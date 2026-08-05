@@ -62,6 +62,32 @@ export const tagBadge = (target: string | undefined): string => {
   return tag ? `${labelFor(tag)} ` : "";
 };
 
+/** Every `#tag`-looking token in a quoted message, in order of appearance.
+ *
+ *  Feeds "引用继承 tag": quoting a message from a session and just typing should
+ *  be the same as typing `#tag` yourself. Two shapes have to be recognized:
+ *    • wezard's own replies — withTagHeader writes ``🦊 `#tag` `` as the first
+ *      line, and WeCom's quote bubble sometimes keeps the backticks and
+ *      sometimes strips them (it re-renders markdown unpredictably), so both
+ *      sides of `#` allow a backtick.
+ *    • the user's own earlier `#tag question` — plain space-delimited.
+ *
+ *  Deliberately looser than inbound's TAG_RE, and deliberately returns ALL
+ *  candidates rather than just the first: the caller is expected to keep only
+ *  tags whose session actually exists. Without that filter this would happily
+ *  read `#include <stdio.h>` out of a quoted code block and spawn a session
+ *  called "include"; with it, a stray `#word` is simply ignored. */
+const QUOTE_TAG_RE = /(?:^|\s|`)#([\p{L}\p{N}_-]{1,32})(?=`|\s|$)/gu;
+
+export const tagsInQuote = (quoted: string): string[] => {
+  const out: string[] = [];
+  for (const m of quoted.matchAll(QUOTE_TAG_RE)) {
+    const t = m[1];
+    if (t && !out.includes(t)) out.push(t);
+  }
+  return out;
+};
+
 /** Prefix markdown content with the `emoji \`#tag\`` header; identity when untagged.
  *  `seq` ("2/5") marks one piece of a split push — it rides in the same header
  *  line so every chunk of a long reply is attributable on its own, and shows

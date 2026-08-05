@@ -17,7 +17,7 @@ import { computeUsage, renderUsageReport } from "./usage.js";
 import { computeAuditReport } from "./audit.js";
 import { syncProjectConfig, renderSyncReport } from "./cfg-sync.js";
 import { captureQuota, renderQuotaReport } from "./quota.js";
-import { tagOfKey, withTagHeader } from "../shared/session-label.js";
+import { tagOfKey, tagsInQuote, withTagHeader } from "../shared/session-label.js";
 
 // Chat-binding key: stable id for "this conversation thread". Used as
 // session-map key, mirror target, defaultChat. NOT used for auth.
@@ -438,6 +438,38 @@ export const installInboundRouter = (
 ): void => {
   const inboxDir = expandHome(cfg.wrc.mirror.inboxDir);
 
+  // ── 引用继承 tag ───────────────────────────────────────────────────────
+  // 引用某个会话的消息 + 直接说话 == 手打 `#tag`。省掉的正是最烦的那一步:
+  // 会话名越长越不想每条都敲一遍。
+  //
+  // 两条硬规则:
+  //  1. 显式 `#tag` 永远优先 —— 推断只在用户没写 tag 时才介入, 不会改写既有语义。
+  //  2. 只认**已经存在**的会话 tag。引用里的 `#xxx` 本质是猜测, 而猜错的代价不
+  //     对称: gate 见到未知 target 会自动 spawn 一个新会话 + 新 pane, 引用一段
+  //     含 `#include` 的代码就能凭空造出个会话来。命中已有会话才采信, 猜错就当
+  //     没看见, 落回默认会话 —— 与改动前的行为一致。
+  //     (想新建会话仍然照旧: 自己打 `#新名字`, 那是显式路径, 不走这里。)
+  //
+  // 注意时序: 这里读的是 msg.quote 原文, 与 resolveTextBody 里那套 self-quote
+  // 去重 (引用 bot 最新一条时会把引用上下文丢掉) 互不干扰 —— 所以"引用刚刚那条
+  // 回复接着说"这个最高频用法能正常路由。
+  const tagFromQuote = (msg: BaseMessage): string => {
+    if (!msg.quote) return "";
+    if (!("hasMirrorTarget" in bridge)) return ""; // headless 模式没有多会话概念
+    const quoted = quoteToText(msg.quote).trim();
+    if (!quoted) return "";
+    const base = chatPrincipal(msg);
+    return tagsInQuote(maybeStripMentions(msg, quoted)).find((t) => bridge.hasMirrorTarget(sessionKey(base, t))) ?? "";
+  };
+
+  /** 本条消息最终落到哪个会话: 显式 tag > 引用推断 > 默认会话。 */
+  const routeOf = (msg: BaseMessage, explicitTag: string): { who: string; tagFrom: "text" | "quote" | "" } => {
+    const base = chatPrincipal(msg);
+    if (explicitTag) return { who: sessionKey(base, explicitTag), tagFrom: "text" };
+    const inherited = tagFromQuote(msg);
+    return inherited ? { who: sessionKey(base, inherited), tagFrom: "quote" } : { who: base, tagFrom: "" };
+  };
+
   // Render /pwd output. Mirror mode reads the live attachment + persisted
   // store via bridge.getCwd; headless mode has no per-chat cwd, so it just
   // shows cfg.wrc.cwd as the global default.
@@ -773,8 +805,8 @@ export const installInboundRouter = (
     const msg = frame.body;
     if (!msg) return;
     const { text, tag, promoted } = resolveTextBody(msg);
-    const who = sessionKey(chatPrincipal(msg), tag);
-    log.info({ msgid: msg.msgid, len: text.length, tag, hasQuote: !!msg.quote, promoted }, "rx text");
+    const { who, tagFrom } = routeOf(msg, tag);
+    log.info({ msgid: msg.msgid, len: text.length, tag: tagOf(who), hasQuote: !!msg.quote, promoted, tagFrom }, "rx text");
     const { stop } = await gate(frame, msg, text, who);
     if (stop) return;
     await send(frame, msg, who, text);
@@ -784,8 +816,10 @@ export const installInboundRouter = (
     const msg = frame.body;
     if (!msg) return;
     log.info({ msgid: msg.msgid, hasQuote: !!msg.quote }, "rx image");
-    // Images carry no text — always route to the chat's default session.
-    const who = chatPrincipal(msg);
+    // Images carry no text of their own, so there's no `#tag` to read — but a
+    // quoted message still identifies a session (see tagFromQuote). Without a
+    // quote this stays what it was: the chat's default session.
+    const { who } = routeOf(msg, "");
     const { stop } = await gate(frame, msg, "", who);
     if (stop) return;
     const path = await downloadToInbox({ client, log, inboxDir }, msg.image.url, msg.image.aeskey, msg.msgid, 0);
@@ -811,7 +845,7 @@ export const installInboundRouter = (
       .map((it) => (it as { text?: { content?: string } }).text?.content ?? "")
       .join("\n");
     const { tag } = parseTag(maybeStripMentions(msg, rawText));
-    const who = sessionKey(chatPrincipal(msg), tag);
+    const { who } = routeOf(msg, tag);
     const { stop } = await gate(frame, msg, "", who);
     if (stop) return;
     const texts: string[] = [];
