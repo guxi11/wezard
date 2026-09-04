@@ -90,8 +90,9 @@ const main = async (): Promise<void> => {
 
   const ws = startWs(cfg, log);
   // Wrap replyStream / replyStreamWithCard before any module sends —
-  // last-response tracker enables inbound's `quote` dedup of bot self-replies.
-  installResponseTracker(ws.client);
+  // last-response tracker enables inbound's `quote` dedup of bot self-replies,
+  // and its chat-gate drops header-only pushes (empty messages) daemon-wide.
+  installResponseTracker(ws.client, log.child({ mod: "chat-gate" }));
   const sessions = loadSessionStore(cfg.wrc.sessionMapFile);
   const mirrorStore = loadMirrorStore(cfg.wrc.mirror.attachmentsFile);
   const bridge =

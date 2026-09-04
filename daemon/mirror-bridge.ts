@@ -32,9 +32,10 @@ import { isModalPane, isAskqSubmitPage, parseModalOptions, pickModalAnswer, type
 import type { MirrorStore } from "./mirror-store.js";
 import { hasMirrorAskq, runMirrorAskqFlow, hasMirrorPlan, mootMirrorPlan, runMirrorPlanFlow } from "./approval.js";
 import { runTmux as runTmuxCmd, spawnTmuxClaude } from "./spawn-tmux.js";
+import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
 import { recordTool, recordToolResult, recordTurnStart, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, buildDetailUrl, buildChatUrl } from "./detail.js";
 import type { CtxCut, TurnOrigin, TurnUsage } from "./detail.js";
-import { labelFor, tagOfKey, baseOfKey, keyOf, withTagHeader } from "../shared/session-label.js";
+import { labelFor, tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, normChatName, parsePeerRef, peerAddress } from "./chat-name.js";
@@ -820,6 +821,9 @@ interface TailHandle {
    *  before sending: callers can force the tail to catch up so any pending
    *  assistant text is queued onto the mirror's outbound paths first. */
   drain: () => void;
+  /** 主 jsonl 当前的实时路径 (worktree 迁移后随之变化)。subagent watch 用它
+   *  定位 `<projectDir>/<sid>/subagents/` 目录。 */
+  livePath: () => string | undefined;
 }
 
 export const startMirrorTail = (deps: TailDeps): TailHandle => {
@@ -931,6 +935,7 @@ export const startMirrorTail = (deps: TailDeps): TailHandle => {
       clearInterval(poll);
     },
     drain,
+    livePath: resolveLive,
   };
 };
 
@@ -1862,6 +1867,21 @@ interface AttachState {
   /** CLI 侧最近一条用户输入, 用作下一个"无气泡 turn"(ensureBriefTurn) 的 userQuery。
    *  WeCom 发起的 turn 直接从 dispatch 拿到原文, 用不到它。 */
   pendingBriefQuery?: string;
+  /** CLI-driven brief turn 的详情链接暂存槽。ensureBriefTurn 把链接写进来, 由该
+   *  turn 的首条 standalone body (concludeBriefTurn / skill_output) 取走并前缀拼上。
+   *  不再像以前那样 sendRaw 一条"只有链接没正文"的消息 — 在 /model 这类 skill_output
+   *  立即到达的场景下, 那条 link 渲染成纯文本就是一条空消息。空 body 时整条丢弃,
+   *  header 也跟着清掉, 不会泄漏到下一 turn。 */
+  pendingBriefHeader?: string;
+  /** Subagent (Task/Agent 工具) 转录观察器 — tail `<sid>/subagents/agent-*.jsonl`,
+   *  把子 agent 的执行过程记成带 agent 标记的 turn (chat detail 内联展示) 并驱动
+   *  brief 气泡的实时进度行。随 attach/migrate 创建, detach/migrate 时停掉。 */
+  subagentWatch?: SubagentWatchHandle;
+  /** 本 attachment 已见的 subagent run。key = agentId (文件名去前缀)。 */
+  subagents?: Map<string, { turnId: string; label: string; closed: boolean }>;
+  /** 最近的 Task/Agent 工具调用入参 (prompt/type/description), 用于给 subagent
+   *  turn 归属类型 — codebuddy 的 agent 文件没有 meta.json, 只能从父侧匹配。 */
+  agentCalls?: Array<{ prompt: string; type?: string; description?: string; at: number }>;
   /** True while a `/goal` is active (session-scoped Stop hook self-driving the
    *  model). Goal runs never emit a terminal stop_reason, so brief-mode's
    *  turn_end-gated flush would swallow the whole run into the turn store while
@@ -2086,6 +2106,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const finalizeStream = async (a: AttachState, s: ActiveStream): Promise<void> => {
     if (s.closed) return;
     s.closed = true;
+    // 非 brief 路径的父 turn 收口 — subagent turns 一并关 (brief 路径在
+    // closeBriefTurn 关, 双关幂等)。
+    closeSubagentTurns(a);
     if (s.flushTimer) { clearTimeout(s.flushTimer); s.flushTimer = undefined; }
     if (s.idleTimer) { clearTimeout(s.idleTimer); s.idleTimer = undefined; }
     if (s.hardTimer) { clearTimeout(s.hardTimer); s.hardTimer = undefined; }
@@ -2154,7 +2177,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return withSessionTag(a.target, content, seq);
   };
 
+  // 空正文一票否决 (近源拦截): 剥掉可能存在的路由头 (`🦊 #tag` / `[🧙](url)`)
+  // 后没有可见内容就不发。中央 chat-gate (last-response 的 SDK 包装) 是最后一道
+  // 防线; 这里拦在源头 —— 空内容不进 standalonePending FIFO、不占防抖 buf、
+  // 不重置计时器, 免得"空 part 入队 → flush 时 join 出空串"的死角。
+  const hasVisibleBody = (content: string): boolean => parseTagHeader(content).body.length > 0;
+
   const sendStandalone = (a: AttachState, content: string): void => {
+    if (!hasVisibleBody(content)) return;
     const chatId = stripPrincipalPrefix(a.target);
     const pieces = splitChunks(content, Math.max(200, cfg.wrc.mirror.chunkBytes - TAG_HEADER_BUDGET));
     const chunks = pieces.map((p, i) =>
@@ -2174,6 +2204,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   // Like sendStandalone but skips withSessionTag — content already contains the tag header (e.g. as a link).
   const sendRaw = (a: AttachState, content: string): void => {
+    if (!hasVisibleBody(content)) return;
     const chatId = stripPrincipalPrefix(a.target);
     a.standalonePending = a.standalonePending
       .then(async () => {
@@ -2209,15 +2240,18 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   // Debounce 聚合: 仅 standalone 路径用。窗口内 onItem 多次落入 → 合并成单条 markdown。
   // 0 关闭时退化为透传。flushStandalone 也用于 detach / teardown 时的 drain。
+  // parts 在 enqueue 时已过 hasVisibleBody, flush 端再过滤一遍是纵深防御 ——
+  // 防的是绕过 enqueue 直写 buf 的未来代码路径。
   const flushStandalone = (a: AttachState): void => {
     const buf = a.standaloneBuf;
     if (!buf) return;
-    const merged = buf.parts.join("\n\n");
     a.standaloneBuf = undefined;
+    const merged = buf.parts.filter((p) => hasVisibleBody(p)).join("\n\n");
     if (merged) sendStandalone(a, merged);
   };
 
   const enqueueStandalone = (a: AttachState, content: string): void => {
+    if (!hasVisibleBody(content)) return;
     const ms = cfg.wrc.mirror.standaloneDebounceMs;
     if (ms <= 0) {
       sendStandalone(a, content);
@@ -2594,7 +2628,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefConcluded = false;
     a.briefLastText = undefined;
     clearCot(a);
-    sendRaw(a, briefDetailLink(turnId, a.target));
+    // 链接暂存, 不再单独发 — 让首条 standalone body 取走拼到前缀, 一条消息解决。
+    // turn 始终会通过 concludeBriefTurn / closeBriefTurn 收口, header 不会泄漏。
+    a.pendingBriefHeader = briefDetailLink(turnId, a.target);
     log.info({ sessionId: a.sessionId, turnId }, "brief: turn started (CLI-side, no bubble)");
   };
 
@@ -2606,17 +2642,23 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   };
 
   // 本轮结论落地, 只生效一次:
-  //   • 气泡仍开 (ack 时的 `链接 …` 还在) → 以 `链接 正文` 覆盖收口;
-  //   • 气泡已收 (过 6min 窗口 / 已收口) 或无气泡 turn (CLI 侧发起) → body 走 standalone,
-  //     那条 standalone 自带 `链接` 头 (withLinkedTag / ensureBriefTurn 已发过详情链接)。
+  //   • 气泡仍开 (ack 时的 `链接 …` 还在) → 以 `链接 正文` 覆盖收口; ensureBriefTurn
+  //     暂存的 header 跟着 bubble 收口一并丢 (气泡内已自带链接)。
+  //   • 气泡已收 (过 6min 窗口 / 已收口) 或无气泡 turn (CLI 侧发起) → 把暂存 header
+  //     拼到 body 前缀一并 standalone, 一条消息含详情入口 + 正文。
+  //   • body 为空 → 一个字不发, 顺手清掉 header, 不留"只有链接"的空消息。
   const concludeBriefTurn = (a: AttachState, body: string): void => {
     const turnId = a.briefTurnId;
-    if (!turnId || a.briefConcluded || !body.trim()) return;
+    if (!turnId || a.briefConcluded) return;
+    if (!body.trim()) { a.pendingBriefHeader = undefined; return; }
     a.briefConcluded = true;
     if (a.briefBubble && !a.briefBubble.done) {
       void finishBriefBubble(a, `${briefDetailLink(turnId, a.target)} ${body}`, true);
+      a.pendingBriefHeader = undefined;
     } else {
-      sendStandalone(a, body);
+      const header = a.pendingBriefHeader;
+      a.pendingBriefHeader = undefined;
+      sendStandalone(a, header ? `${header} ${body}` : body);
     }
     // 只保留当前 turn: 其余仍开着的 turn 记录是漏收的 close, 一并扫掉。
     recordCloseOpenTurns({ target: a.target, sessionId: a.sessionId, exceptIds: [turnId] });
@@ -2638,7 +2680,113 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefIsSlash = false;
     a.briefConcluded = false;
     a.briefLastText = undefined;
+    a.pendingBriefHeader = undefined;
+    closeSubagentTurns(a); // 父 turn 收口 = 它派出的 subagent 都已结束
     clearCot(a);
+  };
+
+  // ── Subagent turns ─────────────────────────────────────────────────
+  // Task/Agent 工具派出的子 agent 在自己的转录文件里跑 (主 jsonl 只有派发与最终
+  // 总结)。subagent-tail 把过程流式吐到这里: 记成带 agent 标记的 turn (chat
+  // detail 时间轴内联展示), 并在 brief 气泡里以 `🤖 label · 最新活动` 驱动 CoT
+  // 进度行 —— 父 agent 阻塞在 Agent 调用上时, 子 agent 就是唯一的进度来源,
+  // last-writer-wins 让"最后的消息是 agent 调用"期间气泡展示的正是 agent 内状态。
+
+  // agent 类型归属: claude 的 meta.json 优先; codebuddy 没有 meta — 用父侧捕获的
+  // Task/Agent 入参按 prompt 原文对上 (子文件首行 user 内容 == input.prompt,
+  // codebuddy 实测逐字一致), 对不上再退到最近一次调用。
+  const subagentLabel = (a: AttachState, task: string, meta: { type?: string; description?: string }): string => {
+    if (meta.type) return meta.type;
+    const calls = a.agentCalls ?? [];
+    const hit = calls.find((c) => c.prompt && (c.prompt === task || task.startsWith(c.prompt) || c.prompt.startsWith(task)));
+    const fresh = (hit ?? [...calls].reverse().find((c) => Date.now() - c.at < 10 * 60_000));
+    return fresh?.type ?? fresh?.description?.slice(0, 24) ?? "subagent";
+  };
+
+  const closeSubagentRun = (a: AttachState, agentId: string): void => {
+    const run = a.subagents?.get(agentId);
+    if (!run || run.closed) return;
+    run.closed = true;
+    recordTurnClose(run.turnId);
+  };
+
+  // 关掉该 attachment 所有开着的 subagent turn。父 turn 收口 (closeBriefTurn /
+  // finalizeStream / detach / migrate) 时调用 — subagent 必然先于父 turn 结束,
+  // 父都收了, 子的开着只会让页面永远「运行中」。
+  const closeSubagentTurns = (a: AttachState): void => {
+    for (const id of a.subagents?.keys() ?? []) closeSubagentRun(a, id);
+  };
+
+  const handleSubagentItem = (a: AttachState, agentId: string, item: SubagentItem): void => {
+    if (!a.subagents) a.subagents = new Map();
+    let run = a.subagents.get(agentId);
+    const now = Date.now();
+    // 首个 item 懒建 turn — task 行建在开头 (userQuery=任务原文), EOF 起步的存量
+    // agent 任何 item 都能建 (userQuery 缺省), 不丢过程。
+    if (!run && item.kind !== "end") {
+      const task = item.kind === "task" ? item.body : undefined;
+      const meta = item.kind === "task" ? item.meta : {};
+      const turnId = newTurnId();
+      run = { turnId, label: subagentLabel(a, task ?? "", meta), closed: false };
+      a.subagents.set(agentId, run);
+      recordTurnStart({
+        id: turnId,
+        target: a.target,
+        sessionId: a.sessionId,
+        cwd: a.runningCwd || undefined,
+        userQuery: task,
+        agent: { id: agentId, type: meta.type, description: meta.description },
+      });
+      log.info({ sessionId: a.sessionId, agentId, turnId, label: run.label }, "subagent: turn started");
+      if (item.kind === "task") return;
+    }
+    if (!run || run.closed) return;
+    switch (item.kind) {
+      case "task":
+        return; // 已在建 turn 时消费
+      case "text":
+        recordTurnItem(run.turnId, { t: "text", body: item.body, ts: now, final: item.final });
+        break;
+      case "tool_use":
+        for (const c of item.calls) {
+          recordTurnItem(run.turnId, { t: "tool_use", toolUseId: c.toolUseId, toolName: c.name, toolInput: c.input, ts: now });
+        }
+        break;
+      case "tool_result":
+        recordTurnItem(run.turnId, { t: "tool_result", toolUseId: item.toolUseId, body: item.full, ts: now });
+        break;
+      case "usage":
+        recordTurnUsage(run.turnId, { model: item.model, messageId: item.messageId, usage: item.usage });
+        break;
+      case "end":
+        closeSubagentRun(a, agentId);
+        return;
+    }
+    // brief 气泡的实时进度: 静默窗 (keepalive 吞没 / 新 pane 未注入) 不推;
+    // updateBriefProgress 自身会检查气泡是否仍开。final text 之后的 end 会很快
+    // 收口气泡, 进度行不会残留。
+    if (a.muteUntilInject || a.keepaliveQuiet || a.keepaliveByContent) return;
+    const activity = item.kind === "tool_use"
+      ? cotToolLabel(item.calls)
+      : item.kind === "thinking" || item.kind === "text"
+        ? item.body
+        : "";
+    if (activity) updateBriefProgress(a, `🤖 ${run.label} · ${activity}`);
+  };
+
+  // (重新) 挂上 subagent watch — attach 与 migrateAttachment 共用; 会话轮换后
+  // sessionId 变了, 旧 watch 的目录定位随之作废, 必须重建。
+  const startSubagentsFor = (a: AttachState): void => {
+    a.subagentWatch?.stop();
+    closeSubagentTurns(a);
+    a.subagents = new Map();
+    a.subagentWatch = startSubagentWatch({
+      log: log.child({ sub: "subagents", sessionId: a.sessionId }),
+      sessionId: a.sessionId,
+      liveJsonlPath: () => a.tail.livePath(),
+      normalizeLine: backendForPath(a.jsonlPath).normalizeTranscriptLine,
+      onAgentItem: (agentId, item) => handleSubagentItem(a, agentId, item),
+    });
   };
 
   // 强制收口一个 attachment 的全部出站通道, 并返回收掉的气泡/流条数。
@@ -2656,6 +2804,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
     clearCot(a); // 无 turn 也要撤: 它可能正挂在一个已被 finish 掉的气泡上
     if (a.softEnd) { clearTimeout(a.softEnd); a.softEnd = undefined; }
+    closeSubagentTurns(a); // brief/liveStream 都不在的收口路径也把 subagent 关掉
     if (a.outbound) {
       if (a.outbound.kind === "deferred") clearTimeout(a.outbound.timer);
       a.outbound = undefined;
@@ -2766,8 +2915,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // loading 气泡。非 slash 场景的 skill_output 是用户可见的中间反馈, 走 standalone。
       if (a.briefIsSlash && !a.briefHadTool && a.briefBubble && !a.briefBubble.done) {
         void finishBriefBubble(a, item.body);
+        a.pendingBriefHeader = undefined;
       } else {
-        sendStandalone(a, item.body);
+        // CLI-driven turn: 把 ensureBriefTurn 暂存的详情链接拼到 body 前缀, 避免
+        // "只发了一条 link 渲染成空文本" 的前置消息。
+        const header = a.pendingBriefHeader;
+        a.pendingBriefHeader = undefined;
+        sendStandalone(a, header ? `${header} ${item.body}` : item.body);
       }
       return;
     }
@@ -2919,6 +3073,17 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           const oldest = a.recentToolSigs.keys().next().value;
           if (oldest === undefined) break;
           a.recentToolSigs.delete(oldest);
+        }
+        // Task/Agent 派发入参留档 — subagent 文件本身不带类型信息 (codebuddy),
+        // subagentLabel 拿它按 prompt 匹配出 agent 类型。
+        if (c.name === "Task" || c.name === "Agent") {
+          const inp = c.input as { subagent_type?: unknown; description?: unknown; prompt?: unknown } | undefined;
+          a.agentCalls = [...(a.agentCalls ?? []).slice(-8), {
+            prompt: typeof inp?.prompt === "string" ? inp.prompt : "",
+            type: typeof inp?.subagent_type === "string" && inp.subagent_type ? inp.subagent_type : undefined,
+            description: typeof inp?.description === "string" && inp.description ? inp.description : undefined,
+            at: Date.now(),
+          }];
         }
         // codebuddy 的 ExitPlanMode 完全不过 PreToolUse hook (实测: 由
         // interruption-service 本地对话框裁决, HookExecutor 零调用)。mirror 从
@@ -3129,6 +3294,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (a.briefTurnId) closeBriefTurn(a); // 活跃 turn 收掉 (队列已随对话边界策略移除)
     if (a.liveStream && !a.liveStream.closed) void finalizeStream(a, a.liveStream);
     if (a.standaloneBuf) { clearTimeout(a.standaloneBuf.timer); flushStandalone(a); }
+    a.subagentWatch?.stop();
+    a.subagentWatch = undefined;
+    closeSubagentTurns(a);
     a.tail.stop();
     bySessionId.delete(a.sessionId);
     if (byTarget.get(a.target) === a) byTarget.delete(a.target);
@@ -3182,7 +3350,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // collapsing to cfg.wrc.cwd (which would mislabel /pwd, /clear, /new).
       runningCwd: expandHome(((cwd ?? "").trim()) || readCwdFromJsonl(jsonlPath) || cfg.wrc.cwd),
       pendingCwd: carryPending,
-      tail: { stop: () => undefined, drain: () => undefined }, // placeholder; replaced below
+      tail: { stop: () => undefined, drain: () => undefined, livePath: () => undefined }, // placeholder; replaced below
       standalonePending: Promise.resolve(),
       recentToolSigs: new Map(),
     };
@@ -3205,6 +3373,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // what lets a claude session and a codebuddy session be mirrored at once.
       normalizeLine: backendForPath(jsonlPath).normalizeTranscriptLine,
     });
+    startSubagentsFor(a);
     bySessionId.set(sessionId, a);
     byTarget.set(target, a);
     // Preserve a persisted `/stop` pause across the re-attach: restore rebuilds the
@@ -3574,6 +3743,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // path, not by CLI) — re-derive the dialect from the destination.
       normalizeLine: backendForPath(newJsonlPath).normalizeTranscriptLine,
     });
+    // 会话轮换 = 新 <sid>/subagents/ 目录; 旧 run 的 turn 一并收口。
+    startSubagentsFor(a);
     deps.store.set(a.target, {
       sessionId: newSessionId,
       jsonlPath: newJsonlPath,

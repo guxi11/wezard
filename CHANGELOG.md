@@ -6,9 +6,17 @@
 
 ### Added
 - `mirror`: **触限额会话自动续跑** (`wrc.mirror.limitResume`, 默认开)。CC 触顶时写入 transcript 的 synthetic 限额行自带恢复时刻 (`quotaLimits.resetsAt`, epoch 秒; 旧版无此字段时从 "resets 2:30am" 文案按本机时区解析)。daemon 每 30s 轮询各 attachment: transcript 末轮是限额行 ⇒ 群里通知一次预定续跑时间, 到点 (reset + `delaySec`, 默认 60s) 后向仍停着的会话注入 `text` (默认 `continue`) 续跑。检测纯规则、逐轮从 tail 重推导, 无持久化 —— reload、人工亲自续跑、注入本身都靠「限额行不再是末轮」自然收敛; 再撞 429 会生成带新 resetsAt 的新限额行, 自动开启下一轮排定。pane 已死 (人收摊了)、正忙、`/stop` 静默中的会话不打扰。同时 keepalive 的 stall-resume 对已排定限额恢复的会话不再抢跑 —— reset 前注入只会再吃一条 429。
+- `mirror`: **subagent 执行过程进入 chat detail, Agent 调用期间气泡实时显示子 agent 状态**。Task/Agent 工具派出的子 agent 转录 (`<sid>/subagents/agent-*.jsonl`, claude/codebuddy 同构) 此前完全不可见 —— 主 jsonl 只有派发与最终总结, Explore 跑几分钟群里是黑洞。新增 `daemon/subagent-tail.ts` 观察器: 按 attachment 监听 subagents 目录 (fs.watch + 1s poll, 存量文件从 EOF 起、新 spawn 从 0 起拿到 task 原文; 目录跟随主 jsonl 实时路径, worktree 迁移不断流), 经各 backend 的 `normalizeLine` 归一后把子 agent 的 text/tool_use/tool_result/usage 记成带 `agent` 标记的 turn (`TurnDetailRecord.agent: {id,type,description}`), 在 chat 时间轴内联渲染 (绿色归属条 + 缩进卡片, 复用既有折叠工具气泡)。类型归属: claude 读 `agent-*.meta.json`; codebuddy 无 meta, 用父侧捕获的 Task/Agent 入参按 prompt 逐字匹配 (实测一致)。brief 气泡: 父 agent 阻塞在 Agent 调用期间, 子 agent 最新活动以 `🤖 type · 最新工具/思考行` 驱动 CoT 进度行 (last-writer-wins, 复用 1.5s 节流与 100 字单行约束), keepalive 吞没窗内静默。生命周期: 子 turn 随父 turn 收口统一关闭 (closeBriefTurn/finalizeStream/detach/migrate), 会话轮换重建 watch。
 
 ### Fixed
 - `approval`: **子代理工具调用的审批归属修正 —— 与主会话同一套判定链**。CC/CodeBuddy 通常把子代理 hook 的 `session_id` 上报成父会话 id, 子代理工具调用因此天然被 `danger.skipAll` / 卡片 / ⏱窗口 / 缓存覆盖; 但部分 CC 版本 / IDE 集成会上报子代理**自己**的 session, 该 id 无镜像绑定时请求会落到 `ask` 兜底 —— 镜像 pane 里变成远程无人可点的原生确认框 (卡住、不下发卡片, 看似「不受 skipAll 控制」)。现在 hook 把 CC 的 `agent_id` / `agent_type` 透传给 daemon, daemon 在 mirror 模式下对「session_id 未绑定 + transcript_path 含 `/subagents/` 或落在父会话转录」的请求按 transcript 反推父会话并路由过去, 审批链 (skipAll/卡片/窗口/缓存/规则) 与主会话完全一致。
+- `mirror`: **brief 模式 CLI-driven turn 不再单独发"只有链接"的空消息**。此前 `ensureBriefTurn` 通过 `sendRaw` 单独把 `briefDetailLink` 当一条 WeCom 消息推出去 (`web 团队 AI 助理 BOT` 列表里看到一条 `#dev` 标题但正文几乎为空,markdown 链接在客户端渲染为纯文本就成了"空消息");随后 `handleBriefItem`/`concludeBriefTurn` 走 standalone 推正文, 两条连发。现在把链接暂存到 `pendingBriefHeader`, 由该 turn 首条 standalone body (`concludeBriefTurn` / skill_output 路径) 取走拼到前缀, 一条消息同时含详情入口 + 正文。空 body 时整条丢弃、header 跟着清, 不会泄漏到下一 turn。CLI 输入触发 `/model` / `/context` / `/clear` 这类 skill_output 立即到达的命令时,群里从两条变一条,WeCom 渲染也好看。
+
+### Changed
+- **空消息门控 (chat-gate): 任何通道都不再下发"正文为空"的消息**。空 = 剥掉可路由头 (`🦊 #tag …` / `[🧙 #tag](url) 2/5 …`) 后没有任何可见内容 —— WeCom 把这种气泡渲染成一行光秃秃的 tag。两层拦截:
+  - **中央 gate** (`daemon/last-response.ts` 的 SDK 包装层,单一缝全覆盖): `sendMessage` (markdown)、`replyStream` / `replyStreamWithCard` 的 `finish=true` 定稿帧,剥头后无可见正文一律丢弃并 warn 日志。两条豁免: `finish≠true` 的流式中间帧 (打字机 "…"/CoT 进度本来就可能暂时只有头,后续帧会覆盖); 附带 `templateCard` 的定稿 (卡片是载荷,丢卡片会卡死审批流)。headless (`cc-bridge`)、审批回执、MCP `send_markdown`、graph/peers 中继 (`notifyChat`) 等全部出站路径自动受保护。
+  - **近源拦截** (`mirror-bridge`): `sendStandalone` / `sendRaw` / `enqueueStandalone` / `flushStandalone` 入口同判 —— 空内容不进 `standalonePending` FIFO、不占防抖 buf、不重置计时器,消除"空 part 入队 → flush join 出空串"的死角。
+  判定复用 `parseTagHeader` (与引用去重同一套头解析),已验证: link-only / 纯 tag / 空白全拦, `[链接] 正文` / `🧙 正文` / 意外以动物 emoji 开头的正文全放行。
 
 ## [1.3.6] - 2026-09-04
 
