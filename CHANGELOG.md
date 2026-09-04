@@ -10,6 +10,9 @@
 
 ### Fixed
 - `approval`: **子代理工具调用的审批归属修正 —— 与主会话同一套判定链**。CC/CodeBuddy 通常把子代理 hook 的 `session_id` 上报成父会话 id, 子代理工具调用因此天然被 `danger.skipAll` / 卡片 / ⏱窗口 / 缓存覆盖; 但部分 CC 版本 / IDE 集成会上报子代理**自己**的 session, 该 id 无镜像绑定时请求会落到 `ask` 兜底 —— 镜像 pane 里变成远程无人可点的原生确认框 (卡住、不下发卡片, 看似「不受 skipAll 控制」)。现在 hook 把 CC 的 `agent_id` / `agent_type` 透传给 daemon, daemon 在 mirror 模式下对「session_id 未绑定 + transcript_path 含 `/subagents/` 或落在父会话转录」的请求按 transcript 反推父会话并路由过去, 审批链 (skipAll/卡片/窗口/缓存/规则) 与主会话完全一致。
+- `mirror`: **subagent watch 的 EOF/新文件判定修正 + codebuddy 类型归属真正落库**。
+  - 此前 `subagent-tail` 首扫对已在盘的 agent 文件**从 0 重放**、之后出现的新 spawn 反而**跳到 EOF** —— 与注释/设计意图正好相反: daemon 重启、re-attach 会把历史 subagent 全量重放成新 turn (chat detail 里同一段执行反复出现), 而会话运行中新 spawn 的 agent (第二个起) 会丢开头、连 task 行都可能错过。现在以「目录是否已成功读过一次 + 文件 mtime 与 watch 建立时刻」判定: watch 建立前就在盘上的老文件从 EOF 起、不重放 (与主 tail 同语义); watch 建立后出现的文件一律从 0 起、完整拿到 task 原文。
+  - codebuddy 无 `agent-*.meta.json`, 此前父侧 Task/Agent 入参按 prompt 匹配出的类型只喂了 brief 气泡的进度行, `TurnDetailRecord.agent.type/description` 仍旧是空 —— detail 页 header 只剩干巴巴的 `🤖 subagent`, 与气泡里解析出的类型自相矛盾 (codebuddy 恰恰是首个支持目标)。现在归属解析结果 (`resolveSubagentMeta`) 同时写进记录, 气泡 label 与 detail 页同源。
 - `mirror`: **brief 模式 CLI-driven turn 不再单独发"只有链接"的空消息**。此前 `ensureBriefTurn` 通过 `sendRaw` 单独把 `briefDetailLink` 当一条 WeCom 消息推出去 (`web 团队 AI 助理 BOT` 列表里看到一条 `#dev` 标题但正文几乎为空,markdown 链接在客户端渲染为纯文本就成了"空消息");随后 `handleBriefItem`/`concludeBriefTurn` 走 standalone 推正文, 两条连发。现在把链接暂存到 `pendingBriefHeader`, 由该 turn 首条 standalone body (`concludeBriefTurn` / skill_output 路径) 取走拼到前缀, 一条消息同时含详情入口 + 正文。空 body 时整条丢弃、header 跟着清, 不会泄漏到下一 turn。CLI 输入触发 `/model` / `/context` / `/clear` 这类 skill_output 立即到达的命令时,群里从两条变一条,WeCom 渲染也好看。
 
 ### Changed

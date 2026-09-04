@@ -193,7 +193,9 @@ export const startSubagentWatch = (deps: SubagentWatchDeps): SubagentWatchHandle
   let stopped = false;
   let watcher: FSWatcher | undefined;
   let watchedDir = "";
-  let initialScan = false;
+  // 目录已成功读过一次 = watch 建立时刻已过; 之后再出现的 agent 文件必是新 spawn。
+  let dirSeen = false;
+  const watchStart = Date.now();
 
   // subagents 目录 = <dirname(live jsonl)>/<sessionId>/subagents。sessionId 在
   // watch 创建时固定 — 会话轮换由 mirror-bridge 重建整个 watch。
@@ -311,18 +313,22 @@ export const startSubagentWatch = (deps: SubagentWatchDeps): SubagentWatchHandle
         log.warn({ agentCount: agents.size }, "subagent watch: cap reached, ignoring new agent");
         continue;
       }
-      // 首轮扫描就存在的文件 = 历史 agent — 与主 tail 一致从 EOF 起, 不重放;
-      // 之后才出现的文件 = 本轮新 spawn — 从 0 起, 完整拿到 task 行。
+      // 与主 tail 同语义: watch 建立时已在盘上的 agent = 历史, 从 EOF 起不重放;
+      // watch 建立后才出现 = 本轮新 spawn, 从 0 起完整拿到 task 行。首扫目录时用
+      // mtime 区分「attach 前就有的老文件」(历史) 与「恰在 watch 前后 spawn 的」
+      // (新文件, mtime ≥ watchStart) —— 否则首扫恰逢首个 agent 建文件时, 会把新
+      // spawn 误判成历史、丢它的开头。dirSeen 之后再出现的文件一律是新 spawn。
       let offset = 0;
-      if (initialScan) {
+      if (!dirSeen) {
         try {
-          offset = statSync(join(dir, f)).size;
+          const st = statSync(join(dir, f));
+          if (st.mtimeMs < watchStart) offset = st.size;
         } catch { offset = 0; }
       }
       agents.set(id, { offset, buffer: "", done: false, sawUser: false });
       if (offset === 0) log.info({ agentId: id }, "subagent watch: agent file appeared");
     }
-    initialScan = true;
+    dirSeen = true;
     for (const f of files) {
       drainAgent(dir, f.replace(/^agent-/, "").replace(/\.jsonl$/, ""), f);
     }
@@ -331,7 +337,7 @@ export const startSubagentWatch = (deps: SubagentWatchDeps): SubagentWatchHandle
   const poll = setInterval(scan, POLL_MS);
   scan();
 
-  log.info({ sessionId: deps.sessionId }, "subagent watch started");
+  log.info("subagent watch started");
   return {
     stop: () => {
       stopped = true;

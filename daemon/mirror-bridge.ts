@@ -2695,12 +2695,21 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // agent 类型归属: claude 的 meta.json 优先; codebuddy 没有 meta — 用父侧捕获的
   // Task/Agent 入参按 prompt 原文对上 (子文件首行 user 内容 == input.prompt,
   // codebuddy 实测逐字一致), 对不上再退到最近一次调用。
-  const subagentLabel = (a: AttachState, task: string, meta: { type?: string; description?: string }): string => {
-    if (meta.type) return meta.type;
+  // 返回值同喂两条消费方: detail 记录的 agent.type/description 与 brief 进度行的
+  // label —— 二者必须同源, 否则"支持 codebuddy"时页面上叫 `🤖 subagent`、气泡里却
+  // 叫解析出的类型, 自相矛盾。undefined = 无从归属 (老文件无 meta 且父侧无调用)。
+  const resolveSubagentMeta = (
+    a: AttachState,
+    task: string,
+    meta: { type?: string; description?: string },
+  ): { type?: string; description?: string; label: string } | undefined => {
+    if (meta.type || meta.description) return { ...meta, label: meta.type ?? meta.description!.slice(0, 24) };
     const calls = a.agentCalls ?? [];
     const hit = calls.find((c) => c.prompt && (c.prompt === task || task.startsWith(c.prompt) || c.prompt.startsWith(task)));
-    const fresh = (hit ?? [...calls].reverse().find((c) => Date.now() - c.at < 10 * 60_000));
-    return fresh?.type ?? fresh?.description?.slice(0, 24) ?? "subagent";
+    const m = hit ?? [...calls].reverse().find((c) => Date.now() - c.at < 10 * 60_000);
+    if (!m) return undefined;
+    const { type, description } = m;
+    return { type, description, label: type ?? description?.slice(0, 24) ?? "subagent" };
   };
 
   const closeSubagentRun = (a: AttachState, agentId: string): void => {
@@ -2726,8 +2735,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!run && item.kind !== "end") {
       const task = item.kind === "task" ? item.body : undefined;
       const meta = item.kind === "task" ? item.meta : {};
+      const resolved = resolveSubagentMeta(a, task ?? "", meta);
       const turnId = newTurnId();
-      run = { turnId, label: subagentLabel(a, task ?? "", meta), closed: false };
+      run = { turnId, label: resolved?.label ?? "subagent", closed: false };
       a.subagents.set(agentId, run);
       recordTurnStart({
         id: turnId,
@@ -2735,9 +2745,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         sessionId: a.sessionId,
         cwd: a.runningCwd || undefined,
         userQuery: task,
-        agent: { id: agentId, type: meta.type, description: meta.description },
+        agent: { id: agentId, type: resolved?.type, description: resolved?.description },
       });
-      log.info({ sessionId: a.sessionId, agentId, turnId, label: run.label }, "subagent: turn started");
+      log.info({ agentId, turnId, label: run.label }, "subagent: turn started");
       if (item.kind === "task") return;
     }
     if (!run || run.closed) return;
