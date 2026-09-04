@@ -94,6 +94,19 @@ export interface TurnOrigin {
   fromTag?: string;
 }
 
+// Subagent 归属 —— 这一轮不是主会话的 turn, 是 Task/Agent 工具派出的子 agent
+// 在自己的 transcript (`<sid>/subagents/agent-<id>.jsonl`) 里跑出来的。与 origin
+// 一样落在记录里: chat 线程按时间轴内联渲染 subagent turn, 没有这个字段就分不出
+// 「主 agent 自己的一轮」和「子 agent 的一轮」。
+export interface TurnAgentMeta {
+  /** 文件名里的 agent id (不含 `agent-` 前缀与扩展名)。 */
+  id: string;
+  /** 派发时指定的 subagent_type (Explore / general-purpose / 自定义)。 */
+  type?: string;
+  /** 派发描述 (Task input.description)。 */
+  description?: string;
+}
+
 export interface TurnDetailRecord {
   kind: "turn";
   id: string;
@@ -106,6 +119,7 @@ export interface TurnDetailRecord {
   userQuery?: string;  // 触发本轮的用户输入原文 (mirror 侧 dispatch 的 text)
   cut?: CtxCut;        // 本轮之前的上下文断点; undefined = 与上一轮同一上下文
   origin?: TurnOrigin; // 本轮由 graph 注入; undefined = 人 (或 peer) 直接发起
+  agent?: TurnAgentMeta; // 本轮是 subagent 跑的; undefined = 主会话自身的 turn
   items: TurnItem[];
   model?: string;      // 首个见到的 model 名
   modelAlt?: number;   // 与 model 不同的后续行数, 用于渲染 "+N"

@@ -454,6 +454,15 @@ const TURN_CSS = `
   .tg-graph code{background:#8250df14;border-radius:4px;padding:0 4px}
   .tg-graph .s{color:#8250df;opacity:.85}
   .tg-graph .f{color:#8c959f}
+  /* ── subagent 归属条 ── 绿色贯穿线 (断点=黄/graph=紫/子 agent=绿); 卡片整体
+     缩进+左边框, 让时间轴上"父 turn 内嵌套的子 turn"一眼可辨。 */
+  .tg-agent{display:flex;align-items:center;gap:8px;font-size:11px;color:#1a7f37;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.3px}
+  .tg-agent::after{content:"";flex:1;border-top:1px dashed #1a7f3766}
+  .tg-agent .s{color:#57606a;opacity:.9;overflow:hidden;text-overflow:ellipsis;
+    white-space:nowrap;max-width:60%}
+  .turn-group.subagent{margin-left:20px;border-left:2px solid #1a7f3733;
+    padding-left:10px}
 `;
 
 const renderJsonSection = (input: unknown): string =>
@@ -715,6 +724,16 @@ const renderOrigin = (r: TurnDetailRecord): string => {
     `<span class="s">轮 ${o.round}/${o.rounds} · 步 ${o.step}/${o.steps}</span>${from}</div>`;
 };
 
+// subagent 归属条: 这一轮是 Task/Agent 工具派出的子 agent 跑的。与断点/归因条同一
+// 视觉语法, 用绿色 —— 三种横条各讲一件事 (上下文断点/谁派的/谁执行的), 必须一眼分得开。
+const renderAgent = (r: TurnDetailRecord): string => {
+  const g = r.agent;
+  if (!g) return "";
+  const type = g.type ? ` · ${escHtml(g.type)}` : "";
+  const desc = g.description ? `<span class="s">${escHtml(g.description.slice(0, 80))}</span>` : "";
+  return `<div class="tg-agent"><span class="l">🤖 subagent${type}</span>${desc}</div>`;
+};
+
 const renderTurnPage = (r: TurnDetailRecord): string => {
   const { items, bodies, done, ageMs } = turnParts(r);
   const statusBadge = done
@@ -846,6 +865,7 @@ const renderTurnPage = (r: TurnDetailRecord): string => {
 <header><h1><span class="accent">Turn Details</span></h1>${statusBadge}</header>
 ${renderCut(r)}
 ${renderOrigin(r)}
+${renderAgent(r)}
 ${turnInfo}
 <div class="meta">${metaParts.map(escHtml).join('<span class="sep">·</span>')}</div>
 ${statsCard}
@@ -899,7 +919,7 @@ export const renderTurnGroup = (r: TurnDetailRecord, now = Date.now()): TurnFrag
   </div>`;
   // staleAt 只走 JSON, 绝不进 HTML —— 它跟着 updatedAt 变, 一旦计入 sig, SSE 的
   // "内容没变就不重发" 会彻底失效 (一个 turn 的 HTML 可以是几十 KB)。
-  const body = `<section class="turn-group${r.cut ? ` cut cut-${r.cut}` : ""}${r.origin ? " graph" : ""}" data-key="t:${escHtml(r.id)}">${renderCut(r)}${renderOrigin(r)}${head}<div class="bubbles">${inner}</div></section>`;
+  const body = `<section class="turn-group${r.cut ? ` cut cut-${r.cut}` : ""}${r.origin ? " graph" : ""}${r.agent ? " subagent" : ""}" data-key="t:${escHtml(r.id)}">${renderCut(r)}${renderOrigin(r)}${renderAgent(r)}${head}<div class="bubbles">${inner}</div></section>`;
   return {
     id: r.id, html: tagSig(body), sig: hashStr(body),
     createdAt: r.createdAt, updatedAt: r.updatedAt,

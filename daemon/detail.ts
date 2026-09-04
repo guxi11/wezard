@@ -21,7 +21,7 @@ import {
 import { renderDetailPage, renderNotFound } from "../shared/detail-render.js";
 import { createChatRoutes, chatRouteTable, CHAT_ROUTE_KEYS } from "../shared/chat-http.js";
 
-export type { ToolDetailRecord, ApprovalDetailRecord, TurnDetailRecord, TurnItem, TurnUsage, CtxCut, TurnOrigin } from "../shared/detail-store.js";
+export type { ToolDetailRecord, ApprovalDetailRecord, TurnDetailRecord, TurnItem, TurnUsage, CtxCut, TurnOrigin, TurnAgentMeta } from "../shared/detail-store.js";
 
 let store: DetailStore | null = null;
 let remoteBase = "";
