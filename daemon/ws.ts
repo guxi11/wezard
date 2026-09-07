@@ -45,6 +45,8 @@ export interface DaemonWs {
   client: WSClient;
   /** resolves on first authenticated; rejects on fatal auth/reconnect failure */
   ready: Promise<void>;
+  /** tear down + rebuild the socket in place (e.g. after a network switch) */
+  reconnect: (reason: string) => void;
   shutdown: () => Promise<void>;
 }
 
@@ -90,6 +92,20 @@ export const startWs = (cfg: Config, log: Logger): DaemonWs => {
     client.disconnect();
   });
 
+  // 切网后旧 socket 大概率黑洞化: SDK 心跳要连续 miss 数个 30s 周期才判死,
+  // HANDSHAKE_TIMEOUT 只兜 connect 阶段, 兜不了已建立连接的静默死亡。强制
+  // 原地重建把恢复时间压到秒级。顺序不可颠倒: started=true 时 connect() 是
+  // no-op, 必须先 disconnect() (置 started=false + 杀旧 socket + 清重连定时器)。
+  const reconnect = (reason: string): void => {
+    log.warn({ reason }, "WS force reconnect");
+    try {
+      client.disconnect();
+    } catch (e) {
+      log.warn({ err: (e as Error).message }, "disconnect threw");
+    }
+    client.connect();
+  };
+
   const shutdown = async (): Promise<void> => {
     log.info("WS shutdown");
     try {
@@ -102,5 +118,5 @@ export const startWs = (cfg: Config, log: Logger): DaemonWs => {
   // SDK 构造不自动连接，需显式调用。
   client.connect();
 
-  return { client, ready, shutdown };
+  return { client, ready, reconnect, shutdown };
 };

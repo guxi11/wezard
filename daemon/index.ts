@@ -3,6 +3,7 @@ import { loadConfig } from "../shared/config.js";
 import { makeLogger } from "../shared/log.js";
 import { bindCliBackends, type CliBackendName } from "../shared/cli-backends.js";
 import { startWs } from "./ws.js";
+import { startNetWatch } from "./net-watch.js";
 import { startHttp, json } from "./http.js";
 import { installInboundRouter } from "./inbound.js";
 import { loadSessionStore } from "./sessions.js";
@@ -89,6 +90,12 @@ const main = async (): Promise<void> => {
   configureRemoteForward(cfg.daemon.detailRemoteBase, cfg.daemon.detailRemoteToken);
 
   const ws = startWs(cfg, log);
+  // 切网 (换 WiFi / VPN 起停) 后原地重建 WS, 等价于自动做了一次 reload 的
+  // 联通性部分 — 但保留全部内存态 (graph 运行、pending 长轮询、镜像绑定),
+  // 也不依赖 launchd/systemd 的 respawn 策略 (nohup fallback 没有 supervisor)。
+  const netWatch = startNetWatch(log.child({ mod: "net" }), (from, to) =>
+    ws.reconnect(`network changed: ${from || "<offline>"} → ${to}`),
+  );
   // Wrap replyStream / replyStreamWithCard before any module sends —
   // last-response tracker enables inbound's `quote` dedup of bot self-replies,
   // and its chat-gate drops header-only pushes (empty messages) daemon-wide.
@@ -834,6 +841,7 @@ const main = async (): Promise<void> => {
   const shutdown = async (signal: string): Promise<void> => {
     log.info({ signal }, "shutdown signal");
     scheduler.stop();
+    netWatch.stop();
     // 同 POST /shutdown: 先把挂着的审批长轮询了结成「稍后续接」, 再关连接。
     log.info(drainForReload(), "pending drained for reload");
     // Hard-exit watchdog: http.close() blocks until every in-flight connection

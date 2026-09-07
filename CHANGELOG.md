@@ -98,6 +98,9 @@
 ### Changed
 - `mirror` standalone 防抖窗口默认 `3s → 8s`(`wrc.mirror.standaloneDebounceMs`)。连续工具调用间隔常超过 3s,窗口太短仍会按气泡刷屏;8s 能把一整串工具调用聚合成一条 markdown 后再补发。
 
+### Added
+- `daemon`: **切网后自动重建 WeCom WS 连接**。新增 `net-watch.ts` 轮询网卡 IPv4 指纹(5s 一拍,连续稳定 2 拍算 settle),换 WiFi / 插拔网线 / VPN 起停后立即原地 `disconnect + connect` 重建 socket——旧连接黑洞化时不再等心跳连续 miss 数个 30s 周期才恢复。相比整进程 reload,保留全部内存态(graph 运行、pending 长轮询、镜像绑定),且不依赖 launchd/systemd 的 respawn 策略。断网(指纹变空)只记日志不动作,等新网络 settle 后再触发。
+
 ## [1.2.22] - 2026-08-27
 
 ### Changed
