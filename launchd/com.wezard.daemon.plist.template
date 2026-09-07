@@ -35,6 +35,18 @@
     <key>ThrottleInterval</key>
     <integer>10</integer>
 
+    <!-- Raise the open-file soft limit above launchd's default 256. The daemon
+         restores one mirror per active session at boot (each = jsonl tail +
+         subagent watchers + a tmux spawn); with a few hundred sessions the
+         inherited 256 ceiling exhausts the fd table and `spawn` throws EBADF,
+         killing the process before HTTP binds and wedging KeepAlive in a crash
+         loop. 65536 is comfortably above any realistic mirror count. -->
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>65536</integer>
+    </dict>
+
     <key>StandardOutPath</key>
     <string>__HOME__/.wezard/daemon.stdout.log</string>
     <key>StandardErrorPath</key>

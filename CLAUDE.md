@@ -80,6 +80,7 @@ Three processes, all coordinating via 127.0.0.1:17890 and `~/.wezard/`:
 - **Mirror mode** runs against either `~/.claude-internal/projects/` or `~/.claude/projects/` — `cli/wezard.sh mirror` probes both bases for the encoded cwd.
 - **Long-poll timeouts**: hook curl `--max-time` (`approval.hookTimeoutSec`, default 43210) must be **strictly larger** than `approval.longPollSec` (default 43200 = 12h), or the hook returns `ask` while the daemon is still waiting on a click.
 - **Sensitive arg redaction** (`daemon/redact.ts`) runs before card render when `approval.sensitiveArgRedact=true`. Only the redacted form is shown in WeCom and stored in pending meta.
+- **Daemon fd limit**: the launchd plist MUST set `SoftResourceLimits.NumberOfFiles` (template = 65536). The daemon restores one mirror per active session at boot (jsonl tail + subagent watchers + tmux spawn each), so a few hundred sessions exceed launchd's default 256 soft limit; `spawn` then throws `EBADF`, the process dies before `HTTP listening`, and `KeepAlive` wedges in a crash loop (`status` shows `down`, `launchctl` reports a stale pid). If `/status` is connection-refused while a launchd pid exists and `daemon.stderr.log` shows `spawn EBADF`, this is the cause — never "fix" it by editing the installed plist in `~/Library/LaunchAgents`, since `install.sh` regenerates it from `launchd/com.wezard.daemon.plist.template`; edit the template instead.
 
 ## Project conventions
 
