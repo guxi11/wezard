@@ -6,6 +6,10 @@
 
 ### Added
 - `mirror`: **触限额会话自动续跑** (`wrc.mirror.limitResume`, 默认开)。CC 触顶时写入 transcript 的 synthetic 限额行自带恢复时刻 (`quotaLimits.resetsAt`, epoch 秒; 旧版无此字段时从 "resets 2:30am" 文案按本机时区解析)。daemon 每 30s 轮询各 attachment: transcript 末轮是限额行 ⇒ 群里通知一次预定续跑时间, 到点 (reset + `delaySec`, 默认 60s) 后向仍停着的会话注入 `text` (默认 `continue`) 续跑。检测纯规则、逐轮从 tail 重推导, 无持久化 —— reload、人工亲自续跑、注入本身都靠「限额行不再是末轮」自然收敛; 再撞 429 会生成带新 resetsAt 的新限额行, 自动开启下一轮排定。pane 已死 (人收摊了)、正忙、`/stop` 静默中的会话不打扰。同时 keepalive 的 stall-resume 对已排定限额恢复的会话不再抢跑 —— reset 前注入只会再吃一条 429。
+
+## [1.3.7] - 2026-09-07
+
+### Added
 - `mirror`: **subagent 执行过程进入 chat detail, Agent 调用期间气泡实时显示子 agent 状态**。Task/Agent 工具派出的子 agent 转录 (`<sid>/subagents/agent-*.jsonl`, claude/codebuddy 同构) 此前完全不可见 —— 主 jsonl 只有派发与最终总结, Explore 跑几分钟群里是黑洞。新增 `daemon/subagent-tail.ts` 观察器: 按 attachment 监听 subagents 目录 (fs.watch + 1s poll, 存量文件从 EOF 起、新 spawn 从 0 起拿到 task 原文; 目录跟随主 jsonl 实时路径, worktree 迁移不断流), 经各 backend 的 `normalizeLine` 归一后把子 agent 的 text/tool_use/tool_result/usage 记成带 `agent` 标记的 turn (`TurnDetailRecord.agent: {id,type,description}`), 在 chat 时间轴内联渲染 (绿色归属条 + 缩进卡片, 复用既有折叠工具气泡)。类型归属: claude 读 `agent-*.meta.json`; codebuddy 无 meta, 用父侧捕获的 Task/Agent 入参按 prompt 逐字匹配 (实测一致)。brief 气泡: 父 agent 阻塞在 Agent 调用期间, 子 agent 最新活动以 `🤖 type · 最新工具/思考行` 驱动 CoT 进度行 (last-writer-wins, 复用 1.5s 节流与 100 字单行约束), keepalive 吞没窗内静默。生命周期: 子 turn 随父 turn 收口统一关闭 (closeBriefTurn/finalizeStream/detach/migrate), 会话轮换重建 watch。
 
 ### Fixed
@@ -14,6 +18,7 @@
   - 此前 `subagent-tail` 首扫对已在盘的 agent 文件**从 0 重放**、之后出现的新 spawn 反而**跳到 EOF** —— 与注释/设计意图正好相反: daemon 重启、re-attach 会把历史 subagent 全量重放成新 turn (chat detail 里同一段执行反复出现), 而会话运行中新 spawn 的 agent (第二个起) 会丢开头、连 task 行都可能错过。现在以「目录是否已成功读过一次 + 文件 mtime 与 watch 建立时刻」判定: watch 建立前就在盘上的老文件从 EOF 起、不重放 (与主 tail 同语义); watch 建立后出现的文件一律从 0 起、完整拿到 task 原文。
   - codebuddy 无 `agent-*.meta.json`, 此前父侧 Task/Agent 入参按 prompt 匹配出的类型只喂了 brief 气泡的进度行, `TurnDetailRecord.agent.type/description` 仍旧是空 —— detail 页 header 只剩干巴巴的 `🤖 subagent`, 与气泡里解析出的类型自相矛盾 (codebuddy 恰恰是首个支持目标)。现在归属解析结果 (`resolveSubagentMeta`) 同时写进记录, 气泡 label 与 detail 页同源。
 - `mirror`: **brief 模式 CLI-driven turn 不再单独发"只有链接"的空消息**。此前 `ensureBriefTurn` 通过 `sendRaw` 单独把 `briefDetailLink` 当一条 WeCom 消息推出去 (`web 团队 AI 助理 BOT` 列表里看到一条 `#dev` 标题但正文几乎为空,markdown 链接在客户端渲染为纯文本就成了"空消息");随后 `handleBriefItem`/`concludeBriefTurn` 走 standalone 推正文, 两条连发。现在把链接暂存到 `pendingBriefHeader`, 由该 turn 首条 standalone body (`concludeBriefTurn` / skill_output 路径) 取走拼到前缀, 一条消息同时含详情入口 + 正文。空 body 时整条丢弃、header 跟着清, 不会泄漏到下一 turn。CLI 输入触发 `/model` / `/context` / `/clear` 这类 skill_output 立即到达的命令时,群里从两条变一条,WeCom 渲染也好看。
+- `launchd`: **plist 模板加 `SoftResourceLimits.NumberOfFiles`(65536),消除镜像会话一多 spawn 就 EBADF 的崩溃循环**。launchd 默认把软 fd 上限压在 256,而 daemon 启动时按活跃会话逐个恢复镜像(每个 = jsonl tail + subagent watchers + tmux spawn),几百个会话就把 fd 表耗尽,`spawn` 抛 `EBADF`、进程在 HTTP bind 之前就死,KeepAlive 陷入崩溃循环(`/status` 显示 down、`daemon.stderr.log` 报 `spawn EBADF`)。改口只在模板——已装的 plist 会被 `install.sh` 重新生成,手改 `~/Library/LaunchAgents` 那份会被覆盖。
 
 ### Changed
 - **空消息门控 (chat-gate): 任何通道都不再下发"正文为空"的消息**。空 = 剥掉可路由头 (`🦊 #tag …` / `[🧙 #tag](url) 2/5 …`) 后没有任何可见内容 —— WeCom 把这种气泡渲染成一行光秃秃的 tag。两层拦截:
@@ -341,7 +346,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.6...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.7...HEAD
+[1.3.7]: https://github.com/guxi11/wezard/compare/v1.3.6...v1.3.7
 [1.3.6]: https://github.com/guxi11/wezard/compare/v1.3.5...v1.3.6
 [1.3.5]: https://github.com/guxi11/wezard/compare/v1.3.4...v1.3.5
 [1.3.3]: https://github.com/guxi11/wezard/compare/v1.3.2...v1.3.3
