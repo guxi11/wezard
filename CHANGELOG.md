@@ -4,7 +4,10 @@
 
 ## [Unreleased]
 
+## [1.3.8] - 2026-09-07
+
 ### Added
+- `daemon`: **切网后自动重建 WeCom WS 连接**。新增 `net-watch.ts` 轮询网卡 IPv4 指纹(5s 一拍,连续稳定 2 拍算 settle),换 WiFi / 插拔网线 / VPN 起停后立即原地 `disconnect + connect` 重建 socket——旧连接黑洞化时不再等心跳连续 miss 数个 30s 周期才恢复。相比整进程 reload,保留全部内存态(graph 运行、pending 长轮询、镜像绑定),且不依赖 launchd/systemd 的 respawn 策略。断网(指纹变空)只记日志不动作,等新网络 settle 后再触发。
 - `mirror`: **触限额会话自动续跑** (`wrc.mirror.limitResume`, 默认开)。CC 触顶时写入 transcript 的 synthetic 限额行自带恢复时刻 (`quotaLimits.resetsAt`, epoch 秒; 旧版无此字段时从 "resets 2:30am" 文案按本机时区解析)。daemon 每 30s 轮询各 attachment: transcript 末轮是限额行 ⇒ 群里通知一次预定续跑时间, 到点 (reset + `delaySec`, 默认 60s) 后向仍停着的会话注入 `text` (默认 `continue`) 续跑。检测纯规则、逐轮从 tail 重推导, 无持久化 —— reload、人工亲自续跑、注入本身都靠「限额行不再是末轮」自然收敛; 再撞 429 会生成带新 resetsAt 的新限额行, 自动开启下一轮排定。pane 已死 (人收摊了)、正忙、`/stop` 静默中的会话不打扰。同时 keepalive 的 stall-resume 对已排定限额恢复的会话不再抢跑 —— reset 前注入只会再吃一条 429。
 
 ## [1.3.7] - 2026-09-07
@@ -97,9 +100,6 @@
 
 ### Changed
 - `mirror` standalone 防抖窗口默认 `3s → 8s`(`wrc.mirror.standaloneDebounceMs`)。连续工具调用间隔常超过 3s,窗口太短仍会按气泡刷屏;8s 能把一整串工具调用聚合成一条 markdown 后再补发。
-
-### Added
-- `daemon`: **切网后自动重建 WeCom WS 连接**。新增 `net-watch.ts` 轮询网卡 IPv4 指纹(5s 一拍,连续稳定 2 拍算 settle),换 WiFi / 插拔网线 / VPN 起停后立即原地 `disconnect + connect` 重建 socket——旧连接黑洞化时不再等心跳连续 miss 数个 30s 周期才恢复。相比整进程 reload,保留全部内存态(graph 运行、pending 长轮询、镜像绑定),且不依赖 launchd/systemd 的 respawn 策略。断网(指纹变空)只记日志不动作,等新网络 settle 后再触发。
 
 ## [1.2.22] - 2026-08-27
 
@@ -349,7 +349,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.7...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.8...HEAD
+[1.3.8]: https://github.com/guxi11/wezard/compare/v1.3.7...v1.3.8
 [1.3.7]: https://github.com/guxi11/wezard/compare/v1.3.6...v1.3.7
 [1.3.6]: https://github.com/guxi11/wezard/compare/v1.3.5...v1.3.6
 [1.3.5]: https://github.com/guxi11/wezard/compare/v1.3.4...v1.3.5
