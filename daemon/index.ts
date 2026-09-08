@@ -120,12 +120,19 @@ const main = async (): Promise<void> => {
       ? (sid: string): void => (bridge as MirrorBridge).terminateLiveStream(sid)
       : undefined;
   installApprovalEventListener(ws.client, log.child({ mod: "approval" }), cfg, onApproved);
-  // In mirror mode, route approval cards to the WeCom chat bound to the requesting session.
-  // Falls back to cfg.approval.approvers / cfg.defaultChat when no mirror is attached.
+  // Route approval cards to the WeCom chat bound to the requesting session.
+  // mirror: the chat this session's pane is attached to; headless: the principal
+  // (user:/chat:) that /wrc-dispatched this session — reverse of the sessions store.
+  // Falls back to cfg.approval.approvers / cfg.defaultChat when nothing is bound.
   const getMirrorTarget =
     cfg.wrc.mode === "mirror"
       ? (sid: string): string | undefined => (bridge as MirrorBridge).targetForSession(sid)
-      : undefined;
+      : (sid: string): string | undefined => {
+          for (const [principal, s] of Object.entries(sessions.all())) {
+            if (s === sid) return principal;
+          }
+          return undefined;
+        };
   // Pre-card barrier: drain pending mirror text/tool markdown for this session
   // and await its FIFO so vote/approval cards never overtake the "thinking" bubble.
   // Headless mode has no mirror pipe — leave undefined so approval skips the call.

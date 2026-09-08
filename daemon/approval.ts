@@ -1778,12 +1778,16 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
       return;
     }
 
-    // 子代理请求归属修正 (见 subagentParentOf): 只有 mirror 模式下、session_id 本身
-    // 没绑到任何会话、而 transcript 能反推出已绑定的父会话时才改写 —— 主会话/已绑定
-    // 子代理请求 (CC/CodeBuddy 都上报父 id) 完全不受影响。
-    if (sessionId && cfg.wrc.mode === "mirror" && getMirrorTarget && !getMirrorTarget(sessionId)) {
+    // 子代理请求归属修正 (见 subagentParentOf): 带 agent 标记、且 session_id 本身解析不到
+    // 任何会话归属 (mirror 未绑定 / headless 无记录) 时, 用 transcript_path 反推父会话改写
+    // —— 让 skipAll/卡片/⏱窗口/缓存 与父会话一致, 而不是落到无人可点的 ask。
+    // 主会话 / 已解析到归属的子代理请求 (CC/CodeBuddy 都上报父 id) 完全不受影响。
+    // 不 gate 在 mirror: headless 下 getMirrorTarget 同样是「session → 归属 chat」的解析
+    // (由 index.ts 注入 sessions store 反查), 父归属逻辑对两种模式统一生效。
+    const fromSubagent = Boolean(body.agent_id || body.agent_type);
+    if (fromSubagent && sessionId && !getMirrorTarget?.(sessionId)) {
       const parent = subagentParentOf(body.transcript_path ?? "", body.agent_id ?? "", body.agent_type ?? "");
-      if (parent && parent !== sessionId && getMirrorTarget(parent)) {
+      if (parent && parent !== sessionId) {
         log.info(
           { sessionId, parent, agentType: body.agent_type ?? "", toolName },
           "subagent call re-routed to parent session",
@@ -1981,6 +1985,17 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     }
 
     if (!approver) {
+      // 子代理请求在此境地下绝不要把 ask 送进它的原生 picker —— headless / 后台
+      // subagent 没人能点 → 永久挂起 (无卡、skipAll 也救不了)。安全默认 = deny +
+      // reason, 让模型把"缺审批人"带回对话, 引导用户配 defaultChat / approvers。
+      if (fromSubagent) {
+        log.warn(
+          { toolName, sessionId, agentType: body.agent_type ?? "" },
+          "no approver for subagent request — deny instead of ask (never hang an unattended subagent)",
+        );
+        json(res, 200, { decision: "deny", reason: "no_approver_for_subagent" } satisfies ApproveResp);
+        return;
+      }
       log.warn("no approver configured");
       json(res, 200, fallback(cfg, "no_approver", mustCard || guardActive) satisfies ApproveResp);
       return;
