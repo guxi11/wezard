@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [1.3.9] - 2026-09-08
+
 ### Fixed
 - `approval`: **子代理审批解析不到审批人时不再把 `ask` 送进无人可点的原生 picker —— 消除 headless/后台 subagent 授权永久挂起**。此前 subagent→父会话 re-routing 被 `wrc.mode === "mirror"` 门控: headless(/wrc) 模式 `getMirrorTarget` 为 undefined, re-route 永不触发; 且父会话要求已 mirror 绑定。当 subagent 上报未绑定的自身 session、`approvers` 与 `defaultChat` 又都为空时, `resolveApprover` 返回 undefined → handler 走 `fallback` 的 `ask` → 原生 picker 弹在没人能点的 headless/后台 subagent 里 → 永久卡死 (无卡、`danger.skipAll` 也救不了)。现在: (1) re-route 去掉 mirror 门控, 统一走 `getMirrorTarget` —— headless 模式由 index.ts 注入 sessions store 的反查 (session → 驱动它的 principal chat), 父归属与卡片路由两种模式一致; (2) 归属仍解析不出、`approver` 为 undefined 的子代理请求返回 `deny no_approver_for_subagent` (安全默认 + reason 引导配置), 而非 `ask`。
 
@@ -352,7 +354,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.8...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.9...HEAD
+[1.3.9]: https://github.com/guxi11/wezard/compare/v1.3.8...v1.3.9
 [1.3.8]: https://github.com/guxi11/wezard/compare/v1.3.7...v1.3.8
 [1.3.7]: https://github.com/guxi11/wezard/compare/v1.3.6...v1.3.7
 [1.3.6]: https://github.com/guxi11/wezard/compare/v1.3.5...v1.3.6
