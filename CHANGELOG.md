@@ -2,7 +2,11 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [1.3.10] - 2026-09-09
+
+### Changed
+- `mirror`: **codebuddy 软收口静默期默认 10s → 1s —— 纯文本答复/最终正文落盘 1s 无新 item 即定稿**。codebuddy jsonl 无 `end_turn`/`turn_duration` 硬信号, 每条 assistant 文本只能软收口确认; 实测叙述消息→紧随其后的 function_call 落盘间隔仅 4-8ms, 1s 已含 fs.watch 抖动/落盘延迟余量, 不再让最终结论干等 10s。可由 `wrc.mirror.softTurnEndMs` 覆盖。
+- `mirror`: **派发子 agent 期间的独白不再被提前当 final 正文收口**。codebuddy 子 agent 转录 (`subagents/agent-*.jsonl`) 没有结束标记, 子 agent 会话结束返回主会话的唯一硬信号是父转录 `function_call_result` 落盘 —— 故以父转录 `function_call(Agent/Task)` ↔ `function_call_result` 配对判 in-flight。软收口到点若仍有未返回的派发 (`openAgents` 非空) 则 defer: 上一段文本按普通独白保留在流/气泡里, 待子 agent 返回后最终正文以自身的软收口正常收口; 无后续文本的死角由 350s hard cap 兜底。
 
 ## [1.3.9] - 2026-09-08
 
@@ -354,7 +358,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.9...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.10...HEAD
+[1.3.10]: https://github.com/guxi11/wezard/compare/v1.3.9...v1.3.10
 [1.3.9]: https://github.com/guxi11/wezard/compare/v1.3.8...v1.3.9
 [1.3.8]: https://github.com/guxi11/wezard/compare/v1.3.7...v1.3.8
 [1.3.7]: https://github.com/guxi11/wezard/compare/v1.3.6...v1.3.7
