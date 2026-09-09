@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+## [1.3.13] - 2026-09-09
+
+### Fixed
+- `approval`: **"全跳过权限"模式在子代理里不再退化成本地原生 picker**。hook 的权限模式短路只认 `bypassPermissions` 一个字面量, 而 (1) CodeBuddy / IDE 协议注入报的是 `fullAccess`, (2) 子代理是另起的 CLI 实例, 拿不到父的 `--permission-mode`、自身 `permissions.defaultMode` 又通常没写, payload 里只剩 `ignore`/`current`/空这类「继承」语义值 —— 三者都匹配不上, 请求全掉进 daemon 长轮询, 子代理场景下那张卡没人点 → 回 `ask` → CLI 画出远端看不见的原生确认框。现在: (1) 字面量名单扩到 `bypassPermissions|fullAccess`; (2) 主线程每次把实际模式记进 `<stateDir>/modes/<sid>`, 子代理报继承语义值时按 transcript 反推父 sid 读回真实模式 (只有主线程写, 子代理的 `default` 不会覆盖父的 bypass; 父切回 `default` 时下一次主线程调用即自愈); (3) 解析后的模式随请求透传给 daemon, 在 `danger.skipAll` 同层再裁决一次 (`denyRules` / `AskUserQuestion` / `ExitPlanMode` 分支仍在其之前生效)。`WEZARD_HONOR_AUTO_MODE=0` 同时关掉 hook 与 daemon 两侧的直通。
+
 ## [1.3.12] - 2026-09-09
 
 ### Fixed
@@ -374,7 +379,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.12...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.13...HEAD
+[1.3.13]: https://github.com/guxi11/wezard/compare/v1.3.12...v1.3.13
 [1.3.12]: https://github.com/guxi11/wezard/compare/v1.3.11...v1.3.12
 [1.3.11]: https://github.com/guxi11/wezard/compare/v1.3.10...v1.3.11
 [1.3.10]: https://github.com/guxi11/wezard/compare/v1.3.9...v1.3.10
