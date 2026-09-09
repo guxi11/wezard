@@ -158,5 +158,8 @@ export const tagBadge = (target: string | undefined): string => {
 export const withTagHeader = (target: string | undefined, content: string, seq?: string): string => {
   const tag = tagOfKey(target);
   const head = [tag ? `${labelFor(tag)} #${tag}` : "🧙", seq ?? ""].filter(Boolean).join(" ");
-  return `${head} ${content}`;
+  // 栅栏必须顶行首才被 WeCom 认作代码块 —— 同行拼头会把 ``` 挤成字面文本。
+  // HEADER_RE 尾部的 \s* 吃得掉换行,parseTagHeader 剥头不受影响。
+  const sep = content.startsWith("```") ? "\n" : " ";
+  return `${head}${sep}${content}`;
 };
