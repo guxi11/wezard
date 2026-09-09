@@ -83,6 +83,62 @@ case "$TRANSCRIPT_PATH" in
   */.codebuddy/*) CLI_BACKEND="codebuddy" ;;
 esac
 
+# ── 权限模式解析 ────────────────────────────────────────────────────────
+# 各家 CLI 对「完全跳过审批」的字面量不统一, 子代理更常报的是「继承」语义值而不是
+# 父会话的实际模式:
+#   bypassPermissions        Claude Code (--dangerously-skip-permissions 同义)
+#   fullAccess               CodeBuddy / IDE 协议注入
+#   ignore|current|inherit|"" 「用父会话的模式」—— 本身不是决策
+# 只认 bypassPermissions 一个字面量时, 后两类全掉进 daemon 长轮询, 而子代理那边
+# 往往没人推卡 → 回 ask → CLI 弹出远端看不见的原生 picker (= 「danger skip all
+# 没生效」的真实成因)。
+is_bypass_mode()  { case "$1" in bypassPermissions|fullAccess) return 0 ;; *) return 1 ;; esac; }
+is_inherit_mode() { case "$1" in ""|ignore|current|inherit)    return 0 ;; *) return 1 ;; esac; }
+
+# 父会话模式档案。子代理是另起的 CLI 实例, 既拿不到父的 --permission-mode, 自己
+# 的 permissions.defaultMode 通常也没写 —— payload 里只剩继承语义值或空。主线程
+# 每次把实际模式写进 <stateDir>/modes/<sid>, 子代理按 transcript 反推父 sid 读回,
+# 这是唯一能把父子模式对上的旁路。只有主线程 (无 agent_id) 才写, 否则子代理的
+# default 会把父的 bypassPermissions 覆盖掉。
+MODE_DIR="$STATE_DIR/modes"
+
+# <projectDir>/<encodedCwd>/<parentSid>/subagents/agent-*.jsonl → parentSid;
+# 主转录布局 <projectDir>/<sid>.jsonl → sid。与 daemon/approval.ts 的
+# subagentParentOf 同源。
+parent_sid() {
+  local p="$TRANSCRIPT_PATH"
+  case "$p" in
+    */subagents/agent-*.jsonl) p="${p%/subagents/*}"; printf '%s' "${p##*/}" ;;
+    */*.jsonl)                 p="${p##*/}";         printf '%s' "${p%.jsonl}" ;;
+  esac
+}
+
+record_mode() {
+  [[ -n "$SESSION_ID" && -n "$1" ]] || return 0
+  local f="$MODE_DIR/$SESSION_ID"
+  [[ "$(cat "$f" 2>/dev/null || true)" == "$1" ]] && return 0
+  mkdir -p "$MODE_DIR" 2>/dev/null || return 0
+  # 新会话首次落盘时顺手清掉一周前的旧档, 免得目录无限增长 (只在新建时跑一次)。
+  [[ -e "$f" ]] || find "$MODE_DIR" -type f -mtime +7 -delete 2>/dev/null || true
+  printf '%s' "$1" >"$f" 2>/dev/null || true
+}
+
+recall_mode() {
+  local sid m
+  for sid in "$SESSION_ID" "$(parent_sid)"; do
+    [[ -n "$sid" && -r "$MODE_DIR/$sid" ]] || continue
+    m=$(cat "$MODE_DIR/$sid" 2>/dev/null || true)
+    [[ -n "$m" ]] && { printf '%s' "$m"; return 0; }
+  done
+}
+
+EFFECTIVE_MODE="$PERMISSION_MODE"
+if is_inherit_mode "$EFFECTIVE_MODE"; then
+  EFFECTIVE_MODE=$(recall_mode)
+elif [[ -z "$AGENT_ID" ]]; then
+  record_mode "$EFFECTIVE_MODE"
+fi
+
 # 权限模式短路: 只对用户主动选的"完全跳过"模式放掉, 其它一律走 daemon 发 IM
 # 卡, 让 wezard 远端用户能在 IM 上点决策。
 #   - bypassPermissions: 用户已经主动选了"全跳", emit allow 直接放, 不打 daemon。
@@ -95,11 +151,15 @@ esac
 # 走卡 (远端用户的主动决策), 故任何 mode 都不在此短路。
 # WEZARD_HONOR_AUTO_MODE=0 关掉本段对齐行为。
 if [[ "$TOOL_NAME" != "AskUserQuestion" ]] && [[ "${WEZARD_HONOR_AUTO_MODE:-1}" != "0" ]]; then
-  case "$PERMISSION_MODE" in
-    bypassPermissions)
-      emit "allow" "bypass-mode passthrough" ;;
-  esac
+  if is_bypass_mode "$EFFECTIVE_MODE"; then
+    emit "allow" "bypass-mode passthrough ($EFFECTIVE_MODE)"
+  fi
 fi
+
+# daemon 二次裁决用 (approval.ts 的 permission-mode 分支): 传解析后的模式而不是
+# 原始字面量。killswitch 打开时不传 —— 那正是「别替我跳过」的意思。
+MODE_FOR_DAEMON=""
+[[ "${WEZARD_HONOR_AUTO_MODE:-1}" != "0" ]] && MODE_FOR_DAEMON="$EFFECTIVE_MODE"
 
 # ExitPlanMode 只是把 plan mode 的产出交给用户确认, 本地 CLI 会再弹一次原生
 # 确认框, 走 IM 审批纯属多此一举, 直接放行。
@@ -182,10 +242,12 @@ build_body() {
     --arg rid "$RESUME_ID" \
     --arg aid "$AGENT_ID" \
     --arg aty "$AGENT_TYPE" \
+    --arg pm "$MODE_FOR_DAEMON" \
     '{session_id:$sid,tool_name:$tn,tool_input:$ti,cwd:$cwd,transcript_tail:$tail,transcript_path:$tp,cli_backend:$cb}
      + (if $rid == "" then {} else {resume_req_id:$rid} end)
      + (if $aid == "" then {} else {agent_id:$aid} end)
-     + (if $aty == "" then {} else {agent_type:$aty} end)'
+     + (if $aty == "" then {} else {agent_type:$aty} end)
+     + (if $pm  == "" then {} else {permission_mode:$pm} end)'
 }
 
 # drain 到进程真正退出之间还有 ~200ms。不等它先死就重投, 会打进这个将死的进程,

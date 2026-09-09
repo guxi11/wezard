@@ -1502,6 +1502,9 @@ interface ApproveReq {
    *  用于把「session_id 上报成子代理自己」的请求对回父会话 (见 subagentParentOf)。 */
   agent_id?: string;
   agent_type?: string;
+  /** hook 侧解析后的权限模式 (pre-tool-use.sh: payload 的 permission_mode, 继承语义值
+   *  已按父会话档案还原)。WEZARD_HONOR_AUTO_MODE=0 时不传。 */
+  permission_mode?: string;
 }
 
 interface ApproveResp {
@@ -1513,6 +1516,11 @@ interface ApproveResp {
 }
 
 const decisionToHook = (d: Decision): "allow" | "deny" => (d === "deny" ? "deny" : "allow");
+
+// 「完全跳过审批」的模式字面量, 各家 CLI 不统一: bypassPermissions 是 Claude Code
+// (--dangerously-skip-permissions 同义), fullAccess 是 CodeBuddy / IDE 协议注入。
+// 与 hooks/pre-tool-use.sh 的 is_bypass_mode 保持同一份名单。
+const BYPASS_MODES = new Set(["bypassPermissions", "fullAccess"]);
 
 // 必发卡的请求 (危险名单 / askRules) 永不走 fallbackOnError: "allow" — 超时/断线时
 // 降级为 ask, 交回本地 CLI 由人来确认, 而不是静默放行一次 rm。只判 danger 的话,
@@ -1931,6 +1939,18 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
         },
       });
       json(res, 200, resp satisfies ApproveResp);
+      return;
+    }
+
+    // 权限模式直通: 用户在 CLI 侧已经选了"全跳"。hook 本该在本地就 emit allow, 走到
+    // 这里说明它没认出这个字面量 (旧版 hook / 子代理把父模式透传成别的写法), 补一刀 ——
+    // 否则请求挂在长轮询上等一张子代理场景下没人点的卡, 最终 ask 回退成远端看不见的
+    // 原生 picker。denyRules 已在上方生效 (拒绝不是审批), AskUserQuestion / ExitPlanMode
+    // 的交互卡也已在上方分支返回, 均不受影响。
+    if (BYPASS_MODES.has(body.permission_mode ?? "")) {
+      log.info({ toolName, sessionId, mode: body.permission_mode }, "permission-mode bypass auto allow");
+      json(res, 200, { decision: "allow", reason: `permission_mode:${body.permission_mode}` } satisfies ApproveResp);
+      settleGuard();
       return;
     }
 
