@@ -2,6 +2,13 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+## [1.3.11] - 2026-09-09
+
+### Fixed
+- `wrc`: **引用去重的 transcript tail 改取「有效 tail」—— keepalive ping/pong 不再挤占回看轮次**。`quoteInContext` 兜底路径按最近 12 逻辑轮比对引用内容,挂机久了 keepalive 的 ping 及其应答会占满窗口,把用户真正引用的气泡挤出去 → 去重 miss、原文被重复注入 prompt。现在 `tailTurnsWithTools` 先按与 `keepaliveStamps` 同源的签名集(配置的 ping/resumePing + 旧版裸 `ping`)剔除 ping 轮与其紧随的应答轮,再数轮次。
+
 ## [1.3.10] - 2026-09-09
 
 ### Changed
@@ -358,7 +365,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.10...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.11...HEAD
+[1.3.11]: https://github.com/guxi11/wezard/compare/v1.3.10...v1.3.11
 [1.3.10]: https://github.com/guxi11/wezard/compare/v1.3.9...v1.3.10
 [1.3.9]: https://github.com/guxi11/wezard/compare/v1.3.8...v1.3.9
 [1.3.8]: https://github.com/guxi11/wezard/compare/v1.3.7...v1.3.8
