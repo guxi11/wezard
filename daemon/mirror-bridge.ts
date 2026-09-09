@@ -1882,6 +1882,11 @@ interface AttachState {
   /** 最近的 Task/Agent 工具调用入参 (prompt/type/description), 用于给 subagent
    *  turn 归属类型 — codebuddy 的 agent 文件没有 meta.json, 只能从父侧匹配。 */
   agentCalls?: Array<{ prompt: string; type?: string; description?: string; at: number }>;
+  /** 父转录里已派发但尚未收到 function_call_result 的 Agent/Task 调用 —— callId →
+   *  spawn 时刻。codebuddy 子转录文件没有结束标记, 「子agent 会话结束返回主会话」的
+   *  唯一硬信号是父侧 result 落盘, 故以此配对判 in-flight。软收口 (fireSoftTurnEnd)
+   *  期间非空 = 有子agent 调用中, 不得把上一段文本当 final 正文收口。 */
+  openAgents?: Map<string, number>;
   /** True while a `/goal` is active (session-scoped Stop hook self-driving the
    *  model). Goal runs never emit a terminal stop_reason, so brief-mode's
    *  turn_end-gated flush would swallow the whole run into the turn store while
@@ -2048,10 +2053,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   /** 软收口静默期。后端只能说"这条消息写完了"(codebuddy) 时, 等这么久没有新 item
    *  才认定一轮结束。取值只需盖住"叙述消息落盘 → 紧随其后的 function_call 落盘"
    *  这一段, 与模型思考/工具执行时长无关。
-   *  codebuddy 默认 10s (实测 <40ms, 但留余量防 fs.watch 抖动 / 落盘延迟);
+   *  codebuddy 默认 1s (实测叙述→function_call 间隔 4-8ms, 1s 已含 fs.watch
+   *  抖动 / 落盘延迟余量; 派发子 agent 期间父 turn 本无文本产出, 若确有残留软收口
+   *  会挂在 openAgents guard 上, 见 fireSoftTurnEnd);
    *  claude 默认 4s (硬信号兜底, 软收口极少触发)。可由 config 覆盖。 */
   const SOFT_TURN_END_DEFAULT_CLAUDE = 4_000;
-  const SOFT_TURN_END_DEFAULT_CB = 10_000;
+  const SOFT_TURN_END_DEFAULT_CB = 1_000;
   const softTurnEndMsFor = (a: AttachState): number =>
     cfg.wrc.mirror.softTurnEndMs ?? (backendForPath(a.jsonlPath).name === "codebuddy" ? SOFT_TURN_END_DEFAULT_CB : SOFT_TURN_END_DEFAULT_CLAUDE);
   const STREAM_SOFT_CAP = 18_000;
@@ -2790,6 +2797,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.subagentWatch?.stop();
     closeSubagentTurns(a);
     a.subagents = new Map();
+    a.openAgents = new Map(); // 新会话 (轮换/迁移) 从头跟踪未返回的 Agent/Task 派发
     a.subagentWatch = startSubagentWatch({
       log: log.child({ sub: "subagents", sessionId: a.sessionId }),
       sessionId: a.sessionId,
@@ -2980,6 +2988,17 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 软收口到点: 静默期内没有新 item, 确认这一轮真的结束了。
   const fireSoftTurnEnd = (a: AttachState): void => {
     a.softEnd = undefined;
+    // 子agent 会话调用中 (Agent/Task 已派发、result 未落回主会话): 上一条文本只是
+    // 普通独白, 不能当 final 正文收口 —— 静默期往往正是父 turn 阻塞在子agent 上的
+    // 表象。defer 不重挂: 子agent 返回后父转录会写最终文本, 自带新的软收口;
+    // 无后续文本的死角由 HARD_TIMEOUT_MS 兜底。
+    if (a.openAgents && a.openAgents.size > 0) {
+      log.info(
+        { sessionId: a.sessionId, turnId: a.briefTurnId, open: [...a.openAgents.keys()] },
+        "soft turn_end deferred — subagent in flight, keeping monologue",
+      );
+      return;
+    }
     log.debug({ sessionId: a.sessionId, turnId: a.briefTurnId }, "soft turn_end confirmed");
     if (a.goalActive) { handleGoalItem(a, { kind: "turn_end" }); return; }
     if (cfg.wrc.mirror.brief && a.briefTurnId) { closeBriefTurn(a); return; }
@@ -3035,7 +3054,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // boundary — any keepalive swallow still holding never got its turn_end
     // (crashed reply). Release BEFORE the swallow gate so this real line (and
     // its reply) mirror normally instead of being eaten by the stale swallow.
-    if (item.kind === "user_text") endKeepaliveSwallow(a);
+    if (item.kind === "user_text") {
+      endKeepaliveSwallow(a);
+      // 对话边界 = 旧 turn 清算。上一 turn 派发而未返回的 Agent/Task 到此作废,
+      // 清掉防残留阻塞新 turn 的软收口 (guard 的 defer 判断依据)。
+      a.openAgents?.clear();
+    }
     if (a.keepaliveQuiet || a.keepaliveByContent) {
       const id = a.keepaliveTurnId;
       if (id) {
@@ -3070,7 +3094,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
     // codebuddy: ExitPlanMode 若被本地先答, result 落盘即作废挂着的计划审批卡
     // (卡 pending 期间 model 阻塞在本地对话框, 不可能有其它 tool_result)。
-    if (item.kind === "tool_result") mootMirrorPlan(a.sessionId);
+    if (item.kind === "tool_result") {
+      mootMirrorPlan(a.sessionId);
+      // Agent/Task 的 result 落回主转录 = 子agent 会话结束、控制权返回主会话。
+      // 任何结果 (含非 Agent/Task 工具) 都可能恰好顶着某 callId, 只删命中项即可。
+      if (item.toolUseId) a.openAgents?.delete(item.toolUseId);
+    }
     // Record tool_use signatures unconditionally (before any state branching),
     // so flushBeforeCard's poll-drain can detect that the to-be-approved tool
     // is now persisted in the jsonl regardless of DEFERRED/STREAMING/IDLE.
@@ -3094,6 +3123,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
             description: typeof inp?.description === "string" && inp.description ? inp.description : undefined,
             at: Date.now(),
           }];
+          // 派发即记 in-flight (key=callId)。result 落盘时由 tool_result 分支清除。
+          if (c.toolUseId) {
+            (a.openAgents ??= new Map()).set(c.toolUseId, Date.now());
+          }
         }
         // codebuddy 的 ExitPlanMode 完全不过 PreToolUse hook (实测: 由
         // interruption-service 本地对话框裁决, HookExecutor 零调用)。mirror 从

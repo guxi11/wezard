@@ -106,7 +106,8 @@ const Mirror = z.object({
   slashAckFirstLine: z.boolean().default(false),
   // 软收口静默期 (ms)。codebuddy 后端只能说"这条消息写完了", 等这么久没有新 item
   // 才认定一轮结束。值越大越不容易误收 (model 思考时间长), 但用户等最终结论的延迟也
-  // 越大。不设则按后端自动选择: codebuddy 10s, claude 4s。
+  // 越大。不设则按后端自动选择: codebuddy 1s (派发子 agent 期间由 openAgents guard
+  // 拦截, 无需长静默期), claude 4s。
   softTurnEndMs: z.number().int().positive().optional(),
   // ── Prompt-cache keepalive ────────────────────────────────────────────
   // Anthropic prompt caching: cache-write costs 1.25x, cache-read 0.1x, and the
