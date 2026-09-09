@@ -112,17 +112,36 @@ const blockTextWithTools = (content: unknown): string => {
     .join(" ");
 };
 
+// ── Keepalive ping detection ──────────────────────────────────────────
+// Shared by the idle clocks (keepaliveStamps) and the quote-dedup tail:
+// a ping is machinery, not conversation, and both readers must agree on
+// what counts as one.
+const normPing = (s: string): string => s.replace(/\s+/gu, "");
+
+/** Normalized signature set of the configured ping forms — whitespace-stripped
+ *  40-char prefixes, the same shape keepaliveTick feeds keepaliveStamps. */
+export const keepalivePingSigs = (...pings: string[]): string[] =>
+  pings.map((p) => normPing(p).slice(0, 40)).filter((s) => s.length > 0);
+
+/** Is this user-turn text a keepalive ping? Matches every configured form plus
+ *  the bare "ping" legacy streak form still present in older transcripts. */
+export const isKeepalivePingText = (text: string, sigs: readonly string[]): boolean =>
+  normPing(text).toLowerCase() === "ping" ||
+  sigs.some((sig) => sig.length > 0 && normPing(text).includes(sig));
+
 /** Like `tailTurns` but the flattened text includes tool_use/tool_result
  *  content — the dedup-only reader so quoted tool bubbles match context.
  *  `n` counts logical conversation turns (user→assistant transitions), not
  *  individual transcript records — essential for backends like CodeBuddy
  *  where a single turn is split across many jsonl lines (text, function_call,
- *  function_call_result, reasoning, …). */
-export const tailTurnsWithTools = (jsonlPath: string, n = 3): string => {
+ *  function_call_result, reasoning, …).
+ *  `pingSigs` 剔除 keepalive ping 及其应答后再数轮次(有效 tail) —— 挂机久了
+ *  ping/pong 会把真实轮次挤出窗口,引用去重 miss → 原文被重复注入。 */
+export const tailTurnsWithTools = (jsonlPath: string, n = 3, pingSigs: readonly string[] = []): string => {
   const raw = readTail(jsonlPath);
   if (!raw) return "";
   const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
-  const entries: Array<{ role: string; text: string }> = [];
+  const all: Array<{ role: string; text: string }> = [];
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     let parsed: unknown;
@@ -133,8 +152,14 @@ export const tailTurnsWithTools = (jsonlPath: string, n = 3): string => {
     const role = row.message?.role;
     if (role !== "user" && role !== "assistant") continue;
     const text = blockTextWithTools(row.message?.content).replace(META_RE, "").replace(/\s+/g, " ").trim();
-    if (text) entries.push({ role, text });
+    if (text) all.push({ role, text });
   }
+  // Keepalive = ping query + whatever the model replies to it (query-based,
+  // same rule as keepaliveStamps).
+  const isPingEntry = (e: { role: string; text: string } | undefined): boolean =>
+    !!e && e.role === "user" && isKeepalivePingText(e.text, pingSigs);
+  const entries = all.filter((e, i) =>
+    !isPingEntry(e) && !(e.role === "assistant" && isPingEntry(all[i - 1])));
   // Count logical turns: each user→assistant transition (or assistant→user)
   // is one turn. Walk backward to find the cut point for the last `n` turns.
   let turns = 0;
@@ -226,17 +251,13 @@ export const keepaliveStamps = (
   pingSigs: string[],
 ): { lastMs: number; lastRealMs: number; stamped: boolean } => {
   const turns = tailTurns(jsonlPath, 24);
-  const norm = (s: string): string => s.replace(/\s+/gu, "");
   // Every warmer ping now carries the full instruction; a stall-recovery ping
   // carries a different one. Match every injected form (`pingSigs` = normalized
   // prefixes of each) plus the bare "ping" that streak pings used to shrink to
   // (transcripts written before that changed still hold them) — otherwise a
   // keepalive user line reads as REAL activity and re-anchors lastRealMs /
   // resets the round counter before the model has even replied.
-  const isPing = (t: Turn): boolean =>
-    t.role === "user" &&
-    (norm(t.text).toLowerCase() === "ping" ||
-      pingSigs.some((sig) => sig.length > 0 && norm(t.text).includes(sig)));
+  const isPing = (t: Turn): boolean => t.role === "user" && isKeepalivePingText(t.text, pingSigs);
   let lastMs = 0;
   let lastRealMs = 0;
   let stamped = false;

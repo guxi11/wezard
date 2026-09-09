@@ -7,7 +7,7 @@ import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
 import type { Bridge } from "./cc-bridge.js";
 import type { MirrorBridge } from "./mirror-bridge.js";
-import { tailTurnsWithTools, renderPeerMentionHint, type PeerInfo, type PeerMention } from "./peers.js";
+import { tailTurnsWithTools, keepalivePingSigs, renderPeerMentionHint, type PeerInfo, type PeerMention } from "./peers.js";
 import { expandHome, sanitizeId } from "../shared/paths.js";
 import type { CliBackendName } from "../shared/cli-backends.js";
 import { tryConsumeClaim, persistClaim, ackClaim, shouldAutoClaim, ackAutoClaim } from "./claim.js";
@@ -911,7 +911,9 @@ export const installInboundRouter = (
       log.info({ target, mirrorCount: mirrors.length, mirrorTargets: mirrors.map((m) => m.target) }, "quoteInContext: no jsonl for target");
       return false;
     }
-    const tail = tailTurnsWithTools(jsonl, QUOTE_TAIL_TURNS);
+    // 有效 tail: keepalive ping/pong 不算轮次,否则挂机后引用的真实气泡被挤出窗口。
+    const kc = cfg.wrc.mirror.keepalive;
+    const tail = tailTurnsWithTools(jsonl, QUOTE_TAIL_TURNS, keepalivePingSigs(kc.ping, kc.resumePing));
     const hit = canonContains(tail, quoted);
     log.info({ target, jsonl, tailLen: tail.length, quotedLen: quoted.length, hit }, "quoteInContext: tail check");
     return hit;
