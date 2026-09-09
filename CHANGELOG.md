@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [1.3.12] - 2026-09-09
+
+### Fixed
+- `mirror`: **后台派发 (`run_in_background`) 的子 agent 不再让独白被当成终稿投递**。`openAgents` in-flight 记账原本假设「`function_call_result` 落回父转录 = 子 agent 结束」——该等式只对前台派发成立: 后台派发的 result 是 ~300ms 就回的 spawn 句柄, 账本在子 agent 真正开跑前就被销掉, 软收口 guard 在它唯一被设计来防的场景里 100% 失效 (日志中 `soft turn_end deferred` 零命中)。现在记账按前后台分流: 后台派发只由平台的完成通知 (`<task-notification>` 或无标签的 `[Framework Auto-Notification] …`, 按 label 命中、命中不了按 FIFO) 或 `OPEN_AGENT_TTL_MS`(15min) 销账。
+- `mirror`: **软收口 defer 后会重挂, 不再永久悬挂**。此前 `fireSoftTurnEnd` 命中 guard 直接 return, 依赖「子 agent 返回后父侧必写新文本」自带下一次软收口; 而 CLI 侧起的无气泡 turn 没有 hard cap 兜底 (那只挂在 WeCom 发起的气泡上), 后台派发的结束信号又不会让父侧再写一段文本 ⇒ 正文永不投递。现在 defer 会按「最早未返回派发的 TTL 剩余」重挂; 子 agent 一返回则改用 15s 宽限窗口(父侧此刻正要写真正的答复, 立刻收口投出去的还是那句独白)。
+- `mirror`: **「欠一次软收口」与静默计时器解耦**。此前任何新 item 都撤销待确认的软收口, 于是子 agent 返回时的 `tool_result`/完成通知/平台注入的 user 行会把欠账一起抹掉。现在只有父 agent 自己的产出 (`text`/`thinking`/`tool_use`/`turn_end`) 才推翻收口意图, 其余 item 只让欠账往后顺延。
+- `mirror`: **对话边界清账不再是死代码**。`user` 行的边界语义原本挂在 `includeUser`(默认 false)上, renderLine 直接把整行丢掉 ⇒ 清账/keepalive 释放从不执行。现在无论 `includeUser` 都发出 `user_text`(quiet 只表示不渲染); 且清账按 `turnId` 认人, 只销「已经过去的那一轮」的前台派发, 不误伤本轮正在跑的。
+- `mirror`: **同一 query 轮次内的重复终稿只投一次**。平台把「一个后台子 agent 完成」展开成结果与通知两条独立 user 注入, 模型被唤醒两次、各写一遍内容几乎相同的完整终稿; `briefConcluded` 只在 turn 内幂等, turn 一收下一条 text 就补开新 turn 再投一次。现在以 `queryEpoch`(仅真实用户输入推进)为界, 与上一份终稿 4-gram Jaccard ≥0.8 的判为重复投递, 只记进 turn/detail 不发群。
+
 ## [1.3.11] - 2026-09-09
 
 ### Fixed
@@ -365,7 +374,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.11...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.12...HEAD
+[1.3.12]: https://github.com/guxi11/wezard/compare/v1.3.11...v1.3.12
 [1.3.11]: https://github.com/guxi11/wezard/compare/v1.3.10...v1.3.11
 [1.3.10]: https://github.com/guxi11/wezard/compare/v1.3.9...v1.3.10
 [1.3.9]: https://github.com/guxi11/wezard/compare/v1.3.8...v1.3.9
