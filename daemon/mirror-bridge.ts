@@ -435,6 +435,45 @@ const cleanUserText = (raw: string): string => {
 const truncate = (s: string, max: number): string =>
   s.length <= max ? s : `${s.slice(0, max)}…(+${s.length - max})`;
 
+// 后台子agent 完成通知的无标签形态 —— codebuddy 平台在子agent 跑完后注入
+// `[Framework Auto-Notification] <agent> completed` 的纯文本 user 行 (不套
+// <task-notification>)。只认"整条消息以它开头", 免得把正文里提到它的消息吞掉。
+const AGENT_NOTICE_RE = /^\s*(\[(?:Framework )?Auto-Notification\][^\n]*)/;
+
+// Agent/Task 派发是不是后台的。后台派发的 result 是 spawn 句柄 (300ms 就回),
+// 不代表子agent 结束 —— in-flight 记账必须按这个标志分流。
+const isBackgroundAgentCall = (input: unknown): boolean => {
+  const i = input as Record<string, unknown> | undefined;
+  return i?.run_in_background === true || i?.runInBackground === true;
+};
+
+// 派发的可辨识名 —— 完成通知里没有 callId, 只有 agent 名/描述, 用它对账。
+const agentCallLabel = (input: unknown): string => {
+  const i = input as { name?: unknown; subagent_type?: unknown; description?: unknown } | undefined;
+  const v = [i?.name, i?.subagent_type, i?.description].find((x) => typeof x === "string" && x.trim());
+  return typeof v === "string" ? v.trim() : "";
+};
+
+// 4-gram Jaccard。中文按字符切窗即可, 无需分词; 只服务一个判断: 这两份终稿是不是
+// 同一份答案 (平台把"子agent 完成"展开成结果 + 通知两条注入时, 模型会被唤醒两次,
+// 各写一遍内容几乎相同的终稿 —— 逐字相等的比较拦不住)。
+const shinglesOf = (s: string): Set<string> => {
+  const t = s.replace(/\s+/g, "");
+  const out = new Set<string>();
+  for (let i = 0; i + 4 <= t.length; i += 1) out.add(t.slice(i, i + 4));
+  return out;
+};
+
+const textSimilarity = (x: string, y: string): number => {
+  const a = shinglesOf(x);
+  const b = shinglesOf(y);
+  if (a.size === 0 || b.size === 0) return x.replace(/\s+/g, "") === y.replace(/\s+/g, "") ? 1 : 0;
+  const ratio = a.size / b.size;
+  if (ratio > 2 || ratio < 0.5) return 0; // 长度差一倍以上不可能是同一份答案
+  const inter = [...a].reduce((n, g) => (b.has(g) ? n + 1 : n), 0);
+  return inter / (a.size + b.size - inter);
+};
+
 const renderToolInput = (input: unknown): string => {
   try {
     const json = JSON.stringify(input ?? {}, null, 0);
@@ -468,7 +507,11 @@ type RenderItem =
   // CLI-side user line (not a WeCom inject). Marks a turn boundary that did
   // NOT originate from the still-open WeCom liveStream — onItem uses this to
   // finalize the prior bubble so the new conversation gets its own bubble.
-  | { kind: "user_text"; body: string }
+  // `quiet` = includeUser 关 (默认): 这一条只当边界信号用 (清 keepalive 吞没 /
+  // 销前台派发的账 / 推进 query 轮次), 不渲染。边界语义不能挂在一个显示开关上 ——
+  // 以前 includeUser=false 时整条 user 行在 renderLine 就被丢掉, 于是"对话边界清账"
+  // 那段在默认配置下是死代码。
+  | { kind: "user_text"; body: string; quiet?: boolean }
   // The user line that started this turn IS a keepalive ping (content match
   // via TailDeps.isKeepalivePing). Emitted REGARDLESS of includeUser — the
   // ping must never echo as user_text, and onItem swallows the whole reply
@@ -487,7 +530,10 @@ type RenderItem =
   // assistant turn is active. `quiet` 例外: subagent/后台任务完成通知 —— 主 agent
   // 随后自己会把结论说进本轮答复里, 单独再推一条只是重复噪声。只记进 turn/detail,
   // 不发气泡。
-  | { kind: "skill_output"; body: string; quiet?: boolean }
+  // `agentDone` = 这条其实是"某个后台派发跑完了"的平台通知原文 (<task-notification>
+  // 或无标签的 `[Framework Auto-Notification] …`)。后台 Agent 的 function_call_result
+  // 只是 spawn 句柄, 真正的结束信号就是它 —— onItem 拿它给 openAgents 销账。
+  | { kind: "skill_output"; body: string; quiet?: boolean; agentDone?: string }
   | {
       kind: "tool_use";
       body: string;
@@ -623,7 +669,15 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
       // a single styled line. quiet: 这是 subagent 的回执, 不单独推给聊天。
       const taskMatch = c.match(TASK_NOTIF_RE);
       if (taskMatch && taskMatch[1]) {
-        out.push({ kind: "skill_output", body: renderTaskNotification(taskMatch[1]), quiet: true });
+        out.push({ kind: "skill_output", body: renderTaskNotification(taskMatch[1]), quiet: true, agentDone: taskMatch[1] });
+        return out;
+      }
+
+      // 同一语义的无标签形态 (codebuddy 平台注入)。必须绕开下面的 includeUser 门 ——
+      // 它是后台派发唯一的结束信号, 被丢掉 openAgents 就永远等不到销账。
+      const notice = c.match(AGENT_NOTICE_RE)?.[1];
+      if (notice) {
+        out.push({ kind: "skill_output", body: `🏁 ${notice.trim()}`, quiet: true, agentDone: notice });
         return out;
       }
 
@@ -639,10 +693,11 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
       // the reply turn is swallowed by content in onItem. Timer windows can't
       // cover reloads or replays; the user message itself always can.
       if (deps.isKeepalivePing?.(text)) return [{ kind: "keepalive_start", body: text }];
-      if (!deps.includeUser) return [];
       if (deps.isOwnInject(text)) return []; // dedupe WeCom→CLI echo
       const quoted = text.split("\n").map((l) => `> ${l}`).join("\n");
-      out.push({ kind: "user_text", body: quoted });
+      // includeUser 只决定"渲不渲染", 不决定"算不算边界" —— quiet 的这一条照样发出,
+      // onItem 消费完边界语义后自己丢掉。
+      out.push({ kind: "user_text", body: quoted, quiet: !deps.includeUser });
     } else if (Array.isArray(c)) {
       for (const b of c) {
         if (b?.type !== "tool_result") continue;
@@ -1862,8 +1917,23 @@ interface AttachState {
   /** 最近一条已发上气泡的 CoT 进度行。cotText 是"待发"; 引用比对要看"已发" ——
    *  用户引用的是屏幕上定格的那行, 而非节流窗口里积压的下一条。 */
   cotLastSent?: string;
-  /** 软收口的静默期计时器 —— 任何新 item 到达即撤销。 */
+  /** 软收口的静默期计时器 —— 父 agent 自己的新产出到达即撤销 (见 SOFT_END_CANCELLERS)。 */
   softEnd?: NodeJS.Timeout;
+  /** 欠着一次软收口: 最后一条 assistant 消息自称"写完了", 但还没确认这一轮结束。
+   *  与 softEnd 分开记, 因为计时器会被各种**非父侧发言**的 item (tool_result /
+   *  完成通知 / 平台注入的 user 行) 撤掉重排 —— 欠账不能跟着一起被抹掉, 否则
+   *  子agent 一返回, 独白就永远等不到收口 (CLI 侧 turn 没有 hardTimer 兜底)。 */
+  softOwed?: boolean;
+  /** 上一次软收口尝试因账上有未返回的派发而被推迟。只有它为真时才用宽限窗口重排,
+   *  普通一轮仍是 softTurnEndMsFor 的静默期。 */
+  softDeferred?: boolean;
+  /** query 轮次 —— 每条真实用户输入 (CLI 侧 user 行 / WeCom 侧新一轮) +1。平台注入的
+   *  完成通知不计。重复终稿抑制以它为界: 同一轮次内的第二份近似终稿是重复投递。 */
+  queryEpoch?: number;
+  /** 最近一次真正投递出去的终稿正文 + 它所属的轮次/时刻。 */
+  lastConcludedBody?: string;
+  lastConcludedEpoch?: number;
+  lastConcludedAt?: number;
   /** CLI 侧最近一条用户输入, 用作下一个"无气泡 turn"(ensureBriefTurn) 的 userQuery。
    *  WeCom 发起的 turn 直接从 dispatch 拿到原文, 用不到它。 */
   pendingBriefQuery?: string;
@@ -1882,11 +1952,17 @@ interface AttachState {
   /** 最近的 Task/Agent 工具调用入参 (prompt/type/description), 用于给 subagent
    *  turn 归属类型 — codebuddy 的 agent 文件没有 meta.json, 只能从父侧匹配。 */
   agentCalls?: Array<{ prompt: string; type?: string; description?: string; at: number }>;
-  /** 父转录里已派发但尚未收到 function_call_result 的 Agent/Task 调用 —— callId →
-   *  spawn 时刻。codebuddy 子转录文件没有结束标记, 「子agent 会话结束返回主会话」的
-   *  唯一硬信号是父侧 result 落盘, 故以此配对判 in-flight。软收口 (fireSoftTurnEnd)
-   *  期间非空 = 有子agent 调用中, 不得把上一段文本当 final 正文收口。 */
-  openAgents?: Map<string, number>;
+  /** 父转录里已派发、尚未确认结束的 Agent/Task 调用 —— callId → 派发记录。软收口
+   *  (fireSoftTurnEnd) 期间非空 = 有子agent 调用中, 不得把上一段文本当 final 正文收口。
+   *
+   *  结束信号按前台/后台分流 —— 这是本账本唯一的要害:
+   *   • 前台 (默认): function_call_result 落回父转录 = 控制权回到主会话。codebuddy
+   *     子转录文件没有结束标记, 这是唯一硬信号。
+   *   • 后台 (run_in_background): result 是 spawn 句柄, 派发后 ~300ms 就回, 它**不是**
+   *     结束信号。真正的结束是平台随后注入的完成通知 (skill_output.agentDone), 或
+   *     OPEN_AGENT_TTL_MS 到期兜底。按 result 销账会让 guard 在它唯一被设计来防的
+   *     场景里 100% 失效 —— 派发后的独白被当成终稿投出去。 */
+  openAgents?: Map<string, { at: number; background: boolean; label: string; turnId?: string }>;
   /** True while a `/goal` is active (session-scoped Stop hook self-driving the
    *  model). Goal runs never emit a terminal stop_reason, so brief-mode's
    *  turn_end-gated flush would swallow the whole run into the turn store while
@@ -2061,6 +2137,17 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const SOFT_TURN_END_DEFAULT_CB = 1_000;
   const softTurnEndMsFor = (a: AttachState): number =>
     cfg.wrc.mirror.softTurnEndMs ?? (backendForPath(a.jsonlPath).name === "codebuddy" ? SOFT_TURN_END_DEFAULT_CB : SOFT_TURN_END_DEFAULT_CLAUDE);
+  /** 未返回派发的挂账上限。到点即销账 —— 结束信号可能永远不来 (后台 agent 挂了 /
+   *  平台没发通知 / 前台 result 因中断丢失), 而 CLI 侧起的 turn 没有 hardTimer,
+   *  没有这个上限就是永久静默。 */
+  const OPEN_AGENT_TTL_MS = 15 * 60_000;
+  /** 子agent 刚返回后的宽限窗口。此刻立刻收口投出去的还是派发前那句独白 —— 父侧
+   *  正要写真正的答复。宽限期内父侧一有产出就撤销重排, 真的没有下文才以独白兜底。 */
+  const AGENT_RETURN_GRACE_MS = 15_000;
+  /** 同一 query 轮次内, 与上一份终稿的近似度超过此值即判为重复投递。 */
+  const DUP_CONCLUSION_RATIO = 0.8;
+  /** 重复终稿抑制的时间上限 —— 轮次相同但隔了很久的答复仍算新答复。 */
+  const DUP_CONCLUSION_WINDOW_MS = 10 * 60_000;
   const STREAM_SOFT_CAP = 18_000;
   const TOOL_DETAIL_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -2462,6 +2549,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 其它所有 item 只写入 turn detail store。
   // 能证明"assistant 已经在产出"的 item —— 见到它们才补开无气泡 turn。
   const BRIEF_TURN_OPENERS = new Set<RenderItem["kind"]>(["text", "tool_use", "tool_result", "skill_output"]);
+  // 父 agent 自己的发言 —— 只有这些能推翻"上一条消息说完了"的收口意图。其余 item
+  // (tool_result / 完成通知 / 平台注入的 user 行) 都不是父侧产出, 只把欠着的那次
+  // 软收口往后顺延, 不销欠账。见 onItem 的 softOwed 分支。
+  // turn_end / goal_start 同样销欠账 —— 一个是权威收口 (软形态会在紧随其后的分支里
+  // 重新记上欠账), 一个是整个 turn 交给 goal 模式接管。
+  const SOFT_END_CANCELLERS = new Set<RenderItem["kind"]>(["text", "thinking", "tool_use", "turn_end", "goal_start"]);
 
   // ── CoT 进度行 (brief 气泡) ─────────────────────────────────────────
   // 一轮里正文要等 final text 才落地, 中间几十秒到几分钟气泡只有一个 "…"。这里把最新的
@@ -2588,6 +2681,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   const startBriefTurn = async (a: AttachState, frame: WsFrameHeaders, streamId: string, isSlash = false, userQuery = ""): Promise<void> => {
     const turnId = newTurnId();
+    a.queryEpoch = (a.queryEpoch ?? 0) + 1; // WeCom 侧的新一轮同样是 query 边界
     recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cwd: a.runningCwd || undefined, userQuery: userQuery.trim() || undefined, cut: consumeCut(a), origin: consumeOrigin(a) });
     // hardTimer 兜底: turn 若无终句 / turn_end 收口 (卡死/漏收), 到点仍收气泡。
     const bubble: BriefBubble = { frame, streamId, hardTimer: undefined as unknown as NodeJS.Timeout, done: false };
@@ -2654,11 +2748,34 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   //   • 气泡已收 (过 6min 窗口 / 已收口) 或无气泡 turn (CLI 侧发起) → 把暂存 header
   //     拼到 body 前缀一并 standalone, 一条消息含详情入口 + 正文。
   //   • body 为空 → 一个字不发, 顺手清掉 header, 不留"只有链接"的空消息。
+  //   • 同一 query 轮次内的第二份近似终稿 → 只记进 turn/detail, 不再投递 (见下)。
+  //
+  // 重复终稿: 平台把"一个后台子agent 完成"展开成结果 + 完成通知两条独立 user 注入,
+  // 模型被唤醒两次、各写一遍完整终稿。briefConcluded 只在 turn 内幂等 —— turn 一收,
+  // 下一条 text 就是 BRIEF_TURN_OPENER, 补开新 turn 再投一次。判据只能跨 turn:
+  // 同一 query 轮次 (queryEpoch 未推进 = 中间没有真实用户输入) + 与上一份终稿高度
+  // 近似 = 重复。气泡仍开的 turn 不在此列 —— 那是 WeCom 自己发起的一轮, 必须收口。
+  const isDuplicateConclusion = (a: AttachState, body: string): boolean =>
+    a.lastConcludedBody !== undefined
+    && a.lastConcludedEpoch === (a.queryEpoch ?? 0)
+    && Date.now() - (a.lastConcludedAt ?? 0) < DUP_CONCLUSION_WINDOW_MS
+    && (!a.briefBubble || a.briefBubble.done)
+    && textSimilarity(a.lastConcludedBody, body) >= DUP_CONCLUSION_RATIO;
+
   const concludeBriefTurn = (a: AttachState, body: string): void => {
     const turnId = a.briefTurnId;
     if (!turnId || a.briefConcluded) return;
     if (!body.trim()) { a.pendingBriefHeader = undefined; return; }
+    if (isDuplicateConclusion(a, body)) {
+      a.briefConcluded = true; // 本轮已"定稿", 只是不投递
+      a.pendingBriefHeader = undefined;
+      log.info({ sessionId: a.sessionId, turnId, epoch: a.queryEpoch ?? 0 }, "brief: duplicate conclusion suppressed");
+      return;
+    }
     a.briefConcluded = true;
+    a.lastConcludedBody = body;
+    a.lastConcludedEpoch = a.queryEpoch ?? 0;
+    a.lastConcludedAt = Date.now();
     if (a.briefBubble && !a.briefBubble.done) {
       void finishBriefBubble(a, `${briefDetailLink(turnId, a.target)} ${body}`, true);
       a.pendingBriefHeader = undefined;
@@ -2688,6 +2805,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefConcluded = false;
     a.briefLastText = undefined;
     a.pendingBriefHeader = undefined;
+    // 收口 = 欠账两清。前台派发的 result 不会再落回这一轮; 后台派发跨轮存活, 由完成
+    // 通知 / TTL 销账 (voidTurnAgents)。挂着的软收口计时器一并撤掉 —— 它到点会去收
+    // 「当前 turn」, 那时的当前 turn 已经是下一轮了。
+    if (a.softEnd) { clearTimeout(a.softEnd); a.softEnd = undefined; }
+    a.softOwed = false;
+    a.softDeferred = false;
+    voidTurnAgents(a);
     closeSubagentTurns(a); // 父 turn 收口 = 它派出的 subagent 都已结束
     clearCot(a);
   };
@@ -2985,20 +3109,78 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // tool_use / tool_result / user_text / turn_usage: recorded to detail store; no bubble.
   };
 
+  // ── 未返回派发的账本 (openAgents) ───────────────────────────────────
+  // 记账/销账/挂账上限。软收口的"独白 vs 正文"判据全靠它 —— 判据本身只是一个静默
+  // 计时器, 分不出"我在等子agent"和"我说完了"。
+
+  // TTL 到期的挂账作废。结束信号可能永远不来, 上限是唯一的兜底。
+  const pruneOpenAgents = (a: AttachState): void => {
+    const now = Date.now();
+    for (const [id, v] of a.openAgents ?? []) {
+      if (now - v.at < OPEN_AGENT_TTL_MS) continue;
+      a.openAgents!.delete(id);
+      log.info({ sessionId: a.sessionId, callId: id, label: v.label }, "open agent expired — TTL reached");
+    }
+  };
+
+  // 轮次作废: 已经过去的那一轮派发的前台 Agent/Task, result 不可能再落回, 直接销账。
+  // 两条边界都要按 turnId 认人 —— 平台注入的 user 行 (子agent 结果回灌) 与本轮的完成
+  // 通知都会走到这里, 一刀切会把**本轮正在跑**的前台派发也销掉, guard 当场失效。
+  // 后台派发与轮次无关: 只有完成通知 / TTL 有资格销它。
+  const voidTurnAgents = (a: AttachState): void => {
+    for (const [id, v] of a.openAgents ?? []) {
+      if (!v.background && v.turnId !== a.briefTurnId) a.openAgents!.delete(id);
+    }
+  };
+
+  // 后台派发销账。通知里没有 callId, 只有 agent 名/摘要: 先按派发时留的 label 命中,
+  // 命中不了就销最早的一笔 —— N 次派发对 N 条通知, 账本终会归零。
+  const clearBackgroundAgent = (a: AttachState, notice: string): void => {
+    const open = [...(a.openAgents ?? [])].filter(([, v]) => v.background);
+    if (open.length === 0) return;
+    const hit = open.find(([, v]) => v.label && notice.includes(v.label))
+      ?? open.reduce((oldest, e) => (e[1].at < oldest[1].at ? e : oldest));
+    a.openAgents!.delete(hit[0]);
+    log.info(
+      { sessionId: a.sessionId, callId: hit[0], label: hit[1].label, left: a.openAgents!.size },
+      "background agent done — cleared by completion notice",
+    );
+  };
+
+  // 下一次软收口尝试的等待时长: 账上还有未返回的派发 → 等到最早那笔 TTL 到期
+  // (期间任何信号都会重排); 账已清零 → 宽限窗口 (子agent 刚回, 父侧马上要说话)。
+  const deferredSoftDelay = (a: AttachState): number => {
+    const oldest = [...(a.openAgents?.values() ?? [])]
+      .reduce<number | undefined>((m, v) => (m === undefined || v.at < m ? v.at : m), undefined);
+    return oldest === undefined
+      ? Math.max(softTurnEndMsFor(a), AGENT_RETURN_GRACE_MS)
+      : Math.max(1_000, OPEN_AGENT_TTL_MS - (Date.now() - oldest));
+  };
+
+  const armSoftEnd = (a: AttachState, ms: number): void => {
+    if (a.softEnd) clearTimeout(a.softEnd);
+    a.softEnd = setTimeout(() => fireSoftTurnEnd(a), ms);
+  };
+
   // 软收口到点: 静默期内没有新 item, 确认这一轮真的结束了。
   const fireSoftTurnEnd = (a: AttachState): void => {
     a.softEnd = undefined;
-    // 子agent 会话调用中 (Agent/Task 已派发、result 未落回主会话): 上一条文本只是
-    // 普通独白, 不能当 final 正文收口 —— 静默期往往正是父 turn 阻塞在子agent 上的
-    // 表象。defer 不重挂: 子agent 返回后父转录会写最终文本, 自带新的软收口;
-    // 无后续文本的死角由 HARD_TIMEOUT_MS 兜底。
+    pruneOpenAgents(a);
+    // 子agent 调用中 (已派发、结束信号未到): 上一条文本只是普通独白, 不能当 final
+    // 正文收口 —— 静默期往往正是父 turn 阻塞在子agent 上的表象。
+    // 必须重挂: 后台派发的结束信号是平台注入的 user 行/通知, 它们不会让父转录再写
+    // 一段文本, 光靠"下一次软收口"等不来。重挂的到点时刻见 deferredSoftDelay。
     if (a.openAgents && a.openAgents.size > 0) {
+      a.softDeferred = true;
+      armSoftEnd(a, deferredSoftDelay(a));
       log.info(
         { sessionId: a.sessionId, turnId: a.briefTurnId, open: [...a.openAgents.keys()] },
         "soft turn_end deferred — subagent in flight, keeping monologue",
       );
       return;
     }
+    a.softOwed = false;
+    a.softDeferred = false;
     log.debug({ sessionId: a.sessionId, turnId: a.briefTurnId }, "soft turn_end confirmed");
     if (a.goalActive) { handleGoalItem(a, { kind: "turn_end" }); return; }
     if (cfg.wrc.mirror.brief && a.briefTurnId) { closeBriefTurn(a); return; }
@@ -3056,10 +3238,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // its reply) mirror normally instead of being eaten by the stale swallow.
     if (item.kind === "user_text") {
       endKeepaliveSwallow(a);
-      // 对话边界 = 旧 turn 清算。上一 turn 派发而未返回的 Agent/Task 到此作废,
+      // 对话边界 = 旧 turn 清算。上一 turn 派发而未返回的前台 Agent/Task 到此作废,
       // 清掉防残留阻塞新 turn 的软收口 (guard 的 defer 判断依据)。
-      a.openAgents?.clear();
+      voidTurnAgents(a);
+      a.queryEpoch = (a.queryEpoch ?? 0) + 1;
     }
+    // 后台派发的结束信号 —— 它不是 function_call_result (那只是 spawn 句柄)。放在
+    // keepalive 门之前: 吞没窗口里到达也必须销账, 否则账本永久悬空。
+    if (item.kind === "skill_output" && item.agentDone) clearBackgroundAgent(a, item.agentDone);
     if (a.keepaliveQuiet || a.keepaliveByContent) {
       const id = a.keepaliveTurnId;
       if (id) {
@@ -3078,9 +3264,18 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (item.kind === "turn_end") { endKeepaliveSwallow(a); }
       return;
     }
-    // 任何新 item 到达 = 上一条"消息写完了"并不代表这一轮结束 → 撤销待确认的软收口。
-    // 硬信号 (end_turn / turn_duration) 的后端永远不会走到这里。
+    // 父 agent 自己的新产出到达 = 上一条"消息写完了"并不代表这一轮结束 → 撤销待确认
+    // 的软收口。硬信号 (end_turn / turn_duration) 的后端永远不会走到这里。
+    //
+    // 只有父侧发言 (SOFT_END_CANCELLERS) 才有资格推翻收口意图。tool_result / 后台完成
+    // 通知 / 平台注入的 user 行都不是父侧发言 —— 它们只让欠着的那次收口往后顺延。
+    // 一视同仁地抹掉欠账, 子agent 一返回独白就永远等不到收口 (CLI 侧 turn 没有
+    // hardTimer 兜底 —— 那只挂在 WeCom 起的气泡上)。
     if (a.softEnd) { clearTimeout(a.softEnd); a.softEnd = undefined; }
+    if (SOFT_END_CANCELLERS.has(item.kind)) { a.softOwed = false; a.softDeferred = false; }
+    else if (a.softOwed) armSoftEnd(a, a.softDeferred ? deferredSoftDelay(a) : softTurnEndMsFor(a));
+    // includeUser=false 下的 user 行只作边界信号 (上面已清账/推进轮次), 不渲染。
+    if (item.kind === "user_text" && item.quiet) return;
     // thinking 唯一的出口是 brief 气泡的 CoT 进度行。必须在这里就吃掉 —— 漏到下面任何
     // 一条通道 (deferred buf → renderBuf / standalone / stream append) 都会把它写进正文,
     // 那就变回已下线的 thinkStyle 了。
@@ -3089,16 +3284,20 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       return;
     }
     if (item.kind === "turn_end" && item.soft === true) {
-      a.softEnd = setTimeout(() => fireSoftTurnEnd(a), softTurnEndMsFor(a));
+      a.softOwed = true;
+      a.softDeferred = false;
+      armSoftEnd(a, softTurnEndMsFor(a));
       return;
     }
     // codebuddy: ExitPlanMode 若被本地先答, result 落盘即作废挂着的计划审批卡
     // (卡 pending 期间 model 阻塞在本地对话框, 不可能有其它 tool_result)。
     if (item.kind === "tool_result") {
       mootMirrorPlan(a.sessionId);
-      // Agent/Task 的 result 落回主转录 = 子agent 会话结束、控制权返回主会话。
+      // 前台 Agent/Task 的 result 落回主转录 = 子agent 会话结束、控制权返回主会话。
       // 任何结果 (含非 Agent/Task 工具) 都可能恰好顶着某 callId, 只删命中项即可。
-      if (item.toolUseId) a.openAgents?.delete(item.toolUseId);
+      // 后台派发例外: 它的 result 是 300ms 就回的 spawn 句柄, 销账等于把 guard 关掉。
+      const open = item.toolUseId ? a.openAgents?.get(item.toolUseId) : undefined;
+      if (open && !open.background) a.openAgents!.delete(item.toolUseId);
     }
     // Record tool_use signatures unconditionally (before any state branching),
     // so flushBeforeCard's poll-drain can detect that the to-be-approved tool
@@ -3123,9 +3322,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
             description: typeof inp?.description === "string" && inp.description ? inp.description : undefined,
             at: Date.now(),
           }];
-          // 派发即记 in-flight (key=callId)。result 落盘时由 tool_result 分支清除。
+          // 派发即记 in-flight (key=callId)。销账路径按前后台分流, 见 openAgents 注释。
           if (c.toolUseId) {
-            (a.openAgents ??= new Map()).set(c.toolUseId, Date.now());
+            (a.openAgents ??= new Map()).set(c.toolUseId, {
+              at: Date.now(),
+              background: isBackgroundAgentCall(c.input),
+              label: agentCallLabel(c.input),
+              turnId: a.briefTurnId,
+            });
           }
         }
         // codebuddy 的 ExitPlanMode 完全不过 PreToolUse hook (实测: 由
