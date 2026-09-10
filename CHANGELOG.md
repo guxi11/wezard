@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [1.3.15] - 2026-09-10
+
 ### Fixed
 - `approval`: **CodeBuddy 延迟加载工具 (`ToolSearch` → `DeferExecuteTool`) 的审批链按内层工具裁决**。deferred/MCP 工具经 `DeferExecuteTool(toolName, …)` 外层包装派发时, hook/daemon 只见外层名 —— matcher/danger/allow/deny 规则匹配不到真实工具, 卡片也读不出语义。现在 hook (`pre-tool-use.sh`) 与 daemon (`unwrapDeferredTool`, 兜底旧版 hook) 各下钻一层, 用 `tool_input.toolName`/`.toolInput` 替换外层再走审批链; wezard 自家 MCP 工具被 defer 后的 self-call bypass 一并恢复 (否则首次绑定又是鸡生蛋)。
 - `approval`: **无 `agent_id`/`agent_type` 标记的子代理请求恢复父会话归属**。部分 CodeBuddy 版本的子代理 hook 两个标记都不带, 而 `subagentParentOf` 与 `fromSubagent` 只认标记 —— 归属反推失效, no-approver 时还错走 `ask` 挂进无人能点的原生 picker。现在 `subagents/agent-*.jsonl` 转录布局本身即子代理证据 (主转录布局仍需标记佐证); hook 侧 `record_mode` 同理改按布局+标记判子代理, 堵住「无标记子代理的 `default` 覆盖父会话 bypass 档案」。
@@ -389,7 +391,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.14...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.15...HEAD
+[1.3.15]: https://github.com/guxi11/wezard/compare/v1.3.14...v1.3.15
 [1.3.14]: https://github.com/guxi11/wezard/compare/v1.3.13...v1.3.14
 [1.3.13]: https://github.com/guxi11/wezard/compare/v1.3.12...v1.3.13
 [1.3.12]: https://github.com/guxi11/wezard/compare/v1.3.11...v1.3.12
