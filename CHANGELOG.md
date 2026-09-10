@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+### Fixed
+- `approval`: **CodeBuddy 延迟加载工具 (`ToolSearch` → `DeferExecuteTool`) 的审批链按内层工具裁决**。deferred/MCP 工具经 `DeferExecuteTool(toolName, …)` 外层包装派发时, hook/daemon 只见外层名 —— matcher/danger/allow/deny 规则匹配不到真实工具, 卡片也读不出语义。现在 hook (`pre-tool-use.sh`) 与 daemon (`unwrapDeferredTool`, 兜底旧版 hook) 各下钻一层, 用 `tool_input.toolName`/`.toolInput` 替换外层再走审批链; wezard 自家 MCP 工具被 defer 后的 self-call bypass 一并恢复 (否则首次绑定又是鸡生蛋)。
+- `approval`: **无 `agent_id`/`agent_type` 标记的子代理请求恢复父会话归属**。部分 CodeBuddy 版本的子代理 hook 两个标记都不带, 而 `subagentParentOf` 与 `fromSubagent` 只认标记 —— 归属反推失效, no-approver 时还错走 `ask` 挂进无人能点的原生 picker。现在 `subagents/agent-*.jsonl` 转录布局本身即子代理证据 (主转录布局仍需标记佐证); hook 侧 `record_mode` 同理改按布局+标记判子代理, 堵住「无标记子代理的 `default` 覆盖父会话 bypass 档案」。
+- `mirror`: **`danger.skipAll` 下代按 CLI 原生权限 picker —— 不再对「本地 picker 先行、hook 后到/不到」的调用失明**。CodeBuddy 对一部分调用 (实测: 子代理里经 `ToolSearch`→`DeferExecuteTool` 派发的 MCP 工具) 先弹自家权限 picker、PreToolUse hook 在人点掉之后才触发 —— hook 链路零参与: daemon 无日志、无卡可发、`skipAll` 落空, pane 就地阻塞。与 AskUserQuestion「本地面板先行」同源, 解法同源: mirror 每 5s 读屏, `skipAll` 开启时对形状可信的权限确认框 (裸 `Yes` + `Yes, and …` 放宽变体 + `No` 三件齐全, 排除 是非题/plan review//model) 代按一次性 `Yes` 并发 chat 回执; 放宽静态权限的选项永不选中, 挑不出就不碰。`WEZARD_PICKER_SENTINEL=0` 关闭。
+
 ## [1.3.14] - 2026-09-10
 
 ### Fixed

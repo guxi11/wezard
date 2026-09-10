@@ -74,6 +74,25 @@ PERMISSION_MODE=$(printf '%s' "$PAYLOAD" | jq -r '.permission_mode // ""')
 # 与主会话一致, 而不是落到无人可点的 ask 兜底。
 AGENT_ID=$(printf '%s' "$PAYLOAD" | jq -r '.agent_id // empty')
 AGENT_TYPE=$(printf '%s' "$PAYLOAD" | jq -r '.agent_type // empty')
+# 子代理判定: agent 标记, 或转录本身落在 subagents/ 布局 —— 部分 CodeBuddy 版本
+# 不带 agent_id/agent_type, 路径是唯一证据。决定谁有资格写模式档案 (见 record_mode)。
+IS_SUBAGENT=0
+[[ -n "$AGENT_ID" || -n "$AGENT_TYPE" ]] && IS_SUBAGENT=1
+case "$TRANSCRIPT_PATH" in */subagents/agent-*.jsonl) IS_SUBAGENT=1 ;; esac
+
+# ── DeferExecuteTool 下钻 (CodeBuddy 延迟加载工具的外层包装) ──────────────
+# ToolSearch 发现的 deferred/MCP 工具经 DeferExecuteTool(toolName, …) 代为派发。
+# 外层名对整条审批链都是噪音: matcher/danger/allow/deny 匹配不到真实工具, 卡片上
+# 也只剩一个不知所云的 DeferExecuteTool。换成内层工具名+入参再走后面的短路与
+# daemon 裁决 (内层入参字段名各版本有出入, 依次探测; 都没有则剥掉包装字段取余)。
+if [[ "$TOOL_NAME" == "DeferExecuteTool" ]]; then
+  INNER_NAME=$(printf '%s' "$TOOL_INPUT" | jq -r '.toolName // .tool_name // .name // empty')
+  if [[ -n "$INNER_NAME" ]]; then
+    TOOL_NAME="$INNER_NAME"
+    TOOL_INPUT=$(printf '%s' "$TOOL_INPUT" \
+      | jq -c '(.toolInput // .tool_input // .arguments // .args // .input) // del(.toolName, .tool_name, .name)')
+  fi
+fi
 
 # CLI 后端: 与下方 ExitPlanMode 同款判别 — transcript 落在 ~/.codebuddy/ 即
 # codebuddy。daemon 的 AskUserQuestion 分支据此走去重逻辑 (codebuddy 的 hook
@@ -98,7 +117,7 @@ is_inherit_mode() { case "$1" in ""|ignore|current|inherit)    return 0 ;; *) re
 # 父会话模式档案。子代理是另起的 CLI 实例, 既拿不到父的 --permission-mode, 自己
 # 的 permissions.defaultMode 通常也没写 —— payload 里只剩继承语义值或空。主线程
 # 每次把实际模式写进 <stateDir>/modes/<sid>, 子代理按 transcript 反推父 sid 读回,
-# 这是唯一能把父子模式对上的旁路。只有主线程 (无 agent_id) 才写, 否则子代理的
+# 这是唯一能把父子模式对上的旁路。只有主线程 (IS_SUBAGENT=0) 才写, 否则子代理的
 # default 会把父的 bypassPermissions 覆盖掉。
 MODE_DIR="$STATE_DIR/modes"
 
@@ -135,7 +154,9 @@ recall_mode() {
 EFFECTIVE_MODE="$PERMISSION_MODE"
 if is_inherit_mode "$EFFECTIVE_MODE"; then
   EFFECTIVE_MODE=$(recall_mode)
-elif [[ -z "$AGENT_ID" ]]; then
+elif [[ "$IS_SUBAGENT" == "0" ]]; then
+  # 只认 AGENT_ID 会漏掉不带 agent 标记的子代理 —— 它上报的 default 若落盘,
+  # 就把父会话的 bypass 档案覆盖了。IS_SUBAGENT 把转录布局也算进证据。
   record_mode "$EFFECTIVE_MODE"
 fi
 

@@ -1581,20 +1581,43 @@ const resolveApprover = (
 // 只剩 transcript_path + agent 标记能对回父会话。session_id 无镜像绑定时, 按
 // transcript_path 反推父会话并路由过去 —— 否则这类请求落到 ask 兜底, 在镜像
 // pane 里变成远程无人可点的原生确认框 (卡住、无卡片), skipAll/卡片全部失联。
+const SUBAGENT_TRANSCRIPT_RE = /\/([^/]+)\/subagents\/agent-[^/]+\.jsonl$/;
+
 const subagentParentOf = (
   transcriptPath: string,
   agentId: string,
   agentType: string,
 ): string | undefined => {
-  if (!transcriptPath || (!agentId && !agentType)) return undefined;
+  if (!transcriptPath) return undefined;
   const norm = transcriptPath.replace(/\\/g, "/");
-  // `<projectDir>/<encodedCwd>/<parentSid>/subagents/agent-*.jsonl` — 父在上一级
-  const sub = norm.match(/\/([^/]+)\/subagents\/agent-[^/]+\.jsonl$/);
+  // `<projectDir>/<encodedCwd>/<parentSid>/subagents/agent-*.jsonl` — 父在上一级。
+  // 布局本身就是子代理证据, 不要求 agent 标记 —— 部分 CodeBuddy 版本的子代理
+  // hook 不带 agent_id/agent_type, 只认标记会让这类请求丢失父归属。
+  const sub = norm.match(SUBAGENT_TRANSCRIPT_RE);
   if (sub) return sub[1];
   // 直接落在 `<projectDir>/<uuid>.jsonl` 的主转录布局 (CC 子代理 hook 给的是父转录)
+  // 给不出子代理证据, 必须有 agent 标记佐证才敢当父 sid 用。
+  if (!agentId && !agentType) return undefined;
   const main = norm.match(/\/([0-9a-fA-F-]{36})\.jsonl$/);
   if (main) return main[1];
   return undefined;
+};
+
+// ── DeferExecuteTool 下钻 ──────────────────────────────────────────────
+// CodeBuddy 的延迟加载工具 (ToolSearch → DeferExecuteTool) 把真实工具包进
+// tool_input.toolName / .toolInput。审批链 (matcher/danger/allow/deny/卡片/缓存)
+// 一律按内层工具裁决 —— 外层名匹配不到任何用户规则, 卡上也读不出语义。hook 侧
+// (pre-tool-use.sh) 已做同样下钻; 这里再剥一层是给旧版 hook / 直连调用兜底。
+const unwrapDeferredTool = (toolName: string, toolInput: unknown): { toolName: string; toolInput: unknown } => {
+  if (toolName !== "DeferExecuteTool" || typeof toolInput !== "object" || toolInput === null) return { toolName, toolInput };
+  const o = toolInput as Record<string, unknown>;
+  const inner = [o.toolName, o.tool_name, o.name].find((v): v is string => typeof v === "string" && v.length > 0);
+  if (!inner) return { toolName, toolInput };
+  // 内层入参字段名各版本有出入, 依次探测; 都没有则剥掉包装字段取余下对象。
+  const args = [o.toolInput, o.tool_input, o.arguments, o.args, o.input].find((v) => v !== undefined);
+  if (args !== undefined) return { toolName: inner, toolInput: args };
+  const { toolName: _tn, tool_name: _tn2, name: _n, ...rest } = o;
+  return { toolName: inner, toolInput: rest };
 };
 
 export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarget, flushBeforeCard, nativeModal }: ApprovalDeps): Handler => {
@@ -1776,8 +1799,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
 
     const body = (await readBody(req)) as Partial<ApproveReq>;
     let sessionId = body.session_id ?? "";
-    const toolName = body.tool_name ?? "";
-    const toolInput = body.tool_input ?? {};
+    const { toolName, toolInput } = unwrapDeferredTool(body.tool_name ?? "", body.tool_input ?? {});
     const cwd = body.cwd ?? "";
     const transcriptTail = body.transcript_tail ?? "";
 
@@ -1792,7 +1814,10 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // 主会话 / 已解析到归属的子代理请求 (CC/CodeBuddy 都上报父 id) 完全不受影响。
     // 不 gate 在 mirror: headless 下 getMirrorTarget 同样是「session → 归属 chat」的解析
     // (由 index.ts 注入 sessions store 反查), 父归属逻辑对两种模式统一生效。
-    const fromSubagent = Boolean(body.agent_id || body.agent_type);
+    // agent 标记之外, subagents/ 转录布局同样是子代理证据 (部分 CodeBuddy 版本
+    // 两个标记都不带) —— 否则这类请求按主会话处理, no-approver 时挂进无人能点的 ask。
+    const fromSubagent = Boolean(body.agent_id || body.agent_type)
+      || SUBAGENT_TRANSCRIPT_RE.test((body.transcript_path ?? "").replace(/\\/g, "/"));
     if (fromSubagent && sessionId && !getMirrorTarget?.(sessionId)) {
       const parent = subagentParentOf(body.transcript_path ?? "", body.agent_id ?? "", body.agent_type ?? "");
       if (parent && parent !== sessionId) {

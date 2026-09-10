@@ -121,3 +121,19 @@ export const pickModalAnswer = (options: ModalOption[], title?: string): ModalAn
   if (!plainYes) return undefined;
   return { index: plainYes.index, label: plainYes.label };
 };
+
+/**
+ * skipAll 哨兵版选材 (mirror 主动读屏, 无任何审批上下文): 按**选项形状**认权限
+ * 确认框 —— 裸 "Yes" + "Yes, and/allow…" 放宽变体 + "No" 打头的拒绝项三件齐全。
+ * 不看标题: CodeBuddy 的 MCP 权限 picker 标题只有一个 "Confirm", PERMISSION_TITLE
+ * 认不出; 反过来 AskUserQuestion 的是非题标题可能长得像权限确认 ("Do you want me
+ * to …?") 但只有 Yes/No 两项 —— 那是用户的问题, 不是权限门, 靠三件套排除。
+ * 仍只挑一次性裸 "Yes": 放宽静态权限的变体永不选中。挑不出返回 undefined。
+ */
+export const pickAutoAllowAnswer = (options: ModalOption[]): ModalAnswer | undefined => {
+  const plainYes = options.find((o) => /^yes\s*$/iu.test(o.label));
+  if (!plainYes) return undefined;
+  if (!options.some((o) => /^yes,\s/iu.test(o.label))) return undefined;
+  if (!options.some((o) => /^no\b/iu.test(o.label))) return undefined;
+  return { index: plainYes.index, label: plainYes.label };
+};

@@ -28,7 +28,7 @@ import {
   projectDirsFor,
   type NormalizedTranscriptLine,
 } from "../shared/cli-backends.js";
-import { isModalPane, isAskqSubmitPage, parseModalOptions, pickModalAnswer, type ModalPaneVerdict } from "../shared/modal-pane.js";
+import { isModalPane, isAskqSubmitPage, parseModalOptions, pickModalAnswer, pickAutoAllowAnswer, type ModalPaneVerdict } from "../shared/modal-pane.js";
 import type { MirrorStore } from "./mirror-store.js";
 import { hasMirrorAskq, runMirrorAskqFlow, hasMirrorPlan, mootMirrorPlan, runMirrorPlanFlow } from "./approval.js";
 import { runTmux as runTmuxCmd, spawnTmuxClaude } from "./spawn-tmux.js";
@@ -2011,6 +2011,9 @@ interface AttachState {
    *  attempt per episode — a retry that hits the wall again produces a NEW
    *  limit line with a fresh resetsAt, which starts a fresh episode. */
   limitResume?: { resetsAt: number; notified: boolean; retried: boolean };
+  /** skipAll 原生 picker 哨兵的去重指纹 = 上一次已处理 (代按后仍未消失 / 判为
+   *  不可按) 的那一屏。屏幕内容一变自动重新评估; picker 消失时清除。 */
+  pickerSentinelFp?: string;
 }
 
 // Mirror outbound state machine. See plan: defer stream open by N ms; flush
@@ -4895,6 +4898,61 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   };
   const limitResumeTimer = setInterval(() => void limitResumeTick(), 30_000);
 
+  // ── skipAll 原生权限 picker 哨兵 ──────────────────────────────────────
+  // CodeBuddy 对一部分调用先弹自家权限 picker、PreToolUse hook 在人点掉之后才
+  // 触发 / 根本不触发 (与 AskUserQuestion 的「本地面板先行」同源; 实测命中: 子代理
+  // 里经 ToolSearch→DeferExecuteTool 派发的 MCP 工具)。hook 链路对这类调用完全
+  // 失明 —— daemon 零日志、无卡可发、danger.skipAll 落空, pane 就地阻塞。解法也
+  // 与 askq 同源: mirror 读屏兜底。仅当用户已用 danger.skipAll 声明「全部放行,
+  // 别问」时代按, 且只按一次性裸 "Yes" (pickAutoAllowAnswer 的三件套形状判据) ——
+  // 「Yes, and don't ask again」这类放宽静态权限的选项永不选中, 挑不出就不碰,
+  // 代按后发一条 chat 回执留痕。WEZARD_PICKER_SENTINEL=0 关闭。
+  let pickerTicking = false;
+  const pickerTick = async (): Promise<void> => {
+    if (pickerTicking || process.env.WEZARD_PICKER_SENTINEL === "0") return;
+    if (!cfg.approval.enabled || !cfg.approval.danger.skipAll) return;
+    pickerTicking = true;
+    try {
+      for (const a of byTarget.values()) {
+        if (!a.tmuxPane || a.migrationWatcher) continue;
+        if (!(await tmuxPaneAlive(a.tmuxPane))) continue;
+        const v = await detectModalPicker(a.tmuxPane);
+        if (!v.modal) { a.pickerSentinelFp = undefined; continue; }
+        if (a.pickerSentinelFp === v.screen) continue; // 同一屏已处理过, 等它变化
+        a.pickerSentinelFp = v.screen;
+        const pick = pickAutoAllowAnswer(parseModalOptions(v.screen));
+        if (!pick) {
+          log.info({ target: a.target, title: v.title }, "picker sentinel: modal on pane but not a trustworthy permission picker — leaving it");
+          continue;
+        }
+        // 与 answerNativeModal 同款按法: 数字键即选即确认; 一拍后同标题的框还在
+        // 才补 Enter (个别布局要显式确认), 标题变了说明已是另一个框, 绝不盲按。
+        await tmuxRun(["send-keys", "-t", a.tmuxPane, String(pick.index)]);
+        await sleepMs(400);
+        let after = await detectModalPicker(a.tmuxPane);
+        if (after.modal && after.title === v.title) {
+          await tmuxRun(["send-keys", "-t", a.tmuxPane, "Enter"]);
+          await sleepMs(400);
+          after = await detectModalPicker(a.tmuxPane);
+        }
+        if (after.modal) {
+          // 没按掉: 指纹换成当前屏 — pane 静止就不再重试, 免得往一个不认识的框里刷数字键。
+          a.pickerSentinelFp = after.screen;
+          log.warn({ target: a.target, title: after.title, pressed: pick.index }, "picker sentinel: modal still on pane after press");
+          continue;
+        }
+        a.pickerSentinelFp = undefined;
+        log.info({ target: a.target, title: v.title, pressed: `${pick.index}. ${pick.label}` }, "picker sentinel: native permission picker auto-allowed (danger.skipAll)");
+        sendStandalone(a, `[mirror] 🔓 skipAll 代按了 CLI 原生权限确认${v.title ? `「${v.title}」` : ""} → ${pick.index}. ${pick.label}`);
+      }
+    } catch (e) {
+      log.warn({ err: (e as Error).message }, "picker sentinel tick failed");
+    } finally {
+      pickerTicking = false;
+    }
+  };
+  const pickerTimer = setInterval(() => void pickerTick(), 5_000);
+
   return {
     attach,
     chatTargets,
@@ -5242,6 +5300,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       clearInterval(paneDriftTimer);
       clearInterval(keepaliveTimer);
       clearInterval(limitResumeTimer);
+      clearInterval(pickerTimer);
       for (const a of bySessionId.values()) {
         if (a.outbound?.kind === "deferred") clearTimeout(a.outbound.timer);
         a.outbound = undefined;
