@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Fixed
+- `mirror`: **原生 picker 哨兵识破 CodeBuddy 的确认框布局 —— 子代理 confirm 不再对远端隐形**。1.3.15 的 skipAll 哨兵在 devcloud (CodeBuddy) 上零命中, 成因是 `isModalPane` 的两条判据都被这版布局绕过: 确认框整圈圆角边框让 capture 行带 `│` 前后缀, 行首锚定的选项行正则落空; 快捷键提示内联在选项文案里 (`(escape)`), 没有 `Esc to cancel` footer —— 哨兵全盲且零日志。现在判定前逐行剥框线; footer 缺失时以权限三件套形状 (裸 `Yes` + `Yes, and …` + `No`) 作为 modal 证据补位 (是非题/plan review//model 天然不命中); `Are you sure …?` 纳入标题形状。注入防护 (`injectViaTmux` 的 modal 守卫) 与 `.claude/**` 守卫代按同步受益。
+- `mirror`: **哨兵不再 gate 在 `danger.skipAll` 上 —— skipAll 关闭时原生确认框转标准审批卡发到绑定 chat**。此前 skipAll 关闭 = 哨兵整体停摆, 不过 hook 的确认框在远端既无卡也无法代按。现在读屏认出权限确认框后分三路: skipAll 开 → 代按一次性 `Yes` (原行为); 本 chat ⏱自动窗口内且内层工具不踩危险名单 → 同上代按; 否则 → 读屏下钻真实工具名/入参 (`parseConfirmContext`, DeferExecuteTool 布局解析 `toolName:"…"`/`params:{…}`) 发标准审批卡 (`runMirrorPickerFlow`, 与 askq/plan 镜像流同源), 点击后代按对应选项: ✅/⏱ → 一次性 `Yes` (⏱ 同时开 chat 自动窗口), ✅总是 → 原生「本会话不再询问」(静态规则帮不上不过 hook 的框), ❌ → Escape; 危险名单命中的卡走单次确认形态。本地先按掉 → 卡自动作废; 代按前重读屏校验仍是同一调用, 换框绝不盲按。
+
 ## [1.3.15] - 2026-09-10
 
 ### Fixed

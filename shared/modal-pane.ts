@@ -21,12 +21,24 @@
 // non-space content are all load-bearing.
 const MODAL_OPTION_ROW = /^\s*[❯>]\s*\d+\.\s+\S/mu;
 
-// Picker footer. Present on every modal picker, absent from the idle input box.
+// Picker footer. Present on Claude Code's pickers; CodeBuddy 的权限确认框没有它
+// (快捷键提示内联在选项文案里, 如 "(escape)"), 由三件套形状判据补位, 见 isModalPane。
 const MODAL_FOOTER = /Esc to cancel/iu;
 
 // Title line of the confirm, surfaced in the failure reason so the user knows
 // what is waiting for them. Optional — detection never depends on it.
-const MODAL_TITLE = /^\s*((?:Do|Would|Should) you .+?)\s*$/mu;
+// "Are you sure …?" 是 CodeBuddy 权限确认框的问句形态。
+const MODAL_TITLE = /^\s*((?:(?:Do|Would|Should) you|Are you sure) .+?)\s*$/mu;
+
+// CodeBuddy 把确认框画成整圈圆角边框, capture-pane 的每一行都带 `│` 前后缀,
+// 所有行首锚定的判据 (选项行/标题/footer) 因此全部落空 —— 这正是 skipAll 哨兵
+// 在 CodeBuddy 子代理 confirm 上失明的成因之一。判定前逐行剥掉行首行尾的框线;
+// 内容中间的字面 `|` (管道) 不受影响。
+const stripBoxBorders = (pane: string): string =>
+  pane
+    .split("\n")
+    .map((l) => l.replace(/^\s*[│┃|]/u, "").replace(/\s*[│┃|]\s*$/u, ""))
+    .join("\n");
 
 export interface ModalPaneVerdict {
   modal: boolean;
@@ -35,15 +47,20 @@ export interface ModalPaneVerdict {
 }
 
 /**
- * Conservative by construction: BOTH an option row and the footer must be
- * present. A false positive blocks a legitimate message, which is worse than
- * missing an exotic picker layout — an "Esc to cancel" appearing inside pasted
- * text cannot fabricate a numbered option row above itself, and a message that
- * merely lists "1. …" cannot fabricate the footer.
+ * Conservative by construction: an option row PLUS a second independent piece of
+ * evidence must both be present — either the "Esc to cancel" footer (Claude
+ * Code 系全部 picker), or the permission three-piece option shape (裸 Yes +
+ * "Yes, and…" + No, CodeBuddy 的权限确认框没有 footer, 这是它唯一的稳定指纹)。
+ * A false positive blocks a legitimate message, which is worse than missing an
+ * exotic picker layout — pasted text cannot fabricate a highlighted numbered
+ * option row, and a message that merely lists "1. …" fabricates neither the
+ * footer nor the full Yes/Yes,and/No triple.
  */
 export const isModalPane = (pane: string): ModalPaneVerdict => {
-  if (!pane || !MODAL_OPTION_ROW.test(pane) || !MODAL_FOOTER.test(pane)) return { modal: false };
-  return { modal: true, title: pane.match(MODAL_TITLE)?.[1] };
+  const p = stripBoxBorders(pane ?? "");
+  if (!p || !MODAL_OPTION_ROW.test(p)) return { modal: false };
+  if (!MODAL_FOOTER.test(p) && !hasPermissionShape(parseModalOptions(p))) return { modal: false };
+  return { modal: true, title: p.match(MODAL_TITLE)?.[1] };
 };
 
 // ── 选项解析 + 代按 ────────────────────────────────────────────────────
@@ -62,8 +79,9 @@ export const isModalPane = (pane: string): ModalPaneVerdict => {
 const OPTION_ROW = /^\s*(?:[❯>]\s*)?(\d+)\.\s+(\S.*?)\s*$/u;
 
 /** 权限确认框的标题形状。plan review("Would you like to proceed?")也在此列 —— 但它
- *  的选项文案不是裸 "Yes", pickModalAnswer 会自然放弃, 不需要在标题上再排除。 */
-const PERMISSION_TITLE = /^(?:Do|Would|Should) you /iu;
+ *  的选项文案不是裸 "Yes", pickModalAnswer 会自然放弃, 不需要在标题上再排除。
+ *  "Are you sure …" 是 CodeBuddy 权限确认框的问句。 */
+const PERMISSION_TITLE = /^(?:(?:Do|Would|Should) you|Are you sure) /iu;
 
 export interface ModalOption {
   index: number;
@@ -80,7 +98,7 @@ export interface ModalOption {
 export const parseModalOptions = (pane: string): ModalOption[] => {
   const groups: ModalOption[][] = [];
   let cur: ModalOption[] = [];
-  for (const line of (pane ?? "").split("\n")) {
+  for (const line of stripBoxBorders(pane ?? "").split("\n")) {
     const m = OPTION_ROW.exec(line);
     if (!m) {
       // 选项行之间允许空行(部分布局会插一行), 非空的非选项行才断组。
@@ -122,18 +140,79 @@ export const pickModalAnswer = (options: ModalOption[], title?: string): ModalAn
   return { index: plainYes.index, label: plainYes.label };
 };
 
+/** 权限确认框的三件套形状: 裸 "Yes" + "Yes, and/allow…" 放宽变体 + "No" 打头的
+ *  拒绝项齐全。AskUserQuestion 的是非题只有 Yes/No 两项、plan review 没有裸
+ *  "Yes" —— 都天然不命中。既是哨兵选材的判据, 也是无 footer 布局 (CodeBuddy)
+ *  下 isModalPane 的 modal 证据。 */
+const hasPermissionShape = (options: ModalOption[]): boolean =>
+  options.some((o) => /^yes\s*$/iu.test(o.label))
+  && options.some((o) => /^yes,\s/iu.test(o.label))
+  && options.some((o) => /^no\b/iu.test(o.label));
+
 /**
- * skipAll 哨兵版选材 (mirror 主动读屏, 无任何审批上下文): 按**选项形状**认权限
- * 确认框 —— 裸 "Yes" + "Yes, and/allow…" 放宽变体 + "No" 打头的拒绝项三件齐全。
- * 不看标题: CodeBuddy 的 MCP 权限 picker 标题只有一个 "Confirm", PERMISSION_TITLE
- * 认不出; 反过来 AskUserQuestion 的是非题标题可能长得像权限确认 ("Do you want me
- * to …?") 但只有 Yes/No 两项 —— 那是用户的问题, 不是权限门, 靠三件套排除。
- * 仍只挑一次性裸 "Yes": 放宽静态权限的变体永不选中。挑不出返回 undefined。
+ * skipAll 哨兵版选材 (mirror 主动读屏, 无任何审批上下文): 按**选项形状**
+ * (hasPermissionShape) 认权限确认框, 不看标题 —— CodeBuddy 的 MCP 权限 picker
+ * 标题只有一个 "Confirm", PERMISSION_TITLE 认不出。
+ * 仍只挑一次性裸 "Yes": 放宽静态权限的变体永不自动选中。挑不出返回 undefined。
  */
 export const pickAutoAllowAnswer = (options: ModalOption[]): ModalAnswer | undefined => {
+  if (!hasPermissionShape(options)) return undefined;
   const plainYes = options.find((o) => /^yes\s*$/iu.test(o.label));
   if (!plainYes) return undefined;
-  if (!options.some((o) => /^yes,\s/iu.test(o.label))) return undefined;
-  if (!options.some((o) => /^no\b/iu.test(o.label))) return undefined;
   return { index: plainYes.index, label: plainYes.label };
+};
+
+// ── 权限确认框上下文提取 (审批卡渲染用) ────────────────────────────────
+// CodeBuddy 子代理的 confirm 完全不过 hook, 卡片能拿到的唯一事实就是屏上这只框。
+// DeferExecuteTool 布局在正文里带 `toolName: "…"` 与 `params: {…}`, 直接下钻成
+// 真实工具; 其它布局退回正文首行。解析失败也要给出可渲染的兜底 —— 卡片信息糙一点
+// 仍胜过确认框在远端隐形。纯函数。
+export interface ConfirmContext {
+  toolName: string;
+  toolInput: unknown;
+  /** "Confirm · @tag" 头里的子代理名, 有则供卡片标注来源。 */
+  agent?: string;
+}
+
+const CONFIRM_HEADER = /^\s*Confirm\b(?:\s*[·:]\s*(@?\S+))?/u;
+// 框顶线 / 分隔线: 只由框线字符与空白组成的行。空行也命中 (正文为空时继续上溯)。
+const BOX_RULE = /^[\s─━╭╮╰╯┌┐└┘├┤┬┴═║╔╗╚╝]*$/u;
+const CONFIRM_QUESTION = /^\s*(?:(?:Do|Would|Should) you|Are you sure)\b.*\?\s*$/iu;
+
+export const parseConfirmContext = (pane: string): ConfirmContext => {
+  const lines = stripBoxBorders(pane ?? "").split("\n");
+  // 正文的下界 = 最后一组选项的 "1." 行; 上界 = Confirm 头 / 框线(正文已开始时)。
+  let firstOpt = lines.length;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/^\s*(?:[❯>]\s*)?1\.\s+\S/u.test(lines[i]!)) { firstOpt = i; break; }
+  }
+  let agent: string | undefined;
+  const body: string[] = [];
+  // 正文收完后 (bodyDone) 继续上溯只为找 Confirm 头 —— 正文与头之间隔着空行,
+  // 一碰空行就停会把 `@子代理名` 丢掉; 碰到头以外的实际内容才真正停。
+  let bodyDone = false;
+  for (let i = firstOpt - 1; i >= 0; i--) {
+    const line = lines[i]!;
+    const h = CONFIRM_HEADER.exec(line);
+    if (h) { agent = h[1] || undefined; break; }
+    if (BOX_RULE.test(line)) { bodyDone = body.length > 0; continue; }
+    if (CONFIRM_QUESTION.test(line) || OPTION_ROW.test(line)) continue;
+    if (bodyDone) break;
+    body.unshift(line.trim());
+  }
+  const text = body.join("\n");
+  const inner = /(?:^|[^\w])toolName:\s*"([^"]+)"/u.exec(text)?.[1];
+  const params = /params:\s*(\{[\s\S]*)$/u.exec(text)?.[1]?.trim();
+  let input: unknown;
+  // params 可能被 pane 宽度截断 → JSON.parse 失败时保留原文, 卡上仍可读。
+  if (params !== undefined) {
+    try { input = JSON.parse(params); } catch { input = { params }; }
+  }
+  const first = body.find((l) => l.length > 0);
+  const toolName = inner ?? (first && first.length <= 60 ? first : undefined) ?? "权限确认";
+  if (input === undefined) {
+    const rest = body.filter((l) => l && l !== toolName).join("\n").trim();
+    input = rest ? { 参数: rest } : {};
+  }
+  return { toolName, toolInput: input, agent };
 };

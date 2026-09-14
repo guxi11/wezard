@@ -28,9 +28,11 @@ import {
   projectDirsFor,
   type NormalizedTranscriptLine,
 } from "../shared/cli-backends.js";
-import { isModalPane, isAskqSubmitPage, parseModalOptions, pickModalAnswer, pickAutoAllowAnswer, type ModalPaneVerdict } from "../shared/modal-pane.js";
+import { isModalPane, isAskqSubmitPage, parseModalOptions, pickModalAnswer, pickAutoAllowAnswer, parseConfirmContext, type ModalPaneVerdict } from "../shared/modal-pane.js";
 import type { MirrorStore } from "./mirror-store.js";
-import { hasMirrorAskq, runMirrorAskqFlow, hasMirrorPlan, mootMirrorPlan, runMirrorPlanFlow } from "./approval.js";
+import { hasMirrorAskq, runMirrorAskqFlow, hasMirrorPlan, mootMirrorPlan, runMirrorPlanFlow, hasMirrorPicker, mootMirrorPicker, runMirrorPickerFlow, type PickerPress } from "./approval.js";
+import { isAutoWindowActive } from "./session-cache.js";
+import { dangerOf } from "./danger.js";
 import { runTmux as runTmuxCmd, spawnTmuxClaude } from "./spawn-tmux.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
 import { recordTool, recordToolResult, recordTurnStart, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, buildDetailUrl, buildChatUrl } from "./detail.js";
@@ -1245,6 +1247,26 @@ const detectModalPicker = async (target: string): Promise<ModalPaneVerdict & { s
   return { ...isModalPane(screen), screen };
 };
 
+// 按下确认框的第 index 号选项: 数字键即选即确认; 一拍后**同标题**的框还在才补
+// Enter (个别布局要显式确认), 标题变了说明弹的已是另一个框 —— 绝不盲按, 免得替
+// 用户确认了他没看过的东西。返回按完后的屏面 verdict, 由调用方裁决成败。
+const MODAL_PRESS_SETTLE_MS = 400;
+const pressModalIndex = async (
+  pane: string,
+  before: ModalPaneVerdict & { screen: string },
+  index: number,
+): Promise<ModalPaneVerdict & { screen: string }> => {
+  await tmuxRun(["send-keys", "-t", pane, String(index)]);
+  await sleepMs(MODAL_PRESS_SETTLE_MS);
+  let after = await detectModalPicker(pane);
+  if (after.modal && after.title === before.title) {
+    await tmuxRun(["send-keys", "-t", pane, "Enter"]);
+    await sleepMs(MODAL_PRESS_SETTLE_MS);
+    after = await detectModalPicker(pane);
+  }
+  return after;
+};
+
 // 「聊聊这个」收尾: 文本 inject 已把引导语贴进自定义文本行 (❯ N. <text>)。codebuddy
 // 的 AskUserQuestion 面板把自定义行和 Submit 行做成两个独立行, 光标此刻停在自定义
 // 行, 直接 Enter 只是在文本里换行, 提交不了。这里读屏确认 Submit 行已渲染
@@ -2011,8 +2033,9 @@ interface AttachState {
    *  attempt per episode — a retry that hits the wall again produces a NEW
    *  limit line with a fresh resetsAt, which starts a fresh episode. */
   limitResume?: { resetsAt: number; notified: boolean; retried: boolean };
-  /** skipAll 原生 picker 哨兵的去重指纹 = 上一次已处理 (代按后仍未消失 / 判为
-   *  不可按) 的那一屏。屏幕内容一变自动重新评估; picker 消失时清除。 */
+  /** 原生 picker 哨兵的去重指纹 = 上一次已处理 (代按后仍未消失 / 判为不可按 /
+   *  已转审批卡) 的那一屏。屏幕内容一变自动重新评估; picker 消失时清除。审批卡
+   *  在途期间的防重由 hasMirrorPicker 槽位负责, 不靠这枚指纹。 */
   pickerSentinelFp?: string;
 }
 
@@ -4898,26 +4921,34 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   };
   const limitResumeTimer = setInterval(() => void limitResumeTick(), 30_000);
 
-  // ── skipAll 原生权限 picker 哨兵 ──────────────────────────────────────
+  // ── 原生权限 picker 哨兵 ──────────────────────────────────────────────
   // CodeBuddy 对一部分调用先弹自家权限 picker、PreToolUse hook 在人点掉之后才
   // 触发 / 根本不触发 (与 AskUserQuestion 的「本地面板先行」同源; 实测命中: 子代理
   // 里经 ToolSearch→DeferExecuteTool 派发的 MCP 工具)。hook 链路对这类调用完全
-  // 失明 —— daemon 零日志、无卡可发、danger.skipAll 落空, pane 就地阻塞。解法也
-  // 与 askq 同源: mirror 读屏兜底。仅当用户已用 danger.skipAll 声明「全部放行,
-  // 别问」时代按, 且只按一次性裸 "Yes" (pickAutoAllowAnswer 的三件套形状判据) ——
-  // 「Yes, and don't ask again」这类放宽静态权限的选项永不选中, 挑不出就不碰,
-  // 代按后发一条 chat 回执留痕。WEZARD_PICKER_SENTINEL=0 关闭。
+  // 失明 —— daemon 零日志、无卡可发, pane 就地阻塞。解法与 askq/plan 同源:
+  // mirror 读屏兜底, 按三件套形状 (pickAutoAllowAnswer) 认权限确认框, 分三路:
+  //   - danger.skipAll 开 → 代按一次性裸 "Yes" (放宽静态权限的变体永不自动选中);
+  //   - 本 chat 的 ⏱自动窗口内、且内层工具不踩危险名单 → 同上代按;
+  //   - 否则 → 把框转成标准审批卡发到本 chat (runMirrorPickerFlow), 点击后代按
+  //     对应选项; 本地先按掉则 moot 作废卡。代按/发卡都发 chat 回执留痕。
+  // WEZARD_PICKER_SENTINEL=0 整体关闭。
   let pickerTicking = false;
   const pickerTick = async (): Promise<void> => {
     if (pickerTicking || process.env.WEZARD_PICKER_SENTINEL === "0") return;
-    if (!cfg.approval.enabled || !cfg.approval.danger.skipAll) return;
+    if (!cfg.approval.enabled) return;
     pickerTicking = true;
     try {
       for (const a of byTarget.values()) {
         if (!a.tmuxPane || a.migrationWatcher) continue;
         if (!(await tmuxPaneAlive(a.tmuxPane))) continue;
         const v = await detectModalPicker(a.tmuxPane);
-        if (!v.modal) { a.pickerSentinelFp = undefined; continue; }
+        if (!v.modal) {
+          a.pickerSentinelFp = undefined;
+          // 审批卡在途而框已消失 = 本地先按掉了 → 作废卡等待 (无卡则 no-op)。
+          mootMirrorPicker(a.sessionId);
+          continue;
+        }
+        if (hasMirrorPicker(a.sessionId)) continue; // 审批卡在途, 等点击 / moot
         if (a.pickerSentinelFp === v.screen) continue; // 同一屏已处理过, 等它变化
         a.pickerSentinelFp = v.screen;
         const pick = pickAutoAllowAnswer(parseModalOptions(v.screen));
@@ -4925,25 +4956,44 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           log.info({ target: a.target, title: v.title }, "picker sentinel: modal on pane but not a trustworthy permission picker — leaving it");
           continue;
         }
-        // 与 answerNativeModal 同款按法: 数字键即选即确认; 一拍后同标题的框还在
-        // 才补 Enter (个别布局要显式确认), 标题变了说明已是另一个框, 绝不盲按。
-        await tmuxRun(["send-keys", "-t", a.tmuxPane, String(pick.index)]);
-        await sleepMs(400);
-        let after = await detectModalPicker(a.tmuxPane);
-        if (after.modal && after.title === v.title) {
-          await tmuxRun(["send-keys", "-t", a.tmuxPane, "Enter"]);
-          await sleepMs(400);
-          after = await detectModalPicker(a.tmuxPane);
-        }
-        if (after.modal) {
-          // 没按掉: 指纹换成当前屏 — pane 静止就不再重试, 免得往一个不认识的框里刷数字键。
-          a.pickerSentinelFp = after.screen;
-          log.warn({ target: a.target, title: after.title, pressed: pick.index }, "picker sentinel: modal still on pane after press");
+        const ctx = parseConfirmContext(v.screen);
+        const danger = dangerOf(cfg, ctx.toolName, ctx.toolInput);
+        // 自动代按的两个授权源。窗口路径要过危险名单 (窗口语义不覆盖 mustCard);
+        // skipAll 本就压过危险名单 (与 daemon 审批链一致), 不检。
+        const auto = cfg.approval.danger.skipAll
+          ? "skipAll"
+          : isAutoWindowActive(a.target) && !danger ? "⏱自动窗口" : undefined;
+        if (auto) {
+          const after = await pressModalIndex(a.tmuxPane, v, pick.index);
+          if (after.modal) {
+            // 没按掉: 指纹换成当前屏 — pane 静止就不再重试, 免得往一个不认识的框里刷数字键。
+            a.pickerSentinelFp = after.screen;
+            log.warn({ target: a.target, title: after.title, pressed: pick.index }, "picker sentinel: modal still on pane after press");
+            continue;
+          }
+          a.pickerSentinelFp = undefined;
+          log.info({ target: a.target, title: v.title, via: auto, pressed: `${pick.index}. ${pick.label}` }, "picker sentinel: native permission picker auto-allowed");
+          sendStandalone(a, `[mirror] 🔓 ${auto} 代按了 CLI 原生权限确认${v.title ? `「${v.title}」` : ""} → ${pick.index}. ${pick.label}`);
           continue;
         }
-        a.pickerSentinelFp = undefined;
-        log.info({ target: a.target, title: v.title, pressed: `${pick.index}. ${pick.label}` }, "picker sentinel: native permission picker auto-allowed (danger.skipAll)");
-        sendStandalone(a, `[mirror] 🔓 skipAll 代按了 CLI 原生权限确认${v.title ? `「${v.title}」` : ""} → ${pick.index}. ${pick.label}`);
+        // 卡片路径: fire-and-forget — 长轮询在 flow 里, 哨兵循环不能被一张卡挂住;
+        // 防重靠 hasMirrorPicker 槽位 (含代按窗口期, 见 flow 内 finally)。
+        log.info({ target: a.target, toolName: ctx.toolName, agent: ctx.agent, danger: danger?.rule }, "picker sentinel: forwarding native picker as approval card");
+        runMirrorPickerFlow({
+          log: log.child({ target: a.target, sessionId: a.sessionId, sub: "picker-card" }),
+          client,
+          cfg,
+          sessionId: a.sessionId,
+          chatKey: a.target,
+          cwd: a.runningCwd,
+          jsonlPath: a.jsonlPath,
+          toolName: ctx.toolName,
+          toolInput: ctx.toolInput,
+          agent: ctx.agent,
+          danger: danger?.rule,
+          voteTimeoutMs: cfg.approval.longPollSec * 1000,
+          press: (what) => pressNativePicker(a, ctx.toolName, what),
+        }).catch((e) => log.warn({ err: (e as Error).message, target: a.target }, "mirror picker flow failed"));
       }
     } catch (e) {
       log.warn({ err: (e as Error).message }, "picker sentinel tick failed");
@@ -4952,6 +5002,38 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
   };
   const pickerTimer = setInterval(() => void pickerTick(), 5_000);
+
+  // 审批卡点击后的代按回调。点击与本地按键之间隔着人的反应时间, 必须重读屏并
+  // 校验仍是**同一个调用**的确认框 —— 期间本地按掉旧框又弹了新框的话, 盲按就是
+  // 替用户批准了他没看过的东西。
+  const pressNativePicker = async (
+    a: AttachState,
+    expectToolName: string,
+    what: PickerPress,
+  ): Promise<{ ok: boolean; reason?: string; label?: string }> => {
+    if (!a.tmuxPane || !(await tmuxPaneAlive(a.tmuxPane))) return { ok: false, reason: "pane 已不在" };
+    const v = await detectModalPicker(a.tmuxPane);
+    if (!v.modal) return { ok: false, reason: "确认框已不在（可能已在本地处理）" };
+    const now = parseConfirmContext(v.screen);
+    if (expectToolName && now.toolName !== expectToolName) {
+      return { ok: false, reason: `当前确认框已是另一个调用（${now.toolName}），不代按` };
+    }
+    if (what === "no") {
+      await tmuxRun(["send-keys", "-t", a.tmuxPane, "Escape"]);
+      await sleepMs(MODAL_PRESS_SETTLE_MS);
+      const after = await detectModalPicker(a.tmuxPane);
+      return after.modal ? { ok: false, reason: "Escape 后确认框仍在" } : { ok: true, label: "Escape" };
+    }
+    const opts = parseModalOptions(v.screen);
+    const bare = opts.find((o) => /^yes\s*$/iu.test(o.label));
+    const sess = what === "yes_session" ? opts.find((o) => /^yes,\s/iu.test(o.label)) : undefined;
+    const pick = sess ?? bare;
+    if (!pick) return { ok: false, reason: "确认框上找不到可按的 Yes 选项" };
+    const after = await pressModalIndex(a.tmuxPane, v, pick.index);
+    return after.modal
+      ? { ok: false, reason: `按下 ${pick.index} 后确认框仍在` }
+      : { ok: true, label: `${pick.index}. ${pick.label}` };
+  };
 
   return {
     attach,
@@ -5274,18 +5356,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         return { status: "unparsable", title: v.title, screen: v.screen };
       }
 
-      // 数字键在 CC 的 picker 里即选即确认。按完等一拍回读: 框还在且**标题没变**才
-      // 补一个 Enter(个别布局要显式确认); 标题变了说明弹的已是另一个框 —— 绝不盲按,
-      // 交给兜底路径, 免得替用户确认了他没看过的东西。
-      const SETTLE_MS = 400;
-      await tmuxRun(["send-keys", "-t", pane, String(pick.index)]);
-      await sleepMs(SETTLE_MS);
-      let after = await detectModalPicker(pane);
-      if (after.modal && after.title === v.title) {
-        await tmuxRun(["send-keys", "-t", pane, "Enter"]);
-        await sleepMs(SETTLE_MS);
-        after = await detectModalPicker(pane);
-      }
+      // 数字键在 CC 的 picker 里即选即确认; 补 Enter 与"标题没变才按"的守卫在
+      // pressModalIndex 里 —— 按不掉交给兜底路径, 免得替用户确认了他没看过的东西。
+      const after = await pressModalIndex(pane, v, pick.index);
       if (after.modal) {
         lg.warn({ title: after.title, pressed: pick.index }, "native modal: still on pane after answer");
         return { status: "still_modal", title: after.title, index: pick.index, label: pick.label };

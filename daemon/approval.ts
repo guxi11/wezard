@@ -1355,6 +1355,183 @@ export const runMirrorPlanFlow = async ({ log, client, sessionId, chatKey, cwd, 
   await note(approve ? "✅ 已同意，退出 plan mode 开始执行…" : "✏️ 已选择继续完善计划。");
 };
 
+// ── mirror 驱动原生权限 picker 审批卡 (确认框完全不过 hook 的兜底) ────────
+// 实测: CodeBuddy 子代理里经 ToolSearch→DeferExecuteTool 派发的 MCP 工具, 本地
+// 权限 picker 先弹、PreToolUse hook 在人点掉之后才触发 / 根本不触发 —— hook 链路
+// 零参与, 审批卡只能由 mirror 读屏发起 (与 askq/plan 两条镜像流同源)。
+// 点击 → Decision → press 回调代按 pane:
+//   ✅ / ⏱ → 一次性 "Yes" (⏱ 同时开本 chat 自动窗口, 后续 picker 由哨兵直按)
+//   ✅总是  → "Yes, and don't ask again this session" —— 静态规则帮不上不过 hook
+//            的框, 原生的会话级免问是「总是」在此语境下最忠实的翻译
+//   ❌     → Escape (等价 "No, and tell … differently" 的快捷键)
+// 本地先按掉 → mootMirrorPicker 作废卡等待。槽位防重: 同 session 同时至多一张。
+interface MirrorPickerSlot { reqId?: string; at: number }
+const mirrorPickerSlots = new Map<string, MirrorPickerSlot>();
+const MIRROR_PICKER_SLOT_TTL_MS = 12 * 3600_000; // 与 approval.longPollSec 对齐
+const freshPickerSlot = (sessionId: string): MirrorPickerSlot | undefined => {
+  const s = mirrorPickerSlots.get(sessionId);
+  if (!s) return undefined;
+  if (Date.now() - s.at > MIRROR_PICKER_SLOT_TTL_MS) {
+    mirrorPickerSlots.delete(sessionId);
+    return undefined;
+  }
+  return s;
+};
+export const hasMirrorPicker = (sessionId: string): boolean => freshPickerSlot(sessionId) !== undefined;
+export const mootMirrorPicker = (sessionId: string): void => {
+  const s = freshPickerSlot(sessionId);
+  if (!s) return;
+  if (s.reqId) resolvePending(s.reqId, "moot" as never);
+  mirrorPickerSlots.delete(sessionId);
+};
+
+// ── picker 代按 → 迟到 hook 请求的去重 ─────────────────────────────────
+// 这类调用的 hook 在本地确认框被按掉**之后**才到 (CodeBuddy「本地面板先行」,
+// 与 askq 同源)。代按 Yes 的那一下就是人工审批结论 —— hook 随后送来的同一调用
+// 不该再发第二张卡。一次性消费 + 短 TTL: 只豁免紧跟着代按的那一次上报, 不构成
+// 任何持久放行。
+const recentPickerAllows = new Map<string, number>(); // `${sessionId}|${toolName}` → at
+const RECENT_PICKER_TTL_MS = 60_000;
+const recordPickerAllow = (sessionId: string, toolName: string): void => {
+  recentPickerAllows.set(`${sessionId}|${toolName}`, Date.now());
+};
+const consumePickerAllow = (sessionId: string, toolName: string): boolean => {
+  const k = `${sessionId}|${toolName}`;
+  const at = recentPickerAllows.get(k);
+  if (at === undefined) return false;
+  recentPickerAllows.delete(k);
+  return Date.now() - at <= RECENT_PICKER_TTL_MS;
+};
+
+export type PickerPress = "yes" | "yes_session" | "no";
+
+interface MirrorPickerFlowArgs {
+  log: Logger;
+  client: WSClient;
+  cfg: Config;
+  sessionId: string;
+  /** mirror 附件的 target (可带 #tag) — 卡片/回执都发到这一聊天。 */
+  chatKey: string;
+  cwd: string;
+  jsonlPath: string;
+  /** 读屏解出的真实工具名/入参 (parseConfirmContext) — 卡片正文的数据源。 */
+  toolName: string;
+  toolInput: unknown;
+  agent?: string;
+  /** 内层工具命中的危险名单规则名 — 卡片走单次确认形态 (无 ⏱/总是按钮)。 */
+  danger?: string;
+  voteTimeoutMs: number;
+  /** 代按 pane; 实现方 (mirror) 负责重读屏 + 校验仍是同一只框。 */
+  press: (what: PickerPress) => Promise<{ ok: boolean; reason?: string; label?: string }>;
+}
+
+export const runMirrorPickerFlow = async (
+  { log, client, cfg, sessionId, chatKey, cwd, jsonlPath, toolName, toolInput, agent, danger, voteTimeoutMs, press }: MirrorPickerFlowArgs,
+): Promise<void> => {
+  if (!client.isConnected) return;
+  const target = targetChatId(chatKey);
+  const note = async (content: string): Promise<void> => {
+    try {
+      await client.sendMessage(target, { msgtype: "markdown", markdown: { content: withTagHeader(chatKey, content) } });
+    } catch { /* best-effort */ }
+  };
+
+  const tail = agent ? `子代理 ${agent} 的原生权限确认` : "CLI 原生权限确认";
+  const sessionName = sessionNameFor(chatKey, jsonlPath, sessionId);
+  const { reqId, promise } = createPending({
+    meta: {
+      kind: "generic",
+      createdAt: Date.now(),
+      toolName,
+      toolInput,
+      cwd,
+      sessionId,
+      chatKey,
+      transcriptTail: tail,
+      danger,
+      forceSingle: Boolean(danger),
+      sessionName,
+    },
+    timeoutMs: voteTimeoutMs,
+  });
+  mirrorPickerSlots.set(sessionId, { reqId, at: Date.now() });
+
+  try {
+    await client.sendMessage(target, {
+      msgtype: "template_card",
+      template_card: buildCard({
+        reqId,
+        toolName,
+        toolInput,
+        toolInputStr: "",
+        cwd,
+        sessionShort: sessionId.slice(-8),
+        sessionId,
+        chatKey,
+        transcriptTail: tail,
+        windowMinutes: cfg.approval.windowMinutes,
+        danger,
+        forceSingle: Boolean(danger),
+        sessionName,
+      }),
+    });
+    log.info({ reqId, chatKey, toolName, agent }, "mirror picker card sent");
+  } catch (e) {
+    log.error({ err: (e as Error).message }, "mirror picker card send failed");
+    resolvePending(reqId, "deny");
+    mirrorPickerSlots.delete(sessionId);
+    return;
+  }
+
+  let raw: string;
+  try {
+    raw = (await promise) as unknown as string;
+  } catch {
+    mirrorPickerSlots.delete(sessionId);
+    await note(`⌛ 权限确认卡已超时（${toolName}），请在 CLI 中处理。`);
+    return;
+  }
+  // 本地先按掉 (哨兵读到框消失触发的 moot) — 槽位已由 mootMirrorPicker 清除。
+  if (raw === "moot") {
+    log.info({ reqId, sessionId }, "mirror picker mooted by local answer");
+    return;
+  }
+
+  // 槽位保持到代按完成 — 哨兵靠它跳过在途 pane; 提前清会与代按赛跑出双按键。
+  try {
+    const d = raw as Decision;
+    if (d === "deny") {
+      const r = await press("no");
+      await note(r.ok
+        ? `🚫 已替你拒绝 CLI 权限确认（${toolName}）→ ${r.label ?? "Escape"}`
+        : `⚠️ 已记录拒绝，但代按失败（${r.reason ?? "未知"}），请回 CLI 处理。`);
+      return;
+    }
+    if (d === "allow_window" && cfg.approval.windowMinutes > 0) {
+      setAutoWindow(chatKey, cfg.approval.windowMinutes * 60_000, { toolName, toolInput, cwd, transcriptTail: tail });
+      // 与 handler 的 allow_window 同款 sweep: 同 chat 其它 pending 卡一并放行。
+      const swept = resolvePendingsByChat(chatKey, "allow_window", reqId);
+      log.info({ chatKey, minutes: cfg.approval.windowMinutes, swept: swept.length }, "auto-window opened via picker card");
+      if (swept.length > 0) await note(`⚡ 已批量自动放行其他 ${swept.length} 个并发请求。`);
+    }
+    const wantSession = d === "allow_always" || d === "allow_session";
+    const r = await press(wantSession ? "yes_session" : "yes");
+    if (!r.ok) {
+      await note(`⚠️ 已记录同意，但代按失败（${r.reason ?? "未知"}），请回 CLI 手动确认。`);
+      return;
+    }
+    // 代按成功 → CLI 才真正派发工具 → hook 此刻才会上报同一调用; 预先记账让
+    // handler 直接放行, 不再发第二张卡 (consumePickerAllow)。
+    recordPickerAllow(sessionId, toolName);
+    await note(wantSession
+      ? `🔓 已代按「本会话不再询问」（${toolName}）→ ${r.label ?? ""}\n原生确认框不过 hook，「总是」规则帮不上它，已翻译成 CLI 的会话级免问。`
+      : `🔓 已代按 CLI 权限确认（${toolName}）→ ${r.label ?? "Yes"}${d === "allow_window" ? `，并开启 ${cfg.approval.windowMinutes} 分钟自动放行窗口` : ""}`);
+    log.info({ reqId, sessionId, decision: d, pressed: r.label }, "mirror picker resolved via send-keys");
+  } finally {
+    mirrorPickerSlots.delete(sessionId);
+  }
+};
+
 // 多问题: 逐题顺序发卡 → 收答 → 下一题。任一题选「CLI」整体转 CLI,选「聊聊」
 // 整体转讨论; 全部答完合并成单个 deny+reason 注入。卡不会一次性轰炸 N 张。
 const handleAskUserQuestion = async ({ cfg, log, client, body, getMirrorTarget, flushBeforeCard, clientGone }: AskqHandleArgs): Promise<ApproveResp> => {
@@ -1986,6 +2163,16 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     if (cfg.approval.danger.skipAll) {
       log.info({ toolName, sessionId }, "danger.skipAll auto allow");
       json(res, 200, { decision: "allow", reason: "danger_skip_all" } satisfies ApproveResp);
+      settleGuard();
+      return;
+    }
+
+    // picker 代按后的迟到 hook 上报 (CodeBuddy「本地面板先行」): 刚在审批卡上点过
+    // ✅ 并被代按 Yes 的调用, 不再发第二张卡。一次性消费, 压过 mustCard —— 危险卡
+    // 那次也是人刚点过的。
+    if (consumePickerAllow(sessionId, toolName)) {
+      log.info({ toolName, sessionId }, "picker-card allow replay — auto allow");
+      json(res, 200, { decision: "allow", reason: "picker_card_allow" } satisfies ApproveResp);
       settleGuard();
       return;
     }
