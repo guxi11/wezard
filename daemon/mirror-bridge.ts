@@ -2438,6 +2438,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     flushStandalone(a);
   };
 
+  // Skill 反馈 (/model 的 "Switch model to …" 等) 是用户敲完命令正在等的回执 ——
+  // 不进 standaloneDebounceMs 防抖窗 (默认 30s, 对交互回执就是纯延迟)。先清掉
+  // 在途 debounce 缓冲保序 (同批 drain 里先到的 user 回显不能被反超), 再立即发。
+  const sendStandaloneNow = (a: AttachState, content: string): void => {
+    flushPendingStandalone(a);
+    sendStandalone(a, content);
+  };
+
   // Path A: a needs-approval tool_use just landed. Aggregate the buffer as one
   // standalone, send it BEFORE the approval card race, transition to AWAITING_APPR.
   const promoteToStandalone = (a: AttachState): void => {
@@ -2564,7 +2572,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // Skill outputs (e.g. /model) bypass deferred filtering — emit directly
     // as a standalone bubble so the user sees the result immediately.
     if (item.kind === "skill_output") {
-      if (!item.quiet) enqueueStandalone(a, item.body);
+      if (!item.quiet) sendStandaloneNow(a, item.body);
       return;
     }
     const wasEmpty = out.buf.length === 0;
@@ -3137,8 +3145,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // chat with hundreds of tool bubbles. turn_end = the goal auto-cleared and the
   // model finally stopped → leave goal mode; normal brief resumes next turn.
   const handleGoalItem = (a: AttachState, item: RenderItem): void => {
-    if (item.kind === "text" || item.kind === "skill_output") {
-      if (item.kind !== "skill_output" || !item.quiet) enqueueStandalone(a, item.body);
+    if (item.kind === "text") {
+      enqueueStandalone(a, item.body);
+      return;
+    }
+    if (item.kind === "skill_output") {
+      if (!item.quiet) sendStandaloneNow(a, item.body);
       return;
     }
     if (item.kind === "turn_end") {
@@ -3515,7 +3527,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // Skill outputs (e.g. /model) always emit as standalone — never append to
     // an active stream so the result is independently visible.
     if (item.kind === "skill_output") {
-      if (!item.quiet) enqueueStandalone(a, item.body);
+      if (!item.quiet) sendStandaloneNow(a, item.body);
       return;
     }
     // Assistant turn truly ended (stop_reason terminal). Finalize the live

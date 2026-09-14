@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+## [1.3.18] - 2026-09-14
+
+### Fixed
+- `mirror`: **CLI 敲 `/model` 等 slash 命令的回执即时推送 —— 不再吃 `standaloneDebounceMs` 防抖 (默认 30s)**。非 brief 路径下 skill_output (`⚙️ Switch model to …`) 此前与工具刷屏共用 standalone 防抖窗, 窗口被后续 item 反复重置时延迟还会更长; 现在 skill_output 一律先冲掉在途防抖缓冲 (保序, 同批 drain 里先到的 `> /model` 回显不被反超) 再立即发出。deferred / goal / 常规三条非 brief 消费路径同步生效; brief 路径本就即时, 不受影响。
+
 ## [1.3.17] - 2026-09-14
 
 ### Fixed
@@ -405,7 +410,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.17...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.18...HEAD
+[1.3.18]: https://github.com/guxi11/wezard/compare/v1.3.17...v1.3.18
 [1.3.17]: https://github.com/guxi11/wezard/compare/v1.3.16...v1.3.17
 [1.3.16]: https://github.com/guxi11/wezard/compare/v1.3.15...v1.3.16
 [1.3.15]: https://github.com/guxi11/wezard/compare/v1.3.14...v1.3.15
