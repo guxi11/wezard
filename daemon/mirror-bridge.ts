@@ -28,7 +28,7 @@ import {
   projectDirsFor,
   type NormalizedTranscriptLine,
 } from "../shared/cli-backends.js";
-import { isModalPane, isAskqSubmitPage, parseModalOptions, pickModalAnswer, pickAutoAllowAnswer, parseConfirmContext, type ModalPaneVerdict } from "../shared/modal-pane.js";
+import { isModalPane, isAskqSubmitPage, parseModalOptions, pickModalAnswer, pickAutoAllowAnswer, parseConfirmContext, looksLikePicker, type ModalPaneVerdict } from "../shared/modal-pane.js";
 import type { MirrorStore } from "./mirror-store.js";
 import { hasMirrorAskq, runMirrorAskqFlow, hasMirrorPlan, mootMirrorPlan, runMirrorPlanFlow, hasMirrorPicker, mootMirrorPicker, runMirrorPickerFlow, type PickerPress } from "./approval.js";
 import { isAutoWindowActive } from "./session-cache.js";
@@ -1247,10 +1247,16 @@ const detectModalPicker = async (target: string): Promise<ModalPaneVerdict & { s
   return { ...isModalPane(screen), screen };
 };
 
-// 按下确认框的第 index 号选项: 数字键即选即确认; 一拍后**同标题**的框还在才补
-// Enter (个别布局要显式确认), 标题变了说明弹的已是另一个框 —— 绝不盲按, 免得替
-// 用户确认了他没看过的东西。返回按完后的屏面 verdict, 由调用方裁决成败。
+// 按下确认框的第 index 号选项。Claude Code 的 picker 数字键即选即确认; CodeBuddy
+// 的框数字键不一定生效, 且高亮可能停在别的选项上 (实测见过默认高亮在 "Yes, and
+// don't ask again…" 上) —— 盲补 Enter 会把**高亮项**确认下去, 可能恰是那条放宽
+// 权限的选项。所以补 Enter 前必须核对高亮就在目标项; 不在就用方向键挪过去、复核
+// 后再按; 高亮读不出 / 挪不动 / 标题变了 (已是另一个框) 一律罢手, 交调用方兜底。
+// 返回按完后的屏面 verdict, 由调用方裁决成败。
 const MODAL_PRESS_SETTLE_MS = 400;
+const MODAL_ARROW_SETTLE_MS = 150;
+const highlightedIndex = (screen: string): number | undefined =>
+  parseModalOptions(screen).find((o) => o.selected)?.index;
 const pressModalIndex = async (
   pane: string,
   before: ModalPaneVerdict & { screen: string },
@@ -1259,12 +1265,20 @@ const pressModalIndex = async (
   await tmuxRun(["send-keys", "-t", pane, String(index)]);
   await sleepMs(MODAL_PRESS_SETTLE_MS);
   let after = await detectModalPicker(pane);
-  if (after.modal && after.title === before.title) {
-    await tmuxRun(["send-keys", "-t", pane, "Enter"]);
-    await sleepMs(MODAL_PRESS_SETTLE_MS);
+  if (!after.modal || after.title !== before.title) return after;
+  // 数字键没关掉框: 把高亮挪到目标项。guard 上限盖过任何确认框的选项数。
+  for (let guard = 0; guard < 8; guard++) {
+    const cur = highlightedIndex(after.screen);
+    if (cur === undefined || cur === index) break;
+    await tmuxRun(["send-keys", "-t", pane, cur < index ? "Down" : "Up"]);
+    await sleepMs(MODAL_ARROW_SETTLE_MS);
     after = await detectModalPicker(pane);
+    if (!after.modal || after.title !== before.title) return after;
   }
-  return after;
+  if (highlightedIndex(after.screen) !== index) return after; // 核不准, 绝不盲按
+  await tmuxRun(["send-keys", "-t", pane, "Enter"]);
+  await sleepMs(MODAL_PRESS_SETTLE_MS);
+  return detectModalPicker(pane);
 };
 
 // 「聊聊这个」收尾: 文本 inject 已把引导语贴进自定义文本行 (❯ N. <text>)。codebuddy
@@ -4943,9 +4957,18 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         if (!(await tmuxPaneAlive(a.tmuxPane))) continue;
         const v = await detectModalPicker(a.tmuxPane);
         if (!v.modal) {
-          a.pickerSentinelFp = undefined;
           // 审批卡在途而框已消失 = 本地先按掉了 → 作废卡等待 (无卡则 no-op)。
           mootMirrorPicker(a.sessionId);
+          // 诊断: 屏上有高亮编号行却没判成 modal = 布局盲区候选 (askq/plan 面板
+          // 也长这样, 属正常)。每屏记一次日志, 供远端排查"哨兵为何没反应"。
+          if (looksLikePicker(v.screen)) {
+            if (a.pickerSentinelFp !== v.screen) {
+              a.pickerSentinelFp = v.screen;
+              log.info({ target: a.target, tail: v.screen.split("\n").slice(-8).join("\\n").slice(-600) }, "picker sentinel: numbered picker shape on pane but not judged modal");
+            }
+          } else {
+            a.pickerSentinelFp = undefined;
+          }
           continue;
         }
         if (hasMirrorPicker(a.sessionId)) continue; // 审批卡在途, 等点击 / moot
@@ -4993,6 +5016,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           danger: danger?.rule,
           voteTimeoutMs: cfg.approval.longPollSec * 1000,
           press: (what) => pressNativePicker(a, ctx.toolName, what),
+        }).then((sent) => {
+          // 卡没发出去 (WS 断/发送失败): 清指纹, 让下一 tick 对同屏重试发卡,
+          // 否则这只框会被指纹永久静默。
+          if (!sent) a.pickerSentinelFp = undefined;
         }).catch((e) => log.warn({ err: (e as Error).message, target: a.target }, "mirror picker flow failed"));
       }
     } catch (e) {

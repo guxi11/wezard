@@ -63,6 +63,11 @@ export const isModalPane = (pane: string): ModalPaneVerdict => {
   return { modal: true, title: p.match(MODAL_TITLE)?.[1] };
 };
 
+/** 弱形状: 屏上有高亮编号行 (isModalPane 的必要不充分条件)。哨兵用它区分
+ *  「真没有框」和「有框但没判成 modal」—— 后者是布局盲区, 值得留日志排查。 */
+export const looksLikePicker = (pane: string): boolean =>
+  MODAL_OPTION_ROW.test(stripBoxBorders(pane ?? ""));
+
 // ── 选项解析 + 代按 ────────────────────────────────────────────────────
 // 只服务一个场景: 用户刚在企微卡片上显式批准了某次调用, 而 Claude Code 在 hook
 // 返回后又立起它自己的原生确认框(见文件头 `.claude/**` 那段)。此时把答案按进

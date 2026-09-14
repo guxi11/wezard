@@ -1425,10 +1425,11 @@ interface MirrorPickerFlowArgs {
   press: (what: PickerPress) => Promise<{ ok: boolean; reason?: string; label?: string }>;
 }
 
+/** 返回「卡是否真的发出去了」— false (WS 断 / 发送失败) 时调用方应允许对同屏重试。 */
 export const runMirrorPickerFlow = async (
   { log, client, cfg, sessionId, chatKey, cwd, jsonlPath, toolName, toolInput, agent, danger, voteTimeoutMs, press }: MirrorPickerFlowArgs,
-): Promise<void> => {
-  if (!client.isConnected) return;
+): Promise<boolean> => {
+  if (!client.isConnected) return false;
   const target = targetChatId(chatKey);
   const note = async (content: string): Promise<void> => {
     try {
@@ -1480,7 +1481,7 @@ export const runMirrorPickerFlow = async (
     log.error({ err: (e as Error).message }, "mirror picker card send failed");
     resolvePending(reqId, "deny");
     mirrorPickerSlots.delete(sessionId);
-    return;
+    return false;
   }
 
   let raw: string;
@@ -1489,12 +1490,12 @@ export const runMirrorPickerFlow = async (
   } catch {
     mirrorPickerSlots.delete(sessionId);
     await note(`⌛ 权限确认卡已超时（${toolName}），请在 CLI 中处理。`);
-    return;
+    return true;
   }
   // 本地先按掉 (哨兵读到框消失触发的 moot) — 槽位已由 mootMirrorPicker 清除。
   if (raw === "moot") {
     log.info({ reqId, sessionId }, "mirror picker mooted by local answer");
-    return;
+    return true;
   }
 
   // 槽位保持到代按完成 — 哨兵靠它跳过在途 pane; 提前清会与代按赛跑出双按键。
@@ -1505,7 +1506,7 @@ export const runMirrorPickerFlow = async (
       await note(r.ok
         ? `🚫 已替你拒绝 CLI 权限确认（${toolName}）→ ${r.label ?? "Escape"}`
         : `⚠️ 已记录拒绝，但代按失败（${r.reason ?? "未知"}），请回 CLI 处理。`);
-      return;
+      return true;
     }
     if (d === "allow_window" && cfg.approval.windowMinutes > 0) {
       setAutoWindow(chatKey, cfg.approval.windowMinutes * 60_000, { toolName, toolInput, cwd, transcriptTail: tail });
@@ -1518,7 +1519,7 @@ export const runMirrorPickerFlow = async (
     const r = await press(wantSession ? "yes_session" : "yes");
     if (!r.ok) {
       await note(`⚠️ 已记录同意，但代按失败（${r.reason ?? "未知"}），请回 CLI 手动确认。`);
-      return;
+      return true;
     }
     // 代按成功 → CLI 才真正派发工具 → hook 此刻才会上报同一调用; 预先记账让
     // handler 直接放行, 不再发第二张卡 (consumePickerAllow)。
@@ -1527,6 +1528,7 @@ export const runMirrorPickerFlow = async (
       ? `🔓 已代按「本会话不再询问」（${toolName}）→ ${r.label ?? ""}\n原生确认框不过 hook，「总是」规则帮不上它，已翻译成 CLI 的会话级免问。`
       : `🔓 已代按 CLI 权限确认（${toolName}）→ ${r.label ?? "Yes"}${d === "allow_window" ? `，并开启 ${cfg.approval.windowMinutes} 分钟自动放行窗口` : ""}`);
     log.info({ reqId, sessionId, decision: d, pressed: r.label }, "mirror picker resolved via send-keys");
+    return true;
   } finally {
     mirrorPickerSlots.delete(sessionId);
   }

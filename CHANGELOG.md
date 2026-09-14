@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+## [1.3.17] - 2026-09-14
+
+### Fixed
+- `mirror`: **代按确认框改为「高亮核对 + 方向键导航」—— 数字键失效的布局 (CodeBuddy) 不再盲补 Enter**。原按法「发数字 N → 同标题框还在就补 Enter」隐含"数字键至少会把高亮挪到 N"的假设; CodeBuddy 的确认框数字键不一定生效 (其快捷键提示是 shift+tab/escape 系), 且实测默认高亮可能停在「Yes, and don't ask again…」上 —— 盲补的 Enter 会把**高亮项**按下去, 恰是哨兵发誓永不自动选中的放宽权限项。现在数字键没关掉框时: 读出当前高亮 → 方向键逐步挪到目标项 → **复核高亮就位后**才 Enter; 高亮读不出 / 挪不动 / 标题变化一律罢手交兜底。`answerNativeModal`(`.claude/**` 守卫) 与哨兵/审批卡代按共用此实现。
+
+### Added
+- `mirror`: **哨兵盲区诊断日志**。屏上有高亮编号行 (`looksLikePicker`) 却没判成 modal 时, 按屏去重记一条 `picker sentinel: numbered picker shape on pane but not judged modal` 及末 8 行屏面 —— 远端排查"哨兵为何没反应"不再无迹可循。发卡失败 (WS 断/发送失败) 时清哨兵指纹, 同屏下一 tick 自动重试, 不再被永久静默。
+
 ## [1.3.16] - 2026-09-14
 
 ### Fixed
@@ -397,7 +405,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.16...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.17...HEAD
+[1.3.17]: https://github.com/guxi11/wezard/compare/v1.3.16...v1.3.17
 [1.3.16]: https://github.com/guxi11/wezard/compare/v1.3.15...v1.3.16
 [1.3.15]: https://github.com/guxi11/wezard/compare/v1.3.14...v1.3.15
 [1.3.14]: https://github.com/guxi11/wezard/compare/v1.3.13...v1.3.14
