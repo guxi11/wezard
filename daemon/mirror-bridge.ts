@@ -35,7 +35,7 @@ import { isAutoWindowActive } from "./session-cache.js";
 import { dangerOf } from "./danger.js";
 import { runTmux as runTmuxCmd, spawnTmuxClaude } from "./spawn-tmux.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
-import { recordTool, recordToolResult, recordTurnStart, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, buildDetailUrl, buildChatUrl } from "./detail.js";
+import { recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, buildDetailUrl, buildChatUrl } from "./detail.js";
 import type { CtxCut, TurnOrigin, TurnUsage } from "./detail.js";
 import { labelFor, tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
@@ -1898,10 +1898,7 @@ interface AttachState {
   /** 新 spawn 的 pane 在首次 inject 落地前会产出初始输出 (greeting / system),
    *  设为 true 时 onItem 全部吞掉, inject 成功后清除。 */
   muteUntilInject?: boolean;
-  /** 待记账的上下文断点 (`/clear` 注入 / `/new` 铸盘 / 观测到 /clear 轮换)。由下一次
-   *  recordTurnStart 消费一次 —— 断点属于"断点之后的第一轮", 那才是读不到上文的一轮。 */
-  ctxCut?: CtxCut;
-  /** 待记账的 graph 归因, 与 ctxCut 同一套路: injectText 盖章, 下一次 recordTurnStart
+  /** 待记账的 graph 归因: injectText 盖章, 下一次 recordTurnStart
    *  消费一次。带时间戳是因为注入未必真的开出一轮 (pane 死了 / 文本被吞), 陈旧的
    *  印章若一直留着, 会把很久以后某条真人消息误标成 graph 派的。 */
   pendingOrigin?: { origin: TurnOrigin; at: number };
@@ -1983,12 +1980,6 @@ interface AttachState {
   turnFromChat?: boolean;
   /** 本 attachment 已经告知过"CLI 侧对话只进详情页" —— 入口链接只发一次。 */
   cliSilentNoticed?: boolean;
-  /** CLI-driven brief turn 的详情链接暂存槽。ensureBriefTurn 把链接写进来, 由该
-   *  turn 的首条 standalone body (concludeBriefTurn / skill_output) 取走并前缀拼上。
-   *  不再像以前那样 sendRaw 一条"只有链接没正文"的消息 — 在 /model 这类 skill_output
-   *  立即到达的场景下, 那条 link 渲染成纯文本就是一条空消息。空 body 时整条丢弃,
-   *  header 也跟着清掉, 不会泄漏到下一 turn。 */
-  pendingBriefHeader?: string;
   /** Subagent (Task/Agent 工具) 转录观察器 — tail `<sid>/subagents/agent-*.jsonl`,
    *  把子 agent 的执行过程记成带 agent 标记的 turn (chat detail 内联展示) 并驱动
    *  brief 气泡的实时进度行。随 attach/migrate 创建, detach/migrate 时停掉。 */
@@ -2209,6 +2200,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   const TOOL_DETAIL_PREFIX = "TOOL_DETAIL|";
   const newTurnId = (): string => `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  const newMarkId = (): string => `m${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
   const detailCardFor = (s: ActiveStream, target: string): TemplateCard | undefined => {
     if (s.tools.length === 0) return undefined;
@@ -2730,11 +2722,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     log.info({ sessionId: a.sessionId, turnId: q.turnId, isSlash: q.isSlash }, "brief: turn started");
   };
 
-  // WeCom 侧发起一个 turn。断点是一次性的: 只归给断点后的第一轮, 之后的轮次上下文又连续了。
-  const consumeCut = (a: AttachState): CtxCut | undefined => {
-    const cut = a.ctxCut;
-    a.ctxCut = undefined;
-    return cut;
+  // 上下文断点落一条独立记录 —— 清空/轮换发生在两轮之间, 分隔线就画在两轮之间。
+  // 挂在"下一轮"上等于要等人再开口才显形, 而那一轮还可能被当成空壳 turn 丢掉。
+  // sessionId 记断点之后的那个: detail-store 的轮换判定以它为基准, 免得紧随其后的
+  // 第一轮又被判成一次轮换、多画一条线。
+  const markCut = (target: string, sessionId: string, cut: CtxCut): void => {
+    recordMark({ id: newMarkId(), target, sessionId, cut });
+    log.info({ target, sessionId, cut }, "detail: context cut marked");
   };
 
   // graph 归因同样一次性: 一次注入只解释它开出的那一轮。超过 ORIGIN_TTL_MS 还没被
@@ -2752,7 +2746,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.queryEpoch = (a.queryEpoch ?? 0) + 1; // WeCom 侧的新一轮同样是 query 边界
     a.turnFromChat = true;                  // 出处确凿: 这一轮有 frame, 群里就是它的主场
     a.pendingFromCli = false;               // 人改从聊天里说话了, 之前那条 CLI 输入不再是出处
-    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cwd: a.runningCwd || undefined, userQuery: userQuery.trim() || undefined, cut: consumeCut(a), origin: consumeOrigin(a) });
+    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cwd: a.runningCwd || undefined, userQuery: userQuery.trim() || undefined, origin: consumeOrigin(a) });
     // hardTimer 兜底: turn 若无终句 / turn_end 收口 (卡死/漏收), 到点仍收气泡。
     const bubble: BriefBubble = { frame, streamId, hardTimer: undefined as unknown as NodeJS.Timeout, done: false };
     const q: QueuedTurn = { turnId, bubble, isSlash };
@@ -2796,7 +2790,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const fromCli = a.pendingFromCli === true;
     a.pendingFromCli = false;
     a.turnFromChat = fromCli ? false : a.turnFromChat ?? true;
-    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cwd: a.runningCwd || undefined, userQuery: query || undefined, cut: consumeCut(a), origin: consumeOrigin(a) });
+    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cwd: a.runningCwd || undefined, userQuery: query || undefined, origin: consumeOrigin(a) });
     a.briefTurnId = turnId;
     a.briefBubble = undefined;
     a.briefIsSlash = false;
@@ -2804,11 +2798,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefConcluded = false;
     a.briefLastText = undefined;
     clearCot(a);
-    // 链接暂存, 不再单独发 — 让首条 standalone body 取走拼到前缀, 一条消息解决。
-    // turn 始终会通过 concludeBriefTurn / closeBriefTurn 收口, header 不会泄漏。
-    // 静默轮不留 header: 它没有任何 standalone 可以搭车, 留着只是个悬空的链接。
+    // 详情链接不在这里单独发 — 本轮的每条 standalone 都由 withLinkedTag 自带
+    // (linkedTagPrefix 读的正是 a.briefTurnId), 再暂存一份只会在正文前拼出第二条
+    // 一模一样的链接。静默轮没有 standalone 可搭车, 单独提示一次。
     if (turnSilent(a)) noticeCliSilent(a, turnId);
-    else a.pendingBriefHeader = briefDetailLink(turnId, a.target);
     log.info({ sessionId: a.sessionId, turnId, fromCli, silent: turnSilent(a) }, "brief: turn started (CLI-side, no bubble)");
   };
 
@@ -2842,10 +2835,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const concludeBriefTurn = (a: AttachState, body: string): void => {
     const turnId = a.briefTurnId;
     if (!turnId || a.briefConcluded) return;
-    if (!body.trim()) { a.pendingBriefHeader = undefined; return; }
+    if (!body.trim()) return;
     if (isDuplicateConclusion(a, body)) {
       a.briefConcluded = true; // 本轮已"定稿", 只是不投递
-      a.pendingBriefHeader = undefined;
       log.info({ sessionId: a.sessionId, turnId, epoch: a.queryEpoch ?? 0 }, "brief: duplicate conclusion suppressed");
       return;
     }
@@ -2855,15 +2847,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.lastConcludedAt = Date.now();
     if (a.briefBubble && !a.briefBubble.done) {
       void finishBriefBubble(a, `${briefDetailLink(turnId, a.target)} ${body}`, true);
-      a.pendingBriefHeader = undefined;
     } else if (turnSilent(a)) {
       // CLI 手敲的一轮: 终稿只留在 turn store, 详情页照常实时可见。
-      a.pendingBriefHeader = undefined;
       log.info({ sessionId: a.sessionId, turnId }, "brief: CLI-origin conclusion kept out of chat");
     } else {
-      const header = a.pendingBriefHeader;
-      a.pendingBriefHeader = undefined;
-      sendStandalone(a, header ? `${header} ${body}` : body);
+      sendStandalone(a, body); // 详情链接由 withLinkedTag 统一前缀, 不在这里拼
     }
     // 只保留当前 turn: 其余仍开着的 turn 记录是漏收的 close, 一并扫掉。
     recordCloseOpenTurns({ target: a.target, sessionId: a.sessionId, exceptIds: [turnId] });
@@ -2885,7 +2873,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefIsSlash = false;
     a.briefConcluded = false;
     a.briefLastText = undefined;
-    a.pendingBriefHeader = undefined;
     // 收口 = 欠账两清。前台派发的 result 不会再落回这一轮; 后台派发跨轮存活, 由完成
     // 通知 / TTL 销账 (voidTurnAgents)。挂着的软收口计时器一并撤掉 —— 它到点会去收
     // 「当前 turn」, 那时的当前 turn 已经是下一轮了。
@@ -2957,7 +2944,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         sessionId: a.sessionId,
         cwd: a.runningCwd || undefined,
         userQuery: task,
-        agent: { id: agentId, type: resolved?.type, description: resolved?.description },
+        agent: { id: agentId, type: resolved?.type, description: resolved?.description, parentTurnId: a.briefTurnId },
       });
       log.info({ agentId, turnId, label: run.label }, "subagent: turn started");
       if (item.kind === "task") return;
@@ -3138,16 +3125,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // loading 气泡。非 slash 场景的 skill_output 是用户可见的中间反馈, 走 standalone。
       if (a.briefIsSlash && !a.briefHadTool && a.briefBubble && !a.briefBubble.done) {
         void finishBriefBubble(a, item.body);
-        a.pendingBriefHeader = undefined;
       } else if (turnSilent(a)) {
         // CLI 里手敲的 /clear、/model 之类, 回执给敲的人看就够了 —— 只进详情页。
-        a.pendingBriefHeader = undefined;
       } else {
-        // CLI-driven turn: 把 ensureBriefTurn 暂存的详情链接拼到 body 前缀, 避免
-        // "只发了一条 link 渲染成空文本" 的前置消息。
-        const header = a.pendingBriefHeader;
-        a.pendingBriefHeader = undefined;
-        sendStandalone(a, header ? `${header} ${item.body}` : item.body);
+        sendStandalone(a, item.body); // 链接前缀同上, 走 withLinkedTag
       }
       return;
     }
@@ -4044,9 +4025,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const oldJsonlPath = a.jsonlPath;
     // 迁移是所有会话轮换的唯一漏斗 (注入的 /clear、TUI 里手打的 /clear、resume fork、
     // worktree drift)。只有目标 jsonl 首条用户行是 /clear 的那种才是真清空 —— fork /
-    // drift 上下文是延续的, 让 store 去推它那条中性的 "switch"。
-    if (jsonlIsPostClearChild(newJsonlPath)) {
-      a.ctxCut = "clear";
+    // drift 上下文是延续的, 画中性的 "switch"。
+    const cleared = jsonlIsPostClearChild(newJsonlPath);
+    markCut(a.target, newSessionId, cleared ? "clear" : "switch");
+    if (cleared) {
       // 真清空 = 缓存里已无任何值得保温的内容。像 /stop 一样暂停保活 —— 与
       // dispatch 里 WeCom 注入 /clear 的暂停对齐;TUI 手打 /clear 只走这个漏斗,
       // 不在这里停下的话旧时钟会继续 ping 一个空上下文。busy-resume(过 grace)
@@ -4435,7 +4417,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       spawned.justSpawned = true;
       spawned.muteUntilInject = true;
       // 只有换过 pane 才是断点 —— 首次 /wrc 建会话时 prev 为空, 那不是"不连续", 是开局。
-      if (prev) spawned.ctxCut = "new";
+      if (prev) markCut(target, spawned.sessionId, "new");
       // A freshly spawned session is empty — nothing in the cache to keep warm.
       // Pause keepalive like /stop; the first real turn (WeCom inbound, or the
       // pane going busy after the resume grace) re-earns the budget. Mirrors
@@ -5464,9 +5446,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // can take ~10s, and a sibling chat's watcher armed earlier must already
       // see this clear as an overlap by the time it evaluates a candidate.
       if (armMigration) noteClearInject(a);
-      // 记下断点, 由下一轮 (第一轮读不到上文的轮次) 领走。/clear 自己不建 turn,
-      // 否则这次清空在 chat 详情里毫无痕迹, 前后两轮看着还是连续的。
-      if (armMigration) a.ctxCut = "clear";
       // 新消息 = 对话边界: 上一 turn 的出站状态在此清算。softEnd 是旧 turn 的
       // 静默期收口判决, 残留到新 turn 会在中途开火、提前收掉新气泡/新流;
       // deferred 缓冲里是已从 tail 消费但还没下发的 item, 收入旧 streamId 收口

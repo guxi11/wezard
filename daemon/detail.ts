@@ -13,6 +13,7 @@ import {
   type ApprovalDetailRecord,
   type DetailRecord,
   type DetailStore,
+  type MarkDetailRecord,
   type ToolDetailRecord,
   type TurnDetailRecord,
   type TurnItem,
@@ -21,7 +22,7 @@ import {
 import { renderDetailPage, renderNotFound } from "../shared/detail-render.js";
 import { createChatRoutes, chatRouteTable, CHAT_ROUTE_KEYS } from "../shared/chat-http.js";
 
-export type { ToolDetailRecord, ApprovalDetailRecord, TurnDetailRecord, TurnItem, TurnUsage, CtxCut, TurnOrigin, TurnAgentMeta } from "../shared/detail-store.js";
+export type { ToolDetailRecord, ApprovalDetailRecord, TurnDetailRecord, MarkDetailRecord, TurnItem, TurnUsage, CtxCut, TurnOrigin, TurnAgentMeta } from "../shared/detail-store.js";
 
 let store: DetailStore | null = null;
 let remoteBase = "";
@@ -81,6 +82,15 @@ export const recordApprovalDecision = (
   store.recordApprovalDecision(reqId, toApprovalDecision(decision), decidedBy);
   const rec = store.get(reqId);
   if (rec) forwardToRemote(rec);
+};
+
+// 上下文断点标记: 清空/轮换发生的那一刻就落一条独立记录, chat 线程据此画分隔线,
+// 不必等下一轮开口 (那一轮还可能是个被丢弃的空壳)。
+export const recordMark = (rec: Omit<MarkDetailRecord, "kind" | "createdAt"> & { createdAt?: number }): void => {
+  if (!store) return;
+  store.recordMark(rec);
+  const full = store.get(rec.id);
+  if (full) forwardToRemote(full);
 };
 
 // Brief 模式聚合详情: 一个 turn 的时间线。startTurn 建空壳,item 增量 append,close 收尾。

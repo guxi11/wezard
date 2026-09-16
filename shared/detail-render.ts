@@ -10,6 +10,7 @@ import type {
   ApprovalDetailRecord,
   CtxCut,
   DetailRecord,
+  MarkDetailRecord,
   ToolDetailRecord,
   TurnDetailRecord,
   TurnItem,
@@ -463,6 +464,14 @@ const TURN_CSS = `
     white-space:nowrap;max-width:60%}
   .turn-group.subagent{margin-left:20px;border-left:2px solid #1a7f3733;
     padding-left:10px}
+  /* ── 独立断点行 ── 不依附卡片的那一道分隔 (/clear、/new、会话轮换)。 */
+  .tg-mark{display:flex;align-items:center;gap:8px;font-size:11px;color:#9a6700;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.3px;
+    padding:2px 0}
+  .tg-mark::before,.tg-mark::after{content:"";flex:1;border-top:1px dashed #d4a72c99}
+  .tg-mark .s{opacity:.55}
+  .tg-mark.cut-switch{color:#8c959f}
+  .tg-mark.cut-switch::before,.tg-mark.cut-switch::after{border-top-color:#d0d7de}
 `;
 
 const renderJsonSection = (input: unknown): string =>
@@ -670,6 +679,8 @@ const tagSig = (html: string): string =>
 const turnParts = (r: TurnDetailRecord, keyPrefix = "", now = Date.now()): {
   items: TurnItem[];
   bodies: string[];
+  /** bodies[i] 对应的时刻 —— 子 agent 卡片按它插回父轮时间轴。 */
+  stamps: number[];
   done: boolean;
   ageMs: number;
 } => {
@@ -696,7 +707,8 @@ const turnParts = (r: TurnDetailRecord, keyPrefix = "", now = Date.now()): {
   // 结束判定统一收在 chat-view.turnDone (closed / final text / 静默超时), 详情页
   // 与聊天视图必须给出同一个答案 —— 否则一个显示「进行中」另一个显示「已完成」。
   const done = turnDone(r, now);
-  return { items, bodies, done, ageMs: (done ? r.updatedAt : now) - r.createdAt };
+  const stamps = paired.map((p) => (p.kind === "pair" ? p.use.ts : p.item.ts));
+  return { items, bodies, stamps, done, ageMs: (done ? r.updatedAt : now) - r.createdAt };
 };
 
 const CUT_TEXT: Record<CtxCut, string> = {
@@ -891,8 +903,30 @@ export interface TurnFragment {
   staleAt: number;
 }
 
-export const renderTurnGroup = (r: TurnDetailRecord, now = Date.now()): TurnFragment => {
-  const { items, bodies, done, ageMs } = turnParts(r, `${r.id}:`, now);
+// 子 agent 卡片按 createdAt 插回父轮的气泡序列: 派发那一刻之后、下一条父轮动作
+// 之前。子卡片挂在时间轴中间而不是整轮末尾 —— 否则父 agent 在 Task 返回后继续
+// 调的工具会排在子卡片上面, 整段读起来就是倒序 (最新的反而不在最下面)。
+const spliceChildren = (
+  bodies: readonly string[],
+  stamps: readonly number[],
+  children: readonly TurnFragment[],
+): string[] =>
+  bodies.reduce<string[]>(
+    (acc, b, i) => [
+      ...acc,
+      b,
+      ...children.filter((c) => c.createdAt >= (stamps[i] ?? 0) && c.createdAt < (stamps[i + 1] ?? Infinity)).map((c) => c.html),
+    ],
+    // stamps 之前就开跑的子 agent (父轮第一条 item 尚未落盘) 排在最前。
+    children.filter((c) => c.createdAt < (stamps[0] ?? Infinity)).map((c) => c.html),
+  );
+
+export const renderTurnGroup = (
+  r: TurnDetailRecord,
+  now = Date.now(),
+  children: readonly TurnFragment[] = [],
+): TurnFragment => {
+  const { items, bodies, stamps, done, ageMs } = turnParts(r, `${r.id}:`, now);
   const u = r.usage;
   const ctxPeak = u ? (u.ctxPeak ?? u.input + u.cacheRead + u.cacheWrite) : 0;
   const chips = [
@@ -911,7 +945,8 @@ export const renderTurnGroup = (r: TurnDetailRecord, now = Date.now()): TurnFrag
       </section>`
     : "";
   const typing = done ? "" : `<div class="typing" data-key="${r.id}:typing">Agent 正在思考</div>`;
-  const inner = [queryBubble, ...bodies, typing].map(tagSig).join("");
+  // 子卡片已是完整片段 (自带 data-key/data-sig), 不再过 tagSig。
+  const inner = [tagSig(queryBubble), ...spliceChildren(bodies.map(tagSig), stamps, children), tagSig(typing)].join("");
   const head = `<div class="tg-head">
     <span class="tg-dot${done ? "" : " live"}"></span>
     <span class="tg-time">${fmtTs(r.createdAt)}</span>${chips}
@@ -927,11 +962,25 @@ export const renderTurnGroup = (r: TurnDetailRecord, now = Date.now()): TurnFrag
   };
 };
 
+// 独立断点行 —— 与卡片头上的 tg-cut 同一视觉语法, 只是不依附任何一轮:
+// 清空发生在两轮之间, 它就该画在两张卡片之间。
+export const renderCutMark = (m: MarkDetailRecord): TurnFragment => {
+  const body = `<div class="tg-mark cut-${m.cut}" data-key="m:${escHtml(m.id)}"><span class="l">${
+    escHtml(CUT_TEXT[m.cut])
+  }</span><span class="s">${escHtml(fmtTs(m.createdAt))}</span></div>`;
+  return {
+    id: m.id, html: tagSig(body), sig: hashStr(body),
+    createdAt: m.createdAt, updatedAt: m.createdAt, done: true, staleAt: 0,
+  };
+};
+
 export { escHtml, fmtTs, fmtDuration, fmtTok, TURN_CSS };
 
 export const renderDetailPage = (r: DetailRecord): string => {
   if (r.kind === "tool") return renderToolPage(r);
   if (r.kind === "turn") return renderTurnPage(r);
+  // 断点标记没有自己的页面 —— 它只是线程里的一行, id 也从不出现在链接里。
+  if (r.kind === "mark") return renderNotFound(r.id);
   return renderApprovalPage(r);
 };
 

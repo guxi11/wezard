@@ -323,12 +323,10 @@
 
   // staleAt 由 JSON 单独送来 (不在 html 里, 否则会打乱服务端的 sig 去重), 落到
   // DOM 上供 expireTurns 定时判定。
+  // 't:' = 一轮对话, 'm:' = 上下文断点行。子 agent 的卡片嵌在父轮里面, 所以按
+  // 整棵子树找 —— 只扫顶层会把它当成"还没渲染过"而重复插一份。
   var turnNode = function (id) {
-    var inner = $('#thread-in'), hit = null;
-    Array.prototype.forEach.call(inner.children, function (c) {
-      if (c.getAttribute('data-key') === 't:' + id) hit = c;
-    });
-    return hit;
+    return $('#thread-in').querySelector('[data-key="t:' + id + '"],[data-key="m:' + id + '"]');
   };
   var markStale = function (t) {
     var n = turnNode(t.id);
@@ -366,8 +364,10 @@
       var until = Number(g.getAttribute('data-stale-at') || 0);
       if (!until || now <= until) return;
       g.setAttribute('data-stale-at', '0');
-      var dot = g.querySelector('.tg-dot'); if (dot) dot.classList.remove('live');
-      var typing = g.querySelector('.typing'); if (typing) typing.remove();
+      // 连内嵌的子 agent 卡片一起熄灯: 父轮都到点了, 它派出去的必然也停了,
+      // 而子卡片没有自己的 data-stale-at (staleAt 只随顶层片段下发)。
+      g.querySelectorAll('.tg-dot').forEach(function (d) { d.classList.remove('live'); });
+      g.querySelectorAll('.typing').forEach(function (t) { t.remove(); });
     });
   };
 

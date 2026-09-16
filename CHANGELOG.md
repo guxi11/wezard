@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [1.3.20] - 2026-09-16
+
+### Fixed
+- `mirror`: **CLI 侧一轮的 standalone 不再顶着两条一模一样的详情链接**。`ensureBriefTurn` 会把详情链接暂存到 `pendingBriefHeader` 再拼到首条正文前缀, 而 `sendStandalone` 本就通过 `withLinkedTag` 给每条 standalone 加同一条链接 (`linkedTagPrefix` 读的正是 `a.briefTurnId`) —— 两者叠加, 消息开头就是 `[🧙](url) [🧙](url) 正文`。暂存槽整体移除, 链接只由 withLinkedTag 一处产出。
+
+### Changed
+- `chat detail`: **子 agent 的一轮内联回父轮的时间轴, 不再作为兄弟卡片吊在最底下**。subagent turn 记录新增 `agent.parentTurnId`, 线程视图按 `createdAt` 把它插进父轮的气泡序列 (派发那一刻之后、父轮下一条动作之前) —— 此前它是顶层卡片, 父 agent 在 Task 返回后继续调的工具全排在它上面, 贴底阅读看到的反而是早已跑完的子 agent。SSE 相应改推父轮片段; 侧栏的「N 轮」与预览只算主会话自己的轮次 (token/工具用量仍按全部计)。
+- `chat detail`: **上下文断点改为独立的分隔行, 在清空发生的那一刻就落地**。`/clear`、`/new`、会话轮换现在各写一条 `mark` 记录 (新的 detail 记录类型, 不占一轮统计), 线程里渲染成一条贯穿的虚线 —— 此前断点只能盖在"下一轮"的卡片头上, 要等人再开口才显形, 而那一轮还可能被当成空壳 turn 丢掉, 分隔就此消失。轮换判定 (`startTurn` 的 rotated) 一并以标记为基准, 不会在标记后再多画一条。
+
 ## [1.3.19] - 2026-09-16
 
 ### Changed
@@ -421,7 +430,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.19...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.20...HEAD
+[1.3.20]: https://github.com/guxi11/wezard/compare/v1.3.19...v1.3.20
 [1.3.19]: https://github.com/guxi11/wezard/compare/v1.3.18...v1.3.19
 [1.3.18]: https://github.com/guxi11/wezard/compare/v1.3.17...v1.3.18
 [1.3.17]: https://github.com/guxi11/wezard/compare/v1.3.16...v1.3.17

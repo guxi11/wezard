@@ -16,8 +16,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { URL } from "node:url";
 import { baseOfKey } from "./session-label.js";
-import { chatSummary, isTurn, threadOf, turnDone } from "./chat-view.js";
-import { renderTurnGroup } from "./detail-render.js";
+import { chatSummary, isMark, isTurn, threadEntries, turnDone, type ThreadEntry } from "./chat-view.js";
+import { renderCutMark, renderTurnGroup } from "./detail-render.js";
 import { chatScript, chatStyles, renderChatPage } from "./chat-render.js";
 import type { Asset } from "./web-assets.js";
 import type { DetailRecord, DetailStore } from "./detail-store.js";
@@ -77,6 +77,12 @@ const authorizedTarget = (scope: Scope, raw: string | null): string => {
   return baseOfKey(t) === scope.base ? t : scope.selfTarget;
 };
 
+/** 线程一格 → 客户端片段。子 agent 的卡片作为 children 内联进父轮, 不单独成格。 */
+const renderEntry = (e: ThreadEntry, now: number): ReturnType<typeof renderTurnGroup> =>
+  e.kind === "mark"
+    ? renderCutMark(e.mark)
+    : renderTurnGroup(e.turn, now, e.children.map((c) => renderTurnGroup(c, now)));
+
 export const createChatRoutes = (store: DetailStore): ChatRoutes => {
   const summary = (base: string): ReturnType<typeof chatSummary> =>
     chatSummary(store.list(), base, Date.now());
@@ -112,12 +118,12 @@ export const createChatRoutes = (store: DetailStore): ChatRoutes => {
     if (!scope) { json(res, 404, { ok: false, error: "未找到该会话 (链接可能已过期)" }); return; }
     const target = authorizedTarget(scope, url.searchParams.get("target"));
     const now = Date.now();
-    const all = threadOf(store.list(), target, now);
+    const all = threadEntries(store.list(), target, now);
     // 注意 Number(null) === 0 —— 缺省必须先判 null, 否则默认就成了"全量"。
     const raw = url.searchParams.get("limit");
     const n = raw === null ? Number.NaN : Number(raw);
     const limit = Number.isFinite(n) && n >= 0 ? n : DEFAULT_LIMIT;
-    // 0 = 全量; 否则只回最近 N 轮 (页面默认贴底, 更早的按需再拉)。
+    // 0 = 全量; 否则只回最近 N 格 (页面默认贴底, 更早的按需再拉)。
     const shown = limit === 0 ? all : all.slice(-limit);
     json(res, 200, {
       ok: true,
@@ -125,8 +131,8 @@ export const createChatRoutes = (store: DetailStore): ChatRoutes => {
       at: now,
       total: all.length,
       truncated: shown.length < all.length,
-      running: all.some((r) => !turnDone(r, now)),
-      turns: shown.map((r) => renderTurnGroup(r, now)),
+      running: all.some((e) => e.kind === "turn" && [e.turn, ...e.children].some((r) => !turnDone(r, now))),
+      turns: shown.map((e) => renderEntry(e, now)),
     });
   };
 
@@ -153,13 +159,20 @@ export const createChatRoutes = (store: DetailStore): ChatRoutes => {
     // 一个 turn 的 HTML 可以是几十 KB, 而 usage 累加这类改动并不改变正文 —— 按 sig
     // 去重, 内容没变就不重发。
     const sentSig = new Map<string, string>();
-    const pushTurn = (id: string): void => {
-      const r = store.get(id);
-      if (!r || !isTurn(r)) return;
-      const frag = renderTurnGroup(r, Date.now());
-      if (sentSig.get(id) === frag.sig) return;
-      sentSig.set(id, frag.sig);
+    const pushFrag = (frag: ReturnType<typeof renderTurnGroup>): void => {
+      if (sentSig.get(frag.id) === frag.sig) return;
+      sentSig.set(frag.id, frag.sig);
       send("turn", frag);
+    };
+    // 推一条记录所在的那一格。子 agent 的一轮没有自己的顶层节点 —— 它渲染在父轮
+    // 里面, 所以推的是父轮 (entries 由本次 flush 统一算一遍, 不逐条重建)。
+    const pushTurn = (id: string, entries: readonly ThreadEntry[], now: number): void => {
+      const r = store.get(id);
+      if (!r) return;
+      if (isMark(r)) { pushFrag(renderCutMark(r)); return; }
+      if (!isTurn(r)) return;
+      const hit = entries.find((e) => e.kind === "turn" && (e.turn.id === id || e.children.some((c) => c.id === id)));
+      pushFrag(hit ? renderEntry(hit, now) : renderTurnGroup(r, now));
     };
 
     pushChat();
@@ -168,13 +181,17 @@ export const createChatRoutes = (store: DetailStore): ChatRoutes => {
     const turnDirty = new Set<string>();
     const flush = setInterval(() => {
       if (chatDirty) { chatDirty = false; pushChat(); }
-      for (const id of turnDirty) pushTurn(id);
-      turnDirty.clear();
+      if (turnDirty.size) {
+        const now = Date.now();
+        const entries = threadEntries(store.list(), target, now);
+        for (const id of turnDirty) pushTurn(id, entries, now);
+        turnDirty.clear();
+      }
     }, FLUSH_MS);
     const ping = setInterval(() => { try { res.write(": ping\n\n"); } catch { /* closed */ } }, PING_MS);
 
     const unsub = store.subscribe((rec) => {
-      if (!isTurn(rec) || !rec.target) return;
+      if ((!isTurn(rec) && !isMark(rec)) || !rec.target) return;
       if (baseOfKey(rec.target) !== scope.base) return;
       chatDirty = true;
       if (rec.target === target) turnDirty.add(rec.id);

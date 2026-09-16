@@ -105,6 +105,9 @@ export interface TurnAgentMeta {
   type?: string;
   /** 派发描述 (Task input.description)。 */
   description?: string;
+  /** 派它出去的那一轮 —— chat 线程据此把子 turn 内嵌回父 turn 的时间轴,
+   *  而不是作为兄弟卡片吊在最底下 (父轮后续的工具调用会排在它上面, 看着像倒序)。 */
+  parentTurnId?: string;
 }
 
 export interface TurnDetailRecord {
@@ -130,7 +133,22 @@ export interface TurnDetailRecord {
   usageMsgIds?: string[];
 }
 
-export type DetailRecord = ToolDetailRecord | ApprovalDetailRecord | TurnDetailRecord;
+// 上下文断点标记 —— /clear、/new、会话轮换本身不产生一轮对话, 但在 chat 详情的
+// 时间轴上必须留下一道分隔: 它上下两侧的 turn 读不到彼此的上下文。挂在 turn 上的
+// `cut` 只能在"下一轮真的发生了"之后才显形 (那一轮还可能被当成空壳 turn 丢掉);
+// 独立记录让分隔在清空的那一刻就落地, 且不占一轮统计。
+export interface MarkDetailRecord {
+  kind: "mark";
+  id: string;
+  createdAt: number;
+  target?: string;
+  /** 断点之后的 sessionId —— 轮换判定 (startTurn 的 rotated) 以它为基准, 免得
+   *  下一轮又被判成一次轮换、渲染出第二条分隔。 */
+  sessionId?: string;
+  cut: CtxCut;
+}
+
+export type DetailRecord = ToolDetailRecord | ApprovalDetailRecord | TurnDetailRecord | MarkDetailRecord;
 
 export interface DetailStore {
   recordTool(rec: Omit<ToolDetailRecord, "kind" | "createdAt"> & { createdAt?: number }): void;
@@ -139,6 +157,7 @@ export interface DetailStore {
     rec: Omit<ApprovalDetailRecord, "kind" | "createdAt" | "decision" | "decidedAt" | "decidedBy"> & { createdAt?: number },
   ): void;
   recordApprovalDecision(reqId: string, decision: ApprovalDecision, decidedBy?: string): void;
+  recordMark(rec: Omit<MarkDetailRecord, "kind" | "createdAt"> & { createdAt?: number }): void;
   startTurn(
     rec: Omit<TurnDetailRecord, "kind" | "createdAt" | "updatedAt" | "closed" | "items"> & { createdAt?: number },
   ): void;
@@ -179,12 +198,14 @@ export const createDetailStore = (opts: { stateDir: string; log?: Logger }): Det
     }
   };
 
-  const lastTurnOf = (target: string): TurnDetailRecord | undefined =>
-    [...store.values()].reduce<TurnDetailRecord | undefined>(
+  // 该 target 上最后一条带 sessionId 的记录 (turn 或断点标记)。轮换判定的基准 ——
+  // 标记也要算进来, 否则 /clear 落了标记之后, 下一轮仍会被判成轮换而多出一条分隔。
+  const lastSidOf = (target: string): string | undefined =>
+    [...store.values()].reduce<TurnDetailRecord | MarkDetailRecord | undefined>(
       (m, r) =>
-        r.kind === "turn" && r.target === target && (!m || r.createdAt > m.createdAt) ? r : m,
+        (r.kind === "turn" || r.kind === "mark") && r.target === target && (!m || r.createdAt > m.createdAt) ? r : m,
       undefined,
-    );
+    )?.sessionId;
 
   const persist = (rec: DetailRecord): void => {
     try { appendFileSync(logPath, `${JSON.stringify(rec)}\n`); } catch { /* ignore */ }
@@ -208,7 +229,7 @@ export const createDetailStore = (opts: { stateDir: string; log?: Logger }): Det
         if (!line) continue;
         try {
           const r = JSON.parse(line) as DetailRecord;
-          if (!r?.id || (r.kind !== "tool" && r.kind !== "approval" && r.kind !== "turn")) continue;
+          if (!r?.id || (r.kind !== "tool" && r.kind !== "approval" && r.kind !== "turn" && r.kind !== "mark")) continue;
           if (typeof r.createdAt !== "number" || r.createdAt < cutoff) { dropped++; continue; }
           store.set(r.id, r);
           replayed++;
@@ -262,12 +283,15 @@ export const createDetailStore = (opts: { stateDir: string; log?: Logger }): Det
       if (!r || r.kind !== "approval") return;
       put({ ...r, decision, decidedBy, decidedAt: Date.now() });
     },
+    recordMark: (rec) => {
+      put({ kind: "mark", ...rec, createdAt: rec.createdAt ?? Date.now() });
+    },
     startTurn: (rec) => {
       const now = Date.now();
       // 断点成因由 caller 给 (它才知道刚注入的是 /clear 还是 /new); 没给就退回观测:
       // 同 target 的上一轮 sid 与本轮不同 ⇒ 上下文不连续, 至少要标出来。
-      const prev = rec.target ? lastTurnOf(rec.target) : undefined;
-      const rotated = !!prev?.sessionId && !!rec.sessionId && prev.sessionId !== rec.sessionId;
+      const prevSid = rec.target ? lastSidOf(rec.target) : undefined;
+      const rotated = !!prevSid && !!rec.sessionId && prevSid !== rec.sessionId;
       put({
         kind: "turn",
         ...rec,
