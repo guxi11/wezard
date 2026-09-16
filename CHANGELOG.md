@@ -2,6 +2,13 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+## [1.3.22] - 2026-09-16
+
+### Fixed
+- `mirror`: **群里不再出现没有正文的消息**。两处噪音一并去掉 —— (1) CLI 轮首次静默时发的「CLI 侧对话不再下发到群里，点标签看实时详情。」入口提示整体移除: 有正文的 standalone 本就由 `withLinkedTag` 自带详情链接, 没正文时一条都不该发; (2) `brief` 下的 user 行无条件丢弃 —— 此前只在 `item.quiet` (即 `includeUser=false`) 时丢, 而 user_text 不在 `BRIEF_TURN_OPENERS` 里, `includeUser=true` 时它会穿过整条 brief 短路落到底部的 standalone fallback, 把人在 CLI 敲的那一行原样回显进群, 正好破掉 `chatOriginOnly`。
+
 ## [1.3.21] - 2026-09-16
 
 ### Fixed
@@ -433,7 +440,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.21...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.22...HEAD
+[1.3.22]: https://github.com/guxi11/wezard/compare/v1.3.21...v1.3.22
 [1.3.21]: https://github.com/guxi11/wezard/compare/v1.3.20...v1.3.21
 [1.3.20]: https://github.com/guxi11/wezard/compare/v1.3.19...v1.3.20
 [1.3.19]: https://github.com/guxi11/wezard/compare/v1.3.18...v1.3.19

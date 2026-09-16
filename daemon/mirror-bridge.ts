@@ -1993,8 +1993,6 @@ interface AttachState {
    *  chat 详情页, 不占聊天消息 (chatOriginOnly)。收口不清零 —— 收口后补写进来的
    *  零星 item 属于同一场对话, 沿用上一轮的出处。 */
   turnFromChat?: boolean;
-  /** 本 attachment 已经告知过"CLI 侧对话只进详情页" —— 入口链接只发一次。 */
-  cliSilentNoticed?: boolean;
   /** Subagent (Task/Agent 工具) 转录观察器 — tail `<sid>/subagents/agent-*.jsonl`,
    *  把子 agent 的执行过程记成带 agent 标记的 turn (chat detail 内联展示) 并驱动
    *  brief 气泡的实时进度行。随 attach/migrate 创建, detach/migrate 时停掉。 */
@@ -2686,14 +2684,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const turnSilent = (a: AttachState): boolean =>
     cfg.wrc.mirror.brief && cfg.wrc.mirror.chatOriginOnly && a.turnFromChat === false;
 
-  // 详情页入口一次性告知。CLI 轮全程静默后, 一个从未收到过气泡的会话在群里将没有
-  // 任何链接可点 —— 每个 attachment 发一条 (且仅一条) 带链接的提示解决这个死角。
-  const noticeCliSilent = (a: AttachState, turnId: string): void => {
-    if (a.cliSilentNoticed) return;
-    a.cliSilentNoticed = true;
-    sendRaw(a, `${briefDetailLink(turnId, a.target)} CLI 侧对话不再下发到群里，点标签看实时详情。`);
-  };
-
   // 收口一条 loading 气泡: finish=true 写入最终内容, 只生效一次。发送失败退回 standalone。
   // raw=true skips withSessionTag (used when content already contains the linked tag header).
   // WeCom 客户端收到 finish=true 后仍有打字机动画要播放, 如果紧接着就下发
@@ -2814,9 +2804,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefLastText = undefined;
     clearCot(a);
     // 详情链接不在这里单独发 — 本轮的每条 standalone 都由 withLinkedTag 自带
-    // (linkedTagPrefix 读的正是 a.briefTurnId), 再暂存一份只会在正文前拼出第二条
-    // 一模一样的链接。静默轮没有 standalone 可搭车, 单独提示一次。
-    if (turnSilent(a)) noticeCliSilent(a, turnId);
+    // (linkedTagPrefix 读的正是 a.briefTurnId)。静默轮没有 standalone 可搭车, 那就
+    // 一条都不发: 群里只该出现有正文的消息, 纯入口提示是噪音。
     log.info({ sessionId: a.sessionId, turnId, fromCli, silent: turnSilent(a) }, "brief: turn started (CLI-side, no bubble)");
   };
 
@@ -3363,8 +3352,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (a.softEnd) { clearTimeout(a.softEnd); a.softEnd = undefined; }
     if (SOFT_END_CANCELLERS.has(item.kind)) { a.softOwed = false; a.softDeferred = false; }
     else if (a.softOwed) armSoftEnd(a, a.softDeferred ? deferredSoftDelay(a) : softTurnEndMsFor(a));
-    // includeUser=false 下的 user 行只作边界信号 (上面已清账/推进轮次), 不渲染。
-    if (item.kind === "user_text" && item.quiet) return;
+    // user 行只作边界信号 (上面已清账/推进轮次), 不渲染。brief 下无条件丢:
+    // 有活跃 turn 时 handleBriefItem 本就丢它, 没有 turn 时 (user_text 不是
+    // BRIEF_TURN_OPENERS) 它会一路穿到底部的 standalone fallback —— includeUser=true
+    // 的配置下, 人在 CLI 敲的那一行就这么原样回显进了群, 正好破了 chatOriginOnly。
+    if (item.kind === "user_text" && (item.quiet || cfg.wrc.mirror.brief)) return;
     // thinking 唯一的出口是 brief 气泡的 CoT 进度行。必须在这里就吃掉 —— 漏到下面任何
     // 一条通道 (deferred buf → renderBuf / standalone / stream append) 都会把它写进正文,
     // 那就变回已下线的 thinkStyle 了。
