@@ -80,7 +80,14 @@ export const tailTurns = (jsonlPath: string, n = 3): Turn[] => {
       const role = row.message?.role;
       if (role !== "user" && role !== "assistant") return [];
       const text = blockText(row.message?.content).replace(META_RE, "").replace(/\s+/g, " ").trim();
-      const ms = Date.parse((parsed as { timestamp?: string }).timestamp ?? "");
+      // Claude writes ISO timestamp strings; CodeBuddy writes epoch-ms NUMBERS.
+      // Date.parse(number) coerces to a bare digit-string and returns NaN —
+      // which silently stamped every CodeBuddy turn ms=0, degraded
+      // keepaliveStamps to mtime fallback, and let the keepalive's own ping
+      // writes (plus snapshot/summary churn) read as REAL activity that reset
+      // the round budget without bound.
+      const rawTs = (parsed as { timestamp?: unknown }).timestamp;
+      const ms = typeof rawTs === "number" ? rawTs : Date.parse(String(rawTs ?? ""));
       return text ? [{ role, text, ms: Number.isNaN(ms) ? 0 : ms } as Turn] : [];
     });
   return turns.slice(-n);
@@ -261,6 +268,12 @@ export const keepaliveStamps = (
   let lastMs = 0;
   let lastRealMs = 0;
   let stamped = false;
+  // "After a ping" persists across EVERY assistant turn until the next user
+  // turn: CodeBuddy splits one model reply into multiple independent message
+  // records (mid-turn narration + final), so strict ping→assistant adjacency
+  // would let the 2nd record of a pong read as REAL activity and reset the
+  // round budget.
+  let afterPing = false;
   for (let i = 0; i < turns.length; i++) {
     const t = turns[i]!;
     const ms = t.ms ?? 0;
@@ -269,8 +282,8 @@ export const keepaliveStamps = (
     // Keepalive = ping query + whatever the model replies to it. Detection is
     // purely query-based: if the user turn is a ping, the assistant reply is
     // keepalive too — even when the model adds extra content beyond "pong".
-    const isKeepalive = isPing(t) ||
-      (t.role === "assistant" && i > 0 && isPing(turns[i - 1]!));
+    const isKeepalive = isPing(t) || (afterPing && t.role === "assistant");
+    if (t.role === "user") afterPing = isPing(t);
     if (ms > lastRealMs && !isKeepalive) lastRealMs = ms;
   }
   return { lastMs, lastRealMs, stamped };

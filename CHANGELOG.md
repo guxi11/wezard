@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- `mirror`: **CodeBuddy pane 的 keepalive 不再突破 6 轮预算无限续命**。`tailTurns` 用 `Date.parse` 解析时间戳, 而 CodeBuddy 写的是 epoch-ms 数字 —— `Date.parse(数字)` 恒为 NaN, 每条 turn 的 `ms=0`, `keepaliveStamps` 退化为 mtime 兜底: ping/pong 自己的写入、`file-history-snapshot`/周期 `summary`/`turn-metrics` 等机器记录, 只要落在 ping settle 30s 静默窗之后, 全被当成真实活动把 `round` 清零, 预算重置再发一轮 6 次 (日志实测 #checkrun4 一晚 10+ 次)。现在数字时间戳直接透传 (Claude 的 ISO 字符串照旧 `Date.parse`), 时钟锚回消息轮本身; 同时 pong 判定从「紧邻 ping 的单条 assistant」放宽为「ping 之后到下一条 user 之前的所有 assistant」—— CodeBuddy 会把一条回复拆成多条独立 message 记录, 旧邻接规则会让拆出的后半段被误判为真实活动。
+
 ## [1.3.18] - 2026-09-14
 
 ### Fixed
