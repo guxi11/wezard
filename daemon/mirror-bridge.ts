@@ -1024,6 +1024,10 @@ interface InjectArgs {
    *  several extra seconds to be processed, so the verifier uses extended
    *  timeouts. False (default) keeps warm-pane behavior untouched. */
   freshSpawn?: boolean;
+  /** 有意往 modal 面板里贴文本时置 true —— askq「聊聊这个」要把引导语贴进
+   *  AskUserQuestion 面板的自定义文本行, 面板本身就是 modal, 不豁免会被
+   *  injectViaTmux 的 modal guard 拒掉 (talk-about-this 卡死根因)。 */
+  bypassModalGuard?: boolean;
 }
 
 // Run a tmux subcommand, capturing stdout/stderr. Delegates to spawn-tmux's
@@ -1290,6 +1294,10 @@ const pressModalIndex = async (
 const ASKQ_CONFIRM_ENTERS = 3;
 const ASKQ_CONFIRM_POLL_MS = 150;
 const ASKQ_CONFIRM_STAGE_MS = 2500; // 每阶段 (到提交页 / 面板关闭) 的轮询上限
+// 二次确认: 提交 Enter 后 codebuddy 还会立一个复核框 (自定义文本答案的确认),
+// 需要再按 Enter。复核框布局未知、读屏解析不可靠, 采取「盲按一次 → 轮询面板
+// 关闭 → 没关再按」的有界循环, 上限 ASKQ_SECONDARY_ENTERS 防失控。
+const ASKQ_SECONDARY_ENTERS = 3;
 const confirmAskqSubmit = async (
   target: string,
   paneAlive: () => Promise<boolean>,
@@ -1331,6 +1339,12 @@ const confirmAskqSubmit = async (
     const e = await sendKey("Enter");
     if (!e.ok) return { ok: false, reason: `send-keys Enter: ${e.stderr.slice(-200) || e.code}` };
     if (await pollUntil((p) => !isModalPane(p).modal, ASKQ_CONFIRM_STAGE_MS)) return { ok: true };
+    // 面板没关 → 多半是二次确认框立起来了: 补 Enter 直到关闭 (用户实测需要)。
+    for (let s = 0; s < ASKQ_SECONDARY_ENTERS; s++) {
+      const se = await sendKey("Enter");
+      if (!se.ok) return { ok: false, reason: `send-keys Enter: ${se.stderr.slice(-200) || se.code}` };
+      if (await pollUntil((p) => !isModalPane(p).modal, ASKQ_CONFIRM_STAGE_MS)) return { ok: true };
+    }
   }
   return { ok: false, reason: "面板未在确认后关闭 (可能停在提交页/自定义行)" };
 };
@@ -1357,7 +1371,7 @@ const fingerprints = (text: string): { headFp: string; tailFp: string } => {
 //   3. narrow-window poll (last 5 rows = just the input box, NOT the echo
 //      above) for tailFp absence → submit was honored.
 //   4. on stuck-after-Enter, retry Enter once with extra settle.
-const injectViaTmux = async (target: string, text: string, images: string[], log: Logger, freshSpawn: boolean, backendName: CliBackendName): Promise<{ ok: boolean; reason?: string; uncertain?: boolean }> => {
+const injectViaTmux = async (target: string, text: string, images: string[], log: Logger, freshSpawn: boolean, backendName: CliBackendName, bypassModalGuard = false): Promise<{ ok: boolean; reason?: string; uncertain?: boolean }> => {
   log.info({ target, len: text.length, images: images.length, freshSpawn, backendName }, "mirror inject (tmux)");
 
   // Never type into a modal picker (see detectModalPicker). Checked before the
@@ -1365,7 +1379,8 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
   // 必须在按后端分流之前: 每个后端都有自己的原生确认框, 往任何一个里打字都会
   // 替用户点掉框并吞掉这条消息。放到 codebuddy 早退之后就等于只保护了 claude。
   // Escape hatch: WEZARD_MODAL_GUARD=0, in case a future TUI layout trips it.
-  if (process.env.WEZARD_MODAL_GUARD !== "0") {
+  // askq「聊聊这个」的 text 动作带 bypassModalGuard —— 贴入目标就是这只面板。
+  if (process.env.WEZARD_MODAL_GUARD !== "0" && !bypassModalGuard) {
     const modal = await detectModalPicker(target);
     if (modal.modal) {
       log.warn({ target, title: modal.title, backendName }, "mirror inject: modal picker on pane, refusing to inject");
@@ -1597,7 +1612,7 @@ const inject = (args: InjectArgs): Promise<{ ok: boolean; reason?: string; uncer
   const target = (args.tmuxTarget ?? "").trim();
   if (!target) return injectViaSpawn(args);
   const backendName = backendForPath(args.jsonlPath).name;
-  return injectViaTmux(target, args.text, args.images ?? [], args.log, args.freshSpawn ?? false, backendName);
+  return injectViaTmux(target, args.text, args.images ?? [], args.log, args.freshSpawn ?? false, backendName, args.bypassModalGuard ?? false);
 };
 
 // ── Per-session injection queue ───────────────────────────────────────
@@ -3456,6 +3471,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
               for (const act of acts) {
                 if (act.kind === "text") {
                   // 贴文本到自定义输入行: 复用 inject 的 bracketed-paste + Enter。
+                  // bypassModalGuard: 目标就是这只 askq 面板, 不豁免会被守卫拒掉。
                   const r = await inject({
                     text: act.text,
                     cfg,
@@ -3464,6 +3480,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
                     jsonlPath: a.jsonlPath,
                     tmuxTarget: a.tmuxPane,
                     freshSpawn: false,
+                    bypassModalGuard: true,
                   });
                   if (!r.ok) return r;
                 } else if (act.kind === "confirm_submit") {

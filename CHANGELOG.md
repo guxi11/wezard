@@ -2,7 +2,10 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [1.3.21] - 2026-09-16
+
+### Fixed
+- `mirror`: **askq 卡选「聊聊这个」不再卡死 CLI 面板**。text 注入复用的 `inject` 自带 modal guard, 而 AskUserQuestion 面板本身就是 modal —— 引导语被守卫拒掉, 自定义文本行永远空着, 驱动必败 (日志实测五连 `mirror askq chat drive failed` 均此因)。该注入现在带 `bypassModalGuard` 豁免; 注入文案改为「聊聊这个」, 并在 `confirmAskqSubmit` 里为 codebuddy 的二次确认框补 Enter (盲按一次 → 轮询面板关闭 → 没关再按, 上限 3 次)。
 
 ## [1.3.20] - 2026-09-16
 
@@ -430,7 +433,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.20...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.21...HEAD
+[1.3.21]: https://github.com/guxi11/wezard/compare/v1.3.20...v1.3.21
 [1.3.20]: https://github.com/guxi11/wezard/compare/v1.3.19...v1.3.20
 [1.3.19]: https://github.com/guxi11/wezard/compare/v1.3.18...v1.3.19
 [1.3.18]: https://github.com/guxi11/wezard/compare/v1.3.17...v1.3.18

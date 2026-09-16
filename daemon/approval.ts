@@ -1076,16 +1076,15 @@ export const buildAskqDriveActions = (questions: AskqQuestion[], picks: number[]
   return acts;
 };
 
-// 「聊聊这个」: 光标钳 0 后落到第 N 行 (自定义文本行), 贴入引导语 — 自由文本
+// 「聊聊这个」: 光标钳 0 后落到第 N 行 (自定义文本行), 贴入「聊聊这个」— 自由文本
 // 答案本身即语义完整 (hook 若触发, deny+reason 会再覆盖成同款文案)。
-// text 动作里 inject 负责 paste + 首个 Enter (确认自定义文本为本题答案、前进到
-// 提交页)。收尾不再盲发第二个 Enter —— codebuddy CLI 里自定义行必须有实际输入
-// 才能确认, 且要真正落到 "Submit answers" 页再 Enter 才结束; 盲发在光标漂移 /
-// 文本没落下时提交不了, CLI 死等输入 (talk-about-this 卡死根因)。改由 confirm_submit
-// 让 mirror 侧读屏确认已到提交页 → Enter → 确认面板关闭, 失败重试。
+// text 动作里 inject 负责 paste + 首个 Enter (确认自定义文本为本题答案); 注入
+// 必须带 bypassModalGuard —— 目标面板本身就是 modal, 否则被守卫拒掉 (卡死根因)。
+// 提交后 codebuddy 还有二次确认框, 由 confirm_submit 侧补 Enter 收尾 (读屏确认
+// 面板真正关闭), 不盲发固定次数。
 export const buildAskqChatDriveActions = (q: AskqQuestion): AskqDriveAction[] => [
   { kind: "keys", keys: [...Array<string>(q.options.length + 3).fill("Up"), ...Array<string>(q.options.length).fill("Down")] },
-  { kind: "text", text: "先不回答，我想和你讨论一下这个问题" },
+  { kind: "text", text: "聊聊这个" },
   { kind: "confirm_submit" },
 ];
 
