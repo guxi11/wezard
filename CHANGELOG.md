@@ -7,6 +7,9 @@
 ### Fixed
 - `mirror`: **CodeBuddy pane 的 keepalive 不再突破 6 轮预算无限续命**。`tailTurns` 用 `Date.parse` 解析时间戳, 而 CodeBuddy 写的是 epoch-ms 数字 —— `Date.parse(数字)` 恒为 NaN, 每条 turn 的 `ms=0`, `keepaliveStamps` 退化为 mtime 兜底: ping/pong 自己的写入、`file-history-snapshot`/周期 `summary`/`turn-metrics` 等机器记录, 只要落在 ping settle 30s 静默窗之后, 全被当成真实活动把 `round` 清零, 预算重置再发一轮 6 次 (日志实测 #checkrun4 一晚 10+ 次)。现在数字时间戳直接透传 (Claude 的 ISO 字符串照旧 `Date.parse`), 时钟锚回消息轮本身; 同时 pong 判定从「紧邻 ping 的单条 assistant」放宽为「ping 之后到下一条 user 之前的所有 assistant」—— CodeBuddy 会把一条回复拆成多条独立 message 记录, 旧邻接规则会让拆出的后半段被误判为真实活动。
 
+### Removed
+- `mirror`: **触限额自动续跑 (`wrc.mirror.limitResume`) 整体移除**。限额行不再被解析出 `resetsAt`、不再排定通知与到点注入; 配置项同步从 schema 删除 (旧 config 里残留该键会被 zod 忽略, 无需迁移)。keepalive 的 stall-resume 恢复无条件生效 —— 不再为已排定限额恢复的会话让路。
+
 ## [1.3.18] - 2026-09-14
 
 ### Fixed
