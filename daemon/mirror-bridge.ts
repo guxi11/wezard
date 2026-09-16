@@ -1973,6 +1973,16 @@ interface AttachState {
   /** CLI 侧最近一条用户输入, 用作下一个"无气泡 turn"(ensureBriefTurn) 的 userQuery。
    *  WeCom 发起的 turn 直接从 dispatch 拿到原文, 用不到它。 */
   pendingBriefQuery?: string;
+  /** 刚到达一条真人 CLI 输入行, 还没被任何 turn 认领。ensureBriefTurn 消费它来判
+   *  出处 —— 我们自己的注入在 tail 侧就被 isOwnInject 吃掉了, 所以能走到这里的
+   *  user 行必然来自键盘 (或平台回灌)。 */
+  pendingFromCli?: boolean;
+  /** 本轮 (或最近一轮) 的出处: true = WeCom 发起, false = CLI 手敲。CLI 轮只写
+   *  chat 详情页, 不占聊天消息 (chatOriginOnly)。收口不清零 —— 收口后补写进来的
+   *  零星 item 属于同一场对话, 沿用上一轮的出处。 */
+  turnFromChat?: boolean;
+  /** 本 attachment 已经告知过"CLI 侧对话只进详情页" —— 入口链接只发一次。 */
+  cliSilentNoticed?: boolean;
   /** CLI-driven brief turn 的详情链接暂存槽。ensureBriefTurn 把链接写进来, 由该
    *  turn 的首条 standalone body (concludeBriefTurn / skill_output) 取走并前缀拼上。
    *  不再像以前那样 sendRaw 一条"只有链接没正文"的消息 — 在 /model 这类 skill_output
@@ -2660,6 +2670,23 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return tag ? `[${labelFor(tag)} #${tag}](${url})` : `[🧙](${url})`;
   };
 
+  // ── 出处门 (chatOriginOnly) ───────────────────────────────────────────
+  // 人在 CLI 里手敲的一轮, 镜像只发生在两处: 他眼前的终端, 和 chat 详情页 (turn
+  // store 全量记录 + SSE 实时刷新)。聊天里不再下发它的气泡 —— 那份内容他本来就
+  // 在看。群里保留的是需要在群里发生的事: WeCom 发起的轮次、审批/提问卡、
+  // `[mirror]` 系统提示 —— 它们都不走这道门。
+  // 只在 brief 下生效: 抑制的前提是详情页兜得住内容, 而 turn store 只有 brief 在写。
+  const turnSilent = (a: AttachState): boolean =>
+    cfg.wrc.mirror.brief && cfg.wrc.mirror.chatOriginOnly && a.turnFromChat === false;
+
+  // 详情页入口一次性告知。CLI 轮全程静默后, 一个从未收到过气泡的会话在群里将没有
+  // 任何链接可点 —— 每个 attachment 发一条 (且仅一条) 带链接的提示解决这个死角。
+  const noticeCliSilent = (a: AttachState, turnId: string): void => {
+    if (a.cliSilentNoticed) return;
+    a.cliSilentNoticed = true;
+    sendRaw(a, `${briefDetailLink(turnId, a.target)} CLI 侧对话不再下发到群里，点标签看实时详情。`);
+  };
+
   // 收口一条 loading 气泡: finish=true 写入最终内容, 只生效一次。发送失败退回 standalone。
   // raw=true skips withSessionTag (used when content already contains the linked tag header).
   // WeCom 客户端收到 finish=true 后仍有打字机动画要播放, 如果紧接着就下发
@@ -2723,6 +2750,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const startBriefTurn = async (a: AttachState, frame: WsFrameHeaders, streamId: string, isSlash = false, userQuery = ""): Promise<void> => {
     const turnId = newTurnId();
     a.queryEpoch = (a.queryEpoch ?? 0) + 1; // WeCom 侧的新一轮同样是 query 边界
+    a.turnFromChat = true;                  // 出处确凿: 这一轮有 frame, 群里就是它的主场
+    a.pendingFromCli = false;               // 人改从聊天里说话了, 之前那条 CLI 输入不再是出处
     recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cwd: a.runningCwd || undefined, userQuery: userQuery.trim() || undefined, cut: consumeCut(a), origin: consumeOrigin(a) });
     // hardTimer 兜底: turn 若无终句 / turn_end 收口 (卡死/漏收), 到点仍收气泡。
     const bubble: BriefBubble = { frame, streamId, hardTimer: undefined as unknown as NodeJS.Timeout, done: false };
@@ -2762,7 +2791,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const turnId = newTurnId();
     const query = a.pendingBriefQuery?.replace(/^> ?/gm, "").trim();
     a.pendingBriefQuery = undefined;
-    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, userQuery: query || undefined, cut: consumeCut(a), origin: consumeOrigin(a) });
+    // 出处继承: 有真人 CLI 输入行开头 → CLI 轮; 否则 (收口后的补写、peer/graph 注入
+    // 开出的轮) 沿用上一轮 —— 那些续写属于同一场对话, 不该改变可见性。
+    const fromCli = a.pendingFromCli === true;
+    a.pendingFromCli = false;
+    a.turnFromChat = fromCli ? false : a.turnFromChat ?? true;
+    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cwd: a.runningCwd || undefined, userQuery: query || undefined, cut: consumeCut(a), origin: consumeOrigin(a) });
     a.briefTurnId = turnId;
     a.briefBubble = undefined;
     a.briefIsSlash = false;
@@ -2772,8 +2806,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     clearCot(a);
     // 链接暂存, 不再单独发 — 让首条 standalone body 取走拼到前缀, 一条消息解决。
     // turn 始终会通过 concludeBriefTurn / closeBriefTurn 收口, header 不会泄漏。
-    a.pendingBriefHeader = briefDetailLink(turnId, a.target);
-    log.info({ sessionId: a.sessionId, turnId }, "brief: turn started (CLI-side, no bubble)");
+    // 静默轮不留 header: 它没有任何 standalone 可以搭车, 留着只是个悬空的链接。
+    if (turnSilent(a)) noticeCliSilent(a, turnId);
+    else a.pendingBriefHeader = briefDetailLink(turnId, a.target);
+    log.info({ sessionId: a.sessionId, turnId, fromCli, silent: turnSilent(a) }, "brief: turn started (CLI-side, no bubble)");
   };
 
   // 本轮出现过工具调用 / tool_result / 非 final 文本 —— 只记状态: 详情链接从 ack 起
@@ -2820,6 +2856,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (a.briefBubble && !a.briefBubble.done) {
       void finishBriefBubble(a, `${briefDetailLink(turnId, a.target)} ${body}`, true);
       a.pendingBriefHeader = undefined;
+    } else if (turnSilent(a)) {
+      // CLI 手敲的一轮: 终稿只留在 turn store, 详情页照常实时可见。
+      a.pendingBriefHeader = undefined;
+      log.info({ sessionId: a.sessionId, turnId }, "brief: CLI-origin conclusion kept out of chat");
     } else {
       const header = a.pendingBriefHeader;
       a.pendingBriefHeader = undefined;
@@ -3099,6 +3139,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (a.briefIsSlash && !a.briefHadTool && a.briefBubble && !a.briefBubble.done) {
         void finishBriefBubble(a, item.body);
         a.pendingBriefHeader = undefined;
+      } else if (turnSilent(a)) {
+        // CLI 里手敲的 /clear、/model 之类, 回执给敲的人看就够了 —— 只进详情页。
+        a.pendingBriefHeader = undefined;
       } else {
         // CLI-driven turn: 把 ensureBriefTurn 暂存的详情链接拼到 body 前缀, 避免
         // "只发了一条 link 渲染成空文本" 的前置消息。
@@ -3287,6 +3330,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // 清掉防残留阻塞新 turn 的软收口 (guard 的 defer 判断依据)。
       voidTurnAgents(a);
       a.queryEpoch = (a.queryEpoch ?? 0) + 1;
+      // 这一行是人在 CLI 里敲的 —— 它既是下一轮的 query, 也是下一轮的出处。
+      // quiet (includeUser=false, 默认) 同样记: includeUser 只决定气泡渲不渲染,
+      // 不决定详情页记不记 —— 聊天不再下发 CLI 轮之后, 详情页是唯一的落点。
+      a.pendingBriefQuery = item.body;
+      a.pendingFromCli = true;
     }
     // 后台派发的结束信号 —— 它不是 function_call_result (那只是 spawn 句柄)。放在
     // keepalive 门之前: 吞没窗口里到达也必须销账, 否则账本永久悬空。
@@ -3466,11 +3514,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (a.goalActive) { handleGoalItem(a, item); return; }
     // Brief 模式下没有活跃 turn 时, 任何 assistant 侧产出都补开一个无气泡 turn ——
     // 覆盖 CLI 侧直接开的新一轮 (WeCom 没参与, 拿不到 frame) 与收口后的零星补写。
-    // user_text 只记下来当下一轮的 query, 不开 turn (CLI 敲字 ≠ 一定有回复)。
-    if (cfg.wrc.mirror.brief && !a.briefTurnId) {
-      if (item.kind === "user_text") a.pendingBriefQuery = item.body;
-      else if (BRIEF_TURN_OPENERS.has(item.kind)) ensureBriefTurn(a);
-    }
+    // user 行不开 turn (CLI 敲字 ≠ 一定有回复), 它的 query/出处已在上面记下。
+    if (cfg.wrc.mirror.brief && !a.briefTurnId && BRIEF_TURN_OPENERS.has(item.kind)) ensureBriefTurn(a);
     // Usage snapshots never flow into WeCom bubbles — brief 分支下 handleBriefItem
     // 会把它写进 turn store, 非 brief 下直接吞掉, 保持 onItem 主流程只处理有渲染
     // 输出的 item 类型。

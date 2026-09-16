@@ -57,6 +57,9 @@
       // 中间 tool_use / tool_result / thinking 只写进详情页 (可折叠, Claude 网页风格)。
       // 授权卡照常发群。
       "brief": false,
+      // 出处门: CLI 手敲的那一轮只进终端 + chat 详情页, 不下发气泡。WeCom 发起的
+      // 轮次、审批卡、[mirror] 提示不受影响。只在 brief=true 下生效。
+      "chatOriginOnly": true,
       // 斜杠命令回执精简: /clear、/new 只回第一行 ack ("cleared"/"created"),
       // 不再附 📂 项目信息与 💡 tip。默认 false = 完整回执。
       "slashAckFirstLine": false

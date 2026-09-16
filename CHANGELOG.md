@@ -4,11 +4,16 @@
 
 ## [Unreleased]
 
-### Fixed
-- `mirror`: **CodeBuddy pane 的 keepalive 不再突破 6 轮预算无限续命**。`tailTurns` 用 `Date.parse` 解析时间戳, 而 CodeBuddy 写的是 epoch-ms 数字 —— `Date.parse(数字)` 恒为 NaN, 每条 turn 的 `ms=0`, `keepaliveStamps` 退化为 mtime 兜底: ping/pong 自己的写入、`file-history-snapshot`/周期 `summary`/`turn-metrics` 等机器记录, 只要落在 ping settle 30s 静默窗之后, 全被当成真实活动把 `round` 清零, 预算重置再发一轮 6 次 (日志实测 #checkrun4 一晚 10+ 次)。现在数字时间戳直接透传 (Claude 的 ISO 字符串照旧 `Date.parse`), 时钟锚回消息轮本身; 同时 pong 判定从「紧邻 ping 的单条 assistant」放宽为「ping 之后到下一条 user 之前的所有 assistant」—— CodeBuddy 会把一条回复拆成多条独立 message 记录, 旧邻接规则会让拆出的后半段被误判为真实活动。
+## [1.3.19] - 2026-09-16
+
+### Changed
+- `mirror`: **CLI 侧手敲的一轮不再下发到聊天** (`wrc.mirror.chatOriginOnly`, 默认开, 仅 `brief=true` 下生效)。镜像改为发生在两处 —— 人眼前的终端, 和 chat 详情页 (turn store 全量记录 + SSE 实时刷新)。每个 turn 现在带出处标记: 有 WeCom frame = 群里发起 (气泡照旧); 由一条真人 CLI 输入行开头 = CLI 轮, 终稿与斜杠命令回执只写详情页; 收口后的补写 / peer·graph 注入开出的轮沿用上一轮出处。审批与提问卡、卡前 pane 前言、`[mirror]` 系统提示、`/goal` 进度推送均不走这道门。每个 attachment 首次静默时发一条带详情链接的提示, 免得从没收过气泡的会话在群里无处可点。CLI 输入行同时开始写进 turn 的 `userQuery` (此前 `includeUser=false` 下详情页看不到人敲了什么), CLI 轮的 `cwd` 也补上, 与 WeCom 发起的轮次对齐。
 
 ### Removed
 - `mirror`: **触限额自动续跑 (`wrc.mirror.limitResume`) 整体移除**。限额行不再被解析出 `resetsAt`、不再排定通知与到点注入; 配置项同步从 schema 删除 (旧 config 里残留该键会被 zod 忽略, 无需迁移)。keepalive 的 stall-resume 恢复无条件生效 —— 不再为已排定限额恢复的会话让路。
+
+### Fixed
+- `mirror`: **CodeBuddy pane 的 keepalive 不再突破 6 轮预算无限续命**。`tailTurns` 用 `Date.parse` 解析时间戳, 而 CodeBuddy 写的是 epoch-ms 数字 —— `Date.parse(数字)` 恒为 NaN, 每条 turn 的 `ms=0`, `keepaliveStamps` 退化为 mtime 兜底: ping/pong 自己的写入、`file-history-snapshot`/周期 `summary`/`turn-metrics` 等机器记录, 只要落在 ping settle 30s 静默窗之后, 全被当成真实活动把 `round` 清零, 预算重置再发一轮 6 次 (日志实测 #checkrun4 一晚 10+ 次)。现在数字时间戳直接透传 (Claude 的 ISO 字符串照旧 `Date.parse`), 时钟锚回消息轮本身; 同时 pong 判定从「紧邻 ping 的单条 assistant」放宽为「ping 之后到下一条 user 之前的所有 assistant」—— CodeBuddy 会把一条回复拆成多条独立 message 记录, 旧邻接规则会让拆出的后半段被误判为真实活动。
 
 ## [1.3.18] - 2026-09-14
 
@@ -416,7 +421,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.18...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.19...HEAD
+[1.3.19]: https://github.com/guxi11/wezard/compare/v1.3.18...v1.3.19
 [1.3.18]: https://github.com/guxi11/wezard/compare/v1.3.17...v1.3.18
 [1.3.17]: https://github.com/guxi11/wezard/compare/v1.3.16...v1.3.17
 [1.3.16]: https://github.com/guxi11/wezard/compare/v1.3.15...v1.3.16

@@ -100,6 +100,13 @@ const Mirror = z.object({
   // 中间 tool_use / tool_result / thinking / 非 final text 全部只写进详情页,不发气泡。
   // 授权卡照常发群 (交互无法替代)。false = 现状 (逐条气泡)。
   brief: z.boolean().default(true),
+  // 出处门: 群里只留"需要在群里发生的事"。人在 CLI 手敲的那一轮 (以及它触发的
+  // 斜杠命令回执) 不再下发气泡 —— 镜像改为发生在他眼前的终端 + chat 详情页
+  // (turn store 全量记录, SSE 实时刷新)。WeCom 发起的轮次、审批/提问卡、
+  // `[mirror]` 系统提示都不受影响。每个 attachment 首次静默时发一条带链接的提示,
+  // 免得一个从没收过气泡的会话在群里无处可点。
+  // 只在 brief=true 下生效: 抑制的前提是详情页兜住内容, 而 turn store 只有 brief 在写。
+  chatOriginOnly: z.boolean().default(true),
   // 斜杠命令回执精简: /clear、/new 等会话边界命令的回执只发第一行 ack
   // ("cleared" / "created"), 不再附 💡 tip。cwd 信息一律不随回执下发, 随时
   // `/pwd` 可查。默认 false = ack + tip 两行气泡。
