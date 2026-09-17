@@ -193,6 +193,10 @@ const Wrc = z.object({
   // `${prefix}-<short>`. Auto-spawn fires when an authorized inbound finds no
   // mirror attached for that chat — allowFrom IS the authorization.
   tmuxPrefix: z.string().default("wezard"),
+  // 机器人在 WeCom 里的显示名 —— 由建机器人的人自己取, 我们无法从消息里读到。
+  // 群里 @ 它 / 引用它的气泡时, WeCom 会把 `@<显示名>` 塞进正文; 这里配上真名
+  // (可多个别名) 才能把它从 prompt 里剥干净。内置 wezard / weclaude 恒生效。
+  botNames: z.array(z.string()).default([]),
 }).transform((v) => {
   // Resolve the active backend once — honors defaultCli if set, otherwise
   // infers from claudeBin basename (legacy back-compat). Pin the inferred

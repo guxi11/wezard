@@ -309,33 +309,48 @@ const matchSession = (sessions: SessionInfo[], arg: string): SessionInfo | undef
   sessions.find((s) => s.sessionId === arg) ??
   (arg.length >= 6 ? sessions.find((s) => s.sessionId.startsWith(arg)) : undefined);
 
-// Strip any "@<botname>" mention (leading, mid-text, or trailing) so it doesn't
-// leak into claude's prompt. WeCom may place the mention anywhere depending on
-// where the user typed it.
-// Safety: if the text contains more than one "@", it's ambiguous (user likely
-// also @'d a file path like "@src/foo.ts"), so leave it untouched rather than
-// risk eating the path.
-const stripMentions = (text: string): string => {
-  const atCount = (text.match(/@/gu) ?? []).length;
-  if (atCount !== 1) return text;
-  return text.replace(/\s*@\S+\s*/u, " ").replace(/\s+/gu, " ").trim();
-};
+// ── @mention 剥离 ──────────────────────────────────────────────────────
+// 机器人的显示名由建它的人自己取, 消息体里没有任何字段告诉我们叫什么。所以:
+// 一条消息里只认定 **一个** 机器人名, 认定后把全文里同名的 @ 全部剥掉 ——
+// 用户一条消息里可能 @ 它好几次, 但不可能有两个不同的机器人。
+//
+// 候选 token = `@` 之后到下一个空格/行尾为止, 且不含 `/` `\`。机器人名不可能
+// 带 slash, 所以 `@src/foo.ts` 这类"喂文件"的路径连候选都进不来 —— 路径优先
+// 被识别为路径, 这是整条规则的第一顺位。裸文件名 (`@README.md`) 没有 slash,
+// 靠扩展名形状再排一道。
+const MENTION_RE = "(^|\\s)@NAME(?=\\s|$)";
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const mentionRe = (name: string): RegExp =>
+  new RegExp(MENTION_RE.replace("NAME", escapeRe(name)), "giu");
+
+// 扩展名形状的裸 token: `@README.md` 是文件, 不是人。
+const looksLikeFile = (name: string): boolean => /\.[A-Za-z0-9]{1,8}$/u.test(name);
+
+/** 这条消息里的机器人名 —— 第一个不像文件的 @token。 */
+const detectBotName = (text: string): string | undefined =>
+  [...text.matchAll(new RegExp(MENTION_RE.replace("NAME", "([^\\s/\\\\]+)"), "gu"))]
+    .map((m) => m[2] ?? "")
+    .find((n) => n && !looksLikeFile(n));
+
+/** 剥掉 `@name` 的每一次出现; 分隔符 (`$1`) 留着, 免得吃掉换行 —— 代价是行尾的
+ *  @ 会留下一个孤立空格, 所以收尾再清一遍每行的尾随空白。 */
+const stripName = (text: string, name: string): string =>
+  text
+    .replace(mentionRe(name), "$1")
+    .replace(/[^\S\n]{2,}/g, " ")
+    .replace(/[^\S\n]+$/gmu, "")
+    .trim();
 
 // DMs can't @ a bot — any "@" the user types is content (e.g. "@src/foo.ts"),
-// so we only strip mentions in group chats.
+// so name detection is group-only. 配置里写死的名字 (`wrc.botNames`) 则任何
+// 场景都剥: 单聊里手打 "@wezard /usage" 同样不该漏进 prompt。
 const isGroup = (msg: BaseMessage): boolean => msg.chattype === "group" && !!msg.chatid;
-// Always kill "@wezard" (bot's own name) regardless of chat type / @-count:
-// a DM user typing "@wezard start …" would otherwise leak the mention into
-// Claude's prompt and get semantically parsed (e.g. spawning wrc). Word-tail
-// guard `(?![A-Za-z0-9_])` keeps identifiers like "@wezard-foo" intact
-// while allowing CJK / punctuation right after.
-// `weclaude` stays in the alternation: the bot's WeCom display name is chosen
-// by the user, not by us, so pre-rename bots are still literally "@weclaude".
-const stripBotName = (text: string): string =>
-  text.replace(/[ \t]*@(?:wezard|weclaude)(?![A-Za-z0-9_])[ \t]*/giu, " ").replace(/[ \t]{2,}/g, " ").trim();
-const maybeStripMentions = (msg: BaseMessage, text: string): string => {
-  const cleaned = stripBotName(text);
-  return isGroup(msg) ? stripMentions(cleaned) : cleaned;
+const BUILTIN_BOT_NAMES = ["wezard", "weclaude"] as const;
+
+const maybeStripMentions = (names: readonly string[], msg: BaseMessage, text: string): string => {
+  const configured = names.find((n) => mentionRe(n).test(text));
+  const name = configured ?? (isGroup(msg) ? detectBotName(text) : undefined);
+  return name ? stripName(text, name) : text.trim();
 };
 
 // Render the user's "引用" (quoted message) into a markdown blockquote so the
@@ -429,6 +444,7 @@ const composeInbound = (
   msg: BaseMessage,
   rawBody: string,
   inContext: (target: string, quoted: string) => boolean,
+  stripAt: (msg: BaseMessage, text: string) => string,
 ): { text: string; tag: string; promoted: boolean } => {
   const { tag: typed, cleaned } = parseTag(rawBody);
   const q = parseQuote(msg.quote);
@@ -444,7 +460,7 @@ const composeInbound = (
   }
   if (q && !consumed) {
     // 提成正文时也剥一次 @mention,让 "@wezard /usage" → "/usage" 命中命令路径。
-    const p = parseTag(maybeStripMentions(msg, q.body).trim());
+    const p = parseTag(stripAt(msg, q.body).trim());
     return { text: p.cleaned, tag: p.tag || tag, promoted: true };
   }
   return { text: cleaned, tag, promoted: false };
@@ -513,6 +529,9 @@ export const installInboundRouter = (
   sourcePath: string,
 ): void => {
   const inboxDir = expandHome(cfg.wrc.mirror.inboxDir);
+  // 已知的机器人名只随配置变; 下面所有入站路径共用这一个剥离器。
+  const botNames = [...BUILTIN_BOT_NAMES, ...cfg.wrc.botNames.filter(Boolean)];
+  const stripAt = (msg: BaseMessage, text: string): string => maybeStripMentions(botNames, msg, text);
 
   // Render /pwd output. Mirror mode reads the live attachment + persisted
   // store via bridge.getCwd; headless mode has no per-chat cwd, so it just
@@ -998,7 +1017,7 @@ export const installInboundRouter = (
   client.on("message.text", async (frame: WsFrame<TextMessage>) => {
     const msg = frame.body;
     if (!msg) return;
-    const { text, tag, promoted } = composeInbound(msg, maybeStripMentions(msg, msg.text?.content ?? ""), quoteInContext);
+    const { text, tag, promoted } = composeInbound(msg, stripAt(msg, msg.text?.content ?? ""), quoteInContext, stripAt);
     const who = sessionKey(chatPrincipal(msg), tag);
     log.info({ msgid: msg.msgid, len: text.length, tag, hasQuote: !!msg.quote, promoted }, "rx text");
     const { stop } = await gate(frame, msg, text, who);
@@ -1012,7 +1031,7 @@ export const installInboundRouter = (
     log.info({ msgid: msg.msgid, hasQuote: !!msg.quote }, "rx image");
     // Images carry no text of their own — the quote (if any) is the only
     // routing signal; without it they land on the chat's default session.
-    const { text, tag } = composeInbound(msg, "", quoteInContext);
+    const { text, tag } = composeInbound(msg, "", quoteInContext, stripAt);
     const who = sessionKey(chatPrincipal(msg), tag);
     const { stop } = await gate(frame, msg, "", who);
     if (stop) return;
@@ -1038,7 +1057,7 @@ export const installInboundRouter = (
       .filter((it) => it.msgtype === "text")
       .map((it) => (it as { text?: { content?: string } }).text?.content ?? "")
       .join("\n");
-    const { tag } = composeInbound(msg, maybeStripMentions(msg, rawText), quoteInContext);
+    const { tag } = composeInbound(msg, stripAt(msg, rawText), quoteInContext, stripAt);
     const who = sessionKey(chatPrincipal(msg), tag);
     const { stop } = await gate(frame, msg, "", who);
     if (stop) return;
@@ -1047,7 +1066,7 @@ export const installInboundRouter = (
     let imgIdx = 0;
     for (const item of msg.mixed?.msg_item ?? []) {
       if (item.msgtype === "text" && item.text?.content) {
-        const t = maybeStripMentions(msg, item.text.content);
+        const t = stripAt(msg, item.text.content);
         if (t) texts.push(t);
       } else if (item.msgtype === "image" && item.image?.url) {
         const path = await downloadToInbox(
@@ -1064,7 +1083,7 @@ export const installInboundRouter = (
     // Re-compose on the per-item stripped text: drops the routing `#tag` (it was
     // consumed above; leaving it in would leak into Claude) and attaches the
     // quote only when it isn't already in the target's context.
-    await send(frame, msg, who, composeInbound(msg, texts.join("\n"), quoteInContext).text, images);
+    await send(frame, msg, who, composeInbound(msg, texts.join("\n"), quoteInContext, stripAt).text, images);
   });
 
   // template_card_event is handled in approval module; no listener here.

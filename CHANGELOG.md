@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+## [1.3.23] - 2026-09-17
+
+### Added
+- `wrc.botNames`: 机器人在 WeCom 里的显示名(可配多个别名)。名字由建机器人的人自己取, 消息体里没有任何字段能读到, 此前硬编码 `wezard` / `weclaude` —— 改名后 `@<真名>` 剥不掉。配了名字的在单聊里也剥。
+
+### Changed
+- **@mention 剥离改为「一条消息只认定一个机器人名」**。候选 token = `@` 之后到空格/行尾为止且不含 `/` `\\`;路径优先被识别为路径(`@src/foo.ts` 连候选都进不来, 裸文件名再按扩展名形状排一道);剩下的第一个就是机器人名, 认定后把全文里同名的 `@` 全部剥掉(一条消息里可能 @ 它好几次, 但不可能有两个机器人)。群聊才做这套推断 —— 单聊 @ 不了人, 那里的 `@` 只按配置名剥。
+
+### Fixed
+- **引用/@ 机器人后的正文剥离不再依赖机器人叫什么名字**。改名后 `@<真名>` 会原样漏进 prompt 被语义解析(如误触发 wrc)。
+- **`@wezard 看看 @src/foo.ts` 不再把文件路径一起吃掉**。旧逻辑按名剥掉 `@wezard` 后 @ 数降到 1, 随后"唯一 @ 即 mention"的兜底就把 `@src/foo.ts` 删了;新规则下路径根本不是候选。
+- 引用正文本身的剥离(`parseTagHeader` 的 `emoji #tag` 头)一直是按出站气泡的 emoji 头反解的, 与机器人名无关 —— 不受影响。
+
 ## [1.3.22] - 2026-09-16
 
 ### Fixed
@@ -440,7 +453,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.22...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.3.23...HEAD
+[1.3.23]: https://github.com/guxi11/wezard/compare/v1.3.22...v1.3.23
 [1.3.22]: https://github.com/guxi11/wezard/compare/v1.3.21...v1.3.22
 [1.3.21]: https://github.com/guxi11/wezard/compare/v1.3.20...v1.3.21
 [1.3.20]: https://github.com/guxi11/wezard/compare/v1.3.19...v1.3.20
