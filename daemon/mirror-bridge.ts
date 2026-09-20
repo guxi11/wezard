@@ -1788,7 +1788,21 @@ export interface MirrorBridge {
   /** Detach + respawn a target's pane in `cfg.wrc.cwd` or its pendingCwd
    *  override. Used by /new to give the user a fresh claude in the bound
    *  project. Returns the new attachment result. */
-  newSession: (target: string, windowName?: string, cli?: CliBackendName, opts?: { model?: string; cwd?: string; silent?: boolean }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string }>;
+  newSession: (target: string, windowName?: string, cli?: CliBackendName, opts?: { model?: string; cwd?: string; silent?: boolean; systemPrompt?: string }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string }>;
+  /** Spawn `target` as a CLONE of `parent`: a fresh pane launched with
+   *  `--resume <parent sid>`, which the CLI forks — the child starts holding
+   *  everything the parent had read, the parent is untouched. `inherit: false`
+   *  (or a different cwd, which `--resume` cannot honor) degrades to a plain
+   *  `newSession`; the reply says which happened via `inherited`. */
+  cloneSession: (args: { parent: string; target: string; windowName?: string; cli?: CliBackendName; model?: string; cwd?: string; systemPrompt?: string; inherit?: boolean; bootstrap?: string }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; inherited: boolean }>;
+  /** Install the wizard-identity provider. Every spawn path (`/new`, a dead-pane
+   *  respawn, a clone) asks it for the target's charter and presses the result
+   *  into the new process's system prompt, so identity is a property of the
+   *  session rather than of the one code path that happened to create it. */
+  setCharterProvider: (fn: (target: string) => string) => void;
+  /** Hard facts about one session — sessionId, transcript, cwd, backend, pane,
+   *  and how full its context window is (prompt tokens of the last turn). */
+  sessionInfo: (target: string) => { sessionId: string; jsonlPath: string; cwd: string; cli: CliBackendName; tmuxPane: string; contextTokens: number } | undefined;
   /** Every target key of `target`'s chat (default + every `#tag`), live or
    *  merely persisted. Sync and cheap — the `peers` probe shells out to tmux,
    *  far too much for answering "is this tag taken". */
@@ -3931,6 +3945,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return t === "/clear" || t.startsWith("/clear ") || t.startsWith("/clear\n");
   };
 
+  /** mtime(ms), 0 when unreadable — "newest transcript wins" 的排序键。 */
+  const mtimeOf = (path: string): number => {
+    try { return statSync(path).mtimeMs; } catch { return 0; }
+  };
+
   const listJsonls = (dir: string): Set<string> => {
     try {
       return new Set(readdirSync(dir).filter((n) => n.endsWith(".jsonl")));
@@ -4357,11 +4376,21 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // /new path: kill the old pane (so we don't leak orphan tmux windows) and
   // spawn a fresh claude in pendingCwd ?? runningCwd ?? default. Returns the
   // new sessionId/cwd so callers can render the user-facing reply.
+  // 身份提供者。newSession / 重生 / clone 全都从这里取「这个 target 是谁」, 于是
+  // 无论是群里手打的 /new、pane 死了的自愈重生, 还是编排生出来的分身, 新进程一
+  // 睁眼就知道自己是谁 —— 而不是只有走 wizard 路由那一条路才有身份。
+  // 由 index.ts 在启动时装上 (注册表活在那边); 没装 = 退回无身份行为, 全链路无回归。
+  let charterOf: ((target: string) => string) | undefined;
+  const setCharterProvider = (fn: (target: string) => string): void => { charterOf = fn; };
+  const charterFor = (target: string): string | undefined => {
+    try { return charterOf?.(target); } catch { return undefined; }
+  };
+
   const newSession = async (
     target: string,
     windowName?: string,
     cli?: CliBackendName,
-    opts?: { model?: string; cwd?: string; silent?: boolean },
+    opts?: { model?: string; cwd?: string; silent?: boolean; systemPrompt?: string },
   ): Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; info?: string }> => {
     const prev = byTarget.get(target);
     // Resolution precedence (all chat-scoped except the running-cwd fallback):
@@ -4406,6 +4435,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       cwdOverride: eff,
       cli: effCli,
       model: opts?.model,
+      systemPrompt: opts?.systemPrompt ?? charterFor(target),
     });
     if (!r.ok) return { ok: false, reason: r.reason };
     const att = attach({
@@ -4458,6 +4488,147 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
     if (!opts?.silent) pushProjectInfo(target, "created");
     return { ok: true, sessionId: r.sessionId, cwd: r.cwd };
+  };
+
+  // ── Clone ───────────────────────────────────────────────────────────
+  // 分身 = `--resume <父 sid> --fork-session` 起的新 pane: CLI 把父亲的 transcript
+  // 复制成一份新的再继续写, 于是子进程开局就带着父亲此刻读过的一切 (规范、目录、
+  // 刚啃完的那份文档), 而父亲毫发无损。这正是「先把公共材料载进一个基座, 再从它
+  // 身上分出 N 个干活的」所需要的语义: 材料只读一遍, 却进了 N 份上下文。
+  //
+  // 两件事非做不可:
+  //   `--fork-session` —— 少了它, 这个 pane 会**续写父亲的 jsonl**。两个 pane 写
+  //     同一个 transcript, 两个 target 指向同一个 sid, 群与群从此串线且无法回滚。
+  //   先说话再 attach —— 分叉文件不是开机就有的, CLI 在收到第一条消息那一刻才写。
+  //     所以 spawn 之后先注入开场白, 等分叉出现拿到它自己的 sid, 再 attach。等不到
+  //     就把 pane 一起收掉: 那时唯一已知的 sid 是父亲的, 认下去就是上面那种串线
+  //     (attach 也会正当地拒绝), 一个干净的失败远比一条错绑好收拾。
+  const FORK_POLL_MS = 400;
+  const FORK_WAIT_MS = 45_000;
+  const awaitFork = async (
+    projectDir: string,
+    baseline: Set<string>,
+    claimed: Set<string>,
+  ): Promise<{ sessionId: string; jsonlPath: string } | undefined> => {
+    const deadline = Date.now() + FORK_WAIT_MS;
+    while (Date.now() < deadline) {
+      const born = [...listJsonls(projectDir)]
+        .filter((n) => !baseline.has(n) && !claimed.has(n.replace(/\.jsonl$/, "")))
+        .map((n) => ({ n, path: join(projectDir, n) }))
+        // 种子化的 fork 一落地就带着父亲的 user 行 —— 空文件 (刚 touch 出来的)
+        // 还不能认, 认早了 tail 会从一个还没写完的复制过程中间开始读。
+        .filter((c) => firstUserUuid(c.path) !== undefined)
+        .sort((x, y) => mtimeOf(y.path) - mtimeOf(x.path));
+      const hit = born[0];
+      if (hit) return { sessionId: hit.n.replace(/\.jsonl$/, ""), jsonlPath: hit.path };
+      await sleepMs(FORK_POLL_MS);
+    }
+    return undefined;
+  };
+
+  const cloneSession = async (args: {
+    parent: string;
+    target: string;
+    windowName?: string;
+    cli?: CliBackendName;
+    model?: string;
+    cwd?: string;
+    systemPrompt?: string;
+    /** false = 空白分身 (只继承身份, 不继承上下文)。 */
+    inherit?: boolean;
+    /** 分身的第一句话。继承路径上它是**必需**的 (分叉文件要靠它才生成), 省略则用
+     *  一句自我介绍兜底; 空白路径上它只是普通的首条消息。 */
+    bootstrap?: string;
+  }): Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; inherited: boolean }> => {
+    const p = byTarget.get(args.parent) ?? (await restoreFromStore(args.parent));
+    // 继承上下文要求父亲有一个活着的 transcript, 且分身必须待在同一个项目目录 ——
+    // `--resume` 是按项目目录寻址 session 的。调用方点名换目录 = 明确放弃继承。
+    const sameCwd = !args.cwd?.trim() || expandHome(args.cwd.trim()) === (p?.runningCwd ?? "");
+    const canInherit = args.inherit !== false && !!p?.sessionId && !!p.jsonlPath && existsSync(p.jsonlPath) && sameCwd;
+    if (!canInherit) {
+      const r = await newSession(args.target, args.windowName, args.cli, {
+        model: args.model, cwd: args.cwd, systemPrompt: args.systemPrompt, silent: true,
+      });
+      return { ...r, inherited: false };
+    }
+    const parent = p!;
+    const projectDir = dirname(parent.jsonlPath);
+    const baseline = listJsonls(projectDir);
+    const lg = log.child({ sub: "clone", target: args.target });
+    const r = await spawnTmuxClaude({
+      cfg,
+      log: lg,
+      resumeSessionId: parent.sessionId,
+      forkSession: true,
+      windowName: args.windowName ?? args.target,
+      cwdOverride: parent.runningCwd,
+      cli: backendForPath(parent.jsonlPath).name,
+      model: args.model,
+      systemPrompt: args.systemPrompt,
+    });
+    if (!r.ok) return { ok: false, reason: r.reason, inherited: false };
+    // 分叉文件不是开机就有的: CLI 在这个 pane **收到第一条消息**的那一刻才把父亲的
+    // transcript 复制成新文件。所以必须先说一句话, 分身才会有自己的 sid —— 这句话
+    // 顺便就是它的开场白 (「你是谁、继承了什么、准备接什么」), 群里看到的第一条也是它。
+    const hello = args.bootstrap?.trim()
+      || "（wezard 分身初始化）用一句话说明: 你是谁、从谁那里继承了哪些上下文、准备接什么活。不要复述这条指令。";
+    rememberInject(hello);
+    const boot = await inject({
+      text: hello, images: [], cfg, log: lg,
+      sessionId: parent.sessionId, jsonlPath: parent.jsonlPath,
+      tmuxTarget: r.tmuxPane, freshSpawn: true,
+    });
+    if (!boot.ok) {
+      await tmuxRun(["kill-pane", "-t", r.tmuxPane ?? ""]);
+      return { ok: false, reason: `分身开场白注入失败: ${boot.reason ?? "unknown"}`, inherited: false };
+    }
+    const fork = await awaitFork(projectDir, baseline, sidsClaimedByOthers(args.target));
+    // 等不到分叉就必须收手: 此刻唯一已知的 sid 是父亲的, 认下去两个 target 会指向
+    // 同一个会话 (attach 也会正当地拒绝)。留一个孤儿 pane 比留一条错绑更好收拾 ——
+    // 所以连 pane 一起杀掉, 调用方拿到的是一个干净的失败。
+    if (!fork) {
+      await tmuxRun(["kill-pane", "-t", r.tmuxPane ?? ""]);
+      return { ok: false, reason: "分身没能在超时内分叉出自己的会话 (CLI 可能不支持 --fork-session)", inherited: false };
+    }
+    const att = attach({
+      sessionId: fork.sessionId,
+      jsonlPath: fork.jsonlPath,
+      target: args.target,
+      tmuxPane: r.tmuxPane,
+      tmuxSession: r.tmuxSession,
+      cwd: r.cwd,
+      pendingCwd: "",
+    });
+    if (!att.ok) return { ok: false, reason: att.reason, inherited: false };
+    const spawned = byTarget.get(args.target);
+    if (spawned) {
+      // muteUntilInject 是给"全新 pane 的 greeting 噪音"准备的; 分身的开场白是正经
+      // 内容 (群里第一条就该是它), 所以这里不静音。
+      spawned.justSpawned = true;
+      spawned.keepaliveOff = true;
+      spawned.keepaliveOffAt = Date.now();
+      spawned.keepalive = undefined;
+      persistPause(spawned);
+    }
+    lg.info({ parent: args.parent, sessionId: fork.sessionId }, "clone: forked");
+    return { ok: true, sessionId: fork.sessionId, cwd: r.cwd, inherited: true };
+  };
+
+  /** 一个会话此刻的硬事实 —— whoami / 交接判断要用的那几个数。 */
+  const sessionInfo = (target: string): { sessionId: string; jsonlPath: string; cwd: string; cli: CliBackendName; tmuxPane: string; contextTokens: number } | undefined => {
+    const a = byTarget.get(target);
+    const rec = a ? undefined : deps.store.get(target);
+    const sessionId = a?.sessionId ?? rec?.sessionId ?? "";
+    const jsonlPath = a?.jsonlPath ?? (rec?.jsonlPath ? expandHome(rec.jsonlPath) : "");
+    if (!sessionId || !jsonlPath) return undefined;
+    return {
+      sessionId,
+      jsonlPath,
+      cwd: a?.runningCwd || rec?.cwd || "",
+      cli: backendForPath(jsonlPath).name,
+      tmuxPane: a?.tmuxPane ?? rec?.tmuxPane ?? "",
+      contextTokens: lastContextTokens(jsonlPath),
+    };
   };
 
   const getCwd = (target: string): { runningCwd: string; pendingCwd: string; defaultCwd: string } => {
@@ -5203,7 +5374,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // Same resume-fork hazard as dispatch: snapshot before spawn, re-bind
         // onto the forked jsonl once it appears (EOF offset — fork is seeded).
         const resumeBaseline = listJsonls(dirname(a.jsonlPath));
-        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: tagOfTarget(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name });
+        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: tagOfTarget(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, systemPrompt: charterFor(target) });
         if (!r.ok || !r.tmuxPane) return { ok: false, reason: `respawn failed: ${r.reason ?? "unknown"}` };
         a.tmuxPane = r.tmuxPane;
         a.tmuxSession = r.tmuxSession ?? a.tmuxSession;
@@ -5369,6 +5540,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     getCwd,
     setPendingCwd,
     newSession,
+    cloneSession,
+    sessionInfo,
+    setCharterProvider,
     shutdown: () => {
       clearInterval(paneDriftTimer);
       clearInterval(keepaliveTimer);
@@ -5532,7 +5706,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           const resumeBaseline = !armMigration ? listJsonls(dirname(a.jsonlPath)) : undefined;
           // Respawn in the binding's runningCwd (pendingCwd doesn't apply to a
           // mid-turn reincarnation — only /new and /clear-with-pending swap cwd).
-          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: tagOfTarget(a.target) || a.target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name });
+          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: tagOfTarget(a.target) || a.target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, systemPrompt: charterFor(a.target) });
           if (r.ok && r.tmuxPane && r.tmuxSession) {
             a.tmuxPane = r.tmuxPane;
             a.tmuxSession = r.tmuxSession;

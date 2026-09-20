@@ -5,7 +5,18 @@
 ## [Unreleased]
 
 ### Added
+- **wizard: 绑定聊天的会话从此是一个有身份的角色**。一个 `chat:xxx[#tag]` 不再只是路由 key，它有名字(= 聊天名，带 tag 的分身读作 `chat#tag`)、一句职责、一份跨会话的记忆、一条家谱，以及「知道自己活在一个群里、群里还有别的同类」这件事。
+  - **身份走系统提示，不走对话**。spawn 时把宪章写进 `~/.wezard/state/charters/<sid>.md`，以 `--append-system-prompt "$(cat …)"` 压进那个进程 —— 不占一轮、群里看不见、`/clear` 抹不掉、上下文窗口也挤不掉。所有 spawn 路径(群里 `/new`、pane 死了的自愈重生、编排生出来的分身)统一从 `setCharterProvider` 取身份，「是谁」不再取决于是哪段代码把它生出来的。没有该 flag 的后端(codebuddy)静默跳过，无回归。
+  - **分身(clone) = fork 父亲此刻的上下文**。`spawn_clone({inherit:true})` 以 `--resume <父 sid> --fork-session` 起新 pane，CLI 把父亲的 transcript 复制成一份新的再继续写：分身开局就带着父亲读过的一切，父亲毫发无损。于是「先把公共材料读进一个基座，再从它分出 N 个干活的」成立 —— 材料只读一遍，却进了 N 份上下文。分叉文件在该 pane 收到**第一条消息**时才生成，所以开场白(即第一件活)是分叉的触发器，等到它才 attach；等不到就连 pane 一起收掉，绝不拿父亲的 sid 凑合。`inherit` 必填，没有默认值。
+  - 新 MCP 工具：`wizard_whoami`(我是谁 / 上下文用了多少 / 分身有哪些) · `wizard_identity`(给自己起名字、写职责；默认会话起名同时给聊天起名) · `wizard_roster`(全体 wizard 与 clone：名字/聊天/工作区/职责/忙闲/家谱) · `spawn_clone` · `stop_wizard`(打断或终结) · `wizard_remember`(跨 `/clear` 活下来的长期记忆，每次 spawn 重新注入) · `wizard_handoff_self`(上下文快满时自己写简报、原地 `/clear` 重开、把简报贴回去)。
+  - 注册表落在 `~/.wezard/wizards.json`(`wrc.mirror.wizardsFile`)。
 - `/new` 接受位置参数 `[cli] [model] [prompt…]`，三个都可选、从前往后逐个认领：认得出的 CLI 名吃进后端、认得出的模型别名(`opus` / `sonnet` / `haiku` / `claude-opus-5` 这类完整 slug)吃进 `--model`、剩下的整段作为新会话的第一句话在 spawn 后照常走 dispatch 注入。`/new opus`、`/new 帮我看下这个 bug`、`/new codebuddy opus #docs 先读一遍 README` 都成立。模型槽刻意收窄到已知别名与 `claude|gpt|gemini|deepseek-*` slug —— 认不出的一律当正文，`/new 看看 sonnet 贵不贵` 不会被吃掉第一个词。
+
+### Changed
+- **把历史上的 peer 话术统一到 wizard/clone**。同一套东西此前有两种说法(「会话 / peer / sibling」与「wizard / 分身」)，模型读到的是分裂的世界观。现在 MCP 工具描述、`#tag` mention 提示(`<system-reminder>`)、`/help`、`/peers`、README 与架构文档一律讲同一种话：一个绑定聊天的会话 = 一个 wizard，它的分身 = clone，同一聊天里的其他 wizard = 同伴。**工具名保持不变** —— 名字是地址，改名会把 hint、文档与用户肌肉记忆一起打碎；`send_peer` 读作「跟另一个 wizard 说话」即可。
+  - `/peers`(新增别名 `/wizards`)从「会话列表」改成**名册**：每行带名字、职责、忙闲、以及「分身自 #x」。名字与职责来自注册表，通过 `bindWizardStore` 进程级绑定读到，没登记过的仍只显示 tag。
+  - `new_claude_session` 的描述明确写出它与 `spawn_clone` 的分工(白纸一张 vs 继承上下文)，`handoff` 明确指向 `wizard_handoff_self` 处理自己，`stop_graph` 指向 `stop_wizard` 做即时打断 —— 相邻能力之间互相指路，模型不必猜。
+- **wizard 之间的对话在群里只留关键节点，且不重复**。`wait_peer` 拿回的结论只推给**提问方**的群 —— 答话方自己的群里那条回复本来就会以它自己的气泡出现，再 relay 一遍就是同一句话说两遍；同一个群内更是整条省掉。派活(`send_peer`)、分身出生、终结、自我交接仍然各留一条，中间的催促只落在 chat 详情页。宪章里同时写死了说话的规矩：分清「对人说」与「对 wizard 说」、不复述、不客套、不替别人开口。
 
 ## [1.3.23] - 2026-09-17
 

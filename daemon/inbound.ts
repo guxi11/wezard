@@ -19,6 +19,7 @@ import { syncProjectConfig, renderSyncReport } from "./cfg-sync.js";
 import { captureQuota, renderQuotaReport } from "./quota.js";
 import { tagOfKey, baseOfKey, withTagHeader, parseTagHeader, tagTokenRe, allTags, allCompoundAddresses, labelFor } from "../shared/session-label.js";
 import { chatNameOf, chatBaseOf, clearChatName, listChatNames, peerAddress, setChatName } from "./chat-name.js";
+import { wizardName, wizardStore } from "./wizard.js";
 
 /** 判定"引用内容是否已在目标会话上下文里"时回看的轮数 —— 引用的通常是最近几轮
  *  里的某条气泡,再往前用户多半是真想把老内容重新拎出来说事。 */
@@ -181,13 +182,13 @@ const renderHelp = (): string =>
     "*wezard 命令*",
     "",
     "▎会话",
-    "`/new` 新开会话并绑定本聊天 (沿用当前会话的 CLI)",
+    "`/new` 让一个全新的 wizard 就位并绑定本聊天 (沿用当前的 CLI;不继承上下文)",
     "`/new <模型>` 指定模型新开 (opus / sonnet / haiku / 完整 slug)",
     "`/new <问题>` 新开并把这句话作为第一句发过去",
     "`/clear` 清空当前会话上下文 (有待切项目时自动升级为 /new)",
-    "`/sessions` 列出 live 会话 · `/sessions <emoji|id>` 切换",
+    "`/sessions` 列出本机所有 live 会话 · `/sessions <emoji|id>` 把本聊天改接到某一个",
     "`/stop` 打断当前生成 (Esc)",
-    "`/kill` 结束本会话并移除 tmux pane (下条消息自动新开)",
+    "`/kill` 结束本会话并移除 tmux pane (下条消息自动让新的 wizard 就位)",
     "`/n` 向 CLI 输入回车 (Enter)",
     "`/reveal` 把终端的 tmux 窗口切到本会话",
     "",
@@ -197,27 +198,33 @@ const renderHelp = (): string =>
     "不写则沿用本会话当前的 CLI;新开 `#tag` 会话则继承本聊天的 CLI。",
     "切换后 `/clear`、`/stop`、`--resume` 自愈都仍绑在该 CLI 上。",
     "",
-    "▎多会话路由",
-    "同一聊天可同时运行多个 Agent 会话:消息中任意位置带 `#tag`(如 `#docs 帮我改 README`)",
-    "即路由到该标签会话;不带 tag = 默认会话。tagged 会话的回复以 `emoji #tag` 前缀标注。",
-    "`/clear #tag`、`/pwd #tag`、`/stop #tag` 等命令同理按 tag 路由。",
-    "`#tag` 与 CLI 名可同时写:`/new codebuddy #docs` = 用 codebuddy 开 docs 会话。",
+    "▎wizard(绑定聊天的会话)",
+    "一个聊天里可以同时住着多个 wizard —— 各有各的终端、工作区、名字和职责。",
+    "消息里任意位置带 `#tag`(如 `#docs 帮我改 README`)就是找那一个;不带 = 默认那个。",
+    "它们的回复以 `emoji #tag` 打头。`/clear #tag`、`/pwd #tag`、`/stop #tag` 同理按 tag 走。",
+    "`#tag` 与 CLI 名可以同写:`/new codebuddy #docs` = 用 codebuddy 让 docs 就位。",
+    "wizard 知道自己是谁(名字=聊天名,带 tag 的读作 `聊天名#tag`)、在哪个目录、群里还有谁,",
+    "也知道自己能给自己起名、写职责、记长期记忆、上下文满了自己交接重开。",
+    "",
+    "▎分身(clone)",
+    "对 AI 说「分个身去干 X」「开三个分身分头处理」即可。分身默认**继承它此刻的上下文** ——",
+    "先把公共材料读进来、再分身,材料只读一遍却进了 N 份上下文;要白纸一张就说明白。",
+    "分身有自己的 `#tag`、自己的终端,也能再生分身。活干完对 AI 说「收掉它们」。",
     "",
     "▎跨聊天",
     "`/name <名字>` 给本聊天起名 · `/name` 查看 · `/name -` 取消",
-    "`/chats` 列出所有已知聊天及其会话",
-    "名字 1-32 位字母/数字/`_`/`-`,全机唯一。起了名字,别的聊天才叫得到这里:",
-    "`daily#fix` = daily 聊天的 `#fix` · `daily#` = 它的默认会话 · `fix` = 本聊天优先。",
-    "对 AI 说「让 daily#fix 看一眼」「在 daily 里开个 #ingest 跑这个目录」即可,",
-    "它会调 `send_peer` / `new_claude_session` 跨群寻址、跨群建会话。",
-    "未命名的聊天不可寻址、也不可被建入 —— 想被叫到,就在那个群里发一次 `/name`。",
+    "`/chats` 列出所有已知聊天及其 wizard",
+    "名字 1-32 位字母/数字/`_`/`-`,全机唯一;它同时就是这里默认 wizard 的名字。",
+    "`daily#fix` = daily 聊天的 `#fix` · `daily#` = 它的默认 wizard · `fix` = 本聊天优先。",
+    "对 AI 说「让 daily#fix 看一眼」「在 daily 里开个 #ingest 跑这个目录」即可。",
+    "未命名的聊天叫不到、也生不进去 —— 想被叫到,就在那个群里发一次 `/name`。",
     "",
-    "▎多会话协作",
-    "`/peers` 列出本聊天的所有会话及忙闲状态",
-    "同一聊天内的会话互为 peer,可以互相观察和驱动。直接说人话即可:",
-    "「看下 `#fix` 的进展,推动它直到结束」— AI 会读它的终端、注入指令、等它跑完。",
-    "「让 `#fix` 和 `#review` 互相迭代到 review 说 LGTM」— AI 会建一个 loop graph,",
-    "把多个带 tag 的会话(可各用不同 CLI / 模型)串成流水线并循环驱动。",
+    "▎协作",
+    "`/peers`(或 `/wizards`) 列出本聊天的 wizard:名字、职责、忙闲、谁是谁的分身",
+    "同一聊天里的 wizard 互相看得见也驱动得动,直接说人话:",
+    "「看下 `#fix` 的进展,推动它直到结束」— AI 会读它的终端、派活、等它跑完。",
+    "「让 `#fix` 和 `#review` 互相迭代到 review 说 LGTM」— AI 会把它们串成一条循环流水线。",
+    "它们之间的关键往返(派活、分身出生、收尾、结论)会在群里留痕,中间的催促只进详情页。",
     "",
     "▎信息 (免授权)",
     "`/id` 查看会话/权限 id",
@@ -237,7 +244,7 @@ const renderHelp = (): string =>
     "纯引用不加字：把被引用内容当正文重发 —— 微信会去重相同文本，",
     "这是重新触发同一条命令 (如 `/usage`) 的唯一方式。",
     "",
-    "其余文本直接转发给已绑定的 Agent 会话。",
+    "其余文本直接转发给这个聊天绑定的 wizard。",
   ].join("\n");
 
 // /session(s) [arg] — list live Claude sessions, or switch the mirror to one.
@@ -269,10 +276,11 @@ const renderSessionsList = (sessions: SessionInfo[], currentSid: string): string
   ].join("\n");
 };
 
-// /peers — roster of the sessions living in THIS chat (default + every `#tag`).
-// Distinct from /sessions, which sweeps the whole host: peers are the ones an
-// agent here can actually collaborate with (shared chat = shared address space).
-const isPeersCommand = (text: string): boolean => /^\/(?:peers?|agents?)$/iu.test(text.trim());
+// /peers — 住在**这个聊天**里的 wizard 名册 (默认那个 + 每个 `#tag`)。与 /sessions
+// 的区别是范围: /sessions 扫的是整台机器上所有 agent 会话 (包括人在终端里自己开
+// 的、与企微无关的), 这里列的是同一个聊天里互相叫得动的那些 —— 同聊天 = 同一个
+// 地址空间。名字与职责来自 wizard 注册表, 没登记过的就只显示 tag。
+const isPeersCommand = (text: string): boolean => /^\/(?:peers?|agents?|wizards?)$/iu.test(text.trim());
 
 const uniq = (xs: string[]): string[] => [...new Set(xs)];
 const dirOf = (p: PeerInfo): string => p.cwd.replace(/^.*\//, "") || p.cwd;
@@ -282,30 +290,48 @@ const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}
 // repeated N times — hoist those into the header and annotate rows only where
 // they actually differ. Rows are blank-line separated so a wrapped summary can't
 // visually merge into the next peer.
-const renderPeers = (peers: PeerInfo[]): string => {
-  if (peers.length === 0) return "[wezard] 本聊天还没有会话。发消息或 `/new` 建一个。";
+const renderPeers = (peers: PeerInfo[], chatName: string): string => {
+  if (peers.length === 0) return "[wezard] 本聊天还没有 wizard。发消息或 `/new` 让一个就位。";
+  const reg = wizardStore();
   const dirs = uniq(peers.map(dirOf));
   const clis = uniq(peers.map((p) => p.cli));
   const shared = [dirs.length === 1 ? dirs[0] : "", clis.length === 1 ? clis[0] : ""].filter(Boolean);
+  // 家谱只画直系: 谁是谁的分身。整棵树留给 AI 侧的 wizard_roster —— 群里一行放不下。
+  const parentTag = (target: string): string => {
+    const p = reg?.get(target)?.parent;
+    return p ? tagOfKey(p) || "默认" : "";
+  };
   const rows = peers.flatMap((p) => {
-    const name = p.tag ? `#${p.tag}` : "默认";
+    const rec = reg?.get(p.target);
+    const addr = p.tag ? `#${p.tag}` : "默认";
+    const name = wizardName(rec, chatName, p.target);
+    // 名字推导不出新信息时 (就是 tag 本身) 不重复印一遍。
+    const title = name && name !== p.tag && name !== chatName ? `${name} \`${addr}\`` : addr;
     const state = !p.paneAlive ? "⚫️ 已关闭" : p.busy ? "🔴 忙" : "🟢 空闲";
-    const varies = [dirs.length > 1 ? dirOf(p) : "", clis.length > 1 ? p.cli : ""].filter(Boolean);
+    const from = parentTag(p.target);
+    const varies = [
+      dirs.length > 1 ? dirOf(p) : "",
+      clis.length > 1 ? p.cli : "",
+      from ? `分身自 #${from}` : "",
+    ].filter(Boolean);
     const me = p.self ? " ⬅️ 本会话" : "";
     return [
-      `**${p.label} ${name}** ${state}${varies.length ? ` · ${varies.join(" · ")}` : ""}${me}`,
+      `**${p.label} ${title}** ${state}${varies.length ? ` · ${varies.join(" · ")}` : ""}${me}`,
+      ...(rec?.description ? [`　_${clip(rec.description, 48)}_`] : []),
       `　${clip(p.summary, 64)}`,
-      "",
+      "", // 行间空行: 没有它, 折行的摘要会和下一个 wizard 糊在一起
     ];
   });
-  const named = peers.find((p) => p.chat)?.chat ?? "";
+  const named = chatName || peers.find((p) => p.chat)?.chat || "";
   return [
-    `[wezard] 本聊天${named ? ` \`${named}\`` : ""}的会话 · ${peers.length} 个${shared.length ? ` · ${shared.join(" · ")}` : ""}`,
+    `[wezard] 本聊天${named ? ` \`${named}\`` : ""}的 wizard · ${peers.length} 个${shared.length ? ` · ${shared.join(" · ")}` : ""}`,
     "",
     ...rows,
-    "> 协作：直接说「看下 #fix 的进展并推动它」，AI 会读它的终端并注入指令",
-    named ? "" : "> 起名：`/name <名字>` — 起了名字，别的聊天才能用 `名字#tag` 叫到这里的会话",
-  ].filter((l) => l !== "").join("\n");
+    "> 协作：直接说「看下 #fix 的进展并推动它」，AI 会读它的终端、派活、等它跑完",
+    "> 分身：说「分个身去干 X」— AI 会 clone 一个带着当前上下文的 wizard，干完再收掉",
+    // 空行只在这一处按需省略 —— 上面那些是有意的分隔, 不能被一把 filter 掉。
+    ...(named ? [] : ["> 起名：`/name <名字>` — 起了名字，别的聊天才叫得到这里的 wizard（`名字#tag`）"]),
+  ].join("\n");
 };
 
 // /chats — 跨聊天目录。命名的聊天可以被 `名字#tag` 精确寻址;没命名的只能靠
@@ -877,7 +903,7 @@ export const installInboundRouter = (
       }
       let body: string;
       try {
-        body = renderPeers(await bridge.peers(who));
+        body = renderPeers(await bridge.peers(who), chatNameOf(cfg, who));
       } catch (e) {
         body = `[wezard] /peers failed: ${(e as Error).message}`;
       }

@@ -87,6 +87,14 @@ export interface CliBackend {
    *  Without these, cc-bridge falls back to the whole-assistant-message path
    *  (no typewriter effect, but still functional). */
   headlessStreamingArgs: readonly string[];
+  /** Flag that appends text to the session's system prompt at launch, or
+   *  undefined when the CLI has none. wezard uses it to press a wizard's
+   *  identity into the process itself — a system prompt survives `/clear` and
+   *  can't be squeezed out of the context window, which a first message can't
+   *  promise. Undefined → the spawn silently goes without a charter rather
+   *  than passing a flag the binary would reject (an unknown flag kills the
+   *  pane before the TUI ever starts). */
+  systemPromptFlag?: string;
   /** Encode an absolute cwd path into the on-disk project dir segment. */
   encodeProjectDir: (absCwd: string) => string;
   /** Map a raw parsed jsonl line into the Claude Code TranscriptLine shape
@@ -124,6 +132,7 @@ const makeClaude = (name: CliBackendName, bin: string): CliBackend => {
     projectDirEnv: "CLAUDE_PROJECT_DIR",
     pluginRootEnv: "CLAUDE_PLUGIN_ROOT",
     headlessStreamingArgs: ["--verbose"],
+    systemPromptFlag: "--append-system-prompt",
     encodeProjectDir: encodeClaude,
     // Claude Code jsonl is already in the TranscriptLine shape — identity pass.
     normalizeTranscriptLine: (raw) => raw as NormalizedTranscriptLine,

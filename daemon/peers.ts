@@ -1,10 +1,10 @@
-// Peer awareness: the read side of "who else is working in this chat".
+// 同伴感知: 「这个聊天里还有谁在干活」的读侧。
 //
-// A single WeCom chat hosts one default session plus any number of `#tag`
-// sessions (inbound.ts routes on the tag). Those siblings are *peers* — same
-// chat, own tmux pane, own CLI / model / cwd. An agent that can see its peers
-// can also collaborate with them: read `#fix`'s pane, inject a nudge, wait for
-// it to go idle, then act on its answer.
+// 一个企微聊天里住着一个默认 wizard 加任意多个 `#tag` wizard (inbound.ts 按 tag
+// 路由)。它们互为同伴 —— 同一个聊天, 各有各的 pane、CLI、模型、工作区。看得见
+// 同伴的 wizard 就驱动得动它们: 读 `#fix` 的终端、推它一把、等它闲下来、再拿它
+// 的答案接着干。身份那一层 (名字/职责/记忆/家谱) 在 wizard.ts, 这里只管"此刻它
+// 在干嘛、是不是还活着"。
 //
 // Everything here is pure parsing over a transcript tail or a captured pane —
 // no tmux, no WeCom, no daemon state. The mirror bridge (which owns the live
@@ -369,18 +369,16 @@ export const compactPane = (paneText: string, rows = 24): string =>
     .slice(-rows)
     .join("\n");
 
-// ── Peer mentions ─────────────────────────────────────────────────────
-// The inbound router consumes only the FIRST `#tag` of a message — that one
-// says WHICH session receives it. Every other `#tag` flows through verbatim,
-// and that is exactly where the user points at a sibling: "让 #b 也看一眼",
-// "把 #fix 的结论拿过来". The receiving agent sees a bare token with nothing in
-// its context marking it as a live session, so it answers on #b's behalf (or
-// reads it as an issue number) instead of reaching for the peer tools.
+// ── 提到别的 wizard ───────────────────────────────────────────────────
+// 入站路由只吃掉消息里**第一个** `#tag` —— 那个决定这条消息进谁的输入框。其余的
+// `#tag` 原样流过去, 而那正是用户指着另一个 wizard 说话的地方: 「让 #b 也看一眼」
+// 「把 #fix 的结论拿过来」。收到消息的 wizard 眼里只有一个光秃秃的 token, 上下文
+// 里没有任何东西说明它是一个**活着的同类**, 于是它替 #b answered 了 (或者把它读
+// 成 issue 号), 而不是去叫它。
 //
-// Annotating the mention at the boundary is what turns `#b` into "peer b". The
-// hint is only ever emitted for tags that ALREADY resolve through the same
-// lookup send_peer/peek_peer use, so it can never advertise a call that would
-// fail — an unresolvable `#123` / `#L45` passes through silently.
+// 在边界上给这个 mention 加注, 就是把 `#b` 变成「wizard b」的那一步。加注只对
+// 已经能通过 send_peer/peek_peer 同一套查找解析出来的 tag 发生, 所以它永远不会
+// 广告一个调不通的地址 —— 解析不出来的 `#123` / `#L45` 静静穿过去。
 export interface PeerMention {
   /** Tag as written, without `#`. */
   tag: string;
@@ -409,14 +407,14 @@ export const renderPeerMentionHint = (mentions: readonly PeerMention[]): string 
   const unborn = mentions.filter((m) => m.unborn);
   const lines = live.map(
     (m) =>
-      `- \`#${m.tag}\` ${m.label} — a live agent session${m.foreign ? ` in ANOTHER chat${m.chat ? ` named "${m.chat}"` : ""}` : " in this chat"}` +
-      ` (target \`${m.target}\`${m.cwd ? `, cwd ${m.cwd}` : ""}), address "${m.address}".`,
+      `- \`#${m.tag}\` ${m.label} —— 一个活着的 wizard, 住在${m.foreign ? `**另一个**聊天${m.chat ? ` (\`${m.chat}\`)` : ""}` : "你这个聊天"}` +
+      ` (target \`${m.target}\`${m.cwd ? `, 工作区 ${m.cwd}` : ""}), 地址 "${m.address}"。`,
   );
   const unbornLines = unborn.map(
     (m) =>
-      `- \`${m.address}\` — refers to chat "${m.chat}" tag "#${m.tag}", but that session does NOT exist yet.` +
-      ` Create it first: new_claude_session({ chat: "${m.chat}", tag: "${m.tag}", cwd: "<project path>" }),` +
-      ` then send_peer("${m.address}", "<task>") to hand it work.`,
+      `- \`${m.address}\` —— 指的是聊天 "${m.chat}" 里的 "#${m.tag}", 但那个 wizard **还不存在**。` +
+      ` 先把它造出来: new_claude_session({ chat: "${m.chat}", tag: "${m.tag}", cwd: "<项目路径>" }) (白纸一张),` +
+      ` 或者 spawn_clone 让它继承你此刻的上下文; 然后 send_peer("${m.address}", "<活>") 派活。`,
   );
   const parts: string[] = [
     "",
@@ -424,28 +422,30 @@ export const renderPeerMentionHint = (mentions: readonly PeerMention[]): string 
   ];
   if (lines.length > 0) {
     parts.push(
-      "The `#tag` token(s) in the message above name peer agent sessions, not literal text:",
+      "上面这条消息里的 `#tag` 点的是**别的 wizard**, 不是字面文本:",
       ...lines,
     );
   }
   if (unbornLines.length > 0) {
     parts.push(
-      "The following compound addresses (`chatName#tag`) refer to sessions that don't exist yet:",
+      "下面这些 `聊天名#tag` 形式的地址指向还不存在的 wizard:",
       ...unbornLines,
     );
   }
   parts.push(
-    "When the user asks you to involve, check on, or relay to one of them, use the wezard peer tools rather than",
-    "guessing or answering on its behalf: peek_peer(address) reads its recent conversation, send_peer(address, text)",
-    "hands it work or a nudge, wait_peer(address) blocks until it goes idle, list_peers() shows everyone. Pass the",
-    "`address` shown above verbatim — a bare tag for a sibling, `chatName#tag` for a peer in another chat. A mention that is",
-    "merely referential (\"#b 说的那个方案\") needs no tool call — judge from what the user is asking for.",
+    "用户要你把它们拉进来、看看它们在干嘛、或者把话带到时, 去叫它们, 别猜、更别替它们回答:",
+    "peek_peer(address) 读它最近的对话, send_peer(address, text) 派活或推它一把, wait_peer(address) 等它闲下来,",
+    "wizard_roster() 看全体 wizard 的名字/职责/家谱。地址原样用上面给的那个 —— 同一个聊天里是裸 tag,",
+    "别的聊天里是 `聊天名#tag`。你跟它们说的话会以 `你 → 它` 的气泡出现在群里, 所以直说、别复述。",
+    "只是提了一嘴、并没有要你去找它 (\"#b 说的那个方案\") 就不必调工具 —— 看用户到底要什么。",
     "</system-reminder>",
   );
   return parts.join("\n");
 };
 
-// ── Peer model ────────────────────────────────────────────────────────
+// ── 同伴模型 ──────────────────────────────────────────────────────────
+// 一行 = 一个 wizard 此刻的可观测状态。名字/职责/家谱不在这里 (那些在注册表里,
+// 由 index.ts 的 roster 贴上来) —— 这一层只回答"它在不在、忙不忙、刚在干嘛"。
 export interface PeerInfo {
   /** Full session key, e.g. `chat:wrxxx#fix`. */
   target: string;
@@ -473,6 +473,6 @@ export interface PeerInfo {
   /** Transcript mtime (ms); 0 when the session hasn't written yet. */
   lastActivity: number;
   summary: string;
-  /** True for the caller's own session — an agent should not drive itself. */
+  /** 调用方自己 —— wizard 不该驱动自己。 */
   self: boolean;
 }

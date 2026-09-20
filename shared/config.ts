@@ -69,6 +69,10 @@ const Mirror = z.object({
   // on daemon boot + lazily on first inbound after reload — so reloading the
   // daemon doesn't re-spawn a fresh claude for an already-bound chat.
   attachmentsFile: z.string().default("~/.wezard/mirror-attachments.json"),
+  // Wizard registry: 每个「绑定聊天的会话」的名字 / 职责 / 记忆 / 家谱。运行时
+  // 状态 (会话生生死死), 所以落在 state 目录而不是 config.jsonc —— 与 chats 的
+  // 名字表相反: 那是人手写的长期配置。
+  wizardsFile: z.string().default("~/.wezard/wizards.json"),
   // Standalone fallback 路径(liveStream 已 closed/dead/capped) 上的防抖聚合窗口
   // (ms)。窗口内同一 attachment 的多个 item 合并为一条 markdown, 抑制连续工具
   // 调用刷屏。liveStream 仍活时不受影响——直接走 typewriter。0 = 关闭。

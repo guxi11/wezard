@@ -157,47 +157,64 @@ curl -sS -X POST http://127.0.0.1:17890/publish \
 
 ---
 
-## 一个聊天里跑多个会话（`#tag` 路由）
+## 一个聊天里住着多个 wizard（`#tag` 路由）
 
-同一个 WeCom 聊天里可以同时挂多个并行 Agent session，靠消息里的 `#tag` 前缀路由。不带 tag 就是默认 session，与旧行为一致。
+一个绑定了聊天的会话，在 wezard 里叫一个 **wizard**：它有自己的终端、工作区、名字和职责，知道群里还有谁，也叫得动它们。同一个 WeCom 聊天里可以同时住着多个 wizard，靠消息里的 `#tag` 路由。不带 tag 就是默认那个，与旧行为一致。
 
 ![多会话](images/multi-session.png)
 
 **创建 & 切换**
 
 ```
-/new #docs        新开一个标签为 docs 的会话（tmux 窗口名也叫 docs）
-/new #api         再开一个,与 #docs 完全独立(独立 sessionId / jsonl / cwd)
-/new              默认 session,老玩法
+/new #docs        让一个叫 docs 的 wizard 就位（tmux 窗口名也叫 docs）
+/new #api         再来一个,与 #docs 完全独立(独立 sessionId / jsonl / cwd)
+/new              默认那个,老玩法
 ```
 
 **消息路由**
 
-只要消息文本里任意位置带 `#tag`（空白/句首/句尾分隔），就路由到那个 tagged session：
+只要消息文本里任意位置带 `#tag`（空白/句首/句尾分隔），就路由到那个 wizard：
 
 ```
 #docs 帮我把 README 的目录补一下
 帮我看下这个报错 #api
-/pwd #docs        → 只看 docs 会话的项目路径
-/stop #api        → 只打断 api 会话
-/clear #docs      → 只清 docs 会话上下文
+/pwd #docs        → 只看 docs 的工作区
+/stop #api        → 只打断 api
+/clear #docs      → 只清 docs 的上下文
 ```
 
-不带 tag 的消息始终落到默认 session。
+不带 tag 的消息始终落到默认那个。消息里**第二个**及之后的 `#tag` 不参与路由，但守护进程会在消息尾部挂一条不可见的提示，告诉收信的 wizard「`#b` 是一个活着的同类，去叫它，别替它回答」。
 
 **回复标识**
 
-tagged session 的每条回复自带 `emoji #tag` 前缀（emoji 由 tag 名 hash 决定，稳定），一眼分辨来自哪个 session：
+带 tag 的 wizard 每条回复自带 `emoji #tag` 前缀（emoji 由 tag 名 hash 决定，稳定），一眼分辨是谁在说话——在群里引用它的气泡，就等于跟它说话：
 
 ```
 🦊 `#docs`
 
-（这里是 docs 会话的 Agent 回复……）
+（这里是 docs 这个 wizard 的回复……）
 ```
 
 默认 session 无前缀，视觉上保持简洁。
 
 **tag 语法**：`[\p{L}\p{N}_-]{1,32}`，支持中英文数字与 `_`、`-`；一条消息里只识别**第一个** `#tag`，后续的 `#foo` 原样透传给 Agent（不会误伤代码里的 `#include` 或 issue 引用）。
+
+**身份、记忆与分身**
+
+每个 wizard 的身份（名字、工作区、职责、记忆、家谱）在它启动时以**系统提示**的形式压进进程——不占一轮对话、群里看不见、`/clear` 也抹不掉。所以它一睁眼就知道自己是谁、群里还有谁、自己能做什么：
+
+```
+你叫什么 / 你负责什么          → 它调 wizard_whoami
+以后你就叫 sanitizer          → wizard_identity，默认会话会连带给聊天起名
+记住：发版前必须更新 CHANGELOG  → wizard_remember，跨 /clear 活着，每次重开重新入场
+还有谁在跑 / 谁在弄那个项目     → wizard_roster（名字、职责、忙闲、谁是谁的分身）
+分个身去把这三个目录都扫一遍     → spawn_clone ×3，干完 stop_wizard 收掉
+上下文快满了                   → 它自己 wizard_handoff_self：写简报、原地重开、把简报贴回去
+```
+
+**分身（clone）默认继承上下文**：`spawn_clone({inherit:true})` 用 `--resume <父> --fork-session` 起 pane，CLI 把父亲的 transcript 复制一份再继续写——分身开局就带着父亲读过的材料，父亲毫发无损。于是「先把公共文档读进一个基座，再从它分出 N 个干活的」成立：材料只读一遍，却进了 N 份上下文。要白纸一张就传 `inherit:false`（那时才能顺便换工作区）。分身自己也能再分身，层级不限。
+
+它们之间的**关键往返**（派活、分身出生、收尾、跨群结论）会以 `A → B` 的气泡留在群里，中间的催促只落进 chat 详情页——人看得见谁派了什么活、谁给了什么结论，不会被每一次「收到」刷屏。
 
 **cwd 是聊天级的，不是 session 级**：同一聊天里所有 tagged / 默认 session **共用**一个 cwd。`/new #foo` 会在**当前聊天绑定的 cwd** 下起 pane；换项目直接对 AI 说「切到 /path/to/proj」，它调 `set_workspace` MCP **一步到位**——杀掉当前 pane、在新 cwd 重开新会话，聊天里以新会话的 📂 项目回执为准，上下文不延续。这样多 session 天然对齐到同一个项目根，切换 tag 时不用重新指路径。
 
@@ -225,7 +242,7 @@ tagged session 的每条回复自带 `emoji #tag` 前缀（emoji 由 tag 名 has
 | `fix` | 本聊天的 `#fix`；本聊天没有，才回退去找全机唯一的 `#fix` |
 | `daily#fix` | daily 这个聊天的 `#fix`——不问 tag 全不全局唯一 |
 | `daily#` | daily 的默认（无 tag）会话 |
-| `chat:wr…#fix` | 全量 key，`/chats`、`list_peers` 吐出来的原样也能用 |
+| `chat:wr…#fix` | 全量 key，`/chats`、`wizard_roster` 吐出来的原样也能用 |
 
 起完名之后，在**别的群**里直接说人话即可：
 
@@ -235,7 +252,7 @@ tagged session 的每条回复自带 `emoji #tag` 前缀（emoji 由 tag 名 has
 别的群还有谁在跑                      → AI 调 list_chats
 ```
 
-最后一块是**跨群建会话**：`new_claude_session` 的 `chat` 参数可以直接在另一个已命名的聊天里拉起 peer，「目标 peer 还不存在」不再需要找个人去那个群手打 `/new`。跨群的每一次 `send_peer`，两边聊天都会收到 relay 气泡——被叫的那侧不会莫名其妙冒出一句话。
+最后一块是**跨群造 wizard**：`new_claude_session` 的 `chat` 参数可以直接在另一个已命名的聊天里让一个 wizard 就位，「要找的那个还不存在」不再需要拉个人去那边手打 `/new`。跨群派活时两边聊天都会收到 relay 气泡——被叫的那侧不会莫名其妙冒出一句话；它的回答则只推回给**问的人**那个群（它自己群里那条回复本来就在）。
 
 > **未命名的聊天既不可寻址、也不可被建入**，这是刻意的：往一个谁也读不出的 `chat:wr…` id 里塞会话，等于把它扔进一个调用方根本不该进的群。想让某个群能被叫到，就在那个群里发一次 `/name`。
 
@@ -273,7 +290,7 @@ daemon 同时挂载所有已安装的 CLI，不是二选一：你可以一个 tm
 
 ## Prompt-cache 保活（省钱心跳）
 
-Anthropic 的 prompt cache 只活 ~5 分钟，且**写缓存 1.25x、读缓存 0.1x**。一个 pane 一旦空闲（agent 在等 peer 回复、或后台任务在跑），整份上下文就会掉出缓存——下一轮真实对话得按 1.25x 把整个上下文重写一遍。保活机制会在缓存**即将过期前**往 pane 注入一次极小的 ping，逼模型发起一次廉价请求（命中缓存前缀走 0.1x 读）并把 5 分钟 TTL 往前滑，真实那轮就只需写增量。
+Anthropic 的 prompt cache 只活 ~5 分钟，且**写缓存 1.25x、读缓存 0.1x**。一个 pane 一旦空闲（wizard 在等同伴回话、或后台任务在跑），整份上下文就会掉出缓存——下一轮真实对话得按 1.25x 把整个上下文重写一遍。保活机制会在缓存**即将过期前**往 pane 注入一次极小的 ping，逼模型发起一次廉价请求（命中缓存前缀走 0.1x 读）并把 5 分钟 TTL 往前滑，真实那轮就只需写增量。
 
 - **锚定「真实活动」，不自我续命**：整套调度以**最后一次真实（非 ping）对话**为锚——保活自己的 ping **不会**刷新这个锚点。空闲落在 `[ttlSec - marginSec, ttlSec)`（缓存快过期）才 ping；一旦**真实空闲超过 `maxIdleSec`（默认 = TTL 5min）就彻底停手**，让缓存自然冷掉。这正是关键：老会话不会因为「ping 把 mtime 刷新了」而被误判成活跃，从而无限保活。
 - **两道成本保险**：① 缓存已冷（距上次任何触碰 ≥ TTL）绝不 ping——否则就是为 no-op 付整份冷写；② 真实工作太老（≥ `maxIdleSec`）直接放弃。daemon reload 后，会先看 transcript 最后一轮是不是自己的 ping，是就把锚点当成「早已空闲」，**不会**把一个搁置很久的大会话重新烧热。
@@ -303,7 +320,7 @@ IM 里发 `/help` 可随时拉出完整命令表；每次 `/new`、`/clear` 之�
 /new · /clear · /stop · /n          会话控制
 /sessions [emoji|id]                 列出 / 切换 live 会话
 /new <cli> [#tag]                    切换 CLI 后端 / 开并行会话
-/peers                               本聊天的会话及忙闲状态
+/peers · /wizards                    本聊天的 wizard：名字、职责、忙闲、家谱
 /name [名字|-] · /chats              给本聊天起名 / 跨聊天目录
 /id · /pwd · /usage · /cost · /audit  信息查询（免授权）
 /help                                全部命令

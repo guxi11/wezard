@@ -25,7 +25,7 @@
 // before the first paste-buffer inject hits.
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { Logger } from "pino";
@@ -235,6 +235,20 @@ export interface SpawnArgs {
    *  different models (a graph node can pick opus for design, haiku for lint).
    *  Undefined → the CLI's own default. */
   model?: string;
+  /** Fork the resumed session instead of continuing it (`--fork-session`).
+   *  MANDATORY whenever a SECOND pane resumes a session the daemon still has
+   *  bound: without it both panes append to the same jsonl and the two chats
+   *  cross-wire irrecoverably. The CLI writes the forked transcript (a seeded
+   *  copy of the parent) the moment the new pane takes its first message. */
+  forkSession?: boolean;
+  /** Wizard charter — pressed into the pane's SYSTEM prompt at launch
+   *  (`--append-system-prompt`), not injected as a first message. Two reasons:
+   *  a first message costs a turn and shows up in the chat, and it is the first
+   *  thing `/clear` throws away — while identity is exactly what must survive a
+   *  clear. Passed via `"$(cat <file>)"` so a multi-KB charter never travels
+   *  through `send-keys` (a literal newline there would submit a half-typed
+   *  command line). Ignored for backends with no such flag. */
+  systemPrompt?: string;
 }
 
 export interface SpawnResult {
@@ -305,7 +319,42 @@ export const trustWorkspace = (claudeBin: string, cwd: string, log: Logger): voi
   }
 };
 
-export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, windowName, cwdOverride, cli, model }: SpawnArgs): Promise<SpawnResult> => {
+/** 一个会话一份宪章, 会话是无限多的 —— 留最近 200 份就够用 (真正在跑的 pane
+ *  远少于此, 更老的那些对应的会话早已不存在)。best-effort: 清不掉也不影响 spawn。 */
+const CHARTER_KEEP = 200;
+const pruneCharters = (dir: string): void => {
+  try {
+    const files = readdirSync(dir).filter((n) => n.endsWith(".md"));
+    if (files.length <= CHARTER_KEEP) return;
+    files
+      .map((n) => ({ p: join(dir, n), m: statSync(join(dir, n)).mtimeMs }))
+      .sort((a, b) => b.m - a.m)
+      .slice(CHARTER_KEEP)
+      .forEach((f) => { try { unlinkSync(f.p); } catch { /* 下次再说 */ } });
+  } catch { /* ignore */ }
+};
+
+/** Park a charter next to the daemon's other state and hand back the shell
+ *  fragment that feeds it to the CLI. "" when the backend has no flag for it,
+ *  or the write failed — a missing charter degrades the wizard's self-awareness,
+ *  it must never cost us the pane. */
+const charterArg = (cfg: Config, backend: CliBackend, sessionId: string, charter: string | undefined, log: Logger): string => {
+  const text = (charter ?? "").trim();
+  if (!text || !backend.systemPromptFlag) return "";
+  try {
+    const dir = join(expandHome(cfg.daemon.stateDir), "charters");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, `${sessionId}.md`);
+    writeFileSync(file, text, "utf8");
+    pruneCharters(dir);
+    return `${backend.systemPromptFlag} "$(cat ${shQuote(file)})"`;
+  } catch (e) {
+    log.warn({ err: (e as Error).message }, "spawn-tmux: charter write failed; spawning without identity");
+    return "";
+  }
+};
+
+export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, windowName, cwdOverride, cli, model, systemPrompt, forkSession }: SpawnArgs): Promise<SpawnResult> => {
   const backend = backendFor(cfg, cli);
   const cwd = expandHome((cwdOverride ?? "").trim() || cfg.wrc.cwd);
   const projectDir = join(expandHome(backend.projectsDir), backend.encodeProjectDir(cwd));
@@ -382,11 +431,13 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, windowName, c
     "DISABLE_AUTOUPDATER=1",
   ];
   const argv = [
-    ...(resumeSessionId ? ["--resume", sessionId] : ["--session-id", sessionId]),
+    ...(resumeSessionId ? ["--resume", sessionId, ...(forkSession ? ["--fork-session"] : [])] : ["--session-id", sessionId]),
     ...(model?.trim() ? ["--model", model.trim()] : []),
     ...cfg.wrc.extraArgs,
   ].map(shQuote);
-  const cmd = [...envPrefix, backend.bin, ...argv].join(" ");
+  const cmd = [...envPrefix, backend.bin, ...argv, charterArg(cfg, backend, sessionId, systemPrompt, log)]
+    .filter(Boolean)
+    .join(" ");
   // Old tmux couldn't set the pane's start-dir via `-c`; cd into it first.
   const launch = supportsC ? cmd : `cd ${shQuote(cwd)} && ${cmd}`;
   const sent = await runTmux(["send-keys", "-t", tmuxPane, launch, "Enter"]);
