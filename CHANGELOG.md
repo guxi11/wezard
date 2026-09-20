@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Added
+- `/new` 接受位置参数 `[cli] [model] [prompt…]`，三个都可选、从前往后逐个认领：认得出的 CLI 名吃进后端、认得出的模型别名(`opus` / `sonnet` / `haiku` / `claude-opus-5` 这类完整 slug)吃进 `--model`、剩下的整段作为新会话的第一句话在 spawn 后照常走 dispatch 注入。`/new opus`、`/new 帮我看下这个 bug`、`/new codebuddy opus #docs 先读一遍 README` 都成立。模型槽刻意收窄到已知别名与 `claude|gpt|gemini|deepseek-*` slug —— 认不出的一律当正文，`/new 看看 sonnet 贵不贵` 不会被吃掉第一个词。
+
 ## [1.3.23] - 2026-09-17
 
 ### Added

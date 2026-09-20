@@ -121,13 +121,35 @@ const resolveAuditMirror = (
   }
   return mirrors.find((m) => m.target === who || m.target === chatWho);
 };
-// `/new` optionally names which CLI to launch (`/new codebuddy`). Bare `/new`
-// keeps whatever CLI the chat's current session runs — see newSession's inherit
-// rule — so naming one is only needed to *switch* backends.
-const NEW_RE = /^\/new(?:\s+(claude-internal|claude|codebuddy))?$/i;
-const isNewCommand = (text: string): boolean => NEW_RE.test(text.trim());
-const cliOfNewCommand = (text: string): CliBackendName | undefined =>
-  NEW_RE.exec(text.trim())?.[1]?.toLowerCase() as CliBackendName | undefined;
+// `/new [cli] [model] [prompt…]` — 三个位置参数都可选, 从前往后逐个认领: 认得出
+// 的 CLI 名吃进后端, 认得出的模型别名吃进 `--model`, 剩下的整段就是新会话的第一
+// 句话 (spawn 完再照常走 dispatch 注入)。Bare `/new` 沿用当前会话的 CLI 与该 CLI
+// 自己的默认模型 —— 见 newSession 的继承规则, 只有要*换*后端时才需要写出来。
+const NEW_RE = /^\/new(?:\s+([\s\S]+))?$/i;
+const CLI_TOKEN_RE = /^(claude-internal|claude|codebuddy)$/i;
+// `--model` 认的短别名与完整 slug。刻意收得窄: 认不出的一律当正文 —— 把
+// `/new 看看 sonnet 贵不贵` 的第一个词吃成模型, 比多打一个词烦得多。
+const MODEL_TOKEN_RE = /^(?:default|opus|opusplan|sonnet|haiku|(?:claude|gpt|gemini|deepseek)-[\w.-]+)(?:\[1m\])?$/i;
+
+interface NewCommand { cli?: CliBackendName; model?: string; prompt: string }
+const parseNewCommand = (text: string): NewCommand | undefined => {
+  const m = NEW_RE.exec(text.trim());
+  if (!m) return undefined;
+  // 递归吃前缀: 每个槽位只认领一次, 第一个认不出的 token 起整段都是 prompt。
+  const claim = (rest: string, acc: NewCommand): NewCommand => {
+    const head = /^(\S+)(?:\s+([\s\S]*))?$/.exec(rest);
+    if (!head) return acc;
+    const [, tok = "", tail = ""] = head;
+    if (!acc.cli && CLI_TOKEN_RE.test(tok)) {
+      return claim(tail, { ...acc, cli: tok.toLowerCase() as CliBackendName });
+    }
+    if (!acc.model && MODEL_TOKEN_RE.test(tok)) {
+      return claim(tail, { ...acc, model: tok.toLowerCase() });
+    }
+    return { ...acc, prompt: rest };
+  };
+  return claim((m[1] ?? "").trim(), { prompt: "" });
+};
 // `/cfgsync` (alias `/sync`) — reconcile the project's per-CLI config trees.
 // Bare form is a dry run; `apply` is the only form that writes.
 const CFGSYNC_RE = /^\/(?:cfgsync|sync)(?:\s+(apply))?$/i;
@@ -160,6 +182,8 @@ const renderHelp = (): string =>
     "",
     "▎会话",
     "`/new` 新开会话并绑定本聊天 (沿用当前会话的 CLI)",
+    "`/new <模型>` 指定模型新开 (opus / sonnet / haiku / 完整 slug)",
+    "`/new <问题>` 新开并把这句话作为第一句发过去",
     "`/clear` 清空当前会话上下文 (有待切项目时自动升级为 /new)",
     "`/sessions` 列出 live 会话 · `/sessions <emoji|id>` 切换",
     "`/stop` 打断当前生成 (Esc)",
@@ -169,6 +193,7 @@ const renderHelp = (): string =>
     "",
     "▎切换 CLI 后端",
     "`/new codebuddy` 用指定 CLI 新开 (claude / claude-internal / codebuddy)",
+    "位置参数可叠:`/new codebuddy opus #docs 先读一遍 README` = 后端 + 模型 + 标签 + 首句。",
     "不写则沿用本会话当前的 CLI;新开 `#tag` 会话则继承本聊天的 CLI。",
     "切换后 `/clear`、`/stop`、`--resume` 自愈都仍绑在该 CLI 上。",
     "",
@@ -558,10 +583,10 @@ export const installInboundRouter = (
   // status bar (e.g. `#docs` → window `docs`, not the principal slug).
   // On success there is NO reply: newSession already pushed the single
   // "created + cwd" bubble. Only failures produce user-facing text.
-  const spawnSession = async (who: string, cli?: CliBackendName, silent?: boolean): Promise<{ err?: string }> => {
+  const spawnSession = async (who: string, cli?: CliBackendName, silent?: boolean, model?: string): Promise<{ err?: string }> => {
     if (!("newSession" in bridge)) return { err: "[wezard] /new only available in mirror mode" };
     const tag = tagOf(who);
-    const r = await bridge.newSession(who, tag || who, cli, { silent });
+    const r = await bridge.newSession(who, tag || who, cli, { silent, model });
     return r.ok ? {} : { err: `[wezard] /new failed: ${r.reason ?? "unknown"}` };
   };
 
@@ -578,8 +603,8 @@ export const installInboundRouter = (
   };
 
   // 显式 /new:排队但仍强制重开(用户就是要换一个)。
-  const autoSpawnAndAttach = (who: string, cli?: CliBackendName): Promise<{ err?: string }> =>
-    serializeSpawn(who, () => spawnSession(who, cli));
+  const autoSpawnAndAttach = (who: string, cli?: CliBackendName, model?: string): Promise<{ err?: string }> =>
+    serializeSpawn(who, () => spawnSession(who, cli, false, model));
 
   // 隐式建会话(裸 `#tag` 第一条消息):轮到自己时若前一条已经把会话建好,直接
   // 复用,不再 respawn —— 否则先到的消息会被注入进一个刚被杀掉的 pane。
@@ -726,9 +751,16 @@ export const installInboundRouter = (
     // Runs BEFORE the mirror-not-attached short-circuit so it works as the
     // very first message from a fresh user. When routed with a `#tag`, the
     // tag becomes both the mirror-store key and the tmux window name.
-    if (isNewCommand(text)) {
-      const { err } = await autoSpawnAndAttach(who, cliOfNewCommand(text));
-      if (err) await replyText(frame, msg, who, err);
+    const nu = parseNewCommand(text);
+    if (nu) {
+      const { err } = await autoSpawnAndAttach(who, nu.cli, nu.model);
+      if (err) {
+        await replyText(frame, msg, who, err);
+        return { stop: true };
+      }
+      // 带正文的 `/new`: 这段就是新会话的第一句。走和「隐式建会话后 fall through」
+      // 完全相同的 dispatch 路径 —— freshSpawn 的冷时序、peer 提示都在那里。
+      if (nu.prompt) await send(frame, msg, who, nu.prompt);
       return { stop: true };
     }
     // 事件订阅 / 广播 / 定时已全部迁移到 MCP 工具(subscribe_topic /
