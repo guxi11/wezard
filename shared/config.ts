@@ -338,21 +338,67 @@ const Svr = z.object({
   logLevel: z.enum(["trace", "debug", "info", "warn", "error"]).default("info"),
 });
 
-// 事件订阅 / 广播。subs 是 topic → 目标id数组 (`user:xxx` / `chat:xxx`),
-// 一个 topic 可以有多个订阅者; schedules 是「每天 HH:MM 触发某 topic」的定时任务。
-// 订阅关系与定时通过 MCP 工具 (subscribe_topic / schedule_broadcast …) 增删,写回 config.jsonc。
-const Schedule = z.object({
-  topic: z.string(),
-  hour: z.number().int().min(0).max(23),
-  minute: z.number().int().min(0).max(59),
-  content: z.string(),
+// 事件订阅 / 广播 / 定时。subs 是 topic → 目标id数组 (`user:xxx` / `chat:xxx`),
+// 一个 topic 可以有多个订阅者; schedules 是定时表, 两种动作:
+//   broadcast  到点把一段固定 markdown 推给某 topic 的订阅者 (通知)
+//   task       到点把一句 prompt 注入某个 wizard 会话 (真的干活)
+// 触发时机由 `when` 描述 (shared/schedule-spec.ts), 不再限于「每天 HH:MM」。
+// 订阅关系与定时通过 MCP 工具 (subscribe_topic / schedule_task / schedule_broadcast …)
+// 增删,写回 config.jsonc。
+const When = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("daily"),
+    days: z.array(z.number().int().min(0).max(6)).default([]), // 空 = 每天; 0 = 周日
+    hour: z.number().int().min(0).max(23),
+    minute: z.number().int().min(0).max(59),
+  }),
+  z.object({ kind: z.literal("every"), minutes: z.number().int().min(1) }),
+  z.object({ kind: z.literal("once"), at: z.number() }),
+]);
+
+// 1.3.x 的老记录形如 `{topic,hour,minute,content}` —— 没有 kind/id/when。就地升格成
+// broadcast+daily, 于是除了这个函数以外,全代码只见新形状。id 取确定式而非随机:
+// 同一份 config 反复读盘要得到同一个 id,否则 cancel_task 拿到的 id 转眼就失效。
+const upgradeLegacy = (v: unknown): unknown => {
+  if (!v || typeof v !== "object") return v;
+  const o = v as Record<string, unknown>;
+  if (typeof o.kind === "string" && o.when) return o;
+  const hour = Number(o.hour ?? 0);
+  const minute = Number(o.minute ?? 0);
+  return {
+    kind: "broadcast",
+    id: o.id ?? `legacy-${String(o.topic ?? "")}-${hour}-${minute}`,
+    when: { kind: "daily", days: [], hour, minute },
+    topic: o.topic,
+    content: o.content,
+    createdBy: o.createdBy,
+    createdAt: o.createdAt,
+  };
+};
+
+const ScheduleBase = {
+  id: z.string(),
+  when: When,
   createdBy: z.string().default(""),
   createdAt: z.number().default(0),
-});
+  /** 上次触发时刻 (epoch ms)。去重、重启不重放、间隔计时都以它为准。 */
+  lastFired: z.number().optional(),
+  /** 人写的备注,只用于列表回显。 */
+  note: z.string().default(""),
+};
+const Schedule = z.preprocess(
+  upgradeLegacy,
+  z.discriminatedUnion("kind", [
+    z.object({ ...ScheduleBase, kind: z.literal("broadcast"), topic: z.string(), content: z.string() }),
+    z.object({ ...ScheduleBase, kind: z.literal("task"), target: z.string(), prompt: z.string() }),
+  ]),
+);
 const Topics = z.object({
   subs: z.record(z.string(), z.array(z.string())).default({}),
   schedules: z.array(Schedule).default([]),
 });
+
+export type ScheduleRecord = z.infer<typeof Schedule>;
 
 // 聊天命名表: `name → base principal` (`chat:wrxxx` / `user:xxx`)。方向选 name→
 // principal 而不是反过来: 名字是寻址用的 key, 这个方向天然保证唯一, 手写也更顺。

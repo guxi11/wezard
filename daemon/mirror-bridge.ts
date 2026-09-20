@@ -37,7 +37,7 @@ import { runTmux as runTmuxCmd, spawnTmuxClaude } from "./spawn-tmux.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
 import { recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, buildDetailUrl, buildChatUrl } from "./detail.js";
 import type { CtxCut, TurnOrigin, TurnUsage } from "./detail.js";
-import { labelFor, tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader } from "../shared/session-label.js";
+import { labelFor, tagOfKey, baseOfKey, keyOf, withTagHeader, headSep, parseTagHeader } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, normChatName, parsePeerRef, peerAddress } from "./chat-name.js";
@@ -1740,7 +1740,9 @@ export interface MirrorBridge {
    *  the user sees the full PreToolUse → approval card → assistant mirror
    *  loop end-to-end. Skips the live-stream/replyStream machinery — the tail
    *  pushes assistant output via the standalone path. */
-  injectText: (target: string, text: string, origin?: TurnOrigin) => Promise<{ ok: boolean; reason?: string }>;
+  /** `fromChat` 强制这一轮走出处门 (chatOriginOnly) —— 定时任务点的火, 结果必须
+   *  在群里看得见, 哪怕上一轮是人在 CLI 里敲的。 */
+  injectText: (target: string, text: string, origin?: TurnOrigin, opts?: { fromChat?: boolean }) => Promise<{ ok: boolean; reason?: string }>;
   /** Send Esc to the live tmux pane bound to `target` — interrupts whatever
    *  Claude is currently doing (active generation / open prompt). No-op for
    *  spawn-mode attachments (no live TTY to interrupt).
@@ -2328,7 +2330,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const prefix = linkedTagPrefix(a.target, turnId ?? a.briefTurnId);
     if (prefix) {
       const seqBit = seq ? ` ${seq}` : "";
-      return `${prefix}${seqBit} ${content}`;
+      return `${prefix}${seqBit}${headSep(content)}${content}`;
     }
     return withSessionTag(a.target, content, seq);
   };
@@ -5352,7 +5354,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // 队列内单条失败已在 sendStandalone 里 warn 过, 这里吞掉, 不阻塞发卡。
       }
     },
-    injectText: async (target, text, origin) => {
+    injectText: async (target, text, origin, opts) => {
       // Lazy restore, same as dispatch: a peer session that hasn't been talked
       // to in this process lifetime (or any session after a reload) has an empty
       // in-memory slot but a perfectly good persisted binding. Without this, an
@@ -5360,6 +5362,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const a = byTarget.get(target) ?? (await restoreFromStore(target));
       if (!a) return { ok: false, reason: "no mirror attached for target" };
       if (!text.trim()) return { ok: false, reason: "empty text" };
+      // 出处改写要早于 inject: tail 可能在 promise resolve 之前就开出 turn。
+      if (opts?.fromChat) a.turnFromChat = true;
       // Pre-record so the tail's user-line emission is suppressed by the
       // recentInjects dedupe (otherwise the user sees their own demo prompt
       // echoed back as a quoted bubble).

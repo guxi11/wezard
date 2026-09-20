@@ -12,7 +12,7 @@ import { makeBridge } from "./cc-bridge.js";
 import { startMirror, installMirrorEventListener, type MirrorBridge } from "./mirror-bridge.js";
 import { setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { installApprovalEventListener, makeApproveHandler } from "./approval.js";
-import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward } from "./detail.js";
+import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, buildChatUrl, latestTurnIdFor } from "./detail.js";
 import { initAutoWindowPersistence } from "./session-cache.js";
 import { makeMessageHandler } from "./outbound.js";
 import { makeCardHandler, makeAskHandler, installAskEventListener } from "./ask.js";
@@ -33,9 +33,12 @@ import {
   listSubs,
   listSchedules,
   addSchedule,
+  removeScheduleById,
   removeSchedulesByTopic,
+  renderSchedule,
 } from "./topics.js";
-import { baseOfKey, keyOf, normalizeTag, tagFromCwd, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
+import { parseWhen, type When } from "../shared/schedule-spec.js";
+import { baseOfKey, keyOf, labelFor, normalizeTag, tagFromCwd, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
 import { chatBaseOf, chatNameOf, clearChatName, listChatNames, normChatName, peerAddress, setChatName } from "./chat-name.js";
 import {
   bindWizardStore,
@@ -557,8 +560,9 @@ const main = async (): Promise<void> => {
 
     // Push a plain markdown bubble into a chat. `base` may carry a `#tag` — a
     // tagged key strips down to the same WeCom chatid as its base.
+    const chatIdOf = (t: string): string => baseOfKey(t).replace(/^(user|chat|group):/, "");
     const notifyChat = (base: string, markdown: string): void => {
-      const chatId = baseOfKey(base).replace(/^(user|chat|group):/, "");
+      const chatId = chatIdOf(base);
       void ws.client
         .sendMessage(chatId, { msgtype: "markdown", markdown: { content: markdown } })
         .catch((e: unknown) => log.warn({ err: (e as Error).message }, "chat notify failed"));
@@ -573,24 +577,42 @@ const main = async (): Promise<void> => {
     };
 
     // wizard 之间的往返本来是看不见的: 它发生在两个没人盯着的 pane 里。关键的那几
-    // 次 (派活、结论) 各自成一条气泡, 头写成
-    // `<from> → <to>` so the direction reads at a glance in the chat timeline.
-    // 跨 chat 时两端都要看得见 —— from 的群显示 "我发出去了",to 的群显示
-    // "另一个群的 agent 找上门了",否则 to 侧的人以为消息是凭空冒出来的。
+    // 次 (派活、结论) 各自成一条气泡, 头写成 `<from> → <to>`, 方向一眼可读。
     const RELAY_MAX = 1200;
-    /** `where`: 这条 relay 该出现在谁的群里。
-     *  - "both" (派活): 双方都要看见 —— to 那边的人得知道活是谁派来的, 而被注入的
-     *    那一轮在 brief 模式下只把提问写进详情页, 群里没有别的痕迹。
-     *  - "from" (回程结论): 只发给问的人。答话方自己的群里, 它的回复本来就会以它
-     *    自己的气泡出现, 再 relay 一条就是同一句话在同一个群里说两遍。 */
-    const relayPeer = (from: string, to: string, body: string, where: "both" | "from" = "both"): void => {
+    /** 一个 wizard 在 `dest` 群里的称呼。本群: 照旧 `emoji #tag` —— 那一段是路由
+     *  信息, parseTagHeader 靠它反解, 引用气泡就能直接跟它说话。外群: 换成带聊天
+     *  名的全称 `emoji chat#tag`, 一个裸 `#tag` 在别人群里既认不出是谁, 又会被当
+     *  成本群的 tag 误投到一个不存在的会话上。 */
+    const relayLabel = (t: string, dest: string): string => {
+      const name = baseOfKey(t) === dest
+        ? withTagHeader(t, "").trim()
+        : `${tagOfKey(t) ? labelFor(tagOfKey(t)) : "🧙"} ${peerAddress(cfg, dest, t)}`;
+      const url = chatDetailUrl(t);
+      return url ? `[${name}](${url})` : name;
+    };
+    /** 头上的名字挂它自己的 chat 详情页 —— 看见「A → B」的人下一步想问的永远是
+     *  「A 那边在干嘛」, 链接就省掉他去翻群找 A 气泡这一步。票据取该 wizard 最近
+     *  那条 turn (mirror 的 linkedTagPrefix 同源); 没跑过一轮就不挂, 留裸名字。 */
+    const chatDetailUrl = (t: string): string | undefined => {
+      const id = latestTurnIdFor(t);
+      return id ? buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, id, chatIdOf(t)) : undefined;
+    };
+    /** 一条 relay 只落在**收信那一方**的群里, 从不两头都发:
+     *  - 派活 → to 的群。同群时那就是双方共处的那个群 (行为照旧); 跨群时源头群
+     *    不再复述 —— 那句话本来就是它自己说出口的, 贴回自己群里只是噪音, 真正
+     *    需要看见的是 to 那边的人: 活是谁派来的。
+     *  - 回程结论 (`relayPeer(target, self)`) → 问话人的群。答话方自己的群里,
+     *    它的回复早就以它自己的气泡出现过了。 */
+    const relayPeer = (from: string, to: string, body: string): void => {
       const text = body.trim();
       if (!text) return;
-      const head = `${withTagHeader(from, "→")} ${withTagHeader(to, "")}`.trim();
+      const dest = baseOfKey(to);
+      const head = `${relayLabel(from, dest)} → ${relayLabel(to, dest)}`;
       const clipped = text.length > RELAY_MAX ? `${text.slice(0, RELAY_MAX)}…` : text;
-      const bubble = `${head}\n${clipped}`;
-      notifyChat(from, bubble);
-      if (where === "both" && baseOfKey(from) !== baseOfKey(to)) notifyChat(to, bubble);
+      // 头独占一行, 正文自成一个块 —— 只隔一个换行的话, markdown 会把正文首行
+      // 当成头那一段的续行; 表格因此整张塌成一行带竖线的文字 (表格不能打断段落)。
+      // 方向已经写在头里了, 正文不再加任何引用/缩进标记。
+      notifyChat(dest, `${head}\n\n${clipped}`);
     };
 
 
@@ -646,8 +668,9 @@ const main = async (): Promise<void> => {
       // 回程只在跨聊天时下发。同一个群里, 对方的回复本来就会以它自己的 `emoji #tag`
       // 气泡出现 —— 再 relay 一条 `B → A` 就是同一句话在同一个群里出现两次, 正是
       // 「A 告诉 B 之后不必再展示 B 收到了」要消灭的那种重复。跨聊天则相反: A 的群
-      // 里看不到 B 的任何气泡, 这条 relay 是那边唯一能看见结论的地方。
-      if (wr.idle && foreign) relayPeer(target, self, lastText, "from");
+      // 里看不到 B 的任何气泡, 这条 relay 是那边唯一能看见结论的地方 —— 所以它落在
+      // self (问话人) 的群, 而不是答话方那边。
+      if (wr.idle && foreign) relayPeer(target, self, lastText);
       json(res, 200, { ok: true, target, foreign, idle: wr.idle, reason: wr.reason, lastText });
     });
 
@@ -1027,23 +1050,31 @@ const main = async (): Promise<void> => {
     http.register("POST /topics/list", async (req, res) => {
       const { self } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      json(res, 200, { ok: true, target: self, subs: listSubs(cfg, self), schedules: listSchedules(cfg) });
+      json(res, 200, {
+        ok: true,
+        target: self,
+        subs: listSubs(cfg, self),
+        schedules: listSchedules(cfg, { kind: "broadcast" }).map((x) => renderSchedule(x)),
+      });
     });
 
     http.register("POST /topics/schedule", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       const topic = topicOf(body);
-      const b = body as { hour?: number; minute?: number; content?: string };
-      const hour = Number(b.hour);
-      const minute = Number(b.minute ?? 0);
+      const b = body as { hour?: number; minute?: number; content?: string; when?: string };
       const content = (b.content ?? "").toString();
       if (!topic) { json(res, 400, { ok: false, reason: "topic required" }); return; }
       if (!content.trim()) { json(res, 400, { ok: false, reason: "content required" }); return; }
-      if (!Number.isInteger(hour) || hour < 0 || hour > 23) { json(res, 400, { ok: false, reason: "hour must be 0-23" }); return; }
-      if (!Number.isInteger(minute) || minute < 0 || minute > 59) { json(res, 400, { ok: false, reason: "minute must be 0-59" }); return; }
-      addSchedule(cfg, sourcePath, { topic, hour, minute, content, createdBy: self, createdAt: Date.now() });
-      json(res, 200, { ok: true, topic, hour, minute, subs: (cfg.topics.subs[topic] ?? []).length });
+      // 两种入参并存: `when` 是人话 (「每个工作日 9:00」), hour/minute 是老调用方。
+      const when = b.when?.trim()
+        ? parseWhen(b.when, new Date())
+        : Number.isInteger(Number(b.hour))
+          ? ({ kind: "daily", days: [], hour: Number(b.hour), minute: Number(b.minute ?? 0) } satisfies When)
+          : undefined;
+      if (!when) { json(res, 400, { ok: false, reason: `cannot parse when: ${b.when ?? `${b.hour}:${b.minute}`}` }); return; }
+      const rec = addSchedule(cfg, sourcePath, { kind: "broadcast", when, topic, content, createdBy: self });
+      json(res, 200, { ok: true, ...renderSchedule(rec), subs: (cfg.topics.subs[topic] ?? []).length });
     });
 
     http.register("POST /topics/cancel-schedule", async (req, res) => {
@@ -1053,6 +1084,56 @@ const main = async (): Promise<void> => {
       if (!topic) { json(res, 400, { ok: false, reason: "topic required" }); return; }
       const removed = removeSchedulesByTopic(cfg, sourcePath, topic);
       json(res, 200, { ok: true, topic, removed });
+    });
+
+    // ── 定时任务 ────────────────────────────────────────────────────
+    // 到点把一句 prompt 注入一个 wizard 会话 —— 和人在群里对它说话走的是同一条路
+    // (injectText), 所以 pane 死了会被拉起来, 输出照常落进群和详情页。这是「定时
+    // 广播」缺的那一半: 广播只是通知, 任务是真的干活。
+    http.register("POST /tasks/schedule", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      const b = body as { when?: string; prompt?: string; note?: string };
+      const prompt = (b.prompt ?? "").toString().trim();
+      const whenText = (b.when ?? "").toString().trim();
+      if (!prompt) { json(res, 400, { ok: false, reason: "prompt required" }); return; }
+      const when = parseWhen(whenText, new Date());
+      if (!when) {
+        json(res, 400, { ok: false, reason: `无法理解「${whenText}」。能认的说法: 每天/每个工作日/每周三 + 时刻 (晚上9:30 / 21:30 / 九点半), 每隔 N 分钟|小时, N 分钟后, 明早 9 点。` });
+        return;
+      }
+      // tag 省略 = 排给调用者自己。这是最常见的用法: wizard 给自己定一个夜里跑的活。
+      // 注入自身在**当下**是死锁 (往正在生成的输入框里打字), 但定时是未来的事,
+      // 那时这一轮早已收工, 所以这里不套 /peers/send 的自我保护。
+      const tag = (body.tag ?? "").toString().trim();
+      let target = self;
+      if (tag) {
+        const r = resolvePeer(self, tag);
+        if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
+        target = r.target;
+      }
+      const rec = addSchedule(cfg, sourcePath, { kind: "task", when, target, prompt, createdBy: self, note: (b.note ?? "").toString() });
+      json(res, 200, { ok: true, ...renderSchedule(rec), address: peerAddress(cfg, self, target) });
+    });
+
+    http.register("POST /tasks/list", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      const mineOnly = (body as { mine?: boolean }).mine === true;
+      const now = new Date();
+      const tasks = listSchedules(cfg, { kind: "task", ...(mineOnly ? { target: self } : {}) })
+        .map((x) => ({ ...renderSchedule(x, now), address: x.kind === "task" ? peerAddress(cfg, self, x.target) : "" }));
+      json(res, 200, { ok: true, self, tasks });
+    });
+
+    http.register("POST /tasks/cancel", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      const id = ((body as { id?: string }).id ?? "").toString().trim();
+      if (!id) { json(res, 400, { ok: false, reason: "id required (list_tasks 里那个 id)" }); return; }
+      const gone = removeScheduleById(cfg, sourcePath, id);
+      if (!gone) { json(res, 404, { ok: false, reason: `no schedule with id ${id}` }); return; }
+      json(res, 200, { ok: true, removed: renderSchedule(gone) });
     });
 
     // POST /config/set — modify daemon config from MCP
@@ -1157,8 +1238,18 @@ const main = async (): Promise<void> => {
     });
   }
 
-  // 事件订阅调度器 — 每 20s 检查 topics.schedules,匹配当前分钟即广播。
-  const scheduler = startScheduler({ client: ws.client, cfg, log: log.child({ mod: "topics" }) });
+  // 定时调度器 — 每 20s 检查 topics.schedules: 广播照推, task 类注入到目标 wizard。
+  // inject 只在 mirror 模式给得出 (headless 模式没有常驻会话可注入)。
+  const scheduler = startScheduler({
+    client: ws.client,
+    cfg,
+    sourcePath,
+    log: log.child({ mod: "topics" }),
+    inject:
+      cfg.wrc.mode === "mirror"
+        ? (target, text) => (bridge as MirrorBridge).injectText(target, text, undefined, { fromChat: true })
+        : undefined,
+  });
 
   const shutdown = async (signal: string): Promise<void> => {
     log.info({ signal }, "shutdown signal");

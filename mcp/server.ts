@@ -622,7 +622,7 @@ server.registerTool(
   {
     title: "List this chat's subscriptions and all scheduled broadcasts",
     description:
-      "Show what THIS chat is subscribed to (`subs`: topic + subscriber count) plus every daily scheduled broadcast on the host (`schedules`: topic, HH:MM, creator). Use when the user asks 「订阅列表」/「有哪些定时广播」/「我订了什么」. Read-only.",
+      "Show what THIS chat is subscribed to (`subs`: topic + subscriber count) plus every scheduled **broadcast** on the host (`schedules`: id / 人话回显的 when / 下次触发时刻 / topic / creator). Use when the user asks 「订阅列表」/「有哪些定时广播」/「我订了什么」. Read-only. 定时**任务** (到点让 wizard 干活的那种) 不在这里, 在 list_tasks。",
     inputSchema: {},
   },
   async () => unwrap("list_topics", await daemonPost("/topics/list", {})),
@@ -633,16 +633,63 @@ server.registerTool(
   {
     title: "Schedule a daily broadcast to a topic",
     description:
-      "Register a recurring daily broadcast: every day at hour:minute (host local time) the daemon publishes `content` to all subscribers of `topic`. Equivalent to 「每天 HH:MM 广播 <topic> <内容>」. Persists across daemon reloads. Use when the user says 「每天 8 点广播 xxx」/「定时给订阅者发 xxx」. To fire once immediately instead, use broadcast_topic.",
+      "注册一条**定时广播**: 到点把 `content` 推给 `topic` 的所有订阅者。推的是一段固定文字, 不会让任何 wizard 干活 —— 要「到点自动跑任务」用 schedule_task。时机写在 `when` 里, 直接用人话 (「每天 8 点」「每个工作日 9:30」), 也可以继续传 hour/minute。跨 daemon 重启仍在。用户说「每天 8 点广播 xxx」「定时给订阅者发 xxx」时调它; 只发一次用 broadcast_topic。",
     inputSchema: {
-      topic: z.string().describe("Topic whose subscribers receive the daily push."),
-      hour: z.number().int().min(0).max(23).describe("Hour of day, 0-23 (host local time)."),
+      topic: z.string().describe("Topic whose subscribers receive the push."),
+      when: z.string().optional().describe("什么时候, 人话即可: 「每天 8 点」「每个工作日 9:30」「每隔 2 小时」。给了它就不必给 hour/minute。"),
+      hour: z.number().int().min(0).max(23).optional().describe("Hour of day, 0-23 (host local time). `when` 的旧写法, 二选一。"),
       minute: z.number().int().min(0).max(59).optional().describe("Minute, 0-59. Default 0."),
-      content: z.string().describe("Message body in WeCom markdown, sent every day at the given time."),
+      content: z.string().describe("Message body in WeCom markdown, sent every time it fires."),
     },
   },
-  async ({ topic, hour, minute, content }) =>
-    unwrap("schedule_broadcast", await daemonPost("/topics/schedule", { topic, hour, minute: minute ?? 0, content })),
+  async ({ topic, when, hour, minute, content }) =>
+    unwrap("schedule_broadcast", await daemonPost("/topics/schedule", { topic, when, hour, minute: minute ?? 0, content })),
+);
+
+// 定时任务 —— 到点把一句话说给一个 wizard 听。和人在群里 at 它说同一句话完全等价:
+// pane 死了会被拉起来, 它干完的活照常出现在群里和详情页。这是 claude/codebuddy 自带
+// 定时器给不了的那一半: 它们的循环活在会话里, 会话一死就没了; 这个活在 daemon 里。
+server.registerTool(
+  "schedule_task",
+  {
+    title: "Schedule a prompt to run in a wizard session, on a recurring or one-off schedule",
+    description:
+      "给某个 wizard 排一个**到点自动执行**的活: 到时间了, daemon 把 `prompt` 原样说给它听 —— 等价于那一刻有人在群里对它说了这句话, 所以它会真的去做, 产出照常落在群里。守护进程级, 跨 CLI 重启/会话结束仍在, 目标 pane 死了会被自动拉起来。用户说「每个工作日晚上 9:30 自动跑一下 xxx」「每天早上帮我看看 yyy」「每 2 小时同步一次 zzz」「明早 9 点提醒并整理 www」时调它。\n`when` 用人话原样写, 别自己翻译成 cron: 「每个工作日晚上9:30」「每天 8:00」「每周三下午3点」「每隔两小时」「每 30 分钟」「20 分钟后」「明早 9 点」都认。解析不出会报错并列出能认的说法 —— 这时把原话回给用户让他重说, 别自己猜一个时间存进去。\n存成功后**必须把回显的 `when` 和 `next` 念给用户**确认 (例: 「每个工作日 21:30, 下次 2026-09-21 21:30」)。`prompt` 要写成一句完整的、零上下文也能执行的指令 —— 到点时那个会话可能早已 /clear 过, 它只看得见这句话。",
+    inputSchema: {
+      when: z.string().describe("什么时候跑, 人话原样传: 「每个工作日晚上9:30」「每天早上9点」「每周三下午3点」「每隔2小时」「每30分钟」「20分钟后」「明早9点」。"),
+      prompt: z.string().describe("到点要说给那个 wizard 听的话。写成自洽的完整指令 (要做什么、在哪个目录/文件上、做完怎么汇报), 别依赖当前对话的上下文。"),
+      tag: z.string().optional().describe(`排给谁干。省略 = 排给你自己 (最常见: 给自己定一个夜里跑的活)。${ADDRESS_DOC}`),
+      note: z.string().optional().describe("给人看的一句话备注, 只在 list_tasks 里回显。"),
+    },
+  },
+  async ({ when, prompt, tag, note }) =>
+    unwrap("schedule_task", await daemonPost("/tasks/schedule", { when, prompt, tag: tag ?? "", note: note ?? "" })),
+);
+
+server.registerTool(
+  "list_tasks",
+  {
+    title: "List scheduled tasks on this host",
+    description:
+      "列出本机所有定时任务: `id` (取消要用)、`when` (人话回显)、`next` (下次触发时刻)、`lastFired`、目标 wizard 的 `address` 与 `prompt`。用户问「有哪些定时任务」「我设了什么定时」「下次什么时候跑」时调它。只读。`mine:true` 只看排给你自己的。定时**广播**不在这里, 在 list_topics。",
+    inputSchema: {
+      mine: z.boolean().optional().describe("true = 只列排给调用方自己的任务。默认列全机。"),
+    },
+  },
+  async ({ mine }) => unwrap("list_tasks", await daemonPost("/tasks/list", { mine: mine === true })),
+);
+
+server.registerTool(
+  "cancel_task",
+  {
+    title: "Cancel one scheduled task by id",
+    description:
+      "按 id 删掉一条定时任务 (id 从 list_tasks 拿)。用户说「取消那个定时」「别再每天跑了」时调它: 先 list_tasks 把候选念给用户确认是哪一条, 再删。删的是日程本身, 不影响任何正在跑的活。",
+    inputSchema: {
+      id: z.string().describe("Schedule id from list_tasks."),
+    },
+  },
+  async ({ id }) => unwrap("cancel_task", await daemonPost("/tasks/cancel", { id })),
 );
 
 server.registerTool(

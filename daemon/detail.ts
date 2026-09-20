@@ -136,6 +136,15 @@ export const recordCloseOpenTurns = (scope: { target?: string; sessionId?: strin
 
 export const getDetail = (id: string): DetailRecord | undefined => store?.get(id);
 
+// 一个 wizard 名字背后的 chat 链接需要一张票据 —— `?id=` 既是凭据, 也决定页面
+// 默认选中哪个 #tag, 所以必须取**这个 target 自己**的 turn (拿兄弟会话的 id 会
+// 把页面开在别人那一栏)。从没跑过一轮的会话没有票据, 返回 undefined。
+export const latestTurnIdFor = (target: string): string | undefined =>
+  store?.list()
+    .filter((r): r is TurnDetailRecord => r.kind === "turn" && r.target === target)
+    .reduce<TurnDetailRecord | undefined>((best, r) => (best && best.updatedAt >= r.updatedAt ? best : r), undefined)
+    ?.id;
+
 // URL 优先级: publicBase (反代/自定义 host) > remoteBase (chat 端直连 svr)
 // > fallback host+port (回环 → LAN IP 替换)。
 // forceInnerBrowser=1 / ww_vw / ww_vh: WeCom 桌面端识别参数, 让链接在内置浏览器打开。

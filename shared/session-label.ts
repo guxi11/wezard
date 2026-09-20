@@ -151,6 +151,15 @@ export const tagBadge = (target: string | undefined): string => {
   return tag ? `${labelFor(tag)} ` : "🧙 ";
 };
 
+/** 头与正文之间该留多少空白。默认同行一个空格 —— 头只是一句话的前缀,省一行。
+ *  块级语法认行首,两种例外:
+ *   • ``` 栅栏必须顶行首才被 WeCom 认作代码块,同行拼头会把它挤成字面文本;
+ *   • 表格更严 —— 它**不能打断一个段落**,只隔一个换行,首行表头会被当成头那一
+ *     段的续行,整张表塌成一行带竖线的文字。所以表格必须空行隔开。
+ *  HEADER_RE 尾部的 \s* 吃得掉这些换行,parseTagHeader 剥头不受影响。 */
+export const headSep = (content: string): string =>
+  content.startsWith("```") ? "\n" : content.startsWith("|") ? "\n\n" : " ";
+
 /** Prefix markdown content with the `emoji \`#tag\`` header; identity when untagged.
  *  `seq` ("2/5") marks one piece of a split push — it rides in the same header
  *  line so every chunk of a long reply is attributable on its own, and shows
@@ -158,8 +167,5 @@ export const tagBadge = (target: string | undefined): string => {
 export const withTagHeader = (target: string | undefined, content: string, seq?: string): string => {
   const tag = tagOfKey(target);
   const head = [tag ? `${labelFor(tag)} #${tag}` : "🧙", seq ?? ""].filter(Boolean).join(" ");
-  // 栅栏必须顶行首才被 WeCom 认作代码块 —— 同行拼头会把 ``` 挤成字面文本。
-  // HEADER_RE 尾部的 \s* 吃得掉换行,parseTagHeader 剥头不受影响。
-  const sep = content.startsWith("```") ? "\n" : " ";
-  return `${head}${sep}${content}`;
+  return `${head}${headSep(content)}${content}`;
 };
