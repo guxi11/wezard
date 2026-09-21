@@ -174,8 +174,8 @@ const isEnterCommand = (text: string): boolean => text.trim() === "/n";
 const isRevealCommand = (text: string): boolean => text.trim() === "/reveal";
 const isHelpCommand = (text: string): boolean => /^\/(?:help|\?|h)$/i.test(text.trim());
 
-// Static command reference. Grouped: session control, usage/info, topic
-// broadcast (natural-language, zh+en). Anything not matching a command is a
+// Static command reference. Grouped: session control, usage/info. Anything
+// not matching a command is a
 // prompt forwarded to the bound Claude session.
 const renderHelp = (): string =>
   [
@@ -234,10 +234,6 @@ const renderHelp = (): string =>
     "`/audit` 本会话 token/成本明细 (含 subagent) · `/audit <tag>` 指定标签会话",
     "`/cfgsync` 预演跨 CLI 项目配置同步 · `/cfgsync apply` 执行 (需授权)",
     "`/help` 本帮助",
-    "",
-    "▎事件订阅 / 广播",
-    "已迁到 MCP:直接对 AI 说「订阅 xxx」「广播 xxx: …」「每天8点广播 xxx: …」,",
-    "它会调 `subscribe_topic` / `broadcast_topic` / `schedule_broadcast` 等工具处理。",
     "",
     "▎引用 (quote)",
     "引用消息 + 新文字：被引用内容作为上下文前缀附在你的话前。",
@@ -789,8 +785,6 @@ export const installInboundRouter = (
       if (nu.prompt) await send(frame, msg, who, nu.prompt);
       return { stop: true };
     }
-    // 事件订阅 / 广播 / 定时已全部迁移到 MCP 工具(subscribe_topic /
-    // broadcast_topic / schedule_broadcast …),不再有 IM 文本命令。
     // Authorized `/stop` — Esc the live pane to interrupt whatever Claude is
     // currently doing. Mirror-mode only; bails cleanly when no attachment.
     if (isStopCommand(text)) {

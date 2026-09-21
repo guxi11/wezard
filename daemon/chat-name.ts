@@ -12,7 +12,7 @@
 // 冲突从此可解: 名字唯一 (存在 config 的 key 上, 结构性保证), tag 只需在自己
 // 聊天内唯一。
 //
-// 落盘走 config.jsonc (`chats`), 与 topics 同一套 patchJsonc + in-place cfg 变更 ——
+// 落盘走 config.jsonc (`chats`), 与定时表同一套 patchJsonc + in-place cfg 变更 ——
 // 名字是用户手写的长期配置, 不是运行时状态, 不该躺在 state 目录里。
 import type { Config } from "../shared/config.js";
 import { patchJsonc } from "../shared/config-writer.js";

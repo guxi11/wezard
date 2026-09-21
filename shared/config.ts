@@ -338,13 +338,9 @@ const Svr = z.object({
   logLevel: z.enum(["trace", "debug", "info", "warn", "error"]).default("info"),
 });
 
-// 事件订阅 / 广播 / 定时。subs 是 topic → 目标id数组 (`user:xxx` / `chat:xxx`),
-// 一个 topic 可以有多个订阅者; schedules 是定时表, 两种动作:
-//   broadcast  到点把一段固定 markdown 推给某 topic 的订阅者 (通知)
-//   task       到点把一句 prompt 注入某个 wizard 会话 (真的干活)
-// 触发时机由 `when` 描述 (shared/schedule-spec.ts), 不再限于「每天 HH:MM」。
-// 订阅关系与定时通过 MCP 工具 (subscribe_topic / schedule_task / schedule_broadcast …)
-// 增删,写回 config.jsonc。
+// 定时任务: 到点把一句 prompt 注入某个 wizard 会话 —— 等价于那一刻有人在群里对它
+// 说了这句话。触发时机由 `when` 描述 (shared/schedule-spec.ts), 不限于「每天 HH:MM」。
+// 增删走 MCP 工具 (schedule_task / cancel_task), 写回 config.jsonc 的 `schedules`。
 const When = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("daily"),
@@ -356,47 +352,27 @@ const When = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("once"), at: z.number() }),
 ]);
 
-// 1.3.x 的老记录形如 `{topic,hour,minute,content}` —— 没有 kind/id/when。就地升格成
-// broadcast+daily, 于是除了这个函数以外,全代码只见新形状。id 取确定式而非随机:
-// 同一份 config 反复读盘要得到同一个 id,否则 cancel_task 拿到的 id 转眼就失效。
-const upgradeLegacy = (v: unknown): unknown => {
-  if (!v || typeof v !== "object") return v;
-  const o = v as Record<string, unknown>;
-  if (typeof o.kind === "string" && o.when) return o;
-  const hour = Number(o.hour ?? 0);
-  const minute = Number(o.minute ?? 0);
-  return {
-    kind: "broadcast",
-    id: o.id ?? `legacy-${String(o.topic ?? "")}-${hour}-${minute}`,
-    when: { kind: "daily", days: [], hour, minute },
-    topic: o.topic,
-    content: o.content,
-    createdBy: o.createdBy,
-    createdAt: o.createdAt,
-  };
-};
-
-const ScheduleBase = {
+const Schedule = z.object({
   id: z.string(),
   when: When,
+  /** 排给谁干 —— 一个 wizard 的 target key。 */
+  target: z.string(),
+  prompt: z.string(),
   createdBy: z.string().default(""),
   createdAt: z.number().default(0),
   /** 上次触发时刻 (epoch ms)。去重、重启不重放、间隔计时都以它为准。 */
   lastFired: z.number().optional(),
-  /** 人写的备注,只用于列表回显。 */
+  /** 人写的备注, 只用于列表回显。 */
   note: z.string().default(""),
-};
-const Schedule = z.preprocess(
-  upgradeLegacy,
-  z.discriminatedUnion("kind", [
-    z.object({ ...ScheduleBase, kind: z.literal("broadcast"), topic: z.string(), content: z.string() }),
-    z.object({ ...ScheduleBase, kind: z.literal("task"), target: z.string(), prompt: z.string() }),
-  ]),
-);
-const Topics = z.object({
-  subs: z.record(z.string(), z.array(z.string())).default({}),
-  schedules: z.array(Schedule).default([]),
 });
+
+// 1.4.x 之前这张表里还有「定时广播」(`kind:"broadcast"`, 更老的还没有 kind)。
+// topic 订阅废弃后它们没有收件人了 —— 认不出的记录整条丢掉而不是抛: 一条过期
+// 定时不该把 daemon 挡在启动之外, 那会让 launchd 陷进崩溃循环。
+const Schedules = z.preprocess(
+  (v) => (Array.isArray(v) ? v.filter((x) => Schedule.safeParse(x).success) : []),
+  z.array(Schedule),
+);
 
 export type ScheduleRecord = z.infer<typeof Schedule>;
 
@@ -406,7 +382,16 @@ export type ScheduleRecord = z.infer<typeof Schedule>;
 // "全局唯一 tag" 碰运气。见 daemon/chat-name.ts。
 const Chats = z.record(z.string(), z.string());
 
-export const ConfigSchema = z.object({
+// 1.4.x 之前定时表住在 `topics.schedules` (同一张表里还混着 topic 广播)。订阅与
+// 广播删掉后它升到顶层, 老 config 就地抬一手 —— 否则已排好的任务会静默消失。
+const liftLegacySchedules = (v: unknown): unknown => {
+  if (!v || typeof v !== "object") return v;
+  const o = v as Record<string, unknown>;
+  const legacy = (o.topics as { schedules?: unknown } | undefined)?.schedules;
+  return legacy && !o.schedules ? { ...o, schedules: legacy } : v;
+};
+
+export const ConfigSchema = z.preprocess(liftLegacySchedules, z.object({
   bot: Bot,
   defaultChat: z.string().default(""),
   chats: Chats.default({}),
@@ -415,8 +400,8 @@ export const ConfigSchema = z.object({
   approval: Approval.default({}),
   sync: Sync.default({ targets: [] }),
   svr: Svr.default({}),
-  topics: Topics.default({ subs: {}, schedules: [] }),
-});
+  schedules: Schedules,
+}));
 
 export type Config = z.infer<typeof ConfigSchema>;
 

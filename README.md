@@ -38,7 +38,7 @@
 - [镜像模式](#镜像模式)
 - [体验是什么样](#体验是什么样)
 - [文档 / 智能表格 / 智能文档](#文档--智能表格--智能文档)
-- [事件订阅 / 定时广播](#事件订阅--定时广播)
+- [定时任务 / 跨群通知](#定时任务--跨群通知)
 - [一个聊天里跑多个会话（`#tag` 路由）](#一个聊天里跑多个会话tag-路由)
 - [跨聊天：给聊天命名](#跨聊天给聊天命名)
 - [多 CLI 后端](#多-cli-后端claude--claude-internal--codebuddy)
@@ -128,34 +128,23 @@ IM 里发 `/new` 直接开新 tmux 窗口 + 新 Agent 会话；`/clear` 清当�
 
 ---
 
-## 事件订阅 / 定时广播
+## 定时任务 / 跨群通知
 
-一个轻量 pub/sub：任意群或单聊都能订阅一个 **topic**（自定义事件名），任何会话都能广播；daemon 内置分钟级调度器，每天定点自动推送。订阅关系与定时任务持久化到 `~/.wezard/config.jsonc` 的 `topics` 段，`wezard reload` 后自动恢复。
+**定时任务**：到点把一句话说给某个 wizard 听——等价于那一刻有人在群里对它说了这句话，所以它**真的会去干活**，产出照常落在群里。守护进程级，跨 CLI 重启、会话结束仍在；目标 pane 死了会被自动拉起来，不要求那台机器上一直开着窗口。定时表持久化到 `~/.wezard/config.jsonc` 的 `schedules`，`wezard reload` 后自动恢复。
 
-**全部由 MCP 工具驱动**——直接对 Agent 说人话，它自己调工具，不用记命令语法：
+`when` 用人话说就行，不用翻译成 cron：
 
 | 说 | 工具 | 干什么 |
 | --- | --- | --- |
-| 「订阅 sync-daily」 | `subscribe_topic(topic)` | 把当前聊天加进某 topic 的订阅表 |
-| 「别再往这群发 sync-daily」 | `unsubscribe_topic(topic)` | 退订 |
-| 「广播 sync-daily：早会 10 分钟后开始」 | `broadcast_topic(topic, markdown)` | 立即扇出给所有订阅者，返回 `sent / failed / subs` |
-| 「每天 8 点广播 sync-daily：…」 | `schedule_broadcast(topic, hour, minute, content)` | 注册每日定时广播 |
-| 「取消 sync-daily 的定时」 | `cancel_broadcast(topic)` | 删掉该 topic 的所有定时 |
-| 「我订了什么 / 有哪些定时」 | `list_topics()` | 列出本聊天订阅 + 全部定时 |
+| 「每个工作日晚上 9:30 跑一遍回归」 | `schedule_task(when, prompt, tag?)` | 排给某个 wizard（省略 `tag` = 排给自己） |
+| 「我设了什么定时」 | `list_tasks()` | 列出 id / 人话回显的 when / 下次触发时刻 / 目标 |
+| 「取消那个定时」 | `cancel_task(id)` | 按 id 删 |
 
-典型用法：在群 A 说「订阅 sync-daily」，在群 B 说「每天 8 点广播 sync-daily：早会 10 分钟后开始」——第二天早 8 点群 A 自动收到。一个 agent 也能在跑完任务后自己 `broadcast_topic` 汇报结果，无需人工敲命令。
+认得的说法：`每天 8:00`、`每个工作日晚上9:30`、`每周三下午3点`、`每隔两小时`、`每 30 分钟`、`20 分钟后`、`明早 9 点`。
 
-**外部触发**（CI / 监控 / 脚本，无需 MCP）：daemon 在 loopback 暴露 `POST /publish`，广播给某 topic 的所有订阅者：
+**跨群通知**：`notify(to?, markdown)` 把一段 markdown 贴进指定聊天**给人看**——和 `send_peer` 正好相反，它不驱动任何 agent、不触发一轮对话。`to` 写聊天名（见[给聊天命名](#跨聊天给聊天命名)），省略就是自己所在的群。跨群时气泡头自动写成 `源聊天#你` 并挂上 chat 详情页链接，那边的人一眼知道是谁从哪说过来的。
 
-```bash
-curl -sS -X POST http://127.0.0.1:17890/publish \
-  -H 'content-type: application/json' \
-  -d '{"topic":"ci-fail","markdown":"🔴 build #1234 failed on main"}'
-```
-
-调用方只关心事件名，订阅者由 AI 通过 MCP 工具增删，代码零改动。
-
----
+典型用法：一个长活在 `build` 群跑完，`notify(["ops"], "🔴 回归挂了 3 例…")` 把结论送到该看的人那里；或者 `schedule_task` 到点跑完，由那个 wizard 自己 `notify` 播报。
 
 ## 一个聊天里住着多个 wizard（`#tag` 路由）
 

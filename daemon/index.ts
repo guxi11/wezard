@@ -27,17 +27,12 @@ import { installResponseTracker } from "./last-response.js";
 import { scanClaudeSessions } from "./session-scan.js";
 import {
   startScheduler,
-  publish as publishTopic,
-  subscribe as subscribeTopic,
-  unsubscribe as unsubscribeTopic,
-  listSubs,
   listSchedules,
   addSchedule,
   removeScheduleById,
-  removeSchedulesByTopic,
   renderSchedule,
-} from "./topics.js";
-import { parseWhen, type When } from "../shared/schedule-spec.js";
+} from "./tasks.js";
+import { parseWhen } from "../shared/schedule-spec.js";
 import { baseOfKey, keyOf, labelFor, normalizeTag, tagFromCwd, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
 import { chatBaseOf, chatNameOf, clearChatName, listChatNames, normChatName, peerAddress, setChatName } from "./chat-name.js";
 import {
@@ -183,21 +178,6 @@ const main = async (): Promise<void> => {
   http.register("POST /message", makeMessageHandler(ws.client, log.child({ mod: "outbound" })));
   http.register("POST /card", makeCardHandler(ws.client, log.child({ mod: "outbound" })));
   http.register("POST /ask", makeAskHandler(ws.client, log.child({ mod: "ask" })));
-  // 事件订阅广播: 外部脚本/CI 可 curl :17890/publish 触发一次广播,不用关心订阅者。
-  http.register("POST /publish", async (req, res) => {
-    const { readBody } = await import("./http.js");
-    const body = (await readBody(req)) as Partial<{ topic: string; markdown: string; text: string }>;
-    const topic = (body.topic ?? "").trim();
-    const content = body.markdown ?? body.text ?? "";
-    if (!topic || !content) { json(res, 400, { ok: false, error: "topic and markdown/text required" }); return; }
-    if (!ws.client.isConnected) { json(res, 503, { ok: false, error: "ws_disconnected" }); return; }
-    try {
-      const r = await publishTopic(ws.client, cfg, log.child({ mod: "topics" }), topic, content);
-      json(res, 200, { ok: true, ...r });
-    } catch (e) {
-      json(res, 502, { ok: false, error: (e as Error).message });
-    }
-  });
   http.register("POST /claim/start", makeClaimStartHandler({ log: log.child({ mod: "claim" }) }));
   http.register("GET /claim/status", makeClaimStatusHandler());
   http.register("POST /claim/reset", makeClaimResetHandler());
@@ -615,6 +595,29 @@ const main = async (): Promise<void> => {
       notifyChat(dest, `${head}\n\n${clipped}`);
     };
 
+    // ── 给人看的消息 ──────────────────────────────────────────────────
+    // send_peer 把话塞进另一个 agent 的输入框 (驱动它干活); 这条把话贴进一个聊天
+    // 给**人**看。收件人就是地址 —— 聊天名或裸 principal, 没有「先订阅才收得到」
+    // 这一步。头沿用 relay 那一套: 本群退化成寻常的 `emoji #tag`, 外群写成带聊天
+    // 名的全称, 于是那边的人一眼看得出是谁、从哪个群说过来的。
+    http.register("POST /notify", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      const b = body as { to?: string[]; markdown?: string };
+      const content = (b.markdown ?? "").trim();
+      if (!content) { json(res, 400, { ok: false, reason: "markdown required" }); return; }
+      // 认不出的名字原样报回去, 绝不静默跳过 ——「发了但没人收到」是这类工具最难查
+      // 的故障; 有一个收件人错了整条就不发, 部分送达比不送达更难对账。
+      const refs = (b.to ?? []).map((r) => (r ?? "").trim()).filter(Boolean);
+      const bad = refs.filter((r) => !chatBaseOf(cfg, r));
+      if (bad.length) {
+        json(res, 400, { ok: false, reason: `认不出这些聊天: ${bad.join(", ")} (list_chats 看有哪些; 没起名的聊天寻址不到)` });
+        return;
+      }
+      const dests = [...new Set(refs.length ? refs.map((r) => chatBaseOf(cfg, r)) : [baseOfKey(self)])];
+      for (const dest of dests) notifyChat(dest, `${relayLabel(self, dest)}\n\n${content}`);
+      json(res, 200, { ok: true, sent: dests.map((d) => chatNameOf(cfg, d) || d) });
+    });
 
     http.register("POST /peers/peek", async (req, res) => {
       const { self, body } = await readPeerBody(req);
@@ -1021,75 +1024,9 @@ const main = async (): Promise<void> => {
       })();
     });
 
-    // ── Topic pub/sub (MCP-driven) ─────────────────────────────────────
-    // 订阅/退订/列表/定时/取消 全部走 MCP,不再有 IM 文本命令。self 复用 peer
-    // 路由的解析链(target → sessionId → tmuxPane → defaultChat),把调用方所在
-    // 的聊天当作订阅者。即时广播是订阅者无关的,复用全局 POST /publish,不在这里
-    // 另开。持久化与 startScheduler 定时器不变。
-    const topicOf = (body: PeerBody): string => ((body as { topic?: string }).topic ?? "").trim();
-
-    http.register("POST /topics/subscribe", async (req, res) => {
-      const { self, body } = await readPeerBody(req);
-      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const topic = topicOf(body);
-      if (!topic) { json(res, 400, { ok: false, reason: "topic required" }); return; }
-      const r = subscribeTopic(cfg, sourcePath, topic, self);
-      json(res, 200, { ok: true, ...r, topic, target: self, subs: (cfg.topics.subs[topic] ?? []).length });
-    });
-
-    http.register("POST /topics/unsubscribe", async (req, res) => {
-      const { self, body } = await readPeerBody(req);
-      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const topic = topicOf(body);
-      if (!topic) { json(res, 400, { ok: false, reason: "topic required" }); return; }
-      const r = unsubscribeTopic(cfg, sourcePath, topic, self);
-      json(res, 200, { ok: true, ...r, topic, target: self });
-    });
-
-    // List = 本聊天订阅了哪些 topic + 全部定时广播(scheduler 是进程级的)。
-    http.register("POST /topics/list", async (req, res) => {
-      const { self } = await readPeerBody(req);
-      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      json(res, 200, {
-        ok: true,
-        target: self,
-        subs: listSubs(cfg, self),
-        schedules: listSchedules(cfg, { kind: "broadcast" }).map((x) => renderSchedule(x)),
-      });
-    });
-
-    http.register("POST /topics/schedule", async (req, res) => {
-      const { self, body } = await readPeerBody(req);
-      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const topic = topicOf(body);
-      const b = body as { hour?: number; minute?: number; content?: string; when?: string };
-      const content = (b.content ?? "").toString();
-      if (!topic) { json(res, 400, { ok: false, reason: "topic required" }); return; }
-      if (!content.trim()) { json(res, 400, { ok: false, reason: "content required" }); return; }
-      // 两种入参并存: `when` 是人话 (「每个工作日 9:00」), hour/minute 是老调用方。
-      const when = b.when?.trim()
-        ? parseWhen(b.when, new Date())
-        : Number.isInteger(Number(b.hour))
-          ? ({ kind: "daily", days: [], hour: Number(b.hour), minute: Number(b.minute ?? 0) } satisfies When)
-          : undefined;
-      if (!when) { json(res, 400, { ok: false, reason: `cannot parse when: ${b.when ?? `${b.hour}:${b.minute}`}` }); return; }
-      const rec = addSchedule(cfg, sourcePath, { kind: "broadcast", when, topic, content, createdBy: self });
-      json(res, 200, { ok: true, ...renderSchedule(rec), subs: (cfg.topics.subs[topic] ?? []).length });
-    });
-
-    http.register("POST /topics/cancel-schedule", async (req, res) => {
-      const { self, body } = await readPeerBody(req);
-      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const topic = topicOf(body);
-      if (!topic) { json(res, 400, { ok: false, reason: "topic required" }); return; }
-      const removed = removeSchedulesByTopic(cfg, sourcePath, topic);
-      json(res, 200, { ok: true, topic, removed });
-    });
-
     // ── 定时任务 ────────────────────────────────────────────────────
     // 到点把一句 prompt 注入一个 wizard 会话 —— 和人在群里对它说话走的是同一条路
-    // (injectText), 所以 pane 死了会被拉起来, 输出照常落进群和详情页。这是「定时
-    // 广播」缺的那一半: 广播只是通知, 任务是真的干活。
+    // (injectText), 所以 pane 死了会被拉起来, 输出照常落进群和详情页。
     http.register("POST /tasks/schedule", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
@@ -1112,7 +1049,7 @@ const main = async (): Promise<void> => {
         if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
         target = r.target;
       }
-      const rec = addSchedule(cfg, sourcePath, { kind: "task", when, target, prompt, createdBy: self, note: (b.note ?? "").toString() });
+      const rec = addSchedule(cfg, sourcePath, { when, target, prompt, createdBy: self, note: (b.note ?? "").toString() });
       json(res, 200, { ok: true, ...renderSchedule(rec), address: peerAddress(cfg, self, target) });
     });
 
@@ -1121,8 +1058,8 @@ const main = async (): Promise<void> => {
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       const mineOnly = (body as { mine?: boolean }).mine === true;
       const now = new Date();
-      const tasks = listSchedules(cfg, { kind: "task", ...(mineOnly ? { target: self } : {}) })
-        .map((x) => ({ ...renderSchedule(x, now), address: x.kind === "task" ? peerAddress(cfg, self, x.target) : "" }));
+      const tasks = listSchedules(cfg, mineOnly ? self : undefined)
+        .map((x) => ({ ...renderSchedule(x, now), address: peerAddress(cfg, self, x.target) }));
       json(res, 200, { ok: true, self, tasks });
     });
 
@@ -1238,13 +1175,13 @@ const main = async (): Promise<void> => {
     });
   }
 
-  // 定时调度器 — 每 20s 检查 topics.schedules: 广播照推, task 类注入到目标 wizard。
+  // 定时调度器 — 每 20s 检查 cfg.schedules, 到点把 prompt 注入目标 wizard。
   // inject 只在 mirror 模式给得出 (headless 模式没有常驻会话可注入)。
   const scheduler = startScheduler({
     client: ws.client,
     cfg,
     sourcePath,
-    log: log.child({ mod: "topics" }),
+    log: log.child({ mod: "tasks" }),
     inject:
       cfg.wrc.mode === "mirror"
         ? (target, text) => (bridge as MirrorBridge).injectText(target, text, undefined, { fromChat: true })

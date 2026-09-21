@@ -5,12 +5,12 @@
 ## [Unreleased]
 
 ### Added
-- **定时任务: 到点让一个 wizard 真的去干活**。此前 `topics.schedules` 只能「每天 HH:MM 推一段固定文字给订阅者」——那是通知,不产生工作。现在同一张表里多了 `task` 类:到点把一句 prompt 注入目标 wizard 的会话,与那一刻有人在群里对它说这句话完全等价 —— pane 死了 `injectText` 自己把它拉起来,产出照常落进群和详情页。活在 daemon 里而不是某个会话里,所以 CLI 重启、`/clear`、会话结束都带不走它。
+- **定时任务: 到点让一个 wizard 真的去干活**。到点把一句 prompt 注入目标 wizard 的会话,与那一刻有人在群里对它说这句话完全等价 —— pane 死了 `injectText` 自己把它拉起来,产出照常落进群和详情页。活在 daemon 里而不是某个会话里,所以 CLI 重启、`/clear`、会话结束都带不走它。
   - **时机写人话,不写 cron**。`shared/schedule-spec.ts` 是一层纯解析:「每个工作日晚上9:30」「每天早上9点」「每周三下午3点」「每周二和周四晚上8点」「每隔两小时」「每30分钟」「20分钟后」「明早9点」,中文数字(九点半/十点)、时段词(凌晨/上午/中午/下午/晚上)、刻钟(一刻/半/三刻)、英文(weekdays 21:30 / every 15m / tomorrow 9:30pm)都认。刻意不收 cron 表达式:人说的是前者,让模型翻译成 `30 21 * * 1-5` 翻错了没人看得出来。认不出就报错并列出能认的说法,绝不猜一个时间存下去;存成功后回显 `when` 与 `next` 供人当场确认。
   - 三种形状足够覆盖:`daily`(某几天的 HH:MM)、`every`(每 N 分钟)、`once`(绝对时刻,触发后自删)。判定收在一个纯函数 `isDue(when, now, since)` 里,同时承担同分钟去重、重启不重放、以及**5 分钟补跑窗口** —— 守护进程重启吃掉的那一下会补上,超窗就放弃(早上 9 点的活中午补跑比不跑更糟)。
-  - 新 MCP 工具:`schedule_task`(省略 `tag` = 排给自己)· `list_tasks`(id / 人话回显 / 下次触发时刻)· `cancel_task`。`schedule_broadcast` 同步接受 `when` 人话入参,`hour`/`minute` 老写法继续可用。
+  - 新 MCP 工具:`schedule_task`(省略 `tag` = 排给自己)· `list_tasks`(id / 人话回显 / 下次触发时刻)· `cancel_task`。
   - 定时注入强制走出处门(`injectText(…, { fromChat: true })`):定时点的火,结果必须在群里看得见,哪怕上一轮是人在 CLI 里敲的。放枪前先推一条 `⏰ 定时任务 · <时机>` 气泡 —— 否则群里凭空冒出一轮对话,没人知道是谁点的。
-  - 老配置零迁移成本:`{topic,hour,minute,content}` 形状的历史记录读盘时就地升格为 `broadcast` + `daily`,id 取确定式(同一份 config 反复读得到同一个 id)。
+  - 定时表从 `topics.schedules` 升到顶层 `schedules`;老 config 读盘时就地抬一手,已排好的任务不会静默消失。
 - **wizard: 绑定聊天的会话从此是一个有身份的角色**。一个 `chat:xxx[#tag]` 不再只是路由 key，它有名字(= 聊天名，带 tag 的分身读作 `chat#tag`)、一句职责、一份跨会话的记忆、一条家谱，以及「知道自己活在一个群里、群里还有别的同类」这件事。
   - **身份走系统提示，不走对话**。spawn 时把宪章写进 `~/.wezard/state/charters/<sid>.md`，以 `--append-system-prompt "$(cat …)"` 压进那个进程 —— 不占一轮、群里看不见、`/clear` 抹不掉、上下文窗口也挤不掉。所有 spawn 路径(群里 `/new`、pane 死了的自愈重生、编排生出来的分身)统一从 `setCharterProvider` 取身份，「是谁」不再取决于是哪段代码把它生出来的。没有该 flag 的后端(codebuddy)静默跳过，无回归。
   - **分身(clone) = fork 父亲此刻的上下文**。`spawn_clone({inherit:true})` 以 `--resume <父 sid> --fork-session` 起新 pane，CLI 把父亲的 transcript 复制成一份新的再继续写：分身开局就带着父亲读过的一切，父亲毫发无损。于是「先把公共材料读进一个基座，再从它分出 N 个干活的」成立 —— 材料只读一遍，却进了 N 份上下文。分叉文件在该 pane 收到**第一条消息**时才生成，所以开场白(即第一件活)是分叉的触发器，等到它才 attach；等不到就连 pane 一起收掉，绝不拿父亲的 sid 凑合。`inherit` 必填，没有默认值。
@@ -18,7 +18,13 @@
   - 注册表落在 `~/.wezard/wizards.json`(`wrc.mirror.wizardsFile`)。
 - `/new` 接受位置参数 `[cli] [model] [prompt…]`，三个都可选、从前往后逐个认领：认得出的 CLI 名吃进后端、认得出的模型别名(`opus` / `sonnet` / `haiku` / `claude-opus-5` 这类完整 slug)吃进 `--model`、剩下的整段作为新会话的第一句话在 spawn 后照常走 dispatch 注入。`/new opus`、`/new 帮我看下这个 bug`、`/new codebuddy opus #docs 先读一遍 README` 都成立。模型槽刻意收窄到已知别名与 `claude|gpt|gemini|deepseek-*` slug —— 认不出的一律当正文，`/new 看看 sonnet 贵不贵` 不会被吃掉第一个词。
 
+### Removed
+- **BREAKING: 删掉 topic 订阅 / 广播整套子系统** —— `subscribe_topic` / `unsubscribe_topic` / `list_topics` / `broadcast_topic` / `schedule_broadcast` / `cancel_broadcast` 六个 MCP 工具、`POST /publish` 与五条 `/topics/*` 路由、`config.jsonc` 的 `topics.subs`,以及 `schedules` 里的 `broadcast` 记录形状。pub/sub 的价值是「发布者不认识订阅者」,而这里的收件人全是本机 wizard —— `list_chats` / `wizard_roster` 早就把通讯录完整、人类可读地枚举出来了。topic 于是成了给一本翻得完的通讯录加的一层间接:多一套与地址不兼容的命名、多一步注册、打错一个字永远静默收不到。它占掉 34 个工具里的 6 个、工具描述总量的 15%(这些描述进每一个 wizard 的系统提示),换来的是零真实使用。
+  - 能力没丢,换了表达:**要通知人**用新的 `notify`(收件人就是地址,不需要谁先订阅);**要到点干活**用 `schedule_task`(定时广播只是它的退化特例 ——「到点说这一句固定的话」)。
+  - 迁移:老 config 里 `topics.schedules` 中的广播记录读盘时被丢弃(不再抛错,一条过期定时不该把 daemon 挡在启动之外);`topics` 段留在盘上无害,可手工删。`POST /publish` 的外部调用方(CI / 监控脚本)改调 `POST /message`(直接给 chatid)。
+
 ### Changed
+- **`notify`: wizard 说给人听的那条通路**。此前一个 wizard 只有两种开口方式 —— 自己那一轮的正常回复(只到自己群),和 `send_peer`(把话塞进另一个 agent 的输入框,驱动它干活)。「把结论贴到另一个群给人看」既不属于前者也不属于后者,此前只能借广播歪着走。`notify(to?, markdown)` 补上这一格:`to` 写聊天名(可多个),省略即自己这个群;跨群时气泡头沿用 relay 那一套 —— 写成带聊天名的全称并挂上 chat 详情链接,那边的人一眼看出是谁从哪说过来的。收件人认不出整条拒绝并列出来,绝不部分送达 ——「发了但没人收到」是这类工具最难查的故障。
 - **把历史上的 peer 话术统一到 wizard/clone**。同一套东西此前有两种说法(「会话 / peer / sibling」与「wizard / 分身」)，模型读到的是分裂的世界观。现在 MCP 工具描述、`#tag` mention 提示(`<system-reminder>`)、`/help`、`/peers`、README 与架构文档一律讲同一种话：一个绑定聊天的会话 = 一个 wizard，它的分身 = clone，同一聊天里的其他 wizard = 同伴。**工具名保持不变** —— 名字是地址，改名会把 hint、文档与用户肌肉记忆一起打碎；`send_peer` 读作「跟另一个 wizard 说话」即可。
   - `/peers`(新增别名 `/wizards`)从「会话列表」改成**名册**：每行带名字、职责、忙闲、以及「分身自 #x」。名字与职责来自注册表，通过 `bindWizardStore` 进程级绑定读到，没登记过的仍只显示 tag。
   - `new_claude_session` 的描述明确写出它与 `spawn_clone` 的分工(白纸一张 vs 继承上下文)，`handoff` 明确指向 `wizard_handoff_self` 处理自己，`stop_graph` 指向 `stop_wizard` 做即时打断 —— 相邻能力之间互相指路，模型不必猜。

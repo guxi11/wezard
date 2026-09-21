@@ -452,6 +452,25 @@ server.registerTool(
 );
 
 server.registerTool(
+  "notify",
+  {
+    title: "Post a message into a chat for people to read",
+    description:
+      "把一段 markdown 贴进一个企微聊天**给人看**。和 send_peer 分工明确: send_peer 是把话塞进另一个 agent 的输入框 (驱动它干活), notify 是说给人听 —— 不会触发任何一轮对话。\n" +
+      "`to` 省略 = 自己所在的聊天 (等于你正常回复, 只是不用等这一轮结束就能先播一条); 要发到别的群就写聊天名 (`list_chats` 里那个), 一次可以写多个。跨群时气泡头自动写成 `源聊天#你` 并挂上你的 chat 详情页链接, 那边的人一眼知道是谁从哪说过来的。\n" +
+      "什么时候用: 长活跑完了要通知另一个群的人; 一批分身收工后把汇总播给发起那个群; 定时任务 (schedule_task) 到点跑完把结论送到该看的人那里。别拿它跟同群的人说话 —— 那是你的正常回复。",
+    inputSchema: {
+      to: z
+        .array(z.string())
+        .optional()
+        .describe("收件聊天, 聊天名或裸 principal (`chat:wr…` / `user:…`)。省略 = 自己所在的聊天。认不出的名字会整条拒绝并列出来, 不会部分送达。"),
+      markdown: z.string().describe("正文, markdown。头 (是谁发的) 由守护进程自动加, 别自己写。"),
+    },
+  },
+  async ({ to, markdown }) => unwrap("notify", await daemonPost("/notify", { ...(to ? { to } : {}), markdown })),
+);
+
+server.registerTool(
   "wait_peer",
   {
     title: "Wait until another wizard stops working",
@@ -562,90 +581,6 @@ server.registerTool(
     ),
 );
 
-// ── Topic pub/sub (注册订阅 + 广播) ────────────────────────────────────────
-// A lightweight event bus layered on WeCom chats: a session registers its chat
-// as a subscriber of a named topic, anyone broadcasts to every subscriber at
-// once. Same store the IM commands「订阅」/「广播」use — persisted to config.jsonc
-// (`topics.subs`), surviving daemon reloads. subscribe resolves the caller's
-// chat via selfRef; broadcast is subscriber-agnostic, so it hits the shared
-// /publish route directly.
-server.registerTool(
-  "subscribe_topic",
-  {
-    title: "Subscribe this chat to a topic",
-    description:
-      "Register the CURRENT WeCom chat (the one mirroring this session) as a subscriber of a named topic, so it receives every future broadcast_topic push and scheduled daily broadcast on that topic. Equivalent to the user typing 「订阅 <topic>」 in the chat, but driven by the agent. Topics are free-form event names (e.g. 'ci-fail', 'daily-report'); subscriptions persist across daemon reloads. Use when the user says 「订阅 xxx」/「注册到 xxx 事件」/「以后 xxx 的消息也发这个群」. Returns `added` (false if already subscribed) and the topic's current subscriber count.",
-    inputSchema: {
-      topic: z.string().describe("Topic name to subscribe to, e.g. 'ci-fail'. Free-form: letters / digits / CJK / - / _ / . , no whitespace."),
-    },
-  },
-  async ({ topic }) => unwrap("subscribe_topic", await daemonPost("/topics/subscribe", { topic })),
-);
-
-server.registerTool(
-  "broadcast_topic",
-  {
-    title: "Broadcast a message to a topic's subscribers",
-    description:
-      "Fan a markdown message out to EVERY chat/session subscribed to the given topic. Equivalent to 「广播 <topic> <内容>」. Each subscriber receives it as a normal WeCom bubble in its own channel (tagged sessions get their `#tag` header). Returns `sent` / `failed` / `subs` so you know the reach. Use when the user says 「广播 xxx」/「给订阅 xxx 的都发一下」, or an agent needs to notify a fleet of sessions at once. 要私下推**一个** wizard 一把, 用 send_peer。",
-    inputSchema: {
-      topic: z.string().describe("Topic to publish to. Subscribers are whoever ran subscribe_topic / 「订阅」 on this topic."),
-      markdown: z.string().describe("Message body in WeCom markdown."),
-    },
-  },
-  async ({ topic, markdown }) => {
-    const resp = await fetch(`${DAEMON_BASE}/publish`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ topic, markdown }),
-    });
-    const j = (await resp.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-    return j.ok ? ok(j) : fail(`broadcast_topic failed: ${j.error ?? `http ${resp.status}`}`);
-  },
-);
-
-server.registerTool(
-  "unsubscribe_topic",
-  {
-    title: "Unsubscribe this chat from a topic",
-    description:
-      "Remove the CURRENT WeCom chat from a topic's subscriber list, so it stops receiving that topic's broadcasts and scheduled pushes. The inverse of subscribe_topic. Returns `removed` (false if it wasn't subscribed). Use when the user says 「退订 xxx」/「别再往这个群发 xxx 了」.",
-    inputSchema: {
-      topic: z.string().describe("Topic name to unsubscribe from."),
-    },
-  },
-  async ({ topic }) => unwrap("unsubscribe_topic", await daemonPost("/topics/unsubscribe", { topic })),
-);
-
-server.registerTool(
-  "list_topics",
-  {
-    title: "List this chat's subscriptions and all scheduled broadcasts",
-    description:
-      "Show what THIS chat is subscribed to (`subs`: topic + subscriber count) plus every scheduled **broadcast** on the host (`schedules`: id / 人话回显的 when / 下次触发时刻 / topic / creator). Use when the user asks 「订阅列表」/「有哪些定时广播」/「我订了什么」. Read-only. 定时**任务** (到点让 wizard 干活的那种) 不在这里, 在 list_tasks。",
-    inputSchema: {},
-  },
-  async () => unwrap("list_topics", await daemonPost("/topics/list", {})),
-);
-
-server.registerTool(
-  "schedule_broadcast",
-  {
-    title: "Schedule a daily broadcast to a topic",
-    description:
-      "注册一条**定时广播**: 到点把 `content` 推给 `topic` 的所有订阅者。推的是一段固定文字, 不会让任何 wizard 干活 —— 要「到点自动跑任务」用 schedule_task。时机写在 `when` 里, 直接用人话 (「每天 8 点」「每个工作日 9:30」), 也可以继续传 hour/minute。跨 daemon 重启仍在。用户说「每天 8 点广播 xxx」「定时给订阅者发 xxx」时调它; 只发一次用 broadcast_topic。",
-    inputSchema: {
-      topic: z.string().describe("Topic whose subscribers receive the push."),
-      when: z.string().optional().describe("什么时候, 人话即可: 「每天 8 点」「每个工作日 9:30」「每隔 2 小时」。给了它就不必给 hour/minute。"),
-      hour: z.number().int().min(0).max(23).optional().describe("Hour of day, 0-23 (host local time). `when` 的旧写法, 二选一。"),
-      minute: z.number().int().min(0).max(59).optional().describe("Minute, 0-59. Default 0."),
-      content: z.string().describe("Message body in WeCom markdown, sent every time it fires."),
-    },
-  },
-  async ({ topic, when, hour, minute, content }) =>
-    unwrap("schedule_broadcast", await daemonPost("/topics/schedule", { topic, when, hour, minute: minute ?? 0, content })),
-);
-
 // 定时任务 —— 到点把一句话说给一个 wizard 听。和人在群里 at 它说同一句话完全等价:
 // pane 死了会被拉起来, 它干完的活照常出现在群里和详情页。这是 claude/codebuddy 自带
 // 定时器给不了的那一半: 它们的循环活在会话里, 会话一死就没了; 这个活在 daemon 里。
@@ -671,7 +606,7 @@ server.registerTool(
   {
     title: "List scheduled tasks on this host",
     description:
-      "列出本机所有定时任务: `id` (取消要用)、`when` (人话回显)、`next` (下次触发时刻)、`lastFired`、目标 wizard 的 `address` 与 `prompt`。用户问「有哪些定时任务」「我设了什么定时」「下次什么时候跑」时调它。只读。`mine:true` 只看排给你自己的。定时**广播**不在这里, 在 list_topics。",
+      "列出本机所有定时任务: `id` (取消要用)、`when` (人话回显)、`next` (下次触发时刻)、`lastFired`、目标 wizard 的 `address` 与 `prompt`。用户问「有哪些定时任务」「我设了什么定时」「下次什么时候跑」时调它。只读。`mine:true` 只看排给你自己的。",
     inputSchema: {
       mine: z.boolean().optional().describe("true = 只列排给调用方自己的任务。默认列全机。"),
     },
@@ -690,19 +625,6 @@ server.registerTool(
     },
   },
   async ({ id }) => unwrap("cancel_task", await daemonPost("/tasks/cancel", { id })),
-);
-
-server.registerTool(
-  "cancel_broadcast",
-  {
-    title: "Cancel a topic's daily scheduled broadcasts",
-    description:
-      "Delete ALL daily scheduled broadcasts for a topic (does NOT touch subscriptions or fire anything). Equivalent to 「取消广播 <topic>」. Returns how many schedules were removed. Use when the user says 「取消 xxx 的定时」/「别再每天发 xxx 了」.",
-    inputSchema: {
-      topic: z.string().describe("Topic whose scheduled broadcasts should be removed."),
-    },
-  },
-  async ({ topic }) => unwrap("cancel_broadcast", await daemonPost("/topics/cancel-schedule", { topic })),
 );
 
 // ── Config ──────────────────────────────────────────────────────────

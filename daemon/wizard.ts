@@ -169,6 +169,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "`wizard_remember` 写一条跨会话的记忆",
       "`wizard_handoff_self` 上下文快满时自己原地交接重开",
       "`send_peer` / `wait_peer` / `peek_peer` / `list_peers` 和别的 wizard 说话、等它、看它在干嘛",
+      "`notify` 把一段话贴进某个聊天给**人**看 (省略 `to` 就是自己这个群) —— 和 send_peer 相反, 它不驱动任何 agent",
       "`schedule_task` 给自己或别的 wizard 排一个到点自动执行的活 (「每个工作日晚上9:30 …」) · `list_tasks` / `cancel_task`",
       "`set_workspace` 换工作区 · `name_chat` 给聊天起名 · `list_chats` 看别的聊天",
       "`run_agent_graph` 把多个 wizard 串成一条会循环的流水线",
