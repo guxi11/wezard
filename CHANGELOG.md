@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-09-21
+
 ### Changed
 - **精简: 把四处各自重写的东西收成一份**。没有行为变化,`npm run build` 与 6 个测试文件照常通过。
   - `shared/json-map-store.ts`: `sessions` / `mirror-store` / `wizard` / `jobs` 四个存储各自抄了一遍「读一份 keyed json、每次改动写穿」。收成一个 `loadJsonMap`,`gc` 钩子让 jobs 继续在写盘前丢掉 24h 前收工的行。顺带统一了容错口径 —— 此前只有 wizard / jobs 的写失败被吞掉,sessions / mirror-store 会抛; 这些都是恢复用的状态,丢了该重挂一次,不该拖垮一个活着的会话。
@@ -528,7 +530,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v1.4.1...HEAD
+[1.4.1]: https://github.com/guxi11/wezard/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/guxi11/wezard/compare/v1.3.23...v1.4.0
 [1.3.23]: https://github.com/guxi11/wezard/compare/v1.3.22...v1.3.23
 [1.3.22]: https://github.com/guxi11/wezard/compare/v1.3.21...v1.3.22
