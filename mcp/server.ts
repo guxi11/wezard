@@ -136,21 +136,16 @@ server.registerTool(
     // a tmux pane" signal that drives respawn when their pane dies.
     const tmuxPane = process.env.TMUX_PANE?.trim();
     const tmuxSession = tmuxPane ? await detectTmuxSession() : undefined;
-    const resp = await fetch(`${DAEMON_BASE}/mirror/attach`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        sessionId: r.sessionId,
-        jsonlPath: r.jsonlPath,
-        ...(normalizedTarget ? { target: normalizedTarget } : {}),
-        ...(tmuxPane ? { tmuxPane } : {}),
-        ...(tmuxSession ? { tmuxSession } : {}),
-      }),
+    const { j } = await daemonPost("/mirror/attach", {
+      sessionId: r.sessionId,
+      jsonlPath: r.jsonlPath,
+      ...(normalizedTarget ? { target: normalizedTarget } : {}),
+      ...(tmuxPane ? { tmuxPane } : {}),
+      ...(tmuxSession ? { tmuxSession } : {}),
     });
-    const j = (await resp.json().catch(() => ({}))) as { ok?: boolean; reason?: string; target?: string };
     return j.ok
       ? ok({ ok: true, sessionId: r.sessionId, target: j.target })
-      : fail(`attach failed: ${j.reason ?? "unknown"}`);
+      : fail(`attach failed: ${(j.reason as string) ?? "unknown"}`);
   },
 );
 
@@ -181,19 +176,15 @@ server.registerTool(
   async ({ cwd, target }) => {
     const { sessionId, tmuxPane } = selfRef();
     const normalizedTarget = normalizeTarget(target);
-    const resp = await fetch(`${DAEMON_BASE}/mirror/workspace`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        cwd,
-        ...(normalizedTarget ? { target: normalizedTarget } : {}),
-        ...(sessionId ? { sessionId } : {}),
-        ...(tmuxPane ? { tmuxPane } : {}),
-      }),
+    const { j } = await daemonPost("/mirror/workspace", {
+      cwd,
+      ...(normalizedTarget ? { target: normalizedTarget } : {}),
+      ...(sessionId ? { sessionId } : {}),
+      ...(tmuxPane ? { tmuxPane } : {}),
     });
-    const j = (await resp.json().catch(() => ({}))) as { ok?: boolean; reason?: string; target?: string; sessionId?: string; cwd?: string; pendingCwd?: string };
     if (!j.ok) {
-      return fail(`set_workspace failed: ${j.reason ?? "unknown"}${j.pendingCwd ? ` (switch queued for ${j.pendingCwd} — send /new from WeCom to apply)` : ""}`);
+      const queued = j.pendingCwd ? ` (switch queued for ${j.pendingCwd as string} — send /new from WeCom to apply)` : "";
+      return fail(`set_workspace failed: ${(j.reason as string) ?? "unknown"}${queued}`);
     }
     return ok({ ok: true, target: j.target, sessionId: j.sessionId, cwd: j.cwd });
   },
@@ -220,13 +211,8 @@ server.registerTool(
     },
   },
   async ({ category, requesterUserId }) => {
-    const resp = await fetch(`${DAEMON_BASE}/wedoc/list`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ category, ...(requesterUserId ? { requesterUserId } : {}) }),
-    });
-    const j = (await resp.json().catch(() => ({}))) as { ok?: boolean; error?: string; result?: unknown };
-    return j.ok ? ok(j.result) : fail(`wecom_doc_list_tools failed: ${j.error ?? `http ${resp.status}`}`);
+    const r = await daemonPost("/wedoc/list", { category, ...(requesterUserId ? { requesterUserId } : {}) });
+    return unwrap("wecom_doc_list_tools", r, (j) => j.result);
   },
 );
 
@@ -252,18 +238,13 @@ server.registerTool(
     },
   },
   async ({ category, method, args, requesterUserId }) => {
-    const resp = await fetch(`${DAEMON_BASE}/wedoc/call`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        category,
-        method,
-        args: args ?? {},
-        ...(requesterUserId ? { requesterUserId } : {}),
-      }),
+    const r = await daemonPost("/wedoc/call", {
+      category,
+      method,
+      args: args ?? {},
+      ...(requesterUserId ? { requesterUserId } : {}),
     });
-    const j = (await resp.json().catch(() => ({}))) as { ok?: boolean; error?: string; result?: unknown };
-    return j.ok ? ok(j.result) : fail(`wecom_doc_call failed: ${j.error ?? `http ${resp.status}`}`);
+    return unwrap("wecom_doc_call", r, (j) => j.result);
   },
 );
 
@@ -280,9 +261,7 @@ server.registerTool(
     inputSchema: {},
   },
   async () => {
-    const resp = await fetch(`${DAEMON_BASE}/sessions/list`, { method: "GET" });
-    const j = (await resp.json().catch(() => ({}))) as { ok?: boolean; reason?: string };
-    return j.ok ? ok(j) : fail(`list_claude_sessions failed: ${j.reason ?? `http ${resp.status}`}`);
+    return unwrap("list_claude_sessions", await daemonGet("/sessions/list"));
   },
 );
 
@@ -297,13 +276,7 @@ server.registerTool(
     },
   },
   async ({ sessionId }) => {
-    const resp = await fetch(`${DAEMON_BASE}/sessions/switch`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId }),
-    });
-    const j = (await resp.json().catch(() => ({}))) as { ok?: boolean; reason?: string };
-    return j.ok ? ok(j) : fail(`switch_claude_session failed: ${j.reason ?? `http ${resp.status}`}`);
+    return unwrap("switch_claude_session", await daemonPost("/sessions/switch", { sessionId }));
   },
 );
 
@@ -325,7 +298,12 @@ const selfRef = (): { sessionId?: string; tmuxPane?: string } => {
   return { ...(sessionId ? { sessionId } : {}), ...(tmuxPane ? { tmuxPane } : {}) };
 };
 
-const daemonPost = async (path: string, body: Record<string, unknown>): Promise<{ j: Record<string, unknown>; status: number }> => {
+interface DaemonReply {
+  j: Record<string, unknown>;
+  status: number;
+}
+
+const daemonPost = async (path: string, body: Record<string, unknown>): Promise<DaemonReply> => {
   const resp = await fetch(`${DAEMON_BASE}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -334,8 +312,15 @@ const daemonPost = async (path: string, body: Record<string, unknown>): Promise<
   return { j: (await resp.json().catch(() => ({}))) as Record<string, unknown>, status: resp.status };
 };
 
-const unwrap = (name: string, { j, status }: { j: Record<string, unknown>; status: number }) =>
-  j.ok ? ok(j) : fail(`${name} failed: ${(j.reason as string) ?? `http ${status}`}`);
+const daemonGet = async (path: string): Promise<DaemonReply> => {
+  const resp = await fetch(`${DAEMON_BASE}${path}`);
+  return { j: (await resp.json().catch(() => ({}))) as Record<string, unknown>, status: resp.status };
+};
+
+// Routes answer with either `reason` or `error`; `pick` narrows a payload that
+// is nested rather than spread at the top level (wedoc's `result`).
+const unwrap = (name: string, { j, status }: DaemonReply, pick: (j: Record<string, unknown>) => unknown = (x) => x) =>
+  j.ok ? ok(pick(j)) : fail(`${name} failed: ${(j.reason ?? j.error ?? `http ${status}`) as string}`);
 
 // 地址语法只有一套, 每个吃地址的工具都把它原样重述一遍: 模型单看一个 schema
 // 时没有别的地方能学到它, 而猜出来的地址会安静地指向另一个 wizard 的终端。
@@ -567,9 +552,7 @@ server.registerTool(
   },
   async ({ runId }) => {
     const qs = runId ? `?runId=${encodeURIComponent(runId)}` : "";
-    const resp = await fetch(`${DAEMON_BASE}/graph/status${qs}`);
-    const j = (await resp.json().catch(() => ({}))) as { ok?: boolean; reason?: string };
-    return j.ok ? ok(j) : fail(`graph_status failed: ${j.reason ?? `http ${resp.status}`}`);
+    return unwrap("graph_status", await daemonGet(`/graph/status${qs}`));
   },
 );
 

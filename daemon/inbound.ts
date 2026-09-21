@@ -21,6 +21,7 @@ import { captureQuota, renderQuotaReport } from "./quota.js";
 import { tagOfKey, baseOfKey, withTagHeader, parseTagHeader, tagTokenRe, allTags, allCompoundAddresses, labelFor } from "../shared/session-label.js";
 import { chatNameOf, chatBaseOf, clearChatName, listChatNames, peerAddress, setChatName } from "./chat-name.js";
 import { wizardName, wizardStore } from "./wizard.js";
+import { truncate } from "../shared/std.js";
 
 /** 判定"引用内容是否已在目标会话上下文里"时回看的轮数 —— 引用的通常是最近几轮
  *  里的某条气泡,再往前用户多半是真想把老内容重新拎出来说事。 */
@@ -281,7 +282,6 @@ const isPeersCommand = (text: string): boolean => /^\/(?:peers?|agents?|wizards?
 
 const uniq = (xs: string[]): string[] => [...new Set(xs)];
 const dirOf = (p: PeerInfo): string => p.cwd.replace(/^.*\//, "") || p.cwd;
-const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}…` : s);
 
 // A field with the same value on every row (project dir, CLI backend) is noise
 // repeated N times — hoist those into the header and annotate rows only where
@@ -314,8 +314,8 @@ const renderPeers = (peers: PeerInfo[], chatName: string): string => {
     const me = p.self ? " ⬅️ 本会话" : "";
     return [
       `**${p.label} ${title}** ${state}${varies.length ? ` · ${varies.join(" · ")}` : ""}${me}`,
-      ...(rec?.description ? [`　_${clip(rec.description, 48)}_`] : []),
-      `　${clip(p.summary, 64)}`,
+      ...(rec?.description ? [`　_${truncate(rec.description, 48)}_`] : []),
+      `　${truncate(p.summary, 64)}`,
       "", // 行间空行: 没有它, 折行的摘要会和下一个 wizard 糊在一起
     ];
   });

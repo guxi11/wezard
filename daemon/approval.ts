@@ -30,7 +30,7 @@ import type { NativeModalAnswer } from "./mirror-bridge.js";
 import { recordApproval, recordApprovalDecision, buildDetailUrl, getDetail } from "./detail.js";
 import type { Handler } from "./http.js";
 import { json, readBody } from "./http.js";
-import { tagBadge, tagOfKey, withTagHeader } from "../shared/session-label.js";
+import { tagBadge, withTagHeader } from "../shared/session-label.js";
 import { sessionNameFor } from "./session-name.js";
 
 // ── Routing helpers ────────────────────────────────────────────────────
@@ -228,10 +228,6 @@ const commandOf = (toolName: string, toolInput: unknown): string => {
   const i = toolInput as Record<string, unknown> | null;
   return i && typeof i.command === "string" ? i.command : "";
 };
-
-const MAIN_DESC_MAX = 30;
-const mainTitle = (title: string, desc?: string): TemplateCard["main_title"] =>
-  desc ? { title, desc: TRUNC(desc, MAIN_DESC_MAX) } : { title };
 
 const dirName = (cwd: string): string => cwd.replace(/^.*\//, "") || cwd;
 
@@ -1565,11 +1561,6 @@ const handleAskUserQuestion = async ({ cfg, log, client, body, getMirrorTarget, 
   const total = questions.length;
   const answers: string[] = [];
   const flowStart = Date.now();
-  // hook 客户端断开后整个流程只是往死管道灌数据 — 记标志, 循环内 race、
-  // 循环后回执都以它止血。正常完成时 clientGone 永不 resolve, 无副作用。
-  let gone = false;
-  void clientGone?.then(() => { gone = true; });
-
   for (let i = 0; i < total; i++) {
     const q = questions[i]!;
     // 剩余预算: N 题共享一份 longPollSec。若每题都给整份, 多题总时长上限是

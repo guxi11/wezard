@@ -25,6 +25,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { expandHome } from "../shared/paths.js";
+import { augmentedPath } from "../shared/exec-path.js";
 import { activeBackends, type CliBackend, type CliBackendName } from "../shared/cli-backends.js";
 
 // Subdirectories synced under each backend's project config dir. settings.json
@@ -135,11 +136,7 @@ const writeFile = (p: string, data: Buffer): void => {
 };
 
 // PATH is stripped under launchd/systemd — git may live in a homebrew prefix.
-const augmentedPath = (orig: string | undefined): string => {
-  const extra = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
-  const seen = new Set((orig ?? "").split(":").filter(Boolean));
-  return [...seen, ...extra.filter((d) => !seen.has(d))].join(":");
-};
+const syncPath = (orig: string | undefined): string => augmentedPath(orig, ["/usr/bin", "/bin"]);
 
 /**
  * 3-way text merge via `git merge-file`. Exit code ≥ 0 is the conflict count;
@@ -156,7 +153,7 @@ const merge3 = (tmpDir: string, base: string, ours: string, theirs: string): Pro
     execFile(
       "git",
       ["merge-file", "-p", "-L", "current", "-L", "base", "-L", "incoming", files.ours, files.base, files.theirs],
-      { encoding: "utf8", maxBuffer: 4 * MAX_BYTES, env: { ...process.env, PATH: augmentedPath(process.env.PATH) } },
+      { encoding: "utf8", maxBuffer: 4 * MAX_BYTES, env: { ...process.env, PATH: syncPath(process.env.PATH) } },
       (err, stdout) => {
         const code = (err as { code?: number } | null)?.code ?? 0;
         if (code < 0 || (err && typeof code !== "number")) return reject(err);

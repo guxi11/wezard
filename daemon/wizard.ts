@@ -12,9 +12,7 @@
 //
 // 本模块只有两类东西: 一个写盘的注册表 (唯一副作用), 和一堆把记录渲染成文字的
 // 纯函数。真正的动作 (spawn / inject / kill) 全在 mirror-bridge, 这里一个都不做。
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
-import { expandHome } from "../shared/paths.js";
+import { loadJsonMap } from "../shared/json-map-store.js";
 import { tagOfKey } from "../shared/session-label.js";
 
 export interface WizardRecord {
@@ -48,27 +46,15 @@ const blank = (target: string): WizardRecord => ({ target, name: "", description
 /** 写穿式单文件存储, 与 mirror-store 同款 —— 这是运行时状态, 不是用户手写配置,
  *  所以躺在 stateDir 而不是 config.jsonc。 */
 export const loadWizardStore = (filePath: string): WizardStore => {
-  const abs = expandHome(filePath);
-  let map: Record<string, WizardRecord> = {};
-  if (existsSync(abs)) {
-    try { map = JSON.parse(readFileSync(abs, "utf8")) as Record<string, WizardRecord>; } catch { map = {}; }
-  } else {
-    mkdirSync(dirname(abs), { recursive: true });
-  }
-  const persist = (): void => {
-    try { writeFileSync(abs, JSON.stringify(map, null, 2), "utf8"); } catch { /* 记忆丢了也不该拖垮会话 */ }
-  };
+  const db = loadJsonMap<WizardRecord>(filePath);
   return {
-    get: (t) => map[t],
+    get: db.get,
     upsert: (t, patch) => {
-      const next: WizardRecord = { ...(map[t] ?? blank(t)), ...patch, target: t };
-      next.memory = next.memory.slice(-MEMORY_MAX).map((m) => m.slice(0, NOTE_MAX));
-      map[t] = next;
-      persist();
-      return next;
+      const next: WizardRecord = { ...(db.get(t) ?? blank(t)), ...patch, target: t };
+      return db.set(t, { ...next, memory: next.memory.slice(-MEMORY_MAX).map((m) => m.slice(0, NOTE_MAX)) });
     },
-    drop: (t) => { delete map[t]; persist(); },
-    all: () => Object.values(map),
+    drop: db.drop,
+    all: () => Object.values(db.all()),
   };
 };
 

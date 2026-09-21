@@ -31,17 +31,10 @@ import { basename, dirname, join } from "node:path";
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
 import { expandHome } from "../shared/paths.js";
+import { augmentedPath } from "../shared/exec-path.js";
+import { sleep } from "../shared/std.js";
 import { activateBackend, CLI_BACKEND_DEFAULTS, primaryBackend, type CliBackend, type CliBackendName } from "../shared/cli-backends.js";
 
-const NODE_BIN_DIR = dirname(process.execPath);
-const augmentedPath = (orig: string | undefined): string => {
-  const extras = [NODE_BIN_DIR, "/opt/homebrew/bin", "/usr/local/bin", `${process.env.HOME ?? ""}/.local/bin`].filter(Boolean);
-  const seen = new Set<string>();
-  return [orig ?? "", ...extras]
-    .flatMap((p) => p.split(":"))
-    .filter((p) => p && !seen.has(p) && (seen.add(p), true))
-    .join(":");
-};
 
 // A spawn has no transcript to derive a backend from, so the caller picks one
 // (`cli`) and we fall back to the primary (`wrc.defaultCli`). Everything the
@@ -126,7 +119,6 @@ export const runTmux = (args: string[], opts: RunTmuxOpts = {}): Promise<ExecRes
     if (opts.stdin !== undefined) proc.stdin?.end(opts.stdin);
   });
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // `tmux -V` → "tmux 3.4" / "tmux 3.2a" / "tmux next-3.4" / "tmux 1.8". Extract
 // the first major.minor as a float for coarse feature gating. Unparseable →

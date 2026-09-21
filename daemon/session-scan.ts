@@ -16,6 +16,7 @@ import { readdirSync, readFileSync, existsSync, statSync, readlinkSync } from "n
 import { join, basename } from "node:path";
 import { activeBackends, backendForPath, projectDirsFor, type CliBackendName } from "../shared/cli-backends.js";
 import { expandHome } from "../shared/paths.js";
+import { augmentedPath } from "../shared/exec-path.js";
 import { labelFor } from "../shared/session-label.js";
 import { summarizeTail } from "./peers.js";
 
@@ -43,28 +44,8 @@ interface PaneOwner {
   session: string;
 }
 
-const dirnameOfNode = (): string => {
-  const i = process.execPath.lastIndexOf("/");
-  return i > 0 ? process.execPath.slice(0, i) : "";
-};
-
-const augmentedPath = (orig: string | undefined): string => {
-  // sbin dirs matter: lsof lives in /usr/sbin on macOS, and launchd starts the
-  // daemon with a stripped PATH that lacks it.
-  const extras = [
-    dirnameOfNode(),
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    `${process.env.HOME ?? ""}/.local/bin`,
-    "/usr/sbin",
-    "/sbin",
-  ].filter(Boolean);
-  const seen = new Set<string>();
-  return [orig ?? "", ...extras]
-    .flatMap((p) => p.split(":"))
-    .filter((p) => p && !seen.has(p) && (seen.add(p), true))
-    .join(":");
-};
+// lsof lives in /usr/sbin on macOS, which a stripped launchd PATH lacks.
+const scanPath = (orig: string | undefined): string => augmentedPath(orig, ["/usr/sbin", "/sbin"]);
 
 // A wedged tmux server (or an lsof blocked on a stuck mount) must not hang the
 // scan forever — /sessions would never answer and, worse, the caller's await
@@ -74,7 +55,7 @@ const SCAN_CMD_TIMEOUT_MS = 15_000;
 const runCmd = (cmd: string, args: string[]): Promise<{ ok: boolean; stdout: string }> =>
   new Promise((resolve) => {
     const p = spawn(cmd, args, {
-      env: { ...process.env, PATH: augmentedPath(process.env.PATH) },
+      env: { ...process.env, PATH: scanPath(process.env.PATH) },
       stdio: ["ignore", "pipe", "ignore"],
     });
     let out = "";

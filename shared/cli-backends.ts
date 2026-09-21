@@ -356,18 +356,6 @@ export const resolveCliBackend = (cfg: CliBackendsConfig): CliBackend => {
   return base;
 };
 
-/**
- * Bind the active backend's dialect (encodeProjectDir) into module-level state.
- * Call once at daemon boot after loadConfig — flips mirror-bridge + spawn-tmux
- * to the resolved backend's project-dir encoding. Idempotent; re-binding on
- * daemon reload picks up a changed defaultCli without restart.
- */
-export const bindCliBackend = (cfg: CliBackendsConfig): CliBackend => {
-  const backend = resolveCliBackend(cfg);
-  _encodeProjectDir = backend.encodeProjectDir;
-  return backend;
-};
-
 // ── Multi-backend registry ──────────────────────────────────────────────
 //
 // The daemon mirrors sessions from EVERY installed CLI at once, not just the

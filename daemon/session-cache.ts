@@ -51,8 +51,6 @@ export const cachePut = (key: string, decision: Decision, ttlMs: number): void =
   cache.set(key, { decision, expiresAt: Date.now() + ttlMs });
 };
 
-export const cacheClear = (): void => cache.clear();
-
 // ── Per-chat auto-approve window ───────────────────────────────────────
 // Set by `allow_window` clicks; while active, approval requests routed to
 // the SAME chat (WeCom principal like "user:abc" / "chat:wc...") bypass the

@@ -16,6 +16,7 @@ import type {
   TurnDetailRecord,
   TurnItem,
 } from "./detail-store.js";
+import { truncate, clipLine } from "./std.js";
 
 const escHtml = (s: string): string =>
   s.replace(/[&<>"']/g, (c) =>
@@ -518,7 +519,7 @@ const toolResultPreview = (
     return `<span class="corner">⎿</span>读取 ${countLines(rawResult)} 行`;
   const lines = countLines(rawResult);
   const first = rawResult.split("\n").find((l) => l.trim() !== "") ?? "";
-  const head = escHtml(truncate(first.replace(/\s+/g, " ").trim(), 88));
+  const head = escHtml(clipLine(first, 88));
   const more = lines > 1 ? ` <span class="more">+${lines - 1} 行</span>` : "";
   return `<span class="corner">⎿</span>${head || "(空)"}${more}`;
 };
@@ -561,13 +562,11 @@ const oneLineCompact = (input: unknown, max = 100): string => {
   if (input && typeof input === "object") {
     const o = input as Record<string, unknown>;
     const pick = o.command ?? o.file_path ?? o.path ?? o.pattern ?? o.url ?? o.query ?? o.prompt;
-    if (typeof pick === "string") return truncate(pick.replace(/\s+/g, " ").trim(), max);
+    if (typeof pick === "string") return clipLine(pick, max);
   }
   try { return truncate(JSON.stringify(input) ?? "", max); } catch { return ""; }
 };
 
-const truncate = (s: string, max: number): string =>
-  s.length <= max ? s : `${s.slice(0, max - 1)}…`;
 
 const extractFilePath = (input: unknown): string => {
   if (!input || typeof input !== "object") return "";

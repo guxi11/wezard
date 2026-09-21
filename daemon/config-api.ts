@@ -91,4 +91,3 @@ export const configGet = (cfg: Config, key: string | undefined): { ok: true; key
   return { ok: true, key, value: getNestedValue(cfg, KEYS[key]!.path) };
 };
 
-export const CONFIG_KEYS = Object.keys(KEYS);

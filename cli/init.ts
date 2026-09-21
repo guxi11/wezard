@@ -19,6 +19,7 @@ import { mapClaudePermissions, readClaudePermissions } from "../shared/claude-pe
 import { expandHome } from "../shared/paths.js";
 import { resolvePublicHost } from "../shared/lan-ip.js";
 import { loadOrCreateSvrToken } from "../shared/svr-token.js";
+import { sleep } from "../shared/std.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO = pathResolve(here, "..", "..");
@@ -84,7 +85,6 @@ const post = async (p: string, body: unknown): Promise<unknown> => {
   });
   return r.json().catch(() => ({}));
 };
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // ── Existing credentials ─────────────────────────────────────────────
 // secrets.json 是 botId/secret 的唯一落盘点 (config.jsonc 只留非敏感字段)。

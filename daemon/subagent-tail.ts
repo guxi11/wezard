@@ -24,6 +24,7 @@ import { dirname, join } from "node:path";
 import type { Logger } from "pino";
 import type { NormalizedTranscriptLine } from "../shared/cli-backends.js";
 import type { TurnUsage } from "../shared/detail-store.js";
+import { truncateWithCount } from "../shared/std.js";
 
 export interface SubagentMeta {
   type?: string;
@@ -98,8 +99,6 @@ interface LineShape {
   softTurnEnd?: boolean;
 }
 
-const truncate = (s: string, max: number): string =>
-  s.length <= max ? s : `${s.slice(0, max)}…(+${s.length - max})`;
 
 const resultText = (c: { content?: string | Array<{ type?: string; text?: string }> }): string => {
   const v = c.content;
@@ -123,7 +122,7 @@ const classifyLine = (line: LineShape): SubagentItem[] => {
     if (Array.isArray(c)) {
       for (const b of c) {
         if (b?.type !== "tool_result") continue;
-        const full = truncate(resultText(b), RESULT_MAX);
+        const full = truncateWithCount(resultText(b), RESULT_MAX);
         if (full) out.push({ kind: "tool_result", toolUseId: b.tool_use_id ?? "", full });
       }
     }

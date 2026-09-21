@@ -4,7 +4,8 @@ import { makeLogger } from "../shared/log.js";
 import { bindCliBackends, type CliBackendName } from "../shared/cli-backends.js";
 import { startWs } from "./ws.js";
 import { startNetWatch } from "./net-watch.js";
-import { startHttp, json } from "./http.js";
+import { startHttp, json, readBody } from "./http.js";
+import { configGet, configSet } from "./config-api.js";
 import { installInboundRouter } from "./inbound.js";
 import { loadSessionStore } from "./sessions.js";
 import { loadMirrorStore } from "./mirror-store.js";
@@ -214,7 +215,6 @@ const main = async (): Promise<void> => {
       return fallbackUserId();
     };
     http.register("POST /wedoc/list", async (req, res) => {
-      const { readBody } = await import("./http.js");
       const body = (await readBody(req)) as Partial<{ category: string; requesterUserId: string }>;
       const category = (body.category ?? "").trim();
       if (!category) { json(res, 400, { ok: false, error: "category required" }); return; }
@@ -227,7 +227,6 @@ const main = async (): Promise<void> => {
       }
     });
     http.register("POST /wedoc/call", async (req, res) => {
-      const { readBody } = await import("./http.js");
       const body = (await readBody(req)) as Partial<{
         category: string;
         method: string;
@@ -249,7 +248,6 @@ const main = async (): Promise<void> => {
       }
     });
     http.register("POST /wedoc/invalidate", async (req, res) => {
-      const { readBody } = await import("./http.js");
       const body = (await readBody(req)) as Partial<{ category: string }>;
       bridge.invalidate(body.category?.trim() || undefined);
       json(res, 200, { ok: true });
@@ -263,7 +261,6 @@ const main = async (): Promise<void> => {
     installMirrorEventListener(ws.client, m, log.child({ mod: "mirror" }));
     http.register("GET /mirror/status", (_req, res) => json(res, 200, m.status()));
     http.register("POST /mirror/attach", async (req, res) => {
-      const { readBody } = await import("./http.js");
       const body = (await readBody(req)) as Partial<{ sessionId: string; jsonlPath: string; target: string; tmuxPane: string; tmuxSession: string }>;
       if (!body.sessionId || !body.jsonlPath) {
         json(res, 400, { ok: false, reason: "sessionId and jsonlPath required" });
@@ -278,7 +275,6 @@ const main = async (): Promise<void> => {
     // to cfg.defaultChat. Same code path as the inbound auto-spawn so any
     // future fix benefits both.
     http.register("POST /mirror/spawn", async (req, res) => {
-      const { readBody } = await import("./http.js");
       const body = (await readBody(req)) as Partial<{ target: string }>;
       const target = (body.target ?? cfg.defaultChat ?? "").trim();
       if (!target) {
@@ -328,7 +324,6 @@ const main = async (): Promise<void> => {
     // (the caller MCP tool only knows its OWN session), then attach — which
     // replaces any existing binding for the target.
     http.register("POST /sessions/switch", async (req, res) => {
-      const { readBody } = await import("./http.js");
       const body = (await readBody(req)) as Partial<{ sessionId: string; target: string }>;
       const sessionId = (body.sessionId ?? "").trim();
       if (!sessionId) {
@@ -375,7 +370,6 @@ const main = async (): Promise<void> => {
     // `chat:wr…` id nobody can read is how you strand a session in a group the
     // caller has no business in.
     http.register("POST /sessions/new", async (req, res) => {
-      const { readBody } = await import("./http.js");
       const body = (await readBody(req)) as Partial<{ cwd: string; tag: string; chat: string; target: string; sessionId: string; tmuxPane: string; cli: CliBackendName; model: string }>;
       const cwd = (body.cwd ?? "").toString().trim();
       if (!cwd) {
@@ -432,7 +426,6 @@ const main = async (): Promise<void> => {
     // after /mirror/spawn so first-time users see the full PreToolUse → card
     // → mirror loop without needing to type in WeCom.
     http.register("POST /mirror/inject", async (req, res) => {
-      const { readBody } = await import("./http.js");
       const body = (await readBody(req)) as Partial<{ target: string; text: string }>;
       const target = (body.target ?? cfg.defaultChat ?? "").trim();
       const text = (body.text ?? "").toString();
@@ -450,7 +443,6 @@ const main = async (): Promise<void> => {
     // project-info bubble is the receipt. On spawn failure the pendingCwd
     // stays queued, so a manual /new from WeCom still completes the switch.
     http.register("POST /mirror/workspace", async (req, res) => {
-      const { readBody } = await import("./http.js");
       const body = (await readBody(req)) as Partial<{ target: string; sessionId: string; tmuxPane: string; cwd: string }>;
       const cwd = (body.cwd ?? "").toString();
       let target = (body.target ?? "").trim();
@@ -540,7 +532,6 @@ const main = async (): Promise<void> => {
 
     interface PeerBody { target?: string; sessionId?: string; tmuxPane?: string; tag?: string }
     const readPeerBody = async (req: import("node:http").IncomingMessage): Promise<{ self: string; body: PeerBody }> => {
-      const { readBody } = await import("./http.js");
       const body = (await readBody(req)) as PeerBody;
       return { self: resolveSelf(body), body };
     };
@@ -1174,7 +1165,6 @@ const main = async (): Promise<void> => {
         return;
       }
       wizards.upsert(target, { clonedFrom: r.inherited ? parentInfo?.sessionId ?? "" : "" });
-      const me = briefOf(self, self);
       const kid = briefOf(self, target);
       // 分身出生要在群里留一条 —— 群里多了一个成员, 人有权当场知道。
       // 工单里的分身是临时工: 出生、派活各发一条气泡, 五路 fan-out 就是十条交叉的
@@ -1354,17 +1344,13 @@ const main = async (): Promise<void> => {
 
     // POST /config/set — modify daemon config from MCP
     http.register("POST /config/set", async (req, res) => {
-      const { readBody } = await import("./http.js");
       const body = (await readBody(req)) as { key?: string; value?: unknown; action?: string };
-      const { configSet } = await import("./config-api.js");
       const r = configSet(cfg, sourcePath, body.key, body.value, body.action);
       json(res, r.ok ? 200 : 400, r);
     });
 
     http.register("POST /config/get", async (req, res) => {
-      const { readBody } = await import("./http.js");
       const body = (await readBody(req)) as { key?: string };
-      const { configGet } = await import("./config-api.js");
       const r = configGet(cfg, body.key);
       json(res, r.ok ? 200 : 400, r);
     });
@@ -1373,7 +1359,6 @@ const main = async (): Promise<void> => {
     // and start walking it. Fire-and-forget: returns a runId immediately, then
     // narrates progress into the chat while it advances.
     http.register("POST /graph/run", async (req, res) => {
-      const { readBody } = await import("./http.js");
       const body = (await readBody(req)) as Partial<{
         target: string; sessionId: string; tmuxPane: string;
         nodes: GraphNodeSpec[]; steps: GraphStepSpec[];
@@ -1427,7 +1412,6 @@ const main = async (): Promise<void> => {
     });
 
     http.register("POST /graph/stop", async (req, res) => {
-      const { readBody } = await import("./http.js");
       const body = (await readBody(req)) as Partial<{ runId: string }>;
       const runId = (body.runId ?? "").trim();
       if (!runId) { json(res, 400, { ok: false, reason: "runId required" }); return; }

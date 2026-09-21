@@ -19,6 +19,7 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import type { CliBackendName } from "../shared/cli-backends.js";
 import type { TurnOrigin } from "../shared/detail-store.js";
+import { sleep, clipLine } from "../shared/std.js";
 
 export interface GraphNodeSpec {
   /** Session tag, without `#`. */
@@ -116,7 +117,6 @@ const POLL_MS = 2500;
 const RAMP_MS = 20_000;
 const IDLE_CONFIRM = 3;
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 export interface IdleResult { idle: boolean; reason?: string }
 
@@ -201,17 +201,13 @@ export const stopRun = (runId: string): boolean => {
 const renderStep = (s: StepRecord, total: number): string =>
   `轮 ${s.round}/${total} · \`#${s.tag}\` ${s.status === "done" ? "✅" : s.status === "timeout" ? "⏱" : "❌"}`;
 
-const clip = (s: string, max: number): string => {
-  const t = s.replace(/\s+/g, " ").trim();
-  return t.length > max ? `${t.slice(0, max)}…` : t;
-};
 
 /** A step bubble carries the traffic, not just the tick: `▸` what the graph
  *  asked, `◂` what the node answered — same glyphs peek_peer renders a peer
  *  conversation with. Otherwise the whole exchange happens in panes nobody is
  *  watching and the chat only ever sees "2/6 ✅". */
 const renderTraffic = (s: StepRecord, total: number, runId: string): string =>
-  [`🕸 \`${runId}\` ${renderStep(s, total)}`, `▸ ${clip(s.prompt, 500)}`, s.reply ? `◂ ${clip(s.reply, 900)}` : ""]
+  [`🕸 \`${runId}\` ${renderStep(s, total)}`, `▸ ${clipLine(s.prompt, 500)}`, s.reply ? `◂ ${clipLine(s.reply, 900)}` : ""]
     .filter(Boolean)
     .join("\n");
 

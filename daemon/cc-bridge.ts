@@ -3,34 +3,14 @@
 // per principal; subsequent messages queue.
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { dirname } from "node:path";
 import type { WSClient, WsFrameHeaders } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
 import { expandHome } from "../shared/paths.js";
+import { augmentedPath } from "../shared/exec-path.js";
 import { resolveCliBackend } from "../shared/cli-backends.js";
 import type { SessionStore } from "./sessions.js";
 
-// launchd 默认 PATH 不含 nvm / homebrew，spawn `claude-internal` 会 ENOENT。
-// 用 daemon 自身 Node 的 bin 目录（nvm 装的 cli 通常和 node 同目录）+ 常见路径补齐。
-const NODE_BIN_DIR = dirname(process.execPath);
-const augmentedPath = (orig: string | undefined): string => {
-  const extras = [
-    NODE_BIN_DIR,
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    `${process.env.HOME ?? ""}/.local/bin`,
-  ].filter(Boolean);
-  const seen = new Set<string>();
-  return [orig ?? "", ...extras]
-    .flatMap((p) => p.split(":"))
-    .filter((p) => {
-      if (!p || seen.has(p)) return false;
-      seen.add(p);
-      return true;
-    })
-    .join(":");
-};
 
 // Anything that looks like a delta-bearing event in `claude -p --output-format stream-json --verbose`.
 // Two text sources, mutually exclusive in practice:

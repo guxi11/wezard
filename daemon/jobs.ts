@@ -16,10 +16,8 @@
 //
 // 群里只出两条气泡 (开工 / 收工), 中间的每一次派活与回话照旧落在各自 wizard 的
 // chat 详情页 —— 五个分身同时干活时, 十条交叉气泡里读不出结构, 两条能。
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
-import { expandHome } from "../shared/paths.js";
+import { loadJsonMap } from "../shared/json-map-store.js";
 
 export interface JobMember {
   target: string;
@@ -65,38 +63,35 @@ const newId = (): string => `J${randomUUID().slice(0, 6)}`;
 
 /** 写穿式单文件存储, 同 wizard 注册表。收工满 24h 的工单在下一次写盘时被丢掉 ——
  *  账本是为了收尾, 不是为了存档。 */
+const dropStale = (map: Record<string, JobRecord>): Record<string, JobRecord> => {
+  const cutoff = Date.now() - KEEP_CLOSED_MS;
+  return Object.fromEntries(
+    Object.entries(map).filter(([, j]) => j.status === "open" || (j.closedAt ?? 0) > cutoff),
+  );
+};
+
 export const loadJobStore = (filePath: string): JobStore => {
-  const abs = expandHome(filePath);
-  let map: Record<string, JobRecord> = {};
-  if (existsSync(abs)) {
-    try { map = JSON.parse(readFileSync(abs, "utf8")) as Record<string, JobRecord>; } catch { map = {}; }
-  } else {
-    mkdirSync(dirname(abs), { recursive: true });
-  }
-  const persist = (): void => {
-    const cutoff = Date.now() - KEEP_CLOSED_MS;
-    map = Object.fromEntries(Object.entries(map).filter(([, j]) => j.status === "open" || (j.closedAt ?? 0) > cutoff));
-    try { writeFileSync(abs, JSON.stringify(map, null, 2), "utf8"); } catch { /* 账本丢了也不该拖垮会话 */ }
-  };
-  const put = (j: JobRecord): JobRecord => { map[j.id] = j; persist(); return j; };
+  const db = loadJsonMap<JobRecord>(filePath, dropStale);
   return {
-    open: (base, owner, title) =>
-      put({ id: newId(), base, owner, title, members: [], status: "open", openedAt: Date.now() }),
-    get: (id) => map[id],
+    open: (base, owner, title) => {
+      const id = newId();
+      return db.set(id, { id, base, owner, title, members: [], status: "open", openedAt: Date.now() });
+    },
+    get: db.get,
     attach: (id, member) => {
-      const j = map[id];
+      const j = db.get(id);
       if (!j || j.status !== "open" || j.members.length >= JOB_MEMBER_MAX) return undefined;
       const rest = j.members.filter((x) => x.target !== member.target);
       const prev = j.members.find((x) => x.target === member.target);
-      return put({ ...j, members: [...rest, { ...member, spawned: member.spawned || !!prev?.spawned, at: Date.now() }] });
+      return db.set(id, { ...j, members: [...rest, { ...member, spawned: member.spawned || !!prev?.spawned, at: Date.now() }] });
     },
     close: (id, summary) => {
-      const j = map[id];
-      if (!j) return undefined;
-      return put({ ...j, status: "closed", closedAt: Date.now(), summary });
+      const j = db.get(id);
+      return j ? db.set(id, { ...j, status: "closed", closedAt: Date.now(), summary }) : undefined;
     },
-    openOf: (base) => Object.values(map).filter((j) => j.base === base && j.status === "open").sort((a, b) => b.openedAt - a.openedAt),
-    all: () => Object.values(map),
+    openOf: (base) =>
+      Object.values(db.all()).filter((j) => j.base === base && j.status === "open").sort((a, b) => b.openedAt - a.openedAt),
+    all: () => Object.values(db.all()),
   };
 };
 

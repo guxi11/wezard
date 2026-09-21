@@ -4,6 +4,25 @@
 
 ## [Unreleased]
 
+### Changed
+- **精简: 把四处各自重写的东西收成一份**。没有行为变化,`npm run build` 与 6 个测试文件照常通过。
+  - `shared/json-map-store.ts`: `sessions` / `mirror-store` / `wizard` / `jobs` 四个存储各自抄了一遍「读一份 keyed json、每次改动写穿」。收成一个 `loadJsonMap`,`gc` 钩子让 jobs 继续在写盘前丢掉 24h 前收工的行。顺带统一了容错口径 —— 此前只有 wizard / jobs 的写失败被吞掉,sessions / mirror-store 会抛; 这些都是恢复用的状态,丢了该重挂一次,不该拖垮一个活着的会话。
+  - `shared/exec-path.ts`: `augmentedPath` 有 5 份副本 (其中一份还漏了 nvm 的 bin 目录)。合成一份,额外目录走第二个参数 (`session-scan` 要 `/usr/sbin` 找 `lsof`,`cfg-sync` 要 `/usr/bin`)。
+  - `shared/std.ts`: `sleep` ×5、`truncate` / `clip` ×6 —— 后者原本有三种语义在互相混用。收成 `truncate` / `truncateWithCount` (`…(+N)`) / `clipLine` (先压成一行再截)。
+  - `mirror-bridge.ts` 里 5 个纯改名的本地别名 (`tagOfTarget` = `tagOfKey`、`basePrincipalOf` = `baseOfKey`、`withSessionTag` = `withTagHeader`、`splitChunks` = `splitMarkdown`、`tmuxRun` = `runTmux`) 折回各自模块导出的名字 —— 同一件事两个名字,文件里两种写法都在用。
+  - `mcp/server.ts`: 6 个早于 `daemonPost` 的工具还在手搓 fetch。全部折上去,并补一个 `daemonGet`; 现在整个文件只剩这两处 `fetch`。
+  - `daemon/index.ts`: 14 处 `await import("./http.js")` 动态导入一个文件顶部已经静态导入的模块,`config-api` 同理。改成静态导入。
+  - 删掉真正没人用的: `bindCliBackend` (已被 `bindCliBackends` 取代)、`cacheClear`、`CONFIG_KEYS`、`mainTitle`、`session-scan` 的 `dirnameOfNode`,以及 `approval.ts` 里一个只写不读的 `gone` 标志 (实际止血的是下面那个 `clientGone` race,注释描述的机制并不由它实现)。
+
+### Fixed
+- 文档: `技术说明.md` 指向一个不存在的 `docs/ONBOARDING.md`; README 与技术说明都还在说「未命名的聊天不可寻址也不可被建入」,而 1.4.0 起没名字的聊天会按工作区自动补名。
+- `CODEBUDDY.md` 是 `CLAUDE.md` 的手抄副本, 已经漂移了一条 (缺 daemon fd limit 那段)。改成符号链接, 从此不会再漂。
+
+### Added
+- README: 新增「编排: 读完材料才知道要分几路」一节 —— 工单 / 批量 `wait_peer` / `RESULT:` 收口行 / `send_peer({when:"idle"})` / `cloneMax` 各自解决什么问题, 以及 `run_agent_graph` 与它们的分工。另补模型作为 wizard 属性、名册增量、聊天自动命名。
+- `技术说明.md`: 新增「wizard 网络: 身份、感知、编排」一节 (charter 为什么是系统提示、fork 的两条不变式、快照 + 增量的感知模型、控制流留在发起方的取舍, 带一张 fan-out 时序图)。
+- `CLAUDE.md`: 补上 `jobs.ts` / `notices.ts` / `chat-name.ts` / `tasks.ts` 四个模块的职责, 以及「共享原语」一节 (动手写本地副本之前先看这里)。
+
 ## [1.4.0] - 2026-09-21
 
 ### Added

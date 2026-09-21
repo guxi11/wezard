@@ -13,8 +13,8 @@ import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
 import { expandHome } from "../shared/paths.js";
 import { parseTmuxVersion, runTmux, trustWorkspace } from "./spawn-tmux.js";
+import { sleep } from "../shared/std.js";
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // One rate-limit bar from the panel. `label` is verbatim from the header
 // ("session", "week (all models)", "week (Opus 4.8)", …) — kept generic so a
