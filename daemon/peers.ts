@@ -21,16 +21,26 @@ export const stripAnsi = (s: string): string =>
 // only ever want the last few turns. 64K covers ~10 turns of prose plus tool
 // noise even in the worst case.
 const TAIL_BYTES = 64 * 1024;
+// …除非单行本身就比窗口大。Claude Code 每轮往 transcript 里写若干 `attachment`
+// 行, 其中 `prompt_snapshot` 带完整系统提示 + skill 清单 —— 实测一行 157KB。一条
+// 这样的行就能把 64K 的窗口整个吃掉, 于是尾部根本够不到真正的对话行: lastText 空、
+// summarizeTail 空、keepalive 的两个时钟一起退化成 mtime。窗口因此按需长大: 常见
+// 情况仍然只读 64K, 读不到要的东西才翻四倍, 到这个上限为止 (再大就不是"尾巴"了)。
+const TAIL_BYTES_MAX = 2 * 1024 * 1024;
 
-const readTail = (jsonlPath: string): string => {
+const fileSize = (jsonlPath: string): number => {
+  try { return statSync(jsonlPath).size; } catch { return 0; }
+};
+
+const readTailBytes = (jsonlPath: string, want: number): string => {
   if (!existsSync(jsonlPath)) return "";
   let fd: number | undefined;
   try {
     const size = statSync(jsonlPath).size;
-    const len = Math.min(size, TAIL_BYTES);
+    const len = Math.min(size, want);
     const buf = Buffer.allocUnsafe(len);
     fd = openSync(jsonlPath, "r");
-    const read = readSync(fd, buf, 0, len, Math.max(0, size - TAIL_BYTES));
+    const read = readSync(fd, buf, 0, len, Math.max(0, size - want));
     return buf.subarray(0, read).toString("utf8");
   } catch {
     return "";
@@ -38,6 +48,24 @@ const readTail = (jsonlPath: string): string => {
     if (fd !== undefined) { try { closeSync(fd); } catch { /* ignore */ } }
   }
 };
+
+/** 从文件尾读一段并解析; `enough` 说不够就翻四倍重读, 直到够了、读完整个文件、
+ *  或者撞上上限。窗口是手段不是目的 —— 调用方只说"我要几轮", 不该关心一条
+ *  attachment 有多大。 */
+const readTailUntil = <T>(
+  jsonlPath: string,
+  parse: (raw: string) => T,
+  enough: (parsed: T) => boolean,
+): T => {
+  const size = fileSize(jsonlPath);
+  const ceiling = Math.min(size || TAIL_BYTES, TAIL_BYTES_MAX);
+  const walk = (win: number): T => {
+    const parsed = parse(readTailBytes(jsonlPath, win));
+    return enough(parsed) || win >= ceiling ? parsed : walk(Math.min(win * 4, ceiling));
+  };
+  return walk(Math.min(TAIL_BYTES, ceiling));
+};
+
 
 export interface Turn {
   role: "user" | "assistant";
@@ -62,11 +90,14 @@ const blockText = (content: unknown): string => {
 
 /** Last `n` user/assistant turns of a transcript, oldest first. Backend-agnostic:
  *  the line shape is normalized through the owning CLI's dialect adapter. */
-export const tailTurns = (jsonlPath: string, n = 3): Turn[] => {
-  const raw = readTail(jsonlPath);
+export const tailTurns = (jsonlPath: string, n = 3): Turn[] =>
+  readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw), (ts) => ts.length >= n).slice(-n);
+
+/** 纯解析: 一段 transcript 原文 → 里面的对话轮次。 */
+const parseTurns = (jsonlPath: string, raw: string): Turn[] => {
   if (!raw) return [];
   const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
-  const turns = raw
+  return raw
     .split("\n")
     .filter((l) => l.trim())
     .flatMap((line) => {
@@ -90,7 +121,6 @@ export const tailTurns = (jsonlPath: string, n = 3): Turn[] => {
       const ms = typeof rawTs === "number" ? rawTs : Date.parse(String(rawTs ?? ""));
       return text ? [{ role, text, ms: Number.isNaN(ms) ? 0 : ms } as Turn] : [];
     });
-  return turns.slice(-n);
 };
 
 // Flatten a message's content for QUOTE DEDUP only — unlike `blockText` this
@@ -144,41 +174,57 @@ export const isKeepalivePingText = (text: string, sigs: readonly string[]): bool
  *  function_call_result, reasoning, …).
  *  `pingSigs` 剔除 keepalive ping 及其应答后再数轮次(有效 tail) —— 挂机久了
  *  ping/pong 会把真实轮次挤出窗口,引用去重 miss → 原文被重复注入。 */
-export const tailTurnsWithTools = (jsonlPath: string, n = 3, pingSigs: readonly string[] = []): string => {
-  const raw = readTail(jsonlPath);
-  if (!raw) return "";
+interface ToolEntry { role: string; text: string }
+
+/** 纯解析: transcript 原文 → 条目 (文本含 tool_use/tool_result)。 */
+const parseToolEntries = (jsonlPath: string, raw: string): ToolEntry[] => {
+  if (!raw) return [];
   const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
-  const all: Array<{ role: string; text: string }> = [];
-  for (const line of raw.split("\n")) {
-    if (!line.trim()) continue;
+  return raw.split("\n").flatMap((line): ToolEntry[] => {
+    if (!line.trim()) return [];
     let parsed: unknown;
-    try { parsed = JSON.parse(line); } catch { continue; }
+    try { parsed = JSON.parse(line); } catch { return []; }
     let row;
-    try { row = normalize(parsed); } catch { continue; }
-    if (!row || row.isMeta || row.isSidechain) continue;
+    try { row = normalize(parsed); } catch { return []; }
+    if (!row || row.isMeta || row.isSidechain) return [];
     const role = row.message?.role;
-    if (role !== "user" && role !== "assistant") continue;
+    if (role !== "user" && role !== "assistant") return [];
     const text = blockTextWithTools(row.message?.content).replace(META_RE, "").replace(/\s+/g, " ").trim();
-    if (text) all.push({ role, text });
-  }
-  // Keepalive = ping query + whatever the model replies to it (query-based,
-  // same rule as keepaliveStamps).
-  const isPingEntry = (e: { role: string; text: string } | undefined): boolean =>
+    return text ? [{ role, text }] : [];
+  });
+};
+
+/** Keepalive = ping query + whatever the model replies to it (query-based,
+ *  same rule as keepaliveStamps). */
+const withoutPings = (all: readonly ToolEntry[], pingSigs: readonly string[]): ToolEntry[] => {
+  const isPing = (e: ToolEntry | undefined): boolean =>
     !!e && e.role === "user" && isKeepalivePingText(e.text, pingSigs);
-  const entries = all.filter((e, i) =>
-    !isPingEntry(e) && !(e.role === "assistant" && isPingEntry(all[i - 1])));
-  // Count logical turns: each user→assistant transition (or assistant→user)
-  // is one turn. Walk backward to find the cut point for the last `n` turns.
+  return all.filter((e, i) => !isPing(e) && !(e.role === "assistant" && isPing(all[i - 1])));
+};
+
+/** 逻辑轮次 = 角色交替的次数 (一条模型回复可能被后端拆成好几行记录)。 */
+const countTurns = (entries: readonly ToolEntry[]): number =>
+  entries.reduce((acc, e, i) => acc + (i > 0 && entries[i - 1]!.role !== e.role ? 1 : 0), 0);
+
+/** 从尾部数 `n` 个逻辑轮次的切点; 不足 n 轮就从头给 (要多少给多少)。 */
+const cutForTurns = (entries: readonly ToolEntry[], n: number): number => {
   let turns = 0;
-  let cutIdx = entries.length;
   for (let i = entries.length - 1; i > 0; i--) {
-    if (entries[i]!.role !== entries[i - 1]!.role) {
-      turns++;
-      if (turns >= n) { cutIdx = i; break; }
-    }
+    if (entries[i]!.role !== entries[i - 1]!.role && ++turns >= n) return i;
   }
-  if (turns < n) cutIdx = 0; // fewer turns than requested — return everything
-  return entries.slice(cutIdx).map((e) => e.text).join("\n");
+  return 0;
+};
+
+export const tailTurnsWithTools = (jsonlPath: string, n = 3, pingSigs: readonly string[] = []): string => {
+  const entries = withoutPings(
+    readTailUntil(
+      jsonlPath,
+      (raw) => parseToolEntries(jsonlPath, raw),
+      (es) => countTurns(withoutPings(es, pingSigs)) >= n,
+    ),
+    pingSigs,
+  );
+  return entries.slice(cutForTurns(entries, n)).map((e) => e.text).join("\n");
 };
 
 // Transcript prose is arbitrary text: backticks / asterisks / pipes lifted out of
@@ -204,6 +250,22 @@ export const renderDialog = (turns: readonly Turn[], per = 800): string =>
     .map((t) => `${t.role === "user" ? "▸" : "◂"} ${t.text.length > per ? `${t.text.slice(0, per)}…` : t.text}`)
     .join("\n");
 
+/** 交付收口行。
+ *
+ *  fan-out 之后 join 的载荷是「最后一条 assistant 文本」, 而一个分身的最后一句可能
+ *  是"好的我开始了", 也可能是八百字散文 —— 两种都没法直接汇总。对法与 graph 的
+ *  `until` 哨兵同源: 不改 CLI 的输出格式 (改不了), 只在派活的提示里要求收口成一行
+ *  `RESULT: …`, 这里把它捞出来。取**最后一个**匹配 —— 中间复述过这个格式的那些
+ *  不算数。捞不到返回 "", 调用方退回整段 lastText, 所以不遵守约定也只是退化。 */
+export const extractResult = (text: string, max = 800): string => {
+  // 标记之后的**全部**内容, 而不是"那一行" —— 这个函数的入口 (lastAssistantText)
+  // 已经把换行压成空格了, 行的概念到这里不存在。约定是收口在最后, 所以标记之后
+  // 剩下的就是结论。取最后一个匹配: 模型常先复述一遍格式要求再给答案。
+  const hits = [...text.matchAll(/(?:^|[\s>*|-])(?:RESULT|结论)\s*[:：]\s*/gim)];
+  const last = hits[hits.length - 1];
+  return last ? text.slice((last.index ?? 0) + last[0].length).trim().slice(0, max) : "";
+};
+
 /** The peer's most recent assistant message — the handoff payload when one
  *  agent drives another ("take #fix's conclusion and review it"). */
 export const lastAssistantText = (jsonlPath: string, max = 4000): string => {
@@ -217,8 +279,10 @@ export const lastAssistantText = (jsonlPath: string, max = 4000): string => {
  *  have to re-write at 1.25x. Read from the last assistant usage snapshot in
  *  the tail; 0 when no usage is on record yet. Drives the keepalive decision
  *  and the "session size" note. */
-export const lastContextTokens = (jsonlPath: string): number => {
-  const raw = readTail(jsonlPath);
+export const lastContextTokens = (jsonlPath: string): number =>
+  readTailUntil(jsonlPath, (raw) => pickContextTokens(jsonlPath, raw), (v) => v > 0);
+
+const pickContextTokens = (jsonlPath: string, raw: string): number => {
   if (!raw) return 0;
   const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
   const lines = raw.split("\n").filter((l) => l.trim());
@@ -463,6 +527,8 @@ export interface PeerInfo {
   jsonlPath: string;
   cwd: string;
   cli: CliBackendName;
+  /** `--model` slug this session runs on; "" = the CLI's own default. */
+  model: string;
   tmuxPane: string;
   /** Bridge holds a live attachment (vs. a persisted-but-cold binding). */
   attached: boolean;

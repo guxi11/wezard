@@ -73,6 +73,14 @@ const Mirror = z.object({
   // 状态 (会话生生死死), 所以落在 state 目录而不是 config.jsonc —— 与 chats 的
   // 名字表相反: 那是人手写的长期配置。
   wizardsFile: z.string().default("~/.wezard/wizards.json"),
+  // 工单账本: 一次 fan-out 的成员与状态。与 wizards 同理是运行时状态; 分开存是
+  // 因为 wizard 是长期身份, job 是一次性的活 —— 混在一张表里, 收工清理会连身份
+  // 一起抹掉。
+  jobsFile: z.string().default("~/.wezard/jobs.json"),
+  // 一个 wizard 名下同时活着的分身上限。不是能力上限, 是"忘了收"的刹车: 分身能
+  // 递归生分身, 而每个都是一个 tmux pane + 一份上下文, 一次跑飞的编排足以把 fd
+  // 吃光 (见 launchd plist 的 NumberOfFiles)。
+  cloneMax: z.number().int().positive().default(8),
   // Standalone fallback 路径(liveStream 已 closed/dead/capped) 上的防抖聚合窗口
   // (ms)。窗口内同一 attachment 的多个 item 合并为一条 markdown, 抑制连续工具
   // 调用刷屏。liveStream 仍活时不受影响——直接走 typewriter。0 = 关闭。

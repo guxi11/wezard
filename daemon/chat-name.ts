@@ -39,9 +39,19 @@ export const chatNameOf = (cfg: Config, target: string): string => {
   return entries(cfg).find(([, p]) => p === base)?.[0] ?? "";
 };
 
-/** 名字或裸 principal → base principal; 认不出返回 ""。 */
+/** 任何一种寻址串 → base principal; 认不出返回 ""。
+ *
+ *  「聊天名」「裸 principal」「`daily#fix`」「`chat:wr…#fix`」全收 —— 后两种是
+ *  wizard_roster / list_peers 吐给模型的那个 `address`, 而模型手里往往只有它:
+ *  它知道「那个 wizard 叫 exp、地址 org-archivist#exp」, 要往那个群里说句话时,
+ *  唯一能写出来的就是这个串。此前 `name#tag` 被整条拒收 (只有全量 key 那一种因为
+ *  前缀命中而侥幸可用), 于是同一个地址空间在 send_peer 那边通、在 notify 这边不通。
+ *  会话那一截在这里是多余信息, 剥掉即可 —— 一个 tag 指不出第二个聊天。 */
 export const chatBaseOf = (cfg: Config, ref: string): string => {
-  const r = normChatName(ref);
+  const { chat, tag } = parsePeerRef(ref ?? "");
+  // 裸 tag (`fix`) 没有聊天那一截 —— parsePeerRef 把它放进 tag。它可能正是一个
+  // 聊天的名字, 所以两边都试一次。
+  const r = normChatName(chat || tag);
   if (!r) return "";
   if (PRINCIPAL_RE.test(r)) return baseOfKey(r);
   const f = fold(r);
@@ -81,6 +91,68 @@ export const setChatName = (
   ]);
   writeChats(cfg, sourcePath, next);
   return { ok: true, name, base };
+};
+
+// ── 自动命名 ──────────────────────────────────────────────────────────
+// 没名字的聊天在别的聊天眼里只有一串 `chat:wr4-87DwAA…` 的 key —— 能寻址, 但模型
+// 抄错一个字符就找不到, 而人根本读不出那是哪个群。实测这台机器上 16 个聊天只有 3
+// 个起过名字, 于是超过一半的 wizard 的 `chat` 字段是空的。
+//
+// 名字不该等人想起来去起。一个聊天天然带着一个可读的标识: 它在干哪个项目。所以
+// 没名字就按工作区补一个 —— `~/develop/Guxi11/weclaude` → `weclaude`。这只填空,
+// 永远不覆盖人起过的名字。
+
+/** 工作区路径 → 名字候选。取最后一段, 非法字符折成 `-`; 推不出返回 ""
+ *  (宁可没名字, 也不造一个 `chat-wr4` 这种同样不可读的东西)。 */
+export const nameFromCwd = (cwd: string): string =>
+  ((cwd ?? "").replace(/\/+$/, "").split("/").filter(Boolean).pop() ?? "")
+    .replace(/[^\p{L}\p{N}_-]+/gu, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 32);
+
+/** 在一组已占用的名字里给 `want` 挑一个不冲突的: `lisct` → `lisct-2` → `lisct-3`。
+ *  大小写不敏感, 与 setChatName 的冲突判定同一把尺子。 */
+export const uniqueChatName = (want: string, taken: ReadonlySet<string>): string => {
+  const walk = (n: number): string => {
+    const cand = n === 1 ? want : `${want.slice(0, 29)}-${n}`;
+    return taken.has(fold(cand)) ? walk(n + 1) : cand;
+  };
+  return walk(1);
+};
+
+/** 给一批没名字的聊天算名字 (纯函数)。批内互不重名 —— 三个聊天都在 lisct 下就是
+ *  lisct / lisct-2 / lisct-3。已有名字的、以及工作区推不出名字的, 都不在结果里。 */
+export const planChatNames = (
+  cfg: Config,
+  chats: ReadonlyArray<{ base: string; cwd: string }>,
+): Record<string, string> => {
+  const taken = new Set(entries(cfg).map(([n]) => fold(n)));
+  return chats.reduce<Record<string, string>>((acc, c) => {
+    if (!c.base || chatNameOf(cfg, c.base)) return acc;
+    const want = nameFromCwd(c.cwd);
+    if (!NAME_RE.test(want)) return acc;
+    const name = uniqueChatName(want, taken);
+    taken.add(fold(name));
+    return { ...acc, [c.base]: name };
+  }, {});
+};
+
+/** 落盘, 一次 patchJsonc (而不是一个聊天写一次 —— 首次补名会一口气命中十几个)。
+ *  写失败不抛: 自动命名是锦上添花, 不该把一次 roster 查询搞崩。 */
+export const applyChatNames = (
+  cfg: Config,
+  sourcePath: string,
+  plan: Readonly<Record<string, string>>,
+): Record<string, string> => {
+  const pairs = Object.entries(plan);
+  if (pairs.length === 0) return {};
+  const next = Object.fromEntries([...entries(cfg), ...pairs.map(([base, name]) => [name, base] as [string, string])]);
+  try {
+    writeChats(cfg, sourcePath, next);
+  } catch {
+    cfg.chats = next; // 盘上没写成也让本进程认得这些名字, 下次启动再补
+  }
+  return plan;
 };
 
 /** 取消命名。返回被摘掉的名字 ("" = 本来就没名字)。 */

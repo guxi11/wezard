@@ -18,6 +18,10 @@ export interface MirrorAttachment {
    *  back to cfg.wrc.cwd. Updated on every spawn/respawn so /pwd reflects
    *  reality, not an outdated user request. */
   cwd?: string;
+  /** `--model` slug the live pane was spawned with. Empty/undefined = the CLI's
+   *  own default. Persisted so a pane-death respawn brings the wizard back on
+   *  the model it was given instead of silently dropping to the default. */
+  model?: string;
   /** User-requested next cwd (set by AI via the `set_workspace` MCP). Applied
    *  on the next /new (or /clear → upgraded to /new when present). Cleared
    *  once the spawn lands. Decoupling from `cwd` means a /pwd before /new

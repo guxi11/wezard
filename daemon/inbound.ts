@@ -8,6 +8,7 @@ import type { Config } from "../shared/config.js";
 import type { Bridge } from "./cc-bridge.js";
 import type { MirrorBridge } from "./mirror-bridge.js";
 import { tailTurnsWithTools, keepalivePingSigs, renderPeerMentionHint, type PeerInfo, type PeerMention } from "./peers.js";
+import { noticeSuffixFor } from "./notices.js";
 import { expandHome, sanitizeId } from "../shared/paths.js";
 import type { CliBackendName } from "../shared/cli-backends.js";
 import { tryConsumeClaim, persistClaim, ackClaim, shouldAutoClaim, ackAutoClaim } from "./claim.js";
@@ -1058,8 +1059,10 @@ export const installInboundRouter = (
   const send = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, who: string, text: string, images: string[] = []): Promise<void> => {
     // 斜杠命令按行解析,尾巴上多挂一段会让它不再被识别成命令 —— 只标注普通消息。
     const hint = text.trimStart().startsWith("/") ? "" : renderPeerMentionHint(peerMentions(who, text));
+    // 同一条边界上再挂一段: 这个 wizard 不在场时群里发生的成员变动 (见 notices.ts)。
+    const notice = noticeSuffixFor(who, text);
     try {
-      await bridge.dispatch({ principal: who, text: text + hint, images, frame, streamId: msg.msgid });
+      await bridge.dispatch({ principal: who, text: text + hint + notice, images, frame, streamId: msg.msgid });
     } catch (e) {
       log.error({ err: (e as Error).message }, "bridge dispatch failed");
       try { await client.replyStream(frame, msg.msgid, withTagHeader(who, `[wezard] error: ${(e as Error).message}`), true); } catch { /* ignore */ }

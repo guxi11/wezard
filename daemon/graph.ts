@@ -118,16 +118,22 @@ const IDLE_CONFIRM = 3;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-interface IdleResult { idle: boolean; reason?: string }
+export interface IdleResult { idle: boolean; reason?: string }
+
+/** `rampMs` / `confirm` 只在一个场景下需要改: 「投递前先看它闲不闲」。那里没有
+ *  刚注入的一轮要等, ramp 反而会把"现在就闲着"硬拖 20 秒。 */
+export interface IdleOpts { rampMs?: number; confirm?: number }
 
 export const waitForIdle = async (
   target: string,
   isBusy: (t: string) => Promise<boolean>,
   timeoutMs: number,
   aborted: () => boolean,
+  opts: IdleOpts = {},
 ): Promise<IdleResult> => {
   const deadline = Date.now() + timeoutMs;
-  const rampUntil = Date.now() + RAMP_MS;
+  const rampUntil = Date.now() + (opts.rampMs ?? RAMP_MS);
+  const confirmN = Math.max(1, opts.confirm ?? IDLE_CONFIRM);
   let sawBusy = false;
   let quiet = 0;
   while (Date.now() < deadline) {
@@ -142,9 +148,40 @@ export const waitForIdle = async (
     // Still inside the ramp and the turn never started — keep waiting for it
     // rather than mistaking "hasn't begun" for "already done".
     if (!sawBusy && Date.now() < rampUntil) continue;
-    if (++quiet >= IDLE_CONFIRM) return { idle: true };
+    if (++quiet >= confirmN) return { idle: true };
   }
   return { idle: false, reason: "idle wait timed out" };
+};
+
+/** 等一组 wizard, 满 `need` 个就返回 —— fan-out 之后的 join。
+ *
+ *  这是 wait 从"一个一个等"变成"并行等"的那一步: 串行地 waitForIdle 五个分身,
+ *  墙钟是五个之和, 并行则是最慢的那一个。`need` 同时把 all / any / 过半三种语义
+ *  收进一个数字: need = n 是全等, need = 1 是谁先完事就返回谁, 中间值是法定人数。
+ *
+ *  满足之后剩下的等待立刻撤掉 (它们的 `aborted` 就是这个标志), 所以调用方不会为
+ *  已经不关心的目标多等一秒。被撤掉的那些结果 reason 写成"仍在干活", 而不是
+ *  waitForIdle 内部的 "stopped" —— 对调用方来说它们不是被停了, 是还没轮到。 */
+export const waitForQuorum = async (
+  targets: readonly string[],
+  isBusy: (t: string) => Promise<boolean>,
+  timeoutMs: number,
+  need: number,
+  aborted: () => boolean = () => false,
+): Promise<IdleResult[]> => {
+  const quota = clamp(need, 1, Math.max(1, targets.length));
+  let done = 0;
+  const enough = (): boolean => done >= quota;
+  const results = await Promise.all(
+    targets.map(async (t): Promise<IdleResult> => {
+      const r = await waitForIdle(t, isBusy, timeoutMs, () => aborted() || enough());
+      if (r.idle) done++;
+      return r;
+    }),
+  );
+  return results.map((r) =>
+    r.idle || r.reason !== "stopped" ? r : { idle: false, reason: aborted() ? "stopped" : "仍在干活 (法定人数已满, 不再等它)" },
+  );
 };
 
 // ── Runner ────────────────────────────────────────────────────────────

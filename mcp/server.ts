@@ -365,14 +365,19 @@ server.registerTool(
         .enum(["claude", "claude-internal", "codebuddy"])
         .optional()
         .describe("用哪个 CLI 启动。用户没点名就省略, 它会继承那个聊天当前的后端。多个后端可以并存。"),
+      model: z
+        .string()
+        .optional()
+        .describe("这个 wizard 跑在哪个模型上 (`--model` 的 slug, 如 'opus' / 'sonnet' / 'haiku')。省略用该 CLI 的默认。同一个聊天里的 wizard 可以各跑各的模型 —— 又长又要判断的活给 opus, 跑腿的 lint/grep 给 haiku。"),
     },
   },
-  async ({ cwd, tag, chat, cli }) =>
+  async ({ cwd, tag, chat, cli, model }) =>
     unwrap("new_claude_session", await daemonPost("/sessions/new", {
       cwd,
       ...(tag ? { tag } : {}),
       ...(chat ? { chat } : {}),
       ...(cli ? { cli } : {}),
+      ...(model ? { model } : {}),
     })),
 );
 
@@ -386,7 +391,7 @@ server.registerTool(
   {
     title: "Name this WeCom chat",
     description:
-      "给**这个聊天**起个短名字, 别的聊天里的 wizard 从此能以 `名字#tag` 叫到这里、也能把新 wizard 生进来。聊天的名字同时就是这里默认 wizard 的名字 —— 所以 `wizard_identity({name})` 在默认 wizard 身上会连带写这里。用户说「给这个群起名叫 daily」「这个群叫什么」(不传 `name` 就是读) 「取消命名」(传 '-') 时调它。名字全机唯一、大小写不敏感; 改名即覆盖, 照着旧名字写的地址从此解析不到。起完名告诉用户别的聊天该怎么写地址 (`名字#tag`)。",
+      "给**这个聊天**起个短名字, 别的聊天里的 wizard 从此能以 `名字#tag` 叫到这里、也能把新 wizard 生进来。没起过名字的聊天不会一直没名字 —— 第一次有人用到名字时 (名册 / 聊天列表 / 分身出生) 守护进程按它的工作区自动补一个 (`~/develop/foo` → `foo`, 撞名加序号), 所以这个工具的用途是**起一个更好的名字**, 而不是从无到有。聊天的名字同时就是这里默认 wizard 的名字 —— 所以 `wizard_identity({name})` 在默认 wizard 身上会连带写这里。用户说「给这个群起名叫 daily」「这个群叫什么」(不传 `name` 就是读) 「取消命名」(传 '-') 时调它。名字全机唯一、大小写不敏感; 改名即覆盖, 照着旧名字写的地址从此解析不到。起完名告诉用户别的聊天该怎么写地址 (`名字#tag`)。",
     inputSchema: {
       name: z
         .string()
@@ -446,9 +451,18 @@ server.registerTool(
     inputSchema: {
       tag: z.string().describe(ADDRESS_DOC),
       text: z.string().describe("Message to inject. Plain prompt text; slash commands like '/clear' also work."),
+      when: z
+        .enum(["now", "idle"])
+        .optional()
+        .describe(
+          "什么时候投。`now` (默认) 立刻投 —— 对方正在生成时这句话会排在它这一轮后面, 回答它的提问、打断它、催它都该用这个。`idle` 先等它闲下来再投: **派一件新活给一个正在忙的同伴时用它**, 否则你和别人的两段文本会挤进同一个输入框被当成一轮读掉。返回里的 `wasBusy` 告诉你投的时候它忙不忙。",
+        ),
+      waitSec: z.number().optional().describe("`when:'idle'` 最多等多少秒 (10-3600, 默认 600)。等不到就返回失败, 不会强行投。"),
+      job: z.string().optional().describe("这次派活归到某个工单名下 (open_job 给的 id) —— 不再单独出气泡, 攒进 close_job 那一条。"),
     },
   },
-  async ({ tag, text }) => unwrap("send_peer", await daemonPost("/peers/send", { tag, text })),
+  async ({ tag, text, when, waitSec, job }) =>
+    unwrap("send_peer", await daemonPost("/peers/send", { tag, text, ...(when ? { when } : {}), ...(waitSec ? { waitSec } : {}), ...(job ? { job } : {}) })),
 );
 
 server.registerTool(
@@ -463,7 +477,7 @@ server.registerTool(
       to: z
         .array(z.string())
         .optional()
-        .describe("收件聊天, 聊天名或裸 principal (`chat:wr…` / `user:…`)。省略 = 自己所在的聊天。认不出的名字会整条拒绝并列出来, 不会部分送达。"),
+        .describe("收件聊天。**任何一种地址都收**: 聊天名 (`daily`)、裸 principal (`chat:wr…` / `user:…`), 以及 wizard_roster / list_peers 给的那个 wizard 地址 (`daily#fix`、`chat:wr…#fix`) —— 后者会自动落到它所在的那个聊天, 所以「知道某个 wizard 叫什么」就等于「能往它那个群里说话」, 哪怕那个群没起过名字。省略 = 自己所在的聊天。认不出的整条拒绝并列出来, 不会部分送达。"),
       markdown: z.string().describe("正文, markdown。头 (是谁发的) 由守护进程自动加, 别自己写。"),
     },
   },
@@ -475,13 +489,27 @@ server.registerTool(
   {
     title: "Wait until another wizard stops working",
     description:
-      "挂起, 直到点名的 wizard 停下来 (它的终端不再显示中断提示), 然后返回它最新的回复。send_peer 之后就该用它 —— 这样你拿到的是写完的答案, 而不是写了一半的。超时先到则返回 `idle: false` 与原因: 它只是还在干, 你可以 peek 一眼再等。很便宜: 守护进程轮询的是 pane, 不烧 token。同一个聊天里它的回复本来就会以它自己的气泡出现在群里, 所以你拿到结论后**别再复述一遍**, 只说你据此做了什么。",
+      "挂起, 直到点名的 wizard 停下来 (它的终端不再显示中断提示), 然后返回它最新的回复。send_peer 之后就该用它 —— 这样你拿到的是写完的答案, 而不是写了一半的。超时先到则返回 `idle: false` 与原因: 它只是还在干, 你可以 peek 一眼再等。很便宜: 守护进程轮询的是 pane, 不烧 token。同一个聊天里它的回复本来就会以它自己的气泡出现在群里, 所以你拿到结论后**别再复述一遍**, 只说你据此做了什么。\n" +
+      "**派了一批活就用 `tags` 一次等一组**, 别一个一个等: 它们本来在同时干活, 串行等的墙钟是所有人之和, 并行等只等最慢的那一个。`results` 按你给的顺序逐个回 `idle` / `lastText`。`need` 决定满几个就返回 (默认全部; `need:1` = 谁先完事就先处理谁, 剩下的还在跑, 再调一次接着等)。",
     inputSchema: {
-      tag: z.string().describe(ADDRESS_DOC),
+      tag: z.string().optional().describe(`${ADDRESS_DOC} 等一组时改用 \`tags\`。`),
+      tags: z
+        .array(z.string())
+        .optional()
+        .describe("一次等多个 wizard 的地址 (最多 16 个), 每个的写法同 `tag`。fan-out 之后的 join 用它 —— 五个分身并行等只花最慢那一个的时间。"),
+      need: z
+        .number()
+        .optional()
+        .describe("满几个就返回 (1 到地址个数, 默认全部)。`1` = 任意一个先完事就返回; 中间值 = 法定人数。满足后剩下的等待会被撤掉, 它们照常继续干活, 结果里 `idle:false`。"),
       timeoutSec: z.number().optional().describe("Max seconds to wait (10-7200, default 900)."),
     },
   },
-  async ({ tag, timeoutSec }) => unwrap("wait_peer", await daemonPost("/peers/wait", { tag, ...(timeoutSec ? { timeoutSec } : {}) })),
+  async ({ tag, tags, need, timeoutSec }) =>
+    unwrap("wait_peer", await daemonPost("/peers/wait", {
+      ...(tags?.length ? { tags } : { tag: tag ?? "" }),
+      ...(need ? { need } : {}),
+      ...(timeoutSec ? { timeoutSec } : {}),
+    })),
 );
 
 server.registerTool(
@@ -695,10 +723,24 @@ server.registerTool(
   {
     title: "Every wizard and clone",
     description:
-      "这个世界上所有的 wizard 与 clone: 每一个的名字、地址、所在聊天、工作区、职责、忙闲 (busy)、是否还活着 (alive)、最近在干嘛 (summary), 以及家谱 (parent / clones / ancestors)。跨聊天的也在里面。这是你感知同伴的唯一入口 —— 用户说「还有谁在跑」「谁在弄那个项目」「让懂 X 的那个来看看」时先调它, 拿到目标的 `address` 再 send_peer / peek_peer / wait_peer。比 list_peers 多的是身份 (名字/职责/家谱), 少的是纯会话细节; 只想知道同群谁忙着就用 list_peers。",
-    inputSchema: {},
+      "这个世界上所有的 wizard 与 clone: 每一个的名字、地址、**所在聊天**、**工作区**、职责、忙闲 (busy)、是否还活着 (alive)、最近在干嘛 (summary), 以及家谱 (parent / clones / ancestors)。跨聊天的也在里面。这是你感知同伴的唯一入口 —— 用户说「还有谁在跑」「谁在弄那个项目」「让懂 X 的那个来看看」时先调它, 拿到目标的 `address` 再 send_peer / peek_peer / wait_peer; 要往它**所在的群里对人说话**则把它的 `address` (或 `chat`) 交给 notify。\n" +
+      "**这是一张索引, 不是一份名单**: 整台机器上可能有几百个会话, 所以默认只回最相关的一页 (自己 → 活着的 → 最近动过的), 并告诉你 `total` / `matched` 有多少。找人就带上条件: `query` 匹配名字/职责/地址, `cwd` 匹配工作区路径 (「谁在这个目录里干活」), `chat` 限定某个聊天, `alive:true` 只看还活着的。别不带条件硬拉全表。",
+    inputSchema: {
+      query: z.string().optional().describe("在名字 / 职责 / 地址 / target 里做子串匹配 (不分大小写)。「让懂 X 的那个来看看」就把 X 写在这里。"),
+      chat: z.string().optional().describe("只看某个聊天里的 wizard: 聊天名, 或者聊天 principal 的一段 (无名聊天用它)。"),
+      cwd: z.string().optional().describe("只看工作区路径包含这一段的 wizard —— 「谁在 /path 下干活」的反查。"),
+      alive: z.boolean().optional().describe("true = 只看 pane 还活着的。默认全给 (冷会话发消息就会被唤醒)。"),
+      limit: z.number().optional().describe("最多回多少条 (1-300, 默认 40)。"),
+    },
   },
-  async () => unwrap("wizard_roster", await daemonPost("/wizard/roster", {})),
+  async ({ query, chat, cwd, alive, limit }) =>
+    unwrap("wizard_roster", await daemonPost("/wizard/roster", {
+      ...(query ? { query } : {}),
+      ...(chat ? { chat } : {}),
+      ...(cwd ? { cwd } : {}),
+      ...(alive ? { alive } : {}),
+      ...(limit ? { limit } : {}),
+    })),
 );
 
 server.registerTool(
@@ -721,20 +763,74 @@ server.registerTool(
       cwd: z.string().optional().describe("分身的工作区绝对路径。只在 inherit=false 时有意义 —— 换目录与继承上下文互斥。"),
       chat: z.string().optional().describe("把分身生在另一个聊天里 (list_chats 里的名字)。省略 = 你自己的聊天, 这是绝大多数情况。"),
       cli: z.enum(["claude", "claude-internal", "codebuddy"]).optional().describe("分身用哪个 CLI。省略则继承。"),
-      model: z.string().optional().describe("分身的模型 slug (如 'opus' / 'haiku')。省略用该 CLI 的默认。"),
+      model: z.string().optional().describe("分身跑在哪个模型上 (`--model` 的 slug, 如 'opus' / 'sonnet' / 'haiku')。省略用该 CLI 的默认。分身可以和你跑在不同模型上: 要判断力的那一路给 opus, 跑腿的 (grep、跑测试、照着清单改) 给 haiku —— 一批分身不必齐步走。"),
+      job: z
+        .string()
+        .optional()
+        .describe("把这个分身归到某个工单名下 (open_job 给的 id)。归了工单的分身出生/派活不再逐条出气泡 —— 五路 fan-out 就是十条交叉气泡, 人读不出结构; 它们攒到 close_job 那一条里一起交代, 过程照旧在各自的详情页。close_job 还会把它们整批回收掉。"),
     },
   },
-  async ({ inherit, description, tag, task, cwd, chat, cli, model }) =>
+  async ({ inherit, description, tag, task, cwd, chat, cli, model, job }) =>
     unwrap("spawn_clone", await daemonPost("/wizard/clone", {
       inherit,
       description,
       ...(tag ? { tag } : {}),
       ...(task ? { task } : {}),
+      ...(job ? { job } : {}),
       ...(cwd ? { cwd } : {}),
       ...(chat ? { chat } : {}),
       ...(cli ? { cli } : {}),
       ...(model ? { model } : {}),
     })),
+);
+
+// ── Job: 一次 fan-out 的工单 ────────────────────────────────────────────────
+// 工单不是第二个编排器: 控制流始终在你自己的上下文里 (你自己 spawn、自己 wait、
+// 自己汇总)。守护进程只替你记一本账 —— 谁属于这个活、谁是临时生的、群里出哪两条
+// 气泡、收工时该回收谁。
+server.registerTool(
+  "open_job",
+  {
+    title: "Open a job for a fan-out",
+    description:
+      "开一个**工单**: 你接下来要同时派出两个以上的分身干同一件事时, 先开它。返回一个 id, 把这个 id 传给 spawn_clone / send_peer 的 `job` 参数, 它们就归到这个工单名下。\n" +
+      "开了工单之后有三件事不一样: ① 群里只出两条气泡 —— 这里的「开工」和 close_job 的「收工」, 中间每个分身的出生和每一次派活不再各刷一条 (五路 fan-out 本来会刷十条交叉气泡, 人从里面读不出结构; 过程照旧在各自的 chat 详情页里, 收工那条会把成员和各自那段活列出来)。② close_job 会把为这个工单生出来的分身**整批回收**, 不必一个个 stop_wizard —— 忘记回收是常态, 每个分身都占着一个 pane 和一份上下文。③ list_jobs 能看到还开着哪些活。\n" +
+      "派活时顺手让每个分身**把结论收口成一行** `RESULT: …` (交付物写进文件就回传路径): wait_peer 会把这一行单独摘出来放进 `result`, 你汇总时不必再从八百字里找结论。\n" +
+      "只派一个分身、或者只是推某个同伴一把, 不用开工单 —— 那时逐条气泡正是人想看的。",
+    inputSchema: {
+      title: z.string().describe("一句话说清这个工单要干成什么 —— 它会出现在群里的开工气泡上。"),
+      plan: z.string().optional().describe("要在开工气泡里一并说明的计划 (打算分几路、各干什么)。省略则只出标题。"),
+    },
+  },
+  async ({ title, plan }) => unwrap("open_job", await daemonPost("/jobs/open", { title, ...(plan ? { plan } : {}) })),
+);
+
+server.registerTool(
+  "close_job",
+  {
+    title: "Close a job and recycle its clones",
+    description:
+      "收工: 把汇总结论发进群 (连同成员清单和各自那段活, 每个名字挂它自己的 chat 详情页), 并**把为这个工单生出来的分身整批回收**。被拉来帮忙的长期 wizard 不在回收之列, 你自己也不会被收。\n" +
+      "拿到所有分身的结果、汇总完就调它 —— 分身留着不收, 下一次编排就会撞到分身上限。`stop:false` 只结账不回收 (那些分身后面还有用)。",
+    inputSchema: {
+      job: z.string().describe("open_job 返回的工单 id。"),
+      summary: z.string().optional().describe("汇总结论, 发进群给人看。这是人在群里看到的唯一一条结果 —— 写清楚做成了什么、有什么没做成。"),
+      stop: z.boolean().optional().describe("是否回收为这个工单生出来的分身。默认 true。"),
+    },
+  },
+  async ({ job, summary, stop }) =>
+    unwrap("close_job", await daemonPost("/jobs/close", { job, ...(summary ? { summary } : {}), ...(stop === false ? { stop: false } : {}) })),
+);
+
+server.registerTool(
+  "list_jobs",
+  {
+    title: "Open jobs in this chat",
+    description:
+      "这个聊天里还开着的工单: id、标题、谁开的、成员和各自那段活。用来回答「那批分身在干什么」「上次那个活收了没」, 以及在继续派活前拿回工单 id。",
+    inputSchema: {},
+  },
+  async () => unwrap("list_jobs", await daemonPost("/jobs/list", {})),
 );
 
 server.registerTool(

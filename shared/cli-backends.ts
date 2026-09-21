@@ -16,6 +16,18 @@ import { expandHome } from "./paths.js";
 
 export type CliBackendName = "claude" | "claude-internal" | "codebuddy";
 
+// 人读的后端名 —— 详情页「X 正在思考」这类给人看的地方用它, 而不是配置里的标识符。
+// claude-internal 是 Claude Code 的内部构建, 对人来说仍然是 Claude。
+const BACKEND_LABEL: Record<CliBackendName, string> = {
+  "claude": "Claude",
+  "claude-internal": "Claude",
+  "codebuddy": "CodeBuddy",
+};
+
+/** 未知 / 缺省后端退回中性的「Agent」—— 宁可不说, 也别说错一个产品名。 */
+export const backendLabel = (name?: string): string =>
+  BACKEND_LABEL[name as CliBackendName] ?? "Agent";
+
 // Normalized transcript line — structurally compatible with mirror-bridge's
 // TranscriptLine. Defined here (not imported from mirror-bridge) to keep the
 // shared layer free of daemon dependencies. mirror-bridge casts the return

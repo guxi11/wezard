@@ -5,6 +5,7 @@ import { structuredPatch, parsePatch, type StructuredPatchHunk } from "diff";
 import { highlightCode, langFromPath } from "./highlight.js";
 import { ansiToHtml } from "./ansi.js";
 import { staleAt, turnDone } from "./chat-view.js";
+import { backendLabel } from "./cli-backends.js";
 import type {
   ApprovalDecision,
   ApprovalDetailRecord,
@@ -774,7 +775,7 @@ const renderTurnPage = (r: TurnDetailRecord): string => {
     r.target || null,
     `${items.length} 项`,
   ].filter(Boolean) as string[];
-  const typing = done ? "" : `<div class="typing" data-key="typing">Agent 正在思考</div>`;
+  const typing = done ? "" : `<div class="typing" data-key="typing">${escHtml(backendLabel(r.cli))} 正在思考</div>`;
   // markdown-it + highlight.js from unpkg CDN. html:false 防注入; linkify + breaks 更贴聊天。
   // 未 closed 时客户端 2s 轮询同一 URL — DOMParser 抽 .bubbles 后按 data-key reconcile:
   // 未变气泡复用原 DOM 节点 (连带用户手动展开/折叠的 <details> 一并保住), 变化/新增气泡
@@ -944,7 +945,7 @@ export const renderTurnGroup = (
         <div class="q-body">${escHtml(r.userQuery)}</div>
       </section>`
     : "";
-  const typing = done ? "" : `<div class="typing" data-key="${r.id}:typing">Agent 正在思考</div>`;
+  const typing = done ? "" : `<div class="typing" data-key="${r.id}:typing">${escHtml(backendLabel(r.cli))} 正在思考</div>`;
   // 子卡片已是完整片段 (自带 data-key/data-sig), 不再过 tagSig。
   const inner = [tagSig(queryBubble), ...spliceChildren(bodies.map(tagSig), stamps, children), tagSig(typing)].join("");
   const head = `<div class="tg-head">

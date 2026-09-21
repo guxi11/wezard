@@ -34,7 +34,7 @@ import {
 } from "./tasks.js";
 import { parseWhen } from "../shared/schedule-spec.js";
 import { baseOfKey, keyOf, labelFor, normalizeTag, tagFromCwd, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
-import { chatBaseOf, chatNameOf, clearChatName, listChatNames, normChatName, peerAddress, setChatName } from "./chat-name.js";
+import { applyChatNames, chatBaseOf, chatNameOf, clearChatName, listChatNames, normChatName, peerAddress, planChatNames, setChatName } from "./chat-name.js";
 import {
   bindWizardStore,
   loadWizardStore,
@@ -45,6 +45,9 @@ import {
   type WizardBrief,
   type WizardRecord,
 } from "./wizard.js";
+import { bindNoticeBox, createNoticeBox, chatAudience } from "./notices.js";
+import { loadJobStore, renderJobOpen, renderJobClose, JOB_MEMBER_MAX } from "./jobs.js";
+import { extractResult } from "./peers.js";
 import {
   startGraph,
   stopRun,
@@ -52,6 +55,7 @@ import {
   listRuns,
   validateSpec,
   waitForIdle,
+  waitForQuorum,
   type GraphSpec,
   type GraphNodeSpec,
   type GraphStepSpec,
@@ -372,7 +376,7 @@ const main = async (): Promise<void> => {
     // caller has no business in.
     http.register("POST /sessions/new", async (req, res) => {
       const { readBody } = await import("./http.js");
-      const body = (await readBody(req)) as Partial<{ cwd: string; tag: string; chat: string; target: string; sessionId: string; tmuxPane: string; cli: CliBackendName }>;
+      const body = (await readBody(req)) as Partial<{ cwd: string; tag: string; chat: string; target: string; sessionId: string; tmuxPane: string; cli: CliBackendName; model: string }>;
       const cwd = (body.cwd ?? "").toString().trim();
       if (!cwd) {
         json(res, 400, { ok: false, reason: "cwd required" });
@@ -404,8 +408,10 @@ const main = async (): Promise<void> => {
       }
       const tag = asked || uniqueTag(tagFromCwd(cwd) || "peer", taken);
       const target = keyOf(base, tag);
-      log.child({ mod: "mirror", sub: "sessions-new", target }).info({ self, cwd, foreign, cli: body.cli }, "spawning peer session");
-      const r = await m.newSession(target, tag, body.cli, { cwd });
+      const model = (body.model ?? "").toString().trim();
+      log.child({ mod: "mirror", sub: "sessions-new", target }).info({ self, cwd, foreign, cli: body.cli, model }, "spawning peer session");
+      const r = await m.newSession(target, tag, body.cli, { cwd, model });
+      if (r.ok) postRoster(base, [target, self], `新 wizard **#${tag}** 就位 · 地址 \`${peerAddress(cfg, base, target)}\`${r.cwd ? ` · 工作区 ${r.cwd}` : ""}${model ? ` · 模型 ${model}` : ""} —— 空白起步, 由 ${displayName(self)} 造的`);
       json(res, r.ok ? 200 : 500, r.ok
         ? {
             ok: true,
@@ -415,6 +421,7 @@ const main = async (): Promise<void> => {
             base,
             tag,
             cwd: r.cwd,
+            ...(model ? { model } : {}),
             foreign,
             // 调用方之后拿这个串 send_peer / peek_peer 驱动它。
             address: peerAddress(cfg, self, target),
@@ -493,16 +500,23 @@ const main = async (): Promise<void> => {
     // (`new_claude_session({ chat: 'daily' })`) expressible at all.
     http.register("POST /chats/list", async (req, res) => {
       const { self } = await readPeerBody(req);
+      if (self) ensureChatNames(self);
       const roster = self ? m.chatRoster(self) : listChatNames(cfg).map((c) => ({ ...c, self: false, targets: [] }));
       json(res, 200, {
         ok: true,
         self,
         chats: roster.map((c) => ({
           ...c,
+          // 每一行带上"它是谁": 只有 target/tag/address 的话, 想知道哪个会话
+          // 是干什么的就得再拉一次三百条的名册。名字/职责取注册表, 工作区取
+          // store —— 都是内存里的, 不探 tmux。
           sessions: c.targets.map((t) => ({
             target: t,
             tag: tagOfKey(t),
             address: self ? peerAddress(cfg, self, t) : t,
+            name: wizardName(wizards.get(t), chatNameOf(cfg, t), t),
+            description: wizards.get(t)?.description ?? "",
+            cwd: m.getCwd(t).runningCwd || m.getCwd(t).defaultCwd,
           })),
         })),
       });
@@ -534,6 +548,7 @@ const main = async (): Promise<void> => {
     http.register("POST /peers/list", async (req, res) => {
       const { self } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session (pass target/sessionId/tmuxPane)" }); return; }
+      ensureChatNames(self);
       const [peers, foreignPeers] = await Promise.all([m.peers(self), m.foreignPeers(self)]);
       json(res, 200, { ok: true, self, base: baseOfKey(self), peers, foreignPeers });
     });
@@ -606,6 +621,9 @@ const main = async (): Promise<void> => {
       const b = body as { to?: string[]; markdown?: string };
       const content = (b.markdown ?? "").trim();
       if (!content) { json(res, 400, { ok: false, reason: "markdown required" }); return; }
+      // 收件人写的就是名字 —— 补名必须发生在解析之前, 否则一个刚被别处命名的聊天
+      // 在这里仍然认不出来。
+      ensureChatNames(self);
       // 认不出的名字原样报回去, 绝不静默跳过 ——「发了但没人收到」是这类工具最难查
       // 的故障; 有一个收件人错了整条就不发, 部分送达比不送达更难对账。
       const refs = (b.to ?? []).map((r) => (r ?? "").trim()).filter(Boolean);
@@ -647,34 +665,93 @@ const main = async (): Promise<void> => {
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       const text = ((body as { text?: string }).text ?? "").toString();
       if (!text.trim()) { json(res, 400, { ok: false, reason: "text required" }); return; }
+      const jobId = ((body as { job?: string }).job ?? "").trim();
+      if (jobId) {
+        const jc = checkJob(jobId);
+        if (!jc.ok) { json(res, jc.status, { ok: false, reason: jc.reason }); return; }
+      }
       const r = resolvePeer(self, body.tag ?? "");
       if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
       const { target, foreign } = r;
       // Injecting into your own pane would type into the box you're generating
       // from — Claude Code queues it and the caller deadlocks waiting for itself.
       if (target === self) { json(res, 400, { ok: false, reason: "refusing to inject into the calling session itself" }); return; }
+      // 投递时机。默认照旧立刻投 —— 「回答它的提问」「打断它」本来就是冲着一个
+      // 正在忙的会话去的。`when:"idle"` 是**派新活**该用的那一种: 两个 wizard 同时
+      // 找第三个时, 两段文本会挤进同一个输入框、被当成一轮读掉, 这在协同网络里
+      // 不是边角情况而是常态。等它闲下来再投, 一句话就是一轮。
+      const when = ((body as { when?: string }).when ?? "now") === "idle" ? "idle" : "now";
+      const waitSec = Math.min(Math.max(Number((body as { waitSec?: number }).waitSec ?? 600) || 600, 10), 3600);
+      const wasBusy = await m.isBusy(target);
+      let waitedMs = 0;
+      if (when === "idle" && wasBusy) {
+        const t0 = Date.now();
+        // rampMs=0: ramp 是给「刚注入、这一轮还没起来」准备的; 这里相反, 一旦它
+        // 真闲下来就该立刻投。
+        const wr = await waitForIdle(target, m.isBusy, waitSec * 1000, () => false, { rampMs: 0, confirm: 2 });
+        waitedMs = Date.now() - t0;
+        if (!wr.idle) {
+          json(res, 409, { ok: false, target, foreign, wasBusy, waitedMs, reason: `它一直在忙, ${waitSec}s 内没闲下来 —— peek_peer 看看它卡在哪, 或者用 when:"now" 插队` });
+          return;
+        }
+      }
       const inj = await m.injectText(target, text);
-      if (inj.ok) relayPeer(self, target, text);
-      json(res, inj.ok ? 200 : 502, { ...inj, target, foreign });
+      // 归到工单名下的往返不单独出气泡: 五路 fan-out 的每一次派活都发一条, 群里
+      // 就只剩交叉的气泡, 读不出结构。它照旧落在对方的 chat 详情页里, 收工那一条
+      // 会把成员和各自那段活一起列出来。
+      if (inj.ok && jobId) jobs.attach(jobId, { target, task: text, spawned: false });
+      if (inj.ok && !jobId) relayPeer(self, target, text);
+      // `wasBusy` 是给调用方的判断依据: 立刻投给一个正在生成的会话, 这句话会排在
+      // 它这一轮后面, 而不是马上被读到。
+      json(res, inj.ok ? 200 : 502, { ...inj, target, foreign, when, wasBusy, waitedMs, ...(jobId ? { job: jobId } : {}) });
     });
 
+    // 等一个 wizard, 或者等一**组**。fan-out 之后 join 必须是并行的: 串行地等五个
+    // 分身, 墙钟是五个之和, 而它们本来就在同时干活。`need` 把 all / any / 过半收进
+    // 一个数字 (默认全等), 满了就撤掉剩下的等待。
     http.register("POST /peers/wait", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const r = resolvePeer(self, body.tag ?? "");
-      if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
-      const { target, foreign } = r;
-      if (target === self) { json(res, 400, { ok: false, reason: "refusing to wait on the calling session itself" }); return; }
-      const timeoutMs = Math.min(Math.max(Number((body as { timeoutSec?: number }).timeoutSec ?? 900) || 900, 10), 7200) * 1000;
-      const wr = await waitForIdle(target, m.isBusy, timeoutMs, () => false);
-      const lastText = m.lastText(target);
-      // 回程只在跨聊天时下发。同一个群里, 对方的回复本来就会以它自己的 `emoji #tag`
-      // 气泡出现 —— 再 relay 一条 `B → A` 就是同一句话在同一个群里出现两次, 正是
-      // 「A 告诉 B 之后不必再展示 B 收到了」要消灭的那种重复。跨聊天则相反: A 的群
-      // 里看不到 B 的任何气泡, 这条 relay 是那边唯一能看见结论的地方 —— 所以它落在
-      // self (问话人) 的群, 而不是答话方那边。
-      if (wr.idle && foreign) relayPeer(target, self, lastText);
-      json(res, 200, { ok: true, target, foreign, idle: wr.idle, reason: wr.reason, lastText });
+      const b = body as { tag?: string; tags?: string[]; need?: number; timeoutSec?: number };
+      const asked = (Array.isArray(b.tags) && b.tags.length > 0 ? b.tags : [b.tag ?? ""]).map((x) => String(x ?? ""));
+      if (asked.length > 16) { json(res, 400, { ok: false, reason: "一次最多等 16 个 wizard" }); return; }
+      // 全部先解析: 地址错了就整批拒绝, 而不是等了十分钟才发现有一个打错了。
+      const resolved = asked.map((address) => ({ address, r: resolvePeer(self, address) }));
+      const bad = resolved.find((x) => !x.r.ok);
+      if (bad && !bad.r.ok) {
+        json(res, bad.r.status, { ok: false, reason: `地址 '${bad.address}': ${bad.r.reason}`, candidates: bad.r.candidates });
+        return;
+      }
+      const hits = resolved.map((x) => ({ address: x.address, ...(x.r as { ok: true; target: string; foreign: boolean }) }));
+      if (hits.some((h) => h.target === self)) { json(res, 400, { ok: false, reason: "refusing to wait on the calling session itself" }); return; }
+      // 同一个 wizard 写两遍不该顶掉两个名额。
+      const uniq = hits.filter((h, i) => hits.findIndex((o) => o.target === h.target) === i);
+      const need = Math.min(Math.max(Number(b.need ?? uniq.length) || uniq.length, 1), uniq.length);
+      const timeoutMs = Math.min(Math.max(Number(b.timeoutSec ?? 900) || 900, 10), 7200) * 1000;
+      const wrs = await waitForQuorum(uniq.map((h) => h.target), m.isBusy, timeoutMs, need);
+      const results = uniq.map((h, i) => {
+        const wr = wrs[i]!;
+        const lastText = m.lastText(h.target);
+        // 回程只在跨聊天时下发。同一个群里, 对方的回复本来就会以它自己的 `emoji #tag`
+        // 气泡出现 —— 再 relay 一条 `B → A` 就是同一句话在同一个群里出现两次, 正是
+        // 「A 告诉 B 之后不必再展示 B 收到了」要消灭的那种重复。跨聊天则相反: A 的群
+        // 里看不到 B 的任何气泡, 这条 relay 是那边唯一能看见结论的地方 —— 所以它落在
+        // self (问话人) 的群, 而不是答话方那边。
+        if (wr.idle && h.foreign) relayPeer(h.target, self, lastText);
+        // `result` 是它自己收口的那一行 (见 peers.extractResult); 捞不到就是 "",
+        // 调用方照旧读 lastText。
+        return { address: h.address, target: h.target, foreign: h.foreign, idle: wr.idle, reason: wr.reason, result: extractResult(lastText), lastText };
+      });
+      const first = results[0]!;
+      // 单目标的扁平回显照旧 —— 老调用方 (和只等一个的绝大多数调用) 不必去读数组。
+      json(res, 200, {
+        ok: true,
+        need,
+        done: results.filter((x) => x.idle).length,
+        satisfied: results.filter((x) => x.idle).length >= need,
+        results,
+        target: first.target, foreign: first.foreign, idle: first.idle, reason: first.reason, result: first.result, lastText: first.lastText,
+      });
     });
 
     // POST /handoff — 交接一个 pane 的会话给一个全新会话,原地完成。先让目标
@@ -741,6 +818,67 @@ const main = async (): Promise<void> => {
     // mirror-bridge。
     const wizards = bindWizardStore(loadWizardStore(cfg.wrc.mirror.wizardsFile));
 
+    // 名册增量的投递面 (见 notices.ts)。charter 只是出生那一刻的快照; 此后的成员
+    // 变动从这里搭下一次注入的车进到每个在场 wizard 的上下文里, 不占一轮。
+    // 一条变动只投给**同一个聊天**里在场的其他 wizard: 群成员变动是那个群的事,
+    // 当事人自己做的自己知道, 所以排除在外。
+    const notices = bindNoticeBox(createNoticeBox());
+    const postRoster = (base: string, except: readonly string[], line: string): void =>
+      notices.post(chatAudience(m.chatTargets(base), base, except), line);
+
+    /** 一个聊天的工作区: 它名下各会话跑在哪个目录, 取最多的那个。聊天与工作区是
+     *  一对多, 但绝大多数聊天只围着一个项目转。 */
+    const chatCwd = (targets: readonly string[]): string => {
+      const counts = targets.reduce<Record<string, number>>((acc, t) => {
+        const c = m.getCwd(t).runningCwd;
+        return c ? { ...acc, [c]: (acc[c] ?? 0) + 1 } : acc;
+      }, {});
+      return Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
+    };
+
+    /** 拦在每一个「把名字交给模型」的入口前: 没名字的聊天按它的工作区补一个。
+     *
+     *  名字就是地址。一个没名字的聊天在别的聊天眼里只有 `chat:wr4-87DwAA…` 这串
+     *  key —— 能寻址, 但模型抄错一个字符就找不到, 人更读不出那是哪个群。等人想起来
+     *  去 `/name` 是等不到的 (实测 16 个聊天只有 3 个有名字), 而每个聊天本来就带着
+     *  一个可读的标识: 它在干哪个项目。所以在这里补, 而不是在某个 spawn 路径上补 ——
+     *  聊天是先于 wizard 存在的, 只有"要用到名字"这个时刻才是它必须有名字的时刻。
+     *  只填空, 从不覆盖人起过的名字; 推不出名字 (工作区为空) 的原样留着。 */
+    const ensureChatNames = (self: string): Record<string, string> => {
+      const blank = m.chatRoster(self).filter((c) => !c.name);
+      if (blank.length === 0) return {};
+      // 会话多的先排 —— 同一个目录下的几个聊天要靠序号区分 (`lisct` / `lisct-2`),
+      // 而裸名字该归那个真正在干这个项目的群; 按 chatRoster 的字典序分配的话,
+      // 70 个会话的主力群会拿到 `lisct-7`, 一个只有一条冷记录的空群反倒占了裸名。
+      const plan = planChatNames(
+        cfg,
+        blank
+          .slice()
+          .sort((x, y) => y.targets.length - x.targets.length)
+          .map((c) => ({ base: c.base, cwd: chatCwd(c.targets) })),
+      );
+      const named = applyChatNames(cfg, sourcePath, plan);
+      for (const [base, name] of Object.entries(named)) {
+        log.info({ base, name }, "chat: auto-named from workspace");
+        // 群里不发气泡 (一次补名会命中十几个群, 那是刷屏), 但住在里面的 wizard
+        // 得知道自己的地址变了 —— 它的 charter 里写的还是「(未命名)」。
+        postRoster(base, [], `这个聊天现在叫 **${name}** (按工作区自动起的) —— 别的聊天从此能以 \`${name}#tag\` 叫到这里, 你的地址也随之可读了。`);
+      }
+      return named;
+    };
+
+    // 工单账本 (见 jobs.ts)。只在**显式传了 `job`** 时起作用 —— 不用工单的调用方
+    // 行为与从前一模一样。
+    const jobs = loadJobStore(cfg.wrc.mirror.jobsFile);
+    /** 派活前先验工单: 生完分身才发现工单号打错了, 那个分身就成了没人认领的孤儿。 */
+    const checkJob = (id: string): { ok: true } | { ok: false; status: number; reason: string } => {
+      const j = jobs.get(id);
+      if (!j) return { ok: false, status: 404, reason: `没有工单 '${id}' —— open_job 先开一个, 或者 list_jobs 看还开着哪些` };
+      if (j.status !== "open") return { ok: false, status: 409, reason: `工单 '${id}' 已经收工了` };
+      if (j.members.length >= JOB_MEMBER_MAX) return { ok: false, status: 409, reason: `工单 '${id}' 的成员已经满了 (${JOB_MEMBER_MAX} 个) —— 分身是有成本的, 拆成两个工单, 或者先收工回收掉一批` };
+      return { ok: true };
+    };
+
     /** 上下文超过这个数就该自己交接了。Claude 家族最小的窗口是 200k, 留三成余量
      *  给交接那一轮本身 —— 提示而已, 决定权在 wizard 自己。 */
     const HANDOFF_HINT_TOKENS = 140_000;
@@ -777,9 +915,20 @@ const main = async (): Promise<void> => {
     // 所有 spawn 路径 (群里手打 /new、pane 自愈重生、编排出来的分身) 都从这里
     // 取身份, 于是「是谁」不再取决于是哪段代码把它生出来的。
     m.setCharterProvider((target) => {
+      // 这里是最要紧的那道拦截: 宪章把「所在聊天」写进系统提示, 而系统提示是随进程
+      // 终身的 —— 一个在聊天还没名字时出生的 wizard, 会一辈子以为自己住在一个
+      // 「(未命名)」的地方。所以补名要发生在渲染之前, 不能等它以后自己去查。
+      ensureChatNames(target);
       const rec = wizards.get(target);
       return charterFor(target, { parent: rec?.parent, inherited: !!rec?.clonedFrom });
     });
+
+    // 开机也补一次: IM 侧的 `/peers`、`/help` 直接读名字, 不经过任何 MCP 路由。
+    // 延后是因为附着表要先从盘上恢复完, 否则这一刻还看不见那些聊天; 补不全也无妨,
+    // 上面每一道拦截都会再补。
+    setTimeout(() => {
+      try { ensureChatNames(cfg.defaultChat ?? ""); } catch (e) { log.warn({ err: (e as Error).message }, "boot auto-name failed"); }
+    }, 15_000).unref();
 
     const kinOf = (self: string, all: readonly WizardRecord[], target: string) => ({
       parent: wizards.get(target)?.parent ? briefOf(self, wizards.get(target)!.parent!) : undefined,
@@ -805,6 +954,7 @@ const main = async (): Promise<void> => {
         ...kinOf(self, wizards.all(), target),
         sessionId: info?.sessionId ?? "",
         cli: info?.cli,
+        model: info?.model ?? "",
         contextTokens: info?.contextTokens ?? 0,
         handoffSuggested: (info?.contextTokens ?? 0) > HANDOFF_HINT_TOKENS,
       };
@@ -824,6 +974,7 @@ const main = async (): Promise<void> => {
           chat: chatNameOf(cfg, p.target) || p.chat,
           label: p.label,
           cli: p.cli,
+          model: p.model,
           busy: p.busy,
           alive: p.paneAlive,
           self: p.self,
@@ -842,6 +993,9 @@ const main = async (): Promise<void> => {
           busy: false,
           alive: false,
           self: false,
+          // 没跑过就没有活动时刻。排序拿它当最旧 —— 冷会话排在活着的后面, 正是
+          // 截断时该被留下的顺序。
+          lastActivity: 0,
           summary: "(未运行 —— 发消息或 send_peer 会把它唤醒)",
           ...kinOf(self, all, w.target),
         }));
@@ -853,6 +1007,7 @@ const main = async (): Promise<void> => {
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       // 身份已经写在系统提示里了, whoami 回答的是"此刻"的部分: 上下文用了多少、
       // 分身还剩几个、工作区有没有被换掉。
+      ensureChatNames(self);
       json(res, 200, { ok: true, ...identityOf(self, self), peers: (await m.peers(self)).filter((p) => !p.self).length });
     });
 
@@ -879,13 +1034,49 @@ const main = async (): Promise<void> => {
       const me = identityOf(self, self);
       // 起名是稀有事件, 值得在群里留一条 —— 人得知道群里这个角色叫什么了。
       if (name && !wasNamed) notifyChat(self, withTagHeader(self, `我是 **${me.name}**${description ? ` · ${description}` : ""}`));
+      // 职责是别人决定"该不该找你"的依据, 改了就得让同群的人知道 —— 否则他们照着
+      // 出生快照里那句旧的 (或者空的) 职责派活。
+      if (name || description) postRoster(baseOfKey(self), [self], `**${me.name || me.address}** 改了身份 · 地址 \`${peerAddress(cfg, baseOfKey(self), self)}\`${description ? ` · 职责: ${description}` : ""}`);
       json(res, 200, { ok: true, ...me, chatNamed });
     });
 
+    // 名册是**索引**, 不是转储: 这台机器上现在有 300+ 个会话, 整表吐出来是三万
+    // token —— 一个 wizard 每次想找人都付这个价, 等于找不到人。所以服务端过滤
+    // (名字/职责/工作区/聊天/死活), 并且默认只给最相关的一页, 同时回 total 让
+    // 调用方知道自己看的是不是全部。
+    const rosterFilters = (b: { query?: string; chat?: string; cwd?: string; alive?: boolean }) => {
+      const q = (b.query ?? "").trim().toLowerCase();
+      const chat = (b.chat ?? "").trim().toLowerCase();
+      const cwd = (b.cwd ?? "").trim().toLowerCase();
+      return (w: { name: string; address: string; description: string; cwd: string; chat: string; target: string; alive: boolean }): boolean =>
+        (!q || [w.name, w.address, w.description, w.target].some((f) => (f ?? "").toLowerCase().includes(q))) &&
+        (!chat || (w.chat ?? "").toLowerCase() === chat || (w.target ?? "").toLowerCase().includes(chat)) &&
+        (!cwd || (w.cwd ?? "").toLowerCase().includes(cwd)) &&
+        (b.alive !== true || w.alive);
+    };
+
     http.register("POST /wizard/roster", async (req, res) => {
-      const { self } = await readPeerBody(req);
+      const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      json(res, 200, { ok: true, self: identityOf(self, self), wizards: await rosterOf(self) });
+      const b = body as { query?: string; chat?: string; cwd?: string; alive?: boolean; limit?: number };
+      ensureChatNames(self);
+      const all = await rosterOf(self);
+      const hit = all.filter(rosterFilters(b));
+      // 自己在最前, 然后活着的, 然后最近动过的 —— 截断时留下的正是最可能有用的。
+      const ranked = hit.slice().sort((x, y) =>
+        Number(y.self) - Number(x.self) || Number(y.alive) - Number(x.alive) || (y.lastActivity ?? 0) - (x.lastActivity ?? 0));
+      const limit = Math.min(Math.max(Number(b.limit ?? 40) || 40, 1), 300);
+      const shown = ranked.slice(0, limit);
+      json(res, 200, {
+        ok: true,
+        self: identityOf(self, self),
+        total: all.length,
+        matched: hit.length,
+        wizards: shown,
+        ...(hit.length > shown.length
+          ? { more: `还有 ${hit.length - shown.length} 个没列出来 —— 用 query (名字/职责) / cwd (工作区) / chat 收窄, 或者调大 limit` }
+          : {}),
+      });
     });
 
     http.register("POST /wizard/remember", async (req, res) => {
@@ -907,7 +1098,13 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/clone", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { tag?: string; description?: string; inherit?: boolean; cwd?: string; chat?: string; cli?: CliBackendName; model?: string; task?: string };
+      const b = body as { tag?: string; description?: string; inherit?: boolean; cwd?: string; chat?: string; cli?: CliBackendName; model?: string; task?: string; job?: string };
+      // 工单先验: 生完分身才发现工单号打错了, 那个分身就成了没人认领的孤儿。
+      const jobId = (b.job ?? "").trim();
+      if (jobId) {
+        const jc = checkJob(jobId);
+        if (!jc.ok) { json(res, jc.status, { ok: false, reason: jc.reason }); return; }
+      }
       // `inherit` 没有默认值 —— 继承与否是两种完全不同的分身 (一种开局就带着你
       // 读过的一切, 另一种白纸一张), 猜错了要么白烧一份上下文, 要么让它从零重读。
       // 逼调用方每次自己说。
@@ -915,7 +1112,21 @@ const main = async (): Promise<void> => {
         json(res, 400, { ok: false, reason: "inherit 必填: true = fork 你此刻的上下文 (它开局就有你读过的材料, 必须留在同一个 cwd); false = 空白分身, 只继承身份" });
         return;
       }
+      const alivePeers = await m.peers(self);
       const inherit = b.inherit;
+      // 预算。撞到上限不是"不许再分", 是"先把干完活的收掉": stop_wizard 收单个,
+      // close_job 整批回收一个工单的临时分身。只数**本聊天里**活着的 ——
+      // 生到别的聊天去的归那边管, 为了数它们再探一遍 tmux 不值当。
+      const aliveKids = childrenOf(wizards.all(), self).filter((k) =>
+        alivePeers.some((pp) => pp.target === k.target && pp.paneAlive));
+      if (aliveKids.length >= cfg.wrc.mirror.cloneMax) {
+        json(res, 429, {
+          ok: false,
+          reason: `你名下已经有 ${aliveKids.length} 个活着的分身 (上限 ${cfg.wrc.mirror.cloneMax}) —— 先 stop_wizard 收掉干完活的那些, 或者 close_job 整批回收一个工单`,
+          clones: aliveKids.map((k) => peerAddress(cfg, self, k.target)),
+        });
+        return;
+      }
       const wantChat = (b.chat ?? "").toString().trim();
       const base = wantChat ? chatBaseOf(cfg, wantChat) : baseOfKey(self);
       if (!base) {
@@ -966,7 +1177,13 @@ const main = async (): Promise<void> => {
       const me = briefOf(self, self);
       const kid = briefOf(self, target);
       // 分身出生要在群里留一条 —— 群里多了一个成员, 人有权当场知道。
-      notifyChat(base, withTagHeader(target, `已就位 · ${r.inherited ? `${displayName(self)} 的分身 (继承了它的上下文)` : "全新 wizard (空白上下文)"}${kid.description ? ` · ${kid.description}` : ""}`));
+      // 工单里的分身是临时工: 出生、派活各发一条气泡, 五路 fan-out 就是十条交叉的
+      // 气泡, 人从里面读不出结构。它们攒到收工那一条里一起交代 (成员 + 各自那段活),
+      // 中间过程照旧在各自的 chat 详情页。同理不惊动同群的其他 wizard。
+      if (!jobId) {
+        notifyChat(base, withTagHeader(target, `已就位 · ${r.inherited ? `${displayName(self)} 的分身 (继承了它的上下文)` : "全新 wizard (空白上下文)"}${kid.description ? ` · ${kid.description}` : ""}`));
+        postRoster(base, [target, self], `新 wizard **${kid.name || tag}** 就位 · 地址 \`${peerAddress(cfg, base, target)}\`${kid.description ? ` · ${kid.description}` : ""}${r.cwd ? ` · 工作区 ${r.cwd}` : ""}${b.model?.trim() ? ` · 模型 ${b.model.trim()}` : ""} —— ${displayName(self)} 的分身${r.inherited ? " (继承了它的上下文)" : ""}`);
+      }
       // 派活在群里留一条 (它是关键节点)。继承路径上活已经随开场白进去了, 空白分身
       // 才需要在这里补一次注入。
       let dispatched = r.inherited && !!task;
@@ -974,8 +1191,9 @@ const main = async (): Promise<void> => {
         const inj = await m.injectText(target, task);
         dispatched = inj.ok;
       }
-      if (dispatched) relayPeer(self, target, task);
-      json(res, 200, { ok: true, target, tag, address: peerAddress(cfg, self, target), name: kid.name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched });
+      if (jobId) jobs.attach(jobId, { target, task, spawned: true });
+      else if (dispatched) relayPeer(self, target, task);
+      json(res, 200, { ok: true, target, tag, address: peerAddress(cfg, self, target), name: kid.name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, ...(jobId ? { job: jobId } : {}) });
     });
 
     // 收掉一个 wizard。interrupt = 打断它这一轮 (Esc); end = 结束它并回收 pane。
@@ -995,6 +1213,8 @@ const main = async (): Promise<void> => {
       if (!done.ok) { json(res, 502, { ok: false, target, reason: done.reason }); return; }
       if (end && b.forget) wizards.drop(target);
       notifyChat(target, withTagHeader(target, `${end ? "已结束" : "已打断"} · 由 ${displayName(self)} 发起`));
+      // 打断只是停了它这一轮, 它还在; 只有结束才是名册变了。
+      if (end) postRoster(baseOfKey(target), [target, self], `**${victim.name || target}** 已收工 · 由 ${displayName(self)} 结束${b.forget ? " (记录一并抹掉)" : ""}`);
       json(res, 200, { ok: true, target, name: victim.name, mode: end ? "end" : "interrupt", forgotten: !!(end && b.forget) });
     });
 
@@ -1022,6 +1242,65 @@ const main = async (): Promise<void> => {
         lg.info({ ok: inj.ok, reason: inj.reason }, "self-handoff: 完成");
         notifyChat(self, withTagHeader(self, `上下文已交接重开 (${info?.contextTokens ?? 0} tok → 0), 工作照旧`));
       })();
+    });
+
+    // ── Job: 一次 fan-out 的工单 ─────────────────────────────────────────
+    // 账本, 不是编排器: 控制流留在发起的那个 wizard 手里 (它自己 spawn / wait /
+    // 汇总), 这里只记谁属于这个活、谁是为它临时生的、群里该出哪两条气泡。
+    // 见 jobs.ts 开头那段取舍。
+    http.register("POST /jobs/open", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      const b = body as { title?: string; plan?: string };
+      const title = (b.title ?? "").toString().trim();
+      if (!title) { json(res, 400, { ok: false, reason: "title required —— 一句话说清这个工单要干成什么" }); return; }
+      const base = baseOfKey(self);
+      const job = jobs.open(base, self, title);
+      notifyChat(base, renderJobOpen(job, (b.plan ?? "").toString()));
+      json(res, 200, {
+        ok: true,
+        job: job.id,
+        title,
+        memberMax: JOB_MEMBER_MAX,
+        hint: "把这个 id 传给 spawn_clone / send_peer 的 `job` 参数, 它们就归到这个工单名下 (期间不再逐条出气泡); 活干完调 close_job 收尾并回收临时分身。",
+      });
+    });
+
+    http.register("POST /jobs/close", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      const b = body as { job?: string; summary?: string; stop?: boolean };
+      const id = (b.job ?? "").toString().trim();
+      const job = jobs.get(id);
+      if (!job) { json(res, 404, { ok: false, reason: `没有工单 '${id}'` }); return; }
+      if (job.status !== "open") { json(res, 409, { ok: false, reason: `工单 '${id}' 已经收工了`, closedAt: job.closedAt }); return; }
+      // 回收只针对**为这个工单生出来的**分身: 被拉来帮忙的长期 wizard 不该因为一次
+      // 活结束就被杀掉。调用方自己也不收 —— 那会在这次工具调用里把自己干掉。
+      const recycle = b.stop !== false;
+      const victims = recycle ? job.members.filter((mm) => mm.spawned && mm.target !== self) : [];
+      const killed = await victims.reduce(
+        async (acc, mm) => (await acc) + ((await m.killPane(mm.target)).ok ? 1 : 0),
+        Promise.resolve(0),
+      );
+      const closed = jobs.close(id, (b.summary ?? "").toString())!;
+      notifyChat(job.base, renderJobClose(closed, (t) => relayLabel(t, job.base), killed));
+      json(res, 200, { ok: true, job: id, members: closed.members.length, recycled: killed, kept: victims.length - killed });
+    });
+
+    http.register("POST /jobs/list", async (req, res) => {
+      const { self } = await readPeerBody(req);
+      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      json(res, 200, {
+        ok: true,
+        jobs: jobs.openOf(baseOfKey(self)).map((j) => ({
+          job: j.id,
+          title: j.title,
+          owner: displayName(j.owner),
+          mine: j.owner === self,
+          openedAt: j.openedAt,
+          members: j.members.map((mm) => ({ address: peerAddress(cfg, self, mm.target), task: mm.task.split("\n")[0] ?? "", spawned: mm.spawned })),
+        })),
+      });
     });
 
     // ── 定时任务 ────────────────────────────────────────────────────

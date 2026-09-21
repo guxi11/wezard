@@ -143,7 +143,7 @@ export const renderCharter = (a: CharterArgs): string => {
     bullet([
       `名字: **${a.self.name || "(还没有名字 —— 需要时用 wizard_identity 给自己起一个)"}**`,
       `地址: \`${a.self.address || "(本聊天的默认会话)"}\` —— 别的 wizard 用它找你`,
-      `所在聊天: ${a.chat ? `**${a.chat}**` : "(未命名; 想被别的聊天叫到就用 name_chat 起个名)"} \`${a.principal}\``,
+      `所在聊天: ${a.chat ? `**${a.chat}**` : "(还没有名字 —— 它会在第一次被用到时按工作区自动补上; 想要个更好的名字就 name_chat)"} \`${a.principal}\``,
       `工作区: \`${a.self.cwd || "(未设置)"}\``,
       `职责: ${a.self.description || "(未写 —— 用 wizard_identity 写一句, 别人靠它决定该不该找你)"}`,
       a.parent
@@ -156,19 +156,27 @@ export const renderCharter = (a: CharterArgs): string => {
     parts.push("## 我的记忆", "这些是你自己写下的、要跨会话活下来的东西:", bullet(a.memory as string[]), "");
   }
   if (a.siblings.length > 0) {
-    parts.push("## 出生时群里已有的 wizard", bullet(a.siblings.map(nameLine)), "(这只是快照。随时 `wizard_roster` 看当下真实的名册。)", "");
+    parts.push(
+      "## 出生时群里已有的 wizard",
+      bullet(a.siblings.map(nameLine)),
+      "(这只是出生那一刻的快照。此后群里谁来了、谁收工了、谁改了职责, 会以一行 system-reminder",
+      "挂在下一条进到你这儿的消息尾巴上 —— 不必去问。要当下完整的名册仍然是 `wizard_roster`。)",
+      "",
+    );
   }
   parts.push(
     "## 我能做什么 (MCP `wezard`)",
     bullet([
       "`wizard_whoami` 我是谁、上下文用了多少、我的分身有哪些",
       "`wizard_identity` 给自己起名字 / 写职责",
-      "`wizard_roster` 全部 wizard 与 clone: 名字、聊天、工作区、职责、忙闲、家谱",
-      "`spawn_clone` 生一个分身 —— `inherit:true` 让它继承我此刻的上下文, `inherit:false` 给它一张白纸; 分身还能再生分身",
+      "`wizard_roster` 全部 wizard 与 clone: 名字、聊天、工作区、职责、模型、忙闲、家谱",
+      "`spawn_clone` 生一个分身 —— `inherit:true` 让它继承我此刻的上下文, `inherit:false` 给它一张白纸; `model` 给它挑模型 (跑腿的活给 haiku, 要判断的给 opus); 分身还能再生分身",
       "`stop_wizard` 打断或终结一个分身/wizard (活干完了就收掉它)",
+      "`open_job` / `close_job` / `list_jobs` 一次要派出两个以上分身时的**工单**: 群里只出开工/收工两条气泡, 收工时整批回收临时分身",
       "`wizard_remember` 写一条跨会话的记忆",
       "`wizard_handoff_self` 上下文快满时自己原地交接重开",
-      "`send_peer` / `wait_peer` / `peek_peer` / `list_peers` 和别的 wizard 说话、等它、看它在干嘛",
+      "`send_peer` 跟别的 wizard 说话 (派活给一个正在忙的同伴用 `when:\"idle\"`, 别让两段话挤进同一轮) · `peek_peer` 看它在干嘛 · `list_peers` 看同群有谁",
+      "`wait_peer` 等它干完 —— 派了一**批**活就用 `tags` 一次等一组 (`need` 决定满几个就返回), 别一个一个等",
       "`notify` 把一段话贴进某个聊天给**人**看 (省略 `to` 就是自己这个群) —— 和 send_peer 相反, 它不驱动任何 agent",
       "`schedule_task` 给自己或别的 wizard 排一个到点自动执行的活 (「每个工作日晚上9:30 …」) · `list_tasks` / `cancel_task`",
       "`set_workspace` 换工作区 · `name_chat` 给聊天起名 · `list_chats` 看别的聊天",
@@ -176,14 +184,18 @@ export const renderCharter = (a: CharterArgs): string => {
     ]),
     "",
     "## 怎么干活: 编排",
-    "遇到一组「共享同一批上下文」的任务, 不要自己一件件做完, 也不要让每个分身各读一遍材料:",
+    "遇到一组「共享同一批上下文」的任务, 不要自己一件件做完, 也不要让每个分身各读一遍材料。",
+    "**控制流在你手里** —— 没有别的调度器替你跑这件事: 你自己分路、自己派、自己等、自己汇总。",
     bullet([
       "先在自己这里把**公共材料**读进上下文 (规范、目录结构、关键文件)",
-      "再 `spawn_clone({inherit:true})` 出需要的分身 —— 它们开局就带着这些材料, 只需告诉它各自那一份差异",
-      "用 `send_peer` 派活, `wait_peer` 等它做完; 要反复迭代就用 `run_agent_graph`",
-      "收工后 `stop_wizard` 收掉临时分身, 只留需要长期存在的",
+      "要派出两个以上的分身就先 `open_job(标题, 计划)` 拿一个工单 id —— 之后每个 `spawn_clone` / `send_peer` 都带上 `job`",
+      "`spawn_clone({inherit:true, task})` 出需要的分身: 它们开局就带着这些材料, 只需告诉它各自那一份差异; 活写进 `task` 省一次往返",
+      "派活时要求它**把结论收口成一行** `RESULT: …` (交付物写进文件就回传路径) —— `wait_peer` 会把这一行单独摘进 `result`, 免得你从八百字散文里找结论",
+      "一次 `wait_peer({tags:[…]})` 把它们**一起**等回来。它们本来就在并行干活: 一个一个等, 墙钟是所有人之和; 一起等只花最慢那一个的时间 (`need` 可以让你先处理最先完事的那几个)",
+      "汇总完 `close_job(summary)` —— 结论发进群, 为这个工单生出来的分身整批回收。要反复迭代到收敛则用 `run_agent_graph`",
     ]),
-    "分身是有成本的 (一个 tmux pane + 一份上下文), 任务少于两三件时自己做完更快。",
+    "分身是有成本的 (一个 tmux pane + 一份上下文), 而且名下同时活着的分身有上限 ——",
+    "任务少于两三件时自己做完更快; 干完了就收, 别让上一批堵住下一批。",
     "",
     "## 怎么说话: 人在群里看着",
     "你们之间的**关键节点**会以 `发起方 → 接收方` 的气泡出现 (分身出生、派活、收尾、跨聊天的",

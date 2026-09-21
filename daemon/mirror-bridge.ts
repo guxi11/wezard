@@ -32,6 +32,7 @@ import { isModalPane, isAskqSubmitPage, parseModalOptions, pickModalAnswer, pick
 import type { MirrorStore } from "./mirror-store.js";
 import { hasMirrorAskq, runMirrorAskqFlow, hasMirrorPlan, mootMirrorPlan, runMirrorPlanFlow, hasMirrorPicker, mootMirrorPicker, runMirrorPickerFlow, type PickerPress } from "./approval.js";
 import { isAutoWindowActive } from "./session-cache.js";
+import { noticeSuffixFor } from "./notices.js";
 import { dangerOf } from "./danger.js";
 import { runTmux as runTmuxCmd, spawnTmuxClaude } from "./spawn-tmux.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
@@ -1676,6 +1677,10 @@ export interface AttachArgs {
   /** Cwd the live pane is running in. Persisted so /pwd can show truth and
    *  /clear can detect mismatch. Empty → cfg.wrc.cwd. */
   cwd?: string;
+  /** `--model` the pane was spawned with. `undefined` = carry over from the
+   *  previous binding (a bare /wrc re-attach has no way to know it); `""` =
+   *  explicitly the CLI's default, which is what a fresh `/new` means. */
+  model?: string;
   /** User-requested next cwd (carry-over on re-attach). */
   pendingCwd?: string;
 }
@@ -1804,7 +1809,7 @@ export interface MirrorBridge {
   setCharterProvider: (fn: (target: string) => string) => void;
   /** Hard facts about one session — sessionId, transcript, cwd, backend, pane,
    *  and how full its context window is (prompt tokens of the last turn). */
-  sessionInfo: (target: string) => { sessionId: string; jsonlPath: string; cwd: string; cli: CliBackendName; tmuxPane: string; contextTokens: number } | undefined;
+  sessionInfo: (target: string) => { sessionId: string; jsonlPath: string; cwd: string; cli: CliBackendName; model: string; tmuxPane: string; contextTokens: number } | undefined;
   /** Every target key of `target`'s chat (default + every `#tag`), live or
    *  merely persisted. Sync and cheap — the `peers` probe shells out to tmux,
    *  far too much for answering "is this tag taken". */
@@ -1910,6 +1915,10 @@ interface AttachState {
   /** User-requested next cwd (set via the `set_workspace` MCP tool). Applied at
    *  next /new (or /clear → upgraded to /new). Cleared after the spawn. */
   pendingCwd: string;
+  /** `--model` slug this pane runs on; "" = the CLI's default. Carried into
+   *  every `--resume` respawn, so a wizard put on a model stays on it through
+   *  a pane death — a fresh `/new` is the only thing that resets it. */
+  model: string;
   tail: TailHandle;
   liveStream?: ActiveStream;
   /** Per-attachment FIFO so standalone pushes from the same mirror stay ordered. */
@@ -2762,12 +2771,17 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return p && Date.now() - p.at <= ORIGIN_TTL_MS ? p.origin : undefined;
   };
 
+  // 详情页要按后端的名字称呼它 ("Claude 正在思考" / "CodeBuddy 正在思考") —— 后端
+  // 由 transcript 落盘路径唯一确定, 所以每次开 turn 时现算, 不必额外记在 AttachState 上。
+  const cliOf = (a: AttachState): CliBackendName | undefined =>
+    a.jsonlPath ? backendForPath(a.jsonlPath).name : undefined;
+
   const startBriefTurn = async (a: AttachState, frame: WsFrameHeaders, streamId: string, isSlash = false, userQuery = ""): Promise<void> => {
     const turnId = newTurnId();
     a.queryEpoch = (a.queryEpoch ?? 0) + 1; // WeCom 侧的新一轮同样是 query 边界
     a.turnFromChat = true;                  // 出处确凿: 这一轮有 frame, 群里就是它的主场
     a.pendingFromCli = false;               // 人改从聊天里说话了, 之前那条 CLI 输入不再是出处
-    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cwd: a.runningCwd || undefined, userQuery: userQuery.trim() || undefined, origin: consumeOrigin(a) });
+    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: userQuery.trim() || undefined, origin: consumeOrigin(a) });
     // hardTimer 兜底: turn 若无终句 / turn_end 收口 (卡死/漏收), 到点仍收气泡。
     const bubble: BriefBubble = { frame, streamId, hardTimer: undefined as unknown as NodeJS.Timeout, done: false };
     const q: QueuedTurn = { turnId, bubble, isSlash };
@@ -2811,7 +2825,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const fromCli = a.pendingFromCli === true;
     a.pendingFromCli = false;
     a.turnFromChat = fromCli ? false : a.turnFromChat ?? true;
-    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cwd: a.runningCwd || undefined, userQuery: query || undefined, origin: consumeOrigin(a) });
+    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: query || undefined, origin: consumeOrigin(a) });
     a.briefTurnId = turnId;
     a.briefBubble = undefined;
     a.briefIsSlash = false;
@@ -2962,6 +2976,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         id: turnId,
         target: a.target,
         sessionId: a.sessionId,
+        cli: cliOf(a),
         cwd: a.runningCwd || undefined,
         userQuery: task,
         agent: { id: agentId, type: resolved?.type, description: resolved?.description, parentTurnId: a.briefTurnId },
@@ -3303,7 +3318,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!a.keepaliveTurnId) {
       const turnId = newTurnId();
       a.keepaliveTurnId = turnId;
-      recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, userQuery: text });
+      recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), userQuery: text });
     }
   };
 
@@ -3656,7 +3671,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       ? buildDetailUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, id, principal ? stripPrincipalPrefix(principal) : undefined)
       : "";
 
-  const attach = ({ sessionId, jsonlPath, target: targetOverride, tmuxPane, tmuxSession, cwd, pendingCwd }: AttachArgs): AttachResult => {
+  const attach = ({ sessionId, jsonlPath, target: targetOverride, tmuxPane, tmuxSession, cwd, model, pendingCwd }: AttachArgs): AttachResult => {
     const target = resolveTarget(targetOverride);
     if (!target) return { ok: false, reason: "no target chat (set wrc.mirror.pushChat or defaultChat, or pass target)" };
     // Note: jsonlPath may not exist yet on the auto-spawn path — claude only
@@ -3680,6 +3695,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // otherwise. `undefined` (omitted) → carry from prev (re-attach case);
     // `""` → explicit clear (newSession just consumed it); `"/foo"` → set.
     const carryPending = pendingCwd !== undefined ? pendingCwd : (prevByTarget?.pendingCwd ?? "");
+    // Same carry rule as pendingCwd, and for the same reason: a spawn knows the
+    // model it asked for (possibly "" = CLI default) and says so; a re-attach
+    // onto an already-running pane doesn't, so it keeps what was recorded.
+    const carryModel = model !== undefined ? model.trim() : (prevByTarget?.model ?? deps.store.get(target)?.model ?? "");
     if (prevByTarget) detach(prevByTarget, "target reassigned");
     // Build the attachment first so the tail's onItem closure can capture it.
     const a: AttachState = {
@@ -3693,6 +3712,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // collapsing to cfg.wrc.cwd (which would mislabel /pwd, /clear, /new).
       runningCwd: expandHome(((cwd ?? "").trim()) || readCwdFromJsonl(jsonlPath) || cfg.wrc.cwd),
       pendingCwd: carryPending,
+      model: carryModel,
       tail: { stop: () => undefined, drain: () => undefined, livePath: () => undefined }, // placeholder; replaced below
       standalonePending: Promise.resolve(),
       recentToolSigs: new Map(),
@@ -3729,6 +3749,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       tmuxSession: a.tmuxSession || undefined,
       tmuxPane: a.tmuxPane || undefined,
       cwd: a.runningCwd || undefined,
+      model: a.model || undefined,
       pendingCwd: a.pendingCwd || undefined,
       keepaliveOff: prevRec?.keepaliveOff,
       keepaliveOffAt: prevRec?.keepaliveOffAt,
@@ -3865,6 +3886,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       tmuxPane: livePane,
       tmuxSession: rec.tmuxSession ?? "",
       cwd: rec.cwd,
+      model: rec.model,
       pendingCwd: rec.pendingCwd,
     });
     if (!r.ok) {
@@ -4449,6 +4471,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       cwd: r.cwd,
       // Explicit "" clears any carried-over pending — it has just been applied.
       pendingCwd: "",
+      // Likewise explicit: `/new` starts a NEW session, so an unnamed model
+      // means this CLI's default, not the dead pane's model.
+      model: opts?.model?.trim() ?? "",
     });
     if (!att.ok) return { ok: false, reason: att.reason };
     // 首条注入吃冷时序(injectText 走 /mirror/spawn 时已经硬编码 freshSpawn:true,
@@ -4600,6 +4625,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       tmuxSession: r.tmuxSession,
       cwd: r.cwd,
       pendingCwd: "",
+      model: args.model?.trim() ?? "",
     });
     if (!att.ok) return { ok: false, reason: att.reason, inherited: false };
     const spawned = byTarget.get(args.target);
@@ -4617,7 +4643,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   };
 
   /** 一个会话此刻的硬事实 —— whoami / 交接判断要用的那几个数。 */
-  const sessionInfo = (target: string): { sessionId: string; jsonlPath: string; cwd: string; cli: CliBackendName; tmuxPane: string; contextTokens: number } | undefined => {
+  const sessionInfo = (target: string): { sessionId: string; jsonlPath: string; cwd: string; cli: CliBackendName; model: string; tmuxPane: string; contextTokens: number } | undefined => {
     const a = byTarget.get(target);
     const rec = a ? undefined : deps.store.get(target);
     const sessionId = a?.sessionId ?? rec?.sessionId ?? "";
@@ -4628,6 +4654,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       jsonlPath,
       cwd: a?.runningCwd || rec?.cwd || "",
       cli: backendForPath(jsonlPath).name,
+      model: a?.model || rec?.model || "",
       tmuxPane: a?.tmuxPane ?? rec?.tmuxPane ?? "",
       contextTokens: lastContextTokens(jsonlPath),
     };
@@ -4759,7 +4786,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       return {
         ok: false,
         reason: `chat '${chat}' has no ${t ? `'#${t}'` : "default"} session — create it with new_claude_session({ chat: '${chat}'${t ? `, tag: '${t}'` : ""}, cwd })`,
-        candidates: allTargets().filter((k) => basePrincipalOf(k) === c.base),
+        // 候选给**地址**而不是裸 key —— 这份清单存在的意义就是让调用方照着改一个
+        // 能用的串; 隔壁两个分支早就这么做了, 只有这一条漏掉。
+        candidates: allTargets().filter((k) => basePrincipalOf(k) === c.base).map((k) => peerAddress(cfg, self, k)),
       };
     }
     const local = keyOf(basePrincipalOf(self), t);
@@ -4869,6 +4898,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       jsonlPath,
       cwd: a?.runningCwd || rec?.cwd || expandedDefaultCwd,
       cli: jsonlPath ? backendForPath(jsonlPath).name : (activeBackends()[0]?.name ?? "claude"),
+      model: a?.model || rec?.model || "",
       tmuxPane: pane,
       attached: !!a,
       paneAlive,
@@ -4997,7 +5027,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!a.keepaliveTurnId) {
       const turnId = newTurnId();
       a.keepaliveTurnId = turnId;
-      recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, userQuery: text });
+      recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), userQuery: text });
     }
   };
 
@@ -5364,10 +5394,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (!text.trim()) return { ok: false, reason: "empty text" };
       // 出处改写要早于 inject: tail 可能在 promise resolve 之前就开出 turn。
       if (opts?.fromChat) a.turnFromChat = true;
+      // 名册增量搭这趟车进去 —— 同伴派活 / 定时任务 / graph 步骤都走这里, 所以
+      // 一个从不被人直接说话的分身也能知道群里多了谁、少了谁。人说的话那一条
+      // 路径在 inbound.send 上挂 (dispatch 有自己的 inject)。
+      const full = text + noticeSuffixFor(target, text);
       // Pre-record so the tail's user-line emission is suppressed by the
       // recentInjects dedupe (otherwise the user sees their own demo prompt
       // echoed back as a quoted bubble).
-      rememberInject(text);
+      rememberInject(full);
       // 印章要早于 inject 落地 —— tail 是独立轮询的, 它可能在 inject 的 promise
       // resolve 之前就看到 user 行并开出 turn, 那时归因必须已经在位。
       if (origin) a.pendingOrigin = { origin, at: Date.now() };
@@ -5378,12 +5412,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // Same resume-fork hazard as dispatch: snapshot before spawn, re-bind
         // onto the forked jsonl once it appears (EOF offset — fork is seeded).
         const resumeBaseline = listJsonls(dirname(a.jsonlPath));
-        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: tagOfTarget(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, systemPrompt: charterFor(target) });
+        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: tagOfTarget(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, model: a.model || undefined, systemPrompt: charterFor(target) });
         if (!r.ok || !r.tmuxPane) return { ok: false, reason: `respawn failed: ${r.reason ?? "unknown"}` };
         a.tmuxPane = r.tmuxPane;
         a.tmuxSession = r.tmuxSession ?? a.tmuxSession;
         if (r.cwd) a.runningCwd = r.cwd;
-        deps.store.set(target, { sessionId: sid, jsonlPath: a.jsonlPath, tmuxSession: a.tmuxSession, tmuxPane: a.tmuxPane, cwd: a.runningCwd || undefined, pendingCwd: a.pendingCwd || undefined });
+        deps.store.set(target, { sessionId: sid, jsonlPath: a.jsonlPath, tmuxSession: a.tmuxSession, tmuxPane: a.tmuxPane, cwd: a.runningCwd || undefined, model: a.model || undefined, pendingCwd: a.pendingCwd || undefined });
         startMigrationWatcher(a, resumeBaseline, (p) => firstUserUuid(p) !== undefined);
       }
       // freshSpawn: true — the pane was just minted by /mirror/spawn, the TUI
@@ -5392,7 +5426,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       a.muteUntilInject = false;
       a.justSpawned = false;
       const r = await inject({
-        text, images: [], cfg, log: log.child({ principal: target, sessionId: sid, sub: "init-demo" }),
+        text: full, images: [], cfg, log: log.child({ principal: target, sessionId: sid, sub: "init-demo" }),
         sessionId: sid, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn: true,
       });
       return r;
@@ -5710,7 +5744,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           const resumeBaseline = !armMigration ? listJsonls(dirname(a.jsonlPath)) : undefined;
           // Respawn in the binding's runningCwd (pendingCwd doesn't apply to a
           // mid-turn reincarnation — only /new and /clear-with-pending swap cwd).
-          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: tagOfTarget(a.target) || a.target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, systemPrompt: charterFor(a.target) });
+          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: tagOfTarget(a.target) || a.target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, model: a.model || undefined, systemPrompt: charterFor(a.target) });
           if (r.ok && r.tmuxPane && r.tmuxSession) {
             a.tmuxPane = r.tmuxPane;
             a.tmuxSession = r.tmuxSession;
@@ -5722,6 +5756,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
               tmuxSession: a.tmuxSession,
               tmuxPane: a.tmuxPane,
               cwd: a.runningCwd || undefined,
+              model: a.model || undefined,
               pendingCwd: a.pendingCwd || undefined,
             });
             log.info({ target: a.target, sessionId: sid, newPane: a.tmuxPane, newSession: a.tmuxSession }, "mirror: tmux respawned");
