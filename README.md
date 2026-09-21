@@ -268,17 +268,17 @@ sequenceDiagram
     participant W as 发起的 wizard
     participant K as 分身 ×5
 
-    W->>W: 先把公共材料读进自己的上下文
+    Note over W,K: 先把公共材料读进发起方自己的上下文
     W->>U: 📋 开工 open_job(标题, 计划)
     loop 每一路
         W->>K: spawn_clone({inherit:true, task, job})
-        Note right of K: fork 父上下文<br/>材料不必重读<br/>要求一行 RESULT: 收口
+        Note over W,K: fork 父上下文，材料不必重读；派活时要求一行 RESULT: 收口
     end
-    Note over K: 五个分身并行干活<br/>过程落在各自的 chat 详情页
+    Note over W,K: 五个分身并行干活，过程落在各自的 chat 详情页
     W->>K: wait_peer({tags:[…], need})
     K-->>W: 各自的 RESULT: 行
     W->>U: 📋 收工 close_job(汇总)
-    Note over W,K: 为这个工单生出来的分身整批回收<br/>被拉来帮忙的长期 wizard 不在其列
+    Note over W,K: 为这个工单生出来的分身整批回收，被拉来帮忙的长期 wizard 不在其列
 ```
 
 每一步存在的理由：
