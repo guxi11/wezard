@@ -19,6 +19,8 @@ import type { WSClient, WsFrame, WsFrameHeaders, EventMessageWith, TemplateCard,
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
 import { expandHome, sanitizeId } from "../shared/paths.js";
+import { augmentedPath } from "../shared/exec-path.js";
+import { sleep, truncateWithCount } from "../shared/std.js";
 import {
   activeBackends,
   backendForPath,
@@ -34,7 +36,7 @@ import { hasMirrorAskq, runMirrorAskqFlow, hasMirrorPlan, mootMirrorPlan, runMir
 import { isAutoWindowActive } from "./session-cache.js";
 import { noticeSuffixFor } from "./notices.js";
 import { dangerOf } from "./danger.js";
-import { runTmux as runTmuxCmd, spawnTmuxClaude } from "./spawn-tmux.js";
+import { runTmux, spawnTmuxClaude } from "./spawn-tmux.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
 import { recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, buildDetailUrl, buildChatUrl } from "./detail.js";
 import type { CtxCut, TurnOrigin, TurnUsage } from "./detail.js";
@@ -46,24 +48,6 @@ import { stripAnsi, compactPane, paneIsBusy, paneIsStalled, transcriptStalled, s
 
 // Same PATH augmentation logic as cc-bridge: launchd / systemd start the daemon
 // with a stripped PATH that often lacks nvm / homebrew, breaking spawn(claudeBin).
-const NODE_BIN_DIR = dirname(process.execPath);
-const augmentedPath = (orig: string | undefined): string => {
-  const extras = [
-    NODE_BIN_DIR,
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    `${process.env.HOME ?? ""}/.local/bin`,
-  ].filter(Boolean);
-  const seen = new Set<string>();
-  return [orig ?? "", ...extras]
-    .flatMap((p) => p.split(":"))
-    .filter((p) => {
-      if (!p || seen.has(p)) return false;
-      seen.add(p);
-      return true;
-    })
-    .join(":");
-};
 
 // Backend resolution is per-transcript, not global: `backendForPath` recovers
 // which CLI wrote a jsonl from its projects root, so claude / claude-internal /
@@ -362,18 +346,6 @@ const stripPrincipalPrefix = (s: string): string => {
   return h >= 0 ? rest.slice(0, h) : rest;
 };
 
-// Extract the `#tag` suffix from a target key, "" if untagged.
-const tagOfTarget = tagOfKey;
-
-// Drop the `#tag` suffix — collapses tagged session keys to the chat-scoped
-// base principal. Shared with the peer/graph layer via session-label.
-const basePrincipalOf = baseOfKey;
-
-// Prefix outbound content with `<emoji> #tag` header (blank line separator)
-// when the target carries a `#tag` suffix. Untagged targets pass through
-// unchanged — default session keeps its plain-bubble UX.
-const withSessionTag = withTagHeader;
-
 // Claude Code wraps slash-command invocations into the user message as
 //   <command-message>name</command-message>
 //   <command-name>/name</command-name>
@@ -435,8 +407,6 @@ const cleanUserText = (raw: string): string => {
   return stripped;
 };
 
-const truncate = (s: string, max: number): string =>
-  s.length <= max ? s : `${s.slice(0, max)}…(+${s.length - max})`;
 
 // 后台子agent 完成通知的无标签形态 —— codebuddy 平台在子agent 跑完后注入
 // `[Framework Auto-Notification] <agent> completed` 的纯文本 user 行 (不套
@@ -480,7 +450,7 @@ const textSimilarity = (x: string, y: string): number => {
 const renderToolInput = (input: unknown): string => {
   try {
     const json = JSON.stringify(input ?? {}, null, 0);
-    return truncate(json, 600);
+    return truncateWithCount(json, 600);
   } catch {
     return "{}";
   }
@@ -558,7 +528,7 @@ type RenderItem =
 
 const oneLineSummary = (s: string, max = 40): string => {
   const flat = s.replace(/\s+/g, " ").trim();
-  return truncate(flat, max);
+  return truncateWithCount(flat, max);
 };
 
 // WeCom's markdown sanitizer strips HTML-like `<...>` runs even inside inline
@@ -707,7 +677,7 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
         const raw = extractToolResultText(b);
         if (!raw) continue;
         const toolUseId = b.tool_use_id ?? "";
-        const full = truncate(raw, DETAIL_RESULT_MAX);
+        const full = truncateWithCount(raw, DETAIL_RESULT_MAX);
         // 始终把完整 result 落 detail 库 + 作为 tool_result item 发出 — 与
         // includeToolResults(气泡推送开关)彻底解耦: 关掉气泡时 detail 页与 brief
         // turn 页(handleBriefItem 消费本 item 写 turn store)都仍要看到 result。
@@ -866,8 +836,6 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
 
 // Block-wise packing (shared/md-chunk): never cuts mid-line, and never cuts a
 // fenced block or table in a way that breaks rendering — see splitMarkdown.
-const splitChunks = splitMarkdown;
-
 // Room reserved in every chunk for the `emoji \`#tag\` \`2/5\`` header line
 // (up to ~110 bytes in its linked `[🧙 #tag](url)` form).
 const TAG_HEADER_BUDGET = 64;
@@ -1036,10 +1004,6 @@ interface InjectArgs {
 // exactly one place where the hard timeout lives. (Two hand-rolled copies used
 // to exist here; both could hang forever, which is how a wedged tmux server
 // silently killed a whole chat. See TMUX_TIMEOUT_MS.)
-const tmuxRun = (args: string[], opts?: { stdin?: string }): Promise<{ ok: boolean; stdout: string; stderr: string; code: number | null }> =>
-  runTmuxCmd(args, opts);
-
-const sleepMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // Stable JSON: sort object keys recursively. Used to fingerprint a tool_use's
 // `input` so the hook-side and the jsonl-side compute the same signature even
@@ -1164,7 +1128,7 @@ const setMacClipboardImage = async (imgPath: string): Promise<{ ok: boolean; rea
 // the input box and would otherwise re-trigger the fingerprint, falsely
 // flagging "Enter not honored".
 const capturePaneTail = async (target: string, rows = 12): Promise<string> => {
-  const r = await tmuxRun(["capture-pane", "-t", target, "-p", "-S", `-${rows}`]);
+  const r = await runTmux(["capture-pane", "-t", target, "-p", "-S", `-${rows}`]);
   return r.ok ? r.stdout : "";
 };
 
@@ -1245,7 +1209,7 @@ const MODAL_SCAN_ROWS = 15;
 // `screen` = 实际参与判定的那一屏文本, 一并返回给调用方做选项解析 —— 再 capture
 // 一次会拿到"下一瞬间"的屏幕, 与 verdict 不同源(框可能已被本地按掉), 按键就按错了。
 const detectModalPicker = async (target: string): Promise<ModalPaneVerdict & { screen: string }> => {
-  const r = await tmuxRun(["capture-pane", "-t", target, "-p"]);
+  const r = await runTmux(["capture-pane", "-t", target, "-p"]);
   if (!r.ok) return { modal: false, screen: "" };
   const lines = r.stdout.replace(/\s+$/u, "").split("\n");
   const screen = lines.slice(-MODAL_SCAN_ROWS).join("\n");
@@ -1267,22 +1231,22 @@ const pressModalIndex = async (
   before: ModalPaneVerdict & { screen: string },
   index: number,
 ): Promise<ModalPaneVerdict & { screen: string }> => {
-  await tmuxRun(["send-keys", "-t", pane, String(index)]);
-  await sleepMs(MODAL_PRESS_SETTLE_MS);
+  await runTmux(["send-keys", "-t", pane, String(index)]);
+  await sleep(MODAL_PRESS_SETTLE_MS);
   let after = await detectModalPicker(pane);
   if (!after.modal || after.title !== before.title) return after;
   // 数字键没关掉框: 把高亮挪到目标项。guard 上限盖过任何确认框的选项数。
   for (let guard = 0; guard < 8; guard++) {
     const cur = highlightedIndex(after.screen);
     if (cur === undefined || cur === index) break;
-    await tmuxRun(["send-keys", "-t", pane, cur < index ? "Down" : "Up"]);
-    await sleepMs(MODAL_ARROW_SETTLE_MS);
+    await runTmux(["send-keys", "-t", pane, cur < index ? "Down" : "Up"]);
+    await sleep(MODAL_ARROW_SETTLE_MS);
     after = await detectModalPicker(pane);
     if (!after.modal || after.title !== before.title) return after;
   }
   if (highlightedIndex(after.screen) !== index) return after; // 核不准, 绝不盲按
-  await tmuxRun(["send-keys", "-t", pane, "Enter"]);
-  await sleepMs(MODAL_PRESS_SETTLE_MS);
+  await runTmux(["send-keys", "-t", pane, "Enter"]);
+  await sleep(MODAL_PRESS_SETTLE_MS);
   return detectModalPicker(pane);
 };
 
@@ -1304,7 +1268,7 @@ const confirmAskqSubmit = async (
   paneAlive: () => Promise<boolean>,
 ): Promise<{ ok: boolean; reason?: string }> => {
   const capture = async (): Promise<string> => {
-    const r = await tmuxRun(["capture-pane", "-t", target, "-p"]);
+    const r = await runTmux(["capture-pane", "-t", target, "-p"]);
     return r.ok ? r.stdout.replace(/\s+$/u, "") : "";
   };
   // 轮询到 pred 为真; 期间 pane 死了立即失败。
@@ -1314,10 +1278,10 @@ const confirmAskqSubmit = async (
       if (!(await paneAlive())) return false;
       if (pred(await capture())) return true;
       if (Date.now() - t0 >= timeoutMs) return false;
-      await sleepMs(ASKQ_CONFIRM_POLL_MS);
+      await sleep(ASKQ_CONFIRM_POLL_MS);
     }
   };
-  const sendKey = (key: string) => tmuxRun(["send-keys", "-t", target, key]);
+  const sendKey = (key: string) => runTmux(["send-keys", "-t", target, key]);
 
   for (let attempt = 0; attempt < ASKQ_CONFIRM_ENTERS; attempt++) {
     if (!(await paneAlive())) return { ok: false, reason: "pane_dead" };
@@ -1336,7 +1300,7 @@ const confirmAskqSubmit = async (
     // Submit 行, 再 Enter 收工。
     const d = await sendKey("Down");
     if (!d.ok) return { ok: false, reason: `send-keys Down: ${d.stderr.slice(-200) || d.code}` };
-    await sleepMs(ASKQ_CONFIRM_POLL_MS); // 等光标移动重绘
+    await sleep(ASKQ_CONFIRM_POLL_MS); // 等光标移动重绘
     const e = await sendKey("Enter");
     if (!e.ok) return { ok: false, reason: `send-keys Enter: ${e.stderr.slice(-200) || e.code}` };
     if (await pollUntil((p) => !isModalPane(p).modal, ASKQ_CONFIRM_STAGE_MS)) return { ok: true };
@@ -1364,14 +1328,51 @@ const fingerprints = (text: string): { headFp: string; tailFp: string } => {
   return { headFp: stripped.slice(0, 8), tailFp: stripped.slice(-8) };
 };
 
+// 输入框本体 = 两条 ruler 之间那几行, 首行以 `❯ `/`> ` 打头:
+//
+//   ────────────────────────
+//   ❯ [Pasted text #1 +5 lines]
+//   ────────────────────────
+//     <cwd>            <status>
+//
+// 读整块、跟「贴之前」的快照比对, 判据就与文本内容无关了 —— 这恰恰是指纹法的
+// 盲区: Claude Code 把多行粘贴折叠成 `[Pasted text #N +M lines]`, headFp/tailFp
+// 双双不在屏上, 于是「没贴进去」被误判 → 盲目重贴 → 两份提示叠在一个输入框里
+// (实测第三次粘贴渲染成 `…OMEGATAIL[Pasted text #2 +5 lines]`)。同一个盲区也让
+// 回车后的「框清空了吗」永远立刻为真, 等于根本没校验过提交。
+const BOX_RULER_RE = /^[\u2500-\u257F\u2014-]{8,}\s*$/u;
+const BOX_PROMPT_RE = /^\s*[❯>]\s?/u;
+/** 底 ruler 之下只该剩 cwd/模式两行状态; 多于此说明框到的不是输入框。 */
+const BOX_FOOTER_ROWS = 6;
+
+export interface InputBox {
+  /** 布局没认出来 (非 Claude Code 系 TUI / 被模态框顶掉) —— 调用方须退回指纹法。 */
+  known: boolean;
+  body: string;
+}
+const UNKNOWN_BOX: InputBox = { known: false, body: "" };
+
+export const parseInputBox = (cap: string): InputBox => {
+  const lines = cap.split("\n");
+  while (lines.length && lines[lines.length - 1]!.trim() === "") lines.pop();
+  const rulers = lines.reduce<number[]>((acc, l, i) => (BOX_RULER_RE.test(l) ? [...acc, i] : acc), []);
+  const bottom = rulers[rulers.length - 1];
+  const top = rulers[rulers.length - 2];
+  if (top === undefined || bottom === undefined || bottom - top < 1) return UNKNOWN_BOX;
+  if (lines.length - bottom > BOX_FOOTER_ROWS) return UNKNOWN_BOX;
+  const rows = lines.slice(top + 1, bottom);
+  if (!rows.length || !BOX_PROMPT_RE.test(rows[0]!)) return UNKNOWN_BOX;
+  const body = [rows[0]!.replace(BOX_PROMPT_RE, ""), ...rows.slice(1)].join("\n").replace(/[\s\u200b\ufeff]+/gu, " ").trim();
+  return { known: true, body };
+};
+
+// 24 行足够容纳展开后的多行粘贴 (折叠态只占一行)。
+const readInputBox = async (target: string): Promise<InputBox> => parseInputBox(await capturePaneTail(target, 24));
+
 // Self-verifying inject. The cold-spawn race we guard against: paste lands
 // but the trailing Enter is eaten while the TUI is still initializing, so
-// the prompt sits typed-but-unsent. Strategy:
-//   1. paste; wide-window poll for headFp → paste reached the input box.
-//   2. settle; send Enter.
-//   3. narrow-window poll (last 5 rows = just the input box, NOT the echo
-//      above) for tailFp absence → submit was honored.
-//   4. on stuck-after-Enter, retry Enter once with extra settle.
+// the prompt sits typed-but-unsent. 校验策略见 injectViaTmuxText —— 以输入框
+// 整块为判据, 粘贴只在「确凿看见框仍是空的」时才重来。
 const injectViaTmux = async (target: string, text: string, images: string[], log: Logger, freshSpawn: boolean, backendName: CliBackendName, bypassModalGuard = false): Promise<{ ok: boolean; reason?: string; uncertain?: boolean }> => {
   log.info({ target, len: text.length, images: images.length, freshSpawn, backendName }, "mirror inject (tmux)");
 
@@ -1421,9 +1422,9 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
       log.warn({ imgPath, reason: cb.reason }, "mirror inject: clipboard set failed, skipping image");
       continue;
     }
-    const cv = await tmuxRun(["send-keys", "-t", target, "C-v"]);
+    const cv = await runTmux(["send-keys", "-t", target, "C-v"]);
     if (!cv.ok) return { ok: false, reason: `tmux send-keys C-v failed: ${cv.stderr.slice(-200)}` };
-    await sleepMs(IMG_SETTLE_MS);
+    await sleep(IMG_SETTLE_MS);
   }
 
   // Image-only message: TUI input box now holds the attached images; press
@@ -1431,7 +1432,7 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
   // image refs, not text).
   if (!text) {
     if (images.length === 0) return { ok: true };
-    const e = await tmuxRun(["send-keys", "-t", target, "Enter"]);
+    const e = await runTmux(["send-keys", "-t", target, "Enter"]);
     return e.ok ? { ok: true } : { ok: false, reason: `tmux send-keys Enter failed: ${e.stderr.slice(-200)}` };
   }
 
@@ -1440,6 +1441,13 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
 
 // 文本 paste + Enter 提交 + 自校验。从 injectViaTmux 抽出来，让 codebuddy
 // 后端的 @<path> 回退路径也能复用同样的 paste-verify 逻辑。
+//
+// 两个判据都以**输入框整块**为准 (parseInputBox), 指纹只是认不出布局时的退路:
+//   1. 贴完轮询「框变了」→ 粘贴已被 TUI 消化 (折叠成占位符也算)。这是个**正**
+//      信号, 只有确凿看见框仍是贴之前的样子才重贴 —— 存疑一律不重贴, 多贴一次
+//      的代价 (两份提示叠进同一个输入框) 远高于少贴一次。
+//   2. 回车后轮询「框回到贴之前的样子」→ 提交被吃下了。框认得出来时这条判据可
+//      信, 于是允许多补一次回车 (空框上的回车在 CLI 里是 no-op)。
 const injectViaTmuxText = async (target: string, text: string, log: Logger, freshSpawn: boolean): Promise<{ ok: boolean; reason?: string; uncertain?: boolean }> => {
   // Warm pane: tight timings, low latency. Fresh spawn (claude --resume just
   // started, transcript still loading): extended timings — bracketed-paste
@@ -1451,12 +1459,25 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   const CLEARED_TIMEOUT_MS = freshSpawn ? 4000 : 1500;
   const RETRY_SETTLE_MS = freshSpawn ? 1500 : 800;
 
+  const { headFp, tailFp } = fingerprints(text);
+  const POLL_MS = 100;
+  const stripWs = (s: string): string => s.replace(/\s+/gu, "");
+
+  // 贴之前框里是什么: 空框、幽灵提示 (`Try "how do I log an error?"`)、甚至用户
+  // 自己敲了一半的字 —— 一律作为基线, 免得去维护一张「哪些文案算空」的清单。
+  const preBox = await readInputBox(target);
+  // 基线读不出来 (框被模态顶掉 / 正在重绘) 就整条退回指纹法: 没有基线,「框变了」
+  // 无从谈起, 而把幽灵提示 (`Try "…"`) 误当成「贴进去了」会让这条消息静静消失。
+  const boxVerify = preBox.known;
+  /** 框里还是贴之前那样 (或彻底空了) = 我们的文本不在框里。 */
+  const boxIntact = (b: InputBox): boolean => boxVerify && b.known && (b.body === "" || b.body === preBox.body);
+
   const loadAndPaste = async (): Promise<{ ok: boolean; reason?: string }> => {
     // stdin variant of the shared exec path — it carries the same hard timeout,
     // which a hand-rolled spawn here did not.
-    const loaded = await tmuxRun(["load-buffer", "-"], { stdin: text });
+    const loaded = await runTmux(["load-buffer", "-"], { stdin: text });
     if (!loaded.ok) return { ok: false, reason: `tmux load-buffer failed: ${loaded.stderr.slice(-200) || loaded.code}` };
-    const pasted = await tmuxRun(["paste-buffer", "-p", "-d", "-t", target]);
+    const pasted = await runTmux(["paste-buffer", "-p", "-d", "-t", target]);
     if (!pasted.ok) return { ok: false, reason: `tmux paste-buffer failed: ${pasted.stderr.slice(-200)}` };
     return { ok: true };
   };
@@ -1464,99 +1485,88 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   let r = await loadAndPaste();
   if (!r.ok) return r;
 
-  const { headFp, tailFp } = fingerprints(text);
-  const POLL_MS = 100;
-  const stripWs = (s: string): string => s.replace(/\s+/gu, "");
-
-  // Wide window catches a wrapped paste's head whether it's row -3 or row -10.
-  const sawHead = async (timeoutMs: number): Promise<boolean> => {
+  // 框认得出来 → 看它变没变; 认不出来 → 退回宽窗口找 headFp (长文本会换行,
+  // 头部可能在框顶, 所以窗口要宽)。
+  const sawLanded = async (timeoutMs: number): Promise<boolean> => {
     const t0 = Date.now();
     while (Date.now() - t0 < timeoutMs) {
-      const pane = await capturePaneTail(target, 12);
-      if (headFp && stripWs(pane).includes(headFp)) return true;
-      await sleepMs(POLL_MS);
+      const cap = await capturePaneTail(target, 24);
+      const box = parseInputBox(cap);
+      if (boxVerify && box.known ? !boxIntact(box) : Boolean(headFp) && stripWs(cap).includes(headFp)) return true;
+      await sleep(POLL_MS);
     }
     return false;
   };
 
-  // Narrow window = just the input box. tailFp is the chars next to the
-  // cursor, so it's always inside this window pre-submit and gone post-submit.
+  // 窄窗口 = 只有输入框本身。tailFp 紧挨光标, 提交前必在窗内、提交后消失。
+  // 仅用于 parseInputBox 认不出布局的后端。
   const inputBoxStillHasTail = async (): Promise<boolean> => {
     const pane = await capturePaneTail(target, 5);
     return Boolean(tailFp) && stripWs(pane).includes(tailFp);
   };
 
-  let pasteSeen = await sawHead(PASTE_VERIFY_MS);
+  let pasteSeen = await sawLanded(PASTE_VERIFY_MS);
   if (!pasteSeen) {
-    // headFp not seen — but on a cold fresh-spawn the TUI can render the paste
-    // just outside our capture window / after our budget, so `sawHead` yields a
-    // FALSE negative even though the text is sitting in the input box. Blindly
-    // re-pasting then stacks a SECOND copy → the classic doubled prompt. Guard:
-    // re-paste only if the box genuinely lacks our tail; otherwise the first
-    // paste landed and we just proceed to submit.
-    if (await inputBoxStillHasTail()) {
-      log.warn({ target, headFp }, "mirror inject: headFp not seen but tail present in box — first paste landed, skipping re-paste");
+    const box = await readInputBox(target);
+    const empty = boxVerify && box.known ? boxIntact(box) : !(await inputBoxStillHasTail());
+    if (!empty) {
+      log.warn({ target, headFp, boxKnown: box.known }, "mirror inject: 粘贴未验证但输入框非空 — 首次粘贴已落地, 不重贴");
       pasteSeen = true;
     } else {
-      log.warn({ target, headFp }, "mirror inject: paste headFp not seen, re-pasting");
-      await sleepMs(RETRY_SETTLE_MS);
+      log.warn({ target, headFp, boxKnown: box.known }, "mirror inject: 输入框确认为空, 重贴一次");
+      await sleep(RETRY_SETTLE_MS);
       r = await loadAndPaste();
       if (!r.ok) return r;
-      pasteSeen = await sawHead(PASTE_VERIFY_MS);
+      pasteSeen = await sawLanded(PASTE_VERIFY_MS);
     }
   }
 
   // Bracketed-paste end + TUI catch-up. Warm pane: 400ms is invisible.
   // Fresh respawn: 1500ms+ — claude --resume is still loading the transcript.
-  await sleepMs(pasteSeen ? POST_PASTE_SETTLE_MS : POST_PASTE_SETTLE_FALLBACK_MS);
+  await sleep(pasteSeen ? POST_PASTE_SETTLE_MS : POST_PASTE_SETTLE_FALLBACK_MS);
 
   const sendEnter = async (): Promise<{ ok: boolean; reason?: string }> => {
-    const e = await tmuxRun(["send-keys", "-t", target, "Enter"]);
+    const e = await runTmux(["send-keys", "-t", target, "Enter"]);
     return e.ok ? { ok: true } : { ok: false, reason: `tmux send-keys failed: ${e.stderr.slice(-200)}` };
+  };
+  const cleared = async (): Promise<boolean> => {
+    const box = await readInputBox(target);
+    return boxVerify && box.known ? boxIntact(box) : !(await inputBoxStillHasTail());
   };
   const waitForCleared = async (timeoutMs: number): Promise<boolean> => {
     const t0 = Date.now();
     while (Date.now() - t0 < timeoutMs) {
-      await sleepMs(POLL_MS);
-      if (!(await inputBoxStillHasTail())) return true;
+      await sleep(POLL_MS);
+      if (await cleared()) return true;
     }
     return false;
   };
 
-  const e1 = await sendEnter();
-  if (!e1.ok) return e1;
   if (!pasteSeen) log.warn({ target }, "mirror inject: submitted without paste verification (capture-pane lag)");
-  if (!tailFp) return { ok: true }; // empty/whitespace text — nothing to verify
+  if (!tailFp) {
+    // empty/whitespace text — nothing to verify, fire once and go.
+    const e = await sendEnter();
+    return e.ok ? { ok: true } : e;
+  }
 
-  if (await waitForCleared(CLEARED_TIMEOUT_MS)) return { ok: true };
+  // 回车可能被冷启动中的 TUI 吞掉 (框里躺着没提交的提示)。框认得出来时判据可信,
+  // 多补一次; 认不出来时维持原来的「只补一次」, 免得判据出错往真实对话里灌回车。
+  const boxTrusted = boxVerify && (await readInputBox(target)).known;
+  const attempts = boxTrusted ? 3 : 2;
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0) {
+      log.warn({ target, tailFp, attempt: i + 1 }, "mirror inject: 回车后输入框未清空, 再补一次");
+      await sleep(RETRY_SETTLE_MS);
+    }
+    const e = await sendEnter();
+    if (!e.ok) return e;
+    if (await waitForCleared(CLEARED_TIMEOUT_MS)) return { ok: true };
+  }
 
-  // Input box still holds our tail — Enter was eaten (cold TUI) or the
-  // bracketed-paste end hadn't been processed yet. One retry with extra
-  // settle. We keep this to ONE retry to bound damage if our cleared-check
-  // is wrong (would otherwise spam Enters into a real conversation).
-  log.warn({ target, tailFp }, "mirror inject: input box still has text after Enter, retrying once");
-  await sleepMs(RETRY_SETTLE_MS);
-  const e2 = await sendEnter();
-  if (!e2.ok) return e2;
-  if (await waitForCleared(CLEARED_TIMEOUT_MS)) return { ok: true };
-
-  // freshSpawn fallback: claude --resume can take longer than our budget to
-  // process bracketed-paste end. The Enter was sent twice; if it lands later,
-  // claude will process the prompt and the user gets their reply. Trust it
-  // rather than reporting a hard failure that the user actually got served.
-  //
-  // Warm-pane path also trusts: in practice tmux Enter is reliable once the
-  // pane exists, and the verifier has structural false-positive risk —
-  // tailFp (last 8 non-ws chars) can match the echo line directly above the
-  // input box when it falls within the 5-row capture window. Surfacing
-  // `[mirror] ✗` to the user when the prompt actually landed is worse than
-  // accepting an extra no-op Enter on the rare true-stuck case.
-  log.warn({ target, tailFp, freshSpawn }, "mirror inject: clear not observed, trusting submit");
-  // Input box still held our text after two Enters. Usually the prompt landed
-  // late (verifier false-positive), but it can also mean the target session is
-  // busy / not consuming input (e.g. running a long task, or context full) —
-  // the user's message would then silently go nowhere. Flag it uncertain so the
-  // caller can hint the user, without reporting a hard failure.
+  // 补到头还没清空。通常是渲染滞后 (回车其实落了), 但也可能是目标会话正忙 /
+  // 上下文满了不消费输入 —— 那样用户这条消息会悄无声息地消失。不报硬失败 (用户
+  // 多半已经被服务到了), 标 uncertain 让调用方按需提示。
+  log.warn({ target, tailFp, freshSpawn, boxTrusted }, "mirror inject: clear not observed, trusting submit");
   return { ok: true, uncertain: true, reason: "目标会话可能正忙或未消费输入(回车后输入框未清空)" };
 };
 
@@ -2242,7 +2252,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   const detailCardFor = (s: ActiveStream, target: string): TemplateCard | undefined => {
     if (s.tools.length === 0) return undefined;
-    const tag = tagOfTarget(target);
+    const tag = tagOfKey(target);
     const titlePrefix = tag ? `${labelFor(tag)} #${tag} · ` : "";
     return {
       card_type: "button_interaction" as const,
@@ -2259,7 +2269,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const content = s.acc;
     s.lastSent = content;
     try {
-      await client.replyStream(s.frame, s.streamId, withSessionTag(s.target, content || " "), false);
+      await client.replyStream(s.frame, s.streamId, withTagHeader(s.target, content || " "), false);
       log.debug({ turnId: s.turnId, len: content.length }, "stream flush ok");
     } catch (e) {
       log.warn({ turnId: s.turnId, err: (e as Error).message }, "stream flush failed; marking dead");
@@ -2327,7 +2337,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // Standalone fallback (no live stream / stream dead). Per-attachment FIFO so
   // pushes from a single mirror stay ordered; different mirrors run in parallel.
   // Linked tag prefix: emoji+tag becomes a chat-detail link. Falls back to
-  // plain withSessionTag when no turnId is available (no active turn to link).
+  // plain withTagHeader when no turnId is available (no active turn to link).
   const linkedTagPrefix = (target: string, turnId: string | undefined): string => {
     if (!turnId) return "";
     const url = buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, turnId, stripPrincipalPrefix(target));
@@ -2341,7 +2351,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const seqBit = seq ? ` ${seq}` : "";
       return `${prefix}${seqBit}${headSep(content)}${content}`;
     }
-    return withSessionTag(a.target, content, seq);
+    return withTagHeader(a.target, content, seq);
   };
 
   // 空正文一票否决 (近源拦截): 剥掉可能存在的路由头 (`🦊 #tag` / `[🧙](url)`)
@@ -2353,7 +2363,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const sendStandalone = (a: AttachState, content: string): void => {
     if (!hasVisibleBody(content)) return;
     const chatId = stripPrincipalPrefix(a.target);
-    const pieces = splitChunks(content, Math.max(200, cfg.wrc.mirror.chunkBytes - TAG_HEADER_BUDGET));
+    const pieces = splitMarkdown(content, Math.max(200, cfg.wrc.mirror.chunkBytes - TAG_HEADER_BUDGET));
     const chunks = pieces.map((p, i) =>
       withLinkedTag(a, p, pieces.length > 1 ? `${i + 1}/${pieces.length}` : undefined));
     a.standalonePending = a.standalonePending
@@ -2369,7 +2379,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       .catch(() => undefined);
   };
 
-  // Like sendStandalone but skips withSessionTag — content already contains the tag header (e.g. as a link).
+  // Like sendStandalone but skips withTagHeader — content already contains the tag header (e.g. as a link).
   const sendRaw = (a: AttachState, content: string): void => {
     if (!hasVisibleBody(content)) return;
     const chatId = stripPrincipalPrefix(a.target);
@@ -2562,7 +2572,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // sees the bubble; subsequent items grow it as today.
       void (async () => {
         try {
-          await client.replyStream(frame, streamId, withSessionTag(a.target, "…"), false);
+          await client.replyStream(frame, streamId, withTagHeader(a.target, "…"), false);
         } catch (e) {
           log.warn({ sessionId: a.sessionId, err: (e as Error).message }, "stream initial ack failed");
         }
@@ -2710,7 +2720,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     cfg.wrc.mirror.brief && cfg.wrc.mirror.chatOriginOnly && a.turnFromChat === false;
 
   // 收口一条 loading 气泡: finish=true 写入最终内容, 只生效一次。发送失败退回 standalone。
-  // raw=true skips withSessionTag (used when content already contains the linked tag header).
+  // raw=true skips withTagHeader (used when content already contains the linked tag header).
   // WeCom 客户端收到 finish=true 后仍有打字机动画要播放, 如果紧接着就下发
   // standalone (sendMessage), 用户会看到 standalone 抢在气泡动画结束之前出现。
   // 把 finishBubble 的 replyStream promise 链入 standalonePending, 让后续
@@ -3465,7 +3475,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
             sendKey: async (key) => {
               if (!a.tmuxPane) return { ok: false, reason: "no_live_pane" };
               if (!(await tmuxPaneAlive(a.tmuxPane))) return { ok: false, reason: "pane_dead" };
-              const r = await tmuxRun(["send-keys", "-t", a.tmuxPane, key]);
+              const r = await runTmux(["send-keys", "-t", a.tmuxPane, key]);
               return r.code === 0 ? { ok: true } : { ok: false, reason: `send-keys ${key} failed: ${r.stdout.slice(-200) || r.code}` };
             },
           });
@@ -3512,12 +3522,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
                   if (!r.ok) return r;
                 } else {
                   for (const key of act.keys) {
-                    const r = await tmuxRun(["send-keys", "-t", a.tmuxPane!, key]);
+                    const r = await runTmux(["send-keys", "-t", a.tmuxPane!, key]);
                     if (r.code !== 0) return { ok: false, reason: `send-keys ${key}: ${r.stdout.slice(-200) || r.code}` };
-                    await sleepMs(120); // 键间距 — 等 TUI 重渲染, 防吞键
+                    await sleep(120); // 键间距 — 等 TUI 重渲染, 防吞键
                   }
                 }
-                await sleepMs(300); // 题间/阶段间隔 — 等面板翻页
+                await sleep(300); // 题间/阶段间隔 — 等面板翻页
               }
               return { ok: true };
             },
@@ -3769,7 +3779,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // the session name, which matters because /wrc attaches capture only $TMUX_PANE.
   const tmuxPaneAlive = async (paneId: string): Promise<boolean> => {
     if (!paneId) return false;
-    const r = await tmuxRun(["display-message", "-p", "-t", paneId, "#{pane_id}"]);
+    const r = await runTmux(["display-message", "-p", "-t", paneId, "#{pane_id}"]);
     return r.code === 0 && r.stdout.trim() === paneId;
   };
 
@@ -3858,7 +3868,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // is silently detached; that detached chat then never mirrors again. Runs at
     // boot; the 3s drift follower maintains it thereafter.
     if (livePane) {
-      const cwdRes = await tmuxRun(["display-message", "-p", "-t", livePane, "#{pane_current_path}"]);
+      const cwdRes = await runTmux(["display-message", "-p", "-t", livePane, "#{pane_current_path}"]);
       const paneCwd = cwdRes.stdout.trim();
       if (paneCwd) {
         // Encode under the backend that owns the bound transcript — comparing
@@ -3945,11 +3955,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           })();
       const result = t.result ?? "(no result captured)";
       parts.push(
-        `### ${i}. 🔧 ${t.name}\n\n**input**\n\`\`\`json\n${truncate(inputJson, 4000)}\n\`\`\`\n\n**result**\n\`\`\`\n${truncate(result, 4000)}\n\`\`\``,
+        `### ${i}. 🔧 ${t.name}\n\n**input**\n\`\`\`json\n${truncateWithCount(inputJson, 4000)}\n\`\`\`\n\n**result**\n\`\`\`\n${truncateWithCount(result, 4000)}\n\`\`\``,
       );
     }
     const merged = parts.join("\n\n---\n\n");
-    return splitChunks(merged, Math.max(200, cfg.wrc.mirror.chunkBytes - TAG_HEADER_BUDGET));
+    return splitMarkdown(merged, Math.max(200, cfg.wrc.mirror.chunkBytes - TAG_HEADER_BUDGET));
   };
 
   const resolveToolDetail = (turnId: string): { target: string; markdown: string[] } | undefined => {
@@ -4266,7 +4276,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // Guard 1+2: pane must be alive AND still in the bound project dir. One
       // display-message gives both — it fails on a dead pane, and its cwd tells
       // us whether the pane still belongs here.
-      const r = await tmuxRun(["display-message", "-p", "-t", a.tmuxPane, "#{pane_current_path}"]);
+      const r = await runTmux(["display-message", "-p", "-t", a.tmuxPane, "#{pane_current_path}"]);
       if (stopped) return;
       const paneCwd = r.code === 0 ? r.stdout.trim() : "";
       if (!paneCwd) { a.migrationWatcher = undefined; return; } // pane gone → dead-pane path owns it
@@ -4326,7 +4336,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     try {
       const attachments = Array.from(byTarget.values()).filter((a) => a.tmuxPane);
       if (attachments.length === 0) return;
-      const r = await tmuxRun(["list-panes", "-a", "-F", "#{pane_id}\t#{pane_current_path}"]);
+      const r = await runTmux(["list-panes", "-a", "-F", "#{pane_id}\t#{pane_current_path}"]);
       if (r.code !== 0) return;
       const paneCwd = new Map<string, string>();
       for (const line of r.stdout.split("\n")) {
@@ -4378,7 +4388,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // Send via plain sendMessage so the user still gets the info.
     const chatId = stripPrincipalPrefix(target);
     void client
-      .sendMessage(chatId, { msgtype: "markdown", markdown: { content: withSessionTag(target, md) } })
+      .sendMessage(chatId, { msgtype: "markdown", markdown: { content: withTagHeader(target, md) } })
       .catch((e: unknown) => log.warn({ err: (e as Error).message, target }, "pushProjectInfo (no attach) failed"));
   };
 
@@ -4388,7 +4398,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // own `runningCwd` (the tmux pane's actual working dir at spawn time), but
   // cwd fallbacks and `set_workspace` pendingCwd writes always resolve against the base.
   const chatCwdFallback = (target: string): { pending: string; running: string } => {
-    const base = basePrincipalOf(target);
+    const base = baseOfKey(target);
     const baseA = byTarget.get(base);
     const baseRec = deps.store.get(base);
     return {
@@ -4443,13 +4453,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // is chat-scoped like cwd — a FIRST `/new #tag` has no record of its own,
     // so it falls back to the base session's binding instead of `defaultCli`
     // (otherwise a tagged sibling silently forks onto a different CLI).
-    const base = basePrincipalOf(target);
+    const base = baseOfKey(target);
     const baseBound = base === target ? undefined : byTarget.get(base)?.jsonlPath ?? deps.store.get(base)?.jsonlPath;
     const boundPath = prev?.jsonlPath ?? rec?.jsonlPath ?? baseBound;
     const effCli = cli ?? (boundPath ? backendForPath(expandHome(boundPath)).name : undefined);
     if (prev?.tmuxPane) {
       // Best-effort kill; ignore errors (pane may already be dead).
-      void tmuxRun(["kill-pane", "-t", prev.tmuxPane]);
+      void runTmux(["kill-pane", "-t", prev.tmuxPane]);
     }
     if (prev) detach(prev, "/new respawn");
     const r = await spawnTmuxClaude({
@@ -4548,7 +4558,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         .sort((x, y) => mtimeOf(y.path) - mtimeOf(x.path));
       const hit = born[0];
       if (hit) return { sessionId: hit.n.replace(/\.jsonl$/, ""), jsonlPath: hit.path };
-      await sleepMs(FORK_POLL_MS);
+      await sleep(FORK_POLL_MS);
     }
     return undefined;
   };
@@ -4606,7 +4616,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       tmuxTarget: r.tmuxPane, freshSpawn: true,
     });
     if (!boot.ok) {
-      await tmuxRun(["kill-pane", "-t", r.tmuxPane ?? ""]);
+      await runTmux(["kill-pane", "-t", r.tmuxPane ?? ""]);
       return { ok: false, reason: `分身开场白注入失败: ${boot.reason ?? "unknown"}`, inherited: false };
     }
     const fork = await awaitFork(projectDir, baseline, sidsClaimedByOthers(args.target));
@@ -4614,7 +4624,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 同一个会话 (attach 也会正当地拒绝)。留一个孤儿 pane 比留一条错绑更好收拾 ——
     // 所以连 pane 一起杀掉, 调用方拿到的是一个干净的失败。
     if (!fork) {
-      await tmuxRun(["kill-pane", "-t", r.tmuxPane ?? ""]);
+      await runTmux(["kill-pane", "-t", r.tmuxPane ?? ""]);
       return { ok: false, reason: "分身没能在超时内分叉出自己的会话 (CLI 可能不支持 --fork-session)", inherited: false };
     }
     const att = attach({
@@ -4685,7 +4695,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!trimmed) return { ok: false, reason: "empty cwd", runningCwd: "", pendingCwd: "" };
     const expanded = expandHome(trimmed);
     if (!expanded.startsWith("/")) return { ok: false, reason: "cwd must be absolute (or start with ~)", runningCwd: "", pendingCwd: "" };
-    const base = basePrincipalOf(target);
+    const base = baseOfKey(target);
     const callerA = byTarget.get(target);
     const callerRunning = callerA?.runningCwd?.trim() || deps.store.get(target)?.cwd?.trim() || expandedDefaultCwd;
     const baseA = byTarget.get(base);
@@ -4744,8 +4754,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return Array.from(keys).sort();
   };
   const chatTargets = (target: string): string[] => {
-    const base = basePrincipalOf(target);
-    return allTargets().filter((k) => basePrincipalOf(k) === base);
+    const base = baseOfKey(target);
+    return allTargets().filter((k) => baseOfKey(k) === base);
   };
 
   // 名字解析:`daily` / `chat:wrxxx` → base principal。认不出就把已知名字一并回给
@@ -4781,21 +4791,21 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (!c.ok) return c;
       const target = keyOf(c.base, t);
       if (allTargets().includes(target)) {
-        return { ok: true, target, foreign: c.base !== basePrincipalOf(self) };
+        return { ok: true, target, foreign: c.base !== baseOfKey(self) };
       }
       return {
         ok: false,
         reason: `chat '${chat}' has no ${t ? `'#${t}'` : "default"} session — create it with new_claude_session({ chat: '${chat}'${t ? `, tag: '${t}'` : ""}, cwd })`,
         // 候选给**地址**而不是裸 key —— 这份清单存在的意义就是让调用方照着改一个
         // 能用的串; 隔壁两个分支早就这么做了, 只有这一条漏掉。
-        candidates: allTargets().filter((k) => basePrincipalOf(k) === c.base).map((k) => peerAddress(cfg, self, k)),
+        candidates: allTargets().filter((k) => baseOfKey(k) === c.base).map((k) => peerAddress(cfg, self, k)),
       };
     }
-    const local = keyOf(basePrincipalOf(self), t);
+    const local = keyOf(baseOfKey(self), t);
     if (!t) return { ok: true, target: local, foreign: false };
     const all = allTargets();
     if (all.includes(local)) return { ok: true, target: local, foreign: false };
-    const foreignMatches = all.filter((k) => tagOfKey(k) === t && basePrincipalOf(k) !== basePrincipalOf(self));
+    const foreignMatches = all.filter((k) => tagOfKey(k) === t && baseOfKey(k) !== baseOfKey(self));
     if (foreignMatches.length === 1) return { ok: true, target: foreignMatches[0]!, foreign: true };
     if (foreignMatches.length === 0) {
       // 裸 token 正好是个 chat 名字 —— 用户/agent 想说的是"那个群",不是"那个 tag"。
@@ -4805,7 +4815,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         return {
           ok: false,
           reason: `'${t}' is a CHAT, not a tag — address one of its sessions, e.g. '${t}#' for its default`,
-          candidates: allTargets().filter((k) => basePrincipalOf(k) === asChat).map((k) => peerAddress(cfg, self, k)),
+          candidates: allTargets().filter((k) => baseOfKey(k) === asChat).map((k) => peerAddress(cfg, self, k)),
         };
       }
       return { ok: false, reason: `no peer with tag '#${t}' — create one with new_claude_session, or address it in full as 'chatName#${t}' (list_chats shows the names)` };
@@ -4822,14 +4832,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const chatRoster = (self: string): Array<{ base: string; name: string; self: boolean; targets: string[] }> => {
     const bases = new Set([
       ...listChatNames(cfg).map((c) => c.base),
-      ...allTargets().map(basePrincipalOf),
-      basePrincipalOf(self),
+      ...allTargets().map(baseOfKey),
+      baseOfKey(self),
     ]);
     return [...bases].filter(Boolean).sort().map((base) => ({
       base,
       name: chatNameOf(cfg, base),
-      self: base === basePrincipalOf(self),
-      targets: allTargets().filter((k) => basePrincipalOf(k) === base),
+      self: base === baseOfKey(self),
+      targets: allTargets().filter((k) => baseOfKey(k) === base),
     }));
   };
 
@@ -4885,7 +4895,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const jsonlPath = jsonlOf(t);
     const pane = paneOf(t);
     const paneAlive = pane ? await tmuxPaneAlive(pane) : false;
-    const tag = tagOfTarget(t);
+    const tag = tagOfKey(t);
     let lastActivity = 0;
     try { if (jsonlPath) lastActivity = statSync(jsonlPath).mtimeMs; } catch { /* not written yet */ }
     return {
@@ -4919,8 +4929,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // `daily#fix` 命中)。后者是命名带来的新增量:同名 tag 不再互相遮蔽,想被找到
   // 只要给群起个名,不必回去改别人的 tag。
   const foreignPeers = async (self: string): Promise<PeerInfo[]> => {
-    const selfBase = basePrincipalOf(self);
-    const foreign = allTargets().filter((k) => tagOfKey(k) && basePrincipalOf(k) !== selfBase);
+    const selfBase = baseOfKey(self);
+    const foreign = allTargets().filter((k) => tagOfKey(k) && baseOfKey(k) !== selfBase);
     const tagCount = foreign.reduce(
       (acc, k) => acc.set(tagOfKey(k), (acc.get(tagOfKey(k)) ?? 0) + 1),
       new Map<string, number>(),
@@ -5222,8 +5232,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       return { ok: false, reason: `当前确认框已是另一个调用（${now.toolName}），不代按` };
     }
     if (what === "no") {
-      await tmuxRun(["send-keys", "-t", a.tmuxPane, "Escape"]);
-      await sleepMs(MODAL_PRESS_SETTLE_MS);
+      await runTmux(["send-keys", "-t", a.tmuxPane, "Escape"]);
+      await sleep(MODAL_PRESS_SETTLE_MS);
       const after = await detectModalPicker(a.tmuxPane);
       return after.modal ? { ok: false, reason: "Escape 后确认框仍在" } : { ok: true, label: "Escape" };
     }
@@ -5338,7 +5348,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           try { a.tail.drain(); } catch (e) { log.warn({ sessionId, err: (e as Error).message }, "flushBeforeCard tail drain failed"); }
           if (a.recentToolSigs.has(expectSig)) break;
           polls++;
-          await sleepMs(50);
+          await sleep(50);
         }
         if (!a.recentToolSigs.has(expectSig)) {
           log.warn({ sessionId, polls, toolName: expect?.toolName }, "flushBeforeCard wait timed out — sending card without sig confirm");
@@ -5412,7 +5422,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // Same resume-fork hazard as dispatch: snapshot before spawn, re-bind
         // onto the forked jsonl once it appears (EOF offset — fork is seeded).
         const resumeBaseline = listJsonls(dirname(a.jsonlPath));
-        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: tagOfTarget(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, model: a.model || undefined, systemPrompt: charterFor(target) });
+        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: tagOfKey(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, model: a.model || undefined, systemPrompt: charterFor(target) });
         if (!r.ok || !r.tmuxPane) return { ok: false, reason: `respawn failed: ${r.reason ?? "unknown"}` };
         a.tmuxPane = r.tmuxPane;
         a.tmuxSession = r.tmuxSession ?? a.tmuxSession;
@@ -5467,7 +5477,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       } else if (!(await tmuxPaneAlive(a.tmuxPane))) {
         escReason = "tmux pane no longer alive";
       } else {
-        const r = await tmuxRun(["send-keys", "-t", a.tmuxPane, "Escape"]);
+        const r = await runTmux(["send-keys", "-t", a.tmuxPane, "Escape"]);
         escOk = r.ok;
         if (!r.ok) escReason = `send-keys Escape failed: ${(r.stderr || r.stdout).slice(-200) || r.code}`;
       }
@@ -5489,9 +5499,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (pane && (await tmuxPaneAlive(pane))) {
         // Esc first, like /stop: a mid-generation CLI gets a beat to unwind and
         // flush its transcript before the TTY is yanked out from under it.
-        await tmuxRun(["send-keys", "-t", pane, "Escape"]);
-        await sleepMs(250);
-        const r = await tmuxRun(["kill-pane", "-t", pane]);
+        await runTmux(["send-keys", "-t", pane, "Escape"]);
+        await sleep(250);
+        const r = await runTmux(["kill-pane", "-t", pane]);
         if (r.code !== 0) return { ok: false, reason: `kill-pane failed: ${r.stdout.slice(-200) || r.code}` };
       }
       if (a) detach(a, "/kill");
@@ -5509,7 +5519,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (!a.tmuxPane) return { ok: false, reason: "no live tmux pane (spawn-mode attachment)" };
       const alive = await tmuxPaneAlive(a.tmuxPane);
       if (!alive) return { ok: false, reason: "tmux pane no longer alive" };
-      const r = await tmuxRun(["send-keys", "-t", a.tmuxPane, "Enter"]);
+      const r = await runTmux(["send-keys", "-t", a.tmuxPane, "Enter"]);
       if (r.code !== 0) return { ok: false, reason: `send-keys Enter failed: ${r.stdout.slice(-200) || r.code}` };
       log.info({ target, sessionId: a.sessionId, pane: a.tmuxPane }, "mirror /n — Enter sent to pane");
       return { ok: true };
@@ -5524,9 +5534,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // switching a client that sits on an unrelated session would yank the
       // user's other terminal window into wezard. Most-recently-active wins —
       // switch-client with no -c is ambiguous under multiple clients.
-      const s = await tmuxRun(["display-message", "-p", "-t", pane, "#{session_name}"]);
+      const s = await runTmux(["display-message", "-p", "-t", pane, "#{session_name}"]);
       const sess = s.stdout.trim() || cfg.wrc.tmuxPrefix;
-      const clients = await tmuxRun(["list-clients", "-t", sess, "-F", "#{client_activity} #{client_name}"]);
+      const clients = await runTmux(["list-clients", "-t", sess, "-F", "#{client_activity} #{client_name}"]);
       const best = clients.stdout.split("\n").filter(Boolean)
         .map((l) => { const i = l.indexOf(" "); return { act: Number(l.slice(0, i)), name: l.slice(i + 1) }; })
         .sort((x, y) => y.act - x.act)[0]?.name;
@@ -5535,7 +5545,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         return { ok: false, reason: `没有 attach 到 \`${sess}\` 的 tmux 客户端。先在终端执行: \`tmux attach -t ${sess}\`` };
       }
       // A pane target pulls session + window selection along with it.
-      const r = await tmuxRun(["switch-client", "-c", best, "-t", pane]);
+      const r = await runTmux(["switch-client", "-c", best, "-t", pane]);
       if (r.code !== 0) return { ok: false, reason: `switch-client failed: ${r.stdout.slice(-200) || r.code}` };
       log.info({ target, pane, client: best }, "mirror /reveal — tmux client switched");
       return { ok: true };
@@ -5553,7 +5563,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const deadline = Date.now() + Math.max(0, opts.waitMs);
       let v = await detectModalPicker(pane);
       while (!v.modal && Date.now() < deadline) {
-        await sleepMs(POLL_MS);
+        await sleep(POLL_MS);
         v = await detectModalPicker(pane);
       }
       // 没等到: 这次 CC 没弹框(会话内已授权过 / 命中盲点判断失误)。无事可做。
@@ -5607,7 +5617,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           await client.replyStream(
             frame,
             streamId,
-            withSessionTag(principal, "[wezard] wecom remote control not attached — run `/wrc` inside the target Claude session"),
+            withTagHeader(principal, "[wezard] wecom remote control not attached — run `/wrc` inside the target Claude session"),
             true,
           );
         } catch {
@@ -5651,10 +5661,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         log.info({ target: a.target, runningCwd: a.runningCwd, pendingCwd: pending }, "/clear upgraded to /new (cwd switch)");
         // Prefer the tag suffix as tmux window name when present (matches
         // /new #tag behavior), fall back to the full target for untagged.
-        const tag = tagOfTarget(a.target);
+        const tag = tagOfKey(a.target);
         const r = await newSession(a.target, tag || a.target);
         if (!r.ok) {
-          try { await client.replyStream(frame, streamId, withSessionTag(a.target, `[mirror] 切换失败: ${r.reason ?? "unknown"}`), true); } catch { /* ignore */ }
+          try { await client.replyStream(frame, streamId, withTagHeader(a.target, `[mirror] 切换失败: ${r.reason ?? "unknown"}`), true); } catch { /* ignore */ }
         }
         return;
       }
@@ -5702,7 +5712,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (s) {
         a.liveStream = s;
         try {
-          await client.replyStream(frame, streamId, withSessionTag(a.target, "…"), false);
+          await client.replyStream(frame, streamId, withTagHeader(a.target, "…"), false);
         } catch (e) {
           log.warn({ sessionId: a.sessionId, err: (e as Error).message }, "stream initial ack failed");
         }
@@ -5744,7 +5754,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           const resumeBaseline = !armMigration ? listJsonls(dirname(a.jsonlPath)) : undefined;
           // Respawn in the binding's runningCwd (pendingCwd doesn't apply to a
           // mid-turn reincarnation — only /new and /clear-with-pending swap cwd).
-          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: tagOfTarget(a.target) || a.target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, model: a.model || undefined, systemPrompt: charterFor(a.target) });
+          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: tagOfKey(a.target) || a.target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, model: a.model || undefined, systemPrompt: charterFor(a.target) });
           if (r.ok && r.tmuxPane && r.tmuxSession) {
             a.tmuxPane = r.tmuxPane;
             a.tmuxSession = r.tmuxSession;
@@ -5809,7 +5819,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           } else if (armMigration) {
             // /clear path has no live stream — surface failure as a one-shot
             // terse reply ("clean" per project convention).
-            try { await client.replyStream(frame, streamId, withSessionTag(a.target, "clean"), true); } catch { /* ignore */ }
+            try { await client.replyStream(frame, streamId, withTagHeader(a.target, "clean"), true); } catch { /* ignore */ }
           } else {
             // Deferred path: tear down outbound, surface error as standalone.
             // promote* may have already cleared the slot if a tail item raced
@@ -5847,8 +5857,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // "Set model to …" as <local-command-stdout> — the tail mirrors that
         // back to the chat as a ⚙️ bubble, which IS the readback.
         if (isModelSwitch && a.tmuxPane) {
-          await sleepMs(1000);
-          const e = await tmuxRun(["send-keys", "-t", a.tmuxPane, "Enter"]);
+          await sleep(1000);
+          const e = await runTmux(["send-keys", "-t", a.tmuxPane, "Enter"]);
           if (e.code !== 0) log.warn({ pane: a.tmuxPane, reason: e.stdout.slice(-200) || e.code }, "/model confirm Enter failed — user can send /n manually");
         }
         // /clear was just injected — claude rotates sessionId on the next user
@@ -5897,7 +5907,7 @@ export const installMirrorEventListener = (
       const n = detail.markdown.length;
       for (const [i, md] of detail.markdown.entries()) {
         try {
-          const content = withSessionTag(detail.target, md, n > 1 ? `${i + 1}/${n}` : undefined);
+          const content = withTagHeader(detail.target, md, n > 1 ? `${i + 1}/${n}` : undefined);
           await client.sendMessage(chatId, { msgtype: "markdown", markdown: { content } });
         } catch (e) {
           log.warn({ err: (e as Error).message, turnId }, "tool detail push failed");
