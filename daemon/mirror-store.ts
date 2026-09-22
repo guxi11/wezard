@@ -31,6 +31,11 @@ export interface MirrorAttachment {
    *  gating the busy-resume grace across restarts. */
   keepaliveOff?: boolean;
   keepaliveOffAt?: number;
+  /** Sticky per-session opt-out, set at spawn time (`spawn_clone` /
+   *  `new_claude_session`'s `keepalive:false`). Unlike `keepaliveOff` this
+   *  never auto-resumes on real activity — the session was deliberately
+   *  created as a disposable worker that shouldn't be kept warm. */
+  keepaliveDisabled?: boolean;
 }
 
 export type MirrorStore = JsonMap<MirrorAttachment>;

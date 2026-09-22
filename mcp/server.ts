@@ -354,15 +354,20 @@ server.registerTool(
         .string()
         .optional()
         .describe("这个 wizard 跑在哪个模型上 (`--model` 的 slug, 如 'opus' / 'sonnet' / 'haiku')。省略用该 CLI 的默认。同一个聊天里的 wizard 可以各跑各的模型 —— 又长又要判断的活给 opus, 跑腿的 lint/grep 给 haiku。"),
+      keepalive: z
+        .boolean()
+        .optional()
+        .describe("这个 wizard 要不要被 keepalive 心跳保温 (空闲时定期 ping 一下防 prompt cache 过期)。false = 永远不保温, 省下那份 ping 的钱 —— 适合跑腿一次就收工的临时会话; true = 明确要保温。省略则按 daemon 配置的默认值。"),
     },
   },
-  async ({ cwd, tag, chat, cli, model }) =>
+  async ({ cwd, tag, chat, cli, model, keepalive }) =>
     unwrap("new_claude_session", await daemonPost("/sessions/new", {
       cwd,
       ...(tag ? { tag } : {}),
       ...(chat ? { chat } : {}),
       ...(cli ? { cli } : {}),
       ...(model ? { model } : {}),
+      ...(keepalive !== undefined ? { keepalive } : {}),
     })),
 );
 
@@ -751,9 +756,13 @@ server.registerTool(
         .string()
         .optional()
         .describe("把这个分身归到某个工单名下 (open_job 给的 id)。归了工单的分身出生/派活不再逐条出气泡 —— 五路 fan-out 就是十条交叉气泡, 人读不出结构; 它们攒到 close_job 那一条里一起交代, 过程照旧在各自的详情页。close_job 还会把它们整批回收掉。"),
+      keepalive: z
+        .boolean()
+        .optional()
+        .describe("这个分身要不要被 keepalive 心跳保温 (空闲时定期 ping 一下防 prompt cache 过期)。false = 永远不保温, 省下那份 ping 的钱 —— 适合跑腿一次就收工的临时分身; true = 明确要保温 —— 适合会长期挂着、随时可能被叫醒接手的分身。省略则按 daemon 配置的默认值。"),
     },
   },
-  async ({ inherit, description, tag, task, cwd, chat, cli, model, job }) =>
+  async ({ inherit, description, tag, task, cwd, chat, cli, model, job, keepalive }) =>
     unwrap("spawn_clone", await daemonPost("/wizard/clone", {
       inherit,
       description,
@@ -764,6 +773,7 @@ server.registerTool(
       ...(chat ? { chat } : {}),
       ...(cli ? { cli } : {}),
       ...(model ? { model } : {}),
+      ...(keepalive !== undefined ? { keepalive } : {}),
     })),
 );
 

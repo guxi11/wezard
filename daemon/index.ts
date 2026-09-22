@@ -371,7 +371,7 @@ const main = async (): Promise<void> => {
     // `chat:wr…` id nobody can read is how you strand a session in a group the
     // caller has no business in.
     http.register("POST /sessions/new", async (req, res) => {
-      const body = (await readBody(req)) as Partial<{ cwd: string; tag: string; chat: string; target: string; sessionId: string; tmuxPane: string; cli: CliBackendName; model: string }>;
+      const body = (await readBody(req)) as Partial<{ cwd: string; tag: string; chat: string; target: string; sessionId: string; tmuxPane: string; cli: CliBackendName; model: string; keepalive: boolean }>;
       const cwd = (body.cwd ?? "").toString().trim();
       if (!cwd) {
         json(res, 400, { ok: false, reason: "cwd required" });
@@ -404,9 +404,11 @@ const main = async (): Promise<void> => {
       const tag = asked || uniqueTag(tagFromCwd(cwd) || "peer", taken);
       const target = keyOf(base, tag);
       const model = (body.model ?? "").toString().trim();
-      log.child({ mod: "mirror", sub: "sessions-new", target }).info({ self, cwd, foreign, cli: body.cli, model }, "spawning peer session");
-      const r = await m.newSession(target, tag, body.cli, { cwd, model });
-      if (r.ok) postRoster(base, [target, self], `新 wizard **#${tag}** 就位 · 地址 \`${peerAddress(cfg, base, target)}\`${r.cwd ? ` · 工作区 ${r.cwd}` : ""}${model ? ` · 模型 ${model}` : ""} —— 空白起步, 由 ${displayName(self)} 造的`);
+      // 没点名就按配置的 keepalive.spawnDefault 来 —— 调用方明说的永远优先。
+      const keepalive = typeof body.keepalive === "boolean" ? body.keepalive : cfg.wrc.mirror.keepalive.spawnDefault;
+      log.child({ mod: "mirror", sub: "sessions-new", target }).info({ self, cwd, foreign, cli: body.cli, model, keepalive }, "spawning peer session");
+      const r = await m.newSession(target, tag, body.cli, { cwd, model, keepalive });
+      if (r.ok) postRoster(base, [target, self], `新 wizard **#${tag}** 就位 · 地址 \`${peerAddress(cfg, base, target)}\`${r.cwd ? ` · 工作区 ${r.cwd}` : ""}${model ? ` · 模型 ${model}` : ""}${keepalive ? "" : " · 已关闭 keepalive"} —— 空白起步, 由 ${displayName(self)} 造的`);
       json(res, r.ok ? 200 : 500, r.ok
         ? {
             ok: true,
@@ -418,6 +420,7 @@ const main = async (): Promise<void> => {
             cwd: r.cwd,
             ...(model ? { model } : {}),
             foreign,
+            keepalive,
             // 调用方之后拿这个串 send_peer / peek_peer 驱动它。
             address: peerAddress(cfg, self, target),
           }
@@ -1177,7 +1180,7 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/clone", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { tag?: string; description?: string; inherit?: boolean; cwd?: string; chat?: string; cli?: CliBackendName; model?: string; task?: string; job?: string };
+      const b = body as { tag?: string; description?: string; inherit?: boolean; cwd?: string; chat?: string; cli?: CliBackendName; model?: string; task?: string; job?: string; keepalive?: boolean };
       // 工单先验: 生完分身才发现工单号打错了, 那个分身就成了没人认领的孤儿。
       const jobId = (b.job ?? "").trim();
       if (jobId) {
@@ -1254,6 +1257,8 @@ const main = async (): Promise<void> => {
       });
       const charter = charterFor(target, { parent: self, inherited: inherit });
       const task = (b.task ?? "").toString().trim();
+      // 没点名就按配置的 keepalive.spawnDefault 来 —— 调用方明说的永远优先。
+      const keepalive = typeof b.keepalive === "boolean" ? b.keepalive : cfg.wrc.mirror.keepalive.spawnDefault;
       const r = await m.cloneSession({
         parent: self,
         target,
@@ -1266,6 +1271,7 @@ const main = async (): Promise<void> => {
         // 继承路径上第一句话是分叉的触发器, 所以直接把活当开场白 —— 少一次往返,
         // 也少一次"就位了但没事干"的空转。
         bootstrap: task || undefined,
+        keepalive,
       });
       if (!r.ok) {
         wizards.drop(target);
@@ -1280,7 +1286,7 @@ const main = async (): Promise<void> => {
       // 中间过程照旧在各自的 chat 详情页。同理不惊动同群的其他 wizard。
       if (!jobId) {
         notifyChat(base, withTagHeader(target, `已就位 · ${r.inherited ? `${displayName(self)} 的分身 (继承了它的上下文)` : "全新 wizard (空白上下文)"}${kid.description ? ` · ${kid.description}` : ""}`));
-        postRoster(base, [target, self], `新 wizard **${kid.name || tag}** 就位 · 地址 \`${peerAddress(cfg, base, target)}\`${kid.description ? ` · ${kid.description}` : ""}${r.cwd ? ` · 工作区 ${r.cwd}` : ""}${b.model?.trim() ? ` · 模型 ${b.model.trim()}` : ""} —— ${displayName(self)} 的分身${r.inherited ? " (继承了它的上下文)" : ""}`);
+        postRoster(base, [target, self], `新 wizard **${kid.name || tag}** 就位 · 地址 \`${peerAddress(cfg, base, target)}\`${kid.description ? ` · ${kid.description}` : ""}${r.cwd ? ` · 工作区 ${r.cwd}` : ""}${b.model?.trim() ? ` · 模型 ${b.model.trim()}` : ""}${keepalive ? "" : " · 已关闭 keepalive"} —— ${displayName(self)} 的分身${r.inherited ? " (继承了它的上下文)" : ""}`);
       }
       // 派活在群里留一条 (它是关键节点)。继承路径上活已经随开场白进去了, 空白分身
       // 才需要在这里补一次注入。
@@ -1291,7 +1297,7 @@ const main = async (): Promise<void> => {
       }
       if (jobId) jobs.attach(jobId, { target, task, spawned: true });
       else if (dispatched) relayPeer(self, target, task);
-      json(res, 200, { ok: true, target, tag, address: peerAddress(cfg, self, target), name: kid.name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, ...(jobId ? { job: jobId } : {}) });
+      json(res, 200, { ok: true, target, tag, address: peerAddress(cfg, self, target), name: kid.name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, keepalive, ...(jobId ? { job: jobId } : {}) });
     });
 
     // 收掉一个 wizard。interrupt = 打断它这一轮 (Esc); end = 结束它并回收 pane。

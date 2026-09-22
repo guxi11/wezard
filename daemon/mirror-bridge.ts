@@ -1707,6 +1707,9 @@ export interface AttachArgs {
   model?: string;
   /** User-requested next cwd (carry-over on re-attach). */
   pendingCwd?: string;
+  /** Sticky prompt-cache keepalive opt-out. `undefined` = carry over from the
+   *  previous binding (same rule as `model`); `false`/`true` = explicit set. */
+  keepaliveDisabled?: boolean;
 }
 
 export interface AttachResult {
@@ -1819,13 +1822,13 @@ export interface MirrorBridge {
   /** Detach + respawn a target's pane in `cfg.wrc.cwd` or its pendingCwd
    *  override. Used by /new to give the user a fresh claude in the bound
    *  project. Returns the new attachment result. */
-  newSession: (target: string, windowName?: string, cli?: CliBackendName, opts?: { model?: string; cwd?: string; silent?: boolean; systemPrompt?: string }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string }>;
+  newSession: (target: string, windowName?: string, cli?: CliBackendName, opts?: { model?: string; cwd?: string; silent?: boolean; systemPrompt?: string; keepalive?: boolean }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string }>;
   /** Spawn `target` as a CLONE of `parent`: a fresh pane launched with
    *  `--resume <parent sid>`, which the CLI forks — the child starts holding
    *  everything the parent had read, the parent is untouched. `inherit: false`
    *  (or a different cwd, which `--resume` cannot honor) degrades to a plain
    *  `newSession`; the reply says which happened via `inherited`. */
-  cloneSession: (args: { parent: string; target: string; windowName?: string; cli?: CliBackendName; model?: string; cwd?: string; systemPrompt?: string; inherit?: boolean; bootstrap?: string }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; inherited: boolean }>;
+  cloneSession: (args: { parent: string; target: string; windowName?: string; cli?: CliBackendName; model?: string; cwd?: string; systemPrompt?: string; inherit?: boolean; bootstrap?: string; keepalive?: boolean }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; inherited: boolean }>;
   /** Install the wizard-identity provider. Every spawn path (`/new`, a dead-pane
    *  respawn, a clone) asks it for the target's charter and presses the result
    *  into the new process's system prompt, so identity is a property of the
@@ -2093,6 +2096,10 @@ interface AttachState {
   /** When `/stop` paused keepalive (ms). The busy-based resume is gated on a
    *  grace window after this so an in-flight ping at /stop time can't self-resume. */
   keepaliveOffAt?: number;
+  /** Sticky opt-out set once at spawn time (`spawn_clone` / `new_claude_session`
+   *  `keepalive:false`). Unlike `keepaliveOff` there is no auto-resume — a
+   *  wizard created this way is never pinged for its whole lifetime. */
+  keepaliveDisabled?: boolean;
   /** While set, onItem swallows the keepalive ping turn from every WeCom path
    *  (no bubble, no live stream), closing on the turn's terminal signal. The
    *  timer is a fail-safe so a ping that never emits turn_end can't mute a later
@@ -3710,7 +3717,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       ? buildDetailUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, id, principal ? stripPrincipalPrefix(principal) : undefined)
       : "";
 
-  const attach = ({ sessionId, jsonlPath, target: targetOverride, tmuxPane, tmuxSession, cwd, model, pendingCwd }: AttachArgs): AttachResult => {
+  const attach = ({ sessionId, jsonlPath, target: targetOverride, tmuxPane, tmuxSession, cwd, model, pendingCwd, keepaliveDisabled }: AttachArgs): AttachResult => {
     const target = resolveTarget(targetOverride);
     if (!target) return { ok: false, reason: "no target chat (set wrc.mirror.pushChat or defaultChat, or pass target)" };
     // Note: jsonlPath may not exist yet on the auto-spawn path — claude only
@@ -3738,6 +3745,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // model it asked for (possibly "" = CLI default) and says so; a re-attach
     // onto an already-running pane doesn't, so it keeps what was recorded.
     const carryModel = model !== undefined ? model.trim() : (prevByTarget?.model ?? deps.store.get(target)?.model ?? "");
+    // Same carry rule again: an explicit spawn-time choice wins, otherwise this
+    // wizard's existing policy (in-memory, or on disk across a reload) sticks.
+    const carryKeepaliveDisabled = keepaliveDisabled !== undefined ? keepaliveDisabled : (prevByTarget?.keepaliveDisabled ?? deps.store.get(target)?.keepaliveDisabled ?? false);
     if (prevByTarget) detach(prevByTarget, "target reassigned");
     // Build the attachment first so the tail's onItem closure can capture it.
     const a: AttachState = {
@@ -3752,6 +3762,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       runningCwd: expandHome(((cwd ?? "").trim()) || readCwdFromJsonl(jsonlPath) || cfg.wrc.cwd),
       pendingCwd: carryPending,
       model: carryModel,
+      keepaliveDisabled: carryKeepaliveDisabled,
       tail: { stop: () => undefined, drain: () => undefined, livePath: () => undefined }, // placeholder; replaced below
       standalonePending: Promise.resolve(),
       recentToolSigs: new Map(),
@@ -3792,6 +3803,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       pendingCwd: a.pendingCwd || undefined,
       keepaliveOff: prevRec?.keepaliveOff,
       keepaliveOffAt: prevRec?.keepaliveOffAt,
+      keepaliveDisabled: carryKeepaliveDisabled || undefined,
     });
     log.info({ sessionId, jsonlPath, target, tmuxSession: a.tmuxSession, runningCwd: a.runningCwd, pendingCwd: a.pendingCwd, mirrors: bySessionId.size }, "mirror attached");
     return { ok: true, sessionId, jsonlPath, target };
@@ -3937,6 +3949,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
     // Re-hydrate the `/stop` pause so a reload doesn't resume pinging a quieted
     // session (attach preserved it on disk; this puts it back in memory).
+    // keepaliveDisabled is carried by attach() itself (same rule as `model`);
+    // only the transient `/stop` pause needs manual re-hydration here.
     const restored = byTarget.get(principal);
     if (restored && rec.keepaliveOff) { restored.keepaliveOff = true; restored.keepaliveOffAt = rec.keepaliveOffAt; }
     log.info({ principal, sessionId: rec.sessionId, livePane: livePane || "(spawn-mode)" }, "mirror restored from store");
@@ -3947,7 +3961,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // clobbering, the rest of the record) so it survives a daemon reload.
   const persistPause = (a: AttachState): void => {
     const rec = deps.store.get(a.target);
-    if (rec) deps.store.set(a.target, { ...rec, keepaliveOff: a.keepaliveOff, keepaliveOffAt: a.keepaliveOffAt });
+    if (rec) deps.store.set(a.target, { ...rec, keepaliveOff: a.keepaliveOff, keepaliveOffAt: a.keepaliveOffAt, keepaliveDisabled: a.keepaliveDisabled });
   };
 
 
@@ -4464,7 +4478,16 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     target: string,
     windowName?: string,
     cli?: CliBackendName,
-    opts?: { model?: string; cwd?: string; silent?: boolean; systemPrompt?: string },
+    opts?: {
+      model?: string;
+      cwd?: string;
+      silent?: boolean;
+      systemPrompt?: string;
+      /** false = sticky opt-out from prompt-cache keepalive for this wizard's
+       *  whole lifetime; true = force it on even if the tag was previously
+       *  disabled; undefined = leave whatever was carried over from before. */
+      keepalive?: boolean;
+    },
   ): Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; info?: string }> => {
     const prev = byTarget.get(target);
     // Resolution precedence (all chat-scoped except the running-cwd fallback):
@@ -4524,6 +4547,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // Likewise explicit: `/new` starts a NEW session, so an unnamed model
       // means this CLI's default, not the dead pane's model.
       model: opts?.model?.trim() ?? "",
+      keepaliveDisabled: opts?.keepalive === undefined ? undefined : !opts.keepalive,
     });
     if (!att.ok) return { ok: false, reason: att.reason };
     // 首条注入吃冷时序(injectText 走 /mirror/spawn 时已经硬编码 freshSpawn:true,
@@ -4616,6 +4640,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     /** 分身的第一句话。继承路径上它是**必需**的 (分叉文件要靠它才生成), 省略则用
      *  一句自我介绍兜底; 空白路径上它只是普通的首条消息。 */
     bootstrap?: string;
+    /** false = 这个分身**永远**不会被 keepalive 心跳唤醒 (跑腿的一次性分身不必
+     *  为保温付 ping 的钱); true = 明确要保温; 省略 = 按配置的
+     *  `keepalive.spawnDefault`。与 `justSpawned` 那种"直到第一次真活动才恢复"
+     *  的临时暂停不同 —— 这个是终身的。 */
+    keepalive?: boolean;
   }): Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; inherited: boolean }> => {
     const p = byTarget.get(args.parent) ?? (await restoreFromStore(args.parent));
     // 继承上下文要求父亲有一个活着的 transcript, 且分身必须待在同一个项目目录 ——
@@ -4624,7 +4653,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const canInherit = args.inherit !== false && !!p?.sessionId && !!p.jsonlPath && existsSync(p.jsonlPath) && sameCwd;
     if (!canInherit) {
       const r = await newSession(args.target, args.windowName, args.cli, {
-        model: args.model, cwd: args.cwd, systemPrompt: args.systemPrompt, silent: true,
+        model: args.model, cwd: args.cwd, systemPrompt: args.systemPrompt, silent: true, keepalive: args.keepalive,
       });
       return { ...r, inherited: false };
     }
@@ -4676,6 +4705,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       cwd: r.cwd,
       pendingCwd: "",
       model: args.model?.trim() ?? "",
+      keepaliveDisabled: args.keepalive === undefined ? undefined : !args.keepalive,
     });
     if (!att.ok) return { ok: false, reason: att.reason, inherited: false };
     const spawned = byTarget.get(args.target);
@@ -5124,6 +5154,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const pingSigs = [normAssistant(kc.ping).slice(0, 40), normAssistant(kc.resumePing).slice(0, 40)].filter((s) => s.length > 0);
       const now = Date.now();
       for (const a of byTarget.values()) {
+        if (a.keepaliveDisabled) continue;                    // sticky spawn-time opt-out — never pings, never auto-resumes
         if (!a.tmuxPane) continue;                            // spawn-mode: no live pane to warm
         if (a.migrationWatcher) continue;                     // session rotating — skip
         if (a.liveStream && !a.liveStream.closed) continue;   // mid typewriter — don't inject

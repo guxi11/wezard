@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- **`spawn_clone` / `new_claude_session` 新增 `keepalive` 参数** —— 可以让某个分身/wizard 永远不被 prompt-cache keepalive 心跳保温, 省下跑腿一次就收工的临时分身那份 ping 的钱; 省略则按新配置项 `wrc.mirror.keepalive.spawnDefault` (默认 `true`) 来。和 `/stop` 那种"直到下一次真活动才恢复"的临时暂停不同, 这是终身粘住的 (`keepaliveDisabled`, 随 `model` 同款的 carry-over 规则持久化, 幸存 daemon reload)。
 - **chat 详情页从"一个聊天的线程"扩成三栏: 线程 / 关系 / 日程**。原先那一栏只回答一个聊天内部的问题 (有哪些 `#tag`、某一路的时间线长什么样) —— 它的第一步就是 `baseOfKey === base`, 于是 wizard 之间**跨聊天**的那些关系一条都画不出来: 谁是谁的分身、谁在驱动谁、哪几个属于同一个工单、谁被排了定时。
   - **关系**: 不按聊天切, 按关系切。聊天是卡片 (归属), 分身按家谱缩进 (层级), SVG 只画布局表达不了的边 —— 跨卡片的分身、同群与跨群的派活、流水线的一步。不用力导向: 节点天然有归属和层级, 力导向会把这两件确定的事揉成一团随机位置。图例同时是开关, 「只看有关系的」把此刻不属于任何关系的收起来, 剩下的就是这张协作网本身。
   - **日程**: 定时任务与工单摆在一起 —— 它们回答同一个问题「什么被安排了」, 区别只在时间的方向 (定时指向未来, 工单指向现在)。顶上是未来 12 小时的刻度条。
@@ -12,8 +13,10 @@
 - **turn 记录新增出处 `from` (`shared/detail-store`)** —— 这一轮是**谁开的口**: 同伴 `send_peer` 派的、工单 fan-out 派的、定时任务放的枪; `undefined` = 人直接说的。此前只有 graph 有归因 (`origin`), 而 peer 派活是协同网络里最常见的那种边, 却在数据里一点痕迹都没有: 一条 9:30 自动跑出来的轮次和真人发言长得一模一样。和 `origin` 一样走 append-only JSONL 跟着记录过夜, 所以独立 svr 收到 POST 之后画出来的图与本机一致。
 - `GET /api/world` (daemon 与 svr 共用) + `shared/world.ts` 的纯折叠。注册表侧的事实 (身份 / 家谱 / 工单 / 日程) 由 daemon 以 provider 注入, svr 拿不到就退化成只画观测到的往来。**正文仍然按聊天关**: 外聊天的节点只有身份与关系, 没有线程、没有对话预览 —— 拿到一条链接看得见拓扑, 读不到别的群的内容。
 - `shared/std.ts` 新增 `mapLimit` —— 带并发上限的 `Promise.all`。凡是 `f` 会 spawn 进程或开文件的, 就不该用裸 `Promise.all` (见下面那条事故)。
+- **`schedule_task` 到点撞见 busy 目标时, 改起一个白板分身单独执行, 而不是排进目标当前那一轮**。`schedule_task` 的 prompt 设计上本就要求"零上下文也能执行"(到点时目标可能早已 `/clear` 过, 它只看得见这一句) —— 既然如此就没必要非挤进目标那个会话: 排进去既打乱了触发时间点 (要等它这一轮忙完才轮到), 又把两件不相关的事挤进同一个 transcript。现在 busy 时新起一个白板分身 (`#tag-<taskId 前4位>`) 单独跑这条自洽 prompt, 跑完自动 `stop_wizard` 回收; 空闲时行为不变, 原样直接投。群里补一条通知说明"为什么多了个陌生 tag"。
 
 ### Fixed
+- **`wizard_handoff_self` 目标一直忙时静默放弃, 群里零通知**。这个工具应答之后是 fire-and-forget: 应答里已经给了 `scheduled:true`, 调用方早就挂断; 真正的交接在后台等目标闲下来, 最长等 10 分钟, 超时此前只写一行 `log.warn`——用户调了这个工具, 十分钟后交接悄悄失败, 没有任何气泡告诉他上下文其实没动。现在超时也补一条 `notifyChat`, 对齐它成功时发的那条。
 - **`worldPeers` 全量探活打穿 fd 上限, 把 tmux server 和守护进程一起拖垮**。一个裸 `Promise.all` 铺在全部 349 个 target 上, 每个各要两次 tmux (pane 存活 + capture tail) —— 约 700 个并发子进程, 日志刷满 `tmux command timed out — killed`, tmux server 重启 (活着的 pane 全数丢失, 会话本身可按 `--resume` 恢复), `/api/world` 挂死超过 120s, 守护进程随后 down。正是 CLAUDE.md 记的 launchd fd 那个失效模式。现在两道闸: 先用**不 spawn 的**证据排序 (transcript 的 mtime 一次 statSync, 注册表里登记过的无条件入选), 只探前 48 个, 并发封顶 6。没被探到的照旧出现在名册里, 只是 busy/alive 按冷处理 —— 图上少一盏呼吸灯, 远好过把整台机器上的会话一起搞停。冷 57ms / 命中缓存 4ms, 持续轮询下 tmux 超时 0 次。
 - **`el.hidden` 对 `.gbar` / `.topbar .cwd` 这类元素不生效**。UA 的 `[hidden]` 规则与类选择器同权重而作者样式胜出, 于是 `hidden=true` 的元素照旧显示 (空的 graph 条会剩一条带边框的窄带)。补一条 `[hidden]{display:none!important}`。
 
