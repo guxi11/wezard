@@ -1822,13 +1822,13 @@ export interface MirrorBridge {
   /** Detach + respawn a target's pane in `cfg.wrc.cwd` or its pendingCwd
    *  override. Used by /new to give the user a fresh claude in the bound
    *  project. Returns the new attachment result. */
-  newSession: (target: string, windowName?: string, cli?: CliBackendName, opts?: { model?: string; cwd?: string; silent?: boolean; systemPrompt?: string; keepalive?: boolean }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string }>;
+  newSession: (target: string, windowName?: string, cli?: CliBackendName, opts?: { model?: string; cwd?: string; silent?: boolean; systemPrompt?: string; keepalive?: boolean }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; model?: string; modelWarning?: string }>;
   /** Spawn `target` as a CLONE of `parent`: a fresh pane launched with
    *  `--resume <parent sid>`, which the CLI forks — the child starts holding
    *  everything the parent had read, the parent is untouched. `inherit: false`
    *  (or a different cwd, which `--resume` cannot honor) degrades to a plain
    *  `newSession`; the reply says which happened via `inherited`. */
-  cloneSession: (args: { parent: string; target: string; windowName?: string; cli?: CliBackendName; model?: string; cwd?: string; systemPrompt?: string; inherit?: boolean; bootstrap?: string; keepalive?: boolean }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; inherited: boolean }>;
+  cloneSession: (args: { parent: string; target: string; windowName?: string; cli?: CliBackendName; model?: string; cwd?: string; systemPrompt?: string; inherit?: boolean; bootstrap?: string; keepalive?: boolean }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; inherited: boolean; model?: string; modelWarning?: string }>;
   /** Install the wizard-identity provider. Every spawn path (`/new`, a dead-pane
    *  respawn, a clone) asks it for the target's charter and presses the result
    *  into the new process's system prompt, so identity is a property of the
@@ -4488,7 +4488,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
        *  disabled; undefined = leave whatever was carried over from before. */
       keepalive?: boolean;
     },
-  ): Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; info?: string }> => {
+  ): Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; info?: string; model?: string; modelWarning?: string }> => {
     const prev = byTarget.get(target);
     // Resolution precedence (all chat-scoped except the running-cwd fallback):
     //   base.pending > caller.pending > target.running > base.running > default
@@ -4545,8 +4545,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // Explicit "" clears any carried-over pending — it has just been applied.
       pendingCwd: "",
       // Likewise explicit: `/new` starts a NEW session, so an unnamed model
-      // means this CLI's default, not the dead pane's model.
-      model: opts?.model?.trim() ?? "",
+      // means this CLI's default, not the dead pane's model. Store what
+      // spawnTmuxClaude actually confirmed via `/model` (r.model), not the
+      // raw request — a later respawn's fast path then matches on try one.
+      model: r.model ?? (opts?.model?.trim() ?? ""),
       keepaliveDisabled: opts?.keepalive === undefined ? undefined : !opts.keepalive,
     });
     if (!att.ok) return { ok: false, reason: att.reason };
@@ -4588,7 +4590,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       }
     }
     if (!opts?.silent) pushProjectInfo(target, "created");
-    return { ok: true, sessionId: r.sessionId, cwd: r.cwd };
+    return { ok: true, sessionId: r.sessionId, cwd: r.cwd, model: r.model, modelWarning: r.modelWarning };
   };
 
   // ── Clone ───────────────────────────────────────────────────────────
@@ -4645,7 +4647,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
      *  `keepalive.spawnDefault`。与 `justSpawned` 那种"直到第一次真活动才恢复"
      *  的临时暂停不同 —— 这个是终身的。 */
     keepalive?: boolean;
-  }): Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; inherited: boolean }> => {
+  }): Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; inherited: boolean; model?: string; modelWarning?: string }> => {
     const p = byTarget.get(args.parent) ?? (await restoreFromStore(args.parent));
     // 继承上下文要求父亲有一个活着的 transcript, 且分身必须待在同一个项目目录 ——
     // `--resume` 是按项目目录寻址 session 的。调用方点名换目录 = 明确放弃继承。
@@ -4704,7 +4706,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       tmuxSession: r.tmuxSession,
       cwd: r.cwd,
       pendingCwd: "",
-      model: args.model?.trim() ?? "",
+      model: r.model ?? (args.model?.trim() ?? ""),
       keepaliveDisabled: args.keepalive === undefined ? undefined : !args.keepalive,
     });
     if (!att.ok) return { ok: false, reason: att.reason, inherited: false };
@@ -4719,7 +4721,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       persistPause(spawned);
     }
     lg.info({ parent: args.parent, sessionId: fork.sessionId }, "clone: forked");
-    return { ok: true, sessionId: fork.sessionId, cwd: r.cwd, inherited: true };
+    return { ok: true, sessionId: fork.sessionId, cwd: r.cwd, inherited: true, model: r.model, modelWarning: r.modelWarning };
   };
 
   /** 一个会话此刻的硬事实 —— whoami / 交接判断要用的那几个数。 */

@@ -408,7 +408,12 @@ const main = async (): Promise<void> => {
       const keepalive = typeof body.keepalive === "boolean" ? body.keepalive : cfg.wrc.mirror.keepalive.spawnDefault;
       log.child({ mod: "mirror", sub: "sessions-new", target }).info({ self, cwd, foreign, cli: body.cli, model, keepalive }, "spawning peer session");
       const r = await m.newSession(target, tag, body.cli, { cwd, model, keepalive });
-      if (r.ok) postRoster(base, [target, self], `新 wizard **#${tag}** 就位 · 地址 \`${peerAddress(cfg, base, target)}\`${r.cwd ? ` · 工作区 ${r.cwd}` : ""}${model ? ` · 模型 ${model}` : ""}${keepalive ? "" : " · 已关闭 keepalive"} —— 空白起步, 由 ${displayName(self)} 造的`);
+      // r.model 是 spawnTmuxClaude 通过 /model 实测确认落地的那个 —— 可能跟调用方
+      // 传的原始字符串不一样 (口语化 → 目录里匹配到的关键词), 播报要报实情。
+      const modelNote = r.model
+        ? (r.modelWarning ? ` · 模型 ${r.model} (⚠️ ${r.modelWarning})` : ` · 模型 ${r.model}`)
+        : "";
+      if (r.ok) postRoster(base, [target, self], `新 wizard **#${tag}** 就位 · 地址 \`${peerAddress(cfg, base, target)}\`${r.cwd ? ` · 工作区 ${r.cwd}` : ""}${modelNote}${keepalive ? "" : " · 已关闭 keepalive"} —— 空白起步, 由 ${displayName(self)} 造的`);
       json(res, r.ok ? 200 : 500, r.ok
         ? {
             ok: true,
@@ -418,7 +423,8 @@ const main = async (): Promise<void> => {
             base,
             tag,
             cwd: r.cwd,
-            ...(model ? { model } : {}),
+            ...(r.model ? { model: r.model } : {}),
+            ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}),
             foreign,
             keepalive,
             // 调用方之后拿这个串 send_peer / peek_peer 驱动它。
@@ -1280,13 +1286,18 @@ const main = async (): Promise<void> => {
       }
       wizards.upsert(target, { clonedFrom: r.inherited ? parentInfo?.sessionId ?? "" : "" });
       const kid = briefOf(self, target);
+      // r.model 是 spawnTmuxClaude 通过 /model 实测确认落地的那个 —— 可能跟调用方
+      // 传的原始字符串不一样 (口语化 → 目录里匹配到的关键词), 播报要报实情。
+      const modelNote = r.model
+        ? (r.modelWarning ? ` · 模型 ${r.model} (⚠️ ${r.modelWarning})` : ` · 模型 ${r.model}`)
+        : "";
       // 分身出生要在群里留一条 —— 群里多了一个成员, 人有权当场知道。
       // 工单里的分身是临时工: 出生、派活各发一条气泡, 五路 fan-out 就是十条交叉的
       // 气泡, 人从里面读不出结构。它们攒到收工那一条里一起交代 (成员 + 各自那段活),
       // 中间过程照旧在各自的 chat 详情页。同理不惊动同群的其他 wizard。
       if (!jobId) {
         notifyChat(base, withTagHeader(target, `已就位 · ${r.inherited ? `${displayName(self)} 的分身 (继承了它的上下文)` : "全新 wizard (空白上下文)"}${kid.description ? ` · ${kid.description}` : ""}`));
-        postRoster(base, [target, self], `新 wizard **${kid.name || tag}** 就位 · 地址 \`${peerAddress(cfg, base, target)}\`${kid.description ? ` · ${kid.description}` : ""}${r.cwd ? ` · 工作区 ${r.cwd}` : ""}${b.model?.trim() ? ` · 模型 ${b.model.trim()}` : ""}${keepalive ? "" : " · 已关闭 keepalive"} —— ${displayName(self)} 的分身${r.inherited ? " (继承了它的上下文)" : ""}`);
+        postRoster(base, [target, self], `新 wizard **${kid.name || tag}** 就位 · 地址 \`${peerAddress(cfg, base, target)}\`${kid.description ? ` · ${kid.description}` : ""}${r.cwd ? ` · 工作区 ${r.cwd}` : ""}${modelNote}${keepalive ? "" : " · 已关闭 keepalive"} —— ${displayName(self)} 的分身${r.inherited ? " (继承了它的上下文)" : ""}`);
       }
       // 派活在群里留一条 (它是关键节点)。继承路径上活已经随开场白进去了, 空白分身
       // 才需要在这里补一次注入。
@@ -1297,7 +1308,7 @@ const main = async (): Promise<void> => {
       }
       if (jobId) jobs.attach(jobId, { target, task, spawned: true });
       else if (dispatched) relayPeer(self, target, task);
-      json(res, 200, { ok: true, target, tag, address: peerAddress(cfg, self, target), name: kid.name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, keepalive, ...(jobId ? { job: jobId } : {}) });
+      json(res, 200, { ok: true, target, tag, address: peerAddress(cfg, self, target), name: kid.name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, keepalive, ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(jobId ? { job: jobId } : {}) });
     });
 
     // 收掉一个 wizard。interrupt = 打断它这一轮 (Esc); end = 结束它并回收 pane。

@@ -353,7 +353,7 @@ server.registerTool(
       model: z
         .string()
         .optional()
-        .describe("这个 wizard 跑在哪个模型上 (`--model` 的 slug, 如 'opus' / 'sonnet' / 'haiku')。省略用该 CLI 的默认。同一个聊天里的 wizard 可以各跑各的模型 —— 又长又要判断的活给 opus, 跑腿的 lint/grep 给 haiku。"),
+        .describe("这个 wizard 跑在哪个模型上, 口语化随便写 ('opus' / 'sonnet' / '最新的 opus' / 'claude-sonnet-5' 都行) —— 不是直接塞给启动参数, 而是等 pane 起来后真的敲 `/model` 校验, 认不出就翻一遍这台 CLI 此刻的目录再重试, 所以返回里的 `model` 才是真正落地的那个, 可能跟你传的字符串不完全一样; 万一没匹配上会带 `modelWarning`, 那时 wizard 还在跑但停在了原来的模型上, 不是失败。省略用该 CLI 的默认。同一个聊天里的 wizard 可以各跑各的模型 —— 又长又要判断的活给 opus, 跑腿的 lint/grep 给 haiku。"),
       keepalive: z
         .boolean()
         .optional()
@@ -514,7 +514,7 @@ server.registerTool(
           z.object({
             tag: z.string().describe("wizard 的 tag, 不带 '#', 如 'fix'。"),
             cli: z.enum(["claude", "claude-internal", "codebuddy"]).optional().describe("这个 wizard 用哪个 CLI。省略则继承本聊天的。"),
-            model: z.string().optional().describe("要现造这个 wizard 时传给 `--model` 的模型 slug, 如 'opus' / 'haiku'。已经在跑的不受影响。"),
+            model: z.string().optional().describe("要现造这个 wizard 时跑在哪个模型上, 口语化随便写 ('opus' / 'haiku' / '最新的 opus' 都行) —— 起来后会用 `/model` 实测校验。已经在跑的不受影响。"),
             cwd: z.string().optional().describe("这个 wizard 的工作区绝对路径。省略则继承本聊天的。"),
           }),
         )
@@ -751,7 +751,7 @@ server.registerTool(
       cwd: z.string().optional().describe("分身的工作区绝对路径。只在 inherit=false 时有意义 —— 换目录与继承上下文互斥。"),
       chat: z.string().optional().describe("把分身生在另一个聊天里 (list_chats 里的名字)。省略 = 你自己的聊天, 这是绝大多数情况。"),
       cli: z.enum(["claude", "claude-internal", "codebuddy"]).optional().describe("分身用哪个 CLI。省略则继承。"),
-      model: z.string().optional().describe("分身跑在哪个模型上 (`--model` 的 slug, 如 'opus' / 'sonnet' / 'haiku')。省略用该 CLI 的默认。分身可以和你跑在不同模型上: 要判断力的那一路给 opus, 跑腿的 (grep、跑测试、照着清单改) 给 haiku —— 一批分身不必齐步走。"),
+      model: z.string().optional().describe("分身跑在哪个模型上, 口语化随便写 ('opus' / 'sonnet' / '最新的 opus' / 'claude-sonnet-5' 都行) —— 不是直接塞给启动参数, 而是等 pane 起来后真的敲 `/model` 校验, 认不出就翻一遍这台 CLI 此刻的目录再重试, 所以返回里的 `model` 才是真正落地的那个, 可能跟你传的字符串不完全一样; 万一没匹配上会带 `modelWarning`, 那时分身还在跑但停在了原来的模型上, 不是失败。省略用该 CLI 的默认。分身可以和你跑在不同模型上: 要判断力的那一路给 opus, 跑腿的 (grep、跑测试、照着清单改) 给 haiku —— 一批分身不必齐步走。"),
       job: z
         .string()
         .optional()

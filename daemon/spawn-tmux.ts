@@ -34,6 +34,7 @@ import { expandHome } from "../shared/paths.js";
 import { augmentedPath } from "../shared/exec-path.js";
 import { sleep } from "../shared/std.js";
 import { activateBackend, CLI_BACKEND_DEFAULTS, primaryBackend, type CliBackend, type CliBackendName } from "../shared/cli-backends.js";
+import { selectModel } from "./model-select.js";
 
 
 // A spawn has no transcript to derive a backend from, so the caller picks one
@@ -223,9 +224,14 @@ export interface SpawnArgs {
   /** Which CLI to launch. Undefined → `wrc.defaultCli`. A respawn should pass
    *  the backend that owns `resumeSessionId`, else the resume finds no session. */
   cli?: CliBackendName;
-  /** Model slug for `--model`. Lets sibling `#tag` sessions in one chat run on
+  /** Model to put the pane on. Lets sibling `#tag` sessions in one chat run on
    *  different models (a graph node can pick opus for design, haiku for lint).
-   *  Undefined → the CLI's own default. */
+   *  NOT passed as `--model` at launch — that flag is unvalidated (an unknown
+   *  slug spawns fine and only fails on the first real turn). Instead, once
+   *  the TUI is ready, we drive it through the pane's own `/model` command
+   *  (see `model-select.ts`), which validates against the live catalog and
+   *  reports back what actually landed. Undefined/empty → the CLI's own
+   *  default, no `/model` round trip. */
   model?: string;
   /** Fork the resumed session instead of continuing it (`--fork-session`).
    *  MANDATORY whenever a SECOND pane resumes a session the daemon still has
@@ -255,6 +261,13 @@ export interface SpawnResult {
   cwd?: string;
   /** Backend actually launched. */
   cli?: CliBackendName;
+  /** Model keyword actually confirmed applied via `/model` (may differ from
+   *  the requested string — e.g. a colloquial "opus 最新" resolves to "Opus").
+   *  "" when no model was requested. On a failed resolution this still carries
+   *  the raw requested string (best-effort record) and `modelWarning` explains
+   *  why — the pane itself is left on whatever model it already had. */
+  model?: string;
+  modelWarning?: string;
 }
 
 // Pre-write the "trust this folder" + onboarding markers for `cwd` into
@@ -424,7 +437,6 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, windowName, c
   ];
   const argv = [
     ...(resumeSessionId ? ["--resume", sessionId, ...(forkSession ? ["--fork-session"] : [])] : ["--session-id", sessionId]),
-    ...(model?.trim() ? ["--model", model.trim()] : []),
     ...cfg.wrc.extraArgs,
   ].map(shQuote);
   const cmd = [...envPrefix, backend.bin, ...argv, charterArg(cfg, backend, sessionId, systemPrompt, log)]
@@ -443,8 +455,30 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, windowName, c
   // claude does NOT create the transcript jsonl until it processes the first
   // user input, so we don't wait for the file — mirror tail tolerates a
   // missing jsonl and starts emitting once claude writes the first line.
-  await waitForTuiReady(tmuxPane, cmd, log);
+  const tuiReady = await waitForTuiReady(tmuxPane, cmd, log);
 
-  log.info({ tmuxName, tmuxPane, sessionId, jsonlPath, cwd, cli: backend.name }, "spawn-tmux: ready");
-  return { ok: true, sessionId, jsonlPath, tmuxPane, tmuxSession: tmuxName, cwd, cli: backend.name };
+  // Model selection needs the TUI actually up (it types `/model …` into the
+  // input box) — skip it if readiness never confirmed, same as any other
+  // post-launch step would have to.
+  let resolvedModel = "";
+  let modelWarning: string | undefined;
+  if (model?.trim() && tuiReady) {
+    const sel = await selectModel(tmuxPane, model.trim(), log);
+    if (sel.ok) {
+      resolvedModel = sel.applied ?? model.trim();
+    } else {
+      resolvedModel = model.trim();
+      modelWarning = sel.reason;
+      log.warn({ tmuxPane, wanted: model.trim(), reason: sel.reason }, "spawn-tmux: model selection failed, pane stays on its prior model");
+    }
+  } else if (model?.trim()) {
+    resolvedModel = model.trim();
+    modelWarning = "TUI 未就绪, 跳过了模型选择";
+  }
+
+  log.info({ tmuxName, tmuxPane, sessionId, jsonlPath, cwd, cli: backend.name, model: resolvedModel }, "spawn-tmux: ready");
+  return {
+    ok: true, sessionId, jsonlPath, tmuxPane, tmuxSession: tmuxName, cwd, cli: backend.name,
+    ...(model?.trim() ? { model: resolvedModel, ...(modelWarning ? { modelWarning } : {}) } : {}),
+  };
 };

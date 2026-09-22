@@ -25,8 +25,10 @@ export interface GraphNodeSpec {
   /** Session tag, without `#`. */
   tag: string;
   cli?: CliBackendName;
-  /** Model slug passed to the CLI at spawn (`--model`). Only honored when the
-   *  node has to be created; an already-running pane keeps its model. */
+  /** Model to put a freshly-created node on — resolved via `/model` against
+   *  the live catalog (see `model-select.ts`), not a raw `--model` flag. Only
+   *  honored when the node has to be created; an already-running pane keeps
+   *  its model. */
   model?: string;
   cwd?: string;
 }
