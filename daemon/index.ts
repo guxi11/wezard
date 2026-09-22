@@ -31,6 +31,7 @@ import {
   startScheduler,
   listSchedules,
   addSchedule,
+  promptWantsFreshWizard,
   removeScheduleById,
   renderSchedule,
 } from "./tasks.js";
@@ -1455,11 +1456,12 @@ const main = async (): Promise<void> => {
         if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
         target = r.target;
       }
-      // 到点是新建还是续用, 在**排班时**就定死: 「没点名 wizard」= 新建一个白板的
-      // 去干 (定时的 prompt 本就要求零上下文自洽), 点了名才在那个会话里继续。
-      // `fresh` 显式传入时压过这条推断 —— 「每天新建一个 wizard 在 #foo 的目录下跑」
-      // 要的是 #foo 的 cwd/model 当模板, 不是在 #foo 的上下文里续。
-      const fresh = typeof b.fresh === "boolean" ? b.fresh : !tag;
+      // 到点是新建还是续用, 在**排班时**就定死。两条都指向新建:
+      //   · 没点名 wizard —— 定时的 prompt 本就要求零上下文自洽, 没理由挑一个会话挤进去;
+      //   · prompt 自己就在说「建两个 wizard 去干 xxx」—— 这时 tag 只是「在谁的聊天/
+      //     目录下办」, 不是「在它的上下文里续」。
+      // `fresh` 显式传入压过这两条推断 (要强行在 tag 那一轮里续就传 false)。
+      const fresh = typeof b.fresh === "boolean" ? b.fresh : !tag || promptWantsFreshWizard(prompt);
       const rec = addSchedule(cfg, sourcePath, { when, target, prompt, fresh, createdBy: self, note: (b.note ?? "").toString() });
       json(res, 200, { ok: true, ...renderSchedule(rec), address: peerAddress(cfg, self, target) });
     });

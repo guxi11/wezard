@@ -50,6 +50,20 @@ export const removeScheduleById = (cfg: Config, sourcePath: string, id: string):
   return hit;
 };
 
+// 一条定时的 prompt 本身就在说「建一个 wizard 去干这件事」时, 它要的显然不是
+// 在某个已有会话里续 —— 哪怕排班时点了 tag, 那个 tag 也只是「在谁的聊天/目录下
+// 办」。这条推断放在 daemon 而不是靠调用方记得传 fresh: 排班的模型换一个就忘了,
+// 而这句话的意思一直写在 prompt 里。否定说法 (「不用新建」「无需另起」) 不算。
+const SPAWN = "(?:新建|新起|新开|另起|创建|建立|拉起|开|起|建|spawn|create|new)";
+const COUNT = "\\s*(?:一|两|二|三|四|五|[0-9]+)?\\s*(?:个|名|只)?\\s*";
+const AGENT = "(?:wizard|分身|clone|会话|session)";
+const WISH = new RegExp(SPAWN + COUNT + AGENT, "i");
+// 否定说法先抹掉再判: 「不用新建 wizard」里的「建 wizard」照样能被 WISH 咬住,
+// 单靠 lookbehind 拦不住 —— 它只挡得住整句里最长的那一次匹配。
+const NEGATED = new RegExp("(?:不|别|勿|无|免)(?:用|需|要)?\\s*" + SPAWN + COUNT + AGENT, "gi");
+
+export const promptWantsFreshWizard = (prompt: string): boolean => WISH.test(prompt.replace(NEGATED, ""));
+
 /** 给出 `target` 就只列排给那个 wizard 的。 */
 export const listSchedules = (cfg: Config, target?: string): Schedule[] =>
   target ? cfg.schedules.filter((s) => s.target === target) : cfg.schedules;
