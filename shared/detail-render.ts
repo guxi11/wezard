@@ -980,7 +980,8 @@ export const renderDetailPage = (r: DetailRecord): string => {
   if (r.kind === "tool") return renderToolPage(r);
   if (r.kind === "turn") return renderTurnPage(r);
   // 断点标记没有自己的页面 —— 它只是线程里的一行, id 也从不出现在链接里。
-  if (r.kind === "mark") return renderNotFound(r.id);
+  // 聊天票据同理: 它只出现在 /chat 的 `?id=` 上。
+  if (r.kind === "mark" || r.kind === "chat") return renderNotFound(r.id);
   return renderApprovalPage(r);
 };
 

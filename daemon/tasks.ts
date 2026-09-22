@@ -75,8 +75,10 @@ interface SchedulerDeps {
   cfg: Config;
   sourcePath: string;
   log: Logger;
-  /** 注入一句话到某个 wizard 会话。只有 mirror 模式给得出; 没有它定时任务只能告警。 */
-  inject?: (target: string, text: string) => Promise<{ ok: boolean; reason?: string }>;
+  /** 注入一句话到某个 wizard 会话。只有 mirror 模式给得出; 没有它定时任务只能告警。
+   *  `taskId` 让被开出的那一轮带上出处 —— 关系视图据此把"这一轮是定时放的枪"
+   *  与"人说的话"分开, 否则一条 9:30 自动跑出来的轮次看着和真人发言一模一样。 */
+  inject?: (target: string, text: string, taskId: string) => Promise<{ ok: boolean; reason?: string }>;
 }
 
 const announce = async (client: WSClient, target: string, markdown: string): Promise<void> => {
@@ -96,7 +98,7 @@ export const startScheduler = ({ client, cfg, sourcePath, log, inject }: Schedul
     // 冒出一轮对话, 没人知道是谁点的火。
     await announce(client, s.target, `⏰ **定时任务** · ${describeWhen(s.when)}\n> ${s.prompt.split("\n")[0]!.slice(0, 120)}`)
       .catch((e: unknown) => log.warn({ id: s.id, err: (e as Error).message }, "task announce failed"));
-    const r = await inject(s.target, s.prompt);
+    const r = await inject(s.target, s.prompt, s.id);
     log.info({ id: s.id, target: s.target, ok: r.ok, reason: r.reason }, "scheduled task fired");
     if (!r.ok) {
       await announce(client, s.target, `⏰ 定时任务注入失败:${r.reason ?? "unknown"}`).catch(() => {});

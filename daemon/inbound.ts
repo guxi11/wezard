@@ -217,7 +217,7 @@ const renderHelp = (): string =>
     "`/name <名字>` 给本聊天起名 · `/name` 查看 · `/name -` 取消",
     "`/chats` 列出所有已知聊天及其 wizard",
     "名字 1-32 位字母/数字/`_`/`-`,全机唯一;它同时就是这里默认 wizard 的名字。",
-    "`daily#fix` = daily 聊天的 `#fix` · `daily#` = 它的默认 wizard · `fix` = 本聊天优先。",
+    "`daily#fix` = daily 聊天的 `#fix` · `daily` = 它的默认 wizard · `fix` = 本聊天优先。",
     "对 AI 说「让 daily#fix 看一眼」「在 daily 里开个 #ingest 跑这个目录」即可。",
     "未命名的聊天叫不到、也生不进去 —— 想被叫到,就在那个群里发一次 `/name`。",
     "",

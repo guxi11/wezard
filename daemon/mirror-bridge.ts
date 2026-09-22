@@ -20,7 +20,7 @@ import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
 import { expandHome, sanitizeId } from "../shared/paths.js";
 import { augmentedPath } from "../shared/exec-path.js";
-import { sleep, truncateWithCount } from "../shared/std.js";
+import { sleep, truncateWithCount, mapLimit } from "../shared/std.js";
 import {
   activeBackends,
   backendForPath,
@@ -37,9 +37,10 @@ import { isAutoWindowActive } from "./session-cache.js";
 import { noticeSuffixFor } from "./notices.js";
 import { dangerOf } from "./danger.js";
 import { runTmux, spawnTmuxClaude } from "./spawn-tmux.js";
+import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
 import { recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, buildDetailUrl, buildChatUrl } from "./detail.js";
-import type { CtxCut, TurnOrigin, TurnUsage } from "./detail.js";
+import type { CtxCut, TurnFrom, TurnOrigin, TurnUsage } from "./detail.js";
 import { labelFor, tagOfKey, baseOfKey, keyOf, withTagHeader, headSep, parseTagHeader } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
@@ -1005,6 +1006,19 @@ interface InjectArgs {
 // to exist here; both could hang forever, which is how a wedged tmux server
 // silently killed a whole chat. See TMUX_TIMEOUT_MS.)
 
+// 一次 tmux 往返描述所有活着的 pane: paneId → pane_current_path。boot 恢复要对
+// 几百个绑定各问两次 (还活着吗 / cwd 在哪), 那是 2N 个 client 排在同一台 server
+// 上; 换成一张快照, N 再大也只是一次。
+type PaneSnapshot = ReadonlyMap<string, string>;
+
+const parsePaneList = (out: string): PaneSnapshot =>
+  new Map(
+    out.split("\n").flatMap((line) => {
+      const [id, ...rest] = line.trim().split("\t");
+      return id?.startsWith("%") ? ([[id, rest.join("\t")]] as Array<[string, string]>) : [];
+    }),
+  );
+
 // Stable JSON: sort object keys recursively. Used to fingerprint a tool_use's
 // `input` so the hook-side and the jsonl-side compute the same signature even
 // when the model emits keys in arbitrary order.
@@ -1757,7 +1771,7 @@ export interface MirrorBridge {
    *  pushes assistant output via the standalone path. */
   /** `fromChat` 强制这一轮走出处门 (chatOriginOnly) —— 定时任务点的火, 结果必须
    *  在群里看得见, 哪怕上一轮是人在 CLI 里敲的。 */
-  injectText: (target: string, text: string, origin?: TurnOrigin, opts?: { fromChat?: boolean }) => Promise<{ ok: boolean; reason?: string }>;
+  injectText: (target: string, text: string, origin?: TurnOrigin, opts?: { fromChat?: boolean; from?: TurnFrom }) => Promise<{ ok: boolean; reason?: string }>;
   /** Send Esc to the live tmux pane bound to `target` — interrupts whatever
    *  Claude is currently doing (active generation / open prompt). No-op for
    *  spawn-mode attachments (no live TTY to interrupt).
@@ -1831,6 +1845,10 @@ export interface MirrorBridge {
    *  unique `#tag`, or any tag in a NAMED chat (reachable as `chatName#tag`).
    *  The discovery surface for cross-chat handoffs; same shape as `peers`. */
   foreignPeers: (target: string) => Promise<PeerInfo[]>;
+  /** 每一个 wizard, 不分聊天、不问叫不叫得动 —— peers ∪ foreignPeers 再加上那些
+   *  既没起名、tag 又不唯一因而**寻址不到**的会话。关系图要画的是这个世界的全貌,
+   *  而"叫不动"是一种关系状态, 不是一条把它从图上抹掉的理由。 */
+  worldPeers: (self: string) => Promise<PeerInfo[]>;
   /** Resolve a peer address to a target key. `""` → self's chat default;
    *  `fix` → self's chat, else a GLOBALLY UNIQUE `#fix` elsewhere;
    *  `daily#fix` / `chat:wr…#fix` → that exact chat's `#fix`, no uniqueness
@@ -1952,6 +1970,10 @@ interface AttachState {
    *  消费一次。带时间戳是因为注入未必真的开出一轮 (pane 死了 / 文本被吞), 陈旧的
    *  印章若一直留着, 会把很久以后某条真人消息误标成 graph 派的。 */
   pendingOrigin?: { origin: TurnOrigin; at: number };
+  /** 待记账的出处 (同伴派活 / 定时任务)。与 pendingOrigin 同一套一次性语义 ——
+   *  盖章、下一轮消费、超期作废。两个印章各走各的: graph 那一路两者都盖不上,
+   *  peer 那一路只有出处, 合成一个字段就得让读的人去猜哪几种组合合法。 */
+  pendingFrom?: { from: TurnFrom; at: number };
   /** Set when `/clear` was injected: the next user prompt will land in a fresh
    *  jsonl with a new sessionId. A watcher polls the project dir to migrate
    *  this attachment onto the new file. Cleared once migration completes or
@@ -2781,6 +2803,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return p && Date.now() - p.at <= ORIGIN_TTL_MS ? p.origin : undefined;
   };
 
+  /** 同上, 出处那一枚印章。 */
+  const consumeFrom = (a: AttachState): TurnFrom | undefined => {
+    const p = a.pendingFrom;
+    a.pendingFrom = undefined;
+    return p && Date.now() - p.at <= ORIGIN_TTL_MS ? p.from : undefined;
+  };
+
   // 详情页要按后端的名字称呼它 ("Claude 正在思考" / "CodeBuddy 正在思考") —— 后端
   // 由 transcript 落盘路径唯一确定, 所以每次开 turn 时现算, 不必额外记在 AttachState 上。
   const cliOf = (a: AttachState): CliBackendName | undefined =>
@@ -2791,7 +2820,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.queryEpoch = (a.queryEpoch ?? 0) + 1; // WeCom 侧的新一轮同样是 query 边界
     a.turnFromChat = true;                  // 出处确凿: 这一轮有 frame, 群里就是它的主场
     a.pendingFromCli = false;               // 人改从聊天里说话了, 之前那条 CLI 输入不再是出处
-    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: userQuery.trim() || undefined, origin: consumeOrigin(a) });
+    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: userQuery.trim() || undefined, origin: consumeOrigin(a), from: consumeFrom(a) });
     // hardTimer 兜底: turn 若无终句 / turn_end 收口 (卡死/漏收), 到点仍收气泡。
     const bubble: BriefBubble = { frame, streamId, hardTimer: undefined as unknown as NodeJS.Timeout, done: false };
     const q: QueuedTurn = { turnId, bubble, isSlash };
@@ -2835,7 +2864,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const fromCli = a.pendingFromCli === true;
     a.pendingFromCli = false;
     a.turnFromChat = fromCli ? false : a.turnFromChat ?? true;
-    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: query || undefined, origin: consumeOrigin(a) });
+    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: query || undefined, origin: consumeOrigin(a), from: consumeFrom(a) });
     a.briefTurnId = turnId;
     a.briefBubble = undefined;
     a.briefIsSlash = false;
@@ -3800,7 +3829,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return s;
   };
 
-  const restoreFromStore = async (principal: string): Promise<AttachState | undefined> => {
+  // `panes` = boot 快照; 给了就不再为每个 principal 单独问 tmux。lazy 调用方
+  // 不传, 维持原来的逐个探活。
+  const restoreFromStore = async (principal: string, panes?: PaneSnapshot): Promise<AttachState | undefined> => {
     const rec = deps.store.get(principal);
     if (!rec) return undefined;
     let jsonlAbs = expandHome(rec.jsonlPath);
@@ -3816,7 +3847,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // jsonl means "no input yet", NOT "rotated away" — healing it onto some
     // unrelated newest-in-cwd file is exactly the cross-wire we must avoid.
     const storedPane = (rec.tmuxPane ?? "").trim();
-    const livePane = storedPane && (await tmuxPaneAlive(storedPane)) ? storedPane : "";
+    const livePane = storedPane && (panes ? panes.has(storedPane) : await tmuxPaneAlive(storedPane)) ? storedPane : "";
     if (!existsSync(jsonlAbs)) {
       // First: the SAME-sid transcript may have merely relocated to a sibling
       // project dir (Claude Code EnterWorktree/ExitWorktree moved it while the
@@ -3868,8 +3899,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // is silently detached; that detached chat then never mirrors again. Runs at
     // boot; the 3s drift follower maintains it thereafter.
     if (livePane) {
-      const cwdRes = await runTmux(["display-message", "-p", "-t", livePane, "#{pane_current_path}"]);
-      const paneCwd = cwdRes.stdout.trim();
+      const paneCwd = panes
+        ? (panes.get(livePane) ?? "")
+        : (await runTmux(["display-message", "-p", "-t", livePane, "#{pane_current_path}"])).stdout.trim();
       if (paneCwd) {
         // Encode under the backend that owns the bound transcript — comparing
         // with the primary dialect would report a phantom drift for every
@@ -3923,12 +3955,20 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // hasMirrorTarget), but eager boot-restore makes outbound (tail → push) work
   // even before any inbound arrives — e.g. claude finishes a long-running
   // background task and writes assistant content to the jsonl while idle.
+  const RESTORE_CONC = 8;
   const persisted = deps.store.all();
   const persistedKeys = Object.keys(persisted);
   if (persistedKeys.length > 0) {
-    for (const principal of persistedKeys) {
-      void restoreFromStore(principal);
-    }
+    // 裸 fan-out 会把 2N 次 tmux 同时压下去 —— 几百个绑定就是七百个 client 一起
+    // 撞 10s 超时, spawn 风暴顺带把事件循环压住, :17890 要 25s 才 bind, 而 CLI 的
+    // reload 探测早放弃了 (「reload issued but /status not responding」的真身)。
+    // 一张快照 + 封顶并发; await 立刻让出, startHttp 先绑端口。
+    void (async () => {
+      const snap = await runTmux(["list-panes", "-a", "-F", "#{pane_id}\t#{pane_current_path}"]);
+      const panes = snap.ok ? parsePaneList(snap.stdout) : undefined;
+      await mapLimit(persistedKeys, RESTORE_CONC, (principal) => restoreFromStore(principal, panes));
+      log.info({ restored: persistedKeys.length, panes: panes?.size ?? -1 }, "mirror: boot restore done");
+    })();
   } else if (cfg.wrc.mirror.sessionId.trim()) {
     // Pinned-sessionId fallback: only honor when the store is empty (otherwise
     // the persisted bindings already cover the right sessions).
@@ -4776,7 +4816,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   //   `fix`         本 chat 优先,本 chat 没有再全局兜底(全 host 唯一才认)——
   //                 命名之前唯一的跨 chat 路子,老调用方不能因为引入命名而断掉;
   //   `daily#fix`   daily 这个 chat 里的 `#fix`,精确到点,不问 tag 全不全局唯一;
-  //   `daily#`      daily 的 default 会话;
+  //   `daily`       daily 这个聊天的 default 会话 —— 默认 wizard 的名字就是聊天名,
+  //                 所以裸聊天名就是它的地址 (`daily#` 这种老写法继续认);
   //   `chat:wr…#fix` 全量 key 同理(list_peers 吐的就是它)。
   // 裸 tag 的 0 命中 / ≥2 命中依旧拒绝,但出路从"回去改 tag 名"变成"用带 chat 名
   // 的全称地址"——后者不需要动别人的会话。
@@ -4812,9 +4853,15 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // 直接给出它的会话地址,比让人再查一次 list_chats 快。
       const asChat = chatBaseOf(cfg, t);
       if (asChat) {
+        // 裸聊天名 = 那个聊天的**默认 wizard**: 它的名字就是聊天名, peerAddress
+        // 印出来的地址也就是这个裸名字, 必须能原样喂回来 (此前这里一律报错, 于是
+        // 「名册里读到的地址」与「send_peer 收得下的地址」对不上)。
+        if (allTargets().includes(asChat)) {
+          return { ok: true, target: asChat, foreign: asChat !== baseOfKey(self) };
+        }
         return {
           ok: false,
-          reason: `'${t}' is a CHAT, not a tag — address one of its sessions, e.g. '${t}#' for its default`,
+          reason: `chat '${t}' has no default session — address one of its tagged sessions, or create it with new_claude_session({ chat: '${t}', cwd })`,
           candidates: allTargets().filter((k) => baseOfKey(k) === asChat).map((k) => peerAddress(cfg, self, k)),
         };
       }
@@ -4937,6 +4984,31 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     );
     const reachable = foreign.filter((k) => tagCount.get(tagOfKey(k)) === 1 || chatNameOf(cfg, k));
     return (await Promise.all(reachable.map((t) => peerInfoOf(t, self)))).sort(byRecent);
+  };
+
+  // peerInfoOf 每个 target 要两次 tmux (pane 存活 + capture tail)。跑了几个月的
+  // 机器上 allTargets() 是几百个 —— 一次全量探活就是上千次 spawn, 足够打穿 fd
+  // 上限、把 tmux server 拖垮, 守护进程跟着崩进重启循环 (CLAUDE.md 的 fd 那一条
+  // 记的就是这个失效模式)。所以两道闸:
+  //   1. 先用**不 spawn 的**证据排序 —— transcript 的 mtime, 一次 statSync;
+  //      注册表里登记过的 wizard 无条件入选 (它们是有身份的那些, 也就那么几个)。
+  //   2. 探活并发封顶, 且只探前 WORLD_PROBE 个。
+  // 没被探到的照旧出现在名册里, 只是 busy/alive 按冷处理 —— 图上少一盏呼吸灯,
+  // 远好过把整台机器上的会话一起搞停。
+  const WORLD_PROBE = 48;
+  const WORLD_CONC = 6;
+  const worldPeers = async (self: string): Promise<PeerInfo[]> => {
+    const mtimeOf = (t: string): number => {
+      const p = jsonlOf(t);
+      if (!p) return 0;
+      try { return statSync(p).mtimeMs; } catch { return 0; }
+    };
+    const named = new Set(wizardStore()?.all().map((w) => w.target) ?? []);
+    const ranked = allTargets()
+      .map((t) => ({ t, ts: mtimeOf(t), named: named.has(t) }))
+      .sort((a, b) => (a.named !== b.named ? (a.named ? -1 : 1) : b.ts - a.ts));
+    const hot = ranked.slice(0, WORLD_PROBE).map((x) => x.t);
+    return (await mapLimit(hot, WORLD_CONC, (t) => peerInfoOf(t, self))).sort(byRecent);
   };
 
   // Capture a few extra rows then compact away the TUI's blank padding, so
@@ -5253,6 +5325,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     chatTargets,
     peers,
     foreignPeers,
+    worldPeers,
     resolvePeerTag,
     chatRoster,
     peekPane,
@@ -5415,6 +5488,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // 印章要早于 inject 落地 —— tail 是独立轮询的, 它可能在 inject 的 promise
       // resolve 之前就看到 user 行并开出 turn, 那时归因必须已经在位。
       if (origin) a.pendingOrigin = { origin, at: Date.now() };
+      if (opts?.from) a.pendingFrom = { from: opts.from, at: Date.now() };
       const sid = a.sessionId;
       const paneAlive = a.tmuxPane ? await tmuxPaneAlive(a.tmuxPane) : false;
       if (!paneAlive) {

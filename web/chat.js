@@ -1,18 +1,39 @@
-// Chat 详情 SPA。数据全部来自 /api/chat (侧栏 + 总账) 与 /api/thread (线程),
-// 增量走 /api/events (SSE)。turn 正文是服务端渲染好的 HTML 片段 —— diff / ANSI /
-// 语法高亮只在 shared/detail-render 实现一次, 这里只做 DOM 增量 reconcile。
+// Chat 详情 SPA。三块视图共用一个 `?id=` 凭据:
+//
+//   线程  /api/chat (侧栏 + 总账) + /api/thread (正文) + /api/events (SSE 增量)
+//   关系  /api/world —— 全部 wizard、家谱、跨聊天往来、工单、日程 (轮询)
+//   日程  同一份 /api/world, 换一种读法 (按时间而不是按关系)
+//
+// turn 正文是服务端渲染好的 HTML 片段 —— diff / ANSI / 语法高亮只在
+// shared/detail-render 实现一次, 这里只做 DOM 增量 reconcile。
+//
+// 关系图为什么不用力导向: 节点天然有归属 (哪个聊天) 和层级 (谁的分身), 力导向
+// 会把这两件确定的事揉成一团随机位置。这里改成 HTML 布局 + SVG 连线 —— 聊天是
+// 卡片、分身按家谱缩进 (结构由布局承担), SVG 只画那些布局表达不了的边 (跨卡片
+// 的派活、跨聊天的分身)。好处是文字永远可读、可省略、可响应式换行。
 //
 // 无构建步骤: 保持 var / function 写法, 直接被浏览器加载。
 (function () {
   var qs = new URLSearchParams(location.search);
   var TOKEN = qs.get('id') || '';
+  // 链接指定要开在哪个 wizard 那一栏。票据 (`id`) 可能是兄弟会话的 turn —— 它只
+  // 决定授权范围 (整个聊天), 落点由这个参数说。
+  var WANT = qs.get('target') || '';
   var TICK_MS = 3000;
 
   // at / recvAt: 服务端快照时刻与本地收到时刻。所有"现在几点"的判断都换算到
   // 服务端时钟, 否则客户端时钟偏几分钟就会把运行中的会话判成已结束。
   var S = { base: '', target: '', tags: [], graphs: [], at: 0, recvAt: 0, es: null, pinned: true };
+  // 关系/日程两栏共用的世界快照。sel = 当前聚焦的节点 (空 = 不聚焦, 全图淡显),
+  // kinds = 边类型开关。loaded 用来区分"还没拉过"与"拉过但是空的"。
+  var W = {
+    at: 0, nodes: [], edges: [], chats: [], jobs: [], schedules: [],
+    degraded: false, loaded: false, sel: '', onlyRel: false, kinds: { clone: 1, peer: 1, graph: 1 },
+  };
+  var VIEW = 'thread';
   var $ = function (s) { return document.querySelector(s); };
   var thread = $('#thread'), tagsEl = $('#tags'), sbEl = $('#sb'), connEl = $('#conn'), gbarEl = $('#gbar');
+  var wmapEl = $('#wmap'), wscrollEl = $('#wscroll'), wtoolsEl = $('#wtools'), planEl = $('#plan-in');
 
   var srvNow = function () { return S.at ? S.at + (Date.now() - S.recvAt) : Date.now(); };
 
@@ -181,7 +202,7 @@
         '" data-tag="' + esc(p.tag) + '" title="步 ' + p.step + '/' + g.steps + ' · #' + esc(p.tag) + '">' +
         esc(labelOfTag(p.tag)) + ' ' + esc(p.tag ? '#' + p.tag : 'default') + '</span>';
     }).join('<span class="arw">→</span>');
-    gbarEl.hidden = false;
+    gbarEl.hidden = VIEW !== 'thread';
     gbarEl.innerHTML =
       '<span class="gid" title="graph run">🕸 ' + esc(g.runId) + '</span>' +
       '<span class="pipe">' + nodes + '</span>' +
@@ -195,6 +216,17 @@
       };
     });
   };
+  // 一个会话的 wizard 身份 (名字 / 职责 / 家谱) 只有 /api/world 知道 —— 侧栏
+  // 因此是两份数据的合流: tag 那份讲"跑了多少", world 那份讲"它是谁"。世界还没
+  // 拉回来时退化成原先的 `#tag` 视图, 不阻塞线程的首屏。
+  var nodeOf = function (target) {
+    return W.nodes.filter(function (n) { return n.target === target; })[0];
+  };
+  var nameOf = function (target) {
+    var n = nodeOf(target);
+    return (n && n.name) || (target.indexOf('#') >= 0 ? '#' + target.split('#').pop() : target) || target;
+  };
+
   var renderTags = function () {
     if (!S.tags.length) {
       tagsEl.innerHTML = '<div class="empty-side">这个 chat 还没有会话记录</div>';
@@ -202,9 +234,14 @@
     }
     $('#side-n').textContent = S.tags.length + ' 个会话';
     tagsEl.replaceChildren.apply(tagsEl, S.tags.map(function (t) {
-      var run = isRunning(t);
+      var run = isRunning(t), n = nodeOf(t.target) || {};
       var el = document.createElement('div');
       el.className = 'tag-row' + (t.target === S.target ? ' on' : '') + (run ? ' running' : '');
+      // 名字在前、地址在后: `#tag` 是地址, wizard 起过名之后人读的是名字。
+      var kin = n.parent
+        ? '<span class="kin" title="' + esc(nameOf(n.parent)) + ' 的分身' + (n.inherited ? ' (继承了它的上下文)' : '') + '">↳ ' +
+            esc(nameOf(n.parent)) + (n.inherited ? ' ⧉' : '') + '</span>'
+        : '';
       el.innerHTML =
         '<div class="tag-av">' + esc(t.label) + (run ? '<span class="live"></span>' : '') + '</div>' +
         '<div class="tag-main">' +
@@ -212,6 +249,8 @@
             '<span class="tag-name">' + esc(t.tag ? '#' + t.tag : 'default') + '</span>' +
             '<span class="tag-ts">' + esc(fmtAgo(t.lastTs)) + '</span>' +
           '</div>' +
+          (n.description ? '<div class="tag-job">' + esc(n.description) + '</div>' : '') +
+          (kin ? '<div class="tag-kin">' + kin + '</div>' : '') +
           '<div class="tag-prev">' + esc(t.preview || '(暂无对话)') + '</div>' +
           tagMeta(t) +
         '</div>';
@@ -399,6 +438,22 @@
     };
   };
 
+  // 关系图上随时间变化的只有两样: 呼吸灯该不该亮、"几分钟前"该写几。重建整张图
+  // 会把滚动位置、聚焦态和连线一起抖掉, 所以这里只原地改这两处。
+  var tickWorld = function () {
+    wmapEl.querySelectorAll('.wnode').forEach(function (el) {
+      var n = nodeOf(el.getAttribute('data-t'));
+      if (!n) return;
+      var run = wRunning(n);
+      el.classList.toggle('run', run);
+      var av = el.querySelector('.wav'), dot = el.querySelector('.wav .live');
+      if (run && !dot && av) av.insertAdjacentHTML('beforeend', '<i class="live"></i>');
+      if (!run && dot) dot.remove();
+      var ts = el.querySelector('.wts');
+      if (ts) ts.textContent = fmtAgo(n.lastTs);
+    });
+  };
+
   // 本地心跳: 相对时间、运行中判定、耗时都随时间变化, 但服务端没有新事件可推。
   setInterval(function () {
     if (!S.tags.length) return;
@@ -406,10 +461,400 @@
     renderStatus(curTag());
     renderGraph();
     expireTurns();
+    if (VIEW === 'world') tickWorld();
+    else if (VIEW === 'plan') renderPlan();
   }, TICK_MS);
 
+
+  // ══ 关系视图 ═══════════════════════════════════════════════════════
+  // 三层叠在一起:
+  //   1. 聊天卡片 (HTML)  —— 归属; 一张卡 = 一个群
+  //   2. 家谱缩进 (HTML)  —— 层级; 分身缩在父亲下面, 左侧一道折线
+  //   3. 连线   (SVG)     —— 其余的关系; 布局表达不了的那些 (跨卡片的分身、
+  //                         同群与跨群的派活、流水线的一步)
+  // 前两层撑起版面 (所以文字永远可读), 第三层才是"图"。
+  var EDGE = {
+    clone: { c: '#8250df', label: '分身', dash: '' },
+    peer: { c: '#0969da', label: '派活', dash: '5 4' },
+    graph: { c: '#0a7d6b', label: '流水线', dash: '2 3' },
+  };
+
+  // 老 webview 未必有 CSS.escape, 而 target 里带着 `:` 和 `#` —— 不转义选择器
+  // 直接抛异常, 整张图就白了。
+  var cssEsc = function (v) {
+    return window.CSS && CSS.escape
+      ? CSS.escape(v)
+      : String(v).replace(/[^a-zA-Z0-9_-]/g, function (c) { return '\\' + c; });
+  };
+
+  var shortPath = function (p, keep) {
+    var seg = String(p || '').replace(/\/+$/, '').split('/').filter(Boolean);
+    return seg.length <= keep ? p : '…/' + seg.slice(-keep).join('/');
+  };
+
+  var wRunning = function (n) { return n.busy || (!!n.runningUntil && srvNow() < n.runningUntil); };
+
+  // 卡片里的名字不重复卡片头已经说过的话。默认名是 `聊天名#tag`, 而卡片头写着
+  // 聊天名、行尾还挂着 `#tag` —— 三处同一个词。所以: 起过名字就显示名字, 没起过
+  // 就只显示 `#tag`; 名字本身已经以 `#tag` 收尾时也不再重复那枚 badge。
+  var shortName = function (n) {
+    var fallback = n.chat ? (n.tag ? n.chat + '#' + n.tag : n.chat) : n.tag;
+    return n.name && n.name !== fallback ? n.name : (n.tag ? '#' + n.tag : '默认');
+  };
+
+  // 与 sel 相连的一切 (含 sel 自己)。聚焦时其余的压暗而不是移除 —— 位置稳定,
+  // 反复点不同节点时版面不会跳。
+  var neighborhood = function (target) {
+    var set = {}; set[target] = 1;
+    W.edges.forEach(function (e) {
+      if (e.from === target) set[e.to] = 1;
+      if (e.to === target) set[e.from] = 1;
+    });
+    return set;
+  };
+
+  var edgeOn = function (e) { return !!W.kinds[e.kind]; };
+
+  // 一个节点身上挂了几条 (当前开着的) 边。0 = 它此刻不属于任何协作关系 ——
+  // 「只看有关系的」就是把这些收起来, 剩下的才是真正的那张网。
+  var degree = function (target) {
+    return W.edges.filter(edgeOn).filter(function (e) { return e.from === target || e.to === target; }).length;
+  };
+
+  var renderWTools = function () {
+    var counts = { clone: 0, peer: 0, graph: 0 };
+    W.edges.forEach(function (e) { counts[e.kind] = (counts[e.kind] || 0) + 1; });
+    var cross = W.edges.filter(function (e) { return e.cross; }).length;
+    var chips = Object.keys(EDGE).map(function (k) {
+      return '<button class="chip' + (W.kinds[k] ? ' on' : '') + '" data-k="' + k + '" ' +
+        'style="--c:' + EDGE[k].c + '"><i></i>' + EDGE[k].label +
+        '<b>' + (counts[k] || 0) + '</b></button>';
+    }).join('');
+    wtoolsEl.innerHTML =
+      '<div class="wlegend">' + chips + '</div>' +
+      '<div class="wstat">' +
+        W.nodes.length + ' 个 wizard · ' + W.chats.length + ' 个聊天' +
+        (cross ? ' · <b>' + cross + '</b> 条跨聊天关系' : '') +
+        (W.degraded ? ' · <span class="warn" title="注册表不可达 (独立 svr 部署), 只画观测到的往来">名册缺席</span>' : '') +
+        '<span class="hint">单击聚焦 · 双击进入线程</span>' +
+      '</div>' +
+      '<button class="chip only' + (W.onlyRel ? ' on' : '') + '" id="wonly" ' +
+        'title="把此刻不属于任何关系的 wizard 收起来 —— 剩下的就是这张协作网本身">' +
+        (W.onlyRel ? '☑' : '☐') + ' 只看有关系的</button>' +
+      (W.sel ? '<button class="chip clear" id="wclear">✕ 取消聚焦</button>' : '');
+    wtoolsEl.querySelectorAll('.chip[data-k]').forEach(function (b) {
+      b.onclick = function () {
+        var k = b.getAttribute('data-k');
+        W.kinds[k] = W.kinds[k] ? 0 : 1;
+        renderWTools(); drawEdges();
+      };
+    });
+    var only = $('#wonly');
+    if (only) only.onclick = function () { W.onlyRel = !W.onlyRel; renderWorld(); };
+    var cl = $('#wclear');
+    if (cl) cl.onclick = function () { W.sel = ''; renderWorld(); };
+  };
+
+  var nodeHTML = function (n, depth) {
+    var run = wRunning(n), nm = shortName(n);
+    var dupTag = !n.tag || nm === '#' + n.tag || nm.slice(-(n.tag.length + 1)) === '#' + n.tag;
+    var bits = [];
+    if (n.model) bits.push(n.model.replace(/^claude-/, ''));
+    if (n.cwd) bits.push('📁 ' + shortPath(n.cwd, 1));
+    if (n.turns) bits.push(n.turns + ' 轮');
+    if (n.taskTurns) bits.push('⏰ ' + n.taskTurns);
+    if (n.peerTurns) bits.push('✉ ' + n.peerTurns);
+    return '<div class="wnode' + (n.self ? ' self' : '') + (run ? ' run' : '') +
+        (n.alive ? '' : ' cold') + (n.local ? ' local' : '') + (degree(n.target) ? ' rel' : '') +
+        '" data-t="' + esc(n.target) + '" style="margin-left:' + (depth * 16) + 'px">' +
+      (depth ? '<span class="lin" title="分身"></span>' : '') +
+      '<span class="wav">' + esc(n.label) + (run ? '<i class="live"></i>' : '') + '</span>' +
+      '<span class="wbody">' +
+        '<span class="wl1">' +
+          '<b class="wname" title="' + esc(n.name || n.target) + '">' + esc(nm) + '</b>' +
+          (dupTag ? '' : '<span class="wtag">#' + esc(n.tag) + '</span>') +
+          (n.inherited ? '<span class="wih" title="开局继承了父亲的上下文">⧉</span>' : '') +
+          '<span class="wts">' + esc(fmtAgo(n.lastTs)) + '</span>' +
+        '</span>' +
+        (n.description ? '<span class="wjob">' + esc(n.description) + '</span>' : '') +
+        (n.preview ? '<span class="wprev">' + esc(n.preview) + '</span>' : '') +
+        (bits.length ? '<span class="wmeta">' + bits.map(esc).join('<span class="sep">·</span>') + '</span>' : '') +
+      '</span>' +
+    '</div>';
+  };
+
+  var renderWMap = function () {
+    if (!W.chats.length) {
+      wmapEl.innerHTML = '<div class="empty">' + (W.loaded ? '还没有任何 wizard 记录' : '加载中…') + '</div>';
+      return;
+    }
+    var hood = W.sel ? neighborhood(W.sel) : null;
+    var cards = W.chats.map(function (c) {
+      var shown = c.members.filter(function (mm) { return !W.onlyRel || degree(mm.target); });
+      var live = shown.filter(function (mm) {
+        var n = nodeOf(mm.target); return n && wRunning(n);
+      }).length;
+      var rows = shown.map(function (mm) {
+        var n = nodeOf(mm.target);
+        // 「只看有关系的」会把父亲筛掉而留下分身 —— 那时的缩进没有参照物, 拉平。
+        var d = W.onlyRel ? 0 : mm.depth;
+        return n ? nodeHTML(n, d) : '';
+      }).join('');
+      if (!shown.length) return '';
+      return '<section class="wchat' + (c.self ? ' self' : '') + '" data-base="' + esc(c.base) + '">' +
+        '<header class="wch">' +
+          '<span class="nm">' + esc(c.name || c.base) + '</span>' +
+          (c.self ? '<span class="here">当前</span>' : '') +
+          '<span class="ct">' + shown.length + (live ? ' · <em>' + live + ' 在跑</em>' : '') + '</span>' +
+        '</header>' +
+        '<div class="wrows">' + rows + '</div>' +
+        (c.hidden || shown.length < c.members.length
+          ? '<div class="wmore" title="不在图上的会话 —— 它们还在, 只是此刻既没在跑也没有关系">另有 ' +
+              (c.hidden + (c.members.length - shown.length)) + ' 个未显示</div>'
+          : '') +
+      '</section>';
+    }).filter(Boolean).join('');
+    wmapEl.innerHTML = '<svg class="wedges" id="wedges"></svg><div class="wgrid">' +
+      (cards || '<div class="empty">此刻没有任何协作关系 —— 派活 / 生分身之后这里就有边了</div>') + '</div>';
+    wmapEl.querySelectorAll('.wnode').forEach(function (el) {
+      var t = el.getAttribute('data-t');
+      if (hood && !hood[t]) el.classList.add('dim');
+      if (t === W.sel) el.classList.add('sel');
+      el.onclick = function () { W.sel = (W.sel === t ? '' : t); renderWorld(); };
+      el.ondblclick = function () {
+        // 双击 = 进它的线程。只有同聊天的节点有线程可进 —— 凭据按聊天关
+        // (见 chat-http 的 capability 说明), 外聊天的节点只有身份与关系。
+        var n = nodeOf(t);
+        if (n && n.local) { setView('thread'); select(t); }
+      };
+    });
+  };
+
+  // ── 连线 ──
+  // 端点在布局之后才知道 (卡片会换行、文字会折行), 所以连线是一个纯粹的
+  // "读版面 → 画路径" 的过程, 每次重排都重来一遍, 不维护任何位置状态。
+  var anchorsOf = function (a, b, base) {
+    var ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+    var ox = base.left, oy = base.top;
+    var A = { l: ra.left - ox, r: ra.right - ox, cy: ra.top - oy + ra.height / 2 };
+    var B = { l: rb.left - ox, r: rb.right - ox, cy: rb.top - oy + rb.height / 2 };
+    // 同一列 (同一张卡片里) → 两端都走左侧, 从左边的空白处绕出去, 像 git 图的
+    // 那条 gutter。左右分列 → 从近的一侧出、近的一侧进。
+    if (Math.abs(A.l - B.l) < 60) {
+      // 同卡片内的边走卡片自己的左内边距 (.wrows 的 padding-left) —— 那条车道
+      // 就是为它留的。拐到卡片外面既会被滚动容器裁掉, 也读不出"这两个是一个群
+      // 里的"。room 按最近的卡片左沿算, 没有卡片 (理论上不会) 才退回画布左沿。
+      var card = a.closest('.wchat');
+      var lane = card ? card.getBoundingClientRect().left - ox + 6 : 4;
+      var room = Math.max(6, Math.min(A.l, B.l) - lane);
+      var d = Math.min(room, 14 + Math.abs(A.cy - B.cy) * 0.22);
+      return {
+        d: 'M' + A.l + ',' + A.cy + ' C' + (A.l - d) + ',' + A.cy + ' ' + (B.l - d) + ',' + B.cy + ' ' + B.l + ',' + B.cy,
+        head: 'start',
+      };
+    }
+    var right = B.l > A.l;
+    var ax = right ? A.r : A.l, bx = right ? B.l : B.r;
+    var k = right ? 1 : -1, dd = Math.max(46, Math.abs(bx - ax) * 0.42);
+    return {
+      d: 'M' + ax + ',' + A.cy + ' C' + (ax + dd * k) + ',' + A.cy + ' ' + (bx - dd * k) + ',' + B.cy + ' ' + bx + ',' + B.cy,
+      head: right ? 'end' : 'start',
+    };
+  };
+
+  var drawEdges = function () {
+    var svg = $('#wedges');
+    if (!svg) return;
+    var base = wmapEl.getBoundingClientRect();
+    svg.setAttribute('width', wmapEl.scrollWidth);
+    svg.setAttribute('height', wmapEl.scrollHeight);
+    svg.setAttribute('viewBox', '0 0 ' + wmapEl.scrollWidth + ' ' + wmapEl.scrollHeight);
+    var defs = Object.keys(EDGE).map(function (k) {
+      return ['', '-d'].map(function (sfx) {
+        return '<marker id="ah-' + k + sfx + '" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" ' +
+          'orient="auto-start-reverse"><path d="M0,0 L8,4 L0,8 z" fill="' + EDGE[k].c + '" ' +
+          'opacity="' + (sfx ? '.16' : '.85') + '"/></marker>';
+      }).join('');
+    }).join('');
+    var hood = W.sel ? neighborhood(W.sel) : null;
+    var paths = W.edges.filter(edgeOn).map(function (e) {
+      var a = wmapEl.querySelector('.wnode[data-t="' + cssEsc(e.from) + '"]');
+      var b = wmapEl.querySelector('.wnode[data-t="' + cssEsc(e.to) + '"]');
+      if (!a || !b) return '';
+      var p = anchorsOf(a, b, base);
+      // 聚焦时: 不碰 sel 的边压到近乎不可见 —— 删掉它们会让"这张图本来有多密"
+      // 这个信息消失, 而那恰恰是判断要不要收几个 wizard 的依据。
+      var off = hood && !(e.from === W.sel || e.to === W.sel);
+      var w = Math.min(4, 1.1 + Math.log(1 + e.count) * 0.9);
+      return '<path d="' + p.d + '" fill="none" stroke="' + EDGE[e.kind].c + '" ' +
+        'stroke-width="' + (off ? 1 : w).toFixed(2) + '" ' +
+        'stroke-dasharray="' + (EDGE[e.kind].dash || '') + '" ' +
+        'opacity="' + (off ? 0.14 : (e.cross ? 0.95 : 0.6)) + '" ' +
+        'marker-' + p.head + '="url(#ah-' + e.kind + (off ? '-d' : '') + ')">' +
+        '<title>' + esc(nameOf(e.from) + ' → ' + nameOf(e.to)) + ' · ' + EDGE[e.kind].label +
+        (e.count > 1 ? ' ×' + e.count : '') + (e.cross ? ' (跨聊天)' : '') +
+        (e.jobs && e.jobs.length ? ' · 工单 ' + esc(e.jobs.join(' ')) : '') + '</title></path>';
+    }).join('');
+    svg.innerHTML = '<defs>' + defs + '</defs>' + paths;
+  };
+
+  var renderWorld = function () {
+    renderWTools();
+    renderWMap();
+    // 连线要等浏览器把卡片排好 —— 同一帧里量到的是上一次的版面。
+    requestAnimationFrame(drawEdges);
+  };
+
+  // ══ 日程视图 ═══════════════════════════════════════════════════════
+  // 定时任务与工单摆在一起, 因为它们回答同一个问题: **什么被安排了**。
+  // 区别只在时间的方向 —— 定时指向未来 (下次几点放枪), 工单指向现在 (还开着
+  // 的这几路活干完没有)。
+  var fmtClock = function (ts) {
+    if (!ts) return '—';
+    var d = new Date(ts), p = function (n) { return n < 10 ? '0' + n : '' + n; };
+    var today = new Date(srvNow());
+    var sameDay = d.toDateString() === today.toDateString();
+    return (sameDay ? '今天 ' : (p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ')) + p(d.getHours()) + ':' + p(d.getMinutes());
+  };
+  var fmtIn = function (ts) {
+    var d = ts - srvNow();
+    if (d <= 0) return '即将';
+    if (d < 3600000) return Math.max(1, Math.round(d / 60000)) + ' 分钟后';
+    if (d < 86400000) return Math.round(d / 3600000) + ' 小时后';
+    return Math.round(d / 86400000) + ' 天后';
+  };
+
+  var wizChip = function (target) {
+    var n = nodeOf(target);
+    return '<span class="wchip' + (n && n.local ? ' go' : '') + '" data-t="' + esc(target) + '">' +
+      esc((n && n.label) || '🧙') + ' ' + esc(nameOf(target)) + '</span>';
+  };
+
+  // 未来 12 小时的刻度条: 哪几个钟点会有任务醒来, 一眼看完。超出 12h 的排进下面
+  // 的列表但不占刻度 —— 把 24h 压进这么窄的一条, 刻度会密到读不出。
+  var HORIZON_H = 12;
+  var renderStrip = function (list) {
+    var now = srvNow(), span = HORIZON_H * 3600000;
+    var soon = list.filter(function (x) { return x.nextAt - now < span; });
+    var ticks = [];
+    for (var i = 0; i <= HORIZON_H; i += 3) {
+      var t = new Date(now + i * 3600000);
+      ticks.push('<span class="tk" style="left:' + (i / HORIZON_H * 100) + '%">' +
+        (i ? (t.getHours() < 10 ? '0' : '') + t.getHours() + ':00' : '现在') + '</span>');
+    }
+    var pins = soon.map(function (x) {
+      var pct = Math.max(0, Math.min(100, (x.nextAt - now) / span * 100));
+      return '<span class="pin" style="left:' + pct.toFixed(2) + '%" data-t="' + esc(x.target) + '" ' +
+        'title="' + esc(fmtClock(x.nextAt) + ' · ' + nameOf(x.target) + ' · ' + x.when) + '"></span>';
+    }).join('');
+    return '<div class="strip"><div class="axis">' + ticks.join('') + '</div>' +
+      '<div class="rail">' + pins + '</div>' +
+      '<div class="cap">' + (soon.length ? '未来 ' + HORIZON_H + ' 小时内 ' + soon.length + ' 次触发' : '未来 ' + HORIZON_H + ' 小时内没有定时任务') + '</div></div>';
+  };
+
+  var renderPlan = function () {
+    var ss = W.schedules || [], js = W.jobs || [];
+    var open = js.filter(function (j) { return j.status === 'open'; });
+    var closed = js.filter(function (j) { return j.status !== 'open'; });
+    var schedRows = ss.length
+      ? ss.map(function (x) {
+          return '<div class="prow">' +
+            '<div class="pl">' +
+              '<div class="pwhen">⏰ ' + esc(x.when) + '</div>' +
+              '<div class="pnext"><b>' + esc(fmtClock(x.nextAt)) + '</b><span>' + esc(fmtIn(x.nextAt)) + '</span></div>' +
+            '</div>' +
+            '<div class="pr">' +
+              '<div class="ph">' + wizChip(x.target) + (x.note ? '<span class="note">' + esc(x.note) + '</span>' : '') +
+                '<span class="pid">' + esc(x.id) + '</span></div>' +
+              '<div class="ptext">' + esc(x.prompt.split('\n')[0].slice(0, 160)) + '</div>' +
+              '<div class="pfoot">' + (x.lastFired ? '上次 ' + esc(fmtAgo(x.lastFired)) : '还没跑过') + '</div>' +
+            '</div>' +
+          '</div>';
+        }).join('')
+      : '<div class="pempty">没有定时任务 —— schedule_task 排一个</div>';
+
+    var jobRow = function (j) {
+      return '<div class="jrow' + (j.status === 'open' ? ' open' : '') + '">' +
+        '<div class="jh"><span class="jid">' + esc(j.id) + '</span>' +
+          '<span class="jt">' + esc(j.title) + '</span>' +
+          '<span class="jst">' + (j.status === 'open' ? '进行中' : '已收工') + '</span>' +
+          '<span class="jts">' + esc(fmtAgo(j.closedAt || j.openedAt)) + '</span></div>' +
+        '<div class="jm">' + (j.members.length
+          ? j.members.map(function (mm) {
+              return '<span class="jmm">' + wizChip(mm.target) +
+                (mm.spawned ? '<i class="tmp" title="为这个工单临时生的分身, 收工时回收">临时</i>' : '') +
+                '<em>' + esc((mm.task || '').split('\n')[0].slice(0, 70)) + '</em></span>';
+            }).join('')
+          : '<span class="jmm none">还没有成员</span>') + '</div>' +
+        (j.summary ? '<div class="jsum">' + esc(j.summary.slice(0, 300)) + '</div>' : '') +
+      '</div>';
+    };
+
+    planEl.innerHTML =
+      '<section class="psec">' +
+        '<h3>⏰ 定时任务<span>' + ss.length + '</span></h3>' +
+        renderStrip(ss) + schedRows +
+      '</section>' +
+      '<section class="psec">' +
+        '<h3>📋 工单<span>' + open.length + ' 开 / ' + closed.length + ' 收</span></h3>' +
+        (js.length ? open.concat(closed).map(jobRow).join('') : '<div class="pempty">没有工单 —— 一次派出两个以上分身时 open_job 开一个</div>') +
+      '</section>';
+    planEl.querySelectorAll('.wchip.go').forEach(function (c) {
+      c.onclick = function () { setView('thread'); select(c.getAttribute('data-t')); };
+    });
+  };
+
+  // ══ 视图切换 ═══════════════════════════════════════════════════════
+  // 世界快照不走 SSE: 它变动的源头 (spawn / 改职责 / 开收工单 / 排定时) 一条都
+  // 不经过 detail store, 而给它们各自搭一条事件通路, 换来的只是几秒的新鲜度。
+  // 改成"看得见才轮询": 不在关系/日程栏、或者页面在后台, 就一次都不请求。
+  var WORLD_MS = 6000;
+  var worldTimer = null;
+  var loadWorld = function () {
+    return api('api/world', {}).then(function (d) {
+      if (!d.ok) return;
+      W.at = d.at; W.loaded = true;
+      W.nodes = d.nodes || []; W.edges = d.edges || []; W.chats = d.chats || [];
+      W.jobs = d.jobs || []; W.schedules = d.schedules || []; W.degraded = !!d.degraded;
+      // 身份回来了, 侧栏那几行也跟着变 —— 名字/职责/家谱都在这份数据里。
+      renderTags();
+      if (VIEW === 'world') renderWorld();
+      if (VIEW === 'plan') renderPlan();
+    }).catch(function () { });
+  };
+  var pollWorld = function () {
+    if (worldTimer) { clearInterval(worldTimer); worldTimer = null; }
+    if (VIEW === 'thread') return;
+    worldTimer = setInterval(function () {
+      if (!document.hidden) loadWorld();
+    }, WORLD_MS);
+  };
+
+  var setView = function (v) {
+    VIEW = v;
+    $('#views').querySelectorAll('.vb').forEach(function (b) {
+      b.classList.toggle('on', b.getAttribute('data-view') === v);
+    });
+    thread.hidden = v !== 'thread';
+    $('#pane-world').hidden = v !== 'world';
+    $('#pane-plan').hidden = v !== 'plan';
+    // graph 条只对线程有意义 (它讲的是当前这一路被谁驱动)。
+    gbarEl.hidden = v !== 'thread' || !(S.graphs || []).length;
+    document.querySelector('.app').classList.toggle('wide', v !== 'thread');
+    if (v === 'thread') { toBottom(true); }
+    else if (!W.loaded) { (v === 'world' ? (wmapEl.innerHTML = '<div class="empty">加载中…</div>') : (planEl.innerHTML = '<div class="empty">加载中…</div>')); loadWorld(); }
+    else if (v === 'world') renderWorld();
+    else renderPlan();
+    pollWorld();
+  };
+  $('#views').querySelectorAll('.vb').forEach(function (b) {
+    b.onclick = function () { setView(b.getAttribute('data-view')); };
+  });
+  // 卡片换行会改变每个节点的坐标 —— 连线必须跟着重画。
+  window.addEventListener('resize', function () { if (VIEW === 'world') requestAnimationFrame(drawEdges); });
+
   // ── boot ──
-  api('api/chat', {}).then(function (d) {
+  api('api/chat', WANT ? { target: WANT } : {}).then(function (d) {
     if (!d.ok) {
       document.body.innerHTML = '<div class="empty" style="padding:80px">' + esc(d.error || 'not found') + '</div>';
       return;
@@ -418,4 +863,7 @@
     // 卡片链接带来的那条 turn 决定默认选中的 tag; 否则取最近活跃的。
     select(d.self && d.self.target ? d.self.target : (S.tags[0] && S.tags[0].target));
   });
+  // 与线程并行取: 侧栏那几行的名字 / 职责 / 家谱都在这份快照里, 不该等线程渲染完
+  // 才补上。首屏之后就只在关系/日程栏轮询 (见 pollWorld)。
+  loadWorld();
 })();

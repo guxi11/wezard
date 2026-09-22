@@ -13,7 +13,8 @@ import { makeBridge } from "./cc-bridge.js";
 import { startMirror, installMirrorEventListener, type MirrorBridge } from "./mirror-bridge.js";
 import { setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { installApprovalEventListener, makeApproveHandler } from "./approval.js";
-import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, buildChatUrl, latestTurnIdFor } from "./detail.js";
+import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, buildChatUrl, latestTurnIdFor, chatTicketFor, setWorldFactsProvider } from "./detail.js";
+import { EMPTY_FACTS, type WorldFacts, type WorldFactWizard } from "../shared/world.js";
 import { initAutoWindowPersistence } from "./session-cache.js";
 import { makeMessageHandler } from "./outbound.js";
 import { makeCardHandler, makeAskHandler, installAskEventListener } from "./ask.js";
@@ -33,7 +34,7 @@ import {
   removeScheduleById,
   renderSchedule,
 } from "./tasks.js";
-import { parseWhen } from "../shared/schedule-spec.js";
+import { describeWhen, nextFire, parseWhen } from "../shared/schedule-spec.js";
 import { baseOfKey, keyOf, labelFor, normalizeTag, tagFromCwd, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
 import { applyChatNames, chatBaseOf, chatNameOf, clearChatName, listChatNames, normChatName, peerAddress, planChatNames, setChatName } from "./chat-name.js";
 import {
@@ -577,11 +578,15 @@ const main = async (): Promise<void> => {
       return url ? `[${name}](${url})` : name;
     };
     /** 头上的名字挂它自己的 chat 详情页 —— 看见「A → B」的人下一步想问的永远是
-     *  「A 那边在干嘛」, 链接就省掉他去翻群找 A 气泡这一步。票据取该 wizard 最近
-     *  那条 turn (mirror 的 linkedTagPrefix 同源); 没跑过一轮就不挂, 留裸名字。 */
+     *  「A 那边在干嘛」, 链接就省掉他去翻群找 A 气泡这一步。票据优先取该 wizard 自己
+     *  最近那条 turn (mirror 的 linkedTagPrefix 同源), 取不到就退到它所在聊天的长期
+     *  票据 —— `?id=` 的授权范围本来就是整个聊天, 开在谁那一栏由 `target=` 明说, 所以
+     *  换票不多给权限也不会开错栏。少了这层兜底, `A → B` 里的 B 几乎总是不可点:
+     *  detail store 只留 24h, 而被派活的那个 wizard 恰恰常常是刚出生 / 闲了一天的,
+     *  跨聊天派活时它所在的那个群更可能整个群都没有 turn 记录。 */
     const chatDetailUrl = (t: string): string | undefined => {
-      const id = latestTurnIdFor(t);
-      return id ? buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, id, chatIdOf(t)) : undefined;
+      const id = latestTurnIdFor(t) ?? chatTicketFor(baseOfKey(t));
+      return id ? buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, id, chatIdOf(t), t) : undefined;
     };
     /** 一条 relay 只落在**收信那一方**的群里, 从不两头都发:
      *  - 派活 → to 的群。同群时那就是双方共处的那个群 (行为照旧); 跨群时源头群
@@ -686,7 +691,7 @@ const main = async (): Promise<void> => {
           return;
         }
       }
-      const inj = await m.injectText(target, text);
+      const inj = await m.injectText(target, text, undefined, { from: { kind: "peer", from: self, ...(jobId ? { job: jobId } : {}) } });
       // 归到工单名下的往返不单独出气泡: 五路 fan-out 的每一次派活都发一条, 群里
       // 就只剩交叉的气泡, 读不出结构。它照旧落在对方的 chat 详情页里, 收工那一条
       // 会把成员和各自那段活一起列出来。
@@ -869,6 +874,89 @@ const main = async (): Promise<void> => {
       if (j.members.length >= JOB_MEMBER_MAX) return { ok: false, status: 409, reason: `工单 '${id}' 的成员已经满了 (${JOB_MEMBER_MAX} 个) —— 分身是有成本的, 拆成两个工单, 或者先收工回收掉一批` };
       return { ok: true };
     };
+
+    // ── 关系视图的数据面 ──────────────────────────────────────────────
+    // `/api/world` (chat 详情页的「关系」「日程」两栏) 要的是注册表侧的事实:
+    // 身份、家谱、工单、日程, 外加此刻的忙闲。turn 记录里没有这些 —— 它只知道
+    // "某个 target 跑了一轮"。
+    //
+    // 活体状态要一个 pane 一次 tmux, 而这条路由会被前端定时轮询, 几十个 wizard
+    // 就是几十次 shell-out。所以整份快照带一个短 TTL 缓存: 页面上的呼吸灯晚几秒
+    // 亮起无所谓, 把 tmux 打爆则会连累所有正在跑的会话。
+    const WORLD_TTL_MS = 5_000;
+    let worldCache: { at: number; facts: Promise<WorldFacts> } | undefined;
+    const collectWorldFacts = async (): Promise<WorldFacts> => {
+      // self 只影响 PeerInfo.address 的写法, 关系图不用它 —— 传 defaultChat 让
+      // peerInfoOf 有个基准即可。
+      const anchorSelf = cfg.defaultChat || m.chatRoster("").at(0)?.base || "";
+      const peers = await m.worldPeers(anchorSelf);
+      const known = wizards.all();
+      const byTarget = new Map(known.map((w) => [w.target, w] as const));
+      const seen = new Set(peers.map((p) => p.target));
+      const live: WorldFactWizard[] = peers.map((p) => {
+        const w = byTarget.get(p.target);
+        return {
+          target: p.target,
+          name: wizardName(w, chatNameOf(cfg, p.target), p.target),
+          description: w?.description ?? "",
+          chat: chatNameOf(cfg, p.target) || p.chat,
+          cwd: p.cwd,
+          model: p.model,
+          cli: p.cli,
+          busy: p.busy,
+          alive: p.paneAlive,
+          parent: w?.parent,
+          clonedFrom: w?.clonedFrom,
+          bornAt: w?.bornAt,
+          lastActivity: p.lastActivity,
+          summary: p.summary,
+        };
+      });
+      // 注册表里有、但一个 pane / 绑定都不剩的 —— 仍是家谱上的一环 (它的分身还在
+      // 跑), 漏掉它会让那些分身看着像是凭空长出来的。
+      const cold: WorldFactWizard[] = known
+        .filter((w) => !seen.has(w.target))
+        .map((w) => ({
+          target: w.target,
+          name: wizardName(w, chatNameOf(cfg, w.target), w.target),
+          description: w.description,
+          chat: chatNameOf(cfg, w.target),
+          cwd: "", model: "", cli: "",
+          busy: false, alive: false,
+          parent: w.parent,
+          clonedFrom: w.clonedFrom,
+          bornAt: w.bornAt,
+          lastActivity: 0,
+          summary: "(未运行)",
+        }));
+      const nowDate = new Date();
+      return {
+        wizards: [...live, ...cold],
+        jobs: jobs.all().map((j) => ({
+          id: j.id, base: j.base, owner: j.owner, title: j.title, status: j.status,
+          openedAt: j.openedAt, closedAt: j.closedAt, summary: j.summary,
+          members: j.members.map((mm) => ({ target: mm.target, task: mm.task, spawned: mm.spawned })),
+        })),
+        schedules: cfg.schedules.map((x) => ({
+          id: x.id,
+          target: x.target,
+          when: describeWhen(x.when),
+          nextAt: nextFire(x.when, x.lastFired ?? x.createdAt, nowDate),
+          lastFired: x.lastFired,
+          prompt: x.prompt,
+          note: x.note,
+          createdBy: x.createdBy,
+        })),
+        chatNames: Object.fromEntries(listChatNames(cfg).map((c) => [c.base, c.name])),
+      };
+    };
+    setWorldFactsProvider(() => {
+      const now = Date.now();
+      if (!worldCache || now - worldCache.at > WORLD_TTL_MS) {
+        worldCache = { at: now, facts: collectWorldFacts().catch(() => EMPTY_FACTS) };
+      }
+      return worldCache.facts;
+    });
 
     /** 上下文超过这个数就该自己交接了。Claude 家族最小的窗口是 200k, 留三成余量
      *  给交接那一轮本身 —— 提示而已, 决定权在 wizard 自己。 */
@@ -1178,7 +1266,7 @@ const main = async (): Promise<void> => {
       // 才需要在这里补一次注入。
       let dispatched = r.inherited && !!task;
       if (task && !r.inherited) {
-        const inj = await m.injectText(target, task);
+        const inj = await m.injectText(target, task, undefined, { from: { kind: "peer", from: self, ...(jobId ? { job: jobId } : {}) } });
         dispatched = inj.ok;
       }
       if (jobId) jobs.attach(jobId, { target, task, spawned: true });
@@ -1447,7 +1535,8 @@ const main = async (): Promise<void> => {
     log: log.child({ mod: "tasks" }),
     inject:
       cfg.wrc.mode === "mirror"
-        ? (target, text) => (bridge as MirrorBridge).injectText(target, text, undefined, { fromChat: true })
+        ? (target, text, taskId) =>
+            (bridge as MirrorBridge).injectText(target, text, undefined, { fromChat: true, from: { kind: "task", taskId } })
         : undefined,
   });
 

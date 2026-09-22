@@ -95,6 +95,28 @@ export interface TurnOrigin {
   fromTag?: string;
 }
 
+// 出处 —— 这一轮是**谁开的口**。undefined = 人直接说的 (群里发言 / CLI 敲字)。
+//
+// 一个 wizard 的轮次早就不只来自人了: 同伴 send_peer 派活、工单 fan-out、定时
+// 任务到点放枪。这些边只存在于发生的那一刻 —— jobs.json 记的是「安排了谁」,
+// schedules 记的是「打算什么时候」, 都不是「真的发生过一次」。关系图画的正是
+// 后者, 所以它必须跟着 turn 记录一起过夜 (append-only JSONL), 和 origin 同理。
+//
+// 与 origin 并列而不是合并: graph 的 (runId, round, step) 是一条声明好的流水线
+// 上的坐标, peer 派活没有这套坐标, 硬塞进去每个字段都得是可选的, 读的人分不清
+// 哪种组合才合法。
+export interface TurnFrom {
+  /** peer = 另一个 wizard 派的; task = 定时任务放的枪。 */
+  kind: "peer" | "task";
+  /** 派活那一方的 target key (kind=peer)。跨聊天时它的 base 与本轮不同 —— 这正是
+   *  「wizards 跨 chats 关联起来了」这件事在数据里唯一的落点。 */
+  from?: string;
+  /** 归在哪个工单名下 (open_job 的 id); 不走工单的派活没有。 */
+  job?: string;
+  /** 定时任务 id (kind=task) —— 拿它回 config.schedules 里找规格。 */
+  taskId?: string;
+}
+
 // Subagent 归属 —— 这一轮不是主会话的 turn, 是 Task/Agent 工具派出的子 agent
 // 在自己的 transcript (`<sid>/subagents/agent-<id>.jsonl`) 里跑出来的。与 origin
 // 一样落在记录里: chat 线程按时间轴内联渲染 subagent turn, 没有这个字段就分不出
@@ -124,6 +146,7 @@ export interface TurnDetailRecord {
   userQuery?: string;  // 触发本轮的用户输入原文 (mirror 侧 dispatch 的 text)
   cut?: CtxCut;        // 本轮之前的上下文断点; undefined = 与上一轮同一上下文
   origin?: TurnOrigin; // 本轮由 graph 注入; undefined = 人 (或 peer) 直接发起
+  from?: TurnFrom;     // 本轮由同伴 / 定时任务开口; undefined = 人直接说的
   agent?: TurnAgentMeta; // 本轮是 subagent 跑的; undefined = 主会话自身的 turn
   items: TurnItem[];
   model?: string;      // 首个见到的 model 名
@@ -150,7 +173,27 @@ export interface MarkDetailRecord {
   cut: CtxCut;
 }
 
-export type DetailRecord = ToolDetailRecord | ApprovalDetailRecord | TurnDetailRecord | MarkDetailRecord;
+// 聊天票据 —— 只承载「这个 id 属于哪个聊天」, 没有任何内容。chat 详情页的 `?id=`
+// 既是凭据也是落点的默认值, 而凭据此前只能从一条真实的 turn 记录里借: 一个刚出生
+// 或闲了一天的 wizard 没有记录, 它的名字在群里就只能是一段不可点的裸文本 —— 而
+// 「A → B」里人最想点开的恰恰是 B。票据把「能不能点开这个聊天」与「这个聊天最近
+// 有没有跑过一轮」彻底解耦。
+// 一个聊天一条, 且**不参与 TTL / LRU 回收**: 它是长期凭据, 过期等于链接失效, 而它
+// 承载的那点信息 (id ↔ 聊天) 永不过时。
+export interface ChatTicketRecord {
+  kind: "chat";
+  id: string;
+  createdAt: number;
+  /** 没有 `target=` 时页面默认开在哪一栏 —— 该聊天的默认 wizard。 */
+  target: string;
+}
+
+export type DetailRecord =
+  | ToolDetailRecord
+  | ApprovalDetailRecord
+  | TurnDetailRecord
+  | MarkDetailRecord
+  | ChatTicketRecord;
 
 export interface DetailStore {
   recordTool(rec: Omit<ToolDetailRecord, "kind" | "createdAt"> & { createdAt?: number }): void;
@@ -191,12 +234,16 @@ export const createDetailStore = (opts: { stateDir: string; log?: Logger }): Det
   mkdirSync(dir, { recursive: true });
   const logPath = join(dir, "details.jsonl");
 
+  // 票据是长期凭据, 回收它等于让群里的链接集体失效 —— 两条回收路径都绕开它。
+  // 它不占预算: 一个聊天一条, 上限就是聊天数。
+  const evictable = (r: DetailRecord): boolean => r.kind !== "chat";
+
   const gc = (): void => {
     const cutoff = Date.now() - TTL_MS;
-    for (const [k, v] of store) if (v.createdAt < cutoff) store.delete(k);
+    for (const [k, v] of store) if (evictable(v) && v.createdAt < cutoff) store.delete(k);
     if (store.size > MAX) {
-      const sorted = [...store.entries()].sort((a, b) => a[1].createdAt - b[1].createdAt);
-      for (let i = 0; i < sorted.length - MAX; i++) store.delete(sorted[i]![0]);
+      const sorted = [...store.entries()].filter(([, v]) => evictable(v)).sort((a, b) => a[1].createdAt - b[1].createdAt);
+      for (let i = 0; i < Math.min(sorted.length, store.size - MAX); i++) store.delete(sorted[i]![0]);
     }
   };
 
@@ -231,8 +278,9 @@ export const createDetailStore = (opts: { stateDir: string; log?: Logger }): Det
         if (!line) continue;
         try {
           const r = JSON.parse(line) as DetailRecord;
-          if (!r?.id || (r.kind !== "tool" && r.kind !== "approval" && r.kind !== "turn" && r.kind !== "mark")) continue;
-          if (typeof r.createdAt !== "number" || r.createdAt < cutoff) { dropped++; continue; }
+          if (!r?.id || (r.kind !== "tool" && r.kind !== "approval" && r.kind !== "turn" && r.kind !== "mark" && r.kind !== "chat")) continue;
+          if (typeof r.createdAt !== "number") { dropped++; continue; }
+          if (r.createdAt < cutoff && r.kind !== "chat") { dropped++; continue; }
           store.set(r.id, r);
           replayed++;
         } catch { /* skip malformed line */ }

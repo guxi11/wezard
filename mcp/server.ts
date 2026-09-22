@@ -325,7 +325,7 @@ const unwrap = (name: string, { j, status }: DaemonReply, pick: (j: Record<strin
 // 地址语法只有一套, 每个吃地址的工具都把它原样重述一遍: 模型单看一个 schema
 // 时没有别的地方能学到它, 而猜出来的地址会安静地指向另一个 wizard 的终端。
 const ADDRESS_DOC =
-  "wizard 的地址。`''` = 本聊天的默认 wizard (没有 `#tag` 的那个)。裸 tag 如 `'fix'` = 本聊天的 `#fix`; 本聊天没有就退回到全机唯一的那个 `#fix`。`'daily#fix'` 直接指名聊天 —— 跨聊天可靠的形式, 也是好几个聊天各有一个 `#fix` 时唯一有效的形式。永远别自己拼: wizard_roster / list_peers / list_chats 返回的 `address` 就是要原样传回来的那个串。";
+  "wizard 的地址。`''` = 本聊天的默认 wizard (没有 `#tag` 的那个)。裸 tag 如 `'fix'` = 本聊天的 `#fix`; 本聊天没有就退回到全机唯一的那个 `#fix`。`'daily#fix'` 直接指名聊天 —— 跨聊天可靠的形式, 也是好几个聊天各有一个 `#fix` 时唯一有效的形式; 裸聊天名 `'daily'` = 那个聊天的默认 wizard。永远别自己拼: wizard_roster / list_peers / list_chats 返回的 `address` 就是要原样传回来的那个串。";
 
 // 造一个 wizard 是本地操作, 不是全局操作: 它落在调用方自己的聊天里 (所以走
 // `selfRef`), 带自己的 `#tag`; 或者 —— 给了 `chat` —— 落在另一个**起过名字**的

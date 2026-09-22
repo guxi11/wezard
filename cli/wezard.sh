@@ -91,10 +91,13 @@ PLIST="$HOME_DIR/Library/LaunchAgents/${LABEL}.plist"
 
 # Fast readiness probe — short per-call timeout so a bound-but-wedged /status
 # (e.g. daemon blocked on WS init) fails the poll in ~1s, not the 5s http_get
-# budget. 30 tries × ~1s ceiling ≈ bounded ~30s worst case, not minutes.
+# budget.
 probe()     { curl -sS --noproxy '*' --connect-timeout 1 --max-time 1 "$DAEMON_BASE/status" >/dev/null 2>&1; }
-wait_up()   { for _ in $(seq 1 30); do probe && return 0; sleep 0.3; done; return 1; }
-wait_down() { for _ in $(seq 1 30); do probe || return 0; sleep 0.3; done; return 1; }
+# 按墙钟收口, 不按次数: 端口没 bind 时 curl 立刻 connection-refused 返回, 30 次
+# 循环其实只等了 ~9s —— 而恢复几百个镜像绑定的 boot 要几十秒才 listen, 于是
+# reload 明明成功却报 "not responding"。
+wait_up()   { local end=$((SECONDS + 90)); while (( SECONDS < end )); do probe && return 0; sleep 0.3; done; return 1; }
+wait_down() { local end=$((SECONDS + 30)); while (( SECONDS < end )); do probe || return 0; sleep 0.3; done; return 1; }
 
 # Nohup fallback for Linux boxes with no systemd user session (containers, CI,
 # minimal images where D-Bus is unreachable). Detached background node process,

@@ -213,3 +213,270 @@ body { overflow: hidden; overscroll-behavior: none }
   .statusbar { gap: 10px; padding: 7px 12px calc(7px + env(safe-area-inset-bottom)) }
   .sb-io, .statusbar .model { display: none }
 }
+
+/* UA 的 [hidden] 规则和 `.gbar{display:flex}` 这类类选择器同权重, 而作者样式
+   胜出 —— 于是 el.hidden=true 的元素照旧显示 (空的 gbar 会剩一条带边框的窄带)。
+   一条 !important 把 hidden 的语义钉死, 三块视图容器的显隐都靠它。 */
+[hidden] { display: none !important }
+
+/* ══ 视图切换 ═══════════════════════════════════════════════════════ */
+/* 三栏并列在顶栏右端。会话 key (.sub) 在窄屏下先让位 —— 它是调试信息, 而切换
+   视图是主操作。 */
+.topbar .views { margin-left: auto; display: flex; gap: 2px; flex: none }
+.topbar .vb {
+  font: inherit; font-size: 12px; color: #57606a; background: transparent;
+  border: 1px solid transparent; border-radius: 7px; padding: 3px 11px; cursor: pointer;
+}
+.topbar .vb:hover { background: #f6f8fa; color: #1f2328 }
+.topbar .vb.on { background: #0969da; border-color: #0969da; color: #fff; font-weight: 600 }
+.topbar .sub { min-width: 0 }
+
+/* 关系/日程栏不需要那条 288px 的会话列表占着半张桌子 —— 图要横向铺开。 */
+.pane { flex: 1; min-height: 0; display: flex; flex-direction: column; background: #fafbfc }
+.app.wide .side { width: 216px }
+
+/* ── 侧栏: wizard 身份 ─────────────────────────────────────────────── */
+/* 名字之外还要有职责与出身, 否则一列 `#tag` 说不出谁是谁。两行都单行省略,
+   会话行的高度必须可预期 —— 侧栏是要能一眼扫完的。 */
+.tag-job {
+  font-size: 11.5px; color: #0550ae; margin-top: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tag-kin { margin-top: 2px }
+.tag-kin .kin {
+  font-size: 10.5px; color: #6639ba; background: #8250df12; border-radius: 4px;
+  padding: 0 5px; font-family: ui-monospace, Menlo, monospace;
+  display: inline-block; max-width: 100%; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;
+}
+
+/* ══ 关系图 ═════════════════════════════════════════════════════════ */
+.wtools {
+  flex: none; display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 8px 20px; background: #fff; border-bottom: 1px solid #d0d7de;
+  font-size: 11.5px; color: #57606a;
+}
+.wlegend { display: flex; gap: 6px; flex-wrap: wrap }
+/* 图例同时是开关 —— 边一多就得能关掉几种; 把"图例"和"过滤器"做成两样东西
+   只会让人在两处之间对照颜色。 */
+.wtools .chip {
+  display: flex; align-items: center; gap: 5px; font: inherit; cursor: pointer;
+  background: #fff; border: 1px solid #d0d7de; border-radius: 13px; padding: 2px 10px;
+  color: #8c959f;
+}
+.wtools .chip i { width: 14px; height: 0; border-top: 2px solid var(--c); opacity: .35 }
+.wtools .chip b { font-variant-numeric: tabular-nums; font-weight: 700 }
+.wtools .chip.on { color: #1f2328; border-color: var(--c) }
+.wtools .chip.on i { opacity: 1 }
+.wtools .chip.clear, .wtools .chip.only { border-color: #d0d7de; color: #57606a }
+.wtools .chip.only.on { border-color: #0969da; color: #0550ae; background: #ddf4ff }
+.wtools .wstat { margin-left: auto; color: #8c959f; font-variant-numeric: tabular-nums }
+.wtools .wstat b { color: #0969da }
+.wtools .warn { color: #9a6700 }
+.wtools .hint { margin-left: 10px; color: #b1bac4 }
+
+.wscroll { flex: 1; min-height: 0; overflow: auto; -webkit-overflow-scrolling: touch }
+.wmap { position: relative; padding: 18px 20px 28px; min-width: min-content }
+/* 有关系的节点带一道左侧色条 —— 76 个会话里哪几个真的在协作, 不点开也看得见。 */
+.wnode.rel::before {
+  content: ""; position: absolute; left: 1px; top: 8px; bottom: 8px;
+  width: 2px; border-radius: 1px; background: #0969da66;
+}
+/* 连线层铺满整张图并且不吃事件 —— 节点的点击/双击必须照常穿过去。 */
+.wedges { position: absolute; inset: 0; pointer-events: none; overflow: visible }
+.wgrid {
+  position: relative; display: grid; gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  align-items: start;
+}
+
+.wchat { background: #fff; border: 1px solid #d0d7de; border-radius: 12px; overflow: hidden }
+/* 当前聊天是读图的锚点, 给它一道明确的边 —— 其余的群一律等价, 不再分轻重。 */
+.wchat.self { border-color: #0969da66; box-shadow: 0 0 0 3px #0969da10 }
+.wch {
+  display: flex; align-items: baseline; gap: 8px; padding: 9px 13px;
+  border-bottom: 1px solid #eaeef2; background: #f6f8fa;
+}
+.wchat.self .wch { background: #f0f6ff }
+.wch .nm {
+  font-size: 13px; font-weight: 700; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.wch .here {
+  font-size: 10px; color: #0969da; background: #0969da14; border-radius: 4px; padding: 1px 5px;
+}
+.wch .ct {
+  margin-left: auto; font-size: 11px; color: #8c959f; flex: none;
+  font-family: ui-monospace, Menlo, monospace;
+}
+.wch .ct em { color: #1a7f37; font-style: normal; font-weight: 700 }
+/* 左内边距是同卡片内连线的车道 —— 一条 `#a → #b` 的派活边从这里绕过去, 不必
+   拐出卡片 (拐出去就会被滚动容器裁掉)。 */
+.wrows { padding: 7px 10px 10px 22px; display: flex; flex-direction: column; gap: 3px }
+
+.wnode {
+  position: relative; display: flex; gap: 8px; align-items: flex-start;
+  padding: 6px 8px; border-radius: 8px; cursor: pointer;
+  border: 1px solid transparent; transition: opacity .15s, background .12s;
+}
+.wnode:hover { background: #f6f8fa }
+.wnode.self { background: #fffbe8 }
+.wnode.sel { background: #eef4fc; border-color: #0969da55 }
+/* 聚焦时无关节点压暗而不是移除 —— 位置不动, 连点几个节点版面也不跳。 */
+.wnode.dim { opacity: .3 }
+.wnode.cold .wav { filter: grayscale(1); opacity: .55 }
+/* 缩进本身就是家谱; 这道折线只是把"缩给谁看"指实。 */
+.wnode .lin {
+  position: absolute; left: -9px; top: 0; bottom: 50%; width: 9px;
+  border-left: 1.5px solid #d8cdf0; border-bottom: 1.5px solid #d8cdf0;
+  border-bottom-left-radius: 6px;
+}
+.wav {
+  position: relative; width: 26px; height: 26px; flex: none; border-radius: 8px;
+  background: #f1f3f6; border: 1px solid #eaeef2;
+  display: flex; align-items: center; justify-content: center; font-size: 14px;
+}
+.wav .live {
+  position: absolute; right: -3px; bottom: -3px; width: 9px; height: 9px;
+  border-radius: 50%; background: #1a7f37; border: 2px solid #fff;
+  animation: pulse 1.4s infinite;
+}
+.wbody { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px }
+.wl1 { display: flex; align-items: baseline; gap: 6px; min-width: 0 }
+.wname {
+  font-size: 12.5px; font-weight: 600; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.wnode.run .wname { color: #1a7f37 }
+.wtag {
+  flex: none; font-size: 10.5px; color: #57606a; background: #f1f3f6;
+  border-radius: 4px; padding: 0 5px; font-family: ui-monospace, Menlo, monospace;
+}
+.wtag.def { color: #8c959f }
+.wih { flex: none; font-size: 11px; color: #6639ba }
+.wts {
+  margin-left: auto; flex: none; font-size: 10.5px; color: #8c959f;
+  font-family: ui-monospace, Menlo, monospace;
+}
+.wjob { font-size: 11.5px; color: #0550ae; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.wprev {
+  font-size: 11.5px; color: #656d76; overflow: hidden; line-height: 1.4;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.wmeta {
+  font-size: 10.5px; color: #8c959f; font-family: ui-monospace, Menlo, monospace;
+  display: flex; gap: 4px; flex-wrap: wrap; margin-top: 1px;
+}
+.wmeta .sep { opacity: .45 }
+
+/* ══ 日程 ═══════════════════════════════════════════════════════════ */
+.plan-in { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 20px 28px }
+.psec { max-width: 900px; margin: 0 auto 22px }
+.psec h3 {
+  display: flex; align-items: baseline; gap: 8px; font-size: 13px; margin: 0 0 10px;
+  padding-bottom: 7px; border-bottom: 1px solid #d0d7de;
+}
+.psec h3 span {
+  font-size: 11px; color: #8c959f; font-weight: 400;
+  font-family: ui-monospace, Menlo, monospace;
+}
+.pempty { color: #8c959f; font-size: 12px; padding: 18px 0; text-align: center }
+
+/* 未来 12 小时的刻度条 —— 「今晚还有几枪要响」比一张日期列表更该先看见。 */
+.strip {
+  background: #fff; border: 1px solid #d0d7de; border-radius: 10px;
+  padding: 10px 14px 9px; margin-bottom: 12px;
+}
+.strip .axis {
+  position: relative; height: 13px; font-size: 10px; color: #8c959f;
+  font-family: ui-monospace, Menlo, monospace;
+}
+.strip .tk { position: absolute; transform: translateX(-50%); white-space: nowrap }
+.strip .tk:first-child { transform: none }
+.strip .rail {
+  position: relative; height: 8px; border-radius: 4px; background: #eaeef2; margin: 3px 0 7px;
+}
+.strip .pin {
+  position: absolute; top: -3px; width: 8px; height: 14px; margin-left: -4px;
+  border-radius: 3px; background: #9a6700; box-shadow: 0 0 0 2px #fff;
+}
+.strip .cap { font-size: 11px; color: #8c959f }
+
+.prow {
+  display: flex; gap: 14px; background: #fff; border: 1px solid #d0d7de;
+  border-radius: 10px; padding: 10px 14px; margin-bottom: 7px;
+}
+.prow .pl { flex: none; width: 152px; border-right: 1px dashed #eaeef2; padding-right: 12px }
+.pwhen { font-size: 11.5px; color: #9a6700; font-weight: 600 }
+.pnext {
+  display: flex; align-items: baseline; gap: 6px; margin-top: 3px;
+  font-family: ui-monospace, Menlo, monospace;
+}
+.pnext b { font-size: 12.5px; font-variant-numeric: tabular-nums }
+.pnext span { font-size: 10.5px; color: #8c959f }
+.prow .pr { min-width: 0; flex: 1 }
+.ph { display: flex; align-items: center; gap: 7px; flex-wrap: wrap }
+.ph .note { font-size: 11px; color: #57606a }
+.ph .pid {
+  margin-left: auto; font-size: 10px; color: #b1bac4;
+  font-family: ui-monospace, Menlo, monospace;
+}
+.ptext { font-size: 12px; color: #1f2328; margin-top: 4px; line-height: 1.5; word-break: break-word }
+.pfoot { font-size: 10.5px; color: #8c959f; margin-top: 4px }
+
+/* wizard 徽标 —— 日程/工单里凡是提到一个 wizard 都用它, 同聊天的可点进线程。 */
+.wchip {
+  display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px;
+  background: #f1f3f6; border: 1px solid #eaeef2; border-radius: 12px; padding: 1px 8px;
+  max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wchip.go { cursor: pointer; border-color: #0969da33; color: #0550ae }
+.wchip.go:hover { background: #ddf4ff; border-color: #0969da }
+
+.jrow { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; padding: 10px 14px; margin-bottom: 7px }
+.jrow.open { border-color: #1a7f3755; box-shadow: 0 0 0 3px #1a7f370d }
+.jh { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap }
+.jid {
+  font-size: 10.5px; color: #57606a; background: #f1f3f6; border-radius: 4px;
+  padding: 0 6px; font-family: ui-monospace, Menlo, monospace;
+}
+.jt { font-size: 13px; font-weight: 600; min-width: 0 }
+.jst { font-size: 10.5px; color: #8c959f }
+.jrow.open .jst { color: #1a7f37; font-weight: 700 }
+.jts {
+  margin-left: auto; font-size: 10.5px; color: #8c959f;
+  font-family: ui-monospace, Menlo, monospace;
+}
+.jm { display: flex; flex-direction: column; gap: 3px; margin-top: 7px }
+.jmm { display: flex; align-items: center; gap: 6px; min-width: 0 }
+.jmm em {
+  font-style: normal; font-size: 11.5px; color: #656d76; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.jmm .tmp {
+  font-style: normal; font-size: 9.5px; color: #9a6700; background: #d4a72c22;
+  border-radius: 3px; padding: 0 4px;
+}
+.jmm.none { font-size: 11.5px; color: #b1bac4 }
+.jsum {
+  font-size: 12px; color: #1f2328; margin-top: 8px; padding-top: 8px;
+  border-top: 1px dashed #eaeef2; line-height: 1.5; white-space: pre-wrap;
+}
+
+@media (max-width: 760px) {
+  .app.wide .side { display: none }
+  .topbar .sub { display: none }
+  .topbar .vb { padding: 3px 8px }
+  .wmap { padding: 12px }
+  .wgrid { grid-template-columns: 1fr }
+  .plan-in { padding: 12px }
+  .prow { flex-direction: column; gap: 6px }
+  .prow .pl { width: auto; border-right: 0; border-bottom: 1px dashed #eaeef2; padding: 0 0 6px }
+  .pnext { margin-top: 1px }
+}
+
+/* 相关性筛掉的那些 —— 说一声它们还在, 但不占图的位置 (见 shared/world 的说明)。 */
+.wmore {
+  padding: 5px 13px 9px; font-size: 10.5px; color: #b1bac4;
+  border-top: 1px dashed #eaeef2; margin-top: 2px;
+}

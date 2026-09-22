@@ -106,7 +106,7 @@ const isDetailRecord = (v: unknown): v is DetailRecord => {
   if (!v || typeof v !== "object") return false;
   const r = v as Record<string, unknown>;
   if (typeof r.id !== "string" || !r.id) return false;
-  if (r.kind !== "tool" && r.kind !== "approval" && r.kind !== "turn" && r.kind !== "mark") return false;
+  if (r.kind !== "tool" && r.kind !== "approval" && r.kind !== "turn" && r.kind !== "mark" && r.kind !== "chat") return false;
   if (typeof r.createdAt !== "number") return false;
   return true;
 };

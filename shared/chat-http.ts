@@ -7,16 +7,24 @@
 //   GET /api/chat      → the chat list: every `#tag` session of this chat + status
 //   GET /api/thread    → one tag's turns, as server-rendered HTML fragments
 //   GET /api/events    → SSE: chat-summary deltas + turn fragments for one tag
+//   GET /api/world     → 关系视图: 全部 wizard、家谱、跨聊天往来、工单、日程
 //
 // 资源路由不校验 `?id=` —— 它们是纯静态前端代码, 不含任何会话数据。
 //
 // Capability model unchanged from /detail: `?id=` is an unguessable record id
 // and IS the credential. The base principal is derived from it server-side and
 // never has to be typed by a client, so nothing becomes enumerable.
+//
+// /api/world 是这条线上唯一的放宽, 而且是有意的、有界的: 它回答"这个世界上有谁、
+// 谁是谁生的、谁在驱动谁", 跨聊天可见 —— 因为那正是要展示的东西, 而每个 wizard
+// 本来就能 `wizard_roster` 把同一份名册读个遍。放宽到此为止: **正文仍然按聊天关**,
+// /api/thread 的 authorizedTarget 不动, 外聊天的节点只有身份与关系, 没有线程、
+// 没有对话预览。拿到一条链接 ⇒ 看得见拓扑, 读不到别的群的内容。
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { URL } from "node:url";
 import { baseOfKey } from "./session-label.js";
 import { chatSummary, isMark, isTurn, threadEntries, turnDone, type ThreadEntry } from "./chat-view.js";
+import { buildWorld, EMPTY_FACTS, type WorldFacts, type WorldNode } from "./world.js";
 import { renderCutMark, renderTurnGroup } from "./detail-render.js";
 import { chatScript, chatStyles, renderChatPage } from "./chat-render.js";
 import type { Asset } from "./web-assets.js";
@@ -31,7 +39,13 @@ export interface ChatRoutes {
   chat: SimpleHandler;
   thread: SimpleHandler;
   events: SimpleHandler;
+  world: SimpleHandler;
 }
+
+/** 注册表侧的事实 (wizard 身份 / 家谱 / 工单 / 日程) —— 只有 daemon 给得出。
+ *  async 是因为活体状态要问 tmux; 独立 svr 不传, 世界图退化成只画观测到的往来。
+ *  实现方自己做节流: 这条路由会被前端定时轮询。 */
+export type WorldFactsProvider = () => Promise<WorldFacts> | WorldFacts;
 
 const DEFAULT_LIMIT = 20;
 const FLUSH_MS = 300;
@@ -83,7 +97,7 @@ const renderEntry = (e: ThreadEntry, now: number): ReturnType<typeof renderTurnG
     ? renderCutMark(e.mark)
     : renderTurnGroup(e.turn, now, e.children.map((c) => renderTurnGroup(c, now)));
 
-export const createChatRoutes = (store: DetailStore): ChatRoutes => {
+export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider): ChatRoutes => {
   const summary = (base: string): ReturnType<typeof chatSummary> =>
     chatSummary(store.list(), base, Date.now());
 
@@ -110,7 +124,9 @@ export const createChatRoutes = (store: DetailStore): ChatRoutes => {
     const scope = resolveScope(store, url);
     if (!scope) { json(res, 404, { ok: false, error: "未找到该会话 (链接可能已过期)" }); return; }
     const s = summary(scope.base);
-    json(res, 200, { ok: true, ...s, self: { target: scope.selfTarget } });
+    // `?target=` 优先于票据自带的那一栏 —— 一个链接可以拿兄弟会话的 id 当凭据
+    // (detail store 只留 24h, 闲置的 wizard 没有自己的记录), 由它说清该开在谁那栏。
+    json(res, 200, { ok: true, ...s, self: { target: authorizedTarget(scope, url.searchParams.get("target")) } });
   };
 
   const thread: SimpleHandler = (_req, res, url) => {
@@ -155,7 +171,7 @@ export const createChatRoutes = (store: DetailStore): ChatRoutes => {
     const send = (event: string, data: unknown): void => {
       try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch { /* closed */ }
     };
-    const pushChat = (): void => send("chat", { ...summary(scope.base), self: { target: scope.selfTarget } });
+    const pushChat = (): void => send("chat", { ...summary(scope.base), self: { target } });
     // 一个 turn 的 HTML 可以是几十 KB, 而 usage 累加这类改动并不改变正文 —— 按 sig
     // 去重, 内容没变就不重发。
     const sentSig = new Map<string, string>();
@@ -207,7 +223,22 @@ export const createChatRoutes = (store: DetailStore): ChatRoutes => {
     req.on("error", close);
   };
 
-  return { page, styles: asset(chatStyles), script: asset(chatScript), chat, thread, events };
+  // 外聊天的节点只留身份与关系 —— preview 是对话正文, 不跨聊天下发 (见文件头的
+  // capability 说明)。在服务端剥, 而不是指望前端不显示。
+  const fenced = (n: WorldNode): WorldNode => (n.local ? n : { ...n, preview: "" });
+
+  const world: SimpleHandler = (_req, res, url) => {
+    const scope = resolveScope(store, url);
+    if (!scope) { json(res, 404, { ok: false, error: "未找到该会话 (链接可能已过期)" }); return; }
+    void Promise.resolve(facts ? facts() : EMPTY_FACTS)
+      .catch(() => EMPTY_FACTS)
+      .then((f) => {
+        const w = buildWorld(store.list(), f, { base: scope.base, self: scope.selfTarget }, Date.now());
+        json(res, 200, { ok: true, ...w, nodes: w.nodes.map(fenced) });
+      });
+  };
+
+  return { page, styles: asset(chatStyles), script: asset(chatScript), chat, thread, events, world };
 };
 
 /** Path → handler map; the daemon registers each, svr dispatches through it. */
@@ -218,10 +249,11 @@ export const chatRouteTable = (routes: ChatRoutes): Record<string, SimpleHandler
   "GET /api/chat": routes.chat,
   "GET /api/thread": routes.thread,
   "GET /api/events": routes.events,
+  "GET /api/world": routes.world,
 });
 
 /** Route keys, single-sourced so the daemon's registration can't drift. */
 export const CHAT_ROUTE_KEYS = [
   "GET /chat", "GET /chat/app.css", "GET /chat/app.js",
-  "GET /api/chat", "GET /api/thread", "GET /api/events",
+  "GET /api/chat", "GET /api/thread", "GET /api/events", "GET /api/world",
 ] as const;

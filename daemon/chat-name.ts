@@ -7,7 +7,8 @@
 // 名字把 base principal 变成人能写的 token, 于是地址空间变成两级:
 //   `fix`          本聊天的 #fix (老语义, 不变)
 //   `daily#fix`    daily 这个聊天里的 #fix
-//   `daily#`       daily 的默认会话
+//   `daily`        daily 的默认 wizard (它的名字就是聊天名, 所以地址也是裸名字)
+//   `daily#`       同上, 老写法
 //   `chat:wr…#fix` 全量 key, 也当合法地址收 (list_peers 直接吐这个)
 // 冲突从此可解: 名字唯一 (存在 config 的 key 上, 结构性保证), tag 只需在自己
 // 聊天内唯一。
@@ -185,10 +186,13 @@ export const parsePeerRef = (raw: string): PeerRef => {
 
 /** 一个 target key 的规范地址 —— 直接能喂回 send_peer / peek_peer 的字符串。
  *  本聊天内退化成裸 tag (`fix`), 跨聊天且对方有名字则 `daily#fix`, 无名字就只能
- *  给全量 key (仍然可用, 只是不好读)。 */
+ *  给全量 key (仍然可用, 只是不好读)。
+ *  一个聊天的默认 wizard 的名字就是聊天名, 地址也就是聊天名 —— 不挂那个孤零零的
+ *  `#` (`daily#` 仍然认, 见 parsePeerRef / resolvePeerTag, 只是不再由我们写出来)。 */
 export const peerAddress = (cfg: Config, self: string, target: string): string => {
   const tag = target.includes("#") ? target.slice(target.indexOf("#") + 1) : "";
   if (baseOfKey(self) === baseOfKey(target)) return tag;
   const name = chatNameOf(cfg, target);
-  return name ? `${name}#${tag}` : keyOf(baseOfKey(target), tag);
+  if (!name) return keyOf(baseOfKey(target), tag);
+  return tag ? `${name}#${tag}` : name;
 };
