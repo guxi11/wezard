@@ -82,7 +82,9 @@ const main = async (): Promise<void> => {
 
   // 定时调度器的 `inject` 真正实现, 赋值在 mirror-mode 的大块里 (要用到那里面的
   // wizards / m / notifyChat), 但 startScheduler 在那块外面接线 —— 见文件尾。
-  let scheduledTaskInject: ((target: string, text: string, taskId: string) => Promise<{ ok: boolean; reason?: string }>) | undefined;
+  let scheduledTaskInject:
+    | ((target: string, text: string, opts: { taskId: string; fresh: boolean }) => Promise<{ ok: boolean; reason?: string }>)
+    | undefined;
 
   // Bind the CLI backend registry. `primary` (= defaultCli) drives new-session
   // spawns; `backends` is every installed CLI whose transcript root exists, so
@@ -1434,7 +1436,7 @@ const main = async (): Promise<void> => {
     http.register("POST /tasks/schedule", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { when?: string; prompt?: string; note?: string };
+      const b = body as { when?: string; prompt?: string; note?: string; fresh?: boolean };
       const prompt = (b.prompt ?? "").toString().trim();
       const whenText = (b.when ?? "").toString().trim();
       if (!prompt) { json(res, 400, { ok: false, reason: "prompt required" }); return; }
@@ -1453,7 +1455,12 @@ const main = async (): Promise<void> => {
         if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
         target = r.target;
       }
-      const rec = addSchedule(cfg, sourcePath, { when, target, prompt, createdBy: self, note: (b.note ?? "").toString() });
+      // 到点是新建还是续用, 在**排班时**就定死: 「没点名 wizard」= 新建一个白板的
+      // 去干 (定时的 prompt 本就要求零上下文自洽), 点了名才在那个会话里继续。
+      // `fresh` 显式传入时压过这条推断 —— 「每天新建一个 wizard 在 #foo 的目录下跑」
+      // 要的是 #foo 的 cwd/model 当模板, 不是在 #foo 的上下文里续。
+      const fresh = typeof b.fresh === "boolean" ? b.fresh : !tag;
+      const rec = addSchedule(cfg, sourcePath, { when, target, prompt, fresh, createdBy: self, note: (b.note ?? "").toString() });
       json(res, 200, { ok: true, ...renderSchedule(rec), address: peerAddress(cfg, self, target) });
     });
 
@@ -1572,32 +1579,35 @@ const main = async (): Promise<void> => {
       json(res, 200, { ok: true, target, ...m.getCwd(target) });
     });
 
-    // 定时任务遇到 busy 目标的兜底。schedule_task 的 prompt 设计上本就要求
-    // "零上下文也能执行"(到点时目标可能早已 /clear 过, 它只看得见这一句) ——
-    // 既然如此就不必非在目标那个会话里跑: 直接把这条自洽 prompt 排进它当前
-    // 那一轮, 既打乱了触发时间点 (要等它这一轮忙完), 又把两件不相关的事挤进
-    // 同一个 transcript。busy 时改起一个白板分身单独执行, 跑完自动收掉;
-    // 不 busy 时行为不变, 原样直接投。
-    scheduledTaskInject = async (target, text, taskId) => {
-      const busy = await m.isBusy(target);
-      if (!busy) return m.injectText(target, text, undefined, { fromChat: true, from: { kind: "task", taskId } });
+    // 定时任务的执行体。schedule_task 的 prompt 设计上本就要求"零上下文也能执行"
+    // (到点时目标可能早已 /clear 过, 它只看得见这一句) —— 既然如此, 默认就不在任何
+    // 已有会话里跑: 硬塞进去会把两件不相关的事挤进同一个 transcript, 目标正忙时
+    // 还要连触发时间点一起被它那一轮拖走。所以到点起一个白板 wizard 单独执行,
+    // 跑完自动收掉。只有排班时点名了某个 wizard (fresh=false) 且它此刻闲着,
+    // 才把这句话直接投进它那一轮 —— 「在已有会话里继续」是要求出来的, 不是默认。
+    scheduledTaskInject = async (target, text, { taskId, fresh }) => {
+      const busy = fresh ? false : await m.isBusy(target);
+      if (!fresh && !busy) return m.injectText(target, text, undefined, { fromChat: true, from: { kind: "task", taskId } });
 
       const base = baseOfKey(target);
       const taken = new Set(m.chatTargets(base).map(tagOfKey).filter(Boolean));
       const runnerTag = uniqueTag(`${tagOfKey(target) || "task"}-${taskId.slice(0, 4)}`, taken);
       const runner = keyOf(base, runnerTag);
       const info = m.sessionInfo(target);
+      const why = busy ? ` (起因: ${displayName(target)} 当时正忙)` : "";
       wizards.upsert(runner, {
-        description: `定时任务 ${taskId} 的一次性执行体 (起因: ${displayName(target)} 当时正忙)`,
+        description: `定时任务 ${taskId} 的一次性执行体${why}`,
         parent: target,
         bornAt: Date.now(),
       });
       const spawned = await m.newSession(runner, runnerTag, info?.cli, { cwd: info?.cwd, model: info?.model, silent: true });
       if (!spawned.ok) {
         wizards.drop(runner);
-        return { ok: false, reason: `目标正忙, 起白板分身失败: ${spawned.reason ?? "unknown"}` };
+        return { ok: false, reason: `起白板 wizard 失败: ${spawned.reason ?? "unknown"}` };
       }
-      notifyChat(base, withTagHeader(target, `⏰ 定时任务到点时正忙, 已起白板分身 \`#${runnerTag}\` 单独执行, 完成后自动收掉`));
+      notifyChat(base, withTagHeader(target, busy
+        ? `⏰ 定时任务到点时正忙, 已起白板 wizard \`#${runnerTag}\` 单独执行, 完成后自动收掉`
+        : `⏰ 定时任务已起白板 wizard \`#${runnerTag}\` 执行, 完成后自动收掉`));
       const inj = await m.injectText(runner, text, undefined, { fromChat: true, from: { kind: "task", taskId } });
       if (!inj.ok) { wizards.drop(runner); return inj; }
       // 没有人会对这个一次性分身喊 stop_wizard, 只能自己等它闲下来再收。30min

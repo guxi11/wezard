@@ -605,16 +605,21 @@ server.registerTool(
   {
     title: "Schedule a prompt to run in a wizard session, on a recurring or one-off schedule",
     description:
-      "给某个 wizard 排一个**到点自动执行**的活: 到时间了, daemon 把 `prompt` 原样说给它听 —— 等价于那一刻有人在群里对它说了这句话, 所以它会真的去做, 产出照常落在群里。守护进程级, 跨 CLI 重启/会话结束仍在, 目标 pane 死了会被自动拉起来。用户说「每个工作日晚上 9:30 自动跑一下 xxx」「每天早上帮我看看 yyy」「每 2 小时同步一次 zzz」「明早 9 点提醒并整理 www」时调它。\n`when` 用人话原样写, 别自己翻译成 cron: 「每个工作日晚上9:30」「每天 8:00」「每周三下午3点」「每隔两小时」「每 30 分钟」「20 分钟后」「明早 9 点」都认。解析不出会报错并列出能认的说法 —— 这时把原话回给用户让他重说, 别自己猜一个时间存进去。\n存成功后**必须把回显的 `when` 和 `next` 念给用户**确认 (例: 「每个工作日 21:30, 下次 2026-09-21 21:30」)。`prompt` 要写成一句完整的、零上下文也能执行的指令 —— 到点时那个会话可能早已 /clear 过, 它只看得见这句话。",
+      "排一个**到点自动执行**的活: 到时间了, daemon 起一个**全新的白板 wizard**, 把 `prompt` 原样说给它听, 它干完活自动收掉 —— 产出照常落在群里。守护进程级, 跨 CLI 重启/会话结束仍在。用户说「每个工作日晚上 9:30 自动跑一下 xxx」「每天早上帮我看看 yyy」「每 2 小时同步一次 zzz」「明早 9 点提醒并整理 www」时调它。\n" +
+      "**默认新建, 不在任何已有会话里续**: 定时的活是一件独立的事, 塞进一个常驻 wizard 会把两件不相关的事挤进同一个 transcript, 那个 wizard 正忙时还会连触发时刻一起被拖走。只有用户明确说了「在 #foo 里继续 / 让 #foo 每天…」才传 `tag` 点名它 —— 这时到点直接投进它那一轮 (它正忙则仍然另起白板执行)。用户说「每天新建一个 wizard 做 xxx」就是默认行为, 不用多做什么。\n`when` 用人话原样写, 别自己翻译成 cron: 「每个工作日晚上9:30」「每天 8:00」「每周三下午3点」「每隔两小时」「每 30 分钟」「20 分钟后」「明早 9 点」都认。解析不出会报错并列出能认的说法 —— 这时把原话回给用户让他重说, 别自己猜一个时间存进去。\n存成功后**必须把回显的 `when` 和 `next` 念给用户**确认 (例: 「每个工作日 21:30, 下次 2026-09-21 21:30」)。`prompt` 要写成一句完整的、零上下文也能执行的指令 —— 到点时那个会话可能早已 /clear 过, 它只看得见这句话。",
     inputSchema: {
       when: z.string().describe("什么时候跑, 人话原样传: 「每个工作日晚上9:30」「每天早上9点」「每周三下午3点」「每隔2小时」「每30分钟」「20分钟后」「明早9点」。"),
       prompt: z.string().describe("到点要说给那个 wizard 听的话。写成自洽的完整指令 (要做什么、在哪个目录/文件上、做完怎么汇报), 别依赖当前对话的上下文。"),
-      tag: z.string().optional().describe(`排给谁干。省略 = 排给你自己 (最常见: 给自己定一个夜里跑的活)。${ADDRESS_DOC}`),
+      tag: z.string().optional().describe(`点名在**哪个已有 wizard**里跑 —— 只有用户要求「在它那儿继续」时才传。省略 = 到点新建一个白板 wizard 干完就收 (默认, 也是「定时新建 wizard 干 xxx」要的那个)。传了它还想要新建, 再加 \`fresh:true\`: 那时它只当模板, 新 wizard 继承它的聊天/目录/模型。${ADDRESS_DOC}`),
+      fresh: z.boolean().optional().describe("覆盖默认: true = 每次到点新建白板 wizard 执行 (给了 tag 时用来表达「在它的目录下新开一个干」), false = 注入 tag 指向的已有会话。默认由 tag 推断 (给了 tag = false, 没给 = true)。"),
       note: z.string().optional().describe("给人看的一句话备注, 只在 list_tasks 里回显。"),
     },
   },
-  async ({ when, prompt, tag, note }) =>
-    unwrap("schedule_task", await daemonPost("/tasks/schedule", { when, prompt, tag: tag ?? "", note: note ?? "" })),
+  async ({ when, prompt, tag, note, fresh }) =>
+    unwrap("schedule_task", await daemonPost("/tasks/schedule", {
+      when, prompt, tag: tag ?? "", note: note ?? "",
+      ...(fresh === undefined ? {} : { fresh }),
+    })),
 );
 
 server.registerTool(
@@ -622,7 +627,7 @@ server.registerTool(
   {
     title: "List scheduled tasks on this host",
     description:
-      "列出本机所有定时任务: `id` (取消要用)、`when` (人话回显)、`next` (下次触发时刻)、`lastFired`、目标 wizard 的 `address` 与 `prompt`。用户问「有哪些定时任务」「我设了什么定时」「下次什么时候跑」时调它。只读。`mine:true` 只看排给你自己的。",
+      "列出本机所有定时任务: `id` (取消要用)、`when` (人话回显)、`next` (下次触发时刻)、`lastFired`、`runIn` (到点是新建白板 wizard 还是注入已有会话)、目标 wizard 的 `address` 与 `prompt`。用户问「有哪些定时任务」「我设了什么定时」「下次什么时候跑」时调它。只读。`mine:true` 只看排给你自己的。",
     inputSchema: {
       mine: z.boolean().optional().describe("true = 只列排给调用方自己的任务。默认列全机。"),
     },

@@ -164,7 +164,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "`send_peer` 跟别的 wizard 说话 (派活给一个正在忙的同伴用 `when:\"idle\"`, 别让两段话挤进同一轮) · `peek_peer` 看它在干嘛 · `list_peers` 看同群有谁",
       "`wait_peer` 等它干完 —— 派了一**批**活就用 `tags` 一次等一组 (`need` 决定满几个就返回), 别一个一个等",
       "`notify` 把一段话贴进某个聊天给**人**看 (省略 `to` 就是自己这个群) —— 和 send_peer 相反, 它不驱动任何 agent",
-      "`schedule_task` 给自己或别的 wizard 排一个到点自动执行的活 (「每个工作日晚上9:30 …」) · `list_tasks` / `cancel_task`",
+      "`schedule_task` 排一个到点自动执行的活 (「每个工作日晚上9:30 …」) —— 默认到点**新起一个白板 wizard** 去干, 干完自动收掉; 只有明说「在 #foo 里继续」才用 `tag` 点名已有的那个 · `list_tasks` / `cancel_task`",
       "`set_workspace` 换工作区 · `name_chat` 给聊天起名 · `list_chats` 看别的聊天",
       "`run_agent_graph` 把多个 wizard 串成一条会循环的流水线",
     ]),

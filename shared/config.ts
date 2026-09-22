@@ -370,9 +370,14 @@ const When = z.discriminatedUnion("kind", [
 const Schedule = z.object({
   id: z.string(),
   when: When,
-  /** 排给谁干 —— 一个 wizard 的 target key。 */
+  /** 排给谁干 —— 一个 wizard 的 target key。fresh 时它只当模板: 出处聊天与
+   *  cwd/cli/model 从它身上继承, 活不在它那里跑。 */
   target: z.string(),
   prompt: z.string(),
+  /** 到点是新起一个白板 wizard 执行 (跑完回收), 还是注入 `target` 那个已有会话。
+   *  默认 false 是为了老记录: 1.4.x 写下的定时都是「注入已有会话」语义。新建的
+   *  定时由 /tasks/schedule 决定, 没点名 wizard 时写 true。 */
+  fresh: z.boolean().default(false),
   createdBy: z.string().default(""),
   createdAt: z.number().default(0),
   /** 上次触发时刻 (epoch ms)。去重、重启不重放、间隔计时都以它为准。 */
