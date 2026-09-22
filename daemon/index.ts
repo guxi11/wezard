@@ -1219,7 +1219,27 @@ const main = async (): Promise<void> => {
       const taken = new Set(m.chatTargets(base).map(tagOfKey).filter(Boolean));
       const asked = normalizeTag(b.tag);
       if (asked && taken.has(asked)) {
-        json(res, 409, { ok: false, reason: `'#${asked}' 已经是一个活着的 wizard —— 换个名字, 或者直接 send_peer 找它`, tag: asked });
+        // "活着" 不能只看 taken 里有没有这个 tag —— taken 是 chatTargets(), 连早就
+        // 断线的冷绑定也算数。真探一次活, 把结论 (alive/busy/多久没动过) 和能直接
+        // 回传给 send_peer/stop_wizard 的完整地址一起吐回去, 调用方才判断得出这是
+        // "该换个名字" 还是"值得 stop_wizard 收掉腾地方再复用"。
+        const existing = keyOf(base, asked);
+        const info = (await m.peers(existing)).find((p) => p.target === existing);
+        const alive = info?.paneAlive ?? false;
+        const idleForMs = info?.lastActivity ? Date.now() - info.lastActivity : undefined;
+        const idleDesc = idleForMs !== undefined ? `静默 ${Math.round(idleForMs / 60000)} 分钟` : "从没动过";
+        const advice = alive
+          ? "它的 pane 还活着 —— 除非这就是同一件事的延续, 否则换个 tag 重新 spawn_clone, 别把不相关的活塞给一个已经有职责的 wizard"
+          : `pane 已经不在了 (${idleDesc}), 真要复用这个 tag 就先 stop_wizard({tag:"${asked}", mode:"end"}) 收掉腾出名字, 再用同一个 tag 重新 spawn_clone —— 拿到干净的上下文; 别直接 send_peer 唤醒它接手, 它会带着上一件事的记忆答你这件`;
+        json(res, 409, {
+          ok: false,
+          reason: `'#${asked}' 已经是一个${alive ? "活着的" : "不再活跃的"} wizard —— ${advice}`,
+          tag: asked,
+          address: peerAddress(cfg, self, existing),
+          alive,
+          busy: info?.busy ?? false,
+          idleForMs,
+        });
         return;
       }
       const tag = asked || uniqueTag(normalizeTag(b.description?.split(/\s+/)[0]) || "clone", taken);

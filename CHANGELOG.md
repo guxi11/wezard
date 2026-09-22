@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Fixed
+- **`spawn_clone` 撞名时随口建议 `send_peer` 找它, 结果活派进了自己这个聊天, 而不是目标聊天里那个 wizard**。409 响应从没真探过对方死活——`taken` 只看 `chatTargets()` 里有没有这个 tag, 连早断线的冷绑定也算数, 于是文案不由分说写"已经是一个活着的 wizard", 唯一给的路是裸 tag `send_peer`；而裸 tag 解析优先撞调用方**自己**聊天里的同名 wizard, 目标明明该在**另一个**聊天, 活就这样悄悄派错了地方, 也不报错。现在 409 真探一次活 (`alive`/`busy`/`idleForMs`) 并带上能直接回传的完整 `address`：冷绑定才建议 `stop_wizard({mode:"end"})` 收掉腾名字再用同一个 tag 重新 spawn, 真活着就建议换个 tag, 不再默认往里塞不相关的活。`ADDRESS_DOC`(`peek_peer`/`send_peer`/`wait_peer`/`schedule_task`/`stop_wizard` 共用)与宪章编排清单都补了这条: 目标是**特定**聊天就必须写 `聊天名#tag`。
 - **`reload` 明明成功却报 "not responding"**。boot 恢复镜像绑定是一次裸 fan-out,每个绑定各问两次 tmux (pane 还活着吗 / cwd 在哪) —— 本机 349 个绑定就是 ~700 个 client 同时排在一台 tmux server 上,全部撞满 10s 超时,而 spawn 风暴顺带把事件循环压住: `:17890` 要 25s 才 bind。CLI 那头 `wait_up` 又是按**次数**收口的 (30 次 × 0.3s),端口没 bind 时 curl 立刻 connection-refused 返回,于是 ~9s 就放弃了 —— 守护进程正常起来了,人看到的是一行失败。两头都改:
   - 恢复改成一次 `list-panes -a` 取全量 pane 快照,所有绑定共用 (并发也封顶,快照取不到才退回逐个探活);`await` 立刻让出,`startHttp` 先绑端口。实测 start→listen 从 25.5s 降到 0.3s,349 个绑定 0.7s 恢复完,tmux 超时 0 次 (此前数千)。
   - `wait_up` / `wait_down` 改按墙钟收口 (90s / 30s),不再被「连接被拒绝返回得快」偷走预算。

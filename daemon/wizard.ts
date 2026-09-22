@@ -176,6 +176,8 @@ export const renderCharter = (a: CharterArgs): string => {
       "先在自己这里把**公共材料**读进上下文 (规范、目录结构、关键文件)",
       "要派出两个以上的分身就先 `open_job(标题, 计划)` 拿一个工单 id —— 之后每个 `spawn_clone` / `send_peer` 都带上 `job`",
       "`spawn_clone({inherit:true, task})` 出需要的分身: 它们开局就带着这些材料, 只需告诉它各自那一份差异; 活写进 `task` 省一次往返",
+      "撞名 (`spawn_clone` 409) 别顺手 `send_peer` 糊弄过去: 响应里的 `alive`/`busy`/`idleForMs` 已经说清那是真在干活还是冷绑定。真活着就换个 tag 重新生, 别把不相关的活塞给一个已经有职责的 wizard; 冷绑定才值得复用, 但复用前先 `stop_wizard({mode:\"end\"})` 把它收掉腾出名字, 再用同一个 tag 重新 spawn —— 拿到干净的上下文, 不然它会带着上一件事的记忆接你这件",
+      "派给**别的聊天**里的 wizard 用完整地址 `聊天名#tag` (409/roster 里的 `address` 就是原样能传回去的那个串), 别图省事传裸 tag —— 裸 tag 优先撞你自己这个聊天里的同名 wizard, 目标聊天那个真正该接活的分身反而没被叫到, 而且不报错",
       "派活时要求它**把结论收口成一行** `RESULT: …` (交付物写进文件就回传路径) —— `wait_peer` 会把这一行单独摘进 `result`, 免得你从八百字散文里找结论",
       "一次 `wait_peer({tags:[…]})` 把它们**一起**等回来。它们本来就在并行干活: 一个一个等, 墙钟是所有人之和; 一起等只花最慢那一个的时间 (`need` 可以让你先处理最先完事的那几个)",
       "汇总完 `close_job(summary)` —— 结论发进群, 为这个工单生出来的分身整批回收。要反复迭代到收敛则用 `run_agent_graph`",
