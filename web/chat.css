@@ -381,7 +381,12 @@ body { overflow: hidden; overscroll-behavior: none }
 
 /* ══ 日程 ═══════════════════════════════════════════════════════════ */
 .plan-in { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 20px 28px }
-.psec { max-width: 900px; margin: 0 auto 30px }
+.psec {
+  max-width: 900px; margin: 0 auto 30px;
+  /* 通用 section 规则给了白底+边框却没有内边距 —— 不补这一层, 刻度条/日程行/工单
+     行就直接贴着卡片的边。底边留小一点: 末行自己还带 10px 的 margin。 */
+  padding: 14px 18px 8px;
+}
 .psec h3 {
   display: flex; align-items: baseline; gap: 8px; font-size: 13px; margin: 0 0 14px;
   padding-bottom: 8px; border-bottom: 1px solid #d0d7de;
