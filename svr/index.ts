@@ -2,10 +2,17 @@
 // wezard svr — 独立的 detail 中转服务。部署到 chat + cli 都可达的网络机器上,
 // cli/daemon 端把 tool/approval 详情 POST 过来, chat 用户点卡片链接直连本机浏览。
 //
-// 只有两条业务路由:
+// 只有三条业务路由:
 //   • POST /d           bearer 鉴权, body = DetailRecord JSON → 存入 store
+//   • POST /w           bearer 鉴权, body = 一台 daemon 的注册表快照 (WorldFacts)
 //   • GET  /detail?id=  从 store 取, 用 shared/detail-render 渲染 HTML
 // 加上 GET /healthz 便于反代/监控探活。
+//
+// 为什么要 POST /w: turn 记录里只有"谁跑了一轮", 身份 / 家谱 / 工单 / 日程全在
+// daemon 那侧的注册表里。没有它, 远端浏览的关系图退化成「名册缺席」, 日程栏更是
+// 永远空的 —— 而那恰恰是最该被远程看一眼的东西。快照按**来源机器**分开存: 一个
+// svr 可能同时接着几台 daemon, 覆盖式写会让先推的那台凭空消失; 读的时候合并,
+// 过了 FACTS_TTL_MS 没再推的来源自动淡出 (那台机器下线了)。
 //
 // 存储直接复用 daemon 的 createDetailStore (append-only JSONL + LRU + 24h TTL)。
 // 信任模型: token 相同 = 可写; 读端不签名 (拿到 id 即可读)。id 是 uuid, 不可枚举。
@@ -17,6 +24,7 @@ import { loadOrCreateSvrToken } from "../shared/svr-token.js";
 import { createDetailStore, type DetailRecord } from "../shared/detail-store.js";
 import { renderDetailPage, renderNotFound } from "../shared/detail-render.js";
 import { createChatRoutes, chatRouteTable } from "../shared/chat-http.js";
+import { EMPTY_FACTS, type WorldFacts } from "../shared/world.js";
 import { resolvePublicHost } from "../shared/lan-ip.js";
 import { loadConfig } from "../shared/config.js";
 
@@ -102,6 +110,33 @@ const json = (res: ServerResponse, status: number, body: unknown): void => {
   res.end(JSON.stringify(body));
 };
 
+/** 一份快照从推来到失效的窗口。daemon 每 30s 推一次, 给足三次重试的余量 —— 宁可
+ *  多显示两分钟略陈的忙闲, 也好过一次网络抖动就把整张名册抹成「缺席」。 */
+const FACTS_TTL_MS = 150_000;
+
+interface FactsPush { source: string; facts: WorldFacts }
+
+const isFactsPush = (v: unknown): v is FactsPush => {
+  if (!v || typeof v !== "object") return false;
+  const r = v as Record<string, unknown>;
+  const f = r.facts as Record<string, unknown> | undefined;
+  if (typeof r.source !== "string" || !r.source || !f) return false;
+  return Array.isArray(f.wizards) && Array.isArray(f.jobs) && Array.isArray(f.schedules) && !!f.chatNames;
+};
+
+/** 几台 daemon 的快照合成一份世界。同一个 key 只可能由它所属的那台机器推出来,
+ *  所以合并就是拼接 + 去重 (后来的覆盖, 顺带把同一台机器的重推收敛掉)。 */
+const mergeFacts = (fresh: readonly FactsPush[]): WorldFacts => {
+  const uniq = <T>(xs: readonly T[], key: (x: T) => string): T[] =>
+    [...xs.reduce((m, x) => m.set(key(x), x), new Map<string, T>()).values()];
+  return {
+    wizards: uniq(fresh.flatMap((p) => [...p.facts.wizards]), (w) => w.target),
+    jobs: uniq(fresh.flatMap((p) => [...p.facts.jobs]), (j) => j.id),
+    schedules: uniq(fresh.flatMap((p) => [...p.facts.schedules]), (x) => x.id),
+    chatNames: Object.assign({}, ...fresh.map((p) => p.facts.chatNames)) as Record<string, string>,
+  };
+};
+
 const isDetailRecord = (v: unknown): v is DetailRecord => {
   if (!v || typeof v !== "object") return false;
   const r = v as Record<string, unknown>;
@@ -118,9 +153,18 @@ const main = async (): Promise<void> => {
   mkdirSync(stateDir, { recursive: true });
   const token = loadOrCreateSvrToken(args.tokenFile, args.token);
   const store = createDetailStore({ stateDir, log });
+  // 注册表快照只放内存: 它是 daemon 那边的投影, 重启后下一次推送 (≤30s) 就补齐,
+  // 落盘只会换来一份过期名册在冷启动那几十秒里冒充现状。
+  const factsBySource = new Map<string, { at: number; facts: WorldFacts }>();
+  const currentFacts = (): WorldFacts => {
+    const cut = Date.now() - FACTS_TTL_MS;
+    const fresh = [...factsBySource].filter(([, v]) => v.at > cut);
+    for (const [k] of [...factsBySource].filter(([, v]) => v.at <= cut)) factsBySource.delete(k);
+    return fresh.length ? mergeFacts(fresh.map(([source, v]) => ({ source, facts: v.facts }))) : EMPTY_FACTS;
+  };
   // Chat 视图 (SPA + JSON API + SSE) 与 daemon 完全同源 —— svr 侧的记录是 POST /d
   // 推过来的, store.subscribe 一样会触发, 所以远端浏览也是实时的。
-  const chat = chatRouteTable(createChatRoutes(store));
+  const chat = chatRouteTable(createChatRoutes(store, currentFacts));
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
@@ -150,6 +194,22 @@ const main = async (): Promise<void> => {
         res.setHeader("content-type", "text/html; charset=utf-8");
         res.setHeader("cache-control", "no-store");
         res.end(renderDetailPage(rec));
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/w") {
+        const auth = req.headers.authorization ?? "";
+        if (!auth.startsWith("Bearer ") || auth.slice(7) !== token) {
+          json(res, 401, { ok: false, error: "unauthorized" });
+          return;
+        }
+        const body = await readBody(req);
+        let parsed: unknown;
+        try { parsed = JSON.parse(body.toString("utf8")); }
+        catch { json(res, 400, { ok: false, error: "invalid json" }); return; }
+        if (!isFactsPush(parsed)) { json(res, 400, { ok: false, error: "invalid world facts" }); return; }
+        factsBySource.set(parsed.source, { at: Date.now(), facts: parsed.facts });
+        log.debug({ source: parsed.source, wizards: parsed.facts.wizards.length }, "world facts stored");
+        json(res, 200, { ok: true });
         return;
       }
       if (req.method === "POST" && url.pathname === "/d") {

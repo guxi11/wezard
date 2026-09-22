@@ -138,6 +138,9 @@ export interface WorldChat {
   base: string;
   name: string;
   self: boolean;
+  /** 进这个聊天的票据 (`/chat?id=`)。由路由层从 store 里取既有的那张, 见
+   *  chat-http 的 capability 说明; 取不到 = 这个群还没有任何可用凭据。 */
+  token?: string;
   /** 本聊天的 wizard target, 已按家谱序 (父在前, 分身紧随其后并带缩进深度)。 */
   members: Array<{ target: string; depth: number }>;
   /** 被相关性筛掉的成员数 —— 页面上写成「另有 N 个已停的会话」, 免得看图的人

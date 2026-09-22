@@ -80,6 +80,10 @@ const main = async (): Promise<void> => {
   });
   log.info({ sourcePath, pid: process.pid }, "daemon start");
 
+  // 定时调度器的 `inject` 真正实现, 赋值在 mirror-mode 的大块里 (要用到那里面的
+  // wizards / m / notifyChat), 但 startScheduler 在那块外面接线 —— 见文件尾。
+  let scheduledTaskInject: ((target: string, text: string, taskId: string) => Promise<{ ok: boolean; reason?: string }>) | undefined;
+
   // Bind the CLI backend registry. `primary` (= defaultCli) drives new-session
   // spawns; `backends` is every installed CLI whose transcript root exists, so
   // sessions from all of them can be mirrored concurrently — each attachment
@@ -1348,7 +1352,13 @@ const main = async (): Promise<void> => {
       void (async () => {
         const lg = log.child({ mod: "wizard", sub: "handoff-self", target: self });
         const idle = await waitForIdle(self, m.isBusy, 10 * 60_000, () => false);
-        if (!idle.idle) { lg.warn({ reason: idle.reason }, "self-handoff: 目标一直忙, 放弃"); return; }
+        if (!idle.idle) {
+          lg.warn({ reason: idle.reason }, "self-handoff: 目标一直忙, 放弃");
+          // 之前这里只写日志: 调用方早就拿到 `scheduled:true` 挂了, 交接静悄悄
+          // 放弃, 群里没有任何气泡告诉人。补一条 notify, 对齐它成功时的那条。
+          notifyChat(self, withTagHeader(self, `上下文交接放弃: 一直没能闲下来 (${idle.reason}), 上下文和之前一样没动, 有空再试一次`));
+          return;
+        }
         const clr = await m.injectText(self, "/clear");
         if (!clr.ok) { lg.warn({ reason: clr.reason }, "self-handoff: /clear 注入失败"); return; }
         await new Promise((r2) => setTimeout(r2, 3000));
@@ -1561,6 +1571,49 @@ const main = async (): Promise<void> => {
       if (!target) { json(res, 400, { ok: false, reason: "target required (or pass sessionId)" }); return; }
       json(res, 200, { ok: true, target, ...m.getCwd(target) });
     });
+
+    // 定时任务遇到 busy 目标的兜底。schedule_task 的 prompt 设计上本就要求
+    // "零上下文也能执行"(到点时目标可能早已 /clear 过, 它只看得见这一句) ——
+    // 既然如此就不必非在目标那个会话里跑: 直接把这条自洽 prompt 排进它当前
+    // 那一轮, 既打乱了触发时间点 (要等它这一轮忙完), 又把两件不相关的事挤进
+    // 同一个 transcript。busy 时改起一个白板分身单独执行, 跑完自动收掉;
+    // 不 busy 时行为不变, 原样直接投。
+    scheduledTaskInject = async (target, text, taskId) => {
+      const busy = await m.isBusy(target);
+      if (!busy) return m.injectText(target, text, undefined, { fromChat: true, from: { kind: "task", taskId } });
+
+      const base = baseOfKey(target);
+      const taken = new Set(m.chatTargets(base).map(tagOfKey).filter(Boolean));
+      const runnerTag = uniqueTag(`${tagOfKey(target) || "task"}-${taskId.slice(0, 4)}`, taken);
+      const runner = keyOf(base, runnerTag);
+      const info = m.sessionInfo(target);
+      wizards.upsert(runner, {
+        description: `定时任务 ${taskId} 的一次性执行体 (起因: ${displayName(target)} 当时正忙)`,
+        parent: target,
+        bornAt: Date.now(),
+      });
+      const spawned = await m.newSession(runner, runnerTag, info?.cli, { cwd: info?.cwd, model: info?.model, silent: true });
+      if (!spawned.ok) {
+        wizards.drop(runner);
+        return { ok: false, reason: `目标正忙, 起白板分身失败: ${spawned.reason ?? "unknown"}` };
+      }
+      notifyChat(base, withTagHeader(target, `⏰ 定时任务到点时正忙, 已起白板分身 \`#${runnerTag}\` 单独执行, 完成后自动收掉`));
+      const inj = await m.injectText(runner, text, undefined, { fromChat: true, from: { kind: "task", taskId } });
+      if (!inj.ok) { wizards.drop(runner); return inj; }
+      // 没有人会对这个一次性分身喊 stop_wizard, 只能自己等它闲下来再收。30min
+      // 内没闲下来就放弃自动回收 (它大概率还在干一个长活), 留给人手动处理 ——
+      // 比杀掉一个还在跑的 pane 安全。
+      void (async () => {
+        const idle = await waitForIdle(runner, m.isBusy, 30 * 60_000, () => false);
+        if (!idle.idle) {
+          log.warn({ runner, reason: idle.reason }, "task runner: 30min 未闲下来, 放弃自动回收");
+          return;
+        }
+        await m.killPane(runner);
+        wizards.drop(runner);
+      })();
+      return inj;
+    };
   }
 
   // 定时调度器 — 每 20s 检查 cfg.schedules, 到点把 prompt 注入目标 wizard。
@@ -1570,11 +1623,7 @@ const main = async (): Promise<void> => {
     cfg,
     sourcePath,
     log: log.child({ mod: "tasks" }),
-    inject:
-      cfg.wrc.mode === "mirror"
-        ? (target, text, taskId) =>
-            (bridge as MirrorBridge).injectText(target, text, undefined, { fromChat: true, from: { kind: "task", taskId } })
-        : undefined,
+    inject: cfg.wrc.mode === "mirror" ? scheduledTaskInject : undefined,
   });
 
   const shutdown = async (signal: string): Promise<void> => {

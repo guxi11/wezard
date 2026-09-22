@@ -13,11 +13,15 @@
 - **turn 记录新增出处 `from` (`shared/detail-store`)** —— 这一轮是**谁开的口**: 同伴 `send_peer` 派的、工单 fan-out 派的、定时任务放的枪; `undefined` = 人直接说的。此前只有 graph 有归因 (`origin`), 而 peer 派活是协同网络里最常见的那种边, 却在数据里一点痕迹都没有: 一条 9:30 自动跑出来的轮次和真人发言长得一模一样。和 `origin` 一样走 append-only JSONL 跟着记录过夜, 所以独立 svr 收到 POST 之后画出来的图与本机一致。
 - `GET /api/world` (daemon 与 svr 共用) + `shared/world.ts` 的纯折叠。注册表侧的事实 (身份 / 家谱 / 工单 / 日程) 由 daemon 以 provider 注入, svr 拿不到就退化成只画观测到的往来。**正文仍然按聊天关**: 外聊天的节点只有身份与关系, 没有线程、没有对话预览 —— 拿到一条链接看得见拓扑, 读不到别的群的内容。
 - `shared/std.ts` 新增 `mapLimit` —— 带并发上限的 `Promise.all`。凡是 `f` 会 spawn 进程或开文件的, 就不该用裸 `Promise.all` (见下面那条事故)。
+- **`POST /w`: daemon 把注册表快照 (身份 / 家谱 / 工单 / 日程) 定期推给 svr**。turn 记录是一条条 `POST /d` 推过去的, 但注册表不是"发生的事"而是"当下的状态", 没有增量可推 —— 于是远端浏览的关系图一直挂着「名册缺席」, 日程栏更是**永远空的**, 而那恰恰是最该被远程看一眼的东西。现在 30s 一份整快照 (一个开着的浏览器本来就 6s 问一次 `/api/world`, 这个频率比它轻五倍), 按**来源机器**分开存: 一个 svr 可能同时接着几台 daemon, 覆盖式写会让先推的那台凭空消失; 读的时候合并, 150s 没再推的来源自动淡出。快照只在 svr 的内存里 —— 它是 daemon 那边的投影, 落盘只会换来一份过期名册在冷启动那几十秒里冒充现状。
+- **关系图上双击别的聊天的节点 = 走进那个群**。`/api/world` 的每张聊天卡片现在带一张那个群**既有**的票据 (`chats[].token`: 长期票据优先, 否则借那个群最近一条 turn 的 id), 卡片头也可点。这是对 `/api/world` 那条 capability 说明的一处明说的放宽: 一张看得见的拓扑图点不进去就只是一张画, 所以「拿到一条链接 ⇒ 看得见整张网」后面补上「并且可以顺着网走到相邻的群」。给的是既有凭据, 不新造、不降低强度, 进去之后照常按那张票据的聊天关 (`/api/thread` 的 `authorizedTarget` 不动)。要把正文严格关在一个群里的部署, 不该开放 `/api/world`。
 - **`schedule_task` 到点撞见 busy 目标时, 改起一个白板分身单独执行, 而不是排进目标当前那一轮**。`schedule_task` 的 prompt 设计上本就要求"零上下文也能执行"(到点时目标可能早已 `/clear` 过, 它只看得见这一句) —— 既然如此就没必要非挤进目标那个会话: 排进去既打乱了触发时间点 (要等它这一轮忙完才轮到), 又把两件不相关的事挤进同一个 transcript。现在 busy 时新起一个白板分身 (`#tag-<taskId 前4位>`) 单独跑这条自洽 prompt, 跑完自动 `stop_wizard` 回收; 空闲时行为不变, 原样直接投。群里补一条通知说明"为什么多了个陌生 tag"。
 
 ### Fixed
 - **`wizard_handoff_self` 目标一直忙时静默放弃, 群里零通知**。这个工具应答之后是 fire-and-forget: 应答里已经给了 `scheduled:true`, 调用方早就挂断; 真正的交接在后台等目标闲下来, 最长等 10 分钟, 超时此前只写一行 `log.warn`——用户调了这个工具, 十分钟后交接悄悄失败, 没有任何气泡告诉他上下文其实没动。现在超时也补一条 `notifyChat`, 对齐它成功时发的那条。
 - **`worldPeers` 全量探活打穿 fd 上限, 把 tmux server 和守护进程一起拖垮**。一个裸 `Promise.all` 铺在全部 349 个 target 上, 每个各要两次 tmux (pane 存活 + capture tail) —— 约 700 个并发子进程, 日志刷满 `tmux command timed out — killed`, tmux server 重启 (活着的 pane 全数丢失, 会话本身可按 `--resume` 恢复), `/api/world` 挂死超过 120s, 守护进程随后 down。正是 CLAUDE.md 记的 launchd fd 那个失效模式。现在两道闸: 先用**不 spawn 的**证据排序 (transcript 的 mtime 一次 statSync, 注册表里登记过的无条件入选), 只探前 48 个, 并发封顶 6。没被探到的照旧出现在名册里, 只是 busy/alive 按冷处理 —— 图上少一盏呼吸灯, 远好过把整台机器上的会话一起搞停。冷 57ms / 命中缓存 4ms, 持续轮询下 tmux 超时 0 次。
+- **chat 详情页在关系/日程栏点左侧会话列表毫无反应**。`select()` 只换了 `S.target` 就去拉线程, 而 `#thread` 还 hidden 着 —— 点上去像什么都没发生。现在非线程栏里点一个会话先切回线程栏 (点它的意思本来就是"去读它")。
+- **关系图稀疏得像没排版**。卡片用的是 `grid` + `align-items:start`, 行高按本行最高的那张对齐, 于是「2 个 wizard 的群」旁边挨着「20 个 wizard 的群」时, 矮卡片下面全是空白; 列宽 `minmax(300px,1fr)` 在宽屏上还会把两张卡片各拉成半个屏。改成 CSS 多列的砌砖式排布 (`columns: 320px` + `break-inside: avoid`), 卡片顺着列往下码, 没有行的概念, 也不再过度拉伸。
 - **`el.hidden` 对 `.gbar` / `.topbar .cwd` 这类元素不生效**。UA 的 `[hidden]` 规则与类选择器同权重而作者样式胜出, 于是 `hidden=true` 的元素照旧显示 (空的 graph 条会剩一条带边框的窄带)。补一条 `[hidden]{display:none!important}`。
 
 

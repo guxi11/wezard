@@ -412,6 +412,9 @@
 
   var select = function (target) {
     if (!target) return;
+    // 线程以外的栏位里点一个会话 —— 意思是"去读它", 不是"在关系图上标记它"。
+    // 不换栏的话 #thread 还 hidden 着, 点上去像什么都没发生。
+    if (VIEW !== 'thread') setView('thread');
     S.target = target;
     document.querySelector('.app').classList.add('reading');
     renderTags(); topbar(); renderStatus(curTag());
@@ -494,6 +497,24 @@
 
   var wRunning = function (n) { return n.busy || (!!n.runningUntil && srvNow() < n.runningUntil); };
 
+  // ── 走进一个 wizard ──
+  // 同聊天的换一栏就到了。外聊天的正文不在本页的授权范围内 (见 chat-http), 但
+  // /api/world 给每张卡片带了那个群既有的票据 —— 拿它整页跳过去, 等于从那个群
+  // 自己的链接点进来。没有票据 = 那个群还没有任何记录可读, 点了也没有意义。
+  var chatOf = function (base) {
+    return (W.chats || []).filter(function (c) { return c.base === base; })[0];
+  };
+  var canOpen = function (n) { return !!n && (n.local || !!(chatOf(n.base) || {}).token); };
+  var openNode = function (target) {
+    var n = nodeOf(target);
+    if (!n) return;
+    if (n.local) { setView('thread'); select(target); return; }
+    var tok = (chatOf(n.base) || {}).token;
+    if (!tok) return;
+    // pathname 而不是写死 '/chat': 这一页可能挂在反代的子路径下 (同 api/ 的相对取法)。
+    location.href = location.pathname + '?' + new URLSearchParams({ id: tok, target: target }).toString();
+  };
+
   // 卡片里的名字不重复卡片头已经说过的话。默认名是 `聊天名#tag`, 而卡片头写着
   // 聊天名、行尾还挂着 `#tag` —— 三处同一个词。所以: 起过名字就显示名字, 没起过
   // 就只显示 `#tag`; 名字本身已经以 `#tag` 收尾时也不再重复那枚 badge。
@@ -536,7 +557,7 @@
         W.nodes.length + ' 个 wizard · ' + W.chats.length + ' 个聊天' +
         (cross ? ' · <b>' + cross + '</b> 条跨聊天关系' : '') +
         (W.degraded ? ' · <span class="warn" title="注册表不可达 (独立 svr 部署), 只画观测到的往来">名册缺席</span>' : '') +
-        '<span class="hint">单击聚焦 · 双击进入线程</span>' +
+        '<span class="hint">单击聚焦 · 双击进入 (外聊天整页跳过去)</span>' +
       '</div>' +
       '<button class="chip only' + (W.onlyRel ? ' on' : '') + '" id="wonly" ' +
         'title="把此刻不属于任何关系的 wizard 收起来 —— 剩下的就是这张协作网本身">' +
@@ -620,13 +641,19 @@
       var t = el.getAttribute('data-t');
       if (hood && !hood[t]) el.classList.add('dim');
       if (t === W.sel) el.classList.add('sel');
+      if (canOpen(nodeOf(t))) el.classList.add('go');
       el.onclick = function () { W.sel = (W.sel === t ? '' : t); renderWorld(); };
-      el.ondblclick = function () {
-        // 双击 = 进它的线程。只有同聊天的节点有线程可进 —— 凭据按聊天关
-        // (见 chat-http 的 capability 说明), 外聊天的节点只有身份与关系。
-        var n = nodeOf(t);
-        if (n && n.local) { setView('thread'); select(t); }
-      };
+      // 双击 = 走进它: 同聊天换一栏, 外聊天整页跳到那个群 (见 openNode)。
+      el.ondblclick = function () { openNode(t); };
+    });
+    // 卡片头 = 那个群本身。点它进那个群里最近活跃的那一栏 —— 图上找不到哪个
+    // 节点该双击的时候, 这是最直觉的入口。
+    wmapEl.querySelectorAll('.wch').forEach(function (h) {
+      var c = chatOf(h.parentNode.getAttribute('data-base'));
+      var first = c && c.members.filter(function (mm) { return canOpen(nodeOf(mm.target)); })[0];
+      if (!first) return;
+      h.classList.add('go');
+      h.onclick = function () { openNode(first.target); };
     });
   };
 
@@ -726,7 +753,7 @@
 
   var wizChip = function (target) {
     var n = nodeOf(target);
-    return '<span class="wchip' + (n && n.local ? ' go' : '') + '" data-t="' + esc(target) + '">' +
+    return '<span class="wchip' + (canOpen(n) ? ' go' : '') + '" data-t="' + esc(target) + '">' +
       esc((n && n.label) || '🧙') + ' ' + esc(nameOf(target)) + '</span>';
   };
 
@@ -800,7 +827,7 @@
         (js.length ? open.concat(closed).map(jobRow).join('') : '<div class="pempty">没有工单 —— 一次派出两个以上分身时 open_job 开一个</div>') +
       '</section>';
     planEl.querySelectorAll('.wchip.go').forEach(function (c) {
-      c.onclick = function () { setView('thread'); select(c.getAttribute('data-t')); };
+      c.onclick = function () { openNode(c.getAttribute('data-t')); };
     });
   };
 

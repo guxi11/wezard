@@ -4,6 +4,7 @@
 //   • buildDetailUrl 用 config.detailPublicBase / detailRemoteBase / LAN IP 兜底
 //   • makeDetailHandler 把 GET /detail?id=xxx 渲染成 HTML
 import { randomBytes } from "node:crypto";
+import { hostname } from "node:os";
 import type { Logger } from "pino";
 import type { Decision } from "./pending.js";
 import type { Handler } from "./http.js";
@@ -34,7 +35,37 @@ let remoteToken = "";
 // 注册表要到 mirror 块才建得起来 —— 所以这里存的是 provider 而不是数据, 由那边
 // 装上 (同 bindWizardStore 的取舍)。没装 = headless 模式, 关系图退化成只画观测边。
 let worldFacts: WorldFactsProvider | undefined;
-export const setWorldFactsProvider = (fn: WorldFactsProvider): void => { worldFacts = fn; };
+export const setWorldFactsProvider = (fn: WorldFactsProvider): void => { worldFacts = fn; startFactsForward(); };
+
+// 注册表侧的事实同样要过河。turn 记录是 POST /d 一条条推的, 但身份 / 家谱 / 工单 /
+// 日程不是"发生的事", 而是"当下的状态" —— 没有增量可推, 只能整份快照定期覆盖。
+// 30s: 采一次要按 pane 问一遍 tmux (见 index.ts 的 WORLD_TTL 说明), 而一个开着的
+// 浏览器本来就 6s 问一次, 这个频率比它轻五倍, 却足够让远端的日程与名册是准的。
+const FACTS_PUSH_MS = 30_000;
+let factsTimer: NodeJS.Timeout | undefined;
+/** 快照的来源署名 —— 一个 svr 可能接着好几台 daemon, 它按这个键分开存。 */
+const factsSource = (): string => hostname() || "daemon";
+
+const pushFacts = async (): Promise<void> => {
+  if (!remoteBase || !worldFacts) return;
+  const facts = await Promise.resolve(worldFacts()).catch(() => undefined);
+  if (!facts) return;
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (remoteToken) headers.authorization = `Bearer ${remoteToken}`;
+  await fetch(`${remoteBase.replace(/\/+$/, "")}/w`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ source: factsSource(), facts }),
+  }).catch(() => { /* 同 forwardToRemote: 远端挂了不该影响本机 */ });
+};
+
+// 两个前置条件 (配了远端、装上了 provider) 谁先到都可能 —— 两处都调一次, 起过就不再起。
+const startFactsForward = (): void => {
+  if (factsTimer || !remoteBase || !worldFacts) return;
+  void pushFacts();
+  factsTimer = setInterval(() => { void pushFacts(); }, FACTS_PUSH_MS);
+  factsTimer.unref();
+};
 
 // 转发失败静默 — 远端 svr 挂了不该拖垮本地工具调用。
 const forwardToRemote = (rec: DetailRecord): void => {
@@ -53,6 +84,7 @@ export const initDetailPersistence = (stateDir: string, log?: Logger): void => {
 export const configureRemoteForward = (base: string, token: string): void => {
   remoteBase = base.trim();
   remoteToken = token.trim();
+  startFactsForward();
 };
 
 // Decision (pending.ts) 是 4 项;detail 层扩了 timeout/swept 两个终态。

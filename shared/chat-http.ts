@@ -17,9 +17,15 @@
 //
 // /api/world 是这条线上唯一的放宽, 而且是有意的、有界的: 它回答"这个世界上有谁、
 // 谁是谁生的、谁在驱动谁", 跨聊天可见 —— 因为那正是要展示的东西, 而每个 wizard
-// 本来就能 `wizard_roster` 把同一份名册读个遍。放宽到此为止: **正文仍然按聊天关**,
-// /api/thread 的 authorizedTarget 不动, 外聊天的节点只有身份与关系, 没有线程、
-// 没有对话预览。拿到一条链接 ⇒ 看得见拓扑, 读不到别的群的内容。
+// 本来就能 `wizard_roster` 把同一份名册读个遍。
+//
+// 放宽到哪一步: 一张看得见的拓扑图, 点不进去就只是一张画 —— 所以每张聊天卡片
+// 附一张**那个聊天既有的票据** (`chats[].token`), 双击别处的节点就走进那个群。
+// 给的是既有凭据 (chat 记录 / 那个群最近一条 turn 的 id), 不新造、不降低强度,
+// 进去之后照常按那张票据的聊天关: 拿到一条链接 ⇒ 看得见整张网, 并且**可以顺着
+// 网走到相邻的群**。要把正文严格关在一个群里的部署, 不该开放 /api/world。
+// 仍然不变的是 /api/thread 的 authorizedTarget: 一次只开一个聊天, 外聊天的节点
+// 在本页上只有身份与关系, 没有对话预览。
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { URL } from "node:url";
 import { baseOfKey } from "./session-label.js";
@@ -227,6 +233,22 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
   // capability 说明)。在服务端剥, 而不是指望前端不显示。
   const fenced = (n: WorldNode): WorldNode => (n.local ? n : { ...n, preview: "" });
 
+  /** base → 进那个聊天的票据。长期票据 (chat 记录) 优先, 否则借那个群最近一条
+   *  turn 的 id —— 两者的授权范围本来就一样 (resolveScope 从记录反推 base)。
+   *  一趟扫完: 这条路由是被轮询的, 每张卡片各扫一遍 store 会随记录数平方增长。 */
+  const ticketsByBase = (): Map<string, string> => {
+    // ts = 这张票据能活到什么时候的代理量: 长期票据给 Infinity (不参与回收),
+    // turn 借来的那张按 updatedAt 取最新的一条 —— 最老的那条明天就 TTL 掉了。
+    const best = store.list().reduce((m, r) => {
+      const key = r.kind === "chat" ? r.target : isTurn(r) && r.target ? baseOfKey(r.target) : "";
+      if (!key) return m;
+      const ts = r.kind === "chat" ? Infinity : (r as { updatedAt: number }).updatedAt;
+      const cur = m.get(key);
+      return cur && cur.ts >= ts ? m : m.set(key, { id: r.id, ts });
+    }, new Map<string, { id: string; ts: number }>());
+    return new Map([...best].map(([base, v]) => [base, v.id] as const));
+  };
+
   const world: SimpleHandler = (_req, res, url) => {
     const scope = resolveScope(store, url);
     if (!scope) { json(res, 404, { ok: false, error: "未找到该会话 (链接可能已过期)" }); return; }
@@ -234,7 +256,13 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       .catch(() => EMPTY_FACTS)
       .then((f) => {
         const w = buildWorld(store.list(), f, { base: scope.base, self: scope.selfTarget }, Date.now());
-        json(res, 200, { ok: true, ...w, nodes: w.nodes.map(fenced) });
+        const tickets = ticketsByBase();
+        json(res, 200, {
+          ok: true,
+          ...w,
+          chats: w.chats.map((c) => ({ ...c, token: tickets.get(c.base) })),
+          nodes: w.nodes.map(fenced),
+        });
       });
   };
 

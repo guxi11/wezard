@@ -284,13 +284,21 @@ body { overflow: hidden; overscroll-behavior: none }
 }
 /* 连线层铺满整张图并且不吃事件 —— 节点的点击/双击必须照常穿过去。 */
 .wedges { position: absolute; inset: 0; pointer-events: none; overflow: visible }
-.wgrid {
-  position: relative; display: grid; gap: 16px;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  align-items: start;
-}
+/* 多列流式而不是 grid: 聊天卡片的高度天差地别 (一个群 2 个 wizard, 另一个 20 个),
+   grid 的行高按本行最高的那张对齐, 于是矮卡片下面全是空白 —— 图看着比实际稀疏
+   一倍。CSS columns 是砌砖式的: 卡片顺着列往下码, 码满了换列, 没有行的概念。
+   列宽钉在 320 附近也顺带收住了"两张卡片各占半个屏"的过度拉伸。 */
+.wgrid { position: relative; columns: 320px; column-gap: 16px }
 
-.wchat { background: #fff; border: 1px solid #d0d7de; border-radius: 12px; overflow: hidden }
+.wchat {
+  background: #fff; border: 1px solid #d0d7de; border-radius: 12px; overflow: hidden;
+  /* 一张卡片不能被切成两列 —— 断在半截的家谱读不出父子关系。 */
+  break-inside: avoid; -webkit-column-break-inside: avoid; page-break-inside: avoid;
+  margin-bottom: 16px;
+}
+/* 卡片头可点 = 进那个群 (见 chat.js 的 openNode)。 */
+.wch.go { cursor: pointer }
+.wch.go:hover .nm { color: #0969da; text-decoration: underline }
 /* 当前聊天是读图的锚点, 给它一道明确的边 —— 其余的群一律等价, 不再分轻重。 */
 .wchat.self { border-color: #0969da66; box-shadow: 0 0 0 3px #0969da10 }
 .wch {
@@ -324,6 +332,8 @@ body { overflow: hidden; overscroll-behavior: none }
 .wnode.sel { background: #eef4fc; border-color: #0969da55 }
 /* 聚焦时无关节点压暗而不是移除 —— 位置不动, 连点几个节点版面也不跳。 */
 .wnode.dim { opacity: .3 }
+/* 双击能走进去的那些 —— 外聊天的节点现在也算 (整页跳过去)。 */
+.wnode.go { cursor: pointer }
 .wnode.cold .wav { filter: grayscale(1); opacity: .55 }
 /* 缩进本身就是家谱; 这道折线只是把"缩给谁看"指实。 */
 .wnode .lin {
@@ -371,10 +381,10 @@ body { overflow: hidden; overscroll-behavior: none }
 
 /* ══ 日程 ═══════════════════════════════════════════════════════════ */
 .plan-in { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 20px 28px }
-.psec { max-width: 900px; margin: 0 auto 22px }
+.psec { max-width: 900px; margin: 0 auto 30px }
 .psec h3 {
-  display: flex; align-items: baseline; gap: 8px; font-size: 13px; margin: 0 0 10px;
-  padding-bottom: 7px; border-bottom: 1px solid #d0d7de;
+  display: flex; align-items: baseline; gap: 8px; font-size: 13px; margin: 0 0 14px;
+  padding-bottom: 8px; border-bottom: 1px solid #d0d7de;
 }
 .psec h3 span {
   font-size: 11px; color: #8c959f; font-weight: 400;
@@ -385,7 +395,7 @@ body { overflow: hidden; overscroll-behavior: none }
 /* 未来 12 小时的刻度条 —— 「今晚还有几枪要响」比一张日期列表更该先看见。 */
 .strip {
   background: #fff; border: 1px solid #d0d7de; border-radius: 10px;
-  padding: 10px 14px 9px; margin-bottom: 12px;
+  padding: 12px 16px 11px; margin-bottom: 16px;
 }
 .strip .axis {
   position: relative; height: 13px; font-size: 10px; color: #8c959f;
@@ -403,13 +413,13 @@ body { overflow: hidden; overscroll-behavior: none }
 .strip .cap { font-size: 11px; color: #8c959f }
 
 .prow {
-  display: flex; gap: 14px; background: #fff; border: 1px solid #d0d7de;
-  border-radius: 10px; padding: 10px 14px; margin-bottom: 7px;
+  display: flex; gap: 16px; background: #fff; border: 1px solid #d0d7de;
+  border-radius: 10px; padding: 12px 16px; margin-bottom: 10px;
 }
-.prow .pl { flex: none; width: 152px; border-right: 1px dashed #eaeef2; padding-right: 12px }
+.prow .pl { flex: none; width: 152px; border-right: 1px dashed #eaeef2; padding-right: 14px }
 .pwhen { font-size: 11.5px; color: #9a6700; font-weight: 600 }
 .pnext {
-  display: flex; align-items: baseline; gap: 6px; margin-top: 3px;
+  display: flex; align-items: baseline; gap: 6px; margin-top: 5px;
   font-family: ui-monospace, Menlo, monospace;
 }
 .pnext b { font-size: 12.5px; font-variant-numeric: tabular-nums }
@@ -421,8 +431,8 @@ body { overflow: hidden; overscroll-behavior: none }
   margin-left: auto; font-size: 10px; color: #b1bac4;
   font-family: ui-monospace, Menlo, monospace;
 }
-.ptext { font-size: 12px; color: #1f2328; margin-top: 4px; line-height: 1.5; word-break: break-word }
-.pfoot { font-size: 10.5px; color: #8c959f; margin-top: 4px }
+.ptext { font-size: 12px; color: #1f2328; margin-top: 6px; line-height: 1.5; word-break: break-word }
+.pfoot { font-size: 10.5px; color: #8c959f; margin-top: 6px }
 
 /* wizard 徽标 —— 日程/工单里凡是提到一个 wizard 都用它, 同聊天的可点进线程。 */
 .wchip {
@@ -433,7 +443,7 @@ body { overflow: hidden; overscroll-behavior: none }
 .wchip.go { cursor: pointer; border-color: #0969da33; color: #0550ae }
 .wchip.go:hover { background: #ddf4ff; border-color: #0969da }
 
-.jrow { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; padding: 10px 14px; margin-bottom: 7px }
+.jrow { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; padding: 12px 16px; margin-bottom: 10px }
 .jrow.open { border-color: #1a7f3755; box-shadow: 0 0 0 3px #1a7f370d }
 .jh { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap }
 .jid {
@@ -447,7 +457,7 @@ body { overflow: hidden; overscroll-behavior: none }
   margin-left: auto; font-size: 10.5px; color: #8c959f;
   font-family: ui-monospace, Menlo, monospace;
 }
-.jm { display: flex; flex-direction: column; gap: 3px; margin-top: 7px }
+.jm { display: flex; flex-direction: column; gap: 5px; margin-top: 9px }
 .jmm { display: flex; align-items: center; gap: 6px; min-width: 0 }
 .jmm em {
   font-style: normal; font-size: 11.5px; color: #656d76; min-width: 0;
@@ -459,7 +469,7 @@ body { overflow: hidden; overscroll-behavior: none }
 }
 .jmm.none { font-size: 11.5px; color: #b1bac4 }
 .jsum {
-  font-size: 12px; color: #1f2328; margin-top: 8px; padding-top: 8px;
+  font-size: 12px; color: #1f2328; margin-top: 10px; padding-top: 10px;
   border-top: 1px dashed #eaeef2; line-height: 1.5; white-space: pre-wrap;
 }
 
@@ -468,10 +478,10 @@ body { overflow: hidden; overscroll-behavior: none }
   .topbar .sub { display: none }
   .topbar .vb { padding: 3px 8px }
   .wmap { padding: 12px }
-  .wgrid { grid-template-columns: 1fr }
+  .wgrid { columns: 1 }
   .plan-in { padding: 12px }
   .prow { flex-direction: column; gap: 6px }
-  .prow .pl { width: auto; border-right: 0; border-bottom: 1px dashed #eaeef2; padding: 0 0 6px }
+  .prow .pl { width: auto; border-right: 0; border-bottom: 1px dashed #eaeef2; padding: 0 0 8px }
   .pnext { margin-top: 1px }
 }
 
