@@ -275,15 +275,24 @@ body { overflow: hidden; overscroll-behavior: none }
 .wtools .warn { color: #9a6700 }
 .wtools .hint { margin-left: 10px; color: #b1bac4 }
 
-.wscroll { flex: 1; min-height: 0; overflow: auto; -webkit-overflow-scrolling: touch }
+/* position 不是装饰: 力导向的画布是 `position:absolute; inset:0`, 没有这一行它
+   就贴到更外层的定位祖先上去 —— 坐标原点跑到顶栏, 节点飘到工具条上面, 而
+   overflow:hidden 也拦不住一个容器块在自己之外的绝对定位子元素。 */
+.wscroll { position: relative; flex: 1; min-height: 0; overflow: auto; -webkit-overflow-scrolling: touch }
 .wmap { position: relative; padding: 18px 20px 28px; min-width: min-content }
 /* 有关系的节点带一道左侧色条 —— 76 个会话里哪几个真的在协作, 不点开也看得见。 */
 .wnode.rel::before {
   content: ""; position: absolute; left: 1px; top: 8px; bottom: 8px;
   width: 2px; border-radius: 1px; background: #0969da66;
 }
-/* 连线层铺满整张图并且不吃事件 —— 节点的点击/双击必须照常穿过去。 */
-.wedges { position: absolute; inset: 0; pointer-events: none; overflow: visible }
+/* 连线层铺满整张图并且不吃事件 —— 节点的点击/双击必须照常穿过去。
+   z-index 把它抬到卡片之上: 卡片是不透明的, 压在下面时一条跨卡片的边会被中途
+   吃掉半截, 读出来像是断的。.wgrid 不设 z-index (保持 auto) 才不会自成一个层叠
+   上下文 —— 那样悬停/聚焦的节点就再也抬不过这条线了。 */
+.wedges { position: absolute; inset: 0; pointer-events: none; overflow: visible; z-index: 2 }
+/* 反过来: 正在看的那个节点要压过连线, 否则文字被线划着读。只抬这两种 —— 一直
+   抬着某个节点等于把"线被卡片吃掉"这个毛病在它身上留一份。 */
+.wnode:hover, .wnode.sel { z-index: 3 }
 /* 多列流式而不是 grid: 聊天卡片的高度天差地别 (一个群 2 个 wizard, 另一个 20 个),
    grid 的行高按本行最高的那张对齐, 于是矮卡片下面全是空白 —— 图看着比实际稀疏
    一倍。CSS columns 是砌砖式的: 卡片顺着列往下码, 码满了换列, 没有行的概念。
@@ -495,3 +504,49 @@ body { overflow: hidden; overscroll-behavior: none }
   padding: 5px 13px 9px; font-size: 10.5px; color: #b1bac4;
   border-top: 1px dashed #eaeef2; margin-top: 2px;
 }
+
+/* ══ 关系视图 · 力导向布局 ═════════════════════════════════════════
+   卡片布局之外的另一种读法: 节点只画 wizard, 聊天不再是容器而是节点身上的一
+   道色条 + 一行群名。见 web/chat.js 的说明。 */
+.wscroll.fx { overflow: hidden }
+.wmap.force { position: absolute; inset: 0; padding: 0; min-width: 0 }
+.fxn {
+  position: absolute; left: 0; top: 0; z-index: 2;
+  display: flex; align-items: center; gap: 7px; max-width: 210px;
+  padding: 5px 10px 5px 7px; border-radius: 10px;
+  background: #fff; border: 1px solid #d0d7de; border-left: 3px solid var(--c);
+  box-shadow: 0 1px 3px #1b1f2412; cursor: grab; touch-action: none;
+  user-select: none; -webkit-user-select: none;
+  transition: opacity .15s, box-shadow .12s;
+  will-change: transform;
+}
+.fxn .wav { width: 22px; height: 22px; border-radius: 7px; font-size: 12px }
+.fxn .wav .live { width: 8px; height: 8px; right: -2px; bottom: -2px }
+.fxb { min-width: 0; display: flex; flex-direction: column; gap: 0 }
+.fxn .wname { font-size: 12px }
+/* 群名压得比名字轻 —— 它是节点的属性, 不是节点本身。 */
+.fxc {
+  font-size: 9.5px; color: var(--c); opacity: .85; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.fxn.self { background: #fffbe8 }
+.fxn.cold { opacity: .72 }
+.fxn.cold .wav { filter: grayscale(1); opacity: .55 }
+.fxn.run .wname { color: #1a7f37 }
+.fxn.dim { opacity: .22 }
+.fxn.sel { box-shadow: 0 0 0 3px var(--c), 0 1px 3px #1b1f2412; }
+.fxn.sel .fxc { opacity: 1 }
+.fxn.drag { cursor: grabbing; box-shadow: 0 6px 16px #1b1f2426 }
+/* 钉住 = 这个位置是人摆的, 力不再动它。 */
+.fxn.pin::after {
+  content: "📌"; position: absolute; right: -5px; top: -7px; font-size: 9px;
+  opacity: .8; pointer-events: none;
+}
+/* 布局开关 —— 两种读法并列, 不是复选。 */
+.wtools .wlay { display: inline-flex; border: 1px solid #d0d7de; border-radius: 7px; overflow: hidden }
+.wtools .lb {
+  border: 0; background: #fff; cursor: pointer; padding: 3px 9px;
+  font-size: 11.5px; color: #57606a; font-family: inherit;
+}
+.wtools .lb + .lb { border-left: 1px solid #d0d7de }
+.wtools .lb.on { background: #ddf4ff; color: #0550ae; font-weight: 600 }
