@@ -29,13 +29,14 @@ import { installResponseTracker } from "./last-response.js";
 import { scanClaudeSessions } from "./session-scan.js";
 import {
   startScheduler,
-  listSchedules,
-  addSchedule,
+  migrateLegacySchedules,
   promptWantsFreshWizard,
-  removeScheduleById,
-  renderSchedule,
+  renderTask,
+  sinceOf,
 } from "./tasks.js";
-import { describeWhen, nextFire, parseWhen } from "../shared/schedule-spec.js";
+import { openTaskRegistry } from "./task-registry.js";
+import { describeTrigger, nextFire, parseTrigger, WHEN_HELP } from "../shared/trigger.js";
+import { slugify, uniqueId } from "../shared/task-file.js";
 import { baseOfKey, keyOf, labelFor, normalizeTag, tagFromCwd, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
 import { applyChatNames, chatBaseOf, chatNameOf, clearChatName, listChatNames, normChatName, peerAddress, planChatNames, setChatName } from "./chat-name.js";
 import {
@@ -123,6 +124,12 @@ const main = async (): Promise<void> => {
   installResponseTracker(ws.client, log.child({ mod: "chat-gate" }));
   const sessions = loadSessionStore(cfg.wrc.sessionMapFile);
   const mirrorStore = loadMirrorStore(cfg.wrc.mirror.attachmentsFile);
+  // 定时任务表 —— 每条任务是 ~/.wezard/tasks/<id>.task.mjs 一份可注入代码的配置
+  // (见 shared/task-file.ts)。目录是热加载的: wizard 改完文件不用 reload 守护进程。
+  const tasks = await openTaskRegistry(
+    log.child({ mod: "tasks" }),
+    (added, removed) => log.info({ added, removed }, "task files changed"),
+  );
   const bridge =
     cfg.wrc.mode === "mirror"
       ? startMirror({ cfg, log: log.child({ mod: "mirror" }), client: ws.client, store: mirrorStore })
@@ -953,16 +960,19 @@ const main = async (): Promise<void> => {
           openedAt: j.openedAt, closedAt: j.closedAt, summary: j.summary,
           members: j.members.map((mm) => ({ target: mm.target, task: mm.task, spawned: mm.spawned })),
         })),
-        schedules: cfg.schedules.map((x) => ({
-          id: x.id,
-          target: x.target,
-          when: describeWhen(x.when),
-          nextAt: nextFire(x.when, x.lastFired ?? x.createdAt, nowDate),
-          lastFired: x.lastFired,
-          prompt: x.prompt,
-          note: x.note,
-          createdBy: x.createdBy,
-        })),
+        schedules: tasks.list().filter((x) => x.enabled).map((x) => {
+          const st = tasks.stateOf(x.id);
+          return {
+            id: x.id,
+            target: x.target || (cfg.defaultChat ?? ""),
+            when: describeTrigger(x.trigger),
+            nextAt: nextFire(x.trigger, sinceOf(st), nowDate),
+            lastFired: st.lastFired,
+            prompt: x.prompt,
+            note: x.note,
+            createdBy: x.createdBy,
+          };
+        }),
         chatNames: Object.fromEntries(listChatNames(cfg).map((c) => [c.base, c.name])),
       };
     };
@@ -1437,15 +1447,12 @@ const main = async (): Promise<void> => {
     http.register("POST /tasks/schedule", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { when?: string; prompt?: string; note?: string; fresh?: boolean };
+      const b = body as { when?: string; prompt?: string; note?: string; fresh?: boolean; id?: string };
       const prompt = (b.prompt ?? "").toString().trim();
       const whenText = (b.when ?? "").toString().trim();
       if (!prompt) { json(res, 400, { ok: false, reason: "prompt required" }); return; }
-      const when = parseWhen(whenText, new Date());
-      if (!when) {
-        json(res, 400, { ok: false, reason: `无法理解「${whenText}」。能认的说法: 每天/每个工作日/每周三 + 时刻 (晚上9:30 / 21:30 / 九点半), 每隔 N 分钟|小时, N 分钟后, 明早 9 点。` });
-        return;
-      }
+      const trigger = parseTrigger(whenText, new Date());
+      if (!trigger) { json(res, 400, { ok: false, reason: WHEN_HELP(whenText) }); return; }
       // tag 省略 = 排给调用者自己。这是最常见的用法: wizard 给自己定一个夜里跑的活。
       // 注入自身在**当下**是死锁 (往正在生成的输入框里打字), 但定时是未来的事,
       // 那时这一轮早已收工, 所以这里不套 /peers/send 的自我保护。
@@ -1462,8 +1469,16 @@ const main = async (): Promise<void> => {
       //     目录下办」, 不是「在它的上下文里续」。
       // `fresh` 显式传入压过这两条推断 (要强行在 tag 那一轮里续就传 false)。
       const fresh = typeof b.fresh === "boolean" ? b.fresh : !tag || promptWantsFreshWizard(prompt);
-      const rec = addSchedule(cfg, sourcePath, { when, target, prompt, fresh, createdBy: self, note: (b.note ?? "").toString() });
-      json(res, 200, { ok: true, ...renderSchedule(rec), address: peerAddress(cfg, self, target) });
+      const note = (b.note ?? "").toString();
+      const id = uniqueId(slugify((b.id ?? "").toString() || note || prompt.slice(0, 24), "task"), tasks.takenIds());
+      const created = tasks.create({ id, trigger, prompt, target, fresh, note, createdBy: self });
+      if ("error" in created) { json(res, 400, { ok: false, reason: created.error }); return; }
+      tasks.patchState(id, { createdAt: Date.now() });
+      json(res, 200, {
+        ok: true,
+        ...renderTask(created, tasks.stateOf(id)),
+        address: peerAddress(cfg, self, target),
+      });
     });
 
     http.register("POST /tasks/list", async (req, res) => {
@@ -1471,9 +1486,19 @@ const main = async (): Promise<void> => {
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       const mineOnly = (body as { mine?: boolean }).mine === true;
       const now = new Date();
-      const tasks = listSchedules(cfg, mineOnly ? self : undefined)
-        .map((x) => ({ ...renderSchedule(x, now), address: peerAddress(cfg, self, x.target) }));
-      json(res, 200, { ok: true, self, tasks });
+      const errs = tasks.errors();
+      const rows = tasks.list()
+        .filter((t) => !mineOnly || t.target === self)
+        .map((t) => ({
+          ...renderTask(t, tasks.stateOf(t.id), now, errs[t.id]),
+          address: peerAddress(cfg, self, t.target || (cfg.defaultChat ?? "")),
+        }));
+      // 加载失败的那些没有记录可回显, 但必须出现在列表里 —— 否则 wizard 改错了
+      // 一个字, 那条定时就像凭空消失了。
+      const broken = Object.entries(errs)
+        .filter(([id]) => !tasks.get(id))
+        .map(([id, loadError]) => ({ id, file: `${tasks.dir}/${id}.task.mjs`, loadError }));
+      json(res, 200, { ok: true, self, dir: tasks.dir, tasks: [...rows, ...broken] });
     });
 
     http.register("POST /tasks/cancel", async (req, res) => {
@@ -1481,9 +1506,10 @@ const main = async (): Promise<void> => {
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       const id = ((body as { id?: string }).id ?? "").toString().trim();
       if (!id) { json(res, 400, { ok: false, reason: "id required (list_tasks 里那个 id)" }); return; }
-      const gone = removeScheduleById(cfg, sourcePath, id);
+      const state = tasks.stateOf(id);
+      const gone = tasks.remove(id);
       if (!gone) { json(res, 404, { ok: false, reason: `no schedule with id ${id}` }); return; }
-      json(res, 200, { ok: true, removed: renderSchedule(gone) });
+      json(res, 200, { ok: true, removed: renderTask(gone, state) });
     });
 
     // POST /config/set — modify daemon config from MCP
@@ -1628,19 +1654,25 @@ const main = async (): Promise<void> => {
     };
   }
 
-  // 定时调度器 — 每 20s 检查 cfg.schedules, 到点把 prompt 注入目标 wizard。
+  // 定时调度器 — 每 20s 检查任务表, 到点把 prompt 注入目标 wizard。
   // inject 只在 mirror 模式给得出 (headless 模式没有常驻会话可注入)。
+  migrateLegacySchedules(cfg, sourcePath, tasks, log.child({ mod: "tasks" }));
   const scheduler = startScheduler({
     client: ws.client,
-    cfg,
-    sourcePath,
+    registry: tasks,
     log: log.child({ mod: "tasks" }),
     inject: cfg.wrc.mode === "mirror" ? scheduledTaskInject : undefined,
+    // gate 里的 `sh` 默认就在目标 wizard 此刻的工作区跑 —— 任务文件里不必写死绝对路径。
+    cwdOf: cfg.wrc.mode === "mirror"
+      ? (t) => { const c = (bridge as MirrorBridge).getCwd(t); return c.runningCwd || c.pendingCwd || c.defaultCwd; }
+      : undefined,
+    fallbackTarget: () => (cfg.defaultChat ?? "").trim(),
   });
 
   const shutdown = async (signal: string): Promise<void> => {
     log.info({ signal }, "shutdown signal");
     scheduler.stop();
+    tasks.stop();
     netWatch.stop();
     // 同 POST /shutdown: 先把挂着的审批长轮询了结成「稍后续接」, 再关连接。
     log.info(drainForReload(), "pending drained for reload");

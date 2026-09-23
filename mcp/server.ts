@@ -606,18 +606,25 @@ server.registerTool(
     title: "Schedule a prompt to run in a wizard session, on a recurring or one-off schedule",
     description:
       "排一个**到点自动执行**的活: 到时间了, daemon 起一个**全新的白板 wizard**, 把 `prompt` 原样说给它听, 它干完活自动收掉 —— 产出照常落在群里。守护进程级, 跨 CLI 重启/会话结束仍在。用户说「每个工作日晚上 9:30 自动跑一下 xxx」「每天早上帮我看看 yyy」「每 2 小时同步一次 zzz」「明早 9 点提醒并整理 www」时调它。\n" +
-      "**默认新建, 不在任何已有会话里续**: 定时的活是一件独立的事, 塞进一个常驻 wizard 会把两件不相关的事挤进同一个 transcript, 那个 wizard 正忙时还会连触发时刻一起被拖走。只有用户明确说了「在 #foo 里继续 / 让 #foo 每天…」才传 `tag` 点名它 —— 这时到点直接投进它那一轮 (它正忙则仍然另起白板执行)。`prompt` 本身就在说「建两个 wizard 去干 xxx」时, 就算给了 `tag` 也照新建办 —— 守护进程自己认这句话, 那个 tag 只决定在谁的聊天/目录下办。要强行在 tag 那一轮里续, 显式传 `fresh:false`。\n`when` 用人话原样写, 别自己翻译成 cron: 「每个工作日晚上9:30」「每天 8:00」「每周三下午3点」「每隔两小时」「每 30 分钟」「20 分钟后」「明早 9 点」都认。解析不出会报错并列出能认的说法 —— 这时把原话回给用户让他重说, 别自己猜一个时间存进去。\n存成功后**必须把回显的 `when` 和 `next` 念给用户**确认 (例: 「每个工作日 21:30, 下次 2026-09-21 21:30」)。`prompt` 要写成一句完整的、零上下文也能执行的指令 —— 到点时那个会话可能早已 /clear 过, 它只看得见这句话。",
+      "**每条任务落成一份你能直接改的代码文件** `~/.wezard/tasks/<id>.task.mjs` (返回值里的 `file`)。这个工具只管最常见的那条路 (什么时候 + 说什么); 要更细的东西就**用 Read/Edit 改那个文件**, 存盘即生效, 不用 reload:\n" +
+      "· 触发条件可组合 —— `when: ({every, daily, at, between, onDays, and, not}) => and(every(\"1h\"), between(\"08:00\",\"20:00\"), onDays(\"工作日\"))`。`every/daily/at` 产生时刻, `between/onDays/not` 只做筛选。\n" +
+      "· **放枪前先探一眼**用 `gate` —— 一段在 daemon 侧跑的异步函数, 返回 `false` 这一轮就不放枪 (不起 wizard、群里不出声), 返回 `{vars}` 则填进 prompt 里的 `{{名字}}`, 返回 `{state}` 下一轮还拿得到。`gate: async ({sh, state}) => { const out = await sh(\"git fetch -q && git log --oneline HEAD..@{u}\"); return out.trim() ? {vars:{commits: out}} : false; }`。「有新东西才处理」这类需求必须用它, 别写成「到点起个 wizard 让它自己看一眼没有就退出」—— 那是每次空转一个 pane 加一份上下文。\n" +
+      "· `enabled: false` 暂停而不删。\n" +
+      "**默认新建, 不在任何已有会话里续**: 定时的活是一件独立的事, 塞进一个常驻 wizard 会把两件不相关的事挤进同一个 transcript, 那个 wizard 正忙时还会连触发时刻一起被拖走。只有用户明确说了「在 #foo 里继续 / 让 #foo 每天…」才传 `tag` 点名它 —— 这时到点直接投进它那一轮 (它正忙则仍然另起白板执行)。`prompt` 本身就在说「建两个 wizard 去干 xxx」时, 就算给了 `tag` 也照新建办 —— 守护进程自己认这句话, 那个 tag 只决定在谁的聊天/目录下办。要强行在 tag 那一轮里续, 显式传 `fresh:false`。\n" +
+      "`when` 用人话原样写, 别自己翻译成 cron: 「每个工作日晚上9:30」「每天 8:00」「每周三下午3点」「每隔两个小时」「每小时」「每 30 分钟」「20 分钟后」「明早 9 点」都认, 还能叠时间窗口 —— 「白天每隔一个小时」「工作时间每半小时」「8点到20点每小时」。解析不出会报错并列出能认的说法 —— 这时把原话回给用户让他重说, 别自己猜一个时间存进去。\n" +
+      "存成功后**必须把回显的 `when` 和 `next` 念给用户**确认 (例: 「每个工作日 21:30, 下次 2026-09-21 21:30」)。`prompt` 要写成一句完整的、零上下文也能执行的指令 —— 到点接活的多半是个刚出生的白板 wizard, 它只看得见这句话。",
     inputSchema: {
-      when: z.string().describe("什么时候跑, 人话原样传: 「每个工作日晚上9:30」「每天早上9点」「每周三下午3点」「每隔2小时」「每30分钟」「20分钟后」「明早9点」。"),
-      prompt: z.string().describe("到点要说给那个 wizard 听的话。写成自洽的完整指令 (要做什么、在哪个目录/文件上、做完怎么汇报), 别依赖当前对话的上下文。"),
+      when: z.string().describe("什么时候跑, 人话原样传: 「每个工作日晚上9:30」「每天早上9点」「白天每隔一个小时」「工作时间每半小时」「每30分钟」「20分钟后」「明早9点」。时间窗口 (白天 / 工作时间 / 8点到20点) 会被解析成筛子, 窗外的那些枪直接吞掉。"),
+      prompt: z.string().describe("到点要说给那个 wizard 听的话。写成自洽的完整指令 (要做什么、在哪个目录/文件上、做完怎么汇报), 别依赖当前对话的上下文。里面可以留 `{{名字}}` 占位, 由任务文件里的 gate 填。"),
       tag: z.string().optional().describe(`点名在**哪个已有 wizard**里跑 —— 只有用户要求「在它那儿继续」时才传。省略 = 到点新建一个白板 wizard 干完就收 (默认, 也是「定时新建 wizard 干 xxx」要的那个)。传了它还想要新建, 再加 \`fresh:true\`: 那时它只当模板, 新 wizard 继承它的聊天/目录/模型。${ADDRESS_DOC}`),
       fresh: z.boolean().optional().describe("覆盖默认: true = 每次到点新建白板 wizard 执行 (给了 tag 时用来表达「在它的目录下新开一个干」), false = 注入 tag 指向的已有会话。默认由 tag 推断 (给了 tag = false, 没给 = true)。"),
-      note: z.string().optional().describe("给人看的一句话备注, 只在 list_tasks 里回显。"),
+      id: z.string().optional().describe("任务 id, 同时也是文件名 (`~/.wezard/tasks/<id>.task.mjs`)。省略则从 note/prompt 生成。取个好认的短名 —— 之后你要改这条任务, 改的就是那个文件。"),
+      note: z.string().optional().describe("给人看的一句话备注, 在 list_tasks 里回显。"),
     },
   },
-  async ({ when, prompt, tag, note, fresh }) =>
+  async ({ when, prompt, tag, note, fresh, id }) =>
     unwrap("schedule_task", await daemonPost("/tasks/schedule", {
-      when, prompt, tag: tag ?? "", note: note ?? "",
+      when, prompt, tag: tag ?? "", note: note ?? "", id: id ?? "",
       ...(fresh === undefined ? {} : { fresh }),
     })),
 );
@@ -627,7 +634,8 @@ server.registerTool(
   {
     title: "List scheduled tasks on this host",
     description:
-      "列出本机所有定时任务: `id` (取消要用)、`when` (人话回显)、`next` (下次触发时刻)、`lastFired`、`runIn` (到点是新建白板 wizard 还是注入已有会话)、目标 wizard 的 `address` 与 `prompt`。用户问「有哪些定时任务」「我设了什么定时」「下次什么时候跑」时调它。只读。`mine:true` 只看排给你自己的。",
+      "列出本机所有定时任务: `id` (取消要用)、`when` (人话回显)、`next` (下次触发时刻)、`lastFired`、`runIn` (到点是新建白板 wizard 还是注入已有会话)、目标 wizard 的 `address` 与 `prompt`。用户问「有哪些定时任务」「我设了什么定时」「下次什么时候跑」时调它。只读。`mine:true` 只看排给你自己的。\n" +
+      "`file` 是这条任务的源码 (`~/.wezard/tasks/<id>.task.mjs`) —— 要改触发条件、加 gate、暂停 (`enabled:false`) 就 Read/Edit 它, 存盘即生效。`gate` 说明这条任务有没有放枪前的探查以及上一轮的去向 (go 放了 / skip 没活 / error 炸了), `lastError` 与 `loadError` 是它上次为什么没跑成 —— 改坏了的文件也会出现在列表里, 带着理由。",
     inputSchema: {
       mine: z.boolean().optional().describe("true = 只列排给调用方自己的任务。默认列全机。"),
     },
@@ -640,7 +648,7 @@ server.registerTool(
   {
     title: "Cancel one scheduled task by id",
     description:
-      "按 id 删掉一条定时任务 (id 从 list_tasks 拿)。用户说「取消那个定时」「别再每天跑了」时调它: 先 list_tasks 把候选念给用户确认是哪一条, 再删。删的是日程本身, 不影响任何正在跑的活。",
+      "按 id 删掉一条定时任务 (id 从 list_tasks 拿), 连同它那份任务文件一起。用户说「取消那个定时」「别再每天跑了」时调它: 先 list_tasks 把候选念给用户确认是哪一条, 再删。删的是日程本身, 不影响任何正在跑的活。**一条定时的 prompt 要求「没活就停掉这个定时」时, 到点接活的那个 wizard 就该自己调它**: list_tasks 按 note/prompt 认出是哪一条, 再 cancel_task。只想暂时停就改任务文件的 `enabled: false`, 留档。",
     inputSchema: {
       id: z.string().describe("Schedule id from list_tasks."),
     },

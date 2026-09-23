@@ -353,9 +353,10 @@ const Svr = z.object({
   logLevel: z.enum(["trace", "debug", "info", "warn", "error"]).default("info"),
 });
 
-// 定时任务: 到点把一句 prompt 注入某个 wizard 会话 —— 等价于那一刻有人在群里对它
-// 说了这句话。触发时机由 `when` 描述 (shared/schedule-spec.ts), 不限于「每天 HH:MM」。
-// 增删走 MCP 工具 (schedule_task / cancel_task), 写回 config.jsonc 的 `schedules`。
+// 定时任务的**旧**存法 (1.5 之前)。现在一条任务是 ~/.wezard/tasks/<id>.task.mjs
+// 一份可注入代码的配置 (shared/task-file.ts) —— 触发条件可组合、放枪前可以先探一眼,
+// 这两件事都写不进 json。这里留着只为把老 config 里的记录抬过去:
+// daemon/tasks.ts 的 migrateLegacySchedules 抬完就把这个数组清空。
 const When = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("daily"),

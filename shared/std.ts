@@ -31,3 +31,13 @@ export const mapLimit = async <T, R>(
   await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, xs.length)) }, worker));
   return out;
 };
+
+/** Substitute `{{…}}` refs from a context map. Unknown keys are left verbatim —
+ *  a prompt legitimately containing `{{foo}}` shouldn't be silently emptied. */
+export const interpolate = (
+  template: string,
+  ctx: Readonly<Record<string, string>>,
+): string =>
+  template.replace(/\{\{\s*#?([\p{L}\p{N}_-]+)\s*\}\}/gu, (whole, key: string) =>
+    key in ctx ? ctx[key]! : whole,
+  );

@@ -19,7 +19,7 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import type { CliBackendName } from "../shared/cli-backends.js";
 import type { TurnOrigin } from "../shared/detail-store.js";
-import { sleep, clipLine } from "../shared/std.js";
+import { sleep, clipLine, interpolate } from "../shared/std.js";
 
 export interface GraphNodeSpec {
   /** Session tag, without `#`. */
@@ -92,16 +92,8 @@ export interface GraphDeps {
 // ── Pure helpers ──────────────────────────────────────────────────────
 const targetOf = (base: string, tag: string): string => (tag ? `${base}#${tag}` : base);
 
-/** Substitute `{{…}}` refs from the accumulated reply context. Unknown keys are
- *  left verbatim — a prompt legitimately containing `{{foo}}` shouldn't be
- *  silently emptied. */
-export const interpolate = (
-  template: string,
-  ctx: Readonly<Record<string, string>>,
-): string =>
-  template.replace(/\{\{\s*#?([\p{L}\p{N}_-]+)\s*\}\}/gu, (whole, key: string) =>
-    key in ctx ? ctx[key]! : whole,
-  );
+// `{{last}}` / `{{<tag>}}` 的替换是共享原语 (shared/std.ts), 这里连同旧的导出名一并转发。
+export { interpolate };
 
 /** Reply satisfies the convergence sentinel. */
 export const converged = (reply: string, until: string | undefined): boolean =>
