@@ -237,12 +237,27 @@
     return (n && n.name) || (target.indexOf('#') >= 0 ? '#' + target.split('#').pop() : target) || target;
   };
 
+  // 左上角写聊天的名字, 不是「会话列表」—— 一个页面同时开着好几个群的时候,
+  // 「这是哪个群」比「这里是一份列表」重要得多。名字只有 /api/world 给
+  // (chatNames 在 daemon 的注册表里), 没回来之前退回静态标题, 不闪空白。
+  var chatName = function () {
+    var c = chatOf(S.base);
+    return (c && c.name) || (nodeOf(S.target) || {}).chat || '';
+  };
+  var sideHead = function () {
+    var n = chatName();
+    $('#side-t').textContent = n || '会话列表';
+    $('#side-t').title = n ? n + ' · ' + S.base : S.base;
+    $('#side-n').textContent = S.tags.length ? S.tags.length + ' 个会话' : '';
+    $('#side-sub').textContent = S.base || '';
+  };
+
   var renderTags = function () {
+    sideHead();
     if (!S.tags.length) {
       tagsEl.innerHTML = '<div class="empty-side">这个 chat 还没有会话记录</div>';
       return;
     }
-    $('#side-n').textContent = S.tags.length + ' 个会话';
     tagsEl.replaceChildren.apply(tagsEl, S.tags.map(function (t) {
       var run = isRunning(t), n = nodeOf(t.target) || {};
       var el = document.createElement('div');
@@ -277,9 +292,13 @@
   };
 
   var topbar = function () {
-    var t = curTag();
+    var t = curTag(), name = chatName();
+    var tag = t ? (t.tag ? '#' + t.tag : 'default') : '';
     $('#tb-em').textContent = t ? t.label : '💬';
-    $('#tb-h').textContent = t ? (t.tag ? '#' + t.tag : 'default') : '';
+    // 群名在前、地址在后。手机上一进来就是阅读态 (侧栏整个隐藏), 顶栏是唯一
+    // 还能说清「这是哪个群」的地方。
+    $('#tb-h').textContent = name || tag;
+    $('#tb-tag').textContent = name ? tag : '';
     var cwdEl = $('#tb-cwd');
     cwdEl.hidden = !(t && t.cwd);
     if (t && t.cwd) { cwdEl.textContent = '📁 ' + shortCwd(t.cwd); cwdEl.title = t.cwd; }
@@ -345,7 +364,6 @@
   var applySummary = function (d) {
     S.base = d.base; S.tags = d.tags || []; S.graphs = d.graphs || [];
     S.at = d.at || Date.now(); S.recvAt = Date.now();
-    $('#side-sub').textContent = d.base || '';
     renderTags(); topbar(); renderStatus(curTag()); renderGraph();
   };
 
@@ -363,6 +381,7 @@
       var btn = $('#more');
       if (btn) btn.onclick = function () { btn.textContent = '载入中…'; loadThread(target, '0'); };
       render(inner);
+      foldPings();
       expireTurns();
       S.pinned = true; toBottom(true);
       // CDN 字体/代码高亮加载完会改变高度, 再吸一次底。
@@ -380,6 +399,60 @@
   var markStale = function (t) {
     var n = turnNode(t.id);
     if (n) n.setAttribute('data-stale-at', t.staleAt || 0);
+  };
+
+  // ── 🏓 keepalive 折叠 ──────────────────────────────────────────────
+  // 保温 ping 是机器行为, 不是对话 (服务端只给一个 .ping 标记, 见 chat-view
+  // 的 isKeepaliveTurn)。挂机一晚攒出几十轮 ping/pong, 等宽排在时间轴上会把
+  // 真正说过的话挤出屏幕 —— 所以连续的一段收成一行 `🏓 ×N`, 点开才是详情。
+  //
+  // 每次变动都先拆回顶层再整段重折: 追加一轮可能把两段并成一段, 增量维护要
+  // 处理的拼接情形更多。折叠只**搬运**既有节点 (不重建 HTML), 所以 markdown
+  // 渲染态、工具展开态、data-sig 全都原样留着。
+  var pingOpen = {};
+  // 摘要行只放时刻: tg-time 是 "YYYY-MM-DD HH:MM:SS", 两份日期会把这一行撑开,
+  // 而一段连续的 ping 本来就落在同一天里。
+  var stampOf = function (el) {
+    var t = el.querySelector('.tg-time');
+    return t ? String(t.textContent).split(' ').pop() : '';
+  };
+  var foldPings = function () {
+    var inner = $('#thread-in');
+    // 顶层没有散落的 ping = 已经折好了。流式 turn 每 300ms 推一次, 每次都拆开
+    // 重折是白搬一趟 DOM, 还会把读者的滚动位置蹭掉。
+    var loose = false;
+    Array.prototype.forEach.call(inner.children, function (el) {
+      if (el.classList.contains('ping')) loose = true;
+    });
+    if (!loose) return;
+    inner.querySelectorAll('.ping-fold').forEach(function (f) {
+      var box = f.querySelector('.ping-body');
+      while (box.firstChild) inner.insertBefore(box.firstChild, f);
+      f.remove();
+    });
+    // 连续段: 中间夹一轮真对话 (或一道上下文断点) 就断开 —— 那正是要露出来的东西。
+    var runs = [], run = null;
+    Array.prototype.forEach.call(inner.children, function (el) {
+      if (!el.classList.contains('ping')) { run = null; return; }
+      if (run) run.push(el); else runs.push(run = [el]);
+    });
+    runs.forEach(function (r) {
+      var key = r[0].getAttribute('data-key') || '';
+      var span = r.length > 1 ? stampOf(r[0]) + ' → ' + stampOf(r[r.length - 1]) : stampOf(r[0]);
+      var d = document.createElement('details');
+      d.className = 'ping-fold';
+      d.open = !!pingOpen[key];
+      d.innerHTML =
+        '<summary class="ping-sum" title="keepalive 保温 ping —— 不是对话, 点开看详情">' +
+          '<span class="pb">🏓 ×' + r.length + '</span>' +
+          '<span class="ps">keepalive 保温</span>' +
+          '<span class="pt">' + esc(span) + '</span>' +
+        '</summary><div class="ping-body"></div>';
+      d.ontoggle = function () { pingOpen[key] = d.open; };
+      inner.insertBefore(d, r[0]);
+      var box = d.querySelector('.ping-body');
+      r.forEach(function (el) { box.appendChild(el); });
+    });
   };
 
   var upsertTurn = function (t) {
@@ -403,6 +476,7 @@
       }
     }
     markStale(t);
+    foldPings();
     if (stick) toBottom(true);
   };
 
@@ -1194,7 +1268,8 @@
       W.nodes = d.nodes || []; W.edges = d.edges || []; W.chats = d.chats || [];
       W.jobs = d.jobs || []; W.schedules = d.schedules || []; W.degraded = !!d.degraded;
       // 身份回来了, 侧栏那几行也跟着变 —— 名字/职责/家谱都在这份数据里。
-      renderTags();
+      // 顶栏同理: 群名只在这份快照里, 不跟着 /api/chat 走。
+      renderTags(); topbar();
       if (VIEW === 'world') renderWorld();
       if (VIEW === 'plan') renderPlan();
     }).catch(function () { });

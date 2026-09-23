@@ -165,6 +165,19 @@ const previewOf = (r: TurnDetailRecord): string => {
   return stripMd(src).slice(0, 120);
 };
 
+// ── keepalive 心跳 ────────────────────────────────────────────────────
+// 保温 ping 记成了一轮 (那份花销是真的), 但它不是对话: 挂机一晚能攒出几十轮
+// ping/pong, 在时间轴上与真实对话等宽排开, 说过的话就被挤出了屏幕。标出来,
+// 让视图把连续的几轮折成一行 (见 web/chat.js 的 foldPings)。
+//
+// 按**形态**认, 不按配置认 —— 这个视图同样跑在没有配置的 svr 上, 而历史记录里
+// 的 ping 文本也可能来自改过的旧配置。只收 `keepalive …` 与裸 `ping` 两种:
+// resumePing ("continue") 是真的在推进工作, 那一轮有内容, 不该被折起来。
+export const isKeepaliveTurn = (r: TurnDetailRecord): boolean => {
+  const q = (r.userQuery ?? "").replace(/\s+/gu, "").toLowerCase();
+  return q === "ping" || q.startsWith("keepalive");
+};
+
 export const isTurn = (r: DetailRecord): r is TurnDetailRecord => r.kind === "turn";
 
 export const isMark = (r: DetailRecord): r is MarkDetailRecord => r.kind === "mark";

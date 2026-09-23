@@ -15,7 +15,10 @@ body { overflow: hidden; overscroll-behavior: none }
 }
 .side-head { padding: 13px 16px 11px; border-bottom: 1px solid #eaeef2 }
 .side-head .l1 { display: flex; align-items: baseline; gap: 8px }
-.side-head .t { font-size: 14px; font-weight: 600 }
+.side-head .t {
+  font-size: 14px; font-weight: 600; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .side-head .n {
   margin-left: auto; font-size: 11px; color: #8c959f;
   font-variant-numeric: tabular-nums;
@@ -88,7 +91,14 @@ body { overflow: hidden; overscroll-behavior: none }
   background: #fff; border-bottom: 1px solid #d0d7de;
 }
 .topbar .em { font-size: 18px }
-.topbar .h { font-size: 15px; font-weight: 600; font-family: ui-monospace, Menlo, monospace }
+.topbar .h {
+  font-size: 15px; font-weight: 600; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.topbar .tg {
+  flex: none; font-size: 12.5px; color: #57606a;
+  font-family: ui-monospace, Menlo, monospace;
+}
 .topbar .cwd {
   flex: none; font-size: 11px; color: #57606a; font-family: ui-monospace, Menlo, monospace;
   background: #f6f8fa; border: 1px solid #eaeef2; border-radius: 5px; padding: 1px 6px;
@@ -166,6 +176,30 @@ body { overflow: hidden; overscroll-behavior: none }
 }
 /* graph 派的一轮: 卡片本身也着色, 滚动时不必读归因条就知道这不是人发的。 */
 .turn-group.graph { border-color: #8250df44 }
+
+/* ── 🏓 keepalive 折叠 ──────────────────────────────────────────────
+   保温 ping 不是对话, 但它是真花销 —— 所以留在时间轴上, 只是收成一行虚线。 */
+.ping-fold { border: 1px dashed #d8dee4; border-radius: 10px; background: #fbfcfd }
+.ping-fold > .ping-sum {
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+  cursor: pointer; list-style: none; font-size: 11.5px; color: #8c959f;
+  font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums;
+}
+.ping-fold > .ping-sum::-webkit-details-marker { display: none }
+.ping-fold > .ping-sum::after {
+  content: "›"; margin-left: auto; font-size: 14px; color: #b1bac4;
+  transition: transform .12s;
+}
+.ping-fold[open] > .ping-sum::after { transform: rotate(90deg) }
+.ping-fold > .ping-sum:hover { color: #57606a }
+.ping-fold .pb { color: #57606a; font-weight: 700; flex: none }
+.ping-fold .ps { overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.ping-fold .pt { flex: none; opacity: .8 }
+.ping-fold .ping-body {
+  display: flex; flex-direction: column; gap: 10px; padding: 2px 10px 10px;
+}
+/* 展开后的 ping 轮次压一档: 它们是背景噪声, 不该和真对话卡片一样醒目。 */
+.ping-fold .turn-group { box-shadow: none; background: #fff }
 
 /* ── 页脚总账 ───────────────────────────────────────────────────── */
 .statusbar {

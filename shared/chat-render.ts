@@ -49,6 +49,7 @@ export const renderChatPage = (): string =>
       <span class="back" id="tb-back">‹</span>
       <span class="em" id="tb-em">💬</span>
       <span class="h" id="tb-h"></span>
+      <span class="tg" id="tb-tag"></span>
       <span class="cwd" id="tb-cwd" hidden></span>
       <span class="sub" id="tb-sub"></span>
       <nav class="views" id="views">
