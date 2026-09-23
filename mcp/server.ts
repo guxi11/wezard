@@ -162,9 +162,14 @@ server.registerTool(
   {
     title: "Switch workspace directory",
     description:
-      "一步换掉这个 wizard 的**工作区**: 杀掉当前 pane, 在给定目录下重开一个全新的会话 —— 等价于往那个目录 `/new`。群里收到新会话的 📂 项目信息气泡当回执; 对话上下文**不会**带过去 (和 /new 一样是全新会话, 但身份的系统提示还在)。调用方就是被替换的那一个时, 它在调用当口就被终结 —— 这是预期行为, 群里那条气泡就是回执。用绝对路径 (或 `~` 开头)。想换目录又想保住手上的上下文: 先 wizard_handoff_self 把工作压成简报, 或者 spawn_clone({inherit:false, cwd}) 让一个分身去那边干。",
+      "一步换掉这个 wizard 的**工作区**: 杀掉当前 pane, 在给定目录下重开一个全新的会话 —— 等价于往那个目录 `/new`。群里收到新会话的 📂 项目信息气泡当回执; 对话上下文**不会**带过去 (和 /new 一样是全新会话, 但身份的系统提示还在)。调用方就是被替换的那一个时, 它在调用当口就被终结 —— 这是预期行为, 群里那条气泡就是回执。用绝对路径 (或 `~` 开头)。想换目录又想保住手上的上下文: 先 wizard_handoff_self 把工作压成简报, 或者 spawn_clone({inherit:false, cwd}) 让一个分身去那边干。\n"
+      + "**`keep:true` 是另一支**: 人回答「不用换, 就用现在这个目录」时调它 —— 不重开会话, 只把「这个工作区是人认过的」记下来, 此后新会话的开局不再问这件事。一个新聊天的第一个 wizard 落在默认兜底目录里, 开局会被要求先问一句要去哪个项目; 人给路径就走 `cwd`, 人说不用换就走 `keep`。",
     inputSchema: {
-      cwd: z.string().describe("Absolute project path, e.g. /Users/foo/projects/bar. ~ is expanded."),
+      cwd: z.string().optional().describe("Absolute project path, e.g. /Users/foo/projects/bar. ~ is expanded. 与 `keep` 二选一。"),
+      keep: z
+        .boolean()
+        .optional()
+        .describe("人回答了「不用换, 就用现在这个目录」时传 `true` (不要传 cwd)。只记一笔确认 —— 不重开会话、不动上下文, 此后再没人问这件事。"),
       target: z
         .string()
         .optional()
@@ -173,11 +178,13 @@ server.registerTool(
         ),
     },
   },
-  async ({ cwd, target }) => {
+  async ({ cwd, keep, target }) => {
+    if (!cwd && !keep) return fail("set_workspace 要么给 cwd (换到那个目录), 要么给 keep:true (确认沿用当前目录)");
     const { sessionId, tmuxPane } = selfRef();
     const normalizedTarget = normalizeTarget(target);
     const { j } = await daemonPost("/mirror/workspace", {
-      cwd,
+      ...(cwd ? { cwd } : {}),
+      ...(keep ? { keep: true } : {}),
       ...(normalizedTarget ? { target: normalizedTarget } : {}),
       ...(sessionId ? { sessionId } : {}),
       ...(tmuxPane ? { tmuxPane } : {}),
@@ -186,7 +193,7 @@ server.registerTool(
       const queued = j.pendingCwd ? ` (switch queued for ${j.pendingCwd as string} — send /new from WeCom to apply)` : "";
       return fail(`set_workspace failed: ${(j.reason as string) ?? "unknown"}${queued}`);
     }
-    return ok({ ok: true, target: j.target, sessionId: j.sessionId, cwd: j.cwd });
+    return ok({ ok: true, target: j.target, sessionId: j.sessionId, cwd: j.cwd, ...(j.confirmed ? { confirmed: true } : {}) });
   },
 );
 

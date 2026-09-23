@@ -1819,6 +1819,11 @@ export interface MirrorBridge {
    *  store; `clearPendingCwd` is called by the bridge after a /new spawn lands. */
   getCwd: (target: string) => { runningCwd: string; pendingCwd: string; defaultCwd: string };
   setPendingCwd: (target: string, cwd: string) => { ok: boolean; reason?: string; runningCwd: string; pendingCwd: string };
+  /** 「人确认过这个工作区」的读写两面。`cwdUnconfirmed` 为真 = 这个聊天还蹲在默认
+   *  兜底目录里且没人认领过它, 宪章据此让新 wizard 开工前先问一句; `confirmCwd` 是
+   *  人回答「不用换」时的落盘。 */
+  cwdUnconfirmed: (target: string, cwd?: string) => boolean;
+  confirmCwd: (target: string) => { ok: boolean; reason?: string; cwd: string };
   /** Detach + respawn a target's pane in `cfg.wrc.cwd` or its pendingCwd
    *  override. Used by /new to give the user a fresh claude in the bound
    *  project. Returns the new attachment result. */
@@ -1833,7 +1838,7 @@ export interface MirrorBridge {
    *  respawn, a clone) asks it for the target's charter and presses the result
    *  into the new process's system prompt, so identity is a property of the
    *  session rather than of the one code path that happened to create it. */
-  setCharterProvider: (fn: (target: string) => string) => void;
+  setCharterProvider: (fn: (target: string, ctx?: { cwd?: string }) => string) => void;
   /** Hard facts about one session — sessionId, transcript, cwd, backend, pane,
    *  and how full its context window is (prompt tokens of the last turn). */
   sessionInfo: (target: string) => { sessionId: string; jsonlPath: string; cwd: string; cli: CliBackendName; model: string; tmuxPane: string; contextTokens: number } | undefined;
@@ -3801,6 +3806,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       cwd: a.runningCwd || undefined,
       model: a.model || undefined,
       pendingCwd: a.pendingCwd || undefined,
+      cwdConfirmed: prevRec?.cwdConfirmed,
       keepaliveOff: prevRec?.keepaliveOff,
       keepaliveOffAt: prevRec?.keepaliveOffAt,
       keepaliveDisabled: carryKeepaliveDisabled || undefined,
@@ -4468,10 +4474,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 无论是群里手打的 /new、pane 死了的自愈重生, 还是编排生出来的分身, 新进程一
   // 睁眼就知道自己是谁 —— 而不是只有走 wizard 路由那一条路才有身份。
   // 由 index.ts 在启动时装上 (注册表活在那边); 没装 = 退回无身份行为, 全链路无回归。
-  let charterOf: ((target: string) => string) | undefined;
-  const setCharterProvider = (fn: (target: string) => string): void => { charterOf = fn; };
-  const charterFor = (target: string): string | undefined => {
-    try { return charterOf?.(target); } catch { return undefined; }
+  let charterOf: ((target: string, ctx?: { cwd?: string }) => string) | undefined;
+  const setCharterProvider = (fn: (target: string, ctx?: { cwd?: string }) => string): void => { charterOf = fn; };
+  // `cwd` = 这个 pane 正要启动的目录。attach 在 spawn 之后才发生, 所以此刻 getCwd
+  // 给的还是上一个 pane 的目录 —— 换目录重开时照它渲染, 新 wizard 会以为自己还在
+  // 旧工作区里。
+  const charterFor = (target: string, ctx?: { cwd?: string }): string | undefined => {
+    try { return charterOf?.(target, ctx); } catch { return undefined; }
   };
 
   const newSession = async (
@@ -4532,7 +4541,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       cwdOverride: eff,
       cli: effCli,
       model: opts?.model,
-      systemPrompt: opts?.systemPrompt ?? charterFor(target),
+      systemPrompt: opts?.systemPrompt ?? charterFor(target, { cwd: eff }),
     });
     if (!r.ok) return { ok: false, reason: r.reason };
     const att = attach({
@@ -4582,6 +4591,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           tmuxSession: baseA.tmuxSession || undefined,
           tmuxPane: baseA.tmuxPane || undefined,
           cwd: baseA.runningCwd || undefined,
+          cwdConfirmed: deps.store.get(base)?.cwdConfirmed,
           pendingCwd: undefined,
         });
       } else {
@@ -4779,6 +4789,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         tmuxSession: baseA.tmuxSession || undefined,
         tmuxPane: baseA.tmuxPane || undefined,
         cwd: baseA.runningCwd || undefined,
+        cwdConfirmed: deps.store.get(base)?.cwdConfirmed,
         pendingCwd: baseA.pendingCwd || undefined,
       });
       log.info({ target, base, runningCwd: callerRunning, pendingCwd: expanded }, "setPendingCwd (chat-scoped, live base)");
@@ -4802,6 +4813,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         tmuxSession: callerA.tmuxSession || undefined,
         tmuxPane: callerA.tmuxPane || undefined,
         cwd: callerA.runningCwd || undefined,
+        cwdConfirmed: deps.store.get(target)?.cwdConfirmed,
         pendingCwd: callerA.pendingCwd || undefined,
       });
       log.info({ target, runningCwd: callerA.runningCwd, pendingCwd: callerA.pendingCwd }, "setPendingCwd (fallback: no base, wrote to caller)");
@@ -4814,6 +4826,32 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       return { ok: true, runningCwd: callerRec.cwd?.trim() || expandedDefaultCwd, pendingCwd: expanded };
     }
     return { ok: false, reason: "no mirror binding for target — send a message in the WeCom chat first", runningCwd: "", pendingCwd: "" };
+  };
+
+  // 「人说了就用这个目录」。一个新聊天的第一个 wizard 落在默认兜底目录里 —— 那不是
+  // 选择, 只是没人说过。所以默认按「还要换」办 (charter 让它开工前先问一句), 直到人
+  // 明说不用换。**只有这一个写入点**: 换去别的目录本身就是选择, 不必记一笔, 那时
+  // runningCwd 已经不等于默认目录, cwdUnconfirmed 自然为假。
+  // 寻址与 pendingCwd 同规 —— 写在 base 上 (聊天级), 没有 base 记录 (只有 tagged
+  // 会话的聊天) 就退回调用方自己的那条。
+  const confirmCwd = (target: string): { ok: boolean; reason?: string; cwd: string } => {
+    const base = baseOfKey(target);
+    const key = deps.store.get(base) ? base : deps.store.get(target) ? target : "";
+    const rec = key ? deps.store.get(key) : undefined;
+    if (!rec) return { ok: false, reason: "no mirror binding for target — send a message in the WeCom chat first", cwd: "" };
+    deps.store.set(key, { ...rec, cwdConfirmed: true });
+    const cwd = getCwd(target).runningCwd;
+    log.info({ target, key, cwd }, "cwd confirmed by user");
+    return { ok: true, cwd };
+  };
+
+  /** 该不该问人「要在哪个项目下干活」: 还蹲在默认兜底目录里, 而且人没说过就用它。 */
+  const cwdUnconfirmed = (target: string, cwd?: string): boolean => {
+    const base = baseOfKey(target);
+    if (deps.store.get(base)?.cwdConfirmed || deps.store.get(target)?.cwdConfirmed) return false;
+    // `cwd` 是调用方已经知道的「即将生效的目录」(spawn 前的宪章渲染)。没给就问现状。
+    const eff = cwd?.trim() ? expandHome(cwd.trim()) : getCwd(target).runningCwd;
+    return eff === expandedDefaultCwd;
   };
 
   // ── Peer graph (sibling sessions of one chat) ────────────────────────
@@ -5529,7 +5567,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // Same resume-fork hazard as dispatch: snapshot before spawn, re-bind
         // onto the forked jsonl once it appears (EOF offset — fork is seeded).
         const resumeBaseline = listJsonls(dirname(a.jsonlPath));
-        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: tagOfKey(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, model: a.model || undefined, systemPrompt: charterFor(target) });
+        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: tagOfKey(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, model: a.model || undefined, systemPrompt: charterFor(target, { cwd: a.runningCwd }) });
         if (!r.ok || !r.tmuxPane) return { ok: false, reason: `respawn failed: ${r.reason ?? "unknown"}` };
         a.tmuxPane = r.tmuxPane;
         a.tmuxSession = r.tmuxSession ?? a.tmuxSession;
@@ -5694,6 +5732,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     },
     getCwd,
     setPendingCwd,
+    cwdUnconfirmed,
+    confirmCwd,
     newSession,
     cloneSession,
     sessionInfo,
@@ -5861,7 +5901,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           const resumeBaseline = !armMigration ? listJsonls(dirname(a.jsonlPath)) : undefined;
           // Respawn in the binding's runningCwd (pendingCwd doesn't apply to a
           // mid-turn reincarnation — only /new and /clear-with-pending swap cwd).
-          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: tagOfKey(a.target) || a.target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, model: a.model || undefined, systemPrompt: charterFor(a.target) });
+          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: tagOfKey(a.target) || a.target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, model: a.model || undefined, systemPrompt: charterFor(a.target, { cwd: a.runningCwd }) });
           if (r.ok && r.tmuxPane && r.tmuxSession) {
             a.tmuxPane = r.tmuxPane;
             a.tmuxSession = r.tmuxSession;

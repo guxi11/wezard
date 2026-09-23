@@ -592,6 +592,7 @@ export const installInboundRouter = (
         lines.push(`下次切换: \`${pendingCwd}\` (使用 /new 或 /clear 生效)`);
       }
       if (runningCwd !== defaultCwd) lines.push(`(默认: \`${defaultCwd}\`)`);
+      if (bridge.cwdUnconfirmed(who)) lines.push("⚠️ 这是默认兜底目录, 还没人确认过 —— 要换就说「切到 /path/to/proj」");
       lines.push("> 切换其他项目: 对 AI 说「切到 /path/to/proj」(`set_workspace` 工具直接换目录重开)");
       return lines.join("\n");
     }

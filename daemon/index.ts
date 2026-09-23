@@ -467,7 +467,7 @@ const main = async (): Promise<void> => {
     // project-info bubble is the receipt. On spawn failure the pendingCwd
     // stays queued, so a manual /new from WeCom still completes the switch.
     http.register("POST /mirror/workspace", async (req, res) => {
-      const body = (await readBody(req)) as Partial<{ target: string; sessionId: string; tmuxPane: string; cwd: string }>;
+      const body = (await readBody(req)) as Partial<{ target: string; sessionId: string; tmuxPane: string; cwd: string; keep: boolean }>;
       const cwd = (body.cwd ?? "").toString();
       let target = (body.target ?? "").trim();
       if (!target && body.sessionId) {
@@ -482,7 +482,14 @@ const main = async (): Promise<void> => {
       }
       if (!target) target = (cfg.defaultChat ?? "").trim();
       if (!target) { json(res, 400, { ok: false, reason: "target required (or pass sessionId of an attached chat)" }); return; }
-      if (!cwd) { json(res, 400, { ok: false, reason: "cwd required" }); return; }
+      // keep = 人回答了「不用换, 就用现在这个」。只落一笔确认, 不碰 pane —— 把
+      // 「保持现状」也走成 setPendingCwd + newSession 的话, 代价是白杀一个会话。
+      if (body.keep === true) {
+        const c = m.confirmCwd(target);
+        json(res, c.ok ? 200 : 400, c.ok ? { ok: true, target, cwd: c.cwd, confirmed: true } : { ok: false, reason: c.reason, target });
+        return;
+      }
+      if (!cwd) { json(res, 400, { ok: false, reason: "cwd required (or keep:true to confirm the current one)" }); return; }
       const set = m.setPendingCwd(target, cwd);
       if (!set.ok) { json(res, 400, { ...set, target }); return; }
       // Same shape as inbound's /new: windowName = tag for tagged sessions,
@@ -1006,26 +1013,28 @@ const main = async (): Promise<void> => {
 
     /** 开局宪章。出生时的兄弟只是快照 —— 名册随时可查, 写进系统提示的那份只为了
      *  让它一睁眼就知道自己不是一个人在跑。 */
-    const charterFor = (target: string, o: { parent?: string; inherited?: boolean }): string =>
+    const charterFor = (target: string, o: { parent?: string; inherited?: boolean; cwd?: string }): string =>
       renderCharter({
-        self: { ...briefOf(target, target), address: selfAddress(target) },
+        // o.cwd = 正在启动的那个 pane 的目录; 没给才退回"现在记着的那个"。
+        self: { ...briefOf(target, target), address: selfAddress(target), ...(o.cwd ? { cwd: o.cwd } : {}) },
         chat: chatNameOf(cfg, target),
         principal: baseOfKey(target),
         parent: o.parent ? briefOf(target, o.parent) : undefined,
         inherited: !!o.inherited,
+        cwdUnconfirmed: m.cwdUnconfirmed(target, o.cwd),
         siblings: m.chatTargets(baseOfKey(target)).filter((t) => t !== target).map((t) => briefOf(target, t)),
         memory: wizards.get(target)?.memory ?? [],
       });
 
     // 所有 spawn 路径 (群里手打 /new、pane 自愈重生、编排出来的分身) 都从这里
     // 取身份, 于是「是谁」不再取决于是哪段代码把它生出来的。
-    m.setCharterProvider((target) => {
+    m.setCharterProvider((target, ctx) => {
       // 这里是最要紧的那道拦截: 宪章把「所在聊天」写进系统提示, 而系统提示是随进程
       // 终身的 —— 一个在聊天还没名字时出生的 wizard, 会一辈子以为自己住在一个
       // 「(未命名)」的地方。所以补名要发生在渲染之前, 不能等它以后自己去查。
       ensureChatNames(target);
       const rec = wizards.get(target);
-      return charterFor(target, { parent: rec?.parent, inherited: !!rec?.clonedFrom });
+      return charterFor(target, { parent: rec?.parent, inherited: !!rec?.clonedFrom, cwd: ctx?.cwd });
     });
 
     // 开机也补一次: IM 侧的 `/peers`、`/help` 直接读名字, 不经过任何 MCP 路由。

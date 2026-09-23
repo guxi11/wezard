@@ -107,6 +107,8 @@ export interface CharterArgs {
   parent?: WizardBrief;
   /** 是否 fork 了父亲的上下文。 */
   inherited: boolean;
+  /** 工作区还是没人选过的默认兜底目录 —— 开工前该先问人一句要去哪个项目。 */
+  cwdUnconfirmed: boolean;
   siblings: readonly WizardBrief[];
   memory: readonly string[];
 }
@@ -138,6 +140,18 @@ export const renderCharter = (a: CharterArgs): string => {
     ]),
     "",
   ];
+  // 新聊天的第一个 wizard 落在默认兜底目录里 —— 那不是人选的, 只是还没人说过。与其
+  // 让它在错的目录里把活干完, 不如开工前先问一句: 一句话的代价, 换掉一次重来。
+  if (a.cwdUnconfirmed) {
+    parts.push(
+      "> ⚠️ 上面这个工作区是**没人选过的默认兜底目录**, 不是人指定的。",
+      "> 所以**开工前先问一句**: 要在哪个项目目录下干活?",
+      "> 给了路径 → `set_workspace({cwd})` (当场换目录重开; 这一轮上下文会没, 让他把活再说一遍)。",
+      "> 说就用这个 / 不用换 → `set_workspace({keep:true})` 记一笔, 此后谁都不会再问。",
+      "> 只问这一次 —— 他不答就照这个目录干, 别反复追问。",
+      "",
+    );
+  }
   if (a.memory.length > 0) {
     parts.push("## 我的记忆", "这些是你自己写下的、要跨会话活下来的东西:", bullet(a.memory as string[]), "");
   }
