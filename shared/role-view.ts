@@ -54,10 +54,14 @@ export const senderOf = (r: TurnDetailRecord): string => {
   return ch.startsWith("user:") ? humanOf(ch) : "human:";
 };
 
-/** 顶层会话里的真实轮次: 去空壳、去子 agent (它内联在父轮里)、去保温 ping
- *  (机器行为, 不是对话 —— 花销仍计进页脚总账)。 */
+/** 顶层会话里的轮次: 去空壳、去子 agent (它内联在父轮里)。保温 ping 留着 ——
+ *  它不是对话, 但它是真花销, 时间轴上抹掉就等于说这段时间什么都没发生;
+ *  视图把它折成一行 (见 isPing)。 */
 const convTurns = (records: readonly DetailRecord[], now: number): TurnDetailRecord[] =>
-  records.filter(isTurn).filter((r) => !!r.target && !r.agent && !isGhostTurn(r, now) && !isKeepaliveTurn(r));
+  records.filter(isTurn).filter((r) => !!r.target && !r.agent && !isGhostTurn(r, now));
+
+/** 保温 ping 的那一条 —— 进时间轴, 但不进会话列表的条数/预览, 也不算一条关系。 */
+export const isPing = (m: Msg): boolean => isKeepaliveTurn(m.turn);
 
 /** 一轮 → 入/出两条消息。没问话的 (/clear 之后的续跑) 只有出; 还没产出也没在跑
  *  的只有入。 */
@@ -164,7 +168,9 @@ const previewOf = (m: Msg | undefined, dir: Directory): string =>
 const SUB_MAX = 40;
 
 /** 一个 role 参与的全部会话, 最近活动在前。wizard 的 home 频道即使还没说过话也在列。 */
-export const convsOf = (msgs: readonly Msg[], role: string, dir: Directory): Conv[] => {
+export const convsOf = (all_: readonly Msg[], role: string, dir: Directory): Conv[] => {
+  // 会话列表讲的是"谁跟谁说过什么", ping 不是话: 条数与预览都不该被它顶掉。
+  const msgs = all_.filter((m) => !isPing(m));
   const mine = msgs.filter((m) => involves(m, role));
   const homes = dir.isWizard(role) ? [`c:${baseOfKey(role)}`] : [];
   const keys = [...new Set([...mine.map((m) => convKeyOf(m, role)), ...homes])];

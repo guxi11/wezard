@@ -409,6 +409,9 @@ const TURN_CSS = `
     font-size:14px;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
   /* ── 工具调用 (Claude CLI 风): 去卡片, 默认折叠, ⎿ 结果预览 ── */
   .bubble.tool{background:transparent;border:0;border-radius:0;overflow:visible}
+  /* 连着的几次工具调用是一串动作, 不是几段话 —— 它们之间只留一行的距离,
+     .bubbles 的 14px 段间距留给真正换了说话内容的地方。 */
+  .bubble.tool+.bubble.tool{margin-top:-9px}
   .bubble .tool-call{border:0}
   .bubble .tool-call>summary{list-style:none;cursor:pointer;display:flex;
     align-items:baseline;gap:7px;padding:3px 6px;border-radius:6px;border:0;
@@ -431,7 +434,7 @@ const TURN_CSS = `
     border-left:2px solid #eaeef2}
   .tool-body>section{margin-bottom:8px}
   .tool-body>section:last-child,.tool-body>details:last-child{margin-bottom:0}
-  .tool-result-line{padding:2px 6px 4px 24px;color:#57606a;font-size:12.5px;
+  .tool-result-line{padding:1px 6px 2px 24px;color:#57606a;font-size:12.5px;
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .tool-call[open] ~ .tool-result-line{display:none}

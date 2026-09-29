@@ -29,7 +29,7 @@ export const chatScript = (): Asset =>
 export const renderChatPage = (): string =>
   `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Rolepage</title>
+<title>对话现场</title>
 <link rel="stylesheet" href="https://unpkg.com/highlight.js@11/styles/github.min.css">
 <link rel="stylesheet" href="chat/app.css">
 <script src="https://unpkg.com/markdown-it@14/dist/markdown-it.min.js"></script>

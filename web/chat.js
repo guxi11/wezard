@@ -75,6 +75,15 @@
     return pad(x.getMonth() + 1) + '-' + pad(x.getDate()) + ' ' + pad(x.getHours()) + ':' + pad(x.getMinutes());
   };
   var fmtHM = function (ts) { var x = new Date(ts); return pad(x.getHours()) + ':' + pad(x.getMinutes()); };
+  var fmtFull = function (ts) {
+    var x = new Date(ts);
+    return (x.getMonth() + 1) + '-' + pad(x.getDate()) + ' ' + pad(x.getHours()) + ':' +
+      pad(x.getMinutes()) + ':' + pad(x.getSeconds());
+  };
+  /** 一条消息的时刻 —— 只写在气泡外面这一处, 卡片里不再重复 (见 chat.css 的 .mb .tg-time)。 */
+  var stamp = function (ts) {
+    return '<time class="mt" title="' + esc(fmtFull(ts)) + '">' + esc(fmtHM(ts)) + '</time>';
+  };
   var esc = function (s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
       return c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;';
@@ -336,7 +345,8 @@
     $('#rb-acts').querySelectorAll('.vb').forEach(function (b) {
       b.onclick = function () { setView(VIEW === b.getAttribute('data-view') ? 'msgs' : b.getAttribute('data-view')); };
     });
-    document.title = nameOf(r.id) + ' · rolepage';
+    // 标题就是这一页的主张: 你此刻站在谁的位置上。换视角 → 标题跟着换。
+    document.title = nameOf(r.id) + ' 的视角';
   };
 
   // ── profile: 当前 role 自己跑过的轮次的总账 (选了 session 就只算那一段) ──
@@ -425,7 +435,7 @@
     learn(m.from, m.fromName, m.fromLabel);
     learn(m.to, m.toName, m.toLabel);
     if (m.dir === 'mark') {
-      return '<div class="mrow mark" data-id="' + esc(m.id) + '" data-ts="' + m.ts + '" data-sig="' + esc(m.sig) + '">' + m.html + '</div>';
+      return '<div class="mrow mark" data-id="' + esc(m.id) + '" data-turn="' + esc(m.turnId || m.id) + '" data-ts="' + m.ts + '" data-sig="' + esc(m.sig) + '">' + m.html + '</div>';
     }
     var mine = m.from === ROLE;
     var other = mine ? m.to : m.from;
@@ -434,18 +444,63 @@
     var to = !mine && m.to !== ROLE && group ? '<span class="to">→ ' + nm(m.to, m.toName) + '</span>' : '';
     var priv = !m.channel && group ? '<span class="ch priv">私聊</span>' : '';
     var who = mine
-      ? '<span class="to">' + (m.to && m.to !== 'human:' ? '→ ' + nm(m.to, m.toName) : '') + '</span><span>' + esc(fmtHM(m.ts)) + '</span>'
-      : nm(m.from, m.fromName) + to + priv + '<span>' + esc(fmtHM(m.ts)) + '</span>';
+      ? '<span class="to">' + (m.to && m.to !== 'human:' ? '→ ' + nm(m.to, m.toName) : '') + '</span>' + stamp(m.ts)
+      : nm(m.from, m.fromName) + to + priv + stamp(m.ts);
     var sw = canSwitch(other);
     var flip = '<button class="flip" data-r="' + esc(other) + '"' + (sw ? '' : ' disabled tabindex="-1"') +
       ' aria-label="' + esc(sw ? '切到 ' + nameOf(other) + ' 的视角' : '') + '">' + (sw ? '⇄ ' + esc(nameOf(other)) : '') + '</button>';
     var av = mine ? '' : '<button class="av' + (canSwitch(m.from) ? ' go' : '') + '" data-r="' + esc(m.from) + '" title="' + esc(nameOf(m.from)) + '"' + (canSwitch(m.from) ? '' : ' disabled') + '>' + esc(m.fromLabel || roleLabel(m.from)) + '</button>';
-    return '<div class="mrow ' + (mine ? 'mine' : 'them') + '" data-id="' + esc(m.id) + '" data-ts="' + m.ts + '" data-sig="' + esc(m.sig) + '" data-stale-at="' + (m.staleAt || 0) + '">' +
+    return '<div class="mrow ' + (mine ? 'mine' : 'them') + '" data-id="' + esc(m.id) + '" data-turn="' + esc(m.turnId || m.id) + '" data-ts="' + m.ts + '"' +
+      (m.ping ? ' data-ping="1"' : '') + ' data-sig="' + esc(m.sig) + '" data-stale-at="' + (m.staleAt || 0) + '">' +
       av +
       '<div class="mcol"><div class="mwho">' + who + '</div><div class="mb">' + m.html + '</div></div>' +
       flip +
     '</div>';
   };
+  // ── 🏓 保温 ping 的折叠 ──
+  // ping 不是对话, 但它是真花销, 从时间轴上抹掉就等于说这段时间什么都没发生。
+  // 一次 ping 落成两行 (问 + pong); 相邻的整串收进一条虚线, 展开才见正文。
+  // 展开态是整页一个开关 —— 折行没有稳定 id, 而"想看 ping"是个一次性的念头。
+  var PING_OPEN = false;
+  var unfoldPings = function (root) {
+    root.querySelectorAll('.ping-fold').forEach(function (f) {
+      var body = f.querySelector('.ping-body');
+      while (body && body.firstChild) root.insertBefore(body.firstChild, f);
+      f.remove();
+    });
+  };
+  var foldPings = function (root) {
+    var run = [];
+    var flush = function (before) {
+      if (!run.length) { return; }
+      var seen = {}, n = 0;
+      run.forEach(function (r) {
+        var t = r.getAttribute('data-turn') || r.getAttribute('data-id');
+        if (!seen[t]) { seen[t] = 1; n++; }
+      });
+      var t0 = Number(run[0].getAttribute('data-ts') || 0);
+      var t1 = Number(run[run.length - 1].getAttribute('data-ts') || 0);
+      var span = fmtHM(t0) + (fmtHM(t1) !== fmtHM(t0) ? ' – ' + fmtHM(t1) : '');
+      var d = document.createElement('details');
+      d.className = 'ping-fold';
+      d.open = PING_OPEN;
+      d.innerHTML = '<summary class="ping-sum"><span class="pb">🏓 ×' + n + '</span>' +
+        '<span class="ps">保温 ping</span><span class="pt">' + esc(span) + '</span></summary>' +
+        '<div class="ping-body"></div>';
+      root.insertBefore(d, before);
+      var body = d.querySelector('.ping-body');
+      run.forEach(function (r) { body.appendChild(r); });
+      d.addEventListener('toggle', function () { PING_OPEN = d.open; });
+      run = [];
+    };
+    // 先取快照 —— flush 会把行搬进 details, 边遍历边改 children 会漏行。
+    [].slice.call(root.children).forEach(function (el) {
+      if (el.classList && el.classList.contains('mrow') && el.getAttribute('data-ping') === '1') { run.push(el); return; }
+      flush(el);
+    });
+    flush(null);
+  };
+
   var bindRow = function (el) {
     el.querySelectorAll('.flip[data-r]:not([disabled]), .av.go').forEach(function (b) {
       b.onclick = function () { switchRole(b.getAttribute('data-r')); };
@@ -471,6 +526,7 @@
       if (btn) btn.onclick = function () { btn.textContent = '载入中…'; loadMsgs('0'); };
       bindRow(inner);
       render(inner);
+      foldPings(inner);
       expireRows();
       S.pinned = true; toBottom(true);
       // CDN 字体/代码高亮加载完会改变高度, 再吸一次底。
@@ -483,6 +539,8 @@
     var stick = S.pinned;
     var cur = rowNode(m.id);
     if (cur && cur.getAttribute('data-sig') === m.sig) return;
+    // 折行会把 .mrow 收进 details, 而下面的按时间插位假定它们都是 inner 的直接子节点。
+    unfoldPings(inner);
     var next = frag(rowHTML(m)).firstElementChild;
     if (!cur) {
       // 按时间插: SSE 推来的可能是一条更早的消息 (长轮次的入消息晚于别人的回复落盘)。
@@ -505,6 +563,7 @@
         cur.replaceWith(next); bindRow(next); render(next);
       }
     }
+    foldPings(inner);
     if (stick) toBottom(true);
   };
 

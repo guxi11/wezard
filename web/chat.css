@@ -11,6 +11,7 @@
   --faint: #9aa3af;
   --line: #d9dee6;
   --mine: #e4ecfc;    /* 当前视角说的话 */
+  --mine-soft: #d6e2f8;  /* 它内部还要再沉一档的块 (代码/结果/折叠头) */
   --mine-line: #b8caef;
   --accent: #2f55c9;  /* 视角色: 名字的点、选中态、自己的气泡描边 */
   --priv: #9a5b10;    /* 私聊 */
@@ -227,19 +228,35 @@ button { font: inherit; color: inherit }
 .mwho .to { color: var(--faint) }
 .mwho .ch { font-size: 10.5px; border-radius: 4px; padding: 0 4px }
 .mwho .ch.priv { color: var(--priv); background: #9a5b1014 }
+/* 时刻只此一处 —— 气泡外, 跟着名字走。等宽数字让一列时间对得齐。 */
+.mwho .mt { color: var(--faint); font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums }
 .mb { min-width: 0; max-width: 100% }
+/* 卡片里那份时刻是详情页要的, 这里已经写在 .mwho 上了 —— 同一条消息不报两次时间。 */
+.mb .tg-time { display: none }
 
 /* 入消息 (问句) 是一颗气泡; 出消息 (回复) 是一张带工具细节的卡片 —— 两者都按视角着色。 */
 .mb > .bubble.mq { border-radius: 14px; border-color: var(--line) }
 .mb .mq .mmeta { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding: 8px 14px 0; font-size: 11px; color: var(--faint) }
-.mb .mq .md-body { padding: 4px 14px 10px }
+.mb .mq .md-body { padding: 10px 14px }
+.mb .mq .mmeta + .md-body { padding-top: 4px }
 .mchip { border-radius: 4px; padding: 0 5px; background: #f1f3f6; color: var(--mute) }
 .mchip.priv { color: var(--priv); background: #9a5b1014 }
 .mchip.pub { color: var(--pub); background: #237a5514 }
 .mchip.graph { color: #6639ba; background: #8250df12 }
+
+/* 自己发出的那条: 整块就是视角色。TURN_CSS 里写死的白卡 / 灰底 (嵌套气泡、
+   代码块、折叠头) 会在蓝底上显成一张张贴纸 —— 这里把它们收回到气泡自己的
+   底色上, 一条消息读起来是一块颜色, 需要再沉一档的才用 --mine-soft。 */
 .mrow.mine .mb > .bubble.mq, .mrow.mine .mb > .turn-group { background: var(--mine); border-color: var(--mine-line) }
-.mrow.mine .mb > .turn-group .bubble { background: #fbfcff }
-.mrow.mine .mb .md-body code { background: #fff }
+.mrow.mine .mb .bubble, .mrow.mine .mb .typing, .mrow.mine .mb .stats { background: transparent; border-color: var(--mine-line) }
+.mrow.mine .mb .bubble.user, .mrow.mine .mb .bubble.approval,
+.mrow.mine .mb .md-body code, .mrow.mine .mb .md-body pre,
+.mrow.mine .mb .tile, .mrow.mine .mb details > summary,
+.mrow.mine .mb .tool-call > summary:hover { background: var(--mine-soft); border-color: var(--mine-line) }
+.mrow.mine .mb .md-body pre code { background: transparent }
+.mrow.mine .mb .bubble details, .mrow.mine .mb .tg-head { border-color: var(--mine-line) }
+.mrow.mine .mb .tool-body { border-left-color: var(--mine-line) }
+.mrow.mine .mb .io-bar { background: var(--mine-soft) }
 
 /* 气泡对面那片空白 = 换视角的门。平时不可见, 悬停才露出要去谁那里。 */
 .flip {
@@ -318,7 +335,9 @@ button { font: inherit; color: inherit }
   display: flex; flex-direction: column; gap: 10px; padding: 2px 10px 10px;
 }
 /* 展开后的 ping 轮次压一档: 它们是背景噪声, 不该和真对话卡片一样醒目。 */
-.ping-fold .turn-group { box-shadow: none; background: #fff }
+.ping-fold .turn-group { box-shadow: none }
+.ping-fold .mcol { max-width: 100% }
+.ping-fold .flip { display: none }
 
 @media (max-width: 760px) {
   .app { flex-direction: column }
