@@ -115,6 +115,9 @@ export interface TurnFrom {
   job?: string;
   /** 定时任务 id (kind=task) —— 拿它回 config.schedules 里找规格。 */
   taskId?: string;
+  /** kind=peer: 发话方选择在公开频道 (turn.channel) 里说 —— 气泡进群, 回复也进群。
+   *  缺省 = 私聊: 只落在双方的 rolepage。 */
+  public?: boolean;
 }
 
 // Subagent 归属 —— 这一轮不是主会话的 turn, 是 Task/Agent 工具派出的子 agent
@@ -147,6 +150,13 @@ export interface TurnDetailRecord {
   cut?: CtxCut;        // 本轮之前的上下文断点; undefined = 与上一轮同一上下文
   origin?: TurnOrigin; // 本轮由 graph 注入; undefined = 人 (或 peer) 直接发起
   from?: TurnFrom;     // 本轮由同伴 / 定时任务开口; undefined = 人直接说的
+  // 频道 —— 这一轮的输入在哪儿说的、回复发到哪儿。名字全局可达以后, 人可以在
+  // 任何群里 `.fix` 叫任何 wizard, 回复回到**发话的那个群**, 不一定是 fix 的 home。
+  //   "chat:wr…" / "user:xxx"  公开频道 (群 / 与人的单聊) 的 base principal;
+  //   ""                       私聊 (wizard 之间, from.kind=peer 且非 public);
+  //   undefined                老记录: 按 from 推 —— peer → 私聊, 其余 → home (target 的 base)。
+  channel?: string;
+  speaker?: string;    // 人说的那一轮: 发话人 `user:<userid>` (群里可能不止一个人)
   agent?: TurnAgentMeta; // 本轮是 subagent 跑的; undefined = 主会话自身的 turn
   items: TurnItem[];
   model?: string;      // 首个见到的 model 名

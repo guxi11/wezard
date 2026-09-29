@@ -34,11 +34,18 @@ import { tagBadge, withTagHeader } from "../shared/session-label.js";
 import { sessionNameFor } from "./session-name.js";
 
 // ── Routing helpers ────────────────────────────────────────────────────
-const targetChatId = (principal: string): string => {
+// 卡片跟着本轮的频道走: 人在群 B 里 `.fix` 叫住在 A 的 wizard, 这一轮的审批/提问卡
+// 要出现在 B —— 等着点的人在那儿。`principal` (chatKey) 仍是 wizard 自己的 key,
+// 头、缓存、⏱窗口都按它; 只有「发到哪个 chatid」这一步换成频道。mirror 在启动时装上。
+let cardChannel: ((principal: string) => string) | undefined;
+export const bindCardChannel = (fn: (principal: string) => string): void => { cardChannel = fn; };
+
+const targetChatId = (key: string): string => {
   // "user:abc" → "abc" (DM chatid == userid for aibot)
   // "chat:wc..." → "wc..."
   // "user:abc#tag" → "abc" (drop the routing tag; WeCom SDK only knows chatids)
   // raw fallthrough
+  const principal = cardChannel?.(key) || key;
   const i = principal.indexOf(":");
   const rest = i >= 0 ? principal.slice(i + 1) : principal;
   const h = rest.indexOf("#");

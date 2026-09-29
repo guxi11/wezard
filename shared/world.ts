@@ -68,6 +68,9 @@ export interface WorldFactSchedule {
   prompt: string;
   note: string;
   createdBy: string;
+  /** 这条日程归谁 —— 排班那个 wizard 的 target。rolepage 的「日程」按它过滤:
+   *  日程跟着 wizard 走, 不跟着它执行时落在哪个聊天走。老 svr 推来的快照可能没有。 */
+  owner: string;
 }
 
 export interface WorldFacts {
@@ -86,7 +89,7 @@ export interface WorldNode {
   base: string;
   tag: string;
   chat: string;
-  /** 显示名: 登记的名字 > `chat#tag` > 裸 tag > target。 */
+  /** 全局名字 (`.name` 去掉点): 登记的名字 > slot id > 聊天名 > target。 */
   name: string;
   label: string;
   description: string;
@@ -99,7 +102,7 @@ export interface WorldNode {
   known: boolean;
   /** 这是打开本页那条链接所属的会话。 */
   self: boolean;
-  /** 与 self 同一个聊天 —— 决定能不能点进线程 (见 chat-http 的 capability 说明)。 */
+  /** 与 self 同一个聊天 (卡片布局里本群那张卡片的锚点)。 */
   local: boolean;
   parent?: string;
   inherited: boolean;
@@ -138,8 +141,8 @@ export interface WorldChat {
   base: string;
   name: string;
   self: boolean;
-  /** 进这个聊天的票据 (`/chat?id=`)。由路由层从 store 里取既有的那张, 见
-   *  chat-http 的 capability 说明; 取不到 = 这个群还没有任何可用凭据。 */
+  /** 那个聊天既有的票据 (`/role?id=`)。由路由层从 store 里取; 取不到 = 这个群还
+   *  没有任何记录。rolepage 下任一票据都能看任一 role, 它只是一个落点更近的链接。 */
   token?: string;
   /** 本聊天的 wizard target, 已按家谱序 (父在前, 分身紧随其后并带缩进深度)。 */
   members: Array<{ target: string; depth: number }>;
@@ -258,13 +261,15 @@ export const buildWorld = (
     const base = baseOfKey(target);
     const chat = f?.chat ?? facts.chatNames[base] ?? "";
     const until = rs.reduce((mx, r) => Math.max(mx, staleAt(r)), 0);
+    // 名字全局唯一, 与聊天无关 —— 名册里的就是它; 名册缺席 (svr) 才按 slot / 聊天名推。
+    const name = (f?.name ?? "").trim() || tag || chat || target;
     return {
       target,
       base,
       tag,
       chat,
-      name: (f?.name ?? "").trim() || (chat ? (tag ? `${chat}#${tag}` : chat) : tag || target),
-      label: tag ? labelFor(tag) : "🧙",
+      name,
+      label: labelFor(name),
       description: f?.description ?? "",
       cwd: f?.cwd || [...rs].reverse().find((r) => r.cwd)?.cwd || "",
       model: f?.model || [...rs].reverse().find((r) => r.model)?.model || "",
@@ -318,7 +323,7 @@ export const buildWorld = (
   const pinned = new Set([
     ...linked,
     ...facts.jobs.filter((j) => j.status === "open").flatMap((j) => [j.owner, ...j.members.map((mm) => mm.target)]),
-    ...facts.schedules.map((x) => x.target),
+    ...facts.schedules.flatMap((x) => [x.target, x.owner].filter(Boolean)),
   ]);
   const relevant = (n: WorldNode): boolean =>
     n.local || n.self || pinned.has(n.target) || n.busy || n.alive || now - n.lastTs < RECENT_MS;

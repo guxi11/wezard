@@ -15,7 +15,7 @@
 // 那边, 重启之后它重试一次就接上了, 比恢复一个状态机简单一个数量级。
 //
 // 群里只出两条气泡 (开工 / 收工), 中间的每一次派活与回话照旧落在各自 wizard 的
-// chat 详情页 —— 五个分身同时干活时, 十条交叉气泡里读不出结构, 两条能。
+// rolepage —— 五个分身同时干活时, 十条交叉气泡里读不出结构, 两条能。
 import { randomUUID } from "node:crypto";
 import { loadJsonMap } from "../shared/json-map-store.js";
 
@@ -105,7 +105,7 @@ const firstLine = (s: string, max = 90): string => {
 export const renderJobOpen = (job: JobRecord, plan: string): string =>
   [`📋 \`${job.id}\` 开工 · **${job.title}**`, plan.trim() ? firstLine(plan, 300) : ""].filter(Boolean).join("\n");
 
-/** 收工气泡 —— 谁干了什么、结论是什么。成员名字挂各自的 chat 详情页, 人想看某一路
+/** 收工气泡 —— 谁干了什么、结论是什么。成员名字挂各自的 rolepage, 人想看某一路
  *  的来龙去脉就点进去, 不必在群里翻交叉的气泡。 */
 export const renderJobClose = (
   job: JobRecord,

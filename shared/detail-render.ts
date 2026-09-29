@@ -921,10 +921,13 @@ const spliceChildren = (
     children.filter((c) => c.createdAt < (stamps[0] ?? Infinity)).map((c) => c.html),
   );
 
+/** `withQuery=false`: rolepage 把「问」与「答」拆成两条消息 —— 问的那句由发话方那条
+ *  气泡承载, 答的这张卡片里就不再重复一遍。 */
 export const renderTurnGroup = (
   r: TurnDetailRecord,
   now = Date.now(),
   children: readonly TurnFragment[] = [],
+  withQuery = true,
 ): TurnFragment => {
   const { items, bodies, stamps, done, ageMs } = turnParts(r, `${r.id}:`, now);
   const u = r.usage;
@@ -938,7 +941,7 @@ export const renderTurnGroup = (
     // 让 SSE 的"内容没变就不重发"彻底失效。进行中的时长由页脚 status bar 负责。
     done ? `<span class="tg-tok">${escHtml(fmtDuration(ageMs))}</span>` : "",
   ].filter(Boolean).join("");
-  const queryBubble = r.userQuery
+  const queryBubble = r.userQuery && withQuery
     ? `<section class="bubble user" data-key="${r.id}:user">
         <div class="bubble-head">💬 <span class="role">User</span></div>
         <div class="q-body">${escHtml(r.userQuery)}</div>
@@ -975,7 +978,7 @@ export const renderCutMark = (m: MarkDetailRecord): TurnFragment => {
   };
 };
 
-export { escHtml, fmtTs, fmtDuration, fmtTok, TURN_CSS };
+export { escHtml, fmtTs, fmtDuration, fmtTok, hashStr, tagSig, TURN_CSS };
 
 export const renderDetailPage = (r: DetailRecord): string => {
   if (r.kind === "tool") return renderToolPage(r);

@@ -18,9 +18,9 @@ import { computeUsage, renderUsageReport } from "./usage.js";
 import { computeAuditReport } from "./audit.js";
 import { syncProjectConfig, renderSyncReport } from "./cfg-sync.js";
 import { captureQuota, renderQuotaReport } from "./quota.js";
-import { tagOfKey, baseOfKey, withTagHeader, parseTagHeader, tagTokenRe, allTags, allCompoundAddresses, labelFor, tagLink } from "../shared/session-label.js";
-import { chatNameOf, chatBaseOf, clearChatName, listChatNames, peerAddress, setChatName } from "./chat-name.js";
-import { wizardName, wizardStore } from "./wizard.js";
+import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe, allNames, normalizeTag, uniqueTag, displayName, labelFor, tagLink } from "../shared/session-label.js";
+import { chatNameOf, clearChatName, listChatNames, peerAddress, setChatName } from "./chat-name.js";
+import { wizardStore } from "./wizard.js";
 import { truncate } from "../shared/std.js";
 
 /** 判定"引用内容是否已在目标会话上下文里"时回看的轮数 —— 引用的通常是最近几轮
@@ -32,19 +32,19 @@ const QUOTE_TAIL_TURNS = 12;
 const chatPrincipal = (msg: BaseMessage): string =>
   msg.chattype === "group" && msg.chatid ? `chat:${msg.chatid}` : `user:${msg.from.userid}`;
 
-// A single chat can host multiple concurrent Claude sessions via `#tag`. The
-// session key = base principal + optional `#tag` suffix. Untagged = default
-// session (backward-compatible). Tags: [\p{L}\p{N}_-]{1,32}, must be
-// space-delimited or edge-of-string so genuine URLs / paths like
-// "#L45-foo/bar" survive. Only the FIRST tag in a message is honored — that
-// tag is stripped from the forwarded text; any additional #foo tokens flow
-// through verbatim (may be actual references in the user's prompt).
-// 剩下那些 #foo 里,真正指向兄弟会话的会在出站前被标注(见 peerMentions)。
-// Token 规则收在 session-label(tagTokenRe / allTags),路由与标注共用同一把尺子。
-const TAG_RE = tagTokenRe();
-const parseTag = (text: string): { tag: string; cleaned: string } => {
-  const m = TAG_RE.exec(text);
-  if (!m) return { tag: "", cleaned: text };
+// 寻址靠 wizard 的**全局名字** `.name` —— 它可能住在任何一个聊天里。
+// Must be space-delimited or edge-of-string so paths / extensions like `a.ts`
+// survive. 一条消息只认**一个**路由名字, 规则:
+//   • 第一个解析得出的已知名字 (名册里有, 或本聊天里有这个 slot 的老会话) 胜出;
+//   • 都不认识时, 只有**消息开头**的 `.x` 才算「叫一个新 wizard 出来」——
+//     正文里随手写的 `.gitignore` 不该凭空变出一个 wizard;
+// 选中的那个 token 从正文里摘掉, 其余 `.foo` 原样留着 (见 peerMentions)。
+// Token 规则收在 session-label(nameTokenRe / allNames),路由与标注共用同一把尺子。
+const NAME_G = new RegExp(nameTokenRe().source, "gu");
+const parseTag = (text: string, known: (name: string) => boolean): { tag: string; cleaned: string } => {
+  const ms = [...text.matchAll(NAME_G)];
+  const m = ms.find((x) => known(x[2] ?? "")) ?? (ms[0]?.index === 0 ? ms[0] : undefined);
+  if (!m || m.index === undefined) return { tag: "", cleaned: text };
   const tag = m[2] ?? "";
   const before = text.slice(0, m.index);
   const sep = m[1] ?? "";
@@ -53,8 +53,21 @@ const parseTag = (text: string): { tag: string; cleaned: string } => {
   return { tag, cleaned };
 };
 
-const sessionKey = (base: string, tag: string): string => (tag ? `${base}#${tag}` : base);
 const tagOf = tagOfKey;
+
+/** 名字 → 投递目标。名册 (全局) > 本聊天同名 slot (改名前的老 `#tag` 会话) > 在本聊天
+ *  新开一个 slot。纯函数: 新 wizard 的名字由 spawn 时 settleName 按 slot 落定。 */
+const resolveName = (base: string, name: string, live: (target: string) => boolean): string => {
+  if (!name) return base;
+  const rec = wizardStore()?.byName(name);
+  if (rec) return rec.target;
+  const slot = normalizeTag(name) || "wizard";
+  const legacy = keyOf(base, slot);
+  if (live(legacy)) return legacy;
+  // 这个 slot 已被一个改了名的 (冷) wizard 占着 → 挪到 `slot-N`, 别唤醒别人。
+  const taken = new Set((wizardStore()?.all() ?? []).filter((w) => baseOfKey(w.target) === base).map((w) => tagOfKey(w.target)));
+  return keyOf(base, uniqueTag(slot, taken));
+};
 
 // Auth principals: any-of test against allowFrom. Tiered — allowing a user
 // grants them access in any chat; allowing a group grants every member of
@@ -92,17 +105,14 @@ const renderIds = (msg: BaseMessage, cfg: Config): string => {
 const isIdCommand = (text: string): boolean => text.trim() === "/id";
 const isPwdCommand = (text: string): boolean => text.trim() === "/pwd";
 const isCostCommand = (text: string): boolean => text.trim() === "/cost";
-// `/audit` or `/audit some-tag`. With a tag, `/audit` re-routes to the
-// newest-by-mtime mirror whose target carries `#<tag>` (see resolveAuditMirror);
-// without a tag, falls back to the caller's own mirror binding.
+// `/audit` or `/audit <name>`. With a name, `/audit` re-routes to that wizard's
+// mirror (global name → target; an old slot id still matches, newest-by-mtime);
+// without one, falls back to the caller's own mirror binding.
 const parseAuditCommand = (text: string): { tag: string } | undefined => {
   const m = /^\/audit(?:\s+(.+))?$/u.exec(text.trim());
-  return m ? { tag: (m[1] ?? "").trim().replace(/^#/, "") } : undefined;
+  return m ? { tag: (m[1] ?? "").trim().replace(/^[.#]/, "") } : undefined;
 };
 
-// Resolve /audit target: with an explicit tag → newest-by-mtime mirror whose
-// target carries `#<tag>` (regardless of caller). Without a tag → caller's own
-// binding. Returns undefined when nothing matches.
 interface MirrorRef { sessionId: string; jsonlPath: string; target: string; }
 const resolveAuditMirror = (
   mirrors: MirrorRef[],
@@ -111,8 +121,10 @@ const resolveAuditMirror = (
   chatWho: string,
 ): MirrorRef | undefined => {
   if (tag) {
-    const wanted = tag.replace(/^#/, "");
-    const matches = mirrors.filter((m) => (m.target.split("#")[1] ?? "") === wanted);
+    const named = wizardStore()?.byName(tag)?.target;
+    const exact = named ? mirrors.find((m) => m.target === named) : undefined;
+    if (exact) return exact;
+    const matches = mirrors.filter((m) => tagOfKey(m.target) === tag);
     if (matches.length <= 1) return matches[0];
     return matches
       .map((m) => {
@@ -160,8 +172,8 @@ const parseCfgSyncCommand = (text: string): { apply: boolean } | undefined => {
   const m = CFGSYNC_RE.exec(text.trim());
   return m ? { apply: Boolean(m[1]) } : undefined;
 };
-// `/name` 读, `/name x` 写, `/name -` 摘掉。名字是 chat 级的 —— 带不带 `#tag`
-// 路由过来都命名同一个聊天, 所以这里不看 tag。
+// `/name` 读, `/name x` 写, `/name -` 摘掉。名字是 chat 级的 —— 带不带 `.name`
+// 路由过来都命名同一个聊天, 所以这里不看路由目标。
 const NAME_RE_CMD = /^\/name(?:\s+(\S+))?$/i;
 const parseNameCommand = (text: string): { arg: string } | undefined => {
   const m = NAME_RE_CMD.exec(text.trim());
@@ -196,44 +208,42 @@ const renderHelp = (): string =>
     "",
     "▎切换 CLI 后端",
     "`/new codebuddy` 用指定 CLI 新开 (claude / claude-internal / codebuddy)",
-    "位置参数可叠:`/new codebuddy opus #docs 先读一遍 README` = 后端 + 模型 + 标签 + 首句。",
-    "不写则沿用本会话当前的 CLI;新开 `#tag` 会话则继承本聊天的 CLI。",
+    "位置参数可叠:`.docs /new codebuddy opus 先读一遍 README` = 名字 + 后端 + 模型 + 首句。",
+    "不写则沿用本会话当前的 CLI;新叫出来的 wizard 继承本聊天的 CLI。",
     "切换后 `/clear`、`/stop`、`--resume` 自愈都仍绑在该 CLI 上。",
     "",
-    "▎wizard(绑定聊天的会话)",
-    "一个聊天里可以同时住着多个 wizard —— 各有各的终端、工作区、名字和职责。",
-    "消息里任意位置带 `#tag`(如 `#docs 帮我改 README`)就是找那一个;不带 = 默认那个。",
-    "它们的回复以 `emoji #tag` 打头。`/clear #tag`、`/pwd #tag`、`/stop #tag` 同理按 tag 走。",
-    "`#tag` 与 CLI 名可以同写:`/new codebuddy #docs` = 用 codebuddy 让 docs 就位。",
-    "wizard 知道自己是谁(名字=聊天名,带 tag 的读作 `聊天名#tag`)、在哪个目录、群里还有谁,",
-    "也知道自己能给自己起名、写职责、记长期记忆、上下文满了自己交接重开。",
+    "▎wizard",
+    "每个 wizard 有一个**全局唯一**的名字,写作 `.name`;聊天的默认 wizard 名字就是聊天名。",
+    "消息里带 `.name`(如 `.docs 帮我改 README`)就是找那一个 —— 它可以住在任何一个聊天里,",
+    "回复会回到你说话的这个群;不带 = 本聊天默认那个。开头写一个还不存在的 `.x` = 在这里叫出一个新的 x。",
+    "它们的回复以 `emoji .name` 打头。`/clear .x`、`/pwd .x`、`/stop .x` 同理按名字走。",
+    "wizard 知道自己是谁、在哪个目录、还有谁在,也能给自己改名、写职责、记长期记忆、上下文满了自己交接重开。",
+    "wizard 之间默认**私聊**,只有需要你知道的才发进群。",
     "",
     "▎分身(clone)",
     "对 AI 说「分个身去干 X」「开三个分身分头处理」即可。分身默认**继承它此刻的上下文** ——",
     "先把公共材料读进来、再分身,材料只读一遍却进了 N 份上下文;要白纸一张就说明白。",
-    "分身有自己的 `#tag`、自己的终端,也能再生分身。活干完对 AI 说「收掉它们」。",
+    "分身有自己的 `.name`、自己的终端,也能再生分身。活干完对 AI 说「收掉它们」。",
     "",
     "▎跨聊天",
     "`/name <名字>` 给本聊天起名 · `/name` 查看 · `/name -` 取消",
     "`/chats` 列出所有已知聊天及其 wizard",
-    "名字 1-32 位字母/数字/`_`/`-`,全机唯一;它同时就是这里默认 wizard 的名字。",
-    "`daily#fix` = daily 聊天的 `#fix` · `daily` = 它的默认 wizard · `fix` = 本聊天优先。",
-    "对 AI 说「让 daily#fix 看一眼」「在 daily 里开个 #ingest 跑这个目录」即可。",
-    "未命名的聊天叫不到、也生不进去 —— 想被叫到,就在那个群里发一次 `/name`。",
+    "名字 1-32 位字母/数字/`_`/`-`,全机唯一;它同时就是这里默认 wizard 的名字 (撞名会自动加后缀)。",
+    "对 AI 说「让 .fix 看一眼」「在 daily 里开个 .ingest 跑这个目录」即可。",
     "",
     "▎协作",
     "`/peers`(或 `/wizards`) 列出本聊天的 wizard:名字、职责、忙闲、谁是谁的分身",
     "同一聊天里的 wizard 互相看得见也驱动得动,直接说人话:",
-    "「看下 `#fix` 的进展,推动它直到结束」— AI 会读它的终端、派活、等它跑完。",
-    "「让 `#fix` 和 `#review` 互相迭代到 review 说 LGTM」— AI 会把它们串成一条循环流水线。",
-    "它们之间的关键往返(派活、分身出生、收尾、结论)会在群里留痕,中间的催促只进详情页。",
+    "「看下 `.fix` 的进展,推动它直到结束」— AI 会读它的终端、派活、等它跑完。",
+    "「让 `.fix` 和 `.review` 互相迭代到 review 说 LGTM」— AI 会把它们串成一条循环流水线。",
+    "它们之间的往来默认只进各自的 rolepage;需要你知道的 (工单开/收工、公开讨论、结论) 才发进群。",
     "",
     "▎信息 (免授权)",
     "`/id` 查看会话/权限 id",
     "`/pwd` 当前项目路径",
     "`/usage` 真实订阅额度 %",
     "`/cost` token/成本估算",
-    "`/audit` 本会话 token/成本明细 (含 subagent) · `/audit <tag>` 指定标签会话",
+    "`/audit` 本会话 token/成本明细 (含 subagent) · `/audit <名字>` 指定 wizard",
     "`/cfgsync` 预演跨 CLI 项目配置同步 · `/cfgsync apply` 执行 (需授权)",
     "`/help` 本帮助",
     "",
@@ -274,7 +284,7 @@ const renderSessionsList = (sessions: SessionInfo[], currentSid: string): string
   ].join("\n");
 };
 
-// /peers — 住在**这个聊天**里的 wizard 名册 (默认那个 + 每个 `#tag`)。与 /sessions
+// /peers — 住在**这个聊天**里的 wizard 名册 (默认那个 + 每个分身)。与 /sessions
 // 的区别是范围: /sessions 扫的是整台机器上所有 agent 会话 (包括人在终端里自己开
 // 的、与企微无关的), 这里列的是同一个聊天里互相叫得动的那些 —— 同聊天 = 同一个
 // 地址空间。名字与职责来自 wizard 注册表, 没登记过的就只显示 tag。
@@ -295,17 +305,14 @@ const renderPeers = (peers: PeerInfo[], chatName: string): string => {
   const shared = [dirs.length === 1 ? dirs[0] : "", clis.length === 1 ? clis[0] : ""].filter(Boolean);
   // 家谱只画直系: 谁是谁的分身。整棵树留给 AI 侧的 wizard_roster —— 群里一行放不下。
   // 每个 tag 都点得开它的 chat 详情页。
-  const addrOf = (target: string): string => tagLink(target, tagOfKey(target) ? `#${tagOfKey(target)}` : "默认");
+  const addrOf = (target: string): string => tagLink(target, `.${displayName(target) || "?"}`);
   const parentAddr = (target: string): string => {
     const p = reg?.get(target)?.parent;
     return p ? addrOf(p) : "";
   };
   const rows = peers.flatMap((p) => {
     const rec = reg?.get(p.target);
-    const addr = addrOf(p.target);
-    const name = wizardName(rec, chatName, p.target);
-    // 名字推导不出新信息时 (就是 tag 本身) 不重复印一遍。
-    const title = name && name !== p.tag && name !== chatName ? `${name} ${addr}` : addr;
+    const title = addrOf(p.target);
     const state = !p.paneAlive ? "⚫️ 已关闭" : p.busy ? "🔴 忙" : "🟢 空闲";
     const from = parentAddr(p.target);
     const varies = [
@@ -326,21 +333,20 @@ const renderPeers = (peers: PeerInfo[], chatName: string): string => {
     `[wezard] 本聊天${named ? ` \`${named}\`` : ""}的 wizard · ${peers.length} 个${shared.length ? ` · ${shared.join(" · ")}` : ""}`,
     "",
     ...rows,
-    "> 协作：直接说「看下 #fix 的进展并推动它」，AI 会读它的终端、派活、等它跑完",
+    "> 协作：直接说「看下 .fix 的进展并推动它」，AI 会读它的终端、派活、等它跑完",
     "> 分身：说「分个身去干 X」— AI 会 clone 一个带着当前上下文的 wizard，干完再收掉",
     // 空行只在这一处按需省略 —— 上面那些是有意的分隔, 不能被一把 filter 掉。
-    ...(named ? [] : ["> 起名：`/name <名字>` — 起了名字，别的聊天才叫得到这里的 wizard（`名字#tag`）"]),
+    ...(named ? [] : ["> 起名：`/name <名字>` — 聊天名就是这里默认 wizard 的名字"]),
   ].join("\n");
 };
 
-// /chats — 跨聊天目录。命名的聊天可以被 `名字#tag` 精确寻址;没命名的只能靠
-// 「全局唯一 tag」碰运气,所以这里把「未命名」显式标出来当作行动号召。
+// /chats — 跨聊天目录: 每个聊天里住着哪些 wizard (`.name`, 全局可达)。
 const renderChats = (
   roster: Array<{ base: string; name: string; self: boolean; targets: string[] }>,
 ): string => {
   if (roster.length === 0) return "[wezard] 还没有任何聊天在跑会话。";
   const rows = roster.flatMap((c) => {
-    const sessions = c.targets.map((t) => (tagOfKey(t) ? `#${tagOfKey(t)}` : "默认")).join(" · ") || "(无)";
+    const sessions = c.targets.map((t) => tagLink(t, `.${displayName(t) || "?"}`)).join(" · ") || "(无)";
     const head = c.name ? `\`${c.name}\`` : `_(未命名)_ \`${c.base}\``;
     return [`**${head}**${c.self ? " ⬅️ 本聊天" : ""} · ${c.targets.length} 个会话`, `　${sessions}`, ""];
   });
@@ -348,7 +354,7 @@ const renderChats = (
     `[wezard] 已知的聊天 · ${roster.length} 个`,
     "",
     ...rows,
-    "> 跨聊天寻址：`名字#tag`（如 `daily#fix`）。未命名的聊天先在里面发 `/name <名字>`",
+    "> 寻址：`.名字`（如 `.fix`），全局唯一，在任何群里都叫得到",
   ].join("\n");
 };
 
@@ -464,53 +470,61 @@ const isLastResponseQuote = (target: string, quoted: string): boolean =>
   canonContains(getLastResponse(target) ?? "", quoted);
 
 // ── 引用即路由 ─────────────────────────────────────────────────────────
-// 群里要跟 `#fix` 说话,手打 tag 太慢 —— 直接引用它的气泡即可。每条出站气泡都
-// 带 `emoji #tag` 头 (withTagHeader),所以引用文本自带路由信息;用户自己发的
-// 行首 `#fix 干活` 同样算数(限行首,否则正文里随手写的 #123 会误判)。
+// 群里要跟 `.fix` 说话,手打名字太慢 —— 直接引用它的气泡即可。每条出站气泡都
+// 带 `emoji .name` 头 (withTagHeader),所以引用文本自带路由信息;用户自己发的
+// 行首 `.fix 干活` 同样算数(限行首,否则正文里随手写的 .gitignore 会误判)。
 // `body` 是剥掉头/tag 后的净引用内容,用于跟目标 context 比对。
 // `tag`   = 路由目标(引用继承的投递 tag)。
-// `srcTag` = 引用气泡真正出自哪个会话 —— 仅 bot 气泡可知(反解 `emoji #tag` 头)。
+// `srcTag` = 引用气泡真正出自哪个会话 —— 仅 bot 气泡可知(反解 `emoji .name` 头)。
 //            去重要比对的是「内容在不在源会话」,而非路由目标: 带着引用新建 /
 //            改投到别的 tag 时,目标会话是空的,只有源会话里才有那段原文。
 //            `srcTag===undefined` 表示源未知(用户自己打的引用),回退到按目标查。
-const parseQuote = (q: QuoteContent | undefined): { tag: string; srcTag?: string; body: string } | null => {
+const QUOTE_NAME_RE = nameTokenRe();
+const parseQuote = (q: QuoteContent | undefined, known: (name: string) => boolean): { tag: string; srcTag?: string; body: string } | null => {
   const raw = q ? quoteToText(q).trim() : "";
   if (!raw) return null;
   const head = parseTagHeader(raw);
   if (head.fromBot) return { tag: head.tag, srcTag: head.tag, body: head.body };
-  const m = TAG_RE.exec(raw);
-  return m && m.index === 0 ? { tag: m[2] ?? "", body: parseTag(raw).cleaned } : { tag: "", body: raw };
+  const m = QUOTE_NAME_RE.exec(raw);
+  return m && m.index === 0 ? { tag: m[2] ?? "", body: parseTag(raw, known).cleaned } : { tag: "", body: raw };
 };
 
 // 一条入站消息的最终「投递目标 tag + 给 claude 的正文」。text / image / mixed
 // 三条路径共用,两条规则:
-//   1. 引用自带的 tag 决定投递目标;引用之外自己打的 `#tag` 优先级更高。
+//   1. 引用自带的 tag 决定投递目标;引用之外自己打的 `.name` 优先级更高。
 //   2. 引用内容若已经在目标会话的 context 尾部,就只保留上面那层路由绑定、正文
 //      丢弃(重复贴回去纯属污染);不在则说明它是真载荷(跨会话转发 / 引同事的
 //      消息 / 目标已 `/clear`),照旧渲染成 markdown 引用块。
 // 纯引用不打字时,沿用旧的"把引用内容提成正文"重触发路径 —— 但同样只在内容不
 // 在目标上下文里时才有意义,否则那只是一次对该会话的空 nudge。
+interface Addressing {
+  known: (name: string) => boolean;
+  /** 名字 → target ("" = 本聊天默认 wizard)。 */
+  resolve: (base: string, name: string) => string;
+}
+
 const composeInbound = (
   msg: BaseMessage,
   rawBody: string,
   inContext: (target: string, quoted: string) => boolean,
   stripAt: (msg: BaseMessage, text: string) => string,
+  addr: Addressing,
 ): { text: string; tag: string; promoted: boolean } => {
-  const { tag: typed, cleaned } = parseTag(rawBody);
-  const q = parseQuote(msg.quote);
+  const { tag: typed, cleaned } = parseTag(rawBody, addr.known);
+  const q = parseQuote(msg.quote, addr.known);
   const tag = typed || q?.tag || "";
   // 去重比对的会话: 若引用来自某个 bot 会话(srcTag 已知),查那个源会话 ——
   // 内容天然存在于源的 transcript, 与你把它投到哪个 tag 无关。源未知时(用户自打
   // 的引用 / 改投)回退到路由目标。这修掉了「带引用新建/改投会话时原文被重复注入」。
   const dedupTag = q?.srcTag ?? tag;
   // 剥完头什么都不剩(折叠气泡这类纯 chrome 的引用)⇒ 没有可搬运的内容,只留路由。
-  const consumed = !q || !q.body.trim() || inContext(sessionKey(chatPrincipal(msg), dedupTag), q.body);
+  const consumed = !q || !q.body.trim() || inContext(addr.resolve(chatPrincipal(msg), dedupTag), q.body);
   if (cleaned.trim()) {
     return { text: consumed ? cleaned : `${renderQuotePrefix(q.body)}${cleaned}`, tag, promoted: false };
   }
   if (q && !consumed) {
     // 提成正文时也剥一次 @mention,让 "@wezard /usage" → "/usage" 命中命令路径。
-    const p = parseTag(stripAt(msg, q.body).trim());
+    const p = parseTag(stripAt(msg, q.body).trim(), addr.known);
     return { text: p.cleaned, tag: p.tag || tag, promoted: true };
   }
   return { text: cleaned, tag, promoted: false };
@@ -604,19 +618,18 @@ export const installInboundRouter = (
   // Mirror-only auto-spawn / /new helper. Routes through bridge.newSession
   // which kills the old pane, spawns fresh in pendingCwd ?? runningCwd ??
   // default, attaches, and pushes "📂 当前项目" info to the chat. Returns
-  // the user-facing one-line ack. When `who` carries a `#tag` suffix, use
-  // the raw tag as the tmux window name so the pane shows readably in the
-  // status bar (e.g. `#docs` → window `docs`, not the principal slug).
+  // the user-facing one-line ack. The wizard's global name doubles as the
+  // tmux window name so the pane shows readably in the status bar (e.g.
+  // `.docs` → window `docs`, not the principal slug).
   // On success there is NO reply: newSession already pushed the single
   // "created + cwd" bubble. Only failures produce user-facing text.
   const spawnSession = async (who: string, cli?: CliBackendName, silent?: boolean, model?: string): Promise<{ err?: string }> => {
     if (!("newSession" in bridge)) return { err: "[wezard] /new only available in mirror mode" };
-    const tag = tagOf(who);
-    const r = await bridge.newSession(who, tag || who, cli, { silent, model });
+    const r = await bridge.newSession(who, displayName(who) || tagOf(who) || who, cli, { silent, model });
     return r.ok ? {} : { err: `[wezard] /new failed: ${r.reason ?? "unknown"}` };
   };
 
-  // 同一 `#tag` 的两条消息会并发落进 gate,双双判定「未附着」→ 双 spawn,后者
+  // 同一 wizard 的两条消息会并发落进 gate,双双判定「未附着」→ 双 spawn,后者
   // newSession 会 kill 掉前者的 pane,前者的 dispatch 再 `--resume` 重生出孤儿
   // pane,消息乱序。spawn 窗口有 3s+(TUI_SETTLE_MS),所以必须按会话串行。
   const spawnQ = new Map<string, Promise<unknown>>();
@@ -632,17 +645,15 @@ export const installInboundRouter = (
   const autoSpawnAndAttach = (who: string, cli?: CliBackendName, model?: string): Promise<{ err?: string }> =>
     serializeSpawn(who, () => spawnSession(who, cli, false, model));
 
-  // 隐式建会话(裸 `#tag` 第一条消息):轮到自己时若前一条已经把会话建好,直接
+  // 隐式建会话(新 `.name` 的第一条消息):轮到自己时若前一条已经把会话建好,直接
   // 复用,不再 respawn —— 否则先到的消息会被注入进一个刚被杀掉的 pane。
   const ensureSession = (who: string): Promise<{ err?: string }> =>
     serializeSpawn(who, async () =>
       "hasMirrorTarget" in bridge && bridge.hasMirrorTarget(who) ? {} : await spawnSession(who, undefined, true));
 
-  // Prefix user-visible daemon replies with `<emoji> #tag` when the routed
-  // session is tagged, so a chat hosting multiple concurrent tagged sessions
-  // stays visually disambiguated. Untagged (default) session passes through
-  // unchanged. Emoji is derived from the tag string (not sessionId) so it
-  // stays stable across /clear cycles.
+  // Prefix user-visible daemon replies with `<emoji> .name`, so a chat hosting
+  // several wizards stays visually disambiguated. Emoji is derived from the
+  // name (not sessionId) so it stays stable across /clear cycles.
   const withTagPrefix = withTagHeader;
   const replyText = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, who: string, text: string): Promise<void> => {
     try { await client.replyStream(frame, msg.msgid, withTagPrefix(who, text), true); } catch { /* ignore */ }
@@ -653,8 +664,8 @@ export const installInboundRouter = (
   const gate = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, text: string, who: string): Promise<{ stop: boolean }> => {
     const auths = authPrincipals(msg);
     // Bootstrap / allowFrom operations are chat-scoped, not session-scoped;
-    // strip any `#tag` suffix so a first-time user typing `hello #foo`
-    // still promotes them as `user:xxx` (not `user:xxx#foo`).
+    // use the chat principal, not the routed wizard — a first-time user typing
+    // `.foo hello` still promotes them as `user:xxx` (not `user:xxx#foo`).
     const basePrincipal = chatPrincipal(msg);
     // /id — bypass allowFrom so users can discover their ids before configuring.
     if (isIdCommand(text)) {
@@ -703,7 +714,7 @@ export const installInboundRouter = (
       let body: string;
       if (!mirror) {
         body = audit.tag
-          ? `[wezard] /audit: 未找到 tag \`${audit.tag}\` 对应的 Agent 会话。`
+          ? `[wezard] /audit: 未找到 \`.${audit.tag}\` 对应的 Agent 会话。`
           : `[wezard] /audit: 未找到 ${who} 绑定的 Agent 会话。先 \`/new\` 或用 \`wezard mirror\` 绑定后再试。`;
       } else {
         try {
@@ -775,8 +786,8 @@ export const installInboundRouter = (
     }
     // Authorized `/new` — spawn a tmux+claude pair and attach it to this chat.
     // Runs BEFORE the mirror-not-attached short-circuit so it works as the
-    // very first message from a fresh user. When routed with a `#tag`, the
-    // tag becomes both the mirror-store key and the tmux window name.
+    // very first message from a fresh user. When routed with a `.name`, it
+    // picks which wizard (re)spawns; the name is also the tmux window name.
     const nu = parseNewCommand(text);
     if (nu) {
       const { err } = await autoSpawnAndAttach(who, nu.cli, nu.model);
@@ -809,7 +820,7 @@ export const installInboundRouter = (
       return { stop: true };
     }
     // Authorized `/kill` — end this session for good: Esc the pane, kill it,
-    // and drop the binding (no `--resume` resurrection). Routed by `#tag` like
+    // and drop the binding (no `--resume` resurrection). Routed by `.name` like
     // /stop, so `/kill #docs` only takes down that sibling.
     if (isKillCommand(text)) {
       if (!("killPane" in bridge)) {
@@ -834,7 +845,7 @@ export const installInboundRouter = (
     }
     // Authorized `/reveal` — switch the attached tmux client to this session's
     // pane so the user lands in the terminal showing the live TUI. Mirror-mode
-    // only; routed by `#tag` like any other session command.
+    // only; routed by `.name` like any other session command.
     if (isRevealCommand(text)) {
       if (!("revealPane" in bridge)) {
         await replyText(frame, msg, who, "[wezard] /reveal only available in mirror mode");
@@ -868,8 +879,8 @@ export const installInboundRouter = (
       const cur = chatNameOf(cfg, who);
       if (!nc.arg) {
         await replyText(frame, msg, who, cur
-          ? `[wezard] 本聊天名为 \`${cur}\` — 别处可用 \`${cur}#tag\` 寻址本聊天的会话`
-          : "[wezard] 本聊天还没起名。`/name <名字>` 起一个，别的聊天才能用 `名字#tag` 叫到这里的会话。");
+          ? `[wezard] 本聊天名为 \`${cur}\``
+          : "[wezard] 本聊天还没起名。`/name <名字>` 起一个。");
         return { stop: true };
       }
       if (nc.arg === "-") {
@@ -879,7 +890,7 @@ export const installInboundRouter = (
       }
       const r = setChatName(cfg, sourcePath, who, nc.arg);
       await replyText(frame, msg, who, r.ok
-        ? `[wezard] ✅ 本聊天更名为 \`${r.name}\`${cur && cur !== r.name ? `（原 \`${cur}\`）` : ""} — 别处用 \`${r.name}#tag\` 即可寻址`
+        ? `[wezard] ✅ 本聊天更名为 \`${r.name}\`${cur && cur !== r.name ? `（原 \`${cur}\`）` : ""}`
         : `[wezard] /name failed: ${r.reason}`);
       return { stop: true };
     }
@@ -892,7 +903,7 @@ export const installInboundRouter = (
       await replyText(frame, msg, who, renderChats(bridge.chatRoster(who)));
       return { stop: true };
     }
-    // /peers — this chat's own session roster (default + `#tag` siblings), with
+    // /peers — this chat's own wizard roster (default + siblings), with
     // live busy state. Read-only, mirror-mode only.
     if (isPeersCommand(text)) {
       if (!("peers" in bridge)) {
@@ -994,69 +1005,42 @@ export const installInboundRouter = (
     return hit;
   };
 
-  // 路由用掉的那个 `#tag` 已被 parseTag 摘走,正文里剩下的每个 `#x` 都可能是
-  // 用户在指另一个会话。解析走 bridge 自己的 resolvePeerTag —— peer 工具用的
-  // 同一套(本 chat 优先、否则全局唯一 tag、再否则带 chat 名的全称),所以标注
-  // 出来的地址一定是 peek_peer/send_peer 打得中的;解析不到的 `#123`/`#L45` 与
-  // 自指静默略过。给的是 `address` 而不是裸 tag —— 跨 chat 时裸 tag 未必唯一。
+  // 路由用掉的那个 `.name` 已被 parseTag 摘走,正文里剩下的每个 `.x` 都可能是
+  // 用户在指另一个 wizard。解析走 bridge 自己的 resolvePeerTag —— peer 工具用的
+  // 同一套(全局名册),所以标注出来的地址一定是 peek_peer/send_peer 打得中的;
+  // 解析不到的 `.foo` 与自指静默略过。
   const peerMentions = (who: string, text: string): PeerMention[] => {
     if (!("resolvePeerTag" in bridge)) return [];
     const mb = bridge as MirrorBridge;
     const seen = new Set<string>();
 
-    // Pass 1: standalone `#tag` tokens (existing behavior)
-    const fromTags = allTags(text).flatMap((tag): PeerMention[] => {
-      const r = mb.resolvePeerTag(who, tag);
-      if (!r.ok || r.target === who) return [];
+    return allNames(text).flatMap((name): PeerMention[] => {
+      const r = mb.resolvePeerTag(who, name);
+      if (!r.ok || r.target === who || seen.has(r.target)) return [];
       seen.add(r.target);
       const { runningCwd, defaultCwd } = mb.getCwd(r.target);
       return [{
-        tag,
+        tag: name,
         target: r.target,
         address: peerAddress(cfg, who, r.target),
         chat: chatNameOf(cfg, r.target),
         foreign: r.foreign,
-        label: labelFor(tag),
+        label: labelFor(peerAddress(cfg, who, r.target)),
         cwd: runningCwd || defaultCwd,
       }];
     });
+  };
 
-    // Pass 2: compound `chatName#tag` patterns (invisible to TAG_TOKEN because
-    // `#` isn't preceded by whitespace). Feed the raw compound to resolvePeerTag
-    // which internally splits via parsePeerRef.
-    const fromCompound = allCompoundAddresses(text).flatMap((addr): PeerMention[] => {
-      const r = mb.resolvePeerTag(who, addr.raw);
-      if (r.ok) {
-        if (r.target === who || seen.has(r.target)) return [];
-        seen.add(r.target);
-        const { runningCwd, defaultCwd } = mb.getCwd(r.target);
-        return [{
-          tag: addr.tag,
-          target: r.target,
-          address: peerAddress(cfg, who, r.target),
-          chat: chatNameOf(cfg, r.target),
-          foreign: r.foreign,
-          label: labelFor(addr.tag),
-          cwd: runningCwd || defaultCwd,
-        }];
-      }
-      // Session doesn't exist but chat name is valid → unborn peer hint
-      if (chatBaseOf(cfg, addr.chat)) {
-        return [{
-          tag: addr.tag,
-          target: "",
-          address: `${addr.chat}#${addr.tag}`,
-          chat: addr.chat,
-          foreign: true,
-          label: labelFor(addr.tag),
-          cwd: "",
-          unborn: true,
-        }];
-      }
-      return [];
-    });
-
-    return [...fromTags, ...fromCompound];
+  // 名字解析的两个问题: 这个名字认不认识 (决定正文里哪个 `.x` 是路由)、它指向谁。
+  const live = (t: string): boolean => "hasMirrorTarget" in bridge && bridge.hasMirrorTarget(t);
+  const addrFor = (base: string): Addressing => ({
+    known: (name) => !!wizardStore()?.byName(name) || live(keyOf(base, normalizeTag(name))),
+    resolve: (b, name) => resolveName(b, name, live),
+  });
+  const route = (msg: BaseMessage, raw: string): { text: string; tag: string; promoted: boolean; who: string } => {
+    const base = chatPrincipal(msg);
+    const c = composeInbound(msg, raw, quoteInContext, stripAt, addrFor(base));
+    return { ...c, who: resolveName(base, c.tag, live) };
   };
 
   const send = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, who: string, text: string, images: string[] = []): Promise<void> => {
@@ -1065,7 +1049,8 @@ export const installInboundRouter = (
     // 同一条边界上再挂一段: 这个 wizard 不在场时群里发生的成员变动 (见 notices.ts)。
     const notice = noticeSuffixFor(who, text);
     try {
-      await bridge.dispatch({ principal: who, text: text + hint + notice, images, frame, streamId: msg.msgid });
+      // 回复回到发话的这个群 —— `who` 可能住在别的聊天 (名字全局可达)。
+      await bridge.dispatch({ principal: who, text: text + hint + notice, images, frame, streamId: msg.msgid, channel: chatPrincipal(msg), speaker: `user:${msg.from.userid}` });
     } catch (e) {
       log.error({ err: (e as Error).message }, "bridge dispatch failed");
       try { await client.replyStream(frame, msg.msgid, withTagHeader(who, `[wezard] error: ${(e as Error).message}`), true); } catch { /* ignore */ }
@@ -1075,8 +1060,7 @@ export const installInboundRouter = (
   client.on("message.text", async (frame: WsFrame<TextMessage>) => {
     const msg = frame.body;
     if (!msg) return;
-    const { text, tag, promoted } = composeInbound(msg, stripAt(msg, msg.text?.content ?? ""), quoteInContext, stripAt);
-    const who = sessionKey(chatPrincipal(msg), tag);
+    const { text, tag, promoted, who } = route(msg, stripAt(msg, msg.text?.content ?? ""));
     log.info({ msgid: msg.msgid, len: text.length, tag, hasQuote: !!msg.quote, promoted }, "rx text");
     const { stop } = await gate(frame, msg, text, who);
     if (stop) return;
@@ -1089,8 +1073,7 @@ export const installInboundRouter = (
     log.info({ msgid: msg.msgid, hasQuote: !!msg.quote }, "rx image");
     // Images carry no text of their own — the quote (if any) is the only
     // routing signal; without it they land on the chat's default session.
-    const { text, tag } = composeInbound(msg, "", quoteInContext, stripAt);
-    const who = sessionKey(chatPrincipal(msg), tag);
+    const { text, who } = route(msg, "");
     const { stop } = await gate(frame, msg, "", who);
     if (stop) return;
     const path = await downloadToInbox({ client, log, inboxDir }, msg.image.url, msg.image.aeskey, msg.msgid, 0);
@@ -1109,14 +1092,13 @@ export const installInboundRouter = (
     const msg = frame.body;
     if (!msg) return;
     log.info({ msgid: msg.msgid, items: msg.mixed?.msg_item?.length, hasQuote: !!msg.quote }, "rx mixed");
-    // Concatenate all text items to sniff a leading `#tag`, then strip it from
+    // Concatenate all text items to sniff a routing `.name`, then strip it from
     // the effective body before forwarding to Claude.
     const rawText = (msg.mixed?.msg_item ?? [])
       .filter((it) => it.msgtype === "text")
       .map((it) => (it as { text?: { content?: string } }).text?.content ?? "")
       .join("\n");
-    const { tag } = composeInbound(msg, stripAt(msg, rawText), quoteInContext, stripAt);
-    const who = sessionKey(chatPrincipal(msg), tag);
+    const { who } = route(msg, stripAt(msg, rawText));
     const { stop } = await gate(frame, msg, "", who);
     if (stop) return;
     const texts: string[] = [];
@@ -1138,10 +1120,10 @@ export const installInboundRouter = (
       }
     }
     if (texts.length === 0 && images.length === 0 && !msg.quote) return;
-    // Re-compose on the per-item stripped text: drops the routing `#tag` (it was
+    // Re-compose on the per-item stripped text: drops the routing `.name` (it was
     // consumed above; leaving it in would leak into Claude) and attaches the
     // quote only when it isn't already in the target's context.
-    await send(frame, msg, who, composeInbound(msg, texts.join("\n"), quoteInContext, stripAt).text, images);
+    await send(frame, msg, who, composeInbound(msg, texts.join("\n"), quoteInContext, stripAt, addrFor(chatPrincipal(msg))).text, images);
   });
 
   // template_card_event is handled in approval module; no listener here.

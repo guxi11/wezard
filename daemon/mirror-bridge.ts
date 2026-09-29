@@ -32,7 +32,7 @@ import {
 } from "../shared/cli-backends.js";
 import { isModalPane, isAskqSubmitPage, parseModalOptions, pickModalAnswer, pickAutoAllowAnswer, parseConfirmContext, looksLikePicker, type ModalPaneVerdict } from "../shared/modal-pane.js";
 import type { MirrorStore } from "./mirror-store.js";
-import { hasMirrorAskq, runMirrorAskqFlow, hasMirrorPlan, mootMirrorPlan, runMirrorPlanFlow, hasMirrorPicker, mootMirrorPicker, runMirrorPickerFlow, type PickerPress } from "./approval.js";
+import { bindCardChannel, hasMirrorAskq, runMirrorAskqFlow, hasMirrorPlan, mootMirrorPlan, runMirrorPlanFlow, hasMirrorPicker, mootMirrorPicker, runMirrorPickerFlow, type PickerPress } from "./approval.js";
 import { isAutoWindowActive } from "./session-cache.js";
 import { noticeSuffixFor } from "./notices.js";
 import { dangerOf } from "./danger.js";
@@ -41,10 +41,10 @@ import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
 import { recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, buildDetailUrl, buildChatUrl } from "./detail.js";
 import type { CtxCut, TurnFrom, TurnOrigin, TurnUsage } from "./detail.js";
-import { labelFor, tagOfKey, baseOfKey, keyOf, withTagHeader, withLinkedTagHeader, linkedTagHead, linkTags, headSep, parseTagHeader, MAX_BODY_LINKS } from "../shared/session-label.js";
+import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagHeader, withLinkedTagHeader, linkedTagHead, linkTags, parseTagHeader, MAX_BODY_LINKS } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
-import { chatBaseOf, chatNameOf, listChatNames, normChatName, parsePeerRef, peerAddress } from "./chat-name.js";
+import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
 import { stripAnsi, compactPane, paneIsBusy, paneIsStalled, transcriptStalled, summarizeTail, lastAssistantText, lastContextTokens, keepaliveStamps, tailTurns, renderDialog, type PeerInfo } from "./peers.js";
 
 // Same PATH augmentation logic as cc-bridge: launchd / systemd start the daemon
@@ -1689,6 +1689,11 @@ export interface MirrorDispatchArgs {
   images?: string[];
   frame: WsFrameHeaders;
   streamId: string;
+  /** 人是在哪个公开频道 (群 / 单聊 base) 说的这句话。名字全局可达, 它不一定是
+   *  target 的 home —— 本轮回复与卡片都回到这里。省略 = target 的 home。 */
+  channel?: string;
+  /** 发话人 `user:<userid>`。 */
+  speaker?: string;
 }
 
 export interface AttachArgs {
@@ -1775,7 +1780,12 @@ export interface MirrorBridge {
    *  pushes assistant output via the standalone path. */
   /** `fromChat` 强制这一轮走出处门 (chatOriginOnly) —— 定时任务点的火, 结果必须
    *  在群里看得见, 哪怕上一轮是人在 CLI 里敲的。 */
-  injectText: (target: string, text: string, origin?: TurnOrigin, opts?: { fromChat?: boolean; from?: TurnFrom }) => Promise<{ ok: boolean; reason?: string }>;
+  /** `channel`: 这一轮的回复发去哪个公开频道 (base); "" = 私聊, 回复不进任何群,
+   *  只落 turn 记录; 省略 = target 的 home。 */
+  injectText: (target: string, text: string, origin?: TurnOrigin, opts?: { fromChat?: boolean; from?: TurnFrom; channel?: string }) => Promise<{ ok: boolean; reason?: string }>;
+  /** 这个 wizard 当前这一轮的频道: 人从哪个群叫的它 / 公开 peer 轮的频道;
+   *  私聊轮 ""; 还没有过轮次 → home base。 */
+  currentChannel: (target: string) => string;
   /** Send Esc to the live tmux pane bound to `target` — interrupts whatever
    *  Claude is currently doing (active generation / open prompt). No-op for
    *  spawn-mode attachments (no live TTY to interrupt).
@@ -1983,6 +1993,13 @@ interface AttachState {
    *  盖章、下一轮消费、超期作废。两个印章各走各的: graph 那一路两者都盖不上,
    *  peer 那一路只有出处, 合成一个字段就得让读的人去猜哪几种组合合法。 */
   pendingFrom?: { from: TurnFrom; at: number };
+  /** 待记账的频道 (dispatch / injectText 盖章, 下一轮开 turn 时消费, 同一套一次性语义)。 */
+  pendingChannel?: { channel: string; speaker?: string; at: number };
+  /** 本轮 (或最近一轮) 的频道 —— 回复推到哪个群。undefined = home (target 的 base);
+   *  "" = 私聊, 本轮一个字都不进群。与 turnFromChat 一样收口不清零: 收口后补写的
+   *  零星 item 属于同一场对话。 */
+  channel?: string;
+  speaker?: string;
   /** Set when `/clear` was injected: the next user prompt will land in a fresh
    *  jsonl with a new sessionId. A watcher polls the project dir to migrate
    *  this attachment onto the new file. Cleared once migration completes or
@@ -2287,8 +2304,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   const detailCardFor = (s: ActiveStream, target: string): TemplateCard | undefined => {
     if (s.tools.length === 0) return undefined;
-    const tag = tagOfKey(target);
-    const titlePrefix = tag ? `${labelFor(tag)} #${tag} · ` : "";
+    const name = displayName(target);
+    const titlePrefix = name ? `${labelFor(name)} .${name} · ` : "";
     return {
       card_type: "button_interaction" as const,
       main_title: { title: `${titlePrefix}本轮工具调用` },
@@ -2387,9 +2404,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 不重置计时器, 免得"空 part 入队 → flush 时 join 出空串"的死角。
   const hasVisibleBody = (content: string): boolean => parseTagHeader(content).body.length > 0;
 
+  // 推到本轮的频道 (人从别的群叫它 → 回那个群)。私聊轮的正文 brief 下在上游
+  // turnSilent 已被拦下; 非 brief 的逐条推送在这里兜一道 —— 只放 `[mirror]` /
+  // `[wezard]` 系统提示 (它们回 home)。
   const sendStandalone = (a: AttachState, content: string): void => {
     if (!hasVisibleBody(content)) return;
-    const chatId = stripPrincipalPrefix(a.target);
+    if (isPrivate(a) && !/^\[(mirror|wezard)\]/.test(content.trim())) return;
+    const chatId = replyChatId(a);
     const pieces = splitMarkdown(content, Math.max(200, cfg.wrc.mirror.chunkBytes - TAG_HEADER_BUDGET));
     const chunks = pieces.map((p, i) =>
       withLinkedTag(a, p, pieces.length > 1 ? `${i + 1}/${pieces.length}` : undefined));
@@ -2409,7 +2430,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // Like sendStandalone but skips withTagHeader — content already contains the tag header (e.g. as a link).
   const sendRaw = (a: AttachState, content: string): void => {
     if (!hasVisibleBody(content)) return;
-    const chatId = stripPrincipalPrefix(a.target);
+    const chatId = replyChatId(a);
     a.standalonePending = a.standalonePending
       .then(async () => {
         try {
@@ -2740,8 +2761,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 在看。群里保留的是需要在群里发生的事: WeCom 发起的轮次、审批/提问卡、
   // `[mirror]` 系统提示 —— 它们都不走这道门。
   // 只在 brief 下生效: 抑制的前提是详情页兜得住内容, 而 turn store 只有 brief 在写。
+  // 私聊轮 (wizard 之间, 非 public) 同理: 它的回复属于那场私聊, 只进双方的 rolepage。
   const turnSilent = (a: AttachState): boolean =>
-    cfg.wrc.mirror.brief && cfg.wrc.mirror.chatOriginOnly && a.turnFromChat === false;
+    isPrivate(a) || (cfg.wrc.mirror.brief && cfg.wrc.mirror.chatOriginOnly && a.turnFromChat === false);
 
   // 收口一条 loading 气泡: finish=true 写入最终内容, 只生效一次。发送失败退回 standalone。
   // raw=true skips withTagHeader (used when content already contains the linked tag header).
@@ -2812,6 +2834,29 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return p && Date.now() - p.at <= ORIGIN_TTL_MS ? p.from : undefined;
   };
 
+  /** 频道印章: 有新印章就换频道; 没有则 `reset` (CLI 手敲 / 人从聊天发起) 回到
+   *  home, 其余续写 (收口后的补写) 沿用上一轮。 */
+  const consumeChannel = (a: AttachState, reset: boolean): void => {
+    const p = a.pendingChannel;
+    a.pendingChannel = undefined;
+    if (p && Date.now() - p.at <= ORIGIN_TTL_MS) {
+      a.channel = p.channel === baseOfKey(a.target) ? undefined : p.channel;
+      a.speaker = p.speaker;
+    } else if (reset) {
+      a.channel = undefined;
+      a.speaker = undefined;
+    }
+  };
+  /** 本轮落 turn 记录的频道字段。 */
+  const channelFields = (a: AttachState): { channel: string; speaker?: string } =>
+    ({ channel: a.channel ?? baseOfKey(a.target), speaker: a.speaker });
+  /** 私聊轮: 回复只落 turn 记录。 */
+  const isPrivate = (a: AttachState): boolean => a.channel === "";
+  /** 本轮回复该推去的 chatId。 */
+  const replyChatId = (a: AttachState): string => stripPrincipalPrefix(a.channel || a.target);
+  // 审批/提问卡同样回本轮的频道; 私聊轮 ("") 的卡回 home —— 要点它的人总得在某个群里。
+  bindCardChannel((key) => byTarget.get(key)?.channel || "");
+
   // 详情页要按后端的名字称呼它 ("Claude 正在思考" / "CodeBuddy 正在思考") —— 后端
   // 由 transcript 落盘路径唯一确定, 所以每次开 turn 时现算, 不必额外记在 AttachState 上。
   const cliOf = (a: AttachState): CliBackendName | undefined =>
@@ -2822,7 +2867,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.queryEpoch = (a.queryEpoch ?? 0) + 1; // WeCom 侧的新一轮同样是 query 边界
     a.turnFromChat = true;                  // 出处确凿: 这一轮有 frame, 群里就是它的主场
     a.pendingFromCli = false;               // 人改从聊天里说话了, 之前那条 CLI 输入不再是出处
-    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: userQuery.trim() || undefined, origin: consumeOrigin(a), from: consumeFrom(a) });
+    consumeChannel(a, true);
+    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: userQuery.trim() || undefined, origin: consumeOrigin(a), from: consumeFrom(a), ...channelFields(a) });
     // hardTimer 兜底: turn 若无终句 / turn_end 收口 (卡死/漏收), 到点仍收气泡。
     const bubble: BriefBubble = { frame, streamId, hardTimer: undefined as unknown as NodeJS.Timeout, done: false };
     const q: QueuedTurn = { turnId, bubble, isSlash };
@@ -2866,7 +2912,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const fromCli = a.pendingFromCli === true;
     a.pendingFromCli = false;
     a.turnFromChat = fromCli ? false : a.turnFromChat ?? true;
-    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: query || undefined, origin: consumeOrigin(a), from: consumeFrom(a) });
+    consumeChannel(a, fromCli);
+    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: query || undefined, origin: consumeOrigin(a), from: consumeFrom(a), ...channelFields(a) });
     a.briefTurnId = turnId;
     a.briefBubble = undefined;
     a.briefIsSlash = false;
@@ -4860,79 +4907,35 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return allTargets().filter((k) => baseOfKey(k) === base);
   };
 
-  // 名字解析:`daily` / `chat:wrxxx` → base principal。认不出就把已知名字一并回给
-  // 调用方 —— 跨 chat 出错时"我该写什么"比"你写错了"有用得多。
-  const resolveChatRef = (ref: string): { ok: true; base: string } | { ok: false; reason: string; candidates?: string[] } => {
-    const base = chatBaseOf(cfg, ref);
-    if (base) return { ok: true, base };
-    const known = listChatNames(cfg).map((c) => c.name);
-    return {
-      ok: false,
-      reason: `unknown chat '${ref}' — give that chat a name first (\`/name ${normChatName(ref) || "<name>"}\` inside it)`,
-      candidates: known,
-    };
-  };
-
-  // peer 寻址。地址是两级的(见 chat-name.ts):
-  //   ""            本 chat 的 default —— 自身语义不变;
-  //   `fix`         本 chat 优先,本 chat 没有再全局兜底(全 host 唯一才认)——
-  //                 命名之前唯一的跨 chat 路子,老调用方不能因为引入命名而断掉;
-  //   `daily#fix`   daily 这个 chat 里的 `#fix`,精确到点,不问 tag 全不全局唯一;
-  //   `daily`       daily 这个聊天的 default 会话 —— 默认 wizard 的名字就是聊天名,
-  //                 所以裸聊天名就是它的地址 (`daily#` 这种老写法继续认);
-  //   `chat:wr…#fix` 全量 key 同理(list_peers 吐的就是它)。
-  // 裸 tag 的 0 命中 / ≥2 命中依旧拒绝,但出路从"回去改 tag 名"变成"用带 chat 名
-  // 的全称地址"——后者不需要动别人的会话。
+  // peer 寻址。地址就是 wizard 的**全局名字** (`.fix` / `fix`), 与它住在哪个聊天无关:
+  //   ""             本 chat 的默认 wizard —— 自身语义不变;
+  //   `fix` / `.fix` 名册里叫这个名字的 wizard, 全局唯一, 不分聊天;
+  //   `chat:wr…#k`   全量 key (调试 / 老调用方);
+  //   `daily#fix`    改名前的老写法 —— 名字取自 tag 迁移而来, 照旧认得。
   const resolvePeerTag = (
     self: string,
     ref: string,
   ): { ok: true; target: string; foreign: boolean } | { ok: false; reason: string; candidates?: string[] } => {
-    const { chat, tag } = parsePeerRef(ref ?? "");
-    const t = tag.trim();
-    if (chat) {
-      const c = resolveChatRef(chat);
-      if (!c.ok) return c;
-      const target = keyOf(c.base, t);
-      if (allTargets().includes(target)) {
-        return { ok: true, target, foreign: c.base !== baseOfKey(self) };
-      }
-      return {
-        ok: false,
-        reason: `chat '${chat}' has no ${t ? `'#${t}'` : "default"} session — create it with new_claude_session({ chat: '${chat}'${t ? `, tag: '${t}'` : ""}, cwd })`,
-        // 候选给**地址**而不是裸 key —— 这份清单存在的意义就是让调用方照着改一个
-        // 能用的串; 隔壁两个分支早就这么做了, 只有这一条漏掉。
-        candidates: allTargets().filter((k) => baseOfKey(k) === c.base).map((k) => peerAddress(cfg, self, k)),
-      };
-    }
-    const local = keyOf(baseOfKey(self), t);
-    if (!t) return { ok: true, target: local, foreign: false };
+    const raw = stripSigil(ref);
     const all = allTargets();
-    if (all.includes(local)) return { ok: true, target: local, foreign: false };
-    const foreignMatches = all.filter((k) => tagOfKey(k) === t && baseOfKey(k) !== baseOfKey(self));
-    if (foreignMatches.length === 1) return { ok: true, target: foreignMatches[0]!, foreign: true };
-    if (foreignMatches.length === 0) {
-      // 裸 token 正好是个 chat 名字 —— 用户/agent 想说的是"那个群",不是"那个 tag"。
-      // 直接给出它的会话地址,比让人再查一次 list_chats 快。
-      const asChat = chatBaseOf(cfg, t);
-      if (asChat) {
-        // 裸聊天名 = 那个聊天的**默认 wizard**: 它的名字就是聊天名, peerAddress
-        // 印出来的地址也就是这个裸名字, 必须能原样喂回来 (此前这里一律报错, 于是
-        // 「名册里读到的地址」与「send_peer 收得下的地址」对不上)。
-        if (allTargets().includes(asChat)) {
-          return { ok: true, target: asChat, foreign: asChat !== baseOfKey(self) };
-        }
-        return {
-          ok: false,
-          reason: `chat '${t}' has no default session — address one of its tagged sessions, or create it with new_claude_session({ chat: '${t}', cwd })`,
-          candidates: allTargets().filter((k) => baseOfKey(k) === asChat).map((k) => peerAddress(cfg, self, k)),
-        };
-      }
-      return { ok: false, reason: `no peer with tag '#${t}' — create one with new_claude_session, or address it in full as 'chatName#${t}' (list_chats shows the names)` };
+    const hit = (target: string) => ({ ok: true as const, target, foreign: baseOfKey(target) !== baseOfKey(self) });
+    if (!raw) return hit(baseOfKey(self));
+    if (/^(user|chat|group):/.test(raw)) {
+      return all.includes(raw) ? hit(raw) : { ok: false, reason: `no running session '${raw}'` };
+    }
+    const named = wizardStore()?.byName(raw)?.target;
+    if (named && all.includes(named)) return hit(named);
+    if (named) return { ok: false, reason: `wizard '.${raw}' exists but its session is not running — respawn it (new_claude_session) or pick another` };
+    const { chat, tag } = parsePeerRef(raw);
+    if (chat) {
+      const base = chatBaseOf(cfg, chat);
+      const legacy = base ? keyOf(base, tag) : "";
+      if (legacy && all.includes(legacy)) return hit(legacy);
     }
     return {
       ok: false,
-      reason: `tag '#${t}' exists in ${foreignMatches.length} chats — address it in full as 'chatName#${t}' (list_chats shows the names)`,
-      candidates: foreignMatches.map((k) => peerAddress(cfg, self, k)),
+      reason: `no wizard named '.${raw}' — wizard_roster lists every name`,
+      candidates: all.map((k) => peerAddress(cfg, self, k)),
     };
   };
 
@@ -5005,6 +5008,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const pane = paneOf(t);
     const paneAlive = pane ? await tmuxPaneAlive(pane) : false;
     const tag = tagOfKey(t);
+    const name = displayName(t);
     let lastActivity = 0;
     try { if (jsonlPath) lastActivity = statSync(jsonlPath).mtimeMs; } catch { /* not written yet */ }
     return {
@@ -5012,7 +5016,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       tag,
       chat: chatNameOf(cfg, t),
       address: peerAddress(cfg, self, t),
-      label: tag ? labelFor(tag) : "🧙",
+      label: name ? labelFor(name) : "🧙",
       sessionId: a?.sessionId || rec?.sessionId || "",
       jsonlPath,
       cwd: a?.runningCwd || rec?.cwd || expandedDefaultCwd,
@@ -5033,19 +5037,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const peers = async (target: string): Promise<PeerInfo[]> =>
     (await Promise.all(chatTargets(target).map((t) => peerInfoOf(t, target)))).sort(byRecent);
 
-  // list_peers 的跨 chat 补充:其他 chat 里**当前调用方叫得动**的 session。两条
-  // 入选路径 —— tag 全局唯一(裸 tag 就能命中),或者它所在的 chat 有名字(全称
-  // `daily#fix` 命中)。后者是命名带来的新增量:同名 tag 不再互相遮蔽,想被找到
-  // 只要给群起个名,不必回去改别人的 tag。
+  // list_peers 的跨 chat 补充: 其他 chat 里的 wizard。名字全局唯一, 所以它们
+  // 全都叫得动 —— 地址就是 `.name`, 与住在哪个聊天无关。
   const foreignPeers = async (self: string): Promise<PeerInfo[]> => {
     const selfBase = baseOfKey(self);
-    const foreign = allTargets().filter((k) => tagOfKey(k) && baseOfKey(k) !== selfBase);
-    const tagCount = foreign.reduce(
-      (acc, k) => acc.set(tagOfKey(k), (acc.get(tagOfKey(k)) ?? 0) + 1),
-      new Map<string, number>(),
-    );
-    const reachable = foreign.filter((k) => tagCount.get(tagOfKey(k)) === 1 || chatNameOf(cfg, k));
-    return (await Promise.all(reachable.map((t) => peerInfoOf(t, self)))).sort(byRecent);
+    // 只列活着的 / 有身份的 —— 冷绑定可能有几百个, 每个探活是两次 tmux。
+    const foreign = allTargets().filter((k) => baseOfKey(k) !== selfBase && (byTarget.has(k) || !!wizardStore()?.get(k)));
+    return (await Promise.all(foreign.map((t) => peerInfoOf(t, self)))).sort(byRecent);
   };
 
   // peerInfoOf 每个 target 要两次 tmux (pane 存活 + capture tail)。跑了几个月的
@@ -5552,6 +5550,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // resolve 之前就看到 user 行并开出 turn, 那时归因必须已经在位。
       if (origin) a.pendingOrigin = { origin, at: Date.now() };
       if (opts?.from) a.pendingFrom = { from: opts.from, at: Date.now() };
+      if (opts?.channel !== undefined) a.pendingChannel = { channel: opts.channel, at: Date.now() };
+      // 注入的那一行会被 recentInjects 当回显吞掉, 走不到 user_text —— 本轮的 query
+      // (rolepage 上「谁对它说了什么」那一半) 只能在这里记。
+      a.pendingBriefQuery = text;
+      // 公开频道里说的话, 回复就该在群里看得见 —— 哪怕上一轮是人在 CLI 里敲的。
+      if (opts?.channel) a.turnFromChat = true;
       const sid = a.sessionId;
       const paneAlive = a.tmuxPane ? await tmuxPaneAlive(a.tmuxPane) : false;
       if (!paneAlive) {
@@ -5559,7 +5563,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // Same resume-fork hazard as dispatch: snapshot before spawn, re-bind
         // onto the forked jsonl once it appears (EOF offset — fork is seeded).
         const resumeBaseline = listJsonls(dirname(a.jsonlPath));
-        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: tagOfKey(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, model: a.model || undefined, systemPrompt: charterFor(target, { cwd: a.runningCwd }) });
+        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: displayName(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, model: a.model || undefined, systemPrompt: charterFor(target, { cwd: a.runningCwd }) });
         if (!r.ok || !r.tmuxPane) return { ok: false, reason: `respawn failed: ${r.reason ?? "unknown"}` };
         a.tmuxPane = r.tmuxPane;
         a.tmuxSession = r.tmuxSession ?? a.tmuxSession;
@@ -5743,7 +5747,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       bySessionId.clear();
       byTarget.clear();
     },
-    dispatch: async ({ principal, text, images, frame, streamId }) => {
+    currentChannel: (target) => {
+      const a = byTarget.get(target);
+      return a?.channel ?? baseOfKey(target);
+    },
+    dispatch: async ({ principal, text, images, frame, streamId, channel, speaker }) => {
       // Route by inbound principal — the WeCom chat the user just messaged us
       // from is the same string we registered as `target` on attach. After a
       // daemon reload the in-memory map is empty; restore from the persisted
@@ -5778,6 +5786,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         if (a.keepalive) { a.keepalive.lastMs = Date.now(); a.keepalive.lastRealMs = Date.now(); }
       }
       persistPause(a); // persist the pause/resume too, else a reload would revert it
+      // 频道印章要早于任何开 turn 的路径 (startBriefTurn 同步消费)。
+      a.pendingChannel = { channel: channel ?? baseOfKey(principal), speaker, at: Date.now() };
       // Finalize prior live stream (if any) so this new turn renders into its
       // own message bubble. Then open a fresh stream tied to the new frame and
       // ack immediately so WeCom doesn't time out while inject queues.
@@ -5798,10 +5808,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (armMigration && pending && pending !== a.runningCwd) {
         if (a.liveStream && !a.liveStream.closed) await finalizeStream(a, a.liveStream);
         log.info({ target: a.target, runningCwd: a.runningCwd, pendingCwd: pending }, "/clear upgraded to /new (cwd switch)");
-        // Prefer the tag suffix as tmux window name when present (matches
-        // /new #tag behavior), fall back to the full target for untagged.
-        const tag = tagOfKey(a.target);
-        const r = await newSession(a.target, tag || a.target);
+        // The wizard's global name is the tmux window name (matches /new).
+        const r = await newSession(a.target, displayName(a.target) || a.target);
         if (!r.ok) {
           try { await client.replyStream(frame, streamId, withTagHeader(a.target, `[mirror] 切换失败: ${r.reason ?? "unknown"}`), true); } catch { /* ignore */ }
         }
@@ -5893,7 +5901,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           const resumeBaseline = !armMigration ? listJsonls(dirname(a.jsonlPath)) : undefined;
           // Respawn in the binding's runningCwd (pendingCwd doesn't apply to a
           // mid-turn reincarnation — only /new and /clear-with-pending swap cwd).
-          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: tagOfKey(a.target) || a.target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, model: a.model || undefined, systemPrompt: charterFor(a.target, { cwd: a.runningCwd }) });
+          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: displayName(a.target) || a.target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, model: a.model || undefined, systemPrompt: charterFor(a.target, { cwd: a.runningCwd }) });
           if (r.ok && r.tmuxPane && r.tmuxSession) {
             a.tmuxPane = r.tmuxPane;
             a.tmuxSession = r.tmuxSession;

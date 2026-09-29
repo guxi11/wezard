@@ -233,6 +233,9 @@ export interface DispatchArgs {
   images?: string[];
   frame: WsFrameHeaders;
   streamId: string;
+  /** mirror 专用 (回复频道 / 发话人); headless 回复天然跟着 frame 走, 忽略。 */
+  channel?: string;
+  speaker?: string;
 }
 
 export const makeBridge = (deps: BridgeDeps) => {

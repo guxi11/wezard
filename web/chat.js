@@ -1,33 +1,30 @@
-// Chat 详情 SPA。三块视图共用一个 `?id=` 凭据:
+// Rolepage SPA —— 从**一个 role 的视角**看它的 IM: 它参与的群聊与单聊, 每一处
+// 它说了什么 (靠右)、听到了什么 (靠左)。点气泡对面那片空白就换成对方的视角。
 //
-//   线程  /api/chat (侧栏 + 总账) + /api/thread (正文) + /api/events (SSE 增量)
-//   关系  /api/world —— 全部 wizard、家谱、跨聊天往来、工单、日程 (轮询)
-//   日程  同一份 /api/world, 换一种读法 (按时间而不是按关系)
+//   对话  /api/role (身份 + 会话列表 + session) + /api/msgs (窗口正文) + /api/role-events (SSE)
+//   关系  /api/world —— 聚焦当前 role 的家谱与协作网 (轮询)
+//   日程  同一份 /api/world, 只列归当前 role 的定时任务与工单
 //
-// turn 正文是服务端渲染好的 HTML 片段 —— diff / ANSI / 语法高亮只在
-// shared/detail-render 实现一次, 这里只做 DOM 增量 reconcile。
-//
-// 关系图有两种读法, 工具条上的开关切换 —— 它们折叠的是同一份数据的不同一面:
-//   卡片   聊天是卡片、分身按家谱缩进 (归属与层级由 HTML 布局承担), SVG 只画
-//          布局表达不了的边。文字永远可读、可省略、可响应式换行。
-//   关系网  只画 wizard, 聊天收进节点自己 (色条 + 群名), 位置交给力导向。群多
-//          而每群只有一两个 wizard 时, 卡片会把图撑成一堵墙 —— 那时"谁在跟谁
-//          协作"比"谁属于哪个群"更值得占位置。
+// 视角状态 (role / conv / with / session) 全在 URL 里 —— 刷新、转发、从别的聊天点
+// 进来, 落点都一样。消息正文是服务端渲染好的 HTML 片段 (diff / ANSI / 高亮只在
+// shared/detail-render 实现一次), 这里只包左右与头像, 再做 DOM 增量 reconcile。
 //
 // 无构建步骤: 保持 var / function 写法, 直接被浏览器加载。
 (function () {
   var qs = new URLSearchParams(location.search);
   var TOKEN = qs.get('id') || '';
-  // 链接指定要开在哪个 wizard 那一栏。票据 (`id`) 可能是兄弟会话的 turn —— 它只
-  // 决定授权范围 (整个聊天), 落点由这个参数说。
-  var WANT = qs.get('target') || '';
+  // 老链接只有 `target=` —— 服务端两个都认, 这里统一成 role。
+  var ROLE = qs.get('role') || qs.get('target') || '';
+  var CONV = qs.get('conv') || '';
+  var WITH = qs.get('with') || '';
+  var SESSION = qs.get('session') || '';
   var TICK_MS = 3000;
 
   // at / recvAt: 服务端快照时刻与本地收到时刻。所有"现在几点"的判断都换算到
   // 服务端时钟, 否则客户端时钟偏几分钟就会把运行中的会话判成已结束。
-  var S = { base: '', target: '', tags: [], graphs: [], at: 0, recvAt: 0, es: null, pinned: true };
-  // 关系/日程两栏共用的世界快照。sel = 当前聚焦的节点 (空 = 不聚焦, 全图淡显),
-  // kinds = 边类型开关。loaded 用来区分"还没拉过"与"拉过但是空的"。
+  var R = { at: 0, recvAt: 0, role: null, sessions: [], convs: [], relations: false, schedules: 0, stats: null };
+  var S = { es: null, pinned: true, gen: 0 };
+  // 关系/日程两栏共用的世界快照。sel = 当前聚焦的节点, kinds = 边类型开关。
   var W = {
     at: 0, nodes: [], edges: [], chats: [], jobs: [], schedules: [],
     degraded: false, loaded: false, sel: '', onlyRel: false, kinds: { clone: 1, peer: 1, graph: 1 },
@@ -40,12 +37,13 @@
     W.layout = v;
     try { localStorage.setItem(LAY_KEY, v); } catch (e) { }
   };
-  var VIEW = 'thread';
+  var VIEW = 'msgs';
   var $ = function (s) { return document.querySelector(s); };
-  var thread = $('#thread'), tagsEl = $('#tags'), sbEl = $('#sb'), connEl = $('#conn'), gbarEl = $('#gbar');
+  var app = $('#app'), thread = $('#thread'), inner = $('#thread-in'), convsEl = $('#convs');
+  var sbEl = $('#sb'), connEl = $('#conn'), barEl = $('#conv-bar');
   var wmapEl = $('#wmap'), wscrollEl = $('#wscroll'), wtoolsEl = $('#wtools'), planEl = $('#plan-in');
 
-  var srvNow = function () { return S.at ? S.at + (Date.now() - S.recvAt) : Date.now(); };
+  var srvNow = function () { return R.at ? R.at + (Date.now() - R.recvAt) : Date.now(); };
 
   var fmtTok = function (n) {
     if (!n) return '0';
@@ -61,16 +59,22 @@
     if (m < 60) return m + 'm' + (s - m * 60) + 's';
     return Math.floor(m / 60) + 'h' + (m % 60) + 'm';
   };
-  // 聊天列表用的相对时间 — 一眼看出"刚刚 / 5 分钟前"。
+  var pad = function (n) { return n < 10 ? '0' + n : '' + n; };
+  var fmtDay = function (ts) {
+    var x = new Date(ts);
+    return x.getFullYear() + '-' + pad(x.getMonth() + 1) + '-' + pad(x.getDate()) + ' ' + pad(x.getHours()) + ':' + pad(x.getMinutes());
+  };
+  // 列表用的相对时间 — 一眼看出"刚刚 / 5 分钟前"。
   var fmtAgo = function (ts) {
     if (!ts) return '';
     var d = srvNow() - ts;
     if (d < 60000) return '刚刚';
     if (d < 3600000) return Math.floor(d / 60000) + '分钟前';
     if (d < 86400000) return Math.floor(d / 3600000) + '小时前';
-    var x = new Date(ts), p = function (n) { return n < 10 ? '0' + n : '' + n; };
-    return p(x.getMonth() + 1) + '-' + p(x.getDate()) + ' ' + p(x.getHours()) + ':' + p(x.getMinutes());
+    var x = new Date(ts);
+    return pad(x.getMonth() + 1) + '-' + pad(x.getDate()) + ' ' + pad(x.getHours()) + ':' + pad(x.getMinutes());
   };
+  var fmtHM = function (ts) { var x = new Date(ts); return pad(x.getHours()) + ':' + pad(x.getMinutes()); };
   var esc = function (s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
       return c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;';
@@ -80,14 +84,46 @@
     var p = new URLSearchParams(params || {}); p.set('id', TOKEN);
     return fetch(path + '?' + p.toString(), { cache: 'no-store' }).then(function (r) { return r.json(); });
   };
-
-  // ── 运行状态: 服务端只给"到这个时刻自动算结束", 由客户端定时判定 ──
-  // SSE 只在有写入时推送, 一个真正停下来的 turn 不会再产生任何事件 —— 没有本地
-  // 判定, 页面上的「运行中 / 正在思考」就永远熄不掉。
-  var isRunning = function (t) { return !!t.runningUntil && srvNow() < t.runningUntil; };
-  var curTag = function () {
-    return S.tags.filter(function (x) { return x.target === S.target; })[0];
+  var viewParams = function (extra) {
+    var p = { role: ROLE };
+    if (CONV) p.conv = CONV;
+    if (WITH) p['with'] = WITH;
+    if (SESSION) p.session = SESSION;
+    Object.keys(extra || {}).forEach(function (k) { p[k] = extra[k]; });
+    return p;
   };
+  // 视角状态回写 URL (replaceState: 不在历史里留一串中间态)。
+  var syncUrl = function () {
+    var p = new URLSearchParams({ id: TOKEN });
+    Object.keys(viewParams()).forEach(function (k) { p.set(k, viewParams()[k]); });
+    ['forceInnerBrowser', 'ww_vw', 'ww_vh', 'ww_uniq'].forEach(function (k) { if (qs.get(k)) p.set(k, qs.get(k)); });
+    try { history.replaceState(null, '', location.pathname + '?' + p.toString()); } catch (e) { }
+  };
+
+  // ── 名字 ──
+  // 一个 role 的名字与头像: 消息片段自带 (fromName/fromLabel), 会话列表与名册兜底。
+  var names = {};
+  var learn = function (id, name, label) { if (id && name) names[id] = { name: name, label: label || '' }; };
+  var kindOf = function (id) {
+    return /^task:/.test(id) ? 'task' : /^human:/.test(id) ? 'human' : 'wizard';
+  };
+  var nodeOf = function (target) {
+    return W.nodes.filter(function (n) { return n.target === target; })[0];
+  };
+  var roleName = function (id) {
+    var k = names[id] || {}, n = nodeOf(id);
+    return k.name || (n && n.name) || id;
+  };
+  var roleLabel = function (id) {
+    var k = names[id] || {}, n = nodeOf(id);
+    return k.label || (n && n.label) || (kindOf(id) === 'human' ? '👤' : kindOf(id) === 'task' ? '⏰' : '🧙');
+  };
+  // `.name` 的点由 CSS 画 —— 人与定时任务没有地址, 不画点。
+  var nm = function (id, name) {
+    return '<span class="nm ' + kindOf(id) + '">' + esc(name || roleName(id)) + '</span>';
+  };
+  var nameOf = function (id) { return (kindOf(id) === 'wizard' ? '.' : '') + roleName(id); };
+  var canSwitch = function (id) { return !!id && kindOf(id) !== 'task' && id !== 'human:'; };
 
   // ── markdown 渲染 (只对未渲染过的节点做, 复用节点不重绘) ──
   var md = null;
@@ -113,7 +149,8 @@
     });
   };
 
-  // ── 增量 reconcile (与 turn 页同款, 但会递归进 .bubbles) ──
+  // ── 增量 reconcile: sig 相同原节点留下; 同为 turn 卡片只换头 + 递归气泡层 ──
+  // 一次 tool_result 到达不该重建整张卡片 (滚动位置 / 展开态全部保住)。
   var snapOpen = function (scope) {
     var m = {};
     scope.querySelectorAll('[data-key]').forEach(function (b) {
@@ -134,8 +171,6 @@
     for (var i = 0; i < el.children.length; i++) if (el.children[i].classList.contains(cls)) return el.children[i];
     return null;
   };
-  // sig 相同 → 原节点原样留下; 不同但两边都是 turn-group → 只换头 + 递归气泡层,
-  // 这样一次 tool_result 到达不会重建整轮 DOM (滚动位置 / 展开态全部保住)。
   var reconcile = function (cur, next) {
     var open = snapOpen(cur), existing = {};
     Array.prototype.forEach.call(cur.children, function (c) {
@@ -164,178 +199,133 @@
   };
 
   // ── 滚动: 默认到底; 用户手动上翻后解除吸附, 回到底部再吸附 ──
-  var atBottom = function () {
-    return thread.scrollHeight - thread.scrollTop - thread.clientHeight < 80;
-  };
-  var toBottom = function (force) {
-    if (force || S.pinned) thread.scrollTop = thread.scrollHeight;
-  };
+  var atBottom = function () { return thread.scrollHeight - thread.scrollTop - thread.clientHeight < 80; };
+  var toBottom = function (force) { if (force || S.pinned) thread.scrollTop = thread.scrollHeight; };
   thread.addEventListener('scroll', function () { S.pinned = atBottom(); });
 
-  // ── 侧栏 (聊天列表) ──
-  var tagMeta = function (t) {
-    var u = t.usage || {};
-    var bits = [];
-    if (t.turns) bits.push(t.turns + ' 轮');
-    if (u.tools) bits.push(u.tools + ' 工具');
-    var tok = (u.output || 0) + (u.input || 0);
-    if (tok) bits.push(fmtTok(tok) + ' tok');
-    // 目录只取最后一段: 兄弟会话常常一个在主仓、一个在 worktree, 差别就在这一段。
-    if (t.cwd) bits.push('📁 ' + (t.cwd.replace(/\/+$/, '').split('/').filter(Boolean).pop() || t.cwd));
-    // graph 驱动的会话单独标出来 —— 它的 userQuery 长得和真人消息一样, 不标就
-    // 分不清是有人在跟它说话, 还是某个 run 在喂它。
-    var g = t.origin
-      ? '<span class="gtag" title="由 graph ' + esc(t.origin.runId) + ' 驱动">🕸 ' + esc(t.origin.runId) + '</span>'
-      : '';
-    if (!bits.length && !g) return '';
-    return '<div class="tag-meta">' +
-      bits.map(esc).join('<span class="sep">·</span>') +
-      (g && bits.length ? '<span class="sep">·</span>' : '') + g +
-      '</div>';
+  // ── 侧栏: 我 + 会话 ──
+  var convOf = function (key) { return R.convs.filter(function (c) { return c.key === key; })[0]; };
+  var renderMe = function () {
+    var r = R.role;
+    if (!r) return;
+    var kind = r.kind === 'human' ? '人' : r.parent ? '分身' : 'wizard';
+    $('#me').innerHTML =
+      '<span class="av">' + esc(r.label) + '</span>' +
+      '<span class="l">' + nm(r.id, r.name) +
+        '<span class="k">' + esc(kind + (r.chat ? ' · 住在 ' + r.chat : '')) + '</span></span>';
   };
 
-  // ── graph 运行条 ──
-  // 只画最近活跃的那一个 run: 同一 chat 同时跑两张图是罕见情形, 而两条并排的
-  // 流水线会把顶栏挤成一团 —— 宁可只讲清楚当前这一条。
-  var labelOfTag = function (tag) {
-    var hit = S.tags.filter(function (x) { return x.tag === tag; })[0];
-    return hit ? hit.label : '•';
+  var convItem = function (c) {
+    var on = c.key === CONV;
+    var tag = c.kind === 'wizard' ? '<span class="tag priv">私聊</span>' : '';
+    var title = c.kind === 'wizard' ? nm(c.peer, c.name) : '<span class="nm chat">' + esc(c.name) + '</span>';
+    var subs = on && c.subs.length
+      ? '<div class="subs">' + c.subs.map(function (s) {
+          return '<button class="si' + (s.role === WITH ? ' on' : '') + (s.count ? '' : ' quiet') + '" data-conv="' + esc(c.key) + '" data-with="' + esc(s.role) + '" ' +
+            'title="' + esc(s.count ? '我与 ' + nameOf(s.role) + ' 在这里的 ' + s.count + ' 条往来' : '在这里, 但还没和我说过话') + '">' +
+            '<span>' + esc(s.label) + '</span><span class="n">' + nm(s.role, s.name) + '</span>' +
+            (s.count ? '<span class="c">' + s.count + '</span>' : '') + '</button>';
+        }).join('') + '</div>'
+      : '';
+    return '<button class="ci' + (on && !WITH ? ' on' : '') + '" data-conv="' + esc(c.key) + '">' +
+        '<span class="av">' + esc(c.label) + '</span>' +
+        '<span class="b"><span class="l1"><span class="t">' + title + '</span>' + tag +
+          '<span class="ts">' + esc(fmtAgo(c.lastTs)) + '</span></span>' +
+          '<span class="pv">' + esc(c.preview) + '</span></span>' +
+      '</button>' + subs;
   };
-  var renderGraph = function () {
-    var g = (S.graphs || [])[0];
-    if (!g) { gbarEl.hidden = true; gbarEl.innerHTML = ''; return; }
-    // 与会话行同一判定: 服务端只给"到这个时刻自动算结束", 熄灯由本地定时判。
-    var run = isRunning(g);
-    var nodes = g.pipeline.map(function (p) {
-      var on = p.step === g.step;
-      return '<span class="nd' + (on ? ' on' : '') + (on && run ? ' live' : '') +
-        '" data-tag="' + esc(p.tag) + '" title="步 ' + p.step + '/' + g.steps + ' · #' + esc(p.tag) + '">' +
-        esc(labelOfTag(p.tag)) + ' ' + esc(p.tag ? '#' + p.tag : 'default') + '</span>';
-    }).join('<span class="arw">→</span>');
-    gbarEl.hidden = VIEW !== 'thread';
-    gbarEl.innerHTML =
-      '<span class="gid" title="graph run">🕸 ' + esc(g.runId) + '</span>' +
-      '<span class="pipe">' + nodes + '</span>' +
-      '<span class="prog' + (run ? '' : ' done') + '">' +
-        (run ? '⟳ ' : '✓ ') + '轮 ' + g.round + '/' + g.rounds + '</span>';
-    gbarEl.querySelectorAll('.nd').forEach(function (n) {
-      n.onclick = function () {
-        var tag = n.getAttribute('data-tag');
-        var hit = S.tags.filter(function (x) { return x.tag === tag; })[0];
-        if (hit) select(hit.target);
-      };
+
+  var renderConvs = function () {
+    var groups = R.convs.filter(function (c) { return c.kind === 'group'; });
+    var dms = R.convs.filter(function (c) { return c.kind !== 'group'; });
+    var sec = function (title, list, none) {
+      return '<h2>' + title + '<span>' + list.length + '</span></h2>' +
+        (list.length ? list.map(convItem).join('') : '<div class="none">' + none + '</div>');
+    };
+    convsEl.innerHTML = sec('群聊', groups, '还没在任何群里说过话') + sec('单聊', dms, '没有单聊');
+    convsEl.querySelectorAll('[data-conv]').forEach(function (b) {
+      b.onclick = function () { selectConv(b.getAttribute('data-conv'), b.getAttribute('data-with') || ''); };
     });
   };
-  // 一个会话的 wizard 身份 (名字 / 职责 / 家谱) 只有 /api/world 知道 —— 侧栏
-  // 因此是两份数据的合流: tag 那份讲"跑了多少", world 那份讲"它是谁"。世界还没
-  // 拉回来时退化成原先的 `#tag` 视图, 不阻塞线程的首屏。
-  var nodeOf = function (target) {
-    return W.nodes.filter(function (n) { return n.target === target; })[0];
-  };
-  var nameOf = function (target) {
-    var n = nodeOf(target);
-    return (n && n.name) || (target.indexOf('#') >= 0 ? '#' + target.split('#').pop() : target) || target;
-  };
 
-  // 左上角写聊天的名字, 不是「会话列表」—— 一个页面同时开着好几个群的时候,
-  // 「这是哪个群」比「这里是一份列表」重要得多。名字只有 /api/world 给
-  // (chatNames 在 daemon 的注册表里), 没回来之前退回静态标题, 不闪空白。
-  var chatName = function () {
-    var c = chatOf(S.base);
-    return (c && c.name) || (nodeOf(S.target) || {}).chat || '';
-  };
-  var sideHead = function () {
-    var n = chatName();
-    $('#side-t').textContent = n || '会话列表';
-    $('#side-t').title = n ? n + ' · ' + S.base : S.base;
-    $('#side-n').textContent = S.tags.length ? S.tags.length + ' 个会话' : '';
-    $('#side-sub').textContent = S.base || '';
-  };
-
-  var renderTags = function () {
-    sideHead();
-    if (!S.tags.length) {
-      tagsEl.innerHTML = '<div class="empty-side">这个 chat 还没有会话记录</div>';
-      return;
-    }
-    tagsEl.replaceChildren.apply(tagsEl, S.tags.map(function (t) {
-      var run = isRunning(t), n = nodeOf(t.target) || {};
-      var el = document.createElement('div');
-      el.className = 'tag-row' + (t.target === S.target ? ' on' : '') + (run ? ' running' : '');
-      // 名字在前、地址在后: `#tag` 是地址, wizard 起过名之后人读的是名字。
-      var kin = n.parent
-        ? '<span class="kin" title="' + esc(nameOf(n.parent)) + ' 的分身' + (n.inherited ? ' (继承了它的上下文)' : '') + '">↳ ' +
-            esc(nameOf(n.parent)) + (n.inherited ? ' ⧉' : '') + '</span>'
-        : '';
-      el.innerHTML =
-        '<div class="tag-av">' + esc(t.label) + (run ? '<span class="live"></span>' : '') + '</div>' +
-        '<div class="tag-main">' +
-          '<div class="tag-l1">' +
-            '<span class="tag-name">' + esc(t.tag ? '#' + t.tag : 'default') + '</span>' +
-            '<span class="tag-ts">' + esc(fmtAgo(t.lastTs)) + '</span>' +
-          '</div>' +
-          (n.description ? '<div class="tag-job">' + esc(n.description) + '</div>' : '') +
-          (kin ? '<div class="tag-kin">' + kin + '</div>' : '') +
-          '<div class="tag-prev">' + esc(t.preview || '(暂无对话)') + '</div>' +
-          tagMeta(t) +
-        '</div>';
-      el.onclick = function () { select(t.target); };
-      return el;
-    }));
-  };
-
-  // cwd 只显示尾部两段 —— 顶栏放不下全路径, 而"哪个项目/哪个 worktree"恰好就在
-  // 尾部; 全路径留在 title 里。~ 前缀在服务端不可知, 客户端也无从展开, 原样保留。
+  // ── 顶栏: 身份 · cwd · 出生 · session · 关系 / 日程 ──
   var shortCwd = function (p) {
     var seg = String(p).replace(/\/+$/, '').split('/').filter(Boolean);
     return seg.length <= 2 ? p : '…/' + seg.slice(-2).join('/');
   };
-
-  // 关系/日程是聊天之外的视图 (画的是全部聊天), 顶栏不再冒充「这是哪个群」。
-  var OUTER = { world: { em: '🕸', h: '关系' }, plan: { em: '⏰', h: '日程' } };
-  var topbar = function () {
-    var o = OUTER[VIEW];
-    if (o) {
-      $('#tb-em').textContent = o.em; $('#tb-h').textContent = o.h;
-      $('#tb-tag').textContent = ''; $('#tb-sub').textContent = ''; $('#tb-cwd').hidden = true;
-      return;
+  var sessLabel = function (s) {
+    return (s.sessionId ? s.sessionId.slice(0, 8) : '(无 id)') + ' · ' + fmtAgo(s.start) + ' · ' + s.turns + ' 轮';
+  };
+  var renderTop = function () {
+    var r = R.role;
+    if (!r) return;
+    var facts = [];
+    if (r.kind === 'wizard') facts.push('<span class="st' + (r.busy ? ' on' : '') + '">' + (r.busy ? '● 正在干活' : r.alive ? '○ 空闲' : '○ 未运行') + '</span>');
+    if (r.cwd) facts.push('<span title="' + esc(r.cwd) + '">📁 ' + esc(shortCwd(r.cwd)) + '</span>');
+    if (r.bornAt) facts.push('<span title="创建时间">🐣 ' + esc(fmtDay(r.bornAt)) + '</span>');
+    if (r.model) facts.push('<span>' + esc(r.model.replace(/^claude-/, '')) + '</span>');
+    if (r.parent) facts.push('<span class="go" data-r="' + esc(r.parent.id) + '" title="' + (r.inherited ? '继承了它的上下文' : '空白起步') + '">↳ ' + esc(r.parent.label) + ' .' + esc(r.parent.name) + ' 的分身</span>');
+    if (r.children.length) facts.push('<span>' + r.children.length + ' 个分身</span>');
+    $('#tb-who').innerHTML =
+      '<span class="av">' + esc(r.label) + '</span>' +
+      '<span class="l"><span class="l1">' + nm(r.id, r.name) +
+        (r.description ? '<span class="job" title="' + esc(r.description) + '">' + esc(r.description) + '</span>' : '') +
+        '</span><span class="facts">' + facts.join('') + '</span></span>';
+    $('#tb-who').querySelectorAll('.go').forEach(function (g) {
+      g.onclick = function () { switchRole(g.getAttribute('data-r')); };
+    });
+    var acts = [];
+    if (R.sessions.length > 1) {
+      acts.push('<select id="sess" aria-label="session">' +
+        '<option value="">全部 ' + R.sessions.length + ' 个 session</option>' +
+        R.sessions.slice().reverse().map(function (s) {
+          return '<option value="' + esc(s.sessionId) + '"' + (s.sessionId === SESSION ? ' selected' : '') + '>' + esc(sessLabel(s)) + '</option>';
+        }).join('') + '</select>');
     }
-    var t = curTag(), name = chatName();
-    var tag = t ? (t.tag ? '#' + t.tag : 'default') : '';
-    $('#tb-em').textContent = t ? t.label : '💬';
-    // 群名在前、地址在后。手机上一进来就是阅读态 (侧栏整个隐藏), 顶栏是唯一
-    // 还能说清「这是哪个群」的地方。
-    $('#tb-h').textContent = name || tag;
-    $('#tb-tag').textContent = name ? tag : '';
-    var cwdEl = $('#tb-cwd');
-    cwdEl.hidden = !(t && t.cwd);
-    if (t && t.cwd) { cwdEl.textContent = '📁 ' + shortCwd(t.cwd); cwdEl.title = t.cwd; }
-    $('#tb-sub').textContent = S.target;
+    if (VIEW !== 'msgs') acts.push('<button class="vb" data-view="msgs">‹ 对话</button>');
+    if (R.relations) acts.push('<button class="vb' + (VIEW === 'world' ? ' on' : '') + '" data-view="world">关系图</button>');
+    if (r.kind === 'wizard') acts.push('<button class="vb' + (VIEW === 'plan' ? ' on' : '') + '" data-view="plan">日程' + (R.schedules ? '<b>' + R.schedules + '</b>' : '') + '</button>');
+    $('#tb-acts').innerHTML = acts.join('');
+    var sel = $('#sess');
+    if (sel) sel.onchange = function () { SESSION = sel.value; refresh(); };
+    $('#tb-acts').querySelectorAll('.vb').forEach(function (b) {
+      b.onclick = function () { setView(b.getAttribute('data-view')); };
+    });
+    document.title = nameOf(r.id) + ' · rolepage';
   };
 
-  // ── 页脚总账 ──
+  var renderBar = function () {
+    var c = convOf(CONV);
+    if (!c || VIEW !== 'msgs') { barEl.innerHTML = ''; return; }
+    var where = c.kind === 'wizard'
+      ? '与 ' + nm(c.peer, c.name) + ' 的私聊'
+      : '<span class="t">' + esc(c.name) + '</span>' + (c.kind === 'human' ? ' · 单聊' : ' · 群聊');
+    barEl.innerHTML = where +
+      (WITH ? ' · 只看我与 ' + nm(WITH) + ' 的往来<button class="x" id="bar-x">看全部</button>' : '');
+    var x = $('#bar-x');
+    if (x) x.onclick = function () { selectConv(CONV, ''); };
+  };
+
+  // ── 页脚总账 (当前 role 自己跑过的轮次; 选了 session 就只算那一段) ──
   var COLORS = { input: '#0a7d6b', cacheRead: '#8250df', cacheWrite: '#953800', output: '#1a7f37' };
-  // 缩写键本身没有自解释性, 悬停给出中文口径 (尤其 ctx 是峰值、cache 是累计读写)。
   var TIP = {
     turns: '对话轮数', tools: '工具调用次数', api: 'API 请求次数',
     ctx: '上下文峰值 — 单次请求送入的 input + 缓存 的最高值',
     out: '累计输出 token', cache: '累计缓存 token (读 + 写)', time: '累计耗时',
   };
-  // 进行中的会话, 耗时要跟着走: durationMs 只统计到快照时刻 at, 之后的补上;
-  // runningUntil 一过就冻住, 不会像旧版那样把静默期一路累加成几十小时。
+  var isRunning = function (t) { return !!t.runningUntil && srvNow() < t.runningUntil; };
   var liveDur = function (t) {
     var d = (t.usage && t.usage.durationMs) || 0;
     if (!t.runningUntil) return d;
-    return d + Math.max(0, Math.min(srvNow(), t.runningUntil) - S.at);
+    return d + Math.max(0, Math.min(srvNow(), t.runningUntil) - R.at);
   };
-  var renderStatus = function (t) {
-    if (!t) { sbEl.innerHTML = ''; return; }
+  var renderStatus = function () {
+    var t = R.stats;
+    if (!t) { sbEl.innerHTML = '<span class="st void"><span class="k">暂无本人的轮次记录</span></span>'; return; }
     var u = t.usage || {}, run = isRunning(t);
     var segs = [['input', '输入'], ['cacheRead', '缓存读'], ['cacheWrite', '缓存写'], ['output', '输出']]
       .filter(function (s) { return u[s[0]] > 0; });
     var total = segs.reduce(function (a, s) { return a + u[s[0]]; }, 0);
-    // token 一条都没采到就别画那条空槽 —— 空进度条看着像"用了 0%", 是误导。
-    // 光有色块看不出哪段是什么 (tooltip 要悬停才知道), 所以条后面always跟图例。
     var io = total > 0
       ? '<span class="sb-io" title="累计 token I/O · 共 ' + fmtTok(total) + '">' +
           '<span class="k">token i/o</span>' +
@@ -368,162 +358,132 @@
       io;
   };
 
-  // ── 线程 ──
-  var applySummary = function (d) {
-    S.base = d.base; S.tags = d.tags || []; S.graphs = d.graphs || [];
-    S.at = d.at || Date.now(); S.recvAt = Date.now();
-    renderTags(); topbar(); renderStatus(curTag()); renderGraph();
+  // ── 消息行 ──
+  // 同一条消息从发话方看靠右、从收信方看靠左 —— 片段不带方向, 由这里按视角包装。
+  // 行的另一侧是 .flip: 点它 = 换成这条消息的对端 (我发的 → 收信方; 别人发的 → 发话方)。
+  var rowHTML = function (m) {
+    learn(m.from, m.fromName, m.fromLabel);
+    learn(m.to, m.toName, m.toLabel);
+    if (m.dir === 'mark') {
+      return '<div class="mrow mark" data-id="' + esc(m.id) + '" data-ts="' + m.ts + '" data-sig="' + esc(m.sig) + '">' + m.html + '</div>';
+    }
+    var mine = m.from === ROLE;
+    var other = mine ? m.to : m.from;
+    var group = (convOf(CONV) || {}).kind !== 'wizard';
+    // 群里我不是收信方的那条 (X → Y), 头上写清是说给谁的。
+    var to = !mine && m.to !== ROLE && group ? '<span class="to">→ ' + nm(m.to, m.toName) + '</span>' : '';
+    var priv = !m.channel && group ? '<span class="ch priv">私聊</span>' : '';
+    var who = mine
+      ? '<span class="to">' + (m.to && m.to !== 'human:' ? '→ ' + nm(m.to, m.toName) : '') + '</span><span>' + esc(fmtHM(m.ts)) + '</span>'
+      : nm(m.from, m.fromName) + to + priv + '<span>' + esc(fmtHM(m.ts)) + '</span>';
+    var sw = canSwitch(other);
+    var flip = '<button class="flip" data-r="' + esc(other) + '"' + (sw ? '' : ' disabled tabindex="-1"') +
+      ' aria-label="' + esc(sw ? '切到 ' + nameOf(other) + ' 的视角' : '') + '">' + (sw ? '⇄ ' + esc(nameOf(other)) : '') + '</button>';
+    var av = mine ? '' : '<button class="av' + (canSwitch(m.from) ? ' go' : '') + '" data-r="' + esc(m.from) + '" title="' + esc(nameOf(m.from)) + '"' + (canSwitch(m.from) ? '' : ' disabled') + '>' + esc(m.fromLabel || roleLabel(m.from)) + '</button>';
+    return '<div class="mrow ' + (mine ? 'mine' : 'them') + '" data-id="' + esc(m.id) + '" data-ts="' + m.ts + '" data-sig="' + esc(m.sig) + '" data-stale-at="' + (m.staleAt || 0) + '">' +
+      av +
+      '<div class="mcol"><div class="mwho">' + who + '</div><div class="mb">' + m.html + '</div></div>' +
+      flip +
+    '</div>';
+  };
+  var bindRow = function (el) {
+    el.querySelectorAll('.flip[data-r]:not([disabled]), .av.go').forEach(function (b) {
+      b.onclick = function () { switchRole(b.getAttribute('data-r')); };
+    });
+  };
+  var rowNode = function (id) {
+    var list = inner.querySelectorAll('.mrow');
+    for (var i = 0; i < list.length; i++) if (list[i].getAttribute('data-id') === id) return list[i];
+    return null;
   };
 
-  var loadThread = function (target, limit) {
-    return api('api/thread', limit ? { target: target, limit: limit } : { target: target }).then(function (d) {
-      if (!d.ok || target !== S.target) return;
-      var inner = $('#thread-in');
-      if (!d.turns.length) { inner.innerHTML = '<div class="empty">这个会话还没有记录</div>'; return; }
-      // 默认只取最近若干轮 (贴底阅读), 更早的按需一次性拉全。
+  var loadMsgs = function (limit) {
+    var gen = S.gen;
+    if (!CONV) { inner.innerHTML = '<div class="empty">选一个会话</div>'; return Promise.resolve(); }
+    return api('api/msgs', viewParams(limit ? { limit: limit } : {})).then(function (d) {
+      if (!d.ok || gen !== S.gen) return;
+      if (!d.msgs.length) { inner.innerHTML = '<div class="empty">这里还没有消息</div>'; return; }
       var more = d.truncated
-        ? '<button class="more-btn" id="more">载入更早的 ' + (d.total - d.turns.length) + ' 轮</button>'
+        ? '<button class="more-btn" id="more">载入更早的 ' + (d.total - d.msgs.length) + ' 条</button>'
         : '';
-      inner.innerHTML = more + d.turns.map(function (t) { return t.html; }).join('');
-      d.turns.forEach(function (t) { markStale(t); });
+      inner.innerHTML = more + d.msgs.map(rowHTML).join('');
       var btn = $('#more');
-      if (btn) btn.onclick = function () { btn.textContent = '载入中…'; loadThread(target, '0'); };
+      if (btn) btn.onclick = function () { btn.textContent = '载入中…'; loadMsgs('0'); };
+      bindRow(inner);
       render(inner);
-      foldPings();
-      expireTurns();
+      expireRows();
       S.pinned = true; toBottom(true);
       // CDN 字体/代码高亮加载完会改变高度, 再吸一次底。
       setTimeout(function () { toBottom(); }, 60);
     });
   };
 
-  // staleAt 由 JSON 单独送来 (不在 html 里, 否则会打乱服务端的 sig 去重), 落到
-  // DOM 上供 expireTurns 定时判定。
-  // 't:' = 一轮对话, 'm:' = 上下文断点行。子 agent 的卡片嵌在父轮里面, 所以按
-  // 整棵子树找 —— 只扫顶层会把它当成"还没渲染过"而重复插一份。
-  var turnNode = function (id) {
-    return $('#thread-in').querySelector('[data-key="t:' + id + '"],[data-key="m:' + id + '"]');
-  };
-  var markStale = function (t) {
-    var n = turnNode(t.id);
-    if (n) n.setAttribute('data-stale-at', t.staleAt || 0);
-  };
-
-  // ── 🏓 keepalive 折叠 ──────────────────────────────────────────────
-  // 保温 ping 是机器行为, 不是对话 (服务端只给一个 .ping 标记, 见 chat-view
-  // 的 isKeepaliveTurn)。挂机一晚攒出几十轮 ping/pong, 等宽排在时间轴上会把
-  // 真正说过的话挤出屏幕 —— 所以连续的一段收成一行 `🏓 ×N`, 点开才是详情。
-  //
-  // 每次变动都先拆回顶层再整段重折: 追加一轮可能把两段并成一段, 增量维护要
-  // 处理的拼接情形更多。折叠只**搬运**既有节点 (不重建 HTML), 所以 markdown
-  // 渲染态、工具展开态、data-sig 全都原样留着。
-  var pingOpen = {};
-  // 摘要行只放时刻: tg-time 是 "YYYY-MM-DD HH:MM:SS", 两份日期会把这一行撑开,
-  // 而一段连续的 ping 本来就落在同一天里。
-  var stampOf = function (el) {
-    var t = el.querySelector('.tg-time');
-    return t ? String(t.textContent).split(' ').pop() : '';
-  };
-  var foldPings = function () {
-    var inner = $('#thread-in');
-    // 顶层没有散落的 ping = 已经折好了。流式 turn 每 300ms 推一次, 每次都拆开
-    // 重折是白搬一趟 DOM, 还会把读者的滚动位置蹭掉。
-    var loose = false;
-    Array.prototype.forEach.call(inner.children, function (el) {
-      if (el.classList.contains('ping')) loose = true;
-    });
-    if (!loose) return;
-    inner.querySelectorAll('.ping-fold').forEach(function (f) {
-      var box = f.querySelector('.ping-body');
-      while (box.firstChild) inner.insertBefore(box.firstChild, f);
-      f.remove();
-    });
-    // 连续段: 中间夹一轮真对话 (或一道上下文断点) 就断开 —— 那正是要露出来的东西。
-    var runs = [], run = null;
-    Array.prototype.forEach.call(inner.children, function (el) {
-      if (!el.classList.contains('ping')) { run = null; return; }
-      if (run) run.push(el); else runs.push(run = [el]);
-    });
-    runs.forEach(function (r) {
-      var key = r[0].getAttribute('data-key') || '';
-      var span = r.length > 1 ? stampOf(r[0]) + ' → ' + stampOf(r[r.length - 1]) : stampOf(r[0]);
-      var d = document.createElement('details');
-      d.className = 'ping-fold';
-      d.open = !!pingOpen[key];
-      d.innerHTML =
-        '<summary class="ping-sum" title="keepalive 保温 ping —— 不是对话, 点开看详情">' +
-          '<span class="pb">🏓 ×' + r.length + '</span>' +
-          '<span class="ps">keepalive 保温</span>' +
-          '<span class="pt">' + esc(span) + '</span>' +
-        '</summary><div class="ping-body"></div>';
-      d.ontoggle = function () { pingOpen[key] = d.open; };
-      inner.insertBefore(d, r[0]);
-      var box = d.querySelector('.ping-body');
-      r.forEach(function (el) { box.appendChild(el); });
-    });
-  };
-
-  var upsertTurn = function (t) {
-    var inner = $('#thread-in');
+  var upsertMsg = function (m) {
     var empty = inner.querySelector('.empty'); if (empty) empty.remove();
     var stick = S.pinned;
-    var cur = turnNode(t.id);
+    var cur = rowNode(m.id);
+    if (cur && cur.getAttribute('data-sig') === m.sig) return;
+    var next = frag(rowHTML(m)).firstElementChild;
     if (!cur) {
-      inner.insertAdjacentHTML('beforeend', t.html);
-      render(inner);
-    } else if (cur.getAttribute('data-sig') !== t.sig) {
-      var box = frag(t.html).firstElementChild;
-      var eb = childBy(cur, 'bubbles'), nb = box && childBy(box, 'bubbles');
-      if (eb && nb) {
-        var eh = childBy(cur, 'tg-head'), nh = childBy(box, 'tg-head');
+      // 按时间插: SSE 推来的可能是一条更早的消息 (长轮次的入消息晚于别人的回复落盘)。
+      var after = null;
+      inner.querySelectorAll('.mrow').forEach(function (r) {
+        if (Number(r.getAttribute('data-ts')) > m.ts && !after) after = r;
+      });
+      inner.insertBefore(next, after);
+      bindRow(next); render(next);
+    } else {
+      var eb = cur.querySelector('.mb'), nb = next.querySelector('.mb');
+      var ec = eb && eb.firstElementChild, nc = nb && nb.firstElementChild;
+      var ebb = ec && childBy(ec, 'bubbles'), nbb = nc && childBy(nc, 'bubbles');
+      if (ebb && nbb) {
+        var eh = childBy(ec, 'tg-head'), nh = childBy(nc, 'tg-head');
         if (eh && nh) eh.innerHTML = nh.innerHTML;
-        reconcile(eb, nb);
-        cur.setAttribute('data-sig', t.sig);
-      } else if (box) {
-        cur.replaceWith(box); render(inner);
+        reconcile(ebb, nbb);
+        ['data-sig', 'data-stale-at'].forEach(function (a) { cur.setAttribute(a, next.getAttribute(a)); });
+      } else {
+        cur.replaceWith(next); bindRow(next); render(next);
       }
     }
-    markStale(t);
-    foldPings();
     if (stick) toBottom(true);
   };
 
   // 到点了还没有新写入 → 这一轮已经结束: 熄掉呼吸点、移除"正在思考"。
-  var expireTurns = function () {
+  var expireRows = function () {
     var now = srvNow();
-    $('#thread-in').querySelectorAll('.turn-group[data-stale-at]').forEach(function (g) {
+    inner.querySelectorAll('.mrow[data-stale-at]').forEach(function (g) {
       var until = Number(g.getAttribute('data-stale-at') || 0);
       if (!until || now <= until) return;
       g.setAttribute('data-stale-at', '0');
-      // 连内嵌的子 agent 卡片一起熄灯: 父轮都到点了, 它派出去的必然也停了,
-      // 而子卡片没有自己的 data-stale-at (staleAt 只随顶层片段下发)。
       g.querySelectorAll('.tg-dot').forEach(function (d) { d.classList.remove('live'); });
       g.querySelectorAll('.typing').forEach(function (t) { t.remove(); });
     });
   };
 
-  var select = function (target) {
-    if (!target) return;
-    // 线程以外的栏位里点一个会话 —— 意思是"去读它", 不是"在关系图上标记它"。
-    // 不换栏的话 #thread 还 hidden 着, 点上去像什么都没发生。
-    if (VIEW !== 'thread') setView('thread');
-    S.target = target;
-    document.querySelector('.app').classList.add('reading');
-    renderTags(); topbar(); renderStatus(curTag());
-    $('#thread-in').innerHTML = '<div class="empty">加载中…</div>';
-    loadThread(target).then(function () { connect(); });
+  // ── role 摘要 ──
+  var applyRole = function (d) {
+    R.at = d.at || Date.now(); R.recvAt = Date.now();
+    R.role = d.role; R.sessions = d.sessions || []; R.convs = d.convs || [];
+    R.relations = !!d.relations; R.schedules = d.schedules || 0; R.stats = d.stats || null;
+    ROLE = d.role.id;
+    learn(d.role.id, d.role.name, d.role.label);
+    R.convs.forEach(function (c) {
+      if (c.peer) learn(c.peer, c.name, c.label);
+      c.subs.forEach(function (s) { learn(s.role, s.name, s.label); });
+    });
+    if (!CONV || !convOf(CONV)) { CONV = d.conv || ''; WITH = ''; }
+    renderMe(); renderConvs(); renderTop(); renderBar(); renderStatus();
   };
-  $('#tb-back').onclick = function () { document.querySelector('.app').classList.remove('reading'); };
 
-  // ── SSE: chat 摘要 + 当前 tag 的 turn 增量。断线指数退避重连。 ──
+  // ── SSE: role 摘要 + 当前窗口的消息增量。断线指数退避重连。 ──
   var backoff = 1000;
   var connect = function () {
     if (S.es) { S.es.close(); S.es = null; }
-    var p = new URLSearchParams({ id: TOKEN, target: S.target });
-    var es = new EventSource('api/events?' + p.toString());
+    var p = new URLSearchParams(viewParams({ id: TOKEN }));
+    var es = new EventSource('api/role-events?' + p.toString());
     S.es = es;
-    es.addEventListener('chat', function (e) { try { applySummary(JSON.parse(e.data)); } catch (err) { } });
-    es.addEventListener('turn', function (e) { try { upsertTurn(JSON.parse(e.data)); } catch (err) { } });
+    es.addEventListener('role', function (e) { try { applyRole(JSON.parse(e.data)); } catch (err) { } });
+    es.addEventListener('msg', function (e) { try { upsertMsg(JSON.parse(e.data)); } catch (err) { } });
     es.onopen = function () { backoff = 1000; connEl.className = 'conn'; connEl.title = '实时连接'; };
     es.onerror = function () {
       connEl.className = 'conn off'; connEl.title = '连接断开, 重连中';
@@ -533,33 +493,47 @@
     };
   };
 
-  // 关系图上随时间变化的只有两样: 呼吸灯该不该亮、"几分钟前"该写几。重建整张图
-  // 会把滚动位置、聚焦态和连线一起抖掉, 所以这里只原地改这两处。
-  var tickWorld = function () {
-    wmapEl.querySelectorAll('.wnode').forEach(function (el) {
-      var n = nodeOf(el.getAttribute('data-t'));
-      if (!n) return;
-      var run = wRunning(n);
-      el.classList.toggle('run', run);
-      var av = el.querySelector('.wav'), dot = el.querySelector('.wav .live');
-      if (run && !dot && av) av.insertAdjacentHTML('beforeend', '<i class="live"></i>');
-      if (!run && dot) dot.remove();
-      var ts = el.querySelector('.wts');
-      if (ts) ts.textContent = fmtAgo(n.lastTs);
+  /** 视角或窗口变了: 摘要、正文、SSE 全部按新参数重来。 */
+  var refresh = function () {
+    S.gen++;
+    syncUrl();
+    inner.innerHTML = '<div class="empty">加载中…</div>';
+    return api('api/role', viewParams()).then(function (d) {
+      if (!d.ok) {
+        document.body.innerHTML = '<div class="empty" style="padding:80px">' + esc(d.error || 'not found') + '</div>';
+        return;
+      }
+      applyRole(d);
+      syncUrl();
+      if (VIEW === 'world' || VIEW === 'plan') { W.sel = ROLE; loadWorld(); }
+      return loadMsgs().then(connect);
     });
   };
 
-  // 本地心跳: 相对时间、运行中判定、耗时都随时间变化, 但服务端没有新事件可推。
-  setInterval(function () {
-    if (!S.tags.length) return;
-    renderTags();
-    renderStatus(curTag());
-    renderGraph();
-    expireTurns();
-    if (VIEW === 'world') tickWorld();
-    else if (VIEW === 'plan') renderPlan();
-  }, TICK_MS);
+  var selectConv = function (key, withRole) {
+    CONV = key; WITH = withRole || '';
+    if (VIEW !== 'msgs') setView('msgs');
+    app.classList.add('reading');
+    renderConvs(); renderBar();
+    S.gen++;
+    syncUrl();
+    inner.innerHTML = '<div class="empty">加载中…</div>';
+    loadMsgs().then(connect);
+  };
 
+  // 换视角: 窗口尽量留在同一个群 —— 从群里的一条消息切过去, 最想看的是对方在这个群
+  // 里的样子; 对方不在这个群 (私聊的另一头) 就交给服务端挑它最近的会话。
+  var switchRole = function (id) {
+    if (!canSwitch(id) || id === ROLE) return;
+    var keep = CONV && CONV.indexOf('c:') === 0 ? CONV : '';
+    var from = ROLE;
+    ROLE = id; WITH = ''; SESSION = '';
+    CONV = keep || (CONV.indexOf('p:') === 0 ? 'p:' + from : '');
+    inner.classList.remove('flipping'); void inner.offsetWidth; inner.classList.add('flipping');
+    refresh();
+  };
+
+  $('#tb-back').onclick = function () { app.classList.remove('reading'); };
 
   // ══ 关系视图 ═══════════════════════════════════════════════════════
   // 三层叠在一起:
@@ -590,30 +564,15 @@
   var wRunning = function (n) { return n.busy || (!!n.runningUntil && srvNow() < n.runningUntil); };
 
   // ── 走进一个 wizard ──
-  // 同聊天的换一栏就到了。外聊天的正文不在本页的授权范围内 (见 chat-http), 但
-  // /api/world 给每张卡片带了那个群既有的票据 —— 拿它整页跳过去, 等于从那个群
-  // 自己的链接点进来。没有票据 = 那个群还没有任何记录可读, 点了也没有意义。
+  // 任一票据都能看任一 role (见 chat-http), 所以走进谁就是把视角切成谁 —— 不再整页跳。
   var chatOf = function (base) {
     return (W.chats || []).filter(function (c) { return c.base === base; })[0];
   };
-  var canOpen = function (n) { return !!n && (n.local || !!(chatOf(n.base) || {}).token); };
-  var openNode = function (target) {
-    var n = nodeOf(target);
-    if (!n) return;
-    if (n.local) { setView('thread'); select(target); return; }
-    var tok = (chatOf(n.base) || {}).token;
-    if (!tok) return;
-    // pathname 而不是写死 '/chat': 这一页可能挂在反代的子路径下 (同 api/ 的相对取法)。
-    location.href = location.pathname + '?' + new URLSearchParams({ id: tok, target: target }).toString();
-  };
+  var canOpen = function (n) { return !!n; };
+  var openNode = function (target) { if (target) switchRole(target); };
 
-  // 卡片里的名字不重复卡片头已经说过的话。默认名是 `聊天名#tag`, 而卡片头写着
-  // 聊天名、行尾还挂着 `#tag` —— 三处同一个词。所以: 起过名字就显示名字, 没起过
-  // 就只显示 `#tag`; 名字本身已经以 `#tag` 收尾时也不再重复那枚 badge。
-  var shortName = function (n) {
-    var fallback = n.chat ? (n.tag ? n.chat + '#' + n.tag : n.chat) : n.tag;
-    return n.name && n.name !== fallback ? n.name : (n.tag ? '#' + n.tag : '默认');
-  };
+  // 名字全局唯一, 卡片头写的是聊天名, 节点上只写它自己的 `.name`。
+  var shortName = function (n) { return '.' + (n.name || n.tag || n.target); };
 
   // 与 sel 相连的一切 (含 sel 自己)。聚焦时其余的压暗而不是移除 —— 位置稳定,
   // 反复点不同节点时版面不会跳。
@@ -689,7 +648,6 @@
 
   var nodeHTML = function (n, depth) {
     var run = wRunning(n), nm = shortName(n);
-    var dupTag = !n.tag || nm === '#' + n.tag || nm.slice(-(n.tag.length + 1)) === '#' + n.tag;
     var bits = [];
     if (n.model) bits.push(n.model.replace(/^claude-/, ''));
     if (n.cwd) bits.push('📁 ' + shortPath(n.cwd, 1));
@@ -697,14 +655,13 @@
     if (n.taskTurns) bits.push('⏰ ' + n.taskTurns);
     if (n.peerTurns) bits.push('✉ ' + n.peerTurns);
     return '<div class="wnode' + (n.self ? ' self' : '') + (run ? ' run' : '') +
-        (n.alive ? '' : ' cold') + (n.local ? ' local' : '') + (degree(n.target) ? ' rel' : '') +
+        (n.alive ? '' : ' cold') + (n.target === ROLE ? ' local' : '') + (degree(n.target) ? ' rel' : '') +
         '" data-t="' + esc(n.target) + '" style="margin-left:' + (depth * 16) + 'px">' +
       (depth ? '<span class="lin" title="分身"></span>' : '') +
       '<span class="wav">' + esc(n.label) + (run ? '<i class="live"></i>' : '') + '</span>' +
       '<span class="wbody">' +
         '<span class="wl1">' +
           '<b class="wname" title="' + esc(n.name || n.target) + '">' + esc(nm) + '</b>' +
-          (dupTag ? '' : '<span class="wtag">#' + esc(n.tag) + '</span>') +
           (n.inherited ? '<span class="wih" title="开局继承了父亲的上下文">⧉</span>' : '') +
           '<span class="wts">' + esc(fmtAgo(n.lastTs)) + '</span>' +
         '</span>' +
@@ -754,7 +711,7 @@
       if (t === W.sel) el.classList.add('sel');
       if (canOpen(nodeOf(t))) el.classList.add('go');
       el.onclick = function () { W.sel = (W.sel === t ? '' : t); renderWorld(); };
-      // 双击 = 走进它: 同聊天换一栏, 外聊天整页跳到那个群 (见 openNode)。
+      // 双击 = 走进它: 视角切成它 (见 openNode)。
       el.ondblclick = function () { openNode(t); };
     });
     // 卡片头 = 那个群本身。点它进那个群里最近活跃的那一栏 —— 图上找不到哪个
@@ -1211,8 +1168,12 @@
       '<div class="cap">' + (soon.length ? '未来 ' + HORIZON_H + ' 小时内 ' + soon.length + ' 次触发' : '未来 ' + HORIZON_H + ' 小时内没有定时任务') + '</div></div>';
   };
 
+  // 日程跟着 wizard 走: 只列归当前 role 的定时任务, 与它有关的工单 (它开的 / 它在里面)。
   var renderPlan = function () {
-    var ss = W.schedules || [], js = W.jobs || [];
+    var ss = (W.schedules || []).filter(function (x) { return (x.owner || x.createdBy || x.target) === ROLE; });
+    var js = (W.jobs || []).filter(function (j) {
+      return j.owner === ROLE || j.members.some(function (mm) { return mm.target === ROLE; });
+    });
     var open = js.filter(function (j) { return j.status === 'open'; });
     var closed = js.filter(function (j) { return j.status !== 'open'; });
     var schedRows = ss.length
@@ -1230,7 +1191,7 @@
             '</div>' +
           '</div>';
         }).join('')
-      : '<div class="pempty">没有定时任务 —— schedule_task 排一个</div>';
+      : '<div class="pempty">' + esc(roleName(ROLE)) + ' 名下没有定时任务 —— 让它 schedule_task 排一个</div>';
 
     var jobRow = function (j) {
       return '<div class="jrow' + (j.status === 'open' ? ' open' : '') + '">' +
@@ -1263,28 +1224,40 @@
     });
   };
 
+  // 关系图上随时间变化的只有两样: 呼吸灯该不该亮、"几分钟前"该写几。重建整张图
+  // 会把滚动位置、聚焦态和连线一起抖掉, 所以这里只原地改这两处。
+  var tickWorld = function () {
+    wmapEl.querySelectorAll('.wnode').forEach(function (el) {
+      var n = nodeOf(el.getAttribute('data-t'));
+      if (!n) return;
+      var run = wRunning(n);
+      el.classList.toggle('run', run);
+      var av = el.querySelector('.wav'), dot = el.querySelector('.wav .live');
+      if (run && !dot && av) av.insertAdjacentHTML('beforeend', '<i class="live"></i>');
+      if (!run && dot) dot.remove();
+      var ts = el.querySelector('.wts');
+      if (ts) ts.textContent = fmtAgo(n.lastTs);
+    });
+  };
+
   // ══ 视图切换 ═══════════════════════════════════════════════════════
   // 世界快照不走 SSE: 它变动的源头 (spawn / 改职责 / 开收工单 / 排定时) 一条都
-  // 不经过 detail store, 而给它们各自搭一条事件通路, 换来的只是几秒的新鲜度。
-  // 改成"看得见才轮询": 不在关系/日程栏、或者页面在后台, 就一次都不请求。
+  // 不经过 detail store。改成"看得见才轮询": 不在关系/日程栏、或者页面在后台, 就一次都不请求。
   var WORLD_MS = 6000;
   var worldTimer = null;
   var loadWorld = function () {
-    return api('api/world', {}).then(function (d) {
+    return api('api/world', { role: ROLE }).then(function (d) {
       if (!d.ok) return;
       W.at = d.at; W.loaded = true;
       W.nodes = d.nodes || []; W.edges = d.edges || []; W.chats = d.chats || [];
       W.jobs = d.jobs || []; W.schedules = d.schedules || []; W.degraded = !!d.degraded;
-      // 身份回来了, 侧栏那几行也跟着变 —— 名字/职责/家谱都在这份数据里。
-      // 顶栏同理: 群名只在这份快照里, 不跟着 /api/chat 走。
-      renderTags(); topbar();
       if (VIEW === 'world') renderWorld();
       if (VIEW === 'plan') renderPlan();
     }).catch(function () { });
   };
   var pollWorld = function () {
     if (worldTimer) { clearInterval(worldTimer); worldTimer = null; }
-    if (VIEW === 'thread') return;
+    if (VIEW === 'msgs') return;
     worldTimer = setInterval(function () {
       if (!document.hidden) loadWorld();
     }, WORLD_MS);
@@ -1292,43 +1265,43 @@
 
   var setView = function (v) {
     VIEW = v;
-    $('#views').querySelectorAll('.vb').forEach(function (b) {
-      b.classList.toggle('on', b.getAttribute('data-view') === v);
-    });
-    thread.hidden = v !== 'thread';
+    thread.hidden = v !== 'msgs';
     $('#pane-world').hidden = v !== 'world';
     $('#pane-plan').hidden = v !== 'plan';
-    // graph 条只对线程有意义 (它讲的是当前这一路被谁驱动)。
-    gbarEl.hidden = v !== 'thread' || !(S.graphs || []).length;
-    // 离开线程 = 走出这个聊天: 侧栏 (本群的会话列表) 与页脚 (本路的总账) 一并收起。
-    document.querySelector('.app').classList.toggle('outer', v !== 'thread');
-    topbar();
-    if (v === 'thread') { toBottom(true); }
-    else if (!W.loaded) { (v === 'world' ? (wmapEl.innerHTML = '<div class="empty">加载中…</div>') : (planEl.innerHTML = '<div class="empty">加载中…</div>')); loadWorld(); }
-    else if (v === 'world') renderWorld();
-    else renderPlan();
+    app.classList.toggle('outer', v !== 'msgs');
+    // 手机上关系/日程占满主区 —— 进入即阅读态。
+    if (v !== 'msgs') app.classList.add('reading');
+    renderTop(); renderBar();
+    if (v === 'msgs') { fxStop(); toBottom(true); }
+    else {
+      // 关系图一打开就聚焦在当前 role 身上: 它的邻居亮着, 其余压暗。
+      if (v === 'world') W.sel = ROLE;
+      if (!W.loaded) { (v === 'world' ? wmapEl : planEl).innerHTML = '<div class="empty">加载中…</div>'; }
+      else if (v === 'world') renderWorld();
+      else renderPlan();
+      loadWorld();
+    }
     pollWorld();
   };
-  $('#views').querySelectorAll('.vb').forEach(function (b) {
-    b.onclick = function () { setView(b.getAttribute('data-view')); };
-  });
   // 卡片换行会改变每个节点的坐标 —— 连线必须跟着重画。
   window.addEventListener('resize', function () {
     if (VIEW !== 'world') return;
     if (W.layout === 'force') renderForce(); else requestAnimationFrame(drawEdges);
   });
 
+  // 本地心跳: 相对时间、运行中判定、耗时都随时间变化, 但服务端没有新事件可推。
+  setInterval(function () {
+    if (!R.role) return;
+    renderStatus();
+    expireRows();
+    if (VIEW === 'world') tickWorld();
+    else if (VIEW === 'plan') renderPlan();
+  }, TICK_MS);
+  // 侧栏的「几分钟前」一分钟刷一次就够 —— 每 3s 重建会把列表的滚动与焦点蹭掉。
+  setInterval(function () { if (R.role && VIEW === 'msgs') renderConvs(); }, 60000);
+
   // ── boot ──
-  api('api/chat', WANT ? { target: WANT } : {}).then(function (d) {
-    if (!d.ok) {
-      document.body.innerHTML = '<div class="empty" style="padding:80px">' + esc(d.error || 'not found') + '</div>';
-      return;
-    }
-    applySummary(d);
-    // 卡片链接带来的那条 turn 决定默认选中的 tag; 否则取最近活跃的。
-    select(d.self && d.self.target ? d.self.target : (S.tags[0] && S.tags[0].target));
-  });
-  // 与线程并行取: 侧栏那几行的名字 / 职责 / 家谱都在这份快照里, 不该等线程渲染完
-  // 才补上。首屏之后就只在关系/日程栏轮询 (见 pollWorld)。
-  loadWorld();
+  // 带着 role / conv 来的链接直接进阅读态 (手机上不先落在会话列表)。
+  if (ROLE || CONV) app.classList.add('reading');
+  refresh();
 })();

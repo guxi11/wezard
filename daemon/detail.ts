@@ -177,13 +177,12 @@ export const recordCloseOpenTurns = (scope: { target?: string; sessionId?: strin
 
 export const getDetail = (id: string): DetailRecord | undefined => store?.get(id);
 
-// 一个 wizard 名字背后的 chat 链接需要一张票据 —— `?id=` 既是凭据, 也是页面默认
-// 选中哪个 #tag 的默认值。从没跑过一轮的会话没有自己的票据, 返回 undefined。
+// 一个 wizard 名字背后的 rolepage 链接需要一张票据 —— `?id=` 既是凭据, 也是页面默认
+// 落点。从没跑过一轮的会话没有自己的票据, 返回 undefined。
 export const latestTurnIdFor = (target: string): string | undefined => latestTurnId((r) => r.target === target);
 
-// 一个聊天的长期票据 —— 没有就现造一条。`?id=` 的授权范围本来就是整个聊天 (见
-// chat-http 的 resolveScope: base 由记录反推), 所以一张聊天级的票据不多给任何权限;
-// 开在哪一栏交给 `target=` 明确指定。
+// 一个聊天的长期票据 —— 没有就现造一条。任一有效票据都能看任一 role (见 chat-http
+// 的 capability 说明), 所以一张聊天级的票据不多给任何权限; 从谁的视角看交给 `role=`。
 // 为什么不能只靠 turn 记录: detail store 只留 24h / 1000 条, 而跨聊天派活的收信方
 // 恰恰常常是刚出生 / 闲了一天的 wizard —— 气泡就落在它那个群里, 它却是全场唯一
 // 点不开的那个名字。票据一个聊天一条、不参与回收, 于是「有没有链接」不再取决于
@@ -222,10 +221,10 @@ const detailRoot = (publicBase: string, fallbackHost: string, fallbackPort: numb
 
 // ww_uniq 决定 WeCom 内置浏览器窗口复用: 同 chat 的所有 detail 链接共用一个窗口,
 // 而不是每条 id 各开一个。无 chatId 时退回 record id (保留旧行为)。
-const detailParams = (id: string, uniq?: string, target?: string): string =>
+const detailParams = (id: string, uniq?: string, role?: string): string =>
   new URLSearchParams({
     id,
-    ...(target ? { target } : {}),
+    ...(role ? { role } : {}),
     forceInnerBrowser: "1", ww_vw: "1000", ww_vh: "800", ww_uniq: uniq ?? id,
   }).toString();
 
@@ -237,21 +236,21 @@ export const buildDetailUrl = (
   uniq?: string,
 ): string => `${detailRoot(publicBase, fallbackHost, fallbackPort)}/detail?${detailParams(id, uniq)}`;
 
-// Chat 视图入口。id 是那条 turn 记录 —— 它既是凭据, 也是默认选中哪一栏的兜底;
-// `target` 显式指定开在哪个 wizard 那一栏 (同聊天内才认, 见 chat-http), 于是票据
-// 是谁的都不影响页面落点。
+// Rolepage 入口。id 是那条 turn 记录 —— 它是凭据, 也是没指定视角时的默认落点
+// (那一轮的 wizard, 以及它所在的那个群); `role` 显式指定从谁的视角看。role 用 target
+// key 而不是名字: 名字可以改, key 不变, 链接发出去之后不该因为改名失效。
 export const buildChatUrl = (
   publicBase: string,
   fallbackHost: string,
   fallbackPort: number,
   id: string,
   uniq?: string,
-  target?: string,
-): string => `${detailRoot(publicBase, fallbackHost, fallbackPort)}/chat?${detailParams(id, uniq, target)}`;
+  role?: string,
+): string => `${detailRoot(publicBase, fallbackHost, fallbackPort)}/role?${detailParams(id, uniq, role)}`;
 
-// 一个 wizard 的 chat 详情页 URL —— 气泡头上的链接都走这里。票据优先取它自己最近
-// 那条 turn, 取不到退到它所在聊天的长期票据 (见 chatTicketFor): `?id=` 的授权范围
-// 本来就是整个聊天, 开在哪一栏由 `target=` 明说, 所以换票既不多给权限也不会开错栏。
+// 一个 wizard 的 rolepage URL —— 气泡头上的链接都走这里。票据优先取它自己最近
+// 那条 turn, 取不到退到它所在聊天的长期票据 (见 chatTicketFor): 任一有效票据都能看
+// 任一 role, 视角由 `role=` 明说, 所以换票既不多给权限也不会开错人。
 // undefined = store 还没起来 (boot 早期), 调用方退回裸头。
 export const chatUrlFor = (
   d: { detailPublicBase: string; host: string; port: number },

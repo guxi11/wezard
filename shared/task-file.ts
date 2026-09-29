@@ -12,6 +12,7 @@
 //   gate    放枪前的检查 (可选) —— 有副作用、可以跑命令; 返回 false 这一轮就不放
 //   prompt  到点说给 wizard 听的话, `{{var}}` 由 gate 填
 //   target/fresh  在谁的聊天/目录下办, 是否每次新起一个白板 wizard
+//   createdBy     排班的 wizard —— 日程归它 (owner), fresh 执行体挂在它的家谱下
 //
 // 本模块只做纯的那一半: 形状、校验、模板渲染、路径。加载与执行在 daemon/。
 import { basename, join } from "node:path";
@@ -68,6 +69,8 @@ export interface TaskRecord {
   hasGate: boolean;
   gateTimeoutSec: number;
   createdBy: string;
+  /** 日程归谁 (rolepage「日程」按它列): 排班的那个 wizard; 老文件没写 createdBy 就归执行目标。 */
+  owner: string;
 }
 
 /** 运行时状态。任务文件是源码 (人与 AI 写), 状态由 daemon 写 —— 两者不混住一个文件。 */
@@ -125,6 +128,7 @@ export const normalizeTask = (
       hasGate: typeof m.gate === "function",
       gateTimeoutSec: Math.max(5, Math.min(900, m.gateTimeoutSec ?? DEFAULT_GATE_TIMEOUT)),
       createdBy: (m.createdBy ?? "").toString(),
+      owner: (m.createdBy ?? "").toString() || (m.target ?? "").toString(),
     },
   };
 };

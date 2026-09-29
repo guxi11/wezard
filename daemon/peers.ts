@@ -444,12 +444,11 @@ export const compactPane = (paneText: string, rows = 24): string =>
 // 已经能通过 send_peer/peek_peer 同一套查找解析出来的 tag 发生, 所以它永远不会
 // 广告一个调不通的地址 —— 解析不出来的 `#123` / `#L45` 静静穿过去。
 export interface PeerMention {
-  /** Tag as written, without `#`. */
+  /** Name as written, without `.`. */
   tag: string;
   /** Resolved session key, e.g. `chat:wrxxx#b`. */
   target: string;
-  /** Canonical string to hand the peer tools — the bare tag for a sibling,
-   *  `chatName#tag` for a session in another (named) chat. */
+  /** Canonical string to hand the peer tools — the wizard's global name. */
   address: string;
   /** Lives in a DIFFERENT chat. */
   foreign: boolean;
@@ -457,8 +456,6 @@ export interface PeerMention {
   chat: string;
   label: string;
   cwd: string;
-  /** Session doesn't exist yet — chat name resolved but no running session. */
-  unborn?: boolean;
 }
 
 /** Machinery, not conversation: the `<system-reminder>` wrapper is the same
@@ -467,44 +464,22 @@ export interface PeerMention {
  *  summaries. Empty string for no mentions — appending it stays a no-op. */
 export const renderPeerMentionHint = (mentions: readonly PeerMention[]): string => {
   if (mentions.length === 0) return "";
-  const live = mentions.filter((m) => !m.unborn);
-  const unborn = mentions.filter((m) => m.unborn);
-  const lines = live.map(
+  const lines = mentions.map(
     (m) =>
-      `- \`#${m.tag}\` ${m.label} —— 一个活着的 wizard, 住在${m.foreign ? `**另一个**聊天${m.chat ? ` (\`${m.chat}\`)` : ""}` : "你这个聊天"}` +
+      `- \`.${m.tag}\` ${m.label} —— 一个活着的 wizard, 住在${m.foreign ? `**另一个**聊天${m.chat ? ` (\`${m.chat}\`)` : ""}` : "你这个聊天"}` +
       ` (target \`${m.target}\`${m.cwd ? `, 工作区 ${m.cwd}` : ""}), 地址 "${m.address}"。`,
   );
-  const unbornLines = unborn.map(
-    (m) =>
-      `- \`${m.address}\` —— 指的是聊天 "${m.chat}" 里的 "#${m.tag}", 但那个 wizard **还不存在**。` +
-      ` 先把它造出来: new_claude_session({ chat: "${m.chat}", tag: "${m.tag}", cwd: "<项目路径>" }) (白纸一张),` +
-      ` 或者 spawn_clone 让它继承你此刻的上下文; 然后 send_peer("${m.address}", "<活>") 派活。`,
-  );
-  const parts: string[] = [
+  return [
     "",
     "<system-reminder>",
-  ];
-  if (lines.length > 0) {
-    parts.push(
-      "上面这条消息里的 `#tag` 点的是**别的 wizard**, 不是字面文本:",
-      ...lines,
-    );
-  }
-  if (unbornLines.length > 0) {
-    parts.push(
-      "下面这些 `聊天名#tag` 形式的地址指向还不存在的 wizard:",
-      ...unbornLines,
-    );
-  }
-  parts.push(
+    "上面这条消息里的 `.name` 点的是**别的 wizard**, 不是字面文本:",
+    ...lines,
     "用户要你把它们拉进来、看看它们在干嘛、或者把话带到时, 去叫它们, 别猜、更别替它们回答:",
     "peek_peer(address) 读它最近的对话, send_peer(address, text) 派活或推它一把, wait_peer(address) 等它闲下来,",
-    "wizard_roster() 看全体 wizard 的名字/职责/家谱。地址原样用上面给的那个 —— 同一个聊天里是裸 tag,",
-    "别的聊天里是 `聊天名#tag`。你跟它们说的话会以 `你 → 它` 的气泡出现在群里, 所以直说、别复述。",
-    "只是提了一嘴、并没有要你去找它 (\"#b 说的那个方案\") 就不必调工具 —— 看用户到底要什么。",
+    "wizard_roster() 看全体 wizard 的名字/职责/家谱。地址就是它的全局名字, 原样用上面给的那个。",
+    "只是提了一嘴、并没有要你去找它 (\".b 说的那个方案\") 就不必调工具 —— 看用户到底要什么。",
     "</system-reminder>",
-  );
-  return parts.join("\n");
+  ].join("\n");
 };
 
 // ── 同伴模型 ──────────────────────────────────────────────────────────

@@ -58,6 +58,7 @@ export const renderTask = (
   note: t.note,
   runIn: t.fresh ? "每次新建一个白板 wizard 执行, 跑完自动回收" : "注入已有会话",
   target: t.target,
+  owner: t.owner,
   prompt: t.prompt,
   /** wizard 要改这条定时, 直接 Read/Edit 这个文件。 */
   file: t.file,

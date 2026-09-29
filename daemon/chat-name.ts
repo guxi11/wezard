@@ -1,32 +1,28 @@
-// 给聊天起名, 让 peer 寻址跨得出去。
+// 给聊天起名。
 //
-// 一个 WeCom 聊天的身份是 `chat:wrkSxxxxx…` 这种不可读、不可手打的 id。同一个
-// 聊天里的会话靠 `#tag` 互相寻址 (`#fix`), 跨聊天则只有"全局唯一 tag"这一条
-// 路: 两个群各有一个 `#fix` 就谁也叫不动谁, 只能让用户回去改名。
+// 一个 WeCom 聊天的身份是 `chat:wrkSxxxxx…` 这种不可读、不可手打的 id。wizard 早已
+// 不靠聊天寻址 —— 每个 wizard 有全局唯一的名字 (`.fix`, 见 wizard.ts); 聊天名要解决
+// 的是**指到一个群**: notify 发到哪、new_claude_session / spawn_clone 把 home 设在哪,
+// 以及一个群的默认 wizard 出生时取什么名字。
 //
-// 名字把 base principal 变成人能写的 token, 于是地址空间变成两级:
-//   `fix`          本聊天的 #fix (老语义, 不变)
-//   `daily#fix`    daily 这个聊天里的 #fix
-//   `daily`        daily 的默认 wizard (它的名字就是聊天名, 所以地址也是裸名字)
-//   `daily#`       同上, 老写法
-//   `chat:wr…#fix` 全量 key, 也当合法地址收 (list_peers 直接吐这个)
-// 冲突从此可解: 名字唯一 (存在 config 的 key 上, 结构性保证), tag 只需在自己
-// 聊天内唯一。
+// 仍然认的老地址 (改名前的 wizard 正在用): `daily#fix` / `daily/fix` / `chat:wr…#fix`
+// —— parsePeerRef 拆开, chatBaseOf 取聊天那一截。
 //
 // 落盘走 config.jsonc (`chats`), 与定时表同一套 patchJsonc + in-place cfg 变更 ——
 // 名字是用户手写的长期配置, 不是运行时状态, 不该躺在 state 目录里。
 import type { Config } from "../shared/config.js";
 import { patchJsonc } from "../shared/config-writer.js";
-import { baseOfKey, keyOf } from "../shared/session-label.js";
+import { baseOfKey } from "../shared/session-label.js";
+import { settleName, wizardStore } from "./wizard.js";
 
-/** 与 `#tag` 同一套字符集: 字母/数字/`_`/`-`, 1~32。名字要能原样写进地址里, 所以
+/** 与 wizard 名字同一套字符集: 字母/数字/`_`/`-`, 1~32。名字要能原样写进地址里, 所以
  *  不能含 `#`、`/`、`:` 与空白 —— 那三个都是地址语法的一部分。 */
 const NAME_RE = /^[\p{L}\p{N}_-]{1,32}$/u;
 const PRINCIPAL_RE = /^(?:chat|user|group|external_user):/;
 
-/** 用户输入的名字: 去引号/空白, 剥掉习惯性前缀的 `@`、`#`。 */
+/** 用户输入的名字: 去引号/空白, 剥掉习惯性前缀的 `@`、`#`、`.`。 */
 export const normChatName = (raw: string): string =>
-  (raw ?? "").trim().replace(/^[\s'"‘’“”`]+|[\s'"‘’“”`]+$/gu, "").replace(/^[@#]+/, "");
+  (raw ?? "").trim().replace(/^[\s'"‘’“”`]+|[\s'"‘’“”`]+$/gu, "").replace(/^[@#.]+/, "");
 
 /** 名字大小写不敏感 —— 用户在手机上打字, `Daily` 和 `daily` 必须是同一个群。
  *  存的是原样拼写, 比对走这个折叠。 */
@@ -184,15 +180,7 @@ export const parsePeerRef = (raw: string): PeerRef => {
   return { chat, tag };
 };
 
-/** 一个 target key 的规范地址 —— 直接能喂回 send_peer / peek_peer 的字符串。
- *  本聊天内退化成裸 tag (`fix`), 跨聊天且对方有名字则 `daily#fix`, 无名字就只能
- *  给全量 key (仍然可用, 只是不好读)。
- *  一个聊天的默认 wizard 的名字就是聊天名, 地址也就是聊天名 —— 不挂那个孤零零的
- *  `#` (`daily#` 仍然认, 见 parsePeerRef / resolvePeerTag, 只是不再由我们写出来)。 */
-export const peerAddress = (cfg: Config, self: string, target: string): string => {
-  const tag = target.includes("#") ? target.slice(target.indexOf("#") + 1) : "";
-  if (baseOfKey(self) === baseOfKey(target)) return tag;
-  const name = chatNameOf(cfg, target);
-  if (!name) return keyOf(baseOfKey(target), tag);
-  return tag ? `${name}#${tag}` : name;
-};
+/** 一个 target key 的规范地址 —— 它的全局名字, 直接能喂回 send_peer / peek_peer。
+ *  名字全局唯一, 所以与 `self` 在不在同一个聊天无关 (参数留着给老调用方)。 */
+export const peerAddress = (cfg: Config, _self: string, target: string): string =>
+  settleName(wizardStore(), chatNameOf(cfg, target), target);

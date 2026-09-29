@@ -1,150 +1,190 @@
-/* Chat 详情视图外壳。turn 正文的样式来自 detail-render 的 SHARED_CSS/TURN_CSS,
-   由 /chat/app.css 拼在本文件之前 —— 这里只管三栏骨架、会话列表与页脚总账。 */
+/* Rolepage 外壳。消息正文 (turn 卡片) 的样式来自 detail-render 的 SHARED_CSS/TURN_CSS,
+   由 /chat/app.css 拼在本文件之前 —— 这里管骨架、会话列表、左右气泡与页脚总账。
+   视觉只押一处: 「视角」。我说的靠右、染成视角色; 别人说的靠左、带头像; 气泡对面
+   那片空白是一道门 —— 点下去就换成对方的视角。其余一律安静。 */
+
+:root {
+  --paper: #eef1f5;   /* 对话底 —— 冷灰, 让白色与视角色的两种气泡都站得住 */
+  --card: #fff;
+  --ink: #1c2430;
+  --mute: #6a7483;
+  --faint: #9aa3af;
+  --line: #d9dee6;
+  --mine: #e4ecfc;    /* 当前视角说的话 */
+  --mine-line: #b8caef;
+  --accent: #2f55c9;  /* 视角色: 名字的点、选中态、自己的气泡描边 */
+  --priv: #9a5b10;    /* 私聊 */
+  --pub: #237a55;     /* 公开 */
+}
 
 html, body { height: 100% }
 /* overscroll-behavior:none 阻止整页橡皮筋回弹 —— webview 里它会和内层
    .thread 抢滚动手势, 表现为"滚一下卡住/整页在弹"。 */
-body { overflow: hidden; overscroll-behavior: none }
+body { overflow: hidden; overscroll-behavior: none; color: var(--ink) }
+button { font: inherit; color: inherit }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px }
 
 .app { display: flex; height: 100vh; height: 100dvh }
-
-/* ── 侧栏: 会话列表 ─────────────────────────────────────────────── */
-.side {
-  width: 288px; flex: none; background: #fff; border-right: 1px solid #d0d7de;
-  display: flex; flex-direction: column; min-height: 0;
-}
-.side-head { padding: 13px 16px 11px; border-bottom: 1px solid #eaeef2 }
-.side-head .l1 { display: flex; align-items: baseline; gap: 8px }
-.side-head .t {
-  font-size: 14px; font-weight: 600; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.side-head .n {
-  margin-left: auto; font-size: 11px; color: #8c959f;
-  font-variant-numeric: tabular-nums;
-}
-.side-head .s {
-  font-size: 11px; color: #8c959f; font-family: ui-monospace, Menlo, monospace;
-  word-break: break-all; margin-top: 3px;
-}
-
-.tags { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 6px 12px }
-
-.tag-row {
-  position: relative; display: flex; gap: 10px; align-items: flex-start;
-  padding: 8px 10px 8px 11px; border-radius: 8px; cursor: pointer;
-  border: 1px solid transparent; transition: background .12s;
-}
-.tag-row:hover { background: #f6f8fa }
-/* 选中态用左侧色条而不是整块蓝底 —— 底色会和内部的 badge/预览抢注意力。 */
-.tag-row.on { background: #f0f4f9 }
-.tag-row.on::before {
-  content: ""; position: absolute; left: 2px; top: 9px; bottom: 9px;
-  width: 3px; border-radius: 2px; background: #0969da;
-}
-
-.tag-av {
-  width: 32px; height: 32px; flex: none; border-radius: 10px; background: #f1f3f6;
-  display: flex; align-items: center; justify-content: center; font-size: 17px;
-  position: relative; border: 1px solid #eaeef2;
-}
-.tag-av .live {
-  position: absolute; right: -3px; bottom: -3px; width: 10px; height: 10px;
-  border-radius: 50%; background: #1a7f37; border: 2px solid #fff;
-  animation: pulse 1.4s infinite;
-}
 @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .3 } }
 
-.tag-main { min-width: 0; flex: 1 }
-.tag-l1 { display: flex; align-items: baseline; gap: 6px }
-.tag-name {
-  font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden;
-  text-overflow: ellipsis; font-family: ui-monospace, Menlo, monospace;
-}
-.tag-row.running .tag-name { color: #1a7f37 }
-.tag-ts {
-  margin-left: auto; flex: none; font-size: 11px; color: #8c959f;
-  font-family: ui-monospace, Menlo, monospace;
-}
-.tag-prev {
-  font-size: 12px; color: #656d76; margin-top: 2px; overflow: hidden;
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-  line-height: 1.45;
-}
-/* 每行第三层: 轮数 / 工具数 / token —— 不点进去也能判断哪个会话在真干活。 */
-.tag-meta {
-  display: flex; gap: 4px; align-items: center; margin-top: 4px;
-  font-size: 10.5px; color: #8c959f; font-family: ui-monospace, Menlo, monospace;
-  font-variant-numeric: tabular-nums;
-}
-.tag-meta .sep { opacity: .45 }
-.tag-meta .hot { color: #9a6700 }
-.tags .empty-side { padding: 28px 12px; text-align: center; color: #8c959f; font-size: 12px }
+/* 名字 = 地址。点是地址的一部分, 也是这一页唯一的颜色记号。 */
+.nm { font-weight: 600 }
+.nm::before { content: "."; color: var(--accent); font-weight: 700 }
+.nm.human::before, .nm.task::before, .nm.chat::before { content: none }
 
-/* ── 主区 ───────────────────────────────────────────────────────── */
-/* min-height:0 给纵向 flex (mobile) 用: 缺了它 .main 的 min-height:auto 会被
-   内容撑破 100dvh, .thread 不产生内部滚动, 底部被 body overflow:hidden 裁掉。
-   横向 (桌面) 下无副作用 —— 高度本来就由 stretch 定死。 */
-.main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column }
+/* ── 侧栏: 我 + 会话 ─────────────────────────────────────────────── */
+.side {
+  width: 292px; flex: none; background: var(--card); border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; min-height: 0;
+}
+.me { padding: 16px 16px 12px; border-bottom: 1px solid #edf0f4; display: flex; gap: 11px; align-items: center }
+.me .av { font-size: 26px; line-height: 1 }
+.me .l { min-width: 0 }
+.me .nm { font-size: 17px; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.me .k { font-size: 11.5px; color: var(--mute) }
+
+.convs { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 8px 16px }
+.convs h2 {
+  margin: 14px 8px 4px; font-size: 12px; font-weight: 600; color: var(--mute);
+  display: flex; align-items: baseline; gap: 6px;
+}
+.convs h2 span { font-weight: 400; color: var(--faint); font-variant-numeric: tabular-nums }
+.convs .none { padding: 6px 10px; font-size: 12px; color: var(--faint) }
+
+.ci {
+  display: flex; gap: 10px; align-items: flex-start; width: 100%; text-align: left; overflow: hidden;
+  padding: 8px 10px; border: 0; border-radius: 9px; background: transparent; cursor: pointer;
+}
+.ci:hover { background: #f4f6f9 }
+.ci.on { background: #eaf0fc }
+.ci .av { font-size: 19px; line-height: 1.3; flex: none; width: 24px; text-align: center }
+.ci .b { min-width: 0; flex: 1; overflow: hidden }
+.ci .pv, .ci .l1 { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.ci .l1 { display: flex }
+.ci .l1 { display: flex; align-items: baseline; gap: 6px }
+.ci .t { font-size: 13.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.ci .ts { margin-left: auto; flex: none; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums }
+.ci .pv { font-size: 12px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.ci .pv:empty { display: none }
+.ci .tag { font-size: 10.5px; border-radius: 4px; padding: 0 4px; flex: none }
+.ci .tag.priv { color: var(--priv); background: #9a5b1014 }
+
+/* 群里的其他 role —— 缩进挂在群下, 点开是「我与它在这个群里」的往来。 */
+.subs { margin: 0 0 6px 34px; border-left: 1px solid var(--line); padding-left: 6px }
+.si {
+  display: flex; align-items: center; gap: 7px; width: 100%; text-align: left;
+  padding: 4px 8px; border: 0; border-radius: 7px; background: transparent; cursor: pointer;
+  font-size: 12.5px; color: var(--ink);
+}
+.si:hover { background: #f4f6f9 }
+.si.on { background: #eaf0fc; color: var(--accent) }
+.si .n { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.si .c { margin-left: auto; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums }
+.si.quiet { color: var(--faint) }
+
+/* ── 顶栏: 当前 role 的身份 ───────────────────────────────────────── */
+.main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--paper) }
 .topbar {
-  flex: none; display: flex; align-items: center; gap: 10px; padding: 11px 20px;
-  background: #fff; border-bottom: 1px solid #d0d7de;
+  flex: none; display: flex; align-items: center; gap: 12px; padding: 10px 20px;
+  background: var(--card); border-bottom: 1px solid var(--line);
 }
-.topbar .em { font-size: 18px }
-.topbar .h {
-  font-size: 15px; font-weight: 600; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+.topbar .back { display: none; border: 0; background: none; font-size: 22px; color: var(--mute); cursor: pointer; padding: 0 4px }
+.topbar .who { display: flex; gap: 11px; align-items: center; min-width: 0; flex: 1 }
+.topbar .who .av { font-size: 28px; line-height: 1; flex: none }
+.topbar .who .l { min-width: 0 }
+.topbar .who .l1 { display: flex; align-items: baseline; gap: 10px; min-width: 0 }
+.topbar .who .nm { font-size: 18px; white-space: nowrap }
+.topbar .who .job { font-size: 12.5px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.topbar .facts { display: flex; gap: 12px; flex-wrap: wrap; font-size: 11.5px; color: var(--mute); margin-top: 1px }
+.topbar .facts span { white-space: nowrap }
+.topbar .facts .go { cursor: pointer; color: var(--accent) }
+.topbar .facts .go:hover { text-decoration: underline }
+.topbar .facts .st { color: var(--faint) }
+.topbar .facts .st.on { color: var(--pub) }
+.topbar .acts { display: flex; gap: 6px; align-items: center; flex: none }
+.topbar select {
+  font: inherit; font-size: 12px; color: var(--ink); background: var(--card);
+  border: 1px solid var(--line); border-radius: 7px; padding: 4px 8px; max-width: 220px;
 }
-.topbar .tg {
-  flex: none; font-size: 12.5px; color: #57606a;
-  font-family: ui-monospace, Menlo, monospace;
+.vb {
+  font-size: 12.5px; background: var(--card); border: 1px solid var(--line); border-radius: 7px;
+  padding: 4px 11px; cursor: pointer; white-space: nowrap;
 }
-.topbar .cwd {
-  flex: none; font-size: 11px; color: #57606a; font-family: ui-monospace, Menlo, monospace;
-  background: #f6f8fa; border: 1px solid #eaeef2; border-radius: 5px; padding: 1px 6px;
-  max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.topbar .sub {
-  font-size: 11px; color: #8c959f; font-family: ui-monospace, Menlo, monospace;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.topbar .back { display: none; font-size: 18px; color: #656d76; cursor: pointer; padding: 0 4px }
+.vb:hover { border-color: var(--accent); color: var(--accent) }
+.vb.on { background: var(--accent); border-color: var(--accent); color: #fff }
+.vb b { font-weight: 600; margin-left: 3px; font-variant-numeric: tabular-nums }
 
-/* ── graph 运行条 ───────────────────────────────────────────────────
-   一条线的流水线不值得画成节点图 —— steps 结构上不可能分叉, 画出来的永远是
-   一条直线。这里只把它压成一行: 步骤序列 + 当前停在哪一步 + 轮次进度。 */
-.gbar {
-  flex: none; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  padding: 7px 20px; background: #fbf9ff; border-bottom: 1px solid #8250df33;
-  font-size: 11.5px; color: #6639ba; font-family: ui-monospace, Menlo, monospace;
+/* 会话窗口的标题条: 在哪、和谁。 */
+.conv-bar {
+  flex: none; display: flex; align-items: center; gap: 8px; padding: 7px 20px;
+  font-size: 12.5px; color: var(--mute); border-bottom: 1px solid #e3e7ed; background: #f7f8fa;
 }
-.gbar .gid { background: #8250df14; border-radius: 5px; padding: 1px 6px }
-.gbar .pipe { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; min-width: 0 }
-.gbar .nd {
-  display: flex; align-items: center; gap: 3px; padding: 1px 7px; border-radius: 10px;
-  background: #fff; border: 1px solid #d8cdf0; color: #57606a; cursor: pointer;
-}
-.gbar .nd:hover { border-color: #8250df }
-.gbar .nd.on { background: #8250df; border-color: #8250df; color: #fff; font-weight: 700 }
-.gbar .nd.on.live { animation: pulse 1.4s infinite }
-.gbar .arw { color: #b3a3d6 }
-.gbar .prog { margin-left: auto; font-variant-numeric: tabular-nums }
-.gbar .done { color: #8c959f }
-/* 侧栏里标出"这个会话是 graph 在驱动的" —— 否则它看着就是某个 tag 在自说自话。 */
-.tag-meta .gtag { color: #6639ba }
+.conv-bar:empty { display: none }
+.conv-bar .t { color: var(--ink); font-weight: 600 }
+.conv-bar .x { margin-left: auto; border: 0; background: none; cursor: pointer; color: var(--accent); font-size: 12px }
 
+/* ── 消息 ─────────────────────────────────────────────────────────── */
 .thread {
   flex: 1; min-height: 0; overflow-y: auto; overflow-anchor: none;
-  padding: 16px 20px 24px; -webkit-overflow-scrolling: touch;
-  overscroll-behavior: contain;
+  padding: 16px 20px 28px; -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
 }
-.thread-in { max-width: 920px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px }
-.empty { color: #8c959f; text-align: center; padding: 60px 0; font-size: 13px }
+.thread-in { max-width: 960px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px }
+.empty { color: var(--faint); text-align: center; padding: 60px 0; font-size: 13px }
 .more-btn {
-  align-self: center; background: #fff; border: 1px solid #d0d7de; border-radius: 16px;
-  padding: 5px 16px; font-size: 12px; color: #57606a; cursor: pointer; font-family: inherit;
+  align-self: center; background: var(--card); border: 1px solid var(--line); border-radius: 16px;
+  padding: 5px 16px; font-size: 12px; color: var(--mute); cursor: pointer;
 }
-.more-btn:hover { background: #f6f8fa; color: #0969da; border-color: #0969da55 }
+.more-btn:hover { color: var(--accent); border-color: var(--accent) }
+
+.mrow { display: flex; align-items: flex-start; gap: 10px }
+.mrow .av {
+  flex: none; width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--line);
+  background: var(--card); font-size: 19px; line-height: 32px; text-align: center; cursor: default; padding: 0;
+}
+.mcol { min-width: 0; max-width: min(78%, 760px); display: flex; flex-direction: column; gap: 4px }
+.mrow.mine { flex-direction: row-reverse }
+.mrow.mine .mcol { align-items: flex-end }
+.mwho { font-size: 11.5px; color: var(--mute); display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap }
+.mwho .to { color: var(--faint) }
+.mwho .ch { font-size: 10.5px; border-radius: 4px; padding: 0 4px }
+.mwho .ch.priv { color: var(--priv); background: #9a5b1014 }
+.mb { min-width: 0; max-width: 100% }
+
+/* 入消息 (问句) 是一颗气泡; 出消息 (回复) 是一张带工具细节的卡片 —— 两者都按视角着色。 */
+.mb > .bubble.mq { border-radius: 14px; border-color: var(--line) }
+.mb .mq .mmeta { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding: 8px 14px 0; font-size: 11px; color: var(--faint) }
+.mb .mq .md-body { padding: 4px 14px 10px }
+.mchip { border-radius: 4px; padding: 0 5px; background: #f1f3f6; color: var(--mute) }
+.mchip.priv { color: var(--priv); background: #9a5b1014 }
+.mchip.pub { color: var(--pub); background: #237a5514 }
+.mchip.graph { color: #6639ba; background: #8250df12 }
+.mrow.mine .mb > .bubble.mq, .mrow.mine .mb > .turn-group { background: var(--mine); border-color: var(--mine-line) }
+.mrow.mine .mb > .turn-group .bubble { background: #fbfcff }
+.mrow.mine .mb .md-body code { background: #fff }
+
+/* 气泡对面那片空白 = 换视角的门。平时不可见, 悬停才露出要去谁那里。 */
+.flip {
+  flex: 1; align-self: stretch; min-width: 40px; border: 0; background: transparent; cursor: pointer;
+  display: flex; align-items: center; padding: 0 12px; border-radius: 10px; color: transparent;
+  font-size: 12px; transition: background .15s, color .15s;
+}
+.mrow.them .flip { justify-content: flex-start }
+.mrow.mine .flip { justify-content: flex-end }
+.flip:hover, .flip:focus-visible { background: #2f55c90d; color: var(--accent) }
+.flip[disabled] { cursor: default; background: transparent !important; color: transparent !important }
+.mrow .av.go { cursor: pointer }
+.mrow .av.go:hover { border-color: var(--accent) }
+
+.mrow.mark { justify-content: center }
+.mrow.mark > * { flex: 1; max-width: 520px }
+
+/* 视角切换的那一下: 整列消息淡出再按新视角排回来 —— 这一页唯一的编排动效。 */
+.thread-in.flipping { animation: flip .26s ease }
+@keyframes flip { 0% { opacity: 1 } 45% { opacity: 0; transform: scaleX(.985) } 100% { opacity: 1 } }
+@media (prefers-reduced-motion: reduce) {
+  .thread-in.flipping { animation: none }
+  .flip { transition: none }
+}
 
 /* ── turn 分组 ──────────────────────────────────────────────────── */
 /* section 的默认样式给了白底+边框, 但没有内边距 —— 气泡/工具行会直接贴着卡片
@@ -237,12 +277,20 @@ body { overflow: hidden; overscroll-behavior: none }
 .conn .d { width: 7px; height: 7px; border-radius: 50%; background: #1a7f37 }
 .conn.off .d { background: #cf222e }
 
+
 @media (max-width: 760px) {
   .app { flex-direction: column }
-  .side { width: auto; border-right: 0; border-bottom: 1px solid #d0d7de; max-height: 44vh; max-height: 44dvh }
+  .side { width: auto; flex: 1; border-right: 0 }
+  .main { display: none }
   .app.reading .side { display: none }
-  .app.reading .topbar .back { display: block }
+  .app.reading .main { display: flex }
+  .topbar { padding: 8px 12px; gap: 8px; flex-wrap: wrap }
+  .topbar .back { display: block }
+  .topbar .who .nm { font-size: 16px }
+  .topbar .acts { width: 100%; overflow-x: auto }
   .thread { padding: 12px }
+  .mcol { max-width: 86% }
+  .flip { min-width: 16px; padding: 0 4px; font-size: 0 }
   .turn-group { padding: 12px }
   .statusbar { gap: 10px; padding: 7px 12px calc(7px + env(safe-area-inset-bottom)) }
   .sb-io, .statusbar .model { display: none }
@@ -253,36 +301,6 @@ body { overflow: hidden; overscroll-behavior: none }
    一条 !important 把 hidden 的语义钉死, 三块视图容器的显隐都靠它。 */
 [hidden] { display: none !important }
 
-/* ══ 视图切换 ═══════════════════════════════════════════════════════ */
-/* 三栏并列在顶栏右端。会话 key (.sub) 在窄屏下先让位 —— 它是调试信息, 而切换
-   视图是主操作。 */
-.topbar .views { margin-left: auto; display: flex; gap: 2px; flex: none }
-.topbar .vb {
-  font: inherit; font-size: 12px; color: #57606a; background: transparent;
-  border: 1px solid transparent; border-radius: 7px; padding: 3px 11px; cursor: pointer;
-}
-.topbar .vb:hover { background: #f6f8fa; color: #1f2328 }
-.topbar .vb.on { background: #0969da; border-color: #0969da; color: #fff; font-weight: 600 }
-.topbar .sub { min-width: 0 }
-
-/* 关系/日程是聊天之外的视图: 会话列表与总账都属于某一个聊天, 在这里一并让位。 */
-.pane { flex: 1; min-height: 0; display: flex; flex-direction: column; background: #fafbfc }
-.app.outer .side, .app.outer .statusbar, .app.outer .topbar .back { display: none }
-
-/* ── 侧栏: wizard 身份 ─────────────────────────────────────────────── */
-/* 名字之外还要有职责与出身, 否则一列 `#tag` 说不出谁是谁。两行都单行省略,
-   会话行的高度必须可预期 —— 侧栏是要能一眼扫完的。 */
-.tag-job {
-  font-size: 11.5px; color: #0550ae; margin-top: 2px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.tag-kin { margin-top: 2px }
-.tag-kin .kin {
-  font-size: 10.5px; color: #6639ba; background: #8250df12; border-radius: 4px;
-  padding: 0 5px; font-family: ui-monospace, Menlo, monospace;
-  display: inline-block; max-width: 100%; overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;
-}
 
 /* ══ 关系图 ═════════════════════════════════════════════════════════ */
 .wtools {
@@ -583,3 +601,12 @@ body { overflow: hidden; overscroll-behavior: none }
 }
 .wtools .lb + .lb { border-left: 1px solid #d0d7de }
 .wtools .lb.on { background: #ddf4ff; color: #0550ae; font-weight: 600 }
+
+/* ══ 关系 / 日程 ═══════════════════════════════════════════════════ */
+/* 都是当前 role 的另一面, 侧栏 (它的会话) 留着 —— 点一个会话就回到对话。
+   会话标题条与页脚总账只属于对话视图。 */
+.pane { flex: 1; min-height: 0; display: flex; flex-direction: column; background: #fafbfc }
+.app.outer .conv-bar, .app.outer .statusbar { display: none }
+
+/* 回复卡片里的工具行是 nowrap 的 —— 不裁一刀会把整列撑出横向滚动。 */
+.mb > .turn-group { overflow: hidden }

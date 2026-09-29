@@ -219,7 +219,7 @@ export const threadEntries = (records: readonly DetailRecord[], target: string, 
   ].sort((a, b) => entryTs(a) - entryTs(b));
 };
 
-const summarizeTag = (target: string, turns: readonly TurnDetailRecord[], now: number): TagSummary => {
+export const summarizeTag = (target: string, turns: readonly TurnDetailRecord[], now: number): TagSummary => {
   // 子 agent 的一轮不是"一轮对话" —— 它内联在派它的那一轮里 (见 threadEntries),
   // 所以轮数与预览都只看主会话自己的轮次; token/工具用量仍按全部计 (那是真花销)。
   const main = turns.filter((r) => !r.agent);
@@ -229,7 +229,7 @@ const summarizeTag = (target: string, turns: readonly TurnDetailRecord[], now: n
   return {
     target,
     tag,
-    label: tag ? labelFor(tag) : "🧙",
+    label: labelFor(tag || target),
     sessionId: last?.sessionId,
     cwd: [...turns].reverse().find((r) => r.cwd)?.cwd,
     model: [...turns].reverse().find((r) => r.model)?.model,
