@@ -41,9 +41,12 @@ export const renderChatPage = (): string =>
       <span class="conn" id="conn" title="实时连接"><span class="d"></span></span>
       <div class="who" id="rb-who"></div>
       <div class="acts" id="rb-acts"></div>
-      <div class="prof" id="rb-prof"></div>
     </header>
     <nav class="convs" id="convs" aria-label="会话"></nav>
+    <footer class="sidefoot" id="rb-foot" hidden>
+      <div id="rb-sess"></div>
+      <div class="prof" id="rb-prof"></div>
+    </footer>
   </aside>
   <main class="main">
     <header class="chathead" id="chathead">

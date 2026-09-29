@@ -39,7 +39,7 @@ button { font: inherit; color: inherit }
   display: flex; flex-direction: column; min-height: 0;
 }
 
-/* ── 左栏顶: 当前 role 的名片 (身份 + profile 总账 + 关系/日程入口) ──── */
+/* ── 左栏顶: 当前 role 的名片 (身份 + 关系/日程入口) ──── */
 .rolebar {
   position: relative; flex: none; padding: 16px 16px 14px; border-bottom: 1px solid var(--line);
   display: flex; flex-direction: column; gap: 10px;
@@ -99,15 +99,21 @@ button { font: inherit; color: inherit }
 .sp-it.all { border-bottom: 1px solid var(--line); border-radius: 6px 6px 0 0; margin-bottom: 3px }
 .sp-it.all .id { font-family: inherit }
 
-/* profile: 这个 role 自己跑过的轮次的总账 —— 原来钉在对话窗口底部, 但它描述的是
-   role, 不是某个会话。 */
+/* 左栏底: session 切换 + 用量, 都是轮次的事 —— 与顶上的身份分开, 钉在会话列表下面。 */
+.sidefoot {
+  flex: none; border-top: 1px solid var(--line); padding: 10px 12px 12px;
+  display: flex; flex-direction: column; gap: 8px; background: var(--paper);
+}
+.sidefoot[hidden] { display: none }
+#rb-sess:empty, #rb-prof:empty { display: none }
+/* 在底部, 浮层往上开。 */
+.sidefoot .sp-list { top: auto; bottom: calc(100% + 4px); transform: translateY(4px) }
+.sidefoot .sp.open .sp-list { transform: none }
+
+/* profile: 这个 role 自己跑过的轮次的总账。 */
 .prof { border: 1px solid var(--line); border-radius: 10px; background: #fff; padding: 9px 10px 10px; font-family: ui-monospace, Menlo, monospace }
-.prof > .none { font-family: inherit; font-size: 12px; color: var(--faint) }
 .prof .hd { display: flex; align-items: center; gap: 8px; font-size: 11.5px; margin-bottom: 8px }
-.prof .pill { display: flex; align-items: center; gap: 5px; font-weight: 700; color: #57606a }
-.prof .pill .d { width: 7px; height: 7px; border-radius: 50%; background: #8c959f }
-.prof .pill.run { color: #1a7f37 }
-.prof .pill.run .d { background: #1a7f37; animation: pulse 1.4s infinite }
+.prof .hd .lb { font-size: 10px; color: var(--faint); text-transform: uppercase; letter-spacing: .4px; font-family: system-ui, sans-serif }
 .prof .model {
   margin-left: auto; color: #57606a; background: #f1f3f6; border-radius: 9px; padding: 1px 7px;
   max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -116,8 +122,6 @@ button { font: inherit; color: inherit }
 .prof .kv { display: flex; flex-direction: column; align-items: flex-start; min-width: 0 }
 .prof .kv .v { font-size: 13px; font-weight: 700; color: #1f2328; font-variant-numeric: tabular-nums; white-space: nowrap }
 .prof .kv .k { font-size: 9.5px; color: #8c959f; text-transform: uppercase; letter-spacing: .4px }
-/* 缺数据的指标压暗, 不显示成有意义的 "0" —— 0 与「没采到」是两回事。 */
-.prof .kv.void .v { color: #b1bac4; font-weight: 400 }
 .prof .io { margin-top: 9px; display: flex; flex-direction: column; gap: 6px }
 .prof .bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: #eaeef2 }
 .prof .bar .seg { height: 100% }

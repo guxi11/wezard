@@ -295,13 +295,13 @@
   };
   var setSessOpen = function (open) {
     SESS_OPEN = open;
-    var sp = $('#rb-acts .sp');
+    var sp = $('#rb-sess .sp');
     if (!sp) return;
     sp.classList.toggle('open', open);
     sp.querySelector('.sp-btn').setAttribute('aria-expanded', open);
   };
   var bindSessPicker = function () {
-    var sp = $('#rb-acts .sp');
+    var sp = $('#rb-sess .sp');
     if (!sp) return;
     sp.querySelector('.sp-btn').onclick = function () { setSessOpen(!SESS_OPEN); };
     sp.querySelectorAll('.sp-it').forEach(function (it) {
@@ -309,7 +309,7 @@
     });
   };
   document.addEventListener('click', function (e) {
-    if (SESS_OPEN && !e.target.closest('#rb-acts .sp')) setSessOpen(false);
+    if (SESS_OPEN && !e.target.closest('#rb-sess .sp')) setSessOpen(false);
   });
   document.addEventListener('keydown', function (e) {
     if (SESS_OPEN && e.key === 'Escape') setSessOpen(false);
@@ -337,17 +337,23 @@
     $('#rb-who').querySelectorAll('.go').forEach(function (g) {
       g.onclick = function () { switchRole(g.getAttribute('data-r')); };
     });
+    $('#rb-sess').innerHTML = R.sessions.length > 1 ? sessPicker() : '';
+    bindSessPicker();
+    syncFoot();
     var acts = [];
-    if (R.sessions.length > 1) acts.push(sessPicker());
     if (R.relations) acts.push('<button class="vb' + (VIEW === 'world' ? ' on' : '') + '" data-view="world">关系图</button>');
     if (r.kind === 'wizard') acts.push('<button class="vb' + (VIEW === 'plan' ? ' on' : '') + '" data-view="plan">日程' + (R.schedules ? '<b>' + R.schedules + '</b>' : '') + '</button>');
     $('#rb-acts').innerHTML = acts.join('');
-    bindSessPicker();
     $('#rb-acts').querySelectorAll('.vb').forEach(function (b) {
       b.onclick = function () { setView(VIEW === b.getAttribute('data-view') ? 'msgs' : b.getAttribute('data-view')); };
     });
     // 标题就是这一页的主张: 你此刻站在谁的位置上。换视角 → 标题跟着换。
     document.title = nameOf(r.id) + ' 的视角';
+  };
+
+  // 左栏底: session 切换 + 用量总账, 都是「轮次」的事, 与上面的身份分开; 两样都空就整条收起。
+  var syncFoot = function () {
+    $('#rb-foot').hidden = !$('#rb-sess').innerHTML && !$('#rb-prof').innerHTML;
   };
 
   // ── profile: 当前 role 自己跑过的轮次的总账 (选了 session 就只算那一段) ──
@@ -366,8 +372,8 @@
   var renderProfile = function () {
     var el = $('#rb-prof');
     var t = R.stats;
-    if (!t) { el.innerHTML = '<div class="none">暂无本人的轮次记录</div>'; return; }
-    var u = t.usage || {}, run = isRunning(t);
+    if (!t) { el.innerHTML = ''; syncFoot(); return; }
+    var u = t.usage || {};
     var segs = [['input', '输入'], ['cacheRead', '缓存读'], ['cacheWrite', '缓存写'], ['output', '输出']]
       .filter(function (s) { return u[s[0]] > 0; });
     var total = segs.reduce(function (a, s) { return a + u[s[0]]; }, 0);
@@ -383,14 +389,15 @@
           }).join('') + '</span>' +
         '</div>'
       : '';
-    // 值为 0 = 该指标没有数据 (老记录 / 网关不报 usage), 压暗成 "–" 与真实的 0 区分。
+    // 值为 0 = 该指标没有数据 (老记录 / 网关不报 usage), 不占格子。
     var st = function (k, n, text) {
-      return '<span class="kv' + (n ? '' : ' void') + '" title="' + esc(TIP[k] || k) + '">' +
-        '<span class="v">' + (n ? esc(text) : '–') + '</span><span class="k">' + k + '</span></span>';
+      return n ? '<span class="kv" title="' + esc(TIP[k] || k) + '">' +
+        '<span class="v">' + esc(text) + '</span><span class="k">' + k + '</span></span>' : '';
     };
     var cache = (u.cacheRead || 0) + (u.cacheWrite || 0);
+    // 忙闲已在名片的状态里, 这里只留模型。
     el.innerHTML =
-      '<div class="hd"><span class="pill' + (run ? ' run' : '') + '"><span class="d"></span>' + (run ? '进行中' : '空闲') + '</span>' +
+      '<div class="hd"><span class="lb">用量</span>' +
         (t.model ? '<span class="model" title="' + esc(t.model) + '">' + esc(t.model.replace(/^claude-/, '')) + '</span>' : '') +
       '</div>' +
       '<div class="grid">' +
@@ -398,6 +405,7 @@
         st('ctx', u.ctxPeak, fmtTok(u.ctxPeak)) + st('out', u.output, fmtTok(u.output)) +
         st('cache', cache, fmtTok(cache)) + st('time', liveDur(t), fmtDur(liveDur(t))) +
       '</div>' + io;
+    syncFoot();
   };
 
   // ── 右栏头: 这个群聊 / 私聊是什么 (关系 / 日程视图时是视图名) ──
