@@ -135,14 +135,14 @@ const HEADER_RE = new RegExp(
 
 /** 反解一条出站气泡的 `emoji #tag` 头,返回 tag 与剥头后的正文。
  *  `fromBot=false` 表示这不是 wezard 发的,body 原样返回。
- *  只切掉头那一段,body 原样保留 —— last-response 里存的是剥头后的同一整串,
- *  `canonContains` 子串比对才能命中。 */
+ *  只切掉头那一段; 正文里 linkTags 挂上的 `[#fix](url)` 还原成裸 `#fix` —— 引用
+ *  内容要跟 transcript 尾部比对, 也可能被贴进 prompt, URL 两头都是噪声。 */
 export const parseTagHeader = (text: string): { fromBot: boolean; tag: string; body: string } => {
   const t = text.trim();
   const m = HEADER_RE.exec(t);
   if (!m) return { fromBot: false, tag: "", body: t };
   const tag = m[1] ?? m[2] ?? "";
-  return { fromBot: true, tag, body: t.slice(m[0].length).trim() };
+  return { fromBot: true, tag, body: unlinkTags(t.slice(m[0].length).trim()) };
 };
 
 /** Trailing-space emoji badge for card titles; "" for untagged targets. */
@@ -160,32 +160,84 @@ export const tagBadge = (target: string | undefined): string => {
 export const headSep = (content: string): string =>
   content.startsWith("```") ? "\n" : content.startsWith("|") ? "\n\n" : " ";
 
-/** Prefix markdown content with the `emoji \`#tag\`` header; identity when untagged.
- *  `seq` ("2/5") marks one piece of a split push — it rides in the same header
- *  line so every chunk of a long reply is attributable on its own, and shows
- *  alone when the session is untagged. */
-export const withTagHeader = (target: string | undefined, content: string, seq?: string): string => {
+// ── tag → chat 详情页链接 ────────────────────────────────────────────
+// 群里出现的每个 `#tag` 都该点得开那个 wizard 的 chat 详情页 —— 气泡头, 以及正文里
+// 提到的 `#fix` / `daily#fix`。票据和「这个 tag 是不是真有其人」都在 daemon 手里,
+// 这里只认一个进程级的注入口 (同 bindWizardStore): 没绑定 (boot 早期 / 浏览器端)
+// 一律退回裸文本, 头照样写 —— 少了链接只是少一层可点。
+export interface TagLinker {
+  /** 该 wizard 的 chat 详情页; undefined = 拿不到票据。 */
+  urlOf: (target: string) => string | undefined;
+  /** 出现在 `base` 聊天里的 `chat#tag` (chat 为 "" 即裸 `#tag`) 指的是哪个已知 wizard。 */
+  resolve: (base: string, chat: string, tag: string) => string | undefined;
+}
+let linker: TagLinker | undefined;
+export const bindTagLinker = (l: TagLinker): void => { linker = l; };
+
+// 正文里最多挂几个链接: 一条 URL 两百来字节, 分片预算 (mirror 的 TAG_HEADER_BUDGET)
+// 按「头 + 这么多个」留的余量。同一个 tag 只挂第一次出现。
+export const MAX_BODY_LINKS = 2;
+// 右边界比路由用的 TAG_TOKEN 宽: 正文里 `#fix。` `#fix,` 也是提及; 后接 `]` 说明它已在
+// 某个链接文本里, 不再套一层。
+const MENTION_RE = /(^|\s)((?:([\p{L}\p{N}_-]{1,32}))?#([\p{L}\p{N}_-]{1,32}))(?![\p{L}\p{N}_\]-])/gu;
+// 代码里的 `#x` 是字面量, 不是提及: 栅栏块与行内代码原样放过 (split 的捕获组落在奇数位)。
+const CODE_RE = /(```[\s\S]*?(?:```|$)|`[^`\n]*`)/;
+const LINKED_RE = /\[((?:[\p{L}\p{N}_-]{1,32})?#[\p{L}\p{N}_-]{1,32})\]\([^)\s]*\)/gu;
+
+/** `text` 挂上 `target` 的 chat 详情页; 拿不到票据原样返回。 */
+export const tagLink = (target: string, text: string): string => {
+  const url = linker?.urlOf(target);
+  return url ? `[${text}](${url})` : text;
+};
+
+/** 正文里指向已知 wizard 的 `#tag` / `chat#tag` 挂上它的 chat 详情页。 */
+export const linkTags = (target: string | undefined, text: string): string => {
+  const l = linker;
+  if (!l || !target) return text;
+  const base = baseOfKey(target);
+  const seen = new Set<string>();
+  const link = (whole: string, lead: string, token: string, chat: string | undefined, tag: string): string => {
+    if (seen.size >= MAX_BODY_LINKS || seen.has(token)) return whole;
+    const t = l.resolve(base, chat ?? "", tag);
+    const linked = t ? tagLink(t, token) : token;
+    if (linked === token) return whole;
+    seen.add(token);
+    return `${lead}${linked}`;
+  };
+  return text
+    .split(CODE_RE)
+    .map((seg, i) => (i % 2 ? seg : seg.replace(MENTION_RE, link)))
+    .join("");
+};
+
+/** linkTags 的逆: `[#fix](url)` → `#fix`。 */
+export const unlinkTags = (text: string): string => text.replace(LINKED_RE, "$1");
+
+/** 头的裸形态 `emoji #tag` (未打 tag 的是 `🧙`)。 */
+export const tagHead = (target: string | undefined): string => {
   const tag = tagOfKey(target);
-  const head = [tag ? `${labelFor(tag)} #${tag}` : "🧙", seq ?? ""].filter(Boolean).join(" ");
-  return `${head}${headSep(content)}${content}`;
+  return tag ? `${labelFor(tag)} #${tag}` : "🧙";
 };
 
 /** 头的链接形态 `[emoji #tag](url)` —— 点它就进那个 wizard 的 chat 详情页。
  *  HEADER_RE 认得这一形态, parseTagHeader 照样剥得掉。 */
-export const linkedTagHead = (target: string | undefined, url: string): string => {
-  const tag = tagOfKey(target);
-  return tag ? `[${labelFor(tag)} #${tag}](${url})` : `[🧙](${url})`;
-};
+export const linkedTagHead = (target: string | undefined, url: string): string => `[${tagHead(target)}](${url})`;
 
-/** withTagHeader, 但头挂上 chat 详情页链接。拿不到票据 (url 为空) 时退回裸头 ——
- *  头那一段是路由信息, 少了链接只是少一层可点, 不能因此不写。 */
+/** 头挂上指定的 chat 详情页链接 (mirror 用本轮 turn 的票据), 正文里的 tag 一并挂链。
+ *  url 为空时退回裸头 —— 头那一段是路由信息, 少了链接只是少一层可点, 不能因此不写。
+ *  `seq` ("2/5") marks one piece of a split push — it rides in the same header
+ *  line so every chunk of a long reply is attributable on its own. */
 export const withLinkedTagHeader = (
   target: string | undefined,
   content: string,
   url: string | undefined,
   seq?: string,
 ): string => {
-  if (!url) return withTagHeader(target, content, seq);
-  const head = [linkedTagHead(target, url), seq ?? ""].filter(Boolean).join(" ");
-  return `${head}${headSep(content)}${content}`;
+  const head = [url ? linkedTagHead(target, url) : tagHead(target), seq ?? ""].filter(Boolean).join(" ");
+  const body = linkTags(target, content);
+  return `${head}${headSep(body)}${body}`;
 };
+
+/** 给气泡加 `emoji #tag` 头, 链接取该 wizard 自己的 chat 详情页 (bindTagLinker)。 */
+export const withTagHeader = (target: string | undefined, content: string, seq?: string): string =>
+  withLinkedTagHeader(target, content, target ? linker?.urlOf(target) : undefined, seq);

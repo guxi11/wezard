@@ -27,6 +27,7 @@
 - **BREAKING `schedule_task` 默认到点新起一个白板 wizard 执行, 不再注入任何已有会话**。这个工具的 prompt 设计上本就要求"零上下文也能执行"(到点时目标可能早已 `/clear` 过, 它只看得见这一句) —— 既然如此就没有理由非挤进某个常驻会话: 挤进去把两件不相关的事压进同一个 transcript, 目标那时正忙还会连触发时刻一起被它那一轮拖走。现在到点新起一个白板 wizard (`#<tag>-<taskId 前4位>`) 跑这条自洽 prompt, 跑完自动回收, 群里补一条通知说明"为什么多了个陌生 tag"。**只有排班时用 `tag` 点了名** (用户明说「让 #foo 每天…」「在 #foo 里继续」) 才投进那个已有会话, 且它当时正忙仍退回白板执行。点了名也**不一定**是续: `prompt` 自己在说「在 auto 聊天里建两个 wizard…」这种话时按新建办 (`promptWantsFreshWizard`, 否定说法「不用新建 wizard」不算) —— 那种 tag 只是「在谁的聊天/目录下办」, 这条推断放在 daemon 而不是指望排班的模型每次记得传参。`fresh` 参数可以显式压过这条推断: `tag` + `fresh:true` = 拿它当模板 (继承聊天/cwd/模型) 另起一个干。老记录 (`fresh` 缺省 = false) 语义不变, 照旧注入原目标。`list_tasks` 新增 `runIn` 回显这一条到点去哪儿跑。
 
 ### Changed
+- **群里出现的每个 `#tag` 都是一条链接**, 点开即那个 wizard 的 chat 详情页。此前只有 mirror 正文气泡、卡片前奏与 relay 的头挂了链接, 其余出站路径 (`/peers` 等命令回复、notify、定时任务、spawn/stop 通告、审批批量提示、graph 步进、MCP `send_markdown`) 走裸 `withTagHeader`, 正文里提到的 `#fix` / `daily#fix` 更是一律不可点。现在 `session-label` 由 daemon 注入一个 `TagLinker` (`bindTagLinker`): `withTagHeader` 默认就挂链 —— 新增调用点不必各自去取票据; 正文里指向**已知** wizard 的 `#tag` / `chat#tag` 经 `linkTags` 挂链 (代码块与行内代码放过, 同一 tag 只挂第一次, 每条最多 `MAX_BODY_LINKS` 个 —— 一条 URL 两百来字节, mirror 的分片预算 `TAG_HEADER_BUDGET` 按「头 + 这么多个」相应放大)。`parseTagHeader` 把正文链接还原成裸 tag, 引用比对与贴进 prompt 的内容不带 URL。卡片标题 (含投票卡) 不支持链接, 只挂 emoji, 它的 tag 链接在卡片前那条 markdown 的头上。
 - **chat 详情页的「关系」「日程」挪到聊天之外**。它们画的是全部聊天的 wizard、工单与定时, 却一直套在某一个聊天的框里: 左边挂着本群的会话列表、底下是当前那一路的总账、顶栏写着本群的名字 —— 读起来像是「这个群的关系图」。现在切到这两栏就走出聊天: 侧栏与页脚收起, 顶栏只写视图名; 切回「线程」才回到这个聊天。
 
 ### Fixed

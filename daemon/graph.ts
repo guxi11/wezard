@@ -193,7 +193,7 @@ export const stopRun = (runId: string): boolean => {
 };
 
 const renderStep = (s: StepRecord, total: number): string =>
-  `轮 ${s.round}/${total} · \`#${s.tag}\` ${s.status === "done" ? "✅" : s.status === "timeout" ? "⏱" : "❌"}`;
+  `轮 ${s.round}/${total} · #${s.tag} ${s.status === "done" ? "✅" : s.status === "timeout" ? "⏱" : "❌"}`;
 
 
 /** A step bubble carries the traffic, not just the tick: `▸` what the graph
@@ -263,7 +263,7 @@ export const startGraph = (spec: GraphSpec, deps: GraphDeps): GraphRun => {
         };
         const rec: StepRecord = { round, tag: step.to, prompt, reply: "", status: "running", startedAt: Date.now() };
         run.history.push(rec);
-        deps.notify(spec.base, `🕸 \`${runId}\` 轮 ${round}/${rounds} → \`#${step.to}\` 开始`);
+        deps.notify(spec.base, `🕸 \`${runId}\` 轮 ${round}/${rounds} → #${step.to} 开始`);
 
         const ready = await deps.ensureNode(target, node);
         if (!ready.ok) {

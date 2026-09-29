@@ -27,10 +27,10 @@ import { dangerOf, dangerEarlyExit, type DangerHit } from "./danger.js";
 import { appendUnique } from "../shared/config-writer.js";
 import { claudeConfigWrite, type ClaudeConfigHit } from "../shared/claude-config-path.js";
 import type { NativeModalAnswer } from "./mirror-bridge.js";
-import { recordApproval, recordApprovalDecision, buildDetailUrl, chatUrlFor, getDetail } from "./detail.js";
+import { recordApproval, recordApprovalDecision, buildDetailUrl, getDetail } from "./detail.js";
 import type { Handler } from "./http.js";
 import { json, readBody } from "./http.js";
-import { tagBadge, withTagHeader, withLinkedTagHeader } from "../shared/session-label.js";
+import { tagBadge, withTagHeader } from "../shared/session-label.js";
 import { sessionNameFor } from "./session-name.js";
 
 // ── Routing helpers ────────────────────────────────────────────────────
@@ -44,12 +44,6 @@ const targetChatId = (principal: string): string => {
   const h = rest.indexOf("#");
   return h >= 0 ? rest.slice(0, h) : rest;
 };
-
-// 卡片前后那几条 markdown 气泡的头。和 mirror 的正文气泡同形: `emoji #tag` 挂上该
-// wizard 的 chat 详情页 —— 一张卡的上下文 (为什么问、题目全文) 都在那页上, 头不可点
-// 就得靠人自己去群里翻。拿不到票据时 withLinkedTagHeader 退回裸头。
-const cardHead = (cfg: Config, chatKey: string, content: string): string =>
-  withLinkedTagHeader(chatKey, content, chatUrlFor(cfg.daemon, chatKey, targetChatId(chatKey)));
 
 const pickApprover = (cfg: Config): string | undefined => {
   if (cfg.approval.approvers.length > 0) return cfg.approval.approvers[0];
@@ -943,7 +937,7 @@ const handleExitPlanMode = async ({ cfg, log, client, body, getMirrorTarget, flu
       try {
         await client.sendMessage(target, {
           msgtype: "markdown",
-          markdown: { content: cardHead(cfg, approver, buildPlanMarkdown(plan)) },
+          markdown: { content: withTagHeader(approver, buildPlanMarkdown(plan)) },
         });
       } catch (e) {
         log.warn({ err: (e as Error).message }, "plan markdown prelude send failed");
@@ -1118,7 +1112,7 @@ export const runMirrorAskqFlow = async ({ cfg, log, client, sessionId, chatKey, 
   const flowStart = Date.now();
   const note = async (content: string): Promise<void> => {
     try {
-      await client.sendMessage(target, { msgtype: "markdown", markdown: { content: cardHead(cfg, chatKey, content) } });
+      await client.sendMessage(target, { msgtype: "markdown", markdown: { content: withTagHeader(chatKey, content) } });
     } catch { /* best-effort */ }
   };
 
@@ -1152,7 +1146,7 @@ export const runMirrorAskqFlow = async ({ cfg, log, client, sessionId, chatKey, 
       try {
         await client.sendMessage(target, {
           msgtype: "markdown",
-          markdown: { content: cardHead(cfg, chatKey, buildAskqMarkdown(q, prefix)) },
+          markdown: { content: withTagHeader(chatKey, buildAskqMarkdown(q, prefix)) },
         });
       } catch (e) {
         log.warn({ err: (e as Error).message }, "mirror askq markdown prelude send failed");
@@ -1287,7 +1281,7 @@ export const runMirrorPlanFlow = async ({ cfg, log, client, sessionId, chatKey, 
   const target = targetChatId(chatKey);
   const note = async (content: string): Promise<void> => {
     try {
-      await client.sendMessage(target, { msgtype: "markdown", markdown: { content: cardHead(cfg, chatKey, content) } });
+      await client.sendMessage(target, { msgtype: "markdown", markdown: { content: withTagHeader(chatKey, content) } });
     } catch { /* best-effort */ }
   };
 
@@ -1313,7 +1307,7 @@ export const runMirrorPlanFlow = async ({ cfg, log, client, sessionId, chatKey, 
       try {
         await client.sendMessage(target, {
           msgtype: "markdown",
-          markdown: { content: cardHead(cfg, chatKey, buildPlanMarkdown(plan)) },
+          markdown: { content: withTagHeader(chatKey, buildPlanMarkdown(plan)) },
         });
       } catch (e) {
         log.warn({ err: (e as Error).message }, "mirror plan markdown prelude send failed");
@@ -1436,7 +1430,7 @@ export const runMirrorPickerFlow = async (
   const target = targetChatId(chatKey);
   const note = async (content: string): Promise<void> => {
     try {
-      await client.sendMessage(target, { msgtype: "markdown", markdown: { content: cardHead(cfg, chatKey, content) } });
+      await client.sendMessage(target, { msgtype: "markdown", markdown: { content: withTagHeader(chatKey, content) } });
     } catch { /* best-effort */ }
   };
 
@@ -1605,7 +1599,7 @@ const handleAskUserQuestion = async ({ cfg, log, client, body, getMirrorTarget, 
       try {
         await client.sendMessage(target, {
           msgtype: "markdown",
-          markdown: { content: cardHead(cfg, approver, buildAskqMarkdown(q, prefix)) },
+          markdown: { content: withTagHeader(approver, buildAskqMarkdown(q, prefix)) },
         });
       } catch (e) {
         log.warn({ err: (e as Error).message }, "askq markdown prelude send failed");
@@ -1635,7 +1629,7 @@ const handleAskUserQuestion = async ({ cfg, log, client, body, getMirrorTarget, 
       try {
         await client.sendMessage(target, {
           msgtype: "markdown",
-          markdown: { content: cardHead(cfg, approver, "⚠️ CLI 侧连接已断开，本轮问题卡已失效，请回到 CLI 处理。") },
+          markdown: { content: withTagHeader(approver, "⚠️ CLI 侧连接已断开，本轮问题卡已失效，请回到 CLI 处理。") },
         });
       } catch { /* best-effort */ }
       return { decision: "ask", reason: "askq_client_gone" };

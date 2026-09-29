@@ -41,7 +41,7 @@ import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
 import { recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, buildDetailUrl, buildChatUrl } from "./detail.js";
 import type { CtxCut, TurnFrom, TurnOrigin, TurnUsage } from "./detail.js";
-import { labelFor, tagOfKey, baseOfKey, keyOf, withTagHeader, withLinkedTagHeader, linkedTagHead, headSep, parseTagHeader } from "../shared/session-label.js";
+import { labelFor, tagOfKey, baseOfKey, keyOf, withTagHeader, withLinkedTagHeader, linkedTagHead, linkTags, headSep, parseTagHeader, MAX_BODY_LINKS } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, normChatName, parsePeerRef, peerAddress } from "./chat-name.js";
@@ -837,9 +837,10 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
 
 // Block-wise packing (shared/md-chunk): never cuts mid-line, and never cuts a
 // fenced block or table in a way that breaks rendering — see splitMarkdown.
-// Room reserved in every chunk for the `emoji \`#tag\` \`2/5\`` header line
-// (up to ~110 bytes in its linked `[🧙 #tag](url)` form).
-const TAG_HEADER_BUDGET = 64;
+// Room reserved in every chunk for the `emoji \`#tag\` \`2/5\`` header line and
+// the chat-detail links linkTags hangs on it and on up to MAX_BODY_LINKS body
+// mentions — each `(url)` runs ~200-250 bytes.
+const TAG_HEADER_BUDGET = 256 * (1 + MAX_BODY_LINKS);
 
 interface TailHandle {
   stop: () => void;
@@ -2303,7 +2304,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const content = s.acc;
     s.lastSent = content;
     try {
-      await client.replyStream(s.frame, s.streamId, withTagHeader(s.target, content || " "), false);
+      await client.replyStream(s.frame, s.streamId, withLinkedTagHeader(s.target, content || " ", chatTurnUrl(s.target, s.turnId)), false);
       log.debug({ turnId: s.turnId, len: content.length }, "stream flush ok");
     } catch (e) {
       log.warn({ turnId: s.turnId, err: (e as Error).message }, "stream flush failed; marking dead");
@@ -2920,7 +2921,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.lastConcludedEpoch = a.queryEpoch ?? 0;
     a.lastConcludedAt = Date.now();
     if (a.briefBubble && !a.briefBubble.done) {
-      void finishBriefBubble(a, `${briefDetailLink(turnId, a.target)} ${body}`, true);
+      void finishBriefBubble(a, `${briefDetailLink(turnId, a.target)} ${linkTags(a.target, body)}`, true);
     } else if (turnSilent(a)) {
       // CLI 手敲的一轮: 终稿只留在 turn store, 详情页照常实时可见。
       log.info({ sessionId: a.sessionId, turnId }, "brief: CLI-origin conclusion kept out of chat");

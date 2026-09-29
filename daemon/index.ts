@@ -37,7 +37,7 @@ import {
 import { openTaskRegistry } from "./task-registry.js";
 import { describeTrigger, nextFire, parseTrigger, WHEN_HELP } from "../shared/trigger.js";
 import { slugify, uniqueId } from "../shared/task-file.js";
-import { baseOfKey, keyOf, labelFor, normalizeTag, tagFromCwd, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
+import { baseOfKey, bindTagLinker, keyOf, labelFor, linkTags, normalizeTag, tagFromCwd, tagHead, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
 import { applyChatNames, chatBaseOf, chatNameOf, clearChatName, listChatNames, normChatName, peerAddress, planChatNames, setChatName } from "./chat-name.js";
 import {
   bindWizardStore,
@@ -138,6 +138,18 @@ const main = async (): Promise<void> => {
     log.fatal("bridge failed to start");
     fatalExit("bridge failed to start");
   }
+  // 群里每个 `#tag` 都挂它的 chat 详情页 (见 session-label 的 TagLinker)。正文提及
+  // 只认真有其人的 —— 随手写的 `#123` 不该变成一个开在空栏上的链接; headless 没有
+  // wizard 名册, 只挂头。
+  const known = cfg.wrc.mode === "mirror" ? (t: string) => (bridge as MirrorBridge).chatTargets(t).includes(t) : () => false;
+  bindTagLinker({
+    urlOf: (t) => chatUrlFor(cfg.daemon, t, baseOfKey(t).replace(/^(user|chat|group):/, "")),
+    resolve: (base, chat, tag) => {
+      const home = chat ? chatBaseOf(cfg, chat) : base;
+      const t = home ? keyOf(home, tag) : "";
+      return t && known(t) ? t : undefined;
+    },
+  });
   installInboundRouter(ws.client, cfg, log, bridge, sourcePath);
   // approval click → finalize 当前 liveStream, 后续 tool/text 落到 standalone。
   // 规则 2: 用户点击授权那一刻就是"上一段对话"的边界, 截断 stream 让授权后的
@@ -577,11 +589,13 @@ const main = async (): Promise<void> => {
 
     // Push a plain markdown bubble into a chat. `base` may carry a `#tag` — a
     // tagged key strips down to the same WeCom chatid as its base.
+    // 头不走 withTagHeader 的那些 (relay / notify / 工单) 正文里的 tag 在这里挂链;
+    // 已挂过的 linkTags 认得出, 不会再套一层。
     const chatIdOf = (t: string): string => baseOfKey(t).replace(/^(user|chat|group):/, "");
     const notifyChat = (base: string, markdown: string): void => {
       const chatId = chatIdOf(base);
       void ws.client
-        .sendMessage(chatId, { msgtype: "markdown", markdown: { content: markdown } })
+        .sendMessage(chatId, { msgtype: "markdown", markdown: { content: linkTags(base, markdown) } })
         .catch((e: unknown) => log.warn({ err: (e as Error).message }, "chat notify failed"));
     };
     // wizard 在群里的称呼, 只用在**正文**里。气泡的头照旧交给 withTagHeader ——
@@ -602,7 +616,7 @@ const main = async (): Promise<void> => {
      *  成本群的 tag 误投到一个不存在的会话上。 */
     const relayLabel = (t: string, dest: string): string => {
       const name = baseOfKey(t) === dest
-        ? withTagHeader(t, "").trim()
+        ? tagHead(t)
         : `${tagOfKey(t) ? labelFor(tagOfKey(t)) : "🧙"} ${peerAddress(cfg, dest, t)}`;
       const url = chatDetailUrl(t);
       return url ? `[${name}](${url})` : name;
@@ -1640,8 +1654,8 @@ const main = async (): Promise<void> => {
         return { ok: false, reason: `起白板 wizard 失败: ${spawned.reason ?? "unknown"}` };
       }
       notifyChat(base, withTagHeader(target, busy
-        ? `⏰ 定时任务到点时正忙, 已起白板 wizard \`#${runnerTag}\` 单独执行, 完成后自动收掉`
-        : `⏰ 定时任务已起白板 wizard \`#${runnerTag}\` 执行, 完成后自动收掉`));
+        ? `⏰ 定时任务到点时正忙, 已起白板 wizard #${runnerTag} 单独执行, 完成后自动收掉`
+        : `⏰ 定时任务已起白板 wizard #${runnerTag} 执行, 完成后自动收掉`));
       const inj = await m.injectText(runner, text, undefined, { fromChat: true, from: { kind: "task", taskId } });
       if (!inj.ok) { wizards.drop(runner); return inj; }
       // 没有人会对这个一次性分身喊 stop_wizard, 只能自己等它闲下来再收。30min

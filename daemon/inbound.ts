@@ -18,7 +18,7 @@ import { computeUsage, renderUsageReport } from "./usage.js";
 import { computeAuditReport } from "./audit.js";
 import { syncProjectConfig, renderSyncReport } from "./cfg-sync.js";
 import { captureQuota, renderQuotaReport } from "./quota.js";
-import { tagOfKey, baseOfKey, withTagHeader, parseTagHeader, tagTokenRe, allTags, allCompoundAddresses, labelFor } from "../shared/session-label.js";
+import { tagOfKey, baseOfKey, withTagHeader, parseTagHeader, tagTokenRe, allTags, allCompoundAddresses, labelFor, tagLink } from "../shared/session-label.js";
 import { chatNameOf, chatBaseOf, clearChatName, listChatNames, peerAddress, setChatName } from "./chat-name.js";
 import { wizardName, wizardStore } from "./wizard.js";
 import { truncate } from "../shared/std.js";
@@ -294,22 +294,24 @@ const renderPeers = (peers: PeerInfo[], chatName: string): string => {
   const clis = uniq(peers.map((p) => p.cli));
   const shared = [dirs.length === 1 ? dirs[0] : "", clis.length === 1 ? clis[0] : ""].filter(Boolean);
   // 家谱只画直系: 谁是谁的分身。整棵树留给 AI 侧的 wizard_roster —— 群里一行放不下。
-  const parentTag = (target: string): string => {
+  // 每个 tag 都点得开它的 chat 详情页。
+  const addrOf = (target: string): string => tagLink(target, tagOfKey(target) ? `#${tagOfKey(target)}` : "默认");
+  const parentAddr = (target: string): string => {
     const p = reg?.get(target)?.parent;
-    return p ? tagOfKey(p) || "默认" : "";
+    return p ? addrOf(p) : "";
   };
   const rows = peers.flatMap((p) => {
     const rec = reg?.get(p.target);
-    const addr = p.tag ? `#${p.tag}` : "默认";
+    const addr = addrOf(p.target);
     const name = wizardName(rec, chatName, p.target);
     // 名字推导不出新信息时 (就是 tag 本身) 不重复印一遍。
-    const title = name && name !== p.tag && name !== chatName ? `${name} \`${addr}\`` : addr;
+    const title = name && name !== p.tag && name !== chatName ? `${name} ${addr}` : addr;
     const state = !p.paneAlive ? "⚫️ 已关闭" : p.busy ? "🔴 忙" : "🟢 空闲";
-    const from = parentTag(p.target);
+    const from = parentAddr(p.target);
     const varies = [
       dirs.length > 1 ? dirOf(p) : "",
       clis.length > 1 ? p.cli : "",
-      from ? `分身自 #${from}` : "",
+      from ? `分身自 ${from}` : "",
     ].filter(Boolean);
     const me = p.self ? " ⬅️ 本会话" : "";
     return [
