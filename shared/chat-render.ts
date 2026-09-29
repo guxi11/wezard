@@ -7,8 +7,9 @@
 // 资源 URL 一律用相对路径 —— svr 常挂在反代子路径下 (如 /wc/role), 绝对路径会 404。
 // /role 与 /chat 同在根下, 所以两者都能用同一个 `chat/app.js`。
 //
-// 三块视图容器 (对话 / 关系 / 日程) 由 web/chat.js 切换显隐: 关系与日程都是**当前
-// role** 的 —— 它的家谱与协作网、它名下的日程 —— 所以挂在顶栏上, 而不是另起一页。
+// 左栏顶上是**当前 role** 的名片 (身份 + profile 总账 + 关系/日程入口), 下面是它的
+// 会话列表; 右栏只管一个会话 —— 头上写这个群聊/私聊是什么, 下面是消息。关系与日程
+// 都是当前 role 的, 所以入口挂在名片上, 视图在右栏里换显。
 import { SHARED_CSS, TURN_CSS } from "./detail-render.js";
 import { readAsset, type Asset } from "./web-assets.js";
 
@@ -36,26 +37,26 @@ export const renderChatPage = (): string =>
 </head><body>
 <div class="app" id="app">
   <aside class="side">
-    <div class="me" id="me"></div>
+    <header class="rolebar" id="rolebar">
+      <span class="conn" id="conn" title="实时连接"><span class="d"></span></span>
+      <div class="who" id="rb-who"></div>
+      <div class="acts" id="rb-acts"></div>
+      <div class="prof" id="rb-prof"></div>
+    </header>
     <nav class="convs" id="convs" aria-label="会话"></nav>
   </aside>
   <main class="main">
-    <header class="topbar" id="topbar">
+    <header class="chathead" id="chathead">
       <button class="back" id="tb-back" aria-label="返回会话列表">‹</button>
-      <div class="who" id="tb-who"></div>
-      <div class="acts" id="tb-acts"></div>
+      <div class="ch-who" id="ch-who"></div>
+      <div class="ch-acts" id="ch-acts"></div>
     </header>
-    <div class="conv-bar" id="conv-bar"></div>
     <div class="thread" id="thread"><div class="thread-in" id="thread-in"></div></div>
     <div class="pane" id="pane-world" hidden>
       <div class="wtools" id="wtools"></div>
       <div class="wscroll" id="wscroll"><div class="wmap" id="wmap"></div></div>
     </div>
     <div class="pane" id="pane-plan" hidden><div class="plan-in" id="plan-in"></div></div>
-    <footer class="statusbar">
-      <span id="sb" style="display:contents"></span>
-      <span class="conn" id="conn"><span class="d"></span></span>
-    </footer>
   </main>
 </div>
 <script src="chat/app.js" defer></script>

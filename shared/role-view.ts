@@ -119,7 +119,9 @@ export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFact
 
 // ── 会话 ─────────────────────────────────────────────────────────────
 // key 相对于视角 role: `c:<base>` 公开频道, `p:<对端>` 私聊。
-export type ConvKind = "group" | "human" | "wizard";
+// 有人在的频道一律是群聊 (与人的「单聊」也是: 人 + 住在里面的 wizard); 只有 wizard
+// 之间的才是私聊。
+export type ConvKind = "group" | "wizard";
 
 export interface ConvSub {
   role: string;
@@ -159,9 +161,6 @@ const msgText = (m: Msg): string => {
 const previewOf = (m: Msg | undefined, dir: Directory): string =>
   m ? `${dir.nameOf(m.from)}: ${stripMd(msgText(m)).slice(0, 80)}` : "";
 
-/** 公开频道的种类: `user:` base 是与那个人的单聊 (哪怕里面住着好几个 wizard), `chat:` 是群。 */
-const channelKind = (base: string): ConvKind => (base.startsWith("user:") ? "human" : "group");
-
 const SUB_MAX = 40;
 
 /** 一个 role 参与的全部会话, 最近活动在前。wizard 的 home 频道即使还没说过话也在列。 */
@@ -196,11 +195,10 @@ export const convsOf = (msgs: readonly Msg[], role: string, dir: Directory): Con
         // 与我有往来的排前, 再按最近。
         .sort((a, b) => Number(b.count > 0) - Number(a.count > 0) || b.lastTs - a.lastTs)
         .slice(0, SUB_MAX);
-      const kind = channelKind(base);
       return {
-        key, kind, base,
-        name: dir.chatName(base) || (kind === "human" ? `与 ${dir.nameOf(humanOf(base))} 的单聊` : base.replace(/^chat:/, "").slice(0, 10)),
-        label: kind === "human" ? "👤" : "💬",
+        key, kind: "group", base,
+        name: dir.chatName(base) || (base.startsWith("user:") ? dir.nameOf(humanOf(base)) : base.replace(/^chat:/, "").slice(0, 10)),
+        label: "💬",
         lastTs: last?.ts ?? 0, preview: previewOf(last, dir), count: all.length, subs,
       };
     })

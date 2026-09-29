@@ -40,7 +40,7 @@
   var VIEW = 'msgs';
   var $ = function (s) { return document.querySelector(s); };
   var app = $('#app'), thread = $('#thread'), inner = $('#thread-in'), convsEl = $('#convs');
-  var sbEl = $('#sb'), connEl = $('#conn'), barEl = $('#conv-bar');
+  var connEl = $('#conn');
   var wmapEl = $('#wmap'), wscrollEl = $('#wscroll'), wtoolsEl = $('#wtools'), planEl = $('#plan-in');
 
   var srvNow = function () { return R.at ? R.at + (Date.now() - R.recvAt) : Date.now(); };
@@ -203,21 +203,26 @@
   var toBottom = function (force) { if (force || S.pinned) thread.scrollTop = thread.scrollHeight; };
   thread.addEventListener('scroll', function () { S.pinned = atBottom(); });
 
-  // ── 侧栏: 我 + 会话 ──
+  // ── 左栏: 当前 role 的名片 + 会话列表 ──
   var convOf = function (key) { return R.convs.filter(function (c) { return c.key === key; })[0]; };
-  var renderMe = function () {
-    var r = R.role;
-    if (!r) return;
-    var kind = r.kind === 'human' ? '人' : r.parent ? '分身' : 'wizard';
-    $('#me').innerHTML =
-      '<span class="av">' + esc(r.label) + '</span>' +
-      '<span class="l">' + nm(r.id, r.name) +
-        '<span class="k">' + esc(kind + (r.chat ? ' · 住在 ' + r.chat : '')) + '</span></span>';
+
+  // 群聊头像 = 参与者头像的拼图 (最多 4 格, 自己排第一)。私聊就是对端自己的头像。
+  var membersOf = function (c) {
+    var seen = {}, out = [];
+    [{ role: ROLE, label: R.role ? R.role.label : '' }].concat(c.subs || []).forEach(function (m) {
+      if (m.role && !seen[m.role]) { seen[m.role] = 1; out.push(m); }
+    });
+    return out;
+  };
+  var avatarOf = function (c) {
+    if (c.kind !== 'group') return '<span class="av">' + esc(c.label) + '</span>';
+    var ms = membersOf(c).slice(0, 4);
+    return '<span class="av mosaic n' + ms.length + '" aria-hidden="true">' +
+      ms.map(function (m) { return '<i>' + esc(m.label || roleLabel(m.role)) + '</i>'; }).join('') + '</span>';
   };
 
   var convItem = function (c) {
     var on = c.key === CONV;
-    var tag = c.kind === 'wizard' ? '<span class="tag priv">私聊</span>' : '';
     var title = c.kind === 'wizard' ? nm(c.peer, c.name) : '<span class="nm chat">' + esc(c.name) + '</span>';
     var subs = on && c.subs.length
       ? '<div class="subs">' + c.subs.map(function (s) {
@@ -228,8 +233,8 @@
         }).join('') + '</div>'
       : '';
     return '<button class="ci' + (on && !WITH ? ' on' : '') + '" data-conv="' + esc(c.key) + '">' +
-        '<span class="av">' + esc(c.label) + '</span>' +
-        '<span class="b"><span class="l1"><span class="t">' + title + '</span>' + tag +
+        avatarOf(c) +
+        '<span class="b"><span class="l1"><span class="t">' + title + '</span>' +
           '<span class="ts">' + esc(fmtAgo(c.lastTs)) + '</span></span>' +
           '<span class="pv">' + esc(c.preview) + '</span></span>' +
       '</button>' + subs;
@@ -242,13 +247,12 @@
       return '<h2>' + title + '<span>' + list.length + '</span></h2>' +
         (list.length ? list.map(convItem).join('') : '<div class="none">' + none + '</div>');
     };
-    convsEl.innerHTML = sec('群聊', groups, '还没在任何群里说过话') + sec('单聊', dms, '没有单聊');
+    convsEl.innerHTML = sec('群聊', groups, '还没在任何群里说过话') + sec('私聊', dms, '没有和别的 wizard 私聊过');
     convsEl.querySelectorAll('[data-conv]').forEach(function (b) {
       b.onclick = function () { selectConv(b.getAttribute('data-conv'), b.getAttribute('data-with') || ''); };
     });
   };
 
-  // ── 顶栏: 身份 · cwd · 出生 · session · 关系 / 日程 ──
   var shortCwd = function (p) {
     var seg = String(p).replace(/\/+$/, '').split('/').filter(Boolean);
     return seg.length <= 2 ? p : '…/' + seg.slice(-2).join('/');
@@ -256,22 +260,27 @@
   var sessLabel = function (s) {
     return (s.sessionId ? s.sessionId.slice(0, 8) : '(无 id)') + ' · ' + fmtAgo(s.start) + ' · ' + s.turns + ' 轮';
   };
-  var renderTop = function () {
+
+  // 名片: 身份 · 出身 · cwd · 出生 · session 切换 · 关系 / 日程入口。
+  var renderRole = function () {
     var r = R.role;
     if (!r) return;
+    var kind = r.kind === 'human' ? '人' : r.parent ? '分身' : 'wizard';
     var facts = [];
-    if (r.kind === 'wizard') facts.push('<span class="st' + (r.busy ? ' on' : '') + '">' + (r.busy ? '● 正在干活' : r.alive ? '○ 空闲' : '○ 未运行') + '</span>');
+    // pane 探活在 reload 后要等它重新挂上才准; 正在跑的轮次本身就是活着的证据。
+    var busy = r.busy || (R.stats && isRunning(R.stats)), alive = r.alive || busy;
+    if (r.kind === 'wizard') facts.push('<span class="st' + (busy ? ' on' : '') + '">' + (busy ? '● 正在干活' : alive ? '○ 空闲' : '○ 未运行') + '</span>');
     if (r.cwd) facts.push('<span title="' + esc(r.cwd) + '">📁 ' + esc(shortCwd(r.cwd)) + '</span>');
     if (r.bornAt) facts.push('<span title="创建时间">🐣 ' + esc(fmtDay(r.bornAt)) + '</span>');
-    if (r.model) facts.push('<span>' + esc(r.model.replace(/^claude-/, '')) + '</span>');
     if (r.parent) facts.push('<span class="go" data-r="' + esc(r.parent.id) + '" title="' + (r.inherited ? '继承了它的上下文' : '空白起步') + '">↳ ' + esc(r.parent.label) + ' .' + esc(r.parent.name) + ' 的分身</span>');
     if (r.children.length) facts.push('<span>' + r.children.length + ' 个分身</span>');
-    $('#tb-who').innerHTML =
-      '<span class="av">' + esc(r.label) + '</span>' +
-      '<span class="l"><span class="l1">' + nm(r.id, r.name) +
-        (r.description ? '<span class="job" title="' + esc(r.description) + '">' + esc(r.description) + '</span>' : '') +
-        '</span><span class="facts">' + facts.join('') + '</span></span>';
-    $('#tb-who').querySelectorAll('.go').forEach(function (g) {
+    $('#rb-who').innerHTML =
+      '<div class="id"><span class="av">' + esc(r.label) + '</span>' +
+        '<span class="l">' + nm(r.id, r.name) +
+          '<span class="k">' + esc(kind + (r.chat ? ' · 住在 ' + r.chat : '')) + '</span></span></div>' +
+      (r.description ? '<p class="job">' + esc(r.description) + '</p>' : '') +
+      '<div class="facts">' + facts.join('') + '</div>';
+    $('#rb-who').querySelectorAll('.go').forEach(function (g) {
       g.onclick = function () { switchRole(g.getAttribute('data-r')); };
     });
     var acts = [];
@@ -282,31 +291,18 @@
           return '<option value="' + esc(s.sessionId) + '"' + (s.sessionId === SESSION ? ' selected' : '') + '>' + esc(sessLabel(s)) + '</option>';
         }).join('') + '</select>');
     }
-    if (VIEW !== 'msgs') acts.push('<button class="vb" data-view="msgs">‹ 对话</button>');
     if (R.relations) acts.push('<button class="vb' + (VIEW === 'world' ? ' on' : '') + '" data-view="world">关系图</button>');
     if (r.kind === 'wizard') acts.push('<button class="vb' + (VIEW === 'plan' ? ' on' : '') + '" data-view="plan">日程' + (R.schedules ? '<b>' + R.schedules + '</b>' : '') + '</button>');
-    $('#tb-acts').innerHTML = acts.join('');
+    $('#rb-acts').innerHTML = acts.join('');
     var sel = $('#sess');
     if (sel) sel.onchange = function () { SESSION = sel.value; refresh(); };
-    $('#tb-acts').querySelectorAll('.vb').forEach(function (b) {
-      b.onclick = function () { setView(b.getAttribute('data-view')); };
+    $('#rb-acts').querySelectorAll('.vb').forEach(function (b) {
+      b.onclick = function () { setView(VIEW === b.getAttribute('data-view') ? 'msgs' : b.getAttribute('data-view')); };
     });
     document.title = nameOf(r.id) + ' · rolepage';
   };
 
-  var renderBar = function () {
-    var c = convOf(CONV);
-    if (!c || VIEW !== 'msgs') { barEl.innerHTML = ''; return; }
-    var where = c.kind === 'wizard'
-      ? '与 ' + nm(c.peer, c.name) + ' 的私聊'
-      : '<span class="t">' + esc(c.name) + '</span>' + (c.kind === 'human' ? ' · 单聊' : ' · 群聊');
-    barEl.innerHTML = where +
-      (WITH ? ' · 只看我与 ' + nm(WITH) + ' 的往来<button class="x" id="bar-x">看全部</button>' : '');
-    var x = $('#bar-x');
-    if (x) x.onclick = function () { selectConv(CONV, ''); };
-  };
-
-  // ── 页脚总账 (当前 role 自己跑过的轮次; 选了 session 就只算那一段) ──
+  // ── profile: 当前 role 自己跑过的轮次的总账 (选了 session 就只算那一段) ──
   var COLORS = { input: '#0a7d6b', cacheRead: '#8250df', cacheWrite: '#953800', output: '#1a7f37' };
   var TIP = {
     turns: '对话轮数', tools: '工具调用次数', api: 'API 请求次数',
@@ -319,43 +315,70 @@
     if (!t.runningUntil) return d;
     return d + Math.max(0, Math.min(srvNow(), t.runningUntil) - R.at);
   };
-  var renderStatus = function () {
+  var renderProfile = function () {
+    var el = $('#rb-prof');
     var t = R.stats;
-    if (!t) { sbEl.innerHTML = '<span class="st void"><span class="k">暂无本人的轮次记录</span></span>'; return; }
+    if (!t) { el.innerHTML = '<div class="none">暂无本人的轮次记录</div>'; return; }
     var u = t.usage || {}, run = isRunning(t);
     var segs = [['input', '输入'], ['cacheRead', '缓存读'], ['cacheWrite', '缓存写'], ['output', '输出']]
       .filter(function (s) { return u[s[0]] > 0; });
     var total = segs.reduce(function (a, s) { return a + u[s[0]]; }, 0);
     var io = total > 0
-      ? '<span class="sb-io" title="累计 token I/O · 共 ' + fmtTok(total) + '">' +
-          '<span class="k">token i/o</span>' +
-          '<span class="sb-bar">' + segs.map(function (s) {
+      ? '<div class="io" title="累计 token I/O · 共 ' + fmtTok(total) + '">' +
+          '<span class="bar">' + segs.map(function (s) {
             return '<span class="seg" style="width:' + (u[s[0]] / total * 100).toFixed(2) + '%;background:' +
               COLORS[s[0]] + '" title="' + s[1] + ': ' + fmtTok(u[s[0]]) + '"></span>';
           }).join('') + '</span>' +
-          '<span class="sb-leg">' + segs.map(function (s) {
+          '<span class="leg">' + segs.map(function (s) {
             return '<span class="lg"><i style="background:' + COLORS[s[0]] + '"></i>' + s[1] +
               '<b>' + fmtTok(u[s[0]]) + '</b></span>';
           }).join('') + '</span>' +
-        '</span>'
+        '</div>'
       : '';
     // 值为 0 = 该指标没有数据 (老记录 / 网关不报 usage), 压暗成 "–" 与真实的 0 区分。
     var st = function (k, n, text) {
-      return '<span class="st' + (n ? '' : ' void') + '" title="' + esc(TIP[k] || k) + '">' +
-        '<span class="k">' + k + '</span><span class="v">' + (n ? esc(text) : '–') + '</span></span>';
+      return '<span class="kv' + (n ? '' : ' void') + '" title="' + esc(TIP[k] || k) + '">' +
+        '<span class="v">' + (n ? esc(text) : '–') + '</span><span class="k">' + k + '</span></span>';
     };
     var cache = (u.cacheRead || 0) + (u.cacheWrite || 0);
-    sbEl.innerHTML =
-      '<span class="pill' + (run ? ' run' : '') + '"><span class="d"></span>' + (run ? '进行中' : '空闲') + '</span>' +
-      (t.model ? '<span class="model" title="' + esc(t.model) + '">' + esc(t.model) + '</span>' : '') +
-      st('turns', t.turns, t.turns) +
-      st('tools', u.tools, u.tools) +
-      st('api', u.calls, u.calls) +
-      st('ctx', u.ctxPeak, fmtTok(u.ctxPeak)) +
-      st('out', u.output, fmtTok(u.output)) +
-      st('cache', cache, fmtTok(cache)) +
-      st('time', liveDur(t), fmtDur(liveDur(t))) +
-      io;
+    el.innerHTML =
+      '<div class="hd"><span class="pill' + (run ? ' run' : '') + '"><span class="d"></span>' + (run ? '进行中' : '空闲') + '</span>' +
+        (t.model ? '<span class="model" title="' + esc(t.model) + '">' + esc(t.model.replace(/^claude-/, '')) + '</span>' : '') +
+      '</div>' +
+      '<div class="grid">' +
+        st('turns', t.turns, t.turns) + st('tools', u.tools, u.tools) + st('api', u.calls, u.calls) +
+        st('ctx', u.ctxPeak, fmtTok(u.ctxPeak)) + st('out', u.output, fmtTok(u.output)) +
+        st('cache', cache, fmtTok(cache)) + st('time', liveDur(t), fmtDur(liveDur(t))) +
+      '</div>' + io;
+  };
+
+  // ── 右栏头: 这个群聊 / 私聊是什么 (关系 / 日程视图时是视图名) ──
+  var renderHead = function () {
+    var who = $('#ch-who'), acts = $('#ch-acts');
+    if (VIEW !== 'msgs') {
+      who.innerHTML = '<span class="t">' + (VIEW === 'world' ? '关系图' : '日程') + '</span>' +
+        '<span class="sub">' + esc(nameOf(ROLE)) + (VIEW === 'world' ? ' 的家谱与协作网' : ' 名下的定时任务与工单') + '</span>';
+      acts.innerHTML = '<button class="vb" id="ch-back">‹ 对话</button>';
+      $('#ch-back').onclick = function () { setView('msgs'); };
+      return;
+    }
+    var c = convOf(CONV);
+    if (!c) { who.innerHTML = ''; acts.innerHTML = ''; return; }
+    if (c.kind === 'wizard') {
+      who.innerHTML = avatarOf(c) + '<span class="l"><span class="t">' + nm(c.peer, c.name) + '</span>' +
+        '<span class="sub">私聊 · ' + c.count + ' 条</span></span>';
+    } else {
+      var ms = membersOf(c);
+      who.innerHTML = avatarOf(c) + '<span class="l"><span class="t">' + esc(c.name) + '</span>' +
+        '<span class="sub">群聊 · ' + ms.length + ' 位成员 · ' +
+          ms.slice(0, 8).map(function (m) { return esc(m.label || roleLabel(m.role)); }).join('') +
+          (ms.length > 8 ? '…' : '') + '</span></span>';
+    }
+    acts.innerHTML = WITH
+      ? '<span class="with">只看我与 ' + nm(WITH) + '</span><button class="vb" id="ch-all">看全部</button>'
+      : '';
+    var x = $('#ch-all');
+    if (x) x.onclick = function () { selectConv(CONV, ''); };
   };
 
   // ── 消息行 ──
@@ -472,7 +495,7 @@
       c.subs.forEach(function (s) { learn(s.role, s.name, s.label); });
     });
     if (!CONV || !convOf(CONV)) { CONV = d.conv || ''; WITH = ''; }
-    renderMe(); renderConvs(); renderTop(); renderBar(); renderStatus();
+    renderRole(); renderProfile(); renderConvs(); renderHead();
   };
 
   // ── SSE: role 摘要 + 当前窗口的消息增量。断线指数退避重连。 ──
@@ -514,7 +537,7 @@
     CONV = key; WITH = withRole || '';
     if (VIEW !== 'msgs') setView('msgs');
     app.classList.add('reading');
-    renderConvs(); renderBar();
+    renderConvs(); renderHead();
     S.gen++;
     syncUrl();
     inner.innerHTML = '<div class="empty">加载中…</div>';
@@ -1271,7 +1294,7 @@
     app.classList.toggle('outer', v !== 'msgs');
     // 手机上关系/日程占满主区 —— 进入即阅读态。
     if (v !== 'msgs') app.classList.add('reading');
-    renderTop(); renderBar();
+    renderRole(); renderHead();
     if (v === 'msgs') { fxStop(); toBottom(true); }
     else {
       // 关系图一打开就聚焦在当前 role 身上: 它的邻居亮着, 其余压暗。
@@ -1292,7 +1315,7 @@
   // 本地心跳: 相对时间、运行中判定、耗时都随时间变化, 但服务端没有新事件可推。
   setInterval(function () {
     if (!R.role) return;
-    renderStatus();
+    renderProfile();
     expireRows();
     if (VIEW === 'world') tickWorld();
     else if (VIEW === 'plan') renderPlan();

@@ -36,7 +36,7 @@ const inMeta = (r: TurnDetailRecord): string => {
     `<span class="mt">${escHtml(fmtTs(r.createdAt))}</span>`,
     r.origin ? `<span class="mchip graph" title="graph ${escHtml(r.origin.runId)}">🕸 轮 ${r.origin.round}/${r.origin.rounds} · 步 ${r.origin.step}/${r.origin.steps}</span>` : "",
     r.from?.kind === "task" ? `<span class="mchip task">⏰ 定时 ${escHtml(r.from.taskId ?? "")}</span>` : "",
-    r.from?.kind === "peer" ? `<span class="mchip ${r.from.public ? "pub" : "priv"}">${r.from.public ? "公开" : "私聊"}</span>` : "",
+    r.from?.kind === "peer" && r.from.public ? `<span class="mchip pub">公开</span>` : "",
     r.from?.job ? `<span class="mchip job">📋 ${escHtml(r.from.job)}</span>` : "",
   ];
   return `<div class="mmeta">${bits.join("")}</div>`;
