@@ -1802,6 +1802,17 @@ export interface MirrorBridge {
    *  persisted binding so nothing resurrects it. The chat auto-spawns a fresh
    *  session on its next message. */
   killPane: (target: string) => Promise<{ ok: boolean; reason?: string }>;
+  /** Idle reaper: kill the tmux pane of every session whose transcript has been
+   *  silent for `ttlMs`, but KEEP the persisted binding — the next inbound
+   *  resurrects it via the dead-pane `--resume` path (reap = asleep, /kill =
+   *  dead). Cheap transcript-mtime gate first, tmux probes only for the few
+   *  idle survivors. `skip` vetoes a target with a reason (task owners,
+   *  pending approvals). Busy panes and windows a human is watching right now
+   *  are passed over. */
+  reapIdle: (
+    ttlMs: number,
+    skip?: (target: string, sessionId: string) => string | undefined,
+  ) => Promise<{ reaped: string[]; skipped: Record<string, string> }>;
   /** Send a bare Enter to the live tmux pane bound to `target` — confirms a
    *  prompt / press-enter-to-continue, or submits the input box as-is. No-op
    *  for spawn-mode attachments (no live TTY). */
@@ -5653,6 +5664,42 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       deps.store.drop(target);
       log.info({ target, sessionId: a?.sessionId, pane }, "mirror /kill — pane killed, binding dropped");
       return { ok: true };
+    },
+    reapIdle: async (ttlMs, skip) => {
+      const now = Date.now();
+      const reaped: string[] = [];
+      const skipped: Record<string, string> = {};
+      for (const target of allTargets()) {
+        const a = byTarget.get(target);
+        const sessionId = a?.sessionId || deps.store.get(target)?.sessionId || "";
+        // 便宜闸门先行: transcript mtime 一次 statSync, 不 spawn —— 跑了几个
+        // 月的机器上 allTargets 是几百个 key, 见 target 就问 tmux 会打穿 fd
+        // (同 worldPeers 的 WORLD_PROBE 取舍)。还没写过 transcript 的 spawn-mode
+        // 绑定没有活动证据, 不动它。
+        const jsonl = jsonlOf(target);
+        let mtime = 0;
+        try { if (jsonl) mtime = statSync(jsonl).mtimeMs; } catch { /* 文件没了 */ }
+        if (!mtime || now - mtime < ttlMs) continue;
+        const veto = skip?.(target, sessionId);
+        if (veto) { skipped[target] = veto; continue; }
+        const pane = paneOf(target);
+        if (!pane || !(await tmuxPaneAlive(pane))) continue; // pane 已死, 没什么可收的
+        if (paneIsBusy(await capturePaneTail(pane, 12))) { skipped[target] = "busy"; continue; }
+        // 人正盯着这个 window —— 收掉他的视野比省下那点内存更讨嫌。
+        const w = await runTmux(["display-message", "-p", "-t", pane, "#{window_active}:#{session_attached}"]);
+        const [wActive, sAttached] = w.stdout.trim().split(":");
+        if (wActive === "1" && sAttached !== "0") { skipped[target] = "watched"; continue; }
+        // 与 killPane 同款前戏: Esc 给生成中的 CLI 一个收束落盘的机会。
+        await runTmux(["send-keys", "-t", pane, "Escape"]);
+        await sleep(250);
+        const r = await runTmux(["kill-pane", "-t", pane]);
+        if (r.code !== 0) { skipped[target] = `kill-pane failed: ${r.stdout.slice(-120) || r.code}`; continue; }
+        if (a) detach(a, "idle reap");
+        // 不碰 store —— 绑定留着, 下一条 inbound 走 dead-pane `--resume` 复活。
+        reaped.push(target);
+        log.info({ target, sessionId, pane, idleHours: Math.round((now - mtime) / 3.6e6) }, "mirror idle reap — pane killed, binding kept");
+      }
+      return { reaped, skipped };
     },
     submitPane: async (target) => {
       const a = byTarget.get(target);

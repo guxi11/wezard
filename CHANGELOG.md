@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- **闲置 pane 自动回收** (`wrc.mirror.idleReapHours`, 默认 48h, 0 = 关闭)。transcript 静默超过阈值的会话, daemon 每 30min 收掉它的 tmux pane 释放内存与 fd (jsonl tail / subagent watcher 一并 detach) —— 但**保留 store 绑定**, 下一条消息走现成的 dead-pane `--resume` 自愈复活, charter 重新压入, 对话不丢: reap 是"睡着", `/kill` 才是"死了"。豁免: 名下有定时任务的 wizard (调度会唤醒它)、挂着审批长轮询的会话 (hook 还在等点击)、正忙的、人正盯着的 window (`window_active:session_attached`)。keepalive 会话天然豁免 (ping 每几分钟刷新 transcript, 永远到不了阈值)。闲置判据先走 transcript mtime (一次 statSync), tmux 探活只发生在少数 idle 幸存者身上 —— 与 worldPeers 的 WORLD_PROBE 同一取舍。
 - **BREAKING wizard 的名字全局唯一, 寻址从 `#tag` 改成 `.name`**。名字不再跟着聊天走 (`chat#tag`): 每个 wizard 有一个全机唯一的名字, 它就是地址 —— 群里、气泡头 (`🦊 .fix`)、工具参数、名册一律写 `.name`。聊天的默认会话取聊天名, 分身取自己的 slot, 撞名挂 `-N`。内部 key (`chat:xxx#slot`) 不变, 改名不搬会话; 启动时一次性把已有 wizard 迁到全局名字 (默认会话先挑)。老 `#tag` 气泡仍可引用路由。MCP 工具的地址参数 `tag` → `name` (`fix` / `.fix` 都认; 守护进程继续接受老字段, 正在跑的 wizard 不受影响)。
 - **任意群可 `.name` 叫任意 wizard, 回复回到发话的那个群**。turn 记录新增 `channel` (公开频道的 base) 与 `speaker` (发话人); 本轮的回复与审批/提问卡都推到 channel, 不再固定回 wizard 的 home 群。
 - **群 = 公开频道, wizard 之间默认私聊**。`send_peer` 新增 `public` —— 需要人知道、该在公开频道讨论的由模型自己决定公开, 此时群里出 `.a → .b` 气泡、回复也进群; 默认私聊不出任何气泡, 只落在双方的 rolepage。派活回程与分身出生气泡取消, 工单开/收工与 `notify` 保留。

@@ -18,7 +18,7 @@ import { EMPTY_FACTS, type WorldFacts, type WorldFactWizard } from "../shared/wo
 import { initAutoWindowPersistence } from "./session-cache.js";
 import { makeMessageHandler } from "./outbound.js";
 import { makeCardHandler, makeAskHandler, installAskEventListener } from "./ask.js";
-import { drainForReload } from "./pending.js";
+import { drainForReload, listPending } from "./pending.js";
 import {
   makeClaimStartHandler,
   makeClaimStatusHandler,
@@ -1722,11 +1722,38 @@ const main = async (): Promise<void> => {
     fallbackTarget: () => (cfg.defaultChat ?? "").trim(),
   });
 
+  // 闲置 pane 收割机 — 默认 48h 静默才动 (wrc.mirror.idleReapHours, 0=关)。
+  // 只收 pane 不收绑定: 下一条消息 `--resume` 复活。豁免: 名下有定时任务的
+  // wizard (调度本身会唤醒/需要它), 挂着审批长轮询的会话 (hook 还停在等点击),
+  // 忙着的 / 人正盯着的 (bridge 内部判)。keepalive 会话靠 ping 刷新 transcript,
+  // 天然到不了阈值。
+  let reapTimer: NodeJS.Timeout | undefined;
+  if (cfg.wrc.mode === "mirror" && cfg.wrc.mirror.idleReapHours > 0) {
+    const ttlMs = cfg.wrc.mirror.idleReapHours * 3.6e6;
+    const sweep = async (): Promise<void> => {
+      const taskOwners = new Set(
+        tasks.list()
+          .filter((t) => t.enabled)
+          .map((t) => wizardStore()?.byName(t.owner)?.target)
+          .filter((t): t is string => !!t),
+      );
+      const pendingSids = new Set(listPending().map((p) => p.meta.sessionId).filter((s): s is string => !!s));
+      const r = await (bridge as MirrorBridge).reapIdle(ttlMs, (target, sid) =>
+        taskOwners.has(target) ? "owns scheduled task"
+          : pendingSids.has(sid) ? "pending approval"
+          : undefined);
+      if (r.reaped.length) log.info({ reaped: r.reaped.length, targets: r.reaped }, "idle reap sweep");
+    };
+    reapTimer = setInterval(() => void sweep().catch((e) => log.warn({ err: (e as Error).message }, "idle reap sweep failed")), 30 * 60_000);
+    reapTimer.unref();
+  }
+
   const shutdown = async (signal: string): Promise<void> => {
     log.info({ signal }, "shutdown signal");
     scheduler.stop();
     tasks.stop();
     netWatch.stop();
+    if (reapTimer) clearInterval(reapTimer);
     // 同 POST /shutdown: 先把挂着的审批长轮询了结成「稍后续接」, 再关连接。
     log.info(drainForReload(), "pending drained for reload");
     // Hard-exit watchdog: http.close() blocks until every in-flight connection

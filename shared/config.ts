@@ -128,6 +128,12 @@ const Mirror = z.object({
   // 越大。不设则按后端自动选择: codebuddy 1s (派发子 agent 期间由 openAgents guard
   // 拦截, 无需长静默期), claude 4s。
   softTurnEndMs: z.number().int().positive().optional(),
+  // 闲置 pane 自动回收 (小时): transcript 静默超过这个时长、且名下没有定时任务的
+  // 会话, daemon 收掉它的 tmux pane 释放内存 —— 但保留 store 绑定 (sessionId/jsonl),
+  // 下一条消息走 dead-pane `--resume` 自愈复活, 对话不丢。与 /kill 的分界线就是
+  // 那行 store.drop: reap 是"睡着", kill 是"死了"。0 = 关闭。
+  // keepalive 会话天然豁免 (ping 每几分钟刷新 transcript, 永远到不了这个阈值)。
+  idleReapHours: z.number().nonnegative().default(48),
   // ── Prompt-cache keepalive ────────────────────────────────────────────
   // Anthropic prompt caching: cache-write costs 1.25x, cache-read 0.1x, and the
   // cache lives only ~5min. A pane that goes idle (agent parked waiting on a
