@@ -42,15 +42,11 @@ button { font: inherit; color: inherit }
 /* ── 左栏顶: 当前 role 的名片 (身份 + 关系/日程入口) ──── */
 .rolebar {
   position: relative; flex: none; padding: 16px 16px 14px; border-bottom: 1px solid var(--line);
-  display: flex; flex-direction: column; gap: 10px;
-  background: linear-gradient(180deg, #f6f8fc 0%, var(--card) 100%);
+  display: flex; flex-direction: column; gap: 8px; background: var(--card);
 }
 .rolebar .conn { position: absolute; top: 12px; right: 14px }
-.rolebar .id { display: flex; gap: 12px; align-items: center; min-width: 0; padding-right: 14px }
-.rolebar .id .av {
-  font-size: 30px; line-height: 1; width: 48px; height: 48px; flex: none; display: grid; place-items: center;
-  border-radius: 14px; background: #fff; border: 1px solid var(--line); box-shadow: 0 1px 2px #1f23280a;
-}
+.rolebar .id { display: flex; gap: 10px; align-items: center; min-width: 0; padding-right: 14px }
+.rolebar .id .av { font-size: 26px; line-height: 1; flex: none }
 .rolebar .id .l { min-width: 0; display: flex; flex-direction: column; gap: 2px }
 .rolebar .id .nm { font-size: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .rolebar .id .k { font-size: 11.5px; color: var(--mute) }
@@ -59,8 +55,6 @@ button { font: inherit; color: inherit }
 .rolebar .facts span { white-space: nowrap }
 .rolebar .facts .go { cursor: pointer; color: var(--accent) }
 .rolebar .facts .go:hover { text-decoration: underline }
-.rolebar .facts .st { color: var(--faint) }
-.rolebar .facts .st.on { color: var(--pub) }
 .rolebar .acts { display: flex; gap: 6px; flex-wrap: wrap; align-items: center }
 .rolebar .acts:empty { display: none }
 /* session 切换: 按钮 + 浮层列表, 取代原生 <select>。 */
@@ -110,19 +104,19 @@ button { font: inherit; color: inherit }
 .sidefoot .sp-list { top: auto; bottom: calc(100% + 4px); transform: translateY(4px) }
 .sidefoot .sp.open .sp-list { transform: none }
 
-/* profile: 这个 role 自己跑过的轮次的总账。 */
-.prof { border: 1px solid var(--line); border-radius: 10px; background: #fff; padding: 9px 10px 10px; font-family: ui-monospace, Menlo, monospace }
-.prof .hd { display: flex; align-items: center; gap: 8px; font-size: 11.5px; margin-bottom: 8px }
+/* profile: 这个 role 自己跑过的轮次的总账 —— 平铺在左栏底, 不套卡片。 */
+.prof { font-family: ui-monospace, Menlo, monospace }
+.prof .hd { display: flex; align-items: center; gap: 8px; font-size: 11.5px; margin-bottom: 6px }
 .prof .hd .lb { font-size: 10px; color: var(--faint); text-transform: uppercase; letter-spacing: .4px; font-family: system-ui, sans-serif }
 .prof .model {
-  margin-left: auto; color: #57606a; background: #f1f3f6; border-radius: 9px; padding: 1px 7px;
+  margin-left: auto; color: var(--mute);
   max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .prof .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px 4px }
 .prof .kv { display: flex; flex-direction: column; align-items: flex-start; min-width: 0 }
 .prof .kv .v { font-size: 13px; font-weight: 700; color: #1f2328; font-variant-numeric: tabular-nums; white-space: nowrap }
 .prof .kv .k { font-size: 9.5px; color: #8c959f; text-transform: uppercase; letter-spacing: .4px }
-.prof .io { margin-top: 9px; display: flex; flex-direction: column; gap: 6px }
+.prof .io { margin-top: 8px; display: flex; flex-direction: column; gap: 6px }
 .prof .bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: #eaeef2 }
 .prof .bar .seg { height: 100% }
 .prof .leg { display: flex; gap: 4px 9px; flex-wrap: wrap }

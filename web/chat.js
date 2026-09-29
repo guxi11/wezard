@@ -315,15 +315,13 @@
     if (SESS_OPEN && e.key === 'Escape') setSessOpen(false);
   });
 
-  // 名片: 身份 · 出身 · cwd · 出生 · session 切换 · 关系 / 日程入口。
+  // 名片: 身份 · 出身 · cwd · 出生 · 关系 / 日程入口。
   var renderRole = function () {
     var r = R.role;
     if (!r) return;
     var kind = r.kind === 'human' ? '人' : r.parent ? '分身' : 'wizard';
+    // 忙闲由右上角的状态点表达, 名片不再重复。
     var facts = [];
-    // pane 探活在 reload 后要等它重新挂上才准; 正在跑的轮次本身就是活着的证据。
-    var busy = r.busy || (R.stats && isRunning(R.stats)), alive = r.alive || busy;
-    if (r.kind === 'wizard') facts.push('<span class="st' + (busy ? ' on' : '') + '">' + (busy ? '● 正在干活' : alive ? '○ 空闲' : '○ 未运行') + '</span>');
     if (r.cwd) facts.push('<span title="' + esc(r.cwd) + '">📁 ' + esc(shortCwd(r.cwd)) + '</span>');
     if (r.bornAt) facts.push('<span title="创建时间">🐣 ' + esc(fmtDay(r.bornAt)) + '</span>');
     if (r.parent) facts.push('<span class="go" data-r="' + esc(r.parent.id) + '" title="' + (r.inherited ? '继承了它的上下文' : '空白起步') + '">↳ ' + esc(r.parent.label) + ' .' + esc(r.parent.name) + ' 的分身</span>');
@@ -363,7 +361,6 @@
     ctx: '上下文峰值 — 单次请求送入的 input + 缓存 的最高值',
     out: '累计输出 token', cache: '累计缓存 token (读 + 写)', time: '累计耗时',
   };
-  var isRunning = function (t) { return !!t.runningUntil && srvNow() < t.runningUntil; };
   var liveDur = function (t) {
     var d = (t.usage && t.usage.durationMs) || 0;
     if (!t.runningUntil) return d;
