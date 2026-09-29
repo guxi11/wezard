@@ -257,7 +257,9 @@
       return '<h2>' + title + '<span>' + list.length + '</span></h2>' +
         (list.length ? list.map(convItem).join('') : '<div class="none">' + none + '</div>');
     };
-    convsEl.innerHTML = sec('群聊', groups, '还没在任何群里说过话') + sec('私聊', dms, '没有和别的 wizard 私聊过');
+    // 人没有私聊 —— wizard↔wizard 才有, 空着的那一栏也不画。
+    convsEl.innerHTML = sec('群聊', groups, '还没在任何群里说过话') +
+      (R.role && R.role.kind === 'human' ? '' : sec('私聊', dms, '没有和别的 wizard 私聊过'));
     convsEl.querySelectorAll('[data-conv]').forEach(function (b) {
       b.onclick = function () { selectConv(b.getAttribute('data-conv'), b.getAttribute('data-with') || ''); };
     });
@@ -668,7 +670,9 @@
     var from = ROLE;
     // 整个频道 / 两人私聊的消息集合与视角无关 —— 只有 with 与 session 按 role 过滤。
     var same = VIEW === 'msgs' && !WITH && !SESSION && (keep || CONV.indexOf('p:') === 0);
-    ROLE = id; WITH = ''; SESSION = '';
+    // 群里「只看我与 X」时换过去, 对面看到的是「只看我与 from」—— 同一段往来, 选中只看而不是整个群。
+    var withBack = keep && WITH ? from : '';
+    ROLE = id; WITH = withBack; SESSION = '';
     CONV = keep || (CONV.indexOf('p:') === 0 ? 'p:' + from : '');
     inner.classList.remove('flipping'); void inner.offsetWidth; inner.classList.add('flipping');
     if (same) flipWindow(); else refresh();

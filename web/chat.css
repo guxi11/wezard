@@ -10,9 +10,9 @@
   --mute: #6a7483;
   --faint: #9aa3af;
   --line: #d9dee6;
-  --mine: #e4ecfc;    /* 当前视角说的话 */
-  --mine-soft: #d6e2f8;  /* 它内部还要再沉一档的块 (代码/结果/折叠头) */
-  --mine-line: #b8caef;
+  --mine: #eef3fd;    /* 当前视角说的话 */
+  --mine-soft: #e2eafa;  /* 它内部还要再沉一档的块 (代码/结果/折叠头) */
+  --mine-line: #c9d7f3;
   --accent: #2f55c9;  /* 视角色: 名字的点、选中态、自己的气泡描边 */
   --priv: #9a5b10;    /* 私聊 */
   --pub: #237a55;     /* 公开 */
