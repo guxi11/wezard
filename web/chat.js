@@ -439,6 +439,8 @@
 
   // ── 消息行 ──
   // 同一条消息从发话方看靠右、从收信方看靠左 —— 片段不带方向, 由这里按视角包装。
+  // 箭头朝外 = 这条气泡换视角后要去的那一侧; mine 行靠 CSS 翻转。
+  var CHEVRON = '<svg class="fc" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   // 行的另一侧是 .flip: 点它 = 换成这条消息的对端 (我发的 → 收信方; 别人发的 → 发话方)。
   var rowHTML = function (m) {
     learn(m.from, m.fromName, m.fromLabel);
@@ -458,7 +460,8 @@
       : nm(m.from, m.fromName) + to + priv + stamp(m.ts);
     var sw = canSwitch(other);
     var flip = '<button class="flip" data-r="' + esc(other) + '"' + (sw ? '' : ' disabled tabindex="-1"') +
-      ' aria-label="' + esc(sw ? '切到 ' + nameOf(other) + ' 的视角' : '') + '">' + (sw ? '⇄ ' + esc(nameOf(other)) : '') + '</button>';
+      ' aria-label="' + esc(sw ? '切到 ' + nameOf(other) + ' 的视角' : '') + '">' +
+      (sw ? '<span class="fi"><span class="fn">' + esc(nameOf(other)) + '</span>' + CHEVRON + '</span>' : '') + '</button>';
     var av = mine ? '' : '<button class="av' + (canSwitch(m.from) ? ' go' : '') + '" data-r="' + esc(m.from) + '" title="' + esc(nameOf(m.from)) + '"' + (canSwitch(m.from) ? '' : ' disabled') + '>' + esc(m.fromLabel || roleLabel(m.from)) + '</button>';
     return '<div class="mrow ' + (mine ? 'mine' : 'them') + '" data-id="' + esc(m.id) + '" data-turn="' + esc(m.turnId || m.id) + '" data-ts="' + m.ts + '"' +
       (m.ping ? ' data-ping="1"' : '') + ' data-sig="' + esc(m.sig) + '" data-stale-at="' + (m.staleAt || 0) + '">' +

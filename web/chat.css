@@ -270,6 +270,15 @@ button { font: inherit; color: inherit }
 }
 .mrow.them .flip { justify-content: flex-start }
 .mrow.mine .flip { justify-content: flex-end }
+/* 气泡可以比视窗还高, 居中的箭头就跑出屏幕了 —— 让它在按钮内 sticky, 上下各留半屏,
+   于是只要这一行还在视窗里, 箭头就钉在视窗中线附近。 */
+.flip .fi {
+  position: sticky; top: calc(50% - 10px); bottom: calc(50% - 10px);
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.mrow.mine .flip .fi { flex-direction: row-reverse }
+.mrow.mine .flip .fc { transform: scaleX(-1) }
+.flip .fc { flex: none }
 .flip:hover, .flip:focus-visible { background: #2f55c90d; color: var(--accent) }
 .flip[disabled] { cursor: default; background: transparent !important; color: transparent !important }
 .mrow .av.go { cursor: pointer }
