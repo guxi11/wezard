@@ -265,9 +265,9 @@ body { overflow: hidden; overscroll-behavior: none }
 .topbar .vb.on { background: #0969da; border-color: #0969da; color: #fff; font-weight: 600 }
 .topbar .sub { min-width: 0 }
 
-/* 关系/日程栏不需要那条 288px 的会话列表占着半张桌子 —— 图要横向铺开。 */
+/* 关系/日程是聊天之外的视图: 会话列表与总账都属于某一个聊天, 在这里一并让位。 */
 .pane { flex: 1; min-height: 0; display: flex; flex-direction: column; background: #fafbfc }
-.app.wide .side { width: 216px }
+.app.outer .side, .app.outer .statusbar, .app.outer .topbar .back { display: none }
 
 /* ── 侧栏: wizard 身份 ─────────────────────────────────────────────── */
 /* 名字之外还要有职责与出身, 否则一列 `#tag` 说不出谁是谁。两行都单行省略,
@@ -522,7 +522,6 @@ body { overflow: hidden; overscroll-behavior: none }
 }
 
 @media (max-width: 760px) {
-  .app.wide .side { display: none }
   .topbar .sub { display: none }
   .topbar .vb { padding: 3px 8px }
   .wmap { padding: 12px }

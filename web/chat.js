@@ -291,7 +291,15 @@
     return seg.length <= 2 ? p : '…/' + seg.slice(-2).join('/');
   };
 
+  // 关系/日程是聊天之外的视图 (画的是全部聊天), 顶栏不再冒充「这是哪个群」。
+  var OUTER = { world: { em: '🕸', h: '关系' }, plan: { em: '⏰', h: '日程' } };
   var topbar = function () {
+    var o = OUTER[VIEW];
+    if (o) {
+      $('#tb-em').textContent = o.em; $('#tb-h').textContent = o.h;
+      $('#tb-tag').textContent = ''; $('#tb-sub').textContent = ''; $('#tb-cwd').hidden = true;
+      return;
+    }
     var t = curTag(), name = chatName();
     var tag = t ? (t.tag ? '#' + t.tag : 'default') : '';
     $('#tb-em').textContent = t ? t.label : '💬';
@@ -1292,7 +1300,9 @@
     $('#pane-plan').hidden = v !== 'plan';
     // graph 条只对线程有意义 (它讲的是当前这一路被谁驱动)。
     gbarEl.hidden = v !== 'thread' || !(S.graphs || []).length;
-    document.querySelector('.app').classList.toggle('wide', v !== 'thread');
+    // 离开线程 = 走出这个聊天: 侧栏 (本群的会话列表) 与页脚 (本路的总账) 一并收起。
+    document.querySelector('.app').classList.toggle('outer', v !== 'thread');
+    topbar();
     if (v === 'thread') { toBottom(true); }
     else if (!W.loaded) { (v === 'world' ? (wmapEl.innerHTML = '<div class="empty">加载中…</div>') : (planEl.innerHTML = '<div class="empty">加载中…</div>')); loadWorld(); }
     else if (v === 'world') renderWorld();
