@@ -23,7 +23,8 @@
   // at / recvAt: 服务端快照时刻与本地收到时刻。所有"现在几点"的判断都换算到
   // 服务端时钟, 否则客户端时钟偏几分钟就会把运行中的会话判成已结束。
   var R = { at: 0, recvAt: 0, role: null, sessions: [], convs: [], relations: false, schedules: 0, stats: null };
-  var S = { es: null, pinned: true, gen: 0 };
+  // frags: 当前窗口的原始片段 (id → 片段)。片段不带方向, 换视角时拿它就地重包左右。
+  var S = { es: null, pinned: true, gen: 0, frags: {} };
   // 关系/日程两栏共用的世界快照。sel = 当前聚焦的节点, kinds = 边类型开关。
   var W = {
     at: 0, nodes: [], edges: [], chats: [], jobs: [], schedules: [],
@@ -439,7 +440,8 @@
     }
     var mine = m.from === ROLE;
     var other = mine ? m.to : m.from;
-    var group = (convOf(CONV) || {}).kind !== 'wizard';
+    // 看 key 而不是会话列表: 换视角就地重包时, 列表还是上一个 role 的。
+    var group = CONV.indexOf('p:') !== 0;
     // 群里我不是收信方的那条 (X → Y), 头上写清是说给谁的。
     var to = !mine && m.to !== ROLE && group ? '<span class="to">→ ' + nm(m.to, m.toName) + '</span>' : '';
     var priv = !m.channel && group ? '<span class="ch priv">私聊</span>' : '';
@@ -517,6 +519,8 @@
     if (!CONV) { inner.innerHTML = '<div class="empty">选一个会话</div>'; return Promise.resolve(); }
     return api('api/msgs', viewParams(limit ? { limit: limit } : {})).then(function (d) {
       if (!d.ok || gen !== S.gen) return;
+      S.frags = {};
+      d.msgs.forEach(function (m) { S.frags[m.id] = m; });
       if (!d.msgs.length) { inner.innerHTML = '<div class="empty">这里还没有消息</div>'; return; }
       var more = d.truncated
         ? '<button class="more-btn" id="more">载入更早的 ' + (d.total - d.msgs.length) + ' 条</button>'
@@ -538,6 +542,7 @@
     var empty = inner.querySelector('.empty'); if (empty) empty.remove();
     var stick = S.pinned;
     var cur = rowNode(m.id);
+    S.frags[m.id] = m;
     if (cur && cur.getAttribute('data-sig') === m.sig) return;
     // 折行会把 .mrow 收进 details, 而下面的按时间插位假定它们都是 inner 的直接子节点。
     unfoldPings(inner);
@@ -646,10 +651,37 @@
     if (!canSwitch(id) || id === ROLE) return;
     var keep = CONV && CONV.indexOf('c:') === 0 ? CONV : '';
     var from = ROLE;
+    // 整个频道 / 两人私聊的消息集合与视角无关 —— 只有 with 与 session 按 role 过滤。
+    var same = VIEW === 'msgs' && !WITH && !SESSION && (keep || CONV.indexOf('p:') === 0);
     ROLE = id; WITH = ''; SESSION = '';
     CONV = keep || (CONV.indexOf('p:') === 0 ? 'p:' + from : '');
     inner.classList.remove('flipping'); void inner.offsetWidth; inner.classList.add('flipping');
-    refresh();
+    if (same) flipWindow(); else refresh();
+  };
+
+  /** 同一窗口换视角: 拿手里的片段就地重包左右, 已渲染的正文整块搬过去; 侧栏交给 SSE 的首个 role 事件。 */
+  var flipWindow = function () {
+    S.gen++;
+    syncUrl();
+    unfoldPings(inner);
+    [].slice.call(inner.querySelectorAll('.mrow')).forEach(function (row) {
+      var m = S.frags[row.getAttribute('data-id')];
+      // 断点 (/clear /new) 是旧视角 role 自己的, 新视角的由下面补拉。
+      if (!m || m.dir === 'mark') { row.remove(); return; }
+      var next = frag(rowHTML(m)).firstElementChild;
+      var ob = row.querySelector('.mb'), nb = next.querySelector('.mb');
+      if (ob && nb) nb.replaceWith(ob);
+      row.replaceWith(next);
+      bindRow(next);
+    });
+    foldPings(inner);
+    expireRows();
+    connect();
+    var gen = S.gen;
+    api('api/msgs', viewParams()).then(function (d) {
+      if (!d.ok || gen !== S.gen) return;
+      d.msgs.filter(function (m) { return m.dir === 'mark'; }).forEach(upsertMsg);
+    });
   };
 
   $('#tb-back').onclick = function () { app.classList.remove('reading'); };
