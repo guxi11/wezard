@@ -13,7 +13,7 @@ import { makeBridge } from "./cc-bridge.js";
 import { startMirror, installMirrorEventListener, type MirrorBridge } from "./mirror-bridge.js";
 import { setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { installApprovalEventListener, makeApproveHandler } from "./approval.js";
-import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, buildChatUrl, latestTurnIdFor, chatTicketFor, setWorldFactsProvider } from "./detail.js";
+import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, setWorldFactsProvider } from "./detail.js";
 import { EMPTY_FACTS, type WorldFacts, type WorldFactWizard } from "../shared/world.js";
 import { initAutoWindowPersistence } from "./session-cache.js";
 import { makeMessageHandler } from "./outbound.js";
@@ -614,10 +614,7 @@ const main = async (): Promise<void> => {
      *  换票不多给权限也不会开错栏。少了这层兜底, `A → B` 里的 B 几乎总是不可点:
      *  detail store 只留 24h, 而被派活的那个 wizard 恰恰常常是刚出生 / 闲了一天的,
      *  跨聊天派活时它所在的那个群更可能整个群都没有 turn 记录。 */
-    const chatDetailUrl = (t: string): string | undefined => {
-      const id = latestTurnIdFor(t) ?? chatTicketFor(baseOfKey(t));
-      return id ? buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, id, chatIdOf(t), t) : undefined;
-    };
+    const chatDetailUrl = (t: string): string | undefined => chatUrlFor(cfg.daemon, t, chatIdOf(t));
     /** 一条 relay 只落在**收信那一方**的群里, 从不两头都发:
      *  - 派活 → to 的群。同群时那就是双方共处的那个群 (行为照旧); 跨群时源头群
      *    不再复述 —— 那句话本来就是它自己说出口的, 贴回自己群里只是噪音, 真正

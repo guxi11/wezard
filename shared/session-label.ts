@@ -169,3 +169,23 @@ export const withTagHeader = (target: string | undefined, content: string, seq?:
   const head = [tag ? `${labelFor(tag)} #${tag}` : "🧙", seq ?? ""].filter(Boolean).join(" ");
   return `${head}${headSep(content)}${content}`;
 };
+
+/** 头的链接形态 `[emoji #tag](url)` —— 点它就进那个 wizard 的 chat 详情页。
+ *  HEADER_RE 认得这一形态, parseTagHeader 照样剥得掉。 */
+export const linkedTagHead = (target: string | undefined, url: string): string => {
+  const tag = tagOfKey(target);
+  return tag ? `[${labelFor(tag)} #${tag}](${url})` : `[🧙](${url})`;
+};
+
+/** withTagHeader, 但头挂上 chat 详情页链接。拿不到票据 (url 为空) 时退回裸头 ——
+ *  头那一段是路由信息, 少了链接只是少一层可点, 不能因此不写。 */
+export const withLinkedTagHeader = (
+  target: string | undefined,
+  content: string,
+  url: string | undefined,
+  seq?: string,
+): string => {
+  if (!url) return withTagHeader(target, content, seq);
+  const head = [linkedTagHead(target, url), seq ?? ""].filter(Boolean).join(" ");
+  return `${head}${headSep(content)}${content}`;
+};

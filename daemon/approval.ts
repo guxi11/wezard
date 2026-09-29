@@ -27,10 +27,10 @@ import { dangerOf, dangerEarlyExit, type DangerHit } from "./danger.js";
 import { appendUnique } from "../shared/config-writer.js";
 import { claudeConfigWrite, type ClaudeConfigHit } from "../shared/claude-config-path.js";
 import type { NativeModalAnswer } from "./mirror-bridge.js";
-import { recordApproval, recordApprovalDecision, buildDetailUrl, getDetail } from "./detail.js";
+import { recordApproval, recordApprovalDecision, buildDetailUrl, chatUrlFor, getDetail } from "./detail.js";
 import type { Handler } from "./http.js";
 import { json, readBody } from "./http.js";
-import { tagBadge, withTagHeader } from "../shared/session-label.js";
+import { tagBadge, withTagHeader, withLinkedTagHeader } from "../shared/session-label.js";
 import { sessionNameFor } from "./session-name.js";
 
 // ── Routing helpers ────────────────────────────────────────────────────
@@ -44,6 +44,12 @@ const targetChatId = (principal: string): string => {
   const h = rest.indexOf("#");
   return h >= 0 ? rest.slice(0, h) : rest;
 };
+
+// 卡片前后那几条 markdown 气泡的头。和 mirror 的正文气泡同形: `emoji #tag` 挂上该
+// wizard 的 chat 详情页 —— 一张卡的上下文 (为什么问、题目全文) 都在那页上, 头不可点
+// 就得靠人自己去群里翻。拿不到票据时 withLinkedTagHeader 退回裸头。
+const cardHead = (cfg: Config, chatKey: string, content: string): string =>
+  withLinkedTagHeader(chatKey, content, chatUrlFor(cfg.daemon, chatKey, targetChatId(chatKey)));
 
 const pickApprover = (cfg: Config): string | undefined => {
   if (cfg.approval.approvers.length > 0) return cfg.approval.approvers[0];
@@ -937,7 +943,7 @@ const handleExitPlanMode = async ({ cfg, log, client, body, getMirrorTarget, flu
       try {
         await client.sendMessage(target, {
           msgtype: "markdown",
-          markdown: { content: withTagHeader(approver, buildPlanMarkdown(plan)) },
+          markdown: { content: cardHead(cfg, approver, buildPlanMarkdown(plan)) },
         });
       } catch (e) {
         log.warn({ err: (e as Error).message }, "plan markdown prelude send failed");
@@ -1087,6 +1093,7 @@ export const buildAskqChatDriveActions = (q: AskqQuestion): AskqDriveAction[] =>
 // 多问题: 逐题顺序发卡 → 收答 → 下一题。任一题选「CLI」整体转 CLI,选「聊聊」
 // 整体转讨论; 全部答完合并成单个 deny+reason 注入。卡不会一次性轰炸 N 张。
 interface MirrorAskqFlowArgs {
+  cfg: Config;
   log: Logger;
   client: WSClient;
   sessionId: string;
@@ -1098,7 +1105,7 @@ interface MirrorAskqFlowArgs {
   drive: (acts: AskqDriveAction[]) => Promise<{ ok: boolean; reason?: string }>;
 }
 
-export const runMirrorAskqFlow = async ({ log, client, sessionId, chatKey, toolInput, voteTimeoutMs, drive }: MirrorAskqFlowArgs): Promise<void> => {
+export const runMirrorAskqFlow = async ({ cfg, log, client, sessionId, chatKey, toolInput, voteTimeoutMs, drive }: MirrorAskqFlowArgs): Promise<void> => {
   const questions = parseAskqInput(toolInput);
   if (!questions || questions.length === 0) return;
   if (questions.some((q) => q.options.length === 0)) return;
@@ -1111,7 +1118,7 @@ export const runMirrorAskqFlow = async ({ log, client, sessionId, chatKey, toolI
   const flowStart = Date.now();
   const note = async (content: string): Promise<void> => {
     try {
-      await client.sendMessage(target, { msgtype: "markdown", markdown: { content: withTagHeader(chatKey, content) } });
+      await client.sendMessage(target, { msgtype: "markdown", markdown: { content: cardHead(cfg, chatKey, content) } });
     } catch { /* best-effort */ }
   };
 
@@ -1145,7 +1152,7 @@ export const runMirrorAskqFlow = async ({ log, client, sessionId, chatKey, toolI
       try {
         await client.sendMessage(target, {
           msgtype: "markdown",
-          markdown: { content: withTagHeader(chatKey, buildAskqMarkdown(q, prefix)) },
+          markdown: { content: cardHead(cfg, chatKey, buildAskqMarkdown(q, prefix)) },
         });
       } catch (e) {
         log.warn({ err: (e as Error).message }, "mirror askq markdown prelude send failed");
@@ -1261,6 +1268,7 @@ export const mootMirrorPlan = (sessionId: string): void => {
 };
 
 interface MirrorPlanFlowArgs {
+  cfg: Config;
   log: Logger;
   client: WSClient;
   sessionId: string;
@@ -1274,12 +1282,12 @@ interface MirrorPlanFlowArgs {
   sendKey: (key: "Enter" | "Escape") => Promise<{ ok: boolean; reason?: string }>;
 }
 
-export const runMirrorPlanFlow = async ({ log, client, sessionId, chatKey, cwd, jsonlPath, voteTimeoutMs, sendKey }: MirrorPlanFlowArgs): Promise<void> => {
+export const runMirrorPlanFlow = async ({ cfg, log, client, sessionId, chatKey, cwd, jsonlPath, voteTimeoutMs, sendKey }: MirrorPlanFlowArgs): Promise<void> => {
   if (!client.isConnected) return;
   const target = targetChatId(chatKey);
   const note = async (content: string): Promise<void> => {
     try {
-      await client.sendMessage(target, { msgtype: "markdown", markdown: { content: withTagHeader(chatKey, content) } });
+      await client.sendMessage(target, { msgtype: "markdown", markdown: { content: cardHead(cfg, chatKey, content) } });
     } catch { /* best-effort */ }
   };
 
@@ -1305,7 +1313,7 @@ export const runMirrorPlanFlow = async ({ log, client, sessionId, chatKey, cwd, 
       try {
         await client.sendMessage(target, {
           msgtype: "markdown",
-          markdown: { content: withTagHeader(chatKey, buildPlanMarkdown(plan)) },
+          markdown: { content: cardHead(cfg, chatKey, buildPlanMarkdown(plan)) },
         });
       } catch (e) {
         log.warn({ err: (e as Error).message }, "mirror plan markdown prelude send failed");
@@ -1428,7 +1436,7 @@ export const runMirrorPickerFlow = async (
   const target = targetChatId(chatKey);
   const note = async (content: string): Promise<void> => {
     try {
-      await client.sendMessage(target, { msgtype: "markdown", markdown: { content: withTagHeader(chatKey, content) } });
+      await client.sendMessage(target, { msgtype: "markdown", markdown: { content: cardHead(cfg, chatKey, content) } });
     } catch { /* best-effort */ }
   };
 
@@ -1597,7 +1605,7 @@ const handleAskUserQuestion = async ({ cfg, log, client, body, getMirrorTarget, 
       try {
         await client.sendMessage(target, {
           msgtype: "markdown",
-          markdown: { content: withTagHeader(approver, buildAskqMarkdown(q, prefix)) },
+          markdown: { content: cardHead(cfg, approver, buildAskqMarkdown(q, prefix)) },
         });
       } catch (e) {
         log.warn({ err: (e as Error).message }, "askq markdown prelude send failed");
@@ -1627,7 +1635,7 @@ const handleAskUserQuestion = async ({ cfg, log, client, body, getMirrorTarget, 
       try {
         await client.sendMessage(target, {
           msgtype: "markdown",
-          markdown: { content: withTagHeader(approver, "⚠️ CLI 侧连接已断开，本轮问题卡已失效，请回到 CLI 处理。") },
+          markdown: { content: cardHead(cfg, approver, "⚠️ CLI 侧连接已断开，本轮问题卡已失效，请回到 CLI 处理。") },
         });
       } catch { /* best-effort */ }
       return { decision: "ask", reason: "askq_client_gone" };

@@ -41,7 +41,7 @@ import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
 import { recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, buildDetailUrl, buildChatUrl } from "./detail.js";
 import type { CtxCut, TurnFrom, TurnOrigin, TurnUsage } from "./detail.js";
-import { labelFor, tagOfKey, baseOfKey, keyOf, withTagHeader, headSep, parseTagHeader } from "../shared/session-label.js";
+import { labelFor, tagOfKey, baseOfKey, keyOf, withTagHeader, withLinkedTagHeader, linkedTagHead, headSep, parseTagHeader } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, normChatName, parsePeerRef, peerAddress } from "./chat-name.js";
@@ -2370,23 +2370,15 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   // Standalone fallback (no live stream / stream dead). Per-attachment FIFO so
   // pushes from a single mirror stay ordered; different mirrors run in parallel.
-  // Linked tag prefix: emoji+tag becomes a chat-detail link. Falls back to
-  // plain withTagHeader when no turnId is available (no active turn to link).
-  const linkedTagPrefix = (target: string, turnId: string | undefined): string => {
-    if (!turnId) return "";
-    const url = buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, turnId, stripPrincipalPrefix(target));
-    const tag = tagOfKey(target);
-    return tag ? `[${labelFor(tag)} #${tag}](${url})` : `[🧙](${url})`;
-  };
+  // 头挂 chat 详情页的票据: 本轮那条 turn。没有活 turn 可挂 → undefined, 头退回裸
+  // `emoji #tag` (withLinkedTagHeader 自己兜)。
+  const chatTurnUrl = (target: string, turnId: string | undefined): string | undefined =>
+    turnId
+      ? buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, turnId, stripPrincipalPrefix(target))
+      : undefined;
 
-  const withLinkedTag = (a: AttachState, content: string, seq?: string, turnId?: string): string => {
-    const prefix = linkedTagPrefix(a.target, turnId ?? a.briefTurnId);
-    if (prefix) {
-      const seqBit = seq ? ` ${seq}` : "";
-      return `${prefix}${seqBit}${headSep(content)}${content}`;
-    }
-    return withTagHeader(a.target, content, seq);
-  };
+  const withLinkedTag = (a: AttachState, content: string, seq?: string, turnId?: string): string =>
+    withLinkedTagHeader(a.target, content, chatTurnUrl(a.target, turnId ?? a.briefTurnId), seq);
 
   // 空正文一票否决 (近源拦截): 剥掉可能存在的路由头 (`🦊 #tag` / `[🧙](url)`)
   // 后没有可见内容就不发。中央 chat-gate (last-response 的 SDK 包装) 是最后一道
@@ -2738,11 +2730,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 链接落到 chat 视图: 默认选中本 turn 所属的 #tag, 贴底显示整条会话。turnId 依旧
   // 是凭据 (不可枚举), 只是页面从"一个 turn"扩成"这个 chat 的全部会话"。
   // target 作为 ww_uniq 传下去, 让同 chat 的所有 turn 详情都复用一个 WeCom 窗口。
-  const briefDetailLink = (turnId: string, target: string): string => {
-    const url = buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, turnId, stripPrincipalPrefix(target));
-    const tag = tagOfKey(target);
-    return tag ? `[${labelFor(tag)} #${tag}](${url})` : `[🧙](${url})`;
-  };
+  const briefDetailLink = (turnId: string, target: string): string =>
+    linkedTagHead(target, buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, turnId, stripPrincipalPrefix(target)));
 
   // ── 出处门 (chatOriginOnly) ───────────────────────────────────────────
   // 人在 CLI 里手敲的一轮, 镜像只发生在两处: 他眼前的终端, 和 chat 详情页 (turn
@@ -2885,7 +2874,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefLastText = undefined;
     clearCot(a);
     // 详情链接不在这里单独发 — 本轮的每条 standalone 都由 withLinkedTag 自带
-    // (linkedTagPrefix 读的正是 a.briefTurnId)。静默轮没有 standalone 可搭车, 那就
+    // (chatTurnUrl 读的正是 a.briefTurnId)。静默轮没有 standalone 可搭车, 那就
     // 一条都不发: 群里只该出现有正文的消息, 纯入口提示是噪音。
     log.info({ sessionId: a.sessionId, turnId, fromCli, silent: turnSilent(a) }, "brief: turn started (CLI-side, no bubble)");
   };
@@ -3506,6 +3495,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           && !hasMirrorPlan(a.sessionId)
         ) {
           void runMirrorPlanFlow({
+            cfg,
             log: log.child({ sessionId: a.sessionId }),
             client,
             sessionId: a.sessionId,
@@ -3532,6 +3522,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           && !hasMirrorAskq(a.sessionId)
         ) {
           void runMirrorAskqFlow({
+            cfg,
             log: log.child({ sessionId: a.sessionId }),
             client,
             sessionId: a.sessionId,

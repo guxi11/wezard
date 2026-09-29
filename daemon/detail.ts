@@ -9,6 +9,7 @@ import type { Logger } from "pino";
 import type { Decision } from "./pending.js";
 import type { Handler } from "./http.js";
 import { resolvePublicHost } from "../shared/lan-ip.js";
+import { baseOfKey } from "../shared/session-label.js";
 import {
   createDetailStore,
   type ApprovalDecision,
@@ -247,6 +248,19 @@ export const buildChatUrl = (
   uniq?: string,
   target?: string,
 ): string => `${detailRoot(publicBase, fallbackHost, fallbackPort)}/chat?${detailParams(id, uniq, target)}`;
+
+// 一个 wizard 的 chat 详情页 URL —— 气泡头上的链接都走这里。票据优先取它自己最近
+// 那条 turn, 取不到退到它所在聊天的长期票据 (见 chatTicketFor): `?id=` 的授权范围
+// 本来就是整个聊天, 开在哪一栏由 `target=` 明说, 所以换票既不多给权限也不会开错栏。
+// undefined = store 还没起来 (boot 早期), 调用方退回裸头。
+export const chatUrlFor = (
+  d: { detailPublicBase: string; host: string; port: number },
+  target: string,
+  chatId: string,
+): string | undefined => {
+  const id = latestTurnIdFor(target) ?? chatTicketFor(baseOfKey(target));
+  return id ? buildChatUrl(d.detailPublicBase, d.host, d.port, id, chatId, target) : undefined;
+};
 
 // Chat 视图路由 (页面 + JSON API + SSE)。store 未初始化时全部 503 —— 只可能发生在
 // initDetailPersistence 之前, 正常启动路径不会命中。
