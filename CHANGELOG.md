@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-29
+
 ### Added
 - **闲置 pane 自动回收** (`wrc.mirror.idleReapHours`, 默认 48h, 0 = 关闭)。transcript 静默超过阈值的会话, daemon 每 30min 收掉它的 tmux pane 释放内存与 fd (jsonl tail / subagent watcher 一并 detach) —— 但**保留 store 绑定**, 下一条消息走现成的 dead-pane `--resume` 自愈复活, charter 重新压入, 对话不丢: reap 是"睡着", `/kill` 才是"死了"。豁免: 名下有定时任务的 wizard (调度会唤醒它)、挂着审批长轮询的会话 (hook 还在等点击)、正忙的、人正盯着的 window (`window_active:session_attached`)。keepalive 会话天然豁免 (ping 每几分钟刷新 transcript, 永远到不了阈值)。闲置判据先走 transcript mtime (一次 statSync), tmux 探活只发生在少数 idle 幸存者身上 —— 与 worldPeers 的 WORLD_PROBE 同一取舍。
 - **BREAKING wizard 的名字全局唯一, 寻址从 `#tag` 改成 `.name`**。名字不再跟着聊天走 (`chat#tag`): 每个 wizard 有一个全机唯一的名字, 它就是地址 —— 群里、气泡头 (`🦊 .fix`)、工具参数、名册一律写 `.name`。聊天的默认会话取聊天名, 分身取自己的 slot, 撞名挂 `-N`。内部 key (`chat:xxx#slot`) 不变, 改名不搬会话; 启动时一次性把已有 wizard 迁到全局名字 (默认会话先挑)。老 `#tag` 气泡仍可引用路由。MCP 工具的地址参数 `tag` → `name` (`fix` / `.fix` 都认; 守护进程继续接受老字段, 正在跑的 wizard 不受影响)。
@@ -49,7 +51,7 @@
 - **关系图稀疏得像没排版**。卡片用的是 `grid` + `align-items:start`, 行高按本行最高的那张对齐, 于是「2 个 wizard 的群」旁边挨着「20 个 wizard 的群」时, 矮卡片下面全是空白; 列宽 `minmax(300px,1fr)` 在宽屏上还会把两张卡片各拉成半个屏。改成 CSS 多列的砌砖式排布 (`columns: 320px` + `break-inside: avoid`), 卡片顺着列往下码, 没有行的概念, 也不再过度拉伸。
 - **关系图上一条跨卡片的连线会被中途吃掉半截**。`.wedges` (SVG) 与 `.wgrid` (卡片) 是同一个层叠上下文里的两个定位兄弟, 后者在 DOM 里靠后于是压在上面, 而卡片是不透明的 —— 一条从左列穿到右列的边只剩两头, 读出来像是断的。给连线层 `z-index:2` 抬到卡片之上, 同时 `.wgrid` **保持 `z-index:auto`** (设了数值它就自成一个层叠上下文, 里面的节点再也抬不过这条线), 悬停/聚焦的那个节点 `z-index:3` 压回线上面, 免得正在读的那行字被线划着。
 - **`el.hidden` 对 `.gbar` / `.topbar .cwd` 这类元素不生效**。UA 的 `[hidden]` 规则与类选择器同权重而作者样式胜出, 于是 `hidden=true` 的元素照旧显示 (空的 graph 条会剩一条带边框的窄带)。补一条 `[hidden]{display:none!important}`。
-
+- **rolepage 三处细节**: 自己发的气泡底色调浅一档; 人的视角不再画「私聊」栏 (人没有 wizard 私聊); 在群里「只看我与 X」时换到 X 的视角, 选中的是「只看我与 原视角」而不是整个群。
 
 ## [1.4.2] - 2026-09-22
 
@@ -591,7 +593,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v1.4.2...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/guxi11/wezard/compare/v1.4.2...v2.0.0
 [1.4.2]: https://github.com/guxi11/wezard/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/guxi11/wezard/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/guxi11/wezard/compare/v1.3.23...v1.4.0
