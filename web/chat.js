@@ -28,7 +28,7 @@
   // 关系/日程两栏共用的世界快照。sel = 当前聚焦的节点, kinds = 边类型开关。
   var W = {
     at: 0, nodes: [], edges: [], chats: [], jobs: [], schedules: [],
-    degraded: false, loaded: false, sel: '', onlyRel: false, kinds: { clone: 1, peer: 1, graph: 1 },
+    degraded: false, loaded: false, sel: '', onlyRel: false, kinds: { clone: 1, spawn: 1, peer: 1, graph: 1 },
     layout: 'cards',
   };
   // 读法是个人偏好, 记在本地。存储不可用 (隐私窗口 / 老 webview) 就退回默认。
@@ -319,13 +319,20 @@
   var renderRole = function () {
     var r = R.role;
     if (!r) return;
-    var kind = r.kind === 'human' ? '人' : r.parent ? '分身' : 'wizard';
+    // 分身 = 从父亲某个 session 节点 fork 出来的 (带着那一刻的上下文);
+    // 子 wizard = 父亲 spawn 的白板, 只有出身、没有继承。
+    var kind = r.kind === 'human' ? '人' : !r.parent ? 'wizard' : r.forkedFrom ? '分身' : '子 wizard';
     // 忙闲由右上角的状态点表达, 名片不再重复。
     var facts = [];
     if (r.cwd) facts.push('<span title="' + esc(r.cwd) + '">📁 ' + esc(shortCwd(r.cwd)) + '</span>');
     if (r.bornAt) facts.push('<span title="创建时间">🐣 ' + esc(fmtDay(r.bornAt)) + '</span>');
-    if (r.parent) facts.push('<span class="go" data-r="' + esc(r.parent.id) + '" title="' + (r.inherited ? '继承了它的上下文' : '空白起步') + '">↳ ' + esc(r.parent.label) + ' .' + esc(r.parent.name) + ' 的分身</span>');
-    if (r.children.length) facts.push('<span>' + r.children.length + ' 个分身</span>');
+    if (r.parent) facts.push(r.forkedFrom
+      ? '<span class="go" data-r="' + esc(r.parent.id) + '" title="从它的 session ' + esc(r.forkedFrom) + ' fork, 开局带着那一刻的上下文">⧉ .' + esc(r.parent.name) + ' 的分身 · @' + esc(r.forkedFrom.slice(0, 8)) + '</span>'
+      : '<span class="go" data-r="' + esc(r.parent.id) + '" title="它 spawn 的白板, 没有继承上下文">↳ .' + esc(r.parent.name) + ' 的子 wizard</span>');
+    var kin = function (xs, what) {
+      return xs.length ? '<span title="' + esc(xs.map(function (x) { return '.' + x.name; }).join(' ')) + '">' + xs.length + ' 个' + what + '</span>' : '';
+    };
+    facts.push(kin(r.clones, '分身'), kin(r.spawns, '子 wizard'));
     $('#rb-who').innerHTML =
       '<div class="id"><span class="av">' + esc(r.label) + '</span>' +
         '<span class="l">' + nm(r.id, r.name) +
@@ -697,12 +704,14 @@
   // ══ 关系视图 ═══════════════════════════════════════════════════════
   // 三层叠在一起:
   //   1. 聊天卡片 (HTML)  —— 归属; 一张卡 = 一个群
-  //   2. 家谱缩进 (HTML)  —— 层级; 分身缩在父亲下面, 左侧一道折线
-  //   3. 连线   (SVG)     —— 其余的关系; 布局表达不了的那些 (跨卡片的分身、
+  //   2. 家谱缩进 (HTML)  —— 层级; 分身 / 子 wizard 缩在父亲下面, 左侧一道折线
+  //   3. 连线   (SVG)     —— 其余的关系; 布局表达不了的那些 (跨卡片的家谱、
   //                         同群与跨群的派活、流水线的一步)
   // 前两层撑起版面 (所以文字永远可读), 第三层才是"图"。
   var EDGE = {
-    clone: { c: '#8250df', label: '分身', dash: '' },
+    // 分身: 从父亲某个 session 节点 fork, 带着上下文; 子 wizard: 父亲 spawn 的白板。
+    clone: { c: '#8250df', label: '分身', dash: '', tip: '从父亲的某个 session 节点 fork 出来, 开局带着那一刻的上下文' },
+    spawn: { c: '#bc4c00', label: '子 wizard', dash: '9 3', tip: '父亲 spawn 的白板 wizard, 只有出身、没有继承上下文' },
     peer: { c: '#0969da', label: '派活', dash: '5 4' },
     graph: { c: '#0a7d6b', label: '流水线', dash: '2 3' },
   };
@@ -753,12 +762,12 @@
   };
 
   var renderWTools = function () {
-    var counts = { clone: 0, peer: 0, graph: 0 };
+    var counts = { clone: 0, spawn: 0, peer: 0, graph: 0 };
     W.edges.forEach(function (e) { counts[e.kind] = (counts[e.kind] || 0) + 1; });
     var cross = W.edges.filter(function (e) { return e.cross; }).length;
     var chips = Object.keys(EDGE).map(function (k) {
       return '<button class="chip' + (W.kinds[k] ? ' on' : '') + '" data-k="' + k + '" ' +
-        'style="--c:' + EDGE[k].c + '"><i></i>' + EDGE[k].label +
+        'style="--c:' + EDGE[k].c + '"' + (EDGE[k].tip ? ' title="' + EDGE[k].tip + '"' : '') + '><i></i>' + EDGE[k].label +
         '<b>' + (counts[k] || 0) + '</b></button>';
     }).join('');
     var force = W.layout === 'force';
@@ -766,7 +775,7 @@
       '<div class="wlegend">' + chips + '</div>' +
       '<div class="wlay">' +
         '<button class="lb' + (force ? '' : ' on') + '" data-lay="cards" ' +
-          'title="按聊天分卡, 分身缩进 —— 归属与层级最准">▦ 卡片</button>' +
+          'title="按聊天分卡, 分身 / 子 wizard 缩在父亲下面 —— 归属与层级最准">▦ 卡片</button>' +
         '<button class="lb' + (force ? ' on' : '') + '" data-lay="force" ' +
           'title="wizard 之间的力导向图, 聊天收进节点 —— 协作关系最直观">🕸 关系网</button>' +
       '</div>' +
@@ -816,12 +825,12 @@
     return '<div class="wnode' + (n.self ? ' self' : '') + (run ? ' run' : '') +
         (n.alive ? '' : ' cold') + (n.target === ROLE ? ' local' : '') + (degree(n.target) ? ' rel' : '') +
         '" data-t="' + esc(n.target) + '" style="margin-left:' + (depth * 16) + 'px">' +
-      (depth ? '<span class="lin" title="分身"></span>' : '') +
+      (depth ? (n.inherited ? '<span class="lin" title="分身"></span>' : '<span class="lin sp" title="子 wizard"></span>') : '') +
       '<span class="wav">' + esc(n.label) + (run ? '<i class="live"></i>' : '') + '</span>' +
       '<span class="wbody">' +
         '<span class="wl1">' +
           '<b class="wname" title="' + esc(n.name || n.target) + '">' + esc(nm) + '</b>' +
-          (n.inherited ? '<span class="wih" title="开局继承了父亲的上下文">⧉</span>' : '') +
+          (n.inherited ? '<span class="wih" title="分身: 从父亲的 session 节点 fork, 开局带着那一刻的上下文">⧉</span>' : '') +
           '<span class="wts">' + esc(fmtAgo(n.lastTs)) + '</span>' +
         '</span>' +
         (n.description ? '<span class="wjob">' + esc(n.description) + '</span>' : '') +
@@ -844,7 +853,7 @@
       }).length;
       var rows = shown.map(function (mm) {
         var n = nodeOf(mm.target);
-        // 「只看有关系的」会把父亲筛掉而留下分身 —— 那时的缩进没有参照物, 拉平。
+        // 「只看有关系的」会把父亲筛掉而留下孩子 —— 那时的缩进没有参照物, 拉平。
         var d = W.onlyRel ? 0 : mm.depth;
         return n ? nodeHTML(n, d) : '';
       }).join('');
@@ -863,7 +872,7 @@
       '</section>';
     }).filter(Boolean).join('');
     wmapEl.innerHTML = '<svg class="wedges" id="wedges"></svg><div class="wgrid">' +
-      (cards || '<div class="empty">此刻没有任何协作关系 —— 派活 / 生分身之后这里就有边了</div>') + '</div>';
+      (cards || '<div class="empty">此刻没有任何协作关系 —— 派活 / 生分身 / 生子 wizard 之后这里就有边了</div>') + '</div>';
     wmapEl.querySelectorAll('.wnode').forEach(function (el) {
       var t = el.getAttribute('data-t');
       if (hood && !hood[t]) el.classList.add('dim');
@@ -956,7 +965,7 @@
   // 卡片布局把「归属」和「层级」交给版面, 代价是聊天必须张张画出来: 一个只出了
   // 一个分身的群也占一整张卡, 而跨聊天那条边得横穿半张图去找对面。
   // 换一种折法 —— 只画 wizard, 聊天收进节点自己 (左侧色条 + 群名一行), 位置交给
-  // 力: 同群相吸自然成簇, 分身的边比派活的边短, 家谱于是仍然读得出来。
+  // 力: 同群相吸自然成簇, 家谱 (分身 / 子 wizard) 的边比派活的边短, 家谱于是仍然读得出来。
   // 两种读法各有盲区 (力导向读不出精确的父子层级), 所以是开关不是替换。
   // 绿在这一页已经有主 (在跑), 所以群色不用绿 —— 一道绿色条会被读成「它活着」。
   var CHAT_C = ['#0969da', '#8250df', '#bc4c00', '#bf3989', '#0a7d6b', '#cf222e', '#9a6700', '#4338ca'];
@@ -1023,7 +1032,7 @@
         a.vx -= ux * f; a.vy -= uy * f; b.vx += ux * f; b.vy += uy * f;
       }
     }
-    // 弹簧 —— 分身的静息长度短于派活的, 于是家谱天然抱成一小团。
+    // 弹簧 —— 家谱边的静息长度短于派活的, 于是家谱天然抱成一小团。
     // 静息长度有个下限: 节点是一张一百多像素宽的卡片, 不是一个点。两端贴到一起
     // 时连线被两张卡各自吃掉一半, 剩下的那截连箭头都放不下 —— 图上就成了一条
     // 看不见的边。下限按两张卡的半宽算, 横着摆也留得出一段看得见的线。
@@ -1033,8 +1042,9 @@
       var za = FX.size[e.from] || { w: 150, h: 36 }, zb = FX.size[e.to] || { w: 150, h: 36 };
       var ex = pb.x - pa.x, ey = pb.y - pa.y;
       var ed = Math.sqrt(ex * ex + ey * ey) || 0.01;
-      var rest = Math.max((za.w + zb.w) / 2 + 30, e.kind === 'clone' ? L * 0.8 : L * 1.35);
-      var k = (e.kind === 'clone' ? 0.06 : 0.032) * Math.min(2.2, 1 + Math.log(1 + e.count) * 0.45);
+      var kin = e.kind === 'clone' || e.kind === 'spawn';
+      var rest = Math.max((za.w + zb.w) / 2 + 30, kin ? L * 0.8 : L * 1.35);
+      var k = (kin ? 0.06 : 0.032) * Math.min(2.2, 1 + Math.log(1 + e.count) * 0.45);
       var g = (ed - rest) * k, gx = ex / ed, gy = ey / ed;
       pa.vx += gx * g; pa.vy += gy * g; pb.vx -= gx * g; pb.vy -= gy * g;
     });
@@ -1361,7 +1371,7 @@
         '<div class="jm">' + (j.members.length
           ? j.members.map(function (mm) {
               return '<span class="jmm">' + wizChip(mm.target) +
-                (mm.spawned ? '<i class="tmp" title="为这个工单临时生的分身, 收工时回收">临时</i>' : '') +
+                (mm.spawned ? '<i class="tmp" title="为这个工单临时生的 wizard (分身或子 wizard), 收工时回收">临时</i>' : '') +
                 '<em>' + esc((mm.task || '').split('\n')[0].slice(0, 70)) + '</em></span>';
             }).join('')
           : '<span class="jmm none">还没有成员</span>') + '</div>' +
@@ -1376,7 +1386,7 @@
       '</section>' +
       '<section class="psec">' +
         '<h3>📋 工单<span>' + open.length + ' 开 / ' + closed.length + ' 收</span></h3>' +
-        (js.length ? open.concat(closed).map(jobRow).join('') : '<div class="pempty">没有工单 —— 一次派出两个以上分身时 open_job 开一个</div>') +
+        (js.length ? open.concat(closed).map(jobRow).join('') : '<div class="pempty">没有工单 —— 一次派出两个以上 wizard 时 open_job 开一个</div>') +
       '</section>';
     planEl.querySelectorAll('.wchip.go').forEach(function (c) {
       c.onclick = function () { openNode(c.getAttribute('data-t')); };

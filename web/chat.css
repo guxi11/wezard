@@ -467,6 +467,8 @@ button { font: inherit; color: inherit }
   border-left: 1.5px solid #d8cdf0; border-bottom: 1.5px solid #d8cdf0;
   border-bottom-left-radius: 6px;
 }
+/* 子 wizard 不是 fork: 折线换成虚线、换色, 与分身一眼分开 (同关系图的 spawn 边)。 */
+.wnode .lin.sp { border-style: dashed; border-color: #f0d2bd }
 .wav {
   position: relative; width: 26px; height: 26px; flex: none; border-radius: 8px;
   background: #f1f3f6; border: 1px solid #eaeef2;

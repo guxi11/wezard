@@ -187,7 +187,9 @@ export const renderCharter = (a: CharterArgs): string => {
       `工作区: \`${a.self.cwd || "(未设置)"}\``,
       `职责: ${a.self.description || "(未写 —— 用 wizard_identity 写一句, 别人靠它决定该不该找你)"}`,
       a.parent
-        ? `出身: 由 **\`${addr(a.parent)}\`** 分身而来${a.inherited ? ", **你继承了它当时的全部上下文**(它读过的文件/文档你开局就有)" : ", 空白起步"}`
+        ? a.inherited
+          ? `出身: **\`${addr(a.parent)}\`** 的分身 —— 从它的 session 节点 fork 而来, **你继承了它当时的全部上下文**(它读过的文件/文档你开局就有)`
+          : `出身: **\`${addr(a.parent)}\`** 生的子 wizard —— 白板起步, 不继承它的上下文`
         : "出身: 本聊天的原生 wizard",
     ]),
     "",

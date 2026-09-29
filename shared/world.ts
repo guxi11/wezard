@@ -35,8 +35,10 @@ export interface WorldFactWizard {
   busy: boolean;
   /** tmux pane 还在 —— false = 冷的, 要说话得先把它拉起来。 */
   alive: boolean;
+  /** 谁生的它 —— 分身与子 wizard 都有; 两者靠 clonedFrom 区分。 */
   parent?: string;
-  /** fork 自哪个 sessionId; 有值 = 它开局就带着父亲的上下文。 */
+  /** fork 自父亲的哪个 sessionId; 有值 = 分身 (从那个 session 节点 clone, 开局带着
+   *  父亲的上下文), 空 = 子 wizard (父亲 spawn 的白板)。 */
   clonedFrom?: string;
   bornAt?: number;
   /** transcript mtime, 0 = 从没写过。 */
@@ -120,13 +122,14 @@ export interface WorldNode {
   peerTurns: number;
 }
 
-export type WorldEdgeKind = "clone" | "peer" | "graph";
+/** clone = 分身 (从父亲的 session 节点 fork); spawn = 子 wizard (父亲生的白板)。 */
+export type WorldEdgeKind = "clone" | "spawn" | "peer" | "graph";
 
 export interface WorldEdge {
   kind: WorldEdgeKind;
   from: string;
   to: string;
-  /** 观测到多少次 (clone 恒为 1 —— 家谱不是流量)。 */
+  /** 观测到多少次 (clone / spawn 恒为 1 —— 家谱不是流量)。 */
   count: number;
   lastTs: number;
   /** 跨聊天的边 —— 画图时单独着重, 它才是"关联起来了"的证据。 */
@@ -311,12 +314,12 @@ export const buildWorld = (
   }, new Map<string, WorldEdge>());
 
   // 登记边 —— 家谱。观测不到 (分身可能一句话没说), 但它是最稳定的一种关系。
-  const withClones = facts.wizards.reduce(
-    (m, w) => (w.parent ? link(m, "clone", w.parent, w.target, w.bornAt ?? 0) : m),
+  const withLineage = facts.wizards.reduce(
+    (m, w) => (w.parent ? link(m, w.clonedFrom ? "clone" : "spawn", w.parent, w.target, w.bornAt ?? 0) : m),
     observed,
   );
 
-  const edges = [...withClones.values()].sort((a, b) => b.lastTs - a.lastTs);
+  const edges = [...withLineage.values()].sort((a, b) => b.lastTs - a.lastTs);
 
   // 有关系的一律留下 —— 边的端点被筛掉, 那条边就没地方落脚了。
   const linked = new Set(edges.flatMap((e) => [e.from, e.to]));

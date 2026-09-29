@@ -271,16 +271,21 @@ export interface RoleInfo {
   /** home 聊天的名字。 */
   chat: string;
   parent?: { id: string; name: string; label: string };
-  children: Array<{ id: string; name: string; label: string }>;
+  /** 分身: 从某个 session 节点 fork 出来的, 开局带着那一刻的上下文。 */
+  clones: Array<{ id: string; name: string; label: string }>;
+  /** 子 wizard: spawn 出来的白板, 只有出身、没有继承。 */
+  spawns: Array<{ id: string; name: string; label: string }>;
   alive: boolean;
   busy: boolean;
-  inherited: boolean;
+  /** fork 自父亲的哪个 sessionId; "" = 不是分身。 */
+  forkedFrom: string;
 }
 
 export const roleInfo = (id: string, dir: Directory, facts: WorldFacts, stats: TagSummary | undefined): RoleInfo => {
   const f = dir.fact(id);
   const ref = (t: string) => ({ id: t, name: dir.nameOf(t), label: dir.labelOf(t) });
   const wiz = dir.isWizard(id);
+  const kids = facts.wizards.filter((w) => w.parent === id);
   return {
     id,
     kind: wiz ? "wizard" : id.startsWith("task:") ? "task" : "human",
@@ -292,10 +297,11 @@ export const roleInfo = (id: string, dir: Directory, facts: WorldFacts, stats: T
     bornAt: f?.bornAt,
     chat: wiz ? dir.chatName(baseOfKey(id)) : "",
     parent: f?.parent ? ref(f.parent) : undefined,
-    children: facts.wizards.filter((w) => w.parent === id).map((w) => ref(w.target)),
+    clones: kids.filter((w) => w.clonedFrom).map((w) => ref(w.target)),
+    spawns: kids.filter((w) => !w.clonedFrom).map((w) => ref(w.target)),
     alive: f?.alive ?? false,
     busy: f?.busy ?? false,
-    inherited: !!f?.clonedFrom,
+    forkedFrom: f?.clonedFrom ?? "",
   };
 };
 
@@ -309,5 +315,5 @@ export const roleStats = (records: readonly DetailRecord[], role: string, now: n
 
 /** 与别的 role 有没有关系 (家谱 / 私聊 / 派活) —— 决定顶栏要不要出「关系图」入口。 */
 export const hasRelations = (msgs: readonly Msg[], role: string, info: RoleInfo): boolean =>
-  !!info.parent || info.children.length > 0 ||
+  !!info.parent || info.clones.length > 0 || info.spawns.length > 0 ||
   msgs.some((m) => involves(m, role) && (m.turn.from?.kind === "peer"));
