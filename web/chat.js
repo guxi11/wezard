@@ -261,6 +261,50 @@
     return (s.sessionId ? s.sessionId.slice(0, 8) : '(无 id)') + ' · ' + fmtAgo(s.start) + ' · ' + s.turns + ' 轮';
   };
 
+  // session 切换: 原生 <select> 的弹层画不了样式, 换成按钮 + 列表。
+  // renderRole 每次刷新都重画, 展开态记在 SESS_OPEN 里才不会被轮询收起。
+  var SESS_OPEN = false;
+  var sessRow = function (s, on) {
+    return '<button class="sp-it' + (on ? ' on' : '') + '" role="option" aria-selected="' + on + '" data-s="' + esc(s.sessionId || '') + '">' +
+      '<span class="id">' + esc(s.sessionId ? s.sessionId.slice(0, 8) : '(无 id)') + '</span>' +
+      '<span class="ago">' + esc(fmtAgo(s.start)) + '</span>' +
+      '<span class="n">' + s.turns + ' 轮</span></button>';
+  };
+  var sessPicker = function () {
+    var cur = R.sessions.filter(function (s) { return s.sessionId === SESSION; })[0];
+    var all = '<button class="sp-it all' + (cur ? '' : ' on') + '" role="option" aria-selected="' + !cur + '" data-s="">' +
+      '<span class="id">全部 session</span><span class="n">' + R.sessions.length + ' 个</span></button>';
+    return '<div class="sp' + (SESS_OPEN ? ' open' : '') + '">' +
+      '<button class="sp-btn" aria-haspopup="listbox" aria-expanded="' + SESS_OPEN + '">' +
+        '<span class="lb">session</span>' +
+        '<span class="v">' + esc(cur ? sessLabel(cur) : '全部 ' + R.sessions.length + ' 个') + '</span>' +
+        '<span class="car" aria-hidden="true"></span></button>' +
+      '<div class="sp-list" role="listbox">' + all +
+        R.sessions.slice().reverse().map(function (s) { return sessRow(s, s.sessionId === SESSION); }).join('') +
+      '</div></div>';
+  };
+  var setSessOpen = function (open) {
+    SESS_OPEN = open;
+    var sp = $('#rb-acts .sp');
+    if (!sp) return;
+    sp.classList.toggle('open', open);
+    sp.querySelector('.sp-btn').setAttribute('aria-expanded', open);
+  };
+  var bindSessPicker = function () {
+    var sp = $('#rb-acts .sp');
+    if (!sp) return;
+    sp.querySelector('.sp-btn').onclick = function () { setSessOpen(!SESS_OPEN); };
+    sp.querySelectorAll('.sp-it').forEach(function (it) {
+      it.onclick = function () { setSessOpen(false); SESSION = it.getAttribute('data-s'); refresh(); };
+    });
+  };
+  document.addEventListener('click', function (e) {
+    if (SESS_OPEN && !e.target.closest('#rb-acts .sp')) setSessOpen(false);
+  });
+  document.addEventListener('keydown', function (e) {
+    if (SESS_OPEN && e.key === 'Escape') setSessOpen(false);
+  });
+
   // 名片: 身份 · 出身 · cwd · 出生 · session 切换 · 关系 / 日程入口。
   var renderRole = function () {
     var r = R.role;
@@ -284,18 +328,11 @@
       g.onclick = function () { switchRole(g.getAttribute('data-r')); };
     });
     var acts = [];
-    if (R.sessions.length > 1) {
-      acts.push('<select id="sess" aria-label="session">' +
-        '<option value="">全部 ' + R.sessions.length + ' 个 session</option>' +
-        R.sessions.slice().reverse().map(function (s) {
-          return '<option value="' + esc(s.sessionId) + '"' + (s.sessionId === SESSION ? ' selected' : '') + '>' + esc(sessLabel(s)) + '</option>';
-        }).join('') + '</select>');
-    }
+    if (R.sessions.length > 1) acts.push(sessPicker());
     if (R.relations) acts.push('<button class="vb' + (VIEW === 'world' ? ' on' : '') + '" data-view="world">关系图</button>');
     if (r.kind === 'wizard') acts.push('<button class="vb' + (VIEW === 'plan' ? ' on' : '') + '" data-view="plan">日程' + (R.schedules ? '<b>' + R.schedules + '</b>' : '') + '</button>');
     $('#rb-acts').innerHTML = acts.join('');
-    var sel = $('#sess');
-    if (sel) sel.onchange = function () { SESSION = sel.value; refresh(); };
+    bindSessPicker();
     $('#rb-acts').querySelectorAll('.vb').forEach(function (b) {
       b.onclick = function () { setView(VIEW === b.getAttribute('data-view') ? 'msgs' : b.getAttribute('data-view')); };
     });

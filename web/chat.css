@@ -62,10 +62,41 @@ button { font: inherit; color: inherit }
 .rolebar .facts .st.on { color: var(--pub) }
 .rolebar .acts { display: flex; gap: 6px; flex-wrap: wrap; align-items: center }
 .rolebar .acts:empty { display: none }
-.rolebar select {
-  font: inherit; font-size: 12px; color: var(--ink); background: var(--card);
-  border: 1px solid var(--line); border-radius: 7px; padding: 4px 8px; min-width: 0; flex: 1 1 100%;
+/* session 切换: 按钮 + 浮层列表, 取代原生 <select>。 */
+.sp { position: relative; flex: 1 1 100%; min-width: 0 }
+.sp-btn {
+  width: 100%; display: flex; align-items: center; gap: 8px; cursor: pointer; text-align: left;
+  font-size: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px;
+  transition: border-color .12s, box-shadow .12s;
 }
+.sp-btn:hover, .sp.open .sp-btn { border-color: var(--accent) }
+.sp.open .sp-btn { box-shadow: 0 0 0 3px #2f55c91f }
+.sp-btn .lb { font-size: 10px; color: var(--faint); text-transform: uppercase; letter-spacing: .4px; flex: none }
+.sp-btn .v { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums }
+.sp-btn .car {
+  flex: none; width: 6px; height: 6px; margin: -3px 2px 0 0; border: solid var(--mute); border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg); transition: transform .15s;
+}
+.sp.open .sp-btn .car { transform: rotate(-135deg); margin-top: 3px }
+.sp-list {
+  position: absolute; z-index: 20; left: 0; right: 0; top: calc(100% + 4px);
+  max-height: 280px; overflow-y: auto; overscroll-behavior: contain;
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 4px;
+  box-shadow: 0 8px 24px #1c24301f, 0 2px 6px #1c24300f;
+  opacity: 0; transform: translateY(-4px); pointer-events: none; transition: opacity .12s, transform .12s;
+}
+.sp.open .sp-list { opacity: 1; transform: none; pointer-events: auto }
+.sp-it {
+  width: 100%; display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: baseline;
+  background: none; border: 0; border-radius: 6px; padding: 6px 8px; cursor: pointer; text-align: left; font-size: 12px;
+}
+.sp-it:hover { background: var(--paper) }
+.sp-it.on { background: var(--mine); color: var(--accent) }
+.sp-it .id { font-family: ui-monospace, Menlo, monospace; font-weight: 600 }
+.sp-it .ago { color: var(--mute) }
+.sp-it .n { color: var(--faint); font-variant-numeric: tabular-nums; grid-column: 3 }
+.sp-it.all { border-bottom: 1px solid var(--line); border-radius: 6px 6px 0 0; margin-bottom: 3px }
+.sp-it.all .id { font-family: inherit }
 
 /* profile: 这个 role 自己跑过的轮次的总账 —— 原来钉在对话窗口底部, 但它描述的是
    role, 不是某个会话。 */
