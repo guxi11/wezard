@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [2.1.4] - 2026-10-01
+
 ### Changed
 - rolepage 一对一会话 (私聊, 或群里「只看我与 X」) 的顶栏并排显示两端角色的头像。
 - rolepage 消息头补齐头像: 收信方名字前带它的头像, 自己发的消息在头部最右带自己的头像; 点头像切到那个角色的视角。
@@ -12,6 +14,7 @@
 
 ### Fixed
 - 企微图文混排消息里的图片下载超时放宽到 60s, 失败自动重试一次; 仍失败时在转给 agent 的文本里注明丢了几张图, 不再静默丢弃。
+- rolepage 里带图的问话以 transcript 落盘的文本为准: 保留 CLI 插进去的 `[Image #N]` 占位, 在 CLI 里手敲的图文消息不再整条丢失。
 
 ## [2.1.3] - 2026-10-01
 
@@ -752,7 +755,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.1.3...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.1.4...HEAD
+[2.1.4]: https://github.com/guxi11/wezard/compare/v2.1.3...v2.1.4
 [2.1.3]: https://github.com/guxi11/wezard/compare/v2.1.2...v2.1.3
 [2.1.2]: https://github.com/guxi11/wezard/compare/v2.1.1...v2.1.2
 [2.1.1]: https://github.com/guxi11/wezard/compare/v2.1.0...v2.1.1
