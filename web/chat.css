@@ -367,6 +367,7 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
   display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: #fff;
   cursor: pointer; list-style: none; font-size: 11.5px; color: #8c959f;
   font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums;
+  text-transform: none; letter-spacing: 0; /* SHARED_CSS 的 details summary 会转大写 —— 这里是 wizard 名, 大小写敏感 */
 }
 .ping-fold > .ping-sum::-webkit-details-marker { display: none }
 .ping-fold > .ping-sum::after {
