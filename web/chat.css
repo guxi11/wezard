@@ -68,16 +68,17 @@ button { font: inherit; color: inherit }
 .rolebar .facts span { white-space: nowrap }
 .rolebar .go { cursor: pointer; color: var(--accent) }
 .rolebar .go:hover { text-decoration: underline }
-.acts { flex: none; display: flex; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--line) }
+.acts { flex: none; display: flex; align-items: center; padding: 9px 6px; border-bottom: 1px solid var(--line) }
 .acts:empty { display: none }
 /* 旧外壳 (daemon 未重启) 里它还在名片内 —— 那里不需要自己的内边距与分隔线。 */
 .rolebar .acts { padding: 0; border: 0 }
+/* 文本按钮: 无底无框, 行高就是两者之间那条分割线的高度。 */
 .bd {
-  flex: 1; font-size: 12.5px; line-height: 28px; padding: 0 10px; border: 0; border-radius: 8px; cursor: pointer;
-  background: #f1f3f6; color: var(--mute); white-space: nowrap;
+  font-size: 12.5px; line-height: 14px; padding: 0 10px; border: 0; cursor: pointer;
+  background: none; color: var(--mute); white-space: nowrap;
 }
-.bd:hover { color: var(--accent) }
-.bd.on { background: var(--mine-soft); color: var(--accent) }
+.bd + .bd { border-left: 1px solid var(--line) }
+.bd:hover, .bd.on { color: var(--accent) }
 .bd b { font-weight: 600; margin-left: 4px; font-variant-numeric: tabular-nums }
 /* session 切换: 按钮 + 浮层列表, 取代原生 <select>。 */
 .sp { position: relative; flex: 1 1 100%; min-width: 0 }
