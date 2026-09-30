@@ -311,6 +311,11 @@
       ms.map(function (m) { return '<i>' + esc(m.label || roleLabel(m.role)) + '</i>'; }).join('') + '</span>';
   };
 
+  // ends = [[id, 已知头像]]; 没带头像的按 role 查。
+  var pairOf = function (ends) {
+    return '<span class="pair">' + ends.map(function (e) { return goSpan('av', e[0], esc(e[1] || roleLabel(e[0]))); }).join('') + '</span>';
+  };
+
   var line = function (title, ts, pv, lamp, unread) {
     return '<span class="b"><span class="l1"><span class="t">' + title + '</span>' + (lamp || '') +
       '<span class="ts">' + esc(fmtAgo(ts)) + '</span></span>' +
@@ -591,7 +596,10 @@
     }
     var c = convOf(CONV);
     if (!c) { who.innerHTML = ''; acts.innerHTML = ''; return; }
-    who.innerHTML = '<span class="t">' + (c.kind === 'wizard' ? nm(c.peer, c.name, true) : esc(c.name)) + '</span>';
+    // 一对一 (私聊, 或群里「只看我与 X」) 两端都亮头像: 我在前, 对端在后, 各自是切视角的入口。
+    var peer = c.kind !== 'group' ? c.peer : WITH;
+    who.innerHTML = (peer ? pairOf([[ROLE, R.role && R.role.label], [peer, c.kind !== 'group' && c.label]]) : '') +
+      '<span class="t">' + (c.kind === 'wizard' ? nm(c.peer, c.name, true) : esc(c.name)) + '</span>';
     acts.innerHTML = WITH
       ? '<span class="with">只看我与 ' + nm(WITH, '', true) + '</span><button class="vb" id="ch-all">看全部</button>'
       : '';
@@ -605,6 +613,11 @@
   // 箭头朝外 = 这条气泡换视角后要去的那一侧; mine 行靠 CSS 翻转。
   var CHEVRON = '<svg class="fc" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   // 行的另一侧是 .flip: 点它 = 换成这条消息的对端 (我发的 → 收信方; 别人发的 → 发话方)。
+  // 消息头上的角色头像 (发话方 / 收信方同一种画法), 点它切到那个角色的视角。
+  var avBtn = function (id, label) {
+    var sw = canSwitch(id) && id !== ROLE;
+    return '<button class="av' + (sw ? ' go' : '') + '" data-r="' + esc(id) + '" title="' + esc(nameOf(id)) + '"' + (sw ? '' : ' disabled') + '>' + esc(label || roleLabel(id)) + '</button>';
+  };
   var rowHTML = function (m) {
     learn(m.from, m.fromName, m.fromLabel);
     learn(m.to, m.toName, m.toLabel);
@@ -616,21 +629,20 @@
     // 看 key 而不是会话列表: 换视角就地重包时, 列表还是上一个 role 的。
     var group = CONV.indexOf('p:') !== 0;
     // 群里我不是收信方的那条 (X → Y), 头上写清是说给谁的。
-    var to = !mine && m.to !== ROLE && group ? '<span class="to">→ ' + nm(m.to, m.toName, true) + '</span>' : '';
+    var to = !mine && m.to !== ROLE && group ? '<span class="to">→ ' + avBtn(m.to, m.toLabel) + nm(m.to, m.toName, true) + '</span>' : '';
     var priv = !m.channel && group ? '<span class="ch priv">私聊</span>' : '';
     // 本轮的账 (呼吸点 + 模型 / token / 耗时) 跟在时刻后面 —— 片段是服务端渲染好的。
     var stat = m.meta ? '<span class="mstat">' + m.meta + '</span>' : '';
     var who = mine
-      ? '<span class="to">' + (m.to && m.to !== 'human:' ? '→ ' + nm(m.to, m.toName, true) : '') + '</span>' + stamp(m.ts) + stat
-      : nm(m.from, m.fromName, true) + to + priv + stamp(m.ts) + stat;
+      ? '<span class="to">' + (m.to && m.to !== 'human:' ? '→ ' + avBtn(m.to, m.toLabel) + nm(m.to, m.toName, true) : '') + '</span>' + stamp(m.ts) + stat + avBtn(m.from, m.fromLabel)
+      : avBtn(m.from, m.fromLabel) + nm(m.from, m.fromName, true) + to + priv + stamp(m.ts) + stat;
     var sw = canSwitch(other);
     var flip = '<button class="flip" data-r="' + esc(other) + '"' + (sw ? '' : ' disabled tabindex="-1"') +
       ' aria-label="' + esc(sw ? '切到 ' + nameOf(other) + ' 的视角' : '') + '">' +
       (sw ? '<span class="fi"><span class="fn">' + esc(nameOf(other)) + '</span>' + CHEVRON + '</span>' : '') + '</button>';
-    var av = mine ? '' : '<button class="av' + (canSwitch(m.from) ? ' go' : '') + '" data-r="' + esc(m.from) + '" title="' + esc(nameOf(m.from)) + '"' + (canSwitch(m.from) ? '' : ' disabled') + '>' + esc(m.fromLabel || roleLabel(m.from)) + '</button>';
     return '<div class="mrow ' + (mine ? 'mine' : 'them') + '" data-id="' + esc(m.id) + '" data-turn="' + esc(m.turnId || m.id) + '" data-ts="' + m.ts + '"' +
       (m.ping ? ' data-ping="1" data-ping-who="' + esc(m.dir === 'in' ? m.toName : m.fromName) + '"' : '') + ' data-sig="' + esc(m.sig) + '" data-stale-at="' + (m.staleAt || 0) + '">' +
-      '<div class="mcol"><div class="mwho">' + av + who + '</div><div class="mb">' + m.html + '</div></div>' +
+      '<div class="mcol"><div class="mwho">' + who + '</div><div class="mb">' + m.html + '</div></div>' +
       flip +
     '</div>';
   };

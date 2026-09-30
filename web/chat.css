@@ -240,6 +240,15 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 }
 .chathead .back { display: none; border: 0; background: none; font-size: 22px; color: var(--mute); cursor: pointer; padding: 0 4px }
 .ch-who { display: flex; gap: 11px; align-items: center; min-width: 0; flex: 1 }
+/* 一对一的两端头像: 同单个角色头像的画法, 后一个略压住前一个。 */
+.ch-who .pair { display: flex; flex: none; align-items: center }
+.ch-who .pair .av {
+  display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px;
+  background: #fff; border: 1px solid var(--line); font-size: 20px; line-height: 1;
+}
+.ch-who .pair .av + .av { margin-left: -8px; box-shadow: -2px 0 0 var(--card) }
+.ch-who .pair .av.go { cursor: pointer }
+.ch-who .pair .av.go:hover { border-color: var(--accent) }
 .ch-who .t { font-size: 16px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .ch-who > .t:not(:only-child) { flex: none }
 .ch-who .sub { font-size: 11.5px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
@@ -278,7 +287,7 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .mrow.mine { flex-direction: row-reverse }
 .mrow.mine .mcol { align-items: flex-end }
 .mwho { font-size: 11.5px; color: var(--mute); display: flex; gap: 6px; align-items: center; flex-wrap: wrap }
-.mwho .to { color: var(--faint) }
+.mwho .to { color: var(--faint); display: inline-flex; gap: 6px; align-items: center }
 .mwho .ch { font-size: 10.5px; border-radius: 4px; padding: 0 4px }
 .mwho .ch.priv { color: var(--priv); background: #9a5b1014 }
 /* 时刻只此一处 —— 气泡外, 跟着名字走。等宽数字让一列时间对得齐。 */
