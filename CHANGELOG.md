@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-09-30
+
 ### Added
 - MCP `read_chat`: 像人翻聊天记录那样读往来, 一行一句 `[时刻] 谁 → 谁: 正文`。三级收窄 `role` (谁的视角) → `chat` (哪个群) → `target` (和谁), 都不给即调用方这一轮所在的群; `since` / `until` / `limit` 按时间翻页。从各会话的 transcript 现拼 (不经 turn store): 每个来回取问话与终句, 不带工具调用; 频道与发话方读每句话挂着的信封。
 
@@ -699,7 +701,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.0.6...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/guxi11/wezard/compare/v2.0.6...v2.1.0
 [2.0.6]: https://github.com/guxi11/wezard/compare/v2.0.5...v2.0.6
 [2.0.5]: https://github.com/guxi11/wezard/compare/v2.0.4...v2.0.5
 [2.0.4]: https://github.com/guxi11/wezard/compare/v2.0.3...v2.0.4
