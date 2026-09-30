@@ -110,6 +110,15 @@ export const settleName = (store: WizardStore | undefined, chatName: string, tar
   return store && want ? store.claim(target, want) : want;
 };
 
+/** 默认会话重开 (`/new`) 时名字回到聊天名: 旧名是上一段会话的, 新会话按聊天重新出生。
+ *  slot 或聊天无名时不动; 撞名照旧挂 `-N`。返回落定的名字。 */
+export const reclaimChatName = (store: WizardStore | undefined, chatName: string, target: string): string => {
+  const have = settleName(store, chatName, target);
+  return store && chatName && !tagOfKey(target) && have.toLowerCase() !== chatName.toLowerCase()
+    ? store.rename(target, chatName)
+    : have;
+};
+
 /** 一次性迁移/补名: 默认会话先挑 (聊天名归它), 其余按出生先后。 */
 export const settleAll = (
   store: WizardStore,

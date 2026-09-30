@@ -20,7 +20,7 @@ import { syncProjectConfig, renderSyncReport } from "./cfg-sync.js";
 import { captureQuota, renderQuotaReport } from "./quota.js";
 import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe, allNames, normalizeTag, uniqueTag, displayName, labelFor, tagLink } from "../shared/session-label.js";
 import { chatNameOf, clearChatName, listChatNames, peerAddress, setChatName } from "./chat-name.js";
-import { wizardStore } from "./wizard.js";
+import { reclaimChatName, wizardStore } from "./wizard.js";
 import { truncate } from "../shared/std.js";
 
 /** 判定"引用内容是否已在目标会话上下文里"时回看的轮数 —— 引用的通常是最近几轮
@@ -642,8 +642,12 @@ export const installInboundRouter = (
   };
 
   // 显式 /new:排队但仍强制重开(用户就是要换一个)。
+  // 默认会话先把名字换回聊天名, 再 spawn —— charter 在 spawn 时按名字渲染。
   const autoSpawnAndAttach = (who: string, cli?: CliBackendName, model?: string): Promise<{ err?: string }> =>
-    serializeSpawn(who, () => spawnSession(who, cli, false, model));
+    serializeSpawn(who, () => {
+      reclaimChatName(wizardStore(), chatNameOf(cfg, who), who);
+      return spawnSession(who, cli, false, model);
+    });
 
   // 隐式建会话(新 `.name` 的第一条消息):轮到自己时若前一条已经把会话建好,直接
   // 复用,不再 respawn —— 否则先到的消息会被注入进一个刚被杀掉的 pane。
