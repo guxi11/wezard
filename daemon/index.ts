@@ -45,6 +45,7 @@ import {
   wizardStore,
   settleName,
   settleAll,
+  evictStaleName,
   childrenOf,
   ancestorsOf,
   renderCharter,
@@ -382,7 +383,7 @@ const main = async (): Promise<void> => {
         return;
       }
       const foreign = base !== baseOfKey(self);
-      const slotR = await claimSlot(base, String(body.name ?? body.tag ?? ""), tagFromCwd(cwd) || "peer");
+      const slotR = await claimSlot(base, String(body.name ?? body.tag ?? ""), tagFromCwd(cwd) || "peer", [self]);
       if (!slotR.ok) { json(res, slotR.status, slotR.body); return; }
       const { target, slot: tag } = slotR;
       const existed = !!wizards.get(target);
@@ -592,23 +593,36 @@ const main = async (): Promise<void> => {
     /** 入参里的地址: 新字段 `name`, 老 MCP 进程 (正在跑的 wizard) 仍在传 `tag`。 */
     const addrOf = (b: { name?: unknown; tag?: unknown }): string => String(b.name ?? b.tag ?? "");
 
+    /** 撞上的名字属于一个静默超过一天的 wizard → 顶掉它 (见 evictStaleName), 同群的
+     *  wizard 收到一行名册变动; 返回是否腾出了名字。 */
+    const displace = async (name: string, keep: readonly string[]): Promise<boolean> => {
+      const gone = await evictStaleName(wizards, name, keep, { lastActivity: m.lastActivity, retire: m.killPane });
+      if (!gone) return false;
+      const slot = !!tagOfKey(gone.target);
+      log.child({ mod: "wizard" }).info({ target: gone.target, name: gone.name, slot }, "stale name evicted");
+      postRoster(baseOfKey(gone.target), [], `**.${gone.name}** 静默超过一天, ${slot ? "已被同名的新 wizard 顶掉并收工" : "名字让给了同名的新 wizard"}`);
+      return true;
+    };
+
     /** 给一个要出生的 wizard 挑槽位 (target key) 并落定名字。名字全局唯一:
-     *  - 撞上的是一个还绑着会话的 wizard → 409, 附上它的死活, 调用方据此换名或先收掉它;
      *  - 撞上的只是目标群里同一个槽位的冷记录 (会话早没了) → 复用这个槽, 即原名重生,
      *    与从前「同一个 tag 重开」一样, 家谱/记忆都还在;
-     *  - 撞上别的群里的冷记录 → 409: 名字仍被那条记录占着。
+     *  - 撞上的 wizard 静默超过一天 (不在 `keep` 里) → 顶掉它, 名字归新的;
+     *  - 其余 (还新鲜的) → 409, 附上它的死活, 调用方据此换名或先收掉它。
      *  槽位 (key 里的 `#k`) 只是内部 id: 默认取名字本身, 被占了就加序号, 与名字无关。 */
     const claimSlot = async (
       base: string,
       want: string,
       fallback: string,
+      keep: readonly string[] = [],
     ): Promise<{ ok: true; target: string; slot: string } | { ok: false; status: number; body: Record<string, unknown> }> => {
       const asked = normalizeTag(want);
       const clash = asked ? wizards.byName(asked) : undefined;
-      if (clash) {
-        const bound = m.chatTargets(baseOfKey(clash.target)).includes(clash.target);
-        const reusable = !bound && baseOfKey(clash.target) === base && !!tagOfKey(clash.target);
-        if (reusable) return { ok: true, target: clash.target, slot: tagOfKey(clash.target) };
+      const bound = !!clash && m.chatTargets(baseOfKey(clash.target)).includes(clash.target);
+      if (clash && !bound && baseOfKey(clash.target) === base && tagOfKey(clash.target)) {
+        return { ok: true, target: clash.target, slot: tagOfKey(clash.target) };
+      }
+      if (clash && !(await displace(asked, keep))) {
         const info = bound ? (await m.peers(clash.target)).find((p) => p.target === clash.target) : undefined;
         const alive = info?.paneAlive ?? false;
         const idleForMs = info?.lastActivity ? Date.now() - info.lastActivity : undefined;
@@ -617,7 +631,7 @@ const main = async (): Promise<void> => {
           ? "它的 pane 还活着 —— 除非这就是同一件事的延续, 否则换个名字重新生, 别把不相关的活塞给一个已经有职责的 wizard"
           : bound
             ? `pane 已经不在了 (${idleDesc}), 真要复用这个名字就先 stop_wizard({name:"${clash.name}", mode:"end"}) 收掉, 再用同一个名字重新生 —— 拿到干净的上下文; 别直接 send_peer 唤醒它接手, 它会带着上一件事的记忆答你这件`
-            : "这个名字被别的群里一个已经不在跑的 wizard 占着 —— 换个名字";
+            : "这个名字被一个一天内还活动过、眼下没有会话的 wizard 占着 —— 换个名字 (它静默满一天后名字会自动让出)";
         return {
           ok: false,
           status: 409,
@@ -1310,7 +1324,7 @@ const main = async (): Promise<void> => {
         return;
       }
       const askedName = String(b.name ?? b.tag ?? "");
-      const slotR = await claimSlot(base, askedName, normalizeTag(b.description?.split(/\s+/)[0]) || "clone");
+      const slotR = await claimSlot(base, askedName, normalizeTag(b.description?.split(/\s+/)[0]) || "clone", [self, source]);
       if (!slotR.ok) { json(res, slotR.status, slotR.body); return; }
       const { target, slot: tag } = slotR;
       const forkOf = inherit && source !== self ? source : undefined;

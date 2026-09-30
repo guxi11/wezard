@@ -18,7 +18,7 @@ import { syncProjectConfig, renderSyncReport } from "./cfg-sync.js";
 import { captureQuota, renderQuotaReport } from "./quota.js";
 import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe, allNames, normalizeTag, uniqueTag, displayName, labelFor, tagLink } from "../shared/session-label.js";
 import { chatNameOf, clearChatName, listChatNames, peerAddress, setChatName } from "./chat-name.js";
-import { reclaimChatName, wizardStore } from "./wizard.js";
+import { evictStaleName, reclaimChatName, wizardStore, type EvictDeps } from "./wizard.js";
 import { truncate } from "../shared/std.js";
 
 /** 判定"引用内容是否已在目标会话上下文里"时回看的轮数 —— 引用的通常是最近几轮
@@ -629,17 +629,36 @@ export const installInboundRouter = (
 
   // 显式 /new:排队但仍强制重开(用户就是要换一个)。
   // 默认会话先把名字换回聊天名, 再 spawn —— charter 在 spawn 时按名字渲染。
-  const autoSpawnAndAttach = (who: string, cli?: CliBackendName, model?: string): Promise<{ err?: string }> =>
-    serializeSpawn(who, () => {
-      reclaimChatName(wizardStore(), chatNameOf(cfg, who), who);
+  // 聊天名若被一个静默超过一天的 wizard 占着, 先顶掉它 —— 否则默认会话只能退避成 `-N`。
+  const staleDeps: EvictDeps = {
+    lastActivity: (t) => bridge.lastActivity(t),
+    retire: async (t) => { await bridge.killPane(t); },
+  };
+  // 新开的 slot 先按人写的名字落名: slot 只是内部 id, 被一个改过名的冷 wizard 占着
+  // 时会挪成 `foo-N` —— 名字不该跟着它退避。已有名字的 wizard 不受影响 (claim 不改)。
+  const claimAsked = (who: string, asked: string): void => {
+    if (asked) wizardStore()?.claim(who, asked);
+  };
+  const autoSpawnAndAttach = (who: string, asked: string, cli?: CliBackendName, model?: string): Promise<{ err?: string }> =>
+    serializeSpawn(who, async () => {
+      claimAsked(who, asked);
+      const chat = chatNameOf(cfg, who);
+      if (chat && !tagOf(who)) {
+        const gone = await evictStaleName(wizardStore(), chat, [who], staleDeps);
+        if (gone) log.info({ target: gone.target, name: gone.name }, "stale name evicted by /new");
+      }
+      reclaimChatName(wizardStore(), chat, who);
       return spawnSession(who, cli, false, model);
     });
 
   // 隐式建会话(新 `.name` 的第一条消息):轮到自己时若前一条已经把会话建好,直接
   // 复用,不再 respawn —— 否则先到的消息会被注入进一个刚被杀掉的 pane。
-  const ensureSession = (who: string): Promise<{ err?: string }> =>
-    serializeSpawn(who, async () =>
-      bridge.hasMirrorTarget(who) ? {} : await spawnSession(who, undefined, true));
+  const ensureSession = (who: string, asked: string): Promise<{ err?: string }> =>
+    serializeSpawn(who, async () => {
+      if (bridge.hasMirrorTarget(who)) return {};
+      claimAsked(who, asked);
+      return spawnSession(who, undefined, true);
+    });
 
   // Prefix user-visible daemon replies with `<emoji> .name`, so a chat hosting
   // several wizards stays visually disambiguated. Emoji is derived from the
@@ -651,7 +670,7 @@ export const installInboundRouter = (
 
   // Common gating: claim bootstrap + allowFrom check. Returns true if the
   // caller should stop (claim consumed or message rejected).
-  const gate = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, text: string, who: string): Promise<{ stop: boolean }> => {
+  const gate = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, text: string, who: string, asked = ""): Promise<{ stop: boolean }> => {
     const auths = authPrincipals(msg);
     // Bootstrap / allowFrom operations are chat-scoped, not session-scoped;
     // use the chat principal, not the routed wizard — a first-time user typing
@@ -778,7 +797,7 @@ export const installInboundRouter = (
     // picks which wizard (re)spawns; the name is also the tmux window name.
     const nu = parseNewCommand(text);
     if (nu) {
-      const { err } = await autoSpawnAndAttach(who, nu.cli, nu.model);
+      const { err } = await autoSpawnAndAttach(who, asked, nu.cli, nu.model);
       if (err) {
         await replyText(frame, msg, who, err);
         return { stop: true };
@@ -927,7 +946,7 @@ export const installInboundRouter = (
     // to auto-spawn: this inbound becomes both the binding signal and the
     // first prompt — attach, then fall through to dispatch.
     if (!bridge.hasMirrorTarget(who)) {
-      const { err } = await ensureSession(who);
+      const { err } = await ensureSession(who, asked);
       if (err) {
         await replyText(frame, msg, who, err);
         return { stop: true };
@@ -1022,7 +1041,7 @@ export const installInboundRouter = (
     if (!msg) return;
     const { text, tag, promoted, who } = route(msg, stripAt(msg, msg.text?.content ?? ""));
     log.info({ msgid: msg.msgid, len: text.length, tag, hasQuote: !!msg.quote, promoted }, "rx text");
-    const { stop } = await gate(frame, msg, text, who);
+    const { stop } = await gate(frame, msg, text, who, tag);
     if (stop) return;
     await send(frame, msg, who, text);
   });
@@ -1033,8 +1052,8 @@ export const installInboundRouter = (
     log.info({ msgid: msg.msgid, hasQuote: !!msg.quote }, "rx image");
     // Images carry no text of their own — the quote (if any) is the only
     // routing signal; without it they land on the chat's default session.
-    const { text, who } = route(msg, "");
-    const { stop } = await gate(frame, msg, "", who);
+    const { text, tag, who } = route(msg, "");
+    const { stop } = await gate(frame, msg, "", who, tag);
     if (stop) return;
     const path = await downloadToInbox({ client, log, inboxDir }, msg.image.url, msg.image.aeskey, msg.msgid, 0);
     if (!path) {
@@ -1058,8 +1077,8 @@ export const installInboundRouter = (
       .filter((it) => it.msgtype === "text")
       .map((it) => (it as { text?: { content?: string } }).text?.content ?? "")
       .join("\n");
-    const { who } = route(msg, stripAt(msg, rawText));
-    const { stop } = await gate(frame, msg, "", who);
+    const { tag, who } = route(msg, stripAt(msg, rawText));
+    const { stop } = await gate(frame, msg, "", who, tag);
     if (stop) return;
     const texts: string[] = [];
     const images: string[] = [];

@@ -253,7 +253,7 @@ server.registerTool(
   {
     title: "Spawn a blank new wizard",
     description:
-      "在指定项目目录下长出一个**全新的 wizard** —— 自己的 tmux pane、自己的全局名字 (`.name`), home 默认是你这个聊天, 等价于人在群里敲 `/new .name`。它**不继承任何上下文**(白纸一张): 要一个开局就带着你读过的材料的分身, 用 clone_wizard; 要一个归你管、干完可回收的白板子 wizard, 用 spawn_wizard。这个工具生的 wizard 独立长住, 不挂在谁名下。新 wizard 在群里说话时气泡头是 `emoji .name`, 之后用 wizard_roster / peek_peer / send_peer / wait_peer 驱动它。用户说「在 /path 下新建一个会话」「帮我在 xxx 目录起个 agent」时调它。给 `chat` 就把它的 home 设在**另一个**聊天里 —— 那个聊天必须起过名字(list_chats 能看到)。目录不存在会自动创建。绝不会顶掉一个聊天的默认 wizard。名字全局唯一: 撞上一个还在的 wizard 返回 409, 返回里的 `name` 是最终落定的名字。",
+      "在指定项目目录下长出一个**全新的 wizard** —— 自己的 tmux pane、自己的全局名字 (`.name`), home 默认是你这个聊天, 等价于人在群里敲 `/new .name`。它**不继承任何上下文**(白纸一张): 要一个开局就带着你读过的材料的分身, 用 clone_wizard; 要一个归你管、干完可回收的白板子 wizard, 用 spawn_wizard。这个工具生的 wizard 独立长住, 不挂在谁名下。新 wizard 在群里说话时气泡头是 `emoji .name`, 之后用 wizard_roster / peek_peer / send_peer / wait_peer 驱动它。用户说「在 /path 下新建一个会话」「帮我在 xxx 目录起个 agent」时调它。给 `chat` 就把它的 home 设在**另一个**聊天里 —— 那个聊天必须起过名字(list_chats 能看到)。目录不存在会自动创建。绝不会顶掉一个聊天的默认 wizard。名字全局唯一: 撞上的 wizard 静默超过一天就直接顶掉它、名字归新的; 撞上一个还在的 wizard 返回 409, 返回里的 `name` 是最终落定的名字。",
     inputSchema: {
       cwd: z.string().describe("Absolute project path to start the new session in, e.g. /Users/foo/projects/bar. Created if missing."),
       name: z
@@ -703,7 +703,7 @@ const bear = (tool: string, inherit: boolean) => async (a: Offspring) =>
   }));
 
 const OFFSPRING_TAIL =
-  "名字全局唯一: 撞上一个还在的 wizard 返回 409 (附它的死活), 返回里的 `name` 是落定的名字。之后用 send_peer 继续派活、wait_peer 等它做完、stop_wizard 收掉它。它自己也能再 spawn_wizard / clone_wizard, 层级不限。每一个都有成本 (一个 pane + 一份上下文), 名下同时活着的有上限; 任务少于两三件时你自己做完更快。";
+  "名字全局唯一: 撞上的 wizard 静默超过一天就直接顶掉它、名字归新的; 撞上一个还在的 wizard 返回 409 (附它的死活), 返回里的 `name` 是落定的名字。之后用 send_peer 继续派活、wait_peer 等它做完、stop_wizard 收掉它。它自己也能再 spawn_wizard / clone_wizard, 层级不限。每一个都有成本 (一个 pane + 一份上下文), 名下同时活着的有上限; 任务少于两三件时你自己做完更快。";
 
 server.registerTool(
   "spawn_wizard",

@@ -1912,6 +1912,9 @@ export interface MirrorBridge {
    *  persisted binding so nothing resurrects it. The chat auto-spawns a fresh
    *  session on its next message. */
   killPane: (target: string) => Promise<{ ok: boolean; reason?: string }>;
+  /** Transcript mtime of the session bound to `target`; 0 = no session / not
+   *  written yet. One statSync, no tmux — same cheap gate reapIdle uses. */
+  lastActivity: (target: string) => number;
   /** Idle reaper: kill the tmux pane of every session whose transcript has been
    *  silent for `ttlMs`, but KEEP the persisted binding — the next inbound
    *  resurrects it via the dead-pane `--resume` path (reap = asleep, /kill =
@@ -5779,6 +5782,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       deps.store.drop(target);
       log.info({ target, sessionId: a?.sessionId, pane }, "mirror /kill — pane killed, binding dropped");
       return { ok: true };
+    },
+    lastActivity: (target) => {
+      const jsonl = jsonlOf(target);
+      try { return jsonl ? statSync(jsonl).mtimeMs : 0; } catch { return 0; }
     },
     reapIdle: async (ttlMs, skip) => {
       const now = Date.now();

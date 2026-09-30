@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### Changed
+- **创建同名 wizard 时, 静默超过一天的旧 wizard 直接被顶掉**。`/new`、`new_claude_session`、`spawn_wizard` / `clone_wizard` 撞上的名字若属于一个最后活跃在 1 天前的 wizard (transcript mtime; 没有会话的冷记录按出生时刻), 新的直接拿走名字, 不再退避成 `-N`, 也不再 409 —— 分身整个收掉 (pane、绑定、记录), 聊天的默认会话只让出名字。一天内还活动过的照旧 409 / 退避。
+
+### Fixed
+- 群里写 `.foo` 隐式新建 (或 `.foo /new`) 时, 若内部 slot `#foo` 被一个改过名的冷 wizard 占着, 新 wizard 的名字不再跟着 slot 退避成 `foo-N` —— slot 照旧挪位, 名字按人写的落定。
+
 ## [2.0.1] - 2026-09-30
 
 ### Added
