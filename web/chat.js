@@ -718,6 +718,21 @@
     return null;
   };
 
+  // 载入更早的消息: 锚住此刻视口顶上的那一行, 重绘后原位不动 —— 不吸底。
+  var keepView = function () {
+    var top = thread.getBoundingClientRect().top;
+    var ref = [].filter.call(inner.querySelectorAll('.mrow'), function (r) { return r.getBoundingClientRect().bottom > top; })[0];
+    if (!ref) return null;
+    var id = ref.getAttribute('data-id'), y = ref.getBoundingClientRect().top;
+    return function () {
+      var el = rowNode(id);
+      if (!el) return false;
+      S.pinned = false;
+      thread.scrollTop += el.getBoundingClientRect().top - y;
+      return true;
+    };
+  };
+
   // land: 换视角时由它来定位 (锚住一条旧消息), 返回 false 才照常吸底。
   var loadMsgs = function (limit, land) {
     var gen = S.gen;
@@ -732,7 +747,7 @@
         : '';
       inner.innerHTML = more + d.msgs.map(rowHTML).join('');
       var btn = $('#more');
-      if (btn) btn.onclick = function () { btn.textContent = '载入中…'; loadMsgs('0'); };
+      if (btn) btn.onclick = function () { btn.textContent = '载入中…'; loadMsgs('0', keepView()); };
       bindRow(inner);
       render(inner);
       foldPings(inner);
