@@ -47,7 +47,7 @@ import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagH
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
-import { stripAnsi, paneIsBusy, paneIsStalled, transcriptStalled, summarizeTail, lastAssistantText, lastReply, unwrapPasted, lastContextTokens, keepaliveStamps, openKeepalivePing, keepalivePingSigs, isKeepalivePingText, talkRounds, openToolUses, renderDialog, type PeerInfo } from "./peers.js";
+import { stripAnsi, paneIsBusy, transcriptStalled, summarizeTail, lastAssistantText, lastReply, unwrapPasted, lastContextTokens, keepaliveStamps, openKeepalivePing, keepalivePingSigs, isKeepalivePingText, talkRounds, openToolUses, renderDialog, type PeerInfo } from "./peers.js";
 
 // PATH augmentation: launchd / systemd start the daemon
 // with a stripped PATH that often lacks nvm / homebrew, breaking spawn(claudeBin).
@@ -5450,11 +5450,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         if (idleSinceTouch < idleTriggerMs) continue;          // cache still comfortably warm
         if (idleSinceTouch >= ttlMs) continue;                 // cache already cold — a ping would cold-rewrite for nothing
         if (k.round >= kc.rounds) continue;                    // budget spent — let it go cold
-        // Stall recovery, decided by RULE only (no model self-judgment): the last
-        // transcript turn is a synthetic API-error/limit line, or the idle pane
-        // still shows an error banner ⇒ a turn died mid-work. Send the resume
+        // Stall recovery, decided by RULE only (no model self-judgment) and from
+        // the transcript's structure only — never the screen: the turn is still
+        // unfinished (died on a synthetic API error, or a tool result nobody
+        // answered) and has been quiet for the whole idle window. Send the resume
         // instruction instead of the plain warmer.
-        const stalled = kc.resumeOnStall && (transcriptStalled(a.jsonlPath) || paneIsStalled(paneTail));
+        const stalled = kc.resumeOnStall && transcriptStalled(a.jsonlPath, keepalivePingSigs(kc.ping, kc.resumePing), idleTriggerMs, now);
         k.pinging = true;
         k.pingMtime = k.lastMs;                                // settles when a newer turn (the ping's own) appears
         await fireKeepalive(a, stalled);

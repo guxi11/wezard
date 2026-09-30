@@ -599,48 +599,57 @@ export const paneIsBusy = (paneText: string): boolean =>
     .slice(-FOOTER_ROWS)
     .some((l) => BUSY_MARKERS.some((re) => re.test(l)));
 
-// A turn that died mid-work leaves an error/limit banner and drops back to an
-// idle prompt (no spinner). This is the ONLY footer state where keepalive should
-// nudge the model to resume instead of just warming the cache. Not-busy is part
-// of the definition: a live auto-retry spinner is the CLI already recovering, so
-// we stay out of its way. Searched over a wider window than the spinner — the
-// error text can sit a few rows above the reclaimed input box.
-const STALL_MARKERS = [
-  /API Error/i, /request (failed|timed ?out)/i, /overloaded/i, /server error/i,
-  /rate.?limit/i, /usage limit/i, /too many requests/i, /quota/i,
-  /请求过多/, /限流|超过.{0,4}限制|额度不足|额度已/, /接口.{0,4}(失败|错误|超时)/, /连接(超时|中断|失败)/, /稍后.{0,4}重试/,
-];
-const STALL_ROWS = 16;
-export const paneIsStalled = (paneText: string): boolean => {
-  if (paneIsBusy(paneText)) return false;
-  return stripAnsi(paneText)
+// ── Stall: a turn that died mid-work ─────────────────────────────────
+// Judged from the transcript's STRUCTURE alone — never from screen text, never
+// from what the words say. A pane scan (and a keyword match on reply prose)
+// can't tell a banner from a model merely *talking about* "API Error", and every
+// false positive hands a healthy session a stray "continue". Exactly two shapes
+// count, both "the turn is unfinished" by construction:
+//   1. the newest message row is the CLI's own synthetic error reply
+//      (`isApiErrorMessage`) — and the turn it killed was real work: one opened
+//      by a keepalive ping (or a previous "continue") is not work to resume, and
+//      an auth failure is not something "continue" can fix;
+//   2. the newest message row is a tool result and nothing followed — the tool
+//      finished, the model's next request never produced a line.
+// A pending tool_use (tool running / parked on an approval card), a real
+// assistant reply, a human interrupt, a local command — all read as not stalled.
+// "Quiet for a while" is part of the definition: the newest message row must be
+// at least `quietMs` old, so a turn still streaming its next block never counts.
+type StallRow = { role: "user" | "assistant"; ms: number; apiError: boolean; toolResult: boolean; text: string };
+
+const stallRows = (jsonlPath: string): StallRow[] => {
+  const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
+  return readTailBytes(jsonlPath, TAIL_BYTES)
     .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .slice(-STALL_ROWS)
-    .some((l) => STALL_MARKERS.some((re) => re.test(l)));
+    .flatMap((line): StallRow[] => {
+      if (!line.trim()) return [];
+      try {
+        const parsed = JSON.parse(line) as { timestamp?: unknown; isApiErrorMessage?: unknown };
+        const row = normalize(parsed);
+        const role = row?.message?.role;
+        if (!row || row.isMeta || row.isSidechain || (role !== "user" && role !== "assistant")) return [];
+        const content = row.message?.content;
+        const blocks = Array.isArray(content) ? (content as { type?: string }[]) : [];
+        const ms = typeof parsed.timestamp === "number" ? parsed.timestamp : Date.parse(String(parsed.timestamp ?? ""));
+        return [{
+          role, ms: Number.isNaN(ms) ? 0 : ms,
+          apiError: parsed.isApiErrorMessage === true,
+          toolResult: blocks.length > 0 && blocks.every((b) => b?.type === "tool_result"),
+          text: stripMeta(blockText(content)).trim(),
+        }];
+      } catch { return []; } // truncated first line of the tail window
+    });
 };
 
-// Session-log side of the same signal, and the more reliable one: Claude Code
-// writes a synthetic `<model>` assistant line when a turn dies — "You've hit your
-// session limit …", "API Error: Connection closed mid-response …". If the LAST
-// assistant turn is one of those, the turn died mid-work and nothing recovered
-// it. Gated on brevity (these are always short one-liners) so a long assistant
-// message merely *discussing* an error can't false-trigger.
-const STALL_TEXT_MARKERS = [
-  /^API Error/i, /hit your (session|usage) limit/i, /session limit/i, /usage limit/i,
-  /rate.?limit/i, /overloaded/i, /too many requests/i, /mid-(response|stream)/i,
-  /连接(超时|中断|失败)/, /请求过多/, /额度(不足|已)/, /稍后.{0,4}重试/,
-];
-export const transcriptStalled = (jsonlPath: string): boolean => {
-  const turns = tailTurns(jsonlPath, 4);
-  for (let i = turns.length - 1; i >= 0; i--) {
-    const t = turns[i]!;
-    if (t.role !== "assistant") continue; // judge only the newest assistant turn
-    const txt = t.text.trim();
-    return txt.length > 0 && txt.length < 240 && STALL_TEXT_MARKERS.some((re) => re.test(txt));
-  }
-  return false;
+export const transcriptStalled = (jsonlPath: string, pingSigs: readonly string[], quietMs: number, now = Date.now()): boolean => {
+  const rows = stallRows(jsonlPath);
+  const last = rows.at(-1);
+  if (!last || !last.ms || now - last.ms < quietMs) return false;
+  if (last.toolResult) return true;
+  if (!(last.role === "assistant" && last.apiError)) return false;
+  if (/\/login\b|log(ged)? ?in|auth/i.test(last.text)) return false;
+  const opener = [...rows].reverse().find((r) => r.role === "user" && !r.toolResult);
+  return !!opener && !isKeepalivePingText(opener.text, pingSigs);
 };
 
 // ── 提到别的 wizard ───────────────────────────────────────────────────

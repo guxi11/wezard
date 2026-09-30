@@ -163,12 +163,12 @@ const Mirror = z.object({
       // human glancing at the pane sees why it's there. The reply is swallowed —
       // never mirrored to chat, the detail store, or usage accounting.
       ping: z.string().default('keepalive — reply with just "pong", take no other action'),
-      // Stall recovery, gated PURELY by rule — never by the model's own judgment.
-      // When the newest transcript turn is a synthetic API-error/limit line
-      // ("API Error: Connection closed mid-response", "You've hit your session
-      // limit"), or the idle pane footer shows an error banner, a turn died
-      // mid-work — so the ping carries `resumePing` (a plain "continue") INSTEAD
-      // of `ping`. Any non-"pong" reply to a ping is treated as a real turn
+      // Stall recovery, gated PURELY by rule — never by the model's own judgment,
+      // and read from the transcript's structure only (never the screen): the
+      // turn is still unfinished — it died on the CLI's synthetic API-error reply,
+      // or a tool result was never answered — and has been quiet for the whole
+      // idle window. Only then does the ping carry `resumePing` (a plain
+      // "continue") INSTEAD of `ping`. Any non-"pong" reply to a ping is treated as a real turn
       // (un-swallowed to chat, clocks re-anchored) — so a resumed session shows.
       resumeOnStall: z.boolean().default(true),
       resumePing: z.string().default('continue'),
