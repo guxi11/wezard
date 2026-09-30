@@ -5,9 +5,12 @@
 ## [Unreleased]
 
 ### Added
+- **wizard 间的每一轮都带信封**: `send_peer` / `clone_wizard({task})` / `spawn_wizard({task})` 注入的文本尾部挂一段 `<system-reminder>`, 写明发话的是哪个 wizard、私聊还是公开 (公开轮带群名)、回执怎么交 (私聊 = 这一轮的最后一条消息, 收口成 `RESULT: …`, 不再 `send_peer` 回去、不 `notify`、不对 wizard 寒暄)。此前同伴的话是裸文本, 收件方分不清它是人说的还是 wizard 说的。信封不进气泡 / rolepage / `peek_peer`; slash 命令不挂。
 - **MCP 工具 `set_model`: 给一个已经在跑的 wizard 换模型** (默认换自己, `name` 点名换别的)。口语化写要什么 (`opus` / `sonnet 5` / `最新的 fable` / `默认`), `scope` 选生效范围: `session` (默认, 只换这一个会话) / `default` (同时设为此后新会话的默认模型)。返回 `model` (真正落地的那一项)、`scope` (实际落在哪一档) 与 `catalog` (这台 CLI 此刻的全部模型)。新路由 `POST /wizard/model`。落地的模型记进绑定, 之后被重启也回到它上面。
 
 ### Changed
+- **BREAKING `wait_peer` 的返回瘦身并与发话对上号**: 只认调用方上次 `send_peer` (或 clone/spawn 的 `task`) **之后**的回复 —— 对方停下了却没有新回复时回 `stale: true`, 不再把上一件事的答案交回来 (分身也不再把被克隆者的旧回复当成自己的)。收口了 `RESULT:` 就只回 `result` (从全文摘取, 不再受 4000 字截断影响) + `omitted`; 没收口才回 `lastText` (保留换行, 超长掐中间保住头尾)。只等一个时结果摊平在顶层, 等一组才有 `results`; `target` / `foreign` / `address` 字段移除, 名字在 `name`。`send_peer` 的返回同样去掉 `target` / `foreign` / `when`。
+- **宪章里的同群名册压缩**: 与自己同工作区的不再重复路径, 既没写职责又同工作区的并成一行名字。
 - **选模型改成驱动 `/model` 列表本身, spawn 与 `set_model` 共用一条路**: 打开 pane 里的 `/model` 列表 → 滚动读出全部条目 → 挑与请求最接近的一项 (家族必须对上, 版本号只参与排序, 同分取更新的) → 方向键逐步移到那一行 (每步回读光标) → 选中 → 读回执。不再先盲敲 `/model <名字>` 再猜: 列表里显示的名字 (`Opus 4.7`) 并不是 `/model` 认的名字。选中键就是生效范围: `s` = 仅本会话, Enter = 同时设为新会话默认; spawn 一律走「仅本会话」—— 一个 wizard 换模型不再改掉 `settings.json` 里新会话的默认模型。`spawn_wizard` / `clone_wizard` / `new_claude_session` 返回的 `model` 相应变成列表里的条目名 (如 `Opus 5.5`)。
 
 ### Fixed

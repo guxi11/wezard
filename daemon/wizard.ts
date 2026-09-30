@@ -217,6 +217,18 @@ const addr = (b: WizardBrief): string => `.${b.address || b.name || "?"}`;
 const nameLine = (b: WizardBrief): string =>
   `\`${addr(b)}\`${b.description ? ` · ${b.description}` : ""}${b.cwd ? ` · ${b.cwd}` : ""}`;
 
+/** 同群名册。宪章每个进程压一份、每一轮都在上下文里, 所以只写**有信息**的部分:
+ *  与自己同工作区的不重复那条路径; 既没写职责又同工作区的 (临时分身的常态) 只剩
+ *  一个名字, 全体并成一行 —— 八十个这样的 wizard 是一行, 不是八十行。 */
+const rosterLines = (self: WizardBrief, sibs: readonly WizardBrief[]): string[] => {
+  const here = (b: WizardBrief): boolean => !b.cwd || b.cwd === self.cwd;
+  const bare = sibs.filter((b) => !b.description && here(b));
+  return [
+    ...sibs.filter((b) => !bare.includes(b)).map((b) => nameLine(here(b) ? { ...b, cwd: "" } : b)),
+    ...(bare.length ? [`同工作区、没写职责的: ${bare.map((b) => `\`${addr(b)}\``).join(" ")}`] : []),
+  ];
+};
+
 /** 开局宪章 —— spawn 时作为 `--append-system-prompt` 压进进程。
  *  它回答四件事, 每一件都是"会话自己没法从对话里知道"的:
  *    我是谁 / 我住在哪、周围有谁 / 我有哪些能力 / 公开频道与私聊该怎么说话。 */
@@ -285,7 +297,7 @@ export const renderCharter = (a: CharterArgs): string => {
   if (a.siblings.length > 0) {
     parts.push(
       "## 出生时同群的 wizard",
-      bullet(a.siblings.map(nameLine)),
+      bullet(rosterLines(a.self, a.siblings)),
       "(这只是出生那一刻的快照。此后谁来了、谁收工了、谁改了职责, 会以一行 system-reminder",
       "挂在下一条进到你这儿的消息尾巴上 —— 不必去问。要当下完整的名册仍然是 `wizard_roster`; 名字全局唯一, 别的群的 wizard 一样叫得到。)",
       "",
@@ -319,7 +331,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "`clone_wizard({task})` 出需要的分身: 它们开局就带着这些材料, 只需告诉它各自那一份差异; 活写进 `task` 省一次往返。材料已经在某个同伴的上下文里, 就 `clone_wizard({from, task})` 从它分, 不必自己再读一遍",
       "撞上的名字若属于一个静默超过一天的 wizard, 新生的直接顶掉它、拿走名字 (不会 409, 也不会挂 `-N`); 还新鲜的才 409。撞名 (`clone_wizard` / `spawn_wizard` 409) 别顺手 `send_peer` 糊弄过去: 响应里的 `alive`/`busy`/`idleForMs` 已经说清那是真在干活还是冷绑定。真活着就换个名字重新生, 别把不相关的活塞给一个已经有职责的 wizard; 冷绑定才值得复用, 但复用前先 `stop_wizard({mode:\"end\"})` 把它收掉腾出名字, 再用同一个名字重新 spawn —— 拿到干净的上下文",
       "地址永远是名字本身 (`fix` 或 `.fix`), 全局唯一, 不分群; 永远别自己拼 key —— roster / 409 里的 `address` 原样传回来",
-      "派活时要求它**把结论收口成一行** `RESULT: …` (交付物写进文件就回传路径) —— `wait_peer` 会把这一行单独摘进 `result`, 免得你从八百字散文里找结论",
+      "派活的文本只写**活本身**: 你是谁、这是私聊、结论要收口成 `RESULT: …` (交付物写进文件就回传路径) —— 这些由守护进程挂的信封替你说, 别再写一遍。`wait_peer` 摘到这一行就**只回** `result` (`omitted` = 正文还有多少字没给, 要读用 `peek_peer`); 它没收口才回整段 `lastText`; `stale:true` = 它停下了却没有答你这一次, 先 `peek_peer` 再说, 别拿旧话当结论",
       "一次 `wait_peer({names:[…]})` 把它们**一起**等回来。它们本来就在并行干活: 一个一个等, 墙钟是所有人之和; 一起等只花最慢那一个的时间 (`need` 可以让你先处理最先完事的那几个)",
       "汇总完 `close_job(summary)` —— 结论发进群, 为这个工单生出来的分身整批回收。要反复迭代到收敛则用 `run_agent_graph`",
     ]),
@@ -338,6 +350,7 @@ export const renderCharter = (a: CharterArgs): string => {
     "人看得见群里的公开消息和工单的开工/收工, 看不见私聊 (要看得去 rolepage)。所以:",
     bullet([
       "**分清对象**: 对人说话 = 你的正常回复; 对 wizard 说话 = `send_peer`。别把派给分身的指令写进给人的回复里。",
+      "**看信封**: 同伴发来的那一轮, 消息尾巴上有一段 system-reminder 写明是谁、私聊还是公开; 没有信封的就是人说的。私聊轮里读你回复的是那个 wizard —— 你这一轮的最后一条消息就是回执 (它用 `wait_peer` 取): 别再 `send_peer` 回它, 别 `notify`, 别加对人的称呼和寒暄。",
       "**不要复述**: 公开的往来人已经看见了; 私聊的结论人需要知道时, 用你自己的话收口给人, 别把对方原话再念一遍。收到消息不必回「收到」。",
       "**对 wizard 直说**: 不用寒暄、不用引用原文、不用客套。要什么、给什么、结论是什么, 一句话讲完。",
       "**不要替别人开口**: 分身该做的事派给它、等它, 不要自己猜它会说什么然后替它答。",

@@ -47,7 +47,7 @@ import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagH
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
-import { stripAnsi, compactPane, paneIsBusy, paneIsStalled, transcriptStalled, summarizeTail, lastAssistantText, lastContextTokens, keepaliveStamps, tailTurns, renderDialog, type PeerInfo } from "./peers.js";
+import { stripAnsi, compactPane, paneIsBusy, paneIsStalled, transcriptStalled, summarizeTail, lastAssistantText, lastReply, lastContextTokens, keepaliveStamps, tailTurns, renderDialog, type PeerInfo } from "./peers.js";
 
 // PATH augmentation: launchd / systemd start the daemon
 // with a stripped PATH that often lacks nvm / homebrew, breaking spawn(claudeBin).
@@ -1893,7 +1893,7 @@ export interface MirrorBridge {
    *  在群里看得见, 哪怕上一轮是人在 CLI 里敲的。 */
   /** `channel`: 这一轮的回复发去哪个公开频道 (base); "" = 私聊, 回复不进任何群,
    *  只落 turn 记录; 省略 = target 的 home。 */
-  injectText: (target: string, text: string, origin?: TurnOrigin, opts?: { fromChat?: boolean; from?: TurnFrom; channel?: string }) => Promise<{ ok: boolean; reason?: string }>;
+  injectText: (target: string, text: string, origin?: TurnOrigin, opts?: { fromChat?: boolean; from?: TurnFrom; channel?: string; envelope?: string }) => Promise<{ ok: boolean; reason?: string }>;
   /** 这个 wizard 当前这一轮的频道: 人从哪个群叫的它 / 公开 peer 轮的频道;
    *  私聊轮 ""; 还没有过轮次 → home base。 */
   currentChannel: (target: string) => string;
@@ -2028,6 +2028,8 @@ export interface MirrorBridge {
   setModel: (target: string, wanted: string, scope?: ModelScope) => Promise<ModelSelectResult>;
   /** Latest assistant message of `target` — the handoff payload between agents. */
   lastText: (target: string) => string;
+  /** `target` 在 `sinceMs` 之后最新的一条回复 (全文、保留换行); 没有 = ""。 */
+  lastReply: (target: string, sinceMs?: number) => string;
   /** Is the inbound `quoted` text a snapshot of `target`'s still-open outbound
    *  bubble (unfinished last stream)? Such a quote carries only transient
    *  chrome — the detail-link URL plus the latest real-time CoT/tool line —
@@ -5125,6 +5127,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const p = jsonlOf(target);
     return p ? lastAssistantText(p) : "";
   };
+  const replySince = (target: string, sinceMs = 0): string => {
+    const p = jsonlOf(target);
+    return p ? lastReply(p, sinceMs) : "";
+  };
 
   // ── 未收口气泡的引用判定 ────────────────────────────────────────────
   // tag 会话的 last stream 未收口时, 群里最新那条气泡是瞬态的: 详情链接 URL +
@@ -5557,6 +5563,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       return r;
     },
     lastText,
+    lastReply: replySince,
     isOpenBubbleQuote,
     status: () => {
       const list = Array.from(bySessionId.values()).map((a) => ({
@@ -5705,7 +5712,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // 名册增量搭这趟车进去 —— 同伴派活 / 定时任务 / graph 步骤都走这里, 所以
       // 一个从不被人直接说话的分身也能知道群里多了谁、少了谁。人说的话那一条
       // 路径在 inbound.send 上挂 (dispatch 有自己的 inject)。
-      const full = text + noticeSuffixFor(target, text);
+      // 信封 (谁说的、私聊还是公开、回执怎么交) 同理挂在尾巴上; slash 命令按行解析,
+      // 多挂一段就不再是命令, 跳过。`pendingBriefQuery` 记的仍是不带信封的原话。
+      const envelope = text.trimStart().startsWith("/") ? "" : opts?.envelope ?? "";
+      const full = text + envelope + noticeSuffixFor(target, text);
       // Pre-record so the tail's user-line emission is suppressed by the
       // recentInjects dedupe (otherwise the user sees their own demo prompt
       // echoed back as a quoted bubble).

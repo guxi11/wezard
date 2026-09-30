@@ -90,11 +90,13 @@ const blockText = (content: unknown): string => {
 
 /** Last `n` user/assistant turns of a transcript, oldest first. Backend-agnostic:
  *  the line shape is normalized through the owning CLI's dialect adapter. */
-export const tailTurns = (jsonlPath: string, n = 3): Turn[] =>
-  readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw), (ts) => ts.length >= n).slice(-n);
+export const tailTurns = (jsonlPath: string, n = 3, keepLines = false): Turn[] =>
+  readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, keepLines), (ts) => ts.length >= n).slice(-n);
 
-/** 纯解析: 一段 transcript 原文 → 里面的对话轮次。 */
-const parseTurns = (jsonlPath: string, raw: string): Turn[] => {
+/** 纯解析: 一段 transcript 原文 → 里面的对话轮次。`keepLines` 保留换行 —— 摘要与
+ *  预览要压成一行, 但交给另一个 wizard 读的回复不能: 表格 / 列表 / 代码块压成一行
+ *  之后对模型就是一团字。 */
+const parseTurns = (jsonlPath: string, raw: string, keepLines = false): Turn[] => {
   if (!raw) return [];
   const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
   return raw
@@ -110,7 +112,8 @@ const parseTurns = (jsonlPath: string, raw: string): Turn[] => {
       if (!row || row.isMeta || row.isSidechain) return [];
       const role = row.message?.role;
       if (role !== "user" && role !== "assistant") return [];
-      const text = blockText(row.message?.content).replace(META_RE, "").replace(/\s+/g, " ").trim();
+      const bare = blockText(row.message?.content).replace(META_RE, "");
+      const text = (keepLines ? bare : bare.replace(/\s+/g, " ")).trim();
       // Claude writes ISO timestamp strings; CodeBuddy writes epoch-ms NUMBERS.
       // Date.parse(number) coerces to a bare digit-string and returns NaN —
       // which silently stamped every CodeBuddy turn ms=0, degraded
@@ -258,9 +261,9 @@ export const renderDialog = (turns: readonly Turn[], per = 800): string =>
  *  `RESULT: …`, 这里把它捞出来。取**最后一个**匹配 —— 中间复述过这个格式的那些
  *  不算数。捞不到返回 "", 调用方退回整段 lastText, 所以不遵守约定也只是退化。 */
 export const extractResult = (text: string, max = 800): string => {
-  // 标记之后的**全部**内容, 而不是"那一行" —— 这个函数的入口 (lastAssistantText)
-  // 已经把换行压成空格了, 行的概念到这里不存在。约定是收口在最后, 所以标记之后
-  // 剩下的就是结论。取最后一个匹配: 模型常先复述一遍格式要求再给答案。
+  // 标记之后的**全部**内容, 而不是"那一行" —— 结论常常不止一行 (路径一行、说明
+  // 一行)。约定是收口在最后, 所以标记之后剩下的就是结论。取最后一个匹配: 模型常
+  // 先复述一遍格式要求再给答案。
   const hits = [...text.matchAll(/(?:^|[\s>*|-])(?:RESULT|结论)\s*[:：]\s*/gim)];
   const last = hits[hits.length - 1];
   return last ? text.slice((last.index ?? 0) + last[0].length).trim().slice(0, max) : "";
@@ -273,6 +276,49 @@ export const lastAssistantText = (jsonlPath: string, max = 4000): string => {
   const last = turns[turns.length - 1]?.text ?? "";
   return last.length > max ? `${last.slice(0, max)}…` : last;
 };
+
+/** 掐中间: 来龙去脉在头、结论在尾, 超长时丢的该是中段。(从尾巴截会把收口那一行
+ *  截掉 —— 而那恰恰是对方最想读的。) */
+export const clipMiddle = (s: string, max = 4000, head = Math.floor(max / 4)): string =>
+  s.length <= max ? s : `${s.slice(0, head)}\n…(略 ${s.length - max} 字)…\n${s.slice(head - max)}`;
+
+/** `sinceMs` 之后这个会话最新的一条回复, 全文、保留换行 —— wait_peer 的载荷。
+ *
+ *  「最后一条 assistant 文本」本身不带归属: 那句话没被接住、或者它停在一个等人点
+ *  的弹窗上时, 最后一条是**上一件事**的答案, 原样交回去就是拿旧结论冒充新结论。
+ *  发话时刻是最便宜的关联 id (A2A 的 taskId 在这里的等价物): 早于它的一律不算。
+ *  没有时间戳的行 (ms=0) 无从判断, 放行 —— 退化成旧行为, 而不是把回复吞掉。 */
+export const lastReply = (jsonlPath: string, sinceMs = 0): string =>
+  tailTurns(jsonlPath, 40, true)
+    .filter((t) => t.role === "assistant" && (!t.ms || t.ms >= sinceMs))
+    .at(-1)?.text ?? "";
+
+// ── wizard → wizard 的信封 ────────────────────────────────────────────
+// 同伴的话是原样落进输入框的, 而落进输入框的东西在模型眼里都是「用户说的」。没有
+// 信封, 收件方分不清这一轮是人说的还是 wizard 说的、回复给谁看、该不该回话 ——
+// 于是对着 wizard 寒暄、把过程 notify 进群、或者 send_peer 回去 (发话方正挂在
+// wait_peer 上, 这一回会给它多排一轮, 两边就此乒乓)。信封把这三件事写在每一轮
+// 自己身上: 宪章是出生时的快照, 正在跑的老 wizard 读不到新规矩, 这一段读得到。
+// 与 mention hint / 名册增量同一个 `<system-reminder>` 壳 —— mirror 的 meta 剥离器
+// 和 tailTurns 都会丢掉它, 不进气泡、不进 rolepage、不进 peek。
+/** `from` = 发话方的称呼 (`.name`); `chat` 给了 = 公开轮 (那个群的名字, 可以是 ""),
+ *  不给 = 私聊。 */
+export const renderPeerEnvelope = (from: string, chat?: string): string =>
+  [
+    "",
+    "<system-reminder>",
+    ...(chat === undefined
+      ? [
+          `这一轮是 wizard \`${from}\` 发来的**私聊**, 不是人说的: 人看不见这一轮, 读你回复的是 \`${from}\`。`,
+          `你这一轮的**最后一条消息**就是给它的回执 —— 它用 wait_peer 取, 所以不要再 send_peer 回它 (除非它明说干完通知它), 也不要为这一轮 notify。`,
+          "对 wizard 直说: 不寒暄、不加对人的称呼、不复述它的话; 结论收口成末尾的 `RESULT: …` (交付物写进文件就回传路径), 要它补信息也写在那里。",
+        ]
+      : [
+          `这一轮是 wizard \`${from}\` 在群${chat ? ` **${chat}** ` : ""}里**公开**对你说的: 你的回复会直接发进那个群, 人和 \`${from}\` 都看得到。`,
+          `照对人说话的方式答; 不要再 send_peer 把同一段话回给 \`${from}\`。`,
+        ]),
+    "</system-reminder>",
+  ].join("\n");
 
 /** Prompt-token size of the session's most recent turn: input + both cache
  *  tiers = how full the context window is, i.e. exactly what a cold cache would

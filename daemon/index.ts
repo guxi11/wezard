@@ -54,7 +54,7 @@ import {
 } from "./wizard.js";
 import { bindNoticeBox, createNoticeBox, chatAudience } from "./notices.js";
 import { loadJobStore, renderJobOpen, renderJobClose, JOB_MEMBER_MAX } from "./jobs.js";
-import { extractResult } from "./peers.js";
+import { clipMiddle, extractResult, renderPeerEnvelope } from "./peers.js";
 import {
   startGraph,
   stopRun,
@@ -590,6 +590,14 @@ const main = async (): Promise<void> => {
     /** 调用方这一轮所在的公开频道: 人从哪个群叫的它 / 公开 peer 轮的那个群;
      *  私聊轮或无记录 → 它的 home 群。notify 与 public send_peer 默认发到这里。 */
     const channelOf = (self: string): string => m.currentChannel(self) || baseOfKey(self);
+    /** 同伴注入的信封: 公开轮写上那个群的名字, 私聊不写 (见 peers.renderPeerEnvelope)。 */
+    const envelopeFor = (from: string, channel: string): string =>
+      renderPeerEnvelope(displayName(from), channel ? chatNameOf(cfg, channel) : undefined);
+    // 发话时刻 —— wait_peer 拿它把「回复」和「这一次发话」对上 (peers.lastReply)。
+    // 纯内存: reload 之后退化成不带关联的旧行为, 不值得为它落盘。
+    const sentAt = new Map<string, number>();
+    const pairOf = (from: string, to: string): string => `${from}\u0000${to}`;
+    const stampSend = (from: string, to: string): void => void sentAt.set(pairOf(from, to), Date.now());
     /** 入参里的地址: 新字段 `name`, 老 MCP 进程 (正在跑的 wizard) 仍在传 `tag`。 */
     const addrOf = (b: { name?: unknown; tag?: unknown }): string => String(b.name ?? b.tag ?? "");
 
@@ -743,16 +751,18 @@ const main = async (): Promise<void> => {
           return;
         }
       }
+      stampSend(self, target);
       const inj = await m.injectText(target, text, undefined, {
         from: { kind: "peer", from: self, ...(jobId ? { job: jobId } : {}), ...(isPublic ? { public: true } : {}) },
         channel,
+        envelope: envelopeFor(self, channel),
       });
       // 工单成员照旧记账 (收工那一条会列出各自那段活); 公开的那一句在群里成气泡。
       if (inj.ok && jobId) jobs.attach(jobId, { target, task: text, spawned: false });
       if (inj.ok && isPublic) relayPeer(self, target, text, channel);
       // `wasBusy` 是给调用方的判断依据: 立刻投给一个正在生成的会话, 这句话会排在
       // 它这一轮后面, 而不是马上被读到。
-      json(res, inj.ok ? 200 : 502, { ...inj, target, name: peerAddress(cfg, self, target), foreign, public: isPublic, when, wasBusy, waitedMs, ...(jobId ? { job: jobId } : {}) });
+      json(res, inj.ok ? 200 : 502, { ...inj, name: peerAddress(cfg, self, target), public: isPublic, wasBusy, ...(waitedMs ? { waitedMs } : {}), ...(jobId ? { job: jobId } : {}) });
     });
 
     // 等一个 wizard, 或者等一**组**。fan-out 之后 join 必须是并行的: 串行地等五个
@@ -779,24 +789,36 @@ const main = async (): Promise<void> => {
       const need = Math.min(Math.max(Number(b.need ?? uniq.length) || uniq.length, 1), uniq.length);
       const timeoutMs = Math.min(Math.max(Number(b.timeoutSec ?? 900) || 900, 10), 7200) * 1000;
       const wrs = await waitForQuorum(uniq.map((h) => h.target), m.isBusy, timeoutMs, need);
+      // 回程不再进群: 私聊的结论由调用方自己收口给人; 公开轮的回复 mirror 早已发进那个群。
+      // 载荷只给一份, 且只给该给的那一份 —— 这段 json 是原样进调用方上下文的:
+      //   - 只认**这一次发话之后**的回复 (lastReply); 停下了却没有新回复 = `stale`,
+      //     绝不把上一件事的答案当成这一件的交回去;
+      //   - 它收口了 `RESULT:` → 只回 `result` (从全文里摘, 不受截断影响), 正文不再
+      //     重复一遍, `omitted` 说还有多少字没给 (要读就 peek_peer);
+      //   - 没收口 → 回 `lastText`, 超长掐中间保住头尾;
+      //   - 内部 key (`target`) 与 `foreign` 不回: 模型用不上, 还会被诱导去拼 key。
       const results = uniq.map((h, i) => {
         const wr = wrs[i]!;
-        const lastText = m.lastText(h.target);
-        // 回程不再进群: 私聊的结论由调用方自己收口给人; 公开轮的回复 mirror 早已发进那个群。
-        // `result` 是它自己收口的那一行 (见 peers.extractResult); 捞不到就是 "",
-        // 调用方照旧读 lastText。
-        return { address: h.address, target: h.target, foreign: h.foreign, idle: wr.idle, reason: wr.reason, result: extractResult(lastText), lastText };
+        const full = wr.idle ? m.lastReply(h.target, sentAt.get(pairOf(self, h.target)) ?? 0) : "";
+        const result = extractResult(full);
+        return {
+          name: h.address,
+          idle: wr.idle,
+          ...(wr.reason ? { reason: wr.reason } : {}),
+          ...(result
+            ? { result, ...(full.length > result.length + 200 ? { omitted: full.length - result.length } : {}) }
+            : full
+              ? { lastText: clipMiddle(full) }
+              : wr.idle
+                ? { stale: true, reason: "它停下了, 但自你上次 send_peer 以来没有新回复 —— 多半停在一个等人点的弹窗上, 或那句话没被接住; peek_peer 看一眼" }
+                : {}),
+        };
       });
-      const first = results[0]!;
-      // 单目标的扁平回显照旧 —— 老调用方 (和只等一个的绝大多数调用) 不必去读数组。
-      json(res, 200, {
-        ok: true,
-        need,
-        done: results.filter((x) => x.idle).length,
-        satisfied: results.filter((x) => x.idle).length >= need,
-        results,
-        target: first.target, foreign: first.foreign, idle: first.idle, reason: first.reason, result: first.result, lastText: first.lastText,
-      });
+      const done = results.filter((x) => x.idle).length;
+      // 只等一个就摊平, 等一组才给数组 —— 同一份载荷不出现两遍。
+      json(res, 200, results.length === 1
+        ? { ok: true, ...results[0]! }
+        : { ok: true, need, done, satisfied: done >= need, results });
     });
 
     // POST /handoff — 交接一个 pane 的会话给一个全新会话,原地完成。先让目标
@@ -1341,6 +1363,9 @@ const main = async (): Promise<void> => {
       const task = (b.task ?? "").toString().trim();
       // 没点名就按配置的 keepalive.spawnDefault 来 —— 调用方明说的永远优先。
       const keepalive = typeof b.keepalive === "boolean" ? b.keepalive : cfg.wrc.mirror.keepalive.spawnDefault;
+      // 先盖章再生: 分叉出来的 transcript 里躺着被克隆者的旧回复, 时刻早于这一枚章,
+      // wait_peer 才不会把它们当成分身对这件活的答复。
+      if (task) stampSend(self, target);
       const r = await m.cloneSession({
         parent: source,
         target,
@@ -1352,7 +1377,7 @@ const main = async (): Promise<void> => {
         inherit,
         // 继承路径上第一句话是分叉的触发器, 所以直接把活当开场白 —— 少一次往返,
         // 也少一次"就位了但没事干"的空转。
-        bootstrap: task || undefined,
+        bootstrap: task ? task + envelopeFor(self, "") : undefined,
         keepalive,
       });
       if (!r.ok) {
@@ -1375,7 +1400,7 @@ const main = async (): Promise<void> => {
       // 继承路径上活已经随开场白进去了, 空白分身才需要在这里补一次注入 (私聊)。
       let dispatched = r.inherited && !!task;
       if (task && !r.inherited) {
-        const inj = await m.injectText(target, task, undefined, { from: { kind: "peer", from: self, ...(jobId ? { job: jobId } : {}) }, channel: "" });
+        const inj = await m.injectText(target, task, undefined, { from: { kind: "peer", from: self, ...(jobId ? { job: jobId } : {}) }, channel: "", envelope: envelopeFor(self, "") });
         dispatched = inj.ok;
       }
       if (jobId) jobs.attach(jobId, { target, task, spawned: true });
