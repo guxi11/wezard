@@ -14,6 +14,7 @@
 - **选模型改成驱动 `/model` 列表本身, spawn 与 `set_model` 共用一条路**: 打开 pane 里的 `/model` 列表 → 滚动读出全部条目 → 挑与请求最接近的一项 (家族必须对上, 版本号只参与排序, 同分取更新的) → 方向键逐步移到那一行 (每步回读光标) → 选中 → 读回执。不再先盲敲 `/model <名字>` 再猜: 列表里显示的名字 (`Opus 4.7`) 并不是 `/model` 认的名字。选中键就是生效范围: `s` = 仅本会话, Enter = 同时设为新会话默认; spawn 一律走「仅本会话」—— 一个 wizard 换模型不再改掉 `settings.json` 里新会话的默认模型。`spawn_wizard` / `clone_wizard` / `new_claude_session` 返回的 `model` 相应变成列表里的条目名 (如 `Opus 5.5`)。
 
 ### Fixed
+- **多行的 `send_peer({public:true})` / 定时任务提示, 对方的回复不进群**: Claude Code 2.1.27x 起把折叠的粘贴在 transcript 里包成 `<pasted_content>`, 注入的回显去重因此对不上, 这一轮被认成「人在 CLI 里敲的」而被 `chatOriginOnly` 挡在群外 (频道其实是对的)。去重两侧改用同一个规范形 (剥掉粘贴壳与尾部 system-reminder); `peek_peer` / `wait_peer` / 摘要 / rolepage 的 query 同样不再带这层壳。宪章新增一段说明: 整条消息都在 `<pasted_content>` 里时它就是发话人本人的话 —— 此前 wizard 会把派来的指令当成「粘贴的资料」而搁置 (如不肯 push)。
 - spawn 时指定 `model` 经常落空并报「/model 没有按预期方式回应」: 回执改为轮询等待 (此前固定等 0.8s 就读屏), 并处理「Switch model?」缓存提示的二次确认。
 
 ## [2.0.3] - 2026-09-30

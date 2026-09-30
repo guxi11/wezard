@@ -79,6 +79,13 @@ export interface Turn {
 // are machinery, not conversation — drop them before any summary or handoff.
 const META_RE = /<(system-reminder|command-[^>]*|local-command-[^>]*|task-notification)>[\s\S]*?<\/\1>/g;
 
+// Claude Code (2.1.27x+) 把折叠成 `[Pasted text #N]` 的粘贴在 transcript 里包成
+// `<pasted_content id="…">…</pasted_content id="…">`。wezard 的注入走 tmux paste, 所以
+// **每一条多行注入** (人在企微里说的、同伴派的、定时任务放的) 落盘时都带着这层壳。
+// 壳是传输的产物不是内容: 只剥标签, 里面的话原样留下。
+const PASTED_TAG_RE = /<pasted_content id="[^"]*">\n?|\n?<\/pasted_content(?:\s+id="[^"]*")?>/g;
+export const unwrapPasted = (s: string): string => s.replace(PASTED_TAG_RE, "");
+
 const blockText = (content: unknown): string => {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -112,7 +119,7 @@ const parseTurns = (jsonlPath: string, raw: string, keepLines = false): Turn[] =
       if (!row || row.isMeta || row.isSidechain) return [];
       const role = row.message?.role;
       if (role !== "user" && role !== "assistant") return [];
-      const bare = blockText(row.message?.content).replace(META_RE, "");
+      const bare = unwrapPasted(blockText(row.message?.content)).replace(META_RE, "");
       const text = (keepLines ? bare : bare.replace(/\s+/g, " ")).trim();
       // Claude writes ISO timestamp strings; CodeBuddy writes epoch-ms NUMBERS.
       // Date.parse(number) coerces to a bare digit-string and returns NaN —
@@ -192,7 +199,7 @@ const parseToolEntries = (jsonlPath: string, raw: string): ToolEntry[] => {
     if (!row || row.isMeta || row.isSidechain) return [];
     const role = row.message?.role;
     if (role !== "user" && role !== "assistant") return [];
-    const text = blockTextWithTools(row.message?.content).replace(META_RE, "").replace(/\s+/g, " ").trim();
+    const text = unwrapPasted(blockTextWithTools(row.message?.content)).replace(META_RE, "").replace(/\s+/g, " ").trim();
     return text ? [{ role, text }] : [];
   });
 };

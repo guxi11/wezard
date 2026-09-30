@@ -47,7 +47,7 @@ import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagH
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
-import { stripAnsi, compactPane, paneIsBusy, paneIsStalled, transcriptStalled, summarizeTail, lastAssistantText, lastReply, lastContextTokens, keepaliveStamps, tailTurns, renderDialog, type PeerInfo } from "./peers.js";
+import { stripAnsi, compactPane, paneIsBusy, paneIsStalled, transcriptStalled, summarizeTail, lastAssistantText, lastReply, unwrapPasted, lastContextTokens, keepaliveStamps, tailTurns, renderDialog, type PeerInfo } from "./peers.js";
 
 // PATH augmentation: launchd / systemd start the daemon
 // with a stripped PATH that often lacks nvm / homebrew, breaking spawn(claudeBin).
@@ -397,7 +397,11 @@ const renderTaskNotification = (block: string): string => {
   return `${icon} ${summary || `后台任务 ${status || "完成"}`}`;
 };
 
-const cleanUserText = (raw: string): string => {
+const cleanUserText = (wrapped: string): string => {
+  // 多行注入落盘时被 CLI 包了一层 `<pasted_content>` (见 peers.unwrapPasted) —— 先剥,
+  // 否则回显去重对不上, 我们自己注入的那一行会被认成「人在 CLI 里敲的」, 整轮回复
+  // 因此被 chatOriginOnly 挡在群外 (公开的 send_peer / 定时任务的多行提示全中)。
+  const raw = unwrapPasted(wrapped);
   const nameMatch = raw.match(SLASH_TAG_RE);
   const slashCmd = nameMatch?.[1]?.trim() ?? "";
   const argsMatch = raw.match(SLASH_ARGS_RE);
@@ -2317,7 +2321,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const INJECT_TTL_MS = 60_000;
   const recentInjects: Array<{ text: string; ts: number }> = [];
   const rememberInject = (text: string): void => {
-    const t = text.trim();
+    // 与 tail 侧同一个规范形 (cleanUserText): 注入时挂在尾巴上的 system-reminder
+    // (信封 / 名册增量 / mention hint) 在那边是被剥掉之后才来比对的。
+    const t = cleanUserText(text);
     if (!t) return;
     recentInjects.push({ text: t, ts: Date.now() });
     // Slash commands land in the jsonl wrapped in <command-name>...</command-name>
