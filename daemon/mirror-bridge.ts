@@ -41,7 +41,7 @@ import { selectModel, type ModelScope, type ModelSelectResult } from "./model-se
 import { hasRegistry, markTranscript, probeOf, sessionOnPane, sessionPanes, submittedSince, type LiveSession, type TranscriptMark } from "./cc-session.js";
 import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
-import { recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, lastChannelOf, buildDetailUrl, buildChatUrl, roleUniq } from "./detail.js";
+import { recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnQuery, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, lastChannelOf, buildDetailUrl, buildChatUrl, roleUniq } from "./detail.js";
 import type { CtxCut, TurnFrom, TurnOrigin, TurnUsage } from "./detail.js";
 import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagHeader, withLinkedTagHeader, linkedTagHead, linkTags, parseTagHeader, MAX_BODY_LINKS } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
@@ -296,6 +296,11 @@ interface ContentBlock {
   content?: string | Array<{ type?: string; text?: string; tool_name?: string }>;
 }
 
+// TUI 给粘进来的图留的指代; 落盘文本里有它, 注入时记下的原文里没有。
+const IMAGE_REF_RE = /\[Image #\d+\]\s*/g;
+
+const hasImages = (c: readonly ContentBlock[]): boolean => c.some((b) => b?.type === "image");
+
 interface TranscriptLine {
   type?: string;
   /** Present on `type:"system"` lines — e.g. "local_command" for slash-command
@@ -492,6 +497,10 @@ type RenderItem =
   // 以前 includeUser=false 时整条 user 行在 renderLine 就被丢掉, 于是"对话边界清账"
   // 那段在默认配置下是死代码。
   | { kind: "user_text"; body: string; quiet?: boolean }
+  // 我们自己注入的那一行真正落盘的样子 (带图时 TUI 会插进 `[Image #N]`)。onItem 拿它
+  // 覆盖这一轮的问话 —— 详情页该给的是 session 真正收到的那句, 不是注入前的原文。
+  // `said` = 去掉占位符与信封后的那句话, 用来确认它确实是这一轮的问话。
+  | { kind: "user_query"; body: string; said: string }
   // The user line that started this turn IS a keepalive ping (content match
   // via TailDeps.isKeepalivePing). Emitted REGARDLESS of includeUser — the
   // ping must never echo as user_text, and onItem swallows the whole reply
@@ -678,6 +687,16 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
       // includeUser 只决定"渲不渲染", 不决定"算不算边界" —— quiet 的这一条照样发出,
       // onItem 消费完边界语义后自己丢掉。
       out.push({ kind: "user_text", body: quoted, quiet: !deps.includeUser });
+    } else if (Array.isArray(c) && hasImages(c) && !c.some((b) => b?.type === "tool_result")) {
+      // 带图的一句话: [text "[Image #1]…", image, …]。去掉占位符才与注入时记下的原文同形,
+      // 回显去重对得上; 记进详情页的则是带占位符的原样文本, 图本身不画。
+      const raw = c.filter((b) => b?.type === "text").map((b) => b.text ?? "").join("\n");
+      const text = cleanUserText(raw.replace(IMAGE_REF_RE, ""));
+      if (text && !deps.isOwnInject(text)) {
+        out.push({ kind: "user_text", body: cleanUserText(raw).split("\n").map((l) => `> ${l}`).join("\n"), quiet: !deps.includeUser });
+      } else {
+        out.push({ kind: "user_query", body: unwrapPasted(raw).trim(), said: text });
+      }
     } else if (Array.isArray(c)) {
       for (const b of c) {
         if (b?.type !== "tool_result") continue;
@@ -3681,6 +3700,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // 不决定详情页记不记 —— 聊天不再下发 CLI 轮之后, 详情页是唯一的落点。
       a.pendingBriefQuery = item.body;
       a.pendingFromCli = true;
+    }
+    // 还有一轮等着懒建 (peer / graph 注入先记了 pendingBriefQuery) 就换掉它; 否则这句话
+    // 就是已开好的那一轮 (IM 侧说的, startBriefTurn 在注入前建好)。
+    if (item.kind === "user_query") {
+      if (a.pendingBriefQuery !== undefined || !a.briefTurnId) a.pendingBriefQuery = item.body;
+      // 只认同一句话: 轮次中途 CLI 里又粘了一张图, 不能改写正在跑的这一轮的问话。
+      else recordTurnQuery(a.briefTurnId, item.body, (prev) => cleanUserText(prev ?? "") === item.said);
+      return;
     }
     // 后台派发的结束信号 —— 它不是 function_call_result (那只是 spawn 句柄)。放在
     // keepalive 门之前: 吞没窗口里到达也必须销账, 否则账本永久悬空。

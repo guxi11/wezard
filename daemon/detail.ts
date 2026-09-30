@@ -146,6 +146,16 @@ export const recordTurnStart = (
   if (full) forwardToRemote(full);
 };
 
+// 问话以落盘为准 —— 注入前记下的原文缺了 CLI 插进去的东西 (如图片的 `[Image #N]`)。
+export const recordTurnQuery = (id: string, userQuery: string, same: (prev: string | undefined) => boolean): void => {
+  if (!store || !userQuery) return;
+  const r = store.get(id);
+  if (r?.kind !== "turn" || r.userQuery === userQuery || !same(r.userQuery)) return;
+  store.put({ ...r, userQuery, updatedAt: Date.now() });
+  const full = store.get(id);
+  if (full) forwardToRemote(full);
+};
+
 export const recordTurnItem = (id: string, item: TurnItem): void => {
   if (!store) return;
   const full = store.get(store.appendTurnItem(id, item) ?? id);
