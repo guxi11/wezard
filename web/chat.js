@@ -318,29 +318,36 @@
       (unread ? '<b class="ub">' + (unread > 99 ? '99+' : unread) + '</b>' : '') + '</span></span>';
   };
 
-  // ── 未读: 页面打开后别人新说完的 final reply 条数 ──
-  // 服务端只给累计的 finals, 基线记在这里: 第一次见到某项就以当时为准 (打开前的不算未读),
-  // 正在读的那项随到随清。按视角分账 —— 同一个群换个 role 看, 未读是另一回事。
-  var SEEN = {};
-  var unreadKey = function (key, withRole) { return ROLE + '|' + key + '|' + (withRole || ''); };
-  var unreadOf = function (key, withRole, n) {
-    var k = unreadKey(key, withRole);
-    if (SEEN[k] === undefined) SEEN[k] = n;
-    return Math.max(0, n - SEEN[k]);
+  // ── 未读: 别人说完、我还没读到的话 ──
+  // 服务端给每个会话一份 heard = [说完的时刻, 属于我与谁的那一对], 以及我在群里 / 每一对里
+  // 最后开口的时刻 (mine)。一句话的已读水位 = 它所在那一处「我最后开口」与「我看过」的较晚者:
+  // 属于某一对的看那一对 (群里说过话不等于读过别的线程), 不属于任何一对的看群。
+  // 「看过」记在本地 (刷新 / 换视角都还在), 按视角分账 —— 同一个群换个 role 看, 未读是另一回事。
+  var READ_KEY = 'wezard.role.read';
+  var READ = (function () {
+    try { var v = JSON.parse(localStorage.getItem(READ_KEY) || '{}'); if (v && v.at) return v; } catch (e) { }
+    return { at: {} };
+  })();
+  var saveRead = function () { try { localStorage.setItem(READ_KEY, JSON.stringify(READ)); } catch (e) { } };
+  var readKey = function (key, withRole) { return ROLE + '|' + key + '|' + (withRole || ''); };
+  var seenAt = function (key, withRole) { return READ.at[readKey(key, withRole)] || 0; };
+  var unreadOf = function (c, withRole) {
+    var g = seenAt(c.key);
+    var mark = {};
+    (c.subs || []).forEach(function (s) { mark[s.role] = Math.max(g, s.mine || 0, seenAt(c.key, s.role)); });
+    var groupMark = Math.max(g, c.mine || 0);
+    return (c.heard || []).filter(function (h) {
+      if (withRole && h[1] !== withRole) return false;
+      return h[0] > (h[1] ? (mark[h[1]] !== undefined ? mark[h[1]] : groupMark) : groupMark);
+    }).length;
   };
   var reading = function () { return VIEW === 'msgs' && !document.hidden; };
-  // 读整个群 = 群与子项全清; 只读一对 = 清那一项, 群的账同步抵掉这一对新增的那几条。
+  // 读整个群 = 群的水位推到此刻 (子项随之全清); 只读一对 = 只推那一对的。
   var markRead = function (c) {
-    if (!reading() || c.key !== CONV) return;
-    var gk = unreadKey(c.key);
-    var subs = (c.subs || []).filter(function (s) { return !WITH || s.role === WITH; });
-    subs.forEach(function (s) {
-      var k = unreadKey(c.key, s.role);
-      if (WITH && SEEN[gk] !== undefined && SEEN[k] !== undefined) SEEN[gk] += Math.max(0, s.finals - SEEN[k]);
-      SEEN[k] = s.finals || 0;
-    });
-    if (!WITH) SEEN[gk] = c.finals || 0;
-    else if (SEEN[gk] > c.finals) SEEN[gk] = c.finals;
+    if (!reading() || c.key !== CONV || !unreadOf(c, WITH)) return;
+    var h = c.heard[c.heard.length - 1];
+    READ.at[readKey(c.key, WITH)] = Math.max(R.at, h ? h[0] : 0);
+    saveRead();
   };
 
   // 展开态按会话各记各的: 点开一个不收起别的, 轮询重画也不动它。
@@ -377,7 +384,7 @@
       return '<button class="si' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '" data-with="' + esc(s.role) + '" ' +
         'title="' + esc('我与 ' + nameOf(s.role) + ' 在这里的 ' + s.count + ' 条往来') + '">' +
         goSpan('av', s.role, esc(s.label)) +
-        line(nm(s.role, s.name, true), s.lastTs, s.preview, lampOf(s.status), unreadOf(c.key, s.role, s.finals || 0)) + '</button>';
+        line(nm(s.role, s.name, true), s.lastTs, s.preview, lampOf(s.status), unreadOf(c, s.role)) + '</button>';
     };
     var rest = MORE[c.key] ? talked.slice(SUB_FOLD).map(sub).join('') : '';
     var subs = talked.length
@@ -385,7 +392,7 @@
       : '';
     var sel = on && !WITH;
     return '<button class="ci' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '">' +
-        avatarOf(c) + line(title, c.lastTs, c.preview, lampOf(c.status), unreadOf(c.key, '', c.finals || 0)) +
+        avatarOf(c) + line(title, c.lastTs, c.preview, lampOf(c.status), unreadOf(c)) +
       '</button>' + subs;
   };
 
