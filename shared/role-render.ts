@@ -5,7 +5,7 @@
 //   出   该 wizard 这一轮的回复: 复用 renderTurnGroup (文本 + 工具细节), 去掉问句 ——
 //        问句已经是上面那条入消息了; 本轮用量单独走 `meta`, 客户端写在名字那一行
 //   断点 视角 role 自己的 /clear /new
-import { renderCutMark, renderTurnGroup, escHtml, hashStr, tagSig, type TurnFragment } from "./detail-render.js";
+import { renderCutMark, renderTurnGroup, splitReminders, escHtml, hashStr, tagSig, type TurnFragment } from "./detail-render.js";
 import { isKeepaliveTurn, isTurn, staleAt, turnDone } from "./chat-view.js";
 import type { DetailRecord, MarkDetailRecord, TurnDetailRecord } from "./detail-store.js";
 import { teammateOf, unwrapMates, type Directory, type Msg } from "./role-view.js";
@@ -54,9 +54,11 @@ const inMeta = (r: TurnDetailRecord): string => {
   return bits.length ? `<div class="mmeta">${bits.join("")}</div>` : "";
 };
 
-const renderIn = (r: TurnDetailRecord): string =>
-  tagSig(`<section class="bubble mq" data-key="${escHtml(r.id)}:in">${inMeta(r)}` +
-    `<div class="md-body"></div><script type="text/plain" class="md-src">${escHtml(unwrapMates(r.userQuery ?? ""))}</script></section>`);
+const renderIn = (r: TurnDetailRecord): string => {
+  const q = splitReminders(unwrapMates(r.userQuery ?? ""));
+  return tagSig(`<section class="bubble mq" data-key="${escHtml(r.id)}:in">${inMeta(r)}` +
+    `<div class="md-body"></div><script type="text/plain" class="md-src">${escHtml(q.body)}</script>${q.html}</section>`);
+};
 
 /** 子 agent 的轮次内联进父轮 —— 与旧线程视图同一规则 (见 chat-view.threadEntries)。 */
 const childrenOf = (records: readonly DetailRecord[], turnId: string, now: number): TurnFragment[] =>

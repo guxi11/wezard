@@ -237,7 +237,7 @@ if [[ -n "$TRANSCRIPT_PATH" && -r "$TRANSCRIPT_PATH" ]]; then
             elif ($c | type) == "array" then
               ([ $c[]? | select(.type == "text") | .text ] | join("\n"))
             else "" end )
-        | gsub("(?s)<system-reminder>.*?</system-reminder>"; "")
+        | gsub("(?s)<system-reminder[^>]*>.*?</system-reminder>"; "")
         | gsub("(?s)<command-name>.*?</command-name>"; "")
         | gsub("(?s)<command-message>.*?</command-message>"; "")
         | gsub("(?s)<command-args>.*?</command-args>"; "")

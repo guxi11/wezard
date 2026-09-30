@@ -4,8 +4,17 @@
 
 ## [Unreleased]
 
+### Added
+- rolepage 里一句话尾巴上的 `<system-reminder>` (信封 / 点名 / 名册变动) 默认显示成一行摘要 (👤 谁 · 群 / 🔒 私聊 / 📣 公开 / ⏰ 定时 / 🔗 点名 / 🧭 名册变动), 点一下切换成原文。
+
 ### Changed
+- wezard 挂的 `<system-reminder>` 结构化: 事实写在开标签的属性上 (`wezard="envelope" kind from chat scope` / `wezard="mention" names` / `wezard="roster"`), 正文只留给模型的规矩 —— `read_chat` 按属性读回, 改措辞不再牵连解析; 没有属性的老 transcript 仍按原措辞认。
+- 回复出来之后, 这一轮的工具调用过程框默认收起。
 - 公开 `send_peer` 派来的那一轮, 回复进群时气泡头标出方向 `.me → .它` (与问话气泡的 `.它 → .me` 对称) —— 之前只有 `.me`, 群里看不出这段话是答给转派它的 wizard 而不是答给人的。引用这种气泡仍然路由到发话方。
+
+### Fixed
+- 保温 ping 改为整句锚定匹配: `resumePing` 是一句 `continue`, 同伴或人说的「continue（接着干…）」不再被当成 ping 整轮吞掉。
+- 保温的轮次预算把工具调用算作真实活动 —— 长串工具调用之后不再被误判为空闲; CLI 自己的 `Retrying in …s · attempt n/m` 页脚算忙, 不再给正在重试的会话排一句 `continue`。
 
 ## [2.1.0] - 2026-09-30
 

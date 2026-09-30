@@ -16,6 +16,7 @@
 // wizard_roster 问到; 为一行提示做可靠投递不值当。信箱是纯内存的, daemon 重启即
 // 清空 —— 同 graph run, 诚实地说: pane 还在, 没送到的提示没了。
 import { baseOfKey } from "../shared/session-label.js";
+import { renderReminder } from "../shared/reminder.js";
 
 export interface NoticeBox {
   /** 把一行投给一批 wizard。自己做的事自己知道, 所以调用方负责把当事人排除在外。 */
@@ -53,15 +54,12 @@ export const noticeBox = (): NoticeBox | undefined => bound;
 /** 纯渲染。`<system-reminder>` 是机器信息而非对话, 与 mention hint 同一个壳。 */
 export const renderNotices = (lines: readonly string[]): string => {
   if (lines.length === 0) return "";
-  return [
-    "",
-    "<system-reminder>",
+  return renderReminder({ wezard: "roster" }, [
     "你出生时拿到的那份名册已经变了 —— 这段时间里:",
     ...lines.map((l) => `- ${l}`),
     "要当下真实的状态 (谁在忙、谁在哪个工作区) 就调 wizard_roster。与手头的活无关就略过,",
     "**不要为此回话, 也不要向用户复述这几行** —— 群里该看见的气泡已经发过了。",
-    "</system-reminder>",
-  ].join("\n");
+  ]);
 };
 
 /** 注入边界上取一次增量。slash 命令按行解析, 尾巴上多挂一段会让它不再被识别成

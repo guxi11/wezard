@@ -51,7 +51,7 @@ const readHead = (path: string): string => {
 };
 
 // 与 hook 的 transcript_tail 提取同一套噪声过滤: 剥掉 Claude Code 注入的包裹标签。
-const WRAPPER_RE = /<system-reminder>[\s\S]*?<\/system-reminder>|<command-[a-z]+>[\s\S]*?<\/command-[a-z]+>|<local-command-[a-z]+>[\s\S]*?<\/local-command-[a-z]+>/g;
+const WRAPPER_RE = /<system-reminder(?:\s[^>]*)?>[\s\S]*?<\/system-reminder>|<command-[a-z]+>[\s\S]*?<\/command-[a-z]+>|<local-command-[a-z]+>[\s\S]*?<\/local-command-[a-z]+>/g;
 
 const firstUserText = (path: string): string => {
   for (const line of readHead(path).split("\n")) {

@@ -17,6 +17,7 @@ import type {
   TurnItem,
 } from "./detail-store.js";
 import { truncate, clipLine } from "./std.js";
+import { parseReminders, stripReminders, viewOf, type Reminder } from "./reminder.js";
 
 const escHtml = (s: string): string =>
   s.replace(/[&<>"']/g, (c) =>
@@ -776,6 +777,23 @@ const renderAgent = (r: TurnDetailRecord): string => {
   return `<div class="tg-agent"><span class="l">🤖 subagent${type}</span>${desc}</div>`;
 };
 
+// 一句话尾巴上的 `<system-reminder>`: 默认给摘要 (谁、在哪、点了谁), 点一下换成原文。
+// 两面都在 HTML 里, 切换只是节点上的一个 class —— 同过程框的收起态, reconcile 留节点就留住它。
+const renderReminder = (r: Reminder): string => {
+  const v = viewOf(r);
+  const items = v.items.length ? `<ul>${v.items.map((i) => `<li>${escHtml(i)}</li>`).join("")}</ul>` : "";
+  return `<div class="rem ${v.kind}" title="点击切换原文 / 摘要"><div class="rem-pretty"><span class="rem-i">${v.icon}</span>` +
+    `<span class="rem-l">${escHtml(v.label)}</span>${items}</div><pre class="rem-raw">${escHtml(r.raw.trim())}</pre></div>`;
+};
+
+/** 把一句输入拆成正文与它挂着的 reminder 块 (没有就是 "")。 */
+export const splitReminders = (text: string): { body: string; html: string } => {
+  const rs = parseReminders(text);
+  return rs.length
+    ? { body: stripReminders(text), html: `<div class="rems">${rs.map(renderReminder).join("")}</div>` }
+    : { body: text, html: "" };
+};
+
 // ── Chat 线程视图用的单 turn 片段 ──────────────────────────────────────
 // 线程里一个 turn 只留一条分隔头 (时间 / model / 状态 / 本轮 token), 总账走页脚 status bar。
 // 返回 html + sig, 让客户端按 sig 判断"这条 turn 变没变", 不用 diff 整段 DOM。
@@ -849,10 +867,11 @@ export const renderTurnGroup = (
   standalone = true,
 ): TurnFragment => {
   const { parts, stamps, done, chips } = turnParts(r, `${r.id}:`, now, true, !standalone);
+  const q = splitReminders(r.userQuery ?? "");
   const queryBubble = r.userQuery && standalone
     ? `<section class="bubble user" data-key="${r.id}:user">
         <div class="bubble-head">💬 <span class="role">User</span></div>
-        <div class="q-body">${escHtml(r.userQuery)}</div>
+        <div class="q-body">${escHtml(q.body)}</div>${q.html}
       </section>`
     : "";
   const typing = done ? "" : `<div class="typing" data-key="${r.id}:typing">${escHtml(backendLabel(r.cli))} 正在思考</div>`;

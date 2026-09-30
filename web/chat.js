@@ -266,6 +266,12 @@
     if (!s) return;
     if (e.target.closest('.steps-head') || e.target === s || e.target === childBy(s, 'bubbles')) s.classList.toggle('folded');
   });
+  // reminder 块: 摘要 ⇄ 原文。刚划选了一段原文的那次松手不算点击。
+  inner.addEventListener('click', function (e) {
+    var r = e.target.closest && e.target.closest('.rem');
+    if (!r || String(window.getSelection() || '')) return;
+    r.classList.toggle('raw');
+  });
 
   // ── 左栏: 当前 role 的名片 + 会话列表 ──
   var convOf = function (key) { return R.convs.filter(function (c) { return c.key === key; })[0]; };

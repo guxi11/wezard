@@ -12,6 +12,7 @@
 import { existsSync, openSync, readSync, closeSync, statSync } from "node:fs";
 import { backendForPath, type CliBackendName } from "../shared/cli-backends.js";
 import { truncate, truncateWithCount } from "../shared/std.js";
+import { envelopeAttrs, parseEnvelope, renderReminder, type Envelope } from "../shared/reminder.js";
 
 /** Strip ANSI SGR/CSI + OSC so captured pane text is safe to embed / match on. */
 export const stripAnsi = (s: string): string =>
@@ -80,7 +81,7 @@ export interface Turn {
 
 // Meta wrappers Claude Code injects around slash commands / hook output. They
 // are machinery, not conversation — drop them before any summary or handoff.
-const META_RE = /<(system-reminder|command-[^>]*|local-command-[^>]*|task-notification)>[\s\S]*?<\/\1>/g;
+const META_RE = /<(system-reminder|command-[^>\s]*|local-command-[^>\s]*|task-notification)(?:\s[^>]*)?>[\s\S]*?<\/\1>/g;
 
 // Claude Code (2.1.27x+) 把折叠成 `[Pasted text #N]` 的粘贴在 transcript 里包成
 // `<pasted_content id="…">…</pasted_content id="…">`。wezard 的注入走 tmux paste, 所以
@@ -443,54 +444,24 @@ export const lastReply = (jsonlPath: string, sinceMs = 0, pingSigs: readonly str
 //
 // 信封同时是 transcript 里**唯一**记着「这句话是谁、在哪个频道说的」的地方: 会话的
 // jsonl 只知道输入框里进过什么。read_chat 就靠把它读回来 (parseEnvelope) 在各个
-// 会话的 jsonl 之间拼出一个群 / 一段私聊的记录 —— 所以渲染与解析放在一起, 改措辞
-// 要两边一起改, 而且老 transcript 里的旧措辞得继续认。
-export interface Envelope {
-  kind: "peer" | "human" | "task";
-  /** 发话方的称呼: wizard 是 `.name`, 人是 userid, 定时任务是 `定时 <id>`。 */
-  from: string;
-  /** wizard 之间的私聊。 */
-  private: boolean;
-  /** 公开轮所在群的名字; "" = 这个会话的 home 聊天。 */
-  chat: string;
-}
-
-const REMINDER_RE = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
-const ENVELOPES: ReadonlyArray<[RegExp, (m: RegExpMatchArray) => Envelope]> = [
-  [/这一轮是 wizard `([^`]+)` 发来的\*\*私聊\*\*/, (m) => ({ kind: "peer", from: m[1]!, private: true, chat: "" })],
-  [/这一轮是 wizard `([^`]+)` 在群(?: \*\*([^*]*)\*\* )?里\*\*公开\*\*/, (m) => ({ kind: "peer", from: m[1]!, private: false, chat: m[2] ?? "" })],
-  [/这一轮是 `([^`]+)` 在群 \*\*([^*]*)\*\* 里说的/, (m) => ({ kind: "human", from: m[1]!, private: false, chat: m[2] ?? "" })],
-  [/这一轮是定时任务 `([^`]+)` 到点放进来的/, (m) => ({ kind: "task", from: `定时 ${m[1]!}`, private: false, chat: "" })],
-];
-
-/** 一句落盘的输入上挂着的信封。只在 `<system-reminder>` 里找 —— 正文里引用这句
- *  措辞的人话不算。 */
-export const parseEnvelope = (raw: string): Envelope | undefined => {
-  const reminders = raw.match(REMINDER_RE)?.join("\n") ?? "";
-  return reminders
-    ? ENVELOPES.reduce<Envelope | undefined>((hit, [re, make]) => hit ?? ((m) => (m ? make(m) : undefined))(reminders.match(re)), undefined)
-    : undefined;
-};
-
-const reminder = (...lines: string[]): string => ["", "<system-reminder>", ...lines, "</system-reminder>"].join("\n");
+// 会话的 jsonl 之间拼出一个群 / 一段私聊的记录。事实写在开标签的属性上 (见
+// shared/reminder.ts), 正文只是给模型的规矩 —— 改措辞不影响解析; 老措辞在那边认。
+export { parseEnvelope, type Envelope };
 
 /** 人说的那一轮的信封。只在 transcript 自己推不出来时才挂 (见 inbound.send): 一个
  *  wizard 被人从别的群叫到、或者住在多人的群里, 它和后来读记录的人都得知道这句是
  *  谁、在哪说的; 住在与一个人的单聊里的, 默认值就是对的, 不为它每轮多付一段。 */
 export const renderHumanEnvelope = (user: string, chat: string): string =>
-  reminder(`这一轮是 \`${user}\` 在群 **${chat}** 里说的, 你的回复发回那个群。`);
+  renderReminder(envelopeAttrs.human(user, chat), [`这一轮是 \`${user}\` 在群 **${chat}** 里说的, 你的回复发回那个群。`]);
 
 /** 定时任务放的那一轮: 不标的话, 记录里它就成了「人说的」。 */
 export const renderTaskEnvelope = (taskId: string): string =>
-  reminder(`这一轮是定时任务 \`${taskId}\` 到点放进来的, 不是人此刻说的 —— 照常执行, 回复照常发进群。`);
+  renderReminder(envelopeAttrs.task(taskId), [`这一轮是定时任务 \`${taskId}\` 到点放进来的, 不是人此刻说的 —— 照常执行, 回复照常发进群。`]);
 
 /** `from` = 发话方的称呼 (`.name`); `chat` 给了 = 公开轮 (那个群的名字, 可以是 ""),
  *  不给 = 私聊。 */
 export const renderPeerEnvelope = (from: string, chat?: string): string =>
-  [
-    "",
-    "<system-reminder>",
-    ...(chat === undefined
+  renderReminder(envelopeAttrs.peer(from, chat), chat === undefined
       ? [
           `这一轮是 wizard \`${from}\` 发来的**私聊**, 不是人说的: 人看不见这一轮, 读你回复的是 \`${from}\`。`,
           `你这一轮的**最后一条消息**就是给它的回执 —— 它用 wait_peer 取, 所以不要再 send_peer 回它 (除非它明说干完通知它), 也不要为这一轮 notify。`,
@@ -499,9 +470,7 @@ export const renderPeerEnvelope = (from: string, chat?: string): string =>
       : [
           `这一轮是 wizard \`${from}\` 在群${chat ? ` **${chat}** ` : ""}里**公开**对你说的: 你的回复会直接发进那个群, 人和 \`${from}\` 都看得到。`,
           `照对人说话的方式答; 不要再 send_peer 把同一段话回给 \`${from}\`。`,
-        ]),
-    "</system-reminder>",
-  ].join("\n");
+        ]);
 
 /** Prompt-token size of the session's most recent turn: input + both cache
  *  tiers = how full the context window is, i.e. exactly what a cold cache would
@@ -710,17 +679,14 @@ export const renderPeerMentionHint = (mentions: readonly PeerMention[]): string 
       `- \`.${m.tag}\` ${m.label} —— 一个活着的 wizard, 住在${m.foreign ? `**另一个**聊天${m.chat ? ` (\`${m.chat}\`)` : ""}` : "你这个聊天"}` +
       ` (target \`${m.target}\`${m.cwd ? `, 工作区 ${m.cwd}` : ""}), 地址 "${m.address}"。`,
   );
-  return [
-    "",
-    "<system-reminder>",
+  return renderReminder({ wezard: "mention", names: mentions.map((m) => `.${m.tag}`).join(" ") }, [
     "上面这条消息里的 `.name` 点的是**别的 wizard**, 不是字面文本:",
     ...lines,
     "用户要你把它们拉进来、看看它们在干嘛、或者把话带到时, 去叫它们, 别猜、更别替它们回答:",
     "peek_peer(address) 读它最近的对话, send_peer(address, text) 派活或推它一把, wait_peer(address) 等它闲下来,",
     "wizard_roster() 看全体 wizard 的名字/职责/家谱。地址就是它的全局名字, 原样用上面给的那个。",
     "只是提了一嘴、并没有要你去找它 (\".b 说的那个方案\") 就不必调工具 —— 看用户到底要什么。",
-    "</system-reminder>",
-  ].join("\n");
+  ]);
 };
 
 // ── 同伴模型 ──────────────────────────────────────────────────────────
