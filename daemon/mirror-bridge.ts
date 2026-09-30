@@ -1556,7 +1556,10 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   // end can take 4-7s to be honored on a cold TUI. Only the fresh-spawn path
   // pays the latency cost.
   const PASTE_VERIFY_MS = freshSpawn ? 6000 : 2500;
+  // 粘贴落定的等待**上限**, 不是固定 sleep: 框认得出来时按 SETTLE_POLL_MS 轮询
+  // 「内容已落进输入框且不再变」, 一满足就回车 (见 pasteSettled)。
   const POST_PASTE_SETTLE_MS = freshSpawn ? 1500 : 400;
+  const SETTLE_POLL_MS = 50;
   const POST_PASTE_SETTLE_FALLBACK_MS = freshSpawn ? 2500 : 700;
   const CLEARED_TIMEOUT_MS = freshSpawn ? 4000 : 1500;
   const RETRY_SETTLE_MS = freshSpawn ? 1500 : 800;
@@ -1646,9 +1649,25 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
     }
   }
 
-  // Bracketed-paste end + TUI catch-up. Warm pane: 400ms is invisible.
-  // Fresh respawn: 1500ms+ — claude --resume is still loading the transcript.
-  if (!alreadyTyped) await sleep(pasteSeen ? POST_PASTE_SETTLE_MS : POST_PASTE_SETTLE_FALLBACK_MS);
+  // 粘贴落定 = 框里是我们的内容, 且连续两次读到同一个样子 —— TUI 已把整段粘贴
+  // (bracketed-paste end 在内) 消化完, 紧跟的回车不会被并进粘贴。实测冷启动的
+  // pane 上粘贴 40–210ms 即落定, 此前这里固定睡 1500ms。到上限仍没等到就照旧
+  // 回车 (与原先睡满等价), 回车被吞由下面的证人 + 补回车兜底。
+  const pasteSettled = async (maxMs: number, prev?: string, t0 = Date.now()): Promise<boolean> => {
+    if (Date.now() - t0 >= maxMs) return false;
+    const box = await readInputBox(target);
+    const body = box.known && !boxIntact(box) ? box.body : undefined;
+    if (body !== undefined && body === prev) return true;
+    await sleep(SETTLE_POLL_MS);
+    return pasteSettled(maxMs, body, t0);
+  };
+
+  // Bracketed-paste end + TUI catch-up. 框认不出来 / 粘贴没被看见时没有条件可查,
+  // 维持固定等待 (fresh respawn: claude --resume is still loading the transcript)。
+  if (!alreadyTyped) {
+    if (pasteSeen && boxVerify) await pasteSettled(POST_PASTE_SETTLE_MS);
+    else await sleep(pasteSeen ? POST_PASTE_SETTLE_MS : POST_PASTE_SETTLE_FALLBACK_MS);
+  }
 
   const sendEnter = async (): Promise<{ ok: boolean; reason?: string }> => {
     const e = await runTmux(["send-keys", "-t", target, "Enter"]);

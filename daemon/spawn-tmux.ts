@@ -159,6 +159,9 @@ const MIN_SETTLE_MS = 1500;
 const TUI_READY_TIMEOUT_MS = 15_000;
 // Poll interval for capture-pane checks.
 const POLL_MS = 400;
+// 注册表判就绪只是读几个小 json, 不起 tmux —— 查得密一些, idle 一报就走
+// (实测冷启动 2.6–2.9s 报 idle, 400ms 的粒度平均白等 0.2–0.3s)。
+const REGISTRY_POLL_MS = 100;
 
 // Patterns indicating the TUI reached interactive state (input box visible).
 // Covers Claude Code, Claude Internal, and CodeBuddy TUIs across versions.
@@ -188,8 +191,9 @@ const waitForTuiReady = async (pane: string, cmd: string, backend: CliBackend, l
   let retriedEnter = false;
   let resent = false;
   let sawSession = false;
+  let lastCap = 0;
   while (Date.now() < deadline) {
-    await sleep(POLL_MS);
+    await sleep(registry ? REGISTRY_POLL_MS : POLL_MS);
     if (registry) {
       const s = sessionOnPane(backend.homeDir, pane);
       if (s?.status === "idle") return true;
@@ -197,6 +201,9 @@ const waitForTuiReady = async (pane: string, cmd: string, backend: CliBackend, l
     }
     // Shell rc needs time to source before capture-pane shows anything meaningful.
     if (Date.now() - t0 < MIN_SETTLE_MS) continue;
+    // pane 那一路仍按 POLL_MS 的节奏读屏 —— 注册表查得再密也不多起 tmux。
+    if (Date.now() - lastCap < POLL_MS) continue;
+    lastCap = Date.now();
     const cap = await capturePaneBottom(pane, 20);
     if (!registry && TUI_READY_RE.test(cap)) return true;
     // Shell prompt eating our Enter: an interactive blocker (omz update, etc.)
