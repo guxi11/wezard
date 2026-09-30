@@ -4,15 +4,20 @@
 
 ## [Unreleased]
 
+## [2.0.4] - 2026-09-30
+
 ### Added
 - **wizard 间的每一轮都带信封**: `send_peer` / `clone_wizard({task})` / `spawn_wizard({task})` 注入的文本尾部挂一段 `<system-reminder>`, 写明发话的是哪个 wizard、私聊还是公开 (公开轮带群名)、回执怎么交 (私聊 = 这一轮的最后一条消息, 收口成 `RESULT: …`, 不再 `send_peer` 回去、不 `notify`、不对 wizard 寒暄)。此前同伴的话是裸文本, 收件方分不清它是人说的还是 wizard 说的。信封不进气泡 / rolepage / `peek_peer`; slash 命令不挂。
 - **MCP 工具 `set_model`: 给一个已经在跑的 wizard 换模型** (默认换自己, `name` 点名换别的)。口语化写要什么 (`opus` / `sonnet 5` / `最新的 fable` / `默认`), `scope` 选生效范围: `session` (默认, 只换这一个会话) / `default` (同时设为此后新会话的默认模型)。返回 `model` (真正落地的那一项)、`scope` (实际落在哪一档) 与 `catalog` (这台 CLI 此刻的全部模型)。新路由 `POST /wizard/model`。落地的模型记进绑定, 之后被重启也回到它上面。
+- **rolepage 群聊顶栏的群名旁加跳转按钮**: `wxwork://openconversation` 直达企业微信里的这个群。只有真群 (`chat:<roomid>`) 才有 —— 人与 bot 的单聊没有可跳的会话。
 
 ### Changed
 - **BREAKING `wait_peer` 的返回瘦身并与发话对上号**: 只认调用方上次 `send_peer` (或 clone/spawn 的 `task`) **之后**的回复 —— 对方停下了却没有新回复时回 `stale: true`, 不再把上一件事的答案交回来 (分身也不再把被克隆者的旧回复当成自己的)。收口了 `RESULT:` 就只回 `result` (从全文摘取, 不再受 4000 字截断影响) + `omitted`; 没收口才回 `lastText` (保留换行, 超长掐中间保住头尾)。只等一个时结果摊平在顶层, 等一组才有 `results`; `target` / `foreign` / `address` 字段移除, 名字在 `name`。`send_peer` 的返回同样去掉 `target` / `foreign` / `when`。
 - **宪章里的同群名册压缩**: 与自己同工作区的不再重复路径, 既没写职责又同工作区的并成一行名字。
 - **新建会话到首条消息提交少等约 1.5s**: 粘贴后不再固定睡 (冷启动 1500ms / 热 pane 400ms), 改成每 50ms 查一次「内容已落进输入框且不再变」, 一满足就回车; 原来的时长降为上限, 到上限照旧回车, 输入框认不出来时维持固定等待。新 pane 的就绪判定走注册表时轮询间隔从 400ms 收到 100ms (读屏那一路节奏不变)。
 - **选模型改成驱动 `/model` 列表本身, spawn 与 `set_model` 共用一条路**: 打开 pane 里的 `/model` 列表 → 滚动读出全部条目 → 挑与请求最接近的一项 (家族必须对上, 版本号只参与排序, 同分取更新的) → 方向键逐步移到那一行 (每步回读光标) → 选中 → 读回执。不再先盲敲 `/model <名字>` 再猜: 列表里显示的名字 (`Opus 4.7`) 并不是 `/model` 认的名字。选中键就是生效范围: `s` = 仅本会话, Enter = 同时设为新会话默认; spawn 一律走「仅本会话」—— 一个 wizard 换模型不再改掉 `settings.json` 里新会话的默认模型。`spawn_wizard` / `clone_wizard` / `new_claude_session` 返回的 `model` 相应变成列表里的条目名 (如 `Opus 5.5`)。
+- rolepage 用量条条首的「用量」标签改成具体模型名, 右端原来的模型一项移除。
+- rolepage 的关系图 / 日程入口改成灰色文本按钮, 中间一条分割线, 不再撑满整行。
 
 ### Removed
 - **单轮详情页 (Turn Details) 及其入口**: rolepage 每张 turn 卡片头上的 `↗` 链接移除, `/detail?id=<turn id>` 不再渲染整页 (回「未找到」) —— 一轮的全部内容本来就在 rolepage 的卡片里。`/detail` 仍服务工具调用与审批详情。
@@ -20,6 +25,7 @@
 ### Fixed
 - **多行的 `send_peer({public:true})` / 定时任务提示, 对方的回复不进群**: Claude Code 2.1.27x 起把折叠的粘贴在 transcript 里包成 `<pasted_content>`, 注入的回显去重因此对不上, 这一轮被认成「人在 CLI 里敲的」而被 `chatOriginOnly` 挡在群外 (频道其实是对的)。去重两侧改用同一个规范形 (剥掉粘贴壳与尾部 system-reminder); `peek_peer` / `wait_peer` / 摘要 / rolepage 的 query 同样不再带这层壳。宪章新增一段说明: 整条消息都在 `<pasted_content>` 里时它就是发话人本人的话 —— 此前 wizard 会把派来的指令当成「粘贴的资料」而搁置 (如不肯 push)。
 - spawn 时指定 `model` 经常落空并报「/model 没有按预期方式回应」: 回执改为轮询等待 (此前固定等 0.8s 就读屏), 并处理「Switch model?」缓存提示的二次确认。
+- **launchd / systemd 下 daemon 认不出任何 tmux pane**: 这样起的 daemon 没有 `LANG` / `LC_*`, tmux 把它当非 UTF-8 client, `-F` 输出里的 tab 被洗成 `_`, 按 tab 切的 boot 恢复 pane 快照 / pane 漂移跟随 / pane 上限 (`maxPanes`) 全部失效, 而带 locale 的 dev shell 里一切正常。`runTmux` 一律带 `-u`。
 
 ## [2.0.3] - 2026-09-30
 
@@ -647,7 +653,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.0.3...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.0.4...HEAD
+[2.0.4]: https://github.com/guxi11/wezard/compare/v2.0.3...v2.0.4
 [2.0.3]: https://github.com/guxi11/wezard/compare/v2.0.2...v2.0.3
 [2.0.2]: https://github.com/guxi11/wezard/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/guxi11/wezard/compare/v2.0.0...v2.0.1
