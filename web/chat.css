@@ -286,9 +286,15 @@ button { font: inherit; color: inherit }
 .mrow.mine .mb .bubble, .mrow.mine .mb .typing, .mrow.mine .mb .stats { background: transparent; border-color: var(--mine-line) }
 .mrow.mine .mb .bubble.user, .mrow.mine .mb .bubble.approval,
 .mrow.mine .mb .md-body code, .mrow.mine .mb .md-body pre,
-.mrow.mine .mb .tile, .mrow.mine .mb details > summary,
+.mrow.mine .mb .tile, .mrow.mine .mb details:not(.tool-call) > summary,
+.mrow.mine .mb .tool-body section > h2, .mrow.mine .mb .diff-meta,
 .mrow.mine .mb .tool-call > summary:hover { background: var(--mine-soft); border-color: var(--mine-line) }
 .mrow.mine .mb .md-body pre code { background: transparent }
+/* 展开的工具正文 (command / diff / 文件内容) 与嵌在父轮里的 subagent 卡片都是裸
+   section, 吃的是 TURN_CSS 的白底 —— 同样收回气泡底色; subagent 的绿色左边线留着。 */
+.mrow.mine .mb .tool-body section { background: transparent; border-color: var(--mine-line) }
+.mrow.mine .mb .turn-group .turn-group { background: transparent; box-shadow: none; border-color: var(--mine-line) }
+.mrow.mine .mb .turn-group .turn-group.subagent { border-left-color: #1a7f3733 }
 .mrow.mine .mb .bubble details, .mrow.mine .mb .tg-head { border-color: var(--mine-line) }
 .mrow.mine .mb .tool-body { border-left-color: var(--mine-line) }
 /* 工具正文是展开时才取的 (chat.js loadTool) —— 空壳期间说一句在干什么。 */
