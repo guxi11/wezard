@@ -205,17 +205,26 @@ const other = (m: Msg, role: string): string => (m.from === role ? m.to : m.from
 export const convKeyOf = (m: Msg, role: string): string => (m.channel ? `c:${m.channel}` : `p:${other(m, role)}`);
 
 const stripMd = (s: string): string => s.replace(/[`*_~|#>]/g, "").replace(/\s+/g, " ").trim();
-const msgText = (m: Msg): string => {
-  if (m.dir === "in") return unwrapMates(m.turn.userQuery ?? "");
+/** 一条消息里最后那句话与它说出的时刻: 入 = 问话 (轮次开始); 出 = 最后一段 text ——
+ *  工具调用之间的独白也算, 时刻取那段 text 自己的, 而不是这一轮开口的时刻。 */
+const saidOf = (m: Msg): { body: string; ts: number } => {
+  if (m.dir === "in") return { body: stripMd(unwrapMates(m.turn.userQuery ?? "")).slice(0, 80), ts: m.ts };
   const t = [...m.turn.items].reverse().find((it): it is Extract<typeof it, { t: "text" }> => it.t === "text");
-  return t?.body ?? "";
+  return { body: stripMd(t?.body ?? "").slice(0, 80), ts: t?.ts ?? m.ts };
 };
-const bodyOf = (m: Msg | undefined): string => (m ? stripMd(msgText(m)).slice(0, 80) : "");
-const previewOf = (m: Msg | undefined, dir: Directory): string =>
-  m ? `${dir.nameOf(m.from)}: ${bodyOf(m)}` : "";
-/** 最后一条有正文的消息 —— 只有工具调用、或还在跑没吐字的那一轮没有可预览的话,
- *  预览越过它落在上一句真话上, 而不是留白。 */
-const lastSaid = (ms: readonly Msg[]): Msg | undefined => [...ms].reverse().find((m) => bodyOf(m) !== "");
+
+interface Glance { preview: string; lastTs: number }
+/** 会话列表一行的预览与时间 —— 取自同一句话: 所有有正文的消息里**最晚说出**的那句
+ *  (按 text 自己的时刻比, 不按消息排序: 一轮长跑的独白可能晚于之后才进来的问话)。
+ *  只有工具调用、或还在跑没吐字的那一轮没有可预览的话, 越过它落在上一句真话上;
+ *  一句话都没有才退回最后一条消息的时刻。`who` 给出正文前的发话人前缀 (群聊用)。 */
+const glance = (ms: readonly Msg[], who: (m: Msg) => string = () => ""): Glance | undefined =>
+  ms.reduce<Glance | undefined>((best, m) => {
+    const s = saidOf(m);
+    return s.body && s.ts >= (best?.lastTs ?? -Infinity) ? { preview: who(m) + s.body, lastTs: s.ts } : best;
+  }, undefined);
+const glanceOr = (ms: readonly Msg[], who?: (m: Msg) => string): Glance =>
+  glance(ms, who) ?? { preview: "", lastTs: ms[ms.length - 1]?.ts ?? 0 };
 
 const SUB_MAX = 40;
 
@@ -231,27 +240,24 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
       if (key.startsWith("p:")) {
         const peer = key.slice(2);
         const ms = mine.filter((m) => !m.channel && other(m, role) === peer);
-        const last = ms[ms.length - 1];
         return {
           key, kind: "wizard", name: dir.nameOf(peer), label: dir.labelOf(peer), base: "", peer,
           status: dir.status(peer, now),
           // 私聊只有两个人, 标题行已是对方的名字, 预览只放正文。
-          lastTs: last?.ts ?? 0, preview: bodyOf(lastSaid(ms)), count: ms.length, subs: [],
+          ...glanceOr(ms), count: ms.length, subs: [],
         };
       }
       const base = key.slice(2);
       const all = msgs.filter((m) => m.channel === base);
-      const last = all[all.length - 1];
       const others = [...new Set(all.flatMap((m) => [m.from, m.to]))].filter((r) => r !== role && !r.startsWith("task:") && r !== SYSTEM);
       const subs = others
         .map((r): ConvSub => {
           const pair = all.filter((m) => involves(m, role) && other(m, role) === r);
           const seen = all.filter((m) => involves(m, r));
-          const last = pair[pair.length - 1] ?? seen[seen.length - 1];
           return {
             role: r, name: dir.nameOf(r), label: dir.labelOf(r), count: pair.length,
             // 标题行已经是它的名字, 预览只放正文。
-            lastTs: last?.ts ?? 0, preview: bodyOf(lastSaid(pair) ?? lastSaid(seen)), status: dir.status(r, now),
+            ...(glance(pair) ?? glanceOr(seen)), status: dir.status(r, now),
           };
         })
         // 与我有往来的排前, 再按最近。
@@ -261,7 +267,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
         key, kind: "group", base,
         name: dir.chatName(base) || (base.startsWith("user:") ? dir.nameOf(humanOf(base)) : base.replace(/^chat:/, "").slice(0, 10)),
         label: "💬",
-        lastTs: last?.ts ?? 0, preview: previewOf(lastSaid(all), dir), count: all.length, subs,
+        ...glanceOr(all, (m) => `${dir.nameOf(m.from)}: `), count: all.length, subs,
       };
     })
     .sort((a, b) => b.lastTs - a.lastTs);
