@@ -1731,14 +1731,13 @@ const main = async (): Promise<void> => {
     fallbackTarget: () => (cfg.defaultChat ?? "").trim(),
   });
 
-  // 闲置 pane 收割机 — 默认 48h 静默才动 (wrc.mirror.idleReapHours, 0=关)。
-  // 只收 pane 不收绑定: 下一条消息 `--resume` 复活。豁免: 名下有定时任务的
-  // wizard (调度本身会唤醒/需要它), 挂着审批长轮询的会话 (hook 还停在等点击),
-  // 忙着的 / 人正盯着的 (bridge 内部判)。keepalive 会话靠 ping 刷新 transcript,
-  // 天然到不了阈值。
-  let reapTimer: NodeJS.Timeout | undefined;
-  if (cfg.wrc.mirror.idleReapHours > 0) {
-    const ttlMs = cfg.wrc.mirror.idleReapHours * 3.6e6;
+  // pane 上限 — 每新建一个 wizard 数一次: 活着的会话 pane 超过 wrc.mirror.maxPanes
+  // (默认 20, 0=关) 就从最久没动的收起。数量只在出生时增长, 所以不设定时器。只收
+  // pane 不收绑定: 下一条消息 `--resume` 复活。豁免: 名下有定时任务的 wizard (调度
+  // 本身会唤醒/需要它), 挂着审批长轮询的会话 (hook 还停在等点击), 忙着的 / 人正
+  // 盯着的 (bridge 内部判)。
+  if (cfg.wrc.mirror.maxPanes > 0) {
+    const max = cfg.wrc.mirror.maxPanes;
     const sweep = async (): Promise<void> => {
       const taskOwners = new Set(
         tasks.list()
@@ -1747,14 +1746,13 @@ const main = async (): Promise<void> => {
           .filter((t): t is string => !!t),
       );
       const pendingSids = new Set(listPending().map((p) => p.meta.sessionId).filter((s): s is string => !!s));
-      const r = await bridge.reapIdle(ttlMs, (target, sid) =>
+      const r = await bridge.reapOverflow(max, (target, sid) =>
         taskOwners.has(target) ? "owns scheduled task"
           : pendingSids.has(sid) ? "pending approval"
           : undefined);
-      if (r.reaped.length) log.info({ reaped: r.reaped.length, targets: r.reaped }, "idle reap sweep");
+      if (r.reaped.length) log.info({ reaped: r.reaped.length, targets: r.reaped, max }, "pane cap sweep");
     };
-    reapTimer = setInterval(() => void sweep().catch((e) => log.warn({ err: (e as Error).message }, "idle reap sweep failed")), 30 * 60_000);
-    reapTimer.unref();
+    bridge.onSpawn(() => void sweep().catch((e) => log.warn({ err: (e as Error).message }, "pane cap sweep failed")));
   }
 
   const shutdown = async (signal: string): Promise<void> => {
@@ -1762,7 +1760,6 @@ const main = async (): Promise<void> => {
     scheduler.stop();
     tasks.stop();
     netWatch.stop();
-    if (reapTimer) clearInterval(reapTimer);
     // 同 POST /shutdown: 先把挂着的审批长轮询了结成「稍后续接」, 再关连接。
     log.info(drainForReload(), "pending drained for reload");
     // Hard-exit watchdog: http.close() blocks until every in-flight connection

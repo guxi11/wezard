@@ -1913,17 +1913,18 @@ export interface MirrorBridge {
    *  session on its next message. */
   killPane: (target: string) => Promise<{ ok: boolean; reason?: string }>;
   /** Transcript mtime of the session bound to `target`; 0 = no session / not
-   *  written yet. One statSync, no tmux — same cheap gate reapIdle uses. */
+   *  written yet. One statSync, no tmux — no pane probe. */
   lastActivity: (target: string) => number;
-  /** Idle reaper: kill the tmux pane of every session whose transcript has been
-   *  silent for `ttlMs`, but KEEP the persisted binding — the next inbound
-   *  resurrects it via the dead-pane `--resume` path (reap = asleep, /kill =
-   *  dead). Cheap transcript-mtime gate first, tmux probes only for the few
-   *  idle survivors. `skip` vetoes a target with a reason (task owners,
-   *  pending approvals). Busy panes and windows a human is watching right now
-   *  are passed over. */
-  reapIdle: (
-    ttlMs: number,
+  /** Pane cap: when more than `max` session panes are alive, kill the least
+   *  recently active ones (transcript mtime) until the count fits, but KEEP
+   *  the persisted binding — the next inbound resurrects it via the dead-pane
+   *  `--resume` path (reap = asleep, /kill = dead). One `list-panes` answers
+   *  both "alive" and "watched"; under the cap nothing else is touched. `skip`
+   *  vetoes a target with a reason (task owners, pending approvals). Busy
+   *  panes and windows a human is watching right now are passed over — so the
+   *  count can stay above `max` when everything old is exempt. */
+  reapOverflow: (
+    max: number,
     skip?: (target: string, sessionId: string) => string | undefined,
   ) => Promise<{ reaped: string[]; skipped: Record<string, string> }>;
   /** Send a bare Enter to the live tmux pane bound to `target` — confirms a
@@ -1974,6 +1975,11 @@ export interface MirrorBridge {
    *  into the new process's system prompt, so identity is a property of the
    *  session rather than of the one code path that happened to create it. */
   setCharterProvider: (fn: (target: string, ctx?: { cwd?: string }) => string) => void;
+  /** Install the hook fired after a new session pane is up and attached
+   *  (`newSession` / `cloneSession`). index.ts hangs the pane-cap sweep on it:
+   *  the count only grows at a birth, so that is the only moment worth
+   *  counting. Fire-and-forget — it never delays or fails the spawn. */
+  onSpawn: (fn: () => void) => void;
   /** Hard facts about one session — sessionId, transcript, cwd, backend, pane,
    *  and how full its context window is (prompt tokens of the last turn). */
   sessionInfo: (target: string) => { sessionId: string; jsonlPath: string; cwd: string; cli: CliBackendName; model: string; tmuxPane: string; contextTokens: number } | undefined;
@@ -4644,6 +4650,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 由 index.ts 在启动时装上 (注册表活在那边); 没装 = 退回无身份行为, 全链路无回归。
   let charterOf: ((target: string, ctx?: { cwd?: string }) => string) | undefined;
   const setCharterProvider = (fn: (target: string, ctx?: { cwd?: string }) => string): void => { charterOf = fn; };
+  // 新 pane 落地后的钩子 —— pane 上限在这里数 (由 index.ts 装上; 没装 = 不数)。
+  let afterSpawn: () => void = () => {};
+  const onSpawn = (fn: () => void): void => { afterSpawn = fn; };
   // `cwd` = 这个 pane 正要启动的目录。attach 在 spawn 之后才发生, 所以此刻 getCwd
   // 给的还是上一个 pane 的目录 —— 换目录重开时照它渲染, 新 wizard 会以为自己还在
   // 旧工作区里。
@@ -4768,6 +4777,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       }
     }
     if (!opts?.silent) pushProjectInfo(target, "created");
+    afterSpawn();
     return { ok: true, sessionId: r.sessionId, cwd: r.cwd, model: r.model, modelWarning: r.modelWarning };
   };
 
@@ -4899,6 +4909,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       persistPause(spawned);
     }
     lg.info({ parent: args.parent, sessionId: fork.sessionId }, "clone: forked");
+    afterSpawn();
     return { ok: true, sessionId: fork.sessionId, cwd: r.cwd, inherited: true, model: r.model, modelWarning: r.modelWarning };
   };
 
@@ -5787,39 +5798,48 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const jsonl = jsonlOf(target);
       try { return jsonl ? statSync(jsonl).mtimeMs : 0; } catch { return 0; }
     },
-    reapIdle: async (ttlMs, skip) => {
+    reapOverflow: async (max, skip) => {
       const now = Date.now();
       const reaped: string[] = [];
       const skipped: Record<string, string> = {};
-      for (const target of allTargets()) {
+      // 一次 list-panes 同时回答「活着吗」和「有人盯着吗」—— 跑了几个月的机器上
+      // allTargets 是几百个 key, 见 target 就问 tmux 会打穿 fd (同 worldPeers 的
+      // WORLD_PROBE 取舍)。
+      const snap = await runTmux(["list-panes", "-a", "-F", "#{pane_id}\t#{window_active}:#{session_attached}"]);
+      if (snap.code !== 0) return { reaped, skipped };
+      const watchedBy = new Map(snap.stdout.split("\n").filter(Boolean).map((l) => {
+        const [id, w = ""] = l.split("\t");
+        const [wActive, sAttached] = w.split(":");
+        return [id, wActive === "1" && sAttached !== "0"] as const;
+      }));
+      const live = allTargets().filter((t) => watchedBy.has(paneOf(t)));
+      let over = live.length - max;
+      if (over <= 0) return { reaped, skipped };
+      // 超了才 stat: 最久没动的先收。还没写过 transcript 的是刚起的 pane, 按"此刻"算。
+      const mtimeOf = (target: string): number => {
+        try { return statSync(jsonlOf(target)).mtimeMs; } catch { return now; }
+      };
+      const oldestFirst = live.map((target) => ({ target, mtime: mtimeOf(target) })).sort((x, y) => x.mtime - y.mtime);
+      for (const { target, mtime } of oldestFirst) {
+        if (over <= 0) break;
         const a = byTarget.get(target);
         const sessionId = a?.sessionId || deps.store.get(target)?.sessionId || "";
-        // 便宜闸门先行: transcript mtime 一次 statSync, 不 spawn —— 跑了几个
-        // 月的机器上 allTargets 是几百个 key, 见 target 就问 tmux 会打穿 fd
-        // (同 worldPeers 的 WORLD_PROBE 取舍)。还没写过 transcript 的 spawn-mode
-        // 绑定没有活动证据, 不动它。
-        const jsonl = jsonlOf(target);
-        let mtime = 0;
-        try { if (jsonl) mtime = statSync(jsonl).mtimeMs; } catch { /* 文件没了 */ }
-        if (!mtime || now - mtime < ttlMs) continue;
         const veto = skip?.(target, sessionId);
         if (veto) { skipped[target] = veto; continue; }
         const pane = paneOf(target);
-        if (!pane || !(await tmuxPaneAlive(pane))) continue; // pane 已死, 没什么可收的
-        if (paneIsBusy(await capturePaneTail(pane, 12))) { skipped[target] = "busy"; continue; }
         // 人正盯着这个 window —— 收掉他的视野比省下那点内存更讨嫌。
-        const w = await runTmux(["display-message", "-p", "-t", pane, "#{window_active}:#{session_attached}"]);
-        const [wActive, sAttached] = w.stdout.trim().split(":");
-        if (wActive === "1" && sAttached !== "0") { skipped[target] = "watched"; continue; }
+        if (watchedBy.get(pane)) { skipped[target] = "watched"; continue; }
+        if (paneIsBusy(await capturePaneTail(pane, 12))) { skipped[target] = "busy"; continue; }
         // 与 killPane 同款前戏: Esc 给生成中的 CLI 一个收束落盘的机会。
         await runTmux(["send-keys", "-t", pane, "Escape"]);
         await sleep(250);
         const r = await runTmux(["kill-pane", "-t", pane]);
         if (r.code !== 0) { skipped[target] = `kill-pane failed: ${r.stdout.slice(-120) || r.code}`; continue; }
-        if (a) detach(a, "idle reap");
+        if (a) detach(a, "pane cap");
         // 不碰 store —— 绑定留着, 下一条 inbound 走 dead-pane `--resume` 复活。
         reaped.push(target);
-        log.info({ target, sessionId, pane, idleHours: Math.round((now - mtime) / 3.6e6) }, "mirror idle reap — pane killed, binding kept");
+        over -= 1;
+        log.info({ target, sessionId, pane, idleHours: Math.round((now - mtime) / 3.6e6), max }, "mirror pane cap — pane killed, binding kept");
       }
       return { reaped, skipped };
     },
@@ -5903,6 +5923,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     cloneSession,
     sessionInfo,
     setCharterProvider,
+    onSpawn,
     shutdown: () => {
       clearInterval(paneDriftTimer);
       clearInterval(keepaliveTimer);
