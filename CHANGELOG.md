@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [2.0.3] - 2026-09-30
+
 ### Changed
 - **rolepage 的头像与名字都是进入那个 role 视角的入口**: 侧栏的私聊项 / 群下子项、会话头、消息行 (发言人与 `→ 对方`) 一律可点, 不必先选中; 侧栏选中项上那颗换视角的小图标移除。点行的其余位置仍是选中会话。
 - **stream 气泡超时收口改成一句中间结束语**: 一轮跑过 WeCom 的 ~6min stream 窗口时, 气泡以 `⏳ 仍在处理中, 点击链接查看详情…` 收口 —— brief 下不再定格在最后一行 CoT 进度上, 非 brief 下缀在已有正文之后 (没正文时也不再留着 loading 气泡等它自然过期)。已被新消息顶替的旧轮照旧只留链接。
@@ -628,7 +630,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.0.2...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.0.3...HEAD
+[2.0.3]: https://github.com/guxi11/wezard/compare/v2.0.2...v2.0.3
 [2.0.2]: https://github.com/guxi11/wezard/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/guxi11/wezard/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/guxi11/wezard/compare/v1.4.2...v2.0.0
