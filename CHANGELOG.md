@@ -5,7 +5,7 @@
 ## [Unreleased]
 
 ### Added
-- rolepage 里一句话尾巴上的 `<system-reminder>` (信封 / 点名 / 名册变动) 默认显示成一行摘要 (👤 谁 · 群 / 🔒 私聊 / 📣 公开 / ⏰ 定时 / 🔗 点名 / 🧭 名册变动), 点一下切换成原文。
+- rolepage 里一句话尾巴上的 `<system-reminder>` (信封 / 点名 / 名册变动) 默认收成一个 `<reminder>` 标签, 点一下展开原文。
 
 ### Changed
 - wezard 挂的 `<system-reminder>` 结构化: 事实写在开标签的属性上 (`wezard="envelope" kind from chat scope` / `wezard="mention" names` / `wezard="roster"`), 正文只留给模型的规矩 —— `read_chat` 按属性读回, 改措辞不再牵连解析; 没有属性的老 transcript 仍按原措辞认。

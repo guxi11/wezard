@@ -17,7 +17,7 @@ import type {
   TurnItem,
 } from "./detail-store.js";
 import { truncate, clipLine } from "./std.js";
-import { parseReminders, stripReminders, viewOf, type Reminder } from "./reminder.js";
+import { parseReminders, stripReminders, type Reminder } from "./reminder.js";
 
 const escHtml = (s: string): string =>
   s.replace(/[&<>"']/g, (c) =>
@@ -777,14 +777,11 @@ const renderAgent = (r: TurnDetailRecord): string => {
   return `<div class="tg-agent"><span class="l">🤖 subagent${type}</span>${desc}</div>`;
 };
 
-// 一句话尾巴上的 `<system-reminder>`: 默认给摘要 (谁、在哪、点了谁), 点一下换成原文。
+// 一句话尾巴上的 `<system-reminder>`: 默认收成一个 `<reminder>` 标签, 点一下展开原文。
 // 两面都在 HTML 里, 切换只是节点上的一个 class —— 同过程框的收起态, reconcile 留节点就留住它。
-const renderReminder = (r: Reminder): string => {
-  const v = viewOf(r);
-  const items = v.items.length ? `<ul>${v.items.map((i) => `<li>${escHtml(i)}</li>`).join("")}</ul>` : "";
-  return `<div class="rem ${v.kind}" title="点击切换原文 / 摘要"><div class="rem-pretty"><span class="rem-i">${v.icon}</span>` +
-    `<span class="rem-l">${escHtml(v.label)}</span>${items}</div><pre class="rem-raw">${escHtml(r.raw.trim())}</pre></div>`;
-};
+const renderReminder = (r: Reminder): string =>
+  `<div class="rem" title="点击展开 / 收起"><span class="rem-tag">&lt;reminder&gt;</span>` +
+  `<pre class="rem-raw">${escHtml(r.raw.trim())}</pre></div>`;
 
 /** 把一句输入拆成正文与它挂着的 reminder 块 (没有就是 "")。 */
 export const splitReminders = (text: string): { body: string; html: string } => {

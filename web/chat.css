@@ -725,13 +725,11 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 /* 过程框里的工具行是 nowrap 的 —— 不裁一刀会把整列撑出横向滚动。 */
 .mb > .turn-group { overflow: hidden }
 
-/* 输入尾巴上的 system-reminder: 默认一行摘要, 点一下换成原文 (见 detail-render.splitReminders)。 */
-.rems { display: flex; flex-direction: column; gap: 4px; padding: 0 14px 10px }
-.rem { cursor: pointer; border-radius: 6px; padding: 3px 8px; font-size: 11.5px; color: var(--mute); background: #fff; box-shadow: inset 0 0 0 1px var(--line) }
-.rem-pretty { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline }
-.rem-pretty ul { flex-basis: 100%; margin: 2px 0 0; padding-left: 18px }
-.rem.peer .rem-l { color: var(--priv) }
-.rem.mention .rem-l { color: #0a7d6b }
-.rem-raw { display: none; margin: 0; white-space: pre-wrap; word-break: break-word; font: 11px/1.5 ui-monospace, monospace; cursor: text }
+/* 输入尾巴上的 system-reminder: 默认一个 <reminder> 标签, 点一下展开原文 (见 detail-render.splitReminders)。 */
+.rems { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 14px 10px }
+.rem { cursor: pointer }
+.rem-tag { display: inline-block; border-radius: 4px; padding: 0 5px; font: 11px/1.6 ui-monospace, monospace; color: var(--faint); background: #0000000a }
+.rem-raw { display: none; margin: 0; padding: 3px 8px; border-radius: 6px; background: #0000000a; color: var(--mute); white-space: pre-wrap; word-break: break-word; font: 11px/1.5 ui-monospace, monospace; cursor: text }
+.rem.raw { flex-basis: 100% }
 .rem.raw .rem-raw { display: block }
-.rem.raw .rem-pretty { display: none }
+.rem.raw .rem-tag { display: none }

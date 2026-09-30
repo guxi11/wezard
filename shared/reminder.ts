@@ -1,7 +1,7 @@
 // `<system-reminder>`: 注入时挂在一句话尾巴上的机器信息 —— 信封 (谁、在哪说的) /
 // 点名提示 / 名册增量。两个读者各取一半:
 //   模型读正文 —— 规矩是写给它的, 措辞随时会改;
-//   读回来的一方 (read_chat 的 parseEnvelope、rolepage 的展示) 读开标签上的属性 ——
+//   读回来的一方 (read_chat 的 parseEnvelope) 读开标签上的属性 ——
 //   事实只写一次、按名取, 改措辞不再牵连解析。
 // 属性出现之前落盘的 transcript / 轮次记录里只有正文, 那些靠 LEGACY 表按措辞认。
 //
@@ -82,51 +82,9 @@ const LEGACY: ReadonlyArray<[RegExp, (m: RegExpMatchArray) => Envelope]> = [
 const legacyEnvelope = (body: string): Envelope | undefined =>
   LEGACY.reduce<Envelope | undefined>((hit, [re, make]) => hit ?? ((m) => (m ? make(m) : undefined))(body.match(re)), undefined);
 
-export const envelopeOf = (r: Reminder): Envelope | undefined => envelopeOfAttrs(r.attrs) ?? legacyEnvelope(r.body);
+const envelopeOf = (r: Reminder): Envelope | undefined => envelopeOfAttrs(r.attrs) ?? legacyEnvelope(r.body);
 
 /** 一句落盘的输入上挂着的信封。只在 `<system-reminder>` 里找 —— 正文里引用这句
  *  措辞的人话不算。 */
 export const parseEnvelope = (raw: string): Envelope | undefined =>
   parseReminders(raw).reduce<Envelope | undefined>((hit, r) => hit ?? envelopeOf(r), undefined);
-
-// ── 展示 ──────────────────────────────────────────────────────────────
-// rolepage 上一段 reminder 的摘要: 一行标签 + 可选的条目。认不出的 (Claude Code 自己
-// 挂的、未来新加的种类) 也给一行, 原文永远在 raw 那一面。
-export interface ReminderView {
-  kind: "human" | "peer" | "task" | "mention" | "roster" | "other";
-  icon: string;
-  label: string;
-  items: string[];
-}
-
-const itemsOf = (body: string): string[] =>
-  body.split("\n").filter((l) => l.startsWith("- ")).map((l) => l.slice(2).trim());
-
-const LEGACY_MENTION = "上面这条消息里的 `.name` 点的是";
-const LEGACY_ROSTER = "你出生时拿到的那份名册已经变了";
-
-const envelopeView = (e: Envelope): ReminderView => {
-  const where = e.chat ? ` · 群 ${e.chat}` : "";
-  if (e.kind === "human") return { kind: "human", icon: "👤", label: `${e.from}${where}`, items: [] };
-  if (e.kind === "task") return { kind: "task", icon: "⏰", label: e.from, items: [] };
-  return e.private
-    ? { kind: "peer", icon: "🔒", label: `${e.from} 私聊`, items: [] }
-    : { kind: "peer", icon: "📣", label: `${e.from} 公开${where}`, items: [] };
-};
-
-export const viewOf = (r: Reminder): ReminderView => {
-  const env = envelopeOf(r);
-  if (env) return envelopeView(env);
-  const mention = r.attrs.wezard === "mention" || r.body.startsWith(LEGACY_MENTION);
-  if (mention) {
-    const names = r.attrs.names?.split(/\s+/).filter(Boolean)
-      ?? [...r.body.matchAll(/^- `(\.[^`]+)`/gm)].map((m) => m[1]!);
-    return { kind: "mention", icon: "🔗", label: `点名 ${names.join(" ")}`, items: [] };
-  }
-  if (r.attrs.wezard === "roster" || r.body.startsWith(LEGACY_ROSTER)) {
-    const items = itemsOf(r.body);
-    return { kind: "roster", icon: "🧭", label: `名册变动 ${items.length} 条`, items };
-  }
-  const first = r.body.split("\n").find((l) => l.trim()) ?? "";
-  return { kind: "other", icon: "⚙️", label: first.length > 80 ? `${first.slice(0, 80)}…` : first || "system-reminder", items: [] };
-};
