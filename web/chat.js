@@ -142,7 +142,11 @@
   };
   var bindGo = function (root, sel) {
     root.querySelectorAll(sel || '.go[data-r]').forEach(function (b) {
-      b.onclick = function (e) { e.stopPropagation(); switchRole(b.getAttribute('data-r')); };
+      b.onclick = function (e) {
+        e.stopPropagation();
+        var row = b.closest('.mrow');
+        switchRole(b.getAttribute('data-r'), row && row.getAttribute('data-id'));
+      };
     });
   };
 
@@ -388,11 +392,11 @@
   var renderConvs = function () {
     var groups = R.convs.filter(function (c) { return c.kind === 'group'; });
     var dms = R.convs.filter(function (c) { return c.kind !== 'group'; });
+    R.convs.forEach(markRead);
     // 空着的那一栏不画 —— 对谁都一样: 人没有私聊只是这条规则的一个特例。
     var sec = function (title, list) {
       return list.length ? '<h2>' + title + '<span>' + list.length + '</span></h2>' + list.map(convItem).join('') : '';
     };
-    R.convs.forEach(markRead);
     // 没变就不碰 DOM: 心跳每 3s 来一次, 重建会把列表的滚动与焦点蹭掉。
     var html = sec('群聊', groups) + sec('私聊', dms);
     if (convsEl._html === html) return;
@@ -755,7 +759,9 @@
   };
 
   // ── role 摘要 ──
-  var applyRole = function (d) {
+  var applyRole = function (d) { takeRole(d); paintRole(); };
+  // 收下摘要 (视角、会话列表、落地窗口) 与按它画页头侧栏分开: 换视角整窗重拉时, 画要等到新行到手的同一帧。
+  var takeRole = function (d) {
     R.at = d.at || Date.now(); R.recvAt = Date.now();
     R.role = d.role; R.sessions = d.sessions || []; R.convs = d.convs || [];
     R.relations = !!d.relations; R.schedules = d.schedules || 0;
@@ -769,17 +775,19 @@
     // 没带 conv 的链接 (群里点名字进来) 落在服务端挑的窗口上, 连同它挑的「只看我与谁」;
     // 手里的 conv 失效则只退回整个会话。
     if (!CONV || !convOf(CONV)) { WITH = CONV ? '' : d['with'] || ''; CONV = d.conv || ''; }
+  };
+  var paintRole = function () {
     reveal();
     renderRole(); renderUsage(); renderConvs(); renderHead();
   };
+
+  // 切回标签页时正在读的那项就算读过了。
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) renderConvs(); });
 
   // ── SSE: role 摘要 + 当前窗口的消息增量。断线指数退避重连。 ──
   var backoff = 1000;
   var connect = function () {
     if (S.es) { S.es.close(); S.es = null; }
-  // 切回标签页时正在读的那项就算读过了。
-  document.addEventListener('visibilitychange', function () { if (!document.hidden) renderConvs(); });
-
     var p = new URLSearchParams(viewParams({ id: TOKEN }));
     var es = new EventSource('api/role-events?' + p.toString());
     S.es = es;
@@ -804,10 +812,14 @@
         document.body.innerHTML = '<div class="empty" style="padding:80px">' + esc(d.error || 'not found') + '</div>';
         return;
       }
-      applyRole(d);
+      // 带 land 的 (换视角) 先不画: 页头换了高度, 旧行会在新行到来前先被顶一下, FLIP 的起点就错了。
+      if (land) takeRole(d); else applyRole(d);
       syncUrl();
       if (VIEW === 'world' || VIEW === 'plan') { W.sel = ROLE; loadWorld(); }
-      return loadMsgs(undefined, land).then(connect);
+      return loadMsgs(undefined, land && function () { paintRole(); return land(); }).then(function () {
+        if (land && !inner.querySelector('.mrow')) paintRole();   // 空窗口不走 land, 页头照样要画
+        connect();
+      });
     });
   };
 
@@ -827,7 +839,8 @@
 
   // 换视角: 窗口尽量留在同一个群 —— 从群里的一条消息切过去, 最想看的是对方在这个群
   // 里的样子; 对方不在这个群 (私聊的另一头) 就交给服务端挑它最近的会话。
-  var switchRole = function (id) {
+  // at: 被点的那条消息 —— 换视角后它留在指针底下, 其余的相对它滑动。
+  var switchRole = function (id, at) {
     if (!canSwitch(id) || id === ROLE) return;
     var keep = CONV && CONV.indexOf('c:') === 0 ? CONV : '';
     var from = ROLE;
@@ -837,49 +850,101 @@
     var withBack = keep && WITH ? from : '';
     ROLE = id; WITH = withBack; SESSION = '';
     CONV = keep || (CONV.indexOf('p:') === 0 ? 'p:' + from : '');
-    if (same) { flipWindow(); return; }
-    var snap = VIEW === 'msgs' && !calm() ? snapRows() : {};
+    var snap = VIEW === 'msgs' && !calm() ? snapRows(at) : null;
+    if (same) { flipWindow(snap); return; }
     var kept = VIEW === 'msgs' ? keepBodies() : {};
-    refresh(function () { adoptBodies(kept); return landFlip(snap); });
-  };
-
-  // ── 换视角的 FLIP: 按 msgid 记下每条气泡的位置与底色, 重包后从旧处滑到新处、旧色渐到新色 ──
-  // 位置动在 .mcol 上, 底色按行内第几颗气泡对上 —— 就地重包与整窗重拉两条路一样用。
-  // 只量视窗里的行 —— 屏外的动了也没人看, 长窗口里逐行 getComputedStyle 是真开销。
-  var BUB = '.bubble.mq, .say > .bubble';
-  var calm = function () { return window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches; };
-  var visibleRows = function () {
-    var vp = thread.getBoundingClientRect();
-    return [].slice.call(inner.querySelectorAll('.mrow:not(.mark)')).filter(function (r) {
-      var b = r.getBoundingClientRect();
-      return b.height && b.bottom > vp.top && b.top < vp.bottom;
+    refresh(function () {
+      adoptBodies(kept);
+      if (landFlip(snap)) return true;
+      // 一条旧消息都不在了 (换到了别的会话): 没有可配对的, 才整列淡入。
+      inner.classList.remove('flipping'); void inner.offsetWidth; inner.classList.add('flipping');
+      return false;
     });
   };
-  var snapRows = function () {
-    return visibleRows().reduce(function (acc, r) {
-      var col = r.querySelector('.mcol');
-      acc[r.getAttribute('data-id')] = {
-        rect: col.getBoundingClientRect(),
-        bubs: [].slice.call(r.querySelectorAll(BUB)).map(function (b) { return getComputedStyle(b).backgroundColor; }),
-      };
-      return acc;
+
+  // ── 换视角的 FLIP: 按 msgid 记下每条消息各块的位置与底色, 重排后从旧处滑到新处、旧色渐到新色 ──
+  // 动的是行里的每一块 (名字行、问句气泡、过程框、终句), 不是整列 .mcol: 换边时块在列里的
+  // 相对位置也会变 —— 名字行有没有头像差 6px, 带过程框的列占满整宽、终句在列内从左跳到右,
+  // 只挪整列的话这些块都是直接闪过去的。
+  // 全量记, 不只记视窗里的: 行高随视角变, 屏外的行会被推进视窗。只在前后有一头落在视窗里时才真动。
+  // 回复的外壳 .turn-group 是 overflow:hidden 的 (工具行 nowrap, 不裁会撑出横向滚动)。它一换边就
+  // 立刻在新位置, 里面的过程框 / 终句要是按屏上绝对位移平移, 起跑时整个在壳外, 被裁得一干二净 ——
+  // 看上去就是对侧空白盖住了气泡。所以壳自己算一块, 壳里的块只补「相对壳」的那点差: 前后都在壳内,
+  // 途中也就不出壳。
+  var PIECES = '.mwho, .mb > *, .mb > .turn-group > .bubbles > *';
+  var BUB = '.bubble.mq, .say > .bubble';
+  var calm = function () { return window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches; };
+  var rowsById = function () {
+    return [].slice.call(inner.querySelectorAll('.mrow:not(.mark)')).reduce(function (acc, r) {
+      acc[r.getAttribute('data-id')] = r; return acc;
     }, {});
   };
-  var playFlip = function (snap) {
+  var piecesOf = function (row) { return [].slice.call(row.querySelectorAll(PIECES)); };
+  // 先把所有矩形读完再读底色 —— 读与读之间没有写, 整次快照只排一次版。
+  var snapRows = function (at) {
+    var rows = rowsById();
+    var shot = Object.keys(rows).reduce(function (acc, id) {
+      var rects = piecesOf(rows[id]).map(function (el) { return el.getBoundingClientRect(); });
+      if (rects.some(function (b) { return b.height; })) acc[id] = { rects: rects };   // 关着的 ping 组里 = 看不见
+      return acc;
+    }, {});
+    Object.keys(shot).forEach(function (id) {
+      shot[id].bubs = [].slice.call(rows[id].querySelectorAll(BUB)).map(function (b) { return getComputedStyle(b).backgroundColor; });
+    });
+    return { at: at && shot[at] ? at : '', rows: shot };
+  };
+  // 滚动锚: 优先被点的那条, 否则第一条前后都看得见的; 把它的首块挪回旧的屏上位置。
+  var anchorScroll = function (snap, rows) {
+    var head = function (id) { var el = rows[id] && rows[id].querySelector(PIECES); return el && el.getBoundingClientRect(); };
+    var shown = function (id) { var b = head(id); return b && b.height; };
+    var id = snap.at && shown(snap.at) ? snap.at : Object.keys(snap.rows).filter(shown)[0];
+    if (!id) return false;
+    thread.scrollTop += head(id).top - snap.rows[id].rects[0].top;
+    S.pinned = atBottom();
+    return true;
+  };
+  var playFlip = function (snap, rows) {
     var ease = { duration: 340, easing: 'cubic-bezier(.2,.7,.2,1)' };
-    Object.keys(snap).forEach(function (id) {
-      var row = rowNode(id), was = snap[id];
-      var col = row && row.querySelector('.mcol');
-      if (!col || !col.animate) return;
-      var now = col.getBoundingClientRect();
-      var dx = was.rect.left - now.left, dy = was.rect.top - now.top;
-      if (dx || dy) col.animate([{ transform: 'translate(' + dx + 'px,' + dy + 'px)' }, { transform: 'none' }], ease);
+    var vp = thread.getBoundingClientRect();
+    var onScreen = function (b) { return b.height && b.bottom > vp.top && b.top < vp.bottom; };
+    // 同样先整批读, 再整批写。宽度变了的块 (别人的气泡被列撑宽, 自己的收回内容宽) 贴着新的
+    // 那一侧对齐: 靠右的行比右边缘, 靠左的比左边缘。
+    var plan = Object.keys(snap.rows).reduce(function (acc, id) {
+      var row = rows[id], was = snap.rows[id];
+      if (!row) return acc;
+      var right = row.classList.contains('mine');
+      var shell = null, lift = [0, 0];   // 这一行 .turn-group 的位移, 壳里的块要减掉它
+      piecesOf(row).forEach(function (el, i) {
+        var a = was.rects[i], b = el.getBoundingClientRect();
+        if (!a || !el.animate) return;
+        var dx = right ? a.right - b.right : a.left - b.left, dy = a.top - b.top;
+        if (el.classList.contains('turn-group')) { shell = el; lift = [dx, dy]; }
+        else if (shell && shell.contains(el)) { dx -= lift[0]; dy -= lift[1]; }
+        if (!(onScreen(a) || onScreen(b))) return;
+        if (dx || dy) acc.push([el, [{ transform: 'translate(' + dx + 'px,' + dy + 'px)' }, { transform: 'none' }]]);
+      });
       var bubs = row.querySelectorAll(BUB);
       was.bubs.forEach(function (from, i) {
         var b = bubs[i], to = b && getComputedStyle(b).backgroundColor;
-        if (to && to !== from) b.animate([{ backgroundColor: from }, { backgroundColor: to }], ease);
+        if (to && to !== from) acc.push([b, [{ backgroundColor: from }, { backgroundColor: to }]]);
       });
-    });
+      return acc;
+    }, []);
+    plan.forEach(function (p) { p[0].animate(p[1], ease); });
+    // 对侧那片空白 (.flip) 是立即到新布局的, 它的 sticky 箭头与 hover 底色会画在正滑过来的
+    // 气泡上面 —— 滑行期间把它藏起来、把列抬到上层 (chat.css 的 .fl-run), 落定再放出来。
+    if (!plan.length) return;
+    clearTimeout(S.flRun);
+    inner.classList.add('fl-run');
+    S.flRun = setTimeout(function () { inner.classList.remove('fl-run'); }, ease.duration);
+  };
+  // 重排之后: 先锚滚动, 再从旧位置滑过来。没有一条可配对的返回 false。
+  var landFlip = function (snap) {
+    if (!snap) return false;
+    var rows = rowsById();
+    if (!anchorScroll(snap, rows)) return false;
+    playFlip(snap, rows);
+    return true;
   };
   // 整窗重拉会把正文换成服务端的新片段 —— 过程框按「已有终句就收起」重新出生, 点开的工具
   // 与取过的正文全丢, 看上去就是工具那一截在切换中突然没了。sig 没变的行把旧 .mb 整块搬回来,
@@ -898,43 +963,47 @@
       if (nb) nb.replaceWith(k.mb);
     });
   };
-  // 整窗重拉后: 滚动锚在第一条新旧都在的消息上, 其余相对它滑动; 一条都不在 (换到了别的会话) 才整列淡入。
-  var landFlip = function (snap) {
-    var anchor = Object.keys(snap).filter(function (id) {
-      var r = rowNode(id); return r && r.getBoundingClientRect().height;
-    })[0];
-    if (!anchor) { inner.classList.remove('flipping'); void inner.offsetWidth; inner.classList.add('flipping'); return false; }
-    thread.scrollTop += rowNode(anchor).querySelector('.mcol').getBoundingClientRect().top - snap[anchor].rect.top;
-    S.pinned = atBottom();
-    playFlip(snap);
-    return true;
-  };
-
-  /** 同一窗口换视角: 拿手里的片段就地重包左右, 已渲染的正文整块搬过去; 侧栏交给 SSE 的首个 role 事件。 */
-  var flipWindow = function () {
+  /** 同一窗口换视角: 拿手里的片段就地重包左右, 已渲染的正文整块搬过去。
+   *  先等 role 摘要到手、页头侧栏按新视角画完再重包 —— 页头换了高度 (人没有职责行、有的 wizard 有),
+   *  在动画起跑之后才变, 整列就会在半路被顶一下。旧行在这几十毫秒里原样留着。 */
+  var flipWindow = function (snap) {
     S.gen++;
     syncUrl();
-    var snap = calm() ? {} : snapRows();
-    unfoldPings(inner);
-    [].slice.call(inner.querySelectorAll('.mrow')).forEach(function (row) {
-      var m = S.frags[row.getAttribute('data-id')];
-      // 断点 (/clear /new) 是旧视角 role 自己的, 新视角的由下面补拉。
-      if (!m || m.dir === 'mark') { row.remove(); return; }
-      var next = frag(rowHTML(m)).firstElementChild;
-      var ob = row.querySelector('.mb'), nb = next.querySelector('.mb');
-      if (ob && nb) nb.replaceWith(ob);
-      row.replaceWith(next);
-      bindRow(next);
-    });
-    foldPings(inner);
-    expireRows();
-    playFlip(snap);
-    connect();
     var gen = S.gen;
-    api('api/msgs', viewParams()).then(function (d) {
+    api('api/role', viewParams()).then(function (d) {
       if (!d.ok || gen !== S.gen) return;
-      d.msgs.filter(function (m) { return m.dir === 'mark'; }).forEach(upsertMsg);
+      applyRole(d);
+      unfoldPings(inner);
+      [].slice.call(inner.querySelectorAll('.mrow')).forEach(function (row) {
+        var m = S.frags[row.getAttribute('data-id')];
+        // 断点 (/clear /new) 是旧视角 role 自己的, 新视角的由下面补拉。
+        if (!m || m.dir === 'mark') { row.remove(); return; }
+        var next = frag(rowHTML(m)).firstElementChild;
+        var ob = row.querySelector('.mb'), nb = next.querySelector('.mb');
+        if (ob && nb) nb.replaceWith(ob);
+        row.replaceWith(next);
+        bindRow(next);
+      });
+      foldPings(inner);
+      expireRows();
+      landFlip(snap);
+      connect();
+      return api('api/msgs', viewParams());
+    }).then(function (d) {
+      if (!d || !d.ok || gen !== S.gen) return;
+      // 断点晚到, 插在视窗上方会把正在滑的整列顶下去 —— 没吸底时锚住屏上第一条, 插完挪回原处。
+      var marks = d.msgs.filter(function (m) { return m.dir === 'mark'; });
+      if (!marks.length) return;
+      var ref = !S.pinned && firstShown(), top = ref && ref.getBoundingClientRect().top;
+      marks.forEach(upsertMsg);
+      if (ref && ref.isConnected) thread.scrollTop += ref.getBoundingClientRect().top - top;
     });
+  };
+  var firstShown = function () {
+    var vp = thread.getBoundingClientRect();
+    return [].slice.call(inner.querySelectorAll('.mrow:not(.mark)')).filter(function (r) {
+      var b = r.getBoundingClientRect(); return b.height && b.bottom > vp.top;
+    })[0];
   };
 
   $('#tb-back').onclick = function () { app.classList.remove('reading'); };
