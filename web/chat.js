@@ -346,7 +346,7 @@
       : '';
     var sel = on && !WITH;
     return '<button class="ci' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '">' +
-        avatarOf(c, lampOf(c.status)) + line(title, c.lastTs, c.preview) +
+        avatarOf(c) + line(title, c.lastTs, c.preview, lampOf(c.status)) +
       '</button>' + subs;
   };
 
