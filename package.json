@@ -1,6 +1,6 @@
 {
   "name": "wezard",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Bridge Claude Code and WeCom: PreToolUse approval cards + bidirectional tmux session mirror with image paste",
   "type": "module",
   "license": "MIT",

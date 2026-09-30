@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-09-30
+
 ### Added
 - **聊天的默认 wizard = 这个群的管家**。宪章多一段守则: 没点名的话由它分派 —— 小事自己答, 对口已有 wizard 的 `send_peer({public:true})` 转交 (回复直接进群, 管家不等不转述), 没有对口的 `spawn_wizard` 从白板生一个再转; 长活一律转出去, 管家的上下文只留给名册和分派。点了名 (`.name`) 的话照旧直达, 不经过管家。
 - **记忆整理者** (`daemon/memory-steward.ts`): 一条内置定时任务 `~/.wezard/tasks/memory-steward.task.mjs` (缺失时开机补写, 已有不覆盖), 每 30 分钟 gate 认领记忆收件箱, 有提议才新起一个白板 wizard 按 新增 / 改写 / 删除 / 不动 合并进 md, 处理过的提议归档进 `~/.wezard/memory/log/`。
@@ -607,7 +609,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.0.1...HEAD
+[2.0.1]: https://github.com/guxi11/wezard/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/guxi11/wezard/compare/v1.4.2...v2.0.0
 [1.4.2]: https://github.com/guxi11/wezard/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/guxi11/wezard/compare/v1.4.0...v1.4.1
