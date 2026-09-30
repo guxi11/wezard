@@ -107,8 +107,11 @@ export const uniqueTag = (want: string, taken: ReadonlySet<string>, n = 1): stri
 const HEAD_EMOJI = [...ANIMALS, "🧙", "❔"];
 const EMO = `(?:${HEAD_EMOJI.join("|")})`;
 const NAME_PART = `(?:\\s+[.#](${NAME_CHARS}{1,32}))?(?:\\s*→\\s*[.#]${NAME_CHARS}{1,32})?`;
+// `→ 对方` 那一半自己也带 emoji、也可能是链接 (`[🦊 .a](url) → [🐨 .b](url)`)。
+const PEER_NAME = `${EMO}\\s+[.#]${NAME_CHARS}{1,32}`;
+const TO_PART = `(?:\\s*→\\s*(?:\\[${PEER_NAME}\\]\\([^)]*\\)|${PEER_NAME}))?`;
 const HEADER_RE = new RegExp(
-  `^(?:\\[${EMO}${NAME_PART}\\]\\([^)]*\\)|${EMO}${NAME_PART})` +
+  `^(?:\\[${EMO}${NAME_PART}\\]\\([^)]*\\)|${EMO}${NAME_PART})${TO_PART}` +
     `(?:\\s+\\d+/\\d+)?(?:\\s*←\\s*View chat details)?(?![\\p{L}\\p{N}_-])\\s*`,
   "u",
 );
@@ -210,6 +213,8 @@ export const linkedTagHead = (target: string | undefined, url: string): string =
 
 /** 头挂上指定的 rolepage 链接 (mirror 用本轮 turn 的票据), 正文里的名字一并挂链。
  *  url 为空时退回裸头 —— 头那一段是路由信息, 少了链接只是少一层可点, 不能因此不写。
+ *  `to` = 这段话是答给哪个 wizard 的 (公开 peer 轮): 头写成 `.me → .它`, 与它问话
+ *  那条气泡的 `.它 → .me` 对称。
  *  `seq` ("2/5") marks one piece of a split push — it rides in the same header
  *  line so every chunk of a long reply is attributable on its own. */
 export const withLinkedTagHeader = (
@@ -217,8 +222,10 @@ export const withLinkedTagHeader = (
   content: string,
   url: string | undefined,
   seq?: string,
+  to?: string,
 ): string => {
-  const head = [url ? linkedTagHead(target, url) : tagHead(target), seq ?? ""].filter(Boolean).join(" ");
+  const me = url ? linkedTagHead(target, url) : tagHead(target);
+  const head = [to ? `${me} → ${tagLink(to, tagHead(to))}` : me, seq ?? ""].filter(Boolean).join(" ");
   const body = linkTags(target, content);
   return `${head}${headSep(body)}${body}`;
 };

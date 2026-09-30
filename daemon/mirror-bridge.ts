@@ -845,8 +845,9 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
 // fenced block or table in a way that breaks rendering — see splitMarkdown.
 // Room reserved in every chunk for the `emoji \`#tag\` \`2/5\`` header line and
 // the chat-detail links linkTags hangs on it and on up to MAX_BODY_LINKS body
-// mentions — each `(url)` runs ~200-250 bytes.
-const TAG_HEADER_BUDGET = 256 * (1 + MAX_BODY_LINKS);
+// mentions — each `(url)` runs ~200-250 bytes. 头里最多两条: 自己的, 以及公开 peer 轮
+// 的 `→ .对方`。
+const TAG_HEADER_BUDGET = 256 * (2 + MAX_BODY_LINKS);
 
 interface TailHandle {
   stop: () => void;
@@ -2168,6 +2169,9 @@ interface AttachState {
    *  零星 item 属于同一场对话。 */
   channel?: string;
   speaker?: string;
+  /** 本轮是同伴公开派来的 (send_peer public:true) —— 那个同伴的 target。回复进群时头
+   *  写成 `.me → .它`, 否则群里看不出这段话是答给谁的。与 channel 同生同灭。 */
+  replyTo?: string;
   /** Set when `/clear` was injected: the next user prompt will land in a fresh
    *  jsonl with a new sessionId. A watcher polls the project dir to migrate
    *  this attachment onto the new file. Cleared once migration completes or
@@ -2574,8 +2578,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       ? buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, turnId, stripPrincipalPrefix(target))
       : undefined;
 
+  // `[mirror]` / `[wezard]` 系统提示不是答给谁的话, 不标方向。
   const withLinkedTag = (a: AttachState, content: string, seq?: string, turnId?: string): string =>
-    withLinkedTagHeader(a.target, content, chatTurnUrl(a.target, turnId ?? a.briefTurnId), seq);
+    withLinkedTagHeader(a.target, content, chatTurnUrl(a.target, turnId ?? a.briefTurnId), seq,
+      /^\[(mirror|wezard)\]/.test(content.trim()) ? undefined : a.replyTo);
 
   // 空正文一票否决 (近源拦截): 剥掉可能存在的路由头 (`🦊 #tag` / `[🧙](url)`)
   // 后没有可见内容就不发。中央 chat-gate (last-response 的 SDK 包装) 是最后一道
@@ -3013,17 +3019,23 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return p && Date.now() - p.at <= ORIGIN_TTL_MS ? p.from : undefined;
   };
 
+  /** 公开派活的那个同伴 —— 回复的头要标给它 (见 AttachState.replyTo)。 */
+  const publicPeer = (from: TurnFrom | undefined): string | undefined =>
+    from?.kind === "peer" && from.public ? from.from : undefined;
+
   /** 频道印章: 有新印章就换频道; 没有则 `reset` (CLI 手敲 / 人从聊天发起) 回到
-   *  home, 其余续写 (收口后的补写) 沿用上一轮。 */
-  const consumeChannel = (a: AttachState, reset: boolean): void => {
+   *  home, 其余续写 (收口后的补写) 沿用上一轮。`from` = 本轮的出处, 答给谁跟着频道走。 */
+  const consumeChannel = (a: AttachState, reset: boolean, from: TurnFrom | undefined): void => {
     const p = a.pendingChannel;
     a.pendingChannel = undefined;
     if (p && Date.now() - p.at <= ORIGIN_TTL_MS) {
       a.channel = p.channel === baseOfKey(a.target) ? undefined : p.channel;
       a.speaker = p.speaker;
+      a.replyTo = publicPeer(from);
     } else if (reset) {
       a.channel = undefined;
       a.speaker = undefined;
+      a.replyTo = undefined;
     }
   };
   /** 本轮落 turn 记录的频道字段。 */
@@ -3046,8 +3058,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.queryEpoch = (a.queryEpoch ?? 0) + 1; // WeCom 侧的新一轮同样是 query 边界
     a.turnFromChat = true;                  // 出处确凿: 这一轮有 frame, 群里就是它的主场
     a.pendingFromCli = false;               // 人改从聊天里说话了, 之前那条 CLI 输入不再是出处
-    consumeChannel(a, true);
-    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: userQuery.trim() || undefined, origin: consumeOrigin(a), from: consumeFrom(a), ...channelFields(a) });
+    const from = consumeFrom(a);
+    consumeChannel(a, true, from);
+    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: userQuery.trim() || undefined, origin: consumeOrigin(a), from, ...channelFields(a) });
     // hardTimer 兜底: turn 若无终句 / turn_end 收口 (卡死/漏收), 到点仍收气泡。
     const bubble: BriefBubble = { frame, streamId, hardTimer: undefined as unknown as NodeJS.Timeout, done: false };
     const q: QueuedTurn = { turnId, bubble, isSlash };
@@ -3091,8 +3104,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const fromCli = a.pendingFromCli === true;
     a.pendingFromCli = false;
     a.turnFromChat = fromCli ? false : a.turnFromChat ?? true;
-    consumeChannel(a, fromCli);
-    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: query || undefined, origin: consumeOrigin(a), from: consumeFrom(a), ...channelFields(a) });
+    const from = consumeFrom(a);
+    consumeChannel(a, fromCli, from);
+    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: query || undefined, origin: consumeOrigin(a), from, ...channelFields(a) });
     a.briefTurnId = turnId;
     a.briefBubble = undefined;
     a.briefIsSlash = false;
