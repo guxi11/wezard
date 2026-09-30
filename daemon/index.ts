@@ -56,7 +56,7 @@ import {
 } from "./wizard.js";
 import { bindNoticeBox, createNoticeBox, chatAudience } from "./notices.js";
 import { loadJobStore, renderJobOpen, renderJobClose, JOB_MEMBER_MAX } from "./jobs.js";
-import { clipMiddle, extractResult, keepalivePingSigs, renderPeerEnvelope, renderTaskEnvelope } from "./peers.js";
+import { clipMiddle, extractResult, keepalivePingSigs, lastExchange, lastModel, renderPeerEnvelope, renderTaskEnvelope } from "./peers.js";
 import { parseWhen, renderChatLog, type LogSession } from "./chat-log.js";
 import {
   startGraph,
@@ -770,10 +770,15 @@ const main = async (): Promise<void> => {
       const per = Math.min(Math.max(Number(b.per ?? 500) || 500, 40), 4000);
       const pinned = new Set([self, role?.target, target?.target]);
       const all = m.transcripts();
-      const sessions = [
-        ...all.filter((t) => pinned.has(t.target)),
-        ...all.filter((t) => !pinned.has(t.target) && now - t.mtime < LOG_RECENT_MS).sort((x, y) => y.mtime - x.mtime).slice(0, LOG_SESSIONS),
-      ];
+      // 两方之间的话只可能落在这两方里的 wizard 自己的 transcript 里 (人没有 transcript)
+      // —— 不必去翻别的会话, 「往回还有没有」也因此答得准。
+      const between = [role?.target, target?.target].filter((t): t is string => !!t);
+      const sessions = role && target && between.length
+        ? all.filter((t) => between.includes(t.target))
+        : [
+            ...all.filter((t) => pinned.has(t.target)),
+            ...all.filter((t) => !pinned.has(t.target) && now - t.mtime < LOG_RECENT_MS).sort((x, y) => y.mtime - x.mtime).slice(0, LOG_SESSIONS),
+          ];
       const chat = base ? chatNameOf(cfg, base) : undefined;
       const log_ = renderChatLog(
         sessions.map(logSession),
@@ -782,7 +787,7 @@ const main = async (): Promise<void> => {
         now,
       );
       const scope = [
-        chat !== undefined ? `群 ${chat || base}` : "",
+        chat !== undefined ? `${base.startsWith("user:") ? "单聊" : "群"} ${chat || base}` : "",
         role && target ? `${role.name} ⇄ ${target.name}` : role ? `${role.name} 的往来` : "",
       ].filter(Boolean).join(" · ");
       json(res, 200, {
@@ -792,7 +797,7 @@ const main = async (): Promise<void> => {
         text: [
           `${scope} · ${log_.shown} 条`,
           log_.text || "(没有读到对话)",
-          ...(log_.earlier ? [`更早的: until="${log_.earlier}"`] : []),
+          ...(log_.earlier ? [`更早的: until="${log_.earlier}"`] : log_.later || !log_.shown ? [] : ["(往回已经到头)"]),
           ...(log_.later ? [`往后还有 ${log_.total - log_.shown} 条: since="${log_.later}"`] : []),
         ].join("\n"),
       });
@@ -1232,6 +1237,8 @@ const main = async (): Promise<void> => {
           ...b,
           target: p.target,
           chat: chatNameOf(cfg, p.target) || p.chat,
+          solo: baseOfKey(p.target).startsWith("user:"),
+          jsonlPath: p.jsonlPath,
           model: p.model,
           busy: p.busy,
           alive: p.paneAlive,
@@ -1248,6 +1255,9 @@ const main = async (): Promise<void> => {
           ...briefOf(self, w.target),
           target: w.target,
           chat: chatNameOf(cfg, w.target),
+          solo: baseOfKey(w.target).startsWith("user:"),
+          jsonlPath: "",
+          model: "",
           busy: false,
           alive: false,
           self: false,
@@ -1318,7 +1328,15 @@ const main = async (): Promise<void> => {
       const ranked = hit.slice().sort((x, y) =>
         Number(y.self) - Number(x.self) || Number(y.alive) - Number(x.alive) || (y.lastActivity ?? 0) - (x.lastActivity ?? 0));
       const limit = Math.min(Math.max(Number(b.limit ?? 40) || 40, 1), 300);
-      const shown = ranked.slice(0, limit);
+      // 「最近」与模型都从 transcript 读, 而且只为列出来的这一页读: 摘要用不指代任何人
+      // 的箭头 (读名册的是另一个 wizard), 模型取它真正跑的那个 —— 绑定里的 model 只在
+      // 有人显式选过时才有。
+      const warm = keepalivePingSigs(cfg.wrc.mirror.keepalive.ping);
+      const shown = ranked.slice(0, limit).map((r) => ({
+        ...r,
+        model: r.model || (r.jsonlPath ? lastModel(r.jsonlPath) : ""),
+        summary: r.jsonlPath ? lastExchange(r.jsonlPath, 80, warm) : "",
+      }));
       json(res, 200, {
         ok: true,
         total: all.length,

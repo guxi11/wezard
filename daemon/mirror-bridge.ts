@@ -47,7 +47,7 @@ import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagH
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
-import { stripAnsi, paneIsBusy, paneIsStalled, transcriptStalled, summarizeTail, lastAssistantText, lastReply, unwrapPasted, lastContextTokens, keepaliveStamps, openKeepalivePing, talkTurns, openToolUses, renderDialog, type PeerInfo } from "./peers.js";
+import { stripAnsi, paneIsBusy, paneIsStalled, transcriptStalled, summarizeTail, lastAssistantText, lastReply, unwrapPasted, lastContextTokens, keepaliveStamps, openKeepalivePing, talkRounds, openToolUses, renderDialog, type PeerInfo } from "./peers.js";
 
 // PATH augmentation: launchd / systemd start the daemon
 // with a stripped PATH that often lacks nvm / homebrew, breaking spawn(claudeBin).
@@ -2039,8 +2039,8 @@ export interface MirrorBridge {
   /** Every chat the daemon knows — named ones plus any with a live/persisted
    *  session — with the target keys living in each. The cross-chat directory. */
   chatRoster: (self: string) => Array<{ base: string; name: string; self: boolean; targets: string[] }>;
-  /** Last `n` text turns of `target`'s conversation, read from its transcript
-   *  (keepalive ping/pong stripped) — the only way a peer is read; the terminal
+  /** Last `n` rounds of `target`'s conversation (each = the ask + its newest
+   *  answer text), read from its transcript (keepalive ping/pong stripped) — the only way a peer is read; the terminal
    *  is never scraped for content. `waiting` = tool calls left hanging while the
    *  session is idle, i.e. it is parked on an approval card / local prompt. */
   peekTurns: (target: string, n?: number) => Promise<{ ok: boolean; reason?: string; dialog?: string; busy?: boolean; waiting?: string[] }>;
@@ -5290,7 +5290,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const jsonl = jsonlOf(target);
     const busy = await isBusy(target);
     if (!jsonl || !existsSync(jsonl)) return { ok: false, reason: "它还没有 transcript (没接过第一句话) —— send_peer 跟它说一句就有了", busy };
-    const dialog = renderDialog(talkTurns(jsonl, n, warmerSigs, true), 800, 4000);
+    // `n` 数的是来回: 每个来回给问话和它最新的一句 (跑完的是终句, 还在跑的是途中
+    // 最近说的那句) —— 途中的其余叙述不给, 那是过程不是结论。
+    const rounds = talkRounds(jsonl, n, warmerSigs).slice(-n);
+    const dialog = renderDialog(rounds.flatMap((r) => (r.length > 1 ? [r[0]!, r.at(-1)!] : r)), 800, 4000);
     const waiting = busy ? [] : openToolUses(jsonl);
     return dialog ? { ok: true, dialog, busy, waiting } : { ok: false, reason: "transcript 里还没有对话", busy, waiting };
   };

@@ -46,18 +46,23 @@ interface LogMsg {
   from: string;
   to: string;
   private: boolean;
-  /** 公开轮所在群的名字。 */
+  /** 公开轮所在聊天的名字。 */
   chat: string;
   text: string;
+  /** 这句问话还没等到回答 —— 标在它自己那一行上, 不另占一条的名额。 */
+  pending?: boolean;
 }
 
 const same = (a: string, b: string): boolean => stripSigil(a).toLowerCase() === stripSigil(b).toLowerCase();
 
-/** 一个会话的来回 → 入/出两条消息。最后一个来回还没有回答就如实说, 而不是装作
- *  没人问过。 */
-const messagesOf = (s: LogSession, q: ChatLogQuery, pingSigs: readonly string[]): LogMsg[] =>
-  talkRounds(s.jsonlPath, q.limit, pingSigs, q)
-    .flatMap((round, i, all): LogMsg[] => {
+/** 一个会话的来回 → 入/出两条消息。`deep` = 这个会话往回还可能有没读到的:
+ *  talkRounds 攒够 `depth` 个来回就停, 没攒够说明已经读到了文件头 (对分身来说,
+ *  读过了出生那一刻也算到头 —— 再往前是父亲的历史)。 */
+const messagesOf = (s: LogSession, q: ChatLogQuery, depth: number, pingSigs: readonly string[]): { msgs: LogMsg[]; deep: boolean } => {
+  const rounds = talkRounds(s.jsonlPath, depth, pingSigs, q);
+  const before = rounds.filter((r) => (r[0]!.ms ?? 0) < (q.until ?? Infinity));
+  const msgs = rounds
+    .flatMap((round, i): LogMsg[] => {
       const ask = round[0]!;
       const answer = round.filter((t) => t.role === "assistant").at(-1);
       const env = ask.env;
@@ -65,12 +70,13 @@ const messagesOf = (s: LogSession, q: ChatLogQuery, pingSigs: readonly string[])
       const where = { private: !!env?.private, chat: env?.private ? "" : env?.chat || s.homeChat };
       const at = ask.ms ?? 0;
       return [
-        { ts: at, from, to: s.name, ...where, text: ask.text },
+        { ts: at, from, to: s.name, ...where, text: ask.text, ...(!answer && i === rounds.length - 1 ? { pending: true } : {}) },
         ...(answer ? [{ ts: answer.ms ?? at, from: s.name, to: from, ...where, text: answer.text }] : []),
-        ...(!answer && i === all.length - 1 ? [{ ts: at + 1, from: s.name, to: from, ...where, text: "(还没有回复)" }] : []),
       ];
     })
     .filter((m) => m.ts >= s.since);
+  return { msgs, deep: before.length > depth && (before[0]![0]!.ms ?? 0) >= s.since };
+};
 
 const pad = (n: number): string => String(n).padStart(2, "0");
 const clock = (d: Date, sec: boolean): string => `${pad(d.getHours())}:${pad(d.getMinutes())}${sec ? `:${pad(d.getSeconds())}` : ""}`;
@@ -80,21 +86,30 @@ const stamp = (ts: number, now: number): string => {
   const d = new Date(ts);
   return d.toDateString() === new Date(now).toDateString() ? clock(d, false) : `${day(d)} ${clock(d, false)}`;
 };
-/** 翻页用的时刻: 带秒, 原样传回 `since` / `until` (parseWhen 认得)。 */
-const cursor = (ts: number): string => `${day(new Date(ts))} ${clock(new Date(ts), true)}`;
+/** 翻页用的时刻: 精确到毫秒, 原样传回 `since` / `until` (parseWhen 认得) —— 只到秒
+ *  的话, 同一秒里的两句会在翻页时漏掉一句。 */
+const cursor = (ts: number): string => {
+  const d = new Date(ts);
+  return `${day(d)} ${clock(d, true)}.${String(d.getMilliseconds()).padStart(3, "0")}`;
+};
+
+/** 一条消息 = 一行起头。正文里的换行留着 (列表、表格压成一行就读不了), 但续行
+ *  一律缩进、空行去掉 —— 于是行首的 `[` 只可能是下一条消息。 */
+const body = (text: string, per: number): string =>
+  truncateWithCount(text, per).split("\n").filter((l) => l.trim()).join("\n    ");
 
 const UNIT_MS = { m: 60_000, h: 3_600_000, d: 86_400_000 } as const;
 /** 人怎么说时间就怎么收: `2h` / `30m` / `3d` (多久以前)、`14:30` (今天)、
- *  `09-30 14:30[:05]` (今年)、或任何 Date 认得的写法。认不出 = undefined。 */
+ *  `09-30 14:30[:05[.123]]` (今年)、或任何 Date 认得的写法。认不出 = undefined。 */
 export const parseWhen = (raw: string, now: number): number | undefined => {
   const s = raw.trim();
   const ago = s.match(/^(\d+)\s*([mhd])$/i);
   if (ago) return now - Number(ago[1]) * UNIT_MS[ago[2]!.toLowerCase() as keyof typeof UNIT_MS];
-  const hm = s.match(/^(?:(\d{1,2})-(\d{1,2})\s+)?(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  const hm = s.match(/^(?:(\d{1,2})-(\d{1,2})\s+)?(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/);
   if (hm) {
     const d = new Date(now);
     if (hm[1]) d.setMonth(Number(hm[1]) - 1, Number(hm[2]));
-    d.setHours(Number(hm[3]), Number(hm[4]), Number(hm[5] ?? 0), 0);
+    d.setHours(Number(hm[3]), Number(hm[4]), Number(hm[5] ?? 0), Number((hm[6] ?? "0").padEnd(3, "0")));
     return d.getTime();
   }
   const t = Date.parse(s);
@@ -108,22 +123,35 @@ export const renderChatLog = (
   now: number,
 ): { text: string; shown: number; total: number; earlier?: string; later?: string } => {
   const involves = (m: LogMsg, who?: string): boolean => !who || same(who, m.from) || same(who, m.to);
-  const hits = sessions
-    .flatMap((s) => messagesOf(s, q, pingSigs))
-    .filter((m) => (q.chat === undefined || (!m.private && same(m.chat, q.chat))) && involves(m, q.role) && involves(m, q.target))
-    .filter((m) => m.ts >= (q.since ?? 0) && m.ts < (q.until ?? Infinity))
-    .sort((a, b) => a.ts - b.ts);
+  // 每个会话读多深是按**全部**来回数的, 而要的只是其中对得上的那些: 一个忙会话的
+  // 最近 30 个来回里可能一句私聊都没有。所以没凑够、又有会话没读到头, 就加深四倍
+  // 再读 —— 到凑够、到头、或加深三次为止 (单个文件的读取另有 2MB 的上限)。
+  const dig = (depth: number, left: number): { hits: LogMsg[]; deep: boolean } => {
+    const read = sessions.map((s) => messagesOf(s, q, depth, pingSigs));
+    const hits = read
+      .flatMap((r) => r.msgs)
+      .filter((m) => (q.chat === undefined || (!m.private && same(m.chat, q.chat))) && involves(m, q.role) && involves(m, q.target))
+      .filter((m) => m.ts >= (q.since ?? 0) && m.ts < (q.until ?? Infinity))
+      .sort((a, b) => a.ts - b.ts);
+    const deep = q.since === undefined && read.some((r) => r.deep);
+    return hits.length > q.limit || !deep || left === 0 ? { hits, deep } : dig(depth * 4, left - 1);
+  };
+  const { hits, deep } = dig(q.limit, 3);
   // 只给了 since 是「从那时起往后读」; 其余都是「窗口里最新的那几条」。
   const forward = q.since !== undefined && q.until === undefined;
   const shown = forward ? hits.slice(0, q.limit) : hits.slice(-q.limit);
-  const where = (m: LogMsg): string => (q.chat !== undefined ? "" : m.private ? " · 私聊" : ` · 群 ${m.chat}`);
+  const where = (m: LogMsg): string => (q.chat !== undefined ? "" : m.private ? " · 私聊" : ` · ${m.chat}`);
   const cut = hits.length > shown.length;
+  // 往回还有没有: 读到的里面有被 limit 切掉的, 或者有会话没读到头。到头了就不给
+  // 游标 —— 否则读的人得多翻一页空的才知道。
+  const more = cut || deep;
   return {
-    text: shown.map((m) => `[${stamp(m.ts, now)}${where(m)}] ${m.from} → ${m.to}: ${truncateWithCount(m.text, q.per)}`).join("\n"),
+    text: shown
+      .map((m) => `[${stamp(m.ts, now)}${where(m)}] ${m.from} → ${m.to}: ${body(m.text, q.per)}${m.pending ? "  (还没有回复)" : ""}`)
+      .join("\n"),
     shown: shown.length,
     total: hits.length,
-    // 每个会话只往回读到攒够 limit 个来回, 所以「更早的」永远可能还有 —— 有显示就给游标。
-    ...(shown.length && !forward ? { earlier: cursor(shown[0]!.ts) } : {}),
-    ...(forward && cut ? { later: cursor(shown[shown.length - 1]!.ts + 1000) } : {}),
+    ...(shown.length && !forward && more ? { earlier: cursor(shown[0]!.ts) } : {}),
+    ...(forward && cut ? { later: cursor(shown[shown.length - 1]!.ts + 1) } : {}),
   };
 };

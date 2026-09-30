@@ -236,13 +236,15 @@ const rosterLines = (self: WizardBrief, sibs: readonly WizardBrief[]): string[] 
 export interface RosterRow extends WizardBrief {
   /** home 聊天的名字; "" = 没起名。 */
   chat: string;
+  /** home 是与一个人的单聊, 不是群。 */
+  solo: boolean;
   model?: string;
   busy: boolean;
   alive: boolean;
   self: boolean;
   /** 最后动过的时刻 (ms); 0 = 没跑过。 */
   lastActivity: number;
-  /** 最近几句真话的一行摘要。 */
+  /** 最近一个来回的一行摘要 (`▸ 问 ◂ 答`); "" = 没有。 */
   summary: string;
   parent?: WizardBrief;
   clones: readonly WizardBrief[];
@@ -260,7 +262,7 @@ const rosterEntry = (r: RosterRow, now: number, home: string): string[] => {
   const state = r.busy ? "忙" : r.alive ? "闲" : "冷";
   const head = [
     `\`${addr(r)}\`${r.self ? " (你)" : ""} ${state}`,
-    r.chat ? `群 ${r.chat}` : "",
+    r.chat ? `${r.solo ? "单聊" : "群"} ${r.chat}` : "",
     r.cwd ? (home && r.cwd.startsWith(home) ? `~${r.cwd.slice(home.length)}` : r.cwd) : "",
     r.model ?? "",
     agoOf(r.lastActivity, now),

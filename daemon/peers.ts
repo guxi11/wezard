@@ -314,7 +314,36 @@ export const summarizeTail = (jsonlPath: string, n = 3, per = 80, pingSigs: read
   if (!existsSync(jsonlPath)) return "(新会话 · 暂无对话)";
   const turns = talkTurns(jsonlPath, n, pingSigs);
   if (turns.length === 0) return "(暂无对话)";
-  return turns.map((t) => `${t.role === "user" ? "你" : "AI"}: ${stripMd(t.text).slice(0, per)}`).join(" · ");
+  // 截了就得看得出截了: 裸 slice 出来的半句话, 读的人会当成它就说了这么多。
+  return turns.map((t) => `${t.role === "user" ? "你" : "AI"}: ${truncate(stripMd(t.text), per)}`).join(" · ");
+};
+
+/** 最近一个来回, 压成一行: `▸ 问话 ◂ 它最新的一句`。名册用它 —— 读名册的是另一个
+ *  wizard, summarizeTail 的「你:」在它眼里指的是它自己; 这里用 peek_peer 同款的
+ *  箭头, 不指代任何人。没有对话 = ""。 */
+export const lastExchange = (jsonlPath: string, per = 80, pingSigs: readonly string[] = []): string => {
+  const round = talkRounds(jsonlPath, 1, pingSigs).at(-1);
+  if (!round) return "";
+  const line = (t: Turn): string => truncate(stripMd(t.text), per);
+  return [`▸ ${line(round[0]!)}`, ...(round.length > 1 ? [`◂ ${line(round.at(-1)!)}`] : [])].join(" ");
+};
+
+/** 这个会话最近一次应答用的模型 —— transcript 里记的是真正跑的那个, 而绑定里的
+ *  `model` 只在有人显式选过时才有 (用 CLI 默认模型的会话那里是空的)。 */
+export const lastModel = (jsonlPath: string): string =>
+  readTailUntil(jsonlPath, (raw) => pickModel(jsonlPath, raw), (v) => v !== "");
+
+const pickModel = (jsonlPath: string, raw: string): string => {
+  const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
+  const lines = raw.split("\n").filter((l) => l.trim());
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let row;
+    try { row = normalize(JSON.parse(lines[i]!)); } catch { continue; }
+    const model = row?.message?.role === "assistant" ? row.message.model ?? "" : "";
+    // `<synthetic>` 是 CLI 自己写的报错行 (限流 / 断连), 不是模型。
+    if (model && !model.startsWith("<")) return model;
+  }
+  return "";
 };
 
 /** Readable multi-turn rendering of a transcript tail — "what has been said in
