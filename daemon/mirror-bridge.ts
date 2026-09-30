@@ -2037,8 +2037,8 @@ interface ToolEntry {
 
 /** Brief turn 的气泡 —— ack 时就把 `tag 详情链接 …` 写进去 (finish=false, 不关闭),
  *  所以从收消息那一刻起群里就有可点的详情页入口, 而不是一个纯文本占位。后续:
- *  正文到位 → 以 `链接 正文` 覆盖收口; 一直没正文 → hardTimer 兜底以最新 CoT
- *  进度行 (从未有过则纯链接) 收口。
+ *  正文到位 → 以 `链接 正文` 覆盖收口; 一直没正文 → hardTimer 兜底以
+ *  `链接 仍在处理中…` 的中间结束语收口 (turn 已被顶替则纯链接)。
  *  hardTimer 兜底 WeCom ~6min stream 窗口, 到点强制 finish=true。 */
 interface BriefBubble {
   frame: WsFrameHeaders;
@@ -2390,6 +2390,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // for >60s mid-turn and we don't want to drop the bubble while it's chewing.
   const FLUSH_MS = 250;
   const HARD_TIMEOUT_MS = 350_000;
+  /** hard cap 到点时的中间结束语: 气泡必须 finish=true, 但 turn 还在跑 —— 明说
+   *  「没完, 去链接看」, 而不是让气泡停在一句看似说完的话 / 一行过期的进度上。 */
+  const STILL_WORKING = "⏳ 仍在处理中, 点击链接查看详情…";
   /** 软收口静默期。后端只能说"这条消息写完了"(codebuddy) 时, 等这么久没有新 item
    *  才认定一轮结束。取值只需盖住"叙述消息落盘 → 紧随其后的 function_call 落盘"
    *  这一段, 与模型思考/工具执行时长无关。
@@ -2462,7 +2465,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (s.flushTimer || s.closed || s.dead) return;
     s.flushTimer = setTimeout(() => void flushStream(s), FLUSH_MS);
   };
-  const finalizeStream = async (a: AttachState, s: ActiveStream): Promise<void> => {
+  const finalizeStream = async (a: AttachState, s: ActiveStream, timedOut = false): Promise<void> => {
     if (s.closed) return;
     s.closed = true;
     // 非 brief 路径的父 turn 收口 — subagent turns 一并关 (brief 路径在
@@ -2474,16 +2477,19 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 没正文不写: finish=true 是整条覆盖, 空正文只会把 "…" ack 覆盖成光秃秃的
     // 链接头, 结束处理自己制造错发。气泡保持现有内容, 由 WeCom 6min 窗口自然
     // 到期。dead 流同理只做本地清理。
-    if (!s.dead && s.acc.trim()) {
+    // 例外是 hard cap 超时: turn 还在跑, 收口时缀上中间结束语 —— 这时即使没正文
+    // 也有话可说, 不算空覆盖。
+    const body = timedOut ? [s.acc, STILL_WORKING].filter((x) => x.trim()).join("\n\n") : s.acc;
+    if (!s.dead && body.trim()) {
       const card = detailCardFor(s, a.target);
       try {
         if (card) {
           s.cardSent = true;
-          await client.replyStreamWithCard(s.frame, s.streamId, withLinkedTag(a, s.acc, undefined, s.turnId), true, { templateCard: card });
+          await client.replyStreamWithCard(s.frame, s.streamId, withLinkedTag(a, body, undefined, s.turnId), true, { templateCard: card });
         } else {
-          await client.replyStream(s.frame, s.streamId, withLinkedTag(a, s.acc, undefined, s.turnId), true);
+          await client.replyStream(s.frame, s.streamId, withLinkedTag(a, body, undefined, s.turnId), true);
         }
-        log.info({ sessionId: a.sessionId, turnId: s.turnId, accLen: s.acc.length, tools: s.tools.length, withCard: !!card }, "stream finalize");
+        log.info({ sessionId: a.sessionId, turnId: s.turnId, accLen: s.acc.length, tools: s.tools.length, withCard: !!card, timedOut }, "stream finalize");
       } catch (e) {
         log.warn({ sessionId: a.sessionId, turnId: s.turnId, err: (e as Error).message }, "stream finalize failed");
         s.dead = true;
@@ -2511,7 +2517,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       capped: false, closed: false, dead: false, cardSent: false,
       tools: [], sawTool: false,
     };
-    s.hardTimer = setTimeout(() => void finalizeStream(a, s), HARD_TIMEOUT_MS);
+    s.hardTimer = setTimeout(() => void finalizeStream(a, s, true), HARD_TIMEOUT_MS);
     log.info({ sessionId: a.sessionId, turnId: s.turnId, streamId }, "stream open");
     return s;
   };
@@ -3003,11 +3009,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const bubble: BriefBubble = { frame, streamId, hardTimer: undefined as unknown as NodeJS.Timeout, done: false };
     const q: QueuedTurn = { turnId, bubble, isSlash };
     bubble.hardTimer = setTimeout(() => {
-      // WeCom ~6min stream 窗口快到, 必须 finish=true 收口。没正文时不能拿光链接
-      // 覆盖 —— finish 是整条替换, 会把屏幕上的 CoT 进度行抹成光秃秃的链接; 改用
-      // 最新进度行定格 (a 上的 CoT 只在气泡仍是本轮活跃气泡时才可信, 换轮后归新轮)。
-      const cot = a.briefBubble === bubble && !a.briefConcluded ? a.cotText ?? a.cotLastSent : undefined;
-      void finishBubble(a, bubble, `${briefDetailLink(turnId, a.target)}${cot ? ` \`${cot}\`` : ""}`, true);
+      // WeCom ~6min stream 窗口快到, 必须 finish=true 收口。finish 是整条替换 ——
+      // 定格在一行过期的 CoT 进度上看着像卡死, 光链接又像说完了; 气泡仍是本轮活跃
+      // 气泡 (turn 还在跑) 就明说「仍在处理中」, 已被顶替的旧轮只留链接。
+      const live = a.briefBubble === bubble && !a.briefConcluded;
+      void finishBubble(a, bubble, `${briefDetailLink(turnId, a.target)}${live ? ` ${STILL_WORKING}` : ""}`, true);
     }, HARD_TIMEOUT_MS);
     // 新消息 = 对话边界: 立刻收掉上一 turn, 新 turn 直接激活、不排队。收口语义见
     // closeBriefTurn: 有正文收入旧气泡, 没正文不写一个字 (绝不因边界结束凭空新发/
