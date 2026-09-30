@@ -346,7 +346,9 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 
 /* ── 🏓 keepalive 折叠 ──────────────────────────────────────────────
    保温 ping 不是对话, 但它是真花销 —— 所以留在时间轴上, 只是收成一行虚线。 */
-.ping-fold { border: 1px dashed #d8dee4; border-radius: 10px; background: #fbfcfd }
+/* summary 的灰底 / 底线是 SHARED_CSS 里通用 details 的 —— 圆角得自己裁, 底线只在展开时才是分割线。 */
+.ping-fold { border: 1px dashed #d8dee4; border-radius: 10px; background: #fbfcfd; overflow: hidden }
+.ping-fold:not([open]) > .ping-sum { border-bottom: 0 }
 .ping-fold > .ping-sum {
   display: flex; align-items: center; gap: 8px; padding: 6px 12px;
   cursor: pointer; list-style: none; font-size: 11.5px; color: #8c959f;
