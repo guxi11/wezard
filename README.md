@@ -73,42 +73,31 @@ flowchart LR
 
 **前置**：macOS / Linux、Node ≥ 20、`tmux`、PATH 里能找到 `claude` / `claude-internal` / `codebuddy`（至少一个）、企业微信「智能机器人」的 `botId` + `secret`。
 
+**1. 安装并初始化**
+
 ```bash
 npm install -g wezard
 wezard init
 ```
 
-```mermaid
-flowchart TD
-    install["npm i -g wezard<br/>wezard init"] --> ask["交互问 3 个问题"]
-    ask --> creds["botId / secret<br/>→ ~/.wezard/secrets.json"]
-    ask --> rest["选哪些 CLI · 是否开审批<br/>→ ~/.wezard/config.jsonc"]
-    creds --> auto
-    rest --> auto["自动: 编译 → 注入 hook/MCP → 装 svr 详情中继<br/>→ 装常驻 daemon → 等 WS 鉴权"]
-    auto --> claim["在企业微信里发:<br/>将本对话设置为默认会话"]
-    claim --> bound["写入 defaultChat + allowFrom<br/>10 分钟窗口, 用完即关"]
-    bound --> first["再发任意一句话<br/>= 绑定信号, 也是第一句 prompt"]
-    first --> live["daemon 拉起 tmux 窗口 + Agent 会话<br/>回复逐字流式推回 IM"]
+按提示填 `botId` / `secret`、选要用的 CLI（可多选）、选是否开启远程审批，其余自动完成。
+
+**2. 绑定默认会话**
+
+`init` 提示后，在企业微信里给机器人发：
+
+```
+将本对话设置为默认会话
 ```
 
-`init` 问的 3 个问题与落点：
+口令 10 分钟内有效。全新安装时，直接单聊机器人发任意消息即可，无需口令。
 
-| 问什么 | 落到哪 |
-| --- | --- |
-| botId / secret | `~/.wezard/secrets.json` |
-| 用哪些 Claude agent（`claude` / `claude-internal` / `codebuddy`，可多选） | `~/.wezard/config.jsonc` |
-| 是否开启 PreToolUse 远程审批 | `~/.wezard/config.jsonc` |
+**3. 开始使用**
 
-已装过的凭证默认复用，所选 CLI 的 `permissions` 会一次性导入审批规则（`allow` → 免审直行，`ask` → 强制发卡，`deny` → 直接拒绝）。
-
-**最后一步：绑定默认会话。** CLI 提示后，**在企业微信里**给机器人发那句认领口令。它带 10 分钟窗口，消费完立刻关；此后所有消息都按白名单鉴权。全新安装（`allowFrom` 还是空的）时，第一个**单聊**发消息的人会被直接提升为超级管理员，不需要口令——群聊不走这条路，免得机器人被拉进群就被人接管。
-
-**绑定之后，按这个顺序把会话跑起来**：
-
-1. **发首条消息**：在企微里随便说句话（比如 `hi`）。它既是绑定信号也是第一句 prompt——daemon 自动拉起 tmux 窗口 + Agent 会话，回复逐字流式推回 IM。
-2. **切到你的项目**：新会话默认落在 `~/.wezard/workspace`，直接对 AI 说「切到 /path/to/proj」——它调 `set_workspace` MCP 一步换目录重开会话，收到 📂 项目回执即切换完成，`/pwd` 随时确认。
-3. **第一次审批**：Agent 要跑 `Bash` / `Edit` 时 IM 弹按钮卡，点 `❌` / `⏱10h自动过` / `✅总是` / `✅`；点卡片里的链接看完整 input / result / git diff。
-4. **`/h` 拉出命令表**：`/new` 开新会话、`/clear` 清上下文、`/sessions` 切换、`.name` 叫任意 wizard、`/usage` `/cost` 查额度——全部命令一屏可查。
+1. **发首条消息**：在企微里随便说句话（比如 `hi`），回复会流式推回 IM。
+2. **切到你的项目**：对 AI 说「切到 /path/to/proj」，收到 📂 项目回执即完成，`/pwd` 随时确认。
+3. **审批**：Agent 要跑 `Bash` / `Edit` 时 IM 弹按钮卡，点 `❌` / `⏱10h自动过` / `✅总是` / `✅`；点卡片里的链接看完整 input / result / git diff。
+4. **查命令**：发 `/h` 拉出命令表——`/new` 开新会话、`/clear` 清上下文、`/sessions` 切换、`.name` 叫任意 wizard、`/usage` `/cost` 查额度。
 
 ---
 
