@@ -235,7 +235,8 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
         return {
           key, kind: "wizard", name: dir.nameOf(peer), label: dir.labelOf(peer), base: "", peer,
           status: dir.status(peer, now),
-          lastTs: last?.ts ?? 0, preview: previewOf(lastSaid(ms), dir), count: ms.length, subs: [],
+          // 私聊只有两个人, 标题行已是对方的名字, 预览只放正文。
+          lastTs: last?.ts ?? 0, preview: bodyOf(lastSaid(ms)), count: ms.length, subs: [],
         };
       }
       const base = key.slice(2);
