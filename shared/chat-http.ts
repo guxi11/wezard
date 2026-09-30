@@ -2,8 +2,9 @@
 // both own a DetailStore, so both can serve the same view off it.
 //
 //   GET /role, /chat      → static SPA shell (shared/chat-render); /chat 是改名前的老链接
-//   GET /chat/app.css     → 视图样式 (detail 共用样式 + web/chat.css)
+//   GET /chat/app.css     → 视图样式 (高亮主题 + detail 共用样式 + web/chat.css)
 //   GET /chat/app.js      → 视图脚本 (web/chat.js)
+//   GET /chat/vendor.js   → markdown-it + highlight.js (随包分发, 不走 CDN)
 //   GET /api/role         → 一个 role 的身份 + 它参与的会话 (群聊/单聊) + session 分段
 //   GET /api/msgs         → 一个会话窗口的消息片段 (服务端渲染的 HTML; 工具调用只有摘要)
 //   GET /api/tool         → 一次工具调用的展开正文 —— 片段的第二级, 展开时才取
@@ -28,7 +29,7 @@ import {
 } from "./role-view.js";
 import { renderMark, renderMsg, type MsgFragment } from "./role-render.js";
 import { renderToolBody } from "./detail-render.js";
-import { chatScript, chatStyles, renderChatPage } from "./chat-render.js";
+import { chatScript, chatStyles, chatVendor, renderChatPage } from "./chat-render.js";
 import type { Asset } from "./web-assets.js";
 import type { DetailRecord, DetailStore } from "./detail-store.js";
 
@@ -38,6 +39,7 @@ export interface ChatRoutes {
   page: SimpleHandler;
   styles: SimpleHandler;
   script: SimpleHandler;
+  vendor: SimpleHandler;
   role: SimpleHandler;
   msgs: SimpleHandler;
   tool: SimpleHandler;
@@ -346,7 +348,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     });
   };
 
-  return { page, styles: asset(chatStyles), script: asset(chatScript), role, msgs, tool, events, world };
+  return { page, styles: asset(chatStyles), script: asset(chatScript), vendor: asset(chatVendor), role, msgs, tool, events, world };
 };
 
 /** Path → handler map; the daemon registers each, svr dispatches through it. */
@@ -355,6 +357,7 @@ export const chatRouteTable = (routes: ChatRoutes): Record<string, SimpleHandler
   "GET /chat": routes.page,
   "GET /chat/app.css": routes.styles,
   "GET /chat/app.js": routes.script,
+  "GET /chat/vendor.js": routes.vendor,
   "GET /api/role": routes.role,
   "GET /api/msgs": routes.msgs,
   "GET /api/tool": routes.tool,
@@ -364,6 +367,6 @@ export const chatRouteTable = (routes: ChatRoutes): Record<string, SimpleHandler
 
 /** Route keys, single-sourced so the daemon's registration can't drift. */
 export const CHAT_ROUTE_KEYS = [
-  "GET /role", "GET /chat", "GET /chat/app.css", "GET /chat/app.js",
+  "GET /role", "GET /chat", "GET /chat/app.css", "GET /chat/app.js", "GET /chat/vendor.js",
   "GET /api/role", "GET /api/msgs", "GET /api/tool", "GET /api/role-events", "GET /api/world",
 ] as const;

@@ -17,13 +17,28 @@
 import { SHARED_CSS, TURN_CSS } from "./detail-render.js";
 import { readAsset, type Asset } from "./web-assets.js";
 
-/** /chat/app.css = 详情页共用样式 + 本视图外壳样式。 */
+/** 拼出来的资源的 ETag = 各片 ETag 之和 —— 任一片变了整体都失效, 缺片记 `-`。 */
+const etagOf = (parts: readonly (Asset | undefined)[]): string =>
+  `W/"${parts.map((a) => a?.etag.slice(3, -1) ?? "-").join("+")}"`;
+
+/** /chat/app.css = 代码高亮主题 + 详情页共用样式 + 本视图外壳样式。 */
 export const chatStyles = (): Asset => {
-  const own = readAsset("chat.css");
+  const [theme, own] = ["hljs-github.min.css", "chat.css"].map(readAsset);
   return {
-    body: `${SHARED_CSS}${TURN_CSS}${own?.body ?? ""}`,
+    body: `${theme?.body ?? ""}${SHARED_CSS}${TURN_CSS}${own?.body ?? ""}`,
     type: "text/css; charset=utf-8",
-    etag: own?.etag ?? 'W/"nocss"',
+    etag: etagOf([theme, own]),
+  };
+};
+
+/** /chat/vendor.js = markdown-it + highlight.js, 随包分发。原先走 unpkg: 外网慢的时候
+ *  head 里的阻塞脚本能把整页卡上十几秒, 而这两个库本来就不随页面变。 */
+export const chatVendor = (): Asset => {
+  const parts = ["markdown-it.min.js", "highlight.min.js"].map(readAsset);
+  return {
+    body: parts.map((a) => a?.body ?? "").join(";\n"),
+    type: "text/javascript; charset=utf-8",
+    etag: etagOf(parts),
   };
 };
 
@@ -34,10 +49,7 @@ export const renderChatPage = (): string =>
   `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>对话现场</title>
-<link rel="stylesheet" href="https://unpkg.com/highlight.js@11/styles/github.min.css">
 <link rel="stylesheet" href="chat/app.css">
-<script src="https://unpkg.com/markdown-it@14/dist/markdown-it.min.js"></script>
-<script src="https://unpkg.com/@highlightjs/cdn-assets@11/highlight.min.js"></script>
 </head><body>
 <div class="app" id="app">
   <aside class="side">
@@ -64,5 +76,6 @@ export const renderChatPage = (): string =>
   </main>
 </div>
 <footer class="usage page" id="pg-usage" hidden></footer>
+<script src="chat/vendor.js" defer></script>
 <script src="chat/app.js" defer></script>
 </body></html>`;

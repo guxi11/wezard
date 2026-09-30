@@ -15,6 +15,7 @@
 
 - `read_chat` / `wizard_roster` / `peek_peer` 的回执收口: 名册的「最近」改成 `▸ 问 ◂ 答` (不再用指代不明的「你:」), 模型取 transcript 里真正跑的那个, home 聊天分「群 / 单聊」; `peek_peer` 的 `turns` 按来回数; `read_chat` 一条消息一行起头 (续行缩进), 没等到回答的问话标在行尾而不另占一条, 翻页时刻精确到毫秒, 往回到头了明说而不是照给游标; 带 role / target 过滤时读不够会自动往回加深。
 - 名册与 `/peers` 摘要里被截断的句子带 `…` —— 之前是裸截, 读起来像它只说了半句。
+- rolepage 的 markdown-it / highlight.js / 高亮主题随包分发 (`/chat/vendor.js`, 主题并进 `/chat/app.css`), 不再从 unpkg 取 —— 外网慢时 head 里的阻塞脚本会把整页卡上十几秒。脚本改 `defer`, 按 ETag 缓存。
 
 ### Removed
 - MCP `list_peers`: 并进 `wizard_roster` (`chat` 写自己的群名即同群名册)。`/peers/list` 路由保留给仍在跑的旧 MCP 进程。
