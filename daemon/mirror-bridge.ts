@@ -1388,8 +1388,39 @@ export const parseInputBox = (cap: string): InputBox => {
   return { known: true, body };
 };
 
+// 空框里的灰字不是输入: 幽灵提示 (`Try "…"`) 和 CC 预测的下一句 (prompt suggestion,
+// 回车不采纳) 都以 SGR 2 (dim) 渲染。纯文本 capture 看不出区别 —— 预测句
+// `commit 这次改动…` 曾让一条 `commit` 被判成「已在框里」, 于是没贴, 只按了三下
+// 空回车, 消息就此消失。所以框一律带样式读, dim 段整段丢掉, 其余转义剥净。
+const SGR_SPLIT_RE = /\x1b\[([0-9;:]*)m/u;
+const OTHER_ESC_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[A-Za-z]/gu;
+
+/** 一段 SGR 参数走完后 dim 的开关; 38/48/58 的颜色参数整段跳过, 免得 `38;5;2` 里的 2 被当成 dim。 */
+const dimAfter = (dim: boolean, ps: readonly string[]): boolean => {
+  if (!ps.length) return dim;
+  const [p, ...rest] = ps;
+  if (p === "38" || p === "48" || p === "58") return dimAfter(dim, rest[0] === "5" ? rest.slice(2) : rest[0] === "2" ? rest.slice(4) : rest);
+  return dimAfter(p === "" || p === "0" || p === "22" ? false : p === "2" ? true : dim, rest);
+};
+
+export const dropDim = (styled: string): string => {
+  // split 带捕获组: 偶数位是正文, 奇数位是 SGR 参数。
+  const parts = styled.split(new RegExp(SGR_SPLIT_RE, "gu"));
+  return parts
+    .reduce<{ dim: boolean; out: string }>(
+      (acc, part, i) => (i % 2 ? { ...acc, dim: dimAfter(acc.dim, part.split(/[;:]/u)) } : acc.dim ? acc : { ...acc, out: acc.out + part }),
+      { dim: false, out: "" },
+    )
+    .out.replace(OTHER_ESC_RE, "");
+};
+
+const captureUndimmed = async (target: string, rows: number): Promise<string> => {
+  const r = await runTmux(["capture-pane", "-t", target, "-p", "-e", "-S", `-${rows}`]);
+  return r.ok ? dropDim(r.stdout) : "";
+};
+
 // 24 行足够容纳展开后的多行粘贴 (折叠态只占一行)。
-const readInputBox = async (target: string): Promise<InputBox> => parseInputBox(await capturePaneTail(target, 24));
+const readInputBox = async (target: string): Promise<InputBox> => parseInputBox(await captureUndimmed(target, 24));
 
 // ── 注入门控的会话证人 (cc-session) ─────────────────────────────────
 // 能从会话自己写的 json 读到的判据, 就不读 pane: 就绪看注册表的 status, 提交看
@@ -1606,7 +1637,7 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   const sawLanded = async (timeoutMs: number): Promise<boolean> => {
     const t0 = Date.now();
     while (Date.now() - t0 < timeoutMs) {
-      const cap = await capturePaneTail(target, 24);
+      const cap = await captureUndimmed(target, 24);
       const box = parseInputBox(cap);
       if (boxVerify && box.known ? !boxIntact(box) : Boolean(headFp) && stripWs(cap).includes(headFp)) return true;
       await sleep(POLL_MS);
@@ -1617,7 +1648,7 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   // 窄窗口 = 只有输入框本身。tailFp 紧挨光标, 提交前必在窗内、提交后消失。
   // 仅用于 parseInputBox 认不出布局的后端。
   const inputBoxStillHasTail = async (): Promise<boolean> => {
-    const pane = await capturePaneTail(target, 5);
+    const pane = await captureUndimmed(target, 5);
     return Boolean(tailFp) && stripWs(pane).includes(tailFp);
   };
 
