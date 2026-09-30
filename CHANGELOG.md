@@ -28,10 +28,10 @@
 - **rolepage 显示 wizard 是否在执行中**: 左栏会话列表里, 私聊对端与群里的 wizard 在执行时头像角上亮一盏呼吸灯; 名片上多一个状态词 (执行中 / 空闲 / 已关闭)。判定 = pane 的 busy 或 turn 记录还没静默到点 (`/api/role` 与 SSE `role` 事件: `role.runningUntil`, `convs[].status` / `convs[].subs[].status`), 到点由页面本地熄灯。SSE 每 10s 带着新名册重推一次摘要 —— busy 变了不写 store, 没有这一拍灯会一直亮着。
 
 ### Changed
+- **BREAKING 闲置 pane 回收从「静默超过 48h」改成「超过 pane 上限」**: 配置项 `wrc.mirror.idleReapHours` 移除, 换成 `wrc.mirror.maxPanes` (默认 20, 0 = 关闭)。每新建一个 wizard (`/new`、`.name` 隐式新建、`spawn_wizard` / `clone_wizard`) 数一次, 活着的会话 pane 超过上限就从 transcript 最久没动的收起, 直到回到上限 —— 不再有定时扫描; 照旧只收 pane 不收绑定, 下一条消息 `--resume` 复活。豁免不变 (名下有定时任务 / 挂着审批 / 正忙 / 人正盯着的), 所以实际数量可能暂时高于上限。旧配置里残留的 `idleReapHours` 被忽略。
 - **rolepage 的消息分两级下发, 首屏不再带工具调用正文**: `/api/msgs` 与 SSE `msg` 片段里的工具调用只剩摘要行 + ⎿ 预览, 展开正文 (命令 / diff / 文件内容高亮、input、原始 result) 在展开那一刻向新路由 `GET /api/tool?id=&turn=&use=` 取, 取到后留在节点上不重取。`/api/msgs` 同时改为先按时间切片再渲染, 没上屏的轮次不再白排一遍。一个约 300 条消息的窗口: 首屏 60 条 1.27 MB → 107 KB, 全量 7.38 MB → 967 KB。`/detail?id=` 整页不变, 仍是全量内联。
 - **rolepage 的用量改成一条页脚组件, 宽屏单行**: 标签 · 指标 · token I/O 条 + 图例 · 模型 一行排完, 窄屏整组折行; 输出 / 缓存不再单列成指标 (就是图例里的那几格)。挂载点跟着账的归属走 —— wizard 视角是横跨两栏的整页页脚 (它自己的总账, 选了 session 只算那一段); 人的视角在群里点开某个 wizard 后, 聊天窗口底下是「我与它在这个群里」这段往来的账 (`/api/role` 与 SSE `role` 事件新增 `winStats`)。左栏底只剩 session 切换。
 - **创建同名 wizard 时, 静默超过一天的旧 wizard 直接被顶掉**。`/new`、`new_claude_session`、`spawn_wizard` / `clone_wizard` 撞上的名字若属于一个最后活跃在 1 天前的 wizard (transcript mtime; 没有会话的冷记录按出生时刻), 新的直接拿走名字, 不再退避成 `-N`, 也不再 409 —— 分身整个收掉 (pane、绑定、记录), 聊天的默认会话只让出名字。一天内还活动过的照旧 409 / 退避。
-- **BREAKING 闲置 pane 回收从「静默超过 48h」改成「超过 pane 上限」**: 配置项 `wrc.mirror.idleReapHours` 移除, 换成 `wrc.mirror.maxPanes` (默认 20, 0 = 关闭)。每新建一个 wizard (`/new`、`.name` 隐式新建、`spawn_wizard` / `clone_wizard`) 数一次, 活着的会话 pane 超过上限就从 transcript 最久没动的收起, 直到回到上限 —— 不再有定时扫描; 照旧只收 pane 不收绑定, 下一条消息 `--resume` 复活。豁免不变 (名下有定时任务 / 挂着审批 / 正忙 / 人正盯着的), 所以实际数量可能暂时高于上限。旧配置里残留的 `idleReapHours` 被忽略。
 
 ### Fixed
 - **工具调用到一半被新消息打断时, 结果不再落进新一轮的气泡**: `tool_result` 改投到持有那次 `tool_use` 的 turn (`detail-store.appendTurnItem` 按 `toolUseId` 找主, 找不到才写当前轮) —— 旧轮的调用拿到结果, 新轮顶上不再多出一个无主的 `tool_result` 块。轮已结束而结果始终没回来的调用, ⎿ 预览显示「已中断 · 无结果」, 不再永远挂着「运行中…」。

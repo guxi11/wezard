@@ -19,46 +19,32 @@
 
 ![demo](images/demo.png)
 
-三个进程，一条 WebSocket。daemon 常驻在你的电脑上，是唯一和企业微信说话的那个；hook 与 MCP 都只是它的本地 HTTP 客户端：
-
-```mermaid
-flowchart LR
-    you["你 · 企业微信"] <-- WebSocket --> daemon["wezard daemon<br/>常驻本机 · 127.0.0.1:17890"]
-    daemon -- "tmux 粘贴消息" --> cli["tmux 里的 Agent CLI<br/>claude · claude-internal · codebuddy"]
-    cli -- "流式回复 / 工具调用" --> daemon
-    cli -- "每次工具调用先问一句" --> hook["PreToolUse hook"]
-    hook -- "阻塞等你点卡片" --> daemon
-    cli -- "主动汇报 / 读写文档" --> mcp["MCP server"]
-    mcp --> daemon
-```
-
 | 功能<img width="160"> | 说明 |
 | --- | --- |
-| 🛎 **远程审批** | Agent 要跑 `Bash` / `Edit`？审批卡片直推 IM，点 `✅` 放行一次、`⏱` 开一段自动放行窗口、`✅总是` 写回规则、`❌` 拒绝。危险操作（`rm` / 强推 / `DROP` / 敏感路径）只给 `❌` 与 `✅ 确认执行`，逐次单独确认。 |
-| 📋 **计划审批** | Agent 在 plan mode 结束（`ExitPlanMode`）时，把计划摘要 + 审批卡推到 IM：点 ✅同意 退出 plan mode 开始执行，或 ✏️继续改 留在 plan mode 继续完善。`AskUserQuestion` 多选题也镜像为投票卡。 |
-| 🪞 **会话镜像** | 你电脑上跑的 Agent 流式打字、tool_use、思考过程，实时同步到企业微信；IM 里发消息原样落进 CLI 输入框。 |
-| 🖼 **图片直贴** | 企业微信发图，自动走 macOS 剪贴板 + tmux 粘贴，Agent 当贴图处理（不走 Read，不耗 token）。 |
-| 🔍 **细节页 / rolepage** | 工具调用 / 审批请求都生成本地 HTML 详情页，IM 里点链接看完整 input / result / git diff；点气泡头的 `.name` 进那个 wizard 的 rolepage——它视角下的全部群聊与单聊。 |
-| 📡 **MCP 主动推送** | Agent 通过 `wecom__send_markdown` / `wecom__send_card` / `wecom__ask_user` 主动汇报或问询。 |
-| 📄 **文档读写** | Agent 通过 `wecom_doc_list_tools` / `wecom_doc_call` 直接调企业微信智能机器人的 doc / smartsheet / smartpage MCP，新建在线文档、写 Markdown、读链接、操作智能表格——全程在内网，不需要 corp access_token。 |
-| 🗂 **多会话发现/切换** | Agent 通过 `list_claude_sessions` / `switch_claude_session` / `new_claude_session` 列出本机 tmux 内所有在跑的会话（带摘要 + 稳定动物 emoji 标签）、切换 IM 镜像、或在指定路径新开会话。审批卡标题也带同一枚 emoji，多会话兜底到同一 IM 时一眼区分。 |
-| 🧙 **多 wizard 协同** | 每个 wizard 有一个**全局唯一**的名字，写作 `.name`，在任何群里都叫得到；有职责、有记忆、能私聊。`clone_wizard` fork 上下文出分身、`spawn_wizard` 白板生子 wizard，`open_job` / `wait_peer({names})` / `close_job` 把一次 fan-out 收成群里两条气泡，干完整批回收。 |
-| 🔄 **重启即续** | 电脑重启 / tmux 全没了 / daemon 崩了都不掉档：IM ↔ 会话绑定持久化在 `~/.wezard/mirror-attachments.json`，下一条 IM 消息自动 `claude --resume` 拉起新 tmux pane，历史完整继承；`tmux attach -t wezard` 接管即可。 |
+| 🛎 **远程审批** | Agent 要跑 `Bash` / `Edit` 时，审批卡片直推 IM：`✅` 放行一次、`⏱` 一段时间内自动放行、`✅总是` 记成规则、`❌` 拒绝。危险操作（`rm` / 强推 / `DROP` / 敏感路径）每次都要单独确认。 |
+| 📋 **计划审批** | Agent 做完计划时，摘要和审批卡推到 IM：`✅同意` 开始执行，`✏️继续改` 接着完善。Agent 提的选择题也会变成投票卡。 |
+| 🪞 **会话镜像** | 电脑上 Agent 的回复、工具调用、思考过程实时同步到企业微信；IM 里发的消息原样落进 CLI 输入框。回到电脑前 `tmux attach -t wezard` 接着干，对话一字不少。 |
+| 🖼 **图片直贴** | 在企业微信里发图，Agent 直接当贴图处理。 |
+| 🔍 **详情页** | 每次工具调用 / 审批请求都有详情页，IM 里点链接看完整 input / result / git diff。 |
+| 📡 **主动汇报** | Agent 可以主动给你发消息、发卡片、向你提问。 |
+| 📄 **文档读写** | Agent 直接新建企业微信在线文档、写 Markdown、读文档链接、操作智能表格。 |
+| 🗂 **多会话** | 列出本机所有在跑的会话、切换 IM 镜像到哪一个、在指定目录新开会话。每个会话有一枚固定的 emoji，审批卡和回复一眼区分。 |
+| 🧙 **多 wizard 协同** | 每个会话是一个有名字的 wizard，写作 `.name`，在任何群里都叫得到；有职责、有记忆，能分身、能互相派活，把一件大活拆成几路并行做完。 |
+| ⏰ **定时任务** | 「每个工作日晚上 9:30 跑一遍回归」——到点自动起一个 wizard 去干，结果发回群里。 |
+| 🔄 **重启即续** | 电脑重启 / tmux 关了 / daemon 崩了都不掉档：下一条 IM 消息自动把会话拉起来，历史完整继承。 |
 
 <details>
 <summary><b>目录</b></summary>
 
 - [快速开始](#快速开始)
-- [镜像模式](#镜像模式)
-- [体验是什么样](#体验是什么样)
-- [文档 / 智能表格 / 智能文档](#文档--智能表格--智能文档)
-- [定时任务 / 跨群通知](#定时任务--跨群通知)
-- [wizard：全局唯一的 `.name`](#wizard全局唯一的-name)
-- [rolepage：一个 wizard 视角下的 IM](#rolepage一个-wizard-视角下的-im)
-- [编排：读完材料才知道要分几路](#编排读完材料才知道要分几路)
-- [跨聊天：给聊天命名](#跨聊天给聊天命名)
-- [多 CLI 后端](#多-cli-后端claude--claude-internal--codebuddy)
-- [Prompt-cache 保活（省钱心跳）](#prompt-cache-保活省钱心跳)
+- [多 wizard 协同](#多-wizard-协同)
+- [任务编排](#任务编排)
+- [rolepage](#rolepage)
+- [聊天命名](#聊天命名)
+- [定时任务与跨群通知](#定时任务与跨群通知)
+- [企业微信文档](#企业微信文档)
+- [多 CLI 后端](#多-cli-后端)
+- [缓存保活](#缓存保活)
 - [常用命令](#常用命令)
 - [常见问题](#常见问题)
 - [深入了解](#深入了解)
@@ -101,336 +87,178 @@ wezard init
 
 ---
 
-## 镜像模式
+## 多 wizard 协同
 
-IM 来消息 → tmux 粘进活的 TUI，CLI 里像你自己敲进去的一样；Agent 的回应、调用了哪些工具、思考过程都逐字流式推回 IM。一对一绑定 IM 聊天 ↔ tmux 窗口，原地累计上下文——真·远程结对编程。
-
-IM 里发 `/new` 开新 tmux 窗口 + 新 Agent 会话，`/clear` 清当前上下文，带图消息自动注入剪贴板。所有 IM 聊天共享一个 tmux session（默认名 `wezard`），每个聊天一个独立 window。
-
-**关 tmux / daemon 崩了 / 整机重启都能自愈**：
-
-- IM ↔ 会话绑定 write-through 落到 `~/.wezard/mirror-attachments.json`，daemon 起来就 eager restore；
-- 重启后 pane 全死，下一条 IM 消息触发 `claude --resume <sid>` 拉起新 pane；
-- `--resume` fork 出的新 jsonl 由 watcher 从 EOF 无缝接管，不会把整段历史再推一遍到 IM；
-- 中途在别处 `/clear` 把 jsonl rotate 掉也不丢绑定，会自愈到同项目目录下最新的 jsonl。
-
-> 💡 **不必先在 CLI 里开 tmux**：首次发任意消息就会自动 spawn + 绑定。回家 `tmux attach -t wezard` 接管即可。
-
----
-
-## 体验是什么样
-
-**审批场景**：你在地铁上，电脑上的 Agent 想 `rm -rf node_modules` 重装。企业微信叮一声弹卡片：
-
-> 🛎 授权请求: Bash
-> `rm -rf node_modules`
-> ⚠️ 命中危险名单：删除目录 rm
-> [❌] [✅ 确认执行]
-
-你点 ✅，卡片立刻刷新成 `✅ 已通过`，电脑上的 Agent 解除阻塞继续跑。
-
-**镜像场景**：你 tmux 里开着 Agent 在写代码。出门后给机器人发：
-
-> 把刚才那个函数改成异步的
-
-这条消息自动粘进 CLI 输入框 + 回车提交。Agent 的回应、调了哪些工具、改了哪些文件，逐字流式推回 IM。回家打开终端，对话一字不少都在那里。
-
-**文档场景**：你说「周报给我整理成一篇企业微信文档」。Agent 自己调 `wecom_doc_list_tools` 看可用方法，再调 `wecom_doc_call` 新建文档、写入 Markdown，最后把链接贴回会话——全程不离开会话，文档归属到你的 userid，每日 20 篇限额按 userid 计。
-
----
-
-## 文档 / 智能表格 / 智能文档
-
-`wezard` 把企业微信智能机器人的远端 MCP（doc / smartsheet / contact）桥接到本地 Agent，**全程内网、不走 corp access_token**。Agent 先调 `wecom_doc_list_tools` 看某 category 有哪些方法，再调 `wecom_doc_call` 执行——新建在线文档、写 Markdown、读链接、操作智能表格。首次用需在「工作台 - 智能机器人 - 可使用权限」里勾选「文档」「智能表格」。
-
-桥接机制、curl 验证、`requesterUserId` 解析规则见 [技术说明](技术说明.md#文档-mcp-如何桥接)。
-
----
-
-## 定时任务 / 跨群通知
-
-**定时任务**：到点把一句话说给某个 wizard 听——等价于那一刻有人在群里对它说了这句话，所以它**真的会去干活**，产出照常落在群里。它活在守护进程里，跨 CLI 重启、`/clear`、会话结束都还在。每条任务是一份 `~/.wezard/tasks/<id>.task.mjs`，热加载。
-
-**日程跟着 wizard 走**：每条任务记着排它的那个 wizard（`owner`），它的 rolepage 顶栏「日程」里就列着它名下的任务；默认到点新起一个白板 wizard 去干，名字是 `<owner>-task-xxxx`、家谱挂在 owner 名下，干完收掉。
-
-`when` 用人话说就行，不用翻译成 cron：
-
-| 说 | 工具 | 干什么 |
-| --- | --- | --- |
-| 「每个工作日晚上 9:30 跑一遍回归」 | `schedule_task(when, prompt, name?)` | 归在自己名下；省略 `name` = 到点新起白板 wizard，点了 `name` = 投进那个已有 wizard |
-| 「我设了什么定时」 | `list_tasks(mine?)` | 列出 id / 人话回显的 when / 下次触发时刻 / owner / 目标；`mine:true` 只看自己名下的 |
-| 「取消那个定时」 | `cancel_task(id)` | 按 id 删 |
-
-认得的说法：`每天 8:00`、`每个工作日晚上9:30`、`每周三下午3点`、`每隔两小时`、`每 30 分钟`、`20 分钟后`、`明早 9 点`。
-
-**跨群通知**：`notify(to?, markdown)` 把一段 markdown 贴进指定聊天**给人看**——和 `send_peer` 正好相反，它不驱动任何 agent、不触发一轮对话。`to` 写聊天名（见[给聊天命名](#跨聊天给聊天命名)），省略就是自己这一轮所在的群（人从哪个群叫的它，就回哪个群）；气泡头是它的 `emoji .name`，挂着它的 rolepage。
-
-典型用法：一个长活在 `build` 群跑完，`notify(["ops"], "🔴 回归挂了 3 例…")` 把结论送到该看的人那里。
-
-## wizard：全局唯一的 `.name`
-
-一个绑定了聊天的会话，在 wezard 里叫一个 **wizard**：有自己的终端、工作区、名字和职责，知道还有谁在，也叫得动它们。**名字全局唯一**，写作 `.name`——它就是地址，不管那个 wizard 住在哪个群，在任何群里都叫得到它。
+一个绑定了聊天的会话叫一个 **wizard**：有自己的终端、工作区、名字和职责，知道还有谁在，也叫得动它们。名字**全局唯一**，写作 `.name`——不管它住在哪个群，在任何群里都叫得到。
 
 ![多会话](images/multi-session.png)
-
-**名字从哪来**
-
-| wizard | 名字 |
-| --- | --- |
-| 聊天的默认 wizard | 聊天的名字（`/name` 起的，或按工作区自动补的，见[给聊天命名](#跨聊天给聊天命名)） |
-| `.docs /new` 叫出来的 / 分身 | 你给的那个名字 |
-| 撞名 | 自动加后缀：`fix` → `fix-2` → `fix-3`（大小写不敏感） |
-
-wizard 自己也能改名（对它说「以后你就叫 sanitizer」→ `wizard_identity`），撞名同样加后缀并告诉它。名字只是名册 `~/.wezard/wizards.json` 里的一个字段：内部的会话 key（`chat:xxx#slot`）不随改名变，改名不会动到它的 pane、jsonl 和历史。
 
 **创建**
 
 ```
-.docs /new        让一个叫 docs 的 wizard 在这个群里就位（tmux 窗口名也叫 docs）
+.docs /new        让一个叫 docs 的 wizard 在这个群里就位
 .api 看下这个报错   开头写一个还不存在的 .api = 就地叫出一个新的 api，并把这句话发给它
-/new              本聊天默认那个，老玩法
+/new              重开本聊天默认的那个
 ```
 
-**消息路由**
+**叫它**
 
-消息里任意位置带一个**已知**的 `.name`（空白/句首/句尾分隔），就路由到那个 wizard——它可以住在任何一个聊天里：
-
-```mermaid
-flowchart LR
-    msg["IM 里的一条消息<br/>(群 B)"] --> scan["扫 .name<br/>空白或首尾分隔"]
-    scan -- "无 / 不认识" --> dflt["群 B 的默认 wizard"]
-    scan -- ".docs (住在群 B)" --> docs[".docs"]
-    scan -- ".fix (住在群 A)" --> fix[".fix"]
-    scan -- "开头的 .x (没人叫这个)" --> newx["在群 B 叫出新的 .x"]
-    docs --> back["回复带 🦊 .docs<br/>回到群 B"]
-    fix --> back2["回复带 🐬 .fix<br/>回到群 B (不是它的 home 群 A)"]
-    scan -. "其余已知的 .name<br/>原样透传给模型" .-> hint["尾部挂一条不可见提示:<br/>.b 是活着的同类, 去叫它"]
-```
-
-**回复回到发话的那个群**：人在群 B 里叫住在群 A 的 `.fix`，它这一轮的回复（连同审批卡、提问卡）推回群 B，而不是它的 home 群 A——在哪儿问，就在哪儿答。
+消息里任意位置带一个已有的 `.name`，就发给那个 wizard；不带 `.name` 的消息发给本聊天默认的那个。在哪个群叫它，回复就回到哪个群。
 
 ```
 .docs 帮我把 README 的目录补一下
 帮我看下这个报错 .api
-/pwd .docs        → 只看 docs 的工作区
-/stop .api        → 只打断 api
-/clear .docs      → 只清 docs 的上下文
+/pwd .docs        只看 docs 的工作区
+/stop .api        只打断 api
+/clear .docs      只清 docs 的上下文
 ```
 
-不带 `.name` 的消息始终落到本聊天默认那个。句中写一个没人叫的 `.x`（`a.ts`、`.gitignore` 这类）原样透传，不会凭空造出 wizard——只有**开头**那个才会。
+每条回复都带 `emoji .name` 头（emoji 固定），在群里引用它的气泡就等于跟它说话。句中的 `a.ts`、`.gitignore` 这类不会被当成名字。
 
-**回复标识**
+**名字**
 
-每个 wizard 的每条回复都带 `emoji .name` 头（emoji 由名字 hash 决定，稳定），默认 wizard 也不例外；头挂着它的 [rolepage](#rolepage一个-wizard-视角下的-im) 链接，正文里提到的已知 `.name` 同样可点。在群里引用它的气泡，就等于跟它说话：
+| wizard | 名字 |
+| --- | --- |
+| 聊天的默认 wizard | 聊天的名字（见[聊天命名](#聊天命名)） |
+| `.docs /new` 叫出来的 / 分身 | 你给的那个名字 |
+| 撞名 | 自动加后缀：`fix` → `fix-2`；对方若已静默超过一天，则直接接手这个名字 |
 
-```
-🦊 .docs （这里是 docs 这个 wizard 的回复……）
-```
+名字支持中英文、数字、`_`、`-`，最长 32 个字符，大小写不敏感。
 
-改名之前发出去的老 `#tag` 气泡照样能引用——名字就是从 tag 迁移过来的，指得还是那个 wizard。
+**直接对它说人话**
 
-**名字语法**：`[\p{L}\p{N}_-]{1,32}`，支持中英文数字与 `_`、`-`；代码块与行内代码里的 `.x` 不算提及。
+| 对它说 | 效果 |
+| --- | --- |
+| 你叫什么 / 你负责什么 | 报出自己的名字、职责和分身 |
+| 以后你就叫 sanitizer | 改名，历史和上下文不受影响 |
+| 记住：发版前必须更新 CHANGELOG | 写进它的长期记忆，`/clear` 之后仍在 |
+| 记到这个群 / 这个仓库的记忆里 | 提交到群或工作区的共享记忆，之后来的 wizard 开局就知道 |
+| 还有谁在跑 / 谁在弄那个项目 | 列出全部 wizard：名字、职责、忙闲、谁是谁的分身 |
+| 让 .fix 看一眼这个报错 | 它去找 `.fix` 派活，等结果回来再答你 |
+| 分个身去把这三个目录都扫一遍 | 分出三个带着当前上下文的分身并行干，干完收掉 |
+| 切到 /path/to/proj | 换工作区，重开会话 |
 
-**身份、记忆与分身**
-
-每个 wizard 的身份（名字、工作区、职责、记忆、家谱）在启动时以**系统提示**压进进程——不占一轮对话、群里看不见、`/clear` 也抹不掉。它一睁眼就知道自己是谁、还有谁在、自己能做什么：
-
-```
-你叫什么 / 你负责什么          → 它调 wizard_whoami
-以后你就叫 sanitizer          → wizard_identity（全局唯一，撞名加后缀）
-记住：发版前必须更新 CHANGELOG  → wizard_remember，跨 /clear 活着，每次重开重新入场
-记到这个群 / 这个仓库的记忆里   → wizard_remember({scope:"chat" | "workspace"})，见下
-还有谁在跑 / 谁在弄那个项目     → wizard_roster（名字、职责、忙闲、谁是谁的分身）
-分个身去把这三个目录都扫一遍     → clone_wizard ×3，干完 stop_wizard 收掉
-上下文快满了                   → 它自己 wizard_handoff_self：写简报、原地重开、把简报贴回去
-```
-
-**三份记忆**：`wizard_remember` 的 `scope` 决定记在哪——
-
-| scope | 落在 | 谁读得到 |
-| --- | --- | --- |
-| `self`（默认） | 它自己的名册记录 | 只有它自己 |
-| `chat` | `~/.wezard/memory/chats/<聊天>.md` | 以这个群为 home 的每个 wizard |
-| `workspace` | `~/.wezard/memory/workspaces/<工作区>.md` | 在这个目录下干活的每个 wizard |
-
-每个 wizard 出生时，群记忆与工作区记忆都注进它的系统提示——「这个群习惯先出方案再动手」「这个仓库没有测试、reload 要先 build」不必再教一遍新来的。两份都是 markdown，你也可以直接打开改。
-
-**分身（clone）继承上下文**：`clone_wizard` 用 `--resume <父> --fork-session` 起 pane，CLI 把父亲的 transcript 复制一份再往下写——分身开局就带着父亲读过的材料，父亲毫发无损。于是「先把公共文档读进一个基座，再分出 N 个干活的」成立：材料只读一遍，却进了 N 份上下文。也可以 `clone_wizard({from})` 从别的 wizard 分——分身仍归你管，上下文来自它。要白纸一张用 `spawn_wizard`（那时才能顺便换工作区）。分身自己也能再分身，层级不限；名下同时活着的分身有上限（`wrc.mirror.cloneMax`，默认 8）——一次跑飞的递归编排足以把 fd 吃光。
-
-**模型是 wizard 的属性**，不是 spawn 那一瞬的开关：`/new [cli] [model]`、`new_claude_session({model})`、`spawn_wizard` / `clone_wizard({model})`、`run_agent_graph` 的节点都能挑，挑了就写进绑定记录。pane 死了自愈重生仍在那个模型上，名册每一行也看得见谁跑在什么模型上——要判断的给 opus、跑腿的给 haiku，这句话得看得见才执行得了。
-
-**群是公开频道，wizard 之间默认私聊**：`send_peer` 派的活、分身之间的来回，默认只落进双方的 rolepage，群里不出气泡。wizard 自己判断「这件事该当着人说」时传 `send_peer({public:true})`：群里出一条 `🦊 .a → 🐬 .b` 的气泡，对方这一轮的回复也发进这个群。分身出生、派活、回程结论都不再各刷一条；群里只留**人发起的那一轮的回复**、`notify`、工单的**开工 / 收工**两条，以及它们主动公开的讨论。
-
-**名册会自己更新，不必去问**：charter 里那份「出生时还有谁」只是快照，只会越来越假。谁出生、谁收工、谁改了职责，会以一行 `<system-reminder>` 挂在**下一次**进到它的任何文本尾巴上——不占一轮、不进气泡、不进 transcript。感知 = spawn 时的快照 + turn 时的增量。要当下完整的名册仍然是 `wizard_roster`，它按 `query` / `cwd` / `chat` / `alive` 过滤（「谁在这个目录里干活」问得出来）。
-
-**cwd 是聊天级的，不是 session 级**：同一聊天里默认 wizard 与在这里叫出来的 wizard **共用**一个 cwd，`.foo /new` 在当前聊天绑定的 cwd 下起 pane。换项目直接对 AI 说「切到 /path/to/proj」，它调 `set_workspace` 一步到位：杀掉当前 pane、在新 cwd 重开新会话，以新会话的 📂 项目回执为准，上下文不延续。多个 wizard 因此天然对齐到同一个项目根，不用重新指路径。
+- **记忆分三层**：自己的、本群共享的、本工作区共享的。「这个群习惯先出方案再动手」「这个仓库 reload 要先 build」不必每来一个新 wizard 再教一遍。
+- **分身继承上下文**：分身开局就带着原 wizard 读过的全部材料，原 wizard 不受影响；也可以生一个白板的子 wizard，顺便换个工作区。分身还能再分身。
+- **模型可以挑**：`/new [cli] [model]`，或让它生分身时指定——要判断的给 opus，跑腿的给 haiku。
+- **群里只留结论**：wizard 之间派活、来回默认是私聊，不刷群；群里只出现回给你的那条回复、通知、工单的开工 / 收工，以及它们主动公开的讨论。过程想看去 [rolepage](#rolepage)。
+- **上下文满了自己交接**：它会写一份简报、原地重开，接着干。
 
 ---
 
-## rolepage：一个 wizard 视角下的 IM
+## 任务编排
 
-点气泡头的 `emoji .name`，打开的是那个 wizard 的 **rolepage**：不是「一个群里有哪些会话」，而是**它**的 IM——它参与的每个群聊与单聊、在每一处说了什么、听到了什么。
-
-```mermaid
-flowchart LR
-    subgraph side["侧栏"]
-        g["群聊<br/>(公开频道)"] --> subs["子项: 群里其他 role<br/>点开 = 只看我与它在这个群里的往来"]
-        dm["单聊"] --> h["与人<br/>(企业微信单聊)"]
-        dm --> w["与 wizard<br/>(私聊)"]
-    end
-    subgraph main["消息窗"]
-        mright["我发的 → 靠右"]
-        mleft["我收到的 → 靠左"]
-    end
-    subgraph topbar["顶栏"]
-        ident[".name · 职责 · 家谱<br/>cwd · 创建时间 · 模型"]
-        ses["session 切换<br/>(/clear /new 轮换)"]
-        rel["关系图"]
-        sch["日程"]
-    end
-    side --> main
-    mleft -. "点它右边的空白 / 头像" .-> flip["切到对端的视角"]
-    mright -. "点它左边的空白" .-> flip
-```
-
-- **消息从 turn 记录折出来**：一轮 = 一进一出——发话方（人 / 同伴 wizard / 定时任务）→ 它，它 → 发话方。落在哪个会话由这一轮的**频道**决定：公开频道（群 / 与人的单聊）按聊天归并，wizard 间私聊按对端归并。工具调用、用量细节照旧折叠在回复里。
-- **切视角**：点靠左消息右边的空白（或靠右消息左边的空白），rolepage 切到对端——能留在同一个群就留在同一个群。
-- **顶栏**：身份、cwd、创建时间；同一个名字下有多个 session（`/clear`、`/new`、交接重开都会轮换）时出一个切换器；与别的 role 有关系（家谱、派活）时出「关系图」入口，聚焦在它身上；「日程」列出它名下的定时任务与它开过 / 参与的工单。
-- **链接**：`/role?id=<票据>&role=<target>`，老的 `/chat` 链接打开同一个页面。页面的核心动作就是顺着消息走到对端，而对端可能住在任何一个群——所以**任一有效票据可以看全部 role**。要把正文严格关在一个群里的部署，不该对外暴露这些路由。
-
----
-
-## 编排：读完材料才知道要分几路
-
-点对点（`send_peer` + `wait_peer`）和静态流水线（`run_agent_graph`）之间空着的，正是「读完材料才知道有 5 个模块要改」的那一种活——分几路是**想出来**的，不是声明出来的。**控制流因此留在发起的那个 wizard 手里**：它自己分路、自己派、自己等、自己汇总，守护进程只做账本与执行器。剧本固定五步：
+遇到「读完材料才知道要分几路」的活，wizard 自己拆、自己派、自己等、自己汇总：
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant U as 群里的人
     participant W as 发起的 wizard
-    participant K as 分身 ×5
+    participant K as 分身 ×N
 
-    Note over W,K: 先把公共材料读进发起方自己的上下文
-    W->>U: 📋 开工 open_job(标题, 计划)
-    loop 每一路
-        W->>K: clone_wizard({task, job})
-        Note over W,K: fork 父上下文，材料不必重读；派活时要求一行 RESULT: 收口
-    end
-    Note over W,K: 五个分身并行干活，往来是私聊，过程落在各自的 rolepage
-    W->>K: wait_peer({names:[…], need})
-    K-->>W: 各自的 RESULT: 行
-    W->>U: 📋 收工 close_job(汇总)
-    Note over W,K: 为这个工单生出来的分身整批回收，被拉来帮忙的长期 wizard 不在其列
+    Note over W: 先读完公共材料
+    W->>U: 📋 开工（标题 + 计划）
+    W->>K: 分出 N 个分身，各领一份活
+    Note over K: 并行干活，过程不刷群
+    K-->>W: 各自交回结论
+    W->>U: 📋 收工（汇总）
+    Note over W,K: 为这单活生出来的分身整批回收
 ```
 
-每一步存在的理由：
+- **群里只有两条气泡**：开工和收工。中间的过程在各自的 rolepage 里。
+- **材料只读一遍**：分身是从发起方的上下文里分出来的，不用各自重读。
+- **并行**：几路同时干，总耗时只取决于最慢的那一路。
+- **自动回收**：收工时为这单活生出来的分身一并收掉；被拉来帮忙的长期 wizard 不受影响。
 
-| 原语 | 它解决的问题 |
-| --- | --- |
-| **工单** `open_job` / `close_job` / `list_jobs` | 五路 fan-out 原本要刷十条交叉气泡，人读不出结构。带 `job` 的派活只在群里留「开工 / 收工」两条，过程照旧在各自的 rolepage；收工那条把成员与各自那段活一并交代。`close_job` 还把**为这个工单生出来的**分身整批回收——忘记收是常态，而每个分身都占一个 pane 和一份上下文。 |
-| **一次等一组** `wait_peer({names, need})` | 分身本来就在并行干活。一个一个等，墙钟是所有人之和；一起等只花最慢那一个的时间。`need` 决定满几个就返回（`1` = 谁先完事就先处理谁），法定人数一满剩下的等待立刻撤掉，它们照常继续干。 |
-| **收口行** `RESULT: …` | join 的载荷本来是「对方最后一条 assistant 文本」——可能是「好的我开始了」，也可能是八百字散文，两种都没法直接汇总。改不了 CLI 的输出格式，就在派活的提示里要求收口：`wait_peer` 摘最后一个 `RESULT:`（或「结论：」）行放进 `result`，摘不到就是空串，照旧读 `lastText`。 |
-| **投递时机** `send_peer({when:"idle"})` | 两个 wizard 同时找第三个时，两段文本会挤进同一个输入框被当成一轮读掉——这在协同网络里是常态而非边角。`idle` 先等对方闲下来再投；「回答它的提问」「打断它」仍用默认的 `now`。返回一律带 `wasBusy`。 |
-
-**预先就声明得出来**的循环（几个 agent 互相评审、迭代到收敛）用 `run_agent_graph`：`nodes` 是参与的 wizard，`steps` 是有序管线，整张表走 `rounds` 遍，`{{last}}` / `{{<tag>}}` / `{{round}}` 把上一步的产出喂给下一步，回复里出现 `until` 哨兵就提前收工。`graph_status` 查、`stop_graph` 停。图只活在守护进程内存里，`reload` 会把它清掉（wizard 本身还活着）。
+流程固定的循环（几个 wizard 互相评审、迭代到收敛）可以让它搭成一条流水线，按轮次跑，达到约定的结束条件就提前收工。
 
 ---
 
-## 跨聊天：给聊天命名
+## rolepage
 
-wizard 的名字全局唯一，叫它本来就不分群；但**聊天本身**的身份仍是 `chat:wrkS…` 这种既读不出也打不进去的 id。给聊天起个名字，它就有了能写进消息、也能传给工具的地址——`notify` 往哪个群发、新 wizard 生在哪个群，都写这个名字。它同时也是这个群**默认 wizard 的名字**。
+点气泡头的 `emoji .name`，打开那个 wizard 的 **rolepage**——它视角下的 IM：
+
+- **侧栏**：它参与的每个群聊，以及与人、与其他 wizard 的单聊。
+- **消息窗**：它发的靠右，收到的靠左；工具调用和用量细节折叠在回复里。
+- **切视角**：点一条消息对侧的空白，切到对方的 rolepage。
+- **顶栏**：名字、职责、工作区、模型；历史会话切换；关系图（谁是谁的分身、谁给谁派过活）；日程（它名下的定时任务和工单）。
+
+---
+
+## 聊天命名
+
+给聊天起个名字，它就有了能写进消息的地址——通知发到哪个群、新 wizard 生在哪个群，都写这个名字。它同时也是这个群默认 wizard 的名字。
 
 ```
 /name daily        给本聊天起名为 daily
 /name              查看当前名字
 /name -            取消命名
-/chats             列出所有已知聊天、各自跑着哪些 wizard（名字 / 职责 / 工作区）
+/chats             列出所有聊天，以及各自跑着哪些 wizard
 ```
 
-**名字规则**：1–32 个字符，字母 / 数字 / `_` / `-`（不能有空格、`#`、`/`、`:`）。全机唯一、大小写不敏感，重名会被拒；改名即覆盖，一个聊天只留一个名字。名字写在 `~/.wezard/config.jsonc` 的 `chats` 里，手改也行。默认 wizard 的名字在它第一次被用到时取自聊天名，此后就是它自己的名字；与别的 wizard 撞上时它加后缀（`daily-2`），聊天名不变。让 AI 调 `name_chat` 改聊天名时，默认 wizard 若还叫旧聊天名会跟着改。
+名字 1–32 个字符，字母 / 数字 / `_` / `-`，全机唯一、大小写不敏感。没起名的聊天会按工作区目录名自动补一个（`~/develop/weclaude` → `weclaude`），你起过的名字不会被覆盖。
 
-**寻址**只剩一种写法——wizard 的名字：
-
-| 写法 | 指向 |
-|---|---|
-| `fix` / `.fix` | 名册里叫 fix 的那个 wizard，不管它住在哪个群 |
-| `daily` | 名字叫 daily 的 wizard——也就是 daily 这个聊天的默认 wizard |
-| `''` | 调用方自己这个聊天的默认 wizard |
-| `chat:wr…#slot` | 全量 key（调试用）；改名前的老写法 `daily#fix` 也还认得，但别再写 |
-
-在**任何群**里直接说人话即可：
+起了名，在任何群里都可以直接说：
 
 ```
-让 .fix 看一眼这个报错              → AI 调 send_peer("fix", …)（默认私聊；要当着人说就 public:true）
-在 daily 里开个 .ingest 跑 ~/repo   → AI 调 new_claude_session({ chat: "daily", name: "ingest", cwd })
-别的群还有谁在跑                    → AI 调 list_chats
+在 daily 里开个 .ingest 跑 ~/repo     在 daily 群里新开一个 wizard
+别的群还有谁在跑                      列出所有聊天和 wizard
 ```
-
-`new_claude_session` 的 `chat` 参数决定新 wizard 的 **home** 群（它的 cwd、默认频道、群记忆都跟着这个群），不必拉个人去那边手打 `/new`。叫的时候反正不分群：它的回复回到叫它的那个频道。
-
-**没名字的聊天会自动补一个**。名字就是地址，而「等人想起来去 `/name`」是等不到的。每个聊天本来就带着一个可读的标识——它在干哪个项目：`~/develop/Guxi11/weclaude` → `weclaude`，撞名加序号（`lisct` / `lisct-2`），非法字符折成 `-`。补名发生在「**要把名字交给模型**」的那一刻：各 MCP 的收件解析，以及渲染 charter 时——后者最要紧，系统提示随进程终身，一个在聊天还没名字时出生的 wizard 会一辈子以为自己住在「(未命名)」的地方。只填空，**永不覆盖你起过的名字**；工作区为空推不出名字的原样留着——宁可没名字，也不造一个同样不可读的 `chat-wr4`。
-
-> 自动命名只是兜底。名字是写进别人消息里的地址，你自己起的那个永远比目录名好读——想让某个群被准确叫到，在那个群里发一次 `/name`。
 
 ---
 
-## 多 CLI 后端（`claude` / `claude-internal` / `codebuddy`）
+## 定时任务与跨群通知
 
-daemon 同时挂载所有已安装的 CLI，不是二选一：一个 tmux 窗口跑 `claude`、另一个跑 `codebuddy`，各自绑不同的 IM 聊天。**会话身份就是它的 jsonl 路径**，daemon 由路径反推是哪个 CLI 写的——`--resume` 用哪个二进制、jsonl 用哪套 schema、project-dir 怎么编码，全部由此派生。
+**定时任务**：到点把一句话说给 wizard 听，它就真的去干活，结果照常发回群里。任务常驻在后台，CLI 重启、`/clear`、会话结束都不受影响。
+
+时间用人话说就行：
+
+| 对它说 | 效果 |
+| --- | --- |
+| 每个工作日晚上 9:30 跑一遍回归 | 排一个定时任务，到点新起一个 wizard 去干，干完收掉 |
+| 每天早上 8 点在 .daily 里继续整理日报 | 到点把这句话发给已有的 `.daily` |
+| 我设了什么定时 | 列出任务、时间和下次触发时刻 |
+| 取消那个定时 | 删掉任务 |
+
+认得的说法：`每天 8:00`、`每个工作日晚上9:30`、`每周三下午3点`、`每隔两小时`、`每 30 分钟`、`20 分钟后`、`明早 9 点`。每个 wizard 排的任务列在它 rolepage 的「日程」里。
+
+**跨群通知**：让 wizard 把一段话贴进另一个群给人看，比如一个长活在 `build` 群跑完，把「🔴 回归挂了 3 例」送到 `ops` 群。
+
+---
+
+## 企业微信文档
+
+对 Agent 说「把周报整理成一篇企业微信文档」，它会新建在线文档、写入内容，把链接贴回会话。同样可以读文档链接、操作智能表格。文档归属到你本人。
+
+首次使用需在企业微信「工作台 - 智能机器人 - 可使用权限」里勾选「文档」「智能表格」。实现细节见 [技术说明](技术说明.md#文档-mcp-如何桥接)。
+
+---
+
+## 多 CLI 后端
+
+`claude` / `claude-internal` / `codebuddy` 可以同时用：一个会话跑 `claude`，另一个跑 `codebuddy`，各自绑不同的聊天或 wizard。
 
 ```
-/new                 沿用「当前会话」的 CLI 新开
-/new codebuddy       换到 codebuddy 新开
-/new claude-internal 换到 claude-internal 新开
-```
-
-默认后端由 `wrc.defaultCli` 决定（缺省 `claude`），二进制路径可用 `wrc.cliBackends.<name>.bin` 覆盖。
-
-**和 `.name` 完全正交**，两者可以任意组合：
-
-```
+/new                    沿用当前会话的 CLI 新开
+/new codebuddy          换到 codebuddy 新开
 .docs /new codebuddy    用 codebuddy 叫出一个叫 docs 的 wizard
-.docs 帮我改 README      → 路由到那个 codebuddy 会话
-/clear .docs            → 只清它，且仍留在 codebuddy 上
 ```
 
-切换 CLI 后按名字路由的所有行为都保持不变：
-
-- `/clear .name` rotate 出的新 jsonl 仍落在该 CLI 的 projects 目录，watcher 按该后端的 dialect 迁移绑定；
-- pane 挂了自愈 `--resume` 用的是**该会话所属**的二进制，不会串到 `defaultCli`；
-- 新叫出的 `.name` 还没有自己的历史时，**继承本聊天基础会话的 CLI**（同 cwd 的聊天级继承规则），不会悄悄退回默认后端；
-- `/sessions` 列表在混用多个 CLI 时，每行自动标注 `(codebuddy)` 之类的来源。
+会话一直留在它所属的 CLI 上，`/clear`、重启自愈都不会换。默认后端由配置项 `wrc.defaultCli` 决定（缺省 `claude`）。
 
 ---
 
-## Prompt-cache 保活（省钱心跳）
+## 缓存保活
 
-Anthropic 的 prompt cache 只活 ~5 分钟，且**写缓存 1.25x、读缓存 0.1x**。pane 一旦空闲（wizard 在等同伴回话、或后台任务在跑），整份上下文掉出缓存，下一轮真实对话得按 1.25x 重写一遍。保活在缓存**即将过期前**注入一次极小的 ping，逼出一次廉价请求（命中前缀走 0.1x 读）把 TTL 往前滑，真实那轮就只写增量。
+Agent 空闲超过约 5 分钟，模型侧的 prompt 缓存就会过期，下一轮对话要为整份上下文重新付费。wezard 在缓存快过期时自动发一次极小的心跳把它续上：
 
-- **不自我续命**：ping 刷新缓存温度，但**不算**真实活动。空闲落在 `[ttlSec - marginSec, ttlSec)`（缓存快过期）才 ping。
-- **给的是预算，不是时限**：一次真实对话之后最多补 `rounds` 次（默认 6，节奏 255 秒，合计约 26 分钟），然后放手让缓存冷掉；真实对话一来预算清零。老会话不会因为「ping 刷新了时间戳」被误判成活跃而无限保活。
-- **两道成本保险**：缓存已冷（距上次触碰 ≥ TTL）绝不 ping——那是为 no-op 付整份冷写；预算用尽直接放弃。
-- **零污染**：ping 逼出一个约 1 token 的回复且禁止任何工具动作，该轮**完全不进聊天**，但**记入 chat detail 时间线**（ping 原文 + 真实回复 + cache-read usage），留痕可审计。
-- **顺手救活断掉的一轮**：上一轮死在 API 报错 / 限额横幅上时，这一 ping 改发 `resumePing`（默认 `continue`）把活接上。纯按规则判定，不问模型自己的意见。
-- **`/stop` 手动暂停**：IM 里发 `/stop` 同时暂停该会话的保活，下次有真实对话自动恢复。
-- **只针对活 pane**：spawn 模式无 TTY、pane 已死、正在流式输出或会话轮换中的，一律跳过。
+- 每次真实对话后最多续 6 次（约 26 分钟），之后不再续；
+- 心跳不出现在聊天里，只记在详情页时间线；
+- 上一轮因报错 / 限额中断时，心跳会顺手把活接上；
+- `/stop` 同时暂停保活，下次真实对话自动恢复。
 
-逐 tick 的完整判定见 [技术说明](技术说明.md#prompt-cache-保活省钱心跳)。
-
-全部可配（`wrc.mirror.keepalive`）：
-
-```jsonc
-"keepalive": {
-  "enabled": true,       // 总开关
-  "ttlSec": 300,         // 缓存 TTL，Anthropic 默认 5min
-  "marginSec": 45,       // 提前多少秒 ping（留出注入落地的余量）
-  "rounds": 6,           // 一次真实对话后最多补几次 ping，之后让缓存冷掉
-  "ping": "keepalive — reply with just \"pong\", take no other action",
-  "resumeOnStall": true, // 上一轮死在报错/限额上时，改发 resumePing 续上
-  "resumePing": "continue"
-}
-```
+配置项在 `wrc.mirror.keepalive`，完整规则见 [技术说明](技术说明.md#prompt-cache-保活省钱心跳)。
 
 ---
 
