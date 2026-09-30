@@ -31,7 +31,7 @@ button { font: inherit; color: inherit }
 /* 名字 = 地址。点是地址的一部分, 也是这一页唯一的颜色记号。 */
 .nm { font-weight: 600 }
 .nm::before { content: "."; color: var(--accent); font-weight: 700 }
-.nm.human::before, .nm.task::before, .nm.chat::before { content: none }
+.nm.human::before, .nm.task::before, .nm.system::before, .nm.chat::before { content: none }
 
 /* ── 侧栏: 我 + 会话 ─────────────────────────────────────────────── */
 .side {
@@ -164,23 +164,35 @@ button { font: inherit; color: inherit }
 .ci .pv { font-size: 12px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .ci .pv:empty { display: none }
 .ci .tag { font-size: 10.5px; border-radius: 4px; padding: 0 4px; flex: none }
+/* 选中的 role 项上的换视角开关。 */
+.sw {
+  flex: none; align-self: center; display: inline-grid; place-items: center;
+  width: 20px; height: 20px; border-radius: 5px; color: var(--accent); cursor: pointer;
+}
+.sw:hover { background: #2f55c91a }
 .ci .tag.priv { color: var(--priv); background: #9a5b1014 }
 
-/* 群里的其他 role —— 缩进挂在群下, 点开是「我与它在这个群里」的往来。 */
-.subs { margin: 0 0 6px 34px; border-left: 1px solid var(--line); padding-left: 6px }
+/* 群里的其他 role —— 挂在群下, 与会话项同一种读法 (名字 · 时刻 / 最近一句), 只压一档。
+   点开是「我与它在这个群里」的往来。 */
+.subs { margin: 0 0 6px 16px; border-left: 1px solid var(--line); padding-left: 2px }
 .si {
-  display: flex; align-items: center; gap: 7px; width: 100%; text-align: left;
-  padding: 4px 8px; border: 0; border-radius: 7px; background: transparent; cursor: pointer;
-  font-size: 12.5px; color: var(--ink);
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; overflow: hidden;
+  padding: 5px 8px; border: 0; border-radius: 8px; background: transparent; cursor: pointer; color: var(--ink);
 }
 .si:hover { background: #f4f6f9 }
-.si.on { background: #eaf0fc; color: var(--accent) }
-.si .n { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.si .c { margin-left: auto; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums }
-.si.quiet { color: var(--faint) }
+.si.on { background: #eaf0fc }
+.si > .av { font-size: 17px; line-height: 1; flex: none; width: 24px; text-align: center }
+.si .b { min-width: 0; flex: 1; overflow: hidden }
+.si .l1 { display: flex; align-items: baseline; gap: 6px }
+.si .t { font-size: 12.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.si.on .t { color: var(--accent) }
+.si .ts { margin-left: auto; flex: none; font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums }
+.si .pv { display: block; font-size: 11.5px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.si .pv:empty { display: none }
+.si.quiet .t, .si.quiet > .av { opacity: .55 }
 
 /* ── 右栏头: 这个群聊 / 私聊是什么 ───────────────────────────────── */
-.main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--paper) }
+.main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--card) }
 .chathead {
   flex: none; display: flex; align-items: center; gap: 12px; padding: 10px 20px; min-height: 58px;
   background: var(--card); border-bottom: 1px solid var(--line);
@@ -206,7 +218,7 @@ button { font: inherit; color: inherit }
   flex: 1; min-height: 0; overflow-y: auto; overflow-anchor: none;
   padding: 16px 20px 28px; -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
 }
-.thread-in { max-width: 960px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px }
+.thread-in { display: flex; flex-direction: column; gap: 14px }
 .empty { color: var(--faint); text-align: center; padding: 60px 0; font-size: 13px }
 .more-btn {
   align-self: center; background: var(--card); border: 1px solid var(--line); border-radius: 16px;
@@ -215,14 +227,14 @@ button { font: inherit; color: inherit }
 .more-btn:hover { color: var(--accent); border-color: var(--accent) }
 
 .mrow { display: flex; align-items: flex-start; gap: 10px }
-.mrow .av {
-  flex: none; width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--line);
-  background: var(--card); font-size: 19px; line-height: 32px; text-align: center; cursor: default; padding: 0;
+.mwho .av {
+  flex: none; align-self: center; width: 24px; height: 24px; border-radius: 50%; border: 1px solid var(--line);
+  background: var(--card); font-size: 14px; line-height: 22px; text-align: center; cursor: default; padding: 0;
 }
 .mcol { min-width: 0; max-width: min(78%, 760px); display: flex; flex-direction: column; gap: 4px }
 .mrow.mine { flex-direction: row-reverse }
 .mrow.mine .mcol { align-items: flex-end }
-.mwho { font-size: 11.5px; color: var(--mute); display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap }
+.mwho { font-size: 11.5px; color: var(--mute); display: flex; gap: 6px; align-items: center; flex-wrap: wrap }
 .mwho .to { color: var(--faint) }
 .mwho .ch { font-size: 10.5px; border-radius: 4px; padding: 0 4px }
 .mwho .ch.priv { color: var(--priv); background: #9a5b1014 }
@@ -241,6 +253,7 @@ button { font: inherit; color: inherit }
 .mchip.priv { color: var(--priv); background: #9a5b1014 }
 .mchip.pub { color: var(--pub); background: #237a5514 }
 .mchip.graph { color: #6639ba; background: #8250df12 }
+.mchip.sys { color: #0a7d6b; background: #0a7d6b12 }
 
 /* 自己发出的那条: 整块就是视角色。TURN_CSS 里写死的白卡 / 灰底 (嵌套气泡、
    代码块、折叠头) 会在蓝底上显成一张张贴纸 —— 这里把它们收回到气泡自己的
@@ -275,8 +288,8 @@ button { font: inherit; color: inherit }
 .flip .fc { flex: none }
 .flip:hover, .flip:focus-visible { background: #2f55c90d; color: var(--accent) }
 .flip[disabled] { cursor: default; background: transparent !important; color: transparent !important }
-.mrow .av.go { cursor: pointer }
-.mrow .av.go:hover { border-color: var(--accent) }
+.mwho .av.go { cursor: pointer }
+.mwho .av.go:hover { border-color: var(--accent) }
 
 .mrow.mark { justify-content: center }
 .mrow.mark > * { flex: 1; max-width: 520px }

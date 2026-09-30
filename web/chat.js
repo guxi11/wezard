@@ -115,7 +115,7 @@
   var names = {};
   var learn = function (id, name, label) { if (id && name) names[id] = { name: name, label: label || '' }; };
   var kindOf = function (id) {
-    return /^task:/.test(id) ? 'task' : /^human:/.test(id) ? 'human' : 'wizard';
+    return /^task:/.test(id) ? 'task' : id === 'system:' ? 'system' : /^human:/.test(id) ? 'human' : 'wizard';
   };
   var nodeOf = function (target) {
     return W.nodes.filter(function (n) { return n.target === target; })[0];
@@ -126,14 +126,14 @@
   };
   var roleLabel = function (id) {
     var k = names[id] || {}, n = nodeOf(id);
-    return k.label || (n && n.label) || (kindOf(id) === 'human' ? '👤' : kindOf(id) === 'task' ? '⏰' : '🧙');
+    return k.label || (n && n.label) || ({ human: '👤', task: '⏰', system: '🧙' })[kindOf(id)] || '🧙';
   };
   // `.name` 的点由 CSS 画 —— 人与定时任务没有地址, 不画点。
   var nm = function (id, name) {
     return '<span class="nm ' + kindOf(id) + '">' + esc(name || roleName(id)) + '</span>';
   };
   var nameOf = function (id) { return (kindOf(id) === 'wizard' ? '.' : '') + roleName(id); };
-  var canSwitch = function (id) { return !!id && kindOf(id) !== 'task' && id !== 'human:'; };
+  var canSwitch = function (id) { return !!id && kindOf(id) !== 'task' && kindOf(id) !== 'system' && id !== 'human:'; };
 
   // ── markdown 渲染 (只对未渲染过的节点做, 复用节点不重绘) ──
   var md = null;
@@ -231,22 +231,35 @@
       ms.map(function (m) { return '<i>' + esc(m.label || roleLabel(m.role)) + '</i>'; }).join('') + '</span>';
   };
 
+  // 选中的那一项若是个 role (私聊对端 / 群里的某人), 行内给一个换视角的开关。
+  // 不能是 <button>: 它嵌在整行那颗按钮里。
+  var SWAP = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3 5.5h9M9.5 3l2.5 2.5L9.5 8M13 10.5H4M6.5 8 4 10.5 6.5 13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  var swapOf = function (role) {
+    return canSwitch(role) && role !== ROLE
+      ? '<span class="sw" role="button" tabindex="0" data-sw="' + esc(role) + '" title="' + esc('切到 ' + nameOf(role) + ' 的视角') + '">' + SWAP + '</span>'
+      : '';
+  };
+  var line = function (title, sw, ts, pv) {
+    return '<span class="b"><span class="l1"><span class="t">' + title + '</span>' + sw +
+      '<span class="ts">' + esc(fmtAgo(ts)) + '</span></span>' +
+      '<span class="pv">' + esc(pv) + '</span></span>';
+  };
+
   var convItem = function (c) {
     var on = c.key === CONV;
     var title = c.kind === 'wizard' ? nm(c.peer, c.name) : '<span class="nm chat">' + esc(c.name) + '</span>';
     var subs = on && c.subs.length
       ? '<div class="subs">' + c.subs.map(function (s) {
-          return '<button class="si' + (s.role === WITH ? ' on' : '') + (s.count ? '' : ' quiet') + '" data-conv="' + esc(c.key) + '" data-with="' + esc(s.role) + '" ' +
+          var sel = s.role === WITH;
+          return '<button class="si' + (sel ? ' on' : '') + (s.count ? '' : ' quiet') + '" data-conv="' + esc(c.key) + '" data-with="' + esc(s.role) + '" ' +
             'title="' + esc(s.count ? '我与 ' + nameOf(s.role) + ' 在这里的 ' + s.count + ' 条往来' : '在这里, 但还没和我说过话') + '">' +
-            '<span>' + esc(s.label) + '</span><span class="n">' + nm(s.role, s.name) + '</span>' +
-            (s.count ? '<span class="c">' + s.count + '</span>' : '') + '</button>';
+            '<span class="av">' + esc(s.label) + '</span>' +
+            line(nm(s.role, s.name), sel ? swapOf(s.role) : '', s.lastTs, s.preview) + '</button>';
         }).join('') + '</div>'
       : '';
-    return '<button class="ci' + (on && !WITH ? ' on' : '') + '" data-conv="' + esc(c.key) + '">' +
-        avatarOf(c) +
-        '<span class="b"><span class="l1"><span class="t">' + title + '</span>' +
-          '<span class="ts">' + esc(fmtAgo(c.lastTs)) + '</span></span>' +
-          '<span class="pv">' + esc(c.preview) + '</span></span>' +
+    var sel = on && !WITH;
+    return '<button class="ci' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '">' +
+        avatarOf(c) + line(title, sel && c.kind === 'wizard' ? swapOf(c.peer) : '', c.lastTs, c.preview) +
       '</button>' + subs;
   };
 
@@ -262,6 +275,11 @@
       (R.role && R.role.kind === 'human' ? '' : sec('私聊', dms, '没有和别的 wizard 私聊过'));
     convsEl.querySelectorAll('[data-conv]').forEach(function (b) {
       b.onclick = function () { selectConv(b.getAttribute('data-conv'), b.getAttribute('data-with') || ''); };
+    });
+    convsEl.querySelectorAll('[data-sw]').forEach(function (x) {
+      var go = function (e) { e.stopPropagation(); switchRole(x.getAttribute('data-sw')); };
+      x.onclick = go;
+      x.onkeydown = function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(e); } };
     });
   };
 
@@ -321,6 +339,7 @@
   var renderRole = function () {
     var r = R.role;
     if (!r) return;
+    connEl.hidden = r.kind === 'human';
     // 分身 = 从父亲某个 session 节点 fork 出来的 (带着那一刻的上下文);
     // 子 wizard = 父亲 spawn 的白板, 只有出身、没有继承。
     var kind = r.kind === 'human' ? '人' : !r.parent ? 'wizard' : r.forkedFrom ? '分身' : '子 wizard';
@@ -471,8 +490,7 @@
     var av = mine ? '' : '<button class="av' + (canSwitch(m.from) ? ' go' : '') + '" data-r="' + esc(m.from) + '" title="' + esc(nameOf(m.from)) + '"' + (canSwitch(m.from) ? '' : ' disabled') + '>' + esc(m.fromLabel || roleLabel(m.from)) + '</button>';
     return '<div class="mrow ' + (mine ? 'mine' : 'them') + '" data-id="' + esc(m.id) + '" data-turn="' + esc(m.turnId || m.id) + '" data-ts="' + m.ts + '"' +
       (m.ping ? ' data-ping="1"' : '') + ' data-sig="' + esc(m.sig) + '" data-stale-at="' + (m.staleAt || 0) + '">' +
-      av +
-      '<div class="mcol"><div class="mwho">' + who + '</div><div class="mb">' + m.html + '</div></div>' +
+      '<div class="mcol"><div class="mwho">' + av + who + '</div><div class="mb">' + m.html + '</div></div>' +
       flip +
     '</div>';
   };

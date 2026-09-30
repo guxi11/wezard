@@ -8,7 +8,7 @@
 import { renderCutMark, renderTurnGroup, escHtml, hashStr, tagSig, type TurnFragment } from "./detail-render.js";
 import { isKeepaliveTurn, isTurn, staleAt, turnDone } from "./chat-view.js";
 import type { DetailRecord, MarkDetailRecord, TurnDetailRecord } from "./detail-store.js";
-import type { Directory, Msg } from "./role-view.js";
+import { teammateOf, unwrapMates, type Directory, type Msg } from "./role-view.js";
 
 export interface MsgFragment {
   /** `<turnId>:in` / `<turnId>:out` / `m:<markId>`。 */
@@ -35,10 +35,14 @@ export interface MsgFragment {
 // 入消息顶上的一行归因: 这句话不是人打的字时说清是谁派的。
 // 时刻不在这里 —— 它写在气泡外的 .mwho 上 (每条消息只报一次时间), 所以
 // 没有归因要说时整行省掉, 免得留下一条空的内边距。
+const mateChip = (mate: string | undefined): string =>
+  mate === undefined ? "" : `<span class="mchip sys">agent team${mate ? ` · ${escHtml(mate)}` : ""}</span>`;
+
 const inMeta = (r: TurnDetailRecord): string => {
   const bits = [
     r.origin ? `<span class="mchip graph" title="graph ${escHtml(r.origin.runId)}">🕸 轮 ${r.origin.round}/${r.origin.rounds} · 步 ${r.origin.step}/${r.origin.steps}</span>` : "",
     r.from?.kind === "task" ? `<span class="mchip task">⏰ 定时 ${escHtml(r.from.taskId ?? "")}</span>` : "",
+    mateChip(teammateOf(r.userQuery)),
     r.from?.kind === "peer" && r.from.public ? `<span class="mchip pub">公开</span>` : "",
     r.from?.job ? `<span class="mchip job">📋 ${escHtml(r.from.job)}</span>` : "",
   ].filter(Boolean);
@@ -47,7 +51,7 @@ const inMeta = (r: TurnDetailRecord): string => {
 
 const renderIn = (r: TurnDetailRecord): string =>
   tagSig(`<section class="bubble mq" data-key="${escHtml(r.id)}:in">${inMeta(r)}` +
-    `<div class="md-body"></div><script type="text/plain" class="md-src">${escHtml(r.userQuery ?? "")}</script></section>`);
+    `<div class="md-body"></div><script type="text/plain" class="md-src">${escHtml(unwrapMates(r.userQuery ?? ""))}</script></section>`);
 
 /** 子 agent 的轮次内联进父轮 —— 与旧线程视图同一规则 (见 chat-view.threadEntries)。 */
 const childrenOf = (records: readonly DetailRecord[], turnId: string, now: number): TurnFragment[] =>

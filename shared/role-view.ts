@@ -12,7 +12,9 @@
 // 归并, 私聊按对端 wizard 归并。
 //
 // role id: wizard 就是它的 target key; 人是 `human:<userid>` (`human:` = 不知道是谁);
-// 定时任务是 `task:<id>` —— 它只发不收, 不能切成视角。人不用 `user:<id>`: 那正是
+// 定时任务是 `task:<id>` —— 它只发不收, 不能切成视角。系统是 `system:` (名为 wezard):
+// agent team 队友的话以 `<teammate-message>` 写进 transcript 的 user 行, 长得和人在
+// 终端里打的字一样, 但不是人说的 —— 归给系统, 同样不能切成视角。人不用 `user:<id>`: 那正是
 // 「与这个人的单聊」里默认 wizard 的 target, 两者字面相同, 同一条消息会变成自己对自己说。
 import { baseOfKey, labelFor, stripSigil, tagOfKey } from "./session-label.js";
 import { isGhostTurn, isKeepaliveTurn, isMark, isTurn, summarizeTag, type TagSummary } from "./chat-view.js";
@@ -45,9 +47,23 @@ export const channelOf = (r: TurnDetailRecord): string =>
 /** `user:<id>` (speaker / 单聊 base) → 人的 role id。 */
 export const humanOf = (principal: string): string => `human:${principal.replace(/^user:/, "").replace(/#.*$/, "")}`;
 
+export const SYSTEM = "system:";
+const MATE_RE = /^\s*<teammate-message\b([^>]*)>/;
+/** 这句是不是 agent team 队友递进来的; 是就给出它的 teammate_id ("" = 没标)。 */
+export const teammateOf = (q: string | undefined): string | undefined => {
+  const attrs = q?.match(MATE_RE)?.[1];
+  return attrs === undefined ? undefined : attrs.match(/\bteammate_id="([^"]*)"/)?.[1] ?? "";
+};
+/** 去掉 `<teammate-message …>` 包装, 只留它说的话。 */
+export const unwrapMates = (q: string): string =>
+  q.replace(/<teammate-message\b[^>]*>\s*/g, "").replace(/\s*<\/teammate-message>/g, "");
+
 export const senderOf = (r: TurnDetailRecord): string => {
   if (r.from?.kind === "peer") return r.from.from || "human:";
   if (r.from?.kind === "task") return `task:${r.from.taskId || "?"}`;
+  // 先于 speaker: 队友的话落进来时, 频道上挂着的可能还是上一句人话的 speaker。
+  const mate = teammateOf(r.userQuery);
+  if (mate !== undefined) return SYSTEM;
   if (r.speaker) return humanOf(r.speaker);
   const ch = channelOf(r);
   // 与人的单聊里发话的只可能是那个人。
@@ -102,12 +118,13 @@ export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFact
   const chatName = (base: string): string => facts.chatNames[base] ?? "";
   const nameOf = (id: string): string => {
     if (id.startsWith("task:")) return `定时 ${id.slice(5)}`;
+    if (id === SYSTEM) return "wezard";
     if (wizards.has(id)) return (facts_.get(id)?.name ?? "").trim() || tagOfKey(id) || chatName(baseOfKey(id)) || id;
     if (id === "human:") return "人";
     return id.startsWith("human:") ? id.slice(6) : id;
   };
   const labelOf = (id: string): string =>
-    id.startsWith("task:") ? "⏰" : wizards.has(id) ? labelFor(nameOf(id)) : "👤";
+    id.startsWith("task:") ? "⏰" : id === SYSTEM ? "🧙" : wizards.has(id) ? labelFor(nameOf(id)) : "👤";
   const byName = new Map([...wizards].map((t) => [fold(nameOf(t)), t] as const));
   const resolve = (ref: string): string | undefined => {
     const r = (ref ?? "").trim();
@@ -134,6 +151,8 @@ export interface ConvSub {
   /** 与当前 role 在这个频道里的往来条数。 */
   count: number;
   lastTs: number;
+  /** 与我往来的最后一条 (没有就是它在这个频道里的最后一条)。 */
+  preview: string;
 }
 
 export interface Conv {
@@ -158,7 +177,7 @@ export const convKeyOf = (m: Msg, role: string): string => (m.channel ? `c:${m.c
 
 const stripMd = (s: string): string => s.replace(/[`*_~|#>]/g, "").replace(/\s+/g, " ").trim();
 const msgText = (m: Msg): string => {
-  if (m.dir === "in") return m.turn.userQuery ?? "";
+  if (m.dir === "in") return unwrapMates(m.turn.userQuery ?? "");
   const t = [...m.turn.items].reverse().find((it): it is Extract<typeof it, { t: "text" }> => it.t === "text");
   return t?.body ?? "";
 };
@@ -188,14 +207,15 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory): Con
       const base = key.slice(2);
       const all = msgs.filter((m) => m.channel === base);
       const last = all[all.length - 1];
-      const others = [...new Set(all.flatMap((m) => [m.from, m.to]))].filter((r) => r !== role && !r.startsWith("task:"));
+      const others = [...new Set(all.flatMap((m) => [m.from, m.to]))].filter((r) => r !== role && !r.startsWith("task:") && r !== SYSTEM);
       const subs = others
         .map((r): ConvSub => {
           const pair = all.filter((m) => involves(m, role) && other(m, role) === r);
           const seen = all.filter((m) => involves(m, r));
+          const last = pair[pair.length - 1] ?? seen[seen.length - 1];
           return {
             role: r, name: dir.nameOf(r), label: dir.labelOf(r), count: pair.length,
-            lastTs: (pair[pair.length - 1] ?? seen[seen.length - 1])?.ts ?? 0,
+            lastTs: last?.ts ?? 0, preview: previewOf(last, dir),
           };
         })
         // 与我有往来的排前, 再按最近。
