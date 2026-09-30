@@ -8,10 +8,9 @@
 //   3. transcript 首条用户消息首句 — 注册表意外缺失时的语义兜底;
 //   4. sessionId 尾八位 — 保底可辨识串。
 // (jsonl 的 summary 行实测 0/20 覆盖 — CC 2.1.x 不写, 不可用。)
-import { closeSync, openSync, readSync, readdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { closeSync, openSync, readSync } from "node:fs";
 import { tagOfKey } from "../shared/session-label.js";
+import { readRegistry } from "./cc-session.js";
 
 const NAME_MAX = 16;
 const TRUNC = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
@@ -19,31 +18,16 @@ const TRUNC = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n 
 // ── CC 活跃会话注册表 ────────────────────────────────────────────────
 // 目录很小 (每个活跃 claude 进程一个 json), 每次全量扫 + 短 TTL 缓存足够。
 // pid 文件在进程退出后清理, 长缓存反而会拿到死名字。
-const SESSIONS_DIRS = [
-  join(homedir(), ".claude", "sessions"),
-  join(homedir(), ".claude-internal", "sessions"),
-];
+const REGISTRY_HOMES = ["~/.claude", "~/.claude-internal"];
 const REGISTRY_TTL_MS = 30_000;
 let registry: { at: number; bySession: Map<string, string> } | null = null;
 
 const scanRegistry = (): Map<string, string> => {
   const now = Date.now();
   if (registry && now - registry.at < REGISTRY_TTL_MS) return registry.bySession;
-  const bySession = new Map<string, string>();
-  for (const dir of SESSIONS_DIRS) {
-    let files: string[];
-    try { files = readdirSync(dir); } catch { continue; }
-    for (const f of files) {
-      if (!f.endsWith(".json")) continue;
-      try {
-        const row = JSON.parse(readFileSync(join(dir, f), "utf8")) as {
-          sessionId?: string;
-          name?: string;
-        };
-        if (row.sessionId && row.name) bySession.set(row.sessionId, row.name);
-      } catch { /* 半写状态的文件, 跳过 */ }
-    }
-  }
+  const bySession = new Map(
+    REGISTRY_HOMES.flatMap(readRegistry).filter((r) => r.name).map((r) => [r.sessionId, r.name] as const),
+  );
   registry = { at: now, bySession };
   return bySession;
 };

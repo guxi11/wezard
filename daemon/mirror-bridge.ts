@@ -37,6 +37,7 @@ import { isAutoWindowActive } from "./session-cache.js";
 import { noticeSuffixFor } from "./notices.js";
 import { dangerOf } from "./danger.js";
 import { runTmux, spawnTmuxClaude } from "./spawn-tmux.js";
+import { hasRegistry, markTranscript, probeOf, sessionOnPane, submittedSince, type LiveSession, type TranscriptMark } from "./cc-session.js";
 import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
 import { recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, buildDetailUrl, buildChatUrl } from "./detail.js";
@@ -1384,12 +1385,89 @@ export const parseInputBox = (cap: string): InputBox => {
 // 24 行足够容纳展开后的多行粘贴 (折叠态只占一行)。
 const readInputBox = async (target: string): Promise<InputBox> => parseInputBox(await capturePaneTail(target, 24));
 
+// ── 注入门控的会话证人 (cc-session) ─────────────────────────────────
+// 能从会话自己写的 json 读到的判据, 就不读 pane: 就绪看注册表的 status, 提交看
+// 注册表的 busy 翻转或 jsonl 里新落的那一行。输入框里「贴进去没有」是唯一只有
+// pane 知道的事 (未提交的输入不落任何盘), 那一段仍旧 capture。
+
+const SHELL_RE = /^-?(zsh|bash|sh|fish|dash|ksh|tcsh|csh)$/;
+/** pane 前台是个 shell = 里面的 AI 会话已经退出 (或从没起来)。只读 tmux 元数据, 不读屏。 */
+const paneRunsShell = async (target: string): Promise<boolean> => {
+  const r = await runTmux(["display-message", "-p", "-t", target, "#{pane_current_command}"]);
+  return r.ok && SHELL_RE.test(r.stdout.trim());
+};
+
+/** pane 活着且里面住着 AI 会话。注册表认得它就是; 不认得时只在前台确是 shell 才判否 ——
+ *  注册表缺席 (codebuddy / 旧版 CC / 进程不在 tmux 里记的行) 不能被当成会话不在。 */
+const paneHostsSession = async (target: string, homeDir: string): Promise<boolean> =>
+  !hasRegistry(homeDir) || sessionOnPane(homeDir, target) !== undefined || !(await paneRunsShell(target));
+
+const SESSION_READY_TIMEOUT_MS = 15_000;
+/** 冷 pane 等注册表报 idle (会话建好、输入框等人); 热 pane 只核一次会话还在 —— 忙也照贴,
+ *  CC 会把它排进队列。等不到 idle 不算失败 (贴后校验会兜), 前台退回 shell 才算:
+ *  往 shell 里贴 = 把用户的话当命令执行。 */
+const awaitSession = async (target: string, homeDir: string, fresh: boolean, log: Logger): Promise<{ ok: true; live?: LiveSession } | { ok: false; reason: string }> => {
+  if (!hasRegistry(homeDir)) return { ok: true };
+  const deadline = Date.now() + (fresh ? SESSION_READY_TIMEOUT_MS : 0);
+  const poll = async (): Promise<LiveSession | undefined> => {
+    const s = sessionOnPane(homeDir, target);
+    if ((s && (!fresh || s.status === "idle")) || Date.now() >= deadline) return s;
+    await sleep(200);
+    return poll();
+  };
+  const live = await poll();
+  if (live) {
+    if (fresh && live.status !== "idle") log.warn({ target, status: live.status }, "mirror inject: 会话未报 idle, 按贴后校验兜底继续");
+    return { ok: true, live };
+  }
+  if (await paneRunsShell(target)) {
+    log.warn({ target }, "mirror inject: pane 前台是 shell, AI 会话不在, 拒绝注入");
+    return { ok: false, reason: "目标 pane 里的 AI 会话已退出 (前台是 shell), 消息未送达。重发即会在新 pane 里恢复该会话。" };
+  }
+  return { ok: true };
+};
+
+interface SubmitWitness {
+  /** 贴之前会话的 status; "" = 注册表不认识 (此时 submitted 恒为 false, 全靠 pane)。 */
+  status: string;
+  /** 这段文本已被会话收下: 注册表 idle→busy 翻转在 `enterAt` 之后, 或 jsonl 落了带探针的提交。 */
+  submitted: (probe: string, since: number, enterAt: number) => boolean;
+}
+const NO_WITNESS: SubmitWitness = { status: "", submitted: () => false };
+
+/** 贴之前给会话可能落盘的 jsonl 打书签: 绑定的那份, 加上注册表报的当前 sid 那份
+ *  (resume / fork 会换 sid)。提交后 sid 若又变了, 新文件从 0 读 —— 时间门挡掉 fork 里的旧话。 */
+const witnessFor = (target: string, homeDir: string, jsonlPath: string, live: LiveSession | undefined): SubmitWitness => {
+  if (!live) return NO_WITNESS;
+  const dir = dirname(jsonlPath);
+  const marks = new Map<string, TranscriptMark>(
+    [jsonlPath, join(dir, `${live.sessionId}.jsonl`)].map((p) => [p, markTranscript(p)] as const),
+  );
+  return {
+    status: live.status,
+    submitted: (probe, since, enterAt) => {
+      const now = sessionOnPane(homeDir, target);
+      if (now && live.status !== "busy" && now.status === "busy" && now.statusUpdatedAt >= enterAt) return true;
+      const p = now && join(dir, `${now.sessionId}.jsonl`);
+      if (p && !marks.has(p)) marks.set(p, { path: p, offset: 0 });
+      return submittedSince([...marks.values()], probe, since);
+    },
+  };
+};
+
 // Self-verifying inject. The cold-spawn race we guard against: paste lands
 // but the trailing Enter is eaten while the TUI is still initializing, so
 // the prompt sits typed-but-unsent. 校验策略见 injectViaTmuxText —— 以输入框
 // 整块为判据, 粘贴只在「确凿看见框仍是空的」时才重来。
-const injectViaTmux = async (target: string, text: string, images: string[], log: Logger, freshSpawn: boolean, backendName: CliBackendName, bypassModalGuard = false): Promise<{ ok: boolean; reason?: string; uncertain?: boolean }> => {
+const injectViaTmux = async (target: string, text: string, images: string[], log: Logger, freshSpawn: boolean, backend: CliBackend, jsonlPath: string, bypassModalGuard = false): Promise<{ ok: boolean; reason?: string; uncertain?: boolean }> => {
+  const backendName = backend.name;
   log.info({ target, len: text.length, images: images.length, freshSpawn, backendName }, "mirror inject (tmux)");
+
+  // 就绪门: pane 里得真有一个进入了交互态的 AI 会话, 才轮得到贴。先于 modal guard ——
+  // 这一步只读注册表, 会话都不在时也就不必去 capture pane 找对话框了。
+  const gate = await awaitSession(target, backend.homeDir, freshSpawn, log);
+  if (!gate.ok) return gate;
+  const witness = witnessFor(target, backend.homeDir, jsonlPath, gate.live);
 
   // Never type into a modal picker (see detectModalPicker). Checked before the
   // image pump too — a C-v into a picker is just as destructive as a paste.
@@ -1424,7 +1502,7 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
   if (backendName === "codebuddy") {
     const refs = images.map((p) => `@${p}`);
     const textWithRefs = refs.length ? (text ? `${refs.join("\n")}\n${text}` : refs.join("\n")) : text;
-    return injectViaTmuxText(target, textWithRefs, log, freshSpawn);
+    return injectViaTmuxText(target, textWithRefs, log, freshSpawn, witness);
   }
 
   // Pump images first via clipboard+C-v so each one is attached as a separate
@@ -1451,19 +1529,23 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
     return e.ok ? { ok: true } : { ok: false, reason: `tmux send-keys Enter failed: ${e.stderr.slice(-200)}` };
   }
 
-  return injectViaTmuxText(target, text, log, freshSpawn);
+  return injectViaTmuxText(target, text, log, freshSpawn, witness);
 };
 
 // 文本 paste + Enter 提交 + 自校验。从 injectViaTmux 抽出来，让 codebuddy
 // 后端的 @<path> 回退路径也能复用同样的 paste-verify 逻辑。
 //
-// 两个判据都以**输入框整块**为准 (parseInputBox), 指纹只是认不出布局时的退路:
-//   1. 贴完轮询「框变了」→ 粘贴已被 TUI 消化 (折叠成占位符也算)。这是个**正**
-//      信号, 只有确凿看见框仍是贴之前的样子才重贴 —— 存疑一律不重贴, 多贴一次
-//      的代价 (两份提示叠进同一个输入框) 远高于少贴一次。
-//   2. 回车后轮询「框回到贴之前的样子」→ 提交被吃下了。框认得出来时这条判据可
-//      信, 于是允许多补一次回车 (空框上的回车在 CLI 里是 no-op)。
-const injectViaTmuxText = async (target: string, text: string, log: Logger, freshSpawn: boolean): Promise<{ ok: boolean; reason?: string; uncertain?: boolean }> => {
+// 贴 —— 只有 pane 知道 (未提交的输入不落任何盘), 以**输入框整块**为准 (parseInputBox),
+// 指纹只是认不出布局时的退路:
+//   1. 框里已经躺着这段文本 (上一次注入回车被吞 / 被 watchdog 掐断) → 不再贴第二份, 直接提交。
+//   2. 贴完轮询「框变了」→ 粘贴已被 TUI 消化 (折叠成占位符也算)。这是个**正**信号,
+//      只有确凿看见框仍是贴之前的样子、且会话也没收到这段话, 才重贴 —— 存疑一律不重贴,
+//      多贴一次的代价 (两份提示叠进同一个输入框) 远高于少贴一次。
+// 交 —— 先问会话证人 (注册表 busy 翻转 / jsonl 新落的提交行), 确认了就完事, 不碰 pane;
+// 证人不作声 (忙时排队、slash 命令、无注册表的后端) 才看框回没回到贴之前的样子。
+// 框认得出来时这条判据可信, 于是允许多补回车 (空框上的回车在 CLI 里是 no-op);
+// 每次补之前再问一遍证人, 已提交就不补。
+const injectViaTmuxText = async (target: string, text: string, log: Logger, freshSpawn: boolean, witness: SubmitWitness = NO_WITNESS): Promise<{ ok: boolean; reason?: string; uncertain?: boolean }> => {
   // Warm pane: tight timings, low latency. Fresh spawn (claude --resume just
   // started, transcript still loading): extended timings — bracketed-paste
   // end can take 4-7s to be honored on a cold TUI. Only the fresh-spawn path
@@ -1473,10 +1555,19 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   const POST_PASTE_SETTLE_FALLBACK_MS = freshSpawn ? 2500 : 700;
   const CLEARED_TIMEOUT_MS = freshSpawn ? 4000 : 1500;
   const RETRY_SETTLE_MS = freshSpawn ? 1500 : 800;
+  // 回车后先只问证人这么久: CC 提交即落盘, 通常 <200ms。证人注定不作声的场合
+  // (会话正忙 → 只是排队; slash 命令 → 不一定落 user 行) 不空等, 直接看框。
+  const witnessQuiet = witness.status === "" || witness.status === "busy" || text.trimStart().startsWith("/");
+  const WITNESS_ONLY_MS = witnessQuiet ? 0 : freshSpawn ? 2500 : 1000;
 
   const { headFp, tailFp } = fingerprints(text);
+  const probe = probeOf(text);
   const POLL_MS = 100;
   const stripWs = (s: string): string => s.replace(/\s+/gu, "");
+  // 时间门往前放 1s: jsonl 的 timestamp 与本机时钟同源, 只差写盘的毫秒。
+  const since = Date.now() - 1000;
+  let enterAt = Number.POSITIVE_INFINITY;
+  const submitted = (): boolean => witness.submitted(probe, since, enterAt);
 
   // 贴之前框里是什么: 空框、幽灵提示 (`Try "how do I log an error?"`)、甚至用户
   // 自己敲了一半的字 —— 一律作为基线, 免得去维护一张「哪些文案算空」的清单。
@@ -1484,8 +1575,12 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   // 基线读不出来 (框被模态顶掉 / 正在重绘) 就整条退回指纹法: 没有基线,「框变了」
   // 无从谈起, 而把幽灵提示 (`Try "…"`) 误当成「贴进去了」会让这条消息静静消失。
   const boxVerify = preBox.known;
+  // 去重: 框里已经是这段文本 —— 上一次注入贴上了却没交出去。再贴就是两份。
+  const alreadyTyped = boxVerify && Boolean(probe) && stripWs(preBox.body).includes(probe);
+  // 提交后框该回到的样子: 正常是贴之前的基线; 文本本就在框里时基线就是它, 只能以「空」为准。
+  const baseBody = alreadyTyped ? "" : preBox.body;
   /** 框里还是贴之前那样 (或彻底空了) = 我们的文本不在框里。 */
-  const boxIntact = (b: InputBox): boolean => boxVerify && b.known && (b.body === "" || b.body === preBox.body);
+  const boxIntact = (b: InputBox): boolean => boxVerify && b.known && (b.body === "" || b.body === baseBody);
 
   const loadAndPaste = async (): Promise<{ ok: boolean; reason?: string }> => {
     // stdin variant of the shared exec path — it carries the same hard timeout,
@@ -1496,9 +1591,6 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
     if (!pasted.ok) return { ok: false, reason: `tmux paste-buffer failed: ${pasted.stderr.slice(-200)}` };
     return { ok: true };
   };
-
-  let r = await loadAndPaste();
-  if (!r.ok) return r;
 
   // 框认得出来 → 看它变没变; 认不出来 → 退回宽窗口找 headFp (长文本会换行,
   // 头部可能在框顶, 所以窗口要宽)。
@@ -1520,17 +1612,30 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
     return Boolean(tailFp) && stripWs(pane).includes(tailFp);
   };
 
-  let pasteSeen = await sawLanded(PASTE_VERIFY_MS);
+  let pasteSeen = alreadyTyped;
+  if (alreadyTyped) {
+    log.warn({ target, headFp }, "mirror inject: 输入框里已有这段文本 (上次未提交) — 不重贴, 直接提交");
+  } else {
+    const r = await loadAndPaste();
+    if (!r.ok) return r;
+    pasteSeen = await sawLanded(PASTE_VERIFY_MS);
+  }
   if (!pasteSeen) {
     const box = await readInputBox(target);
     const empty = boxVerify && box.known ? boxIntact(box) : !(await inputBoxStillHasTail());
+    if (submitted()) {
+      // 框看着空, 是因为粘贴连同某次回车一起被收下了 —— 再贴就是第二份。
+      log.info({ target }, "mirror inject: 会话已收到这段文本, 不重贴");
+      return { ok: true };
+    }
     if (!empty) {
       log.warn({ target, headFp, boxKnown: box.known }, "mirror inject: 粘贴未验证但输入框非空 — 首次粘贴已落地, 不重贴");
       pasteSeen = true;
     } else {
       log.warn({ target, headFp, boxKnown: box.known }, "mirror inject: 输入框确认为空, 重贴一次");
       await sleep(RETRY_SETTLE_MS);
-      r = await loadAndPaste();
+      if (submitted()) return { ok: true };
+      const r = await loadAndPaste();
       if (!r.ok) return r;
       pasteSeen = await sawLanded(PASTE_VERIFY_MS);
     }
@@ -1538,7 +1643,7 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
 
   // Bracketed-paste end + TUI catch-up. Warm pane: 400ms is invisible.
   // Fresh respawn: 1500ms+ — claude --resume is still loading the transcript.
-  await sleep(pasteSeen ? POST_PASTE_SETTLE_MS : POST_PASTE_SETTLE_FALLBACK_MS);
+  if (!alreadyTyped) await sleep(pasteSeen ? POST_PASTE_SETTLE_MS : POST_PASTE_SETTLE_FALLBACK_MS);
 
   const sendEnter = async (): Promise<{ ok: boolean; reason?: string }> => {
     const e = await runTmux(["send-keys", "-t", target, "Enter"]);
@@ -1548,11 +1653,14 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
     const box = await readInputBox(target);
     return boxVerify && box.known ? boxIntact(box) : !(await inputBoxStillHasTail());
   };
-  const waitForCleared = async (timeoutMs: number): Promise<boolean> => {
+  /** 证人先答; 它的窗口过了还不作声, 才每轮加看一眼框。 */
+  const waitForSubmit = async (timeoutMs: number): Promise<boolean> => {
     const t0 = Date.now();
-    while (Date.now() - t0 < timeoutMs) {
+    const budget = Math.max(timeoutMs, WITNESS_ONLY_MS + 500);
+    while (Date.now() - t0 < budget) {
       await sleep(POLL_MS);
-      if (await cleared()) return true;
+      if (submitted()) return true;
+      if (Date.now() - t0 >= WITNESS_ONLY_MS && (await cleared())) return true;
     }
     return false;
   };
@@ -1570,18 +1678,21 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   const attempts = boxTrusted ? 3 : 2;
   for (let i = 0; i < attempts; i++) {
     if (i > 0) {
-      log.warn({ target, tailFp, attempt: i + 1 }, "mirror inject: 回车后输入框未清空, 再补一次");
       await sleep(RETRY_SETTLE_MS);
+      if (submitted()) return { ok: true }; // 迟到的确认 —— 补的这一下会落在空框上, 省了
+      log.warn({ target, tailFp, attempt: i + 1 }, "mirror inject: 回车后输入框未清空, 再补一次");
     }
+    if (i === 0) enterAt = Date.now();
     const e = await sendEnter();
     if (!e.ok) return e;
-    if (await waitForCleared(CLEARED_TIMEOUT_MS)) return { ok: true };
+    if (await waitForSubmit(CLEARED_TIMEOUT_MS)) return { ok: true };
   }
+  if (submitted()) return { ok: true };
 
   // 补到头还没清空。通常是渲染滞后 (回车其实落了), 但也可能是目标会话正忙 /
   // 上下文满了不消费输入 —— 那样用户这条消息会悄无声息地消失。不报硬失败 (用户
   // 多半已经被服务到了), 标 uncertain 让调用方按需提示。
-  log.warn({ target, tailFp, freshSpawn, boxTrusted }, "mirror inject: clear not observed, trusting submit");
+  log.warn({ target, tailFp, freshSpawn, boxTrusted, witness: witness.status }, "mirror inject: clear not observed, trusting submit");
   return { ok: true, uncertain: true, reason: "目标会话可能正忙或未消费输入(回车后输入框未清空)" };
 };
 
@@ -1637,8 +1748,7 @@ const injectViaSpawn = (args: InjectArgs): Promise<{ ok: boolean; reason?: strin
 const inject = (args: InjectArgs): Promise<{ ok: boolean; reason?: string; uncertain?: boolean }> => {
   const target = (args.tmuxTarget ?? "").trim();
   if (!target) return injectViaSpawn(args);
-  const backendName = backendForPath(args.jsonlPath).name;
-  return injectViaTmux(target, args.text, args.images ?? [], args.log, args.freshSpawn ?? false, backendName, args.bypassModalGuard ?? false);
+  return injectViaTmux(target, args.text, args.images ?? [], args.log, args.freshSpawn ?? false, backendForPath(args.jsonlPath), args.jsonlPath, args.bypassModalGuard ?? false);
 };
 
 // ── Per-session injection queue ───────────────────────────────────────
@@ -3879,6 +3989,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const r = await runTmux(["display-message", "-p", "-t", paneId, "#{pane_id}"]);
     return r.code === 0 && r.stdout.trim() === paneId;
   };
+  // 注入前的存活判定要多问一句「里面还有 AI 会话吗」: pane 在、claude 却退回了 shell,
+  // 照旧往里贴就是把用户的话当 shell 命令跑。判否即走 respawn (旧 pane 不杀 —— 它可能是
+  // 用户 /wrc 自己的终端)。
+  const paneUsable = async (paneId: string, jsonlPath: string): Promise<boolean> =>
+    (await tmuxPaneAlive(paneId)) && (await paneHostsSession(paneId, backendForPath(jsonlPath).homeDir));
 
   // Re-attach a stored binding for `principal`. Returns the resulting state, or
   // undefined if the on-disk transcript is gone (in which case the entry is
@@ -5568,7 +5683,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // 公开频道里说的话, 回复就该在群里看得见 —— 哪怕上一轮是人在 CLI 里敲的。
       if (opts?.channel) a.turnFromChat = true;
       const sid = a.sessionId;
-      const paneAlive = a.tmuxPane ? await tmuxPaneAlive(a.tmuxPane) : false;
+      const paneAlive = a.tmuxPane ? await paneUsable(a.tmuxPane, a.jsonlPath) : false;
       if (!paneAlive) {
         log.warn({ target, sessionId: sid, oldPane: a.tmuxPane }, "injectText: pane not alive, respawning");
         // Same resume-fork hazard as dispatch: snapshot before spawn, re-bind
@@ -5933,7 +6048,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // First step of the job and the historical hang point — log BEFORE the
         // probe so a stall is attributable to it next time, not invisible.
         log.info({ target: a.target, sessionId: sid, pane: a.tmuxPane, gen: myGen }, "inject job start");
-        const paneAlive = a.tmuxPane ? await tmuxPaneAlive(a.tmuxPane) : false;
+        const paneAlive = a.tmuxPane ? await paneUsable(a.tmuxPane, a.jsonlPath) : false;
         let freshSpawn = a.justSpawned === true;
         a.justSpawned = false;
         if (!paneAlive) {

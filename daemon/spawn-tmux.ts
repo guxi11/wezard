@@ -35,6 +35,7 @@ import { augmentedPath } from "../shared/exec-path.js";
 import { sleep } from "../shared/std.js";
 import { activateBackend, CLI_BACKEND_DEFAULTS, primaryBackend, type CliBackend, type CliBackendName } from "../shared/cli-backends.js";
 import { selectModel } from "./model-select.js";
+import { hasRegistry, sessionOnPane } from "./cc-session.js";
 
 
 // A spawn has no transcript to derive a backend from, so the caller picks one
@@ -172,18 +173,32 @@ const capturePaneBottom = async (pane: string, rows: number): Promise<string> =>
   return r.ok ? r.stdout : "";
 };
 
-// Active verification that the TUI launched and is ready for input. Replaces
-// the old blind sleep(3000). On success returns true; on timeout returns false
-// (caller decides whether to treat as fatal). Retries Enter once if it detects
-// the command was typed but not submitted.
-const waitForTuiReady = async (pane: string, cmd: string, log: Logger): Promise<boolean> => {
-  await sleep(MIN_SETTLE_MS);
-  const deadline = Date.now() + TUI_READY_TIMEOUT_MS;
+// Active verification that the AI session inside the pane is up and waiting
+// for input. On success returns true; on timeout returns false (caller decides
+// whether to treat as fatal).
+//
+// 判据按可信度取: 后端写注册表 (cc-session) 时, 以「这个 pane 上的会话 status=idle」
+// 为准 —— 进程自己报的就绪, 不读 pane。注册表行一出现就说明 claude 已接管 pty,
+// 之后只管等它 idle; 只有行还没出现 (shell 还在 source rc / 被交互提示卡住 /
+// 后端根本不写注册表) 时 pane 才是唯一的证人, 这时才 capture 去认提示框与 TUI。
+const waitForTuiReady = async (pane: string, cmd: string, backend: CliBackend, log: Logger): Promise<boolean> => {
+  const registry = hasRegistry(backend.homeDir);
+  const t0 = Date.now();
+  const deadline = t0 + MIN_SETTLE_MS + TUI_READY_TIMEOUT_MS;
   let retriedEnter = false;
   let resent = false;
+  let sawSession = false;
   while (Date.now() < deadline) {
+    await sleep(POLL_MS);
+    if (registry) {
+      const s = sessionOnPane(backend.homeDir, pane);
+      if (s?.status === "idle") return true;
+      if (s) { sawSession = true; continue; }
+    }
+    // Shell rc needs time to source before capture-pane shows anything meaningful.
+    if (Date.now() - t0 < MIN_SETTLE_MS) continue;
     const cap = await capturePaneBottom(pane, 20);
-    if (TUI_READY_RE.test(cap)) return true;
+    if (!registry && TUI_READY_RE.test(cap)) return true;
     // Shell prompt eating our Enter: an interactive blocker (omz update, etc.)
     // swallowed it. Dismiss with "N" + Enter, then re-send the full command.
     if (!resent && BLOCKER_RE.test(cap)) {
@@ -196,14 +211,15 @@ const waitForTuiReady = async (pane: string, cmd: string, log: Logger): Promise<
     // If after half the budget we still see nothing, maybe Enter was lost in
     // shell rc sourcing. Retry Enter once (safe: if claude already started, an
     // extra Enter on an empty input box is a no-op).
-    if (!retriedEnter && !resent && (Date.now() - (deadline - TUI_READY_TIMEOUT_MS)) > TUI_READY_TIMEOUT_MS / 2) {
+    if (!retriedEnter && !resent && Date.now() - t0 > MIN_SETTLE_MS + TUI_READY_TIMEOUT_MS / 2) {
       log.warn({ pane }, "spawn-tmux: TUI not seen at half-budget, retrying Enter");
       await runTmux(["send-keys", "-t", pane, "Enter"]);
       retriedEnter = true;
     }
-    await sleep(POLL_MS);
   }
-  log.warn({ pane }, "spawn-tmux: TUI ready timeout, proceeding anyway");
+  // 注册表认得这个会话却迟迟不 idle (启动期对话框? 状态字段改了名?) —— 最后让 pane 裁决一次。
+  if (sawSession && TUI_READY_RE.test(await capturePaneBottom(pane, 20))) return true;
+  log.warn({ pane, registry, sawSession }, "spawn-tmux: TUI ready timeout, proceeding anyway");
   return false;
 };
 
@@ -455,7 +471,7 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, windowName, c
   // claude does NOT create the transcript jsonl until it processes the first
   // user input, so we don't wait for the file — mirror tail tolerates a
   // missing jsonl and starts emitting once claude writes the first line.
-  const tuiReady = await waitForTuiReady(tmuxPane, cmd, log);
+  const tuiReady = await waitForTuiReady(tmuxPane, cmd, backend, log);
 
   // Model selection needs the TUI actually up (it types `/model …` into the
   // input box) — skip it if readiness never confirmed, same as any other
