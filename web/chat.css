@@ -217,6 +217,15 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 }
 .si-more:hover { color: var(--accent); font-weight: 600 }
 
+/* 未读: 预览行右端的红点计数 —— 页面打开后别人新说完的 final reply。 */
+.ci .l2, .si .l2 { display: flex; align-items: center; gap: 6px; min-width: 0 }
+.ci .l2 .pv, .si .l2 .pv { flex: 1; min-width: 0 }
+.ub {
+  flex: none; margin-left: auto; min-width: 16px; height: 16px; padding: 0 5px; border-radius: 8px;
+  background: #e5484d; color: #fff; font-size: 10.5px; font-weight: 600; line-height: 16px; text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
 /* 执行中的 wizard: 名字右边一盏呼吸灯, 会话与子项同一位置, 与回复头上的 .tg-dot 同大。 */
 .ci .l1 .live, .si .l1 .live {
   flex: none; align-self: center; width: 7px; height: 7px;

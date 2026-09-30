@@ -180,6 +180,8 @@ export interface ConvSub {
   lastTs: number;
   /** 与我往来的最后一条 (没有就是它在这个频道里的最后一条)。 */
   preview: string;
+  /** 它回给我的 final reply 条数 —— 客户端拿它的增量点未读。 */
+  finals: number;
   /** 它是 wizard 时才有。 */
   status?: RoleStatus;
 }
@@ -198,6 +200,8 @@ export interface Conv {
   lastTs: number;
   preview: string;
   count: number;
+  /** 别人在这里说完的 final reply 条数 (自己的不算) —— 客户端拿它的增量点未读。 */
+  finals: number;
   /** 群里的其他 role (只对公开频道)。 */
   subs: ConvSub[];
 }
@@ -230,11 +234,16 @@ const glanceOr = (ms: readonly Msg[], who?: (m: Msg) => string): Glance =>
 
 const SUB_MAX = 40;
 
+/** 别人说完的一轮: 出消息带了 final text。 */
+const isFinalOf = (role: string) => (m: Msg): boolean =>
+  m.dir === "out" && m.from !== role && m.turn.items.some((it) => it.t === "text" && it.final === true);
+
 /** 一个 role 参与的全部会话, 最近活动在前。群聊只列它**自己开过口**的 —— 住在里面
  *  (home) 或只是被人叫过一声却没答话的, 都不算参与; 私聊则有往来就在列。 */
 export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now: number): Conv[] => {
   // 会话列表讲的是"谁跟谁说过什么", ping 不是话: 条数与预览都不该被它顶掉。
   const msgs = all_.filter((m) => !isPing(m));
+  const finals = (ms: readonly Msg[]): number => ms.filter(isFinalOf(role)).length;
   const mine = msgs.filter((m) => involves(m, role));
   const keys = [...new Set(mine.filter((m) => !m.channel || m.from === role).map((m) => convKeyOf(m, role)))];
   return keys
@@ -246,7 +255,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
           key, kind: "wizard", name: dir.nameOf(peer), label: dir.labelOf(peer), base: "", peer,
           status: dir.status(peer, now),
           // 私聊只有两个人, 标题行已是对方的名字, 预览只放正文。
-          ...glanceOr(ms), count: ms.length, subs: [],
+          ...glanceOr(ms), count: ms.length, finals: finals(ms), subs: [],
         };
       }
       const base = key.slice(2);
@@ -257,7 +266,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
           const pair = all.filter((m) => involves(m, role) && other(m, role) === r);
           const seen = all.filter((m) => involves(m, r));
           return {
-            role: r, name: dir.nameOf(r), label: dir.labelOf(r), count: pair.length,
+            role: r, name: dir.nameOf(r), label: dir.labelOf(r), count: pair.length, finals: finals(pair),
             // 标题行已经是它的名字, 预览只放正文。
             ...(glance(pair) ?? glanceOr(seen)), status: dir.status(r, now),
           };
@@ -269,7 +278,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
         key, kind: "group", base,
         name: dir.chatName(base) || (base.startsWith("user:") ? dir.nameOf(humanOf(base)) : base.replace(/^chat:/, "").slice(0, 10)),
         label: "💬",
-        ...glanceOr(all, (m) => `${dir.nameOf(m.from)}: `), count: all.length, subs,
+        ...glanceOr(all, (m) => `${dir.nameOf(m.from)}: `), count: all.length, finals: finals(all), subs,
       };
     })
     .sort((a, b) => b.lastTs - a.lastTs);

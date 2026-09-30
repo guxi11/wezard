@@ -307,10 +307,36 @@
       ms.map(function (m) { return '<i>' + esc(m.label || roleLabel(m.role)) + '</i>'; }).join('') + '</span>';
   };
 
-  var line = function (title, ts, pv, lamp) {
+  var line = function (title, ts, pv, lamp, unread) {
     return '<span class="b"><span class="l1"><span class="t">' + title + '</span>' + (lamp || '') +
       '<span class="ts">' + esc(fmtAgo(ts)) + '</span></span>' +
-      '<span class="pv">' + esc(pv) + '</span></span>';
+      '<span class="l2"><span class="pv">' + esc(pv) + '</span>' +
+      (unread ? '<b class="ub">' + (unread > 99 ? '99+' : unread) + '</b>' : '') + '</span></span>';
+  };
+
+  // ── 未读: 页面打开后别人新说完的 final reply 条数 ──
+  // 服务端只给累计的 finals, 基线记在这里: 第一次见到某项就以当时为准 (打开前的不算未读),
+  // 正在读的那项随到随清。按视角分账 —— 同一个群换个 role 看, 未读是另一回事。
+  var SEEN = {};
+  var unreadKey = function (key, withRole) { return ROLE + '|' + key + '|' + (withRole || ''); };
+  var unreadOf = function (key, withRole, n) {
+    var k = unreadKey(key, withRole);
+    if (SEEN[k] === undefined) SEEN[k] = n;
+    return Math.max(0, n - SEEN[k]);
+  };
+  var reading = function () { return VIEW === 'msgs' && !document.hidden; };
+  // 读整个群 = 群与子项全清; 只读一对 = 清那一项, 群的账同步抵掉这一对新增的那几条。
+  var markRead = function (c) {
+    if (!reading() || c.key !== CONV) return;
+    var gk = unreadKey(c.key);
+    var subs = (c.subs || []).filter(function (s) { return !WITH || s.role === WITH; });
+    subs.forEach(function (s) {
+      var k = unreadKey(c.key, s.role);
+      if (WITH && SEEN[gk] !== undefined && SEEN[k] !== undefined) SEEN[gk] += Math.max(0, s.finals - SEEN[k]);
+      SEEN[k] = s.finals || 0;
+    });
+    if (!WITH) SEEN[gk] = c.finals || 0;
+    else if (SEEN[gk] > c.finals) SEEN[gk] = c.finals;
   };
 
   // 展开态按会话各记各的: 点开一个不收起别的, 轮询重画也不动它。
@@ -347,7 +373,7 @@
       return '<button class="si' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '" data-with="' + esc(s.role) + '" ' +
         'title="' + esc('我与 ' + nameOf(s.role) + ' 在这里的 ' + s.count + ' 条往来') + '">' +
         goSpan('av', s.role, esc(s.label)) +
-        line(nm(s.role, s.name, true), s.lastTs, s.preview, lampOf(s.status)) + '</button>';
+        line(nm(s.role, s.name, true), s.lastTs, s.preview, lampOf(s.status), unreadOf(c.key, s.role, s.finals || 0)) + '</button>';
     };
     var rest = MORE[c.key] ? talked.slice(SUB_FOLD).map(sub).join('') : '';
     var subs = talked.length
@@ -355,7 +381,7 @@
       : '';
     var sel = on && !WITH;
     return '<button class="ci' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '">' +
-        avatarOf(c) + line(title, c.lastTs, c.preview, lampOf(c.status)) +
+        avatarOf(c) + line(title, c.lastTs, c.preview, lampOf(c.status), unreadOf(c.key, '', c.finals || 0)) +
       '</button>' + subs;
   };
 
@@ -366,6 +392,7 @@
     var sec = function (title, list) {
       return list.length ? '<h2>' + title + '<span>' + list.length + '</span></h2>' + list.map(convItem).join('') : '';
     };
+    R.convs.forEach(markRead);
     // 没变就不碰 DOM: 心跳每 3s 来一次, 重建会把列表的滚动与焦点蹭掉。
     var html = sec('群聊', groups) + sec('私聊', dms);
     if (convsEl._html === html) return;
@@ -750,6 +777,9 @@
   var backoff = 1000;
   var connect = function () {
     if (S.es) { S.es.close(); S.es = null; }
+  // 切回标签页时正在读的那项就算读过了。
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) renderConvs(); });
+
     var p = new URLSearchParams(viewParams({ id: TOKEN }));
     var es = new EventSource('api/role-events?' + p.toString());
     S.es = es;
@@ -1649,7 +1679,7 @@
     // 手机上关系/日程占满主区 —— 进入即阅读态。
     if (v !== 'msgs') app.classList.add('reading');
     renderRole(); renderHead(); renderUsage();
-    if (v === 'msgs') { fxStop(); toBottom(true); }
+    if (v === 'msgs') { fxStop(); toBottom(true); renderConvs(); }
     else {
       // 关系图一打开就聚焦在当前 role 身上: 它的邻居亮着, 其余压暗。
       if (v === 'world') W.sel = ROLE;
