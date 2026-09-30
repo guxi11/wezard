@@ -207,10 +207,35 @@
     var d = document.createElement('div'); d.innerHTML = html; return d;
   };
 
+  // ── 工具调用正文: 第二级数据, 展开那一刻才取 ──
+  // 片段里的 .tool-body 是个空壳 (data-lazy-turn / data-lazy-use), 首屏只带摘要行。
+  // toggle 不冒泡, 所以在线程根上用捕获听 —— 用户点开, 和 reconcile 换了新节点后
+  // restoreOpen 回填展开态, 走的是同一个事件: 后者正好把「展开着等结果」的那次调用
+  // 重取成带结果的正文。取到之后正文就留在节点上, 收起再展开不会重取。
+  var loadTool = function (d) {
+    var body = childBy(d, 'tool-body');
+    if (!body || !body.hasAttribute('data-lazy-turn') || body._busy || body.firstChild) return;
+    body._busy = true; body.removeAttribute('data-err');
+    api('api/tool', { turn: body.getAttribute('data-lazy-turn'), use: body.getAttribute('data-lazy-use') })
+      .then(function (r) {
+        if (!r.ok) throw new Error(r.error);
+        var stick = S.pinned;
+        body.innerHTML = r.html;
+        if (stick) toBottom(true);
+      })
+      // 失败留着空壳 (CSS 给出提示), 再展开一次就是重试。
+      .catch(function () { body.setAttribute('data-err', '1'); })
+      .then(function () { body._busy = false; });
+  };
+
   // ── 滚动: 默认到底; 用户手动上翻后解除吸附, 回到底部再吸附 ──
   var atBottom = function () { return thread.scrollHeight - thread.scrollTop - thread.clientHeight < 80; };
   var toBottom = function (force) { if (force || S.pinned) thread.scrollTop = thread.scrollHeight; };
   thread.addEventListener('scroll', function () { S.pinned = atBottom(); });
+  inner.addEventListener('toggle', function (e) {
+    var d = e.target;
+    if (d.open && d.classList && d.classList.contains('tool-call')) loadTool(d);
+  }, true);
 
   // ── 左栏: 当前 role 的名片 + 会话列表 ──
   var convOf = function (key) { return R.convs.filter(function (c) { return c.key === key; })[0]; };

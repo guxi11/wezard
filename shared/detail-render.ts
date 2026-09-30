@@ -508,7 +508,7 @@ const diffStat = (blocks: readonly DiffBlock[]): { adds: number; dels: number } 
 
 // Claude CLI 的 ⎿ 结果摘要: diff 工具→增删数, Read→行数, 其余→首行 + 行数。
 const toolResultPreview = (
-  use: Extract<TurnItem, { t: "tool_use" }>,
+  use: ToolUse,
   diffBlocks: readonly DiffBlock[],
   rawResult: string,
   hasResult: boolean,
@@ -527,16 +527,16 @@ const toolResultPreview = (
   return `<span class="corner">⎿</span>${head || "(空)"}${more}`;
 };
 
-const renderToolBubble = (
-  use: Extract<TurnItem, { t: "tool_use" }>,
-  result: Extract<TurnItem, { t: "tool_result" }> | undefined,
-  key: string,
-): string => {
-  const isBash = use.toolName === "Bash";
+type ToolUse = Extract<TurnItem, { t: "tool_use" }>;
+type ToolResult = Extract<TurnItem, { t: "tool_result" }>;
+
+// 展开后才看得见的那部分: 命令 / diff / 文件内容的高亮, input, 原始 result。
+// 一张气泡的重量几乎全在这里 (语法高亮、ANSI、几十 KB 的结果) —— 所以单独成函数:
+// 整页详情直接内联, rolepage 只在展开那一刻按需取 (见 renderToolBody)。
+const toolBody = (use: ToolUse, result: ToolResult | undefined): string => {
   const isRead = use.toolName === "Read";
-  const bashHtml = isBash ? renderBashCommand(use.toolInput) : "";
-  const diffBlocks = extractDiffBlocks(use.toolName, use.toolInput);
-  const diffHtml = diffBlocks.map(renderDiffBlock).join("");
+  const bashHtml = use.toolName === "Bash" ? renderBashCommand(use.toolInput) : "";
+  const diffHtml = extractDiffBlocks(use.toolName, use.toolInput).map(renderDiffBlock).join("");
   const rawResult = result?.body ?? "";
   const readResultHtml = isRead && rawResult ? renderReadContent(rawResult, extractFilePath(use.toolInput)) : "";
   const diffResultHtml = rawResult && !isRead ? tryRenderUnifiedDiff(rawResult) : "";
@@ -547,18 +547,41 @@ const renderToolBubble = (
   const resultRaw = rawResult
     ? `<details><summary>result (raw)</summary><pre><code>${ansiToHtml(rawResult)}</code></pre></details>`
     : `<details><summary>result</summary><pre style="color:#656d76;font-style:italic;margin:0;padding:12px"><code>(尚未捕获)</code></pre></details>`;
+  return `${primary}${inputSection}${resultRaw}`;
+};
+
+/** `lazyTurn`: 正文不随气泡下发, 只留一个指回 (turn, toolUseId) 的空壳, 客户端展开时再取。
+ *  摘要行与 ⎿ 预览照常渲染 —— 折叠态看到的东西一样不少。 */
+const renderToolBubble = (
+  use: ToolUse,
+  result: ToolResult | undefined,
+  key: string,
+  lazyTurn?: string,
+): string => {
+  const rawResult = result?.body ?? "";
   // 头部一行: ⏺ 工具名(参数) — 参数取命令/路径等主字段, 与 Claude CLI 同款。
   const arg = oneLineCompact(use.toolInput, 72);
   const dur = result ? `<span class="tool-dur">${escHtml(fmtDuration(result.ts - use.ts))}</span>` : "";
-  const preview = toolResultPreview(use, diffBlocks, rawResult, Boolean(result));
+  const preview = toolResultPreview(use, extractDiffBlocks(use.toolName, use.toolInput), rawResult, Boolean(result));
+  const body = lazyTurn === undefined
+    ? `<div class="tool-body">${toolBody(use, result)}</div>`
+    : `<div class="tool-body" data-lazy-turn="${escHtml(lazyTurn)}" data-lazy-use="${escHtml(use.toolUseId)}"></div>`;
   // 整个工具调用折叠进 <details> (默认收起); ⎿ 预览行是它的兄弟, 展开时 CSS 隐藏。
   return `<section class="bubble tool" data-key="${key}">
     <details class="tool-call">
       <summary class="tool-summary"><span class="tool-dot">⏺</span><span class="tool-name">${escHtml(use.toolName)}</span>${arg ? `<span class="tool-arg">(${escHtml(arg)})</span>` : ""}${dur}<span class="ts">${fmtTs(use.ts)}</span></summary>
-      <div class="tool-body">${primary}${inputSection}${resultRaw}</div>
+      ${body}
     </details>
     <div class="tool-result-line">${preview}</div>
   </section>`;
+};
+
+/** 懒气泡的另一半: 一轮里某次工具调用的展开正文。不认识这次调用 → undefined。 */
+export const renderToolBody = (r: TurnDetailRecord, toolUseId: string): string | undefined => {
+  const of = <T extends "tool_use" | "tool_result">(t: T) =>
+    r.items.find((it): it is Extract<TurnItem, { t: T }> => it.t === t && it.toolUseId === toolUseId);
+  const use = of("tool_use");
+  return use && toolBody(use, of("tool_result"));
 };
 
 const oneLineCompact = (input: unknown, max = 100): string => {
@@ -678,8 +701,8 @@ const tagSig = (html: string): string =>
 
 // 一个 turn 的可复用切片: 排序后的 items、渲染好的气泡、完成态与耗时。
 // 单 turn 页 (renderTurnPage) 和 chat 线程页 (renderTurnGroup) 共用同一份产物 ——
-// keyPrefix 让线程页里多个 turn 的 data-key 不互撞。
-const turnParts = (r: TurnDetailRecord, keyPrefix = "", now = Date.now()): {
+// keyPrefix 让线程页里多个 turn 的 data-key 不互撞。`lazy`: 工具正文留空壳 (见 renderToolBubble)。
+const turnParts = (r: TurnDetailRecord, keyPrefix = "", now = Date.now(), lazy = false): {
   items: TurnItem[];
   bodies: string[];
   /** bodies[i] 对应的时刻 —— 子 agent 卡片按它插回父轮时间轴。 */
@@ -693,7 +716,7 @@ const turnParts = (r: TurnDetailRecord, keyPrefix = "", now = Date.now()): {
   // 客户端 reconcile 按此键复用未变气泡的 DOM 节点, 从而保住用户手动展开/折叠的 <details>。
   const bodies = paired.map((p, i) => {
     const key = `${keyPrefix}b${i}`;
-    if (p.kind === "pair") return renderToolBubble(p.use, p.result, key);
+    if (p.kind === "pair") return renderToolBubble(p.use, p.result, key, lazy ? r.id : undefined);
     const it = p.item;
     if (it.t === "text") return renderTextBubble(it, key);
     if (it.t === "approval") return renderApprovalItem(it, key);
@@ -894,6 +917,10 @@ ${statsCard}
 // 与 renderTurnPage 同源 (turnParts), 但去掉整页外壳与大统计卡: 线程里一个 turn
 // 只留一条分隔头 (时间 / model / 状态 / 本轮 token), 总账走页脚 status bar。
 // 返回 html + sig, 让客户端按 sig 判断"这条 turn 变没变", 不用 diff 整段 DOM。
+//
+// 数据分两级下发: 片段里的工具调用只有摘要行 + ⎿ 预览, 展开正文由客户端在展开那一刻
+// 向 /api/tool 取。窗口一次要上屏几十轮, 而正文占了片段体积的绝大部分却默认收着 ——
+// 先给骨架, 上屏就不必等它们渲染和传输。
 export interface TurnFragment {
   id: string;
   html: string;
@@ -932,7 +959,7 @@ export const renderTurnGroup = (
   children: readonly TurnFragment[] = [],
   withQuery = true,
 ): TurnFragment => {
-  const { items, bodies, stamps, done, ageMs } = turnParts(r, `${r.id}:`, now);
+  const { items, bodies, stamps, done, ageMs } = turnParts(r, `${r.id}:`, now, true);
   const u = r.usage;
   const ctxPeak = u ? (u.ctxPeak ?? u.input + u.cacheRead + u.cacheWrite) : 0;
   const chips = [

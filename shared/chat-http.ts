@@ -5,7 +5,8 @@
 //   GET /chat/app.css     → 视图样式 (detail 共用样式 + web/chat.css)
 //   GET /chat/app.js      → 视图脚本 (web/chat.js)
 //   GET /api/role         → 一个 role 的身份 + 它参与的会话 (群聊/单聊) + session 分段
-//   GET /api/msgs         → 一个会话窗口的消息片段 (服务端渲染的 HTML)
+//   GET /api/msgs         → 一个会话窗口的消息片段 (服务端渲染的 HTML; 工具调用只有摘要)
+//   GET /api/tool         → 一次工具调用的展开正文 —— 片段的第二级, 展开时才取
 //   GET /api/role-events  → SSE: role 摘要变动 + 当前窗口的消息增量
 //   GET /api/world        → 关系视图: 全部 wizard、家谱、跨聊天往来、工单、日程
 //
@@ -26,6 +27,7 @@ import {
   roleInfo, roleStats, sessionsOf, windowStats, type Directory, type Msg, type SessionSpan,
 } from "./role-view.js";
 import { renderMark, renderMsg, type MsgFragment } from "./role-render.js";
+import { renderToolBody } from "./detail-render.js";
 import { chatScript, chatStyles, renderChatPage } from "./chat-render.js";
 import type { Asset } from "./web-assets.js";
 import type { DetailRecord, DetailStore } from "./detail-store.js";
@@ -38,6 +40,7 @@ export interface ChatRoutes {
   script: SimpleHandler;
   role: SimpleHandler;
   msgs: SimpleHandler;
+  tool: SimpleHandler;
   events: SimpleHandler;
   world: SimpleHandler;
 }
@@ -163,15 +166,17 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     });
   };
 
-  /** 一个窗口的全部片段, 时间序: 消息 + 视角 role 自己的断点。 */
-  const windowFrags = (records: readonly DetailRecord[], dir: Directory, v: View, now: number): MsgFragment[] => {
+  /** 一个窗口的全部片段, 时间序: 消息 + 视角 role 自己的断点。
+   *  给的是**待渲染**的片段 —— 窗口通常只上屏最后几十条, 先按时间切片再渲染,
+   *  没上屏的那几百轮就一个字都不用排。 */
+  const windowFrags = (records: readonly DetailRecord[], dir: Directory, v: View, now: number): Array<{ ts: number; render: () => MsgFragment }> => {
     const msgs = convMessages(allMessages(records, now), v.role, v.conv, v.with || undefined)
       .filter((m) => inSpan(v.span)(m.ts));
     const lo = msgs[0]?.ts ?? Infinity;
     const marks = marksOf(records, v.role).filter((mk) => mk.createdAt >= lo && inSpan(v.span)(mk.createdAt));
     return [
-      ...msgs.map((m) => renderMsg(m, records, dir, now)),
-      ...marks.map((mk) => renderMark(mk, v.role, dir)),
+      ...msgs.map((m) => ({ ts: m.ts, render: () => renderMsg(m, records, dir, now) })),
+      ...marks.map((mk) => ({ ts: mk.createdAt, render: () => renderMark(mk, v.role, dir) })),
     ].sort((a, b) => a.ts - b.ts);
   };
 
@@ -200,9 +205,18 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       const raw = url.searchParams.get("limit");
       const n = raw === null ? Number.NaN : Number(raw);
       const limit = Number.isFinite(n) && n >= 0 ? n : DEFAULT_LIMIT;
-      const shown = limit === 0 ? all : all.slice(-limit);
+      const shown = (limit === 0 ? all : all.slice(-limit)).map((x) => x.render());
       json(res, 200, { ok: true, at: Date.now(), role: v.role, conv: v.conv, total: all.length, truncated: shown.length < all.length, msgs: shown });
     });
+  };
+
+  // 票据照旧只证明「拿到过一条真链接」—— 任一有效票据可以看任一轮, 与 msgs 同一口径。
+  const tool: SimpleHandler = (_req, res, url) => {
+    if (!resolveTicket(store, url)) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
+    const r = store.get(url.searchParams.get("turn") ?? "");
+    const html = r && isTurn(r) ? renderToolBody(r, url.searchParams.get("use") ?? "") : undefined;
+    if (html === undefined) { json(res, 404, { ok: false, error: "未找到该工具调用" }); return; }
+    json(res, 200, { ok: true, html });
   };
 
   // SSE — 一条连接喂两种事件: role (侧栏 + 顶栏 + 页脚) 与 msg (当前窗口的增量)。
@@ -328,7 +342,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     });
   };
 
-  return { page, styles: asset(chatStyles), script: asset(chatScript), role, msgs, events, world };
+  return { page, styles: asset(chatStyles), script: asset(chatScript), role, msgs, tool, events, world };
 };
 
 /** Path → handler map; the daemon registers each, svr dispatches through it. */
@@ -339,6 +353,7 @@ export const chatRouteTable = (routes: ChatRoutes): Record<string, SimpleHandler
   "GET /chat/app.js": routes.script,
   "GET /api/role": routes.role,
   "GET /api/msgs": routes.msgs,
+  "GET /api/tool": routes.tool,
   "GET /api/role-events": routes.events,
   "GET /api/world": routes.world,
 });
@@ -346,5 +361,5 @@ export const chatRouteTable = (routes: ChatRoutes): Record<string, SimpleHandler
 /** Route keys, single-sourced so the daemon's registration can't drift. */
 export const CHAT_ROUTE_KEYS = [
   "GET /role", "GET /chat", "GET /chat/app.css", "GET /chat/app.js",
-  "GET /api/role", "GET /api/msgs", "GET /api/role-events", "GET /api/world",
+  "GET /api/role", "GET /api/msgs", "GET /api/tool", "GET /api/role-events", "GET /api/world",
 ] as const;

@@ -272,6 +272,9 @@ button { font: inherit; color: inherit }
 .mrow.mine .mb .md-body pre code { background: transparent }
 .mrow.mine .mb .bubble details, .mrow.mine .mb .tg-head { border-color: var(--mine-line) }
 .mrow.mine .mb .tool-body { border-left-color: var(--mine-line) }
+/* 工具正文是展开时才取的 (chat.js loadTool) —— 空壳期间说一句在干什么。 */
+.tool-body[data-lazy-turn]:empty::before { content: "加载中…"; color: #8c959f; font-size: 12px }
+.tool-body[data-lazy-turn][data-err]:empty::before { content: "加载失败 · 收起再展开重试"; color: #cf222e }
 .mrow.mine .mb .io-bar { background: var(--mine-soft) }
 
 /* 气泡对面那片空白 = 换视角的门。平时不可见, 悬停才露出要去谁那里。 */
