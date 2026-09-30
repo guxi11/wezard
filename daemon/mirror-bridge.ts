@@ -47,7 +47,7 @@ import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagH
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
-import { stripAnsi, paneIsBusy, paneIsStalled, transcriptStalled, summarizeTail, lastAssistantText, lastReply, unwrapPasted, lastContextTokens, keepaliveStamps, openKeepalivePing, talkRounds, openToolUses, renderDialog, type PeerInfo } from "./peers.js";
+import { stripAnsi, paneIsBusy, paneIsStalled, transcriptStalled, summarizeTail, lastAssistantText, lastReply, unwrapPasted, lastContextTokens, keepaliveStamps, openKeepalivePing, keepalivePingSigs, isKeepalivePingText, talkRounds, openToolUses, renderDialog, type PeerInfo } from "./peers.js";
 
 // PATH augmentation: launchd / systemd start the daemon
 // with a stripped PATH that often lacks nvm / homebrew, breaking spawn(claudeBin).
@@ -2416,16 +2416,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // renderLine, the tick and the transcript parser all agree on what counts
   // as a ping. Content is the source of truth for the swallow: timers and
   // echo-TTLs lose it across reloads/replays.
-  const keepalivePingSigs = [cfg.wrc.mirror.keepalive.ping, cfg.wrc.mirror.keepalive.resumePing]
-    .map((p) => normAssistant(p).slice(0, 40))
-    .filter((s) => s.length > 0);
+  const pingSigs = keepalivePingSigs(cfg.wrc.mirror.keepalive.ping, cfg.wrc.mirror.keepalive.resumePing);
   // The warmer alone — what the peer readers (peek / wait / roster summary) strip.
   // `resumePing` is excluded on purpose: the turn it opens is real work resumed.
-  const warmerSigs = [normAssistant(cfg.wrc.mirror.keepalive.ping).slice(0, 40)].filter(Boolean);
-  const isKeepalivePing = (text: string): boolean => {
-    const n = normAssistant(text);
-    return n.toLowerCase() === "ping" || keepalivePingSigs.some((sig) => n.includes(sig));
-  };
+  const warmerSigs = keepalivePingSigs(cfg.wrc.mirror.keepalive.ping);
+  const isKeepalivePing = (text: string): boolean => isKeepalivePingText(text, pingSigs);
 
   // ── Typewriter stream lifecycle ────────────────────────────────────
   // WeCom spec: server polls us for stream refreshes for up to 6 min from the
@@ -3646,7 +3641,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // transcript, not on the word alone: a real answer that mentions pong has a
     // real question in front of it.
     if (item.kind === "text" && !a.keepaliveQuiet && !a.keepaliveByContent && PONG_RE.test(item.body)) {
-      const ping = openKeepalivePing(a.jsonlPath, keepalivePingSigs);
+      const ping = openKeepalivePing(a.jsonlPath, pingSigs);
       if (ping) beginKeepaliveByContent(a, ping);
     }
     if (a.keepaliveQuiet || a.keepaliveByContent) {

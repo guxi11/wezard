@@ -215,11 +215,19 @@ const normPing = (s: string): string => s.replace(/\s+/gu, "");
 export const keepalivePingSigs = (...pings: string[]): string[] =>
   pings.map((p) => normPing(p).slice(0, 40)).filter((s) => s.length > 0);
 
+/** A sig at the cut length is a prefix of a longer ping; a shorter one IS the whole ping. */
+const SIG_LEN = 40;
+
 /** Is this user-turn text a keepalive ping? Matches every configured form plus
- *  the bare "ping" legacy streak form still present in older transcripts. */
-export const isKeepalivePingText = (text: string, sigs: readonly string[]): boolean =>
-  normPing(text).toLowerCase() === "ping" ||
-  sigs.some((sig) => sig.length > 0 && normPing(text).includes(sig));
+ *  the bare "ping" legacy streak form still present in older transcripts.
+ *  Anchored, never a substring: `resumePing` is a plain "continue", and a peer's
+ *  "continue（接着干原任务）" or a human's "continue" is real work — read as a ping it
+ *  gets swallowed whole (no reply to the chat, no `from` on the rolepage). */
+export const isKeepalivePingText = (text: string, sigs: readonly string[]): boolean => {
+  const n = normPing(text);
+  return n.toLowerCase() === "ping" ||
+    sigs.some((sig) => sig.length > 0 && (sig.length < SIG_LEN ? n === sig : n.startsWith(sig)));
+};
 
 /** Keepalive = the ping query + everything the model says back until the next
  *  user turn — query-based, so a reply that adds more than "pong" still goes,
@@ -559,12 +567,36 @@ export const keepaliveStamps = (
   const real = withoutKeepalive(turns, pingSigs);
   // Everything past the last genuine turn is keepalive; its user turns are the pings.
   const sinceReal = real.length ? turns.slice(turns.lastIndexOf(real[real.length - 1]!) + 1) : turns;
+  // Turns are text-only, so a long tool chain after the last prose line would
+  // read as idle — the tool rows are real work and each one touched the cache.
+  // A ping's reply is a bare "pong", never a tool call, so they can't be warmer traffic.
+  const work = lastToolMs(jsonlPath);
+  const pingsAfterWork = work > newest(sinceReal) ? [] : sinceReal;
   return {
-    lastMs: newest(turns),
-    lastRealMs: newest(real),
-    streak: sinceReal.filter((t) => t.role === "user").length,
+    lastMs: Math.max(newest(turns), work),
+    lastRealMs: Math.max(newest(real), work),
+    streak: pingsAfterWork.filter((t) => t.role === "user").length,
     stamped: turns.some((t) => (t.ms ?? 0) > 0),
   };
+};
+
+/** Timestamp of the newest main-thread tool_use / tool_result row in the tail (0 = none). */
+const lastToolMs = (jsonlPath: string): number => {
+  const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
+  return readTailBytes(jsonlPath, TAIL_BYTES)
+    .split("\n")
+    .reduce((m, line) => {
+      if (!line.includes("tool_")) return m; // cheap prefilter
+      try {
+        const parsed = JSON.parse(line) as { timestamp?: unknown };
+        const row = normalize(parsed);
+        if (!row || row.isMeta || row.isSidechain) return m;
+        const content = row.message?.content;
+        const tooly = Array.isArray(content) && content.some((b) => /^tool_(use|result)$/.test((b as { type?: string })?.type ?? ""));
+        const ms = typeof parsed.timestamp === "number" ? parsed.timestamp : Date.parse(String(parsed.timestamp ?? ""));
+        return tooly && !Number.isNaN(ms) ? Math.max(m, ms) : m;
+      } catch { return m; }
+    }, 0);
 };
 
 // ── Pane liveness ─────────────────────────────────────────────────────
@@ -582,7 +614,12 @@ export const keepaliveStamps = (
 // Only the footer region is searched (last few non-blank rows). Assistant prose
 // scrolled just above the box can quote an elapsed time; the footer cannot lie.
 const SPINNER_RE = /\S*…\s*\((?:\d+h\s*)?(?:\d+m\s*)?\d+(?:\.\d+)?s\b/;
-const BUSY_MARKERS = [SPINNER_RE, /esc to interrupt/i, /按\s*esc[^\n]*中断/, /esc\s*中断/i];
+// The CLI's own auto-retry footer (`✻ API error · Retrying in 0s · attempt 2/10`)
+// has neither an ellipsis nor a timer parenthetical, yet the turn is still in
+// flight — read as idle it both lets keepalive in and trips paneIsStalled's
+// /API Error/, so a healthy session gets a stray "continue" queued behind the retry.
+const RETRY_RE = /Retrying in \d+(?:\.\d+)?s\b.*attempt \d+\/\d+/i;
+const BUSY_MARKERS = [SPINNER_RE, RETRY_RE, /esc to interrupt/i, /按\s*esc[^\n]*中断/, /esc\s*中断/i];
 const FOOTER_ROWS = 8;
 
 export const paneIsBusy = (paneText: string): boolean =>
