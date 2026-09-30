@@ -11,6 +11,7 @@
 // attachments) and the graph runner (which drives them) both compose on top.
 import { existsSync, openSync, readSync, closeSync, statSync } from "node:fs";
 import { backendForPath, type CliBackendName } from "../shared/cli-backends.js";
+import { truncate, truncateWithCount } from "../shared/std.js";
 
 /** Strip ANSI SGR/CSI + OSC so captured pane text is safe to embed / match on. */
 export const stripAnsi = (s: string): string =>
@@ -70,6 +71,8 @@ const readTailUntil = <T>(
 export interface Turn {
   role: "user" | "assistant";
   text: string;
+  /** 这一句挂着的信封 (谁说的、在哪说的); 没挂 = 人在这个会话的 home 聊天里说的。 */
+  env?: Envelope;
   /** Wall-clock epoch ms from the line's own `timestamp`; 0 if absent/unparsable.
    *  Lets keepalive anchor realIdle to a message's actual time, not file mtime. */
   ms?: number;
@@ -85,6 +88,8 @@ const META_RE = /<(system-reminder|command-[^>]*|local-command-[^>]*|task-notifi
 // 壳是传输的产物不是内容: 只剥标签, 里面的话原样留下。
 const PASTED_TAG_RE = /<pasted_content id="[^"]*">\n?|\n?<\/pasted_content(?:\s+id="[^"]*")?>/g;
 export const unwrapPasted = (s: string): string => s.replace(PASTED_TAG_RE, "");
+/** 一段落盘的输入 → 人真正说的那句话: 去粘贴壳, 去信封 / 名册增量 / slash 包装。 */
+export const stripMeta = (s: string): string => unwrapPasted(s).replace(META_RE, "");
 
 const blockText = (content: unknown): string => {
   if (typeof content === "string") return content;
@@ -99,6 +104,44 @@ const blockText = (content: unknown): string => {
  *  the line shape is normalized through the owning CLI's dialect adapter. */
 export const tailTurns = (jsonlPath: string, n = 3, keepLines = false): Turn[] =>
   readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, keepLines), (ts) => ts.length >= n).slice(-n);
+
+/** `tailTurns` 去掉保温 ping/pong 之后的最后 `n` 轮 —— 凡是交给另一个 wizard (或人)
+ *  **读**的都走这里: 挂机一晚的会话尾巴上全是 ping/pong, 照 tailTurns 数出来的
+ *  「最近 6 轮」一句真话都没有, 「最后一条回复」是一个 pong。`pingSigs` 只给保温
+ *  那一种 —— resumePing ("continue") 之后模型是真的在干活, 那一轮不能丢。 */
+export const talkTurns = (jsonlPath: string, n: number, pingSigs: readonly string[] = [], keepLines = false): Turn[] => {
+  const clean = (ts: Turn[]): Turn[] => withoutKeepalive(ts, pingSigs);
+  return clean(readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, keepLines), (ts) => clean(ts).length >= n)).slice(-n);
+};
+
+/** 一个会话的来回, 每个来回 = 一句问话 + 它之后的全部回答 (途中的话在前, 终句在
+ *  最后), 旧的在前。读多深由时间窗定, 调用方再按时刻与条数裁:
+ *    给了 `since` → 一直读到比它更早的那一句 (窗口内的一句不漏);
+ *    没给        → 读到 `until` 之前攒够 `rounds` 个来回为止。
+ *  多读一个问话才停, 所以留下的最早一组是完整的; 开头那组若没有问话 (问话落在
+ *  读到的范围之外) 就丢掉 —— 一句不知道在答谁的话没法归到任何频道。 */
+export const talkRounds = (
+  jsonlPath: string,
+  rounds: number,
+  pingSigs: readonly string[] = [],
+  win: { since?: number; until?: number } = {},
+): Turn[][] => {
+  const { since, until = Infinity } = win;
+  const clean = (ts: Turn[]): Turn[] => withoutKeepalive(ts, pingSigs);
+  const enough = (ts: Turn[]): boolean => {
+    const seen = clean(ts).filter((t) => (t.ms ?? 0) < until);
+    return since !== undefined
+      ? seen.length > 0 && (seen[0]!.ms ?? 0) < since
+      : seen.filter((t) => t.role === "user").length > rounds;
+  };
+  return clean(readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, true), enough))
+    .reduce<Turn[][]>((acc, t) => {
+      if (t.role === "user" || acc.length === 0) acc.push([t]);
+      else acc[acc.length - 1]!.push(t);
+      return acc;
+    }, [])
+    .filter((round) => round[0]!.role === "user");
+};
 
 /** 纯解析: 一段 transcript 原文 → 里面的对话轮次。`keepLines` 保留换行 —— 摘要与
  *  预览要压成一行, 但交给另一个 wizard 读的回复不能: 表格 / 列表 / 代码块压成一行
@@ -119,7 +162,9 @@ const parseTurns = (jsonlPath: string, raw: string, keepLines = false): Turn[] =
       if (!row || row.isMeta || row.isSidechain) return [];
       const role = row.message?.role;
       if (role !== "user" && role !== "assistant") return [];
-      const bare = unwrapPasted(blockText(row.message?.content)).replace(META_RE, "");
+      const raw = blockText(row.message?.content);
+      const bare = stripMeta(raw);
+      const env = role === "user" ? parseEnvelope(raw) : undefined;
       const text = (keepLines ? bare : bare.replace(/\s+/g, " ")).trim();
       // Claude writes ISO timestamp strings; CodeBuddy writes epoch-ms NUMBERS.
       // Date.parse(number) coerces to a bare digit-string and returns NaN —
@@ -129,7 +174,7 @@ const parseTurns = (jsonlPath: string, raw: string, keepLines = false): Turn[] =
       // the round budget without bound.
       const rawTs = (parsed as { timestamp?: unknown }).timestamp;
       const ms = typeof rawTs === "number" ? rawTs : Date.parse(String(rawTs ?? ""));
-      return text ? [{ role, text, ms: Number.isNaN(ms) ? 0 : ms } as Turn] : [];
+      return text ? [{ role, text, ms: Number.isNaN(ms) ? 0 : ms, ...(env ? { env } : {}) } as Turn] : [];
     });
 };
 
@@ -176,6 +221,24 @@ export const isKeepalivePingText = (text: string, sigs: readonly string[]): bool
   normPing(text).toLowerCase() === "ping" ||
   sigs.some((sig) => sig.length > 0 && normPing(text).includes(sig));
 
+/** Keepalive = the ping query + everything the model says back until the next
+ *  user turn — query-based, so a reply that adds more than "pong" still goes,
+ *  and a backend that splits one reply across several records (CodeBuddy:
+ *  mid-turn narration + final) loses all of them, not just the first. A window
+ *  that opens on a bare "pong" lost its ping to the cut; that one goes too. */
+export const withoutKeepalive = <T extends { role: string; text: string }>(
+  turns: readonly T[],
+  pingSigs: readonly string[],
+): T[] =>
+  turns.reduce<{ kept: T[]; ping: boolean }>(
+    (acc, t) => {
+      const ping = t.role === "user" ? isKeepalivePingText(t.text, pingSigs) : acc.ping;
+      if (!ping) acc.kept.push(t);
+      return { kept: acc.kept, ping };
+    },
+    { kept: [], ping: turns[0]?.role === "assistant" && /^pong\W*$/i.test(turns[0].text.trim()) },
+  ).kept;
+
 /** The keepalive ping this session's newest words answer: the text of the LAST
  *  user turn when that turn is a ping, else undefined. Read from the transcript
  *  on purpose — "was a keepalive sent" must survive whatever forgot the
@@ -211,17 +274,9 @@ const parseToolEntries = (jsonlPath: string, raw: string): ToolEntry[] => {
     if (!row || row.isMeta || row.isSidechain) return [];
     const role = row.message?.role;
     if (role !== "user" && role !== "assistant") return [];
-    const text = unwrapPasted(blockTextWithTools(row.message?.content)).replace(META_RE, "").replace(/\s+/g, " ").trim();
+    const text = stripMeta(blockTextWithTools(row.message?.content)).replace(/\s+/g, " ").trim();
     return text ? [{ role, text }] : [];
   });
-};
-
-/** Keepalive = ping query + whatever the model replies to it (query-based,
- *  same rule as keepaliveStamps). */
-const withoutPings = (all: readonly ToolEntry[], pingSigs: readonly string[]): ToolEntry[] => {
-  const isPing = (e: ToolEntry | undefined): boolean =>
-    !!e && e.role === "user" && isKeepalivePingText(e.text, pingSigs);
-  return all.filter((e, i) => !isPing(e) && !(e.role === "assistant" && isPing(all[i - 1])));
 };
 
 /** 逻辑轮次 = 角色交替的次数 (一条模型回复可能被后端拆成好几行记录)。 */
@@ -238,11 +293,11 @@ const cutForTurns = (entries: readonly ToolEntry[], n: number): number => {
 };
 
 export const tailTurnsWithTools = (jsonlPath: string, n = 3, pingSigs: readonly string[] = []): string => {
-  const entries = withoutPings(
+  const entries = withoutKeepalive(
     readTailUntil(
       jsonlPath,
       (raw) => parseToolEntries(jsonlPath, raw),
-      (es) => countTurns(withoutPings(es, pingSigs)) >= n,
+      (es) => countTurns(withoutKeepalive(es, pingSigs)) >= n,
     ),
     pingSigs,
   );
@@ -255,9 +310,9 @@ export const tailTurnsWithTools = (jsonlPath: string, n = 3, pingSigs: readonly 
 const stripMd = (s: string): string => s.replace(/[`*_~|]/g, "").replace(/\s+/g, " ").trim();
 
 /** One-line "what is this session doing" preview, for list rendering. */
-export const summarizeTail = (jsonlPath: string, n = 3, per = 80): string => {
+export const summarizeTail = (jsonlPath: string, n = 3, per = 80, pingSigs: readonly string[] = []): string => {
   if (!existsSync(jsonlPath)) return "(新会话 · 暂无对话)";
-  const turns = tailTurns(jsonlPath, n);
+  const turns = talkTurns(jsonlPath, n, pingSigs);
   if (turns.length === 0) return "(暂无对话)";
   return turns.map((t) => `${t.role === "user" ? "你" : "AI"}: ${stripMd(t.text).slice(0, per)}`).join(" · ");
 };
@@ -266,11 +321,41 @@ export const summarizeTail = (jsonlPath: string, n = 3, per = 80): string => {
  *  that session", for one agent reading another's conversation. Strictly better
  *  than a pane capture for *reading*: whole messages (the viewport truncates),
  *  no ANSI / TUI chrome, already role-tagged. The pane remains the only honest
- *  source for `busy`. */
-export const renderDialog = (turns: readonly Turn[], per = 800): string =>
+ *  source for `busy`. The newest turn gets `lastPer` — it is the one a reader
+ *  came for (the peer's latest answer), so it is clipped last and in the middle. */
+export const renderDialog = (turns: readonly Turn[], per = 800, lastPer = per): string =>
   turns
-    .map((t) => `${t.role === "user" ? "▸" : "◂"} ${t.text.length > per ? `${t.text.slice(0, per)}…` : t.text}`)
+    .map((t, i) => `${t.role === "user" ? "▸" : "◂"} ${i === turns.length - 1 ? clipMiddle(t.text, Math.max(per, lastPer)) : truncateWithCount(t.text, per)}`)
     .join("\n");
+
+/** 这个会话此刻悬着的工具调用 (发了 tool_use、还没等到 tool_result) 的名字。
+ *
+ *  peek 从前靠刮终端回答「它卡在哪」; transcript 答得更准: 一个不在转圈、却悬着
+ *  工具调用的会话, 就是停在审批卡 / 本地弹窗上等人点。一句新的人话会让没收到结果
+ *  的调用作废 (被打断的那些), 所以遇到带正文的 user 行就清空。 */
+export const openToolUses = (jsonlPath: string): string[] =>
+  readTailUntil(jsonlPath, (raw) => parseOpenTools(jsonlPath, raw), (r) => r.rows > 0).names;
+
+const parseOpenTools = (jsonlPath: string, raw: string): { names: string[]; rows: number } => {
+  const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
+  const open = new Map<string, string>();
+  let rows = 0;
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let row;
+    try { row = normalize(JSON.parse(line)); } catch { continue; }
+    const content = row?.message?.content;
+    if (!row || row.isMeta || row.isSidechain || !content) continue;
+    rows++;
+    if (row.message?.role === "user" && stripMeta(blockText(content)).trim()) open.clear();
+    if (!Array.isArray(content)) continue;
+    for (const b of content) {
+      if (b.type === "tool_use" && b.id) open.set(b.id, b.name ?? "?");
+      if (b.type === "tool_result" && b.tool_use_id) open.delete(b.tool_use_id);
+    }
+  }
+  return { names: [...open.values()], rows };
+};
 
 /** 交付收口行。
  *
@@ -290,11 +375,8 @@ export const extractResult = (text: string, max = 800): string => {
 
 /** The peer's most recent assistant message — the handoff payload when one
  *  agent drives another ("take #fix's conclusion and review it"). */
-export const lastAssistantText = (jsonlPath: string, max = 4000): string => {
-  const turns = tailTurns(jsonlPath, 40).filter((t) => t.role === "assistant");
-  const last = turns[turns.length - 1]?.text ?? "";
-  return last.length > max ? `${last.slice(0, max)}…` : last;
-};
+export const lastAssistantText = (jsonlPath: string, max = 4000, pingSigs: readonly string[] = []): string =>
+  truncate(talkTurns(jsonlPath, 40, pingSigs).filter((t) => t.role === "assistant").at(-1)?.text ?? "", max);
 
 /** 掐中间: 来龙去脉在头、结论在尾, 超长时丢的该是中段。(从尾巴截会把收口那一行
  *  截掉 —— 而那恰恰是对方最想读的。) */
@@ -306,9 +388,10 @@ export const clipMiddle = (s: string, max = 4000, head = Math.floor(max / 4)): s
  *  「最后一条 assistant 文本」本身不带归属: 那句话没被接住、或者它停在一个等人点
  *  的弹窗上时, 最后一条是**上一件事**的答案, 原样交回去就是拿旧结论冒充新结论。
  *  发话时刻是最便宜的关联 id (A2A 的 taskId 在这里的等价物): 早于它的一律不算。
- *  没有时间戳的行 (ms=0) 无从判断, 放行 —— 退化成旧行为, 而不是把回复吞掉。 */
-export const lastReply = (jsonlPath: string, sinceMs = 0): string =>
-  tailTurns(jsonlPath, 40, true)
+ *  没有时间戳的行 (ms=0) 无从判断, 放行 —— 退化成旧行为, 而不是把回复吞掉。
+ *  保温的 pong 不算回复: 它比真正的答案晚, 不剔掉的话等的人拿到的就是一个 "pong"。 */
+export const lastReply = (jsonlPath: string, sinceMs = 0, pingSigs: readonly string[] = []): string =>
+  talkTurns(jsonlPath, 40, pingSigs, true)
     .filter((t) => t.role === "assistant" && (!t.ms || t.ms >= sinceMs))
     .at(-1)?.text ?? "";
 
@@ -320,6 +403,50 @@ export const lastReply = (jsonlPath: string, sinceMs = 0): string =>
 // 自己身上: 宪章是出生时的快照, 正在跑的老 wizard 读不到新规矩, 这一段读得到。
 // 与 mention hint / 名册增量同一个 `<system-reminder>` 壳 —— mirror 的 meta 剥离器
 // 和 tailTurns 都会丢掉它, 不进气泡、不进 rolepage、不进 peek。
+//
+// 信封同时是 transcript 里**唯一**记着「这句话是谁、在哪个频道说的」的地方: 会话的
+// jsonl 只知道输入框里进过什么。read_chat 就靠把它读回来 (parseEnvelope) 在各个
+// 会话的 jsonl 之间拼出一个群 / 一段私聊的记录 —— 所以渲染与解析放在一起, 改措辞
+// 要两边一起改, 而且老 transcript 里的旧措辞得继续认。
+export interface Envelope {
+  kind: "peer" | "human" | "task";
+  /** 发话方的称呼: wizard 是 `.name`, 人是 userid, 定时任务是 `定时 <id>`。 */
+  from: string;
+  /** wizard 之间的私聊。 */
+  private: boolean;
+  /** 公开轮所在群的名字; "" = 这个会话的 home 聊天。 */
+  chat: string;
+}
+
+const REMINDER_RE = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
+const ENVELOPES: ReadonlyArray<[RegExp, (m: RegExpMatchArray) => Envelope]> = [
+  [/这一轮是 wizard `([^`]+)` 发来的\*\*私聊\*\*/, (m) => ({ kind: "peer", from: m[1]!, private: true, chat: "" })],
+  [/这一轮是 wizard `([^`]+)` 在群(?: \*\*([^*]*)\*\* )?里\*\*公开\*\*/, (m) => ({ kind: "peer", from: m[1]!, private: false, chat: m[2] ?? "" })],
+  [/这一轮是 `([^`]+)` 在群 \*\*([^*]*)\*\* 里说的/, (m) => ({ kind: "human", from: m[1]!, private: false, chat: m[2] ?? "" })],
+  [/这一轮是定时任务 `([^`]+)` 到点放进来的/, (m) => ({ kind: "task", from: `定时 ${m[1]!}`, private: false, chat: "" })],
+];
+
+/** 一句落盘的输入上挂着的信封。只在 `<system-reminder>` 里找 —— 正文里引用这句
+ *  措辞的人话不算。 */
+export const parseEnvelope = (raw: string): Envelope | undefined => {
+  const reminders = raw.match(REMINDER_RE)?.join("\n") ?? "";
+  return reminders
+    ? ENVELOPES.reduce<Envelope | undefined>((hit, [re, make]) => hit ?? ((m) => (m ? make(m) : undefined))(reminders.match(re)), undefined)
+    : undefined;
+};
+
+const reminder = (...lines: string[]): string => ["", "<system-reminder>", ...lines, "</system-reminder>"].join("\n");
+
+/** 人说的那一轮的信封。只在 transcript 自己推不出来时才挂 (见 inbound.send): 一个
+ *  wizard 被人从别的群叫到、或者住在多人的群里, 它和后来读记录的人都得知道这句是
+ *  谁、在哪说的; 住在与一个人的单聊里的, 默认值就是对的, 不为它每轮多付一段。 */
+export const renderHumanEnvelope = (user: string, chat: string): string =>
+  reminder(`这一轮是 \`${user}\` 在群 **${chat}** 里说的, 你的回复发回那个群。`);
+
+/** 定时任务放的那一轮: 不标的话, 记录里它就成了「人说的」。 */
+export const renderTaskEnvelope = (taskId: string): string =>
+  reminder(`这一轮是定时任务 \`${taskId}\` 到点放进来的, 不是人此刻说的 —— 照常执行, 回复照常发进群。`);
+
 /** `from` = 发话方的称呼 (`.name`); `chat` 给了 = 公开轮 (那个群的名字, 可以是 ""),
  *  不给 = 私聊。 */
 export const renderPeerEnvelope = (from: string, chat?: string): string =>
@@ -392,30 +519,15 @@ export const keepaliveStamps = (
   // prefixes of each) plus the bare "ping" that streak pings used to shrink to
   // (transcripts written before that changed still hold them) — otherwise a
   // keepalive user line reads as REAL activity and re-anchors lastRealMs /
-  // resets the round counter before the model has even replied.
-  const isPing = (t: Turn): boolean => t.role === "user" && isKeepalivePingText(t.text, pingSigs);
-  let lastMs = 0;
-  let lastRealMs = 0;
-  let stamped = false;
-  // "After a ping" persists across EVERY assistant turn until the next user
-  // turn: CodeBuddy splits one model reply into multiple independent message
-  // records (mid-turn narration + final), so strict ping→assistant adjacency
-  // would let the 2nd record of a pong read as REAL activity and reset the
-  // round budget.
-  let afterPing = false;
-  for (let i = 0; i < turns.length; i++) {
-    const t = turns[i]!;
-    const ms = t.ms ?? 0;
-    if (ms > 0) stamped = true;
-    if (ms > lastMs) lastMs = ms;
-    // Keepalive = ping query + whatever the model replies to it. Detection is
-    // purely query-based: if the user turn is a ping, the assistant reply is
-    // keepalive too — even when the model adds extra content beyond "pong".
-    const isKeepalive = isPing(t) || (afterPing && t.role === "assistant");
-    if (t.role === "user") afterPing = isPing(t);
-    if (ms > lastRealMs && !isKeepalive) lastRealMs = ms;
-  }
-  return { lastMs, lastRealMs, stamped };
+  // resets the round counter before the model has even replied. What counts as
+  // keepalive (the ping AND every record of its reply) is `withoutKeepalive`'s
+  // rule — one definition for the clocks, the quote dedup and the peer readers.
+  const newest = (ts: readonly Turn[]): number => ts.reduce((m, t) => Math.max(m, t.ms ?? 0), 0);
+  return {
+    lastMs: newest(turns),
+    lastRealMs: newest(withoutKeepalive(turns, pingSigs)),
+    stamped: turns.some((t) => (t.ms ?? 0) > 0),
+  };
 };
 
 // ── Pane liveness ─────────────────────────────────────────────────────
@@ -487,16 +599,6 @@ export const transcriptStalled = (jsonlPath: string): boolean => {
   }
   return false;
 };
-
-/** Trim a captured pane to its last `rows` non-blank lines — the TUI pads the
- *  viewport with empties that would otherwise dominate a WeCom bubble. */
-export const compactPane = (paneText: string, rows = 24): string =>
-  stripAnsi(paneText)
-    .split("\n")
-    .map((l) => l.replace(/\s+$/, ""))
-    .filter((l) => l.trim())
-    .slice(-rows)
-    .join("\n");
 
 // ── 提到别的 wizard ───────────────────────────────────────────────────
 // 入站路由只吃掉消息里**第一个** `#tag` —— 那个决定这条消息进谁的输入框。其余的

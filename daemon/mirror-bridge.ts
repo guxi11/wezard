@@ -47,7 +47,7 @@ import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagH
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
-import { stripAnsi, compactPane, paneIsBusy, paneIsStalled, transcriptStalled, summarizeTail, lastAssistantText, lastReply, unwrapPasted, lastContextTokens, keepaliveStamps, openKeepalivePing, tailTurns, renderDialog, type PeerInfo } from "./peers.js";
+import { stripAnsi, paneIsBusy, paneIsStalled, transcriptStalled, summarizeTail, lastAssistantText, lastReply, unwrapPasted, lastContextTokens, keepaliveStamps, openKeepalivePing, talkTurns, openToolUses, renderDialog, type PeerInfo } from "./peers.js";
 
 // PATH augmentation: launchd / systemd start the daemon
 // with a stripped PATH that often lacks nvm / homebrew, breaking spawn(claudeBin).
@@ -2039,13 +2039,11 @@ export interface MirrorBridge {
   /** Every chat the daemon knows — named ones plus any with a live/persisted
    *  session — with the target keys living in each. The cross-chat directory. */
   chatRoster: (self: string) => Array<{ base: string; name: string; self: boolean; targets: string[] }>;
-  /** Live tmux pane tail of `target` — what that agent's terminal shows right
-   *  now, including in-flight tool calls the transcript hasn't recorded yet. */
-  peekPane: (target: string, rows?: number) => Promise<{ ok: boolean; reason?: string; pane?: string; busy?: boolean }>;
-  /** Last `n` turns of `target`'s conversation, read from its transcript. The
-   *  default way to observe a peer; `peekPane` is the fallback for a session
-   *  whose jsonl isn't bound/written yet. */
-  peekTurns: (target: string, n?: number) => Promise<{ ok: boolean; reason?: string; dialog?: string; busy?: boolean }>;
+  /** Last `n` text turns of `target`'s conversation, read from its transcript
+   *  (keepalive ping/pong stripped) — the only way a peer is read; the terminal
+   *  is never scraped for content. `waiting` = tool calls left hanging while the
+   *  session is idle, i.e. it is parked on an approval card / local prompt. */
+  peekTurns: (target: string, n?: number) => Promise<{ ok: boolean; reason?: string; dialog?: string; busy?: boolean; waiting?: string[] }>;
   /** Mid-turn check for one target. False for cold/dead panes (nothing running). */
   isBusy: (target: string) => Promise<boolean>;
   /** Switch `target`'s live pane onto the model closest to `wanted` by driving
@@ -2054,6 +2052,9 @@ export interface MirrorBridge {
    *  of this wizard comes back on it. `scope: "default"` additionally makes it
    *  the model every new session of that CLI starts on. */
   setModel: (target: string, wanted: string, scope?: ModelScope) => Promise<ModelSelectResult>;
+  /** Every bound session's transcript, with its mtime (0 = not written yet).
+   *  No tmux — a stat each. read_chat folds a chat's history out of these. */
+  transcripts: () => Array<{ target: string; jsonlPath: string; mtime: number }>;
   /** Latest assistant message of `target` — the handoff payload between agents. */
   lastText: (target: string) => string;
   /** `target` 在 `sinceMs` 之后最新的一条回复 (全文、保留换行); 没有 = ""。 */
@@ -2414,6 +2415,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const keepalivePingSigs = [cfg.wrc.mirror.keepalive.ping, cfg.wrc.mirror.keepalive.resumePing]
     .map((p) => normAssistant(p).slice(0, 40))
     .filter((s) => s.length > 0);
+  // The warmer alone — what the peer readers (peek / wait / roster summary) strip.
+  // `resumePing` is excluded on purpose: the turn it opens is real work resumed.
+  const warmerSigs = [normAssistant(cfg.wrc.mirror.keepalive.ping).slice(0, 40)].filter(Boolean);
   const isKeepalivePing = (text: string): boolean => {
     const n = normAssistant(text);
     return n.toLowerCase() === "ping" || keepalivePingSigs.some((sig) => n.includes(sig));
@@ -5168,11 +5172,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   const lastText = (target: string): string => {
     const p = jsonlOf(target);
-    return p ? lastAssistantText(p) : "";
+    return p ? lastAssistantText(p, 4000, warmerSigs) : "";
   };
   const replySince = (target: string, sinceMs = 0): string => {
     const p = jsonlOf(target);
-    return p ? lastReply(p, sinceMs) : "";
+    return p ? lastReply(p, sinceMs, warmerSigs) : "";
   };
 
   // ── 未收口气泡的引用判定 ────────────────────────────────────────────
@@ -5229,7 +5233,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       paneAlive,
       busy: paneAlive ? paneIsBusy(await capturePaneTail(pane, 12)) : false,
       lastActivity,
-      summary: jsonlPath ? summarizeTail(jsonlPath) : "(未绑定会话)",
+      summary: jsonlPath ? summarizeTail(jsonlPath, 3, 80, warmerSigs) : "(未绑定会话)",
       self: t === self,
     };
   };
@@ -5239,7 +5243,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const peers = async (target: string): Promise<PeerInfo[]> =>
     (await Promise.all(chatTargets(target).map((t) => peerInfoOf(t, target)))).sort(byRecent);
 
-  // list_peers 的跨 chat 补充: 其他 chat 里的 wizard。名字全局唯一, 所以它们
+  // 名册的跨 chat 补充: 其他 chat 里的 wizard。名字全局唯一, 所以它们
   // 全都叫得动 —— 地址就是 `.name`, 与住在哪个聊天无关。
   const foreignPeers = async (self: string): Promise<PeerInfo[]> => {
     const selfBase = baseOfKey(self);
@@ -5273,31 +5277,22 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return (await mapLimit(hot, WORLD_CONC, (t) => peerInfoOf(t, self))).sort(byRecent);
   };
 
-  // Capture a few extra rows then compact away the TUI's blank padding, so
-  // `rows` counts lines the user actually cares about.
-  const peekPane = async (
-    target: string,
-    rows = 24,
-  ): Promise<{ ok: boolean; reason?: string; pane?: string; busy?: boolean }> => {
-    const pane = paneOf(target);
-    if (!pane) return { ok: false, reason: "no tmux pane bound for target" };
-    if (!(await tmuxPaneAlive(pane))) return { ok: false, reason: "tmux pane no longer alive — the session needs /new or a respawn" };
-    const raw = await capturePaneTail(pane, Math.max(8, rows) + 12);
-    return { ok: true, pane: compactPane(raw, rows), busy: paneIsBusy(raw) };
-  };
-
   // Reading a peer's conversation is a transcript job, not a terminal job: the
   // jsonl holds whole role-tagged messages, while a pane capture is ANSI-laden
-  // and clipped at the viewport edge. Only `busy` still comes from the pane.
+  // and clipped at the viewport edge. Text turns only, keepalive stripped. Only
+  // `busy` still comes from the pane (the spinner is the one thing a transcript
+  // cannot say during a long tool call); "where is it stuck" is answered by the
+  // transcript too — `waiting` = tool calls still hanging on an idle session.
   const peekTurns = async (
     target: string,
     n = 6,
-  ): Promise<{ ok: boolean; reason?: string; dialog?: string; busy?: boolean }> => {
+  ): Promise<{ ok: boolean; reason?: string; dialog?: string; busy?: boolean; waiting?: string[] }> => {
     const jsonl = jsonlOf(target);
     const busy = await isBusy(target);
-    if (!jsonl || !existsSync(jsonl)) return { ok: false, reason: "no transcript bound for target", busy };
-    const dialog = renderDialog(tailTurns(jsonl, n));
-    return dialog ? { ok: true, dialog, busy } : { ok: false, reason: "transcript has no turns yet", busy };
+    if (!jsonl || !existsSync(jsonl)) return { ok: false, reason: "它还没有 transcript (没接过第一句话) —— send_peer 跟它说一句就有了", busy };
+    const dialog = renderDialog(talkTurns(jsonl, n, warmerSigs, true), 800, 4000);
+    const waiting = busy ? [] : openToolUses(jsonl);
+    return dialog ? { ok: true, dialog, busy, waiting } : { ok: false, reason: "transcript 里还没有对话", busy, waiting };
   };
 
   // ── Prompt-cache keepalive ──────────────────────────────────────────
@@ -5591,7 +5586,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     worldPeers,
     resolvePeerTag,
     chatRoster,
-    peekPane,
     peekTurns,
     isBusy,
     setModel: async (target, wanted, scope) => {
@@ -5605,6 +5599,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       }
       return r;
     },
+    transcripts: () =>
+      allTargets().flatMap((target) => {
+        const jsonlPath = jsonlOf(target);
+        if (!jsonlPath) return [];
+        let mtime = 0;
+        try { mtime = statSync(jsonlPath).mtimeMs; } catch { /* not written yet */ }
+        return [{ target, jsonlPath, mtime }];
+      }),
     lastText,
     lastReply: replySince,
     isOpenBubbleQuote,

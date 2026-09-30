@@ -1,4 +1,5 @@
 // Daemon entry. Resident process — exits only on signal or fatal WS auth failure.
+import { homedir } from "node:os";
 import { loadConfig } from "../shared/config.js";
 import { makeLogger } from "../shared/log.js";
 import { bindCliBackends, type CliBackendName } from "../shared/cli-backends.js";
@@ -49,12 +50,14 @@ import {
   childrenOf,
   ancestorsOf,
   renderCharter,
+  renderRoster,
   type WizardBrief,
   type WizardRecord,
 } from "./wizard.js";
 import { bindNoticeBox, createNoticeBox, chatAudience } from "./notices.js";
 import { loadJobStore, renderJobOpen, renderJobClose, JOB_MEMBER_MAX } from "./jobs.js";
-import { clipMiddle, extractResult, renderPeerEnvelope } from "./peers.js";
+import { clipMiddle, extractResult, keepalivePingSigs, renderPeerEnvelope, renderTaskEnvelope } from "./peers.js";
+import { parseWhen, renderChatLog, type LogSession } from "./chat-log.js";
 import {
   startGraph,
   stopRun,
@@ -544,6 +547,8 @@ const main = async (): Promise<void> => {
       return { self: resolveSelf(body), body };
     };
 
+    // list_peers 已并进 wizard_roster ({chat}); 路由留着, 是因为正在跑的 wizard 的
+    // MCP 进程还是旧代码, 仍会打到这里。
     http.register("POST /peers/list", async (req, res) => {
       const { self } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session (pass target/sessionId/tmuxPane)" }); return; }
@@ -696,19 +701,100 @@ const main = async (): Promise<void> => {
       if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
       const { target, foreign } = r;
       const turns = Math.min(Math.max(Number((body as { turns?: number }).turns ?? 6) || 6, 1), 40);
-      // 先读 transcript —— 那才是对话本身。只有当这个 wizard 还没有可读的 jsonl
-      // (从没 attach 过, 或者刚 `/clear` 完) 才退回去刮它的终端。
+      // 对话只从 transcript 读 (正文轮次, 去掉保温 ping/pong), 不刮终端: pane 是
+      // 截断的视口加一层 TUI 装饰, 而「它卡在哪」transcript 答得更准 —— 不在转圈
+      // 却悬着工具调用, 就是停在审批卡 / 本地弹窗上等人点。
       const peek = await m.peekTurns(target, turns);
-      const pane = peek.ok ? undefined : await m.peekPane(target, 24);
+      const waiting = peek.waiting ?? [];
+      const state = peek.busy
+        ? "正在生成"
+        : waiting.length
+          ? `停在 ${waiting.join(" / ")} 上 —— 工具调用发出去了还没结果, 多半在等人点审批卡或本地弹窗`
+          : "空闲";
       json(res, 200, {
         ok: true,
-        target,
-        foreign,
-        dialog: peek.dialog ?? "",
-        pane: pane?.pane ?? "",
-        error: peek.ok ? undefined : (pane?.reason ?? peek.reason),
+        name: peerAddress(cfg, self, target),
         busy: peek.busy ?? false,
-        lastText: m.lastText(target),
+        ...(waiting.length ? { waiting } : {}),
+        text: [`${displayName(target)} · ${state}${foreign ? ` · 住在群 ${chatNameOf(cfg, target) || "(未命名)"}` : ""}`, peek.dialog ?? `(${peek.reason})`].join("\n"),
+      });
+    });
+
+    // ── 聊天记录 ────────────────────────────────────────────────────────
+    // peek_peer 读的是**一个会话**听到和说过的一切; 这条读的是**往来**: 三级收窄
+    // role (谁的视角) → chat (哪个群) → target (和谁), 再按时间窗与条数裁 —— 与
+    // rolepage 同一条轴。全部从各会话的 transcript 现算 (见 chat-log.ts), 不经 turn
+    // store。名字全局可达, 一句话可能落在任何一个会话的 transcript 里 (A 对 B 说的
+    // 在 B 那份), 所以候选是全体; 按 mtime 只留最近动过的那一批 (一次 stat, 不
+    // spawn), 点了名的 role / target 与调用方自己无条件入选。
+    const LOG_RECENT_MS = 7 * 24 * 3600_000;
+    const LOG_SESSIONS = 40;
+    const logSession = (t: { target: string; jsonlPath: string }): LogSession => {
+      const home = baseOfKey(t.target);
+      const rec = wizards.get(t.target);
+      return {
+        name: displayName(t.target),
+        jsonlPath: t.jsonlPath,
+        homeChat: chatNameOf(cfg, home),
+        homeHuman: home.startsWith("user:") ? home.slice(5) : "人",
+        since: rec?.clonedFrom ? rec.bornAt : 0,
+      };
+    };
+    /** role / target 的写法: wizard 的名字解析成它的称呼; 解析不出的原样当作人的
+     *  userid (或 `定时 <id>`) —— 记录里人就是按这个字面出现的。 */
+    const logRole = (self: string, ref: string): { name: string; target?: string } => {
+      const r = resolvePeer(self, ref);
+      return r.ok ? { name: displayName(r.target), target: r.target } : { name: ref };
+    };
+
+    http.register("POST /chats/read", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      // 线上字段是 `with`: 请求体里的 `target` 已经是「调用方是谁」的覆盖 (resolveSelf)。
+      const b = body as { role?: string; chat?: string; with?: string; since?: string; until?: string; limit?: number; per?: number };
+      ensureChatNames(self);
+      const now = Date.now();
+      const [roleRef, chatRef, targetRef, sinceRef, untilRef] = [b.role, b.chat, b.with, b.since, b.until].map((x) => (x ?? "").toString().trim());
+      // 什么都没给 = 调用方这一轮所在的群; 只给 target = 调用方与它的往来。
+      const base = chatRef ? chatBaseOf(cfg, chatRef) : roleRef || targetRef ? "" : channelOf(self);
+      if (chatRef && !base) { json(res, 404, { ok: false, reason: `认不出聊天 '${chatRef}' (list_chats 看有哪些)` }); return; }
+      const role = roleRef ? logRole(self, roleRef) : targetRef ? { name: displayName(self), target: self } : undefined;
+      const target = targetRef ? logRole(self, targetRef) : undefined;
+      const since = sinceRef ? parseWhen(sinceRef, now) : undefined;
+      const until = untilRef ? parseWhen(untilRef, now) : undefined;
+      if ((sinceRef && since === undefined) || (untilRef && until === undefined)) {
+        json(res, 400, { ok: false, reason: "时间认不出 —— 写 `2h` / `30m` / `3d` (多久以前)、`14:30` (今天)、`09-30 14:30` 或 ISO 时间" });
+        return;
+      }
+      const limit = Math.min(Math.max(Number(b.limit ?? 30) || 30, 1), 200);
+      const per = Math.min(Math.max(Number(b.per ?? 500) || 500, 40), 4000);
+      const pinned = new Set([self, role?.target, target?.target]);
+      const all = m.transcripts();
+      const sessions = [
+        ...all.filter((t) => pinned.has(t.target)),
+        ...all.filter((t) => !pinned.has(t.target) && now - t.mtime < LOG_RECENT_MS).sort((x, y) => y.mtime - x.mtime).slice(0, LOG_SESSIONS),
+      ];
+      const chat = base ? chatNameOf(cfg, base) : undefined;
+      const log_ = renderChatLog(
+        sessions.map(logSession),
+        { role: role?.name, chat, target: target?.name, since, until, limit, per },
+        keepalivePingSigs(cfg.wrc.mirror.keepalive.ping),
+        now,
+      );
+      const scope = [
+        chat !== undefined ? `群 ${chat || base}` : "",
+        role && target ? `${role.name} ⇄ ${target.name}` : role ? `${role.name} 的往来` : "",
+      ].filter(Boolean).join(" · ");
+      json(res, 200, {
+        ok: true,
+        shown: log_.shown,
+        total: log_.total,
+        text: [
+          `${scope} · ${log_.shown} 条`,
+          log_.text || "(没有读到对话)",
+          ...(log_.earlier ? [`更早的: until="${log_.earlier}"`] : []),
+          ...(log_.later ? [`往后还有 ${log_.total - log_.shown} 条: since="${log_.later}"`] : []),
+        ].join("\n"),
       });
     });
 
@@ -1146,8 +1232,6 @@ const main = async (): Promise<void> => {
           ...b,
           target: p.target,
           chat: chatNameOf(cfg, p.target) || p.chat,
-          label: p.label,
-          cli: p.cli,
           model: p.model,
           busy: p.busy,
           alive: p.paneAlive,
@@ -1170,7 +1254,7 @@ const main = async (): Promise<void> => {
           // 没跑过就没有活动时刻。排序拿它当最旧 —— 冷会话排在活着的后面, 正是
           // 截断时该被留下的顺序。
           lastActivity: 0,
-          summary: "(未运行 —— 发消息或 send_peer 会把它唤醒)",
+          summary: "",
           ...kinOf(self, all, w.target),
         }));
       return [...live, ...cold];
@@ -1237,13 +1321,16 @@ const main = async (): Promise<void> => {
       const shown = ranked.slice(0, limit);
       json(res, 200, {
         ok: true,
-        self: identityOf(self, self),
         total: all.length,
         matched: hit.length,
-        wizards: shown,
-        ...(hit.length > shown.length
-          ? { more: `还有 ${hit.length - shown.length} 个没列出来 —— 用 query (名字/职责) / cwd (工作区) / chat 收窄, 或者调大 limit` }
-          : {}),
+        shown: shown.length,
+        text: [
+          `名册 · 列出 ${shown.length}/${hit.length} 个 (全机 ${all.length} 个) · 忙 = 正在生成, 闲 = 活着没在跑, 冷 = 没有 pane (发消息会唤醒)`,
+          renderRoster(shown, Date.now(), homedir()),
+          ...(hit.length > shown.length
+            ? [`还有 ${hit.length - shown.length} 个没列出来 —— 用 query (名字/职责) / cwd (工作区) / chat 收窄, 或者调大 limit`]
+            : []),
+        ].join("\n"),
       });
     });
 
@@ -1717,7 +1804,7 @@ const main = async (): Promise<void> => {
     // 才把这句话直接投进它那一轮 —— 「在已有会话里继续」是要求出来的, 不是默认。
     scheduledTaskInject = async (target, text, { taskId, fresh }) => {
       const busy = fresh ? false : await m.isBusy(target);
-      if (!fresh && !busy) return m.injectText(target, text, undefined, { fromChat: true, from: { kind: "task", taskId } });
+      if (!fresh && !busy) return m.injectText(target, text, undefined, { fromChat: true, from: { kind: "task", taskId }, envelope: renderTaskEnvelope(taskId) });
 
       // 执行体挂在日程的主人名下: 名字 `<主人>-task-xxxx`, parent = 主人 —— 它的
       // rolepage 里看得见这一枪是谁的日程放的。落在执行目标的群/目录里。
@@ -1744,7 +1831,7 @@ const main = async (): Promise<void> => {
       notifyChat(base, withTagHeader(target, busy
         ? `⏰ 定时任务到点时正忙, 已起白板 wizard .${runnerName} 单独执行, 完成后自动收掉`
         : `⏰ 定时任务已起白板 wizard .${runnerName} 执行, 完成后自动收掉`));
-      const inj = await m.injectText(runner, text, undefined, { fromChat: true, from: { kind: "task", taskId } });
+      const inj = await m.injectText(runner, text, undefined, { fromChat: true, from: { kind: "task", taskId }, envelope: renderTaskEnvelope(taskId) });
       if (!inj.ok) { wizards.drop(runner); return inj; }
       // 没有人会对这个一次性分身喊 stop_wizard, 只能自己等它闲下来再收。30min
       // 内没闲下来就放弃自动回收 (它大概率还在干一个长活), 留给人手动处理 ——

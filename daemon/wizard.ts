@@ -229,6 +229,56 @@ const rosterLines = (self: WizardBrief, sibs: readonly WizardBrief[]): string[] 
   ];
 };
 
+// ── 名册 (wizard_roster 的回执) ───────────────────────────────────────
+// 名册是给模型读的索引, 所以回文本不回 json: 一个 wizard 一行身份 (名字、忙闲、
+// 住哪、在哪干、多久没动、家谱), 有职责 / 最近的话才各加一行。字段名、内部 key、
+// 每一行重复一遍的家谱对象 —— 这些在 json 里占掉大半篇幅, 却没有一个是找人要用的。
+export interface RosterRow extends WizardBrief {
+  /** home 聊天的名字; "" = 没起名。 */
+  chat: string;
+  model?: string;
+  busy: boolean;
+  alive: boolean;
+  self: boolean;
+  /** 最后动过的时刻 (ms); 0 = 没跑过。 */
+  lastActivity: number;
+  /** 最近几句真话的一行摘要。 */
+  summary: string;
+  parent?: WizardBrief;
+  clones: readonly WizardBrief[];
+}
+
+const agoOf = (ms: number, now: number): string => {
+  if (!ms) return "";
+  const min = Math.floor((now - ms) / 60_000);
+  if (min < 1) return "刚刚";
+  if (min < 60) return `${min} 分钟前`;
+  return min < 1440 ? `${Math.floor(min / 60)} 小时前` : `${Math.floor(min / 1440)} 天前`;
+};
+
+const rosterEntry = (r: RosterRow, now: number, home: string): string[] => {
+  const state = r.busy ? "忙" : r.alive ? "闲" : "冷";
+  const head = [
+    `\`${addr(r)}\`${r.self ? " (你)" : ""} ${state}`,
+    r.chat ? `群 ${r.chat}` : "",
+    r.cwd ? (home && r.cwd.startsWith(home) ? `~${r.cwd.slice(home.length)}` : r.cwd) : "",
+    r.model ?? "",
+    agoOf(r.lastActivity, now),
+    r.parent ? `父 ${addr(r.parent)}` : "",
+    r.clones.length ? `分身 ${r.clones.map(addr).join(" ")}` : "",
+  ].filter(Boolean).join(" · ");
+  return [
+    head,
+    ...(r.description ? [`  职责: ${r.description}`] : []),
+    // 冷会话的摘要是很久以前的话, 不值得占一行; 要读就 peek_peer。
+    ...(r.alive && !r.self && r.summary ? [`  最近: ${r.summary}`] : []),
+  ];
+};
+
+/** `home` = 用户主目录, 路径里的它缩成 `~`。 */
+export const renderRoster = (rows: readonly RosterRow[], now: number, home = ""): string =>
+  rows.flatMap((r) => rosterEntry(r, now, home)).join("\n");
+
 /** 开局宪章 —— spawn 时作为 `--append-system-prompt` 压进进程。
  *  它回答四件事, 每一件都是"会话自己没法从对话里知道"的:
  *    我是谁 / 我住在哪、周围有谁 / 我有哪些能力 / 公开频道与私聊该怎么说话。 */
@@ -308,13 +358,14 @@ export const renderCharter = (a: CharterArgs): string => {
     bullet([
       "`wizard_whoami` 我是谁、上下文用了多少、我的分身有哪些",
       "`wizard_identity` 改名字 / 写职责 (名字全局唯一, 撞名会自动加 `-N` 后缀并告诉你最终名字)",
-      "`wizard_roster` 全部 wizard 与 clone: 名字、home 群、工作区、职责、模型、忙闲、家谱",
+      "`wizard_roster` 全部 wizard 与 clone: 名字、home 群、工作区、职责、模型、忙闲、家谱、最近在说什么 —— 找人只用它 (`chat` / `cwd` / `query` 收窄)",
       "`clone_wizard` 克隆出一个分身 —— fork 我 (或 `from` 点名的某个 wizard) 此刻的上下文, 开局就带着读过的一切, 留在被克隆者的工作区 · `spawn_wizard` 从白板生一个子 wizard —— 不带上下文, 可以去别的目录; 两者都归我管, `name` 起名 (全局唯一), `model` 挑模型 (跑腿的活给 haiku, 要判断的给 opus), 它们还能再生",
       "`stop_wizard` 打断或终结一个分身/wizard (活干完了就收掉它)",
       "`open_job` / `close_job` / `list_jobs` 一次要派出两个以上分身时的**工单**: 群里只出开工/收工两条气泡, 收工时整批回收临时分身",
       "`wizard_remember` 写一条跨会话的记忆 —— `scope` 选 `self` (我自己的, 当场生效) / `chat` (本群共享) / `workspace` (本工作区共享); 后两者是**提议**, 由定时的记忆整理者去重、改写、合并后才生效",
       "`wizard_handoff_self` 上下文快满时自己原地交接重开",
-      "`send_peer` 跟别的 wizard 说话, **默认私聊**; `public:true` 则在群里公开说 (见下) · 派活给一个正在忙的同伴用 `when:\"idle\"` · `peek_peer` 看它在干嘛 · `list_peers` 看同群有谁",
+      "`send_peer` 跟别的 wizard 说话, **默认私聊**; `public:true` 则在群里公开说 (见下) · 派活给一个正在忙的同伴用 `when:\"idle\"` · `peek_peer` 读它最近的对话、看它停在哪",
+      "`read_chat` 像人翻聊天记录那样读往来 —— 一行一句, 谁对谁说了什么; `role` (谁的视角) → `chat` (哪个群) → `target` (和谁) 三级收窄, 都不给就是你这一轮所在的群, `since` / `until` / `limit` 按时间翻页",
       "`wait_peer` 等它干完 —— 派了一**批**活就用 `names` 一次等一组 (`need` 决定满几个就返回), 别一个一个等",
       "`notify` 把一段话贴进某个群给**人**看 (省略 `to` 就是你这一轮所在的群) —— 和 send_peer 相反, 它不驱动任何 agent",
       "`schedule_task` 排一个到点自动执行的活 (「每个工作日晚上9:30 …」) —— 日程归在你名下; 默认到点**新起一个白板 wizard** 去干, 干完自动收掉; 只有明说「在 .foo 里继续」才用 `name` 点名已有的那个 · `list_tasks` / `cancel_task`",

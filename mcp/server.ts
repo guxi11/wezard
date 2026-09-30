@@ -241,10 +241,15 @@ const daemonGet = async (path: string): Promise<DaemonReply> => {
 const unwrap = (name: string, { j, status }: DaemonReply, pick: (j: Record<string, unknown>) => unknown = (x) => x) =>
   j.ok ? ok(pick(j)) : fail(`${name} failed: ${(j.reason ?? j.error ?? `http ${status}`) as string}`);
 
+// 读侧工具 (名册 / 对话 / 聊天记录) 的回执是守护进程排好的**文本**, 原样交出去:
+// 这些东西是给模型读的, 包一层 json 只是让它为字段名和转义的换行多付 token。
+const unwrapText = (name: string, r: DaemonReply) =>
+  r.j.ok && typeof r.j.text === "string" ? { content: [{ type: "text" as const, text: r.j.text }] } : unwrap(name, r);
+
 // 地址语法只有一套, 每个吃地址的工具都把它原样重述一遍: 模型单看一个 schema
 // 时没有别的地方能学到它, 而猜出来的地址会安静地指向另一个 wizard 的终端。
 const ADDRESS_DOC =
-  "wizard 的名字 —— 全机唯一, 它就是地址: `'fix'` 或 `'.fix'` 都行, 不分它住在哪个群。`''` = 你这个聊天的默认 wizard。永远别自己拼 key: wizard_roster / list_peers / spawn_wizard / clone_wizard 返回的 `name` (或 409 里的 `address`) 原样传回来。老的 `聊天名#tag` 写法仍然认, 但别再写。";
+  "wizard 的名字 —— 全机唯一, 它就是地址: `'fix'` 或 `'.fix'` 都行, 不分它住在哪个群。`''` = 你这个聊天的默认 wizard。永远别自己拼 key: wizard_roster / spawn_wizard / clone_wizard 返回的名字 (或 409 里的 `address`) 原样传回来。老的 `聊天名#tag` 写法仍然认, 但别再写。";
 
 // 造一个 wizard: 它的 home 默认是调用方自己的聊天 (所以走 `selfRef`); 给了 `chat`
 // 就落在另一个**起过名字**的聊天里。名字全局唯一, 与 home 无关。
@@ -324,28 +329,48 @@ server.registerTool(
 );
 
 server.registerTool(
-  "list_peers",
-  {
-    title: "List the wizards sharing this chat",
-    description:
-      "和你同一个 home 聊天的其他 wizard (默认 wizard 加任意多个分身), 各有各的 pane、CLI、模型和工作区。每一个返回: 名字 (`address`, 即传给其他工具的那个串)、emoji、工作区、CLI、pane 是否还活着、此刻是否在生成 (`busy`)、最后动过是什么时候、最近在聊什么的一行摘要; `self: true` 是你自己。另外返回 `foreignPeers`: 别的聊天里的 wizard —— 名字全局唯一, 一样叫得到。用户提到另一个 agent 时先调它 —— 「.fix 进展如何」「还有谁在跑」「让 .docs 也看看」—— 再用 peek_peer / send_peer / wait_peer 真正协作。想连**职责、家谱**一起看, 用 wizard_roster。",
-    inputSchema: {},
-  },
-  async () => unwrap("list_peers", await daemonPost("/peers/list", {})),
-);
-
-server.registerTool(
   "peek_peer",
   {
     title: "Read what another wizard has been saying",
     description:
-      "**不打扰**地观察另一个 wizard: 返回 `dialog` —— 它最近 N 轮真实对话 (从它的 transcript 读的, `▸` 是别人说的, `◂` 是它答的), 外加它此刻是否在生成 (`busy`) 与它最后一条完整回复 (`lastText`)。这是「它和驱动它的人到底说了什么」的可读记录: 回答「.fix 进展如何」「它们聊到哪了」, 或者判断要不要推它一把, 都读这里。用户消息里写的 `.name` 指的就是那个 wizard —— 守护进程会在消息尾部挂一条 system-reminder 点名每一个解析得出的名字, 所以 prompt 里的 `.b` 是 wizard `b`: 去 peek 它, 别猜它在干嘛, 更别替它回答。它还没有可读 transcript 时, `pane` 兜底给它终端的原始尾巴。`foreign: true` 表示它的 home 在别的聊天。只读, 随便轮询。",
+      "**不打扰**地读另一个 wizard 的会话: 首行是它此刻的状态 (正在生成 / 空闲 / 停在哪个工具调用上等人点), 下面是它最近 N 轮对话的正文 —— `▸` 是别人对它说的, `◂` 是它答的, 最后一条 `◂` 就是它的最新回复 (给得最全)。全部从它的 transcript 读: 只有说出来的话, 没有工具调用的过程, 保温的 ping/pong 已经剔掉。回答「.fix 进展如何」「它卡在哪」, 或者判断要不要推它一把, 都读这里。用户消息里写的 `.name` 指的就是那个 wizard —— 去 peek 它, 别猜它在干嘛, 更别替它回答。这是**一个会话**的视角 (它从各处听到的都在里面); 要看**一个群**里谁对谁说了什么、或你和它的私聊往来, 用 read_chat。只读, 随便轮询。",
     inputSchema: {
       name: z.string().describe(ADDRESS_DOC),
       turns: z.number().optional().describe("How many recent conversation turns to return (1-40, default 6)."),
     },
   },
-  async ({ name, turns }) => unwrap("peek_peer", await daemonPost("/peers/peek", { name, ...(turns ? { turns } : {}) })),
+  async ({ name, turns }) => unwrapText("peek_peer", await daemonPost("/peers/peek", { name, ...(turns ? { turns } : {}) })),
+);
+
+server.registerTool(
+  "read_chat",
+  {
+    title: "Read chat history like a person would",
+    description:
+      "像人翻聊天记录那样读往来, 一行一句: `[时刻] 谁 → 谁: 说了什么`。三级收窄, 每一级都可以不给: `role` (谁的视角 —— 只留它说的或听的) → `chat` (哪个群 —— 只留那个群里公开说的) → `target` (和谁 —— 只留与它的往来)。什么都不给 = 你这一轮所在的群: 人说的、各个 wizard 答的、wizard 之间公开说的都在里面。只给 `target` = 你和它的全部往来 (含 send_peer 默认走的私聊, 群里看不见的那部分); `role` + `target` = 那两方之间; 只给 `role` = 它在所有群与私聊里的往来; 再加 `chat` 就限定在那个群里。没给 `chat` 时每行会标出这句是在哪个群 / 私聊里说的。\n" +
+      "按时间和条数读: 默认回最新的 `limit` 条; `until` = 只看那之前的 (往回翻页), `since` = 从那时起 (只给 `since` 就从它往后数 `limit` 条)。回执末尾给出翻页用的时刻, 原样传回即可。\n" +
+      "只有正文: 每个来回取问话和终句, 工具调用的过程不在里面, 保温的 ping/pong 已经剔掉。记录是从各个 wizard 当前会话的 transcript 现拼的: 一个 wizard `/clear` 或交接之前说的不在里面, 除点名的 role / target 外只并最近一周动过的会话。用户说「群里刚才聊了什么」「.fix 之前怎么答的」「我上次让 .docs 干了什么」, 或者你被叫进一个已经聊了一阵的群、需要来龙去脉时调它。要读**某一个 wizard** 会话里的原始对话用 peek_peer。",
+    inputSchema: {
+      role: z.string().optional().describe("谁的视角: wizard 的名字 ('fix' / '.fix') 或人的 userid。省略 = 不限 (给了 `target` 时默认是你自己)。"),
+      chat: z.string().optional().describe("哪个群: 聊天名 (list_chats 里那个) 或裸 principal。省略 = 不限群 (公开与私聊都算); 三个都省略 = 你这一轮所在的群。"),
+      target: z.string().optional().describe("和谁的往来: wizard 的名字或人的 userid。"),
+      since: z.string().optional().describe("从什么时候起: `2h` / `30m` / `3d` (多久以前)、`14:30` (今天)、`09-30 14:30`、或 ISO 时间。"),
+      until: z.string().optional().describe("到什么时候为止 (不含), 写法同 `since`。往回翻页就把回执里的「更早的」时刻传进来。"),
+      limit: z.number().optional().describe("最多回多少条 (1-200, 默认 30)。"),
+      per: z.number().optional().describe("单条正文最多多少字 (40-4000, 默认 500); 超出的部分标成 `…(+N)`。"),
+    },
+  },
+  async ({ role, chat, target, since, until, limit, per }) =>
+    unwrapText("read_chat", await daemonPost("/chats/read", {
+      ...(role ? { role } : {}),
+      ...(chat ? { chat } : {}),
+      // `target` 在守护进程的请求体里是「调用方是谁」的覆盖 (resolveSelf), 不能占用。
+      ...(target ? { with: target } : {}),
+      ...(since ? { since } : {}),
+      ...(until ? { until } : {}),
+      ...(limit ? { limit } : {}),
+      ...(per ? { per } : {}),
+    })),
 );
 
 server.registerTool(
@@ -645,8 +670,8 @@ server.registerTool(
   {
     title: "Every wizard and clone",
     description:
-      "这个世界上所有的 wizard 与 clone: 每一个的名字 (全局唯一, 即地址)、**home 聊天**、**工作区**、职责、忙闲 (busy)、是否还活着 (alive)、最近在干嘛 (summary), 以及家谱 (parent / clones / ancestors)。跨聊天的也在里面。这是你感知同伴的唯一入口 —— 用户说「还有谁在跑」「谁在弄那个项目」「让懂 X 的那个来看看」时先调它, 拿到目标的名字再 send_peer / peek_peer / wait_peer; 要往某个群里对人说话则把那个 `chat` 交给 notify。\n" +
-      "**这是一张索引, 不是一份名单**: 整台机器上可能有几百个会话, 所以默认只回最相关的一页 (自己 → 活着的 → 最近动过的), 并告诉你 `total` / `matched` 有多少。找人就带上条件: `query` 匹配名字/职责/地址, `cwd` 匹配工作区路径 (「谁在这个目录里干活」), `chat` 限定某个聊天, `alive:true` 只看还活着的。别不带条件硬拉全表。",
+      "这个世界上所有的 wizard 与 clone, 一个一行: 名字 (全局唯一, 即地址)、忙闲 (忙 = 正在生成 / 闲 = 活着没在跑 / 冷 = 没有 pane, 发消息会唤醒)、**home 聊天**、**工作区**、模型、多久没动、家谱 (父 / 分身); 写了职责的多一行职责, 活着的多一行「最近」—— 它最近几句话的摘要。跨聊天的也在里面。这是你感知同伴的唯一入口 —— 用户说「还有谁在跑」「这个群里有谁」「谁在弄那个项目」「让懂 X 的那个来看看」时先调它, 拿到目标的名字再 send_peer / peek_peer / wait_peer; 要往某个群里对人说话则把那个群名交给 notify。\n" +
+      "**这是一张索引, 不是一份名单**: 整台机器上可能有几百个会话, 所以默认只回最相关的一页 (自己 → 活着的 → 最近动过的), 并告诉你 `total` / `matched` 有多少。找人就带上条件: `query` 匹配名字/职责/地址, `cwd` 匹配工作区路径 (「谁在这个目录里干活」), `chat` 限定某个聊天, `alive:true` 只看还活着的。「同群有谁」就是 `chat` 写你自己的群名。别不带条件硬拉全表。",
     inputSchema: {
       query: z.string().optional().describe("在名字 / 职责 / target 里做子串匹配 (不分大小写)。「让懂 X 的那个来看看」就把 X 写在这里。"),
       chat: z.string().optional().describe("只看某个聊天里的 wizard: 聊天名, 或者聊天 principal 的一段 (无名聊天用它)。"),
@@ -656,7 +681,7 @@ server.registerTool(
     },
   },
   async ({ query, chat, cwd, alive, limit }) =>
-    unwrap("wizard_roster", await daemonPost("/wizard/roster", {
+    unwrapText("wizard_roster", await daemonPost("/wizard/roster", {
       ...(query ? { query } : {}),
       ...(chat ? { chat } : {}),
       ...(cwd ? { cwd } : {}),

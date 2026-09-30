@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+### Added
+- MCP `read_chat`: 像人翻聊天记录那样读往来, 一行一句 `[时刻] 谁 → 谁: 正文`。三级收窄 `role` (谁的视角) → `chat` (哪个群) → `target` (和谁), 都不给即调用方这一轮所在的群; `since` / `until` / `limit` 按时间翻页。从各会话的 transcript 现拼 (不经 turn store): 每个来回取问话与终句, 不带工具调用; 频道与发话方读每句话挂着的信封。
+
+### Changed
+- 人从别的群叫到一个 wizard、或在多人的群里对它说话时, 那一轮尾巴上挂一段信封 (谁、在哪个群说的); 定时任务放的那一轮同样挂一段。住在单聊里的 wizard 在自己的单聊里被叫到时不挂。
+- wizard 之间读信息的工具回**文本**不回 json: `wizard_roster` 一个 wizard 一行 (名字 / 忙闲 / 群 / 工作区 / 模型 / 多久没动 / 家谱, 另加职责与最近几句话), `peek_peer` 首行是状态、下面是对话, 最新一条回复给得最全。
+- `peek_peer` 只读 transcript, 不再刮终端兜底; 「它卡在哪」由 transcript 回答 —— 不在转圈却悬着工具调用, 即停在审批卡 / 本地弹窗上。忙闲仍取自 pane 的转圈。
+- 保温 ping/pong 从所有给 wizard 读的内容里剔掉: `peek_peer` 的对话、名册的摘要、graph 与交接用的「最后一条回复」。
+
+### Removed
+- MCP `list_peers`: 并进 `wizard_roster` (`chat` 写自己的群名即同群名册)。`/peers/list` 路由保留给仍在跑的旧 MCP 进程。
+
+### Fixed
+- `wait_peer` 在对方答完之后又被保温 ping 过一次时, 交回来的是那个 `pong` 而不是它的答案。
+
 ## [2.0.6] - 2026-09-30
 
 ### Changed

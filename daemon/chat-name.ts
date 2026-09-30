@@ -39,7 +39,7 @@ export const chatNameOf = (cfg: Config, target: string): string => {
 /** 任何一种寻址串 → base principal; 认不出返回 ""。
  *
  *  「聊天名」「裸 principal」「`daily#fix`」「`chat:wr…#fix`」全收 —— 后两种是
- *  wizard_roster / list_peers 吐给模型的那个 `address`, 而模型手里往往只有它:
+ *  wizard_roster 吐给模型的那个 `address`, 而模型手里往往只有它:
  *  它知道「那个 wizard 叫 exp、地址 org-archivist#exp」, 要往那个群里说句话时,
  *  唯一能写出来的就是这个串。此前 `name#tag` 被整条拒收 (只有全量 key 那一种因为
  *  前缀命中而侥幸可用), 于是同一个地址空间在 send_peer 那边通、在 notify 这边不通。

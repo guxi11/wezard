@@ -5,7 +5,7 @@ import type { WSClient, WsFrame, TextMessage, ImageMessage, MixedMessage, BaseMe
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
 import type { MirrorBridge } from "./mirror-bridge.js";
-import { tailTurnsWithTools, keepalivePingSigs, renderPeerMentionHint, type PeerInfo, type PeerMention } from "./peers.js";
+import { tailTurnsWithTools, keepalivePingSigs, renderPeerMentionHint, renderHumanEnvelope, type PeerInfo, type PeerMention } from "./peers.js";
 import { noticeSuffixFor } from "./notices.js";
 import { expandHome, sanitizeId } from "../shared/paths.js";
 import type { CliBackendName } from "../shared/cli-backends.js";
@@ -1012,12 +1012,19 @@ export const installInboundRouter = (
 
   const send = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, who: string, text: string, images: string[] = []): Promise<void> => {
     // 斜杠命令按行解析,尾巴上多挂一段会让它不再被识别成命令 —— 只标注普通消息。
-    const hint = text.trimStart().startsWith("/") ? "" : renderPeerMentionHint(peerMentions(who, text));
+    const slash = text.trimStart().startsWith("/");
+    const hint = slash ? "" : renderPeerMentionHint(peerMentions(who, text));
+    // 谁、在哪个群说的 —— transcript 里只有这一段记着它 (read_chat 从那里读回来)。
+    // 住在单聊里、又是在那个单聊里被叫到的, 默认值就是对的, 不挂。
+    const channel = chatPrincipal(msg);
+    const chat = chatNameOf(cfg, channel);
+    const homely = channel === baseOfKey(who) && channel.startsWith("user:");
+    const envelope = slash || homely || !chat ? "" : renderHumanEnvelope(msg.from.userid, chat);
     // 同一条边界上再挂一段: 这个 wizard 不在场时群里发生的成员变动 (见 notices.ts)。
     const notice = noticeSuffixFor(who, text);
     try {
       // 回复回到发话的这个群 —— `who` 可能住在别的聊天 (名字全局可达)。
-      await bridge.dispatch({ principal: who, text: text + hint + notice, images, frame, streamId: msg.msgid, channel: chatPrincipal(msg), speaker: `user:${msg.from.userid}` });
+      await bridge.dispatch({ principal: who, text: text + envelope + hint + notice, images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}` });
     } catch (e) {
       log.error({ err: (e as Error).message }, "bridge dispatch failed");
       try { await client.replyStream(frame, msg.msgid, withTagHeader(who, `[wezard] error: ${(e as Error).message}`), true); } catch { /* ignore */ }
