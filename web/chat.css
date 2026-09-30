@@ -227,8 +227,6 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 }
 .chathead .back { display: none; border: 0; background: none; font-size: 22px; color: var(--mute); cursor: pointer; padding: 0 4px }
 .ch-who { display: flex; gap: 11px; align-items: center; min-width: 0; flex: 1 }
-.ch-who > .av:not(.mosaic) { font-size: 26px; line-height: 1; flex: none }
-.ch-who .l { min-width: 0; display: flex; flex-direction: column; gap: 1px }
 .ch-who .t { font-size: 16px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .ch-who > .t { flex: none }
 .ch-who .tr { display: flex; align-items: center; gap: 6px; min-width: 0 }

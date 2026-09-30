@@ -505,16 +505,9 @@
     }
     var c = convOf(CONV);
     if (!c) { who.innerHTML = ''; acts.innerHTML = ''; return; }
-    if (c.kind === 'wizard') {
-      who.innerHTML = avatarOf(c) + '<span class="l"><span class="t">' + nm(c.peer, c.name, true) + '</span>' +
-        '<span class="sub">私聊 · ' + c.count + ' 条</span></span>';
-    } else {
-      var ms = membersOf(c);
-      who.innerHTML = avatarOf(c) + '<span class="l"><span class="tr"><span class="t">' + esc(c.name) + '</span>' + openInWecom(c.base) + '</span>' +
-        '<span class="sub">群聊 · ' + ms.length + ' 位成员 · ' +
-          ms.slice(0, 8).map(function (m) { return esc(m.label || roleLabel(m.role)); }).join('') +
-          (ms.length > 8 ? '…' : '') + '</span></span>';
-    }
+    who.innerHTML = '<span class="tr"><span class="t">' +
+      (c.kind === 'wizard' ? nm(c.peer, c.name, true) : esc(c.name)) + '</span>' +
+      (c.kind === 'wizard' ? '' : openInWecom(c.base)) + '</span>';
     acts.innerHTML = WITH
       ? '<span class="with">只看我与 ' + nm(WITH, '', true) + '</span><button class="vb" id="ch-all">看全部</button>'
       : '';
