@@ -16,7 +16,7 @@ import { computeUsage, renderUsageReport } from "./usage.js";
 import { computeAuditReport } from "./audit.js";
 import { syncProjectConfig, renderSyncReport } from "./cfg-sync.js";
 import { captureQuota, renderQuotaReport } from "./quota.js";
-import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe, allNames, normalizeTag, uniqueTag, displayName, labelFor, tagLink } from "../shared/session-label.js";
+import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe, allNames, unlinkTags, normalizeTag, uniqueTag, displayName, labelFor, tagLink } from "../shared/session-label.js";
 import { chatNameOf, clearChatName, listChatNames, peerAddress, setChatName } from "./chat-name.js";
 import { evictStaleName, reclaimChatName, wizardStore, type EvictDeps } from "./wizard.js";
 import { truncate } from "../shared/std.js";
@@ -32,23 +32,19 @@ const chatPrincipal = (msg: BaseMessage): string =>
 
 // 寻址靠 wizard 的**全局名字** `.name` —— 它可能住在任何一个聊天里。
 // Must be space-delimited or edge-of-string so paths / extensions like `a.ts`
-// survive. 一条消息只认**一个**路由名字, 规则:
-//   • 第一个解析得出的已知名字 (名册里有, 或本聊天里有这个 slot 的老会话) 胜出;
-//   • 都不认识时, 只有**消息开头**的 `.x` 才算「叫一个新 wizard 出来」——
-//     正文里随手写的 `.gitignore` 不该凭空变出一个 wizard;
+// survive. 一条消息只认**一个**路由名字, 且**只做前缀匹配**: 清洗之后 (链接标记
+// 还原成裸 `.name`、@ 已由 stripAt 剥掉、去掉开头的空白与不可见字符) 落在**消息
+// 开头**的那个 `.x` 才是目标 —— 认不认识都算 (不认识 = 叫一个新 wizard 出来)。
+// 正文里的 `.fix` / `.gitignore` 一律只是提及, 哪怕名册里真有这个名字。
 // 选中的那个 token 从正文里摘掉, 其余 `.foo` 原样留着 (见 peerMentions)。
 // Token 规则收在 session-label(nameTokenRe / allNames),路由与标注共用同一把尺子。
-const NAME_G = new RegExp(nameTokenRe().source, "gu");
-const parseTag = (text: string, known: (name: string) => boolean): { tag: string; cleaned: string } => {
-  const ms = [...text.matchAll(NAME_G)];
-  const m = ms.find((x) => known(x[2] ?? "")) ?? (ms[0]?.index === 0 ? ms[0] : undefined);
-  if (!m || m.index === undefined) return { tag: "", cleaned: text };
-  const tag = m[2] ?? "";
-  const before = text.slice(0, m.index);
-  const sep = m[1] ?? "";
-  const after = text.slice(m.index + m[0].length);
-  const cleaned = (before + sep + after).replace(/[ \t]+/g, " ").trim();
-  return { tag, cleaned };
+const NAME_RE = nameTokenRe();
+const LEAD_NOISE_RE = /^[\s​-‍⁠﻿]+/u;
+const parseTag = (text: string): { tag: string; cleaned: string } => {
+  const lead = unlinkTags(text).replace(LEAD_NOISE_RE, "");
+  const m = NAME_RE.exec(lead);
+  if (!m || m.index !== 0) return { tag: "", cleaned: text };
+  return { tag: m[2] ?? "", cleaned: lead.slice(m[0].length).replace(/[ \t]+/g, " ").trim() };
 };
 
 const tagOf = tagOfKey;
@@ -472,14 +468,13 @@ const isLastResponseQuote = (target: string, quoted: string): boolean =>
 //            去重要比对的是「内容在不在源会话」,而非路由目标: 带着引用新建 /
 //            改投到别的 tag 时,目标会话是空的,只有源会话里才有那段原文。
 //            `srcTag===undefined` 表示源未知(用户自己打的引用),回退到按目标查。
-const QUOTE_NAME_RE = nameTokenRe();
-const parseQuote = (q: QuoteContent | undefined, known: (name: string) => boolean): { tag: string; srcTag?: string; body: string } | null => {
+const parseQuote = (q: QuoteContent | undefined): { tag: string; srcTag?: string; body: string } | null => {
   const raw = q ? quoteToText(q).trim() : "";
   if (!raw) return null;
   const head = parseTagHeader(raw);
   if (head.fromBot) return { tag: head.tag, srcTag: head.tag, body: head.body };
-  const m = QUOTE_NAME_RE.exec(raw);
-  return m && m.index === 0 ? { tag: m[2] ?? "", body: parseTag(raw, known).cleaned } : { tag: "", body: raw };
+  const { tag, cleaned } = parseTag(raw);
+  return { tag, body: cleaned };
 };
 
 // 一条入站消息的最终「投递目标 tag + 给 claude 的正文」。text / image / mixed
@@ -490,34 +485,31 @@ const parseQuote = (q: QuoteContent | undefined, known: (name: string) => boolea
 //      消息 / 目标已 `/clear`),照旧渲染成 markdown 引用块。
 // 纯引用不打字时,沿用旧的"把引用内容提成正文"重触发路径 —— 但同样只在内容不
 // 在目标上下文里时才有意义,否则那只是一次对该会话的空 nudge。
-interface Addressing {
-  known: (name: string) => boolean;
-  /** 名字 → target ("" = 本聊天默认 wizard)。 */
-  resolve: (base: string, name: string) => string;
-}
+/** 名字 → target ("" = 本聊天默认 wizard)。 */
+type Resolve = (base: string, name: string) => string;
 
 const composeInbound = (
   msg: BaseMessage,
   rawBody: string,
   inContext: (target: string, quoted: string) => boolean,
   stripAt: (msg: BaseMessage, text: string) => string,
-  addr: Addressing,
+  resolve: Resolve,
 ): { text: string; tag: string; promoted: boolean } => {
-  const { tag: typed, cleaned } = parseTag(rawBody, addr.known);
-  const q = parseQuote(msg.quote, addr.known);
+  const { tag: typed, cleaned } = parseTag(rawBody);
+  const q = parseQuote(msg.quote);
   const tag = typed || q?.tag || "";
   // 去重比对的会话: 若引用来自某个 bot 会话(srcTag 已知),查那个源会话 ——
   // 内容天然存在于源的 transcript, 与你把它投到哪个 tag 无关。源未知时(用户自打
   // 的引用 / 改投)回退到路由目标。这修掉了「带引用新建/改投会话时原文被重复注入」。
   const dedupTag = q?.srcTag ?? tag;
   // 剥完头什么都不剩(折叠气泡这类纯 chrome 的引用)⇒ 没有可搬运的内容,只留路由。
-  const consumed = !q || !q.body.trim() || inContext(addr.resolve(chatPrincipal(msg), dedupTag), q.body);
+  const consumed = !q || !q.body.trim() || inContext(resolve(chatPrincipal(msg), dedupTag), q.body);
   if (cleaned.trim()) {
     return { text: consumed ? cleaned : `${renderQuotePrefix(q.body)}${cleaned}`, tag, promoted: false };
   }
   if (q && !consumed) {
     // 提成正文时也剥一次 @mention,让 "@wezard /usage" → "/usage" 命中命令路径。
-    const p = parseTag(stripAt(msg, q.body).trim(), addr.known);
+    const p = parseTag(stripAt(msg, q.body).trim());
     return { text: p.cleaned, tag: p.tag || tag, promoted: true };
   }
   return { text: cleaned, tag, promoted: false };
@@ -1010,16 +1002,12 @@ export const installInboundRouter = (
     });
   };
 
-  // 名字解析的两个问题: 这个名字认不认识 (决定正文里哪个 `.x` 是路由)、它指向谁。
+  // 名字 → 它指向谁。哪个 `.x` 是路由不在这里定: parseTag 只认消息开头那一个。
   const live = (t: string): boolean => bridge.hasMirrorTarget(t);
-  const addrFor = (base: string): Addressing => ({
-    known: (name) => !!wizardStore()?.byName(name) || live(keyOf(base, normalizeTag(name))),
-    resolve: (b, name) => resolveName(b, name, live),
-  });
+  const resolve: Resolve = (base, name) => resolveName(base, name, live);
   const route = (msg: BaseMessage, raw: string): { text: string; tag: string; promoted: boolean; who: string } => {
-    const base = chatPrincipal(msg);
-    const c = composeInbound(msg, raw, quoteInContext, stripAt, addrFor(base));
-    return { ...c, who: resolveName(base, c.tag, live) };
+    const c = composeInbound(msg, raw, quoteInContext, stripAt, resolve);
+    return { ...c, who: resolve(chatPrincipal(msg), c.tag) };
   };
 
   const send = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, who: string, text: string, images: string[] = []): Promise<void> => {
@@ -1102,7 +1090,7 @@ export const installInboundRouter = (
     // Re-compose on the per-item stripped text: drops the routing `.name` (it was
     // consumed above; leaving it in would leak into Claude) and attaches the
     // quote only when it isn't already in the target's context.
-    await send(frame, msg, who, composeInbound(msg, texts.join("\n"), quoteInContext, stripAt, addrFor(chatPrincipal(msg))).text, images);
+    await send(frame, msg, who, composeInbound(msg, texts.join("\n"), quoteInContext, stripAt, resolve).text, images);
   });
 
   // template_card_event is handled in approval module; no listener here.
