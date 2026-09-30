@@ -123,7 +123,7 @@ button { font: inherit; color: inherit }
 
 /* ── 用量条: 一组轮次的总账 ─────────────────────────────────────────
    一个组件两处挂: 整页页脚 (wizard 的总账) / 聊天窗口底 (人与某个 wizard 这段往来的账)。
-   宽屏一行排完: 标签 · 指标 · I/O 条 + 图例 · 模型。每一组自身不折行, 一行排不下时
+   宽屏一行排完: 模型 · 指标 · I/O 条 + 图例。每一组自身不折行, 一行排不下时
    整组落到下一行 —— 窄屏自然变成两三行, 不需要另一套结构。 */
 .usage {
   flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 6px 20px;
@@ -132,7 +132,7 @@ button { font: inherit; color: inherit }
   font-variant-numeric: tabular-nums;
 }
 .usage b { font-weight: 700; color: var(--ink) }
-.usage .u-lb { font: 10px system-ui, sans-serif; color: var(--faint); letter-spacing: .4px }
+.usage .u-lb { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .usage .u-kvs { display: flex; gap: 4px 16px }
 .usage .kv { white-space: nowrap; font-size: 9.5px; color: var(--faint); text-transform: uppercase; letter-spacing: .4px }
 .usage .kv b { font-size: 12.5px; margin-right: 4px; letter-spacing: 0; text-transform: none }
@@ -143,7 +143,6 @@ button { font: inherit; color: inherit }
 .usage .lg { display: flex; align-items: center; gap: 4px; white-space: nowrap }
 .usage .lg i { width: 8px; height: 8px; border-radius: 2px; flex: none }
 .usage .lg b { margin-left: 1px }
-.usage .u-model { margin-left: auto; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 
 /* 群聊头像 = 参与者头像拼图: 1 格居中, 2 格左右, 3/4 格田字。 */
 .mosaic {

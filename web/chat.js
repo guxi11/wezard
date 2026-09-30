@@ -460,12 +460,13 @@
           }).join('') + '</span>' +
         '</span>'
       : '';
-    return '<span class="u-lb">用量</span>' +
+    // 条首的标签就是模型名: 这本账是拿什么跑出来的。没有模型记录 (老轮次) 才退回「用量」。
+    return '<span class="u-lb" title="' + esc(t.model || '') + '">' +
+        esc(t.model ? t.model.replace(/^claude-/, '') : '用量') + '</span>' +
       '<span class="u-kvs">' +
         kv('turns', t.turns, t.turns) + kv('tools', u.tools, u.tools) + kv('api', u.calls, u.calls) +
         kv('ctx', u.ctxPeak, fmtTok(u.ctxPeak)) + kv('time', liveDur(t), fmtDur(liveDur(t))) +
-      '</span>' + io +
-      (t.model ? '<span class="u-model" title="' + esc(t.model) + '">' + esc(t.model.replace(/^claude-/, '')) + '</span>' : '');
+      '</span>' + io;
   };
   // 没变就不碰 DOM: 心跳每 3s 来一次, 重建会把悬停中的 tooltip 蹭掉。
   var putUsage = function (el, t) {
