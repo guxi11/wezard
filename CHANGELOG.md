@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-09-30
+
 ### Added
 - **rolepage 显示 wizard 是否在执行中**: 左栏会话列表里, 私聊对端与群里的 wizard 在执行时头像角上亮一盏呼吸灯; 名片上多一个状态词 (执行中 / 空闲 / 已关闭)。判定 = pane 的 busy 或 turn 记录还没静默到点 (`/api/role` 与 SSE `role` 事件: `role.runningUntil`, `convs[].status` / `convs[].subs[].status`), 到点由页面本地熄灯。SSE 每 10s 带着新名册重推一次摘要 —— busy 变了不写 store, 没有这一拍灯会一直亮着。
 
@@ -622,7 +624,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.0.1...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.0.2...HEAD
+[2.0.2]: https://github.com/guxi11/wezard/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/guxi11/wezard/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/guxi11/wezard/compare/v1.4.2...v2.0.0
 [1.4.2]: https://github.com/guxi11/wezard/compare/v1.4.1...v1.4.2
