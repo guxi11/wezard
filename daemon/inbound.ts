@@ -553,6 +553,7 @@ const downloadToInbox = async (
   aesKey: string | undefined,
   msgid: string,
   index: number,
+  attempt = 0,
 ): Promise<string | undefined> => {
   try {
     const { buffer, filename } = await deps.client.downloadFile(url, aesKey);
@@ -564,8 +565,9 @@ const downloadToInbox = async (
     deps.log.info({ url: url.slice(0, 80), bytes: buffer.length, abs }, "media saved");
     return abs;
   } catch (e) {
-    deps.log.error({ err: (e as Error).message }, "media download failed");
-    return undefined;
+    deps.log.error({ err: (e as Error).message, attempt }, "media download failed");
+    // 一次瞬时超时不该让图凭空消失 —— 再试一次。
+    return attempt < 1 ? downloadToInbox(deps, url, aesKey, msgid, index, attempt + 1) : undefined;
   }
 };
 
@@ -1078,6 +1080,7 @@ export const installInboundRouter = (
     const texts: string[] = [];
     const images: string[] = [];
     let imgIdx = 0;
+    let lost = 0;
     for (const item of msg.mixed?.msg_item ?? []) {
       if (item.msgtype === "text" && item.text?.content) {
         const t = stripAt(msg, item.text.content);
@@ -1090,9 +1093,12 @@ export const installInboundRouter = (
           msg.msgid,
           imgIdx++,
         );
-        if (path) images.push(path);
+        if (path) images.push(path); else lost++;
       }
     }
+    // 丢图不能静默: agent 得知道它少看了东西 (回复里会带给人)。不另开 replyStream ——
+    // 那条流 (msgid) 留给 bridge 回这一轮, 提前 finish 会把它掐掉。
+    if (lost) texts.push(`[${lost} 张图片下载失败, 未能附上 —— 请让发送者重发]`);
     if (texts.length === 0 && images.length === 0 && !msg.quote) return;
     // Re-compose on the per-item stripped text: drops the routing `.name` (it was
     // consumed above; leaving it in would leak into Claude) and attaches the

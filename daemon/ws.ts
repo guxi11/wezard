@@ -33,6 +33,8 @@ const MAX_AUTH_FAIL = 5;
 // ws 库拿 handshakeTimeout 当 req 的 idle timeout, 超时走 abortHandshake ->
 // emitErrorAndClose -> emit 'close' -> SDK close 回调 -> scheduleReconnect, 链路续上。
 const HANDSHAKE_TIMEOUT_MS = 15_000;
+// SDK 只拿它当媒体下载 (axios) 的超时; 默认 10s 下大图/慢链路时常超时, 图就被丢了。
+const MEDIA_TIMEOUT_MS = 60_000;
 
 const sdkLogger = (log: Logger): SdkLogger => ({
   debug: (msg, ...a) => log.debug({ a }, String(msg)),
@@ -63,6 +65,7 @@ export const startWs = (cfg: Config, log: Logger): DaemonWs => {
     maxReconnectAttempts: MAX_RECONNECT,
     maxAuthFailureAttempts: MAX_AUTH_FAIL,
     wsOptions: { handshakeTimeout: HANDSHAKE_TIMEOUT_MS },
+    requestTimeout: MEDIA_TIMEOUT_MS,
     scene: SCENE,
     plug_version: PLUG_VERSION,
   });
