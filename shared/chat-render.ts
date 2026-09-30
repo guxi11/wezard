@@ -43,8 +43,8 @@ export const renderChatPage = (): string =>
   <aside class="side">
     <header class="rolebar" id="rolebar">
       <div class="who" id="rb-who"></div>
-      <div class="acts" id="rb-acts"></div>
     </header>
+    <div class="acts" id="rb-acts"></div>
     <nav class="convs" id="convs" aria-label="会话"></nav>
     <footer class="sidefoot" id="rb-foot" hidden><div id="rb-sess"></div></footer>
   </aside>

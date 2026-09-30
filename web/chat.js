@@ -378,7 +378,7 @@
     if (SESS_OPEN && e.key === 'Escape') setSessOpen(false);
   });
 
-  // 名片: 身份 · 出身 · cwd · 出生 · 关系 / 日程入口。
+  // 名片: 身份 · 出身 · cwd · 出生; 名片下面一排是关系 / 日程入口。
   var renderRole = function () {
     var r = R.role;
     if (!r) return;
@@ -413,7 +413,7 @@
     $('#rb-foot').hidden = R.sessions.length < 2;
     bindSessPicker();
     var acts = [];
-    // 入口只在有东西可看时出现, 且只是一枚徽标 —— 名片的主角是身份, 不是按钮。
+    // 入口只在有东西可看时出现 —— 挂在名片下、会话列表上, 不挤进名片: 名片的主角是身份。
     if (R.relations) acts.push('<button class="bd' + (VIEW === 'world' ? ' on' : '') + '" data-view="world">关系图</button>');
     if (R.schedules) acts.push('<button class="bd' + (VIEW === 'plan' ? ' on' : '') + '" data-view="plan">日程<b>' + R.schedules + '</b></button>');
     $('#rb-acts').innerHTML = acts.join('');
