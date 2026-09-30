@@ -271,7 +271,7 @@ server.registerTool(
       model: z
         .string()
         .optional()
-        .describe("这个 wizard 跑在哪个模型上, 口语化随便写 ('opus' / 'sonnet' / '最新的 opus' / 'claude-sonnet-5' 都行) —— 不是直接塞给启动参数, 而是等 pane 起来后真的敲 `/model` 校验, 认不出就翻一遍这台 CLI 此刻的目录再重试, 所以返回里的 `model` 才是真正落地的那个, 可能跟你传的字符串不完全一样; 万一没匹配上会带 `modelWarning`, 那时 wizard 还在跑但停在了原来的模型上, 不是失败。省略用该 CLI 的默认。同一个聊天里的 wizard 可以各跑各的模型 —— 又长又要判断的活给 opus, 跑腿的 lint/grep 给 haiku。"),
+        .describe("这个 wizard 跑在哪个模型上, 口语化随便写 ('opus' / 'sonnet 5' / '最新的 opus' / 'claude-haiku-4-5' 都行) —— 不是塞给启动参数, 而是等 pane 起来后打开它自己的 `/model` 列表, 在里面挑最接近的一项选中, 所以返回里的 `model` 是列表里真正落地的那一项 (如 'Opus 5.5'), 可能跟你传的字符串不一样; 列表里对不上会带 `modelWarning`, 那时 wizard 还在跑但停在了原来的模型上, 不是失败。省略用该 CLI 的默认。同一个聊天里的 wizard 可以各跑各的模型 —— 又长又要判断的活给 opus, 跑腿的 lint/grep 给 haiku。之后要换用 set_model。"),
       keepalive: z
         .boolean()
         .optional()
@@ -435,7 +435,7 @@ server.registerTool(
           z.object({
             tag: z.string().describe("wizard 的 tag, 不带 '#', 如 'fix'。"),
             cli: z.enum(["claude", "claude-internal", "codebuddy"]).optional().describe("这个 wizard 用哪个 CLI。省略则继承本聊天的。"),
-            model: z.string().optional().describe("要现造这个 wizard 时跑在哪个模型上, 口语化随便写 ('opus' / 'haiku' / '最新的 opus' 都行) —— 起来后会用 `/model` 实测校验。已经在跑的不受影响。"),
+            model: z.string().optional().describe("要现造这个 wizard 时跑在哪个模型上, 口语化随便写 ('opus' / 'haiku' / '最新的 opus' 都行) —— 起来后在它的 `/model` 列表里挑最接近的一项选中。已经在跑的不受影响。"),
             cwd: z.string().optional().describe("这个 wizard 的工作区绝对路径。省略则继承本聊天的。"),
           }),
         )
@@ -665,6 +665,27 @@ server.registerTool(
     })),
 );
 
+// 换模型和 spawn 时挑模型是同一条路: 守护进程在目标 pane 里打开 `/model` 列表,
+// 读出这台 CLI 此刻真有的每一项, 挑最接近的, 方向键移过去选中。
+server.registerTool(
+  "set_model",
+  {
+    title: "Switch a wizard's model",
+    description:
+      "给一个**已经在跑**的 wizard 换模型 —— 默认换你自己, `name` 点名就换那个 wizard。口语化写要什么 ('opus' / 'haiku' / 'sonnet 5' / '最新的 opus' / '默认'), 守护进程在它的 pane 里打开 `/model` 列表, 读出这台 CLI 此刻真有的每一项, 挑最接近的一项选中; 返回里的 `model` 是真正落地的那一项, `catalog` 是列表里的全部 —— 对不上时 (`ok:false`) 照着 `catalog` 重说一遍。默认只对这一个会话生效 (`scope:'session'`), 不改新开会话的默认模型; `scope:'default'` 则同时把它设成这台 CLI 此后**每个新会话**的默认模型 —— 那是全机的设置, 只在人明说「以后默认都用 X」时才用。返回里的 `scope` 是实际落在哪一档。它之后被重启也会回到这个模型上。正在干活的也能换 (从下一次请求起生效), 但换模型会让它的对话缓存整份重读一遍 —— 别来回切。用户说「换成 opus」「这个用 haiku 跑就行」「把 .fix 切到 sonnet」时调它; 你自己判断手上的活配不上/撑不起当前模型时也可以主动换。",
+    inputSchema: {
+      model: z.string().describe("要换到哪个模型, 口语化写: 'opus' / 'haiku' / 'sonnet 5' / 'opus 4.7' / '最新的 fable' / '默认'。只写家族名 = 那个家族最新的一个。"),
+      name: z.string().optional().describe("换谁的 —— wizard 的名字 ('fix' / '.fix')。省略 = 换你自己。"),
+      scope: z
+        .enum(["session", "default"])
+        .optional()
+        .describe("'session' (默认) = 只换这一个会话; 'default' = 换这个会话, 并设为此后所有新会话的默认模型 (改的是 CLI 的全局设置, 不指定模型的新 wizard 都会跟着变)。"),
+    },
+  },
+  async ({ model, name, scope }) =>
+    unwrap("set_model", await daemonPost("/wizard/model", { model, ...(name ? { name } : {}), ...(scope ? { scope } : {}) })),
+);
+
 // 生孩子与分身是两个操作, 不是一个开关的两档: 一个白纸起步、可以去别的目录;
 // 一个 fork 调用方此刻的上下文、必须留在原地。拆成两个工具, 模型选的是动词,
 // 而不是在一个布尔上猜。两者落到同一条路由 (`inherit` 由工具定死)。
@@ -674,7 +695,7 @@ const offspringShape = {
   task: z.string().optional().describe("就位后立刻派下去的第一件活 (私聊)。省略则它就位待命。"),
   chat: z.string().optional().describe("把它生在另一个聊天里 (list_chats 里的名字)。省略 = 你自己的聊天, 这是绝大多数情况。"),
   cli: z.enum(["claude", "claude-internal", "codebuddy"]).optional().describe("用哪个 CLI。省略则继承。"),
-  model: z.string().optional().describe("跑在哪个模型上, 口语化随便写 ('opus' / 'sonnet' / '最新的 opus' / 'claude-sonnet-5' 都行) —— 不是直接塞给启动参数, 而是等 pane 起来后真的敲 `/model` 校验, 认不出就翻一遍这台 CLI 此刻的目录再重试, 所以返回里的 `model` 才是真正落地的那个, 可能跟你传的字符串不完全一样; 万一没匹配上会带 `modelWarning`, 那时它还在跑但停在了原来的模型上, 不是失败。省略用该 CLI 的默认。要判断力的给 opus, 跑腿的 (grep、跑测试、照着清单改) 给 haiku —— 一批不必齐步走。"),
+  model: z.string().optional().describe("跑在哪个模型上, 口语化随便写 ('opus' / 'sonnet 5' / '最新的 opus' / 'claude-haiku-4-5' 都行) —— 不是塞给启动参数, 而是等 pane 起来后打开它自己的 `/model` 列表, 在里面挑最接近的一项选中, 所以返回里的 `model` 是列表里真正落地的那一项 (如 'Opus 5.5'), 可能跟你传的字符串不一样; 列表里对不上会带 `modelWarning`, 那时它还在跑但停在了原来的模型上, 不是失败。省略用该 CLI 的默认。要判断力的给 opus, 跑腿的 (grep、跑测试、照着清单改) 给 haiku —— 一批不必齐步走。之后要换用 set_model。"),
   job: z
     .string()
     .optional()

@@ -37,6 +37,7 @@ import { isAutoWindowActive } from "./session-cache.js";
 import { noticeSuffixFor } from "./notices.js";
 import { dangerOf } from "./danger.js";
 import { runTmux, spawnTmuxClaude } from "./spawn-tmux.js";
+import { selectModel, type ModelScope, type ModelSelectResult } from "./model-select.js";
 import { hasRegistry, markTranscript, probeOf, sessionOnPane, submittedSince, type LiveSession, type TranscriptMark } from "./cc-session.js";
 import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
@@ -2019,6 +2020,12 @@ export interface MirrorBridge {
   peekTurns: (target: string, n?: number) => Promise<{ ok: boolean; reason?: string; dialog?: string; busy?: boolean }>;
   /** Mid-turn check for one target. False for cold/dead panes (nothing running). */
   isBusy: (target: string) => Promise<boolean>;
+  /** Switch `target`'s live pane onto the model closest to `wanted` by driving
+   *  its `/model` picker (see `model-select.ts`) — the same path a spawn takes.
+   *  What landed is recorded on the attachment and in the store, so a respawn
+   *  of this wizard comes back on it. `scope: "default"` additionally makes it
+   *  the model every new session of that CLI starts on. */
+  setModel: (target: string, wanted: string, scope?: ModelScope) => Promise<ModelSelectResult>;
   /** Latest assistant message of `target` — the handoff payload between agents. */
   lastText: (target: string) => string;
   /** Is the inbound `quoted` text a snapshot of `target`'s still-open outbound
@@ -5538,6 +5545,17 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     peekPane,
     peekTurns,
     isBusy,
+    setModel: async (target, wanted, scope) => {
+      const a = byTarget.get(target);
+      if (!a?.tmuxPane || !(await tmuxPaneAlive(a.tmuxPane))) return { ok: false, reason: "它没有活着的 pane —— 模型是在 pane 里切的, 先叫醒它" };
+      const r = await selectModel(a.tmuxPane, wanted, log.child({ sub: "set-model", target }), scope);
+      if (r.ok && r.applied) {
+        a.model = r.applied;
+        const rec = deps.store.get(target);
+        if (rec) deps.store.set(target, { ...rec, model: r.applied });
+      }
+      return r;
+    },
     lastText,
     isOpenBubbleQuote,
     status: () => {

@@ -1404,6 +1404,24 @@ const main = async (): Promise<void> => {
       json(res, 200, { ok: true, target, name: victim.name, mode: end ? "end" : "interrupt", forgotten: !!(end && b.forget) });
     });
 
+    // 换模型: 省略名字 = 换自己 (选择器盖在正在跑的这一轮上面照样能开), 点名 = 换
+    // 那个 wizard。与 spawn 时的 `model` 是同一条路 (model-select.ts)。
+    http.register("POST /wizard/model", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      const b = body as { model?: string; scope?: string };
+      const model = (b.model ?? "").toString().trim();
+      if (!model) { json(res, 400, { ok: false, reason: "model 必填 —— 口语化写就行 ('opus' / 'haiku' / 'sonnet 5')" }); return; }
+      const scope = (b.scope ?? "session").toString().trim();
+      if (scope !== "session" && scope !== "default") { json(res, 400, { ok: false, reason: "scope 只有两档: 'session' (只换这一个会话) / 'default' (同时设为新会话的默认模型)" }); return; }
+      // 空串不能交给 resolvePeer —— 那是「本聊天的默认 wizard」, 不是「我自己」。
+      const addr = addrOf(body).trim();
+      const r = addr ? resolvePeer(self, addr) : { ok: true as const, target: self };
+      if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
+      const done = await m.setModel(r.target, model, scope);
+      json(res, done.ok ? 200 : 502, { ...done, target: r.target, name: briefOf(self, r.target).name, ...(done.ok ? { model: done.applied } : {}) });
+    });
+
     // 自我交接: 上下文撑不住了, 自己把工作压成简报, 原地 /clear 重开, 再把简报贴
     // 回去。和 /handoff 的区别是**简报由调用方自己写在入参里** —— 它没法在自己
     // 生成的当口再被问一次 (那正是 /handoff 拒绝对自身操作的原因)。所以这里先应答,

@@ -244,10 +244,10 @@ export interface SpawnArgs {
    *  different models (a graph node can pick opus for design, haiku for lint).
    *  NOT passed as `--model` at launch — that flag is unvalidated (an unknown
    *  slug spawns fine and only fails on the first real turn). Instead, once
-   *  the TUI is ready, we drive it through the pane's own `/model` command
-   *  (see `model-select.ts`), which validates against the live catalog and
-   *  reports back what actually landed. Undefined/empty → the CLI's own
-   *  default, no `/model` round trip. */
+   *  the TUI is ready, we drive the pane's own `/model` picker (see
+   *  `model-select.ts`): read the live catalog, arrow onto the closest row,
+   *  select it, and report back what actually landed. Undefined/empty → the
+   *  CLI's own default, no `/model` round trip. */
   model?: string;
   /** Fork the resumed session instead of continuing it (`--fork-session`).
    *  MANDATORY whenever a SECOND pane resumes a session the daemon still has
@@ -277,8 +277,8 @@ export interface SpawnResult {
   cwd?: string;
   /** Backend actually launched. */
   cli?: CliBackendName;
-  /** Model keyword actually confirmed applied via `/model` (may differ from
-   *  the requested string — e.g. a colloquial "opus 最新" resolves to "Opus").
+  /** Picker label actually confirmed applied via `/model` (may differ from
+   *  the requested string — e.g. a colloquial "opus 最新" resolves to "Opus 5.5").
    *  "" when no model was requested. On a failed resolution this still carries
    *  the raw requested string (best-effort record) and `modelWarning` explains
    *  why — the pane itself is left on whatever model it already had. */
@@ -473,8 +473,8 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, windowName, c
   // missing jsonl and starts emitting once claude writes the first line.
   const tuiReady = await waitForTuiReady(tmuxPane, cmd, backend, log);
 
-  // Model selection needs the TUI actually up (it types `/model …` into the
-  // input box) — skip it if readiness never confirmed, same as any other
+  // Model selection needs the TUI actually up (it types `/model` into the
+  // input box and drives the picker) — skip it if readiness never confirmed, same as any other
   // post-launch step would have to.
   let resolvedModel = "";
   let modelWarning: string | undefined;
