@@ -303,6 +303,10 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .say-cap { font-size: 11.5px; color: var(--mute) }
 .mb .mq .mmeta { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding: 8px 14px 0; font-size: 11px; color: var(--faint) }
 .mb .mq .mmeta + .md-body { padding-top: 4px }
+/* 随这句话来的图: 详情页那份是裁成缩略的 (cover), 这里要整张看得见 —— 按原比例缩进气泡, 不裁。 */
+.mb .mq .q-imgs { padding: 10px 14px 4px }
+.mb .mq .q-imgs a { display: block; max-width: 100% }
+.mb .mq .q-imgs img { max-width: min(100%, 420px); max-height: 360px; width: auto; height: auto; object-fit: contain }
 .mchip { border-radius: 4px; padding: 0 5px; background: #f1f3f6; color: var(--mute) }
 .mchip.priv { color: var(--priv); background: #9a5b1014 }
 .mchip.graph { color: #6639ba; background: #8250df12 }

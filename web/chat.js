@@ -279,6 +279,16 @@
 
   // ── 左栏: 当前 role 的名片 + 会话列表 ──
   var convOf = function (key) { return R.convs.filter(function (c) { return c.key === key; })[0]; };
+  // 人的单聊 (user:…) 在数据上是频道, 但对端只有那一个人时同样是一对一。
+  var dmOf = function (c) {
+    return c && c.kind === 'group' && c.base.indexOf('user:') === 0 && (c.subs || []).length === 1 ? c.subs[0] : null;
+  };
+  // 一对一会话的对端 (wizard 私聊 / 人的单聊 / 「只看我与 X」); 不是一对一则空。
+  var pairPeer = function (c) {
+    if (!c) return WITH || '';
+    var dm = dmOf(c);
+    return c.kind !== 'group' ? c.peer : WITH || (dm ? dm.role : '');
+  };
 
   // 群聊头像 = 参与者头像的拼图 (最多 4 格, 自己排第一)。私聊就是对端自己的头像。
   var membersOf = function (c) {
@@ -597,8 +607,10 @@
     var c = convOf(CONV);
     if (!c) { who.innerHTML = ''; acts.innerHTML = ''; return; }
     // 一对一 (私聊, 或群里「只看我与 X」) 两端都亮头像: 我在前, 对端在后, 各自是切视角的入口。
-    var peer = c.kind !== 'group' ? c.peer : WITH;
-    who.innerHTML = (peer ? pairOf([[ROLE, R.role && R.role.label], [peer, c.kind !== 'group' && c.label]]) : '') +
+    var dm = dmOf(c);
+    var peer = pairPeer(c);
+    var peerLabel = c.kind !== 'group' ? c.label : dm && peer === dm.role ? dm.label : '';
+    who.innerHTML = (peer ? pairOf([[ROLE, R.role && R.role.label], [peer, peerLabel]]) : '') +
       '<span class="t">' + (c.kind === 'wizard' ? nm(c.peer, c.name, true) : esc(c.name)) + '</span>';
     acts.innerHTML = WITH
       ? '<span class="with">只看我与 ' + nm(WITH, '', true) + '</span><button class="vb" id="ch-all">看全部</button>'
@@ -633,8 +645,9 @@
     var priv = !m.channel && group ? '<span class="ch priv">私聊</span>' : '';
     // 本轮的账 (呼吸点 + 模型 / token / 耗时) 跟在时刻后面 —— 片段是服务端渲染好的。
     var stat = m.meta ? '<span class="mstat">' + m.meta + '</span>' : '';
+    // 一对一里收信方就是顶栏那个对端, 我的消息头不再重复写。
     var who = mine
-      ? '<span class="to">' + (m.to && m.to !== 'human:' ? '→ ' + avBtn(m.to, m.toLabel) + nm(m.to, m.toName, true) : '') + '</span>' + stamp(m.ts) + stat + avBtn(m.from, m.fromLabel)
+      ? '<span class="to">' + (m.to && m.to !== 'human:' && m.to !== (group ? pairPeer(convOf(CONV)) : CONV.slice(2)) ? '→ ' + avBtn(m.to, m.toLabel) + nm(m.to, m.toName, true) : '') + '</span>' + stamp(m.ts) + stat + avBtn(m.from, m.fromLabel)
       : avBtn(m.from, m.fromLabel) + nm(m.from, m.fromName, true) + to + priv + stamp(m.ts) + stat;
     var sw = canSwitch(other);
     var flip = '<button class="flip" data-r="' + esc(other) + '"' + (sw ? '' : ' disabled tabindex="-1"') +
