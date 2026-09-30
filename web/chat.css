@@ -394,10 +394,12 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .ping-fold .ps { overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .ping-fold .pt { flex: none; opacity: .8 }
 .ping-fold .ping-body {
-  display: flex; flex-direction: column; gap: 10px; padding: 2px 10px 10px;
+  display: flex; flex-direction: column; gap: 10px; padding: 10px 10px 4px;
 }
 .ping-fold .mcol { max-width: 100% }
 .ping-fold .flip { display: none }
+/* 折叠里的气泡同是白底 —— 描一圈虚线跟对话气泡分开, 与外框一个语气。 */
+.ping-fold .mb :is(.bubble.mq, .say > .bubble) { border: 1px dashed var(--bub-line) }
 
 @media (max-width: 760px) {
   .app { flex-direction: column }
