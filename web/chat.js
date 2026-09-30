@@ -296,8 +296,8 @@
       ms.map(function (m) { return '<i>' + esc(m.label || roleLabel(m.role)) + '</i>'; }).join('') + '</span>';
   };
 
-  var line = function (title, ts, pv) {
-    return '<span class="b"><span class="l1"><span class="t">' + title + '</span>' +
+  var line = function (title, ts, pv, lamp) {
+    return '<span class="b"><span class="l1"><span class="t">' + title + '</span>' + (lamp || '') +
       '<span class="ts">' + esc(fmtAgo(ts)) + '</span></span>' +
       '<span class="pv">' + esc(pv) + '</span></span>';
   };
@@ -312,8 +312,8 @@
           var sel = s.role === WITH;
           return '<button class="si' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '" data-with="' + esc(s.role) + '" ' +
             'title="' + esc('我与 ' + nameOf(s.role) + ' 在这里的 ' + s.count + ' 条往来') + '">' +
-            goSpan('av', s.role, esc(s.label) + lampOf(s.status)) +
-            line(nm(s.role, s.name, true), s.lastTs, s.preview) + '</button>';
+            goSpan('av', s.role, esc(s.label)) +
+            line(nm(s.role, s.name, true), s.lastTs, s.preview, lampOf(s.status)) + '</button>';
         }).join('') + '</div>'
       : '';
     var sel = on && !WITH;

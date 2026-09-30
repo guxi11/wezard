@@ -211,13 +211,17 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .si .pv:empty { display: none }
 
 /* 执行中的 wizard: 头像角上一盏呼吸灯 (同关系图的 .wav .live)。 */
-.ci > .av, .si > .av { position: relative }
-.ci > .av .live, .si > .av .live {
+.ci > .av { position: relative }
+.ci > .av .live {
   position: absolute; right: 1px; bottom: -3px; width: 9px; height: 9px;
   border-radius: 50%; background: #1a7f37; border: 2px solid #fff;
   animation: pulse 1.4s infinite;
 }
-.si > .av .live { right: -1px; width: 8px; height: 8px }
+/* 子项的头像太小, 角上挂不住一盏看得清的灯 —— 挪到名字右边, 与回复头上的 .tg-dot 同大。 */
+.si .l1 .live {
+  flex: none; align-self: center; width: 7px; height: 7px;
+  border-radius: 50%; background: #1a7f37; animation: pulse 1.4s infinite;
+}
 
 /* ── 右栏头: 这个群聊 / 私聊是什么 ───────────────────────────────── */
 .main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--card) }

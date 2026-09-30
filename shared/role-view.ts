@@ -213,6 +213,9 @@ const msgText = (m: Msg): string => {
 const bodyOf = (m: Msg | undefined): string => (m ? stripMd(msgText(m)).slice(0, 80) : "");
 const previewOf = (m: Msg | undefined, dir: Directory): string =>
   m ? `${dir.nameOf(m.from)}: ${bodyOf(m)}` : "";
+/** 最后一条有正文的消息 —— 只有工具调用、或还在跑没吐字的那一轮没有可预览的话,
+ *  预览越过它落在上一句真话上, 而不是留白。 */
+const lastSaid = (ms: readonly Msg[]): Msg | undefined => [...ms].reverse().find((m) => bodyOf(m) !== "");
 
 const SUB_MAX = 40;
 
@@ -232,7 +235,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
         return {
           key, kind: "wizard", name: dir.nameOf(peer), label: dir.labelOf(peer), base: "", peer,
           status: dir.status(peer, now),
-          lastTs: last?.ts ?? 0, preview: previewOf(last, dir), count: ms.length, subs: [],
+          lastTs: last?.ts ?? 0, preview: previewOf(lastSaid(ms), dir), count: ms.length, subs: [],
         };
       }
       const base = key.slice(2);
@@ -247,7 +250,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
           return {
             role: r, name: dir.nameOf(r), label: dir.labelOf(r), count: pair.length,
             // 标题行已经是它的名字, 预览只放正文。
-            lastTs: last?.ts ?? 0, preview: bodyOf(last), status: dir.status(r, now),
+            lastTs: last?.ts ?? 0, preview: bodyOf(lastSaid(pair) ?? lastSaid(seen)), status: dir.status(r, now),
           };
         })
         // 与我有往来的排前, 再按最近。
@@ -257,7 +260,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
         key, kind: "group", base,
         name: dir.chatName(base) || (base.startsWith("user:") ? dir.nameOf(humanOf(base)) : base.replace(/^chat:/, "").slice(0, 10)),
         label: "💬",
-        lastTs: last?.ts ?? 0, preview: previewOf(last, dir), count: all.length, subs,
+        lastTs: last?.ts ?? 0, preview: previewOf(lastSaid(all), dir), count: all.length, subs,
       };
     })
     .sort((a, b) => b.lastTs - a.lastTs);
