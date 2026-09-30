@@ -128,11 +128,23 @@
     return k.label || (n && n.label) || ({ human: '👤', task: '⏰', system: '🧙' })[kindOf(id)] || '🧙';
   };
   // `.name` 的点由 CSS 画 —— 人与定时任务没有地址, 不画点。
-  var nm = function (id, name) {
-    return '<span class="nm ' + kindOf(id) + '">' + esc(name || roleName(id)) + '</span>';
-  };
   var nameOf = function (id) { return (kindOf(id) === 'wizard' ? '.' : '') + roleName(id); };
   var canSwitch = function (id) { return !!id && kindOf(id) !== 'task' && kindOf(id) !== 'system' && id !== 'human:'; };
+  // 头像与名字就是进入那个 role 视角的入口 —— 侧栏项、会话头、消息行同一种读法。
+  // 是 <span> 不是 <button>: 侧栏里它嵌在整行那颗按钮里。
+  var goSpan = function (cls, id, inner) {
+    var on = canSwitch(id) && id !== ROLE;
+    return '<span class="' + cls + (on ? ' go" data-r="' + esc(id) + '" title="' + esc('切到 ' + nameOf(id) + ' 的视角') : '') + '">' + inner + '</span>';
+  };
+  var nm = function (id, name, go) {
+    var cls = 'nm ' + kindOf(id), txt = esc(name || roleName(id));
+    return go ? goSpan(cls, id, txt) : '<span class="' + cls + '">' + txt + '</span>';
+  };
+  var bindGo = function (root, sel) {
+    root.querySelectorAll(sel || '.go[data-r]').forEach(function (b) {
+      b.onclick = function (e) { e.stopPropagation(); switchRole(b.getAttribute('data-r')); };
+    });
+  };
 
   // ── markdown 渲染 (只对未渲染过的节点做, 复用节点不重绘) ──
   var md = null;
@@ -265,29 +277,21 @@
   };
 
   var avatarOf = function (c, extra) {
-    if (c.kind !== 'group') return '<span class="av">' + esc(c.label) + (extra || '') + '</span>';
+    if (c.kind !== 'group') return goSpan('av', c.peer, esc(c.label) + (extra || ''));
     var ms = membersOf(c).slice(0, 4);
     return '<span class="av mosaic n' + ms.length + '" aria-hidden="true">' +
       ms.map(function (m) { return '<i>' + esc(m.label || roleLabel(m.role)) + '</i>'; }).join('') + '</span>';
   };
 
-  // 选中的那一项若是个 role (私聊对端 / 群里的某人), 行内给一个换视角的开关。
-  // 不能是 <button>: 它嵌在整行那颗按钮里。
-  var SWAP = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3 5.5h9M9.5 3l2.5 2.5L9.5 8M13 10.5H4M6.5 8 4 10.5 6.5 13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-  var swapOf = function (role) {
-    return canSwitch(role) && role !== ROLE
-      ? '<span class="sw" role="button" tabindex="0" data-sw="' + esc(role) + '" title="' + esc('切到 ' + nameOf(role) + ' 的视角') + '">' + SWAP + '</span>'
-      : '';
-  };
-  var line = function (title, sw, ts, pv) {
-    return '<span class="b"><span class="l1"><span class="t">' + title + '</span>' + sw +
+  var line = function (title, ts, pv) {
+    return '<span class="b"><span class="l1"><span class="t">' + title + '</span>' +
       '<span class="ts">' + esc(fmtAgo(ts)) + '</span></span>' +
       '<span class="pv">' + esc(pv) + '</span></span>';
   };
 
   var convItem = function (c) {
     var on = c.key === CONV;
-    var title = c.kind === 'wizard' ? nm(c.peer, c.name) : '<span class="nm chat">' + esc(c.name) + '</span>';
+    var title = c.kind === 'wizard' ? nm(c.peer, c.name, true) : '<span class="nm chat">' + esc(c.name) + '</span>';
     // 只列与我有往来的: 在群里但没和我说过话的人, 点进去也是空的。
     var talked = on ? c.subs.filter(function (s) { return s.count; }) : [];
     var subs = talked.length
@@ -295,13 +299,13 @@
           var sel = s.role === WITH;
           return '<button class="si' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '" data-with="' + esc(s.role) + '" ' +
             'title="' + esc('我与 ' + nameOf(s.role) + ' 在这里的 ' + s.count + ' 条往来') + '">' +
-            '<span class="av">' + esc(s.label) + lampOf(s.status) + '</span>' +
-            line(nm(s.role, s.name), sel ? swapOf(s.role) : '', s.lastTs, s.preview) + '</button>';
+            goSpan('av', s.role, esc(s.label) + lampOf(s.status)) +
+            line(nm(s.role, s.name, true), s.lastTs, s.preview) + '</button>';
         }).join('') + '</div>'
       : '';
     var sel = on && !WITH;
     return '<button class="ci' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '">' +
-        avatarOf(c, lampOf(c.status)) + line(title, sel && c.kind === 'wizard' ? swapOf(c.peer) : '', c.lastTs, c.preview) +
+        avatarOf(c, lampOf(c.status)) + line(title, c.lastTs, c.preview) +
       '</button>' + subs;
   };
 
@@ -319,11 +323,7 @@
     convsEl.querySelectorAll('[data-conv]').forEach(function (b) {
       b.onclick = function () { selectConv(b.getAttribute('data-conv'), b.getAttribute('data-with') || ''); };
     });
-    convsEl.querySelectorAll('[data-sw]').forEach(function (x) {
-      var go = function (e) { e.stopPropagation(); switchRole(x.getAttribute('data-sw')); };
-      x.onclick = go;
-      x.onkeydown = function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(e); } };
-    });
+    bindGo(convsEl);
   };
 
   var shortCwd = function (p) {
@@ -497,7 +497,7 @@
     var c = convOf(CONV);
     if (!c) { who.innerHTML = ''; acts.innerHTML = ''; return; }
     if (c.kind === 'wizard') {
-      who.innerHTML = avatarOf(c) + '<span class="l"><span class="t">' + nm(c.peer, c.name) + '</span>' +
+      who.innerHTML = avatarOf(c) + '<span class="l"><span class="t">' + nm(c.peer, c.name, true) + '</span>' +
         '<span class="sub">私聊 · ' + c.count + ' 条</span></span>';
     } else {
       var ms = membersOf(c);
@@ -507,8 +507,9 @@
           (ms.length > 8 ? '…' : '') + '</span></span>';
     }
     acts.innerHTML = WITH
-      ? '<span class="with">只看我与 ' + nm(WITH) + '</span><button class="vb" id="ch-all">看全部</button>'
+      ? '<span class="with">只看我与 ' + nm(WITH, '', true) + '</span><button class="vb" id="ch-all">看全部</button>'
       : '';
+    bindGo(who); bindGo(acts);
     var x = $('#ch-all');
     if (x) x.onclick = function () { selectConv(CONV, ''); };
   };
@@ -529,11 +530,11 @@
     // 看 key 而不是会话列表: 换视角就地重包时, 列表还是上一个 role 的。
     var group = CONV.indexOf('p:') !== 0;
     // 群里我不是收信方的那条 (X → Y), 头上写清是说给谁的。
-    var to = !mine && m.to !== ROLE && group ? '<span class="to">→ ' + nm(m.to, m.toName) + '</span>' : '';
+    var to = !mine && m.to !== ROLE && group ? '<span class="to">→ ' + nm(m.to, m.toName, true) + '</span>' : '';
     var priv = !m.channel && group ? '<span class="ch priv">私聊</span>' : '';
     var who = mine
-      ? '<span class="to">' + (m.to && m.to !== 'human:' ? '→ ' + nm(m.to, m.toName) : '') + '</span>' + stamp(m.ts)
-      : nm(m.from, m.fromName) + to + priv + stamp(m.ts);
+      ? '<span class="to">' + (m.to && m.to !== 'human:' ? '→ ' + nm(m.to, m.toName, true) : '') + '</span>' + stamp(m.ts)
+      : nm(m.from, m.fromName, true) + to + priv + stamp(m.ts);
     var sw = canSwitch(other);
     var flip = '<button class="flip" data-r="' + esc(other) + '"' + (sw ? '' : ' disabled tabindex="-1"') +
       ' aria-label="' + esc(sw ? '切到 ' + nameOf(other) + ' 的视角' : '') + '">' +
@@ -590,9 +591,7 @@
   };
 
   var bindRow = function (el) {
-    el.querySelectorAll('.flip[data-r]:not([disabled]), .av.go').forEach(function (b) {
-      b.onclick = function () { switchRole(b.getAttribute('data-r')); };
-    });
+    bindGo(el, '.flip[data-r]:not([disabled]), .mwho .go[data-r]');
   };
   var rowNode = function (id) {
     var list = inner.querySelectorAll('.mrow');
