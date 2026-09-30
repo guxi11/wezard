@@ -89,7 +89,11 @@ export interface RunTmuxOpts {
 }
 
 export const runTmux = (args: string[], opts: RunTmuxOpts = {}): Promise<ExecResult> =>  new Promise((resolve) => {
-    const proc = spawn("tmux", args, {
+    // `-u`: launchd/systemd 起的 daemon 没有 LANG/LC_*, tmux 把这样的 client 当非
+    // UTF-8, 输出里的控制字符一律洗成 `_` —— `-F "#{pane_id}\t…"` 的 tab 也在其中,
+    // 于是按 tab 切的每一处 (boot 恢复的 pane 快照 / pane 漂移跟随 / pane 上限) 都认不出
+    // 任何 pane, 而在带 locale 的 dev shell 里一切正常。
+    const proc = spawn("tmux", ["-u", ...args], {
       env: { ...process.env, PATH: augmentedPath(process.env.PATH) },
       stdio: [opts.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     });
