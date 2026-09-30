@@ -47,7 +47,7 @@ import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagH
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
-import { stripAnsi, compactPane, paneIsBusy, paneIsStalled, transcriptStalled, summarizeTail, lastAssistantText, lastReply, unwrapPasted, lastContextTokens, keepaliveStamps, tailTurns, renderDialog, type PeerInfo } from "./peers.js";
+import { stripAnsi, compactPane, paneIsBusy, paneIsStalled, transcriptStalled, summarizeTail, lastAssistantText, lastReply, unwrapPasted, lastContextTokens, keepaliveStamps, openKeepalivePing, tailTurns, renderDialog, type PeerInfo } from "./peers.js";
 
 // PATH augmentation: launchd / systemd start the daemon
 // with a stripped PATH that often lacks nvm / homebrew, breaking spawn(claudeBin).
@@ -3569,6 +3569,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // slower than the 60s fail-safe. Reuses the detail turn the timer flow may
   // have opened (fireKeepalive skips opening when this got there first).
   const KEEPALIVE_CONTENT_FAILSAFE_MS = 5 * 60_000;
+  const PONG_RE = /pong/i;
   const beginKeepaliveByContent = (a: AttachState, text: string): void => {
     a.keepaliveByContent = true;
     if (a.keepaliveContentTimer) clearTimeout(a.keepaliveContentTimer);
@@ -3618,6 +3619,18 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 后台派发的结束信号 —— 它不是 function_call_result (那只是 spawn 句柄)。放在
     // keepalive 门之前: 吞没窗口里到达也必须销账, 否则账本永久悬空。
     if (item.kind === "skill_output" && item.agentDone) clearBackgroundAgent(a, item.agentDone);
+    // Reply-side belt: a "pong" arriving with NO swallow holding. Both triggers
+    // above live in memory, and the tail re-attaches at EOF — a reload between
+    // the ping and its reply forgets the ping was ever sent, and the pong opens
+    // a chat turn of its own. So ask the transcript: if the last thing said to
+    // the model is a keepalive ping, this text is its pong — swallow from here
+    // to the turn_end, recorded as the same marked detail turn. Gated on the
+    // transcript, not on the word alone: a real answer that mentions pong has a
+    // real question in front of it.
+    if (item.kind === "text" && !a.keepaliveQuiet && !a.keepaliveByContent && PONG_RE.test(item.body)) {
+      const ping = openKeepalivePing(a.jsonlPath, keepalivePingSigs);
+      if (ping) beginKeepaliveByContent(a, ping);
+    }
     if (a.keepaliveQuiet || a.keepaliveByContent) {
       const id = a.keepaliveTurnId;
       if (id) {

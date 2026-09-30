@@ -10,6 +10,7 @@
 - rolepage 的回复不再是一张外层卡片: 每段话是一颗气泡 (去掉 `assistant` 标题行, 时刻挂到气泡外), 连着的工具调用 / 审批 / 子 agent 收进一个虚线框 —— 框头写 `N 次工具调用 · Bash ×5 · Read …`, 点框头或框内空白收起。本轮的模型 / token / 耗时压成末尾一行小字; 工具行的时刻只报 `HH:MM:SS`。
 
 ### Fixed
+- **keepalive 的 pong 不再在 daemon reload 后漏进群**。吞没 ping 轮的两个开关 (注入时的计时窗、tail 读到 ping 行时的内容标记) 都只在内存里, 而恢复后的 tail 从 EOF 起读 —— reload 恰好落在 ping 与 pong 之间时, ping 行已在 EOF 之前, 两个开关都没了, pong 自己开出一轮发进群。现在多一道回复侧的判定: 没有吞没在持有、而到达的文本含 `pong` 时, 回 transcript 看最后一条 user 轮是不是 keepalive ping (`peers.openKeepalivePing`, 与 `keepaliveStamps` 同一套签名), 是就从这一条起吞到 `turn_end`, 照旧记成带标记的保温轮。判据落在 transcript 上而不是这个词上: 真回答里提到 pong, 它前面是一个真问题。
 - rolepage 侧栏的预览不再留白: 最后一轮只有工具调用、或还在跑没吐字时, 预览越过它落在最后一条有正文的消息上 (子项、群聊行、私聊行同一条规则); 时间仍是最近活动的时间。
 
 ### Removed

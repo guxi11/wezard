@@ -176,6 +176,18 @@ export const isKeepalivePingText = (text: string, sigs: readonly string[]): bool
   normPing(text).toLowerCase() === "ping" ||
   sigs.some((sig) => sig.length > 0 && normPing(text).includes(sig));
 
+/** The keepalive ping this session's newest words answer: the text of the LAST
+ *  user turn when that turn is a ping, else undefined. Read from the transcript
+ *  on purpose — "was a keepalive sent" must survive whatever forgot the
+ *  in-memory swallow (a daemon reload lands between the ping and its pong, and
+ *  the restored tail starts past the ping line). tool_result-only user lines
+ *  carry no text and are not turns, so a ping answered through a tool call
+ *  still reads as open. */
+export const openKeepalivePing = (jsonlPath: string, pingSigs: readonly string[]): string | undefined => {
+  const last = tailTurns(jsonlPath, 8).filter((t) => t.role === "user").at(-1);
+  return last && isKeepalivePingText(last.text, pingSigs) ? last.text : undefined;
+};
+
 /** Like `tailTurns` but the flattened text includes tool_use/tool_result
  *  content — the dedup-only reader so quoted tool bubbles match context.
  *  `n` counts logical conversation turns (user→assistant transitions), not
