@@ -210,8 +210,9 @@ const msgText = (m: Msg): string => {
   const t = [...m.turn.items].reverse().find((it): it is Extract<typeof it, { t: "text" }> => it.t === "text");
   return t?.body ?? "";
 };
+const bodyOf = (m: Msg | undefined): string => (m ? stripMd(msgText(m)).slice(0, 80) : "");
 const previewOf = (m: Msg | undefined, dir: Directory): string =>
-  m ? `${dir.nameOf(m.from)}: ${stripMd(msgText(m)).slice(0, 80)}` : "";
+  m ? `${dir.nameOf(m.from)}: ${bodyOf(m)}` : "";
 
 const SUB_MAX = 40;
 
@@ -245,7 +246,8 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
           const last = pair[pair.length - 1] ?? seen[seen.length - 1];
           return {
             role: r, name: dir.nameOf(r), label: dir.labelOf(r), count: pair.length,
-            lastTs: last?.ts ?? 0, preview: previewOf(last, dir), status: dir.status(r, now),
+            // 标题行已经是它的名字, 预览只放正文。
+            lastTs: last?.ts ?? 0, preview: bodyOf(last), status: dir.status(r, now),
           };
         })
         // 与我有往来的排前, 再按最近。
