@@ -819,9 +819,12 @@ const spliceChildren = (
 // 过程框。键取首段的键 —— items 只追加, 一段过程的开头不会变, 往里添调用时框还是
 // 同一个节点 (客户端的收起态挂在它身上)。头 + .bubbles 的骨架与 turn-group 同构,
 // reconcile 才能只换头、逐条对内层, 而不是整框重建。
-const renderSteps = (run: readonly Part[], key: string): string => {
+//
+// `settled`: 这段过程后面已经跟了终句 —— 答案出来了, 过程默认收起。`data-fold` 是给
+// 客户端的一次性信号: 已在屏上的框在它出现的那一刻收起一次, 之后用户再点开就不再管。
+const renderSteps = (run: readonly Part[], key: string, settled: boolean): string => {
   const calls = run.filter((p) => p.call).length;
-  return tagSig(`<div class="steps" data-key="${key}:g"><button type="button" class="steps-head">` +
+  return tagSig(`<div class="steps${settled ? " folded" : ""}" data-key="${key}:g"${settled ? " data-fold" : ""}><button type="button" class="steps-head">` +
     `${calls ? `${calls} 次工具调用` : "过程"}</button>` +
     `<div class="bubbles">${run.map((p) => p.html).join("")}</div></div>`);
 };
@@ -831,9 +834,10 @@ const foldSteps = (parts: readonly Part[]): string[] =>
   parts.reduce<Part[][]>((runs, p) => {
     const last = runs[runs.length - 1];
     return last?.[0]?.step && p.step ? [...runs.slice(0, -1), [...last, p]] : [...runs, [p]];
-  }, []).flatMap((run) => {
+  }, []).flatMap((run, i, runs) => {
     const [head] = run;
-    return head ? [head.step ? renderSteps(run, head.key) : head.html] : [];
+    // 过程段之间必隔着终句, 所以「后面还有一段」= 后面跟了终句。
+    return head ? [head.step ? renderSteps(run, head.key, i < runs.length - 1) : head.html] : [];
   });
 
 /** `standalone=false`: 这一轮是 rolepage 的一条消息, 不是自成一体的一段 —— 问的那句

@@ -210,6 +210,11 @@
       var eb = childBy(ex, 'bubbles'), nb = childBy(nc, 'bubbles');
       if (eb && nb) {
         swapHead(ex, nc);
+        // 终句刚到: 过程框收起一次。标记留在节点上, 用户之后再点开不会被下一帧收回去。
+        if (nc.hasAttribute('data-fold') && !ex.hasAttribute('data-fold')) {
+          ex.setAttribute('data-fold', '');
+          ex.classList.add('folded');
+        }
         reconcile(eb, nb);
         ex.setAttribute('data-sig', nc.getAttribute('data-sig') || '');
         return ex;
