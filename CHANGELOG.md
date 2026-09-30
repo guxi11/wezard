@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+## [2.0.6] - 2026-09-30
+
+### Changed
+- rolepage 的回复不再是一张外层卡片: 终句 (不带工具调用的那次应答) 是一颗实线气泡, 去掉 `assistant` 标题行; 终句之前的 API 应答 —— 途中的话、工具调用、审批、子 agent —— 连着的收进一个虚线框, 框头写 `N 次工具调用`, 点框头或框内空白收起, 收起不改变框宽。框与气泡都按发话方着色。本轮的模型 / token / 耗时并进名字那一行, 隔着过程框的终句气泡头上再带一行自己的时刻与这串账; 工具行的时刻只报 `HH:MM:SS`。
+- rolepage 会话里的气泡不再描实线边, 只靠底色分发话方: 当前视角的是视角色, 其余的是浅灰; 虚线的过程框保留。
+- 工具调用的结果整段是 JSON (对象 / 数组) 时, 展开后按 input 同款的缩进与高亮排版显示; 原文仍收在 `result (raw)` 里。Read 的文件内容与 unified diff 照旧走各自的视图。
+
+### Removed
+- rolepage 入消息上的「公开」标记: 公开与否是会话窗口这一层的事 —— 公开的一句必在群窗、私聊的必在私窗, 在群窗里逐条标「公开」是个恒真的章。
+
 ## [2.0.5] - 2026-09-30
 
 ### Changed
@@ -669,7 +679,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.0.5...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.0.6...HEAD
+[2.0.6]: https://github.com/guxi11/wezard/compare/v2.0.5...v2.0.6
 [2.0.5]: https://github.com/guxi11/wezard/compare/v2.0.4...v2.0.5
 [2.0.4]: https://github.com/guxi11/wezard/compare/v2.0.3...v2.0.4
 [2.0.3]: https://github.com/guxi11/wezard/compare/v2.0.2...v2.0.3
