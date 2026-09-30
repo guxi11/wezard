@@ -485,6 +485,14 @@
     putUsage($('#ch-usage'), !wiz && WITH && VIEW === 'msgs' ? R.winStats : null);
   };
 
+  // 只有真群 (`chat:<roomid>`) 才有跳转: `user:` 是人与 bot 的单聊, userid 指向的是人自己而不是这段会话。
+  var JUMP = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M9.5 2.5h4v4M13.5 2.5 7.5 8.5M11.5 9.5v3a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1h3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  var openInWecom = function (base) {
+    return base.indexOf('chat:') === 0
+      ? '<a class="jump" href="wxwork://openconversation?roomid=' + encodeURIComponent(base.slice(5)) + '" title="在企业微信中打开这个群聊">' + JUMP + '</a>'
+      : '';
+  };
+
   // ── 右栏头: 这个群聊 / 私聊是什么 (关系 / 日程视图时是视图名) ──
   var renderHead = function () {
     var who = $('#ch-who'), acts = $('#ch-acts');
@@ -502,7 +510,7 @@
         '<span class="sub">私聊 · ' + c.count + ' 条</span></span>';
     } else {
       var ms = membersOf(c);
-      who.innerHTML = avatarOf(c) + '<span class="l"><span class="t">' + esc(c.name) + '</span>' +
+      who.innerHTML = avatarOf(c) + '<span class="l"><span class="tr"><span class="t">' + esc(c.name) + '</span>' + openInWecom(c.base) + '</span>' +
         '<span class="sub">群聊 · ' + ms.length + ' 位成员 · ' +
           ms.slice(0, 8).map(function (m) { return esc(m.label || roleLabel(m.role)); }).join('') +
           (ms.length > 8 ? '…' : '') + '</span></span>';

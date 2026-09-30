@@ -231,6 +231,9 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .ch-who .l { min-width: 0; display: flex; flex-direction: column; gap: 1px }
 .ch-who .t { font-size: 16px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .ch-who > .t { flex: none }
+.ch-who .tr { display: flex; align-items: center; gap: 6px; min-width: 0 }
+.ch-who .jump { flex: none; display: inline-flex; padding: 3px; border-radius: 5px; color: var(--mute) }
+.ch-who .jump:hover { color: var(--accent); background: var(--line) }
 .ch-who .sub { font-size: 11.5px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .ch-acts { display: flex; gap: 8px; align-items: center; flex: none; font-size: 12px; color: var(--mute) }
 .vb {
