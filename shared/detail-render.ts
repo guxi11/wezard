@@ -29,10 +29,10 @@ const fmtTs = (ms: number): string => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 };
 
-/** 一行里的时刻: 只报 `HH:MM:SS` (`short` 再去掉秒), 完整日期收进 title —— 日期由消息行自己交代。 */
-const clock = (ms: number, short = false): string => {
+/** 一行里的时刻: 只报 `HH:MM:SS`, 完整日期收进 title —— 日期由消息行自己交代。 */
+const clock = (ms: number): string => {
   const ts = fmtTs(ms);
-  return `<time class="ts" title="${ts}">${ts.slice(11, short ? 16 : 19)}</time>`;
+  return `<time class="ts" title="${ts}">${ts.slice(11)}</time>`;
 };
 
 const fmtDuration = (ms: number): string => {
@@ -82,6 +82,14 @@ const highlightJson = (json: string): string => {
 
 const toJson = (v: unknown): string => {
   try { return JSON.stringify(v, null, 2) ?? "null"; } catch { return String(v); }
+};
+
+/** 整段结果是一个 JSON 容器 (对象 / 数组) → 重排缩进并高亮; 否则 ""。标量不算 ——
+ *  `42` / `"ok"` 排了版也还是它自己。重排会抹平大整数与键的重复, 所以原文始终另留一份 raw。 */
+const prettyJsonHtml = (raw: string): string => {
+  const t = raw.trim();
+  if (!/^[{[]/.test(t)) return "";
+  try { return highlightJson(JSON.stringify(JSON.parse(t), null, 2)); } catch { return ""; }
 };
 
 export const SHARED_CSS = `
@@ -259,7 +267,10 @@ const renderToolPage = (r: ToolDetailRecord): string => {
     ? String((r.toolInput as Record<string, unknown>).file_path ?? "")
     : "";
   const readResultHtml = isRead && hasResult ? renderReadContent(r.toolResult!, filePath) : "";
-  const resultBlock = readResultHtml
+  const jsonResultHtml = hasResult && !isRead && !diffResultHtml ? prettyJsonHtml(r.toolResult!) : "";
+  const resultBlock = jsonResultHtml
+    ? `<section><h2>result</h2><pre><code>${jsonResultHtml}</code></pre></section><section><details><summary>result (raw)</summary><pre><code>${ansiToHtml(r.toolResult!)}</code></pre></details></section>`
+    : readResultHtml
     ? `${readResultHtml}<section><details><summary>result (raw)</summary><pre><code>${ansiToHtml(r.toolResult!)}</code></pre></details></section>`
     : hasResult
       ? (diffResultHtml
@@ -329,13 +340,19 @@ const TURN_CSS = `
   .bubbles{display:flex;flex-direction:column;gap:8px}
   .bubbles>*{margin-bottom:0}
   .bubble{background:#fff;border:1px solid #d0d7de;border-radius:12px;overflow:hidden}
-  /* ── 回复正文: 一段话一颗气泡, 贴着内容的宽度; 时刻挂在气泡外 ── */
-  .say{display:flex;align-items:flex-end;gap:6px;max-width:100%;align-self:flex-start}
-  .say>.bubble{min-width:0;border-radius:14px}
-  .say>.ts,.tool-summary .ts{flex:none;color:#9aa3af;font-size:10.5px;font-variant-numeric:tabular-nums;
+  /* ── 回复正文: 不带工具调用的那次应答才是一颗实线气泡, 贴着内容的宽度。
+     它前面隔着过程框时头上带一行自己的时刻与本轮的账 (.say-cap)。 ── */
+  .say{display:flex;flex-direction:column;align-items:flex-start;gap:4px;
+    align-self:flex-start;max-width:100%}
+  .say>.bubble{max-width:100%;border-radius:14px}
+  .say-cap{display:flex;align-items:center;gap:4px 10px;flex-wrap:wrap;padding:0 2px}
+  /* 带着工具调用的那次应答里的话: 是过程的一部分, 留在框里, 没有自己的框。 */
+  .bubble.note{background:transparent;border:0;border-radius:0}
+  .bubble.note .md-body{padding:2px 6px;font-size:13.5px}
+  .tool-summary .ts{flex:none;color:#9aa3af;font-size:10.5px;font-variant-numeric:tabular-nums;
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-  /* ── 过程框: 连着的工具调用 / 审批 / 子 agent 收进一个虚线框。
-     框头与框内空白是开关 (chat.js), 框里的每一行照旧各管各的展开。 ── */
+  /* ── 过程框: 终句之前的那些 API 应答 —— 途中的话、工具调用、审批、子 agent ——
+     连着的收进一个虚线框。框头与框内空白是开关 (chat.js), 框里的每一行照旧各管各的展开。 ── */
   .steps{min-width:0;padding:4px 6px 6px;border:1px dashed #d0d7de;border-radius:10px;cursor:pointer}
   .steps>.bubbles{gap:2px}
   .steps .bubble,.steps .turn-group{cursor:auto}
@@ -345,8 +362,6 @@ const TURN_CSS = `
   .steps-head:hover{color:#57606a}
   .steps-head::after{content:"›";margin-left:auto;font-size:14px;color:#b1bac4;
     transform:rotate(90deg);transition:transform .12s}
-  .steps-head .sh-n{flex:none;font-weight:600;color:#57606a}
-  .steps-head .sh-t{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .steps.folded{padding-bottom:4px}
   .steps.folded>.bubbles{display:none}
   .steps.folded>.steps-head::after{transform:none}
@@ -536,10 +551,12 @@ const toolBody = (use: ToolUse, result: ToolResult | undefined): string => {
   const inputSection = primary
     ? renderJsonSection(use.toolInput)
     : `<details open><summary>input</summary><pre><code>${highlightJson(toJson(use.toolInput))}</code></pre></details>`;
+  const jsonHtml = rawResult && !isRead && !diffResultHtml ? prettyJsonHtml(rawResult) : "";
+  const resultJson = jsonHtml ? `<details open><summary>result</summary><pre><code>${jsonHtml}</code></pre></details>` : "";
   const resultRaw = rawResult
     ? `<details><summary>result (raw)</summary><pre><code>${ansiToHtml(rawResult)}</code></pre></details>`
     : `<details><summary>result</summary><pre style="color:#656d76;font-style:italic;margin:0;padding:12px"><code>(尚未捕获)</code></pre></details>`;
-  return `${primary}${inputSection}${resultRaw}`;
+  return `${primary}${inputSection}${resultJson}${resultRaw}`;
 };
 
 /** `lazyTurn`: 正文不随气泡下发, 只留一个指回 (turn, toolUseId) 的空壳, 客户端展开时再取。
@@ -593,14 +610,40 @@ const extractFilePath = (input: unknown): string => {
   return typeof v === "string" ? v : "";
 };
 
-// 没有标题行: 谁说的由消息行的 .mwho 交代, 气泡里只有话; 时刻挂在气泡外。
-const renderTextBubble = (item: Extract<TurnItem, { t: "text" }>, key: string): string =>
-  // 原文用 <script type="text/plain"> 承载 —— 免转义歧义, JS 端 textContent 读回原样。
-  `<div class="say${item.final ? " final" : ""}" data-key="${key}">
-    <div class="bubble"><div class="md-body"></div>
-      <script type="text/plain" class="md-src">${escHtml(item.body)}</script></div>
-    ${clock(item.ts, true)}
-  </div>`;
+// 原文用 <script type="text/plain"> 承载 —— 免转义歧义, JS 端 textContent 读回原样。
+const mdBody = (body: string): string =>
+  `<div class="md-body"></div><script type="text/plain" class="md-src">${escHtml(body)}</script>`;
+
+type TextItem = Extract<TurnItem, { t: "text" }>;
+
+/** 终句: 一颗实线气泡。没有标题行 —— 谁说的由消息行的 .mwho 交代。`cap` = 气泡头上
+ *  那一行的账 (undefined = 不要这一行: 气泡紧跟在 .mwho 下面, 那里已经写过了)。 */
+const renderSay = (item: TextItem, key: string, cap?: string): string => {
+  const ts = fmtTs(item.ts);
+  const head = cap === undefined
+    ? ""
+    : `<div class="say-cap"><time class="mt" title="${ts}">${ts.slice(11, 16)}</time>${cap}</div>`;
+  return `<div class="say" data-key="${key}">${head}<div class="bubble">${mdBody(item.body)}</div></div>`;
+};
+
+/** 途中的话: 和它带出来的工具调用同属一次应答, 留在过程框里。 */
+const renderNote = (item: TextItem, key: string): string =>
+  `<div class="bubble note" data-key="${key}">${mdBody(item.body)}</div>`;
+
+// 本轮的账: 模型 / token / 耗时。
+const usageChips = (r: TurnDetailRecord, done: boolean, ageMs: number): string => {
+  const u = r.usage;
+  const ctxPeak = u ? (u.ctxPeak ?? u.input + u.cacheRead + u.cacheWrite) : 0;
+  return [
+    r.model ? `<span class="chip model">${escHtml(r.model)}${r.modelAlt ? `<span class="alt"> +${r.modelAlt}</span>` : ""}</span>` : "",
+    u?.serviceTier && u.serviceTier !== "standard" ? `<span class="chip tier">${escHtml(u.serviceTier)}</span>` : "",
+    ctxPeak ? `<span class="tg-tok" title="上下文峰值">ctx ${fmtTok(ctxPeak)}</span>` : "",
+    u?.output ? `<span class="tg-tok" title="输出 token">out ${fmtTok(u.output)}</span>` : "",
+    // 耗时只在收口后写死 —— 进行中的 turn 每次渲染都会得到不同的 ageMs, 会把 sig 打乱,
+    // 让 SSE 的"内容没变就不重发"彻底失效。进行中的时长由页脚 status bar 负责。
+    done ? `<span class="tg-tok">${escHtml(fmtDuration(ageMs))}</span>` : "",
+  ].filter(Boolean).join("");
+};
 
 const renderApprovalItem = (item: Extract<TurnItem, { t: "approval" }>, key: string): string => {
   const b = decisionBadge(item.decision);
@@ -645,16 +688,18 @@ const tagSig = (html: string): string =>
 
 // 一个 turn 的切片: 渲染好的气泡、完成态与耗时。
 // keyPrefix 让线程页里多个 turn 的 data-key 不互撞。`lazy`: 工具正文留空壳 (见 renderToolBubble)。
-/** 气泡序列里的一段。`step` = 过程 (工具 / 审批 / 子 agent) 而不是话 —— 连着的几段
- *  收进同一个虚线框; `tool` = 工具名, 给框头计数。 */
-interface Part { key: string; html: string; step: boolean; tool?: string }
+/** 气泡序列里的一段。`step` = 过程 (途中的话 / 工具 / 审批 / 子 agent) 而不是终句 ——
+ *  连着的几段收进同一个虚线框; `call` = 这一段是一次工具调用, 给框头计数。 */
+interface Part { key: string; html: string; step: boolean; call?: boolean }
 
-const turnParts = (r: TurnDetailRecord, keyPrefix = "", now = Date.now(), lazy = false): {
+/** `capped`: 隔着过程框的终句气泡头上带一行时刻 + 本轮的账 (rolepage 的消息要,
+ *  自带 .tg-head 的独立片段不要)。 */
+const turnParts = (r: TurnDetailRecord, keyPrefix = "", now = Date.now(), lazy = false, capped = false): {
   parts: Part[];
   /** parts[i] 对应的时刻 —— 子 agent 卡片按它插回父轮时间轴。 */
   stamps: number[];
   done: boolean;
-  ageMs: number;
+  chips: string;
 } => {
   const items = [...r.items].sort((a, b) => a.ts - b.ts);
   const paired = pairItems(items);
@@ -663,17 +708,23 @@ const turnParts = (r: TurnDetailRecord, keyPrefix = "", now = Date.now(), lazy =
   // 结束判定统一收在 chat-view.turnDone (closed / final text / 静默超时), 详情页
   // 与聊天视图必须给出同一个答案 —— 否则一个显示「进行中」另一个显示「已完成」。
   const done = turnDone(r, now);
-  const body = (p: (typeof paired)[number], key: string): string => {
+  const chips = usageChips(r, done, (done ? r.updatedAt : now) - r.createdAt);
+  // 终句 = 不带工具调用的那次应答 (end_turn → final)。说不清 final 的后端 (软收口)
+  // 退一步: 一轮结束后, 最后一个动作之后的话就是终句。
+  const lastAct = paired.reduce((n, p, i) => (p.kind === "solo" && p.item.t === "text" ? n : i), -1);
+  const isSay = (p: (typeof paired)[number], i: number): boolean =>
+    p.kind === "solo" && p.item.t === "text" && (p.item.final === true || (done && i > lastAct));
+  const body = (p: (typeof paired)[number], key: string, i: number): string => {
     if (p.kind === "pair") return renderToolBubble(p.use, p.result, key, done, lazy ? r.id : undefined);
     const it = p.item;
-    if (it.t === "text") return renderTextBubble(it, key);
+    if (it.t === "text") return isSay(p, i) ? renderSay(it, key, capped && i > 0 ? chips : undefined) : renderNote(it, key);
     if (it.t === "approval") return renderApprovalItem(it, key);
     if (it.t === "tool_result") {
       return `<section class="bubble tool" data-key="${key}">
         <div class="bubble-head">↩ <span class="role">tool_result</span>
           <span class="compact">${escHtml(it.toolUseId)}</span>
           <span class="ts">${fmtTs(it.ts)}</span></div>
-        <details open><summary>result</summary><pre><code>${escHtml(it.body)}</code></pre></details>
+        <details open><summary>result</summary><pre><code>${prettyJsonHtml(it.body) || escHtml(it.body)}</code></pre></details>
       </section>`;
     }
     return "";
@@ -681,13 +732,13 @@ const turnParts = (r: TurnDetailRecord, keyPrefix = "", now = Date.now(), lazy =
   const parts = paired.map((p, i): Part => {
     const key = `${keyPrefix}b${i}`;
     return {
-      key, html: tagSig(body(p, key)),
-      step: p.kind === "pair" || p.item.t !== "text",
-      tool: p.kind === "pair" ? p.use.toolName : undefined,
+      key, html: tagSig(body(p, key, i)),
+      step: !isSay(p, i),
+      call: p.kind === "pair",
     };
   });
   const stamps = paired.map((p) => (p.kind === "pair" ? p.use.ts : p.item.ts));
-  return { parts, stamps, done, ageMs: (done ? r.updatedAt : now) - r.createdAt };
+  return { parts, stamps, done, chips };
 };
 
 const CUT_TEXT: Record<CtxCut, string> = {
@@ -735,6 +786,9 @@ const renderAgent = (r: TurnDetailRecord): string => {
 export interface TurnFragment {
   id: string;
   html: string;
+  /** 本轮的账: 进行中的呼吸点 + 模型 / token / 耗时。独立片段把它画在自己头上,
+   *  rolepage 的消息把它交给消息行 (见 renderTurnGroup 的 `standalone`)。 */
+  meta: string;
   sig: string;
   createdAt: number;
   updatedAt: number;
@@ -762,22 +816,17 @@ const spliceChildren = (
   );
 };
 
-// `Bash ×5 · Read ×4 · Edit` —— 按首次出现的顺序, 收起时一行读出这一段干了什么。
-const tally = (tools: readonly string[]): string =>
-  [...tools.reduce((m, t) => m.set(t, (m.get(t) ?? 0) + 1), new Map<string, number>())]
-    .map(([t, n]) => (n > 1 ? `${t} ×${n}` : t)).join(" · ");
-
 // 过程框。键取首段的键 —— items 只追加, 一段过程的开头不会变, 往里添调用时框还是
 // 同一个节点 (客户端的收起态挂在它身上)。头 + .bubbles 的骨架与 turn-group 同构,
 // reconcile 才能只换头、逐条对内层, 而不是整框重建。
 const renderSteps = (run: readonly Part[], key: string): string => {
-  const tools = run.flatMap((p) => (p.tool ? [p.tool] : []));
+  const calls = run.filter((p) => p.call).length;
   return tagSig(`<div class="steps" data-key="${key}:g"><button type="button" class="steps-head">` +
-    `<span class="sh-n">${tools.length ? `${tools.length} 次工具调用` : "过程"}</span><span class="sh-t">${escHtml(tally(tools))}</span></button>` +
+    `${calls ? `${calls} 次工具调用` : "过程"}</button>` +
     `<div class="bubbles">${run.map((p) => p.html).join("")}</div></div>`);
 };
 
-/** 连着的过程段合成一个框, 话照旧一段一颗气泡。 */
+/** 连着的过程段合成一个框, 终句一段一颗气泡。 */
 const foldSteps = (parts: readonly Part[]): string[] =>
   parts.reduce<Part[][]>((runs, p) => {
     const last = runs[runs.length - 1];
@@ -787,27 +836,16 @@ const foldSteps = (parts: readonly Part[]): string[] =>
     return head ? [head.step ? renderSteps(run, head.key) : head.html] : [];
   });
 
-/** `withQuery=false`: rolepage 把「问」与「答」拆成两条消息 —— 问的那句由发话方那条
- *  气泡承载, 答的这张卡片里就不再重复一遍。 */
+/** `standalone=false`: 这一轮是 rolepage 的一条消息, 不是自成一体的一段 —— 问的那句
+ *  由发话方那条气泡承载, 本轮的账 (`meta`) 由消息行的 .mwho 承载, 片段里都不再带。 */
 export const renderTurnGroup = (
   r: TurnDetailRecord,
   now = Date.now(),
   children: readonly TurnFragment[] = [],
-  withQuery = true,
+  standalone = true,
 ): TurnFragment => {
-  const { parts, stamps, done, ageMs } = turnParts(r, `${r.id}:`, now, true);
-  const u = r.usage;
-  const ctxPeak = u ? (u.ctxPeak ?? u.input + u.cacheRead + u.cacheWrite) : 0;
-  const chips = [
-    r.model ? `<span class="chip model">${escHtml(r.model)}${r.modelAlt ? `<span class="alt"> +${r.modelAlt}</span>` : ""}</span>` : "",
-    u?.serviceTier && u.serviceTier !== "standard" ? `<span class="chip tier">${escHtml(u.serviceTier)}</span>` : "",
-    ctxPeak ? `<span class="tg-tok" title="上下文峰值">ctx ${fmtTok(ctxPeak)}</span>` : "",
-    u?.output ? `<span class="tg-tok" title="输出 token">out ${fmtTok(u.output)}</span>` : "",
-    // 耗时只在收口后写死 —— 进行中的 turn 每次渲染都会得到不同的 ageMs, 会把 sig 打乱,
-    // 让 SSE 的"内容没变就不重发"彻底失效。进行中的时长由页脚 status bar 负责。
-    done ? `<span class="tg-tok">${escHtml(fmtDuration(ageMs))}</span>` : "",
-  ].filter(Boolean).join("");
-  const queryBubble = r.userQuery && withQuery
+  const { parts, stamps, done, chips } = turnParts(r, `${r.id}:`, now, true, !standalone);
+  const queryBubble = r.userQuery && standalone
     ? `<section class="bubble user" data-key="${r.id}:user">
         <div class="bubble-head">💬 <span class="role">User</span></div>
         <div class="q-body">${escHtml(r.userQuery)}</div>
@@ -816,16 +854,14 @@ export const renderTurnGroup = (
   const typing = done ? "" : `<div class="typing" data-key="${r.id}:typing">${escHtml(backendLabel(r.cli))} 正在思考</div>`;
   // 子卡片已是完整片段 (自带 data-key/data-sig), 不再过 tagSig。
   const inner = [tagSig(queryBubble), ...foldSteps(spliceChildren(parts, stamps, children)), tagSig(typing)].join("");
-  const head = `<div class="tg-head">
-    <span class="tg-dot${done ? "" : " live"}"></span>
-    <span class="tg-time">${fmtTs(r.createdAt)}</span>${chips}
-  </div>`;
+  const meta = `<span class="tg-dot${done ? "" : " live"}"></span>${chips}`;
+  const head = standalone ? `<div class="tg-head">${meta}</div>` : "";
   // staleAt 只走 JSON, 绝不进 HTML —— 它跟着 updatedAt 变, 一旦计入 sig, SSE 的
   // "内容没变就不重发" 会彻底失效 (一个 turn 的 HTML 可以是几十 KB)。
   // `ping` 只是个标记 —— 连续几轮折成一行由客户端做 (它才知道相邻是谁)。
   const body = `<section class="turn-group${r.cut ? ` cut cut-${r.cut}` : ""}${r.origin ? " graph" : ""}${r.agent ? " subagent" : ""}${isKeepaliveTurn(r) ? " ping" : ""}" data-key="t:${escHtml(r.id)}">${renderCut(r)}${renderOrigin(r)}${renderAgent(r)}${head}<div class="bubbles">${inner}</div></section>`;
   return {
-    id: r.id, html: tagSig(body), sig: hashStr(body),
+    id: r.id, html: tagSig(body), meta, sig: hashStr(body + meta),
     createdAt: r.createdAt, updatedAt: r.updatedAt,
     done, staleAt: done ? 0 : staleAt(r),
   };
@@ -838,7 +874,7 @@ export const renderCutMark = (m: MarkDetailRecord): TurnFragment => {
     escHtml(CUT_TEXT[m.cut])
   }</span><span class="s">${escHtml(fmtTs(m.createdAt))}</span></div>`;
   return {
-    id: m.id, html: tagSig(body), sig: hashStr(body),
+    id: m.id, html: tagSig(body), meta: "", sig: hashStr(body),
     createdAt: m.createdAt, updatedAt: m.createdAt, done: true, staleAt: 0,
   };
 };

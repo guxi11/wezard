@@ -80,7 +80,7 @@
     return (x.getMonth() + 1) + '-' + pad(x.getDate()) + ' ' + pad(x.getHours()) + ':' +
       pad(x.getMinutes()) + ':' + pad(x.getSeconds());
   };
-  /** 一条消息的时刻 —— 只写在气泡外面这一处, 卡片里不再重复 (见 chat.css 的 .mb .tg-time)。 */
+  /** 一条消息的时刻 —— 只写在气泡外面这一处, 气泡里不再重复。 */
   var stamp = function (ts) {
     return '<time class="mt" title="' + esc(fmtFull(ts)) + '">' + esc(fmtHM(ts)) + '</time>';
   };
@@ -537,9 +537,11 @@
     // 群里我不是收信方的那条 (X → Y), 头上写清是说给谁的。
     var to = !mine && m.to !== ROLE && group ? '<span class="to">→ ' + nm(m.to, m.toName, true) + '</span>' : '';
     var priv = !m.channel && group ? '<span class="ch priv">私聊</span>' : '';
+    // 本轮的账 (呼吸点 + 模型 / token / 耗时) 跟在时刻后面 —— 片段是服务端渲染好的。
+    var stat = m.meta ? '<span class="mstat">' + m.meta + '</span>' : '';
     var who = mine
-      ? '<span class="to">' + (m.to && m.to !== 'human:' ? '→ ' + nm(m.to, m.toName, true) : '') + '</span>' + stamp(m.ts)
-      : nm(m.from, m.fromName, true) + to + priv + stamp(m.ts);
+      ? '<span class="to">' + (m.to && m.to !== 'human:' ? '→ ' + nm(m.to, m.toName, true) : '') + '</span>' + stamp(m.ts) + stat
+      : nm(m.from, m.fromName, true) + to + priv + stamp(m.ts) + stat;
     var sw = canSwitch(other);
     var flip = '<button class="flip" data-r="' + esc(other) + '"' + (sw ? '' : ' disabled tabindex="-1"') +
       ' aria-label="' + esc(sw ? '切到 ' + nameOf(other) + ' 的视角' : '') + '">' +
@@ -650,7 +652,8 @@
       var ec = eb && eb.firstElementChild, nc = nb && nb.firstElementChild;
       var ebb = ec && childBy(ec, 'bubbles'), nbb = nc && childBy(nc, 'bubbles');
       if (ebb && nbb) {
-        swapHead(ec, nc);
+        var es = cur.querySelector('.mwho .mstat'), ns = next.querySelector('.mwho .mstat');
+        if (es && ns) es.innerHTML = ns.innerHTML;
         reconcile(ebb, nbb);
         ['data-sig', 'data-stale-at'].forEach(function (a) { cur.setAttribute(a, next.getAttribute(a)); });
       } else {

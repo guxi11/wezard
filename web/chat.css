@@ -10,12 +10,14 @@
   --mute: #6a7483;
   --faint: #9aa3af;
   --line: #d9dee6;
+  --them: #f3f4f6;    /* 别人说的话 —— 浅灰 */
+  --them-soft: #e8eaee;
+  --them-line: #d9dce2;
   --mine: #eef3fd;    /* 当前视角说的话 */
   --mine-soft: #e2eafa;  /* 它内部还要再沉一档的块 (代码/结果/折叠头) */
   --mine-line: #c9d7f3;
   --accent: #2f55c9;  /* 视角色: 名字的点、选中态、自己的气泡描边 */
   --priv: #9a5b10;    /* 私聊 */
-  --pub: #237a55;     /* 公开 */
 }
 
 html { height: 100% }
@@ -263,6 +265,9 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
   background: var(--card); font-size: 14px; line-height: 22px; text-align: center; cursor: default; padding: 0;
 }
 .mcol { min-width: 0; max-width: min(78% + var(--av), 760px + var(--av)); display: flex; flex-direction: column; gap: 4px }
+/* 带过程框的那条占满这一列: 列宽本来跟着内容走, 框一收起内容变窄, 整条就跟着缩。 */
+.mcol:has(.steps) { width: 100% }
+.mcol:has(.steps) > .mb { align-self: stretch }
 .mrow.mine { flex-direction: row-reverse }
 .mrow.mine .mcol { align-items: flex-end }
 .mwho { font-size: 11.5px; color: var(--mute); display: flex; gap: 6px; align-items: center; flex-wrap: wrap }
@@ -270,31 +275,40 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .mwho .ch { font-size: 10.5px; border-radius: 4px; padding: 0 4px }
 .mwho .ch.priv { color: var(--priv); background: #9a5b1014 }
 /* 时刻只此一处 —— 气泡外, 跟着名字走。等宽数字让一列时间对得齐。 */
-.mwho .mt { color: var(--faint); font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums }
+.mwho .mt, .say-cap .mt { color: var(--faint); font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums }
 .mb { min-width: 0; max-width: 100% }
-/* 卡片里那份时刻是详情页要的, 这里已经写在 .mwho 上了 —— 同一条消息不报两次时间。 */
-.mb .tg-time { display: none }
 
-/* 入消息 (问句) 是一颗气泡; 出消息 (回复) 是一串气泡, 中间夹着虚线的过程框 ——
-   没有外层卡片, 直接排在对话底上。 */
+/* 入消息 (问句) 是一颗气泡; 出消息 (回复) 是虚线的过程框 + 终句的气泡 —— 没有外层
+   卡片, 直接排在对话底上。气泡不描实线边: 谁说的只靠底色分 (--bub), 线只留给虚线的过程框。 */
+.mrow { --bub: var(--them); --bub-soft: var(--them-soft); --bub-line: var(--them-line) }
+.mrow.mine { --bub: var(--mine); --bub-soft: var(--mine-soft); --bub-line: var(--mine-line) }
 .mb > .bubble.mq { border-radius: 14px }
-.mb :is(.bubble.mq, .say > .bubble) { border-color: var(--line) }
+.mb .bubble { border: 0 }
+.say-cap { font-size: 11.5px; color: var(--mute) }
 .mb .mq .mmeta { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding: 8px 14px 0; font-size: 11px; color: var(--faint) }
 .mb .mq .mmeta + .md-body { padding-top: 4px }
 .mchip { border-radius: 4px; padding: 0 5px; background: #f1f3f6; color: var(--mute) }
 .mchip.priv { color: var(--priv); background: #9a5b1014 }
-.mchip.pub { color: var(--pub); background: #237a5514 }
 .mchip.graph { color: #6639ba; background: #8250df12 }
 .mchip.sys { color: #0a7d6b; background: #0a7d6b12 }
 
-/* 自己说的话染成视角色 —— 只染气泡; 过程框是底上的一道虚线, 不跟着染。气泡里
-   TURN_CSS 写死的灰底 (行内代码 / 代码块) 沉一档到 --mine-soft, 免得显成贴纸。 */
-.mrow.mine .mb :is(.bubble.mq, .say > .bubble) { background: var(--mine); border-color: var(--mine-line) }
-.mrow.mine .mb :is(.bubble.mq, .say) .md-body :is(code, pre) { background: var(--mine-soft); border-color: var(--mine-line) }
-.mrow.mine .mb :is(.bubble.mq, .say) .md-body pre code { background: transparent }
-/* 气泡跟着行靠右, 时刻翻到气泡左边; 嵌在过程框里的子 agent 不翻 —— 那不是我说的。 */
-.mrow.mine .mb > .turn-group > .bubbles > .say { align-self: flex-end; flex-direction: row-reverse }
-.mrow.mine .mb > .turn-group > .tg-head { justify-content: flex-end }
+/* 气泡与过程框同一种底色: 都是这个人发出来的 —— 自己的是视角色, 别人的是浅灰。
+   TURN_CSS 里写死的白卡 / 灰底 (嵌套气泡、代码块、折叠头) 在有色底上会显成一张张
+   贴纸 —— 这里把它们收回到底色上, 需要再沉一档的才用 --bub-soft。 */
+.mrow .mb :is(.bubble.mq, .say > .bubble, .steps) { background: var(--bub); border-color: var(--bub-line) }
+.mrow .mb .steps :is(.bubble, .typing) { background: transparent }
+.mrow .mb .bubble.user,
+.mrow .mb .md-body code, .mrow .mb .md-body pre,
+.mrow .mb details:not(.tool-call) > summary,
+.mrow .mb .tool-body section > h2, .mrow .mb .diff-meta,
+.mrow .mb .tool-call > summary:hover { background: var(--bub-soft); border-color: var(--bub-line) }
+.mrow .mb .md-body pre code { background: transparent }
+/* 展开的工具正文 (command / diff / 文件内容) 是裸 section, 吃的是 TURN_CSS 的白底。 */
+.mrow .mb .tool-body section { background: transparent; border-color: var(--bub-line) }
+.mrow .mb .bubble details { border-color: var(--bub-line) }
+.mrow .mb .tool-body { border-left-color: var(--bub-line) }
+/* 气泡跟着行靠右; 嵌在过程框里的子 agent 不翻 —— 那不是我说的。 */
+.mrow.mine .mb > .turn-group > .bubbles > .say { align-self: flex-end; align-items: flex-end }
 /* 工具正文是展开时才取的 (chat.js loadTool) —— 空壳期间说一句在干什么。 */
 .tool-body[data-lazy-turn]:empty::before { content: "加载中…"; color: #8c959f; font-size: 12px }
 .tool-body[data-lazy-turn][data-err]:empty::before { content: "加载失败 · 收起再展开重试"; color: #cf222e }
@@ -334,19 +348,20 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 
 /* ── 一轮回复 ───────────────────────────────────────────────────── */
 /* 只是一根竖轴, 不是卡片: section 的默认白底 / 边框在这里收掉。本轮的账 (模型 /
-   token / 耗时) 压成末尾一行小字 —— 它是这条消息的脚注, 不是标题。 */
+   token / 耗时) 是一串小字: 消息自己的写在名字那一行 (.mstat) 与终句气泡头上
+   (.say-cap), 嵌在过程框里的子 agent 没有名字行, 压在它那一段的末尾 (.tg-head)。 */
 .turn-group {
   display: flex; flex-direction: column; gap: 8px;
   padding: 0; border: 0; border-radius: 0; background: none;
 }
 .tg-head { order: 9; display: flex; align-items: center; gap: 4px 10px; flex-wrap: wrap; padding: 0 2px }
-.tg-head .chip.model, .tg-head .chip.tier, .tg-tok {
+.mstat { display: inline-flex; align-items: center; gap: 4px 10px; flex-wrap: wrap }
+:is(.tg-head, .mstat, .say-cap) :is(.chip.model, .chip.tier), .tg-tok {
   padding: 0; border: 0; border-radius: 0; background: none; font-weight: 400;
   font-size: 10.5px; color: var(--faint); font-family: ui-monospace, Menlo, monospace;
 }
 .tg-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; display: none }
 .tg-dot.live { display: block; background: #1a7f37; animation: pulse 1.4s infinite }
-.tg-time { font-size: 11.5px; color: #8c959f; font-family: ui-monospace, Menlo, monospace }
 
 /* ── 🏓 keepalive 折叠 ──────────────────────────────────────────────
    保温 ping 不是对话, 但它是真花销 —— 所以留在时间轴上, 只是收成一行虚线。 */
