@@ -12,6 +12,11 @@
 - **BREAKING `spawn_clone` 拆成两个工具: `spawn_wizard` (从白板生一个子 wizard, 不带上下文, 可换 `cwd`) 与 `clone_wizard` (fork 一个 wizard 此刻的上下文出分身, 默认是自己; `from` 点名可克隆别的 wizard —— 分身仍归调用方管, 家谱多记一笔 `forkOf` 说明上下文从谁来)**。生孩子与克隆是两个操作, 不该是一个 `inherit` 布尔的两档 —— 模型该选的是动词。两者落到同一条 `/wizard/clone` 路由, 已在跑的 wizard 的旧 MCP 进程照常能用。
 - **群 / 工作区记忆只有一个写入者**: `wizard_remember({scope:"chat"|"workspace"})` 不再直接追加 md, 改为往 `~/.wezard/memory/inbox/` 投提议 (记下提议者与时刻), 由记忆整理者合并。此前几十个 wizard 同写一份文件, 只会越来越长、互相矛盾; `self` 作用域照旧直写。人照旧可直接改 md。
 - 宪章里每份共享记忆上限 4000 字, 超出截断并给出全文路径。
+- `wezard init` 开头先探 tmux, 没装直接报错退出 —— 会话只跑在 tmux pane 里, 不再等装完 daemon 才发现。
+
+### Removed
+- **BREAKING 删除 `/wrc` 命令**: `/wezard:wrc` slash command、`wezard mirror` 子命令、MCP 工具 `wrc` 与 `POST /mirror/attach` 路由一并移除。mirror 会话只从聊天侧开启 (首条消息自动起 pane、`/new`、`.name`、`switch_claude_session`); 配置键 `wrc.*` 不变。
+- **BREAKING 删除 headless 模式**: `daemon/cc-bridge.ts` (每条消息起一个 `claude -p`)、`daemon/sessions.ts` 与配置项 `wrc.mode` / `wrc.sessionMapFile` 移除, daemon 只剩 mirror 一条路; `wezard init` 不再问模式。旧配置里残留的这两个键被忽略 —— 原先 `mode: "headless"` (也是旧默认值) 的部署升级后直接走 mirror, 需要本机有 tmux。
 
 ## [2.0.0] - 2026-09-29
 

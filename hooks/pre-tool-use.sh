@@ -190,7 +190,7 @@ if [[ "$TOOL_NAME" == "ExitPlanMode" ]]; then
   emit "allow" "ExitPlanMode passthrough"
 fi
 
-# wezard 自家 MCP 工具全部走 loopback 到本 daemon, 自审会把 /wrc 首次绑定卡死
+# wezard 自家 MCP 工具全部走 loopback 到本 daemon, 自审会把首次绑定卡死
 # (还没 defaultChat, 卡片无处可推 → 鸡生蛋), 直接放行。
 # 命名两条路径:
 #   1. cli/sync.ts (legacy claude-internal): mcp__wezard__<tool>
@@ -200,8 +200,8 @@ if [[ "$TOOL_NAME" == mcp__*wezard__* ]]; then
   emit "allow" "wezard mcp self-call bypass"
 fi
 
-# wezard 自家 Skill (slash commands like /wrc) 也是本地插件代码, 无须审批。
-# tool_input.skill 形如 "wezard:wrc"; plugin 命名空间用冒号分隔。
+# wezard 自家 Skill (slash commands like /wezard:audit) 也是本地插件代码, 无须审批。
+# tool_input.skill 形如 "wezard:audit"; plugin 命名空间用冒号分隔。
 if [[ "$TOOL_NAME" == "Skill" ]]; then
   SKILL_NAME=$(printf '%s' "$TOOL_INPUT" | jq -r '.skill // ""')
   if [[ "$SKILL_NAME" == wezard:* ]]; then
@@ -216,7 +216,7 @@ if [[ "$TOOL_NAME" == "Bash" ]]; then
      && [[ ! "$CMD" =~ [\;\|\&\>\<\`\$\(] ]]; then
     emit "allow" "read-only bypass"
   fi
-  # wezard CLI 同理: /wrc /cd 这些 slash command 的 ! bash 都打到本 daemon,
+  # wezard CLI 同理: /wezard:audit /wezard:update 这些 slash command 的 ! bash 都打到本 daemon,
   # 自己审自己没意义, 也避免首次绑定时无处推卡。
   if [[ "$CMD" =~ (^|/|[[:space:]])wezard(\.sh)?([[:space:]]|$) ]]; then
     emit "allow" "wezard self-call bypass"

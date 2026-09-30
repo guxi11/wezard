@@ -24,16 +24,11 @@
     "logLevel": "info"           // trace|debug|info|warn|error
   },
 
-  // ── /wrc remote-control behavior ──────────────────────────────────
+  // ── remote-control behavior ──────────────────────────────────────
   "wrc": {
     // Allow which WeCom users / chats to drive CC. Empty = deny all.
     // "all" = allow everyone (use with care).
     "allowFrom": [],             // ["user:zhangsan", "chat:wcXXXX", "all"]
-    // headless: spawn `claude -p` per msg with per-principal session map.
-    // mirror : attach to an existing interactive `claude` session by injecting
-    //          via `claude --resume <sid> -p` AND tailing the same session
-    //          jsonl, pushing live assistant output to WeCom.
-    "mode": "headless",
     "claudeBin": "claude",
     // CLI backend selection. Three built-ins: "claude" / "claude-internal" /
     // "codebuddy". Empty/omitted → inferred from claudeBin basename (back-compat).
@@ -43,9 +38,8 @@
     // "cliBackends": {
     //   "codebuddy": { "bin": "/usr/local/bin/codebuddy" }
     // },
-    "cwd": "~",                  // workdir (mirror: must match the running claude's cwd)
-    "sessionMapFile": "~/.wezard/sessions.json",
-    "extraArgs": [],             // appended to `claude -p`
+    "cwd": "~",                  // default workdir for a new chat's first session
+    "extraArgs": [],             // appended to the spawned CLI command line
     "mirror": {
       // Pin a session id; empty → auto-pick latest .jsonl mtime under
       // ~/.claude/projects/<encoded(cwd)>/.

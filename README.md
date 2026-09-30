@@ -80,9 +80,9 @@ wezard init
 
 ```mermaid
 flowchart TD
-    install["npm i -g wezard<br/>wezard init"] --> ask["交互问 4 个问题"]
+    install["npm i -g wezard<br/>wezard init"] --> ask["交互问 3 个问题"]
     ask --> creds["botId / secret<br/>→ ~/.wezard/secrets.json"]
-    ask --> rest["选哪些 CLI · wrc 模式 · 是否开审批<br/>→ ~/.wezard/config.jsonc"]
+    ask --> rest["选哪些 CLI · 是否开审批<br/>→ ~/.wezard/config.jsonc"]
     creds --> auto
     rest --> auto["自动: 编译 → 注入 hook/MCP → 装 svr 详情中继<br/>→ 装常驻 daemon → 等 WS 鉴权"]
     auto --> claim["在企业微信里发:<br/>将本对话设置为默认会话"]
@@ -91,20 +91,19 @@ flowchart TD
     first --> live["daemon 拉起 tmux 窗口 + Agent 会话<br/>回复逐字流式推回 IM"]
 ```
 
-`init` 问的 4 个问题与落点：
+`init` 问的 3 个问题与落点：
 
 | 问什么 | 落到哪 |
 | --- | --- |
 | botId / secret | `~/.wezard/secrets.json` |
 | 用哪些 Claude agent（`claude` / `claude-internal` / `codebuddy`，可多选） | `~/.wezard/config.jsonc` |
-| wrc 模式（`mirror` 推荐 / `headless`） | `~/.wezard/config.jsonc` |
 | 是否开启 PreToolUse 远程审批 | `~/.wezard/config.jsonc` |
 
 已装过的凭证默认复用，所选 CLI 的 `permissions` 会一次性导入审批规则（`allow` → 免审直行，`ask` → 强制发卡，`deny` → 直接拒绝）。
 
 **最后一步：绑定默认会话。** CLI 提示后，**在企业微信里**给机器人发那句认领口令。它带 10 分钟窗口，消费完立刻关；此后所有消息都按白名单鉴权。全新安装（`allowFrom` 还是空的）时，第一个**单聊**发消息的人会被直接提升为超级管理员，不需要口令——群聊不走这条路，免得机器人被拉进群就被人接管。
 
-**绑定之后，按这个顺序把会话跑起来**（mirror 模式）：
+**绑定之后，按这个顺序把会话跑起来**：
 
 1. **发首条消息**：在企微里随便说句话（比如 `hi`）。它既是绑定信号也是第一句 prompt——daemon 自动拉起 tmux 窗口 + Agent 会话，回复逐字流式推回 IM。
 2. **切到你的项目**：新会话默认落在 `~/.wezard/workspace`，直接对 AI 说「切到 /path/to/proj」——它调 `set_workspace` MCP 一步换目录重开会话，收到 📂 项目回执即切换完成，`/pwd` 随时确认。
@@ -426,7 +425,7 @@ Anthropic 的 prompt cache 只活 ~5 分钟，且**写缓存 1.25x、读缓存 0
 - **零污染**：ping 逼出一个约 1 token 的回复且禁止任何工具动作，该轮**完全不进聊天**，但**记入 chat detail 时间线**（ping 原文 + 真实回复 + cache-read usage），留痕可审计。
 - **顺手救活断掉的一轮**：上一轮死在 API 报错 / 限额横幅上时，这一 ping 改发 `resumePing`（默认 `continue`）把活接上。纯按规则判定，不问模型自己的意见。
 - **`/stop` 手动暂停**：IM 里发 `/stop` 同时暂停该会话的保活，下次有真实对话自动恢复。
-- **只针对 mirror 模式的活 pane**：spawn 模式无 TTY、pane 已死、正在流式输出或会话轮换中的，一律跳过。
+- **只针对活 pane**：spawn 模式无 TTY、pane 已死、正在流式输出或会话轮换中的，一律跳过。
 
 逐 tick 的完整判定见 [技术说明](技术说明.md#prompt-cache-保活省钱心跳)。
 

@@ -1723,7 +1723,7 @@ interface ApprovalDeps {
    *  `hasPane` decides whether the guard may promise "we'll press the confirm";
    *  `answer` presses it after approval; `cancel` + `tell` are the fallback that
    *  turns an unanswerable confirm into an explicit reason for the model.
-   *  Undefined in headless mode → guard stays off (nothing to press there). */
+   *  Undefined → guard stays off (nothing to press there). */
   nativeModal?: {
     hasPane: (sessionId: string) => boolean;
     answer: (sessionId: string, opts: { waitMs: number }) => Promise<NativeModalAnswer>;
@@ -1737,8 +1737,7 @@ interface ApprovalDeps {
   getMirrorTarget?: (sessionId: string) => string | undefined;
   /** Optional: drain mirror's pending text/tool markdown for this session AND wait
    *  for the per-attachment FIFO so `client.sendMessage(card)` can't overtake the
-   *  "thinking" bubble. Mirror mode wires this through; headless mode leaves it
-   *  undefined (no mirror pipe to drain). */
+   *  "thinking" bubble. */
   flushBeforeCard?: (sessionId: string, expect?: { toolName: string; toolInput: unknown }) => Promise<void>;
 }
 
@@ -1987,11 +1986,9 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     }
 
     // 子代理请求归属修正 (见 subagentParentOf): 带 agent 标记、且 session_id 本身解析不到
-    // 任何会话归属 (mirror 未绑定 / headless 无记录) 时, 用 transcript_path 反推父会话改写
+    // 任何会话归属 (mirror 未绑定) 时, 用 transcript_path 反推父会话改写
     // —— 让 skipAll/卡片/⏱窗口/缓存 与父会话一致, 而不是落到无人可点的 ask。
     // 主会话 / 已解析到归属的子代理请求 (CC/CodeBuddy 都上报父 id) 完全不受影响。
-    // 不 gate 在 mirror: headless 下 getMirrorTarget 同样是「session → 归属 chat」的解析
-    // (由 index.ts 注入 sessions store 反查), 父归属逻辑对两种模式统一生效。
     // agent 标记之外, subagents/ 转录布局同样是子代理证据 (部分 CodeBuddy 版本
     // 两个标记都不带) —— 否则这类请求按主会话处理, no-approver 时挂进无人能点的 ask。
     const fromSubagent = Boolean(body.agent_id || body.agent_type)
@@ -2032,7 +2029,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // 它自己的原生确认框, 那个框不过 hook —— 规则一放行就是"不发卡 + pane 阻塞"的
     // 静默死锁。命中且该 session 有活 pane 可代按时强制发卡 (压过 allowRules /
     // ⏱窗口 / 会话缓存), 批准后 settleClaudeConfigModal 去把框按掉。
-    // 没有活 pane (headless / 未镜像的本地会话) → 不介入: 那种情形用户就在键盘前,
+    // 没有活 pane (未镜像的本地会话) → 不介入: 那种情形用户就在键盘前,
     // 自己按掉即可, 拦下来只是挡工作。
     const guardHit = cfg.approval.claudeConfigGuard ? claudeConfigWrite(toolName, toolInput) : undefined;
     const guardActive = Boolean(guardHit && nativeModal?.hasPane(sessionId));

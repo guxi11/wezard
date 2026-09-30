@@ -2,7 +2,7 @@
 //
 // Goal: from a WeCom inbound, materialize a fresh `claude` process inside a
 // shared tmux session and attach the resulting jsonl to the WeCom chat —
-// no human-in-the-loop `/wrc` needed.
+// no human-in-the-loop attach needed.
 //
 // Layout: ONE shared tmux session named `cfg.wrc.tmuxPrefix` (default
 // `wezard`); each chat gets its own window inside it. The pane id (`%N`)

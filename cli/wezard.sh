@@ -33,7 +33,6 @@ wezard <subcommand>
   stop                 unload resident daemon
   restart              stop + start
   reload               quick: shutdown via HTTP + kickstart
-  mirror [chat]        attach current Claude session for mirror push (target overrides config)
   mirror-status        show current mirror attachment
   send <chat> <text>   proactive markdown message
   pending              list outstanding approval req_ids
@@ -335,67 +334,6 @@ case "$cmd" in
       echo "[wezard] cleaned. state kept at ~/.wezard — remove with 'wezard uninstall --purge' or 'rm -rf ~/.wezard'"
     fi
     echo "[wezard] safe to 'npm uninstall -g wezard' now"
-    ;;
-  mirror)
-    cwd="${CLAUDE_PROJECT_DIR:-${CODEBUDDY_PROJECT_DIR:-$(pwd)}}"
-    # claude-internal stores under ~/.claude-internal/projects/, official claude
-    # under ~/.claude/projects/, codebuddy under ~/.codebuddy/projects/. Walk up
-    # parent dirs — caller may be in a subdirectory of the cwd the CLI was
-    # launched in (e.g. monorepo subpackage). Encoding differs: claude keeps a
-    # leading `-` ([/.]→-), codebuddy trims it first (no leading `-`).
-    # Prioritize the base matching the active CLI (detected via env vars) so a
-    # codebuddy session doesn't fall through to a stale claude project dir.
-    if [[ -n "${CODEBUDDY_SESSION_ID:-}" ]]; then
-      bases=("$HOME/.codebuddy/projects" "$HOME/.claude-internal/projects" "$HOME/.claude/projects")
-    else
-      bases=("$HOME/.claude-internal/projects" "$HOME/.claude/projects" "$HOME/.codebuddy/projects")
-    fi
-    proj=""
-    probe="$cwd"
-    while [[ -z "$proj" && -n "$probe" ]]; do
-      for base in "${bases[@]}"; do
-        if [[ "$base" == *codebuddy* ]]; then
-          enc="$(printf %s "$probe" | sed 's|^[/]*||; s|[/.]|-|g')"
-        else
-          enc="$(printf %s "$probe" | sed 's|[/.]|-|g')"
-        fi
-        if [[ -d "$base/$enc" ]]; then proj="$base/$enc"; break; fi
-      done
-      [[ "$probe" == "/" ]] && break
-      probe="$(dirname "$probe")"
-    done
-    if [[ -z "$proj" ]]; then
-      echo "no claude/codebuddy project dir for cwd: $cwd (or any ancestor)"
-      echo "tried encodings up to $HOME/.claude{,-internal}/projects/ + $HOME/.codebuddy/projects/<encoded-ancestor>"
-      exit 1
-    fi
-    # Resolve the *calling* session via env var the CLI injects into every
-    # child process. Both Claude Code and CodeBuddy export CLAUDE_SESSION_ID
-    # (back-compat); CODEBUDDY_SESSION_ID is the codebuddy-native name.
-    sid="${CLAUDE_CODE_SESSION_ID:-${CLAUDE_SESSION_ID:-${CODEBUDDY_SESSION_ID:-}}}"
-    latest=""
-    if [[ -n "$sid" && -f "$proj/$sid.jsonl" ]]; then
-      latest="$proj/$sid.jsonl"
-    fi
-    # Fallback for setups that don't propagate the env var: most-recent mtime.
-    [[ -z "$latest" ]] && latest=$(ls -t "$proj"/*.jsonl 2>/dev/null | head -1)
-    if [[ -z "$latest" ]]; then
-      echo "no .jsonl under $proj"; exit 1
-    fi
-    sid="$(basename "$latest" .jsonl)"
-    # Accept user-friendly prefixes: vid:<id> → user:<id>, chatid:<id> → chat:<id>.
-    # Pass anything else through (already in user:/chat:/group: form, or empty).
-    raw="${1:-}"
-    case "$raw" in
-      vid:*)    target="user:${raw#vid:}" ;;
-      chatid:*) target="chat:${raw#chatid:}" ;;
-      *)        target="$raw" ;;
-    esac
-    body=$(jq -nc --arg s "$sid" --arg p "$latest" --arg t "$target" --arg tp "${TMUX_PANE:-}" \
-      '{sessionId:$s, jsonlPath:$p}
-        + (if $t == "" then {} else {target:$t} end)
-        + (if $tp == "" then {} else {tmuxPane:$tp} end)')
-    http_post /mirror/attach "$body" | jq . 2>/dev/null || true
     ;;
   mirror-status)
     http_get /mirror/status | jq . 2>/dev/null || http_get /mirror/status

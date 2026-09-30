@@ -34,7 +34,7 @@ let remoteBase = "";
 let remoteToken = "";
 // 关系视图的注册表侧数据源。路由在 boot 早期就注册好了, 而 wizard/job/schedule
 // 注册表要到 mirror 块才建得起来 —— 所以这里存的是 provider 而不是数据, 由那边
-// 装上 (同 bindWizardStore 的取舍)。没装 = headless 模式, 关系图退化成只画观测边。
+// 装上 (同 bindWizardStore 的取舍)。装上之前关系图退化成只画观测边。
 let worldFacts: WorldFactsProvider | undefined;
 export const setWorldFactsProvider = (fn: WorldFactsProvider): void => { worldFacts = fn; startFactsForward(); };
 

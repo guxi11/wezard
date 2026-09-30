@@ -1,13 +1,8 @@
-// MCP server `wezard`. Stdio transport. Single tool `wrc` = "wecom remote
-// control": attaches the *current* Claude session for WeCom mirror — session
-// resolved via CLAUDE_CODE_SESSION_ID env (Claude Code populates this for
-// every child process), so multiple windows can each /wrc without trampling.
+// MCP server `wezard`. Stdio transport, stateless: every tool POSTs to the
+// resident daemon over loopback. Sessions are opened from the chat side (the
+// daemon spawns the pane), so nothing here attaches a session.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { spawn } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { join, basename } from "node:path";
-import { homedir } from "node:os";
 import { z } from "zod";
 
 const DAEMON_BASE = process.env.WEZARD_DAEMON_BASE ?? "http://127.0.0.1:17890";
@@ -19,82 +14,6 @@ const fail = (msg: string) => ({
   isError: true,
   content: [{ type: "text" as const, text: msg }],
 });
-
-// Project-dir encoding is backend-specific:
-//   Claude Code / claude-internal: `/` `.` → `-`  (yields leading `-`)
-//   CodeBuddy:                     strip leading `/`, then `/` `.` → `-`  (no leading `-`)
-const encodeClaude = (absCwd: string): string => absCwd.replace(/[/.]/g, "-");
-const encodeCodebuddy = (absCwd: string): string =>
-  absCwd.replace(/^[/]+/, "").replace(/[/.]/g, "-");
-
-interface ProjectRoot {
-  dir: string;
-  encode: (absCwd: string) => string;
-}
-const PROJECT_ROOTS: ProjectRoot[] = [
-  { dir: join(homedir(), ".claude-internal", "projects"), encode: encodeClaude },
-  { dir: join(homedir(), ".claude", "projects"), encode: encodeClaude },
-  { dir: join(homedir(), ".codebuddy", "projects"), encode: encodeCodebuddy },
-];
-
-const findProjectDir = (cwd: string): string | undefined => {
-  for (const root of PROJECT_ROOTS) {
-    const p = join(root.dir, root.encode(cwd));
-    if (existsSync(p)) return p;
-  }
-  return undefined;
-};
-
-const latestJsonlByMtime = (projectDir: string): string | null => {
-  const files = readdirSync(projectDir).filter((n) => n.endsWith(".jsonl"));
-  if (files.length === 0) return null;
-  return files
-    .map((n) => ({ p: join(projectDir, n), m: statSync(join(projectDir, n)).mtimeMs }))
-    .reduce((a, b) => (b.m > a.m ? b : a)).p;
-};
-
-const resolveCallerSession = ():
-  | { sessionId: string; jsonlPath: string }
-  | { error: string } => {
-  // CodeBuddy exports CODEBUDDY_PROJECT_DIR / CODEBUDDY_SESSION_ID (native) and
-  // also CLAUDE_PROJECT_DIR / CLAUDE_SESSION_ID (compat). Check native first so
-  // a codebuddy session inside a claude project dir doesn't mis-resolve.
-  const cwd = process.env.CODEBUDDY_PROJECT_DIR
-    ?? process.env.CLAUDE_PROJECT_DIR
-    ?? process.cwd();
-  const projectDir = findProjectDir(cwd);
-  if (!projectDir) return { error: `no claude project dir for cwd ${cwd}` };
-
-  // Primary: env tells us exactly which session invoked us. Trust it
-  // unconditionally — claude only writes the jsonl after the first user
-  // message lands, so a fresh session (e.g. /clear-then-/wrc, or a brand-new
-  // CLI window) will have envSid set but no file yet. The daemon's tail
-  // tolerates a missing path (see mirror-bridge.ts attach()), and any
-  // existsSync gate here would mis-route to a stale jsonl picked by mtime.
-  const envSid = process.env.CODEBUDDY_SESSION_ID
-    ?? process.env.CLAUDE_CODE_SESSION_ID
-    ?? process.env.CLAUDE_SESSION_ID;
-  if (envSid) return { sessionId: envSid, jsonlPath: join(projectDir, `${envSid}.jsonl`) };
-  // Fallback: most-recently-written jsonl. Only reached when env is absent
-  // (older claude versions, exotic launchers).
-  const jsonlPath = latestJsonlByMtime(projectDir);
-  if (!jsonlPath) return { error: `no .jsonl under ${projectDir}` };
-  return { sessionId: basename(jsonlPath, ".jsonl"), jsonlPath };
-};
-
-// Resolve the current pane's tmux session name. `tmux display-message -p` runs
-// against the tmux server pointed at by $TMUX (set in every process running
-// inside tmux), so it returns the session containing *this* pane without us
-// needing to pass a target. Returns undefined if not in tmux or query failed.
-const detectTmuxSession = (): Promise<string | undefined> =>
-  new Promise((resolve) => {
-    if (!process.env.TMUX) return resolve(undefined);
-    const p = spawn("tmux", ["display-message", "-p", "#{session_name}"], { stdio: ["ignore", "pipe", "ignore"] });
-    let out = "";
-    p.stdout?.on("data", (c: Buffer) => (out += c.toString("utf8")));
-    p.on("error", () => resolve(undefined));
-    p.on("close", (code) => resolve(code === 0 ? out.trim() || undefined : undefined));
-  });
 
 const server = new McpServer(
   { name: "wezard", version: "0.0.1" },
@@ -141,45 +60,6 @@ const normalizeTarget = (raw: string | undefined): string | undefined => {
   if (raw.startsWith("chatid:")) return `chat:${raw.slice(7)}`;
   return raw;
 };
-
-server.registerTool(
-  "wrc",
-  {
-    title: "WeCom remote control",
-    description: "wecom remote control — attach the current agent session to a WeCom chat for live mirror push",
-    inputSchema: {
-      target: z
-        .string()
-        .optional()
-        .describe(
-          'Optional push target. Accepts "vid:<userid>" (DM), "chatid:<chatid>" (group), or raw "user:<id>"/"chat:<id>". Empty → use config defaultChat / mirror.pushChat.',
-        ),
-    },
-  },
-  async ({ target }) => {
-    const r = resolveCallerSession();
-    if ("error" in r) return fail(r.error);
-    const normalizedTarget = normalizeTarget(target);
-    // tmux sets $TMUX_PANE for every process inside a pane (e.g. `%5`); we
-    // inherit it through claude → MCP child, so each /wrc auto-picks its own
-    // pane without the user touching config. Pane ids are not stable across
-    // tmux server restarts, so we also capture the session name — the daemon
-    // uses it to re-derive a fresh paneId after reload, and as the "user wants
-    // a tmux pane" signal that drives respawn when their pane dies.
-    const tmuxPane = process.env.TMUX_PANE?.trim();
-    const tmuxSession = tmuxPane ? await detectTmuxSession() : undefined;
-    const { j } = await daemonPost("/mirror/attach", {
-      sessionId: r.sessionId,
-      jsonlPath: r.jsonlPath,
-      ...(normalizedTarget ? { target: normalizedTarget } : {}),
-      ...(tmuxPane ? { tmuxPane } : {}),
-      ...(tmuxSession ? { tmuxSession } : {}),
-    });
-    return j.ok
-      ? ok({ ok: true, sessionId: r.sessionId, target: j.target })
-      : fail(`attach failed: ${(j.reason as string) ?? "unknown"}`);
-  },
-);
 
 // set_workspace — one-shot project switch: the daemon applies the switch
 // itself by walking the exact /new path — setPendingCwd → kill pane →

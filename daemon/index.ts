@@ -7,10 +7,8 @@ import { startNetWatch } from "./net-watch.js";
 import { startHttp, json, readBody } from "./http.js";
 import { configGet, configSet } from "./config-api.js";
 import { installInboundRouter } from "./inbound.js";
-import { loadSessionStore } from "./sessions.js";
 import { loadMirrorStore } from "./mirror-store.js";
-import { makeBridge } from "./cc-bridge.js";
-import { startMirror, installMirrorEventListener, type MirrorBridge } from "./mirror-bridge.js";
+import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { installApprovalEventListener, makeApproveHandler } from "./approval.js";
 import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, setWorldFactsProvider } from "./detail.js";
@@ -126,7 +124,6 @@ const main = async (): Promise<void> => {
   // last-response tracker enables inbound's `quote` dedup of bot self-replies,
   // and its chat-gate drops header-only pushes (empty messages) daemon-wide.
   installResponseTracker(ws.client, log.child({ mod: "chat-gate" }));
-  const sessions = loadSessionStore(cfg.wrc.sessionMapFile);
   const mirrorStore = loadMirrorStore(cfg.wrc.mirror.attachmentsFile);
   // 定时任务表 —— 每条任务是 ~/.wezard/tasks/<id>.task.mjs 一份可注入代码的配置
   // (见 shared/task-file.ts)。目录是热加载的: wizard 改完文件不用 reload 守护进程。
@@ -136,19 +133,11 @@ const main = async (): Promise<void> => {
     log.child({ mod: "tasks" }),
     (added, removed) => log.info({ added, removed }, "task files changed"),
   );
-  const bridge =
-    cfg.wrc.mode === "mirror"
-      ? startMirror({ cfg, log: log.child({ mod: "mirror" }), client: ws.client, store: mirrorStore })
-      : makeBridge({ cfg, log: log.child({ mod: "bridge" }), client: ws.client, sessions });
-  if (!bridge) {
-    log.fatal("bridge failed to start");
-    fatalExit("bridge failed to start");
-  }
+  const bridge = startMirror({ cfg, log: log.child({ mod: "mirror" }), client: ws.client, store: mirrorStore });
   // 群里每个 `.name` 都挂它的 rolepage (见 session-label 的 TagLinker)。正文提及
-  // 只认真有其人的 —— 随手写的 `.gitignore` 不该变成一个开在空栏上的链接; headless
-  // 没有 wizard 名册, 只挂头。
-  const known = cfg.wrc.mode === "mirror" ? (t: string) => (bridge as MirrorBridge).chatTargets(t).includes(t) : () => false;
-  // 名册在 mirror 块里才绑 (bindWizardStore) —— 这里全走 wizardStore() 惰性取。
+  // 只认真有其人的 —— 随手写的 `.gitignore` 不该变成一个开在空栏上的链接。
+  const known = (t: string): boolean => bridge.chatTargets(t).includes(t);
+  // 名册在下面的 mirror 块里才绑 (bindWizardStore) —— 这里全走 wizardStore() 惰性取。
   bindTagLinker({
     urlOf: (t) => chatUrlFor(cfg.daemon, t, baseOfKey(t).replace(/^(user|chat|group):/, "")),
     resolve: (name) => {
@@ -161,54 +150,30 @@ const main = async (): Promise<void> => {
   // approval click → finalize 当前 liveStream, 后续 tool/text 落到 standalone。
   // 规则 2: 用户点击授权那一刻就是"上一段对话"的边界, 截断 stream 让授权后的
   // 工作单独成块, 比让 stream 一直长到下一个 inbound / hardTimer 更清晰。
-  // headless 模式没有 liveStream 概念, onApproved 只在 mirror 模式接。
-  const onApproved =
-    cfg.wrc.mode === "mirror"
-      ? (sid: string): void => (bridge as MirrorBridge).terminateLiveStream(sid)
-      : undefined;
+  const onApproved = (sid: string): void => bridge.terminateLiveStream(sid);
   installApprovalEventListener(ws.client, log.child({ mod: "approval" }), cfg, onApproved);
   // Route approval cards to the WeCom chat bound to the requesting session.
-  // mirror: the chat this session's pane is attached to; headless: the principal
-  // (user:/chat:) that /wrc-dispatched this session — reverse of the sessions store.
-  // Falls back to cfg.approval.approvers / cfg.defaultChat when nothing is bound.
-  const getMirrorTarget =
-    cfg.wrc.mode === "mirror"
-      ? (sid: string): string | undefined => (bridge as MirrorBridge).targetForSession(sid)
-      : (sid: string): string | undefined => {
-          for (const [principal, s] of Object.entries(sessions.all())) {
-            if (s === sid) return principal;
-          }
-          return undefined;
-        };
+  // — the chat this session's pane is attached to. Falls back to
+  // cfg.approval.approvers / cfg.defaultChat when nothing is bound.
+  const getMirrorTarget = (sid: string): string | undefined => bridge.targetForSession(sid);
   // Pre-card barrier: drain pending mirror text/tool markdown for this session
   // and await its FIFO so vote/approval cards never overtake the "thinking" bubble.
-  // Headless mode has no mirror pipe — leave undefined so approval skips the call.
-  const flushBeforeCard =
-    cfg.wrc.mode === "mirror"
-      ? (sid: string, expect?: { toolName: string; toolInput: unknown }): Promise<void> =>
-          (bridge as MirrorBridge).flushBeforeCard(sid, expect)
-      : undefined;
+  const flushBeforeCard = (sid: string, expect?: { toolName: string; toolInput: unknown }): Promise<void> =>
+    bridge.flushBeforeCard(sid, expect);
   // `.claude/**` 写守卫要用的四个 pane 原语。cancel/tell 复用现成的 target 级方法
   // (先 sessionId → target 再调), 只有 hasPane / answerNativeModal 是 pane 级新增。
-  // headless 模式没有 live pane 可按 → 留 undefined, 守卫自动不介入。
-  const nativeModal =
-    cfg.wrc.mode === "mirror"
-      ? (() => {
-          const b = bridge as MirrorBridge;
-          return {
-            hasPane: (sid: string): boolean => b.hasLivePane(sid),
-            answer: (sid: string, opts: { waitMs: number }) => b.answerNativeModal(sid, opts),
-            cancel: async (sid: string): Promise<{ ok: boolean; reason?: string }> => {
-              const t = b.targetForSession(sid);
-              return t ? await b.interruptPane(t) : { ok: false, reason: "no mirror target for session" };
-            },
-            tell: async (sid: string, text: string): Promise<{ ok: boolean; reason?: string }> => {
-              const t = b.targetForSession(sid);
-              return t ? await b.injectText(t, text) : { ok: false, reason: "no mirror target for session" };
-            },
-          };
-        })()
-      : undefined;
+  const nativeModal = {
+    hasPane: (sid: string): boolean => bridge.hasLivePane(sid),
+    answer: (sid: string, opts: { waitMs: number }) => bridge.answerNativeModal(sid, opts),
+    cancel: async (sid: string): Promise<{ ok: boolean; reason?: string }> => {
+      const t = bridge.targetForSession(sid);
+      return t ? await bridge.interruptPane(t) : { ok: false, reason: "no mirror target for session" };
+    },
+    tell: async (sid: string, text: string): Promise<{ ok: boolean; reason?: string }> => {
+      const t = bridge.targetForSession(sid);
+      return t ? await bridge.injectText(t, text) : { ok: false, reason: "no mirror target for session" };
+    },
+  };
   const http = startHttp({ cfg, ws, log, sourcePath });
   http.register(
     "POST /approve",
@@ -289,20 +254,11 @@ const main = async (): Promise<void> => {
     wedocLog.info("wedoc bridge ready");
   }
 
-  // Mirror-mode: expose attach/status so a slash command can pin the live session.
-  if (cfg.wrc.mode === "mirror") {
-    const m = bridge as MirrorBridge;
+  // Mirror-mode: status + the spawn/switch routes the chat side drives.
+  {
+    const m = bridge;
     installMirrorEventListener(ws.client, m, log.child({ mod: "mirror" }));
     http.register("GET /mirror/status", (_req, res) => json(res, 200, m.status()));
-    http.register("POST /mirror/attach", async (req, res) => {
-      const body = (await readBody(req)) as Partial<{ sessionId: string; jsonlPath: string; target: string; tmuxPane: string; tmuxSession: string }>;
-      if (!body.sessionId || !body.jsonlPath) {
-        json(res, 400, { ok: false, reason: "sessionId and jsonlPath required" });
-        return;
-      }
-      const r = m.attach({ sessionId: body.sessionId, jsonlPath: body.jsonlPath, target: body.target, tmuxPane: body.tmuxPane, tmuxSession: body.tmuxSession });
-      json(res, r.ok ? 200 : 400, r);
-    });
     // Manual auto-spawn trigger — used by `wezard init` to materialize a
     // tmux+claude pane immediately after claim, instead of waiting for the
     // first inbound. Body: { target?: "user:xxx" | "chat:xxx" }. Falls back
@@ -1750,17 +1706,14 @@ const main = async (): Promise<void> => {
   }
 
   // 定时调度器 — 每 20s 检查任务表, 到点把 prompt 注入目标 wizard。
-  // inject 只在 mirror 模式给得出 (headless 模式没有常驻会话可注入)。
   migrateLegacySchedules(cfg, sourcePath, tasks, log.child({ mod: "tasks" }));
   const scheduler = startScheduler({
     client: ws.client,
     registry: tasks,
     log: log.child({ mod: "tasks" }),
-    inject: cfg.wrc.mode === "mirror" ? scheduledTaskInject : undefined,
+    inject: scheduledTaskInject,
     // gate 里的 `sh` 默认就在目标 wizard 此刻的工作区跑 —— 任务文件里不必写死绝对路径。
-    cwdOf: cfg.wrc.mode === "mirror"
-      ? (t) => { const c = (bridge as MirrorBridge).getCwd(t); return c.runningCwd || c.pendingCwd || c.defaultCwd; }
-      : undefined,
+    cwdOf: (t) => { const c = bridge.getCwd(t); return c.runningCwd || c.pendingCwd || c.defaultCwd; },
     fallbackTarget: () => (cfg.defaultChat ?? "").trim(),
   });
 
@@ -1770,7 +1723,7 @@ const main = async (): Promise<void> => {
   // 忙着的 / 人正盯着的 (bridge 内部判)。keepalive 会话靠 ping 刷新 transcript,
   // 天然到不了阈值。
   let reapTimer: NodeJS.Timeout | undefined;
-  if (cfg.wrc.mode === "mirror" && cfg.wrc.mirror.idleReapHours > 0) {
+  if (cfg.wrc.mirror.idleReapHours > 0) {
     const ttlMs = cfg.wrc.mirror.idleReapHours * 3.6e6;
     const sweep = async (): Promise<void> => {
       const taskOwners = new Set(
@@ -1780,7 +1733,7 @@ const main = async (): Promise<void> => {
           .filter((t): t is string => !!t),
       );
       const pendingSids = new Set(listPending().map((p) => p.meta.sessionId).filter((s): s is string => !!s));
-      const r = await (bridge as MirrorBridge).reapIdle(ttlMs, (target, sid) =>
+      const r = await bridge.reapIdle(ttlMs, (target, sid) =>
         taskOwners.has(target) ? "owns scheduled task"
           : pendingSids.has(sid) ? "pending approval"
           : undefined);

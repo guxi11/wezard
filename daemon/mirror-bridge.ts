@@ -48,7 +48,7 @@ import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
 import { stripAnsi, compactPane, paneIsBusy, paneIsStalled, transcriptStalled, summarizeTail, lastAssistantText, lastContextTokens, keepaliveStamps, tailTurns, renderDialog, type PeerInfo } from "./peers.js";
 
-// Same PATH augmentation logic as cc-bridge: launchd / systemd start the daemon
+// PATH augmentation: launchd / systemd start the daemon
 // with a stripped PATH that often lacks nvm / homebrew, breaking spawn(claudeBin).
 
 // Backend resolution is per-transcript, not global: `backendForPath` recovers
@@ -61,7 +61,7 @@ import { stripAnsi, compactPane, paneIsBusy, paneIsStalled, transcriptStalled, s
 // jsonl line carries a `cwd` field; the encoded directory name is lossy (both
 // `/` and `.` collapse to `-`) so it can't be reversed — reading the file is
 // the only faithful path. Used as the middle tier in attach()'s cwd resolution
-// so /wrc-attached sessions reflect their real project in /pwd, /clear, /new,
+// so sessions attached without an explicit cwd (switch / restore) reflect their real project in /pwd, /clear, /new,
 // instead of falling back to the global cfg.wrc.cwd.
 const readCwdFromJsonl = (path: string): string => {
   try {
@@ -1818,7 +1818,7 @@ export interface AttachArgs {
    *  /clear can detect mismatch. Empty → cfg.wrc.cwd. */
   cwd?: string;
   /** `--model` the pane was spawned with. `undefined` = carry over from the
-   *  previous binding (a bare /wrc re-attach has no way to know it); `""` =
+   *  previous binding (a bare re-attach has no way to know it); `""` =
    *  explicitly the CLI's default, which is what a fresh `/new` means. */
   model?: string;
   /** User-requested next cwd (carry-over on re-attach). */
@@ -3890,7 +3890,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // missing file (existsSync gate at start, try/catch in drain) and the 1s
     // poll picks it up the moment claude writes the first line.
     // Replace any existing attach with the same sessionId or same target. The
-    // sessionId clash is the "/wrc again from same window" case; the target
+    // sessionId clash is the "same session attached again" case; the target
     // clash is "different window steals my WeCom chat" — both end the previous.
     // Guard: if a DIFFERENT principal already owns this sessionId, refuse rather
     // than detaching it — prevents cross-wire when concurrent restoreFromStore
@@ -3922,7 +3922,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       tmuxPane: (tmuxPane ?? "").trim(),
       tmuxSession: (tmuxSession ?? "").trim(),
       // Explicit cwd (spawn path) wins; otherwise derive from jsonl head so
-      // /wrc attaches inherit the bound session's real project dir instead of
+      // cwd-less attaches inherit the bound session's real project dir instead of
       // collapsing to cfg.wrc.cwd (which would mislabel /pwd, /clear, /new).
       runningCwd: expandHome(((cwd ?? "").trim()) || readCwdFromJsonl(jsonlPath) || cfg.wrc.cwd),
       pendingCwd: carryPending,
@@ -3983,7 +3983,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // Verify a paneId still exists. `display-message -t <paneId>` succeeds iff
   // the pane is alive — and tmux pane ids monotonically increment within a
   // server lifetime, so a freed id will not be silently reused. We don't need
-  // the session name, which matters because /wrc attaches capture only $TMUX_PANE.
+  // the session name, which matters because some attaches carry only a pane id.
   const tmuxPaneAlive = async (paneId: string): Promise<boolean> => {
     if (!paneId) return false;
     const r = await runTmux(["display-message", "-p", "-t", paneId, "#{pane_id}"]);
@@ -3991,7 +3991,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   };
   // 注入前的存活判定要多问一句「里面还有 AI 会话吗」: pane 在、claude 却退回了 shell,
   // 照旧往里贴就是把用户的话当 shell 命令跑。判否即走 respawn (旧 pane 不杀 —— 它可能是
-  // 用户 /wrc 自己的终端)。
+  // 用户自己的终端, 经 switch 绑进来的)。
   const paneUsable = async (paneId: string, jsonlPath: string): Promise<boolean> =>
     (await tmuxPaneAlive(paneId)) && (await paneHostsSession(paneId, backendForPath(jsonlPath).homeDir));
 
@@ -4163,7 +4163,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (!r.ok) log.warn({ reason: r.reason }, "mirror: pinned auto-attach skipped");
     }
   } else {
-    log.info("mirror: no persisted attachments and no pinned sessionId — waiting for /new or /mirror/attach");
+    log.info("mirror: no persisted attachments and no pinned sessionId — waiting for the first inbound or /new");
   }
 
   // Render full tool details for a finalized turn into one-or-more markdown
@@ -4732,7 +4732,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (spawned) {
       spawned.justSpawned = true;
       spawned.muteUntilInject = true;
-      // 只有换过 pane 才是断点 —— 首次 /wrc 建会话时 prev 为空, 那不是"不连续", 是开局。
+      // 只有换过 pane 才是断点 —— 首次建会话时 prev 为空, 那不是"不连续", 是开局。
       if (prev) markCut(target, spawned.sessionId, "new");
       // A freshly spawned session is empty — nothing in the cache to keep warm.
       // Pause keepalive like /stop; the first real turn (WeCom inbound, or the
@@ -5926,7 +5926,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           await client.replyStream(
             frame,
             streamId,
-            withTagHeader(principal, "[wezard] wecom remote control not attached — run `/wrc` inside the target Claude session"),
+            withTagHeader(principal, "[wezard] 本聊天还没有会话 — 发 `/new` 开一个"),
             true,
           );
         } catch {
@@ -6040,7 +6040,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         if (s && s.closed) return; // (eager path) superseded by a newer dispatch
         // Always reincarnate when no live pane: covers (a) pane closed between
         // turns, (b) daemon reload restored a binding without a live pane, AND
-        // (c) /wrc'd from a non-tmux context (no tmuxSession ever stored) —
+        // (c) a binding made from a non-tmux context (no tmuxSession ever stored) —
         // that last case used to permanently lock the chat into spawn-mode.
         // If respawn fails, fall through to spawn-mode inject for THIS turn
         // but DON'T erase tmuxSession from store — next inbound will retry,

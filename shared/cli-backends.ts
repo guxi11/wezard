@@ -1,5 +1,5 @@
 // CLI backend descriptors. Claude Code / claude-internal forks / CodeBuddy
-// all share the headless stream-json + hook protocol shape, but differ in:
+// all share the same jsonl transcript + hook protocol shape, but differ in:
 //   - binary name + config home (~/.claude vs ~/.claude-internal vs ~/.codebuddy)
 //   - on-disk project-dir encoding (Claude: leading `-`; CodeBuddy: none)
 //   - jsonl transcript schema (CodeBuddy splits tool_use / tool_result into
@@ -93,12 +93,6 @@ export interface CliBackend {
   projectDirEnv: "CLAUDE_PROJECT_DIR" | "CODEBUDDY_PROJECT_DIR";
   /** Plugin root env var (for hooks.json `${VAR}` resolution). */
   pluginRootEnv: "CLAUDE_PLUGIN_ROOT" | "CODEBUDDY_PLUGIN_ROOT";
-  /** Args required to emit `stream_event` content_block_delta lines in
-   *  headless `-p --output-format stream-json` mode. Claude Code enables
-   *  streaming via `--verbose`; CodeBuddy needs `--include-partial-messages`.
-   *  Without these, cc-bridge falls back to the whole-assistant-message path
-   *  (no typewriter effect, but still functional). */
-  headlessStreamingArgs: readonly string[];
   /** Flag that appends text to the session's system prompt at launch, or
    *  undefined when the CLI has none. wezard uses it to press a wizard's
    *  identity into the process itself — a system prompt survives `/clear` and
@@ -143,7 +137,6 @@ const makeClaude = (name: CliBackendName, bin: string): CliBackend => {
     settingsPath: `${homeDir}/settings.json`,
     projectDirEnv: "CLAUDE_PROJECT_DIR",
     pluginRootEnv: "CLAUDE_PLUGIN_ROOT",
-    headlessStreamingArgs: ["--verbose"],
     systemPromptFlag: "--append-system-prompt",
     encodeProjectDir: encodeClaude,
     // Claude Code jsonl is already in the TranscriptLine shape — identity pass.
@@ -291,10 +284,6 @@ const makeCodebuddy = (bin: string): CliBackend => ({
   settingsPath: "~/.codebuddy/settings.json",
   projectDirEnv: "CODEBUDDY_PROJECT_DIR",
   pluginRootEnv: "CODEBUDDY_PLUGIN_ROOT",
-  // CodeBuddy: --verbose is a no-op for streaming; --include-partial-messages
-  // is what emits stream_event content_block_delta lines. Keep --verbose too
-  // for log parity — it's harmless and may surface diagnostics in debug mode.
-  headlessStreamingArgs: ["--verbose", "--include-partial-messages"],
   encodeProjectDir: encodeCodebuddy,
   normalizeTranscriptLine: normalizeCodebuddy,
 });
@@ -434,7 +423,7 @@ export const activateBackend = (backend: CliBackend): CliBackend => {
 /**
  * Recover the backend that owns an absolute transcript path, by longest
  * projectsDir prefix match. Falls back to primary for paths outside every known
- * root (custom `mirror.projectsDir`, or a jsonl handed in by `/wrc` from a
+ * root (custom `mirror.projectsDir`, or a jsonl handed in by a session switch from a
  * location we don't manage) — treating an unknown transcript as the primary
  * dialect is what the single-backend code already did.
  */

@@ -1,11 +1,9 @@
-// Inbound text router. Hands the message off to either the headless CC bridge
-// (mode=headless) or the mirror bridge (mode=mirror).
+// Inbound text router. Hands the message off to the mirror bridge.
 import { mkdirSync, writeFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { WSClient, WsFrame, TextMessage, ImageMessage, MixedMessage, BaseMessage, QuoteContent } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
-import type { Bridge } from "./cc-bridge.js";
 import type { MirrorBridge } from "./mirror-bridge.js";
 import { tailTurnsWithTools, keepalivePingSigs, renderPeerMentionHint, type PeerInfo, type PeerMention } from "./peers.js";
 import { noticeSuffixFor } from "./notices.js";
@@ -80,8 +78,7 @@ const authPrincipals = (msg: BaseMessage): string[] => {
 
 // "会话id" = chat-binding (session/mirror key); "权限id" = either the group
 // OR the sender — allowFrom passes if any one of them is whitelisted.
-// Also surfaces per-id 授权状态 + 对应 `wezard mirror` CLI 参数 (vid:/chatid:),
-// so users can copy-paste straight into a terminal to bind a Claude session.
+// Also surfaces per-id 授权状态。
 const renderIds = (msg: BaseMessage, cfg: Config): string => {
   const allowed = new Set(cfg.wrc.allowFrom.map((e) => sanitizeId(e)));
   const mark = (id: string): string =>
@@ -93,13 +90,9 @@ const renderIds = (msg: BaseMessage, cfg: Config): string => {
       `群: \`${chat}\` ${mark(chat)}`,
       `发送者: \`${sender}\` ${mark(sender)}`,
       `(allowFrom 任一通过即可)`,
-      `在已有 Agent 会话中绑定本群聊: \`/wezard:wrc chat:${msg.chatid}\``,
     ].join("\n");
   }
-  return [
-    `会话id: \`${sender}\` ${mark(sender)}`,
-    `在已有 Agent 会话中绑定本单聊: \`/wezard:wrc user:${msg.from.userid}\``,
-  ].join("\n");
+  return `会话id: \`${sender}\` ${mark(sender)}`;
 };
 
 const isIdCommand = (text: string): boolean => text.trim() === "/id";
@@ -540,10 +533,9 @@ const isAllowed = (cfg: Config, principals: string[]): boolean => {
 };
 
 // Mirror mode grants implicit talkback: any chat that's currently a mirror
-// target can post back without being in `allowFrom`. The act of /wrc'ing into
-// that chat is the authorization signal.
-const isMirrorTarget = (bridge: Bridge | MirrorBridge, who: string): boolean =>
-  "hasMirrorTarget" in bridge && bridge.hasMirrorTarget(who);
+// target can post back without being in `allowFrom`. A session bound to that
+// chat is the authorization signal.
+const isMirrorTarget = (bridge: MirrorBridge, who: string): boolean => bridge.hasMirrorTarget(who);
 
 // Sniff extension from magic bytes; falls back to .bin. WeCom doesn't always
 // give us a filename for images, and we want claude's Read tool to recognize
@@ -589,7 +581,7 @@ export const installInboundRouter = (
   client: WSClient,
   cfg: Config,
   log: Logger,
-  bridge: Bridge | MirrorBridge,
+  bridge: MirrorBridge,
   sourcePath: string,
 ): void => {
   const inboxDir = expandHome(cfg.wrc.mirror.inboxDir);
@@ -597,25 +589,20 @@ export const installInboundRouter = (
   const botNames = [...BUILTIN_BOT_NAMES, ...cfg.wrc.botNames.filter(Boolean)];
   const stripAt = (msg: BaseMessage, text: string): string => maybeStripMentions(botNames, msg, text);
 
-  // Render /pwd output. Mirror mode reads the live attachment + persisted
-  // store via bridge.getCwd; headless mode has no per-chat cwd, so it just
-  // shows cfg.wrc.cwd as the global default.
+  // Render /pwd output from the live attachment + persisted store (bridge.getCwd).
   const renderPwd = (who: string): string => {
-    if ("getCwd" in bridge) {
-      const { runningCwd, pendingCwd, defaultCwd } = bridge.getCwd(who);
-      const lines = [`[wezard] 📂 当前项目: \`${runningCwd}\``];
-      if (pendingCwd && pendingCwd !== runningCwd) {
-        lines.push(`下次切换: \`${pendingCwd}\` (使用 /new 或 /clear 生效)`);
-      }
-      if (runningCwd !== defaultCwd) lines.push(`(默认: \`${defaultCwd}\`)`);
-      if (bridge.cwdUnconfirmed(who)) lines.push("⚠️ 这是默认兜底目录, 还没人确认过 —— 要换就说「切到 /path/to/proj」");
-      lines.push("> 切换其他项目: 对 AI 说「切到 /path/to/proj」(`set_workspace` 工具直接换目录重开)");
-      return lines.join("\n");
+    const { runningCwd, pendingCwd, defaultCwd } = bridge.getCwd(who);
+    const lines = [`[wezard] 📂 当前项目: \`${runningCwd}\``];
+    if (pendingCwd && pendingCwd !== runningCwd) {
+      lines.push(`下次切换: \`${pendingCwd}\` (使用 /new 或 /clear 生效)`);
     }
-    return `[wezard] 📂 当前项目: \`${expandHome(cfg.wrc.cwd)}\` (headless mode, 全局默认)`;
+    if (runningCwd !== defaultCwd) lines.push(`(默认: \`${defaultCwd}\`)`);
+    if (bridge.cwdUnconfirmed(who)) lines.push("⚠️ 这是默认兜底目录, 还没人确认过 —— 要换就说「切到 /path/to/proj」");
+    lines.push("> 切换其他项目: 对 AI 说「切到 /path/to/proj」(`set_workspace` 工具直接换目录重开)");
+    return lines.join("\n");
   };
 
-  // Mirror-only auto-spawn / /new helper. Routes through bridge.newSession
+  // Auto-spawn / /new helper. Routes through bridge.newSession
   // which kills the old pane, spawns fresh in pendingCwd ?? runningCwd ??
   // default, attaches, and pushes "📂 当前项目" info to the chat. Returns
   // the user-facing one-line ack. The wizard's global name doubles as the
@@ -624,7 +611,6 @@ export const installInboundRouter = (
   // On success there is NO reply: newSession already pushed the single
   // "created + cwd" bubble. Only failures produce user-facing text.
   const spawnSession = async (who: string, cli?: CliBackendName, silent?: boolean, model?: string): Promise<{ err?: string }> => {
-    if (!("newSession" in bridge)) return { err: "[wezard] /new only available in mirror mode" };
     const r = await bridge.newSession(who, displayName(who) || tagOf(who) || who, cli, { silent, model });
     return r.ok ? {} : { err: `[wezard] /new failed: ${r.reason ?? "unknown"}` };
   };
@@ -653,7 +639,7 @@ export const installInboundRouter = (
   // 复用,不再 respawn —— 否则先到的消息会被注入进一个刚被杀掉的 pane。
   const ensureSession = (who: string): Promise<{ err?: string }> =>
     serializeSpawn(who, async () =>
-      "hasMirrorTarget" in bridge && bridge.hasMirrorTarget(who) ? {} : await spawnSession(who, undefined, true));
+      bridge.hasMirrorTarget(who) ? {} : await spawnSession(who, undefined, true));
 
   // Prefix user-visible daemon replies with `<emoji> .name`, so a chat hosting
   // several wizards stays visually disambiguated. Emoji is derived from the
@@ -712,9 +698,7 @@ export const installInboundRouter = (
     // Untagged form falls back to the caller's own mirror binding.
     const audit = parseAuditCommand(text);
     if (audit) {
-      const mirror = "status" in bridge
-        ? resolveAuditMirror(bridge.status().mirrors, audit.tag, who, chatPrincipal(msg))
-        : undefined;
+      const mirror = resolveAuditMirror(bridge.status().mirrors, audit.tag, who, chatPrincipal(msg));
       let body: string;
       if (!mirror) {
         body = audit.tag
@@ -805,21 +789,19 @@ export const installInboundRouter = (
       return { stop: true };
     }
     // Authorized `/stop` — Esc the live pane to interrupt whatever Claude is
-    // currently doing. Mirror-mode only; bails cleanly when no attachment.
+    // currently doing. Bails cleanly when no attachment.
     if (isStopCommand(text)) {
-      if ("interruptPane" in bridge) {
-        // teardown: /stop is the user's "shut this up" button, so it must also
-        // close hanging bubbles and free the inject queue — not just press Esc.
-        // Stay silent on a clean stop (the pane going quiet IS the receipt);
-        // only speak up when a half actually failed — a live pane that refuses
-        // Esc is a very different situation from a chat merely stuck on a bubble.
-        const r = await bridge.interruptPane(who, { teardown: true });
-        if (!r.ok) {
-          await replyText(frame, msg, who, `[wezard] /stop failed: ${r.reason ?? "unknown"}`);
-        } else if (!r.escOk) {
-          const torndown = r.torndown ? ` · 已收口 ${r.torndown} 个挂起气泡` : "";
-          await replyText(frame, msg, who, `⚠️ Esc 未送达（${r.escReason ?? "unknown"}）${torndown} · 保活已暂停`);
-        }
+      // teardown: /stop is the user's "shut this up" button, so it must also
+      // close hanging bubbles and free the inject queue — not just press Esc.
+      // Stay silent on a clean stop (the pane going quiet IS the receipt);
+      // only speak up when a half actually failed — a live pane that refuses
+      // Esc is a very different situation from a chat merely stuck on a bubble.
+      const r = await bridge.interruptPane(who, { teardown: true });
+      if (!r.ok) {
+        await replyText(frame, msg, who, `[wezard] /stop failed: ${r.reason ?? "unknown"}`);
+      } else if (!r.escOk) {
+        const torndown = r.torndown ? ` · 已收口 ${r.torndown} 个挂起气泡` : "";
+        await replyText(frame, msg, who, `⚠️ Esc 未送达（${r.escReason ?? "unknown"}）${torndown} · 保活已暂停`);
       }
       return { stop: true };
     }
@@ -827,36 +809,24 @@ export const installInboundRouter = (
     // and drop the binding (no `--resume` resurrection). Routed by `.name` like
     // /stop, so `/kill #docs` only takes down that sibling.
     if (isKillCommand(text)) {
-      if (!("killPane" in bridge)) {
-        await replyText(frame, msg, who, "[wezard] /kill only available in mirror mode");
-      } else {
-        const r = await bridge.killPane(who);
-        await replyText(frame, msg, who, r.ok ? "🗑️ 会话已结束，pane 已移除" : `[wezard] /kill failed: ${r.reason ?? "unknown"}`);
-      }
+      const r = await bridge.killPane(who);
+      await replyText(frame, msg, who, r.ok ? "🗑️ 会话已结束，pane 已移除" : `[wezard] /kill failed: ${r.reason ?? "unknown"}`);
       return { stop: true };
     }
     // Authorized `/n` — send a bare Enter to the live pane. Confirms a prompt /
     // dismisses a "press enter to continue", or submits whatever's already in
-    // the input box. Mirror-mode only; bails cleanly when no attachment.
+    // the input box. Bails cleanly when no attachment.
     if (isEnterCommand(text)) {
-      if (!("submitPane" in bridge)) {
-        await replyText(frame, msg, who, "[wezard] /n only available in mirror mode");
-      } else {
-        const r = await bridge.submitPane(who);
-        await replyText(frame, msg, who, r.ok ? "Enter sent" : `[wezard] /n failed: ${r.reason ?? "unknown"}`);
-      }
+      const r = await bridge.submitPane(who);
+      await replyText(frame, msg, who, r.ok ? "Enter sent" : `[wezard] /n failed: ${r.reason ?? "unknown"}`);
       return { stop: true };
     }
     // Authorized `/reveal` — switch the attached tmux client to this session's
-    // pane so the user lands in the terminal showing the live TUI. Mirror-mode
-    // only; routed by `.name` like any other session command.
+    // pane so the user lands in the terminal showing the live TUI. Routed by
+    // `.name` like any other session command.
     if (isRevealCommand(text)) {
-      if (!("revealPane" in bridge)) {
-        await replyText(frame, msg, who, "[wezard] /reveal only available in mirror mode");
-      } else {
-        const r = await bridge.revealPane(who);
-        await replyText(frame, msg, who, r.ok ? "✅ 已切到本会话的 tmux 窗口" : `[wezard] /reveal failed: ${r.reason ?? "unknown"}`);
-      }
+      const r = await bridge.revealPane(who);
+      await replyText(frame, msg, who, r.ok ? "✅ 已切到本会话的 tmux 窗口" : `[wezard] /reveal failed: ${r.reason ?? "unknown"}`);
       return { stop: true };
     }
     // /cfgsync [apply] — 3-way merge of the bound project's per-CLI config
@@ -864,7 +834,7 @@ export const installInboundRouter = (
     // .codebuddy/...). Writes files, so it sits AFTER the allowFrom gate.
     const cs = parseCfgSyncCommand(text);
     if (cs) {
-      const cwd = "getCwd" in bridge ? bridge.getCwd(who).runningCwd : expandHome(cfg.wrc.cwd);
+      const cwd = bridge.getCwd(who).runningCwd;
       let body: string;
       try {
         body = renderSyncReport(await syncProjectConfig(cwd, cs.apply));
@@ -900,20 +870,12 @@ export const installInboundRouter = (
     }
     // /chats — 跨聊天目录:谁有名字、各自跑着哪些会话。Read-only。
     if (isChatsCommand(text)) {
-      if (!("chatRoster" in bridge)) {
-        await replyText(frame, msg, who, `[wezard] headless 模式无会话目录。已命名的聊天：${listChatNames(cfg).map((c) => c.name).join(", ") || "(无)"}`);
-        return { stop: true };
-      }
       await replyText(frame, msg, who, renderChats(bridge.chatRoster(who)));
       return { stop: true };
     }
     // /peers — this chat's own wizard roster (default + siblings), with
-    // live busy state. Read-only, mirror-mode only.
+    // live busy state. Read-only.
     if (isPeersCommand(text)) {
-      if (!("peers" in bridge)) {
-        await replyText(frame, msg, who, "[wezard] /peers only available in mirror mode");
-        return { stop: true };
-      }
       let body: string;
       try {
         body = renderPeers(await bridge.peers(who), chatNameOf(cfg, who));
@@ -929,10 +891,6 @@ export const installInboundRouter = (
     // path as the /sessions/switch route so IM and MCP behave identically.
     const sc = parseSessionsCommand(text);
     if (sc) {
-      if (!("attach" in bridge)) {
-        await replyText(frame, msg, who, "[wezard] /sessions only available in mirror mode");
-        return { stop: true };
-      }
       let sessions: SessionInfo[] = [];
       try {
         sessions = await scanClaudeSessions();
@@ -964,11 +922,11 @@ export const installInboundRouter = (
       );
       return { stop: true };
     }
-    // Mirror mode but no Claude session attached for this chat yet. Since the
+    // No Claude session attached for this chat yet. Since the
     // sender is already in allowFrom, we treat that authorization as license
     // to auto-spawn: this inbound becomes both the binding signal and the
     // first prompt — attach, then fall through to dispatch.
-    if ("hasMirrorTarget" in bridge && !bridge.hasMirrorTarget(who)) {
+    if (!bridge.hasMirrorTarget(who)) {
       const { err } = await ensureSession(who);
       if (err) {
         await replyText(frame, msg, who, err);
@@ -980,9 +938,9 @@ export const installInboundRouter = (
   };
 
   // 「引用内容是否已经在目标会话的 context 里」。两级:先查刚发出去的最后一条
-  // 气泡(内存,headless 模式也有);miss 再读目标会话 transcript 的尾部若干轮
-  // —— 引用的往往是几轮之前的气泡,只比对最后一条会漏。目标未挂载(尚未 attach /
-  // headless)时读不到 transcript,退化成"保留引用",宁可多给上下文。
+  // 气泡(内存);miss 再读目标会话 transcript 的尾部若干轮
+  // —— 引用的往往是几轮之前的气泡,只比对最后一条会漏。目标未挂载(尚未 attach)
+  // 时读不到 transcript,退化成"保留引用",宁可多给上下文。
   const quoteInContext = (target: string, quoted: string): boolean => {
     if (isLastResponseQuote(baseOfKey(target), quoted)) {
       log.info({ target, reason: "lastResponse" }, "quoteInContext: hit");
@@ -990,12 +948,11 @@ export const installInboundRouter = (
     }
     // 源会话的 last stream 还没收口 ⇒ 引用的是实时中间态 (URL + 最新 CoT/工具行),
     // 只保留路由 tag, 不把瞬态内容贴回 prompt。
-    if ("isOpenBubbleQuote" in bridge && (bridge as MirrorBridge).isOpenBubbleQuote(target, quoted)) {
+    if (bridge.isOpenBubbleQuote(target, quoted)) {
       log.info({ target, reason: "openBubble" }, "quoteInContext: hit");
       return true;
     }
-    const mirrors = (bridge as { status?: () => { mirrors?: Array<{ target: string; jsonlPath: string }> } })
-      .status?.().mirrors ?? [];
+    const mirrors = bridge.status().mirrors;
     const jsonl = mirrors.find((m) => m.target === target)?.jsonlPath;
     if (!jsonl) {
       log.info({ target, mirrorCount: mirrors.length, mirrorTargets: mirrors.map((m) => m.target) }, "quoteInContext: no jsonl for target");
@@ -1014,8 +971,7 @@ export const installInboundRouter = (
   // 同一套(全局名册),所以标注出来的地址一定是 peek_peer/send_peer 打得中的;
   // 解析不到的 `.foo` 与自指静默略过。
   const peerMentions = (who: string, text: string): PeerMention[] => {
-    if (!("resolvePeerTag" in bridge)) return [];
-    const mb = bridge as MirrorBridge;
+    const mb = bridge;
     const seen = new Set<string>();
 
     return allNames(text).flatMap((name): PeerMention[] => {
@@ -1036,7 +992,7 @@ export const installInboundRouter = (
   };
 
   // 名字解析的两个问题: 这个名字认不认识 (决定正文里哪个 `.x` 是路由)、它指向谁。
-  const live = (t: string): boolean => "hasMirrorTarget" in bridge && bridge.hasMirrorTarget(t);
+  const live = (t: string): boolean => bridge.hasMirrorTarget(t);
   const addrFor = (base: string): Addressing => ({
     known: (name) => !!wizardStore()?.byName(name) || live(keyOf(base, normalizeTag(name))),
     resolve: (b, name) => resolveName(b, name, live),

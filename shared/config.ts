@@ -185,13 +185,12 @@ const Mirror = z.object({
 
 const Wrc = z.object({
   allowFrom: z.array(z.string()).default([]),
-  mode: z.enum(["headless", "mirror"]).default("headless"),
   // Legacy pre-v0.3: single binary path. Still honored as a back-compat alias
   // — resolveCliBackend picks it up when cliBackends.<name>.bin is unset. Kept
   // on the schema so existing configs keep parsing without migration.
   claudeBin: z.string().default("claude"),
   // DEFAULT CLI backend — the one used when there is no transcript to derive a
-  // backend from (new-session spawns, headless mode). It is NOT exclusive: the
+  // backend from (new-session spawns). It is NOT exclusive: the
   // daemon mirrors sessions from every installed CLI concurrently, resolving
   // each attachment's binary + jsonl dialect from its own transcript path
   // (shared/cli-backends.ts bindCliBackends / backendForPath). Optional —
@@ -211,10 +210,9 @@ const Wrc = z.object({
     })
     .default({}),
   cwd: z.string().default("~/.wezard/workspace"),
-  sessionMapFile: z.string().default("~/.wezard/sessions.json"),
   extraArgs: z.array(z.string()).default([]),
   mirror: Mirror.default({}),
-  // Mirror-only: tmux session name prefix for auto-spawn. Final name is
+  // tmux session name prefix for auto-spawn. Final name is
   // `${prefix}-<short>`. Auto-spawn fires when an authorized inbound finds no
   // mirror attached for that chat — allowFrom IS the authorization.
   tmuxPrefix: z.string().default("wezard"),
@@ -230,7 +228,7 @@ const Wrc = z.object({
   const backend = resolveCliBackend(v);
   if (!v.defaultCli) v.defaultCli = backend.name;
   // Sync claudeBin to the resolved backend's bin so every daemon file that
-  // reads cfg.wrc.claudeBin (cc-bridge, mirror-bridge, spawn-tmux, quota)
+  // reads cfg.wrc.claudeBin (mirror-bridge, spawn-tmux, quota)
   // spawns the correct binary — even when the user set only `defaultCli`
   // without an explicit `claudeBin`. Without this, defaultCli:"codebuddy"
   // + inherited claudeBin:"claude" would spawn the wrong CLI.

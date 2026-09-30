@@ -61,7 +61,6 @@
     "systemd/wezard.service.template",
     "systemd/wezard-svr.service.template",
     "config.example.jsonc",
-    "commands/wrc.md",
     "commands/audit.md",
     "commands/update.md",
     "README.md",

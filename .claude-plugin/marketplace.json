@@ -7,7 +7,7 @@
     {
       "name": "wezard",
       "source": "./",
-      "description": "Remote-control Claude Code from WeCom (/wrc).",
+      "description": "Remote-control Claude Code from WeCom.",
       "category": "productivity"
     }
   ]

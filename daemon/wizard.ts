@@ -91,7 +91,7 @@ export const loadWizardStore = (filePath: string): WizardStore => {
 
 // 进程内唯一的注册表。daemon 启动时绑一次, 之后任何模块都读得到 —— IM 侧的
 // `/peers` 要把名字和职责印在每一行上, 为此给 installInboundRouter 再加一个参数
-// 不值当 (同 bindCliBackends 的取舍)。headless 模式不绑, 读到 undefined 即退化。
+// 不值当 (同 bindCliBackends 的取舍)。绑定之前读到 undefined 即退化。
 let bound: WizardStore | undefined;
 export const bindWizardStore = (store: WizardStore): WizardStore => (bound = store);
 export const wizardStore = (): WizardStore | undefined => bound;

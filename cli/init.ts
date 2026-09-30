@@ -7,12 +7,12 @@
 //      install resident daemon.
 //   4. Arm bootstrap claim. Wait for the user to send a magic phrase in IM.
 //      That message bypasses allowFrom, sets defaultChat, and adds the sender.
-//   5. Mirror 模式下:拉起 tmux+claude pane,提示用户在 WeCom 发首条消息。
+//   5. 拉起 tmux+claude pane,提示用户在 WeCom 发首条消息。
 import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { input, password, select, confirm, checkbox } from "@inquirer/prompts";
+import { input, password, confirm, checkbox } from "@inquirer/prompts";
 import { parse as parseJsonc } from "jsonc-parser";
 import { appendUnique, patchJsonc } from "../shared/config-writer.js";
 import { mapClaudePermissions, readClaudePermissions } from "../shared/claude-permissions.js";
@@ -51,7 +51,6 @@ const step = (n: number, title: string): void =>
 // daemon 会同时 tail 所有已安装 CLI 的 projectsDir (backend 由 transcript 路径反推),
 // 所以 claude 和 codebuddy 的会话可以并存、各自镜像到不同的 WeCom 会话。
 type AgentKind = "claude" | "claude-internal" | "codebuddy";
-type WrcMode = "headless" | "mirror";
 const settingsPathFor = (kind: AgentKind): string => {
   switch (kind) {
     case "claude": return "~/.claude/settings.json";
@@ -172,7 +171,7 @@ const warnIfLanBlocked = async (base: string, ip: string): Promise<void> => {
 
 // Register the local repo as a Claude Code marketplace and install the
 // `wezard` plugin from it. This is what wires up `hooks/hooks.json` (so
-// `${CLAUDE_PLUGIN_ROOT}` resolves) + `commands/wrc.md` + the MCP server
+// `${CLAUDE_PLUGIN_ROOT}` resolves) + `commands/*.md` + the MCP server
 // declared in `.claude-plugin/plugin.json`. Idempotent: marketplace add
 // re-uses the existing entry, install upgrades in place.
 //
@@ -253,10 +252,18 @@ const importClaudePerms = async (settingsPath: string, interactive: boolean): Pr
   if (m.skipped.length) log(c.dim(`  跳过: ${m.skipped.join(", ")}`));
 };
 
+// 会话全部跑在 tmux pane 里 —— 没有 tmux 就没有任何入口, 早退比装完 daemon 才发现强。
+const hasTmux = (): boolean => spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
+
 // ── Main flow ────────────────────────────────────────────────────────
 const main = async (): Promise<void> => {
   log(c.bold("\nwezard · 新用户引导\n"));
   log(c.dim("  目标：3 步内完成 → IM 授权转发 + 远程 CC 控制可用。\n"));
+
+  if (!hasTmux()) {
+    log(c.red("  ✗ 未找到 tmux —— wezard 的会话都跑在 tmux pane 里, 请先安装 (macOS: `brew install tmux`; Debian/Ubuntu: `apt install tmux`) 再重跑 `wezard init`。"));
+    process.exit(1);
+  }
 
   if (existsSync(expandHome(CONFIG))) {
     const ok = await confirm({
@@ -295,20 +302,6 @@ const main = async (): Promise<void> => {
     required: true,
     loop: false,
   })) as AgentKind[];
-  const wrcMode = (await select({
-    message: "选择 wrc 模式：",
-    choices: [
-      {
-        name: "mirror (推荐：远程消息注入到本地 tmux 里的 Agent 会话，CLI 可见双向同步)",
-        value: "mirror",
-      },
-      {
-        name: "headless (远程消息触发新的 `claude -p` 子进程，CLI 不可见)",
-        value: "headless",
-      },
-    ],
-    default: "mirror",
-  })) as WrcMode;
   const enableHook = await confirm({
     message: "开启 PreToolUse 授权拦截 hook？(IM 按钮卡片授权)",
     default: true,
@@ -343,7 +336,6 @@ const main = async (): Promise<void> => {
   patchJsonc(CONFIG, [
     { path: ["bot", "websocketUrl"], value: "wss://openws.work.weixin.qq.com" },
     { path: ["defaultChat"], value: "" },
-    { path: ["wrc", "mode"], value: wrcMode },
     { path: ["wrc", "claudeBin"], value: claudeBin },
     { path: ["wrc", "defaultCli"], value: backendNameFor(primary) },
     { path: ["wrc", "cwd"], value: "~/.wezard/workspace" },
@@ -411,14 +403,14 @@ const main = async (): Promise<void> => {
 
   // ── Step 3: spin up mirror pane ────────────────────────────────
   step(3, "拉起 mirror 会话");
-  if (!enableHook || wrcMode !== "mirror") {
+  if (!enableHook) {
     log(c.green("\n✅ 引导完成。后续可用 `wezard status` / `wezard logs -f` 观察。"));
     return;
   }
-  // Mirror 路径:拉起 tmux+claude pane,然后让用户在 WeCom 发首条消息。
+  // 拉起 tmux+claude pane,然后让用户在 WeCom 发首条消息。
   // 首条 inbound 走完整 dispatch 链路:openStream → 注入 tmux → tail 回流为
   // 打字机气泡。比 frame-less /mirror/inject 体验好得多(后者无 liveStream)。
-  log(c.dim("  正在拉起 tmux+claude pane (mirror 模式) ..."));
+  log(c.dim("  正在拉起 tmux+claude pane ..."));
   const r = (await post("/mirror/spawn", { target: claimed })) as {
     ok?: boolean; reason?: string; tmuxSession?: string; tmuxPane?: string; sessionId?: string;
   };
