@@ -29,6 +29,12 @@ const fmtTs = (ms: number): string => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 };
 
+/** 一行里的时刻: 只报 `HH:MM:SS` (`short` 再去掉秒), 完整日期收进 title —— 日期由消息行自己交代。 */
+const clock = (ms: number, short = false): string => {
+  const ts = fmtTs(ms);
+  return `<time class="ts" title="${ts}">${ts.slice(11, short ? 16 : 19)}</time>`;
+};
+
 const fmtDuration = (ms: number): string => {
   if (ms < 1000) return `${ms}ms`;
   const s = Math.round(ms / 100) / 10;
@@ -320,11 +326,32 @@ ${transcript
 // 转义后的原文放到 data-md, 页尾脚本一次性 render 到 .md-body。未 closed 时页面
 // 每 2s meta-refresh, closed 后移除 refresh + 状态徽章切「已完成 · 用时Xs」。
 const TURN_CSS = `
-  .bubbles{display:flex;flex-direction:column;gap:14px;margin-top:8px}
+  .bubbles{display:flex;flex-direction:column;gap:8px}
+  .bubbles>*{margin-bottom:0}
   .bubble{background:#fff;border:1px solid #d0d7de;border-radius:12px;overflow:hidden}
-  .bubble.assistant{background:#fff}
-  .bubble.final{border-color:#1a7f3766;box-shadow:0 0 0 2px #1a7f3714}
-  .bubble.approval{background:#fbfaff}
+  /* ── 回复正文: 一段话一颗气泡, 贴着内容的宽度; 时刻挂在气泡外 ── */
+  .say{display:flex;align-items:flex-end;gap:6px;max-width:100%;align-self:flex-start}
+  .say>.bubble{min-width:0;border-radius:14px}
+  .say>.ts,.tool-summary .ts{flex:none;color:#9aa3af;font-size:10.5px;font-variant-numeric:tabular-nums;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  /* ── 过程框: 连着的工具调用 / 审批 / 子 agent 收进一个虚线框。
+     框头与框内空白是开关 (chat.js), 框里的每一行照旧各管各的展开。 ── */
+  .steps{min-width:0;padding:4px 6px 6px;border:1px dashed #d0d7de;border-radius:10px;cursor:pointer}
+  .steps>.bubbles{gap:2px}
+  .steps .bubble,.steps .turn-group{cursor:auto}
+  .steps-head{display:flex;align-items:baseline;gap:8px;width:100%;padding:2px 6px;
+    border:0;background:none;cursor:pointer;text-align:left;font-size:11.5px;color:#8c959f;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .steps-head:hover{color:#57606a}
+  .steps-head::after{content:"›";margin-left:auto;font-size:14px;color:#b1bac4;
+    transform:rotate(90deg);transition:transform .12s}
+  .steps-head .sh-n{flex:none;font-weight:600;color:#57606a}
+  .steps-head .sh-t{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .steps.folded{padding-bottom:4px}
+  .steps.folded>.bubbles{display:none}
+  .steps.folded>.steps-head::after{transform:none}
+  .bubble.approval{background:transparent;border:0;border-radius:0}
+  .bubble.approval .bubble-head{padding:3px 6px}
   .bubble-head{display:flex;align-items:center;gap:8px;padding:10px 14px;
     font-size:13px;color:#1f2328;flex-wrap:wrap}
   .bubble-head .role{font-weight:600}
@@ -332,8 +359,10 @@ const TURN_CSS = `
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
   .bubble-head .compact{color:#656d76;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
     font-size:12.5px;overflow:hidden;text-overflow:ellipsis;max-width:100%}
-  .md-body{padding:2px 16px 14px;color:#1f2328;line-height:1.65;font-size:14px}
+  .md-body{padding:10px 14px;color:#1f2328;line-height:1.65;font-size:14px}
   .md-body p{margin:.6em 0}
+  .md-body>:first-child{margin-top:0}
+  .md-body>:last-child{margin-bottom:0}
   .md-body h1,.md-body h2,.md-body h3{margin:1em 0 .4em;font-weight:600}
   .md-body h1{font-size:1.4em}.md-body h2{font-size:1.2em}.md-body h3{font-size:1.05em}
   .md-body ul,.md-body ol{margin:.6em 0;padding-left:1.6em}
@@ -351,8 +380,7 @@ const TURN_CSS = `
   .md-body a:hover{text-decoration:underline}
   .bubble details{border-top:1px solid #eaeef2}
   .bubble details summary{background:#f6f8fa;border-bottom:0}
-  .typing{color:#8c959f;font-style:italic;padding:10px 14px;
-    background:#fff;border:1px dashed #d0d7de;border-radius:12px}
+  .typing{color:#8c959f;font-style:italic;font-size:12.5px;padding:0 2px}
   .typing::after{content:"";display:inline-block;width:6px;height:6px;
     background:#8c959f;border-radius:50%;margin-left:6px;
     animation:blink 1.2s infinite}
@@ -371,9 +399,6 @@ const TURN_CSS = `
     font-size:14px;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
   /* ── 工具调用 (Claude CLI 风): 去卡片, 默认折叠, ⎿ 结果预览 ── */
   .bubble.tool{background:transparent;border:0;border-radius:0;overflow:visible}
-  /* 连着的几次工具调用是一串动作, 不是几段话 —— 它们之间只留一行的距离,
-     .bubbles 的 14px 段间距留给真正换了说话内容的地方。 */
-  .bubble.tool+.bubble.tool{margin-top:-9px}
   .bubble .tool-call{border:0}
   .bubble .tool-call>summary{list-style:none;cursor:pointer;display:flex;
     align-items:baseline;gap:7px;padding:3px 6px;border-radius:6px;border:0;
@@ -391,7 +416,7 @@ const TURN_CSS = `
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .tool-dur{color:#8c959f;font-size:11px;flex:none;
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-  .tool-summary .ts{margin-left:auto;flex:none}
+  .tool-summary .ts{margin-left:auto}
   .tool-body{padding:8px 0 4px 16px;margin:2px 0 0 9px;
     border-left:2px solid #eaeef2}
   .tool-body>section{margin-bottom:8px}
@@ -537,7 +562,7 @@ const renderToolBubble = (
   // 整个工具调用折叠进 <details> (默认收起); ⎿ 预览行是它的兄弟, 展开时 CSS 隐藏。
   return `<section class="bubble tool" data-key="${key}">
     <details class="tool-call">
-      <summary class="tool-summary"><span class="tool-dot">⏺</span><span class="tool-name">${escHtml(use.toolName)}</span>${arg ? `<span class="tool-arg">(${escHtml(arg)})</span>` : ""}${dur}<span class="ts">${fmtTs(use.ts)}</span></summary>
+      <summary class="tool-summary"><span class="tool-dot">⏺</span><span class="tool-name">${escHtml(use.toolName)}</span>${arg ? `<span class="tool-arg">(${escHtml(arg)})</span>` : ""}${dur}${clock(use.ts)}</summary>
       ${body}
     </details>
     <div class="tool-result-line">${preview}</div>
@@ -568,24 +593,21 @@ const extractFilePath = (input: unknown): string => {
   return typeof v === "string" ? v : "";
 };
 
-const renderTextBubble = (item: Extract<TurnItem, { t: "text" }>, key: string): string => {
-  const role = item.final ? "assistant · final" : "assistant";
-  const cls = item.final ? "bubble final" : "bubble assistant";
+// 没有标题行: 谁说的由消息行的 .mwho 交代, 气泡里只有话; 时刻挂在气泡外。
+const renderTextBubble = (item: Extract<TurnItem, { t: "text" }>, key: string): string =>
   // 原文用 <script type="text/plain"> 承载 —— 免转义歧义, JS 端 textContent 读回原样。
-  return `<section class="${cls}" data-key="${key}">
-    <div class="bubble-head"><span class="role">${escHtml(role)}</span>
-      <span class="ts">${fmtTs(item.ts)}</span></div>
-    <div class="md-body"></div>
-    <script type="text/plain" class="md-src">${escHtml(item.body)}</script>
-  </section>`;
-};
+  `<div class="say${item.final ? " final" : ""}" data-key="${key}">
+    <div class="bubble"><div class="md-body"></div>
+      <script type="text/plain" class="md-src">${escHtml(item.body)}</script></div>
+    ${clock(item.ts, true)}
+  </div>`;
 
 const renderApprovalItem = (item: Extract<TurnItem, { t: "approval" }>, key: string): string => {
   const b = decisionBadge(item.decision);
   return `<section class="bubble approval" data-key="${key}">
     <div class="bubble-head">🔐 <span class="role">${escHtml(item.toolName)}</span>
       <span class="badge ${b.cls}">${b.label}</span>
-      <span class="ts">${fmtTs(item.ts)}</span></div>
+      ${clock(item.ts)}</div>
   </section>`;
 };
 
@@ -623,9 +645,13 @@ const tagSig = (html: string): string =>
 
 // 一个 turn 的切片: 渲染好的气泡、完成态与耗时。
 // keyPrefix 让线程页里多个 turn 的 data-key 不互撞。`lazy`: 工具正文留空壳 (见 renderToolBubble)。
+/** 气泡序列里的一段。`step` = 过程 (工具 / 审批 / 子 agent) 而不是话 —— 连着的几段
+ *  收进同一个虚线框; `tool` = 工具名, 给框头计数。 */
+interface Part { key: string; html: string; step: boolean; tool?: string }
+
 const turnParts = (r: TurnDetailRecord, keyPrefix = "", now = Date.now(), lazy = false): {
-  bodies: string[];
-  /** bodies[i] 对应的时刻 —— 子 agent 卡片按它插回父轮时间轴。 */
+  parts: Part[];
+  /** parts[i] 对应的时刻 —— 子 agent 卡片按它插回父轮时间轴。 */
   stamps: number[];
   done: boolean;
   ageMs: number;
@@ -637,8 +663,7 @@ const turnParts = (r: TurnDetailRecord, keyPrefix = "", now = Date.now(), lazy =
   // 结束判定统一收在 chat-view.turnDone (closed / final text / 静默超时), 详情页
   // 与聊天视图必须给出同一个答案 —— 否则一个显示「进行中」另一个显示「已完成」。
   const done = turnDone(r, now);
-  const bodies = paired.map((p, i) => {
-    const key = `${keyPrefix}b${i}`;
+  const body = (p: (typeof paired)[number], key: string): string => {
     if (p.kind === "pair") return renderToolBubble(p.use, p.result, key, done, lazy ? r.id : undefined);
     const it = p.item;
     if (it.t === "text") return renderTextBubble(it, key);
@@ -652,9 +677,17 @@ const turnParts = (r: TurnDetailRecord, keyPrefix = "", now = Date.now(), lazy =
       </section>`;
     }
     return "";
+  };
+  const parts = paired.map((p, i): Part => {
+    const key = `${keyPrefix}b${i}`;
+    return {
+      key, html: tagSig(body(p, key)),
+      step: p.kind === "pair" || p.item.t !== "text",
+      tool: p.kind === "pair" ? p.use.toolName : undefined,
+    };
   });
   const stamps = paired.map((p) => (p.kind === "pair" ? p.use.ts : p.item.ts));
-  return { bodies, stamps, done, ageMs: (done ? r.updatedAt : now) - r.createdAt };
+  return { parts, stamps, done, ageMs: (done ? r.updatedAt : now) - r.createdAt };
 };
 
 const CUT_TEXT: Record<CtxCut, string> = {
@@ -715,19 +748,44 @@ export interface TurnFragment {
 // 之前。子卡片挂在时间轴中间而不是整轮末尾 —— 否则父 agent 在 Task 返回后继续
 // 调的工具会排在子卡片上面, 整段读起来就是倒序 (最新的反而不在最下面)。
 const spliceChildren = (
-  bodies: readonly string[],
+  parts: readonly Part[],
   stamps: readonly number[],
   children: readonly TurnFragment[],
-): string[] =>
-  bodies.reduce<string[]>(
-    (acc, b, i) => [
-      ...acc,
-      b,
-      ...children.filter((c) => c.createdAt >= (stamps[i] ?? 0) && c.createdAt < (stamps[i + 1] ?? Infinity)).map((c) => c.html),
-    ],
+): Part[] => {
+  const between = (lo: number, hi: number): Part[] =>
+    children.filter((c) => c.createdAt >= lo && c.createdAt < hi)
+      .map((c) => ({ key: `t:${escHtml(c.id)}`, html: c.html, step: true }));
+  return parts.reduce<Part[]>(
+    (acc, p, i) => [...acc, p, ...between(stamps[i] ?? 0, stamps[i + 1] ?? Infinity)],
     // stamps 之前就开跑的子 agent (父轮第一条 item 尚未落盘) 排在最前。
-    children.filter((c) => c.createdAt < (stamps[0] ?? Infinity)).map((c) => c.html),
+    between(-Infinity, stamps[0] ?? Infinity),
   );
+};
+
+// `Bash ×5 · Read ×4 · Edit` —— 按首次出现的顺序, 收起时一行读出这一段干了什么。
+const tally = (tools: readonly string[]): string =>
+  [...tools.reduce((m, t) => m.set(t, (m.get(t) ?? 0) + 1), new Map<string, number>())]
+    .map(([t, n]) => (n > 1 ? `${t} ×${n}` : t)).join(" · ");
+
+// 过程框。键取首段的键 —— items 只追加, 一段过程的开头不会变, 往里添调用时框还是
+// 同一个节点 (客户端的收起态挂在它身上)。头 + .bubbles 的骨架与 turn-group 同构,
+// reconcile 才能只换头、逐条对内层, 而不是整框重建。
+const renderSteps = (run: readonly Part[], key: string): string => {
+  const tools = run.flatMap((p) => (p.tool ? [p.tool] : []));
+  return tagSig(`<div class="steps" data-key="${key}:g"><button type="button" class="steps-head">` +
+    `<span class="sh-n">${tools.length ? `${tools.length} 次工具调用` : "过程"}</span><span class="sh-t">${escHtml(tally(tools))}</span></button>` +
+    `<div class="bubbles">${run.map((p) => p.html).join("")}</div></div>`);
+};
+
+/** 连着的过程段合成一个框, 话照旧一段一颗气泡。 */
+const foldSteps = (parts: readonly Part[]): string[] =>
+  parts.reduce<Part[][]>((runs, p) => {
+    const last = runs[runs.length - 1];
+    return last?.[0]?.step && p.step ? [...runs.slice(0, -1), [...last, p]] : [...runs, [p]];
+  }, []).flatMap((run) => {
+    const [head] = run;
+    return head ? [head.step ? renderSteps(run, head.key) : head.html] : [];
+  });
 
 /** `withQuery=false`: rolepage 把「问」与「答」拆成两条消息 —— 问的那句由发话方那条
  *  气泡承载, 答的这张卡片里就不再重复一遍。 */
@@ -737,7 +795,7 @@ export const renderTurnGroup = (
   children: readonly TurnFragment[] = [],
   withQuery = true,
 ): TurnFragment => {
-  const { bodies, stamps, done, ageMs } = turnParts(r, `${r.id}:`, now, true);
+  const { parts, stamps, done, ageMs } = turnParts(r, `${r.id}:`, now, true);
   const u = r.usage;
   const ctxPeak = u ? (u.ctxPeak ?? u.input + u.cacheRead + u.cacheWrite) : 0;
   const chips = [
@@ -757,7 +815,7 @@ export const renderTurnGroup = (
     : "";
   const typing = done ? "" : `<div class="typing" data-key="${r.id}:typing">${escHtml(backendLabel(r.cli))} 正在思考</div>`;
   // 子卡片已是完整片段 (自带 data-key/data-sig), 不再过 tagSig。
-  const inner = [tagSig(queryBubble), ...spliceChildren(bodies.map(tagSig), stamps, children), tagSig(typing)].join("");
+  const inner = [tagSig(queryBubble), ...foldSteps(spliceChildren(parts, stamps, children)), tagSig(typing)].join("");
   const head = `<div class="tg-head">
     <span class="tg-dot${done ? "" : " live"}"></span>
     <span class="tg-time">${fmtTs(r.createdAt)}</span>${chips}

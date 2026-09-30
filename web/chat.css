@@ -1,4 +1,4 @@
-/* Rolepage 外壳。消息正文 (turn 卡片) 的样式来自 detail-render 的 SHARED_CSS/TURN_CSS,
+/* Rolepage 外壳。消息正文 (气泡 / 过程框) 的样式来自 detail-render 的 SHARED_CSS/TURN_CSS,
    由 /chat/app.css 拼在本文件之前 —— 这里管骨架、会话列表、左右气泡与页脚总账。
    视觉只押一处: 「视角」。我说的靠右、染成视角色; 别人说的靠左、带头像; 气泡对面
    那片空白是一道门 —— 点下去就换成对方的视角。其余一律安静。 */
@@ -228,10 +228,7 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .chathead .back { display: none; border: 0; background: none; font-size: 22px; color: var(--mute); cursor: pointer; padding: 0 4px }
 .ch-who { display: flex; gap: 11px; align-items: center; min-width: 0; flex: 1 }
 .ch-who .t { font-size: 16px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.ch-who > .t { flex: none }
-.ch-who .tr { display: flex; align-items: center; gap: 6px; min-width: 0 }
-.ch-who .jump { flex: none; display: inline-flex; padding: 3px; border-radius: 5px; color: var(--mute) }
-.ch-who .jump:hover { color: var(--accent); background: var(--line) }
+.ch-who > .t:not(:only-child) { flex: none }
 .ch-who .sub { font-size: 11.5px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .ch-acts { display: flex; gap: 8px; align-items: center; flex: none; font-size: 12px; color: var(--mute) }
 .vb {
@@ -274,10 +271,11 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 /* 卡片里那份时刻是详情页要的, 这里已经写在 .mwho 上了 —— 同一条消息不报两次时间。 */
 .mb .tg-time { display: none }
 
-/* 入消息 (问句) 是一颗气泡; 出消息 (回复) 是一张带工具细节的卡片 —— 两者都按视角着色。 */
-.mb > .bubble.mq { border-radius: 14px; border-color: var(--line) }
+/* 入消息 (问句) 是一颗气泡; 出消息 (回复) 是一串气泡, 中间夹着虚线的过程框 ——
+   没有外层卡片, 直接排在对话底上。 */
+.mb > .bubble.mq { border-radius: 14px }
+.mb :is(.bubble.mq, .say > .bubble) { border-color: var(--line) }
 .mb .mq .mmeta { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding: 8px 14px 0; font-size: 11px; color: var(--faint) }
-.mb .mq .md-body { padding: 10px 14px }
 .mb .mq .mmeta + .md-body { padding-top: 4px }
 .mchip { border-radius: 4px; padding: 0 5px; background: #f1f3f6; color: var(--mute) }
 .mchip.priv { color: var(--priv); background: #9a5b1014 }
@@ -285,24 +283,14 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .mchip.graph { color: #6639ba; background: #8250df12 }
 .mchip.sys { color: #0a7d6b; background: #0a7d6b12 }
 
-/* 自己发出的那条: 整块就是视角色。TURN_CSS 里写死的白卡 / 灰底 (嵌套气泡、
-   代码块、折叠头) 会在蓝底上显成一张张贴纸 —— 这里把它们收回到气泡自己的
-   底色上, 一条消息读起来是一块颜色, 需要再沉一档的才用 --mine-soft。 */
-.mrow.mine .mb > .bubble.mq, .mrow.mine .mb > .turn-group { background: var(--mine); border-color: var(--mine-line) }
-.mrow.mine .mb .bubble, .mrow.mine .mb .typing { background: transparent; border-color: var(--mine-line) }
-.mrow.mine .mb .bubble.user, .mrow.mine .mb .bubble.approval,
-.mrow.mine .mb .md-body code, .mrow.mine .mb .md-body pre,
-.mrow.mine .mb details:not(.tool-call) > summary,
-.mrow.mine .mb .tool-body section > h2, .mrow.mine .mb .diff-meta,
-.mrow.mine .mb .tool-call > summary:hover { background: var(--mine-soft); border-color: var(--mine-line) }
-.mrow.mine .mb .md-body pre code { background: transparent }
-/* 展开的工具正文 (command / diff / 文件内容) 与嵌在父轮里的 subagent 卡片都是裸
-   section, 吃的是 TURN_CSS 的白底 —— 同样收回气泡底色; subagent 的绿色左边线留着。 */
-.mrow.mine .mb .tool-body section { background: transparent; border-color: var(--mine-line) }
-.mrow.mine .mb .turn-group .turn-group { background: transparent; box-shadow: none; border-color: var(--mine-line) }
-.mrow.mine .mb .turn-group .turn-group.subagent { border-left-color: #1a7f3733 }
-.mrow.mine .mb .bubble details, .mrow.mine .mb .tg-head { border-color: var(--mine-line) }
-.mrow.mine .mb .tool-body { border-left-color: var(--mine-line) }
+/* 自己说的话染成视角色 —— 只染气泡; 过程框是底上的一道虚线, 不跟着染。气泡里
+   TURN_CSS 写死的灰底 (行内代码 / 代码块) 沉一档到 --mine-soft, 免得显成贴纸。 */
+.mrow.mine .mb :is(.bubble.mq, .say > .bubble) { background: var(--mine); border-color: var(--mine-line) }
+.mrow.mine .mb :is(.bubble.mq, .say) .md-body :is(code, pre) { background: var(--mine-soft); border-color: var(--mine-line) }
+.mrow.mine .mb :is(.bubble.mq, .say) .md-body pre code { background: transparent }
+/* 气泡跟着行靠右, 时刻翻到气泡左边; 嵌在过程框里的子 agent 不翻 —— 那不是我说的。 */
+.mrow.mine .mb > .turn-group > .bubbles > .say { align-self: flex-end; flex-direction: row-reverse }
+.mrow.mine .mb > .turn-group > .tg-head { justify-content: flex-end }
 /* 工具正文是展开时才取的 (chat.js loadTool) —— 空壳期间说一句在干什么。 */
 .tool-body[data-lazy-turn]:empty::before { content: "加载中…"; color: #8c959f; font-size: 12px }
 .tool-body[data-lazy-turn][data-err]:empty::before { content: "加载失败 · 收起再展开重试"; color: #cf222e }
@@ -340,34 +328,21 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
   .flip { transition: none }
 }
 
-/* ── turn 分组 ──────────────────────────────────────────────────── */
-/* section 的默认样式给了白底+边框, 但没有内边距 —— 气泡/工具行会直接贴着卡片
-   边缘, 所以这里补上一轮对话自己的呼吸空间。 */
+/* ── 一轮回复 ───────────────────────────────────────────────────── */
+/* 只是一根竖轴, 不是卡片: section 的默认白底 / 边框在这里收掉。本轮的账 (模型 /
+   token / 耗时) 压成末尾一行小字 —— 它是这条消息的脚注, 不是标题。 */
 .turn-group {
-  display: flex; flex-direction: column; gap: 10px;
-  padding: 14px 16px 16px; border-radius: 12px; border-color: #e1e6ec;
-  box-shadow: 0 1px 2px #1f23280a;
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 0; border: 0; border-radius: 0; background: none;
 }
-.tg-head {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  padding-bottom: 6px; border-bottom: 1px dashed #d8dee4;
+.tg-head { order: 9; display: flex; align-items: center; gap: 4px 10px; flex-wrap: wrap; padding: 0 2px }
+.tg-head .chip.model, .tg-head .chip.tier, .tg-tok {
+  padding: 0; border: 0; border-radius: 0; background: none; font-weight: 400;
+  font-size: 10.5px; color: var(--faint); font-family: ui-monospace, Menlo, monospace;
 }
-.tg-dot { width: 7px; height: 7px; border-radius: 50%; background: #b1bac4; flex: none }
-.tg-dot.live { background: #1a7f37; animation: pulse 1.4s infinite }
+.tg-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; display: none }
+.tg-dot.live { display: block; background: #1a7f37; animation: pulse 1.4s infinite }
 .tg-time { font-size: 11.5px; color: #8c959f; font-family: ui-monospace, Menlo, monospace }
-.tg-tok {
-  font-size: 11px; color: #57606a; background: #f1f3f6; border-radius: 9px;
-  padding: 1px 7px; font-family: ui-monospace, Menlo, monospace;
-}
-.turn-group .bubbles { margin-top: 0 }
-/* 上下文断点 (/clear、/new、会话轮换): 断点条来自 TURN_CSS, 这里再给整张卡片
-   多留一口气 + 描边, 让"这一轮读不到上一轮"在滚动中一眼可辨。 */
-.turn-group.cut { margin-top: 12px }
-.turn-group.cut-clear, .turn-group.cut-new {
-  border-color: #d4a72c66; box-shadow: 0 1px 2px #1f23280a, 0 0 0 3px #d4a72c14;
-}
-/* graph 派的一轮: 卡片本身也着色, 滚动时不必读归因条就知道这不是人发的。 */
-.turn-group.graph { border-color: #8250df44 }
 
 /* ── 🏓 keepalive 折叠 ──────────────────────────────────────────────
    保温 ping 不是对话, 但它是真花销 —— 所以留在时间轴上, 只是收成一行虚线。 */
@@ -390,8 +365,6 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .ping-fold .ping-body {
   display: flex; flex-direction: column; gap: 10px; padding: 2px 10px 10px;
 }
-/* 展开后的 ping 轮次压一档: 它们是背景噪声, 不该和真对话卡片一样醒目。 */
-.ping-fold .turn-group { box-shadow: none }
 .ping-fold .mcol { max-width: 100% }
 .ping-fold .flip { display: none }
 
@@ -406,7 +379,6 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
   .thread { padding: 12px }
   .mcol { max-width: calc(86% + var(--av)) }
   .flip { min-width: 16px; padding: 0 4px; font-size: 0 }
-  .turn-group { padding: 12px }
   .thread { padding-bottom: calc(12px + env(safe-area-inset-bottom)) }
   .usage { padding: 8px 12px; gap: 6px 14px }
   .usage .u-kvs, .usage .leg { flex-wrap: wrap }
@@ -727,5 +699,5 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
    会话标题条与页脚总账只属于对话视图。 */
 .pane { flex: 1; min-height: 0; display: flex; flex-direction: column; background: #fafbfc }
 
-/* 回复卡片里的工具行是 nowrap 的 —— 不裁一刀会把整列撑出横向滚动。 */
+/* 过程框里的工具行是 nowrap 的 —— 不裁一刀会把整列撑出横向滚动。 */
 .mb > .turn-group { overflow: hidden }

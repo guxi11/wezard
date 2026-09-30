@@ -192,6 +192,12 @@
     for (var i = 0; i < el.children.length; i++) if (el.children[i].classList.contains(cls)) return el.children[i];
     return null;
   };
+  // 一轮回复 (.tg-head) 与过程框 (.steps-head) 是同一副骨架: 头 + .bubbles。
+  var headOf = function (el) { return childBy(el, 'tg-head') || childBy(el, 'steps-head'); };
+  var swapHead = function (ex, nc) {
+    var eh = headOf(ex), nh = headOf(nc);
+    if (eh && nh) eh.innerHTML = nh.innerHTML;
+  };
   var reconcile = function (cur, next) {
     var open = snapOpen(cur), existing = {};
     Array.prototype.forEach.call(cur.children, function (c) {
@@ -203,8 +209,7 @@
       if (ex.getAttribute('data-sig') === nc.getAttribute('data-sig')) return ex;
       var eb = childBy(ex, 'bubbles'), nb = childBy(nc, 'bubbles');
       if (eb && nb) {
-        var eh = childBy(ex, 'tg-head'), nh = childBy(nc, 'tg-head');
-        if (eh && nh) eh.innerHTML = nh.innerHTML;
+        swapHead(ex, nc);
         reconcile(eb, nb);
         ex.setAttribute('data-sig', nc.getAttribute('data-sig') || '');
         return ex;
@@ -248,6 +253,14 @@
     var d = e.target;
     if (d.open && d.classList && d.classList.contains('tool-call')) loadTool(d);
   }, true);
+
+  // 过程框的收起: 框头与框内空白是开关; 落在某一行工具上的点击归那一行自己。
+  // 收起态只是节点上的一个 class —— reconcile 认键留节点, 往框里添调用时它跟着留下。
+  inner.addEventListener('click', function (e) {
+    var s = e.target.closest && e.target.closest('.steps');
+    if (!s) return;
+    if (e.target.closest('.steps-head') || e.target === s || e.target === childBy(s, 'bubbles')) s.classList.toggle('folded');
+  });
 
   // ── 左栏: 当前 role 的名片 + 会话列表 ──
   var convOf = function (key) { return R.convs.filter(function (c) { return c.key === key; })[0]; };
@@ -485,14 +498,6 @@
     putUsage($('#ch-usage'), !wiz && WITH && VIEW === 'msgs' ? R.winStats : null);
   };
 
-  // 只有真群 (`chat:<roomid>`) 才有跳转: `user:` 是人与 bot 的单聊, userid 指向的是人自己而不是这段会话。
-  var JUMP = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M9.5 2.5h4v4M13.5 2.5 7.5 8.5M11.5 9.5v3a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1h3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-  var openInWecom = function (base) {
-    return base.indexOf('chat:') === 0
-      ? '<a class="jump" href="wxwork://openconversation?roomid=' + encodeURIComponent(base.slice(5)) + '" title="在企业微信中打开这个群聊">' + JUMP + '</a>'
-      : '';
-  };
-
   // ── 右栏头: 这个群聊 / 私聊是什么 (关系 / 日程视图时是视图名) ──
   var renderHead = function () {
     var who = $('#ch-who'), acts = $('#ch-acts');
@@ -505,9 +510,7 @@
     }
     var c = convOf(CONV);
     if (!c) { who.innerHTML = ''; acts.innerHTML = ''; return; }
-    who.innerHTML = '<span class="tr"><span class="t">' +
-      (c.kind === 'wizard' ? nm(c.peer, c.name, true) : esc(c.name)) + '</span>' +
-      (c.kind === 'wizard' ? '' : openInWecom(c.base)) + '</span>';
+    who.innerHTML = '<span class="t">' + (c.kind === 'wizard' ? nm(c.peer, c.name, true) : esc(c.name)) + '</span>';
     acts.innerHTML = WITH
       ? '<span class="with">只看我与 ' + nm(WITH, '', true) + '</span><button class="vb" id="ch-all">看全部</button>'
       : '';
@@ -647,8 +650,7 @@
       var ec = eb && eb.firstElementChild, nc = nb && nb.firstElementChild;
       var ebb = ec && childBy(ec, 'bubbles'), nbb = nc && childBy(nc, 'bubbles');
       if (ebb && nbb) {
-        var eh = childBy(ec, 'tg-head'), nh = childBy(nc, 'tg-head');
-        if (eh && nh) eh.innerHTML = nh.innerHTML;
+        swapHead(ec, nc);
         reconcile(ebb, nbb);
         ['data-sig', 'data-stale-at'].forEach(function (a) { cur.setAttribute(a, next.getAttribute(a)); });
       } else {
