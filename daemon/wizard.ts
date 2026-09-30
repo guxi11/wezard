@@ -27,6 +27,9 @@ export interface WizardRecord {
   parent?: string;
   /** fork 自哪个 sessionId ("" / 缺省 = 开局是空白会话, 没继承上下文)。 */
   clonedFrom?: string;
+  /** 被克隆的那个 wizard 的 target —— 只在它不是 parent 本人时才有。parent 是谁生的、
+   *  归谁管 (预算、回收); forkOf 是上下文从哪来。克隆自己时两者是同一个, 不重复记。 */
+  forkOf?: string;
   bornAt: number;
   /** 自己写下的长期记忆, 每次 spawn 重新注入上下文。 */
   memory: string[];
@@ -160,8 +163,10 @@ export interface CharterArgs {
   chat: string;
   principal: string;
   parent?: WizardBrief;
-  /** 是否 fork 了父亲的上下文。 */
+  /** 是否 fork 了上下文。 */
   inherited: boolean;
+  /** 上下文 fork 自谁 —— 缺省 = parent 本人。 */
+  forkOf?: WizardBrief;
   /** 工作区还是没人选过的默认兜底目录 —— 开工前该先问人一句要去哪个项目。 */
   cwdUnconfirmed: boolean;
   siblings: readonly WizardBrief[];
@@ -170,6 +175,8 @@ export interface CharterArgs {
   chatMemory: string;
   /** 本工作区记忆 (memory/workspaces/<cwd>.md 全文); "" = 没有。 */
   workspaceMemory: string;
+  /** 聊天的默认会话 = 这个群的管家: 没点名的话都落到它这儿, 由它分派。 */
+  steward: boolean;
 }
 
 const addr = (b: WizardBrief): string => `.${b.address || b.name || "?"}`;
@@ -196,7 +203,9 @@ export const renderCharter = (a: CharterArgs): string => {
       `工作区: \`${a.self.cwd || "(未设置)"}\``,
       `职责: ${a.self.description || "(未写 —— 用 wizard_identity 写一句, 别人靠它决定该不该找你)"}`,
       a.parent
-        ? a.inherited
+        ? a.inherited && a.forkOf
+          ? `出身: **\`${addr(a.parent)}\`** 克隆出的 **\`${addr(a.forkOf)}\`** 的分身 —— 从 \`${addr(a.forkOf)}\` 的 session 节点 fork 而来, **你继承了它当时的全部上下文**; 归 \`${addr(a.parent)}\` 管, 活是它派的`
+          : a.inherited
           ? `出身: **\`${addr(a.parent)}\`** 的分身 —— 从它的 session 节点 fork 而来, **你继承了它当时的全部上下文**(它读过的文件/文档你开局就有)`
           : `出身: **\`${addr(a.parent)}\`** 生的子 wizard —— 白板起步, 不继承它的上下文`
         : "出身: 本聊天的原生 wizard",
@@ -219,10 +228,26 @@ export const renderCharter = (a: CharterArgs): string => {
     parts.push("## 我的记忆", "这些是你自己写下的、要跨会话活下来的东西:", bullet(a.memory as string[]), "");
   }
   if (a.chatMemory) {
-    parts.push("## 本群记忆", "这个群里所有 wizard 共享的记忆 (`wizard_remember({scope:\"chat\"})` 追加; 人也会直接改):", a.chatMemory, "");
+    parts.push("## 本群记忆", "这个群里所有 wizard 共享的记忆 (`wizard_remember({scope:\"chat\"})` 提交, 记忆整理者合并; 人也会直接改):", a.chatMemory, "");
   }
   if (a.workspaceMemory) {
-    parts.push("## 本工作区记忆", "在这个目录下干活的所有 wizard 共享的记忆 (`wizard_remember({scope:\"workspace\"})` 追加; 人也会直接改):", a.workspaceMemory, "");
+    parts.push("## 本工作区记忆", "在这个目录下干活的所有 wizard 共享的记忆 (`wizard_remember({scope:\"workspace\"})` 提交, 记忆整理者合并; 人也会直接改):", a.workspaceMemory, "");
+  }
+  if (a.steward) {
+    parts.push(
+      "## 我是这个群的管家",
+      "人在这个群里**没点名**说的话都落到你这儿; 点了名 (`.name`) 的直达那个 wizard, 不经过你。",
+      "你的活是**分派**, 不是亲手干 —— 上下文留给名册和来龙去脉, 别被大段代码和文件塞满:",
+      bullet([
+        "一两句就能答的 (问进度、问谁在干什么、闲聊) → 自己答",
+        "对口某个已有 wizard 的职责 (`wizard_roster` 看职责与忙闲) → `send_peer({name, text, public:true})` 转给它: 它的回复直接进群, 你**不必等、不必转述**, 转完这一轮就结束; 它正忙就加 `when:\"idle\"`",
+        "没有对口的 → `spawn_wizard({name, description})` 从白板生一个 (名字取这件事的短名, description 是它往后的职责), **不带 task**; 就位后照上一条用 `send_peer({public:true})` 把活转给它 —— 这样它的回复进群",
+        "要读很多代码 / 改文件 / 跑很久的活 —— 哪怕你自己能做 —— 也转出去; 你一忙, 这个群里没点名的话就都排在你后面",
+        "名册里职责空着的 wizard 转活前先 `peek_peer` 看它在干嘛, 顺手让它补上职责 —— 职责是你分派的依据",
+        "人立的规矩、这个群的习惯、仓库的硬约束 → `wizard_remember({scope:\"chat\"|\"workspace\"})` 提交; 共享记忆的合并由定时的记忆整理者做, 不在你这儿",
+      ]),
+      "",
+    );
   }
   if (a.siblings.length > 0) {
     parts.push(
@@ -239,10 +264,10 @@ export const renderCharter = (a: CharterArgs): string => {
       "`wizard_whoami` 我是谁、上下文用了多少、我的分身有哪些",
       "`wizard_identity` 改名字 / 写职责 (名字全局唯一, 撞名会自动加 `-N` 后缀并告诉你最终名字)",
       "`wizard_roster` 全部 wizard 与 clone: 名字、home 群、工作区、职责、模型、忙闲、家谱",
-      "`spawn_clone` 生一个分身 —— `inherit:true` 让它继承我此刻的上下文, `inherit:false` 给它一张白纸; `name` 给它起名 (全局唯一); `model` 给它挑模型 (跑腿的活给 haiku, 要判断的给 opus); 分身还能再生分身",
+      "`clone_wizard` 克隆出一个分身 —— fork 我 (或 `from` 点名的某个 wizard) 此刻的上下文, 开局就带着读过的一切, 留在被克隆者的工作区 · `spawn_wizard` 从白板生一个子 wizard —— 不带上下文, 可以去别的目录; 两者都归我管, `name` 起名 (全局唯一), `model` 挑模型 (跑腿的活给 haiku, 要判断的给 opus), 它们还能再生",
       "`stop_wizard` 打断或终结一个分身/wizard (活干完了就收掉它)",
       "`open_job` / `close_job` / `list_jobs` 一次要派出两个以上分身时的**工单**: 群里只出开工/收工两条气泡, 收工时整批回收临时分身",
-      "`wizard_remember` 写一条跨会话的记忆 —— `scope` 选 `self` (我自己的) / `chat` (本群共享) / `workspace` (本工作区共享)",
+      "`wizard_remember` 写一条跨会话的记忆 —— `scope` 选 `self` (我自己的, 当场生效) / `chat` (本群共享) / `workspace` (本工作区共享); 后两者是**提议**, 由定时的记忆整理者去重、改写、合并后才生效",
       "`wizard_handoff_self` 上下文快满时自己原地交接重开",
       "`send_peer` 跟别的 wizard 说话, **默认私聊**; `public:true` 则在群里公开说 (见下) · 派活给一个正在忙的同伴用 `when:\"idle\"` · `peek_peer` 看它在干嘛 · `list_peers` 看同群有谁",
       "`wait_peer` 等它干完 —— 派了一**批**活就用 `names` 一次等一组 (`need` 决定满几个就返回), 别一个一个等",
@@ -257,9 +282,9 @@ export const renderCharter = (a: CharterArgs): string => {
     "**控制流在你手里** —— 没有别的调度器替你跑这件事: 你自己分路、自己派、自己等、自己汇总。",
     bullet([
       "先在自己这里把**公共材料**读进上下文 (规范、目录结构、关键文件)",
-      "要派出两个以上的分身就先 `open_job(标题, 计划)` 拿一个工单 id —— 之后每个 `spawn_clone` / `send_peer` 都带上 `job`",
-      "`spawn_clone({inherit:true, task})` 出需要的分身: 它们开局就带着这些材料, 只需告诉它各自那一份差异; 活写进 `task` 省一次往返",
-      "撞名 (`spawn_clone` 409) 别顺手 `send_peer` 糊弄过去: 响应里的 `alive`/`busy`/`idleForMs` 已经说清那是真在干活还是冷绑定。真活着就换个名字重新生, 别把不相关的活塞给一个已经有职责的 wizard; 冷绑定才值得复用, 但复用前先 `stop_wizard({mode:\"end\"})` 把它收掉腾出名字, 再用同一个名字重新 spawn —— 拿到干净的上下文",
+      "要派出两个以上的分身就先 `open_job(标题, 计划)` 拿一个工单 id —— 之后每个 `clone_wizard` / `spawn_wizard` / `send_peer` 都带上 `job`",
+      "`clone_wizard({task})` 出需要的分身: 它们开局就带着这些材料, 只需告诉它各自那一份差异; 活写进 `task` 省一次往返。材料已经在某个同伴的上下文里, 就 `clone_wizard({from, task})` 从它分, 不必自己再读一遍",
+      "撞名 (`clone_wizard` / `spawn_wizard` 409) 别顺手 `send_peer` 糊弄过去: 响应里的 `alive`/`busy`/`idleForMs` 已经说清那是真在干活还是冷绑定。真活着就换个名字重新生, 别把不相关的活塞给一个已经有职责的 wizard; 冷绑定才值得复用, 但复用前先 `stop_wizard({mode:\"end\"})` 把它收掉腾出名字, 再用同一个名字重新 spawn —— 拿到干净的上下文",
       "地址永远是名字本身 (`fix` 或 `.fix`), 全局唯一, 不分群; 永远别自己拼 key —— roster / 409 里的 `address` 原样传回来",
       "派活时要求它**把结论收口成一行** `RESULT: …` (交付物写进文件就回传路径) —— `wait_peer` 会把这一行单独摘进 `result`, 免得你从八百字散文里找结论",
       "一次 `wait_peer({names:[…]})` 把它们**一起**等回来。它们本来就在并行干活: 一个一个等, 墙钟是所有人之和; 一起等只花最慢那一个的时间 (`need` 可以让你先处理最先完事的那几个)",

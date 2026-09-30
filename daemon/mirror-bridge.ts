@@ -2240,7 +2240,7 @@ interface AttachState {
   /** When `/stop` paused keepalive (ms). The busy-based resume is gated on a
    *  grace window after this so an in-flight ping at /stop time can't self-resume. */
   keepaliveOffAt?: number;
-  /** Sticky opt-out set once at spawn time (`spawn_clone` / `new_claude_session`
+  /** Sticky opt-out set once at spawn time (`spawn_wizard` / `clone_wizard` / `new_claude_session`
    *  `keepalive:false`). Unlike `keepaliveOff` there is no auto-resume — a
    *  wizard created this way is never pinged for its whole lifetime. */
   keepaliveDisabled?: boolean;

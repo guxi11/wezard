@@ -38,7 +38,8 @@ import { openTaskRegistry } from "./task-registry.js";
 import { describeTrigger, nextFire, parseTrigger, WHEN_HELP } from "../shared/trigger.js";
 import { slugify, uniqueId } from "../shared/task-file.js";
 import { baseOfKey, bindTagLinker, keyOf, linkTags, normalizeTag, tagFromCwd, tagHead, tagLink, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
-import { appendMemory, forgetMemory, memoryPath, readMemory, type MemoryScope } from "./wizard-memory.js";
+import { clipForCharter, inboxPath, memoryPath, memoryRoot, proposeMemory, readMemory, type MemoryScope } from "./wizard-memory.js";
+import { ensureStewardTask } from "./memory-steward.js";
 import { applyChatNames, chatBaseOf, chatNameOf, clearChatName, listChatNames, normChatName, peerAddress, planChatNames, setChatName } from "./chat-name.js";
 import {
   bindWizardStore,
@@ -129,6 +130,8 @@ const main = async (): Promise<void> => {
   const mirrorStore = loadMirrorStore(cfg.wrc.mirror.attachmentsFile);
   // 定时任务表 —— 每条任务是 ~/.wezard/tasks/<id>.task.mjs 一份可注入代码的配置
   // (见 shared/task-file.ts)。目录是热加载的: wizard 改完文件不用 reload 守护进程。
+  // 共享记忆的整理者是一条定时任务 (memory-steward.ts), 缺了就补一份默认的。
+  try { ensureStewardTask(memoryRoot(cfg.daemon.stateDir)); } catch (e) { log.warn({ err: (e as Error).message }, "memory steward task not written"); }
   const tasks = await openTaskRegistry(
     log.child({ mod: "tasks" }),
     (added, removed) => log.info({ added, removed }, "task files changed"),
@@ -992,6 +995,7 @@ const main = async (): Promise<void> => {
           alive: p.paneAlive,
           parent: w?.parent,
           clonedFrom: w?.clonedFrom,
+          forkOf: w?.forkOf,
           bornAt: w?.bornAt,
           lastActivity: p.lastActivity,
           summary: p.summary,
@@ -1010,6 +1014,7 @@ const main = async (): Promise<void> => {
           busy: false, alive: false,
           parent: w.parent,
           clonedFrom: w.clonedFrom,
+          forkOf: w.forkOf,
           bornAt: w.bornAt,
           lastActivity: 0,
           summary: "(未运行)",
@@ -1061,9 +1066,14 @@ const main = async (): Promise<void> => {
     /** 自己的地址 = 全局名字, 与住在哪个群无关。 */
     const selfAddress = (target: string): string => settleName(wizards, chatNameOf(cfg, target), target);
 
+    const sharedMemory = (scope: MemoryScope, key: string): string => {
+      const path = memoryPath(cfg.daemon.stateDir, scope, key);
+      return clipForCharter(readMemory(path), path);
+    };
+
     /** 开局宪章。出生时的兄弟只是快照 —— 名册随时可查, 写进系统提示的那份只为了
      *  让它一睁眼就知道自己不是一个人在跑。 */
-    const charterFor = (target: string, o: { parent?: string; inherited?: boolean; cwd?: string }): string =>
+    const charterFor = (target: string, o: { parent?: string; forkOf?: string; inherited?: boolean; cwd?: string }): string =>
       renderCharter({
         // o.cwd = 正在启动的那个 pane 的目录; 没给才退回"现在记着的那个"。
         self: { ...briefOf(target, target), address: selfAddress(target), ...(o.cwd ? { cwd: o.cwd } : {}) },
@@ -1071,14 +1081,16 @@ const main = async (): Promise<void> => {
         principal: baseOfKey(target),
         parent: o.parent ? briefOf(target, o.parent) : undefined,
         inherited: !!o.inherited,
+        forkOf: o.forkOf ? briefOf(target, o.forkOf) : undefined,
         cwdUnconfirmed: m.cwdUnconfirmed(target, o.cwd),
         siblings: m.chatTargets(baseOfKey(target)).filter((t) => t !== target).map((t) => briefOf(target, t)),
         memory: wizards.get(target)?.memory ?? [],
-        chatMemory: readMemory(memoryPath(cfg.daemon.stateDir, "chat", baseOfKey(target))),
+        chatMemory: sharedMemory("chat", baseOfKey(target)),
         workspaceMemory: (() => {
           const cwd = o.cwd || m.getCwd(target).runningCwd || m.getCwd(target).defaultCwd;
-          return cwd ? readMemory(memoryPath(cfg.daemon.stateDir, "workspace", cwd)) : "";
+          return cwd ? sharedMemory("workspace", cwd) : "";
         })(),
+        steward: !tagOfKey(target),
       });
 
     // 所有 spawn 路径 (群里手打 /new、pane 自愈重生、编排出来的分身) 都从这里
@@ -1089,7 +1101,7 @@ const main = async (): Promise<void> => {
       // 「(未命名)」的地方。所以补名要发生在渲染之前, 不能等它以后自己去查。
       ensureChatNames(target);
       const rec = wizards.get(target);
-      return charterFor(target, { parent: rec?.parent, inherited: !!rec?.clonedFrom, cwd: ctx?.cwd });
+      return charterFor(target, { parent: rec?.parent, forkOf: rec?.forkOf, inherited: !!rec?.clonedFrom, cwd: ctx?.cwd });
     });
 
     // 开机也补一次: IM 侧的 `/peers`、`/help` 直接读名字, 不经过任何 MCP 路由。
@@ -1119,6 +1131,7 @@ const main = async (): Promise<void> => {
         named: !!(rec?.name ?? "").trim(),
         bornAt: rec?.bornAt,
         inheritedFrom: rec?.clonedFrom || "",
+        ...(rec?.forkOf ? { forkOf: briefOf(self, rec.forkOf) } : {}),
         memory: rec?.memory ?? [],
         ...kinOf(self, wizards.all(), target),
         sessionId: info?.sessionId ?? "",
@@ -1242,8 +1255,9 @@ const main = async (): Promise<void> => {
       });
     });
 
-    // 记忆三种作用域: self 跟着自己 (wizards.json); chat / workspace 是共享的 md,
-    // 每个在那个群 / 那个目录出生的 wizard 都会读到 (见 wizard-memory.ts)。
+    // 记忆三种作用域: self 跟着自己 (wizards.json), 直写; chat / workspace 是共享的 md,
+    // 每个在那个群 / 那个目录出生的 wizard 都会读到 —— 它们只收提议, 由整理者合并
+    // (见 wizard-memory.ts / memory-steward.ts)。
     http.register("POST /wizard/remember", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
@@ -1254,10 +1268,19 @@ const main = async (): Promise<void> => {
       if (scope === "chat" || scope === "workspace") {
         const key = scope === "chat" ? baseOfKey(self) : (m.getCwd(self).runningCwd || m.getCwd(self).defaultCwd);
         if (!key) { json(res, 400, { ok: false, reason: "这个 wizard 没有工作区, 记不了 workspace 记忆" }); return; }
+        if (!note && !forget) { json(res, 400, { ok: false, reason: "note 和 forget 至少给一个" }); return; }
         const path = memoryPath(cfg.daemon.stateDir, scope as MemoryScope, key);
-        const forgotten = forget ? forgetMemory(path, forget) : 0;
-        const added = note ? appendMemory(path, note) : false;
-        json(res, 200, { ok: true, scope, file: path, memory: readMemory(path), added, forgotten });
+        const queued = proposeMemory(inboxPath(cfg.daemon.stateDir, scope as MemoryScope, key), {
+          at: Date.now(),
+          by: selfAddress(self),
+          ...(note ? { note } : {}),
+          ...(forget ? { forget } : {}),
+        });
+        if (!queued) { json(res, 500, { ok: false, reason: "提议没写进收件箱" }); return; }
+        json(res, 200, {
+          ok: true, scope, queued, file: path, memory: readMemory(path),
+          hint: "已提交给记忆整理者, 下一轮整理 (半小时内) 合并进上面这份记忆; 此后出生的 wizard 才读得到",
+        });
         return;
       }
       const cur = wizards.get(self)?.memory ?? [];
@@ -1273,7 +1296,7 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/clone", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { name?: string; tag?: string; description?: string; inherit?: boolean; cwd?: string; chat?: string; cli?: CliBackendName; model?: string; task?: string; job?: string; keepalive?: boolean };
+      const b = body as { name?: string; tag?: string; description?: string; inherit?: boolean; from?: string; cwd?: string; chat?: string; cli?: CliBackendName; model?: string; task?: string; job?: string; keepalive?: boolean };
       // 工单先验: 生完分身才发现工单号打错了, 那个分身就成了没人认领的孤儿。
       const jobId = (b.job ?? "").trim();
       if (jobId) {
@@ -1287,8 +1310,26 @@ const main = async (): Promise<void> => {
         json(res, 400, { ok: false, reason: "inherit 必填: true = fork 你此刻的上下文 (它开局就有你读过的材料, 必须留在同一个 cwd); false = 空白分身, 只继承身份" });
         return;
       }
-      const alivePeers = await m.peers(self);
       const inherit = b.inherit;
+      // 克隆的源头: 默认是调用方自己; `from` 点名就 fork 那个 wizard 此刻的上下文。
+      // 分身仍归调用方管 (parent = self: 占它的预算、随它的工单回收), 只有上下文来自别处。
+      // 空串不能交给 resolvePeer —— 那是「本聊天的默认 wizard」, 不是「我自己」。
+      const fromAddr = (b.from ?? "").toString().trim();
+      if (fromAddr && !inherit) {
+        json(res, 400, { ok: false, reason: "from 只对克隆有意义 —— 白板生出来的 wizard 不带任何人的上下文" });
+        return;
+      }
+      const fromR = fromAddr ? resolvePeer(self, fromAddr) : { ok: true as const, target: self };
+      if (!fromR.ok) { json(res, fromR.status, { ok: false, reason: fromR.reason, ...(fromR.candidates ? { candidates: fromR.candidates } : {}) }); return; }
+      const source = fromR.target;
+      const sourceInfo = m.sessionInfo(source);
+      // 别人的会话 fork 不出来就是失败, 不能像克隆自己那样悄悄退化成白板 —— 调用方
+      // 要的恰恰是它的上下文, 给一张白纸等于答非所问。
+      if (source !== self && !sourceInfo?.sessionId) {
+        json(res, 409, { ok: false, reason: `${displayName(source)} 没有可 fork 的会话 (还没说过话, 或绑定已失效)` });
+        return;
+      }
+      const alivePeers = await m.peers(self);
       // 预算。撞到上限不是"不许再分", 是"先把干完活的收掉": stop_wizard 收单个,
       // close_job 整批回收一个工单的临时分身。只数**本聊天里**活着的 ——
       // 生到别的聊天去的归那边管, 为了数它们再探一遍 tmux 不值当。
@@ -1316,21 +1357,22 @@ const main = async (): Promise<void> => {
       const slotR = await claimSlot(base, askedName, normalizeTag(b.description?.split(/\s+/)[0]) || "clone");
       if (!slotR.ok) { json(res, slotR.status, slotR.body); return; }
       const { target, slot: tag } = slotR;
-      const parentInfo = m.sessionInfo(self);
+      const forkOf = inherit && source !== self ? source : undefined;
       // 先落身份再 spawn: 宪章是从注册表渲染出来的, 记录不在就渲染出一个无名分身。
       wizards.upsert(target, {
         description: (b.description ?? "").toString().trim(),
         parent: self,
         bornAt: Date.now(),
-        clonedFrom: inherit ? parentInfo?.sessionId ?? "" : "",
+        clonedFrom: inherit ? sourceInfo?.sessionId ?? "" : "",
+        ...(forkOf ? { forkOf } : {}),
       });
       const name = wizards.rename(target, normalizeTag(askedName) || tag);
-      const charter = charterFor(target, { parent: self, inherited: inherit });
+      const charter = charterFor(target, { parent: self, forkOf, inherited: inherit });
       const task = (b.task ?? "").toString().trim();
       // 没点名就按配置的 keepalive.spawnDefault 来 —— 调用方明说的永远优先。
       const keepalive = typeof b.keepalive === "boolean" ? b.keepalive : cfg.wrc.mirror.keepalive.spawnDefault;
       const r = await m.cloneSession({
-        parent: self,
+        parent: source,
         target,
         windowName: name,
         cli: b.cli,
@@ -1348,7 +1390,7 @@ const main = async (): Promise<void> => {
         json(res, 500, { ok: false, reason: r.reason });
         return;
       }
-      wizards.upsert(target, { clonedFrom: r.inherited ? parentInfo?.sessionId ?? "" : "" });
+      wizards.upsert(target, { clonedFrom: r.inherited ? sourceInfo?.sessionId ?? "" : "", ...(r.inherited ? {} : { forkOf: undefined }) });
       const kid = briefOf(self, target);
       // r.model 是 spawnTmuxClaude 通过 /model 实测确认落地的那个 —— 可能跟调用方
       // 传的原始字符串不一样 (口语化 → 目录里匹配到的关键词), 播报要报实情。
@@ -1358,7 +1400,7 @@ const main = async (): Promise<void> => {
       // 出生不再发群气泡 (人要看的是结论, 不是谁生了谁 —— 过程在 rolepage 里);
       // 同群的 wizard 仍要知道群里多了一个成员。工单里的临时工连这条也省掉。
       if (!jobId) {
-        postRoster(base, [target, self], `新 wizard **.${name}** 就位${kid.description ? ` · ${kid.description}` : ""}${r.cwd ? ` · 工作区 ${r.cwd}` : ""}${modelNote}${keepalive ? "" : " · 已关闭 keepalive"} —— ${displayName(self)} 的分身${r.inherited ? " (继承了它的上下文)" : ""}`);
+        postRoster(base, [target, self], `新 wizard **.${name}** 就位${kid.description ? ` · ${kid.description}` : ""}${r.cwd ? ` · 工作区 ${r.cwd}` : ""}${modelNote}${keepalive ? "" : " · 已关闭 keepalive"} —— ${displayName(self)} 的分身${r.inherited ? ` (继承了${forkOf ? ` ${displayName(forkOf)} ` : "它"}的上下文)` : ""}`);
       }
       // 继承路径上活已经随开场白进去了, 空白分身才需要在这里补一次注入 (私聊)。
       let dispatched = r.inherited && !!task;
@@ -1442,7 +1484,7 @@ const main = async (): Promise<void> => {
         job: job.id,
         title,
         memberMax: JOB_MEMBER_MAX,
-        hint: "把这个 id 传给 spawn_clone / send_peer 的 `job` 参数, 它们就归到这个工单名下 (期间不再逐条出气泡); 活干完调 close_job 收尾并回收临时分身。",
+        hint: "把这个 id 传给 spawn_wizard / clone_wizard / send_peer 的 `job` 参数, 它们就归到这个工单名下 (期间不再逐条出气泡); 活干完调 close_job 收尾并回收临时分身。",
       });
     });
 

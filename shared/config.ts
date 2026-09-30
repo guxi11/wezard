@@ -172,7 +172,7 @@ const Mirror = z.object({
       // (un-swallowed to chat, clocks re-anchored) — so a resumed session shows.
       resumeOnStall: z.boolean().default(true),
       resumePing: z.string().default('continue'),
-      // Fallback for the per-spawn `keepalive` override (spawn_clone /
+      // Fallback for the per-spawn `keepalive` override (spawn_wizard / clone_wizard /
       // new_claude_session's `keepalive` param). A spawn that passes the param
       // explicitly always wins; this only applies when it's omitted. false →
       // newly created wizards/clones opt OUT of pings by default — useful when

@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+### Added
+- **聊天的默认 wizard = 这个群的管家**。宪章多一段守则: 没点名的话由它分派 —— 小事自己答, 对口已有 wizard 的 `send_peer({public:true})` 转交 (回复直接进群, 管家不等不转述), 没有对口的 `spawn_wizard` 从白板生一个再转; 长活一律转出去, 管家的上下文只留给名册和分派。点了名 (`.name`) 的话照旧直达, 不经过管家。
+- **记忆整理者** (`daemon/memory-steward.ts`): 一条内置定时任务 `~/.wezard/tasks/memory-steward.task.mjs` (缺失时开机补写, 已有不覆盖), 每 30 分钟 gate 认领记忆收件箱, 有提议才新起一个白板 wizard 按 新增 / 改写 / 删除 / 不动 合并进 md, 处理过的提议归档进 `~/.wezard/memory/log/`。
+
+### Changed
+- **BREAKING `spawn_clone` 拆成两个工具: `spawn_wizard` (从白板生一个子 wizard, 不带上下文, 可换 `cwd`) 与 `clone_wizard` (fork 一个 wizard 此刻的上下文出分身, 默认是自己; `from` 点名可克隆别的 wizard —— 分身仍归调用方管, 家谱多记一笔 `forkOf` 说明上下文从谁来)**。生孩子与克隆是两个操作, 不该是一个 `inherit` 布尔的两档 —— 模型该选的是动词。两者落到同一条 `/wizard/clone` 路由, 已在跑的 wizard 的旧 MCP 进程照常能用。
+- **群 / 工作区记忆只有一个写入者**: `wizard_remember({scope:"chat"|"workspace"})` 不再直接追加 md, 改为往 `~/.wezard/memory/inbox/` 投提议 (记下提议者与时刻), 由记忆整理者合并。此前几十个 wizard 同写一份文件, 只会越来越长、互相矛盾; `self` 作用域照旧直写。人照旧可直接改 md。
+- 宪章里每份共享记忆上限 4000 字, 超出截断并给出全文路径。
+
 ## [2.0.0] - 2026-09-29
 
 ### Added

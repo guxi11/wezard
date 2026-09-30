@@ -42,7 +42,7 @@ flowchart LR
 | 📡 **MCP 主动推送** | Agent 通过 `wecom__send_markdown` / `wecom__send_card` / `wecom__ask_user` 主动汇报或问询。 |
 | 📄 **文档读写** | Agent 通过 `wecom_doc_list_tools` / `wecom_doc_call` 直接调企业微信智能机器人的 doc / smartsheet / smartpage MCP，新建在线文档、写 Markdown、读链接、操作智能表格——全程在内网，不需要 corp access_token。 |
 | 🗂 **多会话发现/切换** | Agent 通过 `list_claude_sessions` / `switch_claude_session` / `new_claude_session` 列出本机 tmux 内所有在跑的会话（带摘要 + 稳定动物 emoji 标签）、切换 IM 镜像、或在指定路径新开会话。审批卡标题也带同一枚 emoji，多会话兜底到同一 IM 时一眼区分。 |
-| 🧙 **多 wizard 协同** | 每个 wizard 有一个**全局唯一**的名字，写作 `.name`，在任何群里都叫得到；有职责、有记忆、能私聊。`spawn_clone` fork 上下文出分身，`open_job` / `wait_peer({names})` / `close_job` 把一次 fan-out 收成群里两条气泡，干完整批回收。 |
+| 🧙 **多 wizard 协同** | 每个 wizard 有一个**全局唯一**的名字，写作 `.name`，在任何群里都叫得到；有职责、有记忆、能私聊。`clone_wizard` fork 上下文出分身、`spawn_wizard` 白板生子 wizard，`open_job` / `wait_peer({names})` / `close_job` 把一次 fan-out 收成群里两条气泡，干完整批回收。 |
 | 🔄 **重启即续** | 电脑重启 / tmux 全没了 / daemon 崩了都不掉档：IM ↔ 会话绑定持久化在 `~/.wezard/mirror-attachments.json`，下一条 IM 消息自动 `claude --resume` 拉起新 tmux pane，历史完整继承；`tmux attach -t wezard` 接管即可。 |
 
 <details>
@@ -253,7 +253,7 @@ flowchart LR
 记住：发版前必须更新 CHANGELOG  → wizard_remember，跨 /clear 活着，每次重开重新入场
 记到这个群 / 这个仓库的记忆里   → wizard_remember({scope:"chat" | "workspace"})，见下
 还有谁在跑 / 谁在弄那个项目     → wizard_roster（名字、职责、忙闲、谁是谁的分身）
-分个身去把这三个目录都扫一遍     → spawn_clone ×3，干完 stop_wizard 收掉
+分个身去把这三个目录都扫一遍     → clone_wizard ×3，干完 stop_wizard 收掉
 上下文快满了                   → 它自己 wizard_handoff_self：写简报、原地重开、把简报贴回去
 ```
 
@@ -267,9 +267,9 @@ flowchart LR
 
 每个 wizard 出生时，群记忆与工作区记忆都注进它的系统提示——「这个群习惯先出方案再动手」「这个仓库没有测试、reload 要先 build」不必再教一遍新来的。两份都是 markdown，你也可以直接打开改。
 
-**分身（clone）默认继承上下文**：`spawn_clone({inherit:true})` 用 `--resume <父> --fork-session` 起 pane，CLI 把父亲的 transcript 复制一份再往下写——分身开局就带着父亲读过的材料，父亲毫发无损。于是「先把公共文档读进一个基座，再分出 N 个干活的」成立：材料只读一遍，却进了 N 份上下文。要白纸一张传 `inherit:false`（那时才能顺便换工作区）。分身自己也能再分身，层级不限；名下同时活着的分身有上限（`wrc.mirror.cloneMax`，默认 8）——一次跑飞的递归编排足以把 fd 吃光。
+**分身（clone）继承上下文**：`clone_wizard` 用 `--resume <父> --fork-session` 起 pane，CLI 把父亲的 transcript 复制一份再往下写——分身开局就带着父亲读过的材料，父亲毫发无损。于是「先把公共文档读进一个基座，再分出 N 个干活的」成立：材料只读一遍，却进了 N 份上下文。也可以 `clone_wizard({from})` 从别的 wizard 分——分身仍归你管，上下文来自它。要白纸一张用 `spawn_wizard`（那时才能顺便换工作区）。分身自己也能再分身，层级不限；名下同时活着的分身有上限（`wrc.mirror.cloneMax`，默认 8）——一次跑飞的递归编排足以把 fd 吃光。
 
-**模型是 wizard 的属性**，不是 spawn 那一瞬的开关：`/new [cli] [model]`、`new_claude_session({model})`、`spawn_clone({model})`、`run_agent_graph` 的节点都能挑，挑了就写进绑定记录。pane 死了自愈重生仍在那个模型上，名册每一行也看得见谁跑在什么模型上——要判断的给 opus、跑腿的给 haiku，这句话得看得见才执行得了。
+**模型是 wizard 的属性**，不是 spawn 那一瞬的开关：`/new [cli] [model]`、`new_claude_session({model})`、`spawn_wizard` / `clone_wizard({model})`、`run_agent_graph` 的节点都能挑，挑了就写进绑定记录。pane 死了自愈重生仍在那个模型上，名册每一行也看得见谁跑在什么模型上——要判断的给 opus、跑腿的给 haiku，这句话得看得见才执行得了。
 
 **群是公开频道，wizard 之间默认私聊**：`send_peer` 派的活、分身之间的来回，默认只落进双方的 rolepage，群里不出气泡。wizard 自己判断「这件事该当着人说」时传 `send_peer({public:true})`：群里出一条 `🦊 .a → 🐬 .b` 的气泡，对方这一轮的回复也发进这个群。分身出生、派活、回程结论都不再各刷一条；群里只留**人发起的那一轮的回复**、`notify`、工单的**开工 / 收工**两条，以及它们主动公开的讨论。
 
@@ -326,7 +326,7 @@ sequenceDiagram
     Note over W,K: 先把公共材料读进发起方自己的上下文
     W->>U: 📋 开工 open_job(标题, 计划)
     loop 每一路
-        W->>K: spawn_clone({inherit:true, task, job})
+        W->>K: clone_wizard({task, job})
         Note over W,K: fork 父上下文，材料不必重读；派活时要求一行 RESULT: 收口
     end
     Note over W,K: 五个分身并行干活，往来是私聊，过程落在各自的 rolepage

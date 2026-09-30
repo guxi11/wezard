@@ -40,6 +40,8 @@ export interface WorldFactWizard {
   /** fork 自父亲的哪个 sessionId; 有值 = 分身 (从那个 session 节点 clone, 开局带着
    *  父亲的上下文), 空 = 子 wizard (父亲 spawn 的白板)。 */
   clonedFrom?: string;
+  /** 被克隆的那个 wizard —— 只在它不是 parent 时才有 (parent 克隆了别人)。 */
+  forkOf?: string;
   bornAt?: number;
   /** transcript mtime, 0 = 从没写过。 */
   lastActivity: number;
@@ -315,7 +317,14 @@ export const buildWorld = (
 
   // 登记边 —— 家谱。观测不到 (分身可能一句话没说), 但它是最稳定的一种关系。
   const withLineage = facts.wizards.reduce(
-    (m, w) => (w.parent ? link(m, w.clonedFrom ? "clone" : "spawn", w.parent, w.target, w.bornAt ?? 0) : m),
+    // 克隆边从上下文的来源画起 (克隆别人时是 forkOf, 否则是 parent); 克隆了别人的那位
+    // parent 另记一条 spawn 边 —— 它是生出这个分身、归它管的那一位。
+    (m, w) => {
+      if (!w.parent) return m;
+      if (!w.clonedFrom) return link(m, "spawn", w.parent, w.target, w.bornAt ?? 0);
+      const m1 = link(m, "clone", w.forkOf ?? w.parent, w.target, w.bornAt ?? 0);
+      return w.forkOf ? link(m1, "spawn", w.parent, w.target, w.bornAt ?? 0) : m1;
+    },
     observed,
   );
 

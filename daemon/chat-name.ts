@@ -2,7 +2,7 @@
 //
 // 一个 WeCom 聊天的身份是 `chat:wrkSxxxxx…` 这种不可读、不可手打的 id。wizard 早已
 // 不靠聊天寻址 —— 每个 wizard 有全局唯一的名字 (`.fix`, 见 wizard.ts); 聊天名要解决
-// 的是**指到一个群**: notify 发到哪、new_claude_session / spawn_clone 把 home 设在哪,
+// 的是**指到一个群**: notify 发到哪、new_claude_session / spawn_wizard / clone_wizard 把 home 设在哪,
 // 以及一个群的默认 wizard 出生时取什么名字。
 //
 // 仍然认的老地址 (改名前的 wizard 正在用): `daily#fix` / `daily/fix` / `chat:wr…#fix`

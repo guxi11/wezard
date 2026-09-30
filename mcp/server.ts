@@ -194,7 +194,7 @@ server.registerTool(
   {
     title: "Switch workspace directory",
     description:
-      "一步换掉这个 wizard 的**工作区**: 杀掉当前 pane, 在给定目录下重开一个全新的会话 —— 等价于往那个目录 `/new`。群里收到新会话的 📂 项目信息气泡当回执; 对话上下文**不会**带过去 (和 /new 一样是全新会话, 但身份的系统提示还在)。调用方就是被替换的那一个时, 它在调用当口就被终结 —— 这是预期行为, 群里那条气泡就是回执。用绝对路径 (或 `~` 开头)。想换目录又想保住手上的上下文: 先 wizard_handoff_self 把工作压成简报, 或者 spawn_clone({inherit:false, cwd}) 让一个分身去那边干。\n"
+      "一步换掉这个 wizard 的**工作区**: 杀掉当前 pane, 在给定目录下重开一个全新的会话 —— 等价于往那个目录 `/new`。群里收到新会话的 📂 项目信息气泡当回执; 对话上下文**不会**带过去 (和 /new 一样是全新会话, 但身份的系统提示还在)。调用方就是被替换的那一个时, 它在调用当口就被终结 —— 这是预期行为, 群里那条气泡就是回执。用绝对路径 (或 `~` 开头)。想换目录又想保住手上的上下文: 先 wizard_handoff_self 把工作压成简报, 或者 spawn_wizard({cwd}) 生一个子 wizard 去那边干。\n"
       + "**`keep:true` 是另一支**: 人回答「不用换, 就用现在这个目录」时调它 —— 不重开会话, 只把「这个工作区是人认过的」记下来, 此后新会话的开局不再问这件事。一个新聊天的第一个 wizard 落在默认兜底目录里, 开局会被要求先问一句要去哪个项目; 人给路径就走 `cwd`, 人说不用换就走 `keep`。",
     inputSchema: {
       cwd: z.string().optional().describe("Absolute project path, e.g. /Users/foo/projects/bar. ~ is expanded. 与 `keep` 二选一。"),
@@ -364,7 +364,7 @@ const unwrap = (name: string, { j, status }: DaemonReply, pick: (j: Record<strin
 // 地址语法只有一套, 每个吃地址的工具都把它原样重述一遍: 模型单看一个 schema
 // 时没有别的地方能学到它, 而猜出来的地址会安静地指向另一个 wizard 的终端。
 const ADDRESS_DOC =
-  "wizard 的名字 —— 全机唯一, 它就是地址: `'fix'` 或 `'.fix'` 都行, 不分它住在哪个群。`''` = 你这个聊天的默认 wizard。永远别自己拼 key: wizard_roster / list_peers / spawn_clone 返回的 `name` (或 409 里的 `address`) 原样传回来。老的 `聊天名#tag` 写法仍然认, 但别再写。";
+  "wizard 的名字 —— 全机唯一, 它就是地址: `'fix'` 或 `'.fix'` 都行, 不分它住在哪个群。`''` = 你这个聊天的默认 wizard。永远别自己拼 key: wizard_roster / list_peers / spawn_wizard / clone_wizard 返回的 `name` (或 409 里的 `address`) 原样传回来。老的 `聊天名#tag` 写法仍然认, 但别再写。";
 
 // 造一个 wizard: 它的 home 默认是调用方自己的聊天 (所以走 `selfRef`); 给了 `chat`
 // 就落在另一个**起过名字**的聊天里。名字全局唯一, 与 home 无关。
@@ -373,7 +373,7 @@ server.registerTool(
   {
     title: "Spawn a blank new wizard",
     description:
-      "在指定项目目录下长出一个**全新的 wizard** —— 自己的 tmux pane、自己的全局名字 (`.name`), home 默认是你这个聊天, 等价于人在群里敲 `/new .name`。它**不继承任何上下文**(白纸一张): 要一个开局就带着你读过的材料的分身, 用 spawn_clone({inherit:true})。新 wizard 在群里说话时气泡头是 `emoji .name`, 之后用 wizard_roster / peek_peer / send_peer / wait_peer 驱动它。用户说「在 /path 下新建一个会话」「帮我在 xxx 目录起个 agent」时调它。给 `chat` 就把它的 home 设在**另一个**聊天里 —— 那个聊天必须起过名字(list_chats 能看到)。目录不存在会自动创建。绝不会顶掉一个聊天的默认 wizard。名字全局唯一: 撞上一个还在的 wizard 返回 409, 返回里的 `name` 是最终落定的名字。",
+      "在指定项目目录下长出一个**全新的 wizard** —— 自己的 tmux pane、自己的全局名字 (`.name`), home 默认是你这个聊天, 等价于人在群里敲 `/new .name`。它**不继承任何上下文**(白纸一张): 要一个开局就带着你读过的材料的分身, 用 clone_wizard; 要一个归你管、干完可回收的白板子 wizard, 用 spawn_wizard。这个工具生的 wizard 独立长住, 不挂在谁名下。新 wizard 在群里说话时气泡头是 `emoji .name`, 之后用 wizard_roster / peek_peer / send_peer / wait_peer 驱动它。用户说「在 /path 下新建一个会话」「帮我在 xxx 目录起个 agent」时调它。给 `chat` 就把它的 home 设在**另一个**聊天里 —— 那个聊天必须起过名字(list_chats 能看到)。目录不存在会自动创建。绝不会顶掉一个聊天的默认 wizard。名字全局唯一: 撞上一个还在的 wizard 返回 409, 返回里的 `name` 是最终落定的名字。",
     inputSchema: {
       cwd: z.string().describe("Absolute project path to start the new session in, e.g. /Users/foo/projects/bar. Created if missing."),
       name: z
@@ -418,7 +418,7 @@ server.registerTool(
   {
     title: "Name this WeCom chat",
     description:
-      "给**这个聊天**起个短名字: notify 的收件人、new_claude_session / spawn_clone 的 `chat` 从此能指到这里。没起过名字的聊天不会一直没名字 —— 第一次有人用到时守护进程按它的工作区自动补一个 (`~/develop/foo` → `foo`, 撞名加序号), 所以这个工具的用途是**起一个更好的名字**。这里的默认 wizard 出生时取聊天名; 它若还叫旧聊天名, 会跟着改 (wizard 的名字全局唯一, 撞名加后缀, 返回里的 `wizardRenamed` 就是它的新名字)。wizard 自己的名字用 wizard_identity 改, 与这里无关。用户说「给这个群起名叫 daily」「这个群叫什么」(不传 `name` 就是读) 「取消命名」(传 '-') 时调它。名字全机唯一、大小写不敏感。",
+      "给**这个聊天**起个短名字: notify 的收件人、new_claude_session / spawn_wizard / clone_wizard 的 `chat` 从此能指到这里。没起过名字的聊天不会一直没名字 —— 第一次有人用到时守护进程按它的工作区自动补一个 (`~/develop/foo` → `foo`, 撞名加序号), 所以这个工具的用途是**起一个更好的名字**。这里的默认 wizard 出生时取聊天名; 它若还叫旧聊天名, 会跟着改 (wizard 的名字全局唯一, 撞名加后缀, 返回里的 `wizardRenamed` 就是它的新名字)。wizard 自己的名字用 wizard_identity 改, 与这里无关。用户说「给这个群起名叫 daily」「这个群叫什么」(不传 `name` 就是读) 「取消命名」(传 '-') 时调它。名字全机唯一、大小写不敏感。",
     inputSchema: {
       name: z
         .string()
@@ -473,7 +473,7 @@ server.registerTool(
   {
     title: "Say something to another wizard",
     description:
-      "跟另一个 wizard 说话 —— 文本原样落进它的输入框, 它当成新的一轮接手。这是你**驱动**同伴的唯一方式: 派活、解它的阻塞、回答它的提问、叫它继续。「推动 .fix 干到底」的典型循环: peek_peer 看它在哪 → send_peer 说该说的 → wait_peer 等它停下 → 再 peek。名字全局唯一, 目标住在哪个群都一样叫。对方还不存在就自己造: 要它继承你的上下文用 spawn_clone, 要一个白纸一张的新 wizard 用 new_claude_session。\n" +
+      "跟另一个 wizard 说话 —— 文本原样落进它的输入框, 它当成新的一轮接手。这是你**驱动**同伴的唯一方式: 派活、解它的阻塞、回答它的提问、叫它继续。「推动 .fix 干到底」的典型循环: peek_peer 看它在哪 → send_peer 说该说的 → wait_peer 等它停下 → 再 peek。名字全局唯一, 目标住在哪个群都一样叫。对方还不存在就自己造: 要它继承你的上下文用 clone_wizard, 要一个白纸一张的子 wizard 用 spawn_wizard。\n" +
       "**默认是私聊**: 不出任何群气泡, 只记在你们双方的 rolepage 里; 它那一轮的回复也不进群, 用 wait_peer 取。**`public:true` 则在公开频道说** —— 你这一轮所在的群里出一条 `.你 → .它` 的气泡, 它那一轮的回复也发进这个群。公开与否由你判断: 需要人知道的、或本该当着人讨论的 (关键决策、给人的结论、要人拍板的分歧) 用 public; 过程性的派活、催进度、对齐细节用私聊。无论哪种都直说: 要什么、给什么、结论是什么, 不用寒暄、不用引用原文。拒绝对自己发送。",
     inputSchema: {
       name: z.string().describe(ADDRESS_DOC),
@@ -548,7 +548,7 @@ server.registerTool(
   {
     title: "Run a loop graph over several tagged agents",
     description:
-      "把这个聊天里的几个 wizard 串成一条**会循环的流水线**, 交给守护进程去驱动。`nodes` 是参与的 `#tag` wizard (每个可以自选 cli / 模型 / 工作区; 不存在的当场造出来, 已经在跑的原样复用、上下文不动)。`steps` 是有序管线 —— 每一步向一个 wizard 发一段提示、等它干完、抓住它的回复、喂给下一步。整张 step 表会被走 `rounds` 遍, 这才叫**循环**: `fix → review → fix → review …` 直到某个回复里出现 `until` 或轮次用完。提示模板可以引用前面的产出: `{{last}}` = 上一步的回复, `{{<tag>}}` = 那个 wizard 最新的回复, `{{round}}` = 第几轮。立刻返回 runId 并把进度播报进群; 用 graph_status 查、stop_graph 停。用户要「几个 agent 互相评审/迭代到收敛」时用它。只是推一个 wizard 一把, 用 send_peer + wait_peer。要它们开局就共享同一批材料, 先 spawn_clone 出这些节点再跑图。",
+      "把这个聊天里的几个 wizard 串成一条**会循环的流水线**, 交给守护进程去驱动。`nodes` 是参与的 `#tag` wizard (每个可以自选 cli / 模型 / 工作区; 不存在的当场造出来, 已经在跑的原样复用、上下文不动)。`steps` 是有序管线 —— 每一步向一个 wizard 发一段提示、等它干完、抓住它的回复、喂给下一步。整张 step 表会被走 `rounds` 遍, 这才叫**循环**: `fix → review → fix → review …` 直到某个回复里出现 `until` 或轮次用完。提示模板可以引用前面的产出: `{{last}}` = 上一步的回复, `{{<tag>}}` = 那个 wizard 最新的回复, `{{round}}` = 第几轮。立刻返回 runId 并把进度播报进群; 用 graph_status 查、stop_graph 停。用户要「几个 agent 互相评审/迭代到收敛」时用它。只是推一个 wizard 一把, 用 send_peer + wait_peer。要它们开局就共享同一批材料, 先 clone_wizard 出这些节点再跑图。",
     inputSchema: {
       nodes: z
         .array(
@@ -785,50 +785,77 @@ server.registerTool(
     })),
 );
 
+// 生孩子与分身是两个操作, 不是一个开关的两档: 一个白纸起步、可以去别的目录;
+// 一个 fork 调用方此刻的上下文、必须留在原地。拆成两个工具, 模型选的是动词,
+// 而不是在一个布尔上猜。两者落到同一条路由 (`inherit` 由工具定死)。
+const offspringShape = {
+  description: z.string().describe("它负责什么, 一句话。它会写进它的系统提示, 也会出现在名册里让别人看到。"),
+  name: z.string().optional().describe("它的名字 (如 'docs'、'fix', 带不带 '.' 都行)。全机唯一。省略则按 description 首词生成。"),
+  task: z.string().optional().describe("就位后立刻派下去的第一件活 (私聊)。省略则它就位待命。"),
+  chat: z.string().optional().describe("把它生在另一个聊天里 (list_chats 里的名字)。省略 = 你自己的聊天, 这是绝大多数情况。"),
+  cli: z.enum(["claude", "claude-internal", "codebuddy"]).optional().describe("用哪个 CLI。省略则继承。"),
+  model: z.string().optional().describe("跑在哪个模型上, 口语化随便写 ('opus' / 'sonnet' / '最新的 opus' / 'claude-sonnet-5' 都行) —— 不是直接塞给启动参数, 而是等 pane 起来后真的敲 `/model` 校验, 认不出就翻一遍这台 CLI 此刻的目录再重试, 所以返回里的 `model` 才是真正落地的那个, 可能跟你传的字符串不完全一样; 万一没匹配上会带 `modelWarning`, 那时它还在跑但停在了原来的模型上, 不是失败。省略用该 CLI 的默认。要判断力的给 opus, 跑腿的 (grep、跑测试、照着清单改) 给 haiku —— 一批不必齐步走。"),
+  job: z
+    .string()
+    .optional()
+    .describe("归到某个工单名下 (open_job 给的 id)。它们攒到 close_job 那一条里一起交代, 过程在各自的 rolepage; close_job 还会把它们整批回收掉。"),
+  keepalive: z
+    .boolean()
+    .optional()
+    .describe("要不要被 keepalive 心跳保温 (空闲时定期 ping 一下防 prompt cache 过期)。false = 永远不保温, 省下那份 ping 的钱 —— 适合跑腿一次就收工的; true = 明确要保温 —— 适合会长期挂着、随时可能被叫醒接手的。省略则按 daemon 配置的默认值。"),
+};
+
+type Offspring = { description: string; name?: string; task?: string; from?: string; cwd?: string; chat?: string; cli?: string; model?: string; job?: string; keepalive?: boolean };
+
+const bear = (tool: string, inherit: boolean) => async (a: Offspring) =>
+  unwrap(tool, await daemonPost("/wizard/clone", {
+    inherit,
+    description: a.description,
+    ...(a.name ? { name: a.name } : {}),
+    ...(a.task ? { task: a.task } : {}),
+    ...(a.from ? { from: a.from } : {}),
+    ...(a.job ? { job: a.job } : {}),
+    ...(a.cwd ? { cwd: a.cwd } : {}),
+    ...(a.chat ? { chat: a.chat } : {}),
+    ...(a.cli ? { cli: a.cli } : {}),
+    ...(a.model ? { model: a.model } : {}),
+    ...(a.keepalive !== undefined ? { keepalive: a.keepalive } : {}),
+  }));
+
+const OFFSPRING_TAIL =
+  "名字全局唯一: 撞上一个还在的 wizard 返回 409 (附它的死活), 返回里的 `name` 是落定的名字。之后用 send_peer 继续派活、wait_peer 等它做完、stop_wizard 收掉它。它自己也能再 spawn_wizard / clone_wizard, 层级不限。每一个都有成本 (一个 pane + 一份上下文), 名下同时活着的有上限; 任务少于两三件时你自己做完更快。";
+
 server.registerTool(
-  "spawn_clone",
+  "spawn_wizard",
   {
-    title: "Spawn a clone of yourself",
+    title: "Spawn a blank child wizard",
     description:
-      "生一个分身 —— 一个新的 wizard, home 在你的聊天 (或指名的另一个聊天), 有自己的 tmux pane、自己的全局名字 (`.name`)、自己的职责, 归你管。\n" +
-      "`inherit` 必填, 它决定这是哪一种分身:\n" +
-      "• inherit=true —— **fork 你此刻的上下文**: 它开局就拥有你已经读过的一切 (规范、目录结构、刚啃完的那份文档), 不必重读。代价是它必须留在你当前的工作区 (换 cwd 会自动退化成 false)。这是编排一组「共享同一批材料」的任务的正确姿势: 你先把公共材料读进自己的上下文, 再 fork 出 N 个分身, 材料只读一遍却进了 N 份上下文。\n" +
-      "• inherit=false —— 空白分身: 只继承身份, 不继承上下文。适合干一件与你手头无关的事, 或者要在别的目录/别的聊天里干活。\n" +
-      "带上 `task` 可以在它就位的同时把第一件活派下去 (私聊), 省掉一次 send_peer。名字全局唯一: 撞上一个还在的 wizard 返回 409 (附它的死活), 返回里的 `name` 是落定的名字。之后用 send_peer 继续派活、wait_peer 等它做完、stop_wizard 收掉它。分身自己也能再 spawn_clone, 层级不限。分身是有成本的 (一个 pane + 一份上下文), 任务少于两三件时你自己做完更快。",
+      "**从白板生**一个子 wizard —— 新的 tmux pane、自己的全局名字 (`.name`)、自己的职责, 归你管 (家谱里挂在你名下, 工单收工时可整批回收)。它**不继承你的任何上下文**, 只拿到身份。适合干一件与你手头无关的事, 或者要去别的目录 (`cwd`) / 别的聊天里干活。要一个开局就带着你读过的材料的, 用 clone_wizard。\n" +
+      "带上 `task` 可以在它就位的同时把第一件活私聊派下去, 省掉一次 send_peer; 要它的回复进群, 就别带 task, 就位后用 `send_peer({public:true})` 转给它。" +
+      OFFSPRING_TAIL,
     inputSchema: {
-      inherit: z
-        .boolean()
-        .describe("true = fork 你此刻的上下文 (它开局就有你读过的材料, 必须留在同一工作区); false = 空白分身, 只继承身份。必填, 没有默认值。"),
-      description: z.string().describe("这个分身负责什么, 一句话。它会写进分身的系统提示, 也会出现在名册里让别人看到。"),
-      name: z.string().optional().describe("分身的名字 (如 'docs'、'fix', 带不带 '.' 都行)。全机唯一。省略则按 description 首词生成。"),
-      task: z.string().optional().describe("就位后立刻派下去的第一件活。省略则它就位待命。"),
-      cwd: z.string().optional().describe("分身的工作区绝对路径。只在 inherit=false 时有意义 —— 换目录与继承上下文互斥。"),
-      chat: z.string().optional().describe("把分身生在另一个聊天里 (list_chats 里的名字)。省略 = 你自己的聊天, 这是绝大多数情况。"),
-      cli: z.enum(["claude", "claude-internal", "codebuddy"]).optional().describe("分身用哪个 CLI。省略则继承。"),
-      model: z.string().optional().describe("分身跑在哪个模型上, 口语化随便写 ('opus' / 'sonnet' / '最新的 opus' / 'claude-sonnet-5' 都行) —— 不是直接塞给启动参数, 而是等 pane 起来后真的敲 `/model` 校验, 认不出就翻一遍这台 CLI 此刻的目录再重试, 所以返回里的 `model` 才是真正落地的那个, 可能跟你传的字符串不完全一样; 万一没匹配上会带 `modelWarning`, 那时分身还在跑但停在了原来的模型上, 不是失败。省略用该 CLI 的默认。分身可以和你跑在不同模型上: 要判断力的那一路给 opus, 跑腿的 (grep、跑测试、照着清单改) 给 haiku —— 一批分身不必齐步走。"),
-      job: z
-        .string()
-        .optional()
-        .describe("把这个分身归到某个工单名下 (open_job 给的 id)。它们攒到 close_job 那一条里一起交代, 过程在各自的 rolepage; close_job 还会把它们整批回收掉。"),
-      keepalive: z
-        .boolean()
-        .optional()
-        .describe("这个分身要不要被 keepalive 心跳保温 (空闲时定期 ping 一下防 prompt cache 过期)。false = 永远不保温, 省下那份 ping 的钱 —— 适合跑腿一次就收工的临时分身; true = 明确要保温 —— 适合会长期挂着、随时可能被叫醒接手的分身。省略则按 daemon 配置的默认值。"),
+      ...offspringShape,
+      cwd: z.string().optional().describe("它的工作区绝对路径。省略 = 跟你同一个目录。"),
     },
   },
-  async ({ inherit, description, name, task, cwd, chat, cli, model, job, keepalive }) =>
-    unwrap("spawn_clone", await daemonPost("/wizard/clone", {
-      inherit,
-      description,
-      ...(name ? { name } : {}),
-      ...(task ? { task } : {}),
-      ...(job ? { job } : {}),
-      ...(cwd ? { cwd } : {}),
-      ...(chat ? { chat } : {}),
-      ...(cli ? { cli } : {}),
-      ...(model ? { model } : {}),
-      ...(keepalive !== undefined ? { keepalive } : {}),
-    })),
+  bear("spawn_wizard", false),
+);
+
+server.registerTool(
+  "clone_wizard",
+  {
+    title: "Clone a wizard, context and all",
+    description:
+      "**克隆**一个 wizard 出分身 —— fork 它此刻的上下文: 分身开局就拥有它已经读过的一切 (规范、目录结构、刚啃完的那份文档), 不必重读; 被克隆的那个毫发无损。默认克隆你自己; `from` 点名就克隆别的 wizard (比如一个已经把某个模块啃透的同伴) —— 分身仍归你管 (占你的名额、随你的工单回收), 只是上下文来自它。分身留在被克隆者的工作区。\n" +
+      "这是编排一组「共享同一批材料」的任务的正确姿势: 先让一个 wizard (你自己或某个同伴) 把公共材料读进上下文, 再从它克隆出 N 个分身, 材料只读一遍却进了 N 份上下文。要白纸一张、或要去别的目录, 用 spawn_wizard。被克隆者正在干活时, 分身拿到的是它此刻为止的上下文 —— 想要它读完再分, 先 wait_peer 等它停下。\n" +
+      "带上 `task` 可以在它就位的同时把第一件活私聊派下去 (分叉本来就由第一句话触发, 省一次往返)。" +
+      OFFSPRING_TAIL,
+    inputSchema: {
+      ...offspringShape,
+      from: z.string().optional().describe("克隆谁 —— wizard 的名字 ('fix' / '.fix')。省略 = 克隆你自己。它必须已经有会话 (说过话), 否则返回 409。"),
+    },
+  },
+  bear("clone_wizard", true),
 );
 
 // ── Job: 一次 fan-out 的工单 ────────────────────────────────────────────────
@@ -840,7 +867,7 @@ server.registerTool(
   {
     title: "Open a job for a fan-out",
     description:
-      "开一个**工单**: 你接下来要同时派出两个以上的分身干同一件事时, 先开它。返回一个 id, 把这个 id 传给 spawn_clone / send_peer 的 `job` 参数, 它们就归到这个工单名下。\n" +
+      "开一个**工单**: 你接下来要同时派出两个以上的分身干同一件事时, 先开它。返回一个 id, 把这个 id 传给 spawn_wizard / clone_wizard / send_peer 的 `job` 参数, 它们就归到这个工单名下。\n" +
       "开了工单之后有三件事不一样: ① 群里出「开工」与 close_job 的「收工」两条气泡, 人据此读得出这批活的结构 (过程在各自的 rolepage 里, 收工那条会把成员和各自那段活列出来)。② close_job 会把为这个工单生出来的分身**整批回收**, 不必一个个 stop_wizard —— 忘记回收是常态, 每个分身都占着一个 pane 和一份上下文。③ list_jobs 能看到还开着哪些活。\n" +
       "派活时顺手让每个分身**把结论收口成一行** `RESULT: …` (交付物写进文件就回传路径): wait_peer 会把这一行单独摘出来放进 `result`, 你汇总时不必再从八百字里找结论。\n" +
       "只派一个分身、或者只是推某个同伴一把, 不用开工单。",
@@ -901,7 +928,7 @@ server.registerTool(
   {
     title: "Write something into your long-term memory",
     description:
-      "写一条长期记忆。它不在对话里 —— 每次 wizard (重)开会话时重新压进系统提示, 所以能跨 /clear、跨交接、跨重启活下来。三种作用域: `self` (默认) 只属于你; `chat` 是**本群共享**的记忆 (这个群里人的习惯、约定), 在这个群出生的每个 wizard 都会读到; `workspace` 是**本工作区共享**的记忆 (这个仓库的硬约束、踩过的坑、'发版前必须更新 CHANGELOG' 这种规矩), 在这个目录下干活的每个 wizard 都会读到。后两者存成 markdown (`~/.wezard/memory/…`), 人也会直接改。一条一句话, 越具体越有用; 选对作用域 —— 属于群/仓库的别只记在自己身上。传 forget (子串匹配) 删掉过时的那条。别拿它存这次任务的临时状态 —— 那种东西属于交接简报。",
+      "写一条长期记忆。它不在对话里 —— 每次 wizard (重)开会话时重新压进系统提示, 所以能跨 /clear、跨交接、跨重启活下来。三种作用域: `self` (默认) 只属于你; `chat` 是**本群共享**的记忆 (这个群里人的习惯、约定), 在这个群出生的每个 wizard 都会读到; `workspace` 是**本工作区共享**的记忆 (这个仓库的硬约束、踩过的坑、'发版前必须更新 CHANGELOG' 这种规矩), 在这个目录下干活的每个 wizard 都会读到。后两者存成 markdown (`~/.wezard/memory/…`), 人也会直接改; 你写的只是一条**提议**, 由定时的记忆整理者去重、改写、合并 (半小时内), 所以不必先读全文查重, 也别为改一个字反复提交。一条一句话, 越具体越有用; 选对作用域 —— 属于群/仓库的别只记在自己身上。传 forget (子串匹配) 删掉 / 提议删掉过时的那条。别拿它存这次任务的临时状态 —— 那种东西属于交接简报。",
     inputSchema: {
       note: z.string().optional().describe("要记住的一句话。"),
       forget: z.string().optional().describe("要忘掉的记忆里的一个子串, 命中的整条删除。"),
