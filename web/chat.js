@@ -247,11 +247,13 @@
   var convItem = function (c) {
     var on = c.key === CONV;
     var title = c.kind === 'wizard' ? nm(c.peer, c.name) : '<span class="nm chat">' + esc(c.name) + '</span>';
-    var subs = on && c.subs.length
-      ? '<div class="subs">' + c.subs.map(function (s) {
+    // 只列与我有往来的: 在群里但没和我说过话的人, 点进去也是空的。
+    var talked = on ? c.subs.filter(function (s) { return s.count; }) : [];
+    var subs = talked.length
+      ? '<div class="subs">' + talked.map(function (s) {
           var sel = s.role === WITH;
-          return '<button class="si' + (sel ? ' on' : '') + (s.count ? '' : ' quiet') + '" data-conv="' + esc(c.key) + '" data-with="' + esc(s.role) + '" ' +
-            'title="' + esc(s.count ? '我与 ' + nameOf(s.role) + ' 在这里的 ' + s.count + ' 条往来' : '在这里, 但还没和我说过话') + '">' +
+          return '<button class="si' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '" data-with="' + esc(s.role) + '" ' +
+            'title="' + esc('我与 ' + nameOf(s.role) + ' 在这里的 ' + s.count + ' 条往来') + '">' +
             '<span class="av">' + esc(s.label) + '</span>' +
             line(nm(s.role, s.name), sel ? swapOf(s.role) : '', s.lastTs, s.preview) + '</button>';
         }).join('') + '</div>'
@@ -265,13 +267,11 @@
   var renderConvs = function () {
     var groups = R.convs.filter(function (c) { return c.kind === 'group'; });
     var dms = R.convs.filter(function (c) { return c.kind !== 'group'; });
-    var sec = function (title, list, none) {
-      return '<h2>' + title + '<span>' + list.length + '</span></h2>' +
-        (list.length ? list.map(convItem).join('') : '<div class="none">' + none + '</div>');
+    // 空着的那一栏不画 —— 对谁都一样: 人没有私聊只是这条规则的一个特例。
+    var sec = function (title, list) {
+      return list.length ? '<h2>' + title + '<span>' + list.length + '</span></h2>' + list.map(convItem).join('') : '';
     };
-    // 人没有私聊 —— wizard↔wizard 才有, 空着的那一栏也不画。
-    convsEl.innerHTML = sec('群聊', groups, '还没在任何群里说过话') +
-      (R.role && R.role.kind === 'human' ? '' : sec('私聊', dms, '没有和别的 wizard 私聊过'));
+    convsEl.innerHTML = sec('群聊', groups) + sec('私聊', dms);
     convsEl.querySelectorAll('[data-conv]').forEach(function (b) {
       b.onclick = function () { selectConv(b.getAttribute('data-conv'), b.getAttribute('data-with') || ''); };
     });
