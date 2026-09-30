@@ -41,7 +41,6 @@
   var VIEW = 'msgs';
   var $ = function (s) { return document.querySelector(s); };
   var app = $('#app'), thread = $('#thread'), inner = $('#thread-in'), convsEl = $('#convs');
-  var connEl = $('#conn');
   var wmapEl = $('#wmap'), wscrollEl = $('#wscroll'), wtoolsEl = $('#wtools'), planEl = $('#plan-in');
 
   var srvNow = function () { return R.at ? R.at + (Date.now() - R.recvAt) : Date.now(); };
@@ -339,17 +338,19 @@
   var renderRole = function () {
     var r = R.role;
     if (!r) return;
-    connEl.hidden = r.kind === 'human';
+    // 名字下面那一行就是出身 —— 有父亲的直接写成「谁的什么」(可点过去), 不再另起一条重复。
     // 分身 = 从父亲某个 session 节点 fork 出来的 (带着那一刻的上下文);
     // 子 wizard = 父亲 spawn 的白板, 只有出身、没有继承。
-    var kind = r.kind === 'human' ? '人' : !r.parent ? 'wizard' : r.forkedFrom ? '分身' : '子 wizard';
-    // 忙闲由右上角的状态点表达, 名片不再重复。
+    var kind = !r.parent
+      ? esc(r.kind === 'human' ? '人' : 'wizard')
+      : r.forkedFrom
+        ? '<span class="go" data-r="' + esc(r.parent.id) + '" title="从它的 session ' + esc(r.forkedFrom) + ' fork, 开局带着那一刻的上下文">⧉ .' + esc(r.parent.name) + ' 的分身 · @' + esc(r.forkedFrom.slice(0, 8)) + '</span>'
+        : '<span class="go" data-r="' + esc(r.parent.id) + '" title="它 spawn 的白板, 没有继承上下文">↳ .' + esc(r.parent.name) + ' 的子 wizard</span>';
     var facts = [];
     if (r.cwd) facts.push('<span title="' + esc(r.cwd) + '">📁 ' + esc(shortCwd(r.cwd)) + '</span>');
-    if (r.bornAt) facts.push('<span title="创建时间">🐣 ' + esc(fmtDay(r.bornAt)) + '</span>');
-    if (r.parent) facts.push(r.forkedFrom
-      ? '<span class="go" data-r="' + esc(r.parent.id) + '" title="从它的 session ' + esc(r.forkedFrom) + ' fork, 开局带着那一刻的上下文">⧉ .' + esc(r.parent.name) + ' 的分身 · @' + esc(r.forkedFrom.slice(0, 8)) + '</span>'
-      : '<span class="go" data-r="' + esc(r.parent.id) + '" title="它 spawn 的白板, 没有继承上下文">↳ .' + esc(r.parent.name) + ' 的子 wizard</span>');
+    // 生在哪个群、什么时候 —— 一件事, 一行。
+    var born = [r.chat, r.bornAt ? fmtAgo(r.bornAt) : ''].filter(Boolean);
+    if (born.length) facts.push('<span title="' + esc('创建于' + (r.chat ? ' ' + r.chat : '') + (r.bornAt ? ' · ' + fmtDay(r.bornAt) : '')) + '">🐣 ' + esc(born.join(' · ')) + '</span>');
     var kin = function (xs, what) {
       return xs.length ? '<span title="' + esc(xs.map(function (x) { return '.' + x.name; }).join(' ')) + '">' + xs.length + ' 个' + what + '</span>' : '';
     };
@@ -357,7 +358,7 @@
     $('#rb-who').innerHTML =
       '<div class="id"><span class="av">' + esc(r.label) + '</span>' +
         '<span class="l">' + nm(r.id, r.name) +
-          '<span class="k">' + esc(kind + (r.chat ? ' · 住在 ' + r.chat : '')) + '</span></span></div>' +
+          '<span class="k">' + kind + '</span></span></div>' +
       (r.description ? '<p class="job">' + esc(r.description) + '</p>' : '') +
       '<div class="facts">' + facts.join('') + '</div>';
     $('#rb-who').querySelectorAll('.go').forEach(function (g) {
@@ -367,10 +368,11 @@
     bindSessPicker();
     syncFoot();
     var acts = [];
-    if (R.relations) acts.push('<button class="vb' + (VIEW === 'world' ? ' on' : '') + '" data-view="world">关系图</button>');
-    if (r.kind === 'wizard') acts.push('<button class="vb' + (VIEW === 'plan' ? ' on' : '') + '" data-view="plan">日程' + (R.schedules ? '<b>' + R.schedules + '</b>' : '') + '</button>');
+    // 入口只在有东西可看时出现, 且只是一枚徽标 —— 名片的主角是身份, 不是按钮。
+    if (R.relations) acts.push('<button class="bd' + (VIEW === 'world' ? ' on' : '') + '" data-view="world">关系图</button>');
+    if (R.schedules) acts.push('<button class="bd' + (VIEW === 'plan' ? ' on' : '') + '" data-view="plan">日程<b>' + R.schedules + '</b></button>');
     $('#rb-acts').innerHTML = acts.join('');
-    $('#rb-acts').querySelectorAll('.vb').forEach(function (b) {
+    $('#rb-acts').querySelectorAll('.bd').forEach(function (b) {
       b.onclick = function () { setView(VIEW === b.getAttribute('data-view') ? 'msgs' : b.getAttribute('data-view')); };
     });
     // 标题就是这一页的主张: 你此刻站在谁的位置上。换视角 → 标题跟着换。
@@ -643,9 +645,8 @@
     S.es = es;
     es.addEventListener('role', function (e) { try { applyRole(JSON.parse(e.data)); } catch (err) { } });
     es.addEventListener('msg', function (e) { try { upsertMsg(JSON.parse(e.data)); } catch (err) { } });
-    es.onopen = function () { backoff = 1000; connEl.className = 'conn'; connEl.title = '实时连接'; };
+    es.onopen = function () { backoff = 1000; };
     es.onerror = function () {
-      connEl.className = 'conn off'; connEl.title = '连接断开, 重连中';
       es.close(); if (S.es === es) S.es = null;
       setTimeout(function () { if (!S.es) connect(); }, backoff);
       backoff = Math.min(backoff * 2, 15000);

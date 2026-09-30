@@ -131,7 +131,9 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     const convs = convsOf(msgs.filter((m) => inSpan(span)(m.ts)), role, dir);
     const stats = roleStats(records, role, now, span);
     const info = roleInfo(role, dir, f, stats);
+    // 日程页画的两样东西 (与 chat.js 的 renderPlan 同一口径) —— 都没有就不给入口。
     const schedules = f.schedules.filter((x) => (x.owner || x.createdBy || x.target) === role);
+    const jobs = f.jobs.filter((j) => j.owner === role || j.members.some((m) => m.target === role));
     return {
       at: now,
       role: info,
@@ -141,7 +143,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       // 链接来自哪个群就默认开哪个群; 否则最近活动的那个。
       conv: convs.find((c) => c.key === `c:${ticketBase}`)?.key ?? convs[0]?.key ?? "",
       relations: hasRelations(msgs, role, info),
-      schedules: schedules.length,
+      schedules: schedules.length + jobs.length,
       stats,
     };
   };

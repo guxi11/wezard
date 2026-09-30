@@ -38,7 +38,6 @@ export const renderChatPage = (): string =>
 <div class="app" id="app">
   <aside class="side">
     <header class="rolebar" id="rolebar">
-      <span class="conn" id="conn" title="实时连接"><span class="d"></span></span>
       <div class="who" id="rb-who"></div>
       <div class="acts" id="rb-acts"></div>
     </header>

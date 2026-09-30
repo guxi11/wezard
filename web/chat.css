@@ -44,8 +44,7 @@ button { font: inherit; color: inherit }
   position: relative; flex: none; padding: 16px 16px 14px; border-bottom: 1px solid var(--line);
   display: flex; flex-direction: column; gap: 8px; background: var(--card);
 }
-.rolebar .conn { position: absolute; top: 12px; right: 14px }
-.rolebar .id { display: flex; gap: 10px; align-items: center; min-width: 0; padding-right: 14px }
+.rolebar .id { display: flex; gap: 10px; align-items: center; min-width: 0 }
 .rolebar .id .av { font-size: 26px; line-height: 1; flex: none }
 .rolebar .id .l { min-width: 0; display: flex; flex-direction: column; gap: 2px }
 .rolebar .id .nm { font-size: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
@@ -53,10 +52,17 @@ button { font: inherit; color: inherit }
 .rolebar .job { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--ink); opacity: .8 }
 .rolebar .facts { display: flex; gap: 6px 12px; flex-wrap: wrap; font-size: 11.5px; color: var(--mute) }
 .rolebar .facts span { white-space: nowrap }
-.rolebar .facts .go { cursor: pointer; color: var(--accent) }
-.rolebar .facts .go:hover { text-decoration: underline }
+.rolebar .go { cursor: pointer; color: var(--accent) }
+.rolebar .go:hover { text-decoration: underline }
 .rolebar .acts { display: flex; gap: 6px; flex-wrap: wrap; align-items: center }
 .rolebar .acts:empty { display: none }
+.bd {
+  font-size: 11px; line-height: 18px; padding: 0 8px; border: 0; border-radius: 9px; cursor: pointer;
+  background: #f1f3f6; color: var(--mute); white-space: nowrap;
+}
+.bd:hover { color: var(--accent) }
+.bd.on { background: var(--mine-soft); color: var(--accent) }
+.bd b { font-weight: 600; margin-left: 4px; font-variant-numeric: tabular-nums }
 /* session 切换: 按钮 + 浮层列表, 取代原生 <select>。 */
 .sp { position: relative; flex: 1 1 100%; min-width: 0 }
 .sp-btn {
@@ -123,9 +129,6 @@ button { font: inherit; color: inherit }
 .prof .lg { display: flex; align-items: center; gap: 4px; font-size: 10.5px; color: #8c959f }
 .prof .lg i { width: 8px; height: 8px; border-radius: 2px; flex: none }
 .prof .lg b { color: #1f2328; font-weight: 700; font-variant-numeric: tabular-nums }
-.conn { display: flex; align-items: center; gap: 5px }
-.conn .d { width: 7px; height: 7px; border-radius: 50%; background: #1a7f37 }
-.conn.off .d { background: #cf222e }
 
 /* 群聊头像 = 参与者头像拼图: 1 格居中, 2 格左右, 3/4 格田字。 */
 .mosaic {
