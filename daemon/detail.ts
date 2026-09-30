@@ -180,6 +180,14 @@ export const getDetail = (id: string): DetailRecord | undefined => store?.get(id
 // 落点。从没跑过一轮的会话没有自己的票据, 返回 undefined。
 export const latestTurnIdFor = (target: string): string | undefined => latestTurnId((r) => r.target === target);
 
+/** 这个会话最近一次有人开口的那一轮落下的频道印章。keepalive 轮不盖频道 (channel
+ *  缺省); 没有问话也没有出处的续写轮只是沿用来的, 可能正是一次 reload 记错的, 都不算数。 */
+export const lastChannelOf = (target: string): Pick<TurnDetailRecord, "channel" | "speaker" | "from"> | undefined => {
+  const id = latestTurnId((r) => r.target === target && r.channel !== undefined && !!(r.userQuery || r.from));
+  const r = id ? store?.get(id) : undefined;
+  return r?.kind === "turn" ? { channel: r.channel, speaker: r.speaker, from: r.from } : undefined;
+};
+
 // 一个聊天的长期票据 —— 没有就现造一条。任一有效票据都能看任一 role (见 chat-http
 // 的 capability 说明), 所以一张聊天级的票据不多给任何权限; 从谁的视角看交给 `role=`。
 // 为什么不能只靠 turn 记录: detail store 只留 24h / 1000 条, 而跨聊天派活的收信方

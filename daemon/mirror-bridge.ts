@@ -41,7 +41,7 @@ import { selectModel, type ModelScope, type ModelSelectResult } from "./model-se
 import { hasRegistry, markTranscript, probeOf, sessionOnPane, sessionPanes, submittedSince, type LiveSession, type TranscriptMark } from "./cc-session.js";
 import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
-import { recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, buildDetailUrl, buildChatUrl } from "./detail.js";
+import { recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, lastChannelOf, buildDetailUrl, buildChatUrl } from "./detail.js";
 import type { CtxCut, TurnFrom, TurnOrigin, TurnUsage } from "./detail.js";
 import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagHeader, withLinkedTagHeader, linkedTagHead, linkTags, parseTagHeader, MAX_BODY_LINKS } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
@@ -2172,6 +2172,11 @@ interface AttachState {
   /** 本轮是同伴公开派来的 (send_peer public:true) —— 那个同伴的 target。回复进群时头
    *  写成 `.me → .它`, 否则群里看不出这段话是答给谁的。与 channel 同生同灭。 */
   replyTo?: string;
+  /** 这场对话的出处 —— 与 channel 同生同灭。续写轮 (没有新的印章) 沿用它: 私聊里的
+   *  续写没有 from, rolepage 就认不出对面是谁, 整段往来掉出那段私聊。 */
+  convFrom?: TurnFrom;
+  /** 本进程里 channel 是否已经定过 —— 没定过的续写轮从 turn store 接回上一轮的频道。 */
+  channelSeeded?: boolean;
   /** Set when `/clear` was injected: the next user prompt will land in a fresh
    *  jsonl with a new sessionId. A watcher polls the project dir to migrate
    *  this attachment onto the new file. Cleared once migration completes or
@@ -3023,14 +3028,30 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const consumeChannel = (a: AttachState, reset: boolean, from: TurnFrom | undefined): void => {
     const p = a.pendingChannel;
     a.pendingChannel = undefined;
+    const seeded = a.channelSeeded;
+    a.channelSeeded = true;
     if (p && Date.now() - p.at <= ORIGIN_TTL_MS) {
       a.channel = p.channel === baseOfKey(a.target) ? undefined : p.channel;
       a.speaker = p.speaker;
       a.replyTo = publicPeer(from);
+      a.convFrom = from;
     } else if (reset) {
       a.channel = undefined;
       a.speaker = undefined;
       a.replyTo = undefined;
+      a.convFrom = undefined;
+    } else if (from) {
+      a.convFrom = from;
+    } else if (!seeded) {
+      // reload 后的第一轮续写: 内存里的频道随进程没了, 缺省 = home 会把一段私聊的
+      // 后续记成群里公开说的 (rolepage 上私聊窗口从此不再更新)。接回最近一轮的印章。
+      const last = lastChannelOf(a.target);
+      if (last) {
+        a.channel = last.channel === baseOfKey(a.target) ? undefined : last.channel;
+        a.speaker = last.speaker;
+        a.replyTo = publicPeer(last.from);
+        a.convFrom = last.from;
+      }
     }
   };
   /** 本轮落 turn 记录的频道字段。 */
@@ -3099,8 +3120,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const fromCli = a.pendingFromCli === true;
     a.pendingFromCli = false;
     a.turnFromChat = fromCli ? false : a.turnFromChat ?? true;
-    const from = consumeFrom(a);
-    consumeChannel(a, fromCli, from);
+    const fresh = consumeFrom(a);
+    consumeChannel(a, fromCli, fresh);
+    const from = fresh ?? a.convFrom;
     recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: query || undefined, origin: consumeOrigin(a), from, ...channelFields(a) });
     a.briefTurnId = turnId;
     a.briefBubble = undefined;
