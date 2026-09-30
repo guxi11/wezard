@@ -216,7 +216,8 @@ export interface DetailStore {
   startTurn(
     rec: Omit<TurnDetailRecord, "kind" | "createdAt" | "updatedAt" | "closed" | "items"> & { createdAt?: number },
   ): void;
-  appendTurnItem(id: string, item: TurnItem): void;
+  /** 返回实际写入的 turn id —— tool_result 会改投到持有其 tool_use 的那一轮。 */
+  appendTurnItem(id: string, item: TurnItem): string | undefined;
   addTurnUsage(id: string, delta: { model?: string; messageId?: string; usage: TurnUsage }): void;
   closeTurn(id: string): void;
   // 收尾所有仍开着的 turn (可选按 target / sessionId 限定, 可选排除若干 id)。返回被
@@ -255,6 +256,17 @@ export const createDetailStore = (opts: { stateDir: string; log?: Logger }): Det
       const sorted = [...store.entries()].filter(([, v]) => evictable(v)).sort((a, b) => a[1].createdAt - b[1].createdAt);
       for (let i = 0; i < Math.min(sorted.length, store.size - MAX); i++) store.delete(sorted[i]![0]);
     }
+  };
+
+  // tool_result 归属的 turn = 持有那次 tool_use 的 turn, 不是「此刻开着的」turn。
+  // 工具跑到一半被新消息打断时, 结果落地那一刻当前 turn 已经换人 —— 照当前 turn 写,
+  // 旧轮的调用永远「运行中」, 新轮顶上多出一个无主的 result。找不到持有者才退回 fallback。
+  const holdsUse = (r: DetailRecord | undefined, toolUseId: string): r is TurnDetailRecord =>
+    r?.kind === "turn" && r.items.some((it) => it.t === "tool_use" && it.toolUseId === toolUseId);
+  const ownerOf = (toolUseId: string, fallback: string): DetailRecord | undefined => {
+    const cur = store.get(fallback);
+    if (!toolUseId || holdsUse(cur, toolUseId)) return cur;
+    return [...store.values()].find((r) => holdsUse(r, toolUseId)) ?? cur;
   };
 
   // 该 target 上最后一条带 sessionId 的记录 (turn 或断点标记)。轮换判定的基准 ——
@@ -363,9 +375,10 @@ export const createDetailStore = (opts: { stateDir: string; log?: Logger }): Det
       });
     },
     appendTurnItem: (id, item) => {
-      const r = store.get(id);
-      if (!r || r.kind !== "turn") return;
+      const r = item.t === "tool_result" ? ownerOf(item.toolUseId, id) : store.get(id);
+      if (!r || r.kind !== "turn") return undefined;
       put({ ...r, items: [...r.items, item], updatedAt: Date.now() });
+      return r.id;
     },
     addTurnUsage: (id, delta) => {
       const r = store.get(id);

@@ -14,6 +14,7 @@
 - **BREAKING 闲置 pane 回收从「静默超过 48h」改成「超过 pane 上限」**: 配置项 `wrc.mirror.idleReapHours` 移除, 换成 `wrc.mirror.maxPanes` (默认 20, 0 = 关闭)。每新建一个 wizard (`/new`、`.name` 隐式新建、`spawn_wizard` / `clone_wizard`) 数一次, 活着的会话 pane 超过上限就从 transcript 最久没动的收起, 直到回到上限 —— 不再有定时扫描; 照旧只收 pane 不收绑定, 下一条消息 `--resume` 复活。豁免不变 (名下有定时任务 / 挂着审批 / 正忙 / 人正盯着的), 所以实际数量可能暂时高于上限。旧配置里残留的 `idleReapHours` 被忽略。
 
 ### Fixed
+- **工具调用到一半被新消息打断时, 结果不再落进新一轮的气泡**: `tool_result` 改投到持有那次 `tool_use` 的 turn (`detail-store.appendTurnItem` 按 `toolUseId` 找主, 找不到才写当前轮) —— 旧轮的调用拿到结果, 新轮顶上不再多出一个无主的 `tool_result` 块。轮已结束而结果始终没回来的调用, ⎿ 预览显示「已中断 · 无结果」, 不再永远挂着「运行中…」。
 - 群里写 `.foo` 隐式新建 (或 `.foo /new`) 时, 若内部 slot `#foo` 被一个改过名的冷 wizard 占着, 新 wizard 的名字不再跟着 slot 退避成 `foo-N` —— slot 照旧挪位, 名字按人写的落定。
 
 ## [2.0.1] - 2026-09-30

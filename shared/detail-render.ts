@@ -512,8 +512,13 @@ const toolResultPreview = (
   diffBlocks: readonly DiffBlock[],
   rawResult: string,
   hasResult: boolean,
+  done: boolean,
 ): string => {
-  if (!hasResult) return `<span class="corner">⎿</span><span class="run">运行中…</span>`;
+  // 轮已结束而结果没回来 = 被打断 (Esc / 新消息顶掉), 不会再有结果, 别一直挂着「运行中」。
+  if (!hasResult)
+    return done
+      ? `<span class="corner">⎿</span><span class="more">已中断 · 无结果</span>`
+      : `<span class="corner">⎿</span><span class="run">运行中…</span>`;
   if (diffBlocks.length > 0) {
     const { adds, dels } = diffStat(diffBlocks);
     return `<span class="corner">⎿</span>更新 <span class="add">+${adds}</span> <span class="del">-${dels}</span>`;
@@ -556,13 +561,14 @@ const renderToolBubble = (
   use: ToolUse,
   result: ToolResult | undefined,
   key: string,
+  done: boolean,
   lazyTurn?: string,
 ): string => {
   const rawResult = result?.body ?? "";
   // 头部一行: ⏺ 工具名(参数) — 参数取命令/路径等主字段, 与 Claude CLI 同款。
   const arg = oneLineCompact(use.toolInput, 72);
   const dur = result ? `<span class="tool-dur">${escHtml(fmtDuration(result.ts - use.ts))}</span>` : "";
-  const preview = toolResultPreview(use, extractDiffBlocks(use.toolName, use.toolInput), rawResult, Boolean(result));
+  const preview = toolResultPreview(use, extractDiffBlocks(use.toolName, use.toolInput), rawResult, Boolean(result), done);
   const body = lazyTurn === undefined
     ? `<div class="tool-body">${toolBody(use, result)}</div>`
     : `<div class="tool-body" data-lazy-turn="${escHtml(lazyTurn)}" data-lazy-use="${escHtml(use.toolUseId)}"></div>`;
@@ -714,9 +720,12 @@ const turnParts = (r: TurnDetailRecord, keyPrefix = "", now = Date.now(), lazy =
   const paired = pairItems(items);
   // data-key = 稳定项键 (items 只追加、按 ts 单调, 位置永不前移 → 索引稳定唯一)。
   // 客户端 reconcile 按此键复用未变气泡的 DOM 节点, 从而保住用户手动展开/折叠的 <details>。
+  // 结束判定统一收在 chat-view.turnDone (closed / final text / 静默超时), 详情页
+  // 与聊天视图必须给出同一个答案 —— 否则一个显示「进行中」另一个显示「已完成」。
+  const done = turnDone(r, now);
   const bodies = paired.map((p, i) => {
     const key = `${keyPrefix}b${i}`;
-    if (p.kind === "pair") return renderToolBubble(p.use, p.result, key, lazy ? r.id : undefined);
+    if (p.kind === "pair") return renderToolBubble(p.use, p.result, key, done, lazy ? r.id : undefined);
     const it = p.item;
     if (it.t === "text") return renderTextBubble(it, key);
     if (it.t === "approval") return renderApprovalItem(it, key);
@@ -730,9 +739,6 @@ const turnParts = (r: TurnDetailRecord, keyPrefix = "", now = Date.now(), lazy =
     }
     return "";
   });
-  // 结束判定统一收在 chat-view.turnDone (closed / final text / 静默超时), 详情页
-  // 与聊天视图必须给出同一个答案 —— 否则一个显示「进行中」另一个显示「已完成」。
-  const done = turnDone(r, now);
   const stamps = paired.map((p) => (p.kind === "pair" ? p.use.ts : p.item.ts));
   return { items, bodies, stamps, done, ageMs: (done ? r.updatedAt : now) - r.createdAt };
 };

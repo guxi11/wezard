@@ -147,8 +147,7 @@ export const recordTurnStart = (
 
 export const recordTurnItem = (id: string, item: TurnItem): void => {
   if (!store) return;
-  store.appendTurnItem(id, item);
-  const full = store.get(id);
+  const full = store.get(store.appendTurnItem(id, item) ?? id);
   if (full) forwardToRemote(full);
 };
 
