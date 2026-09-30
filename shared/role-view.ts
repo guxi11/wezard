@@ -17,7 +17,7 @@
 // 终端里打的字一样, 但不是人说的 —— 归给系统, 同样不能切成视角。人不用 `user:<id>`: 那正是
 // 「与这个人的单聊」里默认 wizard 的 target, 两者字面相同, 同一条消息会变成自己对自己说。
 import { baseOfKey, labelFor, stripSigil, tagOfKey } from "./session-label.js";
-import { isGhostTurn, isKeepaliveTurn, isMark, isTurn, summarizeTag, type TagSummary } from "./chat-view.js";
+import { isGhostTurn, isKeepaliveTurn, isMark, isTurn, staleAt, summarizeTag, type TagSummary } from "./chat-view.js";
 import type { DetailRecord, MarkDetailRecord, TurnDetailRecord } from "./detail-store.js";
 import type { WorldFacts, WorldFactWizard } from "./world.js";
 
@@ -99,6 +99,16 @@ export const allMessages = (records: readonly DetailRecord[], now: number): Msg[
   convTurns(records, now).flatMap(messagesOfTurn).sort((a, b) => a.ts - b.ts);
 
 // ── 名录 ─────────────────────────────────────────────────────────────
+/** 一个 wizard 此刻的活体状态。「执行中」由客户端判: busy || 现在 < runningUntil ——
+ *  pane 的转圈 (busy) 在长工具调用里也亮着, 但它是名册快照、会过期; turn 记录
+ *  (runningUntil) 随写入即时, 但静默久了会误熄。两个信号互补, 任一成立就算在跑。 */
+export interface RoleStatus {
+  alive: boolean;
+  busy: boolean;
+  /** 同 TagSummary.runningUntil: 无新写入时到这个时刻自动算结束, 0 = 已停。 */
+  runningUntil: number;
+}
+
 export interface Directory {
   nameOf: (id: string) => string;
   labelOf: (id: string) => string;
@@ -107,6 +117,8 @@ export interface Directory {
   fact: (id: string) => WorldFactWizard | undefined;
   chatName: (base: string) => string;
   isWizard: (id: string) => boolean;
+  /** undefined = 不是 wizard (人 / 定时 / 系统没有「执行中」)。 */
+  status: (id: string, now: number) => RoleStatus | undefined;
 }
 
 const fold = (s: string): string => stripSigil(s).toLowerCase();
@@ -135,7 +147,20 @@ export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFact
     if (/^human:[^#]*$/.test(r)) return r;
     return /^user:[^#]+$/.test(r) ? humanOf(r) : undefined;
   };
-  return { nameOf, labelOf, resolve, fact: (id) => facts_.get(id), chatName, isWizard: (id) => wizards.has(id) };
+  // 只有摘要要状态, 而 makeDirectory 每次 flush 都会建 —— 用到才扫一遍。
+  let until: Map<string, number> | undefined;
+  const untilOf = (id: string): number =>
+    (until ??= records.filter(isTurn).reduce(
+      (m, r) => (r.target ? m.set(r.target, Math.max(m.get(r.target) ?? 0, staleAt(r))) : m),
+      new Map<string, number>(),
+    )).get(id) ?? 0;
+  const status = (id: string, now: number): RoleStatus | undefined => {
+    if (!wizards.has(id)) return undefined;
+    const f = facts_.get(id);
+    const t = untilOf(id);
+    return { alive: f?.alive ?? false, busy: f?.busy ?? false, runningUntil: t > now ? t : 0 };
+  };
+  return { nameOf, labelOf, resolve, fact: (id) => facts_.get(id), chatName, isWizard: (id) => wizards.has(id), status };
 };
 
 // ── 会话 ─────────────────────────────────────────────────────────────
@@ -153,6 +178,8 @@ export interface ConvSub {
   lastTs: number;
   /** 与我往来的最后一条 (没有就是它在这个频道里的最后一条)。 */
   preview: string;
+  /** 它是 wizard 时才有。 */
+  status?: RoleStatus;
 }
 
 export interface Conv {
@@ -164,6 +191,8 @@ export interface Conv {
   base: string;
   /** 私聊的对端。 */
   peer?: string;
+  /** 私聊对端的状态 (群没有)。 */
+  status?: RoleStatus;
   lastTs: number;
   preview: string;
   count: number;
@@ -187,7 +216,7 @@ const previewOf = (m: Msg | undefined, dir: Directory): string =>
 const SUB_MAX = 40;
 
 /** 一个 role 参与的全部会话, 最近活动在前。wizard 的 home 频道即使还没说过话也在列。 */
-export const convsOf = (all_: readonly Msg[], role: string, dir: Directory): Conv[] => {
+export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now: number): Conv[] => {
   // 会话列表讲的是"谁跟谁说过什么", ping 不是话: 条数与预览都不该被它顶掉。
   const msgs = all_.filter((m) => !isPing(m));
   const mine = msgs.filter((m) => involves(m, role));
@@ -201,6 +230,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory): Con
         const last = ms[ms.length - 1];
         return {
           key, kind: "wizard", name: dir.nameOf(peer), label: dir.labelOf(peer), base: "", peer,
+          status: dir.status(peer, now),
           lastTs: last?.ts ?? 0, preview: previewOf(last, dir), count: ms.length, subs: [],
         };
       }
@@ -215,7 +245,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory): Con
           const last = pair[pair.length - 1] ?? seen[seen.length - 1];
           return {
             role: r, name: dir.nameOf(r), label: dir.labelOf(r), count: pair.length,
-            lastTs: last?.ts ?? 0, preview: previewOf(last, dir),
+            lastTs: last?.ts ?? 0, preview: previewOf(last, dir), status: dir.status(r, now),
           };
         })
         // 与我有往来的排前, 再按最近。
@@ -279,7 +309,7 @@ export const marksOf = (records: readonly DetailRecord[], role: string): MarkDet
   records.filter(isMark).filter((m) => m.target === role);
 
 // ── 身份 ─────────────────────────────────────────────────────────────
-export interface RoleInfo {
+export interface RoleInfo extends RoleStatus {
   id: string;
   kind: RoleKind;
   name: string;
@@ -295,13 +325,13 @@ export interface RoleInfo {
   clones: Array<{ id: string; name: string; label: string }>;
   /** 子 wizard: spawn 出来的白板, 只有出身、没有继承。 */
   spawns: Array<{ id: string; name: string; label: string }>;
-  alive: boolean;
-  busy: boolean;
   /** fork 自父亲的哪个 sessionId; "" = 不是分身。 */
   forkedFrom: string;
 }
 
-export const roleInfo = (id: string, dir: Directory, facts: WorldFacts, stats: TagSummary | undefined): RoleInfo => {
+const COLD: RoleStatus = { alive: false, busy: false, runningUntil: 0 };
+
+export const roleInfo = (id: string, dir: Directory, facts: WorldFacts, stats: TagSummary | undefined, now: number): RoleInfo => {
   const f = dir.fact(id);
   const ref = (t: string) => ({ id: t, name: dir.nameOf(t), label: dir.labelOf(t) });
   const wiz = dir.isWizard(id);
@@ -319,8 +349,7 @@ export const roleInfo = (id: string, dir: Directory, facts: WorldFacts, stats: T
     parent: f?.parent ? ref(f.parent) : undefined,
     clones: kids.filter((w) => w.clonedFrom).map((w) => ref(w.target)),
     spawns: kids.filter((w) => !w.clonedFrom).map((w) => ref(w.target)),
-    alive: f?.alive ?? false,
-    busy: f?.busy ?? false,
+    ...(dir.status(id, now) ?? COLD),
     forkedFrom: f?.clonedFrom ?? "",
   };
 };

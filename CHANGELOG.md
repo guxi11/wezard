@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Added
+- **rolepage 显示 wizard 是否在执行中**: 左栏会话列表里, 私聊对端与群里的 wizard 在执行时头像角上亮一盏呼吸灯; 名片上多一个状态词 (执行中 / 空闲 / 已关闭)。判定 = pane 的 busy 或 turn 记录还没静默到点 (`/api/role` 与 SSE `role` 事件: `role.runningUntil`, `convs[].status` / `convs[].subs[].status`), 到点由页面本地熄灯。SSE 每 10s 带着新名册重推一次摘要 —— busy 变了不写 store, 没有这一拍灯会一直亮着。
+
 ### Changed
 - **rolepage 的消息分两级下发, 首屏不再带工具调用正文**: `/api/msgs` 与 SSE `msg` 片段里的工具调用只剩摘要行 + ⎿ 预览, 展开正文 (命令 / diff / 文件内容高亮、input、原始 result) 在展开那一刻向新路由 `GET /api/tool?id=&turn=&use=` 取, 取到后留在节点上不重取。`/api/msgs` 同时改为先按时间切片再渲染, 没上屏的轮次不再白排一遍。一个约 300 条消息的窗口: 首屏 60 条 1.27 MB → 107 KB, 全量 7.38 MB → 967 KB。`/detail?id=` 整页不变, 仍是全量内联。
 - **rolepage 的用量改成一条页脚组件, 宽屏单行**: 标签 · 指标 · token I/O 条 + 图例 · 模型 一行排完, 窄屏整组折行; 输出 / 缓存不再单列成指标 (就是图例里的那几格)。挂载点跟着账的归属走 —— wizard 视角是横跨两栏的整页页脚 (它自己的总账, 选了 session 只算那一段); 人的视角在群里点开某个 wizard 后, 聊天窗口底下是「我与它在这个群里」这段往来的账 (`/api/role` 与 SSE `role` 事件新增 `winStats`)。左栏底只剩 session 切换。

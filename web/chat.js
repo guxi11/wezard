@@ -248,8 +248,24 @@
     });
     return out;
   };
-  var avatarOf = function (c) {
-    if (c.kind !== 'group') return '<span class="av">' + esc(c.label) + '</span>';
+  // ── 状态: wizard 是否在执行中 ──
+  // 服务端只给事实 (busy / alive / runningUntil), 亮不亮在这里按本地时钟判 ——
+  // 到点没有新写入就自己熄 (同 expireRows), 不必等下一次推送。
+  var ST = { run: '执行中', idle: '空闲', off: '已关闭' };
+  var stateOf = function (s) { return wRunning(s) ? 'run' : s.alive ? 'idle' : 'off'; };
+  // 侧栏只在执行中时点一盏灯: 列表里安静是常态, 亮着的才值得看一眼。
+  var lampOf = function (s) {
+    return s && wRunning(s) ? '<i class="live" title="' + ST.run + '"></i>' : '';
+  };
+  var paintStatus = function () {
+    var el = $('#rb-st'), r = R.role;
+    if (!el || !r) return;
+    var k = stateOf(r);
+    el.className = 'st ' + k; el.textContent = ST[k];
+  };
+
+  var avatarOf = function (c, extra) {
+    if (c.kind !== 'group') return '<span class="av">' + esc(c.label) + (extra || '') + '</span>';
     var ms = membersOf(c).slice(0, 4);
     return '<span class="av mosaic n' + ms.length + '" aria-hidden="true">' +
       ms.map(function (m) { return '<i>' + esc(m.label || roleLabel(m.role)) + '</i>'; }).join('') + '</span>';
@@ -279,13 +295,13 @@
           var sel = s.role === WITH;
           return '<button class="si' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '" data-with="' + esc(s.role) + '" ' +
             'title="' + esc('我与 ' + nameOf(s.role) + ' 在这里的 ' + s.count + ' 条往来') + '">' +
-            '<span class="av">' + esc(s.label) + '</span>' +
+            '<span class="av">' + esc(s.label) + lampOf(s.status) + '</span>' +
             line(nm(s.role, s.name), sel ? swapOf(s.role) : '', s.lastTs, s.preview) + '</button>';
         }).join('') + '</div>'
       : '';
     var sel = on && !WITH;
     return '<button class="ci' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '">' +
-        avatarOf(c) + line(title, sel && c.kind === 'wizard' ? swapOf(c.peer) : '', c.lastTs, c.preview) +
+        avatarOf(c, lampOf(c.status)) + line(title, sel && c.kind === 'wizard' ? swapOf(c.peer) : '', c.lastTs, c.preview) +
       '</button>' + subs;
   };
 
@@ -296,7 +312,10 @@
     var sec = function (title, list) {
       return list.length ? '<h2>' + title + '<span>' + list.length + '</span></h2>' + list.map(convItem).join('') : '';
     };
-    convsEl.innerHTML = sec('群聊', groups) + sec('私聊', dms);
+    // 没变就不碰 DOM: 心跳每 3s 来一次, 重建会把列表的滚动与焦点蹭掉。
+    var html = sec('群聊', groups) + sec('私聊', dms);
+    if (convsEl._html === html) return;
+    convsEl._html = html; convsEl.innerHTML = html;
     convsEl.querySelectorAll('[data-conv]').forEach(function (b) {
       b.onclick = function () { selectConv(b.getAttribute('data-conv'), b.getAttribute('data-with') || ''); };
     });
@@ -383,9 +402,10 @@
     $('#rb-who').innerHTML =
       '<div class="id"><span class="av">' + esc(r.label) + '</span>' +
         '<span class="l">' + nm(r.id, r.name) +
-          '<span class="k">' + kind + '</span></span></div>' +
+          '<span class="k">' + kind + (r.kind === 'wizard' ? '<span class="st" id="rb-st"></span>' : '') + '</span></span></div>' +
       (r.description ? '<p class="job">' + esc(r.description) + '</p>' : '') +
       '<div class="facts">' + facts.join('') + '</div>';
+    paintStatus();
     $('#rb-who').querySelectorAll('.go').forEach(function (g) {
       g.onclick = function () { switchRole(g.getAttribute('data-r')); };
     });
@@ -1518,11 +1538,11 @@
     if (!R.role) return;
     renderUsage();
     expireRows();
+    // 侧栏的「几分钟前」与状态灯: 内容没变时 renderConvs 不碰 DOM。
+    paintStatus(); renderConvs();
     if (VIEW === 'world') tickWorld();
     else if (VIEW === 'plan') renderPlan();
   }, TICK_MS);
-  // 侧栏的「几分钟前」一分钟刷一次就够 —— 每 3s 重建会把列表的滚动与焦点蹭掉。
-  setInterval(function () { if (R.role && VIEW === 'msgs') renderConvs(); }, 60000);
 
   // ── boot ──
   // 带着 role / conv 来的链接直接进阅读态 (手机上不先落在会话列表)。

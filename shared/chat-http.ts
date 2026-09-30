@@ -131,9 +131,9 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     const msgs = allMessages(records, now);
     const spans = sessionsOf(records, role, now);
     const span = spanOf(spans, sid);
-    const convs = convsOf(msgs.filter((m) => inSpan(span)(m.ts)), role, dir);
+    const convs = convsOf(msgs.filter((m) => inSpan(span)(m.ts)), role, dir, now);
     const stats = roleStats(records, role, now, span);
-    const info = roleInfo(role, dir, f, stats);
+    const info = roleInfo(role, dir, f, stats, now);
     // 日程页画的两样东西 (与 chat.js 的 renderPlan 同一口径) —— 都没有就不给入口。
     const schedules = f.schedules.filter((x) => (x.owner || x.createdBy || x.target) === role);
     const jobs = f.jobs.filter((j) => j.owner === role || j.members.some((m) => m.target === role));
@@ -296,6 +296,9 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       }
     }, FLUSH_MS);
     const ping = setInterval(() => { try { res.write(": ping\n\n"); } catch { /* closed */ } }, PING_MS);
+    // 「执行中」的一半来自名册 (pane 的 busy), 而名册变了不会写 store —— 没有这一拍,
+    // 最后一次写入带出去的那份旧快照会让灯一直亮着, 别人开工了侧栏也不知道。
+    const beat = setInterval(() => { factsAt = 0; roleDirty = true; }, FACTS_MS);
 
     const unsub = store.subscribe((rec) => {
       if (!isTurn(rec) && !isMark(rec)) return;
@@ -311,6 +314,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       unsub();
       clearInterval(flush);
       clearInterval(ping);
+      clearInterval(beat);
       try { res.end(); } catch { /* ignore */ }
     };
     req.on("close", close);

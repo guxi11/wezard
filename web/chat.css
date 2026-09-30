@@ -53,6 +53,16 @@ button { font: inherit; color: inherit }
 .rolebar .id .l { min-width: 0; display: flex; flex-direction: column; gap: 2px }
 .rolebar .id .nm { font-size: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .rolebar .id .k { font-size: 11.5px; color: var(--mute) }
+/* 名片上的状态: 只有执行中带颜色与呼吸, 空闲 / 已关闭是一个安静的词。 */
+.rolebar .st { margin-left: 8px; white-space: nowrap }
+.rolebar .st::before {
+  content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 4px;
+  border-radius: 50%; background: #b1bac4; vertical-align: 1px;
+}
+.rolebar .st.run { color: #1a7f37 }
+.rolebar .st.run::before { background: #1a7f37; animation: pulse 1.4s infinite }
+.rolebar .st.off { color: var(--faint) }
+.rolebar .st.off::before { background: transparent; box-shadow: inset 0 0 0 1.5px #b1bac4 }
 .rolebar .job { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--ink); opacity: .8 }
 .rolebar .facts { display: flex; gap: 6px 12px; flex-wrap: wrap; font-size: 11.5px; color: var(--mute) }
 .rolebar .facts span { white-space: nowrap }
@@ -194,6 +204,15 @@ button { font: inherit; color: inherit }
 .si .ts { margin-left: auto; flex: none; font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums }
 .si .pv { display: block; font-size: 11.5px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .si .pv:empty { display: none }
+
+/* 执行中的 wizard: 头像角上一盏呼吸灯 (同关系图的 .wav .live)。 */
+.ci > .av, .si > .av { position: relative }
+.ci > .av .live, .si > .av .live {
+  position: absolute; right: 1px; bottom: -3px; width: 9px; height: 9px;
+  border-radius: 50%; background: #1a7f37; border: 2px solid #fff;
+  animation: pulse 1.4s infinite;
+}
+.si > .av .live { right: -1px; width: 8px; height: 8px }
 
 /* ── 右栏头: 这个群聊 / 私聊是什么 ───────────────────────────────── */
 .main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--card) }
