@@ -219,13 +219,13 @@ const lastSaid = (ms: readonly Msg[]): Msg | undefined => [...ms].reverse().find
 
 const SUB_MAX = 40;
 
-/** 一个 role 参与的全部会话, 最近活动在前。wizard 的 home 频道即使还没说过话也在列。 */
+/** 一个 role 参与的全部会话, 最近活动在前。群聊只列它**自己开过口**的 —— 住在里面
+ *  (home) 或只是被人叫过一声却没答话的, 都不算参与; 私聊则有往来就在列。 */
 export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now: number): Conv[] => {
   // 会话列表讲的是"谁跟谁说过什么", ping 不是话: 条数与预览都不该被它顶掉。
   const msgs = all_.filter((m) => !isPing(m));
   const mine = msgs.filter((m) => involves(m, role));
-  const homes = dir.isWizard(role) ? [`c:${baseOfKey(role)}`] : [];
-  const keys = [...new Set([...mine.map((m) => convKeyOf(m, role)), ...homes])];
+  const keys = [...new Set(mine.filter((m) => !m.channel || m.from === role).map((m) => convKeyOf(m, role)))];
   return keys
     .map((key): Conv => {
       if (key.startsWith("p:")) {
