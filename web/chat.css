@@ -291,10 +291,10 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
    代码块、折叠头) 会在蓝底上显成一张张贴纸 —— 这里把它们收回到气泡自己的
    底色上, 一条消息读起来是一块颜色, 需要再沉一档的才用 --mine-soft。 */
 .mrow.mine .mb > .bubble.mq, .mrow.mine .mb > .turn-group { background: var(--mine); border-color: var(--mine-line) }
-.mrow.mine .mb .bubble, .mrow.mine .mb .typing, .mrow.mine .mb .stats { background: transparent; border-color: var(--mine-line) }
+.mrow.mine .mb .bubble, .mrow.mine .mb .typing { background: transparent; border-color: var(--mine-line) }
 .mrow.mine .mb .bubble.user, .mrow.mine .mb .bubble.approval,
 .mrow.mine .mb .md-body code, .mrow.mine .mb .md-body pre,
-.mrow.mine .mb .tile, .mrow.mine .mb details:not(.tool-call) > summary,
+.mrow.mine .mb details:not(.tool-call) > summary,
 .mrow.mine .mb .tool-body section > h2, .mrow.mine .mb .diff-meta,
 .mrow.mine .mb .tool-call > summary:hover { background: var(--mine-soft); border-color: var(--mine-line) }
 .mrow.mine .mb .md-body pre code { background: transparent }
@@ -308,7 +308,6 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 /* 工具正文是展开时才取的 (chat.js loadTool) —— 空壳期间说一句在干什么。 */
 .tool-body[data-lazy-turn]:empty::before { content: "加载中…"; color: #8c959f; font-size: 12px }
 .tool-body[data-lazy-turn][data-err]:empty::before { content: "加载失败 · 收起再展开重试"; color: #cf222e }
-.mrow.mine .mb .io-bar { background: var(--mine-soft) }
 
 /* 气泡对面那片空白 = 换视角的门。平时不可见, 悬停才露出要去谁那里。 */
 .flip {
@@ -362,8 +361,6 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
   font-size: 11px; color: #57606a; background: #f1f3f6; border-radius: 9px;
   padding: 1px 7px; font-family: ui-monospace, Menlo, monospace;
 }
-.tg-link { margin-left: auto; color: #8c959f; text-decoration: none; font-size: 13px }
-.tg-link:hover { color: #0969da }
 .turn-group .bubbles { margin-top: 0 }
 /* 上下文断点 (/clear、/new、会话轮换): 断点条来自 TURN_CSS, 这里再给整张卡片
    多留一口气 + 描边, 让"这一轮读不到上一轮"在滚动中一眼可辨。 */

@@ -48,15 +48,6 @@ const fmtTok = (n: number): string => {
   return (n / 1e6).toFixed(2).replace(/\.?0+$/, "") + "M";
 };
 
-// token 分类配色 (统计卡片的堆叠条 + 图例共用)。
-const TOK_COLORS = {
-  ctx: "#0969da",       // 上下文峰值 (蓝)
-  input: "#0a7d6b",     // 新鲜输入 (青绿)
-  cacheRead: "#8250df", // 缓存读 (紫)
-  cacheWrite: "#953800",// 缓存写 (棕)
-  output: "#1a7f37",    // 输出 (绿)
-} as const;
-
 const decisionBadge = (d?: ApprovalDecision): { label: string; cls: string } => {
   if (!d) return { label: "待审批", cls: "pending" };
   if (d === "deny") return { label: "拒绝", cls: "deny" };
@@ -366,8 +357,6 @@ const TURN_CSS = `
     background:#8c959f;border-radius:50%;margin-left:6px;
     animation:blink 1.2s infinite}
   @keyframes blink{0%,60%,100%{opacity:.2}30%{opacity:1}}
-  .turn-info{display:flex;flex-wrap:wrap;gap:6px;margin:-6px 0 12px;align-items:center}
-  .turn-info:empty{display:none}
   .chip.model{font-size:12px;padding:3px 10px;border-radius:12px;color:#0969da;
     background:#0969da10;border:1px solid #0969da33;font-weight:600;
     font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",sans-serif}
@@ -375,33 +364,6 @@ const TURN_CSS = `
   .chip.tier{font-size:11px;padding:2px 8px;border-radius:10px;color:#9a6700;
     background:#9a670010;border:1px solid #9a670033;
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-  /* ── 统计卡片 ── */
-  .stats{background:#fff;border:1px solid #d0d7de;border-radius:12px;
-    padding:18px 18px 16px;margin:0 0 16px;
-    box-shadow:0 1px 2px #1f23280a}
-  .stats-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));
-    gap:10px;margin-bottom:16px}
-  .tile{background:#f6f8fa;border:1px solid #eaeef2;border-radius:10px;
-    padding:12px 14px;display:flex;flex-direction:column;gap:3px}
-  .tile .k{font-size:11px;color:#8c959f;text-transform:uppercase;
-    letter-spacing:.5px;font-weight:600}
-  .tile .v{font-size:24px;font-weight:700;line-height:1.1;
-    font-variant-numeric:tabular-nums;color:#1f2328;
-    font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-  .tile .v .u{font-size:14px;font-weight:600;color:#8c959f;margin-left:1px}
-  .tile.accent .v{color:#0969da}
-  .stats-io .io-title{font-size:11px;color:#8c959f;text-transform:uppercase;
-    letter-spacing:.5px;font-weight:600;margin-bottom:8px}
-  .io-bar{display:flex;height:12px;border-radius:6px;overflow:hidden;
-    background:#eaeef2;margin-bottom:10px}
-  .io-bar .seg{height:100%}
-  .io-legend{display:flex;flex-wrap:wrap;gap:14px}
-  .io-legend .item{display:flex;align-items:center;gap:6px;font-size:12px;
-    color:#57606a}
-  .io-legend .dot{width:9px;height:9px;border-radius:3px;flex:none}
-  .io-legend .num{font-weight:700;color:#1f2328;
-    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-    font-variant-numeric:tabular-nums}
   /* ── 用户提问气泡 ── */
   .bubble.user{background:#0969da0a;border-color:#0969da33}
   .bubble.user .bubble-head{color:#0969da}
@@ -647,52 +609,6 @@ const pairItems = (items: readonly TurnItem[]): Array<{ kind: "solo"; item: Turn
   return paired;
 };
 
-// token 数 → "42.4k" 拆成 {n, u} 供 tile 用大数字 + 小单位分开排版。
-const splitTok = (n: number): { n: string; u: string } => {
-  const s = fmtTok(n);
-  const m = /^([\d.]+)([kM]?)$/.exec(s);
-  return m ? { n: m[1]!, u: m[2]! } : { n: s, u: "" };
-};
-
-const tile = (label: string, n: number, accent = false): string => {
-  const { n: num, u } = splitTok(n);
-  return `<div class="tile${accent ? " accent" : ""}"><span class="k">${label}</span>
-    <span class="v">${num}${u ? `<span class="u">${u}</span>` : ""}</span></div>`;
-};
-
-// 累计 token I/O 的堆叠条 + 图例。上下文峰值单列一 tile, 这里画的是「总共读写了多少」
-// 的计费口径 (cacheRead 常远大于窗口占用, 属正常 —— 每次调用重读同一前缀累加)。
-const renderStats = (u: NonNullable<TurnDetailRecord["usage"]>, ctxPeak: number, ageMs: number, done: boolean): string => {
-  const allSegs: Array<{ key: keyof typeof TOK_COLORS; label: string; n: number }> = [
-    { key: "input", label: "Input", n: u.input },
-    { key: "cacheRead", label: "Cache read", n: u.cacheRead },
-    { key: "cacheWrite", label: "Cache write", n: u.cacheWrite },
-    { key: "output", label: "Output", n: u.output },
-  ];
-  const segs = allSegs.filter((s) => s.n > 0);
-  const total = segs.reduce((a, s) => a + s.n, 0) || 1;
-  const bar = segs
-    .map((s) => `<span class="seg" style="width:${((s.n / total) * 100).toFixed(2)}%;background:${TOK_COLORS[s.key]}" title="${s.label}: ${fmtTok(s.n)}"></span>`)
-    .join("");
-  const legend = segs
-    .map((s) => `<span class="item"><span class="dot" style="background:${TOK_COLORS[s.key]}"></span>${s.label} <span class="num">${fmtTok(s.n)}</span></span>`)
-    .join("");
-  const tiles = [
-    tile("Context", ctxPeak, true),
-    tile("Output", u.output),
-    `<div class="tile"><span class="k">API calls</span><span class="v">${u.calls}</span></div>`,
-    `<div class="tile"><span class="k">${done ? "Duration" : "Elapsed"}</span><span class="v" style="font-size:20px">${escHtml(fmtDuration(ageMs))}</span></div>`,
-  ].join("");
-  return `<section class="stats">
-    <div class="stats-tiles">${tiles}</div>
-    <div class="stats-io">
-      <div class="io-title">Token I/O · cumulative</div>
-      <div class="io-bar">${bar}</div>
-      <div class="io-legend">${legend}</div>
-    </div>
-  </section>`;
-};
-
 // djb2 → base36. reconcile 用它做「气泡内容变没变」的判据 —— 不用 outerHTML, 因为客户端
 // 会往 text 气泡的 .md-body 里填渲染结果, 污染 outerHTML; data-sig 是服务端算的纯内容指纹。
 const hashStr = (s: string): string => {
@@ -705,11 +621,9 @@ const hashStr = (s: string): string => {
 const tagSig = (html: string): string =>
   html ? html.replace(/(data-key="[^"]*")/, `$1 data-sig="${hashStr(html)}"`) : "";
 
-// 一个 turn 的可复用切片: 排序后的 items、渲染好的气泡、完成态与耗时。
-// 单 turn 页 (renderTurnPage) 和 chat 线程页 (renderTurnGroup) 共用同一份产物 ——
+// 一个 turn 的切片: 渲染好的气泡、完成态与耗时。
 // keyPrefix 让线程页里多个 turn 的 data-key 不互撞。`lazy`: 工具正文留空壳 (见 renderToolBubble)。
 const turnParts = (r: TurnDetailRecord, keyPrefix = "", now = Date.now(), lazy = false): {
-  items: TurnItem[];
   bodies: string[];
   /** bodies[i] 对应的时刻 —— 子 agent 卡片按它插回父轮时间轴。 */
   stamps: number[];
@@ -740,7 +654,7 @@ const turnParts = (r: TurnDetailRecord, keyPrefix = "", now = Date.now(), lazy =
     return "";
   });
   const stamps = paired.map((p) => (p.kind === "pair" ? p.use.ts : p.item.ts));
-  return { items, bodies, stamps, done, ageMs: (done ? r.updatedAt : now) - r.createdAt };
+  return { bodies, stamps, done, ageMs: (done ? r.updatedAt : now) - r.createdAt };
 };
 
 const CUT_TEXT: Record<CtxCut, string> = {
@@ -778,150 +692,8 @@ const renderAgent = (r: TurnDetailRecord): string => {
   return `<div class="tg-agent"><span class="l">🤖 subagent${type}</span>${desc}</div>`;
 };
 
-const renderTurnPage = (r: TurnDetailRecord): string => {
-  const { items, bodies, done, ageMs } = turnParts(r);
-  const statusBadge = done
-    ? `<span class="badge allow">已完成 · ${fmtDuration(ageMs)}</span>`
-    : `<span class="badge pending">进行中</span>`;
-  const modelChip = r.model
-    ? `<span class="chip model">${escHtml(r.model)}${r.modelAlt ? `<span class="alt"> +${r.modelAlt}</span>` : ""}</span>`
-    : "";
-  const u = r.usage;
-  // 上下文 = 单次 API 调用送入的 input+缓存读+缓存写 的峰值 (窗口占用高水位), 与下方
-  // 累计 I/O 语义不同。窗口上限/占比不再展示 —— 长上下文变体口径不准, 易误导。
-  const ctxPeak = u ? (u.ctxPeak ?? (u.input + u.cacheRead + u.cacheWrite)) : 0;
-  const tierChip = u?.serviceTier && u.serviceTier !== "standard"
-    ? `<span class="chip tier">${escHtml(u.serviceTier)}</span>` : "";
-  const turnInfo = modelChip || tierChip ? `<div class="turn-info">${modelChip}${tierChip}</div>` : "";
-  const statsCard = u ? renderStats(u, ctxPeak, ageMs, done) : "";
-  const queryBubble = r.userQuery
-    ? `<section class="bubble user" data-key="user">
-        <div class="bubble-head">💬 <span class="role">User</span></div>
-        <div class="q-body">${escHtml(r.userQuery)}</div>
-      </section>`
-    : "";
-  const metaParts = [
-    fmtTs(r.createdAt),
-    r.sessionId ? r.sessionId.slice(0, 8) : null,
-    r.target || null,
-    `${items.length} 项`,
-  ].filter(Boolean) as string[];
-  const typing = done ? "" : `<div class="typing" data-key="typing">${escHtml(backendLabel(r.cli))} 正在思考</div>`;
-  // markdown-it + highlight.js from unpkg CDN. html:false 防注入; linkify + breaks 更贴聊天。
-  // 未 closed 时客户端 2s 轮询同一 URL — DOMParser 抽 .bubbles 后按 data-key reconcile:
-  // 未变气泡复用原 DOM 节点 (连带用户手动展开/折叠的 <details> 一并保住), 变化/新增气泡
-  // 才换成新节点、并从快照回填用户改过的折叠态。整页不重刷 → 保留滚动位置 + CDN 缓存。
-  // closed 时 body[data-closed=1], 轮询自终止。
-  const script = `
-(function(){
-  var render = function(scope){
-    if(!window.markdownit) return;
-    var hl = function(str,lang){
-      if(lang && window.hljs){
-        try{return window.hljs.highlight(str,{language:lang,ignoreIllegals:true}).value}catch(e){}
-      }
-      if(window.hljs){try{return window.hljs.highlightAuto(str).value}catch(e){}}
-      return '';
-    };
-    var md = window.markdownit({html:false, linkify:true, breaks:true, highlight:hl});
-    scope.querySelectorAll('.bubble').forEach(function(b){
-      var src = b.querySelector('script.md-src');
-      var body = b.querySelector('.md-body');
-      // 已渲染过的复用节点跳过 —— 免闪一下, 也不动其内部状态。
-      if(src && body && body.dataset.rendered !== '1'){
-        body.innerHTML = md.render(src.textContent||'');
-        body.dataset.rendered = '1';
-      }
-    });
-  };
-  // key#idx → <details>.open 快照, 供换新节点后回填用户手动折叠态。
-  var snapOpen = function(scope){
-    var m = {};
-    scope.querySelectorAll('[data-key]').forEach(function(b){
-      var k = b.getAttribute('data-key');
-      b.querySelectorAll('details').forEach(function(d,i){ m[k+'#'+i] = d.open; });
-    });
-    return m;
-  };
-  var restoreOpen = function(scope, m){
-    scope.querySelectorAll('[data-key]').forEach(function(b){
-      var k = b.getAttribute('data-key');
-      b.querySelectorAll('details').forEach(function(d,i){
-        var v = m[k+'#'+i]; if(v !== undefined) d.open = v;
-      });
-    });
-  };
-  // 按 data-key diff: data-sig (服务端内容指纹) 相同则原样保留旧节点, 否则采纳新节点。
-  var reconcile = function(cur, next){
-    var open = snapOpen(cur);
-    var existing = {};
-    Array.prototype.forEach.call(cur.children, function(c){
-      var k = c.getAttribute('data-key'); if(k) existing[k] = c;
-    });
-    var nodes = Array.prototype.map.call(next.children, function(nc){
-      var k = nc.getAttribute('data-key');
-      var ex = k ? existing[k] : null;
-      var same = ex && ex.getAttribute('data-sig') === nc.getAttribute('data-sig');
-      return same ? ex : document.importNode(nc, true);
-    });
-    cur.replaceChildren.apply(cur, nodes);
-    restoreOpen(cur, open);
-    render(cur);
-  };
-  render(document);
-  if(document.body.dataset.closed === '1') return;
-  var url = location.href;
-  var tick = function(){
-    fetch(url, {cache:'no-store'}).then(function(r){return r.text()}).then(function(html){
-      var doc = new DOMParser().parseFromString(html, 'text/html');
-      var newBubbles = doc.querySelector('.bubbles');
-      var curBubbles = document.querySelector('.bubbles');
-      if(newBubbles && curBubbles){
-        reconcile(curBubbles, newBubbles);
-      }
-      var newBadge = doc.querySelector('header .badge');
-      var curBadge = document.querySelector('header .badge');
-      if(newBadge && curBadge){ curBadge.outerHTML = newBadge.outerHTML; }
-      var newInfo = doc.querySelector('.turn-info');
-      var curInfo = document.querySelector('.turn-info');
-      if(newInfo && curInfo){ curInfo.outerHTML = newInfo.outerHTML; }
-      var newStats = doc.querySelector('.stats');
-      var curStats = document.querySelector('.stats');
-      if(newStats && curStats){ curStats.outerHTML = newStats.outerHTML; }
-      else if(newStats && curBubbles){ curBubbles.parentNode.insertBefore(newStats, curBubbles); }
-      else if(newStats){ document.querySelector('.wrap').appendChild(newStats); }
-      var nowClosed = doc.body.dataset.closed === '1';
-      if(nowClosed){ document.body.dataset.closed = '1'; return; }
-      setTimeout(tick, 2000);
-    }).catch(function(){ setTimeout(tick, 2000); });
-  };
-  setTimeout(tick, 2000);
-})();
-`;
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Turn Details</title>
-<link rel="stylesheet" href="https://unpkg.com/highlight.js@11/styles/github.min.css">
-<style>${SHARED_CSS}${TURN_CSS}</style>
-<script src="https://unpkg.com/markdown-it@14/dist/markdown-it.min.js"></script>
-<script src="https://unpkg.com/@highlightjs/cdn-assets@11/highlight.min.js"></script>
-</head><body data-closed="${done ? "1" : "0"}"><div class="wrap">
-<header><h1><span class="accent">Turn Details</span></h1>${statusBadge}</header>
-${renderCut(r)}
-${renderOrigin(r)}
-${renderAgent(r)}
-${turnInfo}
-<div class="meta">${metaParts.map(escHtml).join('<span class="sep">·</span>')}</div>
-${statsCard}
-<div class="bubbles">${[queryBubble, ...bodies, typing].map(tagSig).join("")}</div>
-</div>
-<script>${script}</script>
-</body></html>`;
-};
-
 // ── Chat 线程视图用的单 turn 片段 ──────────────────────────────────────
-// 与 renderTurnPage 同源 (turnParts), 但去掉整页外壳与大统计卡: 线程里一个 turn
-// 只留一条分隔头 (时间 / model / 状态 / 本轮 token), 总账走页脚 status bar。
+// 线程里一个 turn 只留一条分隔头 (时间 / model / 状态 / 本轮 token), 总账走页脚 status bar。
 // 返回 html + sig, 让客户端按 sig 判断"这条 turn 变没变", 不用 diff 整段 DOM。
 //
 // 数据分两级下发: 片段里的工具调用只有摘要行 + ⎿ 预览, 展开正文由客户端在展开那一刻
@@ -965,7 +737,7 @@ export const renderTurnGroup = (
   children: readonly TurnFragment[] = [],
   withQuery = true,
 ): TurnFragment => {
-  const { items, bodies, stamps, done, ageMs } = turnParts(r, `${r.id}:`, now, true);
+  const { bodies, stamps, done, ageMs } = turnParts(r, `${r.id}:`, now, true);
   const u = r.usage;
   const ctxPeak = u ? (u.ctxPeak ?? u.input + u.cacheRead + u.cacheWrite) : 0;
   const chips = [
@@ -989,7 +761,6 @@ export const renderTurnGroup = (
   const head = `<div class="tg-head">
     <span class="tg-dot${done ? "" : " live"}"></span>
     <span class="tg-time">${fmtTs(r.createdAt)}</span>${chips}
-    <a class="tg-link" href="detail?id=${encodeURIComponent(r.id)}" target="_blank" title="${items.length} 项">↗</a>
   </div>`;
   // staleAt 只走 JSON, 绝不进 HTML —— 它跟着 updatedAt 变, 一旦计入 sig, SSE 的
   // "内容没变就不重发" 会彻底失效 (一个 turn 的 HTML 可以是几十 KB)。
@@ -1018,10 +789,9 @@ export { escHtml, fmtTs, fmtDuration, fmtTok, hashStr, tagSig, TURN_CSS };
 
 export const renderDetailPage = (r: DetailRecord): string => {
   if (r.kind === "tool") return renderToolPage(r);
-  if (r.kind === "turn") return renderTurnPage(r);
-  // 断点标记没有自己的页面 —— 它只是线程里的一行, id 也从不出现在链接里。
-  // 聊天票据同理: 它只出现在 /chat 的 `?id=` 上。
-  if (r.kind === "mark" || r.kind === "chat") return renderNotFound(r.id);
+  // turn / 断点标记 / 聊天票据都没有自己的页面 —— 前两者只是 rolepage 线程里的
+  // 一张卡片 / 一行, 票据只出现在 /role 的 `?id=` 上。
+  if (r.kind === "turn" || r.kind === "mark" || r.kind === "chat") return renderNotFound(r.id);
   return renderApprovalPage(r);
 };
 
