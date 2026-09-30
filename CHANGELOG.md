@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+## [2.1.3] - 2026-10-01
+
+### Added
+- rolepage 侧栏未读红点: 按时刻水位计数, 水位之后别人说完的话 (人说的也算) 记为未读; 默认水位取当前视角最后一次开口处, 看过的位置记在本地浏览器。
+
+### Changed
+- rolepage 保温 ping 折叠里的气泡描虚线边, 展开区的上内边距加大、下内边距收小。
+- wizard 的 emoji 池去掉 🦞。
+
+### Fixed
+- **注入判框不再把 CLI 的灰字预测句当成已输入文本**: Claude Code 的 prompt suggestion 以 dim (SGR 2) 渲染, 纯文本读屏把它当成输入框里的内容 —— 一条 `commit` 命中预测句 `commit 这次改动…` 的子串, 被判成「上次已贴未提交」, 于是不贴只按回车, 消息静默丢失。输入框改为带样式读屏, dim 段整段剔除。
+- rolepage 换视角的 FLIP 动画: 两边都在的气泡全部参与位移, 滚动锚在被点的那条上; 屏外被推进视窗的行不再闪现, 页头换高度不再半路顶动整列, 列内各块的相对位移不再跳。
+
 ## [2.1.2] - 2026-10-01
 
 ### Changed
@@ -730,7 +743,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.1.2...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.1.3...HEAD
+[2.1.3]: https://github.com/guxi11/wezard/compare/v2.1.2...v2.1.3
 [2.1.2]: https://github.com/guxi11/wezard/compare/v2.1.1...v2.1.2
 [2.1.1]: https://github.com/guxi11/wezard/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/guxi11/wezard/compare/v2.0.6...v2.1.0
