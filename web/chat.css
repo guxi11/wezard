@@ -226,12 +226,13 @@ button { font: inherit; color: inherit }
 }
 .more-btn:hover { color: var(--accent); border-color: var(--accent) }
 
-.mrow { display: flex; align-items: flex-start; gap: 10px }
+/* 头像已并进名字那一行, 不再占气泡旁的一列 —— 省下的那一格宽度 (--av) 还给气泡。 */
+.mrow { --av: 24px; display: flex; align-items: flex-start; gap: 10px }
 .mwho .av {
-  flex: none; align-self: center; width: 24px; height: 24px; border-radius: 50%; border: 1px solid var(--line);
+  flex: none; align-self: center; width: var(--av); height: var(--av); border-radius: 50%; border: 1px solid var(--line);
   background: var(--card); font-size: 14px; line-height: 22px; text-align: center; cursor: default; padding: 0;
 }
-.mcol { min-width: 0; max-width: min(78%, 760px); display: flex; flex-direction: column; gap: 4px }
+.mcol { min-width: 0; max-width: min(78% + var(--av), 760px + var(--av)); display: flex; flex-direction: column; gap: 4px }
 .mrow.mine { flex-direction: row-reverse }
 .mrow.mine .mcol { align-items: flex-end }
 .mwho { font-size: 11.5px; color: var(--mute); display: flex; gap: 6px; align-items: center; flex-wrap: wrap }
@@ -368,7 +369,7 @@ button { font: inherit; color: inherit }
   .chathead { padding: 8px 12px; gap: 8px }
   .chathead .back { display: block }
   .thread { padding: 12px }
-  .mcol { max-width: 86% }
+  .mcol { max-width: calc(86% + var(--av)) }
   .flip { min-width: 16px; padding: 0 4px; font-size: 0 }
   .turn-group { padding: 12px }
   .thread { padding-bottom: calc(12px + env(safe-area-inset-bottom)) }
