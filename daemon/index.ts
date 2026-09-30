@@ -143,7 +143,7 @@ const main = async (): Promise<void> => {
   const known = (t: string): boolean => bridge.chatTargets(t).includes(t);
   // 名册在下面的 mirror 块里才绑 (bindWizardStore) —— 这里全走 wizardStore() 惰性取。
   bindTagLinker({
-    urlOf: (t) => chatUrlFor(cfg.daemon, t, baseOfKey(t).replace(/^(user|chat|group):/, "")),
+    urlOf: (t) => chatUrlFor(cfg.daemon, t),
     resolve: (name) => {
       const t = wizardStore()?.byName(name)?.target;
       return t && known(t) ? t : undefined;

@@ -41,7 +41,7 @@ import { selectModel, type ModelScope, type ModelSelectResult } from "./model-se
 import { hasRegistry, markTranscript, probeOf, sessionOnPane, sessionPanes, submittedSince, type LiveSession, type TranscriptMark } from "./cc-session.js";
 import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
-import { recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, lastChannelOf, buildDetailUrl, buildChatUrl } from "./detail.js";
+import { recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, lastChannelOf, buildDetailUrl, buildChatUrl, roleUniq } from "./detail.js";
 import type { CtxCut, TurnFrom, TurnOrigin, TurnUsage } from "./detail.js";
 import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagHeader, withLinkedTagHeader, linkedTagHead, linkTags, parseTagHeader, MAX_BODY_LINKS } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
@@ -2575,7 +2575,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // `emoji #tag` (withLinkedTagHeader 自己兜)。
   const chatTurnUrl = (target: string, turnId: string | undefined): string | undefined =>
     turnId
-      ? buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, turnId, stripPrincipalPrefix(target))
+      ? buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, turnId, roleUniq(target))
       : undefined;
 
   // `[mirror]` / `[wezard]` 系统提示不是答给谁的话, 不标方向。
@@ -2936,9 +2936,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   // 链接落到 chat 视图: 默认选中本 turn 所属的 #tag, 贴底显示整条会话。turnId 依旧
   // 是凭据 (不可枚举), 只是页面从"一个 turn"扩成"这个 chat 的全部会话"。
-  // target 作为 ww_uniq 传下去, 让同 chat 的所有 turn 详情都复用一个 WeCom 窗口。
+  // wizard 名字作为 ww_uniq 传下去, 让同一个 wizard 的所有 turn 详情都复用一个 WeCom 窗口。
   const briefDetailLink = (turnId: string, target: string): string =>
-    linkedTagHead(target, buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, turnId, stripPrincipalPrefix(target)));
+    linkedTagHead(target, buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, turnId, roleUniq(target)));
 
   // ── 出处门 (chatOriginOnly) ───────────────────────────────────────────
   // 人在 CLI 里手敲的一轮, 镜像只发生在两处: 他眼前的终端, 和 chat 详情页 (turn

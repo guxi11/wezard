@@ -10,6 +10,7 @@ import type { Decision } from "./pending.js";
 import type { Handler } from "./http.js";
 import { resolvePublicHost } from "../shared/lan-ip.js";
 import { baseOfKey } from "../shared/session-label.js";
+import { wizardStore } from "./wizard.js";
 import {
   createDetailStore,
   type ApprovalDecision,
@@ -262,11 +263,14 @@ export const buildChatUrl = (
 export const chatUrlFor = (
   d: { detailPublicBase: string; host: string; port: number },
   target: string,
-  chatId: string,
 ): string | undefined => {
   const id = latestTurnIdFor(target) ?? chatTicketFor(baseOfKey(target));
-  return id ? buildChatUrl(d.detailPublicBase, d.host, d.port, id, chatId, target) : undefined;
+  return id ? buildChatUrl(d.detailPublicBase, d.host, d.port, id, roleUniq(target), target) : undefined;
 };
+
+// rolepage 的 ww_uniq 取 wizard 名字: 同一个 wizard 的链接复用一个 WeCom 窗口, 不同
+// wizard 各开各的。名册还没有它 (boot 早期 / 未落名) 时退回 target key。
+export const roleUniq = (target: string): string => wizardStore()?.get(target)?.name || target;
 
 // Chat 视图路由 (页面 + JSON API + SSE)。store 未初始化时全部 503 —— 只可能发生在
 // initDetailPersistence 之前, 正常启动路径不会命中。
