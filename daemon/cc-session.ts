@@ -72,6 +72,10 @@ export const sessionOnPane = (homeDir: string, pane: string): LiveSession | unde
     .filter((r) => r.pane === pane && pidAlive(r.pid))
     .sort((a, b) => b.statusUpdatedAt - a.statusUpdatedAt)[0];
 
+/** 注册表里进程还活着的会话各住在哪个 pane —— 「这个 pane 是不是会话 pane」的正面证据。 */
+export const sessionPanes = (homeDir: string): Set<string> =>
+  new Set(readRegistry(homeDir).filter((r) => r.pane && pidAlive(r.pid)).map((r) => r.pane));
+
 // ── 提交确认 ──────────────────────────────────────────────────────────
 
 const normalize = (s: string): string => s.replace(/\s+/gu, "");

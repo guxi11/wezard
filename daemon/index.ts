@@ -1793,7 +1793,7 @@ const main = async (): Promise<void> => {
         taskOwners.has(target) ? "owns scheduled task"
           : pendingSids.has(sid) ? "pending approval"
           : undefined);
-      if (r.reaped.length) log.info({ reaped: r.reaped.length, targets: r.reaped, max }, "pane cap sweep");
+      if (r.reaped.length || r.orphans.length) log.info({ reaped: r.reaped.length, targets: r.reaped, orphans: r.orphans.length, max }, "pane cap sweep");
     };
     bridge.onSpawn(() => void sweep().catch((e) => log.warn({ err: (e as Error).message }, "pane cap sweep failed")));
   }

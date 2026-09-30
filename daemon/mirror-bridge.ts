@@ -38,7 +38,7 @@ import { noticeSuffixFor } from "./notices.js";
 import { dangerOf } from "./danger.js";
 import { runTmux, spawnTmuxClaude } from "./spawn-tmux.js";
 import { selectModel, type ModelScope, type ModelSelectResult } from "./model-select.js";
-import { hasRegistry, markTranscript, probeOf, sessionOnPane, submittedSince, type LiveSession, type TranscriptMark } from "./cc-session.js";
+import { hasRegistry, markTranscript, probeOf, sessionOnPane, sessionPanes, submittedSince, type LiveSession, type TranscriptMark } from "./cc-session.js";
 import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
 import { recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, buildDetailUrl, buildChatUrl } from "./detail.js";
@@ -1786,6 +1786,9 @@ const queues = new Map<string, Promise<void>>();
  *  behind it forever. Well under brief's 350s bubble ceiling so the user still
  *  gets an error bubble rather than a silent stream timeout. */
 const INJECT_JOB_TIMEOUT_MS = 90_000;
+/** 没有绑定的 pane 静默多久才算孤儿。刚 spawn、还没 attach 的 pane (并发 fan-out 时
+ *  别人的 sweep 会撞见它) 在这段时间里一直有输出, 远大于一次 spawn → attach 的耗时。 */
+const ORPHAN_GRACE_MS = 10 * 60_000;
 /** Drop a session's queue chain. A hung job can't be cancelled (it's parked in a
  *  tmux read), but detaching the chain means the NEXT message doesn't inherit
  *  its deadlock. Pair with an injectGen bump so the zombie can't act when it
@@ -1946,11 +1949,13 @@ export interface MirrorBridge {
    *  both "alive" and "watched"; under the cap nothing else is touched. `skip`
    *  vetoes a target with a reason (task owners, pending approvals). Busy
    *  panes and windows a human is watching right now are passed over — so the
-   *  count can stay above `max` when everything old is exempt. */
+   *  count can stay above `max` when everything old is exempt. Panes in the
+   *  daemon's own tmux session that NO binding points at (`orphans`) are
+   *  unreachable leftovers: killed on sight, outside the count. */
   reapOverflow: (
     max: number,
     skip?: (target: string, sessionId: string) => string | undefined,
-  ) => Promise<{ reaped: string[]; skipped: Record<string, string> }>;
+  ) => Promise<{ reaped: string[]; orphans: string[]; skipped: Record<string, string> }>;
   /** Send a bare Enter to the live tmux pane bound to `target` — confirms a
    *  prompt / press-enter-to-continue, or submits the input box as-is. No-op
    *  for spawn-mode attachments (no live TTY). */
@@ -5864,16 +5869,46 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // 一次 list-panes 同时回答「活着吗」和「有人盯着吗」—— 跑了几个月的机器上
       // allTargets 是几百个 key, 见 target 就问 tmux 会打穿 fd (同 worldPeers 的
       // WORLD_PROBE 取舍)。
-      const snap = await runTmux(["list-panes", "-a", "-F", "#{pane_id}\t#{window_active}:#{session_attached}"]);
-      if (snap.code !== 0) return { reaped, skipped };
-      const watchedBy = new Map(snap.stdout.split("\n").filter(Boolean).map((l) => {
-        const [id, w = ""] = l.split("\t");
+      const orphans: string[] = [];
+      const snap = await runTmux(["list-panes", "-a", "-F", "#{pane_id}\t#{window_active}:#{session_attached}\t#{session_name}\t#{window_activity}"]);
+      if (snap.code !== 0) return { reaped, orphans, skipped };
+      const rows = snap.stdout.split("\n").filter(Boolean).map((l) => l.split("\t"));
+      const watchedBy = new Map(rows.map(([id = "", w = ""]) => {
         const [wActive, sAttached] = w.split(":");
         return [id, wActive === "1" && sAttached !== "0"] as const;
       }));
-      const live = allTargets().filter((t) => watchedBy.has(paneOf(t)));
+      // 收一个 pane; 返回没收成的原因, 收掉了返回 undefined。
+      const putDown = async (pane: string): Promise<string | undefined> => {
+        // 人正盯着这个 window —— 收掉他的视野比省下那点内存更讨嫌。
+        if (watchedBy.get(pane)) return "watched";
+        if (paneIsBusy(await capturePaneTail(pane, 12))) return "busy";
+        // 与 killPane 同款前戏: Esc 给生成中的 CLI 一个收束落盘的机会。
+        await runTmux(["send-keys", "-t", pane, "Escape"]);
+        await sleep(250);
+        const r = await runTmux(["kill-pane", "-t", pane]);
+        return r.code === 0 ? undefined : `kill-pane failed: ${r.stdout.slice(-120) || r.code}`;
+      };
+      const targets = allTargets();
+      // 孤儿: 住在 daemon 自己的 tmux session 里、却没有任何绑定指着它的 pane —— 绑定
+      // 丢了 pane id (restore 认不出 → 下一条消息另起新 pane, 旧 pane 不杀) 之后留下的。
+      // 没有地址能再叫到它, 却不在下面 `live` 的账上, 攒多少都触不到上限; 所以不占
+      // 名额、不等超限, 见到就收。刚起的 pane 在 attach 之前也长这样 (并发 spawn),
+      // 用 window_activity 留一段宽限。只收会话 pane: 注册表认得里面住着活的 AI 会话
+      // 才算; 普通 pane (人自己开的 shell / 编辑器, 会话已退回 shell 的, 没有注册表的
+      // 后端) 一律跳过 —— 认不出就不动。
+      const bound = new Set(targets.map(paneOf).filter(Boolean));
+      const hosting = new Set(activeBackends().flatMap((b) => [...sessionPanes(b.homeDir)]));
+      for (const [pane = "", , session, activity] of rows) {
+        if (session !== cfg.wrc.tmuxPrefix || bound.has(pane) || !hosting.has(pane)) continue;
+        if (now - Number(activity) * 1000 < ORPHAN_GRACE_MS) continue;
+        const why = await putDown(pane);
+        if (why) { skipped[pane] = why; continue; }
+        orphans.push(pane);
+        log.info({ pane, idleHours: Math.round((now - Number(activity) * 1000) / 3.6e6) }, "mirror pane cap — orphan pane killed (no binding)");
+      }
+      const live = targets.filter((t) => watchedBy.has(paneOf(t)));
       let over = live.length - max;
-      if (over <= 0) return { reaped, skipped };
+      if (over <= 0) return { reaped, orphans, skipped };
       // 超了才 stat: 最久没动的先收。还没写过 transcript 的是刚起的 pane, 按"此刻"算。
       const mtimeOf = (target: string): number => {
         try { return statSync(jsonlOf(target)).mtimeMs; } catch { return now; }
@@ -5886,21 +5921,15 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         const veto = skip?.(target, sessionId);
         if (veto) { skipped[target] = veto; continue; }
         const pane = paneOf(target);
-        // 人正盯着这个 window —— 收掉他的视野比省下那点内存更讨嫌。
-        if (watchedBy.get(pane)) { skipped[target] = "watched"; continue; }
-        if (paneIsBusy(await capturePaneTail(pane, 12))) { skipped[target] = "busy"; continue; }
-        // 与 killPane 同款前戏: Esc 给生成中的 CLI 一个收束落盘的机会。
-        await runTmux(["send-keys", "-t", pane, "Escape"]);
-        await sleep(250);
-        const r = await runTmux(["kill-pane", "-t", pane]);
-        if (r.code !== 0) { skipped[target] = `kill-pane failed: ${r.stdout.slice(-120) || r.code}`; continue; }
+        const why = await putDown(pane);
+        if (why) { skipped[target] = why; continue; }
         if (a) detach(a, "pane cap");
         // 不碰 store —— 绑定留着, 下一条 inbound 走 dead-pane `--resume` 复活。
         reaped.push(target);
         over -= 1;
         log.info({ target, sessionId, pane, idleHours: Math.round((now - mtime) / 3.6e6), max }, "mirror pane cap — pane killed, binding kept");
       }
-      return { reaped, skipped };
+      return { reaped, orphans, skipped };
     },
     submitPane: async (target) => {
       const a = byTarget.get(target);
