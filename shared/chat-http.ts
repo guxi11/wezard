@@ -24,14 +24,14 @@ import { baseOfKey } from "./session-label.js";
 import { isMark, isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, type WorldFacts } from "./world.js";
 import {
-  allMessages, convMessages, convsOf, hasRelations, inSpan, makeDirectory, marksOf, messagesOfTurn,
+  allMessages, convKeyOf, convMessages, convsOf, hasRelations, inSpan, makeDirectory, marksOf, messagesOfTurn,
   roleInfo, roleStats, sessionsOf, windowStats, type Directory, type Msg, type SessionSpan,
 } from "./role-view.js";
 import { renderMark, renderMsg, type MsgFragment } from "./role-render.js";
 import { renderToolBody } from "./detail-render.js";
 import { chatScript, chatStyles, chatVendor, renderChatPage } from "./chat-render.js";
 import type { Asset } from "./web-assets.js";
-import type { DetailRecord, DetailStore } from "./detail-store.js";
+import type { DetailRecord, DetailStore, TurnDetailRecord } from "./detail-store.js";
 
 export type SimpleHandler = (req: IncomingMessage, res: ServerResponse, url: URL) => void;
 
@@ -75,11 +75,28 @@ const ticketTarget = (store: DetailStore, rec: DetailRecord): string => {
     .sort((a, b) => b.updatedAt - a.updatedAt)[0]?.target ?? "";
 };
 
-interface Ticket { selfTarget: string }
+interface Ticket {
+  selfTarget: string;
+  /** 票据就是一轮对话时的那一轮 —— 气泡头上的链接带的正是它自己那一轮的 id。 */
+  turn?: TurnDetailRecord;
+}
 
 const resolveTicket = (store: DetailStore, url: URL): Ticket | undefined => {
   const rec = store.get(url.searchParams.get("id") ?? "");
-  return rec ? { selfTarget: ticketTarget(store, rec) } : undefined;
+  return rec ? { selfTarget: ticketTarget(store, rec), turn: isTurn(rec) && rec.target ? rec : undefined } : undefined;
+};
+
+/** 没指定窗口时落在哪: 哪个会话, 以及只看与谁的往来 ("" = 由摘要在那个会话里挑)。 */
+interface Landing { conv: string; with: string }
+
+/** 票据是一轮对话、而 role 正是其中一方 → 落在那一句所在的会话, 对面就是那一句的另一方:
+ *  从哪个群点进来就开哪个群, 谁问的就只看与谁的往来 —— 都从那条消息反查, 不靠猜。
+ *  聊天票据 / 别人的轮次只知道一个群: 落在票据的 home 群。 */
+const landingOf = (ticket: Ticket, role: string): Landing => {
+  const m = ticket.turn ? messagesOfTurn(ticket.turn)[0] : undefined;
+  return m && (m.from === role || m.to === role)
+    ? { conv: convKeyOf(m, role), with: m.channel ? (m.from === role ? m.to : m.from) : "" }
+    : { conv: `c:${baseOfKey(ticket.selfTarget)}`, with: "" };
 };
 
 const NOT_FOUND = "未找到该会话 (链接可能已过期)";
@@ -127,7 +144,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
   };
 
   /** role 摘要: 身份、会话列表、session 分段、页脚总账 (role 自己的 + 当前窗口的)。 */
-  const summary = (records: readonly DetailRecord[], f: WorldFacts, role: string, sid: string | null, ticketBase: string, win?: Pick<View, "conv" | "with">) => {
+  const summary = (records: readonly DetailRecord[], f: WorldFacts, role: string, sid: string | null, land: Landing, win?: Pick<View, "conv" | "with">) => {
     const now = Date.now();
     const dir = makeDirectory(records, f);
     const msgs = allMessages(records, now);
@@ -139,14 +156,19 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     // 日程页画的两样东西 (与 chat.js 的 renderPlan 同一口径) —— 都没有就不给入口。
     const schedules = f.schedules.filter((x) => (x.owner || x.createdBy || x.target) === role);
     const jobs = f.jobs.filter((j) => j.owner === role || j.members.some((m) => m.target === role));
+    const home = convs.find((c) => c.key === land.conv);
     return {
       at: now,
       role: info,
       sessions: spans.map(wireSpan),
       session: span?.sessionId ?? "",
       convs,
-      // 链接来自哪个群就默认开哪个群; 否则最近活动的那个。
-      conv: convs.find((c) => c.key === `c:${ticketBase}`)?.key ?? convs[0]?.key ?? "",
+      // 链接来自哪个会话就默认开哪个 (见 landingOf); 否则最近活动的那个。
+      conv: home?.key ?? convs[0]?.key ?? "",
+      // 从群里点名字进来, 要看的是「我在这个群里和它说过什么」—— 默认只看与问话那一方的
+      // 往来。票据不是一轮对话时不知道是谁问的, 退到最近说过话的那个人 (subs 已按往来、
+      // 最近排好)。落在别的会话上就不猜。
+      with: home?.subs.find((s) => s.count && (land.with ? s.role === land.with : s.role.startsWith("human:")))?.role ?? "",
       relations: hasRelations(msgs, role, info),
       schedules: schedules.length + jobs.length,
       stats,
@@ -164,7 +186,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       const records = store.list();
       const v = viewOf(records, makeDirectory(records, f), ticket, url);
       if (!v) { json(res, 404, { ok: false, error: "不认识这个 role" }); return; }
-      json(res, 200, { ok: true, ...summary(records, f, v.role, url.searchParams.get("session"), baseOfKey(ticket.selfTarget), v) });
+      json(res, 200, { ok: true, ...summary(records, f, v.role, url.searchParams.get("session"), landingOf(ticket, v.role), v) });
     });
   };
 
@@ -262,7 +284,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       const records = store.list();
       v ??= viewOf(records, makeDirectory(records, ff), ticket, url);
       if (!v) return;
-      send("role", summary(records, ff, v.role, url.searchParams.get("session"), baseOfKey(ticket.selfTarget), v));
+      send("role", summary(records, ff, v.role, url.searchParams.get("session"), landingOf(ticket, v.role), v));
     };
 
     /** 这一轮拆出的消息里, 落在当前窗口的那几条。 */

@@ -706,7 +706,9 @@
       if (c.peer) learn(c.peer, c.name, c.label);
       c.subs.forEach(function (s) { learn(s.role, s.name, s.label); });
     });
-    if (!CONV || !convOf(CONV)) { CONV = d.conv || ''; WITH = ''; }
+    // 没带 conv 的链接 (群里点名字进来) 落在服务端挑的窗口上, 连同它挑的「只看我与谁」;
+    // 手里的 conv 失效则只退回整个会话。
+    if (!CONV || !convOf(CONV)) { WITH = CONV ? '' : d['with'] || ''; CONV = d.conv || ''; }
     reveal();
     renderRole(); renderUsage(); renderConvs(); renderHead();
   };
