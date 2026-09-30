@@ -427,8 +427,9 @@
     // 名字下面那一行就是出身 —— 有父亲的直接写成「谁的什么」(可点过去), 不再另起一条重复。
     // 分身 = 从父亲某个 session 节点 fork 出来的 (带着那一刻的上下文);
     // 子 wizard = 父亲 spawn 的白板, 只有出身、没有继承。
-    var kind = !r.parent
-      ? esc(r.kind === 'human' ? '人' : 'wizard')
+    // 人不挂身份行 —— 名字本身就够了。
+    var kind = r.kind === 'human' ? ''
+      : !r.parent ? 'wizard'
       : r.forkedFrom
         ? '<span class="go" data-r="' + esc(r.parent.id) + '" title="从它的 session ' + esc(r.forkedFrom) + ' fork, 开局带着那一刻的上下文">⧉ .' + esc(r.parent.name) + ' 的分身 · @' + esc(r.forkedFrom.slice(0, 8)) + '</span>'
         : '<span class="go" data-r="' + esc(r.parent.id) + '" title="它 spawn 的白板, 没有继承上下文">↳ .' + esc(r.parent.name) + ' 的子 wizard</span>';
@@ -444,7 +445,7 @@
     $('#rb-who').innerHTML =
       '<div class="id"><span class="av">' + esc(r.label) + '</span>' +
         '<span class="l">' + nm(r.id, r.name) +
-          '<span class="k">' + kind + (r.kind === 'wizard' ? '<span class="st" id="rb-st"></span>' : '') + '</span></span></div>' +
+          (kind ? '<span class="k">' + kind + (r.kind === 'wizard' ? '<span class="st" id="rb-st"></span>' : '') + '</span>' : '') + '</span></div>' +
       (r.description ? '<p class="job">' + esc(r.description) + '</p>' : '') +
       '<div class="facts">' + facts.join('') + '</div>';
     paintStatus();
@@ -641,7 +642,8 @@
     return null;
   };
 
-  var loadMsgs = function (limit) {
+  // land: 换视角时由它来定位 (锚住一条旧消息), 返回 false 才照常吸底。
+  var loadMsgs = function (limit, land) {
     var gen = S.gen;
     if (!CONV) { inner.innerHTML = '<div class="empty">选一个会话</div>'; return Promise.resolve(); }
     return api('api/msgs', viewParams(limit ? { limit: limit } : {})).then(function (d) {
@@ -659,6 +661,7 @@
       render(inner);
       foldPings(inner);
       expireRows();
+      if (land && land()) return;
       S.pinned = true; toBottom(true);
       // CDN 字体/代码高亮加载完会改变高度, 再吸一次底。
       setTimeout(function () { toBottom(); }, 60);
@@ -748,10 +751,11 @@
   };
 
   /** 视角或窗口变了: 摘要、正文、SSE 全部按新参数重来。 */
-  var refresh = function () {
+  var refresh = function (land) {
     S.gen++;
     syncUrl();
-    inner.innerHTML = '<div class="empty">加载中…</div>';
+    // 要做 FLIP 就把旧行留到新行到来 —— 中间闪一下「加载中」就量不到旧位置了。
+    if (!land) inner.innerHTML = '<div class="empty">加载中…</div>';
     return api('api/role', viewParams()).then(function (d) {
       if (!d.ok) {
         document.body.innerHTML = '<div class="empty" style="padding:80px">' + esc(d.error || 'not found') + '</div>';
@@ -760,7 +764,7 @@
       applyRole(d);
       syncUrl();
       if (VIEW === 'world' || VIEW === 'plan') { W.sel = ROLE; loadWorld(); }
-      return loadMsgs().then(connect);
+      return loadMsgs(undefined, land).then(connect);
     });
   };
 
@@ -790,14 +794,84 @@
     var withBack = keep && WITH ? from : '';
     ROLE = id; WITH = withBack; SESSION = '';
     CONV = keep || (CONV.indexOf('p:') === 0 ? 'p:' + from : '');
-    inner.classList.remove('flipping'); void inner.offsetWidth; inner.classList.add('flipping');
-    if (same) flipWindow(); else refresh();
+    if (same) { flipWindow(); return; }
+    var snap = VIEW === 'msgs' && !calm() ? snapRows() : {};
+    var kept = VIEW === 'msgs' ? keepBodies() : {};
+    refresh(function () { adoptBodies(kept); return landFlip(snap); });
+  };
+
+  // ── 换视角的 FLIP: 按 msgid 记下每条气泡的位置与底色, 重包后从旧处滑到新处、旧色渐到新色 ──
+  // 位置动在 .mcol 上, 底色按行内第几颗气泡对上 —— 就地重包与整窗重拉两条路一样用。
+  // 只量视窗里的行 —— 屏外的动了也没人看, 长窗口里逐行 getComputedStyle 是真开销。
+  var BUB = '.bubble.mq, .say > .bubble';
+  var calm = function () { return window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches; };
+  var visibleRows = function () {
+    var vp = thread.getBoundingClientRect();
+    return [].slice.call(inner.querySelectorAll('.mrow:not(.mark)')).filter(function (r) {
+      var b = r.getBoundingClientRect();
+      return b.height && b.bottom > vp.top && b.top < vp.bottom;
+    });
+  };
+  var snapRows = function () {
+    return visibleRows().reduce(function (acc, r) {
+      var col = r.querySelector('.mcol');
+      acc[r.getAttribute('data-id')] = {
+        rect: col.getBoundingClientRect(),
+        bubs: [].slice.call(r.querySelectorAll(BUB)).map(function (b) { return getComputedStyle(b).backgroundColor; }),
+      };
+      return acc;
+    }, {});
+  };
+  var playFlip = function (snap) {
+    var ease = { duration: 340, easing: 'cubic-bezier(.2,.7,.2,1)' };
+    Object.keys(snap).forEach(function (id) {
+      var row = rowNode(id), was = snap[id];
+      var col = row && row.querySelector('.mcol');
+      if (!col || !col.animate) return;
+      var now = col.getBoundingClientRect();
+      var dx = was.rect.left - now.left, dy = was.rect.top - now.top;
+      if (dx || dy) col.animate([{ transform: 'translate(' + dx + 'px,' + dy + 'px)' }, { transform: 'none' }], ease);
+      var bubs = row.querySelectorAll(BUB);
+      was.bubs.forEach(function (from, i) {
+        var b = bubs[i], to = b && getComputedStyle(b).backgroundColor;
+        if (to && to !== from) b.animate([{ backgroundColor: from }, { backgroundColor: to }], ease);
+      });
+    });
+  };
+  // 整窗重拉会把正文换成服务端的新片段 —— 过程框按「已有终句就收起」重新出生, 点开的工具
+  // 与取过的正文全丢, 看上去就是工具那一截在切换中突然没了。sig 没变的行把旧 .mb 整块搬回来,
+  // 与 flipWindow 同一个做法: 折叠 / 展开态、懒取的工具正文、已渲染的 markdown 一并保住。
+  var keepBodies = function () {
+    return [].slice.call(inner.querySelectorAll('.mrow:not(.mark)')).reduce(function (acc, r) {
+      var mb = r.querySelector('.mb');
+      if (mb) acc[r.getAttribute('data-id')] = { mb: mb, sig: r.getAttribute('data-sig') };
+      return acc;
+    }, {});
+  };
+  var adoptBodies = function (kept) {
+    Object.keys(kept).forEach(function (id) {
+      var row = rowNode(id), k = kept[id];
+      var nb = row && row.getAttribute('data-sig') === k.sig && row.querySelector('.mb');
+      if (nb) nb.replaceWith(k.mb);
+    });
+  };
+  // 整窗重拉后: 滚动锚在第一条新旧都在的消息上, 其余相对它滑动; 一条都不在 (换到了别的会话) 才整列淡入。
+  var landFlip = function (snap) {
+    var anchor = Object.keys(snap).filter(function (id) {
+      var r = rowNode(id); return r && r.getBoundingClientRect().height;
+    })[0];
+    if (!anchor) { inner.classList.remove('flipping'); void inner.offsetWidth; inner.classList.add('flipping'); return false; }
+    thread.scrollTop += rowNode(anchor).querySelector('.mcol').getBoundingClientRect().top - snap[anchor].rect.top;
+    S.pinned = atBottom();
+    playFlip(snap);
+    return true;
   };
 
   /** 同一窗口换视角: 拿手里的片段就地重包左右, 已渲染的正文整块搬过去; 侧栏交给 SSE 的首个 role 事件。 */
   var flipWindow = function () {
     S.gen++;
     syncUrl();
+    var snap = calm() ? {} : snapRows();
     unfoldPings(inner);
     [].slice.call(inner.querySelectorAll('.mrow')).forEach(function (row) {
       var m = S.frags[row.getAttribute('data-id')];
@@ -811,6 +885,7 @@
     });
     foldPings(inner);
     expireRows();
+    playFlip(snap);
     connect();
     var gen = S.gen;
     api('api/msgs', viewParams()).then(function (d) {

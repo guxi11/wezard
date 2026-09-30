@@ -333,7 +333,7 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .mrow.mark { justify-content: center }
 .mrow.mark > * { flex: 1; max-width: 520px }
 
-/* 视角切换的那一下: 整列消息淡出再按新视角排回来 —— 这一页唯一的编排动效。 */
+/* 换视角后一条旧消息都不在了 (换到别的会话): 整列淡入。有交集的走 chat.js 的逐条 FLIP (位移 + 底色)。 */
 .thread-in.flipping { animation: flip .26s ease }
 @keyframes flip { 0% { opacity: 1 } 45% { opacity: 0; transform: scaleX(.985) } 100% { opacity: 1 } }
 @media (prefers-reduced-motion: reduce) {
