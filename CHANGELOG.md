@@ -4,8 +4,19 @@
 
 ## [Unreleased]
 
+## [2.1.2] - 2026-10-01
+
 ### Changed
 - rolepage 侧栏私聊的预览不再带 `名字:` 前缀 —— 标题行已是对方, 只放正文。
+- rolepage 换视角时气泡按消息做位移与底色的过渡动画; 过程框的收起 / 展开态与已取回的工具正文在切换中不再丢失。
+- rolepage 侧栏群下的子项默认只露前 5 个, 第 6 位是固定的展开 / 折叠条。
+
+### Fixed
+- rolepage 的链接在企业微信里按 wizard 复用窗口 (`ww_uniq` 取 wizard 名字): 此前按聊天复用, 同一个群里不同 wizard 的链接挤进同一个窗口。
+- rolepage 侧栏的预览与时间取自同一句话, 私聊 / 群聊 / 子项同一条规则。
+- rolepage 的保温 ping 折叠按 wizard 分开计数: 群里几个 wizard 同时挂机时 ping 交错成一串, 旧折叠把它们相加 (6+6 显示 ×12); ping 的发话人记成 wezard, 不再算成人说的。
+- rolepage 群内一对一视图找回保温 ping —— 按被保温的 wizard 归入这一对。
+- rolepage 的 ping 折叠标题不再转大写 —— wizard 名字大小写敏感。
 
 ## [2.1.1] - 2026-10-01
 
@@ -719,7 +730,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.1.1...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.1.2...HEAD
+[2.1.2]: https://github.com/guxi11/wezard/compare/v2.1.1...v2.1.2
 [2.1.1]: https://github.com/guxi11/wezard/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/guxi11/wezard/compare/v2.0.6...v2.1.0
 [2.0.6]: https://github.com/guxi11/wezard/compare/v2.0.5...v2.0.6
