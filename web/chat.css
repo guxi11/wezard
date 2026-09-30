@@ -375,7 +375,7 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 }
 .ping-fold[open] > .ping-sum::after { transform: rotate(90deg) }
 .ping-fold > .ping-sum:hover { color: #57606a }
-.ping-fold .pb { color: #57606a; font-weight: 700; flex: none }
+.ping-fold .pb { color: #57606a; font-weight: 700; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .ping-fold .ps { overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .ping-fold .pt { flex: none; opacity: .8 }
 .ping-fold .ping-body {

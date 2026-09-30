@@ -577,7 +577,7 @@
       (sw ? '<span class="fi"><span class="fn">' + esc(nameOf(other)) + '</span>' + CHEVRON + '</span>' : '') + '</button>';
     var av = mine ? '' : '<button class="av' + (canSwitch(m.from) ? ' go' : '') + '" data-r="' + esc(m.from) + '" title="' + esc(nameOf(m.from)) + '"' + (canSwitch(m.from) ? '' : ' disabled') + '>' + esc(m.fromLabel || roleLabel(m.from)) + '</button>';
     return '<div class="mrow ' + (mine ? 'mine' : 'them') + '" data-id="' + esc(m.id) + '" data-turn="' + esc(m.turnId || m.id) + '" data-ts="' + m.ts + '"' +
-      (m.ping ? ' data-ping="1"' : '') + ' data-sig="' + esc(m.sig) + '" data-stale-at="' + (m.staleAt || 0) + '">' +
+      (m.ping ? ' data-ping="1" data-ping-who="' + esc(m.dir === 'in' ? m.toName : m.fromName) + '"' : '') + ' data-sig="' + esc(m.sig) + '" data-stale-at="' + (m.staleAt || 0) + '">' +
       '<div class="mcol"><div class="mwho">' + av + who + '</div><div class="mb">' + m.html + '</div></div>' +
       flip +
     '</div>';
@@ -598,18 +598,24 @@
     var run = [];
     var flush = function (before) {
       if (!run.length) { return; }
-      var seen = {}, n = 0;
+      // 群窗里几个 wizard 同时挂机, 它们的 ping 会交错成一串 —— 按 wizard 分开计数, 不相加。
+      var seen = {}, per = {}, order = [];
       run.forEach(function (r) {
         var t = r.getAttribute('data-turn') || r.getAttribute('data-id');
-        if (!seen[t]) { seen[t] = 1; n++; }
+        var w = r.getAttribute('data-ping-who') || '';
+        if (seen[t]) { return; }
+        seen[t] = 1;
+        if (!per[w]) { per[w] = 0; order.push(w); }
+        per[w]++;
       });
+      var tally = order.map(function (w) { return (w ? '.' + w + ' ' : '') + '×' + per[w]; }).join(' · ');
       var t0 = Number(run[0].getAttribute('data-ts') || 0);
       var t1 = Number(run[run.length - 1].getAttribute('data-ts') || 0);
       var span = fmtHM(t0) + (fmtHM(t1) !== fmtHM(t0) ? ' – ' + fmtHM(t1) : '');
       var d = document.createElement('details');
       d.className = 'ping-fold';
       d.open = PING_OPEN;
-      d.innerHTML = '<summary class="ping-sum"><span class="pb">🏓 ×' + n + '</span>' +
+      d.innerHTML = '<summary class="ping-sum"><span class="pb">🏓 ' + esc(tally) + '</span>' +
         '<span class="ps">保温 ping</span><span class="pt">' + esc(span) + '</span></summary>' +
         '<div class="ping-body"></div>';
       root.insertBefore(d, before);

@@ -61,6 +61,8 @@ export const unwrapMates = (q: string): string =>
 export const senderOf = (r: TurnDetailRecord): string => {
   if (r.from?.kind === "peer") return r.from.from || "human:";
   if (r.from?.kind === "task") return `task:${r.from.taskId || "?"}`;
+  // 保温 ping 是守护进程打的, 不是人: 频道上挂着的 speaker 是上一句人话留下的。
+  if (isKeepaliveTurn(r)) return SYSTEM;
   // 先于 speaker: 队友的话落进来时, 频道上挂着的可能还是上一句人话的 speaker。
   const mate = teammateOf(r.userQuery);
   if (mate !== undefined) return SYSTEM;
