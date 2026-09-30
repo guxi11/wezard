@@ -333,6 +333,16 @@ export const roleStats = (records: readonly DetailRecord[], role: string, now: n
   return turns.length ? summarizeTag(role, turns, now) : undefined;
 };
 
+/** 一个会话窗口的账: 窗口里那几轮, 连同它们派出的子 agent (那也是这段往来的花销)。
+ *  人自己不跑轮次, 没有 roleStats —— 它看的是「我与这个 wizard 在这个群里」花了多少。 */
+export const windowStats = (records: readonly DetailRecord[], msgs: readonly Msg[], target: string, now: number): TagSummary | undefined => {
+  const ids = new Set(msgs.map((m) => m.turn.id));
+  const turns = records.filter(isTurn)
+    .filter((r) => ids.has(r.id) || ids.has(r.agent?.parentTurnId ?? ""))
+    .sort((a, b) => a.createdAt - b.createdAt);
+  return turns.length ? summarizeTag(target, turns, now) : undefined;
+};
+
 /** 与别的 role 有没有关系 (家谱 / 私聊 / 派活) —— 决定顶栏要不要出「关系图」入口。 */
 export const hasRelations = (msgs: readonly Msg[], role: string, info: RoleInfo): boolean =>
   !!info.parent || info.clones.length > 0 || info.spawns.length > 0 ||

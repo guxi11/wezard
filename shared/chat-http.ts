@@ -23,7 +23,7 @@ import { isMark, isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, type WorldFacts } from "./world.js";
 import {
   allMessages, convMessages, convsOf, hasRelations, inSpan, makeDirectory, marksOf, messagesOfTurn,
-  roleInfo, roleStats, sessionsOf, type Directory, type Msg, type SessionSpan,
+  roleInfo, roleStats, sessionsOf, windowStats, type Directory, type Msg, type SessionSpan,
 } from "./role-view.js";
 import { renderMark, renderMsg, type MsgFragment } from "./role-render.js";
 import { chatScript, chatStyles, renderChatPage } from "./chat-render.js";
@@ -121,8 +121,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     res.end(a.body);
   };
 
-  /** role 摘要: 身份、会话列表、session 分段、页脚总账。 */
-  const summary = (records: readonly DetailRecord[], f: WorldFacts, role: string, sid: string | null, ticketBase: string) => {
+  /** role 摘要: 身份、会话列表、session 分段、页脚总账 (role 自己的 + 当前窗口的)。 */
+  const summary = (records: readonly DetailRecord[], f: WorldFacts, role: string, sid: string | null, ticketBase: string, win?: Pick<View, "conv" | "with">) => {
     const now = Date.now();
     const dir = makeDirectory(records, f);
     const msgs = allMessages(records, now);
@@ -145,6 +145,10 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       relations: hasRelations(msgs, role, info),
       schedules: schedules.length + jobs.length,
       stats,
+      // 「只看我与某个 wizard」的窗口自带一本账 —— 人的视角没有 stats, 用量看这里。
+      winStats: win?.conv && dir.isWizard(win.with)
+        ? windowStats(records, convMessages(msgs, role, win.conv, win.with).filter((m) => inSpan(span)(m.ts)), win.with, now)
+        : undefined,
     };
   };
 
@@ -153,9 +157,9 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
     void getFacts().then((f) => {
       const records = store.list();
-      const r = pickRole(makeDirectory(records, f), ticket, url);
-      if (!r) { json(res, 404, { ok: false, error: "不认识这个 role" }); return; }
-      json(res, 200, { ok: true, ...summary(records, f, r, url.searchParams.get("session"), baseOfKey(ticket.selfTarget)) });
+      const v = viewOf(records, makeDirectory(records, f), ticket, url);
+      if (!v) { json(res, 404, { ok: false, error: "不认识这个 role" }); return; }
+      json(res, 200, { ok: true, ...summary(records, f, v.role, url.searchParams.get("session"), baseOfKey(ticket.selfTarget), v) });
     });
   };
 
@@ -242,7 +246,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       const records = store.list();
       v ??= viewOf(records, makeDirectory(records, ff), ticket, url);
       if (!v) return;
-      send("role", summary(records, ff, v.role, url.searchParams.get("session"), baseOfKey(ticket.selfTarget)));
+      send("role", summary(records, ff, v.role, url.searchParams.get("session"), baseOfKey(ticket.selfTarget), v));
     };
 
     /** 这一轮拆出的消息里, 落在当前窗口的那几条。 */

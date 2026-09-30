@@ -7,9 +7,13 @@
 // 资源 URL 一律用相对路径 —— svr 常挂在反代子路径下 (如 /wc/role), 绝对路径会 404。
 // /role 与 /chat 同在根下, 所以两者都能用同一个 `chat/app.js`。
 //
-// 左栏顶上是**当前 role** 的名片 (身份 + profile 总账 + 关系/日程入口), 下面是它的
-// 会话列表; 右栏只管一个会话 —— 头上写这个群聊/私聊是什么, 下面是消息。关系与日程
-// 都是当前 role 的, 所以入口挂在名片上, 视图在右栏里换显。
+// 左栏顶上是**当前 role** 的名片 (身份 + 关系/日程入口), 下面是它的会话列表; 右栏
+// 只管一个会话 —— 头上写这个群聊/私聊是什么, 下面是消息。关系与日程都是当前 role
+// 的, 所以入口挂在名片上, 视图在右栏里换显。
+//
+// 用量条 (.usage) 是同一个组件的两个挂载点, 跟着「这本账是谁的」走: wizard 的总账
+// 属于整页 (#pg-usage, 横跨两栏的页脚); 人自己不跑轮次, 账属于它点开的那个窗口
+// (#ch-usage, 右栏底)。
 import { SHARED_CSS, TURN_CSS } from "./detail-render.js";
 import { readAsset, type Asset } from "./web-assets.js";
 
@@ -42,10 +46,7 @@ export const renderChatPage = (): string =>
       <div class="acts" id="rb-acts"></div>
     </header>
     <nav class="convs" id="convs" aria-label="会话"></nav>
-    <footer class="sidefoot" id="rb-foot" hidden>
-      <div id="rb-sess"></div>
-      <div class="prof" id="rb-prof"></div>
-    </footer>
+    <footer class="sidefoot" id="rb-foot" hidden><div id="rb-sess"></div></footer>
   </aside>
   <main class="main">
     <header class="chathead" id="chathead">
@@ -59,7 +60,9 @@ export const renderChatPage = (): string =>
       <div class="wscroll" id="wscroll"><div class="wmap" id="wmap"></div></div>
     </div>
     <div class="pane" id="pane-plan" hidden><div class="plan-in" id="plan-in"></div></div>
+    <footer class="usage" id="ch-usage" hidden></footer>
   </main>
 </div>
+<footer class="usage page" id="pg-usage" hidden></footer>
 <script src="chat/app.js" defer></script>
 </body></html>`;

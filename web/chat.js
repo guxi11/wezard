@@ -22,7 +22,7 @@
 
   // at / recvAt: 服务端快照时刻与本地收到时刻。所有"现在几点"的判断都换算到
   // 服务端时钟, 否则客户端时钟偏几分钟就会把运行中的会话判成已结束。
-  var R = { at: 0, recvAt: 0, role: null, sessions: [], convs: [], relations: false, schedules: 0, stats: null };
+  var R = { at: 0, recvAt: 0, role: null, sessions: [], convs: [], relations: false, schedules: 0, stats: null, winStats: null };
   // frags: 当前窗口的原始片段 (id → 片段)。片段不带方向, 换视角时拿它就地重包左右。
   var S = { es: null, pinned: true, gen: 0, frags: {} };
   // 关系/日程两栏共用的世界快照。sel = 当前聚焦的节点, kinds = 边类型开关。
@@ -365,8 +365,8 @@
       g.onclick = function () { switchRole(g.getAttribute('data-r')); };
     });
     $('#rb-sess').innerHTML = R.sessions.length > 1 ? sessPicker() : '';
+    $('#rb-foot').hidden = R.sessions.length < 2;
     bindSessPicker();
-    syncFoot();
     var acts = [];
     // 入口只在有东西可看时出现, 且只是一枚徽标 —— 名片的主角是身份, 不是按钮。
     if (R.relations) acts.push('<button class="bd' + (VIEW === 'world' ? ' on' : '') + '" data-view="world">关系图</button>');
@@ -379,60 +379,64 @@
     document.title = nameOf(r.id) + ' 的视角';
   };
 
-  // 左栏底: session 切换 + 用量总账, 都是「轮次」的事, 与上面的身份分开; 两样都空就整条收起。
-  var syncFoot = function () {
-    $('#rb-foot').hidden = !$('#rb-sess').innerHTML && !$('#rb-prof').innerHTML;
-  };
-
-  // ── profile: 当前 role 自己跑过的轮次的总账 (选了 session 就只算那一段) ──
-  var COLORS = { input: '#0a7d6b', cacheRead: '#8250df', cacheWrite: '#953800', output: '#1a7f37' };
+  // ── 用量条: 一组轮次的总账 ──
+  // usageHTML 只管「一本账长什么样」(TagSummary → 一条), 账是谁的、挂在哪由 renderUsage 定。
+  var SEGS = [
+    ['input', '输入', '#0a7d6b'], ['cacheRead', '缓存读', '#8250df'],
+    ['cacheWrite', '缓存写', '#953800'], ['output', '输出', '#1a7f37'],
+  ];
   var TIP = {
     turns: '对话轮数', tools: '工具调用次数', api: 'API 请求次数',
-    ctx: '上下文峰值 — 单次请求送入的 input + 缓存 的最高值',
-    out: '累计输出 token', cache: '累计缓存 token (读 + 写)', time: '累计耗时',
+    ctx: '上下文峰值 — 单次请求送入的 input + 缓存 的最高值', time: '累计耗时',
   };
   var liveDur = function (t) {
     var d = (t.usage && t.usage.durationMs) || 0;
     if (!t.runningUntil) return d;
     return d + Math.max(0, Math.min(srvNow(), t.runningUntil) - R.at);
   };
-  var renderProfile = function () {
-    var el = $('#rb-prof');
-    var t = R.stats;
-    if (!t) { el.innerHTML = ''; syncFoot(); return; }
+  var usageHTML = function (t) {
     var u = t.usage || {};
-    var segs = [['input', '输入'], ['cacheRead', '缓存读'], ['cacheWrite', '缓存写'], ['output', '输出']]
-      .filter(function (s) { return u[s[0]] > 0; });
+    var segs = SEGS.filter(function (s) { return u[s[0]] > 0; });
     var total = segs.reduce(function (a, s) { return a + u[s[0]]; }, 0);
+    // 值为 0 = 该指标没有数据 (老记录 / 网关不报 usage), 不占位置。
+    var kv = function (k, n, text) {
+      return n ? '<span class="kv" title="' + esc(TIP[k] || k) + '"><b>' + esc(text) + '</b>' + k + '</span>' : '';
+    };
+    // 输出 / 缓存不再单列成指标 —— 它们就是 I/O 图例里的那几格。
     var io = total > 0
-      ? '<div class="io" title="累计 token I/O · 共 ' + fmtTok(total) + '">' +
+      ? '<span class="u-io" title="累计 token I/O · 共 ' + fmtTok(total) + '">' +
           '<span class="bar">' + segs.map(function (s) {
             return '<span class="seg" style="width:' + (u[s[0]] / total * 100).toFixed(2) + '%;background:' +
-              COLORS[s[0]] + '" title="' + s[1] + ': ' + fmtTok(u[s[0]]) + '"></span>';
+              s[2] + '" title="' + s[1] + ': ' + fmtTok(u[s[0]]) + '"></span>';
           }).join('') + '</span>' +
           '<span class="leg">' + segs.map(function (s) {
-            return '<span class="lg"><i style="background:' + COLORS[s[0]] + '"></i>' + s[1] +
+            return '<span class="lg"><i style="background:' + s[2] + '"></i>' + s[1] +
               '<b>' + fmtTok(u[s[0]]) + '</b></span>';
           }).join('') + '</span>' +
-        '</div>'
+        '</span>'
       : '';
-    // 值为 0 = 该指标没有数据 (老记录 / 网关不报 usage), 不占格子。
-    var st = function (k, n, text) {
-      return n ? '<span class="kv" title="' + esc(TIP[k] || k) + '">' +
-        '<span class="v">' + esc(text) + '</span><span class="k">' + k + '</span></span>' : '';
-    };
-    var cache = (u.cacheRead || 0) + (u.cacheWrite || 0);
-    // 忙闲已在名片的状态里, 这里只留模型。
-    el.innerHTML =
-      '<div class="hd"><span class="lb">用量</span>' +
-        (t.model ? '<span class="model" title="' + esc(t.model) + '">' + esc(t.model.replace(/^claude-/, '')) + '</span>' : '') +
-      '</div>' +
-      '<div class="grid">' +
-        st('turns', t.turns, t.turns) + st('tools', u.tools, u.tools) + st('api', u.calls, u.calls) +
-        st('ctx', u.ctxPeak, fmtTok(u.ctxPeak)) + st('out', u.output, fmtTok(u.output)) +
-        st('cache', cache, fmtTok(cache)) + st('time', liveDur(t), fmtDur(liveDur(t))) +
-      '</div>' + io;
-    syncFoot();
+    return '<span class="u-lb">用量</span>' +
+      '<span class="u-kvs">' +
+        kv('turns', t.turns, t.turns) + kv('tools', u.tools, u.tools) + kv('api', u.calls, u.calls) +
+        kv('ctx', u.ctxPeak, fmtTok(u.ctxPeak)) + kv('time', liveDur(t), fmtDur(liveDur(t))) +
+      '</span>' + io +
+      (t.model ? '<span class="u-model" title="' + esc(t.model) + '">' + esc(t.model.replace(/^claude-/, '')) + '</span>' : '');
+  };
+  // 没变就不碰 DOM: 心跳每 3s 来一次, 重建会把悬停中的 tooltip 蹭掉。
+  var putUsage = function (el, t) {
+    var html = t ? usageHTML(t) : '';
+    // !el: web/ 是热更的, 外壳 HTML 要等 daemon 重启 —— 新脚本可能先遇上没有挂载点的旧外壳。
+    if (!el || el._html === html) return;
+    el._html = html; el.innerHTML = html; el.hidden = !html;
+    // 条的高度挤的是消息区 —— 原本贴底的继续贴底。
+    toBottom();
+  };
+  // wizard: 整页页脚, 它自己跑过的全部轮次 (选了 session 就只算那一段)。
+  // 人: 自己不跑轮次 —— 在群里点开某个 wizard 之后, 窗口底下是这段往来的账。
+  var renderUsage = function () {
+    var wiz = !!R.role && R.role.kind === 'wizard';
+    putUsage($('#pg-usage'), wiz ? R.stats : null);
+    putUsage($('#ch-usage'), !wiz && WITH && VIEW === 'msgs' ? R.winStats : null);
   };
 
   // ── 右栏头: 这个群聊 / 私聊是什么 (关系 / 日程视图时是视图名) ──
@@ -625,7 +629,8 @@
   var applyRole = function (d) {
     R.at = d.at || Date.now(); R.recvAt = Date.now();
     R.role = d.role; R.sessions = d.sessions || []; R.convs = d.convs || [];
-    R.relations = !!d.relations; R.schedules = d.schedules || 0; R.stats = d.stats || null;
+    R.relations = !!d.relations; R.schedules = d.schedules || 0;
+    R.stats = d.stats || null; R.winStats = d.winStats || null;
     ROLE = d.role.id;
     learn(d.role.id, d.role.name, d.role.label);
     R.convs.forEach(function (c) {
@@ -633,7 +638,7 @@
       c.subs.forEach(function (s) { learn(s.role, s.name, s.label); });
     });
     if (!CONV || !convOf(CONV)) { CONV = d.conv || ''; WITH = ''; }
-    renderRole(); renderProfile(); renderConvs(); renderHead();
+    renderRole(); renderUsage(); renderConvs(); renderHead();
   };
 
   // ── SSE: role 摘要 + 当前窗口的消息增量。断线指数退避重连。 ──
@@ -674,7 +679,9 @@
     CONV = key; WITH = withRole || '';
     if (VIEW !== 'msgs') setView('msgs');
     app.classList.add('reading');
-    renderConvs(); renderHead();
+    // 上一个窗口的账不属于这个窗口 —— 先收起, 新的随 SSE 的首个 role 事件到。
+    R.winStats = null;
+    renderConvs(); renderHead(); renderUsage();
     S.gen++;
     syncUrl();
     inner.innerHTML = '<div class="empty">加载中…</div>';
@@ -1463,7 +1470,7 @@
     app.classList.toggle('outer', v !== 'msgs');
     // 手机上关系/日程占满主区 —— 进入即阅读态。
     if (v !== 'msgs') app.classList.add('reading');
-    renderRole(); renderHead();
+    renderRole(); renderHead(); renderUsage();
     if (v === 'msgs') { fxStop(); toBottom(true); }
     else {
       // 关系图一打开就聚焦在当前 role 身上: 它的邻居亮着, 其余压暗。
@@ -1484,7 +1491,7 @@
   // 本地心跳: 相对时间、运行中判定、耗时都随时间变化, 但服务端没有新事件可推。
   setInterval(function () {
     if (!R.role) return;
-    renderProfile();
+    renderUsage();
     expireRows();
     if (VIEW === 'world') tickWorld();
     else if (VIEW === 'plan') renderPlan();

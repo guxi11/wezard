@@ -18,14 +18,18 @@
   --pub: #237a55;     /* 公开 */
 }
 
-html, body { height: 100% }
+html { height: 100% }
 /* overscroll-behavior:none 阻止整页橡皮筋回弹 —— webview 里它会和内层
    .thread 抢滚动手势, 表现为"滚一下卡住/整页在弹"。 */
-body { overflow: hidden; overscroll-behavior: none; color: var(--ink) }
+/* body 是一根竖轴: 上面 .app (两栏), 下面整页页脚 (wizard 的用量条)。 */
+body {
+  height: 100vh; height: 100dvh; display: flex; flex-direction: column;
+  overflow: hidden; overscroll-behavior: none; color: var(--ink);
+}
 button { font: inherit; color: inherit }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px }
 
-.app { display: flex; height: 100vh; height: 100dvh }
+.app { display: flex; flex: 1; min-height: 0 }
 @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .3 } }
 
 /* 名字 = 地址。点是地址的一部分, 也是这一页唯一的颜色记号。 */
@@ -99,36 +103,35 @@ button { font: inherit; color: inherit }
 .sp-it.all { border-bottom: 1px solid var(--line); border-radius: 6px 6px 0 0; margin-bottom: 3px }
 .sp-it.all .id { font-family: inherit }
 
-/* 左栏底: session 切换 + 用量, 都是轮次的事 —— 与顶上的身份分开, 钉在会话列表下面。 */
-.sidefoot {
-  flex: none; border-top: 1px solid var(--line); padding: 10px 12px 12px;
-  display: flex; flex-direction: column; gap: 8px; background: var(--paper);
-}
-.sidefoot[hidden] { display: none }
-#rb-sess:empty, #rb-prof:empty { display: none }
+/* 左栏底: session 切换 —— 轮次的事, 与顶上的身份分开, 钉在会话列表下面。 */
+.sidefoot { flex: none; border-top: 1px solid var(--line); padding: 10px 12px; background: var(--paper) }
 /* 在底部, 浮层往上开。 */
 .sidefoot .sp-list { top: auto; bottom: calc(100% + 4px); transform: translateY(4px) }
 .sidefoot .sp.open .sp-list { transform: none }
 
-/* profile: 这个 role 自己跑过的轮次的总账 —— 平铺在左栏底, 不套卡片。 */
-.prof { font-family: ui-monospace, Menlo, monospace }
-.prof .hd { display: flex; align-items: center; gap: 8px; font-size: 11.5px; margin-bottom: 6px }
-.prof .hd .lb { font-size: 10px; color: var(--faint); text-transform: uppercase; letter-spacing: .4px; font-family: system-ui, sans-serif }
-.prof .model {
-  margin-left: auto; color: var(--mute);
-  max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+/* ── 用量条: 一组轮次的总账 ─────────────────────────────────────────
+   一个组件两处挂: 整页页脚 (wizard 的总账) / 聊天窗口底 (人与某个 wizard 这段往来的账)。
+   宽屏一行排完: 标签 · 指标 · I/O 条 + 图例 · 模型。每一组自身不折行, 一行排不下时
+   整组落到下一行 —— 窄屏自然变成两三行, 不需要另一套结构。 */
+.usage {
+  flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 6px 20px;
+  padding: 7px 20px; border-top: 1px solid var(--line); background: var(--paper);
+  font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--mute);
+  font-variant-numeric: tabular-nums;
 }
-.prof .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px 4px }
-.prof .kv { display: flex; flex-direction: column; align-items: flex-start; min-width: 0 }
-.prof .kv .v { font-size: 13px; font-weight: 700; color: #1f2328; font-variant-numeric: tabular-nums; white-space: nowrap }
-.prof .kv .k { font-size: 9.5px; color: #8c959f; text-transform: uppercase; letter-spacing: .4px }
-.prof .io { margin-top: 8px; display: flex; flex-direction: column; gap: 6px }
-.prof .bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: #eaeef2 }
-.prof .bar .seg { height: 100% }
-.prof .leg { display: flex; gap: 4px 9px; flex-wrap: wrap }
-.prof .lg { display: flex; align-items: center; gap: 4px; font-size: 10.5px; color: #8c959f }
-.prof .lg i { width: 8px; height: 8px; border-radius: 2px; flex: none }
-.prof .lg b { color: #1f2328; font-weight: 700; font-variant-numeric: tabular-nums }
+.usage b { font-weight: 700; color: var(--ink) }
+.usage .u-lb { font: 10px system-ui, sans-serif; color: var(--faint); letter-spacing: .4px }
+.usage .u-kvs { display: flex; gap: 4px 16px }
+.usage .kv { white-space: nowrap; font-size: 9.5px; color: var(--faint); text-transform: uppercase; letter-spacing: .4px }
+.usage .kv b { font-size: 12.5px; margin-right: 4px; letter-spacing: 0; text-transform: none }
+.usage .u-io { display: flex; align-items: center; gap: 12px; min-width: 0 }
+.usage .bar { flex: none; width: 140px; display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--line) }
+.usage .bar .seg { height: 100% }
+.usage .leg { display: flex; gap: 4px 12px }
+.usage .lg { display: flex; align-items: center; gap: 4px; white-space: nowrap }
+.usage .lg i { width: 8px; height: 8px; border-radius: 2px; flex: none }
+.usage .lg b { margin-left: 1px }
+.usage .u-model { margin-left: auto; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 
 /* 群聊头像 = 参与者头像拼图: 1 格居中, 2 格左右, 3/4 格田字。 */
 .mosaic {
@@ -374,6 +377,11 @@ button { font: inherit; color: inherit }
   .flip { min-width: 16px; padding: 0 4px; font-size: 0 }
   .turn-group { padding: 12px }
   .thread { padding-bottom: calc(12px + env(safe-area-inset-bottom)) }
+  .usage { padding: 8px 12px; gap: 6px 14px }
+  .usage .u-kvs, .usage .leg { flex-wrap: wrap }
+  .usage .u-io { flex: 1 1 100%; flex-wrap: wrap; gap: 6px 12px }
+  .usage .bar { flex: 1 1 100%; width: auto }
+  .usage.page { padding-bottom: calc(8px + env(safe-area-inset-bottom)) }
 }
 
 /* UA 的 [hidden] 规则和 `.gbar{display:flex}` 这类类选择器同权重, 而作者样式

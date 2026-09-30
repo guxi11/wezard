@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Changed
+- **rolepage 的用量改成一条页脚组件, 宽屏单行**: 标签 · 指标 · token I/O 条 + 图例 · 模型 一行排完, 窄屏整组折行; 输出 / 缓存不再单列成指标 (就是图例里的那几格)。挂载点跟着账的归属走 —— wizard 视角是横跨两栏的整页页脚 (它自己的总账, 选了 session 只算那一段); 人的视角在群里点开某个 wizard 后, 聊天窗口底下是「我与它在这个群里」这段往来的账 (`/api/role` 与 SSE `role` 事件新增 `winStats`)。左栏底只剩 session 切换。
 - **创建同名 wizard 时, 静默超过一天的旧 wizard 直接被顶掉**。`/new`、`new_claude_session`、`spawn_wizard` / `clone_wizard` 撞上的名字若属于一个最后活跃在 1 天前的 wizard (transcript mtime; 没有会话的冷记录按出生时刻), 新的直接拿走名字, 不再退避成 `-N`, 也不再 409 —— 分身整个收掉 (pane、绑定、记录), 聊天的默认会话只让出名字。一天内还活动过的照旧 409 / 退避。
 
 ### Fixed
