@@ -302,14 +302,31 @@
       '<span class="pv">' + esc(pv) + '</span></span>';
   };
 
+  // 展开态按会话各记各的: 点开一个不收起别的, 轮询重画也不动它。
+  // OPEN_AT = 已经替它自动展开过的那个 CONV —— 选中新会话时展开一次, 之后折不折由人说了算。
+  var OPEN = {}, OPEN_AT = '';
+  var reveal = function () {
+    if (CONV && CONV !== OPEN_AT) { OPEN[CONV] = true; OPEN_AT = CONV; }
+  };
+  // 点侧栏项: 没选中它 → 选中 (会话顺带展开); 已选中 → 不再选一遍, 右边的正文一个字不动 ——
+  // 会话只折叠/展开, 子项什么都不做。
+  var clickItem = function (key, withRole) {
+    if (key !== CONV || withRole !== WITH || VIEW !== 'msgs') return selectConv(key, withRole);
+    // 窄屏退回列表后再点它是要回去读, 不是要折叠。
+    if (!app.classList.contains('reading')) return app.classList.add('reading');
+    if (withRole) return;
+    OPEN[key] = !OPEN[key];
+    renderConvs();
+  };
+
   var convItem = function (c) {
     var on = c.key === CONV;
     var title = c.kind === 'wizard' ? nm(c.peer, c.name, true) : '<span class="nm chat">' + esc(c.name) + '</span>';
     // 只列与我有往来的: 在群里但没和我说过话的人, 点进去也是空的。
-    var talked = on ? c.subs.filter(function (s) { return s.count; }) : [];
+    var talked = OPEN[c.key] ? c.subs.filter(function (s) { return s.count; }) : [];
     var subs = talked.length
       ? '<div class="subs">' + talked.map(function (s) {
-          var sel = s.role === WITH;
+          var sel = on && s.role === WITH;
           return '<button class="si' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '" data-with="' + esc(s.role) + '" ' +
             'title="' + esc('我与 ' + nameOf(s.role) + ' 在这里的 ' + s.count + ' 条往来') + '">' +
             goSpan('av', s.role, esc(s.label)) +
@@ -334,7 +351,8 @@
     if (convsEl._html === html) return;
     convsEl._html = html; convsEl.innerHTML = html;
     convsEl.querySelectorAll('[data-conv]').forEach(function (b) {
-      b.onclick = function () { selectConv(b.getAttribute('data-conv'), b.getAttribute('data-with') || ''); };
+      var key = b.getAttribute('data-conv'), w = b.getAttribute('data-with') || '';
+      b.onclick = function () { clickItem(key, w); };
     });
     bindGo(convsEl);
   };
@@ -689,6 +707,7 @@
       c.subs.forEach(function (s) { learn(s.role, s.name, s.label); });
     });
     if (!CONV || !convOf(CONV)) { CONV = d.conv || ''; WITH = ''; }
+    reveal();
     renderRole(); renderUsage(); renderConvs(); renderHead();
   };
 
@@ -728,6 +747,7 @@
 
   var selectConv = function (key, withRole) {
     CONV = key; WITH = withRole || '';
+    reveal();
     if (VIEW !== 'msgs') setView('msgs');
     app.classList.add('reading');
     // 上一个窗口的账不属于这个窗口 —— 先收起, 新的随 SSE 的首个 role 事件到。
