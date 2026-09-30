@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-10-01
+
 ### Added
 - rolepage 里一句话尾巴上的 `<system-reminder>` (信封 / 点名 / 名册变动) 默认收成一个 `<reminder>` 标签, 点一下展开原文。
 
@@ -13,6 +15,7 @@
 - 公开 `send_peer` 派来的那一轮, 回复进群时气泡头标出方向 `.me → .它` (与问话气泡的 `.它 → .me` 对称) —— 之前只有 `.me`, 群里看不出这段话是答给转派它的 wizard 而不是答给人的。引用这种气泡仍然路由到发话方。
 
 ### Fixed
+- rolepage 侧栏里私聊的执行中灯从头像角挪到名字右边, 与会话子项对齐。
 - 保温 ping 改为整句锚定匹配: `resumePing` 是一句 `continue`, 同伴或人说的「continue（接着干…）」不再被当成 ping 整轮吞掉。
 - 保温的轮次预算把工具调用算作真实活动 —— 长串工具调用之后不再被误判为空闲; CLI 自己的 `Retrying in …s · attempt n/m` 页脚算忙, 不再给正在重试的会话排一句 `continue`。
 
@@ -713,7 +716,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.1.1...HEAD
+[2.1.1]: https://github.com/guxi11/wezard/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/guxi11/wezard/compare/v2.0.6...v2.1.0
 [2.0.6]: https://github.com/guxi11/wezard/compare/v2.0.5...v2.0.6
 [2.0.5]: https://github.com/guxi11/wezard/compare/v2.0.4...v2.0.5
