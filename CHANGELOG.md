@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [2.0.5] - 2026-09-30
+
 ### Changed
 - rolepage 侧栏群聊下的子项预览只显示消息正文, 不再带 `名字:` 前缀 —— 标题行已经是这个名字。
 - rolepage 会话顶栏只显示名字, 不再带头像、成员行与「私聊 · N 条」副标题。
@@ -12,6 +14,8 @@
 ### Fixed
 - **keepalive 的 pong 不再在 daemon reload 后漏进群**。吞没 ping 轮的两个开关 (注入时的计时窗、tail 读到 ping 行时的内容标记) 都只在内存里, 而恢复后的 tail 从 EOF 起读 —— reload 恰好落在 ping 与 pong 之间时, ping 行已在 EOF 之前, 两个开关都没了, pong 自己开出一轮发进群。现在多一道回复侧的判定: 没有吞没在持有、而到达的文本含 `pong` 时, 回 transcript 看最后一条 user 轮是不是 keepalive ping (`peers.openKeepalivePing`, 与 `keepaliveStamps` 同一套签名), 是就从这一条起吞到 `turn_end`, 照旧记成带标记的保温轮。判据落在 transcript 上而不是这个词上: 真回答里提到 pong, 它前面是一个真问题。
 - rolepage 侧栏的预览不再留白: 最后一轮只有工具调用、或还在跑没吐字时, 预览越过它落在最后一条有正文的消息上 (子项、群聊行、私聊行同一条规则); 时间仍是最近活动的时间。
+- **pane 上限 (`maxPanes`) 数不到孤儿 pane**: 上限只数「有绑定指着的 pane」, 而绑定一旦丢了 pane id (2.0.4 修掉的 `-u` 问题让 restore 认不出 pane → 下一条消息另起新 pane, 旧 pane 不杀), 旧 pane 就既没人叫得到、也不在账上, 攒了几十个也触不到上限。sweep 现在先收掉 daemon 自己 tmux session 里没有任何绑定指着的会话 pane (会话注册表认得里面住着活的 AI 会话才算, 普通 pane 一律跳过; 静默 10 分钟以上; 正忙 / 人正盯着的照旧不收), 不占名额、不等超限。
+- **正文里提到的 wizard 名字不再抢走路由**: 一条消息只做前缀匹配 —— 清洗之后 (链接标记还原成裸 `.name`、@ 剥掉、去掉开头的空白与不可见字符) 落在消息**开头**的那个 `.x` 才是目标, 认不认识都算 (不认识 = 叫一个新 wizard 出来); 正文里的 `.fix` / `.gitignore` 一律只是提及, 哪怕名册里真有这个名字。此前「第一个解析得出的已知名字」胜出, 一句话里顺口提到另一个 wizard 就会被送错地方。引用消息同一条规则。
 
 ### Removed
 - **rolepage 群聊顶栏的跳转按钮**: `wxwork://openconversation` 的 `roomid` 要的是客户端内部的数字群 id, 而智能机器人的消息 / 事件帧里只有字符串 `chatid` (`wr…`, 单聊连它都没有), 也没有可反查的接口 —— 按钮拼出来的链接跳不了。
@@ -41,7 +45,6 @@
 
 ## [2.0.3] - 2026-09-30
 
-- **pane 上限 (`maxPanes`) 数不到孤儿 pane**: 上限只数「有绑定指着的 pane」, 而绑定一旦丢了 pane id (上一条的 restore 认不出 pane → 下一条消息另起新 pane, 旧 pane 不杀), 旧 pane 就既没人叫得到、也不在账上, 攒了几十个也触不到上限。sweep 现在先收掉 daemon 自己 tmux session 里没有任何绑定指着的会话 pane (会话注册表认得里面住着活的 AI 会话才算, 普通 pane 一律跳过; 静默 10 分钟以上; 正忙 / 人正盯着的照旧不收), 不占名额、不等超限。
 ### Changed
 - **rolepage 的头像与名字都是进入那个 role 视角的入口**: 侧栏的私聊项 / 群下子项、会话头、消息行 (发言人与 `→ 对方`) 一律可点, 不必先选中; 侧栏选中项上那颗换视角的小图标移除。点行的其余位置仍是选中会话。
 - **stream 气泡超时收口改成一句中间结束语**: 一轮跑过 WeCom 的 ~6min stream 窗口时, 气泡以 `⏳ 仍在处理中, 点击链接查看详情…` 收口 —— brief 下不再定格在最后一行 CoT 进度上, 非 brief 下缀在已有正文之后 (没正文时也不再留着 loading 气泡等它自然过期)。已被新消息顶替的旧轮照旧只留链接。
@@ -666,7 +669,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.0.4...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.0.5...HEAD
+[2.0.5]: https://github.com/guxi11/wezard/compare/v2.0.4...v2.0.5
 [2.0.4]: https://github.com/guxi11/wezard/compare/v2.0.3...v2.0.4
 [2.0.3]: https://github.com/guxi11/wezard/compare/v2.0.2...v2.0.3
 [2.0.2]: https://github.com/guxi11/wezard/compare/v2.0.1...v2.0.2
