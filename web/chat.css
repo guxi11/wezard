@@ -303,6 +303,8 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .mrow .mb .tool-body section > h2, .mrow .mb .diff-meta,
 .mrow .mb .tool-call > summary:hover { background: var(--bub-soft); border-color: var(--bub-line) }
 .mrow .mb .md-body pre code { background: transparent }
+/* 不是说给人听的 (工具过程框、保温 ping、reminder) 一律白底 —— 底色只留给真正的对话。 */
+.mrow .mb .steps, .ping-fold .mrow { --bub: #fff; --bub-soft: #f6f8fa; --bub-line: #d0d7de }
 /* 展开的工具正文 (command / diff / 文件内容) 是裸 section, 吃的是 TURN_CSS 的白底。 */
 .mrow .mb .tool-body section { background: transparent; border-color: var(--bub-line) }
 .mrow .mb .bubble details { border-color: var(--bub-line) }
@@ -366,10 +368,10 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 /* ── 🏓 keepalive 折叠 ──────────────────────────────────────────────
    保温 ping 不是对话, 但它是真花销 —— 所以留在时间轴上, 只是收成一行虚线。 */
 /* summary 的灰底 / 底线是 SHARED_CSS 里通用 details 的 —— 圆角得自己裁, 底线只在展开时才是分割线。 */
-.ping-fold { border: 1px dashed #d8dee4; border-radius: 10px; background: #fbfcfd; overflow: hidden }
+.ping-fold { border: 1px dashed #d8dee4; border-radius: 10px; background: #fff; overflow: hidden }
 .ping-fold:not([open]) > .ping-sum { border-bottom: 0 }
 .ping-fold > .ping-sum {
-  display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: #fff;
   cursor: pointer; list-style: none; font-size: 11.5px; color: #8c959f;
   font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums;
 }
@@ -725,7 +727,7 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 
 /* 输入尾巴上的 system-reminder: 默认一行摘要, 点一下换成原文 (见 detail-render.splitReminders)。 */
 .rems { display: flex; flex-direction: column; gap: 4px; padding: 0 14px 10px }
-.rem { cursor: pointer; border-radius: 6px; padding: 3px 8px; font-size: 11.5px; color: var(--mute); background: #0000000a }
+.rem { cursor: pointer; border-radius: 6px; padding: 3px 8px; font-size: 11.5px; color: var(--mute); background: #fff; box-shadow: inset 0 0 0 1px var(--line) }
 .rem-pretty { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline }
 .rem-pretty ul { flex-basis: 100%; margin: 2px 0 0; padding-left: 18px }
 .rem.peer .rem-l { color: var(--priv) }
