@@ -211,6 +211,11 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .si .ts { margin-left: auto; flex: none; font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums }
 .si .pv { display: block; font-size: 11.5px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .si .pv:empty { display: none }
+.si-more {
+  display: block; width: 100%; text-align: center; padding: 4px 8px; border: 0;
+  background: transparent; cursor: pointer; font-size: 11.5px; color: var(--mute);
+}
+.si-more:hover { color: var(--accent); font-weight: 600 }
 
 /* 执行中的 wizard: 名字右边一盏呼吸灯, 会话与子项同一位置, 与回复头上的 .tg-dot 同大。 */
 .ci .l1 .live, .si .l1 .live {

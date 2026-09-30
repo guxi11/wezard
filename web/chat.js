@@ -316,6 +316,8 @@
   // 展开态按会话各记各的: 点开一个不收起别的, 轮询重画也不动它。
   // OPEN_AT = 已经替它自动展开过的那个 CONV —— 选中新会话时展开一次, 之后折不折由人说了算。
   var OPEN = {}, OPEN_AT = '';
+  // 子项默认只露前 SUB_FOLD 个, 其余收在一条展开/折叠条后面; 展开态同样按会话各记各的。
+  var SUB_FOLD = 5, MORE = {};
   var reveal = function () {
     if (CONV && CONV !== OPEN_AT) { OPEN[CONV] = true; OPEN_AT = CONV; }
   };
@@ -335,14 +337,21 @@
     var title = c.kind === 'wizard' ? nm(c.peer, c.name, true) : '<span class="nm chat">' + esc(c.name) + '</span>';
     // 只列与我有往来的: 在群里但没和我说过话的人, 点进去也是空的。
     var talked = OPEN[c.key] ? c.subs.filter(function (s) { return s.count; }) : [];
+    var hidden = talked.length - SUB_FOLD;
+    var bar = hidden > 0
+      ? '<button class="si-more" data-more="' + esc(c.key) + '">' + (MORE[c.key] ? '折叠' : '展开更多') + ' × ' + hidden + '</button>'
+      : '';
+    // 展开条钉在第 SUB_FOLD+1 位, 展开与折叠都不挪: 其余子项展开后接在它下面。
+    var sub = function (s) {
+      var sel = on && s.role === WITH;
+      return '<button class="si' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '" data-with="' + esc(s.role) + '" ' +
+        'title="' + esc('我与 ' + nameOf(s.role) + ' 在这里的 ' + s.count + ' 条往来') + '">' +
+        goSpan('av', s.role, esc(s.label)) +
+        line(nm(s.role, s.name, true), s.lastTs, s.preview, lampOf(s.status)) + '</button>';
+    };
+    var rest = MORE[c.key] ? talked.slice(SUB_FOLD).map(sub).join('') : '';
     var subs = talked.length
-      ? '<div class="subs">' + talked.map(function (s) {
-          var sel = on && s.role === WITH;
-          return '<button class="si' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '" data-with="' + esc(s.role) + '" ' +
-            'title="' + esc('我与 ' + nameOf(s.role) + ' 在这里的 ' + s.count + ' 条往来') + '">' +
-            goSpan('av', s.role, esc(s.label)) +
-            line(nm(s.role, s.name, true), s.lastTs, s.preview, lampOf(s.status)) + '</button>';
-        }).join('') + '</div>'
+      ? '<div class="subs">' + talked.slice(0, SUB_FOLD).map(sub).join('') + bar + rest + '</div>'
       : '';
     var sel = on && !WITH;
     return '<button class="ci' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '">' +
@@ -364,6 +373,10 @@
     convsEl.querySelectorAll('[data-conv]').forEach(function (b) {
       var key = b.getAttribute('data-conv'), w = b.getAttribute('data-with') || '';
       b.onclick = function () { clickItem(key, w); };
+    });
+    convsEl.querySelectorAll('[data-more]').forEach(function (b) {
+      var key = b.getAttribute('data-more');
+      b.onclick = function () { MORE[key] = !MORE[key]; renderConvs(); };
     });
     bindGo(convsEl);
   };
