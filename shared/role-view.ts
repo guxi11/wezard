@@ -283,7 +283,10 @@ export const convMessages = (msgs: readonly Msg[], role: string, key: string, wi
   }
   const base = key.slice(2);
   const ch = msgs.filter((m) => m.channel === base);
-  return withRole ? ch.filter((m) => involves(m, role) && other(m, role) === withRole) : ch;
+  // ping 的对端是系统, 不是这一对里的谁 —— 按它保温的那个 wizard 归: 在这一对里就留着。
+  const inPair = (m: Msg): boolean =>
+    isPing(m) ? m.turn.target === role || m.turn.target === withRole : involves(m, role) && other(m, role) === withRole;
+  return withRole ? ch.filter(inPair) : ch;
 };
 
 // ── session ───────────────────────────────────────────────────────────
