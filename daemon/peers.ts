@@ -536,12 +536,16 @@ const pickContextTokens = (jsonlPath: string, raw: string): number => {
  *                warmth clock; only a real model request actually re-warms the cache.
  *   `lastRealMs` newest GENUINE turn (non-keepalive) — the real-idle cutoff; 0
  *                when none sits in the read window ⇒ real work predates the tail.
+ *   `streak`     pings already sent since that last genuine turn — the round
+ *                counter's seed. The budget is "N pings after real work", a fact
+ *                of the transcript: a counter that lives only in memory restarts
+ *                at 0 on every daemon reload and hands the session a fresh N.
  *   `stamped`    false when no turn carried a timestamp (backend without them), so
  *                the caller can fall back to mtime instead of judging all idle. */
 export const keepaliveStamps = (
   jsonlPath: string,
   pingSigs: string[],
-): { lastMs: number; lastRealMs: number; stamped: boolean } => {
+): { lastMs: number; lastRealMs: number; streak: number; stamped: boolean } => {
   const turns = tailTurns(jsonlPath, 24);
   // Every warmer ping now carries the full instruction; a stall-recovery ping
   // carries a different one. Match every injected form (`pingSigs` = normalized
@@ -552,9 +556,13 @@ export const keepaliveStamps = (
   // keepalive (the ping AND every record of its reply) is `withoutKeepalive`'s
   // rule — one definition for the clocks, the quote dedup and the peer readers.
   const newest = (ts: readonly Turn[]): number => ts.reduce((m, t) => Math.max(m, t.ms ?? 0), 0);
+  const real = withoutKeepalive(turns, pingSigs);
+  // Everything past the last genuine turn is keepalive; its user turns are the pings.
+  const sinceReal = real.length ? turns.slice(turns.lastIndexOf(real[real.length - 1]!) + 1) : turns;
   return {
     lastMs: newest(turns),
-    lastRealMs: newest(withoutKeepalive(turns, pingSigs)),
+    lastRealMs: newest(real),
+    streak: sinceReal.filter((t) => t.role === "user").length,
     stamped: turns.some((t) => (t.ms ?? 0) > 0),
   };
 };

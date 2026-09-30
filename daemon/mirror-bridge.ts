@@ -5320,8 +5320,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const initKeepalive = (jsonlPath: string, mtime: number, pingSigs: string[]): AttachState["keepalive"] => {
     let lastMs = 0;
     let lastRealMs = 0;
-    try { const s = keepaliveStamps(jsonlPath, pingSigs); lastMs = s.lastMs; lastRealMs = s.lastRealMs; } catch { /* unreadable tail */ }
-    return { lastMs, lastRealMs, seenMtime: mtime, pinging: false, pingMtime: 0, round: 0, settledAt: 0 };
+    // round is seeded from the transcript too: starting at 0 would hand every
+    // daemon reload a fresh budget, and a session idle across N reloads gets
+    // N × rounds pings instead of rounds.
+    let round = 0;
+    try { const s = keepaliveStamps(jsonlPath, pingSigs); lastMs = s.lastMs; lastRealMs = s.lastRealMs; round = s.streak; } catch { /* unreadable tail */ }
+    return { lastMs, lastRealMs, seenMtime: mtime, pinging: false, pingMtime: 0, round, settledAt: 0 };
   };
 
   const fireKeepalive = async (a: AttachState, stalled: boolean): Promise<void> => {

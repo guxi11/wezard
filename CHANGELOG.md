@@ -22,6 +22,7 @@
 
 ### Fixed
 - `wait_peer` 在对方答完之后又被保温 ping 过一次时, 交回来的是那个 `pong` 而不是它的答案。
+- **keepalive 的轮次预算不再被 daemon reload 清零**。`round` 只活在内存里, 每次 reload 从 0 起数 —— 一个闲着的会话跨 N 次 reload 会被 ping N × `rounds` 次而不是 `rounds` 次。现在起步值从 transcript 读 (`keepaliveStamps.streak`: 最后一条真实轮之后已经发过几次 ping)。
 
 ## [2.0.6] - 2026-09-30
 
