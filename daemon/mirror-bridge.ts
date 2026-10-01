@@ -13,7 +13,7 @@
 // Caveat: the user shouldn't be hammering the same session in their local TTY
 // while a `--resume` injection is in flight; Claude Code locks aren't strict.
 import { spawn } from "node:child_process";
-import { existsSync, readdirSync, statSync, watch, openSync, readSync, closeSync, type FSWatcher } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, watch, openSync, readSync, closeSync, type FSWatcher } from "node:fs";
 import { join, dirname } from "node:path";
 import type { WSClient, WsFrame, WsFrameHeaders, EventMessageWith, TemplateCard, TemplateCardEventData } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
@@ -41,7 +41,7 @@ import { selectModel, type ModelScope, type ModelSelectResult } from "./model-se
 import { hasRegistry, markTranscript, probeOf, sessionOnPane, sessionPanes, submittedSince, type LiveSession, type TranscriptMark } from "./cc-session.js";
 import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
-import { recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnQuery, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, lastChannelOf, buildDetailUrl, buildChatUrl, roleUniq } from "./detail.js";
+import { knowsToolUse, recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnQuery, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, lastChannelOf, buildDetailUrl, buildChatUrl, roleUniq } from "./detail.js";
 import type { CtxCut, TurnFrom, TurnOrigin, TurnUsage } from "./detail.js";
 import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagHeader, withLinkedTagHeader, linkedTagHead, linkTags, parseTagHeader, MAX_BODY_LINKS } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
@@ -610,6 +610,35 @@ const renderToolUseGroupBody = (
 
 
 
+// 从尾往前, 逐个产出含 needle 的整行 —— 只切命中的那几行, 不把整份 transcript 拆成数组。
+function* linesWithFromEnd(text: string, needle: string): Generator<string> {
+  let at = text.lastIndexOf(needle);
+  while (at >= 0) {
+    const s = text.lastIndexOf("\n", at) + 1;
+    const e = text.indexOf("\n", at);
+    yield text.slice(s, e < 0 ? undefined : e);
+    at = s > 0 ? text.lastIndexOf(needle, s - 1) : -1;
+  }
+}
+
+type ToolCall = { toolUseId: string; name: string; input: unknown };
+
+// tail 漏看了某次 tool_use (daemon 停机窗口里落盘的行 —— 恢复后的 tail 从 EOF 起读;
+// 一个挂了几小时的审批最常撞上), 结果却到了: 回 transcript 按 id 把调用本身捞回来。
+const recoverToolUse = (toolUseId: string, deps: TailDeps): ToolCall | undefined => {
+  let text: string;
+  try { text = readFileSync(deps.jsonlPath, "utf8"); } catch { return undefined; }
+  for (const raw of linesWithFromEnd(text, toolUseId)) {
+    let line: TranscriptLine | null;
+    try { line = JSON.parse(raw) as TranscriptLine; } catch { continue; }
+    if (deps.normalizeLine) line = deps.normalizeLine(line) as TranscriptLine | null;
+    const blocks = line?.type === "assistant" ? line.message?.content : undefined;
+    const b = Array.isArray(blocks) ? blocks.find((x) => x?.type === "tool_use" && x.id === toolUseId) : undefined;
+    if (b) return { toolUseId, name: b.name ?? "tool", input: b.input };
+  }
+  return undefined;
+};
+
 // Render one transcript line into tagged items. Caller decides batching.
 const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
   let line: TranscriptLine;
@@ -704,6 +733,12 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
         if (!raw) continue;
         const toolUseId = b.tool_use_id ?? "";
         const full = truncateWithCount(raw, DETAIL_RESULT_MAX);
+        // 孤儿 result: 先补发它的调用, 下游 (turn store / 气泡) 就和 tail 当场看到时一样配对。
+        const lost = toolUseId && deps.includeTools && !knowsToolUse(toolUseId) ? recoverToolUse(toolUseId, deps) : undefined;
+        if (lost) {
+          recordTool({ id: lost.toolUseId, toolName: lost.name, toolInput: lost.input, sessionId: deps.sessionId, target: deps.target });
+          out.push({ kind: "tool_use", calls: [lost], body: renderToolUseGroupBody([lost], deps) });
+        }
         // 始终把完整 result 落 detail 库 + 作为 tool_result item 发出 — 与
         // includeToolResults(气泡推送开关)彻底解耦: 关掉气泡时 detail 页与 brief
         // turn 页(handleBriefItem 消费本 item 写 turn store)都仍要看到 result。

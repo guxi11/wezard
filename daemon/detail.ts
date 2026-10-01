@@ -196,6 +196,12 @@ export const recordCloseOpenTurns = (scope: { target?: string; sessionId?: strin
 
 export const getDetail = (id: string): DetailRecord | undefined => store?.get(id);
 
+/** 这次 tool_use 是否已经落过库。单卡记录会被容量回收挤掉 (一个挂了几小时的审批),
+ *  所以再问一遍有没有哪一轮还握着它 —— 两处都没有, 才算真丢了。 */
+export const knowsToolUse = (toolUseId: string): boolean =>
+  getDetail(toolUseId)?.kind === "tool" ||
+  (store?.list() ?? []).some((r) => r.kind === "turn" && r.items.some((it) => it.t === "tool_use" && it.toolUseId === toolUseId));
+
 // 一个 wizard 名字背后的 rolepage 链接需要一张票据 —— `?id=` 既是凭据, 也是页面默认
 // 落点。从没跑过一轮的会话没有自己的票据, 返回 undefined。
 export const latestTurnIdFor = (target: string): string | undefined => latestTurnId((r) => r.target === target);
