@@ -382,9 +382,19 @@
     renderConvs();
   };
 
+  // 一项的内容 (头像 + 两行): 会话项、子项、关系图卡片共用 —— 时刻、最近一句、未读都取自会话本身。
+  // tail 接在名字后面 (关系图的折叠计数)。
+  var convRow = function (c, tail) {
+    var title = c.kind === 'wizard' ? nm(c.peer, c.name, true) : '<span class="nm chat">' + esc(c.name) + '</span>';
+    return avatarOf(c) + line(title + (tail || ''), c.lastTs, c.preview, stTag(c.status, true), unreadOf(c));
+  };
+  var subRow = function (c, s, tail) {
+    return goSpan('av', s.role, esc(s.label)) +
+      line(nm(s.role, s.name, true) + (tail || ''), s.lastTs, s.preview, stTag(s.status, true), unreadOf(c, s.role));
+  };
+
   var convItem = function (c) {
     var on = c.key === CONV;
-    var title = c.kind === 'wizard' ? nm(c.peer, c.name, true) : '<span class="nm chat">' + esc(c.name) + '</span>';
     // 只列与我有往来的: 在群里但没和我说过话的人, 点进去也是空的。
     var talked = OPEN[c.key] ? c.subs.filter(function (s) { return s.count; }) : [];
     var hidden = talked.length - SUB_FOLD;
@@ -396,8 +406,7 @@
       var sel = on && s.role === WITH;
       return '<button class="si' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '" data-with="' + esc(s.role) + '" ' +
         'title="' + esc('我与 ' + nameOf(s.role) + ' 在这里的 ' + s.count + ' 条往来') + '">' +
-        goSpan('av', s.role, esc(s.label)) +
-        line(nm(s.role, s.name, true), s.lastTs, s.preview, stTag(s.status, true), unreadOf(c, s.role)) + '</button>';
+        subRow(c, s) + '</button>';
     };
     var rest = MORE[c.key] ? talked.slice(SUB_FOLD).map(sub).join('') : '';
     var subs = talked.length
@@ -405,8 +414,7 @@
       : '';
     var sel = on && !WITH;
     return '<button class="ci' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '">' +
-        avatarOf(c) + line(title, c.lastTs, c.preview, stTag(c.status, true), unreadOf(c)) +
-      '</button>' + subs;
+        convRow(c) + '</button>' + subs;
   };
 
   var renderConvs = function () {
@@ -1272,13 +1280,19 @@
   };
 
   // 卡片与侧栏会话项同一套: 头像 · 名字 + 状态灯 · 时刻 / 最近一句。
+  // 视角与对端有会话项 → 就画那一项 (与侧栏同一份数据, 未读照算); 没有 → 画节点, 时刻取这条边最近一次发生,
+  // 而不是节点自己最后的动静 —— 卡片承载的是边。
   var tnodeHTML = function (F, n, folded) {
     var me = n.target === ROLE;
-    var title = nm(n.target, n.name, true) +
-      (folded ? '<span class="tfold" title="它下面还有 ' + folded + ' 个, 切到它的视角可见">+' + folded + '</span>' : '');
+    var tail = folded ? '<span class="tfold" title="它下面还有 ' + folded + ' 个, 切到它的视角可见">+' + folded + '</span>' : '';
+    var hit = edgeConv(F, n.target), c = hit && convOf(hit[0]);
+    var s = c && hit[1] && (c.subs || []).filter(function (x) { return x.role === hit[1]; })[0];
+    var p = F.pp[n.target];
+    var row = s ? subRow(c, s, tail)
+      : c ? convRow(c, tail)
+      : goSpan('av', n.target, esc(n.label)) + line(nm(n.target, n.name, true) + tail, p ? p.last : n.lastTs, n.preview, stTag(n, true));
     return '<button class="ci tci' + (me ? ' me' : '') + (edgeOn(F, n.target) ? ' on' : '') + '" data-t="' + esc(n.target) + '">' +
-      labelHTML(F.pp[n.target]) + goSpan('av', n.target, esc(n.label)) +
-      line(title, n.lastTs, n.preview, stTag(n, true)) + '</button>';
+      labelHTML(p) + row + '</button>';
   };
 
   // keep(父, 孩子) → 'full' 整枝 / 'leaf' 只画它自己 / '' 不画; 不给 keep = 全画。shown 收集画出来的节点。
