@@ -724,6 +724,22 @@ server.registerTool(
     })),
 );
 
+server.registerTool(
+  "route_candidates",
+  {
+    title: "Who could take this task",
+    description:
+      "一件活要不要转给**已有**的 wizard? 先调它。守护进程替你把能算的都算好: 每个已有 wizard 的职责 / 最近的话与这件活重叠了哪些词, 它当前上下文里 (上次压缩之后) 读过哪些文件、其中哪些被这件活点到, 它在不在同一个工作区、忙闲、上下文多大 (`ctx`)。没有任何交集的不列, 列出来的按证据强弱排 (文件命中 > 职责 > 最近的话), 末尾永远附「新 spawn」。不出分数、不替你拍板 —— 交集是不是同一件事、接着用它那段上下文值不值 (省下的重读 vs 往后每一轮都背着它的 ctx), 由你读表判断: 选中一个就 tell_peer 给它, 都不合适就 spawn_wizard。",
+    inputSchema: {
+      task: z.string().describe("这件活, 原话或一句概括都行 —— 带上提到的文件名 / 模块名 / 函数名, 文件命中是最强的证据。"),
+      cwd: z.string().optional().describe("这件活落在哪个工作区。省略 = 你自己的工作区。"),
+      limit: z.number().optional().describe("最多列几个候选 (1-20, 默认 5)。"),
+    },
+  },
+  async ({ task, cwd, limit }) =>
+    unwrapText("route_candidates", await daemonPost("/wizard/route", { task, ...(cwd ? { cwd } : {}), ...(limit ? { limit } : {}) })),
+);
+
 // 换模型和 spawn 时挑模型是同一条路: 守护进程在目标 pane 里打开 `/model` 列表,
 // 读出这台 CLI 此刻真有的每一项, 挑最接近的, 方向键移过去选中。
 server.registerTool(

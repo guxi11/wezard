@@ -51,14 +51,16 @@ import {
   ancestorsOf,
   renderCharter,
   renderRoster,
+  CONTEXT_FULL_TOKENS,
   type WizardBrief,
   type WizardRecord,
 } from "./wizard.js";
 import { bindNoticeBox, createNoticeBox, chatAudience } from "./notices.js";
 import { loadJobStore, renderJobOpen, renderJobClose, JOB_MEMBER_MAX } from "./jobs.js";
-import { clipMiddle, extractResult, lastExchange, lastModel, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
+import { clipMiddle, contextFiles, extractResult, lastContextTokens, lastExchange, lastModel, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { keepalivePingSigs } from "../shared/keepalive.js";
 import { createReceipts } from "./receipts.js";
+import { rankCandidates, renderCandidates } from "./route.js";
 import { parseWhen, renderChatLog, type LogSession } from "./chat-log.js";
 import {
   startGraph,
@@ -1198,10 +1200,6 @@ const main = async (): Promise<void> => {
       return worldCache.facts;
     });
 
-    /** 上下文超过这个数就该自己交接了。Claude 家族最小的窗口是 200k, 留三成余量
-     *  给交接那一轮本身 —— 提示而已, 决定权在 wizard 自己。 */
-    const HANDOFF_HINT_TOKENS = 140_000;
-
     const briefOf = (self: string, target: string): WizardBrief => ({
       name: settleName(wizards, chatNameOf(cfg, target), target),
       address: peerAddress(cfg, self, target),
@@ -1284,7 +1282,7 @@ const main = async (): Promise<void> => {
         cli: info?.cli,
         model: info?.model ?? "",
         contextTokens: info?.contextTokens ?? 0,
-        handoffSuggested: (info?.contextTokens ?? 0) > HANDOFF_HINT_TOKENS,
+        handoffSuggested: (info?.contextTokens ?? 0) > CONTEXT_FULL_TOKENS,
       };
     };
 
@@ -1399,6 +1397,7 @@ const main = async (): Promise<void> => {
         ...r,
         model: r.model || (r.jsonlPath ? lastModel(r.jsonlPath) : ""),
         summary: r.jsonlPath ? lastExchange(r.jsonlPath, 80, warm) : "",
+        contextTokens: r.jsonlPath ? lastContextTokens(r.jsonlPath) : 0,
       }));
       json(res, 200, {
         ok: true,
@@ -1406,13 +1405,40 @@ const main = async (): Promise<void> => {
         matched: hit.length,
         shown: shown.length,
         text: [
-          `名册 · 列出 ${shown.length}/${hit.length} 个 (全机 ${all.length} 个) · 忙 = 正在生成, 闲 = 活着没在跑, 冷 = 没有 pane (发消息会唤醒)`,
+          `名册 · 列出 ${shown.length}/${hit.length} 个 (全机 ${all.length} 个) · 忙 = 正在生成, 闲 = 活着没在跑, 冷 = 没有 pane (发消息会唤醒) · ctx = 当前上下文用量`,
           renderRoster(shown, Date.now(), homedir()),
           ...(hit.length > shown.length
             ? [`还有 ${hit.length - shown.length} 个没列出来 —— 用 query (名字/职责) / cwd (工作区) / chat 收窄, 或者调大 limit`]
             : []),
         ].join("\n"),
       });
+    });
+
+    // 管家分派前的候选表: 事实在这里算 (交集、读过的文件、ctx), 权衡留给管家。
+    // 只为活着的读 transcript —— 冷的没有 jsonl 可读, 靠职责命中进表。
+    http.register("POST /wizard/route", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      const b = body as { task?: string; cwd?: string; limit?: number };
+      const task = (b.task ?? "").trim();
+      if (!task) { json(res, 400, { ok: false, reason: "task is required" }); return; }
+      ensureChatNames(self);
+      const warm = keepalivePingSigs(cfg.wrc.mirror.keepalive.ping);
+      const rows = (await rosterOf(self))
+        .filter((r) => !r.self)
+        .map((r) => {
+          const live = r.jsonlPath ? r.jsonlPath : "";
+          return {
+            ...r,
+            contextTokens: live ? lastContextTokens(live) : 0,
+            files: live ? contextFiles(live) : [],
+            asks: live ? talkTurns(live, 12, warm).filter((t) => t.role === "user").map((t) => t.text) : [],
+            summary: live ? lastExchange(live, 80, warm) : "",
+          };
+        });
+      const limit = Math.min(Math.max(Number(b.limit ?? 5) || 5, 1), 20);
+      const cands = rankCandidates(task, (b.cwd ?? "").trim() || m.getCwd(self).runningCwd, rows).slice(0, limit);
+      json(res, 200, { ok: true, text: renderCandidates(cands, Date.now(), homedir()) });
     });
 
     // 记忆三种作用域: self 跟着自己 (wizards.json), 直写; chat / workspace 是共享的 md,

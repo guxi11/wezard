@@ -212,7 +212,7 @@ export interface CharterArgs {
   steward: boolean;
 }
 
-const addr = (b: WizardBrief): string => `.${b.address || b.name || "?"}`;
+export const addr = (b: WizardBrief): string => `.${b.address || b.name || "?"}`;
 
 const nameLine = (b: WizardBrief): string =>
   `\`${addr(b)}\`${b.description ? ` · ${b.description}` : ""}${b.cwd ? ` · ${b.cwd}` : ""}`;
@@ -246,11 +246,20 @@ export interface RosterRow extends WizardBrief {
   lastActivity: number;
   /** 最近一个来回的一行摘要 (`▸ 问 ◂ 答`); "" = 没有。 */
   summary: string;
+  /** 当前上下文 token 数; 0 = 不知道 (冷会话 / 还没跑过)。管家据此判断「还能不能往里塞活」。 */
+  contextTokens?: number;
   parent?: WizardBrief;
   clones: readonly WizardBrief[];
 }
 
-const agoOf = (ms: number, now: number): string => {
+/** 上下文超过这个数就该自己交接了。Claude 家族最小的窗口是 200k, 留三成余量给
+ *  交接那一轮本身 —— 提示而已, 决定权在 wizard 自己。 */
+export const CONTEXT_FULL_TOKENS = 140_000;
+
+// 名册只报事实, 不替管家判「太满」: 值不值得接着用这段上下文是经济账, 由它自己算。
+export const ctxOf = (n = 0): string => (n ? `ctx ${Math.round(n / 1000)}k` : "");
+
+export const agoOf = (ms: number, now: number): string => {
   if (!ms) return "";
   const min = Math.floor((now - ms) / 60_000);
   if (min < 1) return "刚刚";
@@ -265,6 +274,7 @@ const rosterEntry = (r: RosterRow, now: number, home: string): string[] => {
     r.chat ? `${r.solo ? "单聊" : "群"} ${r.chat}` : "",
     r.cwd ? (home && r.cwd.startsWith(home) ? `~${r.cwd.slice(home.length)}` : r.cwd) : "",
     r.model ?? "",
+    ctxOf(r.contextTokens),
     agoOf(r.lastActivity, now),
     r.parent ? `父 ${addr(r.parent)}` : "",
     r.clones.length ? `分身 ${r.clones.map(addr).join(" ")}` : "",
@@ -337,8 +347,12 @@ export const renderCharter = (a: CharterArgs): string => {
       "你的活是**分派**, 不是亲手干 —— 上下文留给名册和来龙去脉, 别被大段代码和文件塞满:",
       bullet([
         "一两句就能答的 (问进度、问谁在干什么、闲聊) → 自己答",
-        "对口某个已有 wizard 的职责 (`wizard_roster` 看职责与忙闲) → `tell_peer({name, text, public:true})` 转给它: 它的回复直接进群, 你**不必等、不必转述**, 转完这一轮就结束; 它正忙就加 `when:\"idle\"`",
-        "没有对口的 → `spawn_wizard({name, description})` 从白板生一个 (名字取这件事的短名, description 是它往后的职责), **不带 task**; 就位后照上一条用 `tell_peer({public:true})` 把活转给它 —— 这样它的回复进群",
+        "要不要转给**已有** wizard, 先 `route_candidates({task})`: 能算的事实它都算好了 —— 谁的职责 / 最近的话 / 读过的文件和这件活有交集、在不在同一个工作区、忙闲、`ctx` 多大。你只做判断:",
+        "  · **相关性**: 表里的交集是不是真的同一件事 —— 字面沾边不算; 文件命中 (它真读过) 比词面重叠可信",
+        "  · **接着用这段上下文划不划算**: 没有硬阈值, 你来算这笔账 —— 收益是它省掉的重读 (要重读的材料越多越划算); 代价是 `ctx` 越大, 往后每一轮都要背着整段历史 (更贵、更慢)、越容易被旧话题带偏、离交接越近 (窗口一般 200k)。收益盖不过代价, 哪怕相关也别塞给它",
+        "  · 相关 + 划算 → 转给它; 相关但不划算 → 白板 spawn 一个新的, 需要它的结论就在 task 里点名让新的去 `read_chat` / `peek_peer` 它, 别让新的重读一遍; 表里没有候选 → 直接 spawn",
+        "选中了已有的 → `tell_peer({name, text, public:true})` 转给它: 它的回复直接进群, 你**不必等、不必转述**, 转完这一轮就结束; 它正忙就加 `when:\"idle\"`",
+        "没有对口的、或对口的不划算 → `spawn_wizard({name, description})` 从白板生一个 (名字取这件事的短名, description 是它往后的职责), **不带 task**; 就位后照上一条用 `tell_peer({public:true})` 把活转给它 —— 这样它的回复进群",
         "要读很多代码 / 改文件 / 跑很久的活 —— 哪怕你自己能做 —— 也转出去; 你一忙, 这个群里没点名的话就都排在你后面",
         "名册里职责空着的 wizard 转活前先 `peek_peer` 看它在干嘛, 顺手让它补上职责 —— 职责是你分派的依据",
         "人立的规矩、这个群的习惯、仓库的硬约束 → `wizard_remember({scope:\"chat\"|\"workspace\"})` 提交; 共享记忆的合并由定时的记忆整理者做, 不在你这儿",
@@ -360,7 +374,7 @@ export const renderCharter = (a: CharterArgs): string => {
     bullet([
       "`wizard_whoami` 我是谁、上下文用了多少、我的分身有哪些",
       "`wizard_identity` 改名字 / 写职责 (名字全局唯一, 撞名会自动加 `-N` 后缀并告诉你最终名字)",
-      "`wizard_roster` 全部 wizard 与 clone: 名字、home 群、工作区、职责、模型、忙闲、家谱、最近在说什么 —— 找人只用它 (`chat` / `cwd` / `query` 收窄)",
+      "`route_candidates` 一件活该不该转给已有 wizard 的候选表 (交集、读过的文件、ctx), 判断留给你 · `wizard_roster` 全部 wizard 与 clone: 名字、home 群、工作区、职责、模型、忙闲、上下文用量、家谱、最近在说什么 —— 找人只用它 (`chat` / `cwd` / `query` 收窄)",
       "`clone_wizard` 克隆出一个分身 —— fork 我 (或 `from` 点名的某个 wizard) 此刻的上下文, 开局就带着读过的一切, 留在被克隆者的工作区 · `spawn_wizard` 从白板生一个子 wizard —— 不带上下文, 可以去别的目录; 两者都归我管, `name` 起名 (全局唯一), `model` 挑模型 (跑腿的活给 haiku, 要判断的给 opus), 它们还能再生",
       "`stop_wizard` 打断或终结一个分身/wizard (活干完了就收掉它)",
       "`open_job` / `close_job` / `list_jobs` 一次要派出两个以上分身时的**工单**: 群里只出开工/收工两条气泡, 收工时整批回收临时分身",

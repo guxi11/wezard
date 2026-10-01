@@ -1,0 +1,132 @@
+// 管家分派的确定性那一半: 「这件活该不该转给某个已有 wizard」拆成可以算的事实
+// 与必须判断的权衡。
+//
+// 能算的: 它的职责 / 最近的话和这件活重叠了哪些词, 它的上下文里读过哪些文件、
+// 其中哪些被这件活点到, 它在哪个工作区、忙不忙、上下文多大。不能算的: 那些重叠
+// 是不是真的同一件事, 以及「接着用它那段上下文」省下的重读值不值得背着整段历史
+// 往下走 —— 这是经济账, 留给读表的管家。所以这里只做两件事: 把没有任何交集的
+// 候选滤掉, 把剩下的按证据强弱排好、连证据一起摆出来; 不出分数, 不替它拍板。
+//
+// 全是纯函数: 候选的原料 (文件集 / 最近的话 / ctx) 由调用方从 transcript 读好送进来。
+import { addr, agoOf, ctxOf, type WizardBrief } from "./wizard.js";
+
+export interface RouteRow extends WizardBrief {
+  busy: boolean;
+  alive: boolean;
+  lastActivity: number;
+  contextTokens: number;
+  /** 这段上下文里碰过的文件 (contextFiles), 绝对路径。 */
+  files: readonly string[];
+  /** 最近几句问话 (去掉了保温 ping)。 */
+  asks: readonly string[];
+  /** 最近一个来回的一行摘要。 */
+  summary: string;
+}
+
+interface Evidence {
+  row: RouteRow;
+  desc: string[];
+  asks: string[];
+  files: string[];
+  sameCwd: boolean;
+}
+
+// 这类词两边都常见, 撞上了也说明不了是同一件事。
+const STOP = new Set([
+  "the", "and", "for", "with", "this", "that", "from", "into", "src", "lib", "dist", "index",
+  "users", "develop", "home", "tmp", "json", "jsonl", "md", "ts", "js", "tsx", "mjs",
+  "一个", "这个", "那个", "什么", "怎么", "可以", "需要", "我们", "你们", "他们", "现在", "然后",
+  "还是", "就是", "不是", "没有", "是否", "进行", "一下", "看看", "问题", "时候", "如果",
+]);
+
+/** 一段话 → 用来比对的词: 英文/标识符按驼峰与分隔符切开 (整串也留着), 中文取相邻两字。 */
+export const termsOf = (text: string): Set<string> => {
+  const ascii = (text.match(/[A-Za-z0-9_][A-Za-z0-9_.\-/]{2,}/g) ?? []).flatMap((w) => [
+    w.toLowerCase(),
+    ...w.split(/[/.\-_]|(?<=[a-z])(?=[A-Z])/).map((p) => p.toLowerCase()),
+  ]);
+  const han = (text.match(/[一-鿿]{2,}/g) ?? []).flatMap((run) =>
+    Array.from({ length: run.length - 1 }, (_, i) => run.slice(i, i + 2)));
+  return new Set([...ascii, ...han].filter((t) => t.length >= 2 && !STOP.has(t) && !/^\d+$/.test(t)));
+};
+
+const shared = (task: Set<string>, text: string): string[] => [...termsOf(text)].filter((t) => task.has(t));
+
+const relTo = (cwd: string, p: string): string => (cwd && p.startsWith(`${cwd}/`) ? p.slice(cwd.length + 1) : p);
+
+/** `daemon/mirror-bridge.ts` → `mirror-bridge`。 */
+const stemOf = (p: string): string => (p.split("/").pop() ?? "").replace(/\.[^.]+$/, "");
+
+const near = (a: string, b: string): boolean => !!a && !!b && (a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`));
+
+/** 这件活点到的文件名: 每个英文词取最后一段去扩展名 —— `daemon/wizard.ts` 只贡献
+ *  `wizard`, 不贡献目录 `daemon` (否则 daemon.log 也算命中)。 */
+const stemsOf = (text: string): Set<string> =>
+  new Set((text.match(/[A-Za-z0-9_][A-Za-z0-9_.\-/]{2,}/g) ?? []).map((w) => stemOf(w).toLowerCase()).filter((w) => w.length >= 3 && !STOP.has(w)));
+
+/** 同一个文件名只留最后碰的那一次 (`./wizard.js` 与 `daemon/wizard.ts` 是一回事)。 */
+const byStem = (files: readonly string[]): string[] =>
+  files.filter((f, i) => !files.slice(i + 1).some((g) => stemOf(g) === stemOf(f)));
+
+const evidenceOf = (task: Set<string>, stems: Set<string>, taskCwd: string) => (row: RouteRow): Evidence => ({
+  row,
+  desc: shared(task, row.description),
+  asks: [...new Set(row.asks.flatMap((a) => shared(task, a)))],
+  // 文件只认整个文件名被点到: 目录名 (daemon/、web/) 几乎每个文件都带, 文件名里的
+  // 半截词 (role-render 的 render) 又太常见 —— 撞上它们说明不了读过这一个。
+  files: byStem(row.files.filter((f) => stems.has(stemOf(f).toLowerCase()))),
+  sameCwd: near(row.cwd, taskCwd),
+});
+
+// 排序只是让最有证据的先被看到: 文件命中 (它真读过) > 职责 > 最近的话; 同工作区只用来打破平手。
+const weight = (e: Evidence): number => e.files.length * 3 + e.desc.length * 2 + e.asks.length;
+
+/** 有交集的候选, 证据最强的在前。 */
+export const rankCandidates = (task: string, taskCwd: string, rows: readonly RouteRow[]): Evidence[] => {
+  return rows
+    .map(evidenceOf(termsOf(task), stemsOf(task), taskCwd))
+    .filter((e) => weight(e) > 0)
+    .sort((x, y) => weight(y) - weight(x) || Number(y.sameCwd) - Number(x.sameCwd) || y.row.lastActivity - x.row.lastActivity);
+};
+
+const quoted = (ts: readonly string[], max = 6): string =>
+  ts.slice(0, max).map((t) => `「${t}」`).join("") + (ts.length > max ? ` +${ts.length - max}` : "");
+
+/** 文件集落在哪几个顶层目录 —— 一眼看出它的上下文是专注还是摊得很开。 */
+const spread = (cwd: string, files: readonly string[]): string => {
+  const tally = files
+    .map((f) => relTo(cwd, f))
+    .map((r) => (r.startsWith("/") ? "(工作区外)" : r.includes("/") ? `${r.split("/")[0]}/` : "(根)"))
+    .reduce((m, d) => m.set(d, (m.get(d) ?? 0) + 1), new Map<string, number>());
+  return [...tally].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([d, n]) => `${d} ${n}`).join(", ");
+};
+
+const renderOne = (e: Evidence, now: number, home: string): string[] => {
+  const r = e.row;
+  const where = e.sameCwd ? "同工作区" : home && r.cwd.startsWith(home) ? `~${r.cwd.slice(home.length)}` : r.cwd;
+  const hits = [
+    e.files.length ? `读过的文件 ${e.files.slice(-4).map((f) => relTo(r.cwd, f)).join(" ")}${e.files.length > 4 ? ` +${e.files.length - 4}` : ""}` : "",
+    e.desc.length ? `职责${quoted(e.desc)}` : "",
+    e.asks.length ? `最近的话${quoted(e.asks)}` : "",
+  ].filter(Boolean);
+  return [
+    [`\`${addr(r)}\` ${r.busy ? "忙" : r.alive ? "闲" : "冷"}`, where, ctxOf(r.contextTokens) || "ctx ?", agoOf(r.lastActivity, now)]
+      .filter(Boolean).join(" · "),
+    ...(r.description ? [`  职责: ${r.description}`] : []),
+    `  命中: ${hits.join(" · ")}`,
+    ...(r.files.length ? [`  上下文: 读过 ${r.files.length} 个文件 (${spread(r.cwd, r.files)})`] : []),
+    ...(r.summary ? [`  最近: ${r.summary}`] : []),
+  ];
+};
+
+/** 给管家读的候选表。末尾永远留着「新 spawn」这一项 —— 它是没有好候选时的默认。 */
+export const renderCandidates = (cands: readonly Evidence[], now: number, home = ""): string =>
+  [
+    cands.length
+      ? `和这件活有交集的已有 wizard ${cands.length} 个, 证据强的在前 (文件命中 = 它真读过; 词面重叠只是线索):`
+      : "没有哪个已有 wizard 的职责、最近的话或读过的文件和这件活有交集。",
+    ...cands.flatMap((e) => renderOne(e, now, home)),
+    "",
+    "· 新 spawn —— 白板起步, 不背任何历史。",
+    "由你判断: 交集是不是同一件事; 接着用它那段上下文省下的重读, 值不值得往后每一轮都背着它的 ctx (越大越贵、越容易被旧话题带偏、离交接越近)。",
+  ].join("\n");

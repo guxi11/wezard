@@ -520,6 +520,44 @@ const pickContextTokens = (jsonlPath: string, raw: string): number => {
   return 0;
 };
 
+/** 这段上下文里读过 / 改过的文件 (旧的在前、去重, 同一文件按最后一次碰它的位置排)。
+ *
+ *  「它的上下文里装着什么」是可以算出来的事实: 从文件尾往回, 撞上 compact 边界就停
+ *  (边界之前的已被压成摘要, 不再原样在窗口里); `/clear` 换了新 jsonl, 天然隔开。
+ *  只抽工具参数里的路径, 不看结果 —— 读没读过是事实, 读出了什么另说。窗口给到
+ *  1MB: 再往前的东西大概率已不在一个 200k 的上下文里。 */
+export const contextFiles = (jsonlPath: string): string[] => {
+  const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
+  const lines = readTailBytes(jsonlPath, CONTEXT_FILES_BYTES).split("\n");
+  const cut = lines.reduce((at, l, i) => (l.includes('"compact_boundary"') ? i : at), -1);
+  const paths = lines.slice(cut + 1).flatMap((line) => {
+    if (!line.includes("tool_use")) return []; // cheap prefilter
+    let row;
+    try { row = normalize(JSON.parse(line)); } catch { return []; }
+    const content = row?.message?.content;
+    if (!row || row.isSidechain || !Array.isArray(content)) return [];
+    return content.flatMap((b) => (b.type === "tool_use" ? toolPaths(b.input) : []));
+  });
+  // 去重保留最后一次出现的位置。
+  return paths.filter((p, i) => paths.lastIndexOf(p) === i);
+};
+
+const CONTEXT_FILES_BYTES = 1024 * 1024;
+
+// shell 里读文件 (cat / sed -n / grep) 和 Read 工具一样把内容拉进了上下文, 只是路径
+// 藏在命令里: 带扩展名的那些词就是文件。
+const SHELL_FILE_RE = /(?:~|\.{0,2}\/)?[\w.\-/]*\w\.[a-z][a-z0-9]{0,4}\b/gi;
+
+const toolPaths = (input: unknown): string[] => {
+  if (!input || typeof input !== "object") return [];
+  const o = input as Record<string, unknown>;
+  const named = ["file_path", "notebook_path", "path"]
+    .map((k) => o[k])
+    .filter((v): v is string => typeof v === "string" && v.length > 1);
+  const shell = typeof o.command === "string" ? o.command.match(SHELL_FILE_RE) ?? [] : [];
+  return [...named, ...shell.filter((w) => !/^\d/.test(w)).filter((w) => w.includes("/") || /\.(?:ts|tsx|js|mjs|json|jsonc|md|css|html|py|go|rs|sh)$/.test(w))];
+};
+
 /** The two clocks keepalive actually needs, read from MESSAGE-turn timestamps —
  *  never from file mtime. Claude Code appends `file-history-snapshot` / `ai-title`
  *  / `mode` / `permission-mode` lines that carry no `timestamp` yet bump the file
