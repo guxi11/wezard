@@ -38,6 +38,7 @@
 <summary><b>目录</b></summary>
 
 - [快速开始](#快速开始)
+- [双向镜像](#双向镜像)
 - [多 wizard 协同](#多-wizard-协同)
 - [任务编排](#任务编排)
 - [rolepage](#rolepage)
@@ -85,6 +86,18 @@ wezard init
 2. **切到你的项目**：对 AI 说「切到 /path/to/proj」，收到 📂 项目回执即完成，`/pwd` 随时确认。
 3. **审批**：Agent 要跑 `Bash` / `Edit` 时 IM 弹按钮卡，点 `❌` / `⏱10h自动过` / `✅总是` / `✅`；点卡片里的链接看完整 input / result / git diff。
 4. **查命令**：发 `/h` 拉出命令表——`/new` 开新会话、`/clear` 清上下文、`/sessions` 切换、`.name` 叫任意 wizard、`/usage` `/cost` 查额度。
+
+---
+
+## 双向镜像
+
+左边是 tmux 里的 CLI，右边是企业微信里的同一段对话。
+
+![tmux 与企业微信双向镜像](images/mirror.png)
+
+- **IM → CLI**：企业微信里发的消息由守护进程 `tmux paste-buffer` 进 CLI 的输入框——这是唯一能让远程消息出现在你本机窗口里的通路，你坐回电脑前看到的，就是它替你敲的那一行。
+- **CLI → IM**：Agent 的回复、工具调用、思考过程实时推回聊天。默认只推**聊天自己发起的那一轮**：你在电脑前敲出来的轮次只记进 [rolepage](#rolepage)，不刷群；审批卡、投票卡和 `[mirror]` 通知不受这条限制。
+- **随时接管**：`tmux attach -t wezard` 回到那个 pane 接着干，对话一字不少。
 
 ---
 
