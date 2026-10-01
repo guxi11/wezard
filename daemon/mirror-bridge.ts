@@ -5909,10 +5909,20 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // 同 dispatch: 在 inject 之前解除静默, 防止验证循环中 LLM 回复被永久吞掉。
       a.muteUntilInject = false;
       a.justSpawned = false;
+      // 同 dispatch 的 /clear 与静默分叉跟随: self-handoff / 同伴 / 定时任务也走这里注入,
+      // 漏了它 tail 就钉在旧 jsonl 上, 直到下一条人话经 dispatch 才把它拽回来。
+      const clearing = isClearCommand(text);
+      const preClearBaseline = clearing ? listJsonls(dirname(a.jsonlPath)) : undefined;
       const r = await inject({
         text: full, images: [], cfg, log: log.child({ principal: target, sessionId: sid, sub: "init-demo" }),
         sessionId: sid, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn: true,
       });
+      if (r.ok && a.tmuxPane) {
+        if (preClearBaseline) {
+          a.clearRebind = { baseline: preClearBaseline };
+          startMigrationWatcher(a, preClearBaseline, jsonlIsPostClearChild, 0, true);
+        } else armSilentForkRebind(a, full);
+      }
       return r;
     },
     interruptPane: async (target, opts) => {
