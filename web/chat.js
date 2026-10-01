@@ -599,22 +599,18 @@
     for (var el = e.target; el && el.nodeType === 1 && el !== document.body && !clipTip(el); el = el.parentElement);
   });
 
-  // 名片: 头像 · 名字 (忙闲 / session) · 名字下一行低调的描述 (cwd · home 群 · 起点 · 轮数) · 职责;
-  // 名片下面一排是关系 / 日程入口。出身 (谁的分身 / 子 wizard) 交给关系图, 名片不再重复。
+  // 名片: 头像 · 名字 (忙闲 / session) · 名字下一行低调的描述 (📁 cwd · 💬 home 群 · 🐣 出生) · 职责;
+  // 名片下面一排是关系 / 日程入口。身份与出身 (谁的分身 / 子 wizard) 交给关系图, 名片不写。
   var renderRole = function () {
     var r = R.role;
     if (!r) return;
-    // 时刻跟着选中的 session 走: 选了一段就是那一段的开始与轮数, 全部就是最早那段起、共几轮。
-    var cur = R.sessions.filter(function (x) { return x.sessionId === SESSION; })[0];
-    var span = cur ? [cur] : R.sessions;
-    var t0 = span.reduce(function (m, x) { return x.start && (!m || x.start < m) ? x.start : m; }, 0);
-    var turns = span.reduce(function (n, x) { return n + (x.turns || 0); }, 0);
+    // 出生 = 注册表记的 bornAt; 没记 (老 wizard / 人) 就退到最早一段 session 的开始。
+    var born = r.bornAt || R.sessions.reduce(function (m, x) { return x.start && (!m || x.start < m) ? x.start : m; }, 0);
     var facts = [
-      r.cwd ? ['title="' + esc(r.cwd) + '"', shortCwd(r.cwd)] : null,
-      r.chat ? ['title="home 群"', r.chat] : null,
-      t0 || turns ? ['title="' + esc((cur ? 'session ' + cur.sessionId : '全部 ' + R.sessions.length + ' 段 session') + (t0 ? ' · 开始于 ' + fmtDay(t0) : '')) + '"',
-        [t0 ? (cur ? '' : '自 ') + fmtClock(t0) : '', turns ? turns + ' 轮' : ''].filter(Boolean).join(' · ')] : null
-    ].filter(Boolean).map(function (f) { return '<span ' + f[0] + '>' + esc(f[1]) + '</span>'; });
+      r.cwd ? ['📁', shortCwd(r.cwd), r.cwd] : null,
+      r.chat ? ['💬', r.chat, 'home 群'] : null,
+      born ? ['🐣', fmtClock(born), '出生于 ' + fmtDay(born)] : null
+    ].filter(Boolean).map(function (f) { return '<span title="' + esc(f[2]) + '">' + f[0] + ' ' + esc(f[1]) + '</span>'; });
     $('#rb-who').innerHTML =
       '<div class="id"><span class="av">' + esc(r.label) + '</span>' +
         '<span class="l"><span class="nl"><span class="cp" title="' + esc('复制 ' + nameOf(r.id)) + '">' + nm(r.id, r.name) + '</span>' + (r.kind === 'wizard' ? '<span id="rb-st"></span>' : '') +
