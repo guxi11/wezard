@@ -409,7 +409,39 @@ export const replyToPeer = (
   sinceMs = 0,
   pingSigs: readonly string[] = [],
 ): string | undefined => {
-  const ts = talkTurns(jsonlPath, 80, pingSigs, true);
+  const r = answerOf(talkTurns(jsonlPath, 80, pingSigs, true), fromName, sinceMs);
+  // 两种"没有"必须分开: 找不到那一句问话 (老 wizard 不挂信封) → undefined, 调用方
+  // 退回按时刻取; 找到了问话但它后面还没有回答 (我们这一句还排在队里) → "",
+  // 调用方必须继续等, 绝不能退回去把**上一件事**的结论当成这一次的回执。
+  return r && r.text;
+};
+
+/** 交接那一刻, `from` 那一句在旧会话里**收口**了没有 —— 比 replyToPeer 再严一档。
+ *
+ *  自我交接是在某一轮**中途**调的: 那一轮最后一条 assistant 是"已交接"之类的收尾,
+ *  不是答案。所以只认在 `untilMs` 之前就被下一句 user 行关上的那一轮: 问话那一轮
+ *  还开着 (就是交接这一轮) → "", 这份回执的义务跟着简报转进新会话。三态同 replyToPeer。 */
+export const replyClosedBefore = (
+  jsonlPath: string,
+  fromName: string,
+  sinceMs: number,
+  untilMs: number,
+  pingSigs: readonly string[] = [],
+): string | undefined => {
+  const r = answerOf(talkTurns(jsonlPath, 80, pingSigs, true), fromName, sinceMs);
+  return r && (r.closedAt !== undefined && r.closedAt < untilMs ? r.text : "");
+};
+
+/** `from` 那一句 (发话时刻之后最新的那次) 所在那一轮的终句。答案止于**下一句 user 行**:
+ *  那是另一轮的开始 (同伴的新话、回执、人) —— 不截的话, 答方刚说完紧接着收到一份回执、
+ *  回了句「收到」, 发话方拿到的就是这句。CLI 在一轮中途吃进的排队消息记成
+ *  `attachment`, 不是 user 行, 截不断一轮。`closedAt` = 关上这一轮的那一行的时刻
+ *  (还开着 = undefined)。 */
+const answerOf = (
+  ts: readonly { role: string; text: string; ms?: number; env?: { kind: string; from: string } }[],
+  fromName: string,
+  sinceMs: number,
+): { text: string; closedAt?: number } | undefined => {
   const asked = ts.reduce(
     (hit, t, i) =>
       t.role === "user" && t.env?.kind === "peer" && t.env.from === fromName && (!t.ms || t.ms >= sinceMs - ASK_SLACK_MS)
@@ -417,10 +449,10 @@ export const replyToPeer = (
         : hit,
     -1,
   );
-  // 两种"没有"必须分开: 找不到那一句问话 (老 wizard 不挂信封) → undefined, 调用方
-  // 退回按时刻取; 找到了问话但它后面还没有回答 (我们这一句还排在队里) → "",
-  // 调用方必须继续等, 绝不能退回去把**上一件事**的结论当成这一次的回执。
-  return asked < 0 ? undefined : (ts.slice(asked + 1).filter((t) => t.role === "assistant").at(-1)?.text ?? "");
+  if (asked < 0) return undefined;
+  const next = ts.findIndex((t, i) => i > asked && t.role === "user");
+  const text = ts.slice(asked + 1, next < 0 ? undefined : next).filter((t) => t.role === "assistant").at(-1)?.text ?? "";
+  return { text, ...(next < 0 ? {} : { closedAt: ts[next]!.ms ?? 0 }) };
 };
 
 // ── wizard → wizard 的信封 ────────────────────────────────────────────

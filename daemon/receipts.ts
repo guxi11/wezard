@@ -53,6 +53,11 @@ export interface ReceiptDeps {
   log: Logger;
   /** 登记的落盘处。缺省 = 纯内存 (reload 即丢)。 */
   store?: JsonMap<Slot>;
+  /** 这个 wizard 正在交接 (见 handoff.ts): 旧会话就要换掉, 此刻读它的 transcript /
+   *  往它的输入框里投, 都可能落在要被杀掉的那个 pane 或还没贴回简报的新会话上。 */
+  handingOff?: (target: string) => boolean;
+  /** 等它交接完 (没在交接 = 立刻 resolve)。 */
+  handedOff?: (target: string) => Promise<void>;
 }
 
 export interface Tell {
@@ -79,6 +84,9 @@ export interface Slot extends Tell {
   /** 收尾了 (送达 / 不回注 / 被 wait_peer 取走 / 放弃) —— boot 时只续守没收尾的。
    *  与 `claimed` 分开: claimed 在投递**之前**就占位, 投到一半 reload 仍要重投。 */
   settled?: boolean;
+  /** 交接时在旧会话里已经收口的那段答案 (见 Receipts.transfer) —— 换了会话之后
+   *  replyFor 读的是新 transcript, 旧答案只能在交接当口取出来存在这里。 */
+  answer?: string;
 }
 
 /** 落盘的登记留多久。比对方最长允许干的时长宽, 好让续守的那一份仍数得进工单。 */
@@ -96,6 +104,10 @@ export interface Receipts {
   outstanding: (from: string, job?: string) => string[];
   /** 把落盘里没收尾的那些重新守起来。调用方在 mirror 恢复完之后调一次。 */
   resume: () => number;
+  /** 交接当口 (旧会话已停、还没重开): `to` 欠着的每一份回执, `answered` 在旧会话里
+   *  取得到答案的就钉住那段; 取不到的义务跟着简报转进新会话 —— 发话时刻改锚到
+   *  `carryAt`, 新会话贴回简报那一句挂着发话方的信封, 照常按信封定位。返回转过去的那些。 */
+  transfer: (to: string, answered: (s: Slot) => string, carryAt: number) => Slot[];
 }
 
 export const createReceipts = (deps: ReceiptDeps): Receipts => {
@@ -130,11 +142,19 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
    *  对方正忙时我们那一句是排队的, 它先吐出来的是上一件事的结论 —— 按时刻取就会把
    *  旧结论当成这一次的回执。所以"停下了但还没答我们"要接着等, 不能将就。 */
   const awaitReply = async (s: Slot): Promise<string> => {
-    // 锚在发话时刻而不是此刻: reload 后续守的那一份不该重新领一整份时长。
-    const deadline = s.at + TARGET_WAIT_SEC * 1000;
-    for (let fruitless = 0; fruitless < MAX_FRUITLESS && Date.now() < deadline; ) {
-      const wr = await waitForIdle(s.to, deps.isBusy, deadline - Date.now(), () => s.claimed || stale(s));
+    // 锚在发话时刻而不是此刻: reload 后续守的那一份不该重新领一整份时长。交接转过来
+    // 的那份改锚到贴回简报的时刻, 所以每圈重算。
+    const deadline = (): number => s.at + TARGET_WAIT_SEC * 1000;
+    for (let fruitless = 0; fruitless < MAX_FRUITLESS && Date.now() < deadline(); ) {
+      const wr = await waitForIdle(s.to, deps.isBusy, deadline() - Date.now(), () => s.claimed || stale(s));
       if (!wr.idle || s.claimed || stale(s)) return "";
+      // 它停下是因为在交接: 等交接收尾, 答案要么已钉在 s.answer, 要么义务转进了新会话
+      // (那就接着守新会话)。这一段与下面的 replyFor 之间不能有 await —— 交接一旦
+      // 开始就在旧会话还在时把 transfer 做完, 同步读到的必然还是旧 transcript。
+      const handing = deps.handingOff?.(s.to) ?? false;
+      if (handing) await deps.handedOff?.(s.to);
+      if (s.answer !== undefined) return s.answer;
+      if (handing) continue;
       const got = deps.replyFor(s.to, deps.nameOf(s.from), s.at);
       // undefined = 定位不到问话 (老 wizard 不挂信封): 没有更好的锚, 按时刻取。
       if (got === undefined) return deps.replyFor(s.to, deps.nameOf(s.from), 0) ?? "";
@@ -155,6 +175,8 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       settle(s);
       return;
     }
+    // 发话方自己在交接: 重开的那几秒里 pane 是死的, 别把这当成"已经不在了"。
+    await deps.handedOff?.(s.from);
     if (!(await deps.paneLive(s.from))) {
       lg.info("receipt: 发话方已经不在了, 丢弃");
       settle(s);
@@ -172,9 +194,16 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     await serial(s.from, async () => {
       if (stale(s)) return;
       // 发话方正在生成 → 等它这一轮说完。ramp 给 0: 它此刻就闲着的话立刻投。
-      if (await deps.isBusy(s.from)) {
-        const w = await waitForIdle(s.from, deps.isBusy, SENDER_WAIT_SEC * 1000, () => false, { rampMs: 0, confirm: 2 });
-        if (!w.idle) { lg.warn({ reason: w.reason }, "receipt: 发话方一直忙, 放弃回注"); settle(s); return; }
+      // 等的过程中它开始交接 → 等交接完再来一圈: 投进旧会话会被交接一并带走 (简报
+      // 已经写完了, 不含这一段), 投进还没贴回简报的新会话会抢在简报前面。
+      const until = Date.now() + SENDER_WAIT_SEC * 1000;
+      for (;;) {
+        await deps.handedOff?.(s.from);
+        if (await deps.isBusy(s.from)) {
+          const w = await waitForIdle(s.from, deps.isBusy, until - Date.now(), () => false, { rampMs: 0, confirm: 2 });
+          if (!w.idle) { lg.warn({ reason: w.reason }, "receipt: 发话方一直忙, 放弃回注"); settle(s); return; }
+        }
+        if (!deps.handingOff?.(s.from)) break;
       }
       const r = await deps.deliver(s.from, body, meta);
       s.delivered = r.ok;
@@ -214,6 +243,18 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       [...slots.values()]
         .filter((s) => s.from === from && !s.resolved && (job === undefined || s.job === job))
         .map((s) => deps.nameOf(s.to)),
+    transfer: (to, answered, carryAt) => {
+      const owed = [...slots.values()].filter((s) => s.to === to && !s.resolved && !s.claimed);
+      const carried = owed.filter((s) => {
+        const got = answered(s);
+        if (got.trim()) s.answer = got;
+        else s.at = carryAt;
+        save(s);
+        return !got.trim();
+      });
+      if (owed.length) deps.log.info({ mod: "receipt", to: deps.nameOf(to), answered: owed.length - carried.length, carried: carried.map((s) => deps.nameOf(s.from)) }, "receipt: 交接时转交");
+      return carried;
+    },
     resume: () => {
       const open = [...slots.values()].filter((s) => !s.settled);
       // 投到一半被 reload 打断的那份: claimed 是上一个进程的占位, 这里重新来过。

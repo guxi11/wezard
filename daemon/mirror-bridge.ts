@@ -2079,7 +2079,7 @@ export interface MirrorBridge {
   /** Detach + respawn a target's pane in `cfg.wrc.cwd` or its pendingCwd
    *  override. Used by /new to give the user a fresh claude in the bound
    *  project. Returns the new attachment result. */
-  newSession: (target: string, windowName?: string, cli?: CliBackendName, opts?: { model?: string; cwd?: string; silent?: boolean; systemPrompt?: string; keepalive?: boolean }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; model?: string; modelWarning?: string }>;
+  newSession: (target: string, windowName?: string, cli?: CliBackendName, opts?: { model?: string; cwd?: string; silent?: boolean; systemPrompt?: string; keepalive?: boolean; warm?: boolean }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; model?: string; modelWarning?: string }>;
   /** Spawn `target` as a CLONE of `parent`: a fresh pane launched with
    *  `--resume <parent sid>`, which the CLI forks — the child starts holding
    *  everything the parent had read, the parent is untouched. `inherit: false`
@@ -4870,6 +4870,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
        *  whole lifetime; true = force it on even if the tag was previously
        *  disabled; undefined = leave whatever was carried over from before. */
       keepalive?: boolean;
+      /** 交接重开: 新会话马上就要接着干原来的活, 不是一个空白开局 —— 不暂停 keepalive。
+       *  否则简报那一轮短于恢复宽限时, 暂停就一直挂着, 交接过的 wizard 从此不再保温。 */
+      warm?: boolean;
     },
   ): Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; info?: string; model?: string; modelWarning?: string }> => {
     const prev = byTarget.get(target);
@@ -4947,7 +4950,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // Pause keepalive like /stop; the first real turn (WeCom inbound, or the
       // pane going busy after the resume grace) re-earns the budget. Mirrors
       // interruptPane so /new can't strand a ping loop on an idle blank session.
-      spawned.keepaliveOff = true;
+      spawned.keepaliveOff = !opts?.warm;
       spawned.keepaliveOffAt = Date.now();
       spawned.keepalive = undefined; // re-anchors cleanly on resume
       persistPause(spawned);

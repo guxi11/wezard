@@ -80,6 +80,9 @@ const Mirror = z.object({
   // 在飞的 tell_peer 回执登记。落盘是为了扛住 reload —— 被派活的 wizard 自己常以
   // reload 收尾, 纯内存的话它那一份回执就跟着旧进程没了。
   receiptsFile: z.string().default("~/.wezard/receipts.json"),
+  // 在飞的交接 (handoff.ts)。同理扛 reload: 落在「杀了旧 pane、还没贴回简报」之间,
+  // 纯内存的话新会话就空着醒来, 简报跟着旧进程没了。
+  handoffsFile: z.string().default("~/.wezard/handoffs.json"),
   // 一个 wizard 名下同时活着的分身上限。不是能力上限, 是"忘了收"的刹车: 分身能
   // 递归生分身, 而每个都是一个 tmux pane + 一份上下文, 一次跑飞的编排足以把 fd
   // 吃光 (见 launchd plist 的 NumberOfFiles)。

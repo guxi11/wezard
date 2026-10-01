@@ -57,10 +57,12 @@ import {
 } from "./wizard.js";
 import { bindNoticeBox, createNoticeBox, chatAudience } from "./notices.js";
 import { loadJobStore, renderJobOpen, renderJobClose, JOB_MEMBER_MAX } from "./jobs.js";
-import { clipMiddle, contextFiles, extractResult, lastContextTokens, lastExchange, lastModel, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
+import { clipMiddle, contextFiles, extractResult, lastContextTokens, lastExchange, lastModel, replyClosedBefore, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { keepalivePingSigs } from "../shared/keepalive.js";
+import { expandHome } from "../shared/paths.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { createReceipts, type Slot as ReceiptSlot } from "./receipts.js";
+import { createHandoffs, handedOff, handingOff, type Pending as PendingHandoff } from "./handoff.js";
 import { rankCandidates, renderCandidates } from "./route.js";
 import { parseWhen, renderChatLog, type LogSession } from "./chat-log.js";
 import {
@@ -155,7 +157,9 @@ const main = async (): Promise<void> => {
     },
     nameOf: (t) => settleName(wizardStore(), chatNameOf(cfg, t), t),
   });
-  installInboundRouter(ws.client, cfg, log, bridge, sourcePath);
+  // 人话也过交接的闸 (见 handoff.ts): 交接期间说的话进新会话, 不被旧会话带走、也不在
+  // 重开的空档里 resume 回旧 sid。
+  installInboundRouter(ws.client, cfg, log, { ...bridge, dispatch: async (a) => (await handedOff(a.principal), bridge.dispatch(a)) }, sourcePath);
   // approval click → finalize 当前 liveStream, 后续 tool/text 落到 standalone。
   // 规则 2: 用户点击授权那一刻就是"上一段对话"的边界, 截断 stream 让授权后的
   // 工作单独成块, 比让 stream 一直长到下一个 inbound / hardTimer 更清晰。
@@ -612,6 +616,8 @@ const main = async (): Promise<void> => {
       nameOf: displayName,
       log,
       store: loadJsonMap<ReceiptSlot>(cfg.wrc.mirror.receiptsFile),
+      handingOff,
+      handedOff,
       // 信封锚取不到 (对方是个还不挂信封的老 wizard) 时退回按时刻取, 由 receipts
       // 区分这两种"没有"。
       replyFor: (to, fromName, since) => m.replyToPeer(to, fromName, since),
@@ -630,7 +636,35 @@ const main = async (): Promise<void> => {
     });
     // reload 前在飞的回执: 等 mirror 把绑定都恢复了再续守 —— 早一步读 target 会拿不到
     // transcript, 退回按时刻取就可能把上一件事的结论当回执。
-    void m.restored.then(() => receipts.resume());
+    // 交接 (见 handoff.ts): 换会话不换身份。这里给它重开、贴话、读旧 transcript 的能力,
+    // 闸、回执清点与断点续做在那边。
+    const pingSigs = keepalivePingSigs(cfg.wrc.mirror.keepalive.ping);
+    const handoffs = createHandoffs({
+      isBusy: m.isBusy,
+      sessionId: (t) => m.sessionInfo(t)?.sessionId ?? "",
+      restart: (t) => restartFresh(t),
+      // 欠着回执的发话方挂上它们的信封: 新会话那一轮就是在答它们, 回执照常按信封定位,
+      // 频道也接回原来那一句所在的地方 (私聊不进群)。
+      inject: (t, text, owe) =>
+        owe.length
+          ? m.injectText(t, text, undefined, {
+              from: { kind: "peer", from: owe[0]!.from },
+              channel: owe[0]!.channel,
+              envelope: owe.map((o) => envelopeFor(o.from, o.channel)).join(""),
+            })
+          : m.injectText(t, text),
+      lastText: m.lastText,
+      answeredBefore: (to, from, since, until) => {
+        const p = m.sessionInfo(to)?.jsonlPath;
+        return p ? replyClosedBefore(expandHome(p), displayName(from), since, until, pingSigs) : undefined;
+      },
+      receipts,
+      notify: (t, text) => notifyChat(t, withTagHeader(t, text)),
+      log,
+      store: loadJsonMap<PendingHandoff>(cfg.wrc.mirror.handoffsFile),
+    });
+    // 交接先续做: 它的闸要在回执续守之前立起来, 否则续守的 watcher 会读到换了一半的会话。
+    void m.restored.then(() => { handoffs.resume(); receipts.resume(); });
     /** 入参里的地址: 新字段 `name`, 老 MCP 进程 (正在跑的 wizard) 仍在传 `tag`。 */
     const addrOf = (b: { name?: unknown; tag?: unknown }): string => String(b.name ?? b.tag ?? "");
 
@@ -853,11 +887,16 @@ const main = async (): Promise<void> => {
       const { target, foreign } = r;
       // 公开与否由发话方 (LLM) 判断: 公开 = 在它这一轮的公开频道里说, 气泡进群、对方
       // 那一轮的回复也发进这个群; 私聊 (默认) = 只落双方的 rolepage, 回复靠 wait_peer 取。
+      // 只有两端都是登记在册的 wizard 才能当着人说: 裸 target 冒充的发话方、forget
+      // 掉的分身不是谁, 它们的往来进群只会留下一段人找不到主的对话 —— 降为私聊。
       const isPublic = (body as { public?: boolean }).public === true;
       const channel = isPublic ? channelOf(self) : "";
       // Injecting into your own pane would type into the box you're generating
       // from — Claude Code queues it and the caller deadlocks waiting for itself.
       if (target === self) { json(res, 400, { ok: false, reason: "refusing to inject into the calling session itself" }); return; }
+      // 它正在交接: 这句话等它换完会话再进 —— 投进旧会话会被交接一并带走, 投进重开中的
+      // 空 pane 会 resume 回旧 sid (见 handoff.ts)。发话时刻取在这之后。
+      await handedOff(target);
       // 投递时机。默认照旧立刻投 —— 「回答它的提问」「打断它」本来就是冲着一个
       // 正在忙的会话去的。`when:"idle"` 是**派新活**该用的那一种: 两个 wizard 同时
       // 找第三个时, 两段文本会挤进同一个输入框、被当成一轮读掉, 这在协同网络里
@@ -974,7 +1013,7 @@ const main = async (): Promise<void> => {
     // 还得靠 sid 轮换探测才跟得上。模型 / CLI / cwd / keepalive 照旧沿用。
     const restartFresh = (target: string) => {
       const info = m.sessionInfo(target);
-      return m.newSession(target, displayName(target) || tagOfKey(target) || target, info?.cli, { model: info?.model || undefined, silent: true });
+      return m.newSession(target, displayName(target) || tagOfKey(target) || target, info?.cli, { model: info?.model || undefined, silent: true, warm: true });
     };
 
     // POST /handoff — 交接一个 pane 的会话给一个全新会话。先让目标会话把当前工作
@@ -999,34 +1038,8 @@ const main = async (): Promise<void> => {
       if (target === self) { json(res, 400, { ok: false, reason: "refusing to hand off the calling session itself (would deadlock)" }); return; }
       const focus = ((body as { focus?: string }).focus ?? "").toString().trim();
       const timeoutMs = Math.min(Math.max(Number((body as { timeoutSec?: number }).timeoutSec ?? 600) || 600, 30), 7200) * 1000;
-
-      const briefPrompt = [
-        "把你当前会话的全部工作压缩成一份**交接简报**,目标是让一个零上下文的全新会话仅凭这份简报就能无缝接手。必须自洽、具体、可执行,涵盖:",
-        "1. 总目标 / 用户到底想要什么",
-        "2. 已完成的事、关键决策与其理由",
-        "3. 当前状态:改到哪了、什么能跑、什么还没跑通",
-        "4. 下一步该做什么(有序)",
-        "5. 涉及的关键文件/路径/符号,以及非显而易见的坑",
-        focus ? `特别强调:${focus}` : "",
-        "只输出这份简报本身,不要寒暄、不要反问。",
-      ].filter(Boolean).join("\n");
-
-      const inj1 = await m.injectText(target, briefPrompt);
-      if (!inj1.ok) { json(res, 502, { ok: false, target, reason: `summary inject failed: ${inj1.reason}` }); return; }
-      const idle = await waitForIdle(target, m.isBusy, timeoutMs, () => false);
-      const brief = m.lastText(target);
-      // 没等到 idle 就不能重开 —— 那会丢掉这次还在生成的交接总结。
-      if (!idle.idle) { json(res, 504, { ok: false, target, brief, reason: `target still working: ${idle.reason}; not restarting to avoid losing the turn` }); return; }
-      if (!brief.trim()) { json(res, 502, { ok: false, target, reason: "target produced no summary text" }); return; }
-
-      const fresh = await restartFresh(target);
-      if (!fresh.ok) { json(res, 502, { ok: false, target, brief, reason: `/new failed: ${fresh.reason}` }); return; }
-
-      const carry = `以下是上一个会话交接过来的工作简报,请据此无缝接手并继续:\n\n${brief}`;
-      const inj2 = await m.injectText(target, carry);
-      json(res, inj2.ok ? 200 : 502, inj2.ok
-        ? { ok: true, target, brief }
-        : { ok: false, target, brief, reason: `handoff carry inject failed: ${inj2.reason}` });
+      const r = await handoffs.other(target, focus, timeoutMs);
+      json(res, r.ok ? 200 : r.status, r.ok ? { ok: true, target, brief: r.brief } : { ok: false, target, reason: r.reason, ...(r.brief ? { brief: r.brief } : {}) });
     });
 
     // ── Wizard: 会话的身份层 ────────────────────────────────────────────
@@ -1659,29 +1672,9 @@ const main = async (): Promise<void> => {
       const brief = ((body as { brief?: string }).brief ?? "").toString().trim();
       if (brief.length < 40) { json(res, 400, { ok: false, reason: "brief 太短 —— 要写到零上下文也能接手: 目标 / 已完成 / 当前状态 / 下一步 / 关键文件与坑" }); return; }
       const info = m.sessionInfo(self);
-      json(res, 200, { ok: true, target: self, contextTokens: info?.contextTokens ?? 0, scheduled: true });
-      // 应答之后再干活: 调用方此刻还在生成, 必须等它把话说完。
-      void (async () => {
-        const lg = log.child({ mod: "wizard", sub: "handoff-self", target: self });
-        const idle = await waitForIdle(self, m.isBusy, 10 * 60_000, () => false);
-        if (!idle.idle) {
-          lg.warn({ reason: idle.reason }, "self-handoff: 目标一直忙, 放弃");
-          // 之前这里只写日志: 调用方早就拿到 `scheduled:true` 挂了, 交接静悄悄
-          // 放弃, 群里没有任何气泡告诉人。补一条 notify, 对齐它成功时的那条。
-          notifyChat(self, withTagHeader(self, `上下文交接放弃: 一直没能闲下来 (${idle.reason}), 上下文和之前一样没动, 有空再试一次`));
-          return;
-        }
-        const fresh = await restartFresh(self);
-        if (!fresh.ok) {
-          lg.warn({ reason: fresh.reason }, "self-handoff: /new 失败");
-          notifyChat(self, withTagHeader(self, `上下文交接失败: 新开会话没起来 (${fresh.reason ?? "unknown"})`));
-          return;
-        }
-        const carry = `以下是你自己上一段会话压缩出来的交接简报, 据此无缝接着干:\n\n${brief}`;
-        const inj = await m.injectText(self, carry);
-        lg.info({ ok: inj.ok, reason: inj.reason }, "self-handoff: 完成");
-        notifyChat(self, withTagHeader(self, `上下文已交接重开 (${info?.contextTokens ?? 0} tok → 0), 工作照旧`));
-      })();
+      // 应答之后再干活: 调用方此刻还在生成, 交接要等它把话说完 (见 handoff.ts)。
+      const r = handoffs.self(self, brief);
+      json(res, r.ok ? 200 : 409, r.ok ? { ok: true, target: self, contextTokens: info?.contextTokens ?? 0, scheduled: true } : { ok: false, reason: r.reason });
     });
 
     // ── Job: 一次 fan-out 的工单 ─────────────────────────────────────────
@@ -1867,7 +1860,7 @@ const main = async (): Promise<void> => {
           const r = await m.newSession(target, node.tag, node.cli, { model: node.model, cwd: node.cwd, silent: true });
           return { ok: r.ok, reason: r.reason };
         },
-        send: (target, text, origin) => m.injectText(target, text, origin),
+        send: async (target, text, origin) => (await handedOff(target), m.injectText(target, text, origin)),
         isBusy: m.isBusy,
         lastText: async (target) => m.lastText(target),
         notify: notifyChat,
@@ -1921,6 +1914,7 @@ const main = async (): Promise<void> => {
     // 跑完自动收掉。只有排班时点名了某个 wizard (fresh=false) 且它此刻闲着,
     // 才把这句话直接投进它那一轮 —— 「在已有会话里继续」是要求出来的, 不是默认。
     scheduledTaskInject = async (target, text, { taskId, fresh }) => {
+      if (!fresh) await handedOff(target); // 交接中途 pane 是空的, 别当成闲着投进去
       const busy = fresh ? false : await m.isBusy(target);
       if (!fresh && !busy) return m.injectText(target, text, undefined, { fromChat: true, from: { kind: "task", taskId }, envelope: renderTaskEnvelope(taskId) });
 
