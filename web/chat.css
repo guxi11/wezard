@@ -156,6 +156,11 @@ button { font: inherit; color: inherit }
 }
 .usage .bar:hover { height: 6px }
 .usage .bar .seg { flex: 1 1 0; min-width: 2px; height: 100% }
+.usage .leg { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-left: auto }
+.usage .lg { display: flex; align-items: center; gap: 4px; white-space: nowrap }
+.usage .lg i { width: 7px; height: 7px; border-radius: 50%; flex: none }
+.usage .lg b { margin-left: 1px }
+.usage .lg em { font-style: normal; font-size: 10px; color: var(--faint) }
 
 /* 群聊头像 = 参与者头像拼图: 1 格居中, 2 格左右, 3/4 格田字。 */
 .mosaic {
@@ -430,6 +435,7 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
   .thread { padding-bottom: calc(12px + env(safe-area-inset-bottom)) }
   .usage { padding: 8px 12px; gap: 6px 14px }
   .usage .u-kvs { flex-wrap: wrap }
+  .usage .leg { margin-left: 0 }
   .usage.page { padding-bottom: calc(8px + env(safe-area-inset-bottom)) }
 }
 
