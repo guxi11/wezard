@@ -118,6 +118,10 @@ export interface TurnFrom {
   /** kind=peer: 发话方选择在公开频道 (turn.channel) 里说 —— 气泡进群, 回复也进群。
    *  缺省 = 私聊: 只落在双方的 rolepage。 */
   public?: boolean;
+  /** kind=peer: 这一轮是**回执** —— `from` 干完了, 守护进程把它的结论自动送了过来,
+   *  不是它派来的新活。回执不再生回执 (见 index.ts 的 receipts), 所以这也是一条
+   *  「这一轮不该再触发回注」的记录。 */
+  receipt?: boolean;
 }
 
 // Subagent 归属 —— 这一轮不是主会话的 turn, 是 Task/Agent 工具派出的子 agent

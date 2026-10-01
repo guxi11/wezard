@@ -433,6 +433,38 @@ export const lastReply = (jsonlPath: string, sinceMs = 0, pingSigs: readonly str
     .filter((t) => t.role === "assistant" && (!t.ms || t.ms >= sinceMs))
     .at(-1)?.text ?? "";
 
+/** paste 到那一行落盘之间的抖动 —— 问话的时间戳可能比我们记的发话时刻早一点。 */
+const ASK_SLACK_MS = 60_000;
+
+/** 「`from` 那一句的回答」—— 比 lastReply 严一档, 自动回执靠它定位。
+ *
+ *  发话时刻 (lastReply 的 sinceMs) 分不开两件事: 目标正忙时我们这一句是排队的,
+ *  它先吐出来的是**上一件事**的结论, 而那条回复同样晚于我们 paste 的时刻 —— 按时刻
+ *  取就会拿旧结论当新回执。信封是更硬的锚: 我们注入的那一句在它的 transcript 里挂着
+ *  `kind=peer from=.我`, 从那一句往后数, 答的就一定是我们问的。找不到那一句 (老 wizard 的 MCP
+ *  还不挂信封 / 后端不写时间戳) 返回 `undefined`, 调用方退回 lastReply —— 退化而不是
+ *  吞掉; 找到了问话但它后面还没有回答 (我们那一句还排在队里) 返回 "" —— 调用方必须
+ *  接着等, 绝不能退回去把上一件事的结论当成这一次的回执。 */
+export const replyToPeer = (
+  jsonlPath: string,
+  fromName: string,
+  sinceMs = 0,
+  pingSigs: readonly string[] = [],
+): string | undefined => {
+  const ts = talkTurns(jsonlPath, 80, pingSigs, true);
+  const asked = ts.reduce(
+    (hit, t, i) =>
+      t.role === "user" && t.env?.kind === "peer" && t.env.from === fromName && (!t.ms || t.ms >= sinceMs - ASK_SLACK_MS)
+        ? i
+        : hit,
+    -1,
+  );
+  // 两种"没有"必须分开: 找不到那一句问话 (老 wizard 不挂信封) → undefined, 调用方
+  // 退回按时刻取; 找到了问话但它后面还没有回答 (我们这一句还排在队里) → "",
+  // 调用方必须继续等, 绝不能退回去把**上一件事**的结论当成这一次的回执。
+  return asked < 0 ? undefined : (ts.slice(asked + 1).filter((t) => t.role === "assistant").at(-1)?.text ?? "");
+};
+
 // ── wizard → wizard 的信封 ────────────────────────────────────────────
 // 同伴的话是原样落进输入框的, 而落进输入框的东西在模型眼里都是「用户说的」。没有
 // 信封, 收件方分不清这一轮是人说的还是 wizard 说的、回复给谁看、该不该回话 ——
@@ -464,13 +496,40 @@ export const renderPeerEnvelope = (from: string, chat?: string): string =>
   renderReminder(envelopeAttrs.peer(from, chat), chat === undefined
       ? [
           `这一轮是 wizard \`${from}\` 发来的**私聊**, 不是人说的: 人看不见这一轮, 读你回复的是 \`${from}\`。`,
-          `你这一轮的**最后一条消息**就是给它的回执 —— 它用 wait_peer 取, 所以不要再 send_peer 回它 (除非它明说干完通知它), 也不要为这一轮 notify。`,
+          `你这一轮的**最后一条消息**就是给它的回执 —— 你一停下, 守护进程自动把它送进 \`${from}\` 的输入框, **你不需要再调任何工具**: 不要 send_peer 回它 (那会让它多跑一轮), 也不要为这一轮 notify。`,
           "对 wizard 直说: 不寒暄、不加对人的称呼、不复述它的话; 结论收口成末尾的 `RESULT: …` (交付物写进文件就回传路径), 要它补信息也写在那里。",
         ]
       : [
           `这一轮是 wizard \`${from}\` 在群${chat ? ` **${chat}** ` : ""}里**公开**对你说的: 你的回复会直接发进那个群, 人和 \`${from}\` 都看得到。`,
-          `照对人说话的方式答; 不要再 send_peer 把同一段话回给 \`${from}\`。`,
+          `照对人说话的方式答; 不要再 send_peer 把同一段话回给 \`${from}\` —— 你停下之后守护进程会自动把这段结论送回它那里。`,
         ]);
+
+/** 回执的信封 —— 这一轮是对方干完活、守护进程自动送回来的结论, 不是新派的活。
+ *
+ *  为什么必须有它: 回执是原样 paste 进输入框的, 而落进输入框的东西在模型眼里都是
+ *  「有人在对我说话」。没有这一段, 它会把一份结论当成一件新活去做, 或者客气地回它
+ *  一句 —— 而回那一句又会被对方当成新的一轮。所以这里写死三件事: 这是回执、原话在
+ *  下面、读完接着干你自己的, 别回话。 */
+export const renderReceiptEnvelope = (
+  from: string,
+  chat?: string,
+  job?: { job: string; done: number; total: number },
+): string =>
+  renderReminder(envelopeAttrs.receipt(from, chat, job), [
+    `这是 wizard \`${from}\` 对你某一次 send_peer 的**回执**: 它那一轮干完了, 守护进程把它的结论自动送到你这里 —— 不是人说的, 也不是新派给你的活。`,
+    ...(chat === undefined
+      ? [`这段对话是私聊, 人看不见。`]
+      : [`这一轮的对话在群${chat ? ` **${chat}** ` : ""}里, 人看得见你们俩。`]),
+    "下面就是它的原话。据此接着干你自己手上那件事; **不要为收到回执而回话** —— 不要 send_peer 回它 (除非你确实有新的东西要问它), 也不要把这段原话复述给人, 只说你据此做了什么、结论是什么。",
+    "它可能还没干完全部 —— 读 `RESULT:` 那一行 (如果有) 作为它的收口结论; 要更多细节用 peek_peer 读它的对话, 不要猜。",
+    // 「齐了吗」是守护进程数的, 不让模型在上下文里自己数 —— 异步回执是 N 个独立
+    // 的轮次陆续进来的, 数错一个就会提前收口或者永远等。
+    ...(job && job.job
+      ? job.done >= job.total
+        ? [`这是工单 \`${job.job}\` 的**最后一份** (${job.done}/${job.total}, 全部到齐): 现在可以汇总收口了 —— close_job(summary) 发结论并回收临时分身。`]
+        : [`这是工单 \`${job.job}\` 的第 ${job.done}/${job.total} 份, **还差 ${job.total - job.done} 份**: 先把这一份记住 (或落到文件里), 不要现在汇总、也不要向人汇报进度; 等最后一份到了会明确告诉你「全部到齐」。`]
+      : []),
+  ]);
 
 /** Prompt-token size of the session's most recent turn: input + both cache
  *  tiers = how full the context window is, i.e. exactly what a cold cache would

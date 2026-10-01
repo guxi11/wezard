@@ -7,6 +7,7 @@
 //
 // 属性一览 (`wezard` 区分种类):
 //   envelope  kind=human|peer|task  from  chat?  scope=private|public (仅 peer)
+//             receipt=1 (仅 peer): 这一轮是守护进程自动送回来的回执, 不是新活
 //   mention   names  (空格分隔的 `.name`)
 //   roster    正文里 `- ` 开头的每一行是一条变动
 
@@ -50,6 +51,8 @@ export interface Envelope {
   private: boolean;
   /** 公开轮所在群的名字; "" = 这个会话的 home 聊天。 */
   chat: string;
+  /** 这一轮是回执 (对方干完了, 守护进程把结论送回发话方), 不是新派的活。 */
+  receipt?: boolean;
 }
 
 export const envelopeAttrs = {
@@ -59,6 +62,17 @@ export const envelopeAttrs = {
     wezard: "envelope", kind: "peer", from, scope: chat === undefined ? "private" : "public", ...(chat ? { chat } : {}),
   }),
   task: (taskId: string): Attrs => ({ wezard: "envelope", kind: "task", from: taskId }),
+  /** 回执也是「`from` 在对你说话」, 所以仍是 peer 信封 —— read_chat / rolepage 照旧
+   *  把它归到那场对话里; 多一个 `receipt` 属性说明它是自动送回来的结论而不是新活。 */
+  receipt: (from: string, chat?: string, job?: { job: string; done: number; total: number }): Attrs => ({
+    ...envelopeAttrs.peer(from, chat),
+    receipt: "1",
+    // 工单的「齐了吗」由守护进程数出来写在属性上, 不让模型自己记: 异步回执是 N 个
+    // 独立的轮次陆续进来的, 靠模型在上下文里数到五是最容易出错的那种事。
+    ...(job && job.job
+      ? { job: job.job, done: String(job.done), total: String(job.total), complete: job.done >= job.total ? "1" : "0" }
+      : {}),
+  }),
 };
 
 const KINDS = new Set(["peer", "human", "task"]);
@@ -69,6 +83,7 @@ const envelopeOfAttrs = (a: Attrs): Envelope | undefined =>
         from: a.kind === "task" ? `定时 ${a.from ?? ""}` : a.from ?? "",
         private: a.scope === "private",
         chat: a.chat ?? "",
+        ...(a.receipt === "1" ? { receipt: true } : {}),
       }
     : undefined;
 

@@ -47,7 +47,7 @@ import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagH
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
-import { stripAnsi, paneIsBusy, transcriptStalled, summarizeTail, lastAssistantText, lastReply, unwrapPasted, lastContextTokens, keepaliveStamps, openKeepalivePing, keepalivePingSigs, isKeepalivePingText, talkRounds, openToolUses, renderDialog, type PeerInfo } from "./peers.js";
+import { stripAnsi, paneIsBusy, transcriptStalled, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, keepaliveStamps, openKeepalivePing, keepalivePingSigs, isKeepalivePingText, talkRounds, openToolUses, renderDialog, type PeerInfo } from "./peers.js";
 
 // PATH augmentation: launchd / systemd start the daemon
 // with a stripped PATH that often lacks nvm / homebrew, breaking spawn(claudeBin).
@@ -2110,6 +2110,12 @@ export interface MirrorBridge {
   lastText: (target: string) => string;
   /** `target` 在 `sinceMs` 之后最新的一条回复 (全文、保留换行); 没有 = ""。 */
   lastReply: (target: string, sinceMs?: number) => string;
+  /** `target` 答 `fromName` 那一句的那段话 —— 按信封定位, 比 lastReply 严一档
+   *  (见 peers.replyToPeer)。自动回执靠它分清「答我的」和「答上一件事的」。 */
+  replyToPeer: (target: string, fromName: string, sinceMs?: number) => string | undefined;
+  /** 这个 wizard 此刻有没有一个能用的 pane。回执投递前要问一句: 已经收工的
+   *  wizard 不该为了接一份结论被重新拉起来。 */
+  paneLive: (target: string) => Promise<boolean>;
   /** Is the inbound `quoted` text a snapshot of `target`'s still-open outbound
    *  bubble (unfinished last stream)? Such a quote carries only transient
    *  chrome — the detail-link URL plus the latest real-time CoT/tool line —
@@ -5267,6 +5273,15 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const p = jsonlOf(target);
     return p ? lastReply(p, sinceMs, warmerSigs) : "";
   };
+  const replyToPeerSince = (target: string, fromName: string, sinceMs = 0): string | undefined => {
+    const p = jsonlOf(target);
+    return p ? replyToPeerIn(p, fromName, sinceMs, warmerSigs) : undefined;
+  };
+  /** 绑着的 pane 还能用 (存在、且不是别人的窗口) —— 不重生、不猜。 */
+  const paneLiveOf = async (target: string): Promise<boolean> => {
+    const a = byTarget.get(target);
+    return a?.tmuxPane ? paneUsable(a.tmuxPane, a.jsonlPath) : false;
+  };
 
   // ── 未收口气泡的引用判定 ────────────────────────────────────────────
   // tag 会话的 last stream 未收口时, 群里最新那条气泡是瞬态的: 详情链接 URL +
@@ -5706,6 +5721,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       }),
     lastText,
     lastReply: replySince,
+    replyToPeer: replyToPeerSince,
+    paneLive: paneLiveOf,
     isOpenBubbleQuote,
     status: () => {
       const list = Array.from(bySessionId.values()).map((a) => ({

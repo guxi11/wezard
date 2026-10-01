@@ -5,7 +5,7 @@ import { makeLogger } from "../shared/log.js";
 import { bindCliBackends, type CliBackendName } from "../shared/cli-backends.js";
 import { startWs } from "./ws.js";
 import { startNetWatch } from "./net-watch.js";
-import { startHttp, json, readBody } from "./http.js";
+import { startHttp, json, readBody, type Handler } from "./http.js";
 import { configGet, configSet } from "./config-api.js";
 import { installInboundRouter } from "./inbound.js";
 import { loadMirrorStore } from "./mirror-store.js";
@@ -56,7 +56,8 @@ import {
 } from "./wizard.js";
 import { bindNoticeBox, createNoticeBox, chatAudience } from "./notices.js";
 import { loadJobStore, renderJobOpen, renderJobClose, JOB_MEMBER_MAX } from "./jobs.js";
-import { clipMiddle, extractResult, keepalivePingSigs, lastExchange, lastModel, renderPeerEnvelope, renderTaskEnvelope } from "./peers.js";
+import { clipMiddle, extractResult, keepalivePingSigs, lastExchange, lastModel, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
+import { createReceipts } from "./receipts.js";
 import { parseWhen, renderChatLog, type LogSession } from "./chat-log.js";
 import {
   startGraph,
@@ -598,11 +599,30 @@ const main = async (): Promise<void> => {
     /** 同伴注入的信封: 公开轮写上那个群的名字, 私聊不写 (见 peers.renderPeerEnvelope)。 */
     const envelopeFor = (from: string, channel: string): string =>
       renderPeerEnvelope(displayName(from), channel ? chatNameOf(cfg, channel) : undefined);
-    // 发话时刻 —— wait_peer 拿它把「回复」和「这一次发话」对上 (peers.lastReply)。
-    // 纯内存: reload 之后退化成不带关联的旧行为, 不值得为它落盘。
-    const sentAt = new Map<string, number>();
-    const pairOf = (from: string, to: string): string => `${from}\u0000${to}`;
-    const stampSend = (from: string, to: string): void => void sentAt.set(pairOf(from, to), Date.now());
+    // 回执 (见 receipts.ts): 一次 tell_peer 之后对方干完那一轮, 它的结论自动 paste
+    // 回发话方的输入框, 发话方全程不阻塞。这里只提供四样能力给那个模块 —— 忙闲、
+    // 死活、「它答我那一句的是哪段话」、以及怎么把一段话送进去 —— 投递逻辑在那边。
+    const receipts = createReceipts({
+      isBusy: m.isBusy,
+      paneLive: m.paneLive,
+      nameOf: displayName,
+      log,
+      // 信封锚取不到 (对方是个还不挂信封的老 wizard) 时退回按时刻取, 由 receipts
+      // 区分这两种"没有"。
+      replyFor: (to, fromName, since) => m.replyToPeer(to, fromName, since),
+      deliver: (to, bodyText, meta) =>
+        m.injectText(to, clipMiddle(bodyText), undefined, {
+          // receipt:true 是「这一轮不该再生回执」的记录 —— 回环在结构上就不成立:
+          // 只有 tell_peer 那条路登记 watcher, 这里是直接注入。
+          from: { kind: "peer", from: meta.from, receipt: true, ...(meta.job ? { job: meta.job } : {}) },
+          channel: meta.channel,
+          envelope: renderReceiptEnvelope(
+            displayName(meta.from),
+            meta.channel ? chatNameOf(cfg, meta.channel) : undefined,
+            meta.job ? { job: meta.job, done: meta.done, total: meta.total } : undefined,
+          ),
+        }),
+    });
     /** 入参里的地址: 新字段 `name`, 老 MCP 进程 (正在跑的 wizard) 仍在传 `tag`。 */
     const addrOf = (b: { name?: unknown; tag?: unknown }): string => String(b.name ?? b.tag ?? "");
 
@@ -806,7 +826,11 @@ const main = async (): Promise<void> => {
       });
     });
 
-    http.register("POST /peers/send", async (req, res) => {
+    // 跟另一个 wizard 说一句话。`tell_peer` 是它现在的名字 —— 「说」而不是「发送并
+    // 等待」: 调用方注入完就返回, 对方干完那一轮的结论由守护进程自动送回来 (receipts)。
+    // `/peers/send` 保留为同一个处理函数: 正在跑的 wizard 的 MCP 进程是旧代码, 换名字
+    // 不能把它们的通路掐断。
+    const tellPeer: Handler = async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       const text = ((body as { text?: string }).text ?? "").toString();
@@ -845,19 +869,37 @@ const main = async (): Promise<void> => {
           return;
         }
       }
-      stampSend(self, target);
+      // 时刻取在注入**之前**: 晚于那一句落盘的话, 回执定位的下界就偏了。
+      const at = Date.now();
       const inj = await m.injectText(target, text, undefined, {
         from: { kind: "peer", from: self, ...(jobId ? { job: jobId } : {}), ...(isPublic ? { public: true } : {}) },
         channel,
         envelope: envelopeFor(self, channel),
       });
+      // 回执: 对方干完那一轮, 守护进程把它的结论自动送回来 (默认开)。`receipt:false`
+      // 是"放出去就不管了"的那种派活。注入失败就不守 —— 没有问话, 也不会有回答。
+      const wantReceipt = (body as { receipt?: boolean }).receipt !== false;
+      if (inj.ok) receipts.register({ from: self, to: target, channel, job: jobId, at }, wantReceipt);
       // 工单成员照旧记账 (收工那一条会列出各自那段活); 公开的那一句在群里成气泡。
       if (inj.ok && jobId) jobs.attach(jobId, { target, task: text, spawned: false });
       if (inj.ok && isPublic) relayPeer(self, target, text, channel);
       // `wasBusy` 是给调用方的判断依据: 立刻投给一个正在生成的会话, 这句话会排在
       // 它这一轮后面, 而不是马上被读到。
-      json(res, inj.ok ? 200 : 502, { ...inj, name: peerAddress(cfg, self, target), public: isPublic, wasBusy, ...(waitedMs ? { waitedMs } : {}), ...(jobId ? { job: jobId } : {}) });
-    });
+      json(res, inj.ok ? 200 : 502, {
+        ...inj,
+        name: peerAddress(cfg, self, target),
+        public: isPublic,
+        wasBusy,
+        ...(waitedMs ? { waitedMs } : {}),
+        ...(jobId ? { job: jobId } : {}),
+        // 回执怎么回来 —— 写在回包里, 调用方 (模型) 不必从工具描述里回忆。
+        ...(inj.ok && wantReceipt
+          ? { receipt: "它干完那一轮, 结论会作为新的一轮自动进到你这里 —— 不要挂在 wait_peer 上等, 接着干你自己的事" }
+          : {}),
+      });
+    };
+    http.register("POST /peers/tell", tellPeer);
+    http.register("POST /peers/send", tellPeer); // 老 MCP 进程还在调这个名字
 
     // 等一个 wizard, 或者等一**组**。fan-out 之后 join 必须是并行的: 串行地等五个
     // 分身, 墙钟是五个之和, 而它们本来就在同时干活。`need` 把 all / any / 过半收进
@@ -893,11 +935,15 @@ const main = async (): Promise<void> => {
       //   - 内部 key (`target`) 与 `foreign` 不回: 模型用不上, 还会被诱导去拼 key。
       const results = uniq.map((h, i) => {
         const wr = wrs[i]!;
-        const full = wr.idle ? m.lastReply(h.target, sentAt.get(pairOf(self, h.target)) ?? 0) : "";
+        // 取走就占位: 同一段话不会再作为回执 paste 进来一遍 (见 receipts.claim)。
+        const full = wr.idle ? m.lastReply(h.target, receipts.sentAt(self, h.target)) : "";
+        const already = full ? receipts.claim(self, h.target) : false;
         const result = extractResult(full);
         return {
           name: h.address,
           idle: wr.idle,
+          // 回执早一步到了: 这段话已经作为新的一轮进过你的会话, 别再处理第二遍。
+          ...(already ? { delivered: true } : {}),
           ...(wr.reason ? { reason: wr.reason } : {}),
           ...(result
             ? { result, ...(full.length > result.length + 200 ? { omitted: full.length - result.length } : {}) }
@@ -1481,7 +1527,7 @@ const main = async (): Promise<void> => {
       const keepalive = typeof b.keepalive === "boolean" ? b.keepalive : cfg.wrc.mirror.keepalive.spawnDefault;
       // 先盖章再生: 分叉出来的 transcript 里躺着被克隆者的旧回复, 时刻早于这一枚章,
       // wait_peer 才不会把它们当成分身对这件活的答复。
-      if (task) stampSend(self, target);
+      const taskAt = Date.now();
       const r = await m.cloneSession({
         parent: source,
         target,
@@ -1520,6 +1566,9 @@ const main = async (): Promise<void> => {
         dispatched = inj.ok;
       }
       if (jobId) jobs.attach(jobId, { target, task, spawned: true });
+      // 分身的第一件活也守回执: fan-out 最常见的形状就是 clone_wizard({task}) × N,
+      // 让它们干完自己把结论送回来, 发起方不必挂在 wait_peer 上。
+      if (dispatched) receipts.register({ from: self, to: target, channel: "", job: jobId, at: taskAt });
       json(res, 200, { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, keepalive, ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(jobId ? { job: jobId } : {}) });
     });
 

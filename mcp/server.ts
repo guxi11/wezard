@@ -373,32 +373,64 @@ server.registerTool(
     })),
 );
 
+// ── 跟别的 wizard 说话 ──────────────────────────────────────────────────────
+// 一个工具, 一个语义: **说一句, 不等**。注入完就返回; 对方干完那一轮, 守护进程把它
+// 的结论作为新的一轮自动送回这里 (回执)。发话方的 pane 全程在自己手上。
+// `send_peer` 留着当别名 —— 正在跑的 wizard 的 MCP 进程是旧代码, 换个名字不能把
+// 它们的通路掐断。
+const TELL_SCHEMA = {
+  name: z.string().describe(ADDRESS_DOC),
+  text: z.string().describe("Message to inject. Plain prompt text; slash commands like '/clear' also work."),
+  when: z
+    .enum(["now", "idle"])
+    .optional()
+    .describe(
+      "什么时候投。`now` (默认) 立刻投 —— 对方正在生成时这句话会排在它这一轮后面, 回答它的提问、打断它、催它都该用这个。`idle` 先等它闲下来再投: **派一件新活给一个正在忙的同伴时用它**, 否则你和别人的两段文本会挤进同一个输入框被当成一轮读掉。返回里的 `wasBusy` 告诉你投的时候它忙不忙。",
+    ),
+  waitSec: z.number().optional().describe("`when:'idle'` 最多等多少秒 (10-3600, 默认 600)。等不到就返回失败, 不会强行投。"),
+  public: z
+    .boolean()
+    .optional()
+    .describe("true = 在公开频道 (你这一轮所在的群) 里说: 群里出 `.你 → .它` 气泡, 它的回复也进群 (同时照样回执给你)。默认 false = 私聊, 只记在 rolepage。需要人知道 / 该当着人讨论才用 true。"),
+  job: z.string().optional().describe("这次派活归到某个工单名下 (open_job 给的 id)。**fan-out 一定要带上它**: 回执里会带 `还差几份 / 全部到齐`, 「齐了吗」由守护进程数给你, 不用你自己在上下文里记。"),
+  receipt: z
+    .boolean()
+    .optional()
+    .describe("false = 放出去就不管了, 不要回执 (纯通知、或者你根本不关心它说什么)。默认 true。"),
+};
+
+const TELL_DESC =
+  "跟另一个 wizard 说话 —— 文本原样落进它的输入框, 它当成新的一轮接手。这是你**驱动**同伴的唯一方式: 派活、解它的阻塞、回答它的提问、叫它继续。名字全局唯一, 目标住在哪个群都一样叫。对方还不存在就自己造: 要它继承你的上下文用 clone_wizard, 要一个白纸一张的子 wizard 用 spawn_wizard。\n" +
+  "**说完就返回, 你不会被挂住**: 对方干完那一轮, 守护进程把它的结论作为**新的一轮**自动送到你这里 (带信封说明是谁的回执、在哪场对话里、工单还差几份)。所以: 问完就接着干你自己的事, **不要再调 wait_peer 守着**; 也不必催 —— 它答了你自然会收到。你忙着的时候回执会排队等你这一轮说完再进来, 不会和你的输出挤在一起。\n" +
+  "**fan-out 带上 `job`**: 五路派活就是五次 tell_peer (或 clone_wizard({task})), 回执陆续回来, 每一份都写着第几份 / 还差几份, 最后一份明确告诉你「全部到齐」—— 那时才汇总、才 close_job。没齐就别向人汇报进度。\n" +
+  "**默认是私聊**: 不出任何群气泡, 只记在你们双方的 rolepage 里。**`public:true` 则在公开频道说** —— 你这一轮所在的群里出一条 `.你 → .它` 的气泡, 它那一轮的回复也发进这个群。公开与否由你判断: 需要人知道的、或本该当着人讨论的 (关键决策、给人的结论、要人拍板的分歧) 用 public; 过程性的派活、催进度、对齐细节用私聊。\n" +
+  "无论哪种都直说: 要什么、给什么、结论是什么, 不用寒暄、不用引用原文。`text` 只写活本身 —— 守护进程会在后面挂一段信封, 告诉对方这是谁发的、私聊还是公开、它的最后一条消息就是回执 (收口成 `RESULT: …`), 这些别自己再写。拒绝对自己发送。";
+
+const tellBody = (a: { name: string; text: string; when?: string; waitSec?: number; job?: string; public?: boolean; receipt?: boolean }) => ({
+  name: a.name,
+  text: a.text,
+  ...(a.when ? { when: a.when } : {}),
+  ...(a.waitSec ? { waitSec: a.waitSec } : {}),
+  ...(a.job ? { job: a.job } : {}),
+  ...(a.public ? { public: true } : {}),
+  ...(a.receipt === false ? { receipt: false } : {}),
+});
+
+server.registerTool(
+  "tell_peer",
+  { title: "Say something to another wizard (reply comes back by itself)", description: TELL_DESC, inputSchema: TELL_SCHEMA },
+  async (a) => unwrap("tell_peer", await daemonPost("/peers/tell", tellBody(a))),
+);
+
 server.registerTool(
   "send_peer",
   {
-    title: "Say something to another wizard",
+    title: "(deprecated) alias of tell_peer",
     description:
-      "跟另一个 wizard 说话 —— 文本原样落进它的输入框, 它当成新的一轮接手。这是你**驱动**同伴的唯一方式: 派活、解它的阻塞、回答它的提问、叫它继续。「推动 .fix 干到底」的典型循环: peek_peer 看它在哪 → send_peer 说该说的 → wait_peer 等它停下 → 再 peek。名字全局唯一, 目标住在哪个群都一样叫。对方还不存在就自己造: 要它继承你的上下文用 clone_wizard, 要一个白纸一张的子 wizard 用 spawn_wizard。\n" +
-      "**默认是私聊**: 不出任何群气泡, 只记在你们双方的 rolepage 里; 它那一轮的回复也不进群, 用 wait_peer 取。**`public:true` 则在公开频道说** —— 你这一轮所在的群里出一条 `.你 → .它` 的气泡, 它那一轮的回复也发进这个群。公开与否由你判断: 需要人知道的、或本该当着人讨论的 (关键决策、给人的结论、要人拍板的分歧) 用 public; 过程性的派活、催进度、对齐细节用私聊。无论哪种都直说: 要什么、给什么、结论是什么, 不用寒暄、不用引用原文。`text` 只写活本身 —— 守护进程会在后面挂一段信封, 告诉对方这是谁发的、私聊还是公开、回执写在它最后一条消息里并收口成 `RESULT: …`, 这些别自己再写。拒绝对自己发送。",
-    inputSchema: {
-      name: z.string().describe(ADDRESS_DOC),
-      text: z.string().describe("Message to inject. Plain prompt text; slash commands like '/clear' also work."),
-      when: z
-        .enum(["now", "idle"])
-        .optional()
-        .describe(
-          "什么时候投。`now` (默认) 立刻投 —— 对方正在生成时这句话会排在它这一轮后面, 回答它的提问、打断它、催它都该用这个。`idle` 先等它闲下来再投: **派一件新活给一个正在忙的同伴时用它**, 否则你和别人的两段文本会挤进同一个输入框被当成一轮读掉。返回里的 `wasBusy` 告诉你投的时候它忙不忙。",
-        ),
-      waitSec: z.number().optional().describe("`when:'idle'` 最多等多少秒 (10-3600, 默认 600)。等不到就返回失败, 不会强行投。"),
-      public: z
-        .boolean()
-        .optional()
-        .describe("true = 在公开频道 (你这一轮所在的群) 里说: 群里出 `.你 → .它` 气泡, 它的回复也进群。默认 false = 私聊, 只记在 rolepage。需要人知道 / 该当着人讨论才用 true。"),
-      job: z.string().optional().describe("这次派活归到某个工单名下 (open_job 给的 id) —— 收工那一条会把各自那段活列出来。"),
-    },
+      "**已更名为 `tell_peer`** —— 行为完全一样 (说一句、不阻塞、对方的结论自动回执给你), 保留这个名字只为不打断正在跑的会话。新的调用请用 `tell_peer`。\n" + TELL_DESC,
+    inputSchema: TELL_SCHEMA,
   },
-  async ({ name, text, when, waitSec, job, public: pub }) =>
-    unwrap("send_peer", await daemonPost("/peers/send", { name, text, ...(when ? { when } : {}), ...(waitSec ? { waitSec } : {}), ...(job ? { job } : {}), ...(pub ? { public: true } : {}) })),
+  async (a) => unwrap("send_peer", await daemonPost("/peers/tell", tellBody(a))),
 );
 
 server.registerTool(
@@ -406,7 +438,7 @@ server.registerTool(
   {
     title: "Post a message into a chat for people to read",
     description:
-      "把一段 markdown 贴进一个企微聊天**给人看**。和 send_peer 分工明确: send_peer 是把话塞进另一个 agent 的输入框 (驱动它干活), notify 是说给人听 —— 不会触发任何一轮对话。\n" +
+      "把一段 markdown 贴进一个企微聊天**给人看**。和 tell_peer 分工明确: tell_peer 是把话塞进另一个 agent 的输入框 (驱动它干活), notify 是说给人听 —— 不会触发任何一轮对话。\n" +
       "`to` 省略 = 你这一轮所在的群 (人从哪个群叫的你就是哪个; 私聊轮则是你的 home 群); 要发到别的群就写聊天名 (`list_chats` 里那个), 一次可以写多个。气泡头自动写成 `emoji .你的名字` 并挂上你的 rolepage 链接, 那边的人一眼知道是谁。\n" +
       "什么时候用: 长活跑完了要通知另一个群的人; 一批分身收工后把汇总播给发起那个群; 定时任务 (schedule_task) 到点跑完把结论送到该看的人那里。别拿它跟同群的人说话 —— 那是你的正常回复。",
     inputSchema: {
@@ -423,10 +455,12 @@ server.registerTool(
 server.registerTool(
   "wait_peer",
   {
-    title: "Wait until another wizard stops working",
+    title: "(deprecated) block until another wizard stops working",
     description:
-      "挂起, 直到点名的 wizard 停下来 (它的终端不再显示中断提示), 然后返回它最新的回复。send_peer 之后就该用它 —— 这样你拿到的是写完的答案, 而不是写了一半的。超时先到则返回 `idle: false` 与原因: 它只是还在干, 你可以 peek 一眼再等。很便宜: 守护进程轮询的是 pane, 不烧 token。回的只算**你上次 send_peer 之后**它说的: 它收口了 `RESULT: …` 就只回 `result` (`omitted` = 正文还有多少字没给, 要读用 peek_peer), 没收口才回 `lastText` (超长掐中间); `stale: true` = 它停下了却没有新回复 (卡在弹窗上, 或那句话没被接住) —— peek_peer 看一眼, 别把它当成答完了。私聊轮的回复不进群 —— 人需要知道结论时, 用你自己的话收口给人, 别把原话再念一遍; 公开轮的回复已经在群里了, 更不必复述。\n" +
-      "**派了一批活就用 `names` 一次等一组**, 别一个一个等: 它们本来在同时干活, 串行等的墙钟是所有人之和, 并行等只等最慢的那一个。等一组时 `results` 按你给的顺序逐个回, 只等一个则直接摊平在顶层。`need` 决定满几个就返回 (默认全部; `need:1` = 谁先完事就先处理谁, 剩下的还在跑, 再调一次接着等)。",
+      "**一般不需要它了**: `tell_peer` 之后对方的结论会自动作为新的一轮送到你这里 (回执), 你不必守着。保留它是因为有一件事只有它做得到 —— **在同一轮里拿到答案**: 下一步硬依赖对方的结果、把工作拆成两轮会丢上下文时, 用它阻塞等; 以及 `need:1` 那种「谁先完事就先处理谁」。代价是你这个 pane 在等的过程中什么也干不了。\n" +
+      "被它取走的那一份**不会再作为回执注入**一遍 (返回里 `delivered: true` = 回执已经抢先进过你的会话, 别重复处理)。\n" +
+      "挂起, 直到点名的 wizard 停下来 (它的终端不再显示中断提示), 然后返回它最新的回复。超时先到则返回 `idle: false` 与原因: 它只是还在干, 你可以 peek 一眼再等。很便宜: 守护进程轮询的是 pane, 不烧 token。回的只算**你上次 send_peer 之后**它说的: 它收口了 `RESULT: …` 就只回 `result` (`omitted` = 正文还有多少字没给, 要读用 peek_peer), 没收口才回 `lastText` (超长掐中间); `stale: true` = 它停下了却没有新回复 (卡在弹窗上, 或那句话没被接住) —— peek_peer 看一眼, 别把它当成答完了。私聊轮的回复不进群 —— 人需要知道结论时, 用你自己的话收口给人, 别把原话再念一遍; 公开轮的回复已经在群里了, 更不必复述。\n" +
+      "**真要等一批就用 `names` 一次等一组**, 别一个一个等: 它们本来在同时干活, 串行等的墙钟是所有人之和, 并行等只等最慢的那一个 (不过 fan-out 的常规做法是给 `tell_peer` 带 `job`, 让回执自己回来并替你数「齐了吗」)。等一组时 `results` 按你给的顺序逐个回, 只等一个则直接摊平在顶层。`need` 决定满几个就返回 (默认全部; `need:1` = 谁先完事就先处理谁, 剩下的还在跑, 再调一次接着等)。",
     inputSchema: {
       name: z.string().optional().describe(`${ADDRESS_DOC} 等一组时改用 \`names\`。`),
       names: z
