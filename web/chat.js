@@ -32,9 +32,11 @@
     degraded: false, loaded: false, treeAll: false, treeFor: '',
   };
   var VIEW = 'msgs';
+  // 侧栏是会话列表还是关系图 —— 与右边的 VIEW 无关: 关系图下右边照样是选中的那段对话。
+  var WORLD = qs.get('side') === 'world';
   var $ = function (s) { return document.querySelector(s); };
   var app = $('#app'), thread = $('#thread'), inner = $('#thread-in'), convsEl = $('#convs');
-  var wmapEl = $('#wmap'), wtoolsEl = $('#wtools'), planEl = $('#plan-in');
+  var planEl = $('#plan-in');
 
   var srvNow = function () { return R.at ? R.at + (Date.now() - R.recvAt) : Date.now(); };
 
@@ -91,6 +93,7 @@
     if (CONV) p.conv = CONV;
     if (WITH) p['with'] = WITH;
     if (SESSION) p.session = SESSION;
+    if (WORLD) p.side = 'world';
     Object.keys(extra || {}).forEach(function (k) { p[k] = extra[k]; });
     return p;
   };
@@ -410,6 +413,7 @@
     var groups = R.convs.filter(function (c) { return c.kind === 'group'; });
     var dms = R.convs.filter(function (c) { return c.kind !== 'group'; });
     R.convs.forEach(markRead);
+    if (WORLD) return renderWorld();
     // 空着的那一栏不画 —— 对谁都一样: 人没有私聊只是这条规则的一个特例。
     var sec = function (title, list) {
       return list.length ? '<h2>' + title + '<span>' + list.length + '</span></h2>' + list.map(convItem).join('') : '';
@@ -488,7 +492,8 @@
   };
   // 一行: 图标 · 名字 · 一段淡色副标题 (家谱计数 / 下一枪)。不加框不加底 —— 名片下的一条安静的入口。
   var tile = function (view, label, sub, tone) {
-    return '<button class="bd' + (VIEW === view ? ' on' : '') + (tone ? ' ' + tone : '') + '" data-view="' + view + '">' +
+    var on = view === 'world' ? WORLD : VIEW === view;
+    return '<button class="bd' + (on ? ' on' : '') + (tone ? ' ' + tone : '') + '" data-view="' + view + '">' +
       '<span class="ic">' + ICON[view] + '</span><span class="lb">' + label + '</span>' +
       (sub ? '<span class="sb">' + sub + '</span>' : '') + '</button>';
   };
@@ -546,7 +551,8 @@
     // 家谱计数 (几个分身 / 子 wizard) 属于关系, 写在关系图入口上。
     $('#rb-acts').innerHTML = [R.relations && relTile(r), R.schedules && planTile()].filter(Boolean).join('');
     $('#rb-acts').querySelectorAll('.bd').forEach(function (b) {
-      b.onclick = function () { setView(VIEW === b.getAttribute('data-view') ? 'msgs' : b.getAttribute('data-view')); };
+      var v = b.getAttribute('data-view');
+      b.onclick = function () { v === 'world' ? setWorld(!WORLD) : setView(VIEW === v ? 'msgs' : v); };
     });
     // 标题就是这一页的主张: 你此刻站在谁的位置上。换视角 → 标题跟着换。
     document.title = nameOf(r.id) + ' 的视角';
@@ -617,8 +623,7 @@
   var renderHead = function () {
     var who = $('#ch-who'), acts = $('#ch-acts');
     if (VIEW !== 'msgs') {
-      who.innerHTML = '<span class="t">' + (VIEW === 'world' ? '关系图' : '日程') + '</span>' +
-        '<span class="sub">' + esc(nameOf(ROLE)) + (VIEW === 'world' ? ' 的关系树: 谁生了谁、谁给谁派活' : ' 名下的定时任务与工单') + '</span>';
+      who.innerHTML = '<span class="t">日程</span><span class="sub">' + esc(nameOf(ROLE)) + ' 名下的定时任务与工单</span>';
       acts.innerHTML = '<button class="vb" id="ch-back">‹ 对话</button>';
       $('#ch-back').onclick = function () { setView('msgs'); };
       return;
@@ -847,6 +852,11 @@
     });
     // 没带 conv 的链接 (群里点名字进来) 落在服务端挑的窗口上, 连同它挑的「只看我与谁」;
     // 手里的 conv 失效则只退回整个会话。
+    if (PEND && PEND.role === d.role.id) {
+      var pend = pairConv(PEND.other);
+      PEND = null;
+      if (pend) { CONV = pend[0]; WITH = pend[1]; }
+    }
     if (!CONV || !convOf(CONV)) { WITH = CONV ? '' : d['with'] || ''; CONV = d.conv || ''; }
   };
   var paintRole = function () {
@@ -888,7 +898,7 @@
       // 带 land 的 (换视角) 先不画: 页头换了高度, 旧行会在新行到来前先被顶一下, FLIP 的起点就错了。
       if (land) takeRole(d); else applyRole(d);
       syncUrl();
-      if (VIEW === 'world' || VIEW === 'plan') loadWorld();
+      if (WORLD || VIEW === 'plan') loadWorld();
       return loadMsgs(undefined, land && function () { paintRole(); return land(); }).then(function () {
         if (land && !inner.querySelector('.mrow')) paintRole();   // 空窗口不走 land, 页头照样要画
         connect();
@@ -913,18 +923,24 @@
   // 换视角: 窗口尽量留在同一个群 —— 从群里的一条消息切过去, 最想看的是对方在这个群
   // 里的样子; 对方不在这个群 (私聊的另一头) 就交给服务端挑它最近的会话。
   // at: 被点的那条消息 —— 换视角后它留在指针底下, 其余的相对它滑动。
-  var switchRole = function (id, at) {
+  // then: 落地后要选中的「我与 then」那一项 (关系图里点了一条视角不在其上的边)。
+  // 记着是给谁的: 旧视角的 SSE 在新摘要之前还可能推来一次, 不能让它把这一项吃掉。
+  var PEND = null;
+  var switchRole = function (id, at, then) {
     if (!canSwitch(id) || id === ROLE) return;
+    PEND = then ? { role: id, other: then } : null;
+    W.treeFor = '';
     var keep = CONV && CONV.indexOf('c:') === 0 ? CONV : '';
     var from = ROLE;
     // 整个频道 / 两人私聊的消息集合与视角无关 —— 只有 with 与 session 按 role 过滤。
     var same = VIEW === 'msgs' && !WITH && !SESSION && (keep || CONV.indexOf('p:') === 0);
     // 群里「只看我与 X」时换过去, 对面看到的是「只看我与 from」—— 同一段往来, 选中只看而不是整个群。
     var withBack = keep && WITH ? from : '';
-    ROLE = id; WITH = withBack; SESSION = '';
+    // 顺着关系图的一条边跳过来要看的是这一对的全部往来 —— 最新那段里它俩未必说过话。
+    ROLE = id; WITH = withBack; SESSION = PEND ? 'all' : '';
     CONV = keep || (CONV.indexOf('p:') === 0 ? 'p:' + from : '');
     var snap = VIEW === 'msgs' && !calm() ? snapRows(at) : null;
-    if (same) { flipWindow(snap); return; }
+    if (same && !PEND) { if (WORLD) loadWorld(); flipWindow(snap); return; }
     var kept = VIEW === 'msgs' ? keepBodies() : {};
     refresh(function () {
       adoptBodies(kept);
@@ -1103,15 +1119,10 @@
       ? CSS.escape(v)
       : String(v).replace(/[^a-zA-Z0-9_-]/g, function (c) { return '\\' + c; });
   };
-  var shortPath = function (p, keep) {
-    var seg = String(p || '').replace(/\/+$/, '').split('/').filter(Boolean);
-    return seg.length <= keep ? p : '…/' + seg.slice(-keep).join('/');
-  };
   var wRunning = function (n) { return n.busy || (!!n.runningUntil && srvNow() < n.runningUntil); };
   // 任一票据都能看任一 role (见 chat-http), 所以走进谁就是把视角切成谁。
   var canOpen = function (n) { return !!n; };
   var openNode = function (target) { if (target) switchRole(target); };
-  var shortName = function (n) { return '.' + (n.name || n.tag || n.target); };
 
   // ── 时间窗: profile 里选中的 session; 全部 = 不设限 ──
   var rangeOf = function () {
@@ -1219,53 +1230,56 @@
       }).join('') +
       (p.cross ? '<span class="ek cross" title="跨群的关系">⇄ 跨群</span>' : '') + '</span>';
   };
-  // 主父亲之外的入边: 不展开成第二个父亲, 只在节点上留一行淡淡的引用。
-  var refsHTML = function (F, t) {
-    var main = F.pp[t];
-    // 自己的主孩子反过来派给它的活 (回派) 不算: 树上已经连着这一对了。
-    var others = (F.inc[t] || []).filter(function (p) { return p !== main && !(F.pp[p.from] && F.pp[p.from].from === t); });
-    return others.length ? '<span class="trefs">也来自' + others.map(function (p) {
-      var ks = Object.keys(KIND).filter(function (k) { return p.kinds[k]; }).map(function (k) { return KIND[k].mark; }).join('/');
-      return '<span class="tref go" data-t="' + esc(p.from) + '" title="' + esc(nameOf(p.from)) + ' → 它">' + esc(nameOf(p.from)) + ' ' + ks + (p.n > 1 ? '×' + p.n : '') + '</span>';
-    }).join('') + '</span>' : '';
-  };
-  // 一条边的主色: 家谱优先, 决定树上那道折线的颜色与线型。
+  // 一条边的主色: 家谱优先, 决定树上那道线的颜色。
   var domKind = function (p) {
     return !p ? 'root' : ['spawn', 'clone', 'peer', 'job', 'graph'].filter(function (k) { return p.kinds[k]; })[0] || 'peer';
   };
 
-  var tnodeHTML = function (F, n, folded, upBase) {
-    var me = n.target === ROLE, p = F.pp[n.target];
-    var meta = [n.model && n.model.replace(/^claude-/, ''), n.cwd && '📁 ' + shortPath(n.cwd, 1), n.turns && n.turns + ' 轮', fmtAgo(n.lastTs)]
-      .filter(Boolean);
-    // 群名只在换了群时写 (根节点总写) —— 同群一路下来就不重复。
-    var chat = (!upBase || upBase !== n.base) && (n.chat || n.base);
-    return '<div class="tnode' + (me ? ' me' : ' go') + '" data-t="' + esc(n.target) + '"' +
-        (me ? '' : ' title="切到 ' + esc(shortName(n)) + ' 的视角"') + '>' +
-      labelHTML(p) +
-      '<span class="wav">' + esc(n.label) + '</span>' +
-      '<span class="tb">' +
-        '<span class="t1"><b class="wname">' + esc(shortName(n)) + '</b>' + stTag(n) +
-          (me ? '<span class="tk me">当前视角</span>' : '') +
-          (chat ? '<span class="tchat" title="住在这个群">#' + esc(chat) + '</span>' : '') +
-          (folded ? '<span class="tfold" title="它下面还有 ' + folded + ' 个, 切到它的视角可见">+' + folded + '</span>' : '') + '</span>' +
-        (n.description ? '<span class="tjob">' + esc(n.description) + '</span>' : '') +
-        (n.preview ? '<span class="tprev">' + esc(n.preview) + '</span>' : '') +
-        refsHTML(F, n.target) +
-        '<span class="wmeta">' + meta.map(esc).join('<span class="sep">·</span>') + '</span>' +
-      '</span></div>';
+  // ── 卡片 = 一条边: 点它就是去看「箭头两端那两个 role」之间的消息 ──
+  // 卡片画的是节点, 但它承载的是指进来的那条边 (主父亲 → 它); 根没有边, 点它只换视角。
+  var edgeEnds = function (F, t) { var p = F.pp[t]; return p ? [p.from, t] : [t]; };
+  // 视角 role 与 other 之间的那一项: 私聊优先, 否则挑最近说过话的那个群里的「只看我与它」。
+  var pairConv = function (other) {
+    if (convOf('p:' + other)) return ['p:' + other, ''];
+    var hit = R.convs.filter(function (c) { return c.kind === 'group'; }).map(function (c) {
+      return [c, (c.subs || []).filter(function (x) { return x.role === other && x.count; })[0]];
+    }).filter(function (x) { return x[1]; }).sort(function (a, b) { return b[1].lastTs - a[1].lastTs; })[0];
+    return hit ? [hit[0].key, dmOf(hit[0]) ? '' : other] : null;
+  };
+  // 视角在边上 → 直接选中那一项; 不在 → 先切到箭头起点的视角, 落地后再选。
+  var openEdge = function (F, t) {
+    var ends = edgeEnds(F, t);
+    if (ends.indexOf(ROLE) < 0) return switchRole(ends[0], undefined, ends[1]);
+    var other = ends.filter(function (x) { return x !== ROLE; })[0];
+    var hit = other && pairConv(other);
+    if (hit) selectConv(hit[0], hit[1]);
+  };
+  // 选中的那一项就是这条边 (视角是一端, 正在看的对端是另一端)。
+  var edgeOn = function (F, t) {
+    var ends = edgeEnds(F, t), peer = CONV ? pairPeer(convOf(CONV)) : '';
+    return ends.length === 2 && ends.indexOf(ROLE) >= 0 && ends.indexOf(peer) >= 0 && peer !== ROLE;
+  };
+
+  // 卡片与侧栏会话项同一套: 头像 · 名字 + 状态灯 · 时刻 / 最近一句。
+  var tnodeHTML = function (F, n, folded) {
+    var me = n.target === ROLE;
+    var title = nm(n.target, n.name, true) +
+      (folded ? '<span class="tfold" title="它下面还有 ' + folded + ' 个, 切到它的视角可见">+' + folded + '</span>' : '');
+    return '<button class="ci tci' + (me ? ' me' : '') + (edgeOn(F, n.target) ? ' on' : '') + '" data-t="' + esc(n.target) + '">' +
+      labelHTML(F.pp[n.target]) + goSpan('av', n.target, esc(n.label)) +
+      line(title, n.lastTs, n.preview, stTag(n, true)) + '</button>';
   };
 
   // keep(父, 孩子) → 'full' 整枝 / 'leaf' 只画它自己 / '' 不画; 不给 keep = 全画。shown 收集画出来的节点。
-  var treeHTML = function (F, t, depth, keep, leaf, shown, upBase, seen) {
+  var treeHTML = function (F, t, depth, keep, leaf, shown, seen) {
     var n = nodeOf(t);
     if (!n || seen[t] || depth > 32) return '';
     seen[t] = 1;
     shown.push(n);
     var kids = leaf ? [] : (F.kids[t] || []).filter(function (k) { return !keep || keep(t, k); });
-    return '<li class="' + domKind(F.pp[t]) + '">' + tnodeHTML(F, n, leaf ? countSub(F, t) : 0, upBase) +
+    return '<li class="' + domKind(F.pp[t]) + '">' + tnodeHTML(F, n, leaf ? countSub(F, t) : 0) +
       (kids.length ? '<ul>' + kids.map(function (k) {
-        return treeHTML(F, k, depth + 1, keep, keep && keep(t, k) === 'leaf', shown, n.base, seen);
+        return treeHTML(F, k, depth + 1, keep, keep && keep(t, k) === 'leaf', shown, seen);
       }).join('') + '</ul>' : '') +
       '</li>';
   };
@@ -1279,8 +1293,10 @@
     };
   };
 
+  // 关系图替换的是侧栏的会话列表 —— 右边照旧是选中的那段对话。
   var renderWorld = function () {
-    if (!W.loaded) { wmapEl.innerHTML = '<div class="empty">加载中…</div>'; return; }
+    if (!WORLD) return;
+    if (!W.loaded) { convsEl._tree = ''; convsEl.innerHTML = '<div class="empty">加载中…</div>'; return; }
     var rg = rangeOf();
     var F = forestOf(relations(rg));
     var me = nodeOf(ROLE);
@@ -1291,37 +1307,33 @@
       ? F.roots.slice().sort(function (a, b) {
           var mine = path[0];
           return (b === mine) - (a === mine) || ((nodeOf(b) || {}).lastTs || 0) - ((nodeOf(a) || {}).lastTs || 0);
-        }).map(function (r) { return treeHTML(F, r, 0, null, false, shown, '', {}); }).join('')
-      : treeHTML(F, path[0], 0, focusKeep(path), false, shown, '', {});
-    var span = rg ? (rg.s === R.sessions[R.sessions.length - 1] ? '最新 session · ' : 'session · ') + fmtClock(rg.from) + ' 起' : '全部时间';
-    wtoolsEl.innerHTML = '<div class="wstat"><span class="rng" title="在名片里的 session 下拉切换范围">范围: ' + esc(span) + '</span>' +
-      (W.degraded ? ' · <span class="warn" title="注册表不可达 (独立 svr 部署), 只画观测到的往来">名册缺席</span>' : '') +
-      '<span class="hint">箭头方向 = 谁生了谁 / 谁给谁派活 · 单击切到它的视角</span></div>';
+        }).map(function (r) { return treeHTML(F, r, 0, null, false, shown, {}); }).join('')
+      : treeHTML(F, path[0], 0, focusKeep(path), false, shown, {});
+    var span = rg ? (rg.s === R.sessions[R.sessions.length - 1] ? '最新 session' : 'session ' + fmtClock(rg.from)) : '全部时间';
     var alone = !all && shown.length < 2;
     var html = '<div class="tview">' +
-      '<section class="tfam">' +
-        '<h3>关系树<span>' + (all ? Object.keys(F.ends).length + ' 个 wizard 有关系' : shown.length + ' 个 wizard') + '</span>' +
-          (me ? '<button class="tall" title="' + (all ? '只留它的上游链、它自己、它的下游与同源兄弟' : '画出范围内所有有关系的 wizard') + '">' +
-            (all ? '只看相关' : '看全部') + '</button>' : '') + '</h3>' +
-        '<div class="tlegend">' + Object.keys(KIND).map(function (k) {
-          return '<span class="tlk ' + k + '" title="' + KIND[k].tip + '"><i></i>' + KIND[k].mark + '</span>';
-        }).join('') + '<span class="tref">也来自 …</span> = 非主路径的关系</div>' +
-        (alone ? '<div class="tsolo">' + esc(nameOf(ROLE)) + (rg ? ' 在这段 session 里' : '') + ' 既没生过谁、也没和谁派过活</div>' : '') +
-        (shown.length ? '<ul class="tree' + (all ? ' all' : '') + '">' + trees + '</ul>' : '<div class="pempty">这段时间里没有任何关系</div>') +
-      '</section>' +
+      '<h2>关系图<span title="在名片里的 session 下拉切换范围">' + esc(span) + ' · ' + (all ? Object.keys(F.ends).length : shown.length) + ' 个</span>' +
+        (W.degraded ? '<span class="warn" title="注册表不可达 (独立 svr 部署), 只画观测到的往来">名册缺席</span>' : '') +
+        (me ? '<button class="tall" title="' + (all ? '只留它的上游链、它自己、它的下游与同源兄弟' : '画出范围内所有有关系的 wizard') + '">' +
+          (all ? '只看相关' : '看全部') + '</button>' : '') + '</h2>' +
+      '<div class="tlegend">' + Object.keys(KIND).map(function (k) {
+        return '<span class="tlk ' + k + '" title="' + KIND[k].tip + '"><i></i>' + KIND[k].mark + '</span>';
+      }).join('') + '</div>' +
+      (alone ? '<div class="tsolo">' + esc(nameOf(ROLE)) + (rg ? ' 在这段 session 里' : '') + ' 既没生过谁、也没和谁派过活</div>' : '') +
+      (shown.length ? '<ul class="tree' + (all ? ' all' : '') + '">' + trees + '</ul>' : '<div class="pempty">这段时间里没有任何关系</div>') +
     '</div>';
     // 心跳每 3s 重算一次 (状态灯 / 几分钟前) —— 没变就不碰 DOM, 免得蹭掉悬停与滚动。
-    if (wmapEl._tree === html && wmapEl.querySelector('.tview')) return;
-    wmapEl._tree = html;
-    wmapEl.innerHTML = html;
-    wmapEl.querySelectorAll('.tnode.go, .tref.go').forEach(function (el) {
-      el.onclick = function (e) { e.stopPropagation(); openNode(el.getAttribute('data-t')); };
+    if (convsEl._tree === html && convsEl.querySelector('.tview')) return;
+    convsEl._tree = html; convsEl._html = '';
+    convsEl.innerHTML = html;
+    convsEl.querySelectorAll('.tci').forEach(function (el) {
+      el.onclick = function () { openEdge(F, el.getAttribute('data-t')); };
     });
-    var tall = wmapEl.querySelector('.tall');
+    bindGo(convsEl);
+    var tall = convsEl.querySelector('.tall');
     if (tall) tall.onclick = function () { W.treeAll = !W.treeAll; W.treeFor = ''; renderWorld(); };
-    // 树宽过视口时, 把当前 role 滚进视野。
-    var cur = wmapEl.querySelector('.tnode.me');
-    if (cur && W.treeFor !== ROLE) { W.treeFor = ROLE; cur.scrollIntoView({ block: 'nearest', inline: 'center' }); }
+    var cur = convsEl.querySelector('.tci.me');
+    if (cur && W.treeFor !== ROLE) { W.treeFor = ROLE; cur.scrollIntoView({ block: 'nearest' }); }
   };
 
   // ══ 日程视图 ═══════════════════════════════════════════════════════
@@ -1501,13 +1513,13 @@
       W.at = d.at; W.loaded = true;
       W.nodes = d.nodes || []; W.edges = d.edges || []; W.chats = d.chats || [];
       W.jobs = d.jobs || []; W.schedules = d.schedules || []; W.degraded = !!d.degraded;
-      if (VIEW === 'world') renderWorld();
+      renderWorld();
       if (VIEW === 'plan') renderPlan();
     }).catch(function () { });
   };
   var pollWorld = function () {
     if (worldTimer) { clearInterval(worldTimer); worldTimer = null; }
-    if (VIEW === 'msgs') return;
+    if (VIEW === 'msgs' && !WORLD) return;
     worldTimer = setInterval(function () {
       if (!document.hidden) loadWorld();
     }, WORLD_MS);
@@ -1516,7 +1528,6 @@
   var setView = function (v) {
     VIEW = v;
     thread.hidden = v !== 'msgs';
-    $('#pane-world').hidden = v !== 'world';
     $('#pane-plan').hidden = v !== 'plan';
     app.classList.toggle('outer', v !== 'msgs');
     // 手机上关系/日程占满主区 —— 进入即阅读态。
@@ -1524,10 +1535,32 @@
     renderRole(); renderHead(); renderUsage();
     if (v === 'msgs') { toBottom(true); renderConvs(); }
     else {
-      if (!W.loaded) { planEl._html = wmapEl._tree = ''; (v === 'world' ? wmapEl : planEl).innerHTML = '<div class="empty">加载中…</div>'; }
-      else if (v === 'world') renderWorld();
+      if (!W.loaded) { planEl._html = ''; planEl.innerHTML = '<div class="empty">加载中…</div>'; }
       else renderPlan();
       loadWorld();
+    }
+    pollWorld();
+  };
+  // 侧栏换成关系图 / 换回会话列表。换回时选中的仍是在关系图里点开的那一项, 并把它滚进视野。
+  var setWorld = function (on) {
+    WORLD = on; W.treeFor = '';
+    convsEl._html = convsEl._tree = '';
+    syncUrl();
+    // 手机上侧栏与主区二选一 —— 开关在侧栏里, 结果也在侧栏里。
+    if (on) app.classList.remove('reading');
+    renderRole();
+    if (on) { renderWorld(); loadWorld(); }
+    else {
+      // 选中的子项得露出来: 群展开, 排在折叠条后面的连折叠条一起展开。
+      var c = convOf(CONV);
+      if (c) {
+        OPEN[CONV] = true; OPEN_AT = CONV;
+        var rank = c.subs.filter(function (x) { return x.count; }).map(function (x) { return x.role; }).indexOf(WITH);
+        if (rank >= SUB_FOLD) MORE[CONV] = true;
+      }
+      renderConvs();
+      var sel = convsEl.querySelector('.si.on') || convsEl.querySelector('.ci.on');
+      if (sel) sel.scrollIntoView({ block: 'nearest' });
     }
     pollWorld();
   };
@@ -1538,12 +1571,11 @@
     expireRows();
     // 侧栏的「几分钟前」与状态灯: 内容没变时 renderConvs 不碰 DOM。
     paintStatus(); renderConvs();
-    if (VIEW === 'world') renderWorld();
-    else if (VIEW === 'plan') renderPlan();
+    if (VIEW === 'plan') renderPlan();
   }, TICK_MS);
 
   // ── boot ──
   // 带着 role / conv 来的链接直接进阅读态 (手机上不先落在会话列表)。
-  if (ROLE || CONV) app.classList.add('reading');
+  if ((ROLE || CONV) && !WORLD) app.classList.add('reading');
   refresh();
 })();

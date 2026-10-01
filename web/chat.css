@@ -171,7 +171,10 @@ button { font: inherit; color: inherit }
 .ci:hover { background: #f4f6f9 }
 .ci.on { background: #eaf0fc }
 .ci { align-items: center }
-.ci > .av { font-size: 22px; line-height: 1; flex: none; width: 34px; text-align: center }
+.ci > .av {
+  flex: none; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px;
+  background: #f1f3f6; font-size: 20px; line-height: 1;
+}
 .ci .b { min-width: 0; flex: 1; overflow: hidden }
 .ci .pv, .ci .l1 { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .ci .l1 { display: flex }
@@ -200,7 +203,10 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 }
 .si:hover { background: #f4f6f9 }
 .si.on { background: #eaf0fc }
-.si > .av { font-size: 17px; line-height: 1; flex: none; width: 24px; text-align: center }
+.si > .av {
+  flex: none; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 7px;
+  background: #f1f3f6; font-size: 14px; line-height: 1;
+}
 .si .b { min-width: 0; flex: 1; overflow: hidden }
 .si .l1 { display: flex; align-items: baseline; gap: 6px }
 .si .t { font-size: 12.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
@@ -448,20 +454,6 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .wtools .hint { margin-left: auto; color: #b1bac4 }
 .wscroll { position: relative; flex: 1; min-height: 0; overflow: auto; -webkit-overflow-scrolling: touch }
 .wmap { position: relative; padding: 18px 20px 28px; min-width: min-content }
-.wav {
-  position: relative; width: 26px; height: 26px; flex: none; border-radius: 8px;
-  background: #f1f3f6; border: 1px solid #eaeef2;
-  display: flex; align-items: center; justify-content: center; font-size: 14px;
-}
-.wname {
-  font-size: 12.5px; font-weight: 600; min-width: 0; overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap;
-}
-.wmeta {
-  font-size: 10.5px; color: #8c959f; font-family: ui-monospace, Menlo, monospace;
-  display: flex; gap: 4px; flex-wrap: wrap; margin-top: 1px;
-}
-.wmeta .sep { opacity: .45 }
 
 /* ══ 日程 ═══════════════════════════════════════════════════════════ */
 .plan-in { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 20px 28px }
@@ -586,40 +578,31 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .wst.off::before { background: transparent; box-shadow: inset 0 0 0 1.5px #b1bac4 }
 .wst:empty { padding: 0; background: none; box-shadow: none }
 .wst:empty::before { width: 7px; height: 7px }
-/* ══ 关系图 · 关系树 (家谱与派活合成一棵, 以当前 role 为中心) ══════════ */
-.tview {
-  max-width: 960px; margin: 0 auto;
-}
-.tview > section { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px 16px; min-width: 0 }
-.tview h3 {
-  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin: 0 0 14px; font-size: 13px;
-  padding-bottom: 9px; border-bottom: 1px solid #eaeef2;
-}
-.tview h3 > span { font-size: 11px; color: var(--faint); font-weight: 400; font-variant-numeric: tabular-nums }
-/* 展开全部的开关: 一个不显眼的文字链。 */
-.tall {
+/* ══ 关系图 · 关系树 (家谱与派活合成一棵, 以当前 role 为中心) ══════════
+   它替换的是侧栏的会话列表: 标题、图例与会话列表的分组标题同一种读法, 卡片就是会话项 (.ci)。 */
+.tview .tall {
   margin-left: auto; border: 0; background: none; padding: 0 2px; cursor: pointer; font-size: 11px; color: var(--faint);
   text-decoration: underline dotted; text-underline-offset: 3px;
 }
-.tall:hover { color: var(--accent) }
-.tree.all > li + li { margin-top: 14px; padding-top: 14px; border-top: 1px dashed #eaeef2 }
-.tfold { font-size: 10px; color: var(--faint); border: 1px dashed var(--line); border-radius: 8px; padding: 0 5px; line-height: 14px }
-.tfam { overflow-x: auto }
-.tsolo, .tghost { font-size: 11.5px; color: var(--faint); margin: 0 0 10px }
-.tghost { font-family: ui-monospace, Menlo, monospace }
+.tview .tall:hover { color: var(--accent) }
+.tview h2 .warn { color: #9a6700; font-weight: 400 }
+.tree.all > li + li { margin-top: 10px; padding-top: 10px; border-top: 1px dashed #eaeef2 }
+.tfold { flex: none; font-size: 10px; font-weight: 400; color: var(--faint); border: 1px dashed var(--line); border-radius: 8px; padding: 0 5px; line-height: 14px }
+.tsolo { font-size: 11.5px; color: var(--faint); margin: 0 8px 10px }
+.tview .pempty { padding: 18px 8px }
 
-/* 树: 每条入边是一道实线, 从父卡片底下一路落到自己卡片的入口, 末端一枚箭头, 颜色 = 关系种类。
+/* 树: 每条入边是一道实线, 从父卡片底下一路落到自己卡片的头像旁, 末端一枚箭头, 颜色 = 关系种类。
    兄弟共用的那段竖干上, 后画的 (更下方的节点) 盖住先画的; 竖线往上伸到 ul 顶为止 (clip-path 只裁上边)。 */
 .tree, .tree ul { list-style: none; margin: 0; padding: 0 }
-.tree ul { padding-left: 26px; clip-path: inset(0 -100vw -100vh -100vw) }
-.tree li { position: relative; padding-top: 16px }
+.tree ul { padding-left: 20px; clip-path: inset(0 -100vw -100vh -100vw) }
+.tree li { position: relative; padding-top: 14px }
 .tree > li { padding-top: 0 }
 .tree ul > li::before {
-  content: ""; position: absolute; left: -15px; top: -9999px; height: calc(9999px + 31px); width: 15px;
-  border-left: 1.5px solid var(--lc); border-bottom: 1.5px solid var(--lc); border-bottom-left-radius: 8px;
+  content: ""; position: absolute; left: -10px; top: -9999px; height: calc(9999px + 39px); width: 10px;
+  border-left: 1.5px solid var(--lc); border-bottom: 1.5px solid var(--lc); border-bottom-left-radius: 7px;
 }
 .tree ul > li::after {
-  content: ""; position: absolute; left: -6px; top: 26px; border: 4.5px solid transparent; border-right: 0;
+  content: ""; position: absolute; left: -6px; top: 34px; border: 4.5px solid transparent; border-right: 0;
   border-left: 7px solid var(--lc);
 }
 .tree li.spawn, .tlk.spawn { --lc: #d4700f }
@@ -627,35 +610,17 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .tree li.peer, .tlk.peer { --lc: #0969da }
 .tree li.job, .tlk.job { --lc: #bf8700 }
 .tree li.graph, .tlk.graph { --lc: #0a7d6b }
-/* 线接入卡片处的 label: 骑在卡片左上角的边框上, 紧挨箭头。 */
-.tlab { position: absolute; left: 6px; top: -8px; display: flex; gap: 3px; z-index: 1 }
-.tlab .ek { box-shadow: 0 0 0 2px var(--bg, #fff) }
-.tnode {
-  position: relative; display: flex; gap: 10px; align-items: flex-start; max-width: 560px;
-  padding: 9px 12px; border-radius: 10px; background: #fff; border: 1px solid var(--line);
-  transition: border-color .12s, box-shadow .12s, background .12s;
-}
-.tnode.go { cursor: pointer }
-.tnode.go:hover { border-color: var(--accent); box-shadow: 0 2px 8px #2f55c91a }
-.tnode.go:hover .wname { color: var(--accent) }
-.tnode.me { background: var(--mine); border-color: var(--accent); box-shadow: 0 0 0 3px #2f55c914 }
-.tnode .wav { width: 30px; height: 30px; font-size: 16px; border-radius: 9px }
-.tb { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px }
-.t1 { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0 }
-.t1 .wname { font-size: 13px }
-.tk { flex: none; font-size: 10px; line-height: 16px; padding: 0 5px; border-radius: 4px; font-weight: 600 }
-.tk.me { color: #fff; background: var(--accent) }
-.tjob { font-size: 12px; color: var(--ink); opacity: .85; line-height: 1.45 }
-.tprev {
-  font-size: 11.5px; color: var(--mute); line-height: 1.4; overflow: hidden;
-  display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical;
-}
-.tlegend { display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; margin: -4px 0 14px; font-size: 11px; color: var(--faint) }
+/* 卡片 = 会话项; label 骑在它左上角, 紧挨箭头。 */
+.tci { position: relative; overflow: visible }
+.tci.me .t .nm { color: var(--accent) }
+.tlab { position: absolute; left: 4px; top: -8px; display: flex; gap: 3px; z-index: 2 }
+.tlab .ek { box-shadow: 0 0 0 2px var(--card) }
+.tlegend { display: flex; align-items: center; gap: 4px 10px; flex-wrap: wrap; margin: 0 8px 12px; font-size: 11px; color: var(--faint) }
 .tlk { display: inline-flex; align-items: center; gap: 5px; color: var(--lc); font-weight: 600 }
-.tlk i { position: relative; width: 22px; height: 1.5px; background: var(--lc) }
+.tlk i { position: relative; width: 18px; height: 1.5px; background: var(--lc) }
 .tlk i::after { content: ""; position: absolute; right: -1px; top: -3.75px; border: 4.5px solid transparent; border-right: 0; border-left: 7px solid var(--lc) }
 
-/* 边的小标记: 一条边可能同时带几种 (既是子 wizard 又被派过活), 各一枚。 */
+/* 边的 label: 一条边可能同时带几种 (既是子 wizard 又被派过活), 各一枚。 */
 .ek {
   flex: none; font-size: 10px; line-height: 15px; padding: 0 5px; border-radius: 4px; white-space: nowrap;
   font-weight: 600; color: var(--mute); background: #f1f3f6;
@@ -666,11 +631,6 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .ek.job { color: #fff; background: #bf8700 }
 .ek.graph { color: #fff; background: #0a7d6b }
 .ek.cross { font-weight: 400; background: #fff; box-shadow: inset 0 0 0 1px var(--line) }
-.tchat { font-size: 10.5px; color: var(--faint) }
-.trefs { display: flex; gap: 4px; flex-wrap: wrap; align-items: baseline; font-size: 10.5px; color: var(--faint) }
-.tref { color: var(--faint); border-bottom: 1px dotted var(--line) }
-.tref.go { cursor: pointer }
-.tref.go:hover { color: var(--accent); border-bottom-color: var(--accent) }
 
 /* ══ 日程 · 总览 / 任务卡 ════════════════════════════════════════════ */
 .pstats {
