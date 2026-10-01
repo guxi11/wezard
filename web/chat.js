@@ -408,21 +408,29 @@
     renderConvs();
   };
 
-  // 一项的内容 (头像 + 两行): 会话项与子项共用 —— 时刻、最近一句、未读都取自会话本身。
-  // 关系图卡片只借这几样数据, 不借身份 (见 tnodeHTML)。
+  // ── 会话项 / 子项 / 关系图卡片共用的三样: 一行的数据 (glance)、一行的画法 (roleRow)、排序 (recentFirst) ──
+  // glance = 时刻 · 最近一句 · 未读, 取自会话本身 (子项 = 我与它在这个群里的那一对)。
+  var glance = function (c, s) {
+    var x = s || c;
+    return { lastTs: x.lastTs, preview: x.preview, unread: unreadOf(c, s ? s.role : undefined) };
+  };
+  // 同层按最近活动排, 有新话就上浮。
+  var recentFirst = function (a, b) { return b.lastTs - a.lastTs; };
+  // 一个 role 的一行: 头像 · 名字 (+tail) + 忙闲灯 · 时刻 / 最近一句 + 未读。
+  var roleRow = function (id, name, label, g, status, tail) {
+    return goSpan('av', id, esc(label)) +
+      line(nm(id, name, true) + (tail || ''), g.lastTs, g.preview, stTag(status, true), g.unread);
+  };
   var convRow = function (c) {
-    var title = c.kind === 'wizard' ? nm(c.peer, c.name, true) : '<span class="nm chat">' + esc(c.name) + '</span>';
-    return avatarOf(c) + line(title, c.lastTs, c.preview, stTag(c.status, true), unreadOf(c));
+    if (c.kind === 'wizard') return roleRow(c.peer, c.name, c.label, glance(c), c.status);
+    return avatarOf(c) + line('<span class="nm chat">' + esc(c.name) + '</span>', c.lastTs, c.preview, stTag(c.status, true), unreadOf(c));
   };
-  var subRow = function (c, s) {
-    return goSpan('av', s.role, esc(s.label)) +
-      line(nm(s.role, s.name, true), s.lastTs, s.preview, stTag(s.status, true), unreadOf(c, s.role));
-  };
+  var subRow = function (c, s) { return roleRow(s.role, s.name, s.label, glance(c, s), s.status); };
 
   var convItem = function (c) {
     var on = c.key === CONV;
     // 只列与我有往来的: 在群里但没和我说过话的人, 点进去也是空的。
-    var talked = OPEN[c.key] ? c.subs.filter(function (s) { return s.count; }) : [];
+    var talked = OPEN[c.key] ? c.subs.filter(function (s) { return s.count; }).sort(recentFirst) : [];
     var hidden = talked.length - SUB_FOLD;
     var bar = hidden > 0
       ? '<button class="si-more" data-more="' + esc(c.key) + '">' + (MORE[c.key] ? '折叠' : '展开更多') + ' × ' + hidden + '</button>'
@@ -451,8 +459,8 @@
   var SBOX = '<button class="sbox" type="button"><span class="ic">' + SEARCH_SVG + '</span>' +
     '<span class="lb">搜索 role、会话、消息</span><kbd>' + KBD + '</kbd></button>';
   var renderConvs = function () {
-    var groups = R.convs.filter(function (c) { return c.kind === 'group'; });
-    var dms = R.convs.filter(function (c) { return c.kind !== 'group'; });
+    var groups = R.convs.filter(function (c) { return c.kind === 'group'; }).sort(recentFirst);
+    var dms = R.convs.filter(function (c) { return c.kind !== 'group'; }).sort(recentFirst);
     R.convs.forEach(markRead);
     if (WORLD) return renderWorld();
     // 空着的那一栏不画 —— 对谁都一样: 人没有私聊只是这条规则的一个特例。
@@ -1289,10 +1297,8 @@
       close();
     };
     close();
+    // 兄弟的顺序在画的时候定 (按卡片的时刻, 同会话列表), 这里不排。
     var kids = kidsIn();
-    Object.keys(kids).forEach(function (t) {
-      kids[t].sort(function (a, b) { return pp[a].first - pp[b].first; });
-    });
     return { pairs: pairs, inc: inc, pp: pp, kids: kids, roots: roots, ends: ends };
   };
 
@@ -1357,20 +1363,26 @@
     }, {});
   };
 
-  // 卡片与侧栏会话项同一套: 头像 · 名字 + 状态灯 · 时刻 / 最近一句。
-  // 视角与对端有会话项 → 时刻、最近一句、未读取自那一项 (与侧栏同一份数据); 没有 → 取节点, 时刻取这条边最近一次
-  // 发生, 而不是节点自己最后的动静 —— 卡片承载的是边。
+  // 卡片与侧栏会话项同一套 (glance / roleRow / recentFirst)。
+  // 视角与对端有会话项 → 一行的数据就是那一项的 glance; 没有 → 取节点, 时刻取这条边最近一次发生,
+  // 而不是节点自己最后的动静 —— 卡片承载的是边。
   // 身份 (头像 / 名字 / 状态灯) 永远是卡片自己的节点: 会话项的身份是「视角的对端」, 视角自己那张卡片
   // (边的下端是视角) 的对端是它的父亲 —— 拿会话项的身份去画, 这张卡片就成了父亲的分身。
+  var cardGlance = function (F, t) {
+    var hit = edgeConv(F, t), c = hit && convOf(hit[0]);
+    var s = c && hit[1] && (c.subs || []).filter(function (x) { return x.role === hit[1]; })[0];
+    if (c) return glance(c, s || undefined);
+    var n = nodeOf(t) || {}, p = F.pp[t];
+    return { lastTs: p ? p.last : n.lastTs || 0, preview: n.preview || '', unread: 0 };
+  };
+  var byCard = function (F) {
+    return function (a, b) { return recentFirst(cardGlance(F, a), cardGlance(F, b)); };
+  };
   var tnodeHTML = function (F, n, folded) {
     var me = n.target === ROLE;
     var tail = folded ? '<span class="tfold" title="它下面还有 ' + folded + ' 个, 切到它的视角可见">+' + folded + '</span>' : '';
-    var hit = edgeConv(F, n.target), c = hit && convOf(hit[0]);
-    var s = c && hit[1] && (c.subs || []).filter(function (x) { return x.role === hit[1]; })[0];
-    var src = s || c, p = F.pp[n.target];
-    var row = goSpan('av', n.target, esc(n.label)) +
-      line(nm(n.target, n.name, true) + tail, src ? src.lastTs : p ? p.last : n.lastTs, src ? src.preview : n.preview,
-        stTag(n, true), c ? unreadOf(c, s ? s.role : undefined) : 0);
+    var p = F.pp[n.target];
+    var row = roleRow(n.target, n.name, n.label, cardGlance(F, n.target), n, tail);
     var via = F.vis && F.vis[n.target] === 'via';
     return '<button class="ci tci' + (me ? ' me' : '') + (via ? ' via' : '') + (F.links && CONV === talkKey(F.links, n.target) ? ' on' : '') + '" data-t="' + esc(n.target) + '"' +
       (via ? ' title="' + esc(nameOf(n.target) + ' 没和 ' + nameOf(ROLE) + ' 对过话, 留着是为了连到它下面对过话的') + '"' : '') + '>' +
@@ -1383,7 +1395,7 @@
     if (!n || seen[t] || depth > 32) return '';
     seen[t] = 1;
     shown.push(n);
-    var kids = leaf ? [] : (F.kids[t] || []).filter(function (k) { return shows(F, k) && (!keep || keep(t, k)); });
+    var kids = leaf ? [] : (F.kids[t] || []).filter(function (k) { return shows(F, k) && (!keep || keep(t, k)); }).sort(byCard(F));
     return '<li class="' + domKind(F.pp[t]) + '"' + (z ? ' style="z-index:' + z + '"' : '') + '>' + tnodeHTML(F, n, leaf ? countSub(F, t) : 0) +
       // 兄弟的线共用一段竖干, 越往下的越长: 短的叠在上面 (z 随序号递减), 每条线的末段都看得见自己的颜色。
       (kids.length ? '<ul>' + kids.map(function (k, i) {
@@ -1431,7 +1443,7 @@
       return all
         ? F.roots.slice().sort(function (a, b) {
             var mine = path[0];
-            return (b === mine) - (a === mine) || ((nodeOf(b) || {}).lastTs || 0) - ((nodeOf(a) || {}).lastTs || 0);
+            return (b === mine) - (a === mine) || byCard(F)(a, b);
           }).map(function (r) { return treeHTML(F, r, 0, null, false, into, {}); }).join('')
         : treeHTML(F, path[0], 0, focusKeep(path), false, into, {});
     };
