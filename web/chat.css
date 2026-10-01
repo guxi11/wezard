@@ -72,7 +72,7 @@ button { font: inherit; color: inherit }
   margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--ink); opacity: .8; word-break: break-word;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
-/* 名字下的描述: 📁 cwd · 👥/👤 home · 🐣 出生, 一段低调的灰字, 排不下就整项落到下一行。 */
+/* 名字下的描述: 📁 cwd · 🏠 home · 🐣 出生, 一段低调的灰字, 排不下就整项落到下一行。 */
 .rolebar .facts { display: flex; flex-wrap: wrap; gap: 0 10px; font-size: 11.5px; line-height: 1.45; color: var(--faint); min-width: 0 }
 /* 每条自身不折行; 独占一行仍超宽 (长路径 / 长群名) 才省略。 */
 .rolebar .facts span { white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis }
