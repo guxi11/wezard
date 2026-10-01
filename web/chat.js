@@ -655,15 +655,17 @@
 
   // ── 用量条: 一组轮次的总账 ──
   // usageHTML 只管「一本账长什么样」(TagSummary → 一条), 账是谁的、挂在哪由 renderUsage 定。
+  // 按单价从省到贵排, 颜色随之由冷转暖: 缓存读 (约 0.1×, 越多越健康) 青绿 → 输入 (1×) 沉稳蓝 →
+  // 缓存写 (1.25×) 琥珀提醒 → 输出 (约 5×, 最贵) 珊瑚红警示。相邻两段色相至少隔 60°, 不靠明度分。
   var SEGS = [
-    ['input', '输入', '#0a7d6b'], ['cacheRead', '缓存读', '#8250df'],
-    ['cacheWrite', '缓存写', '#953800'], ['output', '输出', '#1a7f37'],
+    ['cacheRead', '缓存读', '#2a9d8f'], ['input', '输入', '#4c6fd6'],
+    ['cacheWrite', '缓存写', '#e0a030'], ['output', '输出', '#e4572e'],
   ];
   var TIP = {
     turns: '对话轮数', tools: '工具调用次数', api: 'API 请求次数',
     ctx: '上下文峰值 — 单次请求送入的 input + 缓存 的最高值', time: '累计耗时',
   };
-  var ICON = { turns: '💬', tools: '🛠️' };
+  var ICON = { turns: '💬', tools: '🛠️', api: '📡', ctx: '🧠', time: '⏱️' };
   var liveDur = function (t) {
     var d = (t.usage && t.usage.durationMs) || 0;
     if (!t.runningUntil) return d;
@@ -674,12 +676,10 @@
     var segs = SEGS.filter(function (s) { return u[s[0]] > 0; });
     var total = segs.reduce(function (a, s) { return a + u[s[0]]; }, 0);
     // 值为 0 = 该指标没有数据 (老记录 / 网关不报 usage), 不占位置。
-    // 有 emoji 的指标: emoji 在前、数字在后, 不再挂英文名。
+    // 指标一律 emoji 在前、数字在后, 不挂英文名 (含义在 title 里)。
     var kv = function (k, n, text) {
-      if (!n) return '';
-      var ic = ICON[k];
-      return '<span class="kv" title="' + esc(TIP[k] || k) + '">' +
-        (ic ? '<i class="u-ic">' + ic + '</i><b>' + esc(text) + '</b>' : '<b>' + esc(text) + '</b>' + k) + '</span>';
+      return n ? '<span class="kv" title="' + esc(TIP[k] || k) + '"><i class="u-ic">' + ICON[k] + '</i><b>' +
+        esc(text) + '</b></span>' : '';
     };
     // 输出 / 缓存不再单列成指标 —— 它们就是 I/O 图例里的那几格。
     var io = total > 0
