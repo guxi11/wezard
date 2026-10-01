@@ -557,7 +557,7 @@ server.registerTool(
   {
     title: "Hand another wizard's work over to a fresh context",
     description:
-      "给**另一个** wizard 做交接, 原地完成: 守护进程让它把当前工作压成一份自洽的交接简报, 等它写完抓取, 再往**同一个 pane** 注入 `/clear` (上下文清零、新 sessionId、cwd 不变、身份的系统提示还在), 然后把简报作为新会话的第一条消息贴回去。它的上下文撑不住了、或者用户说「让 .fix 交接一下」「叫它压缩上下文重开」时用。按 tmux `pane` id (`%5`, 来自 wizard_roster / list_claude_sessions) 或按 `name` 寻址。**要交接的是你自己就用 wizard_handoff_self** —— 这里拒绝对自身操作 (会死锁: 你没法在自己生成的当口再被问一次)。返回被带过去的那份简报。",
+      "给**另一个** wizard 做交接, 原地完成: 守护进程让它把当前工作压成一份自洽的交接简报, 等它写完抓取, 再给它 `/new` 一个全新的会话 (新进程、上下文清零, 名字 / cwd / 模型 / 身份的系统提示照旧), 然后把简报作为新会话的第一条消息贴回去。它的上下文撑不住了、或者用户说「让 .fix 交接一下」「叫它压缩上下文重开」时用。按 tmux `pane` id (`%5`, 来自 wizard_roster / list_claude_sessions) 或按 `name` 寻址。**要交接的是你自己就用 wizard_handoff_self** —— 这里拒绝对自身操作 (会死锁: 你没法在自己生成的当口再被问一次)。返回被带过去的那份简报。",
     inputSchema: {
       pane: z.string().optional().describe("目标 tmux pane id, 如 '%5'。优先于 name。从 wizard_roster / list_claude_sessions 拿。"),
       name: z.string().optional().describe(`${ADDRESS_DOC} 给了 pane 就忽略它。`),
@@ -908,7 +908,7 @@ server.registerTool(
   {
     title: "Hand your own work over to a fresh context",
     description:
-      "给自己做交接: 你把当前工作压成一份自洽的简报写在 `brief` 里, 守护进程等你这一轮说完、会话空下来之后, 在同一个 pane 里 /clear (上下文清零、cwd 不变、身份的系统提示还在), 再把简报作为新会话的第一条消息贴回去。wizard_whoami 的 handoffSuggested=true, 或者你自己感觉上下文塞满了、开始记不住前面的事时, 主动调它 —— 不必等人下令。简报要写到「零上下文的自己仅凭它就能接着干」: 总目标 / 已完成与关键决策 / 当前状态 (改到哪、什么能跑、什么没跑通) / 下一步 (有序) / 关键文件路径与非显然的坑。要交接的是别人 (某个分身上下文爆了), 用 handoff 而不是这个。",
+      "给自己做交接: 你把当前工作压成一份自洽的简报写在 `brief` 里, 守护进程等你这一轮说完、会话空下来之后, 给你 `/new` 一个全新的会话 (新进程 —— MCP 工具也换成最新的; 上下文清零, 名字 / cwd / 模型 / 身份的系统提示照旧), 再把简报作为新会话的第一条消息贴回去。wizard_whoami 的 handoffSuggested=true, 或者你自己感觉上下文塞满了、开始记不住前面的事时, 主动调它 —— 不必等人下令。简报要写到「零上下文的自己仅凭它就能接着干」: 总目标 / 已完成与关键决策 / 当前状态 (改到哪、什么能跑、什么没跑通) / 下一步 (有序) / 关键文件路径与非显然的坑。要交接的是别人 (某个分身上下文爆了), 用 handoff 而不是这个。",
     inputSchema: {
       brief: z.string().describe("交接简报全文。自洽、具体、可执行 —— 接手的是一个什么都不记得的你。"),
     },

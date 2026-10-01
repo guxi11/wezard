@@ -961,11 +961,18 @@ const main = async (): Promise<void> => {
         : { ok: true, need, done, satisfied: done >= need, results });
     });
 
-    // POST /handoff — 交接一个 pane 的会话给一个全新会话,原地完成。先让目标
-    // 会话把当前工作压成一份"零上下文也能接手"的交接简报,等它写完并抓取,
-    // 再向同一 pane 注入 `/clear`(原地重开 session、重置上下文窗口、cwd 不变),
-    // settle 后把简报作为新会话的首条消息贴进去。全程只操控 tmux。拒绝对调用方
-    // 自身 pane 操作(会 deadlock,同 /peers/send)。
+    // 交接的「重开」一步: 走 /new (杀旧 pane、起新进程) 而不是往原 pane 注入 /clear。
+    // /clear 只换会话不换进程 —— MCP 子进程、charter 都还是旧的, 新工具拿不到; 镜像
+    // 还得靠 sid 轮换探测才跟得上。模型 / CLI / cwd / keepalive 照旧沿用。
+    const restartFresh = (target: string) => {
+      const info = m.sessionInfo(target);
+      return m.newSession(target, displayName(target) || tagOfKey(target) || target, info?.cli, { model: info?.model || undefined, silent: true });
+    };
+
+    // POST /handoff — 交接一个 pane 的会话给一个全新会话。先让目标会话把当前工作
+    // 压成一份"零上下文也能接手"的交接简报,等它写完并抓取,再 restartFresh 换一个
+    // 全新的进程(同名、同 cwd),把简报作为新会话的首条消息贴进去。拒绝对调用方
+    // 自身操作(会 deadlock,同 /peers/send)。
     http.register("POST /handoff", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
@@ -1000,14 +1007,12 @@ const main = async (): Promise<void> => {
       if (!inj1.ok) { json(res, 502, { ok: false, target, reason: `summary inject failed: ${inj1.reason}` }); return; }
       const idle = await waitForIdle(target, m.isBusy, timeoutMs, () => false);
       const brief = m.lastText(target);
-      // 没等到 idle 就不能 /clear —— 那会丢掉这次还在生成的交接总结。
-      if (!idle.idle) { json(res, 504, { ok: false, target, brief, reason: `target still working: ${idle.reason}; not clearing to avoid losing the turn` }); return; }
+      // 没等到 idle 就不能重开 —— 那会丢掉这次还在生成的交接总结。
+      if (!idle.idle) { json(res, 504, { ok: false, target, brief, reason: `target still working: ${idle.reason}; not restarting to avoid losing the turn` }); return; }
       if (!brief.trim()) { json(res, 502, { ok: false, target, reason: "target produced no summary text" }); return; }
 
-      const clr = await m.injectText(target, "/clear");
-      if (!clr.ok) { json(res, 502, { ok: false, target, brief, reason: `/clear inject failed: ${clr.reason}` }); return; }
-      // /clear 后 TUI 重绘出全新空会话 + 首条注入需要 warmup,给足 settle。
-      await new Promise((r) => setTimeout(r, 3000));
+      const fresh = await restartFresh(target);
+      if (!fresh.ok) { json(res, 502, { ok: false, target, brief, reason: `/new failed: ${fresh.reason}` }); return; }
 
       const carry = `以下是上一个会话交接过来的工作简报,请据此无缝接手并继续:\n\n${brief}`;
       const inj2 = await m.injectText(target, carry);
@@ -1612,7 +1617,7 @@ const main = async (): Promise<void> => {
       json(res, done.ok ? 200 : 502, { ...done, target: r.target, name: briefOf(self, r.target).name, ...(done.ok ? { model: done.applied } : {}) });
     });
 
-    // 自我交接: 上下文撑不住了, 自己把工作压成简报, 原地 /clear 重开, 再把简报贴
+    // 自我交接: 上下文撑不住了, 自己把工作压成简报, /new 换一个全新进程, 再把简报贴
     // 回去。和 /handoff 的区别是**简报由调用方自己写在入参里** —— 它没法在自己
     // 生成的当口再被问一次 (那正是 /handoff 拒绝对自身操作的原因)。所以这里先应答,
     // 等它这一轮说完、pane 空下来再动手。
@@ -1634,9 +1639,12 @@ const main = async (): Promise<void> => {
           notifyChat(self, withTagHeader(self, `上下文交接放弃: 一直没能闲下来 (${idle.reason}), 上下文和之前一样没动, 有空再试一次`));
           return;
         }
-        const clr = await m.injectText(self, "/clear");
-        if (!clr.ok) { lg.warn({ reason: clr.reason }, "self-handoff: /clear 注入失败"); return; }
-        await new Promise((r2) => setTimeout(r2, 3000));
+        const fresh = await restartFresh(self);
+        if (!fresh.ok) {
+          lg.warn({ reason: fresh.reason }, "self-handoff: /new 失败");
+          notifyChat(self, withTagHeader(self, `上下文交接失败: 新开会话没起来 (${fresh.reason ?? "unknown"})`));
+          return;
+        }
         const carry = `以下是你自己上一段会话压缩出来的交接简报, 据此无缝接着干:\n\n${brief}`;
         const inj = await m.injectText(self, carry);
         lg.info({ ok: inj.ok, reason: inj.reason }, "self-handoff: 完成");
