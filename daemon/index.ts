@@ -59,7 +59,8 @@ import { bindNoticeBox, createNoticeBox, chatAudience } from "./notices.js";
 import { loadJobStore, renderJobOpen, renderJobClose, JOB_MEMBER_MAX } from "./jobs.js";
 import { clipMiddle, contextFiles, extractResult, lastContextTokens, lastExchange, lastModel, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { keepalivePingSigs } from "../shared/keepalive.js";
-import { createReceipts } from "./receipts.js";
+import { loadJsonMap } from "../shared/json-map-store.js";
+import { createReceipts, type Slot as ReceiptSlot } from "./receipts.js";
 import { rankCandidates, renderCandidates } from "./route.js";
 import { parseWhen, renderChatLog, type LogSession } from "./chat-log.js";
 import {
@@ -610,6 +611,7 @@ const main = async (): Promise<void> => {
       paneLive: m.paneLive,
       nameOf: displayName,
       log,
+      store: loadJsonMap<ReceiptSlot>(cfg.wrc.mirror.receiptsFile),
       // 信封锚取不到 (对方是个还不挂信封的老 wizard) 时退回按时刻取, 由 receipts
       // 区分这两种"没有"。
       replyFor: (to, fromName, since) => m.replyToPeer(to, fromName, since),
@@ -626,6 +628,9 @@ const main = async (): Promise<void> => {
           ),
         }),
     });
+    // reload 前在飞的回执: 等 mirror 把绑定都恢复了再续守 —— 早一步读 target 会拿不到
+    // transcript, 退回按时刻取就可能把上一件事的结论当回执。
+    void m.restored.then(() => receipts.resume());
     /** 入参里的地址: 新字段 `name`, 老 MCP 进程 (正在跑的 wizard) 仍在传 `tag`。 */
     const addrOf = (b: { name?: unknown; tag?: unknown }): string => String(b.name ?? b.tag ?? "");
 
