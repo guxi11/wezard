@@ -208,6 +208,9 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
         }
         if (!deps.handingOff?.(s.from)) break;
       }
+      // 等的这段时间里同一对又说了一句 → 这一份作废, 后一句的回执才是要的那个。
+      // 进 serial 时查过一次不够: 等发话方闲下来可能要几分钟, 新的一句正是在这期间来的。
+      if (stale(s)) { lg.info("receipt: 等发话方期间被新的一句顶掉, 不回注"); return; }
       const r = await deps.deliver(s.from, body, meta);
       s.delivered = r.ok;
       settle(s);

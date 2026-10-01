@@ -78,6 +78,9 @@ export interface Turn {
   /** Wall-clock epoch ms from the line's own `timestamp`; 0 if absent/unparsable.
    *  Lets keepalive anchor realIdle to a message's actual time, not file mtime. */
   ms?: number;
+  /** assistant 的中途句: 这条 message 以工具调用收尾 (stop_reason=tool_use), 后面还有
+   *  话, 不可能是这一轮的终句。后端不写 stop_reason (codebuddy) 就不标。 */
+  mid?: true;
 }
 
 // Meta wrappers Claude Code injects around slash commands / hook output. They
@@ -176,7 +179,8 @@ const parseTurns = (jsonlPath: string, raw: string, keepLines = false): Turn[] =
       // the round budget without bound.
       const rawTs = (parsed as { timestamp?: unknown }).timestamp;
       const ms = typeof rawTs === "number" ? rawTs : Date.parse(String(rawTs ?? ""));
-      return text ? [{ role, text, ms: Number.isNaN(ms) ? 0 : ms, ...(env ? { env } : {}) } as Turn] : [];
+      const mid = role === "assistant" && row.message?.stop_reason === "tool_use";
+      return text ? [{ role, text, ms: Number.isNaN(ms) ? 0 : ms, ...(env ? { env } : {}), ...(mid ? { mid: true } : {}) } as Turn] : [];
     });
 };
 
@@ -433,12 +437,15 @@ export const replyClosedBefore = (
 };
 
 /** `from` 那一句 (发话时刻之后最新的那次) 所在那一轮的终句。答案止于**下一句 user 行**:
+ *  这一轮还开着、最后一句又是中途句 (`mid`, 后面跟着工具调用) → 还没答完, 回 "" 让调用方
+ *  接着等 —— 忙闲判定会在长工具调用 / 生成的间隙误报一次「闲了」, 那时取到的是
+ *  「开始读文件」这种开场白, 不是结论。被下一句 user 行关上的就照取最后一句 (中途被打断)。
  *  那是另一轮的开始 (同伴的新话、回执、人) —— 不截的话, 答方刚说完紧接着收到一份回执、
  *  回了句「收到」, 发话方拿到的就是这句。CLI 在一轮中途吃进的排队消息记成
  *  `attachment`, 不是 user 行, 截不断一轮。`closedAt` = 关上这一轮的那一行的时刻
  *  (还开着 = undefined)。 */
 const answerOf = (
-  ts: readonly { role: string; text: string; ms?: number; env?: { kind: string; from: string } }[],
+  ts: readonly { role: string; text: string; ms?: number; mid?: true; env?: { kind: string; from: string } }[],
   fromName: string,
   sinceMs: number,
 ): { text: string; closedAt?: number } | undefined => {
@@ -451,7 +458,8 @@ const answerOf = (
   );
   if (asked < 0) return undefined;
   const next = ts.findIndex((t, i) => i > asked && t.role === "user");
-  const text = ts.slice(asked + 1, next < 0 ? undefined : next).filter((t) => t.role === "assistant").at(-1)?.text ?? "";
+  const last = ts.slice(asked + 1, next < 0 ? undefined : next).filter((t) => t.role === "assistant").at(-1);
+  const text = last && !(last.mid && next < 0) ? last.text : "";
   return { text, ...(next < 0 ? {} : { closedAt: ts[next]!.ms ?? 0 }) };
 };
 
