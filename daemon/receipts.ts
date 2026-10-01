@@ -10,9 +10,12 @@
 //   (peers.replyToPeer, 按信封定位而不是按时刻) → 等发话方停下 → paste 进去。
 // 控制流仍在发话方自己的上下文里: 它没有被阻塞, 也没有被谁代理。
 //
-// 纯内存。reload 之后在飞的回执就没了 —— 与 graph run 同一个诚实口径: pane 还在,
-// 自动化没了; 发话方照旧可以 peek_peer 去看。
+// 登记落盘 (`store`), boot 时把没收尾的重新守起来。不能纯内存: 这个仓库里被派活的
+// wizard 自己就常以 `build + reload` 收尾 —— reload 恰好落在它那一轮里, 内存里的
+// watcher 跟着进程一起没了, 发话方永远等不到回执。答案本来就在对方的 transcript 里
+// (按信封定位), 重启后接着守, 取到的还是同一段。
 import type { Logger } from "pino";
+import type { JsonMap } from "../shared/json-map-store.js";
 import { waitForIdle } from "./graph.js";
 
 /** 对方最长允许干多久 (超过就放弃这一份回执, 不占着内存等到天亮)。 */
@@ -48,6 +51,8 @@ export interface ReceiptDeps {
   deliver: (to: string, body: string, meta: ReceiptMeta) => Promise<{ ok: boolean; reason?: string }>;
   nameOf: (target: string) => string;
   log: Logger;
+  /** 登记的落盘处。缺省 = 纯内存 (reload 即丢)。 */
+  store?: JsonMap<Slot>;
 }
 
 export interface Tell {
@@ -59,7 +64,7 @@ export interface Tell {
   at?: number;
 }
 
-interface Slot extends Tell {
+export interface Slot extends Tell {
   job: string;
   /** 发话时刻 —— replyFor 的下界, 也是 wait_peer 判断「这一次」的那个锚。 */
   at: number;
@@ -71,7 +76,13 @@ interface Slot extends Tell {
   delivered: boolean;
   /** 这一份有了定论 (答了 / 没答 / 超时) —— 工单计数只数它。 */
   resolved: boolean;
+  /** 收尾了 (送达 / 不回注 / 被 wait_peer 取走 / 放弃) —— boot 时只续守没收尾的。
+   *  与 `claimed` 分开: claimed 在投递**之前**就占位, 投到一半 reload 仍要重投。 */
+  settled?: boolean;
 }
+
+/** 落盘的登记留多久。比对方最长允许干的时长宽, 好让续守的那一份仍数得进工单。 */
+const KEEP_MS = 24 * 3600_000;
 
 export interface Receipts {
   /** 登记这一次发话。`watch=false` 只记时刻 (供 wait_peer 定位「这一次」), 不守回执
@@ -83,11 +94,21 @@ export interface Receipts {
   sentAt: (from: string, to: string) => number;
   /** 还没有定论的那些 (名字), 供诊断与退化后的 wait_peer 回话。 */
   outstanding: (from: string, job?: string) => string[];
+  /** 把落盘里没收尾的那些重新守起来。调用方在 mirror 恢复完之后调一次。 */
+  resume: () => number;
 }
 
 export const createReceipts = (deps: ReceiptDeps): Receipts => {
-  const slots = new Map<string, Slot>();
   const keyOfPair = (from: string, to: string): string => `${from}\u0000${to}`;
+  const live = (s: Slot): boolean => Date.now() - s.at < KEEP_MS;
+  const slots = new Map<string, Slot>(
+    Object.values(deps.store?.all() ?? {}).filter(live).map((s) => [keyOfPair(s.from, s.to), s]),
+  );
+  /** 写穿到磁盘。被同一对的新一句顶掉的旧 slot 不写 —— 它的 key 已经归新的了。 */
+  const save = (s: Slot): void => {
+    if (!stale(s)) deps.store?.set(keyOfPair(s.from, s.to), s);
+  };
+  const settle = (s: Slot): void => { s.settled = true; save(s); };
   const stale = (s: Slot): boolean => slots.get(keyOfPair(s.from, s.to))?.gen !== s.gen;
   const ofJob = (from: string, job: string): Slot[] =>
     [...slots.values()].filter((x) => x.from === from && x.job === job);
@@ -101,11 +122,16 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     return next;
   };
 
+  const arm = (s: Slot): void => {
+    void watch(s).catch((e: unknown) => deps.log.warn({ err: (e as Error).message }, "receipt watch failed"));
+  };
+
   /** 守到对方答出**我们这一句**为止。信封是比发话时刻更硬的锚 (见 peers.replyToPeer):
    *  对方正忙时我们那一句是排队的, 它先吐出来的是上一件事的结论 —— 按时刻取就会把
    *  旧结论当成这一次的回执。所以"停下了但还没答我们"要接着等, 不能将就。 */
   const awaitReply = async (s: Slot): Promise<string> => {
-    const deadline = Date.now() + TARGET_WAIT_SEC * 1000;
+    // 锚在发话时刻而不是此刻: reload 后续守的那一份不该重新领一整份时长。
+    const deadline = s.at + TARGET_WAIT_SEC * 1000;
     for (let fruitless = 0; fruitless < MAX_FRUITLESS && Date.now() < deadline; ) {
       const wr = await waitForIdle(s.to, deps.isBusy, deadline - Date.now(), () => s.claimed || stale(s));
       if (!wr.idle || s.claimed || stale(s)) return "";
@@ -122,14 +148,16 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     const lg = deps.log.child({ mod: "receipt", from: deps.nameOf(s.from), to: deps.nameOf(s.to), ...(s.job ? { job: s.job } : {}) });
     const body = await awaitReply(s);
     if (stale(s)) return;
-    if (s.claimed) { s.resolved = true; return; } // wait_peer 抢先取走了
+    if (s.claimed) { s.resolved = true; settle(s); return; } // wait_peer 抢先取走了
     s.resolved = true;
     if (!body.trim()) {
       lg.info("receipt: 没有答这一句, 不回注");
+      settle(s);
       return;
     }
     if (!(await deps.paneLive(s.from))) {
       lg.info("receipt: 发话方已经不在了, 丢弃");
+      settle(s);
       return;
     }
     s.claimed = true; // 占位先于投递: 这中间来的 wait_peer 不该把同一段再取一遍
@@ -146,10 +174,11 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       // 发话方正在生成 → 等它这一轮说完。ramp 给 0: 它此刻就闲着的话立刻投。
       if (await deps.isBusy(s.from)) {
         const w = await waitForIdle(s.from, deps.isBusy, SENDER_WAIT_SEC * 1000, () => false, { rampMs: 0, confirm: 2 });
-        if (!w.idle) { lg.warn({ reason: w.reason }, "receipt: 发话方一直忙, 放弃回注"); return; }
+        if (!w.idle) { lg.warn({ reason: w.reason }, "receipt: 发话方一直忙, 放弃回注"); settle(s); return; }
       }
       const r = await deps.deliver(s.from, body, meta);
       s.delivered = r.ok;
+      settle(s);
       lg.info({ ok: r.ok, reason: r.reason, len: body.length, done: meta.done, total: meta.total }, "receipt: 回注");
     });
   };
@@ -167,8 +196,9 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
         resolved: false,
       };
       slots.set(k, s);
-      if (watchIt) void watch(s).catch((e: unknown) => deps.log.warn({ err: (e as Error).message }, "receipt watch failed"));
-      else { s.claimed = true; s.resolved = true; } // 不守 = 这一份没人会投
+      if (watchIt) arm(s);
+      else { s.claimed = true; s.resolved = true; s.settled = true; } // 不守 = 这一份没人会投
+      save(s);
       return { at: s.at };
     },
     claim: (from, to) => {
@@ -176,6 +206,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       if (!s) return false;
       s.claimed = true;
       s.resolved = true;
+      settle(s);
       return s.delivered;
     },
     sentAt: (from, to) => slots.get(keyOfPair(from, to))?.at ?? 0,
@@ -183,5 +214,12 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       [...slots.values()]
         .filter((s) => s.from === from && !s.resolved && (job === undefined || s.job === job))
         .map((s) => deps.nameOf(s.to)),
+    resume: () => {
+      const open = [...slots.values()].filter((s) => !s.settled);
+      // 投到一半被 reload 打断的那份: claimed 是上一个进程的占位, 这里重新来过。
+      open.forEach((s) => { s.claimed = false; arm(s); });
+      if (open.length) deps.log.info({ mod: "receipt", resumed: open.map((s) => `${deps.nameOf(s.from)}←${deps.nameOf(s.to)}`) }, "receipt: reload 后续守");
+      return open.length;
+    },
   };
 };

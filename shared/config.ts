@@ -77,6 +77,9 @@ const Mirror = z.object({
   // 因为 wizard 是长期身份, job 是一次性的活 —— 混在一张表里, 收工清理会连身份
   // 一起抹掉。
   jobsFile: z.string().default("~/.wezard/jobs.json"),
+  // 在飞的 tell_peer 回执登记。落盘是为了扛住 reload —— 被派活的 wizard 自己常以
+  // reload 收尾, 纯内存的话它那一份回执就跟着旧进程没了。
+  receiptsFile: z.string().default("~/.wezard/receipts.json"),
   // 一个 wizard 名下同时活着的分身上限。不是能力上限, 是"忘了收"的刹车: 分身能
   // 递归生分身, 而每个都是一个 tmux pane + 一份上下文, 一次跑飞的编排足以把 fd
   // 吃光 (见 launchd plist 的 NumberOfFiles)。

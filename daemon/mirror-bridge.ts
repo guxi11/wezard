@@ -2152,6 +2152,9 @@ export interface MirrorBridge {
   /** 这个 wizard 此刻有没有一个能用的 pane。回执投递前要问一句: 已经收工的
    *  wizard 不该为了接一份结论被重新拉起来。 */
   paneLive: (target: string) => Promise<boolean>;
+  /** Settles once the eager boot restore has re-attached every persisted binding —
+   *  anything resumed across a reload (receipts) must not read targets before it. */
+  restored: Promise<void>;
   /** Is the inbound `quoted` text a snapshot of `target`'s still-open outbound
    *  bubble (unfinished last stream)? Such a quote carries only transient
    *  chrome — the detail-link URL plus the latest real-time CoT/tool line —
@@ -4345,17 +4348,18 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const RESTORE_CONC = 8;
   const persisted = deps.store.all();
   const persistedKeys = Object.keys(persisted);
+  let restored: Promise<void> = Promise.resolve();
   if (persistedKeys.length > 0) {
     // 裸 fan-out 会把 2N 次 tmux 同时压下去 —— 几百个绑定就是七百个 client 一起
     // 撞 10s 超时, spawn 风暴顺带把事件循环压住, :17890 要 25s 才 bind, 而 CLI 的
     // reload 探测早放弃了 (「reload issued but /status not responding」的真身)。
     // 一张快照 + 封顶并发; await 立刻让出, startHttp 先绑端口。
-    void (async () => {
+    restored = (async () => {
       const snap = await runTmux(["list-panes", "-a", "-F", "#{pane_id}\t#{pane_current_path}"]);
       const panes = snap.ok ? parsePaneList(snap.stdout) : undefined;
       await mapLimit(persistedKeys, RESTORE_CONC, (principal) => restoreFromStore(principal, panes));
       log.info({ restored: persistedKeys.length, panes: panes?.size ?? -1 }, "mirror: boot restore done");
-    })();
+    })().catch((e: unknown) => { log.warn({ err: (e as Error).message }, "mirror: boot restore failed"); });
   } else if (cfg.wrc.mirror.sessionId.trim()) {
     // Pinned-sessionId fallback: only honor when the store is empty (otherwise
     // the persisted bindings already cover the right sessions).
@@ -5759,6 +5763,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     lastReply: replySince,
     replyToPeer: replyToPeerSince,
     paneLive: paneLiveOf,
+    restored,
     isOpenBubbleQuote,
     status: () => {
       const list = Array.from(bySessionId.values()).map((a) => ({
