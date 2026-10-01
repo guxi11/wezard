@@ -10,7 +10,7 @@
 // jsonl 在首条消息之前根本不存在 (`--session-id` 新建与 `--fork-session` 都一样),
 // 所以「就绪」只能靠注册表; 「已提交」则注册表 (busy 翻转) 与 jsonl 任一确认即可。
 // 没有注册表的后端 (codebuddy / 旧版 CC) 一律返回 undefined, 由调用方退回读 pane。
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync, watch } from "node:fs";
 import { join } from "node:path";
 import { expandHome } from "../shared/paths.js";
 
@@ -71,6 +71,19 @@ export const sessionOnPane = (homeDir: string, pane: string): LiveSession | unde
   readRegistry(homeDir)
     .filter((r) => r.pane === pane && pidAlive(r.pid))
     .sort((a, b) => b.statusUpdatedAt - a.statusUpdatedAt)[0];
+
+/** 注册表目录一有写入就回调 —— status 翻转的事件源, 省得按固定间隔去抽样。
+ *  CC 以整文件改写 (可能是 rename) 落盘, 所以看目录而不是单个文件。返回撤销函数;
+ *  目录不在 / watch 起不来时是空操作, 调用方自带的兜底轮询照样能收尾。 */
+export const watchRegistry = (homeDir: string, onChange: () => void): (() => void) => {
+  try {
+    const w = watch(registryDirOf(homeDir), () => onChange());
+    w.on("error", () => w.close());
+    return () => w.close();
+  } catch {
+    return () => {};
+  }
+};
 
 /** 注册表里进程还活着的会话各住在哪个 pane —— 「这个 pane 是不是会话 pane」的正面证据。 */
 export const sessionPanes = (homeDir: string): Set<string> =>

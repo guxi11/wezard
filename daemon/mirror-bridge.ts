@@ -38,7 +38,8 @@ import { noticeSuffixFor } from "./notices.js";
 import { dangerOf } from "./danger.js";
 import { runTmux, spawnTmuxClaude } from "./spawn-tmux.js";
 import { selectModel, type ModelScope, type ModelSelectResult } from "./model-select.js";
-import { hasRegistry, markTranscript, probeOf, sessionOnPane, sessionPanes, submittedSince, type LiveSession, type TranscriptMark } from "./cc-session.js";
+import { hasRegistry, markTranscript, probeOf, sessionOnPane, sessionPanes, submittedSince, watchRegistry, type LiveSession, type TranscriptMark } from "./cc-session.js";
+import { waitForIdle, type IdleResult } from "./graph.js";
 import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
 import { knowsToolUse, recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnQuery, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, lastChannelOf, buildDetailUrl, buildChatUrl, roleUniq } from "./detail.js";
@@ -2133,6 +2134,12 @@ export interface MirrorBridge {
   peekTurns: (target: string, n?: number) => Promise<{ ok: boolean; reason?: string; dialog?: string; busy?: boolean; waiting?: string[] }>;
   /** Mid-turn check for one target. False for cold/dead panes (nothing running). */
   isBusy: (target: string) => Promise<boolean>;
+  /** Ready to take a new turn: its last turn has ended and it isn't parked on an
+   *  approval prompt. Registry-first, pane as fallback. True for dead panes. */
+  idleNow: (target: string) => Promise<boolean>;
+  /** Resolves the moment `target` turns idle (registry-event driven; pane polling
+   *  only for backends without a registry). */
+  untilIdle: (target: string, timeoutMs: number) => Promise<IdleResult>;
   /** Switch `target`'s live pane onto the model closest to `wanted` by driving
    *  its `/model` picker (see `model-select.ts`) — the same path a spawn takes.
    *  What landed is recorded on the attachment and in the store, so a respawn
@@ -5308,6 +5315,52 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   const isBusy = (target: string): Promise<boolean> => paneBusy(paneOf(target));
 
+  // 「它这一轮结束了、可以投了」。注册表认得这个 pane 时以它为准: status 在整轮里
+  // (工具调用之间、PreToolUse 审批 hook 挂着时) 一直是 busy, 只在轮结束那一刻翻成
+  // idle —— 所以不必抽样 spinner, 也不必连数几次安静来排除工具间隙。idle 却悬着工具
+  // 调用 = 停在本地审批框上等人点, 不算闲。注册表不认得 (codebuddy / 旧版 CC /
+  // 会话已退出) 返回 undefined, 交给 pane 裁决。
+  const idleVerdict = (target: string): boolean | undefined => {
+    const pane = paneOf(target);
+    const live = pane ? activeBackends().map((b) => sessionOnPane(b.homeDir, pane)).find(Boolean) : undefined;
+    if (!live) return undefined;
+    if (live.status === "busy") return false;
+    if (live.status !== "idle") return undefined;
+    const bound = jsonlOf(target);
+    // resume / fork 会换 sid: 悬着的工具调用记在注册表报的当前那份 transcript 里。
+    const jsonl = bound ? join(dirname(bound), `${live.sessionId}.jsonl`) : "";
+    return !(jsonl && existsSync(jsonl) && openToolUses(jsonl).length > 0);
+  };
+  const idleNow = async (target: string): Promise<boolean> => idleVerdict(target) ?? !(await isBusy(target));
+
+  // 等到它闲下来, 事件驱动: 注册表目录一有写入就重判, 翻成 idle 的那一刻即返回。
+  // 兜底轮询只防 watch 漏事件 (以及悬着的审批被点掉后 status 没再动的边角)。
+  const IDLE_SAFETY_POLL_MS = 1000;
+  const untilIdle = (target: string, timeoutMs: number): Promise<IdleResult> => {
+    if (idleVerdict(target) === undefined) return waitForIdle(target, isBusy, timeoutMs, () => false, { rampMs: 0, confirm: 2 });
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (r: IdleResult): void => {
+        if (done) return;
+        done = true;
+        unwatch.forEach((f) => f());
+        clearInterval(tick);
+        clearTimeout(timer);
+        resolve(r);
+      };
+      // 会话中途退出 (注册表不认得了): pane 也不忙就是「那里什么都没在跑」, 与 isBusy 同一口径。
+      const check = async (): Promise<void> => {
+        if (done) return;
+        const v = idleVerdict(target);
+        if (v ?? !(await isBusy(target))) finish({ idle: true });
+      };
+      const unwatch = activeBackends().map((b) => watchRegistry(b.homeDir, () => void check()));
+      const tick = setInterval(() => void check(), IDLE_SAFETY_POLL_MS);
+      const timer = setTimeout(() => finish({ idle: false, reason: "idle wait timed out" }), timeoutMs);
+      void check();
+    });
+  };
+
   const lastText = (target: string): string => {
     const p = jsonlOf(target);
     return p ? lastAssistantText(p, 4000, warmerSigs) : "";
@@ -5743,6 +5796,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     chatRoster,
     peekTurns,
     isBusy,
+    idleNow,
+    untilIdle,
     setModel: async (target, wanted, scope) => {
       const a = byTarget.get(target);
       if (!a?.tmuxPane || !(await tmuxPaneAlive(a.tmuxPane))) return { ok: false, reason: "它没有活着的 pane —— 模型是在 pane 里切的, 先叫醒它" };

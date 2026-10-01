@@ -16,7 +16,7 @@
 // (按信封定位), 重启后接着守, 取到的还是同一段。
 import type { Logger } from "pino";
 import type { JsonMap } from "../shared/json-map-store.js";
-import { waitForIdle } from "./graph.js";
+import { waitForIdle, type IdleResult } from "./graph.js";
 
 /** 对方最长允许干多久 (超过就放弃这一份回执, 不占着内存等到天亮)。 */
 const TARGET_WAIT_SEC = 3600;
@@ -40,6 +40,9 @@ export interface ReceiptMeta {
 
 export interface ReceiptDeps {
   isBusy: (target: string) => Promise<boolean>;
+  /** 能接新一轮了吗 (轮已结束、没停在审批上) / 等到那一刻 —— 投递时机用, 见 tell_peer when:"idle"。 */
+  idleNow: (target: string) => Promise<boolean>;
+  untilIdle: (target: string, timeoutMs: number) => Promise<IdleResult>;
   /** 发话方还在不在。死了就把回执丢掉 —— 为了送一份结论把一个已经收工的 wizard
    *  重新拉起来是本末倒置。 */
   paneLive: (target: string) => Promise<boolean>;
@@ -193,14 +196,14 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     };
     await serial(s.from, async () => {
       if (stale(s)) return;
-      // 发话方正在生成 → 等它这一轮说完。ramp 给 0: 它此刻就闲着的话立刻投。
+      // 发话方正在生成 → 等它这一轮说完, 一结束就投。
       // 等的过程中它开始交接 → 等交接完再来一圈: 投进旧会话会被交接一并带走 (简报
       // 已经写完了, 不含这一段), 投进还没贴回简报的新会话会抢在简报前面。
       const until = Date.now() + SENDER_WAIT_SEC * 1000;
       for (;;) {
         await deps.handedOff?.(s.from);
-        if (await deps.isBusy(s.from)) {
-          const w = await waitForIdle(s.from, deps.isBusy, until - Date.now(), () => false, { rampMs: 0, confirm: 2 });
+        if (!(await deps.idleNow(s.from))) {
+          const w = await deps.untilIdle(s.from, until - Date.now());
           if (!w.idle) { lg.warn({ reason: w.reason }, "receipt: 发话方一直忙, 放弃回注"); settle(s); return; }
         }
         if (!deps.handingOff?.(s.from)) break;

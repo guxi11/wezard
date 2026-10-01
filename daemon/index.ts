@@ -613,6 +613,8 @@ const main = async (): Promise<void> => {
     // 死活、「它答我那一句的是哪段话」、以及怎么把一段话送进去 —— 投递逻辑在那边。
     const receipts = createReceipts({
       isBusy: m.isBusy,
+      idleNow: m.idleNow,
+      untilIdle: m.untilIdle,
       paneLive: m.paneLive,
       nameOf: displayName,
       log,
@@ -906,13 +908,13 @@ const main = async (): Promise<void> => {
       // 不是边角情况而是常态。等它闲下来再投, 一句话就是一轮。
       const when = ((body as { when?: string }).when ?? "now") === "idle" ? "idle" : "now";
       const waitSec = Math.min(Math.max(Number((body as { waitSec?: number }).waitSec ?? 600) || 600, 10), 3600);
-      const wasBusy = await m.isBusy(target);
+      // 「忙」= 这一轮还没结束, 或停在审批上等人 —— 都不是能接新活的时候。
+      const wasBusy = !(await m.idleNow(target));
       let waitedMs = 0;
       if (when === "idle" && wasBusy) {
         const t0 = Date.now();
-        // rampMs=0: ramp 是给「刚注入、这一轮还没起来」准备的; 这里相反, 一旦它
-        // 真闲下来就该立刻投。
-        const wr = await waitForIdle(target, m.isBusy, waitSec * 1000, () => false, { rampMs: 0, confirm: 2 });
+        // 它那一轮一结束就投: 注册表 status 翻 idle 是事件, 不抽样也不等稳定期。
+        const wr = await m.untilIdle(target, waitSec * 1000);
         waitedMs = Date.now() - t0;
         if (!wr.idle) {
           json(res, 409, { ok: false, target, foreign, wasBusy, waitedMs, reason: `它一直在忙, ${waitSec}s 内没闲下来 —— peek_peer 看看它卡在哪, 或者用 when:"now" 插队` });
