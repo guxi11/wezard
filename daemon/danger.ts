@@ -14,20 +14,53 @@ export interface DangerHit {
 
 type Rule = readonly [label: string, re: RegExp];
 
+// 「命令词位置」前缀: 行首 / 换行 / `;` `&&` `||` `(` 之后 / 引号紧邻处 /
+// sudo·nohup·exec·xargs·time·env 这类前缀命令之后 / `do` `then` `else` 之后 /
+// `--` 参数分隔符之后。
+//
+// 为什么需要它: 名单是对**整条命令文本**做 test 的, 光靠 `\b` 界定的词只要在
+// 任何位置出现就算命中 —— 而 `-` `/` 都是非单词字符, 于是分支名、文件名、参数值
+// 里带上这些词就会让所有沾边的命令被判危险。真实案例: 分支
+// `feature/graceful-shutdown` 让 `git checkout` / `git push` /
+// `npm run test -- graceful-shutdown.spec.ts` 全部命中「关机/重启」必发单卡,
+// 流程被审批卡堵死; 同族的 `\brm\b` 还会把 `docker run --rm` 判成删除文件。
+const CMD_HEAD = String.raw`(?:^|[\n;&|(]\s*|["'\`]\s*|\b(?:sudo|nohup|exec|xargs|env|time|do|then|else)\s+|--\s+)`;
+
+// 「远程执行」上下文: 命令把动作送到别的机器/容器里跑时, 位置约束失效 ——
+// `ssh host rm -rf /`、`kubectl exec pod -- halt` 里危险词前面是主机名或 `--`。
+// 因为前置了 ssh / exec 才触发, 不会误伤本机的普通命令, 所以这里保持宽匹配。
+const REMOTE_CTX = String.raw`\b(?:ssh|(?:kubectl|docker)\s+exec)\b[\s\S]*\b`;
+
+/**
+ * 给「词本身太常见、只有出现在命令位置才危险」的规则配一对正则: 本机版带
+ * 命令词位置约束, 远程版在 ssh/exec 上下文里放宽。
+ *
+ * 只用于纯单词触发的规则 —— `kubectl delete`、`dd if=` 这类自带结构约束的
+ * 不需要, 它们的第二个 token 已经把误伤面挡住了。
+ */
+const cmdWord = (label: string, words: string, flags = ""): Rule[] => [
+  [label, new RegExp(`${CMD_HEAD}(?:${words})\\b`, flags)],
+  [`远程${label}`, new RegExp(`${REMOTE_CTX}(?:${words})\\b`, flags)],
+];
+
 // ── 内置命令名单 (Bash / 任何带 command 的工具) ────────────────────────
 const CMD_RULES: readonly Rule[] = [
-  ["删除文件 rm", /\brm\b/],
-  ["删除目录 rmdir", /\brmdir\b/],
+  ...cmdWord("删除文件 rm", "rm"),
+  ...cmdWord("删除目录 rmdir", "rmdir"),
   ["批量删除 find -delete", /\bfind\b[\s\S]*(-delete|-exec\s+rm)\b/],
+  // xargs 传参形态 (`xargs -I{} rm {}`) 里 rm 前面是 `}`, 命令词位置约束够不着,
+  // 靠这条宽规则兜住 —— 有 xargs 前置, 同样不会误伤普通命令。
   ["管道删除 xargs rm", /\bxargs\b[\s\S]*\brm\b/],
-  ["清空文件 truncate", /\btruncate\b/],
+  ...cmdWord("清空文件 truncate", "truncate"),
   ["裸设备写入 dd", /\bdd\s+(if|of)=/],
   ["格式化 mkfs", /\bmkfs\b|\bdiskutil\s+(erase|partition)/],
   ["重定向到设备", />\s*\/dev\/(?!null\b|stdout\b|stderr\b)/],
-  ["提权 sudo", /\bsudo\b|\bsu\s+-/],
+  ...cmdWord("提权 sudo", "sudo"),
+  ["切换用户 su", /\bsu\s+-/],
   ["递归改权限", /\bch(mod|own)\b[\s\S]*(-R|\b777\b)/],
-  ["强制杀进程", /\bkill\s+-9\b|\bkillall\b|\bpkill\b/],
-  ["关机/重启", /\b(shutdown|reboot|halt|poweroff)\b/],
+  ["强制杀进程", /\bkill\s+-9\b/],
+  ...cmdWord("强制杀进程", "killall|pkill"),
+  ...cmdWord("关机/重启", "shutdown|reboot|halt|poweroff"),
   ["服务停用", /\blaunchctl\s+(unload|bootout|remove)\b|\bsystemctl\s+(stop|disable|mask)\b/],
   ["git 强推", /\bgit\b[\s\S]*\bpush\b[\s\S]*(--force|-f\b)/],
   ["git 丢弃改动", /\bgit\s+(reset\s+--hard|clean\b|checkout\s+--\s|restore\b)/],
@@ -40,7 +73,10 @@ const CMD_RULES: readonly Rule[] = [
   ["GitHub 删除", /\bgh\s+(repo|release|secret|ssh-key)\s+delete\b/],
   ["数据库 DROP/TRUNCATE", /\b(drop|truncate)\s+(table|database|schema|index)\b/i],
   ["无条件 DELETE", /\bdelete\s+from\b(?![\s\S]*\bwhere\b)/i],
-  ["Redis 清库", /\bflush(all|db)\b/i],
+  // flushall/flushdb 是 redis-cli 的**子命令**, 永远不在 shell 命令词位置, 所以
+  // 这里用 redis 上下文约束而不是 CMD_HEAD —— 同样挡住 `feat/flushdb-guard`
+  // 这类分支名, 又不会漏掉 `redis-cli -h h flushall`。
+  ["Redis 清库", /\bredis(-cli)?\b[\s\S]*\bflush(all|db)\b/i],
   ["下载即执行", /\b(curl|wget)\b[\s\S]*\|\s*(sudo\s+)?(ba)?sh\b/],
   ["fork 炸弹", /:\(\)\s*\{.*\|.*&.*\}/],
   ["清历史", /\bhistory\s+-c\b|\bdefaults\s+delete\b/],
