@@ -678,7 +678,7 @@
         esc(text) + '</b></span>' : '';
     };
     // 输出 / 缓存不再单列成指标 —— 它们就是底边色带的那几段。
-    // I/O 分布: 贴着整条 bar 的底边画一条横跨整宽的细色带; 各段的量与占比作为图例常显在 bar 里, 色点与色带同色。
+    // I/O 分布: 贴着整条 bar 的底边画一条横跨整宽的细色带; 各段的量作为图例常显在 bar 里 (占比在悬停提示), 色点与色带同色。
     // 两头留一位小数: 99.9% 不该被四舍五入成 100%, 一丁点也不该成 0%。
     var pct = function (n) {
       var p = n / total * 100;
@@ -692,8 +692,8 @@
             s[1] + ' ' + fmtTok(u[s[0]]) + ' · ' + pct(u[s[0]]) + '"></span>';
         }).join('') + '</span>' +
         '<span class="leg">' + segs.map(function (s) {
-          return '<span class="lg"><i style="background:' + s[2] + '"></i>' + s[1] + '<b>' + fmtTok(u[s[0]]) +
-            '</b><em>' + pct(u[s[0]]) + '</em></span>';
+          return '<span class="lg" title="' + s[1] + ' · ' + pct(u[s[0]]) + '"><i style="background:' + s[2] + '"></i>' +
+            s[1] + '<b>' + fmtTok(u[s[0]]) + '</b></span>';
         }).join('') + '</span>'
       : '';
     // 条首的标签就是模型名: 这本账是拿什么跑出来的。没有模型记录 (老轮次) 才退回「用量」。
