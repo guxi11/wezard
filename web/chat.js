@@ -677,18 +677,20 @@
       return n ? '<span class="kv" title="' + esc(TIP[k] || k) + '"><i class="u-ic">' + ICON[k] + '</i><b>' +
         esc(text) + '</b></span>' : '';
     };
-    // 输出 / 缓存不再单列成指标 —— 它们就是 I/O 图例里的那几格。
+    // 输出 / 缓存不再单列成指标 —— 它们就是底边色带的那几段。
+    // I/O 分布不占行: 贴着整条 bar 的底边画一条横跨整宽的细色带, 图例与占比收进悬停提示。
+    // 两头留一位小数: 99.9% 不该被四舍五入成 100%, 一丁点也不该成 0%。
+    var pct = function (n) {
+      var p = n / total * 100;
+      return p < .1 ? '<0.1%' : (p < 1 || p > 99 ? p.toFixed(1) : Math.round(p)) + '%';
+    };
     var io = total > 0
-      ? '<span class="u-io" title="累计 token I/O · 共 ' + fmtTok(total) + '">' +
-          '<span class="bar">' + segs.map(function (s) {
-            return '<span class="seg" style="width:' + (u[s[0]] / total * 100).toFixed(2) + '%;background:' +
-              s[2] + '" title="' + s[1] + ': ' + fmtTok(u[s[0]]) + '"></span>';
-          }).join('') + '</span>' +
-          '<span class="leg">' + segs.map(function (s) {
-            return '<span class="lg"><i style="background:' + s[2] + '"></i>' + s[1] +
-              '<b>' + fmtTok(u[s[0]]) + '</b></span>';
-          }).join('') + '</span>' +
-        '</span>'
+      ? '<span class="bar" title="' + esc(['累计 token I/O · 共 ' + fmtTok(total)].concat(segs.map(function (s) {
+          return s[1] + ' ' + fmtTok(u[s[0]]) + ' · ' + pct(u[s[0]]);
+        })).join('\n')) + '">' + segs.map(function (s) {
+          return '<span class="seg" style="flex-grow:' + u[s[0]] + ';background:' + s[2] + '" title="' +
+            s[1] + ' ' + fmtTok(u[s[0]]) + ' · ' + pct(u[s[0]]) + '"></span>';
+        }).join('') + '</span>'
       : '';
     // 条首的标签就是模型名: 这本账是拿什么跑出来的。没有模型记录 (老轮次) 才退回「用量」。
     return '<span class="u-lb" title="' + esc(t.model || '') + '">' +

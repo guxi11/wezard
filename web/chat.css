@@ -139,7 +139,7 @@ button { font: inherit; color: inherit }
    整组落到下一行 —— 窄屏自然变成两三行, 不需要另一套结构。 */
 .usage {
   flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 6px 20px;
-  padding: 7px 20px; border-top: 1px solid var(--line); background: var(--paper);
+  position: relative; padding: 7px 20px 9px; border-top: 1px solid var(--line); background: var(--paper);
   font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--mute);
   font-variant-numeric: tabular-nums;
 }
@@ -149,13 +149,13 @@ button { font: inherit; color: inherit }
 .usage .u-kvs { display: flex; gap: 4px 16px }
 .usage .kv { white-space: nowrap; font-size: 9.5px; color: var(--faint); text-transform: uppercase; letter-spacing: .4px }
 .usage .kv b { font-size: 12.5px; margin-right: 4px; letter-spacing: 0; text-transform: none }
-.usage .u-io { display: flex; align-items: center; gap: 12px; min-width: 0 }
-.usage .bar { flex: none; width: 140px; display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--line) }
-.usage .bar .seg { height: 100% }
-.usage .leg { display: flex; gap: 4px 12px }
-.usage .lg { display: flex; align-items: center; gap: 4px; white-space: nowrap }
-.usage .lg i { width: 8px; height: 8px; border-radius: 2px; flex: none }
-.usage .lg b { margin-left: 1px }
+/* I/O 分布 = bar 的底边: 横跨整宽的细色带, 不占行; 悬停加粗一点好瞄准某一段。 */
+.usage .bar {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 3px; display: flex;
+  background: var(--line); transition: height .12s;
+}
+.usage .bar:hover { height: 6px }
+.usage .bar .seg { flex: 1 1 0; min-width: 2px; height: 100% }
 
 /* 群聊头像 = 参与者头像拼图: 1 格居中, 2 格左右, 3/4 格田字。 */
 .mosaic {
@@ -429,9 +429,7 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
   .flip { min-width: 16px; padding: 0 4px; font-size: 0 }
   .thread { padding-bottom: calc(12px + env(safe-area-inset-bottom)) }
   .usage { padding: 8px 12px; gap: 6px 14px }
-  .usage .u-kvs, .usage .leg { flex-wrap: wrap }
-  .usage .u-io { flex: 1 1 100%; flex-wrap: wrap; gap: 6px 12px }
-  .usage .bar { flex: 1 1 100%; width: auto }
+  .usage .u-kvs { flex-wrap: wrap }
   .usage.page { padding-bottom: calc(8px + env(safe-area-inset-bottom)) }
 }
 
