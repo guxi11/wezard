@@ -29,7 +29,7 @@
   // 关系/日程两栏共用的世界快照。treeAll = 关系树展开全部; treeFor = 已把谁滚进过视野。
   var W = {
     at: 0, nodes: [], edges: [], chats: [], jobs: [], schedules: [],
-    degraded: false, loaded: false, treeAll: false, treeFor: '',
+    degraded: false, loaded: false, treeAll: false, treeFor: '', glance: {}, gKeys: '',
   };
   var VIEW = 'msgs';
   // 侧栏是会话列表还是关系图 —— 与右边的 VIEW 无关: 关系图下右边照样是选中的那段对话。
@@ -1368,12 +1368,25 @@
   // 而不是节点自己最后的动静 —— 卡片承载的是边。
   // 身份 (头像 / 名字 / 状态灯) 永远是卡片自己的节点: 会话项的身份是「视角的对端」, 视角自己那张卡片
   // (边的下端是视角) 的对端是它的父亲 —— 拿会话项的身份去画, 这张卡片就成了父亲的分身。
+  // 时刻与最近一句取自卡片自己的窗口 (点它打开的那一份, 服务端 /api/glance 用同一个 talkOf 算, 说话人前缀
+  // 也在那里定); 窗口还没取到 (或第一遍量树时) 退回视角与对端的会话项 / 节点。未读跟着视角与对端的会话项走。
   var cardGlance = function (F, t) {
     var hit = edgeConv(F, t), c = hit && convOf(hit[0]);
     var s = c && hit[1] && (c.subs || []).filter(function (x) { return x.role === hit[1]; })[0];
-    if (c) return glance(c, s || undefined);
     var n = nodeOf(t) || {}, p = F.pp[t];
-    return { lastTs: p ? p.last : n.lastTs || 0, preview: n.preview || '', unread: 0 };
+    var base = c ? glance(c, s || undefined) : { lastTs: p ? p.last : n.lastTs || 0, preview: n.preview || '', unread: 0 };
+    var w = F.links && W.glance[talkKey(F.links, t)];
+    return w ? { lastTs: w.lastTs, preview: w.preview, unread: base.unread } : base;
+  };
+  // 卡片窗口的 glance: 树里画了谁变了就取一次, 世界快照每次轮询也顺带刷新。
+  var loadGlance = function () {
+    var keys = W.gKeys, role = ROLE;
+    if (!keys) return;
+    api('api/glance', { role: role, keys: keys }).then(function (d) {
+      if (!d.ok || role !== ROLE || keys !== W.gKeys) return;
+      W.glance = d.glances || {};
+      renderWorld();
+    }).catch(function () { });
   };
   var byCard = function (F) {
     return function (a, b) { return recentFirst(cardGlance(F, a), cardGlance(F, b)); };
@@ -1450,6 +1463,8 @@
     // 两遍: 先量出画了谁 (卡片的窗口要知道它在图上连着谁), 再带着连线画 —— 选中态也就进了 html。
     draw(shown);
     F.links = linksOf(F, shown);
+    var keys = shown.map(function (n) { return talkKey(F.links, n.target); }).join('\n');
+    if (keys !== W.gKeys) { W.gKeys = keys; loadGlance(); }
     // 换视角后的第一张新树: 世界快照与摘要都已是新视角的, 才知道它自己那张卡片连着谁。
     if (W.pickSelf === ROLE && W.role === ROLE && R.role && R.role.id === ROLE) {
       W.pickSelf = '';
@@ -1660,6 +1675,7 @@
       W.nodes = d.nodes || []; W.edges = d.edges || []; W.chats = d.chats || [];
       W.jobs = d.jobs || []; W.schedules = d.schedules || []; W.degraded = !!d.degraded;
       renderWorld();
+      loadGlance();
       if (VIEW === 'plan') renderPlan();
     }).catch(function () { });
   };

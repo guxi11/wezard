@@ -269,7 +269,7 @@ const saidOf = (m: Msg): { body: string; ts: number } => {
   return { body: stripMd(t?.body ?? "").slice(0, 80), ts: t?.ts ?? m.ts };
 };
 
-interface Glance { preview: string; lastTs: number }
+export interface Glance { preview: string; lastTs: number }
 /** 会话列表一行的预览与时间 —— 取自同一句话: 所有有正文的消息里**最晚说出**的那句
  *  (按 text 自己的时刻比, 不按消息排序: 一轮长跑的独白可能晚于之后才进来的问话)。
  *  只有工具调用、或还在跑没吐字的那一轮没有可预览的话, 越过它落在上一句真话上;
@@ -281,6 +281,19 @@ const glance = (ms: readonly Msg[], who: (m: Msg) => string = () => ""): Glance 
   }, undefined);
 const glanceOr = (ms: readonly Msg[], who?: (m: Msg) => string): Glance =>
   glance(ms, who) ?? { preview: "", lastTs: ms[ms.length - 1]?.ts ?? 0 };
+
+/** 一行预览前的说话人: 这一项的对端不是恰好一个 (不限 / 多个) 时才写「.x: 」, 视角自己说的不写。
+ *  peers 就是打开这一项时 talkOf 的入参 (整个公开频道 = 不限) —— 会话项、子项、关系图卡片都从这里拿。 */
+const speakerPrefix = (dir: Directory, viewer: string, peers?: readonly string[]): ((m: Msg) => string) | undefined =>
+  peers?.length === 1
+    ? undefined
+    : (m) => (m.from === viewer ? "" : `${dir.isWizard(m.from) ? "." : ""}${dir.nameOf(m.from)}: `);
+
+/** 一个 talkOf 窗口在列表里的那一行: 最近一句 (按上面的规则带说话人) 与时刻。ping 不是话。 */
+export const glanceOfTalk = (msgs: readonly Msg[], viewer: string, dir: Directory, who: string, peers: readonly string[], chat?: string): Glance => {
+  const ms = talkOf(msgs.filter((m) => !isPing(m)), who, peers, chat);
+  return glanceOr(ms, speakerPrefix(dir, viewer, peers));
+};
 
 const SUB_MAX = 40;
 
@@ -324,8 +337,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
         return {
           key, kind: "wizard", name: dir.nameOf(peer), label: dir.labelOf(peer), base: "", peer,
           status: dir.status(peer, now),
-          // 私聊只有两个人, 标题行已是对方的名字, 预览只放正文。
-          ...glanceOr(ms), count: ms.length, heard: heard(ms), mine: spoke(ms), subs: [],
+          ...glanceOr(ms, speakerPrefix(dir, role, [peer])), count: ms.length, heard: heard(ms), mine: spoke(ms), subs: [],
         };
       }
       const base = key.slice(2);
@@ -337,8 +349,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
           const seen = talkOf(all, r);
           return {
             role: r, name: dir.nameOf(r), label: dir.labelOf(r), count: pair.length, mine: spoke(pair),
-            // 标题行已经是它的名字, 预览只放正文。
-            ...(glance(pair) ?? glanceOr(seen)), status: dir.status(r, now),
+            ...(glance(pair, speakerPrefix(dir, role, [r])) ?? glanceOr(seen, speakerPrefix(dir, role, [r]))), status: dir.status(r, now),
           };
         })
         // 与我有往来的排前, 再按最近。
@@ -348,7 +359,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
         key, kind: "group", base,
         name: dir.chatName(base) || (base.startsWith("user:") ? dir.nameOf(humanOf(base)) : base.replace(/^chat:/, "").slice(0, 10)),
         label: "💬",
-        ...glanceOr(all, (m) => `${dir.nameOf(m.from)}: `), count: all.length, heard: heard(all), mine: spoke(all), subs,
+        ...glanceOr(all, speakerPrefix(dir, role)), count: all.length, heard: heard(all), mine: spoke(all), subs,
       };
     })
     .sort((a, b) => b.lastTs - a.lastTs);

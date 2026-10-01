@@ -25,7 +25,7 @@ import { baseOfKey } from "./session-label.js";
 import { isMark, isPost, isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, type WorldFacts } from "./world.js";
 import {
-  allMessages, convKeyOf, convMessages, parseTalkKey, convsOf, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
+  allMessages, convKeyOf, convMessages, parseTalkKey, glanceOfTalk, convsOf, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
   roleInfo, roleStats, sessionsOf, windowStats, type Directory, type Msg, type SessionSpan,
 } from "./role-view.js";
 import { renderMark, renderMsg, type MsgFragment } from "./role-render.js";
@@ -48,6 +48,7 @@ export interface ChatRoutes {
   events: SimpleHandler;
   world: SimpleHandler;
   search: SimpleHandler;
+  glance: SimpleHandler;
 }
 
 /** 注册表侧的事实 (wizard 身份 / 家谱 / 工单 / 日程) —— 只有 daemon 给得出。
@@ -425,7 +426,26 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     });
   };
 
-  return { page, styles: asset(chatStyles), script: asset(chatScript), vendor: asset(chatVendor), role, msgs, tool, events, world, search };
+  /** 关系图卡片那一行: 每张卡片的窗口 (`a:<x>|<相连者>`, 换行分隔) 各一份 glance —— 与打开它时看到的同一个 talkOf。 */
+  const glance: SimpleHandler = (_req, res, url) => {
+    const ticket = resolveTicket(store, url);
+    if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
+    void getFacts().then((f) => {
+      const records = listRecent();
+      const dir = makeDirectory(records, f);
+      const now = Date.now();
+      const viewer = pickRole(dir, ticket, url);
+      const msgs = allMessages(records, now);
+      const keys = (url.searchParams.get("keys") ?? "").split("\n").filter(Boolean);
+      const out = Object.fromEntries(keys.flatMap((k) => {
+        const t = parseTalkKey(k);
+        return t ? [[k, glanceOfTalk(msgs, viewer, dir, t.who, t.peers)]] : [];
+      }));
+      json(res, 200, { ok: true, at: now, glances: out });
+    });
+  };
+
+  return { page, styles: asset(chatStyles), script: asset(chatScript), vendor: asset(chatVendor), role, msgs, tool, events, world, search, glance };
 };
 
 /** Path → handler map; the daemon registers each, svr dispatches through it. */
@@ -441,10 +461,11 @@ export const chatRouteTable = (routes: ChatRoutes): Record<string, SimpleHandler
   "GET /api/role-events": routes.events,
   "GET /api/world": routes.world,
   "GET /api/search": routes.search,
+  "GET /api/glance": routes.glance,
 });
 
 /** Route keys, single-sourced so the daemon's registration can't drift. */
 export const CHAT_ROUTE_KEYS = [
   "GET /role", "GET /chat", "GET /chat/app.css", "GET /chat/app.js", "GET /chat/vendor.js",
-  "GET /api/role", "GET /api/msgs", "GET /api/tool", "GET /api/role-events", "GET /api/world", "GET /api/search",
+  "GET /api/role", "GET /api/msgs", "GET /api/tool", "GET /api/role-events", "GET /api/world", "GET /api/search", "GET /api/glance",
 ] as const;
