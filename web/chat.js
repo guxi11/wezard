@@ -611,10 +611,11 @@
       r.chat ? ['🏠', r.chat, 'home'] : null,
       born ? ['🐣', fmtClock(born), '出生于 ' + fmtDay(born)] : null
     ].filter(Boolean).map(function (f) { return '<span title="' + esc(f[2]) + '">' + f[0] + ' ' + esc(f[1]) + '</span>'; });
+    // 只有一段 session 也挂选择器 —— 它同时是「现在看的是哪一段」的标签, 不该随段数忽隐忽现。
     $('#rb-who').innerHTML =
       '<div class="id"><span class="av">' + esc(r.label) + '</span>' +
         '<span class="l"><span class="nl"><span class="cp" title="' + esc('复制 ' + nameOf(r.id)) + '">' + nm(r.id, r.name) + '</span>' + (r.kind === 'wizard' ? '<span id="rb-st"></span>' : '') +
-          '<span id="rb-sp">' + (R.sessions.length > 1 ? sessPicker() : '') + '</span></span>' +
+          '<span id="rb-sp">' + (R.sessions.length ? sessPicker() : '') + '</span></span>' +
           (facts.length ? '<span class="facts">' + facts.join('') + '</span>' : '') + '</span></div>' +
       (r.description ? '<p class="job">' + esc(r.description) + '</p>' : '');
     paintStatus();

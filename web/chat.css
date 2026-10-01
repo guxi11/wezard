@@ -114,7 +114,7 @@ button { font: inherit; color: inherit }
 }
 .sp-btn:hover, .sp.open .sp-btn { background: var(--paper); color: var(--ink) }
 /* 箭头用边框画, 不用 ▾ 字形 —— 字形贴着基线, 放大后总是偏下。 */
-.sp-btn .car { flex: none; display: grid; place-items: center; width: 18px; height: 18px; transition: transform .15s }
+.sp-btn .car { flex: none; display: grid; place-items: center; width: 16px; height: 16px; transition: transform .15s }
 .sp-btn .car::before { content: ""; border: 5px solid transparent; border-top: 6px solid var(--faint); border-bottom: 0 }
 .sp.open .sp-btn .car { transform: rotate(180deg) }
 .sp-list {
