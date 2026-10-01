@@ -47,7 +47,8 @@ button { font: inherit; color: inherit }
 
 /* ── 左栏顶: 当前 role 的名片 (身份); 关系/日程入口是名片下、会话列表上的一排 ──── */
 .rolebar {
-  position: relative; flex: none; padding: 16px 16px 14px; border-bottom: 1px solid var(--line);
+  /* margin 归零: 通用 header 规则带着 8px 下边距, 会把下面的入口条顶得上宽下窄。 */
+  position: relative; flex: none; margin: 0; padding: 16px 16px 14px; border-bottom: 1px solid var(--line);
   display: flex; flex-direction: column; gap: 8px; background: var(--card);
 }
 .rolebar .id { display: flex; gap: 10px; align-items: center; min-width: 0 }
@@ -70,36 +71,45 @@ button { font: inherit; color: inherit }
 .rolebar .facts span { white-space: nowrap }
 .rolebar .go { cursor: pointer; color: var(--accent) }
 .rolebar .go:hover { text-decoration: underline }
-.acts { flex: none; display: flex; align-items: center; padding: 9px 6px; border-bottom: 1px solid var(--line) }
+.acts { flex: none; display: flex; gap: 4px; padding: 8px 10px; border-bottom: 1px solid var(--line) }
 .acts:empty { display: none }
 /* 旧外壳 (daemon 未重启) 里它还在名片内 —— 那里不需要自己的内边距与分隔线。 */
 .rolebar .acts { padding: 0; border: 0 }
-/* 文本按钮: 无底无框, 行高就是两者之间那条分割线的高度。 */
+/* 入口: 图标 + 名字 + 淡色副标题, 无框无底; hover 才浮出一层浅底, 打开着的染视角色。 */
 .bd {
-  font-size: 12.5px; line-height: 14px; padding: 0 10px; border: 0; cursor: pointer;
-  background: none; color: var(--mute); white-space: nowrap;
+  flex: 1 1 0; min-width: 0; display: flex; align-items: center; gap: 6px; padding: 6px 8px;
+  border: 0; border-radius: 7px; background: none; color: var(--mute); cursor: pointer; white-space: nowrap;
+  transition: background .12s, color .12s;
 }
-.bd + .bd { border-left: 1px solid var(--line) }
-.bd:hover, .bd.on { color: var(--accent) }
-.bd b { font-weight: 600; margin-left: 4px; font-variant-numeric: tabular-nums }
-/* session 切换: 按钮 + 浮层列表, 取代原生 <select>。 */
-.sp { position: relative; flex: 1 1 100%; min-width: 0 }
+.bd:hover { background: var(--paper); color: var(--ink) }
+.bd:active { background: var(--them-soft) }
+.bd.on { background: var(--mine); color: var(--accent) }
+.bd .ic { flex: none; display: inline-flex }
+.bd .ic svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round }
+.bd .lb { font-size: 12.5px; font-weight: 500 }
+.bd .sb {
+  min-width: 0; font-size: 11px; color: var(--faint); overflow: hidden; text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+.bd.on .sb { color: var(--accent); opacity: .75 }
+.bd.bad .sb { color: #cf222e }
+/* session 切换: name 右边一个小号文字触发器 + 浮层列表。name 先省略, 触发器不让位。 */
+.rolebar .id .l { flex: 1 }
+.rolebar .nl { display: flex; align-items: baseline; gap: 8px; min-width: 0 }
+.rolebar .nl .nm { min-width: 0; flex: 0 1 auto }
+#rb-sp { flex: none; display: inline-flex }
+.sp { position: relative; display: inline-flex }
 .sp-btn {
-  width: 100%; display: flex; align-items: center; gap: 8px; cursor: pointer; text-align: left;
-  font-size: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px;
-  transition: border-color .12s, box-shadow .12s;
+  display: inline-flex; align-items: center; gap: 2px; cursor: pointer; white-space: nowrap;
+  font-size: 11.5px; color: var(--mute); background: none; border: 0; border-radius: 5px; padding: 1px 4px;
+  font-variant-numeric: tabular-nums; transition: background .12s, color .12s;
 }
-.sp-btn:hover, .sp.open .sp-btn { border-color: var(--accent) }
-.sp.open .sp-btn { box-shadow: 0 0 0 3px #2f55c91f }
-.sp-btn .lb { font-size: 10px; color: var(--faint); text-transform: uppercase; letter-spacing: .4px; flex: none }
-.sp-btn .v { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums }
-.sp-btn .car {
-  flex: none; width: 6px; height: 6px; margin: -3px 2px 0 0; border: solid var(--mute); border-width: 0 1.5px 1.5px 0;
-  transform: rotate(45deg); transition: transform .15s;
-}
-.sp.open .sp-btn .car { transform: rotate(-135deg); margin-top: 3px }
+.sp-btn:hover, .sp.open .sp-btn { background: var(--paper); color: var(--ink) }
+.sp-btn .car { font-size: 9px; color: var(--faint); transition: transform .15s }
+.sp.open .sp-btn .car { transform: rotate(180deg) }
 .sp-list {
-  position: absolute; z-index: 20; left: 0; right: 0; top: calc(100% + 4px);
+  /* 以触发器左下角为锚向右下展开 —— 触发器贴着 name 右边, 朝左开会被侧栏左沿裁掉。 */
+  position: absolute; z-index: 20; left: 0; top: calc(100% + 4px); width: 196px; max-width: calc(100vw - 24px);
   max-height: 280px; overflow-y: auto; overscroll-behavior: contain;
   background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 4px;
   box-shadow: 0 8px 24px #1c24301f, 0 2px 6px #1c24300f;
@@ -107,22 +117,14 @@ button { font: inherit; color: inherit }
 }
 .sp.open .sp-list { opacity: 1; transform: none; pointer-events: auto }
 .sp-it {
-  width: 100%; display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: baseline;
+  width: 100%; display: flex; gap: 10px; align-items: baseline;
   background: none; border: 0; border-radius: 6px; padding: 6px 8px; cursor: pointer; text-align: left; font-size: 12px;
 }
 .sp-it:hover { background: var(--paper) }
 .sp-it.on { background: var(--mine); color: var(--accent) }
-.sp-it .id { font-family: ui-monospace, Menlo, monospace; font-weight: 600 }
-.sp-it .ago { color: var(--mute) }
-.sp-it .n { color: var(--faint); font-variant-numeric: tabular-nums; grid-column: 3 }
+.sp-it .id { flex: 1; min-width: 0; font-variant-numeric: tabular-nums }
+.sp-it .n { flex: none; color: var(--faint); font-variant-numeric: tabular-nums }
 .sp-it.all { border-bottom: 1px solid var(--line); border-radius: 6px 6px 0 0; margin-bottom: 3px }
-.sp-it.all .id { font-family: inherit }
-
-/* 左栏底: session 切换 —— 轮次的事, 与顶上的身份分开, 钉在会话列表下面。 */
-.sidefoot { flex: none; border-top: 1px solid var(--line); padding: 10px 12px; background: var(--paper) }
-/* 在底部, 浮层往上开。 */
-.sidefoot .sp-list { top: auto; bottom: calc(100% + 4px); transform: translateY(4px) }
-.sidefoot .sp.open .sp-list { transform: none }
 
 /* ── 用量条: 一组轮次的总账 ─────────────────────────────────────────
    一个组件两处挂: 整页页脚 (wizard 的总账) / 聊天窗口底 (人与某个 wizard 这段往来的账)。
@@ -617,32 +619,18 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
   position: relative; height: 8px; border-radius: 4px; background: #eaeef2; margin: 3px 0 7px;
 }
 .strip .pin {
-  position: absolute; top: -3px; width: 8px; height: 14px; margin-left: -4px;
-  border-radius: 3px; background: #9a6700; box-shadow: 0 0 0 2px #fff;
+  position: absolute; top: -4px; width: 10px; height: 16px; margin-left: -5px; padding: 0; cursor: pointer;
+  border: 0; border-radius: 3px; background: #9a6700; box-shadow: 0 0 0 2px #fff;
 }
+.strip .pin span {
+  position: absolute; bottom: 19px; left: 50%; transform: translateX(-50%); white-space: nowrap;
+  font: 600 9.5px ui-monospace, Menlo, monospace; color: #9a6700; opacity: 0; transition: opacity .12s; pointer-events: none;
+}
+.strip .pin:hover span, .strip .pin:focus-visible span { opacity: 1 }
+.strip .pin:hover { transform: scaleY(1.15) }
+.strip .pin.bad { background: #cf222e }
+.strip .pin.bad span { color: #cf222e }
 .strip .cap { font-size: 11px; color: #8c959f }
-
-.prow {
-  display: flex; gap: 16px; background: #fff; border: 1px solid #d0d7de;
-  border-radius: 10px; padding: 12px 16px; margin-bottom: 10px;
-}
-.prow .pl { flex: none; width: 152px; border-right: 1px dashed #eaeef2; padding-right: 14px }
-.pwhen { font-size: 11.5px; color: #9a6700; font-weight: 600 }
-.pnext {
-  display: flex; align-items: baseline; gap: 6px; margin-top: 5px;
-  font-family: ui-monospace, Menlo, monospace;
-}
-.pnext b { font-size: 12.5px; font-variant-numeric: tabular-nums }
-.pnext span { font-size: 10.5px; color: #8c959f }
-.prow .pr { min-width: 0; flex: 1 }
-.ph { display: flex; align-items: center; gap: 7px; flex-wrap: wrap }
-.ph .note { font-size: 11px; color: #57606a }
-.ph .pid {
-  margin-left: auto; font-size: 10px; color: #b1bac4;
-  font-family: ui-monospace, Menlo, monospace;
-}
-.ptext { font-size: 12px; color: #1f2328; margin-top: 6px; line-height: 1.5; word-break: break-word }
-.pfoot { font-size: 10.5px; color: #8c959f; margin-top: 6px }
 
 /* wizard 徽标 —— 日程/工单里凡是提到一个 wizard 都用它, 同聊天的可点进线程。 */
 .wchip {
@@ -688,9 +676,10 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
   .wmap { padding: 12px }
   .wgrid { columns: 1 }
   .plan-in { padding: 12px }
-  .prow { flex-direction: column; gap: 6px }
-  .prow .pl { width: auto; border-right: 0; border-bottom: 1px dashed #eaeef2; padding: 0 0 8px }
-  .pnext { margin-top: 1px }
+  .tcard { flex-direction: column; gap: 8px }
+  .tc-time { width: auto; flex-direction: row; align-items: baseline; gap: 8px; border-right: 0; padding: 0 }
+  .tview { grid-template-columns: 1fr }
+  .wfocus { left: 12px; right: 12px; bottom: 12px; width: auto }
 }
 
 /* 相关性筛掉的那些 —— 说一声它们还在, 但不占图的位置 (见 shared/world 的说明)。 */
@@ -748,7 +737,7 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 /* ══ 关系 / 日程 ═══════════════════════════════════════════════════ */
 /* 都是当前 role 的另一面, 侧栏 (它的会话) 留着 —— 点一个会话就回到对话。
    会话标题条与页脚总账只属于对话视图。 */
-.pane { flex: 1; min-height: 0; display: flex; flex-direction: column; background: #fafbfc }
+.pane { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; background: #fafbfc }
 
 /* 过程框里的工具行是 nowrap 的 —— 不裁一刀会把整列撑出横向滚动。 */
 .mb > .turn-group { overflow: hidden }
@@ -761,3 +750,206 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .rem.raw { flex-basis: 100% }
 .rem.raw .rem-raw { display: block }
 .rem.raw .rem-tag { display: none }
+
+/* ══ 状态药丸 / 进入箭头 (家谱 · 卡片 · 聚焦卡 · 工单共用) ══════════════ */
+.stp {
+  flex: none; display: inline-flex; align-items: center; gap: 4px; font-size: 10px; line-height: 16px;
+  padding: 0 6px; border-radius: 8px; background: #eef0f3; color: var(--mute); white-space: nowrap; font-weight: 500;
+}
+.stp::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #b1bac4 }
+.stp.run { background: #dafbe1; color: #1a7f37 }
+.stp.run::before { background: #1a7f37; animation: pulse 1.4s infinite }
+.stp.off { background: transparent; color: var(--faint); box-shadow: inset 0 0 0 1px var(--line) }
+.stp.off::before { background: transparent; box-shadow: inset 0 0 0 1.5px #b1bac4 }
+.wnode .stp { margin-left: 2px }
+.wgo {
+  flex: none; width: 20px; height: 20px; margin: -2px -2px -2px 2px; border-radius: 6px; display: grid; place-items: center;
+  font-size: 12px; color: var(--accent); background: var(--mine); opacity: 0; transition: opacity .12s;
+}
+.wnode:hover .wgo, .wnode.sel .wgo { opacity: 1 }
+.wgo:hover { background: var(--accent); color: #fff }
+@media (hover: none) { .wgo { opacity: 1 } }
+
+/* ══ 关系图 · 家谱 (以当前 role 为中心) ════════════════════════════════ */
+.tview {
+  display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 18px; align-items: start;
+  max-width: 1180px; margin: 0 auto;
+}
+.tview > section { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px 16px; min-width: 0 }
+.tview h3 {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin: 0 0 14px; font-size: 13px;
+  padding-bottom: 9px; border-bottom: 1px solid #eaeef2;
+}
+.tview h3 > span:not(.tally) { font-size: 11px; color: var(--faint); font-weight: 400; font-variant-numeric: tabular-nums }
+.tview h3 .tally { margin-left: auto; display: flex; gap: 5px }
+/* 展开全部的开关: 一个不显眼的文字链。 */
+.tall {
+  border: 0; background: none; padding: 0 2px; cursor: pointer; font-size: 11px; color: var(--faint);
+  text-decoration: underline dotted; text-underline-offset: 3px;
+}
+.tall:hover { color: var(--accent) }
+.tree.all > li + li { margin-top: 14px; padding-top: 14px; border-top: 1px dashed #eaeef2 }
+.tfold { font-size: 10px; color: var(--faint); border: 1px dashed var(--line); border-radius: 8px; padding: 0 5px; line-height: 14px }
+.tfam { overflow-x: auto }
+.tsolo, .tghost { font-size: 11.5px; color: var(--faint); margin: 0 0 10px }
+.tghost { font-family: ui-monospace, Menlo, monospace }
+
+/* 树: 每个 li 左边一道竖线、一道横线接到自己的节点上; 分身实线紫, 子 wizard 虚线橙 (同连线图例)。 */
+.tree, .tree ul { list-style: none; margin: 0; padding: 0 }
+.tree ul { padding-left: 26px }
+.tree li { position: relative; padding-top: 8px }
+.tree > li { padding-top: 0 }
+.tree ul > li::before {
+  content: ""; position: absolute; left: -15px; top: 0; height: 30px; width: 15px;
+  border-left: 1.5px solid var(--lc); border-bottom: 1.5px solid var(--lc); border-bottom-left-radius: 8px;
+}
+.tree ul > li:not(:last-child)::after {
+  content: ""; position: absolute; left: -15px; top: 30px; bottom: 0; border-left: 1.5px solid var(--lc2, #d9dee6);
+}
+.tree li.clone { --lc: #b9a3e8 }
+.tree li.spawn { --lc: #e9b991 }
+.tree li.spawn::before { border-left-style: dashed; border-bottom-style: dashed }
+.tnode {
+  position: relative; display: flex; gap: 10px; align-items: flex-start; max-width: 560px;
+  padding: 9px 12px; border-radius: 10px; background: #fff; border: 1px solid var(--line);
+  transition: border-color .12s, box-shadow .12s, background .12s;
+}
+.tnode.go { cursor: pointer }
+.tnode.go:hover { border-color: var(--accent); box-shadow: 0 2px 8px #2f55c91a }
+.tnode.go:hover .wname { color: var(--accent) }
+.tnode.me { background: var(--mine); border-color: var(--accent); box-shadow: 0 0 0 3px #2f55c914 }
+.tnode.run { border-left: 3px solid #1a7f37 }
+.tnode.off .wav { filter: grayscale(1); opacity: .55 }
+.tnode.off .wname { color: var(--mute) }
+.tnode .wav { width: 30px; height: 30px; font-size: 16px; border-radius: 9px }
+.tb { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px }
+.t1 { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0 }
+.t1 .wname { font-size: 13px }
+.tk { flex: none; font-size: 10px; line-height: 16px; padding: 0 5px; border-radius: 4px; font-weight: 600 }
+.tk.clone { color: #6639ba; background: #8250df14 }
+.tk.spawn { color: #953800; background: #bc4c0014 }
+.tk.me { color: #fff; background: var(--accent) }
+.tjob { font-size: 12px; color: var(--ink); opacity: .85; line-height: 1.45 }
+.tprev {
+  font-size: 11.5px; color: var(--mute); line-height: 1.4; overflow: hidden;
+  display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical;
+}
+.tlegend {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 14px; padding-top: 10px;
+  border-top: 1px dashed #eaeef2; font-size: 11px; color: var(--faint);
+}
+.tlegend .tk + * { margin-right: 10px }
+.tlegend .tk:not(:first-child) { margin-left: 10px }
+
+.tcol + .tcol { margin-top: 14px }
+.tcol h4 {
+  display: flex; gap: 6px; align-items: baseline; margin: 0 0 6px; font-size: 11.5px; color: var(--mute); font-weight: 600;
+}
+.tcol h4 span { color: var(--faint); font-weight: 400; font-variant-numeric: tabular-nums }
+.tie { display: flex; gap: 9px; align-items: center; padding: 7px 8px; border-radius: 8px; border: 1px solid transparent }
+.tie.go { cursor: pointer }
+.tie.go:hover { background: var(--mine); border-color: var(--mine-line) }
+.tie.go:hover .wname { color: var(--accent) }
+.tie .wav { width: 26px; height: 26px }
+.tie .wname { font-size: 12.5px }
+.ek { color: var(--c); font-weight: 600 }
+.ek::before { content: ""; display: inline-block; width: 10px; border-top: 2px solid var(--c); margin-right: 4px; vertical-align: 3px }
+.xc { color: #0969da }
+.tties .pempty { padding: 12px 0 }
+
+/* ══ 关系图 · 聚焦卡 ════════════════════════════════════════════════ */
+.wfocus {
+  position: absolute; right: 18px; bottom: 18px; z-index: 5; width: 300px; max-height: calc(100% - 90px); overflow-y: auto;
+  background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px 14px;
+  box-shadow: 0 8px 28px #1c24302a; display: flex; flex-direction: column; gap: 7px;
+}
+.wfocus .fh { display: flex; align-items: center; gap: 9px }
+.wfocus .wav { width: 32px; height: 32px; font-size: 17px; border-radius: 9px }
+.wfocus .fn { min-width: 0; flex: 1; display: flex; flex-direction: column }
+.wfocus .fn .wname { font-size: 14px }
+.wfocus .fk { font-size: 11px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.wfocus .fx-x { border: 0; background: none; cursor: pointer; color: var(--faint); font-size: 12px; padding: 2px 4px; border-radius: 5px }
+.wfocus .fx-x:hover { background: var(--paper); color: var(--ink) }
+.wfocus .fj { margin: 0; font-size: 12px; line-height: 1.5 }
+.wfocus .fp { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--mute); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden }
+.wfocus .fg { display: flex; flex-wrap: wrap; gap: 4px; align-items: center }
+.wfocus .fl { font-size: 10.5px; color: var(--faint); width: 30px; flex: none }
+.wfocus .fgo {
+  margin-top: 4px; border: 0; border-radius: 8px; padding: 7px 10px; cursor: pointer;
+  background: var(--accent); color: #fff; font-size: 12.5px; font-weight: 600;
+}
+.wfocus .fgo:hover { filter: brightness(1.08) }
+.wfocus .fme { margin-top: 4px; font-size: 11.5px; color: var(--accent); text-align: center }
+
+/* ══ 日程 · 总览 / 任务卡 ════════════════════════════════════════════ */
+.pstats {
+  max-width: 900px; margin: 0 auto 18px; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px;
+}
+.pst {
+  background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px;
+  display: flex; flex-direction: column; gap: 2px; min-width: 0;
+}
+.pst .k { font-size: 11px; color: var(--mute) }
+.pst b { font-size: 20px; line-height: 26px; font-variant-numeric: tabular-nums; font-family: ui-monospace, Menlo, monospace }
+.pst b small { font-size: 12px; color: var(--faint); font-weight: 400 }
+.pst .s { font-size: 11px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.pst.bad { border-color: #cf222e66; background: #fff6f6 }
+.pst.bad b, .pst.bad .k { color: #cf222e }
+
+.tcard {
+  display: flex; gap: 16px; background: #fff; border: 1px solid var(--line); border-radius: 12px;
+  padding: 12px 16px; margin-bottom: 10px; transition: box-shadow .2s, border-color .2s;
+}
+.tcard:hover { border-color: #b9c3d3 }
+.tcard.bad { border-color: #cf222e55; border-left: 3px solid #cf222e }
+.tcard.flash { animation: flash 1.2s ease-out }
+@keyframes flash { 0% { box-shadow: 0 0 0 4px #9a670055 } 100% { box-shadow: 0 0 0 4px #9a670000 } }
+.tc-time {
+  flex: none; width: 92px; display: flex; flex-direction: column; gap: 1px;
+  border-right: 1px dashed #eaeef2; padding-right: 14px;
+}
+.tc-time b { font: 700 22px/28px ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; color: var(--ink) }
+.tc-time span { font-size: 11px; color: var(--mute) }
+.tc-time em { font-style: normal; font-size: 11px; color: #9a6700; font-weight: 600 }
+.tc-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 7px }
+.perr {
+  font-size: 11.5px; color: #82071e; background: #ffebe9; border: 1px solid #ff818266; border-radius: 8px;
+  padding: 6px 10px; line-height: 1.5;
+}
+.perr b { font-weight: 700 }
+.perr code {
+  display: block; margin-top: 3px; font: 11px/1.5 ui-monospace, Menlo, monospace; color: #a40e26;
+  white-space: pre-wrap; word-break: break-word;
+}
+.prule { display: flex; gap: 5px; flex-wrap: wrap }
+.rl { font-size: 11px; line-height: 18px; padding: 0 7px; border-radius: 9px; white-space: nowrap }
+.rl.clock { color: #7d4e00; background: #fff8c5; border: 1px solid #d4a72c66; font-weight: 600 }
+.rl.guard { color: var(--mute); background: #f1f3f6; border: 1px solid #e4e8ee }
+.ptitle { font-size: 13px; font-weight: 600; line-height: 1.45; word-break: break-word }
+.pflow { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; font-size: 11.5px }
+.pflow .fl { color: var(--faint) }
+.pflow .ar { color: var(--faint) }
+.pflow .fresh { color: #6639ba; background: #8250df12; border-radius: 10px; padding: 0 7px; line-height: 18px }
+.pprompt { font-size: 11.5px; border-radius: 8px; background: #f6f8fa; border: 1px solid #eaeef2 }
+.pprompt summary {
+  text-transform: none; letter-spacing: 0; font-weight: 400; cursor: pointer; padding: 5px 10px; color: var(--mute); display: flex; gap: 8px; min-width: 0; list-style: none;
+}
+.pprompt summary::-webkit-details-marker { display: none }
+.pprompt summary::before { content: "▸"; color: var(--faint); transition: transform .12s }
+.pprompt[open] summary::before { transform: rotate(90deg) }
+.pprompt summary span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); opacity: .75 }
+.pprompt pre {
+  margin: 0; padding: 8px 12px 10px; border-top: 1px solid #eaeef2; max-height: 280px; overflow: auto;
+  font: 11.5px/1.55 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-word;
+}
+.pfoot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 10.5px; color: var(--faint) }
+.pfoot .pid { margin-left: auto; font-family: ui-monospace, Menlo, monospace; color: #b1bac4 }
+.gt { border-radius: 4px; padding: 0 6px; line-height: 16px; font-weight: 600 }
+.gt.none { color: var(--faint); background: #f1f3f6; font-weight: 400 }
+.gt.go { color: #1a7f37; background: #dafbe1 }
+.gt.skip { color: #57606a; background: #eaeef2 }
+.gt.err { color: #fff; background: #cf222e }
+.jh .jst { border-radius: 4px; padding: 0 6px; background: #eaeef2 }
+.jrow.open .jh .jst { background: #dafbe1 }
+.jmm .stp { font-size: 9.5px }
+.jmm .tmp, .jmm .wchip { flex: none; white-space: nowrap }

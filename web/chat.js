@@ -22,18 +22,18 @@
 
   // at / recvAt: 服务端快照时刻与本地收到时刻。所有"现在几点"的判断都换算到
   // 服务端时钟, 否则客户端时钟偏几分钟就会把运行中的会话判成已结束。
-  var R = { at: 0, recvAt: 0, role: null, sessions: [], convs: [], relations: false, schedules: 0, stats: null, winStats: null };
+  var R = { at: 0, recvAt: 0, role: null, sessions: [], convs: [], relations: false, schedules: 0, plan: null, stats: null, winStats: null };
   // frags: 当前窗口的原始片段 (id → 片段)。片段不带方向, 换视角时拿它就地重包左右。
   var S = { es: null, pinned: true, gen: 0, frags: {} };
   // 关系/日程两栏共用的世界快照。sel = 当前聚焦的节点, kinds = 边类型开关。
   var W = {
     at: 0, nodes: [], edges: [], chats: [], jobs: [], schedules: [],
     degraded: false, loaded: false, sel: '', onlyRel: false, kinds: { clone: 1, spawn: 1, peer: 1, graph: 1 },
-    layout: 'cards',
+    layout: 'tree',
   };
   // 读法是个人偏好, 记在本地。存储不可用 (隐私窗口 / 老 webview) 就退回默认。
   var LAY_KEY = 'wezard.world.layout';
-  try { if (localStorage.getItem(LAY_KEY) === 'force') W.layout = 'force'; } catch (e) { }
+  try { var lay0 = localStorage.getItem(LAY_KEY); if (/^(tree|cards|force)$/.test(lay0)) W.layout = lay0; } catch (e) { }
   var setLayout = function (v) {
     W.layout = v;
     try { localStorage.setItem(LAY_KEY, v); } catch (e) { }
@@ -438,41 +438,41 @@
     var seg = String(p).replace(/\/+$/, '').split('/').filter(Boolean);
     return seg.length <= 2 ? p : '…/' + seg.slice(-2).join('/');
   };
-  var sessLabel = function (s) {
-    return (s.sessionId ? s.sessionId.slice(0, 8) : '(无 id)') + ' · ' + fmtAgo(s.start) + ' · ' + s.turns + ' 轮';
-  };
+  // session 只靠两样认: 何时开始、跑了几轮。最新那段直接叫「最新」。
+  var latestSess = function () { return R.sessions[R.sessions.length - 1]; };
+  var sessWhen = function (s) { return s.start ? fmtClock(s.start) : '(无时刻)'; };
 
-  // session 切换: 原生 <select> 的弹层画不了样式, 换成按钮 + 列表。
+  // session 切换: name 右边一个小号文字触发器 + 浮层列表。
   // renderRole 每次刷新都重画, 展开态记在 SESS_OPEN 里才不会被轮询收起。
   var SESS_OPEN = false;
   var sessRow = function (s, on) {
-    return '<button class="sp-it' + (on ? ' on' : '') + '" role="option" aria-selected="' + on + '" data-s="' + esc(s.sessionId || '') + '">' +
-      '<span class="id">' + esc(s.sessionId ? s.sessionId.slice(0, 8) : '(无 id)') + '</span>' +
-      '<span class="ago">' + esc(fmtAgo(s.start)) + '</span>' +
+    var last = s === latestSess();
+    return '<button class="sp-it' + (on ? ' on' : '') + '" role="option" aria-selected="' + on + '" data-s="' + esc(s.sessionId || '') + '" ' +
+      'title="' + esc(s.sessionId || '') + '">' +
+      '<span class="id">' + (last ? '最新 · ' : '') + esc(sessWhen(s)) + '</span>' +
       '<span class="n">' + s.turns + ' 轮</span></button>';
   };
   var sessPicker = function () {
     var cur = R.sessions.filter(function (s) { return s.sessionId === SESSION; })[0];
     var all = '<button class="sp-it all' + (cur ? '' : ' on') + '" role="option" aria-selected="' + !cur + '" data-s="">' +
-      '<span class="id">全部 session</span><span class="n">' + R.sessions.length + ' 个</span></button>';
-    return '<div class="sp' + (SESS_OPEN ? ' open' : '') + '">' +
-      '<button class="sp-btn" aria-haspopup="listbox" aria-expanded="' + SESS_OPEN + '">' +
-        '<span class="lb">session</span>' +
-        '<span class="v">' + esc(cur ? sessLabel(cur) : '全部 ' + R.sessions.length + ' 个') + '</span>' +
-        '<span class="car" aria-hidden="true"></span></button>' +
-      '<div class="sp-list" role="listbox">' + all +
+      '<span class="id">全部</span><span class="n">' + R.sessions.length + ' 段</span></button>';
+    var v = !cur ? '全部' : cur === latestSess() ? '最新' : sessWhen(cur);
+    return '<span class="sp' + (SESS_OPEN ? ' open' : '') + '">' +
+      '<button class="sp-btn" aria-haspopup="listbox" aria-expanded="' + SESS_OPEN + '" title="切换 session">' +
+        esc(v) + '<span class="car" aria-hidden="true">▾</span></button>' +
+      '<span class="sp-list" role="listbox">' + all +
         R.sessions.slice().reverse().map(function (s) { return sessRow(s, s.sessionId === SESSION); }).join('') +
-      '</div></div>';
+      '</span></span>';
   };
   var setSessOpen = function (open) {
     SESS_OPEN = open;
-    var sp = $('#rb-sess .sp');
+    var sp = $('#rb-sp .sp');
     if (!sp) return;
     sp.classList.toggle('open', open);
     sp.querySelector('.sp-btn').setAttribute('aria-expanded', open);
   };
   var bindSessPicker = function () {
-    var sp = $('#rb-sess .sp');
+    var sp = $('#rb-sp .sp');
     if (!sp) return;
     sp.querySelector('.sp-btn').onclick = function () { setSessOpen(!SESS_OPEN); };
     sp.querySelectorAll('.sp-it').forEach(function (it) {
@@ -480,11 +480,34 @@
     });
   };
   document.addEventListener('click', function (e) {
-    if (SESS_OPEN && !e.target.closest('#rb-sess .sp')) setSessOpen(false);
+    if (SESS_OPEN && !e.target.closest('#rb-sp .sp')) setSessOpen(false);
   });
   document.addEventListener('keydown', function (e) {
     if (SESS_OPEN && e.key === 'Escape') setSessOpen(false);
   });
+
+  // ── 关系 / 日程入口: 一枚图标 + 名字 + 一行副标题 + 计数徽标 ──
+  var ICON = {
+    world: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="3.2" r="2"/><circle cx="3.2" cy="12.6" r="2"/><circle cx="12.8" cy="12.6" r="2"/><path d="M7 5 4.2 10.8M9 5l2.8 5.8M5.2 12.6h5.6"/></svg>',
+    plan: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="11" rx="2"/><path d="M2 6.5h12M5.5 1.5v3M10.5 1.5v3"/><path d="M8 8.6v2.4l1.6 1"/></svg>',
+  };
+  // 一行: 图标 · 名字 · 一段淡色副标题 (家谱计数 / 下一枪)。不加框不加底 —— 名片下的一条安静的入口。
+  var tile = function (view, label, sub, tone) {
+    return '<button class="bd' + (VIEW === view ? ' on' : '') + (tone ? ' ' + tone : '') + '" data-view="' + view + '">' +
+      '<span class="ic">' + ICON[view] + '</span><span class="lb">' + label + '</span>' +
+      (sub ? '<span class="sb">' + sub + '</span>' : '') + '</button>';
+  };
+  var relTile = function (r) {
+    var sub = [r.clones.length ? r.clones.length + ' 分身' : '', r.spawns.length ? r.spawns.length + ' 子' : ''].filter(Boolean);
+    return tile('world', '关系图', sub.join(' · '));
+  };
+  var planTile = function () {
+    var p = R.plan || {};
+    var sub = p.broken ? '⚠ ' + p.broken + ' 出错'
+      : p.nextAt ? fmtClock(p.nextAt).replace(/^今天 /, '')
+      : String(R.schedules);
+    return tile('plan', '日程', esc(sub), p.broken ? 'bad' : '');
+  };
 
   // 名片: 身份 · 出身 · cwd · 出生; 名片下面一排是关系 / 日程入口。
   var renderRole = function () {
@@ -502,15 +525,18 @@
     var facts = [];
     if (r.cwd) facts.push('<span title="' + esc(r.cwd) + '">📁 ' + esc(shortCwd(r.cwd)) + '</span>');
     // 生在哪个群、什么时候 —— 一件事, 一行。
-    var born = [r.chat, r.bornAt ? fmtAgo(r.bornAt) : ''].filter(Boolean);
-    if (born.length) facts.push('<span title="' + esc('创建于' + (r.chat ? ' ' + r.chat : '') + (r.bornAt ? ' · ' + fmtDay(r.bornAt) : '')) + '">🐣 ' + esc(born.join(' · ')) + '</span>');
-    var kin = function (xs, what) {
-      return xs.length ? '<span title="' + esc(xs.map(function (x) { return '.' + x.name; }).join(' ')) + '">' + xs.length + ' 个' + what + '</span>' : '';
-    };
-    facts.push(kin(r.clones, '分身'), kin(r.spawns, '子 wizard'));
+    // 时刻跟着选中的 session 走: 选了一段就是那一段的开始与轮数, 全部就是最早那段起、共几轮。
+    var cur = R.sessions.filter(function (x) { return x.sessionId === SESSION; })[0];
+    var span = cur ? [cur] : R.sessions;
+    var t0 = span.reduce(function (m, x) { return x.start && (!m || x.start < m) ? x.start : m; }, 0);
+    var turns = span.reduce(function (n, x) { return n + (x.turns || 0); }, 0);
+    var when = [r.chat, t0 ? (cur ? '' : '自 ') + fmtClock(t0) : '', turns ? turns + ' 轮' : ''].filter(Boolean);
+    if (when.length) facts.push('<span title="' + esc((cur ? 'session ' + cur.sessionId : '全部 ' + R.sessions.length + ' 段 session') +
+      (t0 ? ' · 开始于 ' + fmtDay(t0) : '')) + '">🕘 ' + esc(when.join(' · ')) + '</span>');
     $('#rb-who').innerHTML =
       '<div class="id"><span class="av">' + esc(r.label) + '</span>' +
-        '<span class="l">' + nm(r.id, r.name) +
+        '<span class="l"><span class="nl">' + nm(r.id, r.name) +
+          '<span id="rb-sp">' + (R.sessions.length > 1 ? sessPicker() : '') + '</span></span>' +
           (kind ? '<span class="k">' + kind + (r.kind === 'wizard' ? '<span class="st" id="rb-st"></span>' : '') + '</span>' : '') + '</span></div>' +
       (r.description ? '<p class="job">' + esc(r.description) + '</p>' : '') +
       '<div class="facts">' + facts.join('') + '</div>';
@@ -518,14 +544,12 @@
     $('#rb-who').querySelectorAll('.go').forEach(function (g) {
       g.onclick = function () { switchRole(g.getAttribute('data-r')); };
     });
-    $('#rb-sess').innerHTML = R.sessions.length > 1 ? sessPicker() : '';
-    $('#rb-foot').hidden = R.sessions.length < 2;
+    // 老外壳的底栏选择框已并进 name 行。
+    if ($('#rb-foot')) $('#rb-foot').hidden = true;
     bindSessPicker();
-    var acts = [];
-    // 入口只在有东西可看时出现 —— 挂在名片下、会话列表上, 不挤进名片: 名片的主角是身份。
-    if (R.relations) acts.push('<button class="bd' + (VIEW === 'world' ? ' on' : '') + '" data-view="world">关系图</button>');
-    if (R.schedules) acts.push('<button class="bd' + (VIEW === 'plan' ? ' on' : '') + '" data-view="plan">日程<b>' + R.schedules + '</b></button>');
-    $('#rb-acts').innerHTML = acts.join('');
+    // 入口只在有东西可看时出现 —— 挂在名片下、会话列表上, 不挤进名片: 名片的主角是身份,
+    // 家谱计数 (几个分身 / 子 wizard) 属于关系, 写在关系图入口上。
+    $('#rb-acts').innerHTML = [R.relations && relTile(r), R.schedules && planTile()].filter(Boolean).join('');
     $('#rb-acts').querySelectorAll('.bd').forEach(function (b) {
       b.onclick = function () { setView(VIEW === b.getAttribute('data-view') ? 'msgs' : b.getAttribute('data-view')); };
     });
@@ -811,7 +835,7 @@
   var takeRole = function (d) {
     R.at = d.at || Date.now(); R.recvAt = Date.now();
     R.role = d.role; R.sessions = d.sessions || []; R.convs = d.convs || [];
-    R.relations = !!d.relations; R.schedules = d.schedules || 0;
+    R.relations = !!d.relations; R.schedules = d.schedules || 0; R.plan = d.plan || null;
     R.stats = d.stats || null; R.winStats = d.winStats || null;
     ROLE = d.role.id;
     learn(d.role.id, d.role.name, d.role.label);
@@ -1115,6 +1139,17 @@
     return W.edges.filter(edgeOn).filter(function (e) { return e.from === target || e.to === target; }).length;
   };
 
+  var bindLays = function () {
+    wtoolsEl.querySelectorAll('.lb').forEach(function (b) {
+      b.onclick = function () {
+        var v = b.getAttribute('data-lay');
+        if (v === W.layout) return;
+        setLayout(v);
+        renderWorld();
+      };
+    });
+  };
+
   var renderWTools = function () {
     var counts = { clone: 0, spawn: 0, peer: 0, graph: 0 };
     W.edges.forEach(function (e) { counts[e.kind] = (counts[e.kind] || 0) + 1; });
@@ -1124,34 +1159,36 @@
         'style="--c:' + EDGE[k].c + '"' + (EDGE[k].tip ? ' title="' + EDGE[k].tip + '"' : '') + '><i></i>' + EDGE[k].label +
         '<b>' + (counts[k] || 0) + '</b></button>';
     }).join('');
-    var force = W.layout === 'force';
-    wtoolsEl.innerHTML =
+    var force = W.layout === 'force', tree = W.layout === 'tree';
+    var lay = function (v, label, tip) {
+      return '<button class="lb' + (W.layout === v ? ' on' : '') + '" data-lay="' + v + '" title="' + tip + '">' + label + '</button>';
+    };
+    var lays = '<div class="wlay">' +
+      lay('tree', '家谱', '以当前 role 为中心: 它的整棵家谱树与它的往来 —— 单击任一节点切到它的视角') +
+      lay('cards', '卡片', '按聊天分卡, 分身 / 子 wizard 缩在父亲下面 —— 归属与层级最准') +
+      lay('force', '关系网', 'wizard 之间的力导向图, 聊天收进节点 —— 协作关系最直观') +
+    '</div>';
+    if (tree) {
+      wtoolsEl.innerHTML = lays + '<div class="wstat">' + W.nodes.length + ' 个 wizard · ' + W.chats.length + ' 个聊天' +
+        (W.degraded ? ' · <span class="warn" title="注册表不可达 (独立 svr 部署), 只画观测到的往来">名册缺席</span>' : '') +
+        '<span class="hint">单击切到它的视角</span></div>';
+      bindLays();
+      return;
+    }
+    wtoolsEl.innerHTML = lays +
       '<div class="wlegend">' + chips + '</div>' +
-      '<div class="wlay">' +
-        '<button class="lb' + (force ? '' : ' on') + '" data-lay="cards" ' +
-          'title="按聊天分卡, 分身 / 子 wizard 缩在父亲下面 —— 归属与层级最准">▦ 卡片</button>' +
-        '<button class="lb' + (force ? ' on' : '') + '" data-lay="force" ' +
-          'title="wizard 之间的力导向图, 聊天收进节点 —— 协作关系最直观">🕸 关系网</button>' +
-      '</div>' +
       '<div class="wstat">' +
         W.nodes.length + ' 个 wizard · ' + W.chats.length + ' 个聊天' +
         (cross ? ' · <b>' + cross + '</b> 条跨聊天关系' : '') +
         (W.degraded ? ' · <span class="warn" title="注册表不可达 (独立 svr 部署), 只画观测到的往来">名册缺席</span>' : '') +
-        '<span class="hint">单击聚焦 · 双击进入' + (force ? ' · 拖动钉住' : ' (外聊天整页跳过去)') + '</span>' +
+        '<span class="hint">单击聚焦 · 双击进入' + (force ? ' · 拖动钉住' : '') + '</span>' +
       '</div>' +
       (force ? '<button class="chip" id="wre" title="松开所有钉住的节点, 重新排一遍">↻ 重排</button>' : '') +
       '<button class="chip only' + (W.onlyRel ? ' on' : '') + '" id="wonly" ' +
         'title="把此刻不属于任何关系的 wizard 收起来 —— 剩下的就是这张协作网本身">' +
         (W.onlyRel ? '☑' : '☐') + ' 只看有关系的</button>' +
       (W.sel ? '<button class="chip clear" id="wclear">✕ 取消聚焦</button>' : '');
-    wtoolsEl.querySelectorAll('.lb').forEach(function (b) {
-      b.onclick = function () {
-        var v = b.getAttribute('data-lay');
-        if (v === W.layout) return;
-        setLayout(v);
-        renderWorld();
-      };
-    });
+    bindLays();
     var re = $('#wre');
     if (re) re.onclick = function () { FX.pos = {}; FX.sig = ''; renderForce(); };
     wtoolsEl.querySelectorAll('.chip[data-k]').forEach(function (b) {
@@ -1185,7 +1222,9 @@
         '<span class="wl1">' +
           '<b class="wname" title="' + esc(n.name || n.target) + '">' + esc(nm) + '</b>' +
           (n.inherited ? '<span class="wih" title="分身: 从父亲的 session 节点 fork, 开局带着那一刻的上下文">⧉</span>' : '') +
+          stPill(n) +
           '<span class="wts">' + esc(fmtAgo(n.lastTs)) + '</span>' +
+          (n.target !== ROLE ? '<span class="wgo" data-go="' + esc(n.target) + '" title="切到 ' + esc(nm) + ' 的视角">↗</span>' : '') +
         '</span>' +
         (n.description ? '<span class="wjob">' + esc(n.description) + '</span>' : '') +
         (n.preview ? '<span class="wprev">' + esc(n.preview) + '</span>' : '') +
@@ -1225,6 +1264,7 @@
           : '') +
       '</section>';
     }).filter(Boolean).join('');
+    wmapEl._tree = '';
     wmapEl.innerHTML = '<svg class="wedges" id="wedges"></svg><div class="wgrid">' +
       (cards || '<div class="empty">此刻没有任何协作关系 —— 派活 / 生分身 / 生子 wizard 之后这里就有边了</div>') + '</div>';
     wmapEl.querySelectorAll('.wnode').forEach(function (el) {
@@ -1232,7 +1272,10 @@
       if (hood && !hood[t]) el.classList.add('dim');
       if (t === W.sel) el.classList.add('sel');
       if (canOpen(nodeOf(t))) el.classList.add('go');
-      el.onclick = function () { W.sel = (W.sel === t ? '' : t); renderWorld(); };
+      el.onclick = function (e) {
+        if (e.target.closest('.wgo')) { openNode(t); return; }
+        W.sel = (W.sel === t ? '' : t); renderWorld();
+      };
       // 双击 = 走进它: 视角切成它 (见 openNode)。
       el.ondblclick = function () { openNode(t); };
     });
@@ -1590,8 +1633,9 @@
       if (moved < 5) {
         FX.pos[t].pin = 0;
         W.sel = (W.sel === t ? '' : t);
-        renderWTools(); fxClasses(); fxHeat(0.12);
+        renderWTools(); fxClasses(); fxHeat(0.12); renderFocus();
       } else { fxClasses(); fxHeat(0.2); }
+      renderFocus();
     };
     el.ondblclick = function () { openNode(t); };
   };
@@ -1619,6 +1663,7 @@
       FX.edges.map(function (e) { return e.kind + e.from + '>' + e.to; }).join(',');
     var fresh = sig !== FX.sig;
     FX.sig = sig;
+    wmapEl._tree = '';
     wmapEl.innerHTML = '<svg class="wedges" id="wedges"></svg>' + ns.map(fxNodeHTML).join('');
     FX.els = {};
     wmapEl.querySelectorAll('.fxn').forEach(function (el) {
@@ -1635,11 +1680,197 @@
     fxHeat(fresh ? 0.9 : 0.05);
   };
 
+  // ── 状态药丸: 执行中 (绿、呼吸) / 空闲 / 已停 —— 三处 (家谱 / 卡片 / 聚焦卡) 同一种写法 ──
+  var stPill = function (n) {
+    var k = stateOf(n);
+    return '<span class="stp ' + k + '">' + ST[k] + '</span>';
+  };
+  var kidsOf = function (t) {
+    return W.nodes.filter(function (n) { return n.parent === t && n.target !== t; })
+      .sort(function (a, b) { return (a.bornAt || 0) - (b.bornAt || 0); });
+  };
+  // 往上走到图上还找得到的最老的祖先; seen 防一个坏掉的 parent 环。
+  var rootOf = function (t, seen) {
+    var n = nodeOf(t), up = n && n.parent && nodeOf(n.parent);
+    seen = seen || {};
+    if (!up || seen[up.target]) return t;
+    seen[t] = 1;
+    return rootOf(up.target, seen);
+  };
+  var lineage = function (t) {
+    var n = nodeOf(t);
+    return n && n.parent && nodeOf(n.parent) ? lineage(n.parent).concat([t]) : [t];
+  };
+  var countTree = function (t) {
+    return kidsOf(t).reduce(function (acc, k) { return acc.concat(countTree(k.target)); }, [nodeOf(t)]);
+  };
+
+  var tnodeHTML = function (n, rel, folded) {
+    var me = n.target === ROLE;
+    var meta = [n.model && n.model.replace(/^claude-/, ''), n.cwd && '📁 ' + shortPath(n.cwd, 1), n.turns && n.turns + ' 轮', fmtAgo(n.lastTs)]
+      .filter(Boolean);
+    return '<div class="tnode ' + stateOf(n) + (me ? ' me' : ' go') + (rel ? ' ' + rel : '') + '" data-t="' + esc(n.target) + '"' +
+        (me ? '' : ' title="切到 ' + esc(shortName(n)) + ' 的视角"') + '>' +
+      '<span class="wav">' + esc(n.label) + (wRunning(n) ? '<i class="live"></i>' : '') + '</span>' +
+      '<span class="tb">' +
+        '<span class="t1"><b class="wname">' + esc(shortName(n)) + '</b>' +
+          (rel === 'clone' ? '<span class="tk clone" title="分身: fork 自父亲的 session, 开局带着那一刻的上下文">⧉ 分身</span>'
+            : rel === 'spawn' ? '<span class="tk spawn" title="子 wizard: 父亲 spawn 的白板, 没有继承上下文">↳ 子</span>' : '') +
+          (me ? '<span class="tk me">当前视角</span>' : '') + stPill(n) +
+          (folded ? '<span class="tfold" title="它还有 ' + folded + ' 个子孙, 切到它的视角可见">+' + folded + '</span>' : '') + '</span>' +
+        (n.description ? '<span class="tjob">' + esc(n.description) + '</span>' : '') +
+        (n.preview ? '<span class="tprev">' + esc(n.preview) + '</span>' : '') +
+        '<span class="wmeta">' + meta.map(esc).join('<span class="sep">·</span>') + '</span>' +
+      '</span></div>';
+  };
+  // keep(父, 孩子) → 'full' 整枝 / 'leaf' 只画它自己 / '' 不画; 不给 keep = 全画。
+  // shown 收集画出来的节点 (状态计数用)。
+  var treeHTML = function (t, rel, depth, keep, leaf, shown) {
+    var n = nodeOf(t);
+    if (!n || depth > 24) return '';
+    shown.push(n);
+    var all = kidsOf(t);
+    var kids = leaf ? [] : all.filter(function (k) { return !keep || keep(t, k); });
+    // 被收起的孩子 (兄弟的子孙): 在节点上记个数, 不至于让人以为它没有后代。
+    var folded = leaf ? countTree(t).length - 1 : 0;
+    return '<li class="' + (rel || 'root') + '">' + tnodeHTML(n, rel, folded) +
+      (kids.length ? '<ul>' + kids.map(function (k) {
+        return treeHTML(k.target, k.inherited ? 'clone' : 'spawn', depth + 1, keep, keep && keep(t, k) === 'leaf', shown);
+      }).join('') + '</ul>' : '') +
+      '</li>';
+  };
+  // 只看相关: 祖先链一条直线下来, 到它自己再整枝展开; 同父的兄弟只画本人。
+  var focusKeep = function (path) {
+    var on = path.reduce(function (m, t) { m[t] = 1; return m; }, {});
+    var parent = path[path.length - 2];
+    return function (t, k) {
+      if (!on[t] || t === ROLE) return 'full';
+      return on[k.target] ? 'full' : t === parent ? 'leaf' : '';
+    };
+  };
+  var rootsAll = function () {
+    var mine = nodeOf(ROLE) ? rootOf(ROLE) : '';
+    return W.nodes.filter(function (n) { return !n.parent || !nodeOf(n.parent); })
+      .sort(function (a, b) { return (b.target === mine) - (a.target === mine) || b.lastTs - a.lastTs; });
+  };
+
+  // 往来: 与当前 role 相连的派活 / 流水线边, 按方向分两栏。家谱已经在树里, 这里不重复。
+  var tiesHTML = function () {
+    var ties = W.edges.filter(function (e) { return (e.kind === 'peer' || e.kind === 'graph') && (e.from === ROLE || e.to === ROLE); })
+      .sort(function (a, b) { return b.lastTs - a.lastTs; });
+    var row = function (e, other) {
+      var n = nodeOf(other);
+      return '<div class="tie' + (n ? ' go' : '') + '" data-t="' + esc(other) + '" title="切到 ' + esc(nameOf(other)) + ' 的视角">' +
+        '<span class="wav">' + esc(roleLabel(other)) + (n && wRunning(n) ? '<i class="live"></i>' : '') + '</span>' +
+        '<span class="tb"><span class="t1"><b class="wname">' + esc(nameOf(other)) + '</b>' + (n ? stPill(n) : '') + '</span>' +
+          '<span class="wmeta">' +
+            '<span class="ek" style="--c:' + EDGE[e.kind].c + '">' + EDGE[e.kind].label + '</span>' +
+            (e.count > 1 ? '<span>×' + e.count + '</span>' : '') +
+            (e.cross ? '<span class="xc" title="跨聊天的往来">跨聊天</span>' : '') +
+            (e.jobs && e.jobs.length ? '<span>📋 ' + esc(e.jobs.slice(-2).join(' ')) + '</span>' : '') +
+            '<span>' + esc(fmtAgo(e.lastTs)) + '</span>' +
+          '</span></span></div>';
+    };
+    var col = function (title, xs, end) {
+      return '<div class="tcol"><h4>' + title + '<span>' + xs.length + '</span></h4>' +
+        (xs.length ? xs.map(function (e) { return row(e, e[end]); }).join('') : '<div class="pempty">没有</div>') + '</div>';
+    };
+    var out = ties.filter(function (e) { return e.from === ROLE; }), inn = ties.filter(function (e) { return e.to === ROLE; });
+    return ties.length
+      ? col('它派活给', out, 'to') + col('派活给它', inn, 'from')
+      : '<div class="pempty">' + esc(nameOf(ROLE)) + ' 还没有和别的 wizard 往来过 —— send_peer 派一次活, 这里就有一条</div>';
+  };
+
+  var renderTree = function () {
+    if (!W.loaded) { wmapEl.innerHTML = '<div class="empty">加载中…</div>'; return; }
+    var me = nodeOf(ROLE);
+    // 人没有家谱, 直接看全部。
+    var all = W.treeAll || !me;
+    var shown = [];
+    var path = me ? lineage(ROLE) : [];
+    var top = me && nodeOf(path[0]);
+    var trees = all
+      ? rootsAll().map(function (r) { return treeHTML(r.target, '', 0, null, false, shown); }).join('')
+      : treeHTML(path[0], '', 0, focusKeep(path), false, shown);
+    var tally = ['run', 'idle', 'off'].map(function (k) {
+      var c = shown.filter(function (n) { return stateOf(n) === k; }).length;
+      return c ? '<span class="stp ' + k + '">' + ST[k] + ' ' + c + '</span>' : '';
+    }).join('');
+    // 图上的祖先到头了, 但它还挂着一个 parent —— 更早的那一辈已经收掉 / 筛出了图。
+    var ghost = !all && top && top.parent ? '<div class="tghost">↑ ' + esc(nameOf(top.parent)) + ' (已不在图上)</div>' : '';
+    var html = '<div class="tview">' +
+      '<section class="tfam">' +
+        '<h3>家谱<span>' + (all ? '全部 ' + shown.length + ' 个 wizard'
+            : shown.length + ' 个 wizard · ' + (path.length > 1 ? '第 ' + path.length + ' 代' : '根')) + '</span>' +
+          '<span class="tally">' + tally + '</span>' +
+          (me ? '<button class="tall" title="' + (all ? '只留祖先链、它自己、子孙与同父兄弟' : '画出图上全部 wizard 的家谱') + '">' +
+            (all ? '只看相关' : '看全部 ' + W.nodes.length) + '</button>' : '') + '</h3>' +
+        (!all && shown.length < 2 ? '<div class="tsolo">' + esc(nameOf(ROLE)) + ' 没有父亲也没有孩子 —— clone_wizard / spawn_wizard 之后这里会长出一棵树</div>' : '') +
+        ghost + '<ul class="tree' + (all ? ' all' : '') + '">' + trees + '</ul>' +
+        '<div class="tlegend"><span class="tk clone">⧉ 分身</span> fork 自父亲, 带着上下文' +
+          '<span class="tk spawn">↳ 子</span> spawn 的白板, 只有出身</div>' +
+      '</section>' +
+      '<section class="tties"><h3>往来<span>派活 / 流水线</span></h3>' + tiesHTML() + '</section>' +
+    '</div>';
+    // 心跳每 3s 重算一次 (状态灯 / 几分钟前) —— 没变就不碰 DOM, 免得蹭掉悬停与滚动。
+    if (wmapEl._tree === html && wmapEl.querySelector('.tview')) return;
+    wmapEl._tree = html;
+    wmapEl.innerHTML = html;
+    wmapEl.querySelectorAll('.tnode.go, .tie.go').forEach(function (el) {
+      el.onclick = function () { openNode(el.getAttribute('data-t')); };
+    });
+    var tall = wmapEl.querySelector('.tall');
+    if (tall) tall.onclick = function () { W.treeAll = !W.treeAll; W.treeFor = ''; renderTree(); };
+    // 树宽过视口时, 把当前 role 滚进视野 —— 深的家谱里它可能在第五层的右边。
+    var cur = wmapEl.querySelector('.tnode.me');
+    if (cur && W.treeFor !== ROLE) { W.treeFor = ROLE; cur.scrollIntoView({ block: 'nearest', inline: 'center' }); }
+  };
+
+  // ── 聚焦卡: 卡片 / 关系网里单击一个节点, 右下角浮出它的身份与邻居, 一键切过去 ──
+  var renderFocus = function () {
+    var pane = $('#pane-world'), el = $('#wfocus');
+    if (!pane) return;
+    if (!el) { el = document.createElement('aside'); el.id = 'wfocus'; el.className = 'wfocus'; pane.appendChild(el); }
+    var n = W.layout !== 'tree' && W.sel && W.sel !== ROLE && nodeOf(W.sel);
+    el.hidden = !n;
+    if (!n) return;
+    var up = n.parent && nodeOf(n.parent);
+    var nb = W.edges.filter(function (e) { return e.from === n.target || e.to === n.target; })
+      .reduce(function (acc, e) {
+        var o = e.from === n.target ? e.to : e.from;
+        var k = e.kind === 'clone' || e.kind === 'spawn' ? (e.to === n.target ? 'up' : 'kid') : 'peer';
+        if (acc[k].indexOf(o) < 0) acc[k].push(o);
+        return acc;
+      }, { up: [], kid: [], peer: [] });
+    var grp = function (title, xs) {
+      return xs.length ? '<div class="fg"><span class="fl">' + title + '</span>' + xs.map(wizChip).join('') + '</div>' : '';
+    };
+    el.innerHTML =
+      '<div class="fh"><span class="wav">' + esc(n.label) + (wRunning(n) ? '<i class="live"></i>' : '') + '</span>' +
+        '<span class="fn"><b class="wname">' + esc(shortName(n)) + '</b>' +
+          '<span class="fk">' + (up ? (n.inherited ? '⧉ ' : '↳ ') + esc(shortName(up)) + (n.inherited ? ' 的分身' : ' 的子 wizard') : esc(n.chat || n.base)) + '</span></span>' +
+        stPill(n) + '<button class="fx-x" title="取消聚焦">✕</button></div>' +
+      (n.description ? '<p class="fj">' + esc(n.description) + '</p>' : '') +
+      (n.preview ? '<p class="fp">' + esc(n.preview) + '</p>' : '') +
+      '<div class="wmeta">' + [n.model && n.model.replace(/^claude-/, ''), n.cwd && '📁 ' + shortPath(n.cwd, 2), fmtAgo(n.lastTs)]
+        .filter(Boolean).map(esc).join('<span class="sep">·</span>') + '</div>' +
+      grp('父亲', nb.up) + grp('孩子', nb.kid) + grp('往来', nb.peer) +
+      (n.target !== ROLE ? '<button class="fgo">切到 ' + esc(shortName(n)) + ' 的视角 →</button>' : '<div class="fme">这就是当前视角</div>');
+    el.querySelector('.fx-x').onclick = function () { W.sel = ''; renderWorld(); };
+    var go = el.querySelector('.fgo');
+    if (go) go.onclick = function () { openNode(n.target); };
+    el.querySelectorAll('.wchip.go').forEach(function (c) {
+      c.onclick = function () { W.sel = c.getAttribute('data-t'); renderWorld(); };
+    });
+  };
+
   var renderWorld = function () {
     renderWTools();
-    if (W.layout === 'force') { renderForce(); return; }
+    if (W.layout === 'force') { renderForce(); renderFocus(); return; }
     fxStop();
+    if (W.layout === 'tree') { renderTree(); renderFocus(); return; }
     renderWMap();
+    renderFocus();
     // 连线要等浏览器把卡片排好 —— 同一帧里量到的是上一次的版面。
     requestAnimationFrame(drawEdges);
   };
@@ -1672,6 +1903,7 @@
   // 未来 12 小时的刻度条: 哪几个钟点会有任务醒来, 一眼看完。超出 12h 的排进下面
   // 的列表但不占刻度 —— 把 24h 压进这么窄的一条, 刻度会密到读不出。
   var HORIZON_H = 12;
+  var broken = function (x) { return x.lastGate === 'error' || !!x.loadError; };
   var renderStrip = function (list) {
     var now = srvNow(), span = HORIZON_H * 3600000;
     var soon = list.filter(function (x) { return x.nextAt - now < span; });
@@ -1679,16 +1911,66 @@
     for (var i = 0; i <= HORIZON_H; i += 3) {
       var t = new Date(now + i * 3600000);
       ticks.push('<span class="tk" style="left:' + (i / HORIZON_H * 100) + '%">' +
-        (i ? (t.getHours() < 10 ? '0' : '') + t.getHours() + ':00' : '现在') + '</span>');
+        (i ? pad(t.getHours()) + ':00' : '现在') + '</span>');
     }
     var pins = soon.map(function (x) {
       var pct = Math.max(0, Math.min(100, (x.nextAt - now) / span * 100));
-      return '<span class="pin" style="left:' + pct.toFixed(2) + '%" data-t="' + esc(x.target) + '" ' +
-        'title="' + esc(fmtClock(x.nextAt) + ' · ' + nameOf(x.target) + ' · ' + x.when) + '"></span>';
+      return '<button class="pin' + (broken(x) ? ' bad' : '') + '" style="left:' + pct.toFixed(2) + '%" data-id="' + esc(x.id) + '" ' +
+        'title="' + esc(fmtClock(x.nextAt) + ' · ' + (x.note || x.id) + ' · ' + x.when) + '"><span>' + esc(fmtHM(x.nextAt)) + '</span></button>';
     }).join('');
     return '<div class="strip"><div class="axis">' + ticks.join('') + '</div>' +
       '<div class="rail">' + pins + '</div>' +
-      '<div class="cap">' + (soon.length ? '未来 ' + HORIZON_H + ' 小时内 ' + soon.length + ' 次触发' : '未来 ' + HORIZON_H + ' 小时内没有定时任务') + '</div></div>';
+      '<div class="cap">' + (soon.length ? '未来 ' + HORIZON_H + ' 小时内 ' + soon.length + ' 次触发 · 点刻度跳到那条' : '未来 ' + HORIZON_H + ' 小时内没有定时任务') + '</div></div>';
+  };
+
+  // 触发规则 = describeTrigger 的人话, 各段以 ` · ` 相接: 第一段是时钟 (什么时候响), 其余是闸 (什么时候不响)。
+  var ruleHTML = function (when) {
+    return String(when || '').split(' · ').filter(Boolean).map(function (part, i) {
+      return '<span class="rl' + (i ? ' guard' : ' clock') + '">' + (i ? '' : '⏱ ') + esc(part) + '</span>';
+    }).join('');
+  };
+  var gateHTML = function (x) {
+    if (!x.hasGate) return '<span class="gt none" title="没有 gate: 到点就放">无 gate</span>';
+    var at = x.lastGateAt ? ' · ' + fmtAgo(x.lastGateAt) : '';
+    return x.lastGate === 'go' ? '<span class="gt go" title="上一轮 gate 放行">gate 放行' + esc(at) + '</span>'
+      : x.lastGate === 'skip' ? '<span class="gt skip" title="上一轮 gate 判定没活, 没放枪 (不出声)">gate 挡下' + esc(at) + '</span>'
+      : x.lastGate === 'error' ? '<span class="gt err">gate 出错' + esc(at) + '</span>'
+      : '<span class="gt none">gate 未跑过</span>';
+  };
+  var flowHTML = function (x) {
+    var own = x.owner || x.createdBy;
+    return '<div class="pflow">' +
+      (own && own !== x.target ? '<span class="fl">排班</span>' + wizChip(own) + '<span class="ar">→</span>' : '') +
+      (x.fresh
+        ? '<span class="fl">执行</span><span class="fresh" title="每次到点新起一个白板 wizard, 跑完自动回收">✦ 新起白板</span><span class="fl">在</span>' + wizChip(x.target) + '<span class="fl">名下</span>'
+        : '<span class="fl">执行</span>' + wizChip(x.target) + '<span class="fl">注入已有会话</span>') +
+    '</div>';
+  };
+  var PLAN_OPEN = {};
+  var taskHTML = function (x) {
+    var lines = String(x.prompt || '').split('\n');
+    var head = x.note || lines[0];
+    var errs = [
+      x.loadError ? '<div class="perr"><b>任务文件加载失败</b> · 仍在跑上一版<code>' + esc(x.loadError.split('\n')[0].slice(0, 240)) + '</code></div>' : '',
+      x.lastGate === 'error' ? '<div class="perr"><b>gate 出错</b>' + (x.lastGateAt ? ' · ' + esc(fmtAgo(x.lastGateAt)) : '') +
+        ' · 本轮未放枪, 下次照常重试' + (x.lastError ? '<code>' + esc(x.lastError.split('\n')[0].slice(0, 240)) + '</code>' : '') + '</div>' : '',
+    ].join('');
+    return '<article class="tcard' + (broken(x) ? ' bad' : '') + '" data-id="' + esc(x.id) + '">' +
+      '<div class="tc-time"><b>' + esc(fmtHM(x.nextAt)) + '</b><span>' + esc(fmtClock(x.nextAt).replace(/ \d\d:\d\d$/, '')) + '</span>' +
+        '<em>' + esc(fmtIn(x.nextAt)) + '</em></div>' +
+      '<div class="tc-main">' +
+        errs +
+        '<div class="prule">' + ruleHTML(x.when) + '</div>' +
+        '<div class="ptitle">' + esc(head.slice(0, 120)) + '</div>' +
+        flowHTML(x) +
+        '<details class="pprompt" data-id="' + esc(x.id) + '"' + (PLAN_OPEN[x.id] ? ' open' : '') + '>' +
+          '<summary>prompt<span>' + esc((x.note ? lines[0] : lines.slice(1).join(' ')).slice(0, 90)) + '</span></summary>' +
+          '<pre>' + esc(x.prompt) + '</pre></details>' +
+        '<div class="pfoot">' + gateHTML(x) +
+          '<span>' + (x.lastFired ? '上次触发 ' + esc(fmtAgo(x.lastFired)) : '还没跑过') + '</span>' +
+          '<span class="pid" title="' + esc(x.file || '') + '">' + esc(x.id) + '</span></div>' +
+      '</div>' +
+    '</article>';
   };
 
   // 日程跟着 wizard 走: 只列归当前 role 的定时任务, 与它有关的工单 (它开的 / 它在里面)。
@@ -1699,57 +1981,70 @@
     });
     var open = js.filter(function (j) { return j.status === 'open'; });
     var closed = js.filter(function (j) { return j.status !== 'open'; });
-    var schedRows = ss.length
-      ? ss.map(function (x) {
-          return '<div class="prow">' +
-            '<div class="pl">' +
-              '<div class="pwhen">⏰ ' + esc(x.when) + '</div>' +
-              '<div class="pnext"><b>' + esc(fmtClock(x.nextAt)) + '</b><span>' + esc(fmtIn(x.nextAt)) + '</span></div>' +
-            '</div>' +
-            '<div class="pr">' +
-              '<div class="ph">' + wizChip(x.target) + (x.note ? '<span class="note">' + esc(x.note) + '</span>' : '') +
-                '<span class="pid">' + esc(x.id) + '</span></div>' +
-              '<div class="ptext">' + esc(x.prompt.split('\n')[0].slice(0, 160)) + '</div>' +
-              '<div class="pfoot">' + (x.lastFired ? '上次 ' + esc(fmtAgo(x.lastFired)) : '还没跑过') + '</div>' +
-            '</div>' +
-          '</div>';
-        }).join('')
-      : '<div class="pempty">' + esc(roleName(ROLE)) + ' 名下没有定时任务 —— 让它 schedule_task 排一个</div>';
+    var bad = ss.filter(broken);
+    var next = ss[0];
+    var stat = function (k, v, sub, tone) {
+      return '<div class="pst' + (tone ? ' ' + tone : '') + '"><span class="k">' + k + '</span><b>' + v + '</b><span class="s">' + sub + '</span></div>';
+    };
+    var stats = '<div class="pstats">' +
+      stat('下一次', next ? esc(fmtHM(next.nextAt)) : '—', next ? esc(fmtIn(next.nextAt) + ' · ' + (next.note || next.id)) : '没有排期') +
+      stat('定时任务', ss.length, ss.length ? esc(ss.filter(function (x) { return x.hasGate; }).length + ' 条带 gate') : '—') +
+      stat('工单', open.length + '<small> / ' + js.length + '</small>', '进行中 / 全部') +
+      (bad.length ? stat('出错', bad.length, '见下方红色卡片', 'bad') : '') +
+    '</div>';
 
     var jobRow = function (j) {
       return '<div class="jrow' + (j.status === 'open' ? ' open' : '') + '">' +
-        '<div class="jh"><span class="jid">' + esc(j.id) + '</span>' +
+        '<div class="jh"><span class="jst">' + (j.status === 'open' ? '进行中' : '已收工') + '</span>' +
           '<span class="jt">' + esc(j.title) + '</span>' +
-          '<span class="jst">' + (j.status === 'open' ? '进行中' : '已收工') + '</span>' +
+          '<span class="jid">' + esc(j.id) + '</span>' +
           '<span class="jts">' + esc(fmtAgo(j.closedAt || j.openedAt)) + '</span></div>' +
         '<div class="jm">' + (j.members.length
           ? j.members.map(function (mm) {
-              return '<span class="jmm">' + wizChip(mm.target) +
+              var n = nodeOf(mm.target);
+              return '<span class="jmm">' + wizChip(mm.target) + (n ? stPill(n) : '') +
                 (mm.spawned ? '<i class="tmp" title="为这个工单临时生的 wizard (分身或子 wizard), 收工时回收">临时</i>' : '') +
-                '<em>' + esc((mm.task || '').split('\n')[0].slice(0, 70)) + '</em></span>';
+                '<em>' + esc((mm.task || '').split('\n')[0].slice(0, 90)) + '</em></span>';
             }).join('')
           : '<span class="jmm none">还没有成员</span>') + '</div>' +
         (j.summary ? '<div class="jsum">' + esc(j.summary.slice(0, 300)) + '</div>' : '') +
       '</div>';
     };
 
-    planEl.innerHTML =
+    var html = stats +
       '<section class="psec">' +
-        '<h3>⏰ 定时任务<span>' + ss.length + '</span></h3>' +
-        renderStrip(ss) + schedRows +
+        '<h3>定时任务<span>' + ss.length + '</span></h3>' +
+        (ss.length ? renderStrip(ss) + bad.concat(ss.filter(function (x) { return !broken(x); })).map(taskHTML).join('')
+          : '<div class="pempty">' + esc(roleName(ROLE)) + ' 名下没有定时任务 —— 让它 schedule_task 排一个</div>') +
       '</section>' +
       '<section class="psec">' +
-        '<h3>📋 工单<span>' + open.length + ' 开 / ' + closed.length + ' 收</span></h3>' +
+        '<h3>工单<span>' + open.length + ' 开 / ' + closed.length + ' 收</span></h3>' +
         (js.length ? open.concat(closed).map(jobRow).join('') : '<div class="pempty">没有工单 —— 一次派出两个以上 wizard 时 open_job 开一个</div>') +
       '</section>';
+    // 心跳每 3s 重画一次 —— 没变就不碰 DOM (展开着的 prompt、悬停的提示都留着)。
+    if (planEl._html === html) return;
+    planEl._html = html;
+    planEl.innerHTML = html;
     planEl.querySelectorAll('.wchip.go').forEach(function (c) {
       c.onclick = function () { openNode(c.getAttribute('data-t')); };
+    });
+    planEl.querySelectorAll('.pprompt').forEach(function (d) {
+      d.ontoggle = function () { PLAN_OPEN[d.getAttribute('data-id')] = d.open; planEl._html = ''; };
+    });
+    planEl.querySelectorAll('.strip .pin').forEach(function (p) {
+      p.onclick = function () {
+        var card = planEl.querySelector('.tcard[data-id="' + cssEsc(p.getAttribute('data-id')) + '"]');
+        if (!card) return;
+        card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        card.classList.remove('flash'); void card.offsetWidth; card.classList.add('flash');
+      };
     });
   };
 
   // 关系图上随时间变化的只有两样: 呼吸灯该不该亮、"几分钟前"该写几。重建整张图
   // 会把滚动位置、聚焦态和连线一起抖掉, 所以这里只原地改这两处。
   var tickWorld = function () {
+    if (W.layout === 'tree') { renderTree(); return; }
     wmapEl.querySelectorAll('.wnode').forEach(function (el) {
       var n = nodeOf(el.getAttribute('data-t'));
       if (!n) return;
@@ -1799,7 +2094,7 @@
     else {
       // 关系图一打开就聚焦在当前 role 身上: 它的邻居亮着, 其余压暗。
       if (v === 'world') W.sel = ROLE;
-      if (!W.loaded) { (v === 'world' ? wmapEl : planEl).innerHTML = '<div class="empty">加载中…</div>'; }
+      if (!W.loaded) { planEl._html = wmapEl._tree = ''; (v === 'world' ? wmapEl : planEl).innerHTML = '<div class="empty">加载中…</div>'; }
       else if (v === 'world') renderWorld();
       else renderPlan();
       loadWorld();

@@ -171,6 +171,13 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       with: home?.subs.find((s) => s.count && (land.with ? s.role === land.with : s.role.startsWith("human:")))?.role ?? "",
       relations: hasRelations(msgs, role, info),
       schedules: schedules.length + jobs.length,
+      // 侧栏日程入口的副标题: 下一枪几点、还开着几个工单、有没有坏掉的定时。
+      plan: {
+        tasks: schedules.length,
+        jobs: jobs.filter((j) => j.status === "open").length,
+        nextAt: schedules.reduce((m, x) => (m && m < x.nextAt ? m : x.nextAt), 0),
+        broken: schedules.filter((x) => x.lastGate === "error" || !!x.loadError).length,
+      },
       stats,
       // 「只看我与某个 wizard」的窗口自带一本账 —— 人的视角没有 stats, 用量看这里。
       winStats: win?.conv && dir.isWizard(win.with)

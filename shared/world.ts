@@ -75,6 +75,16 @@ export interface WorldFactSchedule {
   /** 这条日程归谁 —— 排班那个 wizard 的 target。rolepage 的「日程」按它过滤:
    *  日程跟着 wizard 走, 不跟着它执行时落在哪个聊天走。老 svr 推来的快照可能没有。 */
   owner: string;
+  /** 每次新起白板 wizard 去跑 (跑完回收); false = 注入 target 那个已有会话。 */
+  fresh?: boolean;
+  hasGate?: boolean;
+  /** 上一轮 gate 的去向 (见 TaskState.lastGate)。 */
+  lastGate?: "go" | "skip" | "error";
+  lastGateAt?: number;
+  lastError?: string;
+  /** 任务文件最近一次加载失败的理由 —— 此刻跑的还是上一版。 */
+  loadError?: string;
+  file?: string;
 }
 
 export interface WorldFacts {

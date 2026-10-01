@@ -1112,6 +1112,7 @@ const main = async (): Promise<void> => {
         })),
         schedules: tasks.list().filter((x) => x.enabled).map((x) => {
           const st = tasks.stateOf(x.id);
+          const loadError = tasks.errors()[x.id];
           return {
             id: x.id,
             target: x.target || (cfg.defaultChat ?? ""),
@@ -1122,6 +1123,13 @@ const main = async (): Promise<void> => {
             note: x.note,
             createdBy: x.createdBy,
             owner: x.owner || (cfg.defaultChat ?? ""),
+            fresh: x.fresh,
+            hasGate: x.hasGate,
+            lastGate: st.lastGate,
+            lastGateAt: st.lastGateAt,
+            lastError: st.lastError,
+            ...(loadError ? { loadError } : {}),
+            file: x.file,
           };
         }),
         chatNames: Object.fromEntries(listChatNames(cfg).map((c) => [c.base, c.name])),

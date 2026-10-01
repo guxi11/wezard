@@ -58,7 +58,6 @@ export const renderChatPage = (): string =>
     </header>
     <div class="acts" id="rb-acts"></div>
     <nav class="convs" id="convs" aria-label="会话"></nav>
-    <footer class="sidefoot" id="rb-foot" hidden><div id="rb-sess"></div></footer>
   </aside>
   <main class="main">
     <header class="chathead" id="chathead">
