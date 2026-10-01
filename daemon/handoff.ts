@@ -77,6 +77,7 @@ export interface HandoffDeps {
    *  peers.replyClosedBefore); 定位不到问话 → undefined。 */
   answeredBefore: (to: string, from: string, sinceMs: number, untilMs: number) => string | undefined;
   receipts: Receipts;
+  /** 交接没做成时告诉**它自己** (下一条进它会话的话尾巴上捎带)。生命周期事件不进群。 */
   notify: (target: string, text: string) => void;
   log: Logger;
   store?: JsonMap<Pending>;
@@ -189,7 +190,7 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
     self: (target, brief) => {
       const p = begin(target, "self", { brief });
       if (!p) return { ok: false, reason: "已经在交接中" };
-      void run(p).then((r) => r.ok && deps.notify(target, "上下文已交接重开, 工作照旧"));
+      void run(p);
       return { ok: true };
     },
     other: async (target, focus, timeoutMs) => {
@@ -199,7 +200,7 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
     },
     resume: () => {
       const open = Object.values(deps.store?.all() ?? {});
-      open.forEach((p) => void run(p).then((r) => r.ok && p.mode === "self" && deps.notify(p.target, "上下文已交接重开 (reload 后续做), 工作照旧")));
+      open.forEach((p) => void run(p));
       if (open.length) deps.log.info({ mod: "handoff", resumed: open.map((p) => `${p.target}@${p.stage}`) }, "handoff: reload 后续做");
       return open.length;
     },

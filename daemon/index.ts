@@ -404,7 +404,8 @@ const main = async (): Promise<void> => {
       // 没点名就按配置的 keepalive.spawnDefault 来 —— 调用方明说的永远优先。
       const keepalive = typeof body.keepalive === "boolean" ? body.keepalive : cfg.wrc.mirror.keepalive.spawnDefault;
       log.child({ mod: "mirror", sub: "sessions-new", target }).info({ self, cwd, foreign, cli: body.cli, model, keepalive }, "spawning peer session");
-      const r = await m.newSession(target, name, body.cli, { cwd, model, keepalive });
+      // silent: 新 wizard 就位不进群 (生命周期事件), 同群的 wizard 从名册增量里得知。
+      const r = await m.newSession(target, name, body.cli, { cwd, model, keepalive, silent: true });
       if (!r.ok && !existed) wizards.drop(target);
       // r.model 是 spawnTmuxClaude 通过 /model 实测确认落地的那个 —— 可能跟调用方
       // 传的原始字符串不一样 (口语化 → 目录里匹配到的关键词), 播报要报实情。
@@ -659,7 +660,9 @@ const main = async (): Promise<void> => {
         return p ? replyClosedBefore(expandHome(p), displayName(from), since, until, pingSigs) : undefined;
       },
       receipts,
-      notify: (t, text) => notifyChat(t, withTagHeader(t, text)),
+      // 交接是生命周期事件, 不进群; 失败只捎给它自己 (它调完 handoff_self 拿到的是
+      // scheduled:true, 不说的话它不知道上下文其实没换)。
+      notify: (t, text) => notices.post([t], text),
       log,
       store: loadJsonMap<PendingHandoff>(cfg.wrc.mirror.handoffsFile),
     });
@@ -1624,7 +1627,7 @@ const main = async (): Promise<void> => {
 
     // 收掉一个 wizard。interrupt = 打断它这一轮 (Esc); end = 结束它并回收 pane。
     // 自己终结自己是合法的 (分身干完活自我了结), 代价是这次工具调用不会返回 ——
-    // 群里的气泡就是回执, 与 set_workspace 同款。
+    // 回执只在 rolepage (生命周期事件不进群); 同群的 wizard 从名册增量里得知。
     http.register("POST /wizard/stop", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
@@ -1638,7 +1641,6 @@ const main = async (): Promise<void> => {
       const done = end ? await m.killPane(target) : await m.interruptPane(target, { teardown: true });
       if (!done.ok) { json(res, 502, { ok: false, target, reason: done.reason }); return; }
       if (end && b.forget) wizards.drop(target);
-      notifyChat(target, withTagHeader(target, `${end ? "已结束" : "已打断"} · 由 ${displayName(self)} 发起`));
       // 打断只是停了它这一轮, 它还在; 只有结束才是名册变了。
       if (end) postRoster(baseOfKey(target), [target, self], `**${victim.name || target}** 已收工 · 由 ${displayName(self)} 结束${b.forget ? " (记录一并抹掉)" : ""}`);
       json(res, 200, { ok: true, target, name: victim.name, mode: end ? "end" : "interrupt", forgotten: !!(end && b.forget) });
@@ -1940,9 +1942,6 @@ const main = async (): Promise<void> => {
         wizards.drop(runner);
         return { ok: false, reason: `起白板 wizard 失败: ${spawned.reason ?? "unknown"}` };
       }
-      notifyChat(base, withTagHeader(target, busy
-        ? `⏰ 定时任务到点时正忙, 已起白板 wizard .${runnerName} 单独执行, 完成后自动收掉`
-        : `⏰ 定时任务已起白板 wizard .${runnerName} 执行, 完成后自动收掉`));
       const inj = await m.injectText(runner, text, undefined, { fromChat: true, from: { kind: "task", taskId }, envelope: renderTaskEnvelope(taskId) });
       if (!inj.ok) { wizards.drop(runner); return inj; }
       // 没有人会对这个一次性分身喊 stop_wizard, 只能自己等它闲下来再收。30min
