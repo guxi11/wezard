@@ -74,10 +74,11 @@ button { font: inherit; color: inherit }
 .rolebar .facts span { white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis }
 .rolebar .go { cursor: pointer; color: var(--accent) }
 .rolebar .go:hover { text-decoration: underline }
-.acts { flex: none; display: flex; justify-content: center; align-items: center; gap: 2px; padding: 4px 10px 8px; border-bottom: 1px solid var(--line) }
+/* 分隔线两端收进来, 与上面搜索框的左右边距对齐, 不顶满侧栏。 */
+.acts { flex: none; display: flex; justify-content: center; align-items: center; gap: 2px; margin: 0 10px; padding: 4px 0 8px; border-bottom: 1px solid var(--line) }
 .acts:empty { display: none }
 /* 旧外壳 (daemon 未重启) 里它还在名片内 —— 那里不需要自己的内边距与分隔线。 */
-.rolebar .acts { padding: 0; border: 0 }
+.rolebar .acts { margin: 0; padding: 0; border: 0 }
 /* 入口: 图标 + 名字 + 淡色副标题, 无框无底; hover 才浮出一层浅底, 打开着的染视角色。 */
 .bd {
   flex: none; padding: 1px 4px; border: 0; border-radius: 4px; background: none; cursor: pointer; white-space: nowrap;
