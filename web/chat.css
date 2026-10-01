@@ -168,7 +168,7 @@ button { font: inherit; color: inherit }
 /* 群聊头像 = 参与者头像拼图: 1 格居中, 2 格左右, 3/4 格田字。 */
 .mosaic {
   display: grid !important; width: 34px; height: 34px; border-radius: 10px; overflow: hidden; flex: none;
-  background: var(--av-line); border: 1px solid var(--av-line); gap: 1px; padding: 0;
+  background: #eef1f6; border: 1px solid var(--line); gap: 1px; padding: 1px;
   font-size: 13px !important; line-height: 1 !important;
 }
 .mosaic i { font-style: normal; display: grid; place-items: center; background: var(--av-bg); min-width: 0; min-height: 0 }
@@ -203,8 +203,7 @@ button { font: inherit; color: inherit }
 .ci .pv:empty, .si .pv:empty { display: none }
 .ci .tag { font-size: 10.5px; border-radius: 4px; padding: 0 4px; flex: none }
 /* 头像与名字是进入那个 role 视角的入口 —— 侧栏项、会话头、消息行同一种读法。
-   它们嵌在整行那颗按钮里, 所以悬停态必须压过行: 指到入口上时行自己的悬停底色
-   让位 (:has), 否则读起来像是要选中这一行。z-index 保证没有兄弟盖住命中区。 */
+   它们嵌在整行那颗按钮里; 行本身悬停不变底色, 只有入口自己亮起。z-index 保证没有兄弟盖住命中区。 */
 .nm.go, .av.go { position: relative; z-index: 1; cursor: pointer }
 .nm.go:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 2px }
 span.av.go { border-radius: 8px; transition: background .12s, box-shadow .12s }
