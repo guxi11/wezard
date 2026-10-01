@@ -74,28 +74,19 @@ button { font: inherit; color: inherit }
 .rolebar .facts span { white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis }
 .rolebar .go { cursor: pointer; color: var(--accent) }
 .rolebar .go:hover { text-decoration: underline }
-.acts { flex: none; display: flex; gap: 4px; padding: 8px 10px; border-bottom: 1px solid var(--line) }
+.acts { flex: none; display: flex; justify-content: center; align-items: center; gap: 2px; padding: 4px 10px 8px; border-bottom: 1px solid var(--line) }
 .acts:empty { display: none }
 /* 旧外壳 (daemon 未重启) 里它还在名片内 —— 那里不需要自己的内边距与分隔线。 */
 .rolebar .acts { padding: 0; border: 0 }
 /* 入口: 图标 + 名字 + 淡色副标题, 无框无底; hover 才浮出一层浅底, 打开着的染视角色。 */
 .bd {
-  flex: 1 1 0; min-width: 0; display: flex; align-items: center; gap: 6px; padding: 6px 8px;
-  border: 0; border-radius: 7px; background: none; color: var(--mute); cursor: pointer; white-space: nowrap;
-  transition: background .12s, color .12s;
+  flex: none; padding: 1px 4px; border: 0; border-radius: 4px; background: none; cursor: pointer; white-space: nowrap;
+  font-size: 12px; color: var(--mute); transition: color .12s;
 }
-.bd:hover { background: var(--paper); color: var(--ink) }
-.bd:active { background: var(--them-soft) }
-.bd.on { background: var(--mine); color: var(--accent) }
-.bd .ic { flex: none; display: inline-flex }
-.bd .ic svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round }
-.bd .lb { font-size: 12.5px; font-weight: 500 }
-.bd .sb {
-  min-width: 0; font-size: 11px; color: var(--faint); overflow: hidden; text-overflow: ellipsis;
-  font-variant-numeric: tabular-nums;
-}
-.bd.on .sb { color: var(--accent); opacity: .75 }
-.bd.bad .sb { color: #cf222e }
+.bd:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 3px }
+.bd.on { color: var(--accent); font-weight: 600 }
+.bd.bad { color: #cf222e }
+.acts .sep { color: var(--line); font-size: 12px; user-select: none }
 /* session 切换: name 右边一个小号文字触发器 + 浮层列表。name 先省略, 触发器不让位。 */
 .rolebar .id .l { flex: 1 }
 .rolebar .nl { display: flex; align-items: center; gap: 8px; min-width: 0 }
@@ -183,7 +174,7 @@ button { font: inherit; color: inherit }
   margin: 14px 8px 4px; font-size: 12px; font-weight: 600; color: var(--mute);
   display: flex; align-items: baseline; gap: 6px;
 }
-.convs h2:first-child, .convs .sbox + h2 { margin-top: 10px }
+.convs h2:first-child { margin-top: 6px }
 .convs h2 span { font-weight: 400; color: var(--faint); font-variant-numeric: tabular-nums }
 
 /* 群下的子项 (.si) 与私聊项 (.ci) 同一套尺寸 —— 只有一份。 */
@@ -712,12 +703,10 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 .jmm .wst { font-size: 9.5px }
 .jmm .tmp, .jmm .wchip { flex: none; white-space: nowrap }
 
-/* ── 搜索 (⌘K): 会话列表里的第一项入口 + 居中浮层 ──────────────────────
-   入口与会话项同宽同圆角, 安静的浅灰底; 列表滚动时它吸在顶上 (外圈一道卡片底色, 免得下面的项透出来)。
-   浮层的结果行沿用会话项的两行读法。 */
+/* ── 搜索 (⌘K): 名片下、关系/日程入口上的搜索框 + 居中浮层 ──────────────
+   入口与会话项同圆角, 安静的浅灰底; 浮层的结果行沿用会话项的两行读法。 */
 .sbox {
-  position: sticky; top: 0; z-index: 2; box-shadow: 0 0 0 6px var(--card);
-  display: flex; align-items: center; gap: 8px; width: 100%; margin: 6px 0 2px; padding: 7px 10px;
+  flex: none; display: flex; align-items: center; gap: 8px; margin: 10px 10px 4px; padding: 7px 10px;
   border: 1px solid var(--line); border-radius: 9px; background: var(--paper); color: var(--faint);
   cursor: pointer; text-align: left; transition: border-color .12s, background .12s, color .12s;
 }

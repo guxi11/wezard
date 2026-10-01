@@ -451,13 +451,15 @@
         convRow(c) + '</button>' + subs;
   };
 
-  // 搜索入口是会话列表的一部分 (列表的第一项, 随列表重画); 侧栏换成关系图时它跟着列表一起退场。
-  // ⌘K 本身是全局的, 见下方「搜索」。
+  // 搜索入口挂在名片与关系/日程入口之间 —— 侧栏的公共区, 会话列表与关系图下都在。⌘K 见下方「搜索」。
   var MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
   var KBD = MAC ? '⌘K' : 'Ctrl K';
   var SEARCH_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.6"/><path d="m10.4 10.4 3.6 3.6"/></svg>';
-  var SBOX = '<button class="sbox" type="button"><span class="ic">' + SEARCH_SVG + '</span>' +
-    '<span class="lb">搜索 role、会话、消息</span><kbd>' + KBD + '</kbd></button>';
+  var sbox = document.createElement('button');
+  sbox.className = 'sbox'; sbox.type = 'button';
+  sbox.innerHTML = '<span class="ic">' + SEARCH_SVG + '</span><span class="lb">搜索 role、会话、消息</span><kbd>' + KBD + '</kbd>';
+  sbox.onclick = function () { openSearch(); };
+  $('#rb-acts').parentNode.insertBefore(sbox, $('#rb-acts'));
   var renderConvs = function () {
     var groups = R.convs.filter(function (c) { return c.kind === 'group'; }).sort(recentFirst);
     var dms = R.convs.filter(function (c) { return c.kind !== 'group'; }).sort(recentFirst);
@@ -468,10 +470,9 @@
       return list.length ? '<h2>' + title + '<span>' + list.length + '</span></h2>' + list.map(convItem).join('') : '';
     };
     // 没变就不碰 DOM: 心跳每 3s 来一次, 重建会把列表的滚动与焦点蹭掉。
-    var html = SBOX + sec('群聊', groups) + sec('私聊', dms);
+    var html = sec('群聊', groups) + sec('私聊', dms);
     if (convsEl._html === html) return;
     convsEl._html = html; convsEl.innerHTML = html;
-    convsEl.querySelector('.sbox').onclick = function () { openSearch(); };
     convsEl.querySelectorAll('[data-conv]').forEach(function (b) {
       var key = b.getAttribute('data-conv'), w = b.getAttribute('data-with') || '';
       b.onclick = function () { clickItem(key, w); };
@@ -535,17 +536,12 @@
     if (SESS_OPEN && e.key === 'Escape') setSessOpen(false);
   });
 
-  // ── 关系 / 日程入口: 一枚图标 + 名字 + 一行副标题 + 计数徽标 ──
-  var ICON = {
-    world: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="3.2" r="2"/><circle cx="3.2" cy="12.6" r="2"/><circle cx="12.8" cy="12.6" r="2"/><path d="M7 5 4.2 10.8M9 5l2.8 5.8M5.2 12.6h5.6"/></svg>',
-    plan: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="11" rx="2"/><path d="M2 6.5h12M5.5 1.5v3M10.5 1.5v3"/><path d="M8 8.6v2.4l1.6 1"/></svg>',
-  };
-  // 一行: 图标 · 名字 · 一段淡色副标题 (家谱计数 / 下一枪)。不加框不加底 —— 名片下的一条安静的入口。
+  // ── 关系 / 日程入口: 名片下一行居中的文字链接, 「｜」分隔 ──
+  // 副标题 (家谱计数 / 下一枪) 收进悬停提示; 打开着的染视角色, 定时出错的染红。
   var tile = function (view, label, sub, tone) {
     var on = view === 'world' ? WORLD : VIEW === view;
-    return '<button class="bd' + (on ? ' on' : '') + (tone ? ' ' + tone : '') + '" data-view="' + view + '">' +
-      '<span class="ic">' + ICON[view] + '</span><span class="lb">' + label + '</span>' +
-      (sub ? '<span class="sb">' + sub + '</span>' : '') + '</button>';
+    return '<button class="bd' + (on ? ' on' : '') + (tone ? ' ' + tone : '') + '" data-view="' + view + '"' +
+      (sub ? ' title="' + esc(sub) + '"' : '') + '>' + label + '</button>';
   };
   var relTile = function (r) {
     var sub = [r.clones.length ? r.clones.length + ' 分身' : '', r.spawns.length ? r.spawns.length + ' 子' : ''].filter(Boolean);
@@ -556,7 +552,7 @@
     var sub = p.broken ? '⚠ ' + p.broken + ' 出错'
       : p.nextAt ? fmtClock(p.nextAt).replace(/^今天 /, '')
       : String(R.schedules);
-    return tile('plan', '日程', esc(sub), p.broken ? 'bad' : '');
+    return tile('plan', '日程', sub, p.broken ? 'bad' : '');
   };
 
   // 轻提示: 底部居中一枚, 新的顶掉旧的。
@@ -644,7 +640,7 @@
     bindSessPicker();
     // 入口只在有东西可看时出现 —— 挂在名片下、会话列表上, 不挤进名片: 名片的主角是身份,
     // 家谱计数 (几个分身 / 子 wizard) 属于关系, 写在关系图入口上。
-    $('#rb-acts').innerHTML = [R.relations && relTile(r), R.schedules && planTile()].filter(Boolean).join('');
+    $('#rb-acts').innerHTML = [R.relations && relTile(r), R.schedules && planTile()].filter(Boolean).join('<span class="sep" aria-hidden="true">｜</span>');
     $('#rb-acts').querySelectorAll('.bd').forEach(function (b) {
       var v = b.getAttribute('data-view');
       b.onclick = function () { v === 'world' ? setWorld(!WORLD) : setView(VIEW === v ? 'msgs' : v); };
