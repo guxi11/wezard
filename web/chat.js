@@ -1087,12 +1087,13 @@
   //   · 每个节点只认一个主父亲 —— 家谱父亲优先, 否则派活次数最多的那位; 其余入边记成节点上的引用
   //   · 环 (互相派活) 在建树时截断: 哪个根都走不到的环, 挑最近活跃的那个当根
   //   · 只算选中 session 时间范围内发生的 —— 边的每次发生都带着时刻 (WorldEdge.ts)
+  // 每种关系一种线色 (CSS 里 li.<kind> / .ek.<kind> 同色), 画在树线、卡片入口的 label 与图例上。
   var KIND = {
-    spawn: { mark: '↳ 子', tip: 'spawn 的白板 wizard, 只有出身、没有继承上下文' },
-    clone: { mark: '⧉ 分身', tip: 'fork 自父亲的 session, 开局带着那一刻的上下文' },
-    peer: { mark: '✉ 派活', tip: 'send_peer 派的活' },
-    job: { mark: '📋 工单', tip: '它开的工单里有这位成员' },
-    graph: { mark: '⛓ 流水线', tip: '流水线里上一步喂给下一步' },
+    spawn: { mark: '子', tip: 'spawn 的白板 wizard, 只有出身、没有继承上下文' },
+    clone: { mark: '分身', tip: 'fork 自父亲的 session, 开局带着那一刻的上下文' },
+    peer: { mark: '派活', tip: 'send_peer 派的活' },
+    job: { mark: '工单', tip: '它开的工单里有这位成员' },
+    graph: { mark: '流水线', tip: '流水线里上一步喂给下一步' },
   };
   var LINEAGE = { spawn: 1, clone: 1 };
 
@@ -1134,7 +1135,9 @@
     var pairs = W.edges.map(function (e) {
       return { kind: e.kind, from: e.from, to: e.to, cross: e.cross, jobs: e.jobs || [], ts: e.ts && e.ts.length ? e.ts : [e.lastTs] };
     }).concat(jobEdges()).reduce(function (m, e) {
-      var ts = e.ts.filter(function (t) { return inRange(rg, t); });
+      // 家谱是身份, 不是发生在某段 session 里的事 —— 不受时间窗裁剪, 否则切到子 wizard 时
+      // 它的出生早于自己的 session, 父亲那条边就被裁掉了。
+      var ts = LINEAGE[e.kind] ? e.ts : e.ts.filter(function (t) { return inRange(rg, t); });
       if (!ts.length) return m;
       var k = e.from + '\u0000' + e.to;
       var p = m[k] || (m[k] = { from: e.from, to: e.to, kinds: {}, n: 0, first: Infinity, last: 0, cross: e.cross, jobs: [] });
@@ -1170,12 +1173,20 @@
       return seen;
     };
     var roots = Object.keys(ends).filter(function (t) { return !pp[t]; });
-    // 环: 走不到的节点里挑最近活跃的那个, 断开它的主父亲, 让它当根 —— 直到都走得到。
+    var recent = function (a, b) { return ((nodeOf(b) || {}).lastTs || 0) - ((nodeOf(a) || {}).lastTs || 0); };
+    // 从 t 沿主父亲往上走, 直到撞回走过的点 —— 撞上的那一圈就是环。
+    var loopFrom = function (t, path) {
+      var at = path.indexOf(t);
+      return at >= 0 ? path.slice(at) : loopFrom(pp[t].from, path.concat([t]));
+    };
+    // 环: 只断环上的派活边 (家谱无环, 断它会让子 wizard 丢了父亲), 挑最近活跃的那个当根 —— 直到都走得到。
     var close = function () {
       var seen = reach(kidsIn(), roots);
       var left = Object.keys(ends).filter(function (t) { return !seen[t]; });
       if (!left.length) return;
-      var pick = left.sort(function (a, b) { return ((nodeOf(b) || {}).lastTs || 0) - ((nodeOf(a) || {}).lastTs || 0); })[0];
+      var ring = loopFrom(left[0], []);
+      var cut = ring.filter(function (t) { return !LINEAGE[domKind(pp[t])]; });
+      var pick = (cut.length ? cut : ring).sort(recent)[0];
       delete pp[pick]; roots.push(pick);
       close();
     };
@@ -1198,29 +1209,30 @@
     return chainUp(F, p.from, seen).concat([t]);
   };
 
-  // 一条边上的小标记: 种类 (家谱不计次, 派活计次) + 反向的回派 + 跨群。
-  var marksHTML = function (F, p) {
+  // 线接入卡片处的 label: 种类 (家谱不计次, 派活计次) + 跨群; 经手的工单号放进悬停提示。
+  var labelHTML = function (p) {
     if (!p) return '';
-    var back = F.pairs[p.to + '\u0000' + p.from];
-    return Object.keys(KIND).filter(function (k) { return p.kinds[k]; }).map(function (k) {
-      return '<span class="ek ' + k + '" title="' + KIND[k].tip + '">' + KIND[k].mark +
-        (!LINEAGE[k] && p.kinds[k] > 1 ? ' ×' + p.kinds[k] : '') + '</span>';
-    }).join('') +
-      (back && back.n ? '<span class="ek back" title="它也给父节点派过活">↩ 回派' + (back.n > 1 ? ' ×' + back.n : '') + '</span>' : '') +
-      (p.cross ? '<span class="ek cross" title="跨群的关系">⇄ 跨群</span>' : '') +
-      (p.jobs.length ? '<span class="ek jid" title="经手的工单">' + esc(p.jobs.slice(-2).join(' ')) + '</span>' : '');
+    return '<span class="tlab"' + (p.jobs.length ? ' title="经手的工单: ' + esc(p.jobs.join(' ')) + '"' : '') + '>' +
+      Object.keys(KIND).filter(function (k) { return p.kinds[k]; }).map(function (k) {
+        return '<span class="ek ' + k + '" title="' + KIND[k].tip + '">' + KIND[k].mark +
+          (!LINEAGE[k] && p.kinds[k] > 1 ? ' ×' + p.kinds[k] : '') + '</span>';
+      }).join('') +
+      (p.cross ? '<span class="ek cross" title="跨群的关系">⇄ 跨群</span>' : '') + '</span>';
   };
   // 主父亲之外的入边: 不展开成第二个父亲, 只在节点上留一行淡淡的引用。
   var refsHTML = function (F, t) {
     var main = F.pp[t];
-    var others = (F.inc[t] || []).filter(function (p) { return p !== main; });
+    // 自己的主孩子反过来派给它的活 (回派) 不算: 树上已经连着这一对了。
+    var others = (F.inc[t] || []).filter(function (p) { return p !== main && !(F.pp[p.from] && F.pp[p.from].from === t); });
     return others.length ? '<span class="trefs">也来自' + others.map(function (p) {
-      var ks = Object.keys(KIND).filter(function (k) { return p.kinds[k]; }).map(function (k) { return KIND[k].mark.split(' ')[0]; }).join('');
+      var ks = Object.keys(KIND).filter(function (k) { return p.kinds[k]; }).map(function (k) { return KIND[k].mark; }).join('/');
       return '<span class="tref go" data-t="' + esc(p.from) + '" title="' + esc(nameOf(p.from)) + ' → 它">' + esc(nameOf(p.from)) + ' ' + ks + (p.n > 1 ? '×' + p.n : '') + '</span>';
     }).join('') + '</span>' : '';
   };
   // 一条边的主色: 家谱优先, 决定树上那道折线的颜色与线型。
-  var domKind = function (p) { return !p ? 'root' : p.kinds.spawn ? 'spawn' : p.kinds.clone ? 'clone' : p.kinds.graph && !p.n ? 'graph' : 'peer'; };
+  var domKind = function (p) {
+    return !p ? 'root' : ['spawn', 'clone', 'peer', 'job', 'graph'].filter(function (k) { return p.kinds[k]; })[0] || 'peer';
+  };
 
   var tnodeHTML = function (F, n, folded, upBase) {
     var me = n.target === ROLE, p = F.pp[n.target];
@@ -1230,9 +1242,9 @@
     var chat = (!upBase || upBase !== n.base) && (n.chat || n.base);
     return '<div class="tnode' + (me ? ' me' : ' go') + '" data-t="' + esc(n.target) + '"' +
         (me ? '' : ' title="切到 ' + esc(shortName(n)) + ' 的视角"') + '>' +
+      labelHTML(p) +
       '<span class="wav">' + esc(n.label) + '</span>' +
       '<span class="tb">' +
-        (p ? '<span class="tmarks">' + marksHTML(F, p) + '</span>' : '') +
         '<span class="t1"><b class="wname">' + esc(shortName(n)) + '</b>' + stTag(n) +
           (me ? '<span class="tk me">当前视角</span>' : '') +
           (chat ? '<span class="tchat" title="住在这个群">#' + esc(chat) + '</span>' : '') +
@@ -1291,10 +1303,11 @@
         '<h3>关系树<span>' + (all ? Object.keys(F.ends).length + ' 个 wizard 有关系' : shown.length + ' 个 wizard') + '</span>' +
           (me ? '<button class="tall" title="' + (all ? '只留它的上游链、它自己、它的下游与同源兄弟' : '画出范围内所有有关系的 wizard') + '">' +
             (all ? '只看相关' : '看全部') + '</button>' : '') + '</h3>' +
+        '<div class="tlegend">' + Object.keys(KIND).map(function (k) {
+          return '<span class="tlk ' + k + '" title="' + KIND[k].tip + '"><i></i>' + KIND[k].mark + '</span>';
+        }).join('') + '<span class="tref">也来自 …</span> = 非主路径的关系</div>' +
         (alone ? '<div class="tsolo">' + esc(nameOf(ROLE)) + (rg ? ' 在这段 session 里' : '') + ' 既没生过谁、也没和谁派过活</div>' : '') +
         (shown.length ? '<ul class="tree' + (all ? ' all' : '') + '">' + trees + '</ul>' : '<div class="pempty">这段时间里没有任何关系</div>') +
-        '<div class="tlegend">' + Object.keys(KIND).map(function (k) { return '<span class="ek ' + k + '" title="' + KIND[k].tip + '">' + KIND[k].mark + '</span>'; }).join('') +
-          '<span class="ek back">↩ 回派</span><span class="ek cross">⇄ 跨群</span><span class="tref">也来自 …</span> = 非主路径的关系</div>' +
       '</section>' +
     '</div>';
     // 心跳每 3s 重算一次 (状态灯 / 几分钟前) —— 没变就不碰 DOM, 免得蹭掉悬停与滚动。

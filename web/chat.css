@@ -608,24 +608,28 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .tsolo, .tghost { font-size: 11.5px; color: var(--faint); margin: 0 0 10px }
 .tghost { font-family: ui-monospace, Menlo, monospace }
 
-/* 树: 每个 li 左边一道竖线、一道横线接到自己的节点上; 分身实线紫, 子 wizard 虚线橙 (同连线图例)。 */
+/* 树: 每条入边是一道实线, 从父卡片底下一路落到自己卡片的入口, 末端一枚箭头, 颜色 = 关系种类。
+   兄弟共用的那段竖干上, 后画的 (更下方的节点) 盖住先画的; 竖线往上伸到 ul 顶为止 (clip-path 只裁上边)。 */
 .tree, .tree ul { list-style: none; margin: 0; padding: 0 }
-.tree ul { padding-left: 26px }
-.tree li { position: relative; padding-top: 8px }
+.tree ul { padding-left: 26px; clip-path: inset(0 -100vw -100vh -100vw) }
+.tree li { position: relative; padding-top: 16px }
 .tree > li { padding-top: 0 }
 .tree ul > li::before {
-  content: ""; position: absolute; left: -15px; top: 0; height: 30px; width: 15px;
+  content: ""; position: absolute; left: -15px; top: -9999px; height: calc(9999px + 31px); width: 15px;
   border-left: 1.5px solid var(--lc); border-bottom: 1.5px solid var(--lc); border-bottom-left-radius: 8px;
 }
-.tree ul > li:not(:last-child)::after {
-  content: ""; position: absolute; left: -15px; top: 30px; bottom: 0; border-left: 1.5px solid var(--lc2, #d9dee6);
+.tree ul > li::after {
+  content: ""; position: absolute; left: -6px; top: 26px; border: 4.5px solid transparent; border-right: 0;
+  border-left: 7px solid var(--lc);
 }
-.tree li.clone { --lc: #b9a3e8 }
-.tree li.spawn { --lc: #e9b991 }
-.tree li.spawn::before { border-left-style: dashed; border-bottom-style: dashed }
-.tree li.peer { --lc: #8cb8ec }
-.tree li.peer::before { border-left-style: dotted; border-bottom-style: dotted; border-width: 0 0 2px 2px }
-.tree li.graph { --lc: #7cc4b6 }
+.tree li.spawn, .tlk.spawn { --lc: #d4700f }
+.tree li.clone, .tlk.clone { --lc: #8250df }
+.tree li.peer, .tlk.peer { --lc: #0969da }
+.tree li.job, .tlk.job { --lc: #bf8700 }
+.tree li.graph, .tlk.graph { --lc: #0a7d6b }
+/* 线接入卡片处的 label: 骑在卡片左上角的边框上, 紧挨箭头。 */
+.tlab { position: absolute; left: 6px; top: -8px; display: flex; gap: 3px; z-index: 1 }
+.tlab .ek { box-shadow: 0 0 0 2px var(--bg, #fff) }
 .tnode {
   position: relative; display: flex; gap: 10px; align-items: flex-start; max-width: 560px;
   padding: 9px 12px; border-radius: 10px; background: #fff; border: 1px solid var(--line);
@@ -646,24 +650,22 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
   font-size: 11.5px; color: var(--mute); line-height: 1.4; overflow: hidden;
   display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical;
 }
-.tlegend {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 14px; padding-top: 10px;
-  border-top: 1px dashed #eaeef2; font-size: 11px; color: var(--faint);
-}
+.tlegend { display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; margin: -4px 0 14px; font-size: 11px; color: var(--faint) }
+.tlk { display: inline-flex; align-items: center; gap: 5px; color: var(--lc); font-weight: 600 }
+.tlk i { position: relative; width: 22px; height: 1.5px; background: var(--lc) }
+.tlk i::after { content: ""; position: absolute; right: -1px; top: -3.75px; border: 4.5px solid transparent; border-right: 0; border-left: 7px solid var(--lc) }
 
 /* 边的小标记: 一条边可能同时带几种 (既是子 wizard 又被派过活), 各一枚。 */
 .ek {
   flex: none; font-size: 10px; line-height: 15px; padding: 0 5px; border-radius: 4px; white-space: nowrap;
   font-weight: 600; color: var(--mute); background: #f1f3f6;
 }
-.ek.spawn { color: #953800; background: #bc4c0014 }
-.ek.clone { color: #6639ba; background: #8250df14 }
-.ek.peer { color: #0550ae; background: #0969da12 }
-.ek.job { color: #7d4e00; background: #d4a72c1f }
-.ek.graph { color: #0a7d6b; background: #0a7d6b14 }
-.ek.back, .ek.cross { font-weight: 400; background: none; box-shadow: inset 0 0 0 1px var(--line) }
-.ek.jid { font-weight: 400; background: none; color: var(--faint); font-family: ui-monospace, Menlo, monospace }
-.tmarks { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; margin-bottom: 2px }
+.ek.spawn { color: #fff; background: #d4700f }
+.ek.clone { color: #fff; background: #8250df }
+.ek.peer { color: #fff; background: #0969da }
+.ek.job { color: #fff; background: #bf8700 }
+.ek.graph { color: #fff; background: #0a7d6b }
+.ek.cross { font-weight: 400; background: #fff; box-shadow: inset 0 0 0 1px var(--line) }
 .tchat { font-size: 10.5px; color: var(--faint) }
 .trefs { display: flex; gap: 4px; flex-wrap: wrap; align-items: baseline; font-size: 10.5px; color: var(--faint) }
 .tref { color: var(--faint); border-bottom: 1px dotted var(--line) }
