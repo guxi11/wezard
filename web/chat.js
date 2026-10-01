@@ -382,15 +382,15 @@
     renderConvs();
   };
 
-  // 一项的内容 (头像 + 两行): 会话项、子项、关系图卡片共用 —— 时刻、最近一句、未读都取自会话本身。
-  // tail 接在名字后面 (关系图的折叠计数)。
-  var convRow = function (c, tail) {
+  // 一项的内容 (头像 + 两行): 会话项与子项共用 —— 时刻、最近一句、未读都取自会话本身。
+  // 关系图卡片只借这几样数据, 不借身份 (见 tnodeHTML)。
+  var convRow = function (c) {
     var title = c.kind === 'wizard' ? nm(c.peer, c.name, true) : '<span class="nm chat">' + esc(c.name) + '</span>';
-    return avatarOf(c) + line(title + (tail || ''), c.lastTs, c.preview, stTag(c.status, true), unreadOf(c));
+    return avatarOf(c) + line(title, c.lastTs, c.preview, stTag(c.status, true), unreadOf(c));
   };
-  var subRow = function (c, s, tail) {
+  var subRow = function (c, s) {
     return goSpan('av', s.role, esc(s.label)) +
-      line(nm(s.role, s.name, true) + (tail || ''), s.lastTs, s.preview, stTag(s.status, true), unreadOf(c, s.role));
+      line(nm(s.role, s.name, true), s.lastTs, s.preview, stTag(s.status, true), unreadOf(c, s.role));
   };
 
   var convItem = function (c) {
@@ -1302,17 +1302,19 @@
   };
 
   // 卡片与侧栏会话项同一套: 头像 · 名字 + 状态灯 · 时刻 / 最近一句。
-  // 视角与对端有会话项 → 就画那一项 (与侧栏同一份数据, 未读照算); 没有 → 画节点, 时刻取这条边最近一次发生,
-  // 而不是节点自己最后的动静 —— 卡片承载的是边。
+  // 视角与对端有会话项 → 时刻、最近一句、未读取自那一项 (与侧栏同一份数据); 没有 → 取节点, 时刻取这条边最近一次
+  // 发生, 而不是节点自己最后的动静 —— 卡片承载的是边。
+  // 身份 (头像 / 名字 / 状态灯) 永远是卡片自己的节点: 会话项的身份是「视角的对端」, 视角自己那张卡片
+  // (边的下端是视角) 的对端是它的父亲 —— 拿会话项的身份去画, 这张卡片就成了父亲的分身。
   var tnodeHTML = function (F, n, folded) {
     var me = n.target === ROLE;
     var tail = folded ? '<span class="tfold" title="它下面还有 ' + folded + ' 个, 切到它的视角可见">+' + folded + '</span>' : '';
     var hit = edgeConv(F, n.target), c = hit && convOf(hit[0]);
     var s = c && hit[1] && (c.subs || []).filter(function (x) { return x.role === hit[1]; })[0];
-    var p = F.pp[n.target];
-    var row = s ? subRow(c, s, tail)
-      : c ? convRow(c, tail)
-      : goSpan('av', n.target, esc(n.label)) + line(nm(n.target, n.name, true) + tail, p ? p.last : n.lastTs, n.preview, stTag(n, true));
+    var src = s || c, p = F.pp[n.target];
+    var row = goSpan('av', n.target, esc(n.label)) +
+      line(nm(n.target, n.name, true) + tail, src ? src.lastTs : p ? p.last : n.lastTs, src ? src.preview : n.preview,
+        stTag(n, true), c ? unreadOf(c, s ? s.role : undefined) : 0);
     return '<button class="ci tci' + (me ? ' me' : '') + (edgeOn(F, n.target) ? ' on' : '') + '" data-t="' + esc(n.target) + '">' +
       labelHTML(p) + row + '</button>';
   };
