@@ -150,7 +150,11 @@ export interface WorldEdge {
   jobs?: string[];
   /** graph run id (graph 边)。 */
   runs?: string[];
+  /** 每一次发生的时刻 (最近 EDGE_TS_MAX 次) —— 前端按选中 session 的时间范围重新计数。 */
+  ts: number[];
 }
+
+const EDGE_TS_MAX = 200;
 
 export interface WorldChat {
   base: string;
@@ -233,6 +237,7 @@ const bumpEdge = (
     cross: baseOfKey(from) !== baseOfKey(to),
     jobs: merge(cur?.jobs, tag?.jobs),
     runs: merge(cur?.runs, tag?.runs),
+    ts: [...(cur?.ts ?? []), ts].slice(-EDGE_TS_MAX),
   });
 };
 

@@ -452,102 +452,12 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
   padding: 8px 20px; background: #fff; border-bottom: 1px solid #d0d7de;
   font-size: 11.5px; color: #57606a;
 }
-.wlegend { display: flex; gap: 6px; flex-wrap: wrap }
-/* 图例同时是开关 —— 边一多就得能关掉几种; 把"图例"和"过滤器"做成两样东西
-   只会让人在两处之间对照颜色。 */
-.wtools .chip {
-  display: flex; align-items: center; gap: 5px; font: inherit; cursor: pointer;
-  background: #fff; border: 1px solid #d0d7de; border-radius: 13px; padding: 2px 10px;
-  color: #8c959f;
-}
-.wtools .chip i { width: 14px; height: 0; border-top: 2px solid var(--c); opacity: .35 }
-.wtools .chip b { font-variant-numeric: tabular-nums; font-weight: 700 }
-.wtools .chip.on { color: #1f2328; border-color: var(--c) }
-.wtools .chip.on i { opacity: 1 }
-.wtools .chip.clear, .wtools .chip.only { border-color: #d0d7de; color: #57606a }
-.wtools .chip.only.on { border-color: #0969da; color: #0550ae; background: #ddf4ff }
-.wtools .wstat { margin-left: auto; color: #8c959f; font-variant-numeric: tabular-nums }
-.wtools .wstat b { color: #0969da }
+.wtools .wstat { flex: 1; display: flex; gap: 6px; align-items: baseline; color: #8c959f }
+.wtools .rng { color: var(--ink) }
 .wtools .warn { color: #9a6700 }
-.wtools .hint { margin-left: 10px; color: #b1bac4 }
-
-/* position 不是装饰: 力导向的画布是 `position:absolute; inset:0`, 没有这一行它
-   就贴到更外层的定位祖先上去 —— 坐标原点跑到顶栏, 节点飘到工具条上面, 而
-   overflow:hidden 也拦不住一个容器块在自己之外的绝对定位子元素。 */
+.wtools .hint { margin-left: auto; color: #b1bac4 }
 .wscroll { position: relative; flex: 1; min-height: 0; overflow: auto; -webkit-overflow-scrolling: touch }
 .wmap { position: relative; padding: 18px 20px 28px; min-width: min-content }
-/* 有关系的节点带一道左侧色条 —— 76 个会话里哪几个真的在协作, 不点开也看得见。 */
-.wnode.rel::before {
-  content: ""; position: absolute; left: 1px; top: 8px; bottom: 8px;
-  width: 2px; border-radius: 1px; background: #0969da66;
-}
-/* 连线层铺满整张图并且不吃事件 —— 节点的点击/双击必须照常穿过去。
-   z-index 把它抬到卡片之上: 卡片是不透明的, 压在下面时一条跨卡片的边会被中途
-   吃掉半截, 读出来像是断的。.wgrid 不设 z-index (保持 auto) 才不会自成一个层叠
-   上下文 —— 那样悬停/聚焦的节点就再也抬不过这条线了。 */
-.wedges { position: absolute; inset: 0; pointer-events: none; overflow: visible; z-index: 2 }
-/* 反过来: 正在看的那个节点要压过连线, 否则文字被线划着读。只抬这两种 —— 一直
-   抬着某个节点等于把"线被卡片吃掉"这个毛病在它身上留一份。 */
-.wnode:hover, .wnode.sel { z-index: 3 }
-/* 多列流式而不是 grid: 聊天卡片的高度天差地别 (一个群 2 个 wizard, 另一个 20 个),
-   grid 的行高按本行最高的那张对齐, 于是矮卡片下面全是空白 —— 图看着比实际稀疏
-   一倍。CSS columns 是砌砖式的: 卡片顺着列往下码, 码满了换列, 没有行的概念。
-   列宽钉在 320 附近也顺带收住了"两张卡片各占半个屏"的过度拉伸。 */
-.wgrid { position: relative; columns: 320px; column-gap: 16px }
-
-.wchat {
-  background: #fff; border: 1px solid #d0d7de; border-radius: 12px; overflow: hidden;
-  /* 一张卡片不能被切成两列 —— 断在半截的家谱读不出父子关系。 */
-  break-inside: avoid; -webkit-column-break-inside: avoid; page-break-inside: avoid;
-  margin-bottom: 16px;
-}
-/* 卡片头可点 = 进那个群 (见 chat.js 的 openNode)。 */
-.wch.go { cursor: pointer }
-.wch.go:hover .nm { color: #0969da; text-decoration: underline }
-/* 当前聊天是读图的锚点, 给它一道明确的边 —— 其余的群一律等价, 不再分轻重。 */
-.wchat.self { border-color: #0969da66; box-shadow: 0 0 0 3px #0969da10 }
-.wch {
-  display: flex; align-items: baseline; gap: 8px; padding: 9px 13px;
-  border-bottom: 1px solid #eaeef2; background: #f6f8fa;
-}
-.wchat.self .wch { background: #f0f6ff }
-.wch .nm {
-  font-size: 13px; font-weight: 700; min-width: 0; overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap;
-}
-.wch .here {
-  font-size: 10px; color: #0969da; background: #0969da14; border-radius: 4px; padding: 1px 5px;
-}
-.wch .ct {
-  margin-left: auto; font-size: 11px; color: #8c959f; flex: none;
-  font-family: ui-monospace, Menlo, monospace;
-}
-.wch .ct em { color: #1a7f37; font-style: normal; font-weight: 700 }
-/* 左内边距是同卡片内连线的车道 —— 一条 `#a → #b` 的派活边从这里绕过去, 不必
-   拐出卡片 (拐出去就会被滚动容器裁掉)。 */
-.wrows { padding: 7px 10px 10px 22px; display: flex; flex-direction: column; gap: 3px }
-
-.wnode {
-  position: relative; display: flex; gap: 8px; align-items: flex-start;
-  padding: 6px 8px; border-radius: 8px; cursor: pointer;
-  border: 1px solid transparent; transition: opacity .15s, background .12s;
-}
-.wnode:hover { background: #f6f8fa }
-.wnode.self { background: #fffbe8 }
-.wnode.sel { background: #eef4fc; border-color: #0969da55 }
-/* 聚焦时无关节点压暗而不是移除 —— 位置不动, 连点几个节点版面也不跳。 */
-.wnode.dim { opacity: .3 }
-/* 双击能走进去的那些 —— 外聊天的节点现在也算 (整页跳过去)。 */
-.wnode.go { cursor: pointer }
-.wnode.cold .wav { filter: grayscale(1); opacity: .55 }
-/* 缩进本身就是家谱; 这道折线只是把"缩给谁看"指实。 */
-.wnode .lin {
-  position: absolute; left: -9px; top: 0; bottom: 50%; width: 9px;
-  border-left: 1.5px solid #d8cdf0; border-bottom: 1.5px solid #d8cdf0;
-  border-bottom-left-radius: 6px;
-}
-/* 子 wizard 不是 fork: 折线换成虚线、换色, 与分身一眼分开 (同关系图的 spawn 边)。 */
-.wnode .lin.sp { border-style: dashed; border-color: #f0d2bd }
 .wav {
   position: relative; width: 26px; height: 26px; flex: none; border-radius: 8px;
   background: #f1f3f6; border: 1px solid #eaeef2;
@@ -558,27 +468,9 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
   border-radius: 50%; background: #1a7f37; border: 2px solid #fff;
   animation: pulse 1.4s infinite;
 }
-.wbody { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px }
-.wl1 { display: flex; align-items: baseline; gap: 6px; min-width: 0 }
 .wname {
   font-size: 12.5px; font-weight: 600; min-width: 0; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap;
-}
-.wnode.run .wname { color: #1a7f37 }
-.wtag {
-  flex: none; font-size: 10.5px; color: #57606a; background: #f1f3f6;
-  border-radius: 4px; padding: 0 5px; font-family: ui-monospace, Menlo, monospace;
-}
-.wtag.def { color: #8c959f }
-.wih { flex: none; font-size: 11px; color: #6639ba }
-.wts {
-  margin-left: auto; flex: none; font-size: 10.5px; color: #8c959f;
-  font-family: ui-monospace, Menlo, monospace;
-}
-.wjob { font-size: 11.5px; color: #0550ae; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.wprev {
-  font-size: 11.5px; color: #656d76; overflow: hidden; line-height: 1.4;
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
 }
 .wmeta {
   font-size: 10.5px; color: #8c959f; font-family: ui-monospace, Menlo, monospace;
@@ -674,65 +566,11 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 @media (max-width: 760px) {
   .chathead .vb { padding: 3px 8px }
   .wmap { padding: 12px }
-  .wgrid { columns: 1 }
   .plan-in { padding: 12px }
   .tcard { flex-direction: column; gap: 8px }
   .tc-time { width: auto; flex-direction: row; align-items: baseline; gap: 8px; border-right: 0; padding: 0 }
   .tview { grid-template-columns: 1fr }
-  .wfocus { left: 12px; right: 12px; bottom: 12px; width: auto }
 }
-
-/* 相关性筛掉的那些 —— 说一声它们还在, 但不占图的位置 (见 shared/world 的说明)。 */
-.wmore {
-  padding: 5px 13px 9px; font-size: 10.5px; color: #b1bac4;
-  border-top: 1px dashed #eaeef2; margin-top: 2px;
-}
-
-/* ══ 关系视图 · 力导向布局 ═════════════════════════════════════════
-   卡片布局之外的另一种读法: 节点只画 wizard, 聊天不再是容器而是节点身上的一
-   道色条 + 一行群名。见 web/chat.js 的说明。 */
-.wscroll.fx { overflow: hidden }
-.wmap.force { position: absolute; inset: 0; padding: 0; min-width: 0 }
-.fxn {
-  position: absolute; left: 0; top: 0; z-index: 2;
-  display: flex; align-items: center; gap: 7px; max-width: 210px;
-  padding: 5px 10px 5px 7px; border-radius: 10px;
-  background: #fff; border: 1px solid #d0d7de; border-left: 3px solid var(--c);
-  box-shadow: 0 1px 3px #1b1f2412; cursor: grab; touch-action: none;
-  user-select: none; -webkit-user-select: none;
-  transition: opacity .15s, box-shadow .12s;
-  will-change: transform;
-}
-.fxn .wav { width: 22px; height: 22px; border-radius: 7px; font-size: 12px }
-.fxn .wav .live { width: 8px; height: 8px; right: -2px; bottom: -2px }
-.fxb { min-width: 0; display: flex; flex-direction: column; gap: 0 }
-.fxn .wname { font-size: 12px }
-/* 群名压得比名字轻 —— 它是节点的属性, 不是节点本身。 */
-.fxc {
-  font-size: 9.5px; color: var(--c); opacity: .85; overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap;
-}
-.fxn.self { background: #fffbe8 }
-.fxn.cold { opacity: .72 }
-.fxn.cold .wav { filter: grayscale(1); opacity: .55 }
-.fxn.run .wname { color: #1a7f37 }
-.fxn.dim { opacity: .22 }
-.fxn.sel { box-shadow: 0 0 0 3px var(--c), 0 1px 3px #1b1f2412; }
-.fxn.sel .fxc { opacity: 1 }
-.fxn.drag { cursor: grabbing; box-shadow: 0 6px 16px #1b1f2426 }
-/* 钉住 = 这个位置是人摆的, 力不再动它。 */
-.fxn.pin::after {
-  content: "📌"; position: absolute; right: -5px; top: -7px; font-size: 9px;
-  opacity: .8; pointer-events: none;
-}
-/* 布局开关 —— 两种读法并列, 不是复选。 */
-.wtools .wlay { display: inline-flex; border: 1px solid #d0d7de; border-radius: 7px; overflow: hidden }
-.wtools .lb {
-  border: 0; background: #fff; cursor: pointer; padding: 3px 9px;
-  font-size: 11.5px; color: #57606a; font-family: inherit;
-}
-.wtools .lb + .lb { border-left: 1px solid #d0d7de }
-.wtools .lb.on { background: #ddf4ff; color: #0550ae; font-weight: 600 }
 
 /* ══ 关系 / 日程 ═══════════════════════════════════════════════════ */
 /* 都是当前 role 的另一面, 侧栏 (它的会话) 留着 —— 点一个会话就回到对话。
@@ -751,7 +589,7 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .rem.raw .rem-raw { display: block }
 .rem.raw .rem-tag { display: none }
 
-/* ══ 状态药丸 / 进入箭头 (家谱 · 卡片 · 聚焦卡 · 工单共用) ══════════════ */
+/* ══ 状态药丸 (关系树 · 工单共用) ════════════════════════════════════ */
 .stp {
   flex: none; display: inline-flex; align-items: center; gap: 4px; font-size: 10px; line-height: 16px;
   padding: 0 6px; border-radius: 8px; background: #eef0f3; color: var(--mute); white-space: nowrap; font-weight: 500;
@@ -761,16 +599,7 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .stp.run::before { background: #1a7f37; animation: pulse 1.4s infinite }
 .stp.off { background: transparent; color: var(--faint); box-shadow: inset 0 0 0 1px var(--line) }
 .stp.off::before { background: transparent; box-shadow: inset 0 0 0 1.5px #b1bac4 }
-.wnode .stp { margin-left: 2px }
-.wgo {
-  flex: none; width: 20px; height: 20px; margin: -2px -2px -2px 2px; border-radius: 6px; display: grid; place-items: center;
-  font-size: 12px; color: var(--accent); background: var(--mine); opacity: 0; transition: opacity .12s;
-}
-.wnode:hover .wgo, .wnode.sel .wgo { opacity: 1 }
-.wgo:hover { background: var(--accent); color: #fff }
-@media (hover: none) { .wgo { opacity: 1 } }
-
-/* ══ 关系图 · 家谱 (以当前 role 为中心) ════════════════════════════════ */
+/* ══ 关系图 · 关系树 (家谱与派活合成一棵, 以当前 role 为中心) ══════════ */
 .tview {
   display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 18px; align-items: start;
   max-width: 1180px; margin: 0 auto;
@@ -809,6 +638,9 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .tree li.clone { --lc: #b9a3e8 }
 .tree li.spawn { --lc: #e9b991 }
 .tree li.spawn::before { border-left-style: dashed; border-bottom-style: dashed }
+.tree li.peer { --lc: #8cb8ec }
+.tree li.peer::before { border-left-style: dotted; border-bottom-style: dotted; border-width: 0 0 2px 2px }
+.tree li.graph { --lc: #7cc4b6 }
 .tnode {
   position: relative; display: flex; gap: 10px; align-items: flex-start; max-width: 560px;
   padding: 9px 12px; border-radius: 10px; background: #fff; border: 1px solid var(--line);
@@ -826,8 +658,6 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .t1 { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0 }
 .t1 .wname { font-size: 13px }
 .tk { flex: none; font-size: 10px; line-height: 16px; padding: 0 5px; border-radius: 4px; font-weight: 600 }
-.tk.clone { color: #6639ba; background: #8250df14 }
-.tk.spawn { color: #953800; background: #bc4c0014 }
 .tk.me { color: #fff; background: var(--accent) }
 .tjob { font-size: 12px; color: var(--ink); opacity: .85; line-height: 1.45 }
 .tprev {
@@ -838,8 +668,6 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 14px; padding-top: 10px;
   border-top: 1px dashed #eaeef2; font-size: 11px; color: var(--faint);
 }
-.tlegend .tk + * { margin-right: 10px }
-.tlegend .tk:not(:first-child) { margin-left: 10px }
 
 .tcol + .tcol { margin-top: 14px }
 .tcol h4 {
@@ -852,34 +680,26 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .tie.go:hover .wname { color: var(--accent) }
 .tie .wav { width: 26px; height: 26px }
 .tie .wname { font-size: 12.5px }
-.ek { color: var(--c); font-weight: 600 }
-.ek::before { content: ""; display: inline-block; width: 10px; border-top: 2px solid var(--c); margin-right: 4px; vertical-align: 3px }
-.xc { color: #0969da }
+/* 边的小标记: 一条边可能同时带几种 (既是子 wizard 又被派过活), 各一枚。 */
+.ek {
+  flex: none; font-size: 10px; line-height: 15px; padding: 0 5px; border-radius: 4px; white-space: nowrap;
+  font-weight: 600; color: var(--mute); background: #f1f3f6;
+}
+.ek.spawn { color: #953800; background: #bc4c0014 }
+.ek.clone { color: #6639ba; background: #8250df14 }
+.ek.peer { color: #0550ae; background: #0969da12 }
+.ek.job { color: #7d4e00; background: #d4a72c1f }
+.ek.graph { color: #0a7d6b; background: #0a7d6b14 }
+.ek.back, .ek.cross { font-weight: 400; background: none; box-shadow: inset 0 0 0 1px var(--line) }
+.ek.jid { font-weight: 400; background: none; color: var(--faint); font-family: ui-monospace, Menlo, monospace }
+.tmarks { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; margin-bottom: 2px }
+.tmarks .ago { font-size: 10.5px; color: var(--faint) }
+.tchat { font-size: 10.5px; color: var(--faint) }
+.trefs { display: flex; gap: 4px; flex-wrap: wrap; align-items: baseline; font-size: 10.5px; color: var(--faint) }
+.tref { color: var(--faint); border-bottom: 1px dotted var(--line) }
+.tref.go { cursor: pointer }
+.tref.go:hover { color: var(--accent); border-bottom-color: var(--accent) }
 .tties .pempty { padding: 12px 0 }
-
-/* ══ 关系图 · 聚焦卡 ════════════════════════════════════════════════ */
-.wfocus {
-  position: absolute; right: 18px; bottom: 18px; z-index: 5; width: 300px; max-height: calc(100% - 90px); overflow-y: auto;
-  background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px 14px;
-  box-shadow: 0 8px 28px #1c24302a; display: flex; flex-direction: column; gap: 7px;
-}
-.wfocus .fh { display: flex; align-items: center; gap: 9px }
-.wfocus .wav { width: 32px; height: 32px; font-size: 17px; border-radius: 9px }
-.wfocus .fn { min-width: 0; flex: 1; display: flex; flex-direction: column }
-.wfocus .fn .wname { font-size: 14px }
-.wfocus .fk { font-size: 11px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.wfocus .fx-x { border: 0; background: none; cursor: pointer; color: var(--faint); font-size: 12px; padding: 2px 4px; border-radius: 5px }
-.wfocus .fx-x:hover { background: var(--paper); color: var(--ink) }
-.wfocus .fj { margin: 0; font-size: 12px; line-height: 1.5 }
-.wfocus .fp { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--mute); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden }
-.wfocus .fg { display: flex; flex-wrap: wrap; gap: 4px; align-items: center }
-.wfocus .fl { font-size: 10.5px; color: var(--faint); width: 30px; flex: none }
-.wfocus .fgo {
-  margin-top: 4px; border: 0; border-radius: 8px; padding: 7px 10px; cursor: pointer;
-  background: var(--accent); color: #fff; font-size: 12.5px; font-weight: 600;
-}
-.wfocus .fgo:hover { filter: brightness(1.08) }
-.wfocus .fme { margin-top: 4px; font-size: 11.5px; color: var(--accent); text-align: center }
 
 /* ══ 日程 · 总览 / 任务卡 ════════════════════════════════════════════ */
 .pstats {
