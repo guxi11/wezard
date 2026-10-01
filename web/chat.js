@@ -852,11 +852,6 @@
     });
     // 没带 conv 的链接 (群里点名字进来) 落在服务端挑的窗口上, 连同它挑的「只看我与谁」;
     // 手里的 conv 失效则只退回整个会话。
-    if (PEND && PEND.role === d.role.id) {
-      var pend = pairConv(PEND.other);
-      PEND = null;
-      if (pend) { CONV = pend[0]; WITH = pend[1]; }
-    }
     if (!CONV || !convOf(CONV)) { WITH = CONV ? '' : d['with'] || ''; CONV = d.conv || ''; }
   };
   var paintRole = function () {
@@ -923,12 +918,8 @@
   // 换视角: 窗口尽量留在同一个群 —— 从群里的一条消息切过去, 最想看的是对方在这个群
   // 里的样子; 对方不在这个群 (私聊的另一头) 就交给服务端挑它最近的会话。
   // at: 被点的那条消息 —— 换视角后它留在指针底下, 其余的相对它滑动。
-  // then: 落地后要选中的「我与 then」那一项 (关系图里点了一条视角不在其上的边)。
-  // 记着是给谁的: 旧视角的 SSE 在新摘要之前还可能推来一次, 不能让它把这一项吃掉。
-  var PEND = null;
-  var switchRole = function (id, at, then) {
+  var switchRole = function (id, at) {
     if (!canSwitch(id) || id === ROLE) return;
-    PEND = then ? { role: id, other: then } : null;
     W.treeFor = '';
     var keep = CONV && CONV.indexOf('c:') === 0 ? CONV : '';
     var from = ROLE;
@@ -936,11 +927,10 @@
     var same = VIEW === 'msgs' && !WITH && !SESSION && (keep || CONV.indexOf('p:') === 0);
     // 群里「只看我与 X」时换过去, 对面看到的是「只看我与 from」—— 同一段往来, 选中只看而不是整个群。
     var withBack = keep && WITH ? from : '';
-    // 顺着关系图的一条边跳过来要看的是这一对的全部往来 —— 最新那段里它俩未必说过话。
-    ROLE = id; WITH = withBack; SESSION = PEND ? 'all' : '';
+    ROLE = id; WITH = withBack; SESSION = '';
     CONV = keep || (CONV.indexOf('p:') === 0 ? 'p:' + from : '');
     var snap = VIEW === 'msgs' && !calm() ? snapRows(at) : null;
-    if (same && !PEND) { if (WORLD) loadWorld(); flipWindow(snap); return; }
+    if (same) { if (WORLD) loadWorld(); flipWindow(snap); return; }
     var kept = VIEW === 'msgs' ? keepBodies() : {};
     refresh(function () {
       adoptBodies(kept);
@@ -1246,12 +1236,14 @@
     }).filter(function (x) { return x[1]; }).sort(function (a, b) { return b[1].lastTs - a[1].lastTs; })[0];
     return hit ? [hit[0].key, dmOf(hit[0]) ? '' : other] : null;
   };
-  // 视角在边上 → 直接选中那一项; 不在 → 先切到箭头起点的视角, 落地后再选。
-  var openEdge = function (F, t) {
+  // 卡片只选会话项, 不换视角 (换视角归头像 / 名字): 视角不在这条边上, 侧栏里就没有这一项。
+  var edgeConv = function (F, t) {
     var ends = edgeEnds(F, t);
-    if (ends.indexOf(ROLE) < 0) return switchRole(ends[0], undefined, ends[1]);
-    var other = ends.filter(function (x) { return x !== ROLE; })[0];
-    var hit = other && pairConv(other);
+    var other = ends.length === 2 && ends.indexOf(ROLE) >= 0 && ends.filter(function (x) { return x !== ROLE; })[0];
+    return other ? pairConv(other) : null;
+  };
+  var openEdge = function (F, t) {
+    var hit = edgeConv(F, t);
     if (hit) selectConv(hit[0], hit[1]);
   };
   // 选中的那一项就是这条边 (视角是一端, 正在看的对端是另一端)。
@@ -1265,7 +1257,7 @@
     var me = n.target === ROLE;
     var title = nm(n.target, n.name, true) +
       (folded ? '<span class="tfold" title="它下面还有 ' + folded + ' 个, 切到它的视角可见">+' + folded + '</span>' : '');
-    return '<button class="ci tci' + (me ? ' me' : '') + (edgeOn(F, n.target) ? ' on' : '') + '" data-t="' + esc(n.target) + '">' +
+    return '<button class="ci tci' + (me ? ' me' : '') + (edgeOn(F, n.target) ? ' on' : '') + (edgeConv(F, n.target) ? '' : ' nil') + '" data-t="' + esc(n.target) + '">' +
       labelHTML(F.pp[n.target]) + goSpan('av', n.target, esc(n.label)) +
       line(title, n.lastTs, n.preview, stTag(n, true)) + '</button>';
   };
