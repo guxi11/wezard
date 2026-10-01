@@ -2002,8 +2002,8 @@ export interface MirrorBridge {
    *  the user sees the full PreToolUse → approval card → assistant mirror
    *  loop end-to-end. Skips the live-stream/replyStream machinery — the tail
    *  pushes assistant output via the standalone path. */
-  /** `fromChat` 强制这一轮走出处门 (chatOriginOnly) —— 定时任务点的火, 结果必须
-   *  在群里看得见, 哪怕上一轮是人在 CLI 里敲的。 */
+  /** `fromChat`: 已无作用 —— 注入的轮一律不算 CLI 发起, 可见性只看 `channel`。
+   *  参数留着是因为调用方 (定时任务) 仍在传。 */
   /** `channel`: 这一轮的回复发去哪个公开频道 (base); "" = 私聊, 回复不进任何群,
    *  只落 turn 记录; 省略 = target 的 home。 */
   injectText: (target: string, text: string, origin?: TurnOrigin, opts?: { fromChat?: boolean; from?: TurnFrom; channel?: string; envelope?: string }) => Promise<{ ok: boolean; reason?: string }>;
@@ -5908,7 +5908,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (!a) return { ok: false, reason: "no mirror attached for target" };
       if (!text.trim()) return { ok: false, reason: "empty text" };
       // 出处改写要早于 inject: tail 可能在 promise resolve 之前就开出 turn。
-      if (opts?.fromChat) a.turnFromChat = true;
+      // 守护进程注入的一轮 (回执 / peer / 定时任务 / graph) 不是人在 CLI 手敲的: 可见性
+      // 只由频道定 ("" 私聊才静默)。pendingFromCli 必须一并清 —— 它是粘性的, 不开轮的
+      // CLI 行 (spawn 时 model-select 按下的 `/model`) 会把它一直挂到下一轮, 让紧跟着的
+      // 注入轮被认成 CLI 发起, 公开频道里的回复因此被出处门吞掉。
+      a.pendingFromCli = false;
+      a.turnFromChat = true;
       // 名册增量搭这趟车进去 —— 同伴派活 / 定时任务 / graph 步骤都走这里, 所以
       // 一个从不被人直接说话的分身也能知道群里多了谁、少了谁。人说的话那一条
       // 路径在 inbound.send 上挂 (dispatch 有自己的 inject)。
@@ -5928,8 +5933,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // 注入的那一行会被 recentInjects 当回显吞掉, 走不到 user_text —— 本轮的 query
       // (rolepage 上「谁对它说了什么」那一半) 只能在这里记。
       a.pendingBriefQuery = text;
-      // 公开频道里说的话, 回复就该在群里看得见 —— 哪怕上一轮是人在 CLI 里敲的。
-      if (opts?.channel) a.turnFromChat = true;
       const sid = a.sessionId;
       const paneAlive = a.tmuxPane ? await paneUsable(a.tmuxPane, a.jsonlPath) : false;
       if (!paneAlive) {
