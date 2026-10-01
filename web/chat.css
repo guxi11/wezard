@@ -613,9 +613,6 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 /* 卡片 = 会话项; label 骑在它左上角, 紧挨箭头。 */
 .tci { position: relative; overflow: visible }
 .tci.me .t .nm { color: var(--accent) }
-/* 视角不在这条边上 (或这一对没说过话): 侧栏里没有对应的会话项, 卡片点了也不选。 */
-.tci.nil { cursor: default }
-.tci.nil:hover { background: transparent }
 .tlab { position: absolute; left: 4px; top: -8px; display: flex; gap: 3px; z-index: 2 }
 .tlab .ek { box-shadow: 0 0 0 2px var(--card) }
 

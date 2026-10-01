@@ -852,6 +852,11 @@
     });
     // 没带 conv 的链接 (群里点名字进来) 落在服务端挑的窗口上, 连同它挑的「只看我与谁」;
     // 手里的 conv 失效则只退回整个会话。
+    if (PEND && PEND.role === d.role.id) {
+      var pend = pairConv(PEND.other);
+      PEND = null;
+      if (pend) { CONV = pend[0]; WITH = pend[1]; }
+    }
     if (!CONV || !convOf(CONV)) { WITH = CONV ? '' : d['with'] || ''; CONV = d.conv || ''; }
   };
   var paintRole = function () {
@@ -918,8 +923,12 @@
   // 换视角: 窗口尽量留在同一个群 —— 从群里的一条消息切过去, 最想看的是对方在这个群
   // 里的样子; 对方不在这个群 (私聊的另一头) 就交给服务端挑它最近的会话。
   // at: 被点的那条消息 —— 换视角后它留在指针底下, 其余的相对它滑动。
-  var switchRole = function (id, at) {
+  // then: 落地后要选中的「它与 then」那一项 (关系图里点了一张没有现成对话的卡片)。
+  // 记着是给谁的: 旧视角的 SSE 在新摘要之前还可能推来一次, 不能让它把这一项吃掉。
+  var PEND = null;
+  var switchRole = function (id, at, then) {
     if (!canSwitch(id) || id === ROLE) return;
+    PEND = then ? { role: id, other: then } : null;
     W.treeFor = '';
     var keep = CONV && CONV.indexOf('c:') === 0 ? CONV : '';
     var from = ROLE;
@@ -927,10 +936,11 @@
     var same = VIEW === 'msgs' && !WITH && !SESSION && (keep || CONV.indexOf('p:') === 0);
     // 群里「只看我与 X」时换过去, 对面看到的是「只看我与 from」—— 同一段往来, 选中只看而不是整个群。
     var withBack = keep && WITH ? from : '';
-    ROLE = id; WITH = withBack; SESSION = '';
+    // 要选的那一对未必在最新那段里说过话 —— 看全部时间才保证选得到。
+    ROLE = id; WITH = withBack; SESSION = PEND ? 'all' : '';
     CONV = keep || (CONV.indexOf('p:') === 0 ? 'p:' + from : '');
     var snap = VIEW === 'msgs' && !calm() ? snapRows(at) : null;
-    if (same) { if (WORLD) loadWorld(); flipWindow(snap); return; }
+    if (same && !PEND) { if (WORLD) loadWorld(); flipWindow(snap); return; }
     var kept = VIEW === 'msgs' ? keepBodies() : {};
     refresh(function () {
       adoptBodies(kept);
@@ -1097,7 +1107,7 @@
   var KIND = {
     spawn: { mark: '子', tip: 'spawn 的白板 wizard, 只有出身、没有继承上下文' },
     clone: { mark: '分身', tip: 'fork 自父亲的 session, 开局带着那一刻的上下文' },
-    peer: { mark: '派活', tip: 'send_peer 派的活' },
+    peer: { mark: '对话', tip: 'send_peer 发起的对话' },
     job: { mark: '工单', tip: '它开的工单里有这位成员' },
     graph: { mark: '流水线', tip: '流水线里上一步喂给下一步' },
   };
@@ -1236,15 +1246,24 @@
     }).filter(function (x) { return x[1]; }).sort(function (a, b) { return b[1].lastTs - a[1].lastTs; })[0];
     return hit ? [hit[0].key, dmOf(hit[0]) ? '' : other] : null;
   };
-  // 卡片只选会话项, 不换视角 (换视角归头像 / 名字): 视角不在这条边上, 侧栏里就没有这一项。
+  // 视角这一端与边另一端之间、侧栏里现成的那一项 (视角不在边上 / 这段里没说过话 = 没有)。
   var edgeConv = function (F, t) {
     var ends = edgeEnds(F, t);
     var other = ends.length === 2 && ends.indexOf(ROLE) >= 0 && ends.filter(function (x) { return x !== ROLE; })[0];
     return other ? pairConv(other) : null;
   };
+  // 两个 role 之间说过话没有 (任一方向, 全部时间) —— 家谱与工单归属不算对话。
+  var talked = function (a, b) {
+    return W.edges.some(function (e) {
+      return !LINEAGE[e.kind] && ((e.from === a && e.to === b) || (e.from === b && e.to === a));
+    });
+  };
+  // 有对话 → 打开这段对话; 没有 → 切到卡片的 role, 并选中它与这条边另一端之间的对话 (说过话才有)。
   var openEdge = function (F, t) {
     var hit = edgeConv(F, t);
-    if (hit) selectConv(hit[0], hit[1]);
+    if (hit) return selectConv(hit[0], hit[1]);
+    var ends = edgeEnds(F, t), other = ends.length === 2 ? ends[0] : '';
+    switchRole(t, undefined, other && talked(t, other) ? other : '');
   };
   // 选中的那一项就是这条边 (视角是一端, 正在看的对端是另一端)。
   var edgeOn = function (F, t) {
@@ -1257,7 +1276,7 @@
     var me = n.target === ROLE;
     var title = nm(n.target, n.name, true) +
       (folded ? '<span class="tfold" title="它下面还有 ' + folded + ' 个, 切到它的视角可见">+' + folded + '</span>' : '');
-    return '<button class="ci tci' + (me ? ' me' : '') + (edgeOn(F, n.target) ? ' on' : '') + (edgeConv(F, n.target) ? '' : ' nil') + '" data-t="' + esc(n.target) + '">' +
+    return '<button class="ci tci' + (me ? ' me' : '') + (edgeOn(F, n.target) ? ' on' : '') + '" data-t="' + esc(n.target) + '">' +
       labelHTML(F.pp[n.target]) + goSpan('av', n.target, esc(n.label)) +
       line(title, n.lastTs, n.preview, stTag(n, true)) + '</button>';
   };
@@ -1309,7 +1328,7 @@
         (W.degraded ? '<span class="warn" title="注册表不可达 (独立 svr 部署), 只画观测到的往来">名册缺席</span>' : '') +
         (me ? '<button class="tall" title="' + (all ? '只留它的上游链、它自己、它的下游与同源兄弟' : '画出范围内所有有关系的 wizard') + '">' +
           (all ? '只看相关' : '看全部') + '</button>' : '') + '</h2>' +
-      (alone ? '<div class="tsolo">' + esc(nameOf(ROLE)) + (rg ? ' 在这段 session 里' : '') + ' 既没生过谁、也没和谁派过活</div>' : '') +
+      (alone ? '<div class="tsolo">' + esc(nameOf(ROLE)) + (rg ? ' 在这段 session 里' : '') + ' 既没生过谁、也没和谁对过话</div>' : '') +
       (shown.length ? '<ul class="tree' + (all ? ' all' : '') + '">' + trees + '</ul>' : '<div class="pempty">这段时间里没有任何关系</div>') +
     '</div>';
     // 心跳每 3s 重算一次 (状态灯 / 几分钟前) —— 没变就不碰 DOM, 免得蹭掉悬停与滚动。
