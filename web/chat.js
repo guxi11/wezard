@@ -599,7 +599,7 @@
     for (var el = e.target; el && el.nodeType === 1 && el !== document.body && !clipTip(el); el = el.parentElement);
   });
 
-  // 名片: 头像 · 名字 (忙闲 / session) · 名字下一行低调的描述 (📁 cwd · 💬 home 群 · 🐣 出生) · 职责;
+  // 名片: 头像 · 名字 (忙闲 / session) · 名字下一行低调的描述 (📁 cwd · 👥/👤 home 群或单聊 · 🐣 出生) · 职责;
   // 名片下面一排是关系 / 日程入口。身份与出身 (谁的分身 / 子 wizard) 交给关系图, 名片不写。
   var renderRole = function () {
     var r = R.role;
@@ -608,7 +608,8 @@
     var born = r.bornAt || R.sessions.reduce(function (m, x) { return x.start && (!m || x.start < m) ? x.start : m; }, 0);
     var facts = [
       r.cwd ? ['📁', shortCwd(r.cwd), r.cwd] : null,
-      r.chat ? ['💬', r.chat, 'home 群'] : null,
+      // home 的 base 是 chat:… 就是群, user:… 就是单聊。
+      r.chat ? r.id.indexOf('chat:') === 0 ? ['👥', r.chat, 'home 群'] : ['👤', r.chat, 'home 单聊'] : null,
       born ? ['🐣', fmtClock(born), '出生于 ' + fmtDay(born)] : null
     ].filter(Boolean).map(function (f) { return '<span title="' + esc(f[2]) + '">' + f[0] + ' ' + esc(f[1]) + '</span>'; });
     $('#rb-who').innerHTML =
