@@ -368,11 +368,24 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
 /** 一个会话窗口里的消息。`withRole` 只对公开频道有意义: 当前 role 与它在这个频道里的往来。
  *  整个公开频道 (不带 withRole) 是频道里所有人说的话, 不是某个 role 的往来 —— 唯一不走 talkOf 的。 */
 export const convMessages = (msgs: readonly Msg[], role: string, key: string, withRole?: string): Msg[] => {
+  const t = talkArgs(role, key, withRole);
+  return t ? talkOf(msgs, t.who, t.peers, t.chat) : msgs.filter((m) => m.channel === key.slice(2));
+};
+
+export interface TalkArgs { who: string; peers: string[]; chat?: string }
+/** 一个窗口交给 talkOf 的入参; 整个公开频道不是谁的往来, 没有。 */
+export const talkArgs = (role: string, key: string, withRole?: string): TalkArgs | undefined => {
   const t = parseTalkKey(key);
-  if (t) return talkOf(msgs, t.who, t.peers);
-  if (key.startsWith("p:")) return talkOf(msgs, role, [key.slice(2)], "");
-  const base = key.slice(2);
-  return withRole ? talkOf(msgs, role, [withRole], base) : msgs.filter((m) => m.channel === base);
+  if (t) return t;
+  if (key.startsWith("p:")) return { who: role, peers: [key.slice(2)], chat: "" };
+  return withRole ? { who: role, peers: [withRole], chat: key.slice(2) } : undefined;
+};
+
+/** 窗口是视角与恰好另一个 role 之间的往来时, 那个 role; 否则 (群 / 多个对端 / 不含视角) 没有。 */
+export const counterpartOf = (viewer: string, t: TalkArgs | undefined): string | undefined => {
+  if (t?.peers.length !== 1) return undefined;
+  const [p] = t.peers;
+  return t.who === viewer ? p : p === viewer ? t.who : undefined;
 };
 
 // ── session ───────────────────────────────────────────────────────────

@@ -663,6 +663,7 @@
     turns: '对话轮数', tools: '工具调用次数', api: 'API 请求次数',
     ctx: '上下文峰值 — 单次请求送入的 input + 缓存 的最高值', time: '累计耗时',
   };
+  var ICON = { turns: '💬', tools: '🛠️' };
   var liveDur = function (t) {
     var d = (t.usage && t.usage.durationMs) || 0;
     if (!t.runningUntil) return d;
@@ -673,8 +674,12 @@
     var segs = SEGS.filter(function (s) { return u[s[0]] > 0; });
     var total = segs.reduce(function (a, s) { return a + u[s[0]]; }, 0);
     // 值为 0 = 该指标没有数据 (老记录 / 网关不报 usage), 不占位置。
+    // 有 emoji 的指标: emoji 在前、数字在后, 不再挂英文名。
     var kv = function (k, n, text) {
-      return n ? '<span class="kv" title="' + esc(TIP[k] || k) + '"><b>' + esc(text) + '</b>' + k + '</span>' : '';
+      if (!n) return '';
+      var ic = ICON[k];
+      return '<span class="kv" title="' + esc(TIP[k] || k) + '">' +
+        (ic ? '<i class="u-ic">' + ic + '</i><b>' + esc(text) + '</b>' : '<b>' + esc(text) + '</b>' + k) + '</span>';
     };
     // 输出 / 缓存不再单列成指标 —— 它们就是 I/O 图例里的那几格。
     var io = total > 0
@@ -707,11 +712,12 @@
     toBottom();
   };
   // wizard: 整页页脚, 它自己跑过的全部轮次 (选了 session 就只算那一段)。
-  // 人: 自己不跑轮次 —— 在群里点开某个 wizard 之后, 窗口底下是这段往来的账。
+  // 窗口: 对端恰好是一个 wizard 时 (服务端按这个窗口的 talkOf 入参判定, 给不给 winStats 就是答案),
+  // 窗口底下是那个 wizard 在这段往来里的账 —— 视角是人还是 wizard 都一样。
   var renderUsage = function () {
     var wiz = !!R.role && R.role.kind === 'wizard';
     putUsage($('#pg-usage'), wiz ? R.stats : null);
-    putUsage($('#ch-usage'), !wiz && WITH && VIEW === 'msgs' ? R.winStats : null);
+    putUsage($('#ch-usage'), VIEW === 'msgs' ? R.winStats : null);
   };
 
   // ── 右栏头: 这个群聊 / 私聊是什么 (关系 / 日程视图时是视图名) ──

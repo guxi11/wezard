@@ -26,7 +26,7 @@ import { isMark, isPost, isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, type WorldFacts } from "./world.js";
 import {
   allMessages, convKeyOf, convMessages, parseTalkKey, glanceOfTalk, convsOf, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
-  roleInfo, roleStats, sessionsOf, windowStats, type Directory, type Msg, type SessionSpan,
+  roleInfo, roleStats, sessionsOf, talkArgs, talkOf, counterpartOf, windowStats, type Directory, type Msg, type SessionSpan,
 } from "./role-view.js";
 import { renderMark, renderMsg, type MsgFragment } from "./role-render.js";
 import { searchRole } from "./role-search.js";
@@ -170,7 +170,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
   };
 
   /** role 摘要: 身份、会话列表、session 分段、页脚总账 (role 自己的 + 当前窗口的)。 */
-  const summary = (records: readonly DetailRecord[], f: WorldFacts, role: string, sid: string | null, land: Landing, win?: Pick<View, "conv" | "with">) => {
+  const summary = (records: readonly DetailRecord[], f: WorldFacts, role: string, sid: string | null, land: Landing, win?: Pick<View, "conv" | "with" | "span">) => {
     const now = Date.now();
     const dir = makeDirectory(records, f);
     const msgs = allMessages(records, now);
@@ -205,11 +205,17 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
         broken: schedules.filter((x) => x.lastGate === "error" || !!x.loadError).length,
       },
       stats,
-      // 「只看我与某个 wizard」的窗口自带一本账 —— 人的视角没有 stats, 用量看这里。
-      winStats: win?.conv && dir.isWizard(win.with)
-        ? windowStats(records, convMessages(msgs, role, win.conv, win.with).filter((m) => inSpan(span)(m.ts)), win.with, now)
-        : undefined,
+      // 对端恰好是一个 wizard 的窗口 (判定与窗口取消息同一份 talkOf 入参), 带上它在这段往来里跑的那几轮的账。
+      winStats: peerStats(records, msgs, role, win, dir, now),
     };
+  };
+
+  const peerStats = (records: readonly DetailRecord[], msgs: readonly Msg[], role: string, win: Pick<View, "conv" | "with" | "span"> | undefined, dir: Directory, now: number) => {
+    const t = win?.conv ? talkArgs(role, win.conv, win.with || undefined) : undefined;
+    const w = counterpartOf(role, t);
+    if (!t || !w || !dir.isWizard(w)) return undefined;
+    const ms = talkOf(msgs, t.who, t.peers, t.chat).filter((m) => m.turn.target === w && inSpan(win?.span)(m.ts));
+    return windowStats(records, ms, w, now);
   };
 
   const role: SimpleHandler = (_req, res, url) => {
