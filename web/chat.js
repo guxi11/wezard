@@ -648,11 +648,17 @@
     var sw = canSwitch(id) && id !== ROLE;
     return '<button class="av' + (sw ? ' go' : '') + '" data-r="' + esc(id) + '" title="' + esc(nameOf(id)) + '"' + (sw ? '' : ' disabled') + '>' + esc(label || roleLabel(id)) + '</button>';
   };
+  // 断点 (/clear /new 轮换) 是某一个 role 的 —— 群窗里几个 wizard 交错时, 不署名就认不出是谁断的。
+  // 片段由服务端渲染、不知视角, 名字 (及能否点) 在这里按视角补进断点条的标签前。
+  var CUT_L = /(<div class="tg-(?:cut|mark)\b[^>]*>)(<span class="l">)/;
+  var signCut = function (html, id, name) {
+    return html.replace(CUT_L, function (_, open, l) { return open + nm(id, name, true) + l; });
+  };
   var rowHTML = function (m) {
     learn(m.from, m.fromName, m.fromLabel);
     learn(m.to, m.toName, m.toLabel);
     if (m.dir === 'mark') {
-      return '<div class="mrow mark" data-id="' + esc(m.id) + '" data-turn="' + esc(m.turnId || m.id) + '" data-ts="' + m.ts + '" data-sig="' + esc(m.sig) + '">' + m.html + '</div>';
+      return '<div class="mrow mark" data-id="' + esc(m.id) + '" data-turn="' + esc(m.turnId || m.id) + '" data-ts="' + m.ts + '" data-sig="' + esc(m.sig) + '">' + signCut(m.html, m.from, m.fromName) + '</div>';
     }
     var mine = m.from === ROLE;
     var other = mine ? m.to : m.from;
@@ -673,7 +679,7 @@
       (sw ? '<span class="fi"><span class="fn">' + esc(nameOf(other)) + '</span>' + CHEVRON + '</span>' : '') + '</button>';
     return '<div class="mrow ' + (mine ? 'mine' : 'them') + '" data-id="' + esc(m.id) + '" data-turn="' + esc(m.turnId || m.id) + '" data-ts="' + m.ts + '"' +
       (m.ping ? ' data-ping="1" data-ping-who="' + esc(m.dir === 'in' ? m.toName : m.fromName) + '"' : '') + ' data-sig="' + esc(m.sig) + '" data-stale-at="' + (m.staleAt || 0) + '">' +
-      '<div class="mcol"><div class="mwho">' + who + '</div><div class="mb">' + m.html + '</div></div>' +
+      '<div class="mcol"><div class="mwho">' + who + '</div><div class="mb">' + (m.dir === 'out' ? signCut(m.html, m.from, m.fromName) : m.html) + '</div></div>' +
       flip +
     '</div>';
   };
@@ -728,7 +734,7 @@
   };
 
   var bindRow = function (el) {
-    bindGo(el, '.flip[data-r]:not([disabled]), .mwho .go[data-r]');
+    bindGo(el, '.flip[data-r]:not([disabled]), .mwho .go[data-r], .tg-cut .go[data-r], .tg-mark .go[data-r]');
   };
   var rowNode = function (id) {
     var list = inner.querySelectorAll('.mrow');
