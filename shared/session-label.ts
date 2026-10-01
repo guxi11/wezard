@@ -74,6 +74,11 @@ export const baseOfKey = (target: string): string => {
   return h >= 0 ? target.slice(0, h) : target;
 };
 
+/** Base of daemon-internal sessions (the memory steward): a home that is no chat,
+ *  so it never shows in a chat roster, never gets auto-named, never takes a bubble. */
+export const INTERNAL_BASE = "wezard:internal";
+export const isInternalKey = (target: string): boolean => baseOfKey(target) === INTERNAL_BASE;
+
 /** Compose a session key from a base principal and a tag ("" → default session). */
 export const keyOf = (base: string, tag: string): string => (tag ? `${base}#${tag}` : base);
 

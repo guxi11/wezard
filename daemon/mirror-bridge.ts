@@ -44,7 +44,7 @@ import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
 import { knowsToolUse, recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnQuery, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, lastChannelOf, buildDetailUrl, buildChatUrl, roleUniq } from "./detail.js";
 import type { CtxCut, TurnFrom, TurnOrigin, TurnUsage } from "./detail.js";
-import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagHeader, withLinkedTagHeader, linkedTagHead, linkTags, parseTagHeader, MAX_BODY_LINKS } from "../shared/session-label.js";
+import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagHeader, withLinkedTagHeader, linkedTagHead, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
@@ -5294,7 +5294,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       ...allTargets().map(baseOfKey),
       baseOfKey(self),
     ]);
-    return [...bases].filter(Boolean).sort().map((base) => ({
+    // 内部会话 (记忆整理者) 的 home 不是聊天: 不列、不补名。
+    return [...bases].filter((b) => b && !isInternalKey(b)).sort().map((base) => ({
       base,
       name: chatNameOf(cfg, base),
       self: base === baseOfKey(self),

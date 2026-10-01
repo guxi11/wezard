@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Changed
+- 共享记忆整理从定时任务改成 daemon 内建定时器: 不再生成 `~/.wezard/tasks/memory-steward.task.mjs` (开机把旧的改名为 `.retired` 停用, 免得两路并跑), 不进 `list_tasks` / rolepage 日程。每 30 分钟 (开机后 1 分钟先跑一轮) 认领收件箱里的提议 (认领 / 一小时孤儿回收语义不变), 有活才在不属于任何群的内部 key 上起一个白板 wizard 合并, 收工即收; 收件箱改由守护进程归档进 `memory/log/`。全程零气泡、不 notify, 结果只留在 rolepage 与审计日志。
+
 ## [2.2.2] - 2026-10-02
 
 ### Changed

@@ -14,7 +14,7 @@ import { setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { installApprovalEventListener, makeApproveHandler } from "./approval.js";
 import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, setWorldFactsProvider, recordPost } from "./detail.js";
 import { EMPTY_FACTS, type WorldFacts, type WorldFactWizard } from "../shared/world.js";
-import { initAutoWindowPersistence } from "./session-cache.js";
+import { clearAutoWindow, initAutoWindowPersistence, setAutoWindow } from "./session-cache.js";
 import { makeMessageHandler } from "./outbound.js";
 import { makeCardHandler, makeAskHandler, installAskEventListener } from "./ask.js";
 import { drainForReload, listPending } from "./pending.js";
@@ -38,7 +38,7 @@ import { describeTrigger, nextFire, parseTrigger, WHEN_HELP } from "../shared/tr
 import { slugify, uniqueId } from "../shared/task-file.js";
 import { baseOfKey, bindTagLinker, keyOf, linkTags, normalizeTag, tagFromCwd, tagHead, tagLink, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
 import { clipForCharter, inboxPath, memoryPath, memoryRoot, proposeMemory, readMemory, type MemoryScope } from "./wizard-memory.js";
-import { ensureStewardTask } from "./memory-steward.js";
+import { retireStewardTask, startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET } from "./memory-steward.js";
 import { applyChatNames, chatBaseOf, chatNameOf, clearChatName, listChatNames, normChatName, peerAddress, planChatNames, setChatName } from "./chat-name.js";
 import {
   bindWizardStore,
@@ -97,6 +97,8 @@ const main = async (): Promise<void> => {
 
   // 定时调度器的 `inject` 真正实现, 赋值在 mirror-mode 的大块里 (要用到那里面的
   // wizards / m / notifyChat), 但 startScheduler 在那块外面接线 —— 见文件尾。
+  // 记忆整理者的执行体, 同样只有 mirror 模式给得出 —— 赋值见 scheduledTaskInject 旁边。
+  let stewardRun: ((prompt: string) => Promise<{ ok: boolean; reason?: string }>) | undefined;
   let scheduledTaskInject:
     | ((target: string, text: string, opts: { taskId: string; fresh: boolean }) => Promise<{ ok: boolean; reason?: string }>)
     | undefined;
@@ -138,8 +140,12 @@ const main = async (): Promise<void> => {
   const mirrorStore = loadMirrorStore(cfg.wrc.mirror.attachmentsFile);
   // 定时任务表 —— 每条任务是 ~/.wezard/tasks/<id>.task.mjs 一份可注入代码的配置
   // (见 shared/task-file.ts)。目录是热加载的: wizard 改完文件不用 reload 守护进程。
-  // 共享记忆的整理者是一条定时任务 (memory-steward.ts), 缺了就补一份默认的。
-  try { ensureStewardTask(memoryRoot(cfg.daemon.stateDir)); } catch (e) { log.warn({ err: (e as Error).message }, "memory steward task not written"); }
+  // 共享记忆的整理者改成了 daemon 内建定时器 (memory-steward.ts); 老版本写下的那条
+  // 定时任务要在任务表加载前停用, 否则两路并跑。
+  try {
+    const retired = retireStewardTask();
+    if (retired) log.info({ retired }, "memory steward task file retired");
+  } catch (e) { log.warn({ err: (e as Error).message }, "memory steward task not retired"); }
   const tasks = await openTaskRegistry(
     log.child({ mod: "tasks" }),
     (added, removed) => log.info({ added, removed }, "task files changed"),
@@ -1969,6 +1975,29 @@ const main = async (): Promise<void> => {
       })();
       return inj;
     };
+
+    // 记忆整理者的一轮: 在内部 key 上起白板 wizard, 私聊注入, 闲下来就收 —— 全程不碰
+    // 任何群 (silent spawn、channel ""、无 notifyChat)。它没有人能点审批卡, 所以这一轮
+    // 给它的 key 开一个 ⏱ 窗口; 危险名单照旧逐条要卡, 而它的活 (读收件箱、改 md) 不在其列。
+    stewardRun = async (prompt) => {
+      const target = STEWARD_TARGET;
+      wizards.upsert(target, { description: "共享记忆整理的一次性执行体 (守护进程内建, 不属于任何群)", bornAt: Date.now() });
+      const name = wizards.rename(target, "memsteward-run");
+      setAutoWindow(target, STEWARD_RUN_MS + 5 * 60_000);
+      const done = async (r: { ok: boolean; reason?: string }) => {
+        await m.killPane(target).catch(() => undefined);
+        wizards.drop(target);
+        clearAutoWindow(target);
+        return r;
+      };
+      const spawned = await m.newSession(target, name, undefined, { cwd: memoryRoot(cfg.daemon.stateDir), silent: true, keepalive: false });
+      if (!spawned.ok) return done({ ok: false, reason: `spawn: ${spawned.reason ?? "unknown"}` });
+      const inj = await m.injectText(target, prompt, undefined, { from: { kind: "task", taskId: STEWARD_ID }, channel: "", envelope: stewardEnvelope() });
+      if (!inj.ok) return done(inj);
+      // 超时也收: 没人会对它喊 stop_wizard; 认领留着, 孤儿回收会再派一轮。
+      const idle = await waitForIdle(target, m.isBusy, STEWARD_RUN_MS, () => false);
+      return done(idle.idle ? { ok: true } : { ok: false, reason: idle.reason });
+    };
   }
 
   // 定时调度器 — 每 20s 检查任务表, 到点把 prompt 注入目标 wizard。
@@ -1982,6 +2011,11 @@ const main = async (): Promise<void> => {
     cwdOf: (t) => { const c = bridge.getCwd(t); return c.runningCwd || c.pendingCwd || c.defaultCwd; },
     fallbackTarget: () => (cfg.defaultChat ?? "").trim(),
   });
+
+  // 共享记忆整理 — daemon 内建, 不进任务表 / 日程, 不出任何气泡。
+  const steward = stewardRun
+    ? startSteward({ root: memoryRoot(cfg.daemon.stateDir), log: log.child({ mod: "steward" }), run: stewardRun })
+    : undefined;
 
   // pane 上限 — 每新建一个 wizard 数一次: 活着的会话 pane 超过 wrc.mirror.maxPanes
   // (默认 20, 0=关) 就从最久没动的收起。数量只在出生时增长, 所以不设定时器。只收
@@ -2010,6 +2044,7 @@ const main = async (): Promise<void> => {
   const shutdown = async (signal: string): Promise<void> => {
     log.info({ signal }, "shutdown signal");
     scheduler.stop();
+    steward?.stop();
     tasks.stop();
     netWatch.stop();
     // 同 POST /shutdown: 先把挂着的审批长轮询了结成「稍后续接」, 再关连接。
