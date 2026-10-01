@@ -202,7 +202,8 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 
 /* 群里的其他 role —— 挂在群下, 与会话项同一种读法、同一套尺寸 (名字 · 时刻 / 最近一句), 只靠缩进分层级。
    点开是「我与它在这个群里」的往来。 */
-.subs { margin: 0 0 6px 16px; border-left: 1px solid var(--line); padding-left: 2px }
+/* 竖线的 x 与关系图里的竖向连线对齐: 都在项左缘 +10px (关系树 ul 缩进 20 - 线距 li 10)。 */
+.subs { margin: 0 0 6px 10px; border-left: 1px solid var(--line); padding-left: 2px }
 .si { color: var(--ink) }
 .si-more {
   display: block; width: 100%; text-align: center; padding: 4px 8px; border: 0;
