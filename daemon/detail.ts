@@ -66,11 +66,20 @@ const pushFacts = async (): Promise<boolean> => {
   }).then((r) => r.ok, () => false); // 同 forwardToRemote: 远端挂了不该影响本机
 };
 
+// 聊天票据是长期凭据, 却只在造出来那一刻推过一次: 远端换过地址 (lisct → 本机 svr)、
+// 或那一下 svr 恰好不在, 它就永远缺席 —— 链接在本机开得了, 在 svr 上「未找到该会话」。
+// 所以每次 (重新) 连上远端都把全部票据补推一遍; 一个聊天一条, 量可以忽略, svr 侧 put 幂等。
+const forwardTickets = (): void =>
+  store?.list().filter((r) => r.kind === "chat").forEach(forwardToRemote);
+
 // 两个前置条件 (配了远端、装上了 provider) 谁先到都可能 —— 两处都调一次, 起过就不再起。
 const startFactsForward = (): void => {
   if (factsTimer || !remoteBase || !worldFacts) return;
+  let linked = false;
   const tick = (): void => {
     void pushFacts().then((ok) => {
+      if (ok && !linked) forwardTickets();
+      linked = ok;
       factsTimer = setTimeout(tick, ok ? FACTS_PUSH_MS : FACTS_RETRY_MS);
       factsTimer.unref();
     });
