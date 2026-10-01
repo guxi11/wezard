@@ -365,12 +365,28 @@
     }).length;
   };
   var reading = function () { return VIEW === 'msgs' && !document.hidden; };
+  // 窗口是 `a:<x>|<peers>` (关系图卡片) 时, 视角与 p 的往来在不在里面 —— 与服务端 talkOf 同一口径:
+  // 一端是 x、另一端是 peers 之一 (peers 空 = 不限), 不分频道。
+  var talkCovers = function (p) {
+    var t = convOf(CONV);
+    if (!t || t.kind !== 'all') return false;
+    var hit = function (a, b) { return t.who === a && (!t.peers.length || t.peers.indexOf(b) >= 0); };
+    return hit(ROLE, p) || hit(p, ROLE);
+  };
+  // 一处会话里这次读到了哪几对 (存水位用的 withRole): 侧栏选中的就是那一项; 关系图卡片打开的
+  // 对话横跨会话, 每个会话里落在那段对话里的那几对都算 —— 私聊的那一对记在会话本身 ('')。
+  var readPairs = function (c) {
+    if (c.key === CONV) return [WITH];
+    if (c.kind !== 'group') return c.peer && talkCovers(c.peer) ? [''] : [];
+    return (c.subs || []).filter(function (s) { return talkCovers(s.role); }).map(function (s) { return s.role; });
+  };
   // 读整个群 = 群的水位推到此刻 (子项随之全清); 只读一对 = 只推那一对的。
   var markRead = function (c) {
-    if (!reading() || c.key !== CONV || !unreadOf(c, WITH)) return;
-    var h = c.heard[c.heard.length - 1];
-    READ.at[readKey(c.key, WITH)] = Math.max(R.at, h ? h[0] : 0);
-    saveRead();
+    if (!reading()) return;
+    var h = c.heard && c.heard[c.heard.length - 1];
+    var hit = readPairs(c).filter(function (w) { return unreadOf(c, w || (c.kind !== 'group' ? c.peer : '')); });
+    hit.forEach(function (w) { READ.at[readKey(c.key, w)] = Math.max(R.at, h ? h[0] : 0); });
+    if (hit.length) saveRead();
   };
 
   // 展开态按会话各记各的: 点开一个不收起别的, 轮询重画也不动它。
