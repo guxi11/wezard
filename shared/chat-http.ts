@@ -25,7 +25,7 @@ import { baseOfKey } from "./session-label.js";
 import { isMark, isPost, isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, type WorldFacts } from "./world.js";
 import {
-  allMessages, convKeyOf, convMessages, convsOf, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
+  allMessages, convKeyOf, convMessages, parseTalkKey, convsOf, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
   roleInfo, roleStats, sessionsOf, windowStats, type Directory, type Msg, type SessionSpan,
 } from "./role-view.js";
 import { renderMark, renderMsg, type MsgFragment } from "./role-render.js";
@@ -238,7 +238,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
   };
 
   /** 窗口里画谁的断点: 平常是视角自己; 「某人的全部对话」窗口画那个人的。 */
-  const markRole = (v: View): string => (v.conv.startsWith("a:") ? v.conv.slice(2) : v.role);
+  const markRole = (v: View): string => parseTalkKey(v.conv)?.who ?? v.role;
 
   const viewOf = (records: readonly DetailRecord[], dir: Directory, ticket: Ticket, url: URL): View | undefined => {
     const r = pickRole(dir, ticket, url);

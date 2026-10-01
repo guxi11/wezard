@@ -274,12 +274,13 @@
   });
 
   // ── 左栏: 当前 role 的名片 + 会话列表 ──
-  // `a:<x>` 不在列表里: 它是 x 参与的全部对话按时间排开 (关系图里点一张和视角没有对话的卡片),
-  // 现造一项 —— 落地时才不会被当成失效的会话退回默认。
+  // `a:<x>` / `a:<x>|<p1>,<p2>` 不在列表里: x 参与的全部对话 / x 与这几个对端之间的, 按时间排开
+  // (关系图里点卡片看的就是它, 服务端同一个 talkOf) —— 现造一项, 落地时才不会被当成失效的会话退回默认。
   var convOf = function (key) {
     if (key && key.indexOf('a:') === 0) {
-      var who = key.slice(2);
-      return { key: key, kind: 'all', who: who, name: nameOf(who) + ' 的全部对话', subs: [] };
+      var part = key.slice(2).split('|'), who = part[0], peers = (part[1] || '').split(',').filter(Boolean);
+      var name = nameOf(who) + (peers.length ? ' 与 ' + peers.map(nameOf).join('、') + ' 的对话' : ' 的全部对话');
+      return { key: key, kind: 'all', who: who, peers: peers, name: name, subs: [] };
     }
     return R.convs.filter(function (c) { return c.key === key; })[0];
   };
@@ -1274,8 +1275,7 @@
     return !p ? 'root' : ['spawn', 'clone', 'peer', 'job', 'graph'].filter(function (k) { return p.kinds[k]; })[0] || 'peer';
   };
 
-  // ── 卡片 = 一条边: 点它就是去看「箭头两端那两个 role」之间的消息 ──
-  // 卡片画的是节点, 但它承载的是指进来的那条边 (主父亲 → 它); 根没有边, 点它只换视角。
+  // ── 卡片承载指进来的那条边 (主父亲 → 它): 预览取视角与对端在侧栏里现成的那一项 ──
   var edgeEnds = function (F, t) { var p = F.pp[t]; return p ? [p.from, t] : [t]; };
   // 视角 role 与 other 之间的那一项: 私聊优先, 否则挑最近说过话的那个群里的「只看我与它」。
   var pairConv = function (other) {
@@ -1291,16 +1291,20 @@
     var other = ends.length === 2 && ends.indexOf(ROLE) >= 0 && ends.filter(function (x) { return x !== ROLE; })[0];
     return other ? pairConv(other) : null;
   };
-  // 有对话 → 打开这段对话; 没有 (根、和视角没有对话计数的) → 展开这个 role 参与的全部对话, 不换视角。
-  var openEdge = function (F, t) {
-    var hit = edgeConv(F, t) || ['a:' + t, ''];
-    selectConv(hit[0], hit[1]);
+  // 点任何一张卡片 (视角自己也一样) 看的窗口: 它与图上和它相连的那几个 role 之间的对话, 不换视角。
+  // links = 这一次画出来的树里, 它的父亲与孩子 (见 linksOf); 一个都没连着 = 它的全部对话。
+  var talkKey = function (links, t) {
+    var ls = links[t] || [];
+    return 'a:' + t + (ls.length ? '|' + ls.join(',') : '');
   };
-  // 选中的那一项就是这条边 (视角是一端, 正在看的对端是另一端), 或者正展开着这张卡片的全部对话。
-  var edgeOn = function (F, t) {
-    if (CONV === 'a:' + t) return true;
-    var ends = edgeEnds(F, t), peer = CONV ? pairPeer(convOf(CONV)) : '';
-    return ends.length === 2 && ends.indexOf(ROLE) >= 0 && ends.indexOf(peer) >= 0 && peer !== ROLE;
+  // 图上相连 = 画出来的主父亲边: 它的父亲 + 它的孩子, 两端都画出来了才算。
+  var linksOf = function (F, shown) {
+    var on = shown.reduce(function (m, n) { m[n.target] = 1; return m; }, {});
+    return shown.reduce(function (m, n) {
+      var t = n.target, p = F.pp[t];
+      m[t] = (p && on[p.from] ? [p.from] : []).concat((F.kids[t] || []).filter(function (k) { return on[k]; }));
+      return m;
+    }, {});
   };
 
   // 卡片与侧栏会话项同一套: 头像 · 名字 + 状态灯 · 时刻 / 最近一句。
@@ -1318,7 +1322,7 @@
       line(nm(n.target, n.name, true) + tail, src ? src.lastTs : p ? p.last : n.lastTs, src ? src.preview : n.preview,
         stTag(n, true), c ? unreadOf(c, s ? s.role : undefined) : 0);
     var via = F.vis && F.vis[n.target] === 'via';
-    return '<button class="ci tci' + (me ? ' me' : '') + (via ? ' via' : '') + (edgeOn(F, n.target) ? ' on' : '') + '" data-t="' + esc(n.target) + '"' +
+    return '<button class="ci tci' + (me ? ' me' : '') + (via ? ' via' : '') + (F.links && CONV === talkKey(F.links, n.target) ? ' on' : '') + '" data-t="' + esc(n.target) + '"' +
       (via ? ' title="' + esc(nameOf(n.target) + ' 没和 ' + nameOf(ROLE) + ' 对过话, 留着是为了连到它下面对过话的') + '"' : '') + '>' +
       labelHTML(p) + row + '</button>';
   };
@@ -1373,12 +1377,18 @@
     var path = me ? chainUp(F, ROLE) : [];
     // 和视角之间没有对话的关系只在「看全部」里画。
     F.vis = all ? null : visibleOf(F);
-    var trees = all
-      ? F.roots.slice().sort(function (a, b) {
-          var mine = path[0];
-          return (b === mine) - (a === mine) || ((nodeOf(b) || {}).lastTs || 0) - ((nodeOf(a) || {}).lastTs || 0);
-        }).map(function (r) { return treeHTML(F, r, 0, null, false, shown, {}); }).join('')
-      : treeHTML(F, path[0], 0, focusKeep(path), false, shown, {});
+    var draw = function (into) {
+      return all
+        ? F.roots.slice().sort(function (a, b) {
+            var mine = path[0];
+            return (b === mine) - (a === mine) || ((nodeOf(b) || {}).lastTs || 0) - ((nodeOf(a) || {}).lastTs || 0);
+          }).map(function (r) { return treeHTML(F, r, 0, null, false, into, {}); }).join('')
+        : treeHTML(F, path[0], 0, focusKeep(path), false, into, {});
+    };
+    // 两遍: 先量出画了谁 (卡片的窗口要知道它在图上连着谁), 再带着连线画 —— 选中态也就进了 html。
+    draw(shown);
+    F.links = linksOf(F, shown);
+    var trees = draw([]);
     var span = rg ? (rg.s === R.sessions[R.sessions.length - 1] ? '最新 session' : 'session ' + fmtClock(rg.from)) : '全部时间';
     var alone = !all && shown.length < 2;
     var html = '<div class="tview">' +
@@ -1394,7 +1404,7 @@
     convsEl._tree = html; convsEl._html = '';
     convsEl.innerHTML = html;
     convsEl.querySelectorAll('.tci').forEach(function (el) {
-      el.onclick = function () { openEdge(F, el.getAttribute('data-t')); };
+      el.onclick = function () { selectConv(talkKey(F.links, el.getAttribute('data-t')), ''); };
     });
     bindGo(convsEl);
     var tall = convsEl.querySelector('.tall');

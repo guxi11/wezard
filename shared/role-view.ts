@@ -242,6 +242,24 @@ const involves = (m: Msg, role: string): boolean => m.from === role || m.to === 
 const other = (m: Msg, role: string): string => (m.from === role ? m.to : m.from);
 export const convKeyOf = (m: Msg, role: string): string => (m.channel ? `c:${m.channel}` : `p:${other(m, role)}`);
 
+/** 「某 role 与某些对端的往来」—— 侧栏会话项 / 子项、会话窗口、关系图卡片的窗口都是它。
+ *  peers 空 = 不限对端 (role 参与的全部); chat 给了就只在那个频道 ("" = 私聊), 不给 = 不限。
+ *  保温 ping 的对端是系统, 不是这一对里的谁 —— 限定了对端时按它保温的那个 wizard 归:
+ *  保温的是 role 或其中一个对端就留着。时间序不变。 */
+export const talkOf = (msgs: readonly Msg[], role: string, peers: readonly string[] = [], chat?: string): Msg[] => {
+  const pick = new Set(peers);
+  const withPeer = (m: Msg): boolean =>
+    isPing(m) ? m.turn.target === role || pick.has(m.turn.target ?? "") : involves(m, role) && pick.has(other(m, role));
+  return msgs.filter((m) => (chat === undefined || m.channel === chat) && (pick.size ? withPeer(m) : involves(m, role)));
+};
+
+/** `a:<x>` = x 参与的全部对话; `a:<x>|<p1>,<p2>` = x 与这几个对端之间的 —— 不分会话, 按时间排开。 */
+export const parseTalkKey = (key: string): { who: string; peers: string[] } | undefined => {
+  if (!key.startsWith("a:")) return undefined;
+  const [who = "", rest] = key.slice(2).split("|");
+  return { who, peers: rest ? rest.split(",").filter(Boolean) : [] };
+};
+
 const stripMd = (s: string): string => s.replace(/[`*_~|#>]/g, "").replace(/\s+/g, " ").trim();
 /** 一条消息里最后那句话与它说出的时刻: 入 = 问话 (轮次开始); 出 = 最后一段 text ——
  *  工具调用之间的独白也算, 时刻取那段 text 自己的, 而不是这一轮开口的时刻。 */
@@ -296,13 +314,13 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
   // 开口之后才进来的话才可能没读过: 回过话 = 读到了那里。
   const spoke = (ms: readonly Msg[]): number =>
     ms.filter((m) => m.from === role).reduce((t, m) => Math.max(t, saidOf(m).ts), 0);
-  const mine = msgs.filter((m) => involves(m, role));
+  const mine = talkOf(msgs, role);
   const keys = [...new Set(mine.filter((m) => !m.channel || m.from === role).map((m) => convKeyOf(m, role)))];
   return keys
     .map((key): Conv => {
       if (key.startsWith("p:")) {
         const peer = key.slice(2);
-        const ms = mine.filter((m) => !m.channel && other(m, role) === peer);
+        const ms = talkOf(mine, role, [peer], "");
         return {
           key, kind: "wizard", name: dir.nameOf(peer), label: dir.labelOf(peer), base: "", peer,
           status: dir.status(peer, now),
@@ -315,8 +333,8 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
       const others = [...new Set(all.flatMap((m) => [m.from, m.to]))].filter((r) => r !== role && !r.startsWith("task:") && r !== SYSTEM);
       const subs = others
         .map((r): ConvSub => {
-          const pair = all.filter((m) => involves(m, role) && other(m, role) === r);
-          const seen = all.filter((m) => involves(m, r));
+          const pair = talkOf(all, role, [r]);
+          const seen = talkOf(all, r);
           return {
             role: r, name: dir.nameOf(r), label: dir.labelOf(r), count: pair.length, mine: spoke(pair),
             // 标题行已经是它的名字, 预览只放正文。
@@ -336,23 +354,14 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
     .sort((a, b) => b.lastTs - a.lastTs);
 };
 
-/** 一个会话窗口里的消息。`withRole` 只对公开频道有意义: 当前 role 与它在这个频道里的往来。 */
+/** 一个会话窗口里的消息。`withRole` 只对公开频道有意义: 当前 role 与它在这个频道里的往来。
+ *  整个公开频道 (不带 withRole) 是频道里所有人说的话, 不是某个 role 的往来 —— 唯一不走 talkOf 的。 */
 export const convMessages = (msgs: readonly Msg[], role: string, key: string, withRole?: string): Msg[] => {
-  // `a:<x>` = x 参与的全部对话, 不分会话, 按时间排开 —— 关系图里点一张和视角没有对话的卡片看的就是它。
-  if (key.startsWith("a:")) {
-    const who = key.slice(2);
-    return msgs.filter((m) => involves(m, who));
-  }
-  if (key.startsWith("p:")) {
-    const peer = key.slice(2);
-    return msgs.filter((m) => !m.channel && involves(m, role) && other(m, role) === peer);
-  }
+  const t = parseTalkKey(key);
+  if (t) return talkOf(msgs, t.who, t.peers);
+  if (key.startsWith("p:")) return talkOf(msgs, role, [key.slice(2)], "");
   const base = key.slice(2);
-  const ch = msgs.filter((m) => m.channel === base);
-  // ping 的对端是系统, 不是这一对里的谁 —— 按它保温的那个 wizard 归: 在这一对里就留着。
-  const inPair = (m: Msg): boolean =>
-    isPing(m) ? m.turn.target === role || m.turn.target === withRole : involves(m, role) && other(m, role) === withRole;
-  return withRole ? ch.filter(inPair) : ch;
+  return withRole ? talkOf(msgs, role, [withRole], base) : msgs.filter((m) => m.channel === base);
 };
 
 // ── session ───────────────────────────────────────────────────────────
@@ -458,4 +467,4 @@ export const windowStats = (records: readonly DetailRecord[], msgs: readonly Msg
 /** 与别的 role 有没有关系 (家谱 / 私聊 / 派活) —— 决定顶栏要不要出「关系图」入口。 */
 export const hasRelations = (msgs: readonly Msg[], role: string, info: RoleInfo): boolean =>
   !!info.parent || info.clones.length > 0 || info.spawns.length > 0 ||
-  msgs.some((m) => involves(m, role) && (m.turn.from?.kind === "peer"));
+  talkOf(msgs, role).some((m) => m.turn.from?.kind === "peer");

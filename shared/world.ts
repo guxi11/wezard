@@ -21,6 +21,7 @@ import { baseOfKey, labelFor, tagOfKey } from "./session-label.js";
 import { withoutKeepaliveTurns } from "./keepalive.js";
 import { isTurn, staleAt, isGhostTurn } from "./chat-view.js";
 import type { DetailRecord, TurnDetailRecord } from "./detail-store.js";
+import { senderOf } from "./role-view.js";
 
 // ── 注册表侧 (daemon 独有) ────────────────────────────────────────────
 /** 一个 wizard 的登记信息 + 此刻的活体状态。daemon 从 wizard.json + tmux 取。 */
@@ -213,6 +214,8 @@ const previewOf = (r: TurnDetailRecord): string => {
   return stripMd(texts[texts.length - 1]?.body ?? r.userQuery ?? "").slice(0, 100);
 };
 
+const isHuman = (id: string): boolean => id.startsWith("human:") && id !== "human:";
+
 /** 一条边的身份 —— 同一对端点同一种类只留一条, count 累加。 */
 const edgeKey = (kind: string, from: string, to: string): string => `${kind}\u0000${from}\u0000${to}`;
 
@@ -235,7 +238,8 @@ const bumpEdge = (
     to,
     count: (cur?.count ?? 0) + 1,
     lastTs: Math.max(cur?.lastTs ?? 0, ts),
-    cross: baseOfKey(from) !== baseOfKey(to),
+    // 人不住在哪个群里 —— 它说话的地方没有「跨」可言。
+    cross: !isHuman(from) && baseOfKey(from) !== baseOfKey(to),
     jobs: merge(cur?.jobs, tag?.jobs),
     runs: merge(cur?.runs, tag?.runs),
     ts: [...(cur?.ts ?? []), ts].slice(-EDGE_TS_MAX),
@@ -314,7 +318,22 @@ export const buildWorld = (
     };
   });
 
-  const known = new Set(nodes.map((n) => n.target));
+  // 人也是对话方: 开过一轮的那个人 (认得出是谁的) 是一个节点, 它 → 那个 wizard 是一条对话边。
+  // 不进 chats —— 人不住在哪个聊天里; 只跟着它连着的 wizard 一起下发。
+  const byHuman = turns.reduce((m, r) => {
+    const who = senderOf(r);
+    return isHuman(who) ? m.set(who, [...(m.get(who) ?? []), r]) : m;
+  }, new Map<string, TurnDetailRecord[]>());
+  const humans: WorldNode[] = [...byHuman].map(([target, rs]) => {
+    const last = rs.reduce((a, b) => (b.createdAt > a.createdAt ? b : a));
+    return {
+      target, base: "", tag: "", chat: "", name: target.slice("human:".length), label: "👤", description: "",
+      cwd: "", model: "", cli: "", busy: false, alive: false, known: false, self: target === scope.self, local: false,
+      inherited: false, lastTs: last.createdAt, turns: rs.length, preview: stripMd(last.userQuery ?? "").slice(0, 100),
+      runningUntil: 0, taskTurns: 0, peerTurns: 0,
+    };
+  });
+  const known = new Set([...nodes, ...humans].map((n) => n.target));
   // 一条边的两端都必须是节点 —— 派活方可能已经被回收, 那条边就无处落脚, 画一个
   // 悬空端点只会让人以为漏了谁。
   const link = (m: Map<string, WorldEdge>, kind: WorldEdgeKind, from: string, to: string, ts: number, tag?: Parameters<typeof bumpEdge>[5]): Map<string, WorldEdge> =>
@@ -325,7 +344,10 @@ export const buildWorld = (
     const to = r.target!;
     const f = r.from;
     // 定时任务没有"派活的一方" —— 它是节点上的计数 (taskTurns), 不是一条边。
-    const m1 = f?.kind === "peer" && f.from ? link(m, "peer", f.from, to, r.createdAt, { jobs: f.job }) : m;
+    const who = senderOf(r);
+    const m1 = f?.kind === "peer" && f.from ? link(m, "peer", f.from, to, r.createdAt, { jobs: f.job })
+      : isHuman(who) ? link(m, "peer", who, to, r.createdAt)
+      : m;
     // graph: 上一步的 tag 喂给这一步 —— 同聊天内解析成 target。
     const prev = r.origin?.fromTag;
     return prev !== undefined
@@ -385,13 +407,17 @@ export const buildWorld = (
     });
 
   // 节点表跟着卡片走 —— 画不出来的节点下发了也只是流量 (这条路由是被轮询的)。
-  const shown = new Set(chats.flatMap((c) => c.members.map((mm) => mm.target)));
+  const onCards = new Set(chats.flatMap((c) => c.members.map((mm) => mm.target)));
+  const shown = new Set([
+    ...onCards,
+    ...humans.filter((h) => edges.some((e) => e.from === h.target && onCards.has(e.to))).map((h) => h.target),
+  ]);
   return {
     at: now,
     base: scope.base,
     self: scope.self,
     chats,
-    nodes: nodes.filter((n) => shown.has(n.target)).sort(byTs),
+    nodes: [...nodes, ...humans].filter((n) => shown.has(n.target)).sort(byTs),
     // 两端都还在图上的边才画得出来。
     edges: edges.filter((e) => shown.has(e.from) && shown.has(e.to)),
     jobs: [...facts.jobs].sort((a, b) => (b.closedAt ?? b.openedAt) - (a.closedAt ?? a.openedAt)),
