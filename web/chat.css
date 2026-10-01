@@ -359,11 +359,22 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 .flip:hover, .flip:focus-visible { background: #2f55c90d; color: var(--accent) }
 .flip[disabled] { cursor: default; background: transparent !important; color: transparent !important }
 /* 说给谁: 贴着气泡写在门里, 与气泡首行对齐。不吃点击 —— 点到它就是点门。
-   绝对定位不撑高这一行; 门窄就折行, 最多三行。 */
-.flip { position: relative }
+   门竖排: 描述在上、换视角箭头在下, 描述折几行箭头就跟着往下让, 两者不叠。
+   contain: size —— 门的内容不参与这一行的高度, 描述再长也不撑高一行。 */
+.flip:has(.dest) {
+  flex-direction: column; justify-content: flex-start; gap: 6px; contain: size;
+  padding: calc(var(--av) + 12px) 4px 0;
+}
+/* 只留向下的吸附: 原先的 bottom 吸附会把箭头往上拽到视窗中线, 越过上面的描述。 */
+.flip:has(.dest) .fi { bottom: auto; flex: none }
+/* 门比描述矮 (一行短气泡) 时不许把描述压扁, 宁可溢到行外。 */
+.flip:has(.dest) .dest { flex: none }
+/* 压过 .mrow.mine .flip 的 flex-end: 竖排后那条是纵轴, 会把描述推到行底。 */
+.mrow .flip:has(.dest) { justify-content: flex-start }
+.mrow.them .flip:has(.dest) { align-items: flex-start }
+.mrow.mine .flip:has(.dest) { align-items: flex-end }
 .flip .dest {
-  position: absolute; top: calc(var(--av) + 12px); max-width: calc(100% - 16px);
-  font-size: 11px; line-height: 1.45; color: var(--faint); pointer-events: none;
+  max-width: 100%; font-size: 11px; line-height: 1.45; color: var(--faint); pointer-events: none;
   display: flex; align-items: center; gap: 4px; max-height: calc(3 * 1.45em); overflow: hidden;
 }
 .flip .dest .arr { font-style: normal; flex: none }
@@ -372,11 +383,9 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
   display: grid; place-items: center; font-size: 11px; line-height: 1;
 }
 .flip .dest .dn { min-width: 0; overflow-wrap: anywhere }
-.mrow.them .flip .dest { left: 4px; text-align: left }
-.mrow.mine .flip .dest { right: 4px; text-align: right; justify-content: flex-end }
+.mrow.them .flip .dest { text-align: left }
+.mrow.mine .flip .dest { text-align: right; justify-content: flex-end }
 .flip[disabled] .dest { color: var(--faint) }
-/* 有描述的门, 换视角的箭头让到描述下面一行, 两者不叠。 */
-.flip:has(.dest) { align-items: flex-start; padding-top: calc(var(--av) + 12px + 1.45em + 6px) }
 .mwho .to { display: none }
 .mwho .av.go { cursor: pointer }
 .mwho .av.go:hover { border-color: var(--accent); background: #2f55c914 }
