@@ -633,8 +633,19 @@
       var v = b.getAttribute('data-view');
       b.onclick = function () { v === 'world' ? setWorld(!WORLD) : setView(VIEW === v ? 'msgs' : v); };
     });
-    // 标题就是这一页的主张: 你此刻站在谁的位置上。换视角 → 标题跟着换。
-    document.title = nameOf(r.id) + ' 的视角';
+    // 标题就是这一页的主张: 你此刻站在谁的位置上。换视角 → 标题与 favicon 跟着换成它的头像。
+    document.title = (r.label ? r.label + ' ' : '') + nameOf(r.id) + ' 的视角';
+    setFavicon(r.label);
+  };
+
+  // favicon = 头像 emoji 画成的 SVG data URI; 没有头像就不动。
+  var setFavicon = function (emoji) {
+    if (!emoji) return;
+    var link = document.querySelector('link[rel="icon"]') || document.head.appendChild(Object.assign(document.createElement('link'), { rel: 'icon' }));
+    link.type = 'image/svg+xml';
+    link.href = 'data:image/svg+xml,' + encodeURIComponent(
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text x="50" y="50" font-size="86" text-anchor="middle" dominant-baseline="central">' +
+      esc(emoji) + '</text></svg>');
   };
 
   // ── 用量条: 一组轮次的总账 ──
