@@ -88,6 +88,14 @@ button { font: inherit; color: inherit }
 .rolebar .nl { display: flex; align-items: center; gap: 8px; min-width: 0 }
 #rb-st { flex: none; display: inline-flex }
 .rolebar .nl .nm { min-width: 0; flex: 0 1 auto }
+.rolebar .nl .cp { min-width: 0; flex: 0 1 auto; display: inline-flex; cursor: copy }
+.rolebar .nl .cp:hover .nm { text-decoration: underline dotted var(--faint); text-underline-offset: 3px }
+.toast {
+  position: fixed; left: 50%; bottom: 28px; z-index: 1000; transform: translate(-50%, 8px);
+  padding: 6px 12px; border-radius: 8px; font-size: 12.5px; color: #fff; background: rgba(28, 36, 48, .88);
+  opacity: 0; pointer-events: none; transition: opacity .18s, transform .18s;
+}
+.toast.on { opacity: 1; transform: translate(-50%, 0) }
 #rb-sp { flex: none; display: inline-flex }
 .sp { position: relative; display: inline-flex }
 .sp-btn {
@@ -233,7 +241,7 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 /* ── 右栏头: 这个群聊 / 私聊是什么 ───────────────────────────────── */
 .main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--card) }
 .chathead {
-  flex: none; display: flex; align-items: center; gap: 12px; padding: 10px 20px; min-height: 58px;
+  flex: none; display: flex; align-items: center; gap: 12px; margin: 0; padding: 10px 20px; min-height: 58px;
   background: var(--card); border-bottom: 1px solid var(--line);
 }
 .chathead .back { display: none; border: 0; background: none; font-size: 22px; color: var(--mute); cursor: pointer; padding: 0 4px }

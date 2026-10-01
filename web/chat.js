@@ -517,6 +517,27 @@
     return tile('plan', '日程', esc(sub), p.broken ? 'bad' : '');
   };
 
+  // 轻提示: 底部居中一枚, 新的顶掉旧的。
+  var toast = (function () {
+    var t, el;
+    return function (msg) {
+      el = el || document.body.appendChild(document.createElement('div'));
+      el.className = 'toast on'; el.textContent = msg;
+      clearTimeout(t); t = setTimeout(function () { el.className = 'toast'; }, 1600);
+    };
+  })();
+  // navigator.clipboard 只在安全上下文里有 —— 走 http 的远端页退回 execCommand。
+  var copyText = function (text) {
+    var legacy = function () {
+      var ta = document.body.appendChild(document.createElement('textarea'));
+      ta.value = text; ta.style.cssText = 'position:fixed;opacity:0'; ta.select();
+      var ok = document.execCommand('copy'); ta.remove();
+      return ok ? Promise.resolve() : Promise.reject();
+    };
+    (navigator.clipboard ? navigator.clipboard.writeText(text).catch(legacy) : legacy())
+      .then(function () { toast('已复制 ' + text); }, function () { toast('复制失败'); });
+  };
+
   // 名片: 身份 · 出身 · cwd · 出生; 名片下面一排是关系 / 日程入口。
   var renderRole = function () {
     var r = R.role;
@@ -543,12 +564,13 @@
       (t0 ? ' · 开始于 ' + fmtDay(t0) : '')) + '">🕘 ' + esc(when.join(' · ')) + '</span>');
     $('#rb-who').innerHTML =
       '<div class="id"><span class="av">' + esc(r.label) + '</span>' +
-        '<span class="l"><span class="nl">' + nm(r.id, r.name) + (r.kind === 'wizard' ? '<span id="rb-st"></span>' : '') +
+        '<span class="l"><span class="nl"><span class="cp" title="' + esc('复制 ' + nameOf(r.id)) + '">' + nm(r.id, r.name) + '</span>' + (r.kind === 'wizard' ? '<span id="rb-st"></span>' : '') +
           '<span id="rb-sp">' + (R.sessions.length > 1 ? sessPicker() : '') + '</span></span>' +
           (kind ? '<span class="k">' + kind + '</span>' : '') + '</span></div>' +
       (r.description ? '<p class="job">' + esc(r.description) + '</p>' : '') +
       '<div class="facts">' + facts.join('') + '</div>';
     paintStatus();
+    $('#rb-who').querySelector('.cp').onclick = function () { copyText(nameOf(r.id)); };
     $('#rb-who').querySelectorAll('.go').forEach(function (g) {
       g.onclick = function () { switchRole(g.getAttribute('data-r')); };
     });
