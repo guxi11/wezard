@@ -783,19 +783,24 @@
     var other = mine ? m.to : m.from;
     // 看 key 而不是会话列表: 换视角就地重包时, 列表还是上一个 role 的。
     var group = CONV.indexOf('p:') !== 0;
-    // 群里我不是收信方的那条 (X → Y), 头上写清是说给谁的。
-    var to = !mine && m.to !== ROLE && group ? '<span class="to">→ ' + avBtn(m.to, m.toLabel) + nm(m.to, m.toName, true) + '</span>' : '';
+    // 说给谁: 群里我不是收信方的那条 (X → Y); 我发的那条, 收信方不是顶栏那个对端时
+    // (一对一里收信方就是顶栏那个对端, 不再重复写)。
+    var dst = mine
+      ? (m.to && m.to !== 'human:' && m.to !== (group ? pairPeer(convOf(CONV)) : CONV.slice(2)) ? m.to : '')
+      : (m.to !== ROLE && group ? m.to : '');
+    // 宽屏写在气泡对面的空白里 (.dest, 在换视角的门里但不吃点击); 窄屏空白太窄, 退回消息头 (.to)。
+    var to = dst ? '<span class="to">→ ' + avBtn(m.to, m.toLabel) + nm(m.to, m.toName, true) + '</span>' : '';
+    var dest = dst ? '<span class="dest" aria-hidden="true">→ ' + esc(nameOf(dst)) + '</span>' : '';
     var priv = !m.channel && group ? '<span class="ch priv">私聊</span>' : '';
     // 本轮的账 (呼吸点 + 模型 / token / 耗时) 跟在时刻后面 —— 片段是服务端渲染好的。
     var stat = m.meta ? '<span class="mstat">' + m.meta + '</span>' : '';
-    // 一对一里收信方就是顶栏那个对端, 我的消息头不再重复写。
     var who = mine
-      ? '<span class="to">' + (m.to && m.to !== 'human:' && m.to !== (group ? pairPeer(convOf(CONV)) : CONV.slice(2)) ? '→ ' + avBtn(m.to, m.toLabel) + nm(m.to, m.toName, true) : '') + '</span>' + stamp(m.ts) + stat + avBtn(m.from, m.fromLabel)
+      ? to + stamp(m.ts) + stat + avBtn(m.from, m.fromLabel)
       : avBtn(m.from, m.fromLabel) + nm(m.from, m.fromName, true) + to + priv + stamp(m.ts) + stat;
     var sw = canSwitch(other);
     var flip = '<button class="flip" data-r="' + esc(other) + '"' + (sw ? '' : ' disabled tabindex="-1"') +
       ' aria-label="' + esc(sw ? '切到 ' + nameOf(other) + ' 的视角' : '') + '">' +
-      (sw ? '<span class="fi"><span class="fn">' + esc(nameOf(other)) + '</span>' + CHEVRON + '</span>' : '') + '</button>';
+      dest + (sw ? '<span class="fi"><span class="fn">' + esc(nameOf(other)) + '</span>' + CHEVRON + '</span>' : '') + '</button>';
     return '<div class="mrow ' + (mine ? 'mine' : 'them') + '" data-id="' + esc(m.id) + '" data-turn="' + esc(m.turnId || m.id) + '" data-ts="' + m.ts + '"' +
       (m.ping ? ' data-ping="1" data-ping-who="' + esc(m.dir === 'in' ? m.toName : m.fromName) + '"' : '') + ' data-sig="' + esc(m.sig) + '" data-stale-at="' + (m.staleAt || 0) + '">' +
       '<div class="mcol"><div class="mwho">' + who + '</div><div class="mb">' + (m.dir === 'out' ? signCut(m.html, m.from, m.fromName) : m.html) + '</div></div>' +

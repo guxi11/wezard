@@ -357,6 +357,18 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 .flip .fn { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .flip:hover, .flip:focus-visible { background: #2f55c90d; color: var(--accent) }
 .flip[disabled] { cursor: default; background: transparent !important; color: transparent !important }
+/* 说给谁: 贴着气泡写在门里, 与气泡首行对齐。不吃点击 —— 点到它就是点门。
+   绝对定位不撑高这一行; 门窄就折行, 最多三行。 */
+.flip { position: relative }
+.flip .dest {
+  position: absolute; top: calc(var(--av) + 12px); max-width: calc(100% - 16px);
+  font-size: 11px; line-height: 1.45; color: var(--faint); pointer-events: none;
+  overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
+}
+.mrow.them .flip .dest { left: 4px; text-align: left }
+.mrow.mine .flip .dest { right: 4px; text-align: right }
+.flip[disabled] .dest { color: var(--faint) }
+.mwho .to { display: none }
 .mwho .av.go { cursor: pointer }
 .mwho .av.go:hover { border-color: var(--accent); background: #2f55c914 }
 
@@ -419,6 +431,7 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 }
 .ping-fold .mcol { max-width: 100% }
 .ping-fold .flip { display: none }
+.ping-fold .mwho .to { display: inline-flex }
 /* 折叠里的气泡同是白底 —— 描一圈虚线跟对话气泡分开, 与外框一个语气。 */
 .ping-fold .mb :is(.bubble.mq, .say > .bubble) { border: 1px dashed var(--bub-line) }
 
@@ -433,6 +446,8 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
   .thread { padding: 12px }
   .mcol { max-width: calc(86% + var(--av)) }
   .flip { min-width: 16px; padding: 0 4px; font-size: 0 }
+  .flip .dest { display: none }
+  .mwho .to { display: inline-flex }
   .thread { padding-bottom: calc(12px + env(safe-area-inset-bottom)) }
   .usage { padding: 8px 12px }
   .usage .leg { margin-left: 0 }
