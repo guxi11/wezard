@@ -59,19 +59,24 @@ button { font: inherit; color: inherit }
   flex-wrap: nowrap; align-items: stretch;
 }
 .rolebar > .who { min-width: 0 }
-.rolebar .id { display: flex; gap: 10px; align-items: center; min-width: 0 }
-.rolebar .id .av { font-size: 26px; line-height: 1; flex: none }
-.rolebar .id .l { min-width: 0; display: flex; flex-direction: column; gap: 2px }
+.rolebar .id { display: flex; gap: 12px; align-items: center; min-width: 0 }
+/* 与会话项头像同一套不透明底, 放大到名片尺寸。 */
+.rolebar .id .av {
+  flex: none; display: grid; place-items: center; width: 48px; height: 48px; border-radius: 14px;
+  background: var(--av-bg); box-shadow: inset 0 0 0 1px var(--av-line); font-size: 28px; line-height: 1;
+}
+.rolebar .id .l { min-width: 0; display: flex; flex-direction: column; gap: 3px }
 .rolebar .id .nm { font-size: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.rolebar .id .k { font-size: 11.5px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 /* 职责是一句话, 至多两行; 截掉的悬停看全文 (chat.js 的截断提示)。 */
 .rolebar .job {
   margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--ink); opacity: .8; word-break: break-word;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
-.rolebar .facts { display: flex; gap: 6px 12px; flex-wrap: wrap; font-size: 11.5px; color: var(--mute); min-width: 0 }
-/* 每条事实自身不折行, 一行排不下就落到下一行; 独占一行仍超宽 (长路径 / 长群名) 才省略。 */
+/* 名字下的描述: cwd · home 群 · 起点 · 轮数, 一段低调的灰字, 排不下就在 · 处自然换行。 */
+.rolebar .facts { display: flex; flex-wrap: wrap; font-size: 11.5px; line-height: 1.45; color: var(--faint); min-width: 0 }
+/* 每条自身不折行; 独占一行仍超宽 (长路径 / 长群名) 才省略。 */
 .rolebar .facts span { white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis }
+.rolebar .facts span + span::before { content: "·"; margin: 0 5px }
 .rolebar .go { cursor: pointer; color: var(--accent) }
 .rolebar .go:hover { text-decoration: underline }
 /* 分隔线两端收进来, 与上面搜索框的左右边距对齐, 不顶满侧栏。 */
@@ -110,10 +115,8 @@ button { font: inherit; color: inherit }
 }
 .sp-btn:hover, .sp.open .sp-btn { background: var(--paper); color: var(--ink) }
 /* 箭头用边框画, 不用 ▾ 字形 —— 字形贴着基线, 放大后总是偏下。 */
-.sp-btn .car {
-  width: 0; height: 0; margin-left: 3px; border: 5px solid transparent; border-top: 6px solid var(--faint); border-bottom: 0;
-  transition: transform .15s;
-}
+.sp-btn .car { flex: none; display: grid; place-items: center; width: 18px; height: 18px; transition: transform .15s }
+.sp-btn .car::before { content: ""; border: 5px solid transparent; border-top: 6px solid var(--faint); border-bottom: 0 }
 .sp.open .sp-btn .car { transform: rotate(180deg) }
 .sp-list {
   /* 以触发器左下角为锚向右下展开 —— 触发器贴着 name 右边, 朝左开会被侧栏左沿裁掉。 */

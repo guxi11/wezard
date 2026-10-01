@@ -599,37 +599,28 @@
     for (var el = e.target; el && el.nodeType === 1 && el !== document.body && !clipTip(el); el = el.parentElement);
   });
 
-  // 名片: 身份 · 出身 · cwd · 出生; 名片下面一排是关系 / 日程入口。
+  // 名片: 头像 · 名字 (忙闲 / session) · 名字下一行低调的描述 (cwd · home 群 · 起点 · 轮数) · 职责;
+  // 名片下面一排是关系 / 日程入口。出身 (谁的分身 / 子 wizard) 交给关系图, 名片不再重复。
   var renderRole = function () {
     var r = R.role;
     if (!r) return;
-    // 名字下面那一行就是出身 —— 有父亲的直接写成「谁的什么」(可点过去), 不再另起一条重复。
-    // 分身 = 从父亲某个 session 节点 fork 出来的 (带着那一刻的上下文);
-    // 子 wizard = 父亲 spawn 的白板, 只有出身、没有继承。
-    // 人不挂身份行 —— 名字本身就够了。
-    var kind = r.kind === 'human' ? ''
-      : !r.parent ? 'wizard'
-      : r.forkedFrom
-        ? '<span class="go" data-r="' + esc(r.parent.id) + '" title="从它的 session ' + esc(r.forkedFrom) + ' fork, 开局带着那一刻的上下文">⧉ .' + esc(r.parent.name) + ' 的分身 · @' + esc(r.forkedFrom.slice(0, 8)) + '</span>'
-        : '<span class="go" data-r="' + esc(r.parent.id) + '" title="它 spawn 的白板, 没有继承上下文">↳ .' + esc(r.parent.name) + ' 的子 wizard</span>';
-    var facts = [];
-    if (r.cwd) facts.push('<span title="' + esc(r.cwd) + '">📁 ' + esc(shortCwd(r.cwd)) + '</span>');
-    // 生在哪个群、什么时候 —— 一件事, 一行。
     // 时刻跟着选中的 session 走: 选了一段就是那一段的开始与轮数, 全部就是最早那段起、共几轮。
     var cur = R.sessions.filter(function (x) { return x.sessionId === SESSION; })[0];
     var span = cur ? [cur] : R.sessions;
     var t0 = span.reduce(function (m, x) { return x.start && (!m || x.start < m) ? x.start : m; }, 0);
     var turns = span.reduce(function (n, x) { return n + (x.turns || 0); }, 0);
-    var when = [r.chat, t0 ? (cur ? '' : '自 ') + fmtClock(t0) : '', turns ? turns + ' 轮' : ''].filter(Boolean);
-    if (when.length) facts.push('<span title="' + esc((cur ? 'session ' + cur.sessionId : '全部 ' + R.sessions.length + ' 段 session') +
-      (t0 ? ' · 开始于 ' + fmtDay(t0) : '')) + '">🕘 ' + esc(when.join(' · ')) + '</span>');
+    var facts = [
+      r.cwd ? ['title="' + esc(r.cwd) + '"', shortCwd(r.cwd)] : null,
+      r.chat ? ['title="home 群"', r.chat] : null,
+      t0 || turns ? ['title="' + esc((cur ? 'session ' + cur.sessionId : '全部 ' + R.sessions.length + ' 段 session') + (t0 ? ' · 开始于 ' + fmtDay(t0) : '')) + '"',
+        [t0 ? (cur ? '' : '自 ') + fmtClock(t0) : '', turns ? turns + ' 轮' : ''].filter(Boolean).join(' · ')] : null
+    ].filter(Boolean).map(function (f) { return '<span ' + f[0] + '>' + esc(f[1]) + '</span>'; });
     $('#rb-who').innerHTML =
       '<div class="id"><span class="av">' + esc(r.label) + '</span>' +
         '<span class="l"><span class="nl"><span class="cp" title="' + esc('复制 ' + nameOf(r.id)) + '">' + nm(r.id, r.name) + '</span>' + (r.kind === 'wizard' ? '<span id="rb-st"></span>' : '') +
           '<span id="rb-sp">' + (R.sessions.length > 1 ? sessPicker() : '') + '</span></span>' +
-          (kind ? '<span class="k">' + kind + '</span>' : '') + '</span></div>' +
-      (r.description ? '<p class="job">' + esc(r.description) + '</p>' : '') +
-      '<div class="facts">' + facts.join('') + '</div>';
+          (facts.length ? '<span class="facts">' + facts.join('') + '</span>' : '') + '</span></div>' +
+      (r.description ? '<p class="job">' + esc(r.description) + '</p>' : '');
     paintStatus();
     $('#rb-who').querySelector('.cp').onclick = function () { copyText(nameOf(r.id)); };
     $('#rb-who').querySelectorAll('.go').forEach(function (g) {
