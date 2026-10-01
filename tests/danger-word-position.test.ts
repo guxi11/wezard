@@ -87,6 +87,13 @@ t("pkill", () => danger("pkill -f node"));
 t("kill -9", () => danger("kill -9 12345"));
 t("redis flushall", () => danger("redis-cli -h h flushall"));
 t("su -", () => danger("su - root"));
+// 包装器形态 (#19 合并后的漏报): 包装器之后仍是命令词位置。
+t("反斜杠转义 rm", () => danger("\\rm -rf x"));
+t("command 包装 rm", () => danger("command rm -rf x"));
+t("timeout 包装 rm", () => danger("timeout 5 rm -rf x"));
+t("nice 包装 rm", () => danger("nice rm -rf x"));
+t("env 赋值后 rm", () => danger("env FOO=1 rm -rf x"));
+t("watch reboot", () => danger("watch reboot"));
 
 // ── 远程执行: 位置约束失效, 靠 ssh/exec 上下文兜住 ────────────────────
 t("ssh 裸 reboot", () => danger("ssh host reboot"));

@@ -15,8 +15,7 @@ export interface DangerHit {
 type Rule = readonly [label: string, re: RegExp];
 
 // 「命令词位置」前缀: 行首 / 换行 / `;` `&&` `||` `(` 之后 / 引号紧邻处 /
-// sudo·nohup·exec·xargs·time·env 这类前缀命令之后 / `do` `then` `else` 之后 /
-// `--` 参数分隔符之后。
+// 包装器命令之后 / `do` `then` `else` 之后 / `--` 参数分隔符之后。
 //
 // 为什么需要它: 名单是对**整条命令文本**做 test 的, 光靠 `\b` 界定的词只要在
 // 任何位置出现就算命中 —— 而 `-` `/` 都是非单词字符, 于是分支名、文件名、参数值
@@ -24,7 +23,15 @@ type Rule = readonly [label: string, re: RegExp];
 // `feature/graceful-shutdown` 让 `git checkout` / `git push` /
 // `npm run test -- graceful-shutdown.spec.ts` 全部命中「关机/重启」必发单卡,
 // 流程被审批卡堵死; 同族的 `\brm\b` 还会把 `docker run --rm` 判成删除文件。
-const CMD_HEAD = String.raw`(?:^|[\n;&|(]\s*|["'\`]\s*|\b(?:sudo|nohup|exec|xargs|env|time|do|then|else)\s+|--\s+)`;
+//
+// 包装器 (提权/计时/限流/改环境, 自己不干事只把后面的命令包一层跑) 是开放集合,
+// 初版只列了 sudo·nohup·exec·xargs·env·time, 于是 `command rm` / `timeout 5 rm` /
+// `nice rm` / `env FOO=1 rm` / `watch reboot` 全部漏报 —— 这里尽量收全, 并允许
+// 包装器与命令之间隔一串参数 token。token 只认 `-` 开头的选项 / 纯数字时长 /
+// `K=V` 赋值: 普通单词会打断链条, `timeout 5 rg -n sudo` 里的检索词钓不出命中。
+const WRAPPERS = String.raw`sudo|doas|nohup|exec|xargs|env|time|command|builtin|timeout|nice|ionice|stdbuf|setsid|watch|caffeinate|do|then|else`;
+const WRAP_ARG = String.raw`(?:-[^\s;|&]*|\d+(?:\.\d+)?[smhd]?|\w+=[^\s;|&]*)\s+`;
+const CMD_HEAD = String.raw`(?:^|[\n;&|(]\s*|["'\`]\s*|\b(?:${WRAPPERS})\s+(?:${WRAP_ARG})*|--\s+)`;
 
 // 「远程执行」上下文: 命令把动作送到别的机器/容器里跑时, 位置约束失效 ——
 // `ssh host rm -rf /`、`kubectl exec pod -- halt` 里危险词前面是主机名或 `--`。
@@ -39,7 +46,8 @@ const REMOTE_CTX = String.raw`\b(?:ssh|(?:kubectl|docker)\s+exec)\b[\s\S]*\b`;
  * 不需要, 它们的第二个 token 已经把误伤面挡住了。
  */
 const cmdWord = (label: string, words: string, flags = ""): Rule[] => [
-  [label, new RegExp(`${CMD_HEAD}(?:${words})\\b`, flags)],
+  // `\\?`: `\rm` 这种反斜杠转义 (绕开 alias 的惯用写法) 仍处于命令词位置。
+  [label, new RegExp(`${CMD_HEAD}\\\\?(?:${words})\\b`, flags)],
   [`远程${label}`, new RegExp(`${REMOTE_CTX}(?:${words})\\b`, flags)],
 ];
 
