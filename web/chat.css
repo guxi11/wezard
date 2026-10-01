@@ -621,6 +621,9 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 /* 卡片 = 会话项; label 骑在它左上角, 紧挨箭头。 */
 .tci { position: relative; overflow: visible }
 .tci.me .t .nm { color: var(--accent) }
+/* 连接用的祖先: 没和视角对过话, 只为把对过话的后代挂回家谱 —— 淡一档。 */
+.tci.via { opacity: .55 }
+.tci.via:hover { opacity: 1 }
 .tlab { position: absolute; left: 4px; top: -8px; display: flex; gap: 3px; z-index: 2 }
 .tlab .ek { box-shadow: 0 0 0 2px var(--card) }
 

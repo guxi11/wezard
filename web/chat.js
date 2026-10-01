@@ -1239,8 +1239,11 @@
     return { pairs: pairs, inc: inc, pp: pp, kids: kids, roots: roots, ends: ends };
   };
 
+  // F.vis: 只看相关时画哪些 (见 visibleOf); 没有 = 全画。
+  var shows = function (F, t) { return !F.vis || !!F.vis[t]; };
   var countSub = function (F, t) {
-    return (F.kids[t] || []).reduce(function (n, k) { return n + 1 + countSub(F, k); }, 0);
+    return (F.kids[t] || []).filter(function (k) { return shows(F, k); })
+      .reduce(function (n, k) { return n + 1 + countSub(F, k); }, 0);
   };
   var chainUp = function (F, t, seen) {
     seen = seen || {};
@@ -1315,7 +1318,9 @@
     var row = goSpan('av', n.target, esc(n.label)) +
       line(nm(n.target, n.name, true) + tail, src ? src.lastTs : p ? p.last : n.lastTs, src ? src.preview : n.preview,
         stTag(n, true), c ? unreadOf(c, s ? s.role : undefined) : 0);
-    return '<button class="ci tci' + (me ? ' me' : '') + (edgeOn(F, n.target) ? ' on' : '') + '" data-t="' + esc(n.target) + '">' +
+    var via = F.vis && F.vis[n.target] === 'via';
+    return '<button class="ci tci' + (me ? ' me' : '') + (via ? ' via' : '') + (edgeOn(F, n.target) ? ' on' : '') + '" data-t="' + esc(n.target) + '"' +
+      (via ? ' title="' + esc(nameOf(n.target) + ' 没和 ' + nameOf(ROLE) + ' 对过话, 留着是为了连到它下面对过话的') + '"' : '') + '>' +
       labelHTML(p) + row + '</button>';
   };
 
@@ -1325,7 +1330,7 @@
     if (!n || seen[t] || depth > 32) return '';
     seen[t] = 1;
     shown.push(n);
-    var kids = leaf ? [] : (F.kids[t] || []).filter(function (k) { return !keep || keep(t, k); });
+    var kids = leaf ? [] : (F.kids[t] || []).filter(function (k) { return shows(F, k) && (!keep || keep(t, k)); });
     return '<li class="' + domKind(F.pp[t]) + '"' + (z ? ' style="z-index:' + z + '"' : '') + '>' + tnodeHTML(F, n, leaf ? countSub(F, t) : 0) +
       // 兄弟的线共用一段竖干, 越往下的越长: 短的叠在上面 (z 随序号递减), 每条线的末段都看得见自己的颜色。
       (kids.length ? '<ul>' + kids.map(function (k, i) {
@@ -1344,6 +1349,20 @@
   };
 
   // 关系图替换的是侧栏的会话列表 —— 右边照旧是选中的那段对话。
+  // 只看相关时画谁: 视角自己 + 和视角对过话的 ('talk'); 它们通向根的主父亲链上没对过话的祖先
+  // 留作连接 ('via', 画淡) —— 抹掉它, 有对话的后代就从家谱上脱开, 成了一棵来历不明的孤树。
+  var talks = function (F, a, b) {
+    var p = F.pairs[a + '\u0000' + b];
+    return !!p && !!(p.kinds.peer || p.kinds.graph);
+  };
+  var visibleOf = function (F) {
+    var keep = Object.keys(F.ends).filter(function (t) { return t === ROLE || talks(F, ROLE, t) || talks(F, t, ROLE); });
+    var vis = keep.reduce(function (m, t) { m[t] = 'talk'; return m; }, {});
+    if (!vis[ROLE]) vis[ROLE] = 'talk';
+    keep.forEach(function (t) { chainUp(F, t).forEach(function (u) { if (!vis[u]) vis[u] = 'via'; }); });
+    return vis;
+  };
+
   var renderWorld = function () {
     if (!WORLD) return;
     if (!W.loaded) { convsEl._tree = ''; convsEl.innerHTML = '<div class="empty">加载中…</div>'; return; }
@@ -1353,6 +1372,8 @@
     var all = W.treeAll || !me;
     var shown = [];
     var path = me ? chainUp(F, ROLE) : [];
+    // 和视角之间没有对话的关系只在「看全部」里画。
+    F.vis = all ? null : visibleOf(F);
     var trees = all
       ? F.roots.slice().sort(function (a, b) {
           var mine = path[0];
@@ -1366,7 +1387,7 @@
         (W.degraded ? '<span class="warn" title="注册表不可达 (独立 svr 部署), 只画观测到的往来">名册缺席</span>' : '') +
         (me ? '<button class="tall" title="' + (all ? '只留它的上游链、它自己、它的下游与同源兄弟' : '画出范围内所有有关系的 wizard') + '">' +
           (all ? '只看相关' : '看全部') + '</button>' : '') + '</h2>' +
-      (alone ? '<div class="tsolo">' + esc(nameOf(ROLE)) + (rg ? ' 在这段 session 里' : '') + ' 既没生过谁、也没和谁对过话</div>' : '') +
+      (alone ? '<div class="tsolo">' + esc(nameOf(ROLE)) + (rg ? ' 在这段 session 里' : '') + ' 没和谁对过话</div>' : '') +
       (shown.length ? '<ul class="tree' + (all ? ' all' : '') + '">' + trees + '</ul>' : '<div class="pempty">这段时间里没有任何关系</div>') +
     '</div>';
     // 心跳每 3s 重算一次 (状态灯 / 几分钟前) —— 没变就不碰 DOM, 免得蹭掉悬停与滚动。
