@@ -56,6 +56,21 @@ const DEFAULT_LIMIT = 60;
 const FLUSH_MS = 300;
 const PING_MS = 25_000;
 const FACTS_MS = 10_000;
+/** rolepage 只看最近这么久: 更早的轮次、wizard 登记、家谱、工单一律不进视图。 */
+const HORIZON_MS = 3 * 24 * 3600_000;
+
+const lastTsOf = (r: DetailRecord): number => (r as { updatedAt?: number }).updatedAt ?? r.createdAt;
+
+/** 记录侧的源头裁剪 —— 下游 (会话列表、窗口、关系图) 都只见得到这一份。 */
+const recentRecords = (records: readonly DetailRecord[], cutoff: number): DetailRecord[] =>
+  records.filter((r) => lastTsOf(r) >= cutoff);
+
+/** 注册表侧的源头裁剪: 久未活动的 wizard 连同它挂着的家谱一起退场; 开着的工单与日程是往后看的, 留下。 */
+const recentFacts = (f: WorldFacts, cutoff: number): WorldFacts => ({
+  ...f,
+  wizards: f.wizards.filter((w) => w.busy || Math.max(w.lastActivity, w.bornAt ?? 0) >= cutoff),
+  jobs: f.jobs.filter((j) => j.status === "open" || (j.closedAt ?? j.openedAt) >= cutoff),
+});
 
 const json = (res: ServerResponse, status: number, body: unknown): void => {
   res.statusCode = status;
@@ -126,7 +141,11 @@ interface View {
 
 export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider): ChatRoutes => {
   const getFacts = (): Promise<WorldFacts> =>
-    Promise.resolve(facts ? facts() : EMPTY_FACTS).catch(() => EMPTY_FACTS);
+    Promise.resolve(facts ? facts() : EMPTY_FACTS)
+      .then((f) => recentFacts(f, Date.now() - HORIZON_MS))
+      .catch(() => EMPTY_FACTS);
+  // 票据校验 (store.get) 不受此限: 一条老链接照样打得开, 只是看到的是最近 3 天。
+  const listRecent = (): DetailRecord[] => recentRecords(store.list(), Date.now() - HORIZON_MS);
 
   const page: SimpleHandler = (_req, res) => {
     res.statusCode = 200;
@@ -194,7 +213,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     const ticket = resolveTicket(store, url);
     if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
     void getFacts().then((f) => {
-      const records = store.list();
+      const records = listRecent();
       const v = viewOf(records, makeDirectory(records, f), ticket, url);
       if (!v) { json(res, 404, { ok: false, error: "不认识这个 role" }); return; }
       json(res, 200, { ok: true, ...summary(records, f, v.role, url.searchParams.get("session"), landingOf(ticket, v.role), v) });
@@ -231,7 +250,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     const ticket = resolveTicket(store, url);
     if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
     void getFacts().then((f) => {
-      const records = store.list();
+      const records = listRecent();
       const dir = makeDirectory(records, f);
       const v = viewOf(records, dir, ticket, url);
       if (!v || !v.conv) { json(res, 200, { ok: true, at: Date.now(), total: 0, truncated: false, msgs: [] }); return; }
@@ -292,7 +311,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     let v: View | undefined;
     const pushRole = async (): Promise<void> => {
       const ff = await freshFacts();
-      const records = store.list();
+      const records = listRecent();
       v ??= viewOf(records, makeDirectory(records, ff), ticket, url);
       if (!v) return;
       send("role", summary(records, ff, v.role, url.searchParams.get("session"), landingOf(ticket, v.role), v));
@@ -329,7 +348,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       if (roleDirty) { roleDirty = false; void pushRole(); }
       if (turnDirty.size) {
         const now = Date.now();
-        const records = store.list();
+        const records = listRecent();
         const dir = makeDirectory(records, f);
         for (const id of turnDirty) pushTurn(id, records, dir, now);
         turnDirty.clear();
@@ -379,7 +398,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     const ticket = resolveTicket(store, url);
     if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
     void getFacts().then((f) => {
-      const records = store.list();
+      const records = listRecent();
       const self = pickRole(makeDirectory(records, f), ticket, url);
       const w = buildWorld(records, f, { base: baseOfKey(self), self }, Date.now());
       const tickets = ticketsByBase();
