@@ -673,9 +673,10 @@
     var total = segs.reduce(function (a, s) { return a + u[s[0]]; }, 0);
     // 值为 0 = 该指标没有数据 (老记录 / 网关不报 usage), 不占位置。
     // 指标一律 emoji 在前、数字在后, 不挂英文名 (含义在 title 里)。
+    // data-tip: 被 fitUsage 藏起来时, 它在整条 bar 的 title 里怎么读。
     var kv = function (k, n, text) {
-      return n ? '<span class="kv" title="' + esc(TIP[k] || k) + '"><i class="u-ic">' + ICON[k] + '</i><b>' +
-        esc(text) + '</b></span>' : '';
+      return n ? '<span class="kv kv-' + k + '" title="' + esc(TIP[k] || k) + '" data-tip="' + esc(ICON[k] + ' ' + text) +
+        '"><i class="u-ic">' + ICON[k] + '</i><b>' + esc(text) + '</b></span>' : '';
     };
     // 输出 / 缓存不再单列成指标 —— 它们就是底边色带的那几段。
     // I/O 分布: 贴着整条 bar 的底边画一条横跨整宽的细色带; 各段的量作为图例常显在 bar 里 (占比在悬停提示), 色点与色带同色。
@@ -691,7 +692,8 @@
           return '<span class="seg" style="flex-grow:' + u[s[0]] + ';background:' + s[2] + '" title="' +
             s[1] + ' ' + fmtTok(u[s[0]]) + ' · ' + pct(u[s[0]]) + '"></span>';
         }).join('') + '</span>' +
-        '<span class="leg">' + segs.map(function (s) {
+        '<span class="leg" data-tip="' + esc(segs.map(function (s) { return s[3] + ' ' + fmtTok(u[s[0]]); }).join(' · ')) + '">' +
+        segs.map(function (s) {
           // 常显的是缩写, 全称与占比在 title 里。
           return '<span class="lg" title="' + s[1] + ' ' + fmtTok(u[s[0]]) + ' · ' + pct(u[s[0]]) + '"><i style="background:' +
             s[2] + '"></i>' + s[3] + '<b>' + fmtTok(u[s[0]]) + '</b></span>';
@@ -700,7 +702,7 @@
     // 条首先是账的主人 (rolepage 里它的头像 + .名字), 再是模型名: 这本账是谁、拿什么跑出来的。
     // 没有模型记录 (老轮次) 才退回「用量」。
     return '<span class="u-who" title="' + esc(nameOf(t.target)) + '">' + esc(roleLabel(t.target) || t.label) +
-        '<span class="u-nm">' + esc(nameOf(t.target)) + '</span></span>' +
+        '<span class="u-nm" data-tip="' + esc(nameOf(t.target)) + '">' + esc(nameOf(t.target)) + '</span></span>' +
       '<span class="u-lb" title="' + esc(t.model || '') + '">' +
         esc(t.model ? t.model.replace(/^claude-/, '') : '用量') + '</span>' +
       '<span class="u-kvs">' +
@@ -708,12 +710,39 @@
         kv('ctx', u.ctxPeak, fmtTok(u.ctxPeak)) + kv('time', liveDur(t), fmtDur(liveDur(t))) +
       '</span>' + io;
   };
+  // 永远单行: 排不下就按 FOLD 的顺序一级级藏 (分布文字 → 名字 → 耗时), 宽度回来再按反序放出来。
+  // 判定看的是容器自己溢没溢出, 不看视口 —— 同一个组件挂在整页页脚和右栏底, 宽度各不相同。
+  var FOLD = ['f-leg', 'f-nm', 'f-time'];
+  var FOLDED = { 'f-leg': '.leg', 'f-nm': '.u-nm', 'f-time': '.kv-time' };
+  var fitUsage = function (el) {
+    if (el.hidden) return;
+    var over = function () { return el.scrollWidth > el.clientWidth; };
+    FOLD.forEach(function (c) { el.classList.remove(c); });
+    var n = 0;
+    while (n < FOLD.length && over()) el.classList.add(FOLD[n++]);
+    // 藏起来的那几样进整条 bar 的 title, hover 照样读得到。
+    el.title = FOLD.slice(0, n).map(function (c) {
+      var x = el.querySelector(FOLDED[c]);
+      return x ? x.getAttribute('data-tip') : '';
+    }).filter(Boolean).join('\n');
+  };
+  var watchUsage = function (el) {
+    if (el._ro || typeof ResizeObserver === 'undefined') return;
+    // 只在宽度变了时重算: 自己增删 class 不改宽度, 不会自激。
+    var w = -1;
+    el._ro = new ResizeObserver(function (es) {
+      var cw = Math.round(es[0].contentRect.width);
+      if (cw !== w) { w = cw; fitUsage(el); }
+    });
+    el._ro.observe(el);
+  };
   // 没变就不碰 DOM: 心跳每 3s 来一次, 重建会把悬停中的 tooltip 蹭掉。
   var putUsage = function (el, t) {
     var html = t ? usageHTML(t) : '';
     // !el: web/ 是热更的, 外壳 HTML 要等 daemon 重启 —— 新脚本可能先遇上没有挂载点的旧外壳。
     if (!el || el._html === html) return;
     el._html = html; el.innerHTML = html; el.hidden = !html;
+    watchUsage(el); fitUsage(el);
     // 条的高度挤的是消息区 —— 原本贴底的继续贴底。
     toBottom();
   };
