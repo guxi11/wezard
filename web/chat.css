@@ -18,6 +18,10 @@
   --mine-line: #c9d7f3;
   --accent: #2f55c9;  /* 视角色: 名字的点、选中态、自己的气泡描边 */
   --priv: #9a5b10;    /* 私聊 */
+  /* 头像底: 不透明, 且由 card/accent 推出 —— 叠在选中/高亮/关系图任何底色上都不变色, 换主题时随 token 走。 */
+  --av-bg: var(--card);
+  --av-line: var(--line);
+  --av-hot: color-mix(in srgb, var(--accent) 14%, var(--card));
 }
 
 html { height: 100% }
@@ -50,15 +54,24 @@ button { font: inherit; color: inherit }
   /* margin 归零: 通用 header 规则带着 8px 下边距, 会把下面的入口条顶得上宽下窄。 */
   position: relative; flex: none; margin: 0; padding: 16px 16px 14px; border-bottom: 1px solid var(--line);
   display: flex; flex-direction: column; gap: 8px; background: var(--card);
+  /* 通用 header 规则带着 flex-wrap:wrap + align-items:baseline —— 竖轴上那会让名片按内容撑宽 (max-content),
+     长名字 / 长路径就冲出侧栏。 */
+  flex-wrap: nowrap; align-items: stretch;
 }
+.rolebar > .who { min-width: 0 }
 .rolebar .id { display: flex; gap: 10px; align-items: center; min-width: 0 }
 .rolebar .id .av { font-size: 26px; line-height: 1; flex: none }
 .rolebar .id .l { min-width: 0; display: flex; flex-direction: column; gap: 2px }
 .rolebar .id .nm { font-size: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.rolebar .id .k { font-size: 11.5px; color: var(--mute) }
-.rolebar .job { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--ink); opacity: .8 }
-.rolebar .facts { display: flex; gap: 6px 12px; flex-wrap: wrap; font-size: 11.5px; color: var(--mute) }
-.rolebar .facts span { white-space: nowrap }
+.rolebar .id .k { font-size: 11.5px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+/* 职责是一句话, 至多两行; 截掉的悬停看全文 (chat.js 的截断提示)。 */
+.rolebar .job {
+  margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--ink); opacity: .8; word-break: break-word;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.rolebar .facts { display: flex; gap: 6px 12px; flex-wrap: wrap; font-size: 11.5px; color: var(--mute); min-width: 0 }
+/* 每条事实自身不折行, 一行排不下就落到下一行; 独占一行仍超宽 (长路径 / 长群名) 才省略。 */
+.rolebar .facts span { white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis }
 .rolebar .go { cursor: pointer; color: var(--accent) }
 .rolebar .go:hover { text-decoration: underline }
 .acts { flex: none; display: flex; gap: 4px; padding: 8px 10px; border-bottom: 1px solid var(--line) }
@@ -155,10 +168,10 @@ button { font: inherit; color: inherit }
 /* 群聊头像 = 参与者头像拼图: 1 格居中, 2 格左右, 3/4 格田字。 */
 .mosaic {
   display: grid !important; width: 34px; height: 34px; border-radius: 10px; overflow: hidden; flex: none;
-  background: #eef1f6; border: 1px solid var(--line); gap: 1px; padding: 1px;
+  background: var(--av-line); border: 1px solid var(--av-line); gap: 1px; padding: 0;
   font-size: 13px !important; line-height: 1 !important;
 }
-.mosaic i { font-style: normal; display: grid; place-items: center; background: #fff; min-width: 0; min-height: 0 }
+.mosaic i { font-style: normal; display: grid; place-items: center; background: var(--av-bg); min-width: 0; min-height: 0 }
 .mosaic.n1 { grid-template: 1fr / 1fr; font-size: 20px !important }
 .mosaic.n2 { grid-template: 1fr / 1fr 1fr; font-size: 14px !important }
 .mosaic.n3, .mosaic.n4 { grid-template: 1fr 1fr / 1fr 1fr }
@@ -177,11 +190,10 @@ button { font: inherit; color: inherit }
   display: flex; gap: 10px; align-items: center; width: 100%; text-align: left; overflow: hidden;
   padding: 8px 10px; border: 0; border-radius: 9px; background: transparent; cursor: pointer;
 }
-.ci:hover, .si:hover { background: #f4f6f9 }
 .ci.on, .si.on { background: #eaf0fc }
 .ci > .av, .si > .av {
   flex: none; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px;
-  background: #f1f3f6; font-size: 20px; line-height: 1;
+  background: var(--av-bg); box-shadow: inset 0 0 0 1px var(--av-line); font-size: 20px; line-height: 1;
 }
 .ci .b, .si .b { min-width: 0; flex: 1; overflow: hidden }
 .ci .l1, .si .l1 { display: flex; align-items: baseline; gap: 6px; overflow: hidden; white-space: nowrap }
@@ -196,8 +208,7 @@ button { font: inherit; color: inherit }
 .nm.go, .av.go { position: relative; z-index: 1; cursor: pointer }
 .nm.go:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 2px }
 span.av.go { border-radius: 8px; transition: background .12s, box-shadow .12s }
-span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
-.ci:not(.on):has(.go:hover), .si:not(.on):has(.go:hover) { background: transparent }
+span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot) }
 .ci .tag.priv { color: var(--priv); background: #9a5b1014 }
 
 /* 群里的其他 role —— 挂在群下, 与会话项同一种读法、同一套尺寸 (名字 · 时刻 / 最近一句), 只靠缩进分层级。
@@ -238,10 +249,13 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .ch-who .pair .av + .av { margin-left: -8px; box-shadow: -2px 0 0 var(--card) }
 .ch-who .pair .av.go { cursor: pointer }
 .ch-who .pair .av.go:hover { border-color: var(--accent) }
-.ch-who .t { font-size: 16px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.ch-who > .t:not(:only-child) { flex: none }
-.ch-who .sub { font-size: 11.5px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.ch-acts { display: flex; gap: 8px; align-items: center; flex: none; font-size: 12px; color: var(--mute) }
+/* 标题先让位 (min-width:0), 两端头像与右侧按钮不让。 */
+.ch-who .t { min-width: 0; font-size: 16px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.ch-who > .t:not(:only-child) { flex: 0 1 auto }
+.ch-who .sub { min-width: 0; font-size: 11.5px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.ch-acts { display: flex; gap: 8px; align-items: center; flex: 0 1 auto; min-width: 0; font-size: 12px; color: var(--mute) }
+.ch-acts .with { min-width: 0; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.ch-acts .vb { flex: none }
 .vb {
   font-size: 12.5px; background: var(--card); border: 1px solid var(--line); border-radius: 7px;
   padding: 4px 11px; cursor: pointer; white-space: nowrap;
@@ -276,7 +290,8 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .mrow.mine { flex-direction: row-reverse }
 .mrow.mine .mcol { align-items: flex-end }
 .mwho { font-size: 11.5px; color: var(--mute); display: flex; gap: 6px; align-items: center; flex-wrap: wrap }
-.mwho .to { color: var(--faint); display: inline-flex; gap: 6px; align-items: center }
+.mwho .to { color: var(--faint); display: inline-flex; gap: 6px; align-items: center; min-width: 0; max-width: 100% }
+.mwho .nm { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .mwho .ch { font-size: 10.5px; border-radius: 4px; padding: 0 4px }
 .mwho .ch.priv { color: var(--priv); background: #9a5b1014 }
 /* 时刻只此一处 —— 气泡外, 跟着名字走。等宽数字让一列时间对得齐。 */
@@ -341,6 +356,8 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .mrow.mine .flip .fi { flex-direction: row-reverse }
 .mrow.mine .flip .fc { transform: scaleX(-1) }
 .flip .fc { flex: none }
+.flip .fi { min-width: 0; max-width: 100% }
+.flip .fn { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .flip:hover, .flip:focus-visible { background: #2f55c90d; color: var(--accent) }
 .flip[disabled] { cursor: default; background: transparent !important; color: transparent !important }
 .mwho .av.go { cursor: pointer }
@@ -749,7 +766,7 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 }
 .sk-it .b { min-width: 0; flex: 1; overflow: hidden }
 .sk-it .l1 { display: flex; align-items: baseline; gap: 8px; overflow: hidden; white-space: nowrap }
-.sk-it .nm { font-size: 13.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis }
+.sk-it .nm { font-size: 13.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .sk-it .k { margin-left: auto; flex: none; font-size: 11px; color: var(--faint); opacity: 0 }
 .sk-it.on .k { opacity: 1; color: var(--accent) }
 .sk-it .ts { margin-left: auto; flex: none; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums }

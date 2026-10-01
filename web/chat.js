@@ -556,6 +556,29 @@
       .then(function () { toast('已复制 ' + text); }, function () { toast('复制失败'); });
   };
 
+  // 截断提示: 被省略号 (或 line-clamp) 截掉的文本, 悬停时给 title 看全文 —— 一处委托管全页,
+  // 不必每个渲染点各挂一份。只在真被截断时挂; 元素自带的 title (如「切到 X 的视角」) 不碰。
+  var isClipped = function (el, cs) {
+    return (cs.textOverflow === 'ellipsis' && el.scrollWidth > el.clientWidth + 1) ||
+      (cs.webkitLineClamp !== 'none' && cs.webkitLineClamp !== '' && el.scrollHeight > el.clientHeight + 1);
+  };
+  var clipTip = function (el) {
+    var cs = getComputedStyle(el);
+    if (cs.textOverflow !== 'ellipsis' && (cs.webkitLineClamp === 'none' || !cs.webkitLineClamp)) return false;
+    var ours = el.hasAttribute('data-cliptip');
+    if (el.hasAttribute('title') && !ours) return true;
+    if (isClipped(el, cs)) {
+      el.title = el.textContent.replace(/\s+/g, ' ').trim();
+      el.setAttribute('data-cliptip', '');
+    } else if (ours) {
+      el.removeAttribute('title'); el.removeAttribute('data-cliptip');
+    }
+    return true;
+  };
+  document.addEventListener('mouseover', function (e) {
+    for (var el = e.target; el && el.nodeType === 1 && el !== document.body && !clipTip(el); el = el.parentElement);
+  });
+
   // 名片: 身份 · 出身 · cwd · 出生; 名片下面一排是关系 / 日程入口。
   var renderRole = function () {
     var r = R.role;
