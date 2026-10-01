@@ -295,7 +295,7 @@
   // 到点没有新写入就自己熄 (同 expireRows), 不必等下一次推送。
   var ST = { run: '执行中', idle: '空闲', off: '已关闭' };
   var stateOf = function (s) { return wRunning(s) ? 'run' : s.alive ? 'idle' : 'off'; };
-  // 忙闲只有这一个渲染点, 永远挂在名字右边 —— 名片 / 关系树 / 往来 / 侧栏共用。
+  // 忙闲只有这一个渲染点, 永远挂在名字右边 —— 名片 / 关系树 / 侧栏共用。
   // quiet: 只在执行中出现、只要灯不要字 (侧栏: 列表里安静是常态, 亮着的才值得看一眼)。
   var stTag = function (s, quiet) {
     if (!s) return '';
@@ -1265,25 +1265,6 @@
     };
   };
 
-  // 往来: 当前 role 在窗内的直接关系, 按方向分两栏 (树里它们可能被收在别的枝上)。
-  var tiesHTML = function (F) {
-    var ps = Object.keys(F.pairs).map(function (k) { return F.pairs[k]; });
-    var row = function (p, other) {
-      var n = nodeOf(other);
-      return '<div class="tie' + (n ? ' go' : '') + '" data-t="' + esc(other) + '" title="切到 ' + esc(nameOf(other)) + ' 的视角">' +
-        '<span class="wav">' + esc(roleLabel(other)) + '</span>' +
-        '<span class="tb"><span class="t1"><b class="wname">' + esc(nameOf(other)) + '</b>' + stTag(n) + '</span>' +
-          '<span class="tmarks">' + marksHTML({ pairs: {} }, p) + '<span class="ago">' + esc(fmtAgo(p.last)) + '</span></span></span></div>';
-    };
-    var col = function (title, xs, end) {
-      return '<div class="tcol"><h4>' + title + '<span>' + xs.length + '</span></h4>' +
-        (xs.length ? xs.map(function (p) { return row(p, p[end]); }).join('') : '<div class="pempty">没有</div>') + '</div>';
-    };
-    var byLast = function (a, b) { return b.last - a.last; };
-    return col('它 → 谁', ps.filter(function (p) { return p.from === ROLE; }).sort(byLast), 'to') +
-      col('谁 → 它', ps.filter(function (p) { return p.to === ROLE; }).sort(byLast), 'from');
-  };
-
   var renderWorld = function () {
     if (!W.loaded) { wmapEl.innerHTML = '<div class="empty">加载中…</div>'; return; }
     var rg = rangeOf();
@@ -1313,13 +1294,12 @@
         '<div class="tlegend">' + Object.keys(KIND).map(function (k) { return '<span class="ek ' + k + '" title="' + KIND[k].tip + '">' + KIND[k].mark + '</span>'; }).join('') +
           '<span class="ek back">↩ 回派</span><span class="ek cross">⇄ 跨群</span><span class="tref">也来自 …</span> = 非主路径的关系</div>' +
       '</section>' +
-      '<section class="tties"><h3>往来<span>' + esc(rg ? '本段 session' : '全部时间') + '</span></h3>' + (me ? tiesHTML(F) : '') + '</section>' +
     '</div>';
     // 心跳每 3s 重算一次 (状态灯 / 几分钟前) —— 没变就不碰 DOM, 免得蹭掉悬停与滚动。
     if (wmapEl._tree === html && wmapEl.querySelector('.tview')) return;
     wmapEl._tree = html;
     wmapEl.innerHTML = html;
-    wmapEl.querySelectorAll('.tnode.go, .tie.go, .tref.go').forEach(function (el) {
+    wmapEl.querySelectorAll('.tnode.go, .tref.go').forEach(function (el) {
       el.onclick = function (e) { e.stopPropagation(); openNode(el.getAttribute('data-t')); };
     });
     var tall = wmapEl.querySelector('.tall');
