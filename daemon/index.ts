@@ -1942,6 +1942,9 @@ const main = async (): Promise<void> => {
         wizards.drop(runner);
         return { ok: false, reason: `起白板 wizard 失败: ${spawned.reason ?? "unknown"}` };
       }
+      notifyChat(base, withTagHeader(target, busy
+        ? `⏰ 定时任务到点时正忙, 已起白板 wizard .${runnerName} 单独执行, 完成后自动收掉`
+        : `⏰ 定时任务已起白板 wizard .${runnerName} 执行, 完成后自动收掉`));
       const inj = await m.injectText(runner, text, undefined, { fromChat: true, from: { kind: "task", taskId }, envelope: renderTaskEnvelope(taskId) });
       if (!inj.ok) { wizards.drop(runner); return inj; }
       // 没有人会对这个一次性分身喊 stop_wizard, 只能自己等它闲下来再收。30min
