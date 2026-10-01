@@ -17,7 +17,7 @@
   var ROLE = qs.get('role') || qs.get('target') || '';
   var CONV = qs.get('conv') || '';
   var WITH = qs.get('with') || '';
-  // '' = 未指定 (服务端取最新那段, 回包里认领成具体 sid); 'all' = 全部时间。
+  // '' = 未指定 (服务端按全部时间, 回包里认领成 'all'); 'all' = 全部时间; 其他 = 那一段的 sid。
   var SESSION = qs.get('session') || '';
   var TICK_MS = 3000;
 

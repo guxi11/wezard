@@ -125,11 +125,10 @@ const pickRole = (dir: Directory, ticket: Ticket, url: URL): string =>
   dir.resolve(url.searchParams.get("target") ?? "") ??
   ticket.selfTarget;
 
-// 没指定 = 最新那段 (spans 按时间升序); "all" = 不切, 全部时间。
+// 没指定或 "all" = 不切, 全部时间; 否则只看那一段。
 const ALL_SESSIONS = "all";
 const spanOf = (spans: readonly SessionSpan[], sid: string | null): SessionSpan | undefined =>
-  !sid ? spans[spans.length - 1]
-  : sid === ALL_SESSIONS ? undefined
+  !sid || sid === ALL_SESSIONS ? undefined
   : spans.find((s) => s.sessionId === sid);
 
 // Infinity 过不了 JSON。
