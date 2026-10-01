@@ -172,26 +172,23 @@ button { font: inherit; color: inherit }
 .convs h2:first-child { margin-top: 6px }
 .convs h2 span { font-weight: 400; color: var(--faint); font-variant-numeric: tabular-nums }
 
-.ci {
-  display: flex; gap: 10px; align-items: flex-start; width: 100%; text-align: left; overflow: hidden;
+/* 群下的子项 (.si) 与私聊项 (.ci) 同一套尺寸 —— 只有一份。 */
+.ci, .si {
+  display: flex; gap: 10px; align-items: center; width: 100%; text-align: left; overflow: hidden;
   padding: 8px 10px; border: 0; border-radius: 9px; background: transparent; cursor: pointer;
 }
-.ci:hover { background: #f4f6f9 }
-.ci.on { background: #eaf0fc }
-.ci { align-items: center }
-/* 子项与关系图卡片的头像同私聊项一个尺寸 —— 只有一份。 */
+.ci:hover, .si:hover { background: #f4f6f9 }
+.ci.on, .si.on { background: #eaf0fc }
 .ci > .av, .si > .av {
   flex: none; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px;
   background: #f1f3f6; font-size: 20px; line-height: 1;
 }
-.ci .b { min-width: 0; flex: 1; overflow: hidden }
-.ci .pv, .ci .l1 { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.ci .l1 { display: flex }
-.ci .l1 { display: flex; align-items: baseline; gap: 6px }
-.ci .t { font-size: 13.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.ci .ts { margin-left: auto; flex: none; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums }
-.ci .pv { font-size: 12px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.ci .pv:empty { display: none }
+.ci .b, .si .b { min-width: 0; flex: 1; overflow: hidden }
+.ci .l1, .si .l1 { display: flex; align-items: baseline; gap: 6px; overflow: hidden; white-space: nowrap }
+.ci .t, .si .t { font-size: 13.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.ci .ts, .si .ts { margin-left: auto; flex: none; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums }
+.ci .pv, .si .pv { display: block; font-size: 12px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.ci .pv:empty, .si .pv:empty { display: none }
 .ci .tag { font-size: 10.5px; border-radius: 4px; padding: 0 4px; flex: none }
 /* 头像与名字是进入那个 role 视角的入口 —— 侧栏项、会话头、消息行同一种读法。
    它们嵌在整行那颗按钮里, 所以悬停态必须压过行: 指到入口上时行自己的悬停底色
@@ -203,22 +200,10 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .ci:not(.on):has(.go:hover), .si:not(.on):has(.go:hover) { background: transparent }
 .ci .tag.priv { color: var(--priv); background: #9a5b1014 }
 
-/* 群里的其他 role —— 挂在群下, 与会话项同一种读法 (名字 · 时刻 / 最近一句), 只压一档。
+/* 群里的其他 role —— 挂在群下, 与会话项同一种读法、同一套尺寸 (名字 · 时刻 / 最近一句), 只靠缩进分层级。
    点开是「我与它在这个群里」的往来。 */
 .subs { margin: 0 0 6px 16px; border-left: 1px solid var(--line); padding-left: 2px }
-.si {
-  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; overflow: hidden;
-  padding: 5px 8px; border: 0; border-radius: 8px; background: transparent; cursor: pointer; color: var(--ink);
-}
-.si:hover { background: #f4f6f9 }
-.si.on { background: #eaf0fc }
-.si .b { min-width: 0; flex: 1; overflow: hidden }
-.si .l1 { display: flex; align-items: baseline; gap: 6px }
-.si .t { font-size: 12.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.si.on .t { color: var(--accent) }
-.si .ts { margin-left: auto; flex: none; font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums }
-.si .pv { display: block; font-size: 11.5px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.si .pv:empty { display: none }
+.si { color: var(--ink) }
 .si-more {
   display: block; width: 100%; text-align: center; padding: 4px 8px; border: 0;
   background: transparent; cursor: pointer; font-size: 11.5px; color: var(--mute);
