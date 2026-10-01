@@ -427,6 +427,13 @@
         convRow(c) + '</button>' + subs;
   };
 
+  // 搜索入口是会话列表的一部分 (列表的第一项, 随列表重画); 侧栏换成关系图时它跟着列表一起退场。
+  // ⌘K 本身是全局的, 见下方「搜索」。
+  var MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  var KBD = MAC ? '⌘K' : 'Ctrl K';
+  var SEARCH_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.6"/><path d="m10.4 10.4 3.6 3.6"/></svg>';
+  var SBOX = '<button class="sbox" type="button"><span class="ic">' + SEARCH_SVG + '</span>' +
+    '<span class="lb">搜索 role、会话、消息</span><kbd>' + KBD + '</kbd></button>';
   var renderConvs = function () {
     var groups = R.convs.filter(function (c) { return c.kind === 'group'; });
     var dms = R.convs.filter(function (c) { return c.kind !== 'group'; });
@@ -437,9 +444,10 @@
       return list.length ? '<h2>' + title + '<span>' + list.length + '</span></h2>' + list.map(convItem).join('') : '';
     };
     // 没变就不碰 DOM: 心跳每 3s 来一次, 重建会把列表的滚动与焦点蹭掉。
-    var html = sec('群聊', groups) + sec('私聊', dms);
+    var html = SBOX + sec('群聊', groups) + sec('私聊', dms);
     if (convsEl._html === html) return;
     convsEl._html = html; convsEl.innerHTML = html;
+    convsEl.querySelector('.sbox').onclick = function () { openSearch(); };
     convsEl.querySelectorAll('[data-conv]').forEach(function (b) {
       var key = b.getAttribute('data-conv'), w = b.getAttribute('data-with') || '';
       b.onclick = function () { clickItem(key, w); };
@@ -1654,15 +1662,8 @@
   // ══ 搜索 (⌘K / Ctrl+K) ═══════════════════════════════════════════════
   // 从当前视角搜三样: role 名字 (→ 切视角)、会话名 (→ 打开)、消息正文 (→ 打开会话并定位到那一句)。
   // 服务端搜全部时间; 那一句不在当前 session 段里就放宽成「全部」再跳。空查询时列出最近的会话,
-  // 面板本身就是一个键盘快速切换器。面板与侧栏入口都由脚本挂载 —— 外壳 HTML 要等 daemon 重启才换。
-  var MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
-  var KBD = MAC ? '⌘K' : 'Ctrl K';
-  var SEARCH_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.6"/><path d="m10.4 10.4 3.6 3.6"/></svg>';
+  // 面板本身就是一个键盘快速切换器。面板由脚本挂载 —— 外壳 HTML 要等 daemon 重启才换。
   var Q = { open: false, q: '', done: null, enter: false, items: [], sel: 0, gen: 0, timer: 0 };
-  var sbox = document.createElement('button');
-  sbox.className = 'sbox'; sbox.type = 'button';
-  sbox.innerHTML = '<span class="ic">' + SEARCH_SVG + '</span><span class="lb">搜索 role、会话、消息</span><kbd>' + KBD + '</kbd>';
-  convsEl.parentNode.insertBefore(sbox, convsEl);
   var sk = document.body.appendChild(document.createElement('div'));
   sk.className = 'sk'; sk.hidden = true;
   sk.innerHTML = '<div class="sk-panel" role="dialog" aria-label="搜索">' +
@@ -1820,7 +1821,6 @@
     Q.open = false; sk.hidden = true; Q.enter = false;
     clearTimeout(Q.timer);
   };
-  sbox.onclick = openSearch;
   skQ.addEventListener('input', function () { clearTimeout(Q.timer); Q.timer = setTimeout(runSearch, 140); });
   skQ.addEventListener('keydown', function (e) {
     if (e.isComposing) return;   // 输入法选词时的回车 / 方向键归输入法

@@ -169,7 +169,7 @@ button { font: inherit; color: inherit }
   margin: 14px 8px 4px; font-size: 12px; font-weight: 600; color: var(--mute);
   display: flex; align-items: baseline; gap: 6px;
 }
-.convs h2:first-child { margin-top: 6px }
+.convs h2:first-child, .convs .sbox + h2 { margin-top: 10px }
 .convs h2 span { font-weight: 400; color: var(--faint); font-variant-numeric: tabular-nums }
 
 /* 群下的子项 (.si) 与私聊项 (.ci) 同一套尺寸 —— 只有一份。 */
@@ -695,10 +695,12 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .jmm .wst { font-size: 9.5px }
 .jmm .tmp, .jmm .wchip { flex: none; white-space: nowrap }
 
-/* ── 搜索 (⌘K): 侧栏会话列表顶上的入口 + 居中浮层 ──────────────────────
-   入口与会话项同宽同圆角, 安静的浅灰底; 浮层的结果行沿用会话项的两行读法。 */
+/* ── 搜索 (⌘K): 会话列表里的第一项入口 + 居中浮层 ──────────────────────
+   入口与会话项同宽同圆角, 安静的浅灰底; 列表滚动时它吸在顶上 (外圈一道卡片底色, 免得下面的项透出来)。
+   浮层的结果行沿用会话项的两行读法。 */
 .sbox {
-  flex: none; display: flex; align-items: center; gap: 8px; margin: 8px 10px 2px; padding: 7px 10px;
+  position: sticky; top: 0; z-index: 2; box-shadow: 0 0 0 6px var(--card);
+  display: flex; align-items: center; gap: 8px; width: 100%; margin: 6px 0 2px; padding: 7px 10px;
   border: 1px solid var(--line); border-radius: 9px; background: var(--paper); color: var(--faint);
   cursor: pointer; text-align: left; transition: border-color .12s, background .12s, color .12s;
 }
