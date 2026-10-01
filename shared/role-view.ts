@@ -82,18 +82,29 @@ const convTurns = (records: readonly DetailRecord[], now: number): TurnDetailRec
 /** 保温 ping 的那一条 —— 进时间轴, 但不进会话列表的条数/预览, 也不算一条关系。 */
 export const isPing = (m: Msg): boolean => isKeepaliveTurn(m.turn);
 
+/** 一个公开频道里听话的那一方: 与人的单聊是那个人, 群里是「人」。 */
+const audienceOf = (channel: string): string => (channel.startsWith("user:") ? humanOf(channel) : "human:");
+
+/** 回执轮: 守护进程把同伴那一轮的终句原样转进发话方的会话。 */
+const isReceipt = (r: TurnDetailRecord): boolean => r.from?.kind === "peer" && r.from.receipt === true;
+
 /** 一轮 → 入/出两条消息。没问话的 (/clear 之后的续跑) 只有出; 还没产出也没在跑
- *  的只有入。 */
+ *  的只有入。
+ *  回执轮例外: 入那一句就是同伴自己那一轮的出 (同一段话, 已在同伴的出消息里), 再画
+ *  一遍就是重复, 所以没有入; 它的出是在频道里对那里的人说的 —— 公开频道答给人, 只有
+ *  私聊回执 ("" 频道, 回复不进任何群) 才仍是对那个同伴。 */
 export const messagesOfTurn = (r: TurnDetailRecord): Msg[] => {
   const w = r.target!;
   const who = senderOf(r);
   const channel = channelOf(r);
+  const receipt = isReceipt(r);
+  const to = receipt && channel ? audienceOf(channel) : who;
   const firstOut = r.items.reduce((m, it) => Math.min(m, it.ts), Infinity);
-  const inMsg: Msg[] = r.userQuery?.trim()
+  const inMsg: Msg[] = r.userQuery?.trim() && !receipt
     ? [{ id: `${r.id}:in`, turn: r, dir: "in", from: who, to: w, channel, ts: r.createdAt }]
     : [];
   const outMsg: Msg[] = r.items.length > 0 || !r.closed
-    ? [{ id: `${r.id}:out`, turn: r, dir: "out", from: w, to: who, channel, ts: Math.max(r.createdAt + 1, Number.isFinite(firstOut) ? firstOut : r.createdAt + 1) }]
+    ? [{ id: `${r.id}:out`, turn: r, dir: "out", from: w, to, channel, ts: Math.max(r.createdAt + 1, Number.isFinite(firstOut) ? firstOut : r.createdAt + 1) }]
     : [];
   return [...inMsg, ...outMsg];
 };
@@ -108,7 +119,7 @@ export const messageOfPost = (p: PostDetailRecord): Msg => ({
   },
   dir: "out",
   from: p.target,
-  to: p.channel.startsWith("user:") ? humanOf(p.channel) : "human:",
+  to: audienceOf(p.channel),
   channel: p.channel,
   ts: p.createdAt,
 });
