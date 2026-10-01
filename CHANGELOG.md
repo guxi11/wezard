@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+## [2.2.2] - 2026-10-02
+
+### Changed
+- README 多 wizard 协同一节改用关系图截图 (`images/wizards.png`), 不再与顶部 demo 图共用。
+
+### Removed
+- 仓库里零引用的图片: `images/multi-session.png` (1.1.5 时代的旧截图)、`images/icon.svg`。
+
+### Fixed
+- rolepage 名片的 session 选择器只要有 session 就显示 —— 此前只有一段时整个选择器消失, 看不出当前看的是哪一段; 只有一段时下拉里是「全部 · 1 段」加那一段。箭头改 16px。
+
 ## [2.2.1] - 2026-10-02
 
 ### Changed
@@ -809,7 +820,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.2.1...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.2.2...HEAD
+[2.2.2]: https://github.com/guxi11/wezard/compare/v2.2.1...v2.2.2
 [2.2.1]: https://github.com/guxi11/wezard/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/guxi11/wezard/compare/v2.1.4...v2.2.0
 [2.1.4]: https://github.com/guxi11/wezard/compare/v2.1.3...v2.1.4
