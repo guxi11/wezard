@@ -605,11 +605,11 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
   content: ""; position: absolute; left: -6px; top: 34px; border: 4.5px solid transparent; border-right: 0;
   border-left: 7px solid var(--lc);
 }
-.tree li.spawn, .tlk.spawn { --lc: #d4700f }
-.tree li.clone, .tlk.clone { --lc: #8250df }
-.tree li.peer, .tlk.peer { --lc: #0969da }
-.tree li.job, .tlk.job { --lc: #bf8700 }
-.tree li.graph, .tlk.graph { --lc: #0a7d6b }
+.tree li.spawn { --lc: #d4700f }
+.tree li.clone { --lc: #8250df }
+.tree li.peer { --lc: #0969da }
+.tree li.job { --lc: #bf8700 }
+.tree li.graph { --lc: #0a7d6b }
 /* 卡片 = 会话项; label 骑在它左上角, 紧挨箭头。 */
 .tci { position: relative; overflow: visible }
 .tci.me .t .nm { color: var(--accent) }
@@ -618,21 +618,17 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .tci.nil:hover { background: transparent }
 .tlab { position: absolute; left: 4px; top: -8px; display: flex; gap: 3px; z-index: 2 }
 .tlab .ek { box-shadow: 0 0 0 2px var(--card) }
-.tlegend { display: flex; align-items: center; gap: 4px 10px; flex-wrap: wrap; margin: 0 8px 12px; font-size: 11px; color: var(--faint) }
-.tlk { display: inline-flex; align-items: center; gap: 5px; color: var(--lc); font-weight: 600 }
-.tlk i { position: relative; width: 18px; height: 1.5px; background: var(--lc) }
-.tlk i::after { content: ""; position: absolute; right: -1px; top: -3.75px; border: 4.5px solid transparent; border-right: 0; border-left: 7px solid var(--lc) }
 
-/* 边的 label: 一条边可能同时带几种 (既是子 wizard 又被派过活), 各一枚。 */
+/* 边的 label: 辅助信息, 淡色; 一条边可能同时带几种 (既是子 wizard 又被派过活), 各一枚。 */
 .ek {
   flex: none; font-size: 10px; line-height: 15px; padding: 0 5px; border-radius: 4px; white-space: nowrap;
-  font-weight: 600; color: var(--mute); background: #f1f3f6;
+  font-weight: 500; color: var(--mute); background: #f1f3f6;
 }
-.ek.spawn { color: #fff; background: #d4700f }
-.ek.clone { color: #fff; background: #8250df }
-.ek.peer { color: #fff; background: #0969da }
-.ek.job { color: #fff; background: #bf8700 }
-.ek.graph { color: #fff; background: #0a7d6b }
+.ek.spawn { color: #a8642a; background: #d4700f12 }
+.ek.clone { color: #7a5bb8; background: #8250df12 }
+.ek.peer { color: #4a74b0; background: #0969da10 }
+.ek.job { color: #94741f; background: #bf870014 }
+.ek.graph { color: #3d8577; background: #0a7d6b12 }
 .ek.cross { font-weight: 400; background: #fff; box-shadow: inset 0 0 0 1px var(--line) }
 
 /* ══ 日程 · 总览 / 任务卡 ════════════════════════════════════════════ */

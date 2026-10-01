@@ -1263,15 +1263,16 @@
   };
 
   // keep(父, 孩子) → 'full' 整枝 / 'leaf' 只画它自己 / '' 不画; 不给 keep = 全画。shown 收集画出来的节点。
-  var treeHTML = function (F, t, depth, keep, leaf, shown, seen) {
+  var treeHTML = function (F, t, depth, keep, leaf, shown, seen, z) {
     var n = nodeOf(t);
     if (!n || seen[t] || depth > 32) return '';
     seen[t] = 1;
     shown.push(n);
     var kids = leaf ? [] : (F.kids[t] || []).filter(function (k) { return !keep || keep(t, k); });
-    return '<li class="' + domKind(F.pp[t]) + '">' + tnodeHTML(F, n, leaf ? countSub(F, t) : 0) +
-      (kids.length ? '<ul>' + kids.map(function (k) {
-        return treeHTML(F, k, depth + 1, keep, keep && keep(t, k) === 'leaf', shown, seen);
+    return '<li class="' + domKind(F.pp[t]) + '"' + (z ? ' style="z-index:' + z + '"' : '') + '>' + tnodeHTML(F, n, leaf ? countSub(F, t) : 0) +
+      // 兄弟的线共用一段竖干, 越往下的越长: 短的叠在上面 (z 随序号递减), 每条线的末段都看得见自己的颜色。
+      (kids.length ? '<ul>' + kids.map(function (k, i) {
+        return treeHTML(F, k, depth + 1, keep, keep && keep(t, k) === 'leaf', shown, seen, kids.length - i);
       }).join('') + '</ul>' : '') +
       '</li>';
   };
@@ -1308,9 +1309,6 @@
         (W.degraded ? '<span class="warn" title="注册表不可达 (独立 svr 部署), 只画观测到的往来">名册缺席</span>' : '') +
         (me ? '<button class="tall" title="' + (all ? '只留它的上游链、它自己、它的下游与同源兄弟' : '画出范围内所有有关系的 wizard') + '">' +
           (all ? '只看相关' : '看全部') + '</button>' : '') + '</h2>' +
-      '<div class="tlegend">' + Object.keys(KIND).map(function (k) {
-        return '<span class="tlk ' + k + '" title="' + KIND[k].tip + '"><i></i>' + KIND[k].mark + '</span>';
-      }).join('') + '</div>' +
       (alone ? '<div class="tsolo">' + esc(nameOf(ROLE)) + (rg ? ' 在这段 session 里' : '') + ' 既没生过谁、也没和谁派过活</div>' : '') +
       (shown.length ? '<ul class="tree' + (all ? ' all' : '') + '">' + trees + '</ul>' : '<div class="pempty">这段时间里没有任何关系</div>') +
     '</div>';
