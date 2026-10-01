@@ -17,6 +17,7 @@
   var ROLE = qs.get('role') || qs.get('target') || '';
   var CONV = qs.get('conv') || '';
   var WITH = qs.get('with') || '';
+  // '' = 未指定 (服务端取最新那段, 回包里认领成具体 sid); 'all' = 全部时间。
   var SESSION = qs.get('session') || '';
   var TICK_MS = 3000;
 
@@ -448,7 +449,7 @@
   };
   var sessPicker = function () {
     var cur = R.sessions.filter(function (s) { return s.sessionId === SESSION; })[0];
-    var all = '<button class="sp-it all' + (cur ? '' : ' on') + '" role="option" aria-selected="' + !cur + '" data-s="">' +
+    var all = '<button class="sp-it all' + (cur ? '' : ' on') + '" role="option" aria-selected="' + !cur + '" data-s="all">' +
       '<span class="id">全部</span><span class="n">' + R.sessions.length + ' 段</span></button>';
     var v = !cur ? '全部' : cur === latestSess() ? '最新' : sessWhen(cur);
     return '<span class="sp' + (SESS_OPEN ? ' open' : '') + '">' +
@@ -835,6 +836,7 @@
   var takeRole = function (d) {
     R.at = d.at || Date.now(); R.recvAt = Date.now();
     R.role = d.role; R.sessions = d.sessions || []; R.convs = d.convs || [];
+    SESSION = d.session || '';
     R.relations = !!d.relations; R.schedules = d.schedules || 0; R.plan = d.plan || null;
     R.stats = d.stats || null; R.winStats = d.winStats || null;
     ROLE = d.role.id;

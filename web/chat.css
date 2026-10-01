@@ -85,7 +85,8 @@ button { font: inherit; color: inherit }
 .bd.bad .sb { color: #cf222e }
 /* session 切换: name 右边一个小号文字触发器 + 浮层列表。name 先省略, 触发器不让位。 */
 .rolebar .id .l { flex: 1 }
-.rolebar .nl { display: flex; align-items: baseline; gap: 8px; min-width: 0 }
+.rolebar .nl { display: flex; align-items: center; gap: 8px; min-width: 0 }
+#rb-st { flex: none; display: inline-flex }
 .rolebar .nl .nm { min-width: 0; flex: 0 1 auto }
 #rb-sp { flex: none; display: inline-flex }
 .sp { position: relative; display: inline-flex }
@@ -95,7 +96,7 @@ button { font: inherit; color: inherit }
   font-variant-numeric: tabular-nums; transition: background .12s, color .12s;
 }
 .sp-btn:hover, .sp.open .sp-btn { background: var(--paper); color: var(--ink) }
-.sp-btn .car { font-size: 9px; color: var(--faint); transition: transform .15s }
+.sp-btn .car { font-size: 20px; line-height: 1; color: var(--faint); transition: transform .15s }
 .sp.open .sp-btn .car { transform: rotate(180deg) }
 .sp-list {
   /* 以触发器左下角为锚向右下展开 —— 触发器贴着 name 右边, 朝左开会被侧栏左沿裁掉。 */

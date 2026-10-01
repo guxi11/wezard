@@ -107,8 +107,12 @@ const pickRole = (dir: Directory, ticket: Ticket, url: URL): string =>
   dir.resolve(url.searchParams.get("target") ?? "") ??
   ticket.selfTarget;
 
+// 没指定 = 最新那段 (spans 按时间升序); "all" = 不切, 全部时间。
+const ALL_SESSIONS = "all";
 const spanOf = (spans: readonly SessionSpan[], sid: string | null): SessionSpan | undefined =>
-  sid ? spans.find((s) => s.sessionId === sid) : undefined;
+  !sid ? spans[spans.length - 1]
+  : sid === ALL_SESSIONS ? undefined
+  : spans.find((s) => s.sessionId === sid);
 
 // Infinity 过不了 JSON。
 const wireSpan = (s: SessionSpan) => ({ ...s, end: Number.isFinite(s.end) ? s.end : 0 });
@@ -161,7 +165,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       at: now,
       role: info,
       sessions: spans.map(wireSpan),
-      session: span?.sessionId ?? "",
+      session: span?.sessionId ?? (spans.length ? ALL_SESSIONS : ""),
       convs,
       // 链接来自哪个会话就默认开哪个 (见 landingOf); 否则最近活动的那个。
       conv: home?.key ?? convs[0]?.key ?? "",
