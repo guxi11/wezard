@@ -1693,23 +1693,34 @@
       go: function () { switchRole(r.id); },
     };
   };
+  // 时刻: 列表里写相对的, 悬停给完整的。
+  var skTs = function (ts) { return '<time class="ts" title="' + esc(fmtFull(ts)) + '">' + esc(fmtAgo(ts)) + '</time>'; };
+  // 会话归属: 群聊带群名, 私聊写明是私聊 —— 结果项第三层, 比发话人与正文都淡。
+  var whereOf = function (kind, label, name, q) {
+    return '<span class="where' + (kind === 'wizard' ? ' priv' : '') + '"><i>' + esc(label || '💬') + '</i>' +
+      (kind === 'wizard' ? '私聊 · ' : '') + hl(name, q || '') + '</span>';
+  };
   var convItem_ = function (c, q) {
     var title = c.kind === 'wizard' ? '<span class="nm wizard">' + hl(c.name, q) + '</span>' : '<span class="nm chat">' + hl(c.name, q) + '</span>';
     return {
       kind: 'conv',
       html: '<span class="av">' + esc(c.label) + '</span><span class="b"><span class="l1">' + title +
-        '<span class="ts">' + esc(fmtAgo(c.lastTs)) + '</span></span>' +
+        '<span class="tag">' + (c.kind === 'wizard' ? '私聊' : '群聊') + '</span>' + skTs(c.lastTs) + '</span>' +
         (c.preview ? '<span class="pv">' + esc(c.preview) + '</span>' : '') + '</span>',
       go: function () { selectConv(c.key, ''); },
     };
   };
+  // 三层: 谁 → 对谁 · 何时 / 命中的那一截 / 在哪个会话。
   var msgItem = function (h, q) {
+    var to = h.to && h.to !== h.from && h.to !== 'human:'
+      ? '<span class="arr">→</span>' + nm(h.to, h.toName) : '';
     return {
       kind: 'msg',
       html: '<span class="av">' + esc(h.fromLabel) + '</span><span class="b"><span class="l1">' +
-        nm(h.from, h.fromName) + '<span class="in">' + esc(h.convName) + '</span>' +
-        '<span class="ts">' + esc(fmtAgo(h.ts)) + '</span></span>' +
-        '<span class="pv sn">' + hl(h.snippet, q) + '</span></span>',
+        nm(h.from, h.fromName) + to + skTs(h.ts) + '</span>' +
+        '<span class="sn">' + hl(h.snippet, q) + '</span>' +
+        '<span class="l3">' + whereOf(h.convKind, h.convLabel, h.convName) +
+          (h.hits > 1 ? '<span class="cnt">' + h.hits + ' 处命中</span>' : '') + '</span></span>',
       go: function () { jumpMsg(h); },
     };
   };

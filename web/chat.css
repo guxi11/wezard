@@ -739,6 +739,8 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
   padding: 7px 10px; border: 0; border-radius: 9px; background: transparent; cursor: pointer;
 }
 .sk-it.on { background: #eaf0fc }
+.sk-it.msg { align-items: flex-start }
+.sk-it.msg > .av { margin-top: 1px }
 .sk-it > .av {
   flex: none; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px;
   background: #f1f3f6; font-size: 17px; line-height: 1;
@@ -746,14 +748,28 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .sk-it .b { min-width: 0; flex: 1; overflow: hidden }
 .sk-it .l1 { display: flex; align-items: baseline; gap: 8px; overflow: hidden; white-space: nowrap }
 .sk-it .nm { font-size: 13.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis }
-.sk-it .in { font-size: 11.5px; color: var(--faint); min-width: 0; overflow: hidden; text-overflow: ellipsis }
-.sk-it .in::before { content: "· "; }
 .sk-it .k { margin-left: auto; flex: none; font-size: 11px; color: var(--faint); opacity: 0 }
 .sk-it.on .k { opacity: 1; color: var(--accent) }
 .sk-it .ts { margin-left: auto; flex: none; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums }
 .sk-it .pv { display: block; font-size: 12px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.sk-it .pv.sn { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.45 }
-.sk-it mark { background: #ffe58f; color: inherit; border-radius: 2px; padding: 0 1px }
+.sk-it .l1 .nm + .nm, .sk-it .arr + .nm { font-weight: 500; color: var(--mute) }
+.sk-it .arr { flex: none; color: var(--faint); font-size: 11.5px }
+.sk-it .tag { flex: none; font-size: 10.5px; color: var(--mute); background: var(--paper); border-radius: 4px; padding: 1px 5px }
+/* 命中的那一截: 正文色, 最多两行; 命中词是这一页的视角色淡底 —— 与选中态一个色系。 */
+.sk-it .sn {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  margin-top: 2px; font-size: 12.5px; line-height: 1.5; color: var(--ink); word-break: break-word;
+}
+.sk-it mark { background: #2f55c91f; color: var(--accent); font-weight: 600; border-radius: 3px; padding: 0 1px }
+.sk-it.on mark { background: #2f55c92e }
+.sk-it .l3 { display: flex; align-items: center; gap: 8px; margin-top: 3px; min-width: 0 }
+.sk-it .where {
+  display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 70%;
+  font-size: 11px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sk-it .where i { font-style: normal; font-size: 12px; line-height: 1 }
+.sk-it .where.priv { color: var(--priv) }
+.sk-it .cnt { flex: none; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums }
 .sk-empty { padding: 18px 10px; text-align: center; font-size: 12.5px; color: var(--faint) }
 .sk-foot {
   flex: none; display: flex; gap: 16px; padding: 8px 16px; border-top: 1px solid var(--line);
