@@ -1023,6 +1023,9 @@
     var withBack = keep && WITH ? from : '';
     ROLE = id; WITH = withBack; SESSION = '';
     CONV = keep || (CONV.indexOf('p:') === 0 ? 'p:' + from : '');
+    // 停在关系图时换视角 = 选中新视角自己那张卡片: 先开它的全部对话 (不留旧选中 / 空白),
+    // 新树画出来知道它连着谁后, renderWorld 再收窄成那张卡片的窗口 (W.pickSelf)。
+    if (WORLD) { CONV = 'a:' + id; WITH = ''; same = false; W.pickSelf = id; }
     var snap = VIEW === 'msgs' && !calm() ? snapRows(at) : null;
     if (same) { if (WORLD) loadWorld(); flipWindow(snap); return; }
     var kept = VIEW === 'msgs' ? keepBodies() : {};
@@ -1435,6 +1438,12 @@
     // 两遍: 先量出画了谁 (卡片的窗口要知道它在图上连着谁), 再带着连线画 —— 选中态也就进了 html。
     draw(shown);
     F.links = linksOf(F, shown);
+    // 换视角后的第一张新树: 世界快照与摘要都已是新视角的, 才知道它自己那张卡片连着谁。
+    if (W.pickSelf === ROLE && W.role === ROLE && R.role && R.role.id === ROLE) {
+      W.pickSelf = '';
+      var self = talkKey(F.links, ROLE);
+      if (CONV !== self) return selectConv(self, '');
+    }
     var trees = draw([]);
     var span = rg ? (rg.s === R.sessions[R.sessions.length - 1] ? '最新 session' : 'session ' + fmtClock(rg.from)) : '全部时间';
     var alone = !all && shown.length < 2;
@@ -1632,9 +1641,10 @@
   var WORLD_MS = 6000;
   var worldTimer = null;
   var loadWorld = function () {
-    return api('api/world', { role: ROLE }).then(function (d) {
+    var asked = ROLE;
+    return api('api/world', { role: asked }).then(function (d) {
       if (!d.ok) return;
-      W.at = d.at; W.loaded = true;
+      W.at = d.at; W.loaded = true; W.role = asked;
       W.nodes = d.nodes || []; W.edges = d.edges || []; W.chats = d.chats || [];
       W.jobs = d.jobs || []; W.schedules = d.schedules || []; W.degraded = !!d.degraded;
       renderWorld();
@@ -1667,7 +1677,7 @@
   };
   // 侧栏换成关系图 / 换回会话列表。换回时选中的仍是在关系图里点开的那一项, 并把它滚进视野。
   var setWorld = function (on) {
-    WORLD = on; W.treeFor = '';
+    WORLD = on; W.treeFor = ''; W.pickSelf = '';
     convsEl._html = convsEl._tree = '';
     syncUrl();
     // 手机上侧栏与主区二选一 —— 开关在侧栏里, 结果也在侧栏里。
