@@ -654,8 +654,8 @@
   // 按单价从省到贵排, 颜色随之由冷转暖: 缓存读 (约 0.1×, 通常占了大半) 退成浅灰蓝不抢眼 →
   // 输入 (1×) 沉稳蓝 → 缓存写 (1.25×) 琥珀提醒 → 输出 (约 5×, 最贵) 珊瑚红警示。注意力留给后三段。
   var SEGS = [
-    ['cacheRead', '缓存读', '#aab7c8'], ['input', '输入', '#4c6fd6'],
-    ['cacheWrite', '缓存写', '#e0a030'], ['output', '输出', '#e4572e'],
+    ['cacheRead', '缓存读', '#aab7c8', 'cr'], ['input', '输入', '#4c6fd6', 'in'],
+    ['cacheWrite', '缓存写', '#e0a030', 'cw'], ['output', '输出', '#e4572e', 'out'],
   ];
   var TIP = {
     turns: '对话轮数', tools: '工具调用次数', api: 'API 请求次数',
@@ -692,12 +692,16 @@
             s[1] + ' ' + fmtTok(u[s[0]]) + ' · ' + pct(u[s[0]]) + '"></span>';
         }).join('') + '</span>' +
         '<span class="leg">' + segs.map(function (s) {
-          return '<span class="lg" title="' + s[1] + ' · ' + pct(u[s[0]]) + '"><i style="background:' + s[2] + '"></i>' +
-            s[1] + '<b>' + fmtTok(u[s[0]]) + '</b></span>';
+          // 常显的是缩写, 全称与占比在 title 里。
+          return '<span class="lg" title="' + s[1] + ' ' + fmtTok(u[s[0]]) + ' · ' + pct(u[s[0]]) + '"><i style="background:' +
+            s[2] + '"></i>' + s[3] + '<b>' + fmtTok(u[s[0]]) + '</b></span>';
         }).join('') + '</span>'
       : '';
-    // 条首的标签就是模型名: 这本账是拿什么跑出来的。没有模型记录 (老轮次) 才退回「用量」。
-    return '<span class="u-lb" title="' + esc(t.model || '') + '">' +
+    // 条首先是账的主人 (rolepage 里它的头像 + .名字), 再是模型名: 这本账是谁、拿什么跑出来的。
+    // 没有模型记录 (老轮次) 才退回「用量」。
+    return '<span class="u-who" title="' + esc(nameOf(t.target)) + '">' + esc(roleLabel(t.target) || t.label) +
+        '<span class="u-nm">' + esc(nameOf(t.target)) + '</span></span>' +
+      '<span class="u-lb" title="' + esc(t.model || '') + '">' +
         esc(t.model ? t.model.replace(/^claude-/, '') : '用量') + '</span>' +
       '<span class="u-kvs">' +
         kv('turns', t.turns, t.turns) + kv('tools', u.tools, u.tools) + kv('api', u.calls, u.calls) +
