@@ -68,8 +68,13 @@ export const pickName = (want: string, others: readonly string[]): string => {
  *  所以躺在 stateDir 而不是 config.jsonc。 */
 export const loadWizardStore = (filePath: string): WizardStore => {
   const db = loadJsonMap<WizardRecord>(filePath);
+  // drop 过的 target: claim 只推名字、不落盘, 直到有人明确 upsert (重新 spawn) 它。
+  // 收工播报、rolepage、回执日志这些只读路径都会问一句名字 —— 不拦的话 forget 之后
+  // 几毫秒就又落下一条没会话、没家谱的空壳, 名册里找得到名字却找不到人。
+  const dropped = new Set<string>();
   const all = (): WizardRecord[] => Object.values(db.all());
   const upsert = (t: string, patch: Partial<Omit<WizardRecord, "target">>): WizardRecord => {
+    dropped.delete(t);
     const next: WizardRecord = { ...(db.get(t) ?? blank(t)), ...patch, target: t };
     return db.set(t, { ...next, memory: next.memory.slice(-MEMORY_MAX).map((m) => m.slice(0, NOTE_MAX)) });
   };
@@ -81,10 +86,10 @@ export const loadWizardStore = (filePath: string): WizardStore => {
       const k = foldName(n);
       return k ? all().find((w) => foldName(w.name) === k) : undefined;
     },
-    claim: (t, want) => db.get(t)?.name || rename(t, want),
+    claim: (t, want) => db.get(t)?.name || (dropped.has(t) ? normalizeTag(want) || want : rename(t, want)),
     rename,
     upsert,
-    drop: db.drop,
+    drop: (t) => { dropped.add(t); db.drop(t); },
     all,
   };
 };
