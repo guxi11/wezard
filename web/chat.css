@@ -56,16 +56,6 @@ button { font: inherit; color: inherit }
 .rolebar .id .l { min-width: 0; display: flex; flex-direction: column; gap: 2px }
 .rolebar .id .nm { font-size: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .rolebar .id .k { font-size: 11.5px; color: var(--mute) }
-/* 名片上的状态: 只有执行中带颜色与呼吸, 空闲 / 已关闭是一个安静的词。 */
-.rolebar .st { margin-left: 8px; white-space: nowrap }
-.rolebar .st::before {
-  content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 4px;
-  border-radius: 50%; background: #b1bac4; vertical-align: 1px;
-}
-.rolebar .st.run { color: #1a7f37 }
-.rolebar .st.run::before { background: #1a7f37; animation: pulse 1.4s infinite }
-.rolebar .st.off { color: var(--faint) }
-.rolebar .st.off::before { background: transparent; box-shadow: inset 0 0 0 1.5px #b1bac4 }
 .rolebar .job { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--ink); opacity: .8 }
 .rolebar .facts { display: flex; gap: 6px 12px; flex-wrap: wrap; font-size: 11.5px; color: var(--mute) }
 .rolebar .facts span { white-space: nowrap }
@@ -228,11 +218,6 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
   font-variant-numeric: tabular-nums;
 }
 
-/* 执行中的 wizard: 名字右边一盏呼吸灯, 会话与子项同一位置, 与回复头上的 .tg-dot 同大。 */
-.ci .l1 .live, .si .l1 .live {
-  flex: none; align-self: center; width: 7px; height: 7px;
-  border-radius: 50%; background: #1a7f37; animation: pulse 1.4s infinite;
-}
 
 /* ── 右栏头: 这个群聊 / 私聊是什么 ───────────────────────────────── */
 .main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--card) }
@@ -463,11 +448,6 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
   background: #f1f3f6; border: 1px solid #eaeef2;
   display: flex; align-items: center; justify-content: center; font-size: 14px;
 }
-.wav .live {
-  position: absolute; right: -3px; bottom: -3px; width: 9px; height: 9px;
-  border-radius: 50%; background: #1a7f37; border: 2px solid #fff;
-  animation: pulse 1.4s infinite;
-}
 .wname {
   font-size: 12.5px; font-weight: 600; min-width: 0; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap;
@@ -589,16 +569,19 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .rem.raw .rem-raw { display: block }
 .rem.raw .rem-tag { display: none }
 
-/* ══ 状态药丸 (关系树 · 工单共用) ════════════════════════════════════ */
-.stp {
-  flex: none; display: inline-flex; align-items: center; gap: 4px; font-size: 10px; line-height: 16px;
+/* ══ 忙闲: 名字右边唯一的状态位 (名片 · 关系树 · 往来 · 侧栏共用 stTag) ══
+   只有执行中带颜色与呼吸; 空字 (侧栏) 就只剩那盏灯。 */
+.wst {
+  flex: none; align-self: center; display: inline-flex; align-items: center; gap: 4px; font-size: 10px; line-height: 16px;
   padding: 0 6px; border-radius: 8px; background: #eef0f3; color: var(--mute); white-space: nowrap; font-weight: 500;
 }
-.stp::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #b1bac4 }
-.stp.run { background: #dafbe1; color: #1a7f37 }
-.stp.run::before { background: #1a7f37; animation: pulse 1.4s infinite }
-.stp.off { background: transparent; color: var(--faint); box-shadow: inset 0 0 0 1px var(--line) }
-.stp.off::before { background: transparent; box-shadow: inset 0 0 0 1.5px #b1bac4 }
+.wst::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #b1bac4 }
+.wst.run { background: #dafbe1; color: #1a7f37 }
+.wst.run::before { background: #1a7f37; animation: pulse 1.4s infinite }
+.wst.off { background: transparent; color: var(--faint); box-shadow: inset 0 0 0 1px var(--line) }
+.wst.off::before { background: transparent; box-shadow: inset 0 0 0 1.5px #b1bac4 }
+.wst:empty { padding: 0; background: none; box-shadow: none }
+.wst:empty::before { width: 7px; height: 7px }
 /* ══ 关系图 · 关系树 (家谱与派活合成一棵, 以当前 role 为中心) ══════════ */
 .tview {
   display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 18px; align-items: start;
@@ -609,11 +592,10 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
   display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin: 0 0 14px; font-size: 13px;
   padding-bottom: 9px; border-bottom: 1px solid #eaeef2;
 }
-.tview h3 > span:not(.tally) { font-size: 11px; color: var(--faint); font-weight: 400; font-variant-numeric: tabular-nums }
-.tview h3 .tally { margin-left: auto; display: flex; gap: 5px }
+.tview h3 > span { font-size: 11px; color: var(--faint); font-weight: 400; font-variant-numeric: tabular-nums }
 /* 展开全部的开关: 一个不显眼的文字链。 */
 .tall {
-  border: 0; background: none; padding: 0 2px; cursor: pointer; font-size: 11px; color: var(--faint);
+  margin-left: auto; border: 0; background: none; padding: 0 2px; cursor: pointer; font-size: 11px; color: var(--faint);
   text-decoration: underline dotted; text-underline-offset: 3px;
 }
 .tall:hover { color: var(--accent) }
@@ -650,9 +632,6 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .tnode.go:hover { border-color: var(--accent); box-shadow: 0 2px 8px #2f55c91a }
 .tnode.go:hover .wname { color: var(--accent) }
 .tnode.me { background: var(--mine); border-color: var(--accent); box-shadow: 0 0 0 3px #2f55c914 }
-.tnode.run { border-left: 3px solid #1a7f37 }
-.tnode.off .wav { filter: grayscale(1); opacity: .55 }
-.tnode.off .wname { color: var(--mute) }
 .tnode .wav { width: 30px; height: 30px; font-size: 16px; border-radius: 9px }
 .tb { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px }
 .t1 { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0 }
@@ -771,5 +750,5 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .gt.err { color: #fff; background: #cf222e }
 .jh .jst { border-radius: 4px; padding: 0 6px; background: #eaeef2 }
 .jrow.open .jh .jst { background: #dafbe1 }
-.jmm .stp { font-size: 9.5px }
+.jmm .wst { font-size: 9.5px }
 .jmm .tmp, .jmm .wchip { flex: none; white-space: nowrap }

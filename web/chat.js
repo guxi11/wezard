@@ -295,15 +295,17 @@
   // 到点没有新写入就自己熄 (同 expireRows), 不必等下一次推送。
   var ST = { run: '执行中', idle: '空闲', off: '已关闭' };
   var stateOf = function (s) { return wRunning(s) ? 'run' : s.alive ? 'idle' : 'off'; };
-  // 侧栏只在执行中时点一盏灯: 列表里安静是常态, 亮着的才值得看一眼。
-  var lampOf = function (s) {
-    return s && wRunning(s) ? '<i class="live" title="' + ST.run + '"></i>' : '';
+  // 忙闲只有这一个渲染点, 永远挂在名字右边 —— 名片 / 关系树 / 往来 / 侧栏共用。
+  // quiet: 只在执行中出现、只要灯不要字 (侧栏: 列表里安静是常态, 亮着的才值得看一眼)。
+  var stTag = function (s, quiet) {
+    if (!s) return '';
+    var k = stateOf(s);
+    if (quiet && k !== 'run') return '';
+    return '<span class="wst ' + k + '" title="' + ST[k] + '">' + (quiet ? '' : ST[k]) + '</span>';
   };
   var paintStatus = function () {
-    var el = $('#rb-st'), r = R.role;
-    if (!el || !r) return;
-    var k = stateOf(r);
-    el.className = 'st ' + k; el.textContent = ST[k];
+    var el = $('#rb-st');
+    if (el && R.role) el.innerHTML = stTag(R.role);
   };
 
   var avatarOf = function (c, extra) {
@@ -391,7 +393,7 @@
       return '<button class="si' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '" data-with="' + esc(s.role) + '" ' +
         'title="' + esc('我与 ' + nameOf(s.role) + ' 在这里的 ' + s.count + ' 条往来') + '">' +
         goSpan('av', s.role, esc(s.label)) +
-        line(nm(s.role, s.name, true), s.lastTs, s.preview, lampOf(s.status), unreadOf(c, s.role)) + '</button>';
+        line(nm(s.role, s.name, true), s.lastTs, s.preview, stTag(s.status, true), unreadOf(c, s.role)) + '</button>';
     };
     var rest = MORE[c.key] ? talked.slice(SUB_FOLD).map(sub).join('') : '';
     var subs = talked.length
@@ -399,7 +401,7 @@
       : '';
     var sel = on && !WITH;
     return '<button class="ci' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '">' +
-        avatarOf(c) + line(title, c.lastTs, c.preview, lampOf(c.status), unreadOf(c)) +
+        avatarOf(c) + line(title, c.lastTs, c.preview, stTag(c.status, true), unreadOf(c)) +
       '</button>' + subs;
   };
 
@@ -527,9 +529,9 @@
       (t0 ? ' · 开始于 ' + fmtDay(t0) : '')) + '">🕘 ' + esc(when.join(' · ')) + '</span>');
     $('#rb-who').innerHTML =
       '<div class="id"><span class="av">' + esc(r.label) + '</span>' +
-        '<span class="l"><span class="nl">' + nm(r.id, r.name) +
+        '<span class="l"><span class="nl">' + nm(r.id, r.name) + (r.kind === 'wizard' ? '<span id="rb-st"></span>' : '') +
           '<span id="rb-sp">' + (R.sessions.length > 1 ? sessPicker() : '') + '</span></span>' +
-          (kind ? '<span class="k">' + kind + (r.kind === 'wizard' ? '<span class="st" id="rb-st"></span>' : '') + '</span>' : '') + '</span></div>' +
+          (kind ? '<span class="k">' + kind + '</span>' : '') + '</span></div>' +
       (r.description ? '<p class="job">' + esc(r.description) + '</p>' : '') +
       '<div class="facts">' + facts.join('') + '</div>';
     paintStatus();
@@ -1101,10 +1103,6 @@
   var canOpen = function (n) { return !!n; };
   var openNode = function (target) { if (target) switchRole(target); };
   var shortName = function (n) { return '.' + (n.name || n.tag || n.target); };
-  var stPill = function (n) {
-    var k = stateOf(n);
-    return '<span class="stp ' + k + '">' + ST[k] + '</span>';
-  };
 
   // ── 时间窗: profile 里选中的 session; 全部 = 不设限 ──
   var rangeOf = function () {
@@ -1222,13 +1220,13 @@
       .filter(Boolean);
     // 群名只在换了群时写 (根节点总写) —— 同群一路下来就不重复。
     var chat = (!upBase || upBase !== n.base) && (n.chat || n.base);
-    return '<div class="tnode ' + stateOf(n) + (me ? ' me' : ' go') + '" data-t="' + esc(n.target) + '"' +
+    return '<div class="tnode' + (me ? ' me' : ' go') + '" data-t="' + esc(n.target) + '"' +
         (me ? '' : ' title="切到 ' + esc(shortName(n)) + ' 的视角"') + '>' +
-      '<span class="wav">' + esc(n.label) + (wRunning(n) ? '<i class="live"></i>' : '') + '</span>' +
+      '<span class="wav">' + esc(n.label) + '</span>' +
       '<span class="tb">' +
         (p ? '<span class="tmarks">' + marksHTML(F, p) + '</span>' : '') +
-        '<span class="t1"><b class="wname">' + esc(shortName(n)) + '</b>' +
-          (me ? '<span class="tk me">当前视角</span>' : '') + stPill(n) +
+        '<span class="t1"><b class="wname">' + esc(shortName(n)) + '</b>' + stTag(n) +
+          (me ? '<span class="tk me">当前视角</span>' : '') +
           (chat ? '<span class="tchat" title="住在这个群">#' + esc(chat) + '</span>' : '') +
           (folded ? '<span class="tfold" title="它下面还有 ' + folded + ' 个, 切到它的视角可见">+' + folded + '</span>' : '') + '</span>' +
         (n.description ? '<span class="tjob">' + esc(n.description) + '</span>' : '') +
@@ -1267,8 +1265,8 @@
     var row = function (p, other) {
       var n = nodeOf(other);
       return '<div class="tie' + (n ? ' go' : '') + '" data-t="' + esc(other) + '" title="切到 ' + esc(nameOf(other)) + ' 的视角">' +
-        '<span class="wav">' + esc(roleLabel(other)) + (n && wRunning(n) ? '<i class="live"></i>' : '') + '</span>' +
-        '<span class="tb"><span class="t1"><b class="wname">' + esc(nameOf(other)) + '</b>' + (n ? stPill(n) : '') + '</span>' +
+        '<span class="wav">' + esc(roleLabel(other)) + '</span>' +
+        '<span class="tb"><span class="t1"><b class="wname">' + esc(nameOf(other)) + '</b>' + stTag(n) + '</span>' +
           '<span class="tmarks">' + marksHTML({ pairs: {} }, p) + '<span class="ago">' + esc(fmtAgo(p.last)) + '</span></span></span></div>';
     };
     var col = function (title, xs, end) {
@@ -1294,10 +1292,6 @@
           return (b === mine) - (a === mine) || ((nodeOf(b) || {}).lastTs || 0) - ((nodeOf(a) || {}).lastTs || 0);
         }).map(function (r) { return treeHTML(F, r, 0, null, false, shown, '', {}); }).join('')
       : treeHTML(F, path[0], 0, focusKeep(path), false, shown, '', {});
-    var tally = ['run', 'idle', 'off'].map(function (k) {
-      var c = shown.filter(function (n) { return stateOf(n) === k; }).length;
-      return c ? '<span class="stp ' + k + '">' + ST[k] + ' ' + c + '</span>' : '';
-    }).join('');
     var span = rg ? (rg.s === R.sessions[R.sessions.length - 1] ? '最新 session · ' : 'session · ') + fmtClock(rg.from) + ' 起' : '全部时间';
     wtoolsEl.innerHTML = '<div class="wstat"><span class="rng" title="在名片里的 session 下拉切换范围">范围: ' + esc(span) + '</span>' +
       (W.degraded ? ' · <span class="warn" title="注册表不可达 (独立 svr 部署), 只画观测到的往来">名册缺席</span>' : '') +
@@ -1306,7 +1300,6 @@
     var html = '<div class="tview">' +
       '<section class="tfam">' +
         '<h3>关系树<span>' + (all ? Object.keys(F.ends).length + ' 个 wizard 有关系' : shown.length + ' 个 wizard') + '</span>' +
-          '<span class="tally">' + tally + '</span>' +
           (me ? '<button class="tall" title="' + (all ? '只留它的上游链、它自己、它的下游与同源兄弟' : '画出范围内所有有关系的 wizard') + '">' +
             (all ? '只看相关' : '看全部') + '</button>' : '') + '</h3>' +
         (alone ? '<div class="tsolo">' + esc(nameOf(ROLE)) + (rg ? ' 在这段 session 里' : '') + ' 既没生过谁、也没和谁派过活</div>' : '') +
@@ -1457,7 +1450,7 @@
         '<div class="jm">' + (j.members.length
           ? j.members.map(function (mm) {
               var n = nodeOf(mm.target);
-              return '<span class="jmm">' + wizChip(mm.target) + (n ? stPill(n) : '') +
+              return '<span class="jmm">' + wizChip(mm.target) + stTag(n) +
                 (mm.spawned ? '<i class="tmp" title="为这个工单临时生的 wizard (分身或子 wizard), 收工时回收">临时</i>' : '') +
                 '<em>' + esc((mm.task || '').split('\n')[0].slice(0, 90)) + '</em></span>';
             }).join('')
