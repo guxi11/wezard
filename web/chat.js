@@ -1484,7 +1484,7 @@
     var alone = !all && shown.length < 2;
     var html = '<div class="tview">' +
       '<h2>关系图<span title="在名片里的 session 下拉切换范围">' + esc(span) + ' · ' + (all ? Object.keys(F.ends).length : shown.length) + ' 个</span>' +
-        (W.degraded ? '<span class="warn" title="注册表不可达 (独立 svr 部署), 只画观测到的往来">名册缺席</span>' : '') +
+        (W.degraded ? '<span class="warn" title="没拿到 wizard 注册表 (svr 还没收到 daemon 的快照), 只画观测到的往来">名册缺席</span>' : '') +
         (me ? '<button class="tall" title="' + (all ? '只留它的上游链、它自己、它的下游与同源兄弟' : '画出范围内所有有关系的 wizard') + '">' +
           (all ? '只看相关' : '看全部') + '</button>' : '') + '</h2>' +
       (alone ? '<div class="tsolo">' + esc(nameOf(ROLE)) + (rg ? ' 在这段 session 里' : '') + ' 没和谁对过话</div>' : '') +

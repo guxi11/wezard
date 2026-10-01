@@ -45,28 +45,37 @@ export const setWorldFactsProvider = (fn: WorldFactsProvider): void => { worldFa
 // 30s: 采一次要按 pane 问一遍 tmux (见 index.ts 的 WORLD_TTL 说明), 而一个开着的
 // 浏览器本来就 6s 问一次, 这个频率比它轻五倍, 却足够让远端的日程与名册是准的。
 const FACTS_PUSH_MS = 30_000;
+/** 上一次没推成 (svr 正在重启 / 还没起来) 就紧着重试 —— svr 的快照只在内存里,
+ *  它起来后到下一次推送之间, 名册是真的缺席。 */
+const FACTS_RETRY_MS = 5_000;
 let factsTimer: NodeJS.Timeout | undefined;
 /** 快照的来源署名 —— 一个 svr 可能接着好几台 daemon, 它按这个键分开存。 */
 const factsSource = (): string => hostname() || "daemon";
 
-const pushFacts = async (): Promise<void> => {
-  if (!remoteBase || !worldFacts) return;
+/** 推一次, 答「推成没有」。占位快照 (absent) 不推: 那不是注册表的状态, 推过去只会覆盖掉一份好的。 */
+const pushFacts = async (): Promise<boolean> => {
+  if (!remoteBase || !worldFacts) return false;
   const facts = await Promise.resolve(worldFacts()).catch(() => undefined);
-  if (!facts) return;
+  if (!facts || facts.absent) return false;
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (remoteToken) headers.authorization = `Bearer ${remoteToken}`;
-  await fetch(`${remoteBase.replace(/\/+$/, "")}/w`, {
+  return fetch(`${remoteBase.replace(/\/+$/, "")}/w`, {
     method: "POST",
     headers,
     body: JSON.stringify({ source: factsSource(), facts }),
-  }).catch(() => { /* 同 forwardToRemote: 远端挂了不该影响本机 */ });
+  }).then((r) => r.ok, () => false); // 同 forwardToRemote: 远端挂了不该影响本机
 };
 
 // 两个前置条件 (配了远端、装上了 provider) 谁先到都可能 —— 两处都调一次, 起过就不再起。
 const startFactsForward = (): void => {
   if (factsTimer || !remoteBase || !worldFacts) return;
-  void pushFacts();
-  factsTimer = setInterval(() => { void pushFacts(); }, FACTS_PUSH_MS);
+  const tick = (): void => {
+    void pushFacts().then((ok) => {
+      factsTimer = setTimeout(tick, ok ? FACTS_PUSH_MS : FACTS_RETRY_MS);
+      factsTimer.unref();
+    });
+  };
+  factsTimer = setTimeout(tick, 0);
   factsTimer.unref();
 };
 

@@ -95,9 +95,11 @@ export interface WorldFacts {
   schedules: readonly WorldFactSchedule[];
   /** base → 聊天名; 没起名的不在表里。 */
   chatNames: Readonly<Record<string, string>>;
+  /** 这份不是注册表给的, 是「没拿到」的占位 —— 显式信号: 空名册 ≠ 注册表不可达。 */
+  absent?: true;
 }
 
-export const EMPTY_FACTS: WorldFacts = { wizards: [], jobs: [], schedules: [], chatNames: {} };
+export const EMPTY_FACTS: WorldFacts = { wizards: [], jobs: [], schedules: [], chatNames: {}, absent: true };
 
 // ── 视图模型 ──────────────────────────────────────────────────────────
 export interface WorldNode {
@@ -422,6 +424,6 @@ export const buildWorld = (
     edges: edges.filter((e) => shown.has(e.from) && shown.has(e.to)),
     jobs: [...facts.jobs].sort((a, b) => (b.closedAt ?? b.openedAt) - (a.closedAt ?? a.openedAt)),
     schedules: [...facts.schedules].sort((a, b) => a.nextAt - b.nextAt),
-    degraded: facts.wizards.length === 0,
+    degraded: !!facts.absent,
   };
 };

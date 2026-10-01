@@ -1215,10 +1215,16 @@ const main = async (): Promise<void> => {
         chatNames: Object.fromEntries(listChatNames(cfg).map((c) => [c.base, c.name])),
       };
     };
+    // 一次采集失败 (某个 pane 的 tmux 抖了一下) 不等于注册表没了: 退回上一份好的,
+    // 否则这份空占位会被推给 svr, 把整张名册抹成「缺席」直到下一次推送。
+    let lastGood: WorldFacts = EMPTY_FACTS;
     setWorldFactsProvider(() => {
       const now = Date.now();
       if (!worldCache || now - worldCache.at > WORLD_TTL_MS) {
-        worldCache = { at: now, facts: collectWorldFacts().catch(() => EMPTY_FACTS) };
+        worldCache = {
+          at: now,
+          facts: collectWorldFacts().then((f) => (lastGood = f), () => lastGood),
+        };
       }
       return worldCache.facts;
     });
