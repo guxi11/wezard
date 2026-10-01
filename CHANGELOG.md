@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-10-02
+
+### Changed
+- rolepage 名片收敛: 头像加不透明底, 去掉身份行; 名字下一行灰色描述只留 📁 工作区 · 🏠 home · 🐣 出生 (不再报轮数); session 选择器箭头改 18px。
+- README 改版: 简介与功能列表按重要程度重写 (远程控制 → 审批 → 多 wizard → 管家分派 → 回执 → 记忆 → rolepage …), demo 图换成 rolepage 群聊视图, 新增 tmux ⇄ 企业微信双向镜像的配图与小节、「管家」一节; 技术说明补上记忆 / 分派 / 回执 / 交接的机制说明与配图。
+
 ### Fixed
 - **危险名单加「命令词位置」约束** (#19): rm / shutdown / sudo 这类又短又常见的词只在命令位置 (行首、`;` `&&` `|` `(` 之后、引号紧邻、包装器之后、`-- ` 之后) 才命中 —— 分支名 `feature/graceful-shutdown`、`docker run --rm`、检索词里的 rm/sudo 不再把 `git checkout` / `git push` 堵在审批卡上; ssh / kubectl·docker exec 的远程形态保持宽匹配。
 - #19 的包装器漏报: 包装器初版是白名单, `\rm`、`command rm`、`timeout 5 rm`、`nice rm`、`env FOO=1 rm`、`watch reboot` 全被放行。补全包装器集合 (command/builtin/timeout/nice/stdbuf/watch/caffeinate/doas/setsid/ionice 与 `\` 转义), 包装器与命令之间允许选项/时长/`K=V` 赋值 token —— 普通单词打断链条, 检索词钓不出命中。
@@ -803,7 +809,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.2.1...HEAD
+[2.2.1]: https://github.com/guxi11/wezard/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/guxi11/wezard/compare/v2.1.4...v2.2.0
 [2.1.4]: https://github.com/guxi11/wezard/compare/v2.1.3...v2.1.4
 [2.1.3]: https://github.com/guxi11/wezard/compare/v2.1.2...v2.1.3
