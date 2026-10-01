@@ -105,7 +105,7 @@ wezard init
 
 一个绑定了聊天的会话叫一个 **wizard**：有自己的终端、工作区、名字和职责，知道还有谁在，也叫得动它们。名字**全局唯一**，写作 `.name`——不管它住在哪个群，在任何群里都叫得到。
 
-![多 wizard 协同](images/demo.png)
+![多 wizard 协同](images/wizards.png)
 
 **创建**
 
