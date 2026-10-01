@@ -355,7 +355,9 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 .mrow.mine .flip .fi { flex-direction: row-reverse }
 .mrow.mine .flip .fc { transform: scaleX(-1) }
 .flip .fc { flex: none }
-.flip .fi { min-width: 0; max-width: 100% }
+.flip .fi { min-width: 0; max-width: 100%; box-sizing: border-box; padding: 4px 8px; gap: 6px }
+/* 要去谁那里: 名字可以折行, 不撑出门外。 */
+.flip .fn { min-width: 0; overflow-wrap: anywhere }
 .flip:hover, .flip:focus-visible { background: #2f55c90d; color: var(--accent) }
 .flip[disabled] { cursor: default; background: transparent !important; color: transparent !important }
 /* 说给谁: 贴着气泡写在门里, 与气泡首行对齐。不吃点击 —— 点到它就是点门。

@@ -835,7 +835,7 @@
     var sw = canSwitch(other);
     var flip = '<button class="flip" data-r="' + esc(other) + '"' + (sw ? '' : ' disabled tabindex="-1"') +
       ' aria-label="' + esc(sw ? '切到 ' + nameOf(other) + ' 的视角' : '') + '">' +
-      dest + (sw ? '<span class="fi">' + CHEVRON + '</span>' : '') + '</button>';
+      dest + (sw ? '<span class="fi"><span class="fn">' + esc(nameOf(other)) + '</span>' + CHEVRON + '</span>' : '') + '</button>';
     return '<div class="mrow ' + (mine ? 'mine' : 'them') + '" data-id="' + esc(m.id) + '" data-turn="' + esc(m.turnId || m.id) + '" data-ts="' + m.ts + '"' +
       (m.ping ? ' data-ping="1" data-ping-who="' + esc(m.dir === 'in' ? m.toName : m.fromName) + '"' : '') + ' data-sig="' + esc(m.sig) + '" data-stale-at="' + (m.staleAt || 0) + '">' +
       '<div class="mcol"><div class="mwho">' + who + '</div><div class="mb">' + (m.dir === 'out' ? signCut(m.html, m.from, m.fromName) : m.html) + '</div></div>' +
