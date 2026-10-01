@@ -12,7 +12,7 @@ import { loadMirrorStore } from "./mirror-store.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { installApprovalEventListener, makeApproveHandler } from "./approval.js";
-import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, setWorldFactsProvider } from "./detail.js";
+import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, setWorldFactsProvider, recordPost } from "./detail.js";
 import { EMPTY_FACTS, type WorldFacts, type WorldFactWizard } from "../shared/world.js";
 import { initAutoWindowPersistence } from "./session-cache.js";
 import { makeMessageHandler } from "./outbound.js";
@@ -690,7 +690,10 @@ const main = async (): Promise<void> => {
         return;
       }
       const dests = [...new Set(refs.length ? refs.map((r) => chatBaseOf(cfg, r)) : [channelOf(self)])];
-      for (const dest of dests) notifyChat(dest, `${relayLabel(self)}\n\n${content}`);
+      for (const dest of dests) {
+        notifyChat(dest, `${relayLabel(self)}\n\n${content}`);
+        recordPost({ target: self, channel: dest, body: content });
+      }
       json(res, 200, { ok: true, sent: dests.map((d) => chatNameOf(cfg, d) || d) });
     });
 

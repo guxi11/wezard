@@ -9,7 +9,7 @@
 // Nothing here touches tmux or the mirror bridge, so the standalone svr derives
 // exactly the same view from the records that were POSTed to it.
 import { baseOfKey, labelFor, tagOfKey } from "./session-label.js";
-import type { DetailRecord, MarkDetailRecord, TurnDetailRecord, TurnOrigin, TurnUsage } from "./detail-store.js";
+import type { DetailRecord, MarkDetailRecord, PostDetailRecord, TurnDetailRecord, TurnOrigin, TurnUsage } from "./detail-store.js";
 
 export interface AggUsage extends TurnUsage {
   /** Wall-clock covered by the aggregated turns (sum of per-turn spans). */
@@ -181,6 +181,8 @@ export const isKeepaliveTurn = (r: TurnDetailRecord): boolean => {
 export const isTurn = (r: DetailRecord): r is TurnDetailRecord => r.kind === "turn";
 
 export const isMark = (r: DetailRecord): r is MarkDetailRecord => r.kind === "mark";
+
+export const isPost = (r: DetailRecord): r is PostDetailRecord => r.kind === "post";
 
 /** Real turns of one chat — every ghost dropped exactly once, up front, so the
  *  list / thread / status bar can never disagree about what counts. */

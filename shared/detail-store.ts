@@ -198,11 +198,27 @@ export interface ChatTicketRecord {
   target: string;
 }
 
+// 贴出 —— wizard 用 notify 往一个公开频道里贴给人看的一段话。它不是一轮对话
+// (没有人问, 也不驱动谁), 却是这个 wizard 在那个群里说过的话: rolepage 要把它
+// 当成一条出消息画进那个群, 否则群里看得见、详情页里却查无此句。不借 turn 记录
+// 来装: 那会让它被算进轮次与用量的总账。
+export interface PostDetailRecord {
+  kind: "post";
+  id: string;
+  createdAt: number;
+  /** 发话的 wizard。 */
+  target: string;
+  /** 贴进的那个公开频道的 base。 */
+  channel: string;
+  body: string;
+}
+
 export type DetailRecord =
   | ToolDetailRecord
   | ApprovalDetailRecord
   | TurnDetailRecord
   | MarkDetailRecord
+  | PostDetailRecord
   | ChatTicketRecord;
 
 export interface DetailStore {
@@ -300,7 +316,7 @@ export const createDetailStore = (opts: { stateDir: string; log?: Logger }): Det
         if (!line) continue;
         try {
           const r = JSON.parse(line) as DetailRecord;
-          if (!r?.id || (r.kind !== "tool" && r.kind !== "approval" && r.kind !== "turn" && r.kind !== "mark" && r.kind !== "chat")) continue;
+          if (!r?.id || (r.kind !== "tool" && r.kind !== "approval" && r.kind !== "turn" && r.kind !== "mark" && r.kind !== "post" && r.kind !== "chat")) continue;
           if (typeof r.createdAt !== "number") { dropped++; continue; }
           if (r.createdAt < cutoff && r.kind !== "chat") { dropped++; continue; }
           store.set(r.id, r);

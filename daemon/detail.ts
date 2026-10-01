@@ -19,6 +19,7 @@ import {
   type DetailRecord,
   type DetailStore,
   type MarkDetailRecord,
+  type PostDetailRecord,
   type ToolDetailRecord,
   type TurnDetailRecord,
   type TurnItem,
@@ -133,6 +134,14 @@ export const recordMark = (rec: Omit<MarkDetailRecord, "kind" | "createdAt"> & {
   store.recordMark(rec);
   const full = store.get(rec.id);
   if (full) forwardToRemote(full);
+};
+
+// notify 贴进群的那段话: rolepage 把它画成发话 wizard 在那个群里的一条出消息。
+export const recordPost = (rec: Omit<PostDetailRecord, "kind" | "id" | "createdAt">): void => {
+  if (!store) return;
+  const full: PostDetailRecord = { kind: "post", id: `p${Date.now().toString(36)}${randomBytes(3).toString("hex")}`, createdAt: Date.now(), ...rec };
+  store.put(full);
+  forwardToRemote(full);
 };
 
 // Brief 模式聚合详情: 一个 turn 的时间线。startTurn 建空壳,item 增量 append,close 收尾。

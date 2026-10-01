@@ -21,10 +21,10 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { URL } from "node:url";
 import { baseOfKey } from "./session-label.js";
-import { isMark, isTurn } from "./chat-view.js";
+import { isMark, isPost, isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, type WorldFacts } from "./world.js";
 import {
-  allMessages, convKeyOf, convMessages, convsOf, hasRelations, inSpan, makeDirectory, marksOf, messagesOfTurn,
+  allMessages, convKeyOf, convMessages, convsOf, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
   roleInfo, roleStats, sessionsOf, windowStats, type Directory, type Msg, type SessionSpan,
 } from "./role-view.js";
 import { renderMark, renderMsg, type MsgFragment } from "./role-render.js";
@@ -303,6 +303,11 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
         if (r.target === v.role && inSpan(v.span)(r.createdAt)) pushFrag(renderMark(r, v.role, dir));
         return;
       }
+      if (isPost(r)) {
+        const m = messageOfPost(r);
+        if (convMessages([m], v.role, v.conv, v.with || undefined).length && inSpan(v.span)(m.ts)) pushFrag(renderMsg(m, records, dir, now));
+        return;
+      }
       if (!isTurn(r) || !r.target) return;
       // 子 agent 的一轮渲染在父轮的出消息里 —— 推父轮。
       const top = r.agent?.parentTurnId ? store.get(r.agent.parentTurnId) : r;
@@ -332,10 +337,11 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     const beat = setInterval(() => { factsAt = 0; roleDirty = true; }, FACTS_MS);
 
     const unsub = store.subscribe((rec) => {
-      if (!isTurn(rec) && !isMark(rec)) return;
+      if (!isTurn(rec) && !isMark(rec) && !isPost(rec)) return;
       if (!rec.target) return;
       // 侧栏的预览/时间只在与视角 role 有关的轮次变动时才需要重算。
       const involved = !v || rec.target === v.role || (isTurn(rec) && rec.from?.from === v.role) ||
+        (isPost(rec) && !!v.conv && rec.channel === v.conv.slice(2)) ||
         (isTurn(rec) && !!v.conv && v.conv.startsWith("c:") && (rec.channel ?? baseOfKey(rec.target)) === v.conv.slice(2));
       if (involved) roleDirty = true;
       turnDirty.add(rec.id);

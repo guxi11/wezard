@@ -17,8 +17,8 @@
 // 终端里打的字一样, 但不是人说的 —— 归给系统, 同样不能切成视角。人不用 `user:<id>`: 那正是
 // 「与这个人的单聊」里默认 wizard 的 target, 两者字面相同, 同一条消息会变成自己对自己说。
 import { baseOfKey, labelFor, stripSigil, tagOfKey } from "./session-label.js";
-import { isGhostTurn, isKeepaliveTurn, isMark, isTurn, staleAt, summarizeTag, type TagSummary } from "./chat-view.js";
-import type { DetailRecord, MarkDetailRecord, TurnDetailRecord } from "./detail-store.js";
+import { isGhostTurn, isKeepaliveTurn, isMark, isPost, isTurn, staleAt, summarizeTag, type TagSummary } from "./chat-view.js";
+import type { DetailRecord, MarkDetailRecord, PostDetailRecord, TurnDetailRecord } from "./detail-store.js";
 import type { WorldFacts, WorldFactWizard } from "./world.js";
 
 export type RoleKind = "wizard" | "human" | "task";
@@ -97,8 +97,24 @@ export const messagesOfTurn = (r: TurnDetailRecord): Msg[] => {
   return [...inMsg, ...outMsg];
 };
 
+/** notify 贴进群的一段话 → 发话 wizard 在那个频道里的一条出消息, 对着那里的人说。
+ *  装进一个已收口、只有一段终句的轮次外形, 渲染与未读水位都照出消息的老规矩走。 */
+export const messageOfPost = (p: PostDetailRecord): Msg => ({
+  id: `${p.id}:out`,
+  turn: {
+    kind: "turn", id: p.id, createdAt: p.createdAt, updatedAt: p.createdAt, closed: true,
+    target: p.target, channel: p.channel, items: [{ t: "text", body: p.body, ts: p.createdAt, final: true }],
+  },
+  dir: "out",
+  from: p.target,
+  to: p.channel.startsWith("user:") ? humanOf(p.channel) : "human:",
+  channel: p.channel,
+  ts: p.createdAt,
+});
+
 export const allMessages = (records: readonly DetailRecord[], now: number): Msg[] =>
-  convTurns(records, now).flatMap(messagesOfTurn).sort((a, b) => a.ts - b.ts);
+  [...convTurns(records, now).flatMap(messagesOfTurn), ...records.filter(isPost).map(messageOfPost)]
+    .sort((a, b) => a.ts - b.ts);
 
 // ── 名录 ─────────────────────────────────────────────────────────────
 /** 一个 wizard 此刻的活体状态。「执行中」由客户端判: busy || 现在 < runningUntil ——
