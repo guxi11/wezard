@@ -179,7 +179,8 @@ button { font: inherit; color: inherit }
 .ci:hover { background: #f4f6f9 }
 .ci.on { background: #eaf0fc }
 .ci { align-items: center }
-.ci > .av {
+/* 子项与关系图卡片的头像同私聊项一个尺寸 —— 只有一份。 */
+.ci > .av, .si > .av {
   flex: none; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px;
   background: #f1f3f6; font-size: 20px; line-height: 1;
 }
@@ -211,10 +212,6 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 }
 .si:hover { background: #f4f6f9 }
 .si.on { background: #eaf0fc }
-.si > .av {
-  flex: none; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 7px;
-  background: #f1f3f6; font-size: 14px; line-height: 1;
-}
 .si .b { min-width: 0; flex: 1; overflow: hidden }
 .si .l1 { display: flex; align-items: baseline; gap: 6px }
 .si .t { font-size: 12.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }

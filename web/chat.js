@@ -1253,13 +1253,13 @@
     return chainUp(F, p.from, seen).concat([t]);
   };
 
-  // 线接入卡片处的 label: 种类 (家谱不计次, 派活计次) + 跨群; 经手的工单号放进悬停提示。
+  // 线接入卡片处的 label: 种类 (家谱不计次, 对话等一律写次数, ×1 也写) + 跨群; 经手的工单号放进悬停提示。
   var labelHTML = function (p) {
     if (!p) return '';
     return '<span class="tlab"' + (p.jobs.length ? ' title="经手的工单: ' + esc(p.jobs.join(' ')) + '"' : '') + '>' +
       Object.keys(KIND).filter(function (k) { return p.kinds[k]; }).map(function (k) {
         return '<span class="ek ' + k + '" title="' + KIND[k].tip + '">' + KIND[k].mark +
-          (!LINEAGE[k] && p.kinds[k] > 1 ? ' ×' + p.kinds[k] : '') + '</span>';
+          (!LINEAGE[k] ? ' ×' + p.kinds[k] : '') + '</span>';
       }).join('') +
       (p.cross ? '<span class="ek cross" title="跨群的关系">⇄ 跨群</span>' : '') + '</span>';
   };
