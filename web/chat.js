@@ -790,7 +790,13 @@
       : (m.to !== ROLE && group ? m.to : '');
     // 宽屏写在气泡对面的空白里 (.dest, 在换视角的门里但不吃点击); 窄屏空白太窄, 退回消息头 (.to)。
     var to = dst ? '<span class="to">→ ' + avBtn(m.to, m.toLabel) + nm(m.to, m.toName, true) + '</span>' : '';
-    var dest = dst ? '<span class="dest" aria-hidden="true">→ ' + esc(nameOf(dst)) + '</span>' : '';
+    // 箭头顺着「发话人 → 收件人」: 气泡是发话人, 描述在哪一侧箭头就背着气泡指向哪一侧 ——
+    // 我的消息描述在左 (🦉 .x ←), 别人的在右 (→ 🦉 .x)。
+    var dest = dst
+      ? '<span class="dest" aria-hidden="true">' + (mine ? '' : '<i class="arr">→</i>') +
+        '<span class="dav">' + esc(m.toLabel || roleLabel(dst)) + '</span><span class="dn">' + esc(nameOf(dst)) + '</span>' +
+        (mine ? '<i class="arr">←</i>' : '') + '</span>'
+      : '';
     var priv = !m.channel && group ? '<span class="ch priv">私聊</span>' : '';
     // 本轮的账 (呼吸点 + 模型 / token / 耗时) 跟在时刻后面 —— 片段是服务端渲染好的。
     var stat = m.meta ? '<span class="mstat">' + m.meta + '</span>' : '';
@@ -800,7 +806,7 @@
     var sw = canSwitch(other);
     var flip = '<button class="flip" data-r="' + esc(other) + '"' + (sw ? '' : ' disabled tabindex="-1"') +
       ' aria-label="' + esc(sw ? '切到 ' + nameOf(other) + ' 的视角' : '') + '">' +
-      dest + (sw ? '<span class="fi"><span class="fn">' + esc(nameOf(other)) + '</span>' + CHEVRON + '</span>' : '') + '</button>';
+      dest + (sw ? '<span class="fi">' + CHEVRON + '</span>' : '') + '</button>';
     return '<div class="mrow ' + (mine ? 'mine' : 'them') + '" data-id="' + esc(m.id) + '" data-turn="' + esc(m.turnId || m.id) + '" data-ts="' + m.ts + '"' +
       (m.ping ? ' data-ping="1" data-ping-who="' + esc(m.dir === 'in' ? m.toName : m.fromName) + '"' : '') + ' data-sig="' + esc(m.sig) + '" data-stale-at="' + (m.staleAt || 0) + '">' +
       '<div class="mcol"><div class="mwho">' + who + '</div><div class="mb">' + (m.dir === 'out' ? signCut(m.html, m.from, m.fromName) : m.html) + '</div></div>' +

@@ -354,7 +354,6 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 .mrow.mine .flip .fc { transform: scaleX(-1) }
 .flip .fc { flex: none }
 .flip .fi { min-width: 0; max-width: 100% }
-.flip .fn { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .flip:hover, .flip:focus-visible { background: #2f55c90d; color: var(--accent) }
 .flip[disabled] { cursor: default; background: transparent !important; color: transparent !important }
 /* 说给谁: 贴着气泡写在门里, 与气泡首行对齐。不吃点击 —— 点到它就是点门。
@@ -363,11 +362,19 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 .flip .dest {
   position: absolute; top: calc(var(--av) + 12px); max-width: calc(100% - 16px);
   font-size: 11px; line-height: 1.45; color: var(--faint); pointer-events: none;
-  overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
+  display: flex; align-items: center; gap: 4px; max-height: calc(3 * 1.45em); overflow: hidden;
 }
+.flip .dest .arr { font-style: normal; flex: none }
+.flip .dest .dav {
+  flex: none; width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--line); background: var(--card);
+  display: grid; place-items: center; font-size: 11px; line-height: 1;
+}
+.flip .dest .dn { min-width: 0; overflow-wrap: anywhere }
 .mrow.them .flip .dest { left: 4px; text-align: left }
-.mrow.mine .flip .dest { right: 4px; text-align: right }
+.mrow.mine .flip .dest { right: 4px; text-align: right; justify-content: flex-end }
 .flip[disabled] .dest { color: var(--faint) }
+/* 有描述的门, 换视角的箭头让到描述下面一行, 两者不叠。 */
+.flip:has(.dest) { align-items: flex-start; padding-top: calc(var(--av) + 12px + 1.45em + 6px) }
 .mwho .to { display: none }
 .mwho .av.go { cursor: pointer }
 .mwho .av.go:hover { border-color: var(--accent); background: #2f55c914 }
