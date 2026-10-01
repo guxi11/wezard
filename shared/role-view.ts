@@ -336,6 +336,11 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
 
 /** 一个会话窗口里的消息。`withRole` 只对公开频道有意义: 当前 role 与它在这个频道里的往来。 */
 export const convMessages = (msgs: readonly Msg[], role: string, key: string, withRole?: string): Msg[] => {
+  // `a:<x>` = x 参与的全部对话, 不分会话, 按时间排开 —— 关系图里点一张和视角没有对话的卡片看的就是它。
+  if (key.startsWith("a:")) {
+    const who = key.slice(2);
+    return msgs.filter((m) => involves(m, who));
+  }
   if (key.startsWith("p:")) {
     const peer = key.slice(2);
     return msgs.filter((m) => !m.channel && involves(m, role) && other(m, role) === peer);

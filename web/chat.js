@@ -274,7 +274,15 @@
   });
 
   // ── 左栏: 当前 role 的名片 + 会话列表 ──
-  var convOf = function (key) { return R.convs.filter(function (c) { return c.key === key; })[0]; };
+  // `a:<x>` 不在列表里: 它是 x 参与的全部对话按时间排开 (关系图里点一张和视角没有对话的卡片),
+  // 现造一项 —— 落地时才不会被当成失效的会话退回默认。
+  var convOf = function (key) {
+    if (key && key.indexOf('a:') === 0) {
+      var who = key.slice(2);
+      return { key: key, kind: 'all', who: who, name: nameOf(who) + ' 的全部对话', subs: [] };
+    }
+    return R.convs.filter(function (c) { return c.key === key; })[0];
+  };
   // 人的单聊 (user:…) 在数据上是频道, 但对端只有那一个人时同样是一对一。
   var dmOf = function (c) {
     return c && c.kind === 'group' && c.base.indexOf('user:') === 0 && (c.subs || []).length === 1 ? c.subs[0] : null;
@@ -282,6 +290,7 @@
   // 一对一会话的对端 (wizard 私聊 / 人的单聊 / 「只看我与 X」); 不是一对一则空。
   var pairPeer = function (c) {
     if (!c) return WITH || '';
+    if (c.kind === 'all') return '';
     var dm = dmOf(c);
     return c.kind !== 'group' ? c.peer : WITH || (dm ? dm.role : '');
   };
@@ -660,6 +669,12 @@
     }
     var c = convOf(CONV);
     if (!c) { who.innerHTML = ''; acts.innerHTML = ''; return; }
+    if (c.kind === 'all') {
+      who.innerHTML = pairOf([[c.who]]) + '<span class="t">' + esc(c.name) + '</span>';
+      acts.innerHTML = '';
+      bindGo(who);
+      return;
+    }
     // 一对一 (私聊, 或群里「只看我与 X」) 两端都亮头像: 我在前, 对端在后, 各自是切视角的入口。
     var dm = dmOf(c);
     var peer = pairPeer(c);
@@ -882,11 +897,6 @@
     });
     // 没带 conv 的链接 (群里点名字进来) 落在服务端挑的窗口上, 连同它挑的「只看我与谁」;
     // 手里的 conv 失效则只退回整个会话。
-    if (PEND && PEND.role === d.role.id) {
-      var pend = pairConv(PEND.other);
-      PEND = null;
-      if (pend) { CONV = pend[0]; WITH = pend[1]; }
-    }
     if (!CONV || !convOf(CONV)) { WITH = CONV ? '' : d['with'] || ''; CONV = d.conv || ''; }
   };
   var paintRole = function () {
@@ -953,12 +963,8 @@
   // 换视角: 窗口尽量留在同一个群 —— 从群里的一条消息切过去, 最想看的是对方在这个群
   // 里的样子; 对方不在这个群 (私聊的另一头) 就交给服务端挑它最近的会话。
   // at: 被点的那条消息 —— 换视角后它留在指针底下, 其余的相对它滑动。
-  // then: 落地后要选中的「它与 then」那一项 (关系图里点了一张没有现成对话的卡片)。
-  // 记着是给谁的: 旧视角的 SSE 在新摘要之前还可能推来一次, 不能让它把这一项吃掉。
-  var PEND = null;
-  var switchRole = function (id, at, then) {
+  var switchRole = function (id, at) {
     if (!canSwitch(id) || id === ROLE) return;
-    PEND = then ? { role: id, other: then } : null;
     W.treeFor = '';
     var keep = CONV && CONV.indexOf('c:') === 0 ? CONV : '';
     var from = ROLE;
@@ -966,11 +972,10 @@
     var same = VIEW === 'msgs' && !WITH && !SESSION && (keep || CONV.indexOf('p:') === 0);
     // 群里「只看我与 X」时换过去, 对面看到的是「只看我与 from」—— 同一段往来, 选中只看而不是整个群。
     var withBack = keep && WITH ? from : '';
-    // 要选的那一对未必在最新那段里说过话 —— 看全部时间才保证选得到。
-    ROLE = id; WITH = withBack; SESSION = PEND ? 'all' : '';
+    ROLE = id; WITH = withBack; SESSION = '';
     CONV = keep || (CONV.indexOf('p:') === 0 ? 'p:' + from : '');
     var snap = VIEW === 'msgs' && !calm() ? snapRows(at) : null;
-    if (same && !PEND) { if (WORLD) loadWorld(); flipWindow(snap); return; }
+    if (same) { if (WORLD) loadWorld(); flipWindow(snap); return; }
     var kept = VIEW === 'msgs' ? keepBodies() : {};
     refresh(function () {
       adoptBodies(kept);
@@ -1285,21 +1290,14 @@
     var other = ends.length === 2 && ends.indexOf(ROLE) >= 0 && ends.filter(function (x) { return x !== ROLE; })[0];
     return other ? pairConv(other) : null;
   };
-  // 两个 role 之间说过话没有 (任一方向, 全部时间) —— 家谱与工单归属不算对话。
-  var talked = function (a, b) {
-    return W.edges.some(function (e) {
-      return !LINEAGE[e.kind] && ((e.from === a && e.to === b) || (e.from === b && e.to === a));
-    });
-  };
-  // 有对话 → 打开这段对话; 没有 → 切到卡片的 role, 并选中它与这条边另一端之间的对话 (说过话才有)。
+  // 有对话 → 打开这段对话; 没有 (根、和视角没有对话计数的) → 展开这个 role 参与的全部对话, 不换视角。
   var openEdge = function (F, t) {
-    var hit = edgeConv(F, t);
-    if (hit) return selectConv(hit[0], hit[1]);
-    var ends = edgeEnds(F, t), other = ends.length === 2 ? ends[0] : '';
-    switchRole(t, undefined, other && talked(t, other) ? other : '');
+    var hit = edgeConv(F, t) || ['a:' + t, ''];
+    selectConv(hit[0], hit[1]);
   };
-  // 选中的那一项就是这条边 (视角是一端, 正在看的对端是另一端)。
+  // 选中的那一项就是这条边 (视角是一端, 正在看的对端是另一端), 或者正展开着这张卡片的全部对话。
   var edgeOn = function (F, t) {
+    if (CONV === 'a:' + t) return true;
     var ends = edgeEnds(F, t), peer = CONV ? pairPeer(convOf(CONV)) : '';
     return ends.length === 2 && ends.indexOf(ROLE) >= 0 && ends.indexOf(peer) >= 0 && peer !== ROLE;
   };

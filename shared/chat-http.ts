@@ -227,22 +227,27 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     const msgs = convMessages(allMessages(records, now), v.role, v.conv, v.with || undefined)
       .filter((m) => inSpan(v.span)(m.ts));
     const lo = msgs[0]?.ts ?? Infinity;
-    const marks = marksOf(records, v.role).filter((mk) => mk.createdAt >= lo && inSpan(v.span)(mk.createdAt));
+    const marks = marksOf(records, markRole(v)).filter((mk) => mk.createdAt >= lo && inSpan(v.span)(mk.createdAt));
     return [
       ...msgs.map((m) => ({ ts: m.ts, render: () => renderMsg(m, records, dir, now) })),
       ...marks.map((mk) => ({ ts: mk.createdAt, render: () => renderMark(mk, v.role, dir) })),
     ].sort((a, b) => a.ts - b.ts);
   };
 
+  /** 窗口里画谁的断点: 平常是视角自己; 「某人的全部对话」窗口画那个人的。 */
+  const markRole = (v: View): string => (v.conv.startsWith("a:") ? v.conv.slice(2) : v.role);
+
   const viewOf = (records: readonly DetailRecord[], dir: Directory, ticket: Ticket, url: URL): View | undefined => {
     const r = pickRole(dir, ticket, url);
     if (!r) return undefined;
     const spans = sessionsOf(records, r, Date.now());
+    const conv = url.searchParams.get("conv") ?? "";
     return {
       role: r,
-      conv: url.searchParams.get("conv") ?? "",
+      conv,
       with: dir.resolve(url.searchParams.get("with") ?? "") ?? "",
-      span: spanOf(spans, url.searchParams.get("session")),
+      // 「某人的全部对话」不受视角的 session 裁剪 —— 那是视角自己的时间分段, 与那个人无关。
+      span: conv.startsWith("a:") ? undefined : spanOf(spans, url.searchParams.get("session")),
     };
   };
 
@@ -323,7 +328,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       const r = store.get(id);
       if (!r) return;
       if (isMark(r)) {
-        if (r.target === v.role && inSpan(v.span)(r.createdAt)) pushFrag(renderMark(r, v.role, dir));
+        if (r.target === markRole(v) && inSpan(v.span)(r.createdAt)) pushFrag(renderMark(r, v.role, dir));
         return;
       }
       if (isPost(r)) {
