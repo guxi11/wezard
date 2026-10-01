@@ -454,7 +454,7 @@
     var v = !cur ? '全部' : cur === latestSess() ? '最新' : sessWhen(cur);
     return '<span class="sp' + (SESS_OPEN ? ' open' : '') + '">' +
       '<button class="sp-btn" aria-haspopup="listbox" aria-expanded="' + SESS_OPEN + '" title="切换 session">' +
-        esc(v) + '<span class="car" aria-hidden="true">▾</span></button>' +
+        esc(v) + '<span class="car" aria-hidden="true"></span></button>' +
       '<span class="sp-list" role="listbox">' + all +
         R.sessions.slice().reverse().map(function (s) { return sessRow(s, s.sessionId === SESSION); }).join('') +
       '</span></span>';

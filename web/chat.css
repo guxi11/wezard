@@ -96,7 +96,11 @@ button { font: inherit; color: inherit }
   font-variant-numeric: tabular-nums; transition: background .12s, color .12s;
 }
 .sp-btn:hover, .sp.open .sp-btn { background: var(--paper); color: var(--ink) }
-.sp-btn .car { font-size: 20px; line-height: 1; color: var(--faint); transition: transform .15s }
+/* 箭头用边框画, 不用 ▾ 字形 —— 字形贴着基线, 放大后总是偏下。 */
+.sp-btn .car {
+  width: 0; height: 0; margin-left: 3px; border: 5px solid transparent; border-top: 6px solid var(--faint); border-bottom: 0;
+  transition: transform .15s;
+}
 .sp.open .sp-btn .car { transform: rotate(180deg) }
 .sp-list {
   /* 以触发器左下角为锚向右下展开 —— 触发器贴着 name 右边, 朝左开会被侧栏左沿裁掉。 */
