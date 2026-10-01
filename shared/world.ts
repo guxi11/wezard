@@ -18,6 +18,7 @@
 //
 // 纯函数, 无 IO: 注册表侧的东西由调用方以 WorldFacts 喂进来。
 import { baseOfKey, labelFor, tagOfKey } from "./session-label.js";
+import { withoutKeepaliveTurns } from "./keepalive.js";
 import { isTurn, staleAt, isGhostTurn } from "./chat-view.js";
 import type { DetailRecord, TurnDetailRecord } from "./detail-store.js";
 
@@ -277,6 +278,8 @@ export const buildWorld = (
     const f = factOf.get(target);
     const rs = (byTarget.get(target) ?? []).sort((a, b) => a.createdAt - b.createdAt);
     const last = rs[rs.length - 1];
+    // 卡片上的「最近一句」是它说过的话, 保温的 pong 不算。
+    const said = withoutKeepaliveTurns(rs).at(-1);
     const tag = tagOfKey(target);
     const base = baseOfKey(target);
     const chat = f?.chat ?? facts.chatNames[base] ?? "";
@@ -304,7 +307,7 @@ export const buildWorld = (
       bornAt: f?.bornAt,
       lastTs: Math.max(f?.lastActivity ?? 0, rs.reduce((mx, r) => Math.max(mx, r.updatedAt), 0)),
       turns: rs.length,
-      preview: (last ? previewOf(last) : "") || f?.summary || "",
+      preview: (said ? previewOf(said) : "") || f?.summary || "",
       runningUntil: until > now ? until : 0,
       taskTurns: rs.filter((r) => r.from?.kind === "task").length,
       peerTurns: rs.filter((r) => r.from?.kind === "peer").length,

@@ -6,7 +6,8 @@
 //        问句已经是上面那条入消息了; 本轮用量单独走 `meta`, 客户端写在名字那一行
 //   断点 视角 role 自己的 /clear /new
 import { renderCutMark, renderTurnGroup, splitReminders, escHtml, hashStr, tagSig, type TurnFragment } from "./detail-render.js";
-import { isKeepaliveTurn, isTurn, staleAt, turnDone } from "./chat-view.js";
+import { isTurn, staleAt, turnDone } from "./chat-view.js";
+import { isKeepaliveTurn } from "./keepalive.js";
 import type { DetailRecord, MarkDetailRecord, TurnDetailRecord } from "./detail-store.js";
 import { teammateOf, unwrapMates, type Directory, type Msg } from "./role-view.js";
 

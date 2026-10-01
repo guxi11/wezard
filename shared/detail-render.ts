@@ -4,7 +4,8 @@
 import { structuredPatch, parsePatch, type StructuredPatchHunk } from "diff";
 import { highlightCode, langFromPath } from "./highlight.js";
 import { ansiToHtml } from "./ansi.js";
-import { isKeepaliveTurn, staleAt, turnDone } from "./chat-view.js";
+import { staleAt, turnDone } from "./chat-view.js";
+import { isKeepaliveTurn } from "./keepalive.js";
 import { backendLabel } from "./cli-backends.js";
 import type {
   ApprovalDecision,

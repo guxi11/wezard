@@ -12,6 +12,7 @@
 import { existsSync, openSync, readSync, closeSync, statSync } from "node:fs";
 import { backendForPath, type CliBackendName } from "../shared/cli-backends.js";
 import { truncate, truncateWithCount } from "../shared/std.js";
+import { isKeepalivePingText, withoutKeepalive } from "../shared/keepalive.js";
 import { envelopeAttrs, parseEnvelope, renderReminder, type Envelope } from "../shared/reminder.js";
 
 /** Strip ANSI SGR/CSI + OSC so captured pane text is safe to embed / match on. */
@@ -204,49 +205,6 @@ const blockTextWithTools = (content: unknown): string => {
     .filter(Boolean)
     .join(" ");
 };
-
-// ── Keepalive ping detection ──────────────────────────────────────────
-// Shared by the idle clocks (keepaliveStamps) and the quote-dedup tail:
-// a ping is machinery, not conversation, and both readers must agree on
-// what counts as one.
-const normPing = (s: string): string => s.replace(/\s+/gu, "");
-
-/** Normalized signature set of the configured ping forms — whitespace-stripped
- *  40-char prefixes, the same shape keepaliveTick feeds keepaliveStamps. */
-export const keepalivePingSigs = (...pings: string[]): string[] =>
-  pings.map((p) => normPing(p).slice(0, 40)).filter((s) => s.length > 0);
-
-/** A sig at the cut length is a prefix of a longer ping; a shorter one IS the whole ping. */
-const SIG_LEN = 40;
-
-/** Is this user-turn text a keepalive ping? Matches every configured form plus
- *  the bare "ping" legacy streak form still present in older transcripts.
- *  Anchored, never a substring: `resumePing` is a plain "continue", and a peer's
- *  "continue（接着干原任务）" or a human's "continue" is real work — read as a ping it
- *  gets swallowed whole (no reply to the chat, no `from` on the rolepage). */
-export const isKeepalivePingText = (text: string, sigs: readonly string[]): boolean => {
-  const n = normPing(text);
-  return n.toLowerCase() === "ping" ||
-    sigs.some((sig) => sig.length > 0 && (sig.length < SIG_LEN ? n === sig : n.startsWith(sig)));
-};
-
-/** Keepalive = the ping query + everything the model says back until the next
- *  user turn — query-based, so a reply that adds more than "pong" still goes,
- *  and a backend that splits one reply across several records (CodeBuddy:
- *  mid-turn narration + final) loses all of them, not just the first. A window
- *  that opens on a bare "pong" lost its ping to the cut; that one goes too. */
-export const withoutKeepalive = <T extends { role: string; text: string }>(
-  turns: readonly T[],
-  pingSigs: readonly string[],
-): T[] =>
-  turns.reduce<{ kept: T[]; ping: boolean }>(
-    (acc, t) => {
-      const ping = t.role === "user" ? isKeepalivePingText(t.text, pingSigs) : acc.ping;
-      if (!ping) acc.kept.push(t);
-      return { kept: acc.kept, ping };
-    },
-    { kept: [], ping: turns[0]?.role === "assistant" && /^pong\W*$/i.test(turns[0].text.trim()) },
-  ).kept;
 
 /** The keepalive ping this session's newest words answer: the text of the LAST
  *  user turn when that turn is a ping, else undefined. Read from the transcript

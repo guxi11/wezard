@@ -5,7 +5,8 @@ import type { WSClient, WsFrame, TextMessage, ImageMessage, MixedMessage, BaseMe
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
 import type { MirrorBridge } from "./mirror-bridge.js";
-import { tailTurnsWithTools, keepalivePingSigs, renderPeerMentionHint, renderHumanEnvelope, type PeerInfo, type PeerMention } from "./peers.js";
+import { tailTurnsWithTools, renderPeerMentionHint, renderHumanEnvelope, type PeerInfo, type PeerMention } from "./peers.js";
+import { keepalivePingSigs } from "../shared/keepalive.js";
 import { noticeSuffixFor } from "./notices.js";
 import { expandHome, sanitizeId } from "../shared/paths.js";
 import type { CliBackendName } from "../shared/cli-backends.js";

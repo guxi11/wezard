@@ -56,7 +56,8 @@ import {
 } from "./wizard.js";
 import { bindNoticeBox, createNoticeBox, chatAudience } from "./notices.js";
 import { loadJobStore, renderJobOpen, renderJobClose, JOB_MEMBER_MAX } from "./jobs.js";
-import { clipMiddle, extractResult, keepalivePingSigs, lastExchange, lastModel, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
+import { clipMiddle, extractResult, lastExchange, lastModel, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
+import { keepalivePingSigs } from "../shared/keepalive.js";
 import { createReceipts } from "./receipts.js";
 import { parseWhen, renderChatLog, type LogSession } from "./chat-log.js";
 import {
