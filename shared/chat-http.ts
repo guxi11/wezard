@@ -10,6 +10,7 @@
 //   GET /api/tool         → 一次工具调用的展开正文 —— 片段的第二级, 展开时才取
 //   GET /api/role-events  → SSE: role 摘要变动 + 当前窗口的消息增量
 //   GET /api/world        → 关系视图: 全部 wizard、家谱、跨聊天往来、工单、日程
+//   GET /api/search       → cmd+k: 从视角 role 搜 role 名字 / 会话名 / 消息正文
 //
 // 资源路由不校验 `?id=` —— 它们是纯静态前端代码, 不含任何会话数据。
 //
@@ -28,6 +29,7 @@ import {
   roleInfo, roleStats, sessionsOf, windowStats, type Directory, type Msg, type SessionSpan,
 } from "./role-view.js";
 import { renderMark, renderMsg, type MsgFragment } from "./role-render.js";
+import { searchRole } from "./role-search.js";
 import { renderToolBody } from "./detail-render.js";
 import { chatScript, chatStyles, chatVendor, renderChatPage } from "./chat-render.js";
 import type { Asset } from "./web-assets.js";
@@ -45,6 +47,7 @@ export interface ChatRoutes {
   tool: SimpleHandler;
   events: SimpleHandler;
   world: SimpleHandler;
+  search: SimpleHandler;
 }
 
 /** 注册表侧的事实 (wizard 身份 / 家谱 / 工单 / 日程) —— 只有 daemon 给得出。
@@ -411,7 +414,19 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     });
   };
 
-  return { page, styles: asset(chatStyles), script: asset(chatScript), vendor: asset(chatVendor), role, msgs, tool, events, world };
+  const search: SimpleHandler = (_req, res, url) => {
+    const ticket = resolveTicket(store, url);
+    if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
+    void getFacts().then((f) => {
+      const records = listRecent();
+      const dir = makeDirectory(records, f);
+      const now = Date.now();
+      const r = pickRole(dir, ticket, url);
+      json(res, 200, { ok: true, q: url.searchParams.get("q") ?? "", ...searchRole(allMessages(records, now), r, dir, url.searchParams.get("q") ?? "", now) });
+    });
+  };
+
+  return { page, styles: asset(chatStyles), script: asset(chatScript), vendor: asset(chatVendor), role, msgs, tool, events, world, search };
 };
 
 /** Path → handler map; the daemon registers each, svr dispatches through it. */
@@ -426,10 +441,11 @@ export const chatRouteTable = (routes: ChatRoutes): Record<string, SimpleHandler
   "GET /api/tool": routes.tool,
   "GET /api/role-events": routes.events,
   "GET /api/world": routes.world,
+  "GET /api/search": routes.search,
 });
 
 /** Route keys, single-sourced so the daemon's registration can't drift. */
 export const CHAT_ROUTE_KEYS = [
   "GET /role", "GET /chat", "GET /chat/app.css", "GET /chat/app.js", "GET /chat/vendor.js",
-  "GET /api/role", "GET /api/msgs", "GET /api/tool", "GET /api/role-events", "GET /api/world",
+  "GET /api/role", "GET /api/msgs", "GET /api/tool", "GET /api/role-events", "GET /api/world", "GET /api/search",
 ] as const;

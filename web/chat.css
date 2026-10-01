@@ -694,3 +694,79 @@ span.av.go:hover { background: #2f55c924; box-shadow: 0 0 0 3px #2f55c924 }
 .jrow.open .jh .jst { background: #dafbe1 }
 .jmm .wst { font-size: 9.5px }
 .jmm .tmp, .jmm .wchip { flex: none; white-space: nowrap }
+
+/* ── 搜索 (⌘K): 侧栏会话列表顶上的入口 + 居中浮层 ──────────────────────
+   入口与会话项同宽同圆角, 安静的浅灰底; 浮层的结果行沿用会话项的两行读法。 */
+.sbox {
+  flex: none; display: flex; align-items: center; gap: 8px; margin: 8px 10px 2px; padding: 7px 10px;
+  border: 1px solid var(--line); border-radius: 9px; background: var(--paper); color: var(--faint);
+  cursor: pointer; text-align: left; transition: border-color .12s, background .12s, color .12s;
+}
+.sbox:hover { border-color: #c4cbd6; background: var(--card); color: var(--mute) }
+.sbox .ic, .sk-in .ic { flex: none; display: inline-flex }
+.sbox .ic svg, .sk-in .ic svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round }
+.sbox .lb { flex: 1; min-width: 0; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.sbox kbd, .sk kbd {
+  flex: none; font: 500 10.5px/1 ui-sans-serif, system-ui, -apple-system, sans-serif; color: var(--mute);
+  padding: 3px 5px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; background: var(--card);
+}
+
+.sk {
+  position: fixed; inset: 0; z-index: 900; display: flex; justify-content: center; align-items: flex-start;
+  padding: 12vh 16px 16px; background: #1c243038; animation: sk-in .12s ease-out;
+}
+.sk[hidden] { display: none }
+@keyframes sk-in { from { opacity: 0 } }
+.sk-panel {
+  width: 600px; max-width: 100%; max-height: 70vh; display: flex; flex-direction: column; overflow: hidden;
+  background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+  box-shadow: 0 24px 64px #1c243033, 0 4px 14px #1c24301a;
+}
+.sk-in { flex: none; display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); color: var(--faint) }
+.sk-in .ic svg { width: 17px; height: 17px }
+.sk-in input {
+  flex: 1; min-width: 0; border: 0; outline: 0; background: none; font: inherit; font-size: 15px; color: var(--ink);
+}
+.sk-in input::-webkit-search-cancel-button { display: none }
+.sk-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px 8px 8px }
+.sk-list h3 {
+  margin: 10px 8px 4px; font-size: 11.5px; font-weight: 600; color: var(--mute);
+  display: flex; align-items: baseline; gap: 6px;
+}
+.sk-list h3 span { font-weight: 400; color: var(--faint); font-variant-numeric: tabular-nums }
+.sk-it {
+  display: flex; gap: 10px; align-items: center; width: 100%; text-align: left; overflow: hidden;
+  padding: 7px 10px; border: 0; border-radius: 9px; background: transparent; cursor: pointer;
+}
+.sk-it.on { background: #eaf0fc }
+.sk-it > .av {
+  flex: none; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px;
+  background: #f1f3f6; font-size: 17px; line-height: 1;
+}
+.sk-it .b { min-width: 0; flex: 1; overflow: hidden }
+.sk-it .l1 { display: flex; align-items: baseline; gap: 8px; overflow: hidden; white-space: nowrap }
+.sk-it .nm { font-size: 13.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis }
+.sk-it .in { font-size: 11.5px; color: var(--faint); min-width: 0; overflow: hidden; text-overflow: ellipsis }
+.sk-it .in::before { content: "· "; }
+.sk-it .k { margin-left: auto; flex: none; font-size: 11px; color: var(--faint); opacity: 0 }
+.sk-it.on .k { opacity: 1; color: var(--accent) }
+.sk-it .ts { margin-left: auto; flex: none; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums }
+.sk-it .pv { display: block; font-size: 12px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.sk-it .pv.sn { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.45 }
+.sk-it mark { background: #ffe58f; color: inherit; border-radius: 2px; padding: 0 1px }
+.sk-empty { padding: 18px 10px; text-align: center; font-size: 12.5px; color: var(--faint) }
+.sk-foot {
+  flex: none; display: flex; gap: 16px; padding: 8px 16px; border-top: 1px solid var(--line);
+  font-size: 11px; color: var(--faint); background: #fafbfc;
+}
+.sk-foot span { display: inline-flex; align-items: center; gap: 4px }
+.sk-foot kbd { padding: 2px 4px }
+@media (max-width: 760px) {
+  .sk { padding-top: 8px }
+  .sk-panel { max-height: calc(100dvh - 16px) }
+  .sk-foot { display: none }
+}
+
+/* 搜索跳到的那一句: 气泡闪一圈视角色。 */
+.mrow.hit .mb > * { animation: hit 1.6s ease-out }
+@keyframes hit { 0%, 30% { box-shadow: 0 0 0 3px #2f55c955 } 100% { box-shadow: 0 0 0 3px #2f55c900 } }

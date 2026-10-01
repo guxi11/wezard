@@ -946,7 +946,8 @@
     });
   };
 
-  var selectConv = function (key, withRole) {
+  // land: 见 loadMsgs —— 搜索跳到一条具体消息时由它来定位, 不吸底。
+  var selectConv = function (key, withRole, land) {
     CONV = key; WITH = withRole || '';
     reveal();
     if (VIEW !== 'msgs') setView('msgs');
@@ -957,7 +958,7 @@
     S.gen++;
     syncUrl();
     inner.innerHTML = '<div class="empty">加载中…</div>';
-    loadMsgs().then(connect);
+    loadMsgs(undefined, land).then(connect);
   };
 
   // 换视角: 窗口尽量留在同一个群 —— 从群里的一条消息切过去, 最想看的是对方在这个群
@@ -1639,6 +1640,194 @@
     paintStatus(); renderConvs();
     if (VIEW === 'plan') renderPlan();
   }, TICK_MS);
+
+  // ══ 搜索 (⌘K / Ctrl+K) ═══════════════════════════════════════════════
+  // 从当前视角搜三样: role 名字 (→ 切视角)、会话名 (→ 打开)、消息正文 (→ 打开会话并定位到那一句)。
+  // 服务端搜全部时间; 那一句不在当前 session 段里就放宽成「全部」再跳。空查询时列出最近的会话,
+  // 面板本身就是一个键盘快速切换器。面板与侧栏入口都由脚本挂载 —— 外壳 HTML 要等 daemon 重启才换。
+  var MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  var KBD = MAC ? '⌘K' : 'Ctrl K';
+  var SEARCH_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.6"/><path d="m10.4 10.4 3.6 3.6"/></svg>';
+  var Q = { open: false, q: '', done: null, enter: false, items: [], sel: 0, gen: 0, timer: 0 };
+  var sbox = document.createElement('button');
+  sbox.className = 'sbox'; sbox.type = 'button';
+  sbox.innerHTML = '<span class="ic">' + SEARCH_SVG + '</span><span class="lb">搜索 role、会话、消息</span><kbd>' + KBD + '</kbd>';
+  convsEl.parentNode.insertBefore(sbox, convsEl);
+  var sk = document.body.appendChild(document.createElement('div'));
+  sk.className = 'sk'; sk.hidden = true;
+  sk.innerHTML = '<div class="sk-panel" role="dialog" aria-label="搜索">' +
+      '<div class="sk-in"><span class="ic">' + SEARCH_SVG + '</span>' +
+        '<input id="sk-q" type="search" autocomplete="off" spellcheck="false" placeholder="搜索 role、会话、消息…" aria-controls="sk-list">' +
+        '<kbd>esc</kbd></div>' +
+      '<div class="sk-list" id="sk-list" role="listbox"></div>' +
+      '<div class="sk-foot"><span><kbd>↑</kbd><kbd>↓</kbd> 选择</span><span><kbd>↵</kbd> 打开</span><span><kbd>esc</kbd> 关闭</span></div>' +
+    '</div>';
+  var skQ = sk.querySelector('#sk-q'), skList = sk.querySelector('#sk-list');
+
+  var reEsc = function (s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); };
+  // 先切再转义: 命中段包 <mark>, 其余照常 esc。
+  var hl = function (text, q) {
+    var ts = q.toLowerCase().split(/\s+/).filter(Boolean);
+    if (!ts.length) return esc(text);
+    var re = new RegExp('(' + ts.map(reEsc).join('|') + ')', 'ig');
+    return String(text).split(re).map(function (p, i) { return i % 2 ? '<mark>' + esc(p) + '</mark>' : esc(p); }).join('');
+  };
+
+  // 一项 = { kind, html, go }: 画什么、回车做什么。
+  var roleItem = function (r, q) {
+    return {
+      kind: 'role',
+      html: '<span class="av">' + esc(r.label) + '</span><span class="b"><span class="l1">' +
+        '<span class="nm ' + (r.wizard ? 'wizard' : 'human') + '">' + hl(r.name, q) + '</span><span class="k">切到视角</span></span>' +
+        (r.description ? '<span class="pv">' + hl(r.description, q) + '</span>' : '') + '</span>',
+      go: function () { switchRole(r.id); },
+    };
+  };
+  var convItem_ = function (c, q) {
+    var title = c.kind === 'wizard' ? '<span class="nm wizard">' + hl(c.name, q) + '</span>' : '<span class="nm chat">' + hl(c.name, q) + '</span>';
+    return {
+      kind: 'conv',
+      html: '<span class="av">' + esc(c.label) + '</span><span class="b"><span class="l1">' + title +
+        '<span class="ts">' + esc(fmtAgo(c.lastTs)) + '</span></span>' +
+        (c.preview ? '<span class="pv">' + esc(c.preview) + '</span>' : '') + '</span>',
+      go: function () { selectConv(c.key, ''); },
+    };
+  };
+  var msgItem = function (h, q) {
+    return {
+      kind: 'msg',
+      html: '<span class="av">' + esc(h.fromLabel) + '</span><span class="b"><span class="l1">' +
+        nm(h.from, h.fromName) + '<span class="in">' + esc(h.convName) + '</span>' +
+        '<span class="ts">' + esc(fmtAgo(h.ts)) + '</span></span>' +
+        '<span class="pv sn">' + hl(h.snippet, q) + '</span></span>',
+      go: function () { jumpMsg(h); },
+    };
+  };
+
+  // 一句消息落在当前 session 段里没有 —— 不在就得放宽成全部才看得见。
+  var inSession = function (ts) {
+    var s = R.sessions.filter(function (x) { return x.sessionId === SESSION; })[0];
+    return !s || (ts >= s.start && (!s.end || ts < s.end));
+  };
+  // 定位一行: 滚到视口中间, 闪一下。窗口只上屏最近一截, 不在就整窗重取一次再找。
+  var focusRow = function (id) {
+    var row = rowNode(id);
+    if (!row) return false;
+    row.scrollIntoView({ block: 'center' });
+    S.pinned = atBottom();
+    row.classList.remove('hit'); void row.offsetWidth; row.classList.add('hit');
+    return true;
+  };
+  var landOn = function (id) {
+    return function () {
+      if (focusRow(id)) return true;
+      loadMsgs('0', function () { return focusRow(id); });
+      return true;
+    };
+  };
+  var jumpMsg = function (h) {
+    if (inSession(h.ts) && convOf(h.conv)) return selectConv(h.conv, '', landOn(h.id));
+    SESSION = 'all'; CONV = h.conv; WITH = '';
+    if (VIEW !== 'msgs') setView('msgs');
+    app.classList.add('reading');
+    reveal();
+    refresh(landOn(h.id));
+  };
+
+  var paintSearch = function (sections) {
+    Q.items = sections.reduce(function (a, s) { return a.concat(s.items); }, []);
+    Q.sel = Math.min(Q.sel, Math.max(0, Q.items.length - 1));
+    var n = 0;
+    skList.innerHTML = sections.filter(function (s) { return s.items.length || s.empty; }).map(function (s) {
+      return '<h3>' + esc(s.title) + (s.count ? '<span>' + s.count + '</span>' : '') + '</h3>' +
+        (s.items.length
+          ? s.items.map(function (it) {
+              var i = n++;
+              return '<button class="sk-it ' + it.kind + (i === Q.sel ? ' on' : '') + '" role="option" data-i="' + i + '" aria-selected="' + (i === Q.sel) + '">' + it.html + '</button>';
+            }).join('')
+          : '<div class="sk-empty">' + esc(s.empty) + '</div>');
+    }).join('');
+  };
+  var moveSel = function (d) {
+    if (!Q.items.length) return;
+    Q.sel = (Q.sel + d + Q.items.length) % Q.items.length;
+    skList.querySelectorAll('.sk-it').forEach(function (b) {
+      var on = Number(b.getAttribute('data-i')) === Q.sel;
+      b.classList.toggle('on', on); b.setAttribute('aria-selected', on);
+      if (on) b.scrollIntoView({ block: 'nearest' });
+    });
+  };
+  var pick = function (i) {
+    var it = Q.items[i];
+    if (!it) return;
+    closeSearch();
+    it.go();
+  };
+
+  var recent = function () {
+    Q.done = '';
+    paintSearch([{ title: '最近的会话', items: R.convs.slice(0, 8).map(function (c) { return convItem_(c, ''); }), empty: '还没有会话' }]);
+  };
+  var runSearch = function () {
+    var q = skQ.value.trim(), gen = ++Q.gen;
+    Q.q = q; Q.sel = 0; Q.done = null;
+    if (!q) return recent();
+    api('api/search', { role: ROLE, q: q }).then(function (d) {
+      if (!d.ok || gen !== Q.gen) return;
+      var sections = [
+        { title: 'Role', items: d.roles.map(function (r) { return roleItem(r, q); }) },
+        { title: '会话', items: d.convs.map(function (c) { return convItem_(c, q); }) },
+        { title: '消息', count: d.msgTotal > d.msgs.length ? d.msgs.length + ' / ' + d.msgTotal : d.msgs.length,
+          items: d.msgs.map(function (h) { return msgItem(h, q); }) },
+      ];
+      if (!d.roles.length && !d.convs.length && !d.msgs.length) sections = [{ title: '结果', items: [], empty: '没有找到「' + q + '」' }];
+      paintSearch(sections);
+      Q.done = q;
+      // 结果还没回来时按下的回车, 落在回来的第一项上。
+      if (Q.enter) { Q.enter = false; pick(Q.sel); }
+    }).catch(function () { });
+  };
+
+  var openSearch = function () {
+    if (Q.open) { skQ.select(); return; }
+    Q.open = true; sk.hidden = false;
+    skQ.value = Q.q; skQ.focus(); skQ.select();
+    runSearch();
+  };
+  var closeSearch = function () {
+    if (!Q.open) return;
+    Q.open = false; sk.hidden = true; Q.enter = false;
+    clearTimeout(Q.timer);
+  };
+  sbox.onclick = openSearch;
+  skQ.addEventListener('input', function () { clearTimeout(Q.timer); Q.timer = setTimeout(runSearch, 140); });
+  skQ.addEventListener('keydown', function (e) {
+    if (e.isComposing) return;   // 输入法选词时的回车 / 方向键归输入法
+    if (e.key === 'ArrowDown' || (e.ctrlKey && e.key === 'n')) { e.preventDefault(); moveSel(1); }
+    else if (e.key === 'ArrowUp' || (e.ctrlKey && e.key === 'p')) { e.preventDefault(); moveSel(-1); }
+    else if (e.key === 'Enter') {
+      e.preventDefault();
+      var v = skQ.value.trim();
+      if (Q.done === v) return pick(Q.sel);
+      Q.enter = true;
+      if (Q.q !== v) { clearTimeout(Q.timer); runSearch(); }
+    }
+  });
+  skList.addEventListener('click', function (e) {
+    var b = e.target.closest('.sk-it');
+    if (b) pick(Number(b.getAttribute('data-i')));
+  });
+  skList.addEventListener('mousemove', function (e) {
+    var b = e.target.closest('.sk-it');
+    if (b && Number(b.getAttribute('data-i')) !== Q.sel) moveSel(Number(b.getAttribute('data-i')) - Q.sel);
+  });
+  sk.addEventListener('mousedown', function (e) { if (e.target === sk) closeSearch(); });
+  document.addEventListener('keydown', function (e) {
+    if ((MAC ? e.metaKey : e.ctrlKey) && !e.altKey && !e.shiftKey && (e.key === 'k' || e.key === 'K')) {
+      e.preventDefault();
+      Q.open ? closeSearch() : openSearch();
+    } else if (Q.open && e.key === 'Escape') { e.preventDefault(); closeSearch(); }
+  });
 
   // ── boot ──
   // 带着 role / conv 来的链接直接进阅读态 (手机上不先落在会话列表)。

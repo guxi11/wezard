@@ -149,6 +149,8 @@ export interface Directory {
   isWizard: (id: string) => boolean;
   /** undefined = 不是 wizard (人 / 定时 / 系统没有「执行中」)。 */
   status: (id: string, now: number) => RoleStatus | undefined;
+  /** 认得的全部 wizard。 */
+  wizards: () => string[];
 }
 
 const fold = (s: string): string => stripSigil(s).toLowerCase();
@@ -190,7 +192,7 @@ export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFact
     const t = untilOf(id);
     return { alive: f?.alive ?? false, busy: f?.busy ?? false, runningUntil: t > now ? t : 0 };
   };
-  return { nameOf, labelOf, resolve, fact: (id) => facts_.get(id), chatName, isWizard: (id) => wizards.has(id), status };
+  return { nameOf, labelOf, resolve, fact: (id) => facts_.get(id), chatName, isWizard: (id) => wizards.has(id), status, wizards: () => [...wizards] };
 };
 
 // ── 会话 ─────────────────────────────────────────────────────────────
