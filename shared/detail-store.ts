@@ -3,7 +3,7 @@
 // instance. Pure state + IO. Rendering lives in ./detail-render.
 //
 // Persistence: append-only JSONL → <stateDir>/details.jsonl, replay on init;
-// TTL 24h, LRU 上限 1000 条; 超过 COMPACT_BYTES 时按 store 快照重写整个文件。
+// TTL 24h, LRU 上限 MAX 条 (只数可回收的); 文件涨到快照的两倍 (且过 COMPACT_BYTES) 时按快照重写。
 import { mkdirSync, existsSync, readFileSync, appendFileSync, writeFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { Logger } from "pino";
@@ -284,7 +284,10 @@ export interface DetailStore {
 }
 
 const TTL_MS = 24 * 3600_000;
-const MAX = 1000;
+// 只数可回收的记录 (turn / tool / approval / mark / post): 每个 wizard 一份、永不回收的宪章若也算进来,
+// 几百个 wizard 就吃掉大半预算, 一天的 turn 撑不到半天就被挤掉 (rolepage 用量随之对不上 transcript)。
+// 上限只是兜底, 正常靠 24h TTL 回收 —— 要能装下全机一整天的量。
+const MAX = 8000;
 const COMPACT_BYTES = 5 * 1024 * 1024;
 
 export const createDetailStore = (opts: { stateDir: string; log?: Logger }): DetailStore => {
@@ -306,9 +309,10 @@ export const createDetailStore = (opts: { stateDir: string; log?: Logger }): Det
   const gc = (): void => {
     const cutoff = Date.now() - TTL_MS;
     for (const [k, v] of store) if (evictable(v) && v.createdAt < cutoff) store.delete(k);
-    if (store.size > MAX) {
-      const sorted = [...store.entries()].filter(([, v]) => evictable(v)).sort((a, b) => a[1].createdAt - b[1].createdAt);
-      for (let i = 0; i < Math.min(sorted.length, store.size - MAX); i++) store.delete(sorted[i]![0]);
+    const sorted = [...store.entries()].filter(([, v]) => evictable(v));
+    if (sorted.length > MAX) {
+      sorted.sort((a, b) => a[1].createdAt - b[1].createdAt);
+      for (let i = 0; i < sorted.length - MAX; i++) store.delete(sorted[i]![0]);
     }
   };
 
@@ -336,13 +340,16 @@ export const createDetailStore = (opts: { stateDir: string; log?: Logger }): Det
     try { appendFileSync(logPath, `${JSON.stringify(rec)}\n`); } catch { /* ignore */ }
   };
 
+  // 上次快照的字节数: 快照本身就超过 COMPACT_BYTES 时, 固定阈值会让此后每次 put 都重写整个文件。
+  let snapBytes = 0;
   const compact = (): void => {
     const lines = [...store.values()].map((r) => JSON.stringify(r));
-    try { writeFileSync(logPath, lines.length ? `${lines.join("\n")}\n` : ""); } catch { /* ignore */ }
+    const text = lines.length ? `${lines.join("\n")}\n` : "";
+    try { writeFileSync(logPath, text); snapBytes = Buffer.byteLength(text); } catch { /* ignore */ }
   };
 
   const maybeCompact = (): void => {
-    try { if (statSync(logPath).size > COMPACT_BYTES) compact(); } catch { /* ignore */ }
+    try { if (statSync(logPath).size > Math.max(COMPACT_BYTES, 2 * snapBytes)) compact(); } catch { /* ignore */ }
   };
 
   if (existsSync(logPath)) {
