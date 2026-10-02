@@ -36,7 +36,7 @@ import { bindCardChannel, hasMirrorAskq, runMirrorAskqFlow, hasMirrorPlan, mootM
 import { isAutoWindowActive } from "./session-cache.js";
 import { noticeSuffixFor } from "./notices.js";
 import { dangerOf } from "./danger.js";
-import { runTmux, spawnTmuxClaude } from "./spawn-tmux.js";
+import { renameWindow, runTmux, spawnTmuxClaude } from "./spawn-tmux.js";
 import { selectModel, type ModelScope, type ModelSelectResult } from "./model-select.js";
 import { hasRegistry, markTranscript, probeOf, sessionOnPane, sessionPanes, submittedSince, watchRegistry, type LiveSession, type TranscriptMark } from "./cc-session.js";
 import { waitForIdle, type IdleResult } from "./graph.js";
@@ -2060,6 +2060,9 @@ export interface MirrorBridge {
    *  the terminal" escape hatch. Fails with an attach hint when no tmux
    *  client is attached anywhere. */
   revealPane: (target: string) => Promise<{ ok: boolean; reason?: string }>;
+  /** Relabel this session's tmux window to its current name (after a wizard rename),
+   *  in the same `displayName` form the spawn/respawn paths label it with. */
+  retitlePane: (target: string) => Promise<{ ok: boolean; reason?: string }>;
   /** Does this Claude sessionId have a live tmux pane we could answer a native
    *  confirm on? Sync (map lookup only) — the aliveness probe happens in
    *  `answerNativeModal`. Approval uses it to decide whether the `.claude/**`
@@ -6268,6 +6271,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (r.code !== 0) return { ok: false, reason: `send-keys Enter failed: ${r.stdout.slice(-200) || r.code}` };
       log.info({ target, sessionId: a.sessionId, pane: a.tmuxPane }, "mirror /n — Enter sent to pane");
       return { ok: true };
+    },
+    retitlePane: async (target) => {
+      const pane = paneOf(target);
+      if (!pane) return { ok: false, reason: "no tmux pane bound for target" };
+      const r = await renameWindow(pane, displayName(target) || target);
+      return r.code === 0 ? { ok: true } : { ok: false, reason: `rename-window failed: ${r.stderr.trim() || r.code}` };
     },
     revealPane: async (target) => {
       // paneOf (not byTarget.get) so a cold binding surviving only in the

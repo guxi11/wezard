@@ -155,6 +155,11 @@ const safeWindowName = (s: string): string => {
   return (slug || "claude").slice(0, isPrincipal ? 8 : 24);
 };
 
+/** Relabel the window holding `pane` — same slug as at spawn. `allow-rename off`
+ *  keeps it; the pane title itself is the CLI's (OSC) and would be overwritten. */
+export const renameWindow = (pane: string, name: string): Promise<ExecResult> =>
+  runTmux(["rename-window", "-t", pane, safeWindowName(name)]);
+
 // Minimum settle before first poll: shell rc needs time to source before
 // capture-pane contains anything meaningful. Too short → wasted polls against
 // a blank screen; too long → added latency on happy path.

@@ -877,8 +877,12 @@ export const installInboundRouter = (
         return { stop: true };
       }
       const r = setChatName(cfg, sourcePath, who, nc.arg);
+      // 聊天名就是默认 wizard 的名字: 人起名即改名 (撞名照 pickName 挂 `-N`), tmux 窗口跟着换。
+      const home = baseOfKey(who);
+      const wiz = r.ok ? wizardStore()?.rename(home, r.name) : undefined;
+      if (wiz) void bridge.retitlePane(home);
       await replyText(frame, msg, who, r.ok
-        ? `[wezard] ✅ 本聊天更名为 \`${r.name}\`${cur && cur !== r.name ? `（原 \`${cur}\`）` : ""}`
+        ? `[wezard] ✅ 本聊天更名为 \`${r.name}\`${cur && cur !== r.name ? `（原 \`${cur}\`）` : ""}${wiz && wiz !== r.name ? `; 默认 wizard 名 \`.${wiz}\` (\`.${r.name}\` 已被占)` : ""}`
         : `[wezard] /name failed: ${r.reason}`);
       return { stop: true };
     }

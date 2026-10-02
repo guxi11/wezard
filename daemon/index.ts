@@ -571,6 +571,7 @@ const main = async (): Promise<void> => {
       const home = baseOfKey(self);
       const cur = wizards.get(home)?.name ?? "";
       const wizardRenamed = previous && cur.toLowerCase() === previous.toLowerCase() ? wizards.rename(home, r.name) : undefined;
+      if (wizardRenamed) void m.retitlePane(home);
       json(res, 200, { ok: true, base: r.base, name: r.name, previous, ...(wizardRenamed ? { wizardRenamed } : {}) });
     });
 
