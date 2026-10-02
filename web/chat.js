@@ -614,7 +614,7 @@
     for (var el = e.target; el && el.nodeType === 1 && el !== document.body && !clipTip(el); el = el.parentElement);
   });
 
-  // 名片: 头像 · 名字 (忙闲 / session) · 名字下一行低调的描述 (📁 cwd · 🏠 home · 🐣 出生) · 职责;
+  // 名片: 头像 · 名字 (忙闲 / session) · 名字下一行低调的描述 (🏠 home · 🐣 出生 · 📁 cwd) · 职责;
   // 名片下面一排是关系 / 日程入口。身份与出身 (谁的分身 / 子 wizard) 交给关系图, 名片不写。
   var renderRole = function () {
     var r = R.role;
@@ -622,11 +622,11 @@
     // 出生 = 注册表记的 bornAt; 没记 (老 wizard / 人) 就退到最早一段 session 的开始。
     var born = r.bornAt || R.sessions.reduce(function (m, x) { return x.start && (!m || x.start < m) ? x.start : m; }, 0);
     var facts = [
-      r.cwd ? ['📁', shortCwd(r.cwd), r.cwd] : null,
       r.chat ? ['🏠', r.chat, 'home'] : null,
-      born ? ['🐣', fmtClock(born), '出生于 ' + fmtDay(born)] : null
+      born ? ['🐣', fmtClock(born), '出生于 ' + fmtDay(born)] : null,
+      r.cwd ? ['📁', shortCwd(r.cwd), r.cwd] : null
     ].filter(Boolean).map(function (f) { return '<span title="' + esc(f[2]) + '">' + f[0] + ' ' + esc(f[1]) + '</span>'; });
-    // 只有一段 session 也挂选择器 —— 它同时是「现在看的是哪一段」的标签, 不该随段数忽隐忽现。
+    // 只有一段 session 就没什么可选, 不挂选择器。
     $('#rb-who').innerHTML =
       '<div class="id"><span class="av">' + esc(r.label) + '</span>' +
         '<span class="l"><span class="nl"><span class="cp" title="' + esc('复制 ' + nameOf(r.id)) + '">' + nm(r.id, r.name) + '</span>' + (r.kind === 'wizard' ? '<span id="rb-st"></span>' : '') +
