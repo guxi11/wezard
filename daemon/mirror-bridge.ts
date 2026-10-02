@@ -13,6 +13,7 @@
 // Caveat: the user shouldn't be hammering the same session in their local TTY
 // while a `--resume` injection is in flight; Claude Code locks aren't strict.
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync, watch, openSync, readSync, closeSync, type FSWatcher } from "node:fs";
 import { join, dirname } from "node:path";
 import type { WSClient, WsFrame, WsFrameHeaders, EventMessageWith, TemplateCard, TemplateCardEventData } from "@wecom/aibot-node-sdk";
@@ -4251,8 +4252,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // it collapses N distinct peers onto one sessionId (attach() then dedupes by
   // sid and silently detaches all-but-one). Excluding claimed sids keeps each
   // peer on its own session.
+  // 正在出生、还没 attach 的会话 sid: 新会话 (spawn 时 jsonl 就预建了) 与认下了的分叉
+  // 文件。同一个 cwd 下别的 target 的迁移 / 自愈 / 分叉跟随也在扫这个目录里「新出现的
+  // jsonl」, 不挡住的话它会先一步把别人的新会话认走, 正主 attach 时反撞 "already bound"。
+  const inFlightSids = new Set<string>();
   const sidsClaimedByOthers = (principal: string): Set<string> => {
-    const s = new Set<string>();
+    const s = new Set<string>(inFlightSids);
     for (const [k, v] of Object.entries(deps.store.all())) if (k !== principal && v.sessionId) s.add(v.sessionId);
     for (const [k, a] of byTarget) if (k !== principal && a.sessionId) s.add(a.sessionId);
     return s;
@@ -4776,6 +4781,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // Post-/clear: only transcripts that didn't exist before the rotation
         // can be ours, which is what licenses the shorter fingerprint above.
         .filter((n) => !pendingClear || !pendingClear.baseline.has(n))
+        // 别人的 (含还在出生、没 attach 的新会话与分叉 —— 分叉文件带着父亲注进去的原话,
+        // 指纹会撞上) 不认。
+        .filter((n) => !sidsClaimedByOthers(a.target).has(n.replace(/\.jsonl$/, "")))
         .map((n) => ({ n, m: (() => { try { return statSync(join(dir, n)).mtimeMs; } catch { return 0; } })() }))
         .sort((x, y) => y.m - x.m);
       for (const c of ranked) {
@@ -4972,16 +4980,20 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       void runTmux(["kill-pane", "-t", prev.tmuxPane]);
     }
     if (prev) detach(prev, "/new respawn");
+    // sid 由这里先定, 出生到 attach 之间挂在 inFlightSids 上 (见那里)。
+    const freshSid = randomUUID();
+    inFlightSids.add(freshSid);
     const r = await spawnTmuxClaude({
       cfg,
       log: log.child({ sub: "new-session", target }),
+      sessionId: freshSid,
       windowName: windowName ?? target,
       cwdOverride: eff,
       cli: effCli,
       model: opts?.model,
       systemPrompt: opts?.systemPrompt ?? charterFor(target, { cwd: eff }),
-    });
-    if (!r.ok) return { ok: false, reason: r.reason };
+    }).catch((e: unknown) => { inFlightSids.delete(freshSid); throw e; });
+    if (!r.ok) { inFlightSids.delete(freshSid); return { ok: false, reason: r.reason }; }
     const att = attach({
       sessionId: r.sessionId!,
       jsonlPath: r.jsonlPath!,
@@ -4998,6 +5010,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       model: r.model ?? (opts?.model?.trim() ?? ""),
       keepaliveDisabled: opts?.keepalive === undefined ? undefined : !opts.keepalive,
     });
+    inFlightSids.delete(freshSid);
     if (!att.ok) return { ok: false, reason: att.reason };
     // 首条注入吃冷时序(injectText 走 /mirror/spawn 时已经硬编码 freshSpawn:true,
     // dispatch 这条隐式建会话的路径此前漏了)。
@@ -5057,25 +5070,39 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   //     (attach 也会正当地拒绝), 一个干净的失败远比一条错绑好收拾。
   const FORK_POLL_MS = 400;
   const FORK_WAIT_MS = 45_000;
+  // 认下的分叉文件同样记进 inFlightSids: 同一个父亲并发克隆出几个分身时, 每个分叉的首行
+  // 都与父亲相同, 不预留的话两个 awaitFork 会认下同一个文件。
   const awaitFork = async (
     projectDir: string,
     baseline: Set<string>,
     claimed: Set<string>,
     origin: string,
+    probe: { homeDir: string; pane: string; parentSid: string },
   ): Promise<{ sessionId: string; jsonlPath: string } | undefined> => {
     const ours = forkOf(origin);
-    const deadline = Date.now() + FORK_WAIT_MS;
+    const take = (sessionId: string, jsonlPath: string) => (inFlightSids.add(sessionId), { sessionId, jsonlPath });
+    const start = Date.now();
+    const deadline = start + FORK_WAIT_MS;
     while (Date.now() < deadline) {
+      // 首选会话注册表: 它按 pane 报这个进程此刻的 sid —— 并发分叉时唯一不靠猜的来源。
+      const live = probe.pane ? sessionOnPane(probe.homeDir, probe.pane) : undefined;
+      if (live && live.sessionId !== probe.parentSid && !claimed.has(live.sessionId)) {
+        const path = join(projectDir, `${live.sessionId}.jsonl`);
+        if (existsSync(path) && ours(path)) return take(live.sessionId, path);
+      }
       const born = [...listJsonls(projectDir)]
-        .filter((n) => !baseline.has(n) && !claimed.has(n.replace(/\.jsonl$/, "")))
+        .filter((n) => !baseline.has(n) && !claimed.has(n.replace(/\.jsonl$/, "")) && !inFlightSids.has(n.replace(/\.jsonl$/, "")))
         .map((n) => ({ n, path: join(projectDir, n) }))
         // 种子化的 fork 一落地就带着父亲的 user 行 —— 空文件 (刚 touch 出来的)
         // 还不能认, 认早了 tail 会从一个还没写完的复制过程中间开始读; 别的 pane
         // 同时新开的会话也有 user 行, 只认首行 uuid 与父亲相同的那个。
         .filter((c) => ours(c.path))
         .sort((x, y) => mtimeOf(y.path) - mtimeOf(x.path));
-      const hit = born[0];
-      if (hit) return { sessionId: hit.n.replace(/\.jsonl$/, ""), jsonlPath: hit.path };
+      // 注册表报不出 (没有注册表的后端 / 这个 pane 没登记 / 一阵子了还报着父亲的 sid)
+      // 才按「新出现、首行同父」去猜, 认下即预留。
+      const guess = !hasRegistry(probe.homeDir) || !live || Date.now() - start > FORK_WAIT_MS / 3;
+      const hit = guess ? born[0] : undefined;
+      if (hit) return take(hit.n.replace(/\.jsonl$/, ""), hit.path);
       await sleep(FORK_POLL_MS);
     }
     return undefined;
@@ -5145,7 +5172,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       await runTmux(["kill-pane", "-t", r.tmuxPane ?? ""]);
       return { ok: false, reason: `分身开场白注入失败: ${boot.reason ?? "unknown"}`, inherited: false };
     }
-    const fork = await awaitFork(projectDir, baseline, sidsClaimedByOthers(args.target), parent.jsonlPath);
+    const fork = await awaitFork(projectDir, baseline, sidsClaimedByOthers(args.target), parent.jsonlPath, {
+      homeDir: backendForPath(parent.jsonlPath).homeDir, pane: r.tmuxPane ?? "", parentSid: parent.sessionId,
+    });
     // 等不到分叉就必须收手: 此刻唯一已知的 sid 是父亲的, 认下去两个 target 会指向
     // 同一个会话 (attach 也会正当地拒绝)。留一个孤儿 pane 比留一条错绑更好收拾 ——
     // 所以连 pane 一起杀掉, 调用方拿到的是一个干净的失败。
@@ -5164,6 +5193,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       model: r.model ?? (args.model?.trim() ?? ""),
       keepaliveDisabled: args.keepalive === undefined ? undefined : !args.keepalive,
     });
+    // 绑上 (或没绑上) 之后预留就没用了: 绑上的 sid 由 sidsClaimedByOthers 挡住别人。
+    inFlightSids.delete(fork.sessionId);
     if (!att.ok) return { ok: false, reason: att.reason, inherited: false };
     const spawned = byTarget.get(args.target);
     if (spawned) {

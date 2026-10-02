@@ -246,6 +246,10 @@ export interface SpawnArgs {
    *  minting a new uuid. Used when the user closed the original tmux pane and
    *  we need to reincarnate the same conversation in a fresh pane. */
   resumeSessionId?: string;
+  /** A fresh session's id, chosen by the caller (ignored with `resumeSessionId`) —
+   *  so the caller can fence it off from sibling sessions' dir scans before the
+   *  pre-created jsonl appears. Omitted = minted here. */
+  sessionId?: string;
   /** Cosmetic tmux window name (status-bar label). Falls back to sessionId.
    *  Pass the principal (e.g. "user:xxx") to make windows easy to skim. */
   windowName?: string;
@@ -391,11 +395,11 @@ const charterArg = (cfg: Config, backend: CliBackend, sessionId: string, charter
   }
 };
 
-export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, windowName, cwdOverride, cli, model, systemPrompt, forkSession }: SpawnArgs): Promise<SpawnResult> => {
+export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: freshSessionId, windowName, cwdOverride, cli, model, systemPrompt, forkSession }: SpawnArgs): Promise<SpawnResult> => {
   const backend = backendFor(cfg, cli);
   const cwd = expandHome((cwdOverride ?? "").trim() || cfg.wrc.cwd);
   const projectDir = join(expandHome(backend.projectsDir), backend.encodeProjectDir(cwd));
-  const sessionId = resumeSessionId ?? randomUUID();
+  const sessionId = resumeSessionId ?? freshSessionId ?? randomUUID();
   const jsonlPath = join(projectDir, `${sessionId}.jsonl`);
   const tmuxName = cfg.wrc.tmuxPrefix; // shared session for all chats
   const winName = safeWindowName(windowName ?? sessionId);

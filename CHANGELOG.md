@@ -85,6 +85,7 @@
 - reload 落在 spawn 中途留下的孤儿 tmux 窗口现在会被收掉 (B4 ⑫), 不再只打一行 warn: 开机清掉没生完的身份后, 等绑定恢复完, 把 daemon 自己的 tmux session 里以这些名字命名、且没有任何绑定指着的 pane 杀掉; 名字期间已被新 spawn 认领的不碰。
 - `stop_wizard({forget:true})` 抹掉一个 wizard 时, 它在还开着的工单里没落定的那一份记成 `canceled` (B4 ⑬, 冷记录与活会话两条路径都算; 回包带 `canceledIn`) —— 此前那一份永远不会落定, 工单「齐了吗」一直差一份。已落定的 (连同交付物) 原样保留。
 - `/compact` 与自动压缩之后也补回 self 记忆 (B4 ⑭): mirror tail 读到 `compact_boundary` 即同 `/clear` 一样, 下一条注入捎上出生后新记的条目 (reload 后无快照则只指路) —— 压缩换掉了对话, 宪章 (系统提示) 却还是出生时那份。
+- 同一 cwd 并发出生的 wizard 不再被认错会话 (B4 ⑯): 新会话的 sid 由 daemon 先定 (`--session-id` 传入), 出生到 attach 之间挂进「在途」集合, 同目录别的 target 的迁移 / 自愈 / 分叉跟随 / 指纹重绑扫目录时都绕开它 —— 此前新 spawn 预建的 jsonl 会先被别人认走, 正主 attach 时撞 `already bound`。并发克隆的分叉文件改为首选 CLI 会话注册表按 pane 报的 sid 来认, 注册表报不出 (或 15 秒后还报着父亲的 sid) 才按「新出现、首行同父」去猜, 认下即预留。
 
 ## [2.2.2] - 2026-10-02
 
