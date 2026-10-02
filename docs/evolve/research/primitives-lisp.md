@@ -11,7 +11,7 @@
 2. 能归约成 **8 个原语**: `make` · `send/k` · `observe` · `define` (remember) · `set!` · `stop` · `delay` (schedule) · `ask` (人)。现有 35 个工具里大约一半是这 8 个的派生或观察镜头。
 3. 回执就是 continuation, 而且已经是 CPS 的了 —— 但**只有成功的 k, 没有失败的 k**: 对方超时 / 不答 / 发话方一直忙, 回执静默丢弃 (`receipts.ts` 的「不回注」分支)。这是当前代数里最实在的洞, 比任何新语法都值。
 4. 编排**可以**是数据 (一棵 `Flow` AST, 与 `Trigger` 同构: 构造器 = 字面量工厂, 可存、可渲染、可续跑), 但它只该覆盖「LLM 不擅长的那一层」—— 等待、计时、竞速、跨 reload。别让 LLM 写 s-expression。
-5. clone 是**多次可重入的 continuation** (`--fork-session` = 把「读到此刻的我」当 k, 用不同参数各调一次)。这是 wezard 最独特、最该被强调的原语。
+5. clone 是**多次可重入的 continuation** (`--fork-session` = 把「读到此刻的我」当 k, 用不同参数各调一次)。这是 wezard 最独特、最该被强调的原语。但只可重入到第一次重开为止: clone 的 `WizardRecord.memory` 是空的, `/clear` 或交接后父的 self 记忆就丢了 (memory.md §4.6)。
 
 ---
 
@@ -63,7 +63,7 @@
 | `make` | 人口 + | 新 pane、新名字; `:ctx fork` = 带走此刻上下文 | 唯一能增加人口的 |
 | `send/k` | 时间 (驱动一轮) | 文本落入对方输入框; k 决定答案回到谁 | 唯一能让别的 agent 执行的 |
 | `observe` | 无 (纯) | 读 transcript / 名册 / 注册表, 不唤醒任何人 | 唯一无副作用的; 其他都写 |
-| `define` | 持久环境 | 跨 `/clear`/交接/重启, 下次 spawn 生效 | 活体属性 (`set!`) 随会话死; 它不 |
+| `define` | 持久环境 | 跨交接/重启, 下次 spawn 生效 (出生后写的 self 记忆**活不过 `/clear`**: 宪章不重渲染, 见 memory.md §4.1) | 活体属性 (`set!`) 随会话死; 它不 |
 | `set!` | 活体属性 | 改名、职责、模型、工作区 | 不改人口、不驱动轮; 但 `cwd` 会触发重启, 见 §4 |
 | `stop` | 人口 − / 打断 | `interrupt` 停一轮, `end` 收 pane, `forget` 抹身份 | 唯一能减少人口的 |
 | `delay` | 未来 | 守护进程持有时钟; 到点 = 某人在那一刻 `send` | LLM 不能跨轮 sleep; 时间只能交给 daemon |
@@ -83,7 +83,7 @@
 |---|---|---|
 | `spawn_wizard` | `make :ctx blank :owner self` | **原语入口**, 保留 |
 | `clone_wizard` | `make :ctx fork` (+ 可选 `send task`) | **原语入口**, 保留 |
-| `new_claude_session` | `make :ctx blank :owner nil` | 并入 `spawn_wizard({owned:false})`, 降为别名 |
+| `new_claude_session` | `make :ctx blank :owner nil` | 并入 `spawn_wizard({detached:true})` (inventory R4), 降为别名 |
 | `tell_peer` | `send/k` | **原语入口**, 保留 |
 | `send_peer` | = `tell_peer` | 别名, 过渡期后删 |
 | `wait_peer` | 同步 join over k | 保留为「同一轮硬依赖」的逃生口, 描述里已经是不推荐 |
@@ -120,7 +120,7 @@ LLM 本身就是 `begin`/`if`/`cond`。在 wizard 的上下文里组合是这样
 | 重试 | 依赖超时信号 | ❌ 同上 |
 | 竞速 | `wait_peer need:1` | ⚠️ 只取首个, 不收掉输家 |
 
-缺的三格**都卡在同一处**: k 只有成功分支。补一个失败 continuation 三格同时打开:
+超时与重试**卡在同一处**: k 只有成功分支, 补一个失败 continuation 两格同时打开; 竞速另缺「收掉输家」(§4 #3), 与失败 k 无关:
 
 ```
 (send w text :k self)        ; 现在: 只在 answer 非空时调 (k answer)
@@ -202,6 +202,8 @@ JSON 形状 (LLM 实际写的):
 
 今天的 `run_agent_graph` 能写出其中的 seq + loop + until, 写不出 timeout / retry / let 回收, 且 reload 即丢。
 
+**与「控制流不进 daemon」的张力**: `run_flow` 就是把控制流搬进 daemon —— `jobs.ts` 头注释、a2a-frameworks L1 (graph 降为 job + 预算)、openclaw-dsh §3.2B 都反对这一步。它只在「无人在场也要跑完的静态形状」上站得住; 没有这种真实需求之前, a2a 的 L1 (rounds/until 变成 job 的预算字段, 控制流留在发起 wizard) 更便宜。
+
 **例 3 · trace-loop 定时任务** (已经存在, 改写成代数看它的形状)
 
 ```lisp
@@ -227,7 +229,7 @@ JSON 形状 (LLM 实际写的):
 | 4 | **结构化返回值**: 回执里 `RESULT:` 之后可选带 json, 信封解析成值 | 让 `Pred` 能 branch on 值, 而非子串 | 中。只有 Flow 层需要; LLM 层自己读得懂文本 | 中 |
 | 5 | **可续跑的 Flow 解释器** (`run_flow`), 取代 `run_agent_graph` | §3.2 | 中。真实需求是「循环跑过夜还要活过 reload」; 只有 fix⇄review 这类静态形状用得上 | 大 |
 | 6 | **task body = Flow** | `delay` × Flow | 中低。等 5 落地后顺手 | 小 (在 5 之上) |
-| 7 | **作用域记忆的动态可见性** (`define chat` 后同群活着的 wizard 立刻知道) | 环境模型: 现在是 spawn 时快照 = 静态作用域 | 低。`notices.ts` 已可捎一行提醒, 足够 | — |
+| 7 | **作用域记忆的动态可见性** (`define chat` 后同群活着的 wizard 立刻知道) | 环境模型: 现在是 spawn 时快照 = 静态作用域 | 高。`notices.ts` 通路现成但**没接上记忆** (memory.md §4.1), 长寿 wizard 永远看不到新规矩 | 低: steward `onMerged` → notices |
 
 ---
 
@@ -253,5 +255,5 @@ JSON 形状 (LLM 实际写的):
 
 1. 失败 continuation + `deadline` (§4 #1 #2) —— 改 `receipts.ts` 与信封 `kind`, 不加新工具。立刻让 charter 里「迟迟不来就 peek」那段可以删掉。
 2. race 收尾 (`wait_peer need:1` 的 `cancelRest`, 或 job 级 `race:true`)。
-3. `new_claude_session` → `spawn_wizard({owned:false})` 别名化; `send_peer` 过渡期结束后删除。
+3. `new_claude_session` → `spawn_wizard({detached:true})` 别名化; `send_peer` 过渡期结束后删除。
 4. 有真实的过夜循环需求再做 `run_flow` (CEK 落盘, 构造器 + `describeFlow`, rolepage 渲染); 做完后 `run_agent_graph` 降为它的 `seq+loop` 别名, task body 接 Flow。
