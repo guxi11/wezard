@@ -2138,8 +2138,10 @@ export interface MirrorBridge {
    *  approval prompt. Registry-first, pane as fallback. True for dead panes. */
   idleNow: (target: string) => Promise<boolean>;
   /** Resolves the moment `target` turns idle (registry-event driven; pane polling
-   *  only for backends without a registry). */
-  untilIdle: (target: string, timeoutMs: number) => Promise<IdleResult>;
+   *  only for backends without a registry). `aborted` is polled with the safety
+   *  tick — a watcher whose reason went away must not hold timers for an hour.
+   *  `confirm` = consecutive idle pane samples on the no-registry fallback (default 2). */
+  untilIdle: (target: string, timeoutMs: number, opts?: { aborted?: () => boolean; confirm?: number }) => Promise<IdleResult>;
   /** Switch `target`'s live pane onto the model closest to `wanted` by driving
    *  its `/model` picker (see `model-select.ts`) — the same path a spawn takes.
    *  What landed is recorded on the attachment and in the store, so a respawn
@@ -5337,8 +5339,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 等到它闲下来, 事件驱动: 注册表目录一有写入就重判, 翻成 idle 的那一刻即返回。
   // 兜底轮询只防 watch 漏事件 (以及悬着的审批被点掉后 status 没再动的边角)。
   const IDLE_SAFETY_POLL_MS = 1000;
-  const untilIdle = (target: string, timeoutMs: number): Promise<IdleResult> => {
-    if (idleVerdict(target) === undefined) return waitForIdle(target, isBusy, timeoutMs, () => false, { rampMs: 0, confirm: 2 });
+  const untilIdle = (
+    target: string,
+    timeoutMs: number,
+    { aborted = () => false, confirm = 2 }: { aborted?: () => boolean; confirm?: number } = {},
+  ): Promise<IdleResult> => {
+    if (idleVerdict(target) === undefined) return waitForIdle(target, isBusy, timeoutMs, aborted, { rampMs: 0, confirm });
     return new Promise((resolve) => {
       let done = false;
       const finish = (r: IdleResult): void => {
@@ -5359,6 +5365,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const tick = setInterval(() => void check(), IDLE_SAFETY_POLL_MS);
       const timer = setTimeout(() => finish({ idle: false, reason: "idle wait timed out" }), timeoutMs);
       void check();
+        if (aborted()) { finish({ idle: false, reason: "stopped" }); return; }
     });
   };
 

@@ -6,7 +6,7 @@
 // 异步回执把「问」和「收」拆开: 问完就接着干自己的事, 答案到了作为新的一轮进来。
 //
 // 这不是第二个编排器, 是一条投递通路。它只做四件事, 每一件都复用现成的判定:
-//   等对方停下 (graph.waitForIdle, 与 wait_peer 同一套) → 取它答**这一句**的那段话
+//   等对方停下 (mirror.untilIdle, 注册表判闲) → 取它答**这一句**的那段话
 //   (peers.replyToPeer, 按信封定位而不是按时刻) → 等发话方停下 → paste 进去。
 // 控制流仍在发话方自己的上下文里: 它没有被阻塞, 也没有被谁代理。
 //
@@ -16,15 +16,29 @@
 // (按信封定位), 重启后接着守, 取到的还是同一段。
 import type { Logger } from "pino";
 import type { JsonMap } from "../shared/json-map-store.js";
-import { waitForIdle, type IdleResult } from "./graph.js";
+import type { IdleResult } from "./graph.js";
+import { sleep } from "../shared/std.js";
 
 /** 对方最长允许干多久 (超过就放弃这一份回执, 不占着内存等到天亮)。 */
 const TARGET_WAIT_SEC = 3600;
 /** 发话方正忙时最长等它多久再投。 */
 const SENDER_WAIT_SEC = 1800;
-/** 对方停下来了却还没答我们这一句 (我们那一句排在别人后面) —— 再等下一次停下。
- *  连着这么多次都没答就认定它不会答了, 别守到天亮。 */
+/** 对方读进了我们这一句、停下了却没答 —— 再等下一次停下。连着这么多次都没答就认定
+ *  它不会答了, 别守到天亮。我们那一句还没被读进 (排在别的轮后面) 的那几次不算: 那是
+ *  在等前面的轮, 不是它不答; 只有整段 ramp 都闲着、问话仍不在 transcript 里, 才算一次
+ *  (那一句多半丢了)。 */
 const MAX_FRUITLESS = 3;
+/** 等对方「动起来」的窗口: 注册表在它读进这一句之前仍报 idle, 不等这一下就会在它开工
+ *  之前读 transcript, 读到的还是上一件事。轮询放慢到 2s: idleNow 与 answered 都同步读
+ *  tail, 十几路 fan-out 同时 ramp 时 1s 一次会压住事件循环。 */
+const RAMP_MS = 20_000;
+const RAMP_POLL_MS = 2000;
+/** 每次最多等对方这么久就回来重读 deadline: 交接 transfer 会把 s.at 往后推, 一次定死的
+ *  超时会早于新的 deadline 放弃。 */
+const IDLE_STEP_MS = 5 * 60_000;
+/** codebuddy 没有注册表, 判闲靠 pane 采样 —— 它停在本地对话框上时 spinner 也会消失,
+ *  仍会被算作闲 (P1 在那边没修), 多采一次压低误判。发话方投递路径保持 2。 */
+const IDLE_CONFIRM = 3;
 
 export interface ReceiptMeta {
   /** 答话方的 target key。 */
@@ -39,16 +53,15 @@ export interface ReceiptMeta {
 }
 
 export interface ReceiptDeps {
-  isBusy: (target: string) => Promise<boolean>;
   /** 能接新一轮了吗 (轮已结束、没停在审批上) / 等到那一刻 —— 投递时机用, 见 tell_peer when:"idle"。 */
   idleNow: (target: string) => Promise<boolean>;
-  untilIdle: (target: string, timeoutMs: number) => Promise<IdleResult>;
+  untilIdle: (target: string, timeoutMs: number, opts?: { aborted?: () => boolean; confirm?: number }) => Promise<IdleResult>;
   /** 发话方还在不在。死了就把回执丢掉 —— 为了送一份结论把一个已经收工的 wizard
    *  重新拉起来是本末倒置。 */
   paneLive: (target: string) => Promise<boolean>;
   /** `to` 答 `fromName` 那一句的那段话。三态, 缺一不可 (见 peers.replyToPeer):
    *  非空 = 答案; `""` = 问话在, 但还没答 (接着等); `undefined` = 连问话都定位不到
-   *  (对方是个还不挂信封的老 wizard) —— 那就只能按时刻取, 由调用方兜。 */
+   *  (还排在输入框里没读进) —— 接着等, 绝不退回按时刻取 (取到的是上一件事的结论)。 */
   replyFor: (to: string, fromName: string, sinceMs: number) => string | undefined;
   /** 把回执 paste 进发话方的输入框 (调用方负责拼信封)。 */
   deliver: (to: string, body: string, meta: ReceiptMeta) => Promise<{ ok: boolean; reason?: string }>;
@@ -141,16 +154,51 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     void watch(s).catch((e: unknown) => deps.log.warn({ err: (e as Error).message }, "receipt watch failed"));
   };
 
+  /** 对方这一轮结束了。判闲以注册表为准 (`untilIdle`): pane 的 spinner 在本地对话框上
+   *  (hook 回落成 ask / AskUserQuestion) 和长工具调用的间隙里都会消失, 按它判闲会把
+   *  一个停在对话框上的 wizard 当成「答完了却没答」, 扑空三次就把回执扔了。
+   *  先等它动起来 (`rampEnd` 之前): 还没读进这一句的会话注册表照样报 idle; 已经答出
+   *  来了 (`answered`, 太快的一轮可能在两次采样之间就跑完) 就不必等满。
+   *  `quiet` = 整段 ramp 它都闲着、什么也没答 —— 调用方据此判断那一句是不是丢了。 */
+  const settled = async (
+    to: string,
+    rampEnd: number,
+    deadline: () => number,
+    aborted: () => boolean,
+    answered: () => boolean,
+  ): Promise<IdleResult & { quiet?: true }> => {
+    for (;;) {
+      if (aborted()) return { idle: false, reason: "stopped" };
+      if (Date.now() >= rampEnd) return { idle: true, quiet: true };
+      if (!(await deps.idleNow(to)) || answered()) break;
+      await sleep(RAMP_POLL_MS);
+    }
+    for (;;) {
+      const left = deadline() - Date.now();
+      if (left <= 0) return { idle: false, reason: "timeout" };
+      const r = await deps.untilIdle(to, Math.min(left, IDLE_STEP_MS), { aborted, confirm: IDLE_CONFIRM });
+      if (r.idle || aborted()) return r;
+    }
+  };
+
   /** 守到对方答出**我们这一句**为止。信封是比发话时刻更硬的锚 (见 peers.replyToPeer):
    *  对方正忙时我们那一句是排队的, 它先吐出来的是上一件事的结论 —— 按时刻取就会把
-   *  旧结论当成这一次的回执。所以"停下了但还没答我们"要接着等, 不能将就。 */
+   *  旧结论当成这一次的回执。所以"停下了但还没答我们"要接着等, 不能将就; 定位不到
+   *  问话 (undefined) 也只说明它还没读进, 绝不退回按时刻取。 */
   const awaitReply = async (s: Slot): Promise<string> => {
     // 锚在发话时刻而不是此刻: reload 后续守的那一份不该重新领一整份时长。交接转过来
     // 的那份改锚到贴回简报的时刻, 所以每圈重算。
     const deadline = (): number => s.at + TARGET_WAIT_SEC * 1000;
+    const aborted = (): boolean => s.claimed || stale(s);
+    const reply = (): string | undefined => deps.replyFor(s.to, deps.nameOf(s.from), s.at);
     for (let fruitless = 0; fruitless < MAX_FRUITLESS && Date.now() < deadline(); ) {
-      const wr = await waitForIdle(s.to, deps.isBusy, deadline() - Date.now(), () => s.claimed || stale(s));
-      if (!wr.idle || s.claimed || stale(s)) return "";
+      // 对方 pane 没了 (被收掉 / 崩了): 不会再答, 别空转三次 ramp。交接重开的那几秒
+      // pane 也是死的, 先等交接收尾再看。
+      await deps.handedOff?.(s.to);
+      if (s.answer !== undefined) return s.answer;
+      if (!(await deps.paneLive(s.to))) return "";
+      const wr = await settled(s.to, Math.min(deadline(), Date.now() + RAMP_MS), deadline, aborted, () => !!reply()?.trim());
+      if (!wr.idle || aborted()) return "";
       // 它停下是因为在交接: 等交接收尾, 答案要么已钉在 s.answer, 要么义务转进了新会话
       // (那就接着守新会话)。这一段与下面的 replyFor 之间不能有 await —— 交接一旦
       // 开始就在旧会话还在时把 transfer 做完, 同步读到的必然还是旧 transcript。
@@ -158,11 +206,10 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       if (handing) await deps.handedOff?.(s.to);
       if (s.answer !== undefined) return s.answer;
       if (handing) continue;
-      const got = deps.replyFor(s.to, deps.nameOf(s.from), s.at);
-      // undefined = 定位不到问话 (老 wizard 不挂信封): 没有更好的锚, 按时刻取。
-      if (got === undefined) return deps.replyFor(s.to, deps.nameOf(s.from), 0) ?? "";
-      if (got.trim()) return got;
-      fruitless++;
+      const got = reply();
+      if (got?.trim()) return got;
+      // 读进了没答 = 扑空一次; 还没读进 = 前面有别的轮, 接着等 —— 除非整段 ramp 都静着。
+      if (got !== undefined || wr.quiet) fruitless++;
     }
     return "";
   };

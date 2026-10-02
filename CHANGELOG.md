@@ -13,6 +13,7 @@
 - wizard 的上下文瘦身: charter 的出生名册只列写了职责的同群 wizard (至多 15 个, 其余报个数、指向 `wizard_roster`), 「我能做什么」改为每个工具一行「何时用」, 「编排」「说话」两节不再复述工具描述 —— charter ~5.1k → ~2.5k tok (管家 ~6.0k → ~3.4k)。工具描述不再教 `send_peer` / `wait_peer` (一律 `tell_peer` + 回执); `send_peer` 描述压成一行; `tell_peer` 只讲机制; `schedule_task` 只留何时用 / `when` 人话 / 默认新建 / 回念 `next`, gate 写法挪进任务文件头注释; 生 wizard 的 `model` 参数共用一句; graph 三件套、`list_claude_sessions`、`switch_claude_session`、`list_chats` 标为人侧/罕用。工具定义合计 ~20.4k → ~17.8k tok。CLAUDE.md 的 MCP 段与 `/help` 的过期措辞一并更正。
 
 ### Fixed
+- 回执把上一件事的结论当成这一次的: 对方正忙时我们那一句还排在输入框里, 回执守护在它读进之前读 transcript, 定位不到问话就退回按时刻取。现在定位不到一律视为还没读进、接着等 (不计扑空), 只有对方整段 20s 都闲着而问话仍不在才算一次; 判闲改走注册表 (`untilIdle`), 停在本地对话框上的 wizard 不再被当成答完; 对方 pane 没了直接结束不空转; 交接顺延 deadline 后不再被一次定死的超时提前放弃。
 - spawn 中途失败留下僵尸身份: spawn 途中 daemon 被 reload (调用方看到 `fetch failed`) 时, 身份记录已落盘却没有会话, 名字被永久占住, tell_peer / stop_wizard 都报「exists but its session is not running」。现在身份记录带 `spawning` 标记, 生成功才清; spawn 抛异常也回滚; 开机收掉上一个进程没生完的记录。`stop_wizard` 对有身份没会话的 wizard 也能成功: `end` 视为早已结束, `forget` 删记录腾出名字。
 - rolepage 链接在独立 svr 上报「未找到该会话」: 聊天票据只在创建那一刻推一次到远端, 远端换过地址 (lisct → 本机 17891) 或那一下 svr 不在时就永久缺席。现在 daemon 每次 (重新) 连上远端都把全部聊天票据补推一遍。
 

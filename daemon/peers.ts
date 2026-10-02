@@ -403,10 +403,10 @@ const ASK_SLACK_MS = 60_000;
  *  发话时刻 (lastReply 的 sinceMs) 分不开两件事: 目标正忙时我们这一句是排队的,
  *  它先吐出来的是**上一件事**的结论, 而那条回复同样晚于我们 paste 的时刻 —— 按时刻
  *  取就会拿旧结论当新回执。信封是更硬的锚: 我们注入的那一句在它的 transcript 里挂着
- *  `kind=peer from=.我`, 从那一句往后数, 答的就一定是我们问的。找不到那一句 (老 wizard 的 MCP
- *  还不挂信封 / 后端不写时间戳) 返回 `undefined`, 调用方退回 lastReply —— 退化而不是
- *  吞掉; 找到了问话但它后面还没有回答 (我们那一句还排在队里) 返回 "" —— 调用方必须
- *  接着等, 绝不能退回去把上一件事的结论当成这一次的回执。 */
+ *  `kind=peer from=.我`, 从那一句往后数, 答的就一定是我们问的。找不到那一句 (还排在
+ *  输入框里没读进) 返回 `undefined`; 找到了问话但它后面还没有回答返回 "" —— 两种都要
+ *  接着等, 绝不能退回按时刻取把上一件事的结论当成这一次的回执 (receipts 只用前者分辨
+ *  「它在忙前面的轮」与「读进了却没答」)。 */
 export const replyToPeer = (
   jsonlPath: string,
   fromName: string,
@@ -414,9 +414,6 @@ export const replyToPeer = (
   pingSigs: readonly string[] = [],
 ): string | undefined => {
   const r = answerOf(talkTurns(jsonlPath, 80, pingSigs, true), fromName, sinceMs);
-  // 两种"没有"必须分开: 找不到那一句问话 (老 wizard 不挂信封) → undefined, 调用方
-  // 退回按时刻取; 找到了问话但它后面还没有回答 (我们这一句还排在队里) → "",
-  // 调用方必须继续等, 绝不能退回去把**上一件事**的结论当成这一次的回执。
   return r && r.text;
 };
 

@@ -621,7 +621,6 @@ const main = async (): Promise<void> => {
     // 回发话方的输入框, 发话方全程不阻塞。这里只提供四样能力给那个模块 —— 忙闲、
     // 死活、「它答我那一句的是哪段话」、以及怎么把一段话送进去 —— 投递逻辑在那边。
     const receipts = createReceipts({
-      isBusy: m.isBusy,
       idleNow: m.idleNow,
       untilIdle: m.untilIdle,
       paneLive: m.paneLive,
@@ -630,8 +629,6 @@ const main = async (): Promise<void> => {
       store: loadJsonMap<ReceiptSlot>(cfg.wrc.mirror.receiptsFile),
       handingOff,
       handedOff,
-      // 信封锚取不到 (对方是个还不挂信封的老 wizard) 时退回按时刻取, 由 receipts
-      // 区分这两种"没有"。
       replyFor: (to, fromName, since) => m.replyToPeer(to, fromName, since),
       deliver: (to, bodyText, meta) =>
         m.injectText(to, clipMiddle(bodyText), undefined, {
