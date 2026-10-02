@@ -224,7 +224,7 @@ const renderHelp = (): string =>
     "▎协作",
     "`/peers`(或 `/wizards`) 列出本聊天的 wizard:名字、职责、忙闲、谁是谁的分身",
     "同一聊天里的 wizard 互相看得见也驱动得动,直接说人话:",
-    "「看下 `.fix` 的进展,推动它直到结束」— AI 会读它的终端、派活、等它跑完。",
+    "「看下 `.fix` 的进展,推动它直到结束」— AI 会读它最近的对话、派活、收它的回执直到跑完。",
     "「让 `.fix` 和 `.review` 互相迭代到 review 说 LGTM」— AI 会把它们串成一条循环流水线。",
     "它们之间的往来默认只进各自的 rolepage;需要你知道的 (工单开/收工、公开讨论、结论) 才发进群。",
     "",
@@ -323,7 +323,7 @@ const renderPeers = (peers: PeerInfo[], chatName: string): string => {
     `[wezard] 本聊天${named ? ` \`${named}\`` : ""}的 wizard · ${peers.length} 个${shared.length ? ` · ${shared.join(" · ")}` : ""}`,
     "",
     ...rows,
-    "> 协作：直接说「看下 .fix 的进展并推动它」，AI 会读它的终端、派活、等它跑完",
+    "> 协作：直接说「看下 .fix 的进展并推动它」，AI 会读它最近的对话、派活、收它的回执直到跑完",
     "> 分身：说「分个身去干 X」— AI 会 clone 一个带着当前上下文的 wizard，干完再收掉",
     // 空行只在这一处按需省略 —— 上面那些是有意的分隔, 不能被一把 filter 掉。
     ...(named ? [] : ["> 起名：`/name <名字>` — 聊天名就是这里默认 wizard 的名字"]),
