@@ -423,11 +423,15 @@
     return goSpan('av', id, esc(label)) +
       line(nm(id, name, true) + (tail || ''), g.lastTs, g.preview, stTag(status, true), g.unread);
   };
+  // 名字旁的「+N」: 它在这里还和 N 个别的 role 说着话, 那几段不在当前视角里。
+  var unseenTail = function (id, n) {
+    return n ? '<span class="tfold" title="' + esc(nameOf(id) + ' 在这里还和 ' + n + ' 个别的 role 说过话, 切到它的视角可见') + '">+' + n + '</span>' : '';
+  };
   var convRow = function (c) {
-    if (c.kind === 'wizard') return roleRow(c.peer, c.name, c.label, glance(c), c.status);
+    if (c.kind === 'wizard') return roleRow(c.peer, c.name, c.label, glance(c), c.status, unseenTail(c.peer, c.unseen));
     return avatarOf(c) + line('<span class="nm chat">' + esc(c.name) + '</span>', c.lastTs, c.preview, stTag(c.status, true), unreadOf(c));
   };
-  var subRow = function (c, s) { return roleRow(s.role, s.name, s.label, glance(c, s), s.status); };
+  var subRow = function (c, s) { return roleRow(s.role, s.name, s.label, glance(c, s), s.status, unseenTail(s.role, s.unseen)); };
 
   var convItem = function (c) {
     var on = c.key === CONV;
@@ -617,7 +621,7 @@
     $('#rb-who').innerHTML =
       '<div class="id"><span class="av">' + esc(r.label) + '</span>' +
         '<span class="l"><span class="nl"><span class="cp" title="' + esc('复制 ' + nameOf(r.id)) + '">' + nm(r.id, r.name) + '</span>' + (r.kind === 'wizard' ? '<span id="rb-st"></span>' : '') +
-          '<span id="rb-sp">' + (R.sessions.length ? sessPicker() : '') + '</span></span>' +
+          '<span id="rb-sp">' + (R.sessions.length > 1 ? sessPicker() : '') + '</span></span>' +
           (facts.length ? '<span class="facts">' + facts.join('') + '</span>' : '') + '</span></div>' +
       (r.description ? '<p class="job">' + esc(r.description) + '</p>' : '');
     paintStatus();

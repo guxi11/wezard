@@ -216,6 +216,8 @@ export interface ConvSub {
   mine: number;
   /** 它是 wizard 时才有。 */
   status?: RoleStatus;
+  /** 它在这个频道里还和几个别的 role (不含我) 说过话 —— 我的视角里看不见的那些。 */
+  unseen: number;
 }
 
 export interface Conv {
@@ -229,6 +231,8 @@ export interface Conv {
   peer?: string;
   /** 私聊对端的状态 (群没有)。 */
   status?: RoleStatus;
+  /** 私聊对端还和几个别的 role (不含我) 私聊过 —— 我的视角里看不见的那些; 群为 0。 */
+  unseen: number;
   lastTs: number;
   preview: string;
   count: number;
@@ -329,6 +333,9 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
   // 开口之后才进来的话才可能没读过: 回过话 = 读到了那里。
   const spoke = (ms: readonly Msg[]): number =>
     ms.filter((m) => m.from === role).reduce((t, m) => Math.max(t, saidOf(m).ts), 0);
+  // ms 里 r 的对端, 去掉我、定时与系统 —— 那几段对话不在我的视角里。
+  const unseen = (ms: readonly Msg[], r: string): number =>
+    new Set(talkOf(ms, r).map((m) => other(m, r)).filter((p) => p !== role && !p.startsWith("task:") && p !== SYSTEM)).size;
   const mine = talkOf(msgs, role);
   const keys = [...new Set(mine.filter((m) => !m.channel || m.from === role).map((m) => convKeyOf(m, role)))];
   return keys
@@ -338,7 +345,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
         const ms = talkOf(mine, role, [peer], "");
         return {
           key, kind: "wizard", name: dir.nameOf(peer), label: dir.labelOf(peer), base: "", peer,
-          status: dir.status(peer, now),
+          status: dir.status(peer, now), unseen: unseen(msgs.filter((m) => m.channel === ""), peer),
           ...glanceOr(ms, speakerPrefix(dir, role, [peer])), count: ms.length, heard: heard(ms), mine: spoke(ms), subs: [],
         };
       }
@@ -352,6 +359,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
           return {
             role: r, name: dir.nameOf(r), label: dir.labelOf(r), count: pair.length, mine: spoke(pair),
             ...(glance(pair, speakerPrefix(dir, role, [r])) ?? glanceOr(seen, speakerPrefix(dir, role, [r]))), status: dir.status(r, now),
+            unseen: unseen(all, r),
           };
         })
         // 与我有往来的排前, 再按最近。
@@ -360,7 +368,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
       return {
         key, kind: "group", base,
         name: dir.chatName(base) || (base.startsWith("user:") ? dir.nameOf(humanOf(base)) : base.replace(/^chat:/, "").slice(0, 10)),
-        label: "💬",
+        label: "💬", unseen: 0,
         ...glanceOr(all, speakerPrefix(dir, role)), count: all.length, heard: heard(all), mine: spoke(all), subs,
       };
     })
