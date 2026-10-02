@@ -778,7 +778,7 @@
 
   // 会话列表 ↔ 关系图: 同一个按钮、同一个位置, 标的是「点了去哪」。
   var worldToggle = function () {
-    return R.relations && !narrow() ? '<button class="vb' + (WORLD ? ' on' : '') + '" id="ch-world">' + (WORLD ? '会话列表' : '关系图') + '</button>' : '';
+    return !narrow() ? '<button class="vb' + (WORLD ? ' on' : '') + '" id="ch-world">' + (WORLD ? '会话列表' : '关系图') + '</button>' : '';
   };
   var bindWorldToggle = function () {
     var b = $('#ch-world');
