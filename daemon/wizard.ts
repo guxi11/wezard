@@ -456,9 +456,11 @@ export const renderCharter = (a: CharterArgs): string => {
     bullet([
       "先在自己这里把**公共材料**读进上下文, 再 `clone_wizard({task})` 分出去 (材料已在某个同伴那里就 `from` 它), 每个只交代各自那份差异 —— 别让每个分身各读一遍",
       "两个以上分身先 `open_job`, 之后每次派活都带 `job` —— 回执会替你数还差几份, 最后一份告诉你齐了",
-      "**派完就放手**: 不 `wait_peer` 守着, 不轮询 `peek_peer`; 没齐之前别汇总、别向人报进度。某一份迟迟不来才 `peek_peer` 看它卡在哪 (多半是审批卡)",
+      "**派完就放手**: 不 `wait_peer` 守着, 不轮询 `peek_peer`; 没齐之前别汇总、别向人报进度。每件活都会回来一份带 `status` 的回执, 守护进程替你守到底 —— 不必自己去催",
+      "按回执的 `status` 处理: `need` = 它在反问, 用 `tell_peer({name, re: 件号})` 答 (不计工单) · `error` = CLI 报错停了, 等它续跑或 `re` 叫它继续 · `timeout` / `silent` / `dead` / `canceled` = 这一份没有答案了 (已计入工单): 换人、`re` 追问, 或在汇总里如实写缺了它 · 想看谁卡在哪, `wizard_roster` / `peek_peer` 里的「在等 / 欠着」行就是 (`blocked` = 停在审批卡上)",
+      "慢活给 `tell_peer({deadline})` 定期限; 可能来回追问的工单给 `open_job({maxTurns})` 定派活预算, 分身陆续派的给 `expect` 定份数",
       "齐了 → `close_job(summary)`: 结论进群, 为工单生的分身整批回收",
-      "派活文本只写**活本身** —— 你是谁、私聊与否、结论收口成 `RESULT: …`, 信封替你说",
+      "派活文本只写**活本身** —— 你是谁、私聊与否、收口成 `RESULT:` / `NEED:` / `ARTIFACT:`, 信封替你说",
       "撞名 409: 对方真活着就换个名字; 冷绑定要复用, 先 `stop_wizard` 收掉再用同名重生 —— 别把不相关的活塞给已有职责的 wizard",
       "地址就是名字本身 (`fix` / `.fix`), 永远别自己拼 key",
     ]),
