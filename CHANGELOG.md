@@ -37,6 +37,7 @@
 ### Security
 - 模型不再能免审改审批配置: PreToolUse hook 对 wezard 自家 MCP 工具的一律放行排除了两种「写」—— `config_set` 带 `value` (可写 `danger_skip_all` / `approval_mode` / `allow_from`) 与 `set_model` `scope:"default"` (改 CLI 全局设置), 它们落回审批, 且 daemon 把它们当必发卡 (不吃 matcher / danger 开关 / ⏱窗口 / 会话缓存, 只有人开的 skipAll 与 bypass 模式压得过); `config_set` 的读与 `set_model` 的会话级照旧免审。
 - hook 的 wezard CLI 免审只认整条命令就是一次 `wezard[.sh] <status|logs|pending|audit|update|reload|config-path|mirror-status|version|help>` 且不含 shell 元字符; 此前命令里任意位置出现 `wezard` 一词就放行 (`curl …/config/set; true wezard` 可免审直改配置)。注意 daemon 的 `/config/set` 路由本身仍不鉴权, 本机进程可直接写 —— 这里只关掉了模型免审走到它的两条路。
+- 写敏感状态的 daemon 路由要出示口令 (B4 ⑪): `/config/set`、`/claim/start`、`/claim/reset`、`/tasks/schedule` 只认带 `x-wezard-token` 头、值等于 `~/.wezard/daemon-token` (0600, daemon 开机生成) 的请求 —— wezard 自己的 MCP server 与 CLI 每次现读它; 本机别的进程直接 curl 一律 403 (此前写配置、布认领口令、落一份 daemon 会执行其 gate 的任务文件都不鉴权)。**注意**: 已在跑的 wizard 的 MCP 进程是旧代码、不带口令, 它们的 `config_set` 写 / `schedule_task` 会被拒, 重开会话 (新 pane) 后恢复。
 
 ### Changed
 - `spawn_wizard({detached:true})` 吸收 `new_claude_session` (B4 ②): 白板生一个独立长住的 wizard —— 不挂家谱、不占调用方的分身名额、不随工单回收 (与 `inherit` / `job` 互斥), 等价于人在群里 `/new .name`; `new_claude_session` 留作一行别名, 路由不变。

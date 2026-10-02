@@ -1,6 +1,9 @@
 // Daemon entry. Resident process — exits only on signal or fatal WS auth failure.
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { timingSafeEqual } from "node:crypto";
+import { loadOrCreateSvrToken } from "../shared/svr-token.js";
+import { DAEMON_TOKEN_FILE, DAEMON_TOKEN_HEADER } from "../shared/daemon-token.js";
 import { homedir } from "node:os";
 import { loadConfig } from "../shared/config.js";
 import { makeLogger } from "../shared/log.js";
@@ -218,9 +221,22 @@ const main = async (): Promise<void> => {
   http.register("POST /message", makeMessageHandler(ws.client, log.child({ mod: "outbound" })));
   http.register("POST /card", makeCardHandler(ws.client, log.child({ mod: "outbound" })));
   http.register("POST /ask", makeAskHandler(ws.client, log.child({ mod: "ask" })));
-  http.register("POST /claim/start", makeClaimStartHandler({ log: log.child({ mod: "claim" }) }));
+  // 写敏感状态的路由只认出示口令的 —— wezard 的 MCP server 与 CLI 读得到 0600 的口令文件
+  // (见 shared/daemon-token.ts), 本机别的进程 curl 不进来: 写配置、改 allowFrom 的认领
+  // 口令、落一份 daemon 会执行其 gate 的任务文件, 都不该是谁连上 127.0.0.1 就能做的。
+  const daemonToken = loadOrCreateSvrToken(DAEMON_TOKEN_FILE);
+  const tokenOk = (req: import("node:http").IncomingMessage): boolean => {
+    const got = Buffer.from(String(req.headers[DAEMON_TOKEN_HEADER] ?? ""));
+    const want = Buffer.from(daemonToken);
+    return got.length === want.length && timingSafeEqual(got, want);
+  };
+  const guarded = (h: Handler): Handler => async (req, res, url, ctx) => {
+    if (tokenOk(req)) return h(req, res, url, ctx);
+    json(res, 403, { ok: false, reason: `这条路由要出示 ${DAEMON_TOKEN_FILE} 里的口令 (header ${DAEMON_TOKEN_HEADER}); 正在跑的 wizard 若是旧版 MCP 进程, 重开会话即可` });
+  };
+  http.register("POST /claim/start", guarded(makeClaimStartHandler({ log: log.child({ mod: "claim" }) })));
   http.register("GET /claim/status", makeClaimStatusHandler());
-  http.register("POST /claim/reset", makeClaimResetHandler());
+  http.register("POST /claim/reset", guarded(makeClaimResetHandler()));
   http.register("GET /detail", makeDetailHandler(log.child({ mod: "detail" })));
   for (const [key, handler] of Object.entries(chatHandlers())) http.register(key, handler);
   installAskEventListener(ws.client, log.child({ mod: "ask" }));
@@ -2031,7 +2047,7 @@ const main = async (): Promise<void> => {
     /** 日程归谁: 排班那个 wizard (createdBy); 老文件没写就归执行它的那个。 */
     const ownerOf = (t: { owner: string }): string => t.owner || (cfg.defaultChat ?? "");
 
-    http.register("POST /tasks/schedule", async (req, res) => {
+    http.register("POST /tasks/schedule", guarded(async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       const b = body as { when?: string; prompt?: string; note?: string; fresh?: boolean; quiet?: boolean; id?: string };
@@ -2067,7 +2083,7 @@ const main = async (): Promise<void> => {
         address: peerAddress(cfg, self, target),
         owner: peerAddress(cfg, self, self),
       });
-    });
+    }));
 
     http.register("POST /tasks/list", async (req, res) => {
       const { self, body } = await readPeerBody(req);
@@ -2101,12 +2117,13 @@ const main = async (): Promise<void> => {
       json(res, 200, { ok: true, removed: renderTask(gone, state) });
     });
 
-    // POST /config/set — modify daemon config from MCP
-    http.register("POST /config/set", async (req, res) => {
+    // POST /config/set — modify daemon config from MCP. 口令门见 `guarded`; 模型还得先过
+    // config_set 的审批卡 (danger.ts) 才走得到这里。
+    http.register("POST /config/set", guarded(async (req, res) => {
       const body = (await readBody(req)) as { key?: string; value?: unknown; action?: string };
       const r = configSet(cfg, sourcePath, body.key, body.value, body.action);
       json(res, r.ok ? 200 : 400, r);
-    });
+    }));
 
     http.register("POST /config/get", async (req, res) => {
       const body = (await readBody(req)) as { key?: string };

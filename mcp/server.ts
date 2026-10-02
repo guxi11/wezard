@@ -4,6 +4,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { DAEMON_TOKEN_HEADER, readDaemonToken } from "../shared/daemon-token.js";
 
 const DAEMON_BASE = process.env.WEZARD_DAEMON_BASE ?? "http://127.0.0.1:17890";
 
@@ -232,7 +233,8 @@ interface DaemonReply {
 const daemonPost = async (path: string, body: Record<string, unknown>): Promise<DaemonReply> => {
   const resp = await fetch(`${DAEMON_BASE}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    // 口令每次现读: daemon 可能在本进程起来之后才生成它。
+    headers: { "content-type": "application/json", [DAEMON_TOKEN_HEADER]: readDaemonToken() },
     body: JSON.stringify({ ...selfRef(), ...body }),
   });
   return { j: (await resp.json().catch(() => ({}))) as Record<string, unknown>, status: resp.status };

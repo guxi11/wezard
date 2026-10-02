@@ -19,6 +19,7 @@ import { mapClaudePermissions, readClaudePermissions } from "../shared/claude-pe
 import { expandHome } from "../shared/paths.js";
 import { resolvePublicHost } from "../shared/lan-ip.js";
 import { loadOrCreateSvrToken } from "../shared/svr-token.js";
+import { DAEMON_TOKEN_HEADER, readDaemonToken } from "../shared/daemon-token.js";
 import { sleep } from "../shared/std.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -79,7 +80,7 @@ const get = async (p: string): Promise<unknown> => {
 const post = async (p: string, body: unknown): Promise<unknown> => {
   const r = await fetch(`${DAEMON}${p}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", [DAEMON_TOKEN_HEADER]: readDaemonToken() },
     body: JSON.stringify(body),
   });
   return r.json().catch(() => ({}));

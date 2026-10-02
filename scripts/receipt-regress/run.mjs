@@ -19,6 +19,8 @@ import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 
 const DAEMON = process.env.WEZARD_DAEMON_BASE ?? "http://127.0.0.1:17890";
+// 写敏感路由 (/tasks/schedule 等) 要出示口令, 同 MCP / CLI (见 shared/daemon-token.ts)。
+const TOKEN = (() => { try { return readFileSync(join(homedir(), ".wezard", "daemon-token"), "utf8").trim(); } catch { return ""; } })();
 // receipts.json / jobs.json 在 ~/.wezard 下 (WEZARD_STATE_DIR 是 hook 的另一处目录, 不是它)。
 const STATE = process.env.RR_STATE_DIR ?? join(homedir(), ".wezard");
 const ME = { sessionId: process.env.CLAUDE_CODE_SESSION_ID ?? "", tmuxPane: process.env.TMUX_PANE ?? "" };
@@ -28,7 +30,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nonce = () => randomBytes(3).toString("hex");
 // 别的 wizard 随时会 reload daemon: 连不上 / 被断开就等它回来 (最多 2 分钟), 回执登记落盘、会续守。
 const post = async (route, body, tries = 60) => {
-  const r = await fetch(DAEMON + route, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
+  const r = await fetch(DAEMON + route, { method: "POST", headers: { "content-type": "application/json", "x-wezard-token": TOKEN }, body: JSON.stringify(body) })
     .catch((e) => (tries > 1 ? undefined : Promise.reject(e)));
   if (!r) return sleep(2000).then(() => post(route, body, tries - 1));
   return r.json().catch(() => ({ ok: false, reason: `HTTP ${r.status}` }));
