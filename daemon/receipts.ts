@@ -459,11 +459,14 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
         }
         if (!deps.handingOff?.(s.from)) break;
       }
+      // 上面最后一圈的 await 期间可能被 wait_peer 取走; 从这里到 deliver 之间不能有 await。
+      if (stale(s) || s.settled) return false;
       const { parent, ...route } = routeOf(s, final);
       const at = Date.now();
+      // 先记成已投: 投递途中被 wait_peer 取走的, 要告诉它「这段已经在你会话里了」。
+      s.delivered = true;
       const r = await deps.deliver(s.from, out.body, { ...meta, ...route });
-      if (r.ok) s.delivered = true;
-      else s.undelivered = true;
+      if (!r.ok) { s.delivered = false; s.undelivered = true; }
       if (r.ok && parent) relay(parent, at);
       lg.info({ ok: r.ok, reason: r.reason, status: out.status, len: out.body.length, done: meta.done, total: meta.total, ...(route.replyTo ? { replyTo: kAttr(route.replyTo) } : {}), ...(route.pending ? { pending: route.pending } : {}) }, "receipt: 回注");
       return true;
