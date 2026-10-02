@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- `tell_peer({priority})` 投递策略, 只在对方正忙时分岔 (闲着一律立刻投): `normal` (默认) 等它这一轮结束再投 (即原 `when:"idle"`, 最多 `waitSec`); `urgent` 先按 Esc 打断它这一轮 (同 `stop_wizard` interrupt, 但不清它的注入队列、不停 keepalive) 再投, 回包带 `interrupted`; `now` 不等不打断, 并进它当前这一轮 (插话 / 答问 / 补一句)。**BREAKING**: 没给策略时默认从立刻投改为 `normal`; 带 `re` 续问仍默认 `now` (对方可能正挂在 wait_peer 上等你, 等它闲下来会互相干等到超时)。`when` 留作老 MCP 进程的别名 (`idle` ≡ `normal`, `now` ≡ `now`)。charter 的管家段与工具行改写为三档用法。
 - 回执的收口三态 (B2a ④): 答话方可以收口成 `NEED: <问题>` 反问发话方 —— 回执 `status=need` 照投、**不计入工单**, 发话方用 `tell_peer({re})` 答它后接着守同一件活; `ARTIFACT: <路径> — 一句话` 列交付物。`parseClosing` 解析 (有 RESULT 即交差, NEED 只认全大写、`NEED: 无` 不算), `wait_peer` 回包多 `need` / `artifacts`, peer 私聊信封写明这两条约定。
 - rolepage 会话列表的群下子项加范围开关 (第一行标题右端「往来 / 全部」, 记在本地): 「往来」照旧只列与视角有往来的成对子项; 「全部」再列出群里与视角无往来的 role, 整行淡色、名字不加粗以示区分, 点开是它在这个群里的全部记录 (窗口 key `a:<role>||<群>`, 对端不限), 顶栏写法同成对子项、「在 <群>」点回整个群。这类子项的时刻 / 预览与关系图卡片同走 `glanceOfTalk`, 没有成对往来也就不计未读。
 - `tell_peer` 唤醒的是缓存已冷 (距上次活动超过 `keepalive.ttlSec`) 且 ctx ≥60k 的 wizard 时, 回包多一项 `wakeCost`: 这次要整段重写多少缓存、是白板 spawn 的几倍 —— 让派活的 (多半是管家) 下次分派前就记着这笔账。

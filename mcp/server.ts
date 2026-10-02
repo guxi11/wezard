@@ -382,13 +382,13 @@ server.registerTool(
 const TELL_SCHEMA = {
   name: z.string().describe(ADDRESS_DOC),
   text: z.string().describe("Message to inject. Plain prompt text; slash commands like '/clear' also work."),
-  when: z
-    .enum(["now", "idle"])
+  priority: z
+    .enum(["normal", "urgent", "now"])
     .optional()
     .describe(
-      "什么时候投。`now` (默认) 立刻投 —— 对方正在生成时这句话会排在它这一轮后面, 回答它的提问、打断它、催它都该用这个。`idle` 先等它闲下来再投: **派一件新活给一个正在忙的同伴时用它**, 否则你和别人的两段文本会挤进同一个输入框被当成一轮读掉。返回里的 `wasBusy` 告诉你投的时候它忙不忙。",
+      "对方**正忙**时怎么投 (它闲着三者一样, 立刻投)。`normal` (默认) 等它这一轮结束再投 —— 派新活用它, 否则你和别人的两段话会挤进同一个输入框被当成一轮读掉; 等的是你这次调用 (最多 `waitSec`)。`urgent` 先打断它这一轮 (同 stop_wizard 的 interrupt) 再投 —— 只给真紧急的改道, 它手上那一轮作废。`now` 不等不打断, 落进它的输入框并进当前这一轮 —— 插话、补一句、答它的问。带 `re` 续问时默认 `now`。返回里 `wasBusy` / `interrupted` / `waitedMs` 说明实际怎么投的。",
     ),
-  waitSec: z.number().optional().describe("`when:'idle'` 最多等多少秒 (10-3600, 默认 600)。等不到就返回失败, 不会强行投。"),
+  waitSec: z.number().optional().describe("`normal` 等它闲下来最多等多少秒 (10-3600, 默认 600)。等不到就返回失败, 不会强行投。"),
   public: z
     .boolean()
     .optional()
@@ -407,10 +407,10 @@ const TELL_DESC =
   "**说完就返回**: 对方干完那一轮, 它的最后一条消息作为**新的一轮**自动送到你这里 (回执, 带信封说明是谁、哪场对话、工单还差几份); 你正忙时回执排队等你说完。\n" +
   "默认私聊, 只记在双方 rolepage; 守护进程给 `text` 挂信封 (发话人、私聊/公开、`RESULT: …` 收口)。拒绝对自己发送。";
 
-const tellBody = (a: { name: string; text: string; when?: string; waitSec?: number; job?: string; public?: boolean; receipt?: boolean; re?: string; deadline?: number }) => ({
+const tellBody = (a: { name: string; text: string; priority?: string; waitSec?: number; job?: string; public?: boolean; receipt?: boolean; re?: string; deadline?: number }) => ({
   name: a.name,
   text: a.text,
-  ...(a.when ? { when: a.when } : {}),
+  ...(a.priority ? { priority: a.priority } : {}),
   ...(a.waitSec ? { waitSec: a.waitSec } : {}),
   ...(a.job ? { job: a.job } : {}),
   ...(a.public ? { public: true } : {}),

@@ -946,24 +946,43 @@ const main = async (): Promise<void> => {
       // 它正在交接: 这句话等它换完会话再进 —— 投进旧会话会被交接一并带走, 投进重开中的
       // 空 pane 会 resume 回旧 sid (见 handoff.ts)。发话时刻取在这之后。
       await handedOff(target);
-      // 投递时机。默认照旧立刻投 —— 「回答它的提问」「打断它」本来就是冲着一个
-      // 正在忙的会话去的。`when:"idle"` 是**派新活**该用的那一种: 两个 wizard 同时
-      // 找第三个时, 两段文本会挤进同一个输入框、被当成一轮读掉, 这在协同网络里
-      // 不是边角情况而是常态。等它闲下来再投, 一句话就是一轮。
-      const when = ((body as { when?: string }).when ?? "now") === "idle" ? "idle" : "now";
+      // 投递策略。对方闲着三者一样 —— 立刻投; 只在它正忙时分岔:
+      //   normal (默认) 等它这一轮结束再投 —— 派新活的常态: 两个 wizard 同时找第三个时,
+      //     两段文本会挤进同一个输入框、被当成一轮读掉, 这在协同网络里不是边角情况而是常态;
+      //   urgent 先打断它这一轮 (与 stop_wizard 的 interrupt 同一下 Esc) 再投 —— 紧急改道;
+      //   now   不等不打断, 落进输入框由 CLI 并进它这一轮 —— 插话、补一句、答它的问。
+      // 老 MCP 进程只认 `when` (默认 now): idle ≡ normal, now ≡ now。都没给时, `re` 续问默认 now ——
+      // 续问是同一场来回里的应答, 对方可能正挂在 wait_peer 上等你, 等它闲下来就互相干等到超时。
+      const bp = body as { priority?: string; when?: string };
+      const policy: "normal" | "urgent" | "now" =
+        bp.priority === "urgent" ? "urgent"
+          : bp.priority === "normal" ? "normal"
+            : bp.priority === "now" || bp.when === "now" ? "now"
+              : bp.when === "idle" ? "normal"
+                : re ? "now" : "normal";
       const waitSec = Math.min(Math.max(Number((body as { waitSec?: number }).waitSec ?? 600) || 600, 10), 3600);
       // 「忙」= 这一轮还没结束, 或停在审批上等人 —— 都不是能接新活的时候。
       const wasBusy = !(await m.idleNow(target));
       let waitedMs = 0;
-      if (when === "idle" && wasBusy) {
+      let interrupted: boolean | undefined;
+      if (policy === "normal" && wasBusy) {
         const t0 = Date.now();
         // 它那一轮一结束就投: 注册表 status 翻 idle 是事件, 不抽样也不等稳定期。
         const wr = await m.untilIdle(target, waitSec * 1000);
         waitedMs = Date.now() - t0;
         if (!wr.idle) {
-          json(res, 409, { ok: false, target, foreign, wasBusy, waitedMs, reason: `它一直在忙, ${waitSec}s 内没闲下来 —— peek_peer 看看它卡在哪, 或者用 when:"now" 插队` });
+          json(res, 409, { ok: false, target, foreign, wasBusy, waitedMs, reason: `它一直在忙, ${waitSec}s 内没闲下来 —— peek_peer 看看它卡在哪; 真急就 priority:"urgent" 打断它` });
           return;
         }
+      }
+      if (policy === "urgent" && wasBusy) {
+        // 只按 Esc, 不走 /stop 的 teardown: 那会清掉它的注入队列 (别人排着的话一起丢)
+        // 并暂停 keepalive —— 这里打断它是为了马上接着干, 不是让它安静。
+        const t0 = Date.now();
+        const esc = await m.interruptPane(target);
+        // 等 Esc 生效、这一轮真收住再投; 收不住也照投 —— 落进输入框排在后面, 退化成 now。
+        interrupted = esc.ok && (await m.untilIdle(target, 15_000)).idle;
+        waitedMs = Date.now() - t0;
       }
       // 时刻取在注入**之前**: 晚于那一句落盘的话, 回执定位的下界就偏了。
       const at = Date.now();
@@ -998,7 +1017,9 @@ const main = async (): Promise<void> => {
         ...inj,
         name: peerAddress(cfg, self, target),
         public: isPublic,
+        priority: policy,
         wasBusy,
+        ...(interrupted !== undefined ? { interrupted } : {}),
         ...(waitedMs ? { waitedMs } : {}),
         ...(jobId ? { job: jobId } : {}),
         ...(inj.ok ? { turn: turn.turn } : {}),
