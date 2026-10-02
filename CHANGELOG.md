@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- wizard 启动带上 model 与 effort: `spawn_wizard` / `clone_wizard` 新增 `effort` (low / medium / high / xhigh / max, daemon 校验), 启动即 `--effort`; 档位记进绑定 (`mirror-attachments.json` 的 `effort`), 死 pane 重生、`/new`、交接重开都沿用, 分身默认跟被克隆者同模型同档。模型名能确切对上时 (本机 transcript 里 API 真答过的 id, 或与之同家族同版本的列表标签如 `Opus 5.5`) 直接 `--model <id>` 启动, 省掉 `/model` 选择器那一来回; 口语写法 (「opus 最新」) 或没见过的 id 仍走选择器。`set_model` 新增 `effort` (model 可省): 走 `/effort` 档位条的「只本会话」键 —— `/effort <档>` 会顺手改掉全机默认, 不用它; 档位条没有这一键就不切。codebuddy 不传这两个参数。`wizard_whoami` 带 `effort`。
 - `tell_peer({kind: task|ask|fyi})` (B4 ④): 对方该怎么接这句话 —— 与 `priority` (何时投)、`receipt` (要不要回执) 正交。`ask` 信封加「只答这一问, 别为它开新活」; `fyi` = 知会: 强制不要回执、不进工单 (带 `job` 回 `jobIgnored`)、不进群, 信封改口「不收回执 / 不用回复」。
 - 按件号撤回, 打断不误伤别人的活 (B4 ⑧): `stop_wizard({mode:"interrupt", turn})` 只撤回调用方自己派的那一件 —— 它此刻正做的就是这件才按 Esc (不清它的注入队列), 还排着 / 在做别人的活就只把这件记成 canceled, 并经名册增量捎它一句「不用做了」。不带 `turn` 的打断, 若它这一轮是别的 wizard / 人 / 定时任务的 (回执轮算它自己的), 默认 409, 要 `force:true`; `tell_peer` 的 `urgent` 同样情形降成 `normal` (回包 `urgentDowngraded`)。回归脚本加 `cancel-turn` 用例。
 - 工单验收, 不合格自动打回一次 (B4 ⑦): `open_job({accept})` —— `result` (默认) 要有非空 `RESULT:`, `artifact` 还要列出 `ARTIFACT:`, `none` 不验。成员的 done 答复不合格时守护进程以发话方名义同件号续问打回一次 (私聊, 不占 `maxTurns`), 那一份不投、不计数; 再交上来的照收 (原样再交、或打回那句因 reload 没注入, 都按原文收下, 不报 silent)。**默认对所有工单生效**: 没写 RESULT 的成员会多跑一轮。回归脚本加 `accept` 用例; 脚本每次运行给分身名字加随机后缀 (几个 wizard 并发跑不再互撞), 只在连接被拒时重试 (spawn / tell 不幂等), 分身没照做时单独报出。

@@ -5,6 +5,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { DAEMON_TOKEN_HEADER, readDaemonToken } from "../shared/daemon-token.js";
+import { EFFORTS } from "../shared/effort.js";
 
 const DAEMON_BASE = process.env.WEZARD_DAEMON_BASE ?? "http://127.0.0.1:17890";
 
@@ -262,7 +263,10 @@ const ADDRESS_DOC =
 
 // 生 wizard 的三个工具共用: 模型名是口语, 落地的是 `/model` 列表里最接近的那一项。
 const MODEL_DOC =
-  "跑在哪个模型上, 口语写 ('opus' / 'haiku' / 'sonnet 5'); 落地的是它 `/model` 列表里最接近的一项, 见返回的 `model`, 对不上时带 `modelWarning` (仍在跑, 停在默认模型)。省略 = 该 CLI 默认。之后换用 set_model。";
+  "跑在哪个模型上, 口语写 ('opus' / 'haiku' / 'sonnet 5'); 落地的是它 `/model` 列表里最接近的一项, 见返回的 `model`, 对不上时带 `modelWarning` (仍在跑, 停在默认模型)。写确切的 id ('claude-opus-5-5') 或列表标签 ('Opus 5.5') 且本机跑过它时, 直接带 `--model` 启动, 省掉选择器那一来回。省略 = 该 CLI 默认。之后换用 set_model。";
+
+const EFFORT_DOC =
+  "推理档位, 启动时就带上 (`--effort`), 之后它每次重启都沿用。判断密集的活给 high 以上, 跑腿的给 low。省略 = 该 CLI 默认 (克隆则跟被克隆者同档)。不支持的 CLI (codebuddy) 忽略它。之后换用 set_model 的 `effort`。";
 
 // 造一个 wizard: 它的 home 默认是调用方自己的聊天 (所以走 `selfRef`); 给了 `chat`
 // 就落在另一个**起过名字**的聊天里。名字全局唯一, 与 home 无关。
@@ -765,11 +769,12 @@ server.registerTool(
 server.registerTool(
   "set_model",
   {
-    title: "Switch a wizard's model",
+    title: "Switch a wizard's model / effort",
     description:
-      "给一个**已经在跑**的 wizard 换模型 —— 默认换你自己, `name` 点名就换那个 wizard。口语化写要什么 ('opus' / 'haiku' / 'sonnet 5' / '最新的 opus' / '默认'), 守护进程在它的 pane 里打开 `/model` 列表, 读出这台 CLI 此刻真有的每一项, 挑最接近的一项选中; 返回里的 `model` 是真正落地的那一项, `catalog` 是列表里的全部 —— 对不上时 (`ok:false`) 照着 `catalog` 重说一遍。默认只对这一个会话生效 (`scope:'session'`), 不改新开会话的默认模型; `scope:'default'` 则同时把它设成这台 CLI 此后**每个新会话**的默认模型 —— 那是全机的设置, 只在人明说「以后默认都用 X」时才用。返回里的 `scope` 是实际落在哪一档。它之后被重启也会回到这个模型上。正在干活的也能换 (从下一次请求起生效), 但换模型会让它的对话缓存整份重读一遍 —— 别来回切。用户说「换成 opus」「这个用 haiku 跑就行」「把 .fix 切到 sonnet」时调它; 你自己判断手上的活配不上/撑不起当前模型时也可以主动换。",
+      "给一个**已经在跑**的 wizard 换模型 (和/或推理档位 `effort`) —— 默认换你自己, `name` 点名就换那个 wizard。口语化写要什么 ('opus' / 'haiku' / 'sonnet 5' / '最新的 opus' / '默认'), 守护进程在它的 pane 里打开 `/model` 列表, 读出这台 CLI 此刻真有的每一项, 挑最接近的一项选中; 返回里的 `model` 是真正落地的那一项, `catalog` 是列表里的全部 —— 对不上时 (`ok:false`) 照着 `catalog` 重说一遍。默认只对这一个会话生效 (`scope:'session'`), 不改新开会话的默认模型; `scope:'default'` 则同时把它设成这台 CLI 此后**每个新会话**的默认模型 —— 那是全机的设置, 只在人明说「以后默认都用 X」时才用。返回里的 `scope` 是实际落在哪一档。它之后被重启也会回到这个模型上。正在干活的也能换 (从下一次请求起生效), 但换模型会让它的对话缓存整份重读一遍 —— 别来回切。用户说「换成 opus」「这个用 haiku 跑就行」「把 .fix 切到 sonnet」时调它; 你自己判断手上的活配不上/撑不起当前模型时也可以主动换。",
     inputSchema: {
-      model: z.string().describe("要换到哪个模型, 口语化写: 'opus' / 'haiku' / 'sonnet 5' / 'opus 4.7' / '最新的 fable' / '默认'。只写家族名 = 那个家族最新的一个。"),
+      model: z.string().optional().describe("要换到哪个模型, 口语化写: 'opus' / 'haiku' / 'sonnet 5' / 'opus 4.7' / '最新的 fable' / '默认'。只写家族名 = 那个家族最新的一个。只换 effort 时省略。"),
+      effort: z.enum(EFFORTS).optional().describe("顺带 (或只) 换推理档位 —— 只对这个会话生效, 不改全机默认; 之后它重启也沿用。返回里的 `effort` 是落地的那一档。"),
       name: z.string().optional().describe("换谁的 —— wizard 的名字 ('fix' / '.fix')。省略 = 换你自己。"),
       scope: z
         .enum(["session", "default"])
@@ -777,8 +782,8 @@ server.registerTool(
         .describe("'session' (默认) = 只换这一个会话; 'default' = 换这个会话, 并设为此后所有新会话的默认模型 (改的是 CLI 的全局设置, 不指定模型的新 wizard 都会跟着变)。"),
     },
   },
-  async ({ model, name, scope }) =>
-    unwrap("set_model", await daemonPost("/wizard/model", { model, ...(name ? { name } : {}), ...(scope ? { scope } : {}) })),
+  async ({ model, effort, name, scope }) =>
+    unwrap("set_model", await daemonPost("/wizard/model", { ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...(name ? { name } : {}), ...(scope ? { scope } : {}) })),
 );
 
 // 生孩子与分身是两个操作, 不是一个开关的两档: 一个白纸起步、可以去别的目录;
@@ -791,6 +796,7 @@ const offspringShape = {
   chat: z.string().optional().describe("把它生在另一个聊天里 (wizard_roster 里的 home 聊天名)。省略 = 你自己的聊天, 这是绝大多数情况。"),
   cli: z.enum(["claude", "claude-internal", "codebuddy"]).optional().describe("用哪个 CLI。省略则继承。"),
   model: z.string().optional().describe(MODEL_DOC),
+  effort: z.enum(EFFORTS).optional().describe(EFFORT_DOC),
   job: z
     .string()
     .optional()
@@ -802,7 +808,7 @@ const offspringShape = {
     .describe("要不要被 keepalive 心跳保温 (空闲时定期 ping 一下防 prompt cache 过期)。false = 永远不保温, 省下那份 ping 的钱 —— 适合跑腿一次就收工的; true = 明确要保温 —— 适合会长期挂着、随时可能被叫醒接手的。省略则按 daemon 配置的默认值。"),
 };
 
-type Offspring = { description: string; name?: string; task?: string; from?: string; detached?: boolean; cwd?: string; chat?: string; cli?: string; model?: string; job?: string; keepalive?: boolean; chain?: boolean };
+type Offspring = { description: string; name?: string; task?: string; from?: string; detached?: boolean; cwd?: string; chat?: string; cli?: string; model?: string; effort?: string; job?: string; keepalive?: boolean; chain?: boolean };
 
 const bear = (tool: string, inherit: boolean) => async (a: Offspring) =>
   unwrap(tool, await daemonPost("/wizard/clone", {
@@ -817,6 +823,7 @@ const bear = (tool: string, inherit: boolean) => async (a: Offspring) =>
     ...(a.chat ? { chat: a.chat } : {}),
     ...(a.cli ? { cli: a.cli } : {}),
     ...(a.model ? { model: a.model } : {}),
+    ...(a.effort ? { effort: a.effort } : {}),
     ...(a.keepalive !== undefined ? { keepalive: a.keepalive } : {}),
     ...(a.chain === false ? { chain: false } : {}),
   }));

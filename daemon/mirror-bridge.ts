@@ -25,6 +25,7 @@ import { sleep, truncateWithCount, mapLimit } from "../shared/std.js";
 import {
   activeBackends,
   backendForPath,
+  primaryBackend,
   type CliBackend,
   type CliBackendName,
   projectDirFor,
@@ -38,7 +39,8 @@ import { isAutoWindowActive } from "./session-cache.js";
 import { noticeSuffixFor } from "./notices.js";
 import { dangerOf } from "./danger.js";
 import { renameWindow, runTmux, spawnTmuxClaude } from "./spawn-tmux.js";
-import { selectModel, type ModelScope, type ModelSelectResult } from "./model-select.js";
+import { selectEffort, selectModel, type EffortSelectResult, type ModelScope, type ModelSelectResult } from "./model-select.js";
+import { parseEffort, type Effort } from "../shared/effort.js";
 import { hasRegistry, markTranscript, probeOf, sessionOnPane, sessionPanes, submittedSince, watchRegistry, type LiveSession, type TranscriptMark } from "./cc-session.js";
 import { waitForIdle, type IdleResult } from "./graph.js";
 import { wizardStore } from "./wizard.js";
@@ -50,7 +52,7 @@ import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagH
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
-import { stripAnsi, paneIsBusy, transcriptStalled, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, cacheTtlSec, keepaliveStamps, openKeepalivePing, talkRounds, openToolUses, renderDialog, type PeerInfo, type PeerReply } from "./peers.js";
+import { stripAnsi, paneIsBusy, transcriptStalled, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, lastModel, cacheTtlSec, keepaliveStamps, openKeepalivePing, talkRounds, openToolUses, renderDialog, type PeerInfo, type PeerReply } from "./peers.js";
 import { keepalivePingSigs, isKeepalivePingText } from "../shared/keepalive.js";
 
 // PATH augmentation: launchd / systemd start the daemon
@@ -1948,6 +1950,9 @@ export interface AttachArgs {
    *  previous binding (a bare re-attach has no way to know it); `""` =
    *  explicitly the CLI's default, which is what a fresh `/new` means. */
   model?: string;
+  /** `--effort` the pane was spawned with. Same carry rule as `model`, except
+   *  that `/new` carries it too — effort is the wizard's, not the session's. */
+  effort?: string;
   /** User-requested next cwd (carry-over on re-attach). */
   pendingCwd?: string;
   /** Sticky prompt-cache keepalive opt-out. `undefined` = carry over from the
@@ -2101,13 +2106,13 @@ export interface MirrorBridge {
   /** Detach + respawn a target's pane in `cfg.wrc.cwd` or its pendingCwd
    *  override. Used by /new to give the user a fresh claude in the bound
    *  project. Returns the new attachment result. */
-  newSession: (target: string, windowName?: string, cli?: CliBackendName, opts?: { model?: string; cwd?: string; silent?: boolean; systemPrompt?: string; keepalive?: boolean; warm?: boolean }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; model?: string; modelWarning?: string }>;
+  newSession: (target: string, windowName?: string, cli?: CliBackendName, opts?: { model?: string; effort?: Effort; cwd?: string; silent?: boolean; systemPrompt?: string; keepalive?: boolean; warm?: boolean }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; model?: string; modelWarning?: string; effort?: Effort }>;
   /** Spawn `target` as a CLONE of `parent`: a fresh pane launched with
    *  `--resume <parent sid>`, which the CLI forks — the child starts holding
    *  everything the parent had read, the parent is untouched. `inherit: false`
    *  (or a different cwd, which `--resume` cannot honor) degrades to a plain
    *  `newSession`; the reply says which happened via `inherited`. */
-  cloneSession: (args: { parent: string; target: string; windowName?: string; cli?: CliBackendName; model?: string; cwd?: string; systemPrompt?: string; inherit?: boolean; bootstrap?: string; bootstrapFrom?: { from: TurnFrom; query: string }; keepalive?: boolean }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; inherited: boolean; model?: string; modelWarning?: string }>;
+  cloneSession: (args: { parent: string; target: string; windowName?: string; cli?: CliBackendName; model?: string; effort?: Effort; cwd?: string; systemPrompt?: string; inherit?: boolean; bootstrap?: string; bootstrapFrom?: { from: TurnFrom; query: string }; keepalive?: boolean }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; inherited: boolean; model?: string; modelWarning?: string; effort?: Effort }>;
   /** Install the wizard-identity provider. Every spawn path (`/new`, a dead-pane
    *  respawn, a clone) asks it for the target's charter and presses the result
    *  into the new process's system prompt, so identity is a property of the
@@ -2125,7 +2130,7 @@ export interface MirrorBridge {
   onContextCut: (fn: (target: string, cut: "clear" | "compact") => void) => void;
   /** Hard facts about one session — sessionId, transcript, cwd, backend, pane,
    *  and how full its context window is (prompt tokens of the last turn). */
-  sessionInfo: (target: string) => { sessionId: string; jsonlPath: string; cwd: string; cli: CliBackendName; model: string; tmuxPane: string; contextTokens: number } | undefined;
+  sessionInfo: (target: string) => { sessionId: string; jsonlPath: string; cwd: string; cli: CliBackendName; model: string; effort: string; tmuxPane: string; contextTokens: number } | undefined;
   /** Every target key of `target`'s chat (default + every `#tag`), live or
    *  merely persisted. Sync and cheap — the `peers` probe shells out to tmux,
    *  far too much for answering "is this tag taken". */
@@ -2176,6 +2181,9 @@ export interface MirrorBridge {
    *  of this wizard comes back on it. `scope: "default"` additionally makes it
    *  the model every new session of that CLI starts on. */
   setModel: (target: string, wanted: string, scope?: ModelScope) => Promise<ModelSelectResult>;
+  /** Same for reasoning effort, via the `/effort` slider's session-only key —
+   *  never the user's default. Recorded so every respawn relaunches with it. */
+  setEffort: (target: string, effort: Effort) => Promise<EffortSelectResult>;
   /** Every bound session's transcript, with its mtime (0 = not written yet).
    *  No tmux — a stat each. read_chat folds a chat's history out of these. */
   transcripts: () => Array<{ target: string; jsonlPath: string; mtime: number }>;
@@ -2267,6 +2275,9 @@ interface AttachState {
    *  every `--resume` respawn, so a wizard put on a model stays on it through
    *  a pane death — a fresh `/new` is the only thing that resets it. */
   model: string;
+  /** `--effort` level this wizard runs at; "" = the CLI's default. Carried
+   *  into every respawn, `/new` included. */
+  effort: string;
   tail: TailHandle;
   liveStream?: ActiveStream;
   /** Per-attachment FIFO so standalone pushes from the same mirror stay ordered. */
@@ -4128,7 +4139,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       ? buildDetailUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, id, principal ? stripPrincipalPrefix(principal) : undefined)
       : "";
 
-  const attach = ({ sessionId, jsonlPath, target: targetOverride, tmuxPane, tmuxSession, cwd, model, pendingCwd, keepaliveDisabled }: AttachArgs): AttachResult => {
+  const attach = ({ sessionId, jsonlPath, target: targetOverride, tmuxPane, tmuxSession, cwd, model, effort, pendingCwd, keepaliveDisabled }: AttachArgs): AttachResult => {
     const target = resolveTarget(targetOverride);
     if (!target) return { ok: false, reason: "no target chat (set wrc.mirror.pushChat or defaultChat, or pass target)" };
     // Note: jsonlPath may not exist yet on the auto-spawn path — claude only
@@ -4156,6 +4167,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // model it asked for (possibly "" = CLI default) and says so; a re-attach
     // onto an already-running pane doesn't, so it keeps what was recorded.
     const carryModel = model !== undefined ? model.trim() : (prevByTarget?.model ?? deps.store.get(target)?.model ?? "");
+    const carryEffort = effort !== undefined ? effort.trim() : (prevByTarget?.effort ?? deps.store.get(target)?.effort ?? "");
     // Same carry rule again: an explicit spawn-time choice wins, otherwise this
     // wizard's existing policy (in-memory, or on disk across a reload) sticks.
     const carryKeepaliveDisabled = keepaliveDisabled !== undefined ? keepaliveDisabled : (prevByTarget?.keepaliveDisabled ?? deps.store.get(target)?.keepaliveDisabled ?? false);
@@ -4173,6 +4185,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       runningCwd: expandHome(((cwd ?? "").trim()) || readCwdFromJsonl(jsonlPath) || cfg.wrc.cwd),
       pendingCwd: carryPending,
       model: carryModel,
+      effort: carryEffort,
       keepaliveDisabled: carryKeepaliveDisabled,
       tail: { stop: () => undefined, drain: () => undefined, livePath: () => undefined }, // placeholder; replaced below
       standalonePending: Promise.resolve(),
@@ -4212,6 +4225,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       tmuxPane: a.tmuxPane || undefined,
       cwd: a.runningCwd || undefined,
       model: a.model || undefined,
+      effort: a.effort || undefined,
       pendingCwd: a.pendingCwd || undefined,
       cwdConfirmed: prevRec?.cwdConfirmed,
       keepaliveOff: prevRec?.keepaliveOff,
@@ -4363,6 +4377,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       tmuxSession: rec.tmuxSession ?? "",
       cwd: rec.cwd,
       model: rec.model,
+      effort: rec.effort,
       pendingCwd: rec.pendingCwd,
     });
     if (!r.ok) {
@@ -4926,12 +4941,39 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     try { return charterOf?.(target, ctx); } catch { return undefined; }
   };
 
+  // 确切模型名的证据 (见 exactModelId): transcript 里 API 真答过的 model id, 只认同一个
+  // CLI 的。先问最可能的那几个会话 (自己、被克隆者), 再按新近扫其余 —— 惰性的,
+  // 第一个对上就停, 绝大多数时候只读一两个 transcript 的尾巴。
+  function* modelSightings(cli: CliBackendName | undefined, likely: readonly string[]): Generator<string> {
+    const name = cli ?? primaryBackend().name;
+    const pathOf = (t: string): string => byTarget.get(t)?.jsonlPath ?? expandHome(deps.store.get(t)?.jsonlPath ?? "");
+    const head = likely.map(pathOf).filter(Boolean);
+    // 生成器体到第一次取值才跑: 前几个就对上时, 其余几百个 stat 一个也不做。
+    const paths = function* (): Generator<string> {
+      yield* head;
+      yield* Object.values(deps.store.all())
+        .map((r) => expandHome(r.jsonlPath))
+        .filter((p) => !head.includes(p))
+        .map((p) => ({ p, m: mtimeOf(p) }))
+        .filter((x) => x.m > 0)
+        .sort((x, y) => y.m - x.m)
+        .map((x) => x.p);
+    };
+    for (const path of paths()) {
+      if (!existsSync(path) || backendForPath(path).name !== name) continue;
+      const id = lastModel(path);
+      if (id) yield id;
+    }
+  }
+
   const newSession = async (
     target: string,
     windowName?: string,
     cli?: CliBackendName,
     opts?: {
       model?: string;
+      /** Omitted = carry this wizard's recorded effort (a `/new` keeps it). */
+      effort?: Effort;
       cwd?: string;
       silent?: boolean;
       systemPrompt?: string;
@@ -4943,7 +4985,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
        *  否则简报那一轮短于恢复宽限时, 暂停就一直挂着, 交接过的 wizard 从此不再保温。 */
       warm?: boolean;
     },
-  ): Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; info?: string; model?: string; modelWarning?: string }> => {
+  ): Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; info?: string; model?: string; modelWarning?: string; effort?: Effort }> => {
     const prev = byTarget.get(target);
     // Resolution precedence (all chat-scoped except the running-cwd fallback):
     //   base.pending > caller.pending > target.running > base.running > default
@@ -4975,6 +5017,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const baseBound = base === target ? undefined : byTarget.get(base)?.jsonlPath ?? deps.store.get(base)?.jsonlPath;
     const boundPath = prev?.jsonlPath ?? rec?.jsonlPath ?? baseBound;
     const effCli = cli ?? (boundPath ? backendForPath(expandHome(boundPath)).name : undefined);
+    const effEffort = opts?.effort ?? parseEffort(prev?.effort ?? deps.store.get(target)?.effort);
     if (prev?.tmuxPane) {
       // Best-effort kill; ignore errors (pane may already be dead).
       void runTmux(["kill-pane", "-t", prev.tmuxPane]);
@@ -4991,6 +5034,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       cwdOverride: eff,
       cli: effCli,
       model: opts?.model,
+      knownModels: modelSightings(effCli, [target, base]),
+      effort: effEffort,
       systemPrompt: opts?.systemPrompt ?? charterFor(target, { cwd: eff }),
     }).catch((e: unknown) => { inFlightSids.delete(freshSid); throw e; });
     if (!r.ok) { inFlightSids.delete(freshSid); return { ok: false, reason: r.reason }; }
@@ -5008,6 +5053,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // spawnTmuxClaude actually confirmed via `/model` (r.model), not the
       // raw request — a later respawn's fast path then matches on try one.
       model: r.model ?? (opts?.model?.trim() ?? ""),
+      effort: r.effort ?? "",
       keepaliveDisabled: opts?.keepalive === undefined ? undefined : !opts.keepalive,
     });
     inFlightSids.delete(freshSid);
@@ -5042,6 +5088,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           tmuxSession: baseA.tmuxSession || undefined,
           tmuxPane: baseA.tmuxPane || undefined,
           cwd: baseA.runningCwd || undefined,
+          model: baseA.model || undefined,
+          effort: baseA.effort || undefined,
           cwdConfirmed: deps.store.get(base)?.cwdConfirmed,
           pendingCwd: undefined,
         });
@@ -5052,7 +5100,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
     if (!opts?.silent) pushProjectInfo(target, "created");
     afterSpawn();
-    return { ok: true, sessionId: r.sessionId, cwd: r.cwd, model: r.model, modelWarning: r.modelWarning };
+    return { ok: true, sessionId: r.sessionId, cwd: r.cwd, model: r.model, modelWarning: r.modelWarning, effort: r.effort };
   };
 
   // ── Clone ───────────────────────────────────────────────────────────
@@ -5113,7 +5161,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     target: string;
     windowName?: string;
     cli?: CliBackendName;
+    /** 省略 = 跟被克隆者跑同一个模型、同一档 effort (空白分身则是 CLI 默认)。 */
     model?: string;
+    effort?: Effort;
     cwd?: string;
     systemPrompt?: string;
     /** false = 空白分身 (只继承身份, 不继承上下文)。 */
@@ -5129,7 +5179,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
      *  `keepalive.spawnDefault`。与 `justSpawned` 那种"直到第一次真活动才恢复"
      *  的临时暂停不同 —— 这个是终身的。 */
     keepalive?: boolean;
-  }): Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; inherited: boolean; model?: string; modelWarning?: string }> => {
+  }): Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; inherited: boolean; model?: string; modelWarning?: string; effort?: Effort }> => {
     const p = byTarget.get(args.parent) ?? (await restoreFromStore(args.parent));
     // 继承上下文要求父亲有一个活着的 transcript, 且分身必须待在同一个项目目录 ——
     // `--resume` 是按项目目录寻址 session 的。调用方点名换目录 = 明确放弃继承。
@@ -5137,7 +5187,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const canInherit = args.inherit !== false && !!p?.sessionId && !!p.jsonlPath && existsSync(p.jsonlPath) && sameCwd;
     if (!canInherit) {
       const r = await newSession(args.target, args.windowName, args.cli, {
-        model: args.model, cwd: args.cwd, systemPrompt: args.systemPrompt, silent: true, keepalive: args.keepalive,
+        model: args.model, effort: args.effort, cwd: args.cwd, systemPrompt: args.systemPrompt, silent: true, keepalive: args.keepalive,
       });
       return { ...r, inherited: false };
     }
@@ -5145,6 +5195,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const projectDir = dirname(parent.jsonlPath);
     const baseline = listJsonls(projectDir);
     const lg = log.child({ sub: "clone", target: args.target });
+    // 分身默认跑被克隆者此刻真在跑的那个: 记下的模型, 没记 (CLI 默认) 就取它 transcript 里的 id。
+    const parentCli = backendForPath(parent.jsonlPath).name;
+    const model = args.model?.trim() || parent.model || lastModel(parent.jsonlPath);
+    const effort = args.effort ?? parseEffort(parent.effort);
     const r = await spawnTmuxClaude({
       cfg,
       log: lg,
@@ -5152,8 +5206,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       forkSession: true,
       windowName: args.windowName ?? args.target,
       cwdOverride: parent.runningCwd,
-      cli: backendForPath(parent.jsonlPath).name,
-      model: args.model,
+      cli: parentCli,
+      model,
+      knownModels: modelSightings(parentCli, [args.parent]),
+      effort,
       systemPrompt: args.systemPrompt,
     });
     if (!r.ok) return { ok: false, reason: r.reason, inherited: false };
@@ -5190,7 +5246,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       tmuxSession: r.tmuxSession,
       cwd: r.cwd,
       pendingCwd: "",
-      model: r.model ?? (args.model?.trim() ?? ""),
+      model: r.model ?? model,
+      effort: r.effort ?? "",
       keepaliveDisabled: args.keepalive === undefined ? undefined : !args.keepalive,
     });
     // 绑上 (或没绑上) 之后预留就没用了: 绑上的 sid 由 sidsClaimedByOthers 挡住别人。
@@ -5214,11 +5271,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
     lg.info({ parent: args.parent, sessionId: fork.sessionId }, "clone: forked");
     afterSpawn();
-    return { ok: true, sessionId: fork.sessionId, cwd: r.cwd, inherited: true, model: r.model, modelWarning: r.modelWarning };
+    return { ok: true, sessionId: fork.sessionId, cwd: r.cwd, inherited: true, model: r.model, modelWarning: r.modelWarning, effort: r.effort };
   };
 
   /** 一个会话此刻的硬事实 —— whoami / 交接判断要用的那几个数。 */
-  const sessionInfo = (target: string): { sessionId: string; jsonlPath: string; cwd: string; cli: CliBackendName; model: string; tmuxPane: string; contextTokens: number } | undefined => {
+  const sessionInfo = (target: string): { sessionId: string; jsonlPath: string; cwd: string; cli: CliBackendName; model: string; effort: string; tmuxPane: string; contextTokens: number } | undefined => {
     const a = byTarget.get(target);
     const rec = a ? undefined : deps.store.get(target);
     const sessionId = a?.sessionId ?? rec?.sessionId ?? "";
@@ -5230,6 +5287,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       cwd: a?.runningCwd || rec?.cwd || "",
       cli: backendForPath(jsonlPath).name,
       model: a?.model || rec?.model || "",
+      effort: a?.effort || rec?.effort || "",
       tmuxPane: a?.tmuxPane ?? rec?.tmuxPane ?? "",
       contextTokens: lastContextTokens(jsonlPath),
     };
@@ -5934,6 +5992,17 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       }
       return r;
     },
+    setEffort: async (target, effort) => {
+      const a = byTarget.get(target);
+      if (!a?.tmuxPane || !(await tmuxPaneAlive(a.tmuxPane))) return { ok: false, reason: "它没有活着的 pane —— 档位是在 pane 里切的, 先叫醒它" };
+      const r = await selectEffort(a.tmuxPane, effort, log.child({ sub: "set-effort", target }));
+      if (r.ok && r.applied) {
+        a.effort = r.applied;
+        const rec = deps.store.get(target);
+        if (rec) deps.store.set(target, { ...rec, effort: r.applied });
+      }
+      return r;
+    },
     transcripts: () =>
       allTargets().flatMap((target) => {
         const jsonlPath = jsonlOf(target);
@@ -6123,12 +6192,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // Same resume-fork hazard as dispatch: snapshot before spawn, re-bind
         // onto the forked jsonl once it appears (EOF offset — fork is seeded).
         const resumeBaseline = listJsonls(dirname(a.jsonlPath));
-        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: displayName(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, model: a.model || undefined, systemPrompt: charterFor(target, { cwd: a.runningCwd }) });
+        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: displayName(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, model: a.model || undefined, knownModels: modelSightings(backendForPath(a.jsonlPath).name, [target]), effort: parseEffort(a.effort), systemPrompt: charterFor(target, { cwd: a.runningCwd }) });
         if (!r.ok || !r.tmuxPane) return { ok: false, reason: `respawn failed: ${r.reason ?? "unknown"}` };
         a.tmuxPane = r.tmuxPane;
         a.tmuxSession = r.tmuxSession ?? a.tmuxSession;
         if (r.cwd) a.runningCwd = r.cwd;
-        deps.store.set(target, { sessionId: sid, jsonlPath: a.jsonlPath, tmuxSession: a.tmuxSession, tmuxPane: a.tmuxPane, cwd: a.runningCwd || undefined, model: a.model || undefined, pendingCwd: a.pendingCwd || undefined });
+        deps.store.set(target, { sessionId: sid, jsonlPath: a.jsonlPath, tmuxSession: a.tmuxSession, tmuxPane: a.tmuxPane, cwd: a.runningCwd || undefined, model: a.model || undefined, effort: a.effort || undefined, pendingCwd: a.pendingCwd || undefined });
         startMigrationWatcher(a, resumeBaseline, forkOf(a.jsonlPath));
       }
       // freshSpawn: true — the pane was just minted by /mirror/spawn, the TUI
@@ -6570,7 +6639,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           const resumeBaseline = !armMigration ? listJsonls(dirname(a.jsonlPath)) : undefined;
           // Respawn in the binding's runningCwd (pendingCwd doesn't apply to a
           // mid-turn reincarnation — only /new and /clear-with-pending swap cwd).
-          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: displayName(a.target) || a.target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, model: a.model || undefined, systemPrompt: charterFor(a.target, { cwd: a.runningCwd }) });
+          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: displayName(a.target) || a.target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, model: a.model || undefined, knownModels: modelSightings(backendForPath(a.jsonlPath).name, [a.target]), effort: parseEffort(a.effort), systemPrompt: charterFor(a.target, { cwd: a.runningCwd }) });
           if (r.ok && r.tmuxPane && r.tmuxSession) {
             a.tmuxPane = r.tmuxPane;
             a.tmuxSession = r.tmuxSession;
@@ -6583,6 +6652,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
               tmuxPane: a.tmuxPane,
               cwd: a.runningCwd || undefined,
               model: a.model || undefined,
+              effort: a.effort || undefined,
               pendingCwd: a.pendingCwd || undefined,
             });
             log.info({ target: a.target, sessionId: sid, newPane: a.tmuxPane, newSession: a.tmuxSession }, "mirror: tmux respawned");

@@ -8,6 +8,7 @@ import { homedir } from "node:os";
 import { loadConfig } from "../shared/config.js";
 import { makeLogger } from "../shared/log.js";
 import { clipLine, sleep } from "../shared/std.js";
+import { EFFORTS, parseEffort } from "../shared/effort.js";
 import { bindCliBackends, projectDirsFor, type CliBackendName } from "../shared/cli-backends.js";
 import { startWs } from "./ws.js";
 import { startNetWatch } from "./net-watch.js";
@@ -1616,6 +1617,7 @@ const main = async (): Promise<void> => {
         sessionId: info?.sessionId ?? "",
         cli: info?.cli,
         model: info?.model ?? "",
+        ...(info?.effort ? { effort: info.effort } : {}),
         contextTokens: info?.contextTokens ?? 0,
         handoffSuggested: !!info && info.contextTokens > handoffAt(lastModel(info.jsonlPath) || info.model),
       };
@@ -1830,7 +1832,9 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/clone", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { name?: string; tag?: string; description?: string; inherit?: boolean; detached?: boolean; from?: string; cwd?: string; chat?: string; cli?: CliBackendName; model?: string; task?: string; job?: string; keepalive?: boolean };
+      const b = body as { name?: string; tag?: string; description?: string; inherit?: boolean; detached?: boolean; from?: string; cwd?: string; chat?: string; cli?: CliBackendName; model?: string; effort?: string; task?: string; job?: string; keepalive?: boolean };
+      const effort = parseEffort(b.effort);
+      if (b.effort !== undefined && !effort) { json(res, 400, { ok: false, reason: `effort 只有这几档: ${EFFORTS.join(" / ")}` }); return; }
       // 工单先验: 生完分身才发现工单号打错了, 那个分身就成了没人认领的孤儿。
       const jobId = (b.job ?? "").trim();
       if (jobId) {
@@ -1934,6 +1938,7 @@ const main = async (): Promise<void> => {
         windowName: name,
         cli: b.cli,
         model: b.model,
+        effort,
         cwd: b.cwd,
         systemPrompt: charter,
         inherit,
@@ -1954,9 +1959,9 @@ const main = async (): Promise<void> => {
       const kid = briefOf(self, target);
       // r.model 是 spawnTmuxClaude 通过 /model 实测确认落地的那个 —— 可能跟调用方
       // 传的原始字符串不一样 (口语化 → 目录里匹配到的关键词), 播报要报实情。
-      const modelNote = r.model
+      const modelNote = (r.model
         ? (r.modelWarning ? ` · 模型 ${r.model} (⚠️ ${r.modelWarning})` : ` · 模型 ${r.model}`)
-        : "";
+        : "") + (r.effort ? ` · effort ${r.effort}` : "");
       // 出生不再发群气泡 (人要看的是结论, 不是谁生了谁 —— 过程在 rolepage 里);
       // 同群的 wizard 仍要知道群里多了一个成员。工单里的临时工连这条也省掉。
       if (!jobId) {
@@ -1974,7 +1979,7 @@ const main = async (): Promise<void> => {
       // 让它们干完自己把结论送回来, 发起方不必挂在 wait_peer 上。
       const k = (body as { chain?: boolean }).chain === false ? undefined : parentKOf(self);
       if (dispatched) receipts.register({ from: self, to: target, channel: "", job: jobId, at: taskAt, turn: taskTurn, ...(k ? { k } : {}), ...(asker ? { asker } : {}) });
-      json(res, 200, { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, keepalive, ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(jobId ? { job: jobId } : {}), ...(detached ? { detached: true } : {}) });
+      json(res, 200, { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, keepalive, ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(r.effort ? { effort: r.effort } : {}), ...(jobId ? { job: jobId } : {}), ...(detached ? { detached: true } : {}) });
     });
 
     // 收掉一个 wizard。interrupt = 打断它这一轮 (Esc); end = 结束它并回收 pane。
@@ -2045,22 +2050,35 @@ const main = async (): Promise<void> => {
       json(res, 200, { ok: true, target, name: victim.name, mode: end ? "end" : "interrupt", forgotten: !!(end && b.forget), ...(canceled ? { canceled } : {}), ...(detached.length ? { canceledIn: detached } : {}) });
     });
 
-    // 换模型: 省略名字 = 换自己 (选择器盖在正在跑的这一轮上面照样能开), 点名 = 换
-    // 那个 wizard。与 spawn 时的 `model` 是同一条路 (model-select.ts)。
+    // 换模型 / effort: 省略名字 = 换自己 (选择器盖在正在跑的这一轮上面照样能开), 点名 =
+    // 换那个 wizard。与 spawn 时的 `model` 是同一条路 (model-select.ts); effort 走
+    // `/effort` 档位条的「只本会话」键, 不碰全机默认。两样都给就先模型后档位。
     http.register("POST /wizard/model", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { model?: string; scope?: string };
+      const b = body as { model?: string; scope?: string; effort?: string };
       const model = (b.model ?? "").toString().trim();
-      if (!model) { json(res, 400, { ok: false, reason: "model 必填 —— 口语化写就行 ('opus' / 'haiku' / 'sonnet 5')" }); return; }
+      const effort = parseEffort(b.effort);
+      if (b.effort !== undefined && !effort) { json(res, 400, { ok: false, reason: `effort 只有这几档: ${EFFORTS.join(" / ")}` }); return; }
+      if (!model && !effort) { json(res, 400, { ok: false, reason: "model / effort 至少给一个 —— model 口语化写就行 ('opus' / 'haiku' / 'sonnet 5')" }); return; }
       const scope = (b.scope ?? "session").toString().trim();
       if (scope !== "session" && scope !== "default") { json(res, 400, { ok: false, reason: "scope 只有两档: 'session' (只换这一个会话) / 'default' (同时设为新会话的默认模型)" }); return; }
       // 空串不能交给 resolvePeer —— 那是「本聊天的默认 wizard」, 不是「我自己」。
       const addr = addrOf(body).trim();
       const r = addr ? resolvePeer(self, addr) : { ok: true as const, target: self };
       if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
-      const done = await m.setModel(r.target, model, scope);
-      json(res, done.ok ? 200 : 502, { ...done, target: r.target, name: briefOf(self, r.target).name, ...(done.ok ? { model: done.applied } : {}) });
+      const done = model ? await m.setModel(r.target, model, scope) : undefined;
+      const eff = effort && (done?.ok ?? true) ? await m.setEffort(r.target, effort) : undefined;
+      const ok = (done?.ok ?? true) && (eff?.ok ?? true);
+      json(res, ok ? 200 : 502, {
+        ...done,
+        ok,
+        target: r.target,
+        name: briefOf(self, r.target).name,
+        ...(done?.ok ? { model: done.applied } : {}),
+        ...(eff?.ok ? { effort: eff.applied } : {}),
+        ...(eff && !eff.ok ? { reason: [done?.reason, `effort: ${eff.reason}`].filter(Boolean).join("; ") } : {}),
+      });
     });
 
     // 自我交接: 上下文撑不住了, 自己把工作压成简报, /new 换一个全新进程, 再把简报贴

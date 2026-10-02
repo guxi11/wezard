@@ -458,7 +458,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "`stop_wizard` 活干完就收掉分身; 只想打断它这一轮也是它",
       "`open_job` / `close_job` 一次派两个以上分身时开 / 收工单 · `list_jobs` 找回工单 id",
       "`wizard_whoami` 我的上下文用量与分身 · `wizard_identity` 改名 / 写职责 · `wizard_remember` 跨会话记忆 (`self` / `chat` / `workspace`)",
-      "`handoff` 上下文快满时交接自己 (点名则替别人) · `set_workspace` 换项目目录 · `set_model` 换模型",
+      "`handoff` 上下文快满时交接自己 (点名则替别人) · `set_workspace` 换项目目录 · `set_model` 换模型 / effort",
       "`schedule_task` / `list_tasks` / `cancel_task` 到点自动执行的活",
       "`wait_peer` 仅当这一轮非拿到答案不可 (平时等回执), 或要等一个不是你派活的 wizard 停下 · `name_chat` 给聊天起名",
     ]),

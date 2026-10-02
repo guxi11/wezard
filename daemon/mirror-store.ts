@@ -20,6 +20,9 @@ export interface MirrorAttachment {
    *  own default. Persisted so a pane-death respawn brings the wizard back on
    *  the model it was given instead of silently dropping to the default. */
   model?: string;
+  /** `--effort` level the wizard runs at. Empty/undefined = the CLI's default.
+   *  Persisted for the same reason as `model`, and carried through `/new`. */
+  effort?: string;
   /** User-requested next cwd (set by AI via the `set_workspace` MCP). Applied
    *  on the next /new (or /clear → upgraded to /new when present). Cleared
    *  once the spawn lands. Decoupling from `cwd` means a /pwd before /new

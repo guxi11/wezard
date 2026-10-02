@@ -101,6 +101,11 @@ export interface CliBackend {
    *  than passing a flag the binary would reject (an unknown flag kills the
    *  pane before the TUI ever starts). */
   systemPromptFlag?: string;
+  /** Launch flags pinning the session's model / reasoning effort. Same rule as
+   *  `systemPromptFlag`: undefined = this CLI has none, so the spawn leaves the
+   *  knob alone (the model still goes through the `/model` picker). */
+  modelFlag?: string;
+  effortFlag?: string;
   /** Encode an absolute cwd path into the on-disk project dir segment. */
   encodeProjectDir: (absCwd: string) => string;
   /** Map a raw parsed jsonl line into the Claude Code TranscriptLine shape
@@ -138,6 +143,8 @@ const makeClaude = (name: CliBackendName, bin: string): CliBackend => {
     projectDirEnv: "CLAUDE_PROJECT_DIR",
     pluginRootEnv: "CLAUDE_PLUGIN_ROOT",
     systemPromptFlag: "--append-system-prompt",
+    modelFlag: "--model",
+    effortFlag: "--effort",
     encodeProjectDir: encodeClaude,
     // Claude Code jsonl is already in the TranscriptLine shape — identity pass.
     normalizeTranscriptLine: (raw) => raw as NormalizedTranscriptLine,

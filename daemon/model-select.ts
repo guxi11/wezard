@@ -26,6 +26,7 @@
 import type { Logger } from "pino";
 import { isModalPane } from "../shared/modal-pane.js";
 import { sleep } from "../shared/std.js";
+import { EFFORTS, parseEffort, type Effort } from "../shared/effort.js";
 import { runTmux } from "./spawn-tmux.js";
 
 const POLL_MS = 200;
@@ -250,3 +251,106 @@ export const selectModel = async (pane: string, wanted: string, log: Logger, sco
   log.warn({ pane, wanted: want, match: row.label, receipt, tail: (await screen(pane)).slice(-300) }, "model-select: selection did not land");
   return { ok: false, catalog, reason: receipt ? `选中 '${row.label}' 后没有切换: ${receipt}` : `选中 '${row.label}' 后没等到回执` };
 };
+
+// ── Exact ids: when the picker round trip can be skipped ─────────────────────
+// `--model <id>` at launch saves the whole picker dance, but the flag is not
+// validated — so it only ever gets an id the API has already answered under:
+// one read back from a transcript's `message.model`. Those sightings are also
+// what pairs a picker label with its id ("Haiku 4.5" ↔ claude-haiku-4-5-…):
+// no table to keep, the evidence is already on disk.
+
+// A label naming exactly one model: "Opus 5.5" — not "Default (recommended)",
+// and not "Opus 4.6 (1M context)", whose transcript id drops the context tier.
+const PLAIN_LABEL_RE = /^([a-z]+)\s+(\d+(?:\.\d+)*)$/iu;
+
+/** `id` is the model `label` names: same family word, same version. */
+export const labelFitsId = (label: string, id: string): boolean => {
+  const m = PLAIN_LABEL_RE.exec(label.trim());
+  return !!m && (id.toLowerCase().match(/[a-z]+/gu) ?? ([] as string[])).includes(m[1]!.toLowerCase()) && versionOf(id) === m[2];
+};
+
+/** The exact id to launch with, or undefined when `wanted` is colloquial
+ *  ("opus", "最新的 opus") or names nothing ever seen. `seen` is consumed
+ *  lazily, likeliest first — the first hit ends the scan. */
+export const exactModelId = (wanted: string, seen: Iterable<string>): string | undefined => {
+  const want = wanted.trim();
+  if (!want) return undefined;
+  for (const id of seen) if (id === want || labelFitsId(want, id)) return id;
+  return undefined;
+};
+
+// ── Effort: the `/effort` slider ─────────────────────────────────────────────
+// `/effort <level>` is NOT session-scoped: it also rewrites the user's default
+// for every new session (settings.json `modelSettings`). Only the slider's `s`
+// key stays inside this session, so mid-session changes drive the slider —
+// and a slider offering no `s` is backed out of, never confirmed with Enter.
+
+const EFFORT_HEAD_RE = /^\s*Effort\s*$/u;
+const EFFORT_SCALE_RE = new RegExp(EFFORTS.map((e) => `\\b${e}\\b`).join(".*"), "u");
+const EFFORT_RECEIPT_RE = /Set effort level to (\w+)/u;
+// Worded unlike the model picker's ("s to use this session only").
+const EFFORT_SESSION_ONLY_RE = /\bs (?:for|to use) this session only/u;
+
+interface Slider { at: Effort; sessionOnly: boolean }
+
+/** The slider on screen, or undefined: header, a scale row naming every level,
+ *  the ▲ marker right above it, and the footer hugging the bottom (same reason
+ *  as `parseFrame`). The level under ▲ is the label whose centre is nearest. */
+export const parseSlider = (screen: string): Slider | undefined => {
+  const lines = linesOf(screen);
+  const head = lines.map((l) => EFFORT_HEAD_RE.test(l)).lastIndexOf(true);
+  const foot = lines.at(-1) ?? "";
+  const scale = lines.findIndex((l, i) => i > head && EFFORT_SCALE_RE.test(l));
+  const mark = scale > 0 ? lines[scale - 1]!.indexOf("▲") : -1;
+  if (head < 0 || !FOOTER_RE.test(foot) || mark < 0) return undefined;
+  const row = lines[scale]!;
+  const dist = (e: Effort): number => Math.abs(new RegExp(`\\b${e}\\b`, "u").exec(row)!.index + e.length / 2 - mark);
+  const at = EFFORTS.reduce<Effort>((best, e) => (dist(e) < dist(best) ? e : best), EFFORTS[0]);
+  return { at, sessionOnly: EFFORT_SESSION_ONLY_RE.test(foot) };
+};
+
+const nudgeTo = async (pane: string, want: Effort, left = EFFORTS.length * 2): Promise<Slider | undefined> => {
+  const s = parseSlider(await screen(pane));
+  if (!s || s.at === want) return s;
+  if (left <= 0) return undefined;
+  await key(pane, EFFORTS.indexOf(want) < EFFORTS.indexOf(s.at) ? "Left" : "Right");
+  await sleep(ARROW_STEP_MS);
+  return nudgeTo(pane, want, left - 1);
+};
+
+export interface EffortSelectResult { ok: boolean; applied?: Effort; reason?: string }
+
+/** Puts a live pane on `want` for this session only. Never throws, never
+ *  touches the user's default; a failure leaves the pane's level as it was. */
+export const selectEffort = async (pane: string, want: Effort, log: Logger): Promise<EffortSelectResult> => {
+  const start = await screen(pane);
+  if (isModalPane(start).modal) return { ok: false, reason: "pane 正停在一个确认框上, 这时敲 /effort 会按到它 —— 等它过去再切" };
+  await runTmux(["send-keys", "-t", pane, "-l", "/effort"]);
+  await sleep(150);
+  await key(pane, "Enter");
+  const opened = await until(async () => parseSlider(await screen(pane)), OPEN_TIMEOUT_MS);
+  const back = async (reason: string): Promise<EffortSelectResult> => {
+    if (parseSlider(await screen(pane))) {
+      await key(pane, "Escape");
+      await until(async () => (parseSlider(await screen(pane)) ? undefined : true), CLOSE_TIMEOUT_MS);
+    }
+    log.warn({ pane, want, reason }, "effort-select: not applied");
+    return { ok: false, reason };
+  };
+  if (!opened) return back("/effort 的档位条没有出现");
+  if (!opened.sessionOnly) return back("档位条没有「只对本会话」这一键 —— 按 Enter 会改掉全机默认, 没按");
+  const at = await nudgeTo(pane, want);
+  if (at?.at !== want) return back(`没能把档位挪到 ${want}`);
+  const before = (start.match(new RegExp(EFFORT_RECEIPT_RE, "gu")) ?? []).join("\n");
+  await key(pane, "s");
+  const receipt = await until(async () => {
+    const s = await screen(pane);
+    const got = s.match(new RegExp(EFFORT_RECEIPT_RE, "gu")) ?? [];
+    return !parseSlider(s) && got.join("\n") !== before ? got.at(-1) : undefined;
+  }, SETTLE_TIMEOUT_MS);
+  const applied = parseEffortReceipt(receipt);
+  return applied === want ? { ok: true, applied } : back(receipt ? `回执对不上: ${receipt}` : "选中后没等到回执");
+};
+
+const parseEffortReceipt = (receipt: string | undefined): Effort | undefined =>
+  parseEffort(EFFORT_RECEIPT_RE.exec(receipt ?? "")?.[1]);

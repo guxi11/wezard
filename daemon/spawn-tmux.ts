@@ -34,7 +34,8 @@ import { expandHome } from "../shared/paths.js";
 import { augmentedPath } from "../shared/exec-path.js";
 import { sleep } from "../shared/std.js";
 import { activateBackend, CLI_BACKEND_DEFAULTS, primaryBackend, type CliBackend, type CliBackendName } from "../shared/cli-backends.js";
-import { selectModel } from "./model-select.js";
+import { exactModelId, selectModel } from "./model-select.js";
+import type { Effort } from "../shared/effort.js";
 import { hasRegistry, sessionOnPane } from "./cc-session.js";
 
 
@@ -262,13 +263,19 @@ export interface SpawnArgs {
   cli?: CliBackendName;
   /** Model to put the pane on. Lets sibling `#tag` sessions in one chat run on
    *  different models (a graph node can pick opus for design, haiku for lint).
-   *  NOT passed as `--model` at launch — that flag is unvalidated (an unknown
-   *  slug spawns fine and only fails on the first real turn). Instead, once
-   *  the TUI is ready, we drive the pane's own `/model` picker (see
-   *  `model-select.ts`): read the live catalog, arrow onto the closest row,
-   *  select it, and report back what actually landed. Undefined/empty → the
-   *  CLI's own default, no `/model` round trip. */
+   *  `--model` is unvalidated (an unknown slug spawns fine and only fails on
+   *  the first real turn), so it is passed at launch only when `model` resolves
+   *  to an id some transcript already ran under (`knownModels`, see
+   *  `exactModelId`). Anything else — "opus", "最新的 opus", an unseen slug —
+   *  goes through the pane's own `/model` picker once the TUI is ready (see
+   *  `model-select.ts`). Undefined/empty → the CLI's own default. */
   model?: string;
+  /** Model ids confirmed by transcripts, likeliest first; consumed lazily and
+   *  only when `model` is set. */
+  knownModels?: Iterable<string>;
+  /** Reasoning effort, passed as `--effort` (session-scoped, unlike the
+   *  `/effort <level>` command). Dropped for a backend with no such flag. */
+  effort?: Effort;
   /** Fork the resumed session instead of continuing it (`--fork-session`).
    *  MANDATORY whenever a SECOND pane resumes a session the daemon still has
    *  bound: without it both panes append to the same jsonl and the two chats
@@ -297,13 +304,17 @@ export interface SpawnResult {
   cwd?: string;
   /** Backend actually launched. */
   cli?: CliBackendName;
-  /** Picker label actually confirmed applied via `/model` (may differ from
-   *  the requested string — e.g. a colloquial "opus 最新" resolves to "Opus 5.5").
+  /** What the pane is on: the exact id when it launched with `--model`, else
+   *  the picker label confirmed via `/model` (may differ from the requested
+   *  string — e.g. a colloquial "opus 最新" resolves to "Opus 5.5").
    *  "" when no model was requested. On a failed resolution this still carries
    *  the raw requested string (best-effort record) and `modelWarning` explains
    *  why — the pane itself is left on whatever model it already had. */
   model?: string;
   modelWarning?: string;
+  /** Effort the pane was launched with; absent when none was asked or the
+   *  backend can't take it. */
+  effort?: Effort;
 }
 
 // Pre-write the "trust this folder" + onboarding markers for `cwd` into
@@ -395,7 +406,7 @@ const charterArg = (cfg: Config, backend: CliBackend, sessionId: string, charter
   }
 };
 
-export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: freshSessionId, windowName, cwdOverride, cli, model, systemPrompt, forkSession }: SpawnArgs): Promise<SpawnResult> => {
+export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: freshSessionId, windowName, cwdOverride, cli, model, knownModels, effort, systemPrompt, forkSession }: SpawnArgs): Promise<SpawnResult> => {
   const backend = backendFor(cfg, cli);
   const cwd = expandHome((cwdOverride ?? "").trim() || cfg.wrc.cwd);
   const projectDir = join(expandHome(backend.projectsDir), backend.encodeProjectDir(cwd));
@@ -471,8 +482,13 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
     ...(supportsE ? [] : ["DISABLE_AUTO_UPDATE=true", "DISABLE_UPDATE_PROMPT=true"]),
     "DISABLE_AUTOUPDATER=1",
   ];
+  const wanted = model?.trim() ?? "";
+  const exactId = wanted && backend.modelFlag ? exactModelId(wanted, knownModels ?? []) : undefined;
+  const effortArg = effort && backend.effortFlag ? effort : undefined;
   const argv = [
     ...(resumeSessionId ? ["--resume", sessionId, ...(forkSession ? ["--fork-session"] : [])] : ["--session-id", sessionId]),
+    ...(exactId ? [backend.modelFlag!, exactId] : []),
+    ...(effortArg ? [backend.effortFlag!, effortArg] : []),
     ...cfg.wrc.extraArgs,
   ].map(shQuote);
   const cmd = [...envPrefix, backend.bin, ...argv, charterArg(cfg, backend, sessionId, systemPrompt, log)]
@@ -496,25 +512,28 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
   // Model selection needs the TUI actually up (it types `/model` into the
   // input box and drives the picker) — skip it if readiness never confirmed, same as any other
   // post-launch step would have to.
-  let resolvedModel = "";
+  // An exact id already went in with `--model`; persist the id itself, so the
+  // next respawn resolves on the first sighting.
+  let resolvedModel = exactId ?? "";
   let modelWarning: string | undefined;
-  if (model?.trim() && tuiReady) {
-    const sel = await selectModel(tmuxPane, model.trim(), log);
+  if (wanted && !exactId && tuiReady) {
+    const sel = await selectModel(tmuxPane, wanted, log);
     if (sel.ok) {
-      resolvedModel = sel.applied ?? model.trim();
+      resolvedModel = sel.applied ?? wanted;
     } else {
-      resolvedModel = model.trim();
+      resolvedModel = wanted;
       modelWarning = sel.reason;
-      log.warn({ tmuxPane, wanted: model.trim(), reason: sel.reason }, "spawn-tmux: model selection failed, pane stays on its prior model");
+      log.warn({ tmuxPane, wanted, reason: sel.reason }, "spawn-tmux: model selection failed, pane stays on its prior model");
     }
-  } else if (model?.trim()) {
-    resolvedModel = model.trim();
+  } else if (wanted && !exactId) {
+    resolvedModel = wanted;
     modelWarning = "TUI 未就绪, 跳过了模型选择";
   }
 
-  log.info({ tmuxName, tmuxPane, sessionId, jsonlPath, cwd, cli: backend.name, model: resolvedModel }, "spawn-tmux: ready");
+  log.info({ tmuxName, tmuxPane, sessionId, jsonlPath, cwd, cli: backend.name, model: resolvedModel, viaFlag: !!exactId, effort: effortArg }, "spawn-tmux: ready");
   return {
     ok: true, sessionId, jsonlPath, tmuxPane, tmuxSession: tmuxName, cwd, cli: backend.name,
-    ...(model?.trim() ? { model: resolvedModel, ...(modelWarning ? { modelWarning } : {}) } : {}),
+    ...(wanted ? { model: resolvedModel, ...(modelWarning ? { modelWarning } : {}) } : {}),
+    ...(effortArg ? { effort: effortArg } : {}),
   };
 };
