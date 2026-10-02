@@ -25,7 +25,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { URL } from "node:url";
 import { baseOfKey } from "./session-label.js";
 import { isMark, isPost, isTurn } from "./chat-view.js";
-import { buildWorld, EMPTY_FACTS, type WorldFacts } from "./world.js";
+import { buildWorld, EMPTY_FACTS, withData, type WorldFacts } from "./world.js";
 import {
   allMessages, convKeyOf, convMessages, chatKeysOf, parseTalkKey, glanceOfTalk, convsOf, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
   roleInfo, roleStats, sessionsOf, talkArgs, talkOf, counterpartOf, windowStats, type Directory, type Msg, type SessionSpan,
@@ -152,7 +152,8 @@ interface View {
 export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider): ChatRoutes => {
   const getFacts = (): Promise<WorldFacts> =>
     Promise.resolve(facts ? facts() : EMPTY_FACTS)
-      .then((f) => recentFacts(f, Date.now() - HORIZON_MS))
+      // 没有消息数据的 wizard 在这里就退场 —— 会话列表、关系图、+N、搜索都只见得到这一份。
+      .then((f) => withData(recentFacts(f, Date.now() - HORIZON_MS), listRecent(), Date.now()))
       .catch(() => EMPTY_FACTS);
   // 票据校验 (store.get) 不受此限: 一条老链接照样打得开, 只是看到的是最近 3 天。
   const listRecent = (): DetailRecord[] => recentRecords(store.list(), Date.now() - HORIZON_MS);
