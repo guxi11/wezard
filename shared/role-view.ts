@@ -124,8 +124,27 @@ export const messageOfPost = (p: PostDetailRecord): Msg => ({
   ts: p.createdAt,
 });
 
+/** 群里认不出是谁的那一方 (`human:`: 回执轮 / notify 的听众, 没带 speaker 的老轮) →
+ *  那个群里认得出的人: 这句之前最近开口的那个, 没有就之后第一个, 群里从没人开口就
+ *  取全体里最近的那个 (单用户部署) —— 不然「人」会被当成一个独立的 role 立在会话里。
+ *  一个人都认不出时才留 `human:`。 */
+export const settleHumans = (records: readonly DetailRecord[]): ((m: Msg) => Msg) => {
+  const said = records.filter(isTurn).filter((r) => !!r.target && !r.agent)
+    .map((r) => ({ ts: r.createdAt, channel: channelOf(r), who: senderOf(r) }))
+    .filter((x) => x.who.startsWith("human:") && x.who !== "human:")
+    .sort((a, b) => a.ts - b.ts);
+  const latest = said[said.length - 1]?.who ?? "human:";
+  const pick = (channel: string, ts: number): string => {
+    const here = said.filter((x) => x.channel === channel);
+    return (here.filter((x) => x.ts <= ts).pop() ?? here[0])?.who ?? latest;
+  };
+  const settle = (id: string, m: Msg): string => (id === "human:" && m.channel ? pick(m.channel, m.ts) : id);
+  return (m) => (m.from === "human:" || m.to === "human:" ? { ...m, from: settle(m.from, m), to: settle(m.to, m) } : m);
+};
+
 export const allMessages = (records: readonly DetailRecord[], now: number): Msg[] =>
   [...convTurns(records, now).flatMap(messagesOfTurn), ...records.filter(isPost).map(messageOfPost)]
+    .map(settleHumans(records))
     .sort((a, b) => a.ts - b.ts);
 
 // ── 名录 ─────────────────────────────────────────────────────────────

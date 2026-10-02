@@ -27,7 +27,7 @@ import { baseOfKey } from "./session-label.js";
 import { isMark, isPost, isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, jobProgress, withData, type WorldFactJob, type WorldFacts } from "./world.js";
 import {
-  allMessages, convKeyOf, convMessages, chatKeysOf, parseTalkKey, glanceOfTalk, convsOf, jobConvsOf, jobOfKey, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
+  allMessages, convKeyOf, convMessages, chatKeysOf, parseTalkKey, glanceOfTalk, convsOf, jobConvsOf, jobOfKey, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn, settleHumans,
   roleInfo, roleStats, sessionsOf, talkArgs, talkOf, counterpartOf, windowStats, type Directory, type Msg, type SessionSpan,
 } from "./role-view.js";
 import { renderJobMarks, renderMark, renderMsg, type MsgFragment } from "./role-render.js";
@@ -384,7 +384,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
         return;
       }
       if (isPost(r)) {
-        const m = messageOfPost(r);
+        const m = settleHumans(records)(messageOfPost(r));
         if (convMessages([m], v.role, v.conv, v.with || undefined).length && inSpan(v.span)(m.ts)) pushFrag(renderMsg(m, records, dir, now));
         return;
       }
@@ -392,7 +392,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       // 子 agent 的一轮渲染在父轮的出消息里 —— 推父轮。
       const top = r.agent?.parentTurnId ? store.get(r.agent.parentTurnId) : r;
       if (!top || !isTurn(top) || !top.target) return;
-      const own = messagesOfTurn(top);
+      const own = messagesOfTurn(top).map(settleHumans(records));
       const inWin = new Set(convMessages(own, v.role, v.conv, v.with || undefined).filter((m) => inSpan(v!.span)(m.ts)).map((m) => m.id));
       own.filter((m: Msg) => inWin.has(m.id)).forEach((m) => pushFrag(renderMsg(m, records, dir, now)));
     };
