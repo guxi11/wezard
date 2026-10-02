@@ -17,7 +17,7 @@
 1. **wezard 已经有两个求值器, 分工要画死。** LLM 是最好的 `if` / 拆分 / 汇总; 守护进程擅长 LLM 做不了的: **跨时间等、数数、计时、熬过 reload**。任何新机制先问「它属于哪一边」—— 控制流不进 daemon (`jobs.ts` 头注释的取舍继续成立), daemon 不替模型判断。
 2. **原语核心已经事实存在**: 说 (`tell_peer`) / 看 (`peek_peer` `read_chat`) / 生 (`spawn` `clone`) / 等 (回执) 占 30 天 1133 次调用的 ~80%。演进不是造新语言, 而是**补齐这几个原语的语义缺口, 并把其余工具降为别名、镜头或人侧操作**。
 3. **最实在的语义洞在 continuation 上**: 回执只在对方答了时才投递; 超时 / 不答 / 死掉 → 静默丢弃 (`receipts.ts:177` 不答/超时, `:207` 发话方一直忙), 工单最后一份若是这种, 发起者永远等不到「全部到齐」。补上失败分支, 超时 / 重试两格打开 (竞速另需收掉输家: `cancelRest` 或按 turn 的 cancel), charter 里「迟迟不来就 peek」的补丁可以删。
-4. **一次委托要有名字。** A2A 的 Task、MCP tasks、LangGraph interrupt 都把「派出去的一件活」做成有 id、有状态的东西。wezard 的同类信息散在 receipts Slot / JobMember / paneIsBusy / openToolUses / wait_peer 的 stale 五处。**派生** (不新增存储) 一个 `TurnState` + 信封里的 turn id, 模型、回执、rolepage 三处共用。
+4. **一次委托要有名字。** A2A 的 Task、MCP tasks、LangGraph interrupt 都把「派出去的一件活」做成有 id、有状态的东西。wezard 的同类信息散在 receipts Slot / JobMember / paneIsBusy / openToolUses / wait_peer 的 stale 五处。统一成一个 `TurnState` + 信封里的 turn id, 模型、回执、rolepage 三处共用: 进行中的状态从活体派生, **终态 (done / timeout / canceled …) 写进已落盘的回执 Slot** —— reload 或对方 pane 死后无从重算; 只加字段, 不加文件。turn id **不是** A2A 那种可并发的 task: 沿用 `receipts.ts` 的模型, 同一对 wizard 同时只有一件在飞, 续问 (`re`) 沿用原 turn id。详细设计见 [b2-continuation.md](b2-continuation.md)。
 5. **上下文是预算, 不是仓库。** charter ~4.4k tok 里 1/3 是只会过期的出生名册, 另有 ~2.5k 与工具描述复述; 在 Claude Code 上工具描述是 deferred 的 (只有名字常驻), 所以**charter 是唯一保证在场的那份**。自描述分三层: L0 charter 一行「何时用」→ L1 工具描述讲参数与边界 → L2 文档按需读。
 6. **记忆的病在时机与检索, 不在体积。** 所有记忆只在出生时进 system prompt: 在跑的 wizard 看不到新规矩, `/clear` 后自己的 self 记忆也没了; 交接简报这类最好的情景摘要用完即删。先修通路 (notices 推送、跨 /clear、episode 归档), 再谈检索。
 7. **UI 的单位要从「消息」升到「一件事」。** 工单成为一等会话, 忙闲补上「卡在审批」, 一个「要我处理」的托盘 —— 人管一群 wizard 时只关心这两件事: 这件事到哪了、谁在等我。
