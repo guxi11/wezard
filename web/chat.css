@@ -59,14 +59,14 @@ button { font: inherit; color: inherit }
   flex-wrap: nowrap; align-items: stretch;
 }
 .rolebar > .who { min-width: 0 }
-.rolebar .id { display: flex; gap: 12px; align-items: center; min-width: 0 }
+.rolebar .id { display: flex; gap: 10px; align-items: center; min-width: 0 }
 /* 与会话项头像同一套不透明底, 放大到名片尺寸。 */
 .rolebar .id .av {
-  flex: none; display: grid; place-items: center; width: 48px; height: 48px; border-radius: 14px;
-  background: var(--av-bg); box-shadow: inset 0 0 0 1px var(--av-line); font-size: 28px; line-height: 1;
+  flex: none; display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12px;
+  background: var(--av-bg); box-shadow: inset 0 0 0 1px var(--av-line); font-size: 23px; line-height: 1;
 }
-.rolebar .id .l { min-width: 0; display: flex; flex-direction: column; gap: 3px }
-.rolebar .id .nm { font-size: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.rolebar .id .l { min-width: 0; display: flex; flex-direction: column; gap: 2px }
+.rolebar .id .nm { font-size: 15.5px; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 /* 职责是一句话, 至多两行; 截掉的悬停看全文 (chat.js 的截断提示)。 */
 .rolebar .job {
   margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--ink); opacity: .8; word-break: break-word;
