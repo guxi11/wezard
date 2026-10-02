@@ -472,7 +472,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     });
   };
 
-  /** 关系图卡片那一行: 每张卡片的窗口 (`a:<x>|<相连者>`, 换行分隔) 各一份 glance —— 与打开它时看到的同一个 talkOf。 */
+  /** 关系图卡片那一行: 每张卡片的窗口 (`a:<x>|<相连者>[|<频道>]`, 换行分隔) 各一份 glance —— 与打开它时看到的同一个 talkOf。 */
   const glance: SimpleHandler = (_req, res, url) => {
     const ticket = resolveTicket(store, url);
     if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
@@ -485,7 +485,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       const keys = (url.searchParams.get("keys") ?? "").split("\n").filter(Boolean);
       const out = Object.fromEntries(keys.flatMap((k) => {
         const t = parseTalkKey(k);
-        return t ? [[k, glanceOfTalk(msgs, viewer, dir, t.who, t.peers)]] : [];
+        return t ? [[k, glanceOfTalk(msgs, viewer, dir, t.who, t.peers, t.chat)]] : [];
       }));
       json(res, 200, { ok: true, at: now, glances: out });
     });

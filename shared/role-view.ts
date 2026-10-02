@@ -214,6 +214,8 @@ export interface ConvSub {
   preview: string;
   /** 我与它在这里最后一次开口的时刻 (0 = 没开过口) —— 这一对的默认已读水位。 */
   mine: number;
+  /** 它在这个频道里的全部记录 (不按成对过滤) —— 侧栏「chat 内全部」下与我无往来的那几项用它。 */
+  whole: Glance & { count: number };
   /** 它是 wizard 时才有。 */
   status?: RoleStatus;
 }
@@ -255,11 +257,12 @@ export const talkOf = (msgs: readonly Msg[], role: string, peers: readonly strin
   return msgs.filter((m) => (chat === undefined || m.channel === chat) && (pick.size ? withPeer(m) : involves(m, role)));
 };
 
-/** `a:<x>` = x 参与的全部对话; `a:<x>|<p1>,<p2>` = x 与这几个对端之间的 —— 不分会话, 按时间排开。 */
-export const parseTalkKey = (key: string): { who: string; peers: string[] } | undefined => {
+/** `a:<x>` = x 参与的全部对话; `a:<x>|<p1>,<p2>` = x 与这几个对端之间的 —— 不分会话, 按时间排开。
+ *  再带一段 `|<base>` 就只在那个频道里 (`a:<x>||<base>` = x 在那个群里的全部记录, 对端不限)。 */
+export const parseTalkKey = (key: string): { who: string; peers: string[]; chat?: string } | undefined => {
   if (!key.startsWith("a:")) return undefined;
-  const [who = "", rest] = key.slice(2).split("|");
-  return { who, peers: rest ? rest.split(",").filter(Boolean) : [] };
+  const [who = "", rest, chat] = key.slice(2).split("|");
+  return { who, peers: rest ? rest.split(",").filter(Boolean) : [], ...(chat ? { chat } : {}) };
 };
 
 const stripMd = (s: string): string => s.replace(/[`*_~|#>]/g, "").replace(/\s+/g, " ").trim();
@@ -347,13 +350,15 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
       const all = msgs.filter((m) => m.channel === base);
       const others = [...new Set(all.flatMap((m) => [m.from, m.to]))].filter((r) => r !== role && !r.startsWith("task:") && r !== SYSTEM);
       // 子项成对: 群里与视角有往来的每个 role 一项, 内容是「我与它」在这个群里的对话 (与点进去的窗口同一份 talkOf)。
-      // 没往来的 count 为 0, 客户端不列。
+      // 没往来的 count 为 0, 默认不列; 「chat 内全部」下用 whole (它在群里的全部记录) 列出来。
+      // 两份 glance 都走 glanceOfTalk —— 关系图卡片 (/api/glance) 的同一个实现。
       const subs = others
         .map((r): ConvSub => {
           const pair = talkOf(all, role, [r]);
           return {
             role: r, name: dir.nameOf(r), label: dir.labelOf(r), count: pair.length, mine: spoke(pair),
-            ...glanceOr(pair, speakerPrefix(dir, role, [r])), status: dir.status(r, now),
+            ...glanceOfTalk(all, role, dir, role, [r], base), status: dir.status(r, now),
+            whole: { count: talkOf(all, r).length, ...glanceOfTalk(all, role, dir, r, [], base) },
           };
         })
         .sort((a, b) => b.lastTs - a.lastTs)
