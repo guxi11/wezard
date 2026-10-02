@@ -370,9 +370,9 @@
   };
 
   // ── 未读: 别人说完、我还没读到的话 ──
-  // 服务端给每个会话一份 heard = [说完的时刻, 属于我与谁的那一对], 以及我在群里 / 每一对里
-  // 最后开口的时刻 (mine)。一句话的已读水位 = 它所在那一处「我最后开口」与「我看过」的较晚者:
-  // 属于某一对的看那一对 (群里说过话不等于读过别的线程), 不属于任何一对的看群。
+  // 服务端给每个会话一份 heard = [说完的时刻, 发话方, 收信方], 以及我在群里 / 对每个子项
+  // 最后开口的时刻 (mine)。一句话属于两端各自的子项; 它的已读水位 = 群看过、两端子项任一看过、
+  // 「我最后开口」三者的最晚者 —— 说给我的看我对那一端开口 (群里说过话不等于读过别的线程), 其余看群。
   // 「看过」记在本地 (刷新 / 换视角都还在), 按视角分账 —— 同一个群换个 role 看, 未读是另一回事。
   var READ_KEY = 'wezard.role.read';
   var READ = (function () {
@@ -384,12 +384,15 @@
   var seenAt = function (key, withRole) { return READ.at[readKey(key, withRole)] || 0; };
   var unreadOf = function (c, withRole) {
     var g = seenAt(c.key);
-    var mark = {};
-    (c.subs || []).forEach(function (s) { mark[s.role] = Math.max(g, s.mine || 0, seenAt(c.key, s.role)); });
-    var groupMark = Math.max(g, c.mine || 0);
+    var mine = {};
+    (c.subs || []).forEach(function (s) { mine[s.role] = s.mine || 0; });
+    var spoke = function (h) {
+      var other = h[2] === ROLE ? h[1] : h[1] === ROLE ? h[2] : '';
+      return other && mine[other] !== undefined ? mine[other] : c.mine || 0;
+    };
     return (c.heard || []).filter(function (h) {
-      if (withRole && h[1] !== withRole) return false;
-      return h[0] > (h[1] ? (mark[h[1]] !== undefined ? mark[h[1]] : groupMark) : groupMark);
+      if (withRole && h[1] !== withRole && h[2] !== withRole) return false;
+      return h[0] > Math.max(g, spoke(h), seenAt(c.key, h[1]), seenAt(c.key, h[2]));
     }).length;
   };
   var reading = function () { return VIEW === 'msgs' && !document.hidden; };
@@ -453,11 +456,11 @@
   var moreTag = function (n, tip) {
     return n ? '<span class="oc" title="' + esc(tip) + '">+' + n + '</span>' : '';
   };
-  // 会话列表: 除了这一项 (here = 它的绝对 key), 它还在 N 个会话里 (群 + 私聊)。服务端没给这份 = 不知道, 不画。
+  // 会话列表: 除了这一项 (here = 它的绝对 key), 它还对应 N 个叶子项 (各群里它的子项 + 它的私聊)。服务端没给这份 = 不知道, 不画。
   var otherChats = function (id, here) {
     var ks = (R.chatKeys || {})[id];
     var n = ks ? ks.filter(function (k) { return k !== here; }).length : 0;
-    return moreTag(n, nameOf(id) + ' 还在另外 ' + n + ' 个会话里, 切到它的视角可见');
+    return moreTag(n, nameOf(id) + ' 在另外 ' + n + ' 处 (群里的子项 / 私聊) 还有记录, 切到它的视角可见');
   };
   // 私聊项的 key 是相对视角的 (p:<对端>), 服务端那份是绝对的 (p:<a>|<b>, 两端排序)。
   var dmKey = function (peer) { return 'p:' + [ROLE, peer].sort().join('|'); };
@@ -469,7 +472,7 @@
 
   var convItem = function (c) {
     var on = c.key === CONV;
-    // 只列与我有往来的: 在群里但没和我说过话的人, 点进去也是空的。
+    // 群里每个其他 role 一项 (它在这个群里的全部记录); 没有记录的点进去是空的, 不列。
     var talked = OPEN[c.key] ? c.subs.filter(function (s) { return s.count; }).sort(recentFirst) : [];
     var hidden = talked.length - SUB_FOLD;
     var bar = hidden > 0
@@ -479,7 +482,7 @@
     var sub = function (s) {
       var sel = on && s.role === WITH;
       return '<button class="si' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '" data-with="' + esc(s.role) + '" ' +
-        'title="' + esc('我与 ' + nameOf(s.role) + ' 在这里的 ' + s.count + ' 条往来') + '">' +
+        'title="' + esc(nameOf(s.role) + ' 在这里的 ' + s.count + ' 条记录') + '">' +
         subRow(c, s) + '</button>';
     };
     var rest = MORE[c.key] ? talked.slice(SUB_FOLD).map(sub).join('') : '';

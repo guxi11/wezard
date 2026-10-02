@@ -207,10 +207,10 @@ export interface ConvSub {
   role: string;
   name: string;
   label: string;
-  /** 与当前 role 在这个频道里的往来条数。 */
+  /** 它在这个频道里的记录条数 (它和谁说的都算 —— 与点进去看到的窗口同一份)。 */
   count: number;
   lastTs: number;
-  /** 与我往来的最后一条 (没有就是它在这个频道里的最后一条)。 */
+  /** 它在这个频道里的最后一句。 */
   preview: string;
   /** 我与它在这里最后一次开口的时刻 (0 = 没开过口) —— 这一对的默认已读水位。 */
   mine: number;
@@ -299,10 +299,11 @@ export const glanceOfTalk = (msgs: readonly Msg[], viewer: string, dir: Director
 
 const SUB_MAX = 40;
 
-/** 别人说完的一句 `[说完的时刻, 这句属于我与谁的那一对 ("" = 不关我的事)]`。
+/** 别人说完的一句 `[说完的时刻, 发话方, 收信方]`。一句话属于两端各自的子项 (子项 = 那个 role
+ *  在群里的全部记录), 客户端据此给群和每个子项点未读。
  *  水位按时刻而不按条数: 条数随 span / 记录清理伸缩, 时刻不会 —— 且群与子项共用一份,
- *  读完一对只抹掉这一对的, 群的账不必再做加减。 */
-export type Heard = [number, string];
+ *  读完一个子项只抹掉它的, 群的账不必再做加减。 */
+export type Heard = [number, string, string];
 const HEARD_MAX = 100;
 
 /** 一条消息「说完」的时刻, 没说完 (或是自己说的) 就是 undefined。人 / 同伴 / 定时的问话
@@ -324,7 +325,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
   const heard = (ms: readonly Msg[]): Heard[] =>
     ms.flatMap((m): Heard[] => {
       const ts = saidAt(role)(m);
-      return ts === undefined ? [] : [[ts, involves(m, role) ? other(m, role) : ""]];
+      return ts === undefined ? [] : [[ts, m.from, m.to]];
     }).sort((a, b) => a[0] - b[0]).slice(-HEARD_MAX);
   // 开口之后才进来的话才可能没读过: 回过话 = 读到了那里。
   const spoke = (ms: readonly Msg[]): number =>
@@ -345,17 +346,17 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
       const base = key.slice(2);
       const all = msgs.filter((m) => m.channel === base);
       const others = [...new Set(all.flatMap((m) => [m.from, m.to]))].filter((r) => r !== role && !r.startsWith("task:") && r !== SYSTEM);
+      // 子项 = 群里每个其他 role 一项, 它的全部记录 (与点进去的窗口同一份 talkOf)。
+      // mine 仍是「我对它开口」: 我回过它的话, 它在那之前说的就算读过。
       const subs = others
         .map((r): ConvSub => {
-          const pair = talkOf(all, role, [r]);
           const seen = talkOf(all, r);
           return {
-            role: r, name: dir.nameOf(r), label: dir.labelOf(r), count: pair.length, mine: spoke(pair),
-            ...(glance(pair, speakerPrefix(dir, role, [r])) ?? glanceOr(seen, speakerPrefix(dir, role, [r]))), status: dir.status(r, now),
+            role: r, name: dir.nameOf(r), label: dir.labelOf(r), count: seen.length, mine: spoke(talkOf(all, role, [r])),
+            ...glanceOr(seen, speakerPrefix(dir, role)), status: dir.status(r, now),
           };
         })
-        // 与我有往来的排前, 再按最近。
-        .sort((a, b) => Number(b.count > 0) - Number(a.count > 0) || b.lastTs - a.lastTs)
+        .sort((a, b) => b.lastTs - a.lastTs)
         .slice(0, SUB_MAX);
       return {
         key, kind: "group", base,
@@ -367,14 +368,14 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
     .sort((a, b) => b.lastTs - a.lastTs);
 };
 
-/** 每个 role 参与的全部会话 (与 convsOf 同一口径: 群要自己开过口, 私聊有往来就算) —— 侧栏会话项名字旁的
- *  「+N」= 这份减去那一项自己的会话。key 取绝对的 (`c:<base>` / `p:<a>|<b>`), 与视角无关。
- *  定时与系统不是聊天的一方。 */
+/** 每个 role 对应的全部叶子项 —— 群里的子项 (它在那个群里有记录: 说过或被说到, 与 convsOf 的子项
+ *  同一口径) 与私聊项 (有往来就算)。侧栏名字旁的「+N」= 这份减去那一项自己。
+ *  key 取绝对的 (`c:<base>` / `p:<a>|<b>`), 与视角无关。定时与系统不是聊天的一方。 */
 export const chatKeysOf = (all_: readonly Msg[]): Record<string, string[]> => {
   const party = (r: string): boolean => !!r && !r.startsWith("task:") && r !== SYSTEM;
   const index = all_.filter((m) => !isPing(m)).reduce((idx, m) => {
     const add = (r: string, k: string) => idx.set(r, (idx.get(r) ?? new Set<string>()).add(k));
-    if (m.channel) { if (party(m.from)) add(m.from, `c:${m.channel}`); }
+    if (m.channel) { [m.from, m.to].filter(party).forEach((r) => add(r, `c:${m.channel}`)); }
     else if (party(m.from) && party(m.to)) {
       const k = `p:${[m.from, m.to].sort().join("|")}`;
       add(m.from, k); add(m.to, k);
