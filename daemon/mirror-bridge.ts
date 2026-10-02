@@ -1639,6 +1639,8 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
 // 框认得出来时这条判据可信, 于是允许多补回车 (空框上的回车在 CLI 里是 no-op);
 // 每次补之前再问一遍证人, 已提交就不补。
 const injectViaTmuxText = async (target: string, text: string, log: Logger, freshSpawn: boolean, witness: SubmitWitness = NO_WITNESS): Promise<{ ok: boolean; reason?: string; uncertain?: boolean }> => {
+/** 具名粘贴 buffer 的序号 (见 loadAndPaste)。 */
+let pasteSeq = 0;
   // Warm pane: tight timings, low latency. Fresh spawn (claude --resume just
   // started, transcript still loading): extended timings — bracketed-paste
   // end can take 4-7s to be honored on a cold TUI. Only the fresh-spawn path
@@ -1681,9 +1683,13 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   const loadAndPaste = async (): Promise<{ ok: boolean; reason?: string }> => {
     // stdin variant of the shared exec path — it carries the same hard timeout,
     // which a hand-rolled spawn here did not.
-    const loaded = await runTmux(["load-buffer", "-"], { stdin: text });
+    // 每次注入用自己的具名 buffer: 不同 pane 的注入并发时, 共用 tmux 的默认 buffer 会让
+    // 一方 load 之后、paste 之前被另一方覆盖 —— 两段文本互换 pane (实测: 同一毫秒投的两份
+    // 回执, 发给 A 的进了 B)。同一 pane 的串行管不到跨 pane。
+    const buf = `wezard-${process.pid}-${++pasteSeq}`;
+    const loaded = await runTmux(["load-buffer", "-b", buf, "-"], { stdin: text });
     if (!loaded.ok) return { ok: false, reason: `tmux load-buffer failed: ${loaded.stderr.slice(-200) || loaded.code}` };
-    const pasted = await runTmux(["paste-buffer", "-p", "-d", "-t", target]);
+    const pasted = await runTmux(["paste-buffer", "-b", buf, "-p", "-d", "-t", target]);
     if (!pasted.ok) return { ok: false, reason: `tmux paste-buffer failed: ${pasted.stderr.slice(-200)}` };
     return { ok: true };
   };
