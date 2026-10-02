@@ -848,7 +848,7 @@ const main = async (): Promise<void> => {
       const refs = (b.to ?? []).map((r) => (r ?? "").trim()).filter(Boolean);
       const bad = refs.filter((r) => !chatBaseOf(cfg, r));
       if (bad.length) {
-        json(res, 400, { ok: false, reason: `认不出这些聊天: ${bad.join(", ")} (list_chats 看有哪些; 没起名的聊天寻址不到)` });
+        json(res, 400, { ok: false, reason: `认不出这些聊天: ${bad.join(", ")} (wizard_roster 每行有 home 聊天名, 人侧 /chats; 没起名的聊天寻址不到)` });
         return;
       }
       const dests = [...new Set(refs.length ? refs.map((r) => chatBaseOf(cfg, r)) : [channelOf(self)])];
@@ -923,7 +923,7 @@ const main = async (): Promise<void> => {
       const [roleRef, chatRef, targetRef, sinceRef, untilRef] = [b.role, b.chat, b.with, b.since, b.until].map((x) => (x ?? "").toString().trim());
       // 什么都没给 = 调用方这一轮所在的群; 只给 target = 调用方与它的往来。
       const base = chatRef ? chatBaseOf(cfg, chatRef) : roleRef || targetRef ? "" : channelOf(self);
-      if (chatRef && !base) { json(res, 404, { ok: false, reason: `认不出聊天 '${chatRef}' (list_chats 看有哪些)` }); return; }
+      if (chatRef && !base) { json(res, 404, { ok: false, reason: `认不出聊天 '${chatRef}' (wizard_roster 每行有 home 聊天名, 人侧 /chats)` }); return; }
       const role = roleRef ? logRole(self, roleRef) : targetRef ? { name: displayName(self), target: self } : undefined;
       const target = targetRef ? logRole(self, targetRef) : undefined;
       const since = sinceRef ? parseWhen(sinceRef, now) : undefined;
@@ -1214,7 +1214,7 @@ const main = async (): Promise<void> => {
       // 死锁), 改走交接自己 —— 简报得由调用方自己给。
       if (target === self) {
         const brief = ((body as { brief?: string }).brief ?? "").toString().trim();
-        if (!brief) { json(res, 400, { ok: false, reason: "这是交接你自己: 把简报写在 brief 里 (不传 name 即可)" }); return; }
+        if (!brief) { json(res, 400, { ok: false, reason: "这是交接你自己: 把简报写在 brief 里 (不传 name 即可; 旧会话的 handoff 没有 brief 参数, 用 wizard_handoff_self)" }); return; }
         const r = handoffSelf(self, brief);
         json(res, r.status, r.body);
         return;
@@ -1290,7 +1290,7 @@ const main = async (): Promise<void> => {
         log.info({ base, name }, "chat: auto-named from workspace");
         // 群里不发气泡 (一次补名会命中十几个群, 那是刷屏), 但住在里面的 wizard
         // 得知道自己的地址变了 —— 它的 charter 里写的还是「(未命名)」。
-        postRoster(base, [], `这个聊天现在叫 **${name}** (按工作区自动起的) —— notify / new_claude_session 可以用这个名字指到这里。`);
+        postRoster(base, [], `这个聊天现在叫 **${name}** (按工作区自动起的) —— notify / spawn_wizard 的 \`chat\` 可以用这个名字指到这里。`);
       }
       return named;
     };
@@ -1856,14 +1856,20 @@ const main = async (): Promise<void> => {
         return;
       }
       const askedName = String(b.name ?? b.tag ?? "");
-      const slotR = await claimSlot(base, askedName, normalizeTag(b.description?.split(/\s+/)[0]) || "clone", [self, source]);
+      // 没起名: 独立长住的按目录名 (同 /new 与 new_claude_session), 分身按职责的首词。
+      const fallback = (detached && b.cwd ? tagFromCwd(b.cwd) : "") || normalizeTag(b.description?.split(/\s+/)[0]) || "clone";
+      const slotR = await claimSlot(base, askedName, fallback, [self, source]);
       if (!slotR.ok) { json(res, slotR.status, slotR.body); return; }
       const { target, slot: tag } = slotR;
+      // claimSlot 会复用同名的冷记录 (detached 正是「叫回一个老名字」的场景): 生不出来时
+      // 只回滚这一次的新记录, 不能把那个老 wizard 的记忆和家谱一起删掉。
+      const existed = !!wizards.get(target);
       const forkOf = inherit && source !== self ? source : undefined;
       // 先落身份再 spawn: 宪章是从注册表渲染出来的, 记录不在就渲染出一个无名分身。
       wizards.upsert(target, {
         description: (b.description ?? "").toString().trim(),
-        ...(detached ? {} : { parent: self }),
+        // 显式写 undefined: upsert 是合并写, 复用的冷记录里旧的 parent 会留下来。
+        parent: detached ? undefined : self,
         bornAt: Date.now(),
         clonedFrom: inherit ? sourceInfo?.sessionId ?? "" : "",
         ...(forkOf ? { forkOf } : {}),
@@ -1899,7 +1905,8 @@ const main = async (): Promise<void> => {
       }).catch((e: unknown) => ({ ok: false as const, reason: `spawn threw: ${String(e)}`, inherited: false }));
       // 生不出来就回滚身份 —— 否则名字被一个永远没有会话的记录占住。
       if (!r.ok) {
-        wizards.drop(target);
+        if (existed) wizards.upsert(target, { spawning: undefined });
+        else wizards.drop(target);
         json(res, 500, { ok: false, reason: r.reason });
         return;
       }

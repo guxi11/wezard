@@ -301,7 +301,7 @@ server.registerTool(
   {
     title: "Name this WeCom chat",
     description:
-      "给**这个聊天**起个短名字: notify 的收件人、new_claude_session / spawn_wizard / clone_wizard 的 `chat` 从此能指到这里。没起过名字的聊天不会一直没名字 —— 第一次有人用到时守护进程按它的工作区自动补一个 (`~/develop/foo` → `foo`, 撞名加序号), 所以这个工具的用途是**起一个更好的名字**。这里的默认 wizard 出生时取聊天名; 它若还叫旧聊天名, 会跟着改 (wizard 的名字全局唯一, 撞名加后缀, 返回里的 `wizardRenamed` 就是它的新名字)。wizard 自己的名字用 wizard_identity 改, 与这里无关。用户说「给这个群起名叫 daily」「这个群叫什么」(不传 `name` 就是读) 「取消命名」(传 '-') 时调它。名字全机唯一、大小写不敏感。",
+      "给**这个聊天**起个短名字: notify 的收件人、spawn_wizard / clone_wizard 的 `chat` 从此能指到这里。没起过名字的聊天不会一直没名字 —— 第一次有人用到时守护进程按它的工作区自动补一个 (`~/develop/foo` → `foo`, 撞名加序号), 所以这个工具的用途是**起一个更好的名字**。这里的默认 wizard 出生时取聊天名; 它若还叫旧聊天名, 会跟着改 (wizard 的名字全局唯一, 撞名加后缀, 返回里的 `wizardRenamed` 就是它的新名字)。wizard 自己的名字用 wizard_identity 改, 与这里无关。用户说「给这个群起名叫 daily」「这个群叫什么」(不传 `name` 就是读) 「取消命名」(传 '-') 时调它。名字全机唯一、大小写不敏感。",
     inputSchema: {
       name: z
         .string()
