@@ -327,7 +327,8 @@
     var peer = ROLE === from ? to : ROLE === to ? from : '';
     var conv = !peer ? 'a:' + from + '|' + to : ch ? 'c:' + ch : 'p:' + peer;
     var w = peer && ch ? peer : '';
-    var id = b.getAttribute('data-gid');
+    var id = b.getAttribute('data-gid'), row = b.closest('.mrow');
+    markBack(function () { return VIEW === 'msgs' && CONV === conv && WITH === w; }, row && row.getAttribute('data-id'));
     if (id) return jumpMsg({ conv: conv, with: w, id: id, ts: Number(b.getAttribute('data-gts')) });
     clickItem(conv, w);
   });
@@ -931,17 +932,21 @@
   };
 
   // ── 右栏头: 这个群聊 / 私聊是什么 (关系 / 日程视图时是视图名) ──
-  // 进工单页之前在看的那段会话 —— 工单页与工单列表的「回到 …」回这里。只在从非工单的窗口进来时记。
-  var JOB_BACK = null;
+  // 跳走之前在看的那段会话 —— 顶栏的「‹ 回到 …」回这里。on: 在哪些窗口上露出这个按钮;
+  // at: 跳走时点的那条消息, 回来落在它上面。进工单页 (只在从非工单的窗口进来时记) 与
+  // 移交行点对方都记它, 同一个按钮。
+  var BACK = null;
+  var inJobs = function () { return VIEW === 'jobs' || CONV.indexOf('j:') === 0; };
+  var markBack = function (on, at) { BACK = { conv: CONV, with: WITH, session: SESSION, at: at || '', on: on }; };
   var openJob = function (id) {
-    if (CONV.indexOf('j:') !== 0) JOB_BACK = { conv: CONV, with: WITH };
+    if (CONV.indexOf('j:') !== 0) markBack(inJobs);
     selectConv('j:' + id, '');
   };
   // 一处标记背后可能有好几张: 一张直接进那张, 多张进工单列表且只列这几张 (JOB_ONLY)。
   var JOB_ONLY = null;
   var openJobs = function (ids) {
     if (ids.length === 1) return openJob(ids[0]);
-    if (CONV.indexOf('j:') !== 0) JOB_BACK = { conv: CONV, with: WITH };
+    if (CONV.indexOf('j:') !== 0) markBack(inJobs);
     JOB_ONLY = ids;
     if (VIEW === 'jobs') renderJobList(); else setView('jobs');
     renderHead();
@@ -954,12 +959,12 @@
     openJobs(m.getAttribute('data-jobs').split(' ').filter(Boolean));
   }, true);
   var backBtn = function () {
-    var c = JOB_BACK && convOf(JOB_BACK.conv);
-    return c ? '<button class="vb" id="ch-jback" title="回到进工单之前的那段会话">‹ ' + esc(JOB_BACK.with ? nameOf(JOB_BACK.with) : c.name) + '</button>' : '';
+    var c = BACK && BACK.on() && convOf(BACK.conv);
+    return c ? '<button class="vb" id="ch-jback" title="回到跳过来之前的那段会话">‹ ' + esc(BACK.with ? nameOf(BACK.with) : c.name) + '</button>' : '';
   };
   var bindBack = function () {
     var b = $('#ch-jback');
-    if (b) b.onclick = function () { var x = JOB_BACK; JOB_BACK = null; selectConv(x.conv, x.with); };
+    if (b) b.onclick = function () { var x = BACK; BACK = null; SESSION = x.session; selectConv(x.conv, x.with, x.at && landOn(x.at)); };
   };
   var renderHead = function () {
     var who = $('#ch-who'), acts = $('#ch-acts');
@@ -992,7 +997,8 @@
     }
     if (c.kind === 'all') {
       who.innerHTML = pairOf([[c.who]]) + '<span class="t" title="' + esc(c.name) + '"></span>';
-      acts.innerHTML = '';
+      acts.innerHTML = backBtn();
+      bindBack();
       fitTalk(who.querySelector('.t'), c);
       bindGo(who);
       return;
@@ -1003,7 +1009,8 @@
       var s = (c.subs || []).filter(function (x) { return x.role === WITH; })[0];
       who.innerHTML = '<span class="t">' + nm(WITH, s && s.name, true) + '</span>' +
         '<span class="sub">在 <button type="button" class="up" id="ch-up" title="' + esc('看 ' + c.name + ' 的全部记录') + '">' + esc(c.name) + '</button></span>';
-      acts.innerHTML = '';
+      acts.innerHTML = backBtn();
+      bindBack();
       bindGo(who);
       $('#ch-up').onclick = function () { selectConv(CONV, ''); };
       return;
@@ -1022,7 +1029,8 @@
     var peerLabel = c.kind !== 'group' ? c.label : dm && peer === dm.role ? dm.label : '';
     who.innerHTML = (peer ? pairOf([[ROLE, R.role && R.role.label], [peer, peerLabel]]) : '') +
       '<span class="t">' + (c.kind === 'wizard' ? nm(c.peer, c.name, true) : '<span class="nm chat">' + esc(c.name) + '</span>') + '</span>';
-    acts.innerHTML = '';
+    acts.innerHTML = backBtn();
+    bindBack();
     bindGo(who);
   };
   // 多人对话的标题放不下时, 收成「X 与 .a、.b、.c 等 N 个 role 之间的对话」—— 放得下几个列几个, 至少一个。
