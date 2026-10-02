@@ -467,7 +467,7 @@
         convRow(c) + '</button>' + subs;
   };
 
-  // 搜索入口挂在名片与关系/日程入口之间 —— 侧栏的公共区, 会话列表与关系图下都在。⌘K 见下方「搜索」。
+  // 搜索入口挂在名片下 —— 侧栏的公共区, 会话列表与关系图下都在。⌘K 见下方「搜索」。
   var MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
   var KBD = MAC ? '⌘K' : 'Ctrl K';
   var SEARCH_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.6"/><path d="m10.4 10.4 3.6 3.6"/></svg>';
@@ -475,7 +475,9 @@
   sbox.className = 'sbox'; sbox.type = 'button';
   sbox.innerHTML = '<span class="ic">' + SEARCH_SVG + '</span><span class="lb">搜索 role、会话、消息</span><kbd>' + KBD + '</kbd>';
   sbox.onclick = function () { openSearch(); };
-  $('#rb-acts').parentNode.insertBefore(sbox, $('#rb-acts'));
+  $('#rolebar').parentNode.insertBefore(sbox, $('#rolebar').nextSibling);
+  // 老外壳 (daemon 未重启) 里还留着名片下那条入口栏 —— 日程已并进名片, 它整条不要了。
+  if ($('#rb-acts')) $('#rb-acts').remove();
   var renderConvs = function () {
     var groups = R.convs.filter(function (c) { return c.kind === 'group'; }).sort(recentFirst);
     var dms = R.convs.filter(function (c) { return c.kind !== 'group'; }).sort(recentFirst);
@@ -554,20 +556,6 @@
     if (SESS_OPEN && e.key === 'Escape') setSessOpen(false);
   });
 
-  // ── 关系 / 日程入口: 名片下一行居中的文字链接, 「｜」分隔 ──
-  // 副标题 (家谱计数 / 下一枪) 收进悬停提示; 打开着的染视角色, 定时出错的染红。
-  var tile = function (view, label, sub, tone) {
-    var on = view === 'world' ? WORLD : VIEW === view;
-    return '<button class="bd' + (on ? ' on' : '') + (tone ? ' ' + tone : '') + '" data-view="' + view + '"' +
-      (sub ? ' title="' + esc(sub) + '"' : '') + '>' + label + '</button>';
-  };
-  var planTile = function () {
-    var p = R.plan || {};
-    var sub = p.broken ? '⚠ ' + p.broken + ' 出错'
-      : p.nextAt ? fmtClock(p.nextAt).replace(/^今天 /, '')
-      : String(R.schedules);
-    return tile('plan', '日程', sub, p.broken ? 'bad' : '');
-  };
   // 会话列表 ↔ 关系图: 侧栏第一行右上角同一个小开关, 标的是「点了去哪」。
   var LIST_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M3 4h10M3 8h10M3 12h10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
   var TREE_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M4 3v10M4 6h5M4 11h5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="11" cy="6" r="1.6" fill="currentColor"/><circle cx="11" cy="11" r="1.6" fill="currentColor"/></svg>';
@@ -623,8 +611,15 @@
     for (var el = e.target; el && el.nodeType === 1 && el !== document.body && !clipTip(el); el = el.parentElement);
   });
 
-  // 名片: 头像 · 名字 (忙闲 / session) · 名字下一行低调的描述 (🏠 home · 🐣 出生 · 🗂️ cwd) · 职责;
-  // 名片下面一排是关系 / 日程入口。身份与出身 (谁的分身 / 子 wizard) 交给关系图, 名片不写。
+  // 名片: 头像 · 名字 (忙闲 / session) · 名字下一行低调的描述 (🏠 home · 🐣 出生 · 🗂️ cwd · 📜 宪章 · 📅 日程) · 职责。
+  // 身份与出身 (谁的分身 / 子 wizard) 交给关系图 (侧栏标题右端的开关), 名片不写。
+  // 日程: 下一枪几点, 定时出错时染红改写出错数; 没有排期就只写条数 (定时 + 工单)。
+  var planFact = function () {
+    var p = R.plan || {};
+    var txt = p.broken ? '日程 ⚠ ' + p.broken + ' 出错' : p.nextAt ? '日程 ' + fmtClock(p.nextAt).replace(/^今天 /, '') : '日程 ' + R.schedules;
+    var tip = (p.tasks ? p.tasks + ' 条定时' : '') + (p.jobs ? (p.tasks ? ' · ' : '') + p.jobs + ' 个工单进行中' : '') + ' · 点开看日程';
+    return ['📅', txt, tip.replace(/^ · /, ''), 'plan', p.broken ? 'bad' : ''];
+  };
   var renderRole = function () {
     var r = R.role;
     if (!r) return;
@@ -634,10 +629,11 @@
       r.chat ? ['🏠', r.chat, 'home'] : null,
       born ? ['🐣', fmtClock(born), '出生于 ' + fmtDay(born)] : null,
       r.cwd ? ['🗂️', shortCwd(r.cwd), r.cwd] : null,
-      // 宪章排最后, 可点: 出生时被交代了什么。
-      R.charter ? ['📜', '宪章 ≈' + fmtTok(R.charter.tokens), fmtClock(R.charter.at) + ' 压进系统提示 · 点开看全文', 'charter'] : null
+      // 宪章与日程排最后, 可点: 出生时被交代了什么 / 名下排了什么。
+      R.charter ? ['📜', '宪章 ≈' + fmtTok(R.charter.tokens), fmtClock(R.charter.at) + ' 压进系统提示 · 点开看全文', 'charter'] : null,
+      R.schedules ? planFact() : null
     ].filter(Boolean).map(function (f) {
-      return '<span' + (f[3] ? ' class="fx' + (VIEW === f[3] ? ' on' : '') + '" data-view="' + f[3] + '"' : '') + ' title="' + esc(f[2]) + '">' + f[0] + ' ' + esc(f[1]) + '</span>';
+      return '<span' + (f[3] ? ' class="fx' + (VIEW === f[3] ? ' on' : '') + (f[4] ? ' ' + f[4] : '') + '" data-view="' + f[3] + '"' : '') + ' title="' + esc(f[2]) + '">' + f[0] + ' ' + esc(f[1]) + '</span>';
     });
     // 只有一段 session 就没什么可选, 不挂选择器。
     $('#rb-who').innerHTML =
@@ -657,13 +653,6 @@
     // 老外壳的底栏选择框已并进 name 行。
     if ($('#rb-foot')) $('#rb-foot').hidden = true;
     bindSessPicker();
-    // 入口只在有东西可看时出现 —— 挂在名片下、会话列表上, 不挤进名片: 名片的主角是身份,
-    // 家谱计数 (几个分身 / 子 wizard) 属于关系, 写在关系图入口上。
-    $('#rb-acts').innerHTML = [R.schedules && planTile()].filter(Boolean).join('<span class="sep" aria-hidden="true">｜</span>');
-    $('#rb-acts').querySelectorAll('.bd').forEach(function (b) {
-      var v = b.getAttribute('data-view');
-      b.onclick = function () { v === 'world' ? setWorld(!WORLD) : setView(VIEW === v ? 'msgs' : v); };
-    });
     // 标题就是这一页的主张: 你此刻站在谁的位置上。换视角 → 标题与 favicon 跟着换成它的头像。
     document.title = (r.label ? r.label + ' ' : '') + nameOf(r.id) + ' 的视角';
     setFavicon(r.label);

@@ -56,7 +56,6 @@ export const renderChatPage = (): string =>
     <header class="rolebar" id="rolebar">
       <div class="who" id="rb-who"></div>
     </header>
-    <div class="acts" id="rb-acts"></div>
     <nav class="convs" id="convs" aria-label="会话"></nav>
   </aside>
   <main class="main">
