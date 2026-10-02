@@ -1446,7 +1446,7 @@ const main = async (): Promise<void> => {
     };
 
     // 每个会话的宪章里写进了哪些 self 记忆。`/clear` 抹掉对话却不重写系统提示, 此后
-    // 新记的那些就只活在被抹掉的对话里 —— onClear 据这份快照补发差集。纯内存: reload
+    // 新记的那些就只活在被抹掉的对话里 —— onContextCut 据这份快照补发差集。纯内存: reload
     // 之后没有快照, 只指路不补发。
     const chartered = new Map<string, readonly string[]>();
 
@@ -1483,7 +1483,7 @@ const main = async (): Promise<void> => {
       return text;
     };
 
-    m.onClear((t) => {
+    m.onContextCut((t, cut) => {
       const now = wizards.get(t)?.memory ?? [];
       const seen = chartered.get(t);
       // 没有快照 (reload 之后) 就不猜差集, 只指路 —— 整份塞进一行能有几万字。
@@ -1494,7 +1494,7 @@ const main = async (): Promise<void> => {
       const fresh = now.filter((x) => !seen.includes(x));
       const gone = seen.filter((x) => !now.includes(x)).length;
       const shown = fresh.slice(-10).map((x) => `「${clipLine(x, 200)}」`).join(" ");
-      if (fresh.length) notices.post([t], `你出生之后记下的 self 记忆 (/clear 抹掉了对话, 宪章里没有它们)${fresh.length > 10 ? `, 最新 10 条` : ""}: ${shown}`);
+      if (fresh.length) notices.post([t], `你出生之后记下的 self 记忆 (${cut === "clear" ? "/clear 抹掉了对话" : "上下文压缩把对话换成了摘要"}, 宪章里没有它们)${fresh.length > 10 ? `, 最新 10 条` : ""}: ${shown}`);
       if (gone) notices.post([t], `宪章「我的记忆」里有 ${gone} 条已被你 forget, 别再照它们办`);
     });
 

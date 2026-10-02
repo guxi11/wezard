@@ -246,6 +246,8 @@ const resolveSession = (cfg: Config, log: Logger): ResolvedSession | undefined =
 interface TailDeps {
   jsonlPath: string;
   log: Logger;
+  /** 读到一条 `compact_boundary` (/compact 或自动压缩)。 */
+  onCompact?: () => void;
   includeUser: boolean;
   includeTools: boolean;
   includeToolResults: boolean;
@@ -1010,6 +1012,8 @@ export const startMirrorTail = (deps: TailDeps): TailHandle => {
       const line = buffer.slice(0, nl);
       buffer = buffer.slice(nl + 1);
       if (!line.trim()) continue;
+      // 压缩边界: 对话被摘要替换, 系统提示 (宪章) 不变 —— 同 /clear 一样要补记忆。
+      if (deps.onCompact && line.includes('"compact_boundary"')) deps.onCompact();
       for (const item of renderLine(line, deps)) deps.onItem(item);
     }
   };
@@ -2113,10 +2117,11 @@ export interface MirrorBridge {
    *  the count only grows at a birth, so that is the only moment worth
    *  counting. Fire-and-forget — it never delays or fails the spawn. */
   onSpawn: (fn: () => void) => void;
-  /** A session was truly cleared (`/clear`, injected or typed in the TUI): the
-   *  context is gone but the charter (system prompt) is still the birth-time one.
-   *  index.ts hangs the self-memory catch-up on it. Fire-and-forget. */
-  onClear: (fn: (target: string) => void) => void;
+  /** The session's conversation was cut while its charter (system prompt) stayed
+   *  the birth-time one: `clear` = a true `/clear` (injected or typed in the TUI),
+   *  `compact` = `/compact` or auto-compaction (a `compact_boundary` line in the
+   *  transcript). index.ts hangs the self-memory catch-up on it. Fire-and-forget. */
+  onContextCut: (fn: (target: string, cut: "clear" | "compact") => void) => void;
   /** Hard facts about one session — sessionId, transcript, cwd, backend, pane,
    *  and how full its context window is (prompt tokens of the last turn). */
   sessionInfo: (target: string) => { sessionId: string; jsonlPath: string; cwd: string; cli: CliBackendName; model: string; tmuxPane: string; contextTokens: number } | undefined;
@@ -4196,6 +4201,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       isOwnAssistantSend,
       isKeepalivePing,
       onItem: (item) => onItem(a, item),
+      onCompact: () => contextCut(a.target, "compact"),
       detailUrlFor,
       sessionId,
       target,
@@ -4580,7 +4586,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // drift 上下文是延续的, 画中性的 "switch"。
     const cleared = jsonlIsPostClearChild(newJsonlPath);
     markCut(a.target, newSessionId, cleared ? "clear" : "switch");
-    if (cleared) { try { afterClear(a.target); } catch (e) { log.warn({ target: a.target, err: (e as Error).message }, "onClear hook threw"); } }
+    if (cleared) contextCut(a.target, "clear");
     if (cleared) {
       // 真清空 = 缓存里已无任何值得保温的内容。像 /stop 一样暂停保活 —— 与
       // dispatch 里 WeCom 注入 /clear 的暂停对齐;TUI 手打 /clear 只走这个漏斗,
@@ -4607,6 +4613,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       isOwnAssistantSend,
       isKeepalivePing,
       onItem: (item) => onItem(a, item),
+      onCompact: () => contextCut(a.target, "compact"),
       detailUrlFor,
       sessionId: newSessionId,
       target: a.target,
@@ -4910,8 +4917,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 新 pane 落地后的钩子 —— pane 上限在这里数 (由 index.ts 装上; 没装 = 不数)。
   let afterSpawn: () => void = () => {};
   const onSpawn = (fn: () => void): void => { afterSpawn = fn; };
-  let afterClear: (target: string) => void = () => {};
-  const onClear = (fn: (target: string) => void): void => { afterClear = fn; };
+  let afterCut: (target: string, cut: "clear" | "compact") => void = () => {};
+  const onContextCut = (fn: (target: string, cut: "clear" | "compact") => void): void => { afterCut = fn; };
+  const contextCut = (target: string, cut: "clear" | "compact"): void => {
+    log.info({ target, cut }, "context cut");
+    try { afterCut(target, cut); } catch (e) { log.warn({ target, cut, err: (e as Error).message }, "onContextCut hook threw"); }
+  };
   // `cwd` = 这个 pane 正要启动的目录。attach 在 spawn 之后才发生, 所以此刻 getCwd
   // 给的还是上一个 pane 的目录 —— 换目录重开时照它渲染, 新 wizard 会以为自己还在
   // 旧工作区里。
@@ -6372,7 +6383,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     sessionInfo,
     setCharterProvider,
     onSpawn,
-    onClear,
+    onContextCut,
     shutdown: () => {
       clearInterval(paneDriftTimer);
       clearInterval(keepaliveTimer);
