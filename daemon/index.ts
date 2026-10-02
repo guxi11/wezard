@@ -68,7 +68,7 @@ import {
 } from "./wizard.js";
 import { bindNoticeBox, createNoticeBox, chatAudience } from "./notices.js";
 import { loadJobStore, renderJobOpen, renderJobClose, jobEpisode, JOB_MEMBER_MAX } from "./jobs.js";
-import { clipMiddle, contextFiles, firstStamp, parseClosing, lastContextTokens, lastExchange, lastModel, openingOf, replyClosedBefore, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
+import { cacheTtlSec, clipMiddle, contextFiles, firstStamp, parseClosing, lastContextTokens, lastExchange, lastModel, openingOf, replyClosedBefore, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { keepalivePingSigs } from "../shared/keepalive.js";
 import { expandHome } from "../shared/paths.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
@@ -1009,7 +1009,7 @@ const main = async (): Promise<void> => {
       // 唤醒代价同样要在注入之前量: 投进去 transcript 一动, 就看不出它冷了多久。
       const info = m.sessionInfo(target);
       const wake = info?.jsonlPath
-        ? wakeNoteOf(info.contextTokens, (() => { try { return statSync(info.jsonlPath).mtimeMs; } catch { return 0; } })(), at, cfg.wrc.mirror.keepalive.ttlSec * 1000)
+        ? wakeNoteOf(info.contextTokens, (() => { try { return statSync(info.jsonlPath).mtimeMs; } catch { return 0; } })(), at, (cacheTtlSec(info.jsonlPath) || cfg.wrc.mirror.keepalive.ttlSec) * 1000)
         : "";
       const deadlineSec = (body as { deadline?: number }).deadline;
       const deadlineAt = deadlineOf(at, deadlineSec === undefined ? undefined : Number(deadlineSec));
@@ -1645,9 +1645,11 @@ const main = async (): Promise<void> => {
         .filter((r) => !r.self)
         .map((r) => {
           const live = r.jsonlPath ? r.jsonlPath : "";
+          const ttl = live ? cacheTtlSec(live) : 0;
           return {
             ...r,
             contextTokens: live ? lastContextTokens(live) : 0,
+            ...(ttl ? { cacheTtlMs: ttl * 1000 } : {}),
             files: live ? contextFiles(live) : [],
             asks: live ? talkTurns(live, 12, warm).filter((t) => t.role === "user").map((t) => t.text) : [],
             summary: live ? lastExchange(live, 80, warm) : "",

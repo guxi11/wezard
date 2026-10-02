@@ -681,6 +681,27 @@ const pickContextTokens = (jsonlPath: string, raw: string): number => {
   return 0;
 };
 
+/** Prompt-cache TTL (s) this session actually writes with, read off the last
+ *  usage's per-tier split (`cache_creation.ephemeral_{1h,5m}_input_tokens`):
+ *  Claude Code on a subscription writes 1h entries, the bare API default is 5min.
+ *  0 = no tiered write on record (backend without the split, or no turn yet) —
+ *  the caller falls back to config. */
+export const cacheTtlSec = (jsonlPath: string): number =>
+  readTailUntil(jsonlPath, (raw) => pickCacheTtl(jsonlPath, raw), (v) => v > 0);
+
+const pickCacheTtl = (jsonlPath: string, raw: string): number => {
+  const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
+  const lines = raw.split("\n").filter((l) => l.includes("ephemeral_"));
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let row;
+    try { row = normalize(JSON.parse(lines[i]!)); } catch { continue; }
+    const cc = (row?.message?.usage as { cache_creation?: { ephemeral_1h_input_tokens?: number; ephemeral_5m_input_tokens?: number } } | undefined)?.cache_creation;
+    if ((cc?.ephemeral_1h_input_tokens ?? 0) > 0) return 3600;
+    if ((cc?.ephemeral_5m_input_tokens ?? 0) > 0) return 300;
+  }
+  return 0;
+};
+
 /** 这段上下文里读过 / 改过的文件 (旧的在前、去重, 同一文件按最后一次碰它的位置排)。
  *
  *  「它的上下文里装着什么」是可以算出来的事实: 从文件尾往回, 撞上 compact 边界就停

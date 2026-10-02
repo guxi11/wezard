@@ -48,7 +48,7 @@ import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagH
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
-import { stripAnsi, paneIsBusy, transcriptStalled, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, keepaliveStamps, openKeepalivePing, talkRounds, openToolUses, renderDialog, type PeerInfo, type PeerReply } from "./peers.js";
+import { stripAnsi, paneIsBusy, transcriptStalled, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, cacheTtlSec, keepaliveStamps, openKeepalivePing, talkRounds, openToolUses, renderDialog, type PeerInfo, type PeerReply } from "./peers.js";
 import { keepalivePingSigs, isKeepalivePingText } from "../shared/keepalive.js";
 
 // PATH augmentation: launchd / systemd start the daemon
@@ -2398,7 +2398,7 @@ interface AttachState {
    *  gate. `pinging`/`pingMtime` guard the inject→settle window (pingMtime holds
    *  `lastMs` at fire; the ping settles once a newer turn — its own — appears).
    *  `round` counts pings since the last real turn — surfaced as `n/N`. */
-  keepalive?: { lastMs: number; lastRealMs: number; seenMtime: number; pinging: boolean; pingMtime: number; round: number; settledAt: number };
+  keepalive?: { lastMs: number; lastRealMs: number; seenMtime: number; pinging: boolean; pingMtime: number; round: number; settledAt: number; ttlSec: number; stallFree: number };
   /** Keepalive paused by `/stop`. Stays off until a real turn resumes it — a
    *  WeCom inbound (dispatch) or the pane going busy on a genuine turn — so an
    *  explicitly-stopped session isn't poked until the human comes back. */
@@ -5551,7 +5551,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // N × rounds pings instead of rounds.
     let round = 0;
     try { const s = keepaliveStamps(jsonlPath, pingSigs); lastMs = s.lastMs; lastRealMs = s.lastRealMs; round = s.streak; } catch { /* unreadable tail */ }
-    return { lastMs, lastRealMs, seenMtime: mtime, pinging: false, pingMtime: 0, round, settledAt: 0 };
+    return { lastMs, lastRealMs, seenMtime: mtime, pinging: false, pingMtime: 0, round, settledAt: 0, ttlSec: cacheTtlSec(jsonlPath), stallFree: 0 };
   };
 
   const fireKeepalive = async (a: AttachState, stalled: boolean): Promise<void> => {
@@ -5609,8 +5609,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!kc.enabled || keepaliveTicking) return;
     keepaliveTicking = true;
     try {
-      const idleTriggerMs = Math.max(30, kc.ttlSec - kc.marginSec) * 1000;
-      const ttlMs = kc.ttlSec * 1000;
+      // Stall recovery keeps the configured window: a turn that died on an API
+      // error should be resumed minutes later, whatever the cache tier.
+      const stallQuietMs = Math.max(30, kc.ttlSec - kc.marginSec) * 1000;
       const pingSigs = [normAssistant(kc.ping).slice(0, 40), normAssistant(kc.resumePing).slice(0, 40)].filter((s) => s.length > 0);
       const now = Date.now();
       for (const a of byTarget.values()) {
@@ -5632,6 +5633,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           const s = keepaliveStamps(a.jsonlPath, pingSigs);
           if (s.stamped) { k.lastMs = s.lastMs; k.lastRealMs = s.lastRealMs; }
           else { k.lastMs = mtime; k.lastRealMs = mtime; } // backend without timestamps → fall back to mtime
+          k.ttlSec = cacheTtlSec(a.jsonlPath) || k.ttlSec;
         }
         k.seenMtime = mtime;
         // Round reset / real-activity re-anchor keys off REAL turns only — a
@@ -5664,15 +5666,25 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         }
         if (a.keepaliveOff) continue;                          // paused by /stop until real activity returns
         const idleSinceTouch = k.lastMs ? now - k.lastMs : now - mtime;   // last model turn = cache touch
-        if (idleSinceTouch < idleTriggerMs) continue;          // cache still comfortably warm
+        // The TTL the session's cache entries were actually written with (1h on a
+        // Claude Code subscription), not a guess: pinging at the 5min cadence
+        // against a 1h entry re-reads the whole context ~14x per hour for nothing.
+        const ttlMs = (k.ttlSec || kc.ttlSec) * 1000;
+        const idleTriggerMs = Math.max(30_000, ttlMs - kc.marginSec * 1000);
+        if (idleSinceTouch < stallQuietMs) continue;           // nothing due yet on either clock
         if (idleSinceTouch >= ttlMs) continue;                 // cache already cold — a ping would cold-rewrite for nothing
         if (k.round >= kc.rounds) continue;                    // budget spent — let it go cold
         // Stall recovery, decided by RULE only (no model self-judgment) and from
         // the transcript's structure only — never the screen: the turn is still
         // unfinished (died on a synthetic API error, or a tool result nobody
         // answered) and has been quiet for the whole idle window. Send the resume
-        // instruction instead of the plain warmer.
-        const stalled = kc.resumeOnStall && transcriptStalled(a.jsonlPath, keepalivePingSigs(kc.ping, kc.resumePing), idleTriggerMs, now);
+        // instruction instead of the plain warmer. A transcript found un-stalled a
+        // minute past the quiet window stays so until a new turn lands (= lastMs
+        // moves) — remembered, so a 1h idle stretch reads it once, not every tick.
+        const stalled = kc.resumeOnStall && k.stallFree !== k.lastMs
+          && transcriptStalled(a.jsonlPath, keepalivePingSigs(kc.ping, kc.resumePing), stallQuietMs, now);
+        if (!stalled && idleSinceTouch >= stallQuietMs + 60_000) k.stallFree = k.lastMs;
+        if (!stalled && idleSinceTouch < idleTriggerMs) continue;   // cache still comfortably warm
         k.pinging = true;
         k.pingMtime = k.lastMs;                                // settles when a newer turn (the ping's own) appears
         await fireKeepalive(a, stalled);

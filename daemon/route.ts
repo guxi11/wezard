@@ -20,6 +20,8 @@ export interface RouteRow extends WizardBrief {
   alive: boolean;
   lastActivity: number;
   contextTokens: number;
+  /** 它的缓存实际按多长 TTL 写的 (transcript 的 cache_creation 分档; 订阅下是 1h); 缺 = 用调用方给的默认。 */
+  cacheTtlMs?: number;
   /** 这段上下文里碰过的文件 (contextFiles), 绝对路径。 */
   files: readonly string[];
   /** 最近几句问话 (去掉了保温 ping)。 */
@@ -151,8 +153,9 @@ interface Ctx { now: number; home: string; ttlMs: number; small: boolean }
 const costLines = (e: Evidence, c: Ctx): string[] => {
   const ctx = e.row.contextTokens;
   if (!ctx) return [];
-  const w = wakeCostOf(ctx, e.row.lastActivity, c.now, c.ttlMs);
-  const ttl = `${Math.round(c.ttlMs / 60_000)} 分钟`;
+  const ttlMs = e.row.cacheTtlMs ?? c.ttlMs;
+  const w = wakeCostOf(ctx, e.row.lastActivity, c.now, ttlMs);
+  const ttl = `${Math.round(ttlMs / 60_000)} 分钟`;
   const wake = w.cold
     ? `缓存冷 (超过 TTL ${ttl}) · 唤醒要重写 ~${k(w.write)} 缓存 ≈ 白板 spawn 的 ${w.times} 倍`
     : `缓存热 (TTL ${ttl}内) · 唤醒只读缓存`;

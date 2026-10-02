@@ -151,17 +151,21 @@ const Mirror = z.object({
     .object({
       // Master switch. Off → no pings, no timer overhead.
       enabled: z.boolean().default(true),
-      // Prompt-cache TTL (s). Anthropic default is 300 (5min).
+      // Prompt-cache TTL (s) FALLBACK, plus the stall-recovery quiet window. The
+      // warm-ping cadence follows the TTL each session's cache was actually
+      // written with (`cache_creation.ephemeral_1h/5m` in its transcript — 1h on a
+      // Claude Code subscription); this only applies when no such split is on record.
       ttlSec: z.number().int().positive().default(300),
       // Fire this many seconds BEFORE ttl expiry — the ping needs slack to land
       // and settle. Effective idle trigger = ttlSec - marginSec.
       marginSec: z.number().int().nonnegative().default(45),
       // How many pings to fire after the last REAL (non-ping) turn before
       // letting the cache go cold. Pings fire at the cadence (ttlSec -
-      // marginSec = 255s) — i.e. always just before the cache would expire.
-      // Real activity resets the count, so 6 pings = ~26min of bridging
-      // restarts from each genuine turn. Each ping is a near-free cache-read;
-      // a single cold-rewrite of a large context costs ~1.25x of its full
+      // marginSec) — i.e. always just before the cache would expire.
+      // Real activity resets the count, so bridging restarts from each genuine
+      // turn: 6 pings = ~6h on a 1h cache (~26min on 5min). Each ping is a
+      // near-free cache-read (0.1x); a single cold-rewrite of a large context
+      // costs 1.25x (5min) / 2x (1h) of its full
       // size, so a handful of pings beats letting it expire while the user
       // is still around.
       rounds: z.number().int().positive().default(6),
