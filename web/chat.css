@@ -280,7 +280,6 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 .ch-who > .t:not(:only-child) { flex: 0 1 auto }
 .ch-who .sub { min-width: 0; font-size: 11.5px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .ch-acts { display: flex; gap: 8px; align-items: center; flex: 0 1 auto; min-width: 0; font-size: 12px; color: var(--mute) }
-.ch-acts .with { min-width: 0; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .ch-acts .vb { flex: none }
 .vb {
   font-size: 12.5px; background: var(--card); border: 1px solid var(--line); border-radius: 7px;
@@ -289,6 +288,9 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 .vb:hover { border-color: var(--accent); color: var(--accent) }
 .vb.on { background: var(--accent); border-color: var(--accent); color: #fff }
 .vb b { font-weight: 600; margin-left: 3px; font-variant-numeric: tabular-nums }
+/* 「全部」只是退回整个会话的出口, 不和标题抢眼: 无框、灰字, 悬停才显色。 */
+.vb.lite { border-color: transparent; background: none; color: var(--mute); padding: 2px 6px; font-size: 12px }
+.vb.lite:hover { border-color: transparent; color: var(--accent) }
 
 /* ── 消息 ─────────────────────────────────────────────────────────── */
 .thread {

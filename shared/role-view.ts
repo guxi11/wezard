@@ -396,12 +396,13 @@ export const convMessages = (msgs: readonly Msg[], role: string, key: string, wi
 };
 
 export interface TalkArgs { who: string; peers: string[]; chat?: string }
-/** 一个窗口交给 talkOf 的入参; 整个公开频道不是谁的往来, 没有。 */
+/** 一个窗口交给 talkOf 的入参; 整个公开频道不是谁的往来, 没有。群里选中一个子项 (withRole)
+ *  看的是那个 role 在这个群里的全部记录 —— 它和谁说的都算, 不只是和视角之间的。 */
 export const talkArgs = (role: string, key: string, withRole?: string): TalkArgs | undefined => {
   const t = parseTalkKey(key);
   if (t) return t;
   if (key.startsWith("p:")) return { who: role, peers: [key.slice(2)], chat: "" };
-  return withRole ? { who: role, peers: [withRole], chat: key.slice(2) } : undefined;
+  return withRole ? { who: withRole, peers: [], chat: key.slice(2) } : undefined;
 };
 
 /** 窗口是视角与恰好另一个 role 之间的往来时, 那个 role; 否则 (群 / 多个对端 / 不含视角) 没有。 */

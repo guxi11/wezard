@@ -799,9 +799,20 @@
     var c = convOf(CONV);
     if (!c) { who.innerHTML = ''; acts.innerHTML = ''; return; }
     if (c.kind === 'all') {
-      who.innerHTML = pairOf([[c.who]]) + '<span class="t">' + esc(c.name) + '</span>';
+      who.innerHTML = pairOf([[c.who]]) + '<span class="t" title="' + esc(c.name) + '"></span>';
       acts.innerHTML = '';
+      fitTalk(who.querySelector('.t'), c);
       bindGo(who);
+      return;
+    }
+    // 群里选中一个子项: 窗口是那个 role 在这个群里的记录, 顶栏就换成它 —— 它的头像、它的名字, 群名退到副标题。
+    if (WITH && c.kind === 'group') {
+      var s = (c.subs || []).filter(function (x) { return x.role === WITH; })[0];
+      who.innerHTML = pairOf([[WITH, s && s.label]]) + '<span class="t">' + nm(WITH, s && s.name, true) + '</span>' +
+        '<span class="sub">在 ' + esc(c.name) + '</span>';
+      acts.innerHTML = '<button class="vb lite" id="ch-all" title="' + esc('看 ' + c.name + ' 的全部记录') + '">全部</button>';
+      bindGo(who);
+      $('#ch-all').onclick = function () { selectConv(CONV, ''); };
       return;
     }
     // 一对一 (私聊, 或群里「只看我与 X」) 两端都亮头像: 我在前, 对端在后, 各自是切视角的入口。
@@ -810,13 +821,25 @@
     var peerLabel = c.kind !== 'group' ? c.label : dm && peer === dm.role ? dm.label : '';
     who.innerHTML = (peer ? pairOf([[ROLE, R.role && R.role.label], [peer, peerLabel]]) : '') +
       '<span class="t">' + (c.kind === 'wizard' ? nm(c.peer, c.name, true) : esc(c.name)) + '</span>';
-    acts.innerHTML = WITH
-      ? '<span class="with">只看我与 ' + nm(WITH, '', true) + '</span><button class="vb" id="ch-all">看全部</button>'
-      : '';
-    bindGo(who); bindGo(acts);
-    var x = $('#ch-all');
-    if (x) x.onclick = function () { selectConv(CONV, ''); };
+    acts.innerHTML = '';
+    bindGo(who);
   };
+  // 多人对话的标题放不下时, 收成「X 与 .a、.b、.c 等 N 个 role 之间的对话」—— 放得下几个列几个, 至少一个。
+  // 量的是真宽度: 没上屏 (窄屏还停在列表) 量不出来, 就先给全称, 等 resize / 下一次重画。
+  var fitTalk = function (el, c) {
+    var n = c.peers.length;
+    var at = function (k) {
+      return k >= n ? c.name : nameOf(c.who) + ' 与 ' + c.peers.slice(0, k).map(nameOf).join('、') + ' 等 ' + n + ' 个 role 之间的对话';
+    };
+    var k = n;
+    el.textContent = at(k);
+    if (!el.clientWidth) return;
+    while (k > 1 && el.scrollWidth > el.clientWidth + 1) el.textContent = at(--k);
+  };
+  window.addEventListener('resize', function () {
+    var c = VIEW === 'msgs' && convOf(CONV);
+    if (c && c.kind === 'all') renderHead();
+  });
 
   // ── 消息行 ──
   // 同一条消息从发话方看靠右、从收信方看靠左 —— 片段不带方向, 由这里按视角包装。
@@ -1144,10 +1167,10 @@
     W.treeFor = '';
     var keep = CONV && CONV.indexOf('c:') === 0 ? CONV : '';
     var from = ROLE;
-    // 整个频道 / 两人私聊的消息集合与视角无关 —— 只有 with 与 session 按 role 过滤。
-    var same = VIEW === 'msgs' && !WITH && !SESSION && (keep || CONV.indexOf('p:') === 0);
-    // 群里「只看我与 X」时换过去, 对面看到的是「只看我与 from」—— 同一段往来, 选中只看而不是整个群。
-    var withBack = keep && WITH ? from : '';
+    // 群里选中 X 的子项时换到 X: 窗口仍是「X 在这个群里的记录」, 同一批消息; 换到别人则看整个群。
+    var withBack = keep && WITH === id ? id : '';
+    // 整个频道 / 两人私聊 / 某 role 在群里的记录, 消息集合都与视角无关 —— 集合没变就就地翻面。
+    var same = VIEW === 'msgs' && WITH === withBack && !SESSION && (keep || CONV.indexOf('p:') === 0);
     ROLE = id; WITH = withBack; SESSION = '';
     CONV = keep || (CONV.indexOf('p:') === 0 ? 'p:' + from : '');
     // 停在关系图时换视角 = 选中新视角自己那张卡片: 先开它的全部对话 (不留旧选中 / 空白),
