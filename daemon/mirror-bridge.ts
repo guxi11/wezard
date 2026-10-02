@@ -719,7 +719,8 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
       // the reply turn is swallowed by content in onItem. Timer windows can't
       // cover reloads or replays; the user message itself always can.
       if (deps.isKeepalivePing?.(text)) return [{ kind: "keepalive_start", body: text }];
-      if (deps.isOwnInject(text)) return []; // dedupe WeCom→CLI echo
+      // 自己注入的那一行不回显, 但要报个到: 它的印章 (谁说的、回复去哪) 在这一刻认领。
+      if (deps.isOwnInject(text)) return [{ kind: "user_query", body: unwrapPasted(c).trim(), said: text }];
       const quoted = text.split("\n").map((l) => `> ${l}`).join("\n");
       // includeUser 只决定"渲不渲染", 不决定"算不算边界" —— quiet 的这一条照样发出,
       // onItem 消费完边界语义后自己丢掉。
@@ -2233,6 +2234,27 @@ interface QueuedTurn {
   isSlash: boolean;
 }
 
+/** 一次注入的印章 —— 这一行是谁说的、在哪个频道说的 (回复就去那里)。按行记, 在那一行
+ *  真的出现在 transcript 里时才认领 (bindLine): 一个格子里先后盖章, 后一枚会顶掉前一枚,
+ *  人在别人排着的回执之后开口就会把回执的出处偷走 —— 回复因此标给了错的人、发错了地方。 */
+interface Seal {
+  /** 那一行落盘后剥掉信封的样子 (cleanUserText, 同回显去重); 斜杠命令另有反引号形。 */
+  keys: string[];
+  at: number;
+  /** 这一轮的问话 (不带信封的原话)。 */
+  query: string;
+  from?: TurnFrom;
+  channel?: string;
+  speaker?: string;
+  origin?: TurnOrigin;
+  /** 贴进去那一刻对方闲着 —— 这一行必定开新的一轮; 忙时贴进去的可能插进了正在跑的那一轮。 */
+  fresh: boolean;
+  /** 人从聊天里说的那一句: dispatch 预建的 turn 与气泡, 行一露面就接成活跃 turn。 */
+  turn?: QueuedTurn;
+  /** 那一轮已经接上了 (dispatch 时对方闲着就当场接) —— 行露面时不再接第二次。 */
+  activated?: boolean;
+}
+
 interface ActiveStream {
   turnId: string;
   frame: WsFrameHeaders;
@@ -2305,8 +2327,10 @@ interface AttachState {
    *  盖章、下一轮消费、超期作废。两个印章各走各的: graph 那一路两者都盖不上,
    *  peer 那一路只有出处, 合成一个字段就得让读的人去猜哪几种组合合法。 */
   pendingFrom?: { from: TurnFrom; at: number };
-  /** 待记账的频道 (dispatch / injectText 盖章, 下一轮开 turn 时消费, 同一套一次性语义)。 */
+  /** 待记账的频道 (行露面时由 bindLine 从它的印章落下, 下一轮开 turn 时消费, 同一套一次性语义)。 */
   pendingChannel?: { channel: string; speaker?: string; at: number };
+  /** 注入了、还没在 transcript 里露面的那些行, 各带各的印章 (见 Seal)。 */
+  seals?: Seal[];
   /** 本轮 (或最近一轮) 的频道 —— 回复推到哪个群。undefined = home (target 的 base);
    *  "" = 私聊, 本轮一个字都不进群。与 turnFromChat 一样收口不清零: 收口后补写的
    *  零星 item 属于同一场对话。 */
@@ -2568,7 +2592,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // The warmer alone — what the peer readers (peek / wait / roster summary) strip.
   // `resumePing` is excluded on purpose: the turn it opens is real work resumed.
   const warmerSigs = keepalivePingSigs(cfg.wrc.mirror.keepalive.ping);
-  const isKeepalivePing = (text: string): boolean => isKeepalivePingText(text, pingSigs);
+  // 行上只认保温那一句: 报错之后的续跑 (resumePing) 开出的是那一轮的接续, 整轮吞掉的话
+  // 续出来的结论既不进群也没有频道。续跑若只回了 pong, 回复侧的那道保险照样吞。
+  const isKeepalivePing = (text: string): boolean => isKeepalivePingText(text, warmerSigs);
 
   // ── Typewriter stream lifecycle ────────────────────────────────────
   // WeCom spec: server polls us for stream refreshes for up to 6 min from the
@@ -3216,14 +3242,71 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const cliOf = (a: AttachState): CliBackendName | undefined =>
     a.jsonlPath ? backendForPath(a.jsonlPath).name : undefined;
 
-  const startBriefTurn = async (a: AttachState, frame: WsFrameHeaders, streamId: string, isSlash = false, userQuery = ""): Promise<void> => {
-    const turnId = newTurnId();
+  // ── 印章 (见 Seal) ──────────────────────────────────────────────
+  // 盖在行上而不是格子里: 注入时记下, 行在 transcript 里露面时认领。比回显去重的 60s 活得久 ——
+  // 排在长轮后面的那一行露面时早过了 60s, 认不出就会被当成人在 CLI 里敲的。
+  const SEAL_TTL_MS = 2 * 3600_000;
+  const sealKeys = (text: string): string[] => {
+    const t = cleanUserText(text);
+    if (!t.startsWith("/")) return t ? [t] : [];
+    const head = t.split(/\s+/, 1)[0] ?? t;
+    const args = t.slice(head.length).trim();
+    return [t, `\`${head}${args ? ` ${args}` : ""}\``];
+  };
+  const pushSeal = (a: AttachState, s: Seal): void => {
+    const now = Date.now();
+    a.seals = [...(a.seals ?? []).filter((x) => now - x.at <= SEAL_TTL_MS), s];
+  };
+  /** 露面的这一行认领它的印章, 先注入的先认。CLI 把排队的几句并成一行时, 包含在里面的都算
+   *  露过面, 出处取第一枚。认不出 = undefined。 */
+  const takeSeal = (a: AttachState, said: string): Seal | undefined => {
+    const t = said.trim();
+    const hit = (x: Seal): boolean => x.keys.some((k) => k === t || (k.length >= 8 && t.includes(k)));
+    const seals = a.seals ?? [];
+    const first = seals.find(hit);
+    if (first) a.seals = seals.filter((x) => !hit(x));
+    return first;
+  };
+  /** 人在聊天里说的那一句接成活跃 turn: 收掉在跑的那一轮, 频道与发话人取它自己的印章。 */
+  const activateDispatch = (a: AttachState, s: Seal): void => {
+    const q = s.turn!;
+    s.activated = true;
     a.queryEpoch = (a.queryEpoch ?? 0) + 1; // WeCom 侧的新一轮同样是 query 边界
     a.turnFromChat = true;                  // 出处确凿: 这一轮有 frame, 群里就是它的主场
     a.pendingFromCli = false;               // 人改从聊天里说话了, 之前那条 CLI 输入不再是出处
-    const from = consumeFrom(a);
-    consumeChannel(a, true, from);
-    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: userQuery.trim() || undefined, origin: consumeOrigin(a), from, ...channelFields(a) });
+    // 人说的这一轮没有同伴出处: 别的行认领了、还没开出轮的印章被这一句接管, 一并作废。
+    a.pendingFrom = undefined;
+    a.pendingOrigin = undefined;
+    a.pendingBriefQuery = undefined;
+    a.pendingChannel = { channel: s.channel ?? baseOfKey(a.target), speaker: s.speaker, at: Date.now() };
+    consumeChannel(a, true, undefined);
+    recordTurnStart({ id: q.turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: s.query.trim() || undefined, createdAt: s.at, ...channelFields(a) });
+    if (a.briefTurnId) closeBriefTurn(a);
+    openBriefTurn(a, q);
+  };
+  /** 一行注入露面了: 把它的印章落成下一轮的出处 / 频道。返回认领到的印章。 */
+  const bindLine = (a: AttachState, said: string): Seal | undefined => {
+    const s = takeSeal(a, said);
+    if (!s) return undefined;
+    if (s.turn) {
+      if (!s.activated) activateDispatch(a, s);
+      return s;
+    }
+    // 忙时贴进去、正在跑的那一轮还没出终句: 它是插进那一轮的话 (priority now), 那一轮的
+    // 回复仍归原来那一方。闲时贴进去的、或上一轮已经说完的, 才是新一轮的开头。
+    if (a.briefTurnId && !a.briefConcluded && !s.fresh) return s;
+    if (a.briefTurnId) closeBriefTurn(a);
+    const now = Date.now();
+    a.pendingFrom = s.from ? { from: s.from, at: now } : undefined;
+    a.pendingOrigin = s.origin ? { origin: s.origin, at: now } : undefined;
+    // 没写频道的注入 (graph 步骤 / 手动 inject) 等同在 home 里开口: 印章就是全部出处, 不沿用上一轮的。
+    a.pendingChannel = { channel: s.channel ?? baseOfKey(a.target), at: now };
+    a.pendingBriefQuery = s.query;
+    return s;
+  };
+
+  const startBriefTurn = async (a: AttachState, frame: WsFrameHeaders, streamId: string, isSlash = false, userQuery = "", channel?: string, speaker?: string): Promise<void> => {
+    const turnId = newTurnId();
     // hardTimer 兜底: turn 若无终句 / turn_end 收口 (卡死/漏收), 到点仍收气泡。
     const bubble: BriefBubble = { frame, streamId, hardTimer: undefined as unknown as NodeJS.Timeout, done: false };
     const q: QueuedTurn = { turnId, bubble, isSlash };
@@ -3234,14 +3317,21 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const live = a.briefBubble === bubble && !a.briefConcluded;
       void finishBubble(a, bubble, `${briefDetailLink(turnId, a.target)}${live ? ` ${STILL_WORKING}` : ""}`, true);
     }, HARD_TIMEOUT_MS);
+    const seal: Seal = { keys: sealKeys(userQuery), at: Date.now(), query: userQuery, channel, speaker, fresh: true, turn: q };
+    // 对方闲着 → 这一句就是下一轮, 当场接上。正忙 (在跑别人的回执 / 派活 / 上一句) 就先排着:
+    // 那一轮的回复不能流进这一句的气泡, 等它在 transcript 里露面再接 (bindLine)。turn 记录
+    // 先建好, ack 里的链接点得开。斜杠命令的行未必露面, 当场接。
+    const queued = !isSlash && idleVerdict(a.target) === false;
+    pushSeal(a, seal);
+    if (queued) recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: userQuery.trim() || undefined, channel: channel ?? baseOfKey(a.target), speaker });
+    else activateDispatch(a, seal);
     // 新消息 = 对话边界: 立刻收掉上一 turn, 新 turn 直接激活、不排队。收口语义见
     // closeBriefTurn: 有正文收入旧气泡, 没正文不写一个字 (绝不因边界结束凭空新发/
     // 覆盖消息)。旧 turn 在 CLI 侧的剩余产出自然流入新气泡 —— "新回复走最新气泡"
     // 正是这个语义。代价是旧 turn 页提前标完、尾部 item 记到新 turn 名下, 但远小于
     // 排队的代价: 排队 turn 的 frame 在前一个长 turn 期间 (可达数分钟) 过期, 激活后
-    // replyStream 全被 WeCom 拒收 (#stream 事故的静默根因)。
-    if (a.briefTurnId) closeBriefTurn(a);
-    openBriefTurn(a, q);
+    // replyStream 全被 WeCom 拒收 (#stream 事故的静默根因)。所以只在前面真有别人的行排着时
+    // 才排 (见上): 接上时气泡若已过期, 正文走 standalone (concludeBriefTurn)。
     // ack 即详情链接。URL 的三个入参 (turnId / target / host) 在收消息这一刻全部已知 ——
     // turnId 是本地生成的, 详情页记录也已在 recordTurnStart 建好, 所以不必等 CLI 产出,
     // 也不必猜后端: codebuddy 那种几十秒后才落盘的轮, 入口从第一秒就在。
@@ -3787,6 +3877,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // (crashed reply). Release BEFORE the swallow gate so this real line (and
     // its reply) mirror normally instead of being eaten by the stale swallow.
     if (item.kind === "user_text") {
+      // 回显去重只认 60s 内的注入: 排在长轮后面的那一行露面时已经过期, 会被当成人在 CLI 里敲的。
+      // 印章认得出就仍是那次注入 —— 不回显, 也不算 CLI 轮。
+      if (bindLine(a, item.body.replace(/^> ?/gm, ""))) return;
       endKeepaliveSwallow(a);
       // 对话边界 = 旧 turn 清算。上一 turn 派发而未返回的前台 Agent/Task 到此作废,
       // 清掉防残留阻塞新 turn 的软收口 (guard 的 defer 判断依据)。
@@ -3801,6 +3894,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 还有一轮等着懒建 (peer / graph 注入先记了 pendingBriefQuery) 就换掉它; 否则这句话
     // 就是已开好的那一轮 (IM 侧说的, startBriefTurn 在注入前建好)。
     if (item.kind === "user_query") {
+      // 同伴 / 定时 / graph 注入的那一行: 问话就是印章里的原话 (不带信封)。
+      const sealed = bindLine(a, item.said);
+      if (sealed && !sealed.turn) return;
       if (a.pendingBriefQuery !== undefined || !a.briefTurnId) a.pendingBriefQuery = item.body;
       // 只认同一句话: 轮次中途 CLI 里又粘了一张图, 不能改写正在跑的这一轮的问话。
       else recordTurnQuery(a.briefTurnId, item.body, (prev) => cleanUserText(prev ?? "") === item.said);
@@ -5716,7 +5812,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // the turn somehow never emits turn_end, so a later real turn is never muted;
     // it also closes the detail turn so it can't hang open in the chat timeline.
     rememberInject(text);
-    a.keepaliveQuiet = setTimeout(() => {
+    // 续跑不是保温 (见 isKeepalivePing): 不开吞没窗口, 也不记成保温轮。
+    if (!stalled) a.keepaliveQuiet = setTimeout(() => {
       a.keepaliveQuiet = undefined;
       if (a.keepaliveTurnId) { recordTurnClose(a.keepaliveTurnId); a.keepaliveTurnId = undefined; }
     }, 60_000);
@@ -5740,7 +5837,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // closed on the ping's turn_end (or the fail-safe). Kept out of chat.
     // The tail's keepalive_start (content match on the user line) may have
     // opened this turn already — only open when it hasn't.
-    if (!a.keepaliveTurnId) {
+    if (!stalled && !a.keepaliveTurnId) {
       const turnId = newTurnId();
       a.keepaliveTurnId = turnId;
       recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), userQuery: text });
@@ -6179,12 +6276,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       rememberInject(full);
       // 印章要早于 inject 落地 —— tail 是独立轮询的, 它可能在 inject 的 promise
       // resolve 之前就看到 user 行并开出 turn, 那时归因必须已经在位。
-      if (origin) a.pendingOrigin = { origin, at: Date.now() };
-      if (opts?.from) a.pendingFrom = { from: opts.from, at: Date.now() };
-      if (opts?.channel !== undefined) a.pendingChannel = { channel: opts.channel, at: Date.now() };
-      // 注入的那一行会被 recentInjects 当回显吞掉, 走不到 user_text —— 本轮的 query
-      // (rolepage 上「谁对它说了什么」那一半) 只能在这里记。
-      a.pendingBriefQuery = text;
+      // 印章随这一行走 (见 Seal): 行露面时才落成那一轮的出处 / 频道 / 问话。
+      pushSeal(a, { keys: sealKeys(full), at: Date.now(), query: text, from: opts?.from, channel: opts?.channel, origin, fresh: idleVerdict(target) === true });
       const sid = a.sessionId;
       const paneAlive = a.tmuxPane ? await paneUsable(a.tmuxPane, a.jsonlPath) : false;
       if (!paneAlive) {
@@ -6525,7 +6618,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       }
       persistPause(a); // persist the pause/resume too, else a reload would revert it
       // 频道印章要早于任何开 turn 的路径 (startBriefTurn 同步消费)。
-      a.pendingChannel = { channel: channel ?? baseOfKey(principal), speaker, at: Date.now() };
+      // brief 模式下频道随这一句的印章走 (startBriefTurn); 其余路径仍是开 turn 时消费的格子。
+      if (!cfg.wrc.mirror.brief || isClearCommand(text)) a.pendingChannel = { channel: channel ?? baseOfKey(principal), speaker, at: Date.now() };
       // Finalize prior live stream (if any) so this new turn renders into its
       // own message bubble. Then open a fresh stream tied to the new frame and
       // ack immediately so WeCom doesn't time out while inject queues.
@@ -6606,7 +6700,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // 挂 loading 气泡并起新 turn —— 上一 turn 若还在跑, startBriefTurn 内部
         // 会立刻把它收掉 (对话边界策略), 本轮直接成为活跃 turn。
         // 后续 onItem 走 handleBriefItem, 不再走 stream / defer 路径。
-        await startBriefTurn(a, frame, streamId, isSlash, text);
+        await startBriefTurn(a, frame, streamId, isSlash, text, channel ?? baseOfKey(principal), speaker);
       } else if (!armMigration && !eagerOpen) {
         enterDeferred(a, frame, streamId);
       }
