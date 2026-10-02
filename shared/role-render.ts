@@ -143,7 +143,7 @@ const FAIL = new Set(["timeout", "silent", "dead", "canceled"]);
 /** 移交行的 rolepage 那一半: 对方是名录里的谁 (头像 + 名字), 整行点了开双方的那段往来并落到这一句,
  *  这件活此刻到了哪一步 —— 这一句之后的第一份回执就是它的定论 (need 之后续问再交, 那是下一行的),
  *  没落定就看它接手了没有。每次请求现算, 不进轮次缓存: 回执比派活那一轮晚到, 气泡的 sig 得跟着它变。 */
-const handoffDeco = (r: TurnDetailRecord, records: readonly DetailRecord[], dir: Directory): HandoffDeco => {
+const handoffDeco = (r: TurnDetailRecord, records: readonly DetailRecord[], dir: Directory, now: number): HandoffDeco => {
   const landed = (h: Handoff): TurnDetailRecord | undefined => (h.turn ? dispatchFor(records, { ...h, turn: h.turn }) : undefined);
   return {
     who: (h) => {
@@ -165,6 +165,7 @@ const handoffDeco = (r: TurnDetailRecord, records: readonly DetailRecord[], dir:
       const key = st === "done" || st === "need" || st === "error" ? st : FAIL.has(st) ? "fail" : "run";
       return { key, tip: `回执 · ${RCPT[st] ?? st}` };
     },
+    acct: (h) => ((d) => (d ? turnUsageChips(d, now) : ""))(((d) => d && hostOf(d, records))(landed(h))),
   };
 };
 
@@ -191,23 +192,50 @@ const base = (m: Pick<Msg, "from" | "to" | "channel">, dir: Directory) => ({
   toName: dir.nameOf(m.to), toLabel: dir.labelOf(m.to),
 });
 
-/** 同伴派来的那句是发话方某一轮里说出去的: 那一轮 = 发话方在这一刻正跑着的主会话轮次。
- *  它的账 (模型 / ctx / 耗时) 就是这条入消息的描述 —— 与答话那一侧同一份 chips, 两方会话里同样被 .two 藏掉。
- *  人说的、定时任务放的没有自己的账。 */
-const senderTurn = (r: TurnDetailRecord, records: readonly DetailRecord[], dir: Directory): TurnDetailRecord | undefined => {
-  const from = r.from?.kind === "peer" ? r.from.from : undefined;
-  if (!from || !dir.isWizard(from)) return undefined;
-  return records.filter(isTurn)
-    .filter((t) => t.target === from && !t.agent && t.createdAt <= r.createdAt)
+/** `who` 在 `ts` 这一刻正跑着的主会话轮次 —— 它这一刻说出去的话 (派活、插话、notify) 都记在这一轮的账上。 */
+const turnAt = (records: readonly DetailRecord[], who: string, ts: number): TurnDetailRecord | undefined =>
+  records.filter(isTurn)
+    .filter((t) => t.target === who && !t.agent && t.createdAt <= ts)
     .reduce<TurnDetailRecord | undefined>((best, t) => (!best || t.createdAt > best.createdAt ? t : best), undefined);
+
+/** 插话的轮次外形 (id `<轮>~<序号>`) 没有自己的账: 它落进的那一轮才是。 */
+const hostOf = (t: TurnDetailRecord, records: readonly DetailRecord[]): TurnDetailRecord | undefined =>
+  t.id.includes("~") ? records.filter(isTurn).find((x) => x.id === t.id.slice(0, t.id.indexOf("~"))) : t;
+
+/** 同伴派来的那句是发话方某一轮里说出去的: 它的账 (模型 / ctx / 耗时) 就是这条入消息的描述 ——
+ *  与答话那一侧同一份 chips, 两方会话里同样只藏模型 / ctx。人说的、定时任务放的没有自己的账。 */
+const senderTurn = (r: TurnDetailRecord, records: readonly DetailRecord[]): TurnDetailRecord | undefined =>
+  r.from?.kind === "peer" && r.from.from ? turnAt(records, r.from.from, r.createdAt) : undefined;
+
+/** notify 贴的那段话装在一个零时长的轮次外形里 (见 messageOfPost): 账记在发话 wizard 贴它时跑着的那一轮。 */
+const POSTS = new WeakMap<readonly DetailRecord[], Set<string>>();
+const isPostTurn = (r: TurnDetailRecord, records: readonly DetailRecord[]): boolean =>
+  (POSTS.get(records) ?? ((s) => (POSTS.set(records, s), s))(new Set(records.filter((x) => x.kind === "post").map((x) => x.id)))).has(r.id);
+
+/** 片段里读了 `r` 这一轮的账或结论的**别的**记录 —— `r` 变了它们得跟着重推:
+ *  记在 `r` 账上的入消息 / notify, `r` 接手 (或回执) 的那件活所在的移交行, 回执认领的答话轮。 */
+export const dependentsOf = (r: TurnDetailRecord, records: readonly DetailRecord[]): string[] => {
+  // 先按「r 之后、r 的主人说的」收窄, 再逐条认账 —— 每个脏轮都要算一遍, 不能对全表两两比。
+  const said = records
+    .filter((x) => x.createdAt >= r.createdAt && (x.kind === "post" ? x.target === r.target : isTurn(x) && x.from?.kind === "peer" && x.from.from === r.target))
+    .filter((x) => turnAt(records, r.target ?? "", x.createdAt)?.id === r.id);
+  const f = r.from?.kind === "peer" ? r.from : undefined;
+  const owner = f?.turn ? (f.receipt ? r.target : f.from) : undefined;
+  const handed = owner ? records.filter(isTurn).filter((t) => t.target === owner && t.items.some((it) => it.t === "tool_result" && it.body.includes(f!.turn!))) : [];
+  const answered = f?.receipt ? [answerOf(r, records)].filter((t): t is TurnDetailRecord => !!t) : [];
+  return [...new Set([...said, ...handed, ...answered].map((x) => x.id))].filter((id) => id !== r.id);
 };
 
 export const renderMsg = (m: Msg, records: readonly DetailRecord[], dir: Directory, now: number): MsgFragment => {
   const r = m.turn;
-  const sent = m.dir === "in" ? senderTurn(r, records, dir) : undefined;
+  const acct = (t: TurnDetailRecord | undefined) => (t ? turnUsageChips(t, now) : "");
+  const out = (g: TurnFragment) => ({
+    html: g.html,
+    meta: receiptChip(r, records, dir) + jobChip(r) + (isPostTurn(r, records) ? acct(turnAt(records, r.target ?? "", r.createdAt)) : g.meta),
+  });
   const { html, meta } = m.dir === "in"
-    ? { html: renderIn(r), meta: sent ? turnUsageChips(sent, now) : "" }
-    : ((g) => ({ html: g.html, meta: receiptChip(r, records, dir) + jobChip(r) + g.meta }))(((deco) => renderTurnGroup(r, now, childrenOf(records, r.id, now, deco), false, deco))(handoffDeco(r, records, dir)));
+    ? { html: renderIn(r), meta: acct(senderTurn(r, records)) }
+    : out(((deco) => renderTurnGroup(r, now, childrenOf(records, r.id, now, deco), false, deco))(handoffDeco(r, records, dir, now)));
   const live = m.dir === "out" && !turnDone(r, now);
   return {
     id: m.id, turnId: r.id, dir: m.dir, ...base(m, dir), ts: m.ts,

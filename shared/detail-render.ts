@@ -664,6 +664,8 @@ export interface HandoffDeco {
   who: (h: Handoff) => string;
   attrs: (h: Handoff) => string;
   status: (h: Handoff) => HandoffStatus;
+  /** 接手这件活的那一轮的账 (模型 / ctx / 耗时); 还没接手 = ""。 */
+  acct: (h: Handoff) => string;
 }
 
 // 排队 / 插话 / 打断只在投的那一刻对方正忙时才真发生 —— 只标真发生的那一种, 闲着 (或回包没说) 就不标。
@@ -706,7 +708,8 @@ const renderHandoff = (h: Handoff, deco?: HandoffDeco): string => {
     : h.state === "lost" ? { key: "need", tip: "没等到回包, 交没交出去不确定" }
     : deco ? deco.status(h) : { key: "plain", tip: h.re ? "续问" : "已移交" };
   const lost = h.state === "lost" ? `<span class="ho-why" title="${escHtml(h.reason ?? "")}">交没交出去不确定</span>` : "";
-  return hoBox("", attrs, `${hoArrow(st)}移交 ${who}${turn}${tags}${lost}`, h.text);
+  const acct = deco ? deco.acct(h) : "";
+  return hoBox("", attrs, `${hoArrow(st)}移交 ${who}${turn}${tags}${lost}${acct ? `<span class="ho-acct">${acct}</span>` : ""}`, h.text);
 };
 
 /** `lazyTurn`: 正文不随气泡下发, 只留一个指回 (turn, toolUseId) 的空壳, 客户端展开时再取。
@@ -792,7 +795,7 @@ const usageChips = (r: TurnDetailRecord, done: boolean, ageMs: number): string =
     ctxPeak ? `<span class="tg-tok" title="上下文峰值">ctx ${fmtTok(ctxPeak)}</span>` : "",
     // 耗时只在收口后写死 —— 进行中的 turn 每次渲染都会得到不同的 ageMs, 会把 sig 打乱,
     // 让 SSE 的"内容没变就不重发"彻底失效。进行中只给开始时刻 (不变), rolepage 按它走表。
-    // 单独一个 .tg-dur: rolepage 两人对话里与模型 / ctx 一起藏掉 (.mrow.two), 只留时刻。
+    // 单独一个 .tg-dur: rolepage 两人对话里藏模型 / ctx (.mrow.two), 时刻与耗时都留着。
     done
       ? `<span class="tg-dur">${escHtml(fmtDuration(ageMs))}</span>`
       : `<span class="tg-dur live" data-since="${r.createdAt}"></span>`,

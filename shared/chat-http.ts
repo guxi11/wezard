@@ -30,7 +30,7 @@ import {
   allMessages, convKeyOf, convMessages, chatKeysOf, parseTalkKey, glanceOfTalk, convsOf, jobConvsOf, jobOfKey, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
   roleInfo, roleStats, sessionsOf, talkArgs, talkOf, counterpartOf, windowStats, type Directory, type Msg, type SessionSpan,
 } from "./role-view.js";
-import { renderJobMarks, renderMark, renderMsg, type MsgFragment } from "./role-render.js";
+import { dependentsOf, renderJobMarks, renderMark, renderMsg, type MsgFragment } from "./role-render.js";
 import { searchRole } from "./role-search.js";
 import { charterBrief, charterView } from "./charter-view.js";
 import { renderToolBody } from "./detail-render.js";
@@ -375,8 +375,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       if (job) renderJobMarks(job, makeDirectory(records, ff)).forEach(pushFrag);
     };
 
-    /** 这一轮拆出的消息里, 落在当前窗口的那几条。 */
-    const pushTurn = (id: string, records: readonly DetailRecord[], dir: Directory, now: number): void => {
+    /** 这一轮拆出的消息里, 落在当前窗口的那几条; `deep`: 连同读了它的账 / 结论的别的轮次 (见 dependentsOf)。 */
+    const pushTurn = (id: string, records: readonly DetailRecord[], dir: Directory, now: number, deep = true): void => {
       if (!v || !v.conv) return;
       const r = store.get(id);
       if (!r) return;
@@ -396,6 +396,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       const own = messagesOfTurn(top);
       const inWin = new Set(convMessages(own, v.role, v.conv, v.with || undefined).filter((m) => inSpan(v!.span)(m.ts)).map((m) => m.id));
       own.filter((m: Msg) => inWin.has(m.id)).forEach((m) => pushFrag(renderMsg(m, records, dir, now)));
+      if (deep) dependentsOf(top, records).forEach((d) => pushTurn(d, records, dir, now, false));
     };
 
     void pushRole();

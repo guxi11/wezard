@@ -1145,8 +1145,8 @@
       : '';
     var priv = !m.channel && group ? '<span class="ch priv">私聊</span>' : '';
     // 本轮的账 (呼吸点 + 模型 / 上下文 / 耗时) 跟在时刻后面 —— 片段是服务端渲染好的。
-    // 只在多方会话里有用 (分得清谁跑的什么模型); 两个 role 之间的对话里整行挂 .two, 头像行 (.mstat) 与
-    // 终句气泡的时间行 (.say-cap) 的指标一并藏掉, 呼吸点与回执留着。
+    // 模型 / ctx 只在多方会话里有用 (分得清谁跑的什么模型); 两个 role 之间的对话里整行挂 .two, 头像行 (.mstat)、
+    // 终句气泡的时间行 (.say-cap) 与移交行的账 (.ho-acct) 里藏掉这两样, 耗时、呼吸点与回执留着。
     var c = convOf(CONV);
     var two = !group || !!pairPeer(c) || (!!c && c.kind === 'all' && c.peers.length === 1);
     var stat = m.meta ? '<span class="mstat">' + jobChips(m.meta) + '</span>' : '';
