@@ -31,5 +31,6 @@
 | B2a | ✅ | `e9bea6e` `15c1cf6` `af9102d` `26f57bf` `2f5dd5a` `7a76bb6` `5052687` `779daf1` `4530ac7` `c017c99` | 判闲走注册表 · 回执必有 status (API Error 不计) · 件号 turn / re / deadline · 回执轮沿派活链冒泡 · RESULT/NEED/ARTIFACT · 工单账本按成员记定论 + expect · 在飞活状态观察面 + stop 时 canceled · open_job({maxTurns}) · charter 编排段。 留后: 群里发起的链式活结论进群未实测 · 工单收后迟到的回执信封仍报「到齐」· 答活期间派给测试分身的回执会沿链再转一份给上游 |
 | B2b | ✅ | `ce3bca0` `062cc13` `671c82d` `c5cfdb5` `a03b407` | 等人点第四态 (按 `getMirrorTarget` 归属) · `/api/world` 首行截取 + ETag/304 (实测命中) · `/api/msgs` 游标分页, 游标失效按时刻兜底, 无时刻则整窗重载。 已知: facts 缓存 10s, 点完卡紫灯最多滞后 10s · `ask_user` 的 generic pending 不带 sessionId, 不亮灯 |
 | B3a | ✅ | `0644bb6` `77687bb` `b168a43` `733cb12` | ①–④ 落地, ⑤ 无需改 (`clipForCharter` 本就截尾附路径)。 留后: 120k 提醒未实测, 对 `[1m]` 模型偏早 · `/compact` 不改 jsonl, 不触发 self 记忆补发 · 收工结论归档 episodes 等 B2a |
-| B3b | ⬜ | | 收工结论归档 + ⑥ UI |
+| 批外 | ✅ | `03db344` `77bdc91` `2a39085` `042609b` | 不在批次表里、由人直接提的改动: tell_peer `priority` (normal 等闲 / urgent 打断再投 / now 插话, `when` 留作老别名) · 唤醒冷且大的 wizard 回包带 `wakeCost` · 管家分派偏省钱 (候选表给缓存冷热、唤醒代价) · 出生名册只列 2 天内动过的同群 wizard。B4 ④ 的 `tell_peer({kind})` 与 priority 并存前要先对一遍 |
+| B3b | 🟡 | | 工单 `J04d1e7`。`.ev-proto`: 回执回归脚本 `scripts/receipt-regress/` · NEED legs 与 Slot 状态集和 `turn-state.ts` 对齐 · 工单收后迟到的回执信封 · 测试子活沿链多转 · CLAUDE.md 补协议层。`.ev-mem`: 收工结论存进 episodes · 记忆提醒阈值按模型窗口算。`.ev-ui`: 回执 chip + 序号 · 工单一等会话 `j:<id>` · 关系图按工单高亮 · 只读待办托盘 |
 | B4 | ⬜ | | |
