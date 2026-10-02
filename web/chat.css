@@ -93,8 +93,8 @@ button { font: inherit; color: inherit }
 .rolebar .nl .cp { min-width: 0; flex: 0 1 auto; display: inline-flex; align-items: center; gap: 4px; cursor: pointer }
 .rolebar .nl .cp:hover .nm { text-decoration: underline dotted var(--faint); text-underline-offset: 3px }
 /* 复制提示用 ⧉ 小图标, 不用 cursor:copy —— 那颗绿色的加号读起来像「添加」。 */
-.rolebar .nl .cp::after { content: "⧉"; flex: none; font-size: 12px; color: var(--faint); opacity: 0; transition: opacity .12s }
-.rolebar .nl .cp:hover::after { opacity: 1 }
+.rolebar .nl .cp::after { content: "⧉"; flex: none; font-size: 12px; color: var(--faint); display: none }
+.rolebar .nl .cp:hover::after { display: inline }
 .toast {
   position: fixed; left: 50%; bottom: 28px; z-index: 1000; transform: translate(-50%, 8px);
   padding: 6px 12px; border-radius: 8px; font-size: 12.5px; color: #fff; background: rgba(28, 36, 48, .88);
