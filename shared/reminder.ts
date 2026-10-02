@@ -55,7 +55,14 @@ export interface Envelope {
   receipt?: boolean;
   /** 回执的定论 (见 ReceiptStatus); 老信封没有 = done。 */
   status?: ReceiptStatus;
+  /** 这件活的 id (`t` + 6 hex): 派活、续问、回执都带同一个, 回执按它定位答句。 */
+  turn?: string;
+  /** 续问 (`tell_peer({re})`): 这一句接着那件活说, 不是新活。值同 `turn`。 */
+  re?: string;
 }
+
+/** 一件活的编号: 写进派活与回执的信封。 */
+export interface TurnTag { turn: string; re?: boolean; deadline?: number }
 
 /** 回执落成什么。done = 答了; error = 那一轮以 CLI 报错 (API Error) 收尾, 不是定论;
  *  timeout / silent / dead = 没等到答案 (超时 / 停下几次都没答 / pane 没了)。 */
@@ -64,14 +71,15 @@ export type ReceiptStatus = "done" | "error" | "timeout" | "silent" | "dead";
 export const envelopeAttrs = {
   human: (user: string, chat: string): Attrs => ({ wezard: "envelope", kind: "human", from: user, chat }),
   /** `chat` 不给 = 私聊。 */
-  peer: (from: string, chat?: string): Attrs => ({
+  peer: (from: string, chat?: string, t?: TurnTag): Attrs => ({
     wezard: "envelope", kind: "peer", from, scope: chat === undefined ? "private" : "public", ...(chat ? { chat } : {}),
+    ...(t ? { turn: t.turn, ...(t.re ? { re: t.turn } : {}), ...(t.deadline ? { deadline: new Date(t.deadline).toISOString() } : {}) } : {}),
   }),
   task: (taskId: string): Attrs => ({ wezard: "envelope", kind: "task", from: taskId }),
   /** 回执也是「`from` 在对你说话」, 所以仍是 peer 信封 —— read_chat / rolepage 照旧
    *  把它归到那场对话里; 多一个 `receipt` 属性说明它是自动送回来的结论而不是新活。 */
-  receipt: (from: string, chat?: string, job?: { job: string; done: number; total: number }, status: ReceiptStatus = "done"): Attrs => ({
-    ...envelopeAttrs.peer(from, chat),
+  receipt: (from: string, chat?: string, job?: { job: string; done: number; total: number }, status: ReceiptStatus = "done", turn?: string): Attrs => ({
+    ...envelopeAttrs.peer(from, chat, turn ? { turn } : undefined),
     receipt: "1",
     status,
     // 工单的「齐了吗」由守护进程数出来写在属性上, 不让模型自己记: 异步回执是 N 个
@@ -92,6 +100,8 @@ const envelopeOfAttrs = (a: Attrs): Envelope | undefined =>
         chat: a.chat ?? "",
         ...(a.receipt === "1" ? { receipt: true } : {}),
         ...(a.status ? { status: a.status as ReceiptStatus } : {}),
+        ...(a.turn ? { turn: a.turn } : {}),
+        ...(a.re ? { re: a.re } : {}),
       }
     : undefined;
 

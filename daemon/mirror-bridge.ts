@@ -2161,7 +2161,7 @@ export interface MirrorBridge {
   lastReply: (target: string, sinceMs?: number) => string;
   /** `target` 答 `fromName` 那一句的那段话 —— 按信封定位, 比 lastReply 严一档
    *  (见 peers.replyToPeer)。自动回执靠它分清「答我的」和「答上一件事的」。 */
-  replyToPeer: (target: string, fromName: string, sinceMs?: number) => PeerReply | undefined;
+  replyToPeer: (target: string, fromName: string, sinceMs?: number, turn?: string) => PeerReply | undefined;
   /** 这个 wizard 此刻有没有一个能用的 pane。回执投递前要问一句: 已经收工的
    *  wizard 不该为了接一份结论被重新拉起来。 */
   paneLive: (target: string) => Promise<boolean>;
@@ -5384,9 +5384,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const p = jsonlOf(target);
     return p ? lastReply(p, sinceMs, warmerSigs) : "";
   };
-  const replyToPeerSince = (target: string, fromName: string, sinceMs = 0): PeerReply | undefined => {
+  const replyToPeerSince = (target: string, fromName: string, sinceMs = 0, turn?: string): PeerReply | undefined => {
     const p = jsonlOf(target);
-    return p ? replyToPeerIn(p, fromName, sinceMs, warmerSigs) : undefined;
+    return p ? replyToPeerIn(p, fromName, sinceMs, warmerSigs, turn) : undefined;
   };
   /** 绑着的 pane 还能用 (存在、且不是别人的窗口) —— 不重生、不猜。 */
   const paneLiveOf = async (target: string): Promise<boolean> => {

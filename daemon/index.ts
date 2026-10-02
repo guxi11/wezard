@@ -69,7 +69,8 @@ import { clipMiddle, contextFiles, extractResult, lastContextTokens, lastExchang
 import { keepalivePingSigs } from "../shared/keepalive.js";
 import { expandHome } from "../shared/paths.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
-import { createReceipts, type Slot as ReceiptSlot } from "./receipts.js";
+import { createReceipts, deadlineOf, newTurn, type Slot as ReceiptSlot } from "./receipts.js";
+import type { TurnTag } from "../shared/reminder.js";
 import { createHandoffs, handedOff, handingOff, type Pending as PendingHandoff } from "./handoff.js";
 import { rankCandidates, renderCandidates } from "./route.js";
 import { parseWhen, renderChatLog, type LogSession } from "./chat-log.js";
@@ -621,13 +622,17 @@ const main = async (): Promise<void> => {
      *  私聊轮或无记录 → 它的 home 群。notify 与 public send_peer 默认发到这里。 */
     const channelOf = (self: string): string => m.currentChannel(self) || baseOfKey(self);
     /** 同伴注入的信封: 公开轮写上那个群的名字, 私聊不写 (见 peers.renderPeerEnvelope)。 */
-    const envelopeFor = (from: string, channel: string): string =>
-      renderPeerEnvelope(displayName(from), channel ? chatNameOf(cfg, channel) : undefined);
+    const envelopeFor = (from: string, channel: string, t?: TurnTag & { legs?: number }): string =>
+      renderPeerEnvelope(displayName(from), channel ? chatNameOf(cfg, channel) : undefined, t);
     // 回执 (见 receipts.ts): 一次 tell_peer 之后对方干完那一轮, 它的结论自动 paste
     // 回发话方的输入框, 发话方全程不阻塞。这里只提供四样能力给那个模块 —— 忙闲、
     // 死活、「它答我那一句的是哪段话」、以及怎么把一段话送进去 —— 投递逻辑在那边。
+    // 工单账本 (见 jobs.ts)。只在**显式传了 `job`** 时起作用 —— 不用工单的调用方
+    // 行为与从前一模一样。回执要数它的成员, 所以先于回执载入。
+    const jobs = loadJobStore(cfg.wrc.mirror.jobsFile);
     const receipts = createReceipts({
       idleNow: m.idleNow,
+      jobTotal: (id) => jobs.get(id)?.members.length ?? 0,
       untilIdle: m.untilIdle,
       paneLive: m.paneLive,
       nameOf: displayName,
@@ -635,8 +640,8 @@ const main = async (): Promise<void> => {
       store: loadJsonMap<ReceiptSlot>(cfg.wrc.mirror.receiptsFile),
       handingOff,
       handedOff,
-      replyFor: (to, fromName, since) => m.replyToPeer(to, fromName, since),
-      lastWords: m.lastText,
+      replyFor: (to, fromName, since, turn) => m.replyToPeer(to, fromName, since, turn),
+      lastWords: m.lastReply,
       deliver: (to, bodyText, meta) =>
         m.injectText(to, clipMiddle(bodyText), undefined, {
           // receipt:true 是「这一轮不该再生回执」的记录 —— 回环在结构上就不成立:
@@ -648,6 +653,7 @@ const main = async (): Promise<void> => {
             meta.channel ? chatNameOf(cfg, meta.channel) : undefined,
             meta.job ? { job: meta.job, done: meta.done, total: meta.total } : undefined,
             meta.status,
+            meta.turn || undefined,
           ),
         }),
     });
@@ -667,13 +673,13 @@ const main = async (): Promise<void> => {
           ? m.injectText(t, text, undefined, {
               from: { kind: "peer", from: owe[0]!.from },
               channel: owe[0]!.channel,
-              envelope: owe.map((o) => envelopeFor(o.from, o.channel)).join(""),
+              envelope: owe.map((o) => envelopeFor(o.from, o.channel, o.turn ? { turn: o.turn } : undefined)).join(""),
             })
           : m.injectText(t, text),
       lastText: m.lastText,
-      answeredBefore: (to, from, since, until) => {
+      answeredBefore: (to, from, since, until, turn) => {
         const p = m.sessionInfo(to)?.jsonlPath;
-        return p ? replyClosedBefore(expandHome(p), displayName(from), since, until, pingSigs) : undefined;
+        return p ? replyClosedBefore(expandHome(p), displayName(from), since, until, pingSigs, turn) : undefined;
       },
       receipts,
       // 交接是生命周期事件, 不进群; 失败只捎给它自己 (它调完 handoff_self 拿到的是
@@ -901,20 +907,24 @@ const main = async (): Promise<void> => {
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       const text = ((body as { text?: string }).text ?? "").toString();
       if (!text.trim()) { json(res, 400, { ok: false, reason: "text required" }); return; }
-      const jobId = ((body as { job?: string }).job ?? "").trim();
-      if (jobId) {
-        const jc = checkJob(jobId);
-        if (!jc.ok) { json(res, jc.status, { ok: false, reason: jc.reason }); return; }
-      }
       const r = resolvePeer(self, addrOf(body));
       if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
       const { target, foreign } = r;
+      // 件号先于一切: `re` 续问沿用那件活的件号、工单与频道 (见 receipts.prepare)。
+      const re = ((body as { re?: string }).re ?? "").toString().trim();
+      const turn = receipts.prepare(self, target, re || undefined);
+      // 续问只在那个工单还开着时沿用它: 收了工的工单不再收成员, 续问照样能发。
+      const jobId = ((body as { job?: string }).job ?? "").trim() || (turn.job && jobs.get(turn.job)?.status === "open" ? turn.job : "");
+      if (jobId) {
+        const jc = checkJob(jobId, target);
+        if (!jc.ok) { json(res, jc.status, { ok: false, reason: jc.reason }); return; }
+      }
       // 公开与否由发话方 (LLM) 判断: 公开 = 在它这一轮的公开频道里说, 气泡进群、对方
       // 那一轮的回复也发进这个群; 私聊 (默认) = 只落双方的 rolepage, 回复靠 wait_peer 取。
       // 只有两端都是登记在册的 wizard 才能当着人说: 裸 target 冒充的发话方、forget
       // 掉的分身不是谁, 它们的往来进群只会留下一段人找不到主的对话 —— 降为私聊。
-      const isPublic = (body as { public?: boolean }).public === true && !!wizards.get(self) && !!wizards.get(target);
-      const channel = isPublic ? channelOf(self) : "";
+      const isPublic = (turn.channel !== undefined ? !!turn.channel : (body as { public?: boolean }).public === true) && !!wizards.get(self) && !!wizards.get(target);
+      const channel = isPublic ? turn.channel || channelOf(self) : "";
       // Injecting into your own pane would type into the box you're generating
       // from — Claude Code queues it and the caller deadlocks waiting for itself.
       if (target === self) { json(res, 400, { ok: false, reason: "refusing to inject into the calling session itself" }); return; }
@@ -942,15 +952,23 @@ const main = async (): Promise<void> => {
       }
       // 时刻取在注入**之前**: 晚于那一句落盘的话, 回执定位的下界就偏了。
       const at = Date.now();
+      const deadlineSec = (body as { deadline?: number }).deadline;
+      const deadlineAt = deadlineOf(at, deadlineSec === undefined ? undefined : Number(deadlineSec));
       const inj = await m.injectText(target, text, undefined, {
         from: { kind: "peer", from: self, ...(jobId ? { job: jobId } : {}), ...(isPublic ? { public: true } : {}) },
         channel,
-        envelope: envelopeFor(self, channel),
+        envelope: envelopeFor(self, channel, {
+          turn: turn.turn,
+          legs: turn.legs,
+          ...(turn.legs > 1 ? { re: true } : {}),
+          // 期限只在发话方明说时写给对方看: 默认的一小时不值得每轮多一句。
+          ...(deadlineSec !== undefined ? { deadline: deadlineAt } : {}),
+        }),
       });
       // 回执: 对方干完那一轮, 守护进程把它的结论自动送回来 (默认开)。`receipt:false`
       // 是"放出去就不管了"的那种派活。注入失败就不守 —— 没有问话, 也不会有回答。
       const wantReceipt = (body as { receipt?: boolean }).receipt !== false;
-      if (inj.ok) receipts.register({ from: self, to: target, channel, job: jobId, at }, wantReceipt);
+      if (inj.ok) receipts.register({ from: self, to: target, channel, job: jobId, at, turn: turn.turn, legs: turn.legs, deadlineAt }, wantReceipt);
       // 工单成员照旧记账 (收工那一条会列出各自那段活); 公开的那一句在群里成气泡。
       if (inj.ok && jobId) jobs.attach(jobId, { target, task: text, spawned: false });
       if (inj.ok && isPublic) relayPeer(self, target, text, channel);
@@ -963,6 +981,8 @@ const main = async (): Promise<void> => {
         wasBusy,
         ...(waitedMs ? { waitedMs } : {}),
         ...(jobId ? { job: jobId } : {}),
+        ...(inj.ok ? { turn: turn.turn } : {}),
+        ...(turn.reUnknown ? { reUnknown: true, reNote: `re "${re}" 不是你正在等 ${displayName(target)} 答的那件, 按新活发出` } : {}),
         // 回执怎么回来 —— 写在回包里, 调用方 (模型) 不必从工具描述里回忆。
         ...(inj.ok && wantReceipt
           ? { receipt: "它干完那一轮, 结论会作为新的一轮自动进到你这里 —— 不要挂在 wait_peer 上等, 接着干你自己的事" }
@@ -1144,15 +1164,13 @@ const main = async (): Promise<void> => {
     sweepUnborn(wizards, (t) => m.chatTargets(baseOfKey(t)).includes(t))
       .forEach((w) => log.child({ mod: "wizard" }).warn({ target: w.target, name: w.name }, "unborn identity swept — a tmux window by this name, if any, is now orphaned"));
 
-    // 工单账本 (见 jobs.ts)。只在**显式传了 `job`** 时起作用 —— 不用工单的调用方
-    // 行为与从前一模一样。
-    const jobs = loadJobStore(cfg.wrc.mirror.jobsFile);
     /** 派活前先验工单: 生完分身才发现工单号打错了, 那个分身就成了没人认领的孤儿。 */
-    const checkJob = (id: string): { ok: true } | { ok: false; status: number; reason: string } => {
+    const checkJob = (id: string, target?: string): { ok: true } | { ok: false; status: number; reason: string } => {
       const j = jobs.get(id);
       if (!j) return { ok: false, status: 404, reason: `没有工单 '${id}' —— open_job 先开一个, 或者 list_jobs 看还开着哪些` };
       if (j.status !== "open") return { ok: false, status: 409, reason: `工单 '${id}' 已经收工了` };
-      if (j.members.length >= JOB_MEMBER_MAX) return { ok: false, status: 409, reason: `工单 '${id}' 的成员已经满了 (${JOB_MEMBER_MAX} 个) —— 分身是有成本的, 拆成两个工单, 或者先收工回收掉一批` };
+      // 已在册的成员 (续问 / 再派一句) 不占新名额。
+      if (j.members.length >= JOB_MEMBER_MAX && !j.members.some((x) => x.target === target)) return { ok: false, status: 409, reason: `工单 '${id}' 的成员已经满了 (${JOB_MEMBER_MAX} 个) —— 分身是有成本的, 拆成两个工单, 或者先收工回收掉一批` };
       return { ok: true };
     };
 
@@ -1692,6 +1710,7 @@ const main = async (): Promise<void> => {
       // 先盖章再生: 分叉出来的 transcript 里躺着被克隆者的旧回复, 时刻早于这一枚章,
       // wait_peer 才不会把它们当成分身对这件活的答复。
       const taskAt = Date.now();
+      const taskTurn = newTurn();
       const r = await m.cloneSession({
         parent: source,
         target,
@@ -1703,7 +1722,7 @@ const main = async (): Promise<void> => {
         inherit,
         // 继承路径上第一句话是分叉的触发器, 所以直接把活当开场白 —— 少一次往返,
         // 也少一次"就位了但没事干"的空转。
-        bootstrap: task ? task + envelopeFor(self, "") : undefined,
+        bootstrap: task ? task + envelopeFor(self, "", { turn: taskTurn }) : undefined,
         keepalive,
       }).catch((e: unknown) => ({ ok: false as const, reason: `spawn threw: ${String(e)}`, inherited: false }));
       // 生不出来就回滚身份 —— 否则名字被一个永远没有会话的记录占住。
@@ -1727,13 +1746,13 @@ const main = async (): Promise<void> => {
       // 继承路径上活已经随开场白进去了, 空白分身才需要在这里补一次注入 (私聊)。
       let dispatched = r.inherited && !!task;
       if (task && !r.inherited) {
-        const inj = await m.injectText(target, task, undefined, { from: { kind: "peer", from: self, ...(jobId ? { job: jobId } : {}) }, channel: "", envelope: envelopeFor(self, "") });
+        const inj = await m.injectText(target, task, undefined, { from: { kind: "peer", from: self, ...(jobId ? { job: jobId } : {}) }, channel: "", envelope: envelopeFor(self, "", { turn: taskTurn }) });
         dispatched = inj.ok;
       }
       if (jobId) jobs.attach(jobId, { target, task, spawned: true });
       // 分身的第一件活也守回执: fan-out 最常见的形状就是 clone_wizard({task}) × N,
       // 让它们干完自己把结论送回来, 发起方不必挂在 wait_peer 上。
-      if (dispatched) receipts.register({ from: self, to: target, channel: "", job: jobId, at: taskAt });
+      if (dispatched) receipts.register({ from: self, to: target, channel: "", job: jobId, at: taskAt, turn: taskTurn });
       json(res, 200, { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, keepalive, ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(jobId ? { job: jobId } : {}) });
     });
 

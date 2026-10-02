@@ -13,7 +13,7 @@ import { existsSync, openSync, readSync, closeSync, statSync } from "node:fs";
 import { backendForPath, type CliBackendName } from "../shared/cli-backends.js";
 import { truncate, truncateWithCount } from "../shared/std.js";
 import { isKeepalivePingText, withoutKeepalive } from "../shared/keepalive.js";
-import { envelopeAttrs, parseEnvelope, renderReminder, type Envelope, type ReceiptStatus } from "../shared/reminder.js";
+import { envelopeAttrs, parseEnvelope, renderReminder, type Envelope, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
 
 /** Strip ANSI SGR/CSI + OSC so captured pane text is safe to embed / match on. */
 export const stripAnsi = (s: string): string =>
@@ -86,6 +86,9 @@ export interface Turn {
   notice?: true;
   /** CLI 自己合成的报错回复 (`isApiErrorMessage`: "API Error: …"), 不是模型说的话。 */
   apiError?: true;
+  /** 一轮中途被 CLI 吃进的排队消息 (`attachment.queued_command`): 它被这一轮接着答,
+   *  不起新的一轮。没有正文, 只带信封 —— 只有按信封找问话的调用方 (`marks`) 拿得到。 */
+  queued?: true;
 }
 
 // Meta wrappers Claude Code injects around slash commands / hook output. They
@@ -167,6 +170,12 @@ const parseTurns = (jsonlPath: string, raw: string, keepLines = false, marks = f
       try { parsed = JSON.parse(line); } catch { return []; }
       // The first line of a truncated tail is usually a fragment — normalize
       // returning null (or a throw) is the expected outcome, not an error.
+      const att = (parsed as { attachment?: { type?: string; prompt?: unknown }; timestamp?: unknown; isSidechain?: unknown }).attachment;
+      if (marks && att?.type === "queued_command" && typeof att.prompt === "string" && !(parsed as { isSidechain?: unknown }).isSidechain) {
+        const env = parseEnvelope(att.prompt);
+        const ms = Date.parse(String((parsed as { timestamp?: unknown }).timestamp ?? ""));
+        return env ? [{ role: "user", text: "", ms: Number.isNaN(ms) ? 0 : ms, env, queued: true } as Turn] : [];
+      }
       let row;
       try { row = normalize(parsed); } catch { return []; }
       if (!row || row.isMeta || row.isSidechain) return [];
@@ -422,8 +431,9 @@ export const replyToPeer = (
   fromName: string,
   sinceMs = 0,
   pingSigs: readonly string[] = [],
+  turn?: string,
 ): PeerReply | undefined => {
-  const r = answerOf(talkTurns(jsonlPath, 80, pingSigs, true, true), fromName, sinceMs);
+  const r = answerOf(talkTurns(jsonlPath, 80, pingSigs, true, true), fromName, sinceMs, turn);
   return r && { text: r.text, ...(r.error ? { error: true } : {}) };
 };
 
@@ -442,8 +452,9 @@ export const replyClosedBefore = (
   sinceMs: number,
   untilMs: number,
   pingSigs: readonly string[] = [],
+  turn?: string,
 ): string | undefined => {
-  const r = answerOf(talkTurns(jsonlPath, 80, pingSigs, true, true), fromName, sinceMs);
+  const r = answerOf(talkTurns(jsonlPath, 80, pingSigs, true, true), fromName, sinceMs, turn);
   return r && (r.closedAt !== undefined && r.closedAt < untilMs && !r.error ? r.text : "");
 };
 
@@ -454,28 +465,30 @@ export const replyClosedBefore = (
  *  那是另一轮的开始 (同伴的新话、回执、人) —— 不截的话, 答方刚说完紧接着收到一份回执、
  *  回了句「收到」, 发话方拿到的就是这句。后台任务完成的通知 (`notice`) 同样起新一轮
  *  —— 不截的话回执拿到的是「（后台任务已完成）」。CLI 在一轮中途吃进的排队消息记成
- *  `attachment`, 不是 user 行, 截不断一轮。`closedAt` = 关上这一轮的那一行的时刻
+ *  `attachment` (`queued`), 截不断一轮 —— 但它挂着信封, 可以是问话本身: 那就由这一轮
+ *  接着答, 终句即答案。`closedAt` = 关上这一轮的那一行的时刻
  *  (还开着 = undefined)。
  *  例外: 以 CLI 报错 (`apiError`) 收尾之后紧跟的那句**没有信封**、只是叫它接着干的
  *  user 行 (保温的 `continue` 续跑、或人敲的「继续」) 是在续这一轮, 不切 —— 否则续跑
  *  出来的答案永远定位不到, 回执只拿得到那句报错。人说的别的话照样切: 那是一件新事,
- *  它的答案不能当回执投出去。`error` = 终句是报错。 */
+ *  它的答案不能当回执投出去。`error` = 终句是报错。
+ *  `turn` 给了就先按它找问话 (信封上的件号, 不受名字变动与时钟抖动影响); 老信封没有
+ *  件号, 找不到再退回「`from` + 发话时刻」。 */
 const answerOf = (
-  ts: readonly { role: string; text: string; ms?: number; mid?: true; apiError?: true; notice?: true; env?: { kind: string; from: string } }[],
+  ts: readonly { role: string; text: string; ms?: number; mid?: true; apiError?: true; notice?: true; queued?: true; env?: { kind: string; from: string; turn?: string; receipt?: boolean } }[],
   fromName: string,
   sinceMs: number,
+  turn?: string,
 ): { text: string; closedAt?: number; error?: true } | undefined => {
-  const asked = ts.reduce(
-    (hit, t, i) =>
-      t.role === "user" && t.env?.kind === "peer" && t.env.from === fromName && (!t.ms || t.ms >= sinceMs - ASK_SLACK_MS)
-        ? i
-        : hit,
-    -1,
-  );
+  const lastAsk = (hit: (e: { kind: string; from: string; turn?: string; receipt?: boolean }) => boolean): number =>
+    ts.reduce((at, t, i) => (t.role === "user" && t.env && !t.env.receipt && hit(t.env) && (!t.ms || t.ms >= sinceMs - ASK_SLACK_MS) ? i : at), -1);
+  const byTurn = turn ? lastAsk((e) => e.turn === turn) : -1;
+  // 退回按人找时只认没有件号的老信封: 带件号的那些是别的件, 不是这一件。
+  const asked = byTurn >= 0 ? byTurn : lastAsk((e) => e.kind === "peer" && e.from === fromName && !(turn && e.turn));
   if (asked < 0) return undefined;
   const resumes = (t: (typeof ts)[number], i: number): boolean =>
     !!ts[i - 1]?.apiError && !t.env && !t.notice && RESUME_RE.test(t.text.trim());
-  const next = ts.findIndex((t, i) => i > asked && t.role === "user" && !resumes(t, i));
+  const next = ts.findIndex((t, i) => i > asked && t.role === "user" && !t.queued && !resumes(t, i));
   const last = ts.slice(asked + 1, next < 0 ? undefined : next).filter((t) => t.role === "assistant").at(-1);
   const text = last && !(last.mid && next < 0) ? last.text : "";
   return { text, ...(next < 0 ? {} : { closedAt: ts[next]!.ms ?? 0 }), ...(text && last?.apiError ? { error: true } : {}) };
@@ -508,8 +521,9 @@ export const renderTaskEnvelope = (taskId: string): string =>
 
 /** `from` = 发话方的称呼 (`.name`); `chat` 给了 = 公开轮 (那个群的名字, 可以是 ""),
  *  不给 = 私聊。 */
-export const renderPeerEnvelope = (from: string, chat?: string): string =>
-  renderReminder(envelopeAttrs.peer(from, chat), chat === undefined
+export const renderPeerEnvelope = (from: string, chat?: string, t?: TurnTag & { legs?: number }): string =>
+  renderReminder(envelopeAttrs.peer(from, chat, t), [
+    ...(chat === undefined
       ? [
           `这一轮是 wizard \`${from}\` 发来的**私聊**, 不是人说的: 人看不见这一轮, 读你回复的是 \`${from}\`。`,
           `你这一轮的**最后一条消息**就是给它的回执 —— 你一停下, 守护进程自动把它送进 \`${from}\` 的输入框, **你不需要再调任何工具**: 不要 send_peer 回它 (那会让它多跑一轮), 也不要为这一轮 notify。`,
@@ -518,7 +532,14 @@ export const renderPeerEnvelope = (from: string, chat?: string): string =>
       : [
           `这一轮是 wizard \`${from}\` 在群${chat ? ` **${chat}** ` : ""}里**公开**对你说的: 你的回复会直接发进那个群, 人和 \`${from}\` 都看得到。`,
           `照对人说话的方式答; 不要再 send_peer 把同一段话回给 \`${from}\` —— 你停下之后守护进程会自动把这段结论送回它那里。`,
-        ]);
+        ]),
+    ...(t?.re ? [`这是对件 \`${t.turn}\` 的**续问**: 接着那件活说, 不是一件新活。`] : []),
+    // 来回多了就收口: 不在守护进程里拒绝 —— 拒了模型会换条通路接着乒乓。
+    ...((t?.legs ?? 0) > 3 ? [`这件活已经来回 ${t!.legs! - 1} 次: 这一次请直接给 \`RESULT:\`, 拿不准的写清你的假设。`] : []),
+    ...(t?.deadline ? [`期限 ${hhmm(t.deadline)}: 到点还没答完, \`${from}\` 收到的是一份超时回执。`] : []),
+  ]);
+
+const hhmm = (ms: number): string => new Date(ms).toTimeString().slice(0, 5);
 
 /** 回执的信封 —— 这一轮是对方干完活、守护进程自动送回来的结论, 不是新派的活。
  *
@@ -531,8 +552,9 @@ export const renderReceiptEnvelope = (
   chat?: string,
   job?: { job: string; done: number; total: number },
   status: ReceiptStatus = "done",
+  turn?: string,
 ): string =>
-  renderReminder(envelopeAttrs.receipt(from, chat, job, status), [
+  renderReminder(envelopeAttrs.receipt(from, chat, job, status, turn), [
     ...(status === "done"
       ? [`这是 wizard \`${from}\` 对你某一次 send_peer 的**回执**: 它那一轮干完了, 守护进程把它的结论自动送到你这里 —— 不是人说的, 也不是新派给你的活。`]
       : status === "error"
@@ -547,6 +569,7 @@ export const renderReceiptEnvelope = (
           "它可能还没干完全部 —— 读 `RESULT:` 那一行 (如果有) 作为它的收口结论; 要更多细节用 peek_peer 读它的对话, 不要猜。",
         ]
       : []),
+    ...(turn ? [`这件活是 \`${turn}\`: 要就它追问、补充, 用 \`tell_peer({name: "${from}", re: "${turn}"})\` —— 沿用同一个频道, 工单还开着就沿用工单。`] : []),
     // 「齐了吗」是守护进程数的, 不让模型在上下文里自己数 —— 异步回执是 N 个独立
     // 的轮次陆续进来的, 数错一个就会提前收口或者永远等。
     ...(job && job.job

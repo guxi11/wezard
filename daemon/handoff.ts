@@ -46,6 +46,8 @@ const hold = (target: string): (() => void) => {
 export interface Owe {
   from: string;
   channel: string;
+  /** 那件活的件号 —— 新会话贴回简报那一句照样挂上, 回执仍按它定位。 */
+  turn?: string;
 }
 
 export interface Pending {
@@ -75,7 +77,7 @@ export interface HandoffDeps {
   lastText: (target: string) => string;
   /** `from` 那一句在 `to` 的**当前** transcript 里, `untilMs` 之前就收口的答案 (见
    *  peers.replyClosedBefore); 定位不到问话 → undefined。 */
-  answeredBefore: (to: string, from: string, sinceMs: number, untilMs: number) => string | undefined;
+  answeredBefore: (to: string, from: string, sinceMs: number, untilMs: number, turn?: string) => string | undefined;
   receipts: Receipts;
   /** 交接没做成时告诉**它自己** (下一条进它会话的话尾巴上捎带)。生命周期事件不进群。 */
   notify: (target: string, text: string) => void;
@@ -156,10 +158,10 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
         const until = p.mode === "self" ? p.at : Number.MAX_SAFE_INTEGER;
         const carried = deps.receipts.transfer(
           p.target,
-          (s: Slot) => deps.answeredBefore(p.target, s.from, s.at, until) ?? "",
+          (s: Slot) => deps.answeredBefore(p.target, s.from, s.at, until, s.turn) ?? "",
           Date.now(),
         );
-        const next = saved({ ...p, stage: "restarting", owe: carried.map((s) => ({ from: s.from, channel: s.channel })) });
+        const next = saved({ ...p, stage: "restarting", owe: carried.map((s) => ({ from: s.from, channel: s.channel, ...(s.turn ? { turn: s.turn } : {}) })) });
         const r = await deps.restart(p.target);
         if (!r.ok) return fail(next, 502, `/new failed: ${r.reason ?? "unknown"}`);
         return step(saved({ ...next, stage: "restarted" }));

@@ -14,6 +14,7 @@
 // wizard 自己就常以 `build + reload` 收尾 —— reload 恰好落在它那一轮里, 内存里的
 // watcher 跟着进程一起没了, 发话方永远等不到回执。答案本来就在对方的 transcript 里
 // (按信封定位), 重启后接着守, 取到的还是同一段。
+import { randomBytes } from "node:crypto";
 import type { Logger } from "pino";
 import type { JsonMap } from "../shared/json-map-store.js";
 import type { IdleResult } from "./graph.js";
@@ -21,8 +22,21 @@ import type { PeerReply } from "./peers.js";
 import type { ReceiptStatus } from "../shared/reminder.js";
 import { sleep, truncate } from "../shared/std.js";
 
-/** 对方最长允许干多久 (超过就投一份 timeout 回执, 不占着内存等到天亮)。 */
+/** 对方最长允许干多久 (超过就投一份 timeout 回执, 不占着内存等到天亮)。默认值;
+ *  tell_peer 的 `deadline` 可在 [MIN, MAX] 里改 —— 上限留在 KEEP_MS 之内, 超时那份
+ *  回执还得数得进工单。 */
 const TARGET_WAIT_SEC = 3600;
+const DEADLINE_MIN_SEC = 60;
+const DEADLINE_MAX_SEC = 12 * 3600;
+/** 交接把义务转进新会话时, 至少再给它这么久: 不然对方一交接, 这份就提前超时。 */
+const CARRY_GRACE_MS = 10 * 60_000;
+
+/** 一件活的编号: 注入之前生成, 写进信封, 回执按它定位答句。 */
+export const newTurn = (): string => `t${randomBytes(3).toString("hex")}`;
+
+/** `at` 发出、给了 `sec` 秒 (缺省 / 越界取默认或夹到边上) 的期限。 */
+export const deadlineOf = (at: number, sec?: number): number =>
+  at + 1000 * (sec === undefined || !Number.isFinite(sec) ? TARGET_WAIT_SEC : Math.min(Math.max(sec, DEADLINE_MIN_SEC), DEADLINE_MAX_SEC));
 /** 对方 pane 不在了, 隔这么久再看一眼才判 dead: 非交接的 pane 换新 (respawn) 也有
  *  几秒是死的。 */
 const DEAD_GRACE_MS = 5000;
@@ -54,6 +68,7 @@ export interface ReceiptMeta {
   done: number;
   total: number;
   status: ReceiptStatus;
+  turn: string;
 }
 
 /** 等出来的结果。失败的那几种 `body` 是合成的说明 + 对方最后一句, 照样投回去:
@@ -70,12 +85,17 @@ export interface ReceiptDeps {
   /** `to` 答 `fromName` 那一句的那段话。三态, 缺一不可 (见 peers.replyToPeer):
    *  非空 = 答案; `""` = 问话在, 但还没答 (接着等); `undefined` = 连问话都定位不到
    *  (还排在输入框里没读进) —— 接着等, 绝不退回按时刻取 (取到的是上一件事的结论)。 */
-  replyFor: (to: string, fromName: string, sinceMs: number) => PeerReply | undefined;
-  /** 对方最后说的一句 —— 失败回执里给发话方一点线索。 */
-  lastWords?: (to: string) => string;
+  replyFor: (to: string, fromName: string, sinceMs: number, turn?: string) => PeerReply | undefined;
+  /** 对方在 `sinceMs` 之后最后说的一句 —— 失败回执里给发话方一点线索 (早于发话的
+   *  那句是上一件事的, 引它只会误导)。 */
+  lastWords?: (to: string, sinceMs: number) => string;
   /** 把回执 paste 进发话方的输入框 (调用方负责拼信封)。 */
   deliver: (to: string, body: string, meta: ReceiptMeta) => Promise<{ ok: boolean; reason?: string }>;
   nameOf: (target: string) => string;
+  /** 工单账本里的成员数 —— 「一共几份」的下限。只数回执登记会漏: 登记按发话方 →
+   *  答话方一对一份, 同一对后来又说了一句不带工单的 (或别的工单的), 这份就被顶掉,
+   *  总数跟着少一, 「全部到齐」就提前报了。 */
+  jobTotal?: (job: string) => number;
   log: Logger;
   /** 登记的落盘处。缺省 = 纯内存 (reload 即丢)。 */
   store?: JsonMap<Slot>;
@@ -93,7 +113,15 @@ export interface Tell {
   job?: string;
   /** 发话时刻。注入**之前**取的那个 —— 晚于那一句落盘的话, 回执定位的下界就偏了。 */
   at?: number;
+  /** 件号与第几个来回 (见 prepare)。注入之前就定了, 因为要写进信封。 */
+  turn?: string;
+  legs?: number;
+  /** 到这一刻还没答完就投 timeout (见 deadlineOf)。 */
+  deadlineAt?: number;
 }
+
+/** 这一句该挂的件号: 新活领一个新的; `re` 续问沿用那件活的件号、工单与频道。 */
+export interface Turn { turn: string; legs: number; job?: string; channel?: string; reUnknown?: true }
 
 export interface Slot extends Tell {
   job: string;
@@ -127,7 +155,10 @@ const KEEP_MS = 24 * 3600_000;
 export interface Receipts {
   /** 登记这一次发话。`watch=false` 只记时刻 (供 wait_peer 定位「这一次」), 不守回执
    *  —— 调用方明说了不要自动回注。 */
-  register: (tell: Tell, watch?: boolean) => { at: number };
+  register: (tell: Tell, watch?: boolean) => { at: number; turn: string };
+  /** 注入之前定件号。`re` 只认同一对 (from → to) 正在守的那件 —— 方向反了、过了保留期、
+   *  写错了都当新活 (`reUnknown`), 不拒绝。 */
+  prepare: (from: string, to: string, re?: string) => Turn;
   /** wait_peer 取走了这一次的回复。返回「是否已经 paste 过」。 */
   claim: (from: string, to: string) => boolean;
   /** 这一次发话的时刻 (0 = 没登记过) —— wait_peer 的 sinceMs。 */
@@ -206,10 +237,10 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   const awaitReply = async (s: Slot): Promise<Outcome | undefined> => {
     // 锚在发话时刻而不是此刻: reload 后续守的那一份不该重新领一整份时长。交接转过来
     // 的那份改锚到贴回简报的时刻, 所以每圈重算。
-    const deadline = (): number => s.at + TARGET_WAIT_SEC * 1000;
+    const deadline = (): number => s.deadlineAt ?? s.at + TARGET_WAIT_SEC * 1000;
     const aborted = (): boolean => s.claimed || stale(s);
     const reported = (): boolean => s.outcome?.status === "error";
-    const reply = (): PeerReply | undefined => deps.replyFor(s.to, deps.nameOf(s.from), s.at);
+    const reply = (): PeerReply | undefined => deps.replyFor(s.to, deps.nameOf(s.from), s.at, s.turn);
     const news = (r: PeerReply | undefined): boolean => !!r?.text.trim() && !(r.error && reported());
     const failed = (status: ReceiptStatus): Outcome => ({ status, body: failure(s, status) });
     for (let fruitless = 0; fruitless < MAX_FRUITLESS; ) {
@@ -250,7 +281,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       silent: `它停下了 ${MAX_FRUITLESS} 次, 都没答这一句`,
       dead: "它的 pane 没了",
     };
-    const last = deps.lastWords?.(s.to).trim();
+    const last = deps.lastWords?.(s.to, s.at).trim();
     return `（守护进程: ${deps.nameOf(s.to)} 没有给出结论 —— ${why[status] ?? status}。）${last ? `\n它最后说的: ${truncate(last, 600)}` : ""}`;
   };
 
@@ -278,8 +309,9 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       channel: s.channel,
       job: s.job,
       done: peers.filter((x) => x.resolved).length,
-      total: peers.length,
+      total: Math.max(peers.length, s.job ? deps.jobTotal?.(s.job) ?? 0 : 0),
       status: out.status,
+      turn: s.turn ?? "",
     };
     const sent = await serial(s.from, async () => {
       // 发话方正在生成 → 等它这一轮说完, 一结束就投。它的 pane 还活着就一直等 (上限是
@@ -316,10 +348,14 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   return {
     register: (tell, watchIt = true) => {
       const k = keyOfPair(tell.from, tell.to);
+      const at = tell.at ?? Date.now();
       const s: Slot = {
         ...tell,
         job: tell.job ?? "",
-        at: tell.at ?? Date.now(),
+        at,
+        turn: tell.turn ?? newTurn(),
+        legs: tell.legs ?? 1,
+        deadlineAt: tell.deadlineAt ?? deadlineOf(at),
         gen: (slots.get(k)?.gen ?? 0) + 1,
         claimed: false,
         delivered: false,
@@ -329,7 +365,14 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       if (watchIt) arm(s);
       else { s.claimed = true; s.resolved = true; s.settled = true; } // 不守 = 这一份没人会投
       save(s);
-      return { at: s.at };
+      return { at: s.at, turn: s.turn! };
+    },
+    prepare: (from, to, re) => {
+      const want = re?.replace(/[`\s]/g, "");
+      const s = want ? slots.get(keyOfPair(from, to)) : undefined;
+      return s?.turn && s.turn === want
+        ? { turn: s.turn, legs: (s.legs ?? 1) + 1, job: s.job, channel: s.channel }
+        : { turn: newTurn(), legs: 1, ...(re ? { reUnknown: true as const } : {}) };
     },
     claim: (from, to) => {
       const s = slots.get(keyOfPair(from, to));
@@ -349,7 +392,10 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       const carried = owed.filter((s) => {
         const got = answered(s);
         if (got.trim()) s.answer = got;
-        else s.at = carryAt;
+        else {
+          s.at = carryAt;
+          s.deadlineAt = Math.max(s.deadlineAt ?? 0, carryAt + CARRY_GRACE_MS);
+        }
         save(s);
         return !got.trim();
       });

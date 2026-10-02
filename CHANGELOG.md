@@ -12,6 +12,8 @@
 - 交接简报留档: `wizard_handoff_self` / `/handoff` 的简报贴回新会话成功后追加到 `~/.wezard/memory/episodes/<name>.jsonl` (交接前后的 sessionId 与简报全文), 空简报不记 —— 此前简报只活在新会话的第一条消息里。
 - 上下文到 120k 时, 下一条注入捎一行「先 `wizard_remember` 记下值得跨会话的, 再考虑 `wizard_handoff_self`」, 每段会话 (sessionId) 只提一次。
 
+- `tell_peer` 加 `re` (续问) 与 `deadline` (秒, 60–43200, 默认 3600): 每次派活在注入前领一个件号 (`turn`, 写进信封与回包), 回执按件号定位答句; `re: <件号>` 接着那件活说, 沿用它的频道与 (还开着的) 工单, 来回超过 3 次信封提示直接收口, 件号对不上按新活发出并回 `reUnknown`; 到期没答完收到 timeout 回执。交接转移的义务顺延期限至少 10 分钟。
+
 ### Security
 - 模型不再能免审改审批配置: PreToolUse hook 对 wezard 自家 MCP 工具的一律放行排除了两种「写」—— `config_set` 带 `value` (可写 `danger_skip_all` / `approval_mode` / `allow_from`) 与 `set_model` `scope:"default"` (改 CLI 全局设置), 它们落回审批, 且 daemon 把它们当必发卡 (不吃 matcher / danger 开关 / ⏱窗口 / 会话缓存, 只有人开的 skipAll 与 bypass 模式压得过); `config_set` 的读与 `set_model` 的会话级照旧免审。
 - hook 的 wezard CLI 免审只认整条命令就是一次 `wezard[.sh] <status|logs|pending|audit|update|reload|config-path|mirror-status|version|help>` 且不含 shell 元字符; 此前命令里任意位置出现 `wezard` 一词就放行 (`curl …/config/set; true wezard` 可免审直改配置)。注意 daemon 的 `/config/set` 路由本身仍不鉴权, 本机进程可直接写 —— 这里只关掉了模型免审走到它的两条路。
@@ -24,6 +26,7 @@
 ### Fixed
 - 回执把上一件事的结论当成这一次的: 对方正忙时我们那一句还排在输入框里, 回执守护在它读进之前读 transcript, 定位不到问话就退回按时刻取。现在定位不到一律视为还没读进、接着等 (不计扑空), 只有对方整段 20s 都闲着而问话仍不在才算一次; 判闲改走注册表 (`untilIdle`), 停在本地对话框上的 wizard 不再被当成答完; 对方 pane 没了直接结束不空转; 交接顺延 deadline 后不再被一次定死的超时提前放弃。
 - 回执静默丢失: 对方超时 / 停下几次都没答 / pane 没了, 以前回执直接扔掉, 发话方只能永远等; 发话方忙满 30 分钟也会扔。现在每份回执都有定论 (信封 `status=done|error|timeout|silent|dead`), 失败的投一份合成说明 + 对方最后一句, 工单按已落定计; 发话方 pane 活着就一直等到能投; 结果先落盘再投, reload 重投同一份, 迟到的答案不改写已投的定论。对方那一轮以 CLI 的 `API Error: …` 收尾时不再当成结论 (以前会被当成回执并计入工单份数): 投一份 `status=error` 不计份数, 接着守它续跑 (`continue`) 出来的答案。
+- 工单回执提前报「全部到齐」: 份数只数回执登记, 而登记按一对 wizard 一份 —— 发起者后来又对同一个成员说了句不带工单的话, 那份就被顶掉, total 少一 (J5a009e 3 个成员报成 done=2 total=2)。现在 total 至少是工单账本的成员数。回执定位还修了两处: 对方一轮中途吃进的排队消息 (`queued_command`) 现在认作问话, 由这一轮的终句作答 (以前永远定位不到, 守满三次判没答); 对方 transcript 里我方先前送去的回执行不再被误认成问话。
 - 回执投成「（后台任务已完成）」: 对方答完后, 它先前放到后台的命令跑完会以 `<task-notification>` 起新一轮, 回执定位没把这一行当轮界, 取到的是那一轮的终句。现在 CLI 自插的通知行也截断一轮。
 - spawn 中途失败留下僵尸身份: spawn 途中 daemon 被 reload (调用方看到 `fetch failed`) 时, 身份记录已落盘却没有会话, 名字被永久占住, tell_peer / stop_wizard 都报「exists but its session is not running」。现在身份记录带 `spawning` 标记, 生成功才清; spawn 抛异常也回滚; 开机收掉上一个进程没生完的记录。`stop_wizard` 对有身份没会话的 wizard 也能成功: `end` 视为早已结束, `forget` 删记录腾出名字。
 - rolepage 链接在独立 svr 上报「未找到该会话」: 聊天票据只在创建那一刻推一次到远端, 远端换过地址 (lisct → 本机 17891) 或那一下 svr 不在时就永久缺席。现在 daemon 每次 (重新) 连上远端都把全部聊天票据补推一遍。

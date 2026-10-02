@@ -398,6 +398,8 @@ const TELL_SCHEMA = {
     .boolean()
     .optional()
     .describe("false = 放出去就不管了, 不要回执 (纯通知、或者你根本不关心它说什么)。默认 true。"),
+  re: z.string().optional().describe("续问: 回执或回包里的件号 (`t…`)。接着那件活说, 沿用它的工单与频道; 对不上就按新活发出 (`reUnknown`)。"),
+  deadline: z.number().optional().describe("最多等它多少秒 (60-43200, 默认 3600); 到点没答完你收到一份 timeout 回执。"),
 };
 
 const TELL_DESC =
@@ -406,7 +408,7 @@ const TELL_DESC =
   "默认私聊: 不出群气泡, 只记在双方 rolepage。`public:true`: 你这一轮所在的群里出 `.你 → .它` 气泡, 它的回复也进群 (同时照样回执给你)。\n" +
   "`text` 只写活本身 —— 守护进程会挂信封告诉对方是谁发的、私聊还是公开、结论收口成 `RESULT: …`。拒绝对自己发送。";
 
-const tellBody = (a: { name: string; text: string; when?: string; waitSec?: number; job?: string; public?: boolean; receipt?: boolean }) => ({
+const tellBody = (a: { name: string; text: string; when?: string; waitSec?: number; job?: string; public?: boolean; receipt?: boolean; re?: string; deadline?: number }) => ({
   name: a.name,
   text: a.text,
   ...(a.when ? { when: a.when } : {}),
@@ -414,6 +416,8 @@ const tellBody = (a: { name: string; text: string; when?: string; waitSec?: numb
   ...(a.job ? { job: a.job } : {}),
   ...(a.public ? { public: true } : {}),
   ...(a.receipt === false ? { receipt: false } : {}),
+  ...(a.re ? { re: a.re } : {}),
+  ...(a.deadline ? { deadline: a.deadline } : {}),
 });
 
 server.registerTool(
