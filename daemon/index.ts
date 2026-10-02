@@ -19,7 +19,6 @@ import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { installApprovalEventListener, makeApproveHandler } from "./approval.js";
 import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, setWorldFactsProvider, recordPost, recordCharter, backfillCharter } from "./detail.js";
-import { errText, sendAsk } from "./mention.js";
 import { EMPTY_FACTS, type WorldFacts, type WorldFactWizard } from "../shared/world.js";
 import { clearAutoWindow, initAutoWindowPersistence, setAutoWindow } from "./session-cache.js";
 import { makeMessageHandler } from "./outbound.js";
@@ -31,7 +30,7 @@ import {
   makeClaimResetHandler,
 } from "./claim.js";
 import { makeWedocBridge } from "./wedoc.js";
-import { installResponseTracker } from "./last-response.js";
+import { errText, installResponseTracker } from "./last-response.js";
 import { scanClaudeSessions } from "./session-scan.js";
 import {
   startScheduler,
@@ -612,11 +611,11 @@ const main = async (): Promise<void> => {
     // 头不走 withTagHeader 的那些 (relay / notify / 工单) 正文里的 tag 在这里挂链;
     // 已挂过的 linkTags 认得出, 不会再套一层。
     const chatIdOf = (t: string): string => baseOfKey(t).replace(/^(user|chat|group):/, "");
-    const notifyChat = (base: string, markdown: string): Promise<void> => {
+    const notifyChat = (base: string, markdown: string): void => {
       const chatId = chatIdOf(base);
-      return ws.client
+      void ws.client
         .sendMessage(chatId, { msgtype: "markdown", markdown: { content: linkTags(base, markdown) } })
-        .then(() => undefined, (e: unknown) => log.warn({ chatId, err: errText(e) }, "chat notify failed"));
+        .catch((e: unknown) => log.warn({ chatId, err: errText(e) }, "chat notify failed"));
     };
     // wizard 在群里的称呼, 只用在**正文**里。气泡的头照旧交给 withTagHeader ——
     // 那一段是路由信息 (`emoji #tag`), parseTagHeader 靠它反解, 群里引用一条气泡
@@ -817,7 +816,7 @@ const main = async (): Promise<void> => {
     http.register("POST /notify", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { to?: string[]; markdown?: string; ask?: string };
+      const b = body as { to?: string[]; markdown?: string };
       const content = (b.markdown ?? "").trim();
       if (!content) { json(res, 400, { ok: false, reason: "markdown required" }); return; }
       // 收件人写的就是名字 —— 补名必须发生在解析之前, 否则一个刚被别处命名的聊天
@@ -832,12 +831,9 @@ const main = async (): Promise<void> => {
         return;
       }
       const dests = [...new Set(refs.length ? refs.map((r) => chatBaseOf(cfg, r)) : [channelOf(self)])];
-      // ask: 要人回一句 —— 正文发完再补一条短提醒 (mention.ts)。
-      const ask = (b.ask ?? "").trim();
       for (const dest of dests) {
-        const sent = notifyChat(dest, `${relayLabel(self)}\n\n${content}`);
+        notifyChat(dest, `${relayLabel(self)}\n\n${content}`);
         recordPost({ target: self, channel: dest, body: content });
-        if (ask) void sent.then(() => sendAsk(ws.client, log.child({ mod: "ask" }), dest, displayName(self), ask));
       }
       json(res, 200, { ok: true, sent: dests.map((d) => chatNameOf(cfg, d) || d) });
     });
