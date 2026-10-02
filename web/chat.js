@@ -428,15 +428,16 @@
     return goSpan('av', id, esc(label)) +
       line(nm(id, name, true, badge) + (tail || ''), g.lastTs, g.preview, stTag(status, true), g.unread);
   };
-  // 名字旁的「+N」: 它在这里还和 N 个别的 role 说着话, 那几段不在当前视角里。
-  var unseenTail = function (id, n) {
-    return n ? '<span class="oc" title="' + esc(nameOf(id) + ' 在这里还和 ' + n + ' 个别的 role 说过话, 切到它的视角可见') + '">+' + n + '</span>' : '';
+  // 名字旁的「+N」: 它还在 N 个当前视角不在场的会话里 (群 + 私聊) —— 侧栏与关系图卡片同一份。
+  var otherChats = function (id) {
+    var n = (R.others || {})[id];
+    return n ? '<span class="oc" title="' + esc(nameOf(id) + ' 还在 ' + n + ' 个 ' + nameOf(ROLE) + ' 不在场的会话里, 切到它的视角可见') + '">+' + n + '</span>' : '';
   };
   var convRow = function (c) {
-    if (c.kind === 'wizard') return roleRow(c.peer, c.name, c.label, glance(c), c.status, '', unseenTail(c.peer, c.unseen));
+    if (c.kind === 'wizard') return roleRow(c.peer, c.name, c.label, glance(c), c.status, '', otherChats(c.peer));
     return avatarOf(c) + line('<span class="nm chat">' + esc(c.name) + '</span>', c.lastTs, c.preview, stTag(c.status, true), unreadOf(c));
   };
-  var subRow = function (c, s) { return roleRow(s.role, s.name, s.label, glance(c, s), s.status, '', unseenTail(s.role, s.unseen)); };
+  var subRow = function (c, s) { return roleRow(s.role, s.name, s.label, glance(c, s), s.status, '', otherChats(s.role)); };
 
   var convItem = function (c) {
     var on = c.key === CONV;
@@ -1037,7 +1038,7 @@
   // 收下摘要 (视角、会话列表、落地窗口) 与按它画页头侧栏分开: 换视角整窗重拉时, 画要等到新行到手的同一帧。
   var takeRole = function (d) {
     R.at = d.at || Date.now(); R.recvAt = Date.now();
-    R.role = d.role; R.sessions = d.sessions || []; R.convs = d.convs || [];
+    R.role = d.role; R.sessions = d.sessions || []; R.convs = d.convs || []; R.others = d.others || {};
     SESSION = d.session || '';
     R.relations = !!d.relations; R.schedules = d.schedules || 0; R.plan = d.plan || null;
     R.charter = d.charter || null;
@@ -1493,7 +1494,7 @@
     var me = n.target === ROLE;
     var tail = folded ? '<span class="tfold" title="它下面还有 ' + folded + ' 个, 切到它的视角可见">+' + folded + '</span>' : '';
     var p = F.pp[n.target];
-    var row = roleRow(n.target, n.name, n.label, cardGlance(F, n.target), n, tail);
+    var row = roleRow(n.target, n.name, n.label, cardGlance(F, n.target), n, tail, otherChats(n.target));
     var via = F.vis && F.vis[n.target] === 'via';
     return '<button class="ci tci' + (me ? ' me' : '') + (via ? ' via' : '') + (F.links && CONV === talkKey(F.links, n.target) ? ' on' : '') + '" data-t="' + esc(n.target) + '"' +
       (via ? ' title="' + esc(nameOf(n.target) + ' 没和 ' + nameOf(ROLE) + ' 对过话, 留着是为了连到它下面对过话的') + '"' : '') + '>' +

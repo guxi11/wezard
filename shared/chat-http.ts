@@ -27,7 +27,7 @@ import { baseOfKey } from "./session-label.js";
 import { isMark, isPost, isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, type WorldFacts } from "./world.js";
 import {
-  allMessages, convKeyOf, convMessages, parseTalkKey, glanceOfTalk, convsOf, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
+  allMessages, convKeyOf, convMessages, otherChatsOf, parseTalkKey, glanceOfTalk, convsOf, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
   roleInfo, roleStats, sessionsOf, talkArgs, talkOf, counterpartOf, windowStats, type Directory, type Msg, type SessionSpan,
 } from "./role-view.js";
 import { renderMark, renderMsg, type MsgFragment } from "./role-render.js";
@@ -183,7 +183,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     const msgs = allMessages(records, now);
     const spans = sessionsOf(records, role, now);
     const span = spanOf(spans, sid);
-    const convs = convsOf(msgs.filter((m) => inSpan(span)(m.ts)), role, dir, now);
+    const inWin = msgs.filter((m) => inSpan(span)(m.ts));
+    const convs = convsOf(inWin, role, dir, now);
     const stats = roleStats(records, role, now, span);
     const info = roleInfo(role, dir, f, stats, now);
     // 日程页画的两样东西 (与 chat.js 的 renderPlan 同一口径) —— 都没有就不给入口。
@@ -196,6 +197,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       sessions: spans.map(wireSpan),
       session: span?.sessionId ?? (spans.length ? ALL_SESSIONS : ""),
       convs,
+      others: otherChatsOf(inWin, role),
       // 链接来自哪个会话就默认开哪个 (见 landingOf); 否则最近活动的那个。
       conv: home?.key ?? convs[0]?.key ?? "",
       // 从群里点名字进来, 要看的是「我在这个群里和它说过什么」—— 默认只看与问话那一方的
