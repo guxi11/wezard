@@ -30,5 +30,6 @@
 | B1 | ✅ | `928b870` `77c0c02` `70aae40` `bba80a4` `4a73514` `b9c4f01` | charter 5.1k→2.6k tok, 工具定义 20.4k→17.8k tok。 留后: `/config/set` 路由不鉴权 (本机任意进程可写) · reload 窗口内的孤儿 tmux 窗口只 warn 不 kill · forget 冷记录未摘出开着的工单成员 · CLI 免审收紧后 `npm run build && ./cli/wezard.sh reload` 要过审批卡 |
 | B2a | ⬜ | | |
 | B2b | ⬜ | | |
-| B3 | ⬜ | | 前置已就绪: `.memsteward` `c53392f` 加了 `StewardDeps.onMerged` (只报内容真变了的 md) 与 `refsOf`; 接线在 `index.ts`, md↔wizard 用 `memoryPath(stateDir, scope, …)` 正向算后比对, 跳过 `isInternalKey` |
+| B3a | ✅ | `0644bb6` `77687bb` `b168a43` `733cb12` | ①–④ 落地, ⑤ 无需改 (`clipForCharter` 本就截尾附路径)。 留后: 120k 提醒未实测, 对 `[1m]` 模型偏早 · `/compact` 不改 jsonl, 不触发 self 记忆补发 · 收工结论归档 episodes 等 B2a |
+| B3b | ⬜ | | 收工结论归档 + ⑥ UI |
 | B4 | ⬜ | | |
