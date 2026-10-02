@@ -1745,7 +1745,7 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/clone", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { name?: string; tag?: string; description?: string; inherit?: boolean; from?: string; cwd?: string; chat?: string; cli?: CliBackendName; model?: string; task?: string; job?: string; keepalive?: boolean };
+      const b = body as { name?: string; tag?: string; description?: string; inherit?: boolean; detached?: boolean; from?: string; cwd?: string; chat?: string; cli?: CliBackendName; model?: string; task?: string; job?: string; keepalive?: boolean };
       // 工单先验: 生完分身才发现工单号打错了, 那个分身就成了没人认领的孤儿。
       const jobId = (b.job ?? "").trim();
       if (jobId) {
@@ -1760,6 +1760,13 @@ const main = async (): Promise<void> => {
         return;
       }
       const inherit = b.inherit;
+      // detached = 独立长住 (原 new_claude_session / 人在群里 `/new .x`): 不挂家谱、不占
+      // 调用方的分身名额、不随工单回收。它和「fork 我的上下文」「归某张工单」都互斥。
+      const detached = b.detached === true;
+      if (detached && (inherit || (b.job ?? "").trim())) {
+        json(res, 400, { ok: false, reason: "detached 只用于白板 (inherit:false) 且不带 job —— 独立长住的 wizard 不归你管, 也不随工单回收" });
+        return;
+      }
       // 克隆的源头: 默认是调用方自己; `from` 点名就 fork 那个 wizard 此刻的上下文。
       // 分身仍归调用方管 (parent = self: 占它的预算、随它的工单回收), 只有上下文来自别处。
       // 空串不能交给 resolvePeer —— 那是「本聊天的默认 wizard」, 不是「我自己」。
@@ -1778,13 +1785,13 @@ const main = async (): Promise<void> => {
         json(res, 409, { ok: false, reason: `${displayName(source)} 没有可 fork 的会话 (还没说过话, 或绑定已失效)` });
         return;
       }
-      const alivePeers = await m.peers(self);
+      const alivePeers = detached ? [] : await m.peers(self);
       // 预算。撞到上限不是"不许再分", 是"先把干完活的收掉": stop_wizard 收单个,
       // close_job 整批回收一个工单的临时分身。只数**本聊天里**活着的 ——
       // 生到别的聊天去的归那边管, 为了数它们再探一遍 tmux 不值当。
       const aliveKids = childrenOf(wizards.all(), self).filter((k) =>
         alivePeers.some((pp) => pp.target === k.target && pp.paneAlive));
-      if (aliveKids.length >= cfg.wrc.mirror.cloneMax) {
+      if (!detached && aliveKids.length >= cfg.wrc.mirror.cloneMax) {
         json(res, 429, {
           ok: false,
           reason: `你名下已经有 ${aliveKids.length} 个活着的分身 (上限 ${cfg.wrc.mirror.cloneMax}) —— 先 stop_wizard 收掉干完活的那些, 或者 close_job 整批回收一个工单`,
@@ -1810,7 +1817,7 @@ const main = async (): Promise<void> => {
       // 先落身份再 spawn: 宪章是从注册表渲染出来的, 记录不在就渲染出一个无名分身。
       wizards.upsert(target, {
         description: (b.description ?? "").toString().trim(),
-        parent: self,
+        ...(detached ? {} : { parent: self }),
         bornAt: Date.now(),
         clonedFrom: inherit ? sourceInfo?.sessionId ?? "" : "",
         ...(forkOf ? { forkOf } : {}),
@@ -1821,7 +1828,7 @@ const main = async (): Promise<void> => {
         spawning: BOOT_ID,
       });
       const name = wizards.rename(target, normalizeTag(askedName) || tag);
-      const charter = charterFor(target, { parent: self, forkOf, inherited: inherit });
+      const charter = charterFor(target, { ...(detached ? {} : { parent: self }), forkOf, inherited: inherit });
       const task = (b.task ?? "").toString().trim();
       // 没点名就按配置的 keepalive.spawnDefault 来 —— 调用方明说的永远优先。
       const keepalive = typeof b.keepalive === "boolean" ? b.keepalive : cfg.wrc.mirror.keepalive.spawnDefault;
@@ -1860,7 +1867,7 @@ const main = async (): Promise<void> => {
       // 出生不再发群气泡 (人要看的是结论, 不是谁生了谁 —— 过程在 rolepage 里);
       // 同群的 wizard 仍要知道群里多了一个成员。工单里的临时工连这条也省掉。
       if (!jobId) {
-        postRoster(base, [target, self], `新 wizard **.${name}** 就位${kid.description ? ` · ${kid.description}` : ""}${r.cwd ? ` · 工作区 ${r.cwd}` : ""}${modelNote}${keepalive ? "" : " · 已关闭 keepalive"} —— ${displayName(self)} 的分身${r.inherited ? ` (继承了${forkOf ? ` ${displayName(forkOf)} ` : "它"}的上下文)` : ""}`);
+        postRoster(base, [target, self], `新 wizard **.${name}** 就位${kid.description ? ` · ${kid.description}` : ""}${r.cwd ? ` · 工作区 ${r.cwd}` : ""}${modelNote}${keepalive ? "" : " · 已关闭 keepalive"} —— ${detached ? `空白起步, 由 ${displayName(self)} 造的` : `${displayName(self)} 的分身`}${r.inherited ? ` (继承了${forkOf ? ` ${displayName(forkOf)} ` : "它"}的上下文)` : ""}`);
       }
       // 继承路径上活已经随开场白进去了, 空白分身才需要在这里补一次注入 (私聊)。
       let dispatched = r.inherited && !!task;
@@ -1874,7 +1881,7 @@ const main = async (): Promise<void> => {
       // 让它们干完自己把结论送回来, 发起方不必挂在 wait_peer 上。
       const k = (body as { chain?: boolean }).chain === false ? undefined : parentKOf(self);
       if (dispatched) receipts.register({ from: self, to: target, channel: "", job: jobId, at: taskAt, turn: taskTurn, ...(k ? { k } : {}) });
-      json(res, 200, { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, keepalive, ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(jobId ? { job: jobId } : {}) });
+      json(res, 200, { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, keepalive, ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(jobId ? { job: jobId } : {}), ...(detached ? { detached: true } : {}) });
     });
 
     // 收掉一个 wizard。interrupt = 打断它这一轮 (Esc); end = 结束它并回收 pane。

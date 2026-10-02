@@ -39,6 +39,7 @@
 - hook 的 wezard CLI 免审只认整条命令就是一次 `wezard[.sh] <status|logs|pending|audit|update|reload|config-path|mirror-status|version|help>` 且不含 shell 元字符; 此前命令里任意位置出现 `wezard` 一词就放行 (`curl …/config/set; true wezard` 可免审直改配置)。注意 daemon 的 `/config/set` 路由本身仍不鉴权, 本机进程可直接写 —— 这里只关掉了模型免审走到它的两条路。
 
 ### Changed
+- `spawn_wizard({detached:true})` 吸收 `new_claude_session` (B4 ②): 白板生一个独立长住的 wizard —— 不挂家谱、不占调用方的分身名额、不随工单回收 (与 `inherit` / `job` 互斥), 等价于人在群里 `/new .name`; `new_claude_session` 留作一行别名, 路由不变。
 - 两个交接工具合成一个 `handoff({name?})` (B4 ①): 不传 `name` = 交接你自己 (带 `brief`), 传 `name` = 替那个 wizard 交接 (`focus`); 点名点到自己也按交接自己办, 不再拒绝。`wizard_handoff_self` 留作一行别名, 两条路由不变。`/handoff` 不点名不再落到「本聊天的默认 wizard」(一个漏传的参数就能把群管家交接掉), 直接 400。
 - 默认工具面去掉人侧 / 罕用的 6 个 MCP 工具 (B4 ③): `run_agent_graph` / `graph_status` / `stop_graph` / `list_claude_sessions` / `switch_claude_session` / `list_chats` 不再注册 (30 天零调用; 人有 `/sessions` `/chats`), 路由照旧, 设 `WEZARD_MCP_EXTRA=1` 挂回来; charter 去掉 `run_agent_graph` 一行, 各描述里「list_chats 里的聊天名」改指 `wizard_roster` 的 home 聊天名。
 - rolepage 消息的这一轮耗时不再随「两人对话藏指标」一起藏, 所有对话都显示; 进行中的那一轮按开始时刻每秒走表 (服务端只给开始时刻, 不扰增量推送的去重)。

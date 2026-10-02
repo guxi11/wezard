@@ -269,26 +269,14 @@ server.registerTool(
   {
     title: "Spawn a blank new wizard",
     description:
-      "在指定项目目录下长出一个**全新的 wizard** —— 自己的 tmux pane、自己的全局名字 (`.name`), home 默认是你这个聊天, 等价于人在群里敲 `/new .name`。它**不继承任何上下文**(白纸一张): 要一个开局就带着你读过的材料的分身, 用 clone_wizard; 要一个归你管、干完可回收的白板子 wizard, 用 spawn_wizard。这个工具生的 wizard 独立长住, 不挂在谁名下。新 wizard 在群里说话时气泡头是 `emoji .name`, 之后用 tell_peer 驱动它、peek_peer 看它。用户说「在 /path 下新建一个会话」「帮我在 xxx 目录起个 agent」时调它。给 `chat` 就把它的 home 设在**另一个**聊天里 —— 那个聊天必须起过名字(list_chats 能看到)。目录不存在会自动创建。绝不会顶掉一个聊天的默认 wizard。名字全局唯一: 撞上的 wizard 静默超过一天就直接顶掉它、名字归新的; 撞上一个还在的 wizard 返回 409, 返回里的 `name` 是最终落定的名字。",
+      "同 `spawn_wizard({detached:true, cwd})` —— 在某个目录生一个独立长住的白板 wizard (旧名, 只为不打断正在跑的旧会话而保留)。新调用一律用 spawn_wizard。",
     inputSchema: {
-      cwd: z.string().describe("Absolute project path to start the new session in, e.g. /Users/foo/projects/bar. Created if missing."),
-      name: z
-        .string()
-        .optional()
-        .describe("新 wizard 的名字 (如 'fix'、'docs', 带不带 '.' 都行) —— 全机唯一, 它就是地址, 挑一个说明它干什么的短词, 之后用它 tell_peer / peek_peer。省略则按目录名生成。"),
-      chat: z
-        .string()
-        .optional()
-        .describe("把它生在哪个聊天里 (wizard_roster 里的 home 聊天名)。省略 = 你自己的聊天, 用户绝大多数时候指的就是这个。只有**起过名字**的聊天能被指名 —— 没名字就没有地址, 得先有人在那边发一次 `/name <名字>`。"),
-      cli: z
-        .enum(["claude", "claude-internal", "codebuddy"])
-        .optional()
-        .describe("用哪个 CLI 启动。用户没点名就省略, 它会继承那个聊天当前的后端。多个后端可以并存。"),
+      cwd: z.string().describe("工作区绝对路径, 不存在会创建。"),
+      name: z.string().optional().describe("它的名字, 全机唯一。省略按目录名生成。"),
+      chat: z.string().optional().describe("home 聊天名。省略 = 你的聊天。"),
+      cli: z.enum(["claude", "claude-internal", "codebuddy"]).optional().describe("用哪个 CLI。省略则继承。"),
       model: z.string().optional().describe(MODEL_DOC),
-      keepalive: z
-        .boolean()
-        .optional()
-        .describe("这个 wizard 要不要被 keepalive 心跳保温 (空闲时定期 ping 一下防 prompt cache 过期)。false = 永远不保温, 省下那份 ping 的钱 —— 适合跑腿一次就收工的临时会话; true = 明确要保温。省略则按 daemon 配置的默认值。"),
+      keepalive: z.boolean().optional().describe("要不要保温。省略按配置。"),
     },
   },
   async ({ cwd, name, chat, cli, model, keepalive }) =>
@@ -810,7 +798,7 @@ const offspringShape = {
     .describe("要不要被 keepalive 心跳保温 (空闲时定期 ping 一下防 prompt cache 过期)。false = 永远不保温, 省下那份 ping 的钱 —— 适合跑腿一次就收工的; true = 明确要保温 —— 适合会长期挂着、随时可能被叫醒接手的。省略则按 daemon 配置的默认值。"),
 };
 
-type Offspring = { description: string; name?: string; task?: string; from?: string; cwd?: string; chat?: string; cli?: string; model?: string; job?: string; keepalive?: boolean; chain?: boolean };
+type Offspring = { description: string; name?: string; task?: string; from?: string; detached?: boolean; cwd?: string; chat?: string; cli?: string; model?: string; job?: string; keepalive?: boolean; chain?: boolean };
 
 const bear = (tool: string, inherit: boolean) => async (a: Offspring) =>
   unwrap(tool, await daemonPost("/wizard/clone", {
@@ -819,6 +807,7 @@ const bear = (tool: string, inherit: boolean) => async (a: Offspring) =>
     ...(a.name ? { name: a.name } : {}),
     ...(a.task ? { task: a.task } : {}),
     ...(a.from ? { from: a.from } : {}),
+    ...(a.detached ? { detached: true } : {}),
     ...(a.job ? { job: a.job } : {}),
     ...(a.cwd ? { cwd: a.cwd } : {}),
     ...(a.chat ? { chat: a.chat } : {}),
@@ -842,6 +831,7 @@ server.registerTool(
     inputSchema: {
       ...offspringShape,
       cwd: z.string().optional().describe("它的工作区绝对路径。省略 = 跟你同一个目录。"),
+      detached: z.boolean().optional().describe("true = 独立长住: 不挂在你名下 (不占分身名额、不随工单回收、不带 job), 等价于人在群里 `/new .name` —— 要一个往后一直在的新 wizard 时用; 干完一件活就收的别用。"),
     },
   },
   bear("spawn_wizard", false),
@@ -874,13 +864,13 @@ server.registerTool(
     title: "Open a job for a fan-out",
     description:
       "开一个**工单**: 你接下来要同时派出两个以上的分身干同一件事时, 先开它。返回一个 id, 把这个 id 传给 spawn_wizard / clone_wizard / tell_peer 的 `job` 参数, 它们就归到这个工单名下。\n" +
-      "开了工单之后有三件事不一样: ① 带这个 id 的派活一律私聊, 开工、派活、回执、收工都**不进群** —— 结构在 rolepage 的工单页里, 人在群里只看到你自己那一轮的最终回复。② close_job 会把为这个工单生出来的分身**整批回收**, 不必一个个 stop_wizard —— 忘记回收是常态, 每个分身都占着一个 pane 和一份上下文。③ list_jobs 能看到还开着哪些活。④ 成员交上来的答复没有非空的 `RESULT:` (按 `accept` 验收), 守护进程以你的名义同件号打回一次, 那一份不投给你、不计数; 再交上来的照收。\n" +
+      "开了工单之后有三件事不一样: ① 带这个 id 的派活一律私聊, 开工、派活、回执、收工都**不进群** —— 结构在 rolepage 的工单页里, 人在群里只看到你自己那一轮的最终回复。② close_job 会把为这个工单生出来的分身**整批回收**, 不必一个个 stop_wizard —— 忘记回收是常态, 每个分身都占着一个 pane 和一份上下文。③ list_jobs 能看到还开着哪些活。④ 默认验收: 成员交上来的答复没有非空的 `RESULT:` (按 `accept`), 守护进程以你的名义同件号打回一次, 那一份不投给你、不计数, 也不占 `maxTurns`; 再交上来的照收。\n" +
       "只派一个分身、或者只是推某个同伴一把, 不用开工单。",
     inputSchema: {
       title: z.string().describe("一句话说清这个工单要干成什么 —— 工单页与收工留档的标题。"),
       plan: z.string().optional().describe("计划 (打算分几路、各干什么), 记进工单账本给工单页读。"),
       expect: z.number().optional().describe("这批一共要几份回执。分身是陆续派的, 给了它「全部到齐」就不会在派齐之前提前报。"),
-      maxTurns: z.number().optional().describe("派活次数的预算: 带这张工单的每次 tell_peer (含 re 续问、答 NEED) 与带 task 的 spawn/clone 各记一次, 用完再派会被拒 —— 防反复追问兜圈。省略 = 不限。"),
+      maxTurns: z.number().optional().describe("派活次数的预算: 带这张工单的每次 tell_peer (含 re 续问、答 NEED) 与带 task 的 spawn/clone 各记一次, 用完再派会被拒 —— 防反复追问兜圈。守护进程按 `accept` 代你打回的那一次不算。省略 = 不限。"),
       accept: z.enum(["result", "artifact", "none"]).optional().describe("成员交差的验收: `result` (默认) 要有非空 RESULT; `artifact` 还要列出 ARTIFACT 交付物; `none` 不验。不合格的自动打回一次。"),
     },
   },
