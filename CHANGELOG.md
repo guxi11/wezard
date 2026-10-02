@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Security
+- 模型不再能免审改审批配置: PreToolUse hook 对 wezard 自家 MCP 工具的一律放行排除了两种「写」—— `config_set` 带 `value` (可写 `danger_skip_all` / `approval_mode` / `allow_from`) 与 `set_model` `scope:"default"` (改 CLI 全局设置), 它们落回审批, 且 daemon 把它们当必发卡 (不吃 matcher / danger 开关 / ⏱窗口 / 会话缓存, 只有人开的 skipAll 与 bypass 模式压得过); `config_set` 的读与 `set_model` 的会话级照旧免审。
+- hook 的 wezard CLI 免审只认整条命令就是一次 `wezard[.sh] <status|logs|pending|audit|update|reload|config-path|mirror-status|version|help>` 且不含 shell 元字符; 此前命令里任意位置出现 `wezard` 一词就放行 (`curl …/config/set; true wezard` 可免审直改配置)。注意 daemon 的 `/config/set` 路由本身仍不鉴权, 本机进程可直接写 —— 这里只关掉了模型免审走到它的两条路。
+
 ### Changed
 - 共享记忆整理从定时任务改成 daemon 内建定时器: 不再生成 `~/.wezard/tasks/memory-steward.task.mjs` (开机把旧的改名为 `.retired` 停用, 免得两路并跑), 不进 `list_tasks` / rolepage 日程。每 30 分钟 (开机后 1 分钟先跑一轮) 认领收件箱里的提议 (认领 / 一小时孤儿回收语义不变), 有活才在不属于任何群的内部 key 上起一个白板 wizard 合并, 收工即收; 收件箱改由守护进程归档进 `memory/log/`。全程零气泡、不 notify, 结果只留在 rolepage 与审计日志。
 

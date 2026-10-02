@@ -200,3 +200,21 @@ export const dangerOf = (cfg: Config, toolName: string, toolInput: unknown): Dan
     )
   );
 };
+
+// 入参里任意深度的 key=value 对 (DeferExecuteTool 之类的包装可能把真实入参套一层)。
+const deepEntries = (v: unknown): [string, unknown][] =>
+  v && typeof v === "object"
+    ? Object.entries(v as Record<string, unknown>).flatMap(([k, x]) => [[k, x] as [string, unknown], ...deepEntries(x)])
+    : [];
+
+/** wezard 自家工具里改审批 / 全机设置的「写」: config_set 带 value、set_model scope:"default"。
+ *  hook 的自家工具白名单把它们放回审批; 这里让它们**必发卡** —— 不吃 danger 的两个开关、
+ *  ⏱窗口和会话缓存, 否则模型仍能在一个开着的窗口里替人把审批关掉。只有 skipAll / bypass
+ *  (人主动选的全关) 压得过它。 */
+export const selfConfigWriteOf = (toolName: string, toolInput: unknown): DangerHit | undefined => {
+  const tool = /wezard__(config_set|set_model)$/.exec(toolName)?.[1];
+  const kv = tool ? deepEntries(toolInput) : [];
+  if (tool === "config_set" && kv.some(([k, v]) => k === "value" && v !== null && v !== undefined)) return { rule: "wezard 配置写入 (config_set)" };
+  if (tool === "set_model" && kv.some(([k, v]) => k === "scope" && v === "default")) return { rule: "改全局默认模型 (set_model scope:default)" };
+  return undefined;
+};

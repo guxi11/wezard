@@ -23,7 +23,7 @@ import {
 } from "./session-cache.js";
 import { evaluateAllow, ruleMatchesAny, alwaysAllowRulesFor, splitSegments, NEVER_RULE_ALLOW, type DenyReason } from "../shared/allow-rules.js";
 import { redact } from "./redact.js";
-import { dangerOf, dangerEarlyExit, type DangerHit } from "./danger.js";
+import { dangerOf, dangerEarlyExit, selfConfigWriteOf, type DangerHit } from "./danger.js";
 import { appendUnique } from "../shared/config-writer.js";
 import { claudeConfigWrite, type ClaudeConfigHit } from "../shared/claude-config-path.js";
 import type { NativeModalAnswer } from "./mirror-bridge.js";
@@ -2004,8 +2004,10 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
       }
     }
 
+    // wezard 自改配置的写 (见 selfConfigWriteOf): matcher 也放不掉它。
+    const selfWrite = selfConfigWriteOf(toolName, toolInput);
     // Matcher: only intercept matching tools — others pass.
-    if (!new RegExp(cfg.approval.matcher).test(toolName)) {
+    if (!selfWrite && !new RegExp(cfg.approval.matcher).test(toolName)) {
       json(res, 200, { decision: "allow", reason: "matcher_skip" } satisfies ApproveResp);
       return;
     }
@@ -2058,7 +2060,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // 是「出厂自带的 askRules」—— 所以它必须和用户写的 askRules 站在同一层, 排在
     // allowRules 之前。放在后面的话, 一条 `Bash(git *)` 这样的宽 allow 规则 (尤其
     // 是从 Claude settings.json 批量导入来的) 就能让整份危险名单失效。
-    const danger: DangerHit | undefined = dangerOf(cfg, toolName, toolInput);
+    const danger: DangerHit | undefined = selfWrite ?? dangerOf(cfg, toolName, toolInput);
     if (danger) log.info({ toolName, sessionId, rule: danger.rule }, "danger hit — forcing single approval");
 
     // 必发卡 = 危险名单 或 askRules 命中。这两者的语义是「每次都要人单独看一眼」,
@@ -2178,7 +2180,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // danger.skip / danger 模式的早退。第三个参数是「除 danger 外还有没有别的必发卡
     // 理由」—— askRules 不能被 danger 的开关顺带关掉。守卫不在其列: 它要的是事后按框,
     // 早退照样能给 (settleGuard), 拿它挡早退等于把 danger 的开关废掉。
-    const earlyExit = dangerEarlyExit(cfg, danger, Boolean(askHit));
+    const earlyExit = dangerEarlyExit(cfg, danger, Boolean(askHit) || Boolean(selfWrite));
     if (earlyExit) {
       log.info({ toolName, sessionId, reason: earlyExit }, "danger switch early exit");
       json(res, 200, { decision: "allow", reason: earlyExit } satisfies ApproveResp);
