@@ -822,12 +822,11 @@
       bindGo(who);
       return;
     }
-    // 群里选中一个子项: 窗口是「我与它」在这个群里的往来, 顶栏读作「.我 与 .它」、两端头像并排;
+    // 群里选中一个子项: 窗口是「我与它」在这个群里的往来, 顶栏只写对方 (视角自己左栏名片上已有), 不画头像;
     // 群名退到副标题, 点它 = 选回这个群本身 (整个群的视图)。
     if (WITH && c.kind === 'group') {
       var s = (c.subs || []).filter(function (x) { return x.role === WITH; })[0];
-      who.innerHTML = pairOf([[ROLE, R.role && R.role.label], [WITH, s && s.label]]) +
-        '<span class="t">' + nm(ROLE, R.role && R.role.name) + ' 与 ' + nm(WITH, s && s.name, true) + '</span>' +
+      who.innerHTML = '<span class="t">' + nm(WITH, s && s.name, true) + '</span>' +
         '<span class="sub">在 <button type="button" class="up" id="ch-up" title="' + esc('看 ' + c.name + ' 的全部记录') + '">' + esc(c.name) + '</button></span>';
       acts.innerHTML = '';
       bindGo(who);
