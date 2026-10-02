@@ -614,7 +614,7 @@
     for (var el = e.target; el && el.nodeType === 1 && el !== document.body && !clipTip(el); el = el.parentElement);
   });
 
-  // 名片: 头像 · 名字 (忙闲 / session) · 名字下一行低调的描述 (🏠 home · 🐣 出生 · 📁 cwd) · 职责;
+  // 名片: 头像 · 名字 (忙闲 / session) · 名字下一行低调的描述 (🏠 home · 🐣 出生 · 🗂️ cwd) · 职责;
   // 名片下面一排是关系 / 日程入口。身份与出身 (谁的分身 / 子 wizard) 交给关系图, 名片不写。
   var renderRole = function () {
     var r = R.role;
@@ -624,7 +624,7 @@
     var facts = [
       r.chat ? ['🏠', r.chat, 'home'] : null,
       born ? ['🐣', fmtClock(born), '出生于 ' + fmtDay(born)] : null,
-      r.cwd ? ['📁', shortCwd(r.cwd), r.cwd] : null
+      r.cwd ? ['🗂️', shortCwd(r.cwd), r.cwd] : null
     ].filter(Boolean).map(function (f) { return '<span title="' + esc(f[2]) + '">' + f[0] + ' ' + esc(f[1]) + '</span>'; });
     // 只有一段 session 就没什么可选, 不挂选择器。
     $('#rb-who').innerHTML =
