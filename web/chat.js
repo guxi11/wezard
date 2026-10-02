@@ -844,7 +844,7 @@
     turns: '对话轮数', tools: '工具调用次数', api: 'API 请求次数',
     ctx: '上下文 — 最近一次请求送入的 input + 缓存',
   };
-  var ICON = { cost: '💰', turns: '💬', tools: '🛠️', api: '🔁', ctx: '📄' };
+  var ICON = { cost: '💰', turns: '💬', tools: '🛠️', api: '⇄', ctx: '📄' };
   var fmtUsd = function (n) {
     return n < .01 ? '<$0.01' : '$' + (n < 10 ? n.toFixed(2) : n < 1000 ? n.toFixed(1) : Math.round(n));
   };
@@ -902,10 +902,10 @@
         kv('ctx', u.ctx, fmtTok(u.ctx)) +
       '</span>' + io;
   };
-  // 永远单行: 排不下就按 FOLD 的顺序一级级藏 (分布文字 → 名字), 宽度回来再按反序放出来。
+  // 永远单行: 排不下就按 FOLD 的顺序一级级藏 (消息/工具/API 计数 → 分布文字 → 名字), 宽度回来再按反序放出来。
   // 判定看的是容器自己溢没溢出, 不看视口 —— 同一个组件挂在整页页脚和右栏底, 宽度各不相同。
-  var FOLD = ['f-leg', 'f-nm'];
-  var FOLDED = { 'f-leg': '.leg', 'f-nm': '.u-nm' };
+  var FOLD = ['f-cnt', 'f-leg', 'f-nm'];
+  var FOLDED = { 'f-cnt': '.kv-turns, .kv-tools, .kv-api', 'f-leg': '.leg', 'f-nm': '.u-nm' };
   var fitUsage = function (el) {
     if (el.hidden) return;
     var over = function () { return el.scrollWidth > el.clientWidth; };
@@ -913,10 +913,9 @@
     var n = 0;
     while (n < FOLD.length && over()) el.classList.add(FOLD[n++]);
     // 藏起来的那几样进整条 bar 的 title, hover 照样读得到。
-    el.title = FOLD.slice(0, n).map(function (c) {
-      var x = el.querySelector(FOLDED[c]);
-      return x ? x.getAttribute('data-tip') : '';
-    }).filter(Boolean).join('\n');
+    el.title = FOLD.slice(0, n).reduce(function (a, c) {
+      return a.concat([].map.call(el.querySelectorAll(FOLDED[c]), function (x) { return x.getAttribute('data-tip'); }));
+    }, []).filter(Boolean).join('\n');
   };
   var watchUsage = function (el) {
     if (el._ro || typeof ResizeObserver === 'undefined') return;
