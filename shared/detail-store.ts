@@ -70,6 +70,9 @@ export interface TurnUsage {
   // 本轮**第一次**调用送入的上下文。一段新会话的首轮里, 它就是开局底座 (CLI 系统提示 + 工具 +
   // 宪章 + CLAUDE.md + skills…) 加上第一句话 —— rolepage 拿它衡量宪章在开局里占几成。
   ctxFirst?: number;
+  // 本轮**最后一次**调用送入的上下文 = 此刻窗口里实际装着多少。rolepage 的用量条拿它当「上下文」:
+  // 峰值在 compact / clear 之后就过时了, 最后一次才是现状。
+  ctxLast?: number;
 }
 
 // 上下文断点 —— 本轮开始前上下文发生了什么。渲染成 turn 卡片顶部的断点条,
@@ -446,8 +449,10 @@ export const createDetailStore = (opts: { stateDir: string; log?: Logger }): Det
                   serviceTier: cur.serviceTier ?? delta.usage.serviceTier,
                   calls: cur.calls + delta.usage.calls,
                   ctxPeak: Math.max(cur.ctxPeak ?? 0, callCtx),
+                  ctxFirst: cur.ctxFirst,
+                  ctxLast: callCtx,
                 }
-              : { ...delta.usage, ctxPeak: callCtx, ctxFirst: callCtx };
+              : { ...delta.usage, ctxPeak: callCtx, ctxFirst: callCtx, ctxLast: callCtx };
           })();
       const nextIds = delta.messageId && !dupe ? [...seenIds, delta.messageId] : seenIds;
       let model = r.model;

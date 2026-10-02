@@ -12,6 +12,9 @@ import { baseOfKey, labelFor, tagOfKey } from "./session-label.js";
 import type { DetailRecord, MarkDetailRecord, PostDetailRecord, TurnDetailRecord, TurnOrigin, TurnUsage } from "./detail-store.js";
 
 export interface AggUsage extends TurnUsage {
+  /** 此刻的上下文: 最近一轮主会话 (子 agent 有自己的窗口, 不算) 最后一次调用送入的
+   *  input + 缓存。是现状, 不是峰值 —— compact / clear 之后峰值就过时了。 */
+  ctx: number;
   /** Wall-clock covered by the aggregated turns (sum of per-turn spans). */
   durationMs: number;
   turns: number;
@@ -20,7 +23,7 @@ export interface AggUsage extends TurnUsage {
 
 const ZERO: AggUsage = {
   input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0,
-  ctxPeak: 0, durationMs: 0, turns: 0, tools: 0,
+  ctx: 0, durationMs: 0, turns: 0, tools: 0,
 };
 
 export interface TagSummary {
@@ -135,9 +138,18 @@ export const isGhostTurn = (r: TurnDetailRecord, now: number): boolean =>
 const turnSpan = (r: TurnDetailRecord, now: number): number =>
   (turnDone(r, now) ? r.updatedAt : now) - r.createdAt;
 
+// 老记录没有 ctxLast: 退到这一轮的峰值 (多次调用的累计和不是任何一次的上下文)。
+const lastCtx = (u: TurnUsage): number => u.ctxLast ?? u.ctxPeak ?? u.input + u.cacheRead + u.cacheWrite;
+
+const ctxNow = (turns: readonly TurnDetailRecord[]): number => {
+  const last = turns
+    .filter((r) => !r.agent && r.usage)
+    .reduce<TurnDetailRecord | undefined>((a, r) => (!a || r.createdAt >= a.createdAt ? r : a), undefined);
+  return last?.usage ? lastCtx(last.usage) : 0;
+};
+
 const addUsage = (a: AggUsage, r: TurnDetailRecord, now: number): AggUsage => {
   const u = r.usage;
-  const ctx = u ? (u.ctxPeak ?? u.input + u.cacheRead + u.cacheWrite) : 0;
   return {
     input: a.input + (u?.input ?? 0),
     output: a.output + (u?.output ?? 0),
@@ -145,7 +157,7 @@ const addUsage = (a: AggUsage, r: TurnDetailRecord, now: number): AggUsage => {
     cacheWrite: a.cacheWrite + (u?.cacheWrite ?? 0),
     calls: a.calls + (u?.calls ?? 0),
     serviceTier: a.serviceTier ?? u?.serviceTier,
-    ctxPeak: Math.max(a.ctxPeak ?? 0, ctx),
+    ctx: a.ctx,
     durationMs: a.durationMs + turnSpan(r, now),
     turns: a.turns + 1,
     tools: a.tools + r.items.filter((it) => it.t === "tool_use").length,
@@ -153,7 +165,7 @@ const addUsage = (a: AggUsage, r: TurnDetailRecord, now: number): AggUsage => {
 };
 
 export const aggregate = (turns: readonly TurnDetailRecord[], now: number): AggUsage =>
-  turns.reduce((a, r) => addUsage(a, r, now), ZERO);
+  ({ ...turns.reduce((a, r) => addUsage(a, r, now), ZERO), ctx: ctxNow(turns) });
 
 const stripMd = (s: string): string => s.replace(/[`*_~|#>]/g, "").replace(/\s+/g, " ").trim();
 

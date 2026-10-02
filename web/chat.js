@@ -759,7 +759,7 @@
   ];
   var TIP = {
     turns: '对话轮数', tools: '工具调用次数', api: 'API 请求次数',
-    ctx: '上下文峰值 — 单次请求送入的 input + 缓存 的最高值', time: '累计耗时',
+    ctx: '上下文 — 最近一次请求送入的 input + 缓存', time: '累计耗时',
   };
   var ICON = { turns: '💬', tools: '🛠️', api: '🔁', ctx: '📄', time: '⏱️' };
   var liveDur = function (t) {
@@ -807,7 +807,7 @@
         esc(t.model ? t.model.replace(/^claude-/, '') : '用量') + '</span>' +
       '<span class="u-kvs">' +
         kv('turns', t.turns, t.turns) + kv('tools', u.tools, u.tools) + kv('api', u.calls, u.calls) +
-        kv('ctx', u.ctxPeak, fmtTok(u.ctxPeak)) + kv('time', liveDur(t), fmtDur(liveDur(t))) +
+        kv('ctx', u.ctx, fmtTok(u.ctx)) + kv('time', liveDur(t), fmtDur(liveDur(t))) +
       '</span>' + io;
   };
   // 永远单行: 排不下就按 FOLD 的顺序一级级藏 (分布文字 → 名字 → 耗时), 宽度回来再按反序放出来。
