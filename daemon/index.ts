@@ -1806,9 +1806,13 @@ const main = async (): Promise<void> => {
           ...(forget ? { forget } : {}),
         });
         if (!queued) { json(res, 500, { ok: false, reason: "提议没写进收件箱" }); return; }
+        // 不回全文: 每提一条就把整份 md 吐回上下文, 连交几条就是几倍的 token。
+        // forget 是子串, 回它此刻命中几行 —— 0 行就是写错了, 当场能改。
+        const lines = readMemory(path).split("\n").filter((l) => l.trim());
         json(res, 200, {
-          ok: true, scope, queued, file: path, memory: readMemory(path),
-          hint: "已提交给记忆整理者, 下一轮整理 (半小时内) 合并进上面这份记忆; 此后出生的 wizard 才读得到",
+          ok: true, scope, queued, file: path, lines: lines.length,
+          ...(forget ? { forgetHits: lines.filter((l) => l.includes(forget)).length } : {}),
+          hint: "已提交给记忆整理者, 下一轮整理 (半小时内) 合并进 file; 此后出生的 wizard 才读得到",
         });
         return;
       }
@@ -1822,7 +1826,7 @@ const main = async (): Promise<void> => {
       const dropped = want.slice(0, Math.max(0, want.length - MEMORY_MAX));
       const { memory } = wizards.upsert(self, { memory: want });
       json(res, 200, {
-        ok: true, scope: "self", memory, added: !!note, forgotten: cur.length - next.length,
+        ok: true, scope: "self", count: memory.length, added: !!note, forgotten: cur.length - next.length,
         ...(dropped.length ? { dropped, hint: `self 记忆满 ${MEMORY_MAX} 条, 最旧的 ${dropped.length} 条被挤掉了 (见 dropped); 还要的话 forget 掉不重要的再记回来, 或合并成一条` } : {}),
         ...(note.length > NOTE_MAX ? { truncated: `这条超过 ${NOTE_MAX} 字, 只记下了前 ${NOTE_MAX} 字` } : {}),
       });
