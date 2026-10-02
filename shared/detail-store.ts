@@ -9,6 +9,7 @@ import { join } from "node:path";
 import type { Logger } from "pino";
 import { expandHome } from "./paths.js";
 import type { CliBackendName } from "./cli-backends.js";
+import type { ReceiptStatus } from "./reminder.js";
 
 export type ApprovalDecision =
   | "allow"
@@ -128,6 +129,14 @@ export interface TurnFrom {
    *  不是它派来的新活。回执不再生回执 (见 index.ts 的 receipts), 所以这也是一条
    *  「这一轮不该再触发回注」的记录。 */
   receipt?: boolean;
+  /** 这件活的编号 (`t` + 6 hex, 见 reminder.TurnTag): 派活那句、续问与回执带同一个 ——
+   *  rolepage 凭它从回执跳回派活那句。老记录没有。 */
+  turn?: string;
+  /** 回执: 定论 (见 ReceiptStatus)。 */
+  status?: ReceiptStatus;
+  /** 回执: 工单里已落定几份 / 一共几份 —— 「第 i/n 份」。不走工单的没有。 */
+  done?: number;
+  total?: number;
 }
 
 // Subagent 归属 —— 这一轮不是主会话的 turn, 是 Task/Agent 工具派出的子 agent

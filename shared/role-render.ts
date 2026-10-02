@@ -55,9 +55,27 @@ const inMeta = (r: TurnDetailRecord): string => {
   return bits.length ? `<div class="mmeta">${bits.join("")}</div>` : "";
 };
 
+// 回执的定论 —— 回执轮没有入消息 (那句话就是同伴的出消息), 所以它写在出消息名字那一行。
+const RCPT: Readonly<Record<string, string>> = {
+  done: "已交", need: "反问", error: "报错", timeout: "超时", silent: "没答", dead: "失联", canceled: "撤回",
+};
+/** 回执那一轮的 chip: 定论 + 工单里第几份; 点它跳回派活那句 (按 from.turn 找 data-pturn)。 */
+const receiptChip = (r: TurnDetailRecord): string => {
+  const f = r.from;
+  if (f?.kind !== "peer" || !f.receipt) return "";
+  const st = f.status ?? "done";
+  const seq = f.job && f.total ? ` · ${escHtml(f.job)} 第 ${f.done ?? 0}/${f.total} 份` : "";
+  const tag = f.turn ? "button" : "span";
+  return `<${tag} class="mchip rcpt st-${escHtml(st)}"${f.turn ? ` data-goto="${escHtml(f.turn)}" title="跳到派活那句 (${escHtml(f.turn)})"` : ""}>↩ 回执 · ${RCPT[st] ?? escHtml(st)}${seq}</${tag}>`;
+};
+
+/** 派活 / 续问那句带上它的活号, 回执凭它定位回来。 */
+const pturnAttr = (r: TurnDetailRecord): string =>
+  r.from?.kind === "peer" && r.from.turn && !r.from.receipt ? ` data-pturn="${escHtml(r.from.turn)}"` : "";
+
 const renderIn = (r: TurnDetailRecord): string => {
   const q = splitReminders(unwrapMates(r.userQuery ?? ""));
-  return tagSig(`<section class="bubble mq" data-key="${escHtml(r.id)}:in">${inMeta(r)}` +
+  return tagSig(`<section class="bubble mq" data-key="${escHtml(r.id)}:in"${pturnAttr(r)}>${inMeta(r)}` +
     `<div class="md-body"></div><script type="text/plain" class="md-src">${escHtml(q.body)}</script>${q.html}</section>`);
 };
 
@@ -78,7 +96,7 @@ export const renderMsg = (m: Msg, records: readonly DetailRecord[], dir: Directo
   const r = m.turn;
   const { html, meta } = m.dir === "in"
     ? { html: renderIn(r), meta: "" }
-    : renderTurnGroup(r, now, childrenOf(records, r.id, now), false);
+    : ((g) => ({ html: g.html, meta: receiptChip(r) + g.meta }))(renderTurnGroup(r, now, childrenOf(records, r.id, now), false));
   const live = m.dir === "out" && !turnDone(r, now);
   return {
     id: m.id, turnId: r.id, dir: m.dir, ...base(m, dir), ts: m.ts,

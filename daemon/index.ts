@@ -652,12 +652,12 @@ const main = async (): Promise<void> => {
         m.injectText(to, clipMiddle(bodyText), undefined, {
           // receipt:true 是「这一轮不该再生回执」的记录 —— 回环在结构上就不成立:
           // 只有 tell_peer 那条路登记 watcher, 这里是直接注入。
-          from: { kind: "peer", from: meta.from, receipt: true, ...(meta.job ? { job: meta.job } : {}) },
+          from: { kind: "peer", from: meta.from, receipt: true, status: meta.status, ...(meta.turn ? { turn: meta.turn } : {}), ...(meta.job ? { job: meta.job, done: meta.done, total: meta.total } : {}) },
           channel: meta.channel,
           envelope: renderReceiptEnvelope(
             displayName(meta.from),
             meta.channel ? chatNameOf(cfg, meta.channel) : undefined,
-            meta.job ? { job: meta.job, done: meta.done, total: meta.total } : undefined,
+            meta.job ? { job: meta.job, done: meta.done, total: meta.total, closed: jobs.get(meta.job)?.status !== "open" } : undefined,
             meta.status,
             meta.turn || undefined,
             {
@@ -685,7 +685,7 @@ const main = async (): Promise<void> => {
       inject: (t, text, owe) =>
         owe.length
           ? m.injectText(t, text, undefined, {
-              from: { kind: "peer", from: owe[0]!.from },
+              from: { kind: "peer", from: owe[0]!.from, ...(owe[0]!.turn ? { turn: owe[0]!.turn } : {}) },
               channel: owe[0]!.channel,
               envelope: owe.map((o) => envelopeFor(o.from, o.channel, o.turn ? { turn: o.turn } : undefined)).join(""),
             })
@@ -1014,7 +1014,7 @@ const main = async (): Promise<void> => {
       const deadlineSec = (body as { deadline?: number }).deadline;
       const deadlineAt = deadlineOf(at, deadlineSec === undefined ? undefined : Number(deadlineSec));
       const inj = await m.injectText(target, text, undefined, {
-        from: { kind: "peer", from: self, ...(jobId ? { job: jobId } : {}), ...(isPublic ? { public: true } : {}) },
+        from: { kind: "peer", from: self, turn: turn.turn, ...(jobId ? { job: jobId } : {}), ...(isPublic ? { public: true } : {}) },
         channel,
         envelope: envelopeFor(self, channel, {
           turn: turn.turn,
@@ -1806,6 +1806,7 @@ const main = async (): Promise<void> => {
         // 继承路径上第一句话是分叉的触发器, 所以直接把活当开场白 —— 少一次往返,
         // 也少一次"就位了但没事干"的空转。
         bootstrap: task ? task + envelopeFor(self, "", { turn: taskTurn }) : undefined,
+        ...(task ? { bootstrapFrom: { from: { kind: "peer" as const, from: self, turn: taskTurn, ...(jobId ? { job: jobId } : {}) }, query: task } } : {}),
         keepalive,
       }).catch((e: unknown) => ({ ok: false as const, reason: `spawn threw: ${String(e)}`, inherited: false }));
       // 生不出来就回滚身份 —— 否则名字被一个永远没有会话的记录占住。
@@ -1829,7 +1830,7 @@ const main = async (): Promise<void> => {
       // 继承路径上活已经随开场白进去了, 空白分身才需要在这里补一次注入 (私聊)。
       let dispatched = r.inherited && !!task;
       if (task && !r.inherited) {
-        const inj = await m.injectText(target, task, undefined, { from: { kind: "peer", from: self, ...(jobId ? { job: jobId } : {}) }, channel: "", envelope: envelopeFor(self, "", { turn: taskTurn }) });
+        const inj = await m.injectText(target, task, undefined, { from: { kind: "peer", from: self, turn: taskTurn, ...(jobId ? { job: jobId } : {}) }, channel: "", envelope: envelopeFor(self, "", { turn: taskTurn }) });
         dispatched = inj.ok;
       }
       if (jobId) jobs.attach(jobId, { target, task, spawned: true });

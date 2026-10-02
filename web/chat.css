@@ -339,6 +339,12 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 .mchip.priv { color: var(--priv); background: #9a5b1014 }
 .mchip.graph { color: #6639ba; background: #8250df12 }
 .mchip.sys { color: #0a7d6b; background: #0a7d6b12 }
+/* 回执: 定论着色 —— 已交是常态不抢眼, 反问 / 报错要人看一眼, 没答案的几种灰红。 */
+.mchip.rcpt { border: 0; font: inherit; font-size: 11px; line-height: 16px; color: #1a7f37; background: #1a7f3712 }
+button.mchip.rcpt { cursor: pointer }
+button.mchip.rcpt:hover { text-decoration: underline }
+.mchip.rcpt:is(.st-need, .st-error) { color: #9a6700; background: #9a670014 }
+.mchip.rcpt:is(.st-timeout, .st-silent, .st-dead, .st-canceled) { color: #cf222e; background: #cf222e10 }
 
 /* 气泡与过程框同一种底色: 都是这个人发出来的 —— 自己的是视角色, 别人的是浅灰。
    TURN_CSS 里写死的白卡 / 灰底 (嵌套气泡、代码块、折叠头) 在有色底上会显成一张张

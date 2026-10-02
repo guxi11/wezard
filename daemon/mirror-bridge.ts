@@ -2086,7 +2086,7 @@ export interface MirrorBridge {
    *  everything the parent had read, the parent is untouched. `inherit: false`
    *  (or a different cwd, which `--resume` cannot honor) degrades to a plain
    *  `newSession`; the reply says which happened via `inherited`. */
-  cloneSession: (args: { parent: string; target: string; windowName?: string; cli?: CliBackendName; model?: string; cwd?: string; systemPrompt?: string; inherit?: boolean; bootstrap?: string; keepalive?: boolean }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; inherited: boolean; model?: string; modelWarning?: string }>;
+  cloneSession: (args: { parent: string; target: string; windowName?: string; cli?: CliBackendName; model?: string; cwd?: string; systemPrompt?: string; inherit?: boolean; bootstrap?: string; bootstrapFrom?: { from: TurnFrom; query: string }; keepalive?: boolean }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; inherited: boolean; model?: string; modelWarning?: string }>;
   /** Install the wizard-identity provider. Every spawn path (`/new`, a dead-pane
    *  respawn, a clone) asks it for the target's charter and presses the result
    *  into the new process's system prompt, so identity is a property of the
@@ -5063,6 +5063,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     /** 分身的第一句话。继承路径上它是**必需**的 (分叉文件要靠它才生成), 省略则用
      *  一句自我介绍兜底; 空白路径上它只是普通的首条消息。 */
     bootstrap?: string;
+    /** 开场白其实是一件派下来的活时, 它的出处与原话 (不带信封) —— 同 injectText 的 from:
+     *  第一轮记成「谁派的、哪件活、哪张工单」, rolepage 的工单窗口与回执跳转靠它。 */
+    bootstrapFrom?: { from: TurnFrom; query: string };
     /** false = 这个分身**永远**不会被 keepalive 心跳唤醒 (跑腿的一次性分身不必
      *  为保温付 ping 的钱); true = 明确要保温; 省略 = 按配置的
      *  `keepalive.spawnDefault`。与 `justSpawned` 那种"直到第一次真活动才恢复"
@@ -5140,6 +5143,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       spawned.keepaliveOffAt = Date.now();
       spawned.keepalive = undefined;
       persistPause(spawned);
+      // 开场白早在 attach 之前就落进分叉文件了 (tail 从 EOF 起, 读不到那一行): 第一轮懒建时
+      // 才认得出它是谁派的活。印章赶在 tail 第一次 drain 之前盖上。
+      if (args.bootstrapFrom) {
+        spawned.pendingFrom = { from: args.bootstrapFrom.from, at: Date.now() };
+        spawned.pendingBriefQuery = args.bootstrapFrom.query;
+      }
     }
     lg.info({ parent: args.parent, sessionId: fork.sessionId }, "clone: forked");
     afterSpawn();
