@@ -189,6 +189,18 @@ button { font: inherit; color: inherit }
 }
 .convs h2:first-child { margin-top: 6px }
 .convs h2 span { font-weight: 400; color: var(--faint); font-variant-numeric: tabular-nums }
+/* 会话列表 ↔ 关系图的小开关: 两个视图的第一行标题右端, 同一个位置。 */
+.convs h2 .vt {
+  margin-left: auto; align-self: center; display: inline-flex; align-items: center; gap: 4px;
+  border: 0; background: none; padding: 2px 6px; border-radius: 5px; cursor: pointer;
+  font-size: 11px; font-weight: 400; color: var(--mute);
+}
+.convs h2 .vt:hover { background: #eef1f4; color: var(--accent) }
+.convs h2 .tall + .vt { margin-left: 4px }
+/* 关系图那一行字多 (范围 · 计数 · 名册缺席 · 看全部 · 开关): 一律不折行, 让范围那段先省略。 */
+.convs h2 { white-space: nowrap; min-width: 0 }
+.convs h2 > * { flex: none }
+.convs h2 > span:first-of-type { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis }
 
 /* 群下的子项 (.si) 与私聊项 (.ci) 同一套尺寸 —— 只有一份。 */
 .ci, .si {

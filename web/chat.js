@@ -482,7 +482,8 @@
       return list.length ? '<h2>' + title + '<span>' + list.length + '</span></h2>' + list.map(convItem).join('') : '';
     };
     // 没变就不碰 DOM: 心跳每 3s 来一次, 重建会把列表的滚动与焦点蹭掉。
-    var html = sec('群聊', groups) + sec('私聊', dms);
+    // 开关挂在第一个标题行的右端; 一个会话都没有也留一行标题给它。
+    var html = (sec('群聊', groups) + sec('私聊', dms) || '<h2>会话<span>0</span></h2>').replace('</h2>', worldToggle() + '</h2>');
     if (convsEl._html === html) return;
     convsEl._html = html; convsEl.innerHTML = html;
     convsEl.querySelectorAll('[data-conv]').forEach(function (b) {
@@ -494,6 +495,7 @@
       b.onclick = function () { MORE[key] = !MORE[key]; renderConvs(); };
     });
     bindGo(convsEl);
+    bindWorldToggle(convsEl);
   };
 
   var shortCwd = function (p) {
@@ -555,10 +557,6 @@
     return '<button class="bd' + (on ? ' on' : '') + (tone ? ' ' + tone : '') + '" data-view="' + view + '"' +
       (sub ? ' title="' + esc(sub) + '"' : '') + '>' + label + '</button>';
   };
-  var relTile = function (r) {
-    var sub = [r.clones.length ? r.clones.length + ' 分身' : '', r.spawns.length ? r.spawns.length + ' 子' : ''].filter(Boolean);
-    return tile('world', '关系图', sub.join(' · '));
-  };
   var planTile = function () {
     var p = R.plan || {};
     var sub = p.broken ? '⚠ ' + p.broken + ' 出错'
@@ -566,9 +564,16 @@
       : String(R.schedules);
     return tile('plan', '日程', sub, p.broken ? 'bad' : '');
   };
-  // 宽屏的关系图开关在右栏头上 (与会话列表同一个位置来回切); 窄屏侧栏与主区二选一, 开关只能留在侧栏。
-  var narrow = function () { return !!window.matchMedia && matchMedia('(max-width: 760px)').matches; };
-  if (window.matchMedia) matchMedia('(max-width: 760px)').addEventListener('change', function () { if (R.role) { renderRole(); renderHead(); } });
+  // 会话列表 ↔ 关系图: 侧栏第一行右上角同一个小开关, 标的是「点了去哪」。
+  var LIST_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M3 4h10M3 8h10M3 12h10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+  var TREE_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M4 3v10M4 6h5M4 11h5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="11" cy="6" r="1.6" fill="currentColor"/><circle cx="11" cy="11" r="1.6" fill="currentColor"/></svg>';
+  var worldToggle = function () {
+    return '<button class="vt" data-vt title="' + (WORLD ? '换回会话列表' : '换成关系图') + '">' + (WORLD ? LIST_SVG + '列表' : TREE_SVG + '关系图') + '</button>';
+  };
+  var bindWorldToggle = function (scope) {
+    var b = scope.querySelector('[data-vt]');
+    if (b) b.onclick = function () { setWorld(!WORLD); };
+  };
 
   // 轻提示: 底部居中一枚, 新的顶掉旧的。
   var toast = (function () {
@@ -650,7 +655,7 @@
     bindSessPicker();
     // 入口只在有东西可看时出现 —— 挂在名片下、会话列表上, 不挤进名片: 名片的主角是身份,
     // 家谱计数 (几个分身 / 子 wizard) 属于关系, 写在关系图入口上。
-    $('#rb-acts').innerHTML = [R.relations && narrow() && relTile(r), R.schedules && planTile()].filter(Boolean).join('<span class="sep" aria-hidden="true">｜</span>');
+    $('#rb-acts').innerHTML = [R.schedules && planTile()].filter(Boolean).join('<span class="sep" aria-hidden="true">｜</span>');
     $('#rb-acts').querySelectorAll('.bd').forEach(function (b) {
       var v = b.getAttribute('data-view');
       b.onclick = function () { v === 'world' ? setWorld(!WORLD) : setView(VIEW === v ? 'msgs' : v); };
@@ -776,15 +781,6 @@
     putUsage($('#ch-usage'), VIEW === 'msgs' ? R.winStats : null);
   };
 
-  // 会话列表 ↔ 关系图: 同一个按钮、同一个位置, 标的是「点了去哪」。
-  var worldToggle = function () {
-    return !narrow() ? '<button class="vb' + (WORLD ? ' on' : '') + '" id="ch-world">' + (WORLD ? '会话列表' : '关系图') + '</button>' : '';
-  };
-  var bindWorldToggle = function () {
-    var b = $('#ch-world');
-    if (b) b.onclick = function () { setWorld(!WORLD); };
-  };
-
   // ── 右栏头: 这个群聊 / 私聊是什么 (关系 / 日程视图时是视图名) ──
   var renderHead = function () {
     var who = $('#ch-who'), acts = $('#ch-acts');
@@ -800,8 +796,8 @@
     if (!c) { who.innerHTML = ''; acts.innerHTML = ''; return; }
     if (c.kind === 'all') {
       who.innerHTML = pairOf([[c.who]]) + '<span class="t">' + esc(c.name) + '</span>';
-      acts.innerHTML = worldToggle();
-      bindGo(who); bindWorldToggle();
+      acts.innerHTML = '';
+      bindGo(who);
       return;
     }
     // 一对一 (私聊, 或群里「只看我与 X」) 两端都亮头像: 我在前, 对端在后, 各自是切视角的入口。
@@ -810,13 +806,12 @@
     var peerLabel = c.kind !== 'group' ? c.label : dm && peer === dm.role ? dm.label : '';
     who.innerHTML = (peer ? pairOf([[ROLE, R.role && R.role.label], [peer, peerLabel]]) : '') +
       '<span class="t">' + (c.kind === 'wizard' ? nm(c.peer, c.name, true) : esc(c.name)) + '</span>';
-    acts.innerHTML = (WITH
+    acts.innerHTML = WITH
       ? '<span class="with">只看我与 ' + nm(WITH, '', true) + '</span><button class="vb" id="ch-all">看全部</button>'
-      : '') + worldToggle();
+      : '';
     bindGo(who); bindGo(acts);
     var x = $('#ch-all');
     if (x) x.onclick = function () { selectConv(CONV, ''); };
-    bindWorldToggle();
   };
 
   // ── 消息行 ──
@@ -1598,7 +1593,7 @@
       '<h2>关系图<span title="在名片里的 session 下拉切换范围">' + esc(span) + ' · ' + (all ? Object.keys(F.ends).length : shown.length) + ' 个</span>' +
         (W.degraded ? '<span class="warn" title="没拿到 wizard 注册表 (svr 还没收到 daemon 的快照), 只画观测到的往来">名册缺席</span>' : '') +
         (me ? '<button class="tall" title="' + (all ? '只留它的上游链、它自己、它的下游与同源兄弟' : '画出范围内所有有关系的 wizard') + '">' +
-          (all ? '只看相关' : '看全部') + '</button>' : '') + '</h2>' +
+          (all ? '只看相关' : '看全部') + '</button>' : '') + worldToggle() + '</h2>' +
       (alone ? '<div class="tsolo">' + esc(nameOf(ROLE)) + (rg ? ' 在这段 session 里' : '') + ' 没和谁对过话</div>' : '') +
       (shown.length ? '<ul class="tree' + (all ? ' all' : '') + '">' + trees + '</ul>' : '<div class="pempty">这段时间里没有任何关系</div>') +
     '</div>';
@@ -1612,6 +1607,7 @@
     bindGo(convsEl);
     var tall = convsEl.querySelector('.tall');
     if (tall) tall.onclick = function () { W.treeAll = !W.treeAll; W.treeFor = ''; renderWorld(); };
+    bindWorldToggle(convsEl);
     var cur = convsEl.querySelector('.tci.me');
     if (cur && W.treeFor !== ROLE) { W.treeFor = ROLE; cur.scrollIntoView({ block: 'nearest' }); }
   };
