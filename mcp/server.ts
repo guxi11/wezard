@@ -52,12 +52,13 @@ server.registerTool = ((toolName: string, config: { inputSchema?: Shape }, cb: (
   return registerTool(toolName, { ...config, inputSchema: withLegacyAddress(shape) } as never, ((args: Record<string, unknown>, extra: unknown) => cb(fold(args), extra)) as never);
 }) as typeof server.registerTool;
 
-// Accept user-friendly prefixes from the LLM: vid:<id> → user:<id>, chatid:<id> → chat:<id>.
 // 人侧 / 罕用的工具 (30 天零调用: graph 三件套、本机会话清单与改接、聊天目录) 不进默认
 // 工具面 —— 每个注册的工具都占模型的上下文, 而这些要么人在 IM 里有对应命令 (`/sessions`
 // `/chats`), 要么由 tell_peer + 回执覆盖。路由都还在; `WEZARD_MCP_EXTRA=1` 把它们挂回来。
 const registerRare: typeof server.registerTool =
   process.env.WEZARD_MCP_EXTRA === "1" ? server.registerTool.bind(server) : ((() => undefined) as never);
+
+// Accept user-friendly prefixes from the LLM: vid:<id> → user:<id>, chatid:<id> → chat:<id>.
 
 // Pass anything else (already user:/chat:/group:, or empty) through unchanged.
 const normalizeTarget = (raw: string | undefined): string | undefined => {
@@ -80,7 +81,7 @@ server.registerTool(
   {
     title: "Switch workspace directory",
     description:
-      "一步换掉这个 wizard 的**工作区**: 杀掉当前 pane, 在给定目录下重开一个全新的会话 —— 等价于往那个目录 `/new`。群里收到新会话的 📂 项目信息气泡当回执; 对话上下文**不会**带过去 (和 /new 一样是全新会话, 但身份的系统提示还在)。调用方就是被替换的那一个时, 它在调用当口就被终结 —— 这是预期行为, 群里那条气泡就是回执。用绝对路径 (或 `~` 开头)。想换目录又想保住手上的上下文: 先 wizard_handoff_self 把工作压成简报, 或者 spawn_wizard({cwd}) 生一个子 wizard 去那边干。\n"
+      "一步换掉这个 wizard 的**工作区**: 杀掉当前 pane, 在给定目录下重开一个全新的会话 —— 等价于往那个目录 `/new`。群里收到新会话的 📂 项目信息气泡当回执; 对话上下文**不会**带过去 (和 /new 一样是全新会话, 但身份的系统提示还在)。调用方就是被替换的那一个时, 它在调用当口就被终结 —— 这是预期行为, 群里那条气泡就是回执。用绝对路径 (或 `~` 开头)。想换目录又想保住手上的上下文: 先 handoff 把自己的工作压成简报, 或者 spawn_wizard({cwd}) 生一个子 wizard 去那边干。\n"
       + "**`keep:true` 是另一支**: 人回答「不用换, 就用现在这个目录」时调它 —— 不重开会话, 只把「这个工作区是人认过的」记下来, 此后新会话的开局不再问这件事。一个新聊天的第一个 wizard 落在默认兜底目录里, 开局会被要求先问一句要去哪个项目; 人给路径就走 `cwd`, 人说不用换就走 `keep`。",
     inputSchema: {
       cwd: z.string().optional().describe("Absolute project path, e.g. /Users/foo/projects/bar. ~ is expanded. 与 `keep` 二选一。"),
@@ -570,29 +571,39 @@ registerRare(
   async ({ runId }) => unwrap("stop_graph", await daemonPost("/graph/stop", { runId })),
 );
 
+// 交接只有一个动词: 不点名 = 交接你自己 (你写简报), 点名 = 替别人交接 (守护进程让它写)。
+// 两条路由不变 —— 已在跑的 wizard 的 MCP 进程还在调老名字 wizard_handoff_self。
+const handoffSelf = (tool: string, brief: string) =>
+  daemonPost("/wizard/handoff-self", { brief }).then((r) => unwrap(tool, r));
+
 server.registerTool(
   "handoff",
   {
-    title: "Hand another wizard's work over to a fresh context",
+    title: "Hand work over to a fresh context (yourself or another wizard)",
     description:
-      "给**另一个** wizard 做交接, 原地完成: 守护进程让它把当前工作压成一份自洽的交接简报, 等它写完抓取, 再给它 `/new` 一个全新的会话 (新进程、上下文清零, 名字 / cwd / 模型 / 身份的系统提示照旧), 然后把简报作为新会话的第一条消息贴回去。它的上下文撑不住了、或者用户说「让 .fix 交接一下」「叫它压缩上下文重开」时用。按 tmux `pane` id (`%5`, 来自 wizard_roster / list_claude_sessions) 或按 `name` 寻址。**要交接的是你自己就用 wizard_handoff_self** —— 这里拒绝对自身操作 (会死锁: 你没法在自己生成的当口再被问一次)。返回被带过去的那份简报。",
+      "把一段工作压成简报、原地换一个全新的会话接着干 (新进程、上下文清零; 名字 / cwd / 模型 / 身份的系统提示照旧), 简报作为新会话的第一条消息贴回去。\n" +
+      "**不传 `name` = 交接你自己**: 简报由你写在 `brief` 里, 守护进程等你这一轮说完再重开 (新会话里 MCP 工具也换成最新的)。简报要写到零上下文的自己仅凭它就能接着干: 总目标 / 已完成与关键决策 / 当前状态 / 有序的下一步 / 关键文件与非显然的坑。\n" +
+      "**传 `name` = 替那个 wizard 交接**: 守护进程让它自己写简报 (`focus` 指定要特别交代的点), 抓到后给它重开并贴回; 返回被带过去的那份简报。",
     inputSchema: {
-      pane: z.string().optional().describe("目标 tmux pane id, 如 '%5'。优先于 name。从 wizard_roster 拿。"),
-      name: z.string().optional().describe(`${ADDRESS_DOC} 给了 pane 就忽略它。`),
-      focus: z.string().optional().describe("交接简报里要特别交代的点, 如 '重点交代还没跑通的测试'。可选。"),
-      timeoutSec: z.number().optional().describe("Max seconds to wait for the summary before aborting (30-7200, default 600)."),
+      name: z.string().optional().describe("替谁交接 —— wizard 的名字 ('fix' / '.fix')。省略 = 你自己。"),
+      brief: z.string().optional().describe("交接你自己时必填: 简报全文, 自洽、具体、可执行。"),
+      focus: z.string().optional().describe("替别人交接时可选: 简报里要特别交代的点。"),
+      timeoutSec: z.number().optional().describe("替别人交接时等它写简报的上限秒数 (30-7200, 默认 600)。"),
+      pane: z.string().optional().describe("(旧参数) 按 tmux pane id 指定对方, 同 `name`。"),
     },
   },
-  async ({ pane, name, focus, timeoutSec }) =>
-    unwrap(
-      "handoff",
-      await daemonPost("/handoff", {
-        ...(pane ? { pane } : {}),
-        ...(name !== undefined ? { name } : {}),
-        ...(focus ? { focus } : {}),
-        ...(timeoutSec ? { timeoutSec } : {}),
-      }),
-    ),
+  async ({ name, brief, focus, timeoutSec, pane }) =>
+    !name && !pane
+      ? brief?.trim()
+        ? handoffSelf("handoff", brief)
+        : fail("handoff: 交接你自己要写 `brief` (零上下文也能接手的简报); 替别人交接就传 `name`")
+      : unwrap("handoff", await daemonPost("/handoff", {
+          ...(pane ? { pane } : {}),
+          ...(name ? { name } : {}),
+          ...(brief ? { brief } : {}),
+          ...(focus ? { focus } : {}),
+          ...(timeoutSec ? { timeoutSec } : {}),
+        })),
 );
 
 // 定时任务 —— 到点把一句话说给一个 wizard 听。和人在群里 at 它说同一句话完全等价:
@@ -692,7 +703,7 @@ server.registerTool(
   {
     title: "Who am I",
     description:
-      "你自己是谁: 全局唯一的名字 (即地址, 别人用它找你)、home 聊天、工作区、职责、记忆、家谱 (谁生的你、你生了谁), 以及此刻的 contextTokens 与 handoffSuggested。用户问「你是谁」「你叫什么」「你在哪个目录」「你有几个分身」时先调它; 要做任何编排之前也先调它 —— 你得知道自己的工作区在哪、手里已经有哪些分身。handoffSuggested=true 表示上下文该交接了 (见 wizard_handoff_self)。",
+      "你自己是谁: 全局唯一的名字 (即地址, 别人用它找你)、home 聊天、工作区、职责、记忆、家谱 (谁生的你、你生了谁), 以及此刻的 contextTokens 与 handoffSuggested。用户问「你是谁」「你叫什么」「你在哪个目录」「你有几个分身」时先调它; 要做任何编排之前也先调它 —— 你得知道自己的工作区在哪、手里已经有哪些分身。handoffSuggested=true 表示上下文该交接了 (见 handoff)。",
     inputSchema: {},
   },
   async () => unwrap("wizard_whoami", await daemonPost("/wizard/whoami", {})),
@@ -863,17 +874,18 @@ server.registerTool(
     title: "Open a job for a fan-out",
     description:
       "开一个**工单**: 你接下来要同时派出两个以上的分身干同一件事时, 先开它。返回一个 id, 把这个 id 传给 spawn_wizard / clone_wizard / tell_peer 的 `job` 参数, 它们就归到这个工单名下。\n" +
-      "开了工单之后有三件事不一样: ① 带这个 id 的派活一律私聊, 开工、派活、回执、收工都**不进群** —— 结构在 rolepage 的工单页里, 人在群里只看到你自己那一轮的最终回复。② close_job 会把为这个工单生出来的分身**整批回收**, 不必一个个 stop_wizard —— 忘记回收是常态, 每个分身都占着一个 pane 和一份上下文。③ list_jobs 能看到还开着哪些活。\n" +
+      "开了工单之后有三件事不一样: ① 带这个 id 的派活一律私聊, 开工、派活、回执、收工都**不进群** —— 结构在 rolepage 的工单页里, 人在群里只看到你自己那一轮的最终回复。② close_job 会把为这个工单生出来的分身**整批回收**, 不必一个个 stop_wizard —— 忘记回收是常态, 每个分身都占着一个 pane 和一份上下文。③ list_jobs 能看到还开着哪些活。④ 成员交上来的答复没有非空的 `RESULT:` (按 `accept` 验收), 守护进程以你的名义同件号打回一次, 那一份不投给你、不计数; 再交上来的照收。\n" +
       "只派一个分身、或者只是推某个同伴一把, 不用开工单。",
     inputSchema: {
       title: z.string().describe("一句话说清这个工单要干成什么 —— 工单页与收工留档的标题。"),
       plan: z.string().optional().describe("计划 (打算分几路、各干什么), 记进工单账本给工单页读。"),
       expect: z.number().optional().describe("这批一共要几份回执。分身是陆续派的, 给了它「全部到齐」就不会在派齐之前提前报。"),
       maxTurns: z.number().optional().describe("派活次数的预算: 带这张工单的每次 tell_peer (含 re 续问、答 NEED) 与带 task 的 spawn/clone 各记一次, 用完再派会被拒 —— 防反复追问兜圈。省略 = 不限。"),
+      accept: z.enum(["result", "artifact", "none"]).optional().describe("成员交差的验收: `result` (默认) 要有非空 RESULT; `artifact` 还要列出 ARTIFACT 交付物; `none` 不验。不合格的自动打回一次。"),
     },
   },
-  async ({ title, plan, expect, maxTurns }) =>
-    unwrap("open_job", await daemonPost("/jobs/open", { title, ...(plan ? { plan } : {}), ...(expect ? { expect } : {}), ...(maxTurns ? { maxTurns } : {}) })),
+  async ({ title, plan, expect, maxTurns, accept }) =>
+    unwrap("open_job", await daemonPost("/jobs/open", { title, ...(plan ? { plan } : {}), ...(expect ? { expect } : {}), ...(maxTurns ? { maxTurns } : {}), ...(accept ? { accept } : {}) })),
 );
 
 server.registerTool(
@@ -943,14 +955,11 @@ server.registerTool(
 server.registerTool(
   "wizard_handoff_self",
   {
-    title: "Hand your own work over to a fresh context",
-    description:
-      "给自己做交接: 你把当前工作压成一份自洽的简报写在 `brief` 里, 守护进程等你这一轮说完、会话空下来之后, 给你 `/new` 一个全新的会话 (新进程 —— MCP 工具也换成最新的; 上下文清零, 名字 / cwd / 模型 / 身份的系统提示照旧), 再把简报作为新会话的第一条消息贴回去。wizard_whoami 的 handoffSuggested=true 时就该调。简报要写到「零上下文的自己仅凭它就能接着干」: 总目标 / 已完成与关键决策 / 当前状态 (改到哪、什么能跑、什么没跑通) / 下一步 (有序) / 关键文件路径与非显然的坑。要交接的是别人 (某个分身上下文爆了), 用 handoff 而不是这个。",
-    inputSchema: {
-      brief: z.string().describe("交接简报全文。自洽、具体、可执行 —— 接手的是一个什么都不记得的你。"),
-    },
+    title: "(deprecated) alias of handoff for yourself",
+    description: "同 `handoff({brief})` 不传 name —— 交接你自己 (旧名, 只为不打断正在跑的旧会话而保留)。新调用一律用 handoff。",
+    inputSchema: { brief: z.string().describe("交接简报全文。") },
   },
-  async ({ brief }) => unwrap("wizard_handoff_self", await daemonPost("/wizard/handoff-self", { brief })),
+  async ({ brief }) => handoffSelf("wizard_handoff_self", brief),
 );
 
 const transport = new StdioServerTransport();

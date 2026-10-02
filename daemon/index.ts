@@ -1146,6 +1146,16 @@ const main = async (): Promise<void> => {
     // 压成一份"零上下文也能接手"的交接简报,等它写完并抓取,再 restartFresh 换一个
     // 全新的进程(同名、同 cwd),把简报作为新会话的首条消息贴进去。拒绝对调用方
     // 自身操作(会 deadlock,同 /peers/send)。
+    /** 交接自己: 简报由调用方给, 排在它这一轮说完之后 (见 handoff.ts)。/handoff 点名点到
+     *  自己与老路由 /wizard/handoff-self 共用。 */
+    const handoffSelf = (self: string, brief: string): { status: number; body: Record<string, unknown> } => {
+      if (brief.length < 40) return { status: 400, body: { ok: false, reason: "brief 太短 —— 要写到零上下文也能接手: 目标 / 已完成 / 当前状态 / 下一步 / 关键文件与坑" } };
+      const info = m.sessionInfo(self);
+      const r = handoffs.self(self, brief);
+      return r.ok
+        ? { status: 200, body: { ok: true, target: self, contextTokens: info?.contextTokens ?? 0, scheduled: true } }
+        : { status: 409, body: { ok: false, reason: r.reason } };
+    };
     http.register("POST /handoff", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
@@ -1155,13 +1165,22 @@ const main = async (): Promise<void> => {
         target = m.targetForPane(pane);
         if (!target) { json(res, 404, { ok: false, reason: `no mirror session bound to pane ${pane}` }); return; }
       } else {
+        // 不点名不能落成「本聊天的默认 wizard」(resolvePeer 对 "" 的语义): 交接是把人家的
+        // 上下文清掉重开, 一个漏传的参数不该把群管家交接掉。不点名的交接只能是交接自己。
+        if (!addrOf(body).trim()) { json(res, 400, { ok: false, reason: "要点名 (name) —— 交接你自己走 /wizard/handoff-self (MCP: handoff 不传 name, 带 brief)" }); return; }
         const r = resolvePeer(self, addrOf(body));
         if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
         target = r.target;
       }
-      // 注入到自己的 pane = 往正在生成的输入框里打字,Claude Code 会把它排队,
-      // 调用方等自己等成死锁(同 /peers/send)。
-      if (target === self) { json(res, 400, { ok: false, reason: "refusing to hand off the calling session itself (would deadlock)" }); return; }
+      // 点名点到自己: 不能走「让它写简报」那条 (往正在生成的输入框里打字, 等自己等成
+      // 死锁), 改走交接自己 —— 简报得由调用方自己给。
+      if (target === self) {
+        const brief = ((body as { brief?: string }).brief ?? "").toString().trim();
+        if (!brief) { json(res, 400, { ok: false, reason: "这是交接你自己: 把简报写在 brief 里 (不传 name 即可)" }); return; }
+        const r = handoffSelf(self, brief);
+        json(res, r.status, r.body);
+        return;
+      }
       const focus = ((body as { focus?: string }).focus ?? "").toString().trim();
       const timeoutMs = Math.min(Math.max(Number((body as { timeoutSec?: number }).timeoutSec ?? 600) || 600, 30), 7200) * 1000;
       const r = await handoffs.other(target, focus, timeoutMs);
@@ -1191,7 +1210,7 @@ const main = async (): Promise<void> => {
       if (!i?.sessionId || nudged.has(i.sessionId) || i.contextTokens < MEMORY_NUDGE_FLOOR) return [];
       if (i.contextTokens < memoryNudgeAt(lastModel(i.jsonlPath) || i.model)) return [];
       nudged.add(i.sessionId);
-      return [`你的上下文已到 ${Math.round(i.contextTokens / 1000)}k, 快到自动压缩了: 这段里学到的、值得跨会话活下来的东西, 先 \`wizard_remember\` 记下 (自己的选 self, 属于群 / 仓库的选 chat / workspace), 再考虑 \`wizard_handoff_self\``];
+      return [`你的上下文已到 ${Math.round(i.contextTokens / 1000)}k, 快到自动压缩了: 这段里学到的、值得跨会话活下来的东西, 先 \`wizard_remember\` 记下 (自己的选 self, 属于群 / 仓库的选 chat / workspace), 再考虑 \`handoff\``];
     };
     const notices = bindNoticeBox(createNoticeBox(12, memoryNudge));
     const postRoster = (base: string, except: readonly string[], line: string): void =>
@@ -1916,12 +1935,8 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/handoff-self", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const brief = ((body as { brief?: string }).brief ?? "").toString().trim();
-      if (brief.length < 40) { json(res, 400, { ok: false, reason: "brief 太短 —— 要写到零上下文也能接手: 目标 / 已完成 / 当前状态 / 下一步 / 关键文件与坑" }); return; }
-      const info = m.sessionInfo(self);
-      // 应答之后再干活: 调用方此刻还在生成, 交接要等它把话说完 (见 handoff.ts)。
-      const r = handoffs.self(self, brief);
-      json(res, r.ok ? 200 : 409, r.ok ? { ok: true, target: self, contextTokens: info?.contextTokens ?? 0, scheduled: true } : { ok: false, reason: r.reason });
+      const r = handoffSelf(self, ((body as { brief?: string }).brief ?? "").toString().trim());
+      json(res, r.status, r.body);
     });
 
     // ── Job: 一次 fan-out 的工单 ─────────────────────────────────────────

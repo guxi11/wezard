@@ -39,6 +39,7 @@
 - hook 的 wezard CLI 免审只认整条命令就是一次 `wezard[.sh] <status|logs|pending|audit|update|reload|config-path|mirror-status|version|help>` 且不含 shell 元字符; 此前命令里任意位置出现 `wezard` 一词就放行 (`curl …/config/set; true wezard` 可免审直改配置)。注意 daemon 的 `/config/set` 路由本身仍不鉴权, 本机进程可直接写 —— 这里只关掉了模型免审走到它的两条路。
 
 ### Changed
+- 两个交接工具合成一个 `handoff({name?})` (B4 ①): 不传 `name` = 交接你自己 (带 `brief`), 传 `name` = 替那个 wizard 交接 (`focus`); 点名点到自己也按交接自己办, 不再拒绝。`wizard_handoff_self` 留作一行别名, 两条路由不变。`/handoff` 不点名不再落到「本聊天的默认 wizard」(一个漏传的参数就能把群管家交接掉), 直接 400。
 - 默认工具面去掉人侧 / 罕用的 6 个 MCP 工具 (B4 ③): `run_agent_graph` / `graph_status` / `stop_graph` / `list_claude_sessions` / `switch_claude_session` / `list_chats` 不再注册 (30 天零调用; 人有 `/sessions` `/chats`), 路由照旧, 设 `WEZARD_MCP_EXTRA=1` 挂回来; charter 去掉 `run_agent_graph` 一行, 各描述里「list_chats 里的聊天名」改指 `wizard_roster` 的 home 聊天名。
 - rolepage 消息的这一轮耗时不再随「两人对话藏指标」一起藏, 所有对话都显示; 进行中的那一轮按开始时刻每秒走表 (服务端只给开始时刻, 不扰增量推送的去重)。
 - 工单整个不进群 (人看不懂过程): `open_job` / `close_job` 不再发开工 / 收工气泡; 带 `job` 的 `tell_peer` 一律私聊 (`public:true` 被忽略), 往来与回执都不进群, 照旧写进 turn store 给 rolepage 工单页读。群里只留发起者自己那一轮的最终回复 —— 沿它被问的那条链回去 (人在群里问的就回群); 最后一份回执的信封改说 `close_job` 只留档、结论用自己的话写在这一轮的回复里。`close_job` 的 summary 照旧进情景记忆; `open_job` 的 `plan` 改记进工单账本。charter、MCP 描述、CLAUDE.md 同步。

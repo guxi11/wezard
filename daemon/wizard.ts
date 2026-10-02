@@ -458,7 +458,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "`stop_wizard` 活干完就收掉分身; 只想打断它这一轮也是它",
       "`open_job` / `close_job` 一次派两个以上分身时开 / 收工单 · `list_jobs` 找回工单 id",
       "`wizard_whoami` 我的上下文用量与分身 · `wizard_identity` 改名 / 写职责 · `wizard_remember` 跨会话记忆 (`self` / `chat` / `workspace`)",
-      "`wizard_handoff_self` 上下文快满 · `set_workspace` 换项目目录 · `set_model` 换模型",
+      "`handoff` 上下文快满时交接自己 (点名则替别人) · `set_workspace` 换项目目录 · `set_model` 换模型",
       "`schedule_task` / `list_tasks` / `cancel_task` 到点自动执行的活",
       "`wait_peer` 仅当这一轮非拿到答案不可 (平时等回执), 或要等一个不是你派活的 wizard 停下 · `name_chat` 给聊天起名",
     ]),
@@ -504,7 +504,7 @@ export const renderCharter = (a: CharterArgs): string => {
     "",
     "## 自我管理",
     bullet([
-      "上下文快满 (`wizard_whoami` 的 contextTokens) → 自己调 `wizard_handoff_self`, 把工作压成简报原地重开。",
+      "上下文快满 (`wizard_whoami` 的 contextTokens) → 自己调 `handoff({brief})`, 把工作压成简报原地重开。",
       "要换项目目录 → 自己调 `set_workspace`, 不必让人去敲命令。",
       "职责为空 → 自己调 `wizard_identity` 补上; 名字就是别人喊你的那个词。",
       "学到了属于这个群 / 这个仓库、而不只属于你的东西 → `wizard_remember` 选对 `scope`, 下一个来的 wizard 开局就知道。",
