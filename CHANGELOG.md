@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- `scripts/commit-own.mjs`: 多个 wizard 共用工作树和 git index 时只提交自己的改动 —— `<path>…` (这些文件的工作树全文) 或 `--patch <file|->` (只含自己 hunk、对 HEAD 带上下文的补丁); 在私有 index 上从 HEAD 拼树, 提交出的树先过 tsc, `update-ref` 对 HEAD 做 CAS (别人中途提交就重放), 落地后只同步共享 index 里仍停在旧 HEAD 的项, 工作树不动; 提交里有而工作树缺的内容会点名。工作区记忆里五条手工拼提交的步骤收成这一个命令。
 - rolepage 用量条在模型名旁显示 effort 档位: 取 CLI 写在 transcript assistant 行上的 `effort` (随 turn 记录, 主会话最近一轮为准), 没有才用绑定里记下的档位 (`WorldFactWizard.effort`), 都没有就不显示, 不猜默认。
 - wizard 启动带上 model 与 effort: `spawn_wizard` / `clone_wizard` 新增 `effort` (low / medium / high / xhigh / max, daemon 校验), 启动即 `--effort`; 档位记进绑定 (`mirror-attachments.json` 的 `effort`), 死 pane 重生、`/new`、交接重开都沿用, 分身默认跟被克隆者同模型同档。模型名能确切对上时 (本机 transcript 里 API 真答过的 id, 或与之同家族同版本的列表标签如 `Opus 5.5`) 直接 `--model <id>` 启动, 省掉 `/model` 选择器那一来回; 口语写法 (「opus 最新」) 或没见过的 id 仍走选择器。`set_model` 新增 `effort` (model 可省): 走 `/effort` 档位条的「只本会话」键 —— `/effort <档>` 会顺手改掉全机默认, 不用它; 档位条没有这一键就不切。codebuddy 不传这两个参数。`wizard_whoami` 带 `effort`。
 - `tell_peer({kind: task|ask|fyi})` (B4 ④): 对方该怎么接这句话 —— 与 `priority` (何时投)、`receipt` (要不要回执) 正交。`ask` 信封加「只答这一问, 别为它开新活」; `fyi` = 知会: 强制不要回执、不进工单 (带 `job` 回 `jobIgnored`)、不进群, 信封改口「不收回执 / 不用回复」。
@@ -67,6 +68,8 @@
 - rolepage 用量条的累计耗时 (⏱️) 指标。
 
 ### Fixed
+- `wizard_remember` 不再把整份记忆回给调用方: 共享作用域每提一条就回整份 md (weclaude 那份约 1.5k token), 改回行数与 `file` 路径, `forget` 另回此刻命中几行 (`forgetHits`, 0 = 子串写错了); self 作用域只回条数。
+- 回执回归脚本收尾删掉根留下的工单收工情景记忆, 测试不再往 `memory/episodes/` 里留 `rr-root-*`。
 - `stop_wizard({turn})` 按件号撤回: 按 Esc 之前再认一次它手上这一轮 (等待期间它可能已做完这件、接了别人的下一件, 此时不再按 Esc 误伤); Esc 没按成不再回 502 —— 这件已经撤回, 回包如实写 `interrupted:false` 与原因。
 - `tell_peer({receipt:false})` 不再登记回执槽: 一份不守的槽以同一对的 key 顶掉发话方还在等对方答的那件活, 那件的回执再也来不了; 对方的信封也不再叫它「终句就是回执、收口 RESULT」, 改说「不收回执」。`send_peer` 别名的参数不再背一份说明 (~1.1k → ~0.2k tok)。
 - rolepage 两个 role 之间的对话里, 名字行与终句气泡头上的耗时也一并藏掉 (此前只藏模型与 ctx), 只留时刻; 消息上的工单 badge 比工单的账先到时只写工单号, 现在账到了就按标题与进度重填。
