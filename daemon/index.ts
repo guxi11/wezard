@@ -65,11 +65,11 @@ import {
 } from "./wizard.js";
 import { bindNoticeBox, createNoticeBox, chatAudience } from "./notices.js";
 import { loadJobStore, renderJobOpen, renderJobClose, JOB_MEMBER_MAX } from "./jobs.js";
-import { clipMiddle, contextFiles, extractResult, lastContextTokens, lastExchange, lastModel, replyClosedBefore, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
+import { clipMiddle, contextFiles, extractResult, lastContextTokens, lastExchange, lastModel, openingOf, replyClosedBefore, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { keepalivePingSigs } from "../shared/keepalive.js";
 import { expandHome } from "../shared/paths.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
-import { createReceipts, deadlineOf, newTurn, type Slot as ReceiptSlot } from "./receipts.js";
+import { createReceipts, deadlineOf, kAttr, newTurn, type ParentK, type Slot as ReceiptSlot } from "./receipts.js";
 import type { TurnTag } from "../shared/reminder.js";
 import { createHandoffs, handedOff, handingOff, type Pending as PendingHandoff } from "./handoff.js";
 import { rankCandidates, renderCandidates } from "./route.js";
@@ -654,6 +654,11 @@ const main = async (): Promise<void> => {
             meta.job ? { job: meta.job, done: meta.done, total: meta.total } : undefined,
             meta.status,
             meta.turn || undefined,
+            {
+              ...(meta.replyTo ? { replyTo: meta.replyTo.kind === "chat" ? chatNameOf(cfg, meta.replyTo.channel) : displayName(meta.replyTo.from) } : {}),
+              ...(meta.k ? { k: kAttr(meta.k) } : {}),
+              ...(meta.pending ? { pending: meta.pending } : {}),
+            },
           ),
         }),
     });
@@ -693,6 +698,14 @@ const main = async (): Promise<void> => {
         appendEpisode(episodePath(cfg.daemon.stateDir, name), { at: e.at, kind: "handoff", name, sid: e.sid, nextSid: e.nextSid, text: e.brief });
       },
     });
+    /** `self` 此刻这一轮派出去的活, 结论该交给谁 (见 receipts.parentOf)。只读它自己
+     *  transcript 里开这一轮的那句 user 行的信封: attachment 上的 channel 在注入时就被
+     *  排队的下一句改写了, transcript 才记着「这一轮是谁发起的」, reload 后也读得到。 */
+    const parentKOf = (self: string): ParentK | undefined => {
+      const p = m.sessionInfo(self)?.jsonlPath;
+      const opening = p ? openingOf(talkTurns(expandHome(p), 80, pingSigs, false, true)) : undefined;
+      return receipts.parentOf(self, opening?.env, channelOf(self), String(opening?.ms ?? 0));
+    };
     // 交接先续做: 它的闸要在回执续守之前立起来, 否则续守的 watcher 会读到换了一半的会话。
     void m.restored.then(() => { handoffs.resume(); receipts.resume(); });
     /** 入参里的地址: 新字段 `name`, 老 MCP 进程 (正在跑的 wizard) 仍在传 `tag`。 */
@@ -968,7 +981,7 @@ const main = async (): Promise<void> => {
       // 回执: 对方干完那一轮, 守护进程把它的结论自动送回来 (默认开)。`receipt:false`
       // 是"放出去就不管了"的那种派活。注入失败就不守 —— 没有问话, 也不会有回答。
       const wantReceipt = (body as { receipt?: boolean }).receipt !== false;
-      if (inj.ok) receipts.register({ from: self, to: target, channel, job: jobId, at, turn: turn.turn, legs: turn.legs, deadlineAt }, wantReceipt);
+      if (inj.ok) receipts.register({ from: self, to: target, channel, job: jobId, at, turn: turn.turn, legs: turn.legs, deadlineAt, k: parentKOf(self) }, wantReceipt);
       // 工单成员照旧记账 (收工那一条会列出各自那段活); 公开的那一句在群里成气泡。
       if (inj.ok && jobId) jobs.attach(jobId, { target, task: text, spawned: false });
       if (inj.ok && isPublic) relayPeer(self, target, text, channel);
@@ -1752,7 +1765,7 @@ const main = async (): Promise<void> => {
       if (jobId) jobs.attach(jobId, { target, task, spawned: true });
       // 分身的第一件活也守回执: fan-out 最常见的形状就是 clone_wizard({task}) × N,
       // 让它们干完自己把结论送回来, 发起方不必挂在 wait_peer 上。
-      if (dispatched) receipts.register({ from: self, to: target, channel: "", job: jobId, at: taskAt, turn: taskTurn });
+      if (dispatched) receipts.register({ from: self, to: target, channel: "", job: jobId, at: taskAt, turn: taskTurn, k: parentKOf(self) });
       json(res, 200, { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, keepalive, ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(jobId ? { job: jobId } : {}) });
     });
 

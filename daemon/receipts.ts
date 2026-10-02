@@ -19,7 +19,7 @@ import type { Logger } from "pino";
 import type { JsonMap } from "../shared/json-map-store.js";
 import type { IdleResult } from "./graph.js";
 import type { PeerReply } from "./peers.js";
-import type { ReceiptStatus } from "../shared/reminder.js";
+import type { Envelope, ReceiptStatus } from "../shared/reminder.js";
 import { sleep, truncate } from "../shared/std.js";
 
 /** 对方最长允许干多久 (超过就投一份 timeout 回执, 不占着内存等到天亮)。默认值;
@@ -69,7 +69,29 @@ export interface ReceiptMeta {
   total: number;
   status: ReceiptStatus;
   turn: string;
+  /** 这份回执进去之后, 发话方那一轮的终句去哪 (见 routeOf); 缺省 = 只进 rolepage。 */
+  replyTo?: ParentK;
+  /** 发话方当初派这件活时的父 k —— 写进信封给下一跳继承 (见 parentOf)。 */
+  k?: ParentK;
+  /** 同一个父 k 下还有几份没回 (>0 时这一轮不外发)。 */
+  pending?: number;
 }
+
+/** 发出这次 tell_peer 的那一轮, 结论本该交给谁 (docs/evolve/b2-reply-routing.md §3.1):
+ *  `chat` = 那一轮是人 / 定时任务 / 公开 peer 发起的, 结论进那个群;
+ *  `peer` = 那一轮是 `from` 私聊派来的 (件号 `turn`), 结论作为那一份回执回给它。 */
+export type ParentK =
+  | { kind: "chat"; channel: string; turn: string }
+  | { kind: "peer"; from: string; turn: string };
+
+/** 信封属性上的 k: `chat:<turn>:<base>` / `peer:<turn>:<key>` —— 只给机器读。chat 的
+ *  `turn` 是开那一轮的那句人话的时刻: 人先后问的两件事各派了活, 不能被当成兄弟。 */
+export const kAttr = (k: ParentK): string => `${k.kind}:${k.turn}:${k.kind === "chat" ? k.channel : k.from}`;
+export const kOfAttr = (a: string): ParentK | undefined => {
+  const m = a.match(/^(chat|peer):([^:]+):(.+)$/);
+  return !m ? undefined : m[1] === "chat" ? { kind: "chat", turn: m[2]!, channel: m[3]! } : { kind: "peer", turn: m[2]!, from: m[3]! };
+};
+const sameK = (a: ParentK, b: ParentK): boolean => kAttr(a) === kAttr(b);
 
 /** 等出来的结果。失败的那几种 `body` 是合成的说明 + 对方最后一句, 照样投回去:
  *  发话方等的是一个定论, 「没有答案」也是定论 —— 静默丢弃它就只能永远等。 */
@@ -118,6 +140,8 @@ export interface Tell {
   legs?: number;
   /** 到这一刻还没答完就投 timeout (见 deadlineOf)。 */
   deadlineAt?: number;
+  /** 发话方那一轮的父 k (见 parentOf) —— 这份回执回来那一轮的终句据此续回。 */
+  k?: ParentK;
 }
 
 /** 这一句该挂的件号: 新活领一个新的; `re` 续问沿用那件活的件号、工单与频道。 */
@@ -147,6 +171,11 @@ export interface Slot extends Tell {
   /** 交接时在旧会话里已经收口的那段答案 (见 Receipts.transfer) —— 换了会话之后
    *  replyFor 读的是新 transcript, 旧答案只能在交接当口取出来存在这里。 */
   answer?: string;
+  /** 对方答完了, 但那一轮又派了活 (children) —— 那句「已派」不是定论, 先不投、不计数;
+   *  最后一份子回执进去时由 relay 把锚挪到那一句、重新守 (§3.2/§3.3)。挂起期间没有
+   *  watcher, 也就没有自己的期限: 超时交给子活各自的 deadline —— 它们一定落定 (失败
+   *  也是定论), 落定时由 relay / release 把这一份叫醒。 */
+  deferred?: true;
 }
 
 /** 落盘的登记留多久。比对方最长允许干的时长宽, 好让续守的那一份仍数得进工单。 */
@@ -171,6 +200,10 @@ export interface Receipts {
    *  取得到答案的就钉住那段; 取不到的义务跟着简报转进新会话 —— 发话时刻改锚到
    *  `carryAt`, 新会话贴回简报那一句挂着发话方的信封, 照常按信封定位。返回转过去的那些。 */
   transfer: (to: string, answered: (s: Slot) => string, carryAt: number) => Slot[];
+  /** `self` 此刻这一轮 (开头那句的信封 `env`, 没有 = 人) 派出去的活, 父 k 是什么。
+   *  `channel` = 它这一轮的公开频道。私聊来的而发话方没在等 (wait_peer 取走 / 不要回执)
+   *  → undefined, 退回现状。 */
+  parentOf: (self: string, env: Envelope | undefined, channel: string, opening: string) => ParentK | undefined;
 }
 
 export const createReceipts = (deps: ReceiptDeps): Receipts => {
@@ -187,6 +220,44 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   const stale = (s: Slot): boolean => slots.get(keyOfPair(s.from, s.to))?.gen !== s.gen;
   const ofJob = (from: string, job: string): Slot[] =>
     [...slots.values()].filter((x) => x.from === from && x.job === job);
+  /** P 的答话方在答 P 的那一轮里又派出去、还没落定的活。 */
+  const children = (p: Slot): Slot[] =>
+    [...slots.values()].filter((c) => c.from === p.to && c.k?.kind === "peer" && c.k.from === p.from && c.k.turn === p.turn && !c.settled);
+  /** 与 c 同一个发话方、同一个父 k、定论还没送进去的那几份 (不含 c)。送进去的只是一份
+   *  error 的那种还没落定: 续跑出来的真答案还要来。 */
+  const siblings = (c: Slot): Slot[] =>
+    [...slots.values()].filter((x) => x !== c && x.from === c.from && !!x.k && sameK(x.k, c.k!) && !x.settled && !(x.delivered && x.resolved));
+  /** 这份回执送进去之后, 发话方那一轮的终句去哪 (§3.3)。只在投递那一刻算: 兄弟们是
+   *  陆续回来的, 早算一步就会两份都以为自己不是最后一份。 */
+  const routeOf = (s: Slot, final: boolean): { channel: string; k?: ParentK; replyTo?: ParentK; pending?: number; parent?: Slot } => {
+    const k = s.k;
+    if (!k || !final) return { channel: s.channel, ...(k ? { k } : {}) };
+    const pending = siblings(s).length;
+    if (pending) return { channel: "", k, pending };
+    if (k.kind === "chat") return { channel: k.channel, k, replyTo: k };
+    const p = slots.get(keyOfPair(k.from, s.from));
+    return p && p.turn === k.turn && !p.resolved && !p.claimed ? { channel: "", k, replyTo: k, parent: p } : { channel: s.channel, k };
+  };
+  /** 续回: 上游那一份改锚到刚送进去的那份回执 (answerOf 按 reply-to 认它), 重新守。
+   *  正在守的那个 watcher 自己会发现锚变了; 挂起 (deferred) 的才要重新 arm。 */
+  const relay = (p: Slot, at: number): void => {
+    p.at = at;
+    p.deadlineAt = Math.max(p.deadlineAt ?? 0, deadlineOf(at));
+    wake(p);
+  };
+  const wake = (p: Slot): void => {
+    const was = p.deferred;
+    delete p.deferred;
+    save(p);
+    if (was) arm(p, true);
+  };
+  /** 子活落定了却没有一份回执送进发话方 (发话方不在了 / 等不到它闲 / wait_peer 取走):
+   *  它若是挂起的上游等着的最后一份, 照样叫醒上游 —— 不然上游连一份 dead 都收不到。
+   *  锚不动: 上游按原来那一句重新守, 答话方不在了就落成 dead。 */
+  const release = (s: Slot): void => {
+    const p = routeOf(s, true).parent;
+    if (p) wake(p);
+  };
 
   // 同一个 pane 的回执串行投递。两份回执同时等到发话方 idle 时, 两次 paste 会挤进
   // 同一个输入框被当成一轮读掉 —— 正是异步化最容易带进来的那个故障。
@@ -197,8 +268,17 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     return next;
   };
 
-  const arm = (s: Slot): void => {
-    void watch(s).catch((e: unknown) => deps.log.warn({ err: (e as Error).message }, "receipt watch failed"));
+  // 一份 slot 同时只有一个 watcher: reload 续守与 relay 叫醒可能撞在一起, 两个 watcher
+  // 会把同一个答案投两遍。叫醒挂起的那份要 `force`: 挂起那一刻旧 watcher 已经同步返回,
+  // 只是 finally 还没跑; 用 token 免得旧的 finally 删掉新登记的那个。
+  const watching = new Map<Slot, symbol>();
+  const arm = (s: Slot, force = false): void => {
+    if (watching.has(s) && !force) return;
+    const token = Symbol();
+    watching.set(s, token);
+    void watch(s)
+      .catch((e: unknown) => deps.log.warn({ err: (e as Error).message }, "receipt watch failed"))
+      .finally(() => { if (watching.get(s) === token) watching.delete(s); });
   };
 
   /** 对方这一轮结束了。判闲以注册表为准 (`untilIdle`): pane 的 spinner 在本地对话框上
@@ -287,10 +367,21 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
 
   const watch = async (s: Slot): Promise<void> => {
     const lg = deps.log.child({ mod: "receipt", from: deps.nameOf(s.from), to: deps.nameOf(s.to), ...(s.job ? { job: s.job } : {}) });
+    const anchor = s.at;
     // 终态写一次不再改: reload 打断投递后续守的那一份直接重投同一个结果, 不再重等。
     const out = s.outcome && s.outcome.status !== "error" ? s.outcome : await awaitReply(s);
     if (stale(s)) return;
     if (s.claimed || !out) { s.resolved = true; settle(s); return; } // wait_peer 抢先取走了
+    // 下面到 save 之间不能有 await: relay 与这里的判定必须看到同一个状态。
+    // 锚被 relay 挪到了回执那一句: 刚取到的是旧锚的答案 (那句「已派」), 重来。
+    if (s.at !== anchor) return watch(s);
+    // 它这一轮又派了活, 结论要等那些回来 —— 这一句不是定论: 不投、不计数 (§3.2)。
+    if (out.status === "done" && children(s).length) {
+      s.deferred = true;
+      save(s);
+      lg.info({ children: children(s).map((c) => deps.nameOf(c.to)) }, "receipt: 答话方又派了活, 等子回执回来再续");
+      return;
+    }
     const final = out.status !== "error";
     s.outcome = out;
     s.resolved = final;
@@ -300,6 +391,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     if (!(await deps.paneLive(s.from))) {
       lg.info({ status: out.status }, "receipt: 发话方已经不在了, 丢弃");
       settle(s);
+      if (final) release(s);
       return;
     }
     if (final) s.claimed = true; // 占位先于投递: 这中间来的 wait_peer 不该把同一段再取一遍
@@ -333,16 +425,20 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
         }
         if (!deps.handingOff?.(s.from)) break;
       }
-      const r = await deps.deliver(s.from, out.body, meta);
+      const { parent, ...route } = routeOf(s, final);
+      const at = Date.now();
+      const r = await deps.deliver(s.from, out.body, { ...meta, ...route });
       if (r.ok) s.delivered = true;
       else s.undelivered = true;
-      lg.info({ ok: r.ok, reason: r.reason, status: out.status, len: out.body.length, done: meta.done, total: meta.total }, "receipt: 回注");
+      if (r.ok && parent) relay(parent, at);
+      lg.info({ ok: r.ok, reason: r.reason, status: out.status, len: out.body.length, done: meta.done, total: meta.total, ...(route.replyTo ? { replyTo: kAttr(route.replyTo) } : {}), ...(route.pending ? { pending: route.pending } : {}) }, "receipt: 回注");
       return true;
     });
     if (stale(s)) { lg.info("receipt: 被同一对的新一句顶掉, 不回注"); return; }
     // error 只是中途报了一声: 接着守续跑出来的答案。
     if (!final && sent) return watch(s);
     settle(s);
+    if (!s.delivered) release(s);
   };
 
   return {
@@ -377,9 +473,11 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     claim: (from, to) => {
       const s = slots.get(keyOfPair(from, to));
       if (!s) return false;
+      const fresh = !s.settled;
       s.claimed = true;
       s.resolved = true;
       settle(s);
+      if (fresh) release(s);
       return s.delivered;
     },
     sentAt: (from, to) => slots.get(keyOfPair(from, to))?.at ?? 0,
@@ -402,8 +500,17 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       if (owed.length) deps.log.info({ mod: "receipt", to: deps.nameOf(to), answered: owed.length - carried.length, carried: carried.map((s) => deps.nameOf(s.from)) }, "receipt: 交接时转交");
       return carried;
     },
+    parentOf: (self, env, channel, opening) => {
+      if (env?.receipt) return env.k ? kOfAttr(env.k) : undefined;
+      if (env?.kind === "peer" && env.private) {
+        const p = [...slots.values()].find((x) => x.to === self && !x.resolved && !x.claimed && (env.turn ? x.turn === env.turn : deps.nameOf(x.from) === env.from));
+        return p && { kind: "peer", from: p.from, turn: p.turn! };
+      }
+      return { kind: "chat", channel, turn: opening };
+    },
     resume: () => {
-      const open = [...slots.values()].filter((s) => !s.settled);
+      // 挂起且子活还没落定的不守: 叫醒它是 relay / release 的事, 这里再 arm 一个就是两个 watcher。
+      const open = [...slots.values()].filter((s) => !s.settled && !(s.deferred && children(s).length));
       // 投到一半被 reload 打断的那份: claimed 是上一个进程的占位, 这里重新来过。
       open.forEach((s) => { s.claimed = false; arm(s); });
       if (open.length) deps.log.info({ mod: "receipt", resumed: open.map((s) => `${deps.nameOf(s.from)}←${deps.nameOf(s.to)}`) }, "receipt: reload 后续守");

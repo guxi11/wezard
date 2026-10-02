@@ -8,6 +8,8 @@
 // 属性一览 (`wezard` 区分种类):
 //   envelope  kind=human|peer|task  from  chat?  scope=private|public (仅 peer)
 //             receipt=1 (仅 peer): 这一轮是守护进程自动送回来的回执, 不是新活
+//             reply-to (仅回执): 这一轮的终句会送到哪 (`.x` / 群名); 缺省 = 只进 rolepage
+//             k (仅回执): 机器读的父 k (`chat:<base>` / `peer:<turn>:<key>`), 下一跳继承
 //   mention   names  (空格分隔的 `.name`)
 //   roster    正文里 `- ` 开头的每一行是一条变动
 
@@ -59,7 +61,14 @@ export interface Envelope {
   turn?: string;
   /** 续问 (`tell_peer({re})`): 这一句接着那件活说, 不是新活。值同 `turn`。 */
   re?: string;
+  /** 回执: 这一轮的终句会送到哪 (`.x` = 作为回执回给它; 群名 = 进那个群)。 */
+  replyTo?: string;
+  /** 回执: 父 k 的机器表示 (见 receipts.kAttr)。 */
+  k?: string;
 }
+
+/** 回执那一轮的去向 (见 receipts.routeOf), 已渲染成给人 / 模型看的称呼。 */
+export interface ReceiptRoute { replyTo?: string; k?: string }
 
 /** 一件活的编号: 写进派活与回执的信封。 */
 export interface TurnTag { turn: string; re?: boolean; deadline?: number }
@@ -78,10 +87,12 @@ export const envelopeAttrs = {
   task: (taskId: string): Attrs => ({ wezard: "envelope", kind: "task", from: taskId }),
   /** 回执也是「`from` 在对你说话」, 所以仍是 peer 信封 —— read_chat / rolepage 照旧
    *  把它归到那场对话里; 多一个 `receipt` 属性说明它是自动送回来的结论而不是新活。 */
-  receipt: (from: string, chat?: string, job?: { job: string; done: number; total: number }, status: ReceiptStatus = "done", turn?: string): Attrs => ({
+  receipt: (from: string, chat?: string, job?: { job: string; done: number; total: number }, status: ReceiptStatus = "done", turn?: string, route?: ReceiptRoute): Attrs => ({
     ...envelopeAttrs.peer(from, chat, turn ? { turn } : undefined),
     receipt: "1",
     status,
+    ...(route?.replyTo ? { "reply-to": route.replyTo } : {}),
+    ...(route?.k ? { k: route.k } : {}),
     // 工单的「齐了吗」由守护进程数出来写在属性上, 不让模型自己记: 异步回执是 N 个
     // 独立的轮次陆续进来的, 靠模型在上下文里数到五是最容易出错的那种事。
     ...(job && job.job
@@ -102,6 +113,8 @@ const envelopeOfAttrs = (a: Attrs): Envelope | undefined =>
         ...(a.status ? { status: a.status as ReceiptStatus } : {}),
         ...(a.turn ? { turn: a.turn } : {}),
         ...(a.re ? { re: a.re } : {}),
+        ...(a["reply-to"] ? { replyTo: a["reply-to"] } : {}),
+        ...(a.k ? { k: a.k } : {}),
       }
     : undefined;
 

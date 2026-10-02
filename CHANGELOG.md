@@ -13,6 +13,7 @@
 - 上下文到 120k 时, 下一条注入捎一行「先 `wizard_remember` 记下值得跨会话的, 再考虑 `wizard_handoff_self`」, 每段会话 (sessionId) 只提一次。
 
 - `tell_peer` 加 `re` (续问) 与 `deadline` (秒, 60–43200, 默认 3600): 每次派活在注入前领一个件号 (`turn`, 写进信封与回包), 回执按件号定位答句; `re: <件号>` 接着那件活说, 沿用它的频道与 (还开着的) 工单, 来回超过 3 次信封提示直接收口, 件号对不上按新活发出并回 `reUnknown`; 到期没答完收到 timeout 回执。交接转移的义务顺延期限至少 10 分钟。
+- 回执轮的终句有了去向 (父 continuation): `tell_peer` / 带 task 的 spawn·clone 登记时记下发话方这一轮的父 k —— 人 / 定时任务 / 公开轮发起的 → 那个群; 上游私聊派来的 → 回给上游。答话方那一轮又派了活时, 上游那份回执先挂起不投、不计数 (不再把「已派给 B」当结论提前送走); 最后一份子回执进去时, 信封写明 `reply-to` (群名或 `.上游`), 那一轮的终句进群或作为上游的回执送回, 多级链逐级冒泡; 还有兄弟没回时只进 rolepage。子活失败 / 被 wait_peer 取走 / 发话方不在了同样叫醒挂起的上游。
 
 ### Security
 - 模型不再能免审改审批配置: PreToolUse hook 对 wezard 自家 MCP 工具的一律放行排除了两种「写」—— `config_set` 带 `value` (可写 `danger_skip_all` / `approval_mode` / `allow_from`) 与 `set_model` `scope:"default"` (改 CLI 全局设置), 它们落回审批, 且 daemon 把它们当必发卡 (不吃 matcher / danger 开关 / ⏱窗口 / 会话缓存, 只有人开的 skipAll 与 bypass 模式压得过); `config_set` 的读与 `set_model` 的会话级照旧免审。

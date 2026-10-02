@@ -13,7 +13,7 @@ import { existsSync, openSync, readSync, closeSync, statSync } from "node:fs";
 import { backendForPath, type CliBackendName } from "../shared/cli-backends.js";
 import { truncate, truncateWithCount } from "../shared/std.js";
 import { isKeepalivePingText, withoutKeepalive } from "../shared/keepalive.js";
-import { envelopeAttrs, parseEnvelope, renderReminder, type Envelope, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
+import { envelopeAttrs, parseEnvelope, renderReminder, type Envelope, type ReceiptRoute, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
 
 /** Strip ANSI SGR/CSI + OSC so captured pane text is safe to embed / match on. */
 export const stripAnsi = (s: string): string =>
@@ -473,22 +473,32 @@ export const replyClosedBefore = (
  *  出来的答案永远定位不到, 回执只拿得到那句报错。人说的别的话照样切: 那是一件新事,
  *  它的答案不能当回执投出去。`error` = 终句是报错。
  *  `turn` 给了就先按它找问话 (信封上的件号, 不受名字变动与时钟抖动影响); 老信封没有
- *  件号, 找不到再退回「`from` + 发话时刻」。 */
+ *  件号, 找不到再退回「`from` + 发话时刻」。
+ *  续回 (receipts.relay): 答话方那一轮又派了活, 结论在子回执回来的那一轮 —— 那份回执
+ *  挂着 `reply-to=<fromName>`, 它比原来的问话晚, 取两者中靠后的那一句当问话。 */
+type AskEnv = { kind: string; from: string; turn?: string; receipt?: boolean; replyTo?: string };
+type MarkedTurn = { role: string; text: string; apiError?: true; notice?: true; queued?: true; env?: AskEnv };
+/** 这一行是在续上一轮 (报错之后没有信封的 `continue` / 「继续」), 不起新的一轮。 */
+const resumesAt = (ts: readonly MarkedTurn[], i: number): boolean =>
+  !!ts[i - 1]?.apiError && !ts[i]!.env && !ts[i]!.notice && RESUME_RE.test(ts[i]!.text.trim());
+/** 开最近这一轮的那句 user 行 (`marks` 读出来的 turns): 排队吃进的、后台通知、报错后的
+ *  续跑都不算 —— 它们不起新的一轮, 这一轮是谁发起的要看再往前那一句。 */
+export const openingOf = <T extends MarkedTurn>(ts: readonly T[]): T | undefined =>
+  ts.filter((t, i) => t.role === "user" && !t.queued && !t.notice && !resumesAt(ts, i)).at(-1);
 const answerOf = (
-  ts: readonly { role: string; text: string; ms?: number; mid?: true; apiError?: true; notice?: true; queued?: true; env?: { kind: string; from: string; turn?: string; receipt?: boolean } }[],
+  ts: readonly { role: string; text: string; ms?: number; mid?: true; apiError?: true; notice?: true; queued?: true; env?: AskEnv }[],
   fromName: string,
   sinceMs: number,
   turn?: string,
 ): { text: string; closedAt?: number; error?: true } | undefined => {
-  const lastAsk = (hit: (e: { kind: string; from: string; turn?: string; receipt?: boolean }) => boolean): number =>
-    ts.reduce((at, t, i) => (t.role === "user" && t.env && !t.env.receipt && hit(t.env) && (!t.ms || t.ms >= sinceMs - ASK_SLACK_MS) ? i : at), -1);
-  const byTurn = turn ? lastAsk((e) => e.turn === turn) : -1;
+  const lastAsk = (hit: (e: AskEnv) => boolean): number =>
+    ts.reduce((at, t, i) => (t.role === "user" && t.env && hit(t.env) && (!t.ms || t.ms >= sinceMs - ASK_SLACK_MS) ? i : at), -1);
+  const byTurn = turn ? lastAsk((e) => !e.receipt && e.turn === turn) : -1;
   // 退回按人找时只认没有件号的老信封: 带件号的那些是别的件, 不是这一件。
-  const asked = byTurn >= 0 ? byTurn : lastAsk((e) => e.kind === "peer" && e.from === fromName && !(turn && e.turn));
+  const direct = byTurn >= 0 ? byTurn : lastAsk((e) => !e.receipt && e.kind === "peer" && e.from === fromName && !(turn && e.turn));
+  const asked = Math.max(direct, lastAsk((e) => !!e.receipt && e.replyTo === fromName));
   if (asked < 0) return undefined;
-  const resumes = (t: (typeof ts)[number], i: number): boolean =>
-    !!ts[i - 1]?.apiError && !t.env && !t.notice && RESUME_RE.test(t.text.trim());
-  const next = ts.findIndex((t, i) => i > asked && t.role === "user" && !t.queued && !resumes(t, i));
+  const next = ts.findIndex((t, i) => i > asked && t.role === "user" && !t.queued && !resumesAt(ts, i));
   const last = ts.slice(asked + 1, next < 0 ? undefined : next).filter((t) => t.role === "assistant").at(-1);
   const text = last && !(last.mid && next < 0) ? last.text : "";
   return { text, ...(next < 0 ? {} : { closedAt: ts[next]!.ms ?? 0 }), ...(text && last?.apiError ? { error: true } : {}) };
@@ -553,19 +563,27 @@ export const renderReceiptEnvelope = (
   job?: { job: string; done: number; total: number },
   status: ReceiptStatus = "done",
   turn?: string,
+  route?: ReceiptRoute & { pending?: number },
 ): string =>
-  renderReminder(envelopeAttrs.receipt(from, chat, job, status, turn), [
+  renderReminder(envelopeAttrs.receipt(from, chat, job, status, turn, route), [
     ...(status === "done"
       ? [`这是 wizard \`${from}\` 对你某一次 send_peer 的**回执**: 它那一轮干完了, 守护进程把它的结论自动送到你这里 —— 不是人说的, 也不是新派给你的活。`]
       : status === "error"
         ? [`这是 wizard \`${from}\` 对你某一次 send_peer 的**失败回执**: 它那一轮以 CLI 报错收尾, 下面是报错原文, 不是它的结论, **不计入工单**。它若被续跑、之后答出来, 结论会照常再送来一份; 等不及就 peek_peer 看它, 或者再 tell_peer 它一次。`]
         : [`这是 wizard \`${from}\` 对你某一次 send_peer 的**失败回执**: ${FAILED[status]}, 这一份不会再有答案了 (工单里按已落定计)。自己判断: 换人、再 tell_peer 追问, 或者在汇总里如实写缺了这一份。下面是守护进程的说明和它最后说的一句。`]),
-    ...(chat === undefined
-      ? [`这段对话是私聊, 人看不见。`]
-      : [`这一轮的对话在群${chat ? ` **${chat}** ` : ""}里, 人看得见你们俩。`]),
+    // 去向由守护进程按派活链算好 (receipts.routeOf), 这里只告诉模型终句会落到哪。
+    ...(route?.replyTo?.startsWith(".")
+      ? [`你这一轮的**最后一条消息会作为回执送回 \`${route.replyTo}\`** (它当初把这件活派给你, 你转给了 \`${from}\`) —— 据此收口, 末尾写 \`RESULT: …\`。`]
+      : route?.replyTo
+        ? [`你这一轮的**最后一条消息会发进群「${route.replyTo}」**, 人在等这件事的结论 —— 写给人看: 做成了什么、没做成什么, 不复述 \`${from}\` 的原话。`]
+        : route?.pending && !(job && job.job)
+          ? [`还有 ${route.pending} 份没回: 这一轮的回复只记在 rolepage, 不外发 —— 先记下这一份, 等最后一份到了再收口。`]
+          : chat === undefined
+            ? [`这段对话是私聊, 人看不见。`]
+            : [`这一轮的对话在群${chat ? ` **${chat}** ` : ""}里, 人看得见你们俩。`]),
     ...(status === "done"
       ? [
-          "下面就是它的原话。据此接着干你自己手上那件事; **不要为收到回执而回话** —— 不要 send_peer 回它 (除非你确实有新的东西要问它), 也不要把这段原话复述给人, 只说你据此做了什么、结论是什么。",
+          ...(route?.replyTo ? [] : ["下面就是它的原话。据此接着干你自己手上那件事; **不要为收到回执而回话** —— 不要 send_peer 回它 (除非你确实有新的东西要问它), 也不要把这段原话复述给人, 只说你据此做了什么、结论是什么。"]),
           "它可能还没干完全部 —— 读 `RESULT:` 那一行 (如果有) 作为它的收口结论; 要更多细节用 peek_peer 读它的对话, 不要猜。",
         ]
       : []),
@@ -574,7 +592,7 @@ export const renderReceiptEnvelope = (
     // 的轮次陆续进来的, 数错一个就会提前收口或者永远等。
     ...(job && job.job
       ? job.done >= job.total
-        ? [`这是工单 \`${job.job}\` 的**最后一份** (${job.done}/${job.total}, 全部到齐): 现在可以汇总收口了 —— close_job(summary) 发结论并回收临时分身。`]
+        ? [`这是工单 \`${job.job}\` 的**最后一份** (${job.done}/${job.total}, 全部到齐): 现在可以汇总收口了 —— close_job(summary) 发结论并回收临时分身${route?.replyTo && !route.replyTo.startsWith(".") ? "; 你这一轮的最后一条消息也会进群, 别把同一段结论说两遍" : ""}。`]
         : [`这是工单 \`${job.job}\` 的第 ${job.done}/${job.total} 份, **还差 ${job.total - job.done} 份**: 先把这一份记住 (或落到文件里), 不要现在汇总、也不要向人汇报进度; 等最后一份到了会明确告诉你「全部到齐」。`]
       : []),
   ]);
