@@ -130,10 +130,15 @@ const cases = {
       TELL("rr-q2", `直接回复一行: RESULT: q2-${n}`),
       "两个都发完立刻结束这一轮, 只回「已派」。之后每收到一份回执, 记下它的 RESULT; 两份都到了, 最后一行写 `RESULT: ` 加上两份 RESULT 的内容。",
     ].join("\n\n");
+    const t0 = Date.now();
     await tell("rr-p", p);
     const s = await settledSlot("rr-p", 8 * 60_000);
+    // haiku 偶尔只回「已派」却没真调 tell_peer —— 那是分身没照做, 不是回执的问题, 分开报。
+    const sent = ["rr-q1", "rr-q2"].filter((q) => (slotOf(kids.get("rr-p"), kids.get(q))?.at ?? 0) >= t0).length;
+    if (sent < 2) return { pass: false, why: `rr-p 只真派出了 ${sent}/2 件 (haiku 没照做), 重跑这一条` };
     const got = await receiptsIn(root.target, "rr-p");
-    const atP = [...(await receiptsIn(kids.get("rr-p"), "rr-q1")), ...(await receiptsIn(kids.get("rr-p"), "rr-q2"))];
+    // 子活偶尔先 NEED 反问一次 (中途回执, 不算定论), 只数定论那两份。
+    const atP = [...(await receiptsIn(kids.get("rr-p"), "rr-q1")), ...(await receiptsIn(kids.get("rr-p"), "rr-q2"))].filter((r) => r.attrs.status !== "need");
     const routed = atP.filter((r) => r.attrs["reply-to"] === ".rr-root").length;
     const body = s?.outcome?.body ?? "";
     return {

@@ -958,7 +958,8 @@ const main = async (): Promise<void> => {
       // 那一轮的回复也发进这个群; 私聊 (默认) = 只落双方的 rolepage, 回复靠 wait_peer 取。
       // 只有两端都是登记在册的 wizard 才能当着人说: 裸 target 冒充的发话方、forget
       // 掉的分身不是谁, 它们的往来进群只会留下一段人找不到主的对话 —— 降为私聊。
-      const isPublic = (turn.channel !== undefined ? !!turn.channel : (body as { public?: boolean }).public === true) && !!wizards.get(self) && !!wizards.get(target);
+      // 工单里的派活一律私聊: 人看不懂 fan-out 的过程, 群里只留发起者自己的收口。
+      const isPublic = !jobId && (turn.channel !== undefined ? !!turn.channel : (body as { public?: boolean }).public === true) && !!wizards.get(self) && !!wizards.get(target);
       const channel = isPublic ? turn.channel || channelOf(self) : "";
       // Injecting into your own pane would type into the box you're generating
       // from — Claude Code queues it and the caller deadlocks waiting for itself.
