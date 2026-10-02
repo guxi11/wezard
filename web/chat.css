@@ -18,6 +18,8 @@
   --mine-line: #c9d7f3;
   --accent: #2f55c9;  /* 视角色: 名字的点、选中态、自己的气泡描边 */
   --priv: #9a5b10;    /* 私聊 */
+  --human: #12715a;  /* 人名 —— 青绿, 与 wizard (墨色) 和群名 (暗金) 三分 */
+  --chat: #7d6410;    /* 群名 —— 暗金, 与 role 名 (墨色 + 视角色的点) 分开: 群是频道不是 role */
   /* 头像底: 不透明, 且由 card/accent 推出 —— 叠在选中/高亮/关系图任何底色上都不变色, 换主题时随 token 走。 */
   --av-bg: var(--card);
   --av-line: var(--line);
@@ -42,6 +44,8 @@ button { font: inherit; color: inherit }
 .nm { font-weight: 600 }
 .nm::before { content: "."; color: var(--accent); font-weight: 700 }
 .nm.human::before, .nm.task::before, .nm.system::before, .nm.chat::before { content: none }
+.nm.chat, .ch-who .sub .up { color: var(--chat) }
+.nm.human { color: var(--human) }
 
 /* ── 侧栏: 我 + 会话 ─────────────────────────────────────────────── */
 .side {
@@ -86,8 +90,11 @@ button { font: inherit; color: inherit }
 .rolebar .nl { display: flex; align-items: center; gap: 8px; min-width: 0 }
 #rb-st { flex: none; display: inline-flex }
 .rolebar .nl .nm { min-width: 0; flex: 0 1 auto }
-.rolebar .nl .cp { min-width: 0; flex: 0 1 auto; display: inline-flex; cursor: copy }
+.rolebar .nl .cp { min-width: 0; flex: 0 1 auto; display: inline-flex; align-items: center; gap: 4px; cursor: pointer }
 .rolebar .nl .cp:hover .nm { text-decoration: underline dotted var(--faint); text-underline-offset: 3px }
+/* 复制提示用 ⧉ 小图标, 不用 cursor:copy —— 那颗绿色的加号读起来像「添加」。 */
+.rolebar .nl .cp::after { content: "⧉"; flex: none; font-size: 12px; color: var(--faint); opacity: 0; transition: opacity .12s }
+.rolebar .nl .cp:hover::after { opacity: 1 }
 .toast {
   position: fixed; left: 50%; bottom: 28px; z-index: 1000; transform: translate(-50%, 8px);
   padding: 6px 12px; border-radius: 8px; font-size: 12.5px; color: #fff; background: rgba(28, 36, 48, .88);
@@ -277,7 +284,7 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 .ch-who .sub { min-width: 0; font-size: 11.5px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 /* 副标题里的群名: 回到整个群的入口, 平时只是一行灰字, 悬停才像链接。 */
 .ch-who .sub .up { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer }
-.ch-who .sub .up:hover { color: var(--accent); text-decoration: underline }
+.ch-who .sub .up:hover { text-decoration: underline }
 .ch-acts { display: flex; gap: 8px; align-items: center; flex: 0 1 auto; min-width: 0; font-size: 12px; color: var(--mute) }
 .ch-acts .vb { flex: none }
 .vb {

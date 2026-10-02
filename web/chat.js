@@ -770,7 +770,7 @@
     // 只有一段 session 就没什么可选, 不挂选择器。
     $('#rb-who').innerHTML =
       '<div class="id"><span class="av">' + esc(r.label) + '</span>' +
-        '<span class="l"><span class="nl"><span class="cp" title="' + esc('复制 ' + nameOf(r.id)) + '">' + nm(r.id, r.name) + '</span>' + (r.kind === 'wizard' ? '<span id="rb-st"></span>' : '') +
+        '<span class="l"><span class="nl"><span class="cp" title="' + esc('点击复制 ' + nameOf(r.id)) + '">' + nm(r.id, r.name) + '</span>' + (r.kind === 'wizard' ? '<span id="rb-st"></span>' : '') +
           '<span id="rb-sp">' + (R.sessions.length > 1 ? sessPicker() : '') + '</span></span>' +
           (facts.length ? '<span class="facts">' + facts.join('') + '</span>' : '') + '</span></div>' +
       (r.description ? '<p class="job">' + esc(r.description) + '</p>' : '');
@@ -1006,7 +1006,7 @@
     var peer = pairPeer(c);
     var peerLabel = c.kind !== 'group' ? c.label : dm && peer === dm.role ? dm.label : '';
     who.innerHTML = (peer ? pairOf([[ROLE, R.role && R.role.label], [peer, peerLabel]]) : '') +
-      '<span class="t">' + (c.kind === 'wizard' ? nm(c.peer, c.name, true) : esc(c.name)) + '</span>';
+      '<span class="t">' + (c.kind === 'wizard' ? nm(c.peer, c.name, true) : '<span class="nm chat">' + esc(c.name) + '</span>') + '</span>';
     acts.innerHTML = '';
     bindGo(who);
   };
