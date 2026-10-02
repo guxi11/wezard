@@ -941,9 +941,13 @@ const main = async (): Promise<void> => {
       const re = ((body as { re?: string }).re ?? "").toString().trim();
       const turn = receipts.prepare(self, target, re || undefined);
       // 续问只在那个工单还开着时沿用它: 收了工的工单不再收成员, 续问照样能发。
-      const jobId = ((body as { job?: string }).job ?? "").trim() || (turn.job && jobs.get(turn.job)?.status === "open" ? turn.job : "");
+      // 没带工单的一句顶掉一份还没落定的工单活, 也算在那张工单上 (receipts.register 同理
+      // 继承): 不然换个不带 job 的 tell_peer 就绕开了预算。
+      const open = receipts.pending(self, target);
+      const isOpen = (id?: string): string => (id && jobs.get(id)?.status === "open" ? id : "");
+      const jobId = ((body as { job?: string }).job ?? "").trim() || isOpen(turn.job) || isOpen(open?.job);
       if (jobId) {
-        const jc = checkJob(jobId, target);
+        const jc = checkJob(jobId, target, !!open?.need && open.turn === turn.turn);
         if (!jc.ok) { json(res, jc.status, { ok: false, reason: jc.reason }); return; }
       }
       // 公开与否由发话方 (LLM) 判断: 公开 = 在它这一轮的公开频道里说, 气泡进群、对方
@@ -1023,6 +1027,7 @@ const main = async (): Promise<void> => {
       // 工单成员照旧记账 (收工那一条会列出各自那段活); 公开的那一句在群里成气泡。
       // 续问 (re) 不是一段新活: 收工气泡里该列的仍是当初派的那段。
       if (inj.ok && jobId) jobs.attach(jobId, { target, task: turn.legs > 1 ? "" : text, spawned: false });
+      const spent = inj.ok && jobId ? jobs.spend(jobId) : undefined;
       if (inj.ok && isPublic) relayPeer(self, target, text, channel);
       // `wasBusy` 是给调用方的判断依据: 立刻投给一个正在生成的会话, 这句话会排在
       // 它这一轮后面, 而不是马上被读到。
@@ -1036,6 +1041,7 @@ const main = async (): Promise<void> => {
         ...(waitedMs ? { waitedMs } : {}),
         ...(jobId ? { job: jobId } : {}),
         ...(inj.ok ? { turn: turn.turn } : {}),
+        ...(spent?.maxTurns ? { budget: `${spent.turns}/${spent.maxTurns}${spent.turns >= spent.maxTurns ? " —— 用完了, 这是最后一次派活, 下一步收口" : ""}` } : {}),
         ...(inj.ok && wake ? { wakeCost: wake } : {}),
         ...(turn.reUnknown ? { reUnknown: true, reNote: `re "${re}" 不是你正在等 ${displayName(target)} 答的那件, 按新活发出` } : {}),
         // 回执怎么回来 —— 写在回包里, 调用方 (模型) 不必从工具描述里回忆。
@@ -1226,12 +1232,15 @@ const main = async (): Promise<void> => {
       .forEach((w) => log.child({ mod: "wizard" }).warn({ target: w.target, name: w.name }, "unborn identity swept — a tmux window by this name, if any, is now orphaned"));
 
     /** 派活前先验工单: 生完分身才发现工单号打错了, 那个分身就成了没人认领的孤儿。 */
-    const checkJob = (id: string, target?: string): { ok: true } | { ok: false; status: number; reason: string } => {
+    /** `free` = 这次不花预算 (不带 task 的 spawn; 答一份停在 NEED 上的反问 —— 拒了它就只能干等到超时)。 */
+    const checkJob = (id: string, target?: string, free = false): { ok: true } | { ok: false; status: number; reason: string } => {
       const j = jobs.get(id);
       if (!j) return { ok: false, status: 404, reason: `没有工单 '${id}' —— open_job 先开一个, 或者 list_jobs 看还开着哪些` };
       if (j.status !== "open") return { ok: false, status: 409, reason: `工单 '${id}' 已经收工了` };
       // 已在册的成员 (续问 / 再派一句) 不占新名额。
       if (j.members.length >= JOB_MEMBER_MAX && !j.members.some((x) => x.target === target)) return { ok: false, status: 409, reason: `工单 '${id}' 的成员已经满了 (${JOB_MEMBER_MAX} 个) —— 分身是有成本的, 拆成两个工单, 或者先收工回收掉一批` };
+      // 预算是硬的: 与单件活的 legs 不同, 这里拒了也无路可绕 —— 换个人派照样记在这张工单上。
+      if (!free && j.maxTurns && (j.turns ?? 0) >= j.maxTurns) return { ok: false, status: 409, reason: `工单 '${id}' 的派活预算用完了 (${j.turns}/${j.maxTurns} 次) —— 拿手上已有的结论 close_job 收口, 缺的如实写; 真要接着干就 open_job 开一张新的` };
       return { ok: true };
     };
 
@@ -1696,7 +1705,7 @@ const main = async (): Promise<void> => {
       // 工单先验: 生完分身才发现工单号打错了, 那个分身就成了没人认领的孤儿。
       const jobId = (b.job ?? "").trim();
       if (jobId) {
-        const jc = checkJob(jobId);
+        const jc = checkJob(jobId, undefined, !(b.task ?? "").toString().trim());
         if (!jc.ok) { json(res, jc.status, { ok: false, reason: jc.reason }); return; }
       }
       // `inherit` 没有默认值 —— 继承与否是两种完全不同的分身 (一种开局就带着你
@@ -1815,6 +1824,7 @@ const main = async (): Promise<void> => {
         dispatched = inj.ok;
       }
       if (jobId) jobs.attach(jobId, { target, task, spawned: true });
+      if (jobId && dispatched) jobs.spend(jobId);
       // 分身的第一件活也守回执: fan-out 最常见的形状就是 clone_wizard({task}) × N,
       // 让它们干完自己把结论送回来, 发起方不必挂在 wait_peer 上。
       if (dispatched) receipts.register({ from: self, to: target, channel: "", job: jobId, at: taskAt, turn: taskTurn, k: parentKOf(self) });
@@ -1894,12 +1904,13 @@ const main = async (): Promise<void> => {
     http.register("POST /jobs/open", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { title?: string; plan?: string; expect?: number };
+      const b = body as { title?: string; plan?: string; expect?: number; maxTurns?: number };
       const title = (b.title ?? "").toString().trim();
       const expect = Math.min(JOB_MEMBER_MAX, Math.max(0, Math.floor(Number(b.expect) || 0)));
       if (!title) { json(res, 400, { ok: false, reason: "title required —— 一句话说清这个工单要干成什么" }); return; }
       const base = baseOfKey(self);
-      const job = jobs.open(base, self, title, expect || undefined);
+      const maxTurns = Math.min(200, Math.max(0, Math.floor(Number(b.maxTurns) || 0)));
+      const job = jobs.open(base, self, title, { ...(expect ? { expect } : {}), ...(maxTurns ? { maxTurns } : {}) });
       notifyChat(base, renderJobOpen(job, (b.plan ?? "").toString()));
       json(res, 200, {
         ok: true,
@@ -1946,6 +1957,7 @@ const main = async (): Promise<void> => {
           mine: j.owner === self,
           openedAt: j.openedAt,
           ...jobs.tally(j.id),
+          ...(j.maxTurns ? { budget: `${j.turns ?? 0}/${j.maxTurns}` } : {}),
           members: j.members.map((mm) => ({
             address: peerAddress(cfg, self, mm.target),
             task: mm.task.split("\n")[0] ?? "",

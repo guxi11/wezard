@@ -850,9 +850,11 @@ server.registerTool(
       title: z.string().describe("一句话说清这个工单要干成什么 —— 它会出现在群里的开工气泡上。"),
       plan: z.string().optional().describe("要在开工气泡里一并说明的计划 (打算分几路、各干什么)。省略则只出标题。"),
       expect: z.number().optional().describe("这批一共要几份回执。分身是陆续派的, 给了它「全部到齐」就不会在派齐之前提前报。"),
+      maxTurns: z.number().optional().describe("派活次数的预算: 带这张工单的每次 tell_peer (含 re 续问、答 NEED) 与带 task 的 spawn/clone 各记一次, 用完再派会被拒 —— 防反复追问兜圈。省略 = 不限。"),
     },
   },
-  async ({ title, plan, expect }) => unwrap("open_job", await daemonPost("/jobs/open", { title, ...(plan ? { plan } : {}), ...(expect ? { expect } : {}) })),
+  async ({ title, plan, expect, maxTurns }) =>
+    unwrap("open_job", await daemonPost("/jobs/open", { title, ...(plan ? { plan } : {}), ...(expect ? { expect } : {}), ...(maxTurns ? { maxTurns } : {}) })),
 );
 
 server.registerTool(

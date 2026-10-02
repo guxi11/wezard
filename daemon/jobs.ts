@@ -47,6 +47,11 @@ export interface JobRecord {
   title: string;
   /** 开工时说好要几份 —— 分身还没派齐时「一共几份」的下限。 */
   expect?: number;
+  /** 派活次数的预算 (每次带这张工单的 tell_peer / 带 task 的 spawn 记一次, 续问也算) ——
+   *  NEED 乒乓、续问兜圈的全局刹车; graph 的 rounds 在这里的等价物。没有 = 不限。 */
+  maxTurns?: number;
+  /** 已经派了几次。 */
+  turns?: number;
   members: JobMember[];
   status: "open" | "closed";
   openedAt: number;
@@ -55,7 +60,9 @@ export interface JobRecord {
 }
 
 export interface JobStore {
-  open: (base: string, owner: string, title: string, expect?: number) => JobRecord;
+  open: (base: string, owner: string, title: string, opts?: { expect?: number; maxTurns?: number }) => JobRecord;
+  /** 记一次派活; 返回记完之后的用量。 */
+  spend: (id: string) => { turns: number; maxTurns?: number } | undefined;
   get: (id: string) => JobRecord | undefined;
   /** 同一个 target 再次 attach 更新它那一段活, 并清掉它已落定的那一份 (又在干了)。 */
   attach: (id: string, member: Omit<JobMember, "at">) => JobRecord | undefined;
@@ -88,9 +95,16 @@ const dropStale = (map: Record<string, JobRecord>): Record<string, JobRecord> =>
 export const loadJobStore = (filePath: string): JobStore => {
   const db = loadJsonMap<JobRecord>(filePath, dropStale);
   return {
-    open: (base, owner, title, expect) => {
+    open: (base, owner, title, { expect, maxTurns } = {}) => {
       const id = newId();
-      return db.set(id, { id, base, owner, title, ...(expect ? { expect } : {}), members: [], status: "open", openedAt: Date.now() });
+      return db.set(id, { id, base, owner, title, ...(expect ? { expect } : {}), ...(maxTurns ? { maxTurns, turns: 0 } : {}), members: [], status: "open", openedAt: Date.now() });
+    },
+    spend: (id) => {
+      const j = db.get(id);
+      if (!j) return undefined;
+      const turns = (j.turns ?? 0) + 1;
+      db.set(id, { ...j, turns });
+      return { turns, ...(j.maxTurns ? { maxTurns: j.maxTurns } : {}) };
     },
     get: db.get,
     attach: (id, member) => {

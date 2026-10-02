@@ -211,6 +211,8 @@ export interface Receipts {
   parentOf: (self: string, env: Envelope | undefined, channel: string, opening: string) => ParentK | undefined;
   /** 还没落定的每一件活此刻的状态 (见 turn-state.ts) —— 名册 / peek / 工单清单读它。只读, 不落盘。 */
   states: () => InFlight[];
+  /** `from` → `to` 那件还没落定的活: 它的工单、件号、是不是停在 NEED 上。没有 = undefined。 */
+  pending: (from: string, to: string) => { job: string; turn: string; need: boolean } | undefined;
   /** `target` 被 `by` 收掉或打断: 发往它、还没落定的活都落成 canceled。`by` 自己那份
    *  不投 (它自己知道), 别的发话方各收一份 canceled 回执。必须先于 kill —— pane 一死,
    *  守着的 watcher 会把同一份报成 dead。`only` 收窄到其中几份 (interrupt 只停了它
@@ -537,6 +539,10 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       });
       if (owed.length) deps.log.info({ mod: "receipt", to: deps.nameOf(to), answered: owed.length - carried.length, carried: carried.map((s) => deps.nameOf(s.from)) }, "receipt: 交接时转交");
       return carried;
+    },
+    pending: (from, to) => {
+      const s = slots.get(keyOfPair(from, to));
+      return s && !s.resolved && !s.claimed ? { job: s.job, turn: s.turn ?? "", need: s.outcome?.status === "need" } : undefined;
     },
     states: () => {
       // 一个 target 欠好几份时只探一次 (探针要读它 transcript 的尾巴)。
