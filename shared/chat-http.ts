@@ -27,7 +27,7 @@ import { baseOfKey } from "./session-label.js";
 import { isMark, isPost, isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, withData, type WorldFactJob, type WorldFacts } from "./world.js";
 import {
-  allMessages, convKeyOf, convMessages, chatKeysOf, parseTalkKey, glanceOfTalk, convsOf, jobConvsOf, jobOfKey, jobsIn, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
+  allMessages, convKeyOf, convMessages, chatKeysOf, parseTalkKey, glanceOfTalk, convsOf, jobConvsOf, jobOfKey, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
   roleInfo, roleStats, sessionsOf, talkArgs, talkOf, counterpartOf, windowStats, type Directory, type Msg, type SessionSpan,
 } from "./role-view.js";
 import { renderJobMarks, renderMark, renderMsg, type MsgFragment } from "./role-render.js";
@@ -249,7 +249,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
   /** 一个窗口的全部片段, 时间序: 消息 + 视角 role 自己的断点。
    *  给的是**待渲染**的片段 —— 窗口通常只上屏最后几十条, 先按时间切片再渲染,
    *  没上屏的那几百轮就一个字都不用排。 */
-  const windowFrags = (records: readonly DetailRecord[], dir: Directory, v: View, now: number, jobs: readonly WorldFactJob[]): { frags: Array<{ id: string; ts: number; render: () => MsgFragment }>; jobs: string[] } => {
+  const windowFrags = (records: readonly DetailRecord[], dir: Directory, v: View, now: number, jobs: readonly WorldFactJob[]): Array<{ id: string; ts: number; render: () => MsgFragment }> => {
     const msgs = convMessages(allMessages(records, now), v.role, v.conv, v.with || undefined)
       .filter((m) => inSpan(v.span)(m.ts));
     const lo = msgs[0]?.ts ?? Infinity;
@@ -262,8 +262,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       ...marks.map((mk) => ({ id: `m:${mk.id}`, ts: mk.createdAt, render: () => renderMark(mk, v.role, dir) })),
       ...(job ? renderJobMarks(job, dir).map((f) => ({ id: f.id, ts: f.ts, render: () => f })) : []),
     ].sort((a, b) => a.ts - b.ts);
-    // 整窗出现过的工单 (不只这一页) —— 顶栏的工单入口。
-    return { frags, jobs: jobsIn(msgs) };
+    return frags;
   };
 
   /** 窗口里画谁的断点: 平常是视角自己; 「某人的全部对话」窗口画那个人的。 */
@@ -291,7 +290,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       const dir = makeDirectory(records, f);
       const v = viewOf(records, dir, ticket, url);
       if (!v || !v.conv) { json(res, 200, { ok: true, at: Date.now(), total: 0, truncated: false, msgs: [] }); return; }
-      const { frags: all, jobs: winJobs } = windowFrags(records, dir, v, Date.now(), f.jobs);
+      const all = windowFrags(records, dir, v, Date.now(), f.jobs);
       // 注意 Number(null) === 0 —— 缺省必须先判 null, 否则默认就成了"全量"。
       const raw = url.searchParams.get("limit");
       const n = raw === null ? Number.NaN : Number(raw);
@@ -310,7 +309,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       const page = limit === 0 ? older : older.slice(-limit);
       json(res, 200, {
         ok: true, at: Date.now(), role: v.role, conv: v.conv, total: all.length,
-        truncated: page.length < older.length, older: older.length - page.length, jobs: winJobs, msgs: page.map((x) => x.render()),
+        truncated: page.length < older.length, older: older.length - page.length, msgs: page.map((x) => x.render()),
       });
     });
   };

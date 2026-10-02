@@ -298,6 +298,10 @@
     if (!r || String(window.getSelection() || '')) return;
     r.classList.toggle('raw');
   });
+  inner.addEventListener('click', function (e) {
+    var c = e.target.closest && e.target.closest('.mchip.job[data-job]');
+    if (c) openJob(c.getAttribute('data-job'));
+  });
   // 回执 chip: 跳回派活那句 (同一个活号的入消息)。窗口里没有就整窗重取一次再找, 同搜索落点。
   inner.addEventListener('click', function (e) {
     var c = e.target.closest && e.target.closest('.rcpt[data-goto]');
@@ -328,7 +332,7 @@
   };
   // 侧栏一行 / 关系图卡片上的小标记: 这处往来里有归在工单名下的话。
   var jobMark = function (ids) {
-    return ids && ids.length ? '<span class="jmk" title="' + esc('有工单: ' + ids.join(' ') + ' —— 点进去在顶栏打开') + '">📋</span>' : '';
+    return ids && ids.length ? '<span class="jmk" data-jobs="' + esc(ids.join(' ')) + '" title="' + esc((ids.length > 1 ? ids.length + ' 张工单: ' : '工单 ') + ids.join(' ') + ' —— 点开') + '">📋' + (ids.length > 1 ? '<i>' + ids.length + '</i>' : '') + '</span>' : '';
   };
   // 视角不在里面的工单 (从链接直接打开的) 不在 R.convs 里, 按 /api/world 的账现造一项。
   var jobConv = function (key) {
@@ -907,6 +911,22 @@
     if (CONV.indexOf('j:') !== 0) JOB_BACK = { conv: CONV, with: WITH };
     selectConv('j:' + id, '');
   };
+  // 一处标记背后可能有好几张: 一张直接进那张, 多张进工单列表且只列这几张 (JOB_ONLY)。
+  var JOB_ONLY = null;
+  var openJobs = function (ids) {
+    if (ids.length === 1) return openJob(ids[0]);
+    if (CONV.indexOf('j:') !== 0) JOB_BACK = { conv: CONV, with: WITH };
+    JOB_ONLY = ids;
+    if (VIEW === 'jobs') renderJobList(); else setView('jobs');
+    renderHead();
+  };
+  // 标记长在会话项 / 关系图卡片这些按钮里: 捕获阶段截下来, 不让外层按钮再打开那段对话。
+  document.addEventListener('click', function (e) {
+    var m = e.target.closest && e.target.closest('.jmk[data-jobs]');
+    if (!m) return;
+    e.stopPropagation(); e.preventDefault();
+    openJobs(m.getAttribute('data-jobs').split(' ').filter(Boolean));
+  }, true);
   var backBtn = function () {
     var c = JOB_BACK && convOf(JOB_BACK.conv);
     return c ? '<button class="vb" id="ch-jback" title="回到进工单之前的那段会话">‹ ' + esc(JOB_BACK.with ? nameOf(JOB_BACK.with) : c.name) + '</button>' : '';
@@ -915,33 +935,13 @@
     var b = $('#ch-jback');
     if (b) b.onclick = function () { var x = JOB_BACK; JOB_BACK = null; selectConv(x.conv, x.with); };
   };
-  // 普通会话的顶栏: 这段往来里出现过的工单, 一张一枚 (新的在前, 最多 3 枚, 其余进列表)。
-  var JOB_ACTS = 3;
-  var jobActs = function () {
-    // 只认这个窗口自己取回来的那份: 刚换窗口、新的还没回来时不挂上一处的工单。
-    var ids = S.jobsFor === CONV + '|' + WITH ? S.jobs || [] : [], all = jobConvs();
-    if (!ids.length) return '';
-    var title = function (id) { var c = all.filter(function (x) { return x.job.id === id; })[0] || jobConv('j:' + id); return c; };
-    var cs = ids.map(title).sort(recentFirst);
-    return cs.slice(0, JOB_ACTS).map(function (c) {
-      return '<button class="vb jact" data-job="' + esc(c.key.slice(2)) + '" title="' + esc(c.key.slice(2) + ' · ' + c.name) + '">📋 <span class="jt">' + esc(c.name) + '</span>' + jobTag(c.job) + '</button>';
-    }).join('') + (cs.length > JOB_ACTS ? '<button class="vb" id="ch-jall">全部工单 · ' + cs.length + '</button>' : '');
-  };
-  var bindJobActs = function (acts) {
-    acts.querySelectorAll('.jact').forEach(function (b) { b.onclick = function () { openJob(b.getAttribute('data-job')); }; });
-    var all = $('#ch-jall'); if (all) all.onclick = function () { setView('jobs'); };
-  };
   var renderHead = function () {
-    renderHead_();
-    var acts = $('#ch-acts');
-    if (VIEW === 'msgs' && CONV.indexOf('j:') !== 0) { acts.insertAdjacentHTML('afterbegin', jobActs()); bindJobActs(acts); }
-  };
-  var renderHead_ = function () {
     var who = $('#ch-who'), acts = $('#ch-acts');
     if (VIEW === 'jobs') {
-      who.innerHTML = '<span class="t">工单</span><span class="sub">' + esc(nameOf(ROLE)) + ' 开的或参与的 · 进行中在前</span>';
-      acts.innerHTML = backBtn() + '<button class="vb" id="ch-back">‹ 对话</button>';
+      who.innerHTML = '<span class="t">工单</span><span class="sub">' + (JOB_ONLY ? '这一处经手的' : esc(nameOf(ROLE)) + ' 开的或参与的') + ' · 进行中在前</span>';
+      acts.innerHTML = backBtn() + (JOB_ONLY ? '<button class="vb" id="ch-jall">全部工单</button>' : '') + '<button class="vb" id="ch-back">‹ 对话</button>';
       bindBack();
+      if (JOB_ONLY) $('#ch-jall').onclick = function () { JOB_ONLY = null; renderJobList(); renderHead(); };
       $('#ch-back').onclick = function () { setView('msgs'); };
       return;
     }
@@ -988,7 +988,7 @@
         '<span class="sub">' + esc(c.key.slice(2)) + (c.job ? ' · 开单 ' + nm(c.job.owner, '', true) : '') + jobTag(c.job) + stuckTag(c.job) + '</span>';
       acts.innerHTML = backBtn() + '<button class="vb" id="ch-jall">全部工单</button>';
       bindBack();
-      $('#ch-jall').onclick = function () { setView('jobs'); };
+      $('#ch-jall').onclick = function () { JOB_ONLY = null; setView('jobs'); };
       bindGo(who);
       return;
     }
@@ -1034,6 +1034,16 @@
   var signCut = function (html, id, name) {
     return html.replace(CUT_L, function (_, open, l) { return open + nm(id, name, true) + l; });
   };
+  // 消息上的工单 badge (服务端只写 data-job): 按此刻的账填成 📋 标题 + 进度, 点了进那张工单页。
+  // 工单页自己的消息不挂 —— 点了还是这一页。
+  var JOB_CHIP = /<button class="mchip job" data-job="([^"]*)"><\/button>/g;
+  var jobChips = function (html) {
+    return html.replace(JOB_CHIP, function (_, id) {
+      if (CONV === 'j:' + id) return '';
+      var c = jobConvs().filter(function (x) { return x.job.id === id; })[0] || jobConv('j:' + id);
+      return '<button class="mchip job" data-job="' + id + '" title="' + esc(id + ' · ' + c.name + ' —— 进工单页') + '">📋 <span class="jt">' + esc(c.name) + '</span>' + jobTag(c.job) + '</button>';
+    });
+  };
   var rowHTML = function (m) {
     learn(m.from, m.fromName, m.fromLabel);
     learn(m.to, m.toName, m.toLabel);
@@ -1064,7 +1074,7 @@
     // 终句气泡的时间行 (.say-cap) 的指标一并藏掉, 呼吸点与回执留着。
     var c = convOf(CONV);
     var two = !group || !!pairPeer(c) || (!!c && c.kind === 'all' && c.peers.length === 1);
-    var stat = m.meta ? '<span class="mstat">' + m.meta + '</span>' : '';
+    var stat = m.meta ? '<span class="mstat">' + jobChips(m.meta) + '</span>' : '';
     var who = mine
       ? to + stamp(m.ts) + stat + avBtn(m.from, m.fromLabel)
       : avBtn(m.from, m.fromLabel) + nm(m.from, m.fromName, true) + to + priv + stamp(m.ts) + stat;
@@ -1074,7 +1084,7 @@
       dest + (sw ? '<span class="fi"><span class="fn">' + esc(nameOf(other)) + '</span>' + CHEVRON + '</span>' : '') + '</button>';
     return '<div class="mrow ' + (mine ? 'mine' : 'them') + (two ? ' two' : '') + '" data-id="' + esc(m.id) + '" data-turn="' + esc(m.turnId || m.id) + '" data-ts="' + m.ts + '"' +
       (m.ping ? ' data-ping="1" data-ping-who="' + esc(m.dir === 'in' ? m.toName : m.fromName) + '"' : '') + ' data-sig="' + esc(m.sig) + '" data-stale-at="' + (m.staleAt || 0) + '">' +
-      '<div class="mcol"><div class="mwho">' + who + '</div><div class="mb">' + (m.dir === 'out' ? signCut(m.html, m.from, m.fromName) : m.html) + '</div></div>' +
+      '<div class="mcol"><div class="mwho">' + who + '</div><div class="mb">' + jobChips(m.dir === 'out' ? signCut(m.html, m.from, m.fromName) : m.html) + '</div></div>' +
       flip +
     '</div>';
   };
@@ -1196,10 +1206,6 @@
     return api('api/msgs', viewParams(limit ? { limit: limit } : {})).then(function (d) {
       if (!d.ok || gen !== S.gen) return;
       S.frags = {};
-      // 这个窗口里出现过的工单 (整窗, 不只这一页) —— 顶栏的工单入口。
-      var key = CONV + '|' + WITH, fresh = S.jobsFor !== key || (S.jobs || []).join() !== (d.jobs || []).join();
-      S.jobs = d.jobs || []; S.jobsFor = key;
-      if (fresh) renderHead();
       d.msgs.forEach(function (m) { S.frags[m.id] = m; });
       if (!d.msgs.length) { inner.innerHTML = '<div class="empty">这里还没有消息</div>'; return; }
       inner.innerHTML = moreBtn(d) + d.msgs.map(rowHTML).join('');
@@ -1655,7 +1661,7 @@
           (!LINEAGE[k] ? ' ×' + p.kinds[k] : '') + '</span>';
       }).join('') +
       (p.cross ? '<span class="ek cross" title="跨群的关系">⇄ 跨群</span>' : '') +
-      (p.jobs.length ? '<span class="ek jmk" title="' + esc('经手的工单: ' + p.jobs.join(' ') + ' —— 点卡片后在顶栏打开') + '">📋' + (p.jobs.length > 1 ? ' ×' + p.jobs.length : '') + '</span>' : '') + '</span>';
+      (p.jobs.length ? '<span class="ek jmk" data-jobs="' + esc(p.jobs.join(' ')) + '" title="' + esc('经手的工单: ' + p.jobs.join(' ') + ' —— 点开') + '">📋' + (p.jobs.length > 1 ? ' ×' + p.jobs.length : '') + '</span>' : '') + '</span>';
   };
   // 一条边的主色: 家谱优先, 决定树上那道线的颜色。
   var domKind = function (p) {
@@ -2003,6 +2009,8 @@
       renderWorld();
       loadGlance();
       if (VIEW === 'plan') renderPlan();
+      // 只列某几张时, 视角不在里面的那张要等世界快照到了才知道标题与进度。
+      if (VIEW === 'jobs') renderJobList();
     }).catch(function () { });
   };
   var pollWorld = function () {
@@ -2025,7 +2033,7 @@
     renderRole(); renderHead(); renderUsage();
     if (v === 'msgs') { toBottom(true); renderConvs(); }
     else if (v === 'charter') loadCharter();
-    else if (v === 'jobs') renderJobList();
+    else if (v === 'jobs') { renderJobList(); loadWorld(); }
     else {
       if (!W.loaded) { planEl._html = ''; planEl.innerHTML = '<div class="empty">加载中…</div>'; }
       else renderPlan();
@@ -2056,7 +2064,10 @@
   // 视角开的或在里面的工单: 进行中 (最近有动静的在前) / 已收工 (淡一档, 最近收的在前)。一行与会话列表同一个 convItem。
   var renderJobList = function () {
     var el = jobsPane().firstChild;
-    var js = jobConvs();
+    // 只列某几张时, 视角不在里面的那张也照列 (标记挂在它与别人的往来上); 账里已经没有的 (收工满 24h) 不列。
+    var js = JOB_ONLY ? JOB_ONLY.map(function (id) {
+      return jobConvs().filter(function (c) { return c.job.id === id; })[0] || jobConv('j:' + id);
+    }).filter(function (c) { return c.job; }) : jobConvs();
     var open = js.filter(function (c) { return c.job.status === 'open'; }).sort(recentFirst);
     var closed = js.filter(function (c) { return c.job.status !== 'open'; }).sort(recentFirst);
     var sec = function (title, list, cls) {

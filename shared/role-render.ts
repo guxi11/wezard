@@ -46,12 +46,16 @@ export interface MsgFragment {
 const mateChip = (mate: string | undefined): string =>
   mate === undefined ? "" : `<span class="mchip sys">agent team${mate ? ` · ${escHtml(mate)}` : ""}</span>`;
 
+/** 工单 badge: 只写工单号, 标题与进度由客户端按此刻的账填 (账会变, 片段的 sig 不该跟着变)。 */
+const jobChip = (r: TurnDetailRecord): string =>
+  r.from?.kind === "peer" && r.from.job ? `<button class="mchip job" data-job="${escHtml(r.from.job)}"></button>` : "";
+
 const inMeta = (r: TurnDetailRecord): string => {
   const bits = [
     r.origin ? `<span class="mchip graph" title="graph ${escHtml(r.origin.runId)}">🕸 轮 ${r.origin.round}/${r.origin.rounds} · 步 ${r.origin.step}/${r.origin.steps}</span>` : "",
     r.from?.kind === "task" ? `<span class="mchip task">⏰ 定时 ${escHtml(r.from.taskId ?? "")}</span>` : "",
     mateChip(teammateOf(r.userQuery)),
-    r.from?.job ? `<span class="mchip job">📋 ${escHtml(r.from.job)}</span>` : "",
+    jobChip(r),
   ].filter(Boolean);
   return bits.length ? `<div class="mmeta">${bits.join("")}</div>` : "";
 };
@@ -97,7 +101,7 @@ export const renderMsg = (m: Msg, records: readonly DetailRecord[], dir: Directo
   const r = m.turn;
   const { html, meta } = m.dir === "in"
     ? { html: renderIn(r), meta: "" }
-    : ((g) => ({ html: g.html, meta: receiptChip(r) + g.meta }))(renderTurnGroup(r, now, childrenOf(records, r.id, now), false));
+    : ((g) => ({ html: g.html, meta: receiptChip(r) + jobChip(r) + g.meta }))(renderTurnGroup(r, now, childrenOf(records, r.id, now), false));
   const live = m.dir === "out" && !turnDone(r, now);
   return {
     id: m.id, turnId: r.id, dir: m.dir, ...base(m, dir), ts: m.ts,
