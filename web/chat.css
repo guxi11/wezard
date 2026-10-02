@@ -799,13 +799,14 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 .jmm .tmp, .jmm .wchip { flex: none; white-space: nowrap }
 
 /* ── 搜索 (⌘K): 名片下、关系/日程入口上的搜索框 + 居中浮层 ──────────────
-   入口与会话项同圆角, 安静的浅灰底; 浮层的结果行沿用会话项的两行读法。 */
+   入口与会话项同圆角, 无边框, 只靠浅灰底与侧栏白底区分; 悬停 / 键盘聚焦都只是底色再沉一档, 不描边。
+   浮层的结果行沿用会话项的两行读法。 */
 .sbox {
-  flex: none; display: flex; align-items: center; gap: 8px; margin: 10px 10px 4px; padding: 7px 10px;
-  border: 1px solid var(--line); border-radius: 9px; background: var(--paper); color: var(--faint);
-  cursor: pointer; text-align: left; transition: border-color .12s, background .12s, color .12s;
+  flex: none; display: flex; align-items: center; gap: 8px; margin: 10px 10px 4px; padding: 8px 11px;
+  border: 0; border-radius: 9px; background: var(--paper); color: var(--faint);
+  cursor: pointer; text-align: left; transition: background .12s, color .12s;
 }
-.sbox:hover { border-color: #c4cbd6; background: var(--card); color: var(--mute) }
+.sbox:hover, .sbox:focus-visible { background: var(--them-soft); color: var(--mute); outline: none }
 .sbox .ic, .sk-in .ic { flex: none; display: inline-flex }
 .sbox .ic svg, .sk-in .ic svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round }
 .sbox .lb { flex: 1; min-width: 0; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
