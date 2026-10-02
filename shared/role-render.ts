@@ -60,7 +60,8 @@ const inMeta = (r: TurnDetailRecord): string => {
   return bits.length ? `<div class="mmeta">${bits.join("")}</div>` : "";
 };
 
-// 回执的定论 —— 回执轮没有入消息 (那句话就是同伴的出消息), 所以它写在出消息名字那一行。
+// 回执的定论 —— 标在交回结论的那一方 (答话方) 那一轮的出消息上: 那条消息才是回执;
+// 收回执那一方的回执轮只是读到了它, 不再挂。
 const RCPT: Readonly<Record<string, string>> = {
   done: "已交", need: "反问", error: "报错", timeout: "超时", silent: "没答", dead: "失联", canceled: "撤回",
 };
@@ -77,14 +78,46 @@ const gotoAttrs = (turn: string, d: TurnDetailRecord): string =>
   ` data-goto="${escHtml(turn)}" data-gid="${escHtml(d.id)}:in" data-gts="${d.createdAt}" data-gch="${escHtml(channelOf(d))}"` +
   ` data-gfrom="${escHtml(d.from?.from ?? "")}" data-gto="${escHtml(d.target ?? "")}"`;
 
-/** 回执那一轮的 chip: 定论 + 工单里第几份; 找得到派活那句才可点, 点它跳过去 (跨会话也行)。 */
+const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
+/** 一轮的终句 (说不清 final 的后端退回最后一段话)。 */
+const finalOf = (t: TurnDetailRecord): string => {
+  const texts = t.items.filter((it): it is Extract<typeof it, { t: "text" }> => it.t === "text");
+  return (texts.filter((it) => it.final).at(-1) ?? texts.at(-1))?.body ?? "";
+};
+
+/** 一份回执是答话方哪一轮交回来的。回执轮的那句话就是答话方那一轮的终句原样贴进来 ——
+ *  按正文认: 链式续回时终句在它后来的回执轮里, 活号对不上。认不出 (超时 / 失联这类合成的
+ *  定论没有正文) 就退回它接手这件活的最后一轮。 */
+const answerOf = (rc: TurnDetailRecord, records: readonly DetailRecord[]): TurnDetailRecord | undefined => {
+  const f = rc.from;
+  if (f?.kind !== "peer" || !f.receipt || !f.from) return undefined;
+  const d = f.turn ? dispatchOf(records, f.turn) : undefined;
+  const mine = turnsWhere(records, (t) => t.target === f.from && !t.agent && t.createdAt <= rc.createdAt && t.createdAt >= (d?.createdAt ?? 0));
+  const said = squash(rc.userQuery ?? "");
+  const byText = mine.filter((t) => ((p) => p.length >= 4 && said.includes(p))(squash(finalOf(t)).slice(0, 60))).at(-1);
+  return byText ?? mine.filter((t) => t.from?.kind === "peer" && !t.from.receipt && t.from.turn === f.turn).at(-1);
+};
+
+/** 答话方的轮次 id → 交回它的那份回执 (同一轮被认领多次取最新)。按 records 快照记一次: 每条出消息都要查。 */
+const RECEIPTS = new WeakMap<readonly DetailRecord[], Map<string, TurnDetailRecord>>();
+const receiptsByAnswer = (records: readonly DetailRecord[]): Map<string, TurnDetailRecord> => {
+  const hit = RECEIPTS.get(records);
+  if (hit) return hit;
+  const m = turnsWhere(records, (t) => t.from?.kind === "peer" && !!t.from.receipt)
+    .reduce((acc, rc) => ((a) => (a ? acc.set(a.id, rc) : acc))(answerOf(rc, records)), new Map<string, TurnDetailRecord>());
+  RECEIPTS.set(records, m);
+  return m;
+};
+
+/** 回执 chip: 挂在答话方交回结论的那一轮上 —— 定论 + 工单里第几份; 找得到派活那句才可点,
+ *  点它跳过去 (跨会话也行)。 */
 const receiptChip = (r: TurnDetailRecord, records: readonly DetailRecord[], dir: Directory): string => {
-  const f = r.from;
-  if (f?.kind !== "peer" || !f.receipt) return "";
+  const rc = receiptsByAnswer(records).get(r.id), f = rc?.from;
+  if (!rc || f?.kind !== "peer") return "";
   const st = f.status ?? "done";
   const seq = f.job && f.total ? ` · ${escHtml(f.job)} 第 ${f.done ?? 0}/${f.total} 份` : "";
   const d = f.turn ? dispatchOf(records, f.turn) : undefined;
-  const what = `.${dir.nameOf(f.from ?? "")} 交回了 ${f.turn ? `${f.turn} ` : ""}的结论`;
+  const what = `.${dir.nameOf(r.target ?? "")} 把 ${f.turn ? `${f.turn} ` : ""}的结论交回给 .${dir.nameOf(rc.target ?? "")}`;
   const [tag, attrs] = f.turn && d
     ? ["button", `${gotoAttrs(f.turn, d)} title="${escHtml(`${what} · 点击跳到派活那句`)}"`]
     : ["span", ` title="${escHtml(`${what} · 派活那句已不在记录里`)}"`];
