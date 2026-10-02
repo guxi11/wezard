@@ -1837,7 +1837,7 @@
     var span = rg ? (rg.s === R.sessions[R.sessions.length - 1] ? '最新 session' : 'session ' + fmtClock(rg.from)) : '全部时间';
     var alone = !all && shown.length < 2;
     var html = '<div class="tview">' +
-      '<h2>关系图<span title="在名片里的 session 下拉切换范围">' + esc(span) + ' · ' + (all ? Object.keys(F.ends).length : shown.length) + ' 个</span>' +
+      '<h2>关系<span title="在名片里的 session 下拉切换范围">' + esc(span) + ' · ' + (all ? Object.keys(F.ends).length : shown.length) + ' 个</span>' +
         (W.degraded ? '<span class="warn" title="没拿到 wizard 注册表 (svr 还没收到 daemon 的快照), 只画观测到的往来">名册缺席</span>' : '') +
         (me ? '<button class="vt" data-tall="' + (all ? 'rel' : 'all') + '" title="' +
           (all ? '画出范围内所有有关系的 wizard (点击改为只画相关的)' : '只画它自己、和它有直接关系的, 以及连到它们的上游链 (点击改为画全部)') + '">' + (all ? '全部' : '相关') + '</button>' : '') + worldToggle() + '</h2>' +
