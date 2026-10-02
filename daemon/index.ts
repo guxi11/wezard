@@ -67,7 +67,7 @@ import {
   type WizardRecord,
 } from "./wizard.js";
 import { bindNoticeBox, createNoticeBox, chatAudience } from "./notices.js";
-import { loadJobStore, renderJobOpen, renderJobClose, jobEpisode, JOB_MEMBER_MAX } from "./jobs.js";
+import { loadJobStore, jobEpisode, JOB_MEMBER_MAX } from "./jobs.js";
 import { cacheTtlSec, clipMiddle, contextFiles, firstStamp, parseClosing, lastContextTokens, lastExchange, lastModel, openingOf, replyClosedBefore, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { keepalivePingSigs } from "../shared/keepalive.js";
 import { expandHome } from "../shared/paths.js";
@@ -1032,7 +1032,7 @@ const main = async (): Promise<void> => {
       const k = (body as { chain?: boolean }).chain === false ? undefined : parentKOf(self);
       if (inj.ok) receipts.register({ from: self, to: target, channel, job: jobId, at, turn: turn.turn, legs: turn.legs, deadlineAt, ...(k ? { k } : {}) }, wantReceipt);
       // 工单成员照旧记账 (收工那一条会列出各自那段活); 公开的那一句在群里成气泡。
-      // 续问 (re) 不是一段新活: 收工气泡里该列的仍是当初派的那段。
+      // 续问 (re) 不是一段新活: 工单页与留档里该列的仍是当初派的那段。
       if (inj.ok && jobId) jobs.attach(jobId, { target, task: turn.legs > 1 ? "" : text, spawned: false });
       const spent = inj.ok && jobId ? jobs.spend(jobId) : undefined;
       if (inj.ok && isPublic) relayPeer(self, target, text, channel);
@@ -1929,14 +1929,15 @@ const main = async (): Promise<void> => {
       if (!title) { json(res, 400, { ok: false, reason: "title required —— 一句话说清这个工单要干成什么" }); return; }
       const base = baseOfKey(self);
       const maxTurns = Math.min(200, Math.max(0, Math.floor(Number(b.maxTurns) || 0)));
-      const job = jobs.open(base, self, title, { ...(expect ? { expect } : {}), ...(maxTurns ? { maxTurns } : {}) });
-      notifyChat(base, renderJobOpen(job, (b.plan ?? "").toString()));
+      const plan = (b.plan ?? "").toString().trim();
+      // 不出群气泡: 工单是私下的过程, 人看到的只有发起者那一轮的最终回复。
+      const job = jobs.open(base, self, title, { ...(plan ? { plan } : {}), ...(expect ? { expect } : {}), ...(maxTurns ? { maxTurns } : {}) });
       json(res, 200, {
         ok: true,
         job: job.id,
         title,
         memberMax: JOB_MEMBER_MAX,
-        hint: "把这个 id 传给 spawn_wizard / clone_wizard / send_peer 的 `job` 参数, 它们就归到这个工单名下 (期间不再逐条出气泡); 活干完调 close_job 收尾并回收临时分身。",
+        hint: "把这个 id 传给 spawn_wizard / clone_wizard / tell_peer 的 `job` 参数, 它们就归到这个工单名下 (一律私聊, 不进群); 活干完调 close_job 留档并回收临时分身, 给人的结论写在你自己这一轮的最终回复里。",
       });
     });
 
@@ -1966,7 +1967,6 @@ const main = async (): Promise<void> => {
         const ep = jobEpisode(closed, { nameOf: episodeName, sidOf: (t) => sids.get(t) ?? "", chat: chatNameOf(cfg, job.base) || job.base });
         if (!appendEpisode(episodePath(cfg.daemon.stateDir, ep.name), ep)) log.warn({ job: id, name: ep.name }, "job episode not archived");
       }
-      notifyChat(job.base, renderJobClose(closed, (t) => relayLabel(t, job.base), killed));
       json(res, 200, { ok: true, job: id, members: closed.members.length, recycled: killed, kept: victims.length - killed });
     });
 

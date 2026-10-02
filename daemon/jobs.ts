@@ -8,14 +8,14 @@
 // 所以这里不做第二个编排器。**控制流始终留在发起那个 wizard 的上下文里** (它自己
 // spawn、自己 wait、自己汇总), 守护进程只持有一本账:
 //
-//   谁属于这个工单 · 谁是为它临时生出来的 · 收工时该收掉谁 · 群里该看见哪两条
+//   谁属于这个工单 · 谁是为它临时生出来的 · 收工时该收掉谁 · 各自落成了什么
 //
 // 这个取舍是有来由的: graph.ts 把控制流搬进了守护进程, 代价是 run 只能活在内存里,
 // reload 即丢。账本没有这个问题 —— 它是死的数据, 落盘即可; 而控制流留在 wizard
 // 那边, 重启之后它重试一次就接上了, 比恢复一个状态机简单一个数量级。
 //
-// 群里只出两条气泡 (开工 / 收工), 中间的每一次派活与回话照旧落在各自 wizard 的
-// rolepage —— 五个分身同时干活时, 十条交叉气泡里读不出结构, 两条能。
+// 工单整个是私下的: 开工、派活、回执、收工都不进群 —— 人看不懂这些过程, 结构留给
+// rolepage 的工单页读。群里只有发起者自己那一轮的最终回复, 用它自己的话收口。
 import { randomUUID } from "node:crypto";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import type { Terminal } from "../shared/turn-state.js";
@@ -25,7 +25,7 @@ export interface Artifact { path: string; note: string }
 
 export interface JobMember {
   target: string;
-  /** 派给它的那一段活 (首行即可) —— 收工气泡里按成员列出来。 */
+  /** 派给它的那一段活 —— 工单页与收工留档里按成员列出来。 */
   task: string;
   /** 为这个工单**临时生出来**的; 只有这些会在收工时被回收。已经存在的 wizard
    *  被拉进来帮忙不该因为工单结束就被杀掉。 */
@@ -39,11 +39,13 @@ export interface JobMember {
 
 export interface JobRecord {
   id: string;
-  /** 工单属于哪个聊天 —— 两条气泡落在这里。 */
+  /** 工单属于哪个聊天 (list_jobs 按它筛)。 */
   base: string;
   /** 发起的 wizard。 */
   owner: string;
   title: string;
+  /** 开工时说的计划 (分几路、各干什么) —— 只进账本, 给工单页读。 */
+  plan?: string;
   /** 开工时说好要几份 —— 分身还没派齐时「一共几份」的下限。 */
   expect?: number;
   /** 派活次数的预算 (每次带这张工单的 tell_peer / 带 task 的 spawn 记一次, 续问也算) ——
@@ -59,7 +61,7 @@ export interface JobRecord {
 }
 
 export interface JobStore {
-  open: (base: string, owner: string, title: string, opts?: { expect?: number; maxTurns?: number }) => JobRecord;
+  open: (base: string, owner: string, title: string, opts?: { plan?: string; expect?: number; maxTurns?: number }) => JobRecord;
   /** 记一次派活; 返回记完之后的用量。 */
   spend: (id: string) => { turns: number; maxTurns?: number } | undefined;
   get: (id: string) => JobRecord | undefined;
@@ -94,9 +96,9 @@ const dropStale = (map: Record<string, JobRecord>): Record<string, JobRecord> =>
 export const loadJobStore = (filePath: string): JobStore => {
   const db = loadJsonMap<JobRecord>(filePath, dropStale);
   return {
-    open: (base, owner, title, { expect, maxTurns } = {}) => {
+    open: (base, owner, title, { plan, expect, maxTurns } = {}) => {
       const id = newId();
-      return db.set(id, { id, base, owner, title, ...(expect ? { expect } : {}), ...(maxTurns ? { maxTurns, turns: 0 } : {}), members: [], status: "open", openedAt: Date.now() });
+      return db.set(id, { id, base, owner, title, ...(plan ? { plan } : {}), ...(expect ? { expect } : {}), ...(maxTurns ? { maxTurns, turns: 0 } : {}), members: [], status: "open", openedAt: Date.now() });
     },
     spend: (id) => {
       const j = db.get(id);
@@ -137,16 +139,6 @@ export const loadJobStore = (filePath: string): JobStore => {
   };
 };
 
-// ── 纯渲染 ────────────────────────────────────────────────────────────
-const firstLine = (s: string, max = 90): string => {
-  const t = (s.split("\n")[0] ?? "").trim();
-  return t.length > max ? `${t.slice(0, max)}…` : t;
-};
-
-/** 开工气泡 —— 工单存在这件事本身。成员此刻还没有, 所以这一条只说要干什么。 */
-export const renderJobOpen = (job: JobRecord, plan: string): string =>
-  [`📋 \`${job.id}\` 开工 · **${job.title}**`, plan.trim() ? firstLine(plan, 300) : ""].filter(Boolean).join("\n");
-
 /** 收工的工单 → 一条情景记忆 (见 wizard-memory.ts)。名字、sessionId、聊天名由调用方给:
  *  这里不碰注册表。sid 要在回收分身**之前**取 —— 收掉之后绑定就没了, transcript 是唯一的现场。 */
 export const jobEpisode = (
@@ -171,22 +163,3 @@ export const jobEpisode = (
     ...(mm.artifacts?.length ? { artifacts: mm.artifacts } : {}),
   })),
 });
-
-/** 收工气泡 —— 谁干了什么、结论是什么。成员名字挂各自的 rolepage, 人想看某一路
- *  的来龙去脉就点进去, 不必在群里翻交叉的气泡。 */
-export const renderJobClose = (
-  job: JobRecord,
-  label: (target: string) => string,
-  recycled: number,
-): string =>
-  [
-    `📋 \`${job.id}\` 收工 · **${job.title}**`,
-    ...job.members.flatMap((mm) => [
-      `- ${label(mm.target)}${mm.outcome === "done" ? "" : ` · ${mm.outcome ?? "未回"}`}${mm.task ? ` · ${firstLine(mm.task)}` : ""}`,
-      ...(mm.artifacts ?? []).map((a) => `  ↳ ${a.path}${a.note ? ` — ${firstLine(a.note, 60)}` : ""}`),
-    ]),
-    job.summary?.trim() ? `\n${job.summary.trim()}` : "",
-    recycled > 0 ? `(已回收 ${recycled} 个临时分身)` : "",
-  ]
-    .filter(Boolean)
-    .join("\n");

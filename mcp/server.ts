@@ -392,8 +392,8 @@ const TELL_SCHEMA = {
   public: z
     .boolean()
     .optional()
-    .describe("true = 在公开频道 (你这一轮所在的群) 里说: 群里出 `.你 → .它` 气泡, 它的回复也进群 (同时照样回执给你)。默认 false = 私聊, 只记在 rolepage。需要人知道 / 该当着人讨论才用 true。"),
-  job: z.string().optional().describe("这次派活归到某个工单名下 (open_job 给的 id)。**fan-out 一定要带上它**: 回执里会带 `还差几份 / 全部到齐`, 「齐了吗」由守护进程数给你, 不用你自己在上下文里记。"),
+    .describe("true = 在公开频道 (你这一轮所在的群) 里说: 群里出 `.你 → .它` 气泡, 它的回复也进群 (同时照样回执给你)。默认 false = 私聊, 只记在 rolepage。需要人知道 / 该当着人讨论才用 true。带 `job` 时不起作用 —— 工单里的往来一律私聊。"),
+  job: z.string().optional().describe("这次派活归到某个工单名下 (open_job 给的 id)。**fan-out 一定要带上它**: 回执里会带 `还差几份 / 全部到齐`, 「齐了吗」由守护进程数给你, 不用你自己在上下文里记。带了它就一律私聊, 往来与回执都不进群。"),
   receipt: z
     .boolean()
     .optional()
@@ -779,7 +779,7 @@ const offspringShape = {
   job: z
     .string()
     .optional()
-    .describe("归到某个工单名下 (open_job 给的 id)。它们攒到 close_job 那一条里一起交代, 过程在各自的 rolepage; close_job 还会把它们整批回收掉。"),
+    .describe("归到某个工单名下 (open_job 给的 id)。过程在各自的 rolepage 与工单页, 不进群; close_job 会把它们整批回收掉。"),
   chain: z.boolean().optional().describe("同 tell_peer 的 `chain`: 带了 task 而这件活与你此刻在答的上游那件无关 (旁支、测试) 时给 false, 它的回执就不挂住你给上游的交代。"),
   keepalive: z
     .boolean()
@@ -843,19 +843,19 @@ server.registerTool(
 
 // ── Job: 一次 fan-out 的工单 ────────────────────────────────────────────────
 // 工单不是第二个编排器: 控制流始终在你自己的上下文里 (你自己 spawn、自己 wait、
-// 自己汇总)。守护进程只替你记一本账 —— 谁属于这个活、谁是临时生的、群里出哪两条
-// 气泡、收工时该回收谁。
+// 自己汇总)。守护进程只替你记一本账 —— 谁属于这个活、谁是临时生的、各自落成了什么、
+// 收工时该回收谁。工单整个不进群。
 server.registerTool(
   "open_job",
   {
     title: "Open a job for a fan-out",
     description:
       "开一个**工单**: 你接下来要同时派出两个以上的分身干同一件事时, 先开它。返回一个 id, 把这个 id 传给 spawn_wizard / clone_wizard / tell_peer 的 `job` 参数, 它们就归到这个工单名下。\n" +
-      "开了工单之后有三件事不一样: ① 群里出「开工」与 close_job 的「收工」两条气泡, 人据此读得出这批活的结构 (过程在各自的 rolepage 里, 收工那条会把成员和各自那段活列出来)。② close_job 会把为这个工单生出来的分身**整批回收**, 不必一个个 stop_wizard —— 忘记回收是常态, 每个分身都占着一个 pane 和一份上下文。③ list_jobs 能看到还开着哪些活。\n" +
+      "开了工单之后有三件事不一样: ① 带这个 id 的派活一律私聊, 开工、派活、回执、收工都**不进群** —— 结构在 rolepage 的工单页里, 人在群里只看到你自己那一轮的最终回复。② close_job 会把为这个工单生出来的分身**整批回收**, 不必一个个 stop_wizard —— 忘记回收是常态, 每个分身都占着一个 pane 和一份上下文。③ list_jobs 能看到还开着哪些活。\n" +
       "只派一个分身、或者只是推某个同伴一把, 不用开工单。",
     inputSchema: {
-      title: z.string().describe("一句话说清这个工单要干成什么 —— 它会出现在群里的开工气泡上。"),
-      plan: z.string().optional().describe("要在开工气泡里一并说明的计划 (打算分几路、各干什么)。省略则只出标题。"),
+      title: z.string().describe("一句话说清这个工单要干成什么 —— 工单页与收工留档的标题。"),
+      plan: z.string().optional().describe("计划 (打算分几路、各干什么), 记进工单账本给工单页读。"),
       expect: z.number().optional().describe("这批一共要几份回执。分身是陆续派的, 给了它「全部到齐」就不会在派齐之前提前报。"),
       maxTurns: z.number().optional().describe("派活次数的预算: 带这张工单的每次 tell_peer (含 re 续问、答 NEED) 与带 task 的 spawn/clone 各记一次, 用完再派会被拒 —— 防反复追问兜圈。省略 = 不限。"),
     },
@@ -869,11 +869,11 @@ server.registerTool(
   {
     title: "Close a job and recycle its clones",
     description:
-      "收工: 把汇总结论发进群 (连同成员清单和各自那段活, 每个名字挂它自己的 rolepage), 并**把为这个工单生出来的分身整批回收**。被拉来帮忙的长期 wizard 不在回收之列, 你自己也不会被收。\n" +
-      "汇总完就调它。`stop:false` 只结账不回收 (那些分身后面还有用)。",
+      "收工: 把汇总结论连同成员与各自那段活**留档** (情景记忆, 不发群), 并**把为这个工单生出来的分身整批回收**。被拉来帮忙的长期 wizard 不在回收之列, 你自己也不会被收。\n" +
+      "汇总完就调它。给人的结论写在你自己这一轮的最终回复里 —— 人在群里问的, 那条回复就进群。`stop:false` 只结账不回收 (那些分身后面还有用)。",
     inputSchema: {
       job: z.string().describe("open_job 返回的工单 id。"),
-      summary: z.string().optional().describe("汇总结论, 发进群给人看。这是人在群里看到的唯一一条结果 —— 写清楚做成了什么、有什么没做成。"),
+      summary: z.string().optional().describe("汇总结论, 留档 (不发群): 做成了什么、有什么没做成。"),
       stop: z.boolean().optional().describe("是否回收为这个工单生出来的分身。默认 true。"),
     },
   },
