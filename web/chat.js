@@ -166,7 +166,8 @@
   };
   var render = function (scope) {
     if (!mdReady()) return;
-    scope.querySelectorAll('.bubble').forEach(function (b) {
+    // 工单页的开工 / 收工两行不是气泡, 计划与结论同样是 markdown。
+    scope.querySelectorAll('.bubble, .tg-job').forEach(function (b) {
       var src = b.querySelector('script.md-src'), body = b.querySelector('.md-body');
       if (src && body && body.dataset.rendered !== '1') {
         body.innerHTML = md.render(src.textContent || '');
@@ -948,9 +949,8 @@
     var who = $('#ch-who'), acts = $('#ch-acts');
     if (VIEW === 'jobs') {
       who.innerHTML = '<span class="t">工单</span><span class="sub">' + (JOB_ONLY ? '这一处经手的 ' + jobListRows().length + ' 张' : esc(nameOf(ROLE)) + ' 开的或参与的') + ' · 进行中在前</span>';
-      acts.innerHTML = backBtn() + (JOB_ONLY ? '<button class="vb" id="ch-jall">全部工单</button>' : '') + '<button class="vb" id="ch-back">‹ 对话</button>';
+      acts.innerHTML = backBtn() + '<button class="vb" id="ch-back">‹ 对话</button>';
       bindBack();
-      if (JOB_ONLY) $('#ch-jall').onclick = function () { JOB_ONLY = null; renderJobList(); renderHead(); };
       $('#ch-back').onclick = function () { setView('msgs'); };
       return;
     }
@@ -995,9 +995,8 @@
     if (c.kind === 'job') {
       who.innerHTML = '<span class="av">📋</span><span class="t">' + esc(c.name) + '</span>' +
         '<span class="sub">' + esc(c.key.slice(2)) + (c.job ? ' · 开单 ' + nm(c.job.owner, '', true) : '') + jobTag(c.job) + stuckTag(c.job) + '</span>';
-      acts.innerHTML = backBtn() + '<button class="vb" id="ch-jall">全部工单</button>';
+      acts.innerHTML = backBtn();
       bindBack();
-      $('#ch-jall').onclick = function () { JOB_ONLY = null; setView('jobs'); };
       bindGo(who);
       return;
     }
@@ -1665,7 +1664,8 @@
   var labelHTML = function (p) {
     if (!p) return '';
     return '<span class="tlab"' + (p.jobs.length ? ' title="经手的工单: ' + esc(p.jobs.join(' ')) + '"' : '') + '>' +
-      Object.keys(KIND).filter(function (k) { return p.kinds[k]; }).map(function (k) {
+      // 工单这一种关系由 📋 那一枚说 (可点, 列的就是这几张), 不再另挂「工单 ×N」重复一遍。
+      Object.keys(KIND).filter(function (k) { return p.kinds[k] && !(k === 'job' && p.jobs.length); }).map(function (k) {
         return '<span class="ek ' + k + '" title="' + KIND[k].tip + '">' + KIND[k].mark +
           (!LINEAGE[k] ? ' ×' + p.kinds[k] : '') + '</span>';
       }).join('') +

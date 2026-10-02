@@ -1356,7 +1356,7 @@ const main = async (): Promise<void> => {
         wizards: [...live, ...cold],
         jobs: jobs.all().map((j) => ({
           id: j.id, base: j.base, owner: j.owner, title: j.title, status: j.status,
-          openedAt: j.openedAt, closedAt: j.closedAt, summary: j.summary, ...(j.expect ? { expect: j.expect } : {}),
+          openedAt: j.openedAt, closedAt: j.closedAt, summary: j.summary, ...(j.expect ? { expect: j.expect } : {}), ...(j.plan ? { plan: j.plan } : {}),
           members: j.members.map((mm) => ({ target: mm.target, task: mm.task, spawned: mm.spawned, ...(mm.outcome ? { outcome: mm.outcome } : {}), ...(mm.artifacts?.length ? { artifacts: mm.artifacts } : {}) })),
         })),
         // rolepage 的待办托盘: 与名册 / peek 的「在等 / 欠着」同一份 (receipts.states)。

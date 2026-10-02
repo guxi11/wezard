@@ -65,6 +65,8 @@ export interface WorldFactJob {
   summary?: string;
   /** 开工时说好要几份 (见 jobs.JobRecord.expect)。 */
   expect?: number;
+  /** 开工时的计划 (open_job 的 plan) —— 工单页开工那一行照原样分行显示。 */
+  plan?: string;
   /** outcome: 这一份落定成什么 (见 jobs.MemberOutcome); 缺省 = 还在干。 */
   members: Array<{ target: string; task: string; spawned: boolean; outcome?: string; artifacts?: Array<{ path: string; note: string }> }>;
 }

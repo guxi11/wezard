@@ -128,7 +128,7 @@ const memberLine = (mm: WorldFactJob["members"][number], dir: Directory, closed:
   (dir.isWizard(mm.target)
     ? `<button class="go" data-r="${escHtml(mm.target)}">${escHtml(dir.labelOf(mm.target))} .${escHtml(dir.nameOf(mm.target))}</button>`
     : `<span>${escHtml(dir.labelOf(mm.target))} ${escHtml(dir.nameOf(mm.target))}</span>`) +
-  (mm.task ? `<em>${escHtml((mm.task.split("\n")[0] ?? "").slice(0, 90))}</em>` : "") +
+  (mm.task ? `<em title="${escHtml(mm.task.trim())}">${escHtml(mm.task.trim())}</em>` : "") +
   (mm.artifacts ?? []).map((a) => `<div class="ja">↳ ${escHtml(a.path)}${a.note ? ` — ${escHtml(a.note)}` : ""}</div>`).join("") + "</li>";
 
 export const renderJobMarks = (j: WorldFactJob, dir: Directory): MsgFragment[] => {
@@ -138,12 +138,15 @@ export const renderJobMarks = (j: WorldFactJob, dir: Directory): MsgFragment[] =
     const html = tagSig(`<div class="tg-job ${phase}" data-key="j:${escHtml(j.id)}:${phase}">${body}</div>`);
     return { id: `j:${j.id}:${phase}`, turnId: j.id, dir: "mark", ...base(owner, dir), ts, ping: false, html, meta: "", sig: hashStr(html), staleAt: 0 };
   };
+  // 计划 / 结论是人写的 markdown, 换行要留着: 交给客户端同一个 markdown 渲染 (breaks:true)。
+  const md = (cls: string, text?: string) =>
+    text?.trim() ? `<div class="md-body ${cls}"></div><script type="text/plain" class="md-src">${escHtml(text.trim())}</script>` : "";
   const head = (verb: string) =>
     `<div class="jh">📋 <b>${escHtml(j.id)}</b> ${verb} · <span class="jt">${escHtml(j.title)}</span><span class="s">${escHtml(fmtTs(verb === "开工" ? j.openedAt : j.closedAt ?? 0))}</span></div>`;
   return [
-    row("open", j.openedAt, head("开工") + (j.status === "open" ? members : "")),
+    row("open", j.openedAt, head("开工") + md("jplan", j.plan) + (j.status === "open" ? members : "")),
     ...(j.status === "closed" && j.closedAt
-      ? [row("close", j.closedAt, head("收工") + members + (j.summary?.trim() ? `<div class="md-body"></div><script type="text/plain" class="md-src">${escHtml(j.summary.trim())}</script>` : ""))]
+      ? [row("close", j.closedAt, head("收工") + members + md("jsum", j.summary))]
       : []),
   ];
 };
