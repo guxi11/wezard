@@ -901,17 +901,40 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .mrow.hit .mb > * { animation: hit 1.6s ease-out }
 @keyframes hit { 0%, 30% { box-shadow: 0 0 0 3px #2f55c955 } 100% { box-shadow: 0 0 0 3px #2f55c900 } }
 
-/* ══ 待办托盘: 名片下一小块, 只读; 卡住的 (审批 / 反问 / 失败) 着色。 ══ */
-.tray { margin: 8px 0 0; font-size: 11.5px }
-.tray h3 { margin: 0 0 3px; font-size: 11px; font-weight: 500; color: var(--faint) }
-.tray h3 span { margin-left: 4px }
-.tray ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px }
-.tray .tr { display: flex; align-items: baseline; gap: 6px; min-width: 0; color: var(--mute) }
-.tray .dir { flex: none; color: var(--faint) }
-.tray .st { flex: none; padding: 0 5px; border-radius: 4px; background: #f1f3f6 }
-.tray .tr.run .st { color: #1a7f37; background: #1a7f3712 }
-.tray .tr.wait .st { color: #8250df; background: #fbefff }
-.tray .tr.need .st { color: #9a6700; background: #9a670014 }
-.tray .tr.bad .st { color: #cf222e; background: #cf222e10 }
-.tray .jid { color: var(--faint); font-family: ui-monospace, monospace; font-size: 10.5px }
-.tray .ts { margin-left: auto; flex: none; color: var(--faint) }
+
+/* ══ 工单 (j:<id>) —— 工单页与工单列表都在主区; 侧栏 / 关系图只挂 📋 标记 ══════════════
+   进度徽标: 开着 = 已落定 / 一共 (琥珀), 收了 = 收工 (灰); 有人卡住另挂一枚紫色「N 卡住」。 */
+.jtag { flex: none; margin-left: 6px; font-size: 10.5px; line-height: 15px; padding: 0 5px; border-radius: 4px; color: var(--faint); background: #f1f3f6; font-weight: 500 }
+.jtag.open { color: #94741f; background: #bf870014 }
+.jstuck { flex: none; margin-left: 4px; font-size: 10.5px; line-height: 15px; padding: 0 5px; border-radius: 4px; color: #8250df; background: #fbefff; font-weight: 500 }
+.jmk { flex: none; margin-left: 4px; font-size: 10.5px; opacity: .75 }
+.ek.jmk { margin-left: 0; opacity: 1; color: #94741f; background: #bf870014 }
+/* 会话顶栏上的工单入口: 一张一枚, 标题过长省略。 */
+.vb.jact { display: inline-flex; align-items: center; gap: 3px; max-width: 220px }
+.vb.jact .jt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0 }
+.vb.jact .jtag { margin-left: 2px }
+/* 工单列表 (主区): 与侧栏会话项同一种行; 已收工的淡一档, 悬停回满。 */
+.jlist h2 { margin: 14px 4px 6px; font-size: 12px; font-weight: 500; color: var(--mute) }
+.jlist h2 span { margin-left: 6px; font-weight: 400; color: var(--faint) }
+.jlist .ci { width: 100% }
+.jclosed .ci { opacity: .55 }
+.jclosed .ci:hover { opacity: 1 }
+/* 工单页的开工 / 收工两行。 */
+.tg-job { margin: 6px auto; max-width: 560px; padding: 8px 12px; border-radius: 8px; border: 1px dashed #bf870066; background: #bf870008; font-size: 12px; color: var(--mute) }
+.tg-job .jh { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap }
+.tg-job .jh .jt { color: var(--ink); font-weight: 500 }
+.tg-job .jh .s { margin-left: auto; color: var(--faint); font-size: 11px }
+.tg-job .jmem { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 3px }
+.tg-job .jmem li { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap }
+.tg-job .jmem em { font-style: normal; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 }
+.tg-job .jmem .go { border: 0; background: none; padding: 0; font: inherit; color: var(--accent); cursor: pointer }
+.tg-job .ja { flex-basis: 100%; padding-left: 40px; color: var(--faint); font-family: ui-monospace, monospace; font-size: 11px }
+.tg-job .jo { flex: none; font-size: 10.5px; padding: 0 5px; border-radius: 4px; color: #1a7f37; background: #1a7f3712 }
+.tg-job .jo.st-run { color: #94741f; background: #bf870014 }
+.tg-job .jo.st-none { color: var(--faint); background: #f1f3f6 }
+.tg-job .jo:is(.st-timeout, .st-silent, .st-dead, .st-canceled) { color: #cf222e; background: #cf222e10 }
+.tg-job .md-body { margin-top: 6px; color: var(--ink) }
+/* 关系图: 正在看一张工单时只亮它的当事人与两端都是当事人的线。 */
+.tree.jsel .tci.jout { opacity: .3 }
+.tree.jsel .tci.jout:hover { opacity: 1 }
+.tree.jsel li.jdim { --lc: #d0d7de }

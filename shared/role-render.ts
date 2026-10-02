@@ -5,10 +5,11 @@
 //   出   该 wizard 这一轮的回复: 复用 renderTurnGroup (文本 + 工具细节), 去掉问句 ——
 //        问句已经是上面那条入消息了; 本轮用量单独走 `meta`, 客户端写在名字那一行
 //   断点 视角 role 自己的 /clear /new
-import { renderCutMark, renderTurnGroup, splitReminders, escHtml, hashStr, tagSig, type TurnFragment } from "./detail-render.js";
+import { renderCutMark, renderTurnGroup, splitReminders, escHtml, fmtTs, hashStr, tagSig, type TurnFragment } from "./detail-render.js";
 import { isTurn, staleAt, turnDone } from "./chat-view.js";
 import { isKeepaliveTurn } from "./keepalive.js";
 import type { DetailRecord, MarkDetailRecord, TurnDetailRecord } from "./detail-store.js";
+import type { WorldFactJob } from "./world.js";
 import { teammateOf, unwrapMates, type Directory, type Msg } from "./role-view.js";
 
 export interface MsgFragment {
@@ -112,4 +113,33 @@ export const renderMark = (mk: MarkDetailRecord, role: string, dir: Directory): 
     id: `m:${mk.id}`, turnId: mk.id, dir: "mark", ...base({ from: role, to: role, channel: "" }, dir),
     ts: mk.createdAt, ping: false, html: f.html, meta: "", sig: f.sig, staleAt: 0,
   };
+};
+
+// 工单窗口的开工 / 收工两行: 不是哪一轮的消息, 是账本上的两个时刻。收工那行按成员列定论与交付物,
+// 工单不再进群, 这两行就是收工结论唯一的落点; 还开着时开工那行列成员此刻的进度。
+const OUTCOME: Readonly<Record<string, string>> = { ...RCPT, "": "在干" };
+// 老 daemon 的快照不记成员定论: 收了工却没有定论的, 不说它「在干」。
+const memberLine = (mm: WorldFactJob["members"][number], dir: Directory, closed: boolean): string =>
+  `<li><span class="jo st-${escHtml(mm.outcome ?? (closed ? "none" : "run"))}">${escHtml(mm.outcome ? OUTCOME[mm.outcome] ?? mm.outcome : closed ? "—" : OUTCOME[""]!)}</span>` +
+  (dir.isWizard(mm.target)
+    ? `<button class="go" data-r="${escHtml(mm.target)}">${escHtml(dir.labelOf(mm.target))} .${escHtml(dir.nameOf(mm.target))}</button>`
+    : `<span>${escHtml(dir.labelOf(mm.target))} ${escHtml(dir.nameOf(mm.target))}</span>`) +
+  (mm.task ? `<em>${escHtml((mm.task.split("\n")[0] ?? "").slice(0, 90))}</em>` : "") +
+  (mm.artifacts ?? []).map((a) => `<div class="ja">↳ ${escHtml(a.path)}${a.note ? ` — ${escHtml(a.note)}` : ""}</div>`).join("") + "</li>";
+
+export const renderJobMarks = (j: WorldFactJob, dir: Directory): MsgFragment[] => {
+  const owner = { from: j.owner, to: j.owner, channel: j.base };
+  const members = j.members.length ? `<ul class="jmem">${j.members.map((mm) => memberLine(mm, dir, j.status === "closed")).join("")}</ul>` : "";
+  const row = (phase: "open" | "close", ts: number, body: string): MsgFragment => {
+    const html = tagSig(`<div class="tg-job ${phase}" data-key="j:${escHtml(j.id)}:${phase}">${body}</div>`);
+    return { id: `j:${j.id}:${phase}`, turnId: j.id, dir: "mark", ...base(owner, dir), ts, ping: false, html, meta: "", sig: hashStr(html), staleAt: 0 };
+  };
+  const head = (verb: string) =>
+    `<div class="jh">📋 <b>${escHtml(j.id)}</b> ${verb} · <span class="jt">${escHtml(j.title)}</span><span class="s">${escHtml(fmtTs(verb === "开工" ? j.openedAt : j.closedAt ?? 0))}</span></div>`;
+  return [
+    row("open", j.openedAt, head("开工") + (j.status === "open" ? members : "")),
+    ...(j.status === "closed" && j.closedAt
+      ? [row("close", j.closedAt, head("收工") + members + (j.summary?.trim() ? `<div class="md-body"></div><script type="text/plain" class="md-src">${escHtml(j.summary.trim())}</script>` : ""))]
+      : []),
+  ];
 };

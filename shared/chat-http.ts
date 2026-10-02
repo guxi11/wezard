@@ -25,12 +25,12 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { URL } from "node:url";
 import { baseOfKey } from "./session-label.js";
 import { isMark, isPost, isTurn } from "./chat-view.js";
-import { buildWorld, EMPTY_FACTS, withData, type WorldFacts } from "./world.js";
+import { buildWorld, EMPTY_FACTS, withData, type WorldFactJob, type WorldFacts } from "./world.js";
 import {
-  allMessages, convKeyOf, convMessages, chatKeysOf, parseTalkKey, glanceOfTalk, convsOf, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
+  allMessages, convKeyOf, convMessages, chatKeysOf, parseTalkKey, glanceOfTalk, convsOf, jobConvsOf, jobOfKey, jobsIn, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
   roleInfo, roleStats, sessionsOf, talkArgs, talkOf, counterpartOf, windowStats, type Directory, type Msg, type SessionSpan,
 } from "./role-view.js";
-import { renderMark, renderMsg, type MsgFragment } from "./role-render.js";
+import { renderJobMarks, renderMark, renderMsg, type MsgFragment } from "./role-render.js";
 import { searchRole } from "./role-search.js";
 import { charterBrief, charterView } from "./charter-view.js";
 import { renderToolBody } from "./detail-render.js";
@@ -185,12 +185,13 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     const spans = sessionsOf(records, role, now);
     const span = spanOf(spans, sid);
     const inWin = msgs.filter((m) => inSpan(span)(m.ts));
-    const convs = convsOf(inWin, role, dir, now);
+    // 工单不按视角的 session 段裁 (同 viewOf 的 span): 成员各有各的 session。
+    const convs = [...convsOf(inWin, role, dir, now), ...jobConvsOf(msgs, role, dir, f.jobs)].sort((a, b) => b.lastTs - a.lastTs);
     const stats = roleStats(records, role, now, span);
     const info = roleInfo(role, dir, f, stats, now);
-    // 日程页画的两样东西 (与 chat.js 的 renderPlan 同一口径) —— 都没有就不给入口。
+    // 日程页只画定时任务 (与 chat.js 的 renderPlan 同一口径) —— 没有就不给入口; 工单在主区的工单列表里。
     const schedules = f.schedules.filter((x) => (x.owner || x.createdBy || x.target) === role);
-    const jobs = f.jobs.filter((j) => j.owner === role || j.members.some((m) => m.target === role));
+    const myJobs = new Set(f.jobs.filter((j) => j.owner === role || j.members.some((m) => m.target === role)).map((j) => j.id));
     const home = convs.find((c) => c.key === land.conv);
     return {
       at: now,
@@ -201,21 +202,20 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       // 不随视角的 session 段裁: 「它还在别的会话里」说的是它, 不是视角选的那段时间。
       chatKeys: chatKeysOf(msgs),
       // 链接来自哪个会话就默认开哪个 (见 landingOf); 否则最近活动的那个。
-      conv: home?.key ?? convs[0]?.key ?? "",
+      conv: home?.key ?? convs.find((c) => c.kind !== "job")?.key ?? convs[0]?.key ?? "",
       // 从群里点名字进来, 要看的是「我在这个群里和它说过什么」—— 默认只看与问话那一方的
       // 往来。票据不是一轮对话时不知道是谁问的, 退到最近说过话的那个人 (subs 已按往来、
       // 最近排好)。落在别的会话上就不猜。
       with: home?.subs.find((s) => s.count && (land.with ? s.role === land.with : s.role.startsWith("human:")))?.role ?? "",
       relations: hasRelations(msgs, role, info),
-      // 待办托盘: 视角派出去还没落定的 (在等) 与派给它还没交的 (欠着); 卡在审批上的带上停在哪几个工具。
-      inflight: (f.inflight ?? []).filter((x) => x.from === role || x.to === role).map((x) => ({
+      // 在飞的活: 视角派出去 / 欠着的, 以及它的工单里每一份 (工单行标「卡住」); 卡在审批上的带上停在哪几个工具。
+      inflight: (f.inflight ?? []).filter((x) => x.from === role || x.to === role || myJobs.has(x.job)).map((x) => ({
         ...x, ...(x.state === "blocked" && dir.fact(x.to)?.waiting?.length ? { waiting: dir.fact(x.to)!.waiting } : {}),
       })),
-      schedules: schedules.length + jobs.length,
-      // 侧栏日程入口的副标题: 下一枪几点、还开着几个工单、有没有坏掉的定时。
+      schedules: schedules.length,
+      // 侧栏日程入口的副标题: 下一枪几点、有没有坏掉的定时。
       plan: {
         tasks: schedules.length,
-        jobs: jobs.filter((j) => j.status === "open").length,
         nextAt: schedules.reduce((m, x) => (m && m < x.nextAt ? m : x.nextAt), 0),
         broken: schedules.filter((x) => x.lastGate === "error" || !!x.loadError).length,
       },
@@ -249,15 +249,21 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
   /** 一个窗口的全部片段, 时间序: 消息 + 视角 role 自己的断点。
    *  给的是**待渲染**的片段 —— 窗口通常只上屏最后几十条, 先按时间切片再渲染,
    *  没上屏的那几百轮就一个字都不用排。 */
-  const windowFrags = (records: readonly DetailRecord[], dir: Directory, v: View, now: number): Array<{ id: string; ts: number; render: () => MsgFragment }> => {
+  const windowFrags = (records: readonly DetailRecord[], dir: Directory, v: View, now: number, jobs: readonly WorldFactJob[]): { frags: Array<{ id: string; ts: number; render: () => MsgFragment }>; jobs: string[] } => {
     const msgs = convMessages(allMessages(records, now), v.role, v.conv, v.with || undefined)
       .filter((m) => inSpan(v.span)(m.ts));
     const lo = msgs[0]?.ts ?? Infinity;
-    const marks = marksOf(records, markRole(v)).filter((mk) => mk.createdAt >= lo && inSpan(v.span)(mk.createdAt));
-    return [
+    const jid = jobOfKey(v.conv);
+    // 工单窗口横跨好几个成员的会话, 谁的断点都不属于它; 它自己的两行 (开工 / 收工) 取自账本。
+    const marks = jid ? [] : marksOf(records, markRole(v)).filter((mk) => mk.createdAt >= lo && inSpan(v.span)(mk.createdAt));
+    const job = jid ? jobs.find((j) => j.id === jid) : undefined;
+    const frags = [
       ...msgs.map((m) => ({ id: m.id, ts: m.ts, render: () => renderMsg(m, records, dir, now) })),
       ...marks.map((mk) => ({ id: `m:${mk.id}`, ts: mk.createdAt, render: () => renderMark(mk, v.role, dir) })),
+      ...(job ? renderJobMarks(job, dir).map((f) => ({ id: f.id, ts: f.ts, render: () => f })) : []),
     ].sort((a, b) => a.ts - b.ts);
+    // 整窗出现过的工单 (不只这一页) —— 顶栏的工单入口。
+    return { frags, jobs: jobsIn(msgs) };
   };
 
   /** 窗口里画谁的断点: 平常是视角自己; 「某人的全部对话」窗口画那个人的。 */
@@ -273,7 +279,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       conv,
       with: dir.resolve(url.searchParams.get("with") ?? "") ?? "",
       // 「某人的全部对话」不受视角的 session 裁剪 —— 那是视角自己的时间分段, 与那个人无关。
-      span: conv.startsWith("a:") ? undefined : spanOf(spans, url.searchParams.get("session")),
+      span: conv.startsWith("a:") || conv.startsWith("j:") ? undefined : spanOf(spans, url.searchParams.get("session")),
     };
   };
 
@@ -285,7 +291,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       const dir = makeDirectory(records, f);
       const v = viewOf(records, dir, ticket, url);
       if (!v || !v.conv) { json(res, 200, { ok: true, at: Date.now(), total: 0, truncated: false, msgs: [] }); return; }
-      const all = windowFrags(records, dir, v, Date.now());
+      const { frags: all, jobs: winJobs } = windowFrags(records, dir, v, Date.now(), f.jobs);
       // 注意 Number(null) === 0 —— 缺省必须先判 null, 否则默认就成了"全量"。
       const raw = url.searchParams.get("limit");
       const n = raw === null ? Number.NaN : Number(raw);
@@ -304,7 +310,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       const page = limit === 0 ? older : older.slice(-limit);
       json(res, 200, {
         ok: true, at: Date.now(), role: v.role, conv: v.conv, total: all.length,
-        truncated: page.length < older.length, older: older.length - page.length, msgs: page.map((x) => x.render()),
+        truncated: page.length < older.length, older: older.length - page.length, jobs: winJobs, msgs: page.map((x) => x.render()),
       });
     });
   };
@@ -360,6 +366,10 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       v ??= viewOf(records, makeDirectory(records, ff), ticket, url);
       if (!v) return;
       send("role", summary(records, ff, v.role, url.searchParams.get("session"), landingOf(ticket, v.role), v));
+      // 工单窗口的开工 / 收工两行取自账本, 账本变了不写 store —— 跟着名册的心跳推, 没变的由 sig 挡掉。
+      const jid = jobOfKey(v.conv);
+      const job = jid ? ff.jobs.find((j) => j.id === jid) : undefined;
+      if (job) renderJobMarks(job, makeDirectory(records, ff)).forEach(pushFrag);
     };
 
     /** 这一轮拆出的消息里, 落在当前窗口的那几条。 */
@@ -368,7 +378,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       const r = store.get(id);
       if (!r) return;
       if (isMark(r)) {
-        if (r.target === markRole(v) && inSpan(v.span)(r.createdAt)) pushFrag(renderMark(r, v.role, dir));
+        if (!jobOfKey(v.conv) && r.target === markRole(v) && inSpan(v.span)(r.createdAt)) pushFrag(renderMark(r, v.role, dir));
         return;
       }
       if (isPost(r)) {

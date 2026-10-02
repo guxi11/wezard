@@ -63,8 +63,18 @@ export interface WorldFactJob {
   openedAt: number;
   closedAt?: number;
   summary?: string;
-  members: Array<{ target: string; task: string; spawned: boolean }>;
+  /** 开工时说好要几份 (见 jobs.JobRecord.expect)。 */
+  expect?: number;
+  /** outcome: 这一份落定成什么 (见 jobs.MemberOutcome); 缺省 = 还在干。 */
+  members: Array<{ target: string; task: string; spawned: boolean; outcome?: string; artifacts?: Array<{ path: string; note: string }> }>;
 }
+
+/** 一张工单的进度: 已落定几份 / 一共几份 (成员数与开工时说好的份数取大) —— 侧栏、关系图、工单页都读这一份。 */
+export interface JobProgress { done: number; total: number }
+export const jobProgress = (j: WorldFactJob): JobProgress => ({
+  done: j.members.filter((mm) => mm.outcome).length,
+  total: Math.max(j.members.length, j.expect ?? 0),
+});
 
 export interface WorldFactSchedule {
   id: string;
@@ -195,7 +205,7 @@ export interface WorldView {
   chats: WorldChat[];
   nodes: WorldNode[];
   edges: WorldEdge[];
-  jobs: WorldFactJob[];
+  jobs: Array<WorldFactJob & JobProgress>;
   schedules: WorldFactSchedule[];
   /** 注册表缺席 (svr 独立部署) —— 前端据此说明"只画观测到的往来"。 */
   degraded: boolean;
@@ -465,7 +475,7 @@ export const buildWorld = (
       .map((n) => ({ ...n, rels: [...(relsOf.get(n.target) ?? [])] })),
     // 两端都还在图上的边才画得出来。
     edges: edges.filter((e) => shown.has(e.from) && shown.has(e.to)),
-    jobs: [...facts.jobs].sort((a, b) => (b.closedAt ?? b.openedAt) - (a.closedAt ?? a.openedAt)),
+    jobs: [...facts.jobs].sort((a, b) => (b.closedAt ?? b.openedAt) - (a.closedAt ?? a.openedAt)).map((j) => ({ ...j, ...jobProgress(j) })),
     schedules: [...facts.schedules].sort((a, b) => a.nextAt - b.nextAt),
     degraded: !!facts.absent,
   };

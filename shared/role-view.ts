@@ -20,7 +20,7 @@ import { baseOfKey, labelFor, stripSigil, tagOfKey } from "./session-label.js";
 import { isGhostTurn, isMark, isPost, isTurn, staleAt, summarizeTag, type TagSummary } from "./chat-view.js";
 import { isKeepaliveTurn } from "./keepalive.js";
 import type { DetailRecord, MarkDetailRecord, PostDetailRecord, TurnDetailRecord } from "./detail-store.js";
-import type { WorldFacts, WorldFactWizard } from "./world.js";
+import { jobProgress, type WorldFactJob, type WorldFacts, type WorldFactWizard } from "./world.js";
 
 export type RoleKind = "wizard" | "human" | "task";
 
@@ -201,7 +201,7 @@ export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFact
 // key 相对于视角 role: `c:<base>` 公开频道, `p:<对端>` 私聊。
 // 有人在的频道一律是群聊 (与人的「单聊」也是: 人 + 住在里面的 wizard); 只有 wizard
 // 之间的才是私聊。
-export type ConvKind = "group" | "wizard";
+export type ConvKind = "group" | "wizard" | "job";
 
 export interface ConvSub {
   role: string;
@@ -218,6 +218,8 @@ export interface ConvSub {
   whole: Glance & { count: number };
   /** 它是 wizard 时才有。 */
   status?: RoleStatus;
+  /** 这一对往来里出现过的工单 (侧栏一行的 📋 标记)。 */
+  jobs?: string[];
 }
 
 export interface Conv {
@@ -240,6 +242,10 @@ export interface Conv {
   mine: number;
   /** 群里的其他 role (只对公开频道)。 */
   subs: ConvSub[];
+  /** 这处往来里出现过的工单 (侧栏一行的 📋 标记); 没有 = 不给。 */
+  jobs?: string[];
+  /** 工单 (`j:<id>`) 的账: 开着没有、落定几份 / 一共几份。 */
+  job?: { id: string; owner: string; status: "open" | "closed"; done: number; total: number };
 }
 
 const involves = (m: Msg, role: string): boolean => m.from === role || m.to === role;
@@ -320,19 +326,22 @@ const saidAt = (role: string) => (m: Msg): number | undefined => {
   return t?.ts;
 };
 
+const heardBy = (role: string) => (ms: readonly Msg[]): Heard[] =>
+  ms.flatMap((m): Heard[] => {
+    const ts = saidAt(role)(m);
+    return ts === undefined ? [] : [[ts, m.from, m.to]];
+  }).sort((a, b) => a[0] - b[0]).slice(-HEARD_MAX);
+/** 开口之后才进来的话才可能没读过: 回过话 = 读到了那里。 */
+const spokeBy = (role: string) => (ms: readonly Msg[]): number =>
+  ms.filter((m) => m.from === role).reduce((t, m) => Math.max(t, saidOf(m).ts), 0);
+
 /** 一个 role 参与的全部会话, 最近活动在前。群聊只列它**自己开过口**的 —— 住在里面
  *  (home) 或只是被人叫过一声却没答话的, 都不算参与; 私聊则有往来就在列。 */
 export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now: number): Conv[] => {
   // 会话列表讲的是"谁跟谁说过什么", ping 不是话: 条数与预览都不该被它顶掉。
   const msgs = all_.filter((m) => !isPing(m));
-  const heard = (ms: readonly Msg[]): Heard[] =>
-    ms.flatMap((m): Heard[] => {
-      const ts = saidAt(role)(m);
-      return ts === undefined ? [] : [[ts, m.from, m.to]];
-    }).sort((a, b) => a[0] - b[0]).slice(-HEARD_MAX);
-  // 开口之后才进来的话才可能没读过: 回过话 = 读到了那里。
-  const spoke = (ms: readonly Msg[]): number =>
-    ms.filter((m) => m.from === role).reduce((t, m) => Math.max(t, saidOf(m).ts), 0);
+  const heard = heardBy(role);
+  const spoke = spokeBy(role);
   const mine = talkOf(msgs, role);
   const keys = [...new Set(mine.filter((m) => !m.channel || m.from === role).map((m) => convKeyOf(m, role)))];
   return keys
@@ -343,7 +352,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
         return {
           key, kind: "wizard", name: dir.nameOf(peer), label: dir.labelOf(peer), base: "", peer,
           status: dir.status(peer, now),
-          ...glanceOr(ms, speakerPrefix(dir, role, [peer])), count: ms.length, heard: heard(ms), mine: spoke(ms), subs: [],
+          ...glanceOr(ms, speakerPrefix(dir, role, [peer])), count: ms.length, heard: heard(ms), mine: spoke(ms), subs: [], ...withJobs(ms),
         };
       }
       const base = key.slice(2);
@@ -358,7 +367,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
           return {
             role: r, name: dir.nameOf(r), label: dir.labelOf(r), count: pair.length, mine: spoke(pair),
             ...glanceOfTalk(all, role, dir, role, [r], base), status: dir.status(r, now),
-            whole: { count: talkOf(all, r).length, ...glanceOfTalk(all, role, dir, r, [], base) },
+            whole: { count: talkOf(all, r).length, ...glanceOfTalk(all, role, dir, r, [], base) }, ...withJobs(pair),
           };
         })
         // 成对的排前 (默认只列它们), 其余按它们自己的记录排 —— 截断时先丢与我无往来的。
@@ -368,10 +377,38 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
         key, kind: "group", base,
         name: dir.chatName(base) || (base.startsWith("user:") ? dir.nameOf(humanOf(base)) : base.replace(/^chat:/, "").slice(0, 10)),
         label: "💬",
-        ...glanceOr(all, speakerPrefix(dir, role)), count: all.length, heard: heard(all), mine: spoke(all), subs,
+        ...glanceOr(all, speakerPrefix(dir, role)), count: all.length, heard: heard(all), mine: spoke(all), subs, ...withJobs(all),
       };
     })
     .sort((a, b) => b.lastTs - a.lastTs);
+};
+
+// ── 工单 ─────────────────────────────────────────────────────────────
+// `j:<id>` 是一张工单的全部往来: 归在它名下的派活、各成员的答话、送回开单者的回执 —— 不分
+// 谁对谁, 也不按视角的 session 段裁 (成员各有各的 session)。开工 / 收工两行不是消息, 由
+// chat-http 按 facts 现画。
+export const jobOfKey = (key: string): string | undefined => (key.startsWith("j:") ? key.slice(2) : undefined);
+export const jobMessages = (msgs: readonly Msg[], id: string): Msg[] => msgs.filter((m) => m.turn.from?.job === id);
+/** 一组消息里出现过的工单号, 去重保序。 */
+export const jobsIn = (msgs: readonly Msg[]): string[] => [...new Set(msgs.map((m) => m.turn.from?.job ?? "").filter(Boolean))];
+const withJobs = (msgs: readonly Msg[]): { jobs?: string[] } => ((js) => (js.length ? { jobs: js } : {}))(jobsIn(msgs));
+
+/** 视角开的、或在里面的工单 —— 主区工单列表的一行, 数据与群 / 私聊同一套 (glance)。不进侧栏。 */
+export const jobConvsOf = (all_: readonly Msg[], role: string, dir: Directory, jobs: readonly WorldFactJob[]): Conv[] => {
+  const msgs = all_.filter((m) => !isPing(m));
+  return jobs
+    .filter((j) => j.owner === role || j.members.some((mm) => mm.target === role))
+    .map((j): Conv => {
+      const ms = jobMessages(msgs, j.id);
+      const g = glanceOr(ms, speakerPrefix(dir, role));
+      return {
+        key: `j:${j.id}`, kind: "job", name: j.title, label: "📋", base: j.base,
+        preview: g.preview, lastTs: Math.max(g.lastTs, j.closedAt ?? j.openedAt),
+        // 工单里的每句话同时也在某个群 / 私聊里, 未读只记在那一处 —— 两边各记一份, 读了一边另一边还亮着。
+        count: ms.length, heard: [], mine: 0, subs: [],
+        job: { id: j.id, owner: j.owner, status: j.status, ...jobProgress(j) },
+      };
+    });
 };
 
 /** 每个 role 对应的全部叶子项 —— 群里的成对子项 (它与某个 role 在那个群里有往来, 与 convsOf 的子项
@@ -394,6 +431,8 @@ export const chatKeysOf = (all_: readonly Msg[]): Record<string, string[]> => {
 /** 一个会话窗口里的消息。`withRole` 只对公开频道有意义: 当前 role 与它在这个频道里的往来。
  *  整个公开频道 (不带 withRole) 是频道里所有人说的话, 不是某个 role 的往来 —— 唯一不走 talkOf 的。 */
 export const convMessages = (msgs: readonly Msg[], role: string, key: string, withRole?: string): Msg[] => {
+  const job = jobOfKey(key);
+  if (job) return jobMessages(msgs, job);
   const t = talkArgs(role, key, withRole);
   return t ? talkOf(msgs, t.who, t.peers, t.chat) : msgs.filter((m) => m.channel === key.slice(2));
 };

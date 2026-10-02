@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- rolepage 工单页 (B3b ②③, 按人定的方向): 工单的一切都在对话区 —— 普通会话的顶栏列出这段往来里出现过的工单 (一张一枚, 标题 + 进度, 超过 3 张进「全部工单」); 工单页 (`j:<id>`) 按时间排开工框 (成员与各自状态)、归在工单名下的派活 / 答话 / 回执、收工框 (定论、交付物、结论), 顶栏可「‹ 回到」进工单前那段会话或进「全部工单」; 工单列表在主区, 进行中在前、已收工淡一档在后。侧栏只挂 📋 标记: 出现过工单的会话行、群下成对子项、关系图上经手工单的那条关系。看着一张工单时切到关系图, 只亮它的当事人与两端都是当事人的线。进度 (已落定 / 一共) 由 `world.jobProgress` 一处算; `/api/world` 的工单成员带定论与交付物, `/api/msgs` 带整窗出现过的工单号。
 - `tell_peer({chain:false})` / spawn·clone 带 task 时的 `chain:false` (B3b ③b): 在答上游派的活时顺手派出的旁支活 (测试、与上游无关的事) 不挂父 k —— 不 defer 给上游的那一份、它的回执也不带 reply-to 续回上游, 回执照常回发话方。默认仍链式; `tell_peer` 回包在挂上上游时多一项 `chained` 说明终句被挂住了。是不是为上游派的只有发话方知道, 所以是显式参数而不是按工单 / 文本推断。
 - 回执回归脚本 `scripts/receipt-regress/run.mjs` (B3b ①): 在 wizard 会话里跑, 生一个 haiku 根与各用例的 haiku 临时分身, 直接 POST daemon 驱动, 只按 `receipts.json` / `jobs.json` 的账和根 transcript 里的回执信封判定, 逐条打印 PASS/FAIL, 跑完收掉全部分身。覆盖: 三级链式冒泡、并发两子 reply-to、wait_peer 取走不重投、deadline 超时、pane 被杀 (dead)、NEED→re→done、工单 expect 计数、收工后迟到的回执、`chain:false` 旁支。改 receipts / jobs / peers 后必跑; 用例名作参数只跑那几条。
 - rolepage 待办托盘 (B3b ④): 名片下一小块「在飞 N」, 列出视角派出去还没落定的 (在等 → .x) 与派给它还没交的 (欠着 ← .x): 状态 (在干 / 卡在审批 · 停在哪个工具 / 反问待答 / 报错停了 / 挂起等子活)、工单号、派出多久; 卡住的排前并着色。只读; 数据与名册 / peek 的「在等 / 欠着」同一份 (`receipts.states()` → `WorldFacts.inflight`, svr 合并时按件去重)。
@@ -49,6 +50,7 @@
 - wizard 的上下文瘦身: charter 的出生名册只列写了职责的同群 wizard (至多 15 个, 其余报个数、指向 `wizard_roster`), 「我能做什么」改为每个工具一行「何时用」, 「编排」「说话」两节不再复述工具描述 —— charter ~5.1k → ~2.5k tok (管家 ~6.0k → ~3.4k)。工具描述不再教 `send_peer` / `wait_peer` (一律 `tell_peer` + 回执); `send_peer` 描述压成一行; `tell_peer` 只讲机制; `schedule_task` 只留何时用 / `when` 人话 / 默认新建 / 回念 `next`, gate 写法挪进任务文件头注释; 生 wizard 的 `model` 参数共用一句; graph 三件套、`list_claude_sessions`、`switch_claude_session`、`list_chats` 标为人侧/罕用。工具定义合计 ~20.4k → ~17.8k tok。CLAUDE.md 的 MCP 段与 `/help` 的过期措辞一并更正。
 
 ### Removed
+- rolepage 名片下的「在飞」待办托盘 (d4cd983) 与日程页的工单列表: 工单与在飞的活改由对话区的工单页 / 工单列表承担, 侧栏只留 📋 标记; 名片「📅 日程」的数字只算定时任务。
 - rolepage 用量条的累计耗时 (⏱️) 指标。
 
 ### Fixed
