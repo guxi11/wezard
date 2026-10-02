@@ -1,4 +1,5 @@
 // Daemon entry. Resident process — exits only on signal or fatal WS auth failure.
+import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { loadConfig } from "../shared/config.js";
 import { makeLogger } from "../shared/log.js";
@@ -1255,6 +1256,12 @@ const main = async (): Promise<void> => {
       return clipForCharter(readMemory(path), path);
     };
 
+    /** transcript 最后写入的时刻; 没有会话 / 读不到 = 0。 */
+    const lastTouched = (t: string): number => {
+      const p = m.sessionInfo(t)?.jsonlPath;
+      try { return p ? statSync(p).mtimeMs : 0; } catch { return 0; }
+    };
+
     /** 开局宪章。出生时的兄弟只是快照 —— 名册随时可查, 写进系统提示的那份只为了
      *  让它一睁眼就知道自己不是一个人在跑。 */
     const charterFor = (target: string, o: { parent?: string; forkOf?: string; inherited?: boolean; cwd?: string }): string =>
@@ -1267,7 +1274,12 @@ const main = async (): Promise<void> => {
         inherited: !!o.inherited,
         forkOf: o.forkOf ? briefOf(target, o.forkOf) : undefined,
         cwdUnconfirmed: m.cwdUnconfirmed(target, o.cwd),
-        siblings: m.chatTargets(baseOfKey(target)).filter((t) => t !== target).map((t) => briefOf(target, t)),
+        // 最近动过的排前面: 名册只点名前几个, 截掉的该是早就停了的那些。
+        siblings: m.chatTargets(baseOfKey(target))
+          .filter((t) => t !== target)
+          .map((t) => [t, lastTouched(t)] as const)
+          .sort((x, y) => y[1] - x[1])
+          .map(([t]) => briefOf(target, t)),
         memory: wizards.get(target)?.memory ?? [],
         chatMemory: sharedMemory("chat", baseOfKey(target)),
         workspaceMemory: (() => {

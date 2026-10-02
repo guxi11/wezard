@@ -246,7 +246,7 @@ const nameLine = (b: WizardBrief): string =>
  *  而宪章每一轮都在上下文里 —— 只值得给「找谁干什么」用得上的那几个占位置。 */
 const ROSTER_MAX = 15;
 
-/** 同群名册: 只列写了职责的 (职责是找人的依据), 至多 ROSTER_MAX 个; 与自己同工作区的
+/** 同群名册 (调用方按最近活跃排好序): 只列写了职责的 (职责是找人的依据), 至多 ROSTER_MAX 个; 与自己同工作区的
  *  不重复那条路径。其余 (没写职责的临时分身是常态) 只报个数, 指向 wizard_roster。 */
 const rosterLines = (self: WizardBrief, sibs: readonly WizardBrief[]): string[] => {
   const here = (b: WizardBrief): boolean => !b.cwd || b.cwd === self.cwd;
@@ -407,15 +407,16 @@ export const renderCharter = (a: CharterArgs): string => {
       "`wizard_roster` 找人: 谁在、在哪干、忙不忙 (带 `query` / `chat` / `cwd` 收窄, 别拉全表)",
       "`route_candidates` 拿不准一件活该转给哪个已有 wizard 时",
       "`peek_peer` 某个 wizard 在干嘛、卡在哪 · `read_chat` 群里 / 私聊里谁对谁说了什么",
-      "`tell_peer` 驱动另一个 wizard (派活、答它、叫它继续) —— 默认私聊, 它的结论会自动回执给你",
+      "`tell_peer` 驱动另一个 wizard (派活、答它、叫它继续) —— 默认私聊, 它的结论会自动回执给你; 对方正忙而你派的是一件新活 → `when:\"idle\"`, 否则两段话挤进同一个输入框",
       "`notify` 只是告诉**人**一件事, 不驱动谁",
       "`clone_wizard` 分身要共享我 (或 `from` 某个同伴) 已读的材料 · `spawn_wizard` 白板起步或要去别的目录 —— 要判断的给 opus, 跑腿的给 haiku",
-      "`stop_wizard` 活干完就收掉分身 (`interrupt` 只打断这一轮)",
+      "`stop_wizard` 活干完就收掉分身 (默认 `end` 回收 pane; `mode:\"interrupt\"` 只打断这一轮)",
       "`open_job` / `close_job` 一次派两个以上分身时开 / 收工单 · `list_jobs` 找回工单 id",
       "`wizard_whoami` 我的上下文用量与分身 · `wizard_identity` 改名 / 写职责 · `wizard_remember` 跨会话记忆 (`self` / `chat` / `workspace`)",
       "`wizard_handoff_self` 上下文快满 · `set_workspace` 换项目目录 · `set_model` 换模型",
       "`schedule_task` / `list_tasks` / `cancel_task` 到点自动执行的活",
-      "`wait_peer` 仅当这一轮非拿到答案不可 (平时等回执) · `name_chat` 给聊天起名",
+      "`wait_peer` 仅当这一轮非拿到答案不可 (平时等回执), 或要等一个不是你派活的 wizard 停下 · `name_chat` 给聊天起名",
+      "`run_agent_graph` (罕用) 仅当人明说「几个 wizard 互相迭代到收敛」",
     ]),
     "",
     "## 话是怎么到你这儿的",
