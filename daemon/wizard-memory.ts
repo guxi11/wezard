@@ -48,17 +48,19 @@ export interface MemoryProposal {
   cwd?: string;
 }
 
-/** 投一条提议; 一行一个 json, 追加写 —— 多个 wizard 并发投也不会互相覆盖。 */
-export const proposeMemory = (path: string, p: MemoryProposal): boolean => {
+/** 一行一个 json, 追加写 —— 多个写者并发也不会互相覆盖。失败回 false 不抛。 */
+const appendJsonl = (path: string, row: object): boolean => {
   try {
     mkdirSync(dirname(path), { recursive: true });
-    appendFileSync(path, `${JSON.stringify(p)}
-`);
+    appendFileSync(path, `${JSON.stringify(row)}\n`);
     return true;
   } catch {
     return false;
   }
 };
+
+/** 投一条提议。 */
+export const proposeMemory = (path: string, p: MemoryProposal): boolean => appendJsonl(path, p);
 
 /** 宪章里每份共享记忆的字数上限。超了只截头并指路 —— 压短是整理者的活, 不是渲染器的。 */
 export const CHARTER_MEMORY_MAX = 4000;
@@ -101,3 +103,22 @@ export const proposedCwds = (stateDir: string): string[] => {
 /** 一份工作区 md 对应的 cwd: 在已知的那些 cwd 里找正向算出来正好是它的; 不是工作区 md 就 undefined。 */
 export const cwdOfMd = (stateDir: string, md: string, cwds: readonly string[]): string | undefined =>
   cwds.find((c) => memoryPath(stateDir, "workspace", c) === md);
+
+// ── 情景记忆 ─────────────────────────────────────────────────────────
+// 交接简报是一个 wizard 对一段工作最好的压缩, 用完就只活在新会话的第一条消息里。
+// 按名字留档 (`memory/episodes/<name>.jsonl`, 只追加): 名字是 wizard 的身份, 换会话不换名。
+
+export interface Episode {
+  at: number;
+  kind: "handoff";
+  name: string;
+  /** 交接前 / 后的 sessionId —— 回头翻 transcript 的锚。 */
+  sid: string;
+  nextSid: string;
+  text: string;
+}
+
+export const episodePath = (stateDir: string, name: string): string =>
+  join(memoryRoot(stateDir), "episodes", `${fileKey(name)}.jsonl`);
+
+export const appendEpisode = (path: string, e: Episode): boolean => appendJsonl(path, e);

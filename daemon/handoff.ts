@@ -81,6 +81,8 @@ export interface HandoffDeps {
   notify: (target: string, text: string) => void;
   log: Logger;
   store?: JsonMap<Pending>;
+  /** 简报贴回成功后把它留档 (情景记忆): 新会话第一条消息之外, 简报原本无处可寻。 */
+  archive?: (e: { target: string; mode: Pending["mode"]; at: number; sid: string; nextSid: string; brief: string }) => void;
 }
 
 export type HandoffResult = { ok: true; brief: string } | { ok: false; status: number; reason: string; brief?: string };
@@ -167,6 +169,9 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
         drop(p);
         deps.log.info({ mod: "handoff", target: p.target, ok: r.ok, reason: r.reason, owe: p.owe?.length ?? 0 }, "handoff: 简报已贴回");
         if (!r.ok) return fail(p, 502, `handoff carry inject failed: ${r.reason}`);
+        try {
+          deps.archive?.({ target: p.target, mode: p.mode, at: p.at, sid: p.sid, nextSid: deps.sessionId(p.target), brief: p.brief ?? "" });
+        } catch (e) { deps.log.warn({ mod: "handoff", target: p.target, err: (e as Error).message }, "handoff: 简报留档失败"); }
         return { ok: true, brief: p.brief ?? "" };
       }
     }
