@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- 回执回归脚本 `scripts/receipt-regress/run.mjs` (B3b ①): 在 wizard 会话里跑, 生一个 haiku 根与各用例的 haiku 临时分身, 直接 POST daemon 驱动, 只按 `receipts.json` / `jobs.json` 的账和根 transcript 里的回执信封判定, 逐条打印 PASS/FAIL, 跑完收掉全部分身。覆盖: 三级链式冒泡、并发两子 reply-to、wait_peer 取走不重投、deadline 超时、pane 被杀 (dead)、NEED→re→done、工单 expect 计数、收工后迟到的回执、`chain:false` 旁支。改 receipts / jobs / peers 后必跑; 用例名作参数只跑那几条。
 - rolepage 待办托盘 (B3b ④): 名片下一小块「在飞 N」, 列出视角派出去还没落定的 (在等 → .x) 与派给它还没交的 (欠着 ← .x): 状态 (在干 / 卡在审批 · 停在哪个工具 / 反问待答 / 报错停了 / 挂起等子活)、工单号、派出多久; 卡住的排前并着色。只读; 数据与名册 / peek 的「在等 / 欠着」同一份 (`receipts.states()` → `WorldFacts.inflight`, svr 合并时按件去重)。
 - rolepage 回执 chip (B3b ①): 回执那一轮的消息名字行上挂「↩ 回执 · 已交 / 反问 / 超时 … · J… 第 i/n 份」, 按定论着色; 点它跳回派活那句 (同一个活号, 窗口里没有就整窗重取再找)。turn 记录的 `from` 补上活号 `turn`、回执的 `status` 与工单 `done` / `total`; 继承上下文的 `clone_wizard({task})` 第一件活也记上出处 (此前没有 `from`, 工单与回执都找不回它)。
 - rolepage 用量条显示估算费用 (💰): 每轮按它的模型单价计 input / output / 缓存写 / 缓存读再加总; 单价是 LiteLLM `model_prices_and_context_window.json` 的快照 (`shared/model-prices.ts`, `node scripts/update-prices.mjs` 重新生成), 认得 bedrock / 网关的各种写法 (`[1m]`、`us.anthropic.`、`claude-4.7-opus`、带日期)。表里认不出的模型不猜价, 费用前加「≥」并在悬停里写明有几次请求未计入。
