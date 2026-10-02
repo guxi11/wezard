@@ -4516,6 +4516,18 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return undefined;
   };
 
+  // A resume / --fork-session copy is seeded with the origin's history, uuids
+  // intact — so "its first user line is ours" is pane-certain evidence that a
+  // new jsonl is OUR fork. "Has any user content" is not: a sibling spawned in
+  // the same cwd a moment earlier also has some, and its sid isn't claimed yet
+  // (attach lands after the spawn) — that is how a respawned .evolve got bound
+  // to a haiku sibling's fresh transcript and read empty from then on.
+  const forkOf = (origin: string): ((path: string) => boolean) => {
+    const seed = firstUserUuid(origin);
+    // origin 还没有 user 行 (没说过话就死了 / 刚开的父亲): 没有可比的种子, 退回旧判据。
+    return seed === undefined ? (path) => firstUserUuid(path) !== undefined : (path) => firstUserUuid(path) === seed;
+  };
+
   // startOffset semantics differ by caller: /clear passes 0 to replay the
   // freshly-rotated jsonl (only holds the /clear line + new content); resume
   // migration omits it (→ tail from EOF) because the fork file is seeded with
@@ -5018,15 +5030,18 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     projectDir: string,
     baseline: Set<string>,
     claimed: Set<string>,
+    origin: string,
   ): Promise<{ sessionId: string; jsonlPath: string } | undefined> => {
+    const ours = forkOf(origin);
     const deadline = Date.now() + FORK_WAIT_MS;
     while (Date.now() < deadline) {
       const born = [...listJsonls(projectDir)]
         .filter((n) => !baseline.has(n) && !claimed.has(n.replace(/\.jsonl$/, "")))
         .map((n) => ({ n, path: join(projectDir, n) }))
         // 种子化的 fork 一落地就带着父亲的 user 行 —— 空文件 (刚 touch 出来的)
-        // 还不能认, 认早了 tail 会从一个还没写完的复制过程中间开始读。
-        .filter((c) => firstUserUuid(c.path) !== undefined)
+        // 还不能认, 认早了 tail 会从一个还没写完的复制过程中间开始读; 别的 pane
+        // 同时新开的会话也有 user 行, 只认首行 uuid 与父亲相同的那个。
+        .filter((c) => ours(c.path))
         .sort((x, y) => mtimeOf(y.path) - mtimeOf(x.path));
       const hit = born[0];
       if (hit) return { sessionId: hit.n.replace(/\.jsonl$/, ""), jsonlPath: hit.path };
@@ -5096,7 +5111,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       await runTmux(["kill-pane", "-t", r.tmuxPane ?? ""]);
       return { ok: false, reason: `分身开场白注入失败: ${boot.reason ?? "unknown"}`, inherited: false };
     }
-    const fork = await awaitFork(projectDir, baseline, sidsClaimedByOthers(args.target));
+    const fork = await awaitFork(projectDir, baseline, sidsClaimedByOthers(args.target), parent.jsonlPath);
     // 等不到分叉就必须收手: 此刻唯一已知的 sid 是父亲的, 认下去两个 target 会指向
     // 同一个会话 (attach 也会正当地拒绝)。留一个孤儿 pane 比留一条错绑更好收拾 ——
     // 所以连 pane 一起杀掉, 调用方拿到的是一个干净的失败。
@@ -6043,7 +6058,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         a.tmuxSession = r.tmuxSession ?? a.tmuxSession;
         if (r.cwd) a.runningCwd = r.cwd;
         deps.store.set(target, { sessionId: sid, jsonlPath: a.jsonlPath, tmuxSession: a.tmuxSession, tmuxPane: a.tmuxPane, cwd: a.runningCwd || undefined, model: a.model || undefined, pendingCwd: a.pendingCwd || undefined });
-        startMigrationWatcher(a, resumeBaseline, (p) => firstUserUuid(p) !== undefined);
+        startMigrationWatcher(a, resumeBaseline, forkOf(a.jsonlPath));
       }
       // freshSpawn: true — the pane was just minted by /mirror/spawn, the TUI
       // is still warming up so the verifier in injectViaTmux needs the slack.
@@ -6481,7 +6496,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
             // re-dump it). If --resume happens to keep the same jsonl, no new
             // file appears, the watcher times out harmlessly, and the existing
             // tail keeps working — safe under either behavior.
-            if (resumeBaseline) startMigrationWatcher(a, resumeBaseline, (p) => firstUserUuid(p) !== undefined);
+            if (resumeBaseline) startMigrationWatcher(a, resumeBaseline, forkOf(a.jsonlPath));
           } else {
             // Drop only the stale pane id; keep tmuxSession (if any) so the
             // store still reflects "user wanted tmux" — next turn retries.
