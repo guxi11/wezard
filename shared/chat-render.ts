@@ -14,6 +14,7 @@
 // 用量条 (.usage) 是同一个组件的两个挂载点, 跟着「这本账是谁的」走: wizard 的总账
 // 属于整页 (#pg-usage, 横跨两栏的页脚); 人自己不跑轮次, 账属于它点开的那个窗口
 // (#ch-usage, 右栏底)。
+import { createHash } from "node:crypto";
 import { SHARED_CSS, TURN_CSS } from "./detail-render.js";
 import { readAsset, type Asset } from "./web-assets.js";
 
@@ -21,13 +22,17 @@ import { readAsset, type Asset } from "./web-assets.js";
 const etagOf = (parts: readonly (Asset | undefined)[]): string =>
   `W/"${parts.map((a) => a?.etag.slice(3, -1) ?? "-").join("+")}"`;
 
+/** 编进代码里的那几片样式 (SHARED_CSS / TURN_CSS) 没有文件 mtime: 按内容哈希算它那一片的 ETag ——
+ *  只改了它们时 ETag 也得变, 否则浏览器拿 304 一直用旧样式 (改 detail-render 的 CSS 在页面上不生效)。 */
+const BUILTIN_CSS: Asset = ((body) => ({ body, type: "text/css", etag: `W/"${createHash("sha1").update(body).digest("hex").slice(0, 12)}"` }))(`${SHARED_CSS}${TURN_CSS}`);
+
 /** /chat/app.css = 代码高亮主题 + 详情页共用样式 + 本视图外壳样式。 */
 export const chatStyles = (): Asset => {
   const [theme, own] = ["hljs-github.min.css", "chat.css"].map(readAsset);
   return {
-    body: `${theme?.body ?? ""}${SHARED_CSS}${TURN_CSS}${own?.body ?? ""}`,
+    body: `${theme?.body ?? ""}${BUILTIN_CSS.body}${own?.body ?? ""}`,
     type: "text/css; charset=utf-8",
-    etag: etagOf([theme, own]),
+    etag: etagOf([theme, BUILTIN_CSS, own]),
   };
 };
 

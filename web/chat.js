@@ -196,15 +196,18 @@
     var m = {};
     scope.querySelectorAll('[data-key]').forEach(function (b) {
       var k = b.getAttribute('data-key');
-      b.querySelectorAll('details').forEach(function (d, i) { m[k + '#' + i] = d.open; });
+      b.querySelectorAll('details').forEach(function (d, i) { m[openKey(k, d, i)] = d.open; });
     });
     return m;
   };
+  // 展开态按位置记; 移交行单独记一格 —— 它是后来才挂上去的 (公开移交从气泡变成可开合),
+  // 跟着位置走会把旁边那个框的开合套到它身上, 默认展开的公开移交被收起、箭头朝右。
+  var openKey = function (k, d, i) { return k + '#' + (d.classList.contains('handoff') ? 'ho' : i); };
   var restoreOpen = function (scope, m) {
     scope.querySelectorAll('[data-key]').forEach(function (b) {
       var k = b.getAttribute('data-key');
       b.querySelectorAll('details').forEach(function (d, i) {
-        var v = m[k + '#' + i]; if (v !== undefined) d.open = v;
+        var v = m[openKey(k, d, i)]; if (v !== undefined) d.open = v;
       });
     });
   };
