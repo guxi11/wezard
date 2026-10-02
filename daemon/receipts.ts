@@ -131,6 +131,10 @@ export interface ReceiptDeps {
   handedOff?: (target: string) => Promise<void>;
   /** 此刻停在审批卡 / 本地弹窗上 (闲着却悬着工具调用) —— 只给观察面用。 */
   parkedNow?: (target: string) => boolean;
+  /** 工单成员这份答复不合工单的验收 → 理由; 合格 / 不在工单 = undefined (见 jobs.rejectReason)。 */
+  accept?: (job: string, body: string) => string | undefined;
+  /** 以发话方的名义把同一件活打回一次 (同件号续问, 私聊)。返回是否注入成功。 */
+  rebound?: (x: { from: string; to: string; turn: string; legs: number; channel: string }, why: string) => Promise<boolean>;
 }
 
 export interface Tell {
@@ -147,6 +151,9 @@ export interface Tell {
   deadlineAt?: number;
   /** 发话方那一轮的父 k (见 parentOf) —— 这份回执回来那一轮的终句据此续回。 */
   k?: ParentK;
+  /** 守护进程因为不合工单验收打回过一次, 这是被打回的那段原文 —— 再交上来的照收, 不再打回;
+   *  打回那一句还没落盘时按件号会先定位到原来的问话, 取到的这段原文不算答案。 */
+  bounced?: string;
 }
 
 /** 这一句该挂的件号: 新活领一个新的; `re` 续问沿用那件活的件号、工单与频道。 */
@@ -343,7 +350,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     const asked = (): boolean => s.outcome?.status === "need";
     const reply = (): PeerReply | undefined => deps.replyFor(s.to, deps.nameOf(s.from), s.at, s.turn);
     const news = (r: PeerReply | undefined): boolean =>
-      !!r?.text.trim() && !(r.error && reported()) && !(asked() && r.text === s.outcome!.body);
+      !!r?.text.trim() && !(r.error && reported()) && !(asked() && r.text === s.outcome!.body) && r.text !== s.bounced;
     const failed = (status: ReceiptStatus): Outcome => ({ status, body: failure(s, status) });
     for (let fruitless = 0; fruitless < MAX_FRUITLESS; ) {
       if (Date.now() >= deadline()) return failed("timeout");
@@ -373,7 +380,9 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       // 报过 error / NEED 之后它停着是在等人续跑或答复, 不算扑空, 守到期限。
       if (!reported() && !asked() && (got !== undefined || wr.quiet)) fruitless++;
     }
-    return failed("silent");
+    // 打回过的那份: 它原样再交一遍 (按原文排除, 看不出是新的), 或打回那句因 reload 没注入
+    // 进去 —— 都扑空到这里。手上的原文就是它的交代, 照收, 别报 silent。
+    return s.bounced ? { status: "done", body: s.bounced } : failed("silent");
   };
 
   /** 失败回执的正文: 守护进程的一句说明 + 对方最后一句 (给发话方一点线索)。 */
@@ -411,6 +420,19 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       s.deferred = true;
       save(s);
       lg.info({ children: children(s).map((c) => deps.nameOf(c.to)) }, "receipt: 答话方又派了活, 等子回执回来再续");
+      return;
+    }
+    // 工单验收: 交了个空 RESULT (或缺约定的 ARTIFACT) —— 不投、不计数, 以发话方的名义同件号
+    // 打回一次; 再交上来的照收。新登记顶掉这一份 (它随即 stale), 守的是打回那一句的答案。
+    const why = out.status === "done" && s.job && !s.bounced ? deps.accept?.(s.job, out.body) : undefined;
+    if (why && deps.rebound) {
+      const at = Date.now();
+      const legs = (s.legs ?? 1) + 1;
+      register({ from: s.from, to: s.to, channel: s.channel, job: s.job, at, turn: s.turn, legs, deadlineAt: deadlineOf(at), ...(s.k ? { k: s.k } : {}), bounced: out.body });
+      const ok = await deps.rebound({ from: s.from, to: s.to, turn: s.turn!, legs, channel: s.channel }, why);
+      lg.info({ why, ok }, "receipt: 不合工单验收, 打回一次");
+      // 打回没注入进去: 原来那份照常交上去 (钉成新 slot 的答案, 它的 watcher 直接拿去投)。
+      if (!ok) { const n = slots.get(keyOfPair(s.from, s.to)); if (n?.bounced && n.turn === s.turn) { n.answer = out.body; save(n); } }
       return;
     }
     const final = isTerminal(out.status);
@@ -478,32 +500,34 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     if (!s.delivered) release(s);
   };
 
+  const register = (tell: Tell, watchIt = true): { at: number; turn: string } => {
+    const k = keyOfPair(tell.from, tell.to);
+    const at = tell.at ?? Date.now();
+    // 顶掉一份还没落定的工单活、自己又没带工单: 继承那张工单 —— 旧那份不会再投了,
+    // 这一句的答案就是那个成员的交代; 不继承它就永远不计 done, 工单齐不了。
+    const prev = slots.get(k);
+    const job = tell.job || (prev?.job && !prev.resolved ? prev.job : "");
+    const s: Slot = {
+      ...tell,
+      job,
+      at,
+      turn: tell.turn ?? newTurn(),
+      legs: tell.legs ?? 1,
+      deadlineAt: tell.deadlineAt ?? deadlineOf(at),
+      gen: (slots.get(k)?.gen ?? 0) + 1,
+      claimed: false,
+      delivered: false,
+      resolved: false,
+    };
+    slots.set(k, s);
+    if (watchIt) arm(s);
+    else { s.claimed = true; s.resolved = true; s.settled = true; } // 不守 = 这一份没人会投
+    save(s);
+    return { at: s.at, turn: s.turn! };
+  };
+
   return {
-    register: (tell, watchIt = true) => {
-      const k = keyOfPair(tell.from, tell.to);
-      const at = tell.at ?? Date.now();
-      // 顶掉一份还没落定的工单活、自己又没带工单: 继承那张工单 —— 旧那份不会再投了,
-      // 这一句的答案就是那个成员的交代; 不继承它就永远不计 done, 工单齐不了。
-      const prev = slots.get(k);
-      const job = tell.job || (prev?.job && !prev.resolved ? prev.job : "");
-      const s: Slot = {
-        ...tell,
-        job,
-        at,
-        turn: tell.turn ?? newTurn(),
-        legs: tell.legs ?? 1,
-        deadlineAt: tell.deadlineAt ?? deadlineOf(at),
-        gen: (slots.get(k)?.gen ?? 0) + 1,
-        claimed: false,
-        delivered: false,
-        resolved: false,
-      };
-      slots.set(k, s);
-      if (watchIt) arm(s);
-      else { s.claimed = true; s.resolved = true; s.settled = true; } // 不守 = 这一份没人会投
-      save(s);
-      return { at: s.at, turn: s.turn! };
-    },
+    register,
     prepare: (from, to, re) => {
       const want = re?.replace(/[`\s]/g, "");
       const s = want ? slots.get(keyOfPair(from, to)) : undefined;

@@ -72,7 +72,7 @@ import {
   type WizardRecord,
 } from "./wizard.js";
 import { bindNoticeBox, createNoticeBox, chatAudience } from "./notices.js";
-import { loadJobStore, jobEpisode, JOB_MEMBER_MAX } from "./jobs.js";
+import { loadJobStore, jobEpisode, rejectReason, ACCEPTS, JOB_MEMBER_MAX, type Accept } from "./jobs.js";
 import { cacheTtlSec, clipMiddle, contextFiles, firstStamp, parseClosing, lastContextTokens, lastExchange, lastModel, openingOf, replyClosedBefore, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { keepalivePingSigs } from "../shared/keepalive.js";
 import { expandHome } from "../shared/paths.js";
@@ -658,6 +658,12 @@ const main = async (): Promise<void> => {
       jobTally: (id) => jobs.tally(id),
       parkedNow: m.parkedNow,
       settleJob: (id, target, outcome, artifacts) => { jobs.settle(id, target, outcome, artifacts); },
+      accept: (id, body) => { const j = jobs.get(id); return j?.status === "open" ? rejectReason(j.accept ?? "result", parseClosing(body)) : undefined; },
+      rebound: async (x, why) => (await m.injectText(x.to, `（守护进程代 ${displayName(x.from)} 打回一次: 这件活是工单里的一份, 你的回复${why}。请按约定收口 —— 末尾一行 \`RESULT: <结论>\`, 交付了文件每个加一行 \`ARTIFACT: <路径> — 一句话\`; 真缺信息就 \`NEED: <问题>\`。）`, undefined, {
+        from: { kind: "peer", from: x.from, turn: x.turn },
+        channel: x.channel,
+        envelope: envelopeFor(x.from, x.channel, { turn: x.turn, legs: x.legs, re: true }),
+      })).ok,
       untilIdle: m.untilIdle,
       paneLive: m.paneLive,
       nameOf: displayName,
@@ -1979,7 +1985,7 @@ const main = async (): Promise<void> => {
     http.register("POST /jobs/open", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { title?: string; plan?: string; expect?: number; maxTurns?: number };
+      const b = body as { title?: string; plan?: string; expect?: number; maxTurns?: number; accept?: string };
       const title = (b.title ?? "").toString().trim();
       const expect = Math.min(JOB_MEMBER_MAX, Math.max(0, Math.floor(Number(b.expect) || 0)));
       if (!title) { json(res, 400, { ok: false, reason: "title required —— 一句话说清这个工单要干成什么" }); return; }
@@ -1987,7 +1993,8 @@ const main = async (): Promise<void> => {
       const maxTurns = Math.min(200, Math.max(0, Math.floor(Number(b.maxTurns) || 0)));
       const plan = (b.plan ?? "").toString().trim();
       // 不出群气泡: 工单是私下的过程, 人看到的只有发起者那一轮的最终回复。
-      const job = jobs.open(base, self, title, { ...(plan ? { plan } : {}), ...(expect ? { expect } : {}), ...(maxTurns ? { maxTurns } : {}) });
+      const accept = ACCEPTS.find((x) => x === b.accept) as Accept | undefined;
+      const job = jobs.open(base, self, title, { ...(plan ? { plan } : {}), ...(accept ? { accept } : {}), ...(expect ? { expect } : {}), ...(maxTurns ? { maxTurns } : {}) });
       json(res, 200, {
         ok: true,
         job: job.id,

@@ -19,9 +19,22 @@
 import { randomUUID } from "node:crypto";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import type { Terminal } from "../shared/turn-state.js";
+import type { Closing } from "./peers.js";
 import type { JobEpisode } from "./wizard-memory.js";
 
 export interface Artifact { path: string; note: string }
+
+/** 成员交差的验收: `result` (默认) = 要有非空的 `RESULT:`; `artifact` = 还要列出 `ARTIFACT:`;
+ *  `none` = 不验。不合格的那一份由守护进程打回一次 (见 receipts.ts)。 */
+export type Accept = "result" | "artifact" | "none";
+export const ACCEPTS: readonly Accept[] = ["result", "artifact", "none"];
+
+/** 这份答复不合格的理由; 合格 = undefined。 */
+export const rejectReason = (accept: Accept, c: Closing): string | undefined =>
+  accept === "none" ? undefined
+    : c.kind !== "result" || !c.text.trim() ? "没有 `RESULT:` 收口 (或 RESULT 后面是空的)"
+      : accept === "artifact" && !c.artifacts.length ? "没有列出 `ARTIFACT:` 交付物"
+        : undefined;
 
 export interface JobMember {
   target: string;
@@ -46,6 +59,8 @@ export interface JobRecord {
   title: string;
   /** 开工时说的计划 (分几路、各干什么) —— 只进账本, 给工单页读。 */
   plan?: string;
+  /** 成员交差的验收 (缺省 = result)。 */
+  accept?: Accept;
   /** 开工时说好要几份 —— 分身还没派齐时「一共几份」的下限。 */
   expect?: number;
   /** 派活次数的预算 (每次带这张工单的 tell_peer / 带 task 的 spawn 记一次, 续问也算) ——
@@ -61,7 +76,7 @@ export interface JobRecord {
 }
 
 export interface JobStore {
-  open: (base: string, owner: string, title: string, opts?: { plan?: string; expect?: number; maxTurns?: number }) => JobRecord;
+  open: (base: string, owner: string, title: string, opts?: { plan?: string; expect?: number; maxTurns?: number; accept?: Accept }) => JobRecord;
   /** 记一次派活; 返回记完之后的用量。 */
   spend: (id: string) => { turns: number; maxTurns?: number } | undefined;
   get: (id: string) => JobRecord | undefined;
@@ -100,9 +115,9 @@ const dropStale = (map: Record<string, JobRecord>): Record<string, JobRecord> =>
 export const loadJobStore = (filePath: string): JobStore => {
   const db = loadJsonMap<JobRecord>(filePath, dropStale);
   return {
-    open: (base, owner, title, { plan, expect, maxTurns } = {}) => {
+    open: (base, owner, title, { plan, expect, maxTurns, accept } = {}) => {
       const id = newId();
-      return db.set(id, { id, base, owner, title, ...(plan ? { plan } : {}), ...(expect ? { expect } : {}), ...(maxTurns ? { maxTurns, turns: 0 } : {}), members: [], status: "open", openedAt: Date.now() });
+      return db.set(id, { id, base, owner, title, ...(plan ? { plan } : {}), ...(accept && accept !== "result" ? { accept } : {}), ...(expect ? { expect } : {}), ...(maxTurns ? { maxTurns, turns: 0 } : {}), members: [], status: "open", openedAt: Date.now() });
     },
     spend: (id) => {
       const j = db.get(id);

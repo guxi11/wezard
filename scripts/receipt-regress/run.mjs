@@ -5,7 +5,7 @@
 //   node scripts/receipt-regress/run.mjs chain need # 只跑这几条
 //
 // 必须在一个 wizard 会话里跑 (要 CLAUDE_CODE_SESSION_ID / TMUX_PANE 认出发起者)。它先生一个
-// haiku 根 `rr-root` (发起者的分身), 每条用例再由根生 haiku 临时分身、直接 POST daemon 驱动
+// haiku 根 `rr-root-<后缀>` (发起者的分身), 每条用例再由根生 haiku 临时分身、直接 POST daemon 驱动
 // —— 不经 MCP, 所以不受「本会话的 MCP 进程是旧代码」影响。判定只读守护进程落的账 (receipts.json /
 // jobs.json) 和根的 transcript 里收到的回执信封, 不信分身自己说了什么。跑完 (含失败 / Ctrl-C)
 // 把生的分身全部收掉。
@@ -24,14 +24,19 @@ const TOKEN = (() => { try { return readFileSync(join(homedir(), ".wezard", "dae
 // receipts.json / jobs.json 在 ~/.wezard 下 (WEZARD_STATE_DIR 是 hook 的另一处目录, 不是它)。
 const STATE = process.env.RR_STATE_DIR ?? join(homedir(), ".wezard");
 const ME = { sessionId: process.env.CLAUDE_CODE_SESSION_ID ?? "", tmuxPane: process.env.TMUX_PANE ?? "" };
-const MAX_KIDS = 7; // 根名下同时活着的分身 (cloneMax 默认 8, 留一个余量)
+const MAX_KIDS = 7;
+// 每次运行的名字后缀: 几个 wizard 可能同时在跑这个脚本 (改 receipts 的都要跑), 名字全局唯一,
+// 不带后缀就互相撞名、甚至收掉对方的分身。用例里写的是逻辑名 (`rr-a`), 在边界上换成真名。
+const RUN = randomBytes(2).toString("hex");
+const real = (x) => `${x}-${RUN}`; // 根名下同时活着的分身 (cloneMax 默认 8, 留一个余量)
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nonce = () => randomBytes(3).toString("hex");
-// 别的 wizard 随时会 reload daemon: 连不上 / 被断开就等它回来 (最多 2 分钟), 回执登记落盘、会续守。
+// 别的 wizard 随时会 reload daemon: 连不上就等它回来 (最多 2 分钟), 回执登记落盘、会续守。只在
+// 连接被拒 (请求没送到) 时重试 —— 送到了再断的不重发: spawn / tell 不是幂等的, 重发会生出第二个分身。
 const post = async (route, body, tries = 60) => {
   const r = await fetch(DAEMON + route, { method: "POST", headers: { "content-type": "application/json", "x-wezard-token": TOKEN }, body: JSON.stringify(body) })
-    .catch((e) => (tries > 1 ? undefined : Promise.reject(e)));
+    .catch((e) => (tries > 1 && e.cause?.code === "ECONNREFUSED" ? undefined : Promise.reject(e)));
   if (!r) return sleep(2000).then(() => post(route, body, tries - 1));
   return r.json().catch(() => ({ ok: false, reason: `HTTP ${r.status}` }));
 };
@@ -65,7 +70,7 @@ const receiptsIn = async (target, fromName) => {
   });
   return texts.flatMap((t) => [...t.matchAll(/<system-reminder ([^>]*)>([\s\S]*?)<\/system-reminder>/g)])
     .map((m) => ({ attrs: Object.fromEntries([...m[1].matchAll(/([\w-]+)="([^"]*)"/g)].map((a) => [a[1], a[2]])), body: m[2] }))
-    .filter((r) => r.attrs.wezard === "envelope" && r.attrs.receipt === "1" && (!fromName || r.attrs.from === `.${fromName}`));
+    .filter((r) => r.attrs.wezard === "envelope" && r.attrs.receipt === "1" && (!fromName || r.attrs.from === `.${real(fromName)}`));
 };
 
 /** daemon.log 里 `since` 之后满足 `pred` 的那一行 (json)。 */
@@ -83,12 +88,12 @@ let root; // { target, name }
 const kids = new Map(); // name → target
 const SLEEP = (sec) => `先用 Bash **前台**执行 \`python3 -c "import time; time.sleep(${sec})"\` (不要 run_in_background, 不要用 sleep 命令)`;
 const TELL = (name, text, extra = "") =>
-  `用 wezard 的 tell_peer 工具 (先 ToolSearch 搜 "tell_peer" 加载) 发给 name "${name}"${extra}, text 原样是下面 <<< >>> 之间的内容:\n<<<\n${text}\n>>>`;
+  `用 wezard 的 tell_peer 工具 (先 ToolSearch 搜 "tell_peer" 加载) 发给 name "${real(name)}"${extra}, text 原样是下面 <<< >>> 之间的内容:\n<<<\n${text}\n>>>`;
 
 // 生分身串行: 同一 cwd 里同时起几个会话, daemon 认新 sid 时会认错 (「sessionId … already bound」)。
 let spawning = Promise.resolve();
 const spawnOnce = async (name, extra) => {
-  const r = await post("/wizard/clone", { target: root.target, name, inherit: false, model: "haiku", keepalive: false, description: "receipt-regress 临时分身", ...extra });
+  const r = await post("/wizard/clone", { target: root.target, name: real(name), inherit: false, model: "haiku", keepalive: false, description: "receipt-regress 临时分身", ...extra });
   if (r.ok) kids.set(name, r.target);
   return r;
 };
@@ -104,10 +109,10 @@ const spawn = (name, extra = {}) => {
 };
 const stop = async (name) => {
   if (!kids.has(name)) return;
-  await post("/wizard/stop", { target: root.target, name, mode: "end", forget: true });
+  await post("/wizard/stop", { target: root.target, name: real(name), mode: "end", forget: true });
   kids.delete(name);
 };
-const tell = (to, text, extra = {}) => post("/peers/tell", { target: root.target, name: to, text, priority: "now", ...extra });
+const tell = (to, text, extra = {}) => post("/peers/tell", { target: root.target, name: real(to), text, priority: "now", ...extra });
 /** 根 → `to` 那一份落定 (settled) 为止。 */
 const settledSlot = (to, ms) => until(() => { const s = slotOf(root.target, kids.get(to)); return s?.settled && s; }, ms);
 
@@ -122,6 +127,9 @@ const cases = {
     const a = `${TELL("rr-b", b)}\n发完立刻结束这一轮, 只回「已派」。之后收到 rr-b 的回执, 最后一行原样写它的 RESULT 行。`;
     await tell("rr-a", a);
     const s = await settledSlot("rr-a", 8 * 60_000);
+    // haiku 偶尔先答「已派」收了这一轮、下一轮才真派 —— 那件活就不挂在根的这件下面, 是分身没照做。
+    const ab = slotOf(kids.get("rr-a"), kids.get("rr-b"));
+    if (s && !s.outcome?.body.includes(`chain-${n}`) && ab?.k?.from !== root.target) return { pass: false, why: "rr-a 没在答根的那一轮里派活 (haiku 没照做), 重跑这一条" };
     const got = await receiptsIn(root.target, "rr-a");
     return {
       pass: !!s && s.outcome?.status === "done" && s.outcome.body.includes(`chain-${n}`) && got.length === 1,
@@ -147,7 +155,7 @@ const cases = {
     const got = await receiptsIn(root.target, "rr-p");
     // 子活偶尔先 NEED 反问一次 (中途回执, 不算定论), 只数定论那两份。
     const atP = [...(await receiptsIn(kids.get("rr-p"), "rr-q1")), ...(await receiptsIn(kids.get("rr-p"), "rr-q2"))].filter((r) => r.attrs.status !== "need");
-    const routed = atP.filter((r) => r.attrs["reply-to"] === ".rr-root").length;
+    const routed = atP.filter((r) => r.attrs["reply-to"] === `.${root.name}`).length;
     const body = s?.outcome?.body ?? "";
     return {
       pass: s?.outcome?.status === "done" && body.includes(`q1-${n}`) && body.includes(`q2-${n}`) && got.length === 1 && atP.length === 2 && routed === 1,
@@ -161,7 +169,7 @@ const cases = {
     await spawn("rr-x");
     await tell("rr-x", `${SLEEP(20)}, 然后回复一行: RESULT: wait-${n}`);
     await sleep(6000);
-    const w = await post("/peers/wait", { target: root.target, name: "rr-x", timeoutSec: 180 });
+    const w = await post("/peers/wait", { target: root.target, name: real("rr-x"), timeoutSec: 180 });
     await sleep(30_000);
     const got = await receiptsIn(root.target, "rr-x");
     const text = `${w.result ?? ""}${w.lastText ?? ""}`;
@@ -189,7 +197,7 @@ const cases = {
     await spawn("rr-z");
     await tell("rr-z", `${SLEEP(120)}, 然后回复一行: RESULT: never`);
     await sleep(10_000);
-    const pane = tmuxPaneOf("rr-z");
+    const pane = tmuxPaneOf(real("rr-z"));
     if (!pane) return { pass: false, why: "找不到 rr-z 的 tmux pane" };
     execFileSync("tmux", ["kill-pane", "-t", pane]);
     const t0 = Date.now();
@@ -262,6 +270,22 @@ const cases = {
     };
   } },
 
+  // 工单验收 (B4 ⑦): 成员第一次交了没有 RESULT 的答复 → 守护进程同件号打回一次, 那份不投给根;
+  // 第二次照收。根只收到一份, 内容是补了 RESULT 的那次。
+  accept: { names: ["rr-v"], run: async () => {
+    const n = nonce();
+    const o = await post("/jobs/open", { target: root.target, title: "[receipt-regress] 工单验收打回", expect: 1 });
+    if (!o.ok) return { pass: false, why: `open_job: ${o.reason}` };
+    await spawn("rr-v", { job: o.job, task: `这是回归测试, 不要调用任何工具。第一次只回复「好的」两个字, 不写 RESULT。之后若被要求补收口, 就回复一行: RESULT: accept-${n}` });
+    const s = await settledSlot("rr-v", 4 * 60_000);
+    const got = await receiptsIn(root.target, "rr-v");
+    await post("/jobs/close", { target: root.target, job: o.job, summary: "receipt-regress", stop: false });
+    return {
+      pass: s?.outcome?.status === "done" && s.outcome.body.includes(`accept-${n}`) && s.legs === 2 && got.length === 1,
+      why: `slot=${s?.outcome?.status ?? "未落定"} legs=${s?.legs} 含补交=${!!s?.outcome?.body.includes(`accept-${n}`)} 根收到 ${got.length} 份`,
+    };
+  } },
+
   // 定时任务 (B4 ⑤): 点名目标到点正忙 → 顺延到它闲下来再投; quiet 任务终句是 QUIET 就不进群,
   // 不是就由守护进程转进群 (那一条会真出现在根的 home 聊天里, 带 [receipt-regress] 字样)。
   "task-quiet": { names: ["rr-t", "rr-t2"], run: async () => {
@@ -269,7 +293,7 @@ const cases = {
     await Promise.all(["rr-t", "rr-t2"].map((x) => spawn(x)));
     const t0 = Date.now();
     await tell("rr-t", `${SLEEP(90)}, 然后回复一行: RESULT: busy-done`);
-    const mk = (name, id, prompt) => post("/tasks/schedule", { target: root.target, name, when: "1分钟后", fresh: false, quiet: true, id, prompt });
+    const mk = (name, id, prompt) => post("/tasks/schedule", { target: root.target, name: real(name), when: "1分钟后", fresh: false, quiet: true, id, prompt });
     const a = await mk("rr-t", `rr-quiet-${n}`, "这一轮没有任何值得报告的事: 不要调用任何工具, 直接按「没事」收口。");
     const b = await mk("rr-t2", `rr-loud-${n}`, `有一件人必须知道的事要报告 (不是 QUIET): 不要调用任何工具, 你的最后一条消息原样写这一行: [receipt-regress] 安静任务有事转发 ${n}`);
     if (!a.ok || !b.ok) return { pass: false, why: `schedule_task: ${a.reason ?? b.reason}` };
@@ -307,7 +331,7 @@ const main = async () => {
   const pick = process.argv.slice(2);
   const bad = pick.filter((x) => !cases[x]);
   if (bad.length) throw new Error(`没有用例 ${bad.join(" ")} —— 有: ${Object.keys(cases).join(" ")}`);
-  const r = await post("/wizard/clone", { ...ME, name: "rr-root", inherit: false, model: "haiku", keepalive: false, description: "receipt-regress 的根" });
+  const r = await post("/wizard/clone", { ...ME, name: real("rr-root"), inherit: false, model: "haiku", keepalive: false, description: "receipt-regress 的根" });
   if (!r.ok) throw new Error(`spawn rr-root: ${r.reason}`);
   root = { target: r.target, name: r.name };
   await post("/peers/tell", { ...ME, name: root.name, receipt: false, priority: "now", text: "你是回执回归测试的根。之后进来的每一份回执, 只回一个词 ok, 不调用任何工具。现在回 ok。" });
@@ -324,6 +348,8 @@ const main = async () => {
     return out.pass;
   }));
   const failed = results.filter((x) => !x).length;
+  const rootAlive = !!(await jsonlOf(root.target)) && !!tmuxPaneOf(root.name);
+  if (!rootAlive) console.log("⚠ 根 rr-root 中途没了 (多半撞上了别人的 reload) —— 「根收到 N 份」类判定无效, 重跑");
   console.log(failed ? `${failed}/${results.length} FAIL` : `全部 ${results.length} 条 PASS`);
   return failed;
 };
