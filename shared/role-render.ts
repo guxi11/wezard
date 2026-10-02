@@ -5,7 +5,7 @@
 //   出   该 wizard 这一轮的回复: 复用 renderTurnGroup (文本 + 工具细节), 去掉问句 ——
 //        问句已经是上面那条入消息了; 本轮用量单独走 `meta`, 客户端写在名字那一行
 //   断点 视角 role 自己的 /clear /new
-import { renderCutMark, renderTurnGroup, splitReminders, escHtml, fmtTs, hashStr, tagSig, turnUsageChips, type HandoffDeco, type TurnFragment } from "./detail-render.js";
+import { renderCutMark, renderTurnGroup, splitReminders, escHtml, fmtTs, hashStr, tagSig, turnUsageChips, type Handoff, type HandoffDeco, type TurnFragment } from "./detail-render.js";
 import { isTurn, staleAt, turnDone } from "./chat-view.js";
 import { isKeepaliveTurn } from "./keepalive.js";
 import type { DetailRecord, MarkDetailRecord, TurnDetailRecord } from "./detail-store.js";
@@ -124,16 +124,22 @@ const receiptChip = (r: TurnDetailRecord, records: readonly DetailRecord[], dir:
   return `<${tag} class="mchip rcpt st-${escHtml(st)}"${attrs}>↩ 回执 · ${RCPT[st] ?? escHtml(st)}${seq}</${tag}>`;
 };
 
-/** 移交行的 rolepage 那一半: 对方是名录里的谁 (头像 + 名字, 点了切过去), 这件活此刻到了哪一步 ——
+/** 点移交行里的对方要开的那段往来: 移交双方 (发话方 = 这一轮的 role, 收信方) 在哪个频道 —— 派活那句在就以它为准
+ *  并带上落点; 还没接手就按这次调用公开与否推 (公开的落在发话方此刻的群)。会话键随视角, 由客户端算。 */
+const pairAttrs = (r: TurnDetailRecord, to: string, h: Handoff, d: TurnDetailRecord | undefined): string =>
+  ` data-hfrom="${escHtml(r.target ?? "")}" data-hto="${escHtml(to)}" data-hch="${escHtml(d ? channelOf(d) : h.public ? channelOf(r) : "")}"` +
+  (d ? ` data-gid="${escHtml(d.id)}:in" data-gts="${d.createdAt}"` : "");
+
+/** 移交行的 rolepage 那一半: 对方是名录里的谁 (头像 + 名字, 点了开双方的那段往来), 这件活此刻到了哪一步 ——
  *  回执落定了就写定论 (need 之后续问再交, 取最新那份), 没落定就看它接手了没有。
  *  每次请求现算, 不进轮次缓存: 回执比派活那一轮晚到, 气泡的 sig 得跟着它变。 */
-const handoffDeco = (records: readonly DetailRecord[], dir: Directory): HandoffDeco => {
+const handoffDeco = (r: TurnDetailRecord, records: readonly DetailRecord[], dir: Directory): HandoffDeco => {
   const latest = (pick: (t: TurnDetailRecord) => boolean): TurnDetailRecord | undefined => turnsWhere(records, pick).at(-1);
   return {
     who: (h) => {
       const id = dir.resolve(h.name);
       return id
-        ? `<button type="button" class="ho-who go" data-r="${escHtml(id)}" title="切到 .${escHtml(dir.nameOf(id))} 的视角"><span class="av">${escHtml(dir.labelOf(id))}</span><span class="nm wizard">${escHtml(dir.nameOf(id))}</span></button>`
+        ? `<button type="button" class="ho-who"${pairAttrs(r, id, h, h.turn ? dispatchOf(records, h.turn) : undefined)} title="打开 .${escHtml(dir.nameOf(r.target ?? ""))} 与 .${escHtml(dir.nameOf(id))} 的往来"><span class="av">${escHtml(dir.labelOf(id))}</span><span class="nm wizard">${escHtml(dir.nameOf(id))}</span></button>`
         : `<span class="ho-nm">.${escHtml(h.name)}</span>`;
     },
     turn: (h) => {
@@ -193,7 +199,7 @@ export const renderMsg = (m: Msg, records: readonly DetailRecord[], dir: Directo
   const sent = m.dir === "in" ? senderTurn(r, records, dir) : undefined;
   const { html, meta } = m.dir === "in"
     ? { html: renderIn(r), meta: sent ? turnUsageChips(sent, now) : "" }
-    : ((g) => ({ html: g.html, meta: receiptChip(r, records, dir) + jobChip(r) + g.meta }))(((deco) => renderTurnGroup(r, now, childrenOf(records, r.id, now, deco), false, deco))(handoffDeco(records, dir)));
+    : ((g) => ({ html: g.html, meta: receiptChip(r, records, dir) + jobChip(r) + g.meta }))(((deco) => renderTurnGroup(r, now, childrenOf(records, r.id, now, deco), false, deco))(handoffDeco(r, records, dir)));
   const live = m.dir === "out" && !turnDone(r, now);
   return {
     id: m.id, turnId: r.id, dir: m.dir, ...base(m, dir), ts: m.ts,

@@ -360,7 +360,8 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .steps.folded > .bubbles:has(> .bubble.tool .handoff) { display: flex; flex-direction: column }
 .steps.folded > .bubbles > :not(:has(.handoff)) { display: none }
 .steps.folded > .bubbles > .bubble.tool > :not(.handoff) { display: none }
-.steps.folded .handoff { padding-left: 6px }
+.steps.folded .handoff .ho-line { padding-left: 6px }
+.steps.folded .handoff .ho-text { margin-left: 6px }
 
 /* 气泡与过程框同一种底色: 都是这个人发出来的 —— 自己的是视角色, 别人的是浅灰。
    TURN_CSS 里写死的白卡 / 灰底 (嵌套气泡、代码块、折叠头) 在有色底上会显成一张张
@@ -369,7 +370,7 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .mrow .mb .steps :is(.bubble, .typing) { background: transparent }
 .mrow .mb .bubble.user,
 .mrow .mb .md-body code, .mrow .mb .md-body pre,
-.mrow .mb details:not(.tool-call) > summary,
+.mrow .mb details:not(.tool-call, .handoff) > summary,
 .mrow .mb .tool-body section > h2, .mrow .mb .diff-meta,
 .mrow .mb .tool-call > summary:hover { background: var(--bub-soft); border-color: var(--bub-line) }
 .mrow .mb .md-body pre code { background: transparent }

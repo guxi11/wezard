@@ -450,8 +450,18 @@ const TURN_CSS = `
   .tool-result-line .more{color:#8c959f}
   .tool-result-line .run{color:#9a6700}
   /* ── 移交提示: 系统行, 不是消息 —— 没有底色与边框, 小一号 ── */
-  .handoff{display:flex;align-items:center;flex-wrap:wrap;gap:4px 6px;padding:2px 6px 3px 24px;
-    font-size:11.5px;line-height:18px;color:#656d76}
+  .handoff{font-size:11.5px;line-height:18px;color:#656d76}
+  .handoff .ho-line{display:flex;align-items:center;flex-wrap:wrap;gap:4px 6px;padding:2px 6px 3px 24px;
+    list-style:none}
+  details.handoff>.ho-line{cursor:pointer;background:none;border:0;font:inherit;color:inherit;
+    text-transform:none;letter-spacing:0;user-select:auto}
+  details.handoff>.ho-line::before{content:none}
+  .handoff .ho-line::-webkit-details-marker{display:none}
+  details.handoff>.ho-line::after{content:"▸";color:#8c959f;font-size:10px}
+  .handoff[open] .ho-line::after{content:"▾"}
+  /* 展开 = 交过去的那段原文 (tell_peer 的 text), 按 markdown 分行。 */
+  .handoff .ho-text{margin:0 6px 4px 24px;padding:4px 10px;border-left:2px solid #8250df40;color:#1f2328}
+  .handoff .ho-text .md-body{font-size:12.5px}
   .handoff .ho-arrow{color:#8250df;font-weight:600;margin-right:-2px}
   .handoff .ho-nm{color:#1f2328;font-weight:500}
   .handoff .ho-turn{border:0;background:none;padding:0;font:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
@@ -598,6 +608,8 @@ export interface Handoff {
   /** 投的那一刻对方在忙 —— priority 只在这时才真起作用。undefined = 回包没说。 */
   busy?: boolean;
   kind?: "ask" | "fyi";
+  /** 交过去的那段原文 (tell_peer 的 text)。 */
+  text: string;
   /** 带 `re` = 续问同一件活, 不是新活。 */
   re: boolean;
   /** 守护进程会送回执 (fyi / receipt:false 不送)。 */
@@ -632,6 +644,7 @@ export const handoffOf = (use: ToolUse, result: ToolResult | undefined): Handoff
     priority: priorityOf(j?.priority) ?? priorityOf(a.priority) ?? (a.re ? "now" : "normal"),
     busy: typeof j?.wasBusy === "boolean" ? j.wasBusy : undefined,
     kind: kind === "ask" || kind === "fyi" ? kind : undefined,
+    text: str(a.text) ?? "",
     re: !!str(a.re),
     receipt: ok && !!j?.receipt,
     state: !result ? undefined : ok ? "ok" : failed ? "failed" : "lost",
@@ -657,10 +670,16 @@ const PRIORITY_TAG: Readonly<Record<Handoff["priority"], [string, string]>> = {
 const hoTag = (cls: string, text: string, tip: string): string =>
   `<span class="ho-tag ${cls}" title="${escHtml(tip)}">${escHtml(text)}</span>`;
 
+/** 移交行默认收起, 点开看交过去的原文; 没有原文就只是一行。 */
+const hoBox = (cls: string, line: string, text: string): string =>
+  text
+    ? `<details class="handoff${cls}"><summary class="ho-line">${line}</summary><div class="ho-text">${mdBody(text)}</div></details>`
+    : `<div class="handoff${cls}"><div class="ho-line">${line}</div></div>`;
+
 const renderHandoff = (h: Handoff, deco?: HandoffDeco): string => {
   const who = deco ? deco.who(h) : `<span class="ho-nm">.${escHtml(h.name)}</span>`;
   if (h.state === "failed")
-    return `<div class="handoff fail"><span class="ho-arrow">↪</span>没交出去 ${who}<span class="ho-why">${escHtml(h.reason ?? "")}</span></div>`;
+    return hoBox(" fail", `<span class="ho-arrow">↪</span>没交出去 ${who}<span class="ho-why">${escHtml(h.reason ?? "")}</span>`, h.text);
   const [pt, tip] = PRIORITY_TAG[h.priority];
   const idle = h.busy === false;
   const tags = [
@@ -673,7 +692,7 @@ const renderHandoff = (h: Handoff, deco?: HandoffDeco): string => {
     ? `<span class="ho-st run">投递中…</span>`
     : h.state === "lost" ? `<span class="ho-why" title="${escHtml(h.reason ?? "")}">没等到回包, 交没交出去不确定</span>`
     : deco ? deco.status(h) : "";
-  return `<div class="handoff"><span class="ho-arrow">↪</span>${h.re ? "续问" : h.state === "lost" ? "移交给" : "已移交给"} ${who}${turn}${tags}${st}</div>`;
+  return hoBox("", `<span class="ho-arrow">↪</span>${h.re ? "续问" : h.state === "lost" ? "移交给" : "已移交给"} ${who}${turn}${tags}${st}`, h.text);
 };
 
 /** `lazyTurn`: 正文不随气泡下发, 只留一个指回 (turn, toolUseId) 的空壳, 客户端展开时再取。

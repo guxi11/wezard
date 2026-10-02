@@ -317,12 +317,19 @@
     var conv = ch ? 'c:' + ch : ROLE === from ? 'p:' + to : ROLE === to ? 'p:' + from : 'a:' + from + '|' + to;
     jumpMsg({ conv: conv, id: c.getAttribute('data-gid'), ts: Number(c.getAttribute('data-gts')) });
   });
-  // 移交行里对方的头像 + 名字: 切到它的视角 (节点随 reconcile 换, 所以在根上委托)。
+  // 移交行里对方的头像 + 名字: 侧栏选中移交双方之间的那一项 (群里的一对 / 私聊; 视角不是两端之一就开
+  // 「这两方之间」的往来), 有派活那句就落在它上面。不换视角 (节点随 reconcile 换, 所以在根上委托)。
   inner.addEventListener('click', function (e) {
-    var b = e.target.closest && e.target.closest('.handoff .go[data-r]');
+    var b = e.target.closest && e.target.closest('.handoff .ho-who[data-hto]');
     if (!b) return;
-    var row = b.closest('.mrow');
-    switchRole(b.getAttribute('data-r'), row && row.getAttribute('data-id'));
+    e.preventDefault();   // 在 <summary> 里: 不顺带展开原文
+    var from = b.getAttribute('data-hfrom'), to = b.getAttribute('data-hto'), ch = b.getAttribute('data-hch');
+    var peer = ROLE === from ? to : ROLE === to ? from : '';
+    var conv = !peer ? 'a:' + from + '|' + to : ch ? 'c:' + ch : 'p:' + peer;
+    var w = peer && ch ? peer : '';
+    var id = b.getAttribute('data-gid');
+    if (id) return jumpMsg({ conv: conv, with: w, id: id, ts: Number(b.getAttribute('data-gts')) });
+    clickItem(conv, w);
   });
 
   // ── 左栏: 当前 role 的名片 + 会话列表 ──
@@ -2283,8 +2290,8 @@
     };
   };
   var jumpMsg = function (h) {
-    if (inSession(h.ts) && convOf(h.conv)) return selectConv(h.conv, '', landOn(h.id));
-    SESSION = 'all'; CONV = h.conv; WITH = '';
+    if (inSession(h.ts) && convOf(h.conv)) return selectConv(h.conv, h.with || '', landOn(h.id));
+    SESSION = 'all'; CONV = h.conv; WITH = h.with || '';
     if (VIEW !== 'msgs') setView('msgs');
     app.classList.add('reading');
     reveal();
