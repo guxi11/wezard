@@ -273,12 +273,14 @@ const lineageOrder = (targets: readonly string[], parentOf: (t: string) => strin
   return [...ordered, ...targets.filter((t) => !seen.has(t)).map((target) => ({ target, depth: 0 }))];
 };
 
-/** 注册表侧按消息数据裁剪: 自己没跑过轮次、也没派出过一句的 wizard 不进世界 —— 多半是超时被清掉了
- *  轮次的, 画出来只是一张空卡和几条说不出内容的边。活着的照留: 刚 spawn 还没开口的分身就是这样。
+/** 注册表侧按消息数据裁剪: 没有 transcript (lastActivity = 0, daemon 取自 jsonl 的 mtime; 冷记录也是 0)、
+ *  轮次记录里也没有它 (没跑过、也没派出过一句) 的 wizard 不进世界 —— 画出来只是一张空卡和几条说不出内容的边。
+ *  只看轮次不够: 轮次库有 24h / 1000 条的保留上限, 挤掉了的活跃 wizard 会被误判成没数据; transcript 不受它限。
+ *  活着的照留: 刚 spawn 还没开口的分身就是这样。
  *  挂在被裁者名下的后代改认最近一个留下的祖先 (clone 的上下文来源同理), 家谱不断。 */
 export const withData = (facts: WorldFacts, records: readonly DetailRecord[], now: number): WorldFacts => {
   const spoke = new Set(liveTurns(records, now).flatMap((r) => [r.target!, ...(r.from?.kind === "peer" && r.from.from ? [r.from.from] : [])]));
-  const keep = (w: WorldFactWizard): boolean => w.alive || w.busy || spoke.has(w.target);
+  const keep = (w: WorldFactWizard): boolean => w.alive || w.busy || w.lastActivity > 0 || spoke.has(w.target);
   const byTarget = new Map(facts.wizards.map((w) => [w.target, w] as const));
   const lift = (t: string | undefined, seen: ReadonlySet<string> = new Set()): string | undefined => {
     const w = t ? byTarget.get(t) : undefined;

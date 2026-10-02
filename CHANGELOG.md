@@ -47,7 +47,7 @@
 
 ### Fixed
 - 保温 ping 按会话缓存实际的 TTL 定时: 从 transcript usage 的 `cache_creation.ephemeral_1h/5m` 分档读出 (Claude Code 订阅下全是 1h), 不再按 `keepalive.ttlSec=300` 每 4–5 分钟 ping 一次 —— 1h 的缓存里这些 ping 一个都不需要, 实测 3 天 1318 次、读了 2.07 亿 token 缓存 (约占总花费 7%)。`ttlSec` 退为无分档记录时的兜底, 仍是 stall 续跑的静默窗 (API 报错停住的轮照旧几分钟后续跑)。`tell_peer` 的 `wakeCost` 与 `route_candidates` 的冷热判断同样改按实测 TTL, 不再把 5 分钟前活跃过的 wizard 报成「缓存已冷」劝人白板 spawn。
-- rolepage 关系图 / 会话列表不再翻出没有消息数据的 wizard: `withData` (shared/world.ts) 在 svr 取注册表的源头 (`getFacts`) 裁掉自己没跑过轮次、也没派出过一句的 wizard (多半是超时被清了轮次的), 关系边、+N、侧栏与搜索都只见得到裁后的那份; 活着的照留 (刚 spawn 还没开口的分身)。挂在被裁者名下的后代改认最近一个留下的祖先 (clone 的上下文来源同理), 家谱不断。
+- rolepage 关系图 / 会话列表不再翻出没有消息数据的 wizard: `withData` (shared/world.ts) 在 svr 取注册表的源头 (`getFacts`) 裁掉没有 transcript (daemon 给的 `lastActivity` = 0)、轮次记录里也没有它的 wizard —— 不只看轮次: 轮次库有 24h / 1000 条的保留上限, 挤掉了的活跃 wizard (如 .clickinchat) 会被误判, 关系边、+N、侧栏与搜索都只见得到裁后的那份; 活着的照留 (刚 spawn 还没开口的分身)。挂在被裁者名下的后代改认最近一个留下的祖先 (clone 的上下文来源同理), 家谱不断。
 - rolepage 用量条的上下文 (📄) 取「最近一轮主会话最后一次调用送入的 input + 缓存」, 不再是全部轮次 (含子 agent) 的峰值 —— compact / clear 之后峰值早已过时。顺带修 `ctxFirst` 在一轮第二次调用后被丢掉 (宪章占开局几成因此只在单调用的首轮里算得出)。
 - rolepage 关系图卡片的 +N 改为「这一档图上看不到的关系对端」: 对端卡片已画在图上就不算 (不论有没有连线), 「相关 | 全部」各按自己画出来的卡片算。「相关」改为画出视角的全部直接关系 (任一种类、任一方向; 此前只画对过话的, spawn 的子 wizard 等被藏掉, 视角自己的卡片也挂着 +N), 去掉兄弟卡片的折叠计数 `tfold`; `/api/world` 每个聊天的成员上限不再截掉视角的直接关系 (此前 ev-route 等没下发, 只能计进 +N)。
 - 7a76bb6 里 `wait_peer` 回包的 `need` / `artifacts` 两行被插到了 `restartFresh` 中间 (daemon/index.ts 语法错误), 挪回 wait_peer 回包。
