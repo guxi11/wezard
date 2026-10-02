@@ -611,7 +611,7 @@
     for (var el = e.target; el && el.nodeType === 1 && el !== document.body && !clipTip(el); el = el.parentElement);
   });
 
-  // 名片: 头像 · 名字 (忙闲 / session) · 名字下一行低调的描述 (🏠 home · 🐣 出生 · 🗂️ cwd · 📜 宪章 · 📅 日程) · 职责。
+  // 名片: 头像 · 名字 (忙闲 / session) · 名字下一行低调的描述 (🏠 home · 🐣 出生 · 📜 宪章大小 · 🗂️ cwd · 📅 日程) · 职责。
   // 身份与出身 (谁的分身 / 子 wizard) 交给关系图 (侧栏标题右端的开关), 名片不写。
   // 日程: 下一枪几点, 定时出错时染红改写出错数; 没有排期就只写条数 (定时 + 工单)。
   var planFact = function () {
@@ -628,9 +628,10 @@
     var facts = [
       r.chat ? ['🏠', r.chat, 'home'] : null,
       born ? ['🐣', fmtClock(born), '出生于 ' + fmtDay(born)] : null,
+      // 宪章紧跟出生: 出生时被交代了多少 (≈token), 只写大小; 可点开看全文。
+      R.charter ? ['📜', fmtTok(R.charter.tokens), '宪章 ≈' + fmtTok(R.charter.tokens) + ' token · ' + fmtClock(R.charter.at) + ' 压进系统提示 · 点开看全文', 'charter'] : null,
       r.cwd ? ['🗂️', shortCwd(r.cwd), r.cwd] : null,
-      // 宪章与日程排最后, 可点: 出生时被交代了什么 / 名下排了什么。
-      R.charter ? ['📜', '宪章 ≈' + fmtTok(R.charter.tokens), fmtClock(R.charter.at) + ' 压进系统提示 · 点开看全文', 'charter'] : null,
+      // 日程排最后, 可点: 名下排了什么。
       R.schedules ? planFact() : null
     ].filter(Boolean).map(function (f) {
       return '<span' + (f[3] ? ' class="fx' + (VIEW === f[3] ? ' on' : '') + (f[4] ? ' ' + f[4] : '') + '" data-view="' + f[3] + '"' : '') + ' title="' + esc(f[2]) + '">' + f[0] + ' ' + esc(f[1]) + '</span>';
