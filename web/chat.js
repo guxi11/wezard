@@ -683,12 +683,6 @@
     try { localStorage.setItem(SCOPE_KEY, v); } catch (e) { }
     renderConvs();
   };
-  // 两段式开关 (选中的那段沉底色): 侧栏子项范围与关系图范围同一种样式。opts = [[值, 字, 提示]]。
-  var segToggle = function (attr, cur, opts) {
-    return '<span class="scope">' + opts.map(function (o) {
-      return '<button class="' + (cur === o[0] ? 'on' : '') + '" ' + attr + '="' + o[0] + '" title="' + o[2] + '">' + o[1] + '</button>';
-    }).join('') + '</span>';
-  };
   // 单个文字按钮: 字是当前范围, 点一下切到另一种 (样式与旁边的「关系图」按钮同一个 .vt)。
   var scopeToggle = function () {
     var pair = SCOPE === 'pair';
@@ -1842,8 +1836,8 @@
     var html = '<div class="tview">' +
       '<h2>关系图<span title="在名片里的 session 下拉切换范围">' + esc(span) + ' · ' + (all ? Object.keys(F.ends).length : shown.length) + ' 个</span>' +
         (W.degraded ? '<span class="warn" title="没拿到 wizard 注册表 (svr 还没收到 daemon 的快照), 只画观测到的往来">名册缺席</span>' : '') +
-        (me ? segToggle('data-tall', all ? 'all' : 'rel', [
-          ['rel', '相关', '只画它自己、和它有直接关系的, 以及连到它们的上游链'], ['all', '全部', '画出范围内所有有关系的 wizard']]) : '') + worldToggle() + '</h2>' +
+        (me ? '<button class="vt" data-tall="' + (all ? 'rel' : 'all') + '" title="' +
+          (all ? '画出范围内所有有关系的 wizard (点击改为只画相关的)' : '只画它自己、和它有直接关系的, 以及连到它们的上游链 (点击改为画全部)') + '">' + (all ? '全部' : '相关') + '</button>' : '') + worldToggle() + '</h2>' +
       (alone ? '<div class="tsolo">' + esc(nameOf(ROLE)) + (rg ? ' 在这段 session 里' : '') + ' 没和谁有关系</div>' : '') +
       (shown.length ? '<ul class="tree' + (all ? ' all' : '') + (F.job ? ' jsel' : '') + '">' + trees + '</ul>' : '<div class="pempty">这段时间里没有任何关系</div>') +
     '</div>';

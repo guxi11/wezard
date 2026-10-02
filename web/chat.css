@@ -191,12 +191,9 @@ button { font: inherit; color: inherit }
   font-size: 11px; font-weight: 400; color: var(--mute);
 }
 .convs h2 .vt:hover { background: #eef1f4; color: var(--accent) }
-/* 两段式开关 (侧栏子项「往来 / 全部」、关系图「相关 / 全部」), 挨在视图开关左边: 选中的那段沉底色, 另一段只是灰字。 */
-.convs h2 .scope { margin-left: auto; align-self: center; display: inline-flex; gap: 1px; padding: 1px; border-radius: 6px; background: #eef1f4 }
-.convs h2 .scope button { border: 0; background: none; padding: 1px 6px; border-radius: 5px; cursor: pointer; font-size: 11px; font-weight: 400; color: var(--mute) }
-.convs h2 .scope button.on { background: var(--card); color: var(--ink); box-shadow: 0 1px 1px #0000000d }
-.convs h2 [data-scope] { margin-left: auto }
-.convs h2 [data-scope] + .vt { margin-left: 0 }
+/* 范围按钮 (侧栏「往来 / 全部」、关系图「相关 / 全部」): 与视图开关同一个 .vt, 字是当前范围, 点一下换另一种。 */
+.convs h2 [data-scope], .convs h2 [data-tall] { margin-left: auto }
+.convs h2 [data-scope] + .vt, .convs h2 [data-tall] + .vt { margin-left: 0 }
 /* 关系图那一行字多 (范围 · 计数 · 名册缺席 · 看全部 · 开关): 一律不折行, 让范围那段先省略。 */
 .convs h2 { white-space: nowrap; min-width: 0 }
 .convs h2 > * { flex: none }
