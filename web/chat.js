@@ -307,18 +307,6 @@
   // ── 左栏: 当前 role 的名片 + 会话列表 ──
   // `a:<x>` / `a:<x>|<p1>,<p2>` 不在列表里: x 参与的全部对话 / x 与这几个对端之间的, 按时间排开
   // (关系图里点卡片看的就是它, 服务端同一个 talkOf) —— 现造一项, 落地时才不会被当成失效的会话退回默认。
-  // 工单的进度: 开着 = 已落定几份 / 一共几份, 收了 = 收工。
-  var jobTag = function (j) {
-    return j ? '<span class="jtag' + (j.status === 'open' ? ' open' : '') + '">' + (j.status === 'open' ? j.done + '/' + j.total : '收工') + '</span>' : '';
-  };
-  // 视角不在里面的工单 (从关系图点进来的) 不在会话列表里, 按 /api/world 的账现造一项。
-  var jobConv = function (key) {
-    var id = key.slice(2), j = (W.jobs || []).filter(function (x) { return x.id === id; })[0];
-    return {
-      key: key, kind: 'job', name: j ? j.title : id, label: '📋', base: j ? j.base : '', subs: [], heard: [], lastTs: 0, preview: '',
-      job: j && { id: id, owner: j.owner, status: j.status, done: j.done, total: j.total },
-    };
-  };
   var convOf = function (key) {
     if (key && key.indexOf('a:') === 0) {
       var part = key.slice(2).split('|'), who = part[0], peers = (part[1] || '').split(',').filter(Boolean), chat = part[2] || '';

@@ -657,7 +657,7 @@ const main = async (): Promise<void> => {
           envelope: renderReceiptEnvelope(
             displayName(meta.from),
             meta.channel ? chatNameOf(cfg, meta.channel) : undefined,
-            meta.job ? { job: meta.job, done: meta.done, total: meta.total, closed: jobs.get(meta.job)?.status !== "open" } : undefined,
+            meta.job ? { job: meta.job, done: meta.done, total: meta.total } : undefined,
             meta.status,
             meta.turn || undefined,
             {
