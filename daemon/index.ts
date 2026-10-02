@@ -1173,13 +1173,17 @@ const main = async (): Promise<void> => {
       const byTarget = new Map(known.map((w) => [w.target, w] as const));
       const seen = new Set(peers.map((p) => p.target));
       // 「卡在审批」以 daemon 手里的 pending 为准 —— 审批长轮询期间 pane 照样在转圈,
-      // 拿 busy 去推会把它当成「执行中」。按 sessionId 归到会话上。
-      const waitingBySid = listPending().reduce((m, { meta }) =>
-        meta.sessionId ? m.set(meta.sessionId, [...(m.get(meta.sessionId) ?? []), meta.toolName || meta.kind]) : m,
-      new Map<string, string[]>());
+      // 拿 busy 去推会把它当成「执行中」。归属走 approval 认卡的同一口径 (getMirrorTarget):
+      // hook 的 sid 在 /clear 之后先变, 镜像绑定的 sid 要等新 jsonl 出现才跟上。
+      // ask_user 的 pending 不带 sessionId —— 它是 MCP 工具在等, 不归哪张卡, 不亮。
+      const waitingOf = listPending().reduce((m, { meta }) => {
+        const t = meta.sessionId ? getMirrorTarget(meta.sessionId) : undefined;
+        const tool = meta.toolName || meta.kind;
+        return t ? m.set(t, [...new Set([...(m.get(t) ?? []), tool])]) : m;
+      }, new Map<string, string[]>());
       const live: WorldFactWizard[] = peers.map((p) => {
         const w = byTarget.get(p.target);
-        const waiting = waitingBySid.get(p.sessionId);
+        const waiting = waitingOf.get(p.target);
         return {
           target: p.target,
           name: settleName(wizards, chatNameOf(cfg, p.target), p.target),

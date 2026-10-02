@@ -37,7 +37,7 @@ export interface WorldFactWizard {
   busy: boolean;
   /** tmux pane 还在 —— false = 冷的, 要说话得先把它拉起来。 */
   alive: boolean;
-  /** 停在哪些工具调用上等人点 (审批卡 / 本地弹窗) 的工具名; 缺省 = 没在等。 */
+  /** 停在哪些工具调用上等人点 (daemon 发出的审批卡 / 提问卡, 即还挂着的 pending) 的工具名; 缺省 = 没在等。 */
   waiting?: string[];
   /** 谁生的它 —— 分身与子 wizard 都有; 两者靠 clonedFrom 区分。 */
   parent?: string;

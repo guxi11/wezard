@@ -308,7 +308,7 @@
   // 服务端只给事实 (busy / alive / runningUntil), 亮不亮在这里按本地时钟判 ——
   // 到点没有新写入就自己熄 (同 expireRows), 不必等下一次推送。
   var ST = { wait: '等人点', run: '执行中', idle: '空闲', off: '已关闭' };
-  // 等人点 (停在审批卡 / 弹窗上) 先于执行中: 审批长轮询期间 pane 照样在转圈。
+  // 等人点 (停在审批卡 / 提问卡上) 先于执行中: 审批长轮询期间 pane 照样在转圈。
   var stateOf = function (s) { return s.waiting && s.waiting.length ? 'wait' : wRunning(s) ? 'run' : s.alive ? 'idle' : 'off'; };
   // 忙闲只有这一个渲染点, 永远挂在名字右边 —— 名片 / 关系树 / 侧栏共用。
   // quiet: 只在执行中 / 等人点时出现、只要灯不要字 (侧栏: 列表里安静是常态, 亮着的才值得看一眼)。
@@ -316,7 +316,7 @@
     if (!s) return '';
     var k = stateOf(s);
     if (quiet && k !== 'run' && k !== 'wait') return '';
-    var tip = k === 'wait' ? '停在 ' + s.waiting.join(' / ') + ' 上等人点 (审批卡 / 弹窗)' : ST[k];
+    var tip = k === 'wait' ? '停在 ' + s.waiting.join(' / ') + ' 上等人点 (审批卡 / 提问卡)' : ST[k];
     return '<span class="wst ' + k + '" title="' + esc(tip) + '">' + (quiet ? '' : esc(k === 'wait' ? ST[k] + ' · ' + s.waiting[0] : ST[k])) + '</span>';
   };
   var paintStatus = function () {
