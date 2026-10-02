@@ -58,8 +58,9 @@ import {
   renderCharter,
   ROSTER_FRESH_MS,
   renderRoster,
-  CONTEXT_FULL_TOKENS,
-  MEMORY_NUDGE_TOKENS,
+  handoffAt,
+  memoryNudgeAt,
+  MEMORY_NUDGE_FLOOR,
   MEMORY_MAX,
   NOTE_MAX,
   type WizardBrief,
@@ -1169,9 +1170,12 @@ const main = async (): Promise<void> => {
     // 当事人自己做的自己知道, 所以排除在外。
     // 上下文逼近自动压缩时提醒一句「先记」: 压缩 / 交接都会丢细节。每段会话 (sid) 只提一次。
     const nudged = new Set<string>();
+    // 线按模型的窗口算 (memoryNudgeAt); 模型取 transcript 里实际跑的那个 id, pane 记的常是空串或 `opus` 这种别名。
     const memoryNudge = (t: string): string[] => {
       const i = m.sessionInfo(t);
-      if (!i?.sessionId || i.contextTokens < MEMORY_NUDGE_TOKENS || nudged.has(i.sessionId)) return [];
+      // 最低的那条线先挡: 不到它就不必再读一次 transcript 取模型。
+      if (!i?.sessionId || nudged.has(i.sessionId) || i.contextTokens < MEMORY_NUDGE_FLOOR) return [];
+      if (i.contextTokens < memoryNudgeAt(lastModel(i.jsonlPath) || i.model)) return [];
       nudged.add(i.sessionId);
       return [`你的上下文已到 ${Math.round(i.contextTokens / 1000)}k, 快到自动压缩了: 这段里学到的、值得跨会话活下来的东西, 先 \`wizard_remember\` 记下 (自己的选 self, 属于群 / 仓库的选 chat / workspace), 再考虑 \`wizard_handoff_self\``];
     };
@@ -1493,7 +1497,7 @@ const main = async (): Promise<void> => {
         cli: info?.cli,
         model: info?.model ?? "",
         contextTokens: info?.contextTokens ?? 0,
-        handoffSuggested: (info?.contextTokens ?? 0) > CONTEXT_FULL_TOKENS,
+        handoffSuggested: !!info && info.contextTokens > handoffAt(lastModel(info.jsonlPath) || info.model),
       };
     };
 

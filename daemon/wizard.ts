@@ -303,11 +303,30 @@ export interface RosterRow extends WizardBrief {
   turns?: string;
 }
 
-/** 上下文超过这个数就该自己交接了。Claude 家族最小的窗口是 200k, 留三成余量给
- *  交接那一轮本身 —— 提示而已, 决定权在 wizard 自己。 */
-export const CONTEXT_FULL_TOKENS = 140_000;
-/** 比交接线早一截: 先把值得跨会话活下来的记下, 再谈压缩 / 交接 —— 那两者都会把细节丢掉。 */
-export const MEMORY_NUDGE_TOKENS = 120_000;
+// 上下文窗口 (token)。transcript 里记的是 API 模型 id, 不带 `[1m]`, 所以按家族认:
+// 本机 transcript 实测 Claude 5 家族 (opus / sonnet / fable) 与 opus-4-8 都跑到过 50 万以上,
+// haiku-4-5 是 20 万。认不出的按 20 万 —— 宁可早提醒, 别等压缩了才说。
+const CONTEXT_WINDOWS: ReadonlyArray<readonly [RegExp, number]> = [
+  [/\[1m\]/i, 1_000_000],
+  [/haiku/i, 200_000],
+  [/(opus|sonnet|fable)[-\s]?(5|4[-.][6-9])/i, 1_000_000],
+  // codebuddy 下的非 Claude 模型
+  [/deepseek|gpt-4o|kimi|glm/i, 128_000],
+];
+export const contextWindowOf = (model: string): number =>
+  CONTEXT_WINDOWS.find(([re]) => re.test(model))?.[1] ?? 200_000;
+
+// 两条线都按窗口算, 次序固定: 先提醒记 (六成), 再建议交接 (七成) —— 压缩与交接都会丢细节,
+// 记要在它们之前。20 万窗口 = 12 万 / 14 万, 1M 窗口 = 60 万 / 70 万。
+
+/** 「先 wizard_remember」的提醒线。 */
+export const memoryNudgeAt = (model: string): number => Math.round(contextWindowOf(model) * 0.6);
+/** 所有模型里最低的那条提醒线 —— 不到它就不必去读模型。 */
+export const MEMORY_NUDGE_FLOOR = Math.round(Math.min(...CONTEXT_WINDOWS.map(([, w]) => w)) * 0.6);
+
+/** 该自己交接的线 (whoami 的 handoffSuggested): 留三成余量给交接那一轮本身 —— 提示而已,
+ *  决定权在 wizard 自己。 */
+export const handoffAt = (model: string): number => Math.round(contextWindowOf(model) * 0.7);
 
 // 名册只报事实, 不替管家判「太满」: 值不值得接着用这段上下文是经济账, 由它自己算。
 export const ctxOf = (n = 0): string => (n ? `ctx ${Math.round(n / 1000)}k` : "");
