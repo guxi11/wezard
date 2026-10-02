@@ -468,6 +468,7 @@ const TURN_CSS = `
   /* 展开 = 交过去的那段原文 (tell_peer 的 text), 按 markdown 分行。 */
   .handoff .ho-text{margin:0 6px 4px 24px;padding:4px 10px;border-left:2px solid #8250df40;color:#1f2328}
   .handoff .ho-text .md-body{font-size:12.5px}
+  .handoff.pub>.say{margin:2px 6px 6px 24px}
   /* 箭头的颜色就是这件活的回执状态 (title 写明): 进行中 · 已交 · 反问 · 报错 · 没有答案。 */
   .handoff .ho-arrow{font-weight:600;margin-right:-2px;color:#8250df}
   .handoff .ho-arrow.st-done{color:#1a7f37}
@@ -683,16 +684,19 @@ const CHEVRON = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stro
 /** 交过去那段原文的首行 (行内跟着, 超长省略号)。 */
 const firstLine = (text: string): string => text.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
 
-/** 移交行: 整行是一个入口 (`attrs`), 原文默认收起, 只由行尾的 chevron 展开; 没有原文就只是一行。 */
-const hoBox = (cls: string, attrs: string, line: string, text: string): string =>
-  text
+/** 移交行: 整行是一个入口 (`attrs`), 原文默认收起, 只由行尾的 chevron 展开; 没有原文就只是一行。
+ *  公开移交 (`say` = 气泡的 data-key) 那句人在群里看得见: 不折叠, 行下直接是一颗与普通消息同一份渲染的气泡。 */
+const hoBox = (cls: string, attrs: string, line: string, text: string, say?: string): string =>
+  text && say
+    ? `<div class="handoff${cls} pub"><div class="ho-line"${attrs}>${line}</div>${renderSay({ t: "text", body: text, ts: 0 }, say)}</div>`
+    : text
     ? `<details class="handoff${cls}"><summary class="ho-line"${attrs}>${line}<span class="ho-first">${escHtml(firstLine(text))}</span>` +
       `<span class="ho-chev" title="展开原文">${CHEVRON}</span></summary><div class="ho-text">${mdBody(text)}</div></details>`
     : `<div class="handoff${cls}"><div class="ho-line"${attrs}>${line}</div></div>`;
 
 const hoArrow = (st: HandoffStatus): string => `<span class="ho-arrow st-${st.key}" title="${escHtml(st.tip)}">↪</span>`;
 
-const renderHandoff = (h: Handoff, deco?: HandoffDeco): string => {
+const renderHandoff = (h: Handoff, key: string, deco?: HandoffDeco): string => {
   const who = deco ? deco.who(h) : `<span class="ho-nm">.${escHtml(h.name)}</span>`;
   const attrs = deco ? deco.attrs(h) : "";
   if (h.state === "failed")
@@ -709,7 +713,7 @@ const renderHandoff = (h: Handoff, deco?: HandoffDeco): string => {
     : deco ? deco.status(h) : { key: "plain", tip: h.re ? "续问" : "已移交" };
   const lost = h.state === "lost" ? `<span class="ho-why" title="${escHtml(h.reason ?? "")}">交没交出去不确定</span>` : "";
   const acct = deco ? deco.acct(h) : "";
-  return hoBox("", attrs, `${hoArrow(st)}移交 ${who}${turn}${tags}${lost}${acct ? `<span class="ho-acct">${acct}</span>` : ""}`, h.text);
+  return hoBox("", attrs, `${hoArrow(st)}移交 ${who}${turn}${tags}${lost}${acct ? `<span class="ho-acct">${acct}</span>` : ""}`, h.text, h.public ? `${key}:ho` : undefined);
 };
 
 /** `lazyTurn`: 正文不随气泡下发, 只留一个指回 (turn, toolUseId) 的空壳, 客户端展开时再取。
@@ -737,7 +741,7 @@ const renderToolBubble = (
       <summary class="tool-summary"><span class="tool-dot">⏺</span><span class="tool-name">${escHtml(use.toolName)}</span>${arg ? `<span class="tool-arg">(${escHtml(arg)})</span>` : ""}${dur}${clock(use.ts)}</summary>
       ${body}
     </details>
-    <div class="tool-result-line">${preview}</div>${ho ? renderHandoff(ho, deco) : ""}
+    <div class="tool-result-line">${preview}</div>${ho ? renderHandoff(ho, key, deco) : ""}
   </section>`;
 };
 

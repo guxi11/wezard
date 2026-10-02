@@ -367,6 +367,11 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .steps.folded > .bubbles > .bubble.tool > :not(.handoff) { display: none }
 .steps.folded .handoff .ho-line { padding-left: 6px }
 .steps.folded .handoff .ho-text { margin-left: 6px }
+.steps.folded .handoff.pub > .say { margin-left: 6px }
+/* 公开移交那句是这一行的发话人在群里说的话: 气泡取这一行自己的底色 (过程框里 --bub 被重置成白卡,
+   所以在 .mb 上先把行色存一份), 与普通消息同一颗。 */
+.mrow .mb { --row-bub: var(--bub); --row-bub-line: var(--bub-line) }
+.mrow .mb .steps .handoff.pub > .say > .bubble { background: var(--row-bub); border-color: var(--row-bub-line) }
 
 /* 气泡与过程框同一种底色: 都是这个人发出来的 —— 自己的是视角色, 别人的是浅灰。
    TURN_CSS 里写死的白卡 / 灰底 (嵌套气泡、代码块、折叠头) 在有色底上会显成一张张
