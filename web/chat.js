@@ -805,14 +805,15 @@
       bindGo(who);
       return;
     }
-    // 群里选中一个子项: 窗口是那个 role 在这个群里的记录, 顶栏就换成它 —— 它的头像、它的名字, 群名退到副标题。
+    // 群里选中一个子项: 窗口是那个 role 在这个群里的记录, 顶栏就换成它 —— 它的头像、它的名字, 群名退到副标题;
+    // 点群名 = 选回这个群本身 (整个群的视图)。
     if (WITH && c.kind === 'group') {
       var s = (c.subs || []).filter(function (x) { return x.role === WITH; })[0];
       who.innerHTML = pairOf([[WITH, s && s.label]]) + '<span class="t">' + nm(WITH, s && s.name, true) + '</span>' +
-        '<span class="sub">在 ' + esc(c.name) + '</span>';
-      acts.innerHTML = '<button class="vb lite" id="ch-all" title="' + esc('看 ' + c.name + ' 的全部记录') + '">全部</button>';
+        '<span class="sub">在 <button type="button" class="up" id="ch-up" title="' + esc('看 ' + c.name + ' 的全部记录') + '">' + esc(c.name) + '</button></span>';
+      acts.innerHTML = '';
       bindGo(who);
-      $('#ch-all').onclick = function () { selectConv(CONV, ''); };
+      $('#ch-up').onclick = function () { selectConv(CONV, ''); };
       return;
     }
     // 一对一 (私聊, 或群里「只看我与 X」) 两端都亮头像: 我在前, 对端在后, 各自是切视角的入口。
