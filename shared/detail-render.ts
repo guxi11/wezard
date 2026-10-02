@@ -7,6 +7,7 @@ import { ansiToHtml } from "./ansi.js";
 import { staleAt, turnDone } from "./chat-view.js";
 import { isKeepaliveTurn } from "./keepalive.js";
 import { backendLabel } from "./cli-backends.js";
+import { modelLabel } from "./pricing.js";
 import type {
   ApprovalDecision,
   ApprovalDetailRecord,
@@ -632,15 +633,14 @@ const renderSay = (item: TextItem, key: string, cap?: string): string => {
 const renderNote = (item: TextItem, key: string): string =>
   `<div class="bubble note" data-key="${key}">${mdBody(item.body)}</div>`;
 
-// 本轮的账: 模型 / token / 耗时。
+// 本轮的账: 模型 / 上下文 / 耗时。
 const usageChips = (r: TurnDetailRecord, done: boolean, ageMs: number): string => {
   const u = r.usage;
   const ctxPeak = u ? (u.ctxPeak ?? u.input + u.cacheRead + u.cacheWrite) : 0;
   return [
-    r.model ? `<span class="chip model">${escHtml(r.model)}${r.modelAlt ? `<span class="alt"> +${r.modelAlt}</span>` : ""}</span>` : "",
+    r.model ? `<span class="chip model" title="${escHtml(r.model)}">${escHtml(modelLabel(r.model))}${r.modelAlt ? `<span class="alt"> +${r.modelAlt}</span>` : ""}</span>` : "",
     u?.serviceTier && u.serviceTier !== "standard" ? `<span class="chip tier">${escHtml(u.serviceTier)}</span>` : "",
     ctxPeak ? `<span class="tg-tok" title="上下文峰值">ctx ${fmtTok(ctxPeak)}</span>` : "",
-    u?.output ? `<span class="tg-tok" title="输出 token">out ${fmtTok(u.output)}</span>` : "",
     // 耗时只在收口后写死 —— 进行中的 turn 每次渲染都会得到不同的 ageMs, 会把 sig 打乱,
     // 让 SSE 的"内容没变就不重发"彻底失效。进行中的时长由页脚 status bar 负责。
     done ? `<span class="tg-tok">${escHtml(fmtDuration(ageMs))}</span>` : "",

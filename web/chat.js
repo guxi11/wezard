@@ -999,8 +999,11 @@
         (mine ? '<i class="arr">←</i>' : '') + '</span>'
       : '';
     var priv = !m.channel && group ? '<span class="ch priv">私聊</span>' : '';
-    // 本轮的账 (呼吸点 + 模型 / token / 耗时) 跟在时刻后面 —— 片段是服务端渲染好的。
-    var stat = m.meta ? '<span class="mstat">' + m.meta + '</span>' : '';
+    // 本轮的账 (呼吸点 + 模型 / 上下文 / 耗时) 跟在时刻后面 —— 片段是服务端渲染好的。
+    // 只在多方会话里有用 (分得清谁跑的什么模型); 两个 role 之间的对话里 .two 把指标藏掉, 呼吸点与回执留着。
+    var c = convOf(CONV);
+    var two = !group || !!pairPeer(c) || (!!c && c.kind === 'all' && c.peers.length === 1);
+    var stat = m.meta ? '<span class="mstat' + (two ? ' two' : '') + '">' + m.meta + '</span>' : '';
     var who = mine
       ? to + stamp(m.ts) + stat + avBtn(m.from, m.fromLabel)
       : avBtn(m.from, m.fromLabel) + nm(m.from, m.fromName, true) + to + priv + stamp(m.ts) + stat;

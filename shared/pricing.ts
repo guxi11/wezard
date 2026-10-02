@@ -29,6 +29,18 @@ const spellings = (m: string): string[] => {
   return [...new Set([m, undated, flipped, dashed])];
 };
 
+/** 归一后的规范写法 (claude-opus-4-7 / gpt-5 …): 计价查表与显示名共用。 */
+const canonical = (model: string): string => spellings(unwrap(model)).at(-1)!.replace(/-\d{8}$/, "");
+
+const FAMILY = /^claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d+))?$/;
+
+/** 给人看的模型名: claude-opus-5-5[1m] → Opus 5.5; 不是 Claude 家族的就是去了壳的规范名。 */
+export const modelLabel = (model: string): string => {
+  const c = canonical(model);
+  const m = FAMILY.exec(c);
+  return m ? `${m[1]![0]!.toUpperCase()}${m[1]!.slice(1)} ${m[2]}${m[3] ? `.${m[3]}` : ""}` : c;
+};
+
 const KEYS = Object.keys(MODEL_PRICES).sort((a, b) => b.length - a.length);
 
 /** 都没精确命中: 表里最长的、是它前缀的键 (claude-opus-5-5-preview → claude-opus-5-5)。 */
