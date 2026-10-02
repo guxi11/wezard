@@ -690,7 +690,7 @@
       (pair ? '群下只列与我有往来的 role (点击改为列出 chat 内全部)' : '群下列出 chat 内全部 role (点击改为只列有往来的)') + '">' + (pair ? '往来' : '全部') + '</button>';
   };
   var worldToggle = function () {
-    return '<button class="vt" data-vt title="' + (WORLD ? '换回会话列表' : '换成关系图') + '">' + (WORLD ? LIST_SVG + '列表' : TREE_SVG + '关系图') + '</button>';
+    return '<button class="vt" data-vt title="' + (WORLD ? '换回会话列表' : '换成关系') + '">' + (WORLD ? LIST_SVG + '列表' : TREE_SVG + '关系') + '</button>';
   };
   var bindWorldToggle = function (scope) {
     var b = scope.querySelector('[data-vt]');
