@@ -25,6 +25,7 @@
 - hook 的 wezard CLI 免审只认整条命令就是一次 `wezard[.sh] <status|logs|pending|audit|update|reload|config-path|mirror-status|version|help>` 且不含 shell 元字符; 此前命令里任意位置出现 `wezard` 一词就放行 (`curl …/config/set; true wezard` 可免审直改配置)。注意 daemon 的 `/config/set` 路由本身仍不鉴权, 本机进程可直接写 —— 这里只关掉了模型免审走到它的两条路。
 
 ### Changed
+- rolepage 用量条的指标图标: API 请求次数 📡 → 🔌 (一次接口调用), 上下文峰值 🧠 → 🪟 (上下文窗口)。仍用 emoji 而不是单色 svg, 与同排 💬 🛠️ ⏱️ 保持一套, 也能原样进被 fitUsage 收起时的 title。
 - rolepage 用量条 I/O 分布色带里缓存读 (cr) 一段改用边线色 `--line` (图例色点同步), 贴顶时与普通上边线连成一体, 注意力只留给 in / cw / out。
 - rolepage 用量条的 I/O 分布色带从贴底挪到贴顶, 兼作上边线 (原 `border-top` 去掉; 没有分布时留 1px 线), 厚度 3px → 1px, 悬停加粗到 3px。
 - rolepage 关系图标题行的「看全部 / 只看相关」文字按钮换成与侧栏「往来 / 全部」同款的两段式开关「相关 | 全部」, 切换语义不变。
