@@ -952,10 +952,14 @@
       if (gen !== S.gen) return;
       if (!d.ok) return retry();
       var keep = keepView();
+      // 游标切不出「之前」(服务端回 reset): 退回整窗全量重载, 视口照旧锚住。
+      if (d.reset) return loadMsgs('0', keep);
       var old = $('#more'); if (old) old.remove();
-      d.msgs.forEach(function (m) { S.frags[m.id] = m; });
+      // 按时刻兜底的那一页可能带回同一毫秒、已经画着的几条 —— 按 id 去重。
+      var fresh = d.msgs.filter(function (m) { return !rowNode(m.id); });
+      fresh.forEach(function (m) { S.frags[m.id] = m; });
       unfoldPings(inner);
-      var page = frag(moreBtn(d) + d.msgs.map(rowHTML).join(''));
+      var page = frag(moreBtn(d) + fresh.map(rowHTML).join(''));
       bindRow(page); render(page);
       while (page.lastChild) inner.insertBefore(page.lastChild, inner.firstChild);
       bindMore();

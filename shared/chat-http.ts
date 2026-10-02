@@ -286,11 +286,15 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       const limit = Number.isFinite(n) && n >= 0 ? n : DEFAULT_LIMIT;
       // 游标 `before=<msgid>`: 只取它之前的 —— 「载入更早」一页一页往前翻, 不再一次全量。
       // 按 id 定位而不按时刻: 同一毫秒的两条不会在页边上被漏掉; 游标那条已经不在窗口里
-      // (记录过了 horizon 被裁掉) 就退回按它的时刻切。
+      // (记录过了 horizon 被裁掉) 就退回按它的时刻切 —— 取 `<=`, 宁可多带几条同一毫秒的
+      // (客户端按 id 去重) 也不漏。连时刻都没给就切不出「之前」: 回 reset, 让客户端整窗重载,
+      // 而不是回一页空的让按钮凭空消失。
       const before = url.searchParams.get("before");
       const cut = before === null ? all.length : all.findIndex((x) => x.id === before);
-      const bts = Number(url.searchParams.get("beforeTs"));
-      const older = cut >= 0 ? all.slice(0, cut) : all.filter((x) => x.ts < bts);
+      const rawTs = url.searchParams.get("beforeTs");
+      const bts = rawTs === null || rawTs === "" ? Number.NaN : Number(rawTs);
+      if (cut < 0 && !Number.isFinite(bts)) { json(res, 200, { ok: true, at: Date.now(), role: v.role, conv: v.conv, total: all.length, reset: true, truncated: false, msgs: [] }); return; }
+      const older = cut >= 0 ? all.slice(0, cut) : all.filter((x) => x.ts <= bts && x.id !== before);
       const page = limit === 0 ? older : older.slice(-limit);
       json(res, 200, {
         ok: true, at: Date.now(), role: v.role, conv: v.conv, total: all.length,
