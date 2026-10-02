@@ -19,6 +19,7 @@ import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { installApprovalEventListener, makeApproveHandler } from "./approval.js";
 import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, setWorldFactsProvider, recordPost, recordCharter, backfillCharter } from "./detail.js";
+import { errText, sendAsk } from "./mention.js";
 import { EMPTY_FACTS, type WorldFacts, type WorldFactWizard } from "../shared/world.js";
 import { clearAutoWindow, initAutoWindowPersistence, setAutoWindow } from "./session-cache.js";
 import { makeMessageHandler } from "./outbound.js";
@@ -30,7 +31,7 @@ import {
   makeClaimResetHandler,
 } from "./claim.js";
 import { makeWedocBridge } from "./wedoc.js";
-import { errText, installResponseTracker } from "./last-response.js";
+import { installResponseTracker } from "./last-response.js";
 import { scanClaudeSessions } from "./session-scan.js";
 import {
   startScheduler,
@@ -611,11 +612,11 @@ const main = async (): Promise<void> => {
     // 头不走 withTagHeader 的那些 (relay / notify / 工单) 正文里的 tag 在这里挂链;
     // 已挂过的 linkTags 认得出, 不会再套一层。
     const chatIdOf = (t: string): string => baseOfKey(t).replace(/^(user|chat|group):/, "");
-    const notifyChat = (base: string, markdown: string): void => {
+    const notifyChat = (base: string, markdown: string): Promise<void> => {
       const chatId = chatIdOf(base);
-      void ws.client
+      return ws.client
         .sendMessage(chatId, { msgtype: "markdown", markdown: { content: linkTags(base, markdown) } })
-        .catch((e: unknown) => log.warn({ chatId, err: errText(e) }, "chat notify failed"));
+        .then(() => undefined, (e: unknown) => log.warn({ chatId, err: errText(e) }, "chat notify failed"));
     };
     // wizard 在群里的称呼, 只用在**正文**里。气泡的头照旧交给 withTagHeader ——
     // 那一段是路由信息 (`emoji #tag`), parseTagHeader 靠它反解, 群里引用一条气泡
@@ -816,7 +817,7 @@ const main = async (): Promise<void> => {
     http.register("POST /notify", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { to?: string[]; markdown?: string };
+      const b = body as { to?: string[]; markdown?: string; ask?: string };
       const content = (b.markdown ?? "").trim();
       if (!content) { json(res, 400, { ok: false, reason: "markdown required" }); return; }
       // 收件人写的就是名字 —— 补名必须发生在解析之前, 否则一个刚被别处命名的聊天
@@ -831,9 +832,12 @@ const main = async (): Promise<void> => {
         return;
       }
       const dests = [...new Set(refs.length ? refs.map((r) => chatBaseOf(cfg, r)) : [channelOf(self)])];
+      // ask: 要人回一句 —— 正文发完再补一条短提醒 (mention.ts)。
+      const ask = (b.ask ?? "").trim();
       for (const dest of dests) {
-        notifyChat(dest, `${relayLabel(self)}\n\n${content}`);
+        const sent = notifyChat(dest, `${relayLabel(self)}\n\n${content}`);
         recordPost({ target: self, channel: dest, body: content });
+        if (ask) void sent.then(() => sendAsk(ws.client, log.child({ mod: "ask" }), dest, displayName(self), ask));
       }
       json(res, 200, { ok: true, sent: dests.map((d) => chatNameOf(cfg, d) || d) });
     });
@@ -1907,6 +1911,12 @@ const main = async (): Promise<void> => {
     // 收掉一个 wizard。interrupt = 打断它这一轮 (Esc); end = 结束它并回收 pane。
     // 自己终结自己是合法的 (分身干完活自我了结), 代价是这次工具调用不会返回 ——
     // 回执只在 rolepage (生命周期事件不进群); 同群的 wizard 从名册增量里得知。
+    /** 抹掉一个 wizard 的身份; 它在开着的工单里没落定的那一份记成 canceled —— 名字都没了, 不会再落定。 */
+    const forgetWizard = (target: string): string[] => {
+      wizards.drop(target);
+      return jobs.detach(target);
+    };
+
     http.register("POST /wizard/stop", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
@@ -1917,8 +1927,8 @@ const main = async (): Promise<void> => {
       const found = r.ok || r.candidates?.length ? undefined : wizards.byName(addrOf(b));
       const cold = found && !m.chatTargets(baseOfKey(found.target)).includes(found.target) ? found : undefined;
       if (cold && (b.mode ?? "end") === "end") {
-        if (b.forget) wizards.drop(cold.target);
-        json(res, 200, { ok: true, target: cold.target, name: cold.name, mode: "end", forgotten: !!b.forget, note: "它本来就没有会话在跑" });
+        const detached = b.forget ? forgetWizard(cold.target) : [];
+        json(res, 200, { ok: true, target: cold.target, name: cold.name, mode: "end", forgotten: !!b.forget, note: "它本来就没有会话在跑", ...(detached.length ? { canceledIn: detached } : {}) });
         return;
       }
       if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
@@ -1931,10 +1941,10 @@ const main = async (): Promise<void> => {
       const canceled = receipts.cancel(target, self, end ? undefined : currentAsk(target));
       const done = end ? await m.killPane(target) : await m.interruptPane(target, { teardown: true });
       if (!done.ok) { json(res, 502, { ok: false, target, reason: done.reason }); return; }
-      if (end && b.forget) wizards.drop(target);
+      const detached = end && b.forget ? forgetWizard(target) : [];
       // 打断只是停了它这一轮, 它还在; 只有结束才是名册变了。
       if (end) postRoster(baseOfKey(target), [target, self], `**${victim.name || target}** 已收工 · 由 ${displayName(self)} 结束${b.forget ? " (记录一并抹掉)" : ""}`);
-      json(res, 200, { ok: true, target, name: victim.name, mode: end ? "end" : "interrupt", forgotten: !!(end && b.forget), ...(canceled ? { canceled } : {}) });
+      json(res, 200, { ok: true, target, name: victim.name, mode: end ? "end" : "interrupt", forgotten: !!(end && b.forget), ...(canceled ? { canceled } : {}), ...(detached.length ? { canceledIn: detached } : {}) });
     });
 
     // 换模型: 省略名字 = 换自己 (选择器盖在正在跑的这一轮上面照样能开), 点名 = 换

@@ -452,9 +452,13 @@ server.registerTool(
         .optional()
         .describe("收件聊天: 聊天名 (`daily`) 或裸 principal (`chat:wr…` / `user:…`)。省略 = 你这一轮所在的群。认不出的整条拒绝并列出来, 不会部分送达。"),
       markdown: z.string().describe("正文, markdown。头 (是谁发的) 由守护进程自动加, 别自己写。"),
+      ask: z
+        .string()
+        .optional()
+        .describe("要人回一句时填这一句问题: 正文之后另补一条只含这句的 🔔 短消息, 让它不被长正文淹掉 (企微机器人做不了真 @)。"),
     },
   },
-  async ({ to, markdown }) => unwrap("notify", await daemonPost("/notify", { ...(to ? { to } : {}), markdown })),
+  async ({ to, markdown, ask }) => unwrap("notify", await daemonPost("/notify", { ...(to ? { to } : {}), markdown, ...(ask ? { ask } : {}) })),
 );
 
 server.registerTool(

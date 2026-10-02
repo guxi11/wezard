@@ -72,6 +72,10 @@ export interface JobStore {
   /** 已落定几份 / 一共几份 (成员数与 expect 取大)。 */
   tally: (id: string) => { done: number; total: number } | undefined;
   close: (id: string, summary: string) => JobRecord | undefined;
+  /** 一个 wizard 被 forget 了: 它在开着的工单里还没落定的那一份永远不会落定了, 记成
+   *  canceled (留着行, 不删 —— 删了 expect 撑着的总数就永远凑不齐, 也丢了它派的是哪段活);
+   *  已落定的 (连同交付物) 原样不动。返回动过的工单 id。 */
+  detach: (target: string) => string[];
   /** 某个聊天里还开着的工单, 新的在前。 */
   openOf: (base: string) => JobRecord[];
   all: () => JobRecord[];
@@ -133,6 +137,13 @@ export const loadJobStore = (filePath: string): JobStore => {
       const j = db.get(id);
       return j ? db.set(id, { ...j, status: "closed", closedAt: Date.now(), summary }) : undefined;
     },
+    detach: (target) =>
+      Object.values(db.all())
+        .filter((j) => j.status === "open" && j.members.some((x) => x.target === target && !x.outcome))
+        .map((j) => db.set(j.id, {
+          ...j,
+          members: j.members.map((x) => (x.target === target && !x.outcome ? { ...x, outcome: "canceled" as const } : x)),
+        }).id),
     openOf: (base) =>
       Object.values(db.all()).filter((j) => j.base === base && j.status === "open").sort((a, b) => b.openedAt - a.openedAt),
     all: () => Object.values(db.all()),

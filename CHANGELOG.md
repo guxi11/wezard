@@ -8,6 +8,7 @@
 - `/name <名字>` 给聊天起名时, 该聊天的默认 wizard 一并改成这个名字 (全局唯一, 撞名照 `pickName` 挂 `-N`, 回复里注明), 它所在的 tmux 窗口名同步换成新名字; `name_chat` 跟着改默认 wizard 名时也同步窗口名。
 - 定时任务「有事才说」与忙则顺延 (B4 ⑤): 任务文件 / `schedule_task` 新增 `quiet` —— 到点不在群里预告、不出「已起白板」气泡, 那一轮私下跑 (channel ""), 信封让它没事就只回一行 `QUIET`; 守护进程按这一枪的件号 (task 信封新带 `turn`) 定位终句, 不是 `QUIET` 才转进群, 待转发的那一轮落盘 (`quiet-relays.json`), reload 后续守。点名 (`fresh:false`) 的目标到点正忙时不再立刻起白板, 而是后台等它这一轮结束再投 (最多 30 分钟, 仍忙才退回白板; 同一条任务只留一枪在等)。回归脚本加 `task-quiet` 用例。
 - rolepage 工单入口改为点了就进 (B3b ②③): 侧栏会话项上的 📋 与关系图连线上的 📋 可点 —— 一张直接进那张工单页, 多张进只列这几张的工单列表 (顶栏「全部工单」放开); 对话里属于工单的派活、交回与回执挂「📋 标题 + 进度」badge, 点了进工单页。会话顶栏的工单按钮撤掉, 工单页顶栏的「‹ 回到 …」「全部工单」保留; `/api/msgs` 不再带整窗工单号。
+- 要人回话的单独提醒: 进聊天的终句末尾单起一行 `ASK: 一句话问题` (或 `notify({ask})`), 守护进程在正文之后另补一条只含这句的 `🔔 .x 等你回复: …` 短消息, 免得「需要你定」埋在长方案末尾被划过去; 私聊轮不发。企微 aibot 做不了真 @: `aibot_send_msg` 只收 markdown / template_card / 媒体, `text`+`mentioned_list` 实测回 40008, markdown 的 `<@userid>` 在单聊和群里都原样显示 —— 所以只补一条单独的新消息。charter 写明用法。
 - rolepage 工单页 (B3b ②③, 按人定的方向): 工单的一切都在对话区 —— 普通会话的顶栏列出这段往来里出现过的工单 (一张一枚, 标题 + 进度, 超过 3 张进「全部工单」); 工单页 (`j:<id>`) 按时间排开工框 (成员与各自状态)、归在工单名下的派活 / 答话 / 回执、收工框 (定论、交付物、结论), 顶栏可「‹ 回到」进工单前那段会话或进「全部工单」; 工单列表在主区, 进行中在前、已收工淡一档在后。侧栏只挂 📋 标记: 出现过工单的会话行、群下成对子项、关系图上经手工单的那条关系。看着一张工单时切到关系图, 只亮它的当事人与两端都是当事人的线。进度 (已落定 / 一共) 由 `world.jobProgress` 一处算; `/api/world` 的工单成员带定论与交付物, `/api/msgs` 带整窗出现过的工单号。
 - `tell_peer({chain:false})` / spawn·clone 带 task 时的 `chain:false` (B3b ③b): 在答上游派的活时顺手派出的旁支活 (测试、与上游无关的事) 不挂父 k —— 不 defer 给上游的那一份、它的回执也不带 reply-to 续回上游, 回执照常回发话方。默认仍链式; `tell_peer` 回包在挂上上游时多一项 `chained` 说明终句被挂住了。是不是为上游派的只有发话方知道, 所以是显式参数而不是按工单 / 文本推断。
 - 回执回归脚本 `scripts/receipt-regress/run.mjs` (B3b ①): 在 wizard 会话里跑, 生一个 haiku 根与各用例的 haiku 临时分身, 直接 POST daemon 驱动, 只按 `receipts.json` / `jobs.json` 的账和根 transcript 里的回执信封判定, 逐条打印 PASS/FAIL, 跑完收掉全部分身。覆盖: 三级链式冒泡、并发两子 reply-to、wait_peer 取走不重投、deadline 超时、pane 被杀 (dead)、NEED→re→done、工单 expect 计数、收工后迟到的回执、`chain:false` 旁支。改 receipts / jobs / peers 后必跑; 用例名作参数只跑那几条。
@@ -81,6 +82,7 @@
 - spawn 中途失败留下僵尸身份: spawn 途中 daemon 被 reload (调用方看到 `fetch failed`) 时, 身份记录已落盘却没有会话, 名字被永久占住, tell_peer / stop_wizard 都报「exists but its session is not running」。现在身份记录带 `spawning` 标记, 生成功才清; spawn 抛异常也回滚; 开机收掉上一个进程没生完的记录。`stop_wizard` 对有身份没会话的 wizard 也能成功: `end` 视为早已结束, `forget` 删记录腾出名字。
 - rolepage 链接在独立 svr 上报「未找到该会话」: 聊天票据只在创建那一刻推一次到远端, 远端换过地址 (lisct → 本机 17891) 或那一下 svr 不在时就永久缺席。现在 daemon 每次 (重新) 连上远端都把全部聊天票据补推一遍。
 - reload 落在 spawn 中途留下的孤儿 tmux 窗口现在会被收掉 (B4 ⑫), 不再只打一行 warn: 开机清掉没生完的身份后, 等绑定恢复完, 把 daemon 自己的 tmux session 里以这些名字命名、且没有任何绑定指着的 pane 杀掉; 名字期间已被新 spawn 认领的不碰。
+- `stop_wizard({forget:true})` 抹掉一个 wizard 时, 它在还开着的工单里没落定的那一份记成 `canceled` (B4 ⑬, 冷记录与活会话两条路径都算; 回包带 `canceledIn`) —— 此前那一份永远不会落定, 工单「齐了吗」一直差一份。已落定的 (连同交付物) 原样保留。
 
 ## [2.2.2] - 2026-10-02
 

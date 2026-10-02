@@ -40,12 +40,6 @@ const bareFromFrame = (frame: WsFrame<BaseMessage> | WsFrameHeaders | undefined)
 
 const lastByBareId = new Map<string, string>();
 
-// SDK 的回执失败 reject 的是回执帧 ({errcode, errmsg}) 而不是 Error —— 只读 .message 会把拒收原因记成 undefined。
-export const errText = (e: unknown): string => {
-  const f = e as { message?: string; errcode?: number; errmsg?: string };
-  return f?.message ?? (f?.errcode !== undefined ? `errcode=${f.errcode} ${f.errmsg ?? ""}`.trim() : String(e));
-};
-
 export const getLastResponse = (target: string): string | undefined =>
   lastByBareId.get(principalToBare(target));
 
