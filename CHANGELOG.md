@@ -12,6 +12,7 @@
 - 共享记忆整理从定时任务改成 daemon 内建定时器: 不再生成 `~/.wezard/tasks/memory-steward.task.mjs` (开机把旧的改名为 `.retired` 停用, 免得两路并跑), 不进 `list_tasks` / rolepage 日程。每 30 分钟 (开机后 1 分钟先跑一轮) 认领收件箱里的提议 (认领 / 一小时孤儿回收语义不变), 有活才在不属于任何群的内部 key 上起一个白板 wizard 合并, 收工即收; 收件箱改由守护进程归档进 `memory/log/`。全程零气泡、不 notify, 结果只留在 rolepage 与审计日志。
 
 ### Fixed
+- spawn 中途失败留下僵尸身份: spawn 途中 daemon 被 reload (调用方看到 `fetch failed`) 时, 身份记录已落盘却没有会话, 名字被永久占住, tell_peer / stop_wizard 都报「exists but its session is not running」。现在身份记录带 `spawning` 标记, 生成功才清; spawn 抛异常也回滚; 开机收掉上一个进程没生完的记录。`stop_wizard` 对有身份没会话的 wizard 也能成功: `end` 视为早已结束, `forget` 删记录腾出名字。
 - rolepage 链接在独立 svr 上报「未找到该会话」: 聊天票据只在创建那一刻推一次到远端, 远端换过地址 (lisct → 本机 17891) 或那一下 svr 不在时就永久缺席。现在 daemon 每次 (重新) 连上远端都把全部聊天票据补推一遍。
 
 ## [2.2.2] - 2026-10-02

@@ -46,6 +46,8 @@ import {
   wizardStore,
   settleName,
   settleAll,
+  sweepUnborn,
+  BOOT_ID,
   evictStaleName,
   childrenOf,
   ancestorsOf,
@@ -1119,6 +1121,9 @@ const main = async (): Promise<void> => {
       [...m.chatRoster("").flatMap((c) => c.targets), ...wizards.all().map((w) => w.target)],
       (t) => chatNameOf(cfg, t),
     );
+    // 上一个进程生到一半就没了的身份 (spawn 途中 reload): 没会话的删掉, 腾出名字。
+    sweepUnborn(wizards, (t) => m.chatTargets(baseOfKey(t)).includes(t))
+      .forEach((w) => log.child({ mod: "wizard" }).warn({ target: w.target, name: w.name }, "unborn identity swept — a tmux window by this name, if any, is now orphaned"));
 
     // 工单账本 (见 jobs.ts)。只在**显式传了 `job`** 时起作用 —— 不用工单的调用方
     // 行为与从前一模一样。
@@ -1586,6 +1591,8 @@ const main = async (): Promise<void> => {
         bornAt: Date.now(),
         clonedFrom: inherit ? sourceInfo?.sessionId ?? "" : "",
         ...(forkOf ? { forkOf } : {}),
+        // 生完才清; 这个进程中途没了, 下次开机由 sweepUnborn 认出并收掉。
+        spawning: BOOT_ID,
       });
       const name = wizards.rename(target, normalizeTag(askedName) || tag);
       const charter = charterFor(target, { parent: self, forkOf, inherited: inherit });
@@ -1608,13 +1615,14 @@ const main = async (): Promise<void> => {
         // 也少一次"就位了但没事干"的空转。
         bootstrap: task ? task + envelopeFor(self, "") : undefined,
         keepalive,
-      });
+      }).catch((e: unknown) => ({ ok: false as const, reason: `spawn threw: ${String(e)}`, inherited: false }));
+      // 生不出来就回滚身份 —— 否则名字被一个永远没有会话的记录占住。
       if (!r.ok) {
         wizards.drop(target);
         json(res, 500, { ok: false, reason: r.reason });
         return;
       }
-      wizards.upsert(target, { clonedFrom: r.inherited ? sourceInfo?.sessionId ?? "" : "", ...(r.inherited ? {} : { forkOf: undefined }) });
+      wizards.upsert(target, { spawning: undefined, clonedFrom: r.inherited ? sourceInfo?.sessionId ?? "" : "", ...(r.inherited ? {} : { forkOf: undefined }) });
       const kid = briefOf(self, target);
       // r.model 是 spawnTmuxClaude 通过 /model 实测确认落地的那个 —— 可能跟调用方
       // 传的原始字符串不一样 (口语化 → 目录里匹配到的关键词), 播报要报实情。
@@ -1647,6 +1655,15 @@ const main = async (): Promise<void> => {
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       const b = body as { name?: string; tag?: string; mode?: string; forget?: boolean };
       const r = resolvePeer(self, addrOf(b));
+      // 有身份没会话 (冷记录 / 生到一半的僵尸): resolvePeer 够不着它, 但收它不需要
+      // 会话 —— end 视为早已结束, forget 删掉记录、腾出名字。interrupt 无从谈起。
+      const found = r.ok || r.candidates?.length ? undefined : wizards.byName(addrOf(b));
+      const cold = found && !m.chatTargets(baseOfKey(found.target)).includes(found.target) ? found : undefined;
+      if (cold && (b.mode ?? "end") === "end") {
+        if (b.forget) wizards.drop(cold.target);
+        json(res, 200, { ok: true, target: cold.target, name: cold.name, mode: "end", forgotten: !!b.forget, note: "它本来就没有会话在跑" });
+        return;
+      }
       if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
       const { target } = r;
       const victim = briefOf(self, target);

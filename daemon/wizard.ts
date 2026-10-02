@@ -12,6 +12,7 @@
 //
 // 本模块只有两类东西: 一个写盘的注册表 (唯一副作用), 和一堆把记录渲染成文字的
 // 纯函数。真正的动作 (spawn / inject / kill) 全在 mirror-bridge, 这里一个都不做。
+import { randomUUID } from "node:crypto";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { normalizeTag, stripSigil, tagOfKey, uniqueTag } from "../shared/session-label.js";
 
@@ -31,6 +32,9 @@ export interface WizardRecord {
    *  归谁管 (预算、回收); forkOf 是上下文从哪来。克隆自己时两者是同一个, 不重复记。 */
   forkOf?: string;
   bornAt: number;
+  /** 正在 spawn 它的那个 daemon 进程的代号 (BOOT_ID) —— 身份先于会话落盘, 生成功了才清掉。
+   *  留着别的代号 = 生到一半那个进程就没了 (reload / 崩溃), 记录成了僵尸。不用 pid: 重启后会复用。 */
+  spawning?: string;
   /** 自己写下的长期记忆, 每次 spawn 重新注入上下文。 */
   memory: string[];
 }
@@ -171,6 +175,22 @@ export const settleAll = (
     .sort((a, b) => Number(!!tagOfKey(a)) - Number(!!tagOfKey(b)) || born(a) - born(b))
     .forEach((t) => settleName(store, chatNameOf(t), t));
 };
+
+/** 这个 daemon 进程的代号, 每次启动一个。 */
+export const BOOT_ID = randomUUID();
+
+/** 收掉生到一半就断了的身份: `spawning` 留着别的进程的代号 —— 已经绑上会话的只清
+ *  标记, 没绑上的 (名字被占、tell_peer / stop_wizard 都够不着) 整条删掉。返回删掉的。 */
+export const sweepUnborn = (
+  store: WizardStore,
+  isBound: (target: string) => boolean,
+  boot = BOOT_ID,
+): WizardRecord[] =>
+  store.all()
+    .filter((w) => w.spawning !== undefined && w.spawning !== boot)
+    .flatMap((w) => isBound(w.target)
+      ? (store.upsert(w.target, { spawning: undefined }), [])
+      : (store.drop(w.target), [w]));
 
 /** 直系分身。 */
 export const childrenOf = (all: readonly WizardRecord[], target: string): WizardRecord[] =>
