@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- `tell_peer` 唤醒的是缓存已冷 (距上次活动超过 `keepalive.ttlSec`) 且 ctx ≥60k 的 wizard 时, 回包多一项 `wakeCost`: 这次要整段重写多少缓存、是白板 spawn 的几倍 —— 让派活的 (多半是管家) 下次分派前就记着这笔账。
 - rolepage 忙闲第四态「等人点」(紫色): wizard 停在 daemon 发出的审批卡 / 提问卡上时, 名片、关系树、工单成员显示 `等人点 · <工具名>`, 侧栏也亮灯 —— 此前它在审批长轮询期间显示「执行中」, 和真在干活分不出来。数据取 daemon 的 pending, 按 approval 认卡的同一口径归到 wizard 上。
 - rolepage「载入更早」改为按游标一页一页往前翻 (`/api/msgs?before=<msgid>`), 不再一次取全量 (大群窗口一次近 1MB); 视口锚定不变。
 - 共享记忆合并后告诉在场的 wizard: 整理者真改动了哪份群 / 工作区记忆, pane 活着且读这份 md 的 wizard 下一条消息尾巴上捎一行「记忆已更新, 全文见 …」(宪章是出生快照, 此前要等重生才看得到)。整理者合并时把该工作区的 `CLAUDE.md` / `CODEBUDDY.md` / `AGENTS.md` / `.claude/CLAUDE.md` 与各 backend 的 auto-memory `MEMORY.md` 当只读参考, 已写在那里的不再收; workspace 提议记下 `cwd`, 提议者收工后仍找得到参考源。名册增量的 reminder 表头改成通用的「宪章是快照」; 宪章重渲染时清空该 wizard 待投递的增量 (新宪章里都有了)。

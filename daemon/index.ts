@@ -74,7 +74,7 @@ import { loadJsonMap } from "../shared/json-map-store.js";
 import { createReceipts, deadlineOf, kAttr, newTurn, type ParentK, type Slot as ReceiptSlot } from "./receipts.js";
 import type { TurnTag } from "../shared/reminder.js";
 import { createHandoffs, handedOff, handingOff, type Pending as PendingHandoff } from "./handoff.js";
-import { rankCandidates, renderCandidates } from "./route.js";
+import { rankCandidates, renderCandidates, wakeNoteOf } from "./route.js";
 import { parseWhen, renderChatLog, type LogSession } from "./chat-log.js";
 import {
   startGraph,
@@ -967,6 +967,11 @@ const main = async (): Promise<void> => {
       }
       // 时刻取在注入**之前**: 晚于那一句落盘的话, 回执定位的下界就偏了。
       const at = Date.now();
+      // 唤醒代价同样要在注入之前量: 投进去 transcript 一动, 就看不出它冷了多久。
+      const info = m.sessionInfo(target);
+      const wake = info?.jsonlPath
+        ? wakeNoteOf(info.contextTokens, (() => { try { return statSync(info.jsonlPath).mtimeMs; } catch { return 0; } })(), at, cfg.wrc.mirror.keepalive.ttlSec * 1000)
+        : "";
       const deadlineSec = (body as { deadline?: number }).deadline;
       const deadlineAt = deadlineOf(at, deadlineSec === undefined ? undefined : Number(deadlineSec));
       const inj = await m.injectText(target, text, undefined, {
@@ -997,6 +1002,7 @@ const main = async (): Promise<void> => {
         ...(waitedMs ? { waitedMs } : {}),
         ...(jobId ? { job: jobId } : {}),
         ...(inj.ok ? { turn: turn.turn } : {}),
+        ...(inj.ok && wake ? { wakeCost: wake } : {}),
         ...(turn.reUnknown ? { reUnknown: true, reNote: `re "${re}" 不是你正在等 ${displayName(target)} 答的那件, 按新活发出` } : {}),
         // 回执怎么回来 —— 写在回包里, 调用方 (模型) 不必从工具描述里回忆。
         ...(inj.ok && wantReceipt

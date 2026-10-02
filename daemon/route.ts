@@ -102,6 +102,8 @@ export const FRESH_CTX = 25_000;
 const BIG_COLD = 60_000;
 const BIG_WARM = 150_000;
 
+const k = (n: number): string => `${Math.round(n / 1000)}k`;
+
 /** 唤醒一个 wizard 这一下要付的缓存代价: 冷 = 距上次活动超过 TTL, 整段 ctx 要重新 cache write。 */
 export interface WakeCost {
   cold: boolean;
@@ -116,6 +118,14 @@ export const wakeCostOf = (ctx: number, lastActivity: number, now: number, ttlMs
   return { cold, write: cold ? ctx : 0, times: Math.round((ctx / FRESH_CTX) * 10) / 10 };
 };
 
+/** tell_peer 回包里的一句: 这次唤醒的是冷且大的 wizard, 付了多少缓存重写 —— 让派活的下次先算这笔账。 */
+export const wakeNoteOf = (ctx: number, lastActivity: number, now: number, ttlMs: number): string => {
+  const w = wakeCostOf(ctx, lastActivity, now, ttlMs);
+  return w.cold && ctx >= BIG_COLD
+    ? `这次唤醒的缓存已冷 (超过 TTL ${Math.round(ttlMs / 60_000)} 分钟没动), 要整段重写 ~${k(ctx)} 缓存 ≈ 白板 spawn 的 ${w.times} 倍; 这件活若不依赖它那段上下文, 下次白板 spawn 更省`
+    : "";
+};
+
 /** 一句话就说得清的小活: 改样式 / 文案 / 单点修改 / 简单查询 —— 用不上谁的长上下文。 */
 const SMALL_RE = /样式|css|border|颜色|字号|字体|间距|边距|圆角|阴影|对齐|图标|文案|措辞|改名|重命名|typo|错别字|拼写|一行|单点|查一下|看一下|问一下|是多少|在哪/i;
 export const isSmallTask = (task: string): boolean => task.length <= 40 || (task.length <= 160 && SMALL_RE.test(task));
@@ -123,8 +133,6 @@ export const isSmallTask = (task: string): boolean => task.length <= 40 || (task
 /** 证据弱 (没碰过这件活点到的文件; 小活则少于 3 个) 又贵 (冷且 ≥60k, 或热但 ≥150k) → 不划算。 */
 const notWorth = (e: Evidence, w: WakeCost, small: boolean, ctx: number): boolean =>
   (e.files.length === 0 || (small && e.files.length < 3)) && ctx >= (w.cold ? BIG_COLD : BIG_WARM);
-
-const k = (n: number): string => `${Math.round(n / 1000)}k`;
 
 const quoted = (ts: readonly string[], max = 6): string =>
   ts.slice(0, max).map((t) => `「${t}」`).join("") + (ts.length > max ? ` +${ts.length - max}` : "");
