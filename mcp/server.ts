@@ -176,7 +176,7 @@ server.registerTool(
   {
     title: "List running agent sessions",
     description:
-      "本机 tmux 里**所有**正在跑的 agent 会话 (claude / claude-internal / codebuddy 都算), 每个带一个稳定的动物 emoji、工作目录、tmux 位置和最近在干嘛的一行摘要。注意这是**机器级**的清单: 里面既有绑定了聊天的 wizard, 也有人在终端里自己开的、与企微无关的会话。用户说「列出所有 session」「有哪些会话在跑」「我想切换 session」时调它, 结果按 emoji + 目录 + 摘要 排成可读的编号列表, 并标出当前正被镜像的那个 (`current: true`)。只想看 wizard (名字/职责/家谱/忙闲) 用 wizard_roster。",
+      "(人侧/罕用 · 同 IM `/sessions`) 本机 tmux 里所有 agent 会话, 含与企微无关的终端会话; 只在用户要「切换 session」时用。找 wizard 用 wizard_roster。",
     inputSchema: {},
   },
   async () => {
@@ -189,7 +189,7 @@ server.registerTool(
   {
     title: "Switch WeCom mirror to another agent session",
     description:
-      "把企微镜像**改接**到另一个已经在跑的会话上 —— 从此这个聊天镜像的、注入的都是它。换句话说: 让那个会话成为这个聊天的 wizard。用户挑了一个要切过去时调 —— 「切到 wezard 那个」「镜像第 2 个」「换到 🦊 那个会话」。先用 list_claude_sessions 把用户的自然语言指代 (emoji / 目录 / 话题) 解析成具体 sessionId, 再传进来。",
+      "(人侧/罕用 · 同 IM `/sessions <emoji|id>`) 让本聊天改接到一个已在跑的会话 (sessionId 从 list_claude_sessions 拿)。只在用户点名要切时用。",
     inputSchema: {
       sessionId: z.string().describe("The target session's sessionId (a UUID), as returned by list_claude_sessions."),
     },
@@ -251,6 +251,10 @@ const unwrapText = (name: string, r: DaemonReply) =>
 const ADDRESS_DOC =
   "wizard 的名字 —— 全机唯一, 它就是地址: `'fix'` 或 `'.fix'` 都行, 不分它住在哪个群。`''` = 你这个聊天的默认 wizard。永远别自己拼 key: wizard_roster / spawn_wizard / clone_wizard 返回的名字 (或 409 里的 `address`) 原样传回来。老的 `聊天名#tag` 写法仍然认, 但别再写。";
 
+// 生 wizard 的三个工具共用: 模型名是口语, 落地的是 `/model` 列表里最接近的那一项。
+const MODEL_DOC =
+  "跑在哪个模型上, 口语写 ('opus' / 'haiku' / 'sonnet 5'); 落地的是它 `/model` 列表里最接近的一项, 见返回的 `model`, 对不上时带 `modelWarning` (仍在跑, 停在默认模型)。省略 = 该 CLI 默认。之后换用 set_model。";
+
 // 造一个 wizard: 它的 home 默认是调用方自己的聊天 (所以走 `selfRef`); 给了 `chat`
 // 就落在另一个**起过名字**的聊天里。名字全局唯一, 与 home 无关。
 server.registerTool(
@@ -258,13 +262,13 @@ server.registerTool(
   {
     title: "Spawn a blank new wizard",
     description:
-      "在指定项目目录下长出一个**全新的 wizard** —— 自己的 tmux pane、自己的全局名字 (`.name`), home 默认是你这个聊天, 等价于人在群里敲 `/new .name`。它**不继承任何上下文**(白纸一张): 要一个开局就带着你读过的材料的分身, 用 clone_wizard; 要一个归你管、干完可回收的白板子 wizard, 用 spawn_wizard。这个工具生的 wizard 独立长住, 不挂在谁名下。新 wizard 在群里说话时气泡头是 `emoji .name`, 之后用 wizard_roster / peek_peer / send_peer / wait_peer 驱动它。用户说「在 /path 下新建一个会话」「帮我在 xxx 目录起个 agent」时调它。给 `chat` 就把它的 home 设在**另一个**聊天里 —— 那个聊天必须起过名字(list_chats 能看到)。目录不存在会自动创建。绝不会顶掉一个聊天的默认 wizard。名字全局唯一: 撞上的 wizard 静默超过一天就直接顶掉它、名字归新的; 撞上一个还在的 wizard 返回 409, 返回里的 `name` 是最终落定的名字。",
+      "在指定项目目录下长出一个**全新的 wizard** —— 自己的 tmux pane、自己的全局名字 (`.name`), home 默认是你这个聊天, 等价于人在群里敲 `/new .name`。它**不继承任何上下文**(白纸一张): 要一个开局就带着你读过的材料的分身, 用 clone_wizard; 要一个归你管、干完可回收的白板子 wizard, 用 spawn_wizard。这个工具生的 wizard 独立长住, 不挂在谁名下。新 wizard 在群里说话时气泡头是 `emoji .name`, 之后用 tell_peer 驱动它、peek_peer 看它。用户说「在 /path 下新建一个会话」「帮我在 xxx 目录起个 agent」时调它。给 `chat` 就把它的 home 设在**另一个**聊天里 —— 那个聊天必须起过名字(list_chats 能看到)。目录不存在会自动创建。绝不会顶掉一个聊天的默认 wizard。名字全局唯一: 撞上的 wizard 静默超过一天就直接顶掉它、名字归新的; 撞上一个还在的 wizard 返回 409, 返回里的 `name` 是最终落定的名字。",
     inputSchema: {
       cwd: z.string().describe("Absolute project path to start the new session in, e.g. /Users/foo/projects/bar. Created if missing."),
       name: z
         .string()
         .optional()
-        .describe("新 wizard 的名字 (如 'fix'、'docs', 带不带 '.' 都行) —— 全机唯一, 它就是地址, 挑一个说明它干什么的短词, 之后用它 send_peer / peek_peer。省略则按目录名生成。"),
+        .describe("新 wizard 的名字 (如 'fix'、'docs', 带不带 '.' 都行) —— 全机唯一, 它就是地址, 挑一个说明它干什么的短词, 之后用它 tell_peer / peek_peer。省略则按目录名生成。"),
       chat: z
         .string()
         .optional()
@@ -273,10 +277,7 @@ server.registerTool(
         .enum(["claude", "claude-internal", "codebuddy"])
         .optional()
         .describe("用哪个 CLI 启动。用户没点名就省略, 它会继承那个聊天当前的后端。多个后端可以并存。"),
-      model: z
-        .string()
-        .optional()
-        .describe("这个 wizard 跑在哪个模型上, 口语化随便写 ('opus' / 'sonnet 5' / '最新的 opus' / 'claude-haiku-4-5' 都行) —— 不是塞给启动参数, 而是等 pane 起来后打开它自己的 `/model` 列表, 在里面挑最接近的一项选中, 所以返回里的 `model` 是列表里真正落地的那一项 (如 'Opus 5.5'), 可能跟你传的字符串不一样; 列表里对不上会带 `modelWarning`, 那时 wizard 还在跑但停在了原来的模型上, 不是失败。省略用该 CLI 的默认。同一个聊天里的 wizard 可以各跑各的模型 —— 又长又要判断的活给 opus, 跑腿的 lint/grep 给 haiku。之后要换用 set_model。"),
+      model: z.string().optional().describe(MODEL_DOC),
       keepalive: z
         .boolean()
         .optional()
@@ -322,7 +323,7 @@ server.registerTool(
   {
     title: "List every chat and its sessions",
     description:
-      "跨聊天目录: 守护进程知道的每一个企微聊天、它的名字 (空 = 没起名)、是不是你住的那个 (`self`), 以及以每个聊天为 home 的 wizard 及其名字。用户指向这个聊天之外的活时调它 —— 「别的群有谁在跑」「把这个结论发到 daily 群」「在 sanitizer 群里开个会话」。wizard 本身不必经过聊天就能叫到 (名字全局唯一); 聊天名用于 notify 与在那边生新 wizard。",
+      "(罕用 · 同 IM `/chats`) 每个聊天的名字与住在那里的 wizard。只在要给 notify / spawn 的 `chat` 找聊天名时用; 找 wizard 用 wizard_roster。",
     inputSchema: {},
   },
   async () => unwrap("list_chats", await daemonPost("/chats/list", {})),
@@ -347,7 +348,7 @@ server.registerTool(
   {
     title: "Read chat history like a person would",
     description:
-      "像人翻聊天记录那样读往来, 一行一句: `[时刻] 谁 → 谁: 说了什么`。三级收窄, 每一级都可以不给: `role` (谁的视角 —— 只留它说的或听的) → `chat` (哪个群 —— 只留那个群里公开说的) → `target` (和谁 —— 只留与它的往来)。什么都不给 = 你这一轮所在的群: 人说的、各个 wizard 答的、wizard 之间公开说的都在里面。只给 `target` = 你和它的全部往来 (含 send_peer 默认走的私聊, 群里看不见的那部分); `role` + `target` = 那两方之间; 只给 `role` = 它在所有群与私聊里的往来; 再加 `chat` 就限定在那个群里。没给 `chat` 时每行会标出这句是在哪个聊天 / 私聊里说的。一条消息一行起头, 正文的续行缩进; 还没等到回答的问话行尾标 `(还没有回复)`。\n" +
+      "像人翻聊天记录那样读往来, 一行一句: `[时刻] 谁 → 谁: 说了什么`。三级收窄, 每一级都可以不给: `role` (谁的视角 —— 只留它说的或听的) → `chat` (哪个群 —— 只留那个群里公开说的) → `target` (和谁 —— 只留与它的往来)。什么都不给 = 你这一轮所在的群: 人说的、各个 wizard 答的、wizard 之间公开说的都在里面。只给 `target` = 你和它的全部往来 (含 tell_peer 默认走的私聊, 群里看不见的那部分); `role` + `target` = 那两方之间; 只给 `role` = 它在所有群与私聊里的往来; 再加 `chat` 就限定在那个群里。没给 `chat` 时每行会标出这句是在哪个聊天 / 私聊里说的。一条消息一行起头, 正文的续行缩进; 还没等到回答的问话行尾标 `(还没有回复)`。\n" +
       "按时间和条数读: 默认回最新的 `limit` 条; `until` = 只看那之前的 (往回翻页), `since` = 从那时起 (只给 `since` 就从它往后数 `limit` 条)。回执末尾给出翻页用的时刻, 原样传回即可; 往回已经没有了会明说到头。\n" +
       "只有正文: 每个来回取问话和终句, 工具调用的过程不在里面, 保温的 ping/pong 已经剔掉。记录是从各个 wizard 当前会话的 transcript 现拼的: 一个 wizard `/clear` 或交接之前说的不在里面, 除点名的 role / target 外只并最近一周动过的会话。用户说「群里刚才聊了什么」「.fix 之前怎么答的」「我上次让 .docs 干了什么」, 或者你被叫进一个已经聊了一阵的群、需要来龙去脉时调它。要读**某一个 wizard** 会话里的原始对话用 peek_peer。",
     inputSchema: {
@@ -400,11 +401,10 @@ const TELL_SCHEMA = {
 };
 
 const TELL_DESC =
-  "跟另一个 wizard 说话 —— 文本原样落进它的输入框, 它当成新的一轮接手。这是你**驱动**同伴的唯一方式: 派活、解它的阻塞、回答它的提问、叫它继续。名字全局唯一, 目标住在哪个群都一样叫。对方还不存在就自己造: 要它继承你的上下文用 clone_wizard, 要一个白纸一张的子 wizard 用 spawn_wizard。\n" +
-  "**说完就返回, 你不会被挂住**: 对方干完那一轮, 守护进程把它的结论作为**新的一轮**自动送到你这里 (带信封说明是谁的回执、在哪场对话里、工单还差几份)。所以: 问完就接着干你自己的事, **不要再调 wait_peer 守着**; 也不必催 —— 它答了你自然会收到。你忙着的时候回执会排队等你这一轮说完再进来, 不会和你的输出挤在一起。\n" +
-  "**fan-out 带上 `job`**: 五路派活就是五次 tell_peer (或 clone_wizard({task})), 回执陆续回来, 每一份都写着第几份 / 还差几份, 最后一份明确告诉你「全部到齐」—— 那时才汇总、才 close_job。没齐就别向人汇报进度。\n" +
-  "**默认是私聊**: 不出任何群气泡, 只记在你们双方的 rolepage 里。**`public:true` 则在公开频道说** —— 你这一轮所在的群里出一条 `.你 → .它` 的气泡, 它那一轮的回复也发进这个群。公开与否由你判断: 需要人知道的、或本该当着人讨论的 (关键决策、给人的结论、要人拍板的分歧) 用 public; 过程性的派活、催进度、对齐细节用私聊。\n" +
-  "无论哪种都直说: 要什么、给什么、结论是什么, 不用寒暄、不用引用原文。`text` 只写活本身 —— 守护进程会在后面挂一段信封, 告诉对方这是谁发的、私聊还是公开、它的最后一条消息就是回执 (收口成 `RESULT: …`), 这些别自己再写。拒绝对自己发送。";
+  "跟另一个 wizard 说话 —— 文本原样落进它的输入框, 它当成新的一轮接手 (派活、答它的问题、叫它继续都走这里)。目标不存在就先 spawn_wizard / clone_wizard。\n" +
+  "**说完就返回**: 对方干完那一轮, 它的最后一条消息作为**新的一轮**自动送到你这里 (回执, 带信封说明是谁、哪场对话、工单还差几份); 你正忙时回执排队等你说完。\n" +
+  "默认私聊: 不出群气泡, 只记在双方 rolepage。`public:true`: 你这一轮所在的群里出 `.你 → .它` 气泡, 它的回复也进群 (同时照样回执给你)。\n" +
+  "`text` 只写活本身 —— 守护进程会挂信封告诉对方是谁发的、私聊还是公开、结论收口成 `RESULT: …`。拒绝对自己发送。";
 
 const tellBody = (a: { name: string; text: string; when?: string; waitSec?: number; job?: string; public?: boolean; receipt?: boolean }) => ({
   name: a.name,
@@ -427,7 +427,7 @@ server.registerTool(
   {
     title: "(deprecated) alias of tell_peer",
     description:
-      "**已更名为 `tell_peer`** —— 行为完全一样 (说一句、不阻塞、对方的结论自动回执给你), 保留这个名字只为不打断正在跑的会话。新的调用请用 `tell_peer`。\n" + TELL_DESC,
+      "同 tell_peer (旧名, 只为不打断正在跑的旧会话而保留)。新调用一律用 tell_peer。",
     inputSchema: TELL_SCHEMA,
   },
   async (a) => unwrap("send_peer", await daemonPost("/peers/tell", tellBody(a))),
@@ -459,7 +459,7 @@ server.registerTool(
     description:
       "**一般不需要它了**: `tell_peer` 之后对方的结论会自动作为新的一轮送到你这里 (回执), 你不必守着。保留它是因为有一件事只有它做得到 —— **在同一轮里拿到答案**: 下一步硬依赖对方的结果、把工作拆成两轮会丢上下文时, 用它阻塞等; 以及 `need:1` 那种「谁先完事就先处理谁」。代价是你这个 pane 在等的过程中什么也干不了。\n" +
       "被它取走的那一份**不会再作为回执注入**一遍 (返回里 `delivered: true` = 回执已经抢先进过你的会话, 别重复处理)。\n" +
-      "挂起, 直到点名的 wizard 停下来 (它的终端不再显示中断提示), 然后返回它最新的回复。超时先到则返回 `idle: false` 与原因: 它只是还在干, 你可以 peek 一眼再等。很便宜: 守护进程轮询的是 pane, 不烧 token。回的只算**你上次 send_peer 之后**它说的: 它收口了 `RESULT: …` 就只回 `result` (`omitted` = 正文还有多少字没给, 要读用 peek_peer), 没收口才回 `lastText` (超长掐中间); `stale: true` = 它停下了却没有新回复 (卡在弹窗上, 或那句话没被接住) —— peek_peer 看一眼, 别把它当成答完了。私聊轮的回复不进群 —— 人需要知道结论时, 用你自己的话收口给人, 别把原话再念一遍; 公开轮的回复已经在群里了, 更不必复述。\n" +
+      "挂起, 直到点名的 wizard 停下来 (它的终端不再显示中断提示), 然后返回它最新的回复。超时先到则返回 `idle: false` 与原因: 它只是还在干, 你可以 peek 一眼再等。很便宜: 守护进程轮询的是 pane, 不烧 token。回的只算**你上次 tell_peer 之后**它说的: 它收口了 `RESULT: …` 就只回 `result` (`omitted` = 正文还有多少字没给, 要读用 peek_peer), 没收口才回 `lastText` (超长掐中间); `stale: true` = 它停下了却没有新回复 (卡在弹窗上, 或那句话没被接住) —— peek_peer 看一眼, 别把它当成答完了。私聊轮的回复不进群 —— 人需要知道结论时, 用你自己的话收口给人, 别把原话再念一遍; 公开轮的回复已经在群里了, 更不必复述。\n" +
       "**真要等一批就用 `names` 一次等一组**, 别一个一个等: 它们本来在同时干活, 串行等的墙钟是所有人之和, 并行等只等最慢的那一个 (不过 fan-out 的常规做法是给 `tell_peer` 带 `job`, 让回执自己回来并替你数「齐了吗」)。等一组时 `results` 按你给的顺序逐个回, 只等一个则直接摊平在顶层。`need` 决定满几个就返回 (默认全部; `need:1` = 谁先完事就先处理谁, 剩下的还在跑, 再调一次接着等)。",
     inputSchema: {
       name: z.string().optional().describe(`${ADDRESS_DOC} 等一组时改用 \`names\`。`),
@@ -487,7 +487,7 @@ server.registerTool(
   {
     title: "Run a loop graph over several tagged agents",
     description:
-      "把这个聊天里的几个 wizard 串成一条**会循环的流水线**, 交给守护进程去驱动。`nodes` 是参与的 `#tag` wizard (每个可以自选 cli / 模型 / 工作区; 不存在的当场造出来, 已经在跑的原样复用、上下文不动)。`steps` 是有序管线 —— 每一步向一个 wizard 发一段提示、等它干完、抓住它的回复、喂给下一步。整张 step 表会被走 `rounds` 遍, 这才叫**循环**: `fix → review → fix → review …` 直到某个回复里出现 `until` 或轮次用完。提示模板可以引用前面的产出: `{{last}}` = 上一步的回复, `{{<tag>}}` = 那个 wizard 最新的回复, `{{round}}` = 第几轮。立刻返回 runId 并把进度播报进群; 用 graph_status 查、stop_graph 停。用户要「几个 agent 互相评审/迭代到收敛」时用它。只是推一个 wizard 一把, 用 send_peer + wait_peer。要它们开局就共享同一批材料, 先 clone_wizard 出这些节点再跑图。",
+      "(罕用) 守护进程驱动的循环流水线: `steps` 依次给 `nodes` 里的 wizard 发提示、等它答完、把回复喂给下一步 (`{{last}}` / `{{<tag>}}` / `{{round}}`), 整表走 `rounds` 遍或回复含 `until` 即停。只活在内存, reload 即丢。仅当用户明说「互相迭代到收敛」时用; 平时 tell_peer + 回执就够。",
     inputSchema: {
       nodes: z
         .array(
@@ -530,7 +530,7 @@ server.registerTool(
   {
     title: "Inspect running / finished agent graphs",
     description:
-      "看 run_agent_graph 起的流水线跑到哪了: 每一步的轮次、目标 wizard、状态 (running / done / timeout / error) 以及每个 wizard 交出来的回复。不给 runId 就列出本聊天的全部。注意图只活在守护进程内存里 —— reload 会把它清掉 (wizard 本身还活着)。",
+      "(罕用) run_agent_graph 的进度: 每步的轮次、目标、状态与回复。省略 runId = 本聊天全部。",
     inputSchema: {
       runId: z.string().optional().describe("Run id from run_agent_graph. Omit to list all runs for this chat."),
     },
@@ -546,7 +546,7 @@ server.registerTool(
   {
     title: "Cancel a running agent graph",
     description:
-      "在当前这一步之后停掉流水线。**不会**打断正在生成的那个 wizard —— 它把话说完, 之后不再派新的步骤。用户说「别跑了」时用。要立刻打断某个 wizard 用 stop_wizard({mode:'interrupt'})。",
+      "(罕用) 当前步之后停掉 run_agent_graph, 不打断正在生成的 wizard (要打断用 stop_wizard)。",
     inputSchema: { runId: z.string().describe("Run id from run_agent_graph.") },
   },
   async ({ runId }) => unwrap("stop_graph", await daemonPost("/graph/stop", { runId })),
@@ -585,14 +585,10 @@ server.registerTool(
   {
     title: "Schedule a prompt to run in a wizard session, on a recurring or one-off schedule",
     description:
-      "排一个**到点自动执行**的活, **归在你名下** (你的 rolepage「日程」里看得到): 到时间了, daemon 起一个**全新的白板 wizard** (名字 `<你>-task-xxxx`, 挂在你的家谱下), 把 `prompt` 原样说给它听, 它干完活自动收掉 —— 产出照常落在群里。守护进程级, 跨 CLI 重启/会话结束仍在。用户说「每个工作日晚上 9:30 自动跑一下 xxx」「每天早上帮我看看 yyy」「每 2 小时同步一次 zzz」「明早 9 点提醒并整理 www」时调它。\n" +
-      "**每条任务落成一份你能直接改的代码文件** `~/.wezard/tasks/<id>.task.mjs` (返回值里的 `file`)。这个工具只管最常见的那条路 (什么时候 + 说什么); 要更细的东西就**用 Read/Edit 改那个文件**, 存盘即生效, 不用 reload:\n" +
-      "· 触发条件可组合 —— `when: ({every, daily, at, between, onDays, and, not}) => and(every(\"1h\"), between(\"08:00\",\"20:00\"), onDays(\"工作日\"))`。`every/daily/at` 产生时刻, `between/onDays/not` 只做筛选。\n" +
-      "· **放枪前先探一眼**用 `gate` —— 一段在 daemon 侧跑的异步函数, 返回 `false` 这一轮就不放枪 (不起 wizard、群里不出声), 返回 `{vars}` 则填进 prompt 里的 `{{名字}}`, 返回 `{state}` 下一轮还拿得到。`gate: async ({sh, state}) => { const out = await sh(\"git fetch -q && git log --oneline HEAD..@{u}\"); return out.trim() ? {vars:{commits: out}} : false; }`。「有新东西才处理」这类需求必须用它, 别写成「到点起个 wizard 让它自己看一眼没有就退出」—— 那是每次空转一个 pane 加一份上下文。\n" +
-      "· `enabled: false` 暂停而不删。\n" +
-      "**默认新建, 不在任何已有会话里续**: 定时的活是一件独立的事, 塞进一个常驻 wizard 会把两件不相关的事挤进同一个 transcript, 那个 wizard 正忙时还会连触发时刻一起被拖走。只有用户明确说了「在 .foo 里继续 / 让 .foo 每天…」才传 `name` 点名它 —— 这时到点直接投进它那一轮 (它正忙则仍然另起白板执行)。`prompt` 本身就在说「建两个 wizard 去干 xxx」时, 就算给了 `name` 也照新建办 —— 守护进程自己认这句话, 那个名字只决定在谁的聊天/目录下办。要强行在它那一轮里续, 显式传 `fresh:false`。\n" +
-      "`when` 用人话原样写, 别自己翻译成 cron: 「每个工作日晚上9:30」「每天 8:00」「每周三下午3点」「每隔两个小时」「每小时」「每 30 分钟」「20 分钟后」「明早 9 点」都认, 还能叠时间窗口 —— 「白天每隔一个小时」「工作时间每半小时」「8点到20点每小时」。解析不出会报错并列出能认的说法 —— 这时把原话回给用户让他重说, 别自己猜一个时间存进去。\n" +
-      "存成功后**必须把回显的 `when` 和 `next` 念给用户**确认 (例: 「每个工作日 21:30, 下次 2026-09-21 21:30」)。`prompt` 要写成一句完整的、零上下文也能执行的指令 —— 到点接活的多半是个刚出生的白板 wizard, 它只看得见这句话。",
+      "排一个**到点自动执行**的活, 归在你名下 (rolepage「日程」可见)。用户说「每个工作日晚上 9:30 跑一下 xxx」「每天早上看看 yyy」「每 2 小时同步 zzz」「明早 9 点整理 www」时调它。守护进程级, 跨 CLI 重启仍在。\n" +
+      "`when` 用人话原样写, 别翻译成 cron (「每个工作日晚上9:30」「每隔两个小时」「白天每小时」「20 分钟后」「明早 9 点」都认); 解析不出会报错 —— 把原话回给用户让他重说, 别自己猜。\n" +
+      "**默认到点新起一个白板 wizard** (`<你>-task-xxxx`) 执行, 干完自动收掉; 只有用户明说「在 .foo 里继续」才传 `name` 投进那个已有会话。所以 `prompt` 要写成零上下文也能执行的完整指令。\n" +
+      "存成功后**必须把回显的 `when` 和 `next` 念给用户确认**。任务落成可直接改的 `~/.wezard/tasks/<id>.task.mjs` (返回的 `file`): 组合触发条件、「有活才放枪」的 gate、暂停, 都 Read 那个文件 —— 写法在它的头注释里, 存盘即生效。",
     inputSchema: {
       when: z.string().describe("什么时候跑, 人话原样传: 「每个工作日晚上9:30」「每天早上9点」「白天每隔一个小时」「工作时间每半小时」「每30分钟」「20分钟后」「明早9点」。时间窗口 (白天 / 工作时间 / 8点到20点) 会被解析成筛子, 窗外的那些枪直接吞掉。"),
       prompt: z.string().describe("到点要说给那个 wizard 听的话。写成自洽的完整指令 (要做什么、在哪个目录/文件上、做完怎么汇报), 别依赖当前对话的上下文。里面可以留 `{{名字}}` 占位, 由任务文件里的 gate 填。"),
@@ -704,7 +700,7 @@ server.registerTool(
   {
     title: "Every wizard and clone",
     description:
-      "这个世界上所有的 wizard 与 clone, 一个一行: 名字 (全局唯一, 即地址)、忙闲 (忙 = 正在生成 / 闲 = 活着没在跑 / 冷 = 没有 pane, 发消息会唤醒)、**home 聊天** (群 / 单聊)、**工作区**、模型 (还没应答过的没有这一项)、多久没动、家谱 (父 / 分身); 写了职责的多一行职责, 活着的多一行「最近」—— 它最近一个来回 (`▸` 问 `◂` 答, 各截到 80 字, 截了带 `…`)。跨聊天的也在里面。这是你感知同伴的唯一入口 —— 用户说「还有谁在跑」「这个群里有谁」「谁在弄那个项目」「让懂 X 的那个来看看」时先调它, 拿到目标的名字再 send_peer / peek_peer / wait_peer; 要往某个群里对人说话则把那个群名交给 notify。\n" +
+      "这个世界上所有的 wizard 与 clone, 一个一行: 名字 (全局唯一, 即地址)、忙闲 (忙 = 正在生成 / 闲 = 活着没在跑 / 冷 = 没有 pane, 发消息会唤醒)、**home 聊天** (群 / 单聊)、**工作区**、模型 (还没应答过的没有这一项)、多久没动、家谱 (父 / 分身); 写了职责的多一行职责, 活着的多一行「最近」—— 它最近一个来回 (`▸` 问 `◂` 答, 各截到 80 字, 截了带 `…`)。跨聊天的也在里面。这是你感知同伴的唯一入口 —— 用户说「还有谁在跑」「这个群里有谁」「谁在弄那个项目」「让懂 X 的那个来看看」时先调它, 拿到目标的名字再 tell_peer / peek_peer; 要往某个群里对人说话则把那个群名交给 notify。\n" +
       "**这是一张索引, 不是一份名单**: 整台机器上可能有几百个会话, 所以默认只回最相关的一页 (自己 → 活着的 → 最近动过的), 并告诉你 `total` / `matched` 有多少。找人就带上条件: `query` 匹配名字/职责/地址, `cwd` 匹配工作区路径 (「谁在这个目录里干活」), `chat` 限定某个聊天, `alive:true` 只看还活着的。「同群有谁」就是 `chat` 写你自己的群名。别不带条件硬拉全表。",
     inputSchema: {
       query: z.string().optional().describe("在名字 / 职责 / target 里做子串匹配 (不分大小写)。「让懂 X 的那个来看看」就把 X 写在这里。"),
@@ -770,7 +766,7 @@ const offspringShape = {
   task: z.string().optional().describe("就位后立刻派下去的第一件活 (私聊)。省略则它就位待命。"),
   chat: z.string().optional().describe("把它生在另一个聊天里 (list_chats 里的名字)。省略 = 你自己的聊天, 这是绝大多数情况。"),
   cli: z.enum(["claude", "claude-internal", "codebuddy"]).optional().describe("用哪个 CLI。省略则继承。"),
-  model: z.string().optional().describe("跑在哪个模型上, 口语化随便写 ('opus' / 'sonnet 5' / '最新的 opus' / 'claude-haiku-4-5' 都行) —— 不是塞给启动参数, 而是等 pane 起来后打开它自己的 `/model` 列表, 在里面挑最接近的一项选中, 所以返回里的 `model` 是列表里真正落地的那一项 (如 'Opus 5.5'), 可能跟你传的字符串不一样; 列表里对不上会带 `modelWarning`, 那时它还在跑但停在了原来的模型上, 不是失败。省略用该 CLI 的默认。要判断力的给 opus, 跑腿的 (grep、跑测试、照着清单改) 给 haiku —— 一批不必齐步走。之后要换用 set_model。"),
+  model: z.string().optional().describe(MODEL_DOC),
   job: z
     .string()
     .optional()
@@ -799,7 +795,7 @@ const bear = (tool: string, inherit: boolean) => async (a: Offspring) =>
   }));
 
 const OFFSPRING_TAIL =
-  "名字全局唯一: 撞上的 wizard 静默超过一天就直接顶掉它、名字归新的; 撞上一个还在的 wizard 返回 409 (附它的死活), 返回里的 `name` 是落定的名字。之后用 send_peer 继续派活、wait_peer 等它做完、stop_wizard 收掉它。它自己也能再 spawn_wizard / clone_wizard, 层级不限。每一个都有成本 (一个 pane + 一份上下文), 名下同时活着的有上限; 任务少于两三件时你自己做完更快。";
+  "名字全局唯一: 撞上的 wizard 静默超过一天就直接顶掉它、名字归新的; 撞上一个还在的 wizard 返回 409 (附它的死活), 返回里的 `name` 是落定的名字。之后用 tell_peer 继续派活 (结论自动回执给你), 活干完用 stop_wizard 收掉它。它自己也能再 spawn_wizard / clone_wizard, 层级不限。每一个都有成本 (一个 pane + 一份上下文), 名下同时活着的有上限; 任务少于两三件时你自己做完更快。";
 
 server.registerTool(
   "spawn_wizard",
@@ -807,7 +803,7 @@ server.registerTool(
     title: "Spawn a blank child wizard",
     description:
       "**从白板生**一个子 wizard —— 新的 tmux pane、自己的全局名字 (`.name`)、自己的职责, 归你管 (家谱里挂在你名下, 工单收工时可整批回收)。它**不继承你的任何上下文**, 只拿到身份。适合干一件与你手头无关的事, 或者要去别的目录 (`cwd`) / 别的聊天里干活。要一个开局就带着你读过的材料的, 用 clone_wizard。\n" +
-      "带上 `task` 可以在它就位的同时把第一件活私聊派下去, 省掉一次 send_peer; 要它的回复进群, 就别带 task, 就位后用 `send_peer({public:true})` 转给它。" +
+      "带上 `task` 可以在它就位的同时把第一件活私聊派下去, 省掉一次 tell_peer; 要它的回复进群, 就别带 task, 就位后用 `tell_peer({public:true})` 转给它。" +
       OFFSPRING_TAIL,
     inputSchema: {
       ...offspringShape,
@@ -823,7 +819,7 @@ server.registerTool(
     title: "Clone a wizard, context and all",
     description:
       "**克隆**一个 wizard 出分身 —— fork 它此刻的上下文: 分身开局就拥有它已经读过的一切 (规范、目录结构、刚啃完的那份文档), 不必重读; 被克隆的那个毫发无损。默认克隆你自己; `from` 点名就克隆别的 wizard (比如一个已经把某个模块啃透的同伴) —— 分身仍归你管 (占你的名额、随你的工单回收), 只是上下文来自它。分身留在被克隆者的工作区。\n" +
-      "这是编排一组「共享同一批材料」的任务的正确姿势: 先让一个 wizard (你自己或某个同伴) 把公共材料读进上下文, 再从它克隆出 N 个分身, 材料只读一遍却进了 N 份上下文。要白纸一张、或要去别的目录, 用 spawn_wizard。被克隆者正在干活时, 分身拿到的是它此刻为止的上下文 —— 想要它读完再分, 先 wait_peer 等它停下。\n" +
+      "这是编排一组「共享同一批材料」的任务的正确姿势: 先让一个 wizard (你自己或某个同伴) 把公共材料读进上下文, 再从它克隆出 N 个分身, 材料只读一遍却进了 N 份上下文。要白纸一张、或要去别的目录, 用 spawn_wizard。被克隆者正在干活时, 分身拿到的是它此刻为止的上下文 —— 想要它读完再分, 等它这一轮的回执回来再克隆。\n" +
       "带上 `task` 可以在它就位的同时把第一件活私聊派下去 (分叉本来就由第一句话触发, 省一次往返)。" +
       OFFSPRING_TAIL,
     inputSchema: {
@@ -843,9 +839,9 @@ server.registerTool(
   {
     title: "Open a job for a fan-out",
     description:
-      "开一个**工单**: 你接下来要同时派出两个以上的分身干同一件事时, 先开它。返回一个 id, 把这个 id 传给 spawn_wizard / clone_wizard / send_peer 的 `job` 参数, 它们就归到这个工单名下。\n" +
+      "开一个**工单**: 你接下来要同时派出两个以上的分身干同一件事时, 先开它。返回一个 id, 把这个 id 传给 spawn_wizard / clone_wizard / tell_peer 的 `job` 参数, 它们就归到这个工单名下。\n" +
       "开了工单之后有三件事不一样: ① 群里出「开工」与 close_job 的「收工」两条气泡, 人据此读得出这批活的结构 (过程在各自的 rolepage 里, 收工那条会把成员和各自那段活列出来)。② close_job 会把为这个工单生出来的分身**整批回收**, 不必一个个 stop_wizard —— 忘记回收是常态, 每个分身都占着一个 pane 和一份上下文。③ list_jobs 能看到还开着哪些活。\n" +
-      "派活的文本只写活本身: 每个分身收到的那一轮都带着信封, 已经要求它把结论收口成 `RESULT: …` (交付物写进文件就回传路径); wait_peer 摘到就只回这一行, 你汇总时不必从八百字里找结论。\n" +
+      "派活的文本只写活本身: 每个分身收到的那一轮都带着信封, 已经要求它把结论收口成 `RESULT: …` (交付物写进文件就回传路径), 回执里据此汇总, 不必从八百字里找结论。\n" +
       "只派一个分身、或者只是推某个同伴一把, 不用开工单。",
     inputSchema: {
       title: z.string().describe("一句话说清这个工单要干成什么 —— 它会出现在群里的开工气泡上。"),

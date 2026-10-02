@@ -183,7 +183,9 @@ export const renderTaskFile = (d: TaskDraft): string => `// wezard 定时任务 
 //            返回 { vars }     → 放枪, vars 填进 prompt 里的 {{名字}}
 //            返回 { state }    → 存下来, 下一轮从 ctx.state 拿得到
 //          ctx = { now, task:{id,target,cwd}, sh(cmd), state, log }
-//          sh 的 cwd 默认是目标 wizard 的工作区; 抛错等同于返回 false。
+//          sh 的 cwd 默认是目标 wizard 的工作区; 超时/抛错 = 这一轮不放枪 (群里报一次错)。
+//          「有新东西才处理」必须写成 gate, 别让到点起的 wizard 自己看一眼没有就退出
+//          —— 那是每轮空转一个 pane 加一份上下文。gate 在守护进程里跑, 不经审批卡。
 //   prompt 到点说给 wizard 听的话。写成零上下文也能执行的完整指令 —— 到点接活的
 //          多半是个刚出生的白板 wizard, 它只看得见这一句。
 //
