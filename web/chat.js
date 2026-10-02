@@ -19,7 +19,7 @@
   var WITH = qs.get('with') || '';
   // '' = 未指定 (服务端按全部时间, 回包里认领成 'all'); 'all' = 全部时间; 其他 = 那一段的 sid。
   var SESSION = qs.get('session') || '';
-  // 消息区的视角 (谁算「自己」靠右、描述行以谁为准): 只在看移交详情时才有 —— 接活那一方;
+  // 消息区的视角 (谁算「自己」靠右、描述行以谁为准): 只在看移交详情时才有 —— 移交人 (派活那一方);
   // 平时不存在, 消息区就用 ROLE。侧栏与名片永远是 ROLE 的。
   var EYE = qs.get('eye') || '';
   var eyeOf = function () { return EYE || ROLE; };
@@ -111,9 +111,18 @@
   };
 
   // ── 名字 ──
-  // 一个 role 的名字与头像: 消息片段自带 (fromName/fromLabel), 会话列表与名册兜底。
-  var names = {};
-  var learn = function (id, name, label) { if (id && name) names[id] = { name: name, label: label || '' }; };
+  // 一个 role 的名字与头像, 两路来: 摘要 (名册, 每拍刷新, 为准) 与消息片段 (渲染那一刻的名册, 只在摘要没给时兜底)。
+  // svr 刚重启、还没收到 daemon 推来的名册那几秒, 两路回的「名字」都只是 id 本身 (头像也是按 id 算的) ——
+  // id 不是名字, 不记; 否则它会钉在已上屏的行里, 名册到了也不改。返回: 这一次记的有没有变。
+  var names = {}, fromDir = {};
+  var learn = function (id, name, label, dir) {
+    if (!id || !name || name === id || (!dir && fromDir[id])) return false;
+    if (dir) fromDir[id] = 1;
+    var k = names[id];
+    if (k && k.name === name && k.label === (label || '')) return false;
+    names[id] = { name: name, label: label || '' };
+    return true;
+  };
   var kindOf = function (id) {
     return /^task:/.test(id) ? 'task' : id === 'system:' ? 'system' : /^human:/.test(id) ? 'human' : 'wizard';
   };
@@ -335,9 +344,9 @@
     var w = peer && ch ? peer : '';
     var id = b.getAttribute('data-gid');
     markBack(function () { return VIEW === 'msgs' && CONV === conv && WITH === w; });
-    // 消息区换成接活那一方的视角 (侧栏、名片不动)。
-    if (id) return jumpMsg({ conv: conv, with: w, id: id, ts: Number(b.getAttribute('data-gts')), eye: to });
-    selectConv(conv, w, undefined, to);
+    // 消息区换成移交人 (派活那一方) 的视角 (侧栏、名片不动; 视角就是它时不带)。
+    if (id) return jumpMsg({ conv: conv, with: w, id: id, ts: Number(b.getAttribute('data-gts')), eye: from });
+    selectConv(conv, w, undefined, from);
   });
 
   // ── 左栏: 当前 role 的名片 + 会话列表 ──
@@ -1111,7 +1120,7 @@
     learn(m.from, m.fromName, m.fromLabel);
     learn(m.to, m.toName, m.toLabel);
     if (m.dir === 'mark') {
-      return '<div class="mrow mark" data-id="' + esc(m.id) + '" data-turn="' + esc(m.turnId || m.id) + '" data-ts="' + m.ts + '" data-sig="' + esc(m.sig) + '">' + signCut(m.html, m.from, m.fromName) + '</div>';
+      return '<div class="mrow mark" data-id="' + esc(m.id) + '" data-turn="' + esc(m.turnId || m.id) + '" data-ts="' + m.ts + '" data-sig="' + esc(m.sig) + '">' + signCut(m.html, m.from) + '</div>';
     }
     var me = eyeOf();
     var mine = m.from === me;
@@ -1127,12 +1136,12 @@
       ? (m.to && m.to !== 'human:' && m.to !== peer ? m.to : '')
       : (m.to !== me && group ? m.to : '');
     // 宽屏写在气泡对面的空白里 (.dest, 在换视角的门里但不吃点击); 窄屏空白太窄, 退回消息头 (.to)。
-    var to = dst ? '<span class="to">→ ' + avBtn(m.to, m.toLabel) + nm(m.to, m.toName, true) + '</span>' : '';
+    var to = dst ? '<span class="to">→ ' + avBtn(m.to) + nm(m.to, '', true) + '</span>' : '';
     // 箭头顺着「发话人 → 收件人」: 气泡是发话人, 描述在哪一侧箭头就背着气泡指向哪一侧 ——
     // 我的消息描述在左 (🦉 .x ←), 别人的在右 (→ 🦉 .x)。
     var dest = dst
       ? '<span class="dest" aria-hidden="true">' + (mine ? '' : '<i class="arr">→</i>') +
-        '<span class="dav">' + esc(m.toLabel || roleLabel(dst)) + '</span><span class="dn">' + esc(nameOf(dst)) + '</span>' +
+        '<span class="dav">' + esc(roleLabel(dst)) + '</span><span class="dn">' + esc(nameOf(dst)) + '</span>' +
         (mine ? '<i class="arr">←</i>' : '') + '</span>'
       : '';
     var priv = !m.channel && group ? '<span class="ch priv">私聊</span>' : '';
@@ -1143,15 +1152,15 @@
     var two = !group || !!pairPeer(c) || (!!c && c.kind === 'all' && c.peers.length === 1);
     var stat = m.meta ? '<span class="mstat">' + jobChips(m.meta) + '</span>' : '';
     var who = mine
-      ? to + stamp(m.ts) + stat + avBtn(m.from, m.fromLabel)
-      : avBtn(m.from, m.fromLabel) + nm(m.from, m.fromName, true) + to + priv + stamp(m.ts) + stat;
+      ? to + stamp(m.ts) + stat + avBtn(m.from)
+      : avBtn(m.from) + nm(m.from, '', true) + to + priv + stamp(m.ts) + stat;
     var sw = canSwitch(other);
     var flip = '<button class="flip" data-r="' + esc(other) + '"' + (sw ? '' : ' disabled tabindex="-1"') +
       ' aria-label="' + esc(sw ? '切到 ' + nameOf(other) + ' 的视角' : '') + '">' +
       dest + (sw ? '<span class="fi"><span class="fn">' + esc(nameOf(other)) + '</span>' + CHEVRON + '</span>' : '') + '</button>';
     return '<div class="mrow ' + (mine ? 'mine' : 'them') + (two ? ' two' : '') + '" data-id="' + esc(m.id) + '" data-turn="' + esc(m.turnId || m.id) + '" data-ts="' + m.ts + '"' +
-      (m.ping ? ' data-ping="1" data-ping-who="' + esc(m.dir === 'in' ? m.toName : m.fromName) + '"' : '') + ' data-sig="' + esc(m.sig) + '" data-stale-at="' + (m.staleAt || 0) + '">' +
-      '<div class="mcol"><div class="mwho">' + who + '</div><div class="mb">' + jobChips(m.dir === 'out' ? signCut(m.html, m.from, m.fromName) : m.html) + '</div></div>' +
+      (m.ping ? ' data-ping="1" data-ping-who="' + esc(roleName(m.dir === 'in' ? m.to : m.from)) + '"' : '') + ' data-sig="' + esc(m.sig) + '" data-stale-at="' + (m.staleAt || 0) + '">' +
+      '<div class="mcol"><div class="mwho">' + who + '</div><div class="mb">' + jobChips(m.dir === 'out' ? signCut(m.html, m.from) : m.html) + '</div></div>' +
       flip +
     '</div>';
   };
@@ -1355,11 +1364,11 @@
     R.charter = d.charter || null;
     R.stats = d.stats || null; R.winStats = d.winStats || null;
     ROLE = d.role.id;
-    learn(d.role.id, d.role.name, d.role.label);
-    R.convs.forEach(function (c) {
-      if (c.peer) learn(c.peer, c.name, c.label);
-      c.subs.forEach(function (s) { learn(s.role, s.name, s.label); });
-    });
+    var renamed = [learn(d.role.id, d.role.name, d.role.label, true)].concat.apply([], R.convs.map(function (c) {
+      return [c.peer ? learn(c.peer, c.name, c.label, true) : false].concat(c.subs.map(function (s) { return learn(s.role, s.name, s.label, true); }));
+    })).some(Boolean);
+    // 名册晚到 (svr 刚起) 或有人改了名: 已上屏的行按新名字就地重包, 正文不动。
+    if (renamed && inner.querySelector('.mrow')) rewrapRows(false);
     // 没带 conv 的链接 (群里点名字进来) 落在服务端挑的窗口上, 连同它挑的「只看我与谁」;
     // 手里的 conv 失效则只退回整个会话。
     if (!CONV || !convOf(CONV)) { WITH = CONV ? '' : d['with'] || ''; CONV = d.conv || ''; }
@@ -1557,6 +1566,21 @@
       if (nb) nb.replaceWith(k.mb);
     });
   };
+  /** 已上屏的行拿手里的片段就地重包 (左右、署名), 已渲染的正文整块搬过去。dropMarks: 断点一并撤下。 */
+  var rewrapRows = function (dropMarks) {
+    unfoldPings(inner);
+    [].slice.call(inner.querySelectorAll('.mrow')).forEach(function (row) {
+      var m = S.frags[row.getAttribute('data-id')];
+      if (!m || (dropMarks && m.dir === 'mark')) { if (dropMarks) row.remove(); return; }
+      var next = frag(rowHTML(m)).firstElementChild;
+      var ob = row.querySelector('.mb'), nb = next.querySelector('.mb');
+      if (ob && nb) nb.replaceWith(ob);
+      row.replaceWith(next);
+      bindRow(next);
+    });
+    foldPings(inner);
+    expireRows();
+  };
   /** 同一窗口换视角: 拿手里的片段就地重包左右, 已渲染的正文整块搬过去。
    *  先等 role 摘要到手、页头侧栏按新视角画完再重包 —— 页头换了高度 (人没有职责行、有的 wizard 有),
    *  在动画起跑之后才变, 整列就会在半路被顶一下。旧行在这几十毫秒里原样留着。 */
@@ -1567,19 +1591,8 @@
     api('api/role', viewParams()).then(function (d) {
       if (!d.ok || gen !== S.gen) return;
       applyRole(d);
-      unfoldPings(inner);
-      [].slice.call(inner.querySelectorAll('.mrow')).forEach(function (row) {
-        var m = S.frags[row.getAttribute('data-id')];
-        // 断点 (/clear /new) 是旧视角 role 自己的, 新视角的由下面补拉。
-        if (!m || m.dir === 'mark') { row.remove(); return; }
-        var next = frag(rowHTML(m)).firstElementChild;
-        var ob = row.querySelector('.mb'), nb = next.querySelector('.mb');
-        if (ob && nb) nb.replaceWith(ob);
-        row.replaceWith(next);
-        bindRow(next);
-      });
-      foldPings(inner);
-      expireRows();
+      // 断点 (/clear /new) 是旧视角 role 自己的, 新视角的由下面补拉。
+      rewrapRows(true);
       landFlip(snap);
       connect();
       return api('api/msgs', viewParams());
