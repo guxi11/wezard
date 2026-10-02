@@ -55,6 +55,7 @@ import {
   childrenOf,
   ancestorsOf,
   renderCharter,
+  ROSTER_FRESH_MS,
   renderRoster,
   CONTEXT_FULL_TOKENS,
   MEMORY_NUDGE_TOKENS,
@@ -1341,9 +1342,11 @@ const main = async (): Promise<void> => {
         forkOf: o.forkOf ? briefOf(target, o.forkOf) : undefined,
         cwdUnconfirmed: m.cwdUnconfirmed(target, o.cwd),
         // 最近动过的排前面: 名册只点名前几个, 截掉的该是早就停了的那些。
+        // 没有 transcript 的冷记录按 bornAt 算, 刚生下还没开口的照样在。
         siblings: m.chatTargets(baseOfKey(target))
           .filter((t) => t !== target)
-          .map((t) => [t, lastTouched(t)] as const)
+          .map((t) => [t, Math.max(lastTouched(t), wizards.get(t)?.bornAt ?? 0)] as const)
+          .filter(([, at]) => Date.now() - at <= ROSTER_FRESH_MS)
           .sort((x, y) => y[1] - x[1])
           .map(([t]) => briefOf(target, t)),
         memory: wizards.get(target)?.memory ?? [],

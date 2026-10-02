@@ -246,6 +246,10 @@ const nameLine = (b: WizardBrief): string =>
  *  而宪章每一轮都在上下文里 —— 只值得给「找谁干什么」用得上的那几个占位置。 */
 const ROSTER_MAX = 15;
 
+/** 出生名册只收这么久之内动过的同群 wizard: 更早停下的多半是收了工没回收的临时分身,
+ *  点名它们只是让新来的去找一个不会再接活的人。要找它们仍是 wizard_roster。 */
+export const ROSTER_FRESH_MS = 2 * 24 * 60 * 60 * 1000;
+
 /** 同群名册 (调用方按最近活跃排好序): 只列写了职责的 (职责是找人的依据), 至多 ROSTER_MAX 个; 与自己同工作区的
  *  不重复那条路径。其余 (没写职责的临时分身是常态) 只报个数, 指向 wizard_roster。 */
 const rosterLines = (self: WizardBrief, sibs: readonly WizardBrief[]): string[] => {
@@ -378,7 +382,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "你的活是**分派**, 不是亲手干 —— 上下文留给名册和来龙去脉, 别被大段代码和文件塞满:",
       bullet([
         "一两句就能答的 (问进度、问谁在干什么、闲聊) → 自己答",
-        "要不要转给**已有** wizard: 上下文里已经看得出该给谁 (刚派过同一摊活的、职责正对口的、人点了名的) 就直接判断, 不必查表; 拿不准时才 `route_candidates({task})`: 能算的事实它都算好了 —— 谁的职责 / 最近的话 / 读过的文件和这件活有交集、在不在同一个工作区、忙闲、`ctx` 多大。你只做判断:",
+        "要不要转给**已有** wizard: 上下文里已经看得出该给谁 (刚派过同一摊活的、职责正对口的、人点了名的) 就直接判断, 不必查表; 拿不准时才 `route_candidates({task})` 拿一张证据表 (交集、工作区、忙闲、`ctx`), 你只做判断:",
         "  · **相关性**: 表里的交集是不是真的同一件事 —— 字面沾边不算; 文件命中 (它真读过) 比词面重叠可信",
         "  · **接着用这段上下文划不划算**: 没有硬阈值, 你来算这笔账 —— 收益是它省掉的重读 (要重读的材料越多越划算); 代价是 `ctx` 越大, 往后每一轮都要背着整段历史 (更贵、更慢)、越容易被旧话题带偏、离交接越近 (窗口一般 200k)。收益盖不过代价, 哪怕相关也别塞给它",
         "  · 相关 + 划算 → 转给它; 相关但不划算 → 白板 spawn 一个新的, 需要它的结论就在 task 里点名让新的去 `read_chat` / `peek_peer` 它, 别让新的重读一遍; 表里没有候选 → 直接 spawn",
@@ -396,7 +400,7 @@ export const renderCharter = (a: CharterArgs): string => {
     parts.push(
       "## 出生时同群的 wizard",
       bullet(rosterLines(a.self, a.siblings)),
-      "(这只是出生那一刻的快照。此后谁来了、谁收工了、谁改了职责, 会以一行 system-reminder",
+      "(这只是出生那一刻的快照, 2 天没动过的不列。此后谁来了、谁收工了、谁改了职责, 会以一行 system-reminder",
       "挂在下一条进到你这儿的消息尾巴上 —— 不必去问。要当下完整的名册仍然是 `wizard_roster`; 名字全局唯一, 别的群的 wizard 一样叫得到。)",
       "",
     );
@@ -406,13 +410,13 @@ export const renderCharter = (a: CharterArgs): string => {
     // 上是 deferred 的, 只有这里保证常驻, 所以这里讲选择, 不复述机制。
     "## 我能做什么 (MCP `wezard`; 参数与边界看各工具描述)",
     bullet([
-      "`wizard_roster` 找人: 谁在、在哪干、忙不忙 (带 `query` / `chat` / `cwd` 收窄, 别拉全表)",
+      "`wizard_roster` 找人: 谁在、在哪干、忙不忙 (带条件收窄, 别拉全表)",
       "`route_candidates` 拿不准一件活该转给哪个已有 wizard 时",
       "`peek_peer` 某个 wizard 在干嘛、卡在哪 · `read_chat` 群里 / 私聊里谁对谁说了什么",
       "`tell_peer` 驱动另一个 wizard (派活、答它、叫它继续) —— 默认私聊, 它的结论会自动回执给你; 对方正忙而你派的是一件新活 → `when:\"idle\"`, 否则两段话挤进同一个输入框",
       "`notify` 只是告诉**人**一件事, 不驱动谁",
       "`clone_wizard` 分身要共享我 (或 `from` 某个同伴) 已读的材料 · `spawn_wizard` 白板起步或要去别的目录 —— 要判断的给 opus, 跑腿的给 haiku",
-      "`stop_wizard` 活干完就收掉分身 (默认 `end` 回收 pane; `mode:\"interrupt\"` 只打断这一轮)",
+      "`stop_wizard` 活干完就收掉分身; 只想打断它这一轮也是它",
       "`open_job` / `close_job` 一次派两个以上分身时开 / 收工单 · `list_jobs` 找回工单 id",
       "`wizard_whoami` 我的上下文用量与分身 · `wizard_identity` 改名 / 写职责 · `wizard_remember` 跨会话记忆 (`self` / `chat` / `workspace`)",
       "`wizard_handoff_self` 上下文快满 · `set_workspace` 换项目目录 · `set_model` 换模型",
