@@ -566,9 +566,9 @@
       : String(R.schedules);
     return tile('plan', '日程', sub, p.broken ? 'bad' : '');
   };
-  var charterTile = function () {
-    return tile('charter', '宪章', '≈' + fmtTok(R.charter.tokens) + ' tokens · ' + fmtClock(R.charter.at) + ' 压进系统提示');
-  };
+  // 宽屏的关系图开关在右栏头上 (与会话列表同一个位置来回切); 窄屏侧栏与主区二选一, 开关只能留在侧栏。
+  var narrow = function () { return !!window.matchMedia && matchMedia('(max-width: 760px)').matches; };
+  if (window.matchMedia) matchMedia('(max-width: 760px)').addEventListener('change', function () { if (R.role) { renderRole(); renderHead(); } });
 
   // 轻提示: 底部居中一枚, 新的顶掉旧的。
   var toast = (function () {
@@ -624,8 +624,12 @@
     var facts = [
       r.chat ? ['🏠', r.chat, 'home'] : null,
       born ? ['🐣', fmtClock(born), '出生于 ' + fmtDay(born)] : null,
-      r.cwd ? ['🗂️', shortCwd(r.cwd), r.cwd] : null
-    ].filter(Boolean).map(function (f) { return '<span title="' + esc(f[2]) + '">' + f[0] + ' ' + esc(f[1]) + '</span>'; });
+      r.cwd ? ['🗂️', shortCwd(r.cwd), r.cwd] : null,
+      // 宪章排最后, 可点: 出生时被交代了什么。
+      R.charter ? ['📜', '宪章 ≈' + fmtTok(R.charter.tokens), fmtClock(R.charter.at) + ' 压进系统提示 · 点开看全文', 'charter'] : null
+    ].filter(Boolean).map(function (f) {
+      return '<span' + (f[3] ? ' class="fx' + (VIEW === f[3] ? ' on' : '') + '" data-view="' + f[3] + '"' : '') + ' title="' + esc(f[2]) + '">' + f[0] + ' ' + esc(f[1]) + '</span>';
+    });
     // 只有一段 session 就没什么可选, 不挂选择器。
     $('#rb-who').innerHTML =
       '<div class="id"><span class="av">' + esc(r.label) + '</span>' +
@@ -635,6 +639,9 @@
       (r.description ? '<p class="job">' + esc(r.description) + '</p>' : '');
     paintStatus();
     $('#rb-who').querySelector('.cp').onclick = function () { copyText(nameOf(r.id)); };
+    $('#rb-who').querySelectorAll('.fx').forEach(function (x) {
+      x.onclick = function () { var v = x.getAttribute('data-view'); setView(VIEW === v ? 'msgs' : v); };
+    });
     $('#rb-who').querySelectorAll('.go').forEach(function (g) {
       g.onclick = function () { switchRole(g.getAttribute('data-r')); };
     });
@@ -643,7 +650,7 @@
     bindSessPicker();
     // 入口只在有东西可看时出现 —— 挂在名片下、会话列表上, 不挤进名片: 名片的主角是身份,
     // 家谱计数 (几个分身 / 子 wizard) 属于关系, 写在关系图入口上。
-    $('#rb-acts').innerHTML = [R.relations && relTile(r), R.schedules && planTile(), R.charter && charterTile()].filter(Boolean).join('<span class="sep" aria-hidden="true">｜</span>');
+    $('#rb-acts').innerHTML = [R.relations && narrow() && relTile(r), R.schedules && planTile()].filter(Boolean).join('<span class="sep" aria-hidden="true">｜</span>');
     $('#rb-acts').querySelectorAll('.bd').forEach(function (b) {
       var v = b.getAttribute('data-view');
       b.onclick = function () { v === 'world' ? setWorld(!WORLD) : setView(VIEW === v ? 'msgs' : v); };
@@ -769,6 +776,15 @@
     putUsage($('#ch-usage'), VIEW === 'msgs' ? R.winStats : null);
   };
 
+  // 会话列表 ↔ 关系图: 同一个按钮、同一个位置, 标的是「点了去哪」。
+  var worldToggle = function () {
+    return R.relations && !narrow() ? '<button class="vb' + (WORLD ? ' on' : '') + '" id="ch-world">' + (WORLD ? '会话列表' : '关系图') + '</button>' : '';
+  };
+  var bindWorldToggle = function () {
+    var b = $('#ch-world');
+    if (b) b.onclick = function () { setWorld(!WORLD); };
+  };
+
   // ── 右栏头: 这个群聊 / 私聊是什么 (关系 / 日程视图时是视图名) ──
   var renderHead = function () {
     var who = $('#ch-who'), acts = $('#ch-acts');
@@ -784,8 +800,8 @@
     if (!c) { who.innerHTML = ''; acts.innerHTML = ''; return; }
     if (c.kind === 'all') {
       who.innerHTML = pairOf([[c.who]]) + '<span class="t">' + esc(c.name) + '</span>';
-      acts.innerHTML = '';
-      bindGo(who);
+      acts.innerHTML = worldToggle();
+      bindGo(who); bindWorldToggle();
       return;
     }
     // 一对一 (私聊, 或群里「只看我与 X」) 两端都亮头像: 我在前, 对端在后, 各自是切视角的入口。
@@ -794,12 +810,13 @@
     var peerLabel = c.kind !== 'group' ? c.label : dm && peer === dm.role ? dm.label : '';
     who.innerHTML = (peer ? pairOf([[ROLE, R.role && R.role.label], [peer, peerLabel]]) : '') +
       '<span class="t">' + (c.kind === 'wizard' ? nm(c.peer, c.name, true) : esc(c.name)) + '</span>';
-    acts.innerHTML = WITH
+    acts.innerHTML = (WITH
       ? '<span class="with">只看我与 ' + nm(WITH, '', true) + '</span><button class="vb" id="ch-all">看全部</button>'
-      : '';
+      : '') + worldToggle();
     bindGo(who); bindGo(acts);
     var x = $('#ch-all');
     if (x) x.onclick = function () { selectConv(CONV, ''); };
+    bindWorldToggle();
   };
 
   // ── 消息行 ──
@@ -1884,7 +1901,7 @@
     syncUrl();
     // 手机上侧栏与主区二选一 —— 开关在侧栏里, 结果也在侧栏里。
     if (on) app.classList.remove('reading');
-    renderRole();
+    renderRole(); renderHead();
     if (on) { renderWorld(); loadWorld(); }
     else {
       // 选中的子项得露出来: 群展开, 排在折叠条后面的连折叠条一起展开。

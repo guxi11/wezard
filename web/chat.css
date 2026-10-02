@@ -76,6 +76,8 @@ button { font: inherit; color: inherit }
 .rolebar .facts { display: flex; flex-wrap: wrap; gap: 0 10px; font-size: 11.5px; line-height: 1.45; color: var(--faint); min-width: 0 }
 /* 每条自身不折行; 独占一行仍超宽 (长路径 / 长群名) 才省略。 */
 .rolebar .facts span { white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis }
+.rolebar .facts .fx { cursor: pointer }
+.rolebar .facts .fx:hover, .rolebar .facts .fx.on { color: var(--accent) }
 .rolebar .go { cursor: pointer; color: var(--accent) }
 .rolebar .go:hover { text-decoration: underline }
 /* 分隔线两端收进来, 与上面搜索框的左右边距对齐, 不顶满侧栏。 */
