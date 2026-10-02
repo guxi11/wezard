@@ -20,6 +20,7 @@
 - hook 的 wezard CLI 免审只认整条命令就是一次 `wezard[.sh] <status|logs|pending|audit|update|reload|config-path|mirror-status|version|help>` 且不含 shell 元字符; 此前命令里任意位置出现 `wezard` 一词就放行 (`curl …/config/set; true wezard` 可免审直改配置)。注意 daemon 的 `/config/set` 路由本身仍不鉴权, 本机进程可直接写 —— 这里只关掉了模型免审走到它的两条路。
 
 ### Changed
+- 管家分派默认偏省钱: `route_candidates` 每个候选多一行「代价」—— 缓存冷热 (距上次活动是否超过 `keepalive.ttlSec`)、唤醒要重写多少缓存 (对比白板 spawn 起步 ~25k 的倍数)、往后每轮背着的 ctx, 以及「这件活点到它读过的几个文件」; 证据弱 (没点到它读过的文件, 小活则少于 3 个) 又贵 (缓存冷且 ctx ≥60k, 或热但 ≥150k) 的标 ⚠「不划算, 建议白板 spawn」; 小活 (改样式 / 单点修改 / 简单查询) 表头点明。charter 管家段写明: 小活默认白板 spawn 或交给 ctx 小的, ctx ≥60k 且缓存冷的只接真正依赖它上下文的活, 标 ⚠ 的默认不转。
 - rolepage 关系 / 日程栏的世界快照 (`/api/world`) 瘦身: 工单成员任务只留首行 (实测 119KB → 55KB), 并带 ETag —— 名册没变时 6s 轮询回 304、不重画; 换视角后迟到的回包丢弃。
 - 共享记忆整理从定时任务改成 daemon 内建定时器: 不再生成 `~/.wezard/tasks/memory-steward.task.mjs` (开机把旧的改名为 `.retired` 停用, 免得两路并跑), 不进 `list_tasks` / rolepage 日程。每 30 分钟 (开机后 1 分钟先跑一轮) 认领收件箱里的提议 (认领 / 一小时孤儿回收语义不变), 有活才在不属于任何群的内部 key 上起一个白板 wizard 合并, 收工即收; 收件箱改由守护进程归档进 `memory/log/`。全程零气泡、不 notify, 结果只留在 rolepage 与审计日志。
 - wizard 的上下文瘦身: charter 的出生名册只列写了职责的同群 wizard (至多 15 个, 其余报个数、指向 `wizard_roster`), 「我能做什么」改为每个工具一行「何时用」, 「编排」「说话」两节不再复述工具描述 —— charter ~5.1k → ~2.5k tok (管家 ~6.0k → ~3.4k)。工具描述不再教 `send_peer` / `wait_peer` (一律 `tell_peer` + 回执); `send_peer` 描述压成一行; `tell_peer` 只讲机制; `schedule_task` 只留何时用 / `when` 人话 / 默认新建 / 回念 `next`, gate 写法挪进任务文件头注释; 生 wizard 的 `model` 参数共用一句; graph 三件套、`list_claude_sessions`、`switch_claude_session`、`list_chats` 标为人侧/罕用。工具定义合计 ~20.4k → ~17.8k tok。CLAUDE.md 的 MCP 段与 `/help` 的过期措辞一并更正。

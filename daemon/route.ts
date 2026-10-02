@@ -7,6 +7,11 @@
 // 往下走 —— 这是经济账, 留给读表的管家。所以这里只做两件事: 把没有任何交集的
 // 候选滤掉, 把剩下的按证据强弱排好、连证据一起摆出来; 不出分数, 不替它拍板。
 //
+// 唯一替管家先算好的一笔账是**唤醒成本**: 它在 prompt cache TTL 之外 = 缓存已冷,
+// 下一轮要把整段 ctx 重新 cache write 一遍, 这是能按 token 算的事实; 再配上
+// 「这件活要用到它那段上下文多少」(点到的文件 / 它读过的文件), 证据弱又贵的
+// 打上「不划算」—— 默认偏向省钱, 但仍只是标记, 拍板的还是管家。
+//
 // 全是纯函数: 候选的原料 (文件集 / 最近的话 / ctx) 由调用方从 transcript 读好送进来。
 import { addr, agoOf, ctxOf, type WizardBrief } from "./wizard.js";
 
@@ -89,6 +94,38 @@ export const rankCandidates = (task: string, taskCwd: string, rows: readonly Rou
     .sort((x, y) => weight(y) - weight(x) || Number(y.sameCwd) - Number(x.sameCwd) || y.row.lastActivity - x.row.lastActivity);
 };
 
+// 白板 spawn 的起步 ctx: CLI 自带 system prompt + charter (~2.6k) + 工具定义 (~18k)。
+// 唤醒一个冷的大 ctx wizard, 和它比才看得出贵了几倍。
+export const FRESH_CTX = 25_000;
+// 证据弱时「多大算大」: 缓存冷了按要整段重写算, 60k 已是白板的两倍多; 缓存还热,
+// 唤醒只是 0.1x 的读, 贵在往后每轮都背着它, 到 150k 才算重。
+const BIG_COLD = 60_000;
+const BIG_WARM = 150_000;
+
+/** 唤醒一个 wizard 这一下要付的缓存代价: 冷 = 距上次活动超过 TTL, 整段 ctx 要重新 cache write。 */
+export interface WakeCost {
+  cold: boolean;
+  /** 唤醒那一轮要重写进缓存的 token 数; 缓存还热 = 0。 */
+  write: number;
+  /** 相当于白板 spawn 起步的几倍 (按 ctx 比)。 */
+  times: number;
+}
+
+export const wakeCostOf = (ctx: number, lastActivity: number, now: number, ttlMs: number): WakeCost => {
+  const cold = !lastActivity || now - lastActivity > ttlMs;
+  return { cold, write: cold ? ctx : 0, times: Math.round((ctx / FRESH_CTX) * 10) / 10 };
+};
+
+/** 一句话就说得清的小活: 改样式 / 文案 / 单点修改 / 简单查询 —— 用不上谁的长上下文。 */
+const SMALL_RE = /样式|css|border|颜色|字号|字体|间距|边距|圆角|阴影|对齐|图标|文案|措辞|改名|重命名|typo|错别字|拼写|一行|单点|查一下|看一下|问一下|是多少|在哪/i;
+export const isSmallTask = (task: string): boolean => task.length <= 40 || (task.length <= 160 && SMALL_RE.test(task));
+
+/** 证据弱 (没碰过这件活点到的文件; 小活则少于 3 个) 又贵 (冷且 ≥60k, 或热但 ≥150k) → 不划算。 */
+const notWorth = (e: Evidence, w: WakeCost, small: boolean, ctx: number): boolean =>
+  (e.files.length === 0 || (small && e.files.length < 3)) && ctx >= (w.cold ? BIG_COLD : BIG_WARM);
+
+const k = (n: number): string => `${Math.round(n / 1000)}k`;
+
 const quoted = (ts: readonly string[], max = 6): string =>
   ts.slice(0, max).map((t) => `「${t}」`).join("") + (ts.length > max ? ` +${ts.length - max}` : "");
 
@@ -101,7 +138,27 @@ const spread = (cwd: string, files: readonly string[]): string => {
   return [...tally].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([d, n]) => `${d} ${n}`).join(", ");
 };
 
-const renderOne = (e: Evidence, now: number, home: string): string[] => {
+interface Ctx { now: number; home: string; ttlMs: number; small: boolean }
+
+const costLines = (e: Evidence, c: Ctx): string[] => {
+  const ctx = e.row.contextTokens;
+  if (!ctx) return [];
+  const w = wakeCostOf(ctx, e.row.lastActivity, c.now, c.ttlMs);
+  const ttl = `${Math.round(c.ttlMs / 60_000)} 分钟`;
+  const wake = w.cold
+    ? `缓存冷 (超过 TTL ${ttl}) · 唤醒要重写 ~${k(w.write)} 缓存 ≈ 白板 spawn 的 ${w.times} 倍`
+    : `缓存热 (TTL ${ttl}内) · 唤醒只读缓存`;
+  const need = e.files.length
+    ? `这件活点到它读过的 ${e.files.length}/${e.row.files.length} 个文件`
+    : `这件活没点到它读过的任何文件 (只有词面重叠)`;
+  return [
+    `  代价: ${wake}; 往后每轮都背着 ${k(ctx)} · 相关: ${need}`,
+    ...(notWorth(e, w, c.small, ctx) ? [`  ⚠ 不划算, 建议白板 spawn —— ${c.small ? "小活" : "证据弱"}却要${w.cold ? "整段重写" : "一直背着"} ${k(ctx)}`] : []),
+  ];
+};
+
+const renderOne = (e: Evidence, c: Ctx): string[] => {
+  const { now, home } = c;
   const r = e.row;
   const where = e.sameCwd ? "同工作区" : home && r.cwd.startsWith(home) ? `~${r.cwd.slice(home.length)}` : r.cwd;
   const hits = [
@@ -115,18 +172,22 @@ const renderOne = (e: Evidence, now: number, home: string): string[] => {
     ...(r.description ? [`  职责: ${r.description}`] : []),
     `  命中: ${hits.join(" · ")}`,
     ...(r.files.length ? [`  上下文: 读过 ${r.files.length} 个文件 (${spread(r.cwd, r.files)})`] : []),
+    ...costLines(e, c),
     ...(r.summary ? [`  最近: ${r.summary}`] : []),
   ];
 };
 
 /** 给管家读的候选表。末尾永远留着「新 spawn」这一项 —— 它是没有好候选时的默认。 */
-export const renderCandidates = (cands: readonly Evidence[], now: number, home = ""): string =>
-  [
+export const renderCandidates = (task: string, cands: readonly Evidence[], now: number, ttlMs: number, home = ""): string => {
+  const c: Ctx = { now, home, ttlMs, small: isSmallTask(task) };
+  return [
     cands.length
       ? `和这件活有交集的已有 wizard ${cands.length} 个, 证据强的在前 (文件命中 = 它真读过; 词面重叠只是线索):`
       : "没有哪个已有 wizard 的职责、最近的话或读过的文件和这件活有交集。",
-    ...cands.flatMap((e) => renderOne(e, now, home)),
+    ...(c.small ? ["体量: 看着是小活 (一句话 / 样式 / 单点修改 / 简单查询) —— 默认白板 spawn 或交给 ctx 小的, 除非它真依赖某段上下文。"] : []),
+    ...cands.flatMap((e) => renderOne(e, c)),
     "",
-    "· 新 spawn —— 白板起步, 不背任何历史。",
-    "由你判断: 交集是不是同一件事; 接着用它那段上下文省下的重读, 值不值得往后每一轮都背着它的 ctx (越大越贵、越容易被旧话题带偏、离交接越近)。",
+    `· 新 spawn —— 白板起步, 不背任何历史 (起步 ctx 约 ${k(FRESH_CTX)})。`,
+    "由你判断: 交集是不是同一件事; 接着用它那段上下文省下的重读, 值不值得唤醒时的缓存重写和往后每一轮背着的 ctx。标了 ⚠ 的默认不转, 除非你看得出这件活确实离不开它那段上下文。",
   ].join("\n");
+};

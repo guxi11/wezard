@@ -1594,7 +1594,7 @@ const main = async (): Promise<void> => {
         });
       const limit = Math.min(Math.max(Number(b.limit ?? 5) || 5, 1), 20);
       const cands = rankCandidates(task, (b.cwd ?? "").trim() || m.getCwd(self).runningCwd, rows).slice(0, limit);
-      json(res, 200, { ok: true, text: renderCandidates(cands, Date.now(), homedir()) });
+      json(res, 200, { ok: true, text: renderCandidates(task, cands, Date.now(), cfg.wrc.mirror.keepalive.ttlSec * 1000, homedir()) });
     });
 
     // 记忆三种作用域: self 跟着自己 (wizards.json), 直写; chat / workspace 是共享的 md,
