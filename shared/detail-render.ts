@@ -469,6 +469,10 @@ const TURN_CSS = `
   .handoff .ho-text{margin:0 6px 4px 24px;padding:4px 10px;border-left:2px solid #8250df40;color:#1f2328}
   .handoff .ho-text .md-body{font-size:12.5px}
   .handoff.pub>.say{margin:2px 6px 6px 24px}
+  /* 展开着的公开移交: 全文就在下面的气泡里, 行内的首行不再重复。 */
+  .handoff.pub[open] .ho-first{visibility:hidden}
+  /* 工具调用与挂在它下面的提示 (移交行 / 公开移交气泡) 之间一道分隔。 */
+  .bubble.tool>.handoff{border-top:1px solid #d0d7de;margin-top:4px;padding-top:2px}
   /* 箭头的颜色就是这件活的回执状态 (title 写明): 进行中 · 已交 · 反问 · 报错 · 没有答案。 */
   .handoff .ho-arrow{font-weight:600;margin-right:-2px;color:#8250df}
   .handoff .ho-arrow.st-done{color:#1a7f37}
@@ -684,14 +688,14 @@ const CHEVRON = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stro
 /** 交过去那段原文的首行 (行内跟着, 超长省略号)。 */
 const firstLine = (text: string): string => text.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
 
-/** 移交行: 整行是一个入口 (`attrs`), 原文默认收起, 只由行尾的 chevron 展开; 没有原文就只是一行。
- *  公开移交 (`say` = 气泡的 data-key) 那句人在群里看得见: 不折叠, 行下直接是一颗与普通消息同一份渲染的气泡。 */
+/** 移交行: 整行是一个入口 (`attrs`), 原文只由行尾的 chevron 开合; 没有原文就只是一行。
+ *  私聊的原文默认收起, 行内跟着首行。公开移交 (`say` = 气泡的 data-key) 那句人在群里看得见: 默认展开,
+ *  行下是一颗与普通消息同一份渲染的气泡; chevron 照样能把它收成首行。 */
 const hoBox = (cls: string, attrs: string, line: string, text: string, say?: string): string =>
-  text && say
-    ? `<div class="handoff${cls} pub"><div class="ho-line"${attrs}>${line}</div>${renderSay({ t: "text", body: text, ts: 0 }, say)}</div>`
-    : text
-    ? `<details class="handoff${cls}"><summary class="ho-line"${attrs}>${line}<span class="ho-first">${escHtml(firstLine(text))}</span>` +
-      `<span class="ho-chev" title="展开原文">${CHEVRON}</span></summary><div class="ho-text">${mdBody(text)}</div></details>`
+  text
+    ? `<details class="handoff${cls}${say ? " pub" : ""}"${say ? " open" : ""}><summary class="ho-line"${attrs}>${line}<span class="ho-first">${escHtml(firstLine(text))}</span>` +
+      `<span class="ho-chev" title="${say ? "收起 / 展开原文" : "展开原文"}">${CHEVRON}</span></summary>` +
+      `${say ? renderSay({ t: "text", body: text, ts: 0 }, say) : `<div class="ho-text">${mdBody(text)}</div>`}</details>`
     : `<div class="handoff${cls}"><div class="ho-line"${attrs}>${line}</div></div>`;
 
 const hoArrow = (st: HandoffStatus): string => `<span class="ho-arrow st-${st.key}" title="${escHtml(st.tip)}">↪</span>`;
