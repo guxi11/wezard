@@ -32,11 +32,14 @@ const parse = ([a, ...rest], o = { msg: [], paths: [], check: true, dry: false }
 };
 
 // ── git ───────────────────────────────────────────────────────────
-const git = (args, { index, input } = {}) =>
-  execFileSync("git", args, {
+// raw: 补丁要原样, trim 会削掉末尾那行空上下文 (" "), 补丁就坏了。
+const git = (args, { index, input, raw } = {}) => {
+  const out = execFileSync("git", args, {
     cwd: ROOT, input, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
     env: index ? { ...process.env, GIT_INDEX_FILE: index } : process.env,
-  }).trim();
+  });
+  return raw ? out : out.trim();
+};
 const tryGit = (args, opts) => { try { return git(args, opts); } catch { return null; } };
 
 /** `<mode> <blob>` of a path in a tree-ish, or null when absent. */
@@ -85,8 +88,8 @@ const syncSharedIndex = (old, neu, paths) => paths
 
 /** 提交里有、工作树里却没有的改动 —— 不同步回去, 下一个人一提交就把它抹掉。 */
 const missingInWorktree = (old, neu) => changed(old, neu).filter((p) => {
-  const d = git(["diff", "--binary", old, neu, "--", p]);
-  return d && tryGit(["apply", "--check", "-R", "-"], { input: d + "\n" }) === null;
+  const d = git(["diff", "--binary", old, neu, "--", p], { raw: true });
+  return d && tryGit(["apply", "--check", "-R", "-"], { input: d }) === null;
 });
 
 const commit = (opts, attempt = 1) => {
