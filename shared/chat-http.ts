@@ -11,6 +11,7 @@
 //   GET /api/role-events  → SSE: role 摘要变动 + 当前窗口的消息增量
 //   GET /api/world        → 关系视图: 全部 wizard、家谱、跨聊天往来、工单、日程
 //   GET /api/search       → cmd+k: 从视角 role 搜 role 名字 / 会话名 / 消息正文
+//   GET /api/charter      → 一个 wizard 出生时被压进系统提示的宪章 (按节 + 体量 + 实测开局底座)
 //
 // 资源路由不校验 `?id=` —— 它们是纯静态前端代码, 不含任何会话数据。
 //
@@ -31,6 +32,7 @@ import {
 } from "./role-view.js";
 import { renderMark, renderMsg, type MsgFragment } from "./role-render.js";
 import { searchRole } from "./role-search.js";
+import { charterBrief, charterView } from "./charter-view.js";
 import { renderToolBody } from "./detail-render.js";
 import { chatScript, chatStyles, chatVendor, renderChatPage } from "./chat-render.js";
 import type { Asset } from "./web-assets.js";
@@ -50,6 +52,7 @@ export interface ChatRoutes {
   world: SimpleHandler;
   search: SimpleHandler;
   glance: SimpleHandler;
+  charter: SimpleHandler;
 }
 
 /** 注册表侧的事实 (wizard 身份 / 家谱 / 工单 / 日程) —— 只有 daemon 给得出。
@@ -209,6 +212,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
         broken: schedules.filter((x) => x.lastGate === "error" || !!x.loadError).length,
       },
       stats,
+      // 宪章不受 3 天视界裁剪: 一个开了一周的 wizard, 它的系统提示仍是出生那天那份。
+      charter: charterBrief(store.list(), info.id),
       // 对端恰好是一个 wizard 的窗口 (判定与窗口取消息同一份 talkOf 入参), 带上它在这段往来里跑的那几轮的账。
       winStats: peerStats(records, msgs, role, win, dir, now),
     };
@@ -479,7 +484,18 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     });
   };
 
-  return { page, styles: asset(chatStyles), script: asset(chatScript), vendor: asset(chatVendor), role, msgs, tool, events, world, search, glance };
+  const charter: SimpleHandler = (_req, res, url) => {
+    const ticket = resolveTicket(store, url);
+    if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
+    void getFacts().then((f) => {
+      const records = store.list();
+      const r = pickRole(makeDirectory(listRecent(), f), ticket, url);
+      const v = r ? charterView(records, r) : undefined;
+      json(res, 200, v ? { ok: true, role: r, ...v } : { ok: true, role: r, none: true });
+    });
+  };
+
+  return { page, styles: asset(chatStyles), script: asset(chatScript), vendor: asset(chatVendor), role, msgs, tool, events, world, search, glance, charter };
 };
 
 /** Path → handler map; the daemon registers each, svr dispatches through it. */
@@ -496,10 +512,11 @@ export const chatRouteTable = (routes: ChatRoutes): Record<string, SimpleHandler
   "GET /api/world": routes.world,
   "GET /api/search": routes.search,
   "GET /api/glance": routes.glance,
+  "GET /api/charter": routes.charter,
 });
 
 /** Route keys, single-sourced so the daemon's registration can't drift. */
 export const CHAT_ROUTE_KEYS = [
   "GET /role", "GET /chat", "GET /chat/app.css", "GET /chat/app.js", "GET /chat/vendor.js",
-  "GET /api/role", "GET /api/msgs", "GET /api/tool", "GET /api/role-events", "GET /api/world", "GET /api/search", "GET /api/glance",
+  "GET /api/role", "GET /api/msgs", "GET /api/tool", "GET /api/role-events", "GET /api/world", "GET /api/search", "GET /api/glance", "GET /api/charter",
 ] as const;

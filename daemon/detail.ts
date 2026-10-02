@@ -15,6 +15,7 @@ import {
   createDetailStore,
   type ApprovalDecision,
   type ApprovalDetailRecord,
+  type CharterRecord,
   type ChatTicketRecord,
   type DetailRecord,
   type DetailStore,
@@ -69,8 +70,9 @@ const pushFacts = async (): Promise<boolean> => {
 // 聊天票据是长期凭据, 却只在造出来那一刻推过一次: 远端换过地址 (lisct → 本机 svr)、
 // 或那一下 svr 恰好不在, 它就永远缺席 —— 链接在本机开得了, 在 svr 上「未找到该会话」。
 // 所以每次 (重新) 连上远端都把全部票据补推一遍; 一个聊天一条, 量可以忽略, svr 侧 put 幂等。
+// 宪章同理: 一个 wizard 一份、只在出生那刻推一次, 错过了就要等它下次重生。
 const forwardTickets = (): void =>
-  store?.list().filter((r) => r.kind === "chat").forEach(forwardToRemote);
+  store?.list().filter((r) => r.kind === "chat" || r.kind === "charter").forEach(forwardToRemote);
 
 // 两个前置条件 (配了远端、装上了 provider) 谁先到都可能 —— 两处都调一次, 起过就不再起。
 const startFactsForward = (): void => {
@@ -158,6 +160,22 @@ export const recordMark = (rec: Omit<MarkDetailRecord, "kind" | "createdAt"> & {
 export const recordPost = (rec: Omit<PostDetailRecord, "kind" | "id" | "createdAt">): void => {
   if (!store) return;
   const full: PostDetailRecord = { kind: "post", id: `p${Date.now().toString(36)}${randomBytes(3).toString("hex")}`, createdAt: Date.now(), ...rec };
+  store.put(full);
+  forwardToRemote(full);
+};
+
+// 宪章: 每次渲染都是一次 spawn 要压进系统提示的那份 —— 记下来, rolepage 才看得见它在吃多少上下文。
+export const recordCharter = (target: string, text: string): void => {
+  if (!store || !target || !text.trim()) return;
+  const full: CharterRecord = { kind: "charter", id: `k${randomBytes(12).toString("base64url")}`, createdAt: Date.now(), target, text };
+  store.put(full);
+  forwardToRemote(full);
+};
+
+/** 这条记录出现之前就已经活着的 wizard: 从 spawn 落在盘上的那份补一条, 已经有了就不动。 */
+export const backfillCharter = (target: string, text: string, at: number): void => {
+  if (!store || store.list().some((r) => r.kind === "charter" && r.target === target)) return;
+  const full: CharterRecord = { kind: "charter", id: `k${randomBytes(12).toString("base64url")}`, createdAt: at, target, text };
   store.put(full);
   forwardToRemote(full);
 };

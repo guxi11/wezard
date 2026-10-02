@@ -683,6 +683,22 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 .ek.graph { color: #3d8577; background: #0a7d6b12 }
 .ek.cross { font-weight: 400; background: #fff; box-shadow: inset 0 0 0 1px var(--line) }
 
+/* ══ 宪章 · 按节 ═══════════════════════════════════════════════════ */
+.csec { border-top: 1px solid var(--line) }
+.csec:first-of-type { border-top: 0 }
+.csec summary {
+  display: grid; grid-template-columns: minmax(0, 1fr) 120px 52px; align-items: center; gap: 12px;
+  padding: 9px 0; cursor: pointer; list-style: none; font-size: 13px;
+}
+.csec summary::-webkit-details-marker { display: none }
+.csec .ct { overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.csec[open] .ct { font-weight: 600 }
+.csec .cbar { height: 6px; border-radius: 3px; background: #eaeef2; overflow: hidden }
+.csec .cbar i { display: block; height: 100%; background: #8c959f }
+.csec .cn { text-align: right; font-size: 11.5px; color: var(--mute); font-family: ui-monospace, Menlo, monospace }
+.csec .md-body { font-size: 13px; padding: 0 0 12px; overflow-wrap: anywhere }
+.csec .md-body pre { white-space: pre-wrap }
+
 /* ══ 日程 · 总览 / 任务卡 ════════════════════════════════════════════ */
 .pstats {
   max-width: 900px; margin: 0 auto 18px; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px;

@@ -906,7 +906,7 @@ export const renderDetailPage = (r: DetailRecord): string => {
   if (r.kind === "tool") return renderToolPage(r);
   // turn / 断点标记 / 聊天票据都没有自己的页面 —— 前两者只是 rolepage 线程里的
   // 一张卡片 / 一行, 票据只出现在 /role 的 `?id=` 上。
-  if (r.kind === "turn" || r.kind === "mark" || r.kind === "post" || r.kind === "chat") return renderNotFound(r.id);
+  if (r.kind === "turn" || r.kind === "mark" || r.kind === "post" || r.kind === "chat" || r.kind === "charter") return renderNotFound(r.id);
   return renderApprovalPage(r);
 };
 

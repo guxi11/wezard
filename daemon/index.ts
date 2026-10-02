@@ -1,5 +1,5 @@
 // Daemon entry. Resident process — exits only on signal or fatal WS auth failure.
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { loadConfig } from "../shared/config.js";
@@ -15,7 +15,7 @@ import { loadMirrorStore } from "./mirror-store.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { installApprovalEventListener, makeApproveHandler } from "./approval.js";
-import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, setWorldFactsProvider, recordPost } from "./detail.js";
+import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, setWorldFactsProvider, recordPost, recordCharter, backfillCharter } from "./detail.js";
 import { EMPTY_FACTS, type WorldFacts, type WorldFactWizard } from "../shared/world.js";
 import { clearAutoWindow, initAutoWindowPersistence, setAutoWindow } from "./session-cache.js";
 import { makeMessageHandler } from "./outbound.js";
@@ -1298,7 +1298,7 @@ const main = async (): Promise<void> => {
      *  让它一睁眼就知道自己不是一个人在跑。 */
     const charterFor = (target: string, o: { parent?: string; forkOf?: string; inherited?: boolean; cwd?: string }): string => {
       chartered.set(target, wizards.get(target)?.memory ?? []);
-      return renderCharter({
+      const text = renderCharter({
         // o.cwd = 正在启动的那个 pane 的目录; 没给才退回"现在记着的那个"。
         self: { ...briefOf(target, target), address: selfAddress(target), ...(o.cwd ? { cwd: o.cwd } : {}) },
         chat: chatNameOf(cfg, target),
@@ -1321,6 +1321,8 @@ const main = async (): Promise<void> => {
         })(),
         steward: !tagOfKey(target),
       });
+      recordCharter(target, text);
+      return text;
     };
 
     m.onClear((t) => {
@@ -1350,6 +1352,17 @@ const main = async (): Promise<void> => {
       const rec = wizards.get(target);
       return charterFor(target, { parent: rec?.parent, forkOf: rec?.forkOf, inherited: !!rec?.clonedFrom, cwd: ctx?.cwd });
     });
+
+    // 宪章记录是后来才有的: 已经在跑的 wizard 拿 spawn 落盘的那份 (state/charters/<sid>.md) 补上,
+    // 否则要等它下次重生, rolepage 的「宪章」入口才出现。与自动命名同一个延迟: 等附着表恢复完。
+    setTimeout(() => {
+      const dir = join(expandHome(cfg.daemon.stateDir), "charters");
+      wizards.all().forEach((w) => {
+        const sid = m.sessionInfo(w.target)?.sessionId;
+        const file = sid ? join(dir, `${sid}.md`) : "";
+        try { if (file && existsSync(file)) backfillCharter(w.target, readFileSync(file, "utf8"), statSync(file).mtimeMs); } catch { /* 补不上就等它重生 */ }
+      });
+    }, 15_000).unref();
 
     // 开机也补一次: IM 侧的 `/peers`、`/help` 直接读名字, 不经过任何 MCP 路由。
     // 延后是因为附着表要先从盘上恢复完, 否则这一刻还看不见那些聊天; 补不全也无妨,

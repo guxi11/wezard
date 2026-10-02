@@ -23,7 +23,7 @@
 
   // at / recvAt: 服务端快照时刻与本地收到时刻。所有"现在几点"的判断都换算到
   // 服务端时钟, 否则客户端时钟偏几分钟就会把运行中的会话判成已结束。
-  var R = { at: 0, recvAt: 0, role: null, sessions: [], convs: [], relations: false, schedules: 0, plan: null, stats: null, winStats: null };
+  var R = { at: 0, recvAt: 0, role: null, sessions: [], convs: [], relations: false, schedules: 0, plan: null, charter: null, stats: null, winStats: null };
   // frags: 当前窗口的原始片段 (id → 片段)。片段不带方向, 换视角时拿它就地重包左右。
   var S = { es: null, pinned: true, gen: 0, frags: {} };
   // 关系/日程两栏共用的世界快照。treeAll = 关系树展开全部; treeFor = 已把谁滚进过视野。
@@ -149,8 +149,8 @@
 
   // ── markdown 渲染 (只对未渲染过的节点做, 复用节点不重绘) ──
   var md = null;
-  var render = function (scope) {
-    if (!window.markdownit) return;
+  var mdReady = function () {
+    if (!window.markdownit) return false;
     if (!md) {
       md = window.markdownit({
         html: false, linkify: true, breaks: true, highlight: function (str, lang) {
@@ -162,6 +162,10 @@
         }
       });
     }
+    return true;
+  };
+  var render = function (scope) {
+    if (!mdReady()) return;
     scope.querySelectorAll('.bubble').forEach(function (b) {
       var src = b.querySelector('script.md-src'), body = b.querySelector('.md-body');
       if (src && body && body.dataset.rendered !== '1') {
@@ -561,6 +565,9 @@
       : String(R.schedules);
     return tile('plan', '日程', sub, p.broken ? 'bad' : '');
   };
+  var charterTile = function () {
+    return tile('charter', '宪章', '≈' + fmtTok(R.charter.tokens) + ' tokens · ' + fmtClock(R.charter.at) + ' 压进系统提示');
+  };
 
   // 轻提示: 底部居中一枚, 新的顶掉旧的。
   var toast = (function () {
@@ -635,7 +642,7 @@
     bindSessPicker();
     // 入口只在有东西可看时出现 —— 挂在名片下、会话列表上, 不挤进名片: 名片的主角是身份,
     // 家谱计数 (几个分身 / 子 wizard) 属于关系, 写在关系图入口上。
-    $('#rb-acts').innerHTML = [R.relations && relTile(r), R.schedules && planTile()].filter(Boolean).join('<span class="sep" aria-hidden="true">｜</span>');
+    $('#rb-acts').innerHTML = [R.relations && relTile(r), R.schedules && planTile(), R.charter && charterTile()].filter(Boolean).join('<span class="sep" aria-hidden="true">｜</span>');
     $('#rb-acts').querySelectorAll('.bd').forEach(function (b) {
       var v = b.getAttribute('data-view');
       b.onclick = function () { v === 'world' ? setWorld(!WORLD) : setView(VIEW === v ? 'msgs' : v); };
@@ -765,7 +772,9 @@
   var renderHead = function () {
     var who = $('#ch-who'), acts = $('#ch-acts');
     if (VIEW !== 'msgs') {
-      who.innerHTML = '<span class="t">日程</span><span class="sub">' + esc(nameOf(ROLE)) + ' 名下的定时任务与工单</span>';
+      who.innerHTML = VIEW === 'charter'
+        ? '<span class="t">宪章</span><span class="sub">wezard 出生时压进 ' + esc(nameOf(ROLE)) + ' 系统提示的那份身份</span>'
+        : '<span class="t">日程</span><span class="sub">' + esc(nameOf(ROLE)) + ' 名下的定时任务与工单</span>';
       acts.innerHTML = '<button class="vb" id="ch-back">‹ 对话</button>';
       $('#ch-back').onclick = function () { setView('msgs'); };
       return;
@@ -1031,6 +1040,7 @@
     R.role = d.role; R.sessions = d.sessions || []; R.convs = d.convs || [];
     SESSION = d.session || '';
     R.relations = !!d.relations; R.schedules = d.schedules || 0; R.plan = d.plan || null;
+    R.charter = d.charter || null;
     R.stats = d.stats || null; R.winStats = d.winStats || null;
     ROLE = d.role.id;
     learn(d.role.id, d.role.name, d.role.label);
@@ -1082,6 +1092,7 @@
       if (land) takeRole(d); else applyRole(d);
       syncUrl();
       if (WORLD || VIEW === 'plan') loadWorld();
+      if (VIEW === 'charter') loadCharter();
       return loadMsgs(undefined, land && function () { paintRole(); return land(); }).then(function () {
         if (land && !inner.querySelector('.mrow')) paintRole();   // 空窗口不走 land, 页头照样要画
         connect();
@@ -1777,7 +1788,7 @@
   };
   var pollWorld = function () {
     if (worldTimer) { clearInterval(worldTimer); worldTimer = null; }
-    if (VIEW === 'msgs' && !WORLD) return;
+    if (VIEW !== 'plan' && !WORLD) return;
     worldTimer = setInterval(function () {
       if (!document.hidden) loadWorld();
     }, WORLD_MS);
@@ -1787,11 +1798,13 @@
     VIEW = v;
     thread.hidden = v !== 'msgs';
     $('#pane-plan').hidden = v !== 'plan';
+    charterPane().hidden = v !== 'charter';
     app.classList.toggle('outer', v !== 'msgs');
     // 手机上关系/日程占满主区 —— 进入即阅读态。
     if (v !== 'msgs') app.classList.add('reading');
     renderRole(); renderHead(); renderUsage();
     if (v === 'msgs') { toBottom(true); renderConvs(); }
+    else if (v === 'charter') loadCharter();
     else {
       if (!W.loaded) { planEl._html = ''; planEl.innerHTML = '<div class="empty">加载中…</div>'; }
       else renderPlan();
@@ -1799,6 +1812,48 @@
     }
     pollWorld();
   };
+  // ── 宪章: 出生快照, 不轮询 —— 换视角或重新点开时取一次。 ──
+  // 面板由脚本挂载: 外壳 HTML 要等服务重启才换, 老外壳里没有这一格。
+  var charterPane = function () {
+    var p = $('#pane-charter');
+    if (p) return p;
+    p = document.createElement('div');
+    p.className = 'pane'; p.id = 'pane-charter'; p.hidden = true;
+    p.innerHTML = '<div class="plan-in" id="charter-in"></div>';
+    $('#pane-plan').after(p);
+    return p;
+  };
+  var loadCharter = function () {
+    var el = charterPane().firstChild, asked = ROLE;
+    el.innerHTML = '<div class="empty">加载中…</div>';
+    return api('api/charter', { role: asked }).then(function (d) {
+      if (asked !== ROLE || VIEW !== 'charter') return;
+      el.innerHTML = d.ok && !d.none ? charterHTML(d) : '<div class="empty">' + esc(roleName(asked)) + ' 没有宪章记录 (人, 或在这项记录出现前出生、还没重生过的 wizard)</div>';
+    }).catch(function () { el.innerHTML = '<div class="empty">载入失败</div>'; });
+  };
+  var charterHTML = function (d) {
+    var stat = function (k, v, sub) {
+      return '<div class="pst"><span class="k">' + k + '</span><b>' + v + '</b><span class="s" title="' + esc(sub) + '">' + esc(sub) + '</span></div>';
+    };
+    var b = d.baseline;
+    var top = Math.max.apply(null, d.sections.map(function (x) { return x.tokens; }));
+    var mdOk = mdReady();
+    var sec = function (x) {
+      return '<details class="csec"><summary><span class="ct">' + esc(x.title) + '</span>' +
+        '<span class="cbar"><i style="width:' + Math.round(100 * x.tokens / top) + '%"></i></span>' +
+        '<span class="cn">≈' + fmtTok(x.tokens) + '</span></summary>' +
+        '<div class="md-body">' + (mdOk ? md.render(x.body) : '<pre>' + esc(x.body) + '</pre>') + '</div></details>';
+    };
+    return '<div class="pstats">' +
+        stat('宪章', '≈' + fmtTok(d.tokens), fmtClock(d.at) + ' 渲染, 随进程终身不变') +
+        (b ? stat('开局实测', fmtTok(b.ctx), (b.resumed ? '续接的老会话, 含此前对话 · ' : '') + '此后首轮第一次调用送入的上下文') +
+             stat('宪章占比', Math.round(100 * d.tokens / b.ctx) + '%', '其余是 CLI 系统提示、工具、CLAUDE.md、skills 与第一句话')
+           : stat('开局实测', '—', '它此后还没跑过一轮 (或那一轮早于实测口径)')) +
+      '</div>' +
+      '<section class="psec"><h3>按节<span>点开看原文 · 出生后的变动经 system-reminder 送达, 不改这份</span></h3>' +
+        d.sections.map(sec).join('') + '</section>';
+  };
+
   // 侧栏换成关系图 / 换回会话列表。换回时选中的仍是在关系图里点开的那一项, 并把它滚进视野。
   var setWorld = function (on) {
     WORLD = on; W.treeFor = ''; W.pickSelf = '';

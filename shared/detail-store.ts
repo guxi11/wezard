@@ -67,6 +67,9 @@ export interface TurnUsage {
   // 与上面的累计字段不同: 不随调用次数增长, 反映"窗口有多满"而非"总共读了多少"。
   // delta 传入时可缺省 (mirror 侧按单调用发, 由 store 计算并落库)。
   ctxPeak?: number;
+  // 本轮**第一次**调用送入的上下文。一段新会话的首轮里, 它就是开局底座 (CLI 系统提示 + 工具 +
+  // 宪章 + CLAUDE.md + skills…) 加上第一句话 —— rolepage 拿它衡量宪章在开局里占几成。
+  ctxFirst?: number;
 }
 
 // 上下文断点 —— 本轮开始前上下文发生了什么。渲染成 turn 卡片顶部的断点条,
@@ -217,7 +220,20 @@ export interface PostDetailRecord {
   body: string;
 }
 
+// 宪章 —— wezard 用 --append-system-prompt 压进 wizard 的那份身份 (daemon/wizard.ts renderCharter)。
+// 它是随进程终身的出生快照, 人原本看不见; rolepage 的「宪章」入口靠这条记录让它可见。
+// 每个 wizard 只留最新一份 (respawn / clone 重新渲染, 新的顶掉旧的), 且不进 TTL / LRU:
+// 一个开了一周的 wizard 的宪章就是它此刻的系统提示, 不该被一天的流水挤掉。量的上限 = wizard 数。
+export interface CharterRecord {
+  kind: "charter";
+  id: string;
+  createdAt: number;
+  target: string;
+  text: string;
+}
+
 export type DetailRecord =
+  | CharterRecord
   | ToolDetailRecord
   | ApprovalDetailRecord
   | TurnDetailRecord
@@ -267,7 +283,13 @@ export const createDetailStore = (opts: { stateDir: string; log?: Logger }): Det
 
   // 票据是长期凭据, 回收它等于让群里的链接集体失效 —— 两条回收路径都绕开它。
   // 它不占预算: 一个聊天一条, 上限就是聊天数。
-  const evictable = (r: DetailRecord): boolean => r.kind !== "chat";
+  const evictable = (r: DetailRecord): boolean => r.kind !== "chat" && r.kind !== "charter";
+
+  /** 同一个 wizard 的旧宪章让位 —— 写入与回放走同一条, 回放按落盘顺序, 后写的赢。 */
+  const supersede = (rec: DetailRecord): void => {
+    if (rec.kind !== "charter") return;
+    for (const [k, v] of store) if (v.kind === "charter" && v.target === rec.target && k !== rec.id) store.delete(k);
+  };
 
   const gc = (): void => {
     const cutoff = Date.now() - TTL_MS;
@@ -320,9 +342,10 @@ export const createDetailStore = (opts: { stateDir: string; log?: Logger }): Det
         if (!line) continue;
         try {
           const r = JSON.parse(line) as DetailRecord;
-          if (!r?.id || (r.kind !== "tool" && r.kind !== "approval" && r.kind !== "turn" && r.kind !== "mark" && r.kind !== "post" && r.kind !== "chat")) continue;
+          if (!r?.id || (r.kind !== "tool" && r.kind !== "approval" && r.kind !== "turn" && r.kind !== "mark" && r.kind !== "post" && r.kind !== "chat" && r.kind !== "charter")) continue;
           if (typeof r.createdAt !== "number") { dropped++; continue; }
-          if (r.createdAt < cutoff && r.kind !== "chat") { dropped++; continue; }
+          if (r.createdAt < cutoff && evictable(r)) { dropped++; continue; }
+          supersede(r);
           store.set(r.id, r);
           replayed++;
         } catch { /* skip malformed line */ }
@@ -344,6 +367,7 @@ export const createDetailStore = (opts: { stateDir: string; log?: Logger }): Det
   };
 
   const put = (rec: DetailRecord): void => {
+    supersede(rec);
     store.set(rec.id, rec);
     if (store.size > MAX) gc();
     persist(rec);
@@ -423,7 +447,7 @@ export const createDetailStore = (opts: { stateDir: string; log?: Logger }): Det
                   calls: cur.calls + delta.usage.calls,
                   ctxPeak: Math.max(cur.ctxPeak ?? 0, callCtx),
                 }
-              : { ...delta.usage, ctxPeak: callCtx };
+              : { ...delta.usage, ctxPeak: callCtx, ctxFirst: callCtx };
           })();
       const nextIds = delta.messageId && !dupe ? [...seenIds, delta.messageId] : seenIds;
       let model = r.model;
