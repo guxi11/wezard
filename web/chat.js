@@ -960,9 +960,12 @@
   }, true);
   var backBtn = function () {
     var c = BACK && BACK.on() && convOf(BACK.conv);
-    return c ? '<button class="vb" id="ch-jback" title="' + esc('回到 ' + (BACK.with ? nameOf(BACK.with) : c.name)) + '" aria-label="返回">‹</button>' : '';
+    return c ? '<button class="back jb" id="ch-jback" title="' + esc('回到 ' + (BACK.with ? nameOf(BACK.with) : c.name)) + '" aria-label="返回">‹</button>' : '';
   };
+  // 返回钮钉在标题栏最左 (标题前面), 不进右侧的按钮组 —— 标题写好之后再插进去。
   var bindBack = function () {
+    var h = backBtn();
+    if (h) $('#ch-who').insertAdjacentHTML('afterbegin', h);
     var b = $('#ch-jback');
     if (b) b.onclick = function () { var x = BACK; BACK = null; SESSION = x.session; selectConv(x.conv, x.with, x.at && landOn(x.at)); };
   };
@@ -970,7 +973,7 @@
     var who = $('#ch-who'), acts = $('#ch-acts');
     if (VIEW === 'jobs') {
       who.innerHTML = '<span class="t">工单</span><span class="sub">' + (JOB_ONLY ? '这一处经手的 ' + jobListRows().length + ' 张' : esc(nameOf(ROLE)) + ' 开的或参与的') + ' · 进行中在前</span>';
-      acts.innerHTML = backBtn() + '<button class="vb" id="ch-back">‹ 对话</button>';
+      acts.innerHTML = '<button class="vb" id="ch-back">‹ 对话</button>';
       bindBack();
       $('#ch-back').onclick = function () { setView('msgs'); };
       return;
@@ -997,7 +1000,7 @@
     }
     if (c.kind === 'all') {
       who.innerHTML = pairOf([[c.who]]) + '<span class="t" title="' + esc(c.name) + '"></span>';
-      acts.innerHTML = backBtn();
+      acts.innerHTML = '';
       bindBack();
       fitTalk(who.querySelector('.t'), c);
       bindGo(who);
@@ -1009,7 +1012,7 @@
       var s = (c.subs || []).filter(function (x) { return x.role === WITH; })[0];
       who.innerHTML = '<span class="t">' + nm(WITH, s && s.name, true) + '</span>' +
         '<span class="sub">在 <button type="button" class="up" id="ch-up" title="' + esc('看 ' + c.name + ' 的全部记录') + '">' + esc(c.name) + '</button></span>';
-      acts.innerHTML = backBtn();
+      acts.innerHTML = '';
       bindBack();
       bindGo(who);
       $('#ch-up').onclick = function () { selectConv(CONV, ''); };
@@ -1018,7 +1021,7 @@
     if (c.kind === 'job') {
       who.innerHTML = '<span class="av">📋</span><span class="t">' + esc(c.name) + '</span>' +
         '<span class="sub">' + esc(c.key.slice(2)) + (c.job ? ' · 开单 ' + nm(c.job.owner, '', true) : '') + jobTag(c.job) + stuckTag(c.job) + '</span>';
-      acts.innerHTML = backBtn();
+      acts.innerHTML = '';
       bindBack();
       bindGo(who);
       return;
@@ -1029,7 +1032,7 @@
     var peerLabel = c.kind !== 'group' ? c.label : dm && peer === dm.role ? dm.label : '';
     who.innerHTML = (peer ? pairOf([[ROLE, R.role && R.role.label], [peer, peerLabel]]) : '') +
       '<span class="t">' + (c.kind === 'wizard' ? nm(c.peer, c.name, true) : '<span class="nm chat">' + esc(c.name) + '</span>') + '</span>';
-    acts.innerHTML = backBtn();
+    acts.innerHTML = '';
     bindBack();
     bindGo(who);
   };
