@@ -48,7 +48,7 @@ import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagH
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
-import { stripAnsi, paneIsBusy, transcriptStalled, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, keepaliveStamps, openKeepalivePing, talkRounds, openToolUses, renderDialog, type PeerInfo } from "./peers.js";
+import { stripAnsi, paneIsBusy, transcriptStalled, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, keepaliveStamps, openKeepalivePing, talkRounds, openToolUses, renderDialog, type PeerInfo, type PeerReply } from "./peers.js";
 import { keepalivePingSigs, isKeepalivePingText } from "../shared/keepalive.js";
 
 // PATH augmentation: launchd / systemd start the daemon
@@ -2161,7 +2161,7 @@ export interface MirrorBridge {
   lastReply: (target: string, sinceMs?: number) => string;
   /** `target` 答 `fromName` 那一句的那段话 —— 按信封定位, 比 lastReply 严一档
    *  (见 peers.replyToPeer)。自动回执靠它分清「答我的」和「答上一件事的」。 */
-  replyToPeer: (target: string, fromName: string, sinceMs?: number) => string | undefined;
+  replyToPeer: (target: string, fromName: string, sinceMs?: number) => PeerReply | undefined;
   /** 这个 wizard 此刻有没有一个能用的 pane。回执投递前要问一句: 已经收工的
    *  wizard 不该为了接一份结论被重新拉起来。 */
   paneLive: (target: string) => Promise<boolean>;
@@ -5384,7 +5384,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const p = jsonlOf(target);
     return p ? lastReply(p, sinceMs, warmerSigs) : "";
   };
-  const replyToPeerSince = (target: string, fromName: string, sinceMs = 0): string | undefined => {
+  const replyToPeerSince = (target: string, fromName: string, sinceMs = 0): PeerReply | undefined => {
     const p = jsonlOf(target);
     return p ? replyToPeerIn(p, fromName, sinceMs, warmerSigs) : undefined;
   };

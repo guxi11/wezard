@@ -17,12 +17,15 @@
 import type { Logger } from "pino";
 import type { JsonMap } from "../shared/json-map-store.js";
 import type { IdleResult } from "./graph.js";
-import { sleep } from "../shared/std.js";
+import type { PeerReply } from "./peers.js";
+import type { ReceiptStatus } from "../shared/reminder.js";
+import { sleep, truncate } from "../shared/std.js";
 
-/** 对方最长允许干多久 (超过就放弃这一份回执, 不占着内存等到天亮)。 */
+/** 对方最长允许干多久 (超过就投一份 timeout 回执, 不占着内存等到天亮)。 */
 const TARGET_WAIT_SEC = 3600;
-/** 发话方正忙时最长等它多久再投。 */
-const SENDER_WAIT_SEC = 1800;
+/** 对方 pane 不在了, 隔这么久再看一眼才判 dead: 非交接的 pane 换新 (respawn) 也有
+ *  几秒是死的。 */
+const DEAD_GRACE_MS = 5000;
 /** 对方读进了我们这一句、停下了却没答 —— 再等下一次停下。连着这么多次都没答就认定
  *  它不会答了, 别守到天亮。我们那一句还没被读进 (排在别的轮后面) 的那几次不算: 那是
  *  在等前面的轮, 不是它不答; 只有整段 ramp 都闲着、问话仍不在 transcript 里, 才算一次
@@ -50,7 +53,12 @@ export interface ReceiptMeta {
   /** 这是该工单第几份 / 一共几份 —— 「齐了吗」由守护进程数, 不让模型猜。 */
   done: number;
   total: number;
+  status: ReceiptStatus;
 }
+
+/** 等出来的结果。失败的那几种 `body` 是合成的说明 + 对方最后一句, 照样投回去:
+ *  发话方等的是一个定论, 「没有答案」也是定论 —— 静默丢弃它就只能永远等。 */
+export interface Outcome { status: ReceiptStatus; body: string }
 
 export interface ReceiptDeps {
   /** 能接新一轮了吗 (轮已结束、没停在审批上) / 等到那一刻 —— 投递时机用, 见 tell_peer when:"idle"。 */
@@ -62,7 +70,9 @@ export interface ReceiptDeps {
   /** `to` 答 `fromName` 那一句的那段话。三态, 缺一不可 (见 peers.replyToPeer):
    *  非空 = 答案; `""` = 问话在, 但还没答 (接着等); `undefined` = 连问话都定位不到
    *  (还排在输入框里没读进) —— 接着等, 绝不退回按时刻取 (取到的是上一件事的结论)。 */
-  replyFor: (to: string, fromName: string, sinceMs: number) => string | undefined;
+  replyFor: (to: string, fromName: string, sinceMs: number) => PeerReply | undefined;
+  /** 对方最后说的一句 —— 失败回执里给发话方一点线索。 */
+  lastWords?: (to: string) => string;
   /** 把回执 paste 进发话方的输入框 (调用方负责拼信封)。 */
   deliver: (to: string, body: string, meta: ReceiptMeta) => Promise<{ ok: boolean; reason?: string }>;
   nameOf: (target: string) => string;
@@ -95,8 +105,14 @@ export interface Slot extends Tell {
   claimed: boolean;
   /** 真的 paste 进去了 (wait_peer 据此告诉调用方「这段已经在你会话里了」)。 */
   delivered: boolean;
-  /** 这一份有了定论 (答了 / 没答 / 超时) —— 工单计数只数它。 */
+  /** 这一份有了定论 (答了 / 没答 / 超时 / pane 没了) —— 工单计数只数它。 */
   resolved: boolean;
+  /** 等出来的结果, 写一次不再改 (`error` 除外: 那只是一份中途的失败回执, 之后续跑
+   *  答出来的照样投)。先于投递落盘: reload 打断投递后重投的仍是同一份, 迟到的答案
+   *  不会把已投的 timeout 改写成 done。 */
+  outcome?: Outcome;
+  /** 投递失败 (paste 没成) —— 留给观察面, 不重试。 */
+  undelivered?: true;
   /** 收尾了 (送达 / 不回注 / 被 wait_peer 取走 / 放弃) —— boot 时只续守没收尾的。
    *  与 `claimed` 分开: claimed 在投递**之前**就占位, 投到一半 reload 仍要重投。 */
   settled?: boolean;
@@ -184,55 +200,78 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   /** 守到对方答出**我们这一句**为止。信封是比发话时刻更硬的锚 (见 peers.replyToPeer):
    *  对方正忙时我们那一句是排队的, 它先吐出来的是上一件事的结论 —— 按时刻取就会把
    *  旧结论当成这一次的回执。所以"停下了但还没答我们"要接着等, 不能将就; 定位不到
-   *  问话 (undefined) 也只说明它还没读进, 绝不退回按时刻取。 */
-  const awaitReply = async (s: Slot): Promise<string> => {
+   *  问话 (undefined) 也只说明它还没读进, 绝不退回按时刻取。
+   *  那一轮以 CLI 报错收尾 → `error`; 报过一次之后只等续跑出来的真答案, 不再计扑空。
+   *  `undefined` = 被 wait_peer 取走或被新的一句顶掉, 调用方自己知道。 */
+  const awaitReply = async (s: Slot): Promise<Outcome | undefined> => {
     // 锚在发话时刻而不是此刻: reload 后续守的那一份不该重新领一整份时长。交接转过来
     // 的那份改锚到贴回简报的时刻, 所以每圈重算。
     const deadline = (): number => s.at + TARGET_WAIT_SEC * 1000;
     const aborted = (): boolean => s.claimed || stale(s);
-    const reply = (): string | undefined => deps.replyFor(s.to, deps.nameOf(s.from), s.at);
-    for (let fruitless = 0; fruitless < MAX_FRUITLESS && Date.now() < deadline(); ) {
+    const reported = (): boolean => s.outcome?.status === "error";
+    const reply = (): PeerReply | undefined => deps.replyFor(s.to, deps.nameOf(s.from), s.at);
+    const news = (r: PeerReply | undefined): boolean => !!r?.text.trim() && !(r.error && reported());
+    const failed = (status: ReceiptStatus): Outcome => ({ status, body: failure(s, status) });
+    for (let fruitless = 0; fruitless < MAX_FRUITLESS; ) {
+      if (Date.now() >= deadline()) return failed("timeout");
       // 对方 pane 没了 (被收掉 / 崩了): 不会再答, 别空转三次 ramp。交接重开的那几秒
-      // pane 也是死的, 先等交接收尾再看。
+      // pane 也是死的, 先等交接收尾再看; 别的换新 (respawn) 给一小段 grace。
       await deps.handedOff?.(s.to);
-      if (s.answer !== undefined) return s.answer;
-      if (!(await deps.paneLive(s.to))) return "";
-      const wr = await settled(s.to, Math.min(deadline(), Date.now() + RAMP_MS), deadline, aborted, () => !!reply()?.trim());
-      if (!wr.idle || aborted()) return "";
+      if (s.answer !== undefined) return { status: "done", body: s.answer };
+      if (!(await deps.paneLive(s.to))) {
+        await sleep(DEAD_GRACE_MS);
+        await deps.handedOff?.(s.to);
+        if (s.answer !== undefined) return { status: "done", body: s.answer };
+        if (!(await deps.paneLive(s.to))) return failed("dead");
+      }
+      const wr = await settled(s.to, Math.min(deadline(), Date.now() + RAMP_MS), deadline, aborted, () => news(reply()));
+      if (aborted()) return undefined;
+      if (!wr.idle) { if (wr.reason === "timeout") return failed("timeout"); continue; }
       // 它停下是因为在交接: 等交接收尾, 答案要么已钉在 s.answer, 要么义务转进了新会话
       // (那就接着守新会话)。这一段与下面的 replyFor 之间不能有 await —— 交接一旦
       // 开始就在旧会话还在时把 transfer 做完, 同步读到的必然还是旧 transcript。
       const handing = deps.handingOff?.(s.to) ?? false;
       if (handing) await deps.handedOff?.(s.to);
-      if (s.answer !== undefined) return s.answer;
+      if (s.answer !== undefined) return { status: "done", body: s.answer };
       if (handing) continue;
       const got = reply();
-      if (got?.trim()) return got;
+      if (got && news(got)) return { status: got.error ? "error" : "done", body: got.text };
       // 读进了没答 = 扑空一次; 还没读进 = 前面有别的轮, 接着等 —— 除非整段 ramp 都静着。
-      if (got !== undefined || wr.quiet) fruitless++;
+      // 报过 error 之后它停着是在等人续跑, 不算扑空, 守到期限。
+      if (!reported() && (got !== undefined || wr.quiet)) fruitless++;
     }
-    return "";
+    return failed("silent");
+  };
+
+  /** 失败回执的正文: 守护进程的一句说明 + 对方最后一句 (给发话方一点线索)。 */
+  const failure = (s: Slot, status: ReceiptStatus): string => {
+    const why: Partial<Record<ReceiptStatus, string>> = {
+      timeout: `等了 ${Math.round((Date.now() - s.at) / 60_000)} 分钟它还没答完`,
+      silent: `它停下了 ${MAX_FRUITLESS} 次, 都没答这一句`,
+      dead: "它的 pane 没了",
+    };
+    const last = deps.lastWords?.(s.to).trim();
+    return `（守护进程: ${deps.nameOf(s.to)} 没有给出结论 —— ${why[status] ?? status}。）${last ? `\n它最后说的: ${truncate(last, 600)}` : ""}`;
   };
 
   const watch = async (s: Slot): Promise<void> => {
     const lg = deps.log.child({ mod: "receipt", from: deps.nameOf(s.from), to: deps.nameOf(s.to), ...(s.job ? { job: s.job } : {}) });
-    const body = await awaitReply(s);
+    // 终态写一次不再改: reload 打断投递后续守的那一份直接重投同一个结果, 不再重等。
+    const out = s.outcome && s.outcome.status !== "error" ? s.outcome : await awaitReply(s);
     if (stale(s)) return;
-    if (s.claimed) { s.resolved = true; settle(s); return; } // wait_peer 抢先取走了
-    s.resolved = true;
-    if (!body.trim()) {
-      lg.info("receipt: 没有答这一句, 不回注");
-      settle(s);
-      return;
-    }
+    if (s.claimed || !out) { s.resolved = true; settle(s); return; } // wait_peer 抢先取走了
+    const final = out.status !== "error";
+    s.outcome = out;
+    s.resolved = final;
+    save(s);
     // 发话方自己在交接: 重开的那几秒里 pane 是死的, 别把这当成"已经不在了"。
     await deps.handedOff?.(s.from);
     if (!(await deps.paneLive(s.from))) {
-      lg.info("receipt: 发话方已经不在了, 丢弃");
+      lg.info({ status: out.status }, "receipt: 发话方已经不在了, 丢弃");
       settle(s);
       return;
     }
-    s.claimed = true; // 占位先于投递: 这中间来的 wait_peer 不该把同一段再取一遍
+    if (final) s.claimed = true; // 占位先于投递: 这中间来的 wait_peer 不该把同一段再取一遍
     const peers = s.job ? ofJob(s.from, s.job) : [s];
     const meta: ReceiptMeta = {
       from: s.to,
@@ -240,29 +279,38 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       job: s.job,
       done: peers.filter((x) => x.resolved).length,
       total: peers.length,
+      status: out.status,
     };
-    await serial(s.from, async () => {
-      if (stale(s)) return;
-      // 发话方正在生成 → 等它这一轮说完, 一结束就投。
+    const sent = await serial(s.from, async () => {
+      // 发话方正在生成 → 等它这一轮说完, 一结束就投。它的 pane 还活着就一直等 (上限是
+      // 登记的保留期): 回执到了却因为它在跑长活而扔掉, 它就只能永远等。
       // 等的过程中它开始交接 → 等交接完再来一圈: 投进旧会话会被交接一并带走 (简报
       // 已经写完了, 不含这一段), 投进还没贴回简报的新会话会抢在简报前面。
-      const until = Date.now() + SENDER_WAIT_SEC * 1000;
+      // 每圈都查 stale: 等发话方闲下来可能要很久, 同一对的新一句正是在这期间来的。
       for (;;) {
         await deps.handedOff?.(s.from);
+        // settled 只可能是 wait_peer 在这期间取走了 (watcher 自己投完才 settle)。
+        if (stale(s) || s.settled) return false;
+        if (Date.now() >= s.at + KEEP_MS || !(await deps.paneLive(s.from))) {
+          lg.warn({ status: out.status }, "receipt: 发话方一直没空或已不在, 放弃回注");
+          return false;
+        }
         if (!(await deps.idleNow(s.from))) {
-          const w = await deps.untilIdle(s.from, until - Date.now());
-          if (!w.idle) { lg.warn({ reason: w.reason }, "receipt: 发话方一直忙, 放弃回注"); settle(s); return; }
+          await deps.untilIdle(s.from, Math.min(IDLE_STEP_MS, s.at + KEEP_MS - Date.now()), { aborted: () => stale(s) });
+          continue;
         }
         if (!deps.handingOff?.(s.from)) break;
       }
-      // 等的这段时间里同一对又说了一句 → 这一份作废, 后一句的回执才是要的那个。
-      // 进 serial 时查过一次不够: 等发话方闲下来可能要几分钟, 新的一句正是在这期间来的。
-      if (stale(s)) { lg.info("receipt: 等发话方期间被新的一句顶掉, 不回注"); return; }
-      const r = await deps.deliver(s.from, body, meta);
-      s.delivered = r.ok;
-      settle(s);
-      lg.info({ ok: r.ok, reason: r.reason, len: body.length, done: meta.done, total: meta.total }, "receipt: 回注");
+      const r = await deps.deliver(s.from, out.body, meta);
+      if (r.ok) s.delivered = true;
+      else s.undelivered = true;
+      lg.info({ ok: r.ok, reason: r.reason, status: out.status, len: out.body.length, done: meta.done, total: meta.total }, "receipt: 回注");
+      return true;
     });
+    if (stale(s)) { lg.info("receipt: 被同一对的新一句顶掉, 不回注"); return; }
+    // error 只是中途报了一声: 接着守续跑出来的答案。
+    if (!final && sent) return watch(s);
+    settle(s);
   };
 
   return {

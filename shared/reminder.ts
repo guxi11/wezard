@@ -53,7 +53,13 @@ export interface Envelope {
   chat: string;
   /** 这一轮是回执 (对方干完了, 守护进程把结论送回发话方), 不是新派的活。 */
   receipt?: boolean;
+  /** 回执的定论 (见 ReceiptStatus); 老信封没有 = done。 */
+  status?: ReceiptStatus;
 }
+
+/** 回执落成什么。done = 答了; error = 那一轮以 CLI 报错 (API Error) 收尾, 不是定论;
+ *  timeout / silent / dead = 没等到答案 (超时 / 停下几次都没答 / pane 没了)。 */
+export type ReceiptStatus = "done" | "error" | "timeout" | "silent" | "dead";
 
 export const envelopeAttrs = {
   human: (user: string, chat: string): Attrs => ({ wezard: "envelope", kind: "human", from: user, chat }),
@@ -64,9 +70,10 @@ export const envelopeAttrs = {
   task: (taskId: string): Attrs => ({ wezard: "envelope", kind: "task", from: taskId }),
   /** 回执也是「`from` 在对你说话」, 所以仍是 peer 信封 —— read_chat / rolepage 照旧
    *  把它归到那场对话里; 多一个 `receipt` 属性说明它是自动送回来的结论而不是新活。 */
-  receipt: (from: string, chat?: string, job?: { job: string; done: number; total: number }): Attrs => ({
+  receipt: (from: string, chat?: string, job?: { job: string; done: number; total: number }, status: ReceiptStatus = "done"): Attrs => ({
     ...envelopeAttrs.peer(from, chat),
     receipt: "1",
+    status,
     // 工单的「齐了吗」由守护进程数出来写在属性上, 不让模型自己记: 异步回执是 N 个
     // 独立的轮次陆续进来的, 靠模型在上下文里数到五是最容易出错的那种事。
     ...(job && job.job
@@ -84,6 +91,7 @@ const envelopeOfAttrs = (a: Attrs): Envelope | undefined =>
         private: a.scope === "private",
         chat: a.chat ?? "",
         ...(a.receipt === "1" ? { receipt: true } : {}),
+        ...(a.status ? { status: a.status as ReceiptStatus } : {}),
       }
     : undefined;
 

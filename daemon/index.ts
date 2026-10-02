@@ -636,6 +636,7 @@ const main = async (): Promise<void> => {
       handingOff,
       handedOff,
       replyFor: (to, fromName, since) => m.replyToPeer(to, fromName, since),
+      lastWords: m.lastText,
       deliver: (to, bodyText, meta) =>
         m.injectText(to, clipMiddle(bodyText), undefined, {
           // receipt:true 是「这一轮不该再生回执」的记录 —— 回环在结构上就不成立:
@@ -646,6 +647,7 @@ const main = async (): Promise<void> => {
             displayName(meta.from),
             meta.channel ? chatNameOf(cfg, meta.channel) : undefined,
             meta.job ? { job: meta.job, done: meta.done, total: meta.total } : undefined,
+            meta.status,
           ),
         }),
     });
