@@ -428,10 +428,14 @@
     return goSpan('av', id, esc(label)) +
       line(nm(id, name, true, badge) + (tail || ''), g.lastTs, g.preview, stTag(status, true), g.unread);
   };
-  // 名字旁的「+N」: 它还在 N 个当前视角不在场的会话里 (群 + 私聊) —— 侧栏与关系图卡片同一份。
+  // 名字旁的「+N」: 视图外还有 N 个 —— 同一个徽标, 数什么由所在的视图注入 (会话列表数会话, 关系图数关系)。
+  var moreTag = function (n, tip) {
+    return n ? '<span class="oc" title="' + esc(tip) + '">+' + n + '</span>' : '';
+  };
+  // 会话列表: 它还在 N 个当前视角不在场的会话里 (群 + 私聊)。
   var otherChats = function (id) {
     var n = (R.others || {})[id];
-    return n ? '<span class="oc" title="' + esc(nameOf(id) + ' 还在 ' + n + ' 个 ' + nameOf(ROLE) + ' 不在场的会话里, 切到它的视角可见') + '">+' + n + '</span>' : '';
+    return moreTag(n, nameOf(id) + ' 还在 ' + n + ' 个 ' + nameOf(ROLE) + ' 不在场的会话里, 切到它的视角可见');
   };
   var convRow = function (c) {
     if (c.kind === 'wizard') return roleRow(c.peer, c.name, c.label, glance(c), c.status, '', otherChats(c.peer));
@@ -1506,11 +1510,21 @@
   var byCard = function (F) {
     return function (a, b) { return recentFirst(cardGlance(F, a), cardGlance(F, b)); };
   };
+  // 关系图: 它与 N 个 role 有关系 (范围内的任一种边), 但这张图上没有连到它们的线。
+  var otherRels = function (F, t) {
+    var on = (F.links || {})[t] || [];
+    var n = Object.keys(Object.keys(F.pairs).reduce(function (m, k) {
+      var p = F.pairs[k], o = p.from === t ? p.to : p.to === t ? p.from : '';
+      if (o && on.indexOf(o) < 0) m[o] = 1;
+      return m;
+    }, {})).length;
+    return moreTag(n, nameOf(t) + ' 还和 ' + n + ' 个 role 有关系没连在这张图上, 切到它的视角可见');
+  };
   var tnodeHTML = function (F, n, folded) {
     var me = n.target === ROLE;
     var tail = folded ? '<span class="tfold" title="它下面还有 ' + folded + ' 个, 切到它的视角可见">+' + folded + '</span>' : '';
     var p = F.pp[n.target];
-    var row = roleRow(n.target, n.name, n.label, cardGlance(F, n.target), n, tail, otherChats(n.target));
+    var row = roleRow(n.target, n.name, n.label, cardGlance(F, n.target), n, tail, otherRels(F, n.target));
     var via = F.vis && F.vis[n.target] === 'via';
     return '<button class="ci tci' + (me ? ' me' : '') + (via ? ' via' : '') + (F.links && CONV === talkKey(F.links, n.target) ? ' on' : '') + '" data-t="' + esc(n.target) + '"' +
       (via ? ' title="' + esc(nameOf(n.target) + ' 没和 ' + nameOf(ROLE) + ' 对过话, 留着是为了连到它下面对过话的') + '"' : '') + '>' +
