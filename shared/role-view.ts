@@ -367,10 +367,10 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
     .sort((a, b) => b.lastTs - a.lastTs);
 };
 
-/** 每个 role 参与的会话 (与 convsOf 同一口径: 群要自己开过口, 私聊有往来就算) 里, 视角 role 不在场的有几个 ——
- *  侧栏会话项与关系图卡片名字旁的「+N」。key 取绝对的 (`c:<base>` / `p:<a>|<b>`), 两个视角才比得了。
- *  定时与系统不是聊天的一方。只列 N > 0 的。 */
-export const otherChatsOf = (all_: readonly Msg[], viewer: string): Record<string, number> => {
+/** 每个 role 参与的全部会话 (与 convsOf 同一口径: 群要自己开过口, 私聊有往来就算) —— 侧栏会话项名字旁的
+ *  「+N」= 这份减去那一项自己的会话。key 取绝对的 (`c:<base>` / `p:<a>|<b>`), 与视角无关。
+ *  定时与系统不是聊天的一方。 */
+export const chatKeysOf = (all_: readonly Msg[]): Record<string, string[]> => {
   const party = (r: string): boolean => !!r && !r.startsWith("task:") && r !== SYSTEM;
   const index = all_.filter((m) => !isPing(m)).reduce((idx, m) => {
     const add = (r: string, k: string) => idx.set(r, (idx.get(r) ?? new Set<string>()).add(k));
@@ -381,11 +381,7 @@ export const otherChatsOf = (all_: readonly Msg[], viewer: string): Record<strin
     }
     return idx;
   }, new Map<string, Set<string>>());
-  const seen = index.get(viewer) ?? new Set<string>();
-  return Object.fromEntries([...index]
-    .filter(([r]) => r !== viewer)
-    .map(([r, ks]) => [r, [...ks].filter((k) => !seen.has(k)).length] as const)
-    .filter(([, n]) => n > 0));
+  return Object.fromEntries([...index].map(([r, ks]) => [r, [...ks]] as const));
 };
 
 /** 一个会话窗口里的消息。`withRole` 只对公开频道有意义: 当前 role 与它在这个频道里的往来。

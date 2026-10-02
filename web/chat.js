@@ -432,16 +432,19 @@
   var moreTag = function (n, tip) {
     return n ? '<span class="oc" title="' + esc(tip) + '">+' + n + '</span>' : '';
   };
-  // 会话列表: 它还在 N 个当前视角不在场的会话里 (群 + 私聊)。
-  var otherChats = function (id) {
-    var n = (R.others || {})[id];
-    return moreTag(n, nameOf(id) + ' 还在 ' + n + ' 个 ' + nameOf(ROLE) + ' 不在场的会话里, 切到它的视角可见');
+  // 会话列表: 除了这一项 (here = 它的绝对 key), 它还在 N 个会话里 (群 + 私聊)。服务端没给这份 = 不知道, 不画。
+  var otherChats = function (id, here) {
+    var ks = (R.chatKeys || {})[id];
+    var n = ks ? ks.filter(function (k) { return k !== here; }).length : 0;
+    return moreTag(n, nameOf(id) + ' 还在另外 ' + n + ' 个会话里, 切到它的视角可见');
   };
+  // 私聊项的 key 是相对视角的 (p:<对端>), 服务端那份是绝对的 (p:<a>|<b>, 两端排序)。
+  var dmKey = function (peer) { return 'p:' + [ROLE, peer].sort().join('|'); };
   var convRow = function (c) {
-    if (c.kind === 'wizard') return roleRow(c.peer, c.name, c.label, glance(c), c.status, '', otherChats(c.peer));
+    if (c.kind === 'wizard') return roleRow(c.peer, c.name, c.label, glance(c), c.status, '', otherChats(c.peer, dmKey(c.peer)));
     return avatarOf(c) + line('<span class="nm chat">' + esc(c.name) + '</span>', c.lastTs, c.preview, stTag(c.status, true), unreadOf(c));
   };
-  var subRow = function (c, s) { return roleRow(s.role, s.name, s.label, glance(c, s), s.status, '', otherChats(s.role)); };
+  var subRow = function (c, s) { return roleRow(s.role, s.name, s.label, glance(c, s), s.status, '', otherChats(s.role, c.key)); };
 
   var convItem = function (c) {
     var on = c.key === CONV;
@@ -1072,7 +1075,7 @@
   // 收下摘要 (视角、会话列表、落地窗口) 与按它画页头侧栏分开: 换视角整窗重拉时, 画要等到新行到手的同一帧。
   var takeRole = function (d) {
     R.at = d.at || Date.now(); R.recvAt = Date.now();
-    R.role = d.role; R.sessions = d.sessions || []; R.convs = d.convs || []; R.others = d.others || {};
+    R.role = d.role; R.sessions = d.sessions || []; R.convs = d.convs || []; R.chatKeys = d.chatKeys;
     SESSION = d.session || '';
     R.relations = !!d.relations; R.schedules = d.schedules || 0; R.plan = d.plan || null;
     R.charter = d.charter || null;
@@ -1524,14 +1527,16 @@
   var byCard = function (F) {
     return function (a, b) { return recentFirst(cardGlance(F, a), cardGlance(F, b)); };
   };
-  // 关系图: 它与 N 个 role 有关系 (范围内的任一种边), 但这张图上没有连到它们的线。
+  // 关系图: 它与 N 个 role 有关系, 但这张图上没有连到它们的线。关系 = 服务端裁节点之前的全部对端 (node.rels)
+  // ∪ 这段范围里画得出的边 —— 前者补上没下发的节点, 后者兜住老 svr 没给 rels 的情况。
   var otherRels = function (F, t) {
     var on = (F.links || {})[t] || [];
-    var n = Object.keys(Object.keys(F.pairs).reduce(function (m, k) {
+    var all = Object.keys(F.pairs).reduce(function (m, k) {
       var p = F.pairs[k], o = p.from === t ? p.to : p.to === t ? p.from : '';
-      if (o && on.indexOf(o) < 0) m[o] = 1;
+      if (o) m[o] = 1;
       return m;
-    }, {})).length;
+    }, ((nodeOf(t) || {}).rels || []).reduce(function (m, o) { m[o] = 1; return m; }, {}));
+    var n = Object.keys(all).filter(function (o) { return o !== t && on.indexOf(o) < 0; }).length;
     return moreTag(n, nameOf(t) + ' 还和 ' + n + ' 个 role 有关系没连在这张图上, 切到它的视角可见');
   };
   var tnodeHTML = function (F, n, folded) {

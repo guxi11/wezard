@@ -140,6 +140,9 @@ export interface WorldNode {
   taskTurns: number;
   /** 被同伴派活开出的轮数 (含跨聊天)。 */
   peerTurns: number;
+  /** 与它有关系 (任一种边) 的全部 role —— 在节点按卡片上限裁剪之前算, 所以连到没下发节点的关系也在。
+   *  关系图卡片名字旁的「+N」由前端拿它减去图上已连的。 */
+  rels?: string[];
 }
 
 /** clone = 分身 (从父亲的 session 节点 fork); spawn = 子 wizard (父亲生的白板)。 */
@@ -376,6 +379,11 @@ export const buildWorld = (
   );
 
   const edges = [...withLineage.values()].sort((a, b) => b.lastTs - a.lastTs);
+  const relsOf = edges.reduce((m, e) => {
+    const add = (a: string, b: string) => m.set(a, (m.get(a) ?? new Set<string>()).add(b));
+    add(e.from, e.to); add(e.to, e.from);
+    return m;
+  }, new Map<string, Set<string>>());
 
   // 有关系的一律留下 —— 边的端点被筛掉, 那条边就没地方落脚了。
   const linked = new Set(edges.flatMap((e) => [e.from, e.to]));
@@ -424,7 +432,8 @@ export const buildWorld = (
     base: scope.base,
     self: scope.self,
     chats,
-    nodes: [...nodes, ...humans].filter((n) => shown.has(n.target)).sort(byTs),
+    nodes: [...nodes, ...humans].filter((n) => shown.has(n.target)).sort(byTs)
+      .map((n) => ({ ...n, rels: [...(relsOf.get(n.target) ?? [])] })),
     // 两端都还在图上的边才画得出来。
     edges: edges.filter((e) => shown.has(e.from) && shown.has(e.to)),
     jobs: [...facts.jobs].sort((a, b) => (b.closedAt ?? b.openedAt) - (a.closedAt ?? a.openedAt)),

@@ -27,7 +27,7 @@ import { baseOfKey } from "./session-label.js";
 import { isMark, isPost, isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, type WorldFacts } from "./world.js";
 import {
-  allMessages, convKeyOf, convMessages, otherChatsOf, parseTalkKey, glanceOfTalk, convsOf, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
+  allMessages, convKeyOf, convMessages, chatKeysOf, parseTalkKey, glanceOfTalk, convsOf, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
   roleInfo, roleStats, sessionsOf, talkArgs, talkOf, counterpartOf, windowStats, type Directory, type Msg, type SessionSpan,
 } from "./role-view.js";
 import { renderMark, renderMsg, type MsgFragment } from "./role-render.js";
@@ -197,7 +197,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       sessions: spans.map(wireSpan),
       session: span?.sessionId ?? (spans.length ? ALL_SESSIONS : ""),
       convs,
-      others: otherChatsOf(inWin, role),
+      // 不随视角的 session 段裁: 「它还在别的会话里」说的是它, 不是视角选的那段时间。
+      chatKeys: chatKeysOf(msgs),
       // 链接来自哪个会话就默认开哪个 (见 landingOf); 否则最近活动的那个。
       conv: home?.key ?? convs[0]?.key ?? "",
       // 从群里点名字进来, 要看的是「我在这个群里和它说过什么」—— 默认只看与问话那一方的
