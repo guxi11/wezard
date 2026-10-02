@@ -448,7 +448,7 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .tg-head { order: 9; display: flex; align-items: center; gap: 4px 10px; flex-wrap: wrap; padding: 0 2px }
 .mstat { display: inline-flex; align-items: center; gap: 4px 10px; flex-wrap: wrap }
 .mrow.two :is(.mstat, .say-cap) :is(.chip, .tg-tok) { display: none }
-:is(.tg-head, .mstat, .say-cap) :is(.chip.model, .chip.tier), .tg-tok {
+:is(.tg-head, .mstat, .say-cap) :is(.chip.model, .chip.tier), .tg-tok, .tg-dur {
   padding: 0; border: 0; border-radius: 0; background: none; font-weight: 400;
   font-size: 10.5px; color: var(--faint); font-family: ui-monospace, Menlo, monospace;
 }

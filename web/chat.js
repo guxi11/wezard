@@ -46,6 +46,14 @@
     if (n < 1e6) { var v = n / 1000; return (v >= 10 ? v.toFixed(0) : v.toFixed(1).replace(/\.0$/, '')) + 'k'; }
     return (n / 1e6).toFixed(2).replace(/\.?0+$/, '') + 'M';
   };
+  // 与服务端 detail-render 的 fmtDuration 同一写法: 走表的那一轮收口后换成服务端写死的值, 不该跳格式。
+  var fmtDur = function (ms) {
+    if (ms < 1000) return ms + 'ms';
+    var s = Math.round(ms / 100) / 10;
+    if (s < 60) return s + 's';
+    var m = Math.floor(s / 60);
+    return m + 'm' + Math.round(s - m * 60) + 's';
+  };
   var pad = function (n) { return n < 10 ? '0' + n : '' + n; };
   var fmtDay = function (ts) {
     var x = new Date(ts);
@@ -2133,6 +2141,14 @@
     }
     pollWorld();
   };
+  // 进行中那一轮的耗时: 服务端只给开始时刻, 这里每秒按它走表 (取整秒, 免得小数位抖)。
+  var tickDur = function () {
+    document.querySelectorAll('.tg-dur.live[data-since]').forEach(function (el) {
+      var ms = Math.max(0, srvNow() - Number(el.getAttribute('data-since')));
+      el.textContent = fmtDur(Math.floor(ms / 1000) * 1000);
+    });
+  };
+  setInterval(tickDur, 1000);
   // 本地心跳: 相对时间、运行中判定、耗时都随时间变化, 但服务端没有新事件可推。
   setInterval(function () {
     if (!R.role) return;

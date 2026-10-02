@@ -642,8 +642,11 @@ const usageChips = (r: TurnDetailRecord, done: boolean, ageMs: number): string =
     u?.serviceTier && u.serviceTier !== "standard" ? `<span class="chip tier">${escHtml(u.serviceTier)}</span>` : "",
     ctxPeak ? `<span class="tg-tok" title="上下文峰值">ctx ${fmtTok(ctxPeak)}</span>` : "",
     // 耗时只在收口后写死 —— 进行中的 turn 每次渲染都会得到不同的 ageMs, 会把 sig 打乱,
-    // 让 SSE 的"内容没变就不重发"彻底失效。进行中的时长由页脚 status bar 负责。
-    done ? `<span class="tg-tok">${escHtml(fmtDuration(ageMs))}</span>` : "",
+    // 让 SSE 的"内容没变就不重发"彻底失效。进行中只给开始时刻 (不变), rolepage 按它走表。
+    // 单独一个 .tg-dur: 两人对话里藏指标的规则不碰它。
+    done
+      ? `<span class="tg-dur">${escHtml(fmtDuration(ageMs))}</span>`
+      : `<span class="tg-dur live" data-since="${r.createdAt}"></span>`,
   ].filter(Boolean).join("");
 };
 
