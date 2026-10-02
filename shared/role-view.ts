@@ -85,7 +85,7 @@ export const isPing = (m: Msg): boolean => isKeepaliveTurn(m.turn);
 /** 一个公开频道里听话的那一方: 与人的单聊是那个人; 群里是这条链的链头 (守护进程写 turn /
  *  post 时顺着派活链记下的, 见 Asker) —— 只在他正是在这个群里开的口时才算; 认不出就是
  *  `human:` (未知), 不拿群里别的开口的人去猜: 一个 wizard 可能同时在答好几个人。 */
-const audienceOf = (channel: string, asker: Asker | undefined): string =>
+export const audienceOf = (channel: string, asker: Asker | undefined): string =>
   channel.startsWith("user:") ? humanOf(channel) : asker?.chat === channel ? humanOf(asker.who) : "human:";
 
 /** 回执轮: 守护进程把同伴那一轮的终句原样转进发话方的会话。 */

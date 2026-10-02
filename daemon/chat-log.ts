@@ -10,6 +10,7 @@
 // target (和谁的往来), 每一级都可以不给; 再按时间窗与条数裁。
 import { stripSigil } from "../shared/session-label.js";
 import { truncateWithCount } from "../shared/std.js";
+import type { Envelope } from "../shared/reminder.js";
 import { talkRounds } from "./peers.js";
 
 /** 一个要被读的会话。 */
@@ -53,6 +54,14 @@ interface LogMsg {
   pending?: boolean;
 }
 
+/** 认不出是谁的人。 */
+export const UNKNOWN_HUMAN = "未知";
+
+/** 公开回执那一轮的终句答给谁 —— 与 rolepage 同一个判定 (role-view.audienceOf), 守护进程
+ *  投递时就算好写进了信封; 信封上没有的老回执, 只有单聊 home 认得出是那个人, 其余如实未知。 */
+const audienceIn = (s: LogSession, env: Envelope, chat: string): string =>
+  env.audience ?? (chat === s.homeChat && s.homeHuman !== UNKNOWN_HUMAN ? s.homeHuman : UNKNOWN_HUMAN);
+
 const same = (a: string, b: string): boolean => stripSigil(a).toLowerCase() === stripSigil(b).toLowerCase();
 
 /** 一个会话的来回 → 入/出两条消息。`deep` = 这个会话往回还可能有没读到的:
@@ -71,7 +80,7 @@ const messagesOf = (s: LogSession, q: ChatLogQuery, depth: number, pingSigs: rea
       const at = ask.ms ?? 0;
       return [
         { ts: at, from, to: s.name, ...where, text: ask.text, ...(!answer && i === rounds.length - 1 ? { pending: true } : {}) },
-        ...(answer ? [{ ts: answer.ms ?? at, from: s.name, to: from, ...where, text: answer.text }] : []),
+        ...(answer ? [{ ts: answer.ms ?? at, from: s.name, to: env?.receipt && !env.private ? audienceIn(s, env, where.chat) : from, ...where, text: answer.text }] : []),
       ];
     })
     .filter((m) => m.ts >= s.since);

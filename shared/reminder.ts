@@ -65,10 +65,12 @@ export interface Envelope {
   replyTo?: string;
   /** 回执: 父 k 的机器表示 (见 receipts.kAttr)。 */
   k?: string;
+  /** 回执: 这一轮在群里的终句答给的那个人 (userid, 见 role-view.audienceOf); 认不出 = 没有。 */
+  audience?: string;
 }
 
 /** 回执那一轮的去向 (见 receipts.routeOf), 已渲染成给人 / 模型看的称呼。 */
-export interface ReceiptRoute { replyTo?: string; k?: string }
+export interface ReceiptRoute { replyTo?: string; k?: string; audience?: string }
 
 /** 一件活的编号: 写进派活与回执的信封。 */
 /** `act`: 这句话要对方怎么接 —— 缺省是一件活; ask = 只答一问; fyi = 知会, 不用回。
@@ -96,6 +98,7 @@ export const envelopeAttrs = {
     status,
     ...(route?.replyTo ? { "reply-to": route.replyTo } : {}),
     ...(route?.k ? { k: route.k } : {}),
+    ...(route?.audience ? { audience: route.audience } : {}),
     // 工单的「齐了吗」由守护进程数出来写在属性上, 不让模型自己记: 异步回执是 N 个
     // 独立的轮次陆续进来的, 靠模型在上下文里数到五是最容易出错的那种事。
     ...(job && job.job
@@ -118,6 +121,7 @@ const envelopeOfAttrs = (a: Attrs): Envelope | undefined =>
         ...(a.re ? { re: a.re } : {}),
         ...(a["reply-to"] ? { replyTo: a["reply-to"] } : {}),
         ...(a.k ? { k: a.k } : {}),
+        ...(a.audience ? { audience: a.audience } : {}),
       }
     : undefined;
 

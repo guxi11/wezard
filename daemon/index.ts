@@ -83,7 +83,8 @@ import { renderInFlight } from "../shared/turn-state.js";
 import type { TurnTag } from "../shared/reminder.js";
 import { createHandoffs, handedOff, handingOff, type Pending as PendingHandoff } from "./handoff.js";
 import { rankCandidates, renderCandidates, wakeNoteOf } from "./route.js";
-import { parseWhen, renderChatLog, type LogSession } from "./chat-log.js";
+import { parseWhen, renderChatLog, UNKNOWN_HUMAN, type LogSession } from "./chat-log.js";
+import { audienceOf } from "../shared/role-view.js";
 import {
   startGraph,
   stopRun,
@@ -654,6 +655,12 @@ const main = async (): Promise<void> => {
     // 工单账本 (见 jobs.ts)。只在**显式传了 `job`** 时起作用 —— 不用工单的调用方
     // 行为与从前一模一样。回执要数它的成员, 所以先于回执载入。
     const jobs = loadJobStore(cfg.wrc.mirror.jobsFile);
+    /** 回执那一轮在群里的终句答给谁 (userid) —— 与 rolepage 同一个判定, 写进信封给模型与
+     *  read_chat; 认不出 = ""。 */
+    const audienceName = (channel: string, asker: Asker | undefined): string => {
+      const id = audienceOf(channel, asker);
+      return id === "human:" ? "" : id.slice("human:".length);
+    };
     const receipts = createReceipts({
       idleNow: m.idleNow,
       jobTally: (id) => jobs.tally(id),
@@ -690,6 +697,7 @@ const main = async (): Promise<void> => {
               ...(meta.replyTo ? { replyTo: meta.replyTo.kind === "chat" ? chatNameOf(cfg, meta.replyTo.channel) : displayName(meta.replyTo.from) } : {}),
               ...(meta.k ? { k: kAttr(meta.k) } : {}),
               ...(meta.pending ? { pending: meta.pending } : {}),
+              ...(audienceName(meta.channel, meta.asker) ? { audience: audienceName(meta.channel, meta.asker) } : {}),
             },
           ),
         }),
@@ -920,7 +928,7 @@ const main = async (): Promise<void> => {
         name: displayName(t.target),
         jsonlPath: t.jsonlPath,
         homeChat: chatNameOf(cfg, home),
-        homeHuman: home.startsWith("user:") ? home.slice(5) : "人",
+        homeHuman: home.startsWith("user:") ? home.slice(5) : UNKNOWN_HUMAN,
         since: rec?.clonedFrom ? rec.bornAt : 0,
       };
     };
