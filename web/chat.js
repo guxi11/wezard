@@ -689,8 +689,11 @@
       return '<button class="' + (cur === o[0] ? 'on' : '') + '" ' + attr + '="' + o[0] + '" title="' + o[2] + '">' + o[1] + '</button>';
     }).join('') + '</span>';
   };
+  // 单个文字按钮: 字是当前范围, 点一下切到另一种 (样式与旁边的「关系图」按钮同一个 .vt)。
   var scopeToggle = function () {
-    return segToggle('data-scope', SCOPE, [['pair', '往来', '群下只列与我有往来的 role'], ['all', '全部', '群下列出 chat 内全部 role']]);
+    var pair = SCOPE === 'pair';
+    return '<button class="vt" data-scope="' + (pair ? 'all' : 'pair') + '" title="' +
+      (pair ? '群下只列与我有往来的 role (点击改为列出 chat 内全部)' : '群下列出 chat 内全部 role (点击改为只列有往来的)') + '">' + (pair ? '往来' : '全部') + '</button>';
   };
   var worldToggle = function () {
     return '<button class="vt" data-vt title="' + (WORLD ? '换回会话列表' : '换成关系图') + '">' + (WORLD ? LIST_SVG + '列表' : TREE_SVG + '关系图') + '</button>';
