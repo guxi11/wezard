@@ -28,7 +28,7 @@
 
 ### Changed
 - charter 编排段按回执 `status` 写处理法 (B2a ⑧): `need` 用 `re` 答、`error` 等续跑、`timeout / silent / dead / canceled` 换人或如实写缺; 「迟迟不来才 peek」改为看名册 / peek 的「在等 / 欠着」行; 写明 `deadline` / `maxTurns` / `expect` 何时用, 收口约定加 `NEED:` / `ARTIFACT:`。
-- rolepage 用量条的指标图标: API 请求次数 📡 → 🔌 (一次接口调用), 上下文峰值 🧠 → 🪟 (上下文窗口)。仍用 emoji 而不是单色 svg, 与同排 💬 🛠️ ⏱️ 保持一套, 也能原样进被 fitUsage 收起时的 title。
+- rolepage 用量条的指标图标: API 请求次数 📡 → 🔁 (一次来回), 上下文峰值 🧠 → 📄 (送进去的那份文档)。仍用 emoji 而不是单色 svg, 与同排 💬 🛠️ ⏱️ 保持一套, 也能原样进被 fitUsage 收起时的 title。
 - rolepage 用量条 I/O 分布色带里缓存读 (cr) 一段改用边线色 `--line` (图例色点同步), 贴顶时与普通上边线连成一体, 注意力只留给 in / cw / out。
 - rolepage 用量条的 I/O 分布色带从贴底挪到贴顶, 兼作上边线 (原 `border-top` 去掉; 没有分布时留 1px 线), 厚度 3px → 1px, 悬停加粗到 3px。
 - rolepage 关系图标题行的「看全部 / 只看相关」文字按钮换成与侧栏「往来 / 全部」同款的两段式开关「相关 | 全部」, 切换语义不变。

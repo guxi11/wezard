@@ -761,7 +761,7 @@
     turns: '对话轮数', tools: '工具调用次数', api: 'API 请求次数',
     ctx: '上下文峰值 — 单次请求送入的 input + 缓存 的最高值', time: '累计耗时',
   };
-  var ICON = { turns: '💬', tools: '🛠️', api: '🔌', ctx: '🪟', time: '⏱️' };
+  var ICON = { turns: '💬', tools: '🛠️', api: '🔁', ctx: '📄', time: '⏱️' };
   var liveDur = function (t) {
     var d = (t.usage && t.usage.durationMs) || 0;
     if (!t.runningUntil) return d;
