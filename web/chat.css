@@ -350,6 +350,16 @@ button.mchip.rcpt { cursor: pointer }
 button.mchip.rcpt:hover { text-decoration: underline }
 .mchip.rcpt:is(.st-need, .st-error) { color: #9a6700; background: #9a670014 }
 .mchip.rcpt:is(.st-timeout, .st-silent, .st-dead, .st-canceled) { color: #cf222e; background: #cf222e10 }
+/* 移交行里的对方: 小头像 + 名字, 整块是切视角的入口。 */
+.handoff .ho-who { display: inline-flex; align-items: center; gap: 3px; border: 0; background: none; padding: 0 2px; font: inherit; color: var(--ink); cursor: pointer; border-radius: 4px }
+.handoff .ho-who:hover { background: var(--av-hot) }
+.handoff .ho-who .av { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--line); background: var(--card); font-size: 10px; line-height: 14px; text-align: center }
+.handoff .ho-who .nm { font-weight: 500 }
+/* 过程框收起后移交行仍露在框头下 —— 活交给了谁, 不该和普通工具输出一起藏起来。 */
+.steps.folded > .bubbles:has(> .bubble.tool .handoff) { display: flex; flex-direction: column }
+.steps.folded > .bubbles > :not(:has(.handoff)) { display: none }
+.steps.folded > .bubbles > .bubble.tool > :not(.handoff) { display: none }
+.steps.folded .handoff { padding-left: 6px }
 
 /* 气泡与过程框同一种底色: 都是这个人发出来的 —— 自己的是视角色, 别人的是浅灰。
    TURN_CSS 里写死的白卡 / 灰底 (嵌套气泡、代码块、折叠头) 在有色底上会显成一张张

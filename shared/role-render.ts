@@ -5,12 +5,12 @@
 //   出   该 wizard 这一轮的回复: 复用 renderTurnGroup (文本 + 工具细节), 去掉问句 ——
 //        问句已经是上面那条入消息了; 本轮用量单独走 `meta`, 客户端写在名字那一行
 //   断点 视角 role 自己的 /clear /new
-import { renderCutMark, renderTurnGroup, splitReminders, escHtml, fmtTs, hashStr, tagSig, turnUsageChips, type TurnFragment } from "./detail-render.js";
+import { renderCutMark, renderTurnGroup, splitReminders, escHtml, fmtTs, hashStr, tagSig, turnUsageChips, type HandoffDeco, type TurnFragment } from "./detail-render.js";
 import { isTurn, staleAt, turnDone } from "./chat-view.js";
 import { isKeepaliveTurn } from "./keepalive.js";
 import type { DetailRecord, MarkDetailRecord, TurnDetailRecord } from "./detail-store.js";
 import type { WorldFactJob } from "./world.js";
-import { teammateOf, unwrapMates, type Directory, type Msg } from "./role-view.js";
+import { channelOf, teammateOf, unwrapMates, type Directory, type Msg } from "./role-view.js";
 
 export interface MsgFragment {
   /** `<turnId>:in` / `<turnId>:out` / `m:<markId>`。 */
@@ -64,14 +64,61 @@ const inMeta = (r: TurnDetailRecord): string => {
 const RCPT: Readonly<Record<string, string>> = {
   done: "已交", need: "反问", error: "报错", timeout: "超时", silent: "没答", dead: "失联", canceled: "撤回",
 };
-/** 回执那一轮的 chip: 定论 + 工单里第几份; 点它跳回派活那句 (按 from.turn 找 data-pturn)。 */
-const receiptChip = (r: TurnDetailRecord): string => {
+const turnsWhere = (records: readonly DetailRecord[], pick: (t: TurnDetailRecord) => boolean): TurnDetailRecord[] =>
+  records.filter(isTurn).filter(pick).sort((a, b) => a.createdAt - b.createdAt);
+
+/** 一件活的派活那句 = 收信方接手的那一轮的入消息 (续问共用活号, 取最早那一轮)。 */
+const dispatchOf = (records: readonly DetailRecord[], turn: string): TurnDetailRecord | undefined =>
+  turnsWhere(records, (t) => t.from?.kind === "peer" && !t.from.receipt && t.from.turn === turn && !!t.userQuery?.trim())[0];
+
+/** 跳到派活那句要的坐标。派活那句常常不在点击处这个会话窗口里 (私聊派的活, 回执落在群里),
+ *  所以带上它自己的消息 id / 时刻 / 频道 / 两端 —— 会话键随视角而变, 由客户端算 (片段与视角无关)。 */
+const gotoAttrs = (turn: string, d: TurnDetailRecord): string =>
+  ` data-goto="${escHtml(turn)}" data-gid="${escHtml(d.id)}:in" data-gts="${d.createdAt}" data-gch="${escHtml(channelOf(d))}"` +
+  ` data-gfrom="${escHtml(d.from?.from ?? "")}" data-gto="${escHtml(d.target ?? "")}"`;
+
+/** 回执那一轮的 chip: 定论 + 工单里第几份; 找得到派活那句才可点, 点它跳过去 (跨会话也行)。 */
+const receiptChip = (r: TurnDetailRecord, records: readonly DetailRecord[], dir: Directory): string => {
   const f = r.from;
   if (f?.kind !== "peer" || !f.receipt) return "";
   const st = f.status ?? "done";
   const seq = f.job && f.total ? ` · ${escHtml(f.job)} 第 ${f.done ?? 0}/${f.total} 份` : "";
-  const tag = f.turn ? "button" : "span";
-  return `<${tag} class="mchip rcpt st-${escHtml(st)}"${f.turn ? ` data-goto="${escHtml(f.turn)}" title="跳到派活那句 (${escHtml(f.turn)})"` : ""}>↩ 回执 · ${RCPT[st] ?? escHtml(st)}${seq}</${tag}>`;
+  const d = f.turn ? dispatchOf(records, f.turn) : undefined;
+  const what = `.${dir.nameOf(f.from ?? "")} 交回了 ${f.turn ? `${f.turn} ` : ""}的结论`;
+  const [tag, attrs] = f.turn && d
+    ? ["button", `${gotoAttrs(f.turn, d)} title="${escHtml(`${what} · 点击跳到派活那句`)}"`]
+    : ["span", ` title="${escHtml(`${what} · 派活那句已不在记录里`)}"`];
+  return `<${tag} class="mchip rcpt st-${escHtml(st)}"${attrs}>↩ 回执 · ${RCPT[st] ?? escHtml(st)}${seq}</${tag}>`;
+};
+
+/** 移交行的 rolepage 那一半: 对方是名录里的谁 (头像 + 名字, 点了切过去), 这件活此刻到了哪一步 ——
+ *  回执落定了就写定论 (need 之后续问再交, 取最新那份), 没落定就看它接手了没有。
+ *  每次请求现算, 不进轮次缓存: 回执比派活那一轮晚到, 气泡的 sig 得跟着它变。 */
+const handoffDeco = (records: readonly DetailRecord[], dir: Directory): HandoffDeco => {
+  const latest = (pick: (t: TurnDetailRecord) => boolean): TurnDetailRecord | undefined => turnsWhere(records, pick).at(-1);
+  return {
+    who: (h) => {
+      const id = dir.resolve(h.name);
+      return id
+        ? `<button type="button" class="ho-who go" data-r="${escHtml(id)}" title="切到 .${escHtml(dir.nameOf(id))} 的视角"><span class="av">${escHtml(dir.labelOf(id))}</span><span class="nm wizard">${escHtml(dir.nameOf(id))}</span></button>`
+        : `<span class="ho-nm">.${escHtml(h.name)}</span>`;
+    },
+    turn: (h) => {
+      const d = dispatchOf(records, h.turn);
+      return d
+        ? `<button type="button" class="ho-turn"${gotoAttrs(h.turn, d)} title="跳到 .${escHtml(h.name)} 接手的那一轮">${escHtml(h.turn)}</button>`
+        : `<span class="ho-turn">${escHtml(h.turn)}</span>`;
+    },
+    status: (h) => {
+      if (!h.turn || !h.receipt) return "";
+      const rc = latest((t) => t.from?.kind === "peer" && !!t.from.receipt && t.from.turn === h.turn);
+      if (rc) {
+        const st = rc.from?.status ?? "done";
+        return `<span class="ho-st st-${escHtml(st)}">↩ ${RCPT[st] ?? escHtml(st)}</span>`;
+      }
+      return `<span class="ho-st wait">${dispatchOf(records, h.turn) ? "在办 · 等回执" : "等它接手"}</span>`;
+    },
+  };
 };
 
 /** 派活 / 续问那句带上它的活号, 回执凭它定位回来。 */
@@ -85,11 +132,11 @@ const renderIn = (r: TurnDetailRecord): string => {
 };
 
 /** 子 agent 的轮次内联进父轮 —— 与旧线程视图同一规则 (见 chat-view.threadEntries)。 */
-const childrenOf = (records: readonly DetailRecord[], turnId: string, now: number): TurnFragment[] =>
+const childrenOf = (records: readonly DetailRecord[], turnId: string, now: number, deco: HandoffDeco): TurnFragment[] =>
   records.filter(isTurn)
     .filter((r) => r.agent?.parentTurnId === turnId)
     .sort((a, b) => a.createdAt - b.createdAt)
-    .map((c) => renderTurnGroup(c, now));
+    .map((c) => renderTurnGroup(c, now, [], true, deco));
 
 const base = (m: Pick<Msg, "from" | "to" | "channel">, dir: Directory) => ({
   from: m.from, to: m.to, channel: m.channel,
@@ -113,7 +160,7 @@ export const renderMsg = (m: Msg, records: readonly DetailRecord[], dir: Directo
   const sent = m.dir === "in" ? senderTurn(r, records, dir) : undefined;
   const { html, meta } = m.dir === "in"
     ? { html: renderIn(r), meta: sent ? turnUsageChips(sent, now) : "" }
-    : ((g) => ({ html: g.html, meta: receiptChip(r) + jobChip(r) + g.meta }))(renderTurnGroup(r, now, childrenOf(records, r.id, now), false));
+    : ((g) => ({ html: g.html, meta: receiptChip(r, records, dir) + jobChip(r) + g.meta }))(((deco) => renderTurnGroup(r, now, childrenOf(records, r.id, now, deco), false, deco))(handoffDeco(records, dir)));
   const live = m.dir === "out" && !turnDone(r, now);
   return {
     id: m.id, turnId: r.id, dir: m.dir, ...base(m, dir), ts: m.ts,

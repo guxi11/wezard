@@ -20,6 +20,7 @@ import type {
 } from "./detail-store.js";
 import { truncate, clipLine } from "./std.js";
 import { parseReminders, stripReminders, type Reminder } from "./reminder.js";
+import { stripSigil } from "./session-label.js";
 
 const escHtml = (s: string): string =>
   s.replace(/[&<>"']/g, (c) =>
@@ -448,6 +449,26 @@ const TURN_CSS = `
   .tool-result-line .del{color:#cf222e;font-weight:600}
   .tool-result-line .more{color:#8c959f}
   .tool-result-line .run{color:#9a6700}
+  /* ── 移交提示: 系统行, 不是消息 —— 没有底色与边框, 小一号 ── */
+  .handoff{display:flex;align-items:center;flex-wrap:wrap;gap:4px 6px;padding:2px 6px 3px 24px;
+    font-size:11.5px;line-height:18px;color:#656d76}
+  .handoff .ho-arrow{color:#8250df;font-weight:600;margin-right:-2px}
+  .handoff .ho-nm{color:#1f2328;font-weight:500}
+  .handoff .ho-turn{border:0;background:none;padding:0;font:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    font-size:10.5px;color:#8c959f}
+  .handoff button.ho-turn{cursor:pointer}
+  .handoff button.ho-turn:hover{color:#0969da;text-decoration:underline}
+  .handoff .ho-tag{border-radius:4px;padding:0 5px;font-size:10.5px;line-height:16px;background:#f1f3f6;color:#656d76}
+  .handoff .ho-tag.pub{color:#0969da;background:#0969da12}
+  .handoff .ho-tag.priv{color:#9a5b10;background:#9a5b1014}
+  .handoff .ho-tag.pri.idle{opacity:.55}
+  .handoff .ho-st{border-radius:4px;padding:0 5px;font-size:10.5px;line-height:16px;color:#1a7f37;background:#1a7f3712}
+  .handoff .ho-st.run,.handoff .ho-st.wait{color:#8c959f;background:none;padding:0}
+  .handoff .ho-st:is(.st-need,.st-error){color:#9a6700;background:#9a670014}
+  .handoff .ho-st:is(.st-timeout,.st-silent,.st-dead,.st-canceled){color:#cf222e;background:#cf222e10}
+  .handoff .ho-why{color:#9a6700}
+  .handoff.fail .ho-arrow,.handoff.fail .ho-why{color:#cf222e}
+  .handoff .ho-why{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   /* ── 上下文断点条 ── */
   .tg-cut{display:flex;align-items:center;gap:8px;font-size:11px;color:#9a6700;
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.3px}
@@ -562,6 +583,99 @@ const toolBody = (use: ToolUse, result: ToolResult | undefined): string => {
   return `${primary}${inputSection}${resultJson}${resultRaw}`;
 };
 
+// ── 移交: tell_peer (旧名 send_peer) 把一件活交给了谁 ──
+// 它不是一次普通的工具调用 —— 这一刻起活在对方手里, 结论会作为回执回来。所以在调用框下面
+// 另起一行系统提示, 事实全从这次调用自己的 input / result 读: 回包有就信回包 (落地的名字、
+// 实际的投递方式), 没回来 (运行中 / 失败) 才退回 input。
+export interface Handoff {
+  /** 对方的名字, 不带点。 */
+  name: string;
+  /** 活号; 投递失败 / 回包还没回来时没有。 */
+  turn?: string;
+  public: boolean;
+  /** 实际的投递方式 —— urgent 被降级时回包写的是 normal。 */
+  priority: "normal" | "urgent" | "now";
+  /** 投的那一刻对方在忙 —— priority 只在这时才真起作用。undefined = 回包没说。 */
+  busy?: boolean;
+  kind?: "ask" | "fyi";
+  /** 带 `re` = 续问同一件活, 不是新活。 */
+  re: boolean;
+  /** 守护进程会送回执 (fyi / receipt:false 不送)。 */
+  receipt: boolean;
+  /** undefined = 回包还没回来; lost = 回来的不是回包 (调用被挪去后台等), 交没交出去不知道。 */
+  state?: "ok" | "failed" | "lost";
+  reason?: string;
+}
+
+const HANDOFF_TOOL = /(?:^|__)(?:tell|send)_peer$/;
+
+const objOf = (v: unknown): Record<string, unknown> => (v && typeof v === "object" ? (v as Record<string, unknown>) : {});
+const parseObj = (s: string): Record<string, unknown> | undefined => {
+  try { const v: unknown = JSON.parse(s); return v && typeof v === "object" ? (v as Record<string, unknown>) : undefined; } catch { return undefined; }
+};
+const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
+const PRIORITIES = ["normal", "urgent", "now"] as const;
+const priorityOf = (v: unknown): Handoff["priority"] | undefined => PRIORITIES.find((p) => p === v);
+
+/** 这次调用是不是一次移交; 是就读出它的事实。 */
+export const handoffOf = (use: ToolUse, result: ToolResult | undefined): Handoff | undefined => {
+  if (!HANDOFF_TOOL.test(use.toolName)) return undefined;
+  const a = objOf(use.toolInput);
+  const j = result ? parseObj(result.body) : undefined;
+  const ok = j?.ok !== false && j !== undefined;
+  const failed = j?.ok === false || (!!result && /^\w+ failed: /.test(result.body));
+  const kind = str(j?.kind) ?? str(a.kind);
+  return {
+    name: stripSigil(str(j?.name) ?? str(a.name) ?? str(a.tag) ?? ""),
+    turn: str(j?.turn),
+    public: typeof j?.public === "boolean" ? j.public : a.public === true,
+    priority: priorityOf(j?.priority) ?? priorityOf(a.priority) ?? (a.re ? "now" : "normal"),
+    busy: typeof j?.wasBusy === "boolean" ? j.wasBusy : undefined,
+    kind: kind === "ask" || kind === "fyi" ? kind : undefined,
+    re: !!str(a.re),
+    receipt: ok && !!j?.receipt,
+    state: !result ? undefined : ok ? "ok" : failed ? "failed" : "lost",
+    reason: result && !ok ? clipLine(str(j?.reason) ?? result.body.replace(/^\w+ failed: /, ""), 120) : undefined,
+  };
+};
+
+/** rolepage 给移交行补的三样: 对方的头像 + 名字 (点了切到它的视角), 活号 (点了跳到它接手的那一轮),
+ *  回执落定成什么。整页详情没有名录也不看别的轮次, 只写名字与活号。 */
+export interface HandoffDeco {
+  who: (h: Handoff) => string;
+  turn: (h: Handoff & { turn: string }) => string;
+  status: (h: Handoff) => string;
+}
+
+// 排队 / 插话 / 打断只在对方正忙时才真发生; 对方闲着就是立刻投, 标签淡下去。
+const PRIORITY_TAG: Readonly<Record<Handoff["priority"], [string, string]>> = {
+  normal: ["排队", "等它这一轮结束再投"],
+  now: ["插话", "落进它正在跑的这一轮"],
+  urgent: ["打断", "先打断它这一轮再投"],
+};
+
+const hoTag = (cls: string, text: string, tip: string): string =>
+  `<span class="ho-tag ${cls}" title="${escHtml(tip)}">${escHtml(text)}</span>`;
+
+const renderHandoff = (h: Handoff, deco?: HandoffDeco): string => {
+  const who = deco ? deco.who(h) : `<span class="ho-nm">.${escHtml(h.name)}</span>`;
+  if (h.state === "failed")
+    return `<div class="handoff fail"><span class="ho-arrow">↪</span>没交出去 ${who}<span class="ho-why">${escHtml(h.reason ?? "")}</span></div>`;
+  const [pt, tip] = PRIORITY_TAG[h.priority];
+  const idle = h.busy === false;
+  const tags = [
+    h.public ? hoTag("pub", "公开", "在群里说的, 回复也进群") : hoTag("priv", "私聊", "只在双方的 rolepage"),
+    hoTag(`pri${idle ? " idle" : ""}`, pt, idle ? `${tip} —— 投的时候它闲着, 立刻就投了` : tip),
+    h.kind === "ask" ? hoTag("kind", "只问", "只问一句") : h.kind === "fyi" ? hoTag("kind", "知会", "只是知会, 不要回话") : "",
+  ].join("");
+  const turn = !h.turn ? "" : deco ? deco.turn({ ...h, turn: h.turn }) : `<span class="ho-turn">${escHtml(h.turn)}</span>`;
+  const st = h.state === undefined
+    ? `<span class="ho-st run">投递中…</span>`
+    : h.state === "lost" ? `<span class="ho-why" title="${escHtml(h.reason ?? "")}">没等到回包, 交没交出去不确定</span>`
+    : deco ? deco.status(h) : "";
+  return `<div class="handoff"><span class="ho-arrow">↪</span>${h.re ? "续问" : h.state === "lost" ? "移交给" : "已移交给"} ${who}${turn}${tags}${st}</div>`;
+};
+
 /** `lazyTurn`: 正文不随气泡下发, 只留一个指回 (turn, toolUseId) 的空壳, 客户端展开时再取。
  *  摘要行与 ⎿ 预览照常渲染 —— 折叠态看到的东西一样不少。 */
 const renderToolBubble = (
@@ -570,8 +684,10 @@ const renderToolBubble = (
   key: string,
   done: boolean,
   lazyTurn?: string,
+  deco?: HandoffDeco,
 ): string => {
   const rawResult = result?.body ?? "";
+  const ho = handoffOf(use, result);
   // 头部一行: ⏺ 工具名(参数) — 参数取命令/路径等主字段, 与 Claude CLI 同款。
   const arg = oneLineCompact(use.toolInput, 72);
   const dur = result ? `<span class="tool-dur">${escHtml(fmtDuration(result.ts - use.ts))}</span>` : "";
@@ -585,7 +701,7 @@ const renderToolBubble = (
       <summary class="tool-summary"><span class="tool-dot">⏺</span><span class="tool-name">${escHtml(use.toolName)}</span>${arg ? `<span class="tool-arg">(${escHtml(arg)})</span>` : ""}${dur}${clock(use.ts)}</summary>
       ${body}
     </details>
-    <div class="tool-result-line">${preview}</div>
+    <div class="tool-result-line">${preview}</div>${ho ? renderHandoff(ho, deco) : ""}
   </section>`;
 };
 
@@ -699,7 +815,7 @@ interface Part { key: string; html: string; step: boolean; call?: boolean }
 
 /** `capped`: 隔着过程框的终句气泡头上带一行时刻 + 本轮的账 (rolepage 的消息要,
  *  自带 .tg-head 的独立片段不要)。 */
-const turnParts = (r: TurnDetailRecord, keyPrefix = "", now = Date.now(), lazy = false, capped = false): {
+const turnParts = (r: TurnDetailRecord, keyPrefix = "", now = Date.now(), lazy = false, capped = false, deco?: HandoffDeco): {
   parts: Part[];
   /** parts[i] 对应的时刻 —— 子 agent 卡片按它插回父轮时间轴。 */
   stamps: number[];
@@ -720,7 +836,7 @@ const turnParts = (r: TurnDetailRecord, keyPrefix = "", now = Date.now(), lazy =
   const isSay = (p: (typeof paired)[number], i: number): boolean =>
     p.kind === "solo" && p.item.t === "text" && (p.item.final === true || (done && i > lastAct));
   const body = (p: (typeof paired)[number], key: string, i: number): string => {
-    if (p.kind === "pair") return renderToolBubble(p.use, p.result, key, done, lazy ? r.id : undefined);
+    if (p.kind === "pair") return renderToolBubble(p.use, p.result, key, done, lazy ? r.id : undefined, deco);
     const it = p.item;
     if (it.t === "text") return isSay(p, i) ? renderSay(it, key, capped && i > 0 ? chips : undefined) : renderNote(it, key);
     if (it.t === "approval") return renderApprovalItem(it, key);
@@ -867,8 +983,9 @@ export const renderTurnGroup = (
   now = Date.now(),
   children: readonly TurnFragment[] = [],
   standalone = true,
+  deco?: HandoffDeco,
 ): TurnFragment => {
-  const { parts, stamps, done, chips } = turnParts(r, `${r.id}:`, now, true, !standalone);
+  const { parts, stamps, done, chips } = turnParts(r, `${r.id}:`, now, true, !standalone, deco);
   const q = splitReminders(r.userQuery ?? "");
   const queryBubble = r.userQuery && standalone
     ? `<section class="bubble user" data-key="${r.id}:user">

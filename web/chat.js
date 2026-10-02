@@ -303,18 +303,26 @@
     var c = e.target.closest && e.target.closest('.mchip.job[data-job]');
     if (c) openJob(c.getAttribute('data-job'));
   });
-  // 回执 chip: 跳回派活那句 (同一个活号的入消息)。窗口里没有就整窗重取一次再找, 同搜索落点。
+  // 回执 chip / 移交行的活号: 跳到派活那句 (同一个活号的入消息)。先在眼前这个窗口里找;
+  // 不在就按它带来的坐标切到它所在的会话再落点, 同搜索结果 —— 派活那句常在另一个窗口
+  // (私聊派的活, 回执落在群里)。会话键随视角: 公开的在那个群; 私聊在视角与对端的私聊里,
+  // 视角不是两端之一就开「这两方之间」的往来。服务端找不到那句时不会画成可点的。
   inner.addEventListener('click', function (e) {
-    var c = e.target.closest && e.target.closest('.rcpt[data-goto]');
+    var c = e.target.closest && e.target.closest('[data-goto][data-gid]');
     if (!c) return;
-    var t = c.getAttribute('data-goto');
-    var find = function () {
-      var q = inner.querySelector('[data-pturn="' + cssEsc(t) + '"]');
-      var row = q && q.closest('.mrow');
-      return !!row && focusRow(row.getAttribute('data-id'));
-    };
-    if (find()) return;
-    loadMsgs('0', function () { return find() || (toast('派活那句不在这个会话里'), false); });
+    var q = inner.querySelector('[data-pturn="' + cssEsc(c.getAttribute('data-goto')) + '"]');
+    var row = q && q.closest('.mrow');
+    if (row && focusRow(row.getAttribute('data-id'))) return;
+    var ch = c.getAttribute('data-gch'), from = c.getAttribute('data-gfrom'), to = c.getAttribute('data-gto');
+    var conv = ch ? 'c:' + ch : ROLE === from ? 'p:' + to : ROLE === to ? 'p:' + from : 'a:' + from + '|' + to;
+    jumpMsg({ conv: conv, id: c.getAttribute('data-gid'), ts: Number(c.getAttribute('data-gts')) });
+  });
+  // 移交行里对方的头像 + 名字: 切到它的视角 (节点随 reconcile 换, 所以在根上委托)。
+  inner.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('.handoff .go[data-r]');
+    if (!b) return;
+    var row = b.closest('.mrow');
+    switchRole(b.getAttribute('data-r'), row && row.getAttribute('data-id'));
   });
 
   // ── 左栏: 当前 role 的名片 + 会话列表 ──
