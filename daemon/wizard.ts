@@ -461,7 +461,6 @@ export const renderCharter = (a: CharterArgs): string => {
       "`wizard_handoff_self` 上下文快满 · `set_workspace` 换项目目录 · `set_model` 换模型",
       "`schedule_task` / `list_tasks` / `cancel_task` 到点自动执行的活",
       "`wait_peer` 仅当这一轮非拿到答案不可 (平时等回执), 或要等一个不是你派活的 wizard 停下 · `name_chat` 给聊天起名",
-      "`run_agent_graph` (罕用) 仅当人明说「几个 wizard 互相迭代到收敛」",
     ]),
     "",
     "## 话是怎么到你这儿的",

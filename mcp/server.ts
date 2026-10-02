@@ -53,6 +53,12 @@ server.registerTool = ((toolName: string, config: { inputSchema?: Shape }, cb: (
 }) as typeof server.registerTool;
 
 // Accept user-friendly prefixes from the LLM: vid:<id> → user:<id>, chatid:<id> → chat:<id>.
+// 人侧 / 罕用的工具 (30 天零调用: graph 三件套、本机会话清单与改接、聊天目录) 不进默认
+// 工具面 —— 每个注册的工具都占模型的上下文, 而这些要么人在 IM 里有对应命令 (`/sessions`
+// `/chats`), 要么由 tell_peer + 回执覆盖。路由都还在; `WEZARD_MCP_EXTRA=1` 把它们挂回来。
+const registerRare: typeof server.registerTool =
+  process.env.WEZARD_MCP_EXTRA === "1" ? server.registerTool.bind(server) : ((() => undefined) as never);
+
 // Pass anything else (already user:/chat:/group:, or empty) through unchanged.
 const normalizeTarget = (raw: string | undefined): string | undefined => {
   if (!raw) return undefined;
@@ -171,7 +177,7 @@ server.registerTool(
 // These let the WeCom-side Claude answer "列出所有 claude session" / "切到 xxx
 // 那个" / "在 /path 下新建一个 session" in natural language. The daemon does the
 // host-wide /proc + tmux scan (an MCP tool can only see its OWN session).
-server.registerTool(
+registerRare(
   "list_claude_sessions",
   {
     title: "List running agent sessions",
@@ -184,7 +190,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerRare(
   "switch_claude_session",
   {
     title: "Switch WeCom mirror to another agent session",
@@ -272,7 +278,7 @@ server.registerTool(
       chat: z
         .string()
         .optional()
-        .describe("把它生在哪个聊天里 (list_chats 里显示的名字)。省略 = 你自己的聊天, 用户绝大多数时候指的就是这个。只有**起过名字**的聊天能被指名 —— 没名字就没有地址, 得先有人在那边发一次 `/name <名字>`。"),
+        .describe("把它生在哪个聊天里 (wizard_roster 里的 home 聊天名)。省略 = 你自己的聊天, 用户绝大多数时候指的就是这个。只有**起过名字**的聊天能被指名 —— 没名字就没有地址, 得先有人在那边发一次 `/name <名字>`。"),
       cli: z
         .enum(["claude", "claude-internal", "codebuddy"])
         .optional()
@@ -318,7 +324,7 @@ server.registerTool(
       : unwrap("name_chat", await daemonPost("/chats/name", { name })),
 );
 
-server.registerTool(
+registerRare(
   "list_chats",
   {
     title: "List every chat and its sessions",
@@ -353,7 +359,7 @@ server.registerTool(
       "只有正文: 每个来回取问话和终句, 工具调用的过程不在里面, 保温的 ping/pong 已经剔掉。记录是从各个 wizard 当前会话的 transcript 现拼的: 一个 wizard `/clear` 或交接之前说的不在里面, 除点名的 role / target 外只并最近一周动过的会话。用户说「群里刚才聊了什么」「.fix 之前怎么答的」「我上次让 .docs 干了什么」, 或者你被叫进一个已经聊了一阵的群、需要来龙去脉时调它。要读**某一个 wizard** 会话里的原始对话用 peek_peer。",
     inputSchema: {
       role: z.string().optional().describe("谁的视角: wizard 的名字 ('fix' / '.fix') 或人的 userid。省略 = 不限 (给了 `target` 时默认是你自己)。"),
-      chat: z.string().optional().describe("哪个群: 聊天名 (list_chats 里那个) 或裸 principal。省略 = 不限群 (公开与私聊都算); 三个都省略 = 你这一轮所在的群。"),
+      chat: z.string().optional().describe("哪个群: 聊天名 (wizard_roster 里的 home 聊天名) 或裸 principal。省略 = 不限群 (公开与私聊都算); 三个都省略 = 你这一轮所在的群。"),
       target: z.string().optional().describe("和谁的往来: wizard 的名字或人的 userid。"),
       since: z.string().optional().describe("从什么时候起: `2h` / `30m` / `3d` (多久以前)、`14:30` (今天)、`09-30 14:30`、或 ISO 时间。"),
       until: z.string().optional().describe("到什么时候为止 (不含), 写法同 `since`。往回翻页就把回执里的「更早的」时刻传进来。"),
@@ -447,7 +453,7 @@ server.registerTool(
     title: "Post a message into a chat for people to read",
     description:
       "把一段 markdown 贴进一个企微聊天**给人看**。和 tell_peer 分工明确: tell_peer 是把话塞进另一个 agent 的输入框 (驱动它干活), notify 是说给人听 —— 不会触发任何一轮对话。\n" +
-      "`to` 省略 = 你这一轮所在的群 (人从哪个群叫的你就是哪个; 私聊轮则是你的 home 群); 要发到别的群就写聊天名 (`list_chats` 里那个), 一次可以写多个。气泡头自动写成 `emoji .你的名字` 并挂上你的 rolepage 链接, 那边的人一眼知道是谁。\n" +
+      "`to` 省略 = 你这一轮所在的群 (人从哪个群叫的你就是哪个; 私聊轮则是你的 home 群); 要发到别的群就写聊天名 (wizard_roster 里的 home 聊天名), 一次可以写多个。气泡头自动写成 `emoji .你的名字` 并挂上你的 rolepage 链接, 那边的人一眼知道是谁。\n" +
       "什么时候用: 长活跑完了要通知另一个群的人; 一批分身收工后把汇总播给发起那个群; 定时任务 (schedule_task) 到点跑完把结论送到该看的人那里。",
     inputSchema: {
       to: z
@@ -494,7 +500,7 @@ server.registerTool(
     })),
 );
 
-server.registerTool(
+registerRare(
   "run_agent_graph",
   {
     title: "Run a loop graph over several tagged agents",
@@ -537,7 +543,7 @@ server.registerTool(
     ),
 );
 
-server.registerTool(
+registerRare(
   "graph_status",
   {
     title: "Inspect running / finished agent graphs",
@@ -553,7 +559,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerRare(
   "stop_graph",
   {
     title: "Cancel a running agent graph",
@@ -571,7 +577,7 @@ server.registerTool(
     description:
       "给**另一个** wizard 做交接, 原地完成: 守护进程让它把当前工作压成一份自洽的交接简报, 等它写完抓取, 再给它 `/new` 一个全新的会话 (新进程、上下文清零, 名字 / cwd / 模型 / 身份的系统提示照旧), 然后把简报作为新会话的第一条消息贴回去。它的上下文撑不住了、或者用户说「让 .fix 交接一下」「叫它压缩上下文重开」时用。按 tmux `pane` id (`%5`, 来自 wizard_roster / list_claude_sessions) 或按 `name` 寻址。**要交接的是你自己就用 wizard_handoff_self** —— 这里拒绝对自身操作 (会死锁: 你没法在自己生成的当口再被问一次)。返回被带过去的那份简报。",
     inputSchema: {
-      pane: z.string().optional().describe("目标 tmux pane id, 如 '%5'。优先于 name。从 wizard_roster / list_claude_sessions 拿。"),
+      pane: z.string().optional().describe("目标 tmux pane id, 如 '%5'。优先于 name。从 wizard_roster 拿。"),
       name: z.string().optional().describe(`${ADDRESS_DOC} 给了 pane 就忽略它。`),
       focus: z.string().optional().describe("交接简报里要特别交代的点, 如 '重点交代还没跑通的测试'。可选。"),
       timeoutSec: z.number().optional().describe("Max seconds to wait for the summary before aborting (30-7200, default 600)."),
@@ -777,7 +783,7 @@ const offspringShape = {
   description: z.string().describe("它负责什么, 一句话。它会写进它的系统提示, 也会出现在名册里让别人看到。"),
   name: z.string().optional().describe("它的名字 (如 'docs'、'fix', 带不带 '.' 都行)。全机唯一。省略则按 description 首词生成。"),
   task: z.string().optional().describe("就位后立刻派下去的第一件活 (私聊)。省略则它就位待命。"),
-  chat: z.string().optional().describe("把它生在另一个聊天里 (list_chats 里的名字)。省略 = 你自己的聊天, 这是绝大多数情况。"),
+  chat: z.string().optional().describe("把它生在另一个聊天里 (wizard_roster 里的 home 聊天名)。省略 = 你自己的聊天, 这是绝大多数情况。"),
   cli: z.enum(["claude", "claude-internal", "codebuddy"]).optional().describe("用哪个 CLI。省略则继承。"),
   model: z.string().optional().describe(MODEL_DOC),
   job: z
