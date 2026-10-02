@@ -803,7 +803,9 @@
   // 按单价从省到贵排, 颜色随之由冷转暖: 缓存读 (约 0.1×, 通常占了大半) 直接用边线色, 色带贴顶时这段就像普通上边线 →
   // 输入 (1×) 沉稳蓝 → 输出 (约 5×, 最贵) 绿 → 缓存写 (1.25×) 红, 与蓝/绿都拉开。注意力留给后三段。
   var SEGS = [
-    ['cacheRead', '缓存读', 'var(--line)', 'cr'], ['input', '输入', '#4c6fd6', 'in'],
+    // in = API 的 input_tokens: 只是没命中缓存、也没写进缓存的那点新输入 (Claude 上每次请求常只有个位数),
+    // 不是「送进模型的输入」—— 那是 in + cr + cw, 在 bar 的悬停提示里单列。
+    ['cacheRead', '缓存读', 'var(--line)', 'cr'], ['input', '新输入 (未走缓存)', '#4c6fd6', 'in'],
     ['output', '输出', '#2f9e5b', 'out'], ['cacheWrite', '缓存写', '#d64545', 'cw'],
   ];
   var TIP = {
@@ -842,7 +844,8 @@
       return p < .1 ? '<0.1%' : (p < 1 || p > 99 ? p.toFixed(1) : Math.round(p)) + '%';
     };
     var io = total > 0
-      ? '<span class="bar" title="' + esc(['累计 token I/O · 共 ' + fmtTok(total)].concat(segs.map(function (s) {
+      ? '<span class="bar" title="' + esc(['累计 token I/O · 共 ' + fmtTok(total),
+          '送入合计 (in + cr + cw) ' + fmtTok((u.input || 0) + (u.cacheRead || 0) + (u.cacheWrite || 0))].concat(segs.map(function (s) {
           return s[1] + ' ' + fmtTok(u[s[0]]) + ' · ' + pct(u[s[0]]);
         })).join('\n')) + '">' + segs.map(function (s) {
           return '<span class="seg" style="flex-grow:' + u[s[0]] + ';background:' + s[2] + '" title="' +
