@@ -215,6 +215,10 @@ button { font: inherit; color: inherit }
    它们嵌在整行那颗按钮里; 行本身悬停不变底色, 只有入口自己亮起。z-index 保证没有兄弟盖住命中区。 */
 .nm.go, .av.go { position: relative; z-index: 1; cursor: pointer }
 .nm.go:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 2px }
+/* 名字旁「+N」: 视角外它还在和几个 role 说话 —— inline-block 不吃名字 hover 的下划线 */
+.nm .oc { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 8px; line-height: 15px; font-size: 10.5px; font-weight: 600;
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); vertical-align: 1px }
+.nm.go:hover .oc { background: color-mix(in srgb, var(--accent) 20%, transparent) }
 span.av.go { border-radius: 8px; transition: background .12s, box-shadow .12s }
 span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot) }
 .ci .tag.priv { color: var(--priv); background: #9a5b1014 }

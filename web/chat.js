@@ -132,8 +132,9 @@
     var on = canSwitch(id) && id !== ROLE;
     return '<span class="' + cls + (on ? ' go" data-r="' + esc(id) + '" title="' + esc('切到 ' + nameOf(id) + ' 的视角') : '') + '">' + inner + '</span>';
   };
-  var nm = function (id, name, go) {
-    var cls = 'nm ' + kindOf(id), txt = esc(name || roleName(id));
+  // extra = 跟在名字后、同属一个点击范围的徽标 (原样 html)。
+  var nm = function (id, name, go, extra) {
+    var cls = 'nm ' + kindOf(id), txt = esc(name || roleName(id)) + (extra || '');
     return go ? goSpan(cls, id, txt) : '<span class="' + cls + '">' + txt + '</span>';
   };
   var bindGo = function (root, sel) {
@@ -419,19 +420,19 @@
   // 同层按最近活动排, 有新话就上浮。
   var recentFirst = function (a, b) { return b.lastTs - a.lastTs; };
   // 一个 role 的一行: 头像 · 名字 (+tail) + 忙闲灯 · 时刻 / 最近一句 + 未读。
-  var roleRow = function (id, name, label, g, status, tail) {
+  var roleRow = function (id, name, label, g, status, tail, badge) {
     return goSpan('av', id, esc(label)) +
-      line(nm(id, name, true) + (tail || ''), g.lastTs, g.preview, stTag(status, true), g.unread);
+      line(nm(id, name, true, badge) + (tail || ''), g.lastTs, g.preview, stTag(status, true), g.unread);
   };
   // 名字旁的「+N」: 它在这里还和 N 个别的 role 说着话, 那几段不在当前视角里。
   var unseenTail = function (id, n) {
-    return n ? '<span class="tfold" title="' + esc(nameOf(id) + ' 在这里还和 ' + n + ' 个别的 role 说过话, 切到它的视角可见') + '">+' + n + '</span>' : '';
+    return n ? '<span class="oc" title="' + esc(nameOf(id) + ' 在这里还和 ' + n + ' 个别的 role 说过话, 切到它的视角可见') + '">+' + n + '</span>' : '';
   };
   var convRow = function (c) {
-    if (c.kind === 'wizard') return roleRow(c.peer, c.name, c.label, glance(c), c.status, unseenTail(c.peer, c.unseen));
+    if (c.kind === 'wizard') return roleRow(c.peer, c.name, c.label, glance(c), c.status, '', unseenTail(c.peer, c.unseen));
     return avatarOf(c) + line('<span class="nm chat">' + esc(c.name) + '</span>', c.lastTs, c.preview, stTag(c.status, true), unreadOf(c));
   };
-  var subRow = function (c, s) { return roleRow(s.role, s.name, s.label, glance(c, s), s.status, unseenTail(s.role, s.unseen)); };
+  var subRow = function (c, s) { return roleRow(s.role, s.name, s.label, glance(c, s), s.status, '', unseenTail(s.role, s.unseen)); };
 
   var convItem = function (c) {
     var on = c.key === CONV;
