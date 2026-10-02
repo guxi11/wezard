@@ -270,6 +270,8 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 /* 跳过来之后的返回 (工单页 / 移交行): 同一副无框箭头, 宽屏也露出。 */
 .chathead .back.jb { display: block; flex: none; margin-right: -4px }
 .chathead .back.jb:hover { color: var(--accent) }
+/* 有跳转返回时窄屏只留它一个箭头: 先回跳转前; 没有它时 #tb-back 才是回会话列表。 */
+.chathead:has(.back.jb) #tb-back { display: none }
 .ch-who { display: flex; gap: 11px; align-items: center; min-width: 0; flex: 1 }
 /* 一对一的两端头像: 同单个角色头像的画法, 后一个略压住前一个。 */
 .ch-who .pair { display: flex; flex: none; align-items: center }
