@@ -22,6 +22,7 @@
 - hook 的 wezard CLI 免审只认整条命令就是一次 `wezard[.sh] <status|logs|pending|audit|update|reload|config-path|mirror-status|version|help>` 且不含 shell 元字符; 此前命令里任意位置出现 `wezard` 一词就放行 (`curl …/config/set; true wezard` 可免审直改配置)。注意 daemon 的 `/config/set` 路由本身仍不鉴权, 本机进程可直接写 —— 这里只关掉了模型免审走到它的两条路。
 
 ### Changed
+- rolepage 用量条的 I/O 分布色带从贴底挪到贴顶, 兼作上边线 (原 `border-top` 去掉; 没有分布时留 1px 线), 厚度 3px → 1px, 悬停加粗到 3px。
 - rolepage 关系图标题行的「看全部 / 只看相关」文字按钮换成与侧栏「往来 / 全部」同款的两段式开关「相关 | 全部」, 切换语义不变。
 - 管家分派默认偏省钱: `route_candidates` 每个候选多一行「代价」—— 缓存冷热 (距上次活动是否超过 `keepalive.ttlSec`)、唤醒要重写多少缓存 (对比白板 spawn 起步 ~25k 的倍数)、往后每轮背着的 ctx, 以及「这件活点到它读过的几个文件」; 证据弱 (没点到它读过的文件, 小活则少于 3 个) 又贵 (缓存冷且 ctx ≥60k, 或热但 ≥150k) 的标 ⚠「不划算, 建议白板 spawn」; 小活 (改样式 / 单点修改 / 简单查询) 表头点明。charter 管家段写明: 小活默认白板 spawn 或交给 ctx 小的, ctx ≥60k 且缓存冷的只接真正依赖它上下文的活, 标 ⚠ 的默认不转。
 - rolepage 关系 / 日程栏的世界快照 (`/api/world`) 瘦身: 工单成员任务只留首行 (实测 119KB → 55KB), 并带 ETag —— 名册没变时 6s 轮询回 304、不重画; 换视角后迟到的回包丢弃。

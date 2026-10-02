@@ -127,13 +127,14 @@ button { font: inherit; color: inherit }
 
 /* ── 用量条: 一组轮次的总账 ─────────────────────────────────────────
    一个组件两处挂: 整页页脚 (wizard 的总账) / 聊天窗口底 (人与某个 wizard 这段往来的账)。
-   永远单行: 主人 · 模型 · 指标 · 图例, I/O 分布是贴底的色带。排不下时 chat.js 的 fitUsage
+   永远单行: 主人 · 模型 · 指标 · 图例, I/O 分布是贴顶的色带 (兼作上边线)。排不下时 chat.js 的 fitUsage
    按容器宽度一级级加 f-* 藏掉次要的 (分布文字 → 名字 → 耗时), 不按视口断点。 */
 .usage {
   /* 整条只有一个字号、一个间隔: 指标、模型名、主人、图例都用它。 */
   --u-gap: 14px;
   flex: none; display: flex; align-items: center; flex-wrap: nowrap; gap: var(--u-gap); overflow: hidden; white-space: nowrap;
-  position: relative; padding: 7px 20px 9px; border-top: 1px solid var(--line); background: var(--paper);
+  position: relative; padding: 8px 20px; background: var(--paper);
+  box-shadow: inset 0 1px var(--line); /* 没有分布 (total=0) 时的上边线; 有分布时被色带盖住 */
   font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; color: var(--mute);
   font-variant-numeric: tabular-nums;
 }
@@ -145,12 +146,12 @@ button { font: inherit; color: inherit }
 .usage .u-ic { font-style: normal; margin-right: 4px }
 .usage .u-kvs, .usage .leg { display: flex; gap: var(--u-gap) }
 .usage .kv { white-space: nowrap }
-/* I/O 分布 = bar 的底边: 横跨整宽的细色带, 不占行; 悬停加粗一点好瞄准某一段。 */
+/* I/O 分布 = bar 的上边线: 横跨整宽的细色带, 不占行, 替掉 border-top; 悬停加粗一点好瞄准某一段。 */
 .usage .bar {
-  position: absolute; left: 0; right: 0; bottom: 0; height: 3px; display: flex;
+  position: absolute; left: 0; right: 0; top: 0; height: 1px; display: flex;
   background: var(--line); transition: height .12s;
 }
-.usage .bar:hover { height: 6px }
+.usage .bar:hover { height: 3px }
 .usage .bar .seg { flex: 1 1 0; min-width: 2px; height: 100% }
 .usage .leg { margin-left: auto }
 .usage .lg { display: flex; align-items: center; gap: 4px; white-space: nowrap }
