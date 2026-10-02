@@ -395,6 +395,10 @@ const TELL_SCHEMA = {
     .boolean()
     .optional()
     .describe("false = 放出去就不管了, 不要回执 (纯通知、或者你根本不关心它说什么)。默认 true。"),
+  kind: z
+    .enum(["task", "ask", "fyi"])
+    .optional()
+    .describe("对方该怎么接这句话 (与 `priority` 的何时投、`receipt` 的要不要回执正交): `task` (默认) 一件活, 干完收口 `RESULT:`; `ask` 只答一个问题, 别为它开工; `fyi` 知会, 不用回 —— 自动不要回执、不进工单、不进群。"),
   re: z.string().optional().describe("续问: 回执或回包里的件号 (`t…`)。接着那件活说, 沿用它的工单与频道; 对不上就按新活发出 (`reUnknown`)。"),
   deadline: z.number().optional().describe("最多等它多少秒 (60-43200, 默认 3600); 到点没答完你收到一份 timeout 回执。"),
   chain: z
@@ -408,9 +412,10 @@ const TELL_DESC =
   "**说完就返回**: 对方干完那一轮, 它的最后一条消息作为**新的一轮**自动送到你这里 (回执, 带信封说明是谁、哪场对话、工单还差几份); 你正忙时回执排队等你说完。\n" +
   "默认私聊, 只记在双方 rolepage; 守护进程给 `text` 挂信封 (发话人、私聊/公开、`RESULT: …` 收口)。拒绝对自己发送。";
 
-const tellBody = (a: { name: string; text: string; priority?: string; waitSec?: number; job?: string; public?: boolean; receipt?: boolean; re?: string; deadline?: number; chain?: boolean }) => ({
+const tellBody = (a: { name: string; text: string; kind?: string; priority?: string; waitSec?: number; job?: string; public?: boolean; receipt?: boolean; re?: string; deadline?: number; chain?: boolean }) => ({
   name: a.name,
   text: a.text,
+  ...(a.kind ? { kind: a.kind } : {}),
   ...(a.priority ? { priority: a.priority } : {}),
   ...(a.waitSec ? { waitSec: a.waitSec } : {}),
   ...(a.job ? { job: a.job } : {}),
@@ -433,7 +438,8 @@ server.registerTool(
     title: "(deprecated) alias of tell_peer",
     description:
       "同 tell_peer (旧名, 只为不打断正在跑的旧会话而保留)。新调用一律用 tell_peer。",
-    inputSchema: TELL_SCHEMA,
+    // 参数与 tell_peer 一样收, 但不再背一份参数说明: 别名只为老调用不断, 不该再占一份上下文。
+    inputSchema: Object.fromEntries(Object.entries(TELL_SCHEMA).map(([k, v]) => [k, v.describe("")])) as typeof TELL_SCHEMA,
   },
   async (a) => unwrap("send_peer", await daemonPost("/peers/tell", tellBody(a))),
 );

@@ -452,7 +452,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "`wizard_roster` 找人: 谁在、在哪干、忙不忙 (带条件收窄, 别拉全表)",
       "`route_candidates` 拿不准一件活该转给哪个已有 wizard 时",
       "`peek_peer` 某个 wizard 在干嘛、卡在哪 · `read_chat` 群里 / 私聊里谁对谁说了什么",
-      "`tell_peer` 驱动另一个 wizard (派活、答它、叫它继续) —— 默认私聊, 它的结论会自动回执给你; 对方正忙时默认等它闲下来再投 (派新活就该这样), 插话 / 答它的问 / 补一句 → `priority:\"now\"`, 真紧急要它丢下手上这一轮 → `priority:\"urgent\"`",
+      "`tell_peer` 驱动另一个 wizard (派活、答它、叫它继续) —— 默认私聊, 它的结论会自动回执给你; 对方正忙时默认等它闲下来再投 (派新活就该这样), 插话 / 答它的问 / 补一句 → `priority:\"now\"`, 真紧急要它丢下手上这一轮 → `priority:\"urgent\"`; 只问一句 → `kind:\"ask\"`, 只是知会、不要回话 → `kind:\"fyi\"`",
       "`notify` 只是告诉**人**一件事, 不驱动谁",
       "`clone_wizard` 分身要共享我 (或 `from` 某个同伴) 已读的材料 · `spawn_wizard` 白板起步或要去别的目录 (`detached` = 独立长住、不归你管) —— 要判断的给 opus, 跑腿的给 haiku",
       "`stop_wizard` 活干完就收掉分身; 只想打断它这一轮也是它",

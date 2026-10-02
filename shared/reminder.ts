@@ -71,7 +71,9 @@ export interface Envelope {
 export interface ReceiptRoute { replyTo?: string; k?: string }
 
 /** 一件活的编号: 写进派活与回执的信封。 */
-export interface TurnTag { turn: string; re?: boolean; deadline?: number }
+/** `act`: 这句话要对方怎么接 —— 缺省是一件活; ask = 只答一问; fyi = 知会, 不用回。
+ *  `quiet`: 发话方不收回执 (fyi 一定是; task 带 receipt:false 也是)。 */
+export interface TurnTag { turn: string; re?: boolean; deadline?: number; act?: "ask" | "fyi"; quiet?: boolean }
 
 /** 回执落成什么。done = 答了; need = 它收口成 `NEED:` 反问发话方, 不是定论; error = 那一轮以 CLI 报错 (API Error) 收尾, 不是定论;
  *  timeout / silent / dead = 没等到答案 (超时 / 停下几次都没答 / pane 没了); canceled = 被人 stop 掉了。 */
@@ -82,7 +84,7 @@ export const envelopeAttrs = {
   /** `chat` 不给 = 私聊。 */
   peer: (from: string, chat?: string, t?: TurnTag): Attrs => ({
     wezard: "envelope", kind: "peer", from, scope: chat === undefined ? "private" : "public", ...(chat ? { chat } : {}),
-    ...(t ? { turn: t.turn, ...(t.re ? { re: t.turn } : {}), ...(t.deadline ? { deadline: new Date(t.deadline).toISOString() } : {}) } : {}),
+    ...(t ? { turn: t.turn, ...(t.re ? { re: t.turn } : {}), ...(t.deadline ? { deadline: new Date(t.deadline).toISOString() } : {}), ...(t.act ? { act: t.act } : {}) } : {}),
   }),
   /** `turn` = 这一枪的件号 (安静任务按它定位终句, 见 index.ts relayUnlessQuiet)。 */
   task: (taskId: string, turn?: string): Attrs => ({ wezard: "envelope", kind: "task", from: taskId, ...(turn ? { turn } : {}) }),

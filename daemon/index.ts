@@ -978,6 +978,10 @@ const main = async (): Promise<void> => {
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       const text = ((body as { text?: string }).text ?? "").toString();
       if (!text.trim()) { json(res, 400, { ok: false, reason: "text required" }); return; }
+      // 这句话要对方怎么接 (priority 管何时投, receipt 管要不要回执, 这个管它怎么接):
+      // task 一件活 (默认) / ask 只答一问 / fyi 知会 —— fyi 不要回执、不进工单、不进群。
+      const rawKind = (body as { kind?: string }).kind;
+      const kind: "task" | "ask" | "fyi" = rawKind === "ask" || rawKind === "fyi" ? rawKind : "task";
       const r = resolvePeer(self, addrOf(body));
       if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
       const { target, foreign } = r;
@@ -989,7 +993,8 @@ const main = async (): Promise<void> => {
       // 继承): 不然换个不带 job 的 tell_peer 就绕开了预算。
       const open = receipts.pending(self, target);
       const isOpen = (id?: string): string => (id && jobs.get(id)?.status === "open" ? id : "");
-      const jobId = ((body as { job?: string }).job ?? "").trim() || isOpen(turn.job) || isOpen(open?.job);
+      const askedJob = ((body as { job?: string }).job ?? "").trim();
+      const jobId = kind === "fyi" ? "" : askedJob || isOpen(turn.job) || isOpen(open?.job);
       if (jobId) {
         const jc = checkJob(jobId, target, !!open?.need && open.turn === turn.turn);
         if (!jc.ok) { json(res, jc.status, { ok: false, reason: jc.reason }); return; }
@@ -999,7 +1004,8 @@ const main = async (): Promise<void> => {
       // 只有两端都是登记在册的 wizard 才能当着人说: 裸 target 冒充的发话方、forget
       // 掉的分身不是谁, 它们的往来进群只会留下一段人找不到主的对话 —— 降为私聊。
       // 工单里的派活一律私聊: 人看不懂 fan-out 的过程, 群里只留发起者自己的收口。
-      const isPublic = !jobId && (turn.channel !== undefined ? !!turn.channel : (body as { public?: boolean }).public === true) && !!wizards.get(self) && !!wizards.get(target);
+      // 知会不进群: 公开信封要对方「照对人说话的方式答」, 一句「收到」会被发给一群人。
+      const isPublic = !jobId && kind !== "fyi" && (turn.channel !== undefined ? !!turn.channel : (body as { public?: boolean }).public === true) && !!wizards.get(self) && !!wizards.get(target);
       const channel = isPublic ? turn.channel || channelOf(self) : "";
       // Injecting into your own pane would type into the box you're generating
       // from — Claude Code queues it and the caller deadlocks waiting for itself.
@@ -1057,6 +1063,9 @@ const main = async (): Promise<void> => {
         ? wakeNoteOf(info.contextTokens, (() => { try { return statSync(info.jsonlPath).mtimeMs; } catch { return 0; } })(), at, (cacheTtlSec(info.jsonlPath) || cfg.wrc.mirror.keepalive.ttlSec) * 1000)
         : "";
       const deadlineSec = (body as { deadline?: number }).deadline;
+      // 回执: 对方干完那一轮, 守护进程把它的结论自动送回来 (默认开)。`receipt:false`
+      // 是"放出去就不管了"的那种派活; fyi 一定不要。对方的信封据此改口, 不再让它收口。
+      const wantReceipt = kind !== "fyi" && (body as { receipt?: boolean }).receipt !== false;
       const deadlineAt = deadlineOf(at, deadlineSec === undefined ? undefined : Number(deadlineSec));
       const inj = await m.injectText(target, text, undefined, {
         from: { kind: "peer", from: self, turn: turn.turn, ...(jobId ? { job: jobId } : {}), ...(isPublic ? { public: true } : {}) },
@@ -1067,15 +1076,16 @@ const main = async (): Promise<void> => {
           ...(turn.legs > 1 ? { re: true } : {}),
           // 期限只在发话方明说时写给对方看: 默认的一小时不值得每轮多一句。
           ...(deadlineSec !== undefined ? { deadline: deadlineAt } : {}),
+          ...(kind !== "task" ? { act: kind } : {}),
+          ...(wantReceipt ? {} : { quiet: true }),
         }),
       });
-      // 回执: 对方干完那一轮, 守护进程把它的结论自动送回来 (默认开)。`receipt:false`
-      // 是"放出去就不管了"的那种派活。注入失败就不守 —— 没有问话, 也不会有回答。
-      const wantReceipt = (body as { receipt?: boolean }).receipt !== false;
+      // 注入失败就不守 —— 没有问话, 也不会有回答。不要回执 (receipt:false / fyi) 就不登记:
+      // 一份不守的槽会以同一对的 key 顶掉发话方还在等它答的那件活, 那件的回执就再也来不了。
       // 父 k: 默认这件活算发话方此刻在答的那件的子活 (链式续回); `chain:false` = 旁支,
       // 回执照常回来, 但不挂住它给上游的交代 —— 只有发话方知道这件活是不是为上游派的。
       const k = (body as { chain?: boolean }).chain === false ? undefined : parentKOf(self);
-      if (inj.ok) receipts.register({ from: self, to: target, channel, job: jobId, at, turn: turn.turn, legs: turn.legs, deadlineAt, ...(k ? { k } : {}) }, wantReceipt);
+      if (inj.ok && wantReceipt) receipts.register({ from: self, to: target, channel, job: jobId, at, turn: turn.turn, legs: turn.legs, deadlineAt, ...(k ? { k } : {}) });
       // 工单成员照旧记账 (收工那一条会列出各自那段活); 公开的那一句在群里成气泡。
       // 续问 (re) 不是一段新活: 工单页与留档里该列的仍是当初派的那段。
       if (inj.ok && jobId) jobs.attach(jobId, { target, task: turn.legs > 1 ? "" : text, spawned: false });
@@ -1088,6 +1098,8 @@ const main = async (): Promise<void> => {
         name: peerAddress(cfg, self, target),
         public: isPublic,
         priority: policy,
+        ...(kind !== "task" ? { kind } : {}),
+        ...(kind === "fyi" && askedJob ? { jobIgnored: true } : {}),
         ...(others ? { urgentDowngraded: `它此刻在做 ${others.from} 派的活, 没打断它 —— 按 normal 等它这一轮做完再投` } : {}),
         wasBusy,
         ...(interrupted !== undefined ? { interrupted } : {}),
