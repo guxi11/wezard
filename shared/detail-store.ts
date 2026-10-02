@@ -189,6 +189,7 @@ export interface TurnDetailRecord {
   channel?: string;
   speaker?: string;    // 人说的那一轮: 发话人 `user:<userid>` (群里可能不止一个人)
   agent?: TurnAgentMeta; // 本轮是 subagent 跑的; undefined = 主会话自身的 turn
+  injects?: TurnInject[]; // 这一轮跑着时被插进来的话 (tell_peer priority now 等); 没有 = 没人插话
   items: TurnItem[];
   model?: string;      // 首个见到的 model 名
   modelAlt?: number;   // 与 model 不同的后续行数, 用于渲染 "+N"
@@ -198,6 +199,21 @@ export interface TurnDetailRecord {
   // 多条 assistant 行 (如 thinking + tool_use 各一条), 两条共享同一 message.id
   // 且各自都带 usage 快照。按 id 去重, 避免 usage 被 N 倍夸大。
   usageMsgIds?: string[];
+}
+
+// 插话 —— 一轮跑着时贴进来的一句 (同伴 tell_peer priority:now、忙时排队后被这一轮中途吃进去的)。
+// Claude Code 不为它写 user 行, 只落一行 `attachment.queued_command`, 它不开新的一轮, 由正在跑的这一轮接着答。
+// 它仍是一条独立的话 —— 谁说的、在哪个频道、哪件活 —— 所以挂在被插的那一轮上, 自带出处与频道,
+// rolepage 把每条展成一条入消息。不借 items: 那是这一轮自己的产出, 用量与过程都按它算。
+export interface TurnInject {
+  ts: number;
+  /** 那句话本身 (不带信封)。 */
+  body: string;
+  /** 同伴插的: 出处 (含活号); 没有 = 人在聊天里说的。 */
+  from?: TurnFrom;
+  /** 说这句的频道, 语义同 TurnDetailRecord.channel。 */
+  channel: string;
+  speaker?: string;
 }
 
 // 上下文断点标记 —— /clear、/new、会话轮换本身不产生一轮对话, 但在 chat 详情的

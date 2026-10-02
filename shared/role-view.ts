@@ -96,6 +96,15 @@ const isReceipt = (r: TurnDetailRecord): boolean => r.from?.kind === "peer" && r
  *  回执轮例外: 入那一句就是同伴自己那一轮的出 (同一段话, 已在同伴的出消息里), 再画
  *  一遍就是重复, 所以没有入; 它的出是在频道里对那里的人说的 —— 公开频道答给人, 只有
  *  私聊回执 ("" 频道, 回复不进任何群) 才仍是对那个同伴。 */
+/** 一轮里的插话 → 各自一个只有问话的轮次外形 (id `<轮>~<序号>`): 出处、频道、发话人都是它自己的,
+ *  不随被插的那一轮。它没有自己的回复 —— 回复在被插的那一轮的出消息里。 */
+export const injectTurnsOf = (r: TurnDetailRecord): TurnDetailRecord[] =>
+  (r.injects ?? []).map((x, i) => ({
+    kind: "turn", id: `${r.id}~${i}`, createdAt: x.ts, updatedAt: x.ts, closed: true, items: [],
+    target: r.target, sessionId: r.sessionId, userQuery: x.body, channel: x.channel,
+    ...(x.from ? { from: x.from } : {}), ...(x.speaker ? { speaker: x.speaker } : {}),
+  }));
+
 export const messagesOfTurn = (r: TurnDetailRecord): Msg[] => {
   const w = r.target!;
   const who = senderOf(r);
@@ -109,7 +118,8 @@ export const messagesOfTurn = (r: TurnDetailRecord): Msg[] => {
   const outMsg: Msg[] = r.items.length > 0 || !r.closed
     ? [{ id: `${r.id}:out`, turn: r, dir: "out", from: w, to, channel, ts: Math.max(r.createdAt + 1, Number.isFinite(firstOut) ? firstOut : r.createdAt + 1) }]
     : [];
-  return [...inMsg, ...outMsg];
+  const injected: Msg[] = injectTurnsOf(r).map((t) => ({ id: `${t.id}:in`, turn: t, dir: "in", from: senderOf(t), to: w, channel: t.channel ?? "", ts: t.createdAt }));
+  return [...inMsg, ...outMsg, ...injected];
 };
 
 /** notify 贴进群的一段话 → 发话 wizard 在那个频道里的一条出消息, 对着那里的人说。

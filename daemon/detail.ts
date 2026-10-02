@@ -23,6 +23,7 @@ import {
   type PostDetailRecord,
   type ToolDetailRecord,
   type TurnDetailRecord,
+  type TurnInject,
   type TurnItem,
   type TurnUsage,
 } from "../shared/detail-store.js";
@@ -30,7 +31,7 @@ import { renderDetailPage, renderNotFound } from "../shared/detail-render.js";
 import { createChatRoutes, chatRouteTable, CHAT_ROUTE_KEYS, type WorldFactsProvider } from "../shared/chat-http.js";
 import { EMPTY_FACTS } from "../shared/world.js";
 
-export type { ToolDetailRecord, ApprovalDetailRecord, TurnDetailRecord, MarkDetailRecord, TurnItem, TurnUsage, CtxCut, TurnOrigin, TurnFrom, TurnAgentMeta } from "../shared/detail-store.js";
+export type { ToolDetailRecord, ApprovalDetailRecord, TurnDetailRecord, MarkDetailRecord, TurnItem, TurnInject, TurnUsage, CtxCut, TurnOrigin, TurnFrom, TurnAgentMeta } from "../shared/detail-store.js";
 
 let store: DetailStore | null = null;
 let remoteBase = "";
@@ -197,6 +198,16 @@ export const recordTurnQuery = (id: string, userQuery: string, same: (prev: stri
   const r = store.get(id);
   if (r?.kind !== "turn" || r.userQuery === userQuery || !same(r.userQuery)) return;
   store.put({ ...r, userQuery, updatedAt: Date.now() });
+  const full = store.get(id);
+  if (full) forwardToRemote(full);
+};
+
+/** 一轮跑着时插进来的一句。同一句 (同时刻同正文) 只记一次 —— tail 重放不该把它记成两句。 */
+export const recordTurnInject = (id: string, inj: TurnInject): void => {
+  if (!store) return;
+  const r = store.get(id);
+  if (r?.kind !== "turn" || (r.injects ?? []).some((x) => x.ts === inj.ts && x.body === inj.body)) return;
+  store.put({ ...r, injects: [...(r.injects ?? []), inj], updatedAt: Date.now() });
   const full = store.get(id);
   if (full) forwardToRemote(full);
 };

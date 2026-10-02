@@ -10,7 +10,7 @@ import { isTurn, staleAt, turnDone } from "./chat-view.js";
 import { isKeepaliveTurn } from "./keepalive.js";
 import type { DetailRecord, MarkDetailRecord, TurnDetailRecord } from "./detail-store.js";
 import type { WorldFactJob } from "./world.js";
-import { channelOf, teammateOf, unwrapMates, type Directory, type Msg } from "./role-view.js";
+import { channelOf, injectTurnsOf, teammateOf, unwrapMates, type Directory, type Msg } from "./role-view.js";
 
 export interface MsgFragment {
   /** `<turnId>:in` / `<turnId>:out` / `m:<markId>`。 */
@@ -68,9 +68,13 @@ const RCPT: Readonly<Record<string, string>> = {
 const turnsWhere = (records: readonly DetailRecord[], pick: (t: TurnDetailRecord) => boolean): TurnDetailRecord[] =>
   records.filter(isTurn).filter(pick).sort((a, b) => a.createdAt - b.createdAt);
 
+/** 派活的那些句: 开一轮的问话, 加上插进别人那一轮的插话 (各自一个轮次外形, 见 injectTurnsOf)。 */
+const asksWhere = (records: readonly DetailRecord[], pick: (t: TurnDetailRecord) => boolean): TurnDetailRecord[] =>
+  records.filter(isTurn).flatMap((t) => [t, ...injectTurnsOf(t)]).filter(pick).sort((a, b) => a.createdAt - b.createdAt);
+
 /** 一件活的派活那句 = 收信方接手的那一轮的入消息 (续问共用活号, 取最早那一轮)。 */
 const dispatchOf = (records: readonly DetailRecord[], turn: string): TurnDetailRecord | undefined =>
-  turnsWhere(records, (t) => t.from?.kind === "peer" && !t.from.receipt && t.from.turn === turn && !!t.userQuery?.trim())[0];
+  asksWhere(records, (t) => t.from?.kind === "peer" && !t.from.receipt && t.from.turn === turn && !!t.userQuery?.trim())[0];
 
 /** 跳到派活那句要的坐标。派活那句常常不在点击处这个会话窗口里 (私聊派的活, 回执落在群里),
  *  所以带上它自己的消息 id / 时刻 / 频道 / 两端 —— 会话键随视角而变, 由客户端算 (片段与视角无关)。 */
@@ -127,7 +131,7 @@ const receiptChip = (r: TurnDetailRecord, records: readonly DetailRecord[], dir:
 /** 这一行移交落成的那句。同一个活号续问多次就有多句 (每次 tell_peer 一句): 按原文认 ——
  *  落地的那句就是原文贴进去的 (外面裹着信封), 取首段比对; 认不出 (没原文) 退回最早那句。 */
 const dispatchFor = (records: readonly DetailRecord[], h: Handoff & { turn: string }): TurnDetailRecord | undefined => {
-  const all = turnsWhere(records, (t) => t.from?.kind === "peer" && !t.from.receipt && t.from.turn === h.turn && !!t.userQuery?.trim());
+  const all = asksWhere(records, (t) => t.from?.kind === "peer" && !t.from.receipt && t.from.turn === h.turn && !!t.userQuery?.trim());
   const head = squash(h.text).slice(0, 80);
   return (head.length >= 4 ? all.find((t) => squash(t.userQuery ?? "").includes(head)) : undefined) ?? all[0];
 };

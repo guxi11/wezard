@@ -45,7 +45,7 @@ import { hasRegistry, markTranscript, probeOf, sessionOnPane, sessionPanes, subm
 import { waitForIdle, type IdleResult } from "./graph.js";
 import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
-import { knowsToolUse, recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnQuery, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, lastChannelOf, buildDetailUrl, buildChatUrl, roleUniq } from "./detail.js";
+import { knowsToolUse, recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnQuery, recordTurnInject, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, lastChannelOf, buildDetailUrl, buildChatUrl, roleUniq } from "./detail.js";
 import type { CtxCut, TurnFrom, TurnOrigin, TurnUsage } from "./detail.js";
 import { errText } from "./last-response.js";
 import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagHeader, withLinkedTagHeader, linkedTagHead, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey } from "../shared/session-label.js";
@@ -311,6 +311,9 @@ const hasImages = (c: readonly ContentBlock[]): boolean => c.some((b) => b?.type
 
 interface TranscriptLine {
   type?: string;
+  /** `type:"attachment"` 行的载荷 —— 这里只读 `queued_command` (一轮中途被吃进去的排队输入)。 */
+  attachment?: { type?: string; prompt?: unknown };
+  timestamp?: string;
   /** Present on `type:"system"` lines — e.g. "local_command" for slash-command
    *  invocation records. */
   subtype?: string;
@@ -512,6 +515,9 @@ type RenderItem =
   // 覆盖这一轮的问话 —— 详情页该给的是 session 真正收到的那句, 不是注入前的原文。
   // `said` = 去掉占位符与信封后的那句话, 用来确认它确实是这一轮的问话。
   | { kind: "user_query"; body: string; said: string }
+  // 一轮跑着时被 CLI 吃进去的排队输入 (`attachment.queued_command`, 不写 user 行): 插话。
+  // `said` 同 user_query (去信封后的那句), `ts` = 那一行的时刻。
+  | { kind: "user_inject"; said: string; ts: number }
   // The user line that started this turn IS a keepalive ping (content match
   // via TailDeps.isKeepalivePing). Emitted REGARDLESS of includeUser — the
   // ping must never echo as user_text, and onItem swallows the whole reply
@@ -673,6 +679,14 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
     // 行) — 它是 goal 模式的进入信号, 吞掉它 = 整个 goal run 在 WeCom 静默。
     const goal = line.type === "user" ? goalStartOf(line.message?.content) : undefined;
     return goal ? [goal] : [];
+  }
+
+  // 插话: 正在跑的这一轮中途吃进去的那句, CLI 只落这一行 attachment, 没有 user 行 ——
+  // 不报到的话, 它的印章没人认领, 这句话在详情里就不存在。
+  if (line.type === "attachment" && line.attachment?.type === "queued_command" && typeof line.attachment.prompt === "string") {
+    const said = cleanUserText(line.attachment.prompt);
+    const ts = Date.parse(line.timestamp ?? "");
+    return said ? [{ kind: "user_inject", said, ts: Number.isNaN(ts) ? Date.now() : ts }] : [];
   }
 
   const out: RenderItem[] = [];
@@ -3289,9 +3303,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   };
   /** 露面的这一行认领它的印章, 先注入的先认。CLI 把排队的几句并成一行时, 包含在里面的都算
    *  露过面, 出处取第一枚。认不出 = undefined。 */
-  const takeSeal = (a: AttachState, said: string): Seal | undefined => {
+  const takeSeal = (a: AttachState, said: string, pick: (x: Seal) => boolean = () => true): Seal | undefined => {
     const t = said.trim();
-    const hit = (x: Seal): boolean => x.keys.some((k) => k === t || (k.length >= 8 && t.includes(k)));
+    const hit = (x: Seal): boolean => pick(x) && x.keys.some((k) => k === t || (k.length >= 8 && t.includes(k)));
     const seals = a.seals ?? [];
     const first = seals.find(hit);
     if (first) a.seals = seals.filter((x) => !hit(x));
@@ -3314,6 +3328,17 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (a.briefTurnId) closeBriefTurn(a);
     openBriefTurn(a, q);
   };
+  /** 一句插话记进它插进的那一轮: 出处、频道、发话人都取它自己的印章 (没写频道 = 在 home 里开口)。 */
+  const injectInto = (turnId: string, a: AttachState, s: Seal, ts: number): void =>
+    recordTurnInject(turnId, { ts, body: s.query.trim(), ...(s.from ? { from: s.from } : {}), channel: s.channel ?? baseOfKey(a.target), ...(s.speaker ? { speaker: s.speaker } : {}) });
+  /** `attachment.queued_command` 露面: 那句被正在跑的这一轮中途吃进去了。认领它的印章记成插话。
+   *  人从聊天里说的那句 (印章带预建的轮) 不在这里认: 它已有自己的轮次记录。认不出 (人在 CLI 里
+   *  忙时敲的) 不记 —— 说不清是谁、在哪个频道说的。 */
+  const interject = (a: AttachState, said: string, ts: number): void => {
+    if (!a.briefTurnId) return;
+    const s = takeSeal(a, said, (x) => !x.turn);
+    if (s) injectInto(a.briefTurnId, a, s, ts);
+  };
   /** 一行注入露面了: 把它的印章落成下一轮的出处 / 频道。返回认领到的印章。 */
   const bindLine = (a: AttachState, said: string): Seal | undefined => {
     const s = takeSeal(a, said);
@@ -3323,8 +3348,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       return s;
     }
     // 忙时贴进去、正在跑的那一轮还没出终句: 它是插进那一轮的话 (priority now), 那一轮的
-    // 回复仍归原来那一方。闲时贴进去的、或上一轮已经说完的, 才是新一轮的开头。
-    if (a.briefTurnId && !a.briefConcluded && !s.fresh) return s;
+    // 回复仍归原来那一方, 这句记成那一轮的一条插话。闲时贴进去的、或上一轮已经说完的, 才是新一轮的开头。
+    if (a.briefTurnId && !a.briefConcluded && !s.fresh) { injectInto(a.briefTurnId, a, s, Date.now()); return s; }
     if (a.briefTurnId) closeBriefTurn(a);
     const now = Date.now();
     a.pendingFrom = s.from ? { from: s.from, at: now } : undefined;
@@ -3921,6 +3946,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       a.pendingBriefQuery = item.body;
       a.pendingFromCli = true;
     }
+    if (item.kind === "user_inject") { interject(a, item.said, item.ts); return; }
     // 还有一轮等着懒建 (peer / graph 注入先记了 pendingBriefQuery) 就换掉它; 否则这句话
     // 就是已开好的那一轮 (IM 侧说的, startBriefTurn 在注入前建好)。
     if (item.kind === "user_query") {
