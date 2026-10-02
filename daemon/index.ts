@@ -1156,8 +1156,14 @@ const main = async (): Promise<void> => {
       const known = wizards.all();
       const byTarget = new Map(known.map((w) => [w.target, w] as const));
       const seen = new Set(peers.map((p) => p.target));
+      // 「卡在审批」以 daemon 手里的 pending 为准 —— 审批长轮询期间 pane 照样在转圈,
+      // 拿 busy 去推会把它当成「执行中」。按 sessionId 归到会话上。
+      const waitingBySid = listPending().reduce((m, { meta }) =>
+        meta.sessionId ? m.set(meta.sessionId, [...(m.get(meta.sessionId) ?? []), meta.toolName || meta.kind]) : m,
+      new Map<string, string[]>());
       const live: WorldFactWizard[] = peers.map((p) => {
         const w = byTarget.get(p.target);
+        const waiting = waitingBySid.get(p.sessionId);
         return {
           target: p.target,
           name: settleName(wizards, chatNameOf(cfg, p.target), p.target),
@@ -1168,6 +1174,7 @@ const main = async (): Promise<void> => {
           cli: p.cli,
           busy: p.busy,
           alive: p.paneAlive,
+          ...(waiting ? { waiting } : {}),
           parent: w?.parent,
           clonedFrom: w?.clonedFrom,
           forkOf: w?.forkOf,

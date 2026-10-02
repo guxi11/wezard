@@ -620,6 +620,8 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 .wst::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #b1bac4 }
 .wst.run { background: #dafbe1; color: #1a7f37 }
 .wst.run::before { background: #1a7f37; animation: pulse 1.4s infinite }
+.wst.wait { background: #fbefff; color: #8250df }
+.wst.wait::before { background: #8250df; animation: pulse 1.4s infinite }
 .wst.off { background: transparent; color: var(--faint); box-shadow: inset 0 0 0 1px var(--line) }
 .wst.off::before { background: transparent; box-shadow: inset 0 0 0 1.5px #b1bac4 }
 .wst:empty { padding: 0; background: none; box-shadow: none }

@@ -37,6 +37,8 @@ export interface WorldFactWizard {
   busy: boolean;
   /** tmux pane 还在 —— false = 冷的, 要说话得先把它拉起来。 */
   alive: boolean;
+  /** 停在哪些工具调用上等人点 (审批卡 / 本地弹窗) 的工具名; 缺省 = 没在等。 */
+  waiting?: string[];
   /** 谁生的它 —— 分身与子 wizard 都有; 两者靠 clonedFrom 区分。 */
   parent?: string;
   /** fork 自父亲的哪个 sessionId; 有值 = 分身 (从那个 session 节点 clone, 开局带着
@@ -116,6 +118,8 @@ export interface WorldNode {
   cli: string;
   busy: boolean;
   alive: boolean;
+  /** 同 WorldFactWizard.waiting。 */
+  waiting?: string[];
   /** 注册表里有登记 —— false = 只在 turn 记录里出现过的会话 (svr 视角下的全部)。 */
   known: boolean;
   /** 这是打开本页那条链接所属的会话。 */
@@ -305,6 +309,7 @@ export const buildWorld = (
       cli: f?.cli || last?.cli || "",
       busy: f?.busy ?? false,
       alive: f?.alive ?? false,
+      ...(f?.waiting?.length ? { waiting: f.waiting } : {}),
       known: !!f,
       self: target === scope.self,
       local: base === scope.base,

@@ -137,6 +137,8 @@ export interface RoleStatus {
   busy: boolean;
   /** 同 TagSummary.runningUntil: 无新写入时到这个时刻自动算结束, 0 = 已停。 */
   runningUntil: number;
+  /** 停在哪些工具调用上等人点; 缺省 = 没在等。优先于「执行中」—— 审批长轮询期间 pane 可能还在转圈。 */
+  waiting?: string[];
 }
 
 export interface Directory {
@@ -190,7 +192,7 @@ export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFact
     if (!wizards.has(id)) return undefined;
     const f = facts_.get(id);
     const t = untilOf(id);
-    return { alive: f?.alive ?? false, busy: f?.busy ?? false, runningUntil: t > now ? t : 0 };
+    return { alive: f?.alive ?? false, busy: f?.busy ?? false, runningUntil: t > now ? t : 0, ...(f?.waiting?.length ? { waiting: f.waiting } : {}) };
   };
   return { nameOf, labelOf, resolve, fact: (id) => facts_.get(id), chatName, isWizard: (id) => wizards.has(id), status, wizards: () => [...wizards] };
 };
