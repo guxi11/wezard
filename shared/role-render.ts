@@ -5,7 +5,7 @@
 //   出   该 wizard 这一轮的回复: 复用 renderTurnGroup (文本 + 工具细节), 去掉问句 ——
 //        问句已经是上面那条入消息了; 本轮用量单独走 `meta`, 客户端写在名字那一行
 //   断点 视角 role 自己的 /clear /new
-import { renderCutMark, renderTurnGroup, splitReminders, escHtml, fmtTs, hashStr, tagSig, type TurnFragment } from "./detail-render.js";
+import { renderCutMark, renderTurnGroup, splitReminders, escHtml, fmtTs, hashStr, tagSig, turnUsageChips, type TurnFragment } from "./detail-render.js";
 import { isTurn, staleAt, turnDone } from "./chat-view.js";
 import { isKeepaliveTurn } from "./keepalive.js";
 import type { DetailRecord, MarkDetailRecord, TurnDetailRecord } from "./detail-store.js";
@@ -97,10 +97,22 @@ const base = (m: Pick<Msg, "from" | "to" | "channel">, dir: Directory) => ({
   toName: dir.nameOf(m.to), toLabel: dir.labelOf(m.to),
 });
 
+/** 同伴派来的那句是发话方某一轮里说出去的: 那一轮 = 发话方在这一刻正跑着的主会话轮次。
+ *  它的账 (模型 / ctx / 耗时) 就是这条入消息的描述 —— 与答话那一侧同一份 chips, 两方会话里同样被 .two 藏掉。
+ *  人说的、定时任务放的没有自己的账。 */
+const senderTurn = (r: TurnDetailRecord, records: readonly DetailRecord[], dir: Directory): TurnDetailRecord | undefined => {
+  const from = r.from?.kind === "peer" ? r.from.from : undefined;
+  if (!from || !dir.isWizard(from)) return undefined;
+  return records.filter(isTurn)
+    .filter((t) => t.target === from && !t.agent && t.createdAt <= r.createdAt)
+    .reduce<TurnDetailRecord | undefined>((best, t) => (!best || t.createdAt > best.createdAt ? t : best), undefined);
+};
+
 export const renderMsg = (m: Msg, records: readonly DetailRecord[], dir: Directory, now: number): MsgFragment => {
   const r = m.turn;
+  const sent = m.dir === "in" ? senderTurn(r, records, dir) : undefined;
   const { html, meta } = m.dir === "in"
-    ? { html: renderIn(r), meta: "" }
+    ? { html: renderIn(r), meta: sent ? turnUsageChips(sent, now) : "" }
     : ((g) => ({ html: g.html, meta: receiptChip(r) + jobChip(r) + g.meta }))(renderTurnGroup(r, now, childrenOf(records, r.id, now), false));
   const live = m.dir === "out" && !turnDone(r, now);
   return {

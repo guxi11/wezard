@@ -904,6 +904,12 @@ export const renderCutMark = (m: MarkDetailRecord): TurnFragment => {
   };
 };
 
+/** 一轮的账 (模型 / ctx / 耗时) —— 与这一轮出消息名字行上的同一份。 */
+export const turnUsageChips = (r: TurnDetailRecord, now = Date.now()): string => {
+  const done = turnDone(r, now);
+  return usageChips(r, done, (done ? r.updatedAt : now) - r.createdAt);
+};
+
 export { escHtml, fmtTs, fmtDuration, fmtTok, hashStr, tagSig, TURN_CSS };
 
 export const renderDetailPage = (r: DetailRecord): string => {

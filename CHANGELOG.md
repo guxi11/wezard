@@ -63,6 +63,7 @@
 - rolepage 用量条的累计耗时 (⏱️) 指标。
 
 ### Fixed
+- rolepage 多方视图 (工单页、群) 里同伴派来的那句只有时刻, 答话却带模型 / ctx / 耗时, 同一视图里看着不一致: 入消息原本没有自己的账。现在 wizard 派来的那句带上发话方发出它的那一轮的账 (与它出消息名字行上同一份 chips), 显隐照旧走两方会话那一份判定 (`.two`: 两个 role 之间的对话藏模型与 ctx)。人说的、定时任务放的仍只有时刻。
 - rolepage 工单页: 收工结论原先根本没渲染 (markdown 只处理气泡, 开工 / 收工两行不是气泡), 现在开工那行的计划 (`open_job` 的 plan, 随 `/api/world` 下发) 与收工结论都按 markdown 分行显示, 成员那段活原样分行 (超 4 行收起, 悬停看全文)。撤掉「全部工单」入口 (工单列表只从 📋 进); 关系图上有 📋 的关系不再另挂「工单 ×N」种类签。
 - rolepage 从 📋 进工单列表时列表为空 (标题却写「这 N 张」): 标记数的是「这处往来里出现过的工单」, 列表却按视角开过 / 参与过重新筛, 还要靠没载入的世界快照补。改为按入口带的工单号列, 摘要随 role 一并下发全部工单的账 (`jobIndex`), 标题数字、列表行、消息 badge 都从这一份取; 账里已清掉的明说。
 - 主动推送不再在 reload 窗口里丢消息: 新进程恢复 mirror 后立刻要推的终句 / notify, 撞上 WS 尚未连上就被 SDK 以 `WebSocket not connected` 拒掉、永久丢失 (近 48h 约 18 条); `sendMessage` 现在先等连上 (最多 30s) 再发。推送成功落一条 `standalone pushed` / `raw pushed` 日志 (chatId、turnId、WeCom 回执), 失败日志带上 WeCom 的 errcode/errmsg (SDK 拒收时 reject 的是回执帧而非 Error, 原先记成 undefined) —— 此前成功推送不落日志, 「rolepage 有、群里没有」无从对账。
