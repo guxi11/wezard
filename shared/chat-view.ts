@@ -15,15 +15,13 @@ export interface AggUsage extends TurnUsage {
   /** 此刻的上下文: 最近一轮主会话 (子 agent 有自己的窗口, 不算) 最后一次调用送入的
    *  input + 缓存。是现状, 不是峰值 —— compact / clear 之后峰值就过时了。 */
   ctx: number;
-  /** Wall-clock covered by the aggregated turns (sum of per-turn spans). */
-  durationMs: number;
   turns: number;
   tools: number;
 }
 
 const ZERO: AggUsage = {
   input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0,
-  ctx: 0, durationMs: 0, turns: 0, tools: 0,
+  ctx: 0, turns: 0, tools: 0,
 };
 
 export interface TagSummary {
@@ -135,9 +133,6 @@ export const turnDone = (r: TurnDetailRecord, now: number): boolean => {
 export const isGhostTurn = (r: TurnDetailRecord, now: number): boolean =>
   r.items.length === 0 && !r.usage && now - r.updatedAt > IDLE_MS;
 
-const turnSpan = (r: TurnDetailRecord, now: number): number =>
-  (turnDone(r, now) ? r.updatedAt : now) - r.createdAt;
-
 // 老记录没有 ctxLast: 退到这一轮的峰值 (多次调用的累计和不是任何一次的上下文)。
 const lastCtx = (u: TurnUsage): number => u.ctxLast ?? u.ctxPeak ?? u.input + u.cacheRead + u.cacheWrite;
 
@@ -158,7 +153,6 @@ const addUsage = (a: AggUsage, r: TurnDetailRecord, now: number): AggUsage => {
     calls: a.calls + (u?.calls ?? 0),
     serviceTier: a.serviceTier ?? u?.serviceTier,
     ctx: a.ctx,
-    durationMs: a.durationMs + turnSpan(r, now),
     turns: a.turns + 1,
     tools: a.tools + r.items.filter((it) => it.t === "tool_use").length,
   };

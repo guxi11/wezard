@@ -156,7 +156,7 @@ button { font: inherit; color: inherit }
 .usage .leg { margin-left: auto }
 .usage .lg { display: flex; align-items: center; gap: 4px; white-space: nowrap }
 .usage .lg i { width: 7px; height: 7px; border-radius: 50%; flex: none }
-.usage.f-leg .leg, .usage.f-nm .u-nm, .usage.f-time .kv-time { display: none }
+.usage.f-leg .leg, .usage.f-nm .u-nm { display: none }
 
 /* 群聊头像 = 参与者头像拼图: 1 格居中, 2 格左右, 3/4 格田字。 */
 .mosaic {

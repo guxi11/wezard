@@ -46,14 +46,6 @@
     if (n < 1e6) { var v = n / 1000; return (v >= 10 ? v.toFixed(0) : v.toFixed(1).replace(/\.0$/, '')) + 'k'; }
     return (n / 1e6).toFixed(2).replace(/\.?0+$/, '') + 'M';
   };
-  var fmtDur = function (ms) {
-    if (ms < 1000) return ms + 'ms';
-    var s = Math.round(ms / 1000);
-    if (s < 60) return s + 's';
-    var m = Math.floor(s / 60);
-    if (m < 60) return m + 'm' + (s - m * 60) + 's';
-    return Math.floor(m / 60) + 'h' + (m % 60) + 'm';
-  };
   var pad = function (n) { return n < 10 ? '0' + n : '' + n; };
   var fmtDay = function (ts) {
     var x = new Date(ts);
@@ -759,14 +751,9 @@
   ];
   var TIP = {
     turns: '对话轮数', tools: '工具调用次数', api: 'API 请求次数',
-    ctx: '上下文 — 最近一次请求送入的 input + 缓存', time: '累计耗时',
+    ctx: '上下文 — 最近一次请求送入的 input + 缓存',
   };
-  var ICON = { turns: '💬', tools: '🛠️', api: '🔁', ctx: '📄', time: '⏱️' };
-  var liveDur = function (t) {
-    var d = (t.usage && t.usage.durationMs) || 0;
-    if (!t.runningUntil) return d;
-    return d + Math.max(0, Math.min(srvNow(), t.runningUntil) - R.at);
-  };
+  var ICON = { turns: '💬', tools: '🛠️', api: '🔁', ctx: '📄' };
   var usageHTML = function (t) {
     var u = t.usage || {};
     var segs = SEGS.filter(function (s) { return u[s[0]] > 0; });
@@ -807,13 +794,13 @@
         esc(t.model ? t.model.replace(/^claude-/, '') : '用量') + '</span>' +
       '<span class="u-kvs">' +
         kv('turns', t.turns, t.turns) + kv('tools', u.tools, u.tools) + kv('api', u.calls, u.calls) +
-        kv('ctx', u.ctx, fmtTok(u.ctx)) + kv('time', liveDur(t), fmtDur(liveDur(t))) +
+        kv('ctx', u.ctx, fmtTok(u.ctx)) +
       '</span>' + io;
   };
-  // 永远单行: 排不下就按 FOLD 的顺序一级级藏 (分布文字 → 名字 → 耗时), 宽度回来再按反序放出来。
+  // 永远单行: 排不下就按 FOLD 的顺序一级级藏 (分布文字 → 名字), 宽度回来再按反序放出来。
   // 判定看的是容器自己溢没溢出, 不看视口 —— 同一个组件挂在整页页脚和右栏底, 宽度各不相同。
-  var FOLD = ['f-leg', 'f-nm', 'f-time'];
-  var FOLDED = { 'f-leg': '.leg', 'f-nm': '.u-nm', 'f-time': '.kv-time' };
+  var FOLD = ['f-leg', 'f-nm'];
+  var FOLDED = { 'f-leg': '.leg', 'f-nm': '.u-nm' };
   var fitUsage = function (el) {
     if (el.hidden) return;
     var over = function () { return el.scrollWidth > el.clientWidth; };

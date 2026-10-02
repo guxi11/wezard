@@ -40,6 +40,9 @@
 - 共享记忆整理从定时任务改成 daemon 内建定时器: 不再生成 `~/.wezard/tasks/memory-steward.task.mjs` (开机把旧的改名为 `.retired` 停用, 免得两路并跑), 不进 `list_tasks` / rolepage 日程。每 30 分钟 (开机后 1 分钟先跑一轮) 认领收件箱里的提议 (认领 / 一小时孤儿回收语义不变), 有活才在不属于任何群的内部 key 上起一个白板 wizard 合并, 收工即收; 收件箱改由守护进程归档进 `memory/log/`。全程零气泡、不 notify, 结果只留在 rolepage 与审计日志。
 - wizard 的上下文瘦身: charter 的出生名册只列写了职责的同群 wizard (至多 15 个, 其余报个数、指向 `wizard_roster`), 「我能做什么」改为每个工具一行「何时用」, 「编排」「说话」两节不再复述工具描述 —— charter ~5.1k → ~2.5k tok (管家 ~6.0k → ~3.4k)。工具描述不再教 `send_peer` / `wait_peer` (一律 `tell_peer` + 回执); `send_peer` 描述压成一行; `tell_peer` 只讲机制; `schedule_task` 只留何时用 / `when` 人话 / 默认新建 / 回念 `next`, gate 写法挪进任务文件头注释; 生 wizard 的 `model` 参数共用一句; graph 三件套、`list_claude_sessions`、`switch_claude_session`、`list_chats` 标为人侧/罕用。工具定义合计 ~20.4k → ~17.8k tok。CLAUDE.md 的 MCP 段与 `/help` 的过期措辞一并更正。
 
+### Removed
+- rolepage 用量条的累计耗时 (⏱️) 指标。
+
 ### Fixed
 - rolepage 用量条的上下文 (📄) 取「最近一轮主会话最后一次调用送入的 input + 缓存」, 不再是全部轮次 (含子 agent) 的峰值 —— compact / clear 之后峰值早已过时。顺带修 `ctxFirst` 在一轮第二次调用后被丢掉 (宪章占开局几成因此只在单调用的首轮里算得出)。
 - rolepage 关系图卡片的 +N 改为「这一档图上看不到的关系对端」: 对端卡片已画在图上就不算 (不论有没有连线), 「相关 | 全部」各按自己画出来的卡片算。「相关」改为画出视角的全部直接关系 (任一种类、任一方向; 此前只画对过话的, spawn 的子 wizard 等被藏掉, 视角自己的卡片也挂着 +N), 去掉兄弟卡片的折叠计数 `tfold`; `/api/world` 每个聊天的成员上限不再截掉视角的直接关系 (此前 ev-route 等没下发, 只能计进 +N)。
