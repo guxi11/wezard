@@ -8,6 +8,7 @@
 - 共享记忆合并后告诉在场的 wizard: 整理者真改动了哪份群 / 工作区记忆, pane 活着且读这份 md 的 wizard 下一条消息尾巴上捎一行「记忆已更新, 全文见 …」(宪章是出生快照, 此前要等重生才看得到)。整理者合并时把该工作区的 `CLAUDE.md` / `CODEBUDDY.md` / `AGENTS.md` / `.claude/CLAUDE.md` 与各 backend 的 auto-memory `MEMORY.md` 当只读参考, 已写在那里的不再收; workspace 提议记下 `cwd`, 提议者收工后仍找得到参考源。名册增量的 reminder 表头改成通用的「宪章是快照」; 宪章重渲染时清空该 wizard 待投递的增量 (新宪章里都有了)。
 - self 记忆跨 `/clear`: `/clear` 之后第一条注入捎上出生后新记的条目 (最新 10 条) 与已 forget 的条数; reload 后没有快照则只指路。`clone_wizard` (fork 上下文) 继承被克隆者的 self 记忆并标「(继承自 .x)」。`wizard_remember` self 满 60 条挤掉最旧的时返回里列出 `dropped`, 超 600 字返回 `truncated`; 去重改按截断后的文本比, 长记忆重记不再叠出重复。
 - 交接简报留档: `wizard_handoff_self` / `/handoff` 的简报贴回新会话成功后追加到 `~/.wezard/memory/episodes/<name>.jsonl` (交接前后的 sessionId 与简报全文), 空简报不记 —— 此前简报只活在新会话的第一条消息里。
+- 上下文到 120k 时, 下一条注入捎一行「先 `wizard_remember` 记下值得跨会话的, 再考虑 `wizard_handoff_self`」, 每段会话 (sessionId) 只提一次。
 
 ### Security
 - 模型不再能免审改审批配置: PreToolUse hook 对 wezard 自家 MCP 工具的一律放行排除了两种「写」—— `config_set` 带 `value` (可写 `danger_skip_all` / `approval_mode` / `allow_from`) 与 `set_model` `scope:"default"` (改 CLI 全局设置), 它们落回审批, 且 daemon 把它们当必发卡 (不吃 matcher / danger 开关 / ⏱窗口 / 会话缓存, 只有人开的 skipAll 与 bypass 模式压得过); `config_set` 的读与 `set_model` 的会话级照旧免审。

@@ -57,6 +57,7 @@ import {
   renderCharter,
   renderRoster,
   CONTEXT_FULL_TOKENS,
+  MEMORY_NUDGE_TOKENS,
   MEMORY_MAX,
   NOTE_MAX,
   type WizardBrief,
@@ -1076,7 +1077,15 @@ const main = async (): Promise<void> => {
     // 变动从这里搭下一次注入的车进到每个在场 wizard 的上下文里, 不占一轮。
     // 一条变动只投给**同一个聊天**里在场的其他 wizard: 群成员变动是那个群的事,
     // 当事人自己做的自己知道, 所以排除在外。
-    const notices = bindNoticeBox(createNoticeBox());
+    // 上下文逼近自动压缩时提醒一句「先记」: 压缩 / 交接都会丢细节。每段会话 (sid) 只提一次。
+    const nudged = new Set<string>();
+    const memoryNudge = (t: string): string[] => {
+      const i = m.sessionInfo(t);
+      if (!i?.sessionId || i.contextTokens < MEMORY_NUDGE_TOKENS || nudged.has(i.sessionId)) return [];
+      nudged.add(i.sessionId);
+      return [`你的上下文已到 ${Math.round(i.contextTokens / 1000)}k, 快到自动压缩了: 这段里学到的、值得跨会话活下来的东西, 先 \`wizard_remember\` 记下 (自己的选 self, 属于群 / 仓库的选 chat / workspace), 再考虑 \`wizard_handoff_self\``];
+    };
+    const notices = bindNoticeBox(createNoticeBox(12, memoryNudge));
     const postRoster = (base: string, except: readonly string[], line: string): void =>
       notices.post(chatAudience(m.chatTargets(base), base, except), line);
 

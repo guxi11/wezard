@@ -26,8 +26,10 @@ export interface NoticeBox {
 }
 
 /** 每个信箱最多攒 `max` 行 —— 一个挂了很久的 wizard 不该在醒来时读一部编年史,
- *  溢出时留最新的那些 (旧的那些多半已经被后面的变动覆盖了)。 */
-export const createNoticeBox = (max = 12): NoticeBox => {
+ *  溢出时留最新的那些 (旧的那些多半已经被后面的变动覆盖了)。
+ *  `probe` 是投递那一刻现算的行 (不是谁投进来的, 而是「此刻它的状态值得提一句」,
+ *  如上下文快满); 排在信箱里的那些前面。 */
+export const createNoticeBox = (max = 12, probe: (target: string) => string[] = () => []): NoticeBox => {
   const boxes = new Map<string, string[]>();
   return {
     post: (audience, line) => {
@@ -37,7 +39,7 @@ export const createNoticeBox = (max = 12): NoticeBox => {
       }
     },
     drain: (target) => {
-      const lines = boxes.get(target) ?? [];
+      const lines = [...probe(target), ...(boxes.get(target) ?? [])];
       boxes.delete(target);
       return lines;
     },

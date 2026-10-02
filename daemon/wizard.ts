@@ -284,6 +284,8 @@ export interface RosterRow extends WizardBrief {
 /** 上下文超过这个数就该自己交接了。Claude 家族最小的窗口是 200k, 留三成余量给
  *  交接那一轮本身 —— 提示而已, 决定权在 wizard 自己。 */
 export const CONTEXT_FULL_TOKENS = 140_000;
+/** 比交接线早一截: 先把值得跨会话活下来的记下, 再谈压缩 / 交接 —— 那两者都会把细节丢掉。 */
+export const MEMORY_NUDGE_TOKENS = 120_000;
 
 // 名册只报事实, 不替管家判「太满」: 值不值得接着用这段上下文是经济账, 由它自己算。
 export const ctxOf = (n = 0): string => (n ? `ctx ${Math.round(n / 1000)}k` : "");
