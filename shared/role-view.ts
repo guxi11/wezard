@@ -207,10 +207,10 @@ export interface ConvSub {
   role: string;
   name: string;
   label: string;
-  /** 它在这个频道里的记录条数 (它和谁说的都算 —— 与点进去看到的窗口同一份)。 */
+  /** 它与当前 role 在这个频道里的往来条数 (与点进去看到的窗口同一份)。 */
   count: number;
   lastTs: number;
-  /** 它在这个频道里的最后一句。 */
+  /** 这一对往来的最后一句。 */
   preview: string;
   /** 我与它在这里最后一次开口的时刻 (0 = 没开过口) —— 这一对的默认已读水位。 */
   mine: number;
@@ -299,8 +299,8 @@ export const glanceOfTalk = (msgs: readonly Msg[], viewer: string, dir: Director
 
 const SUB_MAX = 40;
 
-/** 别人说完的一句 `[说完的时刻, 发话方, 收信方]`。一句话属于两端各自的子项 (子项 = 那个 role
- *  在群里的全部记录), 客户端据此给群和每个子项点未读。
+/** 别人说完的一句 `[说完的时刻, 发话方, 收信方]`。说给视角的那句属于「我与发话方」那个成对子项,
+ *  其余只属于群 —— 客户端据此给群和每个子项点未读。
  *  水位按时刻而不按条数: 条数随 span / 记录清理伸缩, 时刻不会 —— 且群与子项共用一份,
  *  读完一个子项只抹掉它的, 群的账不必再做加减。 */
 export type Heard = [number, string, string];
@@ -346,14 +346,14 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
       const base = key.slice(2);
       const all = msgs.filter((m) => m.channel === base);
       const others = [...new Set(all.flatMap((m) => [m.from, m.to]))].filter((r) => r !== role && !r.startsWith("task:") && r !== SYSTEM);
-      // 子项 = 群里每个其他 role 一项, 它的全部记录 (与点进去的窗口同一份 talkOf)。
-      // mine 仍是「我对它开口」: 我回过它的话, 它在那之前说的就算读过。
+      // 子项成对: 群里与视角有往来的每个 role 一项, 内容是「我与它」在这个群里的对话 (与点进去的窗口同一份 talkOf)。
+      // 没往来的 count 为 0, 客户端不列。
       const subs = others
         .map((r): ConvSub => {
-          const seen = talkOf(all, r);
+          const pair = talkOf(all, role, [r]);
           return {
-            role: r, name: dir.nameOf(r), label: dir.labelOf(r), count: seen.length, mine: spoke(talkOf(all, role, [r])),
-            ...glanceOr(seen, speakerPrefix(dir, role)), status: dir.status(r, now),
+            role: r, name: dir.nameOf(r), label: dir.labelOf(r), count: pair.length, mine: spoke(pair),
+            ...glanceOr(pair, speakerPrefix(dir, role, [r])), status: dir.status(r, now),
           };
         })
         .sort((a, b) => b.lastTs - a.lastTs)
@@ -368,16 +368,16 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
     .sort((a, b) => b.lastTs - a.lastTs);
 };
 
-/** 每个 role 对应的全部叶子项 —— 群里的子项 (它在那个群里有记录: 说过或被说到, 与 convsOf 的子项
+/** 每个 role 对应的全部叶子项 —— 群里的成对子项 (它与某个 role 在那个群里有往来, 与 convsOf 的子项
  *  同一口径) 与私聊项 (有往来就算)。侧栏名字旁的「+N」= 这份减去那一项自己。
- *  key 取绝对的 (`c:<base>` / `p:<a>|<b>`), 与视角无关。定时与系统不是聊天的一方。 */
+ *  key 取绝对的 (`c:<base>|<a>|<b>` / `p:<a>|<b>`, 两端排序), 与视角无关。定时与系统不是聊天的一方。 */
 export const chatKeysOf = (all_: readonly Msg[]): Record<string, string[]> => {
   const party = (r: string): boolean => !!r && !r.startsWith("task:") && r !== SYSTEM;
   const index = all_.filter((m) => !isPing(m)).reduce((idx, m) => {
     const add = (r: string, k: string) => idx.set(r, (idx.get(r) ?? new Set<string>()).add(k));
-    if (m.channel) { [m.from, m.to].filter(party).forEach((r) => add(r, `c:${m.channel}`)); }
-    else if (party(m.from) && party(m.to)) {
-      const k = `p:${[m.from, m.to].sort().join("|")}`;
+    if (party(m.from) && party(m.to)) {
+      const pair = [m.from, m.to].sort().join("|");
+      const k = m.channel ? `c:${m.channel}|${pair}` : `p:${pair}`;
       add(m.from, k); add(m.to, k);
     }
     return idx;
@@ -394,12 +394,12 @@ export const convMessages = (msgs: readonly Msg[], role: string, key: string, wi
 
 export interface TalkArgs { who: string; peers: string[]; chat?: string }
 /** 一个窗口交给 talkOf 的入参; 整个公开频道不是谁的往来, 没有。群里选中一个子项 (withRole)
- *  看的是那个 role 在这个群里的全部记录 —— 它和谁说的都算, 不只是和视角之间的。 */
+ *  看的是视角与它在这个群里的往来。 */
 export const talkArgs = (role: string, key: string, withRole?: string): TalkArgs | undefined => {
   const t = parseTalkKey(key);
   if (t) return t;
   if (key.startsWith("p:")) return { who: role, peers: [key.slice(2)], chat: "" };
-  return withRole ? { who: withRole, peers: [], chat: key.slice(2) } : undefined;
+  return withRole ? { who: role, peers: [withRole], chat: key.slice(2) } : undefined;
 };
 
 /** 窗口是视角与恰好另一个 role 之间的往来时, 那个 role; 否则 (群 / 多个对端 / 不含视角) 没有。 */

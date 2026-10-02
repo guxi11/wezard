@@ -217,14 +217,14 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       stats,
       // 宪章不受 3 天视界裁剪: 一个开了一周的 wizard, 它的系统提示仍是出生那天那份。
       charter: charterBrief(store.list(), info.id),
-      // 窗口主角恰好是一个 wizard (群里选中的子项 / 一对一的对端), 带上它在这个窗口里跑的那几轮的账。
+      // 对端恰好是一个 wizard 的窗口 (判定与窗口取消息同一份 talkOf 入参), 带上它在这段往来里跑的那几轮的账。
       winStats: peerStats(records, msgs, role, win, dir, now),
     };
   };
 
   const peerStats = (records: readonly DetailRecord[], msgs: readonly Msg[], role: string, win: Pick<View, "conv" | "with" | "span"> | undefined, dir: Directory, now: number) => {
     const t = win?.conv ? talkArgs(role, win.conv, win.with || undefined) : undefined;
-    const w = win?.with && !win.conv.startsWith("p:") ? win.with : counterpartOf(role, t);
+    const w = counterpartOf(role, t);
     if (!t || !w || !dir.isWizard(w)) return undefined;
     const ms = talkOf(msgs, t.who, t.peers, t.chat).filter((m) => m.turn.target === w && inSpan(win?.span)(m.ts));
     return windowStats(records, ms, w, now);
