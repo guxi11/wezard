@@ -646,6 +646,7 @@ const FAILED: Record<Exclude<ReceiptStatus, "done" | "error" | "need">, string> 
   timeout: "等到期限它还没答完",
   silent: "它停下了几次, 都没有答这一句",
   dead: "它的 pane 没了 (被收掉或崩了)",
+  canceled: "它这件活被人收掉 / 打断了",
 };
 
 /** Prompt-token size of the session's most recent turn: input + both cache

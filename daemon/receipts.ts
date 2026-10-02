@@ -19,6 +19,7 @@ import type { Logger } from "pino";
 import type { JsonMap } from "../shared/json-map-store.js";
 import type { IdleResult } from "./graph.js";
 import { parseClosing, type PeerReply } from "./peers.js";
+import { turnState, type TurnState } from "../shared/turn-state.js";
 import type { Envelope, ReceiptStatus } from "../shared/reminder.js";
 import { sleep, truncate } from "../shared/std.js";
 
@@ -128,6 +129,8 @@ export interface ReceiptDeps {
   handingOff?: (target: string) => boolean;
   /** 等它交接完 (没在交接 = 立刻 resolve)。 */
   handedOff?: (target: string) => Promise<void>;
+  /** 此刻停在审批卡 / 本地弹窗上 (闲着却悬着工具调用) —— 只给观察面用。 */
+  parkedNow?: (target: string) => boolean;
 }
 
 export interface Tell {
@@ -206,7 +209,16 @@ export interface Receipts {
    *  `channel` = 它这一轮的公开频道。私聊来的而发话方没在等 (wait_peer 取走 / 不要回执)
    *  → undefined, 退回现状。 */
   parentOf: (self: string, env: Envelope | undefined, channel: string, opening: string) => ParentK | undefined;
+  /** 还没落定的每一件活此刻的状态 (见 turn-state.ts) —— 名册 / peek / 工单清单读它。只读, 不落盘。 */
+  states: () => InFlight[];
+  /** `target` 被 `by` 收掉或打断: 发往它、还没落定的活都落成 canceled。`by` 自己那份
+   *  不投 (它自己知道), 别的发话方各收一份 canceled 回执。必须先于 kill —— pane 一死,
+   *  守着的 watcher 会把同一份报成 dead。`only` 收窄到其中几份 (interrupt 只停了它
+   *  手上这一轮, 排着的别人的活照旧会被答)。返回落成 canceled 的件数。 */
+  cancel: (target: string, by: string, only?: (x: { from: string; turn: string }) => boolean) => number;
 }
+
+export interface InFlight { from: string; to: string; turn: string; job: string; state: TurnState; ageMs: number }
 
 export const createReceipts = (deps: ReceiptDeps): Receipts => {
   const keyOfPair = (from: string, to: string): string => `${from}\u0000${to}`;
@@ -310,6 +322,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     }
   };
 
+  const canceled = (s: Slot): boolean => s.outcome?.status === "canceled";
   /** 投一份但不算定论的那两种: CLI 报错、NEED 反问。 */
   const interim = (st: ReceiptStatus): boolean => st === "error" || st === "need";
 
@@ -323,7 +336,8 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     // 锚在发话时刻而不是此刻: reload 后续守的那一份不该重新领一整份时长。交接转过来
     // 的那份改锚到贴回简报的时刻, 所以每圈重算。
     const deadline = (): number => s.deadlineAt ?? s.at + TARGET_WAIT_SEC * 1000;
-    const aborted = (): boolean => s.claimed || stale(s);
+    // cancel 落的终态也算: 守到一半被别人收掉, 不再等它的答案。
+    const aborted = (): boolean => s.claimed || stale(s) || canceled(s);
     const reported = (): boolean => s.outcome?.status === "error";
     // 反问过了: 同一段 NEED 不再投第二遍, 等发话方 tell_peer({re}) 答 (那会顶掉这份)。
     const asked = (): boolean => s.outcome?.status === "need";
@@ -379,7 +393,9 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     const lg = deps.log.child({ mod: "receipt", from: deps.nameOf(s.from), to: deps.nameOf(s.to), ...(s.job ? { job: s.job } : {}) });
     const anchor = s.at;
     // 终态写一次不再改: reload 打断投递后续守的那一份直接重投同一个结果, 不再重等。
-    const out = s.outcome && !interim(s.outcome.status) ? s.outcome : await awaitReply(s);
+    const got = s.outcome && !interim(s.outcome.status) ? s.outcome : await awaitReply(s);
+    // 等的过程中被 cancel 落了终态: 以它为准 (pane 随后被杀, awaitReply 可能报的是 dead)。
+    const out = canceled(s) ? s.outcome : got;
     if (stale(s)) return;
     if (s.claimed || !out) { // wait_peer 抢先取走了
       s.resolved = true;
@@ -431,7 +447,8 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       for (;;) {
         await deps.handedOff?.(s.from);
         // settled 只可能是 wait_peer 在这期间取走了 (watcher 自己投完才 settle)。
-        if (stale(s) || s.settled) return false;
+        // 排队期间被 cancel 落了终态: 手上这份 (need / error) 已经过时, 改投 canceled。
+        if (stale(s) || s.settled || (canceled(s) && out !== s.outcome)) return false;
         if (Date.now() >= s.at + KEEP_MS || !(await deps.paneLive(s.from))) {
           lg.warn({ status: out.status }, "receipt: 发话方一直没空或已不在, 放弃回注");
           return false;
@@ -453,7 +470,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     });
     if (stale(s)) { lg.info("receipt: 被同一对的新一句顶掉, 不回注"); return; }
     // error / need 只是中途报了一声: 接着守续跑 (或答复之后) 出来的答案。
-    if (!final && sent) return watch(s);
+    if (!final && (sent || canceled(s))) return watch(s);
     settle(s);
     if (!s.delivered) release(s);
   };
@@ -520,6 +537,35 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       });
       if (owed.length) deps.log.info({ mod: "receipt", to: deps.nameOf(to), answered: owed.length - carried.length, carried: carried.map((s) => deps.nameOf(s.from)) }, "receipt: 交接时转交");
       return carried;
+    },
+    states: () => {
+      // 一个 target 欠好几份时只探一次 (探针要读它 transcript 的尾巴)。
+      const probed = new Map<string, boolean>();
+      const parked = (t: string): boolean => probed.get(t) ?? probed.set(t, deps.parkedNow?.(t) ?? false).get(t)!;
+      return [...slots.values()]
+        .filter((s) => !s.resolved && !s.claimed)
+        .map((s) => ({
+          from: s.from, to: s.to, turn: s.turn ?? "", job: s.job,
+          state: turnState(s, { parked: !s.outcome && parked(s.to) }),
+          ageMs: Date.now() - s.at,
+        }));
+    },
+    cancel: (target, by, only = () => true) => {
+      const hit = [...slots.values()].filter((s) => s.to === target && !s.resolved && !s.claimed && only({ from: s.from, turn: s.turn ?? "" }));
+      for (const s of hit) {
+        const last = deps.lastWords?.(s.to, s.at).trim();
+        s.outcome = {
+          status: "canceled",
+          body: `（守护进程: ${deps.nameOf(s.to)} 被 ${deps.nameOf(by)} 收掉 / 打断了, 这件活没有结论。）${last ? `\n它最后说的: ${truncate(last, 600)}` : ""}`,
+        };
+        if (s.job) deps.settleJob?.(s.job, s.to, "canceled", []);
+        // 发起 stop 的那方自己知道, 不投; 守着的 watcher 看到 claimed 就收尾。
+        if (s.from === by) { s.claimed = true; s.resolved = true; settle(s); continue; }
+        save(s);
+        // 挂起等子活的没有 watcher 在守: 叫醒它去投这份 canceled。
+        if (s.deferred) wake(s);
+      }
+      return hit.length;
     },
     parentOf: (self, env, channel, opening) => {
       if (env?.receipt) return env.k ? kOfAttr(env.k) : undefined;

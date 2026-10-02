@@ -299,6 +299,8 @@ export interface RosterRow extends WizardBrief {
   contextTokens?: number;
   parent?: WizardBrief;
   clones: readonly WizardBrief[];
+  /** 在飞的活: 它在等谁、谁在等它 (各带状态) —— 见 turn-state.ts。 */
+  turns?: string;
 }
 
 /** 上下文超过这个数就该自己交接了。Claude 家族最小的窗口是 200k, 留三成余量给
@@ -335,6 +337,7 @@ const rosterEntry = (r: RosterRow, now: number, home: string): string[] => {
     ...(r.description ? [`  职责: ${r.description}`] : []),
     // 冷会话的摘要是很久以前的话, 不值得占一行; 要读就 peek_peer。
     ...(r.alive && !r.self && r.summary ? [`  最近: ${r.summary}`] : []),
+    ...(r.turns ? [`  ${r.turns}`] : []),
   ];
 };
 

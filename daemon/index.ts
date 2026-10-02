@@ -71,7 +71,8 @@ import { clipMiddle, contextFiles, firstStamp, parseClosing, lastContextTokens, 
 import { keepalivePingSigs } from "../shared/keepalive.js";
 import { expandHome } from "../shared/paths.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
-import { createReceipts, deadlineOf, kAttr, newTurn, type ParentK, type Slot as ReceiptSlot } from "./receipts.js";
+import { createReceipts, deadlineOf, kAttr, newTurn, type InFlight, type ParentK, type Slot as ReceiptSlot } from "./receipts.js";
+import { renderInFlight } from "../shared/turn-state.js";
 import type { TurnTag } from "../shared/reminder.js";
 import { createHandoffs, handedOff, handingOff, type Pending as PendingHandoff } from "./handoff.js";
 import { rankCandidates, renderCandidates, wakeNoteOf } from "./route.js";
@@ -635,6 +636,7 @@ const main = async (): Promise<void> => {
     const receipts = createReceipts({
       idleNow: m.idleNow,
       jobTally: (id) => jobs.tally(id),
+      parkedNow: m.parkedNow,
       settleJob: (id, target, outcome, artifacts) => { jobs.settle(id, target, outcome, artifacts); },
       untilIdle: m.untilIdle,
       paneLive: m.paneLive,
@@ -665,6 +667,7 @@ const main = async (): Promise<void> => {
           ),
         }),
     });
+    const turnsLine = (xs: readonly InFlight[], target: string): string => renderInFlight(xs, target, displayName);
     // reload 前在飞的回执: 等 mirror 把绑定都恢复了再续守 —— 早一步读 target 会拿不到
     // transcript, 退回按时刻取就可能把上一件事的结论当回执。
     // 交接 (见 handoff.ts): 换会话不换身份。这里给它重开、贴话、读旧 transcript 的能力,
@@ -704,6 +707,13 @@ const main = async (): Promise<void> => {
     /** `self` 此刻这一轮派出去的活, 结论该交给谁 (见 receipts.parentOf)。只读它自己
      *  transcript 里开这一轮的那句 user 行的信封: attachment 上的 channel 在注入时就被
      *  排队的下一句改写了, transcript 才记着「这一轮是谁发起的」, reload 后也读得到。 */
+    /** `target` 手上这一轮是哪件 peer 活 —— 认开头那句的信封: 有件号按件号, 老信封按发话方。 */
+    const currentAsk = (target: string): ((x: { from: string; turn: string }) => boolean) => {
+      const p = m.sessionInfo(target)?.jsonlPath;
+      const env = p ? openingOf(talkTurns(expandHome(p), 80, pingSigs, false, true))?.env : undefined;
+      if (env?.kind !== "peer" || env.receipt) return () => false;
+      return (x) => (env.turn ? x.turn === env.turn : displayName(x.from) === env.from);
+    };
     const parentKOf = (self: string): ParentK | undefined => {
       const p = m.sessionInfo(self)?.jsonlPath;
       const opening = p ? openingOf(talkTurns(expandHome(p), 80, pingSigs, false, true)) : undefined;
@@ -816,6 +826,7 @@ const main = async (): Promise<void> => {
       // 截断的视口加一层 TUI 装饰, 而「它卡在哪」transcript 答得更准 —— 不在转圈
       // 却悬着工具调用, 就是停在审批卡 / 本地弹窗上等人点。
       const peek = await m.peekTurns(target, turns);
+      const inflight = turnsLine(receipts.states(), target);
       const waiting = peek.waiting ?? [];
       const state = peek.busy
         ? "正在生成"
@@ -827,7 +838,7 @@ const main = async (): Promise<void> => {
         name: peerAddress(cfg, self, target),
         busy: peek.busy ?? false,
         ...(waiting.length ? { waiting } : {}),
-        text: [`${displayName(target)} · ${state}${foreign ? ` · 住在群 ${chatNameOf(cfg, target) || "(未命名)"}` : ""}`, peek.dialog ?? `(${peek.reason})`].join("\n"),
+        text: [`${displayName(target)} · ${state}${foreign ? ` · 住在群 ${chatNameOf(cfg, target) || "(未命名)"}` : ""}`, ...(inflight ? [inflight] : []), peek.dialog ?? `(${peek.reason})`].join("\n"),
       });
     });
 
@@ -1581,8 +1592,10 @@ const main = async (): Promise<void> => {
       // 的箭头 (读名册的是另一个 wizard), 模型取它真正跑的那个 —— 绑定里的 model 只在
       // 有人显式选过时才有。
       const warm = keepalivePingSigs(cfg.wrc.mirror.keepalive.ping);
+      const inflight = receipts.states();
       const shown = ranked.slice(0, limit).map((r) => ({
         ...r,
+        turns: turnsLine(inflight, r.target),
         model: r.model || (r.jsonlPath ? lastModel(r.jsonlPath) : ""),
         summary: r.jsonlPath ? lastExchange(r.jsonlPath, 80, warm) : "",
         contextTokens: r.jsonlPath ? lastContextTokens(r.jsonlPath) : 0,
@@ -1830,12 +1843,15 @@ const main = async (): Promise<void> => {
       const victim = briefOf(self, target);
       const end = (b.mode ?? "end") === "end";
       if (!end && target === self) { json(res, 400, { ok: false, reason: "打断自己没有意义 —— 你就是正在生成的那一个" }); return; }
+      // 先落 canceled 再动 pane: pane 一死, 守着的 watcher 会把同一份报成 dead。
+      // 打断只停它手上这一轮: 只掐这一轮开头那句派来的活 (人 / 定时 / 回执轮不掐任何一份)。
+      const canceled = receipts.cancel(target, self, end ? undefined : currentAsk(target));
       const done = end ? await m.killPane(target) : await m.interruptPane(target, { teardown: true });
       if (!done.ok) { json(res, 502, { ok: false, target, reason: done.reason }); return; }
       if (end && b.forget) wizards.drop(target);
       // 打断只是停了它这一轮, 它还在; 只有结束才是名册变了。
       if (end) postRoster(baseOfKey(target), [target, self], `**${victim.name || target}** 已收工 · 由 ${displayName(self)} 结束${b.forget ? " (记录一并抹掉)" : ""}`);
-      json(res, 200, { ok: true, target, name: victim.name, mode: end ? "end" : "interrupt", forgotten: !!(end && b.forget) });
+      json(res, 200, { ok: true, target, name: victim.name, mode: end ? "end" : "interrupt", forgotten: !!(end && b.forget), ...(canceled ? { canceled } : {}) });
     });
 
     // 换模型: 省略名字 = 换自己 (选择器盖在正在跑的这一轮上面照样能开), 点名 = 换
@@ -1906,6 +1922,8 @@ const main = async (): Promise<void> => {
       // 活结束就被杀掉。调用方自己也不收 —— 那会在这次工具调用里把自己干掉。
       const recycle = b.stop !== false;
       const victims = recycle ? job.members.filter((mm) => mm.spawned && mm.target !== self) : [];
+      // 收掉之前把它们手上没落定的活记成 canceled: 不然发起者收工之后还会收到一串 dead 回执。
+      victims.forEach((mm) => receipts.cancel(mm.target, self));
       const killed = await victims.reduce(
         async (acc, mm) => (await acc) + ((await m.killPane(mm.target)).ok ? 1 : 0),
         Promise.resolve(0),
@@ -1918,6 +1936,7 @@ const main = async (): Promise<void> => {
     http.register("POST /jobs/list", async (req, res) => {
       const { self } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      const inflight = receipts.states();
       json(res, 200, {
         ok: true,
         jobs: jobs.openOf(baseOfKey(self)).map((j) => ({
@@ -1931,7 +1950,7 @@ const main = async (): Promise<void> => {
             address: peerAddress(cfg, self, mm.target),
             task: mm.task.split("\n")[0] ?? "",
             spawned: mm.spawned,
-            ...(mm.outcome ? { outcome: mm.outcome } : {}),
+            state: mm.outcome ?? inflight.find((x) => x.to === mm.target && x.job === j.id)?.state ?? "unknown",
             ...(mm.artifacts?.length ? { artifacts: mm.artifacts } : {}),
           })),
         })),

@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- 在飞活的状态观察面与取消 (B2a ⑥): 新 `shared/turn-state.ts` 把每件未落定的活归成 `working / blocked (停在审批卡) / needs-input (NEED 反问) / errored / deferred (等它派出去的子活)`; `wizard_roster` 每个 wizard 加「在等 / 欠着」一行, `peek_peer` 头部同样一行, `list_jobs` 成员带 `state`。`stop_wizard` 与 `close_job` 回收前先把发往它的未落定活记成 `canceled` (回执新状态, 记入工单账本): 发起 stop 的一方不再收到 dead 回执, 其他发话方收到一份 canceled 回执; `interrupt` 只取消它手上这一轮那件。
 - 工单账本按成员记定论 (B2a ⑤): 回执落终态 (含 wait_peer 取走) 时写进 `JobMember.outcome` / `artifacts`, 回执里的「第几份 / 一共几份」以账本为准; 同一对后一句顶掉一份未落定的工单活时继承那张工单 (此前被顶掉的成员永远不计 done, 工单齐不了); 再派 / 续问清掉该成员旧定论。`open_job({expect})` 定份数下限; `list_jobs` 带 done/total 与成员定论; 收工气泡列出非 done 的状态 / 未回与 `↳ 交付物`。
 - `tell_peer({priority})` 投递策略, 只在对方正忙时分岔 (闲着一律立刻投): `normal` (默认) 等它这一轮结束再投 (即原 `when:"idle"`, 最多 `waitSec`); `urgent` 先按 Esc 打断它这一轮 (同 `stop_wizard` interrupt, 但不清它的注入队列、不停 keepalive) 再投, 回包带 `interrupted`; `now` 不等不打断, 并进它当前这一轮 (插话 / 答问 / 补一句)。**BREAKING**: 没给策略时默认从立刻投改为 `normal`; 带 `re` 续问仍默认 `now` (对方可能正挂在 wait_peer 上等你, 等它闲下来会互相干等到超时)。`when` 留作老 MCP 进程的别名 (`idle` ≡ `normal`, `now` ≡ `now`)。charter 的管家段与工具行改写为三档用法。
 - 回执的收口三态 (B2a ④): 答话方可以收口成 `NEED: <问题>` 反问发话方 —— 回执 `status=need` 照投、**不计入工单**, 发话方用 `tell_peer({re})` 答它后接着守同一件活; `ARTIFACT: <路径> — 一句话` 列交付物。`parseClosing` 解析 (有 RESULT 即交差, NEED 只认全大写、`NEED: 无` 不算), `wait_peer` 回包多 `need` / `artifacts`, peer 私聊信封写明这两条约定。

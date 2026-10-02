@@ -2141,6 +2141,8 @@ export interface MirrorBridge {
   /** Ready to take a new turn: its last turn has ended and it isn't parked on an
    *  approval prompt. Registry-first, pane as fallback. True for dead panes. */
   idleNow: (target: string) => Promise<boolean>;
+  /** 此刻停在审批卡 / 本地弹窗上 (注册表说闲、transcript 悬着工具调用)。认不得的后端 = false。 */
+  parkedNow: (target: string) => boolean;
   /** Resolves the moment `target` turns idle (registry-event driven; pane polling
    *  only for backends without a registry). `aborted` is polled with the safety
    *  tick — a watcher whose reason went away must not hold timers for an hour.
@@ -5336,10 +5338,19 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!live) return undefined;
     if (live.status === "busy") return false;
     if (live.status !== "idle") return undefined;
+    return !hanging(target, live.sessionId);
+  };
+  /** 闲着却悬着工具调用 = 停在审批卡 / 本地弹窗上。resume / fork 会换 sid: 悬着的
+   *  调用记在注册表报的当前那份 transcript 里。 */
+  const hanging = (target: string, sid: string): boolean => {
     const bound = jsonlOf(target);
-    // resume / fork 会换 sid: 悬着的工具调用记在注册表报的当前那份 transcript 里。
-    const jsonl = bound ? join(dirname(bound), `${live.sessionId}.jsonl`) : "";
-    return !(jsonl && existsSync(jsonl) && openToolUses(jsonl).length > 0);
+    const jsonl = bound ? join(dirname(bound), `${sid}.jsonl`) : "";
+    return !!jsonl && existsSync(jsonl) && openToolUses(jsonl).length > 0;
+  };
+  const parkedNow = (target: string): boolean => {
+    const pane = paneOf(target);
+    const live = pane ? activeBackends().map((b) => sessionOnPane(b.homeDir, pane)).find(Boolean) : undefined;
+    return live?.status === "idle" && hanging(target, live.sessionId);
   };
   const idleNow = async (target: string): Promise<boolean> => idleVerdict(target) ?? !(await isBusy(target));
 
@@ -5812,6 +5823,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     peekTurns,
     isBusy,
     idleNow,
+    parkedNow,
     untilIdle,
     setModel: async (target, wanted, scope) => {
       const a = byTarget.get(target);
