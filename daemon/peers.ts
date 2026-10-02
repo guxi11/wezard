@@ -632,7 +632,7 @@ export const renderReceiptEnvelope = (
     ...(route?.replyTo?.startsWith(".")
       ? [`你这一轮的**最后一条消息会作为回执送回 \`${route.replyTo}\`** (它当初把这件活派给你, 你转给了 \`${from}\`) —— 据此收口, 末尾写 \`RESULT: …\`。`]
       : route?.replyTo
-        ? [`你这一轮的**最后一条消息会发进群「${route.replyTo}」**, ${route.audience ? `\`${route.audience}\`` : "人"}在等这件事的结论 —— 写给${route.audience ? "他" : "人"}看: 做成了什么、没做成什么, 不复述 \`${from}\` 的原话。`]
+        ? [`你这一轮的**最后一条消息会发进群「${route.replyTo}」**, ${route.audience ? `\`${route.audience}\` ` : "人"}在等这件事的结论 —— 写给人看: 做成了什么、没做成什么, 不复述 \`${from}\` 的原话。`]
         : route?.pending && !(job && job.job)
           ? [`还有 ${route.pending} 份没回: 这一轮的回复只记在 rolepage, 不外发 —— 先记下这一份, 等最后一份到了再收口。`]
           : chat === undefined
