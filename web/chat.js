@@ -1052,10 +1052,11 @@
       : '';
     var priv = !m.channel && group ? '<span class="ch priv">私聊</span>' : '';
     // 本轮的账 (呼吸点 + 模型 / 上下文 / 耗时) 跟在时刻后面 —— 片段是服务端渲染好的。
-    // 只在多方会话里有用 (分得清谁跑的什么模型); 两个 role 之间的对话里 .two 把指标藏掉, 呼吸点与回执留着。
+    // 只在多方会话里有用 (分得清谁跑的什么模型); 两个 role 之间的对话里整行挂 .two, 头像行 (.mstat) 与
+    // 终句气泡的时间行 (.say-cap) 的指标一并藏掉, 呼吸点与回执留着。
     var c = convOf(CONV);
     var two = !group || !!pairPeer(c) || (!!c && c.kind === 'all' && c.peers.length === 1);
-    var stat = m.meta ? '<span class="mstat' + (two ? ' two' : '') + '">' + m.meta + '</span>' : '';
+    var stat = m.meta ? '<span class="mstat">' + m.meta + '</span>' : '';
     var who = mine
       ? to + stamp(m.ts) + stat + avBtn(m.from, m.fromLabel)
       : avBtn(m.from, m.fromLabel) + nm(m.from, m.fromName, true) + to + priv + stamp(m.ts) + stat;
@@ -1063,7 +1064,7 @@
     var flip = '<button class="flip" data-r="' + esc(other) + '"' + (sw ? '' : ' disabled tabindex="-1"') +
       ' aria-label="' + esc(sw ? '切到 ' + nameOf(other) + ' 的视角' : '') + '">' +
       dest + (sw ? '<span class="fi"><span class="fn">' + esc(nameOf(other)) + '</span>' + CHEVRON + '</span>' : '') + '</button>';
-    return '<div class="mrow ' + (mine ? 'mine' : 'them') + '" data-id="' + esc(m.id) + '" data-turn="' + esc(m.turnId || m.id) + '" data-ts="' + m.ts + '"' +
+    return '<div class="mrow ' + (mine ? 'mine' : 'them') + (two ? ' two' : '') + '" data-id="' + esc(m.id) + '" data-turn="' + esc(m.turnId || m.id) + '" data-ts="' + m.ts + '"' +
       (m.ping ? ' data-ping="1" data-ping-who="' + esc(m.dir === 'in' ? m.toName : m.fromName) + '"' : '') + ' data-sig="' + esc(m.sig) + '" data-stale-at="' + (m.staleAt || 0) + '">' +
       '<div class="mcol"><div class="mwho">' + who + '</div><div class="mb">' + (m.dir === 'out' ? signCut(m.html, m.from, m.fromName) : m.html) + '</div></div>' +
       flip +

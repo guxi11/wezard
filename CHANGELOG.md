@@ -37,7 +37,7 @@
 
 ### Changed
 - 工单整个不进群 (人看不懂过程): `open_job` / `close_job` 不再发开工 / 收工气泡; 带 `job` 的 `tell_peer` 一律私聊 (`public:true` 被忽略), 往来与回执都不进群, 照旧写进 turn store 给 rolepage 工单页读。群里只留发起者自己那一轮的最终回复 —— 沿它被问的那条链回去 (人在群里问的就回群); 最后一份回执的信封改说 `close_job` 只留档、结论用自己的话写在这一轮的回复里。`close_job` 的 summary 照旧进情景记忆; `open_job` 的 `plan` 改记进工单账本。charter、MCP 描述、CLAUDE.md 同步。
-- rolepage 消息头像行的本轮指标 (模型 / 上下文 / 耗时) 只在多方会话 (群、整个 chat) 里显示, 两个 role 之间的对话 (单聊、成对子项) 不再显示; 各处去掉 out; 模型名改显示简名 (`claude-opus-5-5[1m]` → `Opus 5.5`, 全名在悬停里), 与计价共用 `shared/pricing.ts` 的名字归一; 页脚用量条的模型名同样走这一份。
+- rolepage 消息头像行的本轮指标 (模型 / 上下文 / 耗时) 只在多方会话 (群、整个 chat) 里显示, 两个 role 之间的对话 (单聊、成对子项) 不再显示, 终句气泡的时间行同一规则; 各处去掉 out; 模型名改显示简名 (`claude-opus-5-5[1m]` → `Opus 5.5`, 全名在悬停里), 与计价共用 `shared/pricing.ts` 的名字归一; 页脚用量条的模型名同样走这一份。
 - `/usage` 与 audit 的费用改用同一张价格表 (此前三档写死, Opus 一律按 $5/$25 计, Opus 5.5 实为 $4/$20)。
 - 回执终态只留一份定义 (B3b ②): `shared/turn-state.ts` 的 `Terminal` / `isTerminal`, 工单账本 (`JobMember.outcome`, 原 `MemberOutcome`)、回执 watcher、失败回执措辞表都用它。NEED 往返不设硬上限 —— `legs > 3` 只在信封里提示直接收口, 硬刹车是工单 `maxTurns` (b2-continuation.md 对齐)。
 - charter 编排段按回执 `status` 写处理法 (B2a ⑧): `need` 用 `re` 答、`error` 等续跑、`timeout / silent / dead / canceled` 换人或如实写缺; 「迟迟不来才 peek」改为看名册 / peek 的「在等 / 欠着」行; 写明 `deadline` / `maxTurns` / `expect` 何时用, 收口约定加 `NEED:` / `ARTIFACT:`。
