@@ -960,7 +960,7 @@
   }, true);
   var backBtn = function () {
     var c = BACK && BACK.on() && convOf(BACK.conv);
-    return c ? '<button class="vb" id="ch-jback" title="回到跳过来之前的那段会话">‹ ' + esc(BACK.with ? nameOf(BACK.with) : c.name) + '</button>' : '';
+    return c ? '<button class="vb" id="ch-jback" title="' + esc('回到 ' + (BACK.with ? nameOf(BACK.with) : c.name)) + '" aria-label="返回">‹</button>' : '';
   };
   var bindBack = function () {
     var b = $('#ch-jback');
