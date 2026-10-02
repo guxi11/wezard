@@ -643,7 +643,7 @@ const usageChips = (r: TurnDetailRecord, done: boolean, ageMs: number): string =
     ctxPeak ? `<span class="tg-tok" title="上下文峰值">ctx ${fmtTok(ctxPeak)}</span>` : "",
     // 耗时只在收口后写死 —— 进行中的 turn 每次渲染都会得到不同的 ageMs, 会把 sig 打乱,
     // 让 SSE 的"内容没变就不重发"彻底失效。进行中只给开始时刻 (不变), rolepage 按它走表。
-    // 单独一个 .tg-dur: 两人对话里藏指标的规则不碰它。
+    // 单独一个 .tg-dur: rolepage 两人对话里与模型 / ctx 一起藏掉 (.mrow.two), 只留时刻。
     done
       ? `<span class="tg-dur">${escHtml(fmtDuration(ageMs))}</span>`
       : `<span class="tg-dur live" data-since="${r.createdAt}"></span>`,

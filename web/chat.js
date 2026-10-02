@@ -1052,6 +1052,11 @@
       return '<button class="mchip job" data-job="' + id + '" title="' + esc(id + ' · ' + c.name + ' —— 进工单页') + '">📋 <span class="jt">' + esc(c.name) + '</span>' + jobTag(c.job) + '</button>';
     });
   };
+  var refillJobChips = function () {
+    inner.querySelectorAll('.mchip.job[data-job]').forEach(function (b) {
+      b.outerHTML = jobChips('<button class="mchip job" data-job="' + b.getAttribute('data-job') + '"></button>');
+    });
+  };
   var rowHTML = function (m) {
     learn(m.from, m.fromName, m.fromLabel);
     learn(m.to, m.toName, m.toLabel);
@@ -1289,7 +1294,10 @@
     R.at = d.at || Date.now(); R.recvAt = Date.now();
     R.role = d.role; R.sessions = d.sessions || []; R.convs = d.convs || []; R.chatKeys = d.chatKeys;
     SESSION = d.session || '';
-    R.relations = !!d.relations; R.schedules = d.schedules || 0; R.plan = d.plan || null; R.inflight = d.inflight || []; R.jobIndex = d.jobIndex || {};
+    R.relations = !!d.relations; R.schedules = d.schedules || 0; R.plan = d.plan || null; R.inflight = d.inflight || [];
+    // 工单的账变了 (或比消息晚到): 已上屏的工单 badge 按新账重填一遍 —— 片段里只写了工单号。
+    var jx = JSON.stringify(d.jobIndex || {});
+    if (jx !== R.jobIndexSig) { R.jobIndexSig = jx; R.jobIndex = d.jobIndex || {}; refillJobChips(); }
     R.charter = d.charter || null;
     R.stats = d.stats || null; R.winStats = d.winStats || null;
     ROLE = d.role.id;
