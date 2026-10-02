@@ -52,8 +52,8 @@ export interface WizardStore {
   all: () => WizardRecord[];
 }
 
-const MEMORY_MAX = 60;
-const NOTE_MAX = 600;
+export const MEMORY_MAX = 60;
+export const NOTE_MAX = 600;
 
 const blank = (target: string): WizardRecord => ({ target, name: "", description: "", bornAt: Date.now(), memory: [] });
 

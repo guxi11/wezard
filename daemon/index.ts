@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { loadConfig } from "../shared/config.js";
 import { makeLogger } from "../shared/log.js";
+import { clipLine } from "../shared/std.js";
 import { bindCliBackends, projectDirsFor, type CliBackendName } from "../shared/cli-backends.js";
 import { startWs } from "./ws.js";
 import { startNetWatch } from "./net-watch.js";
@@ -56,6 +57,8 @@ import {
   renderCharter,
   renderRoster,
   CONTEXT_FULL_TOKENS,
+  MEMORY_MAX,
+  NOTE_MAX,
   type WizardBrief,
   type WizardRecord,
 } from "./wizard.js";
@@ -1268,10 +1271,16 @@ const main = async (): Promise<void> => {
       try { return p ? statSync(p).mtimeMs : 0; } catch { return 0; }
     };
 
+    // 每个会话的宪章里写进了哪些 self 记忆。`/clear` 抹掉对话却不重写系统提示, 此后
+    // 新记的那些就只活在被抹掉的对话里 —— onClear 据这份快照补发差集。纯内存: reload
+    // 之后没有快照, 只指路不补发。
+    const chartered = new Map<string, readonly string[]>();
+
     /** 开局宪章。出生时的兄弟只是快照 —— 名册随时可查, 写进系统提示的那份只为了
      *  让它一睁眼就知道自己不是一个人在跑。 */
-    const charterFor = (target: string, o: { parent?: string; forkOf?: string; inherited?: boolean; cwd?: string }): string =>
-      renderCharter({
+    const charterFor = (target: string, o: { parent?: string; forkOf?: string; inherited?: boolean; cwd?: string }): string => {
+      chartered.set(target, wizards.get(target)?.memory ?? []);
+      return renderCharter({
         // o.cwd = 正在启动的那个 pane 的目录; 没给才退回"现在记着的那个"。
         self: { ...briefOf(target, target), address: selfAddress(target), ...(o.cwd ? { cwd: o.cwd } : {}) },
         chat: chatNameOf(cfg, target),
@@ -1294,6 +1303,22 @@ const main = async (): Promise<void> => {
         })(),
         steward: !tagOfKey(target),
       });
+    };
+
+    m.onClear((t) => {
+      const now = wizards.get(t)?.memory ?? [];
+      const seen = chartered.get(t);
+      // 没有快照 (reload 之后) 就不猜差集, 只指路 —— 整份塞进一行能有几万字。
+      if (!seen) {
+        if (now.length) notices.post([t], `你有 ${now.length} 条 self 记忆, 宪章里那份可能是旧的: \`wizard_whoami\` 看全的`);
+        return;
+      }
+      const fresh = now.filter((x) => !seen.includes(x));
+      const gone = seen.filter((x) => !now.includes(x)).length;
+      const shown = fresh.slice(-10).map((x) => `「${clipLine(x, 200)}」`).join(" ");
+      if (fresh.length) notices.post([t], `你出生之后记下的 self 记忆 (/clear 抹掉了对话, 宪章里没有它们)${fresh.length > 10 ? `, 最新 10 条` : ""}: ${shown}`);
+      if (gone) notices.post([t], `宪章「我的记忆」里有 ${gone} 条已被你 forget, 别再照它们办`);
+    });
 
     // 所有 spawn 路径 (群里手打 /new、pane 自愈重生、编排出来的分身) 都从这里
     // 取身份, 于是「是谁」不再取决于是哪段代码把它生出来的。
@@ -1533,9 +1558,17 @@ const main = async (): Promise<void> => {
       const cur = wizards.get(self)?.memory ?? [];
       // 忘记按子串匹配: 模型记不住自己当初一字不差写了什么, 但记得大意。
       const next = forget ? cur.filter((x) => !x.includes(forget)) : cur;
-      const memory = note ? [...next.filter((x) => x !== note), note] : next;
-      wizards.upsert(self, { memory });
-      json(res, 200, { ok: true, scope: "self", memory, added: !!note, forgotten: cur.length - next.length });
+      // 先截再比: 注册表存的是截到 NOTE_MAX 的那版, 拿原文比就永远去不了重。
+      const n = note.slice(0, NOTE_MAX);
+      const want = n ? [...next.filter((x) => x !== n), n] : next;
+      // 满额时注册表从最旧的挤掉 —— 挤掉的、截短的都要明说, 不让它以为全记住了。
+      const dropped = want.slice(0, Math.max(0, want.length - MEMORY_MAX));
+      const { memory } = wizards.upsert(self, { memory: want });
+      json(res, 200, {
+        ok: true, scope: "self", memory, added: !!note, forgotten: cur.length - next.length,
+        ...(dropped.length ? { dropped, hint: `self 记忆满 ${MEMORY_MAX} 条, 最旧的 ${dropped.length} 条被挤掉了 (见 dropped); 还要的话 forget 掉不重要的再记回来, 或合并成一条` } : {}),
+        ...(note.length > NOTE_MAX ? { truncated: `这条超过 ${NOTE_MAX} 字, 只记下了前 ${NOTE_MAX} 字` } : {}),
+      });
     });
 
     // 生分身。默认 fork 调用方此刻的上下文 —— 这是"先把公共材料读进来, 再分出 N
@@ -1612,6 +1645,9 @@ const main = async (): Promise<void> => {
         bornAt: Date.now(),
         clonedFrom: inherit ? sourceInfo?.sessionId ?? "" : "",
         ...(forkOf ? { forkOf } : {}),
+        // fork 了上下文就一并继承 self 记忆: 系统提示不随 fork 走 (分身拿的是自己的宪章),
+        // 不拷的话它开局就没有, /clear 或交接重开后更是彻底没了。标上来源; 已经是继承来的不再套一层。
+        ...(inherit ? { memory: (wizards.get(source)?.memory ?? []).map((x) => x.startsWith("(继承自 ") ? x : `(继承自 ${displayName(source)}) ${x}`) } : {}),
         // 生完才清; 这个进程中途没了, 下次开机由 sweepUnborn 认出并收掉。
         spawning: BOOT_ID,
       });

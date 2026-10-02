@@ -2097,6 +2097,10 @@ export interface MirrorBridge {
    *  the count only grows at a birth, so that is the only moment worth
    *  counting. Fire-and-forget — it never delays or fails the spawn. */
   onSpawn: (fn: () => void) => void;
+  /** A session was truly cleared (`/clear`, injected or typed in the TUI): the
+   *  context is gone but the charter (system prompt) is still the birth-time one.
+   *  index.ts hangs the self-memory catch-up on it. Fire-and-forget. */
+  onClear: (fn: (target: string) => void) => void;
   /** Hard facts about one session — sessionId, transcript, cwd, backend, pane,
    *  and how full its context window is (prompt tokens of the last turn). */
   sessionInfo: (target: string) => { sessionId: string; jsonlPath: string; cwd: string; cli: CliBackendName; model: string; tmuxPane: string; contextTokens: number } | undefined;
@@ -4530,6 +4534,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // drift 上下文是延续的, 画中性的 "switch"。
     const cleared = jsonlIsPostClearChild(newJsonlPath);
     markCut(a.target, newSessionId, cleared ? "clear" : "switch");
+    if (cleared) { try { afterClear(a.target); } catch (e) { log.warn({ target: a.target, err: (e as Error).message }, "onClear hook threw"); } }
     if (cleared) {
       // 真清空 = 缓存里已无任何值得保温的内容。像 /stop 一样暂停保活 —— 与
       // dispatch 里 WeCom 注入 /clear 的暂停对齐;TUI 手打 /clear 只走这个漏斗,
@@ -4859,6 +4864,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 新 pane 落地后的钩子 —— pane 上限在这里数 (由 index.ts 装上; 没装 = 不数)。
   let afterSpawn: () => void = () => {};
   const onSpawn = (fn: () => void): void => { afterSpawn = fn; };
+  let afterClear: (target: string) => void = () => {};
+  const onClear = (fn: (target: string) => void): void => { afterClear = fn; };
   // `cwd` = 这个 pane 正要启动的目录。attach 在 spawn 之后才发生, 所以此刻 getCwd
   // 给的还是上一个 pane 的目录 —— 换目录重开时照它渲染, 新 wizard 会以为自己还在
   // 旧工作区里。
@@ -6261,6 +6268,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     sessionInfo,
     setCharterProvider,
     onSpawn,
+    onClear,
     shutdown: () => {
       clearInterval(paneDriftTimer);
       clearInterval(keepaliveTimer);
