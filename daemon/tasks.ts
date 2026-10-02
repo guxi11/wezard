@@ -45,6 +45,11 @@ export const promptWantsFreshWizard = (prompt: string): boolean => WISH.test(pro
 export const sinceOf = (s: TaskState): number => s.lastFired ?? s.createdAt ?? Date.now();
 
 /** 列表回显: 规格与下次触发都摊成人话, 调用方直接念给用户听。 */
+/** 点名的目标到点正忙, 最多顺延这么久 (之后退回起白板执行)。 */
+export const TASK_POSTPONE_MS = 30 * 60_000;
+/** 安静任务那一轮最长等它跑多久再看终句 —— 超过就不转发了。 */
+export const TASK_QUIET_WAIT_MS = 2 * 3600_000;
+
 export const renderTask = (
   t: TaskRecord,
   s: TaskState,
@@ -56,7 +61,8 @@ export const renderTask = (
   next: t.enabled ? new Date(nextFire(t.trigger, sinceOf(s), now)).toLocaleString("zh-CN", { hour12: false }) : "(已暂停)",
   lastFired: s.lastFired ? new Date(s.lastFired).toLocaleString("zh-CN", { hour12: false }) : "",
   note: t.note,
-  runIn: t.fresh ? "每次新建一个白板 wizard 执行, 跑完自动回收" : "注入已有会话",
+  runIn: t.fresh ? "每次新建一个白板 wizard 执行, 跑完自动回收" : "注入已有会话 (它正忙就等它闲下来, 最多 30 分钟)",
+  ...(t.quiet ? { quiet: "有事才说: 不预告, 终句只是 QUIET 就不进群" } : {}),
   target: t.target,
   owner: t.owner,
   prompt: t.prompt,
@@ -87,6 +93,7 @@ export const migrateLegacySchedules = (
       prompt: s.prompt,
       target: s.target,
       fresh: s.fresh,
+      quiet: false,
       note: s.note,
       createdBy: s.createdBy,
     });
@@ -117,7 +124,7 @@ interface SchedulerDeps {
   inject?: (
     target: string,
     text: string,
-    opts: { taskId: string; fresh: boolean },
+    opts: { taskId: string; fresh: boolean; quiet: boolean },
   ) => Promise<{ ok: boolean; reason?: string }>;
   /** 目标 wizard 的工作区 —— gate 里 `sh("git log")` 默认就在那儿跑。 */
   cwdOf?: (target: string) => string;
@@ -177,9 +184,10 @@ export const startScheduler = ({ client, registry, log, inject, cwdOf, fallbackT
     // 先 announce 后注入: 被唤醒的 wizard 接下来在群里说的话才有出处, 否则群里凭空
     // 冒出一轮对话, 没人知道是谁点的火。
     const how = t.fresh ? " · 新建 wizard 执行" : "";
-    await announce(client, target, `⏰ **定时任务** · ${describeTrigger(t.trigger)}${how}\n> ${prompt.split("\n")[0]!.slice(0, 120)}`)
+    // 安静任务不预告: 「有事才说」, 预告本身就是一句没事也说的话。
+    if (!t.quiet) await announce(client, target, `⏰ **定时任务** · ${describeTrigger(t.trigger)}${how}\n> ${prompt.split("\n")[0]!.slice(0, 120)}`)
       .catch((e: unknown) => log.warn({ id: t.id, err: (e as Error).message }, "task announce failed"));
-    const r = await inject(target, prompt, { taskId: t.id, fresh: t.fresh });
+    const r = await inject(target, prompt, { taskId: t.id, fresh: t.fresh, quiet: t.quiet });
     log.info({ id: t.id, target, ok: r.ok, reason: r.reason }, "scheduled task fired");
     if (!r.ok) await announce(client, target, `⏰ 定时任务注入失败:${r.reason ?? "unknown"}`).catch(() => {});
   };

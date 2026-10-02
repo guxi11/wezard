@@ -605,22 +605,24 @@ server.registerTool(
     description:
       "排一个**到点自动执行**的活, 归在你名下 (rolepage「日程」可见)。用户说「每个工作日晚上 9:30 跑一下 xxx」「每天早上看看 yyy」「每 2 小时同步 zzz」「明早 9 点整理 www」时调它。守护进程级, 跨 CLI 重启仍在。\n" +
       "`when` 用人话原样写, 别翻译成 cron (「每个工作日晚上9:30」「每隔两个小时」「白天每小时」「20 分钟后」「明早 9 点」都认); 解析不出会报错 —— 把原话回给用户让他重说, 别自己猜。\n" +
-      "**默认到点新起一个白板 wizard** (`<你>-task-xxxx`) 执行, 干完自动收掉; 只有用户明说「在 .foo 里继续」才传 `name` 投进那个已有会话 (它到点正忙则另起白板执行; prompt 本身要求「建 wizard 去干」时也照新建办, 除非显式传 `fresh:false`)。所以 `prompt` 要写成零上下文也能执行的完整指令。\n" +
+      "**默认到点新起一个白板 wizard** (`<你>-task-xxxx`) 执行, 干完自动收掉; 只有用户明说「在 .foo 里继续」才传 `name` 投进那个已有会话 (它到点正忙就等它这一轮结束再投, 等满 30 分钟仍忙才另起白板执行; prompt 本身要求「建 wizard 去干」时也照新建办, 除非显式传 `fresh:false`)。所以 `prompt` 要写成零上下文也能执行的完整指令。\n" +
       "「有新东西才处理」写成任务文件里的 gate (没活这一轮就不放枪), 别让到点起的 wizard 自己看一眼没有就退出 —— 那是每轮空转一个 pane。\n" +
       "存成功后**必须把回显的 `when` 和 `next` 念给用户确认**。任务落成可直接改的 `~/.wezard/tasks/<id>.task.mjs` (返回的 `file`): 组合触发条件、「有活才放枪」的 gate、暂停, 都 Read 那个文件 —— 写法在它的头注释里, 存盘即生效。",
     inputSchema: {
       when: z.string().describe("什么时候跑, 人话原样传: 「每个工作日晚上9:30」「每天早上9点」「白天每隔一个小时」「工作时间每半小时」「每30分钟」「20分钟后」「明早9点」。时间窗口 (白天 / 工作时间 / 8点到20点) 会被解析成筛子, 窗外的那些枪直接吞掉。"),
       prompt: z.string().describe("到点要说给那个 wizard 听的话。写成自洽的完整指令 (要做什么、在哪个目录/文件上、做完怎么汇报), 别依赖当前对话的上下文。里面可以留 `{{名字}}` 占位, 由任务文件里的 gate 填。"),
       name: z.string().optional().describe(`点名在**哪个已有 wizard**里跑 —— 只有用户要求「在它那儿继续」时才传。省略 = 到点新建一个白板 wizard 干完就收 (默认, 也是「定时新建 wizard 干 xxx」要的那个)。传了它还想要新建, 再加 \`fresh:true\`: 那时它只当模板, 新 wizard 继承它的聊天/目录/模型。${ADDRESS_DOC}`),
+      quiet: z.boolean().optional().describe("true = 有事才说: 到点不在群里预告, 那一轮私下跑, 它看完没事就只回一行 `QUIET`, 什么也不发; 有事守护进程才把它的终句转进群。巡检 / 盯梢类 (「每小时看一眼 CI, 挂了才告诉我」) 用它。没活连枪都不该放的, 写 gate。"),
       fresh: z.boolean().optional().describe("覆盖默认: true = 每次到点新建白板 wizard 执行 (给了 name 时用来表达「在它的目录下新开一个干」), false = 注入 name 指向的已有会话。默认由 name 推断 (给了 name = false, 没给 = true)。"),
       id: z.string().optional().describe("任务 id, 同时也是文件名 (`~/.wezard/tasks/<id>.task.mjs`)。省略则从 note/prompt 生成。取个好认的短名 —— 之后你要改这条任务, 改的就是那个文件。"),
       note: z.string().optional().describe("给人看的一句话备注, 在 list_tasks 里回显。"),
     },
   },
-  async ({ when, prompt, name, note, fresh, id }) =>
+  async ({ when, prompt, name, note, fresh, quiet, id }) =>
     unwrap("schedule_task", await daemonPost("/tasks/schedule", {
       when, prompt, name: name ?? "", note: note ?? "", id: id ?? "",
       ...(fresh === undefined ? {} : { fresh }),
+      ...(quiet ? { quiet: true } : {}),
     })),
 );
 

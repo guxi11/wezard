@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { loadConfig } from "../shared/config.js";
 import { makeLogger } from "../shared/log.js";
-import { clipLine } from "../shared/std.js";
+import { clipLine, sleep } from "../shared/std.js";
 import { bindCliBackends, projectDirsFor, type CliBackendName } from "../shared/cli-backends.js";
 import { startWs } from "./ws.js";
 import { startNetWatch } from "./net-watch.js";
@@ -36,10 +36,12 @@ import {
   promptWantsFreshWizard,
   renderTask,
   sinceOf,
+  TASK_POSTPONE_MS,
+  TASK_QUIET_WAIT_MS,
 } from "./tasks.js";
 import { openTaskRegistry } from "./task-registry.js";
 import { describeTrigger, nextFire, parseTrigger, WHEN_HELP } from "../shared/trigger.js";
-import { slugify, uniqueId } from "../shared/task-file.js";
+import { isQuiet, slugify, uniqueId } from "../shared/task-file.js";
 import { baseOfKey, bindTagLinker, isInternalKey, keyOf, linkTags, normalizeTag, tagFromCwd, tagHead, tagLink, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
 import { appendEpisode, clipForCharter, cwdOfMd, episodePath, inboxPath, mdsOf, proposedCwds, memoryPath, memoryRoot, proposeMemory, readMemory, type MemoryScope } from "./wizard-memory.js";
 import { retireStewardTask, startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
@@ -115,7 +117,7 @@ const main = async (): Promise<void> => {
   let stewardRun: ((prompt: string) => Promise<{ ok: boolean; reason?: string }>) | undefined;
   let stewardWiring: { refsOf?: RefsOf; onMerged?: (mds: readonly string[]) => void } = {};
   let scheduledTaskInject:
-    | ((target: string, text: string, opts: { taskId: string; fresh: boolean }) => Promise<{ ok: boolean; reason?: string }>)
+    | ((target: string, text: string, opts: { taskId: string; fresh: boolean; quiet: boolean }) => Promise<{ ok: boolean; reason?: string }>)
     | undefined;
 
   // Bind the CLI backend registry. `primary` (= defaultCli) drives new-session
@@ -2009,7 +2011,7 @@ const main = async (): Promise<void> => {
     http.register("POST /tasks/schedule", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { when?: string; prompt?: string; note?: string; fresh?: boolean; id?: string };
+      const b = body as { when?: string; prompt?: string; note?: string; fresh?: boolean; quiet?: boolean; id?: string };
       const prompt = (b.prompt ?? "").toString().trim();
       const whenText = (b.when ?? "").toString().trim();
       if (!prompt) { json(res, 400, { ok: false, reason: "prompt required" }); return; }
@@ -2033,7 +2035,7 @@ const main = async (): Promise<void> => {
       const fresh = typeof b.fresh === "boolean" ? b.fresh : !tag || promptWantsFreshWizard(prompt);
       const note = (b.note ?? "").toString();
       const id = uniqueId(slugify((b.id ?? "").toString() || note || prompt.slice(0, 24), "task"), tasks.takenIds());
-      const created = tasks.create({ id, trigger, prompt, target, fresh, note, createdBy: self });
+      const created = tasks.create({ id, trigger, prompt, target, fresh, quiet: b.quiet === true, note, createdBy: self });
       if ("error" in created) { json(res, 400, { ok: false, reason: created.error }); return; }
       tasks.patchState(id, { createdAt: Date.now() });
       json(res, 200, {
@@ -2177,10 +2179,71 @@ const main = async (): Promise<void> => {
     // 还要连触发时间点一起被它那一轮拖走。所以到点起一个白板 wizard 单独执行,
     // 跑完自动收掉。只有排班时点名了某个 wizard (fresh=false) 且它此刻闲着,
     // 才把这句话直接投进它那一轮 —— 「在已有会话里继续」是要求出来的, 不是默认。
-    scheduledTaskInject = async (target, text, { taskId, fresh }) => {
+    scheduledTaskInject = async (target, text, { taskId, fresh, quiet }) => {
+      // 安静任务私下跑 (channel ""): 镜像不推它的任何一句, 终句由 relayUnlessQuiet 判断要不要进群。
+      const inNamed = async (): Promise<{ ok: boolean; reason?: string }> => {
+        const at = Date.now();
+        const turn = newTurn();
+        const inj = await m.injectText(target, text, undefined, quiet
+          ? { from: { kind: "task", taskId }, channel: "", envelope: renderTaskEnvelope(taskId, { turn }) }
+          : { fromChat: true, from: { kind: "task", taskId }, envelope: renderTaskEnvelope(taskId) });
+        if (inj.ok && quiet) void relayUnlessQuiet(target, at, turn, baseOfKey(target));
+        return inj;
+      };
       if (!fresh) await handedOff(target); // 交接中途 pane 是空的, 别当成闲着投进去
       const busy = fresh ? false : await m.isBusy(target);
-      if (!fresh && !busy) return m.injectText(target, text, undefined, { fromChat: true, from: { kind: "task", taskId }, envelope: renderTaskEnvelope(taskId) });
+      if (!fresh && !busy) return inNamed();
+      // 点名的目标正忙: 顺延到它这一轮结束再投 (与 tell_peer 默认的 normal 同一口径) ——
+      // 「在它那儿继续」是排班时要求的, 不该因为撞上它在干活就换成白板。后台等, 别拖住
+      // 调度器的其它任务; 等满 30 分钟仍忙才退回起白板。
+      const inRunner = (wasBusy: boolean): Promise<{ ok: boolean; reason?: string }> => runTaskInRunner(target, text, taskId, quiet, wasBusy);
+      if (!fresh && busy) {
+        // 同一条任务已有一枪在等这个目标: 这一枪并进去 —— 等它闲下来时几枪一起投, 会挤进同一个输入框。
+        if (postponed.has(taskId)) return { ok: true, reason: "上一枪还在等它闲下来, 这一枪并入" };
+        postponed.add(taskId);
+        void (async () => {
+          const wr = await m.untilIdle(target, TASK_POSTPONE_MS);
+          postponed.delete(taskId);
+          const r = wr.idle ? await inNamed() : await inRunner(true);
+          log.info({ taskId, target, postponed: true, idle: wr.idle, ok: r.ok, reason: r.reason }, "scheduled task: 目标正忙, 顺延");
+          if (!r.ok) notifyChat(baseOfKey(target), withTagHeader(target, `⏰ 定时任务 \`${taskId}\` 顺延后注入失败: ${r.reason ?? "unknown"}`));
+        })();
+        return { ok: true, reason: "目标正忙, 顺延到它闲下来" };
+      }
+      return inRunner(busy);
+    };
+    /** 顺延中的任务 (内存即可: reload 丢了只是少放一枪, 下一次到点照常)。 */
+    const postponed = new Set<string>();
+    /** 安静任务那一轮的终句: 它私下跑, 镜像不推; 等它这一轮跑完, 终句不是 `QUIET` 就替它
+     *  发进群 (头写它的名字, 人知道是谁说的)。按信封件号定位答句 (同回执): 按时刻取会把紧随
+     *  其后的私聊 / 人话那一轮的答案当成它的, 把私下内容发进群。 */
+    const relayUnlessQuiet = async (t: string, at: number, turn: string, base: string): Promise<void> => {
+      quietRelays.set(turn, { target: t, at, base });
+      const end = at + TASK_QUIET_WAIT_MS;
+      // 先等它动起来: 刚注入时注册表还报 idle。
+      await sleep(5000);
+      while (Date.now() < end) {
+        await m.untilIdle(t, end - Date.now());
+        const reply = (m.replyToPeer(t, "", at, turn)?.text ?? "").trim();
+        if (reply && (await m.idleNow(t))) {
+          if (!isQuiet(reply)) notifyChat(base, withTagHeader(t, reply));
+          log.info({ target: t, quiet: isQuiet(reply), len: reply.length }, "quiet task: 一轮结束");
+          quietRelays.drop(turn);
+          return;
+        }
+        await sleep(5000);
+      }
+      log.warn({ target: t }, "quiet task: 等满仍没收口, 不转发");
+      quietRelays.drop(turn);
+    };
+    // 落盘: 这个仓库里 reload 是常态, 守在内存里的那一轮一 reload 就既不转发也不说 QUIET 了。
+    const quietRelays = loadJsonMap<{ target: string; at: number; base: string }>(
+      join(cfg.daemon.stateDir, "quiet-relays.json"),
+      (rows) => Object.fromEntries(Object.entries(rows).filter(([, r]) => Date.now() - r.at < TASK_QUIET_WAIT_MS)),
+    );
+    void m.restored.then(() => Object.entries(quietRelays.all()).forEach(([turn, r]) => void relayUnlessQuiet(r.target, r.at, turn, r.base)));
+    /** 到点起一个白板 wizard 执行这一枪, 跑完自动收掉。 */
+    const runTaskInRunner = async (target: string, text: string, taskId: string, quiet: boolean, busy: boolean): Promise<{ ok: boolean; reason?: string }> => {
 
       // 执行体挂在日程的主人名下: 名字 `<主人>-task-xxxx`, parent = 主人 —— 它的
       // rolepage 里看得见这一枪是谁的日程放的。落在执行目标的群/目录里。
@@ -2204,15 +2267,23 @@ const main = async (): Promise<void> => {
         wizards.drop(runner);
         return { ok: false, reason: `起白板 wizard 失败: ${spawned.reason ?? "unknown"}` };
       }
-      notifyChat(base, withTagHeader(target, busy
-        ? `⏰ 定时任务到点时正忙, 已起白板 wizard .${runnerName} 单独执行, 完成后自动收掉`
-        : `⏰ 定时任务已起白板 wizard .${runnerName} 执行, 完成后自动收掉`));
-      const inj = await m.injectText(runner, text, undefined, { fromChat: true, from: { kind: "task", taskId }, envelope: renderTaskEnvelope(taskId) });
+      if (!quiet) {
+        notifyChat(base, withTagHeader(target, busy
+          ? `⏰ 定时任务到点时正忙, 已起白板 wizard .${runnerName} 单独执行, 完成后自动收掉`
+          : `⏰ 定时任务已起白板 wizard .${runnerName} 执行, 完成后自动收掉`));
+      }
+      const at = Date.now();
+      const turn = newTurn();
+      const inj = await m.injectText(runner, text, undefined, quiet
+        ? { from: { kind: "task", taskId }, channel: "", envelope: renderTaskEnvelope(taskId, { turn }) }
+        : { fromChat: true, from: { kind: "task", taskId }, envelope: renderTaskEnvelope(taskId) });
       if (!inj.ok) { wizards.drop(runner); return inj; }
       // 没有人会对这个一次性分身喊 stop_wizard, 只能自己等它闲下来再收。30min
       // 内没闲下来就放弃自动回收 (它大概率还在干一个长活), 留给人手动处理 ——
       // 比杀掉一个还在跑的 pane 安全。
       void (async () => {
+        // 安静任务先把终句取走 (收掉 pane 之后就读不到了)。
+        if (quiet) await relayUnlessQuiet(runner, at, turn, base);
         const idle = await waitForIdle(runner, m.isBusy, 30 * 60_000, () => false);
         if (!idle.idle) {
           log.warn({ runner, reason: idle.reason }, "task runner: 30min 未闲下来, 放弃自动回收");

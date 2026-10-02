@@ -117,7 +117,7 @@ export const openTaskRegistry = async (
       const file = fileOfTaskId(dir, draft.id);
       writeFileSync(file, renderTaskFile(draft), "utf8");
       const r = normalizeTask(
-        { when: draft.trigger, prompt: draft.prompt, note: draft.note, target: draft.target, fresh: draft.fresh, createdBy: draft.createdBy },
+        { when: draft.trigger, prompt: draft.prompt, note: draft.note, target: draft.target, fresh: draft.fresh, quiet: draft.quiet, createdBy: draft.createdBy },
         draft.id, file,
       );
       if (!r.ok) { try { unlinkSync(file); } catch { /* 写进去又立刻删不掉, 下次 reload 会报出来 */ } return { error: r.reason }; }

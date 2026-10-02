@@ -13,6 +13,7 @@
 //   prompt  到点说给 wizard 听的话, `{{var}}` 由 gate 填
 //   target/fresh  在谁的聊天/目录下办, 是否每次新起一个白板 wizard
 //   createdBy     排班的 wizard —— 日程归它 (owner), fresh 执行体挂在它的家谱下
+//   quiet         「有事才说」: 不预告、私下跑, 终句是 `QUIET` 就什么也不发
 //
 // 本模块只做纯的那一半: 形状、校验、模板渲染、路径。加载与执行在 daemon/。
 import { basename, join } from "node:path";
@@ -50,6 +51,8 @@ export interface TaskModule {
   fresh?: boolean;
   /** false = 留着文件但不再放枪 (暂停)。 */
   enabled?: boolean;
+  /** true = 有事才说: 到点不发预告, 那一轮私下跑, 终句只是一行 `QUIET` 就不进群。 */
+  quiet?: boolean;
   gate?: (ctx: TaskContext) => GateResult | Promise<GateResult>;
   gateTimeoutSec?: number;
   createdBy?: string;
@@ -66,6 +69,7 @@ export interface TaskRecord {
   target: string;
   fresh: boolean;
   enabled: boolean;
+  quiet: boolean;
   hasGate: boolean;
   gateTimeoutSec: number;
   createdBy: string;
@@ -125,6 +129,7 @@ export const normalizeTask = (
       target: (m.target ?? "").toString(),
       fresh: m.fresh !== false,
       enabled: m.enabled !== false,
+      quiet: m.quiet === true,
       hasGate: typeof m.gate === "function",
       gateTimeoutSec: Math.max(5, Math.min(900, m.gateTimeoutSec ?? DEFAULT_GATE_TIMEOUT)),
       createdBy: (m.createdBy ?? "").toString(),
@@ -163,9 +168,18 @@ export interface TaskDraft {
   prompt: string;
   target: string;
   fresh: boolean;
+  quiet: boolean;
   note: string;
   createdBy: string;
 }
+
+/** 安静任务的静默哨兵: 那一轮没什么可报, 终句就只写这一个词。 */
+export const QUIET = "QUIET";
+/** 终句的最后一个非空行是 `QUIET` (容许 `RESULT:` 前缀与反引号) = 这一轮不外发。 */
+export const isQuiet = (reply: string): boolean => {
+  const last = reply.trim().split("\n").map((l) => l.trim()).filter(Boolean).pop() ?? "";
+  return /^QUIET(?![A-Za-z])/.test(last.replace(/^RESULT:\s*/i, "").replace(/[`*]/g, "").trim());
+};
 
 /**
  * 新任务的源码。头上那段注释是 wizard 唯一的说明书 —— 它 Read 这个文件时看到的
@@ -188,12 +202,16 @@ export const renderTaskFile = (d: TaskDraft): string => `// wezard 定时任务 
 //          —— 那是每轮空转一个 pane 加一份上下文。gate 在守护进程里跑, 不经审批卡。
 //   prompt 到点说给 wizard 听的话。写成零上下文也能执行的完整指令 —— 到点接活的
 //          多半是个刚出生的白板 wizard, 它只看得见这一句。
+//   quiet  true = 有事才说: 到点不在群里预告, 那一轮私下跑; 它的终句只是一行 QUIET
+//          就什么也不发, 否则守护进程把终句转进群。巡检类 (「每小时看一眼, 有事才说」) 用它。
+//          gate 是「没活不放枪」(不花 token), quiet 是「放了枪、看完没事不出声」。
 //
 // 停掉这条任务: enabled: false (留档), 或直接删掉本文件。
 export default {
   note: ${js(d.note)},
   target: ${js(d.target)},
   fresh: ${d.fresh},
+  quiet: ${d.quiet},
   enabled: true,
   createdBy: ${js(d.createdBy)},
 

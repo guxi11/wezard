@@ -66,6 +66,12 @@ const receiptsIn = async (target, fromName) => {
     .filter((r) => r.attrs.wezard === "envelope" && r.attrs.receipt === "1" && (!fromName || r.attrs.from === `.${fromName}`));
 };
 
+/** daemon.log 里 `since` 之后满足 `pred` 的那一行 (json)。 */
+const logLine = (since, pred) =>
+  readFileSync(join(STATE, "daemon.log"), "utf8").split("\n").slice(-4000).flatMap((l) => {
+    try { const o = JSON.parse(l); return o.time >= since && pred(o) ? [o] : []; } catch { return []; }
+  })[0];
+
 const tmuxPaneOf = (window) =>
   execFileSync("tmux", ["list-panes", "-a", "-F", "#{pane_id}\t#{window_name}"], { encoding: "utf8" })
     .split("\n").map((l) => l.split("\t")).find(([, w]) => w === window)?.[0];
@@ -251,6 +257,27 @@ const cases = {
     return {
       pass: s?.outcome?.status === "done" && s.outcome.body.includes(`own-${n}`) && !!side && !side.k && got.length === 1,
       why: `slot=${s?.outcome?.status ?? "未落定"} 是自己的结论=${!!s?.outcome?.body.includes(`own-${n}`)} 旁支 k=${side ? side.k?.kind ?? "无" : "未落定"} 根收到 ${got.length} 份`,
+    };
+  } },
+
+  // 定时任务 (B4 ⑤): 点名目标到点正忙 → 顺延到它闲下来再投; quiet 任务终句是 QUIET 就不进群,
+  // 不是就由守护进程转进群 (那一条会真出现在根的 home 聊天里, 带 [receipt-regress] 字样)。
+  "task-quiet": { names: ["rr-t", "rr-t2"], run: async () => {
+    const n = nonce();
+    await Promise.all(["rr-t", "rr-t2"].map((x) => spawn(x)));
+    const t0 = Date.now();
+    await tell("rr-t", `${SLEEP(90)}, 然后回复一行: RESULT: busy-done`);
+    const mk = (name, id, prompt) => post("/tasks/schedule", { target: root.target, name, when: "1分钟后", fresh: false, quiet: true, id, prompt });
+    const a = await mk("rr-t", `rr-quiet-${n}`, "这一轮没有任何值得报告的事: 不要调用任何工具, 直接按「没事」收口。");
+    const b = await mk("rr-t2", `rr-loud-${n}`, `有一件人必须知道的事要报告 (不是 QUIET): 不要调用任何工具, 你的最后一条消息原样写这一行: [receipt-regress] 安静任务有事转发 ${n}`);
+    if (!a.ok || !b.ok) return { pass: false, why: `schedule_task: ${a.reason ?? b.reason}` };
+    const tq = kids.get("rr-t"), tl = kids.get("rr-t2");
+    const postponed = await until(() => logLine(t0, (o) => o.taskId === a.id && /顺延/.test(o.msg ?? "")), 5 * 60_000, 5000);
+    const quiet = await until(() => logLine(t0, (o) => o.target === tq && /quiet task/.test(o.msg ?? "")), 4 * 60_000, 5000);
+    const loud = await until(() => logLine(t0, (o) => o.target === tl && /quiet task/.test(o.msg ?? "")), 60_000, 5000);
+    return {
+      pass: !!postponed?.idle && postponed.ok && quiet?.quiet === true && loud?.quiet === false,
+      why: `顺延=${postponed ? `idle:${postponed.idle} ok:${postponed.ok}` : "没发生"} · 安静那轮 quiet=${quiet?.quiet ?? "没收口"} · 有事那轮 quiet=${loud?.quiet ?? "没收口"} (false = 已转进群)`,
     };
   } },
 };

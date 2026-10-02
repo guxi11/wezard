@@ -84,7 +84,8 @@ export const envelopeAttrs = {
     wezard: "envelope", kind: "peer", from, scope: chat === undefined ? "private" : "public", ...(chat ? { chat } : {}),
     ...(t ? { turn: t.turn, ...(t.re ? { re: t.turn } : {}), ...(t.deadline ? { deadline: new Date(t.deadline).toISOString() } : {}) } : {}),
   }),
-  task: (taskId: string): Attrs => ({ wezard: "envelope", kind: "task", from: taskId }),
+  /** `turn` = 这一枪的件号 (安静任务按它定位终句, 见 index.ts relayUnlessQuiet)。 */
+  task: (taskId: string, turn?: string): Attrs => ({ wezard: "envelope", kind: "task", from: taskId, ...(turn ? { turn } : {}) }),
   /** 回执也是「`from` 在对你说话」, 所以仍是 peer 信封 —— read_chat / rolepage 照旧
    *  把它归到那场对话里; 多一个 `receipt` 属性说明它是自动送回来的结论而不是新活。 */
   receipt: (from: string, chat?: string, job?: { job: string; done: number; total: number }, status: ReceiptStatus = "done", turn?: string, route?: ReceiptRoute): Attrs => ({

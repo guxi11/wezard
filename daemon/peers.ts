@@ -570,8 +570,12 @@ export const renderHumanEnvelope = (user: string, chat: string): string =>
   renderReminder(envelopeAttrs.human(user, chat), [`这一轮是 \`${user}\` 在群 **${chat}** 里说的, 你的回复发回那个群。`]);
 
 /** 定时任务放的那一轮: 不标的话, 记录里它就成了「人说的」。 */
-export const renderTaskEnvelope = (taskId: string): string =>
-  renderReminder(envelopeAttrs.task(taskId), [`这一轮是定时任务 \`${taskId}\` 到点放进来的, 不是人此刻说的 —— 照常执行, 回复照常发进群。`]);
+export const renderTaskEnvelope = (taskId: string, quiet?: { turn: string }): string =>
+  renderReminder(envelopeAttrs.task(taskId, quiet?.turn), quiet
+    ? [`这一轮是定时任务 \`${taskId}\` 到点放进来的, 不是人此刻说的, 而且是**有事才说**的那种: 这一轮私下跑, 没人在看。`,
+        "照常执行。看完**没有值得人知道的**, 最后一条消息就只写一行 `QUIET`, 什么也不会发出去; 有, 就把最后一条消息写给人看 —— 守护进程原样转进群。",
+        "要派活给别的 wizard, 就在这一轮里用 `wait_peer` 把结果拿回来再收口 —— 回执要等这一轮结束才到, 那时已经没人替你转发。"]
+    : [`这一轮是定时任务 \`${taskId}\` 到点放进来的, 不是人此刻说的 —— 照常执行, 回复照常发进群。`]);
 
 /** `from` = 发话方的称呼 (`.name`); `chat` 给了 = 公开轮 (那个群的名字, 可以是 ""),
  *  不给 = 私聊。 */
