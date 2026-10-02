@@ -81,6 +81,9 @@ export interface Turn {
   /** assistant 的中途句: 这条 message 以工具调用收尾 (stop_reason=tool_use), 后面还有
    *  话, 不可能是这一轮的终句。后端不写 stop_reason (codebuddy) 就不标。 */
   mid?: true;
+  /** CLI 自己插进来的一行 user (后台任务完成的 `<task-notification>`): 没有话, 但它
+   *  起了新的一轮 —— 只有要按 user 行切轮的调用方 (`marks`) 才拿得到。 */
+  notice?: true;
 }
 
 // Meta wrappers Claude Code injects around slash commands / hook output. They
@@ -114,9 +117,9 @@ export const tailTurns = (jsonlPath: string, n = 3, keepLines = false): Turn[] =
  *  **读**的都走这里: 挂机一晚的会话尾巴上全是 ping/pong, 照 tailTurns 数出来的
  *  「最近 6 轮」一句真话都没有, 「最后一条回复」是一个 pong。`pingSigs` 只给保温
  *  那一种 —— resumePing ("continue") 之后模型是真的在干活, 那一轮不能丢。 */
-export const talkTurns = (jsonlPath: string, n: number, pingSigs: readonly string[] = [], keepLines = false): Turn[] => {
+export const talkTurns = (jsonlPath: string, n: number, pingSigs: readonly string[] = [], keepLines = false, marks = false): Turn[] => {
   const clean = (ts: Turn[]): Turn[] => withoutKeepalive(ts, pingSigs);
-  return clean(readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, keepLines), (ts) => clean(ts).length >= n)).slice(-n);
+  return clean(readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, keepLines, marks), (ts) => clean(ts).length >= n)).slice(-n);
 };
 
 /** 一个会话的来回, 每个来回 = 一句问话 + 它之后的全部回答 (途中的话在前, 终句在
@@ -150,8 +153,8 @@ export const talkRounds = (
 
 /** 纯解析: 一段 transcript 原文 → 里面的对话轮次。`keepLines` 保留换行 —— 摘要与
  *  预览要压成一行, 但交给另一个 wizard 读的回复不能: 表格 / 列表 / 代码块压成一行
- *  之后对模型就是一团字。 */
-const parseTurns = (jsonlPath: string, raw: string, keepLines = false): Turn[] => {
+ *  之后对模型就是一团字。`marks` 把 CLI 自插的 user 行留成空的 `notice` 轮 (见 Turn)。 */
+const parseTurns = (jsonlPath: string, raw: string, keepLines = false, marks = false): Turn[] => {
   if (!raw) return [];
   const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
   return raw
@@ -180,6 +183,7 @@ const parseTurns = (jsonlPath: string, raw: string, keepLines = false): Turn[] =
       const rawTs = (parsed as { timestamp?: unknown }).timestamp;
       const ms = typeof rawTs === "number" ? rawTs : Date.parse(String(rawTs ?? ""));
       const mid = role === "assistant" && row.message?.stop_reason === "tool_use";
+      if (!text && marks && role === "user" && raw.includes("<task-notification")) return [{ role, text: "", ms: Number.isNaN(ms) ? 0 : ms, notice: true } as Turn];
       return text ? [{ role, text, ms: Number.isNaN(ms) ? 0 : ms, ...(env ? { env } : {}), ...(mid ? { mid: true } : {}) } as Turn] : [];
     });
 };
@@ -413,7 +417,7 @@ export const replyToPeer = (
   sinceMs = 0,
   pingSigs: readonly string[] = [],
 ): string | undefined => {
-  const r = answerOf(talkTurns(jsonlPath, 80, pingSigs, true), fromName, sinceMs);
+  const r = answerOf(talkTurns(jsonlPath, 80, pingSigs, true, true), fromName, sinceMs);
   return r && r.text;
 };
 
@@ -429,7 +433,7 @@ export const replyClosedBefore = (
   untilMs: number,
   pingSigs: readonly string[] = [],
 ): string | undefined => {
-  const r = answerOf(talkTurns(jsonlPath, 80, pingSigs, true), fromName, sinceMs);
+  const r = answerOf(talkTurns(jsonlPath, 80, pingSigs, true, true), fromName, sinceMs);
   return r && (r.closedAt !== undefined && r.closedAt < untilMs ? r.text : "");
 };
 
@@ -438,7 +442,8 @@ export const replyClosedBefore = (
  *  接着等 —— 忙闲判定会在长工具调用 / 生成的间隙误报一次「闲了」, 那时取到的是
  *  「开始读文件」这种开场白, 不是结论。被下一句 user 行关上的就照取最后一句 (中途被打断)。
  *  那是另一轮的开始 (同伴的新话、回执、人) —— 不截的话, 答方刚说完紧接着收到一份回执、
- *  回了句「收到」, 发话方拿到的就是这句。CLI 在一轮中途吃进的排队消息记成
+ *  回了句「收到」, 发话方拿到的就是这句。后台任务完成的通知 (`notice`) 同样起新一轮
+ *  —— 不截的话回执拿到的是「（后台任务已完成）」。CLI 在一轮中途吃进的排队消息记成
  *  `attachment`, 不是 user 行, 截不断一轮。`closedAt` = 关上这一轮的那一行的时刻
  *  (还开着 = undefined)。 */
 const answerOf = (
