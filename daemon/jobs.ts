@@ -19,6 +19,7 @@
 import { randomUUID } from "node:crypto";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import type { ReceiptStatus } from "../shared/reminder.js";
+import type { JobEpisode } from "./wizard-memory.js";
 
 /** 成员那一份的定论 —— 回执落了终态才写 (need / error 是中途的, 不进账)。 */
 export type MemberOutcome = Exclude<ReceiptStatus, "need" | "error">;
@@ -147,6 +148,31 @@ const firstLine = (s: string, max = 90): string => {
 /** 开工气泡 —— 工单存在这件事本身。成员此刻还没有, 所以这一条只说要干什么。 */
 export const renderJobOpen = (job: JobRecord, plan: string): string =>
   [`📋 \`${job.id}\` 开工 · **${job.title}**`, plan.trim() ? firstLine(plan, 300) : ""].filter(Boolean).join("\n");
+
+/** 收工的工单 → 一条情景记忆 (见 wizard-memory.ts)。名字、sessionId、聊天名由调用方给:
+ *  这里不碰注册表。sid 要在回收分身**之前**取 —— 收掉之后绑定就没了, transcript 是唯一的现场。 */
+export const jobEpisode = (
+  job: JobRecord,
+  o: { nameOf: (target: string) => string; sidOf: (target: string) => string; chat: string },
+): JobEpisode => ({
+  at: job.closedAt ?? Date.now(),
+  kind: "job",
+  name: o.nameOf(job.owner),
+  sid: o.sidOf(job.owner),
+  chat: o.chat,
+  job: job.id,
+  title: job.title,
+  openedAt: job.openedAt,
+  text: job.summary ?? "",
+  members: job.members.map((mm) => ({
+    name: o.nameOf(mm.target),
+    sid: o.sidOf(mm.target),
+    spawned: mm.spawned,
+    task: mm.task,
+    ...(mm.outcome ? { outcome: mm.outcome } : {}),
+    ...(mm.artifacts?.length ? { artifacts: mm.artifacts } : {}),
+  })),
+});
 
 /** 收工气泡 —— 谁干了什么、结论是什么。成员名字挂各自的 rolepage, 人想看某一路
  *  的来龙去脉就点进去, 不必在群里翻交叉的气泡。 */

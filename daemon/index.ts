@@ -66,7 +66,7 @@ import {
   type WizardRecord,
 } from "./wizard.js";
 import { bindNoticeBox, createNoticeBox, chatAudience } from "./notices.js";
-import { loadJobStore, renderJobOpen, renderJobClose, JOB_MEMBER_MAX } from "./jobs.js";
+import { loadJobStore, renderJobOpen, renderJobClose, jobEpisode, JOB_MEMBER_MAX } from "./jobs.js";
 import { clipMiddle, contextFiles, firstStamp, parseClosing, lastContextTokens, lastExchange, lastModel, openingOf, replyClosedBefore, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { keepalivePingSigs } from "../shared/keepalive.js";
 import { expandHome } from "../shared/paths.js";
@@ -673,6 +673,8 @@ const main = async (): Promise<void> => {
     // 交接 (见 handoff.ts): 换会话不换身份。这里给它重开、贴话、读旧 transcript 的能力,
     // 闸、回执清点与断点续做在那边。
     const pingSigs = keepalivePingSigs(cfg.wrc.mirror.keepalive.ping);
+    /** 情景记忆 (memory/episodes/<name>.jsonl) 按名字归档; 默认会话没名字时退回 slot / "default"。 */
+    const episodeName = (t: string): string => wizards.get(t)?.name || tagOfKey(t) || "default";
     const handoffs = createHandoffs({
       isBusy: m.isBusy,
       sessionId: (t) => m.sessionInfo(t)?.sessionId ?? "",
@@ -700,8 +702,9 @@ const main = async (): Promise<void> => {
       store: loadJsonMap<PendingHandoff>(cfg.wrc.mirror.handoffsFile),
       archive: (e) => {
         if (!e.brief.trim()) return;
-        const name = wizards.get(e.target)?.name || tagOfKey(e.target) || "default";
-        appendEpisode(episodePath(cfg.daemon.stateDir, name), { at: e.at, kind: "handoff", name, sid: e.sid, nextSid: e.nextSid, text: e.brief });
+        const name = episodeName(e.target);
+        const ok = appendEpisode(episodePath(cfg.daemon.stateDir, name), { at: e.at, kind: "handoff", name, sid: e.sid, nextSid: e.nextSid, text: e.brief });
+        if (!ok) log.warn({ target: e.target, name }, "handoff episode not archived");
       },
     });
     /** `self` 此刻这一轮派出去的活, 结论该交给谁 (见 receipts.parentOf)。只读它自己
@@ -1935,11 +1938,18 @@ const main = async (): Promise<void> => {
       const victims = recycle ? job.members.filter((mm) => mm.spawned && mm.target !== self) : [];
       // 收掉之前把它们手上没落定的活记成 canceled: 不然发起者收工之后还会收到一串 dead 回执。
       victims.forEach((mm) => receipts.cancel(mm.target, self));
+      // 留档要的 sessionId 得在回收之前取: killPane 连绑定一起删。
+      const sids = new Map([job.owner, ...job.members.map((mm) => mm.target)].map((t) => [t, m.sessionInfo(t)?.sessionId ?? ""]));
       const killed = await victims.reduce(
         async (acc, mm) => (await acc) + ((await m.killPane(mm.target)).ok ? 1 : 0),
         Promise.resolve(0),
       );
       const closed = jobs.close(id, (b.summary ?? "").toString())!;
+      // 收工结论留档到开单者名下 (与交接简报同一份 jsonl); 空工单 (没人、没结论) 不记。
+      if (closed.members.length || closed.summary?.trim()) {
+        const ep = jobEpisode(closed, { nameOf: episodeName, sidOf: (t) => sids.get(t) ?? "", chat: chatNameOf(cfg, job.base) || job.base });
+        if (!appendEpisode(episodePath(cfg.daemon.stateDir, ep.name), ep)) log.warn({ job: id, name: ep.name }, "job episode not archived");
+      }
       notifyChat(job.base, renderJobClose(closed, (t) => relayLabel(t, job.base), killed));
       json(res, 200, { ok: true, job: id, members: closed.members.length, recycled: killed, kept: victims.length - killed });
     });

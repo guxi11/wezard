@@ -105,18 +105,38 @@ export const cwdOfMd = (stateDir: string, md: string, cwds: readonly string[]): 
   cwds.find((c) => memoryPath(stateDir, "workspace", c) === md);
 
 // ── 情景记忆 ─────────────────────────────────────────────────────────
-// 交接简报是一个 wizard 对一段工作最好的压缩, 用完就只活在新会话的第一条消息里。
-// 按名字留档 (`memory/episodes/<name>.jsonl`, 只追加): 名字是 wizard 的身份, 换会话不换名。
+// 一段工作收尾时最好的压缩 —— 交接简报、工单的收工结论 —— 用完就只活在一条消息里。
+// 按名字留档 (`memory/episodes/<name>.jsonl`, 只追加, `kind` 区分): 名字是 wizard 的
+// 身份, 换会话不换名。
 
-export interface Episode {
+interface EpisodeBase {
   at: number;
-  kind: "handoff";
   name: string;
+  text: string;
+}
+
+export interface HandoffEpisode extends EpisodeBase {
+  kind: "handoff";
   /** 交接前 / 后的 sessionId —— 回头翻 transcript 的锚。 */
   sid: string;
   nextSid: string;
-  text: string;
 }
+
+/** 收工的工单: `name` 是开单的 wizard, `text` 是它的 summary。 */
+export interface JobEpisode extends EpisodeBase {
+  kind: "job";
+  /** 开单者收工时的 sessionId。 */
+  sid: string;
+  /** 工单所在的聊天 (可读名, 没有就是 principal)。 */
+  chat: string;
+  job: string;
+  title: string;
+  openedAt: number;
+  /** `sid` 是收工 (回收) 前那一刻的 —— 回头翻成员 transcript 的锚; `spawned` = 为这个工单临时生的。 */
+  members: { name: string; sid: string; spawned: boolean; task: string; outcome?: string; artifacts?: { path: string; note: string }[] }[];
+}
+
+export type Episode = HandoffEpisode | JobEpisode;
 
 export const episodePath = (stateDir: string, name: string): string =>
   join(memoryRoot(stateDir), "episodes", `${fileKey(name)}.jsonl`);
