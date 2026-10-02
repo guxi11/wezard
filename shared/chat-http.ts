@@ -19,6 +19,7 @@
 // 可以看全部 role** (用户确认过的取舍: 单用户部署, 名册本来就对每个 wizard 敞开)。
 // 票据只剩两个作用: 证明你拿到过一条真链接; 以及没有 `role=` 时默认开在谁那里。
 // 要把正文严格关在一个群里的部署, 不该对外暴露这些路由。
+import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { URL } from "node:url";
 import { baseOfKey } from "./session-label.js";
@@ -62,6 +63,9 @@ const PING_MS = 25_000;
 const FACTS_MS = 10_000;
 /** rolepage 只看最近这么久: 更早的轮次、wizard 登记、家谱、工单一律不进视图。 */
 const HORIZON_MS = 3 * 24 * 3600_000;
+
+const TASK_LINE = 120;
+const firstLine = (s: string): string => (s.split("\n").find((l) => l.trim()) ?? "").trim().slice(0, TASK_LINE);
 
 const lastTsOf = (r: DetailRecord): number => (r as { updatedAt?: number }).updatedAt ?? r.createdAt;
 
@@ -408,15 +412,29 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     return new Map([...best].map(([base, v]) => [base, v.id] as const));
   };
 
-  const world: SimpleHandler = (_req, res, url) => {
+  // 前端在关系 / 日程栏每 6s 轮询一次, 而名册多数时候没变: 正文 (除去 `at`) 的摘要作 ETag,
+  // 没变就 304 —— 省掉一遍上百 KB 的重传与客户端重画。成员任务只留首行: 页面只画一行,
+  // 全文是派活的原话, 动辄几段。
+  const world: SimpleHandler = (req, res, url) => {
     const ticket = resolveTicket(store, url);
     if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
     void getFacts().then((f) => {
       const records = listRecent();
       const self = pickRole(makeDirectory(records, f), ticket, url);
-      const w = buildWorld(records, f, { base: baseOfKey(self), self }, Date.now());
+      const { at, ...w } = buildWorld(records, f, { base: baseOfKey(self), self }, Date.now());
       const tickets = ticketsByBase();
-      json(res, 200, { ok: true, ...w, chats: w.chats.map((c) => ({ ...c, token: tickets.get(c.base) })) });
+      const body = JSON.stringify({
+        ...w,
+        chats: w.chats.map((c) => ({ ...c, token: tickets.get(c.base) })),
+        jobs: w.jobs.map((j) => ({ ...j, members: j.members.map((mm) => ({ ...mm, task: firstLine(mm.task) })) })),
+      });
+      const etag = `"${createHash("sha1").update(body).digest("base64url")}"`;
+      res.setHeader("etag", etag);
+      if (req.headers["if-none-match"] === etag) { res.statusCode = 304; res.setHeader("cache-control", "no-store"); res.end(); return; }
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/json; charset=utf-8");
+      res.setHeader("cache-control", "no-store");
+      res.end(`{"ok":true,"at":${at},${body.slice(1)}`);
     });
   };
 

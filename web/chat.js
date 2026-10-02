@@ -1724,11 +1724,20 @@
   // 不经过 detail store。改成"看得见才轮询": 不在关系/日程栏、或者页面在后台, 就一次都不请求。
   var WORLD_MS = 6000;
   var worldTimer = null;
+  // 带上次的 ETag 问: 304 = 名册没变, 不重画 (卡片窗口的 glance 照样顺带刷新)。
   var loadWorld = function () {
     var asked = ROLE;
-    return api('api/world', { role: asked }).then(function (d) {
-      if (!d.ok) return;
-      W.at = d.at; W.loaded = true; W.role = asked;
+    var p = new URLSearchParams({ role: asked, id: TOKEN });
+    var tag = W.role === asked ? W.etag : '';
+    var etag = '';
+    return fetch('api/world?' + p.toString(), { cache: 'no-store', headers: tag ? { 'If-None-Match': tag } : {} }).then(function (r) {
+      if (r.status === 304) { if (asked === ROLE) loadGlance(); return null; }
+      etag = r.headers.get('etag') || '';
+      return r.json();
+    }).then(function (d) {
+      // 迟到的回包 (这期间已换了视角) 丢掉, 免得盖掉新视角的图; etag 与 role 成对记。
+      if (!d || !d.ok || asked !== ROLE) return;
+      W.at = d.at; W.loaded = true; W.role = asked; W.etag = etag;
       W.nodes = d.nodes || []; W.edges = d.edges || []; W.chats = d.chats || [];
       W.jobs = d.jobs || []; W.schedules = d.schedules || []; W.degraded = !!d.degraded;
       renderWorld();
