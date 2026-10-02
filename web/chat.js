@@ -1834,6 +1834,7 @@
     return api('api/charter', { role: asked }).then(function (d) {
       if (asked !== ROLE || VIEW !== 'charter') return;
       el.innerHTML = d.ok && !d.none ? charterHTML(d) : '<div class="empty">' + esc(roleName(asked)) + ' 没有宪章记录 (人, 或在这项记录出现前出生、还没重生过的 wizard)</div>';
+      bindCharter(el);
     }).catch(function () { el.innerHTML = '<div class="empty">载入失败</div>'; });
   };
   var charterHTML = function (d) {
@@ -1841,22 +1842,39 @@
       return '<div class="pst"><span class="k">' + k + '</span><b>' + v + '</b><span class="s" title="' + esc(sub) + '">' + esc(sub) + '</span></div>';
     };
     var b = d.baseline;
-    var top = Math.max.apply(null, d.sections.map(function (x) { return x.tokens; }));
+    var max = Math.max.apply(null, d.sections.map(function (x) { return x.tokens; }));
+    var big = d.sections.filter(function (x) { return x.tokens === max; })[0];
+    var pct = function (n) { return Math.round(100 * n / d.tokens) + '%'; };
     var mdOk = mdReady();
+    // 组成条: 一节一段, 宽度按体量 —— 一眼看出谁在吃宪章; 最大那节加深, 与下面的行同色。
+    var mix = '<div class="cmix">' + d.sections.map(function (x) {
+      return '<i class="' + (x === big ? 'top' : '') + '" style="flex:' + x.tokens + '" title="' + esc(x.title + ' ≈' + fmtTok(x.tokens) + ' · ' + pct(x.tokens)) + '"></i>';
+    }).join('') + '</div>';
     var sec = function (x) {
-      return '<details class="csec"><summary><span class="ct">' + esc(x.title) + '</span>' +
-        '<span class="cbar"><i style="width:' + Math.round(100 * x.tokens / top) + '%"></i></span>' +
-        '<span class="cn">≈' + fmtTok(x.tokens) + '</span></summary>' +
+      return '<details class="csec' + (x === big ? ' top' : '') + '"><summary><span class="ct">' + esc(x.title) + '</span>' +
+        '<span class="cbar"><i style="width:' + Math.round(100 * x.tokens / max) + '%"></i></span>' +
+        '<span class="cn">≈' + fmtTok(x.tokens) + '<small>' + pct(x.tokens) + '</small></span></summary>' +
         '<div class="md-body">' + (mdOk ? md.render(x.body) : '<pre>' + esc(x.body) + '</pre>') + '</div></details>';
     };
+    // 没有实测底座就不摆一张「—」: 换成最大的那一节, 同样回答「钱花在哪」。
+    var right = b
+      ? stat('开局实测', fmtTok(b.ctx), (b.resumed ? '续接的老会话, 含此前对话 · ' : '') + '此后首轮第一次调用送入的上下文') +
+        stat('宪章占开局', Math.round(100 * d.tokens / b.ctx) + '%', '其余是 CLI 系统提示、工具、CLAUDE.md、skills 与第一句话')
+      : stat('最大一节', pct(max), big.title + ' ≈' + fmtTok(max));
     return '<div class="pstats">' +
-        stat('宪章', '≈' + fmtTok(d.tokens), fmtClock(d.at) + ' 渲染, 随进程终身不变') +
-        (b ? stat('开局实测', fmtTok(b.ctx), (b.resumed ? '续接的老会话, 含此前对话 · ' : '') + '此后首轮第一次调用送入的上下文') +
-             stat('宪章占比', Math.round(100 * d.tokens / b.ctx) + '%', '其余是 CLI 系统提示、工具、CLAUDE.md、skills 与第一句话')
-           : stat('开局实测', '—', '它此后还没跑过一轮 (或那一轮早于实测口径)')) +
+        stat('宪章', '≈' + fmtTok(d.tokens) + '<small> tokens</small>', fmtClock(d.at) + ' 压进系统提示 · 随进程终身不变') + right +
       '</div>' +
-      '<section class="psec"><h3>按节<span>点开看原文 · 出生后的变动经 system-reminder 送达, 不改这份</span></h3>' +
-        d.sections.map(sec).join('') + '</section>';
+      '<section class="psec"><h3>按节<span>' + d.sections.length + ' 节</span>' +
+        '<button class="cx" id="charter-all">全部展开</button></h3>' +
+        mix + d.sections.map(sec).join('') + '</section>';
+  };
+  var bindCharter = function (el) {
+    var btn = el.querySelector('#charter-all');
+    if (!btn) return;
+    var all = function () { return el.querySelectorAll('.csec'); };
+    var sync = function () { btn.textContent = [].every.call(all(), function (x) { return x.open; }) ? '全部收起' : '全部展开'; };
+    btn.onclick = function () { var open = btn.textContent === '全部展开'; all().forEach(function (x) { x.open = open; }); sync(); };
+    all().forEach(function (x) { x.ontoggle = sync; });
   };
 
   // 侧栏换成关系图 / 换回会话列表。换回时选中的仍是在关系图里点开的那一项, 并把它滚进视野。

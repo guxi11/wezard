@@ -15,7 +15,7 @@ export interface CharterSection { title: string; tokens: number; body: string }
 export const sectionsOf = (text: string): CharterSection[] =>
   text.split(/^(?=## )/m).filter((x) => x.trim()).map((chunk) => {
     const [head = "", ...rest] = chunk.split("\n");
-    return { title: head.replace(/^#+\s*/, "").trim(), tokens: estTokens(chunk), body: rest.join("\n").trim() };
+    return { title: head.replace(/^#+\s*/, "").replace(/`/g, "").trim(), tokens: estTokens(chunk), body: rest.join("\n").trim() };
   });
 
 const isCharter = (r: DetailRecord): r is CharterRecord => r.kind === "charter";

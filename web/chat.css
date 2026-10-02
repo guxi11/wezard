@@ -684,20 +684,43 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 .ek.cross { font-weight: 400; background: #fff; box-shadow: inset 0 0 0 1px var(--line) }
 
 /* ══ 宪章 · 按节 ═══════════════════════════════════════════════════ */
-.csec { border-top: 1px solid var(--line) }
+/* 通用 details summary (SHARED_CSS) 带灰底、大写和 ::before 箭头 —— 这里全部重置, 箭头自己画。 */
+.cmix { display: flex; height: 8px; border-radius: 4px; overflow: hidden; gap: 2px; margin: 2px 0 6px }
+.cmix i { display: block; min-width: 3px; background: #c4cbd3 }
+.cmix i.top { background: #57606a }
+.csec { border-top: 1px solid #eaeef2 }
 .csec:first-of-type { border-top: 0 }
-.csec summary {
-  display: grid; grid-template-columns: minmax(0, 1fr) 120px 52px; align-items: center; gap: 12px;
-  padding: 9px 0; cursor: pointer; list-style: none; font-size: 13px;
+.csec > summary {
+  display: grid; grid-template-columns: 14px minmax(0, 1fr) minmax(60px, 160px) 92px; align-items: center; gap: 10px;
+  padding: 9px 4px; margin: 0 -4px; border-radius: 6px; border: 0; background: none;
+  cursor: pointer; list-style: none; user-select: none;
+  font-size: 13px; font-weight: 400; color: var(--ink); text-transform: none; letter-spacing: 0;
 }
-.csec summary::-webkit-details-marker { display: none }
+.csec > summary::-webkit-details-marker { display: none }
+.csec > summary::before { content: "▸"; font-size: 11px; color: var(--faint); transition: transform .12s; justify-self: center }
+.csec[open] > summary::before { content: "▸"; transform: rotate(90deg) }
+.csec > summary:hover { background: #f6f8fa }
 .csec .ct { overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .csec[open] .ct { font-weight: 600 }
 .csec .cbar { height: 6px; border-radius: 3px; background: #eaeef2; overflow: hidden }
-.csec .cbar i { display: block; height: 100%; background: #8c959f }
-.csec .cn { text-align: right; font-size: 11.5px; color: var(--mute); font-family: ui-monospace, Menlo, monospace }
-.csec .md-body { font-size: 13px; padding: 0 0 12px; overflow-wrap: anywhere }
+.csec .cbar i { display: block; height: 100%; border-radius: 3px; background: #afb8c1 }
+.csec.top .cbar i { background: #57606a }
+.csec .cn { text-align: right; font-size: 11.5px; color: var(--mute); font-family: ui-monospace, Menlo, monospace; white-space: nowrap }
+.csec .cn small { color: var(--faint); margin-left: 6px }
+.csec .md-body { font-size: 13px; line-height: 1.6; margin: 0 0 12px 24px; padding: 2px 0 2px 12px; border-left: 2px solid #eaeef2; overflow-wrap: anywhere }
+.csec .md-body > :first-child { margin-top: 0 }
+.csec .md-body > :last-child { margin-bottom: 0 }
+.csec .md-body ul { padding-left: 18px }
 .csec .md-body pre { white-space: pre-wrap }
+/* 关系 / 日程 / 宪章这类视图名很短, 窄屏上该让位的是副标题, 不是标题。 */
+.outer .ch-who .t { flex-shrink: 0 }
+.psec h3 .cx { white-space: nowrap; margin-left: auto; border: 0; background: none; padding: 0; cursor: pointer; font: 11px/1 inherit; color: var(--mute) }
+.psec h3 .cx:hover { color: var(--ink) }
+@media (max-width: 640px) {
+  .csec > summary { grid-template-columns: 14px minmax(0, 1fr) 84px }
+  .csec .cbar { display: none }
+  .csec .md-body { margin-left: 8px }
+}
 
 /* ══ 日程 · 总览 / 任务卡 ════════════════════════════════════════════ */
 .pstats {
