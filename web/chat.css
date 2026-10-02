@@ -356,9 +356,9 @@ button.mchip.rcpt { cursor: pointer }
 button.mchip.rcpt:hover { text-decoration: underline }
 .mchip.rcpt:is(.st-need, .st-error) { color: #9a6700; background: #9a670014 }
 .mchip.rcpt:is(.st-timeout, .st-silent, .st-dead, .st-canceled) { color: #cf222e; background: #cf222e10 }
-/* 移交行里的对方: 小头像 + 名字, 整块是切视角的入口。 */
-.handoff .ho-who { display: inline-flex; align-items: center; gap: 3px; border: 0; background: none; padding: 0 2px; font: inherit; color: var(--ink); cursor: pointer; border-radius: 4px }
-.handoff .ho-who:hover { background: var(--av-hot) }
+/* 移交行里的对方: 小头像 + 名字。整行是入口 (开双方的往来), 悬停时整行提亮。 */
+.handoff .ho-who { display: inline-flex; align-items: center; gap: 3px; color: var(--ink) }
+.handoff .ho-line[data-hto]:hover { background: var(--av-hot); border-radius: 6px }
 .handoff .ho-who .av { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--line); background: var(--card); font-size: 10px; line-height: 14px; text-align: center }
 .handoff .ho-who .nm { font-weight: 500 }
 /* 过程框收起后移交行仍露在框头下 —— 活交给了谁, 不该和普通工具输出一起藏起来。 */

@@ -451,34 +451,37 @@ const TURN_CSS = `
   .tool-result-line .run{color:#9a6700}
   /* ── 移交提示: 系统行, 不是消息 —— 没有底色与边框, 小一号 ── */
   .handoff{font-size:11.5px;line-height:18px;color:#656d76}
-  .handoff .ho-line{display:flex;align-items:center;flex-wrap:wrap;gap:4px 6px;padding:2px 6px 3px 24px;
-    list-style:none}
-  details.handoff>.ho-line{cursor:pointer;background:none;border:0;font:inherit;color:inherit;
+  /* 一行到底不换行: 箭头 · 移交 · 对方 · 活号 · 标签 · 原文首行 (占剩下的宽, 省略号) · 展开钮。 */
+  .handoff .ho-line{display:flex;align-items:center;gap:6px;padding:2px 6px 3px 24px;list-style:none;white-space:nowrap}
+  .handoff .ho-line>*{flex:none}
+  .handoff .ho-line[data-hto]{cursor:pointer}
+  details.handoff>.ho-line{background:none;border:0;font:inherit;color:inherit;
     text-transform:none;letter-spacing:0;user-select:auto}
   details.handoff>.ho-line::before{content:none}
   .handoff .ho-line::-webkit-details-marker{display:none}
-  details.handoff>.ho-line::after{content:"▸";color:#8c959f;font-size:10px}
-  .handoff[open] .ho-line::after{content:"▾"}
+  .handoff .ho-first{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;color:#8c959f}
+  .handoff .ho-chev{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;
+    border-radius:4px;color:#8c959f;cursor:pointer;transition:transform .12s}
+  .handoff .ho-chev:hover{color:#1f2328;background:#0000000d}
+  .handoff .ho-chev svg{width:10px;height:10px}
+  .handoff[open] .ho-chev{transform:rotate(90deg)}
   /* 展开 = 交过去的那段原文 (tell_peer 的 text), 按 markdown 分行。 */
   .handoff .ho-text{margin:0 6px 4px 24px;padding:4px 10px;border-left:2px solid #8250df40;color:#1f2328}
   .handoff .ho-text .md-body{font-size:12.5px}
-  .handoff .ho-arrow{color:#8250df;font-weight:600;margin-right:-2px}
+  /* 箭头的颜色就是这件活的回执状态 (title 写明): 进行中 · 已交 · 反问 · 报错 · 没有答案。 */
+  .handoff .ho-arrow{font-weight:600;margin-right:-2px;color:#8250df}
+  .handoff .ho-arrow.st-done{color:#1a7f37}
+  .handoff .ho-arrow.st-need{color:#9a6700}
+  .handoff .ho-arrow.st-error{color:#bc4c00}
+  .handoff .ho-arrow.st-fail{color:#cf222e}
+  .handoff .ho-arrow.st-plain{color:#8c959f}
   .handoff .ho-nm{color:#1f2328;font-weight:500}
-  .handoff .ho-turn{border:0;background:none;padding:0;font:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-    font-size:10.5px;color:#8c959f}
-  .handoff button.ho-turn{cursor:pointer}
-  .handoff button.ho-turn:hover{color:#0969da;text-decoration:underline}
+  .handoff .ho-turn{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;color:#8c959f}
   .handoff .ho-tag{border-radius:4px;padding:0 5px;font-size:10.5px;line-height:16px;background:#f1f3f6;color:#656d76}
   .handoff .ho-tag.pub{color:#0969da;background:#0969da12}
   .handoff .ho-tag.priv{color:#9a5b10;background:#9a5b1014}
-  .handoff .ho-tag.pri.idle{opacity:.55}
-  .handoff .ho-st{border-radius:4px;padding:0 5px;font-size:10.5px;line-height:16px;color:#1a7f37;background:#1a7f3712}
-  .handoff .ho-st.run,.handoff .ho-st.wait{color:#8c959f;background:none;padding:0}
-  .handoff .ho-st:is(.st-need,.st-error){color:#9a6700;background:#9a670014}
-  .handoff .ho-st:is(.st-timeout,.st-silent,.st-dead,.st-canceled){color:#cf222e;background:#cf222e10}
-  .handoff .ho-why{color:#9a6700}
-  .handoff.fail .ho-arrow,.handoff.fail .ho-why{color:#cf222e}
-  .handoff .ho-why{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .handoff .ho-why{color:#9a6700;min-width:0;overflow:hidden;text-overflow:ellipsis}
+  .handoff.fail .ho-why{color:#cf222e}
   /* ── 上下文断点条 ── */
   .tg-cut{display:flex;align-items:center;gap:8px;font-size:11px;color:#9a6700;
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.3px}
@@ -652,15 +655,18 @@ export const handoffOf = (use: ToolUse, result: ToolResult | undefined): Handoff
   };
 };
 
-/** rolepage 给移交行补的三样: 对方的头像 + 名字 (点了切到它的视角), 活号 (点了跳到它接手的那一轮),
- *  回执落定成什么。整页详情没有名录也不看别的轮次, 只写名字与活号。 */
+/** 箭头的颜色: 这件活此刻的回执状态。 */
+export interface HandoffStatus { key: "run" | "done" | "need" | "error" | "fail" | "plain"; tip: string }
+
+/** rolepage 给移交行补的三样: 对方的头像 + 名字, 整行点了要开的那段往来 (挂在行上的属性),
+ *  回执落定成什么。整页详情没有名录也不看别的轮次, 只写名字。 */
 export interface HandoffDeco {
   who: (h: Handoff) => string;
-  turn: (h: Handoff & { turn: string }) => string;
-  status: (h: Handoff) => string;
+  attrs: (h: Handoff) => string;
+  status: (h: Handoff) => HandoffStatus;
 }
 
-// 排队 / 插话 / 打断只在对方正忙时才真发生; 对方闲着就是立刻投, 标签淡下去。
+// 排队 / 插话 / 打断只在投的那一刻对方正忙时才真发生 —— 只标真发生的那一种, 闲着 (或回包没说) 就不标。
 const PRIORITY_TAG: Readonly<Record<Handoff["priority"], [string, string]>> = {
   normal: ["排队", "等它这一轮结束再投"],
   now: ["插话", "落进它正在跑的这一轮"],
@@ -670,29 +676,37 @@ const PRIORITY_TAG: Readonly<Record<Handoff["priority"], [string, string]>> = {
 const hoTag = (cls: string, text: string, tip: string): string =>
   `<span class="ho-tag ${cls}" title="${escHtml(tip)}">${escHtml(text)}</span>`;
 
-/** 移交行默认收起, 点开看交过去的原文; 没有原文就只是一行。 */
-const hoBox = (cls: string, line: string, text: string): string =>
+const CHEVRON = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 3 5 5-5 5"/></svg>`;
+
+/** 交过去那段原文的首行 (行内跟着, 超长省略号)。 */
+const firstLine = (text: string): string => text.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+
+/** 移交行: 整行是一个入口 (`attrs`), 原文默认收起, 只由行尾的 chevron 展开; 没有原文就只是一行。 */
+const hoBox = (cls: string, attrs: string, line: string, text: string): string =>
   text
-    ? `<details class="handoff${cls}"><summary class="ho-line">${line}</summary><div class="ho-text">${mdBody(text)}</div></details>`
-    : `<div class="handoff${cls}"><div class="ho-line">${line}</div></div>`;
+    ? `<details class="handoff${cls}"><summary class="ho-line"${attrs}>${line}<span class="ho-first">${escHtml(firstLine(text))}</span>` +
+      `<span class="ho-chev" title="展开原文">${CHEVRON}</span></summary><div class="ho-text">${mdBody(text)}</div></details>`
+    : `<div class="handoff${cls}"><div class="ho-line"${attrs}>${line}</div></div>`;
+
+const hoArrow = (st: HandoffStatus): string => `<span class="ho-arrow st-${st.key}" title="${escHtml(st.tip)}">↪</span>`;
 
 const renderHandoff = (h: Handoff, deco?: HandoffDeco): string => {
   const who = deco ? deco.who(h) : `<span class="ho-nm">.${escHtml(h.name)}</span>`;
+  const attrs = deco ? deco.attrs(h) : "";
   if (h.state === "failed")
-    return hoBox(" fail", `<span class="ho-arrow">↪</span>没交出去 ${who}<span class="ho-why">${escHtml(h.reason ?? "")}</span>`, h.text);
+    return hoBox(" fail", attrs, `${hoArrow({ key: "fail", tip: "没交出去" })}没交出去 ${who}<span class="ho-why">${escHtml(h.reason ?? "")}</span>`, h.text);
   const [pt, tip] = PRIORITY_TAG[h.priority];
-  const idle = h.busy === false;
   const tags = [
     h.public ? hoTag("pub", "公开", "在群里说的, 回复也进群") : hoTag("priv", "私聊", "只在双方的 rolepage"),
-    hoTag(`pri${idle ? " idle" : ""}`, pt, idle ? `${tip} —— 投的时候它闲着, 立刻就投了` : tip),
+    h.busy === true ? hoTag("pri", pt, `${tip} —— 投的时候它正忙`) : "",
     h.kind === "ask" ? hoTag("kind", "只问", "只问一句") : h.kind === "fyi" ? hoTag("kind", "知会", "只是知会, 不要回话") : "",
   ].join("");
-  const turn = !h.turn ? "" : deco ? deco.turn({ ...h, turn: h.turn }) : `<span class="ho-turn">${escHtml(h.turn)}</span>`;
-  const st = h.state === undefined
-    ? `<span class="ho-st run">投递中…</span>`
-    : h.state === "lost" ? `<span class="ho-why" title="${escHtml(h.reason ?? "")}">没等到回包, 交没交出去不确定</span>`
-    : deco ? deco.status(h) : "";
-  return hoBox("", `<span class="ho-arrow">↪</span>${h.re ? "续问" : h.state === "lost" ? "移交给" : "已移交给"} ${who}${turn}${tags}${st}`, h.text);
+  const turn = h.turn ? `<span class="ho-turn">${escHtml(h.turn)}</span>` : "";
+  const st: HandoffStatus = h.state === undefined ? { key: "run", tip: "投递中…" }
+    : h.state === "lost" ? { key: "need", tip: "没等到回包, 交没交出去不确定" }
+    : deco ? deco.status(h) : { key: "plain", tip: h.re ? "续问" : "已移交" };
+  const lost = h.state === "lost" ? `<span class="ho-why" title="${escHtml(h.reason ?? "")}">交没交出去不确定</span>` : "";
+  return hoBox("", attrs, `${hoArrow(st)}移交 ${who}${turn}${tags}${lost}`, h.text);
 };
 
 /** `lazyTurn`: 正文不随气泡下发, 只留一个指回 (turn, toolUseId) 的空壳, 客户端展开时再取。

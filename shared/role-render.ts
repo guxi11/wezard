@@ -124,38 +124,46 @@ const receiptChip = (r: TurnDetailRecord, records: readonly DetailRecord[], dir:
   return `<${tag} class="mchip rcpt st-${escHtml(st)}"${attrs}>↩ 回执 · ${RCPT[st] ?? escHtml(st)}${seq}</${tag}>`;
 };
 
-/** 点移交行里的对方要开的那段往来: 移交双方 (发话方 = 这一轮的 role, 收信方) 在哪个频道 —— 派活那句在就以它为准
+/** 这一行移交落成的那句。同一个活号续问多次就有多句 (每次 tell_peer 一句): 按原文认 ——
+ *  落地的那句就是原文贴进去的 (外面裹着信封), 取首段比对; 认不出 (没原文) 退回最早那句。 */
+const dispatchFor = (records: readonly DetailRecord[], h: Handoff & { turn: string }): TurnDetailRecord | undefined => {
+  const all = turnsWhere(records, (t) => t.from?.kind === "peer" && !t.from.receipt && t.from.turn === h.turn && !!t.userQuery?.trim());
+  const head = squash(h.text).slice(0, 80);
+  return (head.length >= 4 ? all.find((t) => squash(t.userQuery ?? "").includes(head)) : undefined) ?? all[0];
+};
+
+/** 整行点了要开的那段往来: 移交双方 (发话方 = 这一轮的 role, 收信方) 在哪个频道 —— 派活那句在就以它为准
  *  并带上落点; 还没接手就按这次调用公开与否推 (公开的落在发话方此刻的群)。会话键随视角, 由客户端算。 */
 const pairAttrs = (r: TurnDetailRecord, to: string, h: Handoff, d: TurnDetailRecord | undefined): string =>
   ` data-hfrom="${escHtml(r.target ?? "")}" data-hto="${escHtml(to)}" data-hch="${escHtml(d ? channelOf(d) : h.public ? channelOf(r) : "")}"` +
   (d ? ` data-gid="${escHtml(d.id)}:in" data-gts="${d.createdAt}"` : "");
 
-/** 移交行的 rolepage 那一半: 对方是名录里的谁 (头像 + 名字, 点了开双方的那段往来), 这件活此刻到了哪一步 ——
- *  回执落定了就写定论 (need 之后续问再交, 取最新那份), 没落定就看它接手了没有。
- *  每次请求现算, 不进轮次缓存: 回执比派活那一轮晚到, 气泡的 sig 得跟着它变。 */
+const FAIL = new Set(["timeout", "silent", "dead", "canceled"]);
+
+/** 移交行的 rolepage 那一半: 对方是名录里的谁 (头像 + 名字), 整行点了开双方的那段往来并落到这一句,
+ *  这件活此刻到了哪一步 —— 这一句之后的第一份回执就是它的定论 (need 之后续问再交, 那是下一行的),
+ *  没落定就看它接手了没有。每次请求现算, 不进轮次缓存: 回执比派活那一轮晚到, 气泡的 sig 得跟着它变。 */
 const handoffDeco = (r: TurnDetailRecord, records: readonly DetailRecord[], dir: Directory): HandoffDeco => {
-  const latest = (pick: (t: TurnDetailRecord) => boolean): TurnDetailRecord | undefined => turnsWhere(records, pick).at(-1);
+  const landed = (h: Handoff): TurnDetailRecord | undefined => (h.turn ? dispatchFor(records, { ...h, turn: h.turn }) : undefined);
   return {
     who: (h) => {
       const id = dir.resolve(h.name);
       return id
-        ? `<button type="button" class="ho-who"${pairAttrs(r, id, h, h.turn ? dispatchOf(records, h.turn) : undefined)} title="打开 .${escHtml(dir.nameOf(r.target ?? ""))} 与 .${escHtml(dir.nameOf(id))} 的往来"><span class="av">${escHtml(dir.labelOf(id))}</span><span class="nm wizard">${escHtml(dir.nameOf(id))}</span></button>`
+        ? `<span class="ho-who"><span class="av">${escHtml(dir.labelOf(id))}</span><span class="nm wizard">${escHtml(dir.nameOf(id))}</span></span>`
         : `<span class="ho-nm">.${escHtml(h.name)}</span>`;
     },
-    turn: (h) => {
-      const d = dispatchOf(records, h.turn);
-      return d
-        ? `<button type="button" class="ho-turn"${gotoAttrs(h.turn, d)} title="跳到 .${escHtml(h.name)} 接手的那一轮">${escHtml(h.turn)}</button>`
-        : `<span class="ho-turn">${escHtml(h.turn)}</span>`;
+    attrs: (h) => {
+      const id = dir.resolve(h.name);
+      return id ? `${pairAttrs(r, id, h, landed(h))} title="${escHtml(`打开 .${dir.nameOf(r.target ?? "")} 与 .${dir.nameOf(id)} 的往来, 定位到这一句`)}"` : "";
     },
     status: (h) => {
-      if (!h.turn || !h.receipt) return "";
-      const rc = latest((t) => t.from?.kind === "peer" && !!t.from.receipt && t.from.turn === h.turn);
-      if (rc) {
-        const st = rc.from?.status ?? "done";
-        return `<span class="ho-st st-${escHtml(st)}">↩ ${RCPT[st] ?? escHtml(st)}</span>`;
-      }
-      return `<span class="ho-st wait">${dispatchOf(records, h.turn) ? "在办 · 等回执" : "等它接手"}</span>`;
+      if (!h.turn || !h.receipt) return { key: "plain", tip: h.kind === "fyi" ? "只是知会, 不等回执" : "不等回执" };
+      const d = landed(h);
+      const rc = turnsWhere(records, (t) => t.from?.kind === "peer" && !!t.from.receipt && t.from.turn === h.turn && t.createdAt >= (d?.createdAt ?? 0))[0];
+      if (!rc) return { key: "run", tip: d ? "在办 · 等回执" : "等它接手" };
+      const st = rc.from?.status ?? "done";
+      const key = st === "done" || st === "need" || st === "error" ? st : FAIL.has(st) ? "fail" : "run";
+      return { key, tip: `回执 · ${RCPT[st] ?? st}` };
     },
   };
 };

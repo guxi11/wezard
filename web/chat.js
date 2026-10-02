@@ -317,12 +317,13 @@
     var conv = ch ? 'c:' + ch : ROLE === from ? 'p:' + to : ROLE === to ? 'p:' + from : 'a:' + from + '|' + to;
     jumpMsg({ conv: conv, id: c.getAttribute('data-gid'), ts: Number(c.getAttribute('data-gts')) });
   });
-  // 移交行里对方的头像 + 名字: 侧栏选中移交双方之间的那一项 (群里的一对 / 私聊; 视角不是两端之一就开
-  // 「这两方之间」的往来), 有派活那句就落在它上面。不换视角 (节点随 reconcile 换, 所以在根上委托)。
+  // 移交行整行: 侧栏选中移交双方之间的那一项 (群里的一对 / 私聊; 视角不是两端之一就开
+  // 「这两方之间」的往来), 有派活那句就落在这一行自己的那句上。不换视角 (节点随 reconcile 换, 所以在根上委托)。
+  // 行尾的 chevron 只管展开原文, 走 <summary> 自己的开合。
   inner.addEventListener('click', function (e) {
-    var b = e.target.closest && e.target.closest('.handoff .ho-who[data-hto]');
-    if (!b) return;
-    e.preventDefault();   // 在 <summary> 里: 不顺带展开原文
+    var b = e.target.closest && e.target.closest('.handoff .ho-line[data-hto]');
+    if (!b || e.target.closest('.ho-chev')) return;
+    e.preventDefault();   // 行是 <summary>: 不顺带展开原文
     var from = b.getAttribute('data-hfrom'), to = b.getAttribute('data-hto'), ch = b.getAttribute('data-hch');
     var peer = ROLE === from ? to : ROLE === to ? from : '';
     var conv = !peer ? 'a:' + from + '|' + to : ch ? 'c:' + ch : 'p:' + peer;
