@@ -220,9 +220,12 @@ const isPostTurn = (r: TurnDetailRecord, records: readonly DetailRecord[]): bool
  *  记在 `r` 账上的入消息 / notify, `r` 接手 (或回执) 的那件活所在的移交行, 回执认领的答话轮。 */
 export const dependentsOf = (r: TurnDetailRecord, records: readonly DetailRecord[]): string[] => {
   // 先按「r 之后、r 的主人说的」收窄, 再逐条认账 —— 每个脏轮都要算一遍, 不能对全表两两比。
-  const said = records
-    .filter((x) => x.createdAt >= r.createdAt && (x.kind === "post" ? x.target === r.target : isTurn(x) && x.from?.kind === "peer" && x.from.from === r.target))
-    .filter((x) => turnAt(records, r.target ?? "", x.createdAt)?.id === r.id);
+  const mine = (at: number): boolean => at >= r.createdAt && turnAt(records, r.target ?? "", at)?.id === r.id;
+  const said = records.filter((x) =>
+    x.kind === "post" ? x.target === r.target && mine(x.createdAt)
+      : isTurn(x) && (x.from?.kind === "peer" && x.from.from === r.target && mine(x.createdAt) ||
+        // 插话那句的入消息渲染在它落进的那一轮里, 重推的是那一轮
+        (x.injects ?? []).some((i) => i.from?.kind === "peer" && i.from.from === r.target && mine(i.ts))));
   const f = r.from?.kind === "peer" ? r.from : undefined;
   const owner = f?.turn ? (f.receipt ? r.target : f.from) : undefined;
   const handed = owner ? records.filter(isTurn).filter((t) => t.target === owner && t.items.some((it) => it.t === "tool_result" && it.body.includes(f!.turn!))) : [];

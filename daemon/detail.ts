@@ -253,6 +253,12 @@ export const knowsToolUse = (toolUseId: string): boolean =>
 // 落点。从没跑过一轮的会话没有自己的票据, 返回 undefined。
 export const latestTurnIdFor = (target: string): string | undefined => latestTurnId((r) => r.target === target);
 
+/** 这个会话还开着的轮次 (子 agent 的不算), 新的在前 —— reload 时正跑着的那一轮旧进程没来得及收口, 也有排着还没接上的。 */
+export const openTurnsOf = (target: string, sessionId: string): TurnDetailRecord[] =>
+  (store?.list() ?? [])
+    .filter((r): r is TurnDetailRecord => r.kind === "turn" && r.target === target && r.sessionId === sessionId && !r.closed && !r.agent)
+    .sort((x, y) => y.createdAt - x.createdAt);
+
 /** 这个会话最近一次有人开口的那一轮落下的频道印章。keepalive 轮不盖频道 (channel
  *  缺省); 没有问话也没有出处的续写轮只是沿用来的, 可能正是一次 reload 记错的, 都不算数。 */
 export const lastChannelOf = (target: string): Pick<TurnDetailRecord, "channel" | "speaker" | "from"> | undefined => {

@@ -45,7 +45,7 @@ import { hasRegistry, markTranscript, probeOf, sessionOnPane, sessionPanes, subm
 import { waitForIdle, type IdleResult } from "./graph.js";
 import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
-import { knowsToolUse, recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnQuery, recordTurnInject, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, lastChannelOf, buildDetailUrl, buildChatUrl, roleUniq } from "./detail.js";
+import { knowsToolUse, recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnQuery, recordTurnInject, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, lastChannelOf, openTurnsOf, buildDetailUrl, buildChatUrl, roleUniq } from "./detail.js";
 import type { CtxCut, TurnFrom, TurnOrigin, TurnUsage } from "./detail.js";
 import { errText } from "./last-response.js";
 import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagHeader, withLinkedTagHeader, linkedTagHead, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey } from "../shared/session-label.js";
@@ -510,11 +510,12 @@ type RenderItem =
   // 销前台派发的账 / 推进 query 轮次), 不渲染。边界语义不能挂在一个显示开关上 ——
   // 以前 includeUser=false 时整条 user 行在 renderLine 就被丢掉, 于是"对话边界清账"
   // 那段在默认配置下是死代码。
-  | { kind: "user_text"; body: string; quiet?: boolean }
+  // `ts` = 这一行落盘的时刻 (CLI 真正开始处理这句话的那一刻), 读不出就没有。
+  | { kind: "user_text"; body: string; quiet?: boolean; ts?: number }
   // 我们自己注入的那一行真正落盘的样子 (带图时 TUI 会插进 `[Image #N]`)。onItem 拿它
   // 覆盖这一轮的问话 —— 详情页该给的是 session 真正收到的那句, 不是注入前的原文。
   // `said` = 去掉占位符与信封后的那句话, 用来确认它确实是这一轮的问话。
-  | { kind: "user_query"; body: string; said: string }
+  | { kind: "user_query"; body: string; said: string; ts?: number }
   // 一轮跑着时被 CLI 吃进去的排队输入 (`attachment.queued_command`, 不写 user 行): 插话。
   // `said` 同 user_query (去信封后的那句), `ts` = 那一行的时刻。
   | { kind: "user_inject"; said: string; ts: number }
@@ -656,6 +657,11 @@ const recoverToolUse = (toolUseId: string, deps: TailDeps): ToolCall | undefined
   return undefined;
 };
 
+const lineTs = (line: TranscriptLine): number | undefined => {
+  const ts = Date.parse(line.timestamp ?? "");
+  return Number.isNaN(ts) ? undefined : ts;
+};
+
 // Render one transcript line into tagged items. Caller decides batching.
 const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
   let line: TranscriptLine;
@@ -737,20 +743,20 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
       // cover reloads or replays; the user message itself always can.
       if (deps.isKeepalivePing?.(text)) return [{ kind: "keepalive_start", body: text }];
       // 自己注入的那一行不回显, 但要报个到: 它的印章 (谁说的、回复去哪) 在这一刻认领。
-      if (deps.isOwnInject(text)) return [{ kind: "user_query", body: unwrapPasted(c).trim(), said: text }];
+      if (deps.isOwnInject(text)) return [{ kind: "user_query", body: unwrapPasted(c).trim(), said: text, ts: lineTs(line) }];
       const quoted = text.split("\n").map((l) => `> ${l}`).join("\n");
       // includeUser 只决定"渲不渲染", 不决定"算不算边界" —— quiet 的这一条照样发出,
       // onItem 消费完边界语义后自己丢掉。
-      out.push({ kind: "user_text", body: quoted, quiet: !deps.includeUser });
+      out.push({ kind: "user_text", body: quoted, quiet: !deps.includeUser, ts: lineTs(line) });
     } else if (Array.isArray(c) && hasImages(c) && !c.some((b) => b?.type === "tool_result")) {
       // 带图的一句话: [text "[Image #1]…", image, …]。去掉占位符才与注入时记下的原文同形,
       // 回显去重对得上; 记进详情页的则是带占位符的原样文本, 图本身不画。
       const raw = c.filter((b) => b?.type === "text").map((b) => b.text ?? "").join("\n");
       const text = cleanUserText(raw.replace(IMAGE_REF_RE, ""));
       if (text && !deps.isOwnInject(text)) {
-        out.push({ kind: "user_text", body: cleanUserText(raw).split("\n").map((l) => `> ${l}`).join("\n"), quiet: !deps.includeUser });
+        out.push({ kind: "user_text", body: cleanUserText(raw).split("\n").map((l) => `> ${l}`).join("\n"), quiet: !deps.includeUser, ts: lineTs(line) });
       } else {
-        out.push({ kind: "user_query", body: unwrapPasted(raw).trim(), said: text });
+        out.push({ kind: "user_query", body: unwrapPasted(raw).trim(), said: text, ts: lineTs(line) });
       }
     } else if (Array.isArray(c)) {
       for (const b of c) {
@@ -2431,6 +2437,8 @@ interface AttachState {
   /** CLI 侧最近一条用户输入, 用作下一个"无气泡 turn"(ensureBriefTurn) 的 userQuery。
    *  WeCom 发起的 turn 直接从 dispatch 拿到原文, 用不到它。 */
   pendingBriefQuery?: string;
+  /** 那一句在 transcript 里落盘的时刻 = 它那一轮的起点 (排队的话要等前一轮跑完才落盘)。 */
+  pendingBriefAt?: number;
   /** 刚到达一条真人 CLI 输入行, 还没被任何 turn 认领。ensureBriefTurn 消费它来判
    *  出处 —— 我们自己的注入在 tail 侧就被 isOwnInject 吃掉了, 所以能走到这里的
    *  user 行必然来自键盘 (或平台回灌)。 */
@@ -3311,8 +3319,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (first) a.seals = seals.filter((x) => !hit(x));
     return first;
   };
-  /** 人在聊天里说的那一句接成活跃 turn: 收掉在跑的那一轮, 频道与发话人取它自己的印章。 */
-  const activateDispatch = (a: AttachState, s: Seal): void => {
+  /** 人在聊天里说的那一句接成活跃 turn: 收掉在跑的那一轮, 频道与发话人取它自己的印章。
+   *  `at` = 那一行落盘的时刻: 排队的那句从这一刻才开始被处理, 轮次的起点以它为准; 闲时当场接上就是投递那一刻。 */
+  const activateDispatch = (a: AttachState, s: Seal, at = s.at): void => {
     const q = s.turn!;
     s.activated = true;
     a.queryEpoch = (a.queryEpoch ?? 0) + 1; // WeCom 侧的新一轮同样是 query 边界
@@ -3324,7 +3333,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.pendingBriefQuery = undefined;
     a.pendingChannel = { channel: s.channel ?? baseOfKey(a.target), speaker: s.speaker, at: Date.now() };
     consumeChannel(a, true, undefined);
-    recordTurnStart({ id: q.turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: s.query.trim() || undefined, createdAt: s.at, ...channelFields(a) });
+    recordTurnStart({ id: q.turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: s.query.trim() || undefined, createdAt: at, ...channelFields(a) });
     if (a.briefTurnId) closeBriefTurn(a);
     openBriefTurn(a, q);
   };
@@ -3339,12 +3348,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const s = takeSeal(a, said, (x) => !x.turn);
     if (s) injectInto(a.briefTurnId, a, s, ts);
   };
-  /** 一行注入露面了: 把它的印章落成下一轮的出处 / 频道。返回认领到的印章。 */
-  const bindLine = (a: AttachState, said: string): Seal | undefined => {
+  /** 一行注入露面了: 把它的印章落成下一轮的出处 / 频道。返回认领到的印章。`ts` = 那一行落盘的时刻。 */
+  const bindLine = (a: AttachState, said: string, ts?: number): Seal | undefined => {
     const s = takeSeal(a, said);
     if (!s) return undefined;
     if (s.turn) {
-      if (!s.activated) activateDispatch(a, s);
+      if (!s.activated) activateDispatch(a, s, ts);
       return s;
     }
     // 忙时贴进去、正在跑的那一轮还没出终句: 它是插进那一轮的话 (priority now), 那一轮的
@@ -3357,6 +3366,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 没写频道的注入 (graph 步骤 / 手动 inject) 等同在 home 里开口: 印章就是全部出处, 不沿用上一轮的。
     a.pendingChannel = { channel: s.channel ?? baseOfKey(a.target), at: now };
     a.pendingBriefQuery = s.query;
+    a.pendingBriefAt = ts;
     return s;
   };
 
@@ -3398,15 +3408,46 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
   };
 
+  /** reload 后的第一笔产出: 那一轮多半还是旧进程开的那条记录 (内存里的 briefTurnId 随进程没了) ——
+   *  另开一轮就把一件活切成几段、每段都带着开头那句。只在 transcript 最后那句问话正是它的问话时接回,
+   *  频道与出处取它自己记下的; 对不上 (旧进程收口前就有了新问话) 照常开新的。 */
+  const resumeOpenTurn = (a: AttachState): boolean => {
+    if (a.channelSeeded) return false;
+    const head = (t: string | undefined): string => (t ?? "").replace(/\s+/g, " ").trim().slice(0, 60);
+    const said = head(a.jsonlPath ? lastUserTurn(a.jsonlPath)?.text : undefined);
+    const r = said ? openTurnsOf(a.target, a.sessionId).find((t) => head(t.userQuery) === said) : undefined;
+    if (!r) return false;
+    a.channelSeeded = true;
+    a.pendingFrom = undefined;
+    a.pendingOrigin = undefined;
+    a.pendingChannel = undefined;
+    a.channel = r.channel === undefined || r.channel === baseOfKey(a.target) ? undefined : r.channel;
+    a.speaker = r.speaker;
+    a.convFrom = r.from;
+    a.replyTo = publicPeer(r.from);
+    a.turnFromChat = a.turnFromChat ?? true;
+    a.briefTurnId = r.id;
+    a.briefBubble = undefined;
+    a.briefIsSlash = false;
+    a.briefHadTool = r.items.some((it) => it.t === "tool_use");
+    a.briefConcluded = false;
+    a.briefLastText = undefined;
+    log.info({ sessionId: a.sessionId, turnId: r.id }, "brief: turn resumed after reload");
+    return true;
+  };
+
   // 无气泡 turn。CLI 侧自己开的一轮 (WeCom 从没发过消息, 拿不到 frame/streamId), 以及
   // 收口后仍有 item 补写进来的情况, 都要有一个 turn 承接 —— 否则每条 tool/text 都掉进
   // fallback standalone, 一轮工具密集的对话能在群里刷出几十条散装气泡。这里只推一条
   // 详情链接当入口, 其余全部收进 turn 页, 与 WeCom 侧发起的 turn 表现一致。
   const ensureBriefTurn = (a: AttachState): void => {
     if (a.briefTurnId) return;
-    const turnId = newTurnId();
     const query = a.pendingBriefQuery?.replace(/^> ?/gm, "").trim();
+    const at = a.pendingBriefAt;
     a.pendingBriefQuery = undefined;
+    a.pendingBriefAt = undefined;
+    if (!query && a.pendingFromCli !== true && resumeOpenTurn(a)) return;
+    const turnId = newTurnId();
     // 出处继承: 有真人 CLI 输入行开头 → CLI 轮; 否则 (收口后的补写、peer/graph 注入
     // 开出的轮) 沿用上一轮 —— 那些续写属于同一场对话, 不该改变可见性。
     const fromCli = a.pendingFromCli === true;
@@ -3415,7 +3456,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const fresh = consumeFrom(a);
     const opened = consumeChannel(a, fromCli, fresh);
     const from = fresh ?? a.convFrom;
-    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: query || opened || undefined, origin: consumeOrigin(a), from, ...channelFields(a) });
+    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: query || opened || undefined, origin: consumeOrigin(a), from, ...channelFields(a), ...(query && at ? { createdAt: at } : {}) });
     a.briefTurnId = turnId;
     a.briefBubble = undefined;
     a.briefIsSlash = false;
@@ -3934,7 +3975,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (item.kind === "user_text") {
       // 回显去重只认 60s 内的注入: 排在长轮后面的那一行露面时已经过期, 会被当成人在 CLI 里敲的。
       // 印章认得出就仍是那次注入 —— 不回显, 也不算 CLI 轮。
-      if (bindLine(a, item.body.replace(/^> ?/gm, ""))) return;
+      if (bindLine(a, item.body.replace(/^> ?/gm, ""), item.ts)) return;
       endKeepaliveSwallow(a);
       // 对话边界 = 旧 turn 清算。上一 turn 派发而未返回的前台 Agent/Task 到此作废,
       // 清掉防残留阻塞新 turn 的软收口 (guard 的 defer 判断依据)。
@@ -3944,6 +3985,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // quiet (includeUser=false, 默认) 同样记: includeUser 只决定气泡渲不渲染,
       // 不决定详情页记不记 —— 聊天不再下发 CLI 轮之后, 详情页是唯一的落点。
       a.pendingBriefQuery = item.body;
+      a.pendingBriefAt = item.ts;
       a.pendingFromCli = true;
     }
     if (item.kind === "user_inject") { interject(a, item.said, item.ts); return; }
@@ -3951,9 +3993,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 就是已开好的那一轮 (IM 侧说的, startBriefTurn 在注入前建好)。
     if (item.kind === "user_query") {
       // 同伴 / 定时 / graph 注入的那一行: 问话就是印章里的原话 (不带信封)。
-      const sealed = bindLine(a, item.said);
+      const sealed = bindLine(a, item.said, item.ts);
       if (sealed && !sealed.turn) return;
-      if (a.pendingBriefQuery !== undefined || !a.briefTurnId) a.pendingBriefQuery = item.body;
+      if (a.pendingBriefQuery !== undefined || !a.briefTurnId) { a.pendingBriefQuery = item.body; a.pendingBriefAt = item.ts; }
       // 只认同一句话: 轮次中途 CLI 里又粘了一张图, 不能改写正在跑的这一轮的问话。
       else recordTurnQuery(a.briefTurnId, item.body, (prev) => cleanUserText(prev ?? "") === item.said);
       return;
