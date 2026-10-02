@@ -634,7 +634,8 @@ const main = async (): Promise<void> => {
     const jobs = loadJobStore(cfg.wrc.mirror.jobsFile);
     const receipts = createReceipts({
       idleNow: m.idleNow,
-      jobTotal: (id) => jobs.get(id)?.members.length ?? 0,
+      jobTally: (id) => jobs.tally(id),
+      settleJob: (id, target, outcome, artifacts) => { jobs.settle(id, target, outcome, artifacts); },
       untilIdle: m.untilIdle,
       paneLive: m.paneLive,
       nameOf: displayName,
@@ -1009,7 +1010,8 @@ const main = async (): Promise<void> => {
       const wantReceipt = (body as { receipt?: boolean }).receipt !== false;
       if (inj.ok) receipts.register({ from: self, to: target, channel, job: jobId, at, turn: turn.turn, legs: turn.legs, deadlineAt, k: parentKOf(self) }, wantReceipt);
       // 工单成员照旧记账 (收工那一条会列出各自那段活); 公开的那一句在群里成气泡。
-      if (inj.ok && jobId) jobs.attach(jobId, { target, task: text, spawned: false });
+      // 续问 (re) 不是一段新活: 收工气泡里该列的仍是当初派的那段。
+      if (inj.ok && jobId) jobs.attach(jobId, { target, task: turn.legs > 1 ? "" : text, spawned: false });
       if (inj.ok && isPublic) relayPeer(self, target, text, channel);
       // `wasBusy` 是给调用方的判断依据: 立刻投给一个正在生成的会话, 这句话会排在
       // 它这一轮后面, 而不是马上被读到。
@@ -1079,6 +1081,8 @@ const main = async (): Promise<void> => {
           // 回执早一步到了: 这段话已经作为新的一轮进过你的会话, 别再处理第二遍。
           ...(already ? { delivered: true } : {}),
           ...(wr.reason ? { reason: wr.reason } : {}),
+          ...(closing.kind === "need" ? { need: closing.text } : {}),
+          ...(closing.artifacts.length ? { artifacts: closing.artifacts } : {}),
           ...(result
             ? { result, ...(full.length > result.length + 200 ? { omitted: full.length - result.length } : {}) }
             : full
@@ -1100,8 +1104,6 @@ const main = async (): Promise<void> => {
     // 还得靠 sid 轮换探测才跟得上。模型 / CLI / cwd / keepalive 照旧沿用。
     const restartFresh = (target: string) => {
       const info = m.sessionInfo(target);
-          ...(closing.kind === "need" ? { need: closing.text } : {}),
-          ...(closing.artifacts.length ? { artifacts: closing.artifacts } : {}),
       return m.newSession(target, displayName(target) || tagOfKey(target) || target, info?.cli, { model: info?.model || undefined, silent: true, warm: true });
     };
 
@@ -1876,11 +1878,12 @@ const main = async (): Promise<void> => {
     http.register("POST /jobs/open", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { title?: string; plan?: string };
+      const b = body as { title?: string; plan?: string; expect?: number };
       const title = (b.title ?? "").toString().trim();
+      const expect = Math.min(JOB_MEMBER_MAX, Math.max(0, Math.floor(Number(b.expect) || 0)));
       if (!title) { json(res, 400, { ok: false, reason: "title required —— 一句话说清这个工单要干成什么" }); return; }
       const base = baseOfKey(self);
-      const job = jobs.open(base, self, title);
+      const job = jobs.open(base, self, title, expect || undefined);
       notifyChat(base, renderJobOpen(job, (b.plan ?? "").toString()));
       json(res, 200, {
         ok: true,
@@ -1923,7 +1926,14 @@ const main = async (): Promise<void> => {
           owner: displayName(j.owner),
           mine: j.owner === self,
           openedAt: j.openedAt,
-          members: j.members.map((mm) => ({ address: peerAddress(cfg, self, mm.target), task: mm.task.split("\n")[0] ?? "", spawned: mm.spawned })),
+          ...jobs.tally(j.id),
+          members: j.members.map((mm) => ({
+            address: peerAddress(cfg, self, mm.target),
+            task: mm.task.split("\n")[0] ?? "",
+            spawned: mm.spawned,
+            ...(mm.outcome ? { outcome: mm.outcome } : {}),
+            ...(mm.artifacts?.length ? { artifacts: mm.artifacts } : {}),
+          })),
         })),
       });
     });

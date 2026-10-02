@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- 工单账本按成员记定论 (B2a ⑤): 回执落终态 (含 wait_peer 取走) 时写进 `JobMember.outcome` / `artifacts`, 回执里的「第几份 / 一共几份」以账本为准; 同一对后一句顶掉一份未落定的工单活时继承那张工单 (此前被顶掉的成员永远不计 done, 工单齐不了); 再派 / 续问清掉该成员旧定论。`open_job({expect})` 定份数下限; `list_jobs` 带 done/total 与成员定论; 收工气泡列出非 done 的状态 / 未回与 `↳ 交付物`。
 - `tell_peer({priority})` 投递策略, 只在对方正忙时分岔 (闲着一律立刻投): `normal` (默认) 等它这一轮结束再投 (即原 `when:"idle"`, 最多 `waitSec`); `urgent` 先按 Esc 打断它这一轮 (同 `stop_wizard` interrupt, 但不清它的注入队列、不停 keepalive) 再投, 回包带 `interrupted`; `now` 不等不打断, 并进它当前这一轮 (插话 / 答问 / 补一句)。**BREAKING**: 没给策略时默认从立刻投改为 `normal`; 带 `re` 续问仍默认 `now` (对方可能正挂在 wait_peer 上等你, 等它闲下来会互相干等到超时)。`when` 留作老 MCP 进程的别名 (`idle` ≡ `normal`, `now` ≡ `now`)。charter 的管家段与工具行改写为三档用法。
 - 回执的收口三态 (B2a ④): 答话方可以收口成 `NEED: <问题>` 反问发话方 —— 回执 `status=need` 照投、**不计入工单**, 发话方用 `tell_peer({re})` 答它后接着守同一件活; `ARTIFACT: <路径> — 一句话` 列交付物。`parseClosing` 解析 (有 RESULT 即交差, NEED 只认全大写、`NEED: 无` 不算), `wait_peer` 回包多 `need` / `artifacts`, peer 私聊信封写明这两条约定。
 - rolepage 会话列表的群下子项加范围开关 (第一行标题右端「往来 / 全部」, 记在本地): 「往来」照旧只列与视角有往来的成对子项; 「全部」再列出群里与视角无往来的 role, 整行淡色、名字不加粗以示区分, 点开是它在这个群里的全部记录 (窗口 key `a:<role>||<群>`, 对端不限), 顶栏写法同成对子项、「在 <群>」点回整个群。这类子项的时刻 / 预览与关系图卡片同走 `glanceOfTalk`, 没有成对往来也就不计未读。
@@ -33,6 +34,7 @@
 - wizard 的上下文瘦身: charter 的出生名册只列写了职责的同群 wizard (至多 15 个, 其余报个数、指向 `wizard_roster`), 「我能做什么」改为每个工具一行「何时用」, 「编排」「说话」两节不再复述工具描述 —— charter ~5.1k → ~2.5k tok (管家 ~6.0k → ~3.4k)。工具描述不再教 `send_peer` / `wait_peer` (一律 `tell_peer` + 回执); `send_peer` 描述压成一行; `tell_peer` 只讲机制; `schedule_task` 只留何时用 / `when` 人话 / 默认新建 / 回念 `next`, gate 写法挪进任务文件头注释; 生 wizard 的 `model` 参数共用一句; graph 三件套、`list_claude_sessions`、`switch_claude_session`、`list_chats` 标为人侧/罕用。工具定义合计 ~20.4k → ~17.8k tok。CLAUDE.md 的 MCP 段与 `/help` 的过期措辞一并更正。
 
 ### Fixed
+- 7a76bb6 里 `wait_peer` 回包的 `need` / `artifacts` 两行被插到了 `restartFresh` 中间 (daemon/index.ts 语法错误), 挪回 wait_peer 回包。
 - 回执把上一件事的结论当成这一次的: 对方正忙时我们那一句还排在输入框里, 回执守护在它读进之前读 transcript, 定位不到问话就退回按时刻取。现在定位不到一律视为还没读进、接着等 (不计扑空), 只有对方整段 20s 都闲着而问话仍不在才算一次; 判闲改走注册表 (`untilIdle`), 停在本地对话框上的 wizard 不再被当成答完; 对方 pane 没了直接结束不空转; 交接顺延 deadline 后不再被一次定死的超时提前放弃。
 - 回执静默丢失: 对方超时 / 停下几次都没答 / pane 没了, 以前回执直接扔掉, 发话方只能永远等; 发话方忙满 30 分钟也会扔。现在每份回执都有定论 (信封 `status=done|error|timeout|silent|dead`), 失败的投一份合成说明 + 对方最后一句, 工单按已落定计; 发话方 pane 活着就一直等到能投; 结果先落盘再投, reload 重投同一份, 迟到的答案不改写已投的定论。对方那一轮以 CLI 的 `API Error: …` 收尾时不再当成结论 (以前会被当成回执并计入工单份数): 投一份 `status=error` 不计份数, 接着守它续跑 (`continue`) 出来的答案。
 - 工单回执提前报「全部到齐」: 份数只数回执登记, 而登记按一对 wizard 一份 —— 发起者后来又对同一个成员说了句不带工单的话, 那份就被顶掉, total 少一 (J5a009e 3 个成员报成 done=2 total=2)。现在 total 至少是工单账本的成员数。回执定位还修了两处: 对方一轮中途吃进的排队消息 (`queued_command`) 现在认作问话, 由这一轮的终句作答 (以前永远定位不到, 守满三次判没答); 对方 transcript 里我方先前送去的回执行不再被误认成问话。

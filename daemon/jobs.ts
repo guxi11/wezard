@@ -18,6 +18,11 @@
 // rolepage —— 五个分身同时干活时, 十条交叉气泡里读不出结构, 两条能。
 import { randomUUID } from "node:crypto";
 import { loadJsonMap } from "../shared/json-map-store.js";
+import type { ReceiptStatus } from "../shared/reminder.js";
+
+/** 成员那一份的定论 —— 回执落了终态才写 (need / error 是中途的, 不进账)。 */
+export type MemberOutcome = Exclude<ReceiptStatus, "need" | "error">;
+export interface Artifact { path: string; note: string }
 
 export interface JobMember {
   target: string;
@@ -27,6 +32,10 @@ export interface JobMember {
    *  被拉进来帮忙不该因为工单结束就被杀掉。 */
   spawned: boolean;
   at: number;
+  /** 这一份落定了没有、落成什么。「齐了吗」只数它: 回执登记按发话方 → 答话方一对一份,
+   *  会被同一对的后一句顶掉, 账本不会。 */
+  outcome?: MemberOutcome;
+  artifacts?: Artifact[];
 }
 
 export interface JobRecord {
@@ -36,6 +45,8 @@ export interface JobRecord {
   /** 发起的 wizard。 */
   owner: string;
   title: string;
+  /** 开工时说好要几份 —— 分身还没派齐时「一共几份」的下限。 */
+  expect?: number;
   members: JobMember[];
   status: "open" | "closed";
   openedAt: number;
@@ -44,10 +55,14 @@ export interface JobRecord {
 }
 
 export interface JobStore {
-  open: (base: string, owner: string, title: string) => JobRecord;
+  open: (base: string, owner: string, title: string, expect?: number) => JobRecord;
   get: (id: string) => JobRecord | undefined;
-  /** 幂等: 同一个 target 再次 attach 只更新它那一段活。 */
+  /** 同一个 target 再次 attach 更新它那一段活, 并清掉它已落定的那一份 (又在干了)。 */
   attach: (id: string, member: Omit<JobMember, "at">) => JobRecord | undefined;
+  /** 记下某个成员那一份的定论。不在册 / 已收工 = 不记; 已有定论不改写 (终态写一次)。 */
+  settle: (id: string, target: string, outcome: MemberOutcome, artifacts?: Artifact[]) => JobRecord | undefined;
+  /** 已落定几份 / 一共几份 (成员数与 expect 取大)。 */
+  tally: (id: string) => { done: number; total: number } | undefined;
   close: (id: string, summary: string) => JobRecord | undefined;
   /** 某个聊天里还开着的工单, 新的在前。 */
   openOf: (base: string) => JobRecord[];
@@ -73,9 +88,9 @@ const dropStale = (map: Record<string, JobRecord>): Record<string, JobRecord> =>
 export const loadJobStore = (filePath: string): JobStore => {
   const db = loadJsonMap<JobRecord>(filePath, dropStale);
   return {
-    open: (base, owner, title) => {
+    open: (base, owner, title, expect) => {
       const id = newId();
-      return db.set(id, { id, base, owner, title, members: [], status: "open", openedAt: Date.now() });
+      return db.set(id, { id, base, owner, title, ...(expect ? { expect } : {}), members: [], status: "open", openedAt: Date.now() });
     },
     get: db.get,
     attach: (id, member) => {
@@ -83,7 +98,21 @@ export const loadJobStore = (filePath: string): JobStore => {
       if (!j || j.status !== "open" || j.members.length >= JOB_MEMBER_MAX) return undefined;
       const rest = j.members.filter((x) => x.target !== member.target);
       const prev = j.members.find((x) => x.target === member.target);
-      return db.set(id, { ...j, members: [...rest, { ...member, spawned: member.spawned || !!prev?.spawned, at: Date.now() }] });
+      // 再派一段 (含 re 续问) = 它又在干了: 旧的定论作废, 不然「全部到齐」会提前报、
+      // close_job 会把还在干活的它收掉。
+      return db.set(id, { ...j, members: [...rest, { ...member, task: member.task || prev?.task || "", spawned: member.spawned || !!prev?.spawned, at: Date.now() }] });
+    },
+    settle: (id, target, outcome, artifacts) => {
+      const j = db.get(id);
+      if (!j || j.status !== "open" || !j.members.some((x) => x.target === target && !x.outcome)) return undefined;
+      return db.set(id, {
+        ...j,
+        members: j.members.map((x) => (x.target === target ? { ...x, outcome, ...(artifacts?.length ? { artifacts } : {}) } : x)),
+      });
+    },
+    tally: (id) => {
+      const j = db.get(id);
+      return j && { done: j.members.filter((x) => x.outcome).length, total: Math.max(j.members.length, j.expect ?? 0) };
     },
     close: (id, summary) => {
       const j = db.get(id);
@@ -114,7 +143,10 @@ export const renderJobClose = (
 ): string =>
   [
     `📋 \`${job.id}\` 收工 · **${job.title}**`,
-    ...job.members.map((mm) => `- ${label(mm.target)}${mm.task ? ` · ${firstLine(mm.task)}` : ""}`),
+    ...job.members.flatMap((mm) => [
+      `- ${label(mm.target)}${mm.outcome === "done" ? "" : ` · ${mm.outcome ?? "未回"}`}${mm.task ? ` · ${firstLine(mm.task)}` : ""}`,
+      ...(mm.artifacts ?? []).map((a) => `  ↳ ${a.path}${a.note ? ` — ${firstLine(a.note, 60)}` : ""}`),
+    ]),
     job.summary?.trim() ? `\n${job.summary.trim()}` : "",
     recycled > 0 ? `(已回收 ${recycled} 个临时分身)` : "",
   ]

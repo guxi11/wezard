@@ -114,10 +114,12 @@ export interface ReceiptDeps {
   /** 把回执 paste 进发话方的输入框 (调用方负责拼信封)。 */
   deliver: (to: string, body: string, meta: ReceiptMeta) => Promise<{ ok: boolean; reason?: string }>;
   nameOf: (target: string) => string;
-  /** 工单账本里的成员数 —— 「一共几份」的下限。只数回执登记会漏: 登记按发话方 →
-   *  答话方一对一份, 同一对后来又说了一句不带工单的 (或别的工单的), 这份就被顶掉,
-   *  总数跟着少一, 「全部到齐」就提前报了。 */
-  jobTotal?: (job: string) => number;
+  /** 工单账本的计数 (已落定几份 / 一共几份)。只数回执登记会漏: 登记按发话方 →
+   *  答话方一对一份, 同一对后来又说了一句, 这份就被顶掉, 总数跟着少一, 「全部到齐」
+   *  就提前报了 —— 或者被顶掉的那个成员永远不计 done。账本按成员记, 不会。 */
+  jobTally?: (job: string) => { done: number; total: number } | undefined;
+  /** 成员那一份落定了: 记进账本 (终态写一次; need / error 不来这里)。 */
+  settleJob?: (job: string, target: string, outcome: Exclude<ReceiptStatus, "need" | "error">, artifacts: { path: string; note: string }[]) => void;
   log: Logger;
   /** 登记的落盘处。缺省 = 纯内存 (reload 即丢)。 */
   store?: JsonMap<Slot>;
@@ -379,7 +381,12 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     // 终态写一次不再改: reload 打断投递后续守的那一份直接重投同一个结果, 不再重等。
     const out = s.outcome && !interim(s.outcome.status) ? s.outcome : await awaitReply(s);
     if (stale(s)) return;
-    if (s.claimed || !out) { s.resolved = true; settle(s); return; } // wait_peer 抢先取走了
+    if (s.claimed || !out) { // wait_peer 抢先取走了
+      s.resolved = true;
+      settle(s);
+      if (s.job) deps.settleJob?.(s.job, s.to, "done", []);
+      return;
+    }
     // 下面到 save 之间不能有 await: relay 与这里的判定必须看到同一个状态。
     // 锚被 relay 挪到了回执那一句: 刚取到的是旧锚的答案 (那句「已派」), 重来。
     if (s.at !== anchor) return watch(s);
@@ -394,6 +401,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     s.outcome = out;
     s.resolved = final;
     save(s);
+    if (final && s.job) deps.settleJob?.(s.job, s.to, out.status as Exclude<ReceiptStatus, "need" | "error">, parseClosing(out.body).artifacts);
     // 发话方自己在交接: 重开的那几秒里 pane 是死的, 别把这当成"已经不在了"。
     await deps.handedOff?.(s.from);
     if (!(await deps.paneLive(s.from))) {
@@ -404,12 +412,13 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     }
     if (final) s.claimed = true; // 占位先于投递: 这中间来的 wait_peer 不该把同一段再取一遍
     const peers = s.job ? ofJob(s.from, s.job) : [s];
+    const tally = s.job ? deps.jobTally?.(s.job) : undefined;
     const meta: ReceiptMeta = {
       from: s.to,
       channel: s.channel,
       job: s.job,
-      done: peers.filter((x) => x.resolved).length,
-      total: Math.max(peers.length, s.job ? deps.jobTotal?.(s.job) ?? 0 : 0),
+      done: Math.max(peers.filter((x) => x.resolved).length, tally?.done ?? 0),
+      total: Math.max(peers.length, tally?.total ?? 0),
       status: out.status,
       turn: s.turn ?? "",
     };
@@ -453,9 +462,13 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     register: (tell, watchIt = true) => {
       const k = keyOfPair(tell.from, tell.to);
       const at = tell.at ?? Date.now();
+      // 顶掉一份还没落定的工单活、自己又没带工单: 继承那张工单 —— 旧那份不会再投了,
+      // 这一句的答案就是那个成员的交代; 不继承它就永远不计 done, 工单齐不了。
+      const prev = slots.get(k);
+      const job = tell.job || (prev?.job && !prev.resolved ? prev.job : "");
       const s: Slot = {
         ...tell,
-        job: tell.job ?? "",
+        job,
         at,
         turn: tell.turn ?? newTurn(),
         legs: tell.legs ?? 1,
