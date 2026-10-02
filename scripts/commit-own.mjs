@@ -79,7 +79,7 @@ const syncSharedIndex = (old, neu, paths) => paths
   .filter((p) => entryInIndex(p) === entryAt(old, p))
   .forEach((p) => {
     const e = entryAt(neu, p);
-    e ? git(["update-index", "--cacheinfo", `${e.replace(" ", ",")},${p}`])
+    e ? git(["update-index", "--add", "--cacheinfo", `${e.replace(" ", ",")},${p}`])
       : git(["update-index", "--force-remove", "--", p]);
   });
 
