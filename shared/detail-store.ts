@@ -137,6 +137,18 @@ export interface TurnFrom {
   /** 回执: 工单里已落定几份 / 一共几份 —— 「第 i/n 份」。不走工单的没有。 */
   done?: number;
   total?: number;
+  /** kind=peer: 这条派活链是谁开的头 (见 Asker) —— 派活时从发话方那一轮继承, 回执原样带回。
+   *  回执那一轮在群里的终句就是答给他的。不知道 (定时任务开的头 / CLI 敲字 / 老记录) = 没有。 */
+  asker?: Asker;
+}
+
+/** 一条派活链的链头: 开这件事的那句人话是谁、在哪个公开频道说的。一个 wizard 可能同时
+ *  在答好几个人, 受众只能顺着链找回来, 不能拿「群里最近开口的人」去猜。 */
+export interface Asker {
+  /** 发话人 `user:<userid>`。 */
+  who: string;
+  /** 他说那句话的公开频道 base —— 受众只在同一个频道里才成立。 */
+  chat: string;
 }
 
 // Subagent 归属 —— 这一轮不是主会话的 turn, 是 Task/Agent 工具派出的子 agent
@@ -230,6 +242,8 @@ export interface PostDetailRecord {
   /** 贴进的那个公开频道的 base。 */
   channel: string;
   body: string;
+  /** 调用方那一轮的链头 (见 Asker); 认不出 = 没有。 */
+  asker?: Asker;
 }
 
 // 宪章 —— wezard 用 --append-system-prompt 压进 wizard 的那份身份 (daemon/wizard.ts renderCharter)。

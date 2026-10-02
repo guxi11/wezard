@@ -17,6 +17,7 @@
 import { randomBytes } from "node:crypto";
 import type { Logger } from "pino";
 import type { JsonMap } from "../shared/json-map-store.js";
+import type { Asker } from "../shared/detail-store.js";
 import type { IdleResult } from "./graph.js";
 import { parseClosing, type PeerReply } from "./peers.js";
 import { isTerminal, turnState, type Terminal, type TurnState } from "../shared/turn-state.js";
@@ -76,6 +77,8 @@ export interface ReceiptMeta {
   k?: ParentK;
   /** 同一个父 k 下还有几份没回 (>0 时这一轮不外发)。 */
   pending?: number;
+  /** 这条链的链头 (见 Asker) —— 记进回执那一轮, rolepage 据此知道终句答给谁。 */
+  asker?: Asker;
 }
 
 /** 发出这次 tell_peer 的那一轮, 结论本该交给谁 (docs/evolve/b2-reply-routing.md §3.1):
@@ -134,7 +137,7 @@ export interface ReceiptDeps {
   /** 工单成员这份答复不合工单的验收 → 理由; 合格 / 不在工单 = undefined (见 jobs.rejectReason)。 */
   accept?: (job: string, body: string) => string | undefined;
   /** 以发话方的名义把同一件活打回一次 (同件号续问, 私聊)。返回是否注入成功。 */
-  rebound?: (x: { from: string; to: string; turn: string; legs: number; channel: string }, why: string) => Promise<boolean>;
+  rebound?: (x: { from: string; to: string; turn: string; legs: number; channel: string; asker?: Asker }, why: string) => Promise<boolean>;
 }
 
 export interface Tell {
@@ -154,6 +157,8 @@ export interface Tell {
   /** 守护进程因为不合工单验收打回过一次, 这是被打回的那段原文 —— 再交上来的照收, 不再打回;
    *  打回那一句还没落盘时按件号会先定位到原来的问话, 取到的这段原文不算答案。 */
   bounced?: string;
+  /** 发话方那一轮的链头 (见 Asker): 回执带回去, 子活再派下去时继承。 */
+  asker?: Asker;
 }
 
 /** 这一句该挂的件号: 新活领一个新的; `re` 续问沿用那件活的件号、工单与频道。 */
@@ -216,6 +221,8 @@ export interface Receipts {
    *  `channel` = 它这一轮的公开频道。私聊来的而发话方没在等 (wait_peer 取走 / 不要回执)
    *  → undefined, 退回现状。 */
   parentOf: (self: string, env: Envelope | undefined, channel: string, opening: string) => ParentK | undefined;
+  /** `self` 此刻这一轮 (同伴派的活 / 回执) 的链头: 按件号找回登记时记下的那个。人开的轮不归这里。 */
+  askerOf: (self: string, env: Envelope) => Asker | undefined;
   /** 还没落定的每一件活此刻的状态 (见 turn-state.ts) —— 名册 / peek / 工单清单读它。只读, 不落盘。 */
   states: () => InFlight[];
   /** `from` → `to` 那件还没落定的活: 它的工单、件号、是不是停在 NEED 上。没有 = undefined。 */
@@ -428,8 +435,8 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     if (why && deps.rebound) {
       const at = Date.now();
       const legs = (s.legs ?? 1) + 1;
-      register({ from: s.from, to: s.to, channel: s.channel, job: s.job, at, turn: s.turn, legs, deadlineAt: deadlineOf(at), ...(s.k ? { k: s.k } : {}), bounced: out.body });
-      const ok = await deps.rebound({ from: s.from, to: s.to, turn: s.turn!, legs, channel: s.channel }, why);
+      register({ from: s.from, to: s.to, channel: s.channel, job: s.job, at, turn: s.turn, legs, deadlineAt: deadlineOf(at), ...(s.k ? { k: s.k } : {}), ...(s.asker ? { asker: s.asker } : {}), bounced: out.body });
+      const ok = await deps.rebound({ from: s.from, to: s.to, turn: s.turn!, legs, channel: s.channel, ...(s.asker ? { asker: s.asker } : {}) }, why);
       lg.info({ why, ok }, "receipt: 不合工单验收, 打回一次");
       // 打回没注入进去: 原来那份照常交上去 (钉成新 slot 的答案, 它的 watcher 直接拿去投)。
       if (!ok) { const n = slots.get(keyOfPair(s.from, s.to)); if (n?.bounced && n.turn === s.turn) { n.answer = out.body; save(n); } }
@@ -459,6 +466,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       total: Math.max(peers.length, tally?.total ?? 0),
       status: out.status,
       turn: s.turn ?? "",
+      ...(s.asker ? { asker: s.asker } : {}),
     };
     const sent = await serial(s.from, async () => {
       // 发话方正在生成 → 等它这一轮说完, 一结束就投。它的 pane 还活着就一直等 (上限是
@@ -605,6 +613,13 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
         return p && { kind: "peer", from: p.from, turn: p.turn! };
       }
       return { kind: "chat", channel, turn: opening };
+    },
+    askerOf: (self, env) => {
+      // 回执轮: 那件活是 self 派出去的; 派来的活: 那件活是派给 self 的。同一对后来又说了一句,
+      // 槽被顶掉 —— 件号对不上就认不出, 宁可不知道。
+      const mine = (x: Slot): boolean => (env.receipt ? x.from === self : x.to === self);
+      const hit = [...slots.values()].find((x) => mine(x) && (env.turn ? x.turn === env.turn : deps.nameOf(env.receipt ? x.to : x.from) === env.from));
+      return hit?.asker;
     },
     resume: () => {
       // 挂起且子活还没落定的不守: 叫醒它是 relay / release 的事, 这里再 arm 一个就是两个 watcher。

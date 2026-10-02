@@ -47,6 +47,7 @@ import { isQuiet, slugify, uniqueId } from "../shared/task-file.js";
 import { baseOfKey, bindTagLinker, isInternalKey, keyOf, linkTags, normalizeTag, tagFromCwd, tagHead, tagLink, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
 import { appendEpisode, clipForCharter, cwdOfMd, episodePath, inboxPath, mdsOf, proposedCwds, memoryPath, memoryRoot, proposeMemory, readMemory, type MemoryScope } from "./wizard-memory.js";
 import { retireStewardTask, startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
+import type { Asker } from "../shared/detail-store.js";
 import { applyChatNames, chatBaseOf, chatNameOf, clearChatName, listChatNames, normChatName, peerAddress, planChatNames, setChatName } from "./chat-name.js";
 import {
   bindWizardStore,
@@ -660,7 +661,7 @@ const main = async (): Promise<void> => {
       settleJob: (id, target, outcome, artifacts) => { jobs.settle(id, target, outcome, artifacts); },
       accept: (id, body) => { const j = jobs.get(id); return j?.status === "open" ? rejectReason(j.accept ?? "result", parseClosing(body)) : undefined; },
       rebound: async (x, why) => (await m.injectText(x.to, `（守护进程代 ${displayName(x.from)} 打回一次: 这件活是工单里的一份, 你的回复${why}。请按约定收口 —— 末尾一行 \`RESULT: <结论>\`, 交付了文件每个加一行 \`ARTIFACT: <路径> — 一句话\`; 真缺信息就 \`NEED: <问题>\`。）`, undefined, {
-        from: { kind: "peer", from: x.from, turn: x.turn },
+        from: { kind: "peer", from: x.from, turn: x.turn, ...(x.asker ? { asker: x.asker } : {}) },
         channel: x.channel,
         envelope: envelopeFor(x.from, x.channel, { turn: x.turn, legs: x.legs, re: true }),
       })).ok,
@@ -677,7 +678,7 @@ const main = async (): Promise<void> => {
         m.injectText(to, clipMiddle(bodyText), undefined, {
           // receipt:true 是「这一轮不该再生回执」的记录 —— 回环在结构上就不成立:
           // 只有 tell_peer 那条路登记 watcher, 这里是直接注入。
-          from: { kind: "peer", from: meta.from, receipt: true, status: meta.status, ...(meta.turn ? { turn: meta.turn } : {}), ...(meta.job ? { job: meta.job, done: meta.done, total: meta.total } : {}) },
+          from: { kind: "peer", from: meta.from, receipt: true, status: meta.status, ...(meta.turn ? { turn: meta.turn } : {}), ...(meta.job ? { job: meta.job, done: meta.done, total: meta.total } : {}), ...(meta.asker ? { asker: meta.asker } : {}) },
           channel: meta.channel,
           envelope: renderReceiptEnvelope(
             displayName(meta.from),
@@ -710,7 +711,7 @@ const main = async (): Promise<void> => {
       inject: (t, text, owe) =>
         owe.length
           ? m.injectText(t, text, undefined, {
-              from: { kind: "peer", from: owe[0]!.from, ...(owe[0]!.turn ? { turn: owe[0]!.turn } : {}) },
+              from: { kind: "peer", from: owe[0]!.from, ...(owe[0]!.turn ? { turn: owe[0]!.turn } : {}), ...(owe[0]!.asker ? { asker: owe[0]!.asker } : {}) },
               channel: owe[0]!.channel,
               envelope: owe.map((o) => envelopeFor(o.from, o.channel, o.turn ? { turn: o.turn } : undefined)).join(""),
             })
@@ -758,10 +759,26 @@ const main = async (): Promise<void> => {
       if (env?.kind === "peer") return env.from === displayName(self) ? undefined : { from: env.from, ...(env.turn ? { turn: env.turn } : {}) };
       return { from: env?.kind === "task" ? env.from : env?.from ? `人 (${env.from})` : "人" };
     };
-    const parentKOf = (self: string): ParentK | undefined => {
+    const openingOfSelf = (self: string) => {
       const p = m.sessionInfo(self)?.jsonlPath;
-      const opening = p ? openingOf(talkTurns(expandHome(p), 80, pingSigs, false, true)) : undefined;
+      return p ? openingOf(talkTurns(expandHome(p), 80, pingSigs, false, true)) : undefined;
+    };
+    const parentKOf = (self: string): ParentK | undefined => {
+      const opening = openingOfSelf(self);
       return receipts.parentOf(self, opening?.env, channelOf(self), String(opening?.ms ?? 0));
+    };
+    /** `self` 此刻这一轮的链头 (见 Asker), 同样认开头那句的信封: 人在群里说的 → 信封上的
+     *  userid 与群; 与人的单聊里没挂信封 → 那个人; 同伴派的活 / 回执 → 登记那件活时记下的;
+     *  定时任务、CLI 敲字、认不出 → undefined (如实不知道, 不猜)。 */
+    const askerOf = (self: string): Asker | undefined => {
+      const env = openingOfSelf(self)?.env;
+      const home = baseOfKey(self);
+      if (!env) return home.startsWith("user:") ? { who: home, chat: home } : undefined;
+      if (env.kind === "human") {
+        const chat = env.chat ? chatBaseOf(cfg, env.chat) : home;
+        return chat ? { who: `user:${env.from}`, chat } : undefined;
+      }
+      return env.kind === "peer" ? receipts.askerOf(self, env) : undefined;
     };
     // 交接先续做: 它的闸要在回执续守之前立起来, 否则续守的 watcher 会读到换了一半的会话。
     void m.restored.then(() => { handoffs.resume(); receipts.resume(); });
@@ -852,9 +869,10 @@ const main = async (): Promise<void> => {
         return;
       }
       const dests = [...new Set(refs.length ? refs.map((r) => chatBaseOf(cfg, r)) : [channelOf(self)])];
+      const asker = askerOf(self);
       for (const dest of dests) {
         notifyChat(dest, `${relayLabel(self)}\n\n${content}`);
-        recordPost({ target: self, channel: dest, body: content });
+        recordPost({ target: self, channel: dest, body: content, ...(asker ? { asker } : {}) });
       }
       json(res, 200, { ok: true, sent: dests.map((d) => chatNameOf(cfg, d) || d) });
     });
@@ -1067,8 +1085,9 @@ const main = async (): Promise<void> => {
       // 是"放出去就不管了"的那种派活; fyi 一定不要。对方的信封据此改口, 不再让它收口。
       const wantReceipt = kind !== "fyi" && (body as { receipt?: boolean }).receipt !== false;
       const deadlineAt = deadlineOf(at, deadlineSec === undefined ? undefined : Number(deadlineSec));
+      const asker = askerOf(self);
       const inj = await m.injectText(target, text, undefined, {
-        from: { kind: "peer", from: self, turn: turn.turn, ...(jobId ? { job: jobId } : {}), ...(isPublic ? { public: true } : {}) },
+        from: { kind: "peer", from: self, turn: turn.turn, ...(jobId ? { job: jobId } : {}), ...(isPublic ? { public: true } : {}), ...(asker ? { asker } : {}) },
         channel,
         envelope: envelopeFor(self, channel, {
           turn: turn.turn,
@@ -1085,7 +1104,7 @@ const main = async (): Promise<void> => {
       // 父 k: 默认这件活算发话方此刻在答的那件的子活 (链式续回); `chain:false` = 旁支,
       // 回执照常回来, 但不挂住它给上游的交代 —— 只有发话方知道这件活是不是为上游派的。
       const k = (body as { chain?: boolean }).chain === false ? undefined : parentKOf(self);
-      if (inj.ok && wantReceipt) receipts.register({ from: self, to: target, channel, job: jobId, at, turn: turn.turn, legs: turn.legs, deadlineAt, ...(k ? { k } : {}) });
+      if (inj.ok && wantReceipt) receipts.register({ from: self, to: target, channel, job: jobId, at, turn: turn.turn, legs: turn.legs, deadlineAt, ...(k ? { k } : {}), ...(asker ? { asker } : {}) });
       // 工单成员照旧记账 (收工那一条会列出各自那段活); 公开的那一句在群里成气泡。
       // 续问 (re) 不是一段新活: 工单页与留档里该列的仍是当初派的那段。
       if (inj.ok && jobId) jobs.attach(jobId, { target, task: turn.legs > 1 ? "" : text, spawned: false });
@@ -1900,6 +1919,7 @@ const main = async (): Promise<void> => {
       // wait_peer 才不会把它们当成分身对这件活的答复。
       const taskAt = Date.now();
       const taskTurn = newTurn();
+      const asker = task ? askerOf(self) : undefined;
       const r = await m.cloneSession({
         parent: source,
         target,
@@ -1912,7 +1932,7 @@ const main = async (): Promise<void> => {
         // 继承路径上第一句话是分叉的触发器, 所以直接把活当开场白 —— 少一次往返,
         // 也少一次"就位了但没事干"的空转。
         bootstrap: task ? task + envelopeFor(self, "", { turn: taskTurn }) : undefined,
-        ...(task ? { bootstrapFrom: { from: { kind: "peer" as const, from: self, turn: taskTurn, ...(jobId ? { job: jobId } : {}) }, query: task } } : {}),
+        ...(task ? { bootstrapFrom: { from: { kind: "peer" as const, from: self, turn: taskTurn, ...(jobId ? { job: jobId } : {}), ...(asker ? { asker } : {}) }, query: task } } : {}),
         keepalive,
       }).catch((e: unknown) => ({ ok: false as const, reason: `spawn threw: ${String(e)}`, inherited: false }));
       // 生不出来就回滚身份 —— 否则名字被一个永远没有会话的记录占住。
@@ -1937,7 +1957,7 @@ const main = async (): Promise<void> => {
       // 继承路径上活已经随开场白进去了, 空白分身才需要在这里补一次注入 (私聊)。
       let dispatched = r.inherited && !!task;
       if (task && !r.inherited) {
-        const inj = await m.injectText(target, task, undefined, { from: { kind: "peer", from: self, turn: taskTurn, ...(jobId ? { job: jobId } : {}) }, channel: "", envelope: envelopeFor(self, "", { turn: taskTurn }) });
+        const inj = await m.injectText(target, task, undefined, { from: { kind: "peer", from: self, turn: taskTurn, ...(jobId ? { job: jobId } : {}), ...(asker ? { asker } : {}) }, channel: "", envelope: envelopeFor(self, "", { turn: taskTurn }) });
         dispatched = inj.ok;
       }
       if (jobId) jobs.attach(jobId, { target, task, spawned: true });
@@ -1945,7 +1965,7 @@ const main = async (): Promise<void> => {
       // 分身的第一件活也守回执: fan-out 最常见的形状就是 clone_wizard({task}) × N,
       // 让它们干完自己把结论送回来, 发起方不必挂在 wait_peer 上。
       const k = (body as { chain?: boolean }).chain === false ? undefined : parentKOf(self);
-      if (dispatched) receipts.register({ from: self, to: target, channel: "", job: jobId, at: taskAt, turn: taskTurn, ...(k ? { k } : {}) });
+      if (dispatched) receipts.register({ from: self, to: target, channel: "", job: jobId, at: taskAt, turn: taskTurn, ...(k ? { k } : {}), ...(asker ? { asker } : {}) });
       json(res, 200, { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, keepalive, ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(jobId ? { job: jobId } : {}), ...(detached ? { detached: true } : {}) });
     });
 

@@ -15,6 +15,7 @@
 // 从断点接着做。
 import type { Logger } from "pino";
 import type { JsonMap } from "../shared/json-map-store.js";
+import type { Asker } from "../shared/detail-store.js";
 import { waitForIdle } from "./graph.js";
 import type { Receipts, Slot } from "./receipts.js";
 
@@ -48,6 +49,8 @@ export interface Owe {
   channel: string;
   /** 那件活的件号 —— 新会话贴回简报那一句照样挂上, 回执仍按它定位。 */
   turn?: string;
+  /** 那件活的链头 —— 新会话那一轮照样记上 (见 Asker)。 */
+  asker?: Asker;
 }
 
 export interface Pending {
@@ -161,7 +164,7 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
           (s: Slot) => deps.answeredBefore(p.target, s.from, s.at, until, s.turn) ?? "",
           Date.now(),
         );
-        const next = saved({ ...p, stage: "restarting", owe: carried.map((s) => ({ from: s.from, channel: s.channel, ...(s.turn ? { turn: s.turn } : {}) })) });
+        const next = saved({ ...p, stage: "restarting", owe: carried.map((s) => ({ from: s.from, channel: s.channel, ...(s.turn ? { turn: s.turn } : {}), ...(s.asker ? { asker: s.asker } : {}) })) });
         const r = await deps.restart(p.target);
         if (!r.ok) return fail(next, 502, `/new failed: ${r.reason ?? "unknown"}`);
         return step(saved({ ...next, stage: "restarted" }));

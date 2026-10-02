@@ -7,8 +7,8 @@
 // 一轮 turn 在这里拆成两条消息:
 //   入  发话方 → 该 wizard     userQuery
 //   出  该 wizard → 发话方     本轮的回复 (文本 + 工具细节)
-// 发话方: 同伴 (from.kind=peer) / 定时任务 (task) / 人 (speaker; 老记录没有就是
-// 「人」)。消息落在哪个会话由 channel 决定 —— 公开频道 (群 / 与人的单聊) 按 base
+// 发话方: 同伴 (from.kind=peer) / 定时任务 (task) / 人 (speaker; 认不出就是
+// 「未知」)。消息落在哪个会话由 channel 决定 —— 公开频道 (群 / 与人的单聊) 按 base
 // 归并, 私聊按对端 wizard 归并。
 //
 // role id: wizard 就是它的 target key; 人是 `human:<userid>` (`human:` = 不知道是谁);
@@ -19,7 +19,7 @@
 import { baseOfKey, labelFor, stripSigil, tagOfKey } from "./session-label.js";
 import { isGhostTurn, isMark, isPost, isTurn, staleAt, summarizeTag, type TagSummary } from "./chat-view.js";
 import { isKeepaliveTurn } from "./keepalive.js";
-import type { DetailRecord, MarkDetailRecord, PostDetailRecord, TurnDetailRecord } from "./detail-store.js";
+import type { Asker, DetailRecord, MarkDetailRecord, PostDetailRecord, TurnDetailRecord } from "./detail-store.js";
 import { jobProgress, type WorldFactJob, type WorldFacts, type WorldFactWizard } from "./world.js";
 
 export type RoleKind = "wizard" | "human" | "task";
@@ -82,8 +82,11 @@ const convTurns = (records: readonly DetailRecord[], now: number): TurnDetailRec
 /** 保温 ping 的那一条 —— 进时间轴, 但不进会话列表的条数/预览, 也不算一条关系。 */
 export const isPing = (m: Msg): boolean => isKeepaliveTurn(m.turn);
 
-/** 一个公开频道里听话的那一方: 与人的单聊是那个人, 群里是「人」。 */
-const audienceOf = (channel: string): string => (channel.startsWith("user:") ? humanOf(channel) : "human:");
+/** 一个公开频道里听话的那一方: 与人的单聊是那个人; 群里是这条链的链头 (守护进程写 turn /
+ *  post 时顺着派活链记下的, 见 Asker) —— 只在他正是在这个群里开的口时才算; 认不出就是
+ *  `human:` (未知), 不拿群里别的开口的人去猜: 一个 wizard 可能同时在答好几个人。 */
+const audienceOf = (channel: string, asker: Asker | undefined): string =>
+  channel.startsWith("user:") ? humanOf(channel) : asker?.chat === channel ? humanOf(asker.who) : "human:";
 
 /** 回执轮: 守护进程把同伴那一轮的终句原样转进发话方的会话。 */
 const isReceipt = (r: TurnDetailRecord): boolean => r.from?.kind === "peer" && r.from.receipt === true;
@@ -98,7 +101,7 @@ export const messagesOfTurn = (r: TurnDetailRecord): Msg[] => {
   const who = senderOf(r);
   const channel = channelOf(r);
   const receipt = isReceipt(r);
-  const to = receipt && channel ? audienceOf(channel) : who;
+  const to = receipt && channel ? audienceOf(channel, r.from?.asker) : who;
   const firstOut = r.items.reduce((m, it) => Math.min(m, it.ts), Infinity);
   const inMsg: Msg[] = r.userQuery?.trim() && !receipt
     ? [{ id: `${r.id}:in`, turn: r, dir: "in", from: who, to: w, channel, ts: r.createdAt }]
@@ -119,32 +122,13 @@ export const messageOfPost = (p: PostDetailRecord): Msg => ({
   },
   dir: "out",
   from: p.target,
-  to: audienceOf(p.channel),
+  to: audienceOf(p.channel, p.asker),
   channel: p.channel,
   ts: p.createdAt,
 });
 
-/** 群里认不出是谁的那一方 (`human:`: 回执轮 / notify 的听众, 没带 speaker 的老轮) →
- *  那个群里认得出的人: 这句之前最近开口的那个, 没有就之后第一个, 群里从没人开口就
- *  取全体里最近的那个 (单用户部署) —— 不然「人」会被当成一个独立的 role 立在会话里。
- *  一个人都认不出时才留 `human:`。 */
-export const settleHumans = (records: readonly DetailRecord[]): ((m: Msg) => Msg) => {
-  const said = records.filter(isTurn).filter((r) => !!r.target && !r.agent)
-    .map((r) => ({ ts: r.createdAt, channel: channelOf(r), who: senderOf(r) }))
-    .filter((x) => x.who.startsWith("human:") && x.who !== "human:")
-    .sort((a, b) => a.ts - b.ts);
-  const latest = said[said.length - 1]?.who ?? "human:";
-  const pick = (channel: string, ts: number): string => {
-    const here = said.filter((x) => x.channel === channel);
-    return (here.filter((x) => x.ts <= ts).pop() ?? here[0])?.who ?? latest;
-  };
-  const settle = (id: string, m: Msg): string => (id === "human:" && m.channel ? pick(m.channel, m.ts) : id);
-  return (m) => (m.from === "human:" || m.to === "human:" ? { ...m, from: settle(m.from, m), to: settle(m.to, m) } : m);
-};
-
 export const allMessages = (records: readonly DetailRecord[], now: number): Msg[] =>
   [...convTurns(records, now).flatMap(messagesOfTurn), ...records.filter(isPost).map(messageOfPost)]
-    .map(settleHumans(records))
     .sort((a, b) => a.ts - b.ts);
 
 // ── 名录 ─────────────────────────────────────────────────────────────
@@ -185,7 +169,7 @@ export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFact
     if (id.startsWith("task:")) return `定时 ${id.slice(5)}`;
     if (id === SYSTEM) return "wezard";
     if (wizards.has(id)) return (facts_.get(id)?.name ?? "").trim() || tagOfKey(id) || chatName(baseOfKey(id)) || id;
-    if (id === "human:") return "人";
+    if (id === "human:") return "未知";
     return id.startsWith("human:") ? id.slice(6) : id;
   };
   const labelOf = (id: string): string =>
