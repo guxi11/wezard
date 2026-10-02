@@ -132,6 +132,7 @@ const mergeFacts = (fresh: readonly FactsPush[]): WorldFacts => {
   return {
     wizards: uniq(fresh.flatMap((p) => [...p.facts.wizards]), (w) => w.target),
     jobs: uniq(fresh.flatMap((p) => [...p.facts.jobs]), (j) => j.id),
+    inflight: uniq(fresh.flatMap((p) => [...(p.facts.inflight ?? [])]), (x) => `${x.from}\0${x.to}\0${x.turn}`),
     schedules: uniq(fresh.flatMap((p) => [...p.facts.schedules]), (x) => x.id),
     chatNames: Object.assign({}, ...fresh.map((p) => p.facts.chatNames)) as Record<string, string>,
   };

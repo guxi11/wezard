@@ -705,6 +705,30 @@
     var tip = (p.tasks ? p.tasks + ' 条定时' : '') + (p.jobs ? (p.tasks ? ' · ' : '') + p.jobs + ' 个工单进行中' : '') + ' · 点开看日程';
     return ['📅', txt, tip.replace(/^ · /, ''), 'plan', p.broken ? 'bad' : ''];
   };
+  // ── 待办托盘 (只读): 视角派出去还没落定的 (在等 → 谁) 与派给它还没交的 (欠着 ← 谁)。
+  // 状态词与名册 / peek 的「在等 / 欠着」同一份 (shared/turn-state.ts); 多久了 = 自派出起。
+  var TS = {
+    working: ['在干', 'run'], blocked: ['卡在审批', 'wait'], 'needs-input': ['反问待答', 'need'], errored: ['报错停了', 'bad'],
+    deferred: ['挂起等子活', 'run'], done: ['已交', 'ok'], timeout: ['超时', 'bad'], silent: ['没答', 'bad'], dead: ['失联', 'bad'], canceled: ['撤回', 'bad'],
+  };
+  var trayHTML = function (xs, me) {
+    if (!xs.length) return '';
+    var row = function (x) {
+      var out = x.from === me, other = out ? x.to : x.from, st = TS[x.state] || [x.state, 'run'];
+      return '<li class="tr ' + st[1] + '" title="' + esc((x.turn || '') + (x.job ? ' · 工单 ' + x.job : '')) + '">' +
+        '<span class="dir">' + (out ? '在等 →' : '欠着 ←') + '</span>' + nm(other, '', true) +
+        '<span class="st">' + esc(st[0]) + (x.waiting && x.waiting.length ? ' · ' + esc(x.waiting.join(' / ')) : '') + '</span>' +
+        (x.job ? '<span class="jid">' + esc(x.job) + '</span>' : '') +
+        '<span class="ts">' + esc(fmtAgo(x.at)) + '</span></li>';
+    };
+    // 卡住的 (要人或要我动手的) 排前, 其余按派出早晚。
+    var hot = { wait: 0, need: 0, bad: 1, run: 2, ok: 3 };
+    var list = xs.slice().sort(function (a, b) {
+      return (hot[(TS[a.state] || [0, 'run'])[1]] - hot[(TS[b.state] || [0, 'run'])[1]]) || a.at - b.at;
+    });
+    return '<div class="tray"><h3>在飞<span>' + xs.length + '</span></h3><ul>' + list.map(row).join('') + '</ul></div>';
+  };
+
   var renderRole = function () {
     var r = R.role;
     if (!r) return;
@@ -727,7 +751,7 @@
         '<span class="l"><span class="nl"><span class="cp" title="' + esc('复制 ' + nameOf(r.id)) + '">' + nm(r.id, r.name) + '</span>' + (r.kind === 'wizard' ? '<span id="rb-st"></span>' : '') +
           '<span id="rb-sp">' + (R.sessions.length > 1 ? sessPicker() : '') + '</span></span>' +
           (facts.length ? '<span class="facts">' + facts.join('') + '</span>' : '') + '</span></div>' +
-      (r.description ? '<p class="job">' + esc(r.description) + '</p>' : '');
+      (r.description ? '<p class="job">' + esc(r.description) + '</p>' : '') + trayHTML(R.inflight || [], r.id);
     paintStatus();
     $('#rb-who').querySelector('.cp').onclick = function () { copyText(nameOf(r.id)); };
     $('#rb-who').querySelectorAll('.fx').forEach(function (x) {
@@ -1183,7 +1207,7 @@
     R.at = d.at || Date.now(); R.recvAt = Date.now();
     R.role = d.role; R.sessions = d.sessions || []; R.convs = d.convs || []; R.chatKeys = d.chatKeys;
     SESSION = d.session || '';
-    R.relations = !!d.relations; R.schedules = d.schedules || 0; R.plan = d.plan || null;
+    R.relations = !!d.relations; R.schedules = d.schedules || 0; R.plan = d.plan || null; R.inflight = d.inflight || [];
     R.charter = d.charter || null;
     R.stats = d.stats || null; R.winStats = d.winStats || null;
     ROLE = d.role.id;

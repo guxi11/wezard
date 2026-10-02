@@ -207,6 +207,10 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       // 最近排好)。落在别的会话上就不猜。
       with: home?.subs.find((s) => s.count && (land.with ? s.role === land.with : s.role.startsWith("human:")))?.role ?? "",
       relations: hasRelations(msgs, role, info),
+      // 待办托盘: 视角派出去还没落定的 (在等) 与派给它还没交的 (欠着); 卡在审批上的带上停在哪几个工具。
+      inflight: (f.inflight ?? []).filter((x) => x.from === role || x.to === role).map((x) => ({
+        ...x, ...(x.state === "blocked" && dir.fact(x.to)?.waiting?.length ? { waiting: dir.fact(x.to)!.waiting } : {}),
+      })),
       schedules: schedules.length + jobs.length,
       // 侧栏日程入口的副标题: 下一枪几点、还开着几个工单、有没有坏掉的定时。
       plan: {

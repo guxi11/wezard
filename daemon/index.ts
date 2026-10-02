@@ -1326,6 +1326,8 @@ const main = async (): Promise<void> => {
           openedAt: j.openedAt, closedAt: j.closedAt, summary: j.summary,
           members: j.members.map((mm) => ({ target: mm.target, task: mm.task, spawned: mm.spawned })),
         })),
+        // rolepage 的待办托盘: 与名册 / peek 的「在等 / 欠着」同一份 (receipts.states)。
+        inflight: receipts.states().map(({ ageMs, ...x }) => ({ ...x, at: Date.now() - ageMs })),
         schedules: tasks.list().filter((x) => x.enabled).map((x) => {
           const st = tasks.stateOf(x.id);
           const loadError = tasks.errors()[x.id];

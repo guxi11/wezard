@@ -22,6 +22,7 @@ import { withoutKeepaliveTurns } from "./keepalive.js";
 import { isTurn, staleAt, isGhostTurn } from "./chat-view.js";
 import type { DetailRecord, TurnDetailRecord } from "./detail-store.js";
 import { senderOf } from "./role-view.js";
+import type { TurnState } from "./turn-state.js";
 
 // ── 注册表侧 (daemon 独有) ────────────────────────────────────────────
 /** 一个 wizard 的登记信息 + 此刻的活体状态。daemon 从 wizard.json + tmux 取。 */
@@ -91,9 +92,14 @@ export interface WorldFactSchedule {
   file?: string;
 }
 
+/** 一件在飞的活 (见 turn-state.ts): `from` 派给 `to`、还没落定。`at` = 派出的时刻, 多久了由读的一方现算。 */
+export interface WorldFactInFlight { from: string; to: string; turn: string; job: string; state: TurnState; at: number }
+
 export interface WorldFacts {
   wizards: readonly WorldFactWizard[];
   jobs: readonly WorldFactJob[];
+  /** 老 daemon 推来的快照没有。 */
+  inflight?: readonly WorldFactInFlight[];
   schedules: readonly WorldFactSchedule[];
   /** base → 聊天名; 没起名的不在表里。 */
   chatNames: Readonly<Record<string, string>>;

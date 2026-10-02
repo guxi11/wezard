@@ -899,3 +899,18 @@ button.mchip.rcpt:hover { text-decoration: underline }
 /* 搜索跳到的那一句: 气泡闪一圈视角色。 */
 .mrow.hit .mb > * { animation: hit 1.6s ease-out }
 @keyframes hit { 0%, 30% { box-shadow: 0 0 0 3px #2f55c955 } 100% { box-shadow: 0 0 0 3px #2f55c900 } }
+
+/* ══ 待办托盘: 名片下一小块, 只读; 卡住的 (审批 / 反问 / 失败) 着色。 ══ */
+.tray { margin: 8px 0 0; font-size: 11.5px }
+.tray h3 { margin: 0 0 3px; font-size: 11px; font-weight: 500; color: var(--faint) }
+.tray h3 span { margin-left: 4px }
+.tray ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px }
+.tray .tr { display: flex; align-items: baseline; gap: 6px; min-width: 0; color: var(--mute) }
+.tray .dir { flex: none; color: var(--faint) }
+.tray .st { flex: none; padding: 0 5px; border-radius: 4px; background: #f1f3f6 }
+.tray .tr.run .st { color: #1a7f37; background: #1a7f3712 }
+.tray .tr.wait .st { color: #8250df; background: #fbefff }
+.tray .tr.need .st { color: #9a6700; background: #9a670014 }
+.tray .tr.bad .st { color: #cf222e; background: #cf222e10 }
+.tray .jid { color: var(--faint); font-family: ui-monospace, monospace; font-size: 10.5px }
+.tray .ts { margin-left: auto; flex: none; color: var(--faint) }

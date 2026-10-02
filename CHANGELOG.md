@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- rolepage 待办托盘 (B3b ④): 名片下一小块「在飞 N」, 列出视角派出去还没落定的 (在等 → .x) 与派给它还没交的 (欠着 ← .x): 状态 (在干 / 卡在审批 · 停在哪个工具 / 反问待答 / 报错停了 / 挂起等子活)、工单号、派出多久; 卡住的排前并着色。只读; 数据与名册 / peek 的「在等 / 欠着」同一份 (`receipts.states()` → `WorldFacts.inflight`, svr 合并时按件去重)。
 - rolepage 回执 chip (B3b ①): 回执那一轮的消息名字行上挂「↩ 回执 · 已交 / 反问 / 超时 … · J… 第 i/n 份」, 按定论着色; 点它跳回派活那句 (同一个活号, 窗口里没有就整窗重取再找)。turn 记录的 `from` 补上活号 `turn`、回执的 `status` 与工单 `done` / `total`; 继承上下文的 `clone_wizard({task})` 第一件活也记上出处 (此前没有 `from`, 工单与回执都找不回它)。
 - rolepage 用量条显示估算费用 (💰): 每轮按它的模型单价计 input / output / 缓存写 / 缓存读再加总; 单价是 LiteLLM `model_prices_and_context_window.json` 的快照 (`shared/model-prices.ts`, `node scripts/update-prices.mjs` 重新生成), 认得 bedrock / 网关的各种写法 (`[1m]`、`us.anthropic.`、`claude-4.7-opus`、带日期)。表里认不出的模型不猜价, 费用前加「≥」并在悬停里写明有几次请求未计入。
 - 工单派活预算 (B2a ⑦): `open_job({maxTurns})` —— 带这张工单的每次 `tell_peer` (含 `re` 续问、顶掉未落定工单活而继承工单的那句) 与带 task 的 spawn/clone 各记一次, 用完再派 409 (答一份停在 NEED 上的反问、不带 task 的 spawn 不受限); `tell_peer` 回包带 `budget: used/max`, 最后一次提示收口; `list_jobs` 带 `budget`。NEED 乒乓、续问兜圈的全局刹车, 也是 graph `rounds` 并入工单的落点。
