@@ -236,14 +236,14 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
   /** 一个窗口的全部片段, 时间序: 消息 + 视角 role 自己的断点。
    *  给的是**待渲染**的片段 —— 窗口通常只上屏最后几十条, 先按时间切片再渲染,
    *  没上屏的那几百轮就一个字都不用排。 */
-  const windowFrags = (records: readonly DetailRecord[], dir: Directory, v: View, now: number): Array<{ ts: number; render: () => MsgFragment }> => {
+  const windowFrags = (records: readonly DetailRecord[], dir: Directory, v: View, now: number): Array<{ id: string; ts: number; render: () => MsgFragment }> => {
     const msgs = convMessages(allMessages(records, now), v.role, v.conv, v.with || undefined)
       .filter((m) => inSpan(v.span)(m.ts));
     const lo = msgs[0]?.ts ?? Infinity;
     const marks = marksOf(records, markRole(v)).filter((mk) => mk.createdAt >= lo && inSpan(v.span)(mk.createdAt));
     return [
-      ...msgs.map((m) => ({ ts: m.ts, render: () => renderMsg(m, records, dir, now) })),
-      ...marks.map((mk) => ({ ts: mk.createdAt, render: () => renderMark(mk, v.role, dir) })),
+      ...msgs.map((m) => ({ id: m.id, ts: m.ts, render: () => renderMsg(m, records, dir, now) })),
+      ...marks.map((mk) => ({ id: `m:${mk.id}`, ts: mk.createdAt, render: () => renderMark(mk, v.role, dir) })),
     ].sort((a, b) => a.ts - b.ts);
   };
 
@@ -277,8 +277,18 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       const raw = url.searchParams.get("limit");
       const n = raw === null ? Number.NaN : Number(raw);
       const limit = Number.isFinite(n) && n >= 0 ? n : DEFAULT_LIMIT;
-      const shown = (limit === 0 ? all : all.slice(-limit)).map((x) => x.render());
-      json(res, 200, { ok: true, at: Date.now(), role: v.role, conv: v.conv, total: all.length, truncated: shown.length < all.length, msgs: shown });
+      // 游标 `before=<msgid>`: 只取它之前的 —— 「载入更早」一页一页往前翻, 不再一次全量。
+      // 按 id 定位而不按时刻: 同一毫秒的两条不会在页边上被漏掉; 游标那条已经不在窗口里
+      // (记录过了 horizon 被裁掉) 就退回按它的时刻切。
+      const before = url.searchParams.get("before");
+      const cut = before === null ? all.length : all.findIndex((x) => x.id === before);
+      const bts = Number(url.searchParams.get("beforeTs"));
+      const older = cut >= 0 ? all.slice(0, cut) : all.filter((x) => x.ts < bts);
+      const page = limit === 0 ? older : older.slice(-limit);
+      json(res, 200, {
+        ok: true, at: Date.now(), role: v.role, conv: v.conv, total: all.length,
+        truncated: page.length < older.length, older: older.length - page.length, msgs: page.map((x) => x.render()),
+      });
     });
   };
 

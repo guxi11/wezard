@@ -922,6 +922,39 @@
     };
   };
 
+  var moreBtn = function (d) {
+    return d.truncated ? '<button class="more-btn" id="more">载入更早的 ' + (d.older != null ? d.older : d.total - d.msgs.length) + ' 条</button>' : '';
+  };
+  var bindMore = function () {
+    var btn = $('#more');
+    if (btn) btn.onclick = function () { btn.textContent = '载入中…'; btn.disabled = true; loadOlder(); };
+  };
+  // 载入更早: 以此刻最早那一行为游标往前取一页, 插在最前面; 视口锚住原来顶上那一行。
+  var loadOlder = function () {
+    var gen = S.gen, first = inner.querySelector('.mrow');
+    if (!first) return Promise.resolve();
+    var cursor = { before: first.getAttribute('data-id'), beforeTs: first.getAttribute('data-ts') };
+    // 失败就把按钮还原, 别让它永远停在「载入中…」; 换了窗口 (gen 变了) 按钮已随旧内容消失。
+    var retry = function () {
+      var b = $('#more'); if (gen === S.gen && b) { b.disabled = false; b.textContent = '载入失败, 点此重试'; }
+    };
+    return api('api/msgs', viewParams(cursor)).then(function (d) {
+      if (gen !== S.gen) return;
+      if (!d.ok) return retry();
+      var keep = keepView();
+      var old = $('#more'); if (old) old.remove();
+      d.msgs.forEach(function (m) { S.frags[m.id] = m; });
+      unfoldPings(inner);
+      var page = frag(moreBtn(d) + d.msgs.map(rowHTML).join(''));
+      bindRow(page); render(page);
+      while (page.lastChild) inner.insertBefore(page.lastChild, inner.firstChild);
+      bindMore();
+      foldPings(inner);
+      expireRows();
+      if (keep) keep();
+    }).catch(retry);
+  };
+
   // land: 换视角时由它来定位 (锚住一条旧消息), 返回 false 才照常吸底。
   var loadMsgs = function (limit, land) {
     var gen = S.gen;
@@ -931,12 +964,8 @@
       S.frags = {};
       d.msgs.forEach(function (m) { S.frags[m.id] = m; });
       if (!d.msgs.length) { inner.innerHTML = '<div class="empty">这里还没有消息</div>'; return; }
-      var more = d.truncated
-        ? '<button class="more-btn" id="more">载入更早的 ' + (d.total - d.msgs.length) + ' 条</button>'
-        : '';
-      inner.innerHTML = more + d.msgs.map(rowHTML).join('');
-      var btn = $('#more');
-      if (btn) btn.onclick = function () { btn.textContent = '载入中…'; loadMsgs('0', keepView()); };
+      inner.innerHTML = moreBtn(d) + d.msgs.map(rowHTML).join('');
+      bindMore();
       bindRow(inner);
       render(inner);
       foldPings(inner);

@@ -5,6 +5,8 @@
 ## [Unreleased]
 
 ### Added
+- rolepage 忙闲第四态「等人点」(紫色): wizard 停在 daemon 发出的审批卡 / 提问卡上时, 名片、关系树、工单成员显示 `等人点 · <工具名>`, 侧栏也亮灯 —— 此前它在审批长轮询期间显示「执行中」, 和真在干活分不出来。数据取 daemon 的 pending, 按 approval 认卡的同一口径归到 wizard 上。
+- rolepage「载入更早」改为按游标一页一页往前翻 (`/api/msgs?before=<msgid>`), 不再一次取全量 (大群窗口一次近 1MB); 视口锚定不变。
 - 共享记忆合并后告诉在场的 wizard: 整理者真改动了哪份群 / 工作区记忆, pane 活着且读这份 md 的 wizard 下一条消息尾巴上捎一行「记忆已更新, 全文见 …」(宪章是出生快照, 此前要等重生才看得到)。整理者合并时把该工作区的 `CLAUDE.md` / `CODEBUDDY.md` / `AGENTS.md` / `.claude/CLAUDE.md` 与各 backend 的 auto-memory `MEMORY.md` 当只读参考, 已写在那里的不再收; workspace 提议记下 `cwd`, 提议者收工后仍找得到参考源。名册增量的 reminder 表头改成通用的「宪章是快照」; 宪章重渲染时清空该 wizard 待投递的增量 (新宪章里都有了)。
 - self 记忆跨 `/clear`: `/clear` 之后第一条注入捎上出生后新记的条目 (最新 10 条) 与已 forget 的条数; reload 后没有快照则只指路。`clone_wizard` (fork 上下文) 继承被克隆者的 self 记忆并标「(继承自 .x)」。`wizard_remember` self 满 60 条挤掉最旧的时返回里列出 `dropped`, 超 600 字返回 `truncated`; 去重改按截断后的文本比, 长记忆重记不再叠出重复。
 - 交接简报留档: `wizard_handoff_self` / `/handoff` 的简报贴回新会话成功后追加到 `~/.wezard/memory/episodes/<name>.jsonl` (交接前后的 sessionId 与简报全文), 空简报不记 —— 此前简报只活在新会话的第一条消息里。
@@ -15,6 +17,7 @@
 - hook 的 wezard CLI 免审只认整条命令就是一次 `wezard[.sh] <status|logs|pending|audit|update|reload|config-path|mirror-status|version|help>` 且不含 shell 元字符; 此前命令里任意位置出现 `wezard` 一词就放行 (`curl …/config/set; true wezard` 可免审直改配置)。注意 daemon 的 `/config/set` 路由本身仍不鉴权, 本机进程可直接写 —— 这里只关掉了模型免审走到它的两条路。
 
 ### Changed
+- rolepage 关系 / 日程栏的世界快照 (`/api/world`) 瘦身: 工单成员任务只留首行 (实测 119KB → 55KB), 并带 ETag —— 名册没变时 6s 轮询回 304、不重画; 换视角后迟到的回包丢弃。
 - 共享记忆整理从定时任务改成 daemon 内建定时器: 不再生成 `~/.wezard/tasks/memory-steward.task.mjs` (开机把旧的改名为 `.retired` 停用, 免得两路并跑), 不进 `list_tasks` / rolepage 日程。每 30 分钟 (开机后 1 分钟先跑一轮) 认领收件箱里的提议 (认领 / 一小时孤儿回收语义不变), 有活才在不属于任何群的内部 key 上起一个白板 wizard 合并, 收工即收; 收件箱改由守护进程归档进 `memory/log/`。全程零气泡、不 notify, 结果只留在 rolepage 与审计日志。
 - wizard 的上下文瘦身: charter 的出生名册只列写了职责的同群 wizard (至多 15 个, 其余报个数、指向 `wizard_roster`), 「我能做什么」改为每个工具一行「何时用」, 「编排」「说话」两节不再复述工具描述 —— charter ~5.1k → ~2.5k tok (管家 ~6.0k → ~3.4k)。工具描述不再教 `send_peer` / `wait_peer` (一律 `tell_peer` + 回执); `send_peer` 描述压成一行; `tell_peer` 只讲机制; `schedule_task` 只留何时用 / `when` 人话 / 默认新建 / 回念 `next`, gate 写法挪进任务文件头注释; 生 wizard 的 `model` 参数共用一句; graph 三件套、`list_claude_sessions`、`switch_claude_session`、`list_chats` 标为人侧/罕用。工具定义合计 ~20.4k → ~17.8k tok。CLAUDE.md 的 MCP 段与 `/help` 的过期措辞一并更正。
 
