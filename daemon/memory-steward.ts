@@ -55,16 +55,26 @@ export const mdOfInbox = (root: string, f: string): string =>
 export const logOfInbox = (root: string, f: string): string =>
   join(root, "log", relative(join(root, "inbox"), f)).replace(CLAIMED, ".jsonl");
 
-export const stewardPrompt = (root: string, files: readonly string[]): string => [
+/** 一份 md 的只读参考源 (CLAUDE.md、auto-memory 的 MEMORY.md …): 由 daemon 注入, 它才知道
+ *  md 对应哪个 cwd、哪个 backend。返回不存在的路径无妨, 渲染时按行列出、由执行体去读。 */
+export type RefsOf = (md: string) => readonly string[];
+
+const pairLines = (root: string, refsOf?: RefsOf) => (f: string): string[] => {
+  const md = mdOfInbox(root, f);
+  const refs = refsOf?.(md) ?? [];
+  return [`- ${f} → ${md}`, ...(refs.length ? [`  只读参考: ${refs.join(" , ")}`] : [])];
+};
+
+export const stewardPrompt = (root: string, files: readonly string[], refsOf?: RefsOf): string => [
   "整理 wezard 的共享记忆。下面每一行是一对 收件箱 → 记忆 md; 收件箱一行一条别的 wizard 提交的提议 (json: at 时刻, by 提议者, note 要记住的一句, forget 要删掉的那条里的一个子串):",
-  ...files.map((f) => `- ${f} → ${mdOfInbox(root, f)}`),
+  ...files.flatMap(pairLines(root, refsOf)),
   "",
   "md 不存在就新建。对每一对:",
-  "1. 读 md 全文和收件箱的全部提议。",
-  "2. 逐条决定: 新增 / 改写已有的那条 (新的更准, 或推翻了旧的) / 删除 (forget 命中, 或已被推翻、过时) / 不动 (重复, 或只是某次任务的临时状态, 不值得跨会话记住)。",
+  "1. 读 md 全文和收件箱的全部提议; 带「只读参考」的, 把参考文件也读了 (不存在就跳过) —— 那是已经生效的规矩, 你不改它。",
+  "2. 逐条决定: 新增 / 改写已有的那条 (新的更准, 或推翻了旧的) / 删除 (forget 命中, 或已被推翻、过时) / 不动 (重复, 或只是某次任务的临时状态, 不值得跨会话记住, 或参考文件里已经写了)。跟参考文件矛盾的提议不收进 md (参考文件是人写的, 优先), 记作冲突。",
   "3. 重写 md: 每条一行 \"- 一句话\", 相近的合并, 同主题的放一起, 全文控制在 3000 字以内。人手写的内容与格式保留, 除非提议明确推翻它。",
   "",
-  "只动上面列出的 md, 收件箱只读不改 (归档由守护进程在你收工后做), 别的一概不碰。全部处理完用一行 RESULT: 汇报每份记忆 新增/改写/删除 各几条。",
+  "只动上面列出的 md, 收件箱和参考文件只读不改 (归档由守护进程在你收工后做), 别的一概不碰。全部处理完用一行 RESULT: 汇报每份记忆 新增/改写/删除 各几条; 有冲突的, 在 RESULT 之前每条一行 `冲突: <md> · <提议原文> ↔ <参考文件>`。",
 ].join("\n");
 
 /** 私聊信封: 这一轮不属于任何群, 回复哪儿也不发。 */
@@ -85,6 +95,8 @@ const claim = (t: number) => (f: string): string => {
   renameSync(f, c);
   return c;
 };
+
+const contentOf = (f: string): string => (existsSync(f) ? readFileSync(f, "utf8") : "");
 
 const archive = (root: string) => (f: string): void => {
   if (!existsSync(f)) return;
@@ -111,9 +123,12 @@ interface StewardDeps {
    *  认领留着, 一小时后作为孤儿重认。 */
   run: (prompt: string) => Promise<{ ok: boolean; reason?: string }>;
   everyMs?: number;
+  refsOf?: RefsOf;
+  /** 一轮成功收工后, 内容真的变了的那些 md (按前后内容比, 不信执行体的 RESULT)。 */
+  onMerged?: (mds: readonly string[]) => void;
 }
 
-export const startSteward = ({ root, log, run, everyMs = STEWARD_EVERY_MS }: StewardDeps): { stop: () => void } => {
+export const startSteward = ({ root, log, run, everyMs = STEWARD_EVERY_MS, refsOf, onMerged }: StewardDeps): { stop: () => void } => {
   let running = false;
   const round = async (): Promise<void> => {
     if (running) return;
@@ -124,10 +139,17 @@ export const startSteward = ({ root, log, run, everyMs = STEWARD_EVERY_MS }: Ste
       if (!fresh.length && !orphaned.length) return;
       const files = [...fresh, ...orphaned].map(claim(t));
       log.info({ fresh: fresh.length, orphaned: orphaned.length }, "memory steward: claimed");
-      const r = await run(stewardPrompt(root, files));
+      // 同一份 md 可能对着两个收件箱 (新提议 + 孤儿), 去重后再拍快照。
+      const mds = [...new Set(files.map((f) => mdOfInbox(root, f)))];
+      const before = new Map(mds.map((md) => [md, contentOf(md)]));
+      const r = await run(stewardPrompt(root, files, refsOf));
       if (!r.ok) { log.warn({ reason: r.reason, files }, "memory steward: run did not finish, claims left for reclaim"); return; }
       files.forEach(archive(root));
-      log.info({ archived: files.length }, "memory steward: merged");
+      const changed = mds.filter((md) => contentOf(md) !== before.get(md));
+      log.info({ archived: files.length, changed }, "memory steward: merged");
+      if (changed.length) {
+        try { onMerged?.(changed); } catch (e) { log.warn({ err: (e as Error).message }, "memory steward: onMerged threw"); }
+      }
     } catch (e) {
       log.warn({ err: (e as Error).message }, "memory steward: round failed");
     } finally {
