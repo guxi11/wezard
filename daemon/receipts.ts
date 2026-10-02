@@ -18,7 +18,7 @@ import { randomBytes } from "node:crypto";
 import type { Logger } from "pino";
 import type { JsonMap } from "../shared/json-map-store.js";
 import type { IdleResult } from "./graph.js";
-import type { PeerReply } from "./peers.js";
+import { parseClosing, type PeerReply } from "./peers.js";
 import type { Envelope, ReceiptStatus } from "../shared/reminder.js";
 import { sleep, truncate } from "../shared/std.js";
 
@@ -159,7 +159,7 @@ export interface Slot extends Tell {
   delivered: boolean;
   /** 这一份有了定论 (答了 / 没答 / 超时 / pane 没了) —— 工单计数只数它。 */
   resolved: boolean;
-  /** 等出来的结果, 写一次不再改 (`error` 除外: 那只是一份中途的失败回执, 之后续跑
+  /** 等出来的结果, 写一次不再改 (`error` / `need` 除外: 那只是一份中途的回执, 之后续跑
    *  答出来的照样投)。先于投递落盘: reload 打断投递后重投的仍是同一份, 迟到的答案
    *  不会把已投的 timeout 改写成 done。 */
   outcome?: Outcome;
@@ -308,6 +308,9 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     }
   };
 
+  /** 投一份但不算定论的那两种: CLI 报错、NEED 反问。 */
+  const interim = (st: ReceiptStatus): boolean => st === "error" || st === "need";
+
   /** 守到对方答出**我们这一句**为止。信封是比发话时刻更硬的锚 (见 peers.replyToPeer):
    *  对方正忙时我们那一句是排队的, 它先吐出来的是上一件事的结论 —— 按时刻取就会把
    *  旧结论当成这一次的回执。所以"停下了但还没答我们"要接着等, 不能将就; 定位不到
@@ -320,8 +323,11 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     const deadline = (): number => s.deadlineAt ?? s.at + TARGET_WAIT_SEC * 1000;
     const aborted = (): boolean => s.claimed || stale(s);
     const reported = (): boolean => s.outcome?.status === "error";
+    // 反问过了: 同一段 NEED 不再投第二遍, 等发话方 tell_peer({re}) 答 (那会顶掉这份)。
+    const asked = (): boolean => s.outcome?.status === "need";
     const reply = (): PeerReply | undefined => deps.replyFor(s.to, deps.nameOf(s.from), s.at, s.turn);
-    const news = (r: PeerReply | undefined): boolean => !!r?.text.trim() && !(r.error && reported());
+    const news = (r: PeerReply | undefined): boolean =>
+      !!r?.text.trim() && !(r.error && reported()) && !(asked() && r.text === s.outcome!.body);
     const failed = (status: ReceiptStatus): Outcome => ({ status, body: failure(s, status) });
     for (let fruitless = 0; fruitless < MAX_FRUITLESS; ) {
       if (Date.now() >= deadline()) return failed("timeout");
@@ -346,10 +352,10 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       if (s.answer !== undefined) return { status: "done", body: s.answer };
       if (handing) continue;
       const got = reply();
-      if (got && news(got)) return { status: got.error ? "error" : "done", body: got.text };
+      if (got && news(got)) return { status: got.error ? "error" : parseClosing(got.text).kind === "need" ? "need" : "done", body: got.text };
       // 读进了没答 = 扑空一次; 还没读进 = 前面有别的轮, 接着等 —— 除非整段 ramp 都静着。
-      // 报过 error 之后它停着是在等人续跑, 不算扑空, 守到期限。
-      if (!reported() && (got !== undefined || wr.quiet)) fruitless++;
+      // 报过 error / NEED 之后它停着是在等人续跑或答复, 不算扑空, 守到期限。
+      if (!reported() && !asked() && (got !== undefined || wr.quiet)) fruitless++;
     }
     return failed("silent");
   };
@@ -357,7 +363,9 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   /** 失败回执的正文: 守护进程的一句说明 + 对方最后一句 (给发话方一点线索)。 */
   const failure = (s: Slot, status: ReceiptStatus): string => {
     const why: Partial<Record<ReceiptStatus, string>> = {
-      timeout: `等了 ${Math.round((Date.now() - s.at) / 60_000)} 分钟它还没答完`,
+      timeout: s.outcome?.status === "need"
+        ? `它的反问 (NEED) 等了 ${Math.round((Date.now() - s.at) / 60_000)} 分钟没人答`
+        : `等了 ${Math.round((Date.now() - s.at) / 60_000)} 分钟它还没答完`,
       silent: `它停下了 ${MAX_FRUITLESS} 次, 都没答这一句`,
       dead: "它的 pane 没了",
     };
@@ -369,7 +377,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     const lg = deps.log.child({ mod: "receipt", from: deps.nameOf(s.from), to: deps.nameOf(s.to), ...(s.job ? { job: s.job } : {}) });
     const anchor = s.at;
     // 终态写一次不再改: reload 打断投递后续守的那一份直接重投同一个结果, 不再重等。
-    const out = s.outcome && s.outcome.status !== "error" ? s.outcome : await awaitReply(s);
+    const out = s.outcome && !interim(s.outcome.status) ? s.outcome : await awaitReply(s);
     if (stale(s)) return;
     if (s.claimed || !out) { s.resolved = true; settle(s); return; } // wait_peer 抢先取走了
     // 下面到 save 之间不能有 await: relay 与这里的判定必须看到同一个状态。
@@ -382,7 +390,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       lg.info({ children: children(s).map((c) => deps.nameOf(c.to)) }, "receipt: 答话方又派了活, 等子回执回来再续");
       return;
     }
-    const final = out.status !== "error";
+    const final = !interim(out.status);
     s.outcome = out;
     s.resolved = final;
     save(s);
@@ -435,7 +443,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       return true;
     });
     if (stale(s)) { lg.info("receipt: 被同一对的新一句顶掉, 不回注"); return; }
-    // error 只是中途报了一声: 接着守续跑出来的答案。
+    // error / need 只是中途报了一声: 接着守续跑 (或答复之后) 出来的答案。
     if (!final && sent) return watch(s);
     settle(s);
     if (!s.delivered) release(s);

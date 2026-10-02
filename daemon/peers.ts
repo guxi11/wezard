@@ -402,12 +402,34 @@ const parseOpenTools = (jsonlPath: string, raw: string): { names: string[]; rows
  *  `RESULT: …`, 这里把它捞出来。取**最后一个**匹配 —— 中间复述过这个格式的那些
  *  不算数。捞不到返回 "", 调用方退回整段 lastText, 所以不遵守约定也只是退化。 */
 export const extractResult = (text: string, max = 800): string => {
+  const c = parseClosing(text, max);
+  return c.kind === "result" ? c.text : "";
+};
+
+/** 一轮的收口: `RESULT:` 交差 / `NEED:` 反问发话方 / 都没有 —— 外加交付物清单。
+ *  分 result 与 need 是回执计数的事: 反问不是定论, 不能把工单往前数一份。 */
+export interface Closing { kind: "result" | "need" | "none"; text: string; artifacts: { path: string; note: string }[] }
+
+// NEED 只认全大写: "what I need: …" / 「需要: …」在普通答话里太常见, 误认一次就是
+// 一份不计数的回执。
+const CLOSING_RE = /(?:^|[\s>*|-])(RESULT|Result|result|结论|NEED)\s*[:：]\s*/gm;
+const ARTIFACT_RE = /^[ \t>*|-]*ARTIFACT[ \t]*[:：][ \t]*(\S+)(?:[ \t]+(?:—|--|-|:)[ \t]*(.*))?$/gm;
+
+export const parseClosing = (text: string, max = 800): Closing => {
+  const artifacts = [...text.matchAll(ARTIFACT_RE)]
+    .map((m) => ({ path: m[1]!.replace(/^`|`$/g, ""), note: (m[2] ?? "").trim() }))
+    .filter((a) => !/^<.*>$/.test(a.path)); // 复述格式时的 `<路径>` 占位
   // 标记之后的**全部**内容, 而不是"那一行" —— 结论常常不止一行 (路径一行、说明
   // 一行)。约定是收口在最后, 所以标记之后剩下的就是结论。取最后一个匹配: 模型常
-  // 先复述一遍格式要求再给答案。
-  const hits = [...text.matchAll(/(?:^|[\s>*|-])(?:RESULT|结论)\s*[:：]\s*/gim)];
-  const last = hits[hits.length - 1];
-  return last ? text.slice((last.index ?? 0) + last[0].length).trim().slice(0, max) : "";
+  // 先复述一遍格式要求再给答案。ARTIFACT 行不算结论正文。
+  const after = (m: RegExpMatchArray): string => text.slice((m.index ?? 0) + m[0].length).replace(ARTIFACT_RE, "").trim().slice(0, max);
+  const marks = [...text.matchAll(CLOSING_RE)];
+  // 交差优先: 写了 RESULT 就是交差, 哪怕后面跟一句 `NEED: 无` —— 当成反问, 工单就卡到超时。
+  const result = marks.filter((m) => m[1] !== "NEED").at(-1);
+  if (result) return { kind: "result", text: after(result), artifacts };
+  const need = marks.at(-1);
+  const q = need ? after(need) : "";
+  return q && !/^(?:无|没有|none|n\/a|-+)[。.]?$/i.test(q) ? { kind: "need", text: q, artifacts } : { kind: "none", text: "", artifacts };
 };
 
 /** The peer's most recent assistant message — the handoff payload when one
@@ -558,7 +580,7 @@ export const renderPeerEnvelope = (from: string, chat?: string, t?: TurnTag & { 
       ? [
           `这一轮是 wizard \`${from}\` 发来的**私聊**, 不是人说的: 人看不见这一轮, 读你回复的是 \`${from}\`。`,
           `你这一轮的**最后一条消息**就是给它的回执 —— 你一停下, 守护进程自动把它送进 \`${from}\` 的输入框, **你不需要再调任何工具**: 不要 send_peer 回它 (那会让它多跑一轮), 也不要为这一轮 notify。`,
-          "对 wizard 直说: 不寒暄、不加对人的称呼、不复述它的话; 结论收口成末尾的 `RESULT: …` (交付物写进文件就回传路径), 要它补信息也写在那里。",
+          "对 wizard 直说: 不寒暄、不加对人的称呼、不复述它的话; 结论收口成末尾的 `RESULT: …` (交付物写进文件就回传路径); 要它补信息才能干下去, 就收口成 `NEED: <问题>` (这一份不算交差); 交付了文件, 每个加一行 `ARTIFACT: <路径> — 一句话`。",
         ]
       : [
           `这一轮是 wizard \`${from}\` 在群${chat ? ` **${chat}** ` : ""}里**公开**对你说的: 你的回复会直接发进那个群, 人和 \`${from}\` 都看得到。`,
@@ -589,6 +611,8 @@ export const renderReceiptEnvelope = (
   renderReminder(envelopeAttrs.receipt(from, chat, job, status, turn, route), [
     ...(status === "done"
       ? [`这是 wizard \`${from}\` 对你某一次 send_peer 的**回执**: 它那一轮干完了, 守护进程把它的结论自动送到你这里 —— 不是人说的, 也不是新派给你的活。`]
+      : status === "need"
+        ? [`这是 wizard \`${from}\` 对你某一次 send_peer 的**反问**: 它缺信息干不下去, 下面 \`NEED:\` 后面就是它要的 —— 按下面的件号续问答它; 这一份**不计入工单**, 它拿到答复干完会再送一份回执。`]
       : status === "error"
         ? [`这是 wizard \`${from}\` 对你某一次 send_peer 的**失败回执**: 它那一轮以 CLI 报错收尾, 下面是报错原文, 不是它的结论, **不计入工单**。它若被续跑、之后答出来, 结论会照常再送来一份; 等不及就 peek_peer 看它, 或者再 tell_peer 它一次。`]
         : [`这是 wizard \`${from}\` 对你某一次 send_peer 的**失败回执**: ${FAILED[status]}, 这一份不会再有答案了 (工单里按已落定计)。自己判断: 换人、再 tell_peer 追问, 或者在汇总里如实写缺了这一份。下面是守护进程的说明和它最后说的一句。`]),
@@ -611,14 +635,14 @@ export const renderReceiptEnvelope = (
     ...(turn ? [`这件活是 \`${turn}\`: 要就它追问、补充, 用 \`tell_peer({name: "${from}", re: "${turn}"})\` —— 沿用同一个频道, 工单还开着就沿用工单。`] : []),
     // 「齐了吗」是守护进程数的, 不让模型在上下文里自己数 —— 异步回执是 N 个独立
     // 的轮次陆续进来的, 数错一个就会提前收口或者永远等。
-    ...(job && job.job
+    ...(job && job.job && status !== "need"
       ? job.done >= job.total
         ? [`这是工单 \`${job.job}\` 的**最后一份** (${job.done}/${job.total}, 全部到齐): 现在可以汇总收口了 —— close_job(summary) 发结论并回收临时分身${route?.replyTo && !route.replyTo.startsWith(".") ? "; 你这一轮的最后一条消息也会进群, 别把同一段结论说两遍" : ""}。`]
         : [`这是工单 \`${job.job}\` 的第 ${job.done}/${job.total} 份, **还差 ${job.total - job.done} 份**: 先把这一份记住 (或落到文件里), 不要现在汇总、也不要向人汇报进度; 等最后一份到了会明确告诉你「全部到齐」。`]
       : []),
   ]);
 
-const FAILED: Record<Exclude<ReceiptStatus, "done" | "error">, string> = {
+const FAILED: Record<Exclude<ReceiptStatus, "done" | "error" | "need">, string> = {
   timeout: "等到期限它还没答完",
   silent: "它停下了几次, 都没有答这一句",
   dead: "它的 pane 没了 (被收掉或崩了)",

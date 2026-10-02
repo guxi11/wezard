@@ -73,9 +73,9 @@ export interface ReceiptRoute { replyTo?: string; k?: string }
 /** 一件活的编号: 写进派活与回执的信封。 */
 export interface TurnTag { turn: string; re?: boolean; deadline?: number }
 
-/** 回执落成什么。done = 答了; error = 那一轮以 CLI 报错 (API Error) 收尾, 不是定论;
+/** 回执落成什么。done = 答了; need = 它收口成 `NEED:` 反问发话方, 不是定论; error = 那一轮以 CLI 报错 (API Error) 收尾, 不是定论;
  *  timeout / silent / dead = 没等到答案 (超时 / 停下几次都没答 / pane 没了)。 */
-export type ReceiptStatus = "done" | "error" | "timeout" | "silent" | "dead";
+export type ReceiptStatus = "done" | "need" | "error" | "timeout" | "silent" | "dead";
 
 export const envelopeAttrs = {
   human: (user: string, chat: string): Attrs => ({ wezard: "envelope", kind: "human", from: user, chat }),

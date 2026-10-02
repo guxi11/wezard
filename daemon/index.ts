@@ -67,7 +67,7 @@ import {
 } from "./wizard.js";
 import { bindNoticeBox, createNoticeBox, chatAudience } from "./notices.js";
 import { loadJobStore, renderJobOpen, renderJobClose, JOB_MEMBER_MAX } from "./jobs.js";
-import { clipMiddle, contextFiles, extractResult, firstStamp, lastContextTokens, lastExchange, lastModel, openingOf, replyClosedBefore, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
+import { clipMiddle, contextFiles, firstStamp, parseClosing, lastContextTokens, lastExchange, lastModel, openingOf, replyClosedBefore, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { keepalivePingSigs } from "../shared/keepalive.js";
 import { expandHome } from "../shared/paths.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
@@ -1050,7 +1050,8 @@ const main = async (): Promise<void> => {
         // 取走就占位: 同一段话不会再作为回执 paste 进来一遍 (见 receipts.claim)。
         const full = wr.idle ? m.lastReply(h.target, receipts.sentAt(self, h.target)) : "";
         const already = full ? receipts.claim(self, h.target) : false;
-        const result = extractResult(full);
+        const closing = parseClosing(full);
+        const result = closing.kind === "result" ? closing.text : "";
         return {
           name: h.address,
           idle: wr.idle,
@@ -1078,6 +1079,8 @@ const main = async (): Promise<void> => {
     // 还得靠 sid 轮换探测才跟得上。模型 / CLI / cwd / keepalive 照旧沿用。
     const restartFresh = (target: string) => {
       const info = m.sessionInfo(target);
+          ...(closing.kind === "need" ? { need: closing.text } : {}),
+          ...(closing.artifacts.length ? { artifacts: closing.artifacts } : {}),
       return m.newSession(target, displayName(target) || tagOfKey(target) || target, info?.cli, { model: info?.model || undefined, silent: true, warm: true });
     };
 
