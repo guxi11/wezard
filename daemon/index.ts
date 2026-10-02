@@ -1983,16 +1983,21 @@ const main = async (): Promise<void> => {
       if (!end && turn) {
         const mine = receipts.pending(self, target);
         if (mine?.turn !== turn) { json(res, 404, { ok: false, reason: `你没有在等 ${victim.name ? `.${victim.name}` : target} 答 '${turn}' 这件 (已落定、件号写错, 或不是你派的)` }); return; }
-        const current = openingAsk(target)?.turn === turn && !(await m.idleNow(target));
+        // 先落 canceled 再按 Esc: 被打断那一轮的半截话不该被 watcher 当成答案投回来。
+        const busy = !(await m.idleNow(target));
         const canceled = receipts.cancel(target, self, (x) => x.from === self && x.turn === turn);
+        // 按 Esc 之前再认一次手上这一轮: 上面那次 await 期间它可能已经做完这件、接了别人的下一件。
+        const current = busy && openingAsk(target)?.turn === turn;
         // 还没轮到 / 排在后面: 捎一句给它, 轮到那句话时别再做了 (notices 挂在下一条注入的尾巴上)。
         if (!current) notices.post([target], `${displayName(self)} 撤回了它派给你的 ${turn} —— 那件活不用做了; 读到它时直接略过, 不必回复。`);
-        if (current) {
-          // 只按 Esc, 不 teardown: teardown 会清掉它的注入队列, 别人排着的话一起丢。
-          const done = await m.interruptPane(target);
-          if (!done.ok) { json(res, 502, { ok: false, target, reason: done.reason }); return; }
-        }
-        json(res, 200, { ok: true, target, name: victim.name, mode: "interrupt", turn, canceled, interrupted: current, ...(current ? {} : { note: "它此刻没在做这件 (还排着, 或在做别人的活), 没按 Esc —— 这件已撤回, 它之后答出来也不会再回执给你" }) });
+        // 只按 Esc, 不 teardown: teardown 会清掉它的注入队列, 别人排着的话一起丢。
+        const esc = current ? await m.interruptPane(target) : undefined;
+        // Esc 没按成也不回滚撤回: 这件已经不等了, 只是它手上那一轮还在跑 —— 如实说。
+        json(res, 200, {
+          ok: true, target, name: victim.name, mode: "interrupt", turn, canceled, interrupted: !!esc?.ok,
+          ...(esc && !esc.ok ? { note: `这件已撤回 (不会再回执给你), 但 Esc 没按成 (${esc.reason ?? "unknown"}), 它这一轮可能还在跑` } : {}),
+          ...(current ? {} : { note: "它此刻没在做这件 (还排着, 或在做别人的活), 没按 Esc —— 这件已撤回, 它之后答出来也不会再回执给你" }),
+        });
         return;
       }
       // 不带件号的打断会停掉它手上整轮: 那一轮若是别的 wizard 派的, 先拒 —— 误伤的是别人的活。
