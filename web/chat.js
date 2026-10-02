@@ -304,11 +304,16 @@
   // (关系图里点卡片看的就是它, 服务端同一个 talkOf) —— 现造一项, 落地时才不会被当成失效的会话退回默认。
   var convOf = function (key) {
     if (key && key.indexOf('a:') === 0) {
-      var part = key.slice(2).split('|'), who = part[0], peers = (part[1] || '').split(',').filter(Boolean);
-      var name = nameOf(who) + (peers.length ? ' 与 ' + peers.map(nameOf).join('、') + ' 的对话' : ' 的全部对话');
-      return { key: key, kind: 'all', who: who, peers: peers, name: name, subs: [] };
+      var part = key.slice(2).split('|'), who = part[0], peers = (part[1] || '').split(',').filter(Boolean), chat = part[2] || '';
+      var name = chat ? nameOf(who) + ' 在 ' + chatTitle(chat) + ' 的全部记录'
+        : nameOf(who) + (peers.length ? ' 与 ' + peers.map(nameOf).join('、') + ' 的对话' : ' 的全部对话');
+      return { key: key, kind: 'all', who: who, peers: peers, chat: chat, name: name, subs: [] };
     }
     return R.convs.filter(function (c) { return c.key === key; })[0];
+  };
+  var chatTitle = function (base) {
+    var c = R.convs.filter(function (x) { return x.key === 'c:' + base; })[0];
+    return c ? c.name : base;
   };
   // 人的单聊 (user:…) 在数据上是频道, 但对端只有那一个人时同样是一对一。
   var dmOf = function (c) {
@@ -397,9 +402,11 @@
   var reading = function () { return VIEW === 'msgs' && !document.hidden; };
   // 窗口是 `a:<x>|<peers>` (关系图卡片) 时, 视角与 p 的往来在不在里面 —— 与服务端 talkOf 同一口径:
   // 一端是 x、另一端是 peers 之一 (peers 空 = 不限), 不分频道。
-  var talkCovers = function (p) {
+  var talkCovers = function (p, c) {
     var t = convOf(CONV);
     if (!t || t.kind !== 'all') return false;
+    // 限定了频道的窗口 (某 role 在一个群里的全部记录) 只覆盖那个群里的往来。
+    if (t.chat && (!c || c.base !== t.chat)) return false;
     var hit = function (a, b) { return t.who === a && (!t.peers.length || t.peers.indexOf(b) >= 0); };
     return hit(ROLE, p) || hit(p, ROLE);
   };
@@ -407,8 +414,8 @@
   // 对话横跨会话, 每个会话里落在那段对话里的那几对都算 —— 私聊的那一对记在会话本身 ('')。
   var readPairs = function (c) {
     if (c.key === CONV) return [WITH];
-    if (c.kind !== 'group') return c.peer && talkCovers(c.peer) ? [''] : [];
-    return (c.subs || []).filter(function (s) { return talkCovers(s.role); }).map(function (s) { return s.role; });
+    if (c.kind !== 'group') return c.peer && talkCovers(c.peer, c) ? [''] : [];
+    return (c.subs || []).filter(function (s) { return talkCovers(s.role, c); }).map(function (s) { return s.role; });
   };
   // 读整个群 = 群的水位推到此刻 (子项随之全清); 只读一对 = 只推那一对的。
   var markRead = function (c) {
@@ -425,7 +432,11 @@
   // 子项默认只露前 SUB_FOLD 个, 其余收在一条展开/折叠条后面; 展开态同样按会话各记各的。
   var SUB_FOLD = 5, MORE = {};
   var reveal = function () {
-    if (CONV && CONV !== OPEN_AT) { OPEN[CONV] = true; OPEN_AT = CONV; }
+    if (CONV && CONV !== OPEN_AT) {
+      // 某 role 在一个群里的全部记录挂在那个群下: 展开的是那个群。
+      var t = convOf(CONV);
+      OPEN[t && t.chat ? 'c:' + t.chat : CONV] = true; OPEN_AT = CONV;
+    }
   };
   // 点侧栏项: 没选中它 → 选中 (会话顺带展开); 已选中 → 不再选一遍, 右边的正文一个字不动 ——
   // 会话只折叠/展开, 子项什么都不做。
@@ -470,16 +481,36 @@
   };
   var subRow = function (c, s) { return roleRow(s.role, s.name, s.label, glance(c, s), s.status, '', otherChats(s.role, c.key + '|' + pairKey(s.role))); };
 
+  // 「chat 内全部」下与我无往来的那几项: 一行的数据是它在群里的全部记录 (服务端 whole, 与关系图卡片同一个
+  // glanceOfTalk), 点开看的也是那一份 (`a:<它>||<群>`, 对端不限)。没有成对的往来, 也就没有我的未读 —— 同关系图里
+  // 视角没有会话项的那张卡片。+N 数它的全部叶子, 这一项本身不是叶子。
+  var farKey = function (c, s) { return 'a:' + s.role + '||' + c.base; };
+  var farRow = function (s) {
+    var w = s.whole;
+    return roleRow(s.role, s.name, s.label, { lastTs: w.lastTs, preview: w.preview, unread: 0 }, s.status, '', otherChats(s.role, ''));
+  };
+
   var convItem = function (c) {
     var on = c.key === CONV;
     // 成对: 只列与我有往来的 —— 在群里但没和我说过话的人, 点进去也是空的。
-    var talked = OPEN[c.key] ? c.subs.filter(function (s) { return s.count; }).sort(recentFirst) : [];
+    // 「chat 内全部」再把其余有记录的接在成对的后面 (.far), 各自按最近排。
+    var pairs = c.subs.filter(function (s) { return s.count; }).sort(recentFirst);
+    var fars = SCOPE === 'all'
+      ? c.subs.filter(function (s) { return !s.count && s.whole && s.whole.count; })
+        .sort(function (a, b) { return recentFirst(a.whole, b.whole); })
+      : [];
+    var talked = OPEN[c.key] ? pairs.concat(fars) : [];
     var hidden = talked.length - SUB_FOLD;
     var bar = hidden > 0
       ? '<button class="si-more" data-more="' + esc(c.key) + '">' + (MORE[c.key] ? '折叠' : '展开更多') + ' × ' + hidden + '</button>'
       : '';
     // 展开条钉在第 SUB_FOLD+1 位, 展开与折叠都不挪: 其余子项展开后接在它下面。
     var sub = function (s) {
+      if (!s.count) {
+        var k = farKey(c, s);
+        return '<button class="si far' + (CONV === k ? ' on' : '') + '" data-conv="' + esc(k) + '" data-with="" ' +
+          'title="' + esc(nameOf(s.role) + ' 在这里的 ' + s.whole.count + ' 条记录 (与我无往来)') + '">' + farRow(s) + '</button>';
+      }
       var sel = on && s.role === WITH;
       return '<button class="si' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '" data-with="' + esc(s.role) + '" ' +
         'title="' + esc('我与 ' + nameOf(s.role) + ' 在这里的 ' + s.count + ' 条往来') + '">' +
@@ -516,7 +547,7 @@
     };
     // 没变就不碰 DOM: 心跳每 3s 来一次, 重建会把列表的滚动与焦点蹭掉。
     // 开关挂在第一个标题行的右端; 一个会话都没有也留一行标题给它。
-    var html = (sec('群聊', groups) + sec('私聊', dms) || '<h2>会话<span>0</span></h2>').replace('</h2>', worldToggle() + '</h2>');
+    var html = (sec('群聊', groups) + sec('私聊', dms) || '<h2>会话<span>0</span></h2>').replace('</h2>', scopeToggle() + worldToggle() + '</h2>');
     if (convsEl._html === html) return;
     convsEl._html = html; convsEl.innerHTML = html;
     convsEl.querySelectorAll('[data-conv]').forEach(function (b) {
@@ -529,6 +560,9 @@
     });
     bindGo(convsEl);
     bindWorldToggle(convsEl);
+    convsEl.querySelectorAll('[data-scope]').forEach(function (b) {
+      b.onclick = function () { setScope(b.getAttribute('data-scope')); };
+    });
   };
 
   var shortCwd = function (p) {
@@ -586,6 +620,22 @@
   // 会话列表 ↔ 关系图: 侧栏第一行右上角同一个小开关, 标的是「点了去哪」。
   var LIST_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M3 4h10M3 8h10M3 12h10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
   var TREE_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M4 3v10M4 6h5M4 11h5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="11" cy="6" r="1.6" fill="currentColor"/><circle cx="11" cy="11" r="1.6" fill="currentColor"/></svg>';
+  // 群下子项的范围: 「仅与我有往来」(成对) / 「chat 内全部」(再列出群里与我无往来的 role)。
+  // 只是个人的看法偏好 —— 记在本地, 取不到就按成对。
+  var SCOPE_KEY = 'wezard.role.subScope';
+  var SCOPE = (function () { try { return localStorage.getItem(SCOPE_KEY) === 'all' ? 'all' : 'pair'; } catch (e) { return 'pair'; } })();
+  var setScope = function (v) {
+    if (v === SCOPE) return;
+    SCOPE = v;
+    try { localStorage.setItem(SCOPE_KEY, v); } catch (e) { }
+    renderConvs();
+  };
+  var scopeToggle = function () {
+    var opt = function (v, label, tip) {
+      return '<button class="' + (SCOPE === v ? 'on' : '') + '" data-scope="' + v + '" title="' + tip + '">' + label + '</button>';
+    };
+    return '<span class="scope">' + opt('pair', '往来', '群下只列与我有往来的 role') + opt('all', '全部', '群下列出 chat 内全部 role') + '</span>';
+  };
   var worldToggle = function () {
     return '<button class="vt" data-vt title="' + (WORLD ? '换回会话列表' : '换成关系图') + '">' + (WORLD ? LIST_SVG + '列表' : TREE_SVG + '关系图') + '</button>';
   };
@@ -815,6 +865,16 @@
     }
     var c = convOf(CONV);
     if (!c) { who.innerHTML = ''; acts.innerHTML = ''; return; }
+    // 某 role 在一个群里的全部记录 (「chat 内全部」下与我无往来的子项): 顶栏与成对子项同一种写法 —— 只写它,
+    // 「在 <群>」点回整个群。
+    if (c.kind === 'all' && c.chat) {
+      who.innerHTML = '<span class="t">' + nm(c.who, '', true) + '</span>' +
+        '<span class="sub">在 <button type="button" class="up" id="ch-up" title="' + esc('看 ' + chatTitle(c.chat) + ' 的全部记录') + '">' + esc(chatTitle(c.chat)) + '</button></span>';
+      acts.innerHTML = '';
+      bindGo(who);
+      $('#ch-up').onclick = function () { selectConv('c:' + c.chat, ''); };
+      return;
+    }
     if (c.kind === 'all') {
       who.innerHTML = pairOf([[c.who]]) + '<span class="t" title="' + esc(c.name) + '"></span>';
       acts.innerHTML = '';

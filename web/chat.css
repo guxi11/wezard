@@ -184,6 +184,11 @@ button { font: inherit; color: inherit }
 }
 .convs h2 .vt:hover { background: #eef1f4; color: var(--accent) }
 .convs h2 .tall + .vt { margin-left: 4px }
+/* 子项范围的两段式开关, 挨在关系图开关左边: 选中的那段沉底色, 另一段只是灰字。 */
+.convs h2 .scope { margin-left: auto; align-self: center; display: inline-flex; gap: 1px; padding: 1px; border-radius: 6px; background: #eef1f4 }
+.convs h2 .scope button { border: 0; background: none; padding: 1px 6px; border-radius: 5px; cursor: pointer; font-size: 11px; font-weight: 400; color: var(--mute) }
+.convs h2 .scope button.on { background: var(--card); color: var(--ink); box-shadow: 0 1px 1px #0000000d }
+.convs h2 .scope + .vt { margin-left: 4px }
 /* 关系图那一行字多 (范围 · 计数 · 名册缺席 · 看全部 · 开关): 一律不折行, 让范围那段先省略。 */
 .convs h2 { white-space: nowrap; min-width: 0 }
 .convs h2 > * { flex: none }
@@ -229,6 +234,10 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 /* 竖线的 x 与关系图里的竖向连线对齐: 都在项左缘 +10px (关系树 ul 缩进 20 - 线距 li 10)。 */
 .subs { margin: 0 0 6px 10px; border-left: 1px solid var(--line); padding-left: 2px }
 .si { color: var(--ink) }
+/* 「chat 内全部」下与我无往来的子项: 整行淡下去、名字不加粗, 一眼分得出不是我的往来; 选中 / 悬停时恢复。 */
+.si.far { opacity: .58 }
+.si.far .t { font-weight: 400 }
+.si.far:hover, .si.far.on { opacity: 1 }
 .si-more {
   display: block; width: 100%; text-align: center; padding: 4px 8px; border: 0;
   background: transparent; cursor: pointer; font-size: 11.5px; color: var(--mute);

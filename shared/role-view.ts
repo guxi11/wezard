@@ -361,7 +361,8 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
             whole: { count: talkOf(all, r).length, ...glanceOfTalk(all, role, dir, r, [], base) },
           };
         })
-        .sort((a, b) => b.lastTs - a.lastTs)
+        // 成对的排前 (默认只列它们), 其余按它们自己的记录排 —— 截断时先丢与我无往来的。
+        .sort((a, b) => Number(b.count > 0) - Number(a.count > 0) || (a.count ? b.lastTs - a.lastTs : b.whole.lastTs - a.whole.lastTs))
         .slice(0, SUB_MAX);
       return {
         key, kind: "group", base,
