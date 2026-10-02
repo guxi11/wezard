@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-10-03
+
 ### Added
 - `scripts/commit-own.mjs`: 多个 wizard 共用工作树和 git index 时只提交自己的改动 —— `<path>…` (这些文件的工作树全文) 或 `--patch <file|->` (只含自己 hunk、对 HEAD 带上下文的补丁); 在私有 index 上从 HEAD 拼树, 提交出的树先过 tsc, `update-ref` 对 HEAD 做 CAS (别人中途提交就重放), 落地后只同步共享 index 里仍停在旧 HEAD 的项, 工作树不动; 提交里有而工作树缺的内容会点名。工作区记忆里五条手工拼提交的步骤收成这一个命令。
 - rolepage 用量条在模型名旁显示 effort 档位: 取 CLI 写在 transcript assistant 行上的 `effort` (随 turn 记录, 主会话最近一轮为准), 没有才用绑定里记下的档位 (`WorldFactWizard.effort`), 都没有就不显示, 不猜默认。
@@ -915,7 +917,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.2.2...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.3.0...HEAD
+[2.3.0]: https://github.com/guxi11/wezard/compare/v2.2.2...v2.3.0
 [2.2.2]: https://github.com/guxi11/wezard/compare/v2.2.1...v2.2.2
 [2.2.1]: https://github.com/guxi11/wezard/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/guxi11/wezard/compare/v2.1.4...v2.2.0
