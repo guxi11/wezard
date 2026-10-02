@@ -19,7 +19,7 @@ import type { Logger } from "pino";
 import type { JsonMap } from "../shared/json-map-store.js";
 import type { IdleResult } from "./graph.js";
 import { parseClosing, type PeerReply } from "./peers.js";
-import { turnState, type TurnState } from "../shared/turn-state.js";
+import { isTerminal, turnState, type Terminal, type TurnState } from "../shared/turn-state.js";
 import type { Envelope, ReceiptStatus } from "../shared/reminder.js";
 import { sleep, truncate } from "../shared/std.js";
 
@@ -120,7 +120,7 @@ export interface ReceiptDeps {
    *  就提前报了 —— 或者被顶掉的那个成员永远不计 done。账本按成员记, 不会。 */
   jobTally?: (job: string) => { done: number; total: number } | undefined;
   /** 成员那一份落定了: 记进账本 (终态写一次; need / error 不来这里)。 */
-  settleJob?: (job: string, target: string, outcome: Exclude<ReceiptStatus, "need" | "error">, artifacts: { path: string; note: string }[]) => void;
+  settleJob?: (job: string, target: string, outcome: Terminal, artifacts: { path: string; note: string }[]) => void;
   log: Logger;
   /** 登记的落盘处。缺省 = 纯内存 (reload 即丢)。 */
   store?: JsonMap<Slot>;
@@ -325,8 +325,6 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   };
 
   const canceled = (s: Slot): boolean => s.outcome?.status === "canceled";
-  /** 投一份但不算定论的那两种: CLI 报错、NEED 反问。 */
-  const interim = (st: ReceiptStatus): boolean => st === "error" || st === "need";
 
   /** 守到对方答出**我们这一句**为止。信封是比发话时刻更硬的锚 (见 peers.replyToPeer):
    *  对方正忙时我们那一句是排队的, 它先吐出来的是上一件事的结论 —— 按时刻取就会把
@@ -395,7 +393,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     const lg = deps.log.child({ mod: "receipt", from: deps.nameOf(s.from), to: deps.nameOf(s.to), ...(s.job ? { job: s.job } : {}) });
     const anchor = s.at;
     // 终态写一次不再改: reload 打断投递后续守的那一份直接重投同一个结果, 不再重等。
-    const got = s.outcome && !interim(s.outcome.status) ? s.outcome : await awaitReply(s);
+    const got = s.outcome && isTerminal(s.outcome.status) ? s.outcome : await awaitReply(s);
     // 等的过程中被 cancel 落了终态: 以它为准 (pane 随后被杀, awaitReply 可能报的是 dead)。
     const out = canceled(s) ? s.outcome : got;
     if (stale(s)) return;
@@ -415,11 +413,11 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       lg.info({ children: children(s).map((c) => deps.nameOf(c.to)) }, "receipt: 答话方又派了活, 等子回执回来再续");
       return;
     }
-    const final = !interim(out.status);
+    const final = isTerminal(out.status);
     s.outcome = out;
     s.resolved = final;
     save(s);
-    if (final && s.job) deps.settleJob?.(s.job, s.to, out.status as Exclude<ReceiptStatus, "need" | "error">, parseClosing(out.body).artifacts);
+    if (final && s.job) deps.settleJob?.(s.job, s.to, out.status as Terminal, parseClosing(out.body).artifacts);
     // 发话方自己在交接: 重开的那几秒里 pane 是死的, 别把这当成"已经不在了"。
     await deps.handedOff?.(s.from);
     if (!(await deps.paneLive(s.from))) {

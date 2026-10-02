@@ -14,6 +14,7 @@ import { backendForPath, type CliBackendName } from "../shared/cli-backends.js";
 import { truncate, truncateWithCount } from "../shared/std.js";
 import { isKeepalivePingText, withoutKeepalive } from "../shared/keepalive.js";
 import { envelopeAttrs, parseEnvelope, renderReminder, type Envelope, type ReceiptRoute, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
+import type { Terminal } from "../shared/turn-state.js";
 
 /** Strip ANSI SGR/CSI + OSC so captured pane text is safe to embed / match on. */
 export const stripAnsi = (s: string): string =>
@@ -642,7 +643,7 @@ export const renderReceiptEnvelope = (
       : []),
   ]);
 
-const FAILED: Record<Exclude<ReceiptStatus, "done" | "error" | "need">, string> = {
+const FAILED: Record<Exclude<Terminal, "done">, string> = {
   timeout: "等到期限它还没答完",
   silent: "它停下了几次, 都没有答这一句",
   dead: "它的 pane 没了 (被收掉或崩了)",

@@ -7,6 +7,7 @@ import type { ReceiptStatus } from "./reminder.js";
 
 /** 落定了的那几种 (need / error 是中途的)。 */
 export type Terminal = Exclude<ReceiptStatus, "need" | "error">;
+export const isTerminal = (st: ReceiptStatus): st is Terminal => st !== "need" && st !== "error";
 export type TurnState = "working" | "blocked" | "needs-input" | "errored" | "deferred" | Terminal;
 
 export interface TurnSlot {

@@ -12,7 +12,7 @@ B2 方向对, 但按 roadmap 的写法直接做, 有三处会落空、两处会�
 | P1 | **回执等待用错了「闲」的判定**: `awaitReply` 用 `waitForIdle(s.to, deps.isBusy)`, 也就是 pane 的 spinner。停在**本地**对话框上的 wizard (hook 回落成 `ask`、AskUserQuestion 等; 走 wezard 长轮询的那种审批期间 spinner 大概率还在, 未实测) 没有 spinner, 被判成「闲」, 长工具调用的间隙也可能误判; `answerOf` 见那一轮还开着, 返回 "", 记一次 `fruitless`。连着 3 次 (约 20s ramp + 3×2.5s 确认, 每圈 ~30s), 回执就**静默丢弃**。`index.ts` 已经给了 `deps.untilIdle` (注册表 status, 把悬着的审批算作不闲), 但 receipts 只在发话方那一侧用它 | 高 (可能是 `.receiptmiss` 的成因之一, 未实测) | 第一个提交就把 awaitReply 改走 `untilIdle`, 再把「卡在审批」显式化为 `blocked` (§2.1)。在这之前, 不能删 charter 里「迟迟不来就 peek」那一句 |
 | P2 | **「全部到齐」数的是已登记的 slot, 不是工单成员**: `meta.total = ofJob(from, job).length`。第 1 份回来时第 5 路还没派出去, 就会报 `1/1 全部到齐`。另外 slot 按 **(from, to) 一对**为键: 同一对在工单 J2 里又说一句, J1 那份就被顶掉, J1 的总数少一 | 高 | total 取 `max(工单成员数, slot 数, expect)`; open_job 加可选 `expect` (§2.5) |
 | P3 | **失败分支不止 roadmap 列的三种**。现在静默丢弃的路径有五条: ①对方超时 ②对方停了 3 次都没答 ③对方 pane 死了 (`paneBusy` 对死 pane 报「闲」, 最后落进 ②) ④**发话方忙满 1800s 就放弃** (`SENDER_WAIT_SEC`) ⑤`deliver` 失败。roadmap 只覆盖 ①②③。④ 最隐蔽: 发起者在长工具调用里, 回执到了反而被扔掉 | 中 | ①②③ 合成失败回执投递; ④ 发话方活着就一直等 (上限是 slot 的保留期); ⑤ 记 `status=undelivered` 留给 observe |
-| L1 | **NEED 打开了一条回环通道**: 分身 `NEED:` → 发起者 `tell_peer({re})` → 分身又 `NEED:`…… 现在唯一的刹车 (`maxTurns`) 排在 B4 | 中 | 每个 turn 的 NEED 往返设上限 (`legs ≤ 3`), 放进 B2 而不是 B4 |
+| L1 | **NEED 打开了一条回环通道**: 分身 `NEED:` → 发起者 `tell_peer({re})` → 分身又 `NEED:`…… 现在唯一的刹车 (`maxTurns`) 排在 B4 | 中 | 每个 turn 的 NEED 往返过 3 次 (`legs > 3`) 起, 信封**提示**对方直接给 `RESULT:` 并写清假设 —— 不在 daemon 里拒 (见 §3); 硬刹车是工单的 `maxTurns` (B2a ⑦) |
 | L2 | **超时后的迟到答案**: 投了 `timeout` 之后对方又答出来, 要不要再投一次? 投就是同一件活出两个终态, 工单计数也会出错 | 中 | **不投**。终态不可变 (A2A / MCP tasks 都这么规定); 迟到的答案用 peek 能读到, 要追就 `tell_peer({re})` (§2.2) |
 
 另外, roadmap 写的「派生 (不新增存储)」不完全成立: 终态 (`done` / `timeout` / `canceled`…) 在 reload 之后、或 pane 已经没了之后, 无法从实时探测里重新算出来, 必须落进 Slot。好在只是在已经落盘的 Slot 上多几个字段, 不需要新文件。
@@ -154,7 +154,7 @@ interface Envelope { …; turn?: string; re?: string; status?: ReceiptStatus }
 | 场景 | 现状 | B2 之后 | 防线 |
 |---|---|---|---|
 | 回执引出回执 | 不会: deliver 不登记 watcher | 同左 | **NEED 的答复只能走显式 `tell_peer`**, 永远不让「收到 NEED 那一轮」的回复自动回送 |
-| NEED 乒乓 | — | 可能 | `legs` 上限 + 信封升级措辞; B4 的 `maxTurns` 再做全局上限 |
+| NEED 乒乓 | — | 可能 | `legs > 3` 信封升级措辞 (只提示); 工单 `maxTurns` 做硬上限 |
 | timeout 后迟到答案 | 丢 | 丢 (终态不可变) | 回执正文告诉发起者可以 `re` 追问 |
 | wait_peer 与回执同时取 | `claimed` 占位 | 同左, `status=claimed` | 不变 |
 | 同一对两句连发 | 旧的作废 | 同左; 有 `re` 时 turn 延续 | 不变 |
@@ -174,7 +174,7 @@ interface Envelope { …; turn?: string; re?: string; status?: ReceiptStatus }
 1. **P1 修复**: awaitReply 改走 `untilIdle`, 加 `dead` 判定, 加 `status` 字段, 投失败回执。验证: 派一个分身去跑一条需要审批的命令, 晾 2 分钟不点 → 回执不应丢; 点掉之后正常回来。
 2. **发话方不放弃** (P3 ④) + `jobTotal` / `expect` (P2)。验证: open_job(expect:3), 先 clone 一路, 等它回来 → 应显示 1/3。
 3. **turn / re / deadline** + 信封属性 + `answerOf` 按 turn 定位。验证: `tell_peer({deadline:90})` 给一个慢活 → 收到 timeout 回执; 再 `re` 追问 → 拿到答案。
-4. **parseClosing**: NEED / ARTIFACT, 加 `legs` 上限, 回执与收工气泡的渲染。验证: 让分身故意 NEED 一次 → 工单计数不前进; 答复之后正常收口。
+4. **parseClosing**: NEED / ARTIFACT, `legs` 提示, 回执与收工气泡的渲染。验证: 让分身故意 NEED 一次 → 工单计数不前进; 答复之后正常收口。
 5. **observe**: turn-state 进 roster / peek / list_jobs, 以及 cancel。
 
 涉及的文件: `daemon/receipts.ts` `daemon/jobs.ts` `daemon/peers.ts` `shared/reminder.ts` `shared/turn-state.ts`(新) `daemon/index.ts` (tellPeer / clone 路径 / stop / deliver / open_job) `daemon/mirror-bridge.ts` (`parkedNow`, `untilIdle` 的 abort) `mcp/server.ts` (tell_peer `re` `deadline`; open_job `expect`)。注意: `index.ts` 和 `mcp/server.ts` 也在 B1 的范围里, 两批并行时要先排好谁先合。

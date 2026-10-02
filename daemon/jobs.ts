@@ -18,11 +18,9 @@
 // rolepage —— 五个分身同时干活时, 十条交叉气泡里读不出结构, 两条能。
 import { randomUUID } from "node:crypto";
 import { loadJsonMap } from "../shared/json-map-store.js";
-import type { ReceiptStatus } from "../shared/reminder.js";
+import type { Terminal } from "../shared/turn-state.js";
 import type { JobEpisode } from "./wizard-memory.js";
 
-/** 成员那一份的定论 —— 回执落了终态才写 (need / error 是中途的, 不进账)。 */
-export type MemberOutcome = Exclude<ReceiptStatus, "need" | "error">;
 export interface Artifact { path: string; note: string }
 
 export interface JobMember {
@@ -34,8 +32,8 @@ export interface JobMember {
   spawned: boolean;
   at: number;
   /** 这一份落定了没有、落成什么。「齐了吗」只数它: 回执登记按发话方 → 答话方一对一份,
-   *  会被同一对的后一句顶掉, 账本不会。 */
-  outcome?: MemberOutcome;
+   *  会被同一对的后一句顶掉, 账本不会。need / error 是中途的, 不进账。 */
+  outcome?: Terminal;
   artifacts?: Artifact[];
 }
 
@@ -68,7 +66,7 @@ export interface JobStore {
   /** 同一个 target 再次 attach 更新它那一段活, 并清掉它已落定的那一份 (又在干了)。 */
   attach: (id: string, member: Omit<JobMember, "at">) => JobRecord | undefined;
   /** 记下某个成员那一份的定论。不在册 / 已收工 = 不记; 已有定论不改写 (终态写一次)。 */
-  settle: (id: string, target: string, outcome: MemberOutcome, artifacts?: Artifact[]) => JobRecord | undefined;
+  settle: (id: string, target: string, outcome: Terminal, artifacts?: Artifact[]) => JobRecord | undefined;
   /** 已落定几份 / 一共几份 (成员数与 expect 取大)。 */
   tally: (id: string) => { done: number; total: number } | undefined;
   close: (id: string, summary: string) => JobRecord | undefined;

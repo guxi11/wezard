@@ -29,6 +29,7 @@
 - hook 的 wezard CLI 免审只认整条命令就是一次 `wezard[.sh] <status|logs|pending|audit|update|reload|config-path|mirror-status|version|help>` 且不含 shell 元字符; 此前命令里任意位置出现 `wezard` 一词就放行 (`curl …/config/set; true wezard` 可免审直改配置)。注意 daemon 的 `/config/set` 路由本身仍不鉴权, 本机进程可直接写 —— 这里只关掉了模型免审走到它的两条路。
 
 ### Changed
+- 回执终态只留一份定义 (B3b ②): `shared/turn-state.ts` 的 `Terminal` / `isTerminal`, 工单账本 (`JobMember.outcome`, 原 `MemberOutcome`)、回执 watcher、失败回执措辞表都用它。NEED 往返不设硬上限 —— `legs > 3` 只在信封里提示直接收口, 硬刹车是工单 `maxTurns` (b2-continuation.md 对齐)。
 - charter 编排段按回执 `status` 写处理法 (B2a ⑧): `need` 用 `re` 答、`error` 等续跑、`timeout / silent / dead / canceled` 换人或如实写缺; 「迟迟不来才 peek」改为看名册 / peek 的「在等 / 欠着」行; 写明 `deadline` / `maxTurns` / `expect` 何时用, 收口约定加 `NEED:` / `ARTIFACT:`。
 - rolepage 用量条的指标图标: API 请求次数 📡 → 🔁 (一次来回), 上下文峰值 🧠 → 📄 (送进去的那份文档)。仍用 emoji 而不是单色 svg, 与同排 💬 🛠️ ⏱️ 保持一套, 也能原样进被 fitUsage 收起时的 title。
 - rolepage 用量条 I/O 分布色带里缓存读 (cr) 一段改用边线色 `--line` (图例色点同步), 贴顶时与普通上边线连成一体, 注意力只留给 in / cw / out。
