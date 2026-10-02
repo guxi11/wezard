@@ -286,6 +286,29 @@ const cases = {
     };
   } },
 
+  // 按件号撤回 / 不误伤 (B4 ⑧): rr-k 先做根派的活, rr-o 的活排在后面 (normal 等它闲)。
+  // 根按件号撤回自己那件 → 只停这一轮; rr-k 接着做 rr-o 的活时, 根不带件号的打断被拒 (409)、
+  // urgent 降成 normal; rr-o 那件最终照常答完。
+  "cancel-turn": { names: ["rr-k", "rr-o"], run: async () => {
+    const n = nonce();
+    await Promise.all(["rr-k", "rr-o"].map((x) => spawn(x)));
+    const mine = await tell("rr-k", `${SLEEP(60)}, 然后回复一行: RESULT: root-${n}`);
+    await sleep(8000);
+    const theirs = post("/peers/tell", { target: kids.get("rr-o"), name: real("rr-k"), priority: "normal", text: `${SLEEP(40)}, 然后回复一行: RESULT: o-${n}` });
+    await sleep(3000);
+    const byTurn = await post("/wizard/stop", { target: root.target, name: real("rr-k"), mode: "interrupt", turn: mine.turn });
+    await theirs;
+    await sleep(8000);
+    const blunt = await post("/wizard/stop", { target: root.target, name: real("rr-k"), mode: "interrupt" });
+    const urgent = await tell("rr-k", "直接回复一行: RESULT: ok", { priority: "urgent" });
+    const o = await until(() => { const x = slotOf(kids.get("rr-o"), kids.get("rr-k")); return x?.settled && x; }, 3 * 60_000);
+    const m = slotOf(root.target, kids.get("rr-k"));
+    return {
+      pass: byTurn.interrupted === true && blunt.ok === false && /别的|派的活/.test(blunt.reason ?? "") && !!urgent.urgentDowngraded && o?.outcome?.status === "done" && o.outcome.body.includes(`o-${n}`),
+      why: `按件号撤回 interrupted=${byTurn.interrupted} · 不带件号打断=${blunt.ok ? "放行了" : "被拒"} · urgent 降级=${!!urgent.urgentDowngraded} · rr-o 那件=${o?.outcome?.status ?? "未落定"}${o?.outcome?.body.includes(`o-${n}`) ? "(答完)" : ""} · 根最后那件=${m?.outcome?.status ?? "在跑"}`,
+    };
+  } },
+
   // 定时任务 (B4 ⑤): 点名目标到点正忙 → 顺延到它闲下来再投; quiet 任务终句是 QUIET 就不进群,
   // 不是就由守护进程转进群 (那一条会真出现在根的 home 聊天里, 带 [receipt-regress] 字样)。
   "task-quiet": { names: ["rr-t", "rr-t2"], run: async () => {

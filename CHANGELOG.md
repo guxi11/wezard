@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- 按件号撤回, 打断不误伤别人的活 (B4 ⑧): `stop_wizard({mode:"interrupt", turn})` 只撤回调用方自己派的那一件 —— 它此刻正做的就是这件才按 Esc (不清它的注入队列), 还排着 / 在做别人的活就只把这件记成 canceled, 并经名册增量捎它一句「不用做了」。不带 `turn` 的打断, 若它这一轮是别的 wizard / 人 / 定时任务的 (回执轮算它自己的), 默认 409, 要 `force:true`; `tell_peer` 的 `urgent` 同样情形降成 `normal` (回包 `urgentDowngraded`)。回归脚本加 `cancel-turn` 用例。
 - 工单验收, 不合格自动打回一次 (B4 ⑦): `open_job({accept})` —— `result` (默认) 要有非空 `RESULT:`, `artifact` 还要列出 `ARTIFACT:`, `none` 不验。成员的 done 答复不合格时守护进程以发话方名义同件号续问打回一次 (私聊, 不占 `maxTurns`), 那一份不投、不计数; 再交上来的照收 (原样再交、或打回那句因 reload 没注入, 都按原文收下, 不报 silent)。**默认对所有工单生效**: 没写 RESULT 的成员会多跑一轮。回归脚本加 `accept` 用例; 脚本每次运行给分身名字加随机后缀 (几个 wizard 并发跑不再互撞), 只在连接被拒时重试 (spawn / tell 不幂等), 分身没照做时单独报出。
 - `/name <名字>` 给聊天起名时, 该聊天的默认 wizard 一并改成这个名字 (全局唯一, 撞名照 `pickName` 挂 `-N`, 回复里注明), 它所在的 tmux 窗口名同步换成新名字; `name_chat` 跟着改默认 wizard 名时也同步窗口名。
 - 定时任务「有事才说」与忙则顺延 (B4 ⑤): 任务文件 / `schedule_task` 新增 `quiet` —— 到点不在群里预告、不出「已起白板」气泡, 那一轮私下跑 (channel ""), 信封让它没事就只回一行 `QUIET`; 守护进程按这一枪的件号 (task 信封新带 `turn`) 定位终句, 不是 `QUIET` 才转进群, 待转发的那一轮落盘 (`quiet-relays.json`), reload 后续守。点名 (`fresh:false`) 的目标到点正忙时不再立刻起白板, 而是后台等它这一轮结束再投 (最多 30 分钟, 仍忙才退回白板; 同一条任务只留一枪在等)。回归脚本加 `task-quiet` 用例。

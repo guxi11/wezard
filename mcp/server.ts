@@ -383,7 +383,7 @@ const TELL_SCHEMA = {
     .enum(["normal", "urgent", "now"])
     .optional()
     .describe(
-      "对方**正忙**时怎么投 (它闲着三者一样, 立刻投)。`normal` (默认) 等它这一轮结束再投 —— 派新活用它, 否则你和别人的两段话会挤进同一个输入框被当成一轮读掉; 等的是你这次调用 (最多 `waitSec`)。`urgent` 先打断它这一轮 (同 stop_wizard 的 interrupt) 再投 —— 只给真紧急的改道, 它手上那一轮作废。`now` 不等不打断, 落进它的输入框并进当前这一轮 —— 插话、补一句、答它的问。带 `re` 续问时默认 `now`。返回里 `wasBusy` / `interrupted` / `waitedMs` 说明实际怎么投的。",
+      "对方**正忙**时怎么投 (它闲着三者一样, 立刻投)。`normal` (默认) 等它这一轮结束再投 —— 派新活用它, 否则你和别人的两段话会挤进同一个输入框被当成一轮读掉; 等的是你这次调用 (最多 `waitSec`)。`urgent` 先打断它这一轮 (同 stop_wizard 的 interrupt) 再投 —— 只给真紧急的改道, 它手上那一轮作废; 那一轮若是别的 wizard 派的活, 不打断, 降成 normal (回包 `urgentDowngraded`)。`now` 不等不打断, 落进它的输入框并进当前这一轮 —— 插话、补一句、答它的问。带 `re` 续问时默认 `now`。返回里 `wasBusy` / `interrupted` / `waitedMs` 说明实际怎么投的。",
     ),
   waitSec: z.number().optional().describe("`normal` 等它闲下来最多等多少秒 (10-3600, 默认 600)。等不到就返回失败, 不会强行投。"),
   public: z
@@ -914,10 +914,12 @@ server.registerTool(
       name: z.string().describe(ADDRESS_DOC),
       mode: z.enum(["end", "interrupt"]).optional().describe("'end' 结束并回收 pane (默认); 'interrupt' 只打断当前这一轮。"),
       forget: z.boolean().optional().describe("仅对 end 有效: 连身份记录 (名字/职责/记忆) 一起删除。默认 false —— 身份留着, 下次它回来还是它。"),
+      turn: z.string().optional().describe("仅对 interrupt: 只撤回**你自己派的**这一件 (回执 / tell_peer 回包里的件号)。它正在做的就是这件才按 Esc; 还排着或它在做别人的活, 就只把这件记成取消, 不碰它手上那一轮。"),
+      force: z.boolean().optional().describe("仅对 interrupt: 它此刻在做别的 wizard 派的活时, 不带 turn 的打断默认被拒 (会误伤那件); 确要打断加 true。"),
     },
   },
-  async ({ name, mode, forget }) =>
-    unwrap("stop_wizard", await daemonPost("/wizard/stop", { name, ...(mode ? { mode } : {}), ...(forget ? { forget } : {}) })),
+  async ({ name, mode, forget, turn, force }) =>
+    unwrap("stop_wizard", await daemonPost("/wizard/stop", { name, ...(mode ? { mode } : {}), ...(forget ? { forget } : {}), ...(turn ? { turn } : {}), ...(force ? { force } : {}) })),
 );
 
 server.registerTool(

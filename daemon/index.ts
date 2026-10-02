@@ -737,11 +737,26 @@ const main = async (): Promise<void> => {
      *  transcript 里开这一轮的那句 user 行的信封: attachment 上的 channel 在注入时就被
      *  排队的下一句改写了, transcript 才记着「这一轮是谁发起的」, reload 后也读得到。 */
     /** `target` 手上这一轮是哪件 peer 活 —— 认开头那句的信封: 有件号按件号, 老信封按发话方。 */
-    const currentAsk = (target: string): ((x: { from: string; turn: string }) => boolean) => {
+    /** `target` 手上这一轮若是某个 wizard 派来的活: 发话方的称呼 (`.x`) 与件号。人 / 定时 / 回执轮 = undefined。 */
+    const openingAsk = (target: string): { from: string; turn?: string } | undefined => {
       const p = m.sessionInfo(target)?.jsonlPath;
       const env = p ? openingOf(talkTurns(expandHome(p), 80, pingSigs, false, true))?.env : undefined;
-      if (env?.kind !== "peer" || env.receipt) return () => false;
+      return env?.kind === "peer" && !env.receipt ? { from: env.from, ...(env.turn ? { turn: env.turn } : {}) } : undefined;
+    };
+    const currentAsk = (target: string): ((x: { from: string; turn: string }) => boolean) => {
+      const env = openingAsk(target);
+      if (!env) return () => false;
       return (x) => (env.turn ? x.turn === env.turn : displayName(x.from) === env.from);
+    };
+    /** 打断 `target` 会不会误伤别人的活: 它正忙, 且这一轮不是调用方派的 —— 别的 wizard 派的、
+     *  人说的、定时任务放的 → 那一方的称呼。回执轮是它自己那件活的延续, 不算别人的。 */
+    const othersTurn = async (target: string, self: string): Promise<{ from: string; turn?: string } | undefined> => {
+      if (await m.idleNow(target)) return undefined;
+      const p = m.sessionInfo(target)?.jsonlPath;
+      const env = p ? openingOf(talkTurns(expandHome(p), 80, pingSigs, false, true))?.env : undefined;
+      if (env?.receipt) return undefined;
+      if (env?.kind === "peer") return env.from === displayName(self) ? undefined : { from: env.from, ...(env.turn ? { turn: env.turn } : {}) };
+      return { from: env?.kind === "task" ? env.from : env?.from ? `人 (${env.from})` : "人" };
     };
     const parentKOf = (self: string): ParentK | undefined => {
       const p = m.sessionInfo(self)?.jsonlPath;
@@ -1000,7 +1015,7 @@ const main = async (): Promise<void> => {
       // 老 MCP 进程只认 `when` (默认 now): idle ≡ normal, now ≡ now。都没给时, `re` 续问默认 now ——
       // 续问是同一场来回里的应答, 对方可能正挂在 wait_peer 上等你, 等它闲下来就互相干等到超时。
       const bp = body as { priority?: string; when?: string };
-      const policy: "normal" | "urgent" | "now" =
+      const asked: "normal" | "urgent" | "now" =
         bp.priority === "urgent" ? "urgent"
           : bp.priority === "normal" ? "normal"
             : bp.priority === "now" || bp.when === "now" ? "now"
@@ -1009,6 +1024,10 @@ const main = async (): Promise<void> => {
       const waitSec = Math.min(Math.max(Number((body as { waitSec?: number }).waitSec ?? 600) || 600, 10), 3600);
       // 「忙」= 这一轮还没结束, 或停在审批上等人 —— 都不是能接新活的时候。
       const wasBusy = !(await m.idleNow(target));
+      // urgent 只打断你自己派的那一轮 (或它自己的回执轮): 手上若是别的 wizard / 人 / 定时任务的活,
+      // 打断就误伤了那件 —— 降成 normal, 等它这一轮做完再投。
+      const others = asked === "urgent" && wasBusy ? await othersTurn(target, self) : undefined;
+      const policy = others ? "normal" : asked;
       let waitedMs = 0;
       let interrupted: boolean | undefined;
       if (policy === "normal" && wasBusy) {
@@ -1069,6 +1088,7 @@ const main = async (): Promise<void> => {
         name: peerAddress(cfg, self, target),
         public: isPublic,
         priority: policy,
+        ...(others ? { urgentDowngraded: `它此刻在做 ${others.from} 派的活, 没打断它 —— 按 normal 等它这一轮做完再投` } : {}),
         wasBusy,
         ...(interrupted !== undefined ? { interrupted } : {}),
         ...(waitedMs ? { waitedMs } : {}),
@@ -1922,7 +1942,7 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/stop", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { name?: string; tag?: string; mode?: string; forget?: boolean };
+      const b = body as { name?: string; tag?: string; mode?: string; forget?: boolean; turn?: string; force?: boolean };
       const r = resolvePeer(self, addrOf(b));
       // 有身份没会话 (冷记录 / 生到一半的僵尸): resolvePeer 够不着它, 但收它不需要
       // 会话 —— end 视为早已结束, forget 删掉记录、腾出名字。interrupt 无从谈起。
@@ -1938,6 +1958,30 @@ const main = async (): Promise<void> => {
       const victim = briefOf(self, target);
       const end = (b.mode ?? "end") === "end";
       if (!end && target === self) { json(res, 400, { ok: false, reason: "打断自己没有意义 —— 你就是正在生成的那一个" }); return; }
+      // 按件号撤回自己派的那一件: 它此刻正在做的就是这件才按 Esc; 否则 (排着 / 在做别人的)
+      // 只把这件记成 canceled —— 它之后答出来也不再回执, 手上别人的那一轮不受影响。
+      const turn = (b.turn ?? "").replace(/[`\s]/g, "");
+      if (!end && turn) {
+        const mine = receipts.pending(self, target);
+        if (mine?.turn !== turn) { json(res, 404, { ok: false, reason: `你没有在等 ${victim.name ? `.${victim.name}` : target} 答 '${turn}' 这件 (已落定、件号写错, 或不是你派的)` }); return; }
+        const current = openingAsk(target)?.turn === turn && !(await m.idleNow(target));
+        const canceled = receipts.cancel(target, self, (x) => x.from === self && x.turn === turn);
+        // 还没轮到 / 排在后面: 捎一句给它, 轮到那句话时别再做了 (notices 挂在下一条注入的尾巴上)。
+        if (!current) notices.post([target], `${displayName(self)} 撤回了它派给你的 ${turn} —— 那件活不用做了; 读到它时直接略过, 不必回复。`);
+        if (current) {
+          // 只按 Esc, 不 teardown: teardown 会清掉它的注入队列, 别人排着的话一起丢。
+          const done = await m.interruptPane(target);
+          if (!done.ok) { json(res, 502, { ok: false, target, reason: done.reason }); return; }
+        }
+        json(res, 200, { ok: true, target, name: victim.name, mode: "interrupt", turn, canceled, interrupted: current, ...(current ? {} : { note: "它此刻没在做这件 (还排着, 或在做别人的活), 没按 Esc —— 这件已撤回, 它之后答出来也不会再回执给你" }) });
+        return;
+      }
+      // 不带件号的打断会停掉它手上整轮: 那一轮若是别的 wizard 派的, 先拒 —— 误伤的是别人的活。
+      const others = !end && !b.force ? await othersTurn(target, self) : undefined;
+      if (others) {
+        json(res, 409, { ok: false, target, reason: `它此刻在做 ${others.from} 派的活${others.turn ? ` (${others.turn})` : ""}, 打断会连那件一起停掉 —— 只想撤回你自己派的那件, 传 turn (件号); 确要打断它这一轮, 加 force:true` });
+        return;
+      }
       // 先落 canceled 再动 pane: pane 一死, 守着的 watcher 会把同一份报成 dead。
       // 打断只停它手上这一轮: 只掐这一轮开头那句派来的活 (人 / 定时 / 回执轮不掐任何一份)。
       const canceled = receipts.cancel(target, self, end ? undefined : currentAsk(target));
