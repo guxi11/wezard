@@ -53,7 +53,7 @@
 
 **不做的**: 让 LLM 写 s-expression; 把 observe 镜头合成一个工具; 宏 / 自定义特殊形式; 确定性重放; daemon 里跑模型生成的编排脚本; 自动认领任务的调度器; 向量记忆; 默认心跳。理由见各调研的「不该学」一节。
 
-**Flow AST (`run_flow`) 的位置**: 只覆盖「静态形状 + 要熬时间」的编排 (fix⇄review 跑过夜), 可续跑 (CEK 落盘)。**等真实需求出现再做**; 在那之前 `run_agent_graph` 三件套 (30 天零调用) 降出 charter 与默认面。
+**Flow AST (`run_flow`) 不做** (2026-10-02 定): 可续跑的 daemon 侧解释器与「控制流不进 daemon」直接冲突。graph 降格为「工单 + 预算」(a2a L1): `rounds`/`until` 变成工单的 `maxTurns`/`deadline`, 控制流留在发起 wizard。只有出现「无人值守必须跑完」的真实需求才重开。rolepage 的编排视图同理: 画 ledger + `TurnState` 的实际轨迹, 不存 `expr`。
 
 ## 3. 工具面处置
 
