@@ -19,6 +19,10 @@
   var WITH = qs.get('with') || '';
   // '' = 未指定 (服务端按全部时间, 回包里认领成 'all'); 'all' = 全部时间; 其他 = 那一段的 sid。
   var SESSION = qs.get('session') || '';
+  // 消息区的视角 (谁算「自己」靠右、描述行以谁为准): 只在看移交详情时才有 —— 接活那一方;
+  // 平时不存在, 消息区就用 ROLE。侧栏与名片永远是 ROLE 的。
+  var EYE = qs.get('eye') || '';
+  var eyeOf = function () { return EYE || ROLE; };
   var TICK_MS = 3000;
 
   // at / recvAt: 服务端快照时刻与本地收到时刻。所有"现在几点"的判断都换算到
@@ -93,6 +97,7 @@
     if (CONV) p.conv = CONV;
     if (WITH) p['with'] = WITH;
     if (SESSION) p.session = SESSION;
+    if (EYE) p.eye = EYE;
     if (WORLD) p.side = 'world';
     Object.keys(extra || {}).forEach(function (k) { p[k] = extra[k]; });
     return p;
@@ -328,10 +333,11 @@
     var peer = ROLE === from ? to : ROLE === to ? from : '';
     var conv = !peer ? 'a:' + from + '|' + to : ch ? 'c:' + ch : 'p:' + peer;
     var w = peer && ch ? peer : '';
-    var id = b.getAttribute('data-gid'), row = b.closest('.mrow');
-    markBack(function () { return VIEW === 'msgs' && CONV === conv && WITH === w; }, row && row.getAttribute('data-id'));
-    if (id) return jumpMsg({ conv: conv, with: w, id: id, ts: Number(b.getAttribute('data-gts')) });
-    clickItem(conv, w);
+    var id = b.getAttribute('data-gid');
+    markBack(function () { return VIEW === 'msgs' && CONV === conv && WITH === w; });
+    // 消息区换成接活那一方的视角 (侧栏、名片不动)。
+    if (id) return jumpMsg({ conv: conv, with: w, id: id, ts: Number(b.getAttribute('data-gts')), eye: to });
+    selectConv(conv, w, undefined, to);
   });
 
   // ── 左栏: 当前 role 的名片 + 会话列表 ──
@@ -510,7 +516,7 @@
   // 点侧栏项: 没选中它 → 选中 (会话顺带展开); 已选中 → 不再选一遍, 右边的正文一个字不动 ——
   // 会话只折叠/展开, 子项什么都不做。
   var clickItem = function (key, withRole) {
-    if (key !== CONV || withRole !== WITH || VIEW !== 'msgs') return selectConv(key, withRole);
+    if (key !== CONV || withRole !== WITH || VIEW !== 'msgs' || EYE) return selectConv(key, withRole);
     // 窄屏退回列表后再点它是要回去读, 不是要折叠。
     if (!app.classList.contains('reading')) return app.classList.add('reading');
     if (withRole) return;
@@ -938,7 +944,23 @@
   // 移交行点对方都记它, 同一个按钮。
   var BACK = null;
   var inJobs = function () { return VIEW === 'jobs' || CONV.indexOf('j:') === 0; };
-  var markBack = function (on, at) { BACK = { conv: CONV, with: WITH, session: SESSION, at: at || '', on: on }; };
+  // 回来 = 原样恢复那一页: 会话、视角、滚动位置 (按视窗顶上那一行的偏移记, 不闪不吸)。吸在底部就不记锚点。
+  var markBack = function (on) {
+    var r = !atBottom() && firstShown();
+    var at = r && { id: r.getAttribute('data-id'), off: r.getBoundingClientRect().top - thread.getBoundingClientRect().top };
+    BACK = { conv: CONV, with: WITH, session: SESSION, eye: EYE, at: at || null, on: on };
+  };
+  var restoreAt = function (at) {
+    if (!at) return undefined;
+    var put = function () {
+      var row = rowNode(at.id);
+      if (!row) return false;
+      thread.scrollTop += row.getBoundingClientRect().top - thread.getBoundingClientRect().top - at.off;
+      S.pinned = atBottom();
+      return true;
+    };
+    return function () { if (!put()) loadMsgs('0', put); return true; };
+  };
   var openJob = function (id) {
     if (CONV.indexOf('j:') !== 0) markBack(inJobs);
     selectConv('j:' + id, '');
@@ -968,7 +990,7 @@
     var h = backBtn();
     if (h) $('#ch-who').insertAdjacentHTML('afterbegin', h);
     var b = $('#ch-jback');
-    if (b) b.onclick = function () { var x = BACK; BACK = null; SESSION = x.session; selectConv(x.conv, x.with, x.at && landOn(x.at)); };
+    if (b) b.onclick = function () { var x = BACK; BACK = null; SESSION = x.session; selectConv(x.conv, x.with, restoreAt(x.at), x.eye); };
   };
   var renderHead = function () {
     var who = $('#ch-who'), acts = $('#ch-acts');
@@ -1091,15 +1113,19 @@
     if (m.dir === 'mark') {
       return '<div class="mrow mark" data-id="' + esc(m.id) + '" data-turn="' + esc(m.turnId || m.id) + '" data-ts="' + m.ts + '" data-sig="' + esc(m.sig) + '">' + signCut(m.html, m.from, m.fromName) + '</div>';
     }
-    var mine = m.from === ROLE;
+    var me = eyeOf();
+    var mine = m.from === me;
     var other = mine ? m.to : m.from;
     // 看 key 而不是会话列表: 换视角就地重包时, 列表还是上一个 role 的。
     var group = CONV.indexOf('p:') !== 0;
+    // 顶栏那个对端是相对 ROLE 的; 消息区换成了它 (EYE) 的视角时, 它的对端就是 ROLE。
+    var peer = group ? pairPeer(convOf(CONV)) : CONV.slice(2);
+    if (EYE && peer === EYE) peer = ROLE;
     // 说给谁: 群里我不是收信方的那条 (X → Y); 我发的那条, 收信方不是顶栏那个对端时
     // (一对一里收信方就是顶栏那个对端, 不再重复写)。
     var dst = mine
-      ? (m.to && m.to !== 'human:' && m.to !== (group ? pairPeer(convOf(CONV)) : CONV.slice(2)) ? m.to : '')
-      : (m.to !== ROLE && group ? m.to : '');
+      ? (m.to && m.to !== 'human:' && m.to !== peer ? m.to : '')
+      : (m.to !== me && group ? m.to : '');
     // 宽屏写在气泡对面的空白里 (.dest, 在换视角的门里但不吃点击); 窄屏空白太窄, 退回消息头 (.to)。
     var to = dst ? '<span class="to">→ ' + avBtn(m.to, m.toLabel) + nm(m.to, m.toName, true) + '</span>' : '';
     // 箭头顺着「发话人 → 收件人」: 气泡是发话人, 描述在哪一侧箭头就背着气泡指向哪一侧 ——
@@ -1387,8 +1413,8 @@
   };
 
   // land: 见 loadMsgs —— 搜索跳到一条具体消息时由它来定位, 不吸底。
-  var selectConv = function (key, withRole, land) {
-    CONV = key; WITH = withRole || '';
+  var selectConv = function (key, withRole, land, eye) {
+    CONV = key; WITH = withRole || ''; EYE = eye && eye !== ROLE ? eye : '';
     reveal();
     if (VIEW !== 'msgs') setView('msgs');
     app.classList.add('reading');
@@ -1413,7 +1439,7 @@
     var withBack = keep && WITH === id ? from : '';
     // 整个频道 / 两人私聊 / 群里的一对, 消息集合都与视角无关 —— 集合没变就就地翻面。
     var same = VIEW === 'msgs' && (!WITH || withBack) && !SESSION && (keep || CONV.indexOf('p:') === 0);
-    ROLE = id; WITH = withBack; SESSION = '';
+    ROLE = id; WITH = withBack; SESSION = ''; EYE = '';
     CONV = keep || (CONV.indexOf('p:') === 0 ? 'p:' + from : '');
     // 停在关系图时换视角 = 选中新视角自己那张卡片: 先开它的全部对话 (不留旧选中 / 空白),
     // 新树画出来知道它连着谁后, renderWorld 再收窄成那张卡片的窗口 (W.pickSelf)。
@@ -2302,8 +2328,8 @@
     };
   };
   var jumpMsg = function (h) {
-    if (inSession(h.ts) && convOf(h.conv)) return selectConv(h.conv, h.with || '', landOn(h.id));
-    SESSION = 'all'; CONV = h.conv; WITH = h.with || '';
+    if (inSession(h.ts) && convOf(h.conv)) return selectConv(h.conv, h.with || '', landOn(h.id), h.eye);
+    SESSION = 'all'; CONV = h.conv; WITH = h.with || ''; EYE = h.eye && h.eye !== ROLE ? h.eye : '';
     if (VIEW !== 'msgs') setView('msgs');
     app.classList.add('reading');
     reveal();
