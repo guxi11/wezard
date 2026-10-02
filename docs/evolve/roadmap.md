@@ -27,7 +27,7 @@
 
 | 批 | 状态 | commit | 备注 |
 |---|---|---|---|
-| B1 | ⬜ | | |
+| B1 | ✅ | `928b870` `77c0c02` `70aae40` `bba80a4` `4a73514` `b9c4f01` | charter 5.1k→2.6k tok, 工具定义 20.4k→17.8k tok。 留后: `/config/set` 路由不鉴权 (本机任意进程可写) · reload 窗口内的孤儿 tmux 窗口只 warn 不 kill · forget 冷记录未摘出开着的工单成员 · CLI 免审收紧后 `npm run build && ./cli/wezard.sh reload` 要过审批卡 |
 | B2a | ⬜ | | |
 | B2b | ⬜ | | |
 | B3 | ⬜ | | 前置已就绪: `.memsteward` `c53392f` 加了 `StewardDeps.onMerged` (只报内容真变了的 md) 与 `refsOf`; 接线在 `index.ts`, md↔wizard 用 `memoryPath(stateDir, scope, …)` 正向算后比对, 跳过 `isInternalKey` |
