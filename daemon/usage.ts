@@ -9,6 +9,7 @@
 import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { priceOf, costOf as costWith } from "../shared/pricing.js";
 
 export interface ModelTotals {
   input: number;
@@ -71,29 +72,10 @@ const HOUR_MS = 60 * 60 * 1000;
 const BLOCK_MS = 5 * HOUR_MS;
 const DAY_MS = 24 * HOUR_MS;
 
-// Rough per-model pricing (USD per 1M tokens). Kept intentionally small — only
-// covers the models likely to show up on wezard users' machines. Unknown
-// models fall back to 0 (token counts still shown, just no cost line).
-// Prices derived from ccusage's LiteLLM pricing at time of writing (Opus 4.7,
-// Sonnet 4.6, Haiku 4.5). Drift over time is expected — accuracy here matters
-// less than order-of-magnitude for the burn-rate readout.
-interface Price { in: number; out: number; cacheWrite: number; cacheRead: number; }
-export const PRICES: Array<{ match: RegExp; price: Price }> = [
-  { match: /opus/i, price: { in: 5, out: 25, cacheWrite: 6.25, cacheRead: 0.5 } },
-  { match: /sonnet/i, price: { in: 3, out: 15, cacheWrite: 3.75, cacheRead: 0.3 } },
-  { match: /haiku/i, price: { in: 1, out: 5, cacheWrite: 1.25, cacheRead: 0.1 } },
-];
-
-const priceFor = (model: string): Price | undefined =>
-  PRICES.find((p) => p.match.test(model))?.price;
-
+// 单价来自 shared/pricing (LiteLLM 价格表快照); 认不出的模型记 0 (token 照计, 不出费用)。
 export const costOf = (model: string, t: ModelTotals): number => {
-  const p = priceFor(model);
-  if (!p) return 0;
-  return (
-    (t.input * p.in + t.output * p.out + t.cacheCreate * p.cacheWrite + t.cacheRead * p.cacheRead) /
-    1_000_000
-  );
+  const p = priceOf(model);
+  return p ? costWith(p, { input: t.input, output: t.output, cacheWrite: t.cacheCreate, cacheRead: t.cacheRead }) : 0;
 };
 
 const walkJsonl = (root: string, sinceMs: number, out: string[]): void => {

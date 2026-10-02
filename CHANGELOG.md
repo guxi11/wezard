@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- rolepage 用量条显示估算费用 (💰): 每轮按它的模型单价计 input / output / 缓存写 / 缓存读再加总; 单价是 LiteLLM `model_prices_and_context_window.json` 的快照 (`shared/model-prices.ts`, `node scripts/update-prices.mjs` 重新生成), 认得 bedrock / 网关的各种写法 (`[1m]`、`us.anthropic.`、`claude-4.7-opus`、带日期)。表里认不出的模型不猜价, 费用前加「≥」并在悬停里写明有几次请求未计入。
 - 工单派活预算 (B2a ⑦): `open_job({maxTurns})` —— 带这张工单的每次 `tell_peer` (含 `re` 续问、顶掉未落定工单活而继承工单的那句) 与带 task 的 spawn/clone 各记一次, 用完再派 409 (答一份停在 NEED 上的反问、不带 task 的 spawn 不受限); `tell_peer` 回包带 `budget: used/max`, 最后一次提示收口; `list_jobs` 带 `budget`。NEED 乒乓、续问兜圈的全局刹车, 也是 graph `rounds` 并入工单的落点。
 - 在飞活的状态观察面与取消 (B2a ⑥): 新 `shared/turn-state.ts` 把每件未落定的活归成 `working / blocked (停在审批卡) / needs-input (NEED 反问) / errored / deferred (等它派出去的子活)`; `wizard_roster` 每个 wizard 加「在等 / 欠着」一行, `peek_peer` 头部同样一行, `list_jobs` 成员带 `state`。`stop_wizard` 与 `close_job` 回收前先把发往它的未落定活记成 `canceled` (回执新状态, 记入工单账本): 发起 stop 的一方不再收到 dead 回执, 其他发话方收到一份 canceled 回执; `interrupt` 只取消它手上这一轮那件。
 - 工单账本按成员记定论 (B2a ⑤): 回执落终态 (含 wait_peer 取走) 时写进 `JobMember.outcome` / `artifacts`, 回执里的「第几份 / 一共几份」以账本为准; 同一对后一句顶掉一份未落定的工单活时继承那张工单 (此前被顶掉的成员永远不计 done, 工单齐不了); 再派 / 续问清掉该成员旧定论。`open_job({expect})` 定份数下限; `list_jobs` 带 done/total 与成员定论; 收工气泡列出非 done 的状态 / 未回与 `↳ 交付物`。
@@ -29,6 +30,7 @@
 - hook 的 wezard CLI 免审只认整条命令就是一次 `wezard[.sh] <status|logs|pending|audit|update|reload|config-path|mirror-status|version|help>` 且不含 shell 元字符; 此前命令里任意位置出现 `wezard` 一词就放行 (`curl …/config/set; true wezard` 可免审直改配置)。注意 daemon 的 `/config/set` 路由本身仍不鉴权, 本机进程可直接写 —— 这里只关掉了模型免审走到它的两条路。
 
 ### Changed
+- `/usage` 与 audit 的费用改用同一张价格表 (此前三档写死, Opus 一律按 $5/$25 计, Opus 5.5 实为 $4/$20)。
 - 回执终态只留一份定义 (B3b ②): `shared/turn-state.ts` 的 `Terminal` / `isTerminal`, 工单账本 (`JobMember.outcome`, 原 `MemberOutcome`)、回执 watcher、失败回执措辞表都用它。NEED 往返不设硬上限 —— `legs > 3` 只在信封里提示直接收口, 硬刹车是工单 `maxTurns` (b2-continuation.md 对齐)。
 - charter 编排段按回执 `status` 写处理法 (B2a ⑧): `need` 用 `re` 答、`error` 等续跑、`timeout / silent / dead / canceled` 换人或如实写缺; 「迟迟不来才 peek」改为看名册 / peek 的「在等 / 欠着」行; 写明 `deadline` / `maxTurns` / `expect` 何时用, 收口约定加 `NEED:` / `ARTIFACT:`。
 - rolepage 用量条的指标图标: API 请求次数 📡 → 🔁 (一次来回), 上下文峰值 🧠 → 📄 (送进去的那份文档)。仍用 emoji 而不是单色 svg, 与同排 💬 🛠️ ⏱️ 保持一套, 也能原样进被 fitUsage 收起时的 title。

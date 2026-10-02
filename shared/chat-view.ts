@@ -10,18 +10,23 @@
 // exactly the same view from the records that were POSTed to it.
 import { baseOfKey, labelFor, tagOfKey } from "./session-label.js";
 import type { DetailRecord, MarkDetailRecord, PostDetailRecord, TurnDetailRecord, TurnOrigin, TurnUsage } from "./detail-store.js";
+import { costOf, priceOf } from "./pricing.js";
 
 export interface AggUsage extends TurnUsage {
   /** 此刻的上下文: 最近一轮主会话 (子 agent 有自己的窗口, 不算) 最后一次调用送入的
    *  input + 缓存。是现状, 不是峰值 —— compact / clear 之后峰值就过时了。 */
   ctx: number;
+  /** 估算费用 (USD): 每轮按它的模型单价算, 再加总。 */
+  cost: number;
+  /** 模型在价格表里认不出的那几轮的 API 调用数 —— 这部分没计进 cost。 */
+  unpriced: number;
   turns: number;
   tools: number;
 }
 
 const ZERO: AggUsage = {
   input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0,
-  ctx: 0, turns: 0, tools: 0,
+  ctx: 0, cost: 0, unpriced: 0, turns: 0, tools: 0,
 };
 
 export interface TagSummary {
@@ -145,6 +150,7 @@ const ctxNow = (turns: readonly TurnDetailRecord[]): number => {
 
 const addUsage = (a: AggUsage, r: TurnDetailRecord, now: number): AggUsage => {
   const u = r.usage;
+  const p = u && priceOf(r.model);
   return {
     input: a.input + (u?.input ?? 0),
     output: a.output + (u?.output ?? 0),
@@ -153,6 +159,8 @@ const addUsage = (a: AggUsage, r: TurnDetailRecord, now: number): AggUsage => {
     calls: a.calls + (u?.calls ?? 0),
     serviceTier: a.serviceTier ?? u?.serviceTier,
     ctx: a.ctx,
+    cost: a.cost + (u && p ? costOf(p, u) : 0),
+    unpriced: a.unpriced + (u && !p ? u.calls : 0),
     turns: a.turns + 1,
     tools: a.tools + r.items.filter((it) => it.t === "tool_use").length,
   };

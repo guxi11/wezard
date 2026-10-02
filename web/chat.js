@@ -753,7 +753,19 @@
     turns: '对话轮数', tools: '工具调用次数', api: 'API 请求次数',
     ctx: '上下文 — 最近一次请求送入的 input + 缓存',
   };
-  var ICON = { turns: '💬', tools: '🛠️', api: '🔁', ctx: '📄' };
+  var ICON = { cost: '💰', turns: '💬', tools: '🛠️', api: '🔁', ctx: '📄' };
+  var fmtUsd = function (n) {
+    return n < .01 ? '<$0.01' : '$' + (n < 10 ? n.toFixed(2) : n < 1000 ? n.toFixed(1) : Math.round(n));
+  };
+  // 费用: 有认不出价格的模型就在数前加「≥」—— 实际只多不少; 一分钱都没算出来就不占位。
+  var costKv = function (u) {
+    if (!u.cost) return '';
+    var txt = (u.unpriced ? '≥' : '') + fmtUsd(u.cost);
+    var tip = '估算费用 — 每轮按模型单价 (LiteLLM 价格表快照) 计 input / output / 缓存写 / 缓存读' +
+      (u.unpriced ? '\n另有 ' + u.unpriced + ' 次 API 请求的模型不在价格表里, 未计入' : '');
+    return '<span class="kv kv-cost" title="' + esc(tip) + '" data-tip="' + esc(ICON.cost + ' ' + txt) +
+      '"><i class="u-ic">' + ICON.cost + '</i><b>' + esc(txt) + '</b></span>';
+  };
   var usageHTML = function (t) {
     var u = t.usage || {};
     var segs = SEGS.filter(function (s) { return u[s[0]] > 0; });
@@ -793,7 +805,7 @@
       '<span class="u-lb" title="' + esc(t.model || '') + '">' +
         esc(t.model ? t.model.replace(/^claude-/, '') : '用量') + '</span>' +
       '<span class="u-kvs">' +
-        kv('turns', t.turns, t.turns) + kv('tools', u.tools, u.tools) + kv('api', u.calls, u.calls) +
+        costKv(u) + kv('turns', t.turns, t.turns) + kv('tools', u.tools, u.tools) + kv('api', u.calls, u.calls) +
         kv('ctx', u.ctx, fmtTok(u.ctx)) +
       '</span>' + io;
   };
