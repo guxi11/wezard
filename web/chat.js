@@ -483,20 +483,11 @@
 
   // 「chat 内全部」下与我无往来的那几项: 一行的数据是它在群里的全部记录 (服务端 whole, 与关系图卡片同一个
   // glanceOfTalk), 点开看的也是那一份 (`a:<它>||<群>`, 对端不限)。没有成对的往来, 也就没有我的未读 —— 同关系图里
-  // 视角没有会话项的那张卡片。会话列表与关系图都画它 (同一个按钮), 只有 +N 由所在的视图注入:
-  // 会话列表数它的全部叶子 (这一项本身不是叶子), 关系图数它没连在图上的关系。
+  // 视角没有会话项的那张卡片。+N 数它的全部叶子, 这一项本身不是叶子。
   var farKey = function (c, s) { return 'a:' + s.role + '||' + c.base; };
-  var farsOf = function (c) {
-    return SCOPE === 'all'
-      ? c.subs.filter(function (s) { return !s.count && s.whole && s.whole.count; })
-        .sort(function (a, b) { return recentFirst(a.whole, b.whole); })
-      : [];
-  };
-  var farItem = function (c, s, badge) {
-    var k = farKey(c, s), w = s.whole;
-    return '<button class="si far' + (CONV === k ? ' on' : '') + '" data-conv="' + esc(k) + '" data-with="" ' +
-      'title="' + esc(nameOf(s.role) + ' 在这里的 ' + w.count + ' 条记录 (与我无往来)') + '">' +
-      roleRow(s.role, s.name, s.label, { lastTs: w.lastTs, preview: w.preview, unread: 0 }, s.status, '', badge) + '</button>';
+  var farRow = function (s) {
+    var w = s.whole;
+    return roleRow(s.role, s.name, s.label, { lastTs: w.lastTs, preview: w.preview, unread: 0 }, s.status, '', otherChats(s.role, ''));
   };
 
   var convItem = function (c) {
@@ -504,14 +495,22 @@
     // 成对: 只列与我有往来的 —— 在群里但没和我说过话的人, 点进去也是空的。
     // 「chat 内全部」再把其余有记录的接在成对的后面 (.far), 各自按最近排。
     var pairs = c.subs.filter(function (s) { return s.count; }).sort(recentFirst);
-    var talked = OPEN[c.key] ? pairs.concat(farsOf(c)) : [];
+    var fars = SCOPE === 'all'
+      ? c.subs.filter(function (s) { return !s.count && s.whole && s.whole.count; })
+        .sort(function (a, b) { return recentFirst(a.whole, b.whole); })
+      : [];
+    var talked = OPEN[c.key] ? pairs.concat(fars) : [];
     var hidden = talked.length - SUB_FOLD;
     var bar = hidden > 0
       ? '<button class="si-more" data-more="' + esc(c.key) + '">' + (MORE[c.key] ? '折叠' : '展开更多') + ' × ' + hidden + '</button>'
       : '';
     // 展开条钉在第 SUB_FOLD+1 位, 展开与折叠都不挪: 其余子项展开后接在它下面。
     var sub = function (s) {
-      if (!s.count) return farItem(c, s, otherChats(s.role, ''));
+      if (!s.count) {
+        var k = farKey(c, s);
+        return '<button class="si far' + (CONV === k ? ' on' : '') + '" data-conv="' + esc(k) + '" data-with="" ' +
+          'title="' + esc(nameOf(s.role) + ' 在这里的 ' + s.whole.count + ' 条记录 (与我无往来)') + '">' + farRow(s) + '</button>';
+      }
       var sel = on && s.role === WITH;
       return '<button class="si' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '" data-with="' + esc(s.role) + '" ' +
         'title="' + esc('我与 ' + nameOf(s.role) + ' 在这里的 ' + s.count + ' 条往来') + '">' +
@@ -561,7 +560,9 @@
     });
     bindGo(convsEl);
     bindWorldToggle(convsEl);
-    bindScope(convsEl);
+    convsEl.querySelectorAll('[data-scope]').forEach(function (b) {
+      b.onclick = function () { setScope(b.getAttribute('data-scope')); };
+    });
   };
 
   var shortCwd = function (p) {
@@ -629,16 +630,14 @@
     try { localStorage.setItem(SCOPE_KEY, v); } catch (e) { }
     renderConvs();
   };
-  var bindScope = function (scope) {
-    scope.querySelectorAll('[data-scope]').forEach(function (b) {
-      b.onclick = function () { setScope(b.getAttribute('data-scope')); };
-    });
+  // 两段式开关 (选中的那段沉底色): 侧栏子项范围与关系图范围同一种样式。opts = [[值, 字, 提示]]。
+  var segToggle = function (attr, cur, opts) {
+    return '<span class="scope">' + opts.map(function (o) {
+      return '<button class="' + (cur === o[0] ? 'on' : '') + '" ' + attr + '="' + o[0] + '" title="' + o[2] + '">' + o[1] + '</button>';
+    }).join('') + '</span>';
   };
   var scopeToggle = function () {
-    var opt = function (v, label, tip) {
-      return '<button class="' + (SCOPE === v ? 'on' : '') + '" data-scope="' + v + '" title="' + tip + '">' + label + '</button>';
-    };
-    return '<span class="scope">' + opt('pair', '往来', '群下只列与我有往来的 role') + opt('all', '全部', '群下列出 chat 内全部 role') + '</span>';
+    return segToggle('data-scope', SCOPE, [['pair', '往来', '群下只列与我有往来的 role'], ['all', '全部', '群下列出 chat 内全部 role']]);
   };
   var worldToggle = function () {
     return '<button class="vt" data-vt title="' + (WORLD ? '换回会话列表' : '换成关系图') + '">' + (WORLD ? LIST_SVG + '列表' : TREE_SVG + '关系图') + '</button>';
@@ -1717,21 +1716,13 @@
     var trees = draw([]);
     var span = rg ? (rg.s === R.sessions[R.sessions.length - 1] ? '最新 session' : 'session ' + fmtClock(rg.from)) : '全部时间';
     var alone = !all && shown.length < 2;
-    // 「chat 内全部」: 视角所在各群里与它无往来的 role 接在树下, 每群一节 —— 与会话列表同一个淡色按钮、
-    // 同一个窗口 (它在群里的全部记录); 它们不在关系线上, +N 照图上的口径数。
-    var farSecs = R.convs.filter(function (c) { return c.kind === 'group'; }).map(function (c) {
-      var fs = farsOf(c);
-      return fs.length ? '<h2>' + esc(c.name) + '<span>与我无往来 · ' + fs.length + '</span></h2>' +
-        '<div class="subs">' + fs.map(function (s) { return farItem(c, s, otherRels(F, s.role)); }).join('') + '</div>' : '';
-    }).join('');
     var html = '<div class="tview">' +
       '<h2>关系图<span title="在名片里的 session 下拉切换范围">' + esc(span) + ' · ' + (all ? Object.keys(F.ends).length : shown.length) + ' 个</span>' +
         (W.degraded ? '<span class="warn" title="没拿到 wizard 注册表 (svr 还没收到 daemon 的快照), 只画观测到的往来">名册缺席</span>' : '') +
-        (me ? '<button class="tall" title="' + (all ? '只留它的上游链、它自己、它的下游与同源兄弟' : '画出范围内所有有关系的 wizard') + '">' +
-          (all ? '只看相关' : '看全部') + '</button>' : '') + scopeToggle() + worldToggle() + '</h2>' +
+        (me ? segToggle('data-tall', all ? 'all' : 'rel', [
+          ['rel', '相关', '只留它的上游链、它自己、它的下游与同源兄弟'], ['all', '全部', '画出范围内所有有关系的 wizard']]) : '') + worldToggle() + '</h2>' +
       (alone ? '<div class="tsolo">' + esc(nameOf(ROLE)) + (rg ? ' 在这段 session 里' : '') + ' 没和谁对过话</div>' : '') +
       (shown.length ? '<ul class="tree' + (all ? ' all' : '') + '">' + trees + '</ul>' : '<div class="pempty">这段时间里没有任何关系</div>') +
-      farSecs +
     '</div>';
     // 心跳每 3s 重算一次 (状态灯 / 几分钟前) —— 没变就不碰 DOM, 免得蹭掉悬停与滚动。
     if (convsEl._tree === html && convsEl.querySelector('.tview')) return;
@@ -1741,13 +1732,14 @@
       el.onclick = function () { selectConv(talkKey(F.links, el.getAttribute('data-t')), ''); };
     });
     bindGo(convsEl);
-    var tall = convsEl.querySelector('.tall');
-    if (tall) tall.onclick = function () { W.treeAll = !W.treeAll; W.treeFor = ''; renderWorld(); };
-    bindWorldToggle(convsEl);
-    bindScope(convsEl);
-    convsEl.querySelectorAll('.si.far[data-conv]').forEach(function (b) {
-      b.onclick = function () { clickItem(b.getAttribute('data-conv'), ''); };
+    convsEl.querySelectorAll('[data-tall]').forEach(function (b) {
+      b.onclick = function () {
+        var on = b.getAttribute('data-tall') === 'all';
+        if (on === !!W.treeAll) return;
+        W.treeAll = on; W.treeFor = ''; renderWorld();
+      };
     });
+    bindWorldToggle(convsEl);
     var cur = convsEl.querySelector('.tci.me');
     if (cur && W.treeFor !== ROLE) { W.treeFor = ROLE; cur.scrollIntoView({ block: 'nearest' }); }
   };

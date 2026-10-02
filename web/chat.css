@@ -183,8 +183,7 @@ button { font: inherit; color: inherit }
   font-size: 11px; font-weight: 400; color: var(--mute);
 }
 .convs h2 .vt:hover { background: #eef1f4; color: var(--accent) }
-.convs h2 .tall + .vt { margin-left: 4px }
-/* 子项范围的两段式开关, 挨在关系图开关左边: 选中的那段沉底色, 另一段只是灰字。 */
+/* 两段式开关 (侧栏子项「往来 / 全部」、关系图「相关 / 全部」), 挨在视图开关左边: 选中的那段沉底色, 另一段只是灰字。 */
 .convs h2 .scope { margin-left: auto; align-self: center; display: inline-flex; gap: 1px; padding: 1px; border-radius: 6px; background: #eef1f4 }
 .convs h2 .scope button { border: 0; background: none; padding: 1px 6px; border-radius: 5px; cursor: pointer; font-size: 11px; font-weight: 400; color: var(--mute) }
 .convs h2 .scope button.on { background: var(--card); color: var(--ink); box-shadow: 0 1px 1px #0000000d }
@@ -644,13 +643,7 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 .wst:empty::before { width: 7px; height: 7px }
 /* ══ 关系图 · 关系树 (家谱与派活合成一棵, 以当前 role 为中心) ══════════
    它替换的是侧栏的会话列表: 标题、图例与会话列表的分组标题同一种读法, 卡片就是会话项 (.ci)。 */
-.tview .tall {
-  margin-left: auto; border: 0; background: none; padding: 0 2px; cursor: pointer; font-size: 11px; color: var(--faint);
-  text-decoration: underline dotted; text-underline-offset: 3px;
-}
-.tview .tall:hover { color: var(--accent) }
 .tview h2 .warn { color: #9a6700; font-weight: 400 }
-.tview h2 .tall + .scope { margin-left: 6px }
 .tree.all > li + li { margin-top: 10px; padding-top: 10px; border-top: 1px dashed #eaeef2 }
 .tfold { flex: none; font-size: 10px; font-weight: 400; color: var(--faint); border: 1px dashed var(--line); border-radius: 8px; padding: 0 5px; line-height: 14px }
 .tsolo { font-size: 11.5px; color: var(--faint); margin: 0 8px 10px }
