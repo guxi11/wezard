@@ -1027,7 +1027,10 @@ const main = async (): Promise<void> => {
       // 回执: 对方干完那一轮, 守护进程把它的结论自动送回来 (默认开)。`receipt:false`
       // 是"放出去就不管了"的那种派活。注入失败就不守 —— 没有问话, 也不会有回答。
       const wantReceipt = (body as { receipt?: boolean }).receipt !== false;
-      if (inj.ok) receipts.register({ from: self, to: target, channel, job: jobId, at, turn: turn.turn, legs: turn.legs, deadlineAt, k: parentKOf(self) }, wantReceipt);
+      // 父 k: 默认这件活算发话方此刻在答的那件的子活 (链式续回); `chain:false` = 旁支,
+      // 回执照常回来, 但不挂住它给上游的交代 —— 只有发话方知道这件活是不是为上游派的。
+      const k = (body as { chain?: boolean }).chain === false ? undefined : parentKOf(self);
+      if (inj.ok) receipts.register({ from: self, to: target, channel, job: jobId, at, turn: turn.turn, legs: turn.legs, deadlineAt, ...(k ? { k } : {}) }, wantReceipt);
       // 工单成员照旧记账 (收工那一条会列出各自那段活); 公开的那一句在群里成气泡。
       // 续问 (re) 不是一段新活: 收工气泡里该列的仍是当初派的那段。
       if (inj.ok && jobId) jobs.attach(jobId, { target, task: turn.legs > 1 ? "" : text, spawned: false });
@@ -1051,6 +1054,9 @@ const main = async (): Promise<void> => {
         // 回执怎么回来 —— 写在回包里, 调用方 (模型) 不必从工具描述里回忆。
         ...(inj.ok && wantReceipt
           ? { receipt: "它干完那一轮, 结论会作为新的一轮自动进到你这里 —— 不要挂在 wait_peer 上等, 接着干你自己的事" }
+          : {}),
+        ...(inj.ok && wantReceipt && k?.kind === "peer"
+          ? { chained: `这件活算在你答 ${displayName(k.from)} 的那件 (${k.turn}) 名下: 它回来之前, 你这一轮的终句不会先交给 ${displayName(k.from)}; 与那件活无关就带 chain:false 发` }
           : {}),
       });
     };
@@ -1839,7 +1845,8 @@ const main = async (): Promise<void> => {
       if (jobId && dispatched) jobs.spend(jobId);
       // 分身的第一件活也守回执: fan-out 最常见的形状就是 clone_wizard({task}) × N,
       // 让它们干完自己把结论送回来, 发起方不必挂在 wait_peer 上。
-      if (dispatched) receipts.register({ from: self, to: target, channel: "", job: jobId, at: taskAt, turn: taskTurn, k: parentKOf(self) });
+      const k = (body as { chain?: boolean }).chain === false ? undefined : parentKOf(self);
+      if (dispatched) receipts.register({ from: self, to: target, channel: "", job: jobId, at: taskAt, turn: taskTurn, ...(k ? { k } : {}) });
       json(res, 200, { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, keepalive, ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(jobId ? { job: jobId } : {}) });
     });
 

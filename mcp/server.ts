@@ -400,6 +400,10 @@ const TELL_SCHEMA = {
     .describe("false = 放出去就不管了, 不要回执 (纯通知、或者你根本不关心它说什么)。默认 true。"),
   re: z.string().optional().describe("续问: 回执或回包里的件号 (`t…`)。接着那件活说, 沿用它的工单与频道; 对不上就按新活发出 (`reUnknown`)。"),
   deadline: z.number().optional().describe("最多等它多少秒 (60-43200, 默认 3600); 到点没答完你收到一份 timeout 回执。"),
+  chain: z
+    .boolean()
+    .optional()
+    .describe("你此刻在答别的 wizard 派的活时, 这次派出的活默认算那件活的子活: 它回来之前你这一轮的终句不会先交给上游, 它回来那一轮的终句再续回上游。false = 这件活与上游无关 (顺手的测试、旁支), 回执照常回你, 但不挂住你给上游的交代。"),
 };
 
 const TELL_DESC =
@@ -407,7 +411,7 @@ const TELL_DESC =
   "**说完就返回**: 对方干完那一轮, 它的最后一条消息作为**新的一轮**自动送到你这里 (回执, 带信封说明是谁、哪场对话、工单还差几份); 你正忙时回执排队等你说完。\n" +
   "默认私聊, 只记在双方 rolepage; 守护进程给 `text` 挂信封 (发话人、私聊/公开、`RESULT: …` 收口)。拒绝对自己发送。";
 
-const tellBody = (a: { name: string; text: string; priority?: string; waitSec?: number; job?: string; public?: boolean; receipt?: boolean; re?: string; deadline?: number }) => ({
+const tellBody = (a: { name: string; text: string; priority?: string; waitSec?: number; job?: string; public?: boolean; receipt?: boolean; re?: string; deadline?: number; chain?: boolean }) => ({
   name: a.name,
   text: a.text,
   ...(a.priority ? { priority: a.priority } : {}),
@@ -417,6 +421,7 @@ const tellBody = (a: { name: string; text: string; priority?: string; waitSec?: 
   ...(a.receipt === false ? { receipt: false } : {}),
   ...(a.re ? { re: a.re } : {}),
   ...(a.deadline ? { deadline: a.deadline } : {}),
+  ...(a.chain === false ? { chain: false } : {}),
 });
 
 server.registerTool(
@@ -775,13 +780,14 @@ const offspringShape = {
     .string()
     .optional()
     .describe("归到某个工单名下 (open_job 给的 id)。它们攒到 close_job 那一条里一起交代, 过程在各自的 rolepage; close_job 还会把它们整批回收掉。"),
+  chain: z.boolean().optional().describe("同 tell_peer 的 `chain`: 带了 task 而这件活与你此刻在答的上游那件无关 (旁支、测试) 时给 false, 它的回执就不挂住你给上游的交代。"),
   keepalive: z
     .boolean()
     .optional()
     .describe("要不要被 keepalive 心跳保温 (空闲时定期 ping 一下防 prompt cache 过期)。false = 永远不保温, 省下那份 ping 的钱 —— 适合跑腿一次就收工的; true = 明确要保温 —— 适合会长期挂着、随时可能被叫醒接手的。省略则按 daemon 配置的默认值。"),
 };
 
-type Offspring = { description: string; name?: string; task?: string; from?: string; cwd?: string; chat?: string; cli?: string; model?: string; job?: string; keepalive?: boolean };
+type Offspring = { description: string; name?: string; task?: string; from?: string; cwd?: string; chat?: string; cli?: string; model?: string; job?: string; keepalive?: boolean; chain?: boolean };
 
 const bear = (tool: string, inherit: boolean) => async (a: Offspring) =>
   unwrap(tool, await daemonPost("/wizard/clone", {
@@ -796,6 +802,7 @@ const bear = (tool: string, inherit: boolean) => async (a: Offspring) =>
     ...(a.cli ? { cli: a.cli } : {}),
     ...(a.model ? { model: a.model } : {}),
     ...(a.keepalive !== undefined ? { keepalive: a.keepalive } : {}),
+    ...(a.chain === false ? { chain: false } : {}),
   }));
 
 const OFFSPRING_TAIL =

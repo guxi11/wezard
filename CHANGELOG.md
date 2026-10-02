@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- `tell_peer({chain:false})` / spawn·clone 带 task 时的 `chain:false` (B3b ③b): 在答上游派的活时顺手派出的旁支活 (测试、与上游无关的事) 不挂父 k —— 不 defer 给上游的那一份、它的回执也不带 reply-to 续回上游, 回执照常回发话方。默认仍链式; `tell_peer` 回包在挂上上游时多一项 `chained` 说明终句被挂住了。是不是为上游派的只有发话方知道, 所以是显式参数而不是按工单 / 文本推断。
 - 回执回归脚本 `scripts/receipt-regress/run.mjs` (B3b ①): 在 wizard 会话里跑, 生一个 haiku 根与各用例的 haiku 临时分身, 直接 POST daemon 驱动, 只按 `receipts.json` / `jobs.json` 的账和根 transcript 里的回执信封判定, 逐条打印 PASS/FAIL, 跑完收掉全部分身。覆盖: 三级链式冒泡、并发两子 reply-to、wait_peer 取走不重投、deadline 超时、pane 被杀 (dead)、NEED→re→done、工单 expect 计数、收工后迟到的回执、`chain:false` 旁支。改 receipts / jobs / peers 后必跑; 用例名作参数只跑那几条。
 - rolepage 待办托盘 (B3b ④): 名片下一小块「在飞 N」, 列出视角派出去还没落定的 (在等 → .x) 与派给它还没交的 (欠着 ← .x): 状态 (在干 / 卡在审批 · 停在哪个工具 / 反问待答 / 报错停了 / 挂起等子活)、工单号、派出多久; 卡住的排前并着色。只读; 数据与名册 / peek 的「在等 / 欠着」同一份 (`receipts.states()` → `WorldFacts.inflight`, svr 合并时按件去重)。
 - rolepage 回执 chip (B3b ①): 回执那一轮的消息名字行上挂「↩ 回执 · 已交 / 反问 / 超时 … · J… 第 i/n 份」, 按定论着色; 点它跳回派活那句 (同一个活号, 窗口里没有就整窗重取再找)。turn 记录的 `from` 补上活号 `turn`、回执的 `status` 与工单 `done` / `total`; 继承上下文的 `clone_wizard({task})` 第一件活也记上出处 (此前没有 `from`, 工单与回执都找不回它)。
