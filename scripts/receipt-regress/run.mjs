@@ -13,7 +13,7 @@
 // 根的开场白是发起者一句 receipt:false 的私聊 —— 它这一轮没有父 k, 测试活的回执只回到根,
 // 不会沿发起者手上那件活往上冒。工单用例会在根的 home 聊天里各出一对开 / 收工气泡。
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -345,6 +345,8 @@ const pool = (limit) => {
 const cleanup = async () => {
   await Promise.all([...kids.keys()].map(stop));
   if (root) await post("/wizard/stop", { ...ME, name: root.name, mode: "end", forget: true });
+  // 根开过工单, close_job 会把收工结论留档成它的情景记忆 —— 测试的不该留下。
+  if (root) rmSync(join(STATE, "memory", "episodes", `${root.name}.jsonl`), { force: true });
 };
 
 const main = async () => {
