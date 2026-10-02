@@ -10,7 +10,7 @@
 // exactly the same view from the records that were POSTed to it.
 import { baseOfKey, labelFor, tagOfKey } from "./session-label.js";
 import type { DetailRecord, MarkDetailRecord, PostDetailRecord, TurnDetailRecord, TurnOrigin, TurnUsage } from "./detail-store.js";
-import { costOf, priceOf } from "./pricing.js";
+import { costOf, modelLabel, priceOf } from "./pricing.js";
 
 export interface AggUsage extends TurnUsage {
   /** 此刻的上下文: 最近一轮主会话 (子 agent 有自己的窗口, 不算) 最后一次调用送入的
@@ -39,6 +39,8 @@ export interface TagSummary {
   /** 最近一轮记到的工作目录 —— 同一 chat 的兄弟会话可以各跑各的 cwd。 */
   cwd?: string;
   model?: string;
+  /** 给人看的模型简名 (modelLabel): 前端不另做归一。 */
+  modelLabel?: string;
   turns: number;
   lastTs: number;
   running: boolean;
@@ -241,6 +243,7 @@ export const summarizeTag = (target: string, turns: readonly TurnDetailRecord[],
     sessionId: last?.sessionId,
     cwd: [...turns].reverse().find((r) => r.cwd)?.cwd,
     model: [...turns].reverse().find((r) => r.model)?.model,
+    modelLabel: ((m) => m && modelLabel(m))([...turns].reverse().find((r) => r.model)?.model),
     turns: main.length,
     lastTs: turns.reduce((m, r) => Math.max(m, r.updatedAt), 0),
     running: until > now,

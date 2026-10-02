@@ -34,7 +34,7 @@
 - hook 的 wezard CLI 免审只认整条命令就是一次 `wezard[.sh] <status|logs|pending|audit|update|reload|config-path|mirror-status|version|help>` 且不含 shell 元字符; 此前命令里任意位置出现 `wezard` 一词就放行 (`curl …/config/set; true wezard` 可免审直改配置)。注意 daemon 的 `/config/set` 路由本身仍不鉴权, 本机进程可直接写 —— 这里只关掉了模型免审走到它的两条路。
 
 ### Changed
-- rolepage 消息头像行的本轮指标 (模型 / 上下文 / 耗时) 只在多方会话 (群、整个 chat) 里显示, 两个 role 之间的对话 (单聊、成对子项) 不再显示; 各处去掉 out; 模型名改显示简名 (`claude-opus-5-5[1m]` → `Opus 5.5`, 全名在悬停里), 与计价共用 `shared/pricing.ts` 的名字归一。
+- rolepage 消息头像行的本轮指标 (模型 / 上下文 / 耗时) 只在多方会话 (群、整个 chat) 里显示, 两个 role 之间的对话 (单聊、成对子项) 不再显示; 各处去掉 out; 模型名改显示简名 (`claude-opus-5-5[1m]` → `Opus 5.5`, 全名在悬停里), 与计价共用 `shared/pricing.ts` 的名字归一; 页脚用量条的模型名同样走这一份。
 - `/usage` 与 audit 的费用改用同一张价格表 (此前三档写死, Opus 一律按 $5/$25 计, Opus 5.5 实为 $4/$20)。
 - 回执终态只留一份定义 (B3b ②): `shared/turn-state.ts` 的 `Terminal` / `isTerminal`, 工单账本 (`JobMember.outcome`, 原 `MemberOutcome`)、回执 watcher、失败回执措辞表都用它。NEED 往返不设硬上限 —— `legs > 3` 只在信封里提示直接收口, 硬刹车是工单 `maxTurns` (b2-continuation.md 对齐)。
 - charter 编排段按回执 `status` 写处理法 (B2a ⑧): `need` 用 `re` 答、`error` 等续跑、`timeout / silent / dead / canceled` 换人或如实写缺; 「迟迟不来才 peek」改为看名册 / peek 的「在等 / 欠着」行; 写明 `deadline` / `maxTurns` / `expect` 何时用, 收口约定加 `NEED:` / `ARTIFACT:`。
