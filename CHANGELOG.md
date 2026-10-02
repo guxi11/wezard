@@ -59,6 +59,7 @@
 - rolepage 用量条的累计耗时 (⏱️) 指标。
 
 ### Fixed
+- rolepage 从 📋 进工单列表时列表为空 (标题却写「这 N 张」): 标记数的是「这处往来里出现过的工单」, 列表却按视角开过 / 参与过重新筛, 还要靠没载入的世界快照补。改为按入口带的工单号列, 摘要随 role 一并下发全部工单的账 (`jobIndex`), 标题数字、列表行、消息 badge 都从这一份取; 账里已清掉的明说。
 - 主动推送不再在 reload 窗口里丢消息: 新进程恢复 mirror 后立刻要推的终句 / notify, 撞上 WS 尚未连上就被 SDK 以 `WebSocket not connected` 拒掉、永久丢失 (近 48h 约 18 条); `sendMessage` 现在先等连上 (最多 30s) 再发。推送成功落一条 `standalone pushed` / `raw pushed` 日志 (chatId、turnId、WeCom 回执), 失败日志带上 WeCom 的 errcode/errmsg (SDK 拒收时 reject 的是回执帧而非 Error, 原先记成 undefined) —— 此前成功推送不落日志, 「rolepage 有、群里没有」无从对账。
 - 并发注入到不同 pane 时文本会串台: tmux 注入共用默认粘贴 buffer, 一方 load 之后、paste 之前被另一方覆盖, 两段文本互换 pane (实测同一毫秒投出的两份回执, 给 .evolve 的那份进了 .ev-proto, .evolve 没收到)。每次注入改用自己的具名 buffer。
 - 工单收工之后才到的回执, 信封不再说「全部到齐, 去 close_job」: 投递时读工单状态, 已收工就写明这一份是收工后到的、不计入那次汇总、不必再 close_job (定论是 done 且这一轮不外发时, 提示有用就自己交代)。

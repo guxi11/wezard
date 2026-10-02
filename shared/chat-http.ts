@@ -25,7 +25,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { URL } from "node:url";
 import { baseOfKey } from "./session-label.js";
 import { isMark, isPost, isTurn } from "./chat-view.js";
-import { buildWorld, EMPTY_FACTS, withData, type WorldFactJob, type WorldFacts } from "./world.js";
+import { buildWorld, EMPTY_FACTS, jobProgress, withData, type WorldFactJob, type WorldFacts } from "./world.js";
 import {
   allMessages, convKeyOf, convMessages, chatKeysOf, parseTalkKey, glanceOfTalk, convsOf, jobConvsOf, jobOfKey, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
   roleInfo, roleStats, sessionsOf, talkArgs, talkOf, counterpartOf, windowStats, type Directory, type Msg, type SessionSpan,
@@ -208,6 +208,9 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       // 最近排好)。落在别的会话上就不猜。
       with: home?.subs.find((s) => s.count && (land.with ? s.role === land.with : s.role.startsWith("human:")))?.role ?? "",
       relations: hasRelations(msgs, role, info),
+      // 账上全部工单的摘要: 侧栏 / 关系图 / 消息上的 📋 指向的工单不一定有视角的份 (标记挂的是「这处往来里出现过」),
+      // 工单列表与 badge 按 id 从这一份取, 不再按视角重新筛。
+      jobIndex: Object.fromEntries(f.jobs.map((j) => [j.id, { id: j.id, title: j.title, owner: j.owner, base: j.base, status: j.status, closedAt: j.closedAt, openedAt: j.openedAt, ...jobProgress(j) }])),
       // 在飞的活: 视角派出去 / 欠着的, 以及它的工单里每一份 (工单行标「卡住」); 卡在审批上的带上停在哪几个工具。
       inflight: (f.inflight ?? []).filter((x) => x.from === role || x.to === role || myJobs.has(x.job)).map((x) => ({
         ...x, ...(x.state === "blocked" && dir.fact(x.to)?.waiting?.length ? { waiting: dir.fact(x.to)!.waiting } : {}),

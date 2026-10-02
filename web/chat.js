@@ -334,13 +334,22 @@
   var jobMark = function (ids) {
     return ids && ids.length ? '<span class="jmk" data-jobs="' + esc(ids.join(' ')) + '" title="' + esc((ids.length > 1 ? ids.length + ' 张工单: ' : '工单 ') + ids.join(' ') + ' —— 点开') + '">📋' + (ids.length > 1 ? '<i>' + ids.length + '</i>' : '') + '</span>' : '';
   };
-  // 视角不在里面的工单 (从链接直接打开的) 不在 R.convs 里, 按 /api/world 的账现造一项。
+  // 视角不在里面的工单不在 R.convs 里: 按服务端的账 (R.jobIndex, 全部工单) 现造一项; 账里没有 = 已清掉 (job 为空)。
   var jobConv = function (key) {
-    var id = key.slice(2), j = (W.jobs || []).filter(function (x) { return x.id === id; })[0];
+    var id = key.slice(2), j = (R.jobIndex || {})[id];
     return {
-      key: key, kind: 'job', name: j ? j.title : id, label: '📋', base: j ? j.base : '', subs: [], heard: [], lastTs: 0, preview: '',
+      key: key, kind: 'job', name: j ? j.title : id, label: '📋', base: j ? j.base : '', subs: [], heard: [],
+      lastTs: j ? j.closedAt || j.openedAt : 0, preview: '',
       job: j && { id: id, owner: j.owner, status: j.status, done: j.done, total: j.total },
     };
+  };
+  /** 一个工单号 → 它的一行: 视角有份的取会话项 (带预览), 其余按账现造。 */
+  var jobRowOf = function (id) {
+    return jobConvs().filter(function (c) { return c.job.id === id; })[0] || jobConv('j:' + id);
+  };
+  /** 工单列表此刻列哪些: 从 📋 进来 = 入口带的那几张 (按 id, 不按视角筛); 否则视角开的或参与的。标题的数与列表同出这一份。 */
+  var jobListRows = function () {
+    return JOB_ONLY ? JOB_ONLY.map(jobRowOf).filter(function (c) { return c.job; }) : jobConvs();
   };
   var jobConvs = function () { return R.convs.filter(function (c) { return c.kind === 'job' && c.job; }); };
   var convOf = function (key) {
@@ -938,7 +947,7 @@
   var renderHead = function () {
     var who = $('#ch-who'), acts = $('#ch-acts');
     if (VIEW === 'jobs') {
-      who.innerHTML = '<span class="t">工单</span><span class="sub">' + (JOB_ONLY ? '这一处经手的' : esc(nameOf(ROLE)) + ' 开的或参与的') + ' · 进行中在前</span>';
+      who.innerHTML = '<span class="t">工单</span><span class="sub">' + (JOB_ONLY ? '这一处经手的 ' + jobListRows().length + ' 张' : esc(nameOf(ROLE)) + ' 开的或参与的') + ' · 进行中在前</span>';
       acts.innerHTML = backBtn() + (JOB_ONLY ? '<button class="vb" id="ch-jall">全部工单</button>' : '') + '<button class="vb" id="ch-back">‹ 对话</button>';
       bindBack();
       if (JOB_ONLY) $('#ch-jall').onclick = function () { JOB_ONLY = null; renderJobList(); renderHead(); };
@@ -1040,7 +1049,7 @@
   var jobChips = function (html) {
     return html.replace(JOB_CHIP, function (_, id) {
       if (CONV === 'j:' + id) return '';
-      var c = jobConvs().filter(function (x) { return x.job.id === id; })[0] || jobConv('j:' + id);
+      var c = jobRowOf(id);
       return '<button class="mchip job" data-job="' + id + '" title="' + esc(id + ' · ' + c.name + ' —— 进工单页') + '">📋 <span class="jt">' + esc(c.name) + '</span>' + jobTag(c.job) + '</button>';
     });
   };
@@ -1281,7 +1290,7 @@
     R.at = d.at || Date.now(); R.recvAt = Date.now();
     R.role = d.role; R.sessions = d.sessions || []; R.convs = d.convs || []; R.chatKeys = d.chatKeys;
     SESSION = d.session || '';
-    R.relations = !!d.relations; R.schedules = d.schedules || 0; R.plan = d.plan || null; R.inflight = d.inflight || [];
+    R.relations = !!d.relations; R.schedules = d.schedules || 0; R.plan = d.plan || null; R.inflight = d.inflight || []; R.jobIndex = d.jobIndex || {};
     R.charter = d.charter || null;
     R.stats = d.stats || null; R.winStats = d.winStats || null;
     ROLE = d.role.id;
@@ -2009,8 +2018,6 @@
       renderWorld();
       loadGlance();
       if (VIEW === 'plan') renderPlan();
-      // 只列某几张时, 视角不在里面的那张要等世界快照到了才知道标题与进度。
-      if (VIEW === 'jobs') renderJobList();
     }).catch(function () { });
   };
   var pollWorld = function () {
@@ -2033,7 +2040,7 @@
     renderRole(); renderHead(); renderUsage();
     if (v === 'msgs') { toBottom(true); renderConvs(); }
     else if (v === 'charter') loadCharter();
-    else if (v === 'jobs') { renderJobList(); loadWorld(); }
+    else if (v === 'jobs') renderJobList();
     else {
       if (!W.loaded) { planEl._html = ''; planEl.innerHTML = '<div class="empty">加载中…</div>'; }
       else renderPlan();
@@ -2064,10 +2071,7 @@
   // 视角开的或在里面的工单: 进行中 (最近有动静的在前) / 已收工 (淡一档, 最近收的在前)。一行与会话列表同一个 convItem。
   var renderJobList = function () {
     var el = jobsPane().firstChild;
-    // 只列某几张时, 视角不在里面的那张也照列 (标记挂在它与别人的往来上); 账里已经没有的 (收工满 24h) 不列。
-    var js = JOB_ONLY ? JOB_ONLY.map(function (id) {
-      return jobConvs().filter(function (c) { return c.job.id === id; })[0] || jobConv('j:' + id);
-    }).filter(function (c) { return c.job; }) : jobConvs();
+    var js = jobListRows();
     var open = js.filter(function (c) { return c.job.status === 'open'; }).sort(recentFirst);
     var closed = js.filter(function (c) { return c.job.status !== 'open'; }).sort(recentFirst);
     var sec = function (title, list, cls) {
@@ -2075,7 +2079,9 @@
     };
     var html = js.length
       ? sec('进行中', open, 'jopen') + (closed.length ? sec('已收工', closed, 'jclosed') : '')
-      : '<div class="pempty">' + esc(nameOf(ROLE)) + ' 没有开过、也不在任何工单里 —— 一次派出两个以上 wizard 时 open_job 开一个 (收工满 24 小时的不再列出)</div>';
+      : JOB_ONLY
+        ? '<div class="pempty">这几张工单已经不在账上了 (收工满 24 小时会清掉) —— ' + esc(JOB_ONLY.join(' ')) + '</div>'
+        : '<div class="pempty">' + esc(nameOf(ROLE)) + ' 没有开过、也不在任何工单里 —— 一次派出两个以上 wizard 时 open_job 开一个 (收工满 24 小时的不再列出)</div>';
     if (el._html === html) return;
     el._html = html; el.innerHTML = html;
     el.querySelectorAll('[data-conv]').forEach(function (b) { b.onclick = function () { selectConv(b.getAttribute('data-conv'), ''); }; });
