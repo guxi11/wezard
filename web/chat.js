@@ -654,7 +654,7 @@
     var born = r.bornAt || R.sessions.reduce(function (m, x) { return x.start && (!m || x.start < m) ? x.start : m; }, 0);
     var facts = [
       r.chat ? ['🏠', r.chat, 'home'] : null,
-      born ? ['🐣', fmtClock(born), '出生于 ' + fmtDay(born)] : null,
+      born ? ['🐣', fmtAgo(born), '出生于 ' + fmtDay(born)] : null,
       // 宪章紧跟出生: 出生时被交代了多少 (≈token), 只写大小; 可点开看全文。
       R.charter ? ['📜', fmtTok(R.charter.tokens), '宪章 ≈' + fmtTok(R.charter.tokens) + ' token · ' + fmtClock(R.charter.at) + ' 压进系统提示 · 点开看全文', 'charter'] : null,
       r.cwd ? ['🗂️', shortCwd(r.cwd), r.cwd] : null,
