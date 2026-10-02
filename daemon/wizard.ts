@@ -55,7 +55,10 @@ export interface WizardStore {
 export const MEMORY_MAX = 60;
 export const NOTE_MAX = 600;
 
-const blank = (target: string): WizardRecord => ({ target, name: "", description: "", bornAt: Date.now(), memory: [] });
+const blank = (target: string, bornAt: number): WizardRecord => ({ target, name: "", description: "", bornAt, memory: [] });
+
+/** target → 它会话 transcript 的第一条记录时刻; 没有会话 → undefined。 */
+export type BornOf = (target: string) => number | undefined;
 
 const foldName = (n: string): string => stripSigil(n).toLowerCase();
 
@@ -70,7 +73,9 @@ export const pickName = (want: string, others: readonly string[]): string => {
 
 /** 写穿式单文件存储, 与 mirror-store 同款 —— 这是运行时状态, 不是用户手写配置,
  *  所以躺在 stateDir 而不是 config.jsonc。 */
-export const loadWizardStore = (filePath: string): WizardStore => {
+// 新记录的 bornAt: 已有会话 (开机迁移 / 懒认领一个老 session) 取 transcript 首条 ——
+// 「写进注册表的时刻」不是出生; 真新生的还没有 transcript, 才退回此刻。
+export const loadWizardStore = (filePath: string, bornOf: BornOf = () => undefined): WizardStore => {
   const db = loadJsonMap<WizardRecord>(filePath);
   // drop 过的 target: claim 只推名字、不落盘, 直到有人明确 upsert (重新 spawn) 它。
   // 收工播报、rolepage、回执日志这些只读路径都会问一句名字 —— 不拦的话 forget 之后
@@ -79,7 +84,7 @@ export const loadWizardStore = (filePath: string): WizardStore => {
   const all = (): WizardRecord[] => Object.values(db.all());
   const upsert = (t: string, patch: Partial<Omit<WizardRecord, "target">>): WizardRecord => {
     dropped.delete(t);
-    const next: WizardRecord = { ...(db.get(t) ?? blank(t)), ...patch, target: t };
+    const next: WizardRecord = { ...(db.get(t) ?? blank(t, bornOf(t) ?? Date.now())), ...patch, target: t };
     return db.set(t, { ...next, memory: next.memory.slice(-MEMORY_MAX).map((m) => m.slice(0, NOTE_MAX)) });
   };
   const namesExcept = (t: string): string[] => all().filter((w) => w.target !== t).map((w) => w.name);
@@ -175,6 +180,17 @@ export const settleAll = (
     .sort((a, b) => Number(!!tagOfKey(a)) - Number(!!tagOfKey(b)) || born(a) - born(b))
     .forEach((t) => settleName(store, chatNameOf(t), t));
 };
+
+/** 修正被当成出生时间的登记时刻: 非 clone 记录 bornAt 只往前挪到 transcript 首条, 从不往后
+ *  (当前会话可能是交接 / 重开后的新一段, 它的首条晚于真实出生)。clone 的 transcript 开头是
+ *  父亲 fork 来的历史, 它的 bornAt 是生的那一刻写的, 不碰。幂等; 返回改过的。 */
+export const backfillBorn = (store: WizardStore, bornOf: BornOf): WizardRecord[] =>
+  store.all()
+    .filter((w) => !w.clonedFrom)
+    .flatMap((w) => {
+      const t = bornOf(w.target);
+      return t !== undefined && t < w.bornAt ? [store.upsert(w.target, { bornAt: t })] : [];
+    });
 
 /** 这个 daemon 进程的代号, 每次启动一个。 */
 export const BOOT_ID = randomUUID();

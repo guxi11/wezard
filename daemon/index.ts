@@ -49,6 +49,7 @@ import {
   wizardStore,
   settleName,
   settleAll,
+  backfillBorn,
   sweepUnborn,
   BOOT_ID,
   evictStaleName,
@@ -66,7 +67,7 @@ import {
 } from "./wizard.js";
 import { bindNoticeBox, createNoticeBox, chatAudience } from "./notices.js";
 import { loadJobStore, renderJobOpen, renderJobClose, JOB_MEMBER_MAX } from "./jobs.js";
-import { clipMiddle, contextFiles, extractResult, lastContextTokens, lastExchange, lastModel, openingOf, replyClosedBefore, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
+import { clipMiddle, contextFiles, extractResult, firstStamp, lastContextTokens, lastExchange, lastModel, openingOf, replyClosedBefore, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { keepalivePingSigs } from "../shared/keepalive.js";
 import { expandHome } from "../shared/paths.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
@@ -1107,7 +1108,8 @@ const main = async (): Promise<void> => {
     // 上下文窗口也挤不掉。
     // 这里只做三件事: 读身份、改身份、按身份生/收分身。tmux 一概不碰, 动作全在
     // mirror-bridge。
-    const wizards = bindWizardStore(loadWizardStore(cfg.wrc.mirror.wizardsFile));
+    const bornOf = (t: string): number | undefined => firstStamp(m.sessionInfo(t)?.jsonlPath ?? "");
+    const wizards = bindWizardStore(loadWizardStore(cfg.wrc.mirror.wizardsFile, bornOf));
 
     // 名册增量的投递面 (见 notices.ts)。charter 只是出生那一刻的快照; 此后的成员
     // 变动从这里搭下一次注入的车进到每个在场 wizard 的上下文里, 不占一轮。
@@ -1169,6 +1171,8 @@ const main = async (): Promise<void> => {
     // 名字全局唯一 (见 wizard.ts): 先给没名字的聊天补名, 再按「默认会话先挑」把
     // 每个已知 wizard 的名字落定 —— 老记录 (名字还跟着聊天走的那一代) 在这里一次迁完。
     ensureChatNames(cfg.defaultChat || "");
+    const reborn = backfillBorn(wizards, bornOf);
+    if (reborn.length) log.child({ mod: "wizard" }).info({ n: reborn.length }, "bornAt backfilled from transcript heads");
     settleAll(
       wizards,
       [...m.chatRoster("").flatMap((c) => c.targets), ...wizards.all().map((w) => w.target)],

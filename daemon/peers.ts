@@ -52,6 +52,27 @@ const readTailBytes = (jsonlPath: string, want: number): string => {
   }
 };
 
+const HEAD_BYTES = 256 * 1024;
+
+/** transcript 第一条带时间戳的记录的时刻 (ms) —— 会话真正开始的那一刻。只读文件头;
+ *  正文里的 `timestamp` 是转义过的 (`\"timestamp\"`), 正则不会误中。读不到 → undefined。 */
+export const firstStamp = (jsonlPath: string): number | undefined => {
+  if (!jsonlPath || !existsSync(jsonlPath)) return undefined;
+  let fd: number | undefined;
+  try {
+    const buf = Buffer.allocUnsafe(HEAD_BYTES);
+    fd = openSync(jsonlPath, "r");
+    const read = readSync(fd, buf, 0, HEAD_BYTES, 0);
+    const iso = /"timestamp":"([^"]+)"/.exec(buf.subarray(0, read).toString("utf8"))?.[1];
+    const t = iso ? Date.parse(iso) : NaN;
+    return Number.isFinite(t) ? t : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* ignore */ } }
+  }
+};
+
 /** 从文件尾读一段并解析; `enough` 说不够就翻四倍重读, 直到够了、读完整个文件、
  *  或者撞上上限。窗口是手段不是目的 —— 调用方只说"我要几轮", 不该关心一条
  *  attachment 有多大。 */
