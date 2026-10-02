@@ -215,11 +215,8 @@
       var eb = childBy(ex, 'bubbles'), nb = childBy(nc, 'bubbles');
       if (eb && nb) {
         swapHead(ex, nc);
-        // 终句刚到: 过程框收起一次。标记留在节点上, 用户之后再点开不会被下一帧收回去。
-        if (nc.hasAttribute('data-fold') && !ex.hasAttribute('data-fold')) {
-          ex.setAttribute('data-fold', '');
-          ex.classList.add('folded');
-        }
+        // 下面有了新东西 / 这一轮结束: 过程框收起一次。标记留在节点上, 用户之后再点开不会被下一帧收回去。
+        if (nc.hasAttribute('data-fold')) settle(ex);
         reconcile(eb, nb);
         ex.setAttribute('data-sig', nc.getAttribute('data-sig') || '');
         return ex;
@@ -229,6 +226,28 @@
     cur.replaceChildren.apply(cur, nodes);
     restoreOpen(cur, open);
     render(cur);
+  };
+  // 人手点过的过程框: data-key → 是否收起。只由点击写入, 每次换节点 (增量、翻页、换视角
+  // 整窗重拉) 之后按它回填 —— 默认态归服务端, 人的选择压过默认态。
+  var FOLD = {};
+  var settle = function (s) {
+    if (s.hasAttribute('data-fold')) return;
+    s.setAttribute('data-fold', '');
+    s.classList.add('folded');
+  };
+  // 一轮还在跑, 但线程里它下面已经有了别的消息 —— 它也不再是「最末尾那个」。
+  // 这件事只有整条线程知道 (片段按轮缓存, 服务端不看邻居), 所以在客户端补。
+  var settleAbove = function () {
+    var rows = inner.querySelectorAll('.mrow');
+    Array.prototype.slice.call(rows, 0, -1).forEach(function (r) {
+      r.querySelectorAll('.steps').forEach(settle);
+    });
+  };
+  var applyFold = function (root) {
+    root.querySelectorAll('.steps[data-key]').forEach(function (s) {
+      var v = FOLD[s.getAttribute('data-key')];
+      if (v !== undefined) s.classList.toggle('folded', v);
+    });
   };
   var frag = function (html) {
     var d = document.createElement('div'); d.innerHTML = html; return d;
@@ -269,7 +288,9 @@
   inner.addEventListener('click', function (e) {
     var s = e.target.closest && e.target.closest('.steps');
     if (!s) return;
-    if (e.target.closest('.steps-head') || e.target === s || e.target === childBy(s, 'bubbles')) s.classList.toggle('folded');
+    if (e.target.closest('.steps-head') || e.target === s || e.target === childBy(s, 'bubbles')) {
+      FOLD[s.getAttribute('data-key')] = s.classList.toggle('folded');
+    }
   });
   // reminder 块: 摘要 ⇄ 原文。刚划选了一段原文的那次松手不算点击。
   inner.addEventListener('click', function (e) {
@@ -1017,6 +1038,8 @@
       render(inner);
       foldPings(inner);
       expireRows();
+      settleAbove();
+      applyFold(inner);
       if (land && land()) return;
       S.pinned = true; toBottom(true);
       // CDN 字体/代码高亮加载完会改变高度, 再吸一次底。
@@ -1055,6 +1078,8 @@
       }
     }
     foldPings(inner);
+    settleAbove();
+    applyFold(inner);
     if (stick) toBottom(true);
   };
 
@@ -1067,6 +1092,9 @@
       g.setAttribute('data-stale-at', '0');
       g.querySelectorAll('.tg-dot').forEach(function (d) { d.classList.remove('live'); });
       g.querySelectorAll('.typing').forEach(function (t) { t.remove(); });
+      // 静默到点 = 这一轮结束, 末尾那个过程框也不再是「进行中」。
+      g.querySelectorAll('.steps').forEach(settle);
+      applyFold(g);
     });
   };
 

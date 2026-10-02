@@ -836,7 +836,8 @@ const spliceChildren = (
 // 同一个节点 (客户端的收起态挂在它身上)。头 + .bubbles 的骨架与 turn-group 同构,
 // reconcile 才能只换头、逐条对内层, 而不是整框重建。
 //
-// `settled`: 这段过程后面已经跟了终句 —— 答案出来了, 过程默认收起。`data-fold` 是给
+// `settled`: 这段过程下面已经有东西了 (终句), 或这一轮已经结束 —— 只有最末尾、还在
+// 进行中的那一段默认展开, 其余一律收起。`data-fold` 是给
 // 客户端的一次性信号: 已在屏上的框在它出现的那一刻收起一次, 之后用户再点开就不再管。
 const renderSteps = (run: readonly Part[], key: string, settled: boolean): string => {
   const calls = run.filter((p) => p.call).length;
@@ -846,14 +847,14 @@ const renderSteps = (run: readonly Part[], key: string, settled: boolean): strin
 };
 
 /** 连着的过程段合成一个框, 终句一段一颗气泡。 */
-const foldSteps = (parts: readonly Part[]): string[] =>
+const foldSteps = (parts: readonly Part[], done: boolean): string[] =>
   parts.reduce<Part[][]>((runs, p) => {
     const last = runs[runs.length - 1];
     return last?.[0]?.step && p.step ? [...runs.slice(0, -1), [...last, p]] : [...runs, [p]];
   }, []).flatMap((run, i, runs) => {
     const [head] = run;
     // 过程段之间必隔着终句, 所以「后面还有一段」= 后面跟了终句。
-    return head ? [head.step ? renderSteps(run, head.key, i < runs.length - 1) : head.html] : [];
+    return head ? [head.step ? renderSteps(run, head.key, done || i < runs.length - 1) : head.html] : [];
   });
 
 /** `standalone=false`: 这一轮是 rolepage 的一条消息, 不是自成一体的一段 —— 问的那句
@@ -874,7 +875,7 @@ export const renderTurnGroup = (
     : "";
   const typing = done ? "" : `<div class="typing" data-key="${r.id}:typing">${escHtml(backendLabel(r.cli))} 正在思考</div>`;
   // 子卡片已是完整片段 (自带 data-key/data-sig), 不再过 tagSig。
-  const inner = [tagSig(queryBubble), ...foldSteps(spliceChildren(parts, stamps, children)), tagSig(typing)].join("");
+  const inner = [tagSig(queryBubble), ...foldSteps(spliceChildren(parts, stamps, children), done), tagSig(typing)].join("");
   const meta = `<span class="tg-dot${done ? "" : " live"}"></span>${chips}`;
   const head = standalone ? `<div class="tg-head">${meta}</div>` : "";
   // staleAt 只走 JSON, 绝不进 HTML —— 它跟着 updatedAt 变, 一旦计入 sig, SSE 的
