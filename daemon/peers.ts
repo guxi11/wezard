@@ -604,7 +604,7 @@ const hhmm = (ms: number): string => new Date(ms).toTimeString().slice(0, 5);
 export const renderReceiptEnvelope = (
   from: string,
   chat?: string,
-  job?: { job: string; done: number; total: number },
+  job?: { job: string; done: number; total: number; closed?: boolean },
   status: ReceiptStatus = "done",
   turn?: string,
   route?: ReceiptRoute & { pending?: number },
@@ -637,9 +637,11 @@ export const renderReceiptEnvelope = (
     // 「齐了吗」是守护进程数的, 不让模型在上下文里自己数 —— 异步回执是 N 个独立
     // 的轮次陆续进来的, 数错一个就会提前收口或者永远等。
     ...(job && job.job && status !== "need"
-      ? job.done >= job.total
-        ? [`这是工单 \`${job.job}\` 的**最后一份** (${job.done}/${job.total}, 全部到齐): 现在可以汇总收口了 —— close_job(summary) 发结论并回收临时分身${route?.replyTo && !route.replyTo.startsWith(".") ? "; 你这一轮的最后一条消息也会进群, 别把同一段结论说两遍" : ""}。`]
-        : [`这是工单 \`${job.job}\` 的第 ${job.done}/${job.total} 份, **还差 ${job.total - job.done} 份**: 先把这一份记住 (或落到文件里), 不要现在汇总、也不要向人汇报进度; 等最后一份到了会明确告诉你「全部到齐」。`]
+      ? job.closed
+        ? [`工单 \`${job.job}\` 已经收工 (close_job 过了), 这一份是收工之后才到的: 不必再 close_job, 也不计入那次汇总${status === "done" && !route?.replyTo ? " —— 这段结论还有用, 就自己补一句交代 (notify 给人 / 回给上游)" : ""}。`]
+        : job.done >= job.total
+          ? [`这是工单 \`${job.job}\` 的**最后一份** (${job.done}/${job.total}, 全部到齐): 现在可以汇总收口了 —— close_job(summary) 发结论并回收临时分身${route?.replyTo && !route.replyTo.startsWith(".") ? "; 你这一轮的最后一条消息也会进群, 别把同一段结论说两遍" : ""}。`]
+          : [`这是工单 \`${job.job}\` 的第 ${job.done}/${job.total} 份, **还差 ${job.total - job.done} 份**: 先把这一份记住 (或落到文件里), 不要现在汇总、也不要向人汇报进度; 等最后一份到了会明确告诉你「全部到齐」。`]
       : []),
   ]);
 
