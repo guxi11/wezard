@@ -192,6 +192,7 @@ export interface TurnDetailRecord {
   items: TurnItem[];
   model?: string;      // 首个见到的 model 名
   modelAlt?: number;   // 与 model 不同的后续行数, 用于渲染 "+N"
+  effort?: string;     // 最后见到的 effort 档位 (CLI 写在 assistant 行上的), 没写过就没有
   usage?: TurnUsage;
   // 已入账的 Anthropic message.id — Claude Code jsonl 会把一次 API 响应拆成
   // 多条 assistant 行 (如 thinking + tool_use 各一条), 两条共享同一 message.id
@@ -280,7 +281,7 @@ export interface DetailStore {
   ): void;
   /** 返回实际写入的 turn id —— tool_result 会改投到持有其 tool_use 的那一轮。 */
   appendTurnItem(id: string, item: TurnItem): string | undefined;
-  addTurnUsage(id: string, delta: { model?: string; messageId?: string; usage: TurnUsage }): void;
+  addTurnUsage(id: string, delta: { model?: string; effort?: string; messageId?: string; usage: TurnUsage }): void;
   closeTurn(id: string): void;
   // 收尾所有仍开着的 turn (可选按 target / sessionId 限定, 可选排除若干 id)。返回被
   // 关闭的 id。用途: 新一轮发出 finish 消息时, 把此前遗留未关闭的 turn 一并标记结束。
@@ -491,7 +492,8 @@ export const createDetailStore = (opts: { stateDir: string; log?: Logger }): Det
         if (!model) model = delta.model;
         else if (model !== delta.model) modelAlt = (modelAlt ?? 0) + 1;
       }
-      put({ ...r, model, modelAlt, usage: nextUsage, usageMsgIds: nextIds.length ? nextIds : undefined, updatedAt: Date.now() });
+      const effort = delta.effort ?? r.effort;
+      put({ ...r, model, modelAlt, ...(effort ? { effort } : {}), usage: nextUsage, usageMsgIds: nextIds.length ? nextIds : undefined, updatedAt: Date.now() });
     },
     closeTurn: (id) => {
       const r = store.get(id);

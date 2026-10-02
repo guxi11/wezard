@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- rolepage 用量条在模型名旁显示 effort 档位: 取 CLI 写在 transcript assistant 行上的 `effort` (随 turn 记录, 主会话最近一轮为准), 没有才用绑定里记下的档位 (`WorldFactWizard.effort`), 都没有就不显示, 不猜默认。
 - wizard 启动带上 model 与 effort: `spawn_wizard` / `clone_wizard` 新增 `effort` (low / medium / high / xhigh / max, daemon 校验), 启动即 `--effort`; 档位记进绑定 (`mirror-attachments.json` 的 `effort`), 死 pane 重生、`/new`、交接重开都沿用, 分身默认跟被克隆者同模型同档。模型名能确切对上时 (本机 transcript 里 API 真答过的 id, 或与之同家族同版本的列表标签如 `Opus 5.5`) 直接 `--model <id>` 启动, 省掉 `/model` 选择器那一来回; 口语写法 (「opus 最新」) 或没见过的 id 仍走选择器。`set_model` 新增 `effort` (model 可省): 走 `/effort` 档位条的「只本会话」键 —— `/effort <档>` 会顺手改掉全机默认, 不用它; 档位条没有这一键就不切。codebuddy 不传这两个参数。`wizard_whoami` 带 `effort`。
 - `tell_peer({kind: task|ask|fyi})` (B4 ④): 对方该怎么接这句话 —— 与 `priority` (何时投)、`receipt` (要不要回执) 正交。`ask` 信封加「只答这一问, 别为它开新活」; `fyi` = 知会: 强制不要回执、不进工单 (带 `job` 回 `jobIgnored`)、不进群, 信封改口「不收回执 / 不用回复」。
 - 按件号撤回, 打断不误伤别人的活 (B4 ⑧): `stop_wizard({mode:"interrupt", turn})` 只撤回调用方自己派的那一件 —— 它此刻正做的就是这件才按 Esc (不清它的注入队列), 还排着 / 在做别人的活就只把这件记成 canceled, 并经名册增量捎它一句「不用做了」。不带 `turn` 的打断, 若它这一轮是别的 wizard / 人 / 定时任务的 (回执轮算它自己的), 默认 409, 要 `force:true`; `tell_peer` 的 `urgent` 同样情形降成 `normal` (回包 `urgentDowngraded`)。回归脚本加 `cancel-turn` 用例。

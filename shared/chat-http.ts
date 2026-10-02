@@ -187,7 +187,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     const inWin = msgs.filter((m) => inSpan(span)(m.ts));
     // 工单不按视角的 session 段裁 (同 viewOf 的 span): 成员各有各的 session。
     const convs = [...convsOf(inWin, role, dir, now), ...jobConvsOf(msgs, role, dir, f.jobs)].sort((a, b) => b.lastTs - a.lastTs);
-    const stats = roleStats(records, role, now, span);
+    // effort: transcript 记的那档优先, 没有才用绑定里记下的 (dir.fact), 都没有就不显示。
+    const stats = ((s) => s && { ...s, effort: s.effort || dir.fact(role)?.effort })(roleStats(records, role, now, span));
     const info = roleInfo(role, dir, f, stats, now);
     // 日程页只画定时任务 (与 chat.js 的 renderPlan 同一口径) —— 没有就不给入口; 工单在主区的工单列表里。
     const schedules = f.schedules.filter((x) => (x.owner || x.createdBy || x.target) === role);

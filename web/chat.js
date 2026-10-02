@@ -872,6 +872,7 @@
         '<span class="u-nm" data-tip="' + esc(nameOf(t.target)) + '">' + esc(nameOf(t.target)) + '</span></span>' +
       '<span class="u-lb" title="' + esc(t.model || '') + '">' +
         esc(t.modelLabel || t.model || '用量') + '</span>' +
+      (t.effort ? '<span class="u-ef" title="effort 档位">' + esc(t.effort) + '</span>' : '') +
       '<span class="u-kvs">' +
         costKv(u) + kv('turns', t.turns, t.turns) + kv('tools', u.tools, u.tools) + kv('api', u.calls, u.calls) +
         kv('ctx', u.ctx, fmtTok(u.ctx)) +

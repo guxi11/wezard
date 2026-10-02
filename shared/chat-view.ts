@@ -41,6 +41,8 @@ export interface TagSummary {
   model?: string;
   /** 给人看的模型简名 (modelLabel): 前端不另做归一。 */
   modelLabel?: string;
+  /** 主会话最近一轮 CLI 记下的 effort 档位; 没记过就没有 —— 不猜默认。 */
+  effort?: string;
   turns: number;
   lastTs: number;
   running: boolean;
@@ -244,6 +246,7 @@ export const summarizeTag = (target: string, turns: readonly TurnDetailRecord[],
     cwd: [...turns].reverse().find((r) => r.cwd)?.cwd,
     model: [...turns].reverse().find((r) => r.model)?.model,
     modelLabel: ((m) => m && modelLabel(m))([...turns].reverse().find((r) => r.model)?.model),
+    effort: [...main].reverse().find((r) => r.effort)?.effort,
     turns: main.length,
     lastTs: turns.reduce((m, r) => Math.max(m, r.updatedAt), 0),
     running: until > now,

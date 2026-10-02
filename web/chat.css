@@ -150,6 +150,7 @@ button { font: inherit; color: inherit }
 .usage .u-who { display: flex; align-items: center; gap: 4px; max-width: 200px }
 .usage .u-nm { overflow: hidden; text-overflow: ellipsis; color: var(--faint) }
 .usage .u-lb { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; color: var(--accent) }
+.usage .u-ef { margin-left: -4px; white-space: nowrap; color: var(--mute) }
 .usage .u-ic { font-style: normal; margin-right: 4px }
 .usage .u-kvs, .usage .leg { display: flex; gap: var(--u-gap) }
 .usage .kv { white-space: nowrap }

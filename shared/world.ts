@@ -33,6 +33,8 @@ export interface WorldFactWizard {
   chat: string;
   cwd: string;
   model: string;
+  /** 绑定里记下的 effort 档位 (spawn / set_model 给的); 没给过就没有。 */
+  effort?: string;
   cli: string;
   /** 正在生成 (pane 里有中断提示)。 */
   busy: boolean;

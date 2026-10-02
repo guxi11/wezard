@@ -207,7 +207,7 @@ export const recordTurnItem = (id: string, item: TurnItem): void => {
   if (full) forwardToRemote(full);
 };
 
-export const recordTurnUsage = (id: string, delta: { model?: string; messageId?: string; usage: TurnUsage }): void => {
+export const recordTurnUsage = (id: string, delta: { model?: string; effort?: string; messageId?: string; usage: TurnUsage }): void => {
   if (!store) return;
   store.addTurnUsage(id, delta);
   const full = store.get(id);

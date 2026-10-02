@@ -55,6 +55,8 @@ export interface NormalizedTranscriptLine {
   content?: string;
   uuid?: string;
   parentUuid?: string;
+  /** Claude Code stamps each assistant line with the effort it ran at. */
+  effort?: string;
   message?: {
     role?: string;
     content?: string | NormalizedContentBlock[];

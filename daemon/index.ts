@@ -1407,6 +1407,7 @@ const main = async (): Promise<void> => {
           chat: chatNameOf(cfg, p.target) || p.chat,
           cwd: p.cwd,
           model: p.model,
+          ...((e) => (e ? { effort: e } : {}))(mirrorStore.get(p.target)?.effort),
           cli: p.cli,
           busy: p.busy,
           alive: p.paneAlive,

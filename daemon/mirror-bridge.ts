@@ -319,6 +319,9 @@ interface TranscriptLine {
    *  `<command-name>/foo</command-name>...`. */
   content?: string;
   uuid?: string;
+  /** Reasoning effort the CLI ran this assistant line at (top-level, not in
+   *  `message`) — what the session is really on, ahead of anything recorded. */
+  effort?: string;
   message?: {
     role?: string;
     content?: string | ContentBlock[];
@@ -548,7 +551,7 @@ type RenderItem =
   // Per-assistant-line usage snapshot (model + token counts). Consumed only in
   // brief mode where it's fed into the turn store for aggregate chip display.
   // Non-brief onItem drops it silently — no bubble, no stream side effect.
-  | { kind: "turn_usage"; model?: string; messageId?: string; usage: TurnUsage };
+  | { kind: "turn_usage"; model?: string; effort?: string; messageId?: string; usage: TurnUsage };
 
 const oneLineSummary = (s: string, max = 40): string => {
   const flat = s.replace(/\s+/g, " ").trim();
@@ -835,6 +838,7 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
     const u = line.message?.usage;
     if (u) {
       const model = typeof line.message?.model === "string" ? line.message.model : undefined;
+      const effort = typeof line.effort === "string" && line.effort ? line.effort : undefined;
       const messageId = typeof line.message?.id === "string" ? line.message.id : undefined;
       const rawIn = u.input_tokens ?? 0;
       const cr = u.cache_read_input_tokens ?? 0;
@@ -848,6 +852,7 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
       out.push({
         kind: "turn_usage",
         model,
+        effort,
         messageId,
         usage: {
           input,
@@ -3709,7 +3714,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       return;
     }
     if (item.kind === "turn_usage") {
-      recordTurnUsage(turnId, { model: item.model, messageId: item.messageId, usage: item.usage });
+      recordTurnUsage(turnId, { model: item.model, effort: item.effort, messageId: item.messageId, usage: item.usage });
       return;
     }
     if (item.kind === "skill_output") {
@@ -3951,7 +3956,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         } else if (item.kind === "tool_result") {
           recordTurnItem(id, { t: "tool_result", toolUseId: item.toolUseId, body: item.full, ts: now });
         } else if (item.kind === "turn_usage") {
-          recordTurnUsage(id, { model: item.model, messageId: item.messageId, usage: item.usage });
+          recordTurnUsage(id, { model: item.model, effort: item.effort, messageId: item.messageId, usage: item.usage });
         } else if (item.kind === "turn_end") {
           recordTurnClose(id);
           a.keepaliveTurnId = undefined;
