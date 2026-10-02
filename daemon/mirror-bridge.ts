@@ -2051,6 +2051,12 @@ export interface MirrorBridge {
     max: number,
     skip?: (target: string, sessionId: string) => string | undefined,
   ) => Promise<{ reaped: string[]; orphans: string[]; skipped: Record<string, string> }>;
+  /** Kill the panes of windows named after a wizard whose spawn never finished
+   *  (a reload landed mid-spawn): in the daemon's own tmux session, window name
+   *  `name` / `.name`, and NO binding points at the pane. No grace period — unlike
+   *  `reapOverflow`'s orphans these are known-dead by name, so callers must only
+   *  pass names nobody has re-claimed since. Returns the killed pane ids. */
+  reapUnborn: (names: readonly string[]) => Promise<string[]>;
   /** Send a bare Enter to the live tmux pane bound to `target` — confirms a
    *  prompt / press-enter-to-continue, or submits the input box as-is. No-op
    *  for spawn-mode attachments (no live TTY). */
@@ -6191,6 +6197,24 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     lastActivity: (target) => {
       const jsonl = jsonlOf(target);
       try { return jsonl ? statSync(jsonl).mtimeMs : 0; } catch { return 0; }
+    },
+    reapUnborn: async (names) => {
+      const want = new Set(names.flatMap((n) => [n, `.${n}`]));
+      if (!want.size) return [];
+      const snap = await runTmux(["list-panes", "-a", "-F", "#{pane_id}\t#{session_name}\t#{window_name}"]);
+      if (snap.code !== 0) return [];
+      const bound = new Set(allTargets().map(paneOf).filter(Boolean));
+      const doomed = snap.stdout.split("\n").filter(Boolean).map((l) => l.split("\t"))
+        .filter(([pane = "", session, win = ""]) => session === cfg.wrc.tmuxPrefix && want.has(win) && !bound.has(pane))
+        .map(([pane = ""]) => pane);
+      const killed: string[] = [];
+      for (const pane of doomed) {
+        // 与 killPane 同款前戏: Esc 给可能已起来的 CLI 一个收束落盘的机会。
+        await runTmux(["send-keys", "-t", pane, "Escape"]);
+        await sleep(250);
+        if ((await runTmux(["kill-pane", "-t", pane])).code === 0) killed.push(pane);
+      }
+      return killed;
     },
     reapOverflow: async (max, skip) => {
       const now = Date.now();

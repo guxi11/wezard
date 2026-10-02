@@ -1284,8 +1284,16 @@ const main = async (): Promise<void> => {
       (t) => chatNameOf(cfg, t),
     );
     // 上一个进程生到一半就没了的身份 (spawn 途中 reload): 没会话的删掉, 腾出名字。
-    sweepUnborn(wizards, (t) => m.chatTargets(baseOfKey(t)).includes(t))
-      .forEach((w) => log.child({ mod: "wizard" }).warn({ target: w.target, name: w.name }, "unborn identity swept — a tmux window by this name, if any, is now orphaned"));
+    // 它们的 tmux window 也一并收掉 (没人叫得到它, 只会占着 pane): 等绑定恢复完再看,
+    // 免得把还没恢复的活 pane 当成没绑定; 期间名字已被新 spawn 认领的不碰。
+    const unborn = sweepUnborn(wizards, (t) => m.chatTargets(baseOfKey(t)).includes(t));
+    unborn.forEach((w) => log.child({ mod: "wizard" }).warn({ target: w.target, name: w.name }, "unborn identity swept"));
+    if (unborn.length) {
+      void m.restored
+        .then(() => m.reapUnborn(unborn.map((w) => w.name).filter((n) => n && !wizards.byName(n))))
+        .then((killed) => { if (killed.length) log.child({ mod: "wizard" }).info({ killed }, "unborn windows killed"); })
+        .catch((e: unknown) => log.warn({ err: (e as Error).message }, "unborn window reap failed"));
+    }
 
     /** 派活前先验工单: 生完分身才发现工单号打错了, 那个分身就成了没人认领的孤儿。 */
     /** `free` = 这次不花预算 (不带 task 的 spawn; 答一份停在 NEED 上的反问 —— 拒了它就只能干等到超时)。 */

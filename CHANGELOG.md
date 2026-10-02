@@ -81,6 +81,7 @@
 - 回执投成「（后台任务已完成）」: 对方答完后, 它先前放到后台的命令跑完会以 `<task-notification>` 起新一轮, 回执定位没把这一行当轮界, 取到的是那一轮的终句。现在 CLI 自插的通知行也截断一轮。
 - spawn 中途失败留下僵尸身份: spawn 途中 daemon 被 reload (调用方看到 `fetch failed`) 时, 身份记录已落盘却没有会话, 名字被永久占住, tell_peer / stop_wizard 都报「exists but its session is not running」。现在身份记录带 `spawning` 标记, 生成功才清; spawn 抛异常也回滚; 开机收掉上一个进程没生完的记录。`stop_wizard` 对有身份没会话的 wizard 也能成功: `end` 视为早已结束, `forget` 删记录腾出名字。
 - rolepage 链接在独立 svr 上报「未找到该会话」: 聊天票据只在创建那一刻推一次到远端, 远端换过地址 (lisct → 本机 17891) 或那一下 svr 不在时就永久缺席。现在 daemon 每次 (重新) 连上远端都把全部聊天票据补推一遍。
+- reload 落在 spawn 中途留下的孤儿 tmux 窗口现在会被收掉 (B4 ⑫), 不再只打一行 warn: 开机清掉没生完的身份后, 等绑定恢复完, 把 daemon 自己的 tmux session 里以这些名字命名、且没有任何绑定指着的 pane 杀掉; 名字期间已被新 spawn 认领的不碰。
 
 ## [2.2.2] - 2026-10-02
 
