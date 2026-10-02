@@ -140,6 +140,11 @@ const blockText = (content: unknown): string => {
 export const tailTurns = (jsonlPath: string, n = 3, keepLines = false): Turn[] =>
   readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, keepLines), (ts) => ts.length >= n).slice(-n);
 
+/** 最后一句进到模型的话 (带信封), 往回读到有为止 —— 中间隔着多少轮工具都不怕。 */
+export const lastUserTurn = (jsonlPath: string): Turn | undefined =>
+  readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, true), (ts) => ts.some((t) => t.role === "user"))
+    .filter((t) => t.role === "user").at(-1);
+
 /** `tailTurns` 去掉保温 ping/pong 之后的最后 `n` 轮 —— 凡是交给另一个 wizard (或人)
  *  **读**的都走这里: 挂机一晚的会话尾巴上全是 ping/pong, 照 tailTurns 数出来的
  *  「最近 6 轮」一句真话都没有, 「最后一条回复」是一个 pong。`pingSigs` 只给保温

@@ -52,7 +52,7 @@ import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagH
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
-import { stripAnsi, paneIsBusy, transcriptStalled, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, lastModel, cacheTtlSec, keepaliveStamps, openKeepalivePing, talkRounds, openToolUses, renderDialog, type PeerInfo, type PeerReply } from "./peers.js";
+import { stripAnsi, paneIsBusy, transcriptStalled, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, lastModel, cacheTtlSec, keepaliveStamps, openKeepalivePing, lastUserTurn, talkRounds, openToolUses, renderDialog, type PeerInfo, type PeerReply } from "./peers.js";
 import { keepalivePingSigs, isKeepalivePingText } from "../shared/keepalive.js";
 
 // PATH augmentation: launchd / systemd start the daemon
@@ -3196,9 +3196,29 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const publicPeer = (from: TurnFrom | undefined): string | undefined =>
     from?.kind === "peer" && from.public ? from.from : undefined;
 
+  /** reload 后 tail 从 EOF 接上: 正在跑的这一轮的开头那句已在身后, 它的印章随旧进程没了。
+   *  那句话自己挂着信封 (谁说的、私聊还是哪个群) —— 读回来就是这一轮的出处。没挂信封 = undefined。 */
+  const openingOf = (a: AttachState): { channel: string; speaker?: string; from?: TurnFrom; query: string } | undefined => {
+    const t = a.jsonlPath ? lastUserTurn(a.jsonlPath) : undefined;
+    const env = t?.env;
+    if (!env) return undefined;
+    const home = baseOfKey(a.target);
+    const from: TurnFrom | undefined =
+      env.kind === "peer" ? { kind: "peer", from: wizardStore()?.byName(stripSigil(env.from))?.target, ...(env.private ? {} : { public: true }), ...(env.receipt ? { receipt: true } : {}), ...(env.status ? { status: env.status } : {}), ...(env.turn ? { turn: env.turn } : {}) }
+      : env.kind === "task" ? { kind: "task", taskId: env.from.replace(/^定时 /, "") }
+      : undefined;
+    return {
+      channel: env.private ? "" : (env.chat && chatBaseOf(cfg, env.chat)) || home,
+      speaker: env.kind === "human" ? `user:${env.from}` : undefined,
+      from,
+      query: t!.text,
+    };
+  };
+
   /** 频道印章: 有新印章就换频道; 没有则 `reset` (CLI 手敲 / 人从聊天发起) 回到
-   *  home, 其余续写 (收口后的补写) 沿用上一轮。`from` = 本轮的出处, 答给谁跟着频道走。 */
-  const consumeChannel = (a: AttachState, reset: boolean, from: TurnFrom | undefined): void => {
+   *  home, 其余续写 (收口后的补写) 沿用上一轮。`from` = 本轮的出处, 答给谁跟着频道走。
+   *  返回 reload 后从 transcript 读回的开头那句 (见 openingOf), 没读到 = undefined。 */
+  const consumeChannel = (a: AttachState, reset: boolean, from: TurnFrom | undefined): string | undefined => {
     const p = a.pendingChannel;
     a.pendingChannel = undefined;
     const seeded = a.channelSeeded;
@@ -3217,15 +3237,20 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       a.convFrom = from;
     } else if (!seeded) {
       // reload 后的第一轮续写: 内存里的频道随进程没了, 缺省 = home 会把一段私聊的
-      // 后续记成群里公开说的 (rolepage 上私聊窗口从此不再更新)。接回最近一轮的印章。
-      const last = lastChannelOf(a.target);
+      // 后续记成群里公开说的 (rolepage 上私聊窗口从此不再更新), 私聊的终句还会推进群。
+      // 先信这一轮开头那句自带的信封; 没有 (人在 home / CLI 里说的) 才接回最近一轮的印章 ——
+      // 刚出生的分身没有「最近一轮」, 只能靠信封。
+      const opening = openingOf(a);
+      const last = opening ?? lastChannelOf(a.target);
       if (last) {
         a.channel = last.channel === baseOfKey(a.target) ? undefined : last.channel;
         a.speaker = last.speaker;
         a.replyTo = publicPeer(last.from);
         a.convFrom = last.from;
       }
+      return opening?.query;
     }
+    return undefined;
   };
   /** 本轮落 turn 记录的频道字段。 */
   const channelFields = (a: AttachState): { channel: string; speaker?: string } =>
@@ -3358,9 +3383,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.pendingFromCli = false;
     a.turnFromChat = fromCli ? false : a.turnFromChat ?? true;
     const fresh = consumeFrom(a);
-    consumeChannel(a, fromCli, fresh);
+    const opened = consumeChannel(a, fromCli, fresh);
     const from = fresh ?? a.convFrom;
-    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: query || undefined, origin: consumeOrigin(a), from, ...channelFields(a) });
+    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: query || opened || undefined, origin: consumeOrigin(a), from, ...channelFields(a) });
     a.briefTurnId = turnId;
     a.briefBubble = undefined;
     a.briefIsSlash = false;
