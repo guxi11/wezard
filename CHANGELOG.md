@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Added
+- 共享记忆合并后告诉在场的 wizard: 整理者真改动了哪份群 / 工作区记忆, pane 活着且读这份 md 的 wizard 下一条消息尾巴上捎一行「记忆已更新, 全文见 …」(宪章是出生快照, 此前要等重生才看得到)。整理者合并时把该工作区的 `CLAUDE.md` / `CODEBUDDY.md` / `AGENTS.md` / `.claude/CLAUDE.md` 与各 backend 的 auto-memory `MEMORY.md` 当只读参考, 已写在那里的不再收; workspace 提议记下 `cwd`, 提议者收工后仍找得到参考源。名册增量的 reminder 表头改成通用的「宪章是快照」; 宪章重渲染时清空该 wizard 待投递的增量 (新宪章里都有了)。
+
 ### Security
 - 模型不再能免审改审批配置: PreToolUse hook 对 wezard 自家 MCP 工具的一律放行排除了两种「写」—— `config_set` 带 `value` (可写 `danger_skip_all` / `approval_mode` / `allow_from`) 与 `set_model` `scope:"default"` (改 CLI 全局设置), 它们落回审批, 且 daemon 把它们当必发卡 (不吃 matcher / danger 开关 / ⏱窗口 / 会话缓存, 只有人开的 skipAll 与 bypass 模式压得过); `config_set` 的读与 `set_model` 的会话级照旧免审。
 - hook 的 wezard CLI 免审只认整条命令就是一次 `wezard[.sh] <status|logs|pending|audit|update|reload|config-path|mirror-status|version|help>` 且不含 shell 元字符; 此前命令里任意位置出现 `wezard` 一词就放行 (`curl …/config/set; true wezard` 可免审直改配置)。注意 daemon 的 `/config/set` 路由本身仍不鉴权, 本机进程可直接写 —— 这里只关掉了模型免审走到它的两条路。

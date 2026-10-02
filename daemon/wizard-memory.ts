@@ -15,7 +15,7 @@
 // 人照旧可以直接改 md —— 人不是并发写者。
 //
 // 读写失败一律吞掉: 记忆是锦上添花, 读不到就当没有, 写不进就回报失败, 都不该拖垮 spawn。
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { expandHome } from "../shared/paths.js";
 
@@ -44,13 +44,16 @@ export interface MemoryProposal {
   note?: string;
   /** 希望删掉的那条记忆里的一个子串。 */
   forget?: string;
+  /** workspace 提议的工作区 —— 整理者据此找参考源, 不必等提议者还在场。 */
+  cwd?: string;
 }
 
 /** 投一条提议; 一行一个 json, 追加写 —— 多个 wizard 并发投也不会互相覆盖。 */
 export const proposeMemory = (path: string, p: MemoryProposal): boolean => {
   try {
     mkdirSync(dirname(path), { recursive: true });
-    appendFileSync(path, `${JSON.stringify(p)}\n`);
+    appendFileSync(path, `${JSON.stringify(p)}
+`);
     return true;
   } catch {
     return false;
@@ -71,3 +74,30 @@ export const readMemory = (path: string): string => {
     return "";
   }
 };
+
+// ── md ↔ wizard ───────────────────────────────────────────────────────
+// 一律正向算: 对每个 wizard 求出它读的那两份 md, 再与给定的 md 比对。不从路径反推
+// key —— fileKey 是有损的 (`/` 与 `-` 撞成一个), 反推出来的 cwd 可能根本不存在。
+
+/** 一个 wizard 读哪两份共享记忆; 没有工作区就只有 chat 那份。 */
+export const mdsOf = (stateDir: string, base: string, cwd: string): { scope: MemoryScope; md: string }[] => [
+  { scope: "chat", md: memoryPath(stateDir, "chat", base) },
+  ...(cwd ? [{ scope: "workspace" as const, md: memoryPath(stateDir, "workspace", cwd) }] : []),
+];
+
+/** 工作区收件箱 (含已认领的) 里提议者留下的 cwd —— cwdOfMd 的候选来源之一。读不到就是空。 */
+export const proposedCwds = (stateDir: string): string[] => {
+  const dir = join(memoryRoot(stateDir), "inbox", "workspaces");
+  try {
+    return [...new Set(readdirSync(dir).filter((f) => f.endsWith(".jsonl")).flatMap((f) =>
+      readFileSync(join(dir, f), "utf8").split("\n").flatMap((l) => {
+        try { const c = (JSON.parse(l) as MemoryProposal).cwd; return c ? [c] : []; } catch { return []; }
+      })))];
+  } catch {
+    return [];
+  }
+};
+
+/** 一份工作区 md 对应的 cwd: 在已知的那些 cwd 里找正向算出来正好是它的; 不是工作区 md 就 undefined。 */
+export const cwdOfMd = (stateDir: string, md: string, cwds: readonly string[]): string | undefined =>
+  cwds.find((c) => memoryPath(stateDir, "workspace", c) === md);

@@ -1,9 +1,10 @@
 // Daemon entry. Resident process — exits only on signal or fatal WS auth failure.
-import { statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { homedir } from "node:os";
 import { loadConfig } from "../shared/config.js";
 import { makeLogger } from "../shared/log.js";
-import { bindCliBackends, type CliBackendName } from "../shared/cli-backends.js";
+import { bindCliBackends, projectDirsFor, type CliBackendName } from "../shared/cli-backends.js";
 import { startWs } from "./ws.js";
 import { startNetWatch } from "./net-watch.js";
 import { startHttp, json, readBody, type Handler } from "./http.js";
@@ -11,7 +12,7 @@ import { configGet, configSet } from "./config-api.js";
 import { installInboundRouter } from "./inbound.js";
 import { loadMirrorStore } from "./mirror-store.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
-import { setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
+import { runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { installApprovalEventListener, makeApproveHandler } from "./approval.js";
 import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, setWorldFactsProvider, recordPost } from "./detail.js";
 import { EMPTY_FACTS, type WorldFacts, type WorldFactWizard } from "../shared/world.js";
@@ -37,9 +38,9 @@ import {
 import { openTaskRegistry } from "./task-registry.js";
 import { describeTrigger, nextFire, parseTrigger, WHEN_HELP } from "../shared/trigger.js";
 import { slugify, uniqueId } from "../shared/task-file.js";
-import { baseOfKey, bindTagLinker, keyOf, linkTags, normalizeTag, tagFromCwd, tagHead, tagLink, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
-import { clipForCharter, inboxPath, memoryPath, memoryRoot, proposeMemory, readMemory, type MemoryScope } from "./wizard-memory.js";
-import { retireStewardTask, startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET } from "./memory-steward.js";
+import { baseOfKey, bindTagLinker, isInternalKey, keyOf, linkTags, normalizeTag, tagFromCwd, tagHead, tagLink, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
+import { clipForCharter, cwdOfMd, inboxPath, mdsOf, proposedCwds, memoryPath, memoryRoot, proposeMemory, readMemory, type MemoryScope } from "./wizard-memory.js";
+import { retireStewardTask, startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
 import { applyChatNames, chatBaseOf, chatNameOf, clearChatName, listChatNames, normChatName, peerAddress, planChatNames, setChatName } from "./chat-name.js";
 import {
   bindWizardStore,
@@ -102,6 +103,7 @@ const main = async (): Promise<void> => {
   // wizards / m / notifyChat), 但 startScheduler 在那块外面接线 —— 见文件尾。
   // 记忆整理者的执行体, 同样只有 mirror 模式给得出 —— 赋值见 scheduledTaskInject 旁边。
   let stewardRun: ((prompt: string) => Promise<{ ok: boolean; reason?: string }>) | undefined;
+  let stewardWiring: { refsOf?: RefsOf; onMerged?: (mds: readonly string[]) => void } = {};
   let scheduledTaskInject:
     | ((target: string, text: string, opts: { taskId: string; fresh: boolean }) => Promise<{ ok: boolean; reason?: string }>)
     | undefined;
@@ -1300,6 +1302,8 @@ const main = async (): Promise<void> => {
       // 终身的 —— 一个在聊天还没名字时出生的 wizard, 会一辈子以为自己住在一个
       // 「(未命名)」的地方。所以补名要发生在渲染之前, 不能等它以后自己去查。
       ensureChatNames(target);
+      // 信箱里装的是相对上一份宪章的变化; 新宪章一渲染就都过期了 (名册、记忆都已在里面)。
+      notices.drain(target);
       const rec = wizards.get(target);
       return charterFor(target, { parent: rec?.parent, forkOf: rec?.forkOf, inherited: !!rec?.clonedFrom, cwd: ctx?.cwd });
     });
@@ -1515,6 +1519,7 @@ const main = async (): Promise<void> => {
         const queued = proposeMemory(inboxPath(cfg.daemon.stateDir, scope as MemoryScope, key), {
           at: Date.now(),
           by: selfAddress(self),
+          ...(scope === "workspace" ? { cwd: key } : {}),
           ...(note ? { note } : {}),
           ...(forget ? { forget } : {}),
         });
@@ -2031,6 +2036,40 @@ const main = async (): Promise<void> => {
       const idle = await waitForIdle(target, m.isBusy, STEWARD_RUN_MS, () => false);
       return done(idle.idle ? { ok: true } : { ok: false, reason: idle.reason });
     };
+
+    // 整理者与在场 wizard 之间的两根线 (memory.md ①②): 合并前给它看 CLAUDE.md /
+    // auto-memory 好去重, 合并后告诉读这份 md 的 wizard —— 它们的宪章是出生时的快照。
+    // md ↔ wizard 一律正向算 (mdsOf / cwdOfMd), 不从文件名反推。
+    const stateDir = cfg.daemon.stateDir;
+    // 全量绑定 (含冷的), 与 settleAll 同一份 —— 不依赖身份记录在不在。
+    const boundTargets = (): string[] => m.chatRoster("").flatMap((c) => c.targets).filter((t) => !isInternalKey(t));
+    const cwdOfTarget = (t: string): string => { const c = m.getCwd(t); return c.runningCwd || c.defaultCwd; };
+    // 人和各家 CLI 自己读的那几份项目说明 + 各 backend 的 auto-memory 索引。
+    const PROJECT_DOCS = ["CLAUDE.md", "CODEBUDDY.md", "AGENTS.md", join(".claude", "CLAUDE.md")];
+    stewardWiring = {
+      refsOf: (md) => {
+        // cwd 候选: 提议里带的 (提议者可能早收工了) + 在场绑定的; 再正向算出 md 比对。
+        const cwds = [...new Set([...proposedCwds(stateDir), ...boundTargets().map(cwdOfTarget)].filter(Boolean))];
+        const cwd = cwdOfMd(stateDir, md, cwds);
+        if (!cwd) return [];
+        return [...PROJECT_DOCS.map((f) => join(cwd, f)), ...projectDirsFor(cwd).map((d) => join(d.dir, "memory", "MEMORY.md"))].filter((f) => existsSync(f));
+      },
+      // 只投给 pane 活着的: 冷的那些醒来时宪章重渲染, 新记忆已在里面, 再提一句就重复了。
+      onMerged: (mds) => void (async () => {
+        const changed = new Set(mds);
+        const snap = await runTmux(["list-panes", "-a", "-F", "#{pane_id}"]);
+        if (!snap.ok) return;
+        const live = new Set(snap.stdout.split("\n").map((l) => l.trim()).filter(Boolean));
+        for (const t of boundTargets()) {
+          const pane = m.sessionInfo(t)?.tmuxPane;
+          if (!pane || !live.has(pane)) continue;
+          const where = (scope: MemoryScope): string => (scope === "workspace" ? "本工作区" : baseOfKey(t).startsWith("user:") ? "本单聊" : "本群");
+          for (const h of mdsOf(stateDir, baseOfKey(t), cwdOfTarget(t)).filter((x) => changed.has(x.md))) {
+            notices.post([t], `${where(h.scope)}记忆已更新, 全文见 \`${h.md}\``);
+          }
+        }
+      })().catch((e: unknown) => log.warn({ err: (e as Error).message }, "memory steward: notice fan-out failed")),
+    };
   }
 
   // 定时调度器 — 每 20s 检查任务表, 到点把 prompt 注入目标 wizard。
@@ -2047,7 +2086,7 @@ const main = async (): Promise<void> => {
 
   // 共享记忆整理 — daemon 内建, 不进任务表 / 日程, 不出任何气泡。
   const steward = stewardRun
-    ? startSteward({ root: memoryRoot(cfg.daemon.stateDir), log: log.child({ mod: "steward" }), run: stewardRun })
+    ? startSteward({ root: memoryRoot(cfg.daemon.stateDir), log: log.child({ mod: "steward" }), run: stewardRun, ...stewardWiring })
     : undefined;
 
   // pane 上限 — 每新建一个 wizard 数一次: 活着的会话 pane 超过 wrc.mirror.maxPanes

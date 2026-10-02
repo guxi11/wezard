@@ -55,9 +55,9 @@ export const noticeBox = (): NoticeBox | undefined => bound;
 export const renderNotices = (lines: readonly string[]): string => {
   if (lines.length === 0) return "";
   return renderReminder({ wezard: "roster" }, [
-    "你出生时拿到的那份名册已经变了 —— 这段时间里:",
+    "你出生时拿到的宪章 (名册、记忆) 是快照, 这段时间里变了:",
     ...lines.map((l) => `- ${l}`),
-    "要当下真实的状态 (谁在忙、谁在哪个工作区) 就调 wizard_roster。与手头的活无关就略过,",
+    "名册的真相是 wizard_roster, 记忆的真相是那份文件。与手头的活无关就略过,",
     "**不要为此回话, 也不要向用户复述这几行** —— 群里该看见的气泡已经发过了。",
   ]);
 };
