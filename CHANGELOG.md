@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- 要人回话的单独提醒: 进聊天的终句末尾单起一行 `ASK: 一句话问题` (或 `notify({ask})`), 守护进程在正文之后另补一条只含这句的 `🔔 .x 等你回复: …` 短消息, 免得「需要你定」埋在长方案末尾被划过去; 私聊轮不发。企微 aibot 做不了真 @: `aibot_send_msg` 只收 markdown / template_card / 媒体, `text`+`mentioned_list` 实测回 40008, markdown 的 `<@userid>` 在单聊和群里都原样显示 —— 所以只补一条单独的新消息。charter 写明用法。
 - rolepage 工单页 (B3b ②③, 按人定的方向): 工单的一切都在对话区 —— 普通会话的顶栏列出这段往来里出现过的工单 (一张一枚, 标题 + 进度, 超过 3 张进「全部工单」); 工单页 (`j:<id>`) 按时间排开工框 (成员与各自状态)、归在工单名下的派活 / 答话 / 回执、收工框 (定论、交付物、结论), 顶栏可「‹ 回到」进工单前那段会话或进「全部工单」; 工单列表在主区, 进行中在前、已收工淡一档在后。侧栏只挂 📋 标记: 出现过工单的会话行、群下成对子项、关系图上经手工单的那条关系。看着一张工单时切到关系图, 只亮它的当事人与两端都是当事人的线。进度 (已落定 / 一共) 由 `world.jobProgress` 一处算; `/api/world` 的工单成员带定论与交付物, `/api/msgs` 带整窗出现过的工单号。
 - `tell_peer({chain:false})` / spawn·clone 带 task 时的 `chain:false` (B3b ③b): 在答上游派的活时顺手派出的旁支活 (测试、与上游无关的事) 不挂父 k —— 不 defer 给上游的那一份、它的回执也不带 reply-to 续回上游, 回执照常回发话方。默认仍链式; `tell_peer` 回包在挂上上游时多一项 `chained` 说明终句被挂住了。是不是为上游派的只有发话方知道, 所以是显式参数而不是按工单 / 文本推断。
 - 回执回归脚本 `scripts/receipt-regress/run.mjs` (B3b ①): 在 wizard 会话里跑, 生一个 haiku 根与各用例的 haiku 临时分身, 直接 POST daemon 驱动, 只按 `receipts.json` / `jobs.json` 的账和根 transcript 里的回执信封判定, 逐条打印 PASS/FAIL, 跑完收掉全部分身。覆盖: 三级链式冒泡、并发两子 reply-to、wait_peer 取走不重投、deadline 超时、pane 被杀 (dead)、NEED→re→done、工单 expect 计数、收工后迟到的回执、`chain:false` 旁支。改 receipts / jobs / peers 后必跑; 用例名作参数只跑那几条。
@@ -54,6 +55,7 @@
 - rolepage 用量条的累计耗时 (⏱️) 指标。
 
 ### Fixed
+- 主动推送不再在 reload 窗口里丢消息: 新进程恢复 mirror 后立刻要推的终句 / notify, 撞上 WS 尚未连上就被 SDK 以 `WebSocket not connected` 拒掉、永久丢失 (近 48h 约 18 条); `sendMessage` 现在先等连上 (最多 30s) 再发。推送成功落一条 `standalone pushed` / `raw pushed` 日志 (chatId、turnId、WeCom 回执), 失败日志带上 WeCom 的 errcode/errmsg (SDK 拒收时 reject 的是回执帧而非 Error, 原先记成 undefined) —— 此前成功推送不落日志, 「rolepage 有、群里没有」无从对账。
 - 并发注入到不同 pane 时文本会串台: tmux 注入共用默认粘贴 buffer, 一方 load 之后、paste 之前被另一方覆盖, 两段文本互换 pane (实测同一毫秒投出的两份回执, 给 .evolve 的那份进了 .ev-proto, .evolve 没收到)。每次注入改用自己的具名 buffer。
 - 工单收工之后才到的回执, 信封不再说「全部到齐, 去 close_job」: 投递时读工单状态, 已收工就写明这一份是收工后到的、不计入那次汇总、不必再 close_job (定论是 done 且这一轮不外发时, 提示有用就自己交代)。
 - 回执投递与 `wait_peer` 取走撞在一起时会双投: 发话方闲着、回执正在投, 这时 `wait_peer` 取走同一份, 取走方拿到 `delivered:false` 而回执照样进了会话。投递前同步再查一次是否已被取走, 并先记成已投 (投失败再撤回), 取走方据此如实得到 `delivered:true`。回归脚本 `wait` 用例抓到。

@@ -93,7 +93,18 @@ export const installResponseTracker = (client: WSClient, log?: Logger): void => 
     return r;
   };
 
+  // reload 窗口: 新进程恢复 mirror 后立刻有终句要推, 而 WS 还没鉴权完 —— SDK 直接抛
+  // "WebSocket not connected", 那条消息就永久丢了 (近两天十几条都是这么没的)。主动推送
+  // 不赶这几秒: 先等连上再发, 等不到再照常失败。
+  const CONNECT_WAIT_MS = 30_000;
+  const untilConnected = async (): Promise<void> => {
+    for (const t0 = Date.now(); !client.isConnected && Date.now() - t0 < CONNECT_WAIT_MS; ) {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  };
+
   client.sendMessage = async (chatid, body) => {
+    await untilConnected();
     // Only markdown pushes carry quotable text (and are the empty-message
     // risk class); template_card / media bubbles pass through untouched.
     if ((body as { msgtype?: string }).msgtype === "markdown") {

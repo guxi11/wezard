@@ -44,6 +44,7 @@ import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
 import { knowsToolUse, recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnQuery, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, lastChannelOf, buildDetailUrl, buildChatUrl, roleUniq } from "./detail.js";
 import type { CtxCut, TurnFrom, TurnOrigin, TurnUsage } from "./detail.js";
+import { askLineOf, errText, sendAsk } from "./mention.js";
 import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagHeader, withLinkedTagHeader, linkedTagHead, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
@@ -2712,6 +2713,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!hasVisibleBody(content)) return;
     if (isPrivate(a) && !/^\[(mirror|wezard)\]/.test(content.trim())) return;
     const chatId = replyChatId(a);
+    const turnId = a.briefTurnId; // 推送是排队异步的, 到发出时 turn 早已收口
     const pieces = splitMarkdown(content, Math.max(200, cfg.wrc.mirror.chunkBytes - TAG_HEADER_BUDGET));
     const chunks = pieces.map((p, i) =>
       withLinkedTag(a, p, pieces.length > 1 ? `${i + 1}/${pieces.length}` : undefined));
@@ -2719,9 +2721,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       .then(async () => {
         for (const c of chunks) {
           try {
-            await client.sendMessage(chatId, { msgtype: "markdown", markdown: { content: c } });
+            const ack = await client.sendMessage(chatId, { msgtype: "markdown", markdown: { content: c } });
+            log.info({ sessionId: a.sessionId, turnId, chatId, len: c.length, ack: JSON.stringify(ack ?? null).slice(0, 300) }, "standalone pushed");
           } catch (e) {
-            log.warn({ sessionId: a.sessionId, err: (e as Error).message }, "standalone push failed");
+            log.warn({ sessionId: a.sessionId, chatId, err: errText(e) }, "standalone push failed");
           }
         }
       })
@@ -2732,12 +2735,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const sendRaw = (a: AttachState, content: string): void => {
     if (!hasVisibleBody(content)) return;
     const chatId = replyChatId(a);
+    const turnId = a.briefTurnId;
     a.standalonePending = a.standalonePending
       .then(async () => {
         try {
           await client.sendMessage(chatId, { msgtype: "markdown", markdown: { content } });
+          log.info({ sessionId: a.sessionId, turnId, chatId, len: content.length }, "raw pushed");
         } catch (e) {
-          log.warn({ sessionId: a.sessionId, err: (e as Error).message }, "raw push failed");
+          log.warn({ sessionId: a.sessionId, chatId, err: errText(e) }, "raw push failed");
         }
       })
       .catch(() => undefined);
@@ -3280,6 +3285,16 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     && (!a.briefBubble || a.briefBubble.done)
     && textSimilarity(a.lastConcludedBody, body) >= DUP_CONCLUSION_RATIO;
 
+  // 进了聊天的终句带 `ASK:` 收口行 = 要人回一句 —— 正文之后再补一条短提醒
+  // (见 mention.ts)。排在 standalonePending 上, 保证落在正文后面。
+  const askIfAsked = (a: AttachState, body: string): void => {
+    const ask = askLineOf(body);
+    if (!ask) return;
+    const channel = a.channel || baseOfKey(a.target);
+    const who = `.${displayName(a.target) || a.target}`;
+    a.standalonePending = a.standalonePending.then(() => sendAsk(client, log, channel, who, ask)).catch(() => undefined);
+  };
+
   const concludeBriefTurn = (a: AttachState, body: string): void => {
     const turnId = a.briefTurnId;
     if (!turnId || a.briefConcluded) return;
@@ -3295,11 +3310,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.lastConcludedAt = Date.now();
     if (a.briefBubble && !a.briefBubble.done) {
       void finishBriefBubble(a, `${briefDetailLink(turnId, a.target)} ${linkTags(a.target, body)}`, true);
+      askIfAsked(a, body);
     } else if (turnSilent(a)) {
       // CLI 手敲的一轮: 终稿只留在 turn store, 详情页照常实时可见。
       log.info({ sessionId: a.sessionId, turnId }, "brief: CLI-origin conclusion kept out of chat");
     } else {
       sendStandalone(a, body); // 详情链接由 withLinkedTag 统一前缀, 不在这里拼
+      askIfAsked(a, body);
     }
     // 只保留当前 turn: 其余仍开着的 turn 记录是漏收的 close, 一并扫掉。
     recordCloseOpenTurns({ target: a.target, sessionId: a.sessionId, exceptIds: [turnId] });
