@@ -1534,10 +1534,6 @@
 
   // F.vis: 只看相关时画哪些 (见 visibleOf); 没有 = 全画。
   var shows = function (F, t) { return !F.vis || !!F.vis[t]; };
-  var countSub = function (F, t) {
-    return (F.kids[t] || []).filter(function (k) { return shows(F, k); })
-      .reduce(function (n, k) { return n + 1 + countSub(F, k); }, 0);
-  };
   var chainUp = function (F, t, seen) {
     seen = seen || {};
     var p = F.pp[t];
@@ -1621,64 +1617,50 @@
   var byCard = function (F) {
     return function (a, b) { return recentFirst(cardGlance(F, a), cardGlance(F, b)); };
   };
-  // 关系图: 它与 N 个 role 有关系, 但这张图上没有连到它们的线。关系 = 服务端裁节点之前的全部对端 (node.rels)
-  // ∪ 这段范围里画得出的边 —— 前者补上没下发的节点, 后者兜住老 svr 没给 rels 的情况。
+  // 关系图: 它与 N 个 role 有关系, 但它们的卡片不在这一档画出来的图上 (画着就不算, 连没连线都一样)。
+  // 关系 = 服务端裁节点之前的全部对端 (node.rels) ∪ 这段范围里画得出的边 —— 前者补上没下发的节点,
+  // 后者兜住老 svr 没给 rels 的情况。F.on = 这一档画出来的卡片, 「相关 | 全部」各算各的。
   var otherRels = function (F, t) {
-    var on = (F.links || {})[t] || [];
+    var on = F.on || {};
     var all = Object.keys(F.pairs).reduce(function (m, k) {
       var p = F.pairs[k], o = p.from === t ? p.to : p.to === t ? p.from : '';
       if (o) m[o] = 1;
       return m;
     }, ((nodeOf(t) || {}).rels || []).reduce(function (m, o) { m[o] = 1; return m; }, {}));
-    var n = Object.keys(all).filter(function (o) { return o !== t && on.indexOf(o) < 0; }).length;
-    return moreTag(n, nameOf(t) + ' 还和 ' + n + ' 个 role 有关系没连在这张图上, 切到它的视角可见');
+    var n = Object.keys(all).filter(function (o) { return o !== t && !on[o]; }).length;
+    return moreTag(n, nameOf(t) + ' 还和 ' + n + ' 个 role 有关系, 不在这张图上, 切到它的视角可见');
   };
-  var tnodeHTML = function (F, n, folded) {
+  var tnodeHTML = function (F, n) {
     var me = n.target === ROLE;
-    var tail = folded ? '<span class="tfold" title="它下面还有 ' + folded + ' 个, 切到它的视角可见">+' + folded + '</span>' : '';
     var p = F.pp[n.target];
-    var row = roleRow(n.target, n.name, n.label, cardGlance(F, n.target), n, tail, otherRels(F, n.target));
+    var row = roleRow(n.target, n.name, n.label, cardGlance(F, n.target), n, '', otherRels(F, n.target));
     var via = F.vis && F.vis[n.target] === 'via';
     return '<button class="ci tci' + (me ? ' me' : '') + (via ? ' via' : '') + (F.links && CONV === talkKey(F.links, n.target) ? ' on' : '') + '" data-t="' + esc(n.target) + '"' +
-      (via ? ' title="' + esc(nameOf(n.target) + ' 没和 ' + nameOf(ROLE) + ' 对过话, 留着是为了连到它下面对过话的') + '"' : '') + '>' +
+      (via ? ' title="' + esc(nameOf(n.target) + ' 和 ' + nameOf(ROLE) + ' 没有直接关系, 留着是为了连到它下面有关系的') + '"' : '') + '>' +
       labelHTML(p) + row + '</button>';
   };
 
-  // keep(父, 孩子) → 'full' 整枝 / 'leaf' 只画它自己 / '' 不画; 不给 keep = 全画。shown 收集画出来的节点。
-  var treeHTML = function (F, t, depth, keep, leaf, shown, seen, z) {
+  // 只画 F.vis 里的 (没有 = 全画)。shown 收集画出来的节点。
+  var treeHTML = function (F, t, depth, shown, seen, z) {
     var n = nodeOf(t);
     if (!n || seen[t] || depth > 32) return '';
     seen[t] = 1;
     shown.push(n);
-    var kids = leaf ? [] : (F.kids[t] || []).filter(function (k) { return shows(F, k) && (!keep || keep(t, k)); }).sort(byCard(F));
-    return '<li class="' + domKind(F.pp[t]) + '"' + (z ? ' style="z-index:' + z + '"' : '') + '>' + tnodeHTML(F, n, leaf ? countSub(F, t) : 0) +
+    var kids = (F.kids[t] || []).filter(function (k) { return shows(F, k); }).sort(byCard(F));
+    return '<li class="' + domKind(F.pp[t]) + '"' + (z ? ' style="z-index:' + z + '"' : '') + '>' + tnodeHTML(F, n) +
       // 兄弟的线共用一段竖干, 越往下的越长: 短的叠在上面 (z 随序号递减), 每条线的末段都看得见自己的颜色。
       (kids.length ? '<ul>' + kids.map(function (k, i) {
-        return treeHTML(F, k, depth + 1, keep, keep && keep(t, k) === 'leaf', shown, seen, kids.length - i);
+        return treeHTML(F, k, depth + 1, shown, seen, kids.length - i);
       }).join('') + '</ul>' : '') +
       '</li>';
   };
-  // 只看相关: 主父亲链一条直线下来, 到它自己再整枝展开; 同一个主父亲下的兄弟只画本人。
-  var focusKeep = function (path) {
-    var on = path.reduce(function (m, t) { m[t] = 1; return m; }, {});
-    var parent = path[path.length - 2];
-    return function (t, k) {
-      if (!on[t] || t === ROLE) return 'full';
-      return on[k] ? 'full' : t === parent ? 'leaf' : '';
-    };
-  };
-
   // 关系图替换的是侧栏的会话列表 —— 右边照旧是选中的那段对话。
-  // 只看相关时画谁: 视角自己 + 和视角对过话的 ('talk'); 它们通向根的主父亲链上没对过话的祖先
-  // 留作连接 ('via', 画淡) —— 抹掉它, 有对话的后代就从家谱上脱开, 成了一棵来历不明的孤树。
-  var talks = function (F, a, b) {
-    var p = F.pairs[a + '\u0000' + b];
-    return !!p && !!(p.kinds.peer || p.kinds.graph);
-  };
+  // 只看相关时画谁: 视角自己 + 和视角有直接关系的 (任一种, 任一方向; 'rel'); 它们通向根的主父亲链上
+  // 与视角无关的祖先留作连接 ('via', 画淡) —— 抹掉它, 有关系的后代就从家谱上脱开, 成了一棵来历不明的孤树。
   var visibleOf = function (F) {
-    var keep = Object.keys(F.ends).filter(function (t) { return t === ROLE || talks(F, ROLE, t) || talks(F, t, ROLE); });
-    var vis = keep.reduce(function (m, t) { m[t] = 'talk'; return m; }, {});
-    if (!vis[ROLE]) vis[ROLE] = 'talk';
+    var keep = Object.keys(F.ends).filter(function (t) { return t === ROLE || F.pairs[ROLE + '\u0000' + t] || F.pairs[t + '\u0000' + ROLE]; });
+    var vis = keep.reduce(function (m, t) { m[t] = 'rel'; return m; }, {});
+    if (!vis[ROLE]) vis[ROLE] = 'rel';
     keep.forEach(function (t) { chainUp(F, t).forEach(function (u) { if (!vis[u]) vis[u] = 'via'; }); });
     return vis;
   };
@@ -1692,19 +1674,18 @@
     var all = W.treeAll || !me;
     var shown = [];
     var path = me ? chainUp(F, ROLE) : [];
-    // 和视角之间没有对话的关系只在「看全部」里画。
+    // 和视角没有直接关系的只在「看全部」里画。
     F.vis = all ? null : visibleOf(F);
     var draw = function (into) {
-      return all
-        ? F.roots.slice().sort(function (a, b) {
-            var mine = path[0];
-            return (b === mine) - (a === mine) || byCard(F)(a, b);
-          }).map(function (r) { return treeHTML(F, r, 0, null, false, into, {}); }).join('')
-        : treeHTML(F, path[0], 0, focusKeep(path), false, into, {});
+      return F.roots.filter(function (r) { return shows(F, r); }).sort(function (a, b) {
+        var mine = path[0];
+        return (b === mine) - (a === mine) || byCard(F)(a, b);
+      }).map(function (r) { return treeHTML(F, r, 0, into, {}); }).join('');
     };
     // 两遍: 先量出画了谁 (卡片的窗口要知道它在图上连着谁), 再带着连线画 —— 选中态也就进了 html。
     draw(shown);
     F.links = linksOf(F, shown);
+    F.on = shown.reduce(function (m, n) { m[n.target] = 1; return m; }, {});
     var keys = shown.map(function (n) { return talkKey(F.links, n.target); }).join('\n');
     if (keys !== W.gKeys) { W.gKeys = keys; loadGlance(); }
     // 换视角后的第一张新树: 世界快照与摘要都已是新视角的, 才知道它自己那张卡片连着谁。
@@ -1720,8 +1701,8 @@
       '<h2>关系图<span title="在名片里的 session 下拉切换范围">' + esc(span) + ' · ' + (all ? Object.keys(F.ends).length : shown.length) + ' 个</span>' +
         (W.degraded ? '<span class="warn" title="没拿到 wizard 注册表 (svr 还没收到 daemon 的快照), 只画观测到的往来">名册缺席</span>' : '') +
         (me ? segToggle('data-tall', all ? 'all' : 'rel', [
-          ['rel', '相关', '只留它的上游链、它自己、它的下游与同源兄弟'], ['all', '全部', '画出范围内所有有关系的 wizard']]) : '') + worldToggle() + '</h2>' +
-      (alone ? '<div class="tsolo">' + esc(nameOf(ROLE)) + (rg ? ' 在这段 session 里' : '') + ' 没和谁对过话</div>' : '') +
+          ['rel', '相关', '只画它自己、和它有直接关系的, 以及连到它们的上游链'], ['all', '全部', '画出范围内所有有关系的 wizard']]) : '') + worldToggle() + '</h2>' +
+      (alone ? '<div class="tsolo">' + esc(nameOf(ROLE)) + (rg ? ' 在这段 session 里' : '') + ' 没和谁有关系</div>' : '') +
       (shown.length ? '<ul class="tree' + (all ? ' all' : '') + '">' + trees + '</ul>' : '<div class="pempty">这段时间里没有任何关系</div>') +
     '</div>';
     // 心跳每 3s 重算一次 (状态灯 / 几分钟前) —— 没变就不碰 DOM, 免得蹭掉悬停与滚动。

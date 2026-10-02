@@ -392,6 +392,7 @@ export const buildWorld = (
     ...facts.jobs.filter((j) => j.status === "open").flatMap((j) => [j.owner, ...j.members.map((mm) => mm.target)]),
     ...facts.schedules.flatMap((x) => [x.target, x.owner].filter(Boolean)),
   ]);
+  const mustShow = new Set([scope.self, ...(relsOf.get(scope.self) ?? [])]);
   const relevant = (n: WorldNode): boolean =>
     n.local || n.self || pinned.has(n.target) || n.busy || n.alive || now - n.lastTs < RECENT_MS;
 
@@ -402,7 +403,10 @@ export const buildWorld = (
     .map((base) => {
       const mine = nodes.filter((n) => n.base === base);
       const self = base === scope.base;
-      const kept = mine.filter(relevant).sort(byTs).slice(0, self ? SELF_CHAT_MAX : PER_CHAT_MAX);
+      // 视角的直接关系不受截断 —— 「相关」档要把它们全画出来, 截掉了它们就只剩卡片上的 +N。
+      const must = mine.filter((n) => mustShow.has(n.target));
+      const rest = mine.filter((n) => !mustShow.has(n.target) && relevant(n)).sort(byTs).slice(0, self ? SELF_CHAT_MAX : PER_CHAT_MAX);
+      const kept = [...must, ...rest].sort(byTs);
       return {
         base,
         name: facts.chatNames[base] ?? mine[0]?.chat ?? "",

@@ -646,7 +646,6 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
    它替换的是侧栏的会话列表: 标题、图例与会话列表的分组标题同一种读法, 卡片就是会话项 (.ci)。 */
 .tview h2 .warn { color: #9a6700; font-weight: 400 }
 .tree.all > li + li { margin-top: 10px; padding-top: 10px; border-top: 1px dashed #eaeef2 }
-.tfold { flex: none; font-size: 10px; font-weight: 400; color: var(--faint); border: 1px dashed var(--line); border-radius: 8px; padding: 0 5px; line-height: 14px }
 .tsolo { font-size: 11.5px; color: var(--faint); margin: 0 8px 10px }
 .tview .pempty { padding: 18px 8px }
 

@@ -40,6 +40,7 @@
 - wizard 的上下文瘦身: charter 的出生名册只列写了职责的同群 wizard (至多 15 个, 其余报个数、指向 `wizard_roster`), 「我能做什么」改为每个工具一行「何时用」, 「编排」「说话」两节不再复述工具描述 —— charter ~5.1k → ~2.5k tok (管家 ~6.0k → ~3.4k)。工具描述不再教 `send_peer` / `wait_peer` (一律 `tell_peer` + 回执); `send_peer` 描述压成一行; `tell_peer` 只讲机制; `schedule_task` 只留何时用 / `when` 人话 / 默认新建 / 回念 `next`, gate 写法挪进任务文件头注释; 生 wizard 的 `model` 参数共用一句; graph 三件套、`list_claude_sessions`、`switch_claude_session`、`list_chats` 标为人侧/罕用。工具定义合计 ~20.4k → ~17.8k tok。CLAUDE.md 的 MCP 段与 `/help` 的过期措辞一并更正。
 
 ### Fixed
+- rolepage 关系图卡片的 +N 改为「这一档图上看不到的关系对端」: 对端卡片已画在图上就不算 (不论有没有连线), 「相关 | 全部」各按自己画出来的卡片算。「相关」改为画出视角的全部直接关系 (任一种类、任一方向; 此前只画对过话的, spawn 的子 wizard 等被藏掉, 视角自己的卡片也挂着 +N), 去掉兄弟卡片的折叠计数 `tfold`; `/api/world` 每个聊天的成员上限不再截掉视角的直接关系 (此前 ev-route 等没下发, 只能计进 +N)。
 - 7a76bb6 里 `wait_peer` 回包的 `need` / `artifacts` 两行被插到了 `restartFresh` 中间 (daemon/index.ts 语法错误), 挪回 wait_peer 回包。
 - 回执把上一件事的结论当成这一次的: 对方正忙时我们那一句还排在输入框里, 回执守护在它读进之前读 transcript, 定位不到问话就退回按时刻取。现在定位不到一律视为还没读进、接着等 (不计扑空), 只有对方整段 20s 都闲着而问话仍不在才算一次; 判闲改走注册表 (`untilIdle`), 停在本地对话框上的 wizard 不再被当成答完; 对方 pane 没了直接结束不空转; 交接顺延 deadline 后不再被一次定死的超时提前放弃。
 - 回执静默丢失: 对方超时 / 停下几次都没答 / pane 没了, 以前回执直接扔掉, 发话方只能永远等; 发话方忙满 30 分钟也会扔。现在每份回执都有定论 (信封 `status=done|error|timeout|silent|dead`), 失败的投一份合成说明 + 对方最后一句, 工单按已落定计; 发话方 pane 活着就一直等到能投; 结果先落盘再投, reload 重投同一份, 迟到的答案不改写已投的定论。对方那一轮以 CLI 的 `API Error: …` 收尾时不再当成结论 (以前会被当成回执并计入工单份数): 投一份 `status=error` 不计份数, 接着守它续跑 (`continue`) 出来的答案。
