@@ -74,7 +74,23 @@ const asksWhere = (records: readonly DetailRecord[], pick: (t: TurnDetailRecord)
 
 /** 一件活的派活那句 = 收信方接手的那一轮的入消息 (续问共用活号, 取最早那一轮)。 */
 const dispatchOf = (records: readonly DetailRecord[], turn: string): TurnDetailRecord | undefined =>
-  asksWhere(records, (t) => t.from?.kind === "peer" && !t.from.receipt && t.from.turn === turn && !!t.userQuery?.trim())[0];
+  indexOf(records).dispatch.get(turn);
+
+/** 回执认账要反复查的两张表, 按 records 快照一次扫出: 活号 → 派活那句, 主会话轮次按主人分组 (时间序)。
+ *  每个请求都拿到一份新快照 (listRecent 现切的数组), 所以这里只许 O(N) —— 逐份回执再扫全表就是 O(回执 × 记录)。 */
+interface TurnIndex { dispatch: Map<string, TurnDetailRecord>; byTarget: Map<string, TurnDetailRecord[]> }
+const INDEX = new WeakMap<readonly DetailRecord[], TurnIndex>();
+const indexOf = (records: readonly DetailRecord[]): TurnIndex => {
+  const hit = INDEX.get(records);
+  if (hit) return hit;
+  const asks = asksWhere(records, (t) => t.from?.kind === "peer" && !t.from.receipt && !!t.from.turn && !!t.userQuery?.trim());
+  const dispatch = asks.reduce((m, t) => (m.has(t.from!.turn!) ? m : m.set(t.from!.turn!, t)), new Map<string, TurnDetailRecord>());
+  const byTarget = turnsWhere(records, (t) => !!t.target && !t.agent)
+    .reduce((m, t) => m.set(t.target!, [...(m.get(t.target!) ?? []), t]), new Map<string, TurnDetailRecord[]>());
+  const ix = { dispatch, byTarget };
+  INDEX.set(records, ix);
+  return ix;
+};
 
 /** 跳到派活那句要的坐标。派活那句常常不在点击处这个会话窗口里 (私聊派的活, 回执落在群里),
  *  所以带上它自己的消息 id / 时刻 / 频道 / 两端 —— 会话键随视角而变, 由客户端算 (片段与视角无关)。 */
@@ -89,6 +105,11 @@ const finalOf = (t: TurnDetailRecord): string => {
   return (texts.filter((it) => it.final).at(-1) ?? texts.at(-1))?.body ?? "";
 };
 
+/** 终句压空白后的前 60 字 —— 回执按它认答话轮。按轮次对象记: store 里的对象跨请求不变, 轮次一写就换新对象。 */
+const HEADS = new WeakMap<TurnDetailRecord, string>();
+const finalHead = (t: TurnDetailRecord): string =>
+  HEADS.get(t) ?? ((h) => (HEADS.set(t, h), h))(squash(finalOf(t)).slice(0, 60));
+
 /** 一份回执是答话方哪一轮交回来的。回执轮的那句话就是答话方那一轮的终句原样贴进来 ——
  *  按正文认: 链式续回时终句在它后来的回执轮里, 活号对不上。认不出 (超时 / 失联这类合成的
  *  定论没有正文) 就退回它接手这件活的最后一轮。 */
@@ -96,9 +117,9 @@ const answerOf = (rc: TurnDetailRecord, records: readonly DetailRecord[]): TurnD
   const f = rc.from;
   if (f?.kind !== "peer" || !f.receipt || !f.from) return undefined;
   const d = f.turn ? dispatchOf(records, f.turn) : undefined;
-  const mine = turnsWhere(records, (t) => t.target === f.from && !t.agent && t.createdAt <= rc.createdAt && t.createdAt >= (d?.createdAt ?? 0));
+  const mine = (indexOf(records).byTarget.get(f.from) ?? []).filter((t) => t.createdAt <= rc.createdAt && t.createdAt >= (d?.createdAt ?? 0));
   const said = squash(rc.userQuery ?? "");
-  const byText = mine.filter((t) => ((p) => p.length >= 4 && said.includes(p))(squash(finalOf(t)).slice(0, 60))).at(-1);
+  const byText = mine.filter((t) => ((p) => p.length >= 4 && said.includes(p))(finalHead(t))).at(-1);
   return byText ?? mine.filter((t) => t.from?.kind === "peer" && !t.from.receipt && t.from.turn === f.turn).at(-1);
 };
 
