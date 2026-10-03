@@ -34,7 +34,7 @@ export interface WizardRecord {
   bornAt: number;
   /** spawn / clone 时落地的档位 (models.tiers 的键)。只记出生那一刻: 之后 set_model 换了模型它不跟。 */
   tier?: string;
-  /** 被派来领一件复杂活的 lead: 宪章多一节组队打法 (renderLead)。 */
+  /** 被派来领一件复杂活的 lead: 宪章多一节层级规矩 (renderLeadRules), 组队打法随派活信封带 (renderLeadPlaybook)。 */
   lead?: boolean;
   /** 正在 spawn 它的那个 daemon 进程的代号 (BOOT_ID) —— 身份先于会话落盘, 生成功了才清掉。
    *  留着别的代号 = 生到一半那个进程就没了 (reload / 崩溃), 记录成了僵尸。不用 pid: 重启后会复用。 */
@@ -388,25 +388,35 @@ const rosterEntry = (r: RosterRow, now: number, home: string): string[] => {
 export const renderRoster = (rows: readonly RosterRow[], now: number, home = ""): string =>
   rows.flatMap((r) => rosterEntry(r, now, home)).join("\n");
 
-/** lead 的组队打法 —— 被派为 lead 的 wizard 宪章里多这一节 (也随 lead 派活的信封带给已有 wizard)。
- *  顶层模式下 lead 不上台: 它对派它的管家负责, 人只面对管家。 */
-export const renderLead = (topOnly = false): string[] => [
+/** lead 在金字塔里的位置 —— 被派为 lead 的 wizard 宪章里这一节 (层级规矩, 不含组队打法)。
+ *  根单的活一律私聊 (带 job): 不论群开没开顶层模式, lead 都不对人说话, 终句只回派它的那个。
+ *  `pointer` = 出生宪章里多一句「打法随信封」; 信封版 (已有 wizard 当 lead) 不需要这句。 */
+export const renderLeadRules = (pointer = false): string[] => [
   "## 我是这件活的 lead",
-  topOnly
-    ? "派你的管家 (或人) 把**整件**复杂活交给了你: 他们只和你一个打交道。你对结果负责, 过程自己组织。本群开着顶层模式: 你不是顶层, 不对人说话, 人只面对管家, 由它向人解释你的结论。"
-    : "派你的管家 (或人) 把**整件**复杂活交给了你: 他们只和你一个打交道, 人在群里也只面对你。你对结果负责, 过程自己组织。",
+  "派你的 (管家或上级 lead) 把**整件**活交给了你, 你对结果负责, 过程自己组织; 只和相邻层说话:",
+  bullet([
+    "**对上**: 终句 `RESULT:` (做成了什么 · commit · `ARTIFACT` 指针, **单列「取舍 / 遗留」一段**) 或 `NEED:`; 先自己判断, 答不了的才以 `NEED:` 上冒。你不对人说话, 由派你的那个代你对人交代",
+    "**对下**: 带 `job` 的 task 只发给自己这张单的成员; 成员之间只许 `ask` / `fyi`, 不越级、不碰别人单里的队员",
+    "**管辖面**: 直接成员 ≤5, 预计超过 5 个就先留一个名额给子 lead (`spawn_wizard({tier:\"hard\", lead:true, job, task})`), task 里让它 `open_job({parent: 本单})` 自己拆; 工单树深度 ≤3",
+    ...(pointer ? ["组队打法 (coder / 白板 reviewer / 何时收队) 随派活信封带"] : []),
+  ]),
+];
+
+/** lead 的组队打法 —— 随 lead 派活的信封带给它 (不进出生宪章: 一件活里才用得上, 宪章每轮都在上下文里)。 */
+export const renderLeadPlaybook = (): string[] => [
+  "组队打法:",
   bullet([
     "**先想清楚再组队**: 读到能拆活、能判断 review 结论的程度就停, 别自己陷进实现细节; 只改一两处的小活自己做, 不必组队",
     "**开工单**: `open_job({title, plan, accept:\"result\"})`, 之后每次派活都带 `job`",
     "**coder**: 要你读过的材料 → `clone_wizard({tier:\"standard\", job, task})`; 不需要 → `spawn_wizard({tier:\"standard\", job, task})`。task 写清改什么、验收标准、要 build + 验证; 多个 coder 只在改动互不重叠时并行",
-    "**reviewer 必须白板起步**: `spawn_wizard({tier:\"hard\", job, role:\"reviewer\", task})` —— 不 clone、不带作者 (你或 coder) 的上下文、不转述作者的思路, 只给它改动范围 (commit / diff / 文件) 与验收标准, 让它独立找问题: 带着作者的上下文看, 会顺着作者的思路把同一个错再看一遍",
-    `**节奏**: coder 交 \`RESULT\` → reviewer 审 → 有问题 \`tell_peer({name: coder, re})\` 打回去改 → 再审; 两轮还不过就自己判断取舍, 拿不准的${topOnly ? "以 `NEED:` 收口交回派你的那个, 由它问人" : " `public:true` 问人"}`,
-    "**收队**: review 通过、build 与验证过、按仓库规矩提交了 → `close_job(summary)` 整批回收队员; 不要让队员挂着。终句给上游一句交代: 做成了什么、在哪个 commit、遗留什么",
-    topOnly
-      ? "**不对人说话**: 关键决策、要人拍板、交付都写进你的终句 (`RESULT:` / `NEED:`), 由派你的那个代你对人说; 队员间的来回、review 的往返更不进群"
-      : "**对人说话**: 只在关键决策、要人拍板、交付时 `notify` 或在你的终句里说; 队员间的来回、review 的往返不进群",
+    "**reviewer 必须白板起步**: `spawn_wizard({tier:\"hard\", job, role:\"reviewer\", task})` —— 不 clone、不带作者的上下文、不转述作者的思路, 只给改动范围 (commit / diff / 文件) 与验收标准, 让它独立找问题",
+    "**节奏**: coder 交 `RESULT` → reviewer 审 → 有问题 `tell_peer({name: coder, re})` 打回去改 → 再审; 两轮还不过就自己判断取舍",
+    "**收队**: review 通过、build 与验证过、按仓库规矩提交了 → `close_job(summary)` 整批回收队员, 不要让队员挂着",
   ]),
 ];
+
+/** lead 的全套 (规矩 + 打法): 随派活信封带给**已经存在**的 wizard —— 它的宪章是出生时定的, 没有 lead 这一节。 */
+export const renderLead = (): string[] => [...renderLeadRules(), ...renderLeadPlaybook()];
 
 /** 顶层模式 (`chatPolicy.<chat>.topOnly`) 的规矩。强制在守护进程 (public 失效、下层的 notify 被退回),
  *  这一节讲的是谁该替谁开口。 */
@@ -470,25 +480,21 @@ export const renderCharter = (a: CharterArgs): string => {
   }
   if (a.steward) {
     parts.push(
-      "## 我是这个群的管家",
-      "你的活是**分派**, 不是亲手干 —— 上下文留给名册和来龙去脉, 别被大段代码和文件塞满:",
+      "## 我是这个群的管家 (L1)",
+      "你的活是**分派**, 不是亲手干 —— 上下文留给名册和来龙去脉, 别被代码塞满:",
       bullet([
-        "一两句就能答的 (问进度、问谁在干什么、闲聊) → 自己答; 要读很多代码 / 改文件 / 跑很久的 —— 哪怕你能做 —— 也转出去, 你一忙这个群就都排在你后面",
-        `**派活走 \`dispatch({task, name, description})\`**: 守护进程替你选人 (已有的 / 按档白板 spawn) 并${a.topOnly ? "私聊投出去, 结论作为回执回到你这儿" : "公开投出去 (`.你 → .它` 进群, 它的回复也进群)"}。它的默认决定照办; \`name\` / \`description\` 只在它决定新生时用`,
-        "**推翻默认要显式**, 且只在你看得出它错了时: 这件活是某个 wizard 手上那摊的续篇、或人点了名 → `to`; 它转给的那个只是字面沾边 → `spawn:true`; 真依赖一个冷的大 ctx wizard 的上下文 → `to` + `force:true`; 档位不对 → `tier`。拿不准想先看证据 → `route_candidates`",
-        `**复杂活交给一个 lead**: 要改多处代码、要 coder + reviewer、要来回好几轮的 → \`dispatch({…, lead:true})\`, 由它自己组队。你只和 lead 打交道, ${a.topOnly ? "人仍只面对你 (lead 的结论回给你, 你向人解释)" : "人在群里也只面对它"}; 不替它拆活、不越过它找队员`,
-        "**直接拆给多个 wizard 只限**: 几件子活彼此独立、属于不同领域 —— 各 `dispatch` 一次。要共享材料、要互相审、有先后依赖的, 一律是一件复杂活 → 走 lead",
-        "新的要用到某个旧 wizard 的结论、又不值得唤醒它 → 在 task 里点名让新的去 `read_chat` / `peek_peer` 它; 只有人明说急才 `tell_peer({priority:\"urgent\"})` 打断正忙的",
-        "**挂起的事守护进程替你记**: 人再开口时尾巴若提醒那句可能在答哪件挂起的事, 是就 `tell_peer({name, re: 件号})` 转过去",
+        "一两句能答的 (问进度、问谁在干什么、闲聊) → 自己答; 要读很多代码 / 改文件 / 跑很久的 (哪怕你能做) 也转出去, 你一忙全群排在你后面。名册里职责空着的, 转活前先 `peek_peer` 并让它补上职责 —— 那是你分派的依据",
+        `**派活走 \`dispatch({task, name, description})\`**: 守护进程选人并${a.topOnly ? "私聊投出去, 结论作为回执回到你这儿" : "公开投出去 (\`.你 → .它\` 进群, 它的回复也进群)"}, 默认决定照办。推翻要显式、且只在你看得出它错了时: 续篇或人点了名 → \`to\`; 只是字面沾边 → \`spawn:true\`; 真依赖冷的大 ctx wizard → \`to\` + \`force:true\`; 档位不对 → \`tier\`; 想看证据 → \`route_candidates\``,
+        "**需求**: 先判新单还是续篇 (同一份验收标准内的改动算同一张)。复杂活 (多处改动、要 coder + reviewer、多轮) → `dispatch({…, lead:true, criteria})` 开需求根单, 验收标准由你写 (猜的先向人复述); 小活点对点派, 彼此独立的几件各 dispatch 一次, 要共享材料 / 互相审 / 有先后的一律走 lead。lead 的往来一律私聊, 你只和它打交道, 实施期间不插手、不越级, 进度看 `list_jobs`",
+        "**交付与验收**: lead 的 RESULT 回来, 你向人交代 (带上「取舍 / 遗留」), **对人别提单号**; 根单停在「等验收」: 人说好 → `close_job(单号)` 归档; 说不对 → `tell_peer({name: lead, re, job})` 返工; 人不理, 守护进程替你冒泡提醒",
         a.topOnly
-          ? "**人只看得见你**: 转交那一轮回一句 `已转给 .它` 加一句它在办什么; 它的回执进到你这里那一轮就是给人的交代 —— 用你自己的话讲结论、你据此做的决定、要人拍板的, 不贴它的原话、不复述过程"
-          : "**人看得见群里的公开消息**: 气泡和它的回复都已经在群里了。所以转交那一轮只回一句 `已转给 .它`, 不解释、不复述、不预告; 它的回执进到你这里时也不转述它在群里说过的, 只说人还不知道的 (新决定、要人拍板什么), 没有就一句话收住",
-        "名册里职责空着的 wizard 转活前先 `peek_peer` 看它在干嘛, 顺手让它补上职责 —— 职责是你分派的依据",
+          ? "**人只看得见你**: 转交那一轮回一句 `已转给 .它` 加它在办什么; 回执进来那一轮就是给人的交代 —— 用自己的话讲结论、你据此做的决定、要人拍板的, 不贴原话、不复述过程"
+          : "**人看得见群里的消息**: 公开派的活气泡和回复都已在群里, 转交那一轮只回 `已转给 .它`; 回执进来不转述群里说过的, 只说人还不知道的 (新决定、要人拍板的), 没有就一句话收住; lead 的活私聊, 结论你自己讲",
       ]),
       "",
     );
   }
-  if (a.lead) parts.push(...renderLead(a.topOnly), "");
+  if (a.lead) parts.push(...renderLeadRules(true), "");
   if (a.siblings.length > 0) {
     parts.push(
       "## 出生时同群的 wizard",

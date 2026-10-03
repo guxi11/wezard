@@ -67,6 +67,7 @@ import {
   ancestorsOf,
   renderCharter,
   renderLead,
+  renderLeadPlaybook,
   ROSTER_FRESH_MS,
   renderRoster,
   handoffAt,
@@ -2049,9 +2050,9 @@ const main = async (): Promise<void> => {
         const name = to || (d.kind === "existing" && d.row ? d.row.address || d.row.name : "");
         const r = resolvePeer(self, name);
         if (!r.ok) { settleRoot(false); json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
-        // 已有 wizard 当 lead: 宪章是出生时定的, 组队打法挂在信封后面跟这一句带过去; 投成了才记 lead,
-        // 它下次重生宪章里就有。
-        const t = await tell(name, task, lead ? renderReminder({ wezard: "lead" }, renderLead(chatPolicyOf(cfg, channelOf(self)).topOnly)) : "");
+        // 已有 wizard 当 lead: 宪章是出生时定的 (里面没有 lead 一节), 规矩加打法挂在信封后面带过去;
+        // 已是 lead 的宪章里已有层级规矩, 只带打法。投成了才记 lead, 它下次重生宪章里就有。
+        const t = await tell(name, task, lead ? renderReminder({ wezard: "lead" }, wizards.get(r.target)?.lead ? renderLeadPlaybook() : renderLead()) : "");
         if (lead && t.status === 200) wizards.upsert(r.target, { lead: true });
         if (rootId && t.status === 200) jobs.attach(rootId, { target: r.target, task: "", spawned: false, role: "lead" });
         // 自动选中的被冷门控退回 (decide 用名册的活动时刻, 门控用 transcript 的, 口径差一点): 改走 spawn。
@@ -2072,7 +2073,8 @@ const main = async (): Promise<void> => {
       const tier = (b.tier ?? "").toString().trim() || tierFor(task, lead);
       const born = await bearAs(self, { inherit: false, name, description, tier, ...(lead ? { lead: true } : {}) } as PeerBody);
       if (born.status !== 200) { settleRoot(false); json(res, born.status, { ...born.body, decision: "spawn", reason: d.why }); return; }
-      const t = await tell(String(born.body.name), task);
+      // 宪章里只有层级规矩, 打法随信封带 (宪章每轮都在上下文里, 打法只这一件活用得上)。
+      const t = await tell(String(born.body.name), task, lead ? renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : "");
       settleRoot(t.status === 200);
       // 为这张根单生出来的: 归档 close_job 时要回收它 (tell 记的是 spawned:false, 再 attach 一次补上; lead 角色也在这里记)。
       if (rootId && t.status === 200) jobs.attach(rootId, { target: String(born.body.target), task: "", spawned: true, role: "lead" });
@@ -2252,7 +2254,8 @@ const main = async (): Promise<void> => {
         inherit,
         // 继承路径上第一句话是分叉的触发器, 所以直接把活当开场白 —— 少一次往返,
         // 也少一次"就位了但没事干"的空转。
-        bootstrap: task ? task + envelopeFor(self, "", { turn: taskTurn }) : undefined,
+        // 子 lead 的宪章只有层级规矩, 打法跟第一句的信封走 (同 dispatch 对已有 wizard 的做法)。
+        bootstrap: task ? task + envelopeFor(self, "", { turn: taskTurn }) + (b.lead === true ? renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : "") : undefined,
         ...(task ? { bootstrapFrom: { from: { kind: "peer" as const, from: self, turn: taskTurn, ...(jobId ? { job: jobId } : {}), ...(asker ? { asker } : {}) }, query: task } } : {}),
         keepalive,
       }).catch((e: unknown) => ({ ok: false as const, reason: `spawn threw: ${String(e)}`, inherited: false }));

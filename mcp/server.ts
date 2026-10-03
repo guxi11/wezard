@@ -892,7 +892,7 @@ server.registerTool(
       ...offspringShape,
       cwd: z.string().optional().describe("它的工作区绝对路径。省略 = 跟你同一个目录。"),
       detached: z.boolean().optional().describe("true = 独立长住: 不挂在你名下 (不占分身名额、不随工单回收、不带 job), 等价于人在群里 `/new .name` —— 要一个往后一直在的新 wizard 时用; 干完一件活就收的别用。"),
-      lead: z.boolean().optional().describe("true = 它是来领一件复杂活的 lead: 宪章里多一节组队打法 (coder / 白板 reviewer / 工单 / 何时收队), 由它自己组队。配 `tier:\"hard\"`。"),
+      lead: z.boolean().optional().describe("true = 它是来领一件复杂活的 lead: 宪章带层级规矩, 组队打法 (coder / 白板 reviewer / 工单 / 何时收队) 随 task 的信封带, 由它自己组队。配 `tier:\"hard\"`。"),
     },
   },
   bear("spawn_wizard", false),
