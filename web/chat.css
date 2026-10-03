@@ -368,10 +368,12 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .mchip.rcpt:is(.st-need, .st-error) { color: #9a6700; background: #9a670014 }
 .mchip.rcpt:is(.st-timeout, .st-silent, .st-dead, .st-canceled) { color: #cf222e; background: #cf222e10 }
 /* 说给谁 (inline): 气泡正文开头的头像 + 名字, 胶囊背景。点它走移交行同一套跳转。 */
+.mb:has(.to-in) { display: flex; flex-wrap: wrap; align-items: flex-start }
+.mb:has(.to-in) > .md-body, .mb:has(.to-in) > .q-body { flex: 1 1 auto; min-width: 0 }
 .to-in {
-  display: inline-flex; align-items: center; gap: 3px; padding: 2px 8px; border-radius: 14px;
+  display: inline-flex; align-items: center; gap: 0; padding: 2px 8px; border-radius: 14px;
   background: color-mix(in srgb, #0969da 12%, transparent); color: var(--ink);
-  cursor: pointer; transition: background .12s; margin-right: 4px;
+  cursor: pointer; transition: background .12s; margin-right: 4px; flex: none;
 }
 .to-in:hover { background: color-mix(in srgb, #0969da 20%, transparent) }
 .to-in .av { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--line); background: var(--card); font-size: 10px; line-height: 14px; text-align: center }
@@ -973,10 +975,3 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .tree.jsel .tci.jout:hover { opacity: 1 }
 .tree.jsel li.jdim { --lc: #d0d7de }
 
-/* 说给谁: 文本泡泡开头 inline 的 → 头像 名字; 整块可点, 走移交行同一套跳转。 */
-.to-in { display: inline-flex; align-items: center; gap: 3px; margin: 8px 0 0 12px; font-size: 12px; color: var(--faint); cursor: pointer; vertical-align: middle }
-.to-in:hover { background: var(--av-hot); border-radius: 6px }
-.to-in .av { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--line); background: var(--card); font-size: 10px; line-height: 14px; text-align: center }
-.to-in .nm { font-weight: 500; color: var(--ink) }
-.to-in + .md-body, .to-in + .q-body { padding-top: 2px }
-.to-row { display: block }
