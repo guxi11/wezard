@@ -655,8 +655,9 @@
   var convItem = function (c) {
     var on = c.key === CONV;
     // 与我有往来的成对子项在前; chat 内其余有记录的接在后面 (.far), 各自按最近排。
-    var pairs = c.subs.filter(function (s) { return s.count; }).sort(recentFirst);
-    var fars = c.subs.filter(function (s) { return !s.count && s.whole && s.whole.count; })
+    // 时间范围按子项自己的时刻裁 (成对 = 我与它的往来, .far = 它在群里的全部) —— 群的时刻是群里任何人的动静, 放不得行。
+    var pairs = c.subs.filter(function (s) { return s.count && inWin(s.lastTs); }).sort(recentFirst);
+    var fars = c.subs.filter(function (s) { return !s.count && s.whole && s.whole.count && inWin(s.whole.lastTs); })
       .sort(function (a, b) { return recentFirst(a.whole, b.whole); });
     var talked = OPEN[c.key] ? pairs.concat(fars) : [];
     var hidden = talked.length - SUB_FOLD;
@@ -706,9 +707,8 @@
   // 老外壳 (daemon 未重启) 里还留着名片下那条入口栏 —— 日程已并进名片, 它整条不要了。
   if ($('#rb-acts')) $('#rb-acts').remove();
   var renderConvs = function () {
-    var fresh = function (c) { return !WIN || c.lastTs >= winCut(); };
-    var groups = R.convs.filter(function (c) { return c.kind === 'group' && fresh(c); }).sort(recentFirst);
-    var dms = R.convs.filter(function (c) { return c.kind === 'wizard' && fresh(c); }).sort(recentFirst);
+    var groups = R.convs.filter(function (c) { return c.kind === 'group' && inWin(c.lastTs); }).sort(recentFirst);
+    var dms = R.convs.filter(function (c) { return c.kind === 'wizard' && inWin(c.lastTs); }).sort(recentFirst);
     R.convs.forEach(markRead);
     if (WORLD) return renderWorld();
     // 空着的那一栏不画 —— 对谁都一样: 人没有私聊只是这条规则的一个特例。
@@ -831,6 +831,8 @@
   var WIN = pref(WIN_KEY, 0);
   if (!WINS.some(function (w) { return w[0] === WIN; })) WIN = 0;
   var winCut = function () { return WIN ? srvNow() - WIN * 60000 : 0; };
+  /** 一个时刻落没落在时间范围里 —— 侧栏的会话 / 子项与关系图的边 (rangeOf) 都按 winCut 这一刀。 */
+  var inWin = function (ts) { return !WIN || ts >= winCut(); };
   var winSelect = function () {
     return dropdown('win', {
       ic: '⏱', end: true, title: '时间范围: 只看这段时间内有动静的',
@@ -1425,10 +1427,11 @@
   };
 
   // land: 换视角时由它来定位 (锚住一条旧消息), 返回 false 才照常吸底。
-  var loadMsgs = function (limit, land) {
+  // early: 换视角时与摘要并行发出的同一个请求 (见 refresh) —— 窗口参数没变才拿来用。
+  var loadMsgs = function (limit, land, early) {
     var gen = S.gen;
     if (!CONV) { inner.innerHTML = '<div class="empty">选一个会话</div>'; return Promise.resolve(); }
-    return api('api/msgs', viewParams(limit ? { limit: limit } : {})).then(function (d) {
+    return (early || api('api/msgs', viewParams(limit ? { limit: limit } : {}))).then(function (d) {
       if (!d.ok || gen !== S.gen) return;
       S.frags = {};
       d.msgs.forEach(function (m) { S.frags[m.id] = m; });
@@ -1554,18 +1557,32 @@
     syncUrl();
     // 要做 FLIP 就把旧行留到新行到来 —— 中间闪一下「加载中」就量不到旧位置了。
     if (!land) inner.innerHTML = '<div class="empty">加载中…</div>';
+    // 关系图上换视角: 自己那张卡片的窗口要等新树画出来才知道 (W.pickSelf), 正文等它定了只取一次;
+    // 否则窗口已定, 正文与摘要并行取 —— 摘要改了窗口 (落点 / session) 就作废重取。
+    var hold = WORLD && W.pickSelf === ROLE;
+    // 窗口的指纹: 不带 session 与 session=all 取的是同一份 (摘要会把空的回填成 all)。
+    var winSig = function () { var p = viewParams(); if (p.session === 'all') delete p.session; return new URLSearchParams(p).toString(); };
+    var want = hold || !CONV ? '' : winSig();
+    var early = want ? api('api/msgs', viewParams()) : null;
+    W.pickHold = hold;
     return api('api/role', viewParams()).then(function (d) {
       if (!d.ok) {
         document.body.innerHTML = '<div class="empty" style="padding:80px">' + esc(d.error || 'not found') + '</div>';
         return;
       }
-      // 带 land 的 (换视角) 先不画: 页头换了高度, 旧行会在新行到来前先被顶一下, FLIP 的起点就错了。
-      if (land) takeRole(d); else applyRole(d);
+      // 带 land 的 (换视角) 只先画侧栏 (名片 + 会话列表, 不碰详情区的几何): 页头 / 页脚换了高度,
+      // 旧行会在新行到来前先被顶一下, FLIP 的起点就错了 —— 它们等新行到手的同一帧画。
+      if (land) { takeRole(d); reveal(); renderRole(); if (!WORLD) renderConvs(); } else applyRole(d);
       if (restoreSess()) return refresh(land);
       syncUrl();
-      if (WORLD || VIEW === 'plan') loadWorld();
+      var world = WORLD || VIEW === 'plan' ? loadWorld() : null;
       if (VIEW === 'charter') loadCharter();
-      return loadMsgs(undefined, land && function () { paintRole(); return land(); }).then(function () {
+      return Promise.resolve(hold && world).then(function () {
+        W.pickHold = false;
+        syncUrl();
+        var fresh = early && want === winSig() ? early : null;
+        return loadMsgs(undefined, land && function () { paintRole(); return land(); }, fresh);
+      }).then(function () {
         if (land && !inner.querySelector('.mrow')) paintRole();   // 空窗口不走 land, 页头照样要画
         connect();
       });
@@ -1816,12 +1833,19 @@
 
   /** 窗内的关系: 一对有向 (a→b) 一条, kinds = 各种类在窗内发生几次。 */
   var relations = function (rg) {
-    var pairs = W.edges.map(function (e) {
+    var all = W.edges.map(function (e) {
       return { kind: e.kind, from: e.from, to: e.to, cross: e.cross, jobs: e.jobs || [], ts: e.ts && e.ts.length ? e.ts : [e.lastTs], point: e.point };
-    }).concat(jobEdges()).reduce(function (m, e) {
-      // 家谱是身份, 不是发生在某段 session 里的事 —— 不受时间窗裁剪, 否则切到子 wizard 时
-      // 它的出生早于自己的 session, 父亲那条边就被裁掉了。
-      var ts = LINEAGE[e.kind] ? e.ts : e.ts.filter(function (t) { return inRange(rg, t); });
+    }).concat(jobEdges());
+    // 时间范围里有过往来 (任一种非家谱边, 任一端) 的 role。
+    var active = all.reduce(function (m, e) {
+      if (!LINEAGE[e.kind] && e.ts.some(function (t) { return inRange(rg, t); })) { m[e.from] = 1; m[e.to] = 1; }
+      return m;
+    }, {});
+    var pairs = all.reduce(function (m, e) {
+      // 家谱是身份, 不是发生在某段 session 里的事 —— 不受 session 裁剪, 否则切到子 wizard 时
+      // 它的出生早于自己的 session, 父亲那条边就被裁掉了。时间范围 (WIN) 照裁: 子 wizard 在范围里没有
+      // 往来, 它那条家谱边也不画 —— 与侧栏同一刀 (inWin), 闲了一小时的分身不该因为出身留在「半小时」里。
+      var ts = LINEAGE[e.kind] ? (!WIN || active[e.to] ? e.ts : []) : e.ts.filter(function (t) { return inRange(rg, t); });
       if (!ts.length) return m;
       var k = e.from + '\u0000' + e.to;
       var p = m[k] || (m[k] = { from: e.from, to: e.to, kinds: {}, n: 0, first: Infinity, last: 0, cross: e.cross, jobs: [] });
@@ -2089,7 +2113,9 @@
     if (W.pickSelf === ROLE && W.role === ROLE && R.role && R.role.id === ROLE) {
       W.pickSelf = '';
       var self = talkKey(F.links, ROLE);
-      if (CONV !== self) return selectConv(self, '');
+      // refresh 正等着它定窗口 (W.pickHold): 只改窗口, 正文由 refresh 取一次 —— 不再先取全部对话、再收窄重取。
+      if (CONV !== self && W.pickHold) { CONV = self; WITH = ''; }
+      else if (CONV !== self) return selectConv(self, '');
     }
     var trees = draw([]);
     var span = rg ? (!rg.s ? '最近' + (WINS.filter(function (w) { return w[0] === WIN; })[0] || [0, ''])[1] : rg.s === R.sessions[R.sessions.length - 1] ? '最新 session' : 'session ' + fmtClock(rg.from)) : '';
