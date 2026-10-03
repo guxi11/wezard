@@ -5,7 +5,7 @@ import type { WSClient, WsFrame, TextMessage, ImageMessage, MixedMessage, BaseMe
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
 import type { MirrorBridge } from "./mirror-bridge.js";
-import { tailTurnsWithTools, renderPeerMentionHint, renderHumanEnvelope, type PeerInfo, type PeerMention } from "./peers.js";
+import { tailTurnsWithTools, peerMentionPart, renderHumanEnvelope, type PeerInfo, type PeerMention } from "./peers.js";
 import { keepalivePingSigs } from "../shared/keepalive.js";
 import { noticeSuffixFor } from "./notices.js";
 import { expandHome, sanitizeId } from "../shared/paths.js";
@@ -17,8 +17,8 @@ import { computeUsage, renderUsageReport } from "./usage.js";
 import { computeAuditReport } from "./audit.js";
 import { syncProjectConfig, renderSyncReport } from "./cfg-sync.js";
 import { captureQuota, renderQuotaReport } from "./quota.js";
-import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe, allNames, unlinkTags, normalizeTag, uniqueTag, displayName, labelFor, tagLink } from "../shared/session-label.js";
-import { chatNameOf, clearChatName, listChatNames, peerAddress, setChatName } from "./chat-name.js";
+import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe, allNames, unlinkTags, normalizeTag, uniqueTag, displayName, tagLink } from "../shared/session-label.js";
+import { chatNameOf, clearChatName, listChatNames, setChatName } from "./chat-name.js";
 import { evictStaleName, reclaimChatName, wizardStore, type EvictDeps } from "./wizard.js";
 import { truncate } from "../shared/std.js";
 
@@ -1000,10 +1000,9 @@ export const installInboundRouter = (
       return [{
         tag: name,
         target: r.target,
-        address: peerAddress(cfg, who, r.target),
         chat: chatNameOf(cfg, r.target),
         foreign: r.foreign,
-        label: labelFor(peerAddress(cfg, who, r.target)),
+        job: wizardStore()?.get(r.target)?.description ?? "",
         cwd: runningCwd || defaultCwd,
       }];
     });
@@ -1020,18 +1019,19 @@ export const installInboundRouter = (
   const send = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, who: string, text: string, images: string[] = []): Promise<void> => {
     // 斜杠命令按行解析,尾巴上多挂一段会让它不再被识别成命令 —— 只标注普通消息。
     const slash = text.trimStart().startsWith("/");
-    const hint = slash ? "" : renderPeerMentionHint(peerMentions(who, text));
+    const hint = slash ? [] : [peerMentionPart(peerMentions(who, text), ((c) => c.runningCwd || c.defaultCwd)(bridge.getCwd(who)))];
     // 谁、在哪个群说的 —— transcript 里只有这一段记着它 (read_chat 从那里读回来)。
     // 住在单聊里、又是在那个单聊里被叫到的, 默认值就是对的, 不挂。
     const channel = chatPrincipal(msg);
     const chat = chatNameOf(cfg, channel);
     const homely = channel === baseOfKey(who) && channel.startsWith("user:");
     const envelope = slash || homely || !chat ? "" : renderHumanEnvelope(msg.from.userid, chat);
-    // 同一条边界上再挂一段: 这个 wizard 不在场时群里发生的成员变动 (见 notices.ts)。
-    const notice = noticeSuffixFor(who, text, { human: { channel } });
+    // 同一条边界上再挂: 点名提示, 以及这个 wizard 不在场时群里发生的成员变动 (见 notices.ts,
+    // 近几次注入里给过的不再重复)。
+    const notice = noticeSuffixFor(who, text, { human: { channel } }, hint);
     try {
       // 回复回到发话的这个群 —— `who` 可能住在别的聊天 (名字全局可达)。
-      await bridge.dispatch({ principal: who, text: text + envelope + hint + notice, images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}` });
+      await bridge.dispatch({ principal: who, text: text + envelope + notice, images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}` });
     } catch (e) {
       log.error({ err: (e as Error).message }, "bridge dispatch failed");
       try { await client.replyStream(frame, msg.msgid, withTagHeader(who, `[wezard] error: ${(e as Error).message}`), true); } catch { /* ignore */ }

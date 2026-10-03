@@ -224,8 +224,7 @@ export const digest = (d: DigestIn): DigestOut => {
   const inChat = (x: Item): boolean => !!d.human && (!chatOfItem(x) || chatOfItem(x) === d.human.channel);
   // 「这句可能在答哪件」与全表无关: 全表只摆出等人的件, 不知道人此刻开了口。
   const heard = (x: Item): boolean => !!x.waitHuman && inChat(x) && (!x.heard || d.now - x.heard >= HEARD_EVERY_MS);
-  const heardLine = (x: Item): string =>
-    `人这句话可能就是在答 \`${x.turn}\` (${to(x)} 问: ${x.ask ?? x.topic}) —— 是就 \`tell_peer({name, re:"${x.turn}"})\` 转过去; 不是就略过, 它仍挂着`;
+  const heardLine = (x: Item): string => `heard? ${x.turn} ${to(x)} asked: ${x.ask ?? x.topic}`;
   if (why) {
     // 全表把各件都摆出来了: 它们各自那一行增量不必再提。
     const touched = d.items.map((x) => ({
@@ -238,10 +237,10 @@ export const digest = (d: DigestIn): DigestOut => {
   const steps = d.items.map((x): { line: string; next: Item } | undefined => {
     if (heard(x)) return { line: heardLine(x), next: { ...x, heard: d.now, told: { ...x.told, need: true } } };
     if (x.waitHuman && !x.told?.need) {
-      return { line: `\`${x.turn}\` ${to(x)} 回来要人拍板, 已挂成「等人」: ${x.ask ?? x.topic} —— 人答了用 \`re:"${x.turn}"\` 转过去`, next: { ...x, told: { ...x.told, need: true } } };
+      return { line: `need ${x.turn} ${to(x)} asks the human: ${x.ask ?? x.topic}`, next: { ...x, told: { ...x.told, need: true } } };
     }
     if (!x.status && !x.told?.slow && d.now - x.touched >= SLOW_MS) {
-      return { line: `\`${x.turn}\` → ${to(x)} ${x.touched > x.at ? "续问后" : "派出"} ${ago(d.now - x.touched)} 还没回执: 「${x.topic}」 —— 慢活不用管; 怀疑卡住就 \`peek_peer\``, next: { ...x, told: { ...x.told, slow: true } } };
+      return { line: `slow ${x.turn} → ${to(x)} ${ago(d.now - x.touched)} since ${x.touched > x.at ? "re-ask" : "sent"}, no receipt: ${x.topic}`, next: { ...x, told: { ...x.told, slow: true } } };
     }
     return undefined;
   });
@@ -254,19 +253,21 @@ export const digest = (d: DigestIn): DigestOut => {
   };
 };
 
+/** 增量那几行 (need / heard? / slow) 怎么接 —— 窗口里没给过才挂 (`rule`)。 */
+const RULE = "Pending (daemon-tracked). need: the human must answer → relay via tell_peer({name, re}). heard?: their line may be that answer → relay, else ignore. slow: no receipt yet, peek_peer if stuck. FYI — don't reply; pending_items = full list.";
+
 /** 增量那几行 / 全表 → 挂在注入尾巴上的那段。 */
-export const renderDigest = (o: DigestOut, table: string): string =>
+export const renderDigest = (o: DigestOut, table: string, rule = true): string =>
   o.full
     ? renderReminder({ wezard: "pending", mode: "full" }, [
-        `挂起事项全表 (${o.full}):`,
+        ...(rule ? [RULE] : []),
+        `Full list (${o.full}):`,
         table,
         ...o.lines.map((l) => `- ${l}`),
-        "与眼下这句无关就略过, 不要为此回话、也不要向人复述; 随时 `pending_items` 看最新。",
       ])
     : o.lines.length
       ? renderReminder({ wezard: "pending", mode: "delta" }, [
-          "挂起事项有变 (守护进程按回执算的):",
+          ...(rule ? [RULE] : []),
           ...o.lines.map((l) => `- ${l}`),
-          "不要为此回话; 全表在 `pending_items`。",
         ])
       : "";

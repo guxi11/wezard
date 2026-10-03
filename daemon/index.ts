@@ -76,7 +76,7 @@ import {
   type WizardBrief,
   type WizardRecord,
 } from "./wizard.js";
-import { bindNoticeBox, createNoticeBox, chatAudience, type Via } from "./notices.js";
+import { bindNoticeBox, createNoticeBox, createSeenRing, gcSeen, chatAudience, type Notice, type Part, type SeenRow, type Via } from "./notices.js";
 import { createLedger, digest, pendingGc, renderDigest, renderTable, type Item as PendingItem, type LiveOf, type Mark } from "./pending-items.js";
 import { loadJobStore, jobEpisode, rejectReason, ACCEPTS, JOB_MEMBER_MAX, type Accept } from "./jobs.js";
 import { cacheTtlSec, clipMiddle, contextFiles, firstStamp, parseClosing, lastContextTokens, lastExchange, lastModel, openingTurn, replyClosedBefore, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
@@ -452,12 +452,7 @@ const main = async (): Promise<void> => {
       // silent: 新 wizard 就位不进群 (生命周期事件), 同群的 wizard 从名册增量里得知。
       const r = await m.newSession(target, name, body.cli, { cwd, model, keepalive, silent: true });
       if (!r.ok && !existed) wizards.drop(target);
-      // r.model 是 spawnTmuxClaude 通过 /model 实测确认落地的那个 —— 可能跟调用方
-      // 传的原始字符串不一样 (口语化 → 目录里匹配到的关键词), 播报要报实情。
-      const modelNote = r.model
-        ? (r.modelWarning ? ` · 模型 ${r.model} (⚠️ ${r.modelWarning})` : ` · 模型 ${r.model}`)
-        : "";
-      if (r.ok) postRoster(base, [target, self], `新 wizard **.${name}** 就位${r.cwd ? ` · 工作区 ${r.cwd}` : ""}${modelNote}${keepalive ? "" : " · 已关闭 keepalive"} —— 空白起步, 由 ${displayName(self)} 造的`);
+      if (r.ok) postRoster(base, [target, self], { op: "born", name: `.${name}`, by: displayName(self), cwd: r.cwd });
       json(res, r.ok ? 200 : 500, r.ok
         ? {
             ok: true,
@@ -810,7 +805,7 @@ const main = async (): Promise<void> => {
       if (!gone) return false;
       const slot = !!tagOfKey(gone.target);
       log.child({ mod: "wizard" }).info({ target: gone.target, name: gone.name, slot }, "stale name evicted");
-      postRoster(baseOfKey(gone.target), [], `**.${gone.name}** 静默超过一天, ${slot ? "已被同名的新 wizard 顶掉并收工" : "名字让给了同名的新 wizard"}`);
+      postRoster(baseOfKey(gone.target), [], { op: "ended", name: `.${gone.name}`, why: slot ? "evicted (idle >1d, name reused)" : "name yielded (idle >1d)" }, kinAudience(gone));
       return true;
     };
 
@@ -1350,23 +1345,39 @@ const main = async (): Promise<void> => {
       return (turn) => (byTurn ??= new Map(receipts.states().map((x) => [x.turn, x]))).get(turn);
     };
     const pendingNames = { nameOf: displayName, chatOf: (b: string) => chatNameOf(cfg, b) || b };
-    const pendingDigest = (t: string, via: Via): string => {
+    const pendingDigest = (t: string, via: Via): Part => (seen) => {
       const cut = pendingCuts.get(t);
       pendingCuts.delete(t);
-      if (tagOfKey(t)) return "";
+      if (tagOfKey(t)) return { text: "", keys: [] };
       const items = ledger.openOf(t);
       // 没挂着的事: 不读会话, 也不留基线 —— 有了第一件再从那一刻立。
-      if (!items.length) { pendingMarks.delete(t); return ""; }
+      if (!items.length) { pendingMarks.delete(t); return { text: "", keys: [] }; }
       const i = m.sessionInfo(t);
       const now = Date.now();
       const o = digest({ items, mark: pendingMarks.get(t), ...(cut ? { cut } : {}), session: i ? { sid: i.sessionId, ctx: i.contextTokens } : undefined, ...(via.human ? { human: via.human } : {}), now, nameOf: displayName });
       pendingMarks.set(t, o.mark);
       o.touched.forEach(ledger.put);
-      return renderDigest(o, o.full ? renderTable(items, liveOfTurns(), pendingNames, now) : "");
+      const rule = !seen("rule:pending");
+      const text = renderDigest(o, o.full ? renderTable(items, liveOfTurns(), pendingNames, now) : "", rule);
+      return { text, keys: text && rule ? ["rule:pending"] : [] };
     };
-    const notices = bindNoticeBox(createNoticeBox(12, (t) => [...handoffNudge(t), ...memoryNudge(t)], pendingDigest));
-    const postRoster = (base: string, except: readonly string[], line: string): void =>
-      notices.post(chatAudience(m.chatTargets(base), base, except), line);
+    const notices = bindNoticeBox(createNoticeBox({
+      probe: (t) => [...handoffNudge(t), ...memoryNudge(t)],
+      digest: pendingDigest,
+      seen: createSeenRing(loadJsonMap<SeenRow>(cfg.wrc.mirror.noticeSeenFile, gcSeen), (t) => m.sessionInfo(t)?.sessionId ?? ""),
+      cwdOf: (t) => ((c) => c.runningCwd || c.defaultCwd)(m.getCwd(t)),
+    }));
+    /** `only` 收窄听众 (见 kinAudience)。 */
+    const postRoster = (base: string, except: readonly string[], n: Notice, only?: (t: string) => boolean): void =>
+      notices.post(chatAudience(m.chatTargets(base), base, except).filter(only ?? (() => true)), n);
+    /** 一个非 detached 的子 wizard 是生它那位的帮手, 与群里旁人无关: 它的生 / 收只告诉
+     *  生它那位与往上的家谱 (当事人由 except 排除)。独立长住的 (没有 parent) 照旧告诉全群。
+     *  回归测试的临时分身就这样不再刷别人; 旁人的宪章名册里也难得列着这种短命的分身。 */
+    const kinAudience = (kid: WizardRecord | undefined): ((t: string) => boolean) | undefined => {
+      if (!kid?.parent) return undefined;
+      const kin = new Set([kid.parent, ...ancestorsOf(wizards.all(), kid.parent)]);
+      return (t) => kin.has(t);
+    };
 
     /** 一个聊天的工作区: 它名下各会话跑在哪个目录, 取最多的那个。聊天与工作区是
      *  一对多, 但绝大多数聊天只围着一个项目转。 */
@@ -1404,7 +1415,7 @@ const main = async (): Promise<void> => {
         log.info({ base, name }, "chat: auto-named from workspace");
         // 群里不发气泡 (一次补名会命中十几个群, 那是刷屏), 但住在里面的 wizard
         // 得知道自己的地址变了 —— 它的 charter 里写的还是「(未命名)」。
-        postRoster(base, [], `这个聊天现在叫 **${name}** (按工作区自动起的) —— notify / spawn_wizard 的 \`chat\` 可以用这个名字指到这里。`);
+        postRoster(base, [], { op: "chat", name });
       }
       return named;
     };
@@ -1624,6 +1635,8 @@ const main = async (): Promise<void> => {
 
     m.onContextCut((t, cut) => {
       pendingCuts.set(t, cut);
+      // 之前挂过的提示随对话一起没了: 去重窗口清零, 下一次该给的规矩照给。
+      notices.forget(t);
       const now = wizards.get(t)?.memory ?? [];
       const seen = chartered.get(t);
       // 没有快照 (reload 之后) 就不猜差集, 只指路 —— 整份塞进一行能有几万字。
@@ -1647,6 +1660,7 @@ const main = async (): Promise<void> => {
       ensureChatNames(target);
       // 信箱里装的是相对上一份宪章的变化; 新宪章一渲染就都过期了 (名册、记忆都已在里面)。
       notices.drain(target);
+      notices.forget(target);
       const rec = wizards.get(target);
       return charterFor(target, { parent: rec?.parent, forkOf: rec?.forkOf, inherited: !!rec?.clonedFrom, cwd: ctx?.cwd });
     });
@@ -1770,7 +1784,9 @@ const main = async (): Promise<void> => {
       const me = identityOf(self, self);
       // 职责是别人决定"该不该找你"的依据, 改了就得让同群的知道 —— 否则他们照着
       // 出生快照里那句旧的 (或者空的) 职责派活。
-      if (asked || description) postRoster(baseOfKey(self), [self], `${before && before !== name ? `**.${before}** 改名为 **.${name}**` : `**.${name}** 改了身份`}${description ? ` · 职责: ${description}` : ""}`);
+      if (asked || description) postRoster(baseOfKey(self), [self], before && before !== name
+        ? { op: "renamed", name: `.${name}`, was: `.${before}`, ...(description ? { job: description } : {}) }
+        : { op: "job", name: `.${name}`, job: description });
       json(res, 200, {
         ok: true,
         ...me,
@@ -2108,15 +2124,15 @@ const main = async (): Promise<void> => {
       }
       wizards.upsert(target, { spawning: undefined, clonedFrom: r.inherited ? sourceInfo?.sessionId ?? "" : "", ...(r.inherited ? {} : { forkOf: undefined }) });
       const kid = briefOf(self, target);
-      // r.model 是 spawnTmuxClaude 通过 /model 实测确认落地的那个 —— 可能跟调用方
-      // 传的原始字符串不一样 (口语化 → 目录里匹配到的关键词), 播报要报实情。
-      const modelNote = (r.model
-        ? (r.modelWarning ? ` · 模型 ${r.model} (⚠️ ${r.modelWarning})` : ` · 模型 ${r.model}`)
-        : "") + (r.effort ? ` · effort ${r.effort}` : "");
       // 出生不再发群气泡 (人要看的是结论, 不是谁生了谁 —— 过程在 rolepage 里);
       // 同群的 wizard 仍要知道群里多了一个成员。工单里的临时工连这条也省掉。
       if (!jobId) {
-        postRoster(base, [target, self], `新 wizard **.${name}** 就位${kid.description ? ` · ${kid.description}` : ""}${r.cwd ? ` · 工作区 ${r.cwd}` : ""}${modelNote}${keepalive ? "" : " · 已关闭 keepalive"} —— ${detached ? `空白起步, 由 ${displayName(self)} 造的` : `${displayName(self)} 的分身`}${r.inherited ? ` (继承了${forkOf ? ` ${displayName(forkOf)} ` : "它"}的上下文)` : ""}`);
+        // 模型 / keepalive 不报: 那是生它的那位的事, 旁人要时 wizard_roster 有。
+        postRoster(base, [target, self], {
+          op: "born", name: `.${name}`, by: displayName(self), clone: !detached,
+          ...(r.inherited ? { ctx: forkOf ? displayName(forkOf) : displayName(self) } : {}),
+          ...(kid.description ? { job: kid.description } : {}), cwd: r.cwd,
+        }, kinAudience(wizards.get(target)));
       }
       // 继承路径上活已经随开场白进去了, 空白分身才需要在这里补一次注入 (私聊)。
       let dispatched = r.inherited && !!task;
@@ -2166,6 +2182,8 @@ const main = async (): Promise<void> => {
       if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
       const { target } = r;
       const victim = briefOf(self, target);
+      // 家谱要在 forget 抹掉记录之前取 (见 kinAudience)。
+      const victimRec = wizards.get(target);
       const end = (b.mode ?? "end") === "end";
       if (!end && target === self) { json(res, 400, { ok: false, reason: "打断自己没有意义 —— 你就是正在生成的那一个" }); return; }
       // 按件号撤回自己派的那一件: 它此刻正在做的就是这件才按 Esc; 否则 (排着 / 在做别人的)
@@ -2204,7 +2222,7 @@ const main = async (): Promise<void> => {
       if (!done.ok) { json(res, 502, { ok: false, target, reason: done.reason }); return; }
       const detached = end && b.forget ? forgetWizard(target) : [];
       // 打断只是停了它这一轮, 它还在; 只有结束才是名册变了。
-      if (end) postRoster(baseOfKey(target), [target, self], `**${victim.name || target}** 已收工 · 由 ${displayName(self)} 结束${b.forget ? " (记录一并抹掉)" : ""}`);
+      if (end) postRoster(baseOfKey(target), [target, self], { op: "ended", name: victim.name ? `.${victim.name}` : target, by: displayName(self), ...(b.forget ? { why: "forgotten" } : {}) }, kinAudience(victimRec));
       json(res, 200, { ok: true, target, name: victim.name, mode: end ? "end" : "interrupt", forgotten: !!(end && b.forget), ...(canceled ? { canceled } : {}), ...(detached.length ? { canceledIn: detached } : {}) });
     });
 

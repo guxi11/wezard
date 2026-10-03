@@ -75,6 +75,8 @@ const Mirror = z.object({
   // 同理扛 reload: 落在「杀了旧 pane、还没贴回简报」之间, 纯内存的话新会话就空着
   // 醒来, 简报跟着旧进程没了。
   handoffsFile: z.string().default("~/.wezard/handoffs.json").describe("在飞交接 (handoff) 的登记文件"),
+  // 同理扛 reload: 纯内存的话 reload 之后每个 pane 头一条注入又把整段说明挂一遍。
+  noticeSeenFile: z.string().default("~/.wezard/notice-seen.json").describe("每个 wizard 近几次注入尾巴上挂过哪些提示 (去重用)"),
   // 不是能力上限, 是"忘了收"的刹车: 分身能递归生分身, 而每个都是一个 tmux pane +
   // 一份上下文, 一次跑飞的编排足以把 fd 吃光 (见 launchd plist 的 NumberOfFiles)。
   cloneMax: hot(z.number().int().positive().default(8).describe("一个 wizard 名下同时活着的分身上限")),

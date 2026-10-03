@@ -11,7 +11,8 @@
 // attachments) and the graph runner (which drives them) both compose on top.
 import { existsSync, openSync, readSync, closeSync, statSync } from "node:fs";
 import { backendForPath, type CliBackendName } from "../shared/cli-backends.js";
-import { truncate, truncateWithCount } from "../shared/std.js";
+import { clipLine, truncate, truncateWithCount } from "../shared/std.js";
+import { tildePath, type Part } from "./notices.js";
 import { isKeepalivePingText, withoutKeepalive } from "../shared/keepalive.js";
 import { envelopeAttrs, parseEnvelope, renderReminder, type Envelope, type ReceiptRoute, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
 import type { Terminal } from "../shared/turn-state.js";
@@ -945,35 +946,39 @@ export interface PeerMention {
   tag: string;
   /** Resolved session key, e.g. `chat:wrxxx#b`. */
   target: string;
-  /** Canonical string to hand the peer tools — the wizard's global name. */
-  address: string;
   /** Lives in a DIFFERENT chat. */
   foreign: boolean;
   /** That chat's name; "" when it has none. */
   chat: string;
-  label: string;
+  /** Its one-line job description; "" when it has none. */
+  job: string;
   cwd: string;
 }
 
 /** Machinery, not conversation: the `<system-reminder>` wrapper is the same
  *  marker the mirror's meta-stripper and `tailTurns` already drop, so the hint
  *  reaches the agent's context without leaking into WeCom bubbles or peer
- *  summaries. Empty string for no mentions — appending it stays a no-op. */
-export const renderPeerMentionHint = (mentions: readonly PeerMention[]): string => {
-  if (mentions.length === 0) return "";
-  const lines = mentions.map(
-    (m) =>
-      `- \`.${m.tag}\` ${m.label} —— 一个活着的 wizard, 住在${m.foreign ? `**另一个**聊天${m.chat ? ` (\`${m.chat}\`)` : ""}` : "你这个聊天"}` +
-      ` (target \`${m.target}\`${m.cwd ? `, 工作区 ${m.cwd}` : ""}), 地址 "${m.address}"。`,
-  );
-  return renderReminder({ wezard: "mention", names: mentions.map((m) => `.${m.tag}`).join(" ") }, [
-    "上面这条消息里的 `.name` 点的是**别的 wizard**, 不是字面文本:",
-    ...lines,
-    "用户要你把它们拉进来、看看它们在干嘛、或者把话带到时, 去叫它们, 别猜、更别替它们回答:",
-    "peek_peer(address) 读它最近的对话, send_peer(address, text) 派活或推它一把, wait_peer(address) 等它闲下来,",
-    "wizard_roster() 看全体 wizard 的名字/职责/家谱。地址就是它的全局名字, 原样用上面给的那个。",
-    "只是提了一嘴、并没有要你去找它 (\".b 说的那个方案\") 就不必调工具 —— 看用户到底要什么。",
-  ]);
+ *  summaries. A wizard already introduced within the recent injections (`seen`)
+ *  only gets its name re-listed — the full row is still in context; the usage
+ *  rule rides along only when the window has none. `cwd` = the recipient's own
+ *  workspace: a peer working in the same one doesn't repeat it. */
+export const peerMentionPart = (mentions: readonly PeerMention[], cwd = ""): Part => (seen) => {
+  if (mentions.length === 0) return { text: "", keys: [] };
+  const fresh = mentions.filter((m) => !seen(`m:.${m.tag}`));
+  const known = mentions.filter((m) => seen(`m:.${m.tag}`));
+  const rule = !seen("rule:mention");
+  const row = (m: PeerMention): string =>
+    `- .${m.tag}${m.job ? ` job="${clipLine(m.job, 80).replace(/"/g, "'")}"` : ""}${m.foreign ? ` chat=${m.chat || "(other)"}` : ""}${m.cwd && m.cwd !== cwd ? ` cwd=${tildePath(m.cwd)}` : ""}`;
+  return {
+    text: renderReminder({ wezard: "mention", names: mentions.map((m) => `.${m.tag}`).join(" ") }, [
+      ...(rule
+        ? ["`.name` tokens above are live wizards, not literal text. To involve / check / relay to one: tell_peer · peek_peer · wait_peer(name) — never answer for it; wizard_roster for all. A passing mention needs no tool."]
+        : []),
+      ...fresh.map(row),
+      ...(known.length ? [`${known.map((m) => `.${m.tag}`).join(" ")}: wizards (described earlier)`] : []),
+    ]),
+    keys: [...(rule ? ["rule:mention"] : []), ...fresh.map((m) => `m:.${m.tag}`)],
+  };
 };
 
 // ── 同伴模型 ──────────────────────────────────────────────────────────

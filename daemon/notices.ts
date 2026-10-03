@@ -4,55 +4,189 @@
 // 越假 —— 新分身出生、老 wizard 收工、谁改了职责, 它一概不知道, 除非自己去
 // wizard_roster 问。问一次要花一轮, 于是实际上没人问。
 //
-// 这里是另一半。变动发生时不打扰任何人, 只把一行字投进每个相关 wizard 的信箱;
+// 这里是另一半。变动发生时不打扰任何人, 只把一条事件投进每个相关 wizard 的信箱;
 // 下一次**无论谁**往它那儿注入点什么 (人在群里说话、同伴派活、定时任务到点),
 // 这些行以 `<system-reminder>` 的形式挂在那段文本尾巴上一起进去。不占一轮、不进
-// 气泡、不进 transcript (META_RE 会把它剥掉) —— 与 renderPeerMentionHint 同一条
-// 边界注入通路。
+// 气泡、不进 transcript (META_RE 会把它剥掉)。点名提示 (mention) 与挂起事项
+// (pending) 走同一条边界, 由 noticeSuffixFor 一并拼出。
 //
 //   感知 = spawn 时的快照 + turn 时的增量。两者都不花额外的轮次。
 //
-// 投递即清空: 那一次注入失败的话这几行就丢了。通知是提示, 真相永远可以
+// 尾巴每一轮都要付钱, 所以拼的时候看一眼「近 SEEN_DEPTH 次注入里挂过什么」(SeenRing):
+// 同一个 wizard 的点名说明、同一行变动、每段固定的规矩, 窗口里给过就不再给 —— 它们
+// 还在模型的上下文里。窗口随会话走: 换了 sid (交接 / 重生)、/clear、压缩、新宪章,
+// 都清零重来。窗口落盘, 否则 reload 之后每个 pane 的头一条注入又把整段说明挂一遍。
+//
+// 信箱投递即清空: 那一次注入失败的话这几行就丢了。通知是提示, 真相永远可以
 // wizard_roster 问到; 为一行提示做可靠投递不值当。信箱是纯内存的, daemon 重启即
 // 清空 —— 同 graph run, 诚实地说: pane 还在, 没送到的提示没了。
+import { homedir } from "node:os";
 import { baseOfKey } from "../shared/session-label.js";
 import { renderReminder } from "../shared/reminder.js";
+import { clipLine } from "../shared/std.js";
+import type { JsonMap } from "../shared/json-map-store.js";
 
-export interface NoticeBox {
-  /** 把一行投给一批 wizard。自己做的事自己知道, 所以调用方负责把当事人排除在外。 */
-  post: (audience: readonly string[], line: string) => void;
-  /** 取走并清空某个 wizard 的待投递行。 */
-  drain: (target: string) => string[];
-  /** 另一类搭车的: 投递那一刻现算、自带壳的整段 (挂起事项, 见 pending-items.ts)。 */
-  digest?: (target: string, via: Via) => string;
-}
+/** 一次名册变动。`name` / `by` 是给模型看的称呼 (`.x`)。 */
+export type Notice =
+  | { op: "born"; name: string; by: string; clone?: boolean; ctx?: string; job?: string; cwd?: string }
+  | { op: "ended"; name: string; by?: string; why?: string }
+  | { op: "renamed"; name: string; was: string; job?: string }
+  | { op: "job"; name: string; job: string }
+  | { op: "chat"; name: string }
+  | { op: "note"; text: string };
+
+/** 近几次注入里挂过这个键没有。 */
+export type Seen = (key: string) => boolean;
+/** 尾巴上的一段: 照「近来挂过什么」现算, 交回正文与这次挂了哪些键。 */
+export interface Section { text: string; keys: readonly string[] }
+export type Part = (seen: Seen) => Section;
+const none: Section = { text: "", keys: [] };
 
 /** 这一次注入是从哪来的 —— 人在某个群里说的话, 还是别的 (同伴 / 回执 / 定时)。 */
 export interface Via { human?: { channel: string } }
 
-/** 每个信箱最多攒 `max` 行 —— 一个挂了很久的 wizard 不该在醒来时读一部编年史,
+export interface NoticeBox {
+  /** 把一条变动投给一批 wizard。自己做的事自己知道, 所以调用方负责把当事人排除在外。
+   *  字符串 = 一行自由文字 (note)。 */
+  post: (audience: readonly string[], n: Notice | string) => void;
+  /** 取走并清空某个 wizard 的待投递变动。 */
+  drain: (target: string) => Notice[];
+  /** 这一次注入的整条尾巴 (前置段 + 名册 + 挂起事项), 并把挂了什么记进窗口。 */
+  suffix: (target: string, via: Via, lead: readonly Part[]) => string;
+  /** 它的上下文不再含有之前挂过的那些 (/clear / 压缩 / 新宪章): 窗口清零。 */
+  forget: (target: string) => void;
+}
+
+// ── 近 N 次注入的窗口 ────────────────────────────────────────────────
+export const SEEN_DEPTH = 10;
+/** 一个 pane 的窗口: 最近几次注入各挂了哪些键 (新的在后)。`sid` 变了就整份作废。 */
+export interface SeenRow { sid: string; at: number; ring: string[][] }
+
+export interface SeenRing {
+  of: (target: string) => Seen;
+  push: (target: string, keys: readonly string[]) => void;
+  reset: (target: string) => void;
+}
+
+const STALE_MS = 7 * 24 * 3600_000;
+/** 一周没注入过的 pane 不再记。 */
+export const gcSeen = (rows: Record<string, SeenRow>, now = Date.now()): Record<string, SeenRow> =>
+  Object.fromEntries(Object.entries(rows).filter(([, r]) => now - r.at < STALE_MS));
+
+/** `store` 不给 = 纯内存。`sidOf` 给出此刻的会话 id ("" = 不知道, 不据此作废)。 */
+export const createSeenRing = (store: JsonMap<SeenRow> | undefined, sidOf: (t: string) => string, depth = SEEN_DEPTH): SeenRing => {
+  const mem = new Map<string, SeenRow>(Object.entries(store?.all() ?? {}));
+  const live = (t: string): SeenRow | undefined => {
+    const r = mem.get(t);
+    const sid = sidOf(t);
+    return r && (!sid || !r.sid || r.sid === sid) ? r : undefined;
+  };
+  const put = (t: string, r: SeenRow | undefined): void => {
+    if (r) { mem.set(t, r); store?.set(t, r); } else if (mem.delete(t)) store?.drop(t);
+  };
+  return {
+    of: (t) => {
+      const ks = new Set((live(t)?.ring ?? []).flat());
+      return (k) => ks.has(k);
+    },
+    push: (t, keys) => {
+      const prev = live(t)?.ring ?? [];
+      // 一路空着的窗口不必为又一次空注入写盘。
+      if (!keys.length && !prev.some((s) => s.length)) return;
+      put(t, { sid: sidOf(t) || mem.get(t)?.sid || "", at: Date.now(), ring: [...prev, [...keys]].slice(-depth) });
+    },
+    reset: (t) => put(t, undefined),
+  };
+};
+
+// ── 名册变动: 净化与渲染 ─────────────────────────────────────────────
+const nameOf = (n: Notice): string | undefined => ("name" in n && n.op !== "chat" ? n.name : undefined);
+
+/** 两次注入之间生了又收掉的: 那一段关于它的全部变动净值为零, 一并略过。
+ *  先收后生 (同名顶替) 是真变化, 保留。 */
+export const netNotices = (ns: readonly Notice[]): Notice[] => {
+  const void_ = ns.flatMap((n, j) => {
+    if (n.op !== "ended") return [];
+    const i = ns.findIndex((b, k) => k < j && b.op === "born" && b.name === n.name);
+    return i < 0 ? [] : [[i, j, n.name] as const];
+  });
+  return ns.filter((n, k) => !void_.some(([i, j, name]) => k >= i && k <= j && nameOf(n) === name));
+};
+
+const HOME = homedir();
+export const tildePath = (p: string): string => (p === HOME || p.startsWith(`${HOME}/`) ? `~${p.slice(HOME.length)}` : p);
+/** logfmt 的值: 有空白 / 引号 / `=` 才加引号。 */
+const val = (s: string): string => (/[\s"=]/.test(s) ? `"${s.replace(/"/g, "'")}"` : s);
+const kv = (k: string, v: string | undefined): string => (v ? ` ${k}=${val(v)}` : "");
+const clip = (s: string): string => clipLine(s, 80);
+
+/** 一条变动 → 一行 logfmt (`op .name k=v …`)。`cwd` = 收件人自己的工作区: 同一个就不提。 */
+export const renderNotice = (n: Notice, cwd = ""): string => {
+  switch (n.op) {
+    case "born":
+      return `born ${n.name}${kv("by", n.by)} ${n.clone ? "clone" : "spawn"}${kv("ctx", n.ctx)}${kv("job", n.job && clip(n.job))}${n.cwd && n.cwd !== cwd ? kv("cwd", tildePath(n.cwd)) : ""}`;
+    case "ended":
+      return `ended ${n.name}${kv("by", n.by)}${n.why ? ` ${n.why}` : ""}`;
+    case "renamed":
+      return `renamed ${n.name}${kv("was", n.was)}${kv("job", n.job && clip(n.job))}`;
+    case "job":
+      return `job ${n.name}${kv("job", clip(n.job))}`;
+    case "chat":
+      return `chat ${val(n.name)} auto-named (usable as \`chat\` in notify / spawn_wizard)`;
+    case "note":
+      return `note ${n.text}`;
+  }
+};
+
+/** 名册那一段。规矩只在窗口里没给过时给。 */
+export const rosterPart = (ns: readonly Notice[], cwd: string): Part => (seen) => {
+  const rows = [...new Set(netNotices(ns).map((n) => renderNotice(n, cwd)))].filter((r) => !seen(`r:${r}`));
+  if (!rows.length) return none;
+  const rule = !seen("rule:roster");
+  return {
+    text: renderReminder({ wezard: "roster" }, [
+      ...(rule ? ["Roster changes since your charter snapshot (truth: wizard_roster). FYI only — don't reply or relay; skip if irrelevant."] : []),
+      ...rows.map((r) => `- ${r}`),
+    ]),
+    keys: [...(rule ? ["rule:roster"] : []), ...rows.map((r) => `r:${r}`)],
+  };
+};
+
+/** `max`: 每个信箱最多攒几条 —— 一个挂了很久的 wizard 不该在醒来时读一部编年史,
  *  溢出时留最新的那些 (旧的那些多半已经被后面的变动覆盖了)。
  *  `probe` 是投递那一刻现算的行 (不是谁投进来的, 而是「此刻它的状态值得提一句」,
- *  如上下文快满); 排在信箱里的那些前面。 */
-export const createNoticeBox = (
-  max = 12,
-  probe: (target: string) => string[] = () => [],
-  digest?: (target: string, via: Via) => string,
-): NoticeBox => {
-  const boxes = new Map<string, string[]>();
+ *  如上下文快满); 排在信箱里的那些前面。
+ *  `digest` 是另一类搭车的: 投递那一刻现算、自带壳的整段 (挂起事项, 见 pending-items.ts)。 */
+export const createNoticeBox = (o: {
+  max?: number;
+  probe?: (target: string) => string[];
+  digest?: (target: string, via: Via) => Part;
+  seen?: SeenRing;
+  cwdOf?: (target: string) => string;
+} = {}): NoticeBox => {
+  const max = o.max ?? 24;
+  const boxes = new Map<string, Notice[]>();
+  const ring = o.seen ?? createSeenRing(undefined, () => "");
+  const drain = (target: string): Notice[] => {
+    const ns = [...(o.probe?.(target) ?? []).map((text): Notice => ({ op: "note", text })), ...(boxes.get(target) ?? [])];
+    boxes.delete(target);
+    return ns;
+  };
   return {
-    ...(digest ? { digest } : {}),
-    post: (audience, line) => {
-      if (!line.trim()) return;
-      for (const t of new Set(audience)) {
-        boxes.set(t, [...(boxes.get(t) ?? []), line].slice(-max));
-      }
+    post: (audience, n) => {
+      const one: Notice = typeof n === "string" ? { op: "note", text: n } : n;
+      if (one.op === "note" && !one.text.trim()) return;
+      for (const t of new Set(audience)) boxes.set(t, [...(boxes.get(t) ?? []), one].slice(-max));
     },
-    drain: (target) => {
-      const lines = [...probe(target), ...(boxes.get(target) ?? [])];
-      boxes.delete(target);
-      return lines;
+    drain,
+    suffix: (target, via, lead) => {
+      const seen = ring.of(target);
+      const parts = [...lead, rosterPart(drain(target), o.cwdOf?.(target) ?? ""), ...(o.digest ? [o.digest(target, via)] : [])];
+      const secs = parts.map((p) => p(seen));
+      ring.push(target, secs.flatMap((s) => s.keys));
+      return secs.map((s) => s.text).join("");
     },
+    forget: (target) => ring.reset(target),
   };
 };
 
@@ -63,24 +197,13 @@ let bound: NoticeBox | undefined;
 export const bindNoticeBox = (box: NoticeBox): NoticeBox => (bound = box);
 export const noticeBox = (): NoticeBox | undefined => bound;
 
-/** 纯渲染。`<system-reminder>` 是机器信息而非对话, 与 mention hint 同一个壳。 */
-export const renderNotices = (lines: readonly string[]): string => {
-  if (lines.length === 0) return "";
-  return renderReminder({ wezard: "roster" }, [
-    "你出生时拿到的宪章 (名册、记忆) 是快照, 这段时间里变了:",
-    ...lines.map((l) => `- ${l}`),
-    "名册的真相是 wizard_roster, 记忆的真相是那份文件。与手头的活无关就略过,",
-    "**不要为此回话, 也不要向用户复述这几行** —— 群里该看见的气泡已经发过了。",
-  ]);
-};
-
-/** 注入边界上取一次增量。slash 命令按行解析, 尾巴上多挂一段会让它不再被识别成
- *  命令 —— 同 inbound 对 mention hint 的处理, 这类注入直接跳过 (信箱不清空, 等
- *  下一条普通消息)。 */
-export const noticeSuffixFor = (target: string, text: string, via: Via = {}): string => {
+/** 注入边界上取一次尾巴。`lead` 是排在名册前面的段 (人那条路径上的点名提示)。
+ *  slash 命令按行解析, 尾巴上多挂一段会让它不再被识别成命令 —— 这类注入直接跳过
+ *  (信箱不清空, 窗口不前进, 等下一条普通消息)。没绑信箱时前置段照样给, 只是不去重。 */
+export const noticeSuffixFor = (target: string, text: string, via: Via = {}, lead: readonly Part[] = []): string => {
+  if (text.trimStart().startsWith("/")) return "";
   const box = noticeBox();
-  if (!box || text.trimStart().startsWith("/")) return "";
-  return renderNotices(box.drain(target)) + (box.digest?.(target, via) ?? "");
+  return box ? box.suffix(target, via, lead) : lead.map((p) => p(() => false).text).join("");
 };
 
 /** 同一个聊天里除了当事人之外的所有 wizard —— 一次变动的默认听众。跨聊天的同伴
