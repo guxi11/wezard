@@ -67,6 +67,9 @@ export interface Pending {
   brief?: string;
   focus?: string;
   owe?: Owe[];
+  /** 自我交接那一刻它这一轮的频道 ("" = 私聊): 重开后「接着干」那一轮还在答同一件 ask,
+   *  终句回同一处。交接别人时它是闲着的, 没有在答的 ask —— "". */
+  channel?: string;
   timeoutMs: number;
 }
 
@@ -75,8 +78,10 @@ export interface HandoffDeps {
   sessionId: (target: string) => string;
   /** 杀旧 pane、起新进程 (同名 / cwd / 模型 / charter)。 */
   restart: (target: string) => Promise<{ ok: boolean; reason?: string }>;
-  /** 往会话里贴一段话; `owe` 非空时挂上那些发话方的信封。 */
-  inject: (target: string, text: string, owe: readonly Owe[]) => Promise<{ ok: boolean; reason?: string }>;
+  /** 往会话里贴一段话; `owe` 非空时挂上那些发话方的信封 (频道随它们), 否则这一轮的频道是 `channel`。 */
+  inject: (target: string, text: string, owe: readonly Owe[], channel: string) => Promise<{ ok: boolean; reason?: string }>;
+  /** 它此刻这一轮的频道 ("" = 私聊)。 */
+  channelOf: (target: string) => string;
   lastText: (target: string) => string;
   /** `from` 那一句在 `to` 的**当前** transcript 里, `untilMs` 之前就收口的答案 (见
    *  peers.replyClosedBefore); 定位不到问话 → undefined。 */
@@ -140,7 +145,8 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
         const w = await idle(p, p.mode === "self" ? SELF_IDLE_MS : p.timeoutMs);
         if (!w.idle) return fail(p, 504, `一直没能闲下来 (${w.reason}), 上下文没动`);
         if (p.mode === "self") return step({ ...p, stage: "restarting" });
-        const r = await deps.inject(p.target, briefPrompt(p.focus), []);
+        // 守护进程请它写简报, 不是谁在群里问的: 私聊。
+        const r = await deps.inject(p.target, briefPrompt(p.focus), [], "");
         if (!r.ok) return fail(p, 502, `summary inject failed: ${r.reason}`);
         return step(saved({ ...p, stage: "briefing" }));
       }
@@ -170,7 +176,7 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
         return step(saved({ ...next, stage: "restarted" }));
       }
       case "restarted": {
-        const r = await deps.inject(p.target, carryOf(p), p.owe ?? []);
+        const r = await deps.inject(p.target, carryOf(p), p.owe ?? [], p.channel ?? "");
         drop(p);
         deps.log.info({ mod: "handoff", target: p.target, ok: r.ok, reason: r.reason, owe: p.owe?.length ?? 0 }, "handoff: 简报已贴回");
         if (!r.ok) return fail(p, 502, `handoff carry inject failed: ${r.reason}`);
@@ -194,7 +200,7 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
   const begin = (target: string, mode: Pending["mode"], extra: Partial<Pending>): Pending | undefined =>
     handingOff(target)
       ? undefined
-      : saved({ target, mode, at: Date.now(), sid: deps.sessionId(target), stage: "waiting", timeoutMs: SELF_IDLE_MS, ...extra });
+      : saved({ target, mode, at: Date.now(), sid: deps.sessionId(target), stage: "waiting", timeoutMs: SELF_IDLE_MS, channel: mode === "self" ? deps.channelOf(target) : "", ...extra });
 
   return {
     self: (target, brief) => {

@@ -3322,10 +3322,19 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const t = said.trim();
     const hit = (x: Seal): boolean => pick(x) && x.keys.some((k) => k === t || (k.length >= 8 && t.includes(k)));
     const seals = a.seals ?? [];
-    // 并成一行里有人从聊天说的那句, 这一轮就是它的: 它的轮次与气泡早已建好, 认给别的印章它就永远不收口。
-    const first = seals.find((x) => hit(x) && !!x.turn) ?? seals.find(hit);
-    if (first) a.seals = seals.filter((x) => !hit(x));
+    const hits = seals.filter(hit);
+    // CLI 把排队的几句并成一行, 这一轮只能有一个去向: 里面有私聊的那句就是私聊 —— 它的答复不能
+    // 跟着人的话进群; 没有才轮到人从聊天说的那句 (它的轮次与气泡早已建好)。
+    const first = hits.find((x) => x.channel === "") ?? hits.find((x) => !!x.turn) ?? hits[0];
+    if (!first) return undefined;
+    a.seals = seals.filter((x) => !hit(x));
+    hits.filter((x) => x !== first && x.turn && !x.activated).forEach((x) => mergedAway(a, x.turn!));
     return first;
+  };
+  /** 人那句被并进了一轮私聊: 它预建的气泡与轮次收口成一个链接 —— 答复不进群, 也不让气泡挂到超时。 */
+  const mergedAway = (a: AttachState, q: QueuedTurn): void => {
+    void finishBubble(a, q.bubble, `${briefDetailLink(q.turnId, a.target)} （这句和一段私聊并成了一轮, 答复只在 rolepage）`, true);
+    recordTurnClose(q.turnId);
   };
   /** 人在聊天里说的那一句接成活跃 turn: 收掉在跑的那一轮, 频道与发话人取它自己的印章。
    *  `at` = 那一行落盘的时刻: 排队的那句从这一刻才开始被处理, 轮次的起点以它为准; 闲时当场接上就是投递那一刻。 */

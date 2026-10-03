@@ -130,7 +130,7 @@ const turnsOf = (target) => {
 // ── 纯单元: 直接驱动 dist 里的 createReceipts, 依赖全是假的 —— 不生分身、不碰群 ──
 // target 是「忙着」的, 直到给了它这一件的答案; 答案按 (to, 件号) 记, 只认发话之后给的 (同 replyToPeer)。
 const fakeReceipts = async () => {
-  const { createReceipts } = await import(new URL("../../dist/daemon/receipts.js", import.meta.url));
+  const { createReceipts } = await import(process.env.RR_RECEIPTS ?? new URL("../../dist/daemon/receipts.js", import.meta.url).href);
   const answers = [];
   const busy = new Set();
   const sent = [];
@@ -171,9 +171,11 @@ const cases = {
     f.answer("b3", "t3", "RESULT: orphan");
     await until(() => f.sent.length >= 3, 20_000, 100);
     const leak = f.sent.filter((s) => s.meta.channel !== "");
+    // 私聊轮 (频道 "", 例如没挂信封的分身开场白那轮) 派出的活没有 chat 父 k —— 不能回落成 home 群。
+    const k = f.r.parentOf("a", undefined, "", "1");
     return {
-      pass: f.sent.length === 3 && !leak.length,
-      why: `回执 ${f.sent.length}/3 · 带频道的 ${leak.map((s) => `${s.meta.turn}→${s.meta.channel}`).join(",") || "无"}`,
+      pass: f.sent.length === 3 && !leak.length && !k,
+      why: `回执 ${f.sent.length}/3 · 带频道的 ${leak.map((s) => `${s.meta.turn}→${s.meta.channel}`).join(",") || "无"} · 私聊轮的父 k=${k ? `${k.kind}:${k.channel}` : "无"}`,
     };
   } },
 
@@ -195,6 +197,25 @@ const cases = {
     return {
       pass: got?.body === "RESULT: final-1" && relay?.meta.replyTo?.from === "x",
       why: `x 收到 ${f.sent.filter((s) => s.to === "x").map((s) => `${s.meta.turn}:${s.body}`).join(" / ") || "无"} · b 的回执 reply-to=${relay?.meta.replyTo ? `${relay.meta.replyTo.kind}:${relay.meta.replyTo.from ?? relay.meta.replyTo.channel}` : "无"}`,
+    };
+  } },
+
+  // 同上, 但件二进来时件一还没被认出「已派」(watcher 没读到那句): 它已为件一派了活, 照样停放。
+  "same-pair-early": { names: [], unit: true, run: async () => {
+    const f = await fakeReceipts();
+    f.onDeliver((to, meta) => { if (to === "a" && meta.turn === "tc") setTimeout(() => f.answer("a", "t1", "RESULT: final-1"), 200); });
+    f.tell({ from: "a", to: "b", channel: "", turn: "tc", k: { kind: "peer", from: "x", turn: "t1" } });
+    f.tell({ from: "x", to: "a", channel: "", turn: "t1" });
+    f.tell({ from: "x", to: "a", channel: "", turn: "t2" });
+    f.answer("a", "t1", "已派");
+    await sleep(500);
+    f.answer("a", "t2", "RESULT: two");
+    await until(() => f.sent.some((s) => s.to === "x" && s.meta.turn === "t2"), 10_000, 100);
+    f.answer("b", "tc", "RESULT: b");
+    const got = await until(() => f.sent.find((s) => s.to === "x" && s.meta.turn === "t1"), 20_000, 100);
+    return {
+      pass: got?.body === "RESULT: final-1",
+      why: `x 收到 ${f.sent.filter((s) => s.to === "x").map((s) => `${s.meta.turn}:${s.body}`).join(" / ") || "无"}`,
     };
   } },
 

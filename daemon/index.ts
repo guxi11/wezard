@@ -724,14 +724,15 @@ const main = async (): Promise<void> => {
       restart: (t) => restartFresh(t),
       // 欠着回执的发话方挂上它们的信封: 新会话那一轮就是在答它们, 回执照常按信封定位,
       // 频道也接回原来那一句所在的地方 (私聊不进群)。
-      inject: (t, text, owe) =>
+      inject: (t, text, owe, channel) =>
         owe.length
           ? m.injectText(t, text, undefined, {
               from: { kind: "peer", from: owe[0]!.from, ...(owe[0]!.turn ? { turn: owe[0]!.turn } : {}), ...(owe[0]!.channel ? { public: true } : {}), ...(owe[0]!.asker ? { asker: owe[0]!.asker } : {}) },
               channel: owe[0]!.channel,
               envelope: owe.map((o) => envelopeFor(o.from, o.channel, o.turn ? { turn: o.turn } : undefined)).join(""),
             })
-          : m.injectText(t, text),
+          : m.injectText(t, text, undefined, { channel }),
+      channelOf: m.currentChannel,
       lastText: m.lastText,
       answeredBefore: (to, from, since, until, turn) => {
         const p = m.sessionInfo(to)?.jsonlPath;
@@ -781,7 +782,8 @@ const main = async (): Promise<void> => {
     };
     const parentKOf = (self: string): ParentK | undefined => {
       const opening = openingOfSelf(self);
-      return receipts.parentOf(self, opening?.env, channelOf(self), String(opening?.ms ?? 0));
+      // 不用 channelOf: 它把私聊轮 ("") 回落成 home, 私聊轮派出的活就会续回 home 群。
+      return receipts.parentOf(self, opening?.env, m.currentChannel(self), String(opening?.ms ?? 0));
     };
     /** `self` 此刻这一轮的链头 (见 Asker), 同样认开头那句的信封: 人在群里说的 → 信封上的
      *  userid 与群; 与人的单聊里没挂信封 → 那个人; 同伴派的活 / 回执 → 登记那件活时记下的;
@@ -1034,7 +1036,8 @@ const main = async (): Promise<void> => {
       const open = receipts.pending(self, target);
       const isOpen = (id?: string): string => (id && jobs.get(id)?.status === "open" ? id : "");
       const askedJob = ((body as { job?: string }).job ?? "").trim();
-      const jobId = kind === "fyi" ? "" : askedJob || isOpen(turn.job) || isOpen(open?.job);
+      // 挂起等子活的那份不算被顶掉: 它会按件号停放、自己计数, 新的一件不继承它的工单。
+      const jobId = kind === "fyi" ? "" : askedJob || isOpen(turn.job) || (open?.deferred ? "" : isOpen(open?.job));
       if (jobId) {
         const jc = checkJob(jobId, target, !!open?.need && open.turn === turn.turn);
         if (!jc.ok) { return { status: jc.status, body: { ok: false, reason: jc.reason } }; }

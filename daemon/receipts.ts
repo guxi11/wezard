@@ -224,7 +224,7 @@ export interface Receipts {
    *  `carryAt`, 新会话贴回简报那一句挂着发话方的信封, 照常按信封定位。返回转过去的那些。 */
   transfer: (to: string, answered: (s: Slot) => string, carryAt: number) => Slot[];
   /** `self` 此刻这一轮 (开头那句的信封 `env`, 没有 = 人) 派出去的活, 父 k 是什么。
-   *  `channel` = 它这一轮的公开频道。私聊来的而发话方没在等 (wait_peer 取走 / 不要回执)
+   *  `channel` = 它这一轮的频道 ("" = 私聊轮, 没有 chat 父 k)。私聊来的而发话方没在等 (wait_peer 取走 / 不要回执)
    *  → undefined, 退回现状。 */
   parentOf: (self: string, env: Envelope | undefined, channel: string, opening: string) => ParentK | undefined;
   /** `self` 此刻这一轮 (同伴派的活 / 回执) 的链头: 按件号找回登记时记下的那个。人开的轮不归这里。 */
@@ -232,7 +232,7 @@ export interface Receipts {
   /** 还没落定的每一件活此刻的状态 (见 turn-state.ts) —— 名册 / peek / 工单清单读它。只读, 不落盘。 */
   states: () => InFlight[];
   /** `from` → `to` 那件还没落定的活: 它的工单、件号、是不是停在 NEED 上。没有 = undefined。 */
-  pending: (from: string, to: string) => { job: string; turn: string; need: boolean } | undefined;
+  pending: (from: string, to: string) => { job: string; turn: string; need: boolean; deferred?: true } | undefined;
   /** `target` 被 `by` 收掉或打断: 发往它、还没落定的活都落成 canceled。`by` 自己那份
    *  不投 (它自己知道), 别的发话方各收一份 canceled 回执。必须先于 kill —— pane 一死,
    *  守着的 watcher 会把同一份报成 dead。`only` 收窄到其中几份 (interrupt 只停了它
@@ -247,6 +247,8 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   const keyOfTurn = (from: string, to: string, turn: string): string => `${keyOfPair(from, to)}\u0000${turn}`;
   const keyOf = (s: Slot): string => (s.parked ? keyOfTurn(s.from, s.to, s.turn ?? "") : keyOfPair(s.from, s.to));
   const live = (s: Slot): boolean => Date.now() - s.at < KEEP_MS;
+  // 过了保留期的行开机时从盘上抹掉: 同一对的位置会被下一句覆盖, 按件号停放的不会。
+  Object.entries(deps.store?.all() ?? {}).filter(([, s]) => !live(s)).forEach(([key]) => deps.store?.drop(key));
   const slots = new Map<string, Slot>(
     Object.values(deps.store?.all() ?? {}).filter(live).map((s) => [keyOf(s), s]),
   );
@@ -254,13 +256,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   const save = (s: Slot): void => {
     if (!stale(s)) deps.store?.set(keyOf(s), s);
   };
-  /** 停放的那份收尾即删: 它的 key 按件号, 不会被同一对的下一句覆盖, 留着只会越积越多。 */
-  const settle = (s: Slot): void => {
-    s.settled = true;
-    if (!s.parked || stale(s)) { save(s); return; }
-    slots.delete(keyOf(s));
-    deps.store?.drop(keyOf(s));
-  };
+  const settle = (s: Slot): void => { s.settled = true; save(s); };
   const stale = (s: Slot): boolean => slots.get(keyOf(s))?.gen !== s.gen;
   /** `to` 答 `k` 那件活的那一份 —— 在 `from→to` 的位置上, 或已按件号停放。 */
   const upstream = (k: { from: string; turn: string }, to: string): Slot | undefined =>
@@ -460,7 +456,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       const ok = await deps.rebound({ from: s.from, to: s.to, turn: s.turn!, legs, channel: s.channel, ...(s.asker ? { asker: s.asker } : {}) }, why);
       lg.info({ why, ok }, "receipt: 不合工单验收, 打回一次");
       // 打回没注入进去: 原来那份照常交上去 (钉成新 slot 的答案, 它的 watcher 直接拿去投)。
-      if (!ok) { const n = slots.get(keyOfPair(s.from, s.to)); if (n?.bounced && n.turn === s.turn) { n.answer = out.body; save(n); } }
+      if (!ok) { const n = upstream({ from: s.from, turn: s.turn! }, s.to); if (n?.bounced) { n.answer = out.body; save(n); } }
       return;
     }
     const final = isTerminal(out.status);
@@ -536,8 +532,9 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     // 续问一件停放着的: 接替它在停放处的位置, 不碰这一对眼下那一件。
     const parked = slots.get(keyOfTurn(tell.from, tell.to, turn));
     const prev = parked ?? slots.get(keyOfPair(tell.from, tell.to));
-    // 挂起等子活的那份被另一件顶下来: 按件号停放, 不作废 (见 Slot.parked)。
-    const park = !parked && !!prev?.deferred && !prev.settled && prev.turn !== turn;
+    // 挂起等子活的那份被另一件顶下来: 按件号停放, 不作废 (见 Slot.parked)。还没标上挂起、
+    // 但它已经为这件派了活的也算 —— watcher 可能还没读到那句「已派」。
+    const park = !parked && !!prev && !prev.settled && prev.turn !== turn && (!!prev.deferred || children(prev).length > 0);
     if (park) { prev.parked = true; slots.set(keyOf(prev), prev); save(prev); }
     // 顶掉一份还没落定的工单活、自己又没带工单: 继承那张工单 —— 旧那份不会再投了,
     // 这一句的答案就是那个成员的交代; 不继承它就永远不计 done, 工单齐不了。停放的那份还会投, 不让。
@@ -603,7 +600,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     },
     pending: (from, to) => {
       const s = slots.get(keyOfPair(from, to));
-      return s && !s.resolved && !s.claimed ? { job: s.job, turn: s.turn ?? "", need: s.outcome?.status === "need" } : undefined;
+      return s && !s.resolved && !s.claimed ? { job: s.job, turn: s.turn ?? "", need: s.outcome?.status === "need", ...(s.deferred ? { deferred: true as const } : {}) } : undefined;
     },
     states: () => {
       // 一个 target 欠好几份时只探一次 (探针要读它 transcript 的尾巴)。
@@ -641,7 +638,8 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
         const p = [...slots.values()].find((x) => x.to === self && !x.resolved && !x.claimed && (env.turn ? x.turn === env.turn : deps.nameOf(x.from) === env.from));
         return p && { kind: "peer", from: p.from, turn: p.turn! };
       }
-      return { kind: "chat", channel, turn: opening };
+      // 私聊轮 (频道 "") 派出的活没有群可续: 不能回落成 home, 否则回执轮就进了群。
+      return channel ? { kind: "chat", channel, turn: opening } : undefined;
     },
     askerOf: (self, env) => {
       // 回执轮: 那件活是 self 派出去的; 派来的活: 那件活是派给 self 的。同一对后来又说了一句,
