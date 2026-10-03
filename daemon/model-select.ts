@@ -269,6 +269,10 @@ export const labelFitsId = (label: string, id: string): boolean => {
   return !!m && (id.toLowerCase().match(/[a-z]+/gu) ?? ([] as string[])).includes(m[1]!.toLowerCase()) && versionOf(id) === m[2];
 };
 
+/** Claude Code's own `--model` aliases: valid launch args as-is, so a tier's
+ *  "haiku" needs no `/model` picker (whose "Kept model as …" echo is chat noise). */
+export const isLaunchAlias = (wanted: string): boolean => /^(?:haiku|sonnet|opus)$/i.test(wanted.trim());
+
 /** The exact id to launch with, or undefined when `wanted` is colloquial
  *  ("opus", "最新的 opus") or names nothing ever seen. `seen` is consumed
  *  lazily, likeliest first — the first hit ends the scan. */

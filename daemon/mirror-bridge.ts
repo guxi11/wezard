@@ -159,6 +159,10 @@ const findJsonlBySid = (sid: string, only?: CliBackend): string | undefined => {
 const normalizeForPath = (path: string, raw: unknown): TranscriptLine | null =>
   backendForPath(path).normalizeTranscriptLine(raw) as TranscriptLine | null;
 
+// /model、/effort 的本地回执 (spawn 兜底路径 / set_model 敲出来的) 是守护进程自己的
+// 操作痕迹, 不是聊天内容 —— 不镜像、不进详情页。
+const MODEL_RECEIPT_RE = /^(?:Set model to|Kept model as|Set effort level to|Kept effort|Switch model)\b/;
+
 // Local-command noise on user lines: Claude marks the caveat / command-stdout
 // records isMeta; codebuddy persists them as PLAIN user messages (no isMeta
 // field at all). Predicates looking for the first REAL user line must skip
@@ -708,6 +712,7 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
       const stdoutMatch = c.match(/<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/);
       if (stdoutMatch && stdoutMatch[1]) {
         const skillOutput = stdoutMatch[1].replace(/\[[0-9;]*m/g, "").trim();
+        if (MODEL_RECEIPT_RE.test(skillOutput)) return out;
         if (skillOutput) {
           out.push({ kind: "skill_output", body: `⚙️ ${skillOutput}` });
         }

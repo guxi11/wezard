@@ -34,7 +34,7 @@ import { expandHome } from "../shared/paths.js";
 import { augmentedPath } from "../shared/exec-path.js";
 import { sleep } from "../shared/std.js";
 import { activateBackend, CLI_BACKEND_DEFAULTS, primaryBackend, type CliBackend, type CliBackendName } from "../shared/cli-backends.js";
-import { exactModelId, selectModel } from "./model-select.js";
+import { exactModelId, isLaunchAlias, selectModel } from "./model-select.js";
 import type { Effort } from "../shared/effort.js";
 import { hasRegistry, sessionOnPane } from "./cc-session.js";
 
@@ -483,7 +483,7 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
     "DISABLE_AUTOUPDATER=1",
   ];
   const wanted = model?.trim() ?? "";
-  const exactId = wanted && backend.modelFlag ? exactModelId(wanted, knownModels ?? []) : undefined;
+  const exactId = wanted && backend.modelFlag ? (exactModelId(wanted, knownModels ?? []) ?? (isLaunchAlias(wanted) ? wanted : undefined)) : undefined;
   const effortArg = effort && backend.effortFlag ? effort : undefined;
   const argv = [
     ...(resumeSessionId ? ["--resume", sessionId, ...(forkSession ? ["--fork-session"] : [])] : ["--session-id", sessionId]),
