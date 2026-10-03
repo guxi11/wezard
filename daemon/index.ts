@@ -50,7 +50,7 @@ import { isQuiet, slugify, uniqueId } from "../shared/task-file.js";
 import { baseOfKey, bindTagLinker, isInternalKey, keyOf, linkTags, normalizeTag, tagFromCwd, tagHead, tagLink, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
 import { appendEpisode, clipForCharter, cwdOfMd, episodePath, inboxPath, mdsOf, proposedCwds, memoryPath, memoryRoot, proposeMemory, readMemory, type MemoryScope } from "./wizard-memory.js";
 import { retireStewardTask, startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
-import type { Asker } from "../shared/detail-store.js";
+import type { Asker, TurnFrom } from "../shared/detail-store.js";
 import { applyChatNames, chatBaseOf, chatNameOf, clearChatName, listChatNames, normChatName, peerAddress, planChatNames, setChatName } from "./chat-name.js";
 import {
   bindWizardStore,
@@ -86,7 +86,7 @@ import { loadJsonMap } from "../shared/json-map-store.js";
 import { createReceipts, deadlineOf, kAttr, newTurn, type InFlight, type ParentK, type Slot as ReceiptSlot } from "./receipts.js";
 import { renderInFlight } from "../shared/turn-state.js";
 import { renderReminder, type TurnTag } from "../shared/reminder.js";
-import { createHandoffs, handedOff, handingOff, type Pending as PendingHandoff } from "./handoff.js";
+import { createHandoffs, handedOff, handingOff, type Owe, type Pending as PendingHandoff } from "./handoff.js";
 import { coldGateOf, decide, rankCandidates, renderCandidates, tierFor, wakeNoteOf, type RouteRow } from "./route.js";
 import { parseWhen, renderChatLog, UNKNOWN_HUMAN, type LogSession } from "./chat-log.js";
 import { audienceOf } from "../shared/role-view.js";
@@ -214,9 +214,10 @@ const main = async (): Promise<void> => {
       const t = bridge.targetForSession(sid);
       return t ? await bridge.interruptPane(t) : { ok: false, reason: "no mirror target for session" };
     },
+    // 告知那一句接着被取消的那一轮说: 频道照它的走 —— 不带频道就等于在 home 群里开口。
     tell: async (sid: string, text: string): Promise<{ ok: boolean; reason?: string }> => {
       const t = bridge.targetForSession(sid);
-      return t ? await bridge.injectText(t, text) : { ok: false, reason: "no mirror target for session" };
+      return t ? await bridge.injectText(t, text, undefined, { channel: bridge.currentChannel(t) }) : { ok: false, reason: "no mirror target for session" };
     },
   };
   const http = startHttp({ cfg, ws, log, sourcePath });
@@ -717,16 +718,16 @@ const main = async (): Promise<void> => {
       isBusy: m.isBusy,
       sessionId: (t) => m.sessionInfo(t)?.sessionId ?? "",
       restart: (t) => restartFresh(t),
-      // 欠着回执的发话方挂上它们的信封: 新会话那一轮就是在答它们, 回执照常按信封定位,
-      // 频道也接回原来那一句所在的地方 (私聊不进群)。
-      inject: (t, text, owe, channel) =>
-        owe.length
-          ? m.injectText(t, text, undefined, {
-              from: { kind: "peer", from: owe[0]!.from, ...(owe[0]!.turn ? { turn: owe[0]!.turn } : {}), ...(owe[0]!.channel ? { public: true } : {}), ...(owe[0]!.asker ? { asker: owe[0]!.asker } : {}) },
-              channel: owe[0]!.channel,
-              envelope: owe.map((o) => envelopeFor(o.from, o.channel, o.turn ? { turn: o.turn } : undefined)).join(""),
-            })
-          : m.injectText(t, text, undefined, { channel }),
+      // 欠着回执的发话方挂上它的信封: 新会话那一轮就是在答它, 回执照常按信封定位, 频道也接回
+      // 原来那一句所在的地方 (私聊不进群)。欠好几份时每份各开一轮 (见 carryRest): 并成一句,
+      // 那一轮就只有一个去向, 别的上游拿到的是答给第一份的话。
+      inject: async (t, text, owe, channel) => {
+        const [first, ...rest] = owe;
+        if (!first) return m.injectText(t, text, undefined, { channel });
+        const r = await m.injectText(t, text, undefined, carryOpts(first));
+        if (r.ok && rest.length) void carryRest(t, rest);
+        return r;
+      },
       channelOf: m.currentChannel,
       lastText: m.lastText,
       answeredBefore: (to, from, since, until, turn) => {
@@ -746,6 +747,23 @@ const main = async (): Promise<void> => {
         if (!ok) log.warn({ target: e.target, name }, "handoff episode not archived");
       },
     });
+    /** 交接续答一份欠账的那一句: 挂发话方的信封, 出处与频道都是它当初那一句的。 */
+    function carryOpts(o: Owe): { from: TurnFrom; channel: string; envelope: string } {
+      return {
+        from: { kind: "peer", from: o.from, ...(o.turn ? { turn: o.turn } : {}), ...(o.channel ? { public: true } : {}), ...(o.asker ? { asker: o.asker } : {}) },
+        channel: o.channel,
+        envelope: envelopeFor(o.from, o.channel, o.turn ? { turn: o.turn } : undefined),
+      };
+    }
+    /** 简报那一轮之后, 余下的欠账一份一轮: 等它接住上一句 (至多 20s 动起来) 并答完, 再贴下一份。 */
+    async function carryRest(t: string, owe: readonly Owe[]): Promise<void> {
+      for (const o of owe) {
+        for (const end = Date.now() + 20_000; Date.now() < end && (await m.idleNow(t)); ) await sleep(1000);
+        await m.untilIdle(t, 3600_000);
+        const r = await m.injectText(t, `（交接续答）接着上面的简报: 你交接前还欠 ${displayName(o.from)} 一个交代${o.turn ? ` (件 \`${o.turn}\`)` : ""} —— 现在只就这件收口。`, undefined, carryOpts(o));
+        log.info({ mod: "handoff", target: t, from: o.from, turn: o.turn, ok: r.ok, reason: r.reason }, "handoff: 欠账续答");
+      }
+    }
     /** `self` 此刻这一轮派出去的活, 结论该交给谁 (见 receipts.parentOf)。只读它自己
      *  transcript 里开这一轮的那句 user 行的信封: attachment 上的 channel 在注入时就被
      *  排队的下一句改写了, transcript 才记着「这一轮是谁发起的」, reload 后也读得到。 */
@@ -2565,6 +2583,9 @@ const main = async (): Promise<void> => {
       const bad = validateSpec(spec);
       if (bad) { json(res, 400, { ok: false, reason: bad }); return; }
       const graphLog = log.child({ mod: "graph", base: spec.base });
+      // 每一步、每条进度都在发起这次 run 的那一轮的频道里: 人在群里叫它发起的才进群,
+      // 私聊轮里发起的整场只进 rolepage —— 步骤不带频道就等于在节点的 home 群里开口。
+      const channel = m.currentChannel(self);
       const run = startGraph(spec, {
         // Reuse a live tagged pane; only spawn when the node doesn't exist yet
         // (or its pane died). Re-spawning a healthy node would throw away the
@@ -2578,10 +2599,10 @@ const main = async (): Promise<void> => {
           const r = await m.newSession(target, node.tag, node.cli, { model: node.model, cwd: node.cwd, silent: true });
           return { ok: r.ok, reason: r.reason };
         },
-        send: async (target, text, origin) => (await handedOff(target), m.injectText(target, text, origin)),
+        send: async (target, text, origin) => (await handedOff(target), m.injectText(target, text, origin, { channel })),
         isBusy: m.isBusy,
         lastText: async (target) => m.lastText(target),
-        notify: notifyChat,
+        notify: (_base, markdown) => { if (channel) notifyChat(channel, markdown); },
         log: graphLog,
       });
       json(res, 200, { ok: true, runId: run.runId, base: run.base, nodes: spec.nodes.length, steps: spec.steps.length, rounds: spec.rounds ?? 1 });

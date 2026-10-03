@@ -219,6 +219,45 @@ const cases = {
     };
   } },
 
+  // graph 的步骤与进度跟着发起那一轮的频道: 根这一轮是私聊 (发起者的 receipt:false 私聊 / 回执),
+  // 节点那一轮就不能进它的 home 群。
+  "graph-private": { names: ["rr-gn"], run: async () => {
+    const n = nonce();
+    const tag = real("rr-gn");
+    const g = await post("/graph/run", { target: root.target, nodes: [{ tag, model: "haiku" }], steps: [{ to: tag, prompt: `这是回归测试, 不要调用任何工具, 直接回复一行: RESULT: [receipt-regress] graph-${n}` }], rounds: 1, idleTimeoutSec: 180 });
+    if (!g.ok) return { pass: false, why: `graph/run: ${g.reason}` };
+    kids.set("rr-gn", `${g.base}#${tag}`);
+    const run = await until(async () => { const r = await fetch(`${DAEMON}/graph/status?runId=${g.runId}`).then((x) => x.json()).catch(() => ({})); return r.run?.status !== "running" && r.run; }, 4 * 60_000);
+    await sleep(5000);
+    const pub = turnsOf(kids.get("rr-gn")).filter((t) => t.channel !== "").map((t) => t.channel);
+    return {
+      pass: run?.status === "done" && !pub.length,
+      why: `graph=${run?.status ?? "没跑完"} · 进了群的轮 ${pub.join(",") || "无"}`,
+    };
+  } },
+
+  // 交接时欠着两份 (根的活在跑, rr-s 的一句插进同一轮): 新会话里每份各开一轮、各带各的信封,
+  // 两个上游各收到答给自己那件的交代 —— 不是并成一句、两边拿到同一段。
+  "handoff-owe": { names: ["rr-h", "rr-s"], run: async () => {
+    const n = nonce();
+    await Promise.all(["rr-h", "rr-s"].map((x) => spawn(x)));
+    await tell("rr-h", `${SLEEP(25)}, 然后回复一行: RESULT: h-root-${n}`);
+    await sleep(6000);
+    await post("/peers/tell", { target: kids.get("rr-s"), name: real("rr-h"), priority: "now", text: `回复一行: RESULT: h-s-${n}` });
+    await sleep(3000);
+    const h = await post("/wizard/handoff-self", { target: kids.get("rr-h"), brief: `（receipt-regress 交接测试）手上没有别的活。新会话里每收到一份欠账, 只就那一份回复一行 RESULT: 加上它原来要的内容 —— 欠 ${real("rr-root")} 的是 h-root-${n}, 欠 ${real("rr-s")} 的是 h-s-${n}。不要调用任何工具。` });
+    if (!h.ok) return { pass: false, why: `handoff-self: ${h.reason}` };
+    const both = await until(() => { const a = slotOf(root.target, kids.get("rr-h")), b = slotOf(kids.get("rr-s"), kids.get("rr-h")); return a?.settled && b?.settled && [a, b]; }, 5 * 60_000);
+    const p = await jsonlOf(kids.get("rr-h"));
+    const lines = p ? readFileSync(p, "utf8").split("\n").filter((l) => l.includes('"type":"user"') && l.includes('wezard=\\"envelope\\"')) : [];
+    const mixed = lines.filter((l) => l.includes(`.${real("rr-s")}`) && l.includes(`.${root.name}`)).length;
+    const [a, b] = both ?? [];
+    return {
+      pass: !!both && a.outcome?.body.includes(`h-root-${n}`) && !a.outcome.body.includes(`h-s-${n}`) && b.outcome?.body.includes(`h-s-${n}`) && !b.outcome.body.includes(`h-root-${n}`) && !mixed,
+      why: `根收到=${a?.outcome?.status ?? "未落定"}:${a?.outcome?.body.slice(0, 60) ?? ""} · rr-s 收到=${b?.outcome?.status ?? "未落定"}:${b?.outcome?.body.slice(0, 60) ?? ""} · 两份信封并在一句的 ${mixed} 句`,
+    };
+  } },
+
   // fork 分身 (继承上下文) 的第一轮: 带 task 的是私聊派活, 不带的是开场白 —— 都不是人在群里
   // 问的, 终句不能进分身的 home 群。实测于 .irisfit-coder (10-03 04:33) / .eff-d (10-02 15:09)。
   "clone-private": { names: ["rr-f", "rr-g"], run: async () => {
