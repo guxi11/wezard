@@ -1447,8 +1447,9 @@ const main = async (): Promise<void> => {
       if (dayClamp(now) !== now) return 0;
       const owners = [...new Set(jobs.all().filter((j) => j.kind === "req" && j.status === "open").map((j) => j.owner))];
       // 只冒群默认管家 (无 tag) 自己的根单: lead 自己 dispatch 出来的子需求不该推给人; 与 pendingDigest 只服务默认会话一致。
+      // owner 须是已登记的 wizard: 伪造的 owner/群 (调试、回归) 不得往 turn store 落 post, 否则 rolepage 凭空长出一个群和一个「人」。
       const due = owners
-        .filter((o) => !tagOfKey(o))
+        .filter((o) => !tagOfKey(o) && !!wizards.get(o))
         .flatMap((o) => awaitingAccept(jobs.all(), o, jobLive()))
         .filter(({ job, at }) => !!job.origin?.chat && baseOfKey(job.owner) === job.origin.chat && nudgeDue(at, job.nudge, now) && now - (humanAt.get(job.origin.chat) ?? 0) >= HUMAN_QUIET_MS);
       // 按 (群, owner) 分组: 署名与信箱都跟着 owner。
