@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-10-03
+
 ### Added
 - 群管家手闸 (`daemon/steward-guard.ts`, 群聊级配置 `chatPolicy.<chat>.stewardBudget`, 默认 4, -1 = 关, 热生效): 管家 (群的默认会话, 跑 `models.router` 那档轻模型) 宪章说分派、实际常自己埋头干。守护进程在审批链最前面拦它 —— `Edit` / `Write` / `MultiEdit` / `NotebookEdit` / `Agent` / `Task` 一律拒; 读 / 搜 / 跑命令等每轮 (按 turn store 的当前轮) 最多 budget 次, 超了拒; wezard MCP 与 ToolSearch 等元工具不计。deny reason 直接写改道说明 (`dispatch`), 放行窗口 / allowRules / skipAll 都压不过它; 宪章管家段同步一行。
 - 闲置追问 (`daemon/idle-nudge.ts`): 派出去的活 (有回执在等的 `tell_peer` / `dispatch`), 对方持续闲着 (没在忙、没停在审批卡上、没在交接) 又没交回结论, 满 `wrc.mirror.idleNudge.afterMin` 分钟 (默认 5, 0 = 关, 热生效) 守护进程就代发话方同件号追问一句「进展如何 / 卡在哪」, 答复照常作为那件活的回执回去。只追问 `working` 的件 —— 反问中 / 挂起等子活 / 报过错 / 停在审批上的不问; 件落定、工单收了即停。一忙或锚变了 (续问 / 新一句) 就从头计, 问后再满一整段才可再问, 同一件至多 `idleNudge.max` 次 (默认 3)。追问由 `receipts.reask` 重新登记, 工单 / 频道 / 父 k / 链头 / 期限沿用原件 (不续期)。已问次数落盘 (`<stateDir>/idle-nudges.json`) 扛 reload, 闲置时长只在内存、reload 后从头计。
@@ -952,7 +954,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.3.0...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.4.0...HEAD
+[2.4.0]: https://github.com/guxi11/wezard/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/guxi11/wezard/compare/v2.2.2...v2.3.0
 [2.2.2]: https://github.com/guxi11/wezard/compare/v2.2.1...v2.2.2
 [2.2.1]: https://github.com/guxi11/wezard/compare/v2.2.0...v2.2.1
