@@ -224,6 +224,14 @@ button { font: inherit; color: inherit }
 .ci .pv, .si .pv { display: block; font-size: 12px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .ci .pv:empty, .si .pv:empty { display: none }
 .ci .tag { font-size: 10.5px; border-radius: 4px; padding: 0 4px; flex: none }
+.ci-chevron {
+  flex: none; margin-left: auto; align-self: center; width: 24px; height: 24px; padding: 0; border: 0;
+  background: transparent; cursor: pointer; display: flex; align-items: center; justify-content: center;
+  color: var(--faint); transition: color .12s, transform .12s;
+}
+.ci-chevron::before { content: "›"; font-size: 18px; font-weight: 300 }
+.ci-chevron:hover { color: var(--accent) }
+.ci-chevron.on::before { transform: rotate(90deg) }
 /* 头像与名字是进入那个 role 视角的入口 —— 侧栏项、会话头、消息行同一种读法。
    它们嵌在整行那颗按钮里; 行本身悬停不变底色, 只有入口自己亮起。z-index 保证没有兄弟盖住命中区。 */
 .nm.go, .av.go { position: relative; z-index: 1; cursor: pointer }

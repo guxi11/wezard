@@ -659,8 +659,11 @@
       ? '<div class="subs">' + talked.slice(0, SUB_FOLD).map(sub).join('') + bar + rest + '</div>'
       : '';
     var sel = on && !WITH;
+    var chevron = c.kind === 'group' && c.subs && c.subs.length
+      ? '<button class="ci-chevron' + (OPEN[c.key] ? ' on' : '') + '" data-toggle="' + esc(c.key) + '" title="' + (OPEN[c.key] ? '折叠' : '展开') + '"></button>'
+      : '';
     return '<button class="ci' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '">' +
-        convRow(c) + '</button>' + subs;
+        convRow(c) + chevron + '</button>' + subs;
   };
 
   // 搜索入口挂在名片下 —— 侧栏的公共区, 会话列表与关系图下都在。⌘K 见下方「搜索」。
@@ -695,6 +698,10 @@
     convsEl.querySelectorAll('[data-more]').forEach(function (b) {
       var key = b.getAttribute('data-more');
       b.onclick = function () { setMore(key, !MORE[key]); renderConvs(); };
+    });
+    convsEl.querySelectorAll('[data-toggle]').forEach(function (b) {
+      var key = b.getAttribute('data-toggle');
+      b.onclick = function (e) { e.stopPropagation(); setMore(key, !MORE[key]); renderConvs(); };
     });
     bindGo(convsEl);
     bindWorldToggle(convsEl);
