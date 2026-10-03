@@ -138,6 +138,9 @@ export interface ReceiptDeps {
   accept?: (job: string, body: string) => string | undefined;
   /** 以发话方的名义把同一件活打回一次 (同件号续问, 私聊)。返回是否注入成功。 */
   rebound?: (x: { from: string; to: string; turn: string; legs: number; channel: string; asker?: Asker }, why: string) => Promise<boolean>;
+  /** 一份回执有了 status (中途的 need / error 也报) —— 挂起事项表据此记账 (见 pending-items.ts)。
+   *  `bySender` = 发话方自己收掉 / wait_peer 取走的。 */
+  onOutcome?: (s: Slot, status: ReceiptStatus, body: string, bySender: boolean) => void;
 }
 
 export interface Tell {
@@ -446,6 +449,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     s.outcome = out;
     s.resolved = final;
     save(s);
+    deps.onOutcome?.(s, out.status, out.body, false);
     if (final && s.job) deps.settleJob?.(s.job, s.to, out.status as Terminal, parseClosing(out.body).artifacts);
     // 发话方自己在交接: 重开的那几秒里 pane 是死的, 别把这当成"已经不在了"。
     await deps.handedOff?.(s.from);
@@ -550,7 +554,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       s.claimed = true;
       s.resolved = true;
       settle(s);
-      if (fresh) release(s);
+      if (fresh) { release(s); deps.onOutcome?.(s, "done", "", true); }
       return s.delivered;
     },
     sentAt: (from, to) => slots.get(keyOfPair(from, to))?.at ?? 0,
@@ -598,6 +602,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
           body: `（守护进程: ${deps.nameOf(s.to)} 被 ${deps.nameOf(by)} 收掉 / 打断了, 这件活没有结论。）${last ? `\n它最后说的: ${truncate(last, 600)}` : ""}`,
         };
         if (s.job) deps.settleJob?.(s.job, s.to, "canceled", []);
+        deps.onOutcome?.(s, "canceled", s.outcome.body, s.from === by);
         // 发起 stop 的那方自己知道, 不投; 守着的 watcher 看到 claimed 就收尾。
         if (s.from === by) { s.claimed = true; s.resolved = true; settle(s); continue; }
         save(s);

@@ -23,15 +23,25 @@ export interface NoticeBox {
   post: (audience: readonly string[], line: string) => void;
   /** 取走并清空某个 wizard 的待投递行。 */
   drain: (target: string) => string[];
+  /** 另一类搭车的: 投递那一刻现算、自带壳的整段 (挂起事项, 见 pending-items.ts)。 */
+  digest?: (target: string, via: Via) => string;
 }
+
+/** 这一次注入是从哪来的 —— 人在某个群里说的话, 还是别的 (同伴 / 回执 / 定时)。 */
+export interface Via { human?: { channel: string } }
 
 /** 每个信箱最多攒 `max` 行 —— 一个挂了很久的 wizard 不该在醒来时读一部编年史,
  *  溢出时留最新的那些 (旧的那些多半已经被后面的变动覆盖了)。
  *  `probe` 是投递那一刻现算的行 (不是谁投进来的, 而是「此刻它的状态值得提一句」,
  *  如上下文快满); 排在信箱里的那些前面。 */
-export const createNoticeBox = (max = 12, probe: (target: string) => string[] = () => []): NoticeBox => {
+export const createNoticeBox = (
+  max = 12,
+  probe: (target: string) => string[] = () => [],
+  digest?: (target: string, via: Via) => string,
+): NoticeBox => {
   const boxes = new Map<string, string[]>();
   return {
+    ...(digest ? { digest } : {}),
     post: (audience, line) => {
       if (!line.trim()) return;
       for (const t of new Set(audience)) {
@@ -67,10 +77,10 @@ export const renderNotices = (lines: readonly string[]): string => {
 /** 注入边界上取一次增量。slash 命令按行解析, 尾巴上多挂一段会让它不再被识别成
  *  命令 —— 同 inbound 对 mention hint 的处理, 这类注入直接跳过 (信箱不清空, 等
  *  下一条普通消息)。 */
-export const noticeSuffixFor = (target: string, text: string): string => {
+export const noticeSuffixFor = (target: string, text: string, via: Via = {}): string => {
   const box = noticeBox();
   if (!box || text.trimStart().startsWith("/")) return "";
-  return renderNotices(box.drain(target));
+  return renderNotices(box.drain(target)) + (box.digest?.(target, via) ?? "");
 };
 
 /** 同一个聊天里除了当事人之外的所有 wizard —— 一次变动的默认听众。跨聊天的同伴

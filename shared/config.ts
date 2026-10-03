@@ -71,6 +71,7 @@ const Mirror = z.object({
   // 落盘是为了扛住 reload —— 被派活的 wizard 自己常以 reload 收尾, 纯内存的话它那
   // 一份回执就跟着旧进程没了。
   receiptsFile: z.string().default("~/.wezard/receipts.json").describe("在飞 tell_peer 回执的登记文件"),
+  pendingFile: z.string().default("~/.wezard/pending.json").describe("挂起事项表: 各 wizard 派出去、还没了结的事"),
   // 同理扛 reload: 落在「杀了旧 pane、还没贴回简报」之间, 纯内存的话新会话就空着
   // 醒来, 简报跟着旧进程没了。
   handoffsFile: z.string().default("~/.wezard/handoffs.json").describe("在飞交接 (handoff) 的登记文件"),

@@ -214,3 +214,52 @@ export const renderCandidates = (task: string, cands: readonly Evidence[], now: 
     "由你判断: 交集是不是同一件事; 接着用它那段上下文省下的重读, 值不值得唤醒时的缓存重写和往后每一轮背着的 ctx。标了 ⚠ 的默认不转, 除非你看得出这件活确实离不开它那段上下文。",
   ].join("\n");
 };
+
+// ── dispatch: 管家派活的默认决定 ──────────────────────────────────────
+// 上面的表是给模型读的; 这里把同一套事实收成一个默认决定 —— 管家愚笨也不会派错的那一半:
+// 证据够强、不忙、划算、过得了冷门控的头一个候选 → 转给它; 都不是 → 按档白板 spawn。
+// 模型不同意就显式推翻 (`to` 点名 / `force` 越过冷门控), 不推翻就照这个办。
+
+export type Decision =
+  | { kind: "existing"; row: RouteRow; why: string }
+  | { kind: "spawn"; why: string };
+
+/** 「真的是同一件事」的最低证据: 它读过这件活点到的文件, 或职责撞上两个以上的词。 */
+const strong = (e: Evidence): boolean => e.files.length > 0 || e.desc.length >= 2;
+
+/** 一个候选为什么不转给它; "" = 可以转。 */
+const vetoOf = (e: Evidence, now: number, ttlMs: number, small: boolean, force: boolean): string => {
+  const r = e.row;
+  const ctx = r.contextTokens;
+  const w = wakeCostOf(ctx, r.lastActivity, now, r.cacheTtlMs ?? ttlMs);
+  return !strong(e) ? "证据弱 (只有词面重叠)"
+    : r.busy ? "正忙"
+      : notWorth(e, w, small, ctx) ? `不划算 (${small ? "小活" : "证据弱"}却要${w.cold ? "整段重写" : "一直背着"} ${k(ctx)})`
+        : w.cold && ctx >= COLD_GATE && !force ? `缓存冷且 ctx ${k(ctx)} (要转就 force)`
+          : "";
+};
+
+const evidenceLine = (e: Evidence): string =>
+  [
+    e.files.length ? `读过点到的 ${e.files.length} 个文件` : "",
+    e.desc.length ? `职责${quoted(e.desc, 3)}` : "",
+    e.row.contextTokens ? ctxOf(e.row.contextTokens) : "",
+  ].filter(Boolean).join(" · ");
+
+/** 默认决定: 候选按证据排好 (rankCandidates), 取头一个没被否决的; 一个都没有 → spawn, 理由写前几个为什么不行。 */
+export const decide = (task: string, cands: readonly Evidence[], now: number, ttlMs: number, force = false): Decision => {
+  const small = isSmallTask(task);
+  const vetoes = cands.map((e) => ({ e, veto: vetoOf(e, now, ttlMs, small, force) }));
+  const hit = vetoes.find((v) => !v.veto);
+  if (hit) return { kind: "existing", row: hit.e.row, why: `转给 ${addr(hit.e.row)}: ${evidenceLine(hit.e)}` };
+  return {
+    kind: "spawn",
+    why: vetoes.length
+      ? `白板 spawn —— ${vetoes.slice(0, 3).map((v) => `${addr(v.e.row)} ${v.veto}`).join("; ")}`
+      : "白板 spawn —— 没有哪个已有 wizard 和这件活有交集",
+  };
+};
+
+/** spawn 时的默认档: lead 要判断 → hard; 一句话的小活 → light; 其余 standard。 */
+export const tierFor = (task: string, lead: boolean): "hard" | "light" | "standard" =>
+  lead ? "hard" : isSmallTask(task) ? "light" : "standard";

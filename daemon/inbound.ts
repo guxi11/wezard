@@ -1028,7 +1028,7 @@ export const installInboundRouter = (
     const homely = channel === baseOfKey(who) && channel.startsWith("user:");
     const envelope = slash || homely || !chat ? "" : renderHumanEnvelope(msg.from.userid, chat);
     // 同一条边界上再挂一段: 这个 wizard 不在场时群里发生的成员变动 (见 notices.ts)。
-    const notice = noticeSuffixFor(who, text);
+    const notice = noticeSuffixFor(who, text, { human: { channel } });
     try {
       // 回复回到发话的这个群 —— `who` 可能住在别的聊天 (名字全局可达)。
       await bridge.dispatch({ principal: who, text: text + envelope + hint + notice, images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}` });

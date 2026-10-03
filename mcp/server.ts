@@ -779,6 +779,31 @@ server.registerTool(
     unwrapText("route_candidates", await daemonPost("/wizard/route", { task, ...(cwd ? { cwd } : {}), ...(limit ? { limit } : {}) })),
 );
 
+server.registerTool(
+  "dispatch",
+  {
+    title: "Dispatch a task (default decision by the daemon)",
+    description:
+      "派活一步到位: 守护进程查候选 (同 route_candidates) → 过成本门控 → 决定转给已有的 wizard 还是按档白板 spawn → 用 tell_peer 投出去 (默认公开: 气泡与它的回复进你这一轮的群, 回执照常回你), 返回 `decision` (existing / spawn)、`reason`、落到谁 (`name`)、件号 `turn`, spawn 的还有 `tier` / `model`。\n" +
+      "默认决定: 证据够强 (读过这件活点到的文件, 或职责撞上两个以上的词)、不忙、划算、过得了冷门控的头一个候选 → 转给它; 都不是 → 白板 spawn, 档位默认 lead→hard、一句话小活→light、其余 standard。\n" +
+      "你不同意就**显式推翻**: `to` 点名转给谁, `spawn:true` 硬要新的, `force:true` 越过冷门控 (真依赖它那段上下文), `tier` 换档。`lead:true` = 复杂活 (要 coder + reviewer、要来回几轮): 白板起一个 hard 档的 lead 由它组队 (带 `to` 则让那个已有 wizard 当 lead, 组队打法随这一句带过去)。",
+    inputSchema: {
+      task: z.string().describe("这件活, 原样转给对方的文本 —— 带上提到的文件名 / 模块名, 文件命中是转给已有 wizard 的最强证据。"),
+      name: z.string().describe("若决定新 spawn, 它的名字: 这件事的短名 (全机唯一)。转给已有的时不用。"),
+      description: z.string().describe("若决定新 spawn, 它往后的职责, 一句话。"),
+      tier: z.enum(["light", "standard", "hard"]).optional().describe("spawn 时的档位, 推翻默认 (lead→hard、小活→light、其余 standard)。"),
+      to: z.string().optional().describe("推翻默认: 直接转给这个已有 wizard (名字)。"),
+      spawn: z.boolean().optional().describe("推翻默认: 不看候选, 一定白板 spawn。"),
+      force: z.boolean().optional().describe("越过冷门控: 缓存冷且 ctx ≥100k 的候选默认不转; 确认这件活真依赖它那段上下文才给 true。"),
+      lead: z.boolean().optional().describe("复杂活交给一个 lead 组队 (见描述)。"),
+      public: z.boolean().optional().describe("默认 true (气泡与回复进群); false = 私聊, 只记 rolepage。"),
+      deadline: z.number().optional().describe("同 tell_peer 的 deadline (秒)。"),
+      dryRun: z.boolean().optional().describe("只要默认决定与理由, 不执行。"),
+    },
+  },
+  async (a) => unwrap("dispatch", await daemonPost("/dispatch", a)),
+);
+
 // 换模型和 spawn 时挑模型是同一条路: 守护进程在目标 pane 里打开 `/model` 列表,
 // 读出这台 CLI 此刻真有的每一项, 挑最接近的, 方向键移过去选中。
 server.registerTool(
@@ -824,7 +849,7 @@ const offspringShape = {
     .describe("要不要被 keepalive 心跳保温 (空闲时定期 ping 一下防 prompt cache 过期)。false = 永远不保温, 省下那份 ping 的钱 —— 适合跑腿一次就收工的; true = 明确要保温 —— 适合会长期挂着、随时可能被叫醒接手的。省略则按 daemon 配置的默认值。"),
 };
 
-type Offspring = { description: string; name?: string; task?: string; from?: string; detached?: boolean; cwd?: string; chat?: string; cli?: string; model?: string; effort?: string; tier?: string; job?: string; keepalive?: boolean; chain?: boolean };
+type Offspring = { lead?: boolean; description: string; name?: string; task?: string; from?: string; detached?: boolean; cwd?: string; chat?: string; cli?: string; model?: string; effort?: string; tier?: string; job?: string; keepalive?: boolean; chain?: boolean };
 
 const bear = (tool: string, inherit: boolean) => async (a: Offspring) =>
   unwrap(tool, await daemonPost("/wizard/clone", {
@@ -843,6 +868,7 @@ const bear = (tool: string, inherit: boolean) => async (a: Offspring) =>
     ...(a.tier ? { tier: a.tier } : {}),
     ...(a.keepalive !== undefined ? { keepalive: a.keepalive } : {}),
     ...(a.chain === false ? { chain: false } : {}),
+    ...(a.lead ? { lead: true } : {}),
   }));
 
 const OFFSPRING_TAIL =
@@ -860,6 +886,7 @@ server.registerTool(
       ...offspringShape,
       cwd: z.string().optional().describe("它的工作区绝对路径。省略 = 跟你同一个目录。"),
       detached: z.boolean().optional().describe("true = 独立长住: 不挂在你名下 (不占分身名额、不随工单回收、不带 job), 等价于人在群里 `/new .name` —— 要一个往后一直在的新 wizard 时用; 干完一件活就收的别用。"),
+      lead: z.boolean().optional().describe("true = 它是来领一件复杂活的 lead: 宪章里多一节组队打法 (coder / 白板 reviewer / 工单 / 何时收队), 由它自己组队。配 `tier:\"hard\"`。"),
     },
   },
   bear("spawn_wizard", false),
@@ -932,6 +959,23 @@ server.registerTool(
     inputSchema: {},
   },
   async () => unwrap("list_jobs", await daemonPost("/jobs/list", {})),
+);
+
+server.registerTool(
+  "pending_items",
+  {
+    title: "What I dispatched and is still open",
+    description:
+      "挂起事项全表: 你派出去 (tell_peer / 带 task 的 spawn) 还没了结的每一件 —— 件号、对象、一句话题、为谁派的, 状态由守护进程按回执算 (在飞 / 等人拍板 / 人已回话 / 它在反问 / 没结论)。回执 done 了的、同一对改派了的、工单收了的自动消掉; 没结论的留着, 直到你改派、`re` 追问, 或用 `drop` 显式消掉。\n" +
+      "管家平时只会在注入尾巴上收到必要的一行增量, 快忘的时候 (交接 / 压缩后、隔了很多轮) 收到一次全表; 其余时候想看就调它。",
+    inputSchema: {
+      drop: z.array(z.string()).optional().describe("要消掉的件号 (`t...`): 不再需要、或已经另行处理了。"),
+      why: z.string().optional().describe("消掉的理由, 一句话 (记进账本)。"),
+      name: z.string().optional().describe("看别人的挂起事项 (只读)。省略 = 你自己的。"),
+    },
+  },
+  async ({ drop, why, name }) =>
+    unwrapText("pending_items", await daemonPost("/pending", { ...(drop?.length ? { drop } : {}), ...(why ? { why } : {}), ...(name ? { name } : {}) })),
 );
 
 server.registerTool(

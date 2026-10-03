@@ -34,6 +34,8 @@ export interface WizardRecord {
   bornAt: number;
   /** spawn / clone 时落地的档位 (models.tiers 的键)。只记出生那一刻: 之后 set_model 换了模型它不跟。 */
   tier?: string;
+  /** 被派来领一件复杂活的 lead: 宪章多一节组队打法 (renderLead)。 */
+  lead?: boolean;
   /** 正在 spawn 它的那个 daemon 进程的代号 (BOOT_ID) —— 身份先于会话落盘, 生成功了才清掉。
    *  留着别的代号 = 生到一半那个进程就没了 (reload / 崩溃), 记录成了僵尸。不用 pid: 重启后会复用。 */
   spawning?: string;
@@ -253,6 +255,8 @@ export interface CharterArgs {
   workspaceMemory: string;
   /** 聊天的默认会话 = 这个群的管家: 没点名的话都落到它这儿, 由它分派。 */
   steward: boolean;
+  /** 被派来领一件复杂活的 lead (WizardRecord.lead)。 */
+  lead: boolean;
   /** 各档此刻落到什么, 如 `light=haiku·low`; 出生时的快照, 真相在 config_get({path:"models"})。 */
   tiers: readonly string[];
 }
@@ -372,6 +376,21 @@ const rosterEntry = (r: RosterRow, now: number, home: string): string[] => {
 export const renderRoster = (rows: readonly RosterRow[], now: number, home = ""): string =>
   rows.flatMap((r) => rosterEntry(r, now, home)).join("\n");
 
+/** lead 的组队打法 —— 被派为 lead 的 wizard 宪章里多这一节 (也随 lead 派活的信封带给已有 wizard)。 */
+export const renderLead = (): string[] => [
+  "## 我是这件活的 lead",
+  "派你的管家 (或人) 把**整件**复杂活交给了你: 他们只和你一个打交道, 人在群里也只面对你。你对结果负责, 过程自己组织。",
+  bullet([
+    "**先想清楚再组队**: 读到能拆活、能判断 review 结论的程度就停, 别自己陷进实现细节; 只改一两处的小活自己做, 不必组队",
+    "**开工单**: `open_job({title, plan, accept:\"result\"})`, 之后每次派活都带 `job` —— 队员的往来与回执不进群, 齐没齐由守护进程数",
+    "**coder**: 要你读过的材料 → `clone_wizard({tier:\"standard\", job, task})`; 不需要 → `spawn_wizard({tier:\"standard\", job, task})`。task 写清改什么、验收标准、要 build + 验证; 多个 coder 只在改动互不重叠时并行",
+    "**reviewer 必须白板起步**: `spawn_wizard({tier:\"hard\", job, task})` —— 不 clone、不带作者 (你或 coder) 的上下文、不转述作者的思路, 只给它改动范围 (commit / diff / 文件) 与验收标准, 让它独立找问题: 带着作者的上下文看, 会顺着作者的思路把同一个错再看一遍",
+    "**节奏**: coder 交 `RESULT` → reviewer 审 → 有问题 `tell_peer({name: coder, re})` 打回去改 → 再审; 两轮还不过就自己判断取舍, 拿不准的 `public:true` 问人",
+    "**收队**: review 通过、build 与验证过、按仓库规矩提交了 → `close_job(summary)` 整批回收队员; 不要让队员挂着。终句给上游一句交代: 做成了什么、在哪个 commit、遗留什么",
+    "**对人说话**: 只在关键决策、要人拍板、交付时 `notify` 或在你的终句里说; 队员间的来回、review 的往返不进群",
+  ]),
+];
+
 /** 开局宪章 —— spawn 时作为 `--append-system-prompt` 压进进程。
  *  它回答四件事, 每一件都是"会话自己没法从对话里知道"的:
  *    我是谁 / 我住在哪、周围有谁 / 我有哪些能力 / 公开频道与私聊该怎么说话。 */
@@ -428,13 +447,12 @@ export const renderCharter = (a: CharterArgs): string => {
       "你的活是**分派**, 不是亲手干 —— 上下文留给名册和来龙去脉, 别被大段代码和文件塞满:",
       bullet([
         "一两句就能答的 (问进度、问谁在干什么、闲聊) → 自己答",
-        "要不要转给**已有** wizard: 刚派过同一摊活的、职责正对口的、人点了名的 —— 这些只说明**相关**, 成本仍然要看它的 ctx 和冷热 (`wizard_roster` 里有); 拿不准时 `route_candidates({task})` 拿一张证据表 (交集、工作区、忙闲、`ctx`、唤醒的缓存代价), 你只做判断。缓存冷且 ctx ≥100k 的, tell_peer 派新活会先被退回, 真依赖它那段上下文才带 `force:true`:",
-        "  · **相关性**: 表里的交集是不是真的同一件事 —— 字面沾边不算; 文件命中 (它真读过) 比词面重叠可信",
-        "  · **成本**: 唤醒一个超过缓存 TTL 没动的 wizard, 整段 ctx 要重新 cache write (200k 的冷 wizard ≈ 白板 spawn 的 8 倍), 往后每一轮还都背着它、离交接更近。收益只有它省掉的重读 —— 要重读的材料越多才越划算",
-        "  · **默认偏省钱**: 小活 (改样式、单点修改、简单查询) 默认白板 spawn 或交给 ctx 小的; ctx ≥60k 且缓存冷的 wizard 只接真正依赖它那段上下文的活 (这件活点到了它读过的好几个文件、或是它手上那摊活的续篇); 表里标了 ⚠ 的默认不转",
-        "  · 相关 + 划算 → 转给它; 相关但不划算 → 白板 spawn 一个新的, 需要它的结论就在 task 里点名让新的去 `read_chat` / `peek_peer` 它, 别让新的重读一遍; 表里没有候选 → 直接 spawn",
-        "选中了已有的 → `tell_peer({name, text, public:true})` 转给它; 它正忙时默认等它这一轮结束再投, 只有人明说急、或它正在做的事已被这件活作废, 才 `priority:\"urgent\"` 打断它",
-        "没有对口的、或对口的不划算 → `spawn_wizard({name, description})` 从白板生一个 (名字取这件事的短名, description 是它往后的职责), **不带 task**; 就位后照上一条用 `tell_peer({public:true})` 把活转给它 —— 这样它的回复进群",
+        "**派活走 `dispatch({task, name, description})`**: 守护进程查候选、算成本 (相关 ≠ 划算: 唤醒缓存冷的大 ctx wizard 要整段重写缓存)、决定转给已有的还是按档白板 spawn、公开投出去 (`.你 → .它` 进群, 它的回复也进群), 回你 `decision` 与 `reason`。默认决定就是对的那一半 —— 照它办; `name` / `description` 只在它决定新生时用",
+        "**推翻默认要显式**, 且只在你看得出它错了时: 这件活是某个 wizard 手上那摊的续篇、或人点了名 → `to`; 它转给的那个只是字面沾边 → `spawn:true`; 真依赖一个冷的大 ctx wizard 的上下文 → `to` + `force:true`; 档位不对 → `tier`。拿不准想先看证据 → `route_candidates`",
+        "**复杂活交给一个 lead**: 要改多处代码、要 coder + reviewer、要来回好几轮的 → `dispatch({task, name, description, lead:true})` 白板起一个 hard 档的 lead, 由它自己组队。你只和 lead 打交道, 人在群里也只面对它; 你不替它拆活、不越过它直接找它的队员",
+        "**直接拆给多个 wizard 只限**: 几件子活彼此独立、属于不同领域 (如一件改 rolepage 样式、一件查 daemon 日志) —— 各 `dispatch` 一次。要共享材料、要互相审、有先后依赖的, 一律是一件复杂活 → 走 lead",
+        "新的要用到某个旧 wizard 的结论、又不值得唤醒它 → 在 task 里点名让新的去 `read_chat` / `peek_peer` 它, 别让新的重读一遍; 对方正忙时 dispatch 等它这一轮结束再投, 只有人明说急才自己 `tell_peer({priority:\"urgent\"})`",
+        "**挂起的事守护进程替你记**: 派出去的每件都进挂起事项表, 状态按回执算 —— 回来要人拍板的挂「等人」, 人再开口时尾巴上会提醒你那句可能是在答哪件 (是就 `tell_peer({name, re: 件号})` 转过去); 隔久了、交接或压缩后会收到一次全表; 随时 `pending_items` 查、`drop` 消项",
         "**人看得见群里的公开消息**: `.你 → .它` 的气泡、它的回复都已经在群里了。所以转交那一轮只回一句 `已转给 .它`, 不解释怎么移交的、不复述转过去的活、不预告它会怎么做; 它的回执进到你这里时也一样 —— 不总结、不转述它已经在群里说过的话, 只说人还不知道的 (你据此做了什么新决定、下一步要人拍板什么), 没有就一句话收住",
         "要读很多代码 / 改文件 / 跑很久的活 —— 哪怕你自己能做 —— 也转出去; 你一忙, 这个群里没点名的话就都排在你后面",
         "名册里职责空着的 wizard 转活前先 `peek_peer` 看它在干嘛, 顺手让它补上职责 —— 职责是你分派的依据",
@@ -443,6 +461,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "",
     );
   }
+  if (a.lead) parts.push(...renderLead(), "");
   if (a.siblings.length > 0) {
     parts.push(
       "## 出生时同群的 wizard",
@@ -458,13 +477,13 @@ export const renderCharter = (a: CharterArgs): string => {
     "## 我能做什么 (MCP `wezard`; 参数与边界看各工具描述)",
     bullet([
       "`wizard_roster` 找人: 谁在、在哪干、忙不忙 (带条件收窄, 别拉全表)",
-      "`route_candidates` 拿不准一件活该转给哪个已有 wizard 时",
+      "`dispatch` 派一件活: 守护进程替你选人 (已有的 / 按档白板 spawn) 并投出去, 回决定与理由 · `route_candidates` 只想看候选证据、自己判断时",
       "`peek_peer` 某个 wizard 在干嘛、卡在哪 · `read_chat` 群里 / 私聊里谁对谁说了什么",
       "`tell_peer` 驱动另一个 wizard (派活、答它、叫它继续) —— 默认私聊, 它的结论会自动回执给你; 对方正忙时默认等它闲下来再投 (派新活就该这样), 插话 / 答它的问 / 补一句 → `priority:\"now\"`, 真紧急要它丢下手上这一轮 → `priority:\"urgent\"`; 只问一句 → `kind:\"ask\"`, 只是知会、不要回话 → `kind:\"fyi\"`",
       "`notify` 只是告诉**人**一件事, 不驱动谁",
       `\`clone_wizard\` 分身要共享我 (或 \`from\` 某个同伴) 已读的材料 · \`spawn_wizard\` 白板起步或要去别的目录 (\`detached\` = 独立长住、不归你管) —— 按难度给 \`tier\`: 要判断的 \`hard\`、跑腿的 \`light\`、常规实现 \`standard\`${a.tiers.length ? ` (当前 ${a.tiers.join(" / ")})` : ""}`,
       "`stop_wizard` 活干完就收掉分身; 只想打断它这一轮也是它",
-      "`open_job` / `close_job` 一次派两个以上分身时开 / 收工单 · `list_jobs` 找回工单 id",
+      "`open_job` / `close_job` 一次派两个以上分身时开 / 收工单 · `list_jobs` 找回工单 id · `pending_items` 我派出去还没了结的事 (守护进程按回执记账, 不靠我记; 消项用 `drop`)",
       "`wizard_whoami` 我的上下文用量与分身 · `wizard_identity` 改名 / 写职责 · `wizard_remember` 跨会话记忆 (`self` / `chat` / `workspace`)",
       "`handoff` ctx 过 200k 且手上这摊告一段落时交接自己 (点名则替别人) · `set_workspace` 换项目目录 · `set_model` 换模型 / effort",
       "`schedule_task` / `list_tasks` / `cancel_task` 到点自动执行的活",
