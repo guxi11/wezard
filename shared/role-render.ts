@@ -161,7 +161,7 @@ const handoffDeco = (r: TurnDetailRecord, records: readonly DetailRecord[], dir:
         : `<span class="ho-nm">.${escHtml(name)}</span>`;
     },
     role: (name) => ((id) => (id ? ` data-hrole="${escHtml(id)}" title="${escHtml(`以 .${dir.nameOf(id)} 为 viewpoint 看它的往来`)}"` : ""))(dir.resolve(name)),
-    plan: () => (r.target ? ` data-hplan="${escHtml(r.target)}" title="${escHtml(`打开 .${dir.nameOf(r.target)} 的日程`)}"` : ""),
+    plan: () => (r.target ? ` data-hplan="${escHtml(r.target)}"` : ""),
     attrs: (h) => {
       const id = dir.resolve(h.name);
       return id ? `${pairAttrs(r, id, h, landed(h))} title="${escHtml(`打开 .${dir.nameOf(r.target ?? "")} 与 .${dir.nameOf(id)} 的往来, 定位到这一句`)}"` : "";

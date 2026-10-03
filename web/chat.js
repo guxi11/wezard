@@ -39,6 +39,7 @@
   };
   var VIEW = 'msgs';
   // 侧栏是会话列表还是关系图 —— 与右边的 VIEW 无关: 关系图下右边照样是选中的那段对话。
+  // URL 带了 side 以它为准; 没带 (新链接) 用本地记下的, 见 WORLD_KEY。
   var WORLD = qs.get('side') === 'world';
   var $ = function (s) { return document.querySelector(s); };
   var app = $('#app'), thread = $('#thread'), inner = $('#thread-in'), convsEl = $('#convs');
@@ -528,13 +529,15 @@
     if (hit.length) saveRead();
   };
 
-  // 跨会话通用的个人偏好 (看全部、侧栏群节点的展开): 记在本地, 刷新后还在。
+  // 跨会话通用的个人偏好 (看全部、列表 / 关系、侧栏群节点的展开、session 选择): 记在本地, 刷新后还在。
   // 取不到 / 写不进 (隐私窗口、禁存) 就按默认值, 页面照常。
   var pref = function (key, def) {
     try { var v = localStorage.getItem(key); return v === null ? def : JSON.parse(v); } catch (e) { return def; }
   };
   var setPref = function (key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch (e) { } };
   var prefObj = function (key) { var v = pref(key, {}); return v && typeof v === 'object' ? v : {}; };
+  var WORLD_KEY = 'wezard.role.world';
+  if (!qs.has('side')) WORLD = pref(WORLD_KEY, false) === true;
   // 早先也记过 ping 与日程卡片的展开 —— 那两样只活在内存里, 旧 key 顺手清掉。
   try { ['wezard.role.pingOpen', 'wezard.role.planOpen'].forEach(function (k) { localStorage.removeItem(k); }); } catch (e) { }
 
@@ -705,6 +708,27 @@
   };
   // session 只靠两样认: 何时开始、跑了几轮。最新那段直接叫「最新」。
   var latestSess = function () { return R.sessions[R.sessions.length - 1]; };
+  // 选中的 session 按「role + 会话 (+ 群里的对端)」记; 选回默认 (全部时间, 不切) 就删那一项。
+  // 只在 URL 没指定 session 时恢复 —— 落地窗口要等第一份摘要才定, SESS_RESTORE 守到那时。
+  var SESS_KEY = 'wezard.role.session';
+  var SESS_RESTORE = !qs.get('session');
+  var sessKey = function () { return ROLE + '\n' + CONV + (WITH ? '\n' + WITH : ''); };
+  var savedSess = function () { return prefObj(SESS_KEY)[sessKey()] || ''; };
+  var saveSess = function (sid) {
+    var m = prefObj(SESS_KEY);
+    if (sid && sid !== 'all') m[sessKey()] = sid; else delete m[sessKey()];
+    setPref(SESS_KEY, m);
+  };
+  // 第一份摘要到手: 记下的那段还在列表里就换过去 (换了要重取一次), 不在了就回默认并删掉。
+  var restoreSess = function () {
+    if (!SESS_RESTORE) return false;
+    SESS_RESTORE = false;
+    var want = savedSess();
+    if (!want || want === SESSION) return false;
+    if (R.sessions.some(function (x) { return x.sessionId === want; })) { SESSION = want; return true; }
+    saveSess('');
+    return false;
+  };
   var sessWhen = function (s) { return s.start ? fmtClock(s.start) : '(无时刻)'; };
 
   // session 切换: name 右边一个小号文字触发器 + 浮层列表。
@@ -741,7 +765,7 @@
     if (!sp) return;
     sp.querySelector('.sp-btn').onclick = function () { setSessOpen(!SESS_OPEN); };
     sp.querySelectorAll('.sp-it').forEach(function (it) {
-      it.onclick = function () { setSessOpen(false); SESSION = it.getAttribute('data-s'); refresh(); };
+      it.onclick = function () { setSessOpen(false); SESSION = it.getAttribute('data-s'); saveSess(SESSION); refresh(); };
     });
   };
   document.addEventListener('click', function (e) {
@@ -1265,6 +1289,13 @@
 
   var bindRow = function (el) {
     bindGo(el, '.flip[data-r]:not([disabled]), .mwho .go[data-r], .tg-cut .go[data-r], .tg-mark .go[data-r], .tg-job .go[data-r]');
+    // 定时行开的是页面视角自己的日程: 片段不随视角 (服务端只标发话方), 能不能点在这里按 ROLE 定;
+    // 别人的那行不可点, 只剩 chevron 展开 prompt。换视角就地重包时也走这里。
+    el.querySelectorAll('.handoff .ho-line[data-hplan]').forEach(function (b) {
+      var mine = b.getAttribute('data-hplan') === ROLE;
+      b.classList.toggle('plan-go', mine);
+      if (mine) b.title = '打开 ' + nameOf(ROLE) + ' 的日程'; else b.removeAttribute('title');
+    });
   };
   var rowNode = function (id) {
     var list = inner.querySelectorAll('.mrow');
@@ -1460,6 +1491,7 @@
       }
       // 带 land 的 (换视角) 先不画: 页头换了高度, 旧行会在新行到来前先被顶一下, FLIP 的起点就错了。
       if (land) takeRole(d); else applyRole(d);
+      if (restoreSess()) return refresh(land);
       syncUrl();
       if (WORLD || VIEW === 'plan') loadWorld();
       if (VIEW === 'charter') loadCharter();
@@ -2261,6 +2293,7 @@
   // 侧栏换成关系图 / 换回会话列表。换回时选中的仍是在关系图里点开的那一项, 并把它滚进视野。
   var setWorld = function (on) {
     WORLD = on; W.treeFor = ''; W.pickSelf = '';
+    setPref(WORLD_KEY, on);
     convsEl._html = convsEl._tree = '';
     syncUrl();
     // 手机上侧栏与主区二选一 —— 开关在侧栏里, 结果也在侧栏里。
@@ -2494,5 +2527,7 @@
   // ── boot ──
   // 带着 role / conv 来的链接直接进阅读态 (手机上不先落在会话列表)。
   if ((ROLE || CONV) && !WORLD) app.classList.add('reading');
+  // 链接已带着 role 与会话: 记下的 session 先放进第一次请求, 省一次重取 (不在列表里由 restoreSess 收拾)。
+  if (SESS_RESTORE && ROLE && CONV && savedSess()) SESSION = savedSess();
   refresh();
 })();

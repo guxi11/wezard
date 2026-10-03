@@ -454,7 +454,9 @@ const TURN_CSS = `
   /* 一行到底不换行: 箭头 · 移交 · 对方 · 活号 · 标签 · 原文首行 (占剩下的宽, 省略号) · 展开钮。 */
   .handoff .ho-line{display:flex;align-items:center;gap:6px;padding:2px 6px 3px 24px;list-style:none;white-space:nowrap}
   .handoff .ho-line>*{flex:none}
-  .handoff .ho-line:is([data-hto],[data-hrole],[data-job],[data-hplan]){cursor:pointer}
+  .handoff .ho-line:is([data-hto],[data-hrole],[data-job],.plan-go){cursor:pointer}
+  .handoff .ho-line[data-hplan]:not(.plan-go){cursor:default}
+  .handoff .ho-line[data-hplan]:not(.plan-go) .ho-chev{cursor:pointer}
   details.handoff>.ho-line{background:none;border:0;font:inherit;color:inherit;
     text-transform:none;letter-spacing:0;user-select:auto}
   details.handoff>.ho-line::before{content:none}
@@ -716,7 +718,7 @@ export interface HandoffDeco {
   acct: (h: Handoff) => string;
   /** 整行点了开这个 wizard (新生的 / 被收的) 的往来、viewpoint 站到它身上; 名录里没有 = ""。 */
   role: (name: string) => string;
-  /** 整行点了开发话方的日程。 */
+  /** 发话方, 整行点了开它的日程 —— 只有它就是页面视角时才可点, 由客户端判 (片段不随视角)。 */
   plan: () => string;
 }
 
