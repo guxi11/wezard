@@ -666,7 +666,8 @@
 
     // 群聊项特殊处理: 把 chevron 挪到行内部, 在时间左边
     if (c.kind === 'group' && c.subs && c.subs.length) {
-      var chevron = '<button class="ci-chevron' + (OPEN[c.key] ? ' on' : '') + '" data-toggle="' + esc(c.key) + '" title="' + (OPEN[c.key] ? '折叠群' : '展开群') + '"></button>';
+      // 不能是 <button>: 嵌在外层 .ci 按钮里会被解析器提前闭合外层, chevron 就掉到卡片外
+      var chevron = '<span role="button" class="ci-chevron' + (OPEN[c.key] ? ' on' : '') + '" data-toggle="' + esc(c.key) + '" title="' + (OPEN[c.key] ? '折叠群' : '展开群') + '"></span>';
       var content = avatarOf(c) + '<span class="b"><span class="l1"><span class="t"><span class="nm chat">' + esc(c.name) + '</span>' + jobMark(c.jobs) + '</span>' + chevron + '<span class="ts">' + esc(fmtAgo(c.lastTs)) + '</span></span>' +
         '<span class="l2"><span class="pv">' + esc(c.preview) + '</span>' + (unreadOf(c) ? '<b class="ub">' + (unreadOf(c) > 99 ? '99+' : unreadOf(c)) + '</b>' : '') + '</span></span>';
       return '<button class="ci' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '">' + content + '</button>' + subs;

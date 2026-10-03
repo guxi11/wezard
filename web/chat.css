@@ -225,7 +225,7 @@ button { font: inherit; color: inherit }
 .ci .pv:empty, .si .pv:empty { display: none }
 .ci .tag { font-size: 10.5px; border-radius: 4px; padding: 0 4px; flex: none }
 .ci-chevron {
-  flex: none; align-self: center; width: 20px; height: 20px; padding: 0; border: 0;
+  flex: none; align-self: center; position: relative; z-index: 1; width: 20px; height: 20px; padding: 0; border: 0;
   background: transparent; cursor: pointer; display: flex; align-items: center; justify-content: center;
   color: var(--faint); transition: color .12s, transform .12s;
 }
