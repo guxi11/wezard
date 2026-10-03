@@ -797,7 +797,7 @@ server.registerTool(
       to: z.string().optional().describe("推翻默认: 直接转给这个已有 wizard (名字)。"),
       spawn: z.boolean().optional().describe("推翻默认: 不看候选, 一定白板 spawn。"),
       force: z.boolean().optional().describe("越过冷门控: 缓存冷且 ctx ≥100k 的候选默认不转; 确认这件活真依赖它那段上下文才给 true。"),
-      lead: z.boolean().optional().describe("复杂活交给一个 lead 组队 (见描述)。**只有它开需求根单** (回包里的 `job`), 普通小活不开单; 根单在 lead 交付后仍开着, 等人验收: 人认可 → `close_job(job)` 归档并回收 lead, 人说不对 → `tell_peer({re})` 给 lead 返工。对人别提单号。"),
+      lead: z.boolean().optional().describe("复杂活交给一个 lead 组队 (见描述)。**只有它开需求根单** (回包里的 `job`), 普通小活不开单; 根单在 lead 交付后仍开着, 等人验收: `lead:true` 的往来一律私聊 (`public` 不起作用)。人认可 → `close_job(job)` 归档并回收 lead, 人说不对 → `tell_peer({name, re, job})` 给 lead 返工。对人别提单号。"),
       criteria: z.string().optional().describe("验收标准 (`lead:true` 时记进根单): 做成什么样算交付。你猜的就在回复里向人复述一句再派。"),
       public: z.boolean().optional().describe("默认 true (气泡与回复进群); false = 私聊, 只记 rolepage。"),
       deadline: z.number().optional().describe("同 tell_peer 的 deadline (秒)。"),

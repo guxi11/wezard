@@ -275,7 +275,7 @@ const OUTCOME: Readonly<Record<string, string>> = { ...RCPT, "": "在干" };
 export const STAGE_LABEL = (j: { stage?: string; kind?: string; status?: string; parent?: string }): string =>
   j.status === "closed" || j.stage === "closed" ? (j.kind === "req" ? "归档" : "收工")
     : j.stage === "deliver" ? (j.kind === "req" ? "等验收" : "待收工")
-      : ({ plan: "规划", build: "实施", review: "评审", clarify: "澄清" } as Record<string, string>)[j.stage ?? ""] ?? "";
+      : ({ plan: "规划", build: "实施", review: "评审", clarify: "澄清", stalled: "卡住" } as Record<string, string>)[j.stage ?? ""] ?? "";
 const memberLine = (mm: WorldFactJob["members"][number], dir: Directory, closed: boolean): string =>
   `<li><span class="jo st-${escHtml(mm.outcome ?? (closed ? "none" : "run"))}">${escHtml(mm.outcome ? OUTCOME[mm.outcome] ?? mm.outcome : closed ? "—" : OUTCOME[""]!)}</span>` +
   (dir.isWizard(mm.target)

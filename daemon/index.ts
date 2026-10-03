@@ -22,7 +22,7 @@ import { loadMirrorStore } from "./mirror-store.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { installApprovalEventListener, makeApproveHandler, requestConfirm } from "./approval.js";
-import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, setWorldFactsProvider, lastHumanQueryOf, recordPost, recordCharter, backfillCharter } from "./detail.js";
+import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, setWorldFactsProvider, currentHumanQueryOf, recordPost, recordCharter, backfillCharter } from "./detail.js";
 import { EMPTY_FACTS, type WorldFacts, type WorldFactWizard } from "../shared/world.js";
 import { clearAutoWindow, initAutoWindowPersistence, setAutoWindow } from "./session-cache.js";
 import { makeMessageHandler } from "./outbound.js";
@@ -78,8 +78,8 @@ import {
   type WizardRecord,
 } from "./wizard.js";
 import { bindNoticeBox, createNoticeBox, createSeenRing, gcSeen, chatAudience, hears, type Notice, type Subject, type Part, type SeenRow, type Via } from "./notices.js";
-import { createLedger, digest, pendingGc, renderDigest, renderTable, renderAwaiting, type Item as PendingItem, type LiveOf, type Mark } from "./pending-items.js";
-import { loadJobStore, dutyLine, awaitingAccept, jobEpisode, rejectReason, ACCEPTS, JOB_MEMBER_MAX, JOB_DEPTH_MAX, depthOf, ancestorsOf as jobAncestors, treeOrder, jobStage, type Accept, type JobRecord, type MemberLive } from "./jobs.js";
+import { createLedger, digest, pendingGc, renderDigest, renderTable, renderAwaiting, renderStalled, type Item as PendingItem, type LiveOf, type Mark } from "./pending-items.js";
+import { loadJobStore, dutyLine, awaitingAccept, stalledRoots, childrenOf as jobChildren, jobEpisode, rejectReason, ACCEPTS, JOB_MEMBER_MAX, JOB_DEPTH_MAX, depthOf, ancestorsOf as jobAncestors, treeOrder, jobStage, type Accept, type JobRecord, type MemberLive } from "./jobs.js";
 import type { MemberRole } from "../shared/world.js";
 import { cacheTtlSec, clipMiddle, contextFiles, firstStamp, parseClosing, lastContextTokens, lastExchange, lastModel, openingTurn, replyClosedBefore, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { keepalivePingSigs } from "../shared/keepalive.js";
@@ -696,7 +696,7 @@ const main = async (): Promise<void> => {
           envelope: renderReceiptEnvelope(
             displayName(meta.from),
             meta.channel ? chatNameOf(cfg, meta.channel) : undefined,
-            meta.job ? { job: meta.job, done: meta.done, total: meta.total, closed: jobs.get(meta.job)?.status !== "open" } : undefined,
+            meta.job ? { job: meta.job, done: meta.done, total: meta.total, closed: jobs.get(meta.job)?.status !== "open", ...(jobs.get(meta.job)?.kind === "req" ? { req: true } : {}) } : undefined,
             meta.status,
             meta.turn || undefined,
             {
@@ -1062,7 +1062,10 @@ const main = async (): Promise<void> => {
       const isOpen = (id?: string): string => (id && jobs.get(id)?.status === "open" ? id : "");
       const askedJob = ((body as { job?: string }).job ?? "").trim();
       // 挂起等子活的那份不算被顶掉: 它会按件号停放、自己计数, 新的一件不继承它的工单。
-      const jobId = kind === "fyi" ? "" : askedJob || isOpen(turn.job) || (open?.deferred ? "" : isOpen(open?.job));
+      // 返工兜底: 回执槽 24h 过期 / 被顶掉后, re 落空成新件, 不带 job 就和根单断了 ——
+      // 发话方是某张开着的需求根单的 owner、目标恰是它的 lead 时, 自动补上。
+      const leadJob = jobs.all().find((j) => j.kind === "req" && j.status === "open" && j.owner === self && j.members.some((x) => x.target === target && x.role === "lead"))?.id ?? "";
+      const jobId = kind === "fyi" ? "" : askedJob || isOpen(turn.job) || (open?.deferred ? "" : isOpen(open?.job)) || leadJob;
       if (jobId) {
         const jc = checkJob(jobId, target, !!open?.need && open.turn === turn.turn);
         if (!jc.ok) { return { status: jc.status, body: { ok: false, reason: jc.reason } }; }
@@ -1383,6 +1386,8 @@ const main = async (): Promise<void> => {
       return (turn) => (byTurn ??= new Map(receipts.states().map((x) => [x.turn, x]))).get(turn);
     };
     /** 管家等人验收的根单行 (需求已交付、单还开着)。 */
+    const stalledRows = (owner: string): string[] =>
+      stalledRoots(jobs.all(), owner, jobLive()).map(({ job, status }) => renderStalled(job.title, job.id, status));
     const awaitingRows = (owner: string, now: number): string[] =>
       awaitingAccept(jobs.all(), owner, jobLive()).map(({ job, at }) => renderAwaiting(job.title, job.id, at, now));
     const pendingNames = { nameOf: displayName, chatOf: (b: string) => chatNameOf(cfg, b) || b };
@@ -1399,7 +1404,7 @@ const main = async (): Promise<void> => {
       pendingMarks.set(t, o.mark);
       o.touched.forEach(ledger.put);
       const rule = !seen("rule:pending");
-      const text = renderDigest(o, o.full ? renderTable(items, liveOfTurns(), pendingNames, now, awaitingRows(t, now)) : "", rule);
+      const text = renderDigest(o, o.full ? renderTable(items, liveOfTurns(), pendingNames, now, awaitingRows(t, now), stalledRows(t)) : "", rule);
       return { text, keys: text && rule ? ["rule:pending"] : [] };
     };
     const notices = bindNoticeBox(createNoticeBox({
@@ -1479,9 +1484,9 @@ const main = async (): Promise<void> => {
         .catch((e: unknown) => log.warn({ err: (e as Error).message }, "unborn window reap failed"));
     }
 
-    /** 成员角色参数 (MCP 只开放 exec / reviewer / expert, lead 由 dispatch 内部带); 不认识的 = 不给。 */
-    const roleParam = (v: unknown): MemberRole | undefined =>
-      (["lead", "exec", "reviewer", "expert"] as const).find((x) => x === v);
+    /** 成员角色参数: 只认 exec / reviewer / expert (lead 只由 dispatch 在派成之后记, 免得谁都能自封 lead); 不认识的 = 不给。 */
+    const roleParam = (v: unknown): Exclude<MemberRole, "lead"> | undefined =>
+      (["exec", "reviewer", "expert"] as const).find((x) => x === v);
     /** 成员此刻的态: 定论 > 在飞的实时态。每次取一份回执快照。 */
     const jobLive = (): MemberLive => {
       const inflight = receipts.states();
@@ -1966,8 +1971,9 @@ const main = async (): Promise<void> => {
       let rootId = "";
       const tell = (name: string, text: string, extra = ""): Promise<Reply> => tellPeerAs(self, {
         name, text, public: b.public !== false, force,
-        ...(b.deadline !== undefined ? { deadline: b.deadline } : {}),
-        ...(rootId ? { job: rootId, role: "lead" } : {}),
+        // lead 的活远超默认的 1h: 不给 deadline 就按 12h (回执的上限)。
+        ...(b.deadline !== undefined ? { deadline: b.deadline } : lead ? { deadline: 43200 } : {}),
+        ...(rootId ? { job: rootId } : {}),
       } as PeerBody, extra);
       const shown = cands.slice(0, 3).map((e) => `.${e.row.address || e.row.name}${e.row.busy ? " 忙" : ""}`);
       if (b.dryRun) {
@@ -1978,13 +1984,13 @@ const main = async (): Promise<void> => {
         const head = (b.description ?? "").toString().trim() || task.split("\n")[0]!.trim();
         rootId = jobs.open(baseOfKey(self), self, truncate(head, 60), {
           kind: "req", ...(criteria ? { criteria } : {}),
-          origin: { text: (lastHumanQueryOf(self) ?? task).trim(), chat: channelOf(self) },
+          origin: { text: ((m.sessionInfo(self) && currentHumanQueryOf(self, m.sessionInfo(self)!.sessionId)) || task).trim(), chat: channelOf(self) },
         }).id;
       }
       // 没投成的根单当场收掉: 留着只是一张没人干的空单。
       const settleRoot = (ok: boolean): void => { if (rootId && !ok) jobs.close(rootId, "派活没投成"); };
       const withRoot = (body: Record<string, unknown>): Record<string, unknown> => rootId
-        ? { ...body, job: rootId, hint: "需求根单已开, 对人**别提单号**。lead 交付后根单仍开着, 等人验收: 人认可 → close_job(job) 归档并回收 lead; 人说不对 → tell_peer({re}) 给 lead 返工 (同一张单, 不开新单)。" }
+        ? { ...body, job: rootId, hint: "需求根单已开, 对人**别提单号**。lead 交付后根单仍开着, 等人验收: 人认可 → close_job(job) 归档并回收 lead; 人说不对 → tell_peer({name, re, job}) 给 lead 返工 (同一张单, 不开新单)。" }
         : body;
       if (d.kind === "existing") {
         const name = to || (d.kind === "existing" && d.row ? d.row.address || d.row.name : "");
@@ -1994,6 +2000,7 @@ const main = async (): Promise<void> => {
         // 它下次重生宪章里就有。
         const t = await tell(name, task, lead ? renderReminder({ wezard: "lead" }, renderLead(chatPolicyOf(cfg, channelOf(self)).topOnly)) : "");
         if (lead && t.status === 200) wizards.upsert(r.target, { lead: true });
+        if (rootId && t.status === 200) jobs.attach(rootId, { target: r.target, task: "", spawned: false, role: "lead" });
         // 自动选中的被冷门控退回 (decide 用名册的活动时刻, 门控用 transcript 的, 口径差一点): 改走 spawn。
         if (!(t.body.gated === "cold" && !to)) {
           settleRoot(t.status === 200);
@@ -2014,8 +2021,8 @@ const main = async (): Promise<void> => {
       if (born.status !== 200) { settleRoot(false); json(res, born.status, { ...born.body, decision: "spawn", reason: d.why }); return; }
       const t = await tell(String(born.body.name), task);
       settleRoot(t.status === 200);
-      // 为这张根单生出来的: 归档 close_job 时要回收它 (tell 记的是 spawned:false, 再 attach 一次补上; 角色沿用)。
-      if (rootId && t.status === 200) jobs.attach(rootId, { target: String(born.body.target), task: "", spawned: true });
+      // 为这张根单生出来的: 归档 close_job 时要回收它 (tell 记的是 spawned:false, 再 attach 一次补上; lead 角色也在这里记)。
+      if (rootId && t.status === 200) jobs.attach(rootId, { target: String(born.body.target), task: "", spawned: true, role: "lead" });
       json(res, t.status, withRoot({
         ...t.body,
         decision: "spawn",
@@ -2372,9 +2379,12 @@ const main = async (): Promise<void> => {
       const all = jobs.all();
       const mineIn = (j: JobRecord): boolean => j.owner === self || j.members.some((x) => x.target === self);
       const askedParent = (b.parent ?? "").toString().trim();
-      const parentJob = askedParent
-        ? jobs.get(askedParent)
-        : all.filter((j) => j.status === "open" && j.members.some((x) => x.target === self && !x.outcome)).sort((x, y) => y.openedAt - x.openedAt)[0];
+      // 推断: 同一个群里、我作为未落定成员的开着的单, 取我**最近一次领活** (mm.at) 的那张; 它已在最深一层就不挂了 (退成根单, 不 409)。
+      const inferred = all
+        .filter((j) => j.base === base && j.status === "open")
+        .flatMap((j) => j.members.filter((x) => x.target === self && !x.outcome).map((x) => ({ j, at: x.at })))
+        .sort((x, y) => y.at - x.at)[0]?.j;
+      const parentJob = askedParent ? jobs.get(askedParent) : inferred && depthOf(jobs.get, inferred) < JOB_DEPTH_MAX ? inferred : undefined;
       if (askedParent && !parentJob) { json(res, 404, { ok: false, reason: `没有上级工单 '${askedParent}'` }); return; }
       if (askedParent && parentJob && (parentJob.status !== "open" || !mineIn(parentJob))) { json(res, 409, { ok: false, reason: `上级工单 '${askedParent}' 已收工, 或你既不是它的成员也不是它的开单者` }); return; }
       if (parentJob && depthOf(jobs.get, parentJob) + 1 > JOB_DEPTH_MAX) {
@@ -2402,26 +2412,35 @@ const main = async (): Promise<void> => {
       const job = jobs.get(id);
       if (!job) { json(res, 404, { ok: false, reason: `没有工单 '${id}'` }); return; }
       if (job.status !== "open") { json(res, 409, { ok: false, reason: `工单 '${id}' 已经收工了`, closedAt: job.closedAt }); return; }
-      // 回收只针对**为这个工单生出来的**分身: 被拉来帮忙的长期 wizard 不该因为一次
-      // 活结束就被杀掉。调用方自己也不收 —— 那会在这次工具调用里把自己干掉。
+      // 关一张单连它还开着的后代单一起关 (深的先关): 否则子 lead 的分身留在原地、账本上挂着没人收的单。
+      // 回收只针对**为这个工单生出来的**分身: 被拉来帮忙的长期 wizard 不该因为一次活结束就被杀掉。
+      // 调用方自己也不收 —— 那会在这次工具调用里把自己干掉。
       const recycle = b.stop !== false;
-      const victims = recycle ? job.members.filter((mm) => mm.spawned && mm.target !== self) : [];
-      // 收掉之前把它们手上没落定的活记成 canceled: 不然发起者收工之后还会收到一串 dead 回执。
-      victims.forEach((mm) => receipts.cancel(mm.target, self));
-      // 留档要的 sessionId 得在回收之前取: killPane 连绑定一起删。
-      const sids = new Map([job.owner, ...job.members.map((mm) => mm.target)].map((t) => [t, m.sessionInfo(t)?.sessionId ?? ""]));
-      const killed = await victims.reduce(
-        async (acc, mm) => (await acc) + ((await m.killPane(mm.target)).ok ? 1 : 0),
-        Promise.resolve(0),
-      );
-      const closed = jobs.close(id, (b.summary ?? "").toString())!;
-      ledger.closeJob(id);
-      // 收工结论留档到开单者名下 (与交接简报同一份 jsonl); 空工单 (没人、没结论) 不记。
-      if (closed.members.length || closed.summary?.trim()) {
-        const ep = jobEpisode(closed, { nameOf: episodeName, sidOf: (t) => sids.get(t) ?? "", chat: chatNameOf(cfg, job.base) || job.base });
-        if (!appendEpisode(episodePath(cfg.daemon.stateDir, ep.name), ep)) log.warn({ job: id, name: ep.name }, "job episode not archived");
-      }
-      json(res, 200, { ok: true, job: id, members: closed.members.length, recycled: killed, kept: victims.length - killed });
+      const openKids = (j: JobRecord): JobRecord[] => jobChildren(jobs.all(), j.id).filter((c) => c.status === "open").flatMap((c) => [...openKids(c), c]);
+      const cascade = openKids(job);
+      const closeOne = async (j: JobRecord, summary: string): Promise<{ members: number; killed: number; kept: number }> => {
+        const victims = recycle ? j.members.filter((mm) => mm.spawned && mm.target !== self) : [];
+        // 收掉之前把它们手上没落定的活记成 canceled: 不然发起者收工之后还会收到一串 dead 回执。
+        victims.forEach((mm) => receipts.cancel(mm.target, j.owner));
+        // 留档要的 sessionId 得在回收之前取: killPane 连绑定一起删。
+        const sids = new Map([j.owner, ...j.members.map((mm) => mm.target)].map((t) => [t, m.sessionInfo(t)?.sessionId ?? ""]));
+        const killed = await victims.reduce(
+          async (acc, mm) => (await acc) + ((await m.killPane(mm.target)).ok ? 1 : 0),
+          Promise.resolve(0),
+        );
+        const closed = jobs.close(j.id, summary)!;
+        ledger.closeJob(j.id);
+        // 收工结论留档到开单者名下 (与交接简报同一份 jsonl); 空工单 (没人、没结论) 不记。
+        if (closed.members.length || closed.summary?.trim()) {
+          const ep = jobEpisode(closed, { nameOf: episodeName, sidOf: (t) => sids.get(t) ?? "", chat: chatNameOf(cfg, j.base) || j.base });
+          if (!appendEpisode(episodePath(cfg.daemon.stateDir, ep.name), ep)) log.warn({ job: j.id, name: ep.name }, "job episode not archived");
+        }
+        return { members: closed.members.length, killed, kept: victims.length - killed };
+      };
+      const rs = await [...cascade.map((c) => [c, `随上级单 ${id} 收工`] as const), [job, (b.summary ?? "").toString()] as const]
+        .reduce(async (acc, [j, sum]) => [...(await acc), await closeOne(j, sum)], Promise.resolve([] as Array<{ members: number; killed: number; kept: number }>));
+      const sum = (f: (r: { members: number; killed: number; kept: number }) => number): number => rs.reduce((n, r) => n + f(r), 0);
+      json(res, 200, { ok: true, job: id, members: rs[rs.length - 1]!.members, recycled: sum((r) => r.killed), kept: sum((r) => r.kept), ...(cascade.length ? { cascaded: cascade.map((c) => c.id) } : {}) });
     });
 
     // 挂起事项全表 (见 pending-items.ts): 你派出去、还没了结的事。`drop` 显式消项;
@@ -2449,7 +2468,7 @@ const main = async (): Promise<void> => {
         text: [
           ...(dropped.length ? [`已消掉: ${dropped.map((x) => `\`${x.turn}\``).join(" ")}`] : []),
           ...(missed.length ? [`没找到 (不是你开着的): ${missed.join(" ")}`] : []),
-          renderTable(items, liveOfTurns(), pendingNames, now, awaitingRows(owner, now)),
+          renderTable(items, liveOfTurns(), pendingNames, now, awaitingRows(owner, now), stalledRows(owner)),
         ].join("\n"),
       });
     });

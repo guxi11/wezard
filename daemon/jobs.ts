@@ -177,9 +177,11 @@ export const jobStage = (j: JobRecord, all: readonly JobRecord[], live: MemberLi
   if (j.kind === "req") {
     const lead = j.members.find((mm) => roleOf(mm) === "lead");
     if (lead?.outcome === "done") return "deliver";
+    if (lead?.outcome) return "stalled";
     if (asking) return "clarify";
     const sub = childrenOf(all, j.id).find((c) => c.status === "open" && c.members.length);
-    return sub ? jobStage(sub, all, live) : "plan";
+    // 没有子单时 lead 手上还有在飞的活 (自己在干 / 返工中) 也是实施, 不是规划。
+    return sub ? jobStage(sub, all, live) : lead && live(j, lead) ? "build" : "plan";
   }
   if (!j.members.length) return "plan";
   if (asking) return "clarify";
@@ -204,6 +206,11 @@ export const dutyLine = (all: readonly JobRecord[], target: string): string =>
 export const awaitingAccept = (all: readonly JobRecord[], owner: string, live: MemberLive): Array<{ job: JobRecord; at: number }> =>
   all.filter((j) => j.kind === "req" && j.owner === owner && jobStage(j, all, live) === "deliver")
     .map((j) => ({ job: j, at: j.members.find((mm) => (mm.role ?? "exec") === "lead")?.settledAt ?? j.openedAt }));
+
+/** lead 没交差就收场的根单 (timeout / silent / dead / canceled): 要管家重派或关单。 */
+export const stalledRoots = (all: readonly JobRecord[], owner: string, live: MemberLive): Array<{ job: JobRecord; status: string }> =>
+  all.filter((j) => j.kind === "req" && j.owner === owner && jobStage(j, all, live) === "stalled")
+    .map((j) => ({ job: j, status: j.members.find((mm) => (mm.role ?? "exec") === "lead")?.outcome ?? "" }));
 
 export const loadJobStore = (filePath: string): JobStore => {
   const db = loadJsonMap<JobRecord>(filePath, dropStale);

@@ -11,6 +11,7 @@ import type { Handler } from "./http.js";
 import { resolvePublicHost } from "../shared/lan-ip.js";
 import { baseOfKey } from "../shared/session-label.js";
 import { wizardStore } from "./wizard.js";
+import { isKeepaliveShape } from "../shared/keepalive.js";
 import {
   createDetailStore,
   type ApprovalDecision,
@@ -254,11 +255,11 @@ export const knowsToolUse = (toolUseId: string): boolean =>
 // 落点。从没跑过一轮的会话没有自己的票据, 返回 undefined。
 export const latestTurnIdFor = (target: string): string | undefined => latestTurnId((r) => r.target === target);
 
-/** 这个会话最近一次**人**说的话 (没有出处的问话 —— 不是同伴派的、不是定时的): 管家开需求根单时记「需求原话」用。 */
-export const lastHumanQueryOf = (target: string): string | undefined => {
-  const id = latestTurnId((r) => r.target === target && !!r.userQuery && !r.from);
-  const r = id ? store?.get(id) : undefined;
-  return r?.kind === "turn" ? r.userQuery : undefined;
+/** 这个会话**当前这一轮**若是人开的 (有问话、没有同伴出处、不是保温 ping), 那句原话; 回执 / peer 轮 = 无。
+ *  管家开需求根单时记「需求原话」用: 取更早一轮的人话会把上一件事的话记到这件上。 */
+export const currentHumanQueryOf = (target: string, sessionId: string): string | undefined => {
+  const r = openTurnsOf(target, sessionId)[0];
+  return r && r.userQuery && !r.from && !isKeepaliveShape(r.userQuery) ? r.userQuery : undefined;
 };
 
 /** 这个会话还开着的轮次 (子 agent 的不算), 新的在前 —— reload 时正跑着的那一轮旧进程没来得及收口, 也有排着还没接上的。 */

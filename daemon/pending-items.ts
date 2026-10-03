@@ -163,14 +163,20 @@ const HOWTO = "答它 / 转达人的话 → `tell_peer({name, re: 件号})`; 没
 export const renderAwaiting = (title: string, job: string, deliveredAt: number, at: number): string =>
   `- 等验收 · ${title} (${job}) 交付于 ${at - deliveredAt < 60_000 ? "刚刚" : `${ago(at - deliveredAt)} 前`}`;
 
-const ACCEPT_HOWTO = "等验收的: 人认可 → `close_job(单号)` 归档并回收 lead; 人说不对 → `tell_peer({name: lead, re})` 返工 (同一张单)。对人别提单号。";
+/** lead 没交差的一行: 要管家重派或关单。 */
+export const renderStalled = (title: string, job: string, status: string): string =>
+  `- lead 没交差 (${status}) · ${title} (${job})`;
+
+const ACCEPT_HOWTO = "等验收的: 人认可 → `close_job(单号)` 归档并回收 lead; 人说不对 → `tell_peer({name: lead, re, job: 单号})` 返工 (同一张单)。对人别提单号。";
+const STALLED_HOWTO = "lead 没交差的: 向人说明后重派 (`tell_peer({name: lead, re, job})` 或换人), 或 `close_job(单号)` 关单。";
 
 /** 读全表 (pending_items 的回包)。`awaiting` = 等验收的根单行 (见 renderAwaiting)。 */
-export const renderTable = (xs: readonly Item[], live: LiveOf, n: Names, at: number, awaiting: readonly string[] = []): string =>
-  xs.length || awaiting.length
+export const renderTable = (xs: readonly Item[], live: LiveOf, n: Names, at: number, awaiting: readonly string[] = [], stalled: readonly string[] = []): string =>
+  xs.length || awaiting.length || stalled.length
     ? [
         ...(xs.length ? [`派出去还没了结的 ${xs.length} 件 (守护进程按回执算的):`, ...xs.map((x) => renderRow(x, live, n, at)), HOWTO] : []),
         ...(awaiting.length ? [`等人验收的 ${awaiting.length} 件:`, ...awaiting, ACCEPT_HOWTO] : []),
+        ...(stalled.length ? [`卡住的需求单 ${stalled.length} 件:`, ...stalled, STALLED_HOWTO] : []),
       ].join("\n")
     : "没有挂着的事。";
 
