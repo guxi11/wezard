@@ -515,21 +515,17 @@
   // 服务端给每个会话一份 heard = [说完的时刻, 发话方, 收信方], 以及我在群里 / 每一对里
   // 最后开口的时刻 (mine)。说给我的那句属于「我与发话方」那一对。一句话的已读水位 = 它所在那一处
   // 「我最后开口」与「我看过」的较晚者: 属于某一对的看那一对 (群里说过话不等于读过别的线程), 不属于任何一对的看群。
-  // 已读记录 `视角|会话|对端` 的键一直没变: 子项曾短暂是「对端在群里的全部记录」, 那时看过的覆盖了这一对, 照旧算数。
-  // 「看过」记在本地 (刷新 / 换视角都还在), 按视角分账 —— 同一个群换个 role 看, 未读是另一回事。
-  var READ_KEY = 'wezard.role.read';
-  var READ = (function () {
-    try { var v = JSON.parse(localStorage.getItem(READ_KEY) || '{}'); if (v && v.at) return v; } catch (e) { }
-    return { at: {} };
-  })();
-  var saveRead = function () { try { localStorage.setItem(READ_KEY, JSON.stringify(READ)); } catch (e) { } };
+  // 基线是「打开页面这一刻」(BASE, 服务端时钟, 首次拿到快照时定): 此前已有的话不算未读, 之后新说完的才累加,
+  // 刷新即重置 —— 所以「看过」只活在内存里, 不落本地。按视角分账 (同一个群换个 role 看, 未读是另一回事)。
+  var BASE = 0;
+  var READ = { at: {} };
   var readKey = function (key, withRole) { return ROLE + '|' + key + '|' + (withRole || ''); };
   var seenAt = function (key, withRole) { return READ.at[readKey(key, withRole)] || 0; };
   var unreadOf = function (c, withRole) {
     var g = seenAt(c.key);
     var mark = {};
-    (c.subs || []).forEach(function (s) { mark[s.role] = Math.max(g, s.mine || 0, seenAt(c.key, s.role)); });
-    var groupMark = Math.max(g, c.mine || 0);
+    (c.subs || []).forEach(function (s) { mark[s.role] = Math.max(g, BASE, s.mine || 0, seenAt(c.key, s.role)); });
+    var groupMark = Math.max(g, BASE, c.mine || 0);
     return (c.heard || []).filter(function (h) {
       var p = h[2] === ROLE ? h[1] : '';
       if (withRole && p !== withRole) return false;
@@ -560,7 +556,6 @@
     var h = c.heard && c.heard[c.heard.length - 1];
     var hit = readPairs(c).filter(function (w) { return unreadOf(c, w || (c.kind !== 'group' ? c.peer : '')); });
     hit.forEach(function (w) { READ.at[readKey(c.key, w)] = Math.max(R.at, h ? h[0] : 0); });
-    if (hit.length) saveRead();
   };
 
   // 跨会话通用的个人偏好 (看全部、列表 / 关系、侧栏群节点的展开、session 选择): 记在本地, 刷新后还在。
@@ -1497,6 +1492,7 @@
   // 收下摘要 (视角、会话列表、落地窗口) 与按它画页头侧栏分开: 换视角整窗重拉时, 画要等到新行到手的同一帧。
   var takeRole = function (d) {
     R.at = d.at || Date.now(); R.recvAt = Date.now();
+    if (!BASE) BASE = R.at;
     R.role = d.role; R.sessions = d.sessions || []; R.convs = d.convs || []; R.chatKeys = d.chatKeys;
     SESSION = d.session || '';
     R.relations = !!d.relations; R.schedules = d.schedules || 0; R.plan = d.plan || null; R.inflight = d.inflight || [];
