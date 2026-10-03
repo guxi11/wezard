@@ -770,49 +770,62 @@
   };
   var sessWhen = function (s) { return s.start ? fmtClock(s.start) : '(无时刻)'; };
 
-  // session 切换: name 右边一个小号文字触发器 + 浮层列表。
-  // renderRole 每次刷新都重画, 展开态记在 SESS_OPEN 里才不会被轮询收起。
-  var SESS_OPEN = false;
-  var sessRow = function (s, on) {
-    var last = s === latestSess();
-    return '<button class="sp-it' + (on ? ' on' : '') + '" role="option" aria-selected="' + on + '" data-s="' + esc(s.sessionId || '') + '" ' +
-      'title="' + esc(s.sessionId || '') + '">' +
-      '<span class="id">' + (last ? '最新 · ' : '') + esc(sessWhen(s)) + '</span>' +
-      '<span class="n">' + s.turns + ' 轮</span></button>';
+  // 自定义下拉: 小号文字触发器 + 浮层列表 (.sp)。名片里的 session 与侧栏标题行的时间范围共用这一份。
+  // 宿主每次刷新都重画, 展开的是哪一个记在 DD_OPEN 里 (按 id) 才不会被轮询收起。
+  // items: { v, html, on, cls?, tip? }; `ic` = 触发器左侧的图标; `end` = 浮层以触发器右沿为锚向左下展开 (贴着侧栏右沿的那种)。
+  var DD_OPEN = '';
+  var dropdown = function (id, o) {
+    var open = DD_OPEN === id;
+    return '<span class="sp' + (o.end ? ' end' : '') + (open ? ' open' : '') + '" data-dd="' + id + '">' +
+      (o.ic ? '<span class="sp-ic" aria-hidden="true">' + o.ic + '</span>' : '') +
+      '<button class="sp-btn" aria-haspopup="listbox" aria-expanded="' + open + '" title="' + esc(o.title) + '">' +
+        esc(o.label) + '<span class="car" aria-hidden="true"></span></button>' +
+      '<span class="sp-list" role="listbox">' + o.items.map(function (it) {
+        return '<button class="sp-it' + (it.cls ? ' ' + it.cls : '') + (it.on ? ' on' : '') + '" role="option" aria-selected="' + !!it.on + '" data-v="' + esc(it.v) + '"' +
+          (it.tip ? ' title="' + esc(it.tip) + '"' : '') + '>' + it.html + '</button>';
+      }).join('') + '</span></span>';
   };
-  var sessPicker = function () {
-    var cur = R.sessions.filter(function (s) { return s.sessionId === SESSION; })[0];
-    var all = '<button class="sp-it all' + (cur ? '' : ' on') + '" role="option" aria-selected="' + !cur + '" data-s="all">' +
-      '<span class="id">全部</span><span class="n">' + R.sessions.length + ' 段</span></button>';
-    var v = !cur ? '全部' : cur === latestSess() ? '最新' : sessWhen(cur);
-    return '<span class="sp' + (SESS_OPEN ? ' open' : '') + '">' +
-      '<button class="sp-btn" aria-haspopup="listbox" aria-expanded="' + SESS_OPEN + '" title="切换 session">' +
-        esc(v) + '<span class="car" aria-hidden="true"></span></button>' +
-      '<span class="sp-list" role="listbox">' + all +
-        R.sessions.slice().reverse().map(function (s) { return sessRow(s, s.sessionId === SESSION); }).join('') +
-      '</span></span>';
+  var setDdOpen = function (id) {
+    DD_OPEN = id;
+    document.querySelectorAll('.sp[data-dd]').forEach(function (sp) {
+      var on = sp.getAttribute('data-dd') === id;
+      sp.classList.toggle('open', on);
+      sp.querySelector('.sp-btn').setAttribute('aria-expanded', on);
+    });
   };
-  var setSessOpen = function (open) {
-    SESS_OPEN = open;
-    var sp = $('#rb-sp .sp');
+  var bindDropdown = function (root, id, pick) {
+    var sp = root && root.querySelector('.sp[data-dd="' + id + '"]');
     if (!sp) return;
-    sp.classList.toggle('open', open);
-    sp.querySelector('.sp-btn').setAttribute('aria-expanded', open);
-  };
-  var bindSessPicker = function () {
-    var sp = $('#rb-sp .sp');
-    if (!sp) return;
-    sp.querySelector('.sp-btn').onclick = function () { setSessOpen(!SESS_OPEN); };
+    sp.querySelector('.sp-btn').onclick = function () { setDdOpen(DD_OPEN === id ? '' : id); };
     sp.querySelectorAll('.sp-it').forEach(function (it) {
-      it.onclick = function () { setSessOpen(false); SESSION = it.getAttribute('data-s'); saveSess(SESSION); refresh(); };
+      it.onclick = function () { setDdOpen(''); pick(it.getAttribute('data-v')); };
     });
   };
   document.addEventListener('click', function (e) {
-    if (SESS_OPEN && !e.target.closest('#rb-sp .sp')) setSessOpen(false);
+    if (DD_OPEN && !e.target.closest('.sp[data-dd="' + DD_OPEN + '"]')) setDdOpen('');
   });
   document.addEventListener('keydown', function (e) {
-    if (SESS_OPEN && e.key === 'Escape') setSessOpen(false);
+    if (DD_OPEN && e.key === 'Escape') setDdOpen('');
   });
+
+  // session 切换: name 右边那个下拉。
+  var sessItem = function (s, on) {
+    var last = s === latestSess();
+    return { v: s.sessionId || '', on: on, tip: s.sessionId || '',
+      html: '<span class="id">' + (last ? '最新 · ' : '') + esc(sessWhen(s)) + '</span><span class="n">' + s.turns + ' 轮</span>' };
+  };
+  var sessPicker = function () {
+    var cur = R.sessions.filter(function (s) { return s.sessionId === SESSION; })[0];
+    return dropdown('sess', {
+      title: '切换 session',
+      label: !cur ? '全部' : cur === latestSess() ? '最新' : sessWhen(cur),
+      items: [{ v: 'all', on: !cur, cls: 'all', html: '<span class="id">全部</span><span class="n">' + R.sessions.length + ' 段</span>' }]
+        .concat(R.sessions.slice().reverse().map(function (s) { return sessItem(s, s.sessionId === SESSION); })),
+    });
+  };
+  var bindSessPicker = function () {
+    bindDropdown($('#rb-sp'), 'sess', function (v) { SESSION = v; saveSess(SESSION); refresh(); });
+  };
 
   // 会话列表 ↔ 关系图: 侧栏第一行右上角同一个小开关, 标的是「点了去哪」。
   var LIST_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M3 4h10M3 8h10M3 12h10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
@@ -824,17 +837,18 @@
   if (!WINS.some(function (w) { return w[0] === WIN; })) WIN = 0;
   var winCut = function () { return WIN ? srvNow() - WIN * 60000 : 0; };
   var winSelect = function () {
-    return '<select class="vt" data-win title="时间范围: 只看这段时间内有动静的">' + WINS.map(function (w) {
-      return '<option value="' + w[0] + '"' + (w[0] === WIN ? ' selected' : '') + '>🕒 ' + w[1] + '</option>';
-    }).join('') + '</select>';
+    return dropdown('win', {
+      ic: '⏱', end: true, title: '时间范围: 只看这段时间内有动静的',
+      label: (WINS.filter(function (w) { return w[0] === WIN; })[0] || WINS[0])[1],
+      items: WINS.map(function (w) { return { v: String(w[0]), on: w[0] === WIN, html: '<span class="id">' + w[1] + '</span>' }; }),
+    });
   };
   var bindWin = function (scope) {
-    var b = scope.querySelector('[data-win]');
-    if (b) b.onchange = function () {
-      WIN = +b.value; W.treeFor = ''; setPref(WIN_KEY, WIN);
+    bindDropdown(scope, 'win', function (v) {
+      WIN = +v; W.treeFor = ''; setPref(WIN_KEY, WIN);
       convsEl._html = ''; convsEl._tree = '';
       renderConvs();
-    };
+    });
   };
   var worldToggle = function () {
     return '<button class="vt" data-vt title="' + (WORLD ? '换回会话列表' : '换成关系') + '">' + (WORLD ? LIST_SVG + '列表' : TREE_SVG + '关系') + '</button>';

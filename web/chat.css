@@ -123,6 +123,9 @@ button { font: inherit; color: inherit }
   opacity: 0; transform: translateY(-4px); pointer-events: none; transition: opacity .12s, transform .12s;
 }
 .sp.open .sp-list { opacity: 1; transform: none; pointer-events: auto }
+/* 贴着右沿的下拉: 以触发器右下角为锚向左下展开, 宽度随选项。 */
+.sp.end .sp-list { left: auto; right: 0; width: auto; min-width: 104px }
+.sp-ic { flex: none; align-self: center; font-size: 12px; line-height: 1; margin-right: 1px }
 .sp-it {
   width: 100%; display: flex; gap: 10px; align-items: baseline;
   background: none; border: 0; border-radius: 6px; padding: 6px 8px; cursor: pointer; text-align: left; font-size: 12px;
@@ -192,11 +195,14 @@ button { font: inherit; color: inherit }
   border: 0; background: none; padding: 2px 6px; border-radius: 5px; cursor: pointer;
   font-size: 11px; font-weight: 400; color: var(--mute);
 }
-.convs h2 select.vt { appearance: auto; font-family: inherit; max-width: 92px }
 .convs h2 .vt:hover { background: #eef1f4; color: var(--accent) }
-/* 时间范围下拉靠右, 视图开关紧跟在它后面。 */
-.convs h2 [data-win] { margin-left: auto }
-.convs h2 [data-win] + .vt { margin-left: 0 }
+/* 时间范围下拉 (与名片里的 session 下拉同一个 .sp) 靠右, 视图开关紧跟在它后面。
+   标题行把 span 一律染淡, 下拉里的字照回正常色。 */
+.convs h2 .sp[data-dd="win"] { margin-left: auto; align-self: center; align-items: center }
+.convs h2 .sp[data-dd="win"] + .vt { margin-left: 0 }
+.convs h2 .sp .sp-it { color: var(--ink) }
+.convs h2 .sp .sp-it.on { color: var(--accent) }
+.convs h2 .sp-list span { color: inherit }
 /* 关系图那一行字多 (范围 · 计数 · 名册缺席 · 看全部 · 开关): 一律不折行, 让范围那段先省略。 */
 .convs h2 { white-space: nowrap; min-width: 0 }
 .convs h2 > * { flex: none }
