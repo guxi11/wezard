@@ -2200,6 +2200,8 @@ export interface MirrorBridge {
   idleNow: (target: string) => Promise<boolean>;
   /** 此刻停在审批卡 / 本地弹窗上 (注册表说闲、transcript 悬着工具调用)。认不得的后端 = false。 */
   parkedNow: (target: string) => boolean;
+  /** 同步的忙闲: 只问注册表, 不抓 pane —— 给注入尾巴这种不能等的地方。认不得 = undefined。 */
+  idleVerdict: (target: string) => boolean | undefined;
   /** Resolves the moment `target` turns idle (registry-event driven; pane polling
    *  only for backends without a registry). `aborted` is polled with the safety
    *  tick — a watcher whose reason went away must not hold timers for an hour.
@@ -6188,6 +6190,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     isBusy,
     idleNow,
     parkedNow,
+    idleVerdict,
     untilIdle,
     setModel: async (target, wanted, scope) => {
       const a = byTarget.get(target);

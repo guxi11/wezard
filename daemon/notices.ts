@@ -79,7 +79,8 @@ export const createSeenRing = (store: JsonMap<SeenRow> | undefined, sidOf: (t: s
   const live = (t: string): SeenRow | undefined => {
     const r = mem.get(t);
     const sid = sidOf(t);
-    return r && (!sid || !r.sid || r.sid === sid) ? r : undefined;
+    // 没记 sid 的那行 (当时还不知道是哪段会话) 不能证明「这一段见过」: 已知会话下作废。
+    return r && (!sid || r.sid === sid) ? r : undefined;
   };
   const put = (t: string, r: SeenRow | undefined): void => {
     if (r) { mem.set(t, r); store?.set(t, r); } else if (mem.delete(t)) store?.drop(t);
@@ -153,9 +154,38 @@ export const groupRows = (ns: readonly Notice[], cwd: string): string[] => {
   return [...groups].map(([tpl, names]) => tpl.replace(HOLE, listNames(names)));
 };
 
-/** 名册那一段。去重按单条 (`r:<那一行>`) 记, 渲染时再并行; 规矩只在窗口里没给过时给。 */
-export const rosterPart = (ns: readonly Notice[], cwd: string): Part => (seen) => {
+/** 群况快照的一行: 此刻在这个聊天里、与收件人相关的一个 wizard。 */
+export interface SnapRow { name: string; state: "busy" | "idle" | "-"; job: string }
+export const SNAP_MAX = 16;
+/** CSV 的值: 有逗号 / 引号才加引号 (内部引号双写)。 */
+const csv = (s: string): string => (/[",]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
+/** 快照 → `name,state,job` 表; 太多就截断并指路 wizard_roster。 */
+export const renderSnapshot = (rows: readonly SnapRow[]): string[] => [
+  "name,state,job",
+  ...rows.slice(0, SNAP_MAX).map((r) => [r.name, r.state, csv(clip(r.job))].join(",")),
+  ...(rows.length > SNAP_MAX ? [`…(+${rows.length - SNAP_MAX}) wizard_roster`] : []),
+];
+/** 生 / 收 / 改职责 / 改名 —— 快照的表里已经是它们之后的样子。 */
+const subsumed = (n: Notice): boolean => n.op === "born" || n.op === "ended" || n.op === "job" || n.op === "renamed";
+
+/** 名册那一段。去重按单条 (`r:<那一行>`) 记, 渲染时再并行; 规矩只在窗口里没给过时给。
+ *  `snap` 给了 (长住的收件人) 且窗口里没给过整表: 给一份此刻的群况表 (mode=full) ——
+ *  会话一换窗口就清零, 所以交接 / /clear 后的头一条注入必带; 表里已是变动之后的样子,
+ *  生收改名那几行一并记作给过, 只剩 note 照挂。 */
+export const rosterPart = (ns: readonly Notice[], cwd: string, snap?: () => readonly SnapRow[]): Part => (seen) => {
   const fresh = [...new Map(netNotices(ns).map((n) => [renderNotice(n, cwd), n] as const))].filter(([r]) => !seen(`r:${r}`));
+  const table = snap && !seen("roster:full") ? snap() : undefined;
+  if (table?.length) {
+    const notes = fresh.filter(([, n]) => !subsumed(n));
+    return {
+      text: renderReminder({ wezard: "roster", mode: "full" }, [
+        "Wizards in this chat now (state as of this message; truth: wizard_roster). FYI only — don't reply.",
+        ...renderSnapshot(table),
+        ...groupRows(notes.map(([, n]) => n), cwd).map((r) => `- ${r}`),
+      ]),
+      keys: ["roster:full", ...fresh.map(([r]) => `r:${r}`)],
+    };
+  }
   if (!fresh.length) return none;
   const rows = groupRows(fresh.map(([, n]) => n), cwd);
   const rule = !seen("rule:roster");
@@ -177,6 +207,8 @@ export const createNoticeBox = (o: {
   max?: number;
   probe?: (target: string) => string[];
   digest?: (target: string, via: Via) => Part;
+  /** 该给群况快照的收件人 → 此刻的表; undefined = 只给变动。 */
+  snapshot?: (target: string) => (() => readonly SnapRow[]) | undefined;
   seen?: SeenRing;
   cwdOf?: (target: string) => string;
 } = {}): NoticeBox => {
@@ -197,7 +229,7 @@ export const createNoticeBox = (o: {
     drain,
     suffix: (target, via, lead) => {
       const seen = ring.of(target);
-      const parts = [...lead, rosterPart(drain(target), o.cwdOf?.(target) ?? ""), ...(o.digest ? [o.digest(target, via)] : [])];
+      const parts = [...lead, rosterPart(drain(target), o.cwdOf?.(target) ?? "", o.snapshot?.(target)), ...(o.digest ? [o.digest(target, via)] : [])];
       const secs = parts.map((p) => p(seen));
       ring.push(target, secs.flatMap((s) => s.keys));
       return secs.map((s) => s.text).join("");

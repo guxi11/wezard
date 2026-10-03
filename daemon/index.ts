@@ -79,7 +79,7 @@ import {
   type WizardBrief,
   type WizardRecord,
 } from "./wizard.js";
-import { bindNoticeBox, createNoticeBox, createSeenRing, gcSeen, chatAudience, hears, noticeSuffixFor, type Notice, type Subject, type Part, type SeenRow, type Via } from "./notices.js";
+import { bindNoticeBox, createNoticeBox, createSeenRing, gcSeen, chatAudience, hears, noticeSuffixFor, type Notice, type Subject, type Part, type SeenRow, type SnapRow, type Via } from "./notices.js";
 import { createLedger, digest, pendingGc, renderDigest, renderTable, renderAwaiting, renderStalled, renderShelved, ago as agoMs, HEARD_EVERY_MS, type Item as PendingItem, type LiveOf, type Mark } from "./pending-items.js";
 import { loadJobStore, dutyLine, awaitingAccept, stalledRoots, shelvedRoots, nudgeDue, dayClamp, childrenOf as jobChildren, jobEpisode, rejectReason, ACCEPTS, JOB_MEMBER_MAX, JOB_DEPTH_MAX, depthOf, ancestorsOf as jobAncestors, treeOrder, jobStage, type Accept, type JobMark, type JobRecord, type MemberLive } from "./jobs.js";
 import type { MemberRole } from "../shared/world.js";
@@ -1478,6 +1478,14 @@ const main = async (): Promise<void> => {
     const notices = bindNoticeBox(createNoticeBox({
       probe: (t) => [...handoffNudge(t), ...memoryNudge(t)],
       digest: pendingDigest,
+      // 群况快照只给长住的 (没有 parent): 分身的协调人是生它的那位, 宪章里的出生快照够用。
+      // 表里是这个群的常驻面: 管家、长住有职责的、管家生的 (群里的执行者)、收件人自己生的;
+      // 再往下一层的 (分身的分身, 回归测试那批 rr-*) 不进表 —— 同名册变动 hears 的取舍。
+      snapshot: (t) => (wizards.get(t)?.parent ? undefined : () =>
+        m.chatTargets(t)
+          .filter((x) => x !== t && wizards.get(x)?.name)
+          .filter((x) => ((p) => !tagOfKey(x) || (!p ? !!wizards.get(x)?.description : p === t || p === baseOfKey(t)))(wizards.get(x)?.parent))
+          .map((x): SnapRow => ({ name: displayName(x), state: ((v) => (v === undefined ? "-" : v ? "idle" : "busy"))(m.idleVerdict(x)), job: wizards.get(x)?.description || (tagOfKey(x) ? "" : "steward") }))),
       seen: createSeenRing(loadJsonMap<SeenRow>(cfg.wrc.mirror.noticeSeenFile, gcSeen), (t) => m.sessionInfo(t)?.sessionId ?? ""),
       cwdOf: (t) => ((c) => c.runningCwd || c.defaultCwd)(m.getCwd(t)),
     }));
