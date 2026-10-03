@@ -2006,7 +2006,23 @@
   // 只看相关时画谁: 视角自己 + 和视角有直接关系的 (任一种, 任一方向; 'rel'); 它们通向根的主父亲链上
   // 与视角无关的祖先留作连接 ('via', 画淡) —— 抹掉它, 有关系的后代就从家谱上脱开, 成了一棵来历不明的孤树。
   var visibleOf = function (F) {
-    var keep = Object.keys(F.ends).filter(function (t) { return t === ROLE || F.pairs[ROLE + '\u0000' + t] || F.pairs[t + '\u0000' + ROLE]; });
+    // 相关 = 沿关系边 (任一种, 任一方向) 一路走得到的整个连通块, 不止一跳: 间接、多跳的也展开。
+    var nbr = Object.keys(F.pairs).reduce(function (m, k) {
+      var p = F.pairs[k];
+      (m[p.from] = m[p.from] || []).push(p.to);
+      (m[p.to] = m[p.to] || []).push(p.from);
+      return m;
+    }, {});
+    var reach = function (seen, frontier) {
+      if (!frontier.length) return seen;
+      var next = frontier.reduce(function (acc, t) {
+        (nbr[t] || []).forEach(function (o) { if (!seen[o]) { seen[o] = 1; acc.push(o); } });
+        return acc;
+      }, []);
+      return reach(seen, next);
+    };
+    var linked = reach((function (o) { o[ROLE] = 1; return o; })({}), [ROLE]);
+    var keep = Object.keys(F.ends).filter(function (t) { return t === ROLE || linked[t]; });
     var vis = keep.reduce(function (m, t) { m[t] = 'rel'; return m; }, {});
     if (!vis[ROLE]) vis[ROLE] = 'rel';
     keep.forEach(function (t) { chainUp(F, t).forEach(function (u) { if (!vis[u]) vis[u] = 'via'; }); });
@@ -2057,7 +2073,7 @@
       '<h2>关系<span title="在名片里的 session 下拉切换范围">' + esc(span) + ' · ' + (all ? Object.keys(F.ends).length : shown.length) + ' 个</span>' +
         (W.degraded ? '<span class="warn" title="没拿到 wizard 注册表 (svr 还没收到 daemon 的快照), 只画观测到的往来">名册缺席</span>' : '') +
         (me ? '<button class="vt" data-tall="' + (all ? 'rel' : 'all') + '" title="' +
-          (all ? '画出范围内所有有关系的 wizard (点击改为只画相关的)' : '只画它自己、和它有直接关系的, 以及连到它们的上游链 (点击改为画全部)') + '">' + (all ? '全部' : '相关') + '</button>' : '') + worldToggle() + '</h2>' +
+          (all ? '画出范围内所有有关系的 wizard (点击改为只画相关的)' : '只画它自己、顺着关系能连到它的 (含间接多跳的), 以及连到它们的上游链 (点击改为画全部)') + '">' + (all ? '全部' : '相关') + '</button>' : '') + worldToggle() + '</h2>' +
       (alone ? '<div class="tsolo">' + esc(nameOf(ROLE)) + (rg ? ' 在这段 session 里' : '') + ' 没和谁有关系</div>' : '') +
       (shown.length ? '<ul class="tree' + (all ? ' all' : '') + (F.job ? ' jsel' : '') + '">' + trees + '</ul>' : '<div class="pempty">这段时间里没有任何关系</div>') +
     '</div>';
