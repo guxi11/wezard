@@ -83,7 +83,7 @@ import { createReceipts, deadlineOf, kAttr, newTurn, type InFlight, type ParentK
 import { renderInFlight } from "../shared/turn-state.js";
 import type { TurnTag } from "../shared/reminder.js";
 import { createHandoffs, handedOff, handingOff, type Pending as PendingHandoff } from "./handoff.js";
-import { rankCandidates, renderCandidates, wakeNoteOf } from "./route.js";
+import { coldGateOf, rankCandidates, renderCandidates, wakeNoteOf } from "./route.js";
 import { parseWhen, renderChatLog, UNKNOWN_HUMAN, type LogSession } from "./chat-log.js";
 import { audienceOf } from "../shared/role-view.js";
 import {
@@ -1000,6 +1000,11 @@ const main = async (): Promise<void> => {
     // 等待」: 调用方注入完就返回, 对方干完那一轮的结论由守护进程自动送回来 (receipts)。
     // `/peers/send` 保留为同一个处理函数: 正在跑的 wizard 的 MCP 进程是旧代码, 换名字
     // 不能把它们的通路掐断。
+    // 冷与否 = transcript 多久没动 vs 它的缓存实际按多长 TTL 写的 (与 route_candidates 同一口径)。
+    const mtimeOf = (p: string): number => { try { return statSync(p).mtimeMs; } catch { return 0; } };
+    const ttlOf = (p: string): number => (cacheTtlSec(p) || cfg.wrc.mirror.keepalive.ttlSec) * 1000;
+    // 被冷门控退回过的 `self\0target` → 到期时刻: 老 MCP 进程原样重发即视为 force。
+    const coldRefused = new Map<string, number>();
     const tellPeer: Handler = async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
@@ -1055,6 +1060,23 @@ const main = async (): Promise<void> => {
               : bp.when === "idle" ? "normal"
                 : re ? "now" : "normal";
       const waitSec = Math.min(Math.max(Number((body as { waitSec?: number }).waitSec ?? 600) || 600, 10), 3600);
+      // 冷门控: 派新活 (task、不是续问、不是插话) 给一个冷且大的 wizard, 先退回一行让派活的
+      // 算账 —— 唤醒它要整段重写缓存, 点名或职责对口只说明相关, 不说明划算。`force:true`
+      // 是「真依赖它那段上下文」的明说。老 MCP 进程的 schema 里没有 force (请求里压根没这个键,
+      // 新的一律显式带上): 同一对 10 分钟内原样再发一次就算 force, 不然它们被拦下就没有出路。
+      const force = (body as { force?: boolean }).force;
+      if (kind === "task" && !re && asked !== "now" && force !== true) {
+        const gk = `${self}\0${target}`;
+        const retried = force === undefined && (coldRefused.get(gk) ?? 0) > Date.now();
+        coldRefused.delete(gk);
+        const gi = retried ? undefined : m.sessionInfo(target);
+        const gate = gi ? coldGateOf(`.${displayName(target).replace(/^\./, "")}`, gi.contextTokens, mtimeOf(gi.jsonlPath), Date.now(), ttlOf(gi.jsonlPath)) : "";
+        if (gate) {
+          if (force === undefined) coldRefused.set(gk, Date.now() + 10 * 60_000);
+          json(res, 409, { ok: false, gated: "cold", reason: gate + (force === undefined ? " (你的 MCP 是旧版、没有 force 参数: 10 分钟内原样再发一次即视为 force)" : "") });
+          return;
+        }
+      }
       // 「忙」= 这一轮还没结束, 或停在审批上等人 —— 都不是能接新活的时候。
       const wasBusy = !(await m.idleNow(target));
       // urgent 只打断你自己派的那一轮 (或它自己的回执轮): 手上若是别的 wizard / 人 / 定时任务的活,
@@ -1087,7 +1109,7 @@ const main = async (): Promise<void> => {
       // 唤醒代价同样要在注入之前量: 投进去 transcript 一动, 就看不出它冷了多久。
       const info = m.sessionInfo(target);
       const wake = info?.jsonlPath
-        ? wakeNoteOf(info.contextTokens, (() => { try { return statSync(info.jsonlPath).mtimeMs; } catch { return 0; } })(), at, (cacheTtlSec(info.jsonlPath) || cfg.wrc.mirror.keepalive.ttlSec) * 1000)
+        ? wakeNoteOf(info.contextTokens, mtimeOf(info.jsonlPath), at, ttlOf(info.jsonlPath))
         : "";
       const deadlineSec = (body as { deadline?: number }).deadline;
       // 回执: 对方干完那一轮, 守护进程把它的结论自动送回来 (默认开)。`receipt:false`
@@ -1290,7 +1312,16 @@ const main = async (): Promise<void> => {
       nudged.add(i.sessionId);
       return [`你的上下文已到 ${Math.round(i.contextTokens / 1000)}k, 快到自动压缩了: 这段里学到的、值得跨会话活下来的东西, 先 \`wizard_remember\` 记下 (自己的选 self, 属于群 / 仓库的选 chat / workspace), 再考虑 \`handoff\``];
     };
-    const notices = bindNoticeBox(createNoticeBox(12, memoryNudge));
+    // 越过交接判断线 (handoffAt) 也只提一次: 交接不是压缩, 不该等快满。同样每段会话一次 ——
+    // 交接后换了 sid, 新会话再越线会再提。
+    const handoffNudged = new Set<string>();
+    const handoffNudge = (t: string): string[] => {
+      const i = m.sessionInfo(t);
+      if (!i?.sessionId || handoffNudged.has(i.sessionId) || i.contextTokens < handoffAt(lastModel(i.jsonlPath) || i.model)) return [];
+      handoffNudged.add(i.sessionId);
+      return [`你的上下文已到 ${Math.round(i.contextTokens / 1000)}k: 该判断要不要 \`handoff\` 了 —— 手上这摊活告一段落、或往后的活不再依赖前面的大段材料, 就交接 (值得跨会话留下的先 \`wizard_remember\`); 还在一件离不开它们的活中间, 做完这一段再交`];
+    };
+    const notices = bindNoticeBox(createNoticeBox(12, (t) => [...handoffNudge(t), ...memoryNudge(t)]));
     const postRoster = (base: string, except: readonly string[], line: string): void =>
       notices.post(chatAudience(m.chatTargets(base), base, except), line);
 

@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Changed
+- `tell_peer` 冷门控: 派新活 (`kind:"task"`、不带 `re`、`priority` 不是 `now`) 给缓存已冷 (超过 TTL 没动) 且 ctx ≥100k 的 wizard 时先不投递, 409 退回一行「.x 冷 · ctx Nk · 唤醒约等于白板 spawn 的 M 倍; 真依赖它的上下文就带 `force:true` 重发, 否则白板 spawn」(`gated:"cold"`)。冷热与倍数与 `route_candidates` 同一口径 (`wakeCostOf`)。MCP 新增 `force` 且一律显式带上; 请求里没有这个键的老 MCP 进程, 同一对 10 分钟内原样再发一次即视为 force。宪章里「点名 / 职责对口就直接判断」的捷径改为: 那只说明相关, 成本仍看 ctx 与冷热。
+- handoff 时机提前: 交接不是压缩, 判断线从窗口七成改为 `min(200k, 七成)` (`handoffAt`, `wizard_whoami` 的 `handoffSuggested` 随之), 宪章「自我管理」改写为过 200k 就判断 —— 手上这摊告一段落、或往后的活不再依赖前面的材料, 就交接。越线后下一条注入的消息捎一次提醒 (复用 notices 的 probe, 每段会话一次)。
+
 ## [2.3.0] - 2026-10-03
 
 ### Added

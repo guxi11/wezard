@@ -405,6 +405,10 @@ const TELL_SCHEMA = {
     .describe("对方该怎么接这句话 (与 `priority` 的何时投、`receipt` 的要不要回执正交): `task` (默认) 一件活, 干完收口 `RESULT:`; `ask` 只答一个问题, 别为它开工; `fyi` 知会, 不用回 —— 自动不要回执、不进工单、不进群。"),
   re: z.string().optional().describe("续问: 回执或回包里的件号 (`t…`)。接着那件活说, 沿用它的工单与频道; 对不上就按新活发出 (`reUnknown`)。"),
   deadline: z.number().optional().describe("最多等它多少秒 (60-43200, 默认 3600); 到点没答完你收到一份 timeout 回执。"),
+  force: z
+    .boolean()
+    .optional()
+    .describe("派新活给一个缓存已冷、ctx ≥100k 的 wizard 时, 守护进程先退回一行代价说明不投递 (唤醒 ≈ 白板 spawn 的几倍)。确认这件活真依赖它那段上下文, 才带 `force:true` 重发; 否则白板 spawn。续问 (`re`)、`now`、`ask` / `fyi` 不受此限。"),
   chain: z
     .boolean()
     .optional()
@@ -416,7 +420,7 @@ const TELL_DESC =
   "**说完就返回**: 对方干完那一轮, 它的最后一条消息作为**新的一轮**自动送到你这里 (回执, 带信封说明是谁、哪场对话、工单还差几份); 你正忙时回执排队等你说完。\n" +
   "默认私聊, 只记在双方 rolepage; 守护进程给 `text` 挂信封 (发话人、私聊/公开、`RESULT: …` 收口)。拒绝对自己发送。";
 
-const tellBody = (a: { name: string; text: string; kind?: string; priority?: string; waitSec?: number; job?: string; public?: boolean; receipt?: boolean; re?: string; deadline?: number; chain?: boolean }) => ({
+const tellBody = (a: { name: string; text: string; kind?: string; priority?: string; waitSec?: number; job?: string; public?: boolean; receipt?: boolean; re?: string; deadline?: number; chain?: boolean; force?: boolean }) => ({
   name: a.name,
   text: a.text,
   ...(a.kind ? { kind: a.kind } : {}),
@@ -428,6 +432,8 @@ const tellBody = (a: { name: string; text: string; kind?: string; priority?: str
   ...(a.re ? { re: a.re } : {}),
   ...(a.deadline ? { deadline: a.deadline } : {}),
   ...(a.chain === false ? { chain: false } : {}),
+  // 一律显式带上: 守护进程据「有没有这个键」认出老 MCP 进程 (见 /peers/tell 的冷门控)。
+  force: a.force === true,
 });
 
 server.registerTool(
@@ -699,7 +705,7 @@ server.registerTool(
   {
     title: "Who am I",
     description:
-      "你自己是谁: 全局唯一的名字 (即地址, 别人用它找你)、home 聊天、工作区、职责、记忆、家谱 (谁生的你、你生了谁), 以及此刻的 contextTokens 与 handoffSuggested。用户问「你是谁」「你叫什么」「你在哪个目录」「你有几个分身」时先调它; 要做任何编排之前也先调它 —— 你得知道自己的工作区在哪、手里已经有哪些分身。handoffSuggested=true 表示上下文该交接了 (见 handoff)。",
+      "你自己是谁: 全局唯一的名字 (即地址, 别人用它找你)、home 聊天、工作区、职责、记忆、家谱 (谁生的你、你生了谁), 以及此刻的 contextTokens 与 handoffSuggested。用户问「你是谁」「你叫什么」「你在哪个目录」「你有几个分身」时先调它; 要做任何编排之前也先调它 —— 你得知道自己的工作区在哪、手里已经有哪些分身。handoffSuggested=true 表示上下文已过交接判断线 (200k): 手上这摊告一段落、或往后的活不再依赖前面的材料, 就 handoff。",
     inputSchema: {},
   },
   async () => unwrap("wizard_whoami", await daemonPost("/wizard/whoami", {})),
@@ -753,7 +759,7 @@ server.registerTool(
   {
     title: "Who could take this task",
     description:
-      "一件活要不要转给**已有**的 wizard, 而上下文里还看不出该给谁时调它 (刚派过同一摊活、职责正对口的, 直接判断就行)。守护进程替你把能算的都算好: 每个已有 wizard 的职责 / 最近的话与这件活重叠了哪些词, 它当前上下文里 (上次压缩之后) 读过哪些文件、其中哪些被这件活点到, 它在不在同一个工作区、忙闲、上下文多大 (`ctx`), 缓存冷热与唤醒要重写多少缓存 (对比白板 spawn 的倍数)。没有任何交集的不列, 列出来的按证据强弱排 (文件命中 > 职责 > 最近的话), 末尾永远附「新 spawn」; 证据弱又贵的标 ⚠「不划算」。不出分数、不替你拍板。",
+      "一件活要不要转给**已有**的 wizard, 拿不准该给谁、或拿不准值不值时调它 (刚派过同一摊活、职责正对口、人点了名只说明相关, 成本仍要看 ctx 与冷热)。守护进程替你把能算的都算好: 每个已有 wizard 的职责 / 最近的话与这件活重叠了哪些词, 它当前上下文里 (上次压缩之后) 读过哪些文件、其中哪些被这件活点到, 它在不在同一个工作区、忙闲、上下文多大 (`ctx`), 缓存冷热与唤醒要重写多少缓存 (对比白板 spawn 的倍数)。没有任何交集的不列, 列出来的按证据强弱排 (文件命中 > 职责 > 最近的话), 末尾永远附「新 spawn」; 证据弱又贵的标 ⚠「不划算」。不出分数、不替你拍板。",
     inputSchema: {
       task: z.string().describe("这件活, 原话或一句概括都行 —— 带上提到的文件名 / 模块名 / 函数名, 文件命中是最强的证据。"),
       cwd: z.string().optional().describe("这件活落在哪个工作区。省略 = 你自己的工作区。"),

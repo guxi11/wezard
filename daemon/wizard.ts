@@ -316,17 +316,21 @@ const CONTEXT_WINDOWS: ReadonlyArray<readonly [RegExp, number]> = [
 export const contextWindowOf = (model: string): number =>
   CONTEXT_WINDOWS.find(([re]) => re.test(model))?.[1] ?? 200_000;
 
-// 两条线都按窗口算, 次序固定: 先提醒记 (六成), 再建议交接 (七成) —— 压缩与交接都会丢细节,
-// 记要在它们之前。20 万窗口 = 12 万 / 14 万, 1M 窗口 = 60 万 / 70 万。
+// 「先记」的线按窗口算 (六成), 它防的是自动压缩: 20 万窗口 = 12 万, 1M 窗口 = 60 万。
+// 交接线见 handoffAt —— 1M 窗口下它远早于压缩, 交接的提醒里自己带着「先记」。
 
 /** 「先 wizard_remember」的提醒线。 */
 export const memoryNudgeAt = (model: string): number => Math.round(contextWindowOf(model) * 0.6);
 /** 所有模型里最低的那条提醒线 —— 不到它就不必去读模型。 */
 export const MEMORY_NUDGE_FLOOR = Math.round(Math.min(...CONTEXT_WINDOWS.map(([, w]) => w)) * 0.6);
 
-/** 该自己交接的线 (whoami 的 handoffSuggested): 留三成余量给交接那一轮本身 —— 提示而已,
+// 交接不是压缩: 不等快满, 到 20 万就该开始判断 —— 手上这摊告一段落、或往后的活不再依赖
+// 前面那大段材料, 背着它每轮都在付钱。小窗口 (20 万) 的模型等不到 20 万, 退回七成。
+export const HANDOFF_CHECK = 200_000;
+
+/** 该判断要不要交接的线 (whoami 的 handoffSuggested、越线那一次的提醒) —— 提示而已,
  *  决定权在 wizard 自己。 */
-export const handoffAt = (model: string): number => Math.round(contextWindowOf(model) * 0.7);
+export const handoffAt = (model: string): number => Math.min(HANDOFF_CHECK, Math.round(contextWindowOf(model) * 0.7));
 
 // 名册只报事实, 不替管家判「太满」: 值不值得接着用这段上下文是经济账, 由它自己算。
 export const ctxOf = (n = 0): string => (n ? `ctx ${Math.round(n / 1000)}k` : "");
@@ -420,7 +424,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "你的活是**分派**, 不是亲手干 —— 上下文留给名册和来龙去脉, 别被大段代码和文件塞满:",
       bullet([
         "一两句就能答的 (问进度、问谁在干什么、闲聊) → 自己答",
-        "要不要转给**已有** wizard: 上下文里已经看得出该给谁 (刚派过同一摊活的、职责正对口的、人点了名的) 就直接判断, 不必查表; 拿不准时才 `route_candidates({task})` 拿一张证据表 (交集、工作区、忙闲、`ctx`、唤醒的缓存代价), 你只做判断:",
+        "要不要转给**已有** wizard: 刚派过同一摊活的、职责正对口的、人点了名的 —— 这些只说明**相关**, 成本仍然要看它的 ctx 和冷热 (`wizard_roster` 里有); 拿不准时 `route_candidates({task})` 拿一张证据表 (交集、工作区、忙闲、`ctx`、唤醒的缓存代价), 你只做判断。缓存冷且 ctx ≥100k 的, tell_peer 派新活会先被退回, 真依赖它那段上下文才带 `force:true`:",
         "  · **相关性**: 表里的交集是不是真的同一件事 —— 字面沾边不算; 文件命中 (它真读过) 比词面重叠可信",
         "  · **成本**: 唤醒一个超过缓存 TTL 没动的 wizard, 整段 ctx 要重新 cache write (200k 的冷 wizard ≈ 白板 spawn 的 8 倍), 往后每一轮还都背着它、离交接更近。收益只有它省掉的重读 —— 要重读的材料越多才越划算",
         "  · **默认偏省钱**: 小活 (改样式、单点修改、简单查询) 默认白板 spawn 或交给 ctx 小的; ctx ≥60k 且缓存冷的 wizard 只接真正依赖它那段上下文的活 (这件活点到了它读过的好几个文件、或是它手上那摊活的续篇); 表里标了 ⚠ 的默认不转",
@@ -458,7 +462,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "`stop_wizard` 活干完就收掉分身; 只想打断它这一轮也是它",
       "`open_job` / `close_job` 一次派两个以上分身时开 / 收工单 · `list_jobs` 找回工单 id",
       "`wizard_whoami` 我的上下文用量与分身 · `wizard_identity` 改名 / 写职责 · `wizard_remember` 跨会话记忆 (`self` / `chat` / `workspace`)",
-      "`handoff` 上下文快满时交接自己 (点名则替别人) · `set_workspace` 换项目目录 · `set_model` 换模型 / effort",
+      "`handoff` ctx 过 200k 且手上这摊告一段落时交接自己 (点名则替别人) · `set_workspace` 换项目目录 · `set_model` 换模型 / effort",
       "`schedule_task` / `list_tasks` / `cancel_task` 到点自动执行的活",
       "`wait_peer` 仅当这一轮非拿到答案不可 (平时等回执), 或要等一个不是你派活的 wizard 停下 · `name_chat` 给聊天起名",
     ]),
@@ -503,7 +507,7 @@ export const renderCharter = (a: CharterArgs): string => {
     "",
     "## 自我管理",
     bullet([
-      "上下文快满 (`wizard_whoami` 的 contextTokens) → 自己调 `handoff({brief})`, 把工作压成简报原地重开。",
+      "交接不是压缩, 别等上下文快满: ctx 过了 200k (`wizard_whoami` 的 contextTokens / handoffSuggested) 就开始判断 —— 手上这摊活告一段落了, 或往后的活不再依赖前面积累的大段材料, 就自己调 `handoff({brief})` 压成简报原地重开; 还在一件离不开这些材料的活中间, 就做完这一段再交。大 ctx 每一轮都在付钱, 缓存一冷还要整段重写。",
       "要换项目目录 → 自己调 `set_workspace`, 不必让人去敲命令。",
       "职责为空 → 自己调 `wizard_identity` 补上; 名字就是别人喊你的那个词。",
       "学到了属于这个群 / 这个仓库、而不只属于你的东西 → `wizard_remember` 选对 `scope`, 下一个来的 wizard 开局就知道。",

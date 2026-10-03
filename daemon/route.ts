@@ -128,6 +128,18 @@ export const wakeNoteOf = (ctx: number, lastActivity: number, now: number, ttlMs
     : "";
 };
 
+// tell_peer 派新活的门槛: 冷且这么大的, 先退回让派活的算账再说。点名、职责对口只说明
+// 相关, 不说明划算 —— 一句「直接转给它」就把整段 ctx 重写了一遍 (.relock 526k 那次)。
+export const COLD_GATE = 100_000;
+
+/** 冷且 ctx ≥ COLD_GATE → 退回的那一行; 否则空串 (放行)。 */
+export const coldGateOf = (name: string, ctx: number, lastActivity: number, now: number, ttlMs: number): string => {
+  const w = wakeCostOf(ctx, lastActivity, now, ttlMs);
+  return w.cold && ctx >= COLD_GATE
+    ? `${name} 冷 · ctx ${k(ctx)} · 唤醒约等于白板 spawn 的 ${w.times} 倍; 真依赖它的上下文就带 \`force:true\` 重发, 否则白板 spawn`
+    : "";
+};
+
 /** 一句话就说得清的小活: 改样式 / 文案 / 单点修改 / 简单查询 —— 用不上谁的长上下文。 */
 const SMALL_RE = /样式|css|border|颜色|字号|字体|间距|边距|圆角|阴影|对齐|图标|文案|措辞|改名|重命名|typo|错别字|拼写|一行|单点|查一下|看一下|问一下|是多少|在哪/i;
 export const isSmallTask = (task: string): boolean => task.length <= 40 || (task.length <= 160 && SMALL_RE.test(task));
