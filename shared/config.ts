@@ -1,145 +1,116 @@
 // Declarative config: schema (zod) + loader. Pure transforms, file IO at boundary.
+// `.describe()` on a field is the prose config_get shows a model — keep it one
+// sentence of "what"; the "why" stays in source comments. `knob` (config-meta.ts)
+// marks who may change a subtree (`gate`) and whether a change bites without a
+// reload (`apply`); both are inherited downward.
 import { readFileSync, existsSync } from "node:fs";
 import { parse as parseJsonc } from "jsonc-parser";
 import { z } from "zod";
 import { expandHome } from "./paths.js";
 import { resolveCliBackend } from "./cli-backends.js";
+import { EFFORTS } from "./effort.js";
+import { knob } from "./config-meta.js";
+
+// 守护进程每次用时都现读 `cfg.x` 的项 —— 逐个核实过, 没核实的一律留默认 reload。
+const hot = <T extends z.ZodTypeAny>(s: T): T => knob(s, { apply: "hot" });
+
+const CLI_NAMES = ["claude", "claude-internal", "codebuddy"] as const;
+const LOG_LEVELS = ["trace", "debug", "info", "warn", "error"] as const;
 
 // ── Schema ──────────────────────────────────────────────────────────
 const Bot = z.object({
-  botId: z.string().min(1),
-  secret: z.string().min(1),
-  websocketUrl: z.string().url().default("wss://openws.work.weixin.qq.com"),
+  botId: z.string().min(1).describe("企微智能机器人 botId"),
+  secret: z.string().min(1).describe("企微智能机器人 secret"),
+  websocketUrl: z.string().url().default("wss://openws.work.weixin.qq.com").describe("企微长连接地址"),
 });
 
 const Daemon = z.object({
-  host: z.string().default("127.0.0.1"),
-  port: z.number().int().min(1).max(65535).default(17890),
-  stateDir: z.string().default("~/.wezard/state"),
-  logFile: z.string().default("~/.wezard/daemon.log"),
-  logLevel: z.enum(["trace", "debug", "info", "warn", "error"]).default("info"),
-  // 工具调用 / 授权详情页 URL。空则用 http://<host>:<port> (回环)。
+  host: knob(z.string().default("127.0.0.1").describe("守护进程 HTTP 监听地址"), { gate: "card" }),
+  port: knob(z.number().int().min(1).max(65535).default(17890).describe("守护进程 HTTP 监听端口"), { gate: "card" }),
+  stateDir: z.string().default("~/.wezard/state").describe("守护进程状态目录"),
+  logFile: z.string().default("~/.wezard/daemon.log").describe("守护进程日志文件"),
+  logLevel: z.enum(LOG_LEVELS).default("info").describe("日志级别"),
   // 想让手机 WeCom 也能点开, 需要在反向代理后填外网地址。桌面端用回环即可。
-  detailPublicBase: z.string().default(""),
-  // 远端 detail svr (wezard svr 起的独立服务, chat + cli 共同可达的网络里)。
-  // 空则不转发, 详情走本机 :port/detail。非空时:
-  //   • 每次 record*() 后 fire-and-forget POST 到 <base>/d, 存到远端 store。
-  //   • buildDetailUrl 用 <base> 作为链接根 (chat 端浏览器打开 <base>/detail?id=...)。
+  detailPublicBase: knob(z.string().default("").describe("工具调用 / 授权详情页链接的根 URL; 空 = http://<host>:<port> 回环"), { gate: "card", apply: "hot" }),
+  // 每次 record*() 后 fire-and-forget POST 到 <base>/d 存到远端 store, 链接根也换成 <base>。
   // 用这条路径解决 daemon (公司内网) 和 chat 用户 (移动网络) 不同网段的场景。
-  detailRemoteBase: z.string().default(""),
-  detailRemoteToken: z.string().default(""),
-  // 镜像消息里给每个 tool_use 行包成 markdown 链接, 点开本地 HTML 详情页。
-  detailLinksInMirror: z.boolean().default(true),
+  detailRemoteBase: knob(z.string().default("").describe("远端 detail svr (wezard svr) 地址; 空 = 不转发, 详情走本机"), { gate: "card" }),
+  detailRemoteToken: knob(z.string().default("").describe("远端 detail svr 的口令"), { gate: "hidden" }),
+  detailLinksInMirror: hot(z.boolean().default(true).describe("镜像消息里把每个 tool_use 行包成指向详情页的链接")),
 });
 
 const Mirror = z.object({
-  // Transcript root for the DEFAULT backend only — an escape hatch for a
-  // nonstandard location. Empty → auto-derived from `defaultCli` (`claude` →
-  // `~/.claude/projects`, `claude-internal` → `~/.claude-internal/projects`,
-  // `codebuddy` → `~/.codebuddy/projects`). Other installed backends always use
-  // their own built-in roots; the mirror probes all of them, so setting this
+  // An escape hatch for a nonstandard location. Other installed backends always
+  // use their own built-in roots; the mirror probes all of them, so setting this
   // does not narrow which CLIs can be mirrored.
-  projectsDir: z.string().default(""),
-  // Pin a specific Claude session to mirror. Empty → auto-pick latest .jsonl
-  // under `<projectsDir>/<encoded(wrc.cwd)>/` by mtime.
-  sessionId: z.string().default(""),
-  // Where to push live assistant output. Empty → fall back to defaultChat.
-  pushChat: z.string().default(""),
-  // Cap a single push payload in BYTES (WeCom markdown caps `content` at 4096
-  // UTF-8 bytes). Long replies are split into that many bytes per page, minus
-  // the tag header. Shared/md-chunk measures in bytes too — CJK is 3 bytes/char.
-  chunkBytes: z.number().int().positive().default(3800),
-  // Mirror the user's CLI prompts (type:"user" with string content). Off by
-  // default: WeCom-sourced inbounds get dedup'd anyway, and local CLI typing
+  projectsDir: z.string().default("").describe("默认 CLI 的 transcript 根目录; 空 = 按 defaultCli 自动推导"),
+  sessionId: z.string().default("").describe("钉死要镜像的会话 id; 空 = 取工作区下最新的 .jsonl"),
+  pushChat: hot(z.string().default("").describe("实时输出推往哪个聊天; 空 = defaultChat")),
+  // WeCom markdown caps `content` at 4096 UTF-8 bytes; shared/md-chunk measures
+  // in bytes too — CJK is 3 bytes/char.
+  chunkBytes: hot(z.number().int().positive().default(3800).describe("单条推送的字节上限, 长回复按此分页")),
+  // Off by default: WeCom-sourced inbounds get dedup'd anyway, and local CLI typing
   // is rare in the bot-driven flow — keeping it on mostly produced echo noise.
-  includeUser: z.boolean().default(false),
-  // Mirror assistant tool_use blocks (Bash/Edit/Read/...).
-  includeTools: z.boolean().default(true),
-  // Mirror tool_result blocks. Off by default — usually noisy.
-  includeToolResults: z.boolean().default(false),
-  // Truncate each tool_result body to this many chars.
-  toolResultMaxChars: z.number().int().positive().default(400),
-  // 工具调用气泡里 `compact` 一行的最大字符数 (`🔧 Name <compact>` / `[• compact](url)`).
+  includeUser: z.boolean().default(false).describe("镜像人在 CLI 里敲的 prompt"),
+  includeTools: z.boolean().default(true).describe("镜像 tool_use (Bash/Edit/Read…)"),
+  includeToolResults: z.boolean().default(false).describe("镜像 tool_result (通常很吵)"),
+  toolResultMaxChars: z.number().int().positive().default(400).describe("每条 tool_result 截断到多少字符"),
   // 旧值 40 太窄, 长 bash / 长 file_path 直接被截掉; 抬到 120 兼顾可读与单行。
-  toolUseInlineMaxChars: z.number().int().positive().default(120),
-  // Where inbound images/files from WeCom get saved before being pasted into
-  // the live TTY. Files persist — claude reads them by absolute path.
-  inboxDir: z.string().default("~/.wezard/inbox"),
-  // Persisted mirror attachments (principal → sessionId/jsonl/tmux). Restored
-  // on daemon boot + lazily on first inbound after reload — so reloading the
-  // daemon doesn't re-spawn a fresh claude for an already-bound chat.
-  attachmentsFile: z.string().default("~/.wezard/mirror-attachments.json"),
-  // Wizard registry: 每个「绑定聊天的会话」的名字 / 职责 / 记忆 / 家谱。运行时
-  // 状态 (会话生生死死), 所以落在 state 目录而不是 config.jsonc —— 与 chats 的
+  toolUseInlineMaxChars: z.number().int().positive().default(120).describe("工具调用气泡里 compact 一行的最大字符数"),
+  // Files persist — claude reads them by absolute path.
+  inboxDir: z.string().default("~/.wezard/inbox").describe("企微发来的图片 / 文件落盘目录"),
+  // Restored on daemon boot + lazily on first inbound after reload — so reloading
+  // the daemon doesn't re-spawn a fresh claude for an already-bound chat.
+  attachmentsFile: z.string().default("~/.wezard/mirror-attachments.json").describe("镜像绑定 (聊天 → 会话/jsonl/tmux) 的持久化文件"),
+  // 运行时状态 (会话生生死死), 所以落在 state 目录而不是 config.jsonc —— 与 chats 的
   // 名字表相反: 那是人手写的长期配置。
-  wizardsFile: z.string().default("~/.wezard/wizards.json"),
-  // 工单账本: 一次 fan-out 的成员与状态。与 wizards 同理是运行时状态; 分开存是
-  // 因为 wizard 是长期身份, job 是一次性的活 —— 混在一张表里, 收工清理会连身份
-  // 一起抹掉。
-  jobsFile: z.string().default("~/.wezard/jobs.json"),
-  // 在飞的 tell_peer 回执登记。落盘是为了扛住 reload —— 被派活的 wizard 自己常以
-  // reload 收尾, 纯内存的话它那一份回执就跟着旧进程没了。
-  receiptsFile: z.string().default("~/.wezard/receipts.json"),
-  // 在飞的交接 (handoff.ts)。同理扛 reload: 落在「杀了旧 pane、还没贴回简报」之间,
-  // 纯内存的话新会话就空着醒来, 简报跟着旧进程没了。
-  handoffsFile: z.string().default("~/.wezard/handoffs.json"),
-  // 一个 wizard 名下同时活着的分身上限。不是能力上限, 是"忘了收"的刹车: 分身能
-  // 递归生分身, 而每个都是一个 tmux pane + 一份上下文, 一次跑飞的编排足以把 fd
-  // 吃光 (见 launchd plist 的 NumberOfFiles)。
-  cloneMax: z.number().int().positive().default(8),
-  // Standalone fallback 路径(liveStream 已 closed/dead/capped) 上的防抖聚合窗口
-  // (ms)。窗口内同一 attachment 的多个 item 合并为一条 markdown, 抑制连续工具
-  // 调用刷屏。liveStream 仍活时不受影响——直接走 typewriter。0 = 关闭。
-  standaloneDebounceMs: z.number().int().nonnegative().default(30000),
-  // dispatch 后延迟开 stream 的窗口 (ms)。窗口内 item 累积:
+  wizardsFile: z.string().default("~/.wezard/wizards.json").describe("wizard 名册 (名字/职责/记忆/家谱) 文件"),
+  // 与 wizards 分开存: wizard 是长期身份, job 是一次性的活 —— 混在一张表里, 收工
+  // 清理会连身份一起抹掉。
+  jobsFile: z.string().default("~/.wezard/jobs.json").describe("工单账本文件"),
+  // 落盘是为了扛住 reload —— 被派活的 wizard 自己常以 reload 收尾, 纯内存的话它那
+  // 一份回执就跟着旧进程没了。
+  receiptsFile: z.string().default("~/.wezard/receipts.json").describe("在飞 tell_peer 回执的登记文件"),
+  // 同理扛 reload: 落在「杀了旧 pane、还没贴回简报」之间, 纯内存的话新会话就空着
+  // 醒来, 简报跟着旧进程没了。
+  handoffsFile: z.string().default("~/.wezard/handoffs.json").describe("在飞交接 (handoff) 的登记文件"),
+  // 不是能力上限, 是"忘了收"的刹车: 分身能递归生分身, 而每个都是一个 tmux pane +
+  // 一份上下文, 一次跑飞的编排足以把 fd 吃光 (见 launchd plist 的 NumberOfFiles)。
+  cloneMax: hot(z.number().int().positive().default(8).describe("一个 wizard 名下同时活着的分身上限")),
+  // liveStream 仍活时不受影响——直接走 typewriter。
+  standaloneDebounceMs: hot(z.number().int().nonnegative().default(30000).describe("非流式推送的防抖聚合窗口 (ms), 窗口内多条合并; 0 = 关闭")),
+  // 窗口内 item 累积:
   //   • 出现 needs-approval tool_use → 立刻把 buffer 聚合成单条 standalone 推出 (赶在
   //     授权卡之前), 切到 AWAITING_APPR 等点击; 点击后再开 stream 续 tool_result+回复。
   //   • 窗口内 turn_end (纯文本快回复) → buffer 整体作为一条 standalone, 不开 stream。
   //   • 窗口超时 → 正常开 stream, 重放 buffer。
-  // 0 = 关闭, 退回到 dispatch 立即 ack "…" 的旧行为。
-  outboundDeferMs: z.number().int().nonnegative().default(3000),
-  // 发卡前等待目标 tool_use 在 jsonl 落盘的最长 poll 时间 (ms)。Claude Code 的
-  // assistant 行写盘相对 PreToolUse hook fire 有 tens-to-hundreds ms 异步抖动,
-  // 没等到的话 drain 抓空, 卡先到、思考过程后到。轮询步进 50ms。0 = 关闭等待,
-  // 仅做一次同步 drain (旧行为)。
-  flushBeforeCardWaitMs: z.number().int().nonnegative().default(800),
+  outboundDeferMs: hot(z.number().int().nonnegative().default(3000).describe("派发后延迟开流的窗口 (ms); 0 = 立即 ack")),
+  // Claude Code 的 assistant 行写盘相对 PreToolUse hook fire 有 tens-to-hundreds ms 异步
+  // 抖动, 没等到的话 drain 抓空, 卡先到、思考过程后到。轮询步进 50ms。
+  flushBeforeCardWaitMs: hot(z.number().int().nonnegative().default(800).describe("发卡前等目标 tool_use 落盘的最长时间 (ms); 0 = 不等")),
   // codebuddy 对 AskUserQuestion 不在提问时触发 PreToolUse hook (先弹本地面板),
   // mirror 从 jsonl 提前探测到 function_call 后直接下发 vote 卡。该卡与本地面板
   // 竞争 — 面板本就无限期阻塞 turn, 卡对齐 longPollSec 的 12h; 本地先答会作废它。
-  askqVoteTimeoutSec: z.number().int().positive().default(43200),
-  // 发卡前从活着的 tmux pane 抠出「为什么发这张卡」的 assistant 前言并先推一条。
+  askqVoteTimeoutSec: hot(z.number().int().positive().default(43200).describe("codebuddy 提问卡的等待上限 (s)")),
   // 必要性: Claude Code 把以 tool_use 收尾的整个 turn 攒着, 等工具 resolve 才 flush
   // 到 jsonl —— 而工具正卡在这张授权卡上, 于是前言在发卡时点既不在 jsonl 也不在
   // hook 的 transcript_tail 里, 唯一存在处是 pane。抠不到时静默退回「只发卡」(无回归)。
-  panePreamble: z.boolean().default(true),
-  // Brief 模式: 只对 mirror 模式生效。一个 turn 里群里只发两条 —
-  //   1. turn 起始时:「🧵 [本轮详情](url)」链接 (指向聚合详情页,含所有 tool 输入/输出+中间文本+折叠展示)
-  //   2. turn 结束时: Claude 的 finish text (最终 assistant 回复)
-  // 中间 tool_use / tool_result / thinking / 非 final text 全部只写进详情页,不发气泡。
-  // 授权卡照常发群 (交互无法替代)。false = 现状 (逐条气泡)。
-  brief: z.boolean().default(true),
-  // 出处门: 群里只留"需要在群里发生的事"。人在 CLI 手敲的那一轮 (以及它触发的
-  // 斜杠命令回执) 不再下发气泡 —— 镜像改为发生在他眼前的终端 + chat 详情页
-  // (turn store 全量记录, SSE 实时刷新)。WeCom 发起的轮次、审批/提问卡、
-  // `[mirror]` 系统提示都不受影响。每个 attachment 首次静默时发一条带链接的提示,
-  // 免得一个从没收过气泡的会话在群里无处可点。
+  panePreamble: hot(z.boolean().default(true).describe("发授权卡前先从 pane 抠出 assistant 前言推一条")),
+  // 中间 tool_use / tool_result / thinking / 非 final text 全部只写进详情页, 不发气泡。
+  // 授权卡照常发群 (交互无法替代)。
+  brief: hot(z.boolean().default(true).describe("Brief 模式: 一轮在群里只发「本轮详情」链接 + 最终回复")),
+  // 人在 CLI 手敲的那一轮 (以及它触发的斜杠命令回执) 不再下发气泡 —— 镜像改为发生在
+  // 他眼前的终端 + chat 详情页。每个 attachment 首次静默时发一条带链接的提示。
   // 只在 brief=true 下生效: 抑制的前提是详情页兜住内容, 而 turn store 只有 brief 在写。
-  chatOriginOnly: z.boolean().default(true),
-  // 斜杠命令回执精简: /clear、/new 等会话边界命令的回执只发第一行 ack
-  // ("cleared" / "created"), 不再附 💡 tip。cwd 信息一律不随回执下发, 随时
-  // `/pwd` 可查。默认 false = ack + tip 两行气泡。
-  slashAckFirstLine: z.boolean().default(false),
-  // 软收口静默期 (ms)。codebuddy 后端只能说"这条消息写完了", 等这么久没有新 item
-  // 才认定一轮结束。值越大越不容易误收 (model 思考时间长), 但用户等最终结论的延迟也
-  // 越大。不设则按后端自动选择: codebuddy 1s (派发子 agent 期间由 openAgents guard
-  // 拦截, 无需长静默期), claude 4s。
-  softTurnEndMs: z.number().int().positive().optional(),
-  // 会话 pane 上限: 每新建一个 wizard 数一次, 活着的 tmux pane 超过这个数就从 transcript 最久没动的
-  // 收起, 直到回到上限 —— 只收 pane, 保留 store 绑定 (sessionId/jsonl), 下一条消息
-  // 走 dead-pane `--resume` 自愈复活, 对话不丢。与 /kill 的分界线就是那行
-  // store.drop: reap 是"睡着", kill 是"死了"。0 = 关闭。
+  chatOriginOnly: hot(z.boolean().default(true).describe("出处门: 只把群里发起的轮次下发到群, CLI 手敲的只进详情页")),
+  slashAckFirstLine: hot(z.boolean().default(false).describe("/clear、/new 等斜杠命令回执只发第一行 ack, 不附 tip")),
+  // 值越大越不容易误收 (model 思考时间长), 但用户等最终结论的延迟也越大。不设则按
+  // 后端自动: codebuddy 1s (派发子 agent 期间由 openAgents guard 拦截), claude 4s。
+  softTurnEndMs: hot(z.number().int().positive().optional().describe("软收口静默期 (ms): 多久没有新输出算一轮结束; 不设 = 按后端自动")),
+  // 只收 pane, 保留 store 绑定 (sessionId/jsonl), 下一条消息走 dead-pane `--resume` 自愈
+  // 复活, 对话不丢。与 /kill 的分界线就是那行 store.drop: reap 是"睡着", kill 是"死了"。
   // 名下有定时任务 / 挂着审批 / 正忙 / 人正盯着的不收, 所以实际数量可能暂时高于上限。
-  maxPanes: z.number().int().nonnegative().default(20),
+  maxPanes: z.number().int().nonnegative().default(20).describe("活着的会话 pane 上限, 超出从最久没动的收起; 0 = 关闭"),
   // ── Prompt-cache keepalive ────────────────────────────────────────────
   // Anthropic prompt caching: cache-write costs 1.25x, cache-read 0.1x, and the
   // cache lives only ~5min. A pane that goes idle (agent parked waiting on a
@@ -147,89 +118,73 @@ const Mirror = z.object({
   // turn pays a full 1.25x re-write of the entire context. keepalive injects a
   // tiny ping just before expiry: it re-reads the cached prefix (0.1x) and
   // slides the TTL forward, so the eventual real turn only writes the delta.
-  keepalive: z
+  // 保温 tick 每 15s 现读整节; 只有 ping / resumePing 另被启动时建成的识别表用着。
+  keepalive: hot(z
     .object({
-      // Master switch. Off → no pings, no timer overhead.
-      enabled: z.boolean().default(true),
-      // Prompt-cache TTL (s) FALLBACK, plus the stall-recovery quiet window. The
-      // warm-ping cadence follows the TTL each session's cache was actually
+      enabled: z.boolean().default(true).describe("prompt-cache 保温总开关"),
+      // The warm-ping cadence follows the TTL each session's cache was actually
       // written with (`cache_creation.ephemeral_1h/5m` in its transcript — 1h on a
       // Claude Code subscription); this only applies when no such split is on record.
-      ttlSec: z.number().int().positive().default(300),
-      // Fire this many seconds BEFORE ttl expiry — the ping needs slack to land
-      // and settle. Effective idle trigger = ttlSec - marginSec.
-      marginSec: z.number().int().nonnegative().default(45),
-      // How many pings to fire after the last REAL (non-ping) turn before
-      // letting the cache go cold. Pings fire at the cadence (ttlSec -
-      // marginSec) — i.e. always just before the cache would expire.
+      ttlSec: z.number().int().positive().default(300).describe("缓存 TTL 兜底值 (s), 以及卡死恢复的静默窗口"),
+      // The ping needs slack to land and settle. Effective idle trigger = ttlSec - marginSec.
+      marginSec: z.number().int().nonnegative().default(45).describe("提前 TTL 到期多少秒打 ping"),
       // Real activity resets the count, so bridging restarts from each genuine
       // turn: 6 pings = ~6h on a 1h cache (~26min on 5min). Each ping is a
       // near-free cache-read (0.1x); a single cold-rewrite of a large context
-      // costs 1.25x (5min) / 2x (1h) of its full
-      // size, so a handful of pings beats letting it expire while the user
-      // is still around.
-      rounds: z.number().int().positive().default(6),
-      // The ping text. Tiny (small cache-write delta) and self-describing so a
-      // human glancing at the pane sees why it's there. The reply is swallowed —
-      // never mirrored to chat, the detail store, or usage accounting.
-      ping: z.string().default('keepalive — reply with just "pong", take no other action'),
-      // Stall recovery, gated PURELY by rule — never by the model's own judgment,
-      // and read from the transcript's structure only (never the screen): the
-      // turn is still unfinished — it died on the CLI's synthetic API-error reply,
-      // or a tool result was never answered — and has been quiet for the whole
-      // idle window. Only then does the ping carry `resumePing` (a plain
-      // "continue") INSTEAD of `ping`. Any non-"pong" reply to a ping is treated as a real turn
-      // (un-swallowed to chat, clocks re-anchored) — so a resumed session shows.
-      resumeOnStall: z.boolean().default(true),
-      resumePing: z.string().default('continue'),
-      // Fallback for the per-spawn `keepalive` override (spawn_wizard / clone_wizard /
-      // new_claude_session's `keepalive` param). A spawn that passes the param
-      // explicitly always wins; this only applies when it's omitted. false →
-      // newly created wizards/clones opt OUT of pings by default — useful when
-      // most spawns are short-lived task runners and only a few should be kept
-      // warm, at which point those few pass `keepalive:true` explicitly.
-      spawnDefault: z.boolean().default(true),
+      // costs 1.25x (5min) / 2x (1h) of its full size, so a handful of pings beats
+      // letting it expire while the user is still around.
+      rounds: z.number().int().positive().default(6).describe("最后一次真实轮次之后最多保温几次"),
+      // Tiny (small cache-write delta) and self-describing so a human glancing at
+      // the pane sees why it's there. The reply is swallowed — never mirrored to
+      // chat, the detail store, or usage accounting.
+      ping: knob(z.string().default('keepalive — reply with just "pong", take no other action').describe("保温 ping 的文本"), { apply: "reload" }),
+      // Gated PURELY by rule — never by the model's own judgment, and read from the
+      // transcript's structure only (never the screen): the turn is still unfinished
+      // — it died on the CLI's synthetic API-error reply, or a tool result was never
+      // answered — and has been quiet for the whole idle window. Any non-"pong"
+      // reply to a ping is treated as a real turn (un-swallowed to chat, clocks
+      // re-anchored) — so a resumed session shows.
+      resumeOnStall: z.boolean().default(true).describe("轮次卡死时, 保温改发 resumePing 把它续上"),
+      resumePing: knob(z.string().default("continue").describe("卡死恢复时发的文本"), { apply: "reload" }),
+      // A spawn that passes the param explicitly always wins. false → useful when
+      // most spawns are short-lived task runners and only a few should be kept warm,
+      // at which point those few pass `keepalive:true` explicitly.
+      spawnDefault: z.boolean().default(true).describe("spawn/clone 没传 keepalive 时, 新 wizard 是否保温"),
     })
-    .default({}),
+    .default({})
+    .describe("prompt-cache 保温: 空闲 pane 在缓存过期前打一个小 ping")),
 });
 
 const Wrc = z.object({
-  allowFrom: z.array(z.string()).default([]),
-  // Legacy pre-v0.3: single binary path. Still honored as a back-compat alias
-  // — resolveCliBackend picks it up when cliBackends.<name>.bin is unset. Kept
-  // on the schema so existing configs keep parsing without migration.
-  claudeBin: z.string().default("claude"),
-  // DEFAULT CLI backend — the one used when there is no transcript to derive a
-  // backend from (new-session spawns). It is NOT exclusive: the
-  // daemon mirrors sessions from every installed CLI concurrently, resolving
-  // each attachment's binary + jsonl dialect from its own transcript path
-  // (shared/cli-backends.ts bindCliBackends / backendForPath). Optional —
-  // when unset, resolveCliBackend infers from claudeBin basename (so legacy
-  // `claudeBin: "claude-internal"` configs still resolve correctly without
-  // needing to also set defaultCli). The Wrc transform below pins the inferred
-  // name back into v.defaultCli so downstream readers see a concrete value.
-  defaultCli: z.enum(["claude", "claude-internal", "codebuddy"]).optional(),
-  // Per-backend bin overrides. Missing entry → built-in default (`claude`,
-  // `claude-internal`, `codebuddy`). Example:
-  //   cliBackends: { codebuddy: { bin: "/usr/local/bin/codebuddy" } }
-  cliBackends: z
+  allowFrom: knob(z.array(z.string()).default([]).describe("允许驱动本机的聊天 / 用户 (principal)"), { gate: "card", apply: "hot" }),
+  // Still honored as a back-compat alias — resolveCliBackend picks it up when
+  // cliBackends.<name>.bin is unset. Kept so existing configs keep parsing.
+  claudeBin: knob(z.string().default("claude").describe("旧版单一 CLI 二进制路径 (兼容用, 优先用 cliBackends)"), { gate: "card" }),
+  // NOT exclusive: the daemon mirrors sessions from every installed CLI
+  // concurrently, resolving each attachment's binary + jsonl dialect from its own
+  // transcript path (shared/cli-backends.ts bindCliBackends / backendForPath).
+  // When unset, resolveCliBackend infers from claudeBin basename (so legacy
+  // `claudeBin: "claude-internal"` configs still resolve correctly). The Wrc
+  // transform below pins the inferred name back into v.defaultCli.
+  defaultCli: z.enum(CLI_NAMES).optional().describe("新开会话默认用哪个 CLI; 不设 = 按 claudeBin 推断"),
+  // Example: cliBackends: { codebuddy: { bin: "/usr/local/bin/codebuddy" } }
+  cliBackends: knob(z
     .object({
-      claude: z.object({ bin: z.string().optional() }).optional(),
-      "claude-internal": z.object({ bin: z.string().optional() }).optional(),
-      codebuddy: z.object({ bin: z.string().optional() }).optional(),
+      claude: z.object({ bin: z.string().optional().describe("二进制路径") }).optional(),
+      "claude-internal": z.object({ bin: z.string().optional().describe("二进制路径") }).optional(),
+      codebuddy: z.object({ bin: z.string().optional().describe("二进制路径") }).optional(),
     })
-    .default({}),
-  cwd: z.string().default("~/.wezard/workspace"),
-  extraArgs: z.array(z.string()).default([]),
-  mirror: Mirror.default({}),
-  // tmux session name prefix for auto-spawn. Final name is
-  // `${prefix}-<short>`. Auto-spawn fires when an authorized inbound finds no
-  // mirror attached for that chat — allowFrom IS the authorization.
-  tmuxPrefix: z.string().default("wezard"),
-  // 机器人在 WeCom 里的显示名 —— 由建机器人的人自己取, 我们无法从消息里读到。
-  // 群里 @ 它 / 引用它的气泡时, WeCom 会把 `@<显示名>` 塞进正文; 这里配上真名
-  // (可多个别名) 才能把它从 prompt 里剥干净。内置 wezard / weclaude 恒生效。
-  botNames: z.array(z.string()).default([]),
+    .default({})
+    .describe("各 CLI 后端的二进制路径覆盖; 缺省 = 内置默认"), { gate: "card" }),
+  cwd: z.string().default("~/.wezard/workspace").describe("新会话的默认工作区"),
+  extraArgs: knob(z.array(z.string()).default([]).describe("启动 CLI 时追加的参数"), { gate: "card", apply: "hot" }),
+  mirror: Mirror.default({}).describe("会话镜像: 推送、分页、详情页、pane 上限、保温"),
+  // Auto-spawn fires when an authorized inbound finds no mirror attached for that
+  // chat — allowFrom IS the authorization.
+  tmuxPrefix: z.string().default("wezard").describe("自动起的 tmux 会话名前缀 (`<prefix>-<short>`)"),
+  // 机器人显示名由建机器人的人自己取, 我们无法从消息里读到。群里 @ 它 / 引用它的
+  // 气泡时, WeCom 会把 `@<显示名>` 塞进正文; 配上真名才能把它从 prompt 里剥干净。
+  botNames: z.array(z.string()).default([]).describe("机器人在企微里的显示名 (可多个别名), 用于剥掉 @; 内置 wezard / weclaude 恒生效"),
 }).transform((v) => {
   // Resolve the active backend once — honors defaultCli if set, otherwise
   // infers from claudeBin basename (legacy back-compat). Pin the inferred
@@ -259,83 +214,62 @@ const Wrc = z.object({
 // 不吃 session cache、不参与批量合流、卡上没有「全过」按钮、超时不静默放行。
 // patterns 都是 JS 正则源码串, 大小写不敏感; allowPatterns 优先级最高。
 const Danger = z.object({
-  enabled: z.boolean().default(true),
-  // true = 命中危险名单也直接放行 (显式的「跳过 danger」开关)。相当于对危险操作
-  // 完全免卡 —— 与 enabled=false 的区别: 名单仍会计算 (日志/redact 用得到),
-  // 只是不再拦。默认 false。
-  skip: z.boolean().default(false),
-  // true = 跳过所有审批: 命中 matcher 的调用一律静默放行, 压过危险名单 / askRules /
-  // ⏱窗口 / 会话缓存 —— 比 skip 更彻底 (skip 只豁免命中名单的调用, 普通调用照审)。
-  // denyRules 与 EnterPlanMode 拦截仍生效 (拒绝不是审批); AskUserQuestion /
-  // ExitPlanMode 交互卡不受影响。默认 false。
-  skipAll: z.boolean().default(false),
-  // false = 丢掉内置名单, 只用下面三组自定义规则。
-  builtin: z.boolean().default(true),
-  commandPatterns: z.array(z.string()).default([]),
-  toolPatterns: z.array(z.string()).default([]),
-  pathPatterns: z.array(z.string()).default([]),
-  allowPatterns: z.array(z.string()).default([]),
+  enabled: z.boolean().default(true).describe("危险名单总开关"),
+  // 与 enabled=false 的区别: 名单仍会计算 (日志/redact 用得到), 只是不再拦。
+  skip: z.boolean().default(false).describe("命中危险名单也直接放行 (只豁免命中名单的调用)"),
+  // 压过危险名单 / askRules / ⏱窗口 / 会话缓存 —— 比 skip 更彻底 (skip 只豁免命中名单
+  // 的调用, 普通调用照审)。denyRules 与 EnterPlanMode 拦截仍生效 (拒绝不是审批);
+  // AskUserQuestion / ExitPlanMode 交互卡不受影响。
+  skipAll: z.boolean().default(false).describe("跳过所有审批: 命中 matcher 的调用一律静默放行"),
+  builtin: z.boolean().default(true).describe("用内置危险名单; false = 只用下面的自定义规则"),
+  commandPatterns: z.array(z.string()).default([]).describe("危险 Bash 命令正则 (大小写不敏感)"),
+  toolPatterns: z.array(z.string()).default([]).describe("危险工具名正则"),
+  pathPatterns: z.array(z.string()).default([]).describe("危险路径正则"),
+  allowPatterns: z.array(z.string()).default([]).describe("豁免正则, 优先级最高"),
 });
 
 const Approval = z.object({
-  enabled: z.boolean().default(true),
-  // 审批粒度:
-  //   "all"    — 每个命中 matcher 的工具调用都发卡 (默认, 现状)。
-  //   "danger" — 只有命中危险名单 (approval.danger) 的调用才发卡, 其余静默 allow。
-  //              名单被关掉 (danger.enabled=false) 时该模式自动退回 "all" —— 否则
-  //              就成了「全放行」, 与 danger.skipAll 语义重合且更隐蔽。
-  //   (跳过所有审批不在 mode 里 —— 用 danger.skipAll, 与 danger.skip 成对。)
-  mode: z.enum(["all", "danger"]).default("all"),
-  matcher: z.string().default(".*"),
-  approvers: z.array(z.string()).default([]),
-  hookTimeoutSec: z.number().int().positive().default(43210),
-  longPollSec: z.number().int().positive().default(43200),
-  sessionCacheMinutes: z.number().int().nonnegative().default(30),
-  windowMinutes: z.number().int().nonnegative().default(600),
-  sensitiveArgRedact: z.boolean().default(true),
-  fallbackOnError: z.enum(["ask", "allow", "deny"]).default("ask"),
-  // 同 session 同 tool 的并发 PreToolUse 合流窗口: 第一次到达后等待这么久,
-  // 期间到的同类请求合成一张批量卡 (减少 N 张并发卡的轰炸)。0 = 关闭聚合,
-  // 每次立刻发卡 (旧行为)。单次到达走单卡路径, 仅多了一次性的延迟。
-  batchCoalesceMs: z.number().int().nonnegative().default(250),
-  // 拦截 model 主动调用的 EnterPlanMode (deny + reason),让 Claude 不要自动进
-  // plan mode、直接干活。用户仍可在本地 Shift+Tab 手动进 plan mode(那条路径
-  // 不过 hook)。默认 true。设 false 恢复原行为(允许模型自动进 plan mode)。
-  blockAutoPlanMode: z.boolean().default(true),
-  danger: Danger.default({}),
-  // Claude-Code 风格的放行规则 (语法子集见 shared/allow-rules.ts): 命中的调用
-  // 跳过发卡直接 allow。例:
-  //   "Bash(git log *)"  "Bash(python3 .claude/skills/*)"  "mcp__server__tool"
-  // matcher 决定哪些工具进入审批, allowRules 在其中再挖细粒度豁免 (对 Bash 可
-  // 按命令前缀区分, matcher 只认工具名做不到)。默认空 = 不豁免。
-  allowRules: z.array(z.string()).default([]),
-  // 同语法的拒绝规则: 命中直接 deny (不发卡, reason 回传给 model)。
+  enabled: z.boolean().default(true).describe("审批总开关"),
+  // 名单被关掉 (danger.enabled=false) 时 "danger" 自动退回 "all" —— 否则就成了「全
+  // 放行」, 与 danger.skipAll 语义重合且更隐蔽。跳过所有审批不在 mode 里 —— 用
+  // danger.skipAll, 与 danger.skip 成对。
+  mode: z.enum(["all", "danger"]).default("all").describe("审批粒度: all = 每个命中 matcher 的调用都发卡; danger = 只有命中危险名单的才发卡"),
+  matcher: z.string().default(".*").describe("哪些工具名进入审批 (正则)"),
+  approvers: z.array(z.string()).default([]).describe("可以点审批卡的人; 空 = 不限"),
+  // 必须严格大于 longPollSec, 否则 daemon 还在等点击时 hook 已经返回 ask。
+  hookTimeoutSec: knob(z.number().int().positive().default(43210).describe("hook curl 的超时 (s), 须大于 longPollSec; 由 `wezard sync` 写进 hook 环境"), { apply: "reload" }),
+  longPollSec: z.number().int().positive().default(43200).describe("审批卡等待点击的上限 (s)"),
+  sessionCacheMinutes: z.number().int().nonnegative().default(30).describe("同一会话重复调用沿用上次决定的分钟数"),
+  windowMinutes: z.number().int().nonnegative().default(600).describe("点「⏱ 窗口」后该会话自动放行的分钟数"),
+  sensitiveArgRedact: z.boolean().default(true).describe("发卡前脱敏参数里的敏感值"),
+  fallbackOnError: z.enum(["ask", "allow", "deny"]).default("ask").describe("审批链路出错时 hook 的回答"),
+  // 单次到达走单卡路径, 仅多了一次性的延迟。
+  batchCoalesceMs: z.number().int().nonnegative().default(250).describe("同会话同工具并发调用合成一张批量卡的等待窗口 (ms); 0 = 关闭"),
+  // 用户仍可在本地 Shift+Tab 手动进 plan mode (那条路径不过 hook)。
+  blockAutoPlanMode: z.boolean().default(true).describe("拦截模型主动调用的 EnterPlanMode"),
+  danger: Danger.default({}).describe("危险操作名单: 命中者强制单次审批"),
+  // 语法子集见 shared/allow-rules.ts。matcher 决定哪些工具进入审批, allowRules 在其中
+  // 再挖细粒度豁免 (对 Bash 可按命令前缀区分, matcher 只认工具名做不到)。
+  allowRules: z.array(z.string()).default([]).describe("Claude Code 风格的放行规则, 如 \"Bash(git log *)\""),
   // Bash 复合命令任一段命中即拒。优先级最高: deny > ask > allow。
-  denyRules: z.array(z.string()).default([]),
-  // 同语法的强制审批规则: 命中必发卡, 压过 allowRules / 自动放行窗口 / 会话缓存。
+  denyRules: z.array(z.string()).default([]).describe("同语法的拒绝规则: 命中直接 deny"),
   // 用于给危险前缀 (如 "Bash(rm *)", "Bash(git push *)") 兜底 — 即使 ⏱ 窗口开着
   // 也逐条确认, 语义对齐 Claude Code 的 permissions.ask。
-  askRules: z.array(z.string()).default([]),
-  // `.claude/**` 写守卫 (见 shared/claude-config-path.ts): 这类改动会触发 Claude Code
-  // 自己的原生确认框, 而那个框**不经过 PreToolUse hook** —— 规则一放行就是"不发卡 +
-  // pane 无限期阻塞"的静默死锁。开启后: 命中的调用必发卡 (压过 allowRules / ⏱窗口 /
-  // 会话缓存), 用户点「允许」后 daemon 去 pane 上把那个框按掉 (只按一次性 Yes);
-  // 按不掉则 Esc 取消并把原因注入会话, 让模型改走实体路径。
+  askRules: z.array(z.string()).default([]).describe("同语法的强制审批规则: 命中必发卡"),
+  // 这类改动会触发 Claude Code 自己的原生确认框, 而那个框**不经过 PreToolUse hook** ——
+  // 规则一放行就是"不发卡 + pane 无限期阻塞"的静默死锁。开启后命中的调用必发卡, 用户
+  // 点「允许」后 daemon 去 pane 上把那个框按掉; 按不掉则 Esc 取消并把原因注入会话。
   // 仅对有活 tmux pane 的镜像会话生效 —— 本地会话用户自己按掉即可。
-  claudeConfigGuard: z.boolean().default(true),
-  // 批准后等原生确认框出现的最长时间 (ms)。CC 在 hook 返回后才渲染它, 轮询步进 200ms。
-  // 太短会误判成 no_modal (框随后才出现, 于是没人按, 退回死锁), 4s 覆盖实测抖动。
-  claudeConfigModalWaitMs: z.number().int().nonnegative().default(4000),
-  // 审批卡 quote_area 里命令/参数体的最大字符数。WeCom 未公开该字段上限, 发送
-  // 失败会自动缩到 600 重试一次 (见 approval.ts), 所以可以放心调大。
-  // 注意手机端客户端只渲染 quote 区前 2~3 行 (实测), 看全命令靠「展开完整命令」。
-  cardQuoteMaxChars: z.number().int().positive().default(1200),
-  // Bash 命令超过 ~200 字 (卡片手机端可见极限) 时, 发卡前**无条件**先推一条含完整
-  // 命令的 markdown 消息。默认 0 = 关闭 —— 长命令由卡片自己承载: 引用区可点进详情
-  // 页, 右上角「⋯」菜单有「📄 展开完整命令」按需在群里发全文。设成正数可恢复旧
-  // 行为 (客户端不渲染 action_menu、或就是要全文无条件落在群里时用)。
-  // 此值为前置消息的总字数上限 (超出截断并注明; 按 1800 字/条分块发送)。
-  fullCommandPreludeChars: z.number().int().nonnegative().default(0),
+  claudeConfigGuard: z.boolean().default(true).describe("`.claude/**` 写守卫: 必发卡, 批准后替人按掉 CC 原生确认框"),
+  // CC 在 hook 返回后才渲染它, 轮询步进 200ms。太短会误判成 no_modal (框随后才
+  // 出现, 于是没人按, 退回死锁), 4s 覆盖实测抖动。
+  claudeConfigModalWaitMs: z.number().int().nonnegative().default(4000).describe("批准后等 CC 原生确认框出现的最长时间 (ms)"),
+  // WeCom 未公开该字段上限, 发送失败会自动缩到 600 重试一次 (见 approval.ts), 所以
+  // 可以放心调大。手机端只渲染 quote 区前 2~3 行, 看全命令靠「展开完整命令」。
+  cardQuoteMaxChars: knob(z.number().int().positive().default(1200).describe("审批卡引用区命令/参数体的最大字符数"), { apply: "reload" }),
+  // 默认关闭 —— 长命令由卡片自己承载: 引用区可点进详情页, 「⋯」菜单有「📄 展开完整
+  // 命令」按需发全文。客户端不渲染 action_menu、或就是要全文落在群里时设成正数。
+  fullCommandPreludeChars: z.number().int().nonnegative().default(0).describe("长 Bash 命令发卡前先推全文的字数上限; 0 = 关闭"),
 });
 
 // sync.targets[].kind 的合法值。claude-internal / custom 等旧值自动 collapse
@@ -345,26 +279,44 @@ const normalizeSyncKind = (v: unknown): unknown =>
   typeof v === "string" && SYNC_KIND_LEGACY_TO_CLAUDE.has(v) ? "claude" : v;
 
 const SyncTarget = z.object({
-  // CLI 家族标签: "claude" (含 claude-internal 等 fork) 或 "codebuddy"。
   // 仅用于 sync 日志; 真正决定写入位置的是 settingsPath。
-  kind: z.preprocess(normalizeSyncKind, z.enum(["claude", "codebuddy"])).default("claude"),
-  settingsPath: z.string(),
-  scope: z.enum(["user", "project", "local"]).default("user"),
+  kind: z.preprocess(normalizeSyncKind, z.enum(["claude", "codebuddy"])).default("claude").describe("CLI 家族标签"),
+  settingsPath: z.string().describe("要写入 MCP / hook 注册的 settings.json 路径"),
+  scope: z.enum(["user", "project", "local"]).default("user").describe("settings 的作用域"),
 });
 const Sync = z.object({
-  targets: z.array(SyncTarget).default([]),
+  targets: z.array(SyncTarget).default([]).describe("`wezard sync` 要写入的 settings.json 列表"),
 });
 
-// 独立 detail 中转服务 (wezard svr) 的默认参数。CLI 参数 (--host/--port/…) 仍可覆盖,
-// 空则退回硬编码默认 (0.0.0.0:17891)。放在 top-level 而不是塞进 daemon: svr 是独立进程,
-// 与 daemon 生命周期解耦。
+// 放在 top-level 而不是塞进 daemon: svr 是独立进程, 与 daemon 生命周期解耦。CLI 参数
+// (--host/--port/…) 仍可覆盖, 空则退回硬编码默认 (0.0.0.0:17891)。
 const Svr = z.object({
-  host: z.string().default("0.0.0.0"),
-  port: z.number().int().min(1).max(65535).default(17891),
-  stateDir: z.string().default("~/.wezard/svr"),
-  tokenFile: z.string().default("~/.wezard/svr-token"),
-  token: z.string().default(""),
-  logLevel: z.enum(["trace", "debug", "info", "warn", "error"]).default("info"),
+  host: knob(z.string().default("0.0.0.0").describe("svr 监听地址"), { gate: "card" }),
+  port: knob(z.number().int().min(1).max(65535).default(17891).describe("svr 监听端口"), { gate: "card" }),
+  stateDir: z.string().default("~/.wezard/svr").describe("svr 状态目录"),
+  tokenFile: knob(z.string().default("~/.wezard/svr-token").describe("svr 口令文件"), { gate: "hidden" }),
+  token: knob(z.string().default("").describe("svr 口令"), { gate: "hidden" }),
+  logLevel: z.enum(LOG_LEVELS).default("info").describe("svr 日志级别"),
+});
+
+// 按难度分档: spawn_wizard / clone_wizard 的 `tier` 落到这里的 {cli, model, effort};
+// 显式给的 model / effort / cli 压过档位。档名固定三个 —— MCP 参数是 enum, 宪章逐档列。
+const Tier = z.object({
+  cli: z.enum(CLI_NAMES).optional().describe("用哪个 CLI; 省略 = 继承调用方 (clone 一律继承父会话)"),
+  model: z.string().default("").describe("口语化模型名 ('haiku' / 'sonnet 5' / 'opus'), 只写家族 = 该家族最新; 空 = CLI 默认"),
+  effort: z.enum(EFFORTS).optional().describe("推理档位; 省略 = CLI 默认"),
+});
+const Models = z.object({
+  tiers: z.object({
+    light: Tier.default({ model: "haiku", effort: "low" }).describe("跑腿: 查找、搬运、跑命令"),
+    standard: Tier.default({ model: "sonnet", effort: "medium" }).describe("常规实现"),
+    hard: Tier.default({ model: "opus", effort: "high" }).describe("要判断: 设计、排障、审查"),
+  }).default({}).describe("spawn_wizard / clone_wizard 的 tier 档位"),
+  // 只在新起一个群的默认会话时落地; 已在跑的管家不自动切 (换模型会让缓存整份重读)。
+  router: z.object({
+    model: z.string().default("sonnet").describe("口语化模型名; 空 = CLI 默认"),
+    effort: z.enum(EFFORTS).optional().describe("推理档位; 省略 = CLI 默认"),
+  }).default({ model: "sonnet", effort: "low" }).describe("各群管家 (群的默认会话) 新起时用的模型"),
 });
 
 // 定时任务的**旧**存法 (1.5 之前)。现在一条任务是 ~/.wezard/tasks/<id>.task.mjs
@@ -411,11 +363,9 @@ const Schedules = z.preprocess(
 
 export type ScheduleRecord = z.infer<typeof Schedule>;
 
-// 聊天命名表: `name → base principal` (`chat:wrxxx` / `user:xxx`)。方向选 name→
-// principal 而不是反过来: 名字是寻址用的 key, 这个方向天然保证唯一, 手写也更顺。
-// 有了名字, 跨 chat 的 peer 才能写成 `daily#fix` 这种稳定地址 —— 否则只能靠
-// "全局唯一 tag" 碰运气。见 daemon/chat-name.ts。
-const Chats = z.record(z.string(), z.string());
+// 方向选 name→principal 而不是反过来: 名字是寻址用的 key, 这个方向天然保证唯一, 手写
+// 也更顺。有了名字, 跨 chat 的 peer 才能写成 `daily#fix` 这种稳定地址。见 daemon/chat-name.ts。
+const Chats = z.record(z.string(), z.string().describe("base principal (`chat:wr…` / `user:…`)"));
 
 // 1.4.x 之前定时表住在 `topics.schedules` (同一张表里还混着 topic 广播)。订阅与
 // 广播删掉后它升到顶层, 老 config 就地抬一手 —— 否则已排好的任务会静默消失。
@@ -426,16 +376,21 @@ const liftLegacySchedules = (v: unknown): unknown => {
   return legacy && !o.schedules ? { ...o, schedules: legacy } : v;
 };
 
+// gate 的分界线是「放权」: 谁能驱动本机 (allowFrom)、审批怎么判 (approval.*)、跑哪个
+// 二进制带什么参数 (claudeBin / cliBackends / extraArgs —— 一个 --dangerously-skip-permissions
+// 就绕过了整个审批)、往哪写别的 settings (sync)、把什么暴露到哪 (监听地址 / 详情外送 /
+// 出站默认聊天) —— 这些要人点卡; 口令一律 hidden; 其余 wizard 直接改。
 export const ConfigSchema = z.preprocess(liftLegacySchedules, z.object({
-  bot: Bot,
-  defaultChat: z.string().default(""),
-  chats: Chats.default({}),
-  daemon: Daemon.default({}),
-  wrc: Wrc.default({}),
-  approval: Approval.default({}),
-  sync: Sync.default({ targets: [] }),
-  svr: Svr.default({}),
-  schedules: Schedules,
+  bot: knob(Bot.describe("企微机器人凭据"), { gate: "hidden" }),
+  defaultChat: knob(z.string().default("").describe("出站默认聊天 (没有更具体去向时推往这里)"), { gate: "card", apply: "hot" }),
+  chats: hot(Chats.default({}).describe("聊天命名表: 名字 → base principal")),
+  daemon: Daemon.default({}).describe("守护进程: 监听、日志、详情页"),
+  wrc: Wrc.default({}).describe("远程驱动: 授权名单、CLI 后端、工作区、镜像"),
+  approval: knob(Approval.default({}).describe("工具调用审批: 粒度、规则、危险名单、窗口"), { gate: "card", apply: "hot" }),
+  models: hot(Models.default({}).describe("按任务难度分档的模型 / effort, 以及各群管家用的模型")),
+  sync: knob(Sync.default({ targets: [] }).describe("把 MCP / hook 注册写进各 CLI 的 settings.json"), { gate: "card" }),
+  svr: Svr.default({}).describe("独立详情中转服务 (wezard svr)"),
+  schedules: knob(Schedules, { gate: "hidden" }),
 }));
 
 export type Config = z.infer<typeof ConfigSchema>;

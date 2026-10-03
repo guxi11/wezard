@@ -126,6 +126,18 @@
     }
   },
 
+  // ── 按难度分档的模型 ─────────────────────────────────────────────
+  // spawn_wizard / clone_wizard 的 `tier` 落到这里; 显式给的 model / effort / cli 压过档位。
+  // router = 各群管家 (群的默认会话) 新起时用的模型。省略整段 = 下面这组默认值。
+  "models": {
+    "tiers": {
+      "light":    { "model": "haiku",  "effort": "low" },
+      "standard": { "model": "sonnet", "effort": "medium" },
+      "hard":     { "model": "opus",   "effort": "high" }
+    },
+    "router": { "model": "sonnet", "effort": "low" }
+  },
+
   // ── claude / codebuddy wrapper sync ───────────────────────────────
   // `wezard sync` writes hooks/MCP/permissions into every target settings.json
   // listed below. Multi-CLI setups (claude + codebuddy 同时装) 列多项即可。
