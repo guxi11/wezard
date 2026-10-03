@@ -3,7 +3,9 @@
 // from the schema itself (shared/config-meta.ts); this module only renders and plans.
 // The card for a `card`-gated write and the actual file write are the caller's (index.ts).
 import type { Config } from "../shared/config.js";
-import { ConfigSchema, configIssues, parseConfigText, readSecrets } from "../shared/config.js";
+import { ConfigSchema, TIERS, configIssues, parseConfigText, readSecrets, type TierName } from "../shared/config.js";
+import type { CliBackendName } from "../shared/cli-backends.js";
+import { parseEffort, type Effort } from "../shared/effort.js";
 import { previewPatch, readJsoncText } from "../shared/config-writer.js";
 import {
   childKeys, isBranch, parsePath, resolve, toJsonPath, typeOf, writeGate,
@@ -107,7 +109,7 @@ export const configGet = (
     return { ok: true, text: [...body, ...tail].join("\n") };
   }
   const head = p.length
-    ? `${p.join(".")} · ${r.desc}${flags(r) ? `  ${flags(r)}` : ""}`
+    ? `${p.join(".")} · ${r.desc}${r.gate === "card" ? "  ✋" : ""}`
     : `wezard 配置 (${sourcePath}) —— config_get({path}) 逐层展开; config_set({path, value, dryRun:true}) 先看 diff 再改`;
   const kids = childKeys(r.core)
     .map((k) => resolve(ConfigSchema, [...p, k])!)
@@ -251,4 +253,79 @@ export const fromLegacy = (key: string, value: unknown, action: string | undefin
 export const legacyGet = (cfg: Config, key: string | undefined): { ok: true; key: string; value: unknown } | Err => {
   const spec = key ? LEGACY[key] : undefined;
   return spec ? { ok: true, key: key!, value: getIn(cfg, parsePath(spec.path)) } : { ok: false, reason: `unknown key "${key}". valid: ${Object.keys(LEGACY).join(", ")}` };
+};
+
+// ── 档位 ────────────────────────────────────────────────────────────────
+type Via = "explicit" | "tier" | "inherit";
+export interface TierPick {
+  ok: true;
+  tier?: TierName;
+  cli?: CliBackendName;
+  model?: string;
+  effort?: Effort;
+  /** 每个字段的来源; inherit = 不传, spawn 落到 CLI 默认, clone 跟被克隆者。 */
+  via: { cli: Via; model: Via; effort: Via };
+  note?: string;
+}
+
+/** spawn / clone 的 {cli, model, effort}: 显式给的 > 档里写的 > 不传。clone 换不了 CLI —— fork 只能在同一后端里。 */
+export const pickTier = (
+  models: Config["models"],
+  tier: string | undefined,
+  explicit: { cli?: CliBackendName; model?: string; effort?: Effort },
+  inherit: boolean,
+): TierPick | Err => {
+  const name = (tier ?? "").trim();
+  if (name && !(TIERS as readonly string[]).includes(name)) return { ok: false, reason: `tier 只有这几档: ${TIERS.join(" / ")}` };
+  const t = name ? models.tiers[name as TierName] : undefined;
+  const one = <T>(x: T | undefined, y: T | undefined): [T | undefined, Via] =>
+    x !== undefined ? [x, "explicit"] : y !== undefined ? [y, "tier"] : [undefined, "inherit"];
+  const tierCli = inherit ? undefined : t?.cli;
+  const [cli, viaCli] = one(explicit.cli, tierCli);
+  const [model, viaModel] = one(explicit.model?.trim() || undefined, t?.model.trim() || undefined);
+  const [effort, viaEffort] = one(explicit.effort, parseEffort(t?.effort));
+  return {
+    ok: true,
+    ...(name ? { tier: name as TierName } : {}),
+    cli, model, effort,
+    via: { cli: viaCli, model: viaModel, effort: viaEffort },
+    ...(inherit && t?.cli ? { note: `档位里的 cli (${t.cli}) 没用上: 克隆只能留在被克隆者的 CLI 上` } : {}),
+  };
+};
+
+// ── config_get 的依据: 各档的实际用量 ───────────────────────────────────
+// 口径是「按模型」: transcript 里只记了模型, 没记它是哪一档生的 —— 管家用的 sonnet 也会算进
+// standard。各档在用的 wizard 数取名册里出生时记下的 tier。
+export interface UsageTotals { tokens: number; cost: number }
+export interface TierUsage { today: Map<string, UsageTotals>; week: Map<string, UsageTotals> }
+
+// 口语模型名的每个词都出现在 id 里就算: 'sonnet 5' ⊂ claude-sonnet-5-5。
+const matches = (want: string, id: string): boolean => {
+  const words = want.toLowerCase().split(/[\s._-]+/).filter(Boolean);
+  return words.length > 0 && words.every((w) => id.toLowerCase().includes(w));
+};
+const sumFor = (want: string, m: Map<string, UsageTotals>): UsageTotals =>
+  [...m].filter(([id]) => matches(want, id)).reduce((a, [, x]) => ({ tokens: a.tokens + x.tokens, cost: a.cost + x.cost }), { tokens: 0, cost: 0 });
+
+export const tierEvidence = (
+  models: Config["models"],
+  path: string[],
+  usage: () => TierUsage,
+  holders: (tier: TierName) => number,
+  fmt: { tokens: (n: number) => string; cost: (usd: number) => string },
+): string[] => {
+  if (path[0] !== "models") return [];
+  const want = path[1] === "tiers" && path[2] ? [path[2]] : path[1] === "router" ? ["router"] : path[1] === "tiers" || !path[1] ? [...TIERS, ...(path[1] ? [] : ["router"])] : [];
+  const rows = want.filter((n) => n === "router" || (TIERS as readonly string[]).includes(n));
+  if (!rows.length) return [];
+  const u = usage();
+  const line = (name: string): string => {
+    const spec = name === "router" ? models.router : models.tiers[name as TierName];
+    const label = `${spec.model || "CLI 默认"}${spec.effort ? `·${spec.effort}` : ""}`;
+    if (!spec.model) return `${name} (${label}): 用的是 CLI 默认模型, 按模型统计不出来`;
+    const w = sumFor(spec.model, u.week), d = sumFor(spec.model, u.today);
+    const held = name === "router" ? "" : ` · 名册里记作这一档的 ${holders(name as TierName)} 个`;
+    return `${name} (${label}): 本周 ${fmt.tokens(w.tokens)} tok ${fmt.cost(w.cost)} · 今日 ${fmt.tokens(d.tokens)} tok ${fmt.cost(d.cost)}${held}`;
+  };
+  return [...rows.map(line), "(用量按模型统计, 同一模型的档外用量也算在内)"];
 };

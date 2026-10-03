@@ -810,6 +810,7 @@ const offspringShape = {
   task: z.string().optional().describe("就位后立刻派下去的第一件活 (私聊)。省略则它就位待命。"),
   chat: z.string().optional().describe("把它生在另一个聊天里 (wizard_roster 里的 home 聊天名)。省略 = 你自己的聊天, 这是绝大多数情况。"),
   cli: z.enum(["claude", "claude-internal", "codebuddy"]).optional().describe("用哪个 CLI。省略则继承。"),
+  tier: z.enum(["light", "standard", "hard"]).optional().describe("按难度选档, 落到配置 `models.tiers` 里那一档的 {cli, model, effort}: light = 跑腿 (查找、搬运、跑命令), standard = 常规实现, hard = 要判断 (设计、排障、审查)。同时给了 model / effort / cli 的, 以显式值为准; 克隆换不了 CLI。返回里的 `via` 说明每项来自显式、档位还是继承。当前各档是什么见宪章, 或 config_get({path:'models'})。"),
   model: z.string().optional().describe(MODEL_DOC),
   effort: z.enum(EFFORTS).optional().describe(EFFORT_DOC),
   job: z
@@ -823,7 +824,7 @@ const offspringShape = {
     .describe("要不要被 keepalive 心跳保温 (空闲时定期 ping 一下防 prompt cache 过期)。false = 永远不保温, 省下那份 ping 的钱 —— 适合跑腿一次就收工的; true = 明确要保温 —— 适合会长期挂着、随时可能被叫醒接手的。省略则按 daemon 配置的默认值。"),
 };
 
-type Offspring = { description: string; name?: string; task?: string; from?: string; detached?: boolean; cwd?: string; chat?: string; cli?: string; model?: string; effort?: string; job?: string; keepalive?: boolean; chain?: boolean };
+type Offspring = { description: string; name?: string; task?: string; from?: string; detached?: boolean; cwd?: string; chat?: string; cli?: string; model?: string; effort?: string; tier?: string; job?: string; keepalive?: boolean; chain?: boolean };
 
 const bear = (tool: string, inherit: boolean) => async (a: Offspring) =>
   unwrap(tool, await daemonPost("/wizard/clone", {
@@ -839,6 +840,7 @@ const bear = (tool: string, inherit: boolean) => async (a: Offspring) =>
     ...(a.cli ? { cli: a.cli } : {}),
     ...(a.model ? { model: a.model } : {}),
     ...(a.effort ? { effort: a.effort } : {}),
+    ...(a.tier ? { tier: a.tier } : {}),
     ...(a.keepalive !== undefined ? { keepalive: a.keepalive } : {}),
     ...(a.chain === false ? { chain: false } : {}),
   }));

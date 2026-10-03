@@ -5211,7 +5211,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const baseBound = base === target ? undefined : byTarget.get(base)?.jsonlPath ?? deps.store.get(base)?.jsonlPath;
     const boundPath = prev?.jsonlPath ?? rec?.jsonlPath ?? baseBound;
     const effCli = cli ?? (boundPath ? backendForPath(expandHome(boundPath)).name : undefined);
-    const effEffort = opts?.effort ?? parseEffort(prev?.effort ?? deps.store.get(target)?.effort);
+    // 群的默认会话 (管家) 没点名模型 / 档位时用 models.router。只管这里新起的 —— 死 pane
+    // 重生走绑定里记下的模型, 不经过这里; 已在跑的管家也不动 (换模型会让缓存整份重读)。
+    const router = !tagOfKey(target) && !isInternalKey(target) ? cfg.models.router : undefined;
+    const effModel = opts?.model?.trim() || router?.model || undefined;
+    const effEffort = opts?.effort ?? parseEffort(prev?.effort ?? deps.store.get(target)?.effort) ?? router?.effort;
     if (prev?.tmuxPane) {
       // Best-effort kill; ignore errors (pane may already be dead).
       void runTmux(["kill-pane", "-t", prev.tmuxPane]);
@@ -5227,7 +5231,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       windowName: windowName ?? target,
       cwdOverride: eff,
       cli: effCli,
-      model: opts?.model,
+      model: effModel,
       knownModels: modelSightings(effCli, [target, base]),
       effort: effEffort,
       systemPrompt: opts?.systemPrompt ?? charterFor(target, { cwd: eff }),
@@ -5246,7 +5250,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // means this CLI's default, not the dead pane's model. Store what
       // spawnTmuxClaude actually confirmed via `/model` (r.model), not the
       // raw request — a later respawn's fast path then matches on try one.
-      model: r.model ?? (opts?.model?.trim() ?? ""),
+      model: r.model ?? effModel ?? "",
       effort: r.effort ?? "",
       keepaliveDisabled: opts?.keepalive === undefined ? undefined : !opts.keepalive,
     });

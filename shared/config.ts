@@ -306,6 +306,8 @@ const Tier = z.object({
   model: z.string().default("").describe("口语化模型名 ('haiku' / 'sonnet 5' / 'opus'), 只写家族 = 该家族最新; 空 = CLI 默认"),
   effort: z.enum(EFFORTS).optional().describe("推理档位; 省略 = CLI 默认"),
 });
+export const TIERS = ["light", "standard", "hard"] as const;
+export type TierName = (typeof TIERS)[number];
 const Models = z.object({
   tiers: z.object({
     light: Tier.default({ model: "haiku", effort: "low" }).describe("跑腿: 查找、搬运、跑命令"),

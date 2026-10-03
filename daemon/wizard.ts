@@ -32,6 +32,8 @@ export interface WizardRecord {
    *  归谁管 (预算、回收); forkOf 是上下文从哪来。克隆自己时两者是同一个, 不重复记。 */
   forkOf?: string;
   bornAt: number;
+  /** spawn / clone 时落地的档位 (models.tiers 的键)。只记出生那一刻: 之后 set_model 换了模型它不跟。 */
+  tier?: string;
   /** 正在 spawn 它的那个 daemon 进程的代号 (BOOT_ID) —— 身份先于会话落盘, 生成功了才清掉。
    *  留着别的代号 = 生到一半那个进程就没了 (reload / 崩溃), 记录成了僵尸。不用 pid: 重启后会复用。 */
   spawning?: string;

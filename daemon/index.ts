@@ -14,7 +14,8 @@ import { bindCliBackends, projectDirsFor, type CliBackendName } from "../shared/
 import { startWs } from "./ws.js";
 import { startNetWatch } from "./net-watch.js";
 import { startHttp, json, readBody, type Handler } from "./http.js";
-import { applyHot, configGet, fromLegacy, legacyGet, planSet, renderPlan, type Plan, type SetReq } from "./config-api.js";
+import { applyHot, configGet, fromLegacy, legacyGet, pickTier, planSet, renderPlan, tierEvidence, type Plan, type SetReq, type TierUsage, type UsageTotals } from "./config-api.js";
+import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } from "./usage.js";
 import { installInboundRouter } from "./inbound.js";
 import { loadMirrorStore } from "./mirror-store.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
@@ -1869,9 +1870,12 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/clone", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { name?: string; tag?: string; description?: string; inherit?: boolean; detached?: boolean; from?: string; cwd?: string; chat?: string; cli?: CliBackendName; model?: string; effort?: string; task?: string; job?: string; keepalive?: boolean };
-      const effort = parseEffort(b.effort);
-      if (b.effort !== undefined && !effort) { json(res, 400, { ok: false, reason: `effort 只有这几档: ${EFFORTS.join(" / ")}` }); return; }
+      const b = body as { name?: string; tag?: string; description?: string; inherit?: boolean; detached?: boolean; from?: string; cwd?: string; chat?: string; cli?: CliBackendName; model?: string; effort?: string; tier?: string; task?: string; job?: string; keepalive?: boolean };
+      const askedEffort = parseEffort(b.effort);
+      if (b.effort !== undefined && !askedEffort) { json(res, 400, { ok: false, reason: `effort 只有这几档: ${EFFORTS.join(" / ")}` }); return; }
+      const pick = pickTier(cfg.models, b.tier, { cli: b.cli, model: b.model, effort: askedEffort }, b.inherit === true);
+      if (!pick.ok) { json(res, 400, pick); return; }
+      const effort = pick.effort;
       // 工单先验: 生完分身才发现工单号打错了, 那个分身就成了没人认领的孤儿。
       const jobId = (b.job ?? "").trim();
       if (jobId) {
@@ -1956,6 +1960,7 @@ const main = async (): Promise<void> => {
         // fork 了上下文就一并继承 self 记忆: 系统提示不随 fork 走 (分身拿的是自己的宪章),
         // 不拷的话它开局就没有, /clear 或交接重开后更是彻底没了。标上来源; 已经是继承来的不再套一层。
         ...(inherit ? { memory: (wizards.get(source)?.memory ?? []).map((x) => x.startsWith("(继承自 ") ? x : `(继承自 ${displayName(source)}) ${x}`) } : {}),
+        tier: pick.tier,
         // 生完才清; 这个进程中途没了, 下次开机由 sweepUnborn 认出并收掉。
         spawning: BOOT_ID,
       });
@@ -1973,8 +1978,8 @@ const main = async (): Promise<void> => {
         parent: source,
         target,
         windowName: name,
-        cli: b.cli,
-        model: b.model,
+        cli: pick.cli,
+        model: pick.model,
         effort,
         cwd: b.cwd,
         systemPrompt: charter,
@@ -2016,7 +2021,7 @@ const main = async (): Promise<void> => {
       // 让它们干完自己把结论送回来, 发起方不必挂在 wait_peer 上。
       const k = (body as { chain?: boolean }).chain === false ? undefined : parentKOf(self);
       if (dispatched) receipts.register({ from: self, to: target, channel: "", job: jobId, at: taskAt, turn: taskTurn, ...(k ? { k } : {}), ...(asker ? { asker } : {}) });
-      json(res, 200, { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, keepalive, ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(r.effort ? { effort: r.effort } : {}), ...(jobId ? { job: jobId } : {}), ...(detached ? { detached: true } : {}) });
+      json(res, 200, { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, keepalive, ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(r.effort ? { effort: r.effort } : {}), ...(pick.tier ? { tier: pick.tier } : {}), via: pick.via, ...(pick.note ? { tierNote: pick.note } : {}), ...(jobId ? { job: jobId } : {}), ...(detached ? { detached: true } : {}) });
     });
 
     // 收掉一个 wizard。interrupt = 打断它这一轮 (Esc); end = 结束它并回收 pane。
@@ -2288,7 +2293,18 @@ const main = async (): Promise<void> => {
     // 确认卡在请求里最多等 4 分钟 (留出 fetch 5 分钟收头的余量), 卡本身半小时有效。
     const CONFIRM_INLINE_MS = 240_000;
     const CONFIRM_TIMEOUT_MS = 30 * 60_000;
-    const configEvidence = (_p: string[]): string[] => [];
+    // computeUsage 要扫一周的 transcript, 一分钟内的连问共用一份。
+    let usageMemo: { at: number; u: TierUsage } | undefined;
+    const tierUsage = (): TierUsage => {
+      if (usageMemo && Date.now() - usageMemo.at < 60_000) return usageMemo.u;
+      const r = computeUsage();
+      const fold = (m: Map<string, ModelTotals>): Map<string, UsageTotals> =>
+        new Map([...m].map(([id, x]) => [id, { tokens: sumTotal(x), cost: costOf(id, x) }]));
+      usageMemo = { at: Date.now(), u: { today: fold(r.today), week: fold(r.week) } };
+      return usageMemo.u;
+    };
+    const configEvidence = (p: string[]): string[] =>
+      tierEvidence(cfg.models, p, tierUsage, (tier) => wizards.all().filter((w) => w.tier === tier).length, { tokens: fmtTokens, cost: fmtCost });
 
     // POST /config/get —— 新 MCP 带 `path` (可空) 拿渲染好的文本; 老 MCP 带 `key` 拿 {key, value}。
     http.register("POST /config/get", async (req, res) => {
