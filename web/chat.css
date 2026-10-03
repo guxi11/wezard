@@ -974,3 +974,15 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .tree.jsel .tci.jout:hover { opacity: 1 }
 .tree.jsel li.jdim { --lc: #d0d7de }
 
+
+.jstage { flex: none; margin-left: 6px; font-size: 10.5px; line-height: 15px; padding: 0 5px; border-radius: 4px; color: #0969da; background: #0969da12; font-weight: 500 }
+.jstage.wait { color: #94741f; background: #bf870022 }
+.jcrumb { font-weight: 400; color: var(--faint); margin-right: 2px }
+.jcrumb button { border: 0; background: none; padding: 0; font: inherit; color: var(--accent); cursor: pointer }
+.jcrumb i { font-style: normal; margin: 0 4px }
+.tg-job .jrole { flex: none; font-size: 10.5px; padding: 0 5px; border-radius: 4px; color: #8250df; background: #fbefff }
+.tg-job .jfork { font-size: 11px; color: var(--faint) }
+.tg-job .jkids { margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--line, #0001) }
+.tg-job .jkids .jn { font-size: 11px; color: var(--faint) }
+.tg-job .jorigin, .tg-job .jcrit { margin-top: 6px }
+.tg-job .jc { text-align: left }

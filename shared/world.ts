@@ -71,9 +71,26 @@ export interface WorldFactJob {
   expect?: number;
   /** 开工时的计划 (open_job 的 plan) —— 工单页开工那一行照原样分行显示。 */
   plan?: string;
-  /** outcome: 这一份落定成什么 (见 jobs.MemberOutcome); 缺省 = 还在干。 */
-  members: Array<{ target: string; task: string; spawned: boolean; outcome?: string; artifacts?: Array<{ path: string; note: string }> }>;
+  /** 上级工单 (金字塔: 工单树); 缺省 = 树根。 */
+  parent?: string;
+  /** `req` = 需求根单 (管家派 lead 时开)。 */
+  kind?: "req";
+  /** 验收标准。 */
+  criteria?: string;
+  /** 需求原话与它来自哪个群 (只根单有)。 */
+  origin?: { text: string; chat: string };
+  /** 现算的阶段 (见 jobs.jobStage): daemon 算好推过来, 页面只管显示。 */
+  stage?: JobStage;
+  /** outcome: 这一份落定成什么 (见 jobs.MemberOutcome); 缺省 = 还在干。
+   *  role: 它在这张单里是什么 (缺省 exec); forkOf: clone 时材料来自谁 (target key)。 */
+  members: Array<{ target: string; task: string; spawned: boolean; outcome?: string; artifacts?: Array<{ path: string; note: string }>; role?: MemberRole; forkOf?: string }>;
 }
+
+/** 成员在一张工单里的角色: lead = 根单里被派来的需求 lead; exec 执行; reviewer 评审; expert 借来答问的专家。 */
+export type MemberRole = "lead" | "exec" | "reviewer" | "expert";
+/** 工单阶段 (现算, 不落盘): plan 规划 · build 实施 · review 评审 · clarify 澄清 (lead 在等人拍板) ·
+ *  deliver 交付 (根单: lead 已交差, 等人验收; 子单: 成员都落定, 等 owner 收工) · closed 收工 / 归档。 */
+export type JobStage = "plan" | "build" | "review" | "clarify" | "deliver" | "closed";
 
 /** 一张工单的进度: 已落定几份 / 一共几份 (成员数与开工时说好的份数取大) —— 侧栏、关系图、工单页都读这一份。 */
 export interface JobProgress { done: number; total: number }

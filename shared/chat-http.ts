@@ -211,7 +211,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       relations: hasRelations(msgs, role, info),
       // 账上全部工单的摘要: 侧栏 / 关系图 / 消息上的 📋 指向的工单不一定有视角的份 (标记挂的是「这处往来里出现过」),
       // 工单列表与 badge 按 id 从这一份取, 不再按视角重新筛。
-      jobIndex: Object.fromEntries(f.jobs.map((j) => [j.id, { id: j.id, title: j.title, owner: j.owner, base: j.base, status: j.status, closedAt: j.closedAt, openedAt: j.openedAt, ...jobProgress(j) }])),
+      jobIndex: Object.fromEntries(f.jobs.map((j) => [j.id, { id: j.id, title: j.title, owner: j.owner, base: j.base, status: j.status, closedAt: j.closedAt, openedAt: j.openedAt, ...(j.parent ? { parent: j.parent } : {}), ...(j.kind ? { kind: j.kind } : {}), ...(j.stage ? { stage: j.stage } : {}), ...jobProgress(j) }])),
       // 在飞的活: 视角派出去 / 欠着的, 以及它的工单里每一份 (工单行标「卡住」); 卡在审批上的带上停在哪几个工具。
       inflight: (f.inflight ?? []).filter((x) => x.from === role || x.to === role || myJobs.has(x.job)).map((x) => ({
         ...x, ...(x.state === "blocked" && dir.fact(x.to)?.waiting?.length ? { waiting: dir.fact(x.to)!.waiting } : {}),
@@ -264,7 +264,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     const frags = [
       ...msgs.map((m) => ({ id: m.id, ts: m.ts, render: () => renderMsg(m, records, dir, now) })),
       ...marks.map((mk) => ({ id: `m:${mk.id}`, ts: mk.createdAt, render: () => renderMark(mk, v.role, dir) })),
-      ...(job ? renderJobMarks(job, dir).map((f) => ({ id: f.id, ts: f.ts, render: () => f })) : []),
+      ...(job ? renderJobMarks(job, dir, jobs).map((f) => ({ id: f.id, ts: f.ts, render: () => f })) : []),
     ].sort((a, b) => a.ts - b.ts);
     return frags;
   };
@@ -372,7 +372,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       // 工单窗口的开工 / 收工两行取自账本, 账本变了不写 store —— 跟着名册的心跳推, 没变的由 sig 挡掉。
       const jid = jobOfKey(v.conv);
       const job = jid ? ff.jobs.find((j) => j.id === jid) : undefined;
-      if (job) renderJobMarks(job, makeDirectory(records, ff)).forEach(pushFrag);
+      if (job) renderJobMarks(job, makeDirectory(records, ff), ff.jobs).forEach(pushFrag);
     };
 
     /** 这一轮拆出的消息里, 落在当前窗口的那几条; `deep`: 连同读了它的账 / 结论的别的轮次 (见 dependentsOf)。 */

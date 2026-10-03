@@ -323,7 +323,7 @@
     r.classList.toggle('raw');
   });
   inner.addEventListener('click', function (e) {
-    var c = e.target.closest && e.target.closest('.mchip.job[data-job]');
+    var c = e.target.closest && e.target.closest('.mchip.job[data-job], .tg-job .jc[data-job], .jcrumb [data-job]');
     if (c) openJob(c.getAttribute('data-job'));
   });
   // 回执 chip / 移交行的活号: 跳到派活那句 (同一个活号的入消息)。先在眼前这个窗口里找;
@@ -379,6 +379,36 @@
   var jobTag = function (j) {
     return j ? '<span class="jtag' + (j.status === 'open' ? ' open' : '') + '">' + (j.status === 'open' ? j.done + '/' + j.total : '收工') + '</span>' : '';
   };
+  // 阶段 (daemon 现算后推来): 缺省 (老快照) = 不标。
+  var STAGE = { plan: '规划', build: '实施', review: '评审', clarify: '澄清' };
+  var stageText = function (j) {
+    if (!j) return '';
+    if (j.status === 'closed') return j.kind === 'req' ? '归档' : '';
+    return j.stage === 'deliver' ? (j.kind === 'req' ? '等验收' : '待收工') : STAGE[j.stage] || '';
+  };
+  var stageTag = function (j) {
+    var t = stageText(j);
+    return t ? '<span class="jstage' + (j.stage === 'deliver' || j.stage === 'clarify' ? ' wait' : '') + '">' + t + '</span>' : '';
+  };
+  // 祖先链 (根在前): 按服务端的账走 parent; 环 / 缺失就停。
+  var jobAncestors = function (id) {
+    var idx = R.jobIndex || {}, out = [], seen = {}, cur = idx[id] && idx[id].parent;
+    while (cur && idx[cur] && !seen[cur]) { seen[cur] = 1; out.unshift(cur); cur = idx[cur].parent; }
+    return out;
+  };
+  var jobCrumbs = function (id) {
+    var up = jobAncestors(id);
+    return up.length ? '<span class="jcrumb">' + up.map(function (a) {
+      return '<button data-job="' + esc(a) + '" title="' + esc(a) + '">' + esc((R.jobIndex[a] || {}).title || a) + '</button>';
+    }).join('<i>›</i>') + '<i>›</i></span>' : '';
+  };
+  // 工单列表的树序: 父在前、子缩进跟在后; 父不在这一段里的当根。
+  var jobTreeOrder = function (list) {
+    var ids = {}; list.forEach(function (c) { ids[c.job.id] = 1; });
+    var kids = function (id) { return list.filter(function (c) { return c.job.parent === id; }); };
+    var walk = function (c, d) { return [{ c: c, d: d }].concat(kids(c.job.id).reduce(function (a, k) { return a.concat(walk(k, d + 1)); }, [])); };
+    return list.filter(function (c) { return !c.job.parent || !ids[c.job.parent]; }).reduce(function (a, c) { return a.concat(walk(c, 0)); }, []);
+  };
   // 工单里有人卡住 (停在审批卡 / 反问待答 / 报错停了) 时标出几份卡着 —— 要人或开单者动手的。
   var stuckTag = function (j) {
     var n = j && j.status === 'open' ? (R.inflight || []).filter(function (x) {
@@ -396,7 +426,7 @@
     return {
       key: key, kind: 'job', name: j ? j.title : id, label: '📋', base: j ? j.base : '', subs: [], heard: [],
       lastTs: j ? j.closedAt || j.openedAt : 0, preview: '',
-      job: j && { id: id, owner: j.owner, status: j.status, done: j.done, total: j.total },
+      job: j && { id: id, owner: j.owner, status: j.status, done: j.done, total: j.total, parent: j.parent, kind: j.kind, stage: j.stage },
     };
   };
   /** 一个工单号 → 它的一行: 视角有份的取会话项 (带预览), 其余按账现造。 */
@@ -618,7 +648,7 @@
   var dmKey = function (peer) { return 'p:' + pairKey(peer); };
   var convRow = function (c) {
     if (c.kind === 'wizard') return roleRow(c.peer, c.name, c.label, glance(c), c.status, jobMark(c.jobs), otherChats(c.peer, dmKey(c.peer)));
-    if (c.kind === 'job') return '<span class="av">' + esc(c.label) + '</span>' + line('<span class="nm chat">' + esc(c.name) + '</span>' + jobTag(c.job) + stuckTag(c.job), c.lastTs, c.preview, '', unreadOf(c));
+    if (c.kind === 'job') return '<span class="av">' + esc(c.label) + '</span>' + line('<span class="nm chat">' + esc(c.name) + '</span>' + stageTag(c.job) + jobTag(c.job) + stuckTag(c.job), c.lastTs, c.preview, '', unreadOf(c));
     return avatarOf(c) + line('<span class="nm chat">' + esc(c.name) + '</span>' + jobMark(c.jobs), c.lastTs, c.preview, stTag(c.status, true), unreadOf(c));
   };
   var subRow = function (c, s) { return roleRow(s.role, s.name, s.label, glance(c, s), s.status, jobMark(s.jobs), otherChats(s.role, c.key + '|' + pairKey(s.role))); };
@@ -1153,8 +1183,9 @@
       return;
     }
     if (c.kind === 'job') {
-      who.innerHTML = '<span class="av">📋</span><span class="t">' + esc(c.name) + '</span>' +
-        '<span class="sub">' + esc(c.key.slice(2)) + (c.job ? ' · 开单 ' + nm(c.job.owner, '', true) : '') + jobTag(c.job) + stuckTag(c.job) + '</span>';
+      who.innerHTML = '<span class="av">📋</span><span class="t">' + jobCrumbs(c.key.slice(2)) + esc(c.name) + '</span>' +
+        '<span class="sub">' + esc(c.key.slice(2)) + (c.job ? ' · 开单 ' + nm(c.job.owner, '', true) : '') + stageTag(c.job) + jobTag(c.job) + stuckTag(c.job) + '</span>';
+      who.querySelectorAll('.jcrumb [data-job]').forEach(function (b) { b.onclick = function () { openJob(b.getAttribute('data-job')); }; });
       acts.innerHTML = '';
       bindBack();
       bindGo(who);
@@ -2263,10 +2294,14 @@
   var renderJobList = function () {
     var el = jobsPane().firstChild;
     var js = jobListRows();
+    // 视角里没有的祖先也照账补上, 树才连得起来 (JOB_ONLY 是点名的几张, 不补)。
+    if (!JOB_ONLY) js = js.concat(js.reduce(function (a, c) {
+      return a.concat(jobAncestors(c.job.id).filter(function (id) { return !js.some(function (x) { return x.job.id === id; }); }));
+    }, []).filter(function (id, i, a) { return a.indexOf(id) === i; }).map(jobRowOf).filter(function (c) { return c.job; }));
     var open = js.filter(function (c) { return c.job.status === 'open'; }).sort(recentFirst);
     var closed = js.filter(function (c) { return c.job.status !== 'open'; }).sort(recentFirst);
     var sec = function (title, list, cls) {
-      return '<h2>' + title + '<span>' + list.length + '</span></h2>' + '<div class="' + cls + '">' + list.map(convItem).join('') + '</div>';
+      return '<h2>' + title + '<span>' + list.length + '</span></h2>' + '<div class="' + cls + '">' + jobTreeOrder(list).map(function (x) { return x.d ? '<div class="jind" style="margin-left:' + (x.d * 16) + 'px">' + convItem(x.c) + '</div>' : convItem(x.c); }).join('') + '</div>';
     };
     var html = js.length
       ? sec('进行中', open, 'jopen') + (closed.length ? sec('已收工', closed, 'jclosed') : '')

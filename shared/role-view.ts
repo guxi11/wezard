@@ -258,7 +258,7 @@ export interface Conv {
   /** 这处往来里出现过的工单 (侧栏一行的 📋 标记); 没有 = 不给。 */
   jobs?: string[];
   /** 工单 (`j:<id>`) 的账: 开着没有、落定几份 / 一共几份。 */
-  job?: { id: string; owner: string; status: "open" | "closed"; done: number; total: number };
+  job?: { id: string; owner: string; status: "open" | "closed"; done: number; total: number; parent?: string; kind?: "req"; stage?: string };
 }
 
 const involves = (m: Msg, role: string): boolean => m.from === role || m.to === role;
@@ -419,7 +419,7 @@ export const jobConvsOf = (all_: readonly Msg[], role: string, dir: Directory, j
         preview: g.preview, lastTs: Math.max(g.lastTs, j.closedAt ?? j.openedAt),
         // 工单里的每句话同时也在某个群 / 私聊里, 未读只记在那一处 —— 两边各记一份, 读了一边另一边还亮着。
         count: ms.length, heard: [], mine: 0, subs: [],
-        job: { id: j.id, owner: j.owner, status: j.status, ...jobProgress(j) },
+        job: { id: j.id, owner: j.owner, status: j.status, ...(j.parent ? { parent: j.parent } : {}), ...(j.kind ? { kind: j.kind } : {}), ...(j.stage ? { stage: j.stage } : {}), ...jobProgress(j) },
       };
     });
 };

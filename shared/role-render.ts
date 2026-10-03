@@ -9,7 +9,7 @@ import { renderCutMark, renderTurnGroup, splitReminders, escHtml, fmtTs, hashStr
 import { isTurn, staleAt, turnDone } from "./chat-view.js";
 import { isKeepaliveTurn } from "./keepalive.js";
 import type { DetailRecord, MarkDetailRecord, TurnDetailRecord } from "./detail-store.js";
-import type { WorldFactJob } from "./world.js";
+import { jobProgress, type MemberRole, type WorldFactJob } from "./world.js";
 import { channelOf, injectTurnsOf, teammateOf, unwrapMates, type Directory, type Msg } from "./role-view.js";
 
 export interface MsgFragment {
@@ -271,15 +271,30 @@ export const renderMark = (mk: MarkDetailRecord, role: string, dir: Directory): 
 // 工单不再进群, 这两行就是收工结论唯一的落点; 还开着时开工那行列成员此刻的进度。
 const OUTCOME: Readonly<Record<string, string>> = { ...RCPT, "": "在干" };
 // 老 daemon 的快照不记成员定论: 收了工却没有定论的, 不说它「在干」。
+/** 阶段的人话: deliver 在根单 = 等验收, 在子单 = 待收工。 */
+export const STAGE_LABEL = (j: { stage?: string; kind?: string; status?: string; parent?: string }): string =>
+  j.status === "closed" || j.stage === "closed" ? (j.kind === "req" ? "归档" : "收工")
+    : j.stage === "deliver" ? (j.kind === "req" ? "等验收" : "待收工")
+      : ({ plan: "规划", build: "实施", review: "评审", clarify: "澄清" } as Record<string, string>)[j.stage ?? ""] ?? "";
 const memberLine = (mm: WorldFactJob["members"][number], dir: Directory, closed: boolean): string =>
   `<li><span class="jo st-${escHtml(mm.outcome ?? (closed ? "none" : "run"))}">${escHtml(mm.outcome ? OUTCOME[mm.outcome] ?? mm.outcome : closed ? "—" : OUTCOME[""]!)}</span>` +
   (dir.isWizard(mm.target)
     ? `<button class="go" data-r="${escHtml(mm.target)}">${escHtml(dir.labelOf(mm.target))} .${escHtml(dir.nameOf(mm.target))}</button>`
     : `<span>${escHtml(dir.labelOf(mm.target))} ${escHtml(dir.nameOf(mm.target))}</span>`) +
+  (mm.role && ROLE_BADGE[mm.role] ? `<span class="jrole r-${mm.role}">${ROLE_BADGE[mm.role]}</span>` : "") +
+  (mm.forkOf && dir.isWizard(mm.forkOf) ? `<span class="jfork" title="clone 自它: 材料来自它">材料来自 .${escHtml(dir.nameOf(mm.forkOf))}</span>` : "") +
   (mm.task ? `<em title="${escHtml(mm.task.trim())}">${escHtml(mm.task.trim())}</em>` : "") +
   (mm.artifacts ?? []).map((a) => `<div class="ja">↳ ${escHtml(a.path)}${a.note ? ` — ${escHtml(a.note)}` : ""}</div>`).join("") + "</li>";
 
-export const renderJobMarks = (j: WorldFactJob, dir: Directory): MsgFragment[] => {
+const ROLE_BADGE: Readonly<Partial<Record<MemberRole, string>>> = { lead: "lead", reviewer: "评审", expert: "专家" };
+/** 子单一行: 标题 + 阶段 + 进度, 点了进那张单 (data-job)。 */
+const childLine = (c: WorldFactJob): string =>
+  `<li><button class="go jc" data-job="${escHtml(c.id)}">📋 ${escHtml(c.title)}</button>` +
+  `<span class="jo st-run">${escHtml(STAGE_LABEL(c))}</span><span class="jn">${escHtml(c.id)} · ${c.status === "open" ? `${jobProgress(c).done}/${jobProgress(c).total}` : "收工"}</span></li>`;
+
+export const renderJobMarks = (j: WorldFactJob, dir: Directory, all: readonly WorldFactJob[] = []): MsgFragment[] => {
+  const kids = all.filter((x) => x.parent === j.id);
+  const kidsHtml = kids.length ? `<ul class="jmem jkids">${kids.map(childLine).join("")}</ul>` : "";
   const owner = { from: j.owner, to: j.owner, channel: j.base };
   const members = j.members.length ? `<ul class="jmem">${j.members.map((mm) => memberLine(mm, dir, j.status === "closed")).join("")}</ul>` : "";
   const row = (phase: "open" | "close", ts: number, body: string): MsgFragment => {
@@ -291,10 +306,12 @@ export const renderJobMarks = (j: WorldFactJob, dir: Directory): MsgFragment[] =
     text?.trim() ? `<div class="md-body ${cls}"></div><script type="text/plain" class="md-src">${escHtml(text.trim())}</script>` : "";
   const head = (verb: string) =>
     `<div class="jh">📋 <b>${escHtml(j.id)}</b> ${verb} · <span class="jt">${escHtml(j.title)}</span><span class="s">${escHtml(fmtTs(verb === "开工" ? j.openedAt : j.closedAt ?? 0))}</span></div>`;
+  // 根单: 需求原话 + 验收标准 (人写的, 换行留着)。
+  const brief = (j.origin?.text?.trim() ? md("jorigin", `需求: ${j.origin.text.trim()}`) : "") + (j.criteria?.trim() ? md("jcrit", `验收标准: ${j.criteria.trim()}`) : "");
   return [
-    row("open", j.openedAt, head("开工") + md("jplan", j.plan) + (j.status === "open" ? members : "")),
+    row("open", j.openedAt, head("开工") + brief + md("jplan", j.plan) + (j.status === "open" ? members + kidsHtml : "")),
     ...(j.status === "closed" && j.closedAt
-      ? [row("close", j.closedAt, head("收工") + members + md("jsum", j.summary))]
+      ? [row("close", j.closedAt, head("收工") + members + kidsHtml + md("jsum", j.summary))]
       : []),
   ];
 };
