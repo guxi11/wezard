@@ -59,7 +59,7 @@ export const chatBaseOf = (cfg: Config, ref: string): string => {
 export const chatPolicyOf = (cfg: Config, target: string): ChatPolicy => {
   const base = baseOfKey(target);
   const hit = Object.entries(cfg.chatPolicy ?? {}).filter(([k]) => chatBaseOf(cfg, k) === base).map(([, p]) => p);
-  return { backstage: hit.some((p) => p.backstage) };
+  return { backstage: hit.some((p) => !!p?.backstage) };
 };
 
 /** 已命名的聊天, 按名字排序。 */

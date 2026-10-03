@@ -20,10 +20,17 @@ const isObj = (v: unknown): v is Obj => !!v && typeof v === "object" && !Array.i
 const getIn = (obj: unknown, path: readonly string[]): unknown =>
   path.reduce<unknown>((acc, k) => (acc && typeof acc === "object" ? (acc as Obj)[k] : undefined), obj);
 
-/** Mutate the live config in place — the daemon's modules hold this very object. */
-const setIn = (obj: Obj, path: readonly string[], value: unknown): void => {
-  const parent = getIn(obj, path.slice(0, -1));
-  if (isObj(parent) || Array.isArray(parent)) (parent as Obj)[path[path.length - 1]!] = value;
+/** 把 `next` 在 `path` 处的值装进 `obj` (原地): 路上缺的祖先 (记录里的新键、没写过的节) 从最浅的那一层
+ *  整段取 `next` 的 —— 连同 schema 默认一起补全; 取到 undefined (unset 掉的记录项) 就删键, 不留一个值为
+ *  undefined 的键给 `Object.entries` 读。 */
+const putFrom = (obj: Obj, path: readonly string[], next: unknown): void => {
+  const depth = path.findIndex((_, i) => i < path.length - 1 && !(isObj(getIn(obj, path.slice(0, i + 1))) || Array.isArray(getIn(obj, path.slice(0, i + 1)))));
+  const at = depth < 0 ? path : path.slice(0, depth + 1);
+  const parent = getIn(obj, at.slice(0, -1)) as Obj;
+  const key = at[at.length - 1]!;
+  const value = getIn(next, at);
+  if (value === undefined) delete parent[key];
+  else parent[key] = value;
 };
 
 // 默认值从 schema 解析一份空配置得来, 而不是读字段自己的 default: `models.tiers.light.model`
@@ -214,7 +221,15 @@ export const renderPlan = (pl: Plan): string => [
 
 /** 落盘之后把新值装进活的 cfg —— 只对 hot 项: reload 项半途换值, 会让启动时抓住旧值的模块与现读的模块各执一词。 */
 export const applyHot = (cfg: Config, pl: Plan): void => {
-  if (pl.apply === "hot") setIn(cfg as unknown as Obj, pl.path, pl.after);
+  if (pl.apply === "hot") putFrom(cfg as unknown as Obj, pl.path, pl.next);
+};
+
+/** 只装了这一处改动的顶层节 (深拷贝, 不碰活的 cfg) —— 同节里别人手改了、还没生效的 reload 项不跟着进来。 */
+export const patchedTop = (cfg: Config, pl: Plan): unknown => {
+  const key = pl.path[0]!;
+  const box: Obj = { [key]: structuredClone((cfg as unknown as Obj)[key]) };
+  putFrom(box, pl.path, pl.next);
+  return box[key];
 };
 
 // ── 旧 key 兼容 ─────────────────────────────────────────────────────────

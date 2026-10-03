@@ -14,7 +14,7 @@ import { bindCliBackends, projectDirsFor, type CliBackendName } from "../shared/
 import { startWs } from "./ws.js";
 import { startNetWatch } from "./net-watch.js";
 import { startHttp, json, readBody, type Handler } from "./http.js";
-import { applyHot, configGet, fromLegacy, legacyGet, pickTier, planSet, renderPlan, tierEvidence, type Plan, type SetReq, type TierUsage, type UsageTotals } from "./config-api.js";
+import { applyHot, patchedTop, configGet, fromLegacy, legacyGet, pickTier, planSet, renderPlan, tierEvidence, type Plan, type SetReq, type TierUsage, type UsageTotals } from "./config-api.js";
 import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } from "./usage.js";
 import { installInboundRouter } from "./inbound.js";
 import { loadMirrorStore } from "./mirror-store.js";
@@ -83,7 +83,7 @@ import { cacheTtlSec, clipMiddle, contextFiles, firstStamp, parseClosing, lastCo
 import { keepalivePingSigs } from "../shared/keepalive.js";
 import { expandHome } from "../shared/paths.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
-import { createReceipts, deadlineOf, kAttr, newTurn, type InFlight, type ParentK, type Slot as ReceiptSlot } from "./receipts.js";
+import { createReceipts, deadlineOf, kAttr, kOfAttr, newTurn, type InFlight, type ParentK, type Slot as ReceiptSlot } from "./receipts.js";
 import { renderInFlight } from "../shared/turn-state.js";
 import { renderReminder, type TurnTag } from "../shared/reminder.js";
 import { createHandoffs, handedOff, handingOff, type Owe, type Pending as PendingHandoff } from "./handoff.js";
@@ -900,10 +900,13 @@ const main = async (): Promise<void> => {
         return;
       }
       const dests = [...new Set(refs.length ? refs.map((r) => chatBaseOf(cfg, r)) : [channelOf(self)])];
-      // 幕后模式: 只有顶层 wizard 对人说话 —— 群管家, 或这一轮在服务一件人问的事 (父 k 是群) 的那个;
-      // 同伴私聊派来的活在幕后, 它要说的写进终句, 由派它的那个代为收口。
-      const muted = dests.filter((d) => chatPolicyOf(cfg, d).backstage);
-      if (muted.length && tagOfKey(self) && parentKOf(self)?.kind !== "chat") {
+      // 幕后模式: 只有顶层 wizard 对人说话。拦的是「这一轮在为同伴干活」的: 同伴私聊派来的活, 或
+      // 回执轮但那件活是为上游同伴派的 (k 是 peer)。人说的、定时任务放的、旁支 (chain:false, 无 k)
+      // 的回执轮都不拦; 管家只在自己的群里豁免。
+      const env = openingOfSelf(self)?.env;
+      const backstageTurn = env?.kind === "peer" && (env.receipt ? kOfAttr(env.k ?? "")?.kind === "peer" : env.private);
+      const muted = dests.filter((d) => chatPolicyOf(cfg, d).backstage && !(!tagOfKey(self) && baseOfKey(self) === d));
+      if (muted.length && backstageTurn) {
         json(res, 409, { ok: false, backstage: true, reason: `${muted.map((d) => chatNameOf(cfg, d) || d).join(", ")} 开着幕后模式: 你这一轮是同伴派来的活, 不对人说话 —— 要说的写进终句 (\`RESULT:\` / \`NEED:\`), 由派你的那个代你向人交代` });
         return;
       }
@@ -1633,8 +1636,9 @@ const main = async (): Promise<void> => {
       const rec = wizards.get(target);
       return { parent: rec?.parent, forkOf: rec?.forkOf, inherited: !!rec?.clonedFrom, cwd };
     };
-    /** 宪章正文, 只读 —— 只由 cfg 与此刻的注册表 / 附着表算出, config_set 据此比对前后。 */
-    const charterText = (target: string, o: CharterOpts): string =>
+    /** 宪章正文, 只读 —— 只由 cfg 与此刻的注册表 / 附着表算出, config_set 据此比对前后。`forDiff` 去掉
+     *  宪章里自认是出生快照的配置 (档位那一行, 真相在 config_get): 改档位不该叫全员 handoff。 */
+    const charterText = (target: string, o: CharterOpts, forDiff = false): string =>
       renderCharter({
         // o.cwd = 正在启动的那个 pane 的目录; 没给才退回"现在记着的那个"。
         self: { ...briefOf(target, target), address: selfAddress(target), ...(o.cwd ? { cwd: o.cwd } : {}) },
@@ -1653,7 +1657,7 @@ const main = async (): Promise<void> => {
           .sort((x, y) => y[1] - x[1])
           .map(([t]) => briefOf(target, t)),
         memory: wizards.get(target)?.memory ?? [],
-        tiers: TIERS.map((n) => { const s = cfg.models.tiers[n]; return `${n}=${s.model || "默认"}${s.effort ? `·${s.effort}` : ""}`; }),
+        tiers: forDiff ? [] : TIERS.map((n) => { const s = cfg.models.tiers[n]; return `${n}=${s.model || "默认"}${s.effort ? `·${s.effort}` : ""}`; }),
         chatMemory: sharedMemory("chat", baseOfKey(target)),
         workspaceMemory: (() => {
           const cwd = o.cwd || m.getCwd(target).runningCwd || m.getCwd(target).defaultCwd;
@@ -2527,14 +2531,14 @@ const main = async (): Promise<void> => {
     };
     /** 这些 wizard 此刻的宪章正文。 */
     const charterSnapshot = (targets: readonly string[]): Map<string, string> =>
-      new Map(targets.map((t) => [t, charterText(t, charterOptsOf(t, m.getCwd(t).runningCwd || undefined))] as const));
+      new Map(targets.map((t) => [t, charterText(t, charterOptsOf(t, m.getCwd(t).runningCwd || undefined), true)] as const));
     /** 把 `next` 那一节换进活的 cfg 渲染一遍再换回 —— 同步完成, 中间没有 await, 别的模块看不见这一瞬。
      *  reload 项落盘后活值不变, 只有这样才算得出它 reload 之后的宪章。 */
     const charterUnder = (pl: Plan, targets: readonly string[]): Map<string, string> => {
       const live = cfg as unknown as Record<string, unknown>;
       const key = pl.path[0]!;
       const saved = live[key];
-      live[key] = (pl.next as unknown as Record<string, unknown>)[key];
+      live[key] = patchedTop(cfg, pl);
       try { return charterSnapshot(targets); } finally { live[key] = saved; }
     };
     type CharterHit = { target: string; sections: string[] };
@@ -2580,6 +2584,9 @@ const main = async (): Promise<void> => {
           : { ok: true, text, ...extra });
       const pl = planSet(cfg, sourcePath, ask);
       if (!pl.ok) { json(res, 400, pl); return; }
+      // 群聊级策略的键要认得出是哪个聊天: 写错的键策略静默失效, 比报错更难查。
+      const chatKey = pl.path[0] === "chatPolicy" ? pl.path[1] : undefined;
+      if (chatKey && pl.after !== undefined && !chatBaseOf(cfg, chatKey)) { json(res, 400, { ok: false, reason: `认不出聊天 \`${chatKey}\`: 键写聊天名 (/chats) 或 base principal (\`chat:wr…\` / \`user:…\`)` }); return; }
       if (ask.dryRun || !pl.changed) { reply(pl, `${ask.dryRun ? "dryRun, 没写:\n" : ""}${renderPlan(pl)}`); return; }
 
       // 落盘时重算一遍: 等卡期间文件可能被别人改过, 按那一刻的文件打补丁、再校验。
@@ -2594,7 +2601,11 @@ const main = async (): Promise<void> => {
         const before = charterSnapshot(targets);
         patchJsonc(sourcePath, [{ path: now.jsonPath, value: now.value }]);
         applyHot(cfg, now);
-        return { ...now, charter: announceCharterImpact(now, charterImpact(before, now), caller) };
+        // 已经落盘了: 比对失败只少一句提醒, 不能让调用方以为没写而重发。
+        try { return { ...now, charter: announceCharterImpact(now, charterImpact(before, now), caller) }; } catch (e) {
+          log.warn({ err: errText(e), path: now.path.join(".") }, "config_set: 宪章影响比对失败");
+          return { ...now, charter: `\n(宪章影响没比对出来: ${errText(e)} —— 改的若是进宪章的配置, 受影响的 wizard 要 handoff 才换上)` };
+        }
       };
       const done = (now: Plan & { charter: string }): string =>
         `已写入${now.apply === "hot" ? ", 已生效" : "; 需 reload (`./cli/wezard.sh reload`) 才生效"}:\n${renderPlan(now)}${now.charter}`;
@@ -2630,7 +2641,8 @@ const main = async (): Promise<void> => {
         json(res, 200, legacy ? { ok: inline, key: body.key, before: pl.before, after: inline ? pl.after : pl.before, note: text } : { ok: true, text, confirmed: inline });
         return;
       }
-      void decided.then(async (yes) => notices.post([self], `config_set 的确认卡有结果了: ${await settle(yes)}`));
+      void decided.then(async (yes) => notices.post([self], `config_set 的确认卡有结果了: ${await settle(yes)}`))
+        .catch((e: unknown) => log.warn({ err: errText(e) }, "config_set: 迟到的确认落盘失败"));
       json(res, 200, legacy
         ? { ok: false, reason: "确认卡已发到群里, 还没人点; 点了之后自动落盘" }
         : { ok: true, pending: true, text: `确认卡已发到群里, 还没人点 (卡 ${CONFIRM_TIMEOUT_MS / 60_000} 分钟内有效)。点了之后守护进程自动落盘, 结果会捎在你下一条收到的消息上 —— 不用重发。\n${renderPlan(pl)}` });
