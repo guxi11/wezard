@@ -570,17 +570,18 @@
     OPEN_AT = CONV;
     saveOpen();
   };
-  // 点侧栏项: 没选中它 → 选中 (会话顺带展开); 已选中 → 不再选一遍, 右边的正文一个字不动 ——
-  // 会话只折叠/展开, 子项什么都不做。viewpoint 与关系图卡片同一条规矩: 站在这一项的主人身上 ——
-  // 会话与成对的子项是页面视角自己的 (''), 「与我无往来」的 .far 子项是那个 role 的。
+  // 点侧栏项 / 关系图卡片 (两边同一份): 没选中它 → 选中 (会话顺带展开); 已选中再点 → 取消选中, 右边回到
+  // 页面视角的全部对话 (`a:<role>`, 即「看全部」那一份), 页面视角不动; 取消的是会话本身就顺带收起它。
+  // viewpoint: 站在这一项的主人身上 —— 会话与成对的子项是页面视角自己的, .far 子项与卡片是那个 role 的。
   var clickItem = function (key, withRole, viewpoint) {
-    if (key !== CONV || withRole !== WITH || VIEW !== 'msgs' || VIEWPOINT !== viewpoint) return selectConv(key, withRole, undefined, viewpoint);
-    // 窄屏退回列表后再点它是要回去读, 不是要折叠。
+    var vp = viewpoint && viewpoint !== ROLE ? viewpoint : '';
+    if (key !== CONV || (withRole || '') !== WITH || VIEW !== 'msgs' || VIEWPOINT !== vp) return selectConv(key, withRole, undefined, viewpoint);
+    // 窄屏退回列表后再点它是要回去读, 不是要取消。
     if (!app.classList.contains('reading')) return app.classList.add('reading');
-    if (withRole) return;
-    OPEN[key] = !OPEN[key];
-    saveOpen();
-    renderConvs();
+    var fold = !withRole && OPEN[key];
+    if (fold) OPEN[key] = false;
+    selectConv('a:' + ROLE, '', undefined, '');
+    if (fold) saveOpen();   // 选中项换过之后再记: 没选中的收着是默认态, 不占一条
   };
 
   // ── 会话项 / 子项 / 关系图卡片共用的三样: 一行的数据 (glance)、一行的画法 (roleRow)、排序 (recentFirst) ──
@@ -2013,7 +2014,7 @@
     convsEl._tree = html; convsEl._html = '';
     convsEl.innerHTML = html;
     convsEl.querySelectorAll('.tci').forEach(function (el) {
-      el.onclick = function () { var t = el.getAttribute('data-t'); selectConv(talkKey(F.links, t), '', undefined, t); };
+      el.onclick = function () { var t = el.getAttribute('data-t'); clickItem(talkKey(F.links, t), '', t); };
     });
     bindGo(convsEl);
     convsEl.querySelectorAll('[data-tall]').forEach(function (b) {
