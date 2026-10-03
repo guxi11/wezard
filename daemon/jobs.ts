@@ -229,9 +229,10 @@ export const loadJobStore = (filePath: string): JobStore => {
     get: db.get,
     attach: (id, member) => {
       const j = db.get(id);
-      if (!j || j.status !== "open" || j.members.length >= JOB_MEMBER_MAX) return undefined;
+      const prev = j?.members.find((x) => x.target === member.target);
+      // 满员只拦新面孔: 已在册的再派一段 (re 续问) 必须照记, 否则它旧的定论不作废, 「全部到齐」提前报。
+      if (!j || j.status !== "open" || (!prev && j.members.length >= JOB_MEMBER_MAX)) return undefined;
       const rest = j.members.filter((x) => x.target !== member.target);
-      const prev = j.members.find((x) => x.target === member.target);
       // 再派一段 (含 re 续问) = 它又在干了: 旧的定论作废, 不然「全部到齐」会提前报、
       // close_job 会把还在干活的它收掉。
       const role = member.role ?? prev?.role;
