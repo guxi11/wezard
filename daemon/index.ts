@@ -2128,7 +2128,7 @@ const main = async (): Promise<void> => {
       const k = (body as { chain?: boolean }).chain === false ? undefined : parentKOf(self);
       if (dispatched) receipts.register({ from: self, to: target, channel: "", job: jobId, at: taskAt, turn: taskTurn, ...(k ? { k } : {}), ...(asker ? { asker } : {}) });
       if (dispatched) ledger.open({ turn: taskTurn, owner: self, to: target, text: task, at: taskAt, ...(jobId ? { job: jobId } : {}), ...(k ? { for: k } : {}), ...(asker ? { asker } : {}) });
-      return { status: 200, body: { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, keepalive, ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(r.effort ? { effort: r.effort } : {}), ...(pick.tier ? { tier: pick.tier } : {}), via: pick.via, ...(pick.note ? { tierNote: pick.note } : {}), ...(jobId ? { job: jobId } : {}), ...(detached ? { detached: true } : {}) } };
+      return { status: 200, body: { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, ...(dispatched ? { turn: taskTurn } : {}), keepalive, ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(r.effort ? { effort: r.effort } : {}), ...(pick.tier ? { tier: pick.tier } : {}), via: pick.via, ...(pick.note ? { tierNote: pick.note } : {}), ...(jobId ? { job: jobId } : {}), ...(detached ? { detached: true } : {}) } };
     };
     http.register("POST /wizard/clone", async (req, res) => {
       const { self, body } = await readPeerBody(req);

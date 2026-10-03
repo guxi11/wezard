@@ -148,19 +148,26 @@ const FAIL = new Set(["timeout", "silent", "dead", "canceled"]);
  *  这件活此刻到了哪一步 —— 这一句之后的第一份回执就是它的定论 (need 之后续问再交, 那是下一行的),
  *  没落定就看它接手了没有。每次请求现算, 不进轮次缓存: 回执比派活那一轮晚到, 气泡的 sig 得跟着它变。 */
 const handoffDeco = (r: TurnDetailRecord, records: readonly DetailRecord[], dir: Directory, now: number): HandoffDeco => {
-  const landed = (h: Handoff): TurnDetailRecord | undefined => (h.turn ? dispatchFor(records, { ...h, turn: h.turn }) : undefined);
+  // 老的 clone / spawn 回包不带活号: 分身的开场白就是这件活, 从它收到的第一句 (r 的主人私聊派来的) 读回来。
+  const turnOf = (h: Handoff): string | undefined => h.turn ?? ((id) => id && (h.via === "clone" || h.via === "spawn")
+    ? asksWhere(records, (t) => t.target === id && t.from?.kind === "peer" && !t.from.receipt && t.from.from === r.target && t.createdAt >= r.createdAt)[0]?.from?.turn
+    : undefined)(dir.resolve(h.name));
+  const landed = (h: Handoff): TurnDetailRecord | undefined => ((turn) => (turn ? dispatchFor(records, { ...h, turn }) : undefined))(turnOf(h));
   return {
-    who: (h) => {
-      const id = dir.resolve(h.name);
+    who: (name) => {
+      const id = dir.resolve(name);
       return id
         ? `<span class="ho-who"><span class="av">${escHtml(dir.labelOf(id))}</span><span class="nm wizard">${escHtml(dir.nameOf(id))}</span></span>`
-        : `<span class="ho-nm">.${escHtml(h.name)}</span>`;
+        : `<span class="ho-nm">.${escHtml(name)}</span>`;
     },
+    role: (name) => ((id) => (id ? ` data-hrole="${escHtml(id)}" title="${escHtml(`换到 .${dir.nameOf(id)} 的视角`)}"` : ""))(dir.resolve(name)),
+    plan: () => (r.target ? ` data-hplan="${escHtml(r.target)}" title="${escHtml(`打开 .${dir.nameOf(r.target)} 的日程`)}"` : ""),
     attrs: (h) => {
       const id = dir.resolve(h.name);
       return id ? `${pairAttrs(r, id, h, landed(h))} title="${escHtml(`打开 .${dir.nameOf(r.target ?? "")} 与 .${dir.nameOf(id)} 的往来, 定位到这一句`)}"` : "";
     },
-    status: (h) => {
+    status: (h0) => {
+      const h = { ...h0, turn: turnOf(h0) };
       if (!h.turn || !h.receipt) return { key: "plain", tip: h.kind === "fyi" ? "只是知会, 不等回执" : "不等回执" };
       const d = landed(h);
       const rc = turnsWhere(records, (t) => t.from?.kind === "peer" && !!t.from.receipt && t.from.turn === h.turn && t.createdAt >= (d?.createdAt ?? 0))[0];

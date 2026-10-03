@@ -454,7 +454,7 @@ const TURN_CSS = `
   /* 一行到底不换行: 箭头 · 移交 · 对方 · 活号 · 标签 · 原文首行 (占剩下的宽, 省略号) · 展开钮。 */
   .handoff .ho-line{display:flex;align-items:center;gap:6px;padding:2px 6px 3px 24px;list-style:none;white-space:nowrap}
   .handoff .ho-line>*{flex:none}
-  .handoff .ho-line[data-hto]{cursor:pointer}
+  .handoff .ho-line:is([data-hto],[data-hrole],[data-job],[data-hplan]){cursor:pointer}
   details.handoff>.ho-line{background:none;border:0;font:inherit;color:inherit;
     text-transform:none;letter-spacing:0;user-select:auto}
   details.handoff>.ho-line::before{content:none}
@@ -604,8 +604,13 @@ const toolBody = (use: ToolUse, result: ToolResult | undefined): string => {
 // ── 移交: tell_peer (旧名 send_peer) 把一件活交给了谁 ──
 // 它不是一次普通的工具调用 —— 这一刻起活在对方手里, 结论会作为回执回来。所以在调用框下面
 // 另起一行系统提示, 事实全从这次调用自己的 input / result 读: 回包有就信回包 (落地的名字、
-// 实际的投递方式), 没回来 (运行中 / 失败) 才退回 input。
+// 实际的投递方式), 没回来 (运行中 / 失败) 才退回 input。dispatch 与带活的 clone / spawn
+// 也是一次移交 (守护进程同样给活号、守回执), 只是动词不同。
 export interface Handoff {
+  /** 怎么交出去的: 直接 tell_peer / dispatch 选人 / 克隆一个分身带活 / 白板新生一个带活。 */
+  via: "tell" | "dispatch" | "clone" | "spawn";
+  /** dispatch 的决定: 交给已有的 / 新生一个; 理由在 why。 */
+  decision?: { kind: "existing" | "spawn"; why: string };
   /** 对方的名字, 不带点。 */
   name: string;
   /** 活号; 投递失败 / 回包还没回来时没有。 */
@@ -616,7 +621,7 @@ export interface Handoff {
   /** 投的那一刻对方在忙 —— priority 只在这时才真起作用。undefined = 回包没说。 */
   busy?: boolean;
   kind?: "ask" | "fyi";
-  /** 交过去的那段原文 (tell_peer 的 text)。 */
+  /** 交过去的那段原文 (tell_peer 的 text / dispatch 与分身的 task)。 */
   text: string;
   /** 带 `re` = 续问同一件活, 不是新活。 */
   re: boolean;
@@ -627,7 +632,18 @@ export interface Handoff {
   reason?: string;
 }
 
-const HANDOFF_TOOL = /(?:^|__)(?:tell|send)_peer$/;
+/** 其余 wezard 调用的提示行: 一句人看得懂的摘要, 能跳就跳 (新 wizard 的视角 / 工单页 / 日程)。 */
+export type Hint =
+  | ({ k: "handoff" } & Handoff)
+  /** 生了一个不带活的分身: 名字 + 职责。 */
+  | { k: "born"; via: "clone" | "spawn"; name: string; text: string; state?: Handoff["state"]; reason?: string }
+  /** 开 / 收工单: 开的 text = plan, 收的 text = summary。 */
+  | { k: "job"; open: boolean; job: string; title: string; text: string; recycled?: number; state?: Handoff["state"]; reason?: string }
+  | { k: "stop"; name: string; end: boolean; forgotten: boolean; turn?: string; state?: Handoff["state"]; reason?: string }
+  /** 排了一个定时任务: when / next 取回包里渲染好的那两句, text = prompt。 */
+  | { k: "task"; id: string; when: string; next: string; note: string; text: string; state?: Handoff["state"]; reason?: string };
+
+const WEZARD_TOOL = /(?:^|__)(tell_peer|send_peer|dispatch|clone_wizard|spawn_wizard|open_job|close_job|stop_wizard|schedule_task)$/;
 
 const objOf = (v: unknown): Record<string, unknown> => (v && typeof v === "object" ? (v as Record<string, unknown>) : {});
 const parseObj = (s: string): Record<string, unknown> | undefined => {
@@ -637,40 +653,71 @@ const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v 
 const PRIORITIES = ["normal", "urgent", "now"] as const;
 const priorityOf = (v: unknown): Handoff["priority"] | undefined => PRIORITIES.find((p) => p === v);
 
-/** 这次调用是不是一次移交; 是就读出它的事实。 */
-export const handoffOf = (use: ToolUse, result: ToolResult | undefined): Handoff | undefined => {
-  if (!HANDOFF_TOOL.test(use.toolName)) return undefined;
-  const a = objOf(use.toolInput);
-  const j = result ? parseObj(result.body) : undefined;
-  const ok = j?.ok !== false && j !== undefined;
-  const failed = j?.ok === false || (!!result && /^\w+ failed: /.test(result.body));
+/** 一次调用的结局: 回包没回来 = undefined, ok:true = ok, ok:false / `xxx failed:` = failed, 其余 = lost。 */
+const outcomeOf = (result: ToolResult | undefined, j: Record<string, unknown> | undefined): Pick<Handoff, "state" | "reason"> => {
+  if (!result) return {};
+  if (j && j.ok !== false) return { state: "ok" };
+  const failed = j?.ok === false || /^\w+ failed: /.test(result.body);
+  return { state: failed ? "failed" : "lost", reason: clipLine(str(j?.reason) ?? result.body.replace(/^\w+ failed: /, ""), 120) };
+};
+
+const handoffFrom = (via: Handoff["via"], a: Record<string, unknown>, j: Record<string, unknown> | undefined, out: Pick<Handoff, "state" | "reason">): Hint => {
   const kind = str(j?.kind) ?? str(a.kind);
+  const dec = str(j?.decision);
   return {
-    name: stripSigil(str(j?.name) ?? str(a.name) ?? str(a.tag) ?? ""),
+    k: "handoff", via, ...out,
+    ...(dec === "existing" || dec === "spawn" ? { decision: { kind: dec, why: str(j?.reason) ?? "" } } : {}),
+    name: stripSigil(str(j?.name) ?? str(a.name) ?? str(a.to) ?? str(a.tag) ?? ""),
     turn: str(j?.turn),
-    public: typeof j?.public === "boolean" ? j.public : a.public === true,
+    public: typeof j?.public === "boolean" ? j.public : a.public === true || (via === "dispatch" && a.public !== false),
     priority: priorityOf(j?.priority) ?? priorityOf(a.priority) ?? (a.re ? "now" : "normal"),
     busy: typeof j?.wasBusy === "boolean" ? j.wasBusy : undefined,
     kind: kind === "ask" || kind === "fyi" ? kind : undefined,
-    text: str(a.text) ?? "",
+    text: str(a.text) ?? str(a.task) ?? "",
     re: !!str(a.re),
-    receipt: ok && !!j?.receipt,
-    state: !result ? undefined : ok ? "ok" : failed ? "failed" : "lost",
-    reason: result && !ok ? clipLine(str(j?.reason) ?? result.body.replace(/^\w+ failed: /, ""), 120) : undefined,
+    // 分身的回包没有 receipt 字段: 活投进去了 (dispatched) 就守回执。
+    receipt: out.state === "ok" && (via === "clone" || via === "spawn" ? j?.dispatched === true : !!j?.receipt),
   };
+};
+
+/** 这次调用要不要挂一行提示; 要就读出它的事实。 */
+export const hintOf = (use: ToolUse, result: ToolResult | undefined): Hint | undefined => {
+  const tool = WEZARD_TOOL.exec(use.toolName)?.[1];
+  if (!tool) return undefined;
+  const a = objOf(use.toolInput);
+  const j = result ? parseObj(result.body) : undefined;
+  const out = outcomeOf(result, j);
+  switch (tool) {
+    case "tell_peer": case "send_peer": return handoffFrom("tell", a, j, out);
+    case "dispatch": return a.dryRun ? undefined : handoffFrom("dispatch", a, j, out);
+    case "clone_wizard": case "spawn_wizard": {
+      const via = tool === "clone_wizard" ? "clone" : "spawn";
+      return str(a.task) ? handoffFrom(via, a, j, out)
+        : { k: "born", via, ...out, name: stripSigil(str(j?.name) ?? str(a.name) ?? ""), text: str(a.description) ?? "" };
+    }
+    case "open_job": return { k: "job", open: true, ...out, job: str(j?.job) ?? "", title: str(a.title) ?? "", text: str(a.plan) ?? "" };
+    case "close_job": return { k: "job", open: false, ...out, job: str(j?.job) ?? str(a.job) ?? "", title: "", text: str(a.summary) ?? "", ...(typeof j?.recycled === "number" ? { recycled: j.recycled } : {}) };
+    case "stop_wizard": return { k: "stop", ...out, name: stripSigil(str(j?.name) ?? str(a.name) ?? str(a.tag) ?? ""), end: (str(j?.mode) ?? str(a.mode) ?? "end") === "end", forgotten: j?.forgotten === true, turn: str(a.turn) };
+    case "schedule_task": return { k: "task", ...out, id: str(j?.id) ?? str(a.id) ?? "", when: str(j?.when) ?? str(a.when) ?? "", next: str(j?.next) ?? "", note: str(a.note) ?? "", text: str(a.prompt) ?? "" };
+    default: return undefined;
+  }
 };
 
 /** 箭头的颜色: 这件活此刻的回执状态。 */
 export interface HandoffStatus { key: "run" | "done" | "need" | "error" | "fail" | "plain"; tip: string }
 
-/** rolepage 给移交行补的三样: 对方的头像 + 名字, 整行点了要开的那段往来 (挂在行上的属性),
- *  回执落定成什么。整页详情没有名录也不看别的轮次, 只写名字。 */
+/** rolepage 给提示行补的: 对方的头像 + 名字, 整行点了要开的那段往来 / 要换去的视角 / 日程 (挂在行上的属性),
+ *  回执落定成什么。整页详情没有名录也不看别的轮次, 只写名字、不可点。 */
 export interface HandoffDeco {
-  who: (h: Handoff) => string;
+  who: (name: string) => string;
   attrs: (h: Handoff) => string;
   status: (h: Handoff) => HandoffStatus;
   /** 接手这件活的那一轮的账 (模型 / ctx / 耗时); 还没接手 = ""。 */
   acct: (h: Handoff) => string;
+  /** 整行点了换到这个 wizard 的视角 (新生的 / 被收的); 名录里没有 = ""。 */
+  role: (name: string) => string;
+  /** 整行点了开发话方的日程。 */
+  plan: () => string;
 }
 
 // 排队 / 插话 / 打断只在投的那一刻对方正忙时才真发生 —— 只标真发生的那一种, 闲着 (或回包没说) 就不标。
@@ -678,6 +725,14 @@ const PRIORITY_TAG: Readonly<Record<Handoff["priority"], [string, string]>> = {
   normal: ["排队", "等它这一轮结束再投"],
   now: ["插话", "落进它正在跑的这一轮"],
   urgent: ["打断", "先打断它这一轮再投"],
+};
+
+/** 各种交法的图标与动词; 图标的颜色是回执状态。 */
+const VIA: Readonly<Record<Handoff["via"], [string, string]>> = {
+  tell: ["↪", "移交"],
+  dispatch: ["↪", "派活"],
+  clone: ["⑂", "分身"],
+  spawn: ["✦", "新生"],
 };
 
 const hoTag = (cls: string, text: string, tip: string): string =>
@@ -688,25 +743,35 @@ const CHEVRON = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stro
 /** 交过去那段原文的首行 (行内跟着, 超长省略号)。 */
 const firstLine = (text: string): string => text.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
 
-/** 移交行: 整行是一个入口 (`attrs`), 原文只由行尾的 chevron 开合; 没有原文就只是一行。
+/** 提示行: 整行是一个入口 (`attrs`), 原文只由行尾的 chevron 开合; 没有原文就只是一行。
  *  私聊的原文默认收起, 行内跟着首行。公开移交 (`say` = 气泡的 data-key) 那句人在群里看得见: 默认展开,
- *  行下是一颗与普通消息同一份渲染的气泡; chevron 照样能把它收成首行。 */
-const hoBox = (cls: string, attrs: string, line: string, text: string, say?: string): string =>
+ *  行下是一颗与普通消息同一份渲染的气泡; chevron 照样能把它收成首行。`first` = 行内跟着的那句 (默认原文首行)。 */
+const hoBox = (cls: string, attrs: string, line: string, text: string, say?: string, first = firstLine(text)): string =>
   text
-    ? `<details class="handoff${cls}${say ? " pub" : ""}"${say ? " open" : ""}><summary class="ho-line"${attrs}>${line}<span class="ho-first">${escHtml(firstLine(text))}</span>` +
+    ? `<details class="handoff${cls}${say ? " pub" : ""}"${say ? " open" : ""}><summary class="ho-line"${attrs}>${line}<span class="ho-first">${escHtml(first)}</span>` +
       `<span class="ho-chev" title="${say ? "收起 / 展开原文" : "展开原文"}">${CHEVRON}</span></summary>` +
       `${say ? renderSay({ t: "text", body: text, ts: 0 }, say) : `<div class="ho-text">${mdBody(text)}</div>`}</details>`
-    : `<div class="handoff${cls}"><div class="ho-line"${attrs}>${line}</div></div>`;
+    : `<div class="handoff${cls}"><div class="ho-line"${attrs}>${line}${first ? `<span class="ho-first">${escHtml(first)}</span>` : ""}</div></div>`;
 
-const hoArrow = (st: HandoffStatus): string => `<span class="ho-arrow st-${st.key}" title="${escHtml(st.tip)}">↪</span>`;
+const hoArrow = (st: HandoffStatus, glyph = "↪"): string => `<span class="ho-arrow st-${st.key}" title="${escHtml(st.tip)}">${glyph}</span>`;
+
+const plainWho = (name: string): string => `<span class="ho-nm">.${escHtml(name)}</span>`;
+
+/** 回包没回来 / 调用失败 / 不知结局: 三种非 ok 的结局共用一种写法。ok 返回 undefined, 由各自去画。 */
+const hoTrouble = (h: { state?: Handoff["state"]; reason?: string }, glyph: string, what: string, attrs: string, text: string): string | undefined =>
+  h.state === "failed" ? hoBox(" fail", attrs, `${hoArrow({ key: "fail", tip: "没调成" }, glyph)}${what} 没成<span class="ho-why">${escHtml(h.reason ?? "")}</span>`, text, undefined, "")
+    : h.state === "lost" ? hoBox("", attrs, `${hoArrow({ key: "need", tip: "没等到回包" }, glyph)}${what}<span class="ho-why" title="${escHtml(h.reason ?? "")}">成没成不确定</span>`, text)
+      : undefined;
 
 const renderHandoff = (h: Handoff, key: string, deco?: HandoffDeco): string => {
-  const who = deco ? deco.who(h) : `<span class="ho-nm">.${escHtml(h.name)}</span>`;
+  const [glyph, verb] = VIA[h.via];
+  const who = deco ? deco.who(h.name) : plainWho(h.name);
   const attrs = deco ? deco.attrs(h) : "";
   if (h.state === "failed")
-    return hoBox(" fail", attrs, `${hoArrow({ key: "fail", tip: "没交出去" })}没交出去 ${who}<span class="ho-why">${escHtml(h.reason ?? "")}</span>`, h.text);
+    return hoBox(" fail", attrs, `${hoArrow({ key: "fail", tip: "没交出去" }, glyph)}没交出去 ${who}<span class="ho-why">${escHtml(h.reason ?? "")}</span>`, h.text);
   const [pt, tip] = PRIORITY_TAG[h.priority];
   const tags = [
+    h.decision ? hoTag("pri", h.decision.kind === "existing" ? "选中" : "新生", h.decision.why) : "",
     h.public ? hoTag("pub", "公开", "在群里说的, 回复也进群") : hoTag("priv", "私聊", "只在双方的 rolepage"),
     h.busy === true ? hoTag("pri", pt, `${tip} —— 投的时候它正忙`) : "",
     h.kind === "ask" ? hoTag("kind", "只问", "只问一句") : h.kind === "fyi" ? hoTag("kind", "知会", "只是知会, 不要回话") : "",
@@ -717,7 +782,49 @@ const renderHandoff = (h: Handoff, key: string, deco?: HandoffDeco): string => {
     : deco ? deco.status(h) : { key: "plain", tip: h.re ? "续问" : "已移交" };
   const lost = h.state === "lost" ? `<span class="ho-why" title="${escHtml(h.reason ?? "")}">交没交出去不确定</span>` : "";
   const acct = deco ? deco.acct(h) : "";
-  return hoBox("", attrs, `${hoArrow(st)}移交 ${who}${turn}${tags}${lost}${acct ? `<span class="ho-acct">${acct}</span>` : ""}`, h.text, h.public ? `${key}:ho` : undefined);
+  return hoBox("", attrs, `${hoArrow(st, glyph)}${verb} ${who}${turn}${tags}${lost}${acct ? `<span class="ho-acct">${acct}</span>` : ""}`, h.text, h.public ? `${key}:ho` : undefined);
+};
+
+const PLAIN: HandoffStatus = { key: "plain", tip: "" };
+const RUN: HandoffStatus = { key: "run", tip: "调用中…" };
+const stOf = (state: Handoff["state"]): HandoffStatus => (state === undefined ? RUN : PLAIN);
+const jobAttrs = (id: string, deco?: HandoffDeco): string =>
+  deco && id ? ` data-job="${escHtml(id)}" title="打开工单 ${escHtml(id)}"` : "";
+
+const renderHint = (h: Hint, key: string, deco?: HandoffDeco): string => {
+  if (h.k === "handoff") return renderHandoff(h, key, deco);
+  const who = (name: string) => (deco ? deco.who(name) : plainWho(name));
+  const roleAt = (name: string) => (deco ? deco.role(name) : "");
+  switch (h.k) {
+    case "born": {
+      const [glyph, verb] = VIA[h.via];
+      const attrs = roleAt(h.name);
+      return hoTrouble(h, glyph, verb, attrs, h.text) ??
+        hoBox("", attrs, `${hoArrow(stOf(h.state), glyph)}${verb} ${who(h.name)}`, h.text);
+    }
+    case "job": {
+      const attrs = jobAttrs(h.job, deco);
+      const what = h.open ? "开工单" : "收工单";
+      const id = h.job ? `<span class="ho-turn">${escHtml(h.job)}</span>` : "";
+      const recycled = h.recycled ? hoTag("kind", `回收 ${h.recycled}`, `收掉了 ${h.recycled} 个为它生的分身`) : "";
+      return hoTrouble(h, "📋", what, attrs, h.text) ??
+        hoBox("", attrs, `${hoArrow(stOf(h.state), "📋")}${what}${id}${recycled}`, h.text, undefined, h.open ? h.title || firstLine(h.text) : firstLine(h.text));
+    }
+    case "stop": {
+      const [glyph, what] = h.end ? ["⏹", "收掉"] : ["⏸", "打断"];
+      const attrs = roleAt(h.name);
+      const tags = (h.turn ? `<span class="ho-turn">${escHtml(h.turn)}</span>` : "") + (h.forgotten ? hoTag("kind", "抹掉记录", "身份记录一并删了, 名字腾出来") : "");
+      return hoTrouble(h, glyph, `${what} .${h.name}`, attrs, "") ??
+        hoBox("", attrs, `${hoArrow(stOf(h.state), glyph)}${what} ${who(h.name)}${tags}`, "");
+    }
+    case "task": {
+      const attrs = deco ? deco.plan() : "";
+      const id = h.id ? `<span class="ho-turn">${escHtml(h.id)}</span>` : "";
+      const when = h.when ? hoTag("kind", h.when, h.next ? `下一次 ${h.next}` : "定时") : "";
+      return hoTrouble(h, "⏰", "定时", attrs, h.text) ??
+        hoBox("", attrs, `${hoArrow(stOf(h.state), "⏰")}定时${id}${when}`, h.text, undefined, h.note || firstLine(h.text));
+    }
+  }
 };
 
 /** `lazyTurn`: 正文不随气泡下发, 只留一个指回 (turn, toolUseId) 的空壳, 客户端展开时再取。
@@ -731,7 +838,7 @@ const renderToolBubble = (
   deco?: HandoffDeco,
 ): string => {
   const rawResult = result?.body ?? "";
-  const ho = handoffOf(use, result);
+  const hint = hintOf(use, result);
   // 头部一行: ⏺ 工具名(参数) — 参数取命令/路径等主字段, 与 Claude CLI 同款。
   const arg = oneLineCompact(use.toolInput, 72);
   const dur = result ? `<span class="tool-dur">${escHtml(fmtDuration(result.ts - use.ts))}</span>` : "";
@@ -745,7 +852,7 @@ const renderToolBubble = (
       <summary class="tool-summary"><span class="tool-dot">⏺</span><span class="tool-name">${escHtml(use.toolName)}</span>${arg ? `<span class="tool-arg">(${escHtml(arg)})</span>` : ""}${dur}${clock(use.ts)}</summary>
       ${body}
     </details>
-    <div class="tool-result-line">${preview}</div>${ho ? renderHandoff(ho, key, deco) : ""}
+    <div class="tool-result-line">${preview}</div>${hint ? renderHint(hint, key, deco) : ""}
   </section>`;
 };
 

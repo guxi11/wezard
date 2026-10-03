@@ -19,7 +19,7 @@
   var WITH = qs.get('with') || '';
   // '' = 未指定 (服务端按全部时间, 回包里认领成 'all'); 'all' = 全部时间; 其他 = 那一段的 sid。
   var SESSION = qs.get('session') || '';
-  // 消息区的视角 (谁算「自己」靠右、描述行以谁为准): 只在看移交详情时才有 —— 移交人 (派活那一方);
+  // 消息区的视角 (谁算「自己」靠右、描述行以谁为准): 只在关系图里点别人的卡片时才有 —— 被点的那个 role;
   // 平时不存在, 消息区就用 ROLE。侧栏与名片永远是 ROLE 的。
   var EYE = qs.get('eye') || '';
   var eyeOf = function () { return EYE || ROLE; };
@@ -350,6 +350,26 @@
     var id = b.getAttribute('data-gid');
     markBack(function () { return VIEW === 'msgs' && ROLE === as && CONV === conv && WITH === w; });
     jumpMsg({ role: as, conv: conv, with: w, id: id, ts: Number(b.getAttribute('data-gts')) });
+  });
+
+  // 其余 wezard 调用的提示行: 新生 / 被收的 wizard 换到它的视角, 工单行进工单页, 定时行开发话方的日程。
+  // 同移交行: 行是 <summary> 就不顺带展开原文, 行尾 chevron 照旧开合。
+  inner.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('.handoff .ho-line[data-hrole], .handoff .ho-line[data-job], .handoff .ho-line[data-hplan]');
+    if (!b || e.target.closest('.ho-chev')) return;
+    e.preventDefault();
+    var role = b.getAttribute('data-hrole'), job = b.getAttribute('data-job'), plan = b.getAttribute('data-hplan');
+    if (job) return openJob(job);
+    if (plan) {
+      if (plan === ROLE) return setView('plan');
+      if (!canSwitch(plan)) return;
+      ROLE = plan; W.treeFor = ''; W.pickSelf = ''; CONV = ''; WITH = ''; SESSION = ''; EYE = '';
+      setView('plan');
+      return refresh();
+    }
+    if (!canSwitch(role) || role === ROLE) return;
+    markBack(function () { return VIEW === 'msgs' && ROLE === role; });
+    jumpMsg({ role: role, conv: '' });
   });
 
   // ── 左栏: 当前 role 的名片 + 会话列表 ──
@@ -1789,7 +1809,8 @@
     var other = ends.length === 2 && ends.indexOf(ROLE) >= 0 && ends.filter(function (x) { return x !== ROLE; })[0];
     return other ? pairConv(other) : null;
   };
-  // 点任何一张卡片 (视角自己也一样) 看的窗口: 它与图上和它相连的那几个 role 之间的对话, 不换视角。
+  // 点任何一张卡片 (视角自己也一样) 看的窗口: 它与图上和它相连的那几个 role 之间的对话。整页视角不换,
+  // 只有消息区站到被点的那个 role 上 (EYE): 这段往来是它的, 它说的靠右。侧栏子项是视角自己与对端的那一对, 不带 EYE。
   // links = 这一次画出来的树里, 它的父亲与孩子 (见 linksOf); 一个都没连着 = 它的全部对话。
   var talkKey = function (links, t) {
     var ls = links[t] || [];
@@ -1937,7 +1958,7 @@
     convsEl._tree = html; convsEl._html = '';
     convsEl.innerHTML = html;
     convsEl.querySelectorAll('.tci').forEach(function (el) {
-      el.onclick = function () { selectConv(talkKey(F.links, el.getAttribute('data-t')), ''); };
+      el.onclick = function () { var t = el.getAttribute('data-t'); selectConv(talkKey(F.links, t), '', undefined, t); };
     });
     bindGo(convsEl);
     convsEl.querySelectorAll('[data-tall]').forEach(function (b) {
