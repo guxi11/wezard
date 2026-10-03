@@ -1271,8 +1271,13 @@
       : '';
     var withTo = function (html) {
       if (!toIn) return html;
-      var done = false, out = html.replace(/<div class="(?:q-body|md-body)[^"]*">/, function (t) { done = true; return t + toIn; });
-      return done ? out : '<div class="to-row">' + toIn + '</div>' + html;
+      // 只挂进这条消息自己的正文: 移交体也是 .md-body, 但它发给被移交的那个 wizard, 服务端已挂好它自己的 .to-in。
+      var t = document.createElement('template');
+      t.innerHTML = html;
+      var body = [].find.call(t.content.querySelectorAll('.q-body, .md-body'), function (b) { return !b.closest('.handoff'); });
+      if (!body) return '<div class="to-row">' + toIn + '</div>' + html;
+      body.insertAdjacentHTML('afterbegin', toIn);
+      return t.innerHTML;
     };
     var priv = !m.channel && group ? '<span class="ch priv">私聊</span>' : '';
     // 本轮的账 (呼吸点 + 模型 / 上下文 / 耗时) 跟在时刻后面 —— 片段是服务端渲染好的。

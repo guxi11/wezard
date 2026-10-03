@@ -748,11 +748,11 @@ const firstLine = (text: string): string => text.split("\n").map((l) => l.trim()
 /** 提示行: 整行是一个入口 (`attrs`), 原文只由行尾的 chevron 开合; 没有原文就只是一行。
  *  私聊的原文默认收起, 行内跟着首行。公开移交 (`say` = 气泡的 data-key) 那句人在群里看得见: 默认展开,
  *  行下是一颗与普通消息同一份渲染的气泡; chevron 照样能把它收成首行。`first` = 行内跟着的那句 (默认原文首行)。 */
-const hoBox = (cls: string, attrs: string, line: string, text: string, say?: string, first = firstLine(text)): string =>
+const hoBox = (cls: string, attrs: string, line: string, text: string, say?: string, first = firstLine(text), lead = ""): string =>
   text
     ? `<details class="handoff${cls}${say ? " pub" : ""}"${say ? " open" : ""}><summary class="ho-line"${attrs}>${line}<span class="ho-first">${escHtml(first)}</span>` +
       `<span class="ho-chev" title="${say ? "收起 / 展开原文" : "展开原文"}">${CHEVRON}</span></summary>` +
-      `${say ? renderSay({ t: "text", body: text, ts: 0 }, say) : `<div class="ho-text">${mdBody(text)}</div>`}</details>`
+      `${say ? renderSay({ t: "text", body: text, ts: 0 }, say, undefined, lead) : `<div class="ho-text">${mdBody(text, lead)}</div>`}</details>`
     : `<div class="handoff${cls}"><div class="ho-line"${attrs}>${line}${first ? `<span class="ho-first">${escHtml(first)}</span>` : ""}</div></div>`;
 
 const hoArrow = (st: HandoffStatus, glyph = "↪"): string => `<span class="ho-arrow st-${st.key}" title="${escHtml(st.tip)}">${glyph}</span>`;
@@ -784,7 +784,9 @@ const renderHandoff = (h: Handoff, key: string, deco?: HandoffDeco): string => {
     : deco ? deco.status(h) : { key: "plain", tip: h.re ? "续问" : "已移交" };
   const lost = h.state === "lost" ? `<span class="ho-why" title="${escHtml(h.reason ?? "")}">交没交出去不确定</span>` : "";
   const acct = deco ? deco.acct(h) : "";
-  return hoBox("", attrs, `${hoArrow(st, glyph)}${verb} ${who}${turn}${tags}${lost}${acct ? `<span class="ho-acct">${acct}</span>` : ""}`, h.text, h.public ? `${key}:ho` : undefined);
+  // 移交体「发给谁」就是被移交的那个 wizard; 点它与移交行同一套跳转 (同一份 attrs)。
+  const to = attrs ? `<span class="to-in" role="button" tabindex="0"${attrs}>${who}</span>` : "";
+  return hoBox("", attrs, `${hoArrow(st, glyph)}${verb} ${who}${turn}${tags}${lost}${acct ? `<span class="ho-acct">${acct}</span>` : ""}`, h.text, h.public ? `${key}:ho` : undefined, undefined, to);
 };
 
 const PLAIN: HandoffStatus = { key: "plain", tip: "" };
@@ -884,19 +886,20 @@ const extractFilePath = (input: unknown): string => {
 };
 
 // 原文用 <script type="text/plain"> 承载 —— 免转义歧义, JS 端 textContent 读回原样。
-const mdBody = (body: string): string =>
-  `<div class="md-body"></div><script type="text/plain" class="md-src">${escHtml(body)}</script>`;
+// `lead` 预先挂在空 .md-body 里, 客户端填进 markdown 后把它塞进第一段 (「发给谁」.to-in)。
+const mdBody = (body: string, lead = ""): string =>
+  `<div class="md-body">${lead}</div><script type="text/plain" class="md-src">${escHtml(body)}</script>`;
 
 type TextItem = Extract<TurnItem, { t: "text" }>;
 
 /** 终句: 一颗实线气泡。没有标题行 —— 谁说的由消息行的 .mwho 交代。`cap` = 气泡头上
  *  那一行的账 (undefined = 不要这一行: 气泡紧跟在 .mwho 下面, 那里已经写过了)。 */
-const renderSay = (item: TextItem, key: string, cap?: string): string => {
+const renderSay = (item: TextItem, key: string, cap?: string, lead = ""): string => {
   const ts = fmtTs(item.ts);
   const head = cap === undefined
     ? ""
     : `<div class="say-cap"><time class="mt" title="${ts}">${ts.slice(11, 16)}</time>${cap}</div>`;
-  return `<div class="say" data-key="${key}">${head}<div class="bubble">${mdBody(item.body)}</div></div>`;
+  return `<div class="say" data-key="${key}">${head}<div class="bubble">${mdBody(item.body, lead)}</div></div>`;
 };
 
 /** 途中的话: 和它带出来的工具调用同属一次应答, 留在过程框里。 */
