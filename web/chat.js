@@ -334,22 +334,22 @@
     var conv = ch ? 'c:' + ch : ROLE === from ? 'p:' + to : ROLE === to ? 'p:' + from : 'a:' + from + '|' + to;
     jumpMsg({ conv: conv, id: c.getAttribute('data-gid'), ts: Number(c.getAttribute('data-gts')) });
   });
-  // 移交行整行: 侧栏选中移交双方之间的那一项 (群里的一对 / 私聊; 视角不是两端之一就开
-  // 「这两方之间」的往来), 有派活那句就落在这一行自己的那句上。不换视角 (节点随 reconcile 换, 所以在根上委托)。
+  // 移交行整行: 整页换成移交人 (派活那一方) 的视角 —— 名片、侧栏、标题、关系图一起换 ——
+  // 选中它与接活方之间的那一项 (群里的一对 / 私聊), 有派活那句就落在这一行自己的那句上。
+  // 移交人切不过去 (定时任务等) 就留在原视角, 开这两方之间的往来。节点随 reconcile 换, 所以在根上委托。
   // 行尾的 chevron 只管展开原文, 走 <summary> 自己的开合。
   inner.addEventListener('click', function (e) {
     var b = e.target.closest && e.target.closest('.handoff .ho-line[data-hto]');
     if (!b || e.target.closest('.ho-chev')) return;
     e.preventDefault();   // 行是 <summary>: 不顺带展开原文
     var from = b.getAttribute('data-hfrom'), to = b.getAttribute('data-hto'), ch = b.getAttribute('data-hch');
-    var peer = ROLE === from ? to : ROLE === to ? from : '';
+    var as = canSwitch(from) ? from : ROLE;
+    var peer = as === from ? to : as === to ? from : '';
     var conv = !peer ? 'a:' + from + '|' + to : ch ? 'c:' + ch : 'p:' + peer;
     var w = peer && ch ? peer : '';
     var id = b.getAttribute('data-gid');
-    markBack(function () { return VIEW === 'msgs' && CONV === conv && WITH === w; });
-    // 消息区换成移交人 (派活那一方) 的视角 (侧栏、名片不动; 视角就是它时不带)。
-    if (id) return jumpMsg({ conv: conv, with: w, id: id, ts: Number(b.getAttribute('data-gts')), eye: from });
-    selectConv(conv, w, undefined, from);
+    markBack(function () { return VIEW === 'msgs' && ROLE === as && CONV === conv && WITH === w; });
+    jumpMsg({ role: as, conv: conv, with: w, id: id, ts: Number(b.getAttribute('data-gts')) });
   });
 
   // ── 左栏: 当前 role 的名片 + 会话列表 ──
@@ -954,14 +954,17 @@
   // ── 右栏头: 这个群聊 / 私聊是什么 (关系 / 日程视图时是视图名) ──
   // 跳走之前在看的那段会话 —— 顶栏的「‹ 回到 …」回这里。on: 在哪些窗口上露出这个按钮;
   // at: 跳走时点的那条消息, 回来落在它上面。进工单页 (只在从非工单的窗口进来时记) 与
-  // 移交行点对方都记它, 同一个按钮。
+  // 移交行点对方都记它, 同一个按钮。移交会换视角, 所以连视角一起记; 去处的名字也在跳走前
+  // 取好 —— 回来之前侧栏已是别人的会话列表, 查不到原来那一项。
   var BACK = null;
   var inJobs = function () { return VIEW === 'jobs' || CONV.indexOf('j:') === 0; };
   // 回来 = 原样恢复那一页: 会话、视角、滚动位置 (按视窗顶上那一行的偏移记, 不闪不吸)。吸在底部就不记锚点。
   var markBack = function (on) {
     var r = !atBottom() && firstShown();
     var at = r && { id: r.getAttribute('data-id'), off: r.getBoundingClientRect().top - thread.getBoundingClientRect().top };
-    BACK = { conv: CONV, with: WITH, session: SESSION, eye: EYE, at: at || null, on: on };
+    var c = convOf(CONV);
+    var to = WITH ? nameOf(WITH) : c ? c.name : '';
+    BACK = { role: ROLE, conv: CONV, with: WITH, session: SESSION, eye: EYE, at: at || null, on: on, to: to };
   };
   var restoreAt = function (at) {
     if (!at) return undefined;
@@ -995,15 +998,21 @@
     openJobs(m.getAttribute('data-jobs').split(' ').filter(Boolean));
   }, true);
   var backBtn = function () {
-    var c = BACK && BACK.on() && convOf(BACK.conv);
-    return c ? '<button class="back jb" id="ch-jback" title="' + esc('回到 ' + (BACK.with ? nameOf(BACK.with) : c.name)) + '" aria-label="返回">‹</button>' : '';
+    if (!(BACK && BACK.to && BACK.on())) return '';
+    var tip = '回到 ' + (BACK.role !== ROLE ? nameOf(BACK.role) + ' 的视角 · ' : '') + BACK.to;
+    return '<button class="back jb" id="ch-jback" title="' + esc(tip) + '" aria-label="返回">‹</button>';
   };
   // 返回钮钉在标题栏最左 (标题前面), 不进右侧的按钮组 —— 标题写好之后再插进去。
   var bindBack = function () {
     var h = backBtn();
     if (h) $('#ch-who').insertAdjacentHTML('afterbegin', h);
     var b = $('#ch-jback');
-    if (b) b.onclick = function () { var x = BACK; BACK = null; SESSION = x.session; selectConv(x.conv, x.with, restoreAt(x.at), x.eye); };
+    if (b) b.onclick = function () {
+      var x = BACK; BACK = null; SESSION = x.session;
+      if (x.role === ROLE) return selectConv(x.conv, x.with, restoreAt(x.at), x.eye);
+      ROLE = x.role; CONV = x.conv; WITH = x.with; EYE = x.eye; W.treeFor = '';
+      refresh(restoreAt(x.at));
+    };
   };
   var renderHead = function () {
     var who = $('#ch-who'), acts = $('#ch-acts');
@@ -2344,13 +2353,16 @@
       return true;
     };
   };
+  // h.role: 跳过去时连视角一起换 (移交行) —— 新视角的会话列表与 session 段都还没取, 一律按全部时间整页重取。
   var jumpMsg = function (h) {
-    if (inSession(h.ts) && convOf(h.conv)) return selectConv(h.conv, h.with || '', landOn(h.id), h.eye);
+    var as = h.role || ROLE;
+    if (as === ROLE && (!h.id || inSession(h.ts)) && convOf(h.conv)) return selectConv(h.conv, h.with || '', h.id ? landOn(h.id) : undefined, h.eye);
+    if (as !== ROLE) { ROLE = as; W.treeFor = ''; W.pickSelf = ''; }
     SESSION = 'all'; CONV = h.conv; WITH = h.with || ''; EYE = h.eye && h.eye !== ROLE ? h.eye : '';
     if (VIEW !== 'msgs') setView('msgs');
     app.classList.add('reading');
     reveal();
-    refresh(landOn(h.id));
+    refresh(h.id ? landOn(h.id) : undefined);
   };
 
   var paintSearch = function (sections) {
