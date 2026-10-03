@@ -14,6 +14,7 @@ import { bindCliBackends, projectDirsFor, type CliBackendName } from "../shared/
 import { startWs } from "./ws.js";
 import { startNetWatch } from "./net-watch.js";
 import { startHttp, json, readBody, type Handler } from "./http.js";
+import { parsePath } from "../shared/config-meta.js";
 import { applyHot, patchedTop, configGet, fromLegacy, legacyGet, pickTier, planSet, renderPlan, tierEvidence, type Plan, type SetReq, type TierUsage, type UsageTotals } from "./config-api.js";
 import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } from "./usage.js";
 import { installInboundRouter } from "./inbound.js";
@@ -2566,13 +2567,34 @@ const main = async (): Promise<void> => {
       json(res, r.ok ? 200 : 400, r);
     });
 
+    // chatPolicy 的键一律落成 base principal: 聊天名会改, 拿它当键一改名策略就悄悄失效。写名字照收,
+    // 换成它此刻指向的 principal; 认不出的拒写 (写错的键静默无效, 比报错难查)。unset 一个盘上原样存在的
+    // 键不换 —— 留给清理老写法 / 失效的键。
+    const pinChatKeys = (req: SetReq): SetReq | { ok: false; reason: string } => {
+      const p = parsePath(req.path);
+      if (p[0] !== "chatPolicy") return req;
+      const bad = (k: string) => ({ ok: false as const, reason: `认不出聊天 \`${k}\`: 键写 base principal (\`chat:wr…\` / \`user:…\`) 或聊天名 (/chats)` });
+      if (p.length === 1) {
+        if (req.value === undefined || typeof req.value !== "object" || Array.isArray(req.value)) return req;
+        const pairs = Object.entries(req.value as Record<string, unknown>).map(([k, v]) => [k, chatBaseOf(cfg, k), v] as const);
+        const miss = pairs.find(([, b]) => !b);
+        return miss ? bad(miss[0]) : { ...req, value: Object.fromEntries(pairs.map(([, b, v]) => [b, v])) };
+      }
+      const key = p[1]!;
+      if (req.op === "unset" && p.length === 2 && key in cfg.chatPolicy) return req;
+      const base = chatBaseOf(cfg, key);
+      return base ? { ...req, path: ["chatPolicy", base, ...p.slice(2)].join(".") } : bad(key);
+    };
+
     // POST /config/set —— 口令门见 `guarded`。分级在这里而不在 hook: `card` 项由守护进程
     // 自己推确认卡, 所以 danger.skipAll / ⏱窗口 都放不掉它。卡等 CONFIRM_INLINE_MS 还没人点
     // 就先回 pending (fetch 默认 5 分钟收不到头就断), 卡仍有效, 迟到的确认照常落盘并捎一句给调用方。
     http.register("POST /config/set", guarded(async (req, res) => {
       const body = (await readBody(req)) as SetReq & { key?: string; action?: string; sessionId?: string; tmuxPane?: string; target?: string };
       const legacy = typeof body.key === "string";
-      const ask = legacy ? fromLegacy(body.key!, body.value, body.action) : body;
+      const asked = legacy ? fromLegacy(body.key!, body.value, body.action) : body;
+      if ("ok" in asked) { json(res, 400, asked); return; }
+      const ask = pinChatKeys(asked);
       if ("ok" in ask) { json(res, 400, ask); return; }
       const reply = (pl: Plan, text: string, extra: Record<string, unknown> = {}): void =>
         json(res, 200, legacy
@@ -2580,12 +2602,6 @@ const main = async (): Promise<void> => {
           : { ok: true, text, ...extra });
       const pl = planSet(cfg, sourcePath, ask);
       if (!pl.ok) { json(res, 400, pl); return; }
-      // 群聊级策略的键要认得出是哪个聊天: 写错的键策略静默失效, 比报错更难查。
-      // 只查新出现的键: 聊天改名后旧键认不出了, 也得还能改它 (或 unset)。整张表一起写的, 逐键查。
-      const newKeys = pl.path[0] !== "chatPolicy" || pl.after === undefined ? []
-        : (pl.path.length === 1 ? Object.keys(pl.after as Record<string, unknown>) : [pl.path[1]!]).filter((k) => !(k in cfg.chatPolicy));
-      const unknown = newKeys.filter((k) => !chatBaseOf(cfg, k));
-      if (unknown.length) { json(res, 400, { ok: false, reason: `认不出聊天 ${unknown.map((k) => `\`${k}\``).join(", ")}: 键写聊天名 (/chats) 或 base principal (\`chat:wr…\` / \`user:…\`)` }); return; }
       if (ask.dryRun || !pl.changed) { reply(pl, `${ask.dryRun ? "dryRun, 没写:\n" : ""}${renderPlan(pl)}`); return; }
 
       // 落盘时重算一遍: 等卡期间文件可能被别人改过, 按那一刻的文件打补丁、再校验。

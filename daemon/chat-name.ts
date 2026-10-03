@@ -55,12 +55,9 @@ export const chatBaseOf = (cfg: Config, ref: string): string => {
   return entries(cfg).find(([n]) => fold(n) === f)?.[1] ?? "";
 };
 
-/** `target` 所在聊天的群聊级策略 (`chatPolicy`): 键写聊天名或 base principal 都认, 多条命中取或。 */
-export const chatPolicyOf = (cfg: Config, target: string): ChatPolicy => {
-  const base = baseOfKey(target);
-  const hit = Object.entries(cfg.chatPolicy ?? {}).filter(([k]) => chatBaseOf(cfg, k) === base).map(([, p]) => p);
-  return { backstage: hit.some((p) => !!p?.backstage) };
-};
+/** `target` 所在聊天的群聊级策略 (`chatPolicy`, 键是 base principal)。 */
+export const chatPolicyOf = (cfg: Config, target: string): ChatPolicy =>
+  ({ backstage: !!cfg.chatPolicy?.[baseOfKey(target)]?.backstage });
 
 /** 已命名的聊天, 按名字排序。 */
 export const listChatNames = (cfg: Config): Array<{ name: string; base: string }> =>

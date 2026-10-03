@@ -372,7 +372,8 @@ export type ScheduleRecord = z.infer<typeof Schedule>;
 // 也更顺。有了名字, 跨 chat 的 peer 才能写成 `daily#fix` 这种稳定地址。见 daemon/chat-name.ts。
 const Chats = z.record(z.string(), z.string().describe("base principal (`chat:wr…` / `user:…`)"));
 
-// 群聊级策略, 键写聊天名或 base principal。会进宪章 (系统提示): 已在跑的 wizard 要 handoff
+// 群聊级策略, 键是 base principal (确定的聊天 id) —— 聊天名会改, 拿它当键一改名策略就悄悄失效;
+// config_set 收名字, 落盘前换成它此刻指向的 principal。会进宪章 (系统提示): 已在跑的 wizard 要 handoff
 // 才换上新规矩 —— config_set 落盘时按宪章前后对比点名受影响的那些。
 const ChatPolicy = z.object({
   backstage: z.boolean().default(false).describe("幕后模式: 人只和顶层 wizard (群管家 / 人 `.name` 点名的) 对话; wizard 之间一律私聊 (tell_peer / dispatch 的 public 失效), 被派活的 wizard 不能 notify 进群, 过程只在 rolepage"),
@@ -396,7 +397,7 @@ export const ConfigSchema = z.preprocess(liftLegacySchedules, z.object({
   bot: knob(Bot.describe("企微机器人凭据"), { gate: "hidden" }),
   defaultChat: knob(z.string().default("").describe("出站默认聊天 (没有更具体去向时推往这里)"), { gate: "card", apply: "hot" }),
   chats: hot(Chats.default({}).describe("聊天命名表: 名字 → base principal")),
-  chatPolicy: hot(z.record(z.string(), ChatPolicy).default({}).describe("群聊级策略: 聊天名或 base principal → 开关; 进宪章, 已在跑的 wizard 要 handoff 才换上 (config_set 落盘时会点名受影响的)")),
+  chatPolicy: hot(z.record(z.string(), ChatPolicy).default({}).describe("群聊级策略: base principal (`chat:wr…` / `user:…`) → 开关; config_set 写聊天名会换成它的 principal 落盘; 进宪章, 已在跑的 wizard 要 handoff 才换上 (config_set 落盘时会点名受影响的)")),
   daemon: Daemon.default({}).describe("守护进程: 监听、日志、详情页"),
   wrc: Wrc.default({}).describe("远程驱动: 授权名单、CLI 后端、工作区、镜像"),
   approval: knob(Approval.default({}).describe("工具调用审批: 粒度、规则、危险名单、窗口"), { gate: "card", apply: "hot" }),
