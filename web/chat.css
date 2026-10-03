@@ -304,6 +304,7 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 /* 标题先让位 (min-width:0), 两端头像与右侧按钮不让。 */
 .ch-who .t { min-width: 0; font-size: 16px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .ch-who > .t:not(:only-child) { flex: 0 1 auto }
+.ch-who .t .xch { font-weight: 400; color: var(--faint); margin: 0 2px }
 .ch-who .sub { min-width: 0; font-size: 11.5px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 /* 副标题里的群名: 回到整个群的入口, 平时只是一行灰字, 悬停才像链接。 */
 .ch-who .sub .up { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer }

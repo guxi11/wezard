@@ -1158,11 +1158,11 @@
     }
     var c = convOf(CONV);
     if (!c) { who.innerHTML = ''; acts.innerHTML = ''; return; }
-    // 某 role 在一个群里的全部记录 (「chat 内全部」下与我无往来的子项): 顶栏与成对子项同一种写法 —— 只写它,
-    // 「在 <群>」点回整个群。
+    // 某 role 在一个群里的全部记录 (「chat 内全部」下与我无往来的子项): 顶栏只写它, 副标题「在 <群> 的全部对话」——
+    // 与成对子项 (「我 ⇄ 它」) 一眼分得开。群名点回整个群。
     if (c.kind === 'all' && c.chat) {
       who.innerHTML = '<span class="t">' + nm(c.who, '', true) + '</span>' +
-        '<span class="sub">在 <button type="button" class="up" id="ch-up" title="' + esc('看 ' + chatTitle(c.chat) + ' 的全部记录') + '">' + esc(chatTitle(c.chat)) + '</button></span>';
+        '<span class="sub">在 <button type="button" class="up" id="ch-up" title="' + esc('看 ' + chatTitle(c.chat) + ' 的全部记录') + '">' + esc(chatTitle(c.chat)) + '</button> 的全部对话</span>';
       acts.innerHTML = '';
       bindGo(who);
       $('#ch-up').onclick = function () { selectConv('c:' + c.chat, ''); };
@@ -1176,11 +1176,11 @@
       bindGo(who);
       return;
     }
-    // 群里选中一个子项: 窗口是「我与它」在这个群里的往来, 顶栏只写对方 (视角自己左栏名片上已有), 不画头像;
+    // 群里选中一个子项: 窗口是「我与它」在这个群里的往来, 顶栏写成「我 ⇄ 它」, 不画头像;
     // 群名退到副标题, 点它 = 选回这个群本身 (整个群的视图)。
     if (WITH && c.kind === 'group') {
       var s = (c.subs || []).filter(function (x) { return x.role === WITH; })[0];
-      who.innerHTML = '<span class="t">' + nm(WITH, s && s.name, true) + '</span>' +
+      who.innerHTML = '<span class="t">' + nm(ROLE, '', true) + ' <span class="xch" aria-hidden="true">⇄</span> ' + nm(WITH, s && s.name, true) + '</span>' +
         '<span class="sub">在 <button type="button" class="up" id="ch-up" title="' + esc('看 ' + c.name + ' 的全部记录') + '">' + esc(c.name) + '</button></span>';
       acts.innerHTML = '';
       bindBack();
