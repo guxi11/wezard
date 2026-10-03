@@ -124,16 +124,22 @@ const Mirror = z.object({
   // 名下有定时任务 / 挂着审批 / 正忙 / 人正盯着的不收, 所以实际数量可能暂时高于上限。
   maxPanes: z.number().int().nonnegative().default(20).describe("活着的会话 pane 上限, 超出从最久没动的收起; 0 = 关闭"),
   // ── Prompt-cache keepalive ────────────────────────────────────────────
-  // Anthropic prompt caching: cache-write costs 1.25x, cache-read 0.1x, and the
-  // cache lives only ~5min. A pane that goes idle (agent parked waiting on a
-  // peer, or a long background task) lets that cache expire — so the next real
-  // turn pays a full 1.25x re-write of the entire context. keepalive injects a
-  // tiny ping just before expiry: it re-reads the cached prefix (0.1x) and
-  // slides the TTL forward, so the eventual real turn only writes the delta.
+  // Anthropic prompt caching: cache-write costs 1.25x (5min TTL) / 2x (1h TTL),
+  // cache-read 0.1x. A pane that goes idle (agent parked waiting on a peer, or a
+  // long background task) lets that cache expire — so the next real turn pays a
+  // full re-write of the entire context. keepalive injects a tiny ping just
+  // before expiry: it re-reads the cached prefix and slides the TTL forward, so
+  // the eventual real turn only writes the delta.
+  // Off by default: it was built for the API's 5min default, but Claude Code on a
+  // subscription writes 1h entries (measured here: 1490/1491 main sessions, and
+  // 229/230 requests 6–60min apart still hit in full), so idle gaps within the
+  // hour need no warmer — and every ping is a real model turn in a live pane.
+  // Turn it on where transcripts show 5min writes (`ephemeral_5m`, e.g. a bare API key).
   // 保温 tick 每 15s 现读整节; 只有 ping / resumePing 另被启动时建成的识别表用着。
   keepalive: hot(z
     .object({
-      enabled: z.boolean().default(true).describe("prompt-cache 保温总开关"),
+      // The same tick hosts stall recovery (resumeOnStall): off stops that too.
+      enabled: z.boolean().default(false).describe("prompt-cache 保温总开关 (连带卡死续跑); 订阅下缓存本是 1h, 默认关"),
       // The warm-ping cadence follows the TTL each session's cache was actually
       // written with (`cache_creation.ephemeral_1h/5m` in its transcript — 1h on a
       // Claude Code subscription); this only applies when no such split is on record.

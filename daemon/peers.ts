@@ -213,7 +213,7 @@ const parseTurns = (jsonlPath: string, raw: string, keepLines = false, marks = f
       if (marks && att?.type === "queued_command" && typeof att.prompt === "string" && !(parsed as { isSidechain?: unknown }).isSidechain) {
         const env = parseEnvelope(att.prompt);
         const ms = Date.parse(String((parsed as { timestamp?: unknown }).timestamp ?? ""));
-        return env ? [{ role: "user", text: "", ms: Number.isNaN(ms) ? 0 : ms, env, queued: true } as Turn] : [];
+        return env ? [{ role: "user", text: "", ms, env, queued: true } as Turn] : [];
       }
       let row;
       try { row = normalize(parsed); } catch { return []; }
@@ -230,12 +230,11 @@ const parseTurns = (jsonlPath: string, raw: string, keepLines = false, marks = f
       // keepaliveStamps to mtime fallback, and let the keepalive's own ping
       // writes (plus snapshot/summary churn) read as REAL activity that reset
       // the round budget without bound.
-      const rawTs = (parsed as { timestamp?: unknown }).timestamp;
-      const ms = typeof rawTs === "number" ? rawTs : Date.parse(String(rawTs ?? ""));
+      const ms = stampMs((parsed as { timestamp?: unknown }).timestamp);
       const mid = role === "assistant" && row.message?.stop_reason === "tool_use";
-      if (!text && marks && role === "user" && raw.includes("<task-notification")) return [{ role, text: "", ms: Number.isNaN(ms) ? 0 : ms, notice: true } as Turn];
+      if (!text && marks && role === "user" && raw.includes("<task-notification")) return [{ role, text: "", ms, notice: true } as Turn];
       const apiError = role === "assistant" && (parsed as { isApiErrorMessage?: unknown }).isApiErrorMessage === true;
-      return text ? [{ role, text, ms: Number.isNaN(ms) ? 0 : ms, ...(env ? { env } : {}), ...(mid ? { mid: true } : {}), ...(apiError ? { apiError: true } : {}) } as Turn] : [];
+      return text ? [{ role, text, ms, ...(env ? { env } : {}), ...(mid ? { mid: true } : {}), ...(apiError ? { apiError: true } : {}) } as Turn] : [];
     });
 };
 
@@ -749,6 +748,41 @@ const pickCacheTtl = (jsonlPath: string, raw: string): number => {
   return 0;
 };
 
+/** When this session's prompt cache was last touched: the START of its newest answered
+ *  API request (= the user / tool_result row it was sent after), since TTL runs from
+ *  the start of the request that reads or writes the entry. File mtime marks the
+ *  END — a minute later at p99, several on a long generation — and also moves on
+ *  metadata rows that touch no cache. Synthetic replies (`<synthetic>`, all-zero
+ *  usage) sent nothing. A request still in flight is not counted (its user row may be a
+ *  local command that sends nothing) — older = colder, the safe side.
+ *  0 = no request on record — the caller falls back to mtime. */
+export const cacheTouchMs = (jsonlPath: string): number =>
+  readTailUntil(jsonlPath, (raw) => pickCacheTouch(jsonlPath, raw), (v) => v > 0);
+
+const pickCacheTouch = (jsonlPath: string, raw: string): number => {
+  const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
+  return raw.split("\n").reduce(
+    (acc, line) => {
+      let parsed: { timestamp?: unknown };
+      try { parsed = JSON.parse(line) as { timestamp?: unknown }; } catch { return acc; }
+      const row = normalize(parsed);
+      if (!row || row.isSidechain) return acc;
+      const ms = stampMs(parsed.timestamp);
+      if (row.type === "user") return ms ? { ...acc, sentAt: ms } : acc;
+      const u = row.type === "assistant" ? row.message?.usage : undefined;
+      const sent = (u?.input_tokens ?? 0) + (u?.cache_read_input_tokens ?? 0) + (u?.cache_creation_input_tokens ?? 0) > 0;
+      return sent ? { ...acc, touch: acc.sentAt || ms } : acc;
+    },
+    { sentAt: 0, touch: 0 },
+  ).touch;
+};
+
+/** A row's `timestamp` as epoch ms (Claude: ISO string, CodeBuddy: number); 0 if absent / unparsable. */
+const stampMs = (ts: unknown): number => {
+  const ms = typeof ts === "number" ? ts : Date.parse(String(ts ?? ""));
+  return Number.isNaN(ms) ? 0 : ms;
+};
+
 /** 这段上下文里读过 / 改过的文件 (旧的在前、去重, 同一文件按最后一次碰它的位置排)。
  *
  *  「它的上下文里装着什么」是可以算出来的事实: 从文件尾往回, 撞上 compact 边界就停
@@ -846,8 +880,8 @@ const lastToolMs = (jsonlPath: string): number => {
         if (!row || row.isMeta || row.isSidechain) return m;
         const content = row.message?.content;
         const tooly = Array.isArray(content) && content.some((b) => /^tool_(use|result)$/.test((b as { type?: string })?.type ?? ""));
-        const ms = typeof parsed.timestamp === "number" ? parsed.timestamp : Date.parse(String(parsed.timestamp ?? ""));
-        return tooly && !Number.isNaN(ms) ? Math.max(m, ms) : m;
+        const ms = stampMs(parsed.timestamp);
+        return tooly && ms ? Math.max(m, ms) : m;
       } catch { return m; }
     }, 0);
 };
@@ -916,7 +950,7 @@ const stallRows = (jsonlPath: string): StallRow[] => {
         const blocks = Array.isArray(content) ? (content as { type?: string }[]) : [];
         const ms = typeof parsed.timestamp === "number" ? parsed.timestamp : Date.parse(String(parsed.timestamp ?? ""));
         return [{
-          role, ms: Number.isNaN(ms) ? 0 : ms,
+          role, ms,
           apiError: parsed.isApiErrorMessage === true,
           toolResult: blocks.length > 0 && blocks.every((b) => b?.type === "tool_result"),
           text: stripMeta(blockText(content)).trim(),

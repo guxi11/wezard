@@ -23,6 +23,8 @@ export interface RouteRow extends WizardBrief {
   contextTokens: number;
   /** 它的缓存实际按多长 TTL 写的 (transcript 的 cache_creation 分档; 订阅下是 1h); 缺 = 用调用方给的默认。 */
   cacheTtlMs?: number;
+  /** 缓存最近一次被碰的时刻 = 最近一次真实请求的开始 (cacheTouchMs); 缺 = 退回 lastActivity (mtime)。 */
+  cacheAt?: number;
   /** 这段上下文里碰过的文件 (contextFiles), 绝对路径。 */
   files: readonly string[];
   /** 最近几句问话 (去掉了保温 ping)。 */
@@ -132,14 +134,18 @@ export interface WakeCost {
   times: number;
 }
 
-export const wakeCostOf = (ctx: number, lastActivity: number, now: number, ttlMs: number): WakeCost => {
-  const cold = !lastActivity || now - lastActivity > ttlMs;
+/** 缓存计时的起点: 有真实请求时刻就用它, 否则退回 mtime。 */
+const touchOf = (r: RouteRow): number => r.cacheAt || r.lastActivity;
+
+/** `touchedAt` = 缓存最近一次被碰 (请求开始) 的时刻: TTL 从那里起算, 不是从 transcript 写完起算。 */
+export const wakeCostOf = (ctx: number, touchedAt: number, now: number, ttlMs: number): WakeCost => {
+  const cold = !touchedAt || now - touchedAt > ttlMs;
   return { cold, write: cold ? ctx : 0, times: Math.round((ctx / FRESH_CTX) * 10) / 10 };
 };
 
 /** tell_peer 回包里的一句: 这次唤醒的是冷且大的 wizard, 付了多少缓存重写 —— 让派活的下次先算这笔账。 */
-export const wakeNoteOf = (ctx: number, lastActivity: number, now: number, ttlMs: number): string => {
-  const w = wakeCostOf(ctx, lastActivity, now, ttlMs);
+export const wakeNoteOf = (ctx: number, touchedAt: number, now: number, ttlMs: number): string => {
+  const w = wakeCostOf(ctx, touchedAt, now, ttlMs);
   return w.cold && ctx >= BIG_COLD
     ? `这次唤醒的缓存已冷 (超过 TTL ${Math.round(ttlMs / 60_000)} 分钟没动), 要整段重写 ~${k(ctx)} 缓存 ≈ 白板 spawn 的 ${w.times} 倍; 这件活若不依赖它那段上下文, 下次白板 spawn 更省`
     : "";
@@ -150,8 +156,8 @@ export const wakeNoteOf = (ctx: number, lastActivity: number, now: number, ttlMs
 export const COLD_GATE = 100_000;
 
 /** 冷且 ctx ≥ COLD_GATE → 退回的那一行; 否则空串 (放行)。 */
-export const coldGateOf = (name: string, ctx: number, lastActivity: number, now: number, ttlMs: number): string => {
-  const w = wakeCostOf(ctx, lastActivity, now, ttlMs);
+export const coldGateOf = (name: string, ctx: number, touchedAt: number, now: number, ttlMs: number): string => {
+  const w = wakeCostOf(ctx, touchedAt, now, ttlMs);
   return w.cold && ctx >= COLD_GATE
     ? `${name} 冷 · ctx ${k(ctx)} · 唤醒约等于白板 spawn 的 ${w.times} 倍; 真依赖它的上下文就带 \`force:true\` 重发, 否则白板 spawn`
     : "";
@@ -183,7 +189,7 @@ const costLines = (e: Evidence, c: Ctx): string[] => {
   const ctx = e.row.contextTokens;
   if (!ctx) return [];
   const ttlMs = e.row.cacheTtlMs ?? c.ttlMs;
-  const w = wakeCostOf(ctx, e.row.lastActivity, c.now, ttlMs);
+  const w = wakeCostOf(ctx, touchOf(e.row), c.now, ttlMs);
   const ttl = `${Math.round(ttlMs / 60_000)} 分钟`;
   const wake = w.cold
     ? `缓存冷 (超过 TTL ${ttl}) · 唤醒要重写 ~${k(w.write)} 缓存 ≈ 白板 spawn 的 ${w.times} 倍${ctx >= BIG_COLD ? " · 大 ctx 已冷, 默认不转" : ""}`
@@ -249,7 +255,7 @@ const strong = (e: Evidence): boolean => e.files.length > 0 || e.desc.length >= 
 const vetoOf = (e: Evidence, now: number, ttlMs: number, small: boolean, force: boolean): string => {
   const r = e.row;
   const ctx = r.contextTokens;
-  const w = wakeCostOf(ctx, r.lastActivity, now, r.cacheTtlMs ?? ttlMs);
+  const w = wakeCostOf(ctx, touchOf(r), now, r.cacheTtlMs ?? ttlMs);
   return !strong(e) ? "证据弱 (只有词面重叠)"
     : r.busy ? "正忙"
       : notWorth(e, w, small, ctx) ? `不划算 (${small ? "小活" : "证据弱"}却要${w.cold ? "整段重写" : "一直背着"} ${k(ctx)})`

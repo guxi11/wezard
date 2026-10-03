@@ -82,7 +82,7 @@ import { bindNoticeBox, createNoticeBox, createSeenRing, gcSeen, chatAudience, h
 import { createLedger, digest, pendingGc, renderDigest, renderTable, renderAwaiting, renderStalled, renderShelved, ago as agoMs, HEARD_EVERY_MS, type Item as PendingItem, type LiveOf, type Mark } from "./pending-items.js";
 import { loadJobStore, dutyLine, awaitingAccept, stalledRoots, shelvedRoots, nudgeDue, dayClamp, childrenOf as jobChildren, jobEpisode, rejectReason, ACCEPTS, JOB_MEMBER_MAX, JOB_DEPTH_MAX, depthOf, ancestorsOf as jobAncestors, treeOrder, jobStage, type Accept, type JobMark, type JobRecord, type MemberLive } from "./jobs.js";
 import type { MemberRole } from "../shared/world.js";
-import { cacheTtlSec, clipMiddle, contextFiles, firstStamp, parseClosing, lastContextTokens, lastExchange, lastModel, openingTurn, replyClosedBefore, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
+import { cacheTouchMs, cacheTtlSec, clipMiddle, contextFiles, firstStamp, parseClosing, lastContextTokens, lastExchange, lastModel, openingTurn, replyClosedBefore, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { keepalivePingSigs } from "../shared/keepalive.js";
 import { expandHome } from "../shared/paths.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
@@ -1058,8 +1058,9 @@ const main = async (): Promise<void> => {
     // 等待」: 调用方注入完就返回, 对方干完那一轮的结论由守护进程自动送回来 (receipts)。
     // `/peers/send` 保留为同一个处理函数: 正在跑的 wizard 的 MCP 进程是旧代码, 换名字
     // 不能把它们的通路掐断。
-    // 冷与否 = transcript 多久没动 vs 它的缓存实际按多长 TTL 写的 (与 route_candidates 同一口径)。
-    const mtimeOf = (p: string): number => { try { return statSync(p).mtimeMs; } catch { return 0; } };
+    // 冷与否 = 缓存最近一次被碰 (最近一次真实请求的开始; 读不到退回 mtime) 距今多久 vs 它实际按多长 TTL 写的
+    // (与 route_candidates 同一口径)。
+    const touchOf = (p: string): number => { try { return cacheTouchMs(p) || statSync(p).mtimeMs; } catch { return 0; } };
     const ttlOf = (p: string): number => (cacheTtlSec(p) || cfg.wrc.mirror.keepalive.ttlSec) * 1000;
     // 被冷门控退回过的 `self\0target` → 到期时刻: 老 MCP 进程原样重发即视为 force。
     const coldRefused = new Map<string, number>();
@@ -1138,7 +1139,7 @@ const main = async (): Promise<void> => {
         const retried = force === undefined && (coldRefused.get(gk) ?? 0) > Date.now();
         coldRefused.delete(gk);
         const gi = retried ? undefined : m.sessionInfo(target);
-        const gate = gi ? coldGateOf(`.${displayName(target).replace(/^\./, "")}`, gi.contextTokens, mtimeOf(gi.jsonlPath), Date.now(), ttlOf(gi.jsonlPath)) : "";
+        const gate = gi ? coldGateOf(`.${displayName(target).replace(/^\./, "")}`, gi.contextTokens, touchOf(gi.jsonlPath), Date.now(), ttlOf(gi.jsonlPath)) : "";
         if (gate) {
           if (force === undefined) coldRefused.set(gk, Date.now() + 10 * 60_000);
           return { status: 409, body: { ok: false, gated: "cold", reason: gate + (force === undefined ? " (你的 MCP 是旧版、没有 force 参数: 10 分钟内原样再发一次即视为 force)" : "") } };
@@ -1175,7 +1176,7 @@ const main = async (): Promise<void> => {
       // 唤醒代价同样要在注入之前量: 投进去 transcript 一动, 就看不出它冷了多久。
       const info = m.sessionInfo(target);
       const wake = info?.jsonlPath
-        ? wakeNoteOf(info.contextTokens, mtimeOf(info.jsonlPath), at, ttlOf(info.jsonlPath))
+        ? wakeNoteOf(info.contextTokens, touchOf(info.jsonlPath), at, ttlOf(info.jsonlPath))
         : "";
       const deadlineSec = (body as { deadline?: number }).deadline;
       // 回执: 对方干完那一轮, 守护进程把它的结论自动送回来 (默认开)。`receipt:false`
@@ -2004,6 +2005,7 @@ const main = async (): Promise<void> => {
             ...r,
             contextTokens: live ? lastContextTokens(live) : 0,
             ...(ttl ? { cacheTtlMs: ttl * 1000 } : {}),
+            ...(live ? { cacheAt: cacheTouchMs(live) } : {}),
             files: live ? contextFiles(live) : [],
             asks: live ? talkTurns(live, 12, warm).filter((t) => t.role === "user").map((t) => t.text) : [],
             summary: live ? lastExchange(live, 80, warm) : "",
