@@ -116,8 +116,104 @@ const tell = (to, text, extra = {}) => post("/peers/tell", { target: root.target
 /** 根 → `to` 那一份落定 (settled) 为止。 */
 const settledSlot = (to, ms) => until(() => { const s = slotOf(root.target, kids.get(to)); return s?.settled && s; }, ms);
 
+/** 那个 target 落在轮次记录里的每一轮 (同 id 后写覆盖前写): 频道、出处。只读尾巴。 */
+const turnsOf = (target) => {
+  const p = join(STATE, "state", "details.jsonl");
+  const raw = readFileSync(p, "utf8");
+  const rows = raw.slice(Math.max(0, raw.length - 16 * 1024 * 1024)).split("\n").flatMap((l) => {
+    if (!l.includes('"kind":"turn"') || !l.includes(target)) return [];
+    try { const o = JSON.parse(l); return o.kind === "turn" && o.target === target ? [o] : []; } catch { return []; }
+  });
+  return [...rows.reduce((m, o) => m.set(o.id, { ...(m.get(o.id) ?? {}), ...o }), new Map()).values()];
+};
+
+// ── 纯单元: 直接驱动 dist 里的 createReceipts, 依赖全是假的 —— 不生分身、不碰群 ──
+// target 是「忙着」的, 直到给了它这一件的答案; 答案按 (to, 件号) 记, 只认发话之后给的 (同 replyToPeer)。
+const fakeReceipts = async () => {
+  const { createReceipts } = await import(new URL("../../dist/daemon/receipts.js", import.meta.url));
+  const answers = [];
+  const busy = new Set();
+  const sent = [];
+  const hooks = [];
+  const log = { info() {}, warn() {}, debug() {}, child: () => log };
+  const r = createReceipts({
+    idleNow: async (t) => !busy.has(t),
+    untilIdle: async (t, ms, o) => {
+      for (const end = Date.now() + ms; busy.has(t) && Date.now() < end && !o?.aborted?.(); ) await sleep(50);
+      return { idle: !busy.has(t) };
+    },
+    paneLive: async () => true,
+    replyFor: (to, _from, since, turn) => {
+      const a = answers.filter((x) => x.to === to && x.turn === turn && x.at >= since).at(-1);
+      return a && { text: a.text };
+    },
+    deliver: async (to, body, meta) => { sent.push({ to, body, meta }); hooks.forEach((h) => h(to, meta)); return { ok: true }; },
+    nameOf: (t) => `.${t}`,
+    log,
+  });
+  const answer = (to, turn, text) => { answers.push({ to, turn, text, at: Date.now() }); busy.delete(to); };
+  const tell = (x) => { busy.add(x.to); return r.register(x); };
+  return { r, sent, answer, tell, onDeliver: (h) => hooks.push(h) };
+};
+
 // ── 用例: 每条返回 { pass, why } ────────────────────────────────────────
 const cases = {
+  // 回执轮的频道只由去向定: 续回进群 (chat 父 k, 兄弟落齐) 才有频道, 其余一律私聊 ——
+  // 不能因为那件子活是 public:true 派的就沿用它的频道。三种回落: 没有父 k (chain:false)、
+  // 中途回执 (NEED)、父 k 指向的上游那一份已不在 (被 wait_peer 取走 / 不要回执)。
+  "route-fallback": { names: [], unit: true, run: async () => {
+    const f = await fakeReceipts();
+    f.tell({ from: "a", to: "b1", channel: "chat:G", turn: "t1" });
+    f.tell({ from: "a", to: "b2", channel: "chat:G", turn: "t2", k: { kind: "chat", channel: "chat:G", turn: "1" } });
+    f.tell({ from: "a", to: "b3", channel: "chat:G", turn: "t3", k: { kind: "peer", from: "x", turn: "tx" } });
+    f.answer("b1", "t1", "RESULT: side");
+    f.answer("b2", "t2", "NEED: 口令?");
+    f.answer("b3", "t3", "RESULT: orphan");
+    await until(() => f.sent.length >= 3, 20_000, 100);
+    const leak = f.sent.filter((s) => s.meta.channel !== "");
+    return {
+      pass: f.sent.length === 3 && !leak.length,
+      why: `回执 ${f.sent.length}/3 · 带频道的 ${leak.map((s) => `${s.meta.turn}→${s.meta.channel}`).join(",") || "无"}`,
+    };
+  } },
+
+  // 同一对的第二件活不能顶掉第一件挂起 (等子活) 的那份: x 派 a 件一, a 派 b 后先停下 (挂起);
+  // x 又派 a 件二。b 回来时, a 那一轮的终句仍要作为件一的回执回到 x —— 按件号, 不按「这一对最后一件」。
+  "same-pair": { names: [], unit: true, run: async () => {
+    const f = await fakeReceipts();
+    f.onDeliver((to, meta) => { if (to === "a" && meta.turn === "tc") setTimeout(() => f.answer("a", "t1", "RESULT: final-1"), 200); });
+    f.tell({ from: "a", to: "b", channel: "", turn: "tc", k: { kind: "peer", from: "x", turn: "t1" } });
+    f.tell({ from: "x", to: "a", channel: "", turn: "t1" });
+    f.answer("a", "t1", "已派");
+    await sleep(500);
+    f.tell({ from: "x", to: "a", channel: "", turn: "t2" });
+    f.answer("a", "t2", "RESULT: two");
+    await until(() => f.sent.some((s) => s.to === "x" && s.meta.turn === "t2"), 10_000, 100);
+    f.answer("b", "tc", "RESULT: b");
+    const got = await until(() => f.sent.find((s) => s.to === "x" && s.meta.turn === "t1"), 20_000, 100);
+    const relay = f.sent.find((s) => s.to === "a" && s.meta.turn === "tc");
+    return {
+      pass: got?.body === "RESULT: final-1" && relay?.meta.replyTo?.from === "x",
+      why: `x 收到 ${f.sent.filter((s) => s.to === "x").map((s) => `${s.meta.turn}:${s.body}`).join(" / ") || "无"} · b 的回执 reply-to=${relay?.meta.replyTo ? `${relay.meta.replyTo.kind}:${relay.meta.replyTo.from ?? relay.meta.replyTo.channel}` : "无"}`,
+    };
+  } },
+
+  // fork 分身 (继承上下文) 的第一轮: 带 task 的是私聊派活, 不带的是开场白 —— 都不是人在群里
+  // 问的, 终句不能进分身的 home 群。实测于 .irisfit-coder (10-03 04:33) / .eff-d (10-02 15:09)。
+  "clone-private": { names: ["rr-f", "rr-g"], run: async () => {
+    const n = nonce();
+    await spawn("rr-f", { inherit: true, task: `这是回归测试, 不要调用任何工具, 直接回复一行: RESULT: [receipt-regress] fork-${n}` });
+    await spawn("rr-g", { inherit: true });
+    const s = await settledSlot("rr-f", 3 * 60_000);
+    await until(() => turnsOf(kids.get("rr-g")).some((t) => t.closed), 90_000);
+    await sleep(5000);
+    const pub = ["rr-f", "rr-g"].flatMap((x) => turnsOf(kids.get(x)).filter((t) => t.channel !== "").map((t) => `${x}:${t.channel}`));
+    return {
+      pass: s?.outcome?.status === "done" && !pub.length,
+      why: `rr-f 回执=${s?.outcome?.status ?? "未落定"} · 进了群的轮 ${pub.join(",") || "无"}`,
+    };
+  } },
+
   // 三级 root→a→b→c: c 的结论经 b、a 冒泡回根, 根只收到一份, 内容是真结论而不是「已派」。
   chain: { names: ["rr-a", "rr-b", "rr-c"], run: async () => {
     const n = nonce();
@@ -375,13 +471,17 @@ const main = async () => {
   const pick = process.argv.slice(2);
   const bad = pick.filter((x) => !cases[x]);
   if (bad.length) throw new Error(`没有用例 ${bad.join(" ")} —— 有: ${Object.keys(cases).join(" ")}`);
-  const r = await post("/wizard/clone", { ...ME, name: real("rr-root"), inherit: false, model: "haiku", keepalive: false, description: "receipt-regress 的根" });
-  if (!r.ok) throw new Error(`spawn rr-root: ${r.reason}`);
-  root = { target: r.target, name: r.name };
-  await post("/peers/tell", { ...ME, name: root.name, receipt: false, priority: "now", text: "你是回执回归测试的根。之后进来的每一份回执, 只回一个词 ok, 不调用任何工具。现在回 ok。" });
-  await sleep(20_000);
+  const chosen = pick.length ? pick : Object.keys(cases);
+  // 只跑纯单元的不必生根 (它们不碰 daemon)。
+  if (chosen.some((x) => !cases[x].unit)) {
+    const r = await post("/wizard/clone", { ...ME, name: real("rr-root"), inherit: false, model: "haiku", keepalive: false, description: "receipt-regress 的根" });
+    if (!r.ok) throw new Error(`spawn rr-root: ${r.reason}`);
+    root = { target: r.target, name: r.name };
+    await post("/peers/tell", { ...ME, name: root.name, receipt: false, priority: "now", text: "你是回执回归测试的根。之后进来的每一份回执, 只回一个词 ok, 不调用任何工具。现在回 ok。" });
+    await sleep(20_000);
+  }
   const slots = pool(MAX_KIDS);
-  const results = await Promise.all((pick.length ? pick : Object.keys(cases)).map(async (name) => {
+  const results = await Promise.all(chosen.map(async (name) => {
     const c = cases[name];
     await slots.take(c.names.length);
     const t0 = Date.now();
@@ -392,7 +492,7 @@ const main = async () => {
     return out.pass;
   }));
   const failed = results.filter((x) => !x).length;
-  const rootAlive = !!(await jsonlOf(root.target)) && !!tmuxPaneOf(root.name);
+  const rootAlive = !root || (!!(await jsonlOf(root.target)) && !!tmuxPaneOf(root.name));
   if (!rootAlive) console.log("⚠ 根 rr-root 中途没了 (多半撞上了别人的 reload) —— 「根收到 N 份」类判定无效, 重跑");
   console.log(failed ? `${failed}/${results.length} FAIL` : `全部 ${results.length} 条 PASS`);
   return failed;

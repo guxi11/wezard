@@ -1672,9 +1672,9 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
 // 证人不作声 (忙时排队、slash 命令、无注册表的后端) 才看框回没回到贴之前的样子。
 // 框认得出来时这条判据可信, 于是允许多补回车 (空框上的回车在 CLI 里是 no-op);
 // 每次补之前再问一遍证人, 已提交就不补。
-const injectViaTmuxText = async (target: string, text: string, log: Logger, freshSpawn: boolean, witness: SubmitWitness = NO_WITNESS): Promise<{ ok: boolean; reason?: string; uncertain?: boolean }> => {
 /** 具名粘贴 buffer 的序号 (见 loadAndPaste)。 */
 let pasteSeq = 0;
+const injectViaTmuxText = async (target: string, text: string, log: Logger, freshSpawn: boolean, witness: SubmitWitness = NO_WITNESS): Promise<{ ok: boolean; reason?: string; uncertain?: boolean }> => {
   // Warm pane: tight timings, low latency. Fresh spawn (claude --resume just
   // started, transcript still loading): extended timings — bracketed-paste
   // end can take 4-7s to be honored on a cold TUI. Only the fresh-spawn path
@@ -3277,6 +3277,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       }
       return opening?.query;
     }
+    // 私聊派来的活 (不是回执) 这一轮必是私聊, 不论印章带没带频道: 进群的只能是人问的事的
+    // 交代与显式公开。带 task 的 fork 分身就只有出处、没有频道印章, 退回 home 就把私聊派的活答进了群。
+    if (from?.kind === "peer" && !from.public && !from.receipt) {
+      a.channel = "";
+      a.speaker = undefined;
+      a.replyTo = undefined;
+    }
     return undefined;
   };
   /** 本轮落 turn 记录的频道字段。 */
@@ -3315,7 +3322,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const t = said.trim();
     const hit = (x: Seal): boolean => pick(x) && x.keys.some((k) => k === t || (k.length >= 8 && t.includes(k)));
     const seals = a.seals ?? [];
-    const first = seals.find(hit);
+    // 并成一行里有人从聊天说的那句, 这一轮就是它的: 它的轮次与气泡早已建好, 认给别的印章它就永远不收口。
+    const first = seals.find((x) => hit(x) && !!x.turn) ?? seals.find(hit);
     if (first) a.seals = seals.filter((x) => !hit(x));
     return first;
   };
@@ -5413,7 +5421,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!r.ok) return { ok: false, reason: r.reason, inherited: false };
     // 分叉文件不是开机就有的: CLI 在这个 pane **收到第一条消息**的那一刻才把父亲的
     // transcript 复制成新文件。所以必须先说一句话, 分身才会有自己的 sid —— 这句话
-    // 顺便就是它的开场白 (「你是谁、继承了什么、准备接什么」), 群里看到的第一条也是它。
+    // 顺便就是它的开场白 (「你是谁、继承了什么、准备接什么」)。
     const hello = args.bootstrap?.trim()
       || "（wezard 分身初始化）用一句话说明: 你是谁、从谁那里继承了哪些上下文、准备接什么活。不要复述这条指令。";
     rememberInject(hello);
@@ -5454,7 +5462,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const spawned = byTarget.get(args.target);
     if (spawned) {
       // muteUntilInject 是给"全新 pane 的 greeting 噪音"准备的; 分身的开场白是正经
-      // 内容 (群里第一条就该是它), 所以这里不静音。
+      // 内容 (rolepage 上它的第一轮), 所以这里不静音 —— 进不进群由下面的频道印章定。
       spawned.justSpawned = true;
       spawned.keepaliveOff = true;
       spawned.keepaliveOffAt = Date.now();
@@ -5466,6 +5474,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         spawned.pendingFrom = { from: args.bootstrapFrom.from, at: Date.now() };
         spawned.pendingBriefQuery = args.bootstrapFrom.query;
       }
+      // 开场白不是谁在群里问的: 带活的是私聊派活, 不带的是守护进程让它自报家门 —— 都只进 rolepage。
+      spawned.pendingChannel = { channel: "", at: Date.now() };
     }
     lg.info({ parent: args.parent, sessionId: fork.sessionId }, "clone: forked");
     afterSpawn();
@@ -5718,6 +5728,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // 会话中途退出 (注册表不认得了): pane 也不忙就是「那里什么都没在跑」, 与 isBusy 同一口径。
       const check = async (): Promise<void> => {
         if (done) return;
+        if (aborted()) { finish({ idle: false, reason: "stopped" }); return; }
         const v = idleVerdict(target);
         if (v ?? !(await isBusy(target))) finish({ idle: true });
       };
@@ -5725,7 +5736,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const tick = setInterval(() => void check(), IDLE_SAFETY_POLL_MS);
       const timer = setTimeout(() => finish({ idle: false, reason: "idle wait timed out" }), timeoutMs);
       void check();
-        if (aborted()) { finish({ idle: false, reason: "stopped" }); return; }
     });
   };
 

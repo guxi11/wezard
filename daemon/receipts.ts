@@ -62,7 +62,7 @@ const IDLE_CONFIRM = 3;
 export interface ReceiptMeta {
   /** 答话方的 target key。 */
   from: string;
-  /** 原来那一句说在哪 ("" = 私聊) —— 回执跟着同一个频道, 公开轮的后续仍在群里。 */
+  /** 回执那一轮的频道: 只有续回进群 (见 routeOf) 才不是 "" —— 派那件活时公开与否不算数。 */
   channel: string;
   /** 工单 id ("" = 不在工单里)。 */
   job: string;
@@ -196,6 +196,9 @@ export interface Slot extends Tell {
    *  watcher, 也就没有自己的期限: 超时交给子活各自的 deadline —— 它们一定落定 (失败
    *  也是定论), 落定时由 relay / release 把这一份叫醒。 */
   deferred?: true;
+  /** 挂起时同一对又派了另一件, 这一份让出 `from→to` 的位置, 按件号另存 (见 register) ——
+   *  子活回来时它的终句仍要回到这一件, 不能因为「这一对最后一件」换了就作废。 */
+  parked?: true;
 }
 
 /** 落盘的登记留多久。比对方最长允许干的时长宽, 好让续守的那一份仍数得进工单。 */
@@ -241,16 +244,27 @@ export interface InFlight { from: string; to: string; turn: string; job: string;
 
 export const createReceipts = (deps: ReceiptDeps): Receipts => {
   const keyOfPair = (from: string, to: string): string => `${from}\u0000${to}`;
+  const keyOfTurn = (from: string, to: string, turn: string): string => `${keyOfPair(from, to)}\u0000${turn}`;
+  const keyOf = (s: Slot): string => (s.parked ? keyOfTurn(s.from, s.to, s.turn ?? "") : keyOfPair(s.from, s.to));
   const live = (s: Slot): boolean => Date.now() - s.at < KEEP_MS;
   const slots = new Map<string, Slot>(
-    Object.values(deps.store?.all() ?? {}).filter(live).map((s) => [keyOfPair(s.from, s.to), s]),
+    Object.values(deps.store?.all() ?? {}).filter(live).map((s) => [keyOf(s), s]),
   );
   /** 写穿到磁盘。被同一对的新一句顶掉的旧 slot 不写 —— 它的 key 已经归新的了。 */
   const save = (s: Slot): void => {
-    if (!stale(s)) deps.store?.set(keyOfPair(s.from, s.to), s);
+    if (!stale(s)) deps.store?.set(keyOf(s), s);
   };
-  const settle = (s: Slot): void => { s.settled = true; save(s); };
-  const stale = (s: Slot): boolean => slots.get(keyOfPair(s.from, s.to))?.gen !== s.gen;
+  /** 停放的那份收尾即删: 它的 key 按件号, 不会被同一对的下一句覆盖, 留着只会越积越多。 */
+  const settle = (s: Slot): void => {
+    s.settled = true;
+    if (!s.parked || stale(s)) { save(s); return; }
+    slots.delete(keyOf(s));
+    deps.store?.drop(keyOf(s));
+  };
+  const stale = (s: Slot): boolean => slots.get(keyOf(s))?.gen !== s.gen;
+  /** `to` 答 `k` 那件活的那一份 —— 在 `from→to` 的位置上, 或已按件号停放。 */
+  const upstream = (k: { from: string; turn: string }, to: string): Slot | undefined =>
+    [slots.get(keyOfPair(k.from, to)), slots.get(keyOfTurn(k.from, to, k.turn))].find((p) => p?.turn === k.turn);
   const ofJob = (from: string, job: string): Slot[] =>
     [...slots.values()].filter((x) => x.from === from && x.job === job);
   /** P 的答话方在答 P 的那一轮里又派出去、还没落定的活。 */
@@ -261,15 +275,19 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   const siblings = (c: Slot): Slot[] =>
     [...slots.values()].filter((x) => x !== c && x.from === c.from && !!x.k && sameK(x.k, c.k!) && !x.settled && !(x.delivered && x.resolved));
   /** 这份回执送进去之后, 发话方那一轮的终句去哪 (§3.3)。只在投递那一刻算: 兄弟们是
-   *  陆续回来的, 早算一步就会两份都以为自己不是最后一份。 */
+   *  陆续回来的, 早算一步就会两份都以为自己不是最后一份。
+   *  频道只由去向定: 续回进群 (父 k 是人在群里开的那一轮、兄弟都落定了) 才有频道, 其余
+   *  一律 "" —— 回执轮不是谁在群里问的话。那件子活当初 public:true 派的也不例外: 公开的是
+   *  派活那一句和对方的答复, 不是发话方收到回执之后那一轮; 沿用它的频道, 私聊 ask 底下的
+   *  一轮就会因为没有父 k (chain:false)、只是中途回执 (NEED)、或上游那份已被取走而进群。 */
   const routeOf = (s: Slot, final: boolean): { channel: string; k?: ParentK; replyTo?: ParentK; pending?: number; parent?: Slot } => {
     const k = s.k;
-    if (!k || !final) return { channel: s.channel, ...(k ? { k } : {}) };
+    if (!k || !final) return { channel: "", ...(k ? { k } : {}) };
     const pending = siblings(s).length;
     if (pending) return { channel: "", k, pending };
     if (k.kind === "chat") return { channel: k.channel, k, replyTo: k };
-    const p = slots.get(keyOfPair(k.from, s.from));
-    return p && p.turn === k.turn && !p.resolved && !p.claimed ? { channel: "", k, replyTo: k, parent: p } : { channel: s.channel, k };
+    const p = upstream(k, s.from);
+    return p && !p.resolved && !p.claimed ? { channel: "", k, replyTo: k, parent: p } : { channel: "", k };
   };
   /** 续回: 上游那一份改锚到刚送进去的那份回执 (answerOf 按 reply-to 认它), 重新守。
    *  正在守的那个 watcher 自己会发现锚变了; 挂起 (deferred) 的才要重新 arm。 */
@@ -513,25 +531,31 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   };
 
   const register = (tell: Tell, watchIt = true): { at: number; turn: string } => {
-    const k = keyOfPair(tell.from, tell.to);
     const at = tell.at ?? Date.now();
+    const turn = tell.turn ?? newTurn();
+    // 续问一件停放着的: 接替它在停放处的位置, 不碰这一对眼下那一件。
+    const parked = slots.get(keyOfTurn(tell.from, tell.to, turn));
+    const prev = parked ?? slots.get(keyOfPair(tell.from, tell.to));
+    // 挂起等子活的那份被另一件顶下来: 按件号停放, 不作废 (见 Slot.parked)。
+    const park = !parked && !!prev?.deferred && !prev.settled && prev.turn !== turn;
+    if (park) { prev.parked = true; slots.set(keyOf(prev), prev); save(prev); }
     // 顶掉一份还没落定的工单活、自己又没带工单: 继承那张工单 —— 旧那份不会再投了,
-    // 这一句的答案就是那个成员的交代; 不继承它就永远不计 done, 工单齐不了。
-    const prev = slots.get(k);
-    const job = tell.job || (prev?.job && !prev.resolved ? prev.job : "");
+    // 这一句的答案就是那个成员的交代; 不继承它就永远不计 done, 工单齐不了。停放的那份还会投, 不让。
+    const job = tell.job || (!park && prev?.job && !prev.resolved ? prev.job : "");
     const s: Slot = {
       ...tell,
       job,
       at,
-      turn: tell.turn ?? newTurn(),
+      turn,
       legs: tell.legs ?? 1,
       deadlineAt: tell.deadlineAt ?? deadlineOf(at),
-      gen: (slots.get(k)?.gen ?? 0) + 1,
+      gen: (prev?.gen ?? 0) + 1,
       claimed: false,
       delivered: false,
       resolved: false,
+      ...(parked ? { parked: true as const } : {}),
     };
-    slots.set(k, s);
+    slots.set(keyOf(s), s);
     if (watchIt) arm(s);
     else { s.claimed = true; s.resolved = true; s.settled = true; } // 不守 = 这一份没人会投
     save(s);
@@ -542,7 +566,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     register,
     prepare: (from, to, re) => {
       const want = re?.replace(/[`\s]/g, "");
-      const s = want ? slots.get(keyOfPair(from, to)) : undefined;
+      const s = want ? upstream({ from, turn: want }, to) : undefined;
       return s?.turn && s.turn === want
         ? { turn: s.turn, legs: (s.legs ?? 1) + 1, job: s.job, channel: s.channel }
         : { turn: newTurn(), legs: 1, ...(re ? { reUnknown: true as const } : {}) };

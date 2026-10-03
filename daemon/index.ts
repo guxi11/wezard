@@ -727,7 +727,7 @@ const main = async (): Promise<void> => {
       inject: (t, text, owe) =>
         owe.length
           ? m.injectText(t, text, undefined, {
-              from: { kind: "peer", from: owe[0]!.from, ...(owe[0]!.turn ? { turn: owe[0]!.turn } : {}), ...(owe[0]!.asker ? { asker: owe[0]!.asker } : {}) },
+              from: { kind: "peer", from: owe[0]!.from, ...(owe[0]!.turn ? { turn: owe[0]!.turn } : {}), ...(owe[0]!.channel ? { public: true } : {}), ...(owe[0]!.asker ? { asker: owe[0]!.asker } : {}) },
               channel: owe[0]!.channel,
               envelope: owe.map((o) => envelopeFor(o.from, o.channel, o.turn ? { turn: o.turn } : undefined)).join(""),
             })
