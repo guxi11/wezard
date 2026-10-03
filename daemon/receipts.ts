@@ -233,6 +233,9 @@ export interface Receipts {
   states: () => InFlight[];
   /** `from` → `to` 那件还没落定的活: 它的工单、件号、是不是停在 NEED 上。没有 = undefined。 */
   pending: (from: string, to: string) => { job: string; turn: string; need: boolean; deferred?: true } | undefined;
+  /** 守护进程代 `from` 同件号再问 `to` 一句 (闲置追问, 见 idle-nudge.ts): 重新登记这件, 工单 / 频道 / 父 k /
+   *  链头 / 期限都沿用原件 —— 追问不续期。件已落定 / 查不到 = undefined (不问)。注入由调用方做。 */
+  reask: (from: string, to: string, turn: string) => { legs: number; channel: string; asker?: Asker } | undefined;
   /** `target` 被 `by` 收掉或打断: 发往它、还没落定的活都落成 canceled。`by` 自己那份
    *  不投 (它自己知道), 别的发话方各收一份 canceled 回执。必须先于 kill —— pane 一死,
    *  守着的 watcher 会把同一份报成 dead。`only` 收窄到其中几份 (interrupt 只停了它
@@ -561,6 +564,13 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
 
   return {
     register,
+    reask: (from, to, turn) => {
+      const s = upstream({ from, turn }, to);
+      if (!s || s.resolved || s.claimed) return undefined;
+      const legs = (s.legs ?? 1) + 1;
+      register({ from, to, channel: s.channel, job: s.job, turn, legs, ...(s.deadlineAt ? { deadlineAt: s.deadlineAt } : {}), ...(s.k ? { k: s.k } : {}), ...(s.asker ? { asker: s.asker } : {}) });
+      return { legs, channel: s.channel, ...(s.asker ? { asker: s.asker } : {}) };
+    },
     prepare: (from, to, re) => {
       const want = re?.replace(/[`\s]/g, "");
       const s = want ? upstream({ from, turn: want }, to) : undefined;

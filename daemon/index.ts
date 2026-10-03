@@ -88,6 +88,7 @@ import { expandHome } from "../shared/paths.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { createReceipts, deadlineOf, kAttr, kOfAttr, newTurn, type InFlight, type ParentK, type Slot as ReceiptSlot } from "./receipts.js";
 import { renderInFlight } from "../shared/turn-state.js";
+import { startIdleNudge } from "./idle-nudge.js";
 import { renderReminder, type TurnTag } from "../shared/reminder.js";
 import { createHandoffs, handedOff, handingOff, type Owe, type Pending as PendingHandoff } from "./handoff.js";
 import { coldGateOf, decide, rankCandidates, renderCandidates, tierFor, wakeNoteOf, type RouteRow } from "./route.js";
@@ -816,6 +817,28 @@ const main = async (): Promise<void> => {
     };
     // 交接先续做: 它的闸要在回执续守之前立起来, 否则续守的 watcher 会读到换了一半的会话。
     void m.restored.then(() => { handoffs.resume(); receipts.resume(); });
+    // 闲置追问 (见 idle-nudge.ts): 对方持续闲着又没回执 → 代发话方同件号问一句进展, 答复照常回执。
+    // 注入照抄工单打回 (rebound) 那条: 私聊信封挂发话方的名义与件号, 父 k 等由 reask 沿用原件。
+    void m.restored.then(() => startIdleNudge({
+      inflight: () => receipts.states(),
+      idleNow: m.idleNow,
+      handingOff,
+      jobOpen: (id) => jobs.get(id)?.status === "open",
+      policy: () => ({ afterMs: cfg.wrc.mirror.idleNudge.afterMin * 60_000, max: cfg.wrc.mirror.idleNudge.max }),
+      ask: async ({ from, to, turn, text }) => {
+        const x = receipts.reask(from, to, turn);
+        if (!x) return false;
+        ledger.touch(from, turn);
+        return (await m.injectText(to, text, undefined, {
+          from: { kind: "peer", from, turn, ...(x.asker ? { asker: x.asker } : {}) },
+          channel: x.channel,
+          envelope: envelopeFor(from, x.channel, { turn, legs: x.legs, re: true }),
+        })).ok;
+      },
+      nameOf: displayName,
+      store: loadJsonMap<{ asks: number }>(join(cfg.daemon.stateDir, "idle-nudges.json")),
+      log: log.child({ mod: "idle-nudge" }),
+    }));
     /** 入参里的地址: 新字段 `name`, 老 MCP 进程 (正在跑的 wizard) 仍在传 `tag`。 */
     const addrOf = (b: { name?: unknown; tag?: unknown }): string => String(b.name ?? b.tag ?? "");
 
