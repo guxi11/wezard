@@ -1715,11 +1715,11 @@
   // 每种关系一种线色 (CSS 里 li.<kind> / .ek.<kind> 同色), 画在树线、卡片入口的 label 与图例上。
   var KIND = {
     // 生它、归它管的那一位下面挂的是 clone (带上下文) 或 spawn (白板) —— 与调用框下的提示行同一套字。
-    // spawn 不挂徽标: 层级本身已经说明了它归谁管, 线色照旧。clone 徽标点了落到 origin 里的分叉处。
+    // clone 徽标点了落到 origin 里的分叉处。
     clone: { mark: 'clone', tip: 'clone_wizard 生的分身: fork 了上下文, 开局带着那一刻读过的一切; 归生它的那位管 —— 点了看它在哪一处分叉' },
-    spawn: { mark: '', tip: 'spawn_wizard / dispatch 白板生的: 不继承上下文, 只是归生它的那位管 (不带 detached)' },
+    spawn: { mark: 'spawn', tip: 'spawn_wizard / dispatch 白板生的: 不继承上下文, 只是归生它的那位管 (不带 detached)' },
     fork: { mark: '⑂ 上下文', tip: '分身的上下文 fork 自它 —— 生它、归它管的是另一位' },
-    peer: { mark: '对话', tip: 'send_peer 发起的对话' },
+    peer: { mark: '💬', tip: 'send_peer 发起的对话' },
     job: { mark: '工单', tip: '它开的工单里有这位成员' },
     graph: { mark: '流水线', tip: '流水线里上一步喂给下一步' },
   };
@@ -1836,7 +1836,7 @@
     if (!p) return '';
     return '<span class="tlab"' + (p.jobs.length ? ' title="经手的工单: ' + esc(p.jobs.join(' ')) + '"' : '') + '>' +
       // 工单这一种关系由 📋 那一枚说 (可点, 列的就是这几张), 不再另挂「工单 ×N」重复一遍。
-      Object.keys(KIND).filter(function (k) { return p.kinds[k] && KIND[k].mark && !(k === 'job' && p.jobs.length); }).map(function (k) {
+      Object.keys(KIND).filter(function (k) { return p.kinds[k] && !(k === 'job' && p.jobs.length); }).map(function (k) {
         return '<span class="ek ' + k + '"' + (k === 'clone' && p.point ? ' data-cpoint="' + esc(JSON.stringify(p.point)) + '"' : '') + ' title="' + KIND[k].tip + '">' + KIND[k].mark +
           (!LINEAGE[k] ? ' ×' + p.kinds[k] : '') + '</span>';
       }).join('') +
