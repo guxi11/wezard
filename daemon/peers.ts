@@ -81,9 +81,10 @@ const readTailUntil = <T>(
   jsonlPath: string,
   parse: (raw: string) => T,
   enough: (parsed: T) => boolean,
+  max = TAIL_BYTES_MAX,
 ): T => {
   const size = fileSize(jsonlPath);
-  const ceiling = Math.min(size || TAIL_BYTES, TAIL_BYTES_MAX);
+  const ceiling = Math.min(size || TAIL_BYTES, max);
   const walk = (win: number): T => {
     const parsed = parse(readTailBytes(jsonlPath, win));
     return enough(parsed) || win >= ceiling ? parsed : walk(Math.min(win * 4, ceiling));
@@ -153,6 +154,16 @@ export const talkTurns = (jsonlPath: string, n: number, pingSigs: readonly strin
   const clean = (ts: Turn[]): Turn[] => withoutKeepalive(ts, pingSigs);
   return clean(readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, keepLines, marks), (ts) => clean(ts).length >= n)).slice(-n);
 };
+
+/** 从 `sinceMs` 起的全部来回 (带标记): 往回读到越过它的第一行为止, **不受 TAIL_BYTES_MAX
+ *  限制**。按条数读尾巴的 talkTurns 管不了一轮很长的情形: 一轮里的大段工具输出 (读文件、
+ *  跑命令) 能把开这一轮的那句推到 2MB 之外 —— 回执就再也定位不到问话, 对方答完了也只能
+ *  报 silent。问话一定晚于发话时刻, 所以读到发话时刻之前就够了, 再大的文件也只读这一段。 */
+export const turnsSince = (jsonlPath: string, sinceMs: number, pingSigs: readonly string[] = []): Turn[] =>
+  withoutKeepalive(
+    readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, true, true), (ts) => ts.some((t) => !!t.ms && t.ms < sinceMs), Infinity),
+    pingSigs,
+  );
 
 /** 一个会话的来回, 每个来回 = 一句问话 + 它之后的全部回答 (途中的话在前, 终句在
  *  最后), 旧的在前。读多深由时间窗定, 调用方再按时刻与条数裁:
@@ -475,6 +486,10 @@ const ASK_SLACK_MS = 60_000;
  *  输入框里没读进) 返回 `undefined`; 找到了问话但它后面还没有回答返回 "" —— 两种都要
  *  接着等, 绝不能退回按时刻取把上一件事的结论当成这一次的回执 (receipts 只用前者分辨
  *  「它在忙前面的轮」与「读进了却没答」)。 */
+/** 找问话的那一段: 有发话时刻就读到它之前 (问话可以离尾巴很远), 没有 (老调用) 退回最近 80 条。 */
+const askWindow = (jsonlPath: string, sinceMs: number, pingSigs: readonly string[]): Turn[] =>
+  sinceMs > 0 ? turnsSince(jsonlPath, sinceMs - ASK_SLACK_MS, pingSigs) : talkTurns(jsonlPath, 80, pingSigs, true, true);
+
 export const replyToPeer = (
   jsonlPath: string,
   fromName: string,
@@ -482,7 +497,7 @@ export const replyToPeer = (
   pingSigs: readonly string[] = [],
   turn?: string,
 ): PeerReply | undefined => {
-  const r = answerOf(talkTurns(jsonlPath, 80, pingSigs, true, true), fromName, sinceMs, turn);
+  const r = answerOf(askWindow(jsonlPath, sinceMs, pingSigs), fromName, sinceMs, turn);
   return r && { text: r.text, ...(r.error ? { error: true } : {}) };
 };
 
@@ -503,7 +518,7 @@ export const replyClosedBefore = (
   pingSigs: readonly string[] = [],
   turn?: string,
 ): string | undefined => {
-  const r = answerOf(talkTurns(jsonlPath, 80, pingSigs, true, true), fromName, sinceMs, turn);
+  const r = answerOf(askWindow(jsonlPath, sinceMs, pingSigs), fromName, sinceMs, turn);
   return r && (r.closedAt !== undefined && r.closedAt < untilMs && !r.error ? r.text : "");
 };
 
@@ -534,6 +549,14 @@ const resumesAt = (ts: readonly MarkedTurn[], i: number): boolean =>
  *  续跑都不算 —— 它们不起新的一轮, 这一轮是谁发起的要看再往前那一句。 */
 export const openingOf = <T extends MarkedTurn>(ts: readonly T[]): T | undefined =>
   ts.filter((t, i) => t.role === "user" && !t.queued && !t.notice && !resumesAt(ts, i)).at(-1);
+
+/** 开最近这一轮的那句 user 行, 往回读到有为止 (不受 TAIL_BYTES_MAX 限制) —— 一轮再长,
+ *  「这一轮是谁发起的」也要认得出 (父 k、链头、打断会不会误伤别人的活都靠它)。 */
+export const openingTurn = (jsonlPath: string, pingSigs: readonly string[] = []): Turn | undefined =>
+  openingOf(withoutKeepalive(
+    readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, false, true), (ts) => !!openingOf(withoutKeepalive(ts, pingSigs)), Infinity),
+    pingSigs,
+  ));
 const answerOf = (
   ts: readonly { role: string; text: string; ms?: number; mid?: true; apiError?: true; notice?: true; queued?: true; env?: AskEnv }[],
   fromName: string,

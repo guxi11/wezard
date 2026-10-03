@@ -13,7 +13,7 @@
 // 根的开场白是发起者一句 receipt:false 的私聊 —— 它这一轮没有父 k, 测试活的回执只回到根,
 // 不会沿发起者手上那件活往上冒。工单用例会在根的 home 聊天里各出一对开 / 收工气泡。
 import { execFileSync } from "node:child_process";
-import { readFileSync, rmSync } from "node:fs";
+import { appendFileSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -176,6 +176,25 @@ const cases = {
     return {
       pass: text.includes(`wait-${n}`) && got.length === (w.delivered ? 1 : 0),
       why: `wait 取到=${text.includes(`wait-${n}`)} delivered=${!!w.delivered} 根收到 ${got.length} 份`,
+    };
+  } },
+
+  // 长轮: 问话之后那一轮的 transcript 涨过 2MB (大段工具输出), 问话被推出尾巴的读窗 —— 答完了
+  // 也要定位得到, 不能报 silent。对方睡着时往它的 jsonl 尾巴追加 2.5MB 解析器不认的填充行来模拟。
+  "long-turn": { names: ["rr-l"], run: async () => {
+    const n = nonce();
+    await spawn("rr-l");
+    await tell("rr-l", `${SLEEP(40)}, 然后回复一行: RESULT: long-${n}`);
+    await sleep(12_000);
+    const p = await jsonlOf(kids.get("rr-l"));
+    if (!p) return { pass: false, why: "找不到 rr-l 的 transcript" };
+    const pad = "x".repeat(50 * 1024);
+    for (let i = 0; i < 50; i++) appendFileSync(p, JSON.stringify({ type: "rr-filler", timestamp: new Date().toISOString(), pad }) + "\n");
+    const s = await settledSlot("rr-l", 4 * 60_000);
+    const got = await receiptsIn(root.target, "rr-l");
+    return {
+      pass: s?.outcome?.status === "done" && s.outcome.body.includes(`long-${n}`) && got.length === 1,
+      why: `slot=${s?.outcome?.status ?? "未落定"} 含结论=${!!s?.outcome?.body.includes(`long-${n}`)} 根收到 ${got.length} 份`,
     };
   } },
 

@@ -79,7 +79,7 @@ import {
 import { bindNoticeBox, createNoticeBox, chatAudience, type Via } from "./notices.js";
 import { createLedger, digest, pendingGc, renderDigest, renderTable, type Item as PendingItem, type LiveOf, type Mark } from "./pending-items.js";
 import { loadJobStore, jobEpisode, rejectReason, ACCEPTS, JOB_MEMBER_MAX, type Accept } from "./jobs.js";
-import { cacheTtlSec, clipMiddle, contextFiles, firstStamp, parseClosing, lastContextTokens, lastExchange, lastModel, openingOf, replyClosedBefore, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
+import { cacheTtlSec, clipMiddle, contextFiles, firstStamp, parseClosing, lastContextTokens, lastExchange, lastModel, openingTurn, replyClosedBefore, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { keepalivePingSigs } from "../shared/keepalive.js";
 import { expandHome } from "../shared/paths.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
@@ -757,7 +757,7 @@ const main = async (): Promise<void> => {
     /** `target` 手上这一轮若是某个 wizard 派来的活: 发话方的称呼 (`.x`) 与件号。人 / 定时 / 回执轮 = undefined。 */
     const openingAsk = (target: string): { from: string; turn?: string } | undefined => {
       const p = m.sessionInfo(target)?.jsonlPath;
-      const env = p ? openingOf(talkTurns(expandHome(p), 80, pingSigs, false, true))?.env : undefined;
+      const env = p ? openingTurn(expandHome(p), pingSigs)?.env : undefined;
       return env?.kind === "peer" && !env.receipt ? { from: env.from, ...(env.turn ? { turn: env.turn } : {}) } : undefined;
     };
     const currentAsk = (target: string): ((x: { from: string; turn: string }) => boolean) => {
@@ -770,14 +770,14 @@ const main = async (): Promise<void> => {
     const othersTurn = async (target: string, self: string): Promise<{ from: string; turn?: string } | undefined> => {
       if (await m.idleNow(target)) return undefined;
       const p = m.sessionInfo(target)?.jsonlPath;
-      const env = p ? openingOf(talkTurns(expandHome(p), 80, pingSigs, false, true))?.env : undefined;
+      const env = p ? openingTurn(expandHome(p), pingSigs)?.env : undefined;
       if (env?.receipt) return undefined;
       if (env?.kind === "peer") return env.from === displayName(self) ? undefined : { from: env.from, ...(env.turn ? { turn: env.turn } : {}) };
       return { from: env?.kind === "task" ? env.from : env?.from ? `人 (${env.from})` : "人" };
     };
     const openingOfSelf = (self: string) => {
       const p = m.sessionInfo(self)?.jsonlPath;
-      return p ? openingOf(talkTurns(expandHome(p), 80, pingSigs, false, true)) : undefined;
+      return p ? openingTurn(expandHome(p), pingSigs) : undefined;
     };
     const parentKOf = (self: string): ParentK | undefined => {
       const opening = openingOfSelf(self);

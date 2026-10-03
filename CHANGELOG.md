@@ -17,6 +17,9 @@
 - `tell_peer` 冷门控: 派新活 (`kind:"task"`、不带 `re`、`priority` 不是 `now`) 给缓存已冷 (超过 TTL 没动) 且 ctx ≥100k 的 wizard 时先不投递, 409 退回一行「.x 冷 · ctx Nk · 唤醒约等于白板 spawn 的 M 倍; 真依赖它的上下文就带 `force:true` 重发, 否则白板 spawn」(`gated:"cold"`)。冷热与倍数与 `route_candidates` 同一口径 (`wakeCostOf`)。MCP 新增 `force` 且一律显式带上; 请求里没有这个键的老 MCP 进程, 同一对 10 分钟内原样再发一次即视为 force。宪章里「点名 / 职责对口就直接判断」的捷径改为: 那只说明相关, 成本仍看 ctx 与冷热。
 - handoff 时机提前: 交接不是压缩, 判断线从窗口七成改为 `min(200k, 七成)` (`handoffAt`, `wizard_whoami` 的 `handoffSuggested` 随之), 宪章「自我管理」改写为过 200k 就判断 —— 手上这摊告一段落、或往后的活不再依赖前面的材料, 就交接。越线后下一条注入的消息捎一次提醒 (复用 notices 的 probe, 每段会话一次)。
 
+### Fixed
+- 回执在长轮上误判 `silent`: 答话方那一轮的工具输出 (读大文件、跑命令) 让 transcript 涨过 2MB 时, 问话被推出尾巴的读窗 (`TAIL_BYTES_MAX`), `replyToPeer` 一直定位不到它 —— 对方停下之后连着三个 20s 的 ramp 都「静着、问话不在」, 扑空三次就报 `silent`, 真结论没送回去 (.routerx 答 .wezard 的 t289268, 问话离尾巴 2.2MB)。找问话改为按发话时刻往回读 (`turnsSince`: 读到越过发话时刻的那一行为止, 不设上限), 交接时的 `replyClosedBefore` 同理; 「这一轮是谁开的」(`openingTurn`: 父 k、链头、打断是否误伤) 也改为往回读到开轮那句为止, 不再只看最近 80 条。回归脚本加 `long-turn` 用例 (对方睡着时往它的 jsonl 追加 2.5MB 填充行), 修前 FAIL (silent)、修后 PASS。
+
 ## [2.3.0] - 2026-10-03
 
 ### Added
