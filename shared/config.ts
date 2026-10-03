@@ -89,6 +89,16 @@ const Mirror = z.object({
     })
     .default({})
     .describe("派活后对方闲置无回执时的自动追问")),
+  // 没开顶层模式的群里 wizard 之间当着人说话多了 → 给那个群的管家挂一条提醒, 让它问人要不要开
+  // (见 daemon/top-only-nudge.ts)。每次计数现读, 改完即用。
+  topOnlyNudge: hot(z
+    .object({
+      windowMin: z.number().nonnegative().default(30).describe("统计窗口 (分钟); 0 = 关闭"),
+      threshold: z.number().int().nonnegative().default(6).describe("窗口内 wizard 间公开往来 (公开的 tell_peer / dispatch, 一次 = 一条派活气泡 + 它的回复进群) 达到几次就提醒; 0 = 关闭"),
+      cooldownH: z.number().nonnegative().default(24).describe("同一个群提醒过后多少小时内不再提 (人没开也不反复问)"),
+    })
+    .default({})
+    .describe("没开顶层模式的群里 wizard 间公开往来过多时, 提醒该群管家问人要不要开顶层模式 (chatPolicy.<chat>.topOnly)")),
   // liveStream 仍活时不受影响——直接走 typewriter。
   standaloneDebounceMs: hot(z.number().int().nonnegative().default(30000).describe("非流式推送的防抖聚合窗口 (ms), 窗口内多条合并; 0 = 关闭")),
   // 窗口内 item 累积:

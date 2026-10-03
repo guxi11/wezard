@@ -15,6 +15,7 @@
 import { randomUUID } from "node:crypto";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { normalizeTag, stripSigil, tagOfKey, uniqueTag } from "../shared/session-label.js";
+import { policyKeyOf } from "./top-only-nudge.js";
 
 export interface WizardRecord {
   /** 会话 key, 即身份本身: `chat:xxx` 或 `chat:xxx#tag`。 */
@@ -432,6 +433,15 @@ const renderTopOnly = (): string[] => [
   ]),
 ];
 
+/** 管家的顶层模式开关 (开没开都给一行): 人问起、或守护进程提醒群里 wizard 间公开往来太多时, 管家得知道它是什么、怎么开关。
+ *  开着时规矩在「本群开着顶层模式」那一节, 这里只给关法。 */
+const topOnlyLine = (chat: string, on: boolean): string => {
+  const set = (v: boolean): string => `\`config_set({path:"chatPolicy.${chat}.topOnly", value:${v}})\``;
+  return on
+    ? `**顶层模式 (本群: 开)**, 规矩见下文那一节; 人要关 → ${set(false)}`
+    : `**顶层模式 (本群: 关)**: 开了之后人只和顶层 wizard (你 / 人 \`.name\` 点名的) 打交道, wizard 之间一律私聊、过程只在 rolepage, 群里不再有 wizard 互相派活的气泡。人问起或想开 → ${set(true)} (热生效)`;
+};
+
 /** 开局宪章 —— spawn 时作为 `--append-system-prompt` 压进进程。
  *  它回答四件事, 每一件都是"会话自己没法从对话里知道"的:
  *    我是谁 / 我住在哪、周围有谁 / 我有哪些能力 / 公开频道与私聊该怎么说话。 */
@@ -493,6 +503,7 @@ export const renderCharter = (a: CharterArgs): string => {
         a.topOnly
           ? "**人只看得见你**: 转交那一轮回一句 `已转给 .它` 加它在办什么; 回执进来那一轮就是给人的交代 —— 用自己的话讲结论、你据此做的决定、要人拍板的, 不贴原话、不复述过程"
           : "**人看得见群里的消息**: 公开派的活气泡和回复都已在群里, 转交那一轮只回 `已转给 .它`; 回执进来不转述群里说过的, 只说人还不知道的 (新决定、要人拍板的), 没有就一句话收住; lead 的活私聊, 结论你自己讲",
+        topOnlyLine(policyKeyOf(a.chat, a.principal), a.topOnly),
       ]),
       "",
     );

@@ -38,6 +38,18 @@ const putFrom = (obj: Obj, path: readonly string[], next: unknown): void => {
 let defaults: Obj | undefined;
 const defaultsOf = (): Obj => (defaults ??= ConfigSchema.parse({ bot: { botId: "-", secret: "-" } }) as Obj);
 
+/** `path` 处的默认值。记录里的项 (`chatPolicy.<chat>.topOnly`) 不在空配置里: 取记录值类型对 `{}` 的解析 ——
+ *  没写过的聊天读到的正是它 (chatPolicyOf 就这么读)。 */
+const defaultAt = (path: readonly string[]): unknown => {
+  const hit = getIn(defaultsOf(), path);
+  if (hit !== undefined) return hit;
+  const i = path.findIndex((_, j) => resolve(ConfigSchema, path.slice(0, j))?.core instanceof z.ZodRecord);
+  if (i < 0) return undefined;
+  const rec = resolve(ConfigSchema, path.slice(0, i))!.core as z.ZodRecord;
+  const v = rec._def.valueType.safeParse({});
+  return v.success ? getIn(v.data, path.slice(i + 1)) : undefined;
+};
+
 const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
 const show = (v: unknown): string => (v === undefined ? "—" : JSON.stringify(v));
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
@@ -62,11 +74,14 @@ const LEGEND = "✋ = 改动要人在卡片上点确认 · ↻ = 改完要 reloa
 const row = (cfg: Config, r: Resolved): string => {
   const key = r.path[r.path.length - 1]!;
   const cur = getIn(cfg, r.path);
-  const def = getIn(defaultsOf(), r.path);
+  const def = defaultAt(r.path);
   const many = isBranch(r.core) || r.core instanceof z.ZodRecord;
-  const star = !many && !same(cur, def) ? "*" : " ";
+  // 记录里没写的项 (cur 为空) 读到的就是默认, 不算改过。
+  const star = !many && cur !== undefined && !same(cur, def) ? "*" : " ";
   const size = isBranch(r.core) ? childKeys(r.core).length : isObj(cur) ? Object.keys(cur).length : 0;
-  const val = many ? `${size} 项` : `= ${clip(show(cur), 80)}${star === "*" ? ` (默认 ${clip(show(def), 40)})` : ""}`;
+  const val = many ? `${size} 项`
+    : cur === undefined && def !== undefined ? `= — (没写, 按默认 ${clip(show(def), 40)})`
+    : `= ${clip(show(cur), 80)}${star === "*" ? ` (默认 ${clip(show(def), 40)})` : ""}`;
   const mark = isBranch(r.core) ? (r.gate === "card" ? "✋" : "") : flags(r);
   return `${star} ${[`${key}  ${typeOf(r.core)} ${val}`, mark, r.desc].filter(Boolean).join("  ")}`;
 };
@@ -76,7 +91,7 @@ const leaf = (cfg: Config, r: Resolved): string => [
   `  说明: ${r.desc || "—"}`,
   `  类型: ${typeOf(r.core)}${r.optional ? " (可不设)" : ""}`,
   `  当前: ${show(getIn(cfg, r.path))}`,
-  `  默认: ${show(getIn(defaultsOf(), r.path))}`,
+  `  默认: ${show(defaultAt(r.path))}`,
   `  生效: ${r.apply === "hot" ? "热生效, 改完即用" : "需 reload 才生效 (守护进程启动时读一次)"}`,
   `  权限: ${GATE_WORD[writeGate(r)]}`,
 ].join("\n");

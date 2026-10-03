@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### Added
+- 顶层模式门控 (`daemon/top-only-nudge.ts`, 配置 `wrc.mirror.topOnlyNudge` = `{windowMin: 30, threshold: 6, cooldownH: 24}`, 窗口或阈值为 0 = 关, 热生效): 没开顶层模式的群里, 每条 wizard 间公开气泡 (公开的 `tell_peer` / `dispatch`, 一次 = 派活气泡 + 它的回复进群) 计一次, 窗口内达到阈值就往该群管家 (群默认会话) 的信箱挂一行 —— 最近 N 分钟有 M 次 wizard 间公开往来, 人下次说话时顺带问要不要开, 附 `config_set` 的写法。随下一次注入到, 不另起一轮、不发气泡。同群提醒过后 `cooldownH` 小时内不再提, 计数与冷却落盘 (`~/.wezard/top-only-nudge.json`) 扛 reload; 已开的群不计。
+
+### Changed
+- 管家宪章不论本群开没开顶层模式都带一行「顶层模式」: 关着时一句话讲它是什么、本群关、开法 `config_set({path:"chatPolicy.<聊天名>.topOnly", value:true})`; 开着时只给关法 (规矩仍在「本群开着顶层模式」一节)。此前没开的群的管家不知道这个概念。
+- `config_get` 读 `chatPolicy.<聊天名>…` 时先换成它指向的 principal (同 `config_set`), 不再一律显示 `—`; 记录里没写的项显示 `— (没写, 按默认 X)`, 默认值取记录值类型的默认 (原先显示 `—` 且误标 `*`); `chatPolicy` 下附依据: 查整张表列写过策略的聊天 (名字 = principal · 顶层模式开/关) 与没写的个数, 查某个聊天只列它。
+
 ### Fixed
 - AskUserQuestion 在企业微信作答后, CLI 不再显示红色 `PreToolUse:AskUserQuestion hook error: wezard: User answered "…" via WeCom`: hook 改回 `permissionDecision: "allow"` + `updatedInput` (原入参加上 `answers`, 键为题目原文, 多选按 Claude Code 的编码以 `, ` 连接、含 `, ` 或 `"` 的 label 用 JSON 字符串包起来), Claude Code 认它为已作答, 不弹本地面板, 工具照常落地, 模型拿到正常的 tool_result。daemon 回包新增 `updated_input`, hook 用 jq 拼进 `hookSpecificOutput`。「先聊聊」仍是 deny, 「去 CLI 处理」/ 空选 / 超时 / 断线仍是 ask; codebuddy 的镜像流 (`runMirrorAskqFlow`, 驱动失败后迟到的 hook) 还是 deny + reason, 因为没核实它认不认 `updatedInput`。
 
