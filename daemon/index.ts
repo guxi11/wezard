@@ -2585,8 +2585,11 @@ const main = async (): Promise<void> => {
       const pl = planSet(cfg, sourcePath, ask);
       if (!pl.ok) { json(res, 400, pl); return; }
       // 群聊级策略的键要认得出是哪个聊天: 写错的键策略静默失效, 比报错更难查。
-      const chatKey = pl.path[0] === "chatPolicy" ? pl.path[1] : undefined;
-      if (chatKey && pl.after !== undefined && !chatBaseOf(cfg, chatKey)) { json(res, 400, { ok: false, reason: `认不出聊天 \`${chatKey}\`: 键写聊天名 (/chats) 或 base principal (\`chat:wr…\` / \`user:…\`)` }); return; }
+      // 只查新出现的键: 聊天改名后旧键认不出了, 也得还能改它 (或 unset)。整张表一起写的, 逐键查。
+      const newKeys = pl.path[0] !== "chatPolicy" || pl.after === undefined ? []
+        : (pl.path.length === 1 ? Object.keys(pl.after as Record<string, unknown>) : [pl.path[1]!]).filter((k) => !(k in cfg.chatPolicy));
+      const unknown = newKeys.filter((k) => !chatBaseOf(cfg, k));
+      if (unknown.length) { json(res, 400, { ok: false, reason: `认不出聊天 ${unknown.map((k) => `\`${k}\``).join(", ")}: 键写聊天名 (/chats) 或 base principal (\`chat:wr…\` / \`user:…\`)` }); return; }
       if (ask.dryRun || !pl.changed) { reply(pl, `${ask.dryRun ? "dryRun, 没写:\n" : ""}${renderPlan(pl)}`); return; }
 
       // 落盘时重算一遍: 等卡期间文件可能被别人改过, 按那一刻的文件打补丁、再校验。
