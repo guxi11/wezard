@@ -395,6 +395,7 @@ const TELL_SCHEMA = {
     .optional()
     .describe("true = 在公开频道 (你这一轮所在的群) 里说: 群里出 `.你 → .它` 气泡, 它的回复也进群 (同时照样回执给你)。默认 false = 私聊, 只记在 rolepage。需要人知道 / 该当着人讨论才用 true。带 `job` 时不起作用 —— 工单里的往来一律私聊。"),
   job: z.string().optional().describe("这次派活归到某个工单名下 (open_job 给的 id)。**fan-out 一定要带上它**: 回执里会带 `还差几份 / 全部到齐`, 「齐了吗」由守护进程数给你, 不用你自己在上下文里记。带了它就一律私聊, 往来与回执都不进群。"),
+  role: z.enum(["exec", "reviewer", "expert"]).optional().describe("它在这张工单里的角色 (只在带 `job` 时有意义, 记进账本供工单页与名册显示): `exec` 执行 (默认) · `reviewer` 白板评审 · `expert` 借来答问的专家。"),
   receipt: z
     .boolean()
     .optional()
@@ -420,13 +421,14 @@ const TELL_DESC =
   "**说完就返回**: 对方干完那一轮, 它的最后一条消息作为**新的一轮**自动送到你这里 (回执, 带信封说明是谁、哪场对话、工单还差几份); 你正忙时回执排队等你说完。\n" +
   "默认私聊, 只记在双方 rolepage; 守护进程给 `text` 挂信封 (发话人、私聊/公开、`RESULT: …` 收口)。拒绝对自己发送。";
 
-const tellBody = (a: { name: string; text: string; kind?: string; priority?: string; waitSec?: number; job?: string; public?: boolean; receipt?: boolean; re?: string; deadline?: number; chain?: boolean; force?: boolean }) => ({
+const tellBody = (a: { name: string; text: string; kind?: string; priority?: string; waitSec?: number; job?: string; role?: string; public?: boolean; receipt?: boolean; re?: string; deadline?: number; chain?: boolean; force?: boolean }) => ({
   name: a.name,
   text: a.text,
   ...(a.kind ? { kind: a.kind } : {}),
   ...(a.priority ? { priority: a.priority } : {}),
   ...(a.waitSec ? { waitSec: a.waitSec } : {}),
   ...(a.job ? { job: a.job } : {}),
+  ...(a.role ? { role: a.role } : {}),
   ...(a.public ? { public: true } : {}),
   ...(a.receipt === false ? { receipt: false } : {}),
   ...(a.re ? { re: a.re } : {}),
@@ -795,7 +797,8 @@ server.registerTool(
       to: z.string().optional().describe("推翻默认: 直接转给这个已有 wizard (名字)。"),
       spawn: z.boolean().optional().describe("推翻默认: 不看候选, 一定白板 spawn。"),
       force: z.boolean().optional().describe("越过冷门控: 缓存冷且 ctx ≥100k 的候选默认不转; 确认这件活真依赖它那段上下文才给 true。"),
-      lead: z.boolean().optional().describe("复杂活交给一个 lead 组队 (见描述)。"),
+      lead: z.boolean().optional().describe("复杂活交给一个 lead 组队 (见描述)。**只有它开需求根单** (回包里的 `job`), 普通小活不开单; 根单在 lead 交付后仍开着, 等人验收: 人认可 → `close_job(job)` 归档并回收 lead, 人说不对 → `tell_peer({re})` 给 lead 返工。对人别提单号。"),
+      criteria: z.string().optional().describe("验收标准 (`lead:true` 时记进根单): 做成什么样算交付。你猜的就在回复里向人复述一句再派。"),
       public: z.boolean().optional().describe("默认 true (气泡与回复进群); false = 私聊, 只记 rolepage。"),
       deadline: z.number().optional().describe("同 tell_peer 的 deadline (秒)。"),
       dryRun: z.boolean().optional().describe("只要默认决定与理由, 不执行。"),
@@ -842,6 +845,7 @@ const offspringShape = {
     .string()
     .optional()
     .describe("归到某个工单名下 (open_job 给的 id)。过程在各自的 rolepage 与工单页, 不进群; close_job 会把它们整批回收掉。"),
+  role: z.enum(["exec", "reviewer", "expert"]).optional().describe("它在这张工单里的角色 (只在带 `job` 时有意义, 记进账本供工单页与名册显示): `exec` 执行 (默认) · `reviewer` 白板评审 · `expert` 借来答问的专家。"),
   chain: z.boolean().optional().describe("同 tell_peer 的 `chain`: 带了 task 而这件活与你此刻在答的上游那件无关 (旁支、测试) 时给 false, 它的回执就不挂住你给上游的交代。"),
   keepalive: z
     .boolean()
@@ -849,7 +853,7 @@ const offspringShape = {
     .describe("要不要被 keepalive 心跳保温 (空闲时定期 ping 一下防 prompt cache 过期)。false = 永远不保温, 省下那份 ping 的钱 —— 适合跑腿一次就收工的; true = 明确要保温 —— 适合会长期挂着、随时可能被叫醒接手的。省略则按 daemon 配置的默认值。"),
 };
 
-type Offspring = { lead?: boolean; description: string; name?: string; task?: string; from?: string; detached?: boolean; cwd?: string; chat?: string; cli?: string; model?: string; effort?: string; tier?: string; job?: string; keepalive?: boolean; chain?: boolean };
+type Offspring = { lead?: boolean; description: string; name?: string; task?: string; from?: string; detached?: boolean; cwd?: string; chat?: string; cli?: string; model?: string; effort?: string; tier?: string; job?: string; role?: string; keepalive?: boolean; chain?: boolean };
 
 const bear = (tool: string, inherit: boolean) => async (a: Offspring) =>
   unwrap(tool, await daemonPost("/wizard/clone", {
@@ -860,6 +864,7 @@ const bear = (tool: string, inherit: boolean) => async (a: Offspring) =>
     ...(a.from ? { from: a.from } : {}),
     ...(a.detached ? { detached: true } : {}),
     ...(a.job ? { job: a.job } : {}),
+    ...(a.role ? { role: a.role } : {}),
     ...(a.cwd ? { cwd: a.cwd } : {}),
     ...(a.chat ? { chat: a.chat } : {}),
     ...(a.cli ? { cli: a.cli } : {}),
@@ -927,10 +932,12 @@ server.registerTool(
       expect: z.number().optional().describe("这批一共要几份回执。分身是陆续派的, 给了它「全部到齐」就不会在派齐之前提前报。"),
       maxTurns: z.number().optional().describe("派活次数的预算: 带这张工单的每次 tell_peer (含 re 续问、答 NEED) 与带 task 的 spawn/clone 各记一次, 用完再派会被拒 —— 防反复追问兜圈。守护进程按 `accept` 代你打回的那一次不算。省略 = 不限。"),
       accept: z.enum(["result", "artifact", "none"]).optional().describe("成员交差的验收: `result` (默认) 要有非空 RESULT; `artifact` 还要列出 ARTIFACT 交付物; `none` 不验。不合格的自动打回一次。"),
+      parent: z.string().optional().describe("上级工单。省略 = 自动取你作为成员领活的那张最近的开着的单 (被 dispatch 派来当 lead 的, 子单自动挂在根单下); 显式传的要求你是它的成员或开单者。工单树最深 3 层、每张单直接成员 ≤5 个: 超了就把子活交给现有成员, 让它开子单。"),
+      criteria: z.string().optional().describe("这张单的验收标准 (做成什么样算数), 记进账本。"),
     },
   },
-  async ({ title, plan, expect, maxTurns, accept }) =>
-    unwrap("open_job", await daemonPost("/jobs/open", { title, ...(plan ? { plan } : {}), ...(expect ? { expect } : {}), ...(maxTurns ? { maxTurns } : {}), ...(accept ? { accept } : {}) })),
+  async ({ title, plan, expect, maxTurns, accept, parent, criteria }) =>
+    unwrap("open_job", await daemonPost("/jobs/open", { title, ...(plan ? { plan } : {}), ...(expect ? { expect } : {}), ...(maxTurns ? { maxTurns } : {}), ...(accept ? { accept } : {}), ...(parent ? { parent } : {}), ...(criteria ? { criteria } : {}) })),
 );
 
 server.registerTool(
@@ -955,7 +962,7 @@ server.registerTool(
   {
     title: "Open jobs in this chat",
     description:
-      "这个聊天里还开着的工单: id、标题、谁开的、成员和各自那段活。用来回答「那批分身在干什么」「上次那个活收了没」, 以及在继续派活前拿回工单 id。",
+      "这个聊天里还开着的工单, 按树排 (根在前, 子单跟在父后; `depth` / `parent`): id、标题、现算阶段 `stage` (plan / build / review / clarify / deliver / closed)、验收标准、谁开的、成员 (含角色 `role`) 和各自那段活。用来回答「那批分身在干什么」「上次那个活收了没」, 以及在继续派活前拿回工单 id。",
     inputSchema: {},
   },
   async () => unwrap("list_jobs", await daemonPost("/jobs/list", {})),

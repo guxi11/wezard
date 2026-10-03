@@ -18,7 +18,8 @@
 // rolepage 的工单页读。群里只有发起者自己那一轮的最终回复, 用它自己的话收口。
 import { randomUUID } from "node:crypto";
 import { loadJsonMap } from "../shared/json-map-store.js";
-import type { Terminal } from "../shared/turn-state.js";
+import type { Terminal, TurnState } from "../shared/turn-state.js";
+import type { JobStage, MemberRole } from "../shared/world.js";
 import type { Closing } from "./peers.js";
 import type { JobEpisode } from "./wizard-memory.js";
 
@@ -47,7 +48,13 @@ export interface JobMember {
   /** 这一份落定了没有、落成什么。「齐了吗」只数它: 回执登记按发话方 → 答话方一对一份,
    *  会被同一对的后一句顶掉, 账本不会。need / error 是中途的, 不进账。 */
   outcome?: Terminal;
+  /** 定论落下的时刻 (根单的「交付于」从 lead 的它读)。 */
+  settledAt?: number;
   artifacts?: Artifact[];
+  /** 它在这张单里是什么 (缺省 exec)。 */
+  role?: MemberRole;
+  /** clone 时材料来自谁 (target key): lead 要再派一段同材料的活, 账本直接告诉它该从谁 clone。 */
+  forkOf?: string;
 }
 
 export interface JobRecord {
@@ -68,6 +75,14 @@ export interface JobRecord {
   maxTurns?: number;
   /** 已经派了几次。 */
   turns?: number;
+  /** 上级工单 (金字塔: 工单树); 缺省 = 树根。 */
+  parent?: string;
+  /** `req` = 需求根单 (管家派 lead 时开): 交付后不自动归档, 等人验收。 */
+  kind?: "req";
+  /** 验收标准。 */
+  criteria?: string;
+  /** 需求原话与它来自哪个群 (只根单有)。 */
+  origin?: { text: string; chat: string };
   members: JobMember[];
   status: "open" | "closed";
   openedAt: number;
@@ -75,8 +90,13 @@ export interface JobRecord {
   summary?: string;
 }
 
+export interface JobOpenOpts {
+  plan?: string; expect?: number; maxTurns?: number; accept?: Accept;
+  parent?: string; kind?: "req"; criteria?: string; origin?: { text: string; chat: string };
+}
+
 export interface JobStore {
-  open: (base: string, owner: string, title: string, opts?: { plan?: string; expect?: number; maxTurns?: number; accept?: Accept }) => JobRecord;
+  open: (base: string, owner: string, title: string, opts?: JobOpenOpts) => JobRecord;
   /** 记一次派活; 返回记完之后的用量。 */
   spend: (id: string) => { turns: number; maxTurns?: number } | undefined;
   get: (id: string) => JobRecord | undefined;
@@ -96,9 +116,11 @@ export interface JobStore {
   all: () => JobRecord[];
 }
 
-/** 一个工单最多带这么多成员 —— 不是能力上限, 是"忘了收"的刹车: 每个成员都是一个
- *  tmux pane 加一份上下文, 而 fd 是有限的 (见 launchd plist 的 NumberOfFiles)。 */
-export const JOB_MEMBER_MAX = 12;
+/** 一个工单最多带这么多直接成员 —— 管辖幅度: 超了就该长一层子 lead, 不是再塞人。
+ *  (同时也是 "忘了收" 的刹车: 每个成员是一个 tmux pane 加一份上下文。) */
+export const JOB_MEMBER_MAX = 5;
+/** 工单树深度上限: 1 = 根单, 2 = lead 的子单, 3 = 子 lead 的子单。 */
+export const JOB_DEPTH_MAX = 3;
 const KEEP_CLOSED_MS = 24 * 60 * 60 * 1000;
 
 const newId = (): string => `J${randomUUID().slice(0, 6)}`;
@@ -107,17 +129,88 @@ const newId = (): string => `J${randomUUID().slice(0, 6)}`;
  *  账本是为了收尾, 不是为了存档。 */
 const dropStale = (map: Record<string, JobRecord>): Record<string, JobRecord> => {
   const cutoff = Date.now() - KEEP_CLOSED_MS;
+  // 祖先里还有开着的 (交付等人验收可以等好几天) → 已收工的子单留着, 免得面包屑断。
+  const rootOpen = (j: JobRecord): boolean => ancestorsOf((id) => map[id], j).some((a) => a.status === "open");
   return Object.fromEntries(
-    Object.entries(map).filter(([, j]) => j.status === "open" || (j.closedAt ?? 0) > cutoff),
+    Object.entries(map).filter(([, j]) => j.status === "open" || (j.closedAt ?? 0) > cutoff || rootOpen(j)),
   );
 };
+
+
+// ── 工单树 (纯函数) ─────────────────────────────────────────────────
+
+type JobGet = (id: string) => JobRecord | undefined;
+
+/** 祖先链, 由近及远 (不含自己)。带环保护: 账本是落盘数据, 不信它没写坏。 */
+export const ancestorsOf = (get: JobGet, j: JobRecord): JobRecord[] => {
+  const go = (cur: JobRecord, seen: ReadonlySet<string>): JobRecord[] => {
+    const p = cur.parent && !seen.has(cur.parent) ? get(cur.parent) : undefined;
+    return p ? [p, ...go(p, new Set([...seen, p.id]))] : [];
+  };
+  return go(j, new Set([j.id]));
+};
+/** 深度: 根 = 1。 */
+export const depthOf = (get: JobGet, j: JobRecord): number => 1 + ancestorsOf(get, j).length;
+export const childrenOf = (all: readonly JobRecord[], id: string): JobRecord[] =>
+  all.filter((j) => j.parent === id).sort((a, b) => a.openedAt - b.openedAt);
+
+/** 前序展开成树序: 根在前、子单跟在父后。返回 [工单, 深度]。父不在账里的当根。 */
+export const treeOrder = (all: readonly JobRecord[]): Array<[JobRecord, number]> => {
+  const ids = new Set(all.map((j) => j.id));
+  const walk = (j: JobRecord, d: number): Array<[JobRecord, number]> =>
+    [[j, d], ...childrenOf(all, j.id).flatMap((c) => walk(c, d + 1))];
+  return all
+    .filter((j) => !j.parent || !ids.has(j.parent))
+    .sort((a, b) => b.openedAt - a.openedAt)
+    .flatMap((r) => walk(r, 1));
+};
+
+const roleOf = (mm: JobMember): MemberRole => mm.role ?? "exec";
+/** 成员此刻的态: 定论 > 在飞的实时态 > 无 (= 还没派上 / 不知道)。 */
+export type MemberLive = (j: JobRecord, mm: JobMember) => TurnState | undefined;
+
+/** 一张单现算的阶段 —— 不落盘 (见设计文档 §3.2)。 */
+export const jobStage = (j: JobRecord, all: readonly JobRecord[], live: MemberLive): JobStage => {
+  if (j.status === "closed") return "closed";
+  const open = j.members.filter((mm) => !mm.outcome);
+  const asking = open.some((mm) => live(j, mm) === "needs-input");
+  if (j.kind === "req") {
+    const lead = j.members.find((mm) => roleOf(mm) === "lead");
+    if (lead?.outcome === "done") return "deliver";
+    if (asking) return "clarify";
+    const sub = childrenOf(all, j.id).find((c) => c.status === "open" && c.members.length);
+    return sub ? jobStage(sub, all, live) : "plan";
+  }
+  if (!j.members.length) return "plan";
+  if (asking) return "clarify";
+  const doers = j.members.filter((mm) => roleOf(mm) !== "reviewer" && roleOf(mm) !== "expert");
+  const reviewers = j.members.filter((mm) => roleOf(mm) === "reviewer");
+  return doers.some((mm) => !mm.outcome) ? "build"
+    : reviewers.some((mm) => !mm.outcome) ? "review"
+      : open.length ? "build" : "deliver";
+};
+
+const ROLE_ZH: Readonly<Record<MemberRole, string>> = { lead: "lead", exec: "执行", reviewer: "评审", expert: "专家" };
+/** 名册里一个 wizard 的任职: 开着的单里它是什么 (`J1 lead · J2 评审 · J3 开单`); 没有 = 空串。 */
+export const dutyLine = (all: readonly JobRecord[], target: string): string =>
+  all.filter((j) => j.status === "open")
+    .flatMap((j) => [
+      ...(j.owner === target ? [`${j.id} 开单`] : []),
+      ...j.members.filter((mm) => mm.target === target).map((mm) => `${j.id} ${ROLE_ZH[mm.role ?? "exec"]}`),
+    ])
+    .join(" · ");
+
+/** 等人验收的根单: owner 的需求根单里 lead 已交差、单还开着。交付时刻 = lead 落定的那一刻。 */
+export const awaitingAccept = (all: readonly JobRecord[], owner: string, live: MemberLive): Array<{ job: JobRecord; at: number }> =>
+  all.filter((j) => j.kind === "req" && j.owner === owner && jobStage(j, all, live) === "deliver")
+    .map((j) => ({ job: j, at: j.members.find((mm) => (mm.role ?? "exec") === "lead")?.settledAt ?? j.openedAt }));
 
 export const loadJobStore = (filePath: string): JobStore => {
   const db = loadJsonMap<JobRecord>(filePath, dropStale);
   return {
-    open: (base, owner, title, { plan, expect, maxTurns, accept } = {}) => {
+    open: (base, owner, title, { plan, expect, maxTurns, accept, parent, kind, criteria, origin } = {}) => {
       const id = newId();
-      return db.set(id, { id, base, owner, title, ...(plan ? { plan } : {}), ...(accept && accept !== "result" ? { accept } : {}), ...(expect ? { expect } : {}), ...(maxTurns ? { maxTurns, turns: 0 } : {}), members: [], status: "open", openedAt: Date.now() });
+      return db.set(id, { id, base, owner, title, ...(parent ? { parent } : {}), ...(kind ? { kind } : {}), ...(criteria ? { criteria } : {}), ...(origin ? { origin } : {}), ...(plan ? { plan } : {}), ...(accept && accept !== "result" ? { accept } : {}), ...(expect ? { expect } : {}), ...(maxTurns ? { maxTurns, turns: 0 } : {}), members: [], status: "open", openedAt: Date.now() });
     },
     spend: (id) => {
       const j = db.get(id);
@@ -134,14 +227,16 @@ export const loadJobStore = (filePath: string): JobStore => {
       const prev = j.members.find((x) => x.target === member.target);
       // 再派一段 (含 re 续问) = 它又在干了: 旧的定论作废, 不然「全部到齐」会提前报、
       // close_job 会把还在干活的它收掉。
-      return db.set(id, { ...j, members: [...rest, { ...member, task: member.task || prev?.task || "", spawned: member.spawned || !!prev?.spawned, at: Date.now() }] });
+      const role = member.role ?? prev?.role;
+      const forkOf = member.forkOf ?? prev?.forkOf;
+      return db.set(id, { ...j, members: [...rest, { ...member, task: member.task || prev?.task || "", spawned: member.spawned || !!prev?.spawned, ...(role ? { role } : {}), ...(forkOf ? { forkOf } : {}), at: Date.now() }] });
     },
     settle: (id, target, outcome, artifacts) => {
       const j = db.get(id);
       if (!j || j.status !== "open" || !j.members.some((x) => x.target === target && !x.outcome)) return undefined;
       return db.set(id, {
         ...j,
-        members: j.members.map((x) => (x.target === target ? { ...x, outcome, ...(artifacts?.length ? { artifacts } : {}) } : x)),
+        members: j.members.map((x) => (x.target === target ? { ...x, outcome, settledAt: Date.now(), ...(artifacts?.length ? { artifacts } : {}) } : x)),
       });
     },
     tally: (id) => {

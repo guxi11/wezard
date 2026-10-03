@@ -311,6 +311,8 @@ export interface RosterRow extends WizardBrief {
   clones: readonly WizardBrief[];
   /** 在飞的活: 它在等谁、谁在等它 (各带状态) —— 见 turn-state.ts。 */
   turns?: string;
+  /** 它在开着的工单里的任职 (见 jobs.dutyLine); 缺省 = 没有。 */
+  duty?: string;
 }
 
 // 上下文窗口 (token)。transcript 里记的是 API 模型 id, 不带 `[1m]`, 所以按家族认:
@@ -371,6 +373,7 @@ const rosterEntry = (r: RosterRow, now: number, home: string): string[] => {
     // 冷会话的摘要是很久以前的话, 不值得占一行; 要读就 peek_peer。
     ...(r.alive && !r.self && r.summary ? [`  最近: ${r.summary}`] : []),
     ...(r.turns ? [`  ${r.turns}`] : []),
+    ...(r.duty ? [`  任职: ${r.duty}`] : []),
   ];
 };
 
@@ -389,7 +392,7 @@ export const renderLead = (topOnly = false): string[] => [
     "**先想清楚再组队**: 读到能拆活、能判断 review 结论的程度就停, 别自己陷进实现细节; 只改一两处的小活自己做, 不必组队",
     "**开工单**: `open_job({title, plan, accept:\"result\"})`, 之后每次派活都带 `job`",
     "**coder**: 要你读过的材料 → `clone_wizard({tier:\"standard\", job, task})`; 不需要 → `spawn_wizard({tier:\"standard\", job, task})`。task 写清改什么、验收标准、要 build + 验证; 多个 coder 只在改动互不重叠时并行",
-    "**reviewer 必须白板起步**: `spawn_wizard({tier:\"hard\", job, task})` —— 不 clone、不带作者 (你或 coder) 的上下文、不转述作者的思路, 只给它改动范围 (commit / diff / 文件) 与验收标准, 让它独立找问题: 带着作者的上下文看, 会顺着作者的思路把同一个错再看一遍",
+    "**reviewer 必须白板起步**: `spawn_wizard({tier:\"hard\", job, role:\"reviewer\", task})` —— 不 clone、不带作者 (你或 coder) 的上下文、不转述作者的思路, 只给它改动范围 (commit / diff / 文件) 与验收标准, 让它独立找问题: 带着作者的上下文看, 会顺着作者的思路把同一个错再看一遍",
     `**节奏**: coder 交 \`RESULT\` → reviewer 审 → 有问题 \`tell_peer({name: coder, re})\` 打回去改 → 再审; 两轮还不过就自己判断取舍, 拿不准的${topOnly ? "以 `NEED:` 收口交回派你的那个, 由它问人" : " `public:true` 问人"}`,
     "**收队**: review 通过、build 与验证过、按仓库规矩提交了 → `close_job(summary)` 整批回收队员; 不要让队员挂着。终句给上游一句交代: 做成了什么、在哪个 commit、遗留什么",
     topOnly
