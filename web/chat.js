@@ -1838,10 +1838,10 @@
       // 工单这一种关系由 📋 那一枚说 (可点, 列的就是这几张), 不再另挂「工单 ×N」重复一遍。
       Object.keys(KIND).filter(function (k) { return p.kinds[k] && !(k === 'job' && p.jobs.length); }).map(function (k) {
         return '<span class="ek ' + k + '"' + (k === 'clone' && p.point ? ' data-cpoint="' + esc(JSON.stringify(p.point)) + '"' : '') + ' title="' + KIND[k].tip + '">' + KIND[k].mark +
-          (!LINEAGE[k] ? ' ×' + p.kinds[k] : '') + '</span>';
+          (!LINEAGE[k] ? ' ' + p.kinds[k] : '') + '</span>';
       }).join('') +
       (p.cross ? '<span class="ek cross" title="跨群的关系">⇄ 跨群</span>' : '') +
-      (p.jobs.length ? '<span class="ek jmk" data-jobs="' + esc(p.jobs.join(' ')) + '" title="' + esc('经手的工单: ' + p.jobs.join(' ') + ' —— 点开') + '">📋' + (p.jobs.length > 1 ? ' ×' + p.jobs.length : '') + '</span>' : '') + '</span>';
+      (p.jobs.length ? '<span class="ek jmk" data-jobs="' + esc(p.jobs.join(' ')) + '" title="' + esc('经手的工单: ' + p.jobs.join(' ') + ' —— 点开') + '">📋' + (p.jobs.length > 1 ? ' ' + p.jobs.length : '') + '</span>' : '') + '</span>';
   };
   // 一条边的主色: 家谱优先, 决定树上那道线的颜色。
   var domKind = function (p) {
