@@ -1230,7 +1230,7 @@
     // 说给谁画进文本泡泡开头 (头像 + 名字); 点它走移交行同一套跳转 (data-hfrom/hto/hch + gid/gts), 不换页面视角。
     var toIn = dst
       ? '<span class="to-in" role="button" tabindex="0" data-hfrom="' + esc(m.from) + '" data-hto="' + esc(m.to) + '" data-hch="' + esc(m.channel || '') +
-        '" data-gid="' + esc(m.id) + '" data-gts="' + m.ts + '" title="' + esc('→ ' + nameOf(m.to) + ' —— 看这段往来') + '">→ <span class="av">' +
+        '" data-gid="' + esc(m.id) + '" data-gts="' + m.ts + '" title="' + esc('发给 ' + nameOf(m.to) + ' —— 看这段往来') + '"><span class="av">' +
         esc(roleLabel(m.to)) + '</span><span class="nm ' + kindOf(m.to) + '">' + esc(nameOf(m.to)) + '</span></span>'
       : '';
     var withTo = function (html) {
