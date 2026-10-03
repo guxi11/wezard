@@ -27,10 +27,12 @@ import { dangerOf, dangerEarlyExit, selfConfigWriteOf, type DangerHit } from "./
 import { appendUnique } from "../shared/config-writer.js";
 import { claudeConfigWrite, type ClaudeConfigHit } from "../shared/claude-config-path.js";
 import type { NativeModalAnswer } from "./mirror-bridge.js";
-import { recordApproval, recordApprovalDecision, buildDetailUrl, getDetail } from "./detail.js";
+import { recordApproval, recordApprovalDecision, buildDetailUrl, getDetail, openTurnsOf } from "./detail.js";
 import type { Handler } from "./http.js";
 import { json, readBody } from "./http.js";
-import { tagBadge, withTagHeader } from "../shared/session-label.js";
+import { tagBadge, tagOfKey, withTagHeader } from "../shared/session-label.js";
+import { chatPolicyOf } from "./chat-name.js";
+import { makeStewardGuard } from "./steward-guard.js";
 import { sessionNameFor } from "./session-name.js";
 
 // ── Routing helpers ────────────────────────────────────────────────────
@@ -1853,6 +1855,7 @@ const unwrapDeferredTool = (toolName: string, toolInput: unknown): { toolName: s
 };
 
 export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarget, flushBeforeCard, nativeModal }: ApprovalDeps): Handler => {
+  const stewardGuard = makeStewardGuard();
   setCardQuoteMax(cfg.approval.cardQuoteMaxChars);
   const detailUrlFor = (id: string, approver?: string): string =>
     buildDetailUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, id, approver ? targetChatId(approver) : undefined);
@@ -2056,6 +2059,23 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
           "subagent call re-routed to parent session",
         );
         sessionId = parent;
+      }
+    }
+
+    // 群管家的手闸 (见 steward-guard.ts): 排在所有审批之前 —— 拦的不是危险, 是越位,
+    // 放行窗口 / allowRules / skipAll 都不该替它开门。
+    const owner = getMirrorTarget?.(sessionId);
+    if (owner && !tagOfKey(owner)) {
+      const reason = stewardGuard({
+        sessionId,
+        turn: openTurnsOf(owner, sessionId)[0]?.id ?? "",
+        toolName,
+        budget: chatPolicyOf(cfg, owner).stewardBudget,
+      });
+      if (reason) {
+        log.info({ toolName, sessionId, owner }, "steward guard reject");
+        json(res, 200, { decision: "deny", reason } satisfies ApproveResp);
+        return;
       }
     }
 

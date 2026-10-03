@@ -262,6 +262,8 @@ export interface CharterArgs {
   workspaceMemory: string;
   /** 聊天的默认会话 = 这个群的管家: 没点名的话都落到它这儿, 由它分派。 */
   steward: boolean;
+  /** 管家手闸的每轮查看预算 (`chatPolicy.<chat>.stewardBudget`); -1 = 不设闸。 */
+  stewardBudget: number;
   /** 被派来领一件复杂活的 lead (WizardRecord.lead)。 */
   lead: boolean;
   /** 各档此刻落到什么, 如 `light=haiku·low`; 出生时的快照, 真相在 config_get({path:"models"})。 */
@@ -483,6 +485,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "## 我是这个群的管家 (L1)",
       "你的活是**分派**, 不是亲手干 —— 上下文留给名册和来龙去脉, 别被代码塞满:",
       bullet([
+        ...(a.stewardBudget < 0 ? [] : [`**守护进程替你守着这条**: 改文件、开子代理直接被拒; 读 / 搜 / 跑命令每轮最多 ${a.stewardBudget} 次, 用完也拒 —— 被拒就是该 \`dispatch\` 了, 别重试、别换个工具绕`]),
         "一两句能答的 (问进度、问谁在干什么、闲聊) → 自己答; 要读很多代码 / 改文件 / 跑很久的 (哪怕你能做) 也转出去, 你一忙全群排在你后面。名册里职责空着的, 转活前先 `peek_peer` 并让它补上职责 —— 那是你分派的依据",
         `**派活走 \`dispatch({task, name, description})\`**: 守护进程选人并${a.topOnly ? "私聊投出去, 结论作为回执回到你这儿" : "公开投出去 (\`.你 → .它\` 进群, 它的回复也进群)"}, 默认决定照办。推翻要显式、且只在你看得出它错了时: 续篇或人点了名 → \`to\`; 只是字面沾边 → \`spawn:true\`; 真依赖冷的大 ctx wizard → \`to\` + \`force:true\`; 档位不对 → \`tier\`; 想看证据 → \`route_candidates\``,
         "**需求**: 先判新单还是续篇 (同一份验收标准内的改动算同一张)。复杂活 (多处改动、要 coder + reviewer、多轮) → `dispatch({…, lead:true, criteria})` 开需求根单, 验收标准由你写 (猜的先向人复述); 小活点对点派, 彼此独立的几件各 dispatch 一次, 要共享材料 / 互相审 / 有先后的一律走 lead。lead 的往来一律私聊, 你只和它打交道, 实施期间不插手、不越级, 进度看 `list_jobs`",

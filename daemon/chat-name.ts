@@ -10,7 +10,7 @@
 //
 // 落盘走 config.jsonc (`chats`), 与定时表同一套 patchJsonc + in-place cfg 变更 ——
 // 名字是用户手写的长期配置, 不是运行时状态, 不该躺在 state 目录里。
-import type { ChatPolicy, Config } from "../shared/config.js";
+import { ChatPolicy, type Config } from "../shared/config.js";
 import { patchJsonc } from "../shared/config-writer.js";
 import { baseOfKey } from "../shared/session-label.js";
 import { settleName, wizardStore } from "./wizard.js";
@@ -57,7 +57,7 @@ export const chatBaseOf = (cfg: Config, ref: string): string => {
 
 /** `target` 所在聊天的群聊级策略 (`chatPolicy`, 键是 base principal)。 */
 export const chatPolicyOf = (cfg: Config, target: string): ChatPolicy =>
-  ({ topOnly: !!cfg.chatPolicy?.[baseOfKey(target)]?.topOnly });
+  ChatPolicy.parse(cfg.chatPolicy?.[baseOfKey(target)] ?? {});
 
 /** 已命名的聊天, 按名字排序。 */
 export const listChatNames = (cfg: Config): Array<{ name: string; base: string }> =>

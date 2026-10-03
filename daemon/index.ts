@@ -1762,6 +1762,7 @@ const main = async (): Promise<void> => {
           return cwd ? sharedMemory("workspace", cwd) : "";
         })(),
         steward: !tagOfKey(target),
+        stewardBudget: chatPolicyOf(cfg, target).stewardBudget,
         lead: !!wizards.get(target)?.lead,
         topOnly: chatPolicyOf(cfg, target).topOnly,
       });
