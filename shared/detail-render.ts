@@ -733,8 +733,8 @@ const PRIORITY_TAG: Readonly<Record<Handoff["priority"], [string, string]>> = {
 const VIA: Readonly<Record<Handoff["via"], [string, string]>> = {
   tell: ["↪", "移交"],
   dispatch: ["↪", "派活"],
-  clone: ["⑂", "分身"],
-  spawn: ["✦", "新生"],
+  clone: ["⑂", "clone"],
+  spawn: ["✦", "spawn"],
 };
 
 const hoTag = (cls: string, text: string, tip: string): string =>
@@ -849,7 +849,8 @@ const renderToolBubble = (
     ? `<div class="tool-body">${toolBody(use, result)}</div>`
     : `<div class="tool-body" data-lazy-turn="${escHtml(lazyTurn)}" data-lazy-use="${escHtml(use.toolUseId)}"></div>`;
   // 整个工具调用折叠进 <details> (默认收起); ⎿ 预览行是它的兄弟, 展开时 CSS 隐藏。
-  return `<section class="bubble tool" data-key="${key}">
+  // data-use: 关系图的 clone 徽标按它落到 origin 调 clone_wizard 的那一处。
+  return `<section class="bubble tool" data-key="${key}" data-use="${escHtml(use.toolUseId)}">
     <details class="tool-call">
       <summary class="tool-summary"><span class="tool-dot">⏺</span><span class="tool-name">${escHtml(use.toolName)}</span>${arg ? `<span class="tool-arg">(${escHtml(arg)})</span>` : ""}${dur}${clock(use.ts)}</summary>
       ${body}

@@ -17,10 +17,10 @@
 //     「安排」, 不随 TTL 消失, 但只有 daemon 有。svr 拿不到就退化成只画观测边。
 //
 // 纯函数, 无 IO: 注册表侧的东西由调用方以 WorldFacts 喂进来。
-import { baseOfKey, labelFor, tagOfKey } from "./session-label.js";
+import { baseOfKey, labelFor, stripSigil, tagOfKey } from "./session-label.js";
 import { withoutKeepaliveTurns } from "./keepalive.js";
 import { isTurn, staleAt, isGhostTurn } from "./chat-view.js";
-import type { CharterLineage, CharterRecord, DetailRecord, TurnDetailRecord } from "./detail-store.js";
+import type { CharterLineage, CharterRecord, DetailRecord, TurnDetailRecord, TurnItem } from "./detail-store.js";
 import { senderOf } from "./role-view.js";
 import type { TurnState } from "./turn-state.js";
 
@@ -185,7 +185,14 @@ export interface WorldEdge {
   runs?: string[];
   /** 每一次发生的时刻 (最近 EDGE_TS_MAX 次) —— 前端按选中 session 的时间范围重新计数。 */
   ts: number[];
+  /** clone 边: 分身在 origin 会话里分叉的那一处 (clone 徽标点了落到这里)。 */
+  point?: ClonePoint;
 }
+
+/** origin = 被克隆的那一方 (parent, 克隆的是别人时是 forkOf)。`id` = rolepage 的消息 id;
+ *  `use` = origin 调 clone_wizard 的那次 tool_use —— 认不出调用、落到出生前那一句时没有。
+ *  origin 在记录里一轮都没有 = 只有 origin 与 ts, 前端开它的往来不定位。 */
+export interface ClonePoint { origin: string; id?: string; use?: string; ts: number }
 
 const EDGE_TS_MAX = 200;
 
@@ -327,6 +334,35 @@ const lineageOf = (c: CharterRecord, targetOf: (name: string) => string | undefi
   return { parent, kind: m[2] === "生的子 wizard" ? "spawn" : "clone", ...(forkOf ? { forkOf } : {}) };
 };
 
+const CLONE_TOOL = /(?:^|__)clone_wizard$/;
+type ToolUseItem = Extract<TurnItem, { t: "tool_use" }>;
+const parseObj = (s: string): Record<string, unknown> | undefined => {
+  try { const v: unknown = JSON.parse(s); return v && typeof v === "object" ? (v as Record<string, unknown>) : undefined; } catch { return undefined; }
+};
+/** 这次 clone_wizard 生出来的名字: 回包落地的名字优先, 没回包退回 input。 */
+const clonedName = (r: TurnDetailRecord, u: ToolUseItem): string => {
+  const res = r.items.find((it): it is Extract<TurnItem, { t: "tool_result" }> => it.t === "tool_result" && it.toolUseId === u.toolUseId);
+  const j = res ? parseObj(res.body) : undefined;
+  const a = (u.toolInput && typeof u.toolInput === "object" ? u.toolInput : {}) as Record<string, unknown>;
+  return stripSigil(String(j?.name ?? a.name ?? ""));
+};
+const msgIdOf = (r: TurnDetailRecord): string => `${r.id}:${r.items.length || !r.closed ? "out" : "in"}`;
+
+/** 分身在 origin 会话 (`rs`, 按时刻升序) 里分叉的那一处: origin 自己调 clone_wizard 生的 (`byCall`),
+ *  就是那次调用 —— 按名字认, 认不出名字取离出生最近的那次; 否则 (克隆的是别人 / 没找到调用)
+ *  落到出生前最近的那一句, 分叉正发生在它之后。 */
+export const clonePointOf = (rs: readonly TurnDetailRecord[], origin: string, name: string, bornAt: number, byCall: boolean): ClonePoint => {
+  const calls = byCall
+    ? rs.flatMap((r) => r.items.filter((it): it is ToolUseItem => it.t === "tool_use" && CLONE_TOOL.test(it.toolName)).map((u) => ({ r, u })))
+    : [];
+  const near = (ts: number): number => Math.abs(ts - bornAt);
+  const call = calls.find((c) => clonedName(c.r, c.u) === name) ??
+    calls.filter((c) => near(c.u.ts) < 5 * 60_000).sort((a, b) => near(a.u.ts) - near(b.u.ts))[0];
+  if (call) return { origin, id: `${call.r.id}:out`, use: call.u.toolUseId, ts: call.u.ts };
+  const before = rs.filter((r) => r.createdAt <= bornAt).at(-1) ?? rs[0];
+  return before ? { origin, id: msgIdOf(before), ts: before.createdAt } : { origin, ts: bornAt };
+};
+
 export const buildWorld = (
   records: readonly DetailRecord[],
   facts: WorldFacts,
@@ -435,14 +471,27 @@ export const buildWorld = (
   const byName = new Map(nodes.map((n) => [n.name, n.target] as const));
   const lineageEdge = (m: Map<string, WorldEdge>, kind: WorldEdgeKind, from: string | undefined, to: string, ts: number): Map<string, WorldEdge> =>
     from ? link(m, kind, from, to, ts) : m;
-  const withLineage = records.filter((r): r is CharterRecord => r.kind === "charter" && !factOf.has(r.target)).reduce((m, c) => {
-    const l = lineageOf(c, (n) => byName.get(n));
-    if (!l) return m;
+  const chartered = records.filter((r): r is CharterRecord => r.kind === "charter" && !factOf.has(r.target))
+    .flatMap((c) => ((l) => (l ? [{ c, l }] : []))(lineageOf(c, (n) => byName.get(n))));
+  const withLineage = chartered.reduce((m, { c, l }) => {
     const m1 = lineageEdge(m, l.kind, l.parent, c.target, c.createdAt);
     return l.kind === "clone" ? lineageEdge(m1, "fork", l.forkOf, c.target, c.createdAt) : m1;
   }, registered);
 
-  const edges = [...withLineage.values()].sort((a, b) => b.lastTs - a.lastTs);
+  // clone 边带上分叉处: 注册表与宪章各记着谁被克隆、何时出生。
+  const clones = new Map<string, { origin: string; parent: string; bornAt: number }>([
+    ...facts.wizards.filter((w) => w.parent && w.clonedFrom).map((w) => [w.target, { origin: w.forkOf ?? w.parent!, parent: w.parent!, bornAt: w.bornAt ?? 0 }] as const),
+    ...chartered.filter(({ l }) => l.kind === "clone").map(({ c, l }) => [c.target, { origin: l.forkOf ?? l.parent, parent: l.parent, bornAt: c.createdAt }] as const),
+  ]);
+  const nameOf = new Map(nodes.map((n) => [n.target, n.name] as const));
+  const withPoint = (e: WorldEdge): WorldEdge => {
+    const k = e.kind === "clone" ? clones.get(e.to) : undefined;
+    if (!k) return e;
+    const rs = [...(byTarget.get(k.origin) ?? [])].sort((a, b) => a.createdAt - b.createdAt);
+    return { ...e, point: clonePointOf(rs, k.origin, nameOf.get(e.to) ?? "", k.bornAt, k.origin === k.parent) };
+  };
+
+  const edges = [...withLineage.values()].map(withPoint).sort((a, b) => b.lastTs - a.lastTs);
   const relsOf = edges.reduce((m, e) => {
     const add = (a: string, b: string) => m.set(a, (m.get(a) ?? new Set<string>()).add(b));
     add(e.from, e.to); add(e.to, e.from);

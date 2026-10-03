@@ -1063,6 +1063,16 @@
     e.stopPropagation(); e.preventDefault();
     openJobs(m.getAttribute('data-jobs').split(' ').filter(Boolean));
   }, true);
+  // 关系图的 clone 徽标: 开 origin 的全部往来、落到它分叉出这个分身的那一处; viewpoint 站到 origin, 页面视角不动。
+  // 同 📋: 长在卡片按钮里, 捕获阶段截下来。
+  document.addEventListener('click', function (e) {
+    var m = e.target.closest && e.target.closest('.ek.clone[data-cpoint]');
+    if (!m) return;
+    e.stopPropagation(); e.preventDefault();
+    var pt = JSON.parse(m.getAttribute('data-cpoint')), conv = 'a:' + pt.origin;
+    markBack(function () { return VIEW === 'msgs' && CONV === conv; });
+    jumpMsg({ conv: conv, id: pt.id, use: pt.use, ts: pt.ts, viewpoint: pt.origin });
+  }, true);
   var backBtn = function () {
     var c = BACK && BACK.on() && convOf(BACK.conv);
     return c ? '<button class="back jb" id="ch-jback" title="' + esc('回到 ' + (BACK.with ? nameOf(BACK.with) : c.name)) + '" aria-label="返回">‹</button>' : '';
@@ -1705,8 +1715,9 @@
   // 每种关系一种线色 (CSS 里 li.<kind> / .ek.<kind> 同色), 画在树线、卡片入口的 label 与图例上。
   var KIND = {
     // 生它、归它管的那一位下面挂的是 clone (带上下文) 或 spawn (白板) —— 与调用框下的提示行同一套字。
-    clone: { mark: '⑂ 分身', tip: 'clone_wizard 生的分身: fork 了上下文, 开局带着那一刻读过的一切; 归生它的那位管' },
-    spawn: { mark: '✦ 新生', tip: 'spawn_wizard / dispatch 白板生的: 不继承上下文, 只是归生它的那位管 (不带 detached)' },
+    // spawn 不挂徽标: 层级本身已经说明了它归谁管, 线色照旧。clone 徽标点了落到 origin 里的分叉处。
+    clone: { mark: 'clone', tip: 'clone_wizard 生的分身: fork 了上下文, 开局带着那一刻读过的一切; 归生它的那位管 —— 点了看它在哪一处分叉' },
+    spawn: { mark: '', tip: 'spawn_wizard / dispatch 白板生的: 不继承上下文, 只是归生它的那位管 (不带 detached)' },
     fork: { mark: '⑂ 上下文', tip: '分身的上下文 fork 自它 —— 生它、归它管的是另一位' },
     peer: { mark: '对话', tip: 'send_peer 发起的对话' },
     job: { mark: '工单', tip: '它开的工单里有这位成员' },
@@ -1745,7 +1756,7 @@
   /** 窗内的关系: 一对有向 (a→b) 一条, kinds = 各种类在窗内发生几次。 */
   var relations = function (rg) {
     var pairs = W.edges.map(function (e) {
-      return { kind: e.kind, from: e.from, to: e.to, cross: e.cross, jobs: e.jobs || [], ts: e.ts && e.ts.length ? e.ts : [e.lastTs] };
+      return { kind: e.kind, from: e.from, to: e.to, cross: e.cross, jobs: e.jobs || [], ts: e.ts && e.ts.length ? e.ts : [e.lastTs], point: e.point };
     }).concat(jobEdges()).reduce(function (m, e) {
       // 家谱是身份, 不是发生在某段 session 里的事 —— 不受时间窗裁剪, 否则切到子 wizard 时
       // 它的出生早于自己的 session, 父亲那条边就被裁掉了。
@@ -1758,6 +1769,7 @@
       p.first = Math.min(p.first, Math.min.apply(null, ts));
       p.last = Math.max(p.last, Math.max.apply(null, ts));
       e.jobs.forEach(function (id) { if (p.jobs.indexOf(id) < 0) p.jobs.push(id); });
+      if (e.point) p.point = e.point;
       return m;
     }, {});
     // 派活本身带着工单号时, 「工单」标记就是重复的。
@@ -1824,8 +1836,8 @@
     if (!p) return '';
     return '<span class="tlab"' + (p.jobs.length ? ' title="经手的工单: ' + esc(p.jobs.join(' ')) + '"' : '') + '>' +
       // 工单这一种关系由 📋 那一枚说 (可点, 列的就是这几张), 不再另挂「工单 ×N」重复一遍。
-      Object.keys(KIND).filter(function (k) { return p.kinds[k] && !(k === 'job' && p.jobs.length); }).map(function (k) {
-        return '<span class="ek ' + k + '" title="' + KIND[k].tip + '">' + KIND[k].mark +
+      Object.keys(KIND).filter(function (k) { return p.kinds[k] && KIND[k].mark && !(k === 'job' && p.jobs.length); }).map(function (k) {
+        return '<span class="ek ' + k + '"' + (k === 'clone' && p.point ? ' data-cpoint="' + esc(JSON.stringify(p.point)) + '"' : '') + ' title="' + KIND[k].tip + '">' + KIND[k].mark +
           (!LINEAGE[k] ? ' ×' + p.kinds[k] : '') + '</span>';
       }).join('') +
       (p.cross ? '<span class="ek cross" title="跨群的关系">⇄ 跨群</span>' : '') +
@@ -2417,20 +2429,32 @@
     row.classList.remove('hit'); void row.offsetWidth; row.classList.add('hit');
     return true;
   };
-  var landOn = function (id) {
+  // 落到一行里的某一次工具调用 (`use`): 它所在的过程框摊开, 调用框滚到中间闪一下。
+  var focusUse = function (id, use) {
+    if (!focusRow(id)) return false;
+    var b = use && rowNode(id).querySelector('[data-use="' + cssEsc(use) + '"]');
+    if (!b) return true;
+    var g = b.closest('.steps');
+    if (g) { g.classList.remove('folded'); FOLD[g.getAttribute('data-key')] = false; }
+    b.scrollIntoView({ block: 'center' });
+    S.pinned = atBottom();
+    b.classList.remove('hit'); void b.offsetWidth; b.classList.add('hit');
+    return true;
+  };
+  var landOn = function (id, use) {
     return function () {
-      if (focusRow(id)) return true;
-      loadMsgs('0', function () { return focusRow(id); });
+      if (focusUse(id, use)) return true;
+      loadMsgs('0', function () { return focusUse(id, use); });
       return true;
     };
   };
   var jumpMsg = function (h) {
-    if ((!h.id || inSession(h.ts)) && convOf(h.conv)) return selectConv(h.conv, h.with || '', h.id ? landOn(h.id) : undefined, h.viewpoint);
+    if ((!h.id || inSession(h.ts)) && convOf(h.conv)) return selectConv(h.conv, h.with || '', h.id ? landOn(h.id, h.use) : undefined, h.viewpoint);
     SESSION = 'all'; CONV = h.conv; WITH = h.with || ''; VIEWPOINT = h.viewpoint && h.viewpoint !== ROLE ? h.viewpoint : '';
     if (VIEW !== 'msgs') setView('msgs');
     app.classList.add('reading');
     reveal();
-    refresh(h.id ? landOn(h.id) : undefined);
+    refresh(h.id ? landOn(h.id, h.use) : undefined);
   };
 
   var paintSearch = function (sections) {

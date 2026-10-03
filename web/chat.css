@@ -725,6 +725,8 @@ button.mchip.rcpt:hover { text-decoration: underline }
 }
 .ek.spawn { color: #a8642a; background: #d4700f12 }
 .ek.clone { color: #7a5bb8; background: #8250df12 }
+.ek.clone[data-cpoint] { cursor: pointer }
+.ek.clone[data-cpoint]:hover { background: #8250df2e }
 .ek.fork { color: #8f7bb8; background: #8250df0a }
 .ek.peer { color: #4a74b0; background: #0969da10 }
 .ek.job { color: #94741f; background: #bf870014 }
@@ -934,6 +936,8 @@ button.mchip.rcpt:hover { text-decoration: underline }
 
 /* 搜索跳到的那一句: 气泡闪一圈视角色。 */
 .mrow.hit .mb > * { animation: hit 1.6s ease-out }
+/* clone 徽标落到的那次 clone_wizard 调用: 调用框本身再闪一圈。 */
+.mrow .bubble.tool.hit { animation: hit 2.4s ease-out }
 @keyframes hit { 0%, 30% { box-shadow: 0 0 0 3px #2f55c955 } 100% { box-shadow: 0 0 0 3px #2f55c900 } }
 
 
