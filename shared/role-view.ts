@@ -80,7 +80,11 @@ const convTurns = (records: readonly DetailRecord[], now: number): TurnDetailRec
   records.filter(isTurn).filter((r) => !!r.target && !r.agent && !isGhostTurn(r, now));
 
 /** 保温 ping 的那一条 —— 进时间轴, 但不进会话列表的条数/预览, 也不算一条关系。 */
-export const isPing = (m: Msg): boolean => isKeepaliveTurn(m.turn);
+export const isPing = (m: Msg): boolean =>
+  PINGS.get(m.turn) ?? ((v) => (PINGS.set(m.turn, v), v))(isKeepaliveTurn(m.turn));
+/** 按轮次对象记: 判定要对问话跑一串正则, 而 /api/glance 每张卡片都把全部消息筛一遍 ——
+ *  关系图几十张卡片就是几十万次。store 里的对象跨请求不变, 轮次一写就换新对象。 */
+const PINGS = new WeakMap<TurnDetailRecord, boolean>();
 
 /** 一个公开频道里听话的那一方: 与人的单聊是那个人; 群里是这条链的链头 (守护进程写 turn /
  *  post 时顺着派活链记下的, 见 Asker) —— 只在他正是在这个群里开的口时才算; 认不出就是
