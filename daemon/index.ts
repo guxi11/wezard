@@ -76,7 +76,7 @@ import {
   type WizardBrief,
   type WizardRecord,
 } from "./wizard.js";
-import { bindNoticeBox, createNoticeBox, createSeenRing, gcSeen, chatAudience, type Notice, type Part, type SeenRow, type Via } from "./notices.js";
+import { bindNoticeBox, createNoticeBox, createSeenRing, gcSeen, chatAudience, hears, type Notice, type Subject, type Part, type SeenRow, type Via } from "./notices.js";
 import { createLedger, digest, pendingGc, renderDigest, renderTable, type Item as PendingItem, type LiveOf, type Mark } from "./pending-items.js";
 import { loadJobStore, jobEpisode, rejectReason, ACCEPTS, JOB_MEMBER_MAX, type Accept } from "./jobs.js";
 import { cacheTtlSec, clipMiddle, contextFiles, firstStamp, parseClosing, lastContextTokens, lastExchange, lastModel, openingTurn, replyClosedBefore, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
@@ -453,7 +453,7 @@ const main = async (): Promise<void> => {
       // silent: 新 wizard 就位不进群 (生命周期事件), 同群的 wizard 从名册增量里得知。
       const r = await m.newSession(target, name, body.cli, { cwd, model, keepalive, silent: true });
       if (!r.ok && !existed) wizards.drop(target);
-      if (r.ok) postRoster(base, [target, self], { op: "born", name: `.${name}`, by: displayName(self), cwd: r.cwd });
+      if (r.ok) postRoster(base, [target, self], { op: "born", name: `.${name}`, by: displayName(self), cwd: r.cwd }, subjectOf(wizards.get(target)));
       json(res, r.ok ? 200 : 500, r.ok
         ? {
             ok: true,
@@ -823,7 +823,7 @@ const main = async (): Promise<void> => {
       if (!gone) return false;
       const slot = !!tagOfKey(gone.target);
       log.child({ mod: "wizard" }).info({ target: gone.target, name: gone.name, slot }, "stale name evicted");
-      postRoster(baseOfKey(gone.target), [], { op: "ended", name: `.${gone.name}`, why: slot ? "evicted (idle >1d, name reused)" : "name yielded (idle >1d)" }, kinAudience(gone));
+      postRoster(baseOfKey(gone.target), [], { op: "ended", name: `.${gone.name}`, why: slot ? "evicted (idle >1d, name reused)" : "name yielded (idle >1d)" }, subjectOf(gone));
       return true;
     };
 
@@ -1400,17 +1400,13 @@ const main = async (): Promise<void> => {
       seen: createSeenRing(loadJsonMap<SeenRow>(cfg.wrc.mirror.noticeSeenFile, gcSeen), (t) => m.sessionInfo(t)?.sessionId ?? ""),
       cwdOf: (t) => ((c) => c.runningCwd || c.defaultCwd)(m.getCwd(t)),
     }));
-    /** `only` 收窄听众 (见 kinAudience)。 */
-    const postRoster = (base: string, except: readonly string[], n: Notice, only?: (t: string) => boolean): void =>
-      notices.post(chatAudience(m.chatTargets(base), base, except).filter(only ?? (() => true)), n);
-    /** 一个非 detached 的子 wizard 是生它那位的帮手, 与群里旁人无关: 它的生 / 收只告诉
-     *  生它那位与往上的家谱 (当事人由 except 排除)。独立长住的 (没有 parent) 照旧告诉全群。
-     *  回归测试的临时分身就这样不再刷别人; 旁人的宪章名册里也难得列着这种短命的分身。 */
-    const kinAudience = (kid: WizardRecord | undefined): ((t: string) => boolean) | undefined => {
-      if (!kid?.parent) return undefined;
-      const kin = new Set([kid.parent, ...ancestorsOf(wizards.all(), kid.parent)]);
-      return (t) => kin.has(t);
-    };
+    /** `who` = 这次变动的当事人 (见 hears): 不给 = 聊天自己的事 (改名), 全群都听。 */
+    const postRoster = (base: string, except: readonly string[], n: Notice, who?: Subject): void =>
+      notices.post(chatAudience(m.chatTargets(base), base, except).filter(who ? hears(who) : () => true), n);
+    /** 注册表里的当事人。要在 forget 抹掉记录之前取; 没有记录 = 谁也不告诉。 */
+    const subjectOf = (w: WizardRecord | undefined): Subject => (w
+      ? { parent: w.parent, description: w.description, owners: jobs.all().filter((j) => j.status === "open" && j.members.some((x) => x.target === w.target)).map((j) => j.owner) }
+      : {});
 
     /** 一个聊天的工作区: 它名下各会话跑在哪个目录, 取最多的那个。聊天与工作区是
      *  一对多, 但绝大多数聊天只围着一个项目转。 */
@@ -1828,7 +1824,7 @@ const main = async (): Promise<void> => {
       // 出生快照里那句旧的 (或者空的) 职责派活。
       if (asked || description) postRoster(baseOfKey(self), [self], before && before !== name
         ? { op: "renamed", name: `.${name}`, was: `.${before}`, ...(description ? { job: description } : {}) }
-        : { op: "job", name: `.${name}`, job: description });
+        : { op: "job", name: `.${name}`, job: description }, subjectOf(wizards.get(self)));
       json(res, 200, {
         ok: true,
         ...me,
@@ -2174,7 +2170,7 @@ const main = async (): Promise<void> => {
           op: "born", name: `.${name}`, by: displayName(self), clone: !detached,
           ...(r.inherited ? { ctx: forkOf ? displayName(forkOf) : displayName(self) } : {}),
           ...(kid.description ? { job: kid.description } : {}), cwd: r.cwd,
-        }, kinAudience(wizards.get(target)));
+        }, subjectOf(wizards.get(target)));
       }
       // 继承路径上活已经随开场白进去了, 空白分身才需要在这里补一次注入 (私聊)。
       let dispatched = r.inherited && !!task;
@@ -2224,7 +2220,7 @@ const main = async (): Promise<void> => {
       if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
       const { target } = r;
       const victim = briefOf(self, target);
-      // 家谱要在 forget 抹掉记录之前取 (见 kinAudience)。
+      // 当事人要在 forget 抹掉记录之前取 (见 subjectOf)。
       const victimRec = wizards.get(target);
       const end = (b.mode ?? "end") === "end";
       if (!end && target === self) { json(res, 400, { ok: false, reason: "打断自己没有意义 —— 你就是正在生成的那一个" }); return; }
@@ -2264,7 +2260,7 @@ const main = async (): Promise<void> => {
       if (!done.ok) { json(res, 502, { ok: false, target, reason: done.reason }); return; }
       const detached = end && b.forget ? forgetWizard(target) : [];
       // 打断只是停了它这一轮, 它还在; 只有结束才是名册变了。
-      if (end) postRoster(baseOfKey(target), [target, self], { op: "ended", name: victim.name ? `.${victim.name}` : target, by: displayName(self), ...(b.forget ? { why: "forgotten" } : {}) }, kinAudience(victimRec));
+      if (end) postRoster(baseOfKey(target), [target, self], { op: "ended", name: victim.name ? `.${victim.name}` : target, by: displayName(self), ...(b.forget ? { why: "forgotten" } : {}) }, subjectOf(victimRec));
       json(res, 200, { ok: true, target, name: victim.name, mode: end ? "end" : "interrupt", forgotten: !!(end && b.forget), ...(canceled ? { canceled } : {}), ...(detached.length ? { canceledIn: detached } : {}) });
     });
 

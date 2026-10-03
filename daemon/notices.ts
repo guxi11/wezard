@@ -138,17 +138,33 @@ export const renderNotice = (n: Notice, cwd = ""): string => {
   }
 };
 
-/** 名册那一段。规矩只在窗口里没给过时给。 */
+const HOLE = "\u0000";
+/** 名字挖掉之后的那一行: 生 / 收的模板相同 = 除了是谁之外处处相同, 可以并成一行。 */
+const templateOf = (n: Notice, cwd: string): string =>
+  n.op === "born" || n.op === "ended" ? renderNotice({ ...n, name: HOLE }, cwd) : renderNotice(n, cwd);
+const listNames = (xs: readonly string[]): string => (xs.length <= 4 ? xs.join(" ") : `${xs.slice(0, 3).join(" ")} …(+${xs.length - 3})`);
+
+/** 同一模板的几条并成一行, 名字依次列出 —— 一批分身一起收掉只占一行, 不是九行。 */
+export const groupRows = (ns: readonly Notice[], cwd: string): string[] => {
+  const groups = ns.reduce(
+    (acc, n) => ((k) => acc.set(k, [...new Set([...(acc.get(k) ?? []), nameOf(n) ?? ""])]))(templateOf(n, cwd)),
+    new Map<string, string[]>(),
+  );
+  return [...groups].map(([tpl, names]) => tpl.replace(HOLE, listNames(names)));
+};
+
+/** 名册那一段。去重按单条 (`r:<那一行>`) 记, 渲染时再并行; 规矩只在窗口里没给过时给。 */
 export const rosterPart = (ns: readonly Notice[], cwd: string): Part => (seen) => {
-  const rows = [...new Set(netNotices(ns).map((n) => renderNotice(n, cwd)))].filter((r) => !seen(`r:${r}`));
-  if (!rows.length) return none;
+  const fresh = [...new Map(netNotices(ns).map((n) => [renderNotice(n, cwd), n] as const))].filter(([r]) => !seen(`r:${r}`));
+  if (!fresh.length) return none;
+  const rows = groupRows(fresh.map(([, n]) => n), cwd);
   const rule = !seen("rule:roster");
   return {
     text: renderReminder({ wezard: "roster" }, [
       ...(rule ? ["Roster changes since your charter snapshot (truth: wizard_roster). FYI only — don't reply or relay; skip if irrelevant."] : []),
       ...rows.map((r) => `- ${r}`),
     ]),
-    keys: [...(rule ? ["rule:roster"] : []), ...rows.map((r) => `r:${r}`)],
+    keys: [...(rule ? ["rule:roster"] : []), ...fresh.map(([r]) => `r:${r}`)],
   };
 };
 
@@ -205,6 +221,18 @@ export const noticeSuffixFor = (target: string, text: string, via: Via = {}, lea
   const box = noticeBox();
   return box ? box.suffix(target, via, lead) : lead.map((p) => p(() => false).text).join("");
 };
+
+/** 一次生 / 收 / 改职责 / 改名的当事人, 取自注册表。`owners` = 它在册、还开着的工单的发起人。 */
+export interface Subject { parent?: string; description?: string; owners?: readonly string[] }
+
+/** 收件人 `t` 该不该听到关于 `who` 的变动 —— 只有会改变它接下来怎么做的才算:
+ *  - 长住且有职责的 (没有 parent、写了 description): 同群都该知道, 别人照它的职责派活、按名字找它。
+ *  - 分身 / 帮手 (有 parent): 只是生它那位与拉它进工单那位手上的活。不往上走家谱 —— 孙辈是子
+ *    wizard 自己的事: 回归测试的一整批临时分身曾这样从跑测试那位一路刷到群管家。
+ *  - 没有 parent 也没写职责的 (还没自我介绍的新会话、forget 之后残留的冷记录): 谁也不告诉;
+ *    它写下职责那一刻 (job 事件) 才算登场。 */
+export const hears = (who: Subject) => (t: string): boolean =>
+  !who.parent ? !!who.description?.trim() : t === who.parent || !!who.owners?.includes(t);
 
 /** 同一个聊天里除了当事人之外的所有 wizard —— 一次变动的默认听众。跨聊天的同伴
  *  不在其中: 群成员变动是那个群的事, 别的群只在真的去 send_peer 时才需要知道。 */
