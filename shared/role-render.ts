@@ -10,7 +10,7 @@ import { isTurn, staleAt, turnDone } from "./chat-view.js";
 import { isKeepaliveTurn } from "./keepalive.js";
 import type { DetailRecord, MarkDetailRecord, TurnDetailRecord } from "./detail-store.js";
 import { jobProgress, type MemberRole, type WorldFactJob } from "./world.js";
-import { channelOf, injectTurnsOf, teammateOf, unwrapMates, type Directory, type Msg } from "./role-view.js";
+import { channelOf, doneAt, injectTurnsOf, teammateOf, unwrapMates, type Directory, type Msg } from "./role-view.js";
 
 export interface MsgFragment {
   /** `<turnId>:in` / `<turnId>:out` / `m:<markId>`。 */
@@ -34,6 +34,9 @@ export interface MsgFragment {
   sig: string;
   /** 见 chat-view.staleAt; 0 = 已结束。 */
   staleAt: number;
+  /** 这句话说完的时刻 (doneAt); 没说完 / 不是话 (断点、工单行) = 不给。上屏时客户端按它记已读:
+   *  正在吐字的那一版上屏不算读到终句。 */
+  fin?: number;
 }
 
 // 入消息顶上的一行归因: 这句话不是人打的字时说清是谁派的。
@@ -272,11 +275,13 @@ export const renderMsg = (m: Msg, records: readonly DetailRecord[], dir: Directo
     ? { html: renderIn(r), meta: acct(senderTurn(r, records)) }
     : out(((deco) => renderTurnGroup(r, now, childrenOf(records, r.id, now, deco), false, deco))(handoffDeco(r, records, dir, now)));
   const live = m.dir === "out" && !turnDone(r, now);
+  const fin = doneAt(m);
   return {
     id: m.id, turnId: r.id, dir: m.dir, ...base(m, dir), ts: m.ts,
     ping: isKeepaliveTurn(r),
     html, meta, sig: hashStr(html + meta),
     staleAt: live ? staleAt(r) : 0,
+    ...(fin !== undefined ? { fin } : {}),
   };
 };
 
