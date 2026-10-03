@@ -35,6 +35,8 @@ interface Evidence {
   desc: string[];
   asks: string[];
   files: string[];
+  /** 点到了、但几乎人人读过的公共文件: 不计证据, 只摆出来说明为什么被降权。 */
+  common: string[];
   sameCwd: boolean;
 }
 
@@ -75,15 +77,29 @@ const stemsOf = (text: string): Set<string> =>
 const byStem = (files: readonly string[]): string[] =>
   files.filter((f, i) => !files.slice(i + 1).some((g) => stemOf(g) === stemOf(f)));
 
-const evidenceOf = (task: Set<string>, stems: Set<string>, taskCwd: string) => (row: RouteRow): Evidence => ({
-  row,
-  desc: shared(task, row.description),
-  asks: [...new Set(row.asks.flatMap((a) => shared(task, a)))],
+/** 公共文件: 池子里不少候选都读过的文件名 (web/chat.js、shared/role-view.ts 这类) —— 谁都读过, 不构成选人理由。
+ *  至少 3 个候选读过且占到池子的三成才算; 池子太小 (<3) 没有统计意义, 不判。 */
+export const commonStems = (rows: readonly RouteRow[]): Set<string> => {
+  const need = Math.max(3, Math.ceil(rows.length * 0.3));
+  const tally = rows.flatMap((r) => [...new Set(r.files.map((f) => stemOf(f).toLowerCase()))])
+    .reduce((m, s) => m.set(s, (m.get(s) ?? 0) + 1), new Map<string, number>());
+  return new Set([...tally].filter(([, n]) => n >= need).map(([s]) => s));
+};
+
+const evidenceOf = (task: Set<string>, stems: Set<string>, common: Set<string>, taskCwd: string) => (row: RouteRow): Evidence => {
   // 文件只认整个文件名被点到: 目录名 (daemon/、web/) 几乎每个文件都带, 文件名里的
   // 半截词 (role-render 的 render) 又太常见 —— 撞上它们说明不了读过这一个。
-  files: byStem(row.files.filter((f) => stems.has(stemOf(f).toLowerCase()))),
-  sameCwd: near(row.cwd, taskCwd),
-});
+  const hit = byStem(row.files.filter((f) => stems.has(stemOf(f).toLowerCase())));
+  const isCommon = (f: string): boolean => common.has(stemOf(f).toLowerCase());
+  return {
+    row,
+    desc: shared(task, row.description),
+    asks: [...new Set(row.asks.flatMap((a) => shared(task, a)))],
+    files: hit.filter((f) => !isCommon(f)),
+    common: hit.filter(isCommon),
+    sameCwd: near(row.cwd, taskCwd),
+  };
+};
 
 // 排序只是让最有证据的先被看到: 文件命中 (它真读过) > 职责 > 最近的话; 同工作区只用来打破平手。
 const weight = (e: Evidence): number => e.files.length * 3 + e.desc.length * 2 + e.asks.length;
@@ -91,8 +107,8 @@ const weight = (e: Evidence): number => e.files.length * 3 + e.desc.length * 2 +
 /** 有交集的候选, 证据最强的在前。 */
 export const rankCandidates = (task: string, taskCwd: string, rows: readonly RouteRow[]): Evidence[] => {
   return rows
-    .map(evidenceOf(termsOf(task), stemsOf(task), taskCwd))
-    .filter((e) => weight(e) > 0)
+    .map(evidenceOf(termsOf(task), stemsOf(task), commonStems(rows), taskCwd))
+    .filter((e) => weight(e) > 0 || e.common.length > 0)
     .sort((x, y) => weight(y) - weight(x) || Number(y.sameCwd) - Number(x.sameCwd) || y.row.lastActivity - x.row.lastActivity);
 };
 
@@ -169,7 +185,7 @@ const costLines = (e: Evidence, c: Ctx): string[] => {
   const w = wakeCostOf(ctx, e.row.lastActivity, c.now, ttlMs);
   const ttl = `${Math.round(ttlMs / 60_000)} 分钟`;
   const wake = w.cold
-    ? `缓存冷 (超过 TTL ${ttl}) · 唤醒要重写 ~${k(w.write)} 缓存 ≈ 白板 spawn 的 ${w.times} 倍`
+    ? `缓存冷 (超过 TTL ${ttl}) · 唤醒要重写 ~${k(w.write)} 缓存 ≈ 白板 spawn 的 ${w.times} 倍${ctx >= BIG_COLD ? " · 大 ctx 已冷, 默认不转" : ""}`
     : `缓存热 (TTL ${ttl}内) · 唤醒只读缓存`;
   const need = e.files.length
     ? `这件活点到它读过的 ${e.files.length}/${e.row.files.length} 个文件`
@@ -188,6 +204,7 @@ const renderOne = (e: Evidence, c: Ctx): string[] => {
     e.files.length ? `读过的文件 ${e.files.slice(-4).map((f) => relTo(r.cwd, f)).join(" ")}${e.files.length > 4 ? ` +${e.files.length - 4}` : ""}` : "",
     e.desc.length ? `职责${quoted(e.desc)}` : "",
     e.asks.length ? `最近的话${quoted(e.asks)}` : "",
+    e.common.length ? `降权的公共文件 ${e.common.slice(-4).map((f) => relTo(r.cwd, f)).join(" ")}${e.common.length > 4 ? ` +${e.common.length - 4}` : ""} (不少人都读过, 不计证据)` : "",
   ].filter(Boolean);
   return [
     [`\`${addr(r)}\` ${r.busy ? "忙" : r.alive ? "闲" : "冷"}`, where, ctxOf(r.contextTokens) || "ctx ?", agoOf(r.lastActivity, now)]
@@ -235,7 +252,7 @@ const vetoOf = (e: Evidence, now: number, ttlMs: number, small: boolean, force: 
   return !strong(e) ? "证据弱 (只有词面重叠)"
     : r.busy ? "正忙"
       : notWorth(e, w, small, ctx) ? `不划算 (${small ? "小活" : "证据弱"}却要${w.cold ? "整段重写" : "一直背着"} ${k(ctx)})`
-        : w.cold && ctx >= COLD_GATE && !force ? `缓存冷且 ctx ${k(ctx)} (要转就 force)`
+        : w.cold && ctx >= BIG_COLD && !force ? `缓存冷且 ctx ${k(ctx)} (大 ctx 已冷默认不转; 活真依赖它的上下文就 to+force)`
           : "";
 };
 
