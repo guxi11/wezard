@@ -1772,8 +1772,7 @@
     var other = ends.length === 2 && ends.indexOf(ROLE) >= 0 && ends.filter(function (x) { return x !== ROLE; })[0];
     return other ? pairConv(other) : null;
   };
-  // 一张卡片的窗口: 它与图上和它相连的那几个 role 之间的对话。点别人的卡片先换成它的视角
-  // (switchRole → W.pickSelf), 新树画出来再开它自己这张 —— 看的是谁的对话, 站的就是谁的位置。
+  // 点任何一张卡片 (视角自己也一样) 看的窗口: 它与图上和它相连的那几个 role 之间的对话, 不换视角。
   // links = 这一次画出来的树里, 它的父亲与孩子 (见 linksOf); 一个都没连着 = 它的全部对话。
   var talkKey = function (links, t) {
     var ls = links[t] || [];
@@ -1921,10 +1920,7 @@
     convsEl._tree = html; convsEl._html = '';
     convsEl.innerHTML = html;
     convsEl.querySelectorAll('.tci').forEach(function (el) {
-      el.onclick = function () {
-        var t = el.getAttribute('data-t');
-        if (t !== ROLE && canSwitch(t)) switchRole(t); else selectConv(talkKey(F.links, t), '');
-      };
+      el.onclick = function () { selectConv(talkKey(F.links, el.getAttribute('data-t')), ''); };
     });
     bindGo(convsEl);
     convsEl.querySelectorAll('[data-tall]').forEach(function (b) {
