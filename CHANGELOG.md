@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- AskUserQuestion 在企业微信作答后, CLI 不再显示红色 `PreToolUse:AskUserQuestion hook error: wezard: User answered "…" via WeCom`: hook 改回 `permissionDecision: "allow"` + `updatedInput` (原入参加上 `answers`, 键为题目原文, 多选按 Claude Code 的编码以 `, ` 连接、含 `, ` 或 `"` 的 label 用 JSON 字符串包起来), Claude Code 认它为已作答, 不弹本地面板, 工具照常落地, 模型拿到正常的 tool_result。daemon 回包新增 `updated_input`, hook 用 jq 拼进 `hookSpecificOutput`。「先聊聊」仍是 deny, 「去 CLI 处理」/ 空选 / 超时 / 断线仍是 ask; codebuddy 的镜像流 (`runMirrorAskqFlow`, 驱动失败后迟到的 hook) 还是 deny + reason, 因为没核实它认不认 `updatedInput`。
+
 ## [2.4.0] - 2026-10-03
 
 ### Added

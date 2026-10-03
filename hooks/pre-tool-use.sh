@@ -22,13 +22,14 @@ RESUME_WAIT="${WEZARD_RESUME_WAIT:-60}"
 HEALTH_URL="${DAEMON_URL%/approve}/healthz"
 
 emit() {
-  local decision="$1" reason="${2:-}"
-  # 用 jq 拼 JSON: reason 可能含字面引号(askq deny 把答案塞进 reason),
+  local decision="$1" reason="${2:-}" updated="${3:-}"
+  # 用 jq 拼 JSON: reason 可能含字面引号 (「先聊聊」把题目塞进 reason),
   # printf 直接拼会漏出内层 " 把 JSON 撕烂, Claude Code 解析失败 fallback
-  # 弹原生 picker → askq 失效。
+  # 弹原生 picker → askq 失效。updated = daemon 给的替换入参 (askq 的 answers)。
   if command -v jq >/dev/null 2>&1; then
-    jq -cn --arg d "$decision" --arg r "wezard: $reason" \
-      '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:$d,permissionDecisionReason:$r}}'
+    jq -cn --arg d "$decision" --arg r "wezard: $reason" --arg u "$updated" \
+      '{hookSpecificOutput:({hookEventName:"PreToolUse",permissionDecision:$d,permissionDecisionReason:$r}
+        + (if $u == "" then {} else {updatedInput:($u | fromjson)} end))}'
   else
     # jq 缺失兜底: 手动转义 \ 和 " (足够覆盖 reason 里的字面引号)。
     local esc="${reason//\\/\\\\}"; esc="${esc//\"/\\\"}"
@@ -331,6 +332,7 @@ while :; do
 
   DECISION=$(printf '%s' "$RESP" | jq -r '.decision // "ask"' 2>/dev/null) || bridge_down "bad daemon response"
   REASON=$(printf '%s' "$RESP" | jq -r '.reason // ""' 2>/dev/null)
+  UPDATED=$(printf '%s' "$RESP" | jq -c '.updated_input // empty' 2>/dev/null)
 
   # daemon 正在重启: 卡还挂在 IM 上, 拿着它给的 req_id 等 daemon 回来续接。
   if [[ "$DECISION" == "retry" ]]; then
@@ -341,7 +343,8 @@ while :; do
   fi
 
   case "$DECISION" in
-    allow|deny|ask) emit "$DECISION" "$REASON" ;;
+    allow) emit "allow" "$REASON" "$UPDATED" ;;
+    deny|ask) emit "$DECISION" "$REASON" ;;
     *) bridge_down "unknown decision: $DECISION" ;;
   esac
 done

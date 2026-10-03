@@ -4152,7 +4152,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // codebuddy 对 AskUserQuestion 不在提问时触发 PreToolUse hook — 先弹本地
         // 面板, hook 只在面板被提交后才到达 (实测可延迟数小时)。这里从 jsonl 提前
         // 看到 function_call, 直接驱动 vote 卡让远端可答; 点选后注入一段触发文本
-        // 提交本地面板, hook 到达时以 deny+reason 覆盖答案, 与 claude 路径同产物。
+        // 提交本地面板, hook 到达时以 deny+reason 覆盖答案 (claude 路径改走 allow+updatedInput)。
         // claude 系 hook 即时触发, 不走此路 (否则双重发卡)。
         if (
           c.name === "AskUserQuestion"

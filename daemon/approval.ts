@@ -644,10 +644,12 @@ const decodeKey = (
 };
 
 // ── AskUserQuestion 投票卡分支 ─────────────────────────────────────────
-// PreToolUse 协议端只能输出 allow/deny/ask, 没有「合成 tool_result」通道。
-// 取舍: 用户在 WeCom 选了选项 → 走 deny + 把答案塞进 reason, model 把 reason
-// 当作上下文继续推理(CLI 不会弹原生 picker, 流程不被打断);
-// 选「🖥️ CLI 处理」哨兵选项 → 返回 ask, CLI 弹原生 picker 由用户本地作答。两路互斥。
+// 用户在 WeCom 选了选项 → allow + updatedInput 补上 `answers` (AskUserQuestion 自己的
+// 入参: {题目文本: 所选 label}): Claude Code 对 AskUserQuestion / ExitPlanMode 认 hook
+// 给的 updatedInput 为「已作答」, 跳过本地面板, 工具照常落地出 tool_result。曾经走
+// deny + 把答案塞进 reason, CLI 里显示成红色 hook error。
+// 选「🖥️ CLI 处理」哨兵选项 → 返回 ask, CLI 弹原生 picker 由用户本地作答; 选「聊聊」
+// → deny (本来就是「别答, 先讨论」)。codebuddy 的镜像流仍是 deny + reason (见下)。
 // vote_interaction 不支持 button_list (SDK 类型注释明写「button_interaction 类型卡片使用」),
 // 微信侧静默吞掉, 所以 cli 入口只能塞进 checkbox option_list 作为哨兵 id。
 const ASKQ_PREFIX = "ASKQ|";
@@ -1054,6 +1056,11 @@ interface AskqHandleArgs {
   clientGone?: Promise<"client_gone">;
 }
 
+// Claude Code 多选答案的编码 (逆向自其 AskUserQuestion 的结果校验): ", " 连接,
+// 含 ", " 或 `"` 的 label 用 JSON 字符串包起来, 否则它拆不回原 label。
+const encodeAskqLabels = (labels: string[]): string =>
+  labels.map((l) => (l.includes(", ") || l.includes('"') ? JSON.stringify(l) : l)).join(", ");
+
 export type AskqAnswer =
   | { kind: "cli" }
   | { kind: "chat" }
@@ -1070,7 +1077,7 @@ export const interpretAskqRaw = (raw: string, q: AskqQuestion): AskqAnswer => {
       .map((s) => parseInt(s, 10))
       .filter((n) => Number.isInteger(n) && n >= 0 && n < q.options.length);
     if (idxs.length === 0) return { kind: "empty" };
-    return { kind: "picked", labels: idxs.map((i) => q.options[i]!.label).join(", ") };
+    return { kind: "picked", labels: encodeAskqLabels(idxs.map((i) => q.options[i]!.label)) };
   }
   return { kind: "empty" };
 };
@@ -1079,7 +1086,7 @@ export const interpretAskqRaw = (raw: string, q: AskqQuestion): AskqAnswer => {
 // codebuddy 对 AskUserQuestion 不在提问时触发 PreToolUse — 先弹本地面板, hook
 // 只在面板被提交后才到达 (实测可延迟数小时)。mirror 从 jsonl 提前看到
 // function_call 直接发卡; 用户点选后答案记进本槽, mirror 注入一段触发文本提交
-// 本地面板; hook 随后到达时: 有 reason → deny 覆盖(与 claude 路径同产物), 无记录
+// 本地面板; hook 随后到达时: 有 reason → deny 覆盖 (codebuddy 认不认 updatedInput 未核实, 不跟 claude 路径改), 无记录
 // → allow 让本地答案生效并作废挂着的 vote 卡 (resolvePending "moot")。
 // TTL 兜底: 注入失败/hook 不至时槽位不永久阻塞同 session 的下一次提问。
 interface MirrorAskqSlot { reqId?: string; reason?: string; at: number }
@@ -1596,7 +1603,7 @@ export const runMirrorPickerFlow = async (
 };
 
 // 多问题: 逐题顺序发卡 → 收答 → 下一题。任一题选「CLI」整体转 CLI,选「聊聊」
-// 整体转讨论; 全部答完合并成单个 deny+reason 注入。卡不会一次性轰炸 N 张。
+// 整体转讨论; 全部答完合并成一份 answers 随 allow 的 updatedInput 交回。卡不会一次性轰炸 N 张。
 const handleAskUserQuestion = async ({ cfg, log, client, body, getMirrorTarget, flushBeforeCard, clientGone }: AskqHandleArgs): Promise<ApproveResp> => {
   // ── codebuddy 镜像流去重 ────────────────────────────────────────────────
   // codebuddy 的 hook 只在本地面板被提交后到达。mirror 早已发过 vote 卡:
@@ -1625,7 +1632,7 @@ const handleAskUserQuestion = async ({ cfg, log, client, body, getMirrorTarget, 
   const target = targetChatId(approver);
   const longPollMs = cfg.approval.longPollSec * 1000;
   const total = questions.length;
-  const answers: string[] = [];
+  const answers: Record<string, string> = {};
   const flowStart = Date.now();
   for (let i = 0; i < total; i++) {
     const q = questions[i]!;
@@ -1708,13 +1715,14 @@ const handleAskUserQuestion = async ({ cfg, log, client, body, getMirrorTarget, 
       };
     }
     if (ans.kind === "empty") return { decision: "ask", reason: "askq_empty_pick" };
-    answers.push(`"${q.header || q.question}": ${ans.labels}`);
+    answers[q.question] = ans.labels; // 键是题目原文, Claude Code 按它对答案
   }
 
-  const reason = total === 1
-    ? `User answered ${answers[0]} via WeCom`
-    : `User answered ${total} questions via WeCom — ${answers.join("; ")}`;
-  return { decision: "deny", reason };
+  return {
+    decision: "allow",
+    reason: "answered via WeCom",
+    updated_input: { ...(body.tool_input as Record<string, unknown>), answers },
+  };
 };
 
 // ── /approve handler ───────────────────────────────────────────────────
@@ -1748,6 +1756,8 @@ interface ApproveResp {
   decision: "allow" | "deny" | "ask" | "retry";
   reason?: string;
   req_id?: string;
+  /** allow 时替换工具入参 (hook 拼进 hookSpecificOutput.updatedInput) —— askq 用它交答案。 */
+  updated_input?: Record<string, unknown>;
 }
 
 const decisionToHook = (d: Decision): "allow" | "deny" => (d === "deny" ? "deny" : "allow");
@@ -2168,7 +2178,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
       return;
     }
 
-    // AskUserQuestion 走单独的投票卡分支(deny+reason 注入答案 / ask 转 CLI)。
+    // AskUserQuestion 走单独的投票卡分支(allow+updatedInput 交答案 / deny 先聊聊 / ask 转 CLI)。
     if (toolName === "AskUserQuestion") {
       // writableEnded 为 false 时的 close = 响应还没写就断线 = hook 客户端先死。
       // 正常完成时 json() 先置 writableEnded, close 到来后 resolve 不再发生。
