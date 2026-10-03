@@ -192,11 +192,11 @@ button { font: inherit; color: inherit }
   border: 0; background: none; padding: 2px 6px; border-radius: 5px; cursor: pointer;
   font-size: 11px; font-weight: 400; color: var(--mute);
 }
-.convs h2 select.vt { appearance: auto; font-family: inherit; max-width: 70px }
+.convs h2 select.vt { appearance: auto; font-family: inherit; max-width: 92px }
 .convs h2 .vt:hover { background: #eef1f4; color: var(--accent) }
-/* 范围按钮 (侧栏「往来 / 全部」、关系图「相关 / 全部」): 与视图开关同一个 .vt, 字是当前范围, 点一下换另一种。 */
-.convs h2 [data-scope], .convs h2 [data-tall] { margin-left: auto }
-.convs h2 [data-scope] + .vt, .convs h2 [data-tall] + .vt { margin-left: 0 }
+/* 时间范围下拉靠右, 视图开关紧跟在它后面。 */
+.convs h2 [data-win] { margin-left: auto }
+.convs h2 [data-win] + .vt { margin-left: 0 }
 /* 关系图那一行字多 (范围 · 计数 · 名册缺席 · 看全部 · 开关): 一律不折行, 让范围那段先省略。 */
 .convs h2 { white-space: nowrap; min-width: 0 }
 .convs h2 > * { flex: none }

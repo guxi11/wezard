@@ -567,8 +567,8 @@
   var prefObj = function (key) { var v = pref(key, {}); return v && typeof v === 'object' ? v : {}; };
   var WORLD_KEY = 'wezard.role.world';
   if (!qs.has('side')) WORLD = pref(WORLD_KEY, false) === true;
-  // 早先也记过 ping 与日程卡片的展开 —— 那两样只活在内存里, 旧 key 顺手清掉。
-  try { ['wezard.role.pingOpen', 'wezard.role.planOpen'].forEach(function (k) { localStorage.removeItem(k); }); } catch (e) { }
+  // 早先也记过 ping 与日程卡片的展开 (只活在内存里了)、「往来 / 相关 / 全部」开关 (已去掉, 固定看全部 / 相关) —— 旧 key 顺手清掉。
+  try { ['wezard.role.pingOpen', 'wezard.role.planOpen', 'wezard.role.showAll', 'wezard.role.subScope'].forEach(function (k) { localStorage.removeItem(k); }); } catch (e) { }
 
   // 展开态按群各记各的 (键 = 群节点的会话键): 点开一个不收起别的, 轮询重画也不动它。
   // OPEN_AT = 已经替它自动展开过的那个 CONV —— 选中新会话时展开一次, 之后折不折由人说了算; null = 刚载入。
@@ -659,13 +659,10 @@
 
   var convItem = function (c) {
     var on = c.key === CONV;
-    // 成对: 只列与我有往来的 —— 在群里但没和我说过话的人, 点进去也是空的。
-    // 「chat 内全部」再把其余有记录的接在成对的后面 (.far), 各自按最近排。
+    // 与我有往来的成对子项在前; chat 内其余有记录的接在后面 (.far), 各自按最近排。
     var pairs = c.subs.filter(function (s) { return s.count; }).sort(recentFirst);
-    var fars = ALL
-      ? c.subs.filter(function (s) { return !s.count && s.whole && s.whole.count; })
-        .sort(function (a, b) { return recentFirst(a.whole, b.whole); })
-      : [];
+    var fars = c.subs.filter(function (s) { return !s.count && s.whole && s.whole.count; })
+      .sort(function (a, b) { return recentFirst(a.whole, b.whole); });
     var talked = OPEN[c.key] ? pairs.concat(fars) : [];
     var hidden = talked.length - SUB_FOLD;
     var bar = hidden > 0
@@ -725,7 +722,7 @@
     };
     // 没变就不碰 DOM: 心跳每 3s 来一次, 重建会把列表的滚动与焦点蹭掉。
     // 开关挂在第一个标题行的右端; 一个会话都没有也留一行标题给它。
-    var html = (sec('群聊', groups) + sec('私聊', dms) || '<h2>会话<span>0</span></h2>').replace('</h2>', scopeToggle() + winSelect() + worldToggle() + '</h2>');
+    var html = (sec('群聊', groups) + sec('私聊', dms) || '<h2>会话<span>0</span></h2>').replace('</h2>', winSelect() + worldToggle() + '</h2>');
     if (convsEl._html === html) return;
     convsEl._html = html; convsEl.innerHTML = html;
     convsEl.querySelectorAll('[data-conv]').forEach(function (b) {
@@ -742,9 +739,6 @@
     });
     bindGo(convsEl);
     bindWorldToggle(convsEl); bindWin(convsEl);
-    convsEl.querySelectorAll('[data-scope]').forEach(function (b) {
-      b.onclick = function () { setAll(b.getAttribute('data-scope') === 'all'); };
-    });
   };
 
   var shortCwd = function (p) {
@@ -823,17 +817,6 @@
   // 会话列表 ↔ 关系图: 侧栏第一行右上角同一个小开关, 标的是「点了去哪」。
   var LIST_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M3 4h10M3 8h10M3 12h10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
   var TREE_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M4 3v10M4 6h5M4 11h5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="11" cy="6" r="1.6" fill="currentColor"/><circle cx="11" cy="11" r="1.6" fill="currentColor"/></svg>';
-  // 「是否看全部」—— 群下子项「往来 / 全部」与关系图「相关 / 全部」是同一个念头, 共用这一个值。
-  // 还没存过就沿用老 key `wezard.role.subScope` ('all' / 'pair', 不是 json) 里的选择。
-  var ALL_KEY = 'wezard.role.showAll';
-  var ALL = pref(ALL_KEY, null);
-  if (typeof ALL !== 'boolean') ALL = (function () { try { return localStorage.getItem('wezard.role.subScope') === 'all'; } catch (e) { return false; } })();
-  var setAll = function (v) {
-    if (v === ALL) return;
-    ALL = v; W.treeFor = '';
-    setPref(ALL_KEY, v);
-    renderConvs();
-  };
   // 时间范围: 只看最近 N 分钟内有动静的 (0 = 全部)。会话列表与关系图共用这一个值。
   var WIN_KEY = 'wezard.role.winMin';
   var WINS = [[0, '全部'], [30, '半小时'], [60, '1小时'], [120, '2小时'], [1440, '1天']];
@@ -842,7 +825,7 @@
   var winCut = function () { return WIN ? srvNow() - WIN * 60000 : 0; };
   var winSelect = function () {
     return '<select class="vt" data-win title="时间范围: 只看这段时间内有动静的">' + WINS.map(function (w) {
-      return '<option value="' + w[0] + '"' + (w[0] === WIN ? ' selected' : '') + '>' + w[1] + '</option>';
+      return '<option value="' + w[0] + '"' + (w[0] === WIN ? ' selected' : '') + '>🕒 ' + w[1] + '</option>';
     }).join('') + '</select>';
   };
   var bindWin = function (scope) {
@@ -852,12 +835,6 @@
       convsEl._html = ''; convsEl._tree = '';
       renderConvs();
     };
-  };
-  // 单个文字按钮: 字是当前范围, 点一下切到另一种 (样式与旁边的「关系图」按钮同一个 .vt)。
-  var scopeToggle = function () {
-    var pair = !ALL;
-    return '<button class="vt" data-scope="' + (pair ? 'all' : 'pair') + '" title="' +
-      (pair ? '群下只列与我有往来的 role (点击改为列出 chat 内全部)' : '群下列出 chat 内全部 role (点击改为只列有往来的)') + '">' + (pair ? '往来' : '全部') + '</button>';
   };
   var worldToggle = function () {
     return '<button class="vt" data-vt title="' + (WORLD ? '换回会话列表' : '换成关系') + '">' + (WORLD ? LIST_SVG + '列表' : TREE_SVG + '关系') + '</button>';
@@ -2064,10 +2041,10 @@
     var F = forestOf(relations(rg));
     F.job = jobOfConv();
     var me = nodeOf(ROLE);
-    var all = ALL || !me;
+    // 只画相关的 (visibleOf); 视角不是图上的节点 (没有关系可言) 才全画。
+    var all = !me;
     var shown = [];
     var path = me ? chainUp(F, ROLE) : [];
-    // 和视角没有直接关系的只在「看全部」里画。
     F.vis = all ? null : visibleOf(F);
     var draw = function (into) {
       return F.roots.filter(function (r) { return shows(F, r); }).sort(function (a, b) {
@@ -2088,13 +2065,12 @@
       if (CONV !== self) return selectConv(self, '');
     }
     var trees = draw([]);
-    var span = rg ? (!rg.s ? '最近' + (WINS.filter(function (w) { return w[0] === WIN; })[0] || [0, ''])[1] : rg.s === R.sessions[R.sessions.length - 1] ? '最新 session' : 'session ' + fmtClock(rg.from)) : '全部时间';
+    var span = rg ? (!rg.s ? '最近' + (WINS.filter(function (w) { return w[0] === WIN; })[0] || [0, ''])[1] : rg.s === R.sessions[R.sessions.length - 1] ? '最新 session' : 'session ' + fmtClock(rg.from)) : '';
     var alone = !all && shown.length < 2;
     var html = '<div class="tview">' +
-      '<h2>关系<span title="在名片里的 session 下拉切换范围">' + esc(span) + ' · ' + (all ? Object.keys(F.ends).length : shown.length) + ' 个</span>' +
+      '<h2>关系<span title="在名片里的 session 下拉切换范围">' + (span ? esc(span) + ' · ' : '') + (all ? Object.keys(F.ends).length : shown.length) + ' 个</span>' +
         (W.degraded ? '<span class="warn" title="没拿到 wizard 注册表 (svr 还没收到 daemon 的快照), 只画观测到的往来">名册缺席</span>' : '') +
-        (me ? '<button class="vt" data-tall="' + (all ? 'rel' : 'all') + '" title="' +
-          (all ? '画出范围内所有有关系的 wizard (点击改为只画相关的)' : '只画它自己、顺着关系能连到它的 (含间接多跳的), 以及连到它们的上游链 (点击改为画全部)') + '">' + (all ? '全部' : '相关') + '</button>' : '') + winSelect() + worldToggle() + '</h2>' +
+        winSelect() + worldToggle() + '</h2>' +
       (alone ? '<div class="tsolo">' + esc(nameOf(ROLE)) + (rg ? ' 在这段 session 里' : '') + ' 没和谁有关系</div>' : '') +
       (shown.length ? '<ul class="tree' + (all ? ' all' : '') + (F.job ? ' jsel' : '') + '">' + trees + '</ul>' : '<div class="pempty">这段时间里没有任何关系</div>') +
     '</div>';
@@ -2106,11 +2082,6 @@
       el.onclick = function () { var t = el.getAttribute('data-t'); clickItem(talkKey(F.links, t), '', t); };
     });
     bindGo(convsEl);
-    convsEl.querySelectorAll('[data-tall]').forEach(function (b) {
-      b.onclick = function () {
-        setAll(b.getAttribute('data-tall') === 'all');
-      };
-    });
     bindWorldToggle(convsEl); bindWin(convsEl);
     var cur = convsEl.querySelector('.tci.me');
     if (cur && W.treeFor !== ROLE) { W.treeFor = ROLE; cur.scrollIntoView({ block: 'nearest' }); }
