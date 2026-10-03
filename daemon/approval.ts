@@ -790,6 +790,61 @@ const decodePlanKey = (key: string): { reqId: string; action: PlanAction } | und
 const decodePlanNoopKey = (key: string): string | undefined =>
   key.startsWith(PLAN_NOOP_PREFIX) ? key.slice(PLAN_NOOP_PREFIX.length) : undefined;
 
+// ── 确认卡: 守护进程自己要人点一下才做的事 (config_set 的放权项)。它不经 hook, 所以
+// danger.skipAll / ⏱窗口 / 会话缓存都压不过它 —— 这正是它不走审批卡的理由。
+const CONFIRM_PREFIX = "CONFIRM|";
+const CONFIRM_NOOP_PREFIX = "confirm_noop:";
+const CONFIRM_PICKED_PREFIX = "confirm:";
+type ConfirmAction = "yes" | "no";
+const encodeConfirmKey = (reqId: string, action: ConfirmAction): string => `${CONFIRM_PREFIX}${reqId}|${action}`;
+const decodeConfirmKey = (key: string): { reqId: string; action: ConfirmAction } | undefined => {
+  if (!key.startsWith(CONFIRM_PREFIX)) return undefined;
+  const [reqId, action] = key.slice(CONFIRM_PREFIX.length).split("|");
+  return reqId && (action === "yes" || action === "no") ? { reqId, action } : undefined;
+};
+
+interface ConfirmContent { who: string; title: string; body: string }
+// 事件回调里重画已决卡要用原文; 卡决了 (或超时) 就删。
+const confirmCards = new Map<string, ConfirmContent>();
+
+const buildConfirmCard = (reqId: string, c: ConfirmContent, done?: ConfirmAction | "stale"): TemplateCard => ({
+  card_type: "button_interaction",
+  source: buildSource(undefined, c.who),
+  main_title: { title: TRUNC(`⚙️ ${c.title}`, 38) },
+  quote_area: quoteArea(TRUNC(c.body, SAFE_QUOTE_MAX)),
+  task_id: reqId,
+  button_list: done
+    ? [{ text: done === "yes" ? "✅ 已确认写入" : done === "no" ? "❌ 已拒绝" : "⌛ 已失效", style: 4, key: `${CONFIRM_NOOP_PREFIX}${reqId}` }]
+    : [
+        { text: "❌ 不改", style: 4, key: encodeConfirmKey(reqId, "no") },
+        { text: "✅ 确认写入", style: 4, key: encodeConfirmKey(reqId, "yes") },
+      ],
+} as TemplateCard);
+
+/** 往 `principal` 的当前频道推一张确认卡; 卡发出后返回, `decided` 是人的决定 (超时 = false)。
+ *  包一层对象是因为 promise 会被 await 摊平。发不出去就抛 —— 没人看得见的卡不该被当成「人拒绝了」。 */
+export const requestConfirm = async ({ client, principal, who, title, body, timeoutMs }: {
+  client: WSClient; principal: string; who: string; title: string; body: string; timeoutMs: number;
+}): Promise<{ decided: Promise<boolean> }> => {
+  if (!client.isConnected) throw new Error("ws_disconnected");
+  const { reqId, promise } = createPending({ meta: { kind: "generic", createdAt: Date.now(), chatKey: principal }, timeoutMs });
+  const c = { who, title, body };
+  confirmCards.set(reqId, c);
+  try {
+    await client.sendMessage(targetChatId(principal), { msgtype: "template_card", template_card: buildConfirmCard(reqId, c) });
+  } catch (e) {
+    resolvePending(reqId, "deny");
+    confirmCards.delete(reqId);
+    throw e;
+  }
+  return {
+    decided: promise.then(
+      (d) => (d as unknown as string) === `${CONFIRM_PICKED_PREFIX}yes`,
+      () => false,
+    ).finally(() => confirmCards.delete(reqId)),
+  };
+};
+
 const PLAN_PICKED_PREFIX = "plan:";
 const PLAN_REVISE_REASON = "用户希望继续完善计划,请询问还需要调整哪些地方,不要直接开始执行。";
 
@@ -2595,6 +2650,24 @@ export const installApprovalEventListener = (
         }
         return;
       }
+
+      // ── 确认卡 (requestConfirm): 守护进程自己发的「点了才做」。
+      const confirmClick = decodeConfirmKey(key);
+      if (confirmClick) {
+        const c = confirmCards.get(confirmClick.reqId);
+        const ok = resolvePending(confirmClick.reqId, `${CONFIRM_PICKED_PREFIX}${confirmClick.action}` as never);
+        log.info({ reqId: confirmClick.reqId, action: confirmClick.action, ok }, "confirm event resolved");
+        try {
+          await client.updateTemplateCard(
+            frame,
+            buildConfirmCard(cbTaskId || confirmClick.reqId, c ?? { who: "wezard", title: "确认卡", body: "" }, ok ? confirmClick.action : "stale"),
+          );
+        } catch (e) {
+          log.warn({ err: (e as Error).message, reqId: confirmClick.reqId }, "confirm updateTemplateCard failed");
+        }
+        return;
+      }
+      if (key.startsWith(CONFIRM_NOOP_PREFIX)) return;
 
       // ── ExitPlanMode 计划审批卡: 在普通 approval 解码前匹配 PLAN| 前缀。
       const planClick = decodePlanKey(key);

@@ -667,32 +667,41 @@ server.registerTool(
 );
 
 // ── Config ──────────────────────────────────────────────────────────
+// 配置面: 整份 ConfigSchema 渐进式披露。说明 / 类型 / 默认 / 谁能改 / 何时生效都由守护
+// 进程从 schema 读出来渲染, 这里不复述任何一项配置。
+server.registerTool(
+  "config_get",
+  {
+    title: "Read wezard config",
+    description:
+      "读 wezard 守护进程的配置, 一层一层展开: 不给 path 列各节一行说明; 给 path (点分, 如 'approval.danger' / 'models.tiers.light.model') 列这一层的子项 —— 类型、当前值、默认值、说明, 以及 ✋ (改动要人在卡片上确认) / ↻ (改完要 reload 才生效) 标记, * 标出与默认不同的项; 叶子给完整详情。`models` 下附带各档模型的实际用量做依据。想给人提配置建议时先读它, 再用 config_set 的 dryRun 拿 diff。机器人凭据与口令不可见。Keywords: 设置、配置、cfg、allowFrom、审批、窗口、danger、模型分档、tier、keepalive。",
+    inputSchema: {
+      path: z.string().optional().describe("点分路径, 省略 = 顶层各节。数组项用下标 ('sync.targets.0')。"),
+    },
+  },
+  async ({ path }) => unwrapText("config_get", await daemonPost("/config/get", { path: path ?? "" })),
+);
+
 server.registerTool(
   "config_set",
   {
-    title: "Wezard config",
+    title: "Change wezard config",
     description:
-      "Read or modify wezard daemon configuration. Supported keys: allow_from (add/remove authorized chats/users), approval_window (auto-approve window minutes), approval_cache (session decision cache minutes), danger_skip (auto-allow ONLY calls hitting the danger list), danger_skip_all (skip ALL approvals), danger_enabled (toggle danger detection), approval_mode (all|danger), cwd (default workspace), default_chat (outbound target), log_level (trace|debug|info|warn|error), slash_ack_first_line (/clear & /new acks reply first line only, no project info/tip). Use action='add'/'remove' for array keys (allow_from), 'set' for scalars. Keywords: 设置、配置、cfg、wezard、allowFrom、授权、自动通过、时间窗口、danger skip、跳过审批、workspace、回执精简、斜杠命令简洁.",
+      "改一项 wezard 配置: 先过 schema 校验 (整份配置一起验, 不会写出让守护进程起不来的值), 再经 config-writer 写进 config.jsonc (注释保留)。`dryRun:true` 只返回改前→改后与 jsonc diff, 不写。权限按路径分级 (config_get 里的 ✋): 放权项 —— allowFrom、approval.*、CLI 二进制与启动参数、sync、监听 / 外送地址、defaultChat —— 守护进程会推一张确认卡给人, 点了才落盘 (几分钟没人点就先回 pending, 点了之后自动写, 结果捎在你下一条消息上, 别重发); 其余直接写。热生效的项写完即用, 其余回包会说要 reload。人让你「改个设置」时先 config_get 找到确切路径。",
     inputSchema: {
-      key: z
-        .enum(["allow_from", "approval_window", "approval_cache", "danger_skip", "danger_skip_all", "danger_enabled", "approval_mode", "cwd", "default_chat", "log_level", "slash_ack_first_line"])
-        .describe("Config key to read or modify."),
-      value: z
-        .string()
-        .optional()
-        .describe("New value. Omit to read current value. For booleans: 'true'/'false'. For arrays with action=set: JSON array string."),
-      action: z
-        .enum(["set", "add", "remove"])
-        .optional()
-        .describe("For array keys (allow_from): 'add' appends, 'remove' deletes an item. Scalars always use 'set'. Default: 'set'."),
+      path: z.string().describe("点分路径, 如 'models.tiers.light.model'、'wrc.mirror.keepalive.rounds'。"),
+      value: z.any().optional().describe("新值, 按该项类型给 JSON (true / 5 / \"opus\" / [\"a\"] / {...}); 写成字符串的也会按类型解析。op=unset 时省略。"),
+      op: z.enum(["set", "add", "remove", "unset"]).optional().describe("set (默认) 整体替换; add / remove 往数组里加 / 删一项 (value 可以是单项或数组); unset 删掉这一项, 回到默认值。"),
+      dryRun: z.boolean().optional().describe("true = 只看 diff 与校验结果, 不写、不发卡。"),
     },
   },
-  async ({ key, value, action }) => {
-    if (value === undefined) {
-      return unwrap("config_set", await daemonPost("/config/get", { key }));
-    }
-    return unwrap("config_set", await daemonPost("/config/set", { key, value, action: action ?? "set" }));
-  },
+  async ({ path, value, op, dryRun }) =>
+    unwrapText("config_set", await daemonPost("/config/set", {
+      path,
+      ...(value !== undefined ? { value } : {}),
+      ...(op ? { op } : {}),
+      ...(dryRun ? { dryRun } : {}),
+    })),
 );
 
 // ── Wizard: 会话的身份 ─────────────────────────────────────────────────────

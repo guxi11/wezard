@@ -388,8 +388,8 @@ export const ConfigSchema = z.preprocess(liftLegacySchedules, z.object({
   wrc: Wrc.default({}).describe("远程驱动: 授权名单、CLI 后端、工作区、镜像"),
   approval: knob(Approval.default({}).describe("工具调用审批: 粒度、规则、危险名单、窗口"), { gate: "card", apply: "hot" }),
   models: hot(Models.default({}).describe("按任务难度分档的模型 / effort, 以及各群管家用的模型")),
-  sync: knob(Sync.default({ targets: [] }).describe("把 MCP / hook 注册写进各 CLI 的 settings.json"), { gate: "card" }),
-  svr: Svr.default({}).describe("独立详情中转服务 (wezard svr)"),
+  sync: knob(Sync.default({ targets: [] }).describe("把 MCP / hook 注册写进各 CLI 的 settings.json; 改完跑 `wezard sync` 才生效"), { gate: "card" }),
+  svr: Svr.default({}).describe("独立详情中转服务 (wezard svr); svr 自己启动时读, 改完重启 svr 才生效"),
   schedules: knob(Schedules, { gate: "hidden" }),
 }));
 
@@ -445,15 +445,21 @@ export const loadConfig = (explicitPath?: string): LoadResult => {
     );
   }
   const base = (readJsoncIfExists(sourcePath) ?? {}) as Record<string, unknown>;
-  const secrets = (readJsoncIfExists(SECRETS_PATH) ?? {}) as Record<string, unknown>;
-  const merged = deepMerge(base, secrets);
-
-  const parsed = ConfigSchema.safeParse(merged);
-  if (!parsed.success) {
-    const issues = parsed.error.issues
-      .map((i) => `  - ${i.path.join(".") || "<root>"}: ${i.message}`)
-      .join("\n");
-    throw new Error(`wezard config invalid (${sourcePath}):\n${issues}`);
-  }
+  const parsed = parseWithSecrets(base);
+  if (!parsed.success) throw new Error(`wezard config invalid (${sourcePath}):\n${configIssues(parsed.error)}`);
   return { config: parsed.data, sourcePath: expandHome(sourcePath) };
 };
+
+/** secrets.json 的原样内容 —— config_get / config_set 据此把来自它的路径一律藏起来。 */
+export const readSecrets = (): Record<string, unknown> =>
+  (readJsoncIfExists(SECRETS_PATH) ?? {}) as Record<string, unknown>;
+
+const parseWithSecrets = (base: Record<string, unknown>) => ConfigSchema.safeParse(deepMerge(base, readSecrets()));
+
+/** 一份 config.jsonc 全文按 loadConfig 的同一口径 (叠 secrets、整份校验) 解析 —— 写之前先过它,
+ *  任何一次写入都不会产出一份让守护进程起不来的配置。 */
+export const parseConfigText = (text: string) =>
+  parseWithSecrets((parseJsonc(text) ?? {}) as Record<string, unknown>);
+
+export const configIssues = (e: z.ZodError): string =>
+  e.issues.map((i) => `  - ${i.path.join(".") || "<root>"}: ${i.message}`).join("\n");

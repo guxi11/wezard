@@ -15,18 +15,19 @@ const writeText = (abs: string, txt: string): void => {
   writeFileSync(abs, txt.endsWith("\n") ? txt : `${txt}\n`, "utf8");
 };
 
+export type JsoncPatch = { path: JSONPath; value: unknown };
+
+/** The file's current text ("{}" when absent) — the base a preview patches. */
+export const readJsoncText = (filePath: string): string => readText(expandHome(filePath));
+
+/** Pure: `txt` with the patches applied, comments and formatting kept. value=undefined deletes. */
+export const previewPatch = (txt: string, patches: JsoncPatch[]): string =>
+  patches.reduce((acc, { path, value }) => applyEdits(acc, modify(acc, path, value, { formattingOptions: FORMAT })), txt);
+
 /** Apply a sequence of (path, value) patches to a JSONC file. value=undefined deletes. */
-export const patchJsonc = (
-  filePath: string,
-  patches: Array<{ path: JSONPath; value: unknown }>,
-): void => {
+export const patchJsonc = (filePath: string, patches: JsoncPatch[]): void => {
   const abs = expandHome(filePath);
-  let txt = readText(abs);
-  for (const { path, value } of patches) {
-    const edits = modify(txt, path, value, { formattingOptions: FORMAT });
-    txt = applyEdits(txt, edits);
-  }
-  writeText(abs, txt);
+  writeText(abs, previewPatch(readText(abs), patches));
 };
 
 /** Append `value` into a string array at `path`, deduped. No-op if already present. */

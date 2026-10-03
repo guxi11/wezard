@@ -115,3 +115,27 @@ export const typeOf = (core: z.ZodTypeAny): string =>
   : core instanceof z.ZodObject ? "object"
   : core instanceof z.ZodUnion || core instanceof z.ZodDiscriminatedUnion ? "union"
   : "unknown";
+
+const RANK: Record<Gate, number> = { free: 0, card: 1, hidden: 2 };
+const stricter = (a: Gate, b: Gate): Gate => (RANK[a] >= RANK[b] ? a : b);
+
+// Every schema child, including the value type of a record and the element of an array.
+const kidsOf = (core: z.ZodTypeAny): z.ZodTypeAny[] =>
+  core instanceof z.ZodObject ? Object.values(core.shape as Record<string, z.ZodTypeAny>)
+  : core instanceof z.ZodRecord ? [core._def.valueType]
+  : core instanceof z.ZodArray ? [core.element]
+  : [];
+
+const gateBelow = (s: z.ZodTypeAny, up: Required<Knob>): Gate => {
+  const k = inherit(up, unwrap(s).knob);
+  return kidsOf(unwrap(s).core).reduce<Gate>((g, c) => stricter(g, gateBelow(c, k)), k.gate);
+};
+
+/** The gate a WRITE at `path` answers to: the strictest one in its subtree — writing a
+ *  whole branch writes every leaf under it. */
+export const writeGate = (r: Resolved): Gate =>
+  kidsOf(r.core).reduce<Gate>((g, c) => stricter(g, gateBelow(c, r)), r.gate);
+
+/** jsonc-parser addresses array items by number, object keys by string. */
+export const toJsonPath = (root: z.ZodTypeAny, path: string[]): (string | number)[] =>
+  path.map((seg, i) => (resolve(root, path.slice(0, i))?.core instanceof z.ZodArray ? Number(seg) : seg));

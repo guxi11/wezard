@@ -207,14 +207,13 @@ const deepEntries = (v: unknown): [string, unknown][] =>
     ? Object.entries(v as Record<string, unknown>).flatMap(([k, x]) => [[k, x] as [string, unknown], ...deepEntries(x)])
     : [];
 
-/** wezard 自家工具里改审批 / 全机设置的「写」: config_set 带 value、set_model scope:"default"。
- *  hook 的自家工具白名单把它们放回审批; 这里让它们**必发卡** —— 不吃 danger 的两个开关、
- *  ⏱窗口和会话缓存, 否则模型仍能在一个开着的窗口里替人把审批关掉。只有 skipAll / bypass
- *  (人主动选的全关) 压得过它。 */
+/** wezard 自家工具里改全机设置的「写」: set_model scope:"default"。hook 的自家工具白名单把它
+ *  放回审批; 这里让它**必发卡** —— 不吃 danger 的两个开关、⏱窗口和会话缓存。只有 skipAll /
+ *  bypass (人主动选的全关) 压得过它。config_set 不在这里: 它按路径分级, 放权项由守护进程自己
+ *  推确认卡 (/config/set), 那张卡连 skipAll 都压不过; 再在 hook 拦一道就成了一次改动两张卡。 */
 export const selfConfigWriteOf = (toolName: string, toolInput: unknown): DangerHit | undefined => {
-  const tool = /wezard__(config_set|set_model)$/.exec(toolName)?.[1];
+  const tool = /wezard__(set_model)$/.exec(toolName)?.[1];
   const kv = tool ? deepEntries(toolInput) : [];
-  if (tool === "config_set" && kv.some(([k, v]) => k === "value" && v !== null && v !== undefined)) return { rule: "wezard 配置写入 (config_set)" };
   if (tool === "set_model" && kv.some(([k, v]) => k === "scope" && v === "default")) return { rule: "改全局默认模型 (set_model scope:default)" };
   return undefined;
 };

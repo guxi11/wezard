@@ -196,15 +196,14 @@ fi
 #   1. cli/sync.ts (legacy claude-internal): mcp__wezard__<tool>
 #   2. .claude-plugin/plugin.json:           mcp__plugin_wezard_wezard__<tool>
 # 用 *wezard__* 同时覆盖两种前缀。
-# 例外: 改审批本身或全机设置的「写」不在白名单 —— config_set 带 value (可写
-# danger_skip_all / approval_mode / allow_from, 等于模型自己关审批、扩授权) 与
-# set_model scope:"default" (改 CLI 全局设置)。它们落回下面的正常审批; 首次绑定
-# 不受影响: 绑定走 IM 魔法短语 (claim.ts), 不经这两个工具, 而绑定前没有审批人时
-# daemon 回 ask, 由本地 CLI 的原生确认框兜住, 不会卡死。
+# 例外: 改全机设置的「写」不在白名单 —— set_model scope:"default" (改 CLI 全局设置)。
+# 它落回下面的正常审批; 首次绑定不受影响: 绑定走 IM 魔法短语 (claim.ts), 不经这个工具,
+# 而绑定前没有审批人时 daemon 回 ask, 由本地 CLI 的原生确认框兜住, 不会卡死。
+# config_set 放行: 它按路径分级, 放权项 (allowFrom / approval.* …) 由守护进程自己推确认卡,
+# 那张卡不经 hook, danger.skipAll 也压不过; 在这里再拦一道就是一次改动两张卡。
 if [[ "$TOOL_NAME" == mcp__*wezard__* ]]; then
   case "${TOOL_NAME##*wezard__}" in
     # 任意深度找: DeferExecuteTool 剥包装失败时真实入参可能还套着一层, 只看顶层就失败开放。
-    config_set) WRITES=$(printf '%s' "$TOOL_INPUT" | jq -r '[.. | objects | select(has("value") and .value != null)] | any') ;;
     set_model)  WRITES=$(printf '%s' "$TOOL_INPUT" | jq -r '[.. | objects | .scope?] | index("default") != null') ;;
     *)          WRITES=false ;;
   esac

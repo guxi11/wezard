@@ -1,93 +1,254 @@
+// config_get / config_set: the whole ConfigSchema, progressively disclosed. Everything a
+// model reads here — types, defaults, prose, who may change it, when it bites — comes
+// from the schema itself (shared/config-meta.ts); this module only renders and plans.
+// The card for a `card`-gated write and the actual file write are the caller's (index.ts).
 import type { Config } from "../shared/config.js";
-import { patchJsonc } from "../shared/config-writer.js";
+import { ConfigSchema, configIssues, parseConfigText, readSecrets } from "../shared/config.js";
+import { previewPatch, readJsoncText } from "../shared/config-writer.js";
+import {
+  childKeys, isBranch, parsePath, resolve, toJsonPath, typeOf, writeGate,
+  type Apply, type Gate, type Resolved,
+} from "../shared/config-meta.js";
+import { z } from "zod";
 
-type Action = "set" | "add" | "remove";
+type Err = { ok: false; reason: string };
+type Obj = Record<string, unknown>;
 
-type SetResult = { ok: true; key: string; before: unknown; after: unknown };
-type SetError = { ok: false; reason: string };
+const isObj = (v: unknown): v is Obj => !!v && typeof v === "object" && !Array.isArray(v);
+const getIn = (obj: unknown, path: readonly string[]): unknown =>
+  path.reduce<unknown>((acc, k) => (acc && typeof acc === "object" ? (acc as Obj)[k] : undefined), obj);
 
-const KEYS: Record<string, { path: string[]; type: "string" | "number" | "boolean" | "array"; enum?: readonly string[] }> = {
-  allow_from:       { path: ["wrc", "allowFrom"],                type: "array" },
-  approval_window:  { path: ["approval", "windowMinutes"],       type: "number" },
-  approval_cache:   { path: ["approval", "sessionCacheMinutes"], type: "number" },
-  danger_skip:      { path: ["approval", "danger", "skip"],      type: "boolean" },
-  danger_skip_all:  { path: ["approval", "danger", "skipAll"],   type: "boolean" },
-  danger_enabled:   { path: ["approval", "danger", "enabled"],   type: "boolean" },
-  // 枚举必须校验: 写进 jsonc 的非法值会让 daemon reload 时 zod 抛错起不来。
-  approval_mode:    { path: ["approval", "mode"],                type: "string", enum: ["all", "danger"] },
-  cwd:              { path: ["wrc", "cwd"],                      type: "string" },
-  default_chat:     { path: ["defaultChat"],                     type: "string" },
-  log_level:        { path: ["daemon", "logLevel"],              type: "string" },
-  slash_ack_first_line: { path: ["wrc", "mirror", "slashAckFirstLine"], type: "boolean" },
+/** Mutate the live config in place — the daemon's modules hold this very object. */
+const setIn = (obj: Obj, path: readonly string[], value: unknown): void => {
+  const parent = getIn(obj, path.slice(0, -1));
+  if (isObj(parent) || Array.isArray(parent)) (parent as Obj)[path[path.length - 1]!] = value;
 };
 
-const getNestedValue = (obj: unknown, path: string[]): unknown =>
-  path.reduce<unknown>((acc, k) => (acc && typeof acc === "object" ? (acc as Record<string, unknown>)[k] : undefined), obj);
+// 默认值从 schema 解析一份空配置得来, 而不是读字段自己的 default: `models.tiers.light.model`
+// 的字段默认是 "", 真默认 "haiku" 写在上一层的 `.default({...})` 里。
+let defaults: Obj | undefined;
+const defaultsOf = (): Obj => (defaults ??= ConfigSchema.parse({ bot: { botId: "-", secret: "-" } }) as Obj);
 
-const setNestedValue = (obj: unknown, path: string[], value: unknown): void => {
-  const parent = path.slice(0, -1).reduce<unknown>(
-    (acc, k) => (acc && typeof acc === "object" ? (acc as Record<string, unknown>)[k] : undefined),
-    obj,
-  );
-  if (parent && typeof parent === "object") {
-    (parent as Record<string, unknown>)[path[path.length - 1]!] = value;
+const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+const show = (v: unknown): string => (v === undefined ? "—" : JSON.stringify(v));
+const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
+// ── 可见性 ──────────────────────────────────────────────────────────────
+// hidden 两个来源: schema 标的 (bot / 口令), 以及 secrets.json 里实际出现的任何叶子 ——
+// 那里的值叠在 config.jsonc 之上, 读出来是泄密, 写进 config.jsonc 也会被它盖掉。
+const fromSecrets = (path: readonly string[], secrets: Obj): boolean =>
+  path.some((_, i) => { const v = getIn(secrets, path.slice(0, i + 1)); return v !== undefined && !isObj(v); });
+
+const visible = (r: Resolved, secrets: Obj): boolean => r.gate !== "hidden" && !fromSecrets(r.path, secrets);
+
+const APPLY_WORD: Record<Apply, string> = { hot: "热生效", reload: "需 reload" };
+const GATE_WORD: Record<Gate, string> = { free: "wizard 可直接改", card: "改动要人在卡片上确认", hidden: "不可读写" };
+const flags = (r: Resolved): string => `${writeGate(r) === "card" ? "✋" : ""}${r.apply === "reload" ? "↻" : ""}`;
+
+const LEGEND = "✋ = 改动要人在卡片上点确认 · ↻ = 改完要 reload (`./cli/wezard.sh reload`) 才生效 · * = 当前值不同于默认";
+
+// ── config_get ──────────────────────────────────────────────────────────
+// 节 / 记录只报项数: 它们的子项各有各的值、默认与标记, 往下一层看。节上的 ✋ 只在整节都要
+// 确认时才挂 (节自己的 gate), 混着的节 (wrc) 由子项各自标。
+const row = (cfg: Config, r: Resolved): string => {
+  const key = r.path[r.path.length - 1]!;
+  const cur = getIn(cfg, r.path);
+  const def = getIn(defaultsOf(), r.path);
+  const many = isBranch(r.core) || r.core instanceof z.ZodRecord;
+  const star = !many && !same(cur, def) ? "*" : " ";
+  const size = isBranch(r.core) ? childKeys(r.core).length : isObj(cur) ? Object.keys(cur).length : 0;
+  const val = many ? `${size} 项` : `= ${clip(show(cur), 80)}${star === "*" ? ` (默认 ${clip(show(def), 40)})` : ""}`;
+  const mark = isBranch(r.core) ? (r.gate === "card" ? "✋" : "") : flags(r);
+  return `${star} ${[`${key}  ${typeOf(r.core)} ${val}`, mark, r.desc].filter(Boolean).join("  ")}`;
+};
+
+const leaf = (cfg: Config, r: Resolved): string => [
+  r.path.join("."),
+  `  说明: ${r.desc || "—"}`,
+  `  类型: ${typeOf(r.core)}${r.optional ? " (可不设)" : ""}`,
+  `  当前: ${show(getIn(cfg, r.path))}`,
+  `  默认: ${show(getIn(defaultsOf(), r.path))}`,
+  `  生效: ${r.apply === "hot" ? "热生效, 改完即用" : "需 reload 才生效 (守护进程启动时读一次)"}`,
+  `  权限: ${GATE_WORD[writeGate(r)]}`,
+].join("\n");
+
+// 记录 / 数组: 子项是数据而不是 schema 字段, 按数据列。
+const entries = (cfg: Config, r: Resolved): string[] => {
+  const v = getIn(cfg, r.path);
+  const pairs: [string, unknown][] = Array.isArray(v) ? v.map((x, i) => [String(i), x]) : isObj(v) ? Object.entries(v) : [];
+  return pairs.length ? pairs.map(([k, x]) => `  ${k} = ${clip(show(x), 120)}`) : ["  (空)"];
+};
+
+const missing = (path: string[], secrets: Obj): string => {
+  const at = [...path.keys()].reverse().map((i) => path.slice(0, i)).find((p) => resolve(ConfigSchema, p));
+  const base = resolve(ConfigSchema, at ?? [])!;
+  const kids = childKeys(base.core).filter((k) => visible(resolve(ConfigSchema, [...base.path, k])!, secrets));
+  return `没有 \`${path.join(".")}\`${kids.length ? `; \`${base.path.join(".") || "<root>"}\` 下有: ${kids.join(", ")}` : ""}`;
+};
+
+/** `path` 这一层的文本: 节点自己一行说明, 再逐项列子项 (或叶子详情)。`evidence` 挂额外依据 (用量等)。 */
+export const configGet = (
+  cfg: Config,
+  sourcePath: string,
+  path: string | undefined,
+  evidence: (path: string[]) => string[] = () => [],
+): { ok: true; text: string } | Err => {
+  const p = parsePath(path);
+  const secrets = readSecrets();
+  const r = resolve(ConfigSchema, p);
+  if (!r) return { ok: false, reason: missing(p, secrets) };
+  if (!visible(r, secrets)) return { ok: false, reason: `\`${p.join(".")}\` 不可读` };
+  const extra = evidence(p);
+  const tail = [...(extra.length ? ["", "依据:", ...extra.map((l) => `  ${l}`)] : []), "", LEGEND];
+  if (!isBranch(r.core)) {
+    const body = r.core instanceof z.ZodRecord || r.core instanceof z.ZodArray
+      ? [`${p.join(".")}  ${typeOf(r.core)}  ${flags(r)}  ${r.desc}`, ...entries(cfg, r), "", leaf(cfg, r).split("\n").slice(4).join("\n")]
+      : [leaf(cfg, r)];
+    return { ok: true, text: [...body, ...tail].join("\n") };
   }
+  const head = p.length
+    ? `${p.join(".")} · ${r.desc}${flags(r) ? `  ${flags(r)}` : ""}`
+    : `wezard 配置 (${sourcePath}) —— config_get({path}) 逐层展开; config_set({path, value, dryRun:true}) 先看 diff 再改`;
+  const kids = childKeys(r.core)
+    .map((k) => resolve(ConfigSchema, [...p, k])!)
+    .filter((c) => visible(c, secrets))
+    .map((c) => row(cfg, c));
+  return { ok: true, text: [head, ...kids, ...tail].join("\n") };
 };
 
-const parseValue = (raw: string, type: string): unknown => {
+// ── config_set ──────────────────────────────────────────────────────────
+export type Op = "set" | "add" | "remove" | "unset";
+export interface SetReq { path?: string; value?: unknown; op?: string; dryRun?: boolean }
+
+export interface Plan {
+  ok: true;
+  path: string[];
+  jsonPath: (string | number)[];
+  value: unknown;
+  gate: Gate;
+  apply: Apply;
+  before: unknown;
+  after: unknown;
+  changed: boolean;
+  diff: string;
+}
+
+// 字符串之外的类型收到字符串时先试 JSON.parse —— MCP 那头模型常把 `true` / `5` / `["a"]` 写成字符串。
+const coerce = (core: z.ZodTypeAny, v: unknown): unknown => {
+  if (typeof v !== "string" || core instanceof z.ZodString || core instanceof z.ZodEnum) return v;
+  try { return JSON.parse(v); } catch { return v; }
+};
+
+// 行级 diff: 掐掉公共首尾, 中间段前后各留一行上下文。jsonc-parser 的改动总是一段连续区域。
+const lineDiff = (a: string, b: string): string => {
+  const x = a.split("\n"), y = b.split("\n");
+  let s = 0;
+  while (s < x.length && s < y.length && x[s] === y[s]) s++;
+  let e = 0;
+  while (e < x.length - s && e < y.length - s && x[x.length - 1 - e] === y[y.length - 1 - e]) e++;
+  const ctx = (l: string | undefined): string[] => (l === undefined ? [] : [`  ${l}`]);
+  return [
+    ...ctx(x[s - 1]),
+    ...x.slice(s, x.length - e).map((l) => `- ${l}`),
+    ...y.slice(s, y.length - e).map((l) => `+ ${l}`),
+    ...ctx(x[x.length - e]),
+  ].join("\n");
+};
+
+const parseOp = (op: string | undefined): Op | undefined =>
+  op === undefined || op === "" ? "set" : (["set", "add", "remove", "unset"] as const).find((o) => o === op);
+
+/** 算一次写入的全部后果而不落盘: 校验 (整份配置过 zod)、改前改后、jsonc diff、gate / apply。 */
+export const planSet = (cfg: Config, sourcePath: string, req: SetReq): Plan | Err => {
+  const p = parsePath(req.path);
+  if (!p.length) return { ok: false, reason: "path 必填, 例如 'models.tiers.light.model'; 不知道有哪些就先 config_get()" };
+  const secrets = readSecrets();
+  const r = resolve(ConfigSchema, p);
+  if (!r) return { ok: false, reason: missing(p, secrets) };
+  const gate = writeGate(r);
+  if (gate === "hidden" || getIn(secrets, p) !== undefined || fromSecrets(p, secrets)) return { ok: false, reason: `\`${p.join(".")}\` 不可写` };
+  const op = parseOp(req.op);
+  if (!op) return { ok: false, reason: `op 只能是 set / add / remove / unset, 收到 ${req.op}` };
+  if ((op === "set" || op === "add" || op === "remove") && req.value === undefined) return { ok: false, reason: `op=${op} 要带 value` };
+
+  // 改前取盘上那份 (叠 secrets 后解析) 而不是活的 cfg: reload 项写进文件后活值并不跟着变,
+  // 拿活值当 before 会把「文件里已经是 X」说成「还是旧值」。
+  const text = readJsoncText(sourcePath);
+  const onDisk = parseConfigText(text);
+  const before = getIn(onDisk.success ? onDisk.data : cfg, p);
+  const value = (() => {
+    if (op === "unset") return undefined;
+    if (op === "set") return coerce(r.core, req.value);
+    const el = (r.core as z.ZodArray<z.ZodTypeAny>).element;
+    const items = (Array.isArray(req.value) ? req.value : [req.value]).map((x) => coerce(el, x));
+    const cur = Array.isArray(before) ? before : [];
+    return op === "add"
+      ? [...cur, ...items.filter((x) => !cur.some((c) => same(c, x)))]
+      : cur.filter((c) => !items.some((x) => same(c, x)));
+  })();
+  if ((op === "add" || op === "remove") && !(r.core instanceof z.ZodArray)) return { ok: false, reason: `\`${p.join(".")}\` 不是数组, add / remove 用不了` };
+
+  const jsonPath = toJsonPath(ConfigSchema, p);
+  const next = previewPatch(text, [{ path: jsonPath, value }]);
+  const parsed = parseConfigText(next);
+  if (!parsed.success) return { ok: false, reason: `校验没过, 没写:\n${configIssues(parsed.error)}` };
+  const after = getIn(parsed.data, p);
+  return {
+    ok: true, path: p, jsonPath, value, gate, apply: r.apply, before, after,
+    changed: next !== text,
+    diff: lineDiff(text, next),
+  };
+};
+
+/** 计划的文本形态: dryRun 的回包、确认卡的正文、写完的回执共用。 */
+export const renderPlan = (pl: Plan): string => [
+  `${pl.path.join(".")}: ${clip(show(pl.before), 300)} → ${clip(show(pl.after), 300)}`,
+  `${GATE_WORD[pl.gate]} · ${APPLY_WORD[pl.apply]}`,
+  ...(pl.changed ? ["", pl.diff] : ["(文件不变)"]),
+].join("\n");
+
+/** 落盘之后把新值装进活的 cfg —— 只对 hot 项: reload 项半途换值, 会让启动时抓住旧值的模块与现读的模块各执一词。 */
+export const applyHot = (cfg: Config, pl: Plan): void => {
+  if (pl.apply === "hot") setIn(cfg as unknown as Obj, pl.path, pl.after);
+};
+
+// ── 旧 key 兼容 ─────────────────────────────────────────────────────────
+// 正在跑的 wizard 的 MCP 进程还是旧代码, 仍以 {key, value, action} 调 config_set。值按旧规则
+// 从字符串解析成类型, 然后走同一条路 (同样分级、同样发卡)。
+type LegacyType = "string" | "number" | "boolean" | "array";
+const LEGACY: Record<string, { path: string; type: LegacyType }> = {
+  allow_from:           { path: "wrc.allowFrom",                type: "array" },
+  approval_window:      { path: "approval.windowMinutes",       type: "number" },
+  approval_cache:       { path: "approval.sessionCacheMinutes", type: "number" },
+  danger_skip:          { path: "approval.danger.skip",         type: "boolean" },
+  danger_skip_all:      { path: "approval.danger.skipAll",      type: "boolean" },
+  danger_enabled:       { path: "approval.danger.enabled",      type: "boolean" },
+  approval_mode:        { path: "approval.mode",                type: "string" },
+  cwd:                  { path: "wrc.cwd",                      type: "string" },
+  default_chat:         { path: "defaultChat",                  type: "string" },
+  log_level:            { path: "daemon.logLevel",              type: "string" },
+  slash_ack_first_line: { path: "wrc.mirror.slashAckFirstLine", type: "boolean" },
+};
+
+const legacyValue = (raw: string, type: LegacyType): unknown => {
   switch (type) {
-    case "number": { const n = Number(raw); return Number.isFinite(n) ? n : undefined; }
+    case "number": { const n = Number(raw); return Number.isFinite(n) ? n : raw; }
     case "boolean": return raw === "true" || raw === "1";
-    case "array": try { const a = JSON.parse(raw); return Array.isArray(a) ? a : undefined; } catch { return undefined; }
+    case "array": try { return JSON.parse(raw); } catch { return raw; }
     default: return raw;
   }
 };
 
-export const configSet = (
-  cfg: Config,
-  sourcePath: string,
-  key: string | undefined,
-  value: unknown,
-  action: string | undefined,
-): SetResult | SetError => {
-  if (!key || !KEYS[key]) return { ok: false, reason: `unknown key "${key}". valid: ${Object.keys(KEYS).join(", ")}` };
-  const spec = KEYS[key]!;
-  const act: Action = (action === "add" || action === "remove") ? action : "set";
-  const before = getNestedValue(cfg, spec.path);
-
-  if (spec.type === "array") {
-    const arr = Array.isArray(before) ? (before as string[]).slice() : [];
-    let after: string[];
-    if (act === "add") {
-      const item = String(value ?? "");
-      if (!item) return { ok: false, reason: "value required for add" };
-      after = arr.includes(item) ? arr : [...arr, item];
-    } else if (act === "remove") {
-      const item = String(value ?? "");
-      if (!item) return { ok: false, reason: "value required for remove" };
-      after = arr.filter((x) => x !== item);
-    } else {
-      const parsed = parseValue(String(value ?? "[]"), "array");
-      if (!parsed) return { ok: false, reason: "value must be a JSON array for set on array keys" };
-      after = parsed as string[];
-    }
-    patchJsonc(sourcePath, [{ path: spec.path, value: after }]);
-    setNestedValue(cfg, spec.path, after);
-    return { ok: true, key, before: arr, after };
-  }
-
-  const parsed = parseValue(String(value ?? ""), spec.type);
-  if (parsed === undefined) return { ok: false, reason: `cannot parse "${value}" as ${spec.type}` };
-  if (spec.enum && !spec.enum.includes(String(parsed))) {
-    return { ok: false, reason: `invalid value "${parsed}". valid: ${spec.enum.join("|")}` };
-  }
-  patchJsonc(sourcePath, [{ path: spec.path, value: parsed }]);
-  setNestedValue(cfg, spec.path, parsed);
-  return { ok: true, key, before, after: parsed };
+export const fromLegacy = (key: string, value: unknown, action: string | undefined): SetReq | Err => {
+  const spec = LEGACY[key];
+  if (!spec) return { ok: false, reason: `unknown key "${key}". valid: ${Object.keys(LEGACY).join(", ")}` };
+  const raw = String(value ?? "");
+  return action === "add" || action === "remove"
+    ? { path: spec.path, op: action, value: raw }
+    : { path: spec.path, op: "set", value: legacyValue(raw, spec.type) };
 };
 
-export const configGet = (cfg: Config, key: string | undefined): { ok: true; key: string; value: unknown } | SetError => {
-  if (!key || !KEYS[key]) return { ok: false, reason: `unknown key "${key}". valid: ${Object.keys(KEYS).join(", ")}` };
-  return { ok: true, key, value: getNestedValue(cfg, KEYS[key]!.path) };
+export const legacyGet = (cfg: Config, key: string | undefined): { ok: true; key: string; value: unknown } | Err => {
+  const spec = key ? LEGACY[key] : undefined;
+  return spec ? { ok: true, key: key!, value: getIn(cfg, parsePath(spec.path)) } : { ok: false, reason: `unknown key "${key}". valid: ${Object.keys(LEGACY).join(", ")}` };
 };
-

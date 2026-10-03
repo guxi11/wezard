@@ -8,17 +8,18 @@ import { homedir } from "node:os";
 import { loadConfig } from "../shared/config.js";
 import { makeLogger } from "../shared/log.js";
 import { clipLine, sleep } from "../shared/std.js";
+import { patchJsonc } from "../shared/config-writer.js";
 import { EFFORTS, parseEffort } from "../shared/effort.js";
 import { bindCliBackends, projectDirsFor, type CliBackendName } from "../shared/cli-backends.js";
 import { startWs } from "./ws.js";
 import { startNetWatch } from "./net-watch.js";
 import { startHttp, json, readBody, type Handler } from "./http.js";
-import { configGet, configSet } from "./config-api.js";
+import { applyHot, configGet, fromLegacy, legacyGet, planSet, renderPlan, type Plan, type SetReq } from "./config-api.js";
 import { installInboundRouter } from "./inbound.js";
 import { loadMirrorStore } from "./mirror-store.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
-import { installApprovalEventListener, makeApproveHandler } from "./approval.js";
+import { installApprovalEventListener, makeApproveHandler, requestConfirm } from "./approval.js";
 import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, setWorldFactsProvider, recordPost, recordCharter, backfillCharter } from "./detail.js";
 import { EMPTY_FACTS, type WorldFacts, type WorldFactWizard } from "../shared/world.js";
 import { clearAutoWindow, initAutoWindowPersistence, setAutoWindow } from "./session-cache.js";
@@ -2284,19 +2285,82 @@ const main = async (): Promise<void> => {
       json(res, 200, { ok: true, removed: renderTask(gone, state) });
     });
 
-    // POST /config/set — modify daemon config from MCP. 口令门见 `guarded`; 模型还得先过
-    // config_set 的审批卡 (danger.ts) 才走得到这里。
-    http.register("POST /config/set", guarded(async (req, res) => {
-      const body = (await readBody(req)) as { key?: string; value?: unknown; action?: string };
-      const r = configSet(cfg, sourcePath, body.key, body.value, body.action);
-      json(res, r.ok ? 200 : 400, r);
-    }));
+    // 确认卡在请求里最多等 4 分钟 (留出 fetch 5 分钟收头的余量), 卡本身半小时有效。
+    const CONFIRM_INLINE_MS = 240_000;
+    const CONFIRM_TIMEOUT_MS = 30 * 60_000;
+    const configEvidence = (_p: string[]): string[] => [];
 
+    // POST /config/get —— 新 MCP 带 `path` (可空) 拿渲染好的文本; 老 MCP 带 `key` 拿 {key, value}。
     http.register("POST /config/get", async (req, res) => {
-      const body = (await readBody(req)) as { key?: string };
-      const r = configGet(cfg, body.key);
+      const body = (await readBody(req)) as { key?: string; path?: string };
+      if (typeof body.key === "string") { const r = legacyGet(cfg, body.key); json(res, r.ok ? 200 : 400, r); return; }
+      const r = configGet(cfg, sourcePath, body.path, configEvidence);
       json(res, r.ok ? 200 : 400, r);
     });
+
+    // POST /config/set —— 口令门见 `guarded`。分级在这里而不在 hook: `card` 项由守护进程
+    // 自己推确认卡, 所以 danger.skipAll / ⏱窗口 都放不掉它。卡等 CONFIRM_INLINE_MS 还没人点
+    // 就先回 pending (fetch 默认 5 分钟收不到头就断), 卡仍有效, 迟到的确认照常落盘并捎一句给调用方。
+    http.register("POST /config/set", guarded(async (req, res) => {
+      const body = (await readBody(req)) as SetReq & { key?: string; action?: string; sessionId?: string; tmuxPane?: string; target?: string };
+      const legacy = typeof body.key === "string";
+      const ask = legacy ? fromLegacy(body.key!, body.value, body.action) : body;
+      if ("ok" in ask) { json(res, 400, ask); return; }
+      const reply = (pl: Plan, text: string, extra: Record<string, unknown> = {}): void =>
+        json(res, 200, legacy
+          ? { ok: true, key: body.key, before: pl.before, after: pl.after, ...extra }
+          : { ok: true, text, ...extra });
+      const pl = planSet(cfg, sourcePath, ask);
+      if (!pl.ok) { json(res, 400, pl); return; }
+      if (ask.dryRun || !pl.changed) { reply(pl, `${ask.dryRun ? "dryRun, 没写:\n" : ""}${renderPlan(pl)}`); return; }
+
+      // 落盘时重算一遍: 等卡期间文件可能被别人改过, 按那一刻的文件打补丁、再校验。
+      const commit = (): Plan | { ok: false; reason: string } => {
+        const now = planSet(cfg, sourcePath, ask);
+        if (!now.ok) return now;
+        patchJsonc(sourcePath, [{ path: now.jsonPath, value: now.value }]);
+        applyHot(cfg, now);
+        return now;
+      };
+      const done = (now: Plan): string =>
+        `已写入${now.apply === "hot" ? ", 已生效" : "; 需 reload (`./cli/wezard.sh reload`) 才生效"}:\n${renderPlan(now)}`;
+
+      if (pl.gate !== "card") {
+        const now = commit();
+        if (!now.ok) { json(res, 400, now); return; }
+        reply(now, done(now));
+        return;
+      }
+      const self = resolveSelf(body);
+      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session; 这一项要发确认卡给人点" }); return; }
+      let decided: Promise<boolean>;
+      try {
+        ({ decided } = await requestConfirm({
+          client: ws.client, principal: self, who: displayName(self),
+          title: `配置变更待确认 · ${pl.path.join(".")}`,
+          body: `${displayName(self)} 要改配置:\n${renderPlan(pl)}`,
+          timeoutMs: CONFIRM_TIMEOUT_MS,
+        }));
+      } catch (e) {
+        json(res, 503, { ok: false, reason: `确认卡发不出去 (${errText(e)}), 没写` });
+        return;
+      }
+      const settle = (yes: boolean): string => {
+        if (!yes) return `人没确认 (拒绝或超时), \`${pl.path.join(".")}\` 没写`;
+        const now = commit();
+        return now.ok ? done(now) : `人确认了, 但落盘前重算没过, 没写: ${now.reason}`;
+      };
+      const inline = await Promise.race([decided, sleep(CONFIRM_INLINE_MS).then(() => undefined)]);
+      if (inline !== undefined) {
+        const text = settle(inline);
+        json(res, 200, legacy ? { ok: inline, key: body.key, before: pl.before, after: inline ? pl.after : pl.before, note: text } : { ok: true, text, confirmed: inline });
+        return;
+      }
+      void decided.then((yes) => notices.post([self], `config_set 的确认卡有结果了: ${settle(yes)}`));
+      json(res, 200, legacy
+        ? { ok: false, reason: "确认卡已发到群里, 还没人点; 点了之后自动落盘" }
+        : { ok: true, pending: true, text: `确认卡已发到群里, 还没人点 (卡 ${CONFIRM_TIMEOUT_MS / 60_000} 分钟内有效)。点了之后守护进程自动落盘, 结果会捎在你下一条收到的消息上 —— 不用重发。\n${renderPlan(pl)}` });
+    }));
 
     // POST /graph/run — declare a loop graph over this chat's tagged sessions
     // and start walking it. Fire-and-forget: returns a runId immediately, then
