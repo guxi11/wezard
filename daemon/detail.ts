@@ -16,6 +16,7 @@ import {
   type ApprovalDecision,
   type ApprovalDetailRecord,
   type CharterRecord,
+  type CharterLineage,
   type ChatTicketRecord,
   type DetailRecord,
   type DetailStore,
@@ -166,9 +167,9 @@ export const recordPost = (rec: Omit<PostDetailRecord, "kind" | "id" | "createdA
 };
 
 // 宪章: 每次渲染都是一次 spawn 要压进系统提示的那份 —— 记下来, rolepage 才看得见它在吃多少上下文。
-export const recordCharter = (target: string, text: string): void => {
+export const recordCharter = (target: string, text: string, lineage?: CharterLineage): void => {
   if (!store || !target || !text.trim()) return;
-  const full: CharterRecord = { kind: "charter", id: `k${randomBytes(12).toString("base64url")}`, createdAt: Date.now(), target, text };
+  const full: CharterRecord = { kind: "charter", id: `k${randomBytes(12).toString("base64url")}`, createdAt: Date.now(), target, text, ...(lineage ? { lineage } : {}) };
   store.put(full);
   forwardToRemote(full);
 };

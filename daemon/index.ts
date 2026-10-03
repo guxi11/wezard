@@ -1618,7 +1618,7 @@ const main = async (): Promise<void> => {
         steward: !tagOfKey(target),
         lead: !!wizards.get(target)?.lead,
       });
-      recordCharter(target, text);
+      recordCharter(target, text, o.parent ? { parent: o.parent, kind: o.inherited ? "clone" : "spawn", ...(o.forkOf ? { forkOf: o.forkOf } : {}) } : undefined);
       return text;
     };
 

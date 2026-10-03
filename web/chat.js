@@ -1704,13 +1704,15 @@
   //   · 只算选中 session 时间范围内发生的 —— 边的每次发生都带着时刻 (WorldEdge.ts)
   // 每种关系一种线色 (CSS 里 li.<kind> / .ek.<kind> 同色), 画在树线、卡片入口的 label 与图例上。
   var KIND = {
-    spawn: { mark: '子', tip: 'spawn 的白板 wizard, 只有出身、没有继承上下文' },
-    clone: { mark: '分身', tip: 'fork 自父亲的 session, 开局带着那一刻的上下文' },
+    // 生它、归它管的那一位下面挂的是 clone (带上下文) 或 spawn (白板) —— 与调用框下的提示行同一套字。
+    clone: { mark: '⑂ 分身', tip: 'clone_wizard 生的分身: fork 了上下文, 开局带着那一刻读过的一切; 归生它的那位管' },
+    spawn: { mark: '✦ 新生', tip: 'spawn_wizard / dispatch 白板生的: 不继承上下文, 只是归生它的那位管 (不带 detached)' },
+    fork: { mark: '⑂ 上下文', tip: '分身的上下文 fork 自它 —— 生它、归它管的是另一位' },
     peer: { mark: '对话', tip: 'send_peer 发起的对话' },
     job: { mark: '工单', tip: '它开的工单里有这位成员' },
     graph: { mark: '流水线', tip: '流水线里上一步喂给下一步' },
   };
-  var LINEAGE = { spawn: 1, clone: 1 };
+  var LINEAGE = { spawn: 1, clone: 1, fork: 1 };
 
   // 老 webview 未必有 CSS.escape, 而 target 里带着 `:` 和 `#` —— 不转义选择器直接抛异常。
   var cssEsc = function (v) {
@@ -1767,7 +1769,8 @@
   var forestOf = function (pairs) {
     var list = Object.keys(pairs).map(function (k) { return pairs[k]; });
     var inc = list.reduce(function (m, p) { (m[p.to] = m[p.to] || []).push(p); return m; }, {});
-    var weight = function (p) { return (p.kinds.spawn ? 3e6 : p.kinds.clone ? 2e6 : 0) + p.n; };
+    // 主父亲: 生它的那位 (spawn / clone) 先于上下文来源 (fork), 再先于派活。
+    var weight = function (p) { return (p.kinds.spawn || p.kinds.clone ? 3e6 : p.kinds.fork ? 2e6 : 0) + p.n; };
     var pp = Object.keys(inc).reduce(function (m, t) {
       m[t] = inc[t].slice().sort(function (a, b) { return weight(b) - weight(a) || a.first - b.first; })[0];
       return m;
@@ -1830,7 +1833,7 @@
   };
   // 一条边的主色: 家谱优先, 决定树上那道线的颜色。
   var domKind = function (p) {
-    return !p ? 'root' : ['spawn', 'clone', 'peer', 'job', 'graph'].filter(function (k) { return p.kinds[k]; })[0] || 'peer';
+    return !p ? 'root' : ['spawn', 'clone', 'fork', 'peer', 'job', 'graph'].filter(function (k) { return p.kinds[k]; })[0] || 'peer';
   };
 
   // ── 卡片承载指进来的那条边 (主父亲 → 它): 预览取视角与对端在侧栏里现成的那一项 ──

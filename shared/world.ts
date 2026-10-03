@@ -20,7 +20,7 @@
 import { baseOfKey, labelFor, tagOfKey } from "./session-label.js";
 import { withoutKeepaliveTurns } from "./keepalive.js";
 import { isTurn, staleAt, isGhostTurn } from "./chat-view.js";
-import type { DetailRecord, TurnDetailRecord } from "./detail-store.js";
+import type { CharterLineage, CharterRecord, DetailRecord, TurnDetailRecord } from "./detail-store.js";
 import { senderOf } from "./role-view.js";
 import type { TurnState } from "./turn-state.js";
 
@@ -165,14 +165,16 @@ export interface WorldNode {
   rels?: string[];
 }
 
-/** clone = 分身 (从父亲的 session 节点 fork); spawn = 子 wizard (父亲生的白板)。 */
-export type WorldEdgeKind = "clone" | "spawn" | "peer" | "graph";
+/** 家谱三种, 都画在「生它、归它管」或「上下文从它来」的那一位下:
+ *  clone = 分身 (parent 生的, 开局 fork 了上下文); spawn = 新生 (parent 生的白板);
+ *  fork = 分身的上下文来源 —— 只在克隆的是别人 (forkOf ≠ parent) 时另画这一条。 */
+export type WorldEdgeKind = "clone" | "spawn" | "fork" | "peer" | "graph";
 
 export interface WorldEdge {
   kind: WorldEdgeKind;
   from: string;
   to: string;
-  /** 观测到多少次 (clone / spawn 恒为 1 —— 家谱不是流量)。 */
+  /** 观测到多少次 (家谱恒为 1 —— 不是流量)。 */
   count: number;
   lastTs: number;
   /** 跨聊天的边 —— 画图时单独着重, 它才是"关联起来了"的证据。 */
@@ -312,6 +314,19 @@ export const withData = (facts: WorldFacts, records: readonly DetailRecord[], no
   };
 };
 
+// 老宪章 (加 lineage 字段之前) 的出身只在正文那一行里 —— wizard.ts renderCharter 的三种写法。
+const BORN_LINE = /^- 出身: \*\*`\.([^`]+)`\*\* (克隆出的 \*\*`\.([^`]+)`\*\* 的分身|的分身|生的子 wizard)/m;
+
+/** 宪章记下的出身; 老记录从正文读回, 名字按此刻的名录换回 target (改过名的就认不出了)。 */
+const lineageOf = (c: CharterRecord, targetOf: (name: string) => string | undefined): CharterLineage | undefined => {
+  if (c.lineage) return c.lineage;
+  const m = BORN_LINE.exec(c.text);
+  const parent = m && targetOf(m[1]!);
+  if (!m || !parent) return undefined;
+  const forkOf = m[3] ? targetOf(m[3]) : undefined;
+  return { parent, kind: m[2] === "生的子 wizard" ? "spawn" : "clone", ...(forkOf ? { forkOf } : {}) };
+};
+
 export const buildWorld = (
   records: readonly DetailRecord[],
   facts: WorldFacts,
@@ -405,17 +420,27 @@ export const buildWorld = (
   }, new Map<string, WorldEdge>());
 
   // 登记边 —— 家谱。观测不到 (分身可能一句话没说), 但它是最稳定的一种关系。
-  const withLineage = facts.wizards.reduce(
-    // 克隆边从上下文的来源画起 (克隆别人时是 forkOf, 否则是 parent); 克隆了别人的那位
-    // parent 另记一条 spawn 边 —— 它是生出这个分身、归它管的那一位。
+  // parent → 它: 分身 (clone) 或新生 (spawn), 看它开局有没有 fork 上下文; 克隆的是别人时,
+  // 上下文的来源另记一条 fork 边 —— 生它、归它管的仍是 parent, 不能因此把它画成 parent 的白板。
+  const registered = facts.wizards.reduce(
     (m, w) => {
       if (!w.parent) return m;
-      if (!w.clonedFrom) return link(m, "spawn", w.parent, w.target, w.bornAt ?? 0);
-      const m1 = link(m, "clone", w.forkOf ?? w.parent, w.target, w.bornAt ?? 0);
-      return w.forkOf ? link(m1, "spawn", w.parent, w.target, w.bornAt ?? 0) : m1;
+      const m1 = link(m, w.clonedFrom ? "clone" : "spawn", w.parent, w.target, w.bornAt ?? 0);
+      return w.clonedFrom && w.forkOf ? link(m1, "fork", w.forkOf, w.target, w.bornAt ?? 0) : m1;
     },
     observed,
   );
+  // 注册表里已经没有的 (stop_wizard forget、工单回收、回归脚本收尾都会删记录), 家谱只剩
+  // 它的宪章 —— 宪章不进 TTL, 记着出生那一刻谁生的它; 不读回来它就只剩一条「对话」边、像个外人。
+  const byName = new Map(nodes.map((n) => [n.name, n.target] as const));
+  const lineageEdge = (m: Map<string, WorldEdge>, kind: WorldEdgeKind, from: string | undefined, to: string, ts: number): Map<string, WorldEdge> =>
+    from ? link(m, kind, from, to, ts) : m;
+  const withLineage = records.filter((r): r is CharterRecord => r.kind === "charter" && !factOf.has(r.target)).reduce((m, c) => {
+    const l = lineageOf(c, (n) => byName.get(n));
+    if (!l) return m;
+    const m1 = lineageEdge(m, l.kind, l.parent, c.target, c.createdAt);
+    return l.kind === "clone" ? lineageEdge(m1, "fork", l.forkOf, c.target, c.createdAt) : m1;
+  }, registered);
 
   const edges = [...withLineage.values()].sort((a, b) => b.lastTs - a.lastTs);
   const relsOf = edges.reduce((m, e) => {

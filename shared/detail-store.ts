@@ -273,6 +273,16 @@ export interface CharterRecord {
   createdAt: number;
   target: string;
   text: string;
+  /** 出身: 谁生的、带没带上下文 (clone / spawn)、上下文 fork 自谁 (克隆的是别人时)。缺省 = 没有
+   *  归谁管 (聊天的默认会话 / detached) 或是加字段之前的老记录 (出身只在 text 里)。
+   *  宪章不进 TTL, 注册表里的记录被 forget 删掉之后, 家谱靠它还在。 */
+  lineage?: CharterLineage;
+}
+
+export interface CharterLineage {
+  parent: string;
+  kind: "clone" | "spawn";
+  forkOf?: string;
 }
 
 export type DetailRecord =

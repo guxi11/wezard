@@ -705,6 +705,7 @@ button.mchip.rcpt:hover { text-decoration: underline }
 }
 .tree li.spawn { --lc: #d4700f }
 .tree li.clone { --lc: #8250df }
+.tree li.fork { --lc: #b39ddb }
 .tree li.peer { --lc: #0969da }
 .tree li.job { --lc: #bf8700 }
 .tree li.graph { --lc: #0a7d6b }
@@ -724,6 +725,7 @@ button.mchip.rcpt:hover { text-decoration: underline }
 }
 .ek.spawn { color: #a8642a; background: #d4700f12 }
 .ek.clone { color: #7a5bb8; background: #8250df12 }
+.ek.fork { color: #8f7bb8; background: #8250df0a }
 .ek.peer { color: #4a74b0; background: #0969da10 }
 .ek.job { color: #94741f; background: #bf870014 }
 .ek.graph { color: #3d8577; background: #0a7d6b12 }
