@@ -376,7 +376,7 @@ const Chats = z.record(z.string(), z.string().describe("base principal (`chat:wr
 // config_set 收名字, 落盘前换成它此刻指向的 principal。会进宪章 (系统提示): 已在跑的 wizard 要 handoff
 // 才换上新规矩 —— config_set 落盘时按宪章前后对比点名受影响的那些。
 const ChatPolicy = z.object({
-  backstage: z.boolean().default(false).describe("幕后模式: 人只和顶层 wizard (群管家 / 人 `.name` 点名的) 对话; wizard 之间一律私聊 (tell_peer / dispatch 的 public 失效), 被派活的 wizard 不能 notify 进群, 过程只在 rolepage"),
+  topOnly: z.boolean().default(false).describe("顶层模式: 人只和顶层 wizard (群管家 / 人 `.name` 点名的) 对话; wizard 之间一律私聊 (tell_peer / dispatch 的 public 失效), 被派活的 wizard 不能 notify 进群, 过程只在 rolepage"),
 });
 export type ChatPolicy = z.infer<typeof ChatPolicy>;
 

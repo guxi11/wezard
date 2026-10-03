@@ -57,7 +57,7 @@ export const chatBaseOf = (cfg: Config, ref: string): string => {
 
 /** `target` 所在聊天的群聊级策略 (`chatPolicy`, 键是 base principal)。 */
 export const chatPolicyOf = (cfg: Config, target: string): ChatPolicy =>
-  ({ backstage: !!cfg.chatPolicy?.[baseOfKey(target)]?.backstage });
+  ({ topOnly: !!cfg.chatPolicy?.[baseOfKey(target)]?.topOnly });
 
 /** 已命名的聊天, 按名字排序。 */
 export const listChatNames = (cfg: Config): Array<{ name: string; base: string }> =>

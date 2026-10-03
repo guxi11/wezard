@@ -901,14 +901,14 @@ const main = async (): Promise<void> => {
         return;
       }
       const dests = [...new Set(refs.length ? refs.map((r) => chatBaseOf(cfg, r)) : [channelOf(self)])];
-      // 幕后模式: 只有顶层 wizard 对人说话。拦的是「这一轮在为同伴干活」的: 同伴私聊派来的活, 或
+      // 顶层模式: 只有顶层 wizard 对人说话。拦的是「这一轮在为同伴干活」的: 同伴私聊派来的活, 或
       // 回执轮但那件活是为上游同伴派的 (k 是 peer)。人说的、定时任务放的、旁支 (chain:false, 无 k)
       // 的回执轮都不拦; 管家只在自己的群里豁免。
       const env = openingOfSelf(self)?.env;
-      const backstageTurn = env?.kind === "peer" && (env.receipt ? kOfAttr(env.k ?? "")?.kind === "peer" : env.private);
-      const muted = dests.filter((d) => chatPolicyOf(cfg, d).backstage && !(!tagOfKey(self) && baseOfKey(self) === d));
-      if (muted.length && backstageTurn) {
-        json(res, 409, { ok: false, backstage: true, reason: `${muted.map((d) => chatNameOf(cfg, d) || d).join(", ")} 开着幕后模式: 你这一轮是同伴派来的活, 不对人说话 —— 要说的写进终句 (\`RESULT:\` / \`NEED:\`), 由派你的那个代你向人交代` });
+      const belowTop = env?.kind === "peer" && (env.receipt ? kOfAttr(env.k ?? "")?.kind === "peer" : env.private);
+      const muted = dests.filter((d) => chatPolicyOf(cfg, d).topOnly && !(!tagOfKey(self) && baseOfKey(self) === d));
+      if (muted.length && belowTop) {
+        json(res, 409, { ok: false, topOnly: true, reason: `${muted.map((d) => chatNameOf(cfg, d) || d).join(", ")} 开着顶层模式: 你这一轮是同伴派来的活, 不对人说话 —— 要说的写进终句 (\`RESULT:\` / \`NEED:\`), 由派你的那个代你向人交代` });
         return;
       }
       const asker = askerOf(self);
@@ -1072,11 +1072,11 @@ const main = async (): Promise<void> => {
       // 掉的分身不是谁, 它们的往来进群只会留下一段人找不到主的对话 —— 降为私聊。
       // 工单里的派活一律私聊: 人看不懂 fan-out 的过程, 群里只留发起者自己的收口。
       // 知会不进群: 公开信封要对方「照对人说话的方式答」, 一句「收到」会被发给一群人。
-      // 幕后模式 (chatPolicy.backstage): 那个群里 wizard 之间不当着人说话 —— 公开与否不归模型判断,
+      // 顶层模式 (chatPolicy.topOnly): 那个群里 wizard 之间不当着人说话 —— 公开与否不归模型判断,
       // 续问沿用的公开频道也一样降为私聊; 人只从顶层 wizard 的收口里听到结论。
       const wantPublic = !jobId && kind !== "fyi" && (turn.channel !== undefined ? !!turn.channel : (body as { public?: boolean }).public === true) && !!wizards.get(self) && !!wizards.get(target);
-      const backstage = wantPublic && chatPolicyOf(cfg, turn.channel || channelOf(self)).backstage;
-      const isPublic = wantPublic && !backstage;
+      const topOnly = wantPublic && chatPolicyOf(cfg, turn.channel || channelOf(self)).topOnly;
+      const isPublic = wantPublic && !topOnly;
       const channel = isPublic ? turn.channel || channelOf(self) : "";
       // Injecting into your own pane would type into the box you're generating
       // from — Claude Code queues it and the caller deadlocks waiting for itself.
@@ -1188,7 +1188,7 @@ const main = async (): Promise<void> => {
         ...inj,
         name: peerAddress(cfg, self, target),
         public: isPublic,
-        ...(backstage ? { backstage: "这个群开着幕后模式: wizard 之间一律私聊, 已按私聊投出; 结论回到你这儿, 由你 (或你的上游) 对人收口" } : {}),
+        ...(topOnly ? { topOnly: "这个群开着顶层模式: wizard 之间一律私聊, 已按私聊投出; 结论回到你这儿, 由你 (或你的上游) 对人收口" } : {}),
         priority: policy,
         ...(kind !== "task" ? { kind } : {}),
         ...(kind === "fyi" && askedJob ? { jobIgnored: true } : {}),
@@ -1662,7 +1662,7 @@ const main = async (): Promise<void> => {
         })(),
         steward: !tagOfKey(target),
         lead: !!wizards.get(target)?.lead,
-        backstage: chatPolicyOf(cfg, target).backstage,
+        topOnly: chatPolicyOf(cfg, target).topOnly,
       });
     /** 开局宪章。出生时的兄弟只是快照 —— 名册随时可查, 写进系统提示的那份只为了
      *  让它一睁眼就知道自己不是一个人在跑。 */
@@ -1956,7 +1956,7 @@ const main = async (): Promise<void> => {
         if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
         // 已有 wizard 当 lead: 宪章是出生时定的, 组队打法挂在信封后面跟这一句带过去; 投成了才记 lead,
         // 它下次重生宪章里就有。
-        const t = await tell(name, task, lead ? renderReminder({ wezard: "lead" }, renderLead(chatPolicyOf(cfg, channelOf(self)).backstage)) : "");
+        const t = await tell(name, task, lead ? renderReminder({ wezard: "lead" }, renderLead(chatPolicyOf(cfg, channelOf(self)).topOnly)) : "");
         if (lead && t.status === 200) wizards.upsert(r.target, { lead: true });
         // 自动选中的被冷门控退回 (decide 用名册的活动时刻, 门控用 transcript 的, 口径差一点): 改走 spawn。
         if (!(t.body.gated === "cold" && !to)) {
