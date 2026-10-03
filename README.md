@@ -138,25 +138,18 @@ wezard init
 
 **复杂的活交给 lead**：要 coder + reviewer、来回几轮的，管家开一张需求单交给一个 `hard` 档的 lead。lead 自己开工单、按需分身写代码，reviewer 必须从白板起步、不带作者的上下文；管家和你都只面对 lead。交付之后你说「好」它归档，说「不对」它让 lead 返工；一直没人验收，管家会隔一阵在群里提一句（4 小时 → 1 天 → 2 天，只在白天）。
 
-**手闸**：管家常常说着分派、实际埋头自己干。守护进程在审批链最前面拦它——改文件、开子代理一律拒；读、搜、跑命令每轮最多 4 次（`chatPolicy.<群>.stewardBudget`），超了就拒并叫它 `dispatch`。放行窗口、`✅总是`、跳过所有审批都压不过这道闸。
-
 ```mermaid
-flowchart TD
-    msg["群里的一条消息"] --> named{"点了 .name ?"}
-    named -- "是" --> direct["直达那个 wizard<br/>不经过管家"]
-    named -- "否" --> butler["管家 (聊天的默认 wizard)"]
-    butler --> small{"一两句能答完 ?"}
-    small -- "是" --> self["自己答"]
-    small -- "否" --> big{"要 coder + reviewer<br/>来回几轮 ?"}
-    big -- "是" --> lead["交给 hard 档的 lead<br/>它开工单、组队、交付"]
-    big -- "否" --> table["dispatch 列候选<br/>职责 · 最近的话 · 读过的文件<br/>工作区 · 忙闲 · ctx · 冷热"]
-    table --> judge{"证据够强、不忙,<br/>接着用那段上下文划算 ?"}
-    judge -- "是" --> pick["交给已有的"]
-    judge -- "否 / 没有候选" --> fresh["白板新起一个<br/>按活定档"]
-    pick --> back["结论回到管家<br/>(或它的回复直接进群)"]
-    fresh --> back
-    lead --> back
+flowchart LR
+    msg["群里一条消息"] -- "点了 .name" --> direct["直达那个 wizard"]
+    msg -- "没点名" --> butler(["管家"])
+    butler -- "一两句的事" --> self["自己答"]
+    butler -- "要组队的复杂活" --> lead["hard 档 lead"]
+    butler -- "其余 · dispatch" --> pick{"有对口、不忙、<br/>划算的 ?"}
+    pick -- "有" --> exist["交给它"]
+    pick -- "没有" --> fresh["白板新起一个"]
 ```
+
+**手闸**：管家常常说着分派、实际埋头自己干。守护进程在审批链最前面拦它——改文件、开子代理一律拒；读、搜、跑命令每轮最多 4 次（`chatPolicy.<群>.stewardBudget`），超了就拒并叫它 `dispatch`。放行窗口、`✅总是`、跳过所有审批都压不过这道闸。
 
 **转交默认是公开的**：群里出现一条 `.管家 → .它` 的气泡，它的回复直接发进这个群，管家只回一句「已转给 `.它`」。公开往来一多，群就被 wizard 之间的对话刷屏——这时管家会问你要不要开**顶层模式**。
 
