@@ -663,11 +663,17 @@
       ? '<div class="subs">' + talked.slice(0, SUB_FOLD).map(sub).join('') + bar + rest + '</div>'
       : '';
     var sel = on && !WITH;
-    var chevron = c.kind === 'group' && c.subs && c.subs.length
-      ? '<button class="ci-chevron' + (OPEN[c.key] ? ' on' : '') + '" data-toggle="' + esc(c.key) + '" title="' + (OPEN[c.key] ? '折叠' : '展开') + '"></button>'
-      : '';
+
+    // 群聊项特殊处理: 把 chevron 挪到行内部, 在时间左边
+    if (c.kind === 'group' && c.subs && c.subs.length) {
+      var chevron = '<button class="ci-chevron' + (OPEN[c.key] ? ' on' : '') + '" data-toggle="' + esc(c.key) + '" title="' + (OPEN[c.key] ? '折叠群' : '展开群') + '"></button>';
+      var content = avatarOf(c) + '<span class="b"><span class="l1"><span class="t"><span class="nm chat">' + esc(c.name) + '</span>' + jobMark(c.jobs) + '</span>' + chevron + '<span class="ts">' + esc(fmtAgo(c.lastTs)) + '</span></span>' +
+        '<span class="l2"><span class="pv">' + esc(c.preview) + '</span>' + (unreadOf(c) ? '<b class="ub">' + (unreadOf(c) > 99 ? '99+' : unreadOf(c)) + '</b>' : '') + '</span></span>';
+      return '<button class="ci' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '">' + content + '</button>' + subs;
+    }
+
     return '<button class="ci' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '">' +
-        convRow(c) + chevron + '</button>' + subs;
+        convRow(c) + '</button>' + subs;
   };
 
   // 搜索入口挂在名片下 —— 侧栏的公共区, 会话列表与关系图下都在。⌘K 见下方「搜索」。
@@ -705,7 +711,7 @@
     });
     convsEl.querySelectorAll('[data-toggle]').forEach(function (b) {
       var key = b.getAttribute('data-toggle');
-      b.onclick = function (e) { e.stopPropagation(); setMore(key, !MORE[key]); renderConvs(); };
+      b.onclick = function (e) { e.stopPropagation(); OPEN[key] = !OPEN[key]; saveOpen(); renderConvs(); };
     });
     bindGo(convsEl);
     bindWorldToggle(convsEl);

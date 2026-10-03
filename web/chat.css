@@ -225,11 +225,11 @@ button { font: inherit; color: inherit }
 .ci .pv:empty, .si .pv:empty { display: none }
 .ci .tag { font-size: 10.5px; border-radius: 4px; padding: 0 4px; flex: none }
 .ci-chevron {
-  flex: none; margin-left: auto; align-self: center; width: 24px; height: 24px; padding: 0; border: 0;
+  flex: none; align-self: center; width: 20px; height: 20px; padding: 0; border: 0;
   background: transparent; cursor: pointer; display: flex; align-items: center; justify-content: center;
   color: var(--faint); transition: color .12s, transform .12s;
 }
-.ci-chevron::before { content: "›"; font-size: 18px; font-weight: 300 }
+.ci-chevron::before { content: "›"; font-size: 16px; font-weight: 300; display: flex; align-items: center; justify-content: center; line-height: 1 }
 .ci-chevron:hover { color: var(--accent) }
 .ci-chevron.on::before { transform: rotate(90deg) }
 /* 头像与名字是进入那个 role 视角的入口 —— 侧栏项、会话头、消息行同一种读法。
