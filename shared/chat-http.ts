@@ -28,7 +28,7 @@ import { isMark, isPost, isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, jobProgress, withData, type WorldFactJob, type WorldFacts } from "./world.js";
 import {
   allMessages, isPing, pendingOf, unreadByRole, convKeyOf, convMessages, chatKeysOf, isWizardDm, parseTalkKey, glanceOfTalk, convsOf, jobConvsOf, jobOfKey, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
-  roleInfo, roleStats, sessionsOf, talkArgs, talkOf, counterpartOf, windowStats, type Directory, type Msg, type SessionSpan,
+  roleInfo, roleStats, sessionsOf, talkArgs, talkOf, counterpartOf, windowStats, type Directory, type Heard, type Msg, type SessionSpan,
 } from "./role-view.js";
 import { dependentsOf, renderJobMarks, renderMark, renderMsg, type MsgFragment } from "./role-render.js";
 import { searchRole } from "./role-search.js";
@@ -37,6 +37,7 @@ import { renderToolBody } from "./detail-render.js";
 import { chatScript, chatStyles, chatVendor, renderChatPage } from "./chat-render.js";
 import type { Asset } from "./web-assets.js";
 import type { DetailRecord, DetailStore, TurnDetailRecord } from "./detail-store.js";
+import type { SeenLog } from "./seen-log.js";
 
 export type SimpleHandler = (req: IncomingMessage, res: ServerResponse, url: URL) => void;
 
@@ -53,6 +54,7 @@ export interface ChatRoutes {
   search: SimpleHandler;
   glance: SimpleHandler;
   charter: SimpleHandler;
+  seen: SimpleHandler;
 }
 
 /** 注册表侧的事实 (wizard 身份 / 家谱 / 工单 / 日程) —— 只有 daemon 给得出。
@@ -65,7 +67,9 @@ const FLUSH_MS = 300;
 const PING_MS = 25_000;
 const FACTS_MS = 10_000;
 /** rolepage 只看最近这么久: 更早的轮次、wizard 登记、家谱、工单一律不进视图。 */
-const HORIZON_MS = 3 * 24 * 3600_000;
+export const HORIZON_MS = 3 * 24 * 3600_000;
+/** 一批已读的上限 (字节): 页面一次攢的是秒级的那几条, 64KB 足够几百条。 */
+const SEEN_BODY_MAX = 64 * 1024;
 
 const TASK_LINE = 120;
 const firstLine = (s: string): string => (s.split("\n").find((l) => l.trim()) ?? "").trim().slice(0, TASK_LINE);
@@ -149,7 +153,8 @@ interface View {
   span?: SessionSpan;
 }
 
-export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider): ChatRoutes => {
+/** seen = 落盘的已读记录 (seen-log); 不给 = 已读只活在页面内存里, POST /api/seen 回 ok:false。 */
+export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider, seen?: SeenLog): ChatRoutes => {
   const getFacts = (): Promise<WorldFacts> =>
     Promise.resolve(facts ? facts() : EMPTY_FACTS)
       // 没有消息数据的 wizard 在这里就退场 —— 会话列表、关系图、+N、搜索都只见得到这一份。
@@ -233,6 +238,10 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       winStats: peerStats(records, msgs, role, win, dir, now),
     };
   };
+  /** 摘要带上落盘的已读: 基线, 与它要数的那几句里记过的 —— 页面启动、另一个标签页看过之后的下一次心跳都从这里同步。 */
+  const withSeen = <T extends { convs: Array<{ heard: Heard[] }>; peerUnread?: Record<string, Heard[]> }>(d: T): T & { seenBase?: number; seen?: Record<string, number> } =>
+    seen ? { ...d, seenBase: seen.base(), seen: seenOf([...d.convs.map((c) => c.heard), ...Object.values(d.peerUnread ?? {})]) } : d;
+  const seenOf = (hss: readonly Heard[][]): Record<string, number> | undefined => seen?.pick(hss.flatMap((hs) => hs.map((h) => h[3])));
 
   const sinceOf = (url: URL): number | undefined => Number(url.searchParams.get("since")) || undefined;
 
@@ -251,7 +260,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       const records = listRecent();
       const v = viewOf(records, makeDirectory(records, f), ticket, url);
       if (!v) { json(res, 404, { ok: false, error: "不认识这个 role" }); return; }
-      json(res, 200, { ok: true, ...summary(records, f, v.role, url.searchParams.get("session"), landingOf(ticket, v.role), v, sinceOf(url)) });
+      json(res, 200, { ok: true, ...withSeen(summary(records, f, v.role, url.searchParams.get("session"), landingOf(ticket, v.role), v, sinceOf(url))) });
     });
   };
 
@@ -373,7 +382,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       const records = listRecent();
       v ??= viewOf(records, makeDirectory(records, ff), ticket, url);
       if (!v) return;
-      send("role", summary(records, ff, v.role, url.searchParams.get("session"), landingOf(ticket, v.role), v, sinceOf(url)));
+      send("role", withSeen(summary(records, ff, v.role, url.searchParams.get("session"), landingOf(ticket, v.role), v, sinceOf(url))));
       // 工单窗口的开工 / 收工两行取自账本, 账本变了不写 store —— 跟着名册的心跳推, 没变的由 sig 挡掉。
       const jid = jobOfKey(v.conv);
       const job = jid ? ff.jobs.find((j) => j.id === jid) : undefined;
@@ -516,7 +525,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
         const win = talkOf(talk, t.who, t.peers, t.chat);
         return [[k, { ...glanceOfTalk(msgs, viewer, dir, t.who, t.peers, t.chat), mine: mine(win) }]];
       }));
-      json(res, 200, { ok: true, at: now, glances: out });
+      json(res, 200, { ok: true, at: now, glances: out, ...(seen ? { seen: seenOf(Object.values(out).map((g) => g.mine)) } : {}) });
     });
   };
 
@@ -531,7 +540,26 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     });
   };
 
-  return { page, styles: asset(chatStyles), script: asset(chatScript), vendor: asset(chatVendor), role, msgs, tool, events, world, search, glance, charter };
+  /** 页面攢下的一批已读 `{id: fin}` (标签页关掉时也走这里, 用 sendBeacon 发)。坏的、超量的整批不收 —— 页面照样留着内存那份。 */
+  const markSeen: SimpleHandler = (req, res, url) => {
+    if (!resolveTicket(store, url)) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
+    if (!seen) { json(res, 200, { ok: false, error: "已读不落盘" }); return; }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on("data", (c: Buffer) => { size += c.length; if (size <= SEEN_BODY_MAX) chunks.push(c); });
+    req.on("end", () => {
+      try {
+        const rows = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+        const ok = size <= SEEN_BODY_MAX && !!rows && typeof rows === "object" && !Array.isArray(rows) &&
+          Object.entries(rows).every(([k, v]) => k.length <= 120 && typeof v === "number" && Number.isFinite(v));
+        if (!ok) { json(res, 400, { ok: false, error: "bad rows" }); return; }
+        seen.add(rows as Record<string, number>);
+        json(res, 200, { ok: true });
+      } catch { json(res, 400, { ok: false, error: "bad json" }); }
+    });
+  };
+
+  return { page, styles: asset(chatStyles), script: asset(chatScript), vendor: asset(chatVendor), role, msgs, tool, events, world, search, glance, charter, seen: markSeen };
 };
 
 /** Path → handler map; the daemon registers each, svr dispatches through it. */
@@ -549,10 +577,11 @@ export const chatRouteTable = (routes: ChatRoutes): Record<string, SimpleHandler
   "GET /api/search": routes.search,
   "GET /api/glance": routes.glance,
   "GET /api/charter": routes.charter,
+  "POST /api/seen": routes.seen,
 });
 
 /** Route keys, single-sourced so the daemon's registration can't drift. */
 export const CHAT_ROUTE_KEYS = [
   "GET /role", "GET /chat", "GET /chat/app.css", "GET /chat/app.js", "GET /chat/vendor.js",
-  "GET /api/role", "GET /api/msgs", "GET /api/tool", "GET /api/role-events", "GET /api/world", "GET /api/search", "GET /api/glance", "GET /api/charter",
+  "GET /api/role", "GET /api/msgs", "GET /api/tool", "GET /api/role-events", "GET /api/world", "GET /api/search", "GET /api/glance", "GET /api/charter", "POST /api/seen",
 ] as const;

@@ -14,6 +14,8 @@ export interface JsonMap<T> {
   /** Returns what was stored, so callers can `return db.set(...)`. */
   set: (key: string, value: T) => T;
   drop: (key: string) => void;
+  /** Several keys in one write. */
+  merge: (rows: Record<string, T>) => void;
   all: () => Record<string, T>;
 }
 
@@ -37,6 +39,7 @@ export const loadJsonMap = <T>(
     get: (k) => map[k],
     set: (k, v) => { map = { ...map, [k]: v }; persist(); return v; },
     drop: (k) => { const { [k]: _gone, ...rest } = map; map = rest; persist(); },
+    merge: (rows) => { map = { ...map, ...rows }; persist(); },
     all: () => ({ ...map }),
   };
 };

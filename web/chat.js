@@ -517,10 +517,34 @@
   // 看的那个 role 在点开这一项会看到的消息里听得到、且晚于它在那一处最后开口的 (回过话 = 读到了那里)。
   // 已读只有一份 (SEEN): 这句话说完的样子在详情里上过屏 (页面可见、正在看消息) 就记下它的 id ——
   // 与页面视角、详情视角、侧栏 / 关系图无关, 哪一处读到, 所有视图里同一句话一起消失, 不必等下一份摘要。
-  // 基线是「打开页面这一刻」(BASE, 服务端时钟, 首次拿到快照时定): 此前已有的话不算未读, 刷新即重置 ——
-  // 所以 SEEN 只活在内存里, 不落本地。
+  // SEEN 落在 svr 上 (全局一份): 摘要 / 卡片 glance 带回记过的那几条与基线 (seenBase), 新看过的攒一小会儿
+  // 批量写回 —— 刷新、另一个标签页 (下一次心跳) 都看得到。没落盘的服务端 (daemon 自己的页、老 svr)
+  // 或读写失败, 退回只活在内存里: 基线是「打开页面这一刻」(服务端时钟, 首次拿到快照时定), 刷新即重置。
   var BASE = 0;
   var SEEN = {};
+  var keepSeen = function (rows) {
+    Object.keys(rows || {}).forEach(function (id) { if (!((SEEN[id] || 0) >= rows[id])) SEEN[id] = rows[id]; });
+  };
+  var OUTBOX = {}, OUT_T = 0;
+  var SEEN_URL = function () { return 'api/seen?id=' + encodeURIComponent(TOKEN); };
+  var flushSeen = function (leaving) {
+    clearTimeout(OUT_T); OUT_T = 0;
+    var ids = Object.keys(OUTBOX);
+    if (!ids.length) return;
+    var body = JSON.stringify(OUTBOX);
+    OUTBOX = {};
+    try {
+      if (leaving && navigator.sendBeacon) navigator.sendBeacon(SEEN_URL(), body);
+      else fetch(SEEN_URL(), { method: 'POST', body: body, keepalive: true }).catch(function () { });
+    } catch (e) { }
+  };
+  var queueSeen = function (rows) {
+    Object.keys(rows).forEach(function (id) { OUTBOX[id] = rows[id]; });
+    if (!OUT_T) OUT_T = setTimeout(flushSeen, 1500);
+  };
+  // 关页 / 切走时不等那 1.5s。
+  window.addEventListener('pagehide', function () { flushSeen(true); });
+  document.addEventListener('visibilitychange', function () { if (document.hidden) flushSeen(true); });
   var unreadIn = function (hs, skip) {
     return (hs || []).filter(function (h) { return h[0] > BASE && !((SEEN[h[3]] || 0) >= h[0]) && !(skip && skip[h[3]]); });
   };
@@ -546,6 +570,7 @@
     if (!reading()) return;
     var hit = frags.filter(function (m) { return m && m.fin && !((SEEN[m.id] || 0) >= m.fin); });
     hit.forEach(function (m) { SEEN[m.id] = m.fin; });
+    if (hit.length) queueSeen(hit.reduce(function (o, m) { o[m.id] = m.fin; return o; }, {}));
     if (hit.length && R.convs) renderConvs();
   };
   var seeAll = function () { see(Object.keys(S.frags || {}).map(function (k) { return S.frags[k]; })); };
@@ -1508,7 +1533,8 @@
   // 收下摘要 (视角、会话列表、落地窗口) 与按它画页头侧栏分开: 换视角整窗重拉时, 画要等到新行到手的同一帧。
   var takeRole = function (d) {
     R.at = d.at || Date.now(); R.recvAt = Date.now();
-    if (!BASE) BASE = R.at;
+    if (d.seenBase) BASE = d.seenBase; else if (!BASE) BASE = R.at;
+    keepSeen(d.seen);
     R.role = d.role; R.sessions = d.sessions || []; R.convs = d.convs || []; R.chatKeys = d.chatKeys; R.peerUnread = d.peerUnread;
     SESSION = d.session || '';
     R.relations = !!d.relations; R.schedules = d.schedules || 0; R.plan = d.plan || null; R.inflight = d.inflight || [];
@@ -2002,6 +2028,7 @@
     api('api/glance', { role: role, keys: keys }).then(function (d) {
       if (!d.ok || role !== ROLE || keys !== W.gKeys) return;
       W.glance = d.glances || {};
+      keepSeen(d.seen);
       renderWorld();
     }).catch(function () { });
   };

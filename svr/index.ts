@@ -18,12 +18,14 @@
 // 信任模型: token 相同 = 可写; 读端不签名 (拿到 id 即可读)。id 是 uuid, 不可枚举。
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import pino from "pino";
 import { expandHome } from "../shared/paths.js";
 import { loadOrCreateSvrToken } from "../shared/svr-token.js";
 import { createDetailStore, type DetailRecord } from "../shared/detail-store.js";
 import { renderDetailPage, renderNotFound } from "../shared/detail-render.js";
-import { createChatRoutes, chatRouteTable } from "../shared/chat-http.js";
+import { createChatRoutes, chatRouteTable, HORIZON_MS } from "../shared/chat-http.js";
+import { openSeenLog } from "../shared/seen-log.js";
 import { EMPTY_FACTS, type WorldFacts } from "../shared/world.js";
 import { resolvePublicHost } from "../shared/lan-ip.js";
 import { loadConfig } from "../shared/config.js";
@@ -165,7 +167,8 @@ const main = async (): Promise<void> => {
   };
   // Chat 视图 (SPA + JSON API + SSE) 与 daemon 完全同源 —— svr 侧的记录是 POST /d
   // 推过来的, store.subscribe 一样会触发, 所以远端浏览也是实时的。
-  const chat = chatRouteTable(createChatRoutes(store, currentFacts));
+  // 已读记录与消息同住 stateDir, 留到视界为止 (再早的话页面上已经看不到)。
+  const chat = chatRouteTable(createChatRoutes(store, currentFacts, openSeenLog(join(stateDir, "seen.json"), HORIZON_MS)));
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
