@@ -105,6 +105,12 @@
     Object.keys(extra || {}).forEach(function (k) { p[k] = extra[k]; });
     return p;
   };
+  // 摘要另带未读基线 (定了才带): 服务端据此只给基线之后的他人未读账。不进 URL。
+  var roleParams = function (extra) {
+    var p = viewParams(extra);
+    if (BASE) p.since = BASE;
+    return p;
+  };
   // 视角状态回写 URL (replaceState: 不在历史里留一串中间态)。
   var syncUrl = function () {
     var p = new URLSearchParams({ id: TOKEN });
@@ -514,18 +520,34 @@
   // 刷新即重置 —— 所以「看过」只活在内存里, 不落本地。按视角分账 (同一个群换个 role 看, 未读是另一回事)。
   var BASE = 0;
   var READ = { at: {} };
-  var readKey = function (key, withRole) { return ROLE + '|' + key + '|' + (withRole || ''); };
-  var seenAt = function (key, withRole) { return READ.at[readKey(key, withRole)] || 0; };
-  var unreadOf = function (c, withRole) {
-    var g = seenAt(c.key);
+  // who = 站在谁的视角 (缺省 = 页面视角); 别的 role 的未读 (peerUnreadOf) 用同一份, 账取自服务端的 peerUnread。
+  var readKey = function (key, withRole, who) { return (who || ROLE) + '|' + key + '|' + (withRole || ''); };
+  var seenAt = function (key, withRole, who) { return READ.at[readKey(key, withRole, who)] || 0; };
+  var unreadHeard = function (c, withRole, who) {
+    who = who || ROLE;
+    var g = seenAt(c.key, '', who);
     var mark = {};
-    (c.subs || []).forEach(function (s) { mark[s.role] = Math.max(g, BASE, s.mine || 0, seenAt(c.key, s.role)); });
+    (c.subs || []).forEach(function (s) { mark[s.role] = Math.max(g, BASE, s.mine || 0, seenAt(c.key, s.role, who)); });
     var groupMark = Math.max(g, BASE, c.mine || 0);
     return (c.heard || []).filter(function (h) {
-      var p = h[2] === ROLE ? h[1] : '';
+      var p = h[2] === who ? h[1] : '';
       if (withRole && p !== withRole) return false;
       return h[0] > (p && mark[p] !== undefined ? mark[p] : groupMark);
-    }).length;
+    });
+  };
+  var unreadOf = function (c, withRole) { return unreadHeard(c, withRole).length; };
+  // 名字旁的他人未读: 换到 id 的视角会看到的未读 (它全部会话的), 减去页面视角这里已经在数的那几句 (同一句话
+  // 两边都没读时只算一次)。按 role 记, 不按会话: 点名字切过去, 看到的是它的整份会话列表。
+  var hd = function (h) { return h.join('|'); };
+  var peerUnreadOf = function (id) {
+    var ls = id && id !== ROLE && R.peerUnread && R.peerUnread[id];
+    if (!ls) return 0;
+    var mine = R.convs.reduce(function (m, c) { unreadHeard(c).forEach(function (h) { m[hd(h)] = 1; }); return m; }, {});
+    return ls.reduce(function (n, c) { return n + unreadHeard(c, '', id).filter(function (h) { return !mine[hd(h)]; }).length; }, 0);
+  };
+  var peerBadge = function (id) {
+    var n = peerUnreadOf(id);
+    return n ? '<b class="pub" title="' + esc(nameOf(id) + ' 的视角下还有 ' + n + ' 条未读 (这里没在数的)') + '">' + (n > 99 ? '99+' : n) + '</b>' : '';
   };
   var reading = function () { return VIEW === 'msgs' && !document.hidden; };
   // 窗口是 `a:<x>|<peers>` (关系图卡片) 时, 视角与 p 的往来在不在里面 —— 与服务端 talkOf 同一口径:
@@ -621,7 +643,7 @@
   var SWAP = '<i class="sw" aria-hidden="true">⇄</i>';
   var roleRow = function (id, name, label, g, status, tail, badge) {
     return goSpan('av', id, esc(label)) +
-      line(nm(id, name, true, SWAP + (badge || '')) + (tail || ''), g.lastTs, g.preview, stTag(status, true), g.unread);
+      line(nm(id, name, true, peerBadge(id) + SWAP + (badge || '')) + (tail || ''), g.lastTs, g.preview, stTag(status, true), g.unread);
   };
   // 名字旁的「+N」: 视图外还有 N 个 —— 同一个徽标, 数什么由所在的视图注入 (会话列表数会话, 关系图数关系)。
   var moreTag = function (n, tip) {
@@ -1509,7 +1531,7 @@
   var takeRole = function (d) {
     R.at = d.at || Date.now(); R.recvAt = Date.now();
     if (!BASE) BASE = R.at;
-    R.role = d.role; R.sessions = d.sessions || []; R.convs = d.convs || []; R.chatKeys = d.chatKeys;
+    R.role = d.role; R.sessions = d.sessions || []; R.convs = d.convs || []; R.chatKeys = d.chatKeys; R.peerUnread = d.peerUnread;
     SESSION = d.session || '';
     R.relations = !!d.relations; R.schedules = d.schedules || 0; R.plan = d.plan || null; R.inflight = d.inflight || [];
     // 工单的账变了 (或比消息晚到): 已上屏的工单 badge 按新账重填一遍 —— 片段里只写了工单号。
@@ -1539,7 +1561,7 @@
   var backoff = 1000;
   var connect = function () {
     if (S.es) { S.es.close(); S.es = null; }
-    var p = new URLSearchParams(viewParams({ id: TOKEN }));
+    var p = new URLSearchParams(roleParams({ id: TOKEN }));
     var es = new EventSource('api/role-events?' + p.toString());
     S.es = es;
     es.addEventListener('role', function (e) { try { applyRole(JSON.parse(e.data)); } catch (err) { } });
@@ -1566,7 +1588,7 @@
     var want = hold || !CONV ? '' : winSig();
     var early = want ? api('api/msgs', viewParams()) : null;
     W.pickHold = hold;
-    return api('api/role', viewParams()).then(function (d) {
+    return api('api/role', roleParams()).then(function (d) {
       if (!d.ok) {
         document.body.innerHTML = '<div class="empty" style="padding:80px">' + esc(d.error || 'not found') + '</div>';
         return;
@@ -1757,7 +1779,7 @@
     S.gen++;
     syncUrl();
     var gen = S.gen;
-    api('api/role', viewParams()).then(function (d) {
+    api('api/role', roleParams()).then(function (d) {
       if (!d.ok || gen !== S.gen) return;
       applyRole(d);
       // 断点 (/clear /new) 是旧视角 role 自己的, 新视角的由下面补拉。

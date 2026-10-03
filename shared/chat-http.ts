@@ -27,7 +27,7 @@ import { baseOfKey } from "./session-label.js";
 import { isMark, isPost, isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, jobProgress, withData, type WorldFactJob, type WorldFacts } from "./world.js";
 import {
-  allMessages, convKeyOf, convMessages, chatKeysOf, isWizardDm, parseTalkKey, glanceOfTalk, convsOf, jobConvsOf, jobOfKey, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
+  allMessages, unreadLedgersOf, convKeyOf, convMessages, chatKeysOf, isWizardDm, parseTalkKey, glanceOfTalk, convsOf, jobConvsOf, jobOfKey, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
   roleInfo, roleStats, sessionsOf, talkArgs, talkOf, counterpartOf, windowStats, type Directory, type Msg, type SessionSpan,
 } from "./role-view.js";
 import { dependentsOf, renderJobMarks, renderMark, renderMsg, type MsgFragment } from "./role-render.js";
@@ -178,7 +178,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
   };
 
   /** role 摘要: 身份、会话列表、session 分段、页脚总账 (role 自己的 + 当前窗口的)。 */
-  const summary = (records: readonly DetailRecord[], f: WorldFacts, role: string, sid: string | null, land: Landing, win?: Pick<View, "conv" | "with" | "span">) => {
+  /** since = 页面的未读基线 (客户端首次拿到摘要的时刻); 没给 = 还没定, 别的 role 的未读账就不算。 */
+  const summary = (records: readonly DetailRecord[], f: WorldFacts, role: string, sid: string | null, land: Landing, win?: Pick<View, "conv" | "with" | "span">, since?: number) => {
     const now = Date.now();
     const dir = makeDirectory(records, f);
     const msgs = allMessages(records, now);
@@ -202,6 +203,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       convs,
       // 不随视角的 session 段裁: 「它还在别的会话里」说的是它, 不是视角选的那段时间。
       chatKeys: chatKeysOf(msgs),
+      // 每个 role 自己视角下的未读账 (名字旁的他人未读): 同样不按视角的 session 段裁 —— 那是视角自己的时间范围。
+      ...(since ? { peerUnread: unreadLedgersOf(msgs, since) } : {}),
       // 链接来自哪个会话就默认开哪个 (见 landingOf); 否则最近活动的那个。
       conv: home?.key ?? convs.find((c) => c.kind !== "job")?.key ?? convs[0]?.key ?? "",
       // 从群里点名字进来, 要看的是「我在这个群里和它说过什么」—— 默认只看与问话那一方的
@@ -231,6 +234,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     };
   };
 
+  const sinceOf = (url: URL): number | undefined => Number(url.searchParams.get("since")) || undefined;
+
   const peerStats = (records: readonly DetailRecord[], msgs: readonly Msg[], role: string, win: Pick<View, "conv" | "with" | "span"> | undefined, dir: Directory, now: number) => {
     const t = win?.conv ? talkArgs(role, win.conv, win.with || undefined) : undefined;
     const w = counterpartOf(role, t);
@@ -246,7 +251,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       const records = listRecent();
       const v = viewOf(records, makeDirectory(records, f), ticket, url);
       if (!v) { json(res, 404, { ok: false, error: "不认识这个 role" }); return; }
-      json(res, 200, { ok: true, ...summary(records, f, v.role, url.searchParams.get("session"), landingOf(ticket, v.role), v) });
+      json(res, 200, { ok: true, ...summary(records, f, v.role, url.searchParams.get("session"), landingOf(ticket, v.role), v, sinceOf(url)) });
     });
   };
 
@@ -368,7 +373,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       const records = listRecent();
       v ??= viewOf(records, makeDirectory(records, ff), ticket, url);
       if (!v) return;
-      send("role", summary(records, ff, v.role, url.searchParams.get("session"), landingOf(ticket, v.role), v));
+      send("role", summary(records, ff, v.role, url.searchParams.get("session"), landingOf(ticket, v.role), v, sinceOf(url)));
       // 工单窗口的开工 / 收工两行取自账本, 账本变了不写 store —— 跟着名册的心跳推, 没变的由 sig 挡掉。
       const jid = jobOfKey(v.conv);
       const job = jid ? ff.jobs.find((j) => j.id === jid) : undefined;

@@ -357,6 +357,45 @@ const spokeBy = (role: string) => (ms: readonly Msg[]): number =>
     return Math.max(t, said);
   }, 0);
 
+/** 一个 role 的会话项键: 它开过口的群 + 有往来的私聊。mine = talkOf(msgs, role)。 */
+const convKeysOf = (mine: readonly Msg[], role: string): string[] =>
+  [...new Set(mine.filter((m) => !m.channel || m.from === role).map((m) => convKeyOf(m, role)))];
+
+/** 一个会话项的未读账 —— Conv 里客户端点未读要的那几样 (heard / mine / 子项的 mine), 别的不带。 */
+export interface Ledger { key: string; heard: Heard[]; mine: number; subs: Array<{ role: string; mine: number }> }
+/** 每个 role 自己视角下的未读账: 与 convsOf 同一口径 (会话键、heard、开口水位), 让页面在不切视角的情况下
+ *  点出「换到它的视角会看到几条未读」。只留 since (页面的未读基线) 之后说完的话, 一句都没有的会话 / role 不给 ——
+ *  基线之前的话在客户端永远不算未读, 带上只是白占流量。子项也只给有话说给它的那几个对端。 */
+export const unreadLedgersOf = (all_: readonly Msg[], since: number): Record<string, Ledger[]> => {
+  const msgs = all_.filter((m) => !isPing(m));
+  const byChannel = msgs.reduce((idx, m) => {
+    if (m.channel) (idx.get(m.channel) ?? idx.set(m.channel, []).get(m.channel)!).push(m);
+    return idx;
+  }, new Map<string, Msg[]>());
+  const party = (r: string): boolean => !!r && !r.startsWith("task:") && r !== SYSTEM;
+  // 基线之后才说完的话只可能出在这几条里 (出消息的终句晚于开轮, 按它最后一段 text 算): 只有它们沾到的
+  // 群 / 私聊两端才可能有账 —— 不先收窄, 每次推摘要都要替每个 role 扫一遍全部消息。
+  const fresh = msgs.filter((m) => Math.max(m.ts, ...m.turn.items.map((it) => (it.t === "text" ? it.ts ?? 0 : 0))) > since);
+  const hot = new Set(fresh.filter((m) => m.channel).map((m) => m.channel));
+  const roles = [...new Set([
+    ...fresh.flatMap((m) => [m.from, m.to]),
+    ...[...hot].flatMap((c) => (byChannel.get(c) ?? []).map((m) => m.from)),
+  ])].filter(party);
+  const ledgerOf = (role: string): Ledger[] => {
+    const mine = talkOf(msgs, role);
+    return convKeysOf(mine, role).flatMap((key): Ledger[] => {
+      const group = key.startsWith("c:");
+      if (group && !hot.has(key.slice(2))) return [];
+      const ms = group ? byChannel.get(key.slice(2)) ?? [] : talkOf(mine, role, [key.slice(2)], "");
+      const heard = heardBy(role)(ms).filter((h) => h[0] > since);
+      if (!heard.length) return [];
+      const peers = group ? [...new Set(heard.filter((h) => h[2] === role).map((h) => h[1]))].filter(party) : [];
+      return [{ key, heard, mine: spokeBy(role)(ms), subs: peers.map((r) => ({ role: r, mine: spokeBy(role)(talkOf(ms, role, [r])) })) }];
+    });
+  };
+  return Object.fromEntries(roles.map((r) => [r, ledgerOf(r)] as const).filter(([, ls]) => ls.length));
+};
+
 /** 一个 role 参与的全部会话, 最近活动在前。群聊只列它**自己开过口**的 —— 住在里面
  *  (home) 或只是被人叫过一声却没答话的, 都不算参与; 私聊则有往来就在列。 */
 export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now: number): Conv[] => {
@@ -365,8 +404,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
   const heard = heardBy(role);
   const spoke = spokeBy(role);
   const mine = talkOf(msgs, role);
-  const keys = [...new Set(mine.filter((m) => !m.channel || m.from === role).map((m) => convKeyOf(m, role)))];
-  return keys
+  return convKeysOf(mine, role)
     .map((key): Conv => {
       if (key.startsWith("p:")) {
         const peer = key.slice(2);

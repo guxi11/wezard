@@ -278,6 +278,12 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
   font-variant-numeric: tabular-nums;
 }
 
+/* 他人未读: 贴在名字右侧, 同一种红点、小一号 —— 换到那个 role 的视角会看到、这里没在数的未读。 */
+.nm .pub {
+  display: inline-block; margin-left: 4px; min-width: 13px; height: 13px; padding: 0 4px; border-radius: 7px;
+  background: #e5484d; color: #fff; font-size: 9px; font-weight: 600; line-height: 13px; text-align: center;
+  font-variant-numeric: tabular-nums; vertical-align: 2px;
+}
 
 /* ── 右栏头: 这个群聊 / 私聊是什么 ───────────────────────────────── */
 .main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--card) }
