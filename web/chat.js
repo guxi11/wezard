@@ -499,11 +499,6 @@
       ms.map(function (m) { return '<i>' + esc(m.label || roleLabel(m.role)) + '</i>'; }).join('') + '</span>';
   };
 
-  // ends = [[id, 已知头像]]; 没带头像的按 role 查。
-  var pairOf = function (ends) {
-    return '<span class="pair">' + ends.map(function (e) { return goSpan('av', e[0], esc(e[1] || roleLabel(e[0]))); }).join('') + '</span>';
-  };
-
   var line = function (title, ts, pv, lamp, unread) {
     return '<span class="b"><span class="l1"><span class="t">' + title + '</span>' + (lamp || '') +
       '<span class="ts">' + esc(fmtAgo(ts)) + '</span></span>' +
@@ -1139,6 +1134,8 @@
     var b = $('#ch-jback');
     if (b) b.onclick = function () { var x = BACK; BACK = null; SESSION = x.session; selectConv(x.conv, x.with, restoreAt(x.at), x.viewpoint); };
   };
+  // 一对一的标题: 与关系图卡片窗口 (convOf 的 a:) 同一种写法。
+  var pairTitle = function (peer) { return nameOf(ROLE) + ' 与 ' + nameOf(peer) + ' 的对话'; };
   var renderHead = function () {
     var who = $('#ch-who'), acts = $('#ch-acts');
     if (VIEW === 'jobs') {
@@ -1169,18 +1166,18 @@
       return;
     }
     if (c.kind === 'all') {
-      who.innerHTML = pairOf([[c.who]]) + '<span class="t" title="' + esc(c.name) + '"></span>';
+      who.innerHTML = '<span class="t" title="' + esc(c.name) + '"></span>';
       acts.innerHTML = '';
       bindBack();
       fitTalk(who.querySelector('.t'), c);
       bindGo(who);
       return;
     }
-    // 群里选中一个子项: 窗口是「我与它」在这个群里的往来, 顶栏写成「我 ⇄ 它」, 不画头像;
+    // 群里选中一个子项: 窗口是「我与它」在这个群里的往来, 顶栏同关系图卡片的窗口写成「我 与 它 的对话」, 不画头像;
     // 群名退到副标题, 点它 = 选回这个群本身 (整个群的视图)。
     if (WITH && c.kind === 'group') {
-      var s = (c.subs || []).filter(function (x) { return x.role === WITH; })[0];
-      who.innerHTML = '<span class="t">' + nm(ROLE, '', true) + ' <span class="xch" aria-hidden="true">⇄</span> ' + nm(WITH, s && s.name, true) + '</span>' +
+      var withName = pairTitle(WITH);
+      who.innerHTML = '<span class="t" title="' + esc(withName) + '">' + esc(withName) + '</span>' +
         '<span class="sub">在 <button type="button" class="up" id="ch-up" title="' + esc('看 ' + c.name + ' 的全部记录') + '">' + esc(c.name) + '</button></span>';
       acts.innerHTML = '';
       bindBack();
@@ -1197,12 +1194,11 @@
       bindGo(who);
       return;
     }
-    // 一对一 (私聊, 或群里「只看我与 X」) 两端都亮头像: 我在前, 对端在后, 各自是切视角的入口。
-    var dm = dmOf(c);
+    // 一对一 (私聊, 或群里「只看我与 X」) 与关系图卡片的窗口同一种写法: 「我 与 它 的对话」, 不画头像。
     var peer = pairPeer(c);
-    var peerLabel = c.kind !== 'group' ? c.label : dm && peer === dm.role ? dm.label : '';
-    who.innerHTML = (peer ? pairOf([[ROLE, R.role && R.role.label], [peer, peerLabel]]) : '') +
-      '<span class="t">' + (c.kind === 'wizard' ? nm(c.peer, c.name, true) : '<span class="nm chat">' + esc(c.name) + '</span>') + '</span>';
+    var pairName = peer && pairTitle(peer);
+    who.innerHTML = peer ? '<span class="t" title="' + esc(pairName) + '">' + esc(pairName) + '</span>'
+      : '<span class="t">' + (c.kind === 'wizard' ? nm(c.peer, c.name, true) : '<span class="nm chat">' + esc(c.name) + '</span>') + '</span>';
     acts.innerHTML = '';
     bindBack();
     bindGo(who);
@@ -1883,7 +1879,11 @@
     close();
     // 兄弟的顺序在画的时候定 (按卡片的时刻, 同会话列表), 这里不排。
     var kids = kidsIn();
-    return { pairs: pairs, inc: inc, pp: pp, kids: kids, roots: roots, ends: ends };
+    // 人直接对 wizard 说话的那条边不是它的主父亲 (主父亲多是生它的那位) 时, 在人下面再挂一张它的引用卡:
+    // 同一个节点、同一个窗口, 只是承载的是人 → 它这条边; 引用卡不再往下展开 (后代在它的本位上画)。
+    var refs = list.filter(function (p) { return kindOf(p.from) === 'human' && pp[p.to] !== p; })
+      .reduce(function (m, p) { (m[p.from] = m[p.from] || []).push(p); return m; }, {});
+    return { pairs: pairs, inc: inc, pp: pp, kids: kids, refs: refs, roots: roots, ends: ends };
   };
 
   // F.vis: 只看相关时画哪些 (见 visibleOf); 没有 = 全画。
@@ -1914,7 +1914,7 @@
   };
 
   // ── 卡片承载指进来的那条边 (主父亲 → 它): 预览取视角与对端在侧栏里现成的那一项 ──
-  var edgeEnds = function (F, t) { var p = F.pp[t]; return p ? [p.from, t] : [t]; };
+  var edgeEnds = function (F, t, p) { p = p || F.pp[t]; return p ? [p.from, t] : [t]; };
   // 视角 role 与 other 之间的那一项: 私聊优先, 否则挑最近说过话的那个群里的「只看我与它」。
   var pairConv = function (other) {
     if (convOf('p:' + other)) return ['p:' + other, ''];
@@ -1924,8 +1924,8 @@
     return hit ? [hit[0].key, dmOf(hit[0]) ? '' : other] : null;
   };
   // 视角这一端与边另一端之间、侧栏里现成的那一项 (视角不在边上 / 这段里没说过话 = 没有)。
-  var edgeConv = function (F, t) {
-    var ends = edgeEnds(F, t);
+  var edgeConv = function (F, t, e) {
+    var ends = edgeEnds(F, t, e);
     var other = ends.length === 2 && ends.indexOf(ROLE) >= 0 && ends.filter(function (x) { return x !== ROLE; })[0];
     return other ? pairConv(other) : null;
   };
@@ -1936,12 +1936,18 @@
     var ls = links[t] || [];
     return 'a:' + t + (ls.length ? '|' + ls.join(',') : '');
   };
-  // 图上相连 = 画出来的主父亲边: 它的父亲 + 它的孩子, 两端都画出来了才算。
+  // 图上相连 = 画出来的边: 它的父亲 + 它的孩子 + 引用卡两端 (人 ↔ 它), 两端都画出来了才算。
   var linksOf = function (F, shown) {
     var on = shown.reduce(function (m, n) { m[n.target] = 1; return m; }, {});
+    var refIn = Object.keys(F.refs).reduce(function (m, h) {
+      F.refs[h].forEach(function (p) { (m[p.to] = m[p.to] || []).push(h); });
+      return m;
+    }, {});
+    var refOut = function (t) { return (F.refs[t] || []).map(function (p) { return p.to; }); };
     return shown.reduce(function (m, n) {
       var t = n.target, p = F.pp[t];
-      m[t] = (p && on[p.from] ? [p.from] : []).concat((F.kids[t] || []).filter(function (k) { return on[k]; }));
+      m[t] = (p && on[p.from] ? [p.from] : []).concat(F.kids[t] || [], refIn[t] || [], refOut(t))
+        .filter(function (k, i, a) { return on[k] && a.indexOf(k) === i; });
       return m;
     }, {});
   };
@@ -1953,10 +1959,10 @@
   // (边的下端是视角) 的对端是它的父亲 —— 拿会话项的身份去画, 这张卡片就成了父亲的分身。
   // 时刻与最近一句取自卡片自己的窗口 (点它打开的那一份, 服务端 /api/glance 用同一个 talkOf 算, 说话人前缀
   // 也在那里定); 窗口还没取到 (或第一遍量树时) 退回视角与对端的会话项 / 节点。未读跟着视角与对端的会话项走。
-  var cardGlance = function (F, t) {
-    var hit = edgeConv(F, t), c = hit && convOf(hit[0]);
+  var cardGlance = function (F, t, e) {
+    var hit = edgeConv(F, t, e), c = hit && convOf(hit[0]);
     var s = c && hit[1] && (c.subs || []).filter(function (x) { return x.role === hit[1]; })[0];
-    var n = nodeOf(t) || {}, p = F.pp[t];
+    var n = nodeOf(t) || {}, p = e || F.pp[t];
     var base = c ? glance(c, s || undefined) : { lastTs: p ? p.last : n.lastTs || 0, preview: n.preview || '', unread: 0 };
     var w = F.links && W.glance[talkKey(F.links, t)];
     return w ? { lastTs: w.lastTs, preview: w.preview, unread: base.unread } : base;
@@ -1987,13 +1993,14 @@
     var n = Object.keys(all).filter(function (o) { return o !== t && !on[o]; }).length;
     return moreTag(n, nameOf(t) + ' 还和 ' + n + ' 个 role 有关系, 不在这张图上, 切到它的视角可见');
   };
-  var tnodeHTML = function (F, n) {
+  // e = 引用卡承载的那条边 (人 → 它); 没有 = 本位卡片, 承载主父亲边。
+  var tnodeHTML = function (F, n, e) {
     var me = n.target === ROLE;
-    var p = F.pp[n.target];
-    var row = roleRow(n.target, n.name, n.label, cardGlance(F, n.target), n, '', otherRels(F, n.target));
+    var p = e || F.pp[n.target];
+    var row = roleRow(n.target, n.name, n.label, cardGlance(F, n.target, e), n, '', otherRels(F, n.target));
     var via = F.vis && F.vis[n.target] === 'via';
     var jin = F.job && (F.job.in[n.target] ? ' jin' : ' jout');
-    return '<button class="ci tci' + (me ? ' me' : '') + (via ? ' via' : '') + (n.ghost ? ' ghost' : '') + (jin || '') + (F.links && CONV === talkKey(F.links, n.target) ? ' on' : '') + '" data-t="' + esc(n.target) + '"' +
+    return '<button class="ci tci' + (me ? ' me' : '') + (e ? ' ref' : '') + (via ? ' via' : '') + (n.ghost ? ' ghost' : '') + (jin || '') + (F.links && CONV === talkKey(F.links, n.target) ? ' on' : '') + '" data-t="' + esc(n.target) + '"' +
       (n.ghost ? ' title="' + esc(nameOf(n.target) + ' 已停且没有记录, 这里只是占位, 代表它挂着下面的后代') + '"' : via ? ' title="' + esc(nameOf(n.target) + ' 和 ' + nameOf(ROLE) + ' 没有直接关系, 留着是为了连到它下面有关系的') + '"' : '') + '>' +
       labelHTML(p) + row + '</button>';
   };
@@ -2004,13 +2011,19 @@
     if (!n || seen[t] || depth > 32) return '';
     seen[t] = 1;
     shown.push(n);
-    var kids = (F.kids[t] || []).filter(function (k) { return shows(F, k); }).sort(byCard(F));
+    // 孩子 = 本位的主孩子 + 引用卡 (它是人时, 它直接说过话、但主父亲另有其人的 wizard), 一起按卡片时刻排。
+    var kids = (F.kids[t] || []).filter(function (k) { return shows(F, k); }).map(function (k) { return { t: k }; })
+      .concat((F.refs[t] || []).filter(function (p) { return shows(F, p.to) && nodeOf(p.to); }).map(function (p) { return { t: p.to, e: p }; }))
+      .sort(function (a, b) { return recentFirst(cardGlance(F, a.t, a.e), cardGlance(F, b.t, b.e)); });
     // 选中工单时: 两端都是它的当事人 (含开单者) 的那道线才亮。
-    var jl = F.job ? (F.job.in[t] && F.pp[t] && F.job.in[F.pp[t].from] ? ' jline' : ' jdim') : '';
-    return '<li class="' + domKind(F.pp[t]) + jl + '"' + (z ? ' style="z-index:' + z + '"' : '') + '>' + tnodeHTML(F, n) +
+    var jl = function (u, p) { return F.job ? (F.job.in[u] && p && F.job.in[p.from] ? ' jline' : ' jdim') : ''; };
+    var zs = function (z) { return z ? ' style="z-index:' + z + '"' : ''; };
+    return '<li class="' + domKind(F.pp[t]) + jl(t, F.pp[t]) + '"' + zs(z) + '>' + tnodeHTML(F, n) +
       // 兄弟的线共用一段竖干, 越往下的越长: 短的叠在上面 (z 随序号递减), 每条线的末段都看得见自己的颜色。
       (kids.length ? '<ul>' + kids.map(function (k, i) {
-        return treeHTML(F, k, depth + 1, shown, seen, kids.length - i);
+        return k.e
+          ? '<li class="' + domKind(k.e) + jl(k.t, k.e) + '"' + zs(kids.length - i) + '>' + tnodeHTML(F, nodeOf(k.t), k.e) + '</li>'
+          : treeHTML(F, k.t, depth + 1, shown, seen, kids.length - i);
       }).join('') + '</ul>' : '') +
       '</li>';
   };
@@ -2097,7 +2110,7 @@
     });
     bindGo(convsEl);
     bindWorldToggle(convsEl); bindWin(convsEl);
-    var cur = convsEl.querySelector('.tci.me');
+    var cur = convsEl.querySelector('.tci.me:not(.ref)');
     if (cur && W.treeFor !== ROLE) { W.treeFor = ROLE; cur.scrollIntoView({ block: 'nearest' }); }
   };
 
