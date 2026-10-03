@@ -632,7 +632,7 @@ export interface Handoff {
   reason?: string;
 }
 
-/** 其余 wezard 调用的提示行: 一句人看得懂的摘要, 能跳就跳 (新 wizard 的视角 / 工单页 / 日程)。 */
+/** 其余 wezard 调用的提示行: 一句人看得懂的摘要, 能跳就跳 (以新 wizard 为 viewpoint 的往来 / 工单页 / 日程)。 */
 export type Hint =
   | ({ k: "handoff" } & Handoff)
   /** 生了一个不带活的分身: 名字 + 职责。 */
@@ -706,7 +706,7 @@ export const hintOf = (use: ToolUse, result: ToolResult | undefined): Hint | und
 /** 箭头的颜色: 这件活此刻的回执状态。 */
 export interface HandoffStatus { key: "run" | "done" | "need" | "error" | "fail" | "plain"; tip: string }
 
-/** rolepage 给提示行补的: 对方的头像 + 名字, 整行点了要开的那段往来 / 要换去的视角 / 日程 (挂在行上的属性),
+/** rolepage 给提示行补的: 对方的头像 + 名字, 整行点了要开的那段往来 / 要站的 viewpoint / 日程 (挂在行上的属性),
  *  回执落定成什么。整页详情没有名录也不看别的轮次, 只写名字、不可点。 */
 export interface HandoffDeco {
   who: (name: string) => string;
@@ -714,7 +714,7 @@ export interface HandoffDeco {
   status: (h: Handoff) => HandoffStatus;
   /** 接手这件活的那一轮的账 (模型 / ctx / 耗时); 还没接手 = ""。 */
   acct: (h: Handoff) => string;
-  /** 整行点了换到这个 wizard 的视角 (新生的 / 被收的); 名录里没有 = ""。 */
+  /** 整行点了开这个 wizard (新生的 / 被收的) 的往来、viewpoint 站到它身上; 名录里没有 = ""。 */
   role: (name: string) => string;
   /** 整行点了开发话方的日程。 */
   plan: () => string;

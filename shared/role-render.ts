@@ -160,7 +160,7 @@ const handoffDeco = (r: TurnDetailRecord, records: readonly DetailRecord[], dir:
         ? `<span class="ho-who"><span class="av">${escHtml(dir.labelOf(id))}</span><span class="nm wizard">${escHtml(dir.nameOf(id))}</span></span>`
         : `<span class="ho-nm">.${escHtml(name)}</span>`;
     },
-    role: (name) => ((id) => (id ? ` data-hrole="${escHtml(id)}" title="${escHtml(`换到 .${dir.nameOf(id)} 的视角`)}"` : ""))(dir.resolve(name)),
+    role: (name) => ((id) => (id ? ` data-hrole="${escHtml(id)}" title="${escHtml(`以 .${dir.nameOf(id)} 为 viewpoint 看它的往来`)}"` : ""))(dir.resolve(name)),
     plan: () => (r.target ? ` data-hplan="${escHtml(r.target)}" title="${escHtml(`打开 .${dir.nameOf(r.target)} 的日程`)}"` : ""),
     attrs: (h) => {
       const id = dir.resolve(h.name);
