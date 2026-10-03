@@ -460,6 +460,13 @@ export const talkArgs = (role: string, key: string, withRole?: string): TalkArgs
   return withRole ? { who: role, peers: [withRole], chat: key.slice(2) } : undefined;
 };
 
+/** 纯 wizard↔wizard 的私聊窗口 (两端都是 wizard、没限定到某个群): 里面不画断点 ——
+ *  /new 的是 wizard 自己的上下文 (handoff 重开也记一条), 不是这场对话的边界, 署名还会落到人头上。 */
+export const isWizardDm = (role: string, key: string, withRole: string | undefined, dir: Pick<Directory, "isWizard">): boolean => {
+  const t = talkArgs(role, key, withRole);
+  return !!t && !t.chat && t.peers.length > 0 && [t.who, ...t.peers].every(dir.isWizard);
+};
+
 /** 窗口是视角与恰好另一个 role 之间的往来时, 那个 role; 否则 (群 / 多个对端 / 不含视角) 没有。 */
 export const counterpartOf = (viewer: string, t: TalkArgs | undefined): string | undefined => {
   if (t?.peers.length !== 1) return undefined;

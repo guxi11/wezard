@@ -27,7 +27,7 @@ import { baseOfKey } from "./session-label.js";
 import { isMark, isPost, isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, jobProgress, withData, type WorldFactJob, type WorldFacts } from "./world.js";
 import {
-  allMessages, convKeyOf, convMessages, chatKeysOf, parseTalkKey, glanceOfTalk, convsOf, jobConvsOf, jobOfKey, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
+  allMessages, convKeyOf, convMessages, chatKeysOf, isWizardDm, parseTalkKey, glanceOfTalk, convsOf, jobConvsOf, jobOfKey, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
   roleInfo, roleStats, sessionsOf, talkArgs, talkOf, counterpartOf, windowStats, type Directory, type Msg, type SessionSpan,
 } from "./role-view.js";
 import { dependentsOf, renderJobMarks, renderMark, renderMsg, type MsgFragment } from "./role-render.js";
@@ -259,11 +259,11 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
     const lo = msgs[0]?.ts ?? Infinity;
     const jid = jobOfKey(v.conv);
     // 工单窗口横跨好几个成员的会话, 谁的断点都不属于它; 它自己的两行 (开工 / 收工) 取自账本。
-    const marks = jid ? [] : marksOf(records, markRole(v)).filter((mk) => mk.createdAt >= lo && inSpan(v.span)(mk.createdAt));
+    const marks = jid || isWizardDm(v.role, v.conv, v.with || undefined, dir) ? [] : marksOf(records, markRole(v)).filter((mk) => mk.createdAt >= lo && inSpan(v.span)(mk.createdAt));
     const job = jid ? jobs.find((j) => j.id === jid) : undefined;
     const frags = [
       ...msgs.map((m) => ({ id: m.id, ts: m.ts, render: () => renderMsg(m, records, dir, now) })),
-      ...marks.map((mk) => ({ id: `m:${mk.id}`, ts: mk.createdAt, render: () => renderMark(mk, v.role, dir) })),
+      ...marks.map((mk) => ({ id: `m:${mk.id}`, ts: mk.createdAt, render: () => renderMark(mk, mk.target ?? v.role, dir) })),
       ...(job ? renderJobMarks(job, dir, jobs).map((f) => ({ id: f.id, ts: f.ts, render: () => f })) : []),
     ].sort((a, b) => a.ts - b.ts);
     return frags;
@@ -381,7 +381,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider)
       const r = store.get(id);
       if (!r) return;
       if (isMark(r)) {
-        if (!jobOfKey(v.conv) && r.target === markRole(v) && inSpan(v.span)(r.createdAt)) pushFrag(renderMark(r, v.role, dir));
+        if (!jobOfKey(v.conv) && !isWizardDm(v.role, v.conv, v.with || undefined, dir) && r.target === markRole(v) && inSpan(v.span)(r.createdAt)) pushFrag(renderMark(r, r.target ?? v.role, dir));
         return;
       }
       if (isPost(r)) {
