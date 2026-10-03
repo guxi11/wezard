@@ -2519,10 +2519,15 @@ const main = async (): Promise<void> => {
       const x = charterSections(a), y = charterSections(b);
       return [...new Set([...x.keys(), ...y.keys()])].filter((k) => x.get(k) !== y.get(k));
     };
-    /** 宪章在效的 wizard (有会话的) 此刻的宪章正文。 */
-    const charterSnapshot = (): Map<string, string> =>
-      new Map(wizards.all().filter((w) => !!m.sessionInfo(w.target)?.sessionId)
-        .map((w) => [w.target, charterText(w.target, charterOptsOf(w.target, m.getCwd(w.target).runningCwd || undefined))] as const));
+    /** pane 活着的 wizard —— 宪章在效的只有它们; 冷的醒来时宪章重渲染, 自然是新的。一次 list-panes 答完。 */
+    const liveWizards = async (): Promise<string[]> => {
+      const snap = await runTmux(["list-panes", "-a", "-F", "#{pane_id}"]);
+      const live = new Set(snap.ok ? snap.stdout.split("\n").map((l) => l.trim()).filter(Boolean) : []);
+      return wizards.all().map((w) => w.target).filter((t) => live.has(m.sessionInfo(t)?.tmuxPane ?? ""));
+    };
+    /** 这些 wizard 此刻的宪章正文。 */
+    const charterSnapshot = (targets: readonly string[]): Map<string, string> =>
+      new Map(targets.map((t) => [t, charterText(t, charterOptsOf(t, m.getCwd(t).runningCwd || undefined))] as const));
     /** 把 `next` 那一节换进活的 cfg 渲染一遍再换回 —— 同步完成, 中间没有 await, 别的模块看不见这一瞬。
      *  reload 项落盘后活值不变, 只有这样才算得出它 reload 之后的宪章。 */
     const charterUnder = (pl: Plan, targets: readonly string[]): Map<string, string> => {
@@ -2530,9 +2535,7 @@ const main = async (): Promise<void> => {
       const key = pl.path[0]!;
       const saved = live[key];
       live[key] = (pl.next as unknown as Record<string, unknown>)[key];
-      try {
-        return new Map(targets.map((t) => [t, charterText(t, charterOptsOf(t, m.getCwd(t).runningCwd || undefined))] as const));
-      } finally { live[key] = saved; }
+      try { return charterSnapshot(targets); } finally { live[key] = saved; }
     };
     type CharterHit = { target: string; sections: string[] };
     const charterImpact = (before: Map<string, string>, pl: Plan): CharterHit[] => {
@@ -2583,10 +2586,12 @@ const main = async (): Promise<void> => {
       // 宪章快照取在落盘之前: hot 项一 applyHot, 活的 cfg 就已经是新的了。
       // 不用 resolveSelf: 它最后回落到 defaultChat, 会把认不出的调用方当成那个群的管家。
       const caller = (body.sessionId?.trim() && m.targetForSession(body.sessionId.trim())) || (body.tmuxPane?.trim() && m.targetForPane(body.tmuxPane.trim())) || undefined;
-      const commit = (): (Plan & { charter: string }) | { ok: false; reason: string } => {
+      const commit = async (): Promise<(Plan & { charter: string }) | { ok: false; reason: string }> => {
+        const targets = await liveWizards();
+        // 从这里到 applyHot 之间不能有 await: 快照与落盘之间别人的 config_set 插进来, 前后就对不上了。
         const now = planSet(cfg, sourcePath, ask);
         if (!now.ok) return now;
-        const before = charterSnapshot();
+        const before = charterSnapshot(targets);
         patchJsonc(sourcePath, [{ path: now.jsonPath, value: now.value }]);
         applyHot(cfg, now);
         return { ...now, charter: announceCharterImpact(now, charterImpact(before, now), caller) };
@@ -2595,7 +2600,7 @@ const main = async (): Promise<void> => {
         `已写入${now.apply === "hot" ? ", 已生效" : "; 需 reload (`./cli/wezard.sh reload`) 才生效"}:\n${renderPlan(now)}${now.charter}`;
 
       if (pl.gate !== "card") {
-        const now = commit();
+        const now = await commit();
         if (!now.ok) { json(res, 400, now); return; }
         reply(now, done(now));
         return;
@@ -2614,18 +2619,18 @@ const main = async (): Promise<void> => {
         json(res, 503, { ok: false, reason: `确认卡发不出去 (${errText(e)}), 没写` });
         return;
       }
-      const settle = (yes: boolean): string => {
+      const settle = async (yes: boolean): Promise<string> => {
         if (!yes) return `人没确认 (拒绝或超时), \`${pl.path.join(".")}\` 没写`;
-        const now = commit();
+        const now = await commit();
         return now.ok ? done(now) : `人确认了, 但落盘前重算没过, 没写: ${now.reason}`;
       };
       const inline = await Promise.race([decided, sleep(CONFIRM_INLINE_MS).then(() => undefined)]);
       if (inline !== undefined) {
-        const text = settle(inline);
+        const text = await settle(inline);
         json(res, 200, legacy ? { ok: inline, key: body.key, before: pl.before, after: inline ? pl.after : pl.before, note: text } : { ok: true, text, confirmed: inline });
         return;
       }
-      void decided.then((yes) => notices.post([self], `config_set 的确认卡有结果了: ${settle(yes)}`));
+      void decided.then(async (yes) => notices.post([self], `config_set 的确认卡有结果了: ${await settle(yes)}`));
       json(res, 200, legacy
         ? { ok: false, reason: "确认卡已发到群里, 还没人点; 点了之后自动落盘" }
         : { ok: true, pending: true, text: `确认卡已发到群里, 还没人点 (卡 ${CONFIRM_TIMEOUT_MS / 60_000} 分钟内有效)。点了之后守护进程自动落盘, 结果会捎在你下一条收到的消息上 —— 不用重发。\n${renderPlan(pl)}` });
