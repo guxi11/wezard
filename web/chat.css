@@ -337,7 +337,6 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 .mrow.mine { flex-direction: row-reverse }
 .mrow.mine .mcol { align-items: flex-end }
 .mwho { font-size: 11.5px; color: var(--mute); display: flex; gap: 6px; align-items: center; flex-wrap: wrap }
-.mwho .to { color: var(--faint); display: inline-flex; gap: 6px; align-items: center; min-width: 0; max-width: 100% }
 .mwho .nm { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .mwho .ch { font-size: 10.5px; border-radius: 4px; padding: 0 4px }
 .mwho .ch.priv { color: var(--priv); background: #9a5b1014 }
@@ -433,32 +432,6 @@ button.mchip.rcpt:hover { text-decoration: underline }
 /* 说给谁: 贴着气泡写在门里, 与气泡首行对齐。不吃点击 —— 点到它就是点门。
    门竖排: 描述在上、换视角箭头在下, 描述折几行箭头就跟着往下让, 两者不叠。
    contain: size —— 门的内容不参与这一行的高度, 描述再长也不撑高一行。 */
-.flip:has(.dest) {
-  flex-direction: column; justify-content: flex-start; gap: 6px; contain: size;
-  padding: calc(var(--av) + 12px) 4px 0;
-}
-/* 只留向下的吸附: 原先的 bottom 吸附会把箭头往上拽到视窗中线, 越过上面的描述。 */
-.flip:has(.dest) .fi { bottom: auto; flex: none }
-/* 门比描述矮 (一行短气泡) 时不许把描述压扁, 宁可溢到行外。 */
-.flip:has(.dest) .dest { flex: none }
-/* 压过 .mrow.mine .flip 的 flex-end: 竖排后那条是纵轴, 会把描述推到行底。 */
-.mrow .flip:has(.dest) { justify-content: flex-start }
-.mrow.them .flip:has(.dest) { align-items: flex-start }
-.mrow.mine .flip:has(.dest) { align-items: flex-end }
-.flip .dest {
-  max-width: 100%; font-size: 11px; line-height: 1.45; color: var(--faint); pointer-events: none;
-  display: flex; align-items: center; gap: 4px; max-height: calc(3 * 1.45em); overflow: hidden;
-}
-.flip .dest .arr { font-style: normal; flex: none }
-.flip .dest .dav {
-  flex: none; width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--line); background: var(--card);
-  display: grid; place-items: center; font-size: 11px; line-height: 1;
-}
-.flip .dest .dn { min-width: 0; overflow-wrap: anywhere }
-.mrow.them .flip .dest { text-align: left }
-.mrow.mine .flip .dest { text-align: right; justify-content: flex-end }
-.flip[disabled] .dest { color: var(--faint) }
-.mwho .to { display: none }
 .mwho .av.go { cursor: pointer }
 .mwho .av.go:hover { border-color: var(--accent); background: #2f55c914 }
 
@@ -524,8 +497,7 @@ button.mchip.rcpt:hover { text-decoration: underline }
 }
 .ping-fold .mcol { max-width: 100% }
 .ping-fold .flip { display: none }
-.ping-fold .mwho .to { display: inline-flex }
-/* 折叠里的气泡同是白底 —— 描一圈虚线跟对话气泡分开, 与外框一个语气。 */
+.ping-fold /* 折叠里的气泡同是白底 —— 描一圈虚线跟对话气泡分开, 与外框一个语气。 */
 .ping-fold .mb :is(.bubble.mq, .say > .bubble) { border: 1px dashed var(--bub-line) }
 
 @media (max-width: 760px) {
@@ -539,9 +511,7 @@ button.mchip.rcpt:hover { text-decoration: underline }
   .thread { padding: 12px }
   .mcol { max-width: calc(86% + var(--av)) }
   .flip { min-width: 16px; padding: 0 4px; font-size: 0 }
-  .flip .dest { display: none }
-  .mwho .to { display: inline-flex }
-  .thread { padding-bottom: calc(12px + env(safe-area-inset-bottom)) }
+    .thread { padding-bottom: calc(12px + env(safe-area-inset-bottom)) }
   .usage { padding: 8px 12px }
   .usage.page { padding-bottom: calc(8px + env(safe-area-inset-bottom)) }
 }
@@ -993,3 +963,11 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .tree.jsel .tci.jout { opacity: .3 }
 .tree.jsel .tci.jout:hover { opacity: 1 }
 .tree.jsel li.jdim { --lc: #d0d7de }
+
+/* 说给谁: 文本泡泡开头 inline 的 → 头像 名字; 整块可点, 走移交行同一套跳转。 */
+.to-in { display: inline-flex; align-items: center; gap: 3px; margin: 8px 0 0 12px; font-size: 12px; color: var(--faint); cursor: pointer; vertical-align: middle }
+.to-in:hover { background: var(--av-hot); border-radius: 6px }
+.to-in .av { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--line); background: var(--card); font-size: 10px; line-height: 14px; text-align: center }
+.to-in .nm { font-weight: 500; color: var(--ink) }
+.to-in + .md-body, .to-in + .q-body { padding-top: 2px }
+.to-row { display: block }

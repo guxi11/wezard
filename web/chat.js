@@ -342,9 +342,10 @@
   // 换成移交人 (派活那一方)。节点随 reconcile 换, 所以在根上委托。
   // 行尾的 chevron 只管展开原文, 走 <summary> 自己的开合。
   inner.addEventListener('click', function (e) {
-    var b = e.target.closest && e.target.closest('.handoff .ho-line[data-hto]');
+    var b = e.target.closest && e.target.closest('.handoff .ho-line[data-hto], .to-in[data-hto]');
     if (!b || e.target.closest('.ho-chev')) return;
     e.preventDefault();   // 行是 <summary>: 不顺带展开原文
+    e.stopPropagation();
     var from = b.getAttribute('data-hfrom'), to = b.getAttribute('data-hto'), ch = b.getAttribute('data-hch');
     var peer = ROLE === from ? to : ROLE === to ? from : '';
     var conv = !peer ? 'a:' + from + '|' + to : ch ? 'c:' + ch : 'p:' + peer;
@@ -1226,15 +1227,17 @@
     var dst = mine
       ? (m.to && m.to !== 'human:' && m.to !== peer ? m.to : '')
       : (m.to !== me && group ? m.to : '');
-    // 宽屏写在气泡对面的空白里 (.dest, 在换视角的门里但不吃点击); 窄屏空白太窄, 退回消息头 (.to)。
-    var to = dst ? '<span class="to">→ ' + avBtn(m.to) + nm(m.to, '', true) + '</span>' : '';
-    // 箭头顺着「发话人 → 收件人」: 气泡是发话人, 描述在哪一侧箭头就背着气泡指向哪一侧 ——
-    // 我的消息描述在左 (🦉 .x ←), 别人的在右 (→ 🦉 .x)。
-    var dest = dst
-      ? '<span class="dest" aria-hidden="true">' + (mine ? '' : '<i class="arr">→</i>') +
-        '<span class="dav">' + esc(roleLabel(dst)) + '</span><span class="dn">' + esc(nameOf(dst)) + '</span>' +
-        (mine ? '<i class="arr">←</i>' : '') + '</span>'
+    // 说给谁画进文本泡泡开头 (头像 + 名字); 点它走移交行同一套跳转 (data-hfrom/hto/hch + gid/gts), 不换页面视角。
+    var toIn = dst
+      ? '<span class="to-in" role="button" tabindex="0" data-hfrom="' + esc(m.from) + '" data-hto="' + esc(m.to) + '" data-hch="' + esc(m.channel || '') +
+        '" data-gid="' + esc(m.id) + '" data-gts="' + m.ts + '" title="' + esc('→ ' + nameOf(m.to) + ' —— 看这段往来') + '">→ <span class="av">' +
+        esc(roleLabel(m.to)) + '</span><span class="nm ' + kindOf(m.to) + '">' + esc(nameOf(m.to)) + '</span></span>'
       : '';
+    var withTo = function (html) {
+      if (!toIn) return html;
+      var done = false, out = html.replace(/<div class="(?:q-body|md-body)">/, function (t) { done = true; return toIn + t; });
+      return done ? out : '<div class="to-row">' + toIn + '</div>' + html;
+    };
     var priv = !m.channel && group ? '<span class="ch priv">私聊</span>' : '';
     // 本轮的账 (呼吸点 + 模型 / 上下文 / 耗时) 跟在时刻后面 —— 片段是服务端渲染好的。
     // 模型 / ctx 只在多方会话里有用 (分得清谁跑的什么模型); 两个 role 之间的对话里整行挂 .two, 头像行 (.mstat)、
@@ -1243,15 +1246,15 @@
     var two = !group || !!pairPeer(c) || (!!c && c.kind === 'all' && c.peers.length === 1);
     var stat = m.meta ? '<span class="mstat">' + jobChips(m.meta) + '</span>' : '';
     var who = mine
-      ? to + stamp(m.ts) + stat + avBtn(m.from)
-      : avBtn(m.from) + nm(m.from, '', true) + to + priv + stamp(m.ts) + stat;
+      ? stamp(m.ts) + stat + avBtn(m.from)
+      : avBtn(m.from) + nm(m.from, '', true) + priv + stamp(m.ts) + stat;
     var sw = canSwitch(other);
     var flip = '<button class="flip" data-r="' + esc(other) + '"' + (sw ? '' : ' disabled tabindex="-1"') +
       ' aria-label="' + esc(sw ? '切到 ' + nameOf(other) + ' 的视角' : '') + '">' +
-      dest + (sw ? '<span class="fi"><span class="fn">' + esc(nameOf(other)) + '</span>' + CHEVRON + '</span>' : '') + '</button>';
+      (sw ? '<span class="fi"><span class="fn">' + esc(nameOf(other)) + '</span>' + CHEVRON + '</span>' : '') + '</button>';
     return '<div class="mrow ' + (mine ? 'mine' : 'them') + (two ? ' two' : '') + '" data-id="' + esc(m.id) + '" data-turn="' + esc(m.turnId || m.id) + '" data-ts="' + m.ts + '"' +
       (m.ping ? ' data-ping="1" data-ping-who="' + esc(roleName(m.dir === 'in' ? m.to : m.from)) + '"' : '') + ' data-sig="' + esc(m.sig) + '" data-stale-at="' + (m.staleAt || 0) + '">' +
-      '<div class="mcol"><div class="mwho">' + who + '</div><div class="mb">' + jobChips(m.dir === 'out' ? signCut(m.html, m.from) : m.html) + '</div></div>' +
+      '<div class="mcol"><div class="mwho">' + who + '</div><div class="mb">' + jobChips(withTo(m.dir === 'out' ? signCut(m.html, m.from) : m.html)) + '</div></div>' +
       flip +
     '</div>';
   };
