@@ -848,7 +848,7 @@
     });
   };
   var worldToggle = function () {
-    return '<button class="vt" data-vt title="' + (WORLD ? '换回会话列表' : '换成关系') + '">' + (WORLD ? LIST_SVG + '列表' : TREE_SVG + '关系') + '</button>';
+    return '<button class="vt" data-vt title="' + (WORLD ? '换回聊天' : '换成关系') + '">' + (WORLD ? LIST_SVG + '聊天' : TREE_SVG + '关系') + '</button>';
   };
   var bindWorldToggle = function (scope) {
     var b = scope.querySelector('[data-vt]');
@@ -2424,7 +2424,7 @@
     all().forEach(function (x) { x.ontoggle = sync; });
   };
 
-  // 侧栏换成关系图 / 换回会话列表。换回时选中的仍是在关系图里点开的那一项, 并把它滚进视野。
+  // 侧栏换成关系图 / 换回聊天。换回时选中的仍是在关系图里点开的那一项, 并把它滚进视野。
   var setWorld = function (on) {
     WORLD = on; W.treeFor = ''; W.pickSelf = '';
     setPref(WORLD_KEY, on);
