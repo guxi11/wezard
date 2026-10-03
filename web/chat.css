@@ -715,6 +715,8 @@ button.mchip.rcpt:hover { text-decoration: underline }
 /* 连接用的祖先: 没和视角对过话, 只为把对过话的后代挂回家谱 —— 淡一档。 */
 .tci.via { opacity: .55 }
 .tci.via:hover { opacity: 1 }
+.tci.ghost { opacity: .5; filter: grayscale(1) }
+.tci.ghost:hover { opacity: .8 }
 .tlab { position: absolute; left: 4px; top: -8px; display: flex; gap: 3px; z-index: 2 }
 .tlab .ek { box-shadow: 0 0 0 2px var(--card) }
 

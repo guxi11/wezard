@@ -1929,8 +1929,8 @@
     var row = roleRow(n.target, n.name, n.label, cardGlance(F, n.target), n, '', otherRels(F, n.target));
     var via = F.vis && F.vis[n.target] === 'via';
     var jin = F.job && (F.job.in[n.target] ? ' jin' : ' jout');
-    return '<button class="ci tci' + (me ? ' me' : '') + (via ? ' via' : '') + (jin || '') + (F.links && CONV === talkKey(F.links, n.target) ? ' on' : '') + '" data-t="' + esc(n.target) + '"' +
-      (via ? ' title="' + esc(nameOf(n.target) + ' 和 ' + nameOf(ROLE) + ' 没有直接关系, 留着是为了连到它下面有关系的') + '"' : '') + '>' +
+    return '<button class="ci tci' + (me ? ' me' : '') + (via ? ' via' : '') + (n.ghost ? ' ghost' : '') + (jin || '') + (F.links && CONV === talkKey(F.links, n.target) ? ' on' : '') + '" data-t="' + esc(n.target) + '"' +
+      (n.ghost ? ' title="' + esc(nameOf(n.target) + ' 已停且没有记录, 这里只是占位, 代表它挂着下面的后代') + '"' : via ? ' title="' + esc(nameOf(n.target) + ' 和 ' + nameOf(ROLE) + ' 没有直接关系, 留着是为了连到它下面有关系的') + '"' : '') + '>' +
       labelHTML(p) + row + '</button>';
   };
 

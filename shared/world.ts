@@ -28,6 +28,8 @@ import type { TurnState } from "./turn-state.js";
 /** 一个 wizard 的登记信息 + 此刻的活体状态。daemon 从 wizard.json + tmux 取。 */
 export interface WorldFactWizard {
   target: string;
+  /** withData 补的占位: 已停且无记录, 只为挂住还在的后代。 */
+  ghost?: boolean;
   name: string;
   description: string;
   chat: string;
@@ -142,6 +144,8 @@ export interface WorldNode {
   waiting?: string[];
   /** 注册表里有登记 —— false = 只在 turn 记录里出现过的会话 (svr 视角下的全部)。 */
   known: boolean;
+  /** 占位: 已停且无记录的 wizard, 只为把还在的后代挂回它名下 (灰色)。 */
+  ghost?: boolean;
   /** 这是打开本页那条链接所属的会话。 */
   self: boolean;
   /** 与 self 同一个聊天 (卡片布局里本群那张卡片的锚点)。 */
@@ -311,13 +315,15 @@ export const withData = (facts: WorldFacts, records: readonly DetailRecord[], no
   const spoke = new Set(liveTurns(records, now).flatMap((r) => [r.target!, ...(r.from?.kind === "peer" && r.from.from ? [r.from.from] : [])]));
   const keep = (w: WorldFactWizard): boolean => w.alive || w.busy || w.lastActivity > 0 || spoke.has(w.target);
   const byTarget = new Map(facts.wizards.map((w) => [w.target, w] as const));
-  const lift = (t: string | undefined, seen: ReadonlySet<string> = new Set()): string | undefined => {
+  // 被裁者若还有留下的后代, 不把后代改挂祖父, 而是留一个占位 (ghost) 代表它 —— 家谱里那一层真实存在过。
+  const needed = (t: string | undefined, seen: ReadonlySet<string> = new Set()): string[] => {
     const w = t ? byTarget.get(t) : undefined;
-    return !t || !w || keep(w) || seen.has(t) ? t : lift(w.parent, new Set([...seen, t]));
+    return !t || !w || seen.has(t) ? [] : keep(w) ? [] : [t, ...needed(w.parent, new Set([...seen, t])), ...needed(w.forkOf, new Set([...seen, t]))];
   };
+  const ghosts = new Set(facts.wizards.filter(keep).flatMap((w) => [...needed(w.parent), ...needed(w.forkOf)]));
   return {
     ...facts,
-    wizards: facts.wizards.filter(keep).map((w) => ({ ...w, parent: lift(w.parent), ...(w.forkOf ? { forkOf: lift(w.forkOf) } : {}) })),
+    wizards: facts.wizards.filter((w) => keep(w) || ghosts.has(w.target)).map((w) => (keep(w) ? w : { ...w, ghost: true })),
   };
 };
 
@@ -404,6 +410,7 @@ export const buildWorld = (
       alive: f?.alive ?? false,
       ...(f?.waiting?.length ? { waiting: f.waiting } : {}),
       known: !!f,
+      ...(f?.ghost ? { ghost: true } : {}),
       self: target === scope.self,
       local: base === scope.base,
       parent: f?.parent,
