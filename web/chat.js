@@ -528,17 +528,44 @@
     if (hit.length) saveRead();
   };
 
-  // 展开态按会话各记各的: 点开一个不收起别的, 轮询重画也不动它。
-  // OPEN_AT = 已经替它自动展开过的那个 CONV —— 选中新会话时展开一次, 之后折不折由人说了算。
-  var OPEN = {}, OPEN_AT = '';
-  // 子项默认只露前 SUB_FOLD 个, 其余收在一条展开/折叠条后面; 展开态同样按会话各记各的。
-  var SUB_FOLD = 5, MORE = {};
+  // 跨会话通用的个人偏好 (看全部、侧栏群节点的展开): 记在本地, 刷新后还在。
+  // 取不到 / 写不进 (隐私窗口、禁存) 就按默认值, 页面照常。
+  var pref = function (key, def) {
+    try { var v = localStorage.getItem(key); return v === null ? def : JSON.parse(v); } catch (e) { return def; }
+  };
+  var setPref = function (key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch (e) { } };
+  var prefObj = function (key) { var v = pref(key, {}); return v && typeof v === 'object' ? v : {}; };
+  // 早先也记过 ping 与日程卡片的展开 —— 那两样只活在内存里, 旧 key 顺手清掉。
+  try { ['wezard.role.pingOpen', 'wezard.role.planOpen'].forEach(function (k) { localStorage.removeItem(k); }); } catch (e) { }
+
+  // 展开态按群各记各的 (键 = 群节点的会话键): 点开一个不收起别的, 轮询重画也不动它。
+  // OPEN_AT = 已经替它自动展开过的那个 CONV —— 选中新会话时展开一次, 之后折不折由人说了算; null = 刚载入。
+  // 默认只展开选中的那个群; 本地只记偏离默认的: 没选中却展开着的 = true, 选中却被收起的 = false
+  // (载入时自动展开要让着它)。回到默认的那一项写的时候就删, 不越存越多。
+  var OPEN_KEY = 'wezard.role.groupOpen';
+  var OPEN = prefObj(OPEN_KEY), OPEN_AT = null;
+  // 子项默认只露前 SUB_FOLD 个, 其余收在一条展开/折叠条后面; 展开态同样按群记, 只留展开着的。
+  var MORE_KEY = 'wezard.role.groupMore';
+  var SUB_FOLD = 5, MORE = prefObj(MORE_KEY);
+  // 某 role 在一个群里的全部记录挂在那个群下: CONV 落在哪个群节点上。
+  var groupOf = function (key) { var t = key && convOf(key); return t && t.chat ? 'c:' + t.chat : key; };
+  var saveOpen = function () {
+    var sel = groupOf(CONV);
+    setPref(OPEN_KEY, Object.keys(OPEN).reduce(function (m, k) {
+      if (!!OPEN[k] !== (k === sel)) m[k] = !!OPEN[k];
+      return m;
+    }, {}));
+  };
+  var setMore = function (key, v) {
+    if (v) MORE[key] = true; else delete MORE[key];
+    setPref(MORE_KEY, MORE);
+  };
   var reveal = function () {
-    if (CONV && CONV !== OPEN_AT) {
-      // 某 role 在一个群里的全部记录挂在那个群下: 展开的是那个群。
-      var t = convOf(CONV);
-      OPEN[t && t.chat ? 'c:' + t.chat : CONV] = true; OPEN_AT = CONV;
-    }
+    if (!CONV || CONV === OPEN_AT) return;
+    var g = groupOf(CONV);
+    if (!(OPEN_AT === null && OPEN[g] === false)) OPEN[g] = true;
+    OPEN_AT = CONV;
+    saveOpen();
   };
   // 点侧栏项: 没选中它 → 选中 (会话顺带展开); 已选中 → 不再选一遍, 右边的正文一个字不动 ——
   // 会话只折叠/展开, 子项什么都不做。viewpoint 与关系图卡片同一条规矩: 站在这一项的主人身上 ——
@@ -549,6 +576,7 @@
     if (!app.classList.contains('reading')) return app.classList.add('reading');
     if (withRole) return;
     OPEN[key] = !OPEN[key];
+    saveOpen();
     renderConvs();
   };
 
@@ -662,7 +690,7 @@
     });
     convsEl.querySelectorAll('[data-more]').forEach(function (b) {
       var key = b.getAttribute('data-more');
-      b.onclick = function () { MORE[key] = !MORE[key]; renderConvs(); };
+      b.onclick = function () { setMore(key, !MORE[key]); renderConvs(); };
     });
     bindGo(convsEl);
     bindWorldToggle(convsEl);
@@ -726,12 +754,6 @@
   // 会话列表 ↔ 关系图: 侧栏第一行右上角同一个小开关, 标的是「点了去哪」。
   var LIST_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M3 4h10M3 8h10M3 12h10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
   var TREE_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M4 3v10M4 6h5M4 11h5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="11" cy="6" r="1.6" fill="currentColor"/><circle cx="11" cy="11" r="1.6" fill="currentColor"/></svg>';
-  // 跨会话通用的个人偏好 (看全部、ping 展开、日程卡片展开): 记在本地, 刷新后还在。
-  // 取不到 / 写不进 (隐私窗口、禁存) 就按默认值, 页面照常。某一个会话自己的滚动与展开不在此列。
-  var pref = function (key, def) {
-    try { var v = localStorage.getItem(key); return v === null ? def : JSON.parse(v); } catch (e) { return def; }
-  };
-  var setPref = function (key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch (e) { } };
   // 「是否看全部」—— 群下子项「往来 / 全部」与关系图「相关 / 全部」是同一个念头, 共用这一个值。
   // 还没存过就沿用老 key `wezard.role.subScope` ('all' / 'pair', 不是 json) 里的选择。
   var ALL_KEY = 'wezard.role.showAll';
@@ -1195,8 +1217,7 @@
   // ping 不是对话, 但它是真花销, 从时间轴上抹掉就等于说这段时间什么都没发生。
   // 一次 ping 落成两行 (问 + pong); 相邻的整串收进一条虚线, 展开才见正文。
   // 展开态是整页一个开关 —— 折行没有稳定 id, 而"想看 ping"是个一次性的念头。
-  var PING_KEY = 'wezard.role.pingOpen';
-  var PING_OPEN = pref(PING_KEY, false) === true;
+  var PING_OPEN = false;
   var unfoldPings = function (root) {
     root.querySelectorAll('.ping-fold').forEach(function (f) {
       var body = f.querySelector('.ping-body');
@@ -1231,7 +1252,7 @@
       root.insertBefore(d, before);
       var body = d.querySelector('.ping-body');
       run.forEach(function (r) { body.appendChild(r); });
-      d.addEventListener('toggle', function () { PING_OPEN = d.open; setPref(PING_KEY, PING_OPEN); });
+      d.addEventListener('toggle', function () { PING_OPEN = d.open; });
       run = [];
     };
     // 先取快照 —— flush 会把行搬进 details, 边遍历边改 children 会漏行。
@@ -2029,9 +2050,7 @@
         : '<span class="fl">执行</span>' + wizChip(x.target) + '<span class="fl">注入已有会话</span>') +
     '</div>';
   };
-  // 日程卡片的展开按任务 id 记, 只留展开着的 —— 收起 = 删掉那一项, 存的东西不会越攒越多。
-  var PLAN_KEY = 'wezard.role.planOpen';
-  var PLAN_OPEN = (function (v) { return v && typeof v === 'object' ? v : {}; })(pref(PLAN_KEY, {}));
+  var PLAN_OPEN = {};
   var taskHTML = function (x) {
     var lines = String(x.prompt || '').split('\n');
     var head = x.note || lines[0];
@@ -2086,12 +2105,7 @@
       c.onclick = function () { openNode(c.getAttribute('data-t')); };
     });
     planEl.querySelectorAll('.pprompt').forEach(function (d) {
-      d.ontoggle = function () {
-        var id = d.getAttribute('data-id');
-        if (d.open) PLAN_OPEN[id] = true; else delete PLAN_OPEN[id];
-        setPref(PLAN_KEY, PLAN_OPEN);
-        planEl._html = '';
-      };
+      d.ontoggle = function () { PLAN_OPEN[d.getAttribute('data-id')] = d.open; planEl._html = ''; };
     });
     planEl.querySelectorAll('.strip .pin').forEach(function (p) {
       p.onclick = function () {
@@ -2257,9 +2271,9 @@
       // 选中的子项得露出来: 群展开, 排在折叠条后面的连折叠条一起展开。
       var c = convOf(CONV);
       if (c) {
-        OPEN[CONV] = true; OPEN_AT = CONV;
+        OPEN[CONV] = true; OPEN_AT = CONV; saveOpen();
         var rank = c.subs.filter(function (x) { return x.count; }).map(function (x) { return x.role; }).indexOf(WITH);
-        if (rank >= SUB_FOLD) MORE[CONV] = true;
+        if (rank >= SUB_FOLD) setMore(CONV, true);
       }
       renderConvs();
       var sel = convsEl.querySelector('.si.on') || convsEl.querySelector('.ci.on');
