@@ -168,7 +168,7 @@ export const renderStalled = (title: string, job: string, status: string): strin
   `- lead 没交差 (${status}) · ${title} (${job})`;
 
 const ACCEPT_HOWTO = "等验收的: 人认可 → `close_job(单号)` 归档并回收 lead; 人说不对 → `tell_peer({name: lead, re, job: 单号})` 返工 (同一张单)。对人别提单号。";
-const STALLED_HOWTO = "lead 没交差的: 向人说明后重派 (`tell_peer({name: lead, re, job})` 或换人), 或 `close_job(单号)` 关单。";
+const STALLED_HOWTO = "lead 没交差的: lead 还在 → `tell_peer({name: lead, re, job})` 叫它续; 否则 `close_job(单号)` 关掉, 需要的话重新 `dispatch({lead:true})` 开新单。";
 
 /** 读全表 (pending_items 的回包)。`awaiting` = 等验收的根单行 (见 renderAwaiting)。 */
 export const renderTable = (xs: readonly Item[], live: LiveOf, n: Names, at: number, awaiting: readonly string[] = [], stalled: readonly string[] = []): string =>

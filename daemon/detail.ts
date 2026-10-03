@@ -257,9 +257,10 @@ export const latestTurnIdFor = (target: string): string | undefined => latestTur
 
 /** 这个会话**当前这一轮**若是人开的 (有问话、没有同伴出处、不是保温 ping), 那句原话; 回执 / peer 轮 = 无。
  *  管家开需求根单时记「需求原话」用: 取更早一轮的人话会把上一件事的话记到这件上。 */
-export const currentHumanQueryOf = (target: string, sessionId: string): string | undefined => {
-  const r = openTurnsOf(target, sessionId)[0];
-  return r && r.userQuery && !r.from && !isKeepaliveShape(r.userQuery) ? r.userQuery : undefined;
+export const currentHumanQueryOf = (target: string): string | undefined => {
+  const id = latestTurnIdFor(target);
+  const r = id ? store?.get(id) : undefined;
+  return r?.kind === "turn" && r.userQuery && !r.from && !isKeepaliveShape(r.userQuery) ? r.userQuery : undefined;
 };
 
 /** 这个会话还开着的轮次 (子 agent 的不算), 新的在前 —— reload 时正跑着的那一轮旧进程没来得及收口, 也有排着还没接上的。 */

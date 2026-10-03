@@ -676,14 +676,14 @@ export const renderReceiptEnvelope = (
     ...(turn ? [`这件活是 \`${turn}\`: 要就它追问、补充, 用 \`tell_peer({name: "${from}", re: "${turn}"})\` —— 沿用同一个频道, 工单还开着就沿用工单。`] : []),
     // 「齐了吗」是守护进程数的, 不让模型在上下文里自己数 —— 异步回执是 N 个独立
     // 的轮次陆续进来的, 数错一个就会提前收口或者永远等。
-    ...(job && job.job && status !== "need"
+    ...(job && job.job && status !== "need" && !(job.req && status === "error")
       ? job.closed
         ? [`工单 \`${job.job}\` 已经收工 (close_job 过了), 这一份是收工之后才到的: 不必再 close_job, 也不计入那次汇总${status === "done" && !route?.replyTo ? " —— 这段结论还有用, 就自己补一句交代 (notify 给人 / 回给上游)" : ""}。`]
         : job.req
           // 需求根单: 不走「汇总 → close_job」—— 关单 = 归档, 要等人验收。
           ? [status === "done"
             ? `这是需求根单 \`${job.job}\` 的交付: lead 交差了。向人交代结果后**别 close_job**, 等人验收 —— 认可 → \`close_job({job: "${job.job}"})\` 归档并回收 lead; 说不对 → \`tell_peer({name: "${from}", re: "${turn}", job: "${job.job}"})\` 返工 (同一张单)。对人别提单号。`
-            : `这是需求根单 \`${job.job}\`, 但 lead 没交差 (${status}): 向人说明卡在哪, 重派 (\`tell_peer({name: "${from}", re: "${turn}", job: "${job.job}"})\` 或换人) 或 close_job 关单。对人别提单号。`]
+            : `这是需求根单 \`${job.job}\`, 但 lead 没交差 (${status}): 向人说明卡在哪。lead 还在 → \`tell_peer({name: "${from}", re: "${turn}", job: "${job.job}"})\` 叫它续; 否则 \`close_job({job: "${job.job}"})\` 关掉, 需要的话重新 \`dispatch({lead:true})\` 开新单。对人别提单号。`]
         : job.done >= job.total
           ? [`这是工单 \`${job.job}\` 的**最后一份** (${job.done}/${job.total}, 全部到齐): 现在可以汇总收口了 —— close_job(summary) 留档并回收临时分身 (不发群); 给人的结论就是你这一轮的最后一条消息, 用你自己的话写${route?.replyTo && !route.replyTo.startsWith(".") ? " —— 它会进群" : ""}。`]
           : [`这是工单 \`${job.job}\` 的第 ${job.done}/${job.total} 份, **还差 ${job.total - job.done} 份**: 先把这一份记住 (或落到文件里), 不要现在汇总、也不要向人汇报进度; 等最后一份到了会明确告诉你「全部到齐」。`]

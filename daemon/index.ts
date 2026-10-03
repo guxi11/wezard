@@ -1062,10 +1062,11 @@ const main = async (): Promise<void> => {
       const isOpen = (id?: string): string => (id && jobs.get(id)?.status === "open" ? id : "");
       const askedJob = ((body as { job?: string }).job ?? "").trim();
       // 挂起等子活的那份不算被顶掉: 它会按件号停放、自己计数, 新的一件不继承它的工单。
-      // 返工兜底: 回执槽 24h 过期 / 被顶掉后, re 落空成新件, 不带 job 就和根单断了 ——
-      // 发话方是某张开着的需求根单的 owner、目标恰是它的 lead 时, 自动补上。
+      // 返工兜底: 回执槽 24h 过期 / 被顶掉后, 带了 re 却落空成新件, 不带 job 就和根单断了 ——
+      // 只在这种情形下, 发话方是某张开着的需求根单的 owner、目标恰是它的 lead 时才补上;
+      // 没带 re 的普通 task / ask / dispatch 一律不并进根单。
       const leadJob = jobs.all().find((j) => j.kind === "req" && j.status === "open" && j.owner === self && j.members.some((x) => x.target === target && x.role === "lead"))?.id ?? "";
-      const jobId = kind === "fyi" ? "" : askedJob || isOpen(turn.job) || (open?.deferred ? "" : isOpen(open?.job)) || leadJob;
+      const jobId = kind === "fyi" ? "" : askedJob || isOpen(turn.job) || (open?.deferred ? "" : isOpen(open?.job)) || (re && turn.reUnknown ? leadJob : "");
       if (jobId) {
         const jc = checkJob(jobId, target, !!open?.need && open.turn === turn.turn);
         if (!jc.ok) { return { status: jc.status, body: { ok: false, reason: jc.reason } }; }
@@ -1984,7 +1985,7 @@ const main = async (): Promise<void> => {
         const head = (b.description ?? "").toString().trim() || task.split("\n")[0]!.trim();
         rootId = jobs.open(baseOfKey(self), self, truncate(head, 60), {
           kind: "req", ...(criteria ? { criteria } : {}),
-          origin: { text: ((m.sessionInfo(self) && currentHumanQueryOf(self, m.sessionInfo(self)!.sessionId)) || task).trim(), chat: channelOf(self) },
+          origin: { text: (currentHumanQueryOf(self) || task).trim(), chat: channelOf(self) },
         }).id;
       }
       // 没投成的根单当场收掉: 留着只是一张没人干的空单。
@@ -2412,6 +2413,8 @@ const main = async (): Promise<void> => {
       const job = jobs.get(id);
       if (!job) { json(res, 404, { ok: false, reason: `没有工单 '${id}'` }); return; }
       if (job.status !== "open") { json(res, 409, { ok: false, reason: `工单 '${id}' 已经收工了`, closedAt: job.closedAt }); return; }
+      // 只有这张单或它某个祖先单的 owner 能关 (成员、同群的旁人不行)。
+      if (![job, ...jobAncestors(jobs.get, job)].some((j) => j.owner === self)) { json(res, 403, { ok: false, reason: `工单 '${id}' 不是你开的, 也不是你开的某张上级单的后代 —— 只有开单者 (或上级单的开单者) 能收工` }); return; }
       // 关一张单连它还开着的后代单一起关 (深的先关): 否则子 lead 的分身留在原地、账本上挂着没人收的单。
       // 回收只针对**为这个工单生出来的**分身: 被拉来帮忙的长期 wizard 不该因为一次活结束就被杀掉。
       // 调用方自己也不收 —— 那会在这次工具调用里把自己干掉。
