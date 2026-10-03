@@ -344,9 +344,14 @@ const heardBy = (role: string) => (ms: readonly Msg[]): Heard[] =>
     const ts = saidAt(role)(m);
     return ts === undefined ? [] : [[ts, m.from, m.to]];
   }).sort((a, b) => a[0] - b[0]).slice(-HEARD_MAX);
-/** 开口之后才进来的话才可能没读过: 回过话 = 读到了那里。 */
+/** 开口之后才进来的话才可能没读过: 回过话 = 读到了那里。回话要有正文 ——
+ *  只开了轮次、还在调工具没吐字的那条出消息不算开口 (saidOf 会退回轮次开始的时刻, 那会把
+ *  同时进来的问话误当成已读)。 */
 const spokeBy = (role: string) => (ms: readonly Msg[]): number =>
-  ms.filter((m) => m.from === role).reduce((t, m) => Math.max(t, saidOf(m).ts), 0);
+  ms.filter((m) => m.from === role).reduce((t, m) => {
+    const said = m.dir === "in" ? m.ts : m.turn.items.filter((it) => it.t === "text").reduce((a, it) => Math.max(a, it.ts ?? 0), 0);
+    return Math.max(t, said);
+  }, 0);
 
 /** 一个 role 参与的全部会话, 最近活动在前。群聊只列它**自己开过口**的 —— 住在里面
  *  (home) 或只是被人叫过一声却没答话的, 都不算参与; 私聊则有往来就在列。 */
