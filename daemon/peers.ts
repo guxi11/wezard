@@ -220,7 +220,10 @@ const parseTurns = (jsonlPath: string, raw: string, keepLines = false, marks = f
       const role = row.message?.role;
       if (role !== "user" && role !== "assistant") return [];
       const raw = blockText(row.message?.content);
-      const bare = stripMeta(raw);
+      // 剥 meta 只对 user 行: 信封 / slash 包装只会被注入进 user 行。assistant 是模型自己
+      // 的话, 它引用一段 `<system-reminder …>` 原文 (行内代码里写开头、代码块里写结尾)
+      // 时, META_RE 会从那个开头一路吃到代码块里的结尾 —— 回执 / peek 里的终句被掐掉中段。
+      const bare = role === "user" ? stripMeta(raw) : raw;
       const env = role === "user" ? parseEnvelope(raw) : undefined;
       const text = (keepLines ? bare : bare.replace(/\s+/g, " ")).trim();
       // Claude writes ISO timestamp strings; CodeBuddy writes epoch-ms NUMBERS.
@@ -438,7 +441,7 @@ export const parseClosing = (text: string, max = 800): Closing => {
   // 标记之后的**全部**内容, 而不是"那一行" —— 结论常常不止一行 (路径一行、说明
   // 一行)。约定是收口在最后, 所以标记之后剩下的就是结论。取最后一个匹配: 模型常
   // 先复述一遍格式要求再给答案。ARTIFACT 行不算结论正文。
-  const after = (m: RegExpMatchArray): string => text.slice((m.index ?? 0) + m[0].length).replace(ARTIFACT_RE, "").trim().slice(0, max);
+  const after = (m: RegExpMatchArray): string => clipMiddle(text.slice((m.index ?? 0) + m[0].length).replace(ARTIFACT_RE, "").trim(), max);
   const marks = [...text.matchAll(CLOSING_RE)];
   // 交差优先: 写了 RESULT 就是交差, 哪怕后面跟一句 `NEED: 无` —— 当成反问, 工单就卡到超时。
   const result = marks.filter((m) => m[1] !== "NEED").at(-1);
@@ -451,12 +454,21 @@ export const parseClosing = (text: string, max = 800): Closing => {
 /** The peer's most recent assistant message — the handoff payload when one
  *  agent drives another ("take #fix's conclusion and review it"). */
 export const lastAssistantText = (jsonlPath: string, max = 4000, pingSigs: readonly string[] = []): string =>
-  truncate(talkTurns(jsonlPath, 40, pingSigs).filter((t) => t.role === "assistant").at(-1)?.text ?? "", max);
+  clipMiddle(talkTurns(jsonlPath, 40, pingSigs).filter((t) => t.role === "assistant").at(-1)?.text ?? "", max);
 
 /** 掐中间: 来龙去脉在头、结论在尾, 超长时丢的该是中段。(从尾巴截会把收口那一行
  *  截掉 —— 而那恰恰是对方最想读的。) */
-export const clipMiddle = (s: string, max = 4000, head = Math.floor(max / 4)): string =>
-  s.length <= max ? s : `${s.slice(0, head)}\n…(略 ${s.length - max} 字)…\n${s.slice(head - max)}`;
+export const clipMiddle = (s: string, max = 4000, head = Math.floor(max / 4)): string => {
+  if (s.length <= max) return s;
+  const cut = s.length - (max - head);
+  // 切口落在代码块里: 头一段补上收尾 fence, 尾一段补上开头 fence —— 不然略号之后的
+  // 正文全被当成代码 (或代码被当成正文), 读的人分不清结论在哪。
+  const [close, reopen] = [inFence(s.slice(0, head)), inFence(s.slice(0, cut))];
+  return `${s.slice(0, head)}${close ? "\n```" : ""}\n…(略 ${s.length - max} 字)…\n${reopen ? "```\n" : ""}${s.slice(cut)}`;
+};
+
+/** 读到 `s` 末尾时是否还在一个 ``` / ~~~ 代码块里。 */
+const inFence = (s: string): boolean => (s.match(/^[ \t]*(?:```|~~~)/gm)?.length ?? 0) % 2 === 1;
 
 /** `sinceMs` 之后这个会话最新的一条回复, 全文、保留换行 —— wait_peer 的载荷。
  *

@@ -19,10 +19,10 @@ import type { Logger } from "pino";
 import type { JsonMap } from "../shared/json-map-store.js";
 import type { Asker } from "../shared/detail-store.js";
 import type { IdleResult } from "./graph.js";
-import { parseClosing, type PeerReply } from "./peers.js";
+import { clipMiddle, parseClosing, type PeerReply } from "./peers.js";
 import { isTerminal, turnState, type Terminal, type TurnState } from "../shared/turn-state.js";
 import type { Envelope, ReceiptStatus } from "../shared/reminder.js";
-import { sleep, truncate } from "../shared/std.js";
+import { sleep } from "../shared/std.js";
 
 /** 对方最长允许干多久 (超过就投一份 timeout 回执, 不占着内存等到天亮)。默认值;
  *  tell_peer 的 `deadline` 可在 [MIN, MAX] 里改 —— 上限留在 KEEP_MS 之内, 超时那份
@@ -422,7 +422,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       dead: "它的 pane 没了",
     };
     const last = deps.lastWords?.(s.to, s.at).trim();
-    return `（守护进程: ${deps.nameOf(s.to)} 没有给出结论 —— ${why[status] ?? status}。）${last ? `\n它最后说的: ${truncate(last, 600)}` : ""}`;
+    return `（守护进程: ${deps.nameOf(s.to)} 没有给出结论 —— ${why[status] ?? status}。）${last ? `\n它最后说的: ${clipMiddle(last, 600)}` : ""}`;
   };
 
   const watch = async (s: Slot): Promise<void> => {
@@ -630,7 +630,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
         const last = deps.lastWords?.(s.to, s.at).trim();
         s.outcome = {
           status: "canceled",
-          body: `（守护进程: ${deps.nameOf(s.to)} 被 ${deps.nameOf(by)} 收掉 / 打断了, 这件活没有结论。）${last ? `\n它最后说的: ${truncate(last, 600)}` : ""}`,
+          body: `（守护进程: ${deps.nameOf(s.to)} 被 ${deps.nameOf(by)} 收掉 / 打断了, 这件活没有结论。）${last ? `\n它最后说的: ${clipMiddle(last, 600)}` : ""}`,
         };
         if (s.job) deps.settleJob?.(s.job, s.to, "canceled", []);
         deps.onOutcome?.(s, "canceled", s.outcome.body, s.from === by);
