@@ -27,7 +27,7 @@ import { baseOfKey } from "./session-label.js";
 import { isMark, isPost, isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, jobProgress, withData, type WorldFactJob, type WorldFacts } from "./world.js";
 import {
-  allMessages, isPing, pendingOf, unreadByRole, convKeyOf, convMessages, chatKeysOf, isWizardDm, parseTalkKey, glanceOfTalk, convsOf, jobConvsOf, jobOfKey, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
+  allMessages, unreadIndex, ledgerOf, windowOf, spanFor, convKeyOf, chatKeysOf, isWizardDm, parseTalkKey, glanceOfTalk, convsOf, jobConvsOf, jobOfKey, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
   roleInfo, roleStats, sessionsOf, talkArgs, talkOf, counterpartOf, windowStats, type Directory, type Heard, type Msg, type SessionSpan,
 } from "./role-view.js";
 import { dependentsOf, renderJobMarks, renderMark, renderMsg, type MsgFragment } from "./role-render.js";
@@ -182,17 +182,22 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
     res.end(a.body);
   };
 
+  /** 未读的基线: 落盘的已读记录有它自己的 (页面也以它为准); 没落盘就是页面带来的 (它首次拿到摘要的时刻), 还没定就用 fallback。 */
+  const sinceOf = (url: URL, fallback: number): number => seen?.base() ?? (Number(url.searchParams.get("since")) || fallback);
+  /** 服务端已知不算未读的先筛掉: 基线前说完的, 与记过已读的 —— 客户端只再减它内存里还没写回的那几条。 */
+  const keepOf = (since: number) => (h: Heard): boolean => h[0] > since && !((seen?.fin(h[3]) ?? 0) >= h[0]);
+
   /** role 摘要: 身份、会话列表、session 分段、页脚总账 (role 自己的 + 当前窗口的)。 */
-  /** since = 页面的未读基线 (客户端首次拿到摘要的时刻); 没给 = 还没定, 别的 role 的未读就不算。 */
-  const summary = (records: readonly DetailRecord[], f: WorldFacts, role: string, sid: string | null, land: Landing, win?: Pick<View, "conv" | "with" | "span">, since?: number) => {
+  const summary = (records: readonly DetailRecord[], f: WorldFacts, role: string, sid: string | null, land: Landing, win: Pick<View, "conv" | "with" | "span"> | undefined, since: number) => {
     const now = Date.now();
     const dir = makeDirectory(records, f);
     const msgs = allMessages(records, now);
     const spans = sessionsOf(records, role, now);
     const span = spanOf(spans, sid);
-    const inWin = msgs.filter((m) => inSpan(span)(m.ts));
+    // 每一项的未读账按点开它时的那一窗切 (windowOf), 侧栏与关系图卡片 (/api/glance) 同一个 ledgerOf。
+    const ledger = ledgerOf(unreadIndex(msgs), role, keepOf(since));
     // 工单不按视角的 session 段裁 (同 viewOf 的 span): 成员各有各的 session。
-    const convs = [...convsOf(inWin, role, dir, now), ...jobConvsOf(msgs, role, dir, f.jobs)].sort((a, b) => b.lastTs - a.lastTs);
+    const convs = [...convsOf(msgs, role, dir, now, { span, ledger }), ...jobConvsOf(msgs, role, dir, f.jobs)].sort((a, b) => b.lastTs - a.lastTs);
     // effort: transcript 记的那档优先, 没有才用绑定里记下的 (dir.fact), 都没有就不显示。
     const stats = ((s) => s && { ...s, effort: s.effort || dir.fact(role)?.effort })(roleStats(records, role, now, span));
     const info = roleInfo(role, dir, f, stats, now);
@@ -202,14 +207,14 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
     const home = convs.find((c) => c.key === land.conv);
     return {
       at: now,
+      // 落盘的已读记录的基线: 页面的未读基线以它为准, 刷新、另开标签页都是同一条。
+      ...(seen ? { seenBase: seen.base() } : {}),
       role: info,
       sessions: spans.map(wireSpan),
       session: span?.sessionId ?? (spans.length ? ALL_SESSIONS : ""),
       convs,
       // 不随视角的 session 段裁: 「它还在别的会话里」说的是它, 不是视角选的那段时间。
       chatKeys: chatKeysOf(msgs),
-      // 每个 role 自己视角下的未读 (名字旁的他人未读): 同样不按视角的 session 段裁 —— 那是视角自己的时间范围。
-      ...(since ? { peerUnread: unreadByRole(msgs, since) } : {}),
       // 链接来自哪个会话就默认开哪个 (见 landingOf); 否则最近活动的那个。
       conv: home?.key ?? convs.find((c) => c.kind !== "job")?.key ?? convs[0]?.key ?? "",
       // 从群里点名字进来, 要看的是「我在这个群里和它说过什么」—— 默认只看与问话那一方的
@@ -238,13 +243,6 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       winStats: peerStats(records, msgs, role, win, dir, now),
     };
   };
-  /** 摘要带上落盘的已读: 基线, 与它要数的那几句里记过的 —— 页面启动、另一个标签页看过之后的下一次心跳都从这里同步。 */
-  const withSeen = <T extends { convs: Array<{ heard: Heard[] }>; peerUnread?: Record<string, Heard[]> }>(d: T): T & { seenBase?: number; seen?: Record<string, number> } =>
-    seen ? { ...d, seenBase: seen.base(), seen: seenOf([...d.convs.map((c) => c.heard), ...Object.values(d.peerUnread ?? {})]) } : d;
-  const seenOf = (hss: readonly Heard[][]): Record<string, number> | undefined => seen?.pick(hss.flatMap((hs) => hs.map((h) => h[3])));
-
-  const sinceOf = (url: URL): number | undefined => Number(url.searchParams.get("since")) || undefined;
-
   const peerStats = (records: readonly DetailRecord[], msgs: readonly Msg[], role: string, win: Pick<View, "conv" | "with" | "span"> | undefined, dir: Directory, now: number) => {
     const t = win?.conv ? talkArgs(role, win.conv, win.with || undefined) : undefined;
     const w = counterpartOf(role, t);
@@ -260,7 +258,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const records = listRecent();
       const v = viewOf(records, makeDirectory(records, f), ticket, url);
       if (!v) { json(res, 404, { ok: false, error: "不认识这个 role" }); return; }
-      json(res, 200, { ok: true, ...withSeen(summary(records, f, v.role, url.searchParams.get("session"), landingOf(ticket, v.role), v, sinceOf(url))) });
+      json(res, 200, { ok: true, ...summary(records, f, v.role, url.searchParams.get("session"), landingOf(ticket, v.role), v, sinceOf(url, Date.now())) });
     });
   };
 
@@ -268,8 +266,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
    *  给的是**待渲染**的片段 —— 窗口通常只上屏最后几十条, 先按时间切片再渲染,
    *  没上屏的那几百轮就一个字都不用排。 */
   const windowFrags = (records: readonly DetailRecord[], dir: Directory, v: View, now: number, jobs: readonly WorldFactJob[]): Array<{ id: string; ts: number; render: () => MsgFragment }> => {
-    const msgs = convMessages(allMessages(records, now), v.role, v.conv, v.with || undefined)
-      .filter((m) => inSpan(v.span)(m.ts));
+    // 与侧栏 / 关系图这一项的未读账同一个 windowOf: 上屏 (记成已读) 的正是那一项数着的。
+    const msgs = windowOf(allMessages(records, now), v.role, v.conv, v.with || undefined, v.span);
     const lo = msgs[0]?.ts ?? Infinity;
     const jid = jobOfKey(v.conv);
     // 工单窗口横跨好几个成员的会话, 谁的断点都不属于它; 它自己的两行 (开工 / 收工) 取自账本。
@@ -295,8 +293,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       role: r,
       conv,
       with: dir.resolve(url.searchParams.get("with") ?? "") ?? "",
-      // 「某人的全部对话」不受视角的 session 裁剪 —— 那是视角自己的时间分段, 与那个人无关。
-      span: conv.startsWith("a:") || conv.startsWith("j:") ? undefined : spanOf(spans, url.searchParams.get("session")),
+      span: spanFor(conv, spanOf(spans, url.searchParams.get("session"))),
     };
   };
 
@@ -382,7 +379,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const records = listRecent();
       v ??= viewOf(records, makeDirectory(records, ff), ticket, url);
       if (!v) return;
-      send("role", withSeen(summary(records, ff, v.role, url.searchParams.get("session"), landingOf(ticket, v.role), v, sinceOf(url))));
+      send("role", summary(records, ff, v.role, url.searchParams.get("session"), landingOf(ticket, v.role), v, sinceOf(url, Date.now())));
       // 工单窗口的开工 / 收工两行取自账本, 账本变了不写 store —— 跟着名册的心跳推, 没变的由 sig 挡掉。
       const jid = jobOfKey(v.conv);
       const job = jid ? ff.jobs.find((j) => j.id === jid) : undefined;
@@ -400,16 +397,14 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       }
       if (isPost(r)) {
         const m = messageOfPost(r);
-        if (convMessages([m], v.role, v.conv, v.with || undefined).length && inSpan(v.span)(m.ts)) pushFrag(renderMsg(m, records, dir, now));
+        if (windowOf([m], v.role, v.conv, v.with || undefined, v.span).length) pushFrag(renderMsg(m, records, dir, now));
         return;
       }
       if (!isTurn(r) || !r.target) return;
       // 子 agent 的一轮渲染在父轮的出消息里 —— 推父轮。
       const top = r.agent?.parentTurnId ? store.get(r.agent.parentTurnId) : r;
       if (!top || !isTurn(top) || !top.target) return;
-      const own = messagesOfTurn(top);
-      const inWin = new Set(convMessages(own, v.role, v.conv, v.with || undefined).filter((m) => inSpan(v!.span)(m.ts)).map((m) => m.id));
-      own.filter((m: Msg) => inWin.has(m.id)).forEach((m) => pushFrag(renderMsg(m, records, dir, now)));
+      windowOf(messagesOfTurn(top), v.role, v.conv, v.with || undefined, v.span).forEach((m) => pushFrag(renderMsg(m, records, dir, now)));
       if (deep) dependentsOf(top, records).forEach((d) => pushTurn(d, records, dir, now, false));
     };
 
@@ -506,7 +501,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
   };
 
   /** 关系图卡片那一行: 每张卡片的窗口 (`a:<x>|<相连者>[|<频道>]`, 换行分隔) 各一份 glance —— 与打开它时看到的同一个 talkOf。
-   *  连同视角在那个窗口里的未读账 mine (pendingOf, 与侧栏会话项 / 子项同一口径); 卡片主人名字旁的未读是它整个视角的, 随摘要的 peerUnread 下发。 */
+   *  连同那一窗的未读账 (ledgerOf, 主人 = 卡片上的那个 role): 与侧栏会话项 / 子项同一个实现, 同一个 windowOf。 */
   const glance: SimpleHandler = (_req, res, url) => {
     const ticket = resolveTicket(store, url);
     if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
@@ -516,16 +511,13 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const now = Date.now();
       const viewer = pickRole(dir, ticket, url);
       const msgs = allMessages(records, now);
-      const talk = msgs.filter((m) => !isPing(m));
-      const mine = viewer ? pendingOf(talk, viewer) : () => [];
+      const ledger = ledgerOf(unreadIndex(msgs), viewer, keepOf(sinceOf(url, 0)));
       const keys = (url.searchParams.get("keys") ?? "").split("\n").filter(Boolean);
       const out = Object.fromEntries(keys.flatMap((k) => {
         const t = parseTalkKey(k);
-        if (!t) return [];
-        const win = talkOf(talk, t.who, t.peers, t.chat);
-        return [[k, { ...glanceOfTalk(msgs, viewer, dir, t.who, t.peers, t.chat), mine: mine(win) }]];
+        return t ? [[k, { ...glanceOfTalk(msgs, viewer, dir, t.who, t.peers, t.chat), ...ledger(windowOf(msgs, viewer, k, undefined, undefined), t.who) }]] : [];
       }));
-      json(res, 200, { ok: true, at: now, glances: out, ...(seen ? { seen: seenOf(Object.values(out).map((g) => g.mine)) } : {}) });
+      json(res, 200, { ok: true, at: now, glances: out });
     });
   };
 

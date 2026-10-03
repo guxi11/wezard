@@ -9,8 +9,8 @@ const BASE = "@base";
 export interface SeenLog {
   /** 未读基线 (页面的 BASE)。 */
   base: () => number;
-  /** 这几条里记过的那些。 */
-  pick: (ids: Iterable<string>) => Record<string, number>;
+  /** 这一条记过的 fin; 没记过 = undefined。 */
+  fin: (id: string) => number | undefined;
   /** 记一批; 同一条取较晚的 fin。 */
   add: (rows: Record<string, number>) => void;
 }
@@ -25,7 +25,7 @@ export const openSeenLog = (file: string, keepMs: number): SeenLog => {
   if (db.get(BASE) === undefined) db.set(BASE, Date.now());
   return {
     base: () => db.get(BASE) ?? 0,
-    pick: (ids) => Object.fromEntries([...ids].flatMap((id) => ((fin) => (fin ? [[id, fin] as const] : []))(db.get(id)))),
+    fin: (id) => (id === BASE ? undefined : db.get(id)),
     add: (rows) => {
       const fresh = Object.entries(rows).filter(([id, fin]) => id !== BASE && fin > (db.get(id) ?? 0) && fin > (db.get(BASE) ?? 0));
       if (fresh.length) db.merge(Object.fromEntries(fresh));

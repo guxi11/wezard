@@ -35,7 +35,7 @@
   // 关系/日程两栏共用的世界快照。treeFor = 已把谁滚进过视野。
   var W = {
     at: 0, nodes: [], edges: [], chats: [], jobs: [], schedules: [],
-    degraded: false, loaded: false, treeFor: '', glance: {}, gKeys: '',
+    degraded: false, loaded: false, treeFor: '', glance: {}, gKeys: '', gRole: '',
   };
   var VIEW = 'msgs';
   // 侧栏是会话列表还是关系图 —— 与右边的 VIEW 无关: 关系图下右边照样是选中的那段对话。
@@ -513,18 +513,17 @@
   };
 
   // ── 未读: 别人说完、还没在详情里读到的话 ──
-  // 服务端给每个窗口 (侧栏会话项 / 子项、关系图卡片) 一份 heard = [说完的时刻, 发话方, 收信方, 消息 id]:
-  // 看的那个 role 在点开这一项会看到的消息里听得到、且晚于它在那一处最后开口的 (回过话 = 读到了那里)。
+  // 服务端给每一行 (侧栏会话项 / 子项、关系图卡片) 一份账, 条目 = [说完的时刻, 发话方, 收信方, 消息 id], 按点开这一行
+  // 看到的消息 (与详情区取消息同一个 windowOf) 切成不相交的两份: heard = 这里看得见的未读 (右边红点) —— 页面视角的,
+  // 加上这一行主人的; theirs = 主人在这里看不见的未读 (名字旁) —— 切到它的视角才看得到。一句话在一行里最多数一次,
+  // 点开这一行读到的只从红点里减, 名字旁不因此变。
   // 已读只有一份 (SEEN): 这句话说完的样子在详情里上过屏 (页面可见、正在看消息) 就记下它的 id ——
   // 与页面视角、详情视角、侧栏 / 关系图无关, 哪一处读到, 所有视图里同一句话一起消失, 不必等下一份摘要。
-  // SEEN 落在 svr 上 (全局一份): 摘要 / 卡片 glance 带回记过的那几条与基线 (seenBase), 新看过的攒一小会儿
-  // 批量写回 —— 刷新、另一个标签页 (下一次心跳) 都看得到。没落盘的服务端 (daemon 自己的页、老 svr)
-  // 或读写失败, 退回只活在内存里: 基线是「打开页面这一刻」(服务端时钟, 首次拿到快照时定), 刷新即重置。
+  // SEEN 落在 svr 上 (全局一份): 新看过的攒一小会儿批量写回, 服务端下发的账已经减掉记过的, 并带回基线 (seenBase) ——
+  // 刷新、另一个标签页 (下一次心跳) 都看得到。没落盘的服务端 (daemon 自己的页、老 svr) 或读写失败, 退回只活在内存里:
+  // 基线是「打开页面这一刻」(服务端时钟, 首次拿到快照时定), 刷新即重置。
   var BASE = 0;
   var SEEN = {};
-  var keepSeen = function (rows) {
-    Object.keys(rows || {}).forEach(function (id) { if (!((SEEN[id] || 0) >= rows[id])) SEEN[id] = rows[id]; });
-  };
   var OUTBOX = {}, OUT_T = 0;
   var SEEN_URL = function () { return 'api/seen?id=' + encodeURIComponent(TOKEN); };
   var flushSeen = function (leaving) {
@@ -545,22 +544,14 @@
   // 关页 / 切走时不等那 1.5s。
   window.addEventListener('pagehide', function () { flushSeen(true); });
   document.addEventListener('visibilitychange', function () { if (document.hidden) flushSeen(true); });
-  var unreadIn = function (hs, skip) {
-    return (hs || []).filter(function (h) { return h[0] > BASE && !((SEEN[h[3]] || 0) >= h[0]) && !(skip && skip[h[3]]); });
+  var unreadIn = function (hs) {
+    return (hs || []).filter(function (h) { return h[0] > BASE && !((SEEN[h[3]] || 0) >= h[0]); }).length;
   };
-  // 群里的成对子项 = 说给视角的、出自它的那几句; 不给 withRole = 整个会话。
-  var unreadHeard = function (c, withRole) {
-    return unreadIn(withRole ? (c.heard || []).filter(function (h) { return h[1] === withRole && h[2] === ROLE; }) : c.heard);
-  };
-  var unreadOf = function (c, withRole) { return unreadHeard(c, withRole).length; };
-  // 名字旁的他人未读: 点名字切到 id 的视角会看到的未读 (它全部会话项的, 服务端 peerUnread 按同一口径给),
-  // 减去这一行右边红点已在数的那几句。已读同样取自 SEEN —— 哪一处读到, 这里一起消。
-  var idsOf = function (hs) { return hs.reduce(function (m, h) { m[h[3]] = 1; return m; }, {}); };
-  var theirsOf = function (id, counted) {
-    return id && id !== ROLE ? unreadIn((R.peerUnread || {})[id], idsOf(counted || [])).length : 0;
-  };
+  var unreadOf = function (c) { return unreadIn(c.heard); };
+  // 一行的两枚未读, 侧栏会话项 / 子项与关系图卡片同一个: 红点 = 点开看得见的, 名字旁 = 主人在这里看不见的。
+  var tally = function (l) { return { unread: unreadIn(l && l.heard), theirs: unreadIn(l && l.theirs) }; };
   var peerBadge = function (id, n) {
-    return n && id !== ROLE ? '<b class="pub" title="' + esc(nameOf(id) + ' 的视角下还有 ' + n + ' 条未读') + '">' + (n > 99 ? '99+' : n) + '</b>' : '';
+    return n && id !== ROLE ? '<b class="pub" title="' + esc(nameOf(id) + ' 的视角下还有 ' + n + ' 条未读, 这一项里看不到') + '">' + (n > 99 ? '99+' : n) + '</b>' : '';
   };
   // 详情区真在屏上: 窄屏退回列表时它整个 display:none (offsetParent 为空)。
   var reading = function () { return VIEW === 'msgs' && !document.hidden && thread.offsetParent !== null; };
@@ -631,11 +622,11 @@
   };
 
   // ── 会话项 / 子项 / 关系图卡片共用的三样: 一行的数据 (glance)、一行的画法 (roleRow)、排序 (recentFirst) ──
-  // glance = 时刻 · 最近一句 · 未读, 取自会话本身 (子项 = 我与它在这个群里的那一对)。
-  // theirs = 这一行主人的未读 (名字旁): 子项是它, 私聊项是对端, 群项没有。
-  var glance = function (c, s) {
-    var x = s || c, mine = unreadHeard(c, s ? s.role : undefined);
-    return { lastTs: x.lastTs, preview: x.preview, unread: mine.length, theirs: theirsOf(s ? s.role : c.peer, mine) };
+  // glance = 时刻 · 最近一句 (g) · 两枚未读 (l 的账, 见 tally): 会话项与成对的子项两样都取自己 (子项 = 我与它在这个群里的那一对),
+  // 与我无往来的子项时刻与预览取它在群里的全部记录 (whole)。名字旁: 子项是它, 私聊项是对端, 群项没有主人。
+  var glance = function (l, g) {
+    var t = tally(l);
+    return { lastTs: (g || l).lastTs, preview: (g || l).preview, unread: t.unread, theirs: t.theirs };
   };
   // 同层按最近活动排, 有新话就上浮。
   var recentFirst = function (a, b) { return b.lastTs - a.lastTs; };
@@ -664,15 +655,14 @@
     if (c.kind === 'job') return '<span class="av">' + esc(c.label) + '</span>' + line('<span class="nm chat">' + esc(c.name) + '</span>' + stageTag(c.job) + jobTag(c.job) + stuckTag(c.job), c.lastTs, c.preview, '', unreadOf(c));
     return avatarOf(c) + line('<span class="nm chat">' + esc(c.name) + '</span>' + jobMark(c.jobs), c.lastTs, c.preview, stTag(c.status, true), unreadOf(c));
   };
-  var subRow = function (c, s) { return roleRow(s.role, s.name, s.label, glance(c, s), s.status, jobMark(s.jobs), otherChats(s.role, c.key + '|' + pairKey(s.role))); };
+  var subRow = function (c, s) { return roleRow(s.role, s.name, s.label, glance(s), s.status, jobMark(s.jobs), otherChats(s.role, c.key + '|' + pairKey(s.role))); };
 
   // 「chat 内全部」下与我无往来的那几项: 一行的数据是它在群里的全部记录 (服务端 whole, 与关系图卡片同一个
-  // glanceOfTalk), 点开看的也是那一份 (`a:<它>||<群>`, 对端不限)。没有成对的往来, 也就没有我的未读 —— 同关系图里
-  // 视角没有会话项的那张卡片。+N 数它的全部叶子, 这一项本身不是叶子。
+  // glanceOfTalk), 点开看的也是那一份 (`a:<它>||<群>`, 对端不限), 未读账也按那一份切 (服务端 subs 的 heard / theirs)。
+  // +N 数它的全部叶子, 这一项本身不是叶子。
   var farKey = function (c, s) { return 'a:' + s.role + '||' + c.base; };
   var farRow = function (s) {
-    var w = s.whole;
-    return roleRow(s.role, s.name, s.label, { lastTs: w.lastTs, preview: w.preview, unread: 0, theirs: theirsOf(s.role) }, s.status, '', otherChats(s.role, ''));
+    return roleRow(s.role, s.name, s.label, glance(s, s.whole), s.status, '', otherChats(s.role, ''));
   };
 
   var convItem = function (c) {
@@ -1534,8 +1524,7 @@
   var takeRole = function (d) {
     R.at = d.at || Date.now(); R.recvAt = Date.now();
     if (d.seenBase) BASE = d.seenBase; else if (!BASE) BASE = R.at;
-    keepSeen(d.seen);
-    R.role = d.role; R.sessions = d.sessions || []; R.convs = d.convs || []; R.chatKeys = d.chatKeys; R.peerUnread = d.peerUnread;
+    R.role = d.role; R.sessions = d.sessions || []; R.convs = d.convs || []; R.chatKeys = d.chatKeys;
     SESSION = d.session || '';
     R.relations = !!d.relations; R.schedules = d.schedules || 0; R.plan = d.plan || null; R.inflight = d.inflight || [];
     // 工单的账变了 (或比消息晚到): 已上屏的工单 badge 按新账重填一遍 —— 片段里只写了工单号。
@@ -2008,27 +1997,26 @@
   // 而不是节点自己最后的动静 —— 卡片承载的是边。
   // 身份 (头像 / 名字 / 状态灯) 永远是卡片自己的节点: 会话项的身份是「视角的对端」, 视角自己那张卡片
   // (边的下端是视角) 的对端是它的父亲 —— 拿会话项的身份去画, 这张卡片就成了父亲的分身。
-  // 时刻、最近一句与未读取自卡片自己的窗口 (点它打开的那一份, 服务端 /api/glance 用同一个 talkOf 算, 说话人前缀
-  // 与未读账也在那里定); 窗口还没取到 (或第一遍量树时) 退回视角与对端的会话项 / 节点。
+  // 时刻、最近一句与两枚未读取自卡片自己的窗口 (点它打开的那一份, 服务端 /api/glance 用同一个 talkOf 算, 说话人前缀
+  // 也在那里定; 未读账与侧栏同一个 ledgerOf 按这一窗切, 主人 = 卡片上的 role)。窗口还没取到 (或第一遍量树时) 时刻与
+  // 最近一句退回视角与对端的会话项 / 节点, 未读先不画 —— 那一项点开看的不是这一窗, 它的账不属于这张卡片。
   var cardGlance = function (F, t, e) {
+    // 账随看的 role 而变 (红点里有视角的未读): 换了视角, 同一个窗口键下的旧账不能拿来画。
+    var w = F.links && W.gRole === ROLE && W.glance[talkKey(F.links, t)];
+    if (w) return glance(w);
     var hit = edgeConv(F, t, e), c = hit && convOf(hit[0]);
     var s = c && hit[1] && (c.subs || []).filter(function (x) { return x.role === hit[1]; })[0];
     var n = nodeOf(t) || {}, p = e || F.pp[t];
-    var base = c ? glance(c, s || undefined) : { lastTs: p ? p.last : n.lastTs || 0, preview: n.preview || '', unread: 0, theirs: theirsOf(t) };
-    var w = F.links && W.glance[talkKey(F.links, t)];
-    if (!w) return base;
-    // 未读也取自卡片自己的窗口 (与侧栏同一个 unreadIn): 点开它看得到的才数; 名字旁的是卡片主人整个视角的 (theirsOf)。
-    var mine = unreadIn(w.mine);
-    return { lastTs: w.lastTs, preview: w.preview, unread: mine.length, theirs: theirsOf(t, mine) };
+    var g = s || c || { lastTs: p ? p.last : n.lastTs || 0, preview: n.preview || '' };
+    return { lastTs: g.lastTs, preview: g.preview, unread: 0, theirs: 0 };
   };
   // 卡片窗口的 glance: 树里画了谁变了就取一次, 世界快照每次轮询也顺带刷新。
   var loadGlance = function () {
     var keys = W.gKeys, role = ROLE;
     if (!keys) return;
-    api('api/glance', { role: role, keys: keys }).then(function (d) {
+    api('api/glance', { role: role, keys: keys, since: BASE }).then(function (d) {
       if (!d.ok || role !== ROLE || keys !== W.gKeys) return;
-      W.glance = d.glances || {};
-      keepSeen(d.seen);
+      W.glance = d.glances || {}; W.gRole = role;
       renderWorld();
     }).catch(function () { });
   };

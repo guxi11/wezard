@@ -231,6 +231,9 @@ export interface ConvSub {
   preview: string;
   /** 它在这个频道里的全部记录 (不按成对过滤) —— 侧栏「chat 内全部」下与我无往来的那几项用它。 */
   whole: Glance & { count: number };
+  /** 这一项的未读账 (见 Ledger): 成对的按「我与它」那一窗切, 与我无往来的按它在群里的全部记录切 —— 都是点开它看到的那一份。 */
+  heard: Heard[];
+  theirs?: Heard[];
   /** 它是 wizard 时才有。 */
   status?: RoleStatus;
   /** 这一对往来里出现过的工单 (侧栏一行的 📋 标记)。 */
@@ -251,8 +254,10 @@ export interface Conv {
   lastTs: number;
   preview: string;
   count: number;
-  /** 视角在这里可能没读的话 (pendingOf), 最近的在后 —— 客户端减去已上屏的点未读 (见 Heard)。 */
+  /** 点开这里看得见的未读 (见 Ledger), 最近的在后; 群还并上它各子项的 —— 收起时群这一行替子项们说。 */
   heard: Heard[];
+  /** 私聊对端在这里看不见的未读 (名字旁); 群没有主人, 不给。 */
+  theirs?: Heard[];
   /** 群里的其他 role (只对公开频道)。 */
   subs: ConvSub[];
   /** 这处往来里出现过的工单 (侧栏一行的 📋 标记); 没有 = 不给。 */
@@ -321,8 +326,7 @@ export const glanceOfTalk = (msgs: readonly Msg[], viewer: string, dir: Director
 
 const SUB_MAX = 40;
 
-/** 别人说完的一句 `[说完的时刻, 发话方, 收信方, 消息 id]`, 已按看的那个 role 的开口水位筛过 (见 pendingOf)。
- *  说给视角的那句属于「我与发话方」那个成对子项, 其余只属于群 —— 客户端据此给群和每个子项点未读。
+/** 一句未读 `[说完的时刻, 发话方, 收信方, 消息 id]` (见 UnreadIndex / Ledger)。
  *  已读只有一份: 客户端按 id 记「这句话说完的样子在详情里上过屏」, 换视角、换视图都不重记。 */
 export type Heard = [number, string, string, string];
 const HEARD_MAX = 100;
@@ -346,86 +350,117 @@ const spokeBy = (role: string) => (ms: readonly Msg[]): number =>
     return Math.max(t, said);
   }, 0);
 
-/** 按频道分好的消息, 按数组对象记: convsOf 给每个子项的对端各问一次 pendingOf, 同一份消息只分一遍。 */
+/** 按频道分好的消息, 按数组对象记: 同一份消息只分一遍。 */
 const CHANNELS = new WeakMap<readonly Msg[], Map<string, Msg[]>>();
 const channelsOf = (all: readonly Msg[]) => (ch: string): Msg[] => {
   const idx = CHANNELS.get(all) ?? ((v) => (CHANNELS.set(all, v), v))(new Map<string, Msg[]>());
   return idx.get(ch) ?? ((v) => (idx.set(ch, v), v))(all.filter((m) => m.channel === ch));
 };
 
-/** viewer 在一个窗口里可能还没读的话: 别人说完的、它听得到的 (说给它的, 或它开过口的群里的), 晚于它在
- *  那一处最后开口的。「那一处」: 私聊 / 群里说给它的 = 它与发话方的往来, 群里其余的 = 整个群 ——
- *  在群里说过话不等于读过别的线程。侧栏会话项 / 子项与关系图卡片都拿自己的窗口来问它, 口径只此一份。
- *  all = 全部消息 (不含 ping): 开口水位看的是那一处的全部, 不只窗口里的。 */
-export const pendingOf = (all: readonly Msg[], viewer: string): ((win: readonly Msg[]) => Heard[]) => {
+const memo = <T>(f: (k: string) => T): ((k: string) => T) => {
+  const m = new Map<string, T>();
+  return (k) => (m.has(k) ? m.get(k)! : ((v) => (m.set(k, v), v))(f(k)));
+};
+
+/** 未读的判定 —— 侧栏会话项 / 子项、关系图卡片的红点与名字旁的他人未读都从这一份派生。一句话算 role 的未读:
+ *  别人说完的; 它听得到 —— 私聊里说给它的, 或它开过口的群里的 (没开过口的群不在它的会话列表里, 切过去也看不到);
+ *  且晚于它在那一处最后开口的 (回过话 = 读到了那里)。「那一处」: 私聊 / 群里说给它的 = 它与发话方的往来, 群里其余的 =
+ *  整个群 —— 在群里说过话不等于读过别的线程。水位看全部消息, 不看窗口: 同一句话对同一个 role, 在哪一项里问都是同一个答案。 */
+export interface UnreadIndex {
+  /** 这句是不是 role 的未读。 */
+  of: (role: string) => (m: Msg) => boolean;
+  /** role 自己的全部未读 —— 切到它的视角会看到的那一份。 */
+  all: (role: string) => Msg[];
+}
+
+export const unreadIndex = (all_: readonly Msg[]): UnreadIndex => {
+  const all = all_.filter((m) => !isPing(m));
   const inChannel = channelsOf(all);
-  const memo = new Map<string, number>();
-  const once = (k: string, f: () => number): number => memo.get(k) ?? ((v) => (memo.set(k, v), v))(f());
-  const spoke = spokeBy(viewer);
-  const member = (ch: string): boolean => once(`?${ch}`, () => Number(inChannel(ch).some((m) => m.from === viewer))) > 0;
-  const markOf = (m: Msg): number =>
-    m.to === viewer || !m.channel
-      ? once(`${m.channel}\0${m.from}`, () => spoke(talkOf(inChannel(m.channel), viewer, [m.from])))
-      : once(m.channel, () => spoke(inChannel(m.channel)));
-  return (win) =>
-    win.flatMap((m): Heard[] => {
-      if (m.from === viewer || !(m.to === viewer || (m.channel && member(m.channel)))) return [];
-      const ts = doneAt(m);
-      return ts !== undefined && ts > markOf(m) ? [[ts, m.from, m.to, m.id]] : [];
-    }).sort((a, b) => a[0] - b[0]).slice(-HEARD_MAX);
+  // 谁在哪个群里开过口、私聊里说给谁的 —— 一遍建好, 每个 role 只看它听得到的那几处。
+  const speakers = all.reduce((idx, m) => (m.channel ? idx.set(m.channel, (idx.get(m.channel) ?? new Set<string>()).add(m.from)) : idx), new Map<string, Set<string>>());
+  const dmTo = all.reduce((idx, m) => {
+    if (!m.channel) (idx.get(m.to) ?? idx.set(m.to, []).get(m.to)!).push(m);
+    return idx;
+  }, new Map<string, Msg[]>());
+  // 说完的时刻要倒着翻一轮的条目, 每个 role 都问一遍 —— 按消息记一次。
+  const fins = new Map<Msg, number | undefined>();
+  const finOf = (m: Msg): number | undefined => (fins.has(m) ? fins.get(m) : ((v) => (fins.set(m, v), v))(doneAt(m)));
+  const of = memo((role: string) => {
+    const said = spokeBy(role);
+    // `<频道>\0<发话方>` = 它与发话方在那一处的往来; 只有频道 = 整个群。
+    const mark = memo((k: string): number => {
+      const [ch = "", from] = k.split("\0");
+      return said(from === undefined ? inChannel(ch) : talkOf(inChannel(ch), role, [from]));
+    });
+    return (m: Msg): boolean => {
+      if (m.from === role || isPing(m) || (m.channel ? !speakers.get(m.channel)?.has(role) : m.to !== role)) return false;
+      const ts = finOf(m);
+      return ts !== undefined && ts > mark(m.to === role || !m.channel ? `${m.channel}\0${m.from}` : m.channel);
+    };
+  });
+  const allOf = memo((role: string): Msg[] =>
+    [...(dmTo.get(role) ?? []), ...[...speakers].filter(([, who]) => who.has(role)).flatMap(([ch]) => inChannel(ch))].filter(of(role)));
+  return { of, all: allOf };
+};
+
+/** 一项 (侧栏会话项 / 子项、关系图卡片) 的未读账, 按点开它看到的消息 (windowOf —— 与详情区渲染同一个函数) 切成不相交的两份:
+ *  heard  = 这里看得见的未读 (红点): 页面视角的, 加上这一项主人的 —— 点开就读到, 只记在这里;
+ *  theirs = 主人在这里看不见的未读 (名字旁): 切到它的视角才看得到。点开这一项读到的不会在这里。
+ *  主人缺省 / 就是视角 (群项、视角自己那张卡片) 就没有名字旁。 */
+export interface Ledger { heard: Heard[]; theirs?: Heard[] }
+
+/** keep: 服务端已知不算的 (基线前说完的、记过已读的) 先筛掉, 再按说完的时刻留最近 HEARD_MAX 句。 */
+export const ledgerOf = (ix: UnreadIndex, viewer: string, keep: (h: Heard) => boolean = () => true) => {
+  const mine = ix.of(viewer);
+  const heardOf = (ms: readonly Msg[]): Heard[] =>
+    ms.map((m): Heard => [doneAt(m) ?? 0, m.from, m.to, m.id]).filter(keep).sort((a, b) => a[0] - b[0]).slice(-HEARD_MAX);
+  return (win: readonly Msg[], owner?: string): Ledger => {
+    if (!owner || owner === viewer) return { heard: heardOf(win.filter(mine)) };
+    const theirs = ix.of(owner);
+    const here = new Set(win.map((m) => m.id));
+    return { heard: heardOf(win.filter((m) => mine(m) || theirs(m))), theirs: heardOf(ix.all(owner).filter((m) => !here.has(m.id))) };
+  };
 };
 
 /** 一个 role 的会话项键: 它开过口的群 + 有往来的私聊。mine = talkOf(msgs, role)。 */
 const convKeysOf = (mine: readonly Msg[], role: string): string[] =>
   [...new Set(mine.filter((m) => !m.channel || m.from === role).map((m) => convKeyOf(m, role)))];
 
-/** 一个会话项点开看到的消息: 群 = 整个频道, 私聊 = 两端在私聊里的往来。 */
-const convWindowOf = (msgs: readonly Msg[], mine: readonly Msg[], role: string) => (key: string): Msg[] =>
-  key.startsWith("p:") ? talkOf(mine, role, [key.slice(2)], "") : channelsOf(msgs)(key.slice(2));
-
 const party = (r: string): boolean => !!r && !r.startsWith("task:") && r !== SYSTEM;
 
-/** 名字旁的他人未读: 每个 role 换到它自己的视角会看到的未读 —— 它全部会话项的 heard (与 convsOf 同一口径:
- *  会话键、窗口、pendingOf), 群与私聊里同一句只算一次。只留 since (页面的未读基线) 之后说完的,
- *  一句都没有的 role 不给: 基线之前的话客户端永远不算未读。
- *  能听到基线之后某句话的只有它的收信方和它所在群里开过口的 —— 先收窄, 不替每个 role 扫一遍全部消息。 */
-export const unreadByRole = (all_: readonly Msg[], since: number): Record<string, Heard[]> => {
-  const msgs = all_.filter((m) => !isPing(m));
-  const fresh = msgs.filter((m) => (doneAt(m) ?? 0) > since);
-  const inChannel = channelsOf(msgs);
-  const roles = [...new Set(fresh.flatMap((m) => [m.to, ...(m.channel ? inChannel(m.channel).map((x) => x.from) : [])]))].filter(party);
-  const heardOf = (role: string): Heard[] => {
-    const mine = talkOf(msgs, role);
-    const heard = pendingOf(msgs, role);
-    const seen = new Set<string>();
-    return convKeysOf(mine, role).map(convWindowOf(msgs, mine, role)).flatMap(heard)
-      .filter((h) => h[0] > since && !seen.has(h[3]) && !!seen.add(h[3]))
-      .sort((a, b) => a[0] - b[0]).slice(-HEARD_MAX);
-  };
-  return Object.fromEntries(roles.map((r) => [r, heardOf(r)] as const).filter(([, hs]) => hs.length));
-};
+/** 同一句只留一份 (按 id), 时间序。 */
+const mergeHeard = (...hss: ReadonlyArray<readonly Heard[]>): Heard[] =>
+  [...new Map(hss.flat().map((h) => [h[3], h] as const)).values()].sort((a, b) => a[0] - b[0]).slice(-HEARD_MAX);
+
+export interface ConvsOpts {
+  /** 视角选的 session 段: 列哪些项、条数与预览只看这一段; 未读账按点开时的窗口 (windowOf) 切, 裁不裁由 spanFor 定。 */
+  span?: SessionSpan;
+  /** 未读账 (ledgerOf); 不给 = 不算 (搜索只要名字与预览)。 */
+  ledger?: (win: readonly Msg[], owner?: string) => Ledger;
+}
 
 /** 一个 role 参与的全部会话, 最近活动在前。群聊只列它**自己开过口**的 —— 住在里面
  *  (home) 或只是被人叫过一声却没答话的, 都不算参与; 私聊则有往来就在列。 */
-export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now: number): Conv[] => {
+export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now: number, opts: ConvsOpts = {}): Conv[] => {
   // 会话列表讲的是"谁跟谁说过什么", ping 不是话: 条数与预览都不该被它顶掉。
-  const msgs = all_.filter((m) => !isPing(m));
-  const heard = pendingOf(msgs, role);
+  const msgs = all_.filter((m) => !isPing(m) && inSpan(opts.span)(m.ts));
   const mine = talkOf(msgs, role);
-  const windowOf = convWindowOf(msgs, mine, role);
+  // 每一项的账都拿点开它时的那一窗来切 —— 详情区取消息的同一个 windowOf。
+  const book = (key: string, withRole: string | undefined, owner: string | undefined): Ledger =>
+    opts.ledger ? opts.ledger(windowOf(all_, role, key, withRole, opts.span), owner) : { heard: [] };
   return convKeysOf(mine, role)
     .map((key): Conv => {
       if (key.startsWith("p:")) {
         const peer = key.slice(2);
-        const ms = windowOf(key);
+        const ms = talkOf(mine, role, [peer], "");
         return {
           key, kind: "wizard", name: dir.nameOf(peer), label: dir.labelOf(peer), base: "", peer,
           status: dir.status(peer, now),
-          ...glanceOr(ms, speakerPrefix(dir, role, [peer])), count: ms.length, heard: heard(ms), subs: [], ...withJobs(ms),
+          ...glanceOr(ms, speakerPrefix(dir, role, [peer])), count: ms.length, ...book(key, undefined, peer), subs: [], ...withJobs(ms),
         };
       }
       const base = key.slice(2);
-      const all = windowOf(key);
+      const all = channelsOf(msgs)(base);
       const others = [...new Set(all.flatMap((m) => [m.from, m.to]))].filter((r) => r !== role && party(r));
       // 子项成对: 群里与视角有往来的每个 role 一项, 内容是「我与它」在这个群里的对话 (与点进去的窗口同一份 talkOf)。
       // 没往来的 count 为 0, 默认不列; 「chat 内全部」下用 whole (它在群里的全部记录) 列出来。
@@ -438,16 +473,23 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
             role: r, name: dir.nameOf(r), label: dir.labelOf(r), count: pair.length,
             ...glanceOfTalk(all, role, dir, role, [r], base), status: dir.status(r, now),
             whole: { count: whole.length, ...glanceOfTalk(all, role, dir, r, [], base) }, ...withJobs(pair),
+            // 点它打开的窗: 成对 = 群里「我与它」(chat.js subRow), 与我无往来 = 它在群里的全部记录 (chat.js farKey)。
+            ...book(pair.length ? key : `a:${r}||${base}`, pair.length ? r : undefined, r),
           };
         })
         // 成对的排前 (默认只列它们), 其余按它们自己的记录排 —— 截断时先丢与我无往来的。
         .sort((a, b) => Number(b.count > 0) - Number(a.count > 0) || (a.count ? b.lastTs - a.lastTs : b.whole.lastTs - a.whole.lastTs))
         .slice(0, SUB_MAX);
+      // 群这一行的红点并上子项的: 子项看得见的也都在群窗里, 收起时群替它们说 —— 子项的数不会大过群。
+      // 与我无往来的子项不按 session 段裁, 落在段外的那几句不在群窗里, 不并。
+      const inGroup = new Set(all.map((m) => m.id));
+      const own = book(key, undefined, undefined).heard;
       return {
         key, kind: "group", base,
         name: dir.chatName(base) || (base.startsWith("user:") ? dir.nameOf(humanOf(base)) : base.replace(/^chat:/, "").slice(0, 10)),
         label: "💬",
-        ...glanceOr(all, speakerPrefix(dir, role)), count: all.length, heard: heard(all), subs, ...withJobs(all),
+        ...glanceOr(all, speakerPrefix(dir, role)), count: all.length,
+        heard: mergeHeard(own, ...subs.map((s) => s.heard.filter((h) => inGroup.has(h[3])))), subs, ...withJobs(all),
       };
     })
     .sort((a, b) => b.lastTs - a.lastTs);
@@ -506,6 +548,15 @@ export const convMessages = (msgs: readonly Msg[], role: string, key: string, wi
   const t = talkArgs(role, key, withRole);
   return t ? talkOf(msgs, t.who, t.peers, t.chat) : msgs.filter((m) => m.channel === key.slice(2));
 };
+
+/** 一个窗口受不受视角的 session 段裁: 「某人的全部对话」(a:) 与工单 (j:) 不裁 —— 那是视角自己的时间分段, 与那个人 / 工单无关。 */
+export const spanFor = (key: string, span: SessionSpan | undefined): SessionSpan | undefined =>
+  key.startsWith("a:") || key.startsWith("j:") ? undefined : span;
+
+/** 点开一项看到的消息 (断点与工单行另画) —— 详情区按它渲染, 这一项的未读账 (Ledger) 也按它切: 两边同一个函数,
+ *  「看得见」才不会两处各算一套。span = 视角选的 session 段, 裁不裁由 spanFor 定。 */
+export const windowOf = (msgs: readonly Msg[], role: string, key: string, withRole: string | undefined, span: SessionSpan | undefined): Msg[] =>
+  ((sp) => convMessages(msgs, role, key, withRole).filter((m) => inSpan(sp)(m.ts)))(spanFor(key, span));
 
 export interface TalkArgs { who: string; peers: string[]; chat?: string }
 /** 一个窗口交给 talkOf 的入参; 整个公开频道不是谁的往来, 没有。群里选中一个子项 (withRole)
