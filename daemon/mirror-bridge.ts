@@ -6406,6 +6406,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       pushSeal(a, { keys: sealKeys(full), at: Date.now(), query: text, from: opts?.from, channel: opts?.channel, origin, fresh: idleVerdict(target) === true });
       const sid = a.sessionId;
       const paneAlive = a.tmuxPane ? await paneUsable(a.tmuxPane, a.jsonlPath) : false;
+      // 同 dispatch: 只有刚生 / 刚重生的 pane 才要冷启动的宽限 —— 对一个热着、正忙的 pane 贴 `now`
+      // 也按冷启动等 idle 至多 15s, 「不等不打断」就成了「晚 15–20s 才进」(handoff-owe 的竞态即此)。
+      let fresh = a.justSpawned === true;
       if (!paneAlive) {
         log.warn({ target, sessionId: sid, oldPane: a.tmuxPane }, "injectText: pane not alive, respawning");
         // Same resume-fork hazard as dispatch: snapshot before spawn, re-bind
@@ -6418,9 +6421,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         if (r.cwd) a.runningCwd = r.cwd;
         deps.store.set(target, { sessionId: sid, jsonlPath: a.jsonlPath, tmuxSession: a.tmuxSession, tmuxPane: a.tmuxPane, cwd: a.runningCwd || undefined, model: a.model || undefined, effort: a.effort || undefined, pendingCwd: a.pendingCwd || undefined });
         startMigrationWatcher(a, resumeBaseline, forkOf(a.jsonlPath));
+        fresh = true;
       }
-      // freshSpawn: true — the pane was just minted by /mirror/spawn, the TUI
-      // is still warming up so the verifier in injectViaTmux needs the slack.
       // 同 dispatch: 在 inject 之前解除静默, 防止验证循环中 LLM 回复被永久吞掉。
       a.muteUntilInject = false;
       a.justSpawned = false;
@@ -6430,7 +6432,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const preClearBaseline = clearing ? listJsonls(dirname(a.jsonlPath)) : undefined;
       const r = await inject({
         text: full, images: [], cfg, log: log.child({ principal: target, sessionId: sid, sub: "init-demo" }),
-        sessionId: sid, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn: true,
+        sessionId: sid, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn: fresh,
       });
       if (r.ok && a.tmuxPane) {
         if (preClearBaseline) {
