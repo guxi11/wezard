@@ -4,14 +4,22 @@
 
 ## [Unreleased]
 
+## [2.4.1] - 2026-10-04
+
 ### Added
+- rolepage 名字旁显示他人未读: 数字 = 点名字切到那个 role 视角后看得到的全部未读 —— 服务端 `unreadByRole` 按页面未读基线给每个 role 一份与侧栏会话项同口径的账 (会话窗口抽成 `convWindowOf` 共用, 按消息 id 去重), 随摘要下发 `peerUnread`; 侧栏会话项 / 子项 / 远端子项与关系图卡片共用 `theirsOf` 一处点数。
+- 群况快照 (notices roster `mode=full`): 长住 wizard (没有 parent 的) 的注入尾巴在近 10 次注入窗口里没给过时挂一份 CSV 群况表 (`name,state,job`), 列管家、长住有职责的、管家生的与收件人自己生的; 忙闲取注册表, 不抓 pane。交接 / `/clear` 后的头一条必带 —— 此前名册 reminder 只报变动且分身生收已收窄, 管家与长住 wizard 几乎收不到。
 - 顶层模式门控 (`daemon/top-only-nudge.ts`, 配置 `wrc.mirror.topOnlyNudge` = `{windowMin: 30, threshold: 6, cooldownH: 24}`, 窗口或阈值为 0 = 关, 热生效): 没开顶层模式的群里, 每条 wizard 间公开气泡 (公开的 `tell_peer` / `dispatch`, 一次 = 派活气泡 + 它的回复进群) 计一次, 窗口内达到阈值就往该群管家 (群默认会话) 的信箱挂一行 —— 最近 N 分钟有 M 次 wizard 间公开往来, 人下次说话时顺带问要不要开, 附 `config_set` 的写法。随下一次注入到, 不另起一轮、不发气泡。同群提醒过后 `cooldownH` 小时内不再提, 计数与冷却落盘 (`~/.wezard/top-only-nudge.json`) 扛 reload; 已开的群不计。
 
 ### Changed
+- 宪章守卫抽成共用实现 (`guardCharter`): `config_set` 写前写后渲染宪章比对、变了的挂 handoff 提醒, 人 `/name`、`name_chat`、自动补名这些聊天名写入点也走它; 人发起的改动提示「交接之前仍按旧规矩汇报」。
+- rolepage 侧栏「列表」选项改名为「聊天」。
 - 管家宪章不论本群开没开顶层模式都带一行「顶层模式」: 关着时一句话讲它是什么、本群关、开法 `config_set({path:"chatPolicy.<聊天名>.topOnly", value:true})`; 开着时只给关法 (规矩仍在「本群开着顶层模式」一节)。此前没开的群的管家不知道这个概念。
 - `config_get` 读 `chatPolicy.<聊天名>…` 时先换成它指向的 principal (同 `config_set`), 不再一律显示 `—`; 记录里没写的项显示 `— (没写, 按默认 X)`, 默认值取记录值类型的默认 (原先显示 `—` 且误标 `*`); `chatPolicy` 下附依据: 查整张表列写过策略的聊天 (名字 = principal · 顶层模式开/关) 与没写的个数, 查某个聊天只列它。
 
 ### Fixed
+- 终句里引用 `<system-reminder>` 原文不再被掐掉中段: `parseTurns` 剥 meta 只对 user 行做 (assistant 在行内代码写开头标签、代码块里写结尾标签时会从头吃到尾); `parseClosing` / `lastAssistantText` / 回执的「它最后说的」改用 `clipMiddle` 超长掐中间, 切口落在代码块里时补齐 fence。
+- rolepage 未读口径与跨视图已读同步: 红点只数点开这一项看得到的 (服务端 `pendingOf` 按窗口、看的 role 与开口水位算出带消息 id 的可能未读); 已读全局只一份 `SEEN` (消息 id → 上屏时刻), 片段在可见详情区上屏才记, 与页面视角 / 详情视角 / 侧栏 / 关系图无关, 记下即重画两边; 去掉按视角分账的 `READ`。
 - AskUserQuestion 在企业微信作答后, CLI 不再显示红色 `PreToolUse:AskUserQuestion hook error: wezard: User answered "…" via WeCom`: hook 改回 `permissionDecision: "allow"` + `updatedInput` (原入参加上 `answers`, 键为题目原文, 多选按 Claude Code 的编码以 `, ` 连接、含 `, ` 或 `"` 的 label 用 JSON 字符串包起来), Claude Code 认它为已作答, 不弹本地面板, 工具照常落地, 模型拿到正常的 tool_result。daemon 回包新增 `updated_input`, hook 用 jq 拼进 `hookSpecificOutput`。「先聊聊」仍是 deny, 「去 CLI 处理」/ 空选 / 超时 / 断线仍是 ask; codebuddy 的镜像流 (`runMirrorAskqFlow`, 驱动失败后迟到的 hook) 还是 deny + reason, 因为没核实它认不认 `updatedInput`。
 
 ## [2.4.0] - 2026-10-03
@@ -964,7 +972,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.4.0...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.4.1...HEAD
+[2.4.1]: https://github.com/guxi11/wezard/compare/v2.4.0...v2.4.1
 [2.4.0]: https://github.com/guxi11/wezard/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/guxi11/wezard/compare/v2.2.2...v2.3.0
 [2.2.2]: https://github.com/guxi11/wezard/compare/v2.2.1...v2.2.2
