@@ -52,7 +52,7 @@ import { baseOfKey, bindTagLinker, isInternalKey, keyOf, linkTags, normalizeTag,
 import { appendEpisode, clipForCharter, cwdOfMd, episodePath, inboxPath, mdsOf, proposedCwds, memoryPath, memoryRoot, proposeMemory, readMemory, type MemoryScope } from "./wizard-memory.js";
 import { retireStewardTask, startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
 import type { Asker, TurnFrom } from "../shared/detail-store.js";
-import { applyChatNames, chatBaseOf, chatNameOf, chatPolicyOf, clearChatName, listChatNames, normChatName, peerAddress, planChatNames, setChatName } from "./chat-name.js";
+import { applyChatNames, chatBaseOf, chatNameOf, chatPolicyOf, clearChatName, listChatNames, normChatName, peerAddress, planChatNames, setChatName, type CharterChange, type CharterGuard } from "./chat-name.js";
 import { createTopOnlyNudge, gcNudge, policyKeyOf, renderNudge, type NudgeRow } from "./top-only-nudge.js";
 import {
   bindWizardStore,
@@ -196,7 +196,9 @@ const main = async (): Promise<void> => {
   });
   // 人话也过交接的闸 (见 handoff.ts): 交接期间说的话进新会话, 不被旧会话带走、也不在
   // 重开的空档里 resume 回旧 sid。
-  installInboundRouter(ws.client, cfg, log, { ...bridge, dispatch: async (a) => (await handedOff(a.principal), bridge.dispatch(a)) }, sourcePath);
+  // 宪章守卫 (见「改配置会不会动到宪章」): 要等下面宪章渲染那一块立起来才有; 之前 (启动时那次自动补名) 只写不比对。
+  let guardCharter: CharterGuard = (write) => ({ r: write(), note: Promise.resolve("") });
+  installInboundRouter(ws.client, cfg, log, { ...bridge, dispatch: async (a) => (await handedOff(a.principal), bridge.dispatch(a)) }, sourcePath, (w, c) => guardCharter(w, c));
   // approval click → finalize 当前 liveStream, 后续 tool/text 落到 standalone。
   // 规则 2: 用户点击授权那一刻就是"上一段对话"的边界, 截断 stream 让授权后的
   // 工作单独成块, 比让 stream 一直长到下一个 inbound / hardTimer 更清晰。
@@ -582,20 +584,26 @@ const main = async (): Promise<void> => {
       const raw = ((body as { name?: string }).name ?? "").toString().trim();
       // "-" is the same erase gesture `/name -` uses in the chat — one verb,
       // one meaning, whether a human or an agent performs it.
+      // 聊天名进宪章: 过宪章守卫, 受影响的 wizard 被提醒 handoff, 调用方自己受影响的那段话放在 `charter`。
+      const byHuman = !!askerOf(self)?.who.startsWith("user:");
+      const charterOf = async (note: Promise<string>): Promise<{ charter?: string }> => ((t) => (t ? { charter: t } : {}))((await note).trim());
       if (raw === "-") {
-        const gone = clearChatName(cfg, sourcePath, self);
-        json(res, 200, { ok: true, base: baseOfKey(self), name: "", previous: gone });
+        const { r: gone, note } = guardCharter(() => clearChatName(cfg, sourcePath, self), (g) => g ? { what: `\`name_chat\` 取消了聊天名 \`${g}\``, self, byHuman } : undefined);
+        json(res, 200, { ok: true, base: baseOfKey(self), name: "", previous: gone, ...(await charterOf(note)) });
         return;
       }
       const previous = chatNameOf(cfg, self);
-      const r = setChatName(cfg, sourcePath, self, raw);
-      if (!r.ok) { json(res, 409, { ok: false, reason: r.reason }); return; }
-      // 默认 wizard 的名字取自聊天名; 它还叫旧聊天名 (没被单独改过) 就跟着改。
       const home = baseOfKey(self);
-      const cur = wizards.get(home)?.name ?? "";
-      const wizardRenamed = previous && cur.toLowerCase() === previous.toLowerCase() ? wizards.rename(home, r.name) : undefined;
-      if (wizardRenamed) void m.retitlePane(home);
-      json(res, 200, { ok: true, base: r.base, name: r.name, previous, ...(wizardRenamed ? { wizardRenamed } : {}) });
+      const { r, note } = guardCharter(() => {
+        const r = setChatName(cfg, sourcePath, self, raw);
+        if (!r.ok) return r;
+        // 默认 wizard 的名字取自聊天名; 它还叫旧聊天名 (没被单独改过) 就跟着改。
+        const cur = wizards.get(home)?.name ?? "";
+        return { ...r, wizardRenamed: previous && cur.toLowerCase() === previous.toLowerCase() ? wizards.rename(home, r.name) : undefined };
+      }, (r) => r.ok && r.name !== previous ? { what: `\`name_chat\` 把聊天${previous ? ` \`${previous}\`` : ""}改名为 \`${r.name}\``, self, byHuman } : undefined);
+      if (!r.ok) { json(res, 409, { ok: false, reason: r.reason }); return; }
+      if (r.wizardRenamed) void m.retitlePane(home);
+      json(res, 200, { ok: true, base: r.base, name: r.name, previous, ...(r.wizardRenamed ? { wizardRenamed: r.wizardRenamed } : {}), ...(await charterOf(note)) });
     });
 
     interface PeerBody { target?: string; sessionId?: string; tmuxPane?: string; name?: string; tag?: string }
@@ -1544,7 +1552,8 @@ const main = async (): Promise<void> => {
           .sort((x, y) => y.targets.length - x.targets.length)
           .map((c) => ({ base: c.base, cwd: chatCwd(c.targets) })),
       );
-      const named = applyChatNames(cfg, sourcePath, plan);
+      if (!Object.keys(plan).length) return {};
+      const { r: named } = guardCharter(() => applyChatNames(cfg, sourcePath, plan), (n) => Object.keys(n).length ? { what: `自动补的聊天名 (${Object.values(n).map((x) => `\`${x}\``).join(" ")})` } : undefined);
       for (const [base, name] of Object.entries(named)) {
         log.info({ base, name }, "chat: auto-named from workspace");
         // 群里不发气泡 (一次补名会命中十几个群, 那是刷屏), 但住在里面的 wizard
@@ -2740,18 +2749,20 @@ const main = async (): Promise<void> => {
       const x = charterSections(a), y = charterSections(b);
       return [...new Set([...x.keys(), ...y.keys()])].filter((k) => x.get(k) !== y.get(k));
     };
-    /** pane 活着的 wizard —— 宪章在效的只有它们; 冷的醒来时宪章重渲染, 自然是新的。一次 list-panes 答完。 */
-    const liveWizards = async (): Promise<string[]> => {
+    /** 宪章挂在 pane 上的 wizard —— 候选。同步取: 守卫要在写之前拍快照, 中间不能 await。 */
+    const attachedWizards = (): string[] => wizards.all().map((w) => w.target).filter((t) => !!m.sessionInfo(t)?.tmuxPane);
+    /** 其中 pane 活着的 —— 宪章在效的只有它们; 冷的醒来时宪章重渲染, 自然是新的。一次 list-panes 答完。 */
+    const liveOf = async (targets: readonly string[]): Promise<string[]> => {
       const snap = await runTmux(["list-panes", "-a", "-F", "#{pane_id}"]);
       const live = new Set(snap.ok ? snap.stdout.split("\n").map((l) => l.trim()).filter(Boolean) : []);
-      return wizards.all().map((w) => w.target).filter((t) => live.has(m.sessionInfo(t)?.tmuxPane ?? ""));
+      return targets.filter((t) => live.has(m.sessionInfo(t)?.tmuxPane ?? ""));
     };
     /** 这些 wizard 此刻的宪章正文。 */
     const charterSnapshot = (targets: readonly string[]): Map<string, string> =>
       new Map(targets.map((t) => [t, charterText(t, charterOptsOf(t, m.getCwd(t).runningCwd || undefined), true)] as const));
     /** 把 `next` 那一节换进活的 cfg 渲染一遍再换回 —— 同步完成, 中间没有 await, 别的模块看不见这一瞬。
      *  reload 项落盘后活值不变, 只有这样才算得出它 reload 之后的宪章。 */
-    const charterUnder = (pl: Plan, targets: readonly string[]): Map<string, string> => {
+    const charterUnder = (pl: Plan) => (targets: readonly string[]): Map<string, string> => {
       const live = cfg as unknown as Record<string, unknown>;
       const key = pl.path[0]!;
       const saved = live[key];
@@ -2759,24 +2770,43 @@ const main = async (): Promise<void> => {
       try { return charterSnapshot(targets); } finally { live[key] = saved; }
     };
     type CharterHit = { target: string; sections: string[] };
-    const charterImpact = (before: Map<string, string>, pl: Plan): CharterHit[] => {
-      const after = charterUnder(pl, [...before.keys()]);
-      return [...before].flatMap(([t, a]) => { const secs = changedSections(a, after.get(t) ?? a); return secs.length ? [{ target: t, sections: secs }] : []; });
-    };
-    /** 受影响的 wizard 各挂一条提醒 (随它下一条消息到); 给调用方的那段话。调用方自己受影响就直说要它 handoff。 */
-    const announceCharterImpact = (pl: Plan, hits: CharterHit[], self: string | undefined): string => {
+    const charterImpact = (before: Map<string, string>, after: Map<string, string>): CharterHit[] =>
+      [...before].flatMap(([t, a]) => { const secs = changedSections(a, after.get(t) ?? a); return secs.length ? [{ target: t, sections: secs }] : []; });
+    /** 受影响的 wizard 各挂一条提醒 (随它下一条消息到); 给调用方的那段话。调用方自己受影响就直说要它 handoff。
+     *  人发起的改动多一句「交接之前还是旧规矩」: 管家要知道它此刻向人汇报的方式还没变, 别让人以为已经生效。 */
+    const announceCharterImpact = (c: CharterChange, hits: CharterHit[]): string => {
       if (!hits.length) return "";
-      const when = pl.apply === "reload" ? "等守护进程 reload 之后再" : "";
-      const ask = `${when}调 \`handoff({brief})\` 原地重开 (手上这件告一段落就交; 宪章在 handoff 时重新生成)`;
-      const others = hits.filter((h) => h.target !== self);
-      others.forEach((h) => notices.post([h.target], `\`config_set ${pl.path.join(".")}\` 改动了你的宪章 (系统提示, 变了的段: ${h.sections.join(" / ")}); 已在跑的你看不见新规矩 —— ${ask}`));
-      const mine = hits.find((h) => h.target === self);
+      const ask = `${c.reload ? "等守护进程 reload 之后再" : ""}调 \`handoff({brief})\` 原地重开 (手上这件告一段落就交; 宪章在 handoff 时重新生成)`;
+      const lag = (t: string): string => !c.byHuman ? "" : tagOfKey(t)
+        ? " —— 这是人发起的改动: 交接之前你仍按旧规矩做事, handoff 之后才按新的"
+        : " —— 这是人发起的改动: 交接之前你仍按旧规矩向人汇报, handoff 之后才会按新规矩汇报; 回人时说一句「交接后生效」";
+      const others = hits.filter((h) => h.target !== c.self);
+      others.forEach((h) => notices.post([h.target], `${c.what} 改动了你的宪章 (系统提示, 变了的段: ${h.sections.join(" / ")}); 已在跑的你看不见新规矩 —— ${ask}${lag(h.target)}`));
+      const mine = hits.find((h) => h.target === c.self);
       return [
         "",
         `⚠ 这次改动进了宪章 (系统提示): 已在跑的 wizard 看不见, 要 handoff 才换上。受影响 ${hits.length} 个: ${hits.map((h) => displayName(h.target)).join(" ")}`,
         ...(others.length ? [`已给其余 ${others.length} 个各挂一条提醒 (随它们下一条消息到), 让它们${ask}`] : []),
-        ...(mine ? [`**你自己也在其中** (变了的段: ${mine.sections.join(" / ")}): 这一轮收尾后${ask}`] : []),
+        ...(mine ? [`**你自己也在其中** (变了的段: ${mine.sections.join(" / ")}): 这一轮收尾后${ask}${lag(mine.target)}`] : []),
       ].join("\n");
+    };
+    // 所有会动宪章的写入 (config_set、人 `/name`、name_chat、自动补名) 共用这一个守卫: 写前写后各渲染一遍
+    // 挂在 pane 上的 wizard 的宪章, 变了的、pane 还活着的挂提醒。快照到写完之间不能有 await —— 别人的写入
+    // 插进来, 前后就对不上了。已经写了: 比对失败只少一句提醒, 不能让调用方以为没写而重发。
+    guardCharter = (write, change) => {
+      const targets = attachedWizards();
+      const before = charterSnapshot(targets);
+      const r = write();
+      const c = change(r);
+      if (!c) return { r, note: Promise.resolve("") };
+      const fail = (e: unknown): string => {
+        log.warn({ err: errText(e), what: c.what }, "宪章影响比对失败");
+        return `\n(宪章影响没比对出来: ${errText(e)} —— 改的若是进宪章的内容, 受影响的 wizard 要 handoff 才换上)`;
+      };
+      try {
+        const hits = charterImpact(before, (c.after ?? charterSnapshot)(targets));
+        return { r, note: liveOf(hits.map((h) => h.target)).then((live) => announceCharterImpact(c, hits.filter((h) => live.includes(h.target)))).catch(fail) };
+      } catch (e) { return { r, note: Promise.resolve(fail(e)) }; }
     };
 
     // POST /config/get —— 新 MCP 带 `path` (可空) 拿渲染好的文本; 老 MCP 带 `key` 拿 {key, value}。
@@ -2828,22 +2858,20 @@ const main = async (): Promise<void> => {
       if (ask.dryRun || !pl.changed) { reply(pl, `${ask.dryRun ? "dryRun, 没写:\n" : ""}${renderPlan(pl)}`); return; }
 
       // 落盘时重算一遍: 等卡期间文件可能被别人改过, 按那一刻的文件打补丁、再校验。
-      // 宪章快照取在落盘之前: hot 项一 applyHot, 活的 cfg 就已经是新的了。
+      // 宪章快照取在落盘之前 (守卫里): hot 项一 applyHot, 活的 cfg 就已经是新的了。
       // 不用 resolveSelf: 它最后回落到 defaultChat, 会把认不出的调用方当成那个群的管家。
       const caller = (body.sessionId?.trim() && m.targetForSession(body.sessionId.trim())) || (body.tmuxPane?.trim() && m.targetForPane(body.tmuxPane.trim())) || undefined;
+      // 人发起 = 调用方这一轮的链头是人 (人在群里 / 单聊里叫它改的)。
+      const byHuman = !!caller && !!askerOf(caller)?.who.startsWith("user:");
       const commit = async (): Promise<(Plan & { charter: string }) | { ok: false; reason: string }> => {
-        const targets = await liveWizards();
-        // 从这里到 applyHot 之间不能有 await: 快照与落盘之间别人的 config_set 插进来, 前后就对不上了。
-        const now = planSet(cfg, sourcePath, ask);
-        if (!now.ok) return now;
-        const before = charterSnapshot(targets);
-        patchJsonc(sourcePath, [{ path: now.jsonPath, value: now.value }]);
-        applyHot(cfg, now);
-        // 已经落盘了: 比对失败只少一句提醒, 不能让调用方以为没写而重发。
-        try { return { ...now, charter: announceCharterImpact(now, charterImpact(before, now), caller) }; } catch (e) {
-          log.warn({ err: errText(e), path: now.path.join(".") }, "config_set: 宪章影响比对失败");
-          return { ...now, charter: `\n(宪章影响没比对出来: ${errText(e)} —— 改的若是进宪章的配置, 受影响的 wizard 要 handoff 才换上)` };
-        }
+        const { r: now, note } = guardCharter(() => {
+          const now = planSet(cfg, sourcePath, ask);
+          if (!now.ok) return now;
+          patchJsonc(sourcePath, [{ path: now.jsonPath, value: now.value }]);
+          applyHot(cfg, now);
+          return now;
+        }, (now) => now.ok ? { what: `\`config_set ${now.path.join(".")}\``, self: caller, byHuman, reload: now.apply === "reload", after: charterUnder(now) } : undefined);
+        return now.ok ? { ...now, charter: await note } : now;
       };
       const done = (now: Plan & { charter: string }): string =>
         `已写入${now.apply === "hot" ? ", 已生效" : "; 需 reload (`./cli/wezard.sh reload`) 才生效"}:\n${renderPlan(now)}${now.charter}`;

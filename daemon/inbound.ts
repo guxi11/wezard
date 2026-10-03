@@ -18,7 +18,7 @@ import { computeAuditReport } from "./audit.js";
 import { syncProjectConfig, renderSyncReport } from "./cfg-sync.js";
 import { captureQuota, renderQuotaReport } from "./quota.js";
 import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe, allNames, unlinkTags, normalizeTag, uniqueTag, displayName, tagLink } from "../shared/session-label.js";
-import { chatNameOf, clearChatName, listChatNames, setChatName } from "./chat-name.js";
+import { chatNameOf, clearChatName, listChatNames, setChatName, type CharterGuard } from "./chat-name.js";
 import { evictStaleName, reclaimChatName, wizardStore, type EvictDeps } from "./wizard.js";
 import { truncate } from "../shared/std.js";
 
@@ -578,6 +578,7 @@ export const installInboundRouter = (
   log: Logger,
   bridge: MirrorBridge,
   sourcePath: string,
+  guardCharter: CharterGuard,
 ): void => {
   const inboxDir = expandHome(cfg.wrc.mirror.inboxDir);
   // 已知的机器人名只随配置变; 下面所有入站路径共用这一个剥离器。
@@ -871,15 +872,18 @@ export const installInboundRouter = (
           : "[wezard] 本聊天还没起名。`/name <名字>` 起一个。");
         return { stop: true };
       }
+      // 聊天名进宪章 (home 群、管家那节的 config_set 路径): 过宪章守卫, 受影响的 wizard 被提醒 handoff。
       if (nc.arg === "-") {
-        const gone = clearChatName(cfg, sourcePath, who);
+        const { r: gone } = guardCharter(() => clearChatName(cfg, sourcePath, who), (g) => g ? { what: `人 \`/name -\` 取消了聊天名 \`${g}\``, byHuman: true } : undefined);
         await replyText(frame, msg, who, gone ? `[wezard] 已取消命名 \`${gone}\`` : "[wezard] 本聊天本来就没起名。");
         return { stop: true };
       }
-      const r = setChatName(cfg, sourcePath, who, nc.arg);
       // 聊天名就是默认 wizard 的名字: 人起名即改名 (撞名照 pickName 挂 `-N`), tmux 窗口跟着换。
       const home = baseOfKey(who);
-      const wiz = r.ok ? wizardStore()?.rename(home, r.name) : undefined;
+      const { r: [r, wiz] } = guardCharter(() => {
+        const r = setChatName(cfg, sourcePath, who, nc.arg);
+        return [r, r.ok ? wizardStore()?.rename(home, r.name) : undefined] as const;
+      }, ([r]) => r.ok && r.name !== cur ? { what: `人 \`/name ${r.name}\` 把聊天${cur ? ` \`${cur}\`` : ""}改名为 \`${r.name}\``, byHuman: true } : undefined);
       if (wiz) void bridge.retitlePane(home);
       await replyText(frame, msg, who, r.ok
         ? `[wezard] ✅ 本聊天更名为 \`${r.name}\`${cur && cur !== r.name ? `（原 \`${cur}\`）` : ""}${wiz && wiz !== r.name ? `; 默认 wizard 名 \`.${wiz}\` (\`.${r.name}\` 已被占)` : ""}`

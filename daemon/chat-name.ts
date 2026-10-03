@@ -15,6 +15,20 @@ import { patchJsonc } from "../shared/config-writer.js";
 import { baseOfKey } from "../shared/session-label.js";
 import { settleName, wizardStore } from "./wizard.js";
 
+/** 一次会动到宪章的写入 (见 index.ts 的宪章守卫): 聊天名、chatPolicy 都进宪章, 已在跑的 wizard 看不见,
+ *  要 handoff 才换上。`what` 是提醒里点名的改动; `self` = 发起的 wizard (它受影响就在回话里直说);
+ *  `byHuman` = 人发起的; `reload` = 守护进程 reload 后才生效; `after` = 写后的宪章 (默认按此刻的活 cfg 渲染)。 */
+export interface CharterChange {
+  what: string;
+  self?: string;
+  byHuman?: boolean;
+  reload?: boolean;
+  after?: (targets: readonly string[]) => Map<string, string>;
+}
+/** 写前写后各渲染一遍宪章, 变了的 wizard 挂 handoff 提醒。`write` 同步执行 (快照到写完之间不能有 await);
+ *  `change` 由写的结果判断这次算不算一次改动 (undefined = 没写, 不比对)。`note` = 给调用方的那段话。 */
+export type CharterGuard = <T>(write: () => T, change: (r: T) => CharterChange | undefined) => { r: T; note: Promise<string> };
+
 /** 与 wizard 名字同一套字符集: 字母/数字/`_`/`-`, 1~32。名字要能原样写进地址里, 所以
  *  不能含 `#`、`/`、`:` 与空白 —— 那三个都是地址语法的一部分。 */
 const NAME_RE = /^[\p{L}\p{N}_-]{1,32}$/u;
