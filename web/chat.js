@@ -1269,7 +1269,10 @@
     if (VIEWPOINT && peer === VIEWPOINT) peer = ROLE;
     // 说给谁: 群里我不是收信方的那条 (X → Y); 我发的那条, 收信方不是顶栏那个对端时
     // (一对一里收信方就是顶栏那个对端, 不再重复写)。
-    var dst = mine
+    // 两个 role 之间的对话 (标题「X 与 Y 的对话」) 里对象就是另一方, 不标; 多方视图才标。
+    var c = convOf(CONV);
+    var two = !group || !!pairPeer(c) || (!!c && c.kind === 'all' && c.peers.length === 1);
+    var dst = two ? '' : mine
       ? (m.to && m.to !== 'human:' && m.to !== peer ? m.to : '')
       : (m.to !== me && group ? m.to : '');
     // 说给谁画进文本泡泡开头 (头像 + 名字); 点它走移交行同一套跳转 (data-hfrom/hto/hch + gid/gts), 不换页面视角。
@@ -1292,8 +1295,6 @@
     // 本轮的账 (呼吸点 + 模型 / 上下文 / 耗时) 跟在时刻后面 —— 片段是服务端渲染好的。
     // 模型 / ctx 只在多方会话里有用 (分得清谁跑的什么模型); 两个 role 之间的对话里整行挂 .two, 头像行 (.mstat)、
     // 终句气泡的时间行 (.say-cap) 与移交行的账 (.ho-acct) 里藏掉这两样, 耗时、呼吸点与回执留着。
-    var c = convOf(CONV);
-    var two = !group || !!pairPeer(c) || (!!c && c.kind === 'all' && c.peers.length === 1);
     var stat = m.meta ? '<span class="mstat">' + jobChips(m.meta) + '</span>' : '';
     var who = mine
       ? stamp(m.ts) + stat + avBtn(m.from)
