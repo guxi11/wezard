@@ -229,9 +229,6 @@ export interface ConvSub {
   lastTs: number;
   /** 这一对往来的最后一句。 */
   preview: string;
-  /** 它自己在这一项窗口里可能没读的话 (pendingOf): 成对的 = 我与它的往来, 与我无往来的 = 它在群里的全部记录。
-   *  名字旁的他人未读点的就是这份 —— 只数点开这一项看得到的。 */
-  theirs: Heard[];
   /** 它在这个频道里的全部记录 (不按成对过滤) —— 侧栏「chat 内全部」下与我无往来的那几项用它。 */
   whole: Glance & { count: number };
   /** 它是 wizard 时才有。 */
@@ -256,8 +253,6 @@ export interface Conv {
   count: number;
   /** 视角在这里可能没读的话 (pendingOf), 最近的在后 —— 客户端减去已上屏的点未读 (见 Heard)。 */
   heard: Heard[];
-  /** 私聊对端在这里可能没读的话 (名字旁的他人未读); 群没有 (见 ConvSub.theirs)。 */
-  theirs?: Heard[];
   /** 群里的其他 role (只对公开频道)。 */
   subs: ConvSub[];
   /** 这处往来里出现过的工单 (侧栏一行的 📋 标记); 没有 = 不给。 */
@@ -384,6 +379,32 @@ export const pendingOf = (all: readonly Msg[], viewer: string): ((win: readonly 
 const convKeysOf = (mine: readonly Msg[], role: string): string[] =>
   [...new Set(mine.filter((m) => !m.channel || m.from === role).map((m) => convKeyOf(m, role)))];
 
+/** 一个会话项点开看到的消息: 群 = 整个频道, 私聊 = 两端在私聊里的往来。 */
+const convWindowOf = (msgs: readonly Msg[], mine: readonly Msg[], role: string) => (key: string): Msg[] =>
+  key.startsWith("p:") ? talkOf(mine, role, [key.slice(2)], "") : channelsOf(msgs)(key.slice(2));
+
+const party = (r: string): boolean => !!r && !r.startsWith("task:") && r !== SYSTEM;
+
+/** 名字旁的他人未读: 每个 role 换到它自己的视角会看到的未读 —— 它全部会话项的 heard (与 convsOf 同一口径:
+ *  会话键、窗口、pendingOf), 群与私聊里同一句只算一次。只留 since (页面的未读基线) 之后说完的,
+ *  一句都没有的 role 不给: 基线之前的话客户端永远不算未读。
+ *  能听到基线之后某句话的只有它的收信方和它所在群里开过口的 —— 先收窄, 不替每个 role 扫一遍全部消息。 */
+export const unreadByRole = (all_: readonly Msg[], since: number): Record<string, Heard[]> => {
+  const msgs = all_.filter((m) => !isPing(m));
+  const fresh = msgs.filter((m) => (doneAt(m) ?? 0) > since);
+  const inChannel = channelsOf(msgs);
+  const roles = [...new Set(fresh.flatMap((m) => [m.to, ...(m.channel ? inChannel(m.channel).map((x) => x.from) : [])]))].filter(party);
+  const heardOf = (role: string): Heard[] => {
+    const mine = talkOf(msgs, role);
+    const heard = pendingOf(msgs, role);
+    const seen = new Set<string>();
+    return convKeysOf(mine, role).map(convWindowOf(msgs, mine, role)).flatMap(heard)
+      .filter((h) => h[0] > since && !seen.has(h[3]) && !!seen.add(h[3]))
+      .sort((a, b) => a[0] - b[0]).slice(-HEARD_MAX);
+  };
+  return Object.fromEntries(roles.map((r) => [r, heardOf(r)] as const).filter(([, hs]) => hs.length));
+};
+
 /** 一个 role 参与的全部会话, 最近活动在前。群聊只列它**自己开过口**的 —— 住在里面
  *  (home) 或只是被人叫过一声却没答话的, 都不算参与; 私聊则有往来就在列。 */
 export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now: number): Conv[] => {
@@ -391,20 +412,21 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
   const msgs = all_.filter((m) => !isPing(m));
   const heard = pendingOf(msgs, role);
   const mine = talkOf(msgs, role);
+  const windowOf = convWindowOf(msgs, mine, role);
   return convKeysOf(mine, role)
     .map((key): Conv => {
       if (key.startsWith("p:")) {
         const peer = key.slice(2);
-        const ms = talkOf(mine, role, [peer], "");
+        const ms = windowOf(key);
         return {
           key, kind: "wizard", name: dir.nameOf(peer), label: dir.labelOf(peer), base: "", peer,
           status: dir.status(peer, now),
-          ...glanceOr(ms, speakerPrefix(dir, role, [peer])), count: ms.length, heard: heard(ms), theirs: pendingOf(msgs, peer)(ms), subs: [], ...withJobs(ms),
+          ...glanceOr(ms, speakerPrefix(dir, role, [peer])), count: ms.length, heard: heard(ms), subs: [], ...withJobs(ms),
         };
       }
       const base = key.slice(2);
-      const all = msgs.filter((m) => m.channel === base);
-      const others = [...new Set(all.flatMap((m) => [m.from, m.to]))].filter((r) => r !== role && !r.startsWith("task:") && r !== SYSTEM);
+      const all = windowOf(key);
+      const others = [...new Set(all.flatMap((m) => [m.from, m.to]))].filter((r) => r !== role && party(r));
       // 子项成对: 群里与视角有往来的每个 role 一项, 内容是「我与它」在这个群里的对话 (与点进去的窗口同一份 talkOf)。
       // 没往来的 count 为 0, 默认不列; 「chat 内全部」下用 whole (它在群里的全部记录) 列出来。
       // 两份 glance 都走 glanceOfTalk —— 关系图卡片 (/api/glance) 的同一个实现。
@@ -413,7 +435,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
           const pair = talkOf(all, role, [r]);
           const whole = talkOf(all, r);
           return {
-            role: r, name: dir.nameOf(r), label: dir.labelOf(r), count: pair.length, theirs: pendingOf(msgs, r)(pair.length ? pair : whole),
+            role: r, name: dir.nameOf(r), label: dir.labelOf(r), count: pair.length,
             ...glanceOfTalk(all, role, dir, role, [r], base), status: dir.status(r, now),
             whole: { count: whole.length, ...glanceOfTalk(all, role, dir, r, [], base) }, ...withJobs(pair),
           };
