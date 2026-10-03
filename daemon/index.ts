@@ -51,7 +51,7 @@ import { baseOfKey, bindTagLinker, isInternalKey, keyOf, linkTags, normalizeTag,
 import { appendEpisode, clipForCharter, cwdOfMd, episodePath, inboxPath, mdsOf, proposedCwds, memoryPath, memoryRoot, proposeMemory, readMemory, type MemoryScope } from "./wizard-memory.js";
 import { retireStewardTask, startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
 import type { Asker, TurnFrom } from "../shared/detail-store.js";
-import { applyChatNames, chatBaseOf, chatNameOf, clearChatName, listChatNames, normChatName, peerAddress, planChatNames, setChatName } from "./chat-name.js";
+import { applyChatNames, chatBaseOf, chatNameOf, chatPolicyOf, clearChatName, listChatNames, normChatName, peerAddress, planChatNames, setChatName } from "./chat-name.js";
 import {
   bindWizardStore,
   loadWizardStore,
@@ -900,6 +900,13 @@ const main = async (): Promise<void> => {
         return;
       }
       const dests = [...new Set(refs.length ? refs.map((r) => chatBaseOf(cfg, r)) : [channelOf(self)])];
+      // 幕后模式: 只有顶层 wizard 对人说话 —— 群管家, 或这一轮在服务一件人问的事 (父 k 是群) 的那个;
+      // 同伴私聊派来的活在幕后, 它要说的写进终句, 由派它的那个代为收口。
+      const muted = dests.filter((d) => chatPolicyOf(cfg, d).backstage);
+      if (muted.length && tagOfKey(self) && parentKOf(self)?.kind !== "chat") {
+        json(res, 409, { ok: false, backstage: true, reason: `${muted.map((d) => chatNameOf(cfg, d) || d).join(", ")} 开着幕后模式: 你这一轮是同伴派来的活, 不对人说话 —— 要说的写进终句 (\`RESULT:\` / \`NEED:\`), 由派你的那个代你向人交代` });
+        return;
+      }
       const asker = askerOf(self);
       for (const dest of dests) {
         notifyChat(dest, `${relayLabel(self)}\n\n${content}`);
@@ -1061,7 +1068,11 @@ const main = async (): Promise<void> => {
       // 掉的分身不是谁, 它们的往来进群只会留下一段人找不到主的对话 —— 降为私聊。
       // 工单里的派活一律私聊: 人看不懂 fan-out 的过程, 群里只留发起者自己的收口。
       // 知会不进群: 公开信封要对方「照对人说话的方式答」, 一句「收到」会被发给一群人。
-      const isPublic = !jobId && kind !== "fyi" && (turn.channel !== undefined ? !!turn.channel : (body as { public?: boolean }).public === true) && !!wizards.get(self) && !!wizards.get(target);
+      // 幕后模式 (chatPolicy.backstage): 那个群里 wizard 之间不当着人说话 —— 公开与否不归模型判断,
+      // 续问沿用的公开频道也一样降为私聊; 人只从顶层 wizard 的收口里听到结论。
+      const wantPublic = !jobId && kind !== "fyi" && (turn.channel !== undefined ? !!turn.channel : (body as { public?: boolean }).public === true) && !!wizards.get(self) && !!wizards.get(target);
+      const backstage = wantPublic && chatPolicyOf(cfg, turn.channel || channelOf(self)).backstage;
+      const isPublic = wantPublic && !backstage;
       const channel = isPublic ? turn.channel || channelOf(self) : "";
       // Injecting into your own pane would type into the box you're generating
       // from — Claude Code queues it and the caller deadlocks waiting for itself.
@@ -1173,6 +1184,7 @@ const main = async (): Promise<void> => {
         ...inj,
         name: peerAddress(cfg, self, target),
         public: isPublic,
+        ...(backstage ? { backstage: "这个群开着幕后模式: wizard 之间一律私聊, 已按私聊投出; 结论回到你这儿, 由你 (或你的上游) 对人收口" } : {}),
         priority: policy,
         ...(kind !== "task" ? { kind } : {}),
         ...(kind === "fyi" && askedJob ? { jobIgnored: true } : {}),
@@ -1616,11 +1628,14 @@ const main = async (): Promise<void> => {
     // 之后没有快照, 只指路不补发。
     const chartered = new Map<string, readonly string[]>();
 
-    /** 开局宪章。出生时的兄弟只是快照 —— 名册随时可查, 写进系统提示的那份只为了
-     *  让它一睁眼就知道自己不是一个人在跑。 */
-    const charterFor = (target: string, o: { parent?: string; forkOf?: string; inherited?: boolean; cwd?: string }): string => {
-      chartered.set(target, wizards.get(target)?.memory ?? []);
-      const text = renderCharter({
+    type CharterOpts = { parent?: string; forkOf?: string; inherited?: boolean; cwd?: string };
+    const charterOptsOf = (target: string, cwd?: string): CharterOpts => {
+      const rec = wizards.get(target);
+      return { parent: rec?.parent, forkOf: rec?.forkOf, inherited: !!rec?.clonedFrom, cwd };
+    };
+    /** 宪章正文, 只读 —— 只由 cfg 与此刻的注册表 / 附着表算出, config_set 据此比对前后。 */
+    const charterText = (target: string, o: CharterOpts): string =>
+      renderCharter({
         // o.cwd = 正在启动的那个 pane 的目录; 没给才退回"现在记着的那个"。
         self: { ...briefOf(target, target), address: selfAddress(target), ...(o.cwd ? { cwd: o.cwd } : {}) },
         chat: chatNameOf(cfg, target),
@@ -1646,7 +1661,13 @@ const main = async (): Promise<void> => {
         })(),
         steward: !tagOfKey(target),
         lead: !!wizards.get(target)?.lead,
+        backstage: chatPolicyOf(cfg, target).backstage,
       });
+    /** 开局宪章。出生时的兄弟只是快照 —— 名册随时可查, 写进系统提示的那份只为了
+     *  让它一睁眼就知道自己不是一个人在跑。 */
+    const charterFor = (target: string, o: CharterOpts): string => {
+      chartered.set(target, wizards.get(target)?.memory ?? []);
+      const text = charterText(target, o);
       recordCharter(target, text, o.parent ? { parent: o.parent, kind: o.inherited ? "clone" : "spawn", ...(o.forkOf ? { forkOf: o.forkOf } : {}) } : undefined);
       return text;
     };
@@ -1679,8 +1700,7 @@ const main = async (): Promise<void> => {
       // 信箱里装的是相对上一份宪章的变化; 新宪章一渲染就都过期了 (名册、记忆都已在里面)。
       notices.drain(target);
       notices.forget(target);
-      const rec = wizards.get(target);
-      return charterFor(target, { parent: rec?.parent, forkOf: rec?.forkOf, inherited: !!rec?.clonedFrom, cwd: ctx?.cwd });
+      return charterFor(target, charterOptsOf(target, ctx?.cwd));
     });
 
     // 宪章记录是后来才有的: 已经在跑的 wizard 拿 spawn 落盘的那份 (state/charters/<sid>.md) 补上,
@@ -1935,7 +1955,7 @@ const main = async (): Promise<void> => {
         if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
         // 已有 wizard 当 lead: 宪章是出生时定的, 组队打法挂在信封后面跟这一句带过去; 投成了才记 lead,
         // 它下次重生宪章里就有。
-        const t = await tell(name, task, lead ? renderReminder({ wezard: "lead" }, renderLead()) : "");
+        const t = await tell(name, task, lead ? renderReminder({ wezard: "lead" }, renderLead(chatPolicyOf(cfg, channelOf(self)).backstage)) : "");
         if (lead && t.status === 200) wizards.upsert(r.target, { lead: true });
         // 自动选中的被冷门控退回 (decide 用名册的活动时刻, 门控用 transcript 的, 口径差一点): 改走 spawn。
         if (!(t.body.gated === "cold" && !to)) {
@@ -2489,6 +2509,52 @@ const main = async (): Promise<void> => {
     const configEvidence = (p: string[]): string[] =>
       tierEvidence(cfg.models, p, tierUsage, (tier) => wizards.all().filter((w) => w.tier === tier).length, { tokens: fmtTokens, cost: fmtCost });
 
+    // ── 改配置会不会动到宪章 ─────────────────────────────────────────
+    // 宪章是 --append-system-prompt 压进去的, 随进程终身: 改了进宪章的配置, 已在跑的 wizard
+    // 看不见, 要 handoff 重开 (重新渲染宪章) 才换上。不按字段清单判 —— 宪章读哪些配置随代码变,
+    // 清单迟早漏; 改前改后各渲染一遍有会话的 wizard 的宪章, 变了的就是受影响的。
+    const charterSections = (text: string): Map<string, string> =>
+      new Map(text.split(/^(?=## )/m).map((sec) => [sec.split("\n", 1)[0]!.replace(/^## /, ""), sec] as const));
+    const changedSections = (a: string, b: string): string[] => {
+      const x = charterSections(a), y = charterSections(b);
+      return [...new Set([...x.keys(), ...y.keys()])].filter((k) => x.get(k) !== y.get(k));
+    };
+    /** 宪章在效的 wizard (有会话的) 此刻的宪章正文。 */
+    const charterSnapshot = (): Map<string, string> =>
+      new Map(wizards.all().filter((w) => !!m.sessionInfo(w.target)?.sessionId)
+        .map((w) => [w.target, charterText(w.target, charterOptsOf(w.target, m.getCwd(w.target).runningCwd || undefined))] as const));
+    /** 把 `next` 那一节换进活的 cfg 渲染一遍再换回 —— 同步完成, 中间没有 await, 别的模块看不见这一瞬。
+     *  reload 项落盘后活值不变, 只有这样才算得出它 reload 之后的宪章。 */
+    const charterUnder = (pl: Plan, targets: readonly string[]): Map<string, string> => {
+      const live = cfg as unknown as Record<string, unknown>;
+      const key = pl.path[0]!;
+      const saved = live[key];
+      live[key] = (pl.next as unknown as Record<string, unknown>)[key];
+      try {
+        return new Map(targets.map((t) => [t, charterText(t, charterOptsOf(t, m.getCwd(t).runningCwd || undefined))] as const));
+      } finally { live[key] = saved; }
+    };
+    type CharterHit = { target: string; sections: string[] };
+    const charterImpact = (before: Map<string, string>, pl: Plan): CharterHit[] => {
+      const after = charterUnder(pl, [...before.keys()]);
+      return [...before].flatMap(([t, a]) => { const secs = changedSections(a, after.get(t) ?? a); return secs.length ? [{ target: t, sections: secs }] : []; });
+    };
+    /** 受影响的 wizard 各挂一条提醒 (随它下一条消息到); 给调用方的那段话。调用方自己受影响就直说要它 handoff。 */
+    const announceCharterImpact = (pl: Plan, hits: CharterHit[], self: string | undefined): string => {
+      if (!hits.length) return "";
+      const when = pl.apply === "reload" ? "等守护进程 reload 之后再" : "";
+      const ask = `${when}调 \`handoff({brief})\` 原地重开 (手上这件告一段落就交; 宪章在 handoff 时重新生成)`;
+      const others = hits.filter((h) => h.target !== self);
+      others.forEach((h) => notices.post([h.target], `\`config_set ${pl.path.join(".")}\` 改动了你的宪章 (系统提示, 变了的段: ${h.sections.join(" / ")}); 已在跑的你看不见新规矩 —— ${ask}`));
+      const mine = hits.find((h) => h.target === self);
+      return [
+        "",
+        `⚠ 这次改动进了宪章 (系统提示): 已在跑的 wizard 看不见, 要 handoff 才换上。受影响 ${hits.length} 个: ${hits.map((h) => displayName(h.target)).join(" ")}`,
+        ...(others.length ? [`已给其余 ${others.length} 个各挂一条提醒 (随它们下一条消息到), 让它们${ask}`] : []),
+        ...(mine ? [`**你自己也在其中** (变了的段: ${mine.sections.join(" / ")}): 这一轮收尾后${ask}`] : []),
+      ].join("\n");
+    };
+
     // POST /config/get —— 新 MCP 带 `path` (可空) 拿渲染好的文本; 老 MCP 带 `key` 拿 {key, value}。
     http.register("POST /config/get", async (req, res) => {
       const body = (await readBody(req)) as { key?: string; path?: string };
@@ -2514,15 +2580,19 @@ const main = async (): Promise<void> => {
       if (ask.dryRun || !pl.changed) { reply(pl, `${ask.dryRun ? "dryRun, 没写:\n" : ""}${renderPlan(pl)}`); return; }
 
       // 落盘时重算一遍: 等卡期间文件可能被别人改过, 按那一刻的文件打补丁、再校验。
-      const commit = (): Plan | { ok: false; reason: string } => {
+      // 宪章快照取在落盘之前: hot 项一 applyHot, 活的 cfg 就已经是新的了。
+      // 不用 resolveSelf: 它最后回落到 defaultChat, 会把认不出的调用方当成那个群的管家。
+      const caller = (body.sessionId?.trim() && m.targetForSession(body.sessionId.trim())) || (body.tmuxPane?.trim() && m.targetForPane(body.tmuxPane.trim())) || undefined;
+      const commit = (): (Plan & { charter: string }) | { ok: false; reason: string } => {
         const now = planSet(cfg, sourcePath, ask);
         if (!now.ok) return now;
+        const before = charterSnapshot();
         patchJsonc(sourcePath, [{ path: now.jsonPath, value: now.value }]);
         applyHot(cfg, now);
-        return now;
+        return { ...now, charter: announceCharterImpact(now, charterImpact(before, now), caller) };
       };
-      const done = (now: Plan): string =>
-        `已写入${now.apply === "hot" ? ", 已生效" : "; 需 reload (`./cli/wezard.sh reload`) 才生效"}:\n${renderPlan(now)}`;
+      const done = (now: Plan & { charter: string }): string =>
+        `已写入${now.apply === "hot" ? ", 已生效" : "; 需 reload (`./cli/wezard.sh reload`) 才生效"}:\n${renderPlan(now)}${now.charter}`;
 
       if (pl.gate !== "card") {
         const now = commit();

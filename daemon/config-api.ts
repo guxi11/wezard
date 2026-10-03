@@ -133,6 +133,8 @@ export interface Plan {
   after: unknown;
   changed: boolean;
   diff: string;
+  /** 改完之后的整份配置 (叠了 secrets) —— 比对「改了会不会动到宪章」时换进去渲染一遍。 */
+  next: Config;
 }
 
 // 字符串之外的类型收到字符串时先试 JSON.parse —— MCP 那头模型常把 `true` / `5` / `["a"]` 写成字符串。
@@ -199,6 +201,7 @@ export const planSet = (cfg: Config, sourcePath: string, req: SetReq): Plan | Er
     ok: true, path: p, jsonPath, value, gate, apply: r.apply, before, after,
     changed: next !== text,
     diff: lineDiff(text, next),
+    next: parsed.data,
   };
 };
 

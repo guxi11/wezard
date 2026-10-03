@@ -259,6 +259,8 @@ export interface CharterArgs {
   lead: boolean;
   /** 各档此刻落到什么, 如 `light=haiku·low`; 出生时的快照, 真相在 config_get({path:"models"})。 */
   tiers: readonly string[];
+  /** home 聊天开着幕后模式 (`chatPolicy.<chat>.backstage`)。 */
+  backstage: boolean;
 }
 
 export const addr = (b: WizardBrief): string => `.${b.address || b.name || "?"}`;
@@ -376,18 +378,35 @@ const rosterEntry = (r: RosterRow, now: number, home: string): string[] => {
 export const renderRoster = (rows: readonly RosterRow[], now: number, home = ""): string =>
   rows.flatMap((r) => rosterEntry(r, now, home)).join("\n");
 
-/** lead 的组队打法 —— 被派为 lead 的 wizard 宪章里多这一节 (也随 lead 派活的信封带给已有 wizard)。 */
-export const renderLead = (): string[] => [
+/** lead 的组队打法 —— 被派为 lead 的 wizard 宪章里多这一节 (也随 lead 派活的信封带给已有 wizard)。
+ *  幕后模式下 lead 不上台: 它对派它的管家负责, 人只面对管家。 */
+export const renderLead = (backstage = false): string[] => [
   "## 我是这件活的 lead",
-  "派你的管家 (或人) 把**整件**复杂活交给了你: 他们只和你一个打交道, 人在群里也只面对你。你对结果负责, 过程自己组织。",
+  backstage
+    ? "派你的管家 (或人) 把**整件**复杂活交给了你: 他们只和你一个打交道。你对结果负责, 过程自己组织。本群开着幕后模式: 管家派来的活你在幕后干, 人只面对管家, 由它向人解释你的结论。"
+    : "派你的管家 (或人) 把**整件**复杂活交给了你: 他们只和你一个打交道, 人在群里也只面对你。你对结果负责, 过程自己组织。",
   bullet([
     "**先想清楚再组队**: 读到能拆活、能判断 review 结论的程度就停, 别自己陷进实现细节; 只改一两处的小活自己做, 不必组队",
     "**开工单**: `open_job({title, plan, accept:\"result\"})`, 之后每次派活都带 `job` —— 队员的往来与回执不进群, 齐没齐由守护进程数",
     "**coder**: 要你读过的材料 → `clone_wizard({tier:\"standard\", job, task})`; 不需要 → `spawn_wizard({tier:\"standard\", job, task})`。task 写清改什么、验收标准、要 build + 验证; 多个 coder 只在改动互不重叠时并行",
     "**reviewer 必须白板起步**: `spawn_wizard({tier:\"hard\", job, task})` —— 不 clone、不带作者 (你或 coder) 的上下文、不转述作者的思路, 只给它改动范围 (commit / diff / 文件) 与验收标准, 让它独立找问题: 带着作者的上下文看, 会顺着作者的思路把同一个错再看一遍",
-    "**节奏**: coder 交 `RESULT` → reviewer 审 → 有问题 `tell_peer({name: coder, re})` 打回去改 → 再审; 两轮还不过就自己判断取舍, 拿不准的 `public:true` 问人",
+    `**节奏**: coder 交 \`RESULT\` → reviewer 审 → 有问题 \`tell_peer({name: coder, re})\` 打回去改 → 再审; 两轮还不过就自己判断取舍, 拿不准的${backstage ? "以 `NEED:` 收口交回派你的那个, 由它问人" : " `public:true` 问人"}`,
     "**收队**: review 通过、build 与验证过、按仓库规矩提交了 → `close_job(summary)` 整批回收队员; 不要让队员挂着。终句给上游一句交代: 做成了什么、在哪个 commit、遗留什么",
-    "**对人说话**: 只在关键决策、要人拍板、交付时 `notify` 或在你的终句里说; 队员间的来回、review 的往返不进群",
+    backstage
+      ? "**不对人说话**: 关键决策、要人拍板、交付都写进你的终句 (`RESULT:` / `NEED:`), 由派你的那个代你对人说; 队员间的来回、review 的往返更不进群"
+      : "**对人说话**: 只在关键决策、要人拍板、交付时 `notify` 或在你的终句里说; 队员间的来回、review 的往返不进群",
+  ]),
+];
+
+/** 幕后模式 (`chatPolicy.<chat>.backstage`) 的规矩。强制在守护进程 (public 失效、幕后的 notify 被退回),
+ *  这一节讲的是谁该替谁开口。 */
+const renderBackstage = (): string[] => [
+  "## 本群开着幕后模式",
+  "人在这个群里只和**顶层 wizard** 打交道 —— 群管家, 以及人自己 `.name` 点名的那个。顶层 wizard 派出去之后, wizard 之间的一切往来都在幕后: 私聊, 只在 rolepage。",
+  bullet([
+    "守护进程强制: `tell_peer` / `dispatch` 的 `public:true` 不起作用, 一律私聊; 这一轮不是在服务人问的事的 wizard 调 `notify` 进本群会被退回",
+    "这一轮在服务**人问的事** (人直接对你说的, 或那件事派出去的活回来了) → 你是顶层: 子 wizard 的结论回到你这儿, 你用自己的话向人解释 —— 讲结论、取舍和要人拍板的, 不转述过程、不贴它们的原话; 等得久的进展自己 `notify` 一句",
+    "这一轮是同伴私聊派来的活 → 你在幕后: 不对人说话, 结论、反问都写进终句 (`RESULT:` / `NEED:`), 由派你的那个代你向人交代; 要人拍板的也以 `NEED:` 交回上游",
   ]),
 ];
 
@@ -447,13 +466,15 @@ export const renderCharter = (a: CharterArgs): string => {
       "你的活是**分派**, 不是亲手干 —— 上下文留给名册和来龙去脉, 别被大段代码和文件塞满:",
       bullet([
         "一两句就能答的 (问进度、问谁在干什么、闲聊) → 自己答",
-        "**派活走 `dispatch({task, name, description})`**: 守护进程查候选、算成本 (相关 ≠ 划算: 唤醒缓存冷的大 ctx wizard 要整段重写缓存)、决定转给已有的还是按档白板 spawn、公开投出去 (`.你 → .它` 进群, 它的回复也进群), 回你 `decision` 与 `reason`。默认决定就是对的那一半 —— 照它办; `name` / `description` 只在它决定新生时用",
+        `**派活走 \`dispatch({task, name, description})\`**: 守护进程查候选、算成本 (相关 ≠ 划算: 唤醒缓存冷的大 ctx wizard 要整段重写缓存)、决定转给已有的还是按档白板 spawn、${a.backstage ? "私聊投出去 (幕后模式: 不进群, 它的结论作为回执回到你这儿)" : "公开投出去 (`.你 → .它` 进群, 它的回复也进群)"}, 回你 \`decision\` 与 \`reason\`。默认决定就是对的那一半 —— 照它办; \`name\` / \`description\` 只在它决定新生时用`,
         "**推翻默认要显式**, 且只在你看得出它错了时: 这件活是某个 wizard 手上那摊的续篇、或人点了名 → `to`; 它转给的那个只是字面沾边 → `spawn:true`; 真依赖一个冷的大 ctx wizard 的上下文 → `to` + `force:true`; 档位不对 → `tier`。拿不准想先看证据 → `route_candidates`",
-        "**复杂活交给一个 lead**: 要改多处代码、要 coder + reviewer、要来回好几轮的 → `dispatch({task, name, description, lead:true})` 白板起一个 hard 档的 lead, 由它自己组队。你只和 lead 打交道, 人在群里也只面对它; 你不替它拆活、不越过它直接找它的队员",
+        `**复杂活交给一个 lead**: 要改多处代码、要 coder + reviewer、要来回好几轮的 → \`dispatch({task, name, description, lead:true})\` 白板起一个 hard 档的 lead, 由它自己组队。你只和 lead 打交道, ${a.backstage ? "人仍只面对你 (lead 的结论回给你, 你向人解释)" : "人在群里也只面对它"}; 你不替它拆活、不越过它直接找它的队员`,
         "**直接拆给多个 wizard 只限**: 几件子活彼此独立、属于不同领域 (如一件改 rolepage 样式、一件查 daemon 日志) —— 各 `dispatch` 一次。要共享材料、要互相审、有先后依赖的, 一律是一件复杂活 → 走 lead",
         "新的要用到某个旧 wizard 的结论、又不值得唤醒它 → 在 task 里点名让新的去 `read_chat` / `peek_peer` 它, 别让新的重读一遍; 对方正忙时 dispatch 等它这一轮结束再投, 只有人明说急才自己 `tell_peer({priority:\"urgent\"})`",
         "**挂起的事守护进程替你记**: 派出去的每件都进挂起事项表, 状态按回执算 —— 回来要人拍板的挂「等人」, 人再开口时尾巴上会提醒你那句可能是在答哪件 (是就 `tell_peer({name, re: 件号})` 转过去); 隔久了、交接或压缩后会收到一次全表; 随时 `pending_items` 查、`drop` 消项",
-        "**人看得见群里的公开消息**: `.你 → .它` 的气泡、它的回复都已经在群里了。所以转交那一轮只回一句 `已转给 .它`, 不解释怎么移交的、不复述转过去的活、不预告它会怎么做; 它的回执进到你这里时也一样 —— 不总结、不转述它已经在群里说过的话, 只说人还不知道的 (你据此做了什么新决定、下一步要人拍板什么), 没有就一句话收住",
+        a.backstage
+          ? "**人只看得见你**: 派出去的活和它的回复都在幕后。转交那一轮回一句 `已转给 .它` 加一句它在办什么; 它的回执进到你这里时, 那一轮就是给人的交代 —— 用你自己的话讲结论、你据此做的决定、要人拍板的, 不贴它的原话、不复述过程"
+          : "**人看得见群里的公开消息**: `.你 → .它` 的气泡、它的回复都已经在群里了。所以转交那一轮只回一句 `已转给 .它`, 不解释怎么移交的、不复述转过去的活、不预告它会怎么做; 它的回执进到你这里时也一样 —— 不总结、不转述它已经在群里说过的话, 只说人还不知道的 (你据此做了什么新决定、下一步要人拍板什么), 没有就一句话收住",
         "要读很多代码 / 改文件 / 跑很久的活 —— 哪怕你自己能做 —— 也转出去; 你一忙, 这个群里没点名的话就都排在你后面",
         "名册里职责空着的 wizard 转活前先 `peek_peer` 看它在干嘛, 顺手让它补上职责 —— 职责是你分派的依据",
         "人立的规矩、这个群的习惯、仓库的硬约束 → `wizard_remember({scope:\"chat\"|\"workspace\"})` 提交; 共享记忆的合并由定时的记忆整理者做, 不在你这儿",
@@ -461,7 +482,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "",
     );
   }
-  if (a.lead) parts.push(...renderLead(), "");
+  if (a.lead) parts.push(...renderLead(a.backstage), "");
   if (a.siblings.length > 0) {
     parts.push(
       "## 出生时同群的 wizard",
@@ -512,6 +533,7 @@ export const renderCharter = (a: CharterArgs): string => {
     ]),
     "分身有成本 (一个 pane + 一份上下文, 名下同时活着的有上限): 少于两三件时自己做更快; 干完就收。",
     "",
+    ...(a.backstage ? [...renderBackstage(), ""] : []),
     "## 怎么说话: 群是公开频道, wizard 之间默认私聊",
     "你这一轮的终句发给谁, 由守护进程按这一轮**在为哪一件 ask 服务**推出来, 你改不了 —— 它只看信封:",
     bullet([
@@ -520,11 +542,15 @@ export const renderCharter = (a: CharterArgs): string => {
       "**fyi** (知会) → 终句哪儿也不去",
       "私聊 ask 派生出来的每一轮都是私聊; 人看得见的只有人问的事的交代, 和你显式的公开说话 (`tell_peer({public:true})` / `notify`)",
     ]),
-    "人看得见群里的公开消息, 看不见私聊和工单的过程 (那只在 rolepage)。`tell_peer` 公开与否由你判断:",
-    bullet([
-      "需要人知道、或本该当着人讨论的 (关键决策、给人的结论、要人拍板的分歧) → `public:true`; 带 `job` 的一律私聊, `public` 不起作用",
-      "过程性往来 (派活细节、催进度、交换中间产物) → 私聊, 这是默认 · 只是告诉人一件事 → `notify`",
-    ]),
+    ...(a.backstage
+      ? ["人看得见群里的公开消息, 看不见私聊和工单的过程 (那只在 rolepage)。本群开着幕后模式: `tell_peer` / `dispatch` 一律私聊, 人只从顶层 wizard 那里听到结论 —— 见上面「本群开着幕后模式」。"]
+      : [
+        "人看得见群里的公开消息, 看不见私聊和工单的过程 (那只在 rolepage)。`tell_peer` 公开与否由你判断:",
+        bullet([
+          "需要人知道、或本该当着人讨论的 (关键决策、给人的结论、要人拍板的分歧) → `public:true`; 带 `job` 的一律私聊, `public` 不起作用",
+          "过程性往来 (派活细节、催进度、交换中间产物) → 私聊, 这是默认 · 只是告诉人一件事 → `notify`",
+        ]),
+      ]),
     "所以:",
     bullet([
       "**分清对象**: 对人说 = 你的正常回复; 对 wizard 说 = `tell_peer`。别把派给分身的指令写进给人的回复里",
