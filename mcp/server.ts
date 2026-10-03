@@ -6,6 +6,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { DAEMON_TOKEN_HEADER, readDaemonToken } from "../shared/daemon-token.js";
 import { EFFORTS } from "../shared/effort.js";
+import { TIERS } from "../shared/config.js";
 
 const DAEMON_BASE = process.env.WEZARD_DAEMON_BASE ?? "http://127.0.0.1:17890";
 
@@ -793,7 +794,7 @@ server.registerTool(
       task: z.string().describe("这件活, 原样转给对方的文本 —— 带上提到的文件名 / 模块名, 文件命中是转给已有 wizard 的最强证据。"),
       name: z.string().describe("若决定新 spawn, 它的名字: 这件事的短名 (全机唯一)。转给已有的时不用。"),
       description: z.string().describe("若决定新 spawn, 它往后的职责, 一句话。"),
-      tier: z.enum(["light", "standard", "hard"]).optional().describe("spawn 时的档位, 推翻默认 (lead→hard、小活→light、其余 standard)。"),
+      tier: z.enum(TIERS).optional().describe("spawn 时的档位 (由轻到重 mini / light / standard / hard / ultra), 推翻默认 (lead→hard、小活→light、其余 standard; mini / ultra 只能显式给)。"),
       to: z.string().optional().describe("推翻默认: 直接转给这个已有 wizard (名字)。"),
       spawn: z.boolean().optional().describe("推翻默认: 不看候选, 一定白板 spawn。"),
       force: z.boolean().optional().describe("越过冷门控: 缓存冷且 ctx ≥100k 的候选默认不转; 确认这件活真依赖它那段上下文才给 true。"),
@@ -838,7 +839,7 @@ const offspringShape = {
   task: z.string().optional().describe("就位后立刻派下去的第一件活 (私聊)。省略则它就位待命。"),
   chat: z.string().optional().describe("把它生在另一个聊天里 (wizard_roster 里的 home 聊天名)。省略 = 你自己的聊天, 这是绝大多数情况。"),
   cli: z.enum(["claude", "claude-internal", "codebuddy"]).optional().describe("用哪个 CLI。省略则继承。"),
-  tier: z.enum(["light", "standard", "hard"]).optional().describe("按难度选档, 落到配置 `models.tiers` 里那一档的 {cli, model, effort}: light = 跑腿 (查找、搬运、跑命令), standard = 常规实现, hard = 要判断 (设计、排障、审查)。同时给了 model / effort / cli 的, 以显式值为准; 克隆换不了 CLI。返回里的 `via` 说明每项来自显式、档位还是继承。当前各档是什么见宪章, 或 config_get({path:'models'})。"),
+  tier: z.enum(TIERS).optional().describe("按难度选档 (由轻到重), 落到配置 `models.tiers` 里那一档的 {cli, model, effort}: mini = 机械一步 (照单执行、不用判断), light = 跑腿 (查找、搬运、跑命令), standard = 常规实现, hard = 要判断 (设计、排障、审查), ultra = 最难 (架构取舍、疑难排障、关键评审)。同时给了 model / effort / cli 的, 以显式值为准; 克隆换不了 CLI。返回里的 `via` 说明每项来自显式、档位还是继承。当前各档是什么见宪章, 或 config_get({path:'models'})。"),
   model: z.string().optional().describe(MODEL_DOC),
   effort: z.enum(EFFORTS).optional().describe(EFFORT_DOC),
   job: z

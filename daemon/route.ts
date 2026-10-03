@@ -14,6 +14,7 @@
 //
 // 全是纯函数: 候选的原料 (文件集 / 最近的话 / ctx) 由调用方从 transcript 读好送进来。
 import { addr, agoOf, ctxOf, type WizardBrief } from "./wizard.js";
+import type { TierName } from "../shared/config.js";
 
 export interface RouteRow extends WizardBrief {
   busy: boolean;
@@ -277,6 +278,6 @@ export const decide = (task: string, cands: readonly Evidence[], now: number, tt
   };
 };
 
-/** spawn 时的默认档: lead 要判断 → hard; 一句话的小活 → light; 其余 standard。 */
-export const tierFor = (task: string, lead: boolean): "hard" | "light" | "standard" =>
+/** spawn 时的默认档: lead 要判断 → hard; 一句话的小活 → light; 其余 standard。两头的 mini / ultra 只由调用方显式给。 */
+export const tierFor = (task: string, lead: boolean): TierName =>
   lead ? "hard" : isSmallTask(task) ? "light" : "standard";

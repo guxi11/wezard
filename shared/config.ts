@@ -303,20 +303,22 @@ const Svr = z.object({
 });
 
 // 按难度分档: spawn_wizard / clone_wizard 的 `tier` 落到这里的 {cli, model, effort};
-// 显式给的 model / effort / cli 压过档位。档名固定三个 —— MCP 参数是 enum, 宪章逐档列。
+// 显式给的 model / effort / cli 压过档位。档名固定、按由轻到重排 —— MCP 参数是 enum, 宪章逐档列。
 const Tier = z.object({
   cli: z.enum(CLI_NAMES).optional().describe("用哪个 CLI; 省略 = 继承调用方 (clone 一律继承父会话)"),
   model: z.string().default("").describe("口语化模型名 ('haiku' / 'sonnet 5' / 'opus'), 只写家族 = 该家族最新; 空 = CLI 默认"),
   effort: z.enum(EFFORTS).optional().describe("推理档位; 省略 = CLI 默认"),
 });
-export const TIERS = ["light", "standard", "hard"] as const;
+export const TIERS = ["mini", "light", "standard", "hard", "ultra"] as const;
 export type TierName = (typeof TIERS)[number];
 const Models = z.object({
   tiers: z.object({
+    mini: Tier.default({ model: "haiku", effort: "low" }).describe("机械一步: 照单执行、不用判断"),
     light: Tier.default({ model: "haiku", effort: "low" }).describe("跑腿: 查找、搬运、跑命令"),
     standard: Tier.default({ model: "sonnet", effort: "medium" }).describe("常规实现"),
     hard: Tier.default({ model: "opus", effort: "high" }).describe("要判断: 设计、排障、审查"),
-  }).default({}).describe("spawn_wizard / clone_wizard 的 tier 档位"),
+    ultra: Tier.default({ model: "opus", effort: "max" }).describe("最难: 架构取舍、疑难排障、关键评审"),
+  }).default({}).describe("spawn_wizard / clone_wizard / dispatch 的 tier 档位, 由轻到重"),
   // 只在新起一个群的默认会话时落地; 已在跑的管家不自动切 (换模型会让缓存整份重读)。
   router: z.object({
     model: z.string().default("sonnet").describe("口语化模型名; 空 = CLI 默认"),

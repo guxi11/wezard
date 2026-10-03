@@ -235,6 +235,13 @@ export interface WizardBrief {
   cwd: string;
 }
 
+// 档位行: 各档由轻到重排开, 常用的三档挂一个词说用途; 两头的 mini / ultra 靠位置自明。
+const TIER_HINT: Record<string, string> = { light: "跑腿", standard: "常规", hard: "要判断" };
+const tierLine = (tiers: readonly string[]): string =>
+  tiers.length
+    ? `按难度给 \`tier\`, 轻→重: ${tiers.map((t) => [t, TIER_HINT[t.split("=")[0]!]].filter(Boolean).join(" ")).join(" / ")}`
+    : "按难度给 `tier`";
+
 export interface CharterArgs {
   self: WizardBrief;
   /** home 聊天的人类可读名; "" = 这个聊天还没起名。 */
@@ -500,7 +507,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "`peek_peer` 某个 wizard 在干嘛、卡在哪 · `read_chat` 群里 / 私聊里谁对谁说了什么",
       "`tell_peer` 驱动另一个 wizard (派活、答它、叫它继续), 它的结论自动回执给你 · 插话 / 答它的问 → `priority:\"now\"`, 真紧急 → `\"urgent\"`; 只问一句 → `kind:\"ask\"`, 只知会 → `\"fyi\"`",
       `\`notify\` 只是告诉**人**一件事, 不驱动谁${a.topOnly ? " (顶层模式: 只有顶层 wizard 能 notify 进本群)" : ""}`,
-      `\`clone_wizard\` 分身要共享我 (或 \`from\` 某个同伴) 已读的材料 · \`spawn_wizard\` 白板起步或要去别的目录 (\`detached\` = 独立长住、不归你管) —— 按难度给 \`tier\`: 要判断的 \`hard\`、跑腿的 \`light\`、常规实现 \`standard\`${a.tiers.length ? ` (当前 ${a.tiers.join(" / ")})` : ""}`,
+      `\`clone_wizard\` 分身要共享我 (或 \`from\` 某个同伴) 已读的材料 · \`spawn_wizard\` 白板起步或要去别的目录 (\`detached\` = 独立长住、不归你管) —— ${tierLine(a.tiers)}`,
       "`stop_wizard` 活干完就收掉分身; 只想打断它这一轮也是它",
       "`open_job` / `close_job` 一次派两个以上分身时开 / 收工单 · `list_jobs` 找回工单 id · `pending_items` 我派出去还没了结的事 (`drop` 消项)",
       "`wizard_whoami` 我的上下文用量与分身 · `wizard_identity` 改名 / 写职责 · `wizard_remember` 跨会话记忆 (`self` / `chat` / `workspace`)",
