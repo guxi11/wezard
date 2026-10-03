@@ -227,7 +227,10 @@ button { font: inherit; color: inherit }
 /* 头像与名字是进入那个 role 视角的入口 —— 侧栏项、会话头、消息行同一种读法。
    它们嵌在整行那颗按钮里; 行本身悬停不变底色, 只有入口自己亮起。z-index 保证没有兄弟盖住命中区。 */
 .nm.go, .av.go { position: relative; z-index: 1; cursor: pointer }
-.nm.go:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 2px }
+.nm.go:hover { text-decoration: underline; text-underline-offset: 2px }
+/* 名字旁的 ⇄: 只在能切的名字悬停时露出 —— inline-block 同样不吃下划线 */
+.nm .sw { display: none; margin-left: 4px; font-style: normal; font-weight: 400; font-size: 12px; color: var(--faint) }
+.nm.go:hover .sw { display: inline-block }
 /* 名字旁「+N」: 视角外它还在和几个 role 说话 —— inline-block 不吃名字 hover 的下划线 */
 .nm .oc { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 8px; line-height: 15px; font-size: 10.5px; font-weight: 600;
   color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); vertical-align: 1px }

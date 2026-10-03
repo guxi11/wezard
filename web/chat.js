@@ -545,9 +545,11 @@
   // 同层按最近活动排, 有新话就上浮。
   var recentFirst = function (a, b) { return b.lastTs - a.lastTs; };
   // 一个 role 的一行: 头像 · 名字 (+tail) + 忙闲灯 · 时刻 / 最近一句 + 未读。
+  // 名字悬停时紧跟一枚 ⇄ —— 同名片上名字悬停露出 ⧉: 点名字做的事, 先亮给人看。
+  var SWAP = '<i class="sw" aria-hidden="true">⇄</i>';
   var roleRow = function (id, name, label, g, status, tail, badge) {
     return goSpan('av', id, esc(label)) +
-      line(nm(id, name, true, badge) + (tail || ''), g.lastTs, g.preview, stTag(status, true), g.unread);
+      line(nm(id, name, true, SWAP + (badge || '')) + (tail || ''), g.lastTs, g.preview, stTag(status, true), g.unread);
   };
   // 名字旁的「+N」: 视图外还有 N 个 —— 同一个徽标, 数什么由所在的视图注入 (会话列表数会话, 关系图数关系)。
   var moreTag = function (n, tip) {
