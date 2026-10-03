@@ -3,9 +3,9 @@
 // rolepage 时间轴的折叠、关系图卡片的「最近一句」都得对「哪句算 ping」口径一致。
 //
 // 两种认法:
-//   · 按配置认 (isKeepalivePingText + 签名) —— daemon 手里有配置, 能认出 resumePing
+//   · 按配置认 (isKeepalivePingText + 签名) —— daemon 手里有配置
 //   · 按形态认 (isKeepaliveShape) —— svr 没有配置, 历史记录里的 ping 也可能来自改过
-//     的旧配置; 只收 `keepalive …` 与裸 `ping`, resumePing ("continue") 是真的在推进工作
+//     的旧配置; 只收 `keepalive …` 与裸 `ping`
 
 const normPing = (s: string): string => s.replace(/\s+/gu, "");
 
@@ -19,9 +19,9 @@ export const keepalivePingSigs = (...pings: string[]): string[] =>
 
 /** Is this user-turn text a keepalive ping? Matches every configured form plus
  *  the bare "ping" legacy streak form still present in older transcripts.
- *  Anchored, never a substring: `resumePing` is a plain "continue", and a peer's
- *  "continue（接着干原任务）" or a human's "continue" is real work — read as a ping it
- *  gets swallowed whole (no reply to the chat, no `from` on the rolepage). */
+ *  Anchored, never a substring: a ping configured as a short word would otherwise
+ *  swallow every real line that merely contains it (no reply to the chat, no `from`
+ *  on the rolepage). */
 export const isKeepalivePingText = (text: string, sigs: readonly string[]): boolean => {
   const n = normPing(text);
   return n.toLowerCase() === "ping" ||

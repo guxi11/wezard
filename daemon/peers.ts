@@ -149,8 +149,7 @@ export const lastUserTurn = (jsonlPath: string): Turn | undefined =>
 
 /** `tailTurns` 去掉保温 ping/pong 之后的最后 `n` 轮 —— 凡是交给另一个 wizard (或人)
  *  **读**的都走这里: 挂机一晚的会话尾巴上全是 ping/pong, 照 tailTurns 数出来的
- *  「最近 6 轮」一句真话都没有, 「最后一条回复」是一个 pong。`pingSigs` 只给保温
- *  那一种 —— resumePing ("continue") 之后模型是真的在干活, 那一轮不能丢。 */
+ *  「最近 6 轮」一句真话都没有, 「最后一条回复」是一个 pong。 */
 export const talkTurns = (jsonlPath: string, n: number, pingSigs: readonly string[] = [], keepLines = false, marks = false): Turn[] => {
   const clean = (ts: Turn[]): Turn[] => withoutKeepalive(ts, pingSigs);
   return clean(readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, keepLines, marks), (ts) => clean(ts).length >= n)).slice(-n);
@@ -471,7 +470,7 @@ export const lastReply = (jsonlPath: string, sinceMs = 0, pingSigs: readonly str
     .filter((t) => t.role === "assistant" && (!t.ms || t.ms >= sinceMs))
     .at(-1)?.text ?? "";
 
-/** 报错之后叫它接着干的那一句 (keepalive 的 resumePing 默认就是 `continue`)。 */
+/** 报错之后叫它接着干的那一句 (`continue` / `继续` …)。 */
 const RESUME_RE = /^(?:continue|go on|resume|继续|接着(?:干|做)?)[\s.!。！]*$/i;
 
 /** paste 到那一行落盘之间的抖动 —— 问话的时间戳可能比我们记的发话时刻早一点。 */
@@ -916,59 +915,6 @@ export const paneIsBusy = (paneText: string): boolean =>
     .filter(Boolean)
     .slice(-FOOTER_ROWS)
     .some((l) => BUSY_MARKERS.some((re) => re.test(l)));
-
-// ── Stall: a turn that died mid-work ─────────────────────────────────
-// Judged from the transcript's STRUCTURE alone — never from screen text, never
-// from what the words say. A pane scan (and a keyword match on reply prose)
-// can't tell a banner from a model merely *talking about* "API Error", and every
-// false positive hands a healthy session a stray "continue". Exactly two shapes
-// count, both "the turn is unfinished" by construction:
-//   1. the newest message row is the CLI's own synthetic error reply
-//      (`isApiErrorMessage`) — and the turn it killed was real work: one opened
-//      by a keepalive ping (or a previous "continue") is not work to resume, and
-//      an auth failure is not something "continue" can fix;
-//   2. the newest message row is a tool result and nothing followed — the tool
-//      finished, the model's next request never produced a line.
-// A pending tool_use (tool running / parked on an approval card), a real
-// assistant reply, a human interrupt, a local command — all read as not stalled.
-// "Quiet for a while" is part of the definition: the newest message row must be
-// at least `quietMs` old, so a turn still streaming its next block never counts.
-type StallRow = { role: "user" | "assistant"; ms: number; apiError: boolean; toolResult: boolean; text: string };
-
-const stallRows = (jsonlPath: string): StallRow[] => {
-  const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
-  return readTailBytes(jsonlPath, TAIL_BYTES)
-    .split("\n")
-    .flatMap((line): StallRow[] => {
-      if (!line.trim()) return [];
-      try {
-        const parsed = JSON.parse(line) as { timestamp?: unknown; isApiErrorMessage?: unknown };
-        const row = normalize(parsed);
-        const role = row?.message?.role;
-        if (!row || row.isMeta || row.isSidechain || (role !== "user" && role !== "assistant")) return [];
-        const content = row.message?.content;
-        const blocks = Array.isArray(content) ? (content as { type?: string }[]) : [];
-        const ms = typeof parsed.timestamp === "number" ? parsed.timestamp : Date.parse(String(parsed.timestamp ?? ""));
-        return [{
-          role, ms,
-          apiError: parsed.isApiErrorMessage === true,
-          toolResult: blocks.length > 0 && blocks.every((b) => b?.type === "tool_result"),
-          text: stripMeta(blockText(content)).trim(),
-        }];
-      } catch { return []; } // truncated first line of the tail window
-    });
-};
-
-export const transcriptStalled = (jsonlPath: string, pingSigs: readonly string[], quietMs: number, now = Date.now()): boolean => {
-  const rows = stallRows(jsonlPath);
-  const last = rows.at(-1);
-  if (!last || !last.ms || now - last.ms < quietMs) return false;
-  if (last.toolResult) return true;
-  if (!(last.role === "assistant" && last.apiError)) return false;
-  if (/\/login\b|log(ged)? ?in|auth/i.test(last.text)) return false;
-  const opener = [...rows].reverse().find((r) => r.role === "user" && !r.toolResult);
-  return !!opener && !isKeepalivePingText(opener.text, pingSigs);
-};
 
 // ── 提到别的 wizard ───────────────────────────────────────────────────
 // 入站路由只吃掉消息里**第一个** `#tag` —— 那个决定这条消息进谁的输入框。其余的

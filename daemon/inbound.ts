@@ -978,7 +978,7 @@ export const installInboundRouter = (
     }
     // 有效 tail: keepalive ping/pong 不算轮次,否则挂机后引用的真实气泡被挤出窗口。
     const kc = cfg.wrc.mirror.keepalive;
-    const tail = tailTurnsWithTools(jsonl, QUOTE_TAIL_TURNS, keepalivePingSigs(kc.ping, kc.resumePing));
+    const tail = tailTurnsWithTools(jsonl, QUOTE_TAIL_TURNS, keepalivePingSigs(kc.ping));
     const hit = canonContains(tail, quoted);
     log.info({ target, jsonl, tailLen: tail.length, quotedLen: quoted.length, hit }, "quoteInContext: tail check");
     return hit;

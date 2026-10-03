@@ -135,19 +135,20 @@ const Mirror = z.object({
   // 229/230 requests 6–60min apart still hit in full), so idle gaps within the
   // hour need no warmer — and every ping is a real model turn in a live pane.
   // Turn it on where transcripts show 5min writes (`ephemeral_5m`, e.g. a bare API key).
-  // 保温 tick 每 15s 现读整节; 只有 ping / resumePing 另被启动时建成的识别表用着。
+  // 保温 tick 每 15s 现读整节; 只有 ping 另被启动时建成的识别表用着。
+  // A cache idle past 10min is never warmed (1h entries need no warmer) — so in
+  // practice only 5min entries are.
   keepalive: hot(z
     .object({
-      // The same tick hosts stall recovery (resumeOnStall): off stops that too.
-      enabled: z.boolean().default(false).describe("prompt-cache 保温总开关 (连带卡死续跑); 订阅下缓存本是 1h, 默认关"),
+      enabled: z.boolean().default(false).describe("prompt-cache 保温总开关; 订阅下缓存本是 1h, 默认关"),
       // The warm-ping cadence follows the TTL each session's cache was actually
       // written with (`cache_creation.ephemeral_1h/5m` in its transcript — 1h on a
       // Claude Code subscription); this only applies when no such split is on record.
-      ttlSec: z.number().int().positive().default(300).describe("缓存 TTL 兜底值 (s), 以及卡死恢复的静默窗口"),
+      ttlSec: z.number().int().positive().default(300).describe("缓存 TTL 兜底值 (s)"),
       // The ping needs slack to land and settle. Effective idle trigger = ttlSec - marginSec.
       marginSec: z.number().int().nonnegative().default(45).describe("提前 TTL 到期多少秒打 ping"),
       // Real activity resets the count, so bridging restarts from each genuine
-      // turn: 6 pings = ~6h on a 1h cache (~26min on 5min). Each ping is a
+      // turn: 6 pings = ~26min on a 5min cache. Each ping is a
       // near-free cache-read (0.1x); a single cold-rewrite of a large context
       // costs 1.25x (5min) / 2x (1h) of its full size, so a handful of pings beats
       // letting it expire while the user is still around.
@@ -156,14 +157,6 @@ const Mirror = z.object({
       // the pane sees why it's there. The reply is swallowed — never mirrored to
       // chat, the detail store, or usage accounting.
       ping: knob(z.string().default('keepalive — reply with just "pong", take no other action').describe("保温 ping 的文本"), { apply: "reload" }),
-      // Gated PURELY by rule — never by the model's own judgment, and read from the
-      // transcript's structure only (never the screen): the turn is still unfinished
-      // — it died on the CLI's synthetic API-error reply, or a tool result was never
-      // answered — and has been quiet for the whole idle window. Any non-"pong"
-      // reply to a ping is treated as a real turn (un-swallowed to chat, clocks
-      // re-anchored) — so a resumed session shows.
-      resumeOnStall: z.boolean().default(true).describe("轮次卡死时, 保温改发 resumePing 把它续上"),
-      resumePing: knob(z.string().default("continue").describe("卡死恢复时发的文本"), { apply: "reload" }),
       // A spawn that passes the param explicitly always wins. false → useful when
       // most spawns are short-lived task runners and only a few should be kept warm,
       // at which point those few pass `keepalive:true` explicitly.
