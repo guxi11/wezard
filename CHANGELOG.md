@@ -4,7 +4,12 @@
 
 ## [Unreleased]
 
+### Added
+- 按任务难度分档的模型: 配置新增 `models.tiers` (`light` = haiku·low / `standard` = sonnet·medium / `hard` = opus·high, 每档 `{cli?, model, effort?}`) 与 `models.router` (各群管家 = 群的默认会话新起时用的模型, 默认 sonnet·low)。`spawn_wizard` / `clone_wizard` 新增 `tier`, 显式给的 model / effort / cli 压过档位; 克隆换不了 CLI, 档里的 `cli` 被忽略并在返回里注明; 返回带 `tier` 与每项来源 `via` (explicit / tier / inherit), 档位记进 wizards.json。router 只在守护进程新起一个群的默认会话时生效 (首条消息、`/new`), 死 pane 重生沿用绑定里的模型, 已在跑的管家不动。宪章里「要判断的给 opus、跑腿的给 haiku」改成按档选, 并列出当前各档。
+- `config_get({path?})`: 由 `ConfigSchema` 驱动的渐进式披露 —— 不给 path 列各节一行说明, 给了就列这一层子项的类型、当前值、默认值、说明, 标出 ✋ (改动要人确认)、↻ (需 reload) 与 * (不同于默认)。说明取自字段的 `.describe()`, gate / apply 由 `shared/config-meta.ts` 的 `knob` 标在 schema 上并沿树继承, 热生效逐项核实过。`models` 下附各档模型的本周 / 今日用量 (按模型统计) 与名册里记作该档的 wizard 数。
+
 ### Changed
+- `config_set` 改为 `{path, value, op: set|add|remove|unset, dryRun}`, 不再是 11 个 key 的枚举: 整份配置 (叠 secrets) 过 zod 才写, 经 `config-writer` 落盘保留注释, `dryRun` 回改前改后与 jsonc 行级 diff; 热生效项写完即装进活的 cfg。分级: `bot.*`、口令、secrets.json 里出现的路径不可读写; 放权项 (`wrc.allowFrom`、`approval.*`、`claudeBin` / `cliBackends` / `extraArgs`、`sync`、监听与外送地址、`defaultChat`) 由**守护进程自己**推确认卡, 人点了才落盘 —— 不经 hook, `danger.skipAll` 也压不过; 卡在请求里等 4 分钟, 之后回 pending, 迟到的确认照常落盘并捎给调用方。hook 与 `selfConfigWriteOf` 不再拦 `config_set` (否则一次改动两张卡)。老 MCP 进程的 `{key, value, action}` 映射到对应 path, 走同一条路。
 - `tell_peer` 冷门控: 派新活 (`kind:"task"`、不带 `re`、`priority` 不是 `now`) 给缓存已冷 (超过 TTL 没动) 且 ctx ≥100k 的 wizard 时先不投递, 409 退回一行「.x 冷 · ctx Nk · 唤醒约等于白板 spawn 的 M 倍; 真依赖它的上下文就带 `force:true` 重发, 否则白板 spawn」(`gated:"cold"`)。冷热与倍数与 `route_candidates` 同一口径 (`wakeCostOf`)。MCP 新增 `force` 且一律显式带上; 请求里没有这个键的老 MCP 进程, 同一对 10 分钟内原样再发一次即视为 force。宪章里「点名 / 职责对口就直接判断」的捷径改为: 那只说明相关, 成本仍看 ctx 与冷热。
 - handoff 时机提前: 交接不是压缩, 判断线从窗口七成改为 `min(200k, 七成)` (`handoffAt`, `wizard_whoami` 的 `handoffSuggested` 随之), 宪章「自我管理」改写为过 200k 就判断 —— 手上这摊告一段落、或往后的活不再依赖前面的材料, 就交接。越线后下一条注入的消息捎一次提醒 (复用 notices 的 probe, 每段会话一次)。
 

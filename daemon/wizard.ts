@@ -253,6 +253,8 @@ export interface CharterArgs {
   workspaceMemory: string;
   /** 聊天的默认会话 = 这个群的管家: 没点名的话都落到它这儿, 由它分派。 */
   steward: boolean;
+  /** 各档此刻落到什么, 如 `light=haiku·low`; 出生时的快照, 真相在 config_get({path:"models"})。 */
+  tiers: readonly string[];
 }
 
 export const addr = (b: WizardBrief): string => `.${b.address || b.name || "?"}`;
@@ -460,12 +462,13 @@ export const renderCharter = (a: CharterArgs): string => {
       "`peek_peer` 某个 wizard 在干嘛、卡在哪 · `read_chat` 群里 / 私聊里谁对谁说了什么",
       "`tell_peer` 驱动另一个 wizard (派活、答它、叫它继续) —— 默认私聊, 它的结论会自动回执给你; 对方正忙时默认等它闲下来再投 (派新活就该这样), 插话 / 答它的问 / 补一句 → `priority:\"now\"`, 真紧急要它丢下手上这一轮 → `priority:\"urgent\"`; 只问一句 → `kind:\"ask\"`, 只是知会、不要回话 → `kind:\"fyi\"`",
       "`notify` 只是告诉**人**一件事, 不驱动谁",
-      "`clone_wizard` 分身要共享我 (或 `from` 某个同伴) 已读的材料 · `spawn_wizard` 白板起步或要去别的目录 (`detached` = 独立长住、不归你管) —— 要判断的给 opus, 跑腿的给 haiku",
+      `\`clone_wizard\` 分身要共享我 (或 \`from\` 某个同伴) 已读的材料 · \`spawn_wizard\` 白板起步或要去别的目录 (\`detached\` = 独立长住、不归你管) —— 按难度给 \`tier\`: 要判断的 \`hard\`、跑腿的 \`light\`、常规实现 \`standard\`${a.tiers.length ? ` (当前 ${a.tiers.join(" / ")})` : ""}`,
       "`stop_wizard` 活干完就收掉分身; 只想打断它这一轮也是它",
       "`open_job` / `close_job` 一次派两个以上分身时开 / 收工单 · `list_jobs` 找回工单 id",
       "`wizard_whoami` 我的上下文用量与分身 · `wizard_identity` 改名 / 写职责 · `wizard_remember` 跨会话记忆 (`self` / `chat` / `workspace`)",
       "`handoff` ctx 过 200k 且手上这摊告一段落时交接自己 (点名则替别人) · `set_workspace` 换项目目录 · `set_model` 换模型 / effort",
       "`schedule_task` / `list_tasks` / `cancel_task` 到点自动执行的活",
+      "`config_get` 逐层看 wezard 配置 (说明、默认、谁能改、何时生效) · `config_set` 改它 (先 `dryRun` 看 diff; 放权项会推卡等人点)",
       "`wait_peer` 仅当这一轮非拿到答案不可 (平时等回执), 或要等一个不是你派活的 wizard 停下 · `name_chat` 给聊天起名",
     ]),
     "",

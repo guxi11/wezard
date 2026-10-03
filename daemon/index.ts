@@ -5,7 +5,7 @@ import { timingSafeEqual } from "node:crypto";
 import { loadOrCreateSvrToken } from "../shared/svr-token.js";
 import { DAEMON_TOKEN_FILE, DAEMON_TOKEN_HEADER } from "../shared/daemon-token.js";
 import { homedir } from "node:os";
-import { loadConfig } from "../shared/config.js";
+import { TIERS, loadConfig } from "../shared/config.js";
 import { makeLogger } from "../shared/log.js";
 import { clipLine, sleep } from "../shared/std.js";
 import { patchJsonc } from "../shared/config-writer.js";
@@ -1568,6 +1568,7 @@ const main = async (): Promise<void> => {
           .sort((x, y) => y[1] - x[1])
           .map(([t]) => briefOf(target, t)),
         memory: wizards.get(target)?.memory ?? [],
+        tiers: TIERS.map((n) => { const s = cfg.models.tiers[n]; return `${n}=${s.model || "默认"}${s.effort ? `·${s.effort}` : ""}`; }),
         chatMemory: sharedMemory("chat", baseOfKey(target)),
         workspaceMemory: (() => {
           const cwd = o.cwd || m.getCwd(target).runningCwd || m.getCwd(target).defaultCwd;
