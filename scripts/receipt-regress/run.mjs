@@ -29,6 +29,11 @@ const MAX_KIDS = 7;
 // 不带后缀就互相撞名、甚至收掉对方的分身。用例里写的是逻辑名 (`rr-a`), 在边界上换成真名。
 const RUN = randomBytes(2).toString("hex");
 const real = (x) => `${x}-${RUN}`; // 根名下同时活着的分身 (cloneMax 默认 8, 留一个余量)
+// 伪群: 不在 allowFrom / chats 里的 chat id, 企微拒收。会把私下的话转进 home 群的用例 (quiet 任务
+// 有事时) 把分身生在这里, 转发照常走 notifyChat, 只是谁也收不到 —— 回归不打扰真实群里的人。
+// 固定不带后缀: daemon 会给无名聊天自动起名写进配置, 固定 id 只占一条。
+const SINK_ID = "wezard-receipt-regress-sink";
+const SINK = `chat:${SINK_ID}`;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nonce = () => randomBytes(3).toString("hex");
@@ -485,10 +490,11 @@ const cases = {
   } },
 
   // 定时任务 (B4 ⑤): 点名目标到点正忙 → 顺延到它闲下来再投; quiet 任务终句是 QUIET 就不进群,
-  // 不是就由守护进程转进群 (那一条会真出现在根的 home 聊天里, 带 [receipt-regress] 字样)。
+  // 不是就由守护进程转进「它的 home 群」。两个分身都生在伪群 SINK 里, 转发落在那儿 (企微拒收,
+  // daemon.log 记一行 chat notify failed) —— 人所在的真实群里什么也不出现。
   "task-quiet": { names: ["rr-t", "rr-t2"], run: async () => {
     const n = nonce();
-    await Promise.all(["rr-t", "rr-t2"].map((x) => spawn(x)));
+    await Promise.all(["rr-t", "rr-t2"].map((x) => spawn(x, { chat: SINK })));
     const t0 = Date.now();
     await tell("rr-t", `${SLEEP(90)}, 然后回复一行: RESULT: busy-done`);
     const mk = (name, id, prompt) => post("/tasks/schedule", { target: root.target, name: real(name), when: "1分钟后", fresh: false, quiet: true, id, prompt });
@@ -499,9 +505,12 @@ const cases = {
     const postponed = await until(() => logLine(t0, (o) => o.taskId === a.id && /顺延/.test(o.msg ?? "")), 5 * 60_000, 5000);
     const quiet = await until(() => logLine(t0, (o) => o.target === tq && /quiet task/.test(o.msg ?? "")), 4 * 60_000, 5000);
     const loud = await until(() => logLine(t0, (o) => o.target === tl && /quiet task/.test(o.msg ?? "")), 60_000, 5000);
+    // 转发确实发生了、且只落在伪群: notifyChat 投向 SINK 的那一次被企微拒收。
+    const relayed = loud && await until(() => logLine(t0, (o) => o.chatId === SINK_ID && /chat notify failed/.test(o.msg ?? "")), 30_000, 2000);
+    const inSink = [tq, tl].every((t) => t?.startsWith(`${SINK}#`));
     return {
-      pass: !!postponed?.idle && postponed.ok && quiet?.quiet === true && loud?.quiet === false,
-      why: `顺延=${postponed ? `idle:${postponed.idle} ok:${postponed.ok}` : "没发生"} · 安静那轮 quiet=${quiet?.quiet ?? "没收口"} · 有事那轮 quiet=${loud?.quiet ?? "没收口"} (false = 已转进群)`,
+      pass: inSink && !!postponed?.idle && postponed.ok && quiet?.quiet === true && loud?.quiet === false && !!relayed,
+      why: `${inSink ? "" : "分身没生在伪群 · "}顺延=${postponed ? `idle:${postponed.idle} ok:${postponed.ok}` : "没发生"} · 安静那轮 quiet=${quiet?.quiet ?? "没收口"} · 有事那轮 quiet=${loud?.quiet ?? "没收口"} · 转发到伪群=${relayed ? "是" : "没看到"}`,
     };
   } },
 };
