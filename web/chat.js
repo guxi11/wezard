@@ -30,10 +30,10 @@
   var R = { at: 0, recvAt: 0, role: null, sessions: [], convs: [], relations: false, schedules: 0, plan: null, charter: null, stats: null, winStats: null };
   // frags: 当前窗口的原始片段 (id → 片段)。片段不带方向, 换视角时拿它就地重包左右。
   var S = { es: null, pinned: true, gen: 0, frags: {} };
-  // 关系/日程两栏共用的世界快照。treeAll = 关系树展开全部; treeFor = 已把谁滚进过视野。
+  // 关系/日程两栏共用的世界快照。treeFor = 已把谁滚进过视野。
   var W = {
     at: 0, nodes: [], edges: [], chats: [], jobs: [], schedules: [],
-    degraded: false, loaded: false, treeAll: false, treeFor: '', glance: {}, gKeys: '',
+    degraded: false, loaded: false, treeFor: '', glance: {}, gKeys: '',
   };
   var VIEW = 'msgs';
   // 侧栏是会话列表还是关系图 —— 与右边的 VIEW 无关: 关系图下右边照样是选中的那段对话。
@@ -585,7 +585,7 @@
     // 成对: 只列与我有往来的 —— 在群里但没和我说过话的人, 点进去也是空的。
     // 「chat 内全部」再把其余有记录的接在成对的后面 (.far), 各自按最近排。
     var pairs = c.subs.filter(function (s) { return s.count; }).sort(recentFirst);
-    var fars = SCOPE === 'all'
+    var fars = ALL
       ? c.subs.filter(function (s) { return !s.count && s.whole && s.whole.count; })
         .sort(function (a, b) { return recentFirst(a.whole, b.whole); })
       : [];
@@ -651,7 +651,7 @@
     bindGo(convsEl);
     bindWorldToggle(convsEl);
     convsEl.querySelectorAll('[data-scope]').forEach(function (b) {
-      b.onclick = function () { setScope(b.getAttribute('data-scope')); };
+      b.onclick = function () { setAll(b.getAttribute('data-scope') === 'all'); };
     });
   };
 
@@ -710,19 +710,26 @@
   // 会话列表 ↔ 关系图: 侧栏第一行右上角同一个小开关, 标的是「点了去哪」。
   var LIST_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M3 4h10M3 8h10M3 12h10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
   var TREE_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M4 3v10M4 6h5M4 11h5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="11" cy="6" r="1.6" fill="currentColor"/><circle cx="11" cy="11" r="1.6" fill="currentColor"/></svg>';
-  // 群下子项的范围: 「仅与我有往来」(成对) / 「chat 内全部」(再列出群里与我无往来的 role)。
-  // 只是个人的看法偏好 —— 记在本地, 取不到就按成对。
-  var SCOPE_KEY = 'wezard.role.subScope';
-  var SCOPE = (function () { try { return localStorage.getItem(SCOPE_KEY) === 'all' ? 'all' : 'pair'; } catch (e) { return 'pair'; } })();
-  var setScope = function (v) {
-    if (v === SCOPE) return;
-    SCOPE = v;
-    try { localStorage.setItem(SCOPE_KEY, v); } catch (e) { }
+  // 跨会话通用的个人偏好 (看全部、ping 展开、日程卡片展开): 记在本地, 刷新后还在。
+  // 取不到 / 写不进 (隐私窗口、禁存) 就按默认值, 页面照常。某一个会话自己的滚动与展开不在此列。
+  var pref = function (key, def) {
+    try { var v = localStorage.getItem(key); return v === null ? def : JSON.parse(v); } catch (e) { return def; }
+  };
+  var setPref = function (key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch (e) { } };
+  // 「是否看全部」—— 群下子项「往来 / 全部」与关系图「相关 / 全部」是同一个念头, 共用这一个值。
+  // 还没存过就沿用老 key `wezard.role.subScope` ('all' / 'pair', 不是 json) 里的选择。
+  var ALL_KEY = 'wezard.role.showAll';
+  var ALL = pref(ALL_KEY, null);
+  if (typeof ALL !== 'boolean') ALL = (function () { try { return localStorage.getItem('wezard.role.subScope') === 'all'; } catch (e) { return false; } })();
+  var setAll = function (v) {
+    if (v === ALL) return;
+    ALL = v; W.treeFor = '';
+    setPref(ALL_KEY, v);
     renderConvs();
   };
   // 单个文字按钮: 字是当前范围, 点一下切到另一种 (样式与旁边的「关系图」按钮同一个 .vt)。
   var scopeToggle = function () {
-    var pair = SCOPE === 'pair';
+    var pair = !ALL;
     return '<button class="vt" data-scope="' + (pair ? 'all' : 'pair') + '" title="' +
       (pair ? '群下只列与我有往来的 role (点击改为列出 chat 内全部)' : '群下列出 chat 内全部 role (点击改为只列有往来的)') + '">' + (pair ? '往来' : '全部') + '</button>';
   };
@@ -1181,7 +1188,8 @@
   // ping 不是对话, 但它是真花销, 从时间轴上抹掉就等于说这段时间什么都没发生。
   // 一次 ping 落成两行 (问 + pong); 相邻的整串收进一条虚线, 展开才见正文。
   // 展开态是整页一个开关 —— 折行没有稳定 id, 而"想看 ping"是个一次性的念头。
-  var PING_OPEN = false;
+  var PING_KEY = 'wezard.role.pingOpen';
+  var PING_OPEN = pref(PING_KEY, false) === true;
   var unfoldPings = function (root) {
     root.querySelectorAll('.ping-fold').forEach(function (f) {
       var body = f.querySelector('.ping-body');
@@ -1216,7 +1224,7 @@
       root.insertBefore(d, before);
       var body = d.querySelector('.ping-body');
       run.forEach(function (r) { body.appendChild(r); });
-      d.addEventListener('toggle', function () { PING_OPEN = d.open; });
+      d.addEventListener('toggle', function () { PING_OPEN = d.open; setPref(PING_KEY, PING_OPEN); });
       run = [];
     };
     // 先取快照 —— flush 会把行搬进 details, 边遍历边改 children 会漏行。
@@ -1890,7 +1898,7 @@
     var F = forestOf(relations(rg));
     F.job = jobOfConv();
     var me = nodeOf(ROLE);
-    var all = W.treeAll || !me;
+    var all = ALL || !me;
     var shown = [];
     var path = me ? chainUp(F, ROLE) : [];
     // 和视角没有直接关系的只在「看全部」里画。
@@ -1934,9 +1942,7 @@
     bindGo(convsEl);
     convsEl.querySelectorAll('[data-tall]').forEach(function (b) {
       b.onclick = function () {
-        var on = b.getAttribute('data-tall') === 'all';
-        if (on === !!W.treeAll) return;
-        W.treeAll = on; W.treeFor = ''; renderWorld();
+        setAll(b.getAttribute('data-tall') === 'all');
       };
     });
     bindWorldToggle(convsEl);
@@ -2015,7 +2021,9 @@
         : '<span class="fl">执行</span>' + wizChip(x.target) + '<span class="fl">注入已有会话</span>') +
     '</div>';
   };
-  var PLAN_OPEN = {};
+  // 日程卡片的展开按任务 id 记, 只留展开着的 —— 收起 = 删掉那一项, 存的东西不会越攒越多。
+  var PLAN_KEY = 'wezard.role.planOpen';
+  var PLAN_OPEN = (function (v) { return v && typeof v === 'object' ? v : {}; })(pref(PLAN_KEY, {}));
   var taskHTML = function (x) {
     var lines = String(x.prompt || '').split('\n');
     var head = x.note || lines[0];
@@ -2070,7 +2078,12 @@
       c.onclick = function () { openNode(c.getAttribute('data-t')); };
     });
     planEl.querySelectorAll('.pprompt').forEach(function (d) {
-      d.ontoggle = function () { PLAN_OPEN[d.getAttribute('data-id')] = d.open; planEl._html = ''; };
+      d.ontoggle = function () {
+        var id = d.getAttribute('data-id');
+        if (d.open) PLAN_OPEN[id] = true; else delete PLAN_OPEN[id];
+        setPref(PLAN_KEY, PLAN_OPEN);
+        planEl._html = '';
+      };
     });
     planEl.querySelectorAll('.strip .pin').forEach(function (p) {
       p.onclick = function () {
