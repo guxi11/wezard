@@ -128,7 +128,7 @@ export const createLedger = (store: JsonMap<Item>, now: () => number = Date.now)
 
 // ── 渲染 ────────────────────────────────────────────────────────────
 
-const ago = (ms: number): string =>
+export const ago = (ms: number): string =>
   ms < 60_000 ? "刚刚" : ms < 3_600_000 ? `${Math.round(ms / 60_000)}m` : `${Math.round(ms / 3_600_000)}h`;
 
 /** 一行的状态词。等人 / 人已回话 / 没结论 优先于在飞的细分。 */
@@ -167,16 +167,22 @@ export const renderAwaiting = (title: string, job: string, deliveredAt: number, 
 export const renderStalled = (title: string, job: string, status: string): string =>
   `- lead 没交差 (${status}) · ${title} (${job})`;
 
-const ACCEPT_HOWTO = "等验收的: 人认可 → `close_job(单号)` 归档并回收 lead; 人说不对 → `tell_peer({name: lead, re, job: 单号})` 返工 (同一张单)。对人别提单号。";
+const ACCEPT_HOWTO = "等验收的: 人认可 → `close_job(单号)` 归档并回收 lead; 人说不对 → `tell_peer({name: lead, re, job: 单号})` 返工 (同一张单); 人说不要了 → `close_job({job, as:\"cancel\"})`; 先放着 → `close_job({job, as:\"shelve\"})` (停提醒, 不关单)。对人别提单号。";
+const SHELVED_HOWTO = "搁置的: 人又提起 → `close_job({job, as:\"resume\"})` 恢复 (给 lead `re` 或带 `job` 派话也会自动恢复); 不要了 → `as:\"cancel\"`。";
+
+/** 搁置的一行: 需求根单被人说先放着, 账本留着、不再冒泡提醒。 */
+export const renderShelved = (title: string, job: string, heldAt: number, at: number): string =>
+  `- 搁置 · ${title} (${job}) 搁置于 ${at - heldAt < 60_000 ? "刚刚" : at - heldAt >= 24 * 3_600_000 ? `${Math.floor((at - heldAt) / (24 * 3_600_000))} 天前` : `${ago(at - heldAt)} 前`}`;
 const STALLED_HOWTO = "lead 没交差的: lead 还在 → `tell_peer({name: lead, re, job})` 叫它续; 否则 `close_job(单号)` 关掉, 需要的话重新 `dispatch({lead:true})` 开新单。";
 
 /** 读全表 (pending_items 的回包)。`awaiting` = 等验收的根单行 (见 renderAwaiting)。 */
-export const renderTable = (xs: readonly Item[], live: LiveOf, n: Names, at: number, awaiting: readonly string[] = [], stalled: readonly string[] = []): string =>
-  xs.length || awaiting.length || stalled.length
+export const renderTable = (xs: readonly Item[], live: LiveOf, n: Names, at: number, awaiting: readonly string[] = [], stalled: readonly string[] = [], shelved: readonly string[] = []): string =>
+  xs.length || awaiting.length || stalled.length || shelved.length
     ? [
         ...(xs.length ? [`派出去还没了结的 ${xs.length} 件 (守护进程按回执算的):`, ...xs.map((x) => renderRow(x, live, n, at)), HOWTO] : []),
         ...(awaiting.length ? [`等人验收的 ${awaiting.length} 件:`, ...awaiting, ACCEPT_HOWTO] : []),
         ...(stalled.length ? [`卡住的需求单 ${stalled.length} 件:`, ...stalled, STALLED_HOWTO] : []),
+        ...(shelved.length ? [`搁置的 ${shelved.length} 件:`, ...shelved, SHELVED_HOWTO] : []),
       ].join("\n")
     : "没有挂着的事。";
 

@@ -83,6 +83,15 @@ export interface JobRecord {
   criteria?: string;
   /** 需求原话与它来自哪个群 (只根单有)。 */
   origin?: { text: string; chat: string };
+  /** 过闸时刻 (只根单): g1 需求确认 (带验收标准派下去 = 管家已问过人) · g2 方案确认 (owner 答了 lead 的 NEED) ·
+   *  g3 交付验收 (人认可, 以 accept 归档)。 */
+  gate?: { g1?: number; g2?: number; g3?: number };
+  /** 搁置时刻 (只根单): 单不关、账本保留, 阶段算 shelved, 不冒泡。 */
+  hold?: number;
+  /** 重试冒泡的进度 (只根单): 已冒几次、上一次的时刻 —— 间隔由它现算, reload 不丢、不重发。 */
+  nudge?: { n: number; lastAt: number };
+  /** 根单怎么收的: 人认可 / 取消。 */
+  end?: "accept" | "cancel";
   members: JobMember[];
   status: "open" | "closed";
   openedAt: number;
@@ -93,7 +102,11 @@ export interface JobRecord {
 export interface JobOpenOpts {
   plan?: string; expect?: number; maxTurns?: number; accept?: Accept;
   parent?: string; kind?: "req"; criteria?: string; origin?: { text: string; chat: string };
+  gate?: JobRecord["gate"];
 }
+
+/** 根单上可事后改写的几样落盘状态; 值为 undefined = 清掉。 */
+export type JobMark = Partial<Pick<JobRecord, "gate" | "hold" | "nudge" | "end">>;
 
 export interface JobStore {
   open: (base: string, owner: string, title: string, opts?: JobOpenOpts) => JobRecord;
@@ -101,12 +114,14 @@ export interface JobStore {
   spend: (id: string) => { turns: number; maxTurns?: number } | undefined;
   get: (id: string) => JobRecord | undefined;
   /** 同一个 target 再次 attach 更新它那一段活, 并清掉它已落定的那一份 (又在干了)。 */
-  attach: (id: string, member: Omit<JobMember, "at">) => JobRecord | undefined;
+  attach: (id: string, member: Omit<JobMember, "at">, kind?: "task" | "ask") => JobRecord | undefined;
   /** 记下某个成员那一份的定论。不在册 / 已收工 = 不记; 已有定论不改写 (终态写一次)。 */
   settle: (id: string, target: string, outcome: Terminal, artifacts?: Artifact[]) => JobRecord | undefined;
   /** 已落定几份 / 一共几份 (成员数与 expect 取大)。 */
   tally: (id: string) => { done: number; total: number } | undefined;
-  close: (id: string, summary: string) => JobRecord | undefined;
+  close: (id: string, summary: string, mark?: JobMark) => JobRecord | undefined;
+  /** 改写根单的闸 / 搁置 / 冒泡进度 (`gate` 与已有的合并, 其余整值替换)。 */
+  mark: (id: string, patch: JobMark) => JobRecord | undefined;
   /** 一个 wizard 被 forget 了: 它在开着的工单里还没落定的那一份永远不会落定了, 记成
    *  canceled (留着行, 不删 —— 删了 expect 撑着的总数就永远凑不齐, 也丢了它派的是哪段活);
    *  已落定的 (连同交付物) 原样不动。返回动过的工单 id。 */
@@ -172,6 +187,7 @@ export type MemberLive = (j: JobRecord, mm: JobMember) => TurnState | undefined;
 /** 一张单现算的阶段 —— 不落盘 (见设计文档 §3.2)。 */
 export const jobStage = (j: JobRecord, all: readonly JobRecord[], live: MemberLive): JobStage => {
   if (j.status === "closed") return "closed";
+  if (j.kind === "req" && j.hold) return "shelved";
   const open = j.members.filter((mm) => !mm.outcome);
   const asking = open.some((mm) => live(j, mm) === "needs-input");
   if (j.kind === "req") {
@@ -212,12 +228,43 @@ export const stalledRoots = (all: readonly JobRecord[], owner: string, live: Mem
   all.filter((j) => j.kind === "req" && j.owner === owner && jobStage(j, all, live) === "stalled")
     .map((j) => ({ job: j, status: j.members.find((mm) => (mm.role ?? "exec") === "lead")?.outcome ?? "" }));
 
+// ── 重试冒泡 (设计文档 §3.3.1) ──────────────────────────────────────
+
+const HOUR = 3600_000;
+/** 只在白天冒: [09:00, 21:00) 本地时间。 */
+export const NUDGE_FROM_H = 9;
+export const NUDGE_TO_H = 21;
+
+/** 下一次冒泡的理想时刻 (还没算白天窗口): 交付后 4h → 之后 1 天 → 再之后每 2 天, 不封顶。 */
+export const nextNudgeAt = (deliveredAt: number, nudge?: { n: number; lastAt: number }): number =>
+  !nudge || nudge.n < 1 ? Math.max(deliveredAt, nudge?.lastAt ?? 0) + 4 * HOUR
+    : nudge.n < 2 ? nudge.lastAt + 24 * HOUR
+      : nudge.lastAt + 48 * HOUR;
+
+/** 落在 [09:00, 21:00) 之外的时刻顺延到下一个 09:00 (本地时间)。 */
+export const dayClamp = (t: number): number => {
+  const d = new Date(t);
+  const h = d.getHours();
+  if (h >= NUDGE_FROM_H && h < NUDGE_TO_H) return t;
+  if (h >= NUDGE_TO_H) d.setDate(d.getDate() + 1);
+  d.setHours(NUDGE_FROM_H, 0, 0, 0);
+  return d.getTime();
+};
+
+/** 这张等验收的根单此刻该不该冒一次。 */
+export const nudgeDue = (deliveredAt: number, nudge: { n: number; lastAt: number } | undefined, now: number): boolean =>
+  now >= dayClamp(nextNudgeAt(deliveredAt, nudge));
+
+/** 搁置的需求根单: 不冒泡、不算等验收, 但挂起表里要看得见, 免得被遗忘。 */
+export const shelvedRoots = (all: readonly JobRecord[], owner: string): JobRecord[] =>
+  all.filter((j) => j.kind === "req" && j.owner === owner && j.status === "open" && j.hold);
+
 export const loadJobStore = (filePath: string): JobStore => {
   const db = loadJsonMap<JobRecord>(filePath, dropStale);
   return {
-    open: (base, owner, title, { plan, expect, maxTurns, accept, parent, kind, criteria, origin } = {}) => {
+    open: (base, owner, title, { plan, expect, maxTurns, accept, parent, kind, criteria, origin, gate } = {}) => {
       const id = newId();
-      return db.set(id, { id, base, owner, title, ...(parent ? { parent } : {}), ...(kind ? { kind } : {}), ...(criteria ? { criteria } : {}), ...(origin ? { origin } : {}), ...(plan ? { plan } : {}), ...(accept && accept !== "result" ? { accept } : {}), ...(expect ? { expect } : {}), ...(maxTurns ? { maxTurns, turns: 0 } : {}), members: [], status: "open", openedAt: Date.now() });
+      return db.set(id, { id, base, owner, title, ...(parent ? { parent } : {}), ...(kind ? { kind } : {}), ...(criteria ? { criteria } : {}), ...(origin ? { origin } : {}), ...(gate ? { gate } : {}), ...(plan ? { plan } : {}), ...(accept && accept !== "result" ? { accept } : {}), ...(expect ? { expect } : {}), ...(maxTurns ? { maxTurns, turns: 0 } : {}), members: [], status: "open", openedAt: Date.now() });
     },
     spend: (id) => {
       const j = db.get(id);
@@ -227,7 +274,7 @@ export const loadJobStore = (filePath: string): JobStore => {
       return { turns, ...(j.maxTurns ? { maxTurns: j.maxTurns } : {}) };
     },
     get: db.get,
-    attach: (id, member) => {
+    attach: (id, member, kind = "task") => {
       const j = db.get(id);
       const prev = j?.members.find((x) => x.target === member.target);
       // 满员只拦新面孔: 已在册的再派一段 (re 续问) 必须照记, 否则它旧的定论不作废, 「全部到齐」提前报。
@@ -237,7 +284,13 @@ export const loadJobStore = (filePath: string): JobStore => {
       // close_job 会把还在干活的它收掉。
       const role = member.role ?? prev?.role;
       const forkOf = member.forkOf ?? prev?.forkOf;
-      return db.set(id, { ...j, members: [...rest, { ...member, task: member.task || prev?.task || "", spawned: member.spawned || !!prev?.spawned, ...(role ? { role } : {}), ...(forkOf ? { forkOf } : {}), at: Date.now() }] });
+      // 根单上 owner 给 lead 派了新活 (task; ask 只是问一句, 不算返工): 不再搁置; 若这一句让 lead 的定论作废, 冒泡也从头计。
+      // 定论照旧一律作废 (它又在干了, 见上), 只是 ask 不动 hold / nudge。
+      const toLead = j.kind === "req" && role === "lead" && kind === "task";
+      const { hold: _h, ...unheld } = j;
+      const { nudge: _n, ...unnudged } = unheld;
+      const base = !toLead ? j : prev?.outcome ? unnudged : unheld;
+      return db.set(id, { ...base, members: [...rest, { ...member, task: member.task || prev?.task || "", spawned: member.spawned || !!prev?.spawned, ...(role ? { role } : {}), ...(forkOf ? { forkOf } : {}), at: Date.now() }] });
     },
     settle: (id, target, outcome, artifacts) => {
       const j = db.get(id);
@@ -251,9 +304,15 @@ export const loadJobStore = (filePath: string): JobStore => {
       const j = db.get(id);
       return j && { done: j.members.filter((x) => x.outcome).length, total: Math.max(j.members.length, j.expect ?? 0) };
     },
-    close: (id, summary) => {
+    close: (id, summary, mark) => {
       const j = db.get(id);
-      return j ? db.set(id, { ...j, status: "closed", closedAt: Date.now(), summary }) : undefined;
+      return j ? db.set(id, { ...j, ...(mark?.gate ? { gate: { ...j.gate, ...mark.gate } } : {}), ...(mark?.end ? { end: mark.end } : {}), status: "closed", closedAt: Date.now(), summary }) : undefined;
+    },
+    mark: (id, patch) => {
+      const j = db.get(id);
+      if (!j) return undefined;
+      const { gate, ...rest } = patch;
+      return db.set(id, { ...j, ...rest, ...(gate ? { gate: { ...j.gate, ...gate } } : {}) });
     },
     detach: (target) =>
       Object.values(db.all())

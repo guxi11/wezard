@@ -272,10 +272,10 @@ export const renderMark = (mk: MarkDetailRecord, role: string, dir: Directory): 
 const OUTCOME: Readonly<Record<string, string>> = { ...RCPT, "": "在干" };
 // 老 daemon 的快照不记成员定论: 收了工却没有定论的, 不说它「在干」。
 /** 阶段的人话: deliver 在根单 = 等验收, 在子单 = 待收工。 */
-export const STAGE_LABEL = (j: { stage?: string; kind?: string; status?: string; parent?: string }): string =>
-  j.status === "closed" || j.stage === "closed" ? (j.kind === "req" ? "归档" : "收工")
+export const STAGE_LABEL = (j: { stage?: string; kind?: string; status?: string; parent?: string; end?: string }): string =>
+  j.status === "closed" || j.stage === "closed" ? (j.kind === "req" ? (j.end === "cancel" ? "取消" : "归档") : "收工")
     : j.stage === "deliver" ? (j.kind === "req" ? "等验收" : "待收工")
-      : ({ plan: "规划", build: "实施", review: "评审", clarify: "澄清", stalled: "卡住" } as Record<string, string>)[j.stage ?? ""] ?? "";
+      : ({ plan: "规划", build: "实施", review: "评审", clarify: "澄清", stalled: "卡住", shelved: "搁置" } as Record<string, string>)[j.stage ?? ""] ?? "";
 const memberLine = (mm: WorldFactJob["members"][number], dir: Directory, closed: boolean): string =>
   `<li><span class="jo st-${escHtml(mm.outcome ?? (closed ? "none" : "run"))}">${escHtml(mm.outcome ? OUTCOME[mm.outcome] ?? mm.outcome : closed ? "—" : OUTCOME[""]!)}</span>` +
   (dir.isWizard(mm.target)

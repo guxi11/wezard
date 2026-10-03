@@ -77,6 +77,8 @@ export interface WorldFactJob {
   kind?: "req";
   /** 验收标准。 */
   criteria?: string;
+  /** 根单怎么收的 (只收了工的根单): 人认可 = accept, 取消 = cancel。 */
+  end?: "accept" | "cancel";
   /** 需求原话与它来自哪个群 (只根单有)。 */
   origin?: { text: string; chat: string };
   /** 现算的阶段 (见 jobs.jobStage): daemon 算好推过来, 页面只管显示。 */
@@ -89,8 +91,8 @@ export interface WorldFactJob {
 /** 成员在一张工单里的角色: lead = 根单里被派来的需求 lead; exec 执行; reviewer 评审; expert 借来答问的专家。 */
 export type MemberRole = "lead" | "exec" | "reviewer" | "expert";
 /** 工单阶段 (现算, 不落盘): plan 规划 · build 实施 · review 评审 · clarify 澄清 (lead 在等人拍板) ·
- *  deliver 交付 (根单: lead 已交差, 等人验收; 子单: 成员都落定, 等 owner 收工) · stalled 卡住 (根单: lead 以 timeout/silent/dead/canceled 收场, 没交差) · closed 收工 / 归档。 */
-export type JobStage = "plan" | "build" | "review" | "clarify" | "deliver" | "stalled" | "closed";
+ *  deliver 交付 (根单: lead 已交差, 等人验收; 子单: 成员都落定, 等 owner 收工) · stalled 卡住 (根单: lead 以 timeout/silent/dead/canceled 收场, 没交差) · shelved 搁置 (根单: 人说先放着, 账本保留、不冒泡) · closed 收工 / 归档。 */
+export type JobStage = "plan" | "build" | "review" | "clarify" | "deliver" | "stalled" | "shelved" | "closed";
 
 /** 一张工单的进度: 已落定几份 / 一共几份 (成员数与开工时说好的份数取大) —— 侧栏、关系图、工单页都读这一份。 */
 export interface JobProgress { done: number; total: number }

@@ -380,10 +380,10 @@
     return j ? '<span class="jtag' + (j.status === 'open' ? ' open' : '') + '">' + (j.status === 'open' ? j.done + '/' + j.total : '收工') + '</span>' : '';
   };
   // 阶段 (daemon 现算后推来): 缺省 (老快照) = 不标。
-  var STAGE = { plan: '规划', build: '实施', review: '评审', clarify: '澄清', stalled: '卡住' };
+  var STAGE = { plan: '规划', build: '实施', review: '评审', clarify: '澄清', stalled: '卡住', shelved: '搁置' };
   var stageText = function (j) {
     if (!j) return '';
-    if (j.status === 'closed') return j.kind === 'req' ? '归档' : '';
+    if (j.status === 'closed') return j.kind === 'req' ? (j.end === 'cancel' ? '取消' : '归档') : '';
     return j.stage === 'deliver' ? (j.kind === 'req' ? '等验收' : '待收工') : STAGE[j.stage] || '';
   };
   var stageTag = function (j) {

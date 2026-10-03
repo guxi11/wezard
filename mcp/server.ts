@@ -798,7 +798,7 @@ server.registerTool(
       to: z.string().optional().describe("推翻默认: 直接转给这个已有 wizard (名字)。"),
       spawn: z.boolean().optional().describe("推翻默认: 不看候选, 一定白板 spawn。"),
       force: z.boolean().optional().describe("越过冷门控: 缓存冷且 ctx ≥100k 的候选默认不转; 确认这件活真依赖它那段上下文才给 true。"),
-      lead: z.boolean().optional().describe("复杂活交给一个 lead 组队 (见描述)。**只有它开需求根单** (回包里的 `job`), 普通小活不开单; 根单在 lead 交付后仍开着, 等人验收: `lead:true` 的往来一律私聊 (`public` 不起作用)。人认可 → `close_job(job)` 归档并回收 lead, 人说不对 → `tell_peer({name, re, job})` 给 lead 返工。对人别提单号。"),
+      lead: z.boolean().optional().describe("复杂活交给一个 lead 组队 (见描述)。**只有它开需求根单** (回包里的 `job`), 普通小活不开单; 根单在 lead 交付后仍开着, 等人验收: `lead:true` 的往来一律私聊 (`public` 不起作用)。人认可 → `close_job(job)` 归档并回收 lead, 人说不对 → `tell_peer({name, re, job})` 给 lead 返工, 不要了 / 先放着 → `close_job({job, as:\"cancel\"|\"shelve\"})`。对人别提单号。"),
       criteria: z.string().optional().describe("验收标准 (`lead:true` 时记进根单): 做成什么样算交付。你猜的就在回复里向人复述一句再派。"),
       public: z.boolean().optional().describe("默认 true (气泡与回复进群); false = 私聊, 只记 rolepage。"),
       deadline: z.number().optional().describe("同 tell_peer 的 deadline (秒)。"),
@@ -947,15 +947,16 @@ server.registerTool(
     title: "Close a job and recycle its clones",
     description:
       "收工: 把汇总结论连同成员与各自那段活**留档** (情景记忆, 不发群), 并**把为这个工单生出来的分身整批回收**。被拉来帮忙的长期 wizard 不在回收之列, 你自己也不会被收。\n" +
-      "汇总完就调它。给人的结论写在你自己这一轮的最终回复里 —— 人在群里问的, 那条回复就进群。`stop:false` 只结账不回收 (那些分身后面还有用)。",
+      "汇总完就调它。给人的结论写在你自己这一轮的最终回复里 —— 人在群里问的, 那条回复就进群。`stop:false` 只结账不回收 (那些分身后面还有用)。需求根单做完交付后, 守护进程会隔 4h / 1 天 / 2 天… 以你的名义往原群提醒人验收 (不带单号, 同时往你的信箱挂一行带单号的); 人认可 → `as:\"accept\"`, 说不要了 → `as:\"cancel\"`, 说先放着 → `as:\"shelve\"`。",
     inputSchema: {
       job: z.string().describe("open_job 返回的工单 id。"),
       summary: z.string().optional().describe("汇总结论, 留档 (不发群): 做成了什么、有什么没做成。"),
       stop: z.boolean().optional().describe("是否回收为这个工单生出来的分身。默认 true。"),
+      as: z.enum(["accept", "cancel", "shelve", "resume"]).optional().describe("怎么收 (多是需求根单, 管家用)。`accept` (默认) 收工 / 归档 —— 根单即人验收通过 (G3); `cancel` 取消: 关单、整棵子树回收, 留档标「取消」; `shelve` 搁置: **不关单**, 停止「等验收」的提醒冒泡, 账本留着; `resume` 恢复搁置 (给 lead `re` 或带 `job` 派话会自动恢复)。shelve / resume 只对需求根单有效。"),
     },
   },
-  async ({ job, summary, stop }) =>
-    unwrap("close_job", await daemonPost("/jobs/close", { job, ...(summary ? { summary } : {}), ...(stop === false ? { stop: false } : {}) })),
+  async ({ job, summary, stop, as }) =>
+    unwrap("close_job", await daemonPost("/jobs/close", { job, ...(summary ? { summary } : {}), ...(stop === false ? { stop: false } : {}), ...(as ? { as } : {}) })),
 );
 
 server.registerTool(
