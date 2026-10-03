@@ -187,7 +187,10 @@
     scope.querySelectorAll('.bubble, .tg-job').forEach(function (b) {
       var src = b.querySelector('script.md-src'), body = b.querySelector('.md-body');
       if (src && body && body.dataset.rendered !== '1') {
+        // 「发给谁」先挂在空 .md-body 里; 填进 markdown 后把它塞进第一段, 才能和正文第一行同行。
+        var to = body.querySelector(':scope > .to-in');
         body.innerHTML = md.render(src.textContent || '');
+        if (to) { var p = body.firstElementChild; (p && p.tagName === 'P' ? p : body).prepend(to, ' '); }
         body.dataset.rendered = '1';
       }
     });
@@ -1235,7 +1238,7 @@
       : '';
     var withTo = function (html) {
       if (!toIn) return html;
-      var done = false, out = html.replace(/<div class="(?:q-body|md-body)">/, function (t) { done = true; return toIn + t; });
+      var done = false, out = html.replace(/<div class="(?:q-body|md-body)[^"]*">/, function (t) { done = true; return t + toIn; });
       return done ? out : '<div class="to-row">' + toIn + '</div>' + html;
     };
     var priv = !m.channel && group ? '<span class="ch priv">私聊</span>' : '';
