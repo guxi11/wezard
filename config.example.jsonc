@@ -131,7 +131,7 @@
   // steward = 各群管家 (群的默认会话) 用哪一档, 按群覆盖写 chatPolicy.<chat>.steward。省略整段 = 下面这组默认值。
   "models": {
     "tiers": {
-      "light":    { "model": "haiku",  "effort": "low" },
+      "light":    { "model": "sonnet", "effort": "medium" },
       "standard": { "model": "sonnet", "effort": "medium" },
       "hard":     { "model": "opus",   "effort": "high" }
     },

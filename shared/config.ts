@@ -332,7 +332,7 @@ export type TierName = (typeof TIERS)[number];
 const Models = z.object({
   tiers: z.object({
     mini: Tier.default({ model: "haiku", effort: "low" }).describe("机械一步: 照单执行、不用判断"),
-    light: Tier.default({ model: "haiku", effort: "low" }).describe("跑腿: 查找、搬运、跑命令"),
+    light: Tier.default({ model: "sonnet", effort: "medium" }).describe("跑腿: 查找、搬运、跑命令; 也是管家的默认档"),
     standard: Tier.default({ model: "sonnet", effort: "medium" }).describe("常规实现"),
     hard: Tier.default({ model: "opus", effort: "high" }).describe("要判断: 设计、排障、审查"),
     ultra: Tier.default({ model: "opus", effort: "max" }).describe("最难: 架构取舍、疑难排障、关键评审"),
