@@ -35,8 +35,13 @@ export type Notice =
   | { op: "chat"; name: string }
   | { op: "note"; text: string };
 
-/** 近几次注入里挂过这个键没有。 */
-export type Seen = (key: string) => boolean;
+/** 近几次注入里挂过这个键没有; `latest(prefix)` = 窗口里以它开头的最新一个键 (「上次告诉它的值」)。 */
+export type Seen = ((key: string) => boolean) & { latest: (prefix: string) => string | undefined };
+/** 按注入先后排好的键 → Seen。 */
+export const seenOf = (ordered: readonly string[]): Seen => {
+  const ks = new Set(ordered);
+  return Object.assign((k: string) => ks.has(k), { latest: (pre: string) => [...ordered].reverse().find((k) => k.startsWith(pre)) });
+};
 /** 尾巴上的一段: 照「近来挂过什么」现算, 交回正文与这次挂了哪些键。 */
 export interface Section { text: string; keys: readonly string[] }
 export type Part = (seen: Seen) => Section;
@@ -86,10 +91,7 @@ export const createSeenRing = (store: JsonMap<SeenRow> | undefined, sidOf: (t: s
     if (r) { mem.set(t, r); store?.set(t, r); } else if (mem.delete(t)) store?.drop(t);
   };
   return {
-    of: (t) => {
-      const ks = new Set((live(t)?.ring ?? []).flat());
-      return (k) => ks.has(k);
-    },
+    of: (t) => seenOf((live(t)?.ring ?? []).flat()),
     push: (t, keys) => {
       const prev = live(t)?.ring ?? [];
       // 一路空着的窗口不必为又一次空注入写盘。
@@ -165,19 +167,33 @@ const cacheOf = (cold: boolean | undefined): string => (cold === undefined ? "" 
 /** 快照 → `name,state,ctx,cache,job` 表; 太多就截断并指路 wizard_roster。 */
 export const renderSnapshot = (rows: readonly SnapRow[]): string[] => [
   "name,state,ctx,cache,job",
-  ...rows.slice(0, SNAP_MAX).map((r) => [r.name, r.state, kTok(r.ctx), cacheOf(r.cold), csv(clip(r.job))].join(",")),
+  ...rows.slice(0, SNAP_MAX).map(snapRow),
   ...(rows.length > SNAP_MAX ? [`…(+${rows.length - SNAP_MAX}) wizard_roster`] : []),
 ];
+/** 一行快照「变没变」的口径: ctx 按 CTX_STEP 分档 —— 每轮涨几 k 不值得再说一遍, 跨档 (含 COLD_GATE 100k) 才说。 */
+export const CTX_STEP = 50_000;
+const sigOf = (r: SnapRow): string =>
+  [r.state, r.ctx === undefined ? "" : Math.floor(r.ctx / CTX_STEP), cacheOf(r.cold), r.job].join("|");
+/** 记「上次告诉它的这一行」的键。 */
+const valKey = (r: SnapRow): string => `v:${r.name}=${sigOf(r)}`;
+const snapRow = (r: SnapRow): string => [r.name, r.state, kTok(r.ctx), cacheOf(r.cold), csv(clip(r.job))].join(",");
 /** 生 / 收 / 改职责 / 改名 —— 快照的表里已经是它们之后的样子。 */
 const subsumed = (n: Notice): boolean => n.op === "born" || n.op === "ended" || n.op === "job" || n.op === "renamed";
 
 /** 名册那一段。去重按单条 (`r:<那一行>`) 记, 渲染时再并行; 规矩只在窗口里没给过时给。
  *  `snap` 给了 (长住的收件人) 且窗口里没给过整表: 给一份此刻的群况表 (mode=full) ——
  *  会话一换窗口就清零, 所以交接 / /clear 后的头一条注入必带; 表里已是变动之后的样子,
- *  生收改名那几行一并记作给过, 只剩 note 照挂。 */
+ *  生收改名那几行一并记作给过, 只剩 note 照挂。
+ *  整表之后每次注入现算一遍表, 只挂与「上次告诉它的那一行」(`v:` 键, 按 sigOf 比) 不同的行 ——
+ *  state / 冷热 / ctx 跨档随时间变, 不挂的话它手里那份能旧到窗口那头; 挂在注入上正是它要做决定的那一刻。
+ *  按「最新一个 v: 键」比而不按「窗口里有没有」: A→B→A 时窗口里还躺着 A, 但它上次听到的是 B。
+ *  整表把每行的 v: 键一起记下, 窗口里只要还有整表, 表里每个名字就都有基线。 */
 export const rosterPart = (ns: readonly Notice[], cwd: string, snap?: () => readonly SnapRow[]): Part => (seen) => {
   const fresh = [...new Map(netNotices(ns).map((n) => [renderNotice(n, cwd), n] as const))].filter(([r]) => !seen(`r:${r}`));
-  const table = snap && !seen("roster:full") ? snap() : undefined;
+  const full = !seen("roster:full");
+  const now = snap?.().slice(0, SNAP_MAX);
+  const table = full ? now : undefined;
+  const moved = full ? [] : (now ?? []).filter((r) => seen.latest(`v:${r.name}=`) !== valKey(r));
   if (table?.length) {
     const notes = fresh.filter(([, n]) => !subsumed(n));
     return {
@@ -188,18 +204,19 @@ export const rosterPart = (ns: readonly Notice[], cwd: string, snap?: () => read
         ...renderSnapshot(table),
         ...groupRows(notes.map(([, n]) => n), cwd).map((r) => `- ${r}`),
       ]),
-      keys: ["roster:full", ...fresh.map(([r]) => `r:${r}`)],
+      keys: ["roster:full", ...table.map(valKey), ...fresh.map(([r]) => `r:${r}`)],
     };
   }
-  if (!fresh.length) return none;
+  if (!fresh.length && !moved.length) return none;
   const rows = groupRows(fresh.map(([, n]) => n), cwd);
   const rule = !seen("rule:roster");
   return {
-    text: renderReminder({ wezard: "roster" }, [
+    text: renderReminder({ wezard: "roster", ...(moved.length ? { mode: "delta" } : {}) }, [
       ...(rule ? ["Roster changes since your charter snapshot (truth: wizard_roster). FYI only — don't reply or relay; skip if irrelevant."] : []),
+      ...(moved.length ? ["Rows changed since the last table (name,state,ctx,cache,job; as of this message):", ...moved.map(snapRow)] : []),
       ...rows.map((r) => `- ${r}`),
     ]),
-    keys: [...(rule ? ["rule:roster"] : []), ...fresh.map(([r]) => `r:${r}`)],
+    keys: [...(rule ? ["rule:roster"] : []), ...moved.map(valKey), ...fresh.map(([r]) => `r:${r}`)],
   };
 };
 
@@ -256,7 +273,7 @@ export const noticeBox = (): NoticeBox | undefined => bound;
 export const noticeSuffixFor = (target: string, text: string, via: Via = {}, lead: readonly Part[] = []): string => {
   if (text.trimStart().startsWith("/")) return "";
   const box = noticeBox();
-  return box ? box.suffix(target, via, lead) : lead.map((p) => p(() => false).text).join("");
+  return box ? box.suffix(target, via, lead) : lead.map((p) => p(seenOf([])).text).join("");
 };
 
 /** 一次生 / 收 / 改职责 / 改名的当事人, 取自注册表。`owners` = 它在册、还开着的工单的发起人。 */
