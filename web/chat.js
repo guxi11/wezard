@@ -42,7 +42,7 @@
   // URL 带了 side 以它为准; 没带 (新链接) 用本地记下的, 见 WORLD_KEY。
   var WORLD = qs.get('side') === 'world';
   var $ = function (s) { return document.querySelector(s); };
-  var app = $('#app'), thread = $('#thread'), inner = $('#thread-in'), convsEl = $('#convs');
+  var app = $('#app'), main = $('.main'), thread = $('#thread'), inner = $('#thread-in'), convsEl = $('#convs');
   var planEl = $('#plan-in');
 
   var srvNow = function () { return R.at ? R.at + (Date.now() - R.recvAt) : Date.now(); };
@@ -1444,9 +1444,11 @@
   // early: 换视角时与摘要并行发出的同一个请求 (见 refresh) —— 窗口参数没变才拿来用。
   var loadMsgs = function (limit, land, early) {
     var gen = S.gen;
-    if (!CONV) { inner.innerHTML = '<div class="empty">选一个会话</div>'; return Promise.resolve(); }
+    if (!CONV) { unswitch(); inner.innerHTML = '<div class="empty">选一个会话</div>'; return Promise.resolve(); }
     return (early || api('api/msgs', viewParams(limit ? { limit: limit } : {}))).then(function (d) {
-      if (!d.ok || gen !== S.gen) return;
+      if (gen !== S.gen) return;
+      if (!d.ok) { if (unswitch()) inner.innerHTML = '<div class="empty">载入失败</div>'; return; }
+      unswitch();
       S.frags = {};
       d.msgs.forEach(function (m) { S.frags[m.id] = m; });
       if (!d.msgs.length) { inner.innerHTML = '<div class="empty">这里还没有消息</div>'; return; }
@@ -1554,6 +1556,8 @@
   var backoff = 1000;
   var connect = function () {
     if (S.es) { S.es.close(); S.es = null; }
+    // 换窗口的新内容还没上屏: 新窗口的增量会落进旧内容里 —— 等 loadMsgs 替换完再连 (断线重连的定时器也在这儿挡下)。
+    if (S.swapGen === S.gen) return;
     var p = new URLSearchParams(roleParams({ id: TOKEN }));
     var es = new EventSource('api/role-events?' + p.toString());
     S.es = es;
@@ -1606,18 +1610,43 @@
   };
 
   // land: 见 loadMsgs —— 搜索跳到一条具体消息时由它来定位, 不吸底。
+  // 详情区正看着一个窗口时换窗口不清屏: 旧页头 / 正文 / 页脚原样留着 (只变暗、不接点击, 顶上一道细进度条),
+  // 新消息到手的同一帧整块替换 —— 已读也在那一刻才记 (see 跟着替换走)。连点只画最后一次 (gen)。
+  // 详情区原本不可见 (窄屏在列表、停在关系图 / 日程) 就没有可留的, 照旧先清成「加载中」。
   var selectConv = function (key, withRole, land, viewpoint) {
+    var warm = VIEW === 'msgs' && thread.offsetParent !== null && !!inner.querySelector('.mrow, .empty');
     CONV = key; WITH = withRole || ''; VIEWPOINT = viewpoint && viewpoint !== ROLE ? viewpoint : '';
     reveal();
     if (VIEW !== 'msgs') setView('msgs');
     app.classList.add('reading');
     // 上一个窗口的账不属于这个窗口 —— 先收起, 新的随 SSE 的首个 role 事件到。
     R.winStats = null;
-    renderConvs(); renderHead(); renderUsage();
     S.gen++;
     syncUrl();
-    inner.innerHTML = '<div class="empty">加载中…</div>';
-    loadMsgs(undefined, land).then(connect);
+    renderConvs();
+    if (warm) {
+      // 旧窗口的 SSE 先断: 它的增量 / 摘要不该再改留在屏上的旧内容, 新的等替换完 (connect 里挡着) 再连。
+      if (S.es) { S.es.close(); S.es = null; }
+      S.swapGen = S.gen;
+      main.classList.add('switching');
+    } else {
+      renderHead(); renderUsage();
+      inner.innerHTML = '<div class="empty">加载中…</div>';
+    }
+    var gen = S.gen;
+    loadMsgs(undefined, land).catch(function () {
+      if (gen !== S.gen) return;
+      unswitch(); inner.innerHTML = '<div class="empty">载入失败</div>';
+    }).then(function () { if (gen === S.gen) connect(); });   // 被后一次点击取代的由那一次去连
+  };
+  // 待替换的那次换窗口落地 (或被更新的一次取代): 收起加载态, 补画留着没动的页头页脚。返回它是否在等。
+  var unswitch = function () {
+    var was = S.swapGen != null;
+    if (!was) return false;
+    S.swapGen = null;
+    main.classList.remove('switching');
+    renderHead(); renderUsage();
+    return true;
   };
 
   // 换视角: 窗口尽量留在同一个群 —— 从群里的一条消息切过去, 最想看的是对方在这个群
@@ -1631,7 +1660,7 @@
     // 群里「我与 X」时换到 X, 对面看到的是「X 与 from」—— 同一段往来, 选中这一对而不是整个群。
     var withBack = keep && WITH === id ? from : '';
     // 整个频道 / 两人私聊 / 群里的一对, 消息集合都与视角无关 —— 集合没变就就地翻面。
-    var same = VIEW === 'msgs' && (!WITH || withBack) && !SESSION && (keep || CONV.indexOf('p:') === 0);
+    var same = VIEW === 'msgs' && (!WITH || withBack) && !SESSION && (keep || CONV.indexOf('p:') === 0) && S.swapGen !== S.gen;
     ROLE = id; WITH = withBack; SESSION = ''; VIEWPOINT = '';
     CONV = keep || (CONV.indexOf('p:') === 0 ? 'p:' + from : '');
     // 停在关系图时换视角 = 选中新视角自己那张卡片: 先开它的全部对话 (不留旧选中 / 空白),

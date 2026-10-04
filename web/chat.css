@@ -330,6 +330,14 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
   padding: 16px 20px 28px; -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
 }
 .thread-in { display: flex; flex-direction: column; gap: 14px }
+/* 换窗口时旧内容留着等新内容: 不接点击, 稍候才变暗 (快的切换看不出闪), 页头底边一道细进度条。 */
+.main.switching .thread-in, .main.switching .chathead > :not(.back) { pointer-events: none }
+.main.switching .thread-in { opacity: .6; transition: opacity .2s .15s }
+.main.switching .chathead {
+  background-image: linear-gradient(var(--accent), var(--accent)); background-repeat: no-repeat;
+  background-size: 40% 2px; animation: swbar 1s ease-in-out infinite;
+}
+@keyframes swbar { from { background-position: -67% 100% } to { background-position: 167% 100% } }
 .empty { color: var(--faint); text-align: center; padding: 60px 0; font-size: 13px }
 .more-btn {
   align-self: center; background: var(--card); border: 1px solid var(--line); border-radius: 16px;
