@@ -12,6 +12,7 @@
 - 群况快照之后不再只挂生收改名: 每次注入现算一遍表, 与「上次告诉这个收件人的那一行」不同的行 (state 变了、cache 冷热翻了、ctx 跨了 50k 一档、职责改了) 以 `<system-reminder wezard="roster" mode="delta">` 挂上, 同列格式 —— 此前整表之后 state / ctx / cache 不再更新, 管家手里的值能旧到窗口 (近 10 次注入) 那头。比对按窗口里最新的 `v:<name>=…` 键 (A→B→A 也会再报), 没变就一行不挂; 窗口与整表的重发时机不变。
 
 - 管家手闸改成「读代码一律拒」: `Read` / `Grep` / `Glob` / `NotebookRead` / `LSP`, 以及命令位上读文件的 Bash (`cat` / `head` / `tail` / `sed` / `awk` / `grep` / `rg` / `git show|diff|blame|grep` 等; 管道后的 `grep` / `head` 读的是上游输出, 不算) 与改文件、开子代理同级, 一次都不放; `stewardBudget` 只剩给其余命令 (`git log` / `ls` / 外部工具) 计次。此前按调用次数计, 管家 grep 一下、分段 Read 两刀就在 4 次内读完一个模块, 照宪章「看一眼代码能答 → 自己答」答了机制题。宪章检查单第 2 条收成「跑一条状态命令就能答」, 第 3 条点名「机制 / 原理 / 现在还会不会… / 方案 / 排查 / 改动, 哪怕看一眼就像能答 → 派出去」; 人话尾巴的 `hint` 同步改。`stewardBudget: -1` 仍整个关掉手闸。已在跑的管家要 `handoff` 才换上新宪章, 拦截随 reload 即生效。
+- 「活干完就 `stop_wizard` 收掉分身」改成「干完别急着收」(宪章工具行与编排段、`stop_wizard` 描述): 保温默认关, 闲着的分身不耗 token; pane 超 `maxPanes` 时守护进程从最久没动的收起、绑定留着, 追问时 `--resume` 原样续上 —— 而 `end` 连绑定一起丢, 同一话题的续篇只能白板新起重读。`end` 只留给话题确已了结、跑偏、或撞上 `cloneMax` (先收最早了结的) 时。已在跑的 wizard 要 `handoff` 才换上宪章。
 ### Added
 - 人对管家说的话注入时尾巴挂一行 `<system-reminder wezard="hint" role="steward">`: 一两句能答、不用读代码 → 自己答; 要读多处代码 / 改文件 / 跑很久 / 分好几步 → `dispatch`, 复杂的带 `lead:true` 开需求单。只挂人的话 (斜杠命令除外), 回执 / 同伴 / 定时那几轮不挂; 不进 `parseEnvelope`。
 
