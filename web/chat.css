@@ -20,6 +20,8 @@
   --priv: #9a5b10;    /* 私聊 */
   --human: #12715a;  /* 人名 —— 青绿, 与 wizard (墨色) 和群名 (暗金) 三分 */
   --chat: #7d6410;    /* 群名 —— 暗金, 与 role 名 (墨色 + 视角色的点) 分开: 群是频道不是 role */
+  --wezard: #6b3fa0;  /* 系统 wezard (守护进程与认不出的发话方) —— 紫金: 紫起金收, 两端都压暗到正文对比度 */
+  --wezard-gold: #9a6a00;
   /* 头像底: 不透明, 且由 card/accent 推出 —— 叠在选中/高亮/关系图任何底色上都不变色, 换主题时随 token 走。 */
   --av-bg: var(--card);
   --av-line: var(--line);
@@ -46,6 +48,11 @@ button { font: inherit; color: inherit }
 .nm.human::before, .nm.task::before, .nm.system::before, .nm.chat::before { content: none }
 .nm.chat, .ch-who .sub .up { color: var(--chat) }
 .nm.human { color: var(--human) }
+.nm.system {
+  color: var(--wezard);
+  background: linear-gradient(90deg, var(--wezard), var(--wezard-gold));
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+}
 
 /* ── 侧栏: 我 + 会话 ─────────────────────────────────────────────── */
 .side {

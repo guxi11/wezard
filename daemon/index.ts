@@ -685,7 +685,7 @@ const main = async (): Promise<void> => {
      *  read_chat; 认不出 = ""。 */
     const audienceName = (channel: string, asker: Asker | undefined): string => {
       const id = audienceOf(channel, asker);
-      return id === "human:" ? "" : id.slice("human:".length);
+      return id.startsWith("human:") ? id.slice("human:".length) : "";
     };
     // 挂起事项表 (见 pending-items.ts): 派活时记一行, 回执落定时由下面的 onOutcome 记账。
     const ledger = createLedger(loadJsonMap<PendingItem>(cfg.wrc.mirror.pendingFile, pendingGc));

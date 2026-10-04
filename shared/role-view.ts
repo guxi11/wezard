@@ -7,13 +7,13 @@
 // 一轮 turn 在这里拆成两条消息:
 //   入  发话方 → 该 wizard     userQuery
 //   出  该 wizard → 发话方     本轮的回复 (文本 + 工具细节)
-// 发话方: 同伴 (from.kind=peer) / 定时任务 (task) / 人 (speaker; 认不出就是
-// 「未知」)。消息落在哪个会话由 channel 决定 —— 公开频道 (群 / 与人的单聊) 按 base
+// 发话方: 同伴 (from.kind=peer) / 定时任务 (task) / 人 (speaker; 认不出是谁就归
+// 系统 wezard —— 不另立一个「未知」role)。消息落在哪个会话由 channel 决定 —— 公开频道 (群 / 与人的单聊) 按 base
 // 归并, 私聊按对端 wizard 归并。
 //
-// role id: wizard 就是它的 target key; 人是 `human:<userid>` (`human:` = 不知道是谁);
+// role id: wizard 就是它的 target key; 人是 `human:<userid>`;
 // 定时任务是 `task:<id>` —— 它只发不收, 不能切成视角。系统是 `system:` (名为 wezard):
-// agent team 队友的话以 `<teammate-message>` 写进 transcript 的 user 行, 长得和人在
+// 认不出是谁的发话方 / 听话方都归它; agent team 队友的话以 `<teammate-message>` 写进 transcript 的 user 行, 长得和人在
 // 终端里打的字一样, 但不是人说的 —— 归给系统, 同样不能切成视角。人不用 `user:<id>`: 那正是
 // 「与这个人的单聊」里默认 wizard 的 target, 两者字面相同, 同一条消息会变成自己对自己说。
 import { baseOfKey, labelFor, stripSigil, tagOfKey } from "./session-label.js";
@@ -60,7 +60,7 @@ export const unwrapMates = (q: string): string =>
   q.replace(/<teammate-message\b[^>]*>\s*/g, "").replace(/\s*<\/teammate-message>/g, "");
 
 export const senderOf = (r: TurnDetailRecord): string => {
-  if (r.from?.kind === "peer") return r.from.from || "human:";
+  if (r.from?.kind === "peer") return r.from.from || SYSTEM;
   if (r.from?.kind === "task") return `task:${r.from.taskId || "?"}`;
   // 保温 ping 是守护进程打的, 不是人: 频道上挂着的 speaker 是上一句人话留下的。
   if (isKeepaliveTurn(r)) return SYSTEM;
@@ -70,7 +70,7 @@ export const senderOf = (r: TurnDetailRecord): string => {
   if (r.speaker) return humanOf(r.speaker);
   const ch = channelOf(r);
   // 与人的单聊里发话的只可能是那个人。
-  return ch.startsWith("user:") ? humanOf(ch) : "human:";
+  return ch.startsWith("user:") ? humanOf(ch) : SYSTEM;
 };
 
 /** 顶层会话里的轮次: 去空壳、去子 agent (它内联在父轮里)。保温 ping 留着 ——
@@ -88,9 +88,9 @@ const PINGS = new WeakMap<TurnDetailRecord, boolean>();
 
 /** 一个公开频道里听话的那一方: 与人的单聊是那个人; 群里是这条链的链头 (守护进程写 turn /
  *  post 时顺着派活链记下的, 见 Asker) —— 只在他正是在这个群里开的口时才算; 认不出就是
- *  `human:` (未知), 不拿群里别的开口的人去猜: 一个 wizard 可能同时在答好几个人。 */
+ *  系统 wezard, 不拿群里别的开口的人去猜: 一个 wizard 可能同时在答好几个人。 */
 export const audienceOf = (channel: string, asker: Asker | undefined): string =>
-  channel.startsWith("user:") ? humanOf(channel) : asker?.chat === channel ? humanOf(asker.who) : "human:";
+  channel.startsWith("user:") ? humanOf(channel) : asker?.chat === channel ? humanOf(asker.who) : SYSTEM;
 
 /** 回执轮: 守护进程把同伴那一轮的终句原样转进发话方的会话。 */
 const isReceipt = (r: TurnDetailRecord): boolean => r.from?.kind === "peer" && r.from.receipt === true;
@@ -183,11 +183,10 @@ export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFact
     if (id.startsWith("task:")) return `定时 ${id.slice(5)}`;
     if (id === SYSTEM) return "wezard";
     if (wizards.has(id)) return (facts_.get(id)?.name ?? "").trim() || tagOfKey(id) || chatName(baseOfKey(id)) || id;
-    if (id === "human:") return "未知";
     return id.startsWith("human:") ? id.slice(6) : id;
   };
   const labelOf = (id: string): string =>
-    id.startsWith("task:") ? "⏰" : id === SYSTEM ? "🧙" : wizards.has(id) ? labelFor(nameOf(id)) : "👤";
+    id.startsWith("task:") ? "⏰" : id === SYSTEM ? "🧙‍♂️" : wizards.has(id) ? labelFor(nameOf(id)) : "👤";
   const byName = new Map([...wizards].map((t) => [fold(nameOf(t)), t] as const));
   const resolve = (ref: string): string | undefined => {
     const r = (ref ?? "").trim();
@@ -195,7 +194,9 @@ export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFact
     if (wizards.has(r)) return r;
     const named = byName.get(fold(r));
     if (named) return named;
-    if (/^human:[^#]*$/.test(r)) return r;
+    // 老链接里的 `human:` (从前「未知」的那个人) 就是现在的系统 wezard。
+    if (r === "human:") return SYSTEM;
+    if (/^human:[^#]+$/.test(r)) return r;
     return /^user:[^#]+$/.test(r) ? humanOf(r) : undefined;
   };
   // 只有摘要要状态, 而 makeDirectory 每次 flush 都会建 —— 用到才扫一遍。

@@ -144,11 +144,11 @@
   };
   var roleLabel = function (id) {
     var k = names[id] || {}, n = nodeOf(id);
-    return k.label || (n && n.label) || ({ human: '👤', task: '⏰', system: '🧙' })[kindOf(id)] || '🧙';
+    return k.label || (n && n.label) || ({ human: '👤', task: '⏰', system: '🧙‍♂️' })[kindOf(id)] || '🧙';
   };
   // `.name` 的点由 CSS 画 —— 人与定时任务没有地址, 不画点。
   var nameOf = function (id) { return (kindOf(id) === 'wizard' ? '.' : '') + roleName(id); };
-  var canSwitch = function (id) { return !!id && kindOf(id) !== 'task' && kindOf(id) !== 'system' && id !== 'human:'; };
+  var canSwitch = function (id) { return !!id && kindOf(id) !== 'task' && kindOf(id) !== 'system'; };
   // 头像与名字就是进入那个 role 视角的入口 —— 侧栏项、会话头、消息行同一种读法。
   // 是 <span> 不是 <button>: 侧栏里它嵌在整行那颗按钮里。
   var goSpan = function (cls, id, inner) {
@@ -1303,7 +1303,7 @@
     var c = convOf(CONV);
     var two = !group || !!pairPeer(c) || (!!c && c.kind === 'all' && c.peers.length === 1);
     var dst = two ? '' : mine
-      ? (m.to && m.to !== 'human:' && m.to !== peer ? m.to : '')
+      ? (m.to && m.to !== 'system:' && m.to !== peer ? m.to : '')
       : (m.to !== me && group ? m.to : '');
     // 说给谁画进文本泡泡开头 (头像 + 名字); 点它走移交行同一套跳转 (data-hfrom/hto/hch + gid/gts), 不换页面视角。
     var toIn = dst
@@ -2586,7 +2586,7 @@
   };
   // 三层: 谁 → 对谁 · 何时 / 命中的那一截 / 在哪个会话。
   var msgItem = function (h, q) {
-    var to = h.to && h.to !== h.from && h.to !== 'human:'
+    var to = h.to && h.to !== h.from && h.to !== 'system:'
       ? '<span class="arr">→</span>' + nm(h.to, h.toName) : '';
     return {
       kind: 'msg',
