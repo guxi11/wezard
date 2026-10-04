@@ -2555,10 +2555,11 @@ const main = async (): Promise<void> => {
         const victims = recycle ? j.members.filter((mm) => mm.spawned && mm.target !== self) : [];
         // 收掉之前把它们手上没落定的活记成 canceled: 不然发起者收工之后还会收到一串 dead 回执。
         victims.forEach((mm) => receipts.cancel(mm.target, j.owner));
-        // 留档要的 sessionId 得在回收之前取: killPane 连绑定一起删。
+        // 留档要的 sessionId 在回收之前取 (回收只关 pane、绑定留着, 先取也不吃亏)。
         const sids = new Map([j.owner, ...j.members.map((mm) => mm.target)].map((t) => [t, m.sessionInfo(t)?.sessionId ?? ""]));
         const killed = await victims.reduce(
-          async (acc, mm) => (await acc) + ((await m.killPane(mm.target)).ok ? 1 : 0),
+          // 只关 pane、绑定留着 (同 pane cap 的 reap): 收工后再找它, `--resume` 带全上下文复活, 不是白板。
+          async (acc, mm) => (await acc) + ((await m.sleepPane(mm.target)).ok ? 1 : 0),
           Promise.resolve(0),
         );
         // 取消: 还没落定、又不是为这张单生的成员 (长住 wizard) 不杀, 但它们名下这张单派的活记成 canceled, 发起者不会再收到一串回执。

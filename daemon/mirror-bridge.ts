@@ -2074,6 +2074,10 @@ export interface MirrorBridge {
    *  persisted binding so nothing resurrects it. The chat auto-spawns a fresh
    *  session on its next message. */
   killPane: (target: string) => Promise<{ ok: boolean; reason?: string }>;
+  /** Put a session to sleep: kill its pane but KEEP the persisted binding, like
+   *  the pane cap's reap — the next inbound resurrects it via the dead-pane
+   *  `--resume` path with its whole context (reap = asleep, /kill = dead). */
+  sleepPane: (target: string) => Promise<{ ok: boolean; reason?: string }>;
   /** Transcript mtime of the session bound to `target`; 0 = no session / not
    *  written yet. One statSync, no tmux — no pane probe. */
   lastActivity: (target: string) => number;
@@ -5627,6 +5631,35 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   };
 
   // ── Peer graph (sibling sessions of one chat) ────────────────────────
+  // 关一个会话的 pane。`drop` = /kill: 连绑定一起删, 下一条消息另起白板; 否则只是睡着 (同 pane cap 的 reap), 绑定留着、`--resume` 带全上下文复活。
+  const downPane = async (target: string, drop: boolean): Promise<{ ok: boolean; reason?: string }> => {
+    // paneOf (not byTarget.get) so a binding surviving only in the persisted
+    // store — e.g. after a reload that couldn't re-attach — is still killable.
+    const a = byTarget.get(target);
+    const pane = a?.tmuxPane || paneOf(target);
+    if (!a && !pane) return { ok: false, reason: "no session bound to target" };
+    if (pane && (await tmuxPaneAlive(pane))) {
+      // Esc first, like /stop: a mid-generation CLI gets a beat to unwind and
+      // flush its transcript before the TTY is yanked out from under it.
+      await runTmux(["send-keys", "-t", pane, "Escape"]);
+      await sleep(250);
+      const r = await runTmux(["kill-pane", "-t", pane]);
+      if (r.code !== 0) return { ok: false, reason: `kill-pane failed: ${r.stdout.slice(-200) || r.code}` };
+    }
+    if (a) detach(a, drop ? "/kill" : "sleep");
+    if (!drop) {
+      log.info({ target, sessionId: a?.sessionId, pane }, "mirror sleep — pane killed, binding kept");
+      return { ok: true };
+    }
+    // Drop the persisted record too — keeping it would let the next inbound
+    // resurrect this very session via the dead-pane `--resume` self-heal,
+    // which is the opposite of what /kill means. The chat then auto-spawns a
+    // fresh session on its next message.
+    deps.store.drop(target);
+    log.info({ target, sessionId: a?.sessionId, pane }, "mirror /kill — pane killed, binding dropped");
+    return { ok: true };
+  };
+
   // A chat's sessions are exactly the keys sharing its base principal: the
   // untagged default plus every `#tag`. Live attachments are the truth; the
   // persisted store fills in cold bindings so a peer nobody has talked to since
@@ -6490,29 +6523,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (!opts?.teardown && !escOk) return { ok: false, reason: escReason };
       return { ok: true, torndown, escOk, escReason: escReason || undefined };
     },
-    killPane: async (target) => {
-      // paneOf (not byTarget.get) so a binding surviving only in the persisted
-      // store — e.g. after a reload that couldn't re-attach — is still killable.
-      const a = byTarget.get(target);
-      const pane = a?.tmuxPane || paneOf(target);
-      if (!a && !pane) return { ok: false, reason: "no session bound to target" };
-      if (pane && (await tmuxPaneAlive(pane))) {
-        // Esc first, like /stop: a mid-generation CLI gets a beat to unwind and
-        // flush its transcript before the TTY is yanked out from under it.
-        await runTmux(["send-keys", "-t", pane, "Escape"]);
-        await sleep(250);
-        const r = await runTmux(["kill-pane", "-t", pane]);
-        if (r.code !== 0) return { ok: false, reason: `kill-pane failed: ${r.stdout.slice(-200) || r.code}` };
-      }
-      if (a) detach(a, "/kill");
-      // Drop the persisted record too — keeping it would let the next inbound
-      // resurrect this very session via the dead-pane `--resume` self-heal,
-      // which is the opposite of what /kill means. The chat then auto-spawns a
-      // fresh session on its next message.
-      deps.store.drop(target);
-      log.info({ target, sessionId: a?.sessionId, pane }, "mirror /kill — pane killed, binding dropped");
-      return { ok: true };
-    },
+    killPane: (target) => downPane(target, true),
+    sleepPane: (target) => downPane(target, false),
     lastActivity: (target) => {
       const jsonl = jsonlOf(target);
       try { return jsonl ? statSync(jsonl).mtimeMs : 0; } catch { return 0; }
