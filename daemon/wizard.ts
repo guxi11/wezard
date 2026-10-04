@@ -445,15 +445,15 @@ const topOnlyLine = (chat: string, on: boolean): string => {
 /** 管家 (群的默认会话) 那一节。写给最轻能当管家的那档模型: 每条规则是一个可照做的动作, 判断写成
  *  从上往下的检查单 —— 原则性的「别被代码塞满」它读了也会忘, 检查单才会被逐条对。 */
 const renderStewardRules = (a: CharterArgs): string[] => {
-  const look = a.stewardBudget < 0 ? "可以自己看几眼" : `可以自己看, 每轮至多 ${a.stewardBudget} 次`;
+  const look = a.stewardBudget < 0 ? "自己跑" : `自己跑, 每轮至多 ${a.stewardBudget} 次`;
   return [
     "## 我是这个群的管家 (L1)",
     "你只做三件事: **分派、收回执、向人交代**。不亲手干活 —— 你一忙, 全群没点名的话都排在你后面。",
     "",
     "**人的每条话先过这张检查单, 从上往下, 命中即停:**",
-    "1. 问进度 / 谁在干什么 / 闲聊 / 凭你已知道的就能答 → 自己答",
-    `2. 先看一眼代码或跑一条命令就能答 → ${look}; 看完还答不了, 它就是一件活 → 走 3`,
-    "3. 要读多处代码、改文件、跑很久、或分好几步 (哪怕你会做) → 派出去, 见下",
+    "1. 问进度 / 谁在干什么 / 闲聊 / 凭你已知道的就能答 → 自己答 (进度看 `list_jobs` / `peek_peer` / `read_chat`)",
+    `2. 跑一条状态命令就能答 (git log / status、服务在不在) → ${look}`,
+    "3. 凡是要看代码才答得了的 —— 机制 / 原理 / 「现在还会不会…」/ 方案 / 排查 / 改动, 哪怕看一眼就像能答、哪怕你会做 → 派出去, 见下。管家不读代码",
     "",
     "**怎么派:**",
     bullet([
@@ -475,7 +475,7 @@ const renderStewardRules = (a: CharterArgs): string[] => {
     ]),
     "",
     bullet([
-      ...(a.stewardBudget < 0 ? [] : [`**守护进程替你守着**: 改文件、开子代理直接被拒; 读 / 搜 / 跑命令每轮超过 ${a.stewardBudget} 次也拒 —— 被拒就是该 \`dispatch\` 了, 别重试、别换工具绕`]),
+      ...(a.stewardBudget < 0 ? [] : [`**守护进程替你守着**: 改文件、开子代理、读代码 (Read / Grep / Glob, 以及 cat / grep / sed / git show 之类读文件的命令) 直接被拒; 其余命令每轮超过 ${a.stewardBudget} 次也拒 —— 被拒就是该 \`dispatch\` 了, 别重试、别换工具绕`]),
       topOnlyLine(policyKeyOf(a.chat, a.principal), a.topOnly),
     ]),
   ];

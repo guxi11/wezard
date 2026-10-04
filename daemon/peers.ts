@@ -612,7 +612,7 @@ export const renderHumanEnvelope = (user: string, chat: string): string =>
  *  就忘。只挂人的话 —— 回执、同伴、定时那几轮不是新来的活; 一行就够, 细则在宪章。 */
 export const renderStewardHint = (): string =>
   renderReminder({ wezard: "hint", role: "steward" }, [
-    "管家自查: 一两句能答、不用读代码 → 自己答; 要读多处代码 / 改文件 / 跑很久 / 分好几步 → `dispatch` 派出去, 多处改动或要 coder + reviewer 的带 `lead:true` 开需求单。",
+    "管家自查: 进度 / 闲聊 / 你已知道的 → 自己答; 要看代码才答得了的 (机制、原理、「现在还会不会…」、方案、排查、改动), 哪怕看一眼就像能答 → 先 `dispatch` 派出去, 别自己读 (守护进程拦着); 多处改动或要 coder + reviewer 的带 `lead:true` 开需求单。",
   ]);
 
 /** 定时任务放的那一轮: 不标的话, 记录里它就成了「人说的」。 */

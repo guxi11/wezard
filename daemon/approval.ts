@@ -2080,6 +2080,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
         sessionId,
         turn: openTurnsOf(owner, sessionId)[0]?.id ?? "",
         toolName,
+        toolInput,
         budget: chatPolicyOf(cfg, owner).stewardBudget,
       });
       if (reason) {

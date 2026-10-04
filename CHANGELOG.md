@@ -11,6 +11,7 @@
 - 群况快照 (`<system-reminder wezard="roster" mode="full">`) 从 `name,state,job` 扩成 `name,state,ctx,cache,job`: `ctx` 是上下文用量 (`84k`), `cache` 是 prompt cache 冷热 (`warm` / `cold`, 与 `route_candidates` / `tell_peer` 冷门控同一口径), 读不到会话的留空; `state` 多一个 `parked` (闲着却悬着工具调用 = 停在审批卡上, 此前算作 `busy`)。表头上方加一行列义 (`busy` / `parked` / `idle` / `-` 各指什么、冷了唤醒要整段重写 ctx、只在点名 `to` 时要掂量 —— `dispatch` 自己算), 只随整表出现 (每个会话窗口一次), 变动行不重复。tier / 模型不进表: 只在 spawn 时由 `tier` 决定, 点名现成的 wizard 时看 `wizard_roster`。
 - 群况快照之后不再只挂生收改名: 每次注入现算一遍表, 与「上次告诉这个收件人的那一行」不同的行 (state 变了、cache 冷热翻了、ctx 跨了 50k 一档、职责改了) 以 `<system-reminder wezard="roster" mode="delta">` 挂上, 同列格式 —— 此前整表之后 state / ctx / cache 不再更新, 管家手里的值能旧到窗口 (近 10 次注入) 那头。比对按窗口里最新的 `v:<name>=…` 键 (A→B→A 也会再报), 没变就一行不挂; 窗口与整表的重发时机不变。
 
+- 管家手闸改成「读代码一律拒」: `Read` / `Grep` / `Glob` / `NotebookRead` / `LSP`, 以及命令位上读文件的 Bash (`cat` / `head` / `tail` / `sed` / `awk` / `grep` / `rg` / `git show|diff|blame|grep` 等; 管道后的 `grep` / `head` 读的是上游输出, 不算) 与改文件、开子代理同级, 一次都不放; `stewardBudget` 只剩给其余命令 (`git log` / `ls` / 外部工具) 计次。此前按调用次数计, 管家 grep 一下、分段 Read 两刀就在 4 次内读完一个模块, 照宪章「看一眼代码能答 → 自己答」答了机制题。宪章检查单第 2 条收成「跑一条状态命令就能答」, 第 3 条点名「机制 / 原理 / 现在还会不会… / 方案 / 排查 / 改动, 哪怕看一眼就像能答 → 派出去」; 人话尾巴的 `hint` 同步改。`stewardBudget: -1` 仍整个关掉手闸。已在跑的管家要 `handoff` 才换上新宪章, 拦截随 reload 即生效。
 ### Added
 - 人对管家说的话注入时尾巴挂一行 `<system-reminder wezard="hint" role="steward">`: 一两句能答、不用读代码 → 自己答; 要读多处代码 / 改文件 / 跑很久 / 分好几步 → `dispatch`, 复杂的带 `lead:true` 开需求单。只挂人的话 (斜杠命令除外), 回执 / 同伴 / 定时那几轮不挂; 不进 `parseEnvelope`。
 
