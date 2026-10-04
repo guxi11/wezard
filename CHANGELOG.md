@@ -15,6 +15,7 @@
 - 「活干完就 `stop_wizard` 收掉分身」改成「干完别急着收」(宪章工具行与编排段、`stop_wizard` 描述): 保温默认关, 闲着的分身不耗 token; pane 超 `maxPanes` 时守护进程从最久没动的收起、绑定留着, 追问时 `--resume` 原样续上 —— 而 `end` 连绑定一起丢, 同一话题的续篇只能白板新起重读。`end` 只留给话题确已了结、跑偏、或撞上 `cloneMax` (先收最早了结的) 时。已在跑的 wizard 要 `handoff` 才换上宪章。
 - **行为变化** `close_job` 回收为工单生出来的分身时只关 pane、**保留会话绑定** (新的 `MirrorBridge.sleepPane`, 与 pane 超 `maxPanes` 时的自动收起同一语义), 收工后再 `tell_peer` 它会 `--resume` 带全上下文复活 —— 此前走 `killPane` (同 `stop_wizard` end / `/kill`) 连绑定一起删, 收工后的追问 / 返工只能白板新起重读。先 cancel 回执再关 pane 的顺序、只回收「为这张单 spawn 的」规则不变; 被收的分身不再占 `cloneMax` 名额 (只数活着的 pane)。`stop_wizard` end 照旧丢绑定。宪章、`close_job` / `open_job` / `stop_wizard` 描述同步改。
 ### Added
+- rolepage 用量条的 💰 费用悬停改成账单: 按模型 (同显示名同单价并一行, 子 agent 的轮次按它自己的模型并入) 列出单价表 (USD / 百万 token: in / out / cw / cr) 与「token × 单价 = 金额」逐项、小计、多模型时的合计; 认不出价格的模型单列「未计入」。账单由服务端随 usage 下发 (`AggUsage.bill`), 单价取自计价用的同一份 `priceOf` (`shared/model-prices.ts` LiteLLM 快照), 小计是逐轮 `costOf` 的和, 与总价同源。
 - 人对管家说的话注入时尾巴挂一行 `<system-reminder wezard="hint" role="steward">`: 一两句能答、不用读代码 → 自己答; 要读多处代码 / 改文件 / 跑很久 / 分好几步 → `dispatch`, 复杂的带 `lead:true` 开需求单。只挂人的话 (斜杠命令除外), 回执 / 同伴 / 定时那几轮不挂; 不进 `parseEnvelope`。
 
 ### Fixed

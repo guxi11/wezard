@@ -10,7 +10,17 @@
 // exactly the same view from the records that were POSTed to it.
 import { baseOfKey, labelFor, tagOfKey } from "./session-label.js";
 import type { DetailRecord, MarkDetailRecord, PostDetailRecord, TurnDetailRecord, TurnOrigin, TurnUsage } from "./detail-store.js";
-import { costOf, modelLabel, priceOf } from "./pricing.js";
+import { costOf, modelLabel, priceOf, type Price, type Tokens } from "./pricing.js";
+
+/** 账单的一行: 一个模型 (同一显示名、同一单价) 的 token 合计 × 单价 = 它的那份费用。
+ *  price 缺 = 价格表里认不出, 这几次调用没计进 cost。cost 是逐轮 costOf 的和, 与总账同源。 */
+export interface BillRow extends Tokens {
+  model: string;
+  label: string;
+  price?: Price;
+  calls: number;
+  cost: number;
+}
 
 export interface AggUsage extends TurnUsage {
   /** 此刻的上下文: 最近一轮主会话 (子 agent 有自己的窗口, 不算) 最后一次调用送入的
@@ -22,11 +32,13 @@ export interface AggUsage extends TurnUsage {
   unpriced: number;
   turns: number;
   tools: number;
+  /** cost 的计算过程: 按模型分行, 子 agent 的轮次按它自己的模型并进来。 */
+  bill: BillRow[];
 }
 
 const ZERO: AggUsage = {
   input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0,
-  ctx: 0, cost: 0, unpriced: 0, turns: 0, tools: 0,
+  ctx: 0, cost: 0, unpriced: 0, turns: 0, tools: 0, bill: [],
 };
 
 export interface TagSummary {
@@ -152,9 +164,24 @@ const ctxNow = (turns: readonly TurnDetailRecord[]): number => {
   return last?.usage ? lastCtx(last.usage) : 0;
 };
 
+// 同一显示名 + 同一单价并成一行 (claude-opus-5-5 与 claude-opus-5-5[1m] 是一个模型)。
+const billKey = (label: string, p: Price | undefined): string => `${label}|${p ? [p.in, p.out, p.cacheWrite, p.cacheRead].join() : ""}`;
+
+const addBill = (bill: readonly BillRow[], model: string, p: Price | undefined, u: TurnUsage, cost: number): BillRow[] => {
+  const label = model ? modelLabel(model) : "未知模型";
+  const k = billKey(label, p);
+  const cur = bill.find((b) => billKey(b.label, b.price) === k);
+  const row: BillRow = cur
+    ? { ...cur, input: cur.input + u.input, output: cur.output + u.output, cacheRead: cur.cacheRead + u.cacheRead,
+        cacheWrite: cur.cacheWrite + u.cacheWrite, calls: cur.calls + u.calls, cost: cur.cost + cost }
+    : { model, label, price: p, input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, calls: u.calls, cost };
+  return cur ? bill.map((b) => (b === cur ? row : b)) : [...bill, row];
+};
+
 const addUsage = (a: AggUsage, r: TurnDetailRecord, now: number): AggUsage => {
   const u = r.usage;
   const p = u && priceOf(r.model);
+  const cost = u && p ? costOf(p, u) : 0;
   return {
     input: a.input + (u?.input ?? 0),
     output: a.output + (u?.output ?? 0),
@@ -163,10 +190,11 @@ const addUsage = (a: AggUsage, r: TurnDetailRecord, now: number): AggUsage => {
     calls: a.calls + (u?.calls ?? 0),
     serviceTier: a.serviceTier ?? u?.serviceTier,
     ctx: a.ctx,
-    cost: a.cost + (u && p ? costOf(p, u) : 0),
+    cost: a.cost + cost,
     unpriced: a.unpriced + (u && !p ? u.calls : 0),
     turns: a.turns + 1,
     tools: a.tools + r.items.filter((it) => it.t === "tool_use").length,
+    bill: u ? addBill(a.bill, r.model ?? "", p || undefined, u, cost) : a.bill,
   };
 };
 

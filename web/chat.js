@@ -987,11 +987,29 @@
     return n < .01 ? '<$0.01' : '$' + (n < 10 ? n.toFixed(2) : n < 1000 ? n.toFixed(1) : Math.round(n));
   };
   // 费用: 有认不出价格的模型就在数前加「≥」—— 实际只多不少; 一分钱都没算出来就不占位。
+  // 计算过程: 服务端按模型分好行 (bill, 单价取自计价用的同一份价格表), 这里逐项摆成「token × 单价 = 金额」。
+  var BILL = [['input', 'in', 'in'], ['output', 'out', 'out'], ['cacheWrite', 'cw', 'cacheWrite'], ['cacheRead', 'cr', 'cacheRead']];
+  var usd4 = function (n) { return '$' + (n >= 100 ? n.toFixed(2) : n.toFixed(4)); };
+  var billLines = function (b) {
+    var head = b.label + (b.model && b.model !== b.label ? ' (' + b.model + ')' : '') + ' · ' + b.calls + ' 次请求';
+    if (!b.price) return [head, '  价格表里认不出, 未计入'];
+    return [head, '  单价 $/百万: ' + BILL.map(function (k) { return k[1] + ' ' + b.price[k[2]]; }).join(' · ')]
+      .concat(BILL.filter(function (k) { return b[k[0]] > 0; }).map(function (k) {
+        return '  ' + k[1] + ' ' + b[k[0]].toLocaleString('en-US') + ' × $' + b.price[k[2]] + ' / 1M = ' +
+          usd4(b[k[0]] * b.price[k[2]] / 1e6);
+      }))
+      .concat(['  小计 ' + usd4(b.cost)]);
+  };
   var costKv = function (u) {
     if (!u.cost) return '';
     var txt = (u.unpriced ? '≥' : '') + fmtUsd(u.cost);
-    var tip = '估算费用 — 每轮按模型单价 (LiteLLM 价格表快照) 计 input / output / 缓存写 / 缓存读' +
-      (u.unpriced ? '\n另有 ' + u.unpriced + ' 次 API 请求的模型不在价格表里, 未计入' : '');
+    var bill = u.bill || [];
+    var priced = bill.filter(function (b) { return b.price; });
+    var tip = ['估算费用 ' + usd4(u.cost) + ' — 按模型单价 (LiteLLM 价格表快照, USD / 百万 token) 逐项累加', '']
+      .concat(bill.reduce(function (a, b) { return a.concat(billLines(b), ['']); }, []))
+      .concat(priced.length > 1 ? ['合计 ' + priced.map(function (b) { return usd4(b.cost); }).join(' + ') + ' = ' + usd4(u.cost)] : [])
+      .concat(u.unpriced ? ['另有 ' + u.unpriced + ' 次 API 请求的模型不在价格表里, 未计入'] : [])
+      .join('\n').replace(/\n+$/, '');
     return '<span class="kv kv-cost" title="' + esc(tip) + '" data-tip="' + esc(ICON.cost + ' ' + txt) +
       '"><i class="u-ic">' + ICON.cost + '</i><b>' + esc(txt) + '</b></span>';
   };
