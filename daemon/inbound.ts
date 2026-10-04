@@ -5,7 +5,7 @@ import type { WSClient, WsFrame, TextMessage, ImageMessage, MixedMessage, BaseMe
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
 import type { MirrorBridge } from "./mirror-bridge.js";
-import { tailTurnsWithTools, peerMentionPart, renderHumanEnvelope, type PeerInfo, type PeerMention } from "./peers.js";
+import { tailTurnsWithTools, peerMentionPart, renderHumanEnvelope, renderStewardHint, type PeerInfo, type PeerMention } from "./peers.js";
 import { keepalivePingSigs } from "../shared/keepalive.js";
 import { noticeSuffixFor } from "./notices.js";
 import { expandHome, sanitizeId } from "../shared/paths.js";
@@ -18,7 +18,7 @@ import { computeAuditReport } from "./audit.js";
 import { syncProjectConfig, renderSyncReport } from "./cfg-sync.js";
 import { captureQuota, renderQuotaReport } from "./quota.js";
 import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe, allNames, unlinkTags, normalizeTag, uniqueTag, displayName, tagLink } from "../shared/session-label.js";
-import { chatNameOf, clearChatName, listChatNames, setChatName, type CharterGuard } from "./chat-name.js";
+import { chatNameOf, clearChatName, listChatNames, setChatName, stewardTierOf, type CharterGuard } from "./chat-name.js";
 import { evictStaleName, reclaimChatName, wizardStore, type EvictDeps } from "./wizard.js";
 import { truncate } from "../shared/std.js";
 
@@ -1030,12 +1030,13 @@ export const installInboundRouter = (
     const chat = chatNameOf(cfg, channel);
     const homely = channel === baseOfKey(who) && channel.startsWith("user:");
     const envelope = slash || homely || !chat ? "" : renderHumanEnvelope(msg.from.userid, chat);
+    const steward = slash || !stewardTierOf(cfg, who) ? "" : renderStewardHint();
     // 同一条边界上再挂: 点名提示, 以及这个 wizard 不在场时群里发生的成员变动 (见 notices.ts,
     // 近几次注入里给过的不再重复)。
     const notice = noticeSuffixFor(who, text, { human: { channel } }, hint);
     try {
       // 回复回到发话的这个群 —— `who` 可能住在别的聊天 (名字全局可达)。
-      await bridge.dispatch({ principal: who, text: text + envelope + notice, images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}` });
+      await bridge.dispatch({ principal: who, text: text + envelope + steward + notice, images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}` });
     } catch (e) {
       log.error({ err: (e as Error).message }, "bridge dispatch failed");
       try { await client.replyStream(frame, msg.msgid, withTagHeader(who, `[wezard] error: ${(e as Error).message}`), true); } catch { /* ignore */ }

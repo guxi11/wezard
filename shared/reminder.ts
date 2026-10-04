@@ -12,6 +12,7 @@
 //             k (仅回执): 机器读的父 k (`chat:<base>` / `peer:<turn>:<key>`), 下一跳继承
 //   mention   names  (空格分隔的 `.name`)
 //   roster    正文里 `- ` 开头的每一行是一条变动
+//   hint      role=steward: 人对管家说的那一轮挂的「自己答还是派出去」(只给模型, 不读回)
 
 export type Attrs = Readonly<Record<string, string>>;
 export interface Reminder {

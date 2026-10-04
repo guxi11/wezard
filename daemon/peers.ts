@@ -608,6 +608,13 @@ export { parseEnvelope, type Envelope };
 export const renderHumanEnvelope = (user: string, chat: string): string =>
   renderReminder(envelopeAttrs.human(user, chat), [`这一轮是 \`${user}\` 在群 **${chat}** 里说的, 你的回复发回那个群。`]);
 
+/** 人对管家说的那一轮挂一行「自己答还是派出去」: 宪章里的检查项离这句话太远, sonnet 档的管家一接到活
+ *  就忘。只挂人的话 —— 回执、同伴、定时那几轮不是新来的活; 一行就够, 细则在宪章。 */
+export const renderStewardHint = (): string =>
+  renderReminder({ wezard: "hint", role: "steward" }, [
+    "管家自查: 一两句能答、不用读代码 → 自己答; 要读多处代码 / 改文件 / 跑很久 / 分好几步 → `dispatch` 派出去, 多处改动或要 coder + reviewer 的带 `lead:true` 开需求单。",
+  ]);
+
 /** 定时任务放的那一轮: 不标的话, 记录里它就成了「人说的」。 */
 export const renderTaskEnvelope = (taskId: string, quiet?: { turn: string }): string =>
   renderReminder(envelopeAttrs.task(taskId, quiet?.turn), quiet

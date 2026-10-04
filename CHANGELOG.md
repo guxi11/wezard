@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING** 管家模型改按档位配: `models.router` (`{model, effort}`) 换成 `models.steward` (tier 名, 取值同 `models.tiers`, 默认 `light`), 按群覆盖写 `chatPolicy.<chat>.steward`; 老的 `models.router` 不再读。管家 (群的默认会话) 新起的会话 —— 首条消息、`/new`、`set_workspace` 换目录、交接重开 (`handoff` 不再沿用旧模型) —— 都按此档起, 档压过绑定里记下的 effort; 死 pane 重生 (`--resume`) 仍沿用绑定记下的模型 (`set_model` 换上的也在那), 没记的才补管家档。已在跑的管家不动, 要换上就 `handoff` 或 `set_model`。`config_get({path:"models"})` 的依据在管家档那一行标「管家档」。
+- 管家宪章「我是这个群的管家」一节重写给 sonnet 档读: 判断「自己答还是派出去」写成从上往下、命中即停的三条检查单 (凭已知能答 → 自己答; 看一眼代码 / 跑一条命令能答 → 每轮至多 `stewardBudget` 次, 还答不了走下一条; 要读多处代码 / 改文件 / 跑很久 / 分好几步 → 派), 其余分「怎么派」(续篇先判、小活 `dispatch`、复杂活 `lead:true` + `criteria`、推翻 dispatch 的条件) 与「回执回来」(交代带取舍 / 遗留、对人别提单号、验收与返工) 两组; 顶层模式、私聊、手闸等硬约束不变。已在跑的管家要 `handoff` 才换上。
+
+### Added
+- 人对管家说的话注入时尾巴挂一行 `<system-reminder wezard="hint" role="steward">`: 一两句能答、不用读代码 → 自己答; 要读多处代码 / 改文件 / 跑很久 / 分好几步 → `dispatch`, 复杂的带 `lead:true` 开需求单。只挂人的话 (斜杠命令除外), 回执 / 同伴 / 定时那几轮不挂; 不进 `parseEnvelope`。
+
 ### Fixed
 - rolepage 未读归属: 一句未读只要在某一项点开后的详情里看得见, 就只记在这一项的红点, 不再挂到名字旁 —— 此前名字旁 (`peerUnread`) 只减去红点在数的那几句 (页面视角的未读), 这一项主人自己的未读即使就在这一项的详情里也被算成「切过去才看得到的」, 点开这一项一上屏就从名字旁消失。现在服务端给每一项一份账 (`ledgerOf`), 按点开它看到的消息 (`windowOf`, 与详情区取消息同一个函数) 切成不相交的两份: 红点 = 这里看得见的未读 (页面视角的 + 这一项主人的), 名字旁 = 主人在这里看不见的; 群这一行并上它各子项的, 子项不会大过群。侧栏会话项 / 子项 (含与我无往来的) 与关系图卡片 (`/api/glance`) 同一个实现, 未读判定收成一份 `unreadIndex` (去掉 `pendingOf` / `unreadByRole` / 摘要的 `peerUnread`); 基线前的与已落盘的已读由服务端先筛掉, 不再下发 `seen`。关系图卡片的账随看的 role 缓存, 换视角后不再借用上一个视角的。
 

@@ -51,7 +51,7 @@ import { errText } from "./last-response.js";
 import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagHeader, withLinkedTagHeader, linkedTagHead, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
-import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
+import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress, stewardTierOf } from "./chat-name.js";
 import { stripAnsi, paneIsBusy, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, lastModel, cacheTouchMs, cacheTtlSec, keepaliveStamps, openKeepalivePing, lastUserTurn, talkRounds, openToolUses, renderDialog, type PeerInfo, type PeerReply } from "./peers.js";
 import { keepalivePingSigs, isKeepalivePingText } from "../shared/keepalive.js";
 
@@ -5180,6 +5180,16 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
   }
 
+  /** 管家该跑的那一档 (模型 + effort); 不是管家 = undefined。 */
+  const stewardSpec = (target: string): { model?: string; effort?: Effort } | undefined => {
+    const tier = stewardTierOf(cfg, target);
+    return tier ? { model: cfg.models.tiers[tier].model || undefined, effort: cfg.models.tiers[tier].effort } : undefined;
+  };
+  /** 死 pane 重生 (`--resume` 同一个会话) 的模型: 绑定里记着的优先 —— set_model 换上的也记在那;
+   *  没记 (老绑定 / CLI 默认) 的管家补上管家档。 */
+  const respawnSpec = (a: { target: string; model?: string; effort?: string }): { model?: string; effort?: Effort } =>
+    a.model ? { model: a.model, effort: parseEffort(a.effort) } : stewardSpec(a.target) ?? { effort: parseEffort(a.effort) };
+
   const newSession = async (
     target: string,
     windowName?: string,
@@ -5231,11 +5241,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const baseBound = base === target ? undefined : byTarget.get(base)?.jsonlPath ?? deps.store.get(base)?.jsonlPath;
     const boundPath = prev?.jsonlPath ?? rec?.jsonlPath ?? baseBound;
     const effCli = cli ?? (boundPath ? backendForPath(expandHome(boundPath)).name : undefined);
-    // 群的默认会话 (管家) 没点名模型 / 档位时用 models.router。只管这里新起的 —— 死 pane
-    // 重生走绑定里记下的模型, 不经过这里; 已在跑的管家也不动 (换模型会让缓存整份重读)。
-    const router = !tagOfKey(target) && !isInternalKey(target) ? cfg.models.router : undefined;
-    const effModel = opts?.model?.trim() || router?.model || undefined;
-    const effEffort = opts?.effort ?? parseEffort(prev?.effort ?? deps.store.get(target)?.effort) ?? router?.effort;
+    // 管家 (群的默认会话) 新起的会话按管家档起 (models.steward / chatPolicy), 档压过绑定里记下的
+    // effort —— `/new`、换目录、交接重开都是让改过的档位生效的那一下。点名了模型就整档让开。
+    // 已在跑的管家不动 (换模型会让缓存整份重读); 死 pane 重生见 respawnSpec。
+    const steward = opts?.model?.trim() ? undefined : stewardSpec(target);
+    const effModel = opts?.model?.trim() || steward?.model || undefined;
+    const effEffort = opts?.effort ?? steward?.effort ?? parseEffort(prev?.effort ?? deps.store.get(target)?.effort);
     if (prev?.tmuxPane) {
       // Best-effort kill; ignore errors (pane may already be dead).
       void runTmux(["kill-pane", "-t", prev.tmuxPane]);
@@ -6402,7 +6413,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // Same resume-fork hazard as dispatch: snapshot before spawn, re-bind
         // onto the forked jsonl once it appears (EOF offset — fork is seeded).
         const resumeBaseline = listJsonls(dirname(a.jsonlPath));
-        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: displayName(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, model: a.model || undefined, knownModels: modelSightings(backendForPath(a.jsonlPath).name, [target]), effort: parseEffort(a.effort), systemPrompt: charterFor(target, { cwd: a.runningCwd }) });
+        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: displayName(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, ...respawnSpec(a), knownModels: modelSightings(backendForPath(a.jsonlPath).name, [target]), systemPrompt: charterFor(target, { cwd: a.runningCwd }) });
         if (!r.ok || !r.tmuxPane) return { ok: false, reason: `respawn failed: ${r.reason ?? "unknown"}` };
         a.tmuxPane = r.tmuxPane;
         a.tmuxSession = r.tmuxSession ?? a.tmuxSession;
@@ -6849,7 +6860,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           const resumeBaseline = !armMigration ? listJsonls(dirname(a.jsonlPath)) : undefined;
           // Respawn in the binding's runningCwd (pendingCwd doesn't apply to a
           // mid-turn reincarnation — only /new and /clear-with-pending swap cwd).
-          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: displayName(a.target) || a.target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, model: a.model || undefined, knownModels: modelSightings(backendForPath(a.jsonlPath).name, [a.target]), effort: parseEffort(a.effort), systemPrompt: charterFor(a.target, { cwd: a.runningCwd }) });
+          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: displayName(a.target) || a.target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, ...respawnSpec(a), knownModels: modelSightings(backendForPath(a.jsonlPath).name, [a.target]), systemPrompt: charterFor(a.target, { cwd: a.runningCwd }) });
           if (r.ok && r.tmuxPane && r.tmuxSession) {
             a.tmuxPane = r.tmuxPane;
             a.tmuxSession = r.tmuxSession;

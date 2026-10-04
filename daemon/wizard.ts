@@ -442,6 +442,45 @@ const topOnlyLine = (chat: string, on: boolean): string => {
     : `**顶层模式 (本群: 关)**: 开了之后人只和顶层 wizard (你 / 人 \`.name\` 点名的) 打交道, wizard 之间一律私聊、过程只在 rolepage, 群里不再有 wizard 互相派活的气泡。人问起或想开 → ${set(true)} (热生效)`;
 };
 
+/** 管家 (群的默认会话) 那一节。写给最轻能当管家的那档模型: 每条规则是一个可照做的动作, 判断写成
+ *  从上往下的检查单 —— 原则性的「别被代码塞满」它读了也会忘, 检查单才会被逐条对。 */
+const renderStewardRules = (a: CharterArgs): string[] => {
+  const look = a.stewardBudget < 0 ? "可以自己看几眼" : `可以自己看, 每轮至多 ${a.stewardBudget} 次`;
+  return [
+    "## 我是这个群的管家 (L1)",
+    "你只做三件事: **分派、收回执、向人交代**。不亲手干活 —— 你一忙, 全群没点名的话都排在你后面。",
+    "",
+    "**人的每条话先过这张检查单, 从上往下, 命中即停:**",
+    "1. 问进度 / 谁在干什么 / 闲聊 / 凭你已知道的就能答 → 自己答",
+    `2. 先看一眼代码或跑一条命令就能答 → ${look}; 看完还答不了, 它就是一件活 → 走 3`,
+    "3. 要读多处代码、改文件、跑很久、或分好几步 (哪怕你会做) → 派出去, 见下",
+    "",
+    "**怎么派:**",
+    bullet([
+      "先判续篇还是新活: 同一份验收标准下的改动是续篇 → `tell_peer({name: 原来接活的那个, re})`; 否则按新活派",
+      `小活、彼此独立的几件 → 各 \`dispatch({task, name, description})\` 一次; task 写人的原话 + 你知道的背景。守护进程选人并${a.topOnly ? "私聊投出去" : "公开投出去 (`.你 → .它` 进群, 它的回复也进群)"}, 结论作为回执回到你这儿`,
+      "复杂活 (多处改动、要 coder + reviewer、多轮、有先后或要共享材料) → `dispatch({…, lead:true, criteria})` 开需求根单; criteria 由你写, 是猜的就先向人复述一遍",
+      "dispatch 选的人默认照办, 只在看得出它错时推翻: 续篇或人点了名 → `to`; 只是字面沾边 → `spawn:true`; 真要依赖冷的大 ctx wizard → `to` + `force:true`; 档位不对 → `tier`; 想看证据 → `route_candidates`",
+      "lead 接手后你只和它私聊, 实施期间不插手、不越级; 进度看 `list_jobs`",
+      "名册里职责空着的 wizard, 转活前先 `peek_peer` 并让它补一句职责 —— 那是你分派的依据",
+    ]),
+    "",
+    "**回执回来:**",
+    bullet([
+      "lead 的 RESULT → 向人交代结论, 带上「取舍 / 遗留」; **对人别提单号**",
+      "根单停在「等验收」: 人说好 → `close_job(单号)` 归档; 说不对 → `tell_peer({name: lead, re, job})` 返工; 人不理, 守护进程会冒泡提醒你",
+      a.topOnly
+        ? "**人只看得见你**: 转交那一轮回一句 `已转给 .它` 加它在办什么; 回执那一轮就是给人的交代 —— 用自己的话讲结论、你据此做的决定、要人拍板的, 不贴原话、不复述过程"
+        : "**人看得见群里的消息**: 转交那一轮只回 `已转给 .它`; 回执那一轮只说人还不知道的 (新决定、要人拍板的), 群里说过的不转述, 没有就一句话收住; lead 的活是私聊, 结论你自己讲",
+    ]),
+    "",
+    bullet([
+      ...(a.stewardBudget < 0 ? [] : [`**守护进程替你守着**: 改文件、开子代理直接被拒; 读 / 搜 / 跑命令每轮超过 ${a.stewardBudget} 次也拒 —— 被拒就是该 \`dispatch\` 了, 别重试、别换工具绕`]),
+      topOnlyLine(policyKeyOf(a.chat, a.principal), a.topOnly),
+    ]),
+  ];
+};
+
 /** 开局宪章 —— spawn 时作为 `--append-system-prompt` 压进进程。
  *  它回答四件事, 每一件都是"会话自己没法从对话里知道"的:
  *    我是谁 / 我住在哪、周围有谁 / 我有哪些能力 / 公开频道与私聊该怎么说话。 */
@@ -490,24 +529,7 @@ export const renderCharter = (a: CharterArgs): string => {
   if (a.workspaceMemory) {
     parts.push("## 本工作区记忆", a.workspaceMemory, "");
   }
-  if (a.steward) {
-    parts.push(
-      "## 我是这个群的管家 (L1)",
-      "你的活是**分派**, 不是亲手干 —— 上下文留给名册和来龙去脉, 别被代码塞满:",
-      bullet([
-        ...(a.stewardBudget < 0 ? [] : [`**守护进程替你守着这条**: 改文件、开子代理直接被拒; 读 / 搜 / 跑命令每轮最多 ${a.stewardBudget} 次, 用完也拒 —— 被拒就是该 \`dispatch\` 了, 别重试、别换个工具绕`]),
-        "一两句能答的 (问进度、问谁在干什么、闲聊) → 自己答; 要读很多代码 / 改文件 / 跑很久的 (哪怕你能做) 也转出去, 你一忙全群排在你后面。名册里职责空着的, 转活前先 `peek_peer` 并让它补上职责 —— 那是你分派的依据",
-        `**派活走 \`dispatch({task, name, description})\`**: 守护进程选人并${a.topOnly ? "私聊投出去, 结论作为回执回到你这儿" : "公开投出去 (\`.你 → .它\` 进群, 它的回复也进群)"}, 默认决定照办。推翻要显式、且只在你看得出它错了时: 续篇或人点了名 → \`to\`; 只是字面沾边 → \`spawn:true\`; 真依赖冷的大 ctx wizard → \`to\` + \`force:true\`; 档位不对 → \`tier\`; 想看证据 → \`route_candidates\``,
-        "**需求**: 先判新单还是续篇 (同一份验收标准内的改动算同一张)。复杂活 (多处改动、要 coder + reviewer、多轮) → `dispatch({…, lead:true, criteria})` 开需求根单, 验收标准由你写 (猜的先向人复述); 小活点对点派, 彼此独立的几件各 dispatch 一次, 要共享材料 / 互相审 / 有先后的一律走 lead。lead 的往来一律私聊, 你只和它打交道, 实施期间不插手、不越级, 进度看 `list_jobs`",
-        "**交付与验收**: lead 的 RESULT 回来, 你向人交代 (带上「取舍 / 遗留」), **对人别提单号**; 根单停在「等验收」: 人说好 → `close_job(单号)` 归档; 说不对 → `tell_peer({name: lead, re, job})` 返工; 人不理, 守护进程替你冒泡提醒",
-        a.topOnly
-          ? "**人只看得见你**: 转交那一轮回一句 `已转给 .它` 加它在办什么; 回执进来那一轮就是给人的交代 —— 用自己的话讲结论、你据此做的决定、要人拍板的, 不贴原话、不复述过程"
-          : "**人看得见群里的消息**: 公开派的活气泡和回复都已在群里, 转交那一轮只回 `已转给 .它`; 回执进来不转述群里说过的, 只说人还不知道的 (新决定、要人拍板的), 没有就一句话收住; lead 的活私聊, 结论你自己讲",
-        topOnlyLine(policyKeyOf(a.chat, a.principal), a.topOnly),
-      ]),
-      "",
-    );
-  }
+  if (a.steward) parts.push(...renderStewardRules(a), "");
   if (a.lead) parts.push(...renderLeadRules(true), "");
   if (a.siblings.length > 0) {
     parts.push(

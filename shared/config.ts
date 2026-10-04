@@ -337,11 +337,9 @@ const Models = z.object({
     hard: Tier.default({ model: "opus", effort: "high" }).describe("要判断: 设计、排障、审查"),
     ultra: Tier.default({ model: "opus", effort: "max" }).describe("最难: 架构取舍、疑难排障、关键评审"),
   }).default({}).describe("spawn_wizard / clone_wizard / dispatch 的 tier 档位, 由轻到重"),
-  // 只在新起一个群的默认会话时落地; 已在跑的管家不自动切 (换模型会让缓存整份重读)。
-  router: z.object({
-    model: z.string().default("sonnet").describe("口语化模型名; 空 = CLI 默认"),
-    effort: z.enum(EFFORTS).optional().describe("推理档位; 省略 = CLI 默认"),
-  }).default({ model: "sonnet", effort: "low" }).describe("各群管家 (群的默认会话) 新起时用的模型"),
+  // 只在起一个新的管家会话时落地 (首条消息 / `/new` / 交接重开; 死 pane 重生只在绑定没记模型时补);
+  // 已在跑的管家不自动切 (换模型会让缓存整份重读)。
+  steward: z.enum(TIERS).default("light").describe("各群管家 (群的默认会话) 用哪一档 (取值同 tiers); 群里要别的档 → chatPolicy.<chat>.steward。生效: 新起 / 交接重开的管家会话按它起, 已在跑的不动 —— 要它换上就 handoff 或 set_model"),
 });
 
 // 定时任务的**旧**存法 (1.5 之前)。现在一条任务是 ~/.wezard/tasks/<id>.task.mjs
@@ -398,6 +396,7 @@ const Chats = z.record(z.string(), z.string().describe("base principal (`chat:wr
 export const ChatPolicy = z.object({
   topOnly: z.boolean().default(false).describe("顶层模式: 人只和顶层 wizard (群管家 / 人 `.name` 点名的) 对话; wizard 之间一律私聊 (tell_peer / dispatch 的 public 失效), 被派活的 wizard 不能 notify 进群, 过程只在 rolepage"),
   stewardBudget: z.number().int().min(-1).default(4).describe("群管家的手闸: 每轮自己查 (读 / 搜 / 跑命令) 的次数上限, 用完拒并叫它 dispatch; 改文件、开子代理一律拒。-1 = 不设闸"),
+  steward: z.enum(TIERS).optional().describe("本群管家的档位, 覆盖 models.steward; 省略 = 跟全局"),
 });
 export type ChatPolicy = z.infer<typeof ChatPolicy>;
 
@@ -422,7 +421,7 @@ export const ConfigSchema = z.preprocess(liftLegacySchedules, z.object({
   daemon: Daemon.default({}).describe("守护进程: 监听、日志、详情页"),
   wrc: Wrc.default({}).describe("远程驱动: 授权名单、CLI 后端、工作区、镜像"),
   approval: knob(Approval.default({}).describe("工具调用审批: 粒度、规则、危险名单、窗口"), { gate: "card", apply: "hot" }),
-  models: hot(Models.default({}).describe("按任务难度分档的模型 / effort, 以及各群管家用的模型")),
+  models: hot(Models.default({}).describe("按任务难度分档的模型 / effort, 以及各群管家用哪一档")),
   sync: knob(Sync.default({ targets: [] }).describe("把 MCP / hook 注册写进各 CLI 的 settings.json; 改完跑 `wezard sync` 才生效"), { gate: "card" }),
   svr: Svr.default({}).describe("独立详情中转服务 (wezard svr); svr 自己启动时读, 改完重启 svr 才生效"),
   schedules: knob(Schedules, { gate: "hidden" }),

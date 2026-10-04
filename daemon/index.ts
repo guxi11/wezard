@@ -52,7 +52,7 @@ import { baseOfKey, bindTagLinker, isInternalKey, keyOf, linkTags, normalizeTag,
 import { appendEpisode, clipForCharter, cwdOfMd, episodePath, inboxPath, mdsOf, proposedCwds, memoryPath, memoryRoot, proposeMemory, readMemory, type MemoryScope } from "./wizard-memory.js";
 import { retireStewardTask, startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
 import type { Asker, TurnFrom } from "../shared/detail-store.js";
-import { applyChatNames, chatBaseOf, chatNameOf, chatPolicyOf, clearChatName, listChatNames, normChatName, peerAddress, planChatNames, setChatName, type CharterChange, type CharterGuard } from "./chat-name.js";
+import { applyChatNames, chatBaseOf, chatNameOf, chatPolicyOf, clearChatName, listChatNames, normChatName, peerAddress, planChatNames, setChatName, stewardTierOf, type CharterChange, type CharterGuard } from "./chat-name.js";
 import { createTopOnlyNudge, gcNudge, policyKeyOf, renderNudge, type NudgeRow } from "./top-only-nudge.js";
 import {
   bindWizardStore,
@@ -1341,10 +1341,12 @@ const main = async (): Promise<void> => {
 
     // 交接的「重开」一步: 走 /new (杀旧 pane、起新进程) 而不是往原 pane 注入 /clear。
     // /clear 只换会话不换进程 —— MCP 子进程、charter 都还是旧的, 新工具拿不到; 镜像
-    // 还得靠 sid 轮换探测才跟得上。模型 / CLI / cwd / keepalive 照旧沿用。
+    // 还得靠 sid 轮换探测才跟得上。CLI / cwd / keepalive 照旧沿用; 模型也沿用, 管家除外 ——
+    // 它换上此刻的管家档 (newSession 里定), 改了 models.steward 后交接一次就是让它生效的那一下。
     const restartFresh = (target: string) => {
       const info = m.sessionInfo(target);
-      return m.newSession(target, displayName(target) || tagOfKey(target) || target, info?.cli, { model: info?.model || undefined, silent: true, warm: true });
+      const model = stewardTierOf(cfg, target) ? undefined : info?.model || undefined;
+      return m.newSession(target, displayName(target) || tagOfKey(target) || target, info?.cli, { model, silent: true, warm: true });
     };
 
     // POST /handoff — 交接一个 pane 的会话给一个全新会话。先让目标会话把当前工作

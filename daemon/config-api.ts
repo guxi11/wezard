@@ -348,17 +348,16 @@ export const tierEvidence = (
   fmt: { tokens: (n: number) => string; cost: (usd: number) => string },
 ): string[] => {
   if (path[0] !== "models") return [];
-  const want = path[1] === "tiers" && path[2] ? [path[2]] : path[1] === "router" ? ["router"] : path[1] === "tiers" || !path[1] ? [...TIERS, ...(path[1] ? [] : ["router"])] : [];
-  const rows = want.filter((n) => n === "router" || (TIERS as readonly string[]).includes(n));
+  const want = path[1] === "tiers" && path[2] ? [path[2]] : path[1] === "steward" ? [models.steward] : path[1] === "tiers" || !path[1] ? [...TIERS] : [];
+  const rows = want.filter((n): n is TierName => (TIERS as readonly string[]).includes(n));
   if (!rows.length) return [];
   const u = usage();
-  const line = (name: string): string => {
-    const spec = name === "router" ? models.router : models.tiers[name as TierName];
-    const label = `${spec.model || "CLI 默认"}${spec.effort ? `·${spec.effort}` : ""}`;
+  const line = (name: TierName): string => {
+    const spec = models.tiers[name];
+    const label = `${spec.model || "CLI 默认"}${spec.effort ? `·${spec.effort}` : ""}${name === models.steward ? " · 管家档" : ""}`;
     if (!spec.model) return `${name} (${label}): 用的是 CLI 默认模型, 按模型统计不出来`;
     const w = sumFor(spec.model, u.week), d = sumFor(spec.model, u.today);
-    const held = name === "router" ? "" : ` · 名册里记作这一档的 ${holders(name as TierName)} 个`;
-    return `${name} (${label}): 本周 ${fmt.tokens(w.tokens)} tok ${fmt.cost(w.cost)} · 今日 ${fmt.tokens(d.tokens)} tok ${fmt.cost(d.cost)}${held}`;
+    return `${name} (${label}): 本周 ${fmt.tokens(w.tokens)} tok ${fmt.cost(w.cost)} · 今日 ${fmt.tokens(d.tokens)} tok ${fmt.cost(d.cost)} · 名册里记作这一档的 ${holders(name)} 个`;
   };
   return [...rows.map(line), "(用量按模型统计, 同一模型的档外用量也算在内)"];
 };

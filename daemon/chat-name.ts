@@ -10,9 +10,9 @@
 //
 // 落盘走 config.jsonc (`chats`), 与定时表同一套 patchJsonc + in-place cfg 变更 ——
 // 名字是用户手写的长期配置, 不是运行时状态, 不该躺在 state 目录里。
-import { ChatPolicy, type Config } from "../shared/config.js";
+import { ChatPolicy, type Config, type TierName } from "../shared/config.js";
 import { patchJsonc } from "../shared/config-writer.js";
-import { baseOfKey } from "../shared/session-label.js";
+import { baseOfKey, isInternalKey, tagOfKey } from "../shared/session-label.js";
 import { settleName, wizardStore } from "./wizard.js";
 
 /** 一次会动到宪章的写入 (见 index.ts 的宪章守卫): 聊天名、chatPolicy 都进宪章, 已在跑的 wizard 看不见,
@@ -72,6 +72,10 @@ export const chatBaseOf = (cfg: Config, ref: string): string => {
 /** `target` 所在聊天的群聊级策略 (`chatPolicy`, 键是 base principal)。 */
 export const chatPolicyOf = (cfg: Config, target: string): ChatPolicy =>
   ChatPolicy.parse(cfg.chatPolicy?.[baseOfKey(target)] ?? {});
+
+/** `target` 是管家 (群的默认会话) 时它该跑的档: `chatPolicy.<chat>.steward` 压过 `models.steward`; 不是管家 = undefined。 */
+export const stewardTierOf = (cfg: Config, target: string): TierName | undefined =>
+  tagOfKey(target) || isInternalKey(target) ? undefined : chatPolicyOf(cfg, target).steward ?? cfg.models.steward;
 
 /** 已命名的聊天, 按名字排序。 */
 export const listChatNames = (cfg: Config): Array<{ name: string; base: string }> =>

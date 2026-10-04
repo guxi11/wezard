@@ -128,14 +128,14 @@
 
   // ── 按难度分档的模型 ─────────────────────────────────────────────
   // spawn_wizard / clone_wizard 的 `tier` 落到这里; 显式给的 model / effort / cli 压过档位。
-  // router = 各群管家 (群的默认会话) 新起时用的模型。省略整段 = 下面这组默认值。
+  // steward = 各群管家 (群的默认会话) 用哪一档, 按群覆盖写 chatPolicy.<chat>.steward。省略整段 = 下面这组默认值。
   "models": {
     "tiers": {
       "light":    { "model": "haiku",  "effort": "low" },
       "standard": { "model": "sonnet", "effort": "medium" },
       "hard":     { "model": "opus",   "effort": "high" }
     },
-    "router": { "model": "sonnet", "effort": "low" }
+    "steward": "light"
   },
 
   // ── claude / codebuddy wrapper sync ───────────────────────────────
