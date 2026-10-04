@@ -167,7 +167,7 @@ export const renderAwaiting = (title: string, job: string, deliveredAt: number, 
 export const renderStalled = (title: string, job: string, status: string): string =>
   `- lead 没交差 (${status}) · ${title} (${job})`;
 
-const ACCEPT_HOWTO = "等验收的: 人认可 → `close_job(单号)` 归档并回收 lead; 人说不对 → `tell_peer({name: lead, re, job: 单号})` 返工 (同一张单); 人说不要了 → `close_job({job, as:\"cancel\"})`; 先放着 → `close_job({job, as:\"shelve\"})` (停提醒, 不关单)。对人别提单号。";
+const ACCEPT_HOWTO = "等验收的: 人认可 → `close_job(单号)` 归档; 人说不对 → `tell_peer({name: lead, re, job: 单号})` 返工 (同一张单); 人说不要了 → `close_job({job, as:\"cancel\"})`; 先放着 → `close_job({job, as:\"shelve\"})` (停提醒, 不关单)。对人别提单号。";
 const SHELVED_HOWTO = "搁置的: 人又提起 → `close_job({job, as:\"resume\"})` 恢复 (给 lead `re` 或带 `job` 派话也会自动恢复); 不要了 → `as:\"cancel\"`。";
 
 /** 搁置的一行: 需求根单被人说先放着, 账本留着、不再冒泡提醒。 */

@@ -401,7 +401,7 @@ export const renderLeadRules = (pointer = false): string[] => [
     "**对上**: 终句 `RESULT:` (做成了什么 · commit · `ARTIFACT` 指针, **单列「取舍 / 遗留」一段**) 或 `NEED:`; 先自己判断, 答不了的才以 `NEED:` 上冒。你不对人说话, 由派你的那个代你对人交代",
     "**对下**: 带 `job` 的 task 只发给自己这张单的成员; 成员之间只许 `ask` / `fyi`, 不越级、不碰别人单里的队员",
     "**管辖面**: 直接成员 ≤5, 预计超过 5 个就先留一个名额给子 lead (`spawn_wizard({tier:\"hard\", lead:true, job, task})`), task 里让它 `open_job({parent: 本单})` 自己拆; 工单树深度 ≤3",
-    ...(pointer ? ["组队打法 (coder / 白板 reviewer / 何时收队) 随派活信封带"] : []),
+    ...(pointer ? ["组队打法 (coder / 白板 reviewer / 何时收工) 随派活信封带"] : []),
   ]),
 ];
 
@@ -414,7 +414,7 @@ export const renderLeadPlaybook = (): string[] => [
     "**coder**: 要你读过的材料 → `clone_wizard({tier:\"standard\", job, task})`; 不需要 → `spawn_wizard({tier:\"standard\", job, task})`。task 写清改什么、验收标准、要 build + 验证; 多个 coder 只在改动互不重叠时并行",
     "**reviewer 必须白板起步**: `spawn_wizard({tier:\"hard\", job, role:\"reviewer\", task})` —— 不 clone、不带作者的上下文、不转述作者的思路, 只给改动范围 (commit / diff / 文件) 与验收标准, 让它独立找问题",
     "**节奏**: coder 交 `RESULT` → reviewer 审 → 有问题 `tell_peer({name: coder, re})` 打回去改 → 再审; 两轮还不过就自己判断取舍",
-    "**收队**: review 通过、build 与验证过、按仓库规矩提交了 → `close_job(summary)` 整批回收队员, 不要让队员挂着",
+    "**收工**: review 通过、build 与验证过、按仓库规矩提交了 → `close_job(summary)`",
   ]),
 ];
 
@@ -550,7 +550,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "`tell_peer` 驱动另一个 wizard (派活、答它、叫它继续), 它的结论自动回执给你 · 插话 / 答它的问 → `priority:\"now\"`, 真紧急 → `\"urgent\"`; 只问一句 → `kind:\"ask\"`, 只知会 → `\"fyi\"`",
       `\`notify\` 只是告诉**人**一件事, 不驱动谁${a.topOnly ? " (顶层模式: 只有顶层 wizard 能 notify 进本群)" : ""}`,
       `\`clone_wizard\` 分身要共享我 (或 \`from\` 某个同伴) 已读的材料 · \`spawn_wizard\` 白板起步或要去别的目录 (\`detached\` = 独立长住、不归你管) —— ${tierLine(a.tiers)}`,
-      "`stop_wizard` 打断它这一轮 (`interrupt`); `end` 连上下文一起丢, 只给不会再被追问的分身 —— 干完别急着收",
+      "`stop_wizard` 打断或强制结束一个 wizard",
       "`open_job` / `close_job` 一次派两个以上分身时开 / 收工单 · `list_jobs` 找回工单 id · `pending_items` 我派出去还没了结的事 (`drop` 消项)",
       "`wizard_whoami` 我的上下文用量与分身 · `wizard_identity` 改名 / 写职责 · `wizard_remember` 跨会话记忆 (`self` / `chat` / `workspace`)",
       "`handoff` 交接自己原地重开 (时机见「自我管理」; 点名则替别人) · `set_workspace` 换项目目录 (自己调, 不必让人敲命令) · `set_model` 换模型 / effort",
@@ -573,10 +573,10 @@ export const renderCharter = (a: CharterArgs): string => {
       "**派完就放手**: 不 `wait_peer` 守着, 不轮询 `peek_peer`, 不必去催; 没齐之前别汇总、别向人报进度",
       "按回执的 `status` 处理: `need` = 它在反问, 用 `tell_peer({name, re: 件号})` 答 · `error` = CLI 报错停了, 等它续跑或 `re` 叫它继续 · `timeout` / `silent` / `dead` / `canceled` = 这一份没有答案了: 换人、`re` 追问, 或在汇总里如实写缺了它",
       "慢活给 `tell_peer({deadline})` 定期限; 可能来回追问的工单给 `open_job({maxTurns})` 定派活预算, 分身陆续派的给 `expect` 定份数",
-      "齐了 → `close_job(summary)` 留档并回收工单的分身 (只关 pane、留绑定: 收工后追问照常找它, 上下文还在); 给人的结论是你自己这一轮的最终回复, 用你的话收口",
+      "齐了 → `close_job(summary)` 留档; 给人的结论是你自己这一轮的最终回复, 用你的话收口",
       "派活文本只写**活本身** —— 你是谁、私聊与否、收口成 `RESULT:` / `NEED:` / `ARTIFACT:`, 信封替你说",
     ]),
-    "分身有成本 (一份上下文, 名下同时活着的有上限): 少于两三件时自己做更快。**干完别急着收**: 闲着不耗 token (保温默认关), pane 多了守护进程会从最久没动的收起、绑定留着, 追问时原样续上; `stop_wizard` end 会把上下文一起丢, 续篇只能白板重来 —— 只在话题确已了结 (人验收了、换了事)、它跑偏、或撞上分身上限 (先收最早了结的) 时用; 工单的分身交给 `close_job`, 它只关 pane、不丢上下文。",
+    "分身有成本 (一份上下文): 少于两三件时自己做更快。",
     "",
     ...(a.topOnly ? [...renderTopOnly(), ""] : []),
     "## 怎么说话: 群是公开频道, wizard 之间默认私聊",

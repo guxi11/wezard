@@ -2109,7 +2109,7 @@ const main = async (): Promise<void> => {
       // 没投成的根单当场收掉: 留着只是一张没人干的空单。
       const settleRoot = (ok: boolean): void => { if (rootId && !ok) jobs.close(rootId, "派活没投成"); };
       const withRoot = (body: Record<string, unknown>): Record<string, unknown> => rootId
-        ? { ...body, job: rootId, hint: "需求根单已开, 对人**别提单号**。lead 交付后根单仍开着, 等人验收: 人认可 → close_job(job) 归档并回收 lead; 人说不对 → tell_peer({name, re, job}) 给 lead 返工 (同一张单, 不开新单); 人说不要了 → close_job({job, as:\"cancel\"}); 先放着 → close_job({job, as:\"shelve\"}) (停提醒, 不关单)。" }
+        ? { ...body, job: rootId, hint: "需求根单已开, 对人**别提单号**。lead 交付后根单仍开着, 等人验收: 人认可 → close_job(job) 归档; 人说不对 → tell_peer({name, re, job}) 给 lead 返工 (同一张单, 不开新单); 人说不要了 → close_job({job, as:\"cancel\"}); 先放着 → close_job({job, as:\"shelve\"}) (停提醒, 不关单)。" }
         : body;
       if (d.kind === "existing") {
         const name = to || (d.kind === "existing" && d.row ? d.row.address || d.row.name : "");
@@ -2141,7 +2141,7 @@ const main = async (): Promise<void> => {
       // 宪章里只有层级规矩, 打法随信封带 (宪章每轮都在上下文里, 打法只这一件活用得上)。
       const t = await tell(String(born.body.name), task, lead ? renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : "");
       settleRoot(t.status === 200);
-      // 为这张根单生出来的: 归档 close_job 时要回收它 (tell 记的是 spawned:false, 再 attach 一次补上; lead 角色也在这里记)。
+      // 为这张根单生出来的 (tell 记的是 spawned:false, 再 attach 一次补上; lead 角色也在这里记)。
       if (rootId && t.status === 200) jobs.attach(rootId, { target: String(born.body.target), task: "", spawned: true, role: "lead" });
       json(res, t.status, withRoot({
         ...t.body,
@@ -2249,17 +2249,28 @@ const main = async (): Promise<void> => {
         return { status: 409, body: { ok: false, reason: `${displayName(source)} 没有可 fork 的会话 (还没说过话, 或绑定已失效)` } };
       }
       const alivePeers = detached ? [] : await m.peers(self);
-      // 预算。撞到上限不是"不许再分", 是"先把干完活的收掉": stop_wizard 收单个,
-      // close_job 整批回收一个工单的临时分身。只数**本聊天里**活着的 ——
+      // 预算。撞到上限由守护进程腾位, 不叫调用方去收: 最久没动的闲分身只关 pane、绑定留着
+      // (同 maxPanes 的 reap), 再找它 `--resume` 带全上下文复活。忙的、停在审批上的、手上
+      // 还有没落定的活的不动; 全都动不了才拒。只数**本聊天里**活着的 ——
       // 生到别的聊天去的归那边管, 为了数它们再探一遍 tmux 不值当。
-      const aliveKids = childrenOf(wizards.all(), self).filter((k) =>
-        alivePeers.some((pp) => pp.target === k.target && pp.paneAlive));
-      if (!detached && aliveKids.length >= cfg.wrc.mirror.cloneMax) {
-        return { status: 429, body: {
-          ok: false,
-          reason: `你名下已经有 ${aliveKids.length} 个活着的分身 (上限 ${cfg.wrc.mirror.cloneMax}) —— 先 stop_wizard 收掉干完活的那些, 或者 close_job 整批回收一个工单`,
-          clones: aliveKids.map((k) => peerAddress(cfg, self, k.target)),
-        } };
+      const aliveKids = alivePeers.filter((pp) => pp.paneAlive && childrenOf(wizards.all(), self).some((k) => k.target === pp.target));
+      const over = detached ? 0 : aliveKids.length - cfg.wrc.mirror.cloneMax + 1;
+      if (over > 0) {
+        const parked = new Set(listPending().map((p) => p.meta.sessionId).filter(Boolean));
+        const owing = new Set(receipts.states().map((x) => x.to));
+        const idle = aliveKids
+          .filter((pp) => !pp.busy && !owing.has(pp.target) && !parked.has(m.sessionInfo(pp.target)?.sessionId ?? ""))
+          .sort((x, y) => x.lastActivity - y.lastActivity)
+          .slice(0, over);
+        const slept = (await Promise.all(idle.map((pp) => m.sleepPane(pp.target)))).filter((r) => r.ok).length;
+        if (slept < over) {
+          return { status: 429, body: {
+            ok: false,
+            reason: `你名下 ${aliveKids.length} 个活着的分身 (上限 ${cfg.wrc.mirror.cloneMax}) 都在干活, 腾不出位置 —— 等其中一个交回结论再分`,
+            clones: aliveKids.map((k) => peerAddress(cfg, self, k.target)),
+          } };
+        }
+        log.info({ self, slept: idle.map((pp) => pp.target) }, "clone cap: idle clones put to sleep");
       }
       const wantChat = (b.chat ?? "").toString().trim();
       const base = wantChat ? chatBaseOf(cfg, wantChat) : baseOfKey(self);
@@ -2521,7 +2532,7 @@ const main = async (): Promise<void> => {
         title,
         ...(parentJob ? { parent: parentJob.id } : {}),
         memberMax: JOB_MEMBER_MAX,
-        hint: "把这个 id 传给 spawn_wizard / clone_wizard / tell_peer 的 `job` 参数, 它们就归到这个工单名下 (一律私聊, 不进群); 活干完调 close_job 留档并回收临时分身, 给人的结论写在你自己这一轮的最终回复里。",
+        hint: "把这个 id 传给 spawn_wizard / clone_wizard / tell_peer 的 `job` 参数, 它们就归到这个工单名下 (一律私聊, 不进群); 活干完调 close_job 留档, 给人的结论写在你自己这一轮的最终回复里。",
       });
     });
 
@@ -2545,25 +2556,15 @@ const main = async (): Promise<void> => {
         json(res, 200, { ok: true, job: id, [how === "shelve" ? "shelved" : "resumed"]: true });
         return;
       }
-      // 关一张单连它还开着的后代单一起关 (深的先关): 否则子 lead 的分身留在原地、账本上挂着没人收的单。
-      // 回收只针对**为这个工单生出来的**分身: 被拉来帮忙的长期 wizard 不该因为一次活结束就被杀掉。
-      // 调用方自己也不收 —— 那会在这次工具调用里把自己干掉。
-      const recycle = b.stop !== false;
+      // 关一张单连它还开着的后代单一起关 (深的先关): 否则账本上挂着没人收的子单。
+      // 收工只结账、留档, 不碰成员的 pane: 分身的去留与工单无关, pane 多了由 maxPanes / cloneMax 自己收
+      // (只关 pane、绑定留着)。老 MCP 进程还会带 `stop`, 收下不用。
       const openKids = (j: JobRecord): JobRecord[] => jobChildren(jobs.all(), j.id).filter((c) => c.status === "open").flatMap((c) => [...openKids(c), c]);
       const cascade = openKids(job);
-      const closeOne = async (j: JobRecord, summary: string, mark?: JobMark): Promise<{ members: number; killed: number; kept: number }> => {
-        const victims = recycle ? j.members.filter((mm) => mm.spawned && mm.target !== self) : [];
-        // 收掉之前把它们手上没落定的活记成 canceled: 不然发起者收工之后还会收到一串 dead 回执。
-        victims.forEach((mm) => receipts.cancel(mm.target, j.owner));
-        // 留档要的 sessionId 在回收之前取 (回收只关 pane、绑定留着, 先取也不吃亏)。
+      const closeOne = async (j: JobRecord, summary: string, mark?: JobMark): Promise<{ members: number }> => {
         const sids = new Map([j.owner, ...j.members.map((mm) => mm.target)].map((t) => [t, m.sessionInfo(t)?.sessionId ?? ""]));
-        const killed = await victims.reduce(
-          // 只关 pane、绑定留着 (同 pane cap 的 reap): 收工后再找它, `--resume` 带全上下文复活, 不是白板。
-          async (acc, mm) => (await acc) + ((await m.sleepPane(mm.target)).ok ? 1 : 0),
-          Promise.resolve(0),
-        );
-        // 取消: 还没落定、又不是为这张单生的成员 (长住 wizard) 不杀, 但它们名下这张单派的活记成 canceled, 发起者不会再收到一串回执。
-        if (how === "cancel") j.members.filter((mm) => !mm.outcome && !victims.includes(mm)).forEach((mm) => receipts.cancel(mm.target, j.owner, (x) => x.from === j.owner));
+        // 取消: 还没落定的成员手上这张单派的活记成 canceled, 发起者不会再收到一串回执。
+        if (how === "cancel") j.members.filter((mm) => !mm.outcome).forEach((mm) => receipts.cancel(mm.target, j.owner, (x) => x.from === j.owner));
         const closed = jobs.close(j.id, summary, mark)!;
         ledger.closeJob(j.id);
         // 收工结论留档到开单者名下 (与交接简报同一份 jsonl); 空工单 (没人、没结论) 不记。
@@ -2571,13 +2572,12 @@ const main = async (): Promise<void> => {
           const ep = jobEpisode(closed, { nameOf: episodeName, sidOf: (t) => sids.get(t) ?? "", chat: chatNameOf(cfg, j.base) || j.base });
           if (!appendEpisode(episodePath(cfg.daemon.stateDir, ep.name), ep)) log.warn({ job: j.id, name: ep.name }, "job episode not archived");
         }
-        return { members: closed.members.length, killed, kept: victims.length - killed };
+        return { members: closed.members.length };
       };
       const rs = await [...cascade.map((c) => [c, `随上级单 ${id} 收工`] as const), [job, how === "cancel" ? `取消: ${(b.summary ?? "").toString()}` : (b.summary ?? "").toString()] as const]
         // 根单收工: accept = G3 验收过闸 (人认可), cancel = 取消; 非根单没有闸。
-        .reduce(async (acc, [j, sum]) => [...(await acc), await closeOne(j, sum, j !== job ? undefined : how === "cancel" ? { end: "cancel" } : job.kind === "req" ? { gate: { g3: Date.now() }, end: "accept" } : undefined)], Promise.resolve([] as Array<{ members: number; killed: number; kept: number }>));
-      const sum = (f: (r: { members: number; killed: number; kept: number }) => number): number => rs.reduce((n, r) => n + f(r), 0);
-      json(res, 200, { ok: true, job: id, members: rs[rs.length - 1]!.members, recycled: sum((r) => r.killed), kept: sum((r) => r.kept), ...(cascade.length ? { cascaded: cascade.map((c) => c.id) } : {}) });
+        .reduce(async (acc, [j, sum]) => [...(await acc), await closeOne(j, sum, j !== job ? undefined : how === "cancel" ? { end: "cancel" } : job.kind === "req" ? { gate: { g3: Date.now() }, end: "accept" } : undefined)], Promise.resolve([] as Array<{ members: number }>));
+      json(res, 200, { ok: true, job: id, members: rs[rs.length - 1]!.members, ...(cascade.length ? { cascaded: cascade.map((c) => c.id) } : {}) });
     });
 
     // 挂起事项全表 (见 pending-items.ts): 你派出去、还没了结的事。`drop` 显式消项;

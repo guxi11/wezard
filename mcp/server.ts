@@ -798,7 +798,7 @@ server.registerTool(
       to: z.string().optional().describe("推翻默认: 直接转给这个已有 wizard (名字)。"),
       spawn: z.boolean().optional().describe("推翻默认: 不看候选, 一定白板 spawn。"),
       force: z.boolean().optional().describe("越过冷门控: 缓存冷且 ctx ≥100k 的候选默认不转; 确认这件活真依赖它那段上下文才给 true。"),
-      lead: z.boolean().optional().describe("复杂活交给一个 lead 组队 (见描述)。**只有它开需求根单** (回包里的 `job`), 普通小活不开单; 根单在 lead 交付后仍开着, 等人验收: `lead:true` 的往来一律私聊 (`public` 不起作用)。人认可 → `close_job(job)` 归档并回收 lead, 人说不对 → `tell_peer({name, re, job})` 给 lead 返工, 不要了 / 先放着 → `close_job({job, as:\"cancel\"|\"shelve\"})`。对人别提单号。"),
+      lead: z.boolean().optional().describe("复杂活交给一个 lead 组队 (见描述)。**只有它开需求根单** (回包里的 `job`), 普通小活不开单; 根单在 lead 交付后仍开着, 等人验收: `lead:true` 的往来一律私聊 (`public` 不起作用)。人认可 → `close_job(job)` 归档, 人说不对 → `tell_peer({name, re, job})` 给 lead 返工, 不要了 / 先放着 → `close_job({job, as:\"cancel\"|\"shelve\"})`。对人别提单号。"),
       criteria: z.string().optional().describe("验收标准 (`lead:true` 时记进根单): 做成什么样算交付。你猜的就在回复里向人复述一句再派。"),
       public: z.boolean().optional().describe("默认 true (气泡与回复进群); false = 私聊, 只记 rolepage。"),
       deadline: z.number().optional().describe("同 tell_peer 的 deadline (秒)。"),
@@ -845,7 +845,7 @@ const offspringShape = {
   job: z
     .string()
     .optional()
-    .describe("归到某个工单名下 (open_job 给的 id)。过程在各自的 rolepage 与工单页, 不进群; close_job 会把它们整批回收掉。"),
+    .describe("归到某个工单名下 (open_job 给的 id)。过程在各自的 rolepage 与工单页, 不进群。"),
   role: z.enum(["exec", "reviewer", "expert"]).optional().describe("它在这张工单里的角色 (只在带 `job` 时有意义, 记进账本供工单页与名册显示): `exec` 执行 (默认) · `reviewer` 白板评审 · `expert` 借来答问的专家。"),
   chain: z.boolean().optional().describe("同 tell_peer 的 `chain`: 带了 task 而这件活与你此刻在答的上游那件无关 (旁支、测试) 时给 false, 它的回执就不挂住你给上游的交代。"),
   keepalive: z
@@ -885,14 +885,14 @@ server.registerTool(
   {
     title: "Spawn a blank child wizard",
     description:
-      "**从白板生**一个子 wizard —— 新的 tmux pane、自己的全局名字 (`.name`)、自己的职责, 归你管 (家谱里挂在你名下, 工单收工时可整批回收)。它**不继承你的任何上下文**, 只拿到身份。适合干一件与你手头无关的事, 或者要去别的目录 (`cwd`) / 别的聊天里干活。要一个开局就带着你读过的材料的, 用 clone_wizard。\n" +
+      "**从白板生**一个子 wizard —— 新的 tmux pane、自己的全局名字 (`.name`)、自己的职责, 归你管 (家谱里挂在你名下)。它**不继承你的任何上下文**, 只拿到身份。适合干一件与你手头无关的事, 或者要去别的目录 (`cwd`) / 别的聊天里干活。要一个开局就带着你读过的材料的, 用 clone_wizard。\n" +
       "带上 `task` 可以在它就位的同时把第一件活私聊派下去, 省掉一次 tell_peer; 要它的回复进群, 就别带 task, 就位后用 `tell_peer({public:true})` 转给它。" +
       OFFSPRING_TAIL,
     inputSchema: {
       ...offspringShape,
       cwd: z.string().optional().describe("它的工作区绝对路径。省略 = 跟你同一个目录。"),
-      detached: z.boolean().optional().describe("true = 独立长住: 不挂在你名下 (不占分身名额、不随工单回收、不带 job), 等价于人在群里 `/new .name` —— 要一个往后一直在的新 wizard 时用; 干完一件活就收的别用。"),
-      lead: z.boolean().optional().describe("true = 它是来领一件复杂活的 lead: 宪章带层级规矩, 组队打法 (coder / 白板 reviewer / 工单 / 何时收队) 随 task 的信封带, 由它自己组队。配 `tier:\"hard\"`。"),
+      detached: z.boolean().optional().describe("true = 独立长住: 不挂在你名下 (不占分身名额、不带 job), 等价于人在群里 `/new .name` —— 要一个往后一直在的新 wizard 时用。"),
+      lead: z.boolean().optional().describe("true = 它是来领一件复杂活的 lead: 宪章带层级规矩, 组队打法 (coder / 白板 reviewer / 工单) 随 task 的信封带, 由它自己组队。配 `tier:\"hard\"`。"),
     },
   },
   bear("spawn_wizard", false),
@@ -903,7 +903,7 @@ server.registerTool(
   {
     title: "Clone a wizard, context and all",
     description:
-      "**克隆**一个 wizard 出分身 —— fork 它此刻的上下文: 分身开局就拥有它已经读过的一切 (规范、目录结构、刚啃完的那份文档), 不必重读; 被克隆的那个毫发无损。默认克隆你自己; `from` 点名就克隆别的 wizard (比如一个已经把某个模块啃透的同伴) —— 分身仍归你管 (占你的名额、随你的工单回收), 只是上下文来自它。分身留在被克隆者的工作区。\n" +
+      "**克隆**一个 wizard 出分身 —— fork 它此刻的上下文: 分身开局就拥有它已经读过的一切 (规范、目录结构、刚啃完的那份文档), 不必重读; 被克隆的那个毫发无损。默认克隆你自己; `from` 点名就克隆别的 wizard (比如一个已经把某个模块啃透的同伴) —— 分身仍归你管 (占你的名额), 只是上下文来自它。分身留在被克隆者的工作区。\n" +
       "要白纸一张、或要去别的目录, 用 spawn_wizard。被克隆者正在干活时, 分身拿到的是它此刻为止的上下文 —— 想要它读完再分: 是你派的活就等它的回执, 否则先 `wait_peer` 等它停下 (或看 wizard_roster 的忙闲)。\n" +
       "带上 `task` 可以在它就位的同时把第一件活私聊派下去 (分叉本来就由第一句话触发, 省一次往返)。" +
       OFFSPRING_TAIL,
@@ -918,14 +918,14 @@ server.registerTool(
 // ── Job: 一次 fan-out 的工单 ────────────────────────────────────────────────
 // 工单不是第二个编排器: 控制流始终在你自己的上下文里 (你自己 spawn、自己 wait、
 // 自己汇总)。守护进程只替你记一本账 —— 谁属于这个活、谁是临时生的、各自落成了什么、
-// 收工时该回收谁。工单整个不进群。
+// 工单整个不进群。
 server.registerTool(
   "open_job",
   {
     title: "Open a job for a fan-out",
     description:
       "开一个**工单**: 你接下来要同时派出两个以上的分身干同一件事时, 先开它。返回一个 id, 把这个 id 传给 spawn_wizard / clone_wizard / tell_peer 的 `job` 参数, 它们就归到这个工单名下。\n" +
-      "开了工单之后有三件事不一样: ① 带这个 id 的派活一律私聊, 开工、派活、回执、收工都**不进群** —— 结构在 rolepage 的工单页里, 人在群里只看到你自己那一轮的最终回复。② close_job 会把为这个工单生出来的分身**整批回收** (只关 pane、绑定留着, 之后再找它 `--resume` 带全上下文复活), 不必一个个 stop_wizard —— 忘记回收是常态, 每个分身都占着一个 pane。③ list_jobs 能看到还开着哪些活。④ 默认验收: 成员交上来的答复没有非空的 `RESULT:` (按 `accept`), 守护进程以你的名义同件号打回一次, 那一份不投给你、不计数, 也不占 `maxTurns`; 再交上来的照收。\n" +
+      "开了工单之后有三件事不一样: ① 带这个 id 的派活一律私聊, 开工、派活、回执、收工都**不进群** —— 结构在 rolepage 的工单页里, 人在群里只看到你自己那一轮的最终回复。② list_jobs 能看到还开着哪些活。③ 默认验收: 成员交上来的答复没有非空的 `RESULT:` (按 `accept`), 守护进程以你的名义同件号打回一次, 那一份不投给你、不计数, 也不占 `maxTurns`; 再交上来的照收。\n" +
       "只派一个分身、或者只是推某个同伴一把, 不用开工单。",
     inputSchema: {
       title: z.string().describe("一句话说清这个工单要干成什么 —— 工单页与收工留档的标题。"),
@@ -944,19 +944,18 @@ server.registerTool(
 server.registerTool(
   "close_job",
   {
-    title: "Close a job and recycle its clones",
+    title: "Close a job",
     description:
-      "收工: 把汇总结论连同成员与各自那段活**留档** (情景记忆, 不发群), 并**把为这个工单生出来的分身整批回收**: 只关 pane、绑定留着 (同 pane 超上限时的自动收起), 收工后续问 / 返工照常 `tell_peer` 它, `--resume` 带全上下文复活, 不是白板。被拉来帮忙的长期 wizard 不在回收之列, 你自己也不会被收。\n" +
-      "汇总完就调它。给人的结论写在你自己这一轮的最终回复里 —— 人在群里问的, 那条回复就进群。`stop:false` 只结账不回收 (那些分身后面还有用)。需求根单做完交付后, 守护进程会隔 4h / 1 天 / 2 天… 以你的名义往原群提醒人验收 (不带单号, 同时往你的信箱挂一行带单号的); 人认可 → `as:\"accept\"`, 说不要了 → `as:\"cancel\"`, 说先放着 → `as:\"shelve\"`。",
+      "收工: 把汇总结论连同成员与各自那段活**留档** (情景记忆, 不发群)。\n" +
+      "汇总完就调它。给人的结论写在你自己这一轮的最终回复里 —— 人在群里问的, 那条回复就进群。需求根单做完交付后, 守护进程会隔 4h / 1 天 / 2 天… 以你的名义往原群提醒人验收 (不带单号, 同时往你的信箱挂一行带单号的); 人认可 → `as:\"accept\"`, 说不要了 → `as:\"cancel\"`, 说先放着 → `as:\"shelve\"`。",
     inputSchema: {
       job: z.string().describe("open_job 返回的工单 id。"),
       summary: z.string().optional().describe("汇总结论, 留档 (不发群): 做成了什么、有什么没做成。"),
-      stop: z.boolean().optional().describe("是否回收 (关 pane、留绑定) 为这个工单生出来的分身。默认 true。"),
-      as: z.enum(["accept", "cancel", "shelve", "resume"]).optional().describe("怎么收 (多是需求根单, 管家用)。`accept` (默认) 收工 / 归档 —— 根单即人验收通过 (G3); `cancel` 取消: 关单、整棵子树回收, 留档标「取消」; `shelve` 搁置: **不关单**, 停止「等验收」的提醒冒泡, 账本留着; `resume` 恢复搁置 (给 lead `re` 或带 `job` 派话会自动恢复)。shelve / resume 只对需求根单有效。"),
+      as: z.enum(["accept", "cancel", "shelve", "resume"]).optional().describe("怎么收 (多是需求根单, 管家用)。`accept` (默认) 收工 / 归档 —— 根单即人验收通过 (G3); `cancel` 取消: 连子单一起关, 留档标「取消」; `shelve` 搁置: **不关单**, 停止「等验收」的提醒冒泡, 账本留着; `resume` 恢复搁置 (给 lead `re` 或带 `job` 派话会自动恢复)。shelve / resume 只对需求根单有效。"),
     },
   },
-  async ({ job, summary, stop, as }) =>
-    unwrap("close_job", await daemonPost("/jobs/close", { job, ...(summary ? { summary } : {}), ...(stop === false ? { stop: false } : {}), ...(as ? { as } : {}) })),
+  async ({ job, summary, as }) =>
+    unwrap("close_job", await daemonPost("/jobs/close", { job, ...(summary ? { summary } : {}), ...(as ? { as } : {}) })),
 );
 
 server.registerTool(
@@ -992,10 +991,10 @@ server.registerTool(
   {
     title: "Interrupt or end another wizard",
     description:
-      "收掉一个 wizard/分身。mode='interrupt' 只打断它当前这一轮 (等价于群里的 /stop, 它还活着, 可以继续派活); mode='end' 结束它并回收 tmux pane (等价于 /kill, 绑定一起丢, 之后再找它会重新长出一个空白会话 —— 与 close_job 的回收不同, 那个留着绑定)。**活干完不必 end**: 闲着的分身不耗 token (保温默认关), pane 超上限时守护进程从最久没动的收起、绑定留着, 追问时 `--resume` 原样续上; end 之后同一话题的续篇只能白板新起、重读一遍 —— 只在话题确已了结、它跑偏、或撞上分身上限时 end。加 forget=true 连它的身份记录一起抹掉 (名字、职责、记忆), 只在它彻底不会再回来时用。用户说「让 .x 停下」「把那些分身收了」时调它。终结自己也是合法的 (分身干完活自我了结), 只是这次调用不会返回 (这类生命周期事件不进群, 记录在 rolepage)。",
+      "打断或强制结束一个 wizard。mode='interrupt' 只打断它当前这一轮 (等价于群里的 /stop); mode='end' 强制结束它 (等价于 /kill, 之后再找它是一个空白会话)。加 forget=true 连它的身份记录一起抹掉 (名字、职责、记忆)。",
     inputSchema: {
       name: z.string().describe(ADDRESS_DOC),
-      mode: z.enum(["end", "interrupt"]).optional().describe("'end' 结束并回收 pane (默认); 'interrupt' 只打断当前这一轮。"),
+      mode: z.enum(["end", "interrupt"]).optional().describe("'end' 强制结束 (默认); 'interrupt' 只打断当前这一轮。"),
       forget: z.boolean().optional().describe("仅对 end 有效: 连身份记录 (名字/职责/记忆) 一起删除。默认 false —— 身份留着, 下次它回来还是它。"),
       turn: z.string().optional().describe("仅对 interrupt: 只撤回**你自己派的**这一件 (回执 / tell_peer 回包里的件号)。它正在做的就是这件才按 Esc; 还排着或它在做别人的活, 就只把这件记成取消, 不碰它手上那一轮。"),
       force: z.boolean().optional().describe("仅对 interrupt: 它此刻在做别的 wizard 派的活时, 不带 turn 的打断默认被拒 (会误伤那件); 确要打断加 true。"),

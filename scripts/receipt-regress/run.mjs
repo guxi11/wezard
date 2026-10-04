@@ -413,8 +413,7 @@ const cases = {
     await Promise.all(["rr-j1", "rr-j2"].map((x) => spawn(x, { job: o.job, task: `直接回复一行: RESULT: ${x}-${n}` })));
     const done = await until(() => { const j = jobOf(o.job); return j?.members?.length === 2 && j.members.every((mm) => mm.outcome) && j; }, 4 * 60_000);
     const got = await until(async () => { const xs = (await receiptsIn(root.target)).filter((r) => r.attrs.job === o.job); return xs.length >= 2 && xs; }, 60_000) ?? [];
-    await post("/jobs/close", { target: root.target, job: o.job, summary: "receipt-regress", stop: true });
-    ["rr-j1", "rr-j2"].forEach((x) => kids.delete(x));
+    await post("/jobs/close", { target: root.target, job: o.job, summary: "receipt-regress" });
     const tallies = got.map((r) => `${r.attrs.done}/${r.attrs.total}${r.attrs.complete === "1" ? "✓" : ""}`).sort();
     return {
       pass: !!done && done.members.every((mm) => mm.outcome === "done") && tallies.join(",") === "1/2,2/2✓",
@@ -427,7 +426,7 @@ const cases = {
     const o = await post("/jobs/open", { target: root.target, title: "[receipt-regress] 收工后迟到的回执", expect: 1 });
     if (!o.ok) return { pass: false, why: `open_job: ${o.reason}` };
     await spawn("rr-j3", { job: o.job, task: `${SLEEP(20)}, 然后回复一行: RESULT: late` });
-    await post("/jobs/close", { target: root.target, job: o.job, summary: "receipt-regress", stop: false });
+    await post("/jobs/close", { target: root.target, job: o.job, summary: "receipt-regress" });
     const got = await until(async () => (await receiptsIn(root.target, "rr-j3"))[0], 3 * 60_000);
     return {
       pass: !!got && !got.body.includes("全部到齐") && got.body.includes("已经收工"),
@@ -459,7 +458,7 @@ const cases = {
     await spawn("rr-v", { job: o.job, task: `这是回归测试, 不要调用任何工具。第一次只回复「好的」两个字, 不写 RESULT。之后若被要求补收口, 就回复一行: RESULT: accept-${n}` });
     const s = await settledSlot("rr-v", 4 * 60_000);
     const got = await receiptsIn(root.target, "rr-v");
-    await post("/jobs/close", { target: root.target, job: o.job, summary: "receipt-regress", stop: false });
+    await post("/jobs/close", { target: root.target, job: o.job, summary: "receipt-regress" });
     return {
       pass: s?.outcome?.status === "done" && s.outcome.body.includes(`accept-${n}`) && s.legs === 2 && got.length === 1,
       why: `slot=${s?.outcome?.status ?? "未落定"} legs=${s?.legs} 含补交=${!!s?.outcome?.body.includes(`accept-${n}`)} 根收到 ${got.length} 份`,
