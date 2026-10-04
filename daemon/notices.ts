@@ -154,15 +154,18 @@ export const groupRows = (ns: readonly Notice[], cwd: string): string[] => {
   return [...groups].map(([tpl, names]) => tpl.replace(HOLE, listNames(names)));
 };
 
-/** 群况快照的一行: 此刻在这个聊天里、与收件人相关的一个 wizard。 */
-export interface SnapRow { name: string; state: "busy" | "idle" | "-"; job: string }
+/** 群况快照的一行: 此刻在这个聊天里、与收件人相关的一个 wizard。
+ *  `ctx` / `cold` 读不到 (没有会话) 就缺: 表里留空, 不是 0 / 热。 */
+export interface SnapRow { name: string; state: "busy" | "parked" | "idle" | "-"; ctx?: number; cold?: boolean; job: string }
 export const SNAP_MAX = 16;
 /** CSV 的值: 有逗号 / 引号才加引号 (内部引号双写)。 */
 const csv = (s: string): string => (/[",]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
-/** 快照 → `name,state,job` 表; 太多就截断并指路 wizard_roster。 */
+const kTok = (n: number | undefined): string => (n === undefined ? "" : `${Math.round(n / 1000)}k`);
+const cacheOf = (cold: boolean | undefined): string => (cold === undefined ? "" : cold ? "cold" : "warm");
+/** 快照 → `name,state,ctx,cache,job` 表; 太多就截断并指路 wizard_roster。 */
 export const renderSnapshot = (rows: readonly SnapRow[]): string[] => [
-  "name,state,job",
-  ...rows.slice(0, SNAP_MAX).map((r) => [r.name, r.state, csv(clip(r.job))].join(",")),
+  "name,state,ctx,cache,job",
+  ...rows.slice(0, SNAP_MAX).map((r) => [r.name, r.state, kTok(r.ctx), cacheOf(r.cold), csv(clip(r.job))].join(",")),
   ...(rows.length > SNAP_MAX ? [`…(+${rows.length - SNAP_MAX}) wizard_roster`] : []),
 ];
 /** 生 / 收 / 改职责 / 改名 —— 快照的表里已经是它们之后的样子。 */
@@ -179,7 +182,9 @@ export const rosterPart = (ns: readonly Notice[], cwd: string, snap?: () => read
     const notes = fresh.filter(([, n]) => !subsumed(n));
     return {
       text: renderReminder({ wezard: "roster", mode: "full" }, [
-        "Wizards in this chat now (state as of this message; truth: wizard_roster). FYI only — don't reply.",
+        "Wizards in this chat now (as of this message; truth: wizard_roster). FYI only — don't reply.",
+        // 列义只随整表给 (每个窗口一次), 变动行不重复。dispatch 不点名时自己算冷热, 这几列只在点名 `to` / tell_peer 时要看。
+        "state: busy=mid-turn (a new task queues behind it) · parked=waiting on an approval click · idle=free · -=no live session (waking respawns it). cache cold = waking it rewrites its whole ctx (≈ctx/25k × a fresh spawn); only weigh this when you name `to` — dispatch already does.",
         ...renderSnapshot(table),
         ...groupRows(notes.map(([, n]) => n), cwd).map((r) => `- ${r}`),
       ]),

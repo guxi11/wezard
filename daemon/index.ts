@@ -92,7 +92,7 @@ import { renderInFlight } from "../shared/turn-state.js";
 import { startIdleNudge } from "./idle-nudge.js";
 import { renderReminder, type TurnTag } from "../shared/reminder.js";
 import { createHandoffs, handedOff, handingOff, type Owe, type Pending as PendingHandoff } from "./handoff.js";
-import { coldGateOf, decide, rankCandidates, renderCandidates, tierFor, wakeNoteOf, type RouteRow } from "./route.js";
+import { coldGateOf, decide, rankCandidates, renderCandidates, tierFor, wakeCostOf, wakeNoteOf, type RouteRow } from "./route.js";
 import { parseWhen, renderChatLog, UNKNOWN_HUMAN, type LogSession } from "./chat-log.js";
 import { audienceOf } from "../shared/role-view.js";
 import {
@@ -1487,7 +1487,13 @@ const main = async (): Promise<void> => {
         m.chatTargets(t)
           .filter((x) => x !== t && wizards.get(x)?.name)
           .filter((x) => ((p) => !tagOfKey(x) || (!p ? !!wizards.get(x)?.description : p === t || p === baseOfKey(t)))(wizards.get(x)?.parent))
-          .map((x): SnapRow => ({ name: displayName(x), state: ((v) => (v === undefined ? "-" : v ? "idle" : "busy"))(m.idleVerdict(x)), job: wizards.get(x)?.description || (tagOfKey(x) ? "" : "steward") }))),
+          .map((x): SnapRow => {
+            const i = m.sessionInfo(x);
+            const state = ((v) => (v === undefined ? "-" : v ? "idle" : m.parkedNow(x) ? "parked" : "busy"))(m.idleVerdict(x));
+            // 冷热与 route_candidates / tell_peer 冷门控同一口径 (touchOf / ttlOf)。
+            const warmth = i?.jsonlPath ? { ctx: i.contextTokens, cold: wakeCostOf(i.contextTokens, touchOf(i.jsonlPath), Date.now(), ttlOf(i.jsonlPath)).cold } : {};
+            return { name: displayName(x), state, ...warmth, job: wizards.get(x)?.description || (tagOfKey(x) ? "" : "steward") };
+          })),
       seen: createSeenRing(loadJsonMap<SeenRow>(cfg.wrc.mirror.noticeSeenFile, gcSeen), (t) => m.sessionInfo(t)?.sessionId ?? ""),
       cwdOf: (t) => ((c) => c.runningCwd || c.defaultCwd)(m.getCwd(t)),
     }));
