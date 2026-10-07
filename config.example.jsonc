@@ -39,7 +39,10 @@
     //   "codebuddy": { "bin": "/usr/local/bin/codebuddy" }
     // },
     "cwd": "~",                  // default workdir for a new chat's first session
-    "extraArgs": [],             // appended to the spawned CLI command line
+    // Appended to the spawned CLI command line. Default drops tools wizards never use that cost
+    // ~18k tokens per session (Artifact 11.3k, Workflow/SendFeedback/ScheduleWakeup 5.6k, claude.ai Docs/Drive 1.0k);
+    // an explicit value replaces it wholesale (no merge).
+    "extraArgs": ["--disallowedTools=Artifact,Workflow,SendFeedback,ScheduleWakeup,mcp__claude_ai_Claude_Docs__*,mcp__claude_ai_Google_Drive__*"],
     "mirror": {
       // Pin a session id; empty → auto-pick latest .jsonl mtime under
       // ~/.claude/projects/<encoded(cwd)>/.

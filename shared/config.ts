@@ -71,6 +71,8 @@ const Mirror = z.object({
   // 落盘是为了扛住 reload —— 被派活的 wizard 自己常以 reload 收尾, 纯内存的话它那
   // 一份回执就跟着旧进程没了。
   receiptsFile: z.string().default("~/.wezard/receipts.json").describe("在飞 tell_peer 回执的登记文件"),
+  // 停放着的活 (tell_peer 的 after): 前置没落定、还没投出去的那些。与回执登记分开存 —— 槽按 from→to 一对一份, 停放件不能占槽。
+  holdsFile: z.string().default("~/.wezard/holds.json").describe("停放中的 tell_peer (after 依赖) 登记文件"),
   pendingFile: z.string().default("~/.wezard/pending.json").describe("挂起事项表: 各 wizard 派出去、还没了结的事"),
   // 同理扛 reload: 落在「杀了旧 pane、还没贴回简报」之间, 纯内存的话新会话就空着
   // 醒来, 简报跟着旧进程没了。
@@ -198,7 +200,9 @@ const Wrc = z.object({
     .default({})
     .describe("各 CLI 后端的二进制路径覆盖; 缺省 = 内置默认"), { gate: "card" }),
   cwd: z.string().default("~/.wezard/workspace").describe("新会话的默认工作区"),
-  extraArgs: knob(z.array(z.string()).default([]).describe("启动 CLI 时追加的参数"), { gate: "card", apply: "hot" }),
+  // 默认摘掉 wizard 用不上、每个会话首轮白占 ~18k token 的工具 (Artifact 11.3k · Workflow/SendFeedback/ScheduleWakeup 5.6k · claude.ai Docs/Drive 1.0k)。
+  // 显式写了 extraArgs 的 config 整份覆盖它, 不合并 —— 要留某个工具就把整串抄过去删掉那一项。
+  extraArgs: knob(z.array(z.string()).default(["--disallowedTools=Artifact,Workflow,SendFeedback,ScheduleWakeup,mcp__claude_ai_Claude_Docs__*,mcp__claude_ai_Google_Drive__*"]).describe("启动 CLI 时追加的参数"), { gate: "card", apply: "hot" }),
   mirror: Mirror.default({}).describe("会话镜像: 推送、分页、详情页、pane 上限、保温"),
   // Auto-spawn fires when an authorized inbound finds no mirror attached for that
   // chat — allowFrom IS the authorization.
