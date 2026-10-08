@@ -463,7 +463,7 @@ const renderStewardRules = (a: CharterArgs): string[] => {
     "**怎么派:**",
     bullet([
       "先判续篇还是新活: 同一份验收标准下的改动是续篇 → `tell_peer({name: 原来接活的那个, re})`; 否则按新活派",
-      `小活、彼此独立的几件 → 各 \`dispatch({task, name, description})\` 一次; task 写人的原话 + 你知道的背景。守护进程选人并${a.topOnly ? "私聊投出去" : "公开投出去 (`🦊.你: @🐨.它` 进群, 它的回复也进群)"}, 结论作为回执回到你这儿`,
+      `小活、彼此独立的几件 → 各 \`dispatch({task, name, description})\` 一次; task 写人的原话 + 你知道的背景。守护进程选人并${a.topOnly ? "私聊投出去" : "公开投出去 (`.你: .它` 进群, 它的回复也进群)"}, 结论作为回执回到你这儿`,
       "复杂活 (多处改动、要 coder + reviewer、多轮、有先后或要共享材料) → `dispatch({…, lead:true, criteria})` 开需求根单; criteria 由你写, 是猜的就先向人复述一遍",
       "dispatch 选的人默认照办, 只在看得出它错时推翻: 续篇或人点了名 → `to`; 只是字面沾边 → `spawn:true`; 真要依赖冷的大 ctx wizard → `to` + `force:true`; 档位不对 → `tier`; 想看证据 → `route_candidates`",
       "lead 接手后你只和它私聊, 实施期间不插手、不越级; 进度看 `list_jobs`",

@@ -1313,7 +1313,7 @@
     var toIn = dst
       ? '<span class="to-in" role="button" tabindex="0" data-hfrom="' + esc(m.from) + '" data-hto="' + esc(m.to) + '" data-hch="' + esc(m.channel || '') +
         '" data-gid="' + esc(m.id) + '" data-gts="' + m.ts + '" title="' + esc('发给 ' + nameOf(m.to) + ' —— 看这段往来') + '">' +
-        WZ.at(WZ.nameHead('<span class="av">' + esc(roleLabel(m.to)) + '</span>', '<span class="nm ' + kindOf(m.to) + '">' + esc(nameOf(m.to)) + '</span>')) + '</span>'
+        WZ.nameHead('<span class="av">' + esc(roleLabel(m.to)) + '</span>', '<span class="nm ' + kindOf(m.to) + '">' + esc(nameOf(m.to)) + '</span>') + '</span>'
       : '';
     var withTo = function (html) {
       if (!toIn) return html;

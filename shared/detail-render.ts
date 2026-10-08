@@ -20,7 +20,7 @@ import type {
 } from "./detail-store.js";
 import { truncate, clipLine } from "./std.js";
 import { parseReminders, stripReminders, type Reminder } from "./reminder.js";
-import { at, stripSigil } from "./session-label.js";
+import { stripSigil } from "./session-label.js";
 
 const escHtml = (s: string): string =>
   s.replace(/[&<>"']/g, (c) =>
@@ -785,7 +785,7 @@ const renderHandoff = (h: Handoff, key: string, deco?: HandoffDeco): string => {
   const lost = h.state === "lost" ? `<span class="ho-why" title="${escHtml(h.reason ?? "")}">交没交出去不确定</span>` : "";
   const acct = deco ? deco.acct(h) : "";
   // 移交体「发给谁」就是被移交的那个 wizard; 点它与移交行同一套跳转 (同一份 attrs)。
-  const to = attrs ? `<span class="to-in" role="button" tabindex="0"${attrs}>${at(who)}</span>` : "";
+  const to = attrs ? `<span class="to-in" role="button" tabindex="0"${attrs}>${who}</span>` : "";
   return hoBox("", attrs, `${hoArrow(st, glyph)}${verb} ${who}${turn}${tags}${lost}${acct ? `<span class="ho-acct">${acct}</span>` : ""}`, h.text, h.public ? `${key}:ho` : undefined, undefined, to);
 };
 

@@ -55,7 +55,7 @@ const record = (bareId: string, content: string): void => {
 };
 
 // ── 空消息门控 (最后一道防线) ─────────────────────────────────────────────
-// 任何通道都不下发"正文为空"的消息。空 = 剥掉可路由头 (`🦊 #tag …` /
+// 任何通道都不下发"正文为空"的消息。空 = 剥掉可路由头 (`.name: …` /
 // `[🧙 #tag](url) 2/5 …`) 后没有任何可见内容 —— WeCom 把这种气泡渲染成一行
 // 光秃秃的 tag, 正是 "#dev 标题在、正文是空的" 那类事故形态。挂在 tracker 的
 // 同一个 SDK 包装层: 单一缝, sendMessage / replyStream / replyStreamWithCard

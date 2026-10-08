@@ -47,7 +47,7 @@ import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from 
 import { knowsToolUse, recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnQuery, recordTurnInject, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, lastChannelOf, openTurnsOf, buildDetailUrl, buildChatUrl, roleUniq } from "./detail.js";
 import type { CtxCut, TurnFrom, TurnOrigin, TurnUsage } from "./detail.js";
 import { errText } from "./last-response.js";
-import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagHeader, withLinkedTagHeader, linkedTagHead, speakerHead, nameHead, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey } from "../shared/session-label.js";
+import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagHeader, withLinkedTagHeader, chatHead, headed, tagBadge, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { isWxFrame } from "../shared/wx-text.js";
 import { randomTip } from "./tips.js";
@@ -2302,9 +2302,11 @@ interface ActiveStream {
   frame: WsFrameHeaders;
   streamId: string;
   /** Target key of the owning attachment. Duplicated onto the stream so
-   *  flush/finalize can prefix outbound content with `emoji #tag` without
+   *  flush/finalize can prefix outbound content with `.name` without
    *  threading `a` through every call site. */
   target: string;
+  /** 本轮的频道 (AttachState.channel 的快照): 默认 wizard 在 home 不写头, 在别的群写。 */
+  dest?: string;
   acc: string;
   lastSent: string;
   capped: boolean;
@@ -2694,8 +2696,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   const detailCardFor = (s: ActiveStream, target: string): TemplateCard | undefined => {
     if (s.tools.length === 0) return undefined;
-    const name = displayName(target);
-    const titlePrefix = name ? `${nameHead(labelFor(name), `.${name}`)} · ` : "";
+    const badge = tagBadge(target).trim();
+    const titlePrefix = badge ? `${badge} · ` : "";
     return {
       card_type: "button_interaction" as const,
       main_title: { title: `${titlePrefix}本轮工具调用` },
@@ -2711,7 +2713,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const content = s.acc;
     s.lastSent = content;
     try {
-      await client.replyStream(s.frame, s.streamId, withLinkedTagHeader(s.target, content || " ", chatTurnUrl(s.target, s.turnId)), false);
+      await client.replyStream(s.frame, s.streamId, withLinkedTagHeader(s.target, content || "…", chatTurnUrl(s.target, s.turnId), undefined, undefined, s.dest), false);
       log.debug({ turnId: s.turnId, len: content.length }, "stream flush ok");
     } catch (e) {
       log.warn({ turnId: s.turnId, err: (e as Error).message }, "stream flush failed; marking dead");
@@ -2770,6 +2772,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       turnId: newTurnId(),
       frame, streamId,
       target: a.target,
+      ...(a.channel ? { dest: a.channel } : {}),
       acc: "", lastSent: "",
       capped: false, closed: false, dead: false, cardSent: false,
       tools: [], sawTool: false,
@@ -2792,9 +2795,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // `[mirror]` / `[wezard]` 系统提示不是答给谁的话, 不标方向。
   const withLinkedTag = (a: AttachState, content: string, seq?: string, turnId?: string): string =>
     withLinkedTagHeader(a.target, content, chatTurnUrl(a.target, turnId ?? a.briefTurnId), seq,
-      /^\[(mirror|wezard)\]/.test(content.trim()) ? undefined : a.replyTo);
+      /^\[(mirror|wezard)\]/.test(content.trim()) ? undefined : a.replyTo, a.channel || undefined);
 
-  // 空正文一票否决 (近源拦截): 剥掉可能存在的路由头 (`🦊 #tag` / `[🧙](url)`)
+  // 空正文一票否决 (近源拦截): 剥掉可能存在的路由头 (`.name:` / `[.name](url):`)
   // 后没有可见内容就不发。中央 chat-gate (last-response 的 SDK 包装) 是最后一道
   // 防线; 这里拦在源头 —— 空内容不进 standalonePending FIFO、不占防抖 buf、
   // 不重置计时器, 免得"空 part 入队 → flush 时 join 出空串"的死角。
@@ -3132,7 +3135,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!text || !b || b.done || !turnId || a.briefConcluded) return;
     a.cotLastSent = text;
     try {
-      await client.replyStream(b.frame, b.streamId, `${briefDetailLink(turnId, a.target)} \`${text}\``, false);
+      await client.replyStream(b.frame, b.streamId, briefLine(a, turnId, `\`${text}\``), false);
     } catch (e) {
       log.debug({ sessionId: a.sessionId, turnId, err: (e as Error).message }, "brief: cot refresh failed");
     }
@@ -3152,8 +3155,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 链接落到 chat 视图: 默认选中本 turn 所属的 #tag, 贴底显示整条会话。turnId 依旧
   // 是凭据 (不可枚举), 只是页面从"一个 turn"扩成"这个 chat 的全部会话"。
   // wizard 名字作为 ww_uniq 传下去, 让同一个 wizard 的所有 turn 详情都复用一个 WeCom 窗口。
-  const briefDetailLink = (turnId: string, target: string): string =>
-    speakerHead(linkedTagHead(target, buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, turnId, roleUniq(target))));
+  // 默认 wizard 在 home 群不报名 (isHost): 头为空, 气泡里只剩正文 (正文也空时留 `…`, 不发空气泡)。
+  const briefLine = (a: AttachState, turnId: string, rest: string, dest = a.channel): string =>
+    headed(chatHead(a.target, buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, turnId, roleUniq(a.target)), undefined, dest || undefined), rest) || "…";
 
   // ── 出处门 (chatOriginOnly) ───────────────────────────────────────────
   // 人在 CLI 里手敲的一轮, 镜像只发生在两处: 他眼前的终端, 和 chat 详情页 (turn
@@ -3348,7 +3352,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   };
   /** 人那句被并进了一轮私聊: 它预建的气泡与轮次收口成一个链接 —— 答复不进群, 也不让气泡挂到超时。 */
   const mergedAway = (a: AttachState, q: QueuedTurn): void => {
-    void finishBubble(a, q.bubble, `${briefDetailLink(q.turnId, a.target)} （这句和一段私聊并成了一轮, 答复只在 rolepage）`, true);
+    void finishBubble(a, q.bubble, briefLine(a, q.turnId, "（这句和一段私聊并成了一轮, 答复只在 rolepage）"), true);
     recordTurnClose(q.turnId);
   };
   /** 人在聊天里说的那一句接成活跃 turn: 收掉在跑的那一轮, 频道与发话人取它自己的印章。
@@ -3413,7 +3417,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // 定格在一行过期的 CoT 进度上看着像卡死, 光链接又像说完了; 气泡仍是本轮活跃
       // 气泡 (turn 还在跑) 就明说「仍在处理中」, 已被顶替的旧轮只留链接。
       const live = a.briefBubble === bubble && !a.briefConcluded;
-      void finishBubble(a, bubble, `${briefDetailLink(turnId, a.target)}${live ? ` ${STILL_WORKING}` : ""}`, true);
+      void finishBubble(a, bubble, briefLine(a, turnId, live ? STILL_WORKING : "", channel), true);
     }, HARD_TIMEOUT_MS);
     const seal: Seal = { keys: sealKeys(userQuery), at: Date.now(), query: userQuery, channel, speaker, fresh: true, turn: q };
     // 对方闲着 → 这一句就是下一轮, 当场接上。正忙 (在跑别人的回执 / 派活 / 上一句) 就先排着:
@@ -3435,7 +3439,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 也不必猜后端: codebuddy 那种几十秒后才落盘的轮, 入口从第一秒就在。
     // 尾随 `…` 表示"正文还没到", 正文到位时整条内容被 `链接 正文` 覆盖。
     try {
-      await client.replyStream(frame, streamId, `${briefDetailLink(turnId, a.target)} …`, false);
+      await client.replyStream(frame, streamId, briefLine(a, turnId, "…", channel), false);
     } catch (e) {
       log.warn({ sessionId: a.sessionId, turnId, err: (e as Error).message }, "brief: turn ack failed");
     }
@@ -3544,7 +3548,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.lastConcludedEpoch = a.queryEpoch ?? 0;
     a.lastConcludedAt = Date.now();
     if (a.briefBubble && !a.briefBubble.done) {
-      void finishBriefBubble(a, `${briefDetailLink(turnId, a.target)} ${linkTags(a.target, body)}`, true);
+      void finishBriefBubble(a, briefLine(a, turnId, linkTags(a.target, body)), true);
     } else if (turnSilent(a)) {
       // CLI 手敲的一轮: 终稿只留在 turn store, 详情页照常实时可见。
       log.info({ sessionId: a.sessionId, turnId }, "brief: CLI-origin conclusion kept out of chat");
