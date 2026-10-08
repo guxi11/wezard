@@ -130,6 +130,9 @@ export interface WorldFactSchedule {
 /** 一件在飞的活 (见 turn-state.ts): `from` 派给 `to`、还没落定。`at` = 派出的时刻, 多久了由读的一方现算。 */
 export interface WorldFactInFlight { from: string; to: string; turn: string; job: string; state: TurnState; at: number }
 
+/** 一个微信通道的此刻: 掉没掉线、人最近何时开口、压着几条没发、这份 context_token 还能发几条、频控暂停到何时 (0 = 没停)。 */
+export interface WorldFactWeixin { base: string; state: "live" | "expired"; lastInAt: number; held: number; budget: number; pausedUntil: number }
+
 export interface WorldFacts {
   wizards: readonly WorldFactWizard[];
   jobs: readonly WorldFactJob[];
@@ -138,6 +141,10 @@ export interface WorldFacts {
   schedules: readonly WorldFactSchedule[];
   /** base → 聊天名; 没起名的不在表里。 */
   chatNames: Readonly<Record<string, string>>;
+  /** human id (`human:x`) → 显示名; 不在表里的显示裸 id。老 daemon 推来的快照没有。 */
+  humanNames?: Readonly<Record<string, string>>;
+  /** 微信 ClawBot 通道的账号状态, 每个绑定的微信用户一个群 (`chat:wx_…`)。老 daemon 推来的快照没有。 */
+  weixin?: readonly WorldFactWeixin[];
   /** 这份不是注册表给的, 是「没拿到」的占位 —— 显式信号: 空名册 ≠ 注册表不可达。 */
   absent?: true;
 }

@@ -20,7 +20,7 @@ import { baseOfKey, labelFor, stripSigil, tagOfKey } from "./session-label.js";
 import { isGhostTurn, isMark, isPost, isTurn, staleAt, summarizeTag, type TagSummary } from "./chat-view.js";
 import { isKeepaliveTurn } from "./keepalive.js";
 import type { Asker, DetailRecord, MarkDetailRecord, PostDetailRecord, TurnDetailRecord } from "./detail-store.js";
-import { jobProgress, type WorldFactJob, type WorldFacts, type WorldFactWizard } from "./world.js";
+import { jobProgress, type WorldFactJob, type WorldFacts, type WorldFactWeixin, type WorldFactWizard } from "./world.js";
 
 export type RoleKind = "wizard" | "human" | "task";
 
@@ -165,6 +165,8 @@ export interface Directory {
   resolve: (ref: string) => string | undefined;
   fact: (id: string) => WorldFactWizard | undefined;
   chatName: (base: string) => string;
+  /** 微信通道群 (`chat:wx_…`) 的账号状态; 不是微信群 / 老 daemon 没给 = undefined。 */
+  weixin: (base: string) => WorldFactWeixin | undefined;
   isWizard: (id: string) => boolean;
   /** undefined = 不是 wizard (人 / 定时 / 系统没有「执行中」)。 */
   status: (id: string, now: number) => RoleStatus | undefined;
@@ -183,7 +185,7 @@ export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFact
     if (id.startsWith("task:")) return `定时 ${id.slice(5)}`;
     if (id === SYSTEM) return "wezard";
     if (wizards.has(id)) return (facts_.get(id)?.name ?? "").trim() || tagOfKey(id) || chatName(baseOfKey(id)) || id;
-    return id.startsWith("human:") ? id.slice(6) : id;
+    return id.startsWith("human:") ? facts.humanNames?.[id] || id.slice(6) : id;
   };
   const labelOf = (id: string): string =>
     id.startsWith("task:") ? "⏰" : id === SYSTEM ? "🧙‍♂️" : wizards.has(id) ? labelFor(nameOf(id)) : "👤";
@@ -212,7 +214,8 @@ export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFact
     const t = untilOf(id);
     return { alive: f?.alive ?? false, busy: f?.busy ?? false, runningUntil: t > now ? t : 0, ...(f?.waiting?.length ? { waiting: f.waiting } : {}) };
   };
-  return { nameOf, labelOf, resolve, fact: (id) => facts_.get(id), chatName, isWizard: (id) => wizards.has(id), status, wizards: () => [...wizards] };
+  const wx = new Map((facts.weixin ?? []).map((w) => [w.base, w] as const));
+  return { nameOf, labelOf, resolve, fact: (id) => facts_.get(id), chatName, weixin: (base) => wx.get(base), isWizard: (id) => wizards.has(id), status, wizards: () => [...wizards] };
 };
 
 // ── 会话 ─────────────────────────────────────────────────────────────
@@ -263,9 +266,29 @@ export interface Conv {
   subs: ConvSub[];
   /** 这处往来里出现过的工单 (侧栏一行的 📋 标记); 没有 = 不给。 */
   jobs?: string[];
+  /** 微信通道群的状态标记 (见 wxMark); 企微群 / 私聊没有。 */
+  wx?: WxMark;
   /** 工单 (`j:<id>`) 的账: 开着没有、落定几份 / 一共几份。 */
   job?: { id: string; owner: string; status: "open" | "closed"; done: number; total: number; parent?: string; kind?: "req"; stage?: string };
 }
+
+// ── 微信通道 ─────────────────────────────────────────────────────────
+/** 群行 / 群详情头部名字旁的小标记: 怎么判、写什么只在这里, 页面照抄 text / tip。 */
+export interface WxMark { state: "live" | "paused" | "down"; text: string; tip: string }
+const agoText = (ms: number): string =>
+  ms < 60_000 ? "刚刚" : ms < 3600_000 ? `${Math.floor(ms / 60_000)} 分钟前` : ms < 86400_000 ? `${Math.floor(ms / 3600_000)} 小时前` : `${Math.floor(ms / 86400_000)} 天前`;
+export const wxMark = (w: WorldFactWeixin, now: number): WxMark => {
+  const state = w.state === "expired" ? "down" : w.pausedUntil > now ? "paused" : "live";
+  const head = { live: "🟢 微信", paused: "⏸️ 微信频控", down: "🔴 微信掉线" }[state];
+  const tip = [
+    state === "down" ? "微信通道掉线 —— 在企微单聊发 /wx bind 重新扫码" : "微信通道在线",
+    `对方最近开口: ${w.lastInAt ? agoText(now - w.lastInAt) : "从没有"}`,
+    ...(state === "down" ? [] : [`这一轮还能发 ${w.budget} 条 (对方每说一句补一份额度)`]),
+    ...(w.held ? [`压着 ${w.held} 条没发出, ${state === "down" ? "重新绑定后" : "对方再说一句就"}取回`] : []),
+    ...(state === "paused" ? [`频控暂停出站, 还剩 ${Math.ceil((w.pausedUntil - now) / 60_000)} 分钟`] : []),
+  ].join("\n");
+  return { state, text: head + (w.held ? ` · 📬 压着 ${w.held}` : ""), tip };
+};
 
 const involves = (m: Msg, role: string): boolean => m.from === role || m.to === role;
 const other = (m: Msg, role: string): string => (m.from === role ? m.to : m.from);
@@ -489,6 +512,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
         key, kind: "group", base,
         name: dir.chatName(base) || (base.startsWith("user:") ? dir.nameOf(humanOf(base)) : base.replace(/^chat:/, "").slice(0, 10)),
         label: "💬",
+        ...((w) => (w ? { wx: wxMark(w, now) } : {}))(dir.weixin(base)),
         ...glanceOr(all, speakerPrefix(dir, role)), count: all.length,
         heard: mergeHeard(own, ...subs.map((s) => s.heard.filter((h) => inGroup.has(h[3])))), subs, ...withJobs(all),
       };

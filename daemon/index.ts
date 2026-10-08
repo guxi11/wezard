@@ -1790,6 +1790,12 @@ const main = async (): Promise<void> => {
           };
         }),
         chatNames: Object.fromEntries(listChatNames(cfg).map((c) => [c.base, c.name])),
+        // 微信用户的发话人 id 就是它那个群的 chatId: 名字跟着群名走。
+        humanNames: Object.fromEntries(wx.list().map((a) => [`human:${a.chatId}`, chatNameOf(cfg, `chat:${a.chatId}`)] as const).filter(([, n]) => n)),
+        weixin: wx.list().map((a) => ({
+          base: `chat:${a.chatId}`, state: a.state, lastInAt: a.lastInAt ?? 0, held: a.outbox.length,
+          budget: a.ctx ? Math.max(0, cfg.weixin.sendCap - a.ctx.used) : 0, pausedUntil: a.pausedUntil ?? 0,
+        })),
       };
     };
     // 一次采集失败 (某个 pane 的 tmux 抖了一下) 不等于注册表没了: 退回上一份好的,

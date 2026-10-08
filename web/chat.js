@@ -426,6 +426,10 @@
   var jobMark = function (ids) {
     return ids && ids.length ? '<span class="jmk" data-jobs="' + esc(ids.join(' ')) + '" title="' + esc((ids.length > 1 ? ids.length + ' 张工单: ' : '工单 ') + ids.join(' ') + ' —— 点开') + '">📋' + (ids.length > 1 ? '<i>' + ids.length + '</i>' : '') + '</span>' : '';
   };
+  // 微信通道群名字旁的状态: 判定与文字都是服务端 wxMark 给的, 这里只画。
+  var wxTag = function (w) {
+    return w ? '<span class="wxm ' + esc(w.state) + '" title="' + esc(w.tip) + '">' + esc(w.text) + '</span>' : '';
+  };
   // 视角不在里面的工单不在 R.convs 里: 按服务端的账 (R.jobIndex, 全部工单) 现造一项; 账里没有 = 已清掉 (job 为空)。
   var jobConv = function (key) {
     var id = key.slice(2), j = (R.jobIndex || {})[id];
@@ -653,7 +657,7 @@
   var convRow = function (c) {
     if (c.kind === 'wizard') return roleRow(c.peer, c.name, c.label, glance(c), c.status, jobMark(c.jobs), otherChats(c.peer, dmKey(c.peer)));
     if (c.kind === 'job') return '<span class="av">' + esc(c.label) + '</span>' + line('<span class="nm chat">' + esc(c.name) + '</span>' + stageTag(c.job) + jobTag(c.job) + stuckTag(c.job), c.lastTs, c.preview, '', unreadOf(c));
-    return avatarOf(c) + line('<span class="nm chat">' + esc(c.name) + '</span>' + jobMark(c.jobs), c.lastTs, c.preview, stTag(c.status, true), unreadOf(c));
+    return avatarOf(c) + line('<span class="nm chat">' + esc(c.name) + '</span>' + wxTag(c.wx) + jobMark(c.jobs), c.lastTs, c.preview, stTag(c.status, true), unreadOf(c));
   };
   var subRow = function (c, s) { return roleRow(s.role, s.name, s.label, glance(s), s.status, jobMark(s.jobs), otherChats(s.role, c.key + '|' + pairKey(s.role))); };
 
@@ -699,7 +703,7 @@
     if (c.kind === 'group' && c.subs && c.subs.length) {
       // 不能是 <button>: 嵌在外层 .ci 按钮里会被解析器提前闭合外层, chevron 就掉到卡片外
       var chevron = '<span role="button" class="ci-chevron' + (OPEN[c.key] ? ' on' : '') + '" data-toggle="' + esc(c.key) + '" title="' + (OPEN[c.key] ? '折叠群' : '展开群') + '"></span>';
-      var content = avatarOf(c) + '<span class="b"><span class="l1"><span class="t"><span class="nm chat">' + esc(c.name) + '</span>' + jobMark(c.jobs) + '</span>' + chevron + '<span class="ts">' + esc(fmtAgo(c.lastTs)) + '</span></span>' +
+      var content = avatarOf(c) + '<span class="b"><span class="l1"><span class="t"><span class="nm chat">' + esc(c.name) + '</span>' + wxTag(c.wx) + jobMark(c.jobs) + '</span>' + chevron + '<span class="ts">' + esc(fmtAgo(c.lastTs)) + '</span></span>' +
         '<span class="l2"><span class="pv">' + esc(c.preview) + '</span>' + (unreadOf(c) ? '<b class="ub">' + (unreadOf(c) > 99 ? '99+' : unreadOf(c)) + '</b>' : '') + '</span></span>';
       return '<button class="ci' + (sel ? ' on' : '') + '" data-conv="' + esc(c.key) + '">' + content + '</button>' + subs;
     }
@@ -1230,7 +1234,7 @@
     var peer = pairPeer(c);
     var pairName = peer && pairTitle(peer);
     who.innerHTML = peer ? '<span class="t" title="' + esc(pairName) + '">' + esc(pairName) + '</span>'
-      : '<span class="t">' + (c.kind === 'wizard' ? nm(c.peer, c.name, true) : '<span class="nm chat">' + esc(c.name) + '</span>') + '</span>';
+      : '<span class="t">' + (c.kind === 'wizard' ? nm(c.peer, c.name, true) : '<span class="nm chat">' + esc(c.name) + '</span>' + wxTag(c.wx)) + '</span>';
     acts.innerHTML = '';
     bindBack();
     bindGo(who);
