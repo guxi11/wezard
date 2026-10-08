@@ -16,6 +16,7 @@ import type { Config } from "../shared/config.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { expandHome } from "../shared/paths.js";
 import { chatIdOfUser, chunkText, nickOf } from "../shared/wx-text.js";
+import { reheadFor } from "../shared/session-label.js";
 import {
   ILINK_BASE, LONG_POLL_MS, STALE_TOKEN, ITEM,
   getBotQrcode, getQrcodeStatus, getUpdates, sendText, sendItems, getTypingTicket, sendTyping, notifyLifecycle, mintClientId,
@@ -261,6 +262,15 @@ export const startWeixin = (deps: WeixinDeps): Weixin => {
   const polls = new Map<string, AbortController>();
   const seen = new Map<string, Set<string>>();
   const pumps = new Map<string, Promise<void>>();
+  // 上个进程压下的 outbox 条目 id (init 末尾填, 见那里); 填之前 flush 不重写。
+  let legacy: Set<string> | undefined;
+  const reheadLegacy = (botId: string): void => {
+    const a = db.get(botId);
+    const old = legacy;
+    if (!old || !a?.outbox.some((o) => old.has(o.id))) return;
+    const dest = `chat:${a.chatId}`;
+    patch(botId, (x) => ({ outbox: x.outbox.map((o) => (old.delete(o.id) && !o.card ? { ...o, text: reheadFor(o.text, dest) } : o)) }));
+  };
   const timers = new Map<string, { t: NodeJS.Timeout; at: number }>();
   interface Typing { ticket?: string; ticketAt?: number; lastAt?: number; on?: boolean; chain: Promise<void> }
   const typingState = new Map<string, Typing>();
@@ -342,6 +352,7 @@ export const startWeixin = (deps: WeixinDeps): Weixin => {
   };
 
   const flushOnce = async (botId: string): Promise<void> => {
+    reheadLegacy(botId);
     const a = db.get(botId);
     if (!isLive(a) || stopped) return;
     const plan = planFlush(a, Date.now(), w());
@@ -800,6 +811,9 @@ export const startWeixin = (deps: WeixinDeps): Weixin => {
   for (const a of all().filter((x) => x.outbox.some((o) => !o.id))) {
     patch(a.botId, (x) => ({ outbox: x.outbox.map((o) => (o.id ? o : outItem(o.text, { ...(o.card ? { card: true } : {}), at: o.at }))) }));
   }
+  // 上个进程压下的条目, 头是按当时的规矩写的 (带 emoji 头像、默认 wizard 也报名): 第一次发之前按现行规矩
+  // 重写一遍 (reheadFor)。拖到 flush 才做 —— 认名字靠 tag linker, 它在 init 之后才绑; 本进程新压的已是新头, 不碰。
+  legacy = new Set(all().flatMap((x) => x.outbox.map((o) => o.id)));
   log.info({ enabled: w().enabled, accounts: all().length }, "weixin init");
 
   return {

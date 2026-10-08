@@ -231,6 +231,7 @@ const main = async (): Promise<void> => {
       return t && known(t) ? t : undefined;
     },
     nameOf: (t) => settleName(wizardStore(), chatNameOf(cfg, t), t),
+    voiceOf: (t) => wizardStore()?.get(t)?.voiceOf,
   });
   // 人话也过交接的闸 (见 handoff.ts): 交接期间说的话进新会话, 不被旧会话带走、也不在
   // 重开的空档里 resume 回旧 sid。
@@ -3280,6 +3281,7 @@ const main = async (): Promise<void> => {
       wizards.upsert(runner, {
         description: `定时任务 ${taskId} 的一次性执行体${why}`,
         parent: owner,
+        voiceOf: owner,
         bornAt: Date.now(),
       });
       const runnerName = wizards.rename(runner, `${ownerName}-task-${taskId.slice(0, 4)}`);

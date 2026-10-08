@@ -167,6 +167,8 @@ export interface TagLinker {
   resolve: (name: string) => string | undefined;
   /** target → 它的全局名字 ("" = 名册里没有)。 */
   nameOf: (target: string) => string;
+  /** 它在群里替谁说话 (定时任务执行体 = 日程主人); undefined = 替自己。 */
+  voiceOf?: (target: string) => string | undefined;
 }
 let linker: TagLinker | undefined;
 export const bindTagLinker = (l: TagLinker): void => { linker = l; };
@@ -243,9 +245,10 @@ export const linkedTagHead = (target: string | undefined, url: string): string =
 export const isWxChat = (key: string): boolean => key.startsWith("chat:wx_");
 
 /** 群的默认 wizard 在自己群里 (`dest` 缺省 = 它的 home): 人本来就在跟它说话, 不必报名。
- *  slot 分身、被人从别的群点名过来的都不是 host, 照旧带头以示区分。 */
-export const isHost = (target: string | undefined, dest?: string): boolean =>
-  !!target && !tagOfKey(target) && !isInternalKey(target) && (!dest || baseOfKey(dest) === baseOfKey(target));
+ *  替它说话的 (定时任务执行体, voiceOf) 算它本人; slot 分身、被人从别的群点名过来的都不是 host, 照旧带头以示区分。 */
+export const isHost = (target: string | undefined, dest = target): boolean =>
+  ((t) => !!t && !!dest && !tagOfKey(t) && !isInternalKey(t) && baseOfKey(dest) === baseOfKey(t))(
+    target && (linker?.voiceOf?.(target) || target));
 
 /** 一条群气泡: 头 + 正文, 头为空就只有正文。 */
 export const headed = (head: string, body: string, sep = headSep(body)): string => (head ? `${head}${sep}${body}` : body);
@@ -258,6 +261,19 @@ export const chatHead = (target: string | undefined, url: string | undefined, to
   if (host && (!url || isWxChat(baseOfKey(dest || target!)))) return "";
   const me = url ? linkedTagHead(target, url) : tagHead(target);
   return me ? speakerHead(me, to) : "";
+};
+
+/** 已经写好头的纯文本 (微信 outbox 里压着的老消息) 按现行规矩重写: 发往 `dest` 的若是 host 就剥掉整个头,
+ *  否则只剥掉老写法的 emoji 头像与 `@`、箭头换成冒号。认不出头的原样返回。 */
+export const reheadFor = (text: string, dest: string): string => {
+  const t = text.trim();
+  const m = HEADER_RE.exec(t);
+  if (!m) return text;
+  const who = linker?.resolve(m.slice(1).find(Boolean) ?? "");
+  const rest = t.slice(m[0].length);
+  if (who && isHost(who, dest)) return rest;
+  const head = m[0].trimEnd().replace(new RegExp(`${EMO}\\s*`, "gu"), "").replace(/@/g, "").replace(/\s*→\s*/g, ": ");
+  return head ? headed(head, rest) : rest;
 };
 
 /** `target` 自己往 `dest` 群说话的头, 链接取它自己的 rolepage (bindTagLinker)。 */

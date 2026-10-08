@@ -6,7 +6,7 @@
 
 ### Changed
 - rolepage 切换会话不再白屏: 新内容就绪后一次替换 (0c49684)。
-- wizard 发进群 (企微 / 微信) 的消息头统一为 `[.fix](rolepage): …`: 不再带 emoji (emoji 只是 rolepage 的头像), 名字后带冒号; 公开的 wizard 间对话由 `🦊 .a → 🐨 .b` 改为 `.a: .b` (无箭头、无 @, 名字前的 `.` 就是 wizard 的记号)。审批 / 提问卡、工具卡标题、notify、send_file 说明、定时任务、镜像气泡同一份实现。群的默认 wizard 在自己群里不再自报身份: 企微群里只留名字链接 `[.name](rolepage):` (进 rolepage 的入口, 没有链接时整个头不写), 微信群里整个头不写; slot 分身、被人从别的群点名来的照旧带头。引用旧格式 (带 emoji / @ / 箭头) 气泡照样认得出发话人, 引用不带头的默认 wizard 气泡落回本群默认 wizard。
+- wizard 发进群 (企微 / 微信) 的消息头统一为 `[.fix](rolepage): …`: 不再带 emoji (emoji 只是 rolepage 的头像), 名字后带冒号; 公开的 wizard 间对话由 `🦊 .a → 🐨 .b` 改为 `.a: .b` (无箭头、无 @, 名字前的 `.` 就是 wizard 的记号)。审批 / 提问卡、工具卡标题、notify、send_file 说明、定时任务、镜像气泡同一份实现。群的默认 wizard 在自己群里不再自报身份: 企微群里只留名字链接 `[.name](rolepage):` (进 rolepage 的入口, 没有链接时整个头不写), 微信群里整个头不写 (定时任务执行体替日程主人说话, 主人是群默认 wizard 时同样不写; 微信 outbox 里上个进程压着的老格式消息补发前按现行规矩重写头); slot 分身、被人从别的群点名来的照旧带头。引用旧格式 (带 emoji / @ / 箭头) 气泡照样认得出发话人, 引用不带头的默认 wizard 气泡落回本群默认 wizard。
 - 微信 ClawBot 群聊 (`chat:wx_…`) 默认开顶层模式: `chatPolicy.<chat>.topOnly` 没写时按通道取默认 (微信开, 其余关), 不落盘, 已绑定的微信群聊直接生效; `config_set` 写 `false` 照样关。
 - 发往微信的文本里 markdown 链接 `[字](url)` 降成「字」(代码里的原样留着), 其余 markdown 子集 (粗体 / 代码 / 表格 / H1-H4 / 引用) 照旧。
 - rolepage 与 `read_chat` 的发言头跟群里同一写法 (`.a:` / `.a: .b`, 去箭头、去 @; rolepage 名字前贴头像, `read_chat` 与群里一样不带 emoji): 三处共用 `shared/session-label.ts` 的 `nameHead` / `said` / `speakerHead`, 浏览器那份由 `/chat/app.js` 开头的 `WZ` 原样送达, 不另抄。rolepage 的消息头、「发给谁」、移交行里的对方、搜索结果、工单成员按钮一并改。
