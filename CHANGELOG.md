@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Changed
+- rolepage 切换会话不再白屏: 新内容就绪后一次替换 (0c49684)。
 - wizard 发进群的消息头统一格式: 名字后带冒号 (`🦊.fix: …`), emoji 与名字间不留空格; 公开的 wizard 间对话由 `🦊 .a → 🐨 .b` 改为 `🦊.a: @🐨.b`。引用旧格式气泡照样认得出发话人。
 - rolepage 与 `read_chat` 的发言头跟群里同一写法 (`🦊.a:` / `🦊.a: @🐨.b`, 去箭头): 三处共用 `shared/session-label.ts` 的 `nameHead` / `said` / `at` / `speakerHead`, 浏览器那份由 `/chat/app.js` 开头的 `WZ` 原样送达, 不另抄。rolepage 的消息头、「发给谁」、移交行里的对方、搜索结果、工单成员按钮一并改。
 - `wrc.extraArgs` 默认值从 `[]` 改为 `["--disallowedTools=Artifact,Workflow,SendFeedback,ScheduleWakeup,mcp__claude_ai_Claude_Docs__*,mcp__claude_ai_Google_Drive__*"]` (`shared/config.ts` 与 `config.example.jsonc`): 新装 / 没写过 `extraArgs` 的机器默认把这些 wizard 用不上的工具从上下文里摘掉, 交互式首轮实测每个会话省约 18k token (Artifact 11.3k、Workflow / SendFeedback / ScheduleWakeup 5.6k、claude.ai Docs / Drive 1.0k)。**只影响新起的 wizard** (`--resume` 续上的会话可能沿用录下的工具表); config 里显式写了 `extraArgs` 的照旧整份覆盖, 不合并。说明与恢复办法见技术说明「配置」一节; codebuddy / claude-internal 是否认该参数未验证。
