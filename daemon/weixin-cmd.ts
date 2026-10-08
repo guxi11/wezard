@@ -1,9 +1,9 @@
 // `/wx` 命令、`/wx/*` 路由、绑定落定后的那几件事、微信侧的 SendMedia。
 //
-// 门槛: 二维码就是授权凭据 —— 谁扫了谁就能驱动本机。所以只有审批人 (wxAdmins) 能在**企微单聊**
-// 里发起; 本机终端 (`wezard wx bind`) 发起的要先给审批人推一张确认卡, 点了才出码 —— 口令
-// 每个 wizard 都读得到, 光凭口令等于任何 wizard 都能给本机多开一个微信入口。群里发起直接拒绝:
-// 群里谁都看得见码。
+// 门槛: 二维码就是授权凭据 —— 谁扫了谁就能驱动本机。所以只有审批人 (wxAdmins) 能发起; 在群里
+// 发起也行, 但码私发到他的单聊, 不摊在群里 (群里谁都看得见)。本机终端 (`wezard wx bind`) 发起的
+// 要先给审批人推一张确认卡, 点了才出码 —— 口令每个 wizard 都读得到, 光凭口令等于任何 wizard 都能
+// 给本机多开一个微信入口。
 import { mkdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -33,12 +33,12 @@ export const parseWxCommand = (text: string): WxCommand | undefined => {
     : { verb: "help" };
 };
 
-/** 能发起绑定的人: 审批人名单; 名单空 → defaultChat (是个人的话); 再不然 → allowFrom 里的人
- *  (defaultChat 是群时, 认领那一步把认领人写进了 allowFrom)。 */
+/** 能发起绑定的人: 审批人名单; 名单空 → defaultChat (是个人的话) 并上 allowFrom 里的人。
+ *  allowFrom 里的人本就能驱动本机 (所发起的轮次的审批卡也是他点), 绑一个微信号给他不是放出新权限;
+ *  只认 defaultChat 会把「defaultChat 指着别人、自己在 allowFrom」的部署里的唯一使用者挡在外面。 */
 export const wxAdmins = (cfg: Config): string[] =>
   cfg.approval.approvers.length ? cfg.approval.approvers
-    : cfg.defaultChat?.startsWith("user:") ? [cfg.defaultChat]
-    : cfg.wrc.allowFrom.filter((p) => p.startsWith("user:"));
+    : [...new Set([...(cfg.defaultChat?.startsWith("user:") ? [cfg.defaultChat] : []), ...cfg.wrc.allowFrom.filter((p) => p.startsWith("user:"))])];
 export const isWxAdmin = (cfg: Config, userPrincipal: string): boolean => wxAdmins(cfg).includes(userPrincipal);
 
 const ago = (t?: number): string => {
@@ -62,7 +62,7 @@ export const renderAccounts = (cfg: Config, xs: readonly WxAccount[]): string =>
     ].join("\n");
 
 const HELP = [
-  "*/wx* 微信 ClawBot (仅审批人, 企微单聊)",
+  "*/wx* 微信 ClawBot (仅审批人; 群里发起时二维码私发到你的单聊)",
   "`/wx` 列出已绑定的微信",
   "`/wx bind [群名]` 出二维码, 用要绑定的那个微信扫 (约 2 分钟有效)",
   "`/wx code <配对码>` 微信上显示配对码时回填",
@@ -147,7 +147,8 @@ const pickAccount = (cfg: Config, xs: readonly WxAccount[], arg: string): WxAcco
 };
 
 /** 企微侧一次绑定的进度推送: 新码发图, 关键状态各一句。 */
-const wecomBindSink = (d: CmdDeps, to: string): ((v: BindView) => void) => {
+/** `to`: 二维码与进度发去哪 (发起人的单聊); `fallback`: 单聊发不出时退到发起的那个群。 */
+const wecomBindSink = (d: CmdDeps, to: string, fallback = to): ((v: BindView) => void) => {
   let lastQr = "";
   let last = "";
   return (v) => {
@@ -155,8 +156,14 @@ const wecomBindSink = (d: CmdDeps, to: string): ((v: BindView) => void) => {
       lastQr = v.qrUrl;
       void (async () => {
         try {
-          const r = await d.sendWecomMedia(to, { path: await qrPng(v.qrUrl), kind: "image", name: "weixin-bind.png" });
-          if (!r.ok) d.log.warn({ reason: r.reason }, "weixin qr image failed");
+          const png = await qrPng(v.qrUrl);
+          const r = await d.sendWecomMedia(to, { path: png, kind: "image", name: "weixin-bind.png" });
+          if (!r.ok && fallback !== to) {
+            d.log.warn({ reason: r.reason, to }, "weixin qr to DM failed — falling back to the group");
+            to = fallback;
+            const g = await d.sendWecomMedia(to, { path: png, kind: "image", name: "weixin-bind.png" });
+            if (!g.ok) d.log.warn({ reason: g.reason }, "weixin qr image failed");
+          } else if (!r.ok) d.log.warn({ reason: r.reason }, "weixin qr image failed");
         } catch (e) { d.log.warn({ err: (e as Error).message }, "weixin qr render failed"); }
         d.sendWecom(to, `📱 ${v.refresh ? `二维码已换新 (${v.refresh}/3)。` : ""}用**要绑定的那个人的微信**扫上图 (约 2 分钟有效)。手机上只有这一台时: 长按图片存到相册, 微信「扫一扫」右上角选相册。\n\n扫不了也可以在微信里打开: ${v.qrUrl}`);
       })();
@@ -178,14 +185,18 @@ export interface WxCmdCtx {
 export const makeWxCommands = (d: CmdDeps) => async (ctx: WxCmdCtx, cmd: WxCommand): Promise<void> => {
   const { cfg, wx } = d;
   const dm = ctx.chat.startsWith("user:");
-  if (!isWxAdmin(cfg, ctx.sender)) return ctx.reply("[wezard] `/wx` 只有审批人能用 (approval.approvers; 空则 defaultChat / allowFrom 里的人)");
+  if (!isWxAdmin(cfg, ctx.sender)) {
+    d.log.info({ sender: ctx.sender, chat: ctx.chat, admins: wxAdmins(cfg) }, "/wx rejected: not an admin");
+    return ctx.reply(`[wezard] \`/wx\` 只有审批人能用 (approval.approvers; 空则 defaultChat 与 allowFrom 里的人), 你是 \`${ctx.sender}\``);
+  }
   if (cmd.verb === "help") return ctx.reply(HELP);
   if (cmd.verb === "list") return ctx.reply(renderAccounts(cfg, wx.list()));
-  if (!dm && cmd.verb !== "unbind") return ctx.reply("[wezard] 绑定只能在和机器人的**单聊**里发起 —— 二维码就是授权凭据, 群里谁都能扫");
   if (cmd.verb === "bind") {
     if (!cfg.weixin.enabled) return ctx.reply("[wezard] 微信通道未开启: 先 `config_set weixin.enabled=true` (放权项, 会推卡确认), reload 后再 `/wx bind`");
-    const r = wx.startBind(ctx.sender, cmd.name, wecomBindSink(d, ctx.chat));
-    return r.ok ? undefined : ctx.reply(`[wezard] ${r.reason}`);
+    // 审批人在群里发起也放行, 但二维码 (= 授权凭据) 私发到他的单聊, 不摊在群里; 单聊发不出才退回群里。
+    const r = wx.startBind(ctx.sender, cmd.name, wecomBindSink(d, dm ? ctx.chat : ctx.sender, ctx.chat));
+    if (!r.ok) return ctx.reply(`[wezard] ${r.reason}`);
+    return dm ? undefined : ctx.reply("📱 二维码已私发到你和机器人的单聊 (约 2 分钟有效), 用要绑定的那个微信扫; 进度也在单聊里报");
   }
   if (cmd.verb === "code") {
     const r = wx.submitCode(ctx.sender, cmd.code);
