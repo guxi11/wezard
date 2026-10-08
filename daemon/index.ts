@@ -14,7 +14,7 @@ import { bindCliBackends, projectDirsFor, type CliBackendName } from "../shared/
 import { startWs } from "./ws.js";
 import { startWeixin } from "./weixin.js";
 import { installWeixinPort } from "./weixin-port.js";
-import { bindWxCommands, makeOnBound, makeWxCommands, routeSendMedia, weixinSendMedia, wxAdmins, wxRoutes } from "./weixin-cmd.js";
+import { bindWxCommands, makeOnBound, makeWxCommands, routeSendMedia, wecomBindSink, weixinSendMedia, wxAdmins, wxRoutes } from "./weixin-cmd.js";
 import { bindChatReach } from "./reach.js";
 import { planMedia, type MediaKind, type SendMedia } from "./media.js";
 import { aibotSendMedia } from "./aibot-media.js";
@@ -176,9 +176,18 @@ const main = async (): Promise<void> => {
   // 这里只建状态, 收发要等下面的入站监听全装好 (wx.start)。onBound 用到的 bridge 在下面
   // 才立起来, 绑定只会在开机很久之后发生, 闭包里取得到。
   const wxLog = log.child({ mod: "weixin" });
+  // `/wx` 命令与续上的绑定共用的企微出口 (原生 aibot, 不经微信分流)。
+  const wxPush = {
+    log: wxLog,
+    sendWecom: (p: string, md: string): void => void ws.client
+      .sendMessage(baseOfKey(p).replace(/^(user|chat|group):/, ""), { msgtype: "markdown", markdown: { content: md } })
+      .catch((e: unknown) => wxLog.warn({ to: p, err: errText(e) }, "wx cmd push failed")),
+    sendWecomMedia: aibotSendMedia(ws.client, log.child({ mod: "media" })),
+  };
   const wx = startWeixin({
     cfg,
     log: wxLog,
+    sinkFor: (to) => wecomBindSink(wxPush, to),
     onBound: (acct, name) => makeOnBound({
       cfg, sourcePath, log: wxLog,
       hasSession: (t) => bridge.hasMirrorTarget(t),
@@ -294,13 +303,7 @@ const main = async (): Promise<void> => {
     return decided;
   };
   for (const [key, handler] of Object.entries(wxRoutes({ cfg, wx, sourcePath, confirmBind }))) http.register(key, guarded(handler));
-  bindWxCommands(makeWxCommands({
-    cfg, sourcePath, log: wxLog, wx,
-    sendWecom: (p, md) => void ws.client
-      .sendMessage(baseOfKey(p).replace(/^(user|chat|group):/, ""), { msgtype: "markdown", markdown: { content: md } })
-      .catch((e: unknown) => wxLog.warn({ to: p, err: errText(e) }, "wx cmd push failed")),
-    sendWecomMedia: aibotSendMedia(ws.client, log.child({ mod: "media" })),
-  }));
+  bindWxCommands(makeWxCommands({ cfg, sourcePath, wx, ...wxPush }));
   installAskEventListener(ws.client, log.child({ mod: "ask" }));
   // 入站监听 (inbound / approval / ask) 都装好了才开收: 首轮 getupdates 会立刻带回 reload 期间
   // 人发的话 (含回菜单的数字), 游标随即前移 —— 早了就是永久丢。

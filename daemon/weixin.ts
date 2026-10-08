@@ -94,6 +94,8 @@ export interface WeixinDeps {
   onBound: (acct: WxAccount, wantName: string, rebind: boolean) => Promise<string>;
   /** 往企微报一句 (掉线、压着消息) —— 走原生 aibot 出口, 不经过微信分流。 */
   notifyWecom: (principal: string, markdown: string) => void;
+  /** reload 后续上的绑定: 进度推给谁 (发起时记下的聊天; "cli" 没有推送)。 */
+  sinkFor?: (to: string) => (v: BindView) => void;
 }
 
 export interface Weixin {
@@ -108,7 +110,7 @@ export interface Weixin {
   /** 发一个文件: 先冲掉排着的文本 (顺序不乱), 再占一条额度直发; 发不出就如实回 reason, 不压 outbox (二进制不进账本)。 */
   sendMedia: (chatId: string, f: { path: string; kind: WxMediaKind; name: string }) => Promise<{ ok: true } | { ok: false; reason: string }>;
   onInbound: (fn: (m: WxInbound) => void) => void;
-  startBind: (by: string, name: string, onChange: (v: BindView) => void) => { ok: true; view: BindView } | { ok: false; reason: string };
+  startBind: (by: string, name: string, onChange: (v: BindView) => void, to?: string) => { ok: true; view: BindView } | { ok: false; reason: string };
   submitCode: (by: string, code: string) => { ok: boolean; reason?: string };
   bindOf: (idOrBy: string) => BindView | undefined;
   unbind: (chatId: string) => { ok: boolean; reason?: string };
@@ -237,7 +239,8 @@ export const normalizeInbound = (chatId: string, m: WeixinMessage, now: number):
 };
 
 // ── 服务 ─────────────────────────────────────────────────────────────
-export const startWeixin = ({ cfg, log, onBound, notifyWecom }: WeixinDeps): Weixin => {
+export const startWeixin = (deps: WeixinDeps): Weixin => {
+  const { cfg, log, onBound, notifyWecom } = deps;
   const w = (): Config["weixin"] => cfg.weixin;
   const file = expandHome(w().stateFile);
   // 凭据在里面: 每次写完收紧权限 (json-map-store 自己不管 mode)。
@@ -513,16 +516,28 @@ export const startWeixin = ({ cfg, log, onBound, notifyWecom }: WeixinDeps): Wei
   };
 
   // ── 绑定 ──
-  interface Login extends BindView { qrcode: string; base: string; code?: string; codeTried?: boolean; ctl: AbortController; onChange: (v: BindView) => void }
+  interface Login extends BindView { qrcode: string; base: string; to: string; code?: string; codeTried?: boolean; ctl: AbortController; onChange: (v: BindView) => void }
   const logins = new Map<string, Login>();
+  // 在途的绑定落盘: 人扫码要一两分钟, 这期间一次 reload 就会把轮询掐掉 —— 手机上显示已连接,
+  // 我们却没拿到 bot_token (真机第一次就这么丢的)。开机按它续轮询; 配对码不落盘 (人重交即可)。
+  type SavedLogin = Pick<Login, "id" | "by" | "name" | "to" | "qrcode" | "qrUrl" | "base" | "refresh" | "startedAt" | "status" | "message">;
+  const loginDb = loadJsonMap<SavedLogin>(w().stateFile.replace(/\.json$/, "") + "-logins.json");
+  const keep = (l: Login): void => {
+    if (!l.qrcode) return;
+    const { id, by, name, to, qrcode, qrUrl, base, refresh, startedAt, status, message } = l;
+    loginDb.set(by, { id, by, name, to, qrcode, qrUrl, base, refresh, startedAt, status, message });
+  };
   const view = (l: Login): BindView => ({ id: l.id, by: l.by, name: l.name, status: l.status, qrUrl: l.qrUrl, refresh: l.refresh, message: l.message, startedAt: l.startedAt, ...(l.chatId ? { chatId: l.chatId } : {}) });
   const set = (l: Login, p: Partial<BindView>): void => {
+    if (p.status && p.status !== l.status) log.info({ id: l.id, by: l.by, from: l.status, to: p.status, message: p.message }, "weixin bind status");
     Object.assign(l, p);
+    if (!l.ctl.signal.aborted) keep(l);
     try { l.onChange(view(l)); } catch { /* 观察者自己的事 */ }
   };
   const finish = (l: Login, p: Partial<BindView>): void => {
     set(l, p);
     l.ctl.abort();
+    if (loginDb.get(l.by)?.id === l.id) loginDb.drop(l.by);
     // 留 10 分钟给 CLI / rolepage 读终态。
     setTimeout(() => { if (logins.get(l.by) === l) logins.delete(l.by); }, 10 * 60_000).unref();
   };
@@ -623,13 +638,14 @@ export const startWeixin = ({ cfg, log, onBound, notifyWecom }: WeixinDeps): Wei
     if (!l.ctl.signal.aborted) finish(l, { status: "failed", message: "等扫码超时 (8 分钟), 请重新发起绑定" });
   };
 
-  const startBind: Weixin["startBind"] = (by, name, onChange) => {
+  const startBind: Weixin["startBind"] = (by, name, onChange, to = by) => {
     if (!w().enabled) return { ok: false, reason: "微信通道未开启 (weixin.enabled=false)" };
     logins.get(by)?.ctl.abort();
     const l: Login = {
       id: `wb${Date.now().toString(36)}`, by, name, status: "qr", qrUrl: "", refresh: 0, message: "正在取二维码…",
-      startedAt: Date.now(), qrcode: "", base: w().baseUrl || ILINK_BASE, ctl: new AbortController(), onChange,
+      startedAt: Date.now(), qrcode: "", base: w().baseUrl || ILINK_BASE, to, ctl: new AbortController(), onChange,
     };
+    log.info({ id: l.id, by, to, name }, "weixin bind start");
     logins.set(by, l);
     void (async () => {
       const q = await getBotQrcode(w().baseUrl || ILINK_BASE, all().map((a) => a.botToken));
@@ -755,6 +771,13 @@ export const startWeixin = ({ cfg, log, onBound, notifyWecom }: WeixinDeps): Wei
     started = true;
     // 开机: 只在开关开着时收发; 关着的时候账号原样留着, 再开即续。掉线的号也起轮询 —— 它歇到 retryAt 再试。
     if (w().enabled) for (const a of all()) startPoll(a);
+    for (const sv of Object.values(loginDb.all())) {
+      if (!w().enabled || Date.now() - sv.startedAt > LOGIN_DEADLINE_MS || logins.has(sv.by)) { loginDb.drop(sv.by); continue; }
+      const l: Login = { ...sv, ctl: new AbortController(), onChange: deps.sinkFor && sv.to !== "cli" ? deps.sinkFor(sv.to) : () => undefined };
+      logins.set(sv.by, l);
+      log.info({ id: l.id, by: l.by, status: l.status }, "weixin bind resumed after reload");
+      void runLogin(l).catch((e) => finish(l, { status: "failed", message: (e as Error).message }));
+    }
   };
 
   const stop: Weixin["stop"] = async () => {

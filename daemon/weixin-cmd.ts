@@ -147,7 +147,7 @@ const pickAccount = (cfg: Config, xs: readonly WxAccount[], arg: string): WxAcco
 };
 
 /** 企微侧一次绑定的进度推送: 新码发图, 关键状态各一句。 */
-const wecomBindSink = (d: CmdDeps, to: string): ((v: BindView) => void) => {
+export const wecomBindSink = (d: Pick<CmdDeps, "log" | "sendWecom" | "sendWecomMedia">, to: string): ((v: BindView) => void) => {
   let lastQr = "";
   let last = "";
   return (v) => {
@@ -185,7 +185,7 @@ export const makeWxCommands = (d: CmdDeps) => async (ctx: WxCmdCtx, cmd: WxComma
   if (cmd.verb === "list") return ctx.reply(renderAccounts(cfg, wx.list()));
   if (cmd.verb === "bind") {
     if (!cfg.weixin.enabled) return ctx.reply("[wezard] 微信通道未开启: 先 `config_set weixin.enabled=true` (放权项, 会推卡确认), reload 后再 `/wx bind`");
-    const r = wx.startBind(ctx.sender, cmd.name, wecomBindSink(d, ctx.chat));
+    const r = wx.startBind(ctx.sender, cmd.name, wecomBindSink(d, ctx.chat), ctx.chat);
     return r.ok ? undefined : ctx.reply(`[wezard] ${r.reason}`);
   }
   if (cmd.verb === "code") {
@@ -230,7 +230,7 @@ export const wxRoutes = (d: RouteDeps): Record<string, Handler> => ({
     const yes = await d.confirmBind(name).catch((e: Error) => { json(res, 503, { ok: false, reason: `确认卡发不出去: ${e.message}` }); return undefined; });
     if (yes === undefined) return;
     if (!yes) { json(res, 403, { ok: false, reason: "审批人没有同意 (拒绝或超时)" }); return; }
-    const r = d.wx.startBind("cli", name, () => undefined);
+    const r = d.wx.startBind("cli", name, () => undefined, "cli");
     json(res, r.ok ? 200 : 400, r);
   },
   "GET /wx/bind/status": (_req, res, url) => {
