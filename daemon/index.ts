@@ -1030,7 +1030,15 @@ const main = async (): Promise<void> => {
         notifyChat(dest, `${speakerHead(relayLabel(self))}\n\n${content}`);
         recordPost({ target: self, channel: dest, body: content, ...(asker ? { asker } : {}) });
       }
-      json(res, 200, { ok: true, sent: dests.map((d) => chatNameOf(cfg, d) || d) });
+      // 微信群聊: 人超过 ctxTtlSec 没说话时微信会静默丢弃, 消息只能压着等他下次开口 —— 如实告诉调用方, 别回「已发送」。
+      const wxId = (d: string): string => baseOfKey(d).replace(/^chat:/, "");
+      const held = dests.filter((d) => wx.owns(wxId(d)) && !wx.fresh(wxId(d)));
+      const name = (d: string): string => chatNameOf(cfg, d) || d;
+      json(res, 200, {
+        ok: true,
+        sent: dests.filter((d) => !held.includes(d)).map(name),
+        ...(held.length ? { held: held.map(name), note: `微信群聊 ${held.map(name).join("、")} 那头超过 ${cfg.weixin.ctxTtlSec}s 没说话: 微信会静默丢弃主动推送, 这条已压着, 对方下次在微信里开口时送达 (定时提醒做不到准点)` } : {}),
+      });
     });
 
     // ── 给人看的文件 / 图片 ────────────────────────────────────────────

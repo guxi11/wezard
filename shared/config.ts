@@ -335,7 +335,10 @@ const Weixin = z.object({
   sendCap: hot(z.number().int().min(1).default(3).describe("人每说一句 (一份 context_token) 之后最多发几条; 超出的压着, 等人再说话时取回")),
   minGapSec: hot(z.number().int().min(0).default(15).describe("同一微信号两条出站至少隔几秒, 期间的待发合并成一条")),
   ratePauseMin: hot(z.number().int().min(1).default(10).describe("被频控 (rate limited) 后暂停出站几分钟")),
-  ctxTtlHours: hot(z.number().positive().default(10).describe("人多久没说话就不再尝试主动发 (context_token 视为过期)")),
+  // 真机 (2026-10-08): 人说话后 ~10 分钟的定时提醒 sendmessage 照样 ret=0 带 message_id, 微信里却收不到;
+  // 人刚开口十几秒内发的都到了。社区 #286 实测 73s 能发、135s 不行。所以默认只信 2 分钟内的 token —— 更老的
+  // 压着, 等人下次开口时补发, 并往企微报一声, 而不是发出去石沉大海、还回「已发送」。
+  ctxTtlSec: hot(z.number().int().positive().default(120).describe("人说完话之后多少秒内才直接发 (更久的 context_token 微信会静默丢弃, 压着等人下次开口)")),
   fallbackChat: hot(z.string().default("").describe("微信发不出 / 掉线时往哪个企微聊天报; 空 = 发起绑定的那个人")),
   typing: hot(z.boolean().default(true).describe("回复生成中在微信里显示「对方正在输入」")),
   baseUrl: z.string().default("https://ilinkai.weixin.qq.com").describe("iLink API 地址 (登录后以服务端给的为准)"),

@@ -116,6 +116,8 @@ export interface Weixin {
   unbind: (chatId: string) => { ok: boolean; reason?: string };
   /** 切网: 掐断在途长轮询立即重连。 */
   kick: (reason: string) => void;
+  /** 此刻发过去对方收得到吗: 号 live 且人在 ctxTtlSec 内说过话; 否则只会压着等人开口。 */
+  fresh: (chatId: string) => boolean;
   /** 开始收发。要等入站监听全装好再调: 首轮 getupdates 会立刻带回 reload 期间的消息, 游标随即前移。 */
   start: () => void;
   stop: () => Promise<void>;
@@ -162,7 +164,7 @@ export type Plan =
 export const planFlush = (a: Pick<WxAccount, "ctx" | "outbox" | "lastOutAt" | "pausedUntil">, now: number, w: Config["weixin"]): Plan => {
   if (a.outbox.length === 0) return { kind: "hold", why: "empty" };
   if (a.pausedUntil && a.pausedUntil > now) return { kind: "wait", ms: a.pausedUntil - now };
-  if (!a.ctx || now - a.ctx.at > w.ctxTtlHours * 3600_000) return { kind: "hold", why: "stale" };
+  if (!a.ctx || now - a.ctx.at > w.ctxTtlSec * 1000) return { kind: "hold", why: "stale" };
   const budget = w.sendCap - a.ctx.used;
   if (budget <= 0) return { kind: "hold", why: "cap" };
   const gap = (a.lastOutAt ?? 0) + w.minGapSec * 1000 - now;
@@ -704,7 +706,7 @@ export const startWeixin = (deps: WeixinDeps): Weixin => {
     if (!isLive(a)) return { ok: false, reason: "微信通道已掉线, 先 /wx bind 重新绑定" };
     const now = Date.now();
     if (a.pausedUntil && a.pausedUntil > now) return { ok: false, reason: `微信被频控, ${Math.ceil((a.pausedUntil - now) / 60_000)} 分钟后再试` };
-    if (!a.ctx || now - a.ctx.at > w().ctxTtlHours * 3600_000) return { ok: false, reason: "微信那头久没说话, context_token 已过期 —— 等对方在微信里说一句再发" };
+    if (!a.ctx || now - a.ctx.at > w().ctxTtlSec * 1000) return { ok: false, reason: `微信那头 ${Math.round((now - (a.ctx?.at ?? 0)) / 1000)}s 没说话, 超过 ${w().ctxTtlSec}s 的消息微信会静默丢弃 —— 等对方在微信里说一句再发` };
     if (a.ctx.used >= w().sendCap) return { ok: false, reason: `这一轮已发满 ${w().sendCap} 条 (weixin.sendCap), 等对方再说话再发` };
     const raw = readFileSync(f.path);
     const key = randomBytes(16);
@@ -799,6 +801,7 @@ export const startWeixin = (deps: WeixinDeps): Weixin => {
 
   return {
     owns: (chatId) => !!byChat(chatId),
+    fresh: (chatId) => ((a) => !!a && a.state === "live" && !!a.ctx && Date.now() - a.ctx.at <= w().ctxTtlSec * 1000)(byChat(chatId)),
     live: (chatId) => isLive(byChat(chatId)),
     accountOf: byChat,
     list: all,
