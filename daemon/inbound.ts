@@ -1,7 +1,7 @@
 // Inbound text router. Hands the message off to the mirror bridge.
-import { mkdirSync, writeFileSync, statSync } from "node:fs";
-import { join } from "node:path";
-import type { WSClient, WsFrame, TextMessage, ImageMessage, MixedMessage, BaseMessage, QuoteContent } from "@wecom/aibot-node-sdk";
+import { statSync } from "node:fs";
+import type { WSClient, WsFrame, TextMessage, ImageMessage, MixedMessage, FileMessage, VideoMessage, VoiceMessage, BaseMessage, QuoteContent } from "@wecom/aibot-node-sdk";
+import { attachmentLine, inboxName, saveToInbox } from "./media.js";
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
 import type { MirrorBridge } from "./mirror-bridge.js";
@@ -548,6 +548,7 @@ interface DownloadDeps {
   inboxDir: string;
 }
 
+/** 下载并解密到 inbox; 落盘名留着原文件名 (没有就按魔数补扩展名) —— agent 靠它认类型。 */
 const downloadToInbox = async (
   deps: DownloadDeps,
   url: string,
@@ -555,16 +556,16 @@ const downloadToInbox = async (
   msgid: string,
   index: number,
   attempt = 0,
-): Promise<string | undefined> => {
+): Promise<{ path: string; bytes: number } | undefined> => {
   try {
     const { buffer, filename } = await deps.client.downloadFile(url, aesKey);
-    const ext = filename ? `.${filename.split(".").pop()!}` : sniffExt(buffer);
-    const safeName = `${msgid.replace(/[^A-Za-z0-9_-]/g, "_")}_${index}${ext}`;
-    mkdirSync(deps.inboxDir, { recursive: true });
-    const abs = join(deps.inboxDir, safeName);
-    writeFileSync(abs, buffer);
-    deps.log.info({ url: url.slice(0, 80), bytes: buffer.length, abs }, "media saved");
-    return abs;
+    const saved = saveToInbox(deps.inboxDir, inboxName(msgid, index, filename || `media${sniffExt(buffer)}`), buffer);
+    if ("reason" in saved) {
+      deps.log.warn({ bytes: buffer.length, reason: saved.reason }, "media not saved");
+      return undefined;
+    }
+    deps.log.info({ url: url.slice(0, 80), bytes: buffer.length, abs: saved.path }, "media saved");
+    return { path: saved.path, bytes: buffer.length };
   } catch (e) {
     deps.log.error({ err: (e as Error).message, attempt }, "media download failed");
     // 一次瞬时超时不该让图凭空消失 —— 再试一次。
@@ -1062,7 +1063,7 @@ export const installInboundRouter = (
     const { text, tag, who } = route(msg, "");
     const { stop } = await gate(frame, msg, "", who, tag);
     if (stop) return;
-    const path = await downloadToInbox({ client, log, inboxDir }, msg.image.url, msg.image.aeskey, msg.msgid, 0);
+    const path = (await downloadToInbox({ client, log, inboxDir }, msg.image.url, msg.image.aeskey, msg.msgid, 0))?.path;
     if (!path) {
       try { await client.replyStream(frame, msg.msgid, "[wezard] 图片下载失败", true); } catch { /* ignore */ }
       return;
@@ -1096,13 +1097,13 @@ export const installInboundRouter = (
         const t = stripAt(msg, item.text.content);
         if (t) texts.push(t);
       } else if (item.msgtype === "image" && item.image?.url) {
-        const path = await downloadToInbox(
+        const path = (await downloadToInbox(
           { client, log, inboxDir },
           item.image.url,
           item.image.aeskey,
           msg.msgid,
           imgIdx++,
-        );
+        ))?.path;
         if (path) images.push(path); else lost++;
       }
     }
@@ -1114,6 +1115,37 @@ export const installInboundRouter = (
     // consumed above; leaving it in would leak into Claude) and attaches the
     // quote only when it isn't already in the target's context.
     await send(frame, msg, who, composeInbound(msg, texts.join("\n"), quoteInContext, stripAt, resolve).text, images);
+  });
+
+  // 文件 / 视频 (企微只在单聊里推): 落进 inbox, 以一行 `[文件: 路径 (大小)]` 注入 —— 不走剪贴板,
+  // agent 按需用 Read / Bash 去读。路由与 image 同理: 没有正文, 只有引用能带 `.name`。
+  const onAttachment = (kind: "file" | "video", pick: (m: FileMessage | VideoMessage) => { url: string; aeskey?: string }) =>
+    async (frame: WsFrame<FileMessage | VideoMessage>): Promise<void> => {
+      const msg = frame.body;
+      if (!msg) return;
+      log.info({ msgid: msg.msgid, kind, hasQuote: !!msg.quote }, `rx ${kind}`);
+      const { text, tag, who } = route(msg, "");
+      const { stop } = await gate(frame, msg, "", who, tag);
+      if (stop) return;
+      const { url, aeskey } = pick(msg);
+      const got = await downloadToInbox({ client, log, inboxDir }, url, aeskey, msg.msgid, 0);
+      // 丢了也照样告诉 agent (同 mixed): 那条流留给 bridge 回这一轮。
+      const line = got ? attachmentLine(kind, got.path, got.bytes) : `[对方发来一个${kind === "file" ? "文件" : "视频"}, 下载失败 —— 请让发送者重发]`;
+      await send(frame, msg, who, [text, line].filter(Boolean).join("\n"));
+    };
+  client.on("message.file", onAttachment("file", (m) => (m as FileMessage).file));
+  client.on("message.video", onAttachment("video", (m) => (m as VideoMessage).video));
+
+  // 语音: 企微只给转写文本, 拿不到音频 —— 当文字走, 标明是转写 (可能有错字)。
+  client.on("message.voice", async (frame: WsFrame<VoiceMessage>) => {
+    const msg = frame.body;
+    if (!msg) return;
+    const heard = (msg.voice?.content ?? "").trim();
+    log.info({ msgid: msg.msgid, len: heard.length }, "rx voice");
+    const { text, tag, who } = route(msg, heard);
+    const { stop } = await gate(frame, msg, text, who, tag);
+    if (stop) return;
+    await send(frame, msg, who, text ? `[语音转写] ${text}` : "[对方发来一段语音, 没有转写文本]");
   });
 
   // template_card_event is handled in approval module; no listener here.

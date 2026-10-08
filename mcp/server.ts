@@ -477,6 +477,25 @@ server.registerTool(
 );
 
 server.registerTool(
+  "send_file",
+  {
+    title: "Send a local file / image into a chat for people to see",
+    description:
+      "把本机一个文件作为**图片 / 文件 / 语音 / 视频消息**发进聊天给人看 (notify 的媒体版: 去向、聊天名、顶层模式的规矩都与 notify 相同)。截图、生成的图表、导出的报表、日志包要交给人时用它 —— 别只在回复里写一个本地路径, 人那边打不开。\n" +
+      "`kind` 省略按扩展名定: png/jpg/jpeg/gif → image, mp4 → video, amr → voice, 其余 → file。企微上限: 图片 ≤10MB、视频 mp4 ≤10MB、语音只收 amr ≤2MB、文件 ≤20MB; 超了直接报错并告诉你怎么改 (例如大图改 `kind:\"file\"`)。",
+    inputSchema: {
+      path: z.string().describe("本机绝对路径 (`~` 可用)"),
+      kind: z.enum(["image", "file", "voice", "video"]).optional().describe("省略 = 按扩展名推断"),
+      to: z.string().optional().describe("收件聊天名或裸 principal; 省略 = 你这一轮所在的群 (私聊轮则是你的 home 群)"),
+      caption: z.string().optional().describe("附一句说明: 先以一条带你名字的 markdown 气泡发出, 再发文件"),
+      title: z.string().optional().describe("仅视频: 标题"),
+      description: z.string().optional().describe("仅视频: 描述"),
+    },
+  },
+  async (a) => unwrap("send_file", await daemonPost("/send_file", a)),
+);
+
+server.registerTool(
   "wait_peer",
   {
     title: "(deprecated) block until another wizard stops working",

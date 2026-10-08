@@ -12,6 +12,8 @@ import { patchJsonc } from "../shared/config-writer.js";
 import { EFFORTS, parseEffort } from "../shared/effort.js";
 import { bindCliBackends, projectDirsFor, type CliBackendName } from "../shared/cli-backends.js";
 import { startWs } from "./ws.js";
+import { planMedia, type MediaKind, type SendMedia } from "./media.js";
+import { aibotSendMedia } from "./aibot-media.js";
 import { startNetWatch } from "./net-watch.js";
 import { startHttp, json, readBody, type Handler } from "./http.js";
 import { parsePath } from "../shared/config-meta.js";
@@ -627,6 +629,8 @@ const main = async (): Promise<void> => {
     // 头不走 withTagHeader 的那些 (relay / notify / 工单) 正文里的 tag 在这里挂链;
     // 已挂过的 linkTags 认得出, 不会再套一层。
     const chatIdOf = (t: string): string => baseOfKey(t).replace(/^(user|chat|group):/, "");
+    // 出站媒体只经这一个口子 (通道无关, 见 media.ts); 别的通道接进来时在这里按 principal 分流。
+    const sendMedia: SendMedia = aibotSendMedia(ws.client, log.child({ mod: "media" }));
     const notifyChat = (base: string, markdown: string): void => {
       const chatId = chatIdOf(base);
       void ws.client
@@ -929,6 +933,17 @@ const main = async (): Promise<void> => {
     // 给**人**看。收件人就是地址 —— 聊天名或裸 principal, 没有「先订阅才收得到」
     // 这一步。头沿用 relay 那一套: 本群退化成寻常的 `emoji #tag`, 外群写成带聊天
     // 名的全称, 于是那边的人一眼看得出是谁、从哪个群说过来的。
+    // 顶层模式: 只有顶层 wizard 对人说话。拦的是「这一轮在为同伴干活」的: 同伴私聊派来的活, 或
+    // 回执轮但那件活是为上游同伴派的 (k 是 peer)。人说的、定时任务放的、旁支 (chain:false, 无 k)
+    // 的回执轮都不拦; 管家只在自己的群里豁免。notify 与 send_file 共用这一道闸。
+    const topOnlyMuted = (self: string, dests: readonly string[]): Record<string, unknown> | undefined => {
+      const env = openingOfSelf(self)?.env;
+      const belowTop = env?.kind === "peer" && (env.receipt ? kOfAttr(env.k ?? "")?.kind === "peer" : env.private);
+      const muted = dests.filter((d) => chatPolicyOf(cfg, d).topOnly && !(!tagOfKey(self) && baseOfKey(self) === d));
+      return muted.length && belowTop
+        ? { ok: false, topOnly: true, reason: `${muted.map((d) => chatNameOf(cfg, d) || d).join(", ")} 开着顶层模式: 你这一轮是同伴派来的活, 不对人说话 —— 要说的写进终句 (\`RESULT:\` / \`NEED:\`), 由派你的那个代你向人交代` }
+        : undefined;
+    };
     http.register("POST /notify", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
@@ -947,22 +962,40 @@ const main = async (): Promise<void> => {
         return;
       }
       const dests = [...new Set(refs.length ? refs.map((r) => chatBaseOf(cfg, r)) : [channelOf(self)])];
-      // 顶层模式: 只有顶层 wizard 对人说话。拦的是「这一轮在为同伴干活」的: 同伴私聊派来的活, 或
-      // 回执轮但那件活是为上游同伴派的 (k 是 peer)。人说的、定时任务放的、旁支 (chain:false, 无 k)
-      // 的回执轮都不拦; 管家只在自己的群里豁免。
-      const env = openingOfSelf(self)?.env;
-      const belowTop = env?.kind === "peer" && (env.receipt ? kOfAttr(env.k ?? "")?.kind === "peer" : env.private);
-      const muted = dests.filter((d) => chatPolicyOf(cfg, d).topOnly && !(!tagOfKey(self) && baseOfKey(self) === d));
-      if (muted.length && belowTop) {
-        json(res, 409, { ok: false, topOnly: true, reason: `${muted.map((d) => chatNameOf(cfg, d) || d).join(", ")} 开着顶层模式: 你这一轮是同伴派来的活, 不对人说话 —— 要说的写进终句 (\`RESULT:\` / \`NEED:\`), 由派你的那个代你向人交代` });
-        return;
-      }
+      const muted = topOnlyMuted(self, dests);
+      if (muted) { json(res, 409, muted); return; }
       const asker = askerOf(self);
       for (const dest of dests) {
         notifyChat(dest, `${relayLabel(self)}\n\n${content}`);
         recordPost({ target: self, channel: dest, body: content, ...(asker ? { asker } : {}) });
       }
       json(res, 200, { ok: true, sent: dests.map((d) => chatNameOf(cfg, d) || d) });
+    });
+
+    // ── 给人看的文件 / 图片 ────────────────────────────────────────────
+    // notify 的媒体版: 去向、认名字、顶层模式闸都与它同一套; 投递交给 sendMedia (通道无关,
+    // 按 principal 分到 aibot / 微信)。caption 先成一条带头的气泡, 让群里知道是谁发的。
+    http.register("POST /send_file", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      const b = body as { path?: string; kind?: MediaKind; to?: string; caption?: string; title?: string; description?: string };
+      const path = expandHome((b.path ?? "").trim());
+      if (!path) { json(res, 400, { ok: false, reason: "path required" }); return; }
+      ensureChatNames(self);
+      const ref = (b.to ?? "").trim();
+      const dest = ref ? chatBaseOf(cfg, ref) : channelOf(self);
+      if (!dest) { json(res, 400, { ok: false, reason: `认不出聊天: ${ref} (wizard_roster 每行有 home 聊天名, 人侧 /chats; 没起名的聊天寻址不到)` }); return; }
+      const muted = topOnlyMuted(self, [dest]);
+      if (muted) { json(res, 409, muted); return; }
+      const plan = planMedia({ path, ...(b.kind ? { kind: b.kind } : {}) });
+      if (!plan.ok) { json(res, 400, plan); return; }
+      const caption = (b.caption ?? "").trim();
+      if (caption) notifyChat(dest, `${relayLabel(self)}\n\n${caption}`);
+      const r = await sendMedia(dest, { path, kind: plan.kind, ...(b.title ? { title: b.title } : {}), ...(b.description ? { description: b.description } : {}) });
+      if (!r.ok) { json(res, 502, r); return; }
+      const asker = askerOf(self);
+      recordPost({ target: self, channel: dest, body: [caption, `📎 ${r.name} (${r.kind}) · ${path}`].filter(Boolean).join("\n\n"), ...(asker ? { asker } : {}) });
+      json(res, 200, { ok: true, sent: chatNameOf(cfg, dest) || dest, kind: r.kind, name: r.name, bytes: r.bytes });
     });
 
     http.register("POST /peers/peek", async (req, res) => {
