@@ -36,6 +36,8 @@ export interface RouteRow extends WizardBrief {
 interface Evidence {
   row: RouteRow;
   desc: string[];
+  /** 专长 (WizardRecord.expertise) 与这件活重叠的词。 */
+  exp: string[];
   asks: string[];
   files: string[];
   /** 点到了、但几乎人人读过的公共文件: 不计证据, 只摆出来说明为什么被降权。 */
@@ -97,6 +99,7 @@ const evidenceOf = (task: Set<string>, stems: Set<string>, common: Set<string>, 
   return {
     row,
     desc: shared(task, row.description),
+    exp: shared(task, row.expertise ?? ""),
     asks: [...new Set(row.asks.flatMap((a) => shared(task, a)))],
     files: hit.filter((f) => !isCommon(f)),
     common: hit.filter(isCommon),
@@ -105,14 +108,17 @@ const evidenceOf = (task: Set<string>, stems: Set<string>, common: Set<string>, 
 };
 
 // 排序只是让最有证据的先被看到: 文件命中 (它真读过) > 职责 > 最近的话; 同工作区只用来打破平手。
-const weight = (e: Evidence): number => e.files.length * 3 + e.desc.length * 2 + e.asks.length;
+// 专长是它自己声明的「熟哪块」, 与职责同权。
+const weight = (e: Evidence): number => e.files.length * 3 + (e.desc.length + e.exp.length) * 2 + e.asks.length;
 
 /** 有交集的候选, 证据最强的在前。 */
-export const rankCandidates = (task: string, taskCwd: string, rows: readonly RouteRow[]): Evidence[] => {
+export const rankCandidates = (task: string, taskCwd: string, rows: readonly RouteRow[], hot?: { now: number; ttlMs: number }): Evidence[] => {
+  // 平手时缓存热的优先 (同一把尺 wakeCostOf: 没冷 = 唤醒只读缓存); 不给 hot 就不分。
+  const warm = (r: RouteRow): number => (hot && !wakeCostOf(r.contextTokens, touchOf(r), hot.now, r.cacheTtlMs ?? hot.ttlMs).cold ? 1 : 0);
   return rows
     .map(evidenceOf(termsOf(task), stemsOf(task), commonStems(rows), taskCwd))
     .filter((e) => weight(e) > 0 || e.common.length > 0)
-    .sort((x, y) => weight(y) - weight(x) || Number(y.sameCwd) - Number(x.sameCwd) || y.row.lastActivity - x.row.lastActivity);
+    .sort((x, y) => weight(y) - weight(x) || Number(y.sameCwd) - Number(x.sameCwd) || warm(y.row) - warm(x.row) || y.row.lastActivity - x.row.lastActivity);
 };
 
 // 白板 spawn 的起步 ctx: CLI 自带 system prompt + charter (~2.6k) + 工具定义 (~18k)。
@@ -210,6 +216,7 @@ const renderOne = (e: Evidence, c: Ctx): string[] => {
   const hits = [
     e.files.length ? `读过的文件 ${e.files.slice(-4).map((f) => relTo(r.cwd, f)).join(" ")}${e.files.length > 4 ? ` +${e.files.length - 4}` : ""}` : "",
     e.desc.length ? `职责${quoted(e.desc)}` : "",
+    e.exp.length ? `专长${quoted(e.exp)}` : "",
     e.asks.length ? `最近的话${quoted(e.asks)}` : "",
     e.common.length ? `降权的公共文件 ${e.common.slice(-4).map((f) => relTo(r.cwd, f)).join(" ")}${e.common.length > 4 ? ` +${e.common.length - 4}` : ""} (不少人都读过, 不计证据)` : "",
   ].filter(Boolean);
@@ -217,6 +224,7 @@ const renderOne = (e: Evidence, c: Ctx): string[] => {
     [`\`${addr(r)}\` ${r.busy ? "忙" : r.alive ? "闲" : "冷"}`, where, ctxOf(r.contextTokens) || "ctx ?", agoOf(r.lastActivity, now)]
       .filter(Boolean).join(" · "),
     ...(r.description ? [`  职责: ${r.description}`] : []),
+    ...(r.expertise ? [`  专长: ${r.expertise}`] : []),
     `  命中: ${hits.join(" · ")}`,
     ...(r.files.length ? [`  上下文: 读过 ${r.files.length} 个文件 (${spread(r.cwd, r.files)})`] : []),
     ...costLines(e, c),
@@ -249,7 +257,7 @@ export type Decision =
   | { kind: "spawn"; why: string };
 
 /** 「真的是同一件事」的最低证据: 它读过这件活点到的文件, 或职责撞上两个以上的词。 */
-const strong = (e: Evidence): boolean => e.files.length > 0 || e.desc.length >= 2;
+const strong = (e: Evidence): boolean => e.files.length > 0 || e.desc.length + e.exp.length >= 2;
 
 /** 一个候选为什么不转给它; "" = 可以转。 */
 const vetoOf = (e: Evidence, now: number, ttlMs: number, small: boolean, force: boolean): string => {
@@ -267,6 +275,7 @@ const evidenceLine = (e: Evidence): string =>
   [
     e.files.length ? `读过点到的 ${e.files.length} 个文件` : "",
     e.desc.length ? `职责${quoted(e.desc, 3)}` : "",
+    e.exp.length ? `专长${quoted(e.exp, 3)}` : "",
     e.row.contextTokens ? ctxOf(e.row.contextTokens) : "",
   ].filter(Boolean).join(" · ");
 

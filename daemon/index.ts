@@ -1839,6 +1839,7 @@ const main = async (): Promise<void> => {
       name: settleName(wizards, chatNameOf(cfg, target), target),
       address: peerAddress(cfg, self, target),
       description: wizards.get(target)?.description ?? "",
+      ...(wizards.get(target)?.expertise ? { expertise: wizards.get(target)!.expertise } : {}),
       cwd: m.getCwd(target).runningCwd,
     });
 
@@ -2047,13 +2048,16 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/identity", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { name?: string; description?: string };
+      const b = body as { name?: string; description?: string; expertise?: string };
       const asked = normalizeTag((b.name ?? "").toString());
       const description = (b.description ?? "").toString().trim();
+      const expertise = (b.expertise ?? "").toString().trim();
       if ((b.name ?? "").toString().trim() && !asked) { json(res, 400, { ok: false, reason: "名字只能是 1-32 位字母/数字/`_`/`-`" }); return; }
       const before = settleName(wizards, chatNameOf(cfg, self), self);
       const name = asked ? wizards.rename(self, asked) : before;
       if (description) wizards.upsert(self, { description });
+      // 专长: 传 "-" 清掉; 它不进名册变动通知 (只在名册 / 候选行里读)。
+      if (expertise) wizards.upsert(self, { expertise: expertise === "-" ? undefined : expertise });
       const me = identityOf(self, self);
       // 职责是别人决定"该不该找你"的依据, 改了就得让同群的知道 —— 否则他们照着
       // 出生快照里那句旧的 (或者空的) 职责派活。
@@ -2075,8 +2079,8 @@ const main = async (): Promise<void> => {
       const q = (b.query ?? "").trim().toLowerCase();
       const chat = (b.chat ?? "").trim().toLowerCase();
       const cwd = (b.cwd ?? "").trim().toLowerCase();
-      return (w: { name: string; address: string; description: string; cwd: string; chat: string; target: string; alive: boolean }): boolean =>
-        (!q || [w.name, w.address, w.description, w.target].some((f) => (f ?? "").toLowerCase().includes(q))) &&
+      return (w: { name: string; address: string; description: string; expertise?: string; cwd: string; chat: string; target: string; alive: boolean }): boolean =>
+        (!q || [w.name, w.address, w.description, w.expertise, w.target].some((f) => (f ?? "").toLowerCase().includes(q))) &&
         (!chat || (w.chat ?? "").toLowerCase() === chat || (w.target ?? "").toLowerCase().includes(chat)) &&
         (!cwd || (w.cwd ?? "").toLowerCase().includes(cwd)) &&
         (b.alive !== true || w.alive);
@@ -2101,7 +2105,7 @@ const main = async (): Promise<void> => {
       const shown = ranked.slice(0, limit).map((r) => ({
         ...r,
         turns: turnsLine(inflight, r.target),
-        duty: dutyLine(jobs.all(), r.target),
+        duty: dutyLine(jobs.all(), r.target, (t) => `.${displayName(t)}`),
         model: r.model || (r.jsonlPath ? lastModel(r.jsonlPath) : ""),
         summary: r.jsonlPath ? lastExchange(r.jsonlPath, 80, warm) : "",
         contextTokens: r.jsonlPath ? lastContextTokens(r.jsonlPath) : 0,
@@ -2150,7 +2154,7 @@ const main = async (): Promise<void> => {
       const task = (b.task ?? "").trim();
       if (!task) { json(res, 400, { ok: false, reason: "task is required" }); return; }
       const limit = Math.min(Math.max(Number(b.limit ?? 5) || 5, 1), 20);
-      const cands = rankCandidates(task, (b.cwd ?? "").trim() || m.getCwd(self).runningCwd, await routeRowsOf(self)).slice(0, limit);
+      const cands = rankCandidates(task, (b.cwd ?? "").trim() || m.getCwd(self).runningCwd, await routeRowsOf(self), { now: Date.now(), ttlMs: cfg.wrc.mirror.keepalive.ttlSec * 1000 }).slice(0, limit);
       json(res, 200, { ok: true, text: renderCandidates(task, cands, Date.now(), cfg.wrc.mirror.keepalive.ttlSec * 1000, homedir()) });
     });
 
@@ -2172,7 +2176,7 @@ const main = async (): Promise<void> => {
       // 不是别人开着的工单里的队员 —— 点名 (`to`) 不受此限。
       const inOthersJob = (t: string): boolean => jobs.openOf(baseOfKey(t)).some((j) => j.owner !== self && j.members.some((mm) => mm.target === t));
       const pool = to || b.spawn || lead ? [] : (await routeRowsOf(self)).filter((r) => r.alive && !!tagOfKey(r.target) && !inOthersJob(r.target));
-      const cands = rankCandidates(task, m.getCwd(self).runningCwd, pool).slice(0, 5);
+      const cands = rankCandidates(task, m.getCwd(self).runningCwd, pool, { now, ttlMs }).slice(0, 5);
       let d: { kind: "existing"; why: string; row?: RouteRow } | { kind: "spawn"; why: string } = to ? { kind: "existing" as const, why: `你点名了 ${to}` }
         : b.spawn ? { kind: "spawn" as const, why: "你要了新的" }
           : lead ? { kind: "spawn" as const, why: "复杂活: 白板起一个 hard 档的 lead, 由它组队" }

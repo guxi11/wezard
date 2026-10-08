@@ -209,12 +209,13 @@ export const jobStage = (j: JobRecord, all: readonly JobRecord[], live: MemberLi
 };
 
 const ROLE_ZH: Readonly<Record<MemberRole, string>> = { lead: "lead", exec: "执行", reviewer: "评审", expert: "专家" };
-/** 名册里一个 wizard 的任职: 开着的单里它是什么 (`J1 lead · J2 评审 · J3 开单`); 没有 = 空串。 */
-export const dutyLine = (all: readonly JobRecord[], target: string): string =>
+/** 名册里一个 wizard 的任职: 开着的单里它是什么 (`J1 lead · J2 评审 · J3 开单 · 借给 J4(.lead)`); 没有 = 空串。
+ *  专家是借的 (spawned:false, 收工归还不回收), 所以写「借给 谁的单」, 让第三方一眼看出它被占着。 */
+export const dutyLine = (all: readonly JobRecord[], target: string, nameOf: (t: string) => string = (t) => t): string =>
   all.filter((j) => j.status === "open")
     .flatMap((j) => [
       ...(j.owner === target ? [`${j.id} 开单`] : []),
-      ...j.members.filter((mm) => mm.target === target).map((mm) => `${j.id} ${ROLE_ZH[mm.role ?? "exec"]}`),
+      ...j.members.filter((mm) => mm.target === target).map((mm) => mm.role === "expert" ? `借给 ${j.id}(${nameOf(j.owner)})` : `${j.id} ${ROLE_ZH[mm.role ?? "exec"]}`),
     ])
     .join(" · ");
 

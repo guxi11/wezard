@@ -396,7 +396,7 @@ const TELL_SCHEMA = {
     .optional()
     .describe("true = 在公开频道 (你这一轮所在的群) 里说: 群里出 `🦊.你: @🐨.它` 气泡, 它的回复也进群 (同时照样回执给你)。默认 false = 私聊, 只记在 rolepage。需要人知道 / 该当着人讨论才用 true。带 `job` 时不起作用 —— 工单里的往来一律私聊。"),
   job: z.string().optional().describe("这次派活归到某个工单名下 (open_job 给的 id)。**fan-out 一定要带上它**: 回执里会带 `还差几份 / 全部到齐`, 「齐了吗」由守护进程数给你, 不用你自己在上下文里记。带了它就一律私聊, 往来与回执都不进群。"),
-  role: z.enum(["exec", "reviewer", "expert"]).optional().describe("它在这张工单里的角色 (只在带 `job` 时有意义, 记进账本供工单页与名册显示): `exec` 执行 (默认) · `reviewer` 白板评审 · `expert` 借来答问的专家。"),
+  role: z.enum(["exec", "reviewer", "expert"]).optional().describe("它在这张工单里的角色 (只在带 `job` 时有意义, 记进账本供工单页与名册显示): `exec` 执行 (默认) · `reviewer` 白板评审 · `expert` 借来答问的专家 (配 `kind:\"ask\"`; 长住 wizard, 名册任职行写「借给 J…」; 按名册的「专长」行挑)。"),
   receipt: z
     .boolean()
     .optional()
@@ -751,12 +751,14 @@ server.registerTool(
     inputSchema: {
       name: z.string().optional().describe("新名字, 1-32 位字母/数字/`_`/`-`, 全机唯一。不改就别传。"),
       description: z.string().optional().describe("一句话职责, 例如 '盯 wezard 主仓的重构与发版'。不改就别传。"),
+      expertise: z.string().optional().describe("一句话专长: 熟哪块代码 / 领域, 例如 'rolepage 前端 (web/chat.js · role-view)'。名册与 dispatch 候选行都显示它, 任务与它重叠的优先; lead 要借人 (`tell_peer({job, role:\"expert\", kind:\"ask\"})`) 也靠它挑。传 '-' 清掉。"),
     },
   },
-  async ({ name, description }) =>
+  async ({ name, description, expertise }) =>
     unwrap("wizard_identity", await daemonPost("/wizard/identity", {
       ...(name !== undefined ? { name } : {}),
       ...(description !== undefined ? { description } : {}),
+      ...(expertise !== undefined ? { expertise } : {}),
     })),
 );
 

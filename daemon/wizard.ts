@@ -25,6 +25,8 @@ export interface WizardRecord {
   name: string;
   /** 一句话职责 —— 别的 wizard 靠它决定该不该找你。 */
   description: string;
+  /** 一句话专长: 熟哪块代码 / 领域 (`wizard_identity({expertise})` 自己写)。lead 借人 (`role:"expert"`) 与 dispatch 选人都按它挑。 */
+  expertise?: string;
   /** 生它的 wizard 的 target。有值 = 它是个 clone。 */
   parent?: string;
   /** fork 自哪个 sessionId ("" / 缺省 = 开局是空白会话, 没继承上下文)。 */
@@ -233,6 +235,8 @@ export interface WizardBrief {
   /** 别人叫得到它的字符串 (tell_peer 的 `name` 入参), 即名字本身。 */
   address: string;
   description: string;
+  /** 专长 (WizardRecord.expertise); 缺省 = 没写。 */
+  expertise?: string;
   cwd: string;
 }
 
@@ -380,6 +384,7 @@ const rosterEntry = (r: RosterRow, now: number, home: string): string[] => {
   return [
     head,
     ...(r.description ? [`  职责: ${r.description}`] : []),
+    ...(r.expertise ? [`  专长: ${r.expertise}`] : []),
     // 冷会话的摘要是很久以前的话, 不值得占一行; 要读就 peek_peer。
     ...(r.alive && !r.self && r.summary ? [`  最近: ${r.summary}`] : []),
     ...(r.turns ? [`  ${r.turns}`] : []),
