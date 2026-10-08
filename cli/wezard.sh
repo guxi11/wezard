@@ -41,6 +41,7 @@ wezard <subcommand>
   config-path            show resolved config path
   sync                   write hooks/MCP/env into sync.targets settings.json
   unsync                 remove our entries from sync.targets settings.json
+  wx [bind|list|unbind]  WeChat ClawBot: scan-to-bind a WeChat user as a chat (terminal QR)
   audit [tag]            token/cost breakdown for current Claude session (main + subagents)
   update                 npm i -g wezard@latest + repoint/restart daemon + sync (one command, see /wezard:update)
   uninstall              full teardown: stop daemon + unsync + plugin uninstall + remove daemon (run before `npm uninstall -g`)
@@ -165,6 +166,7 @@ svc_unregister() {
 case "$cmd" in
   init)    exec_node dist/cli/init.js "$@" ;;
   migrate) exec_node dist/cli/migrate.js "$@" ;;
+  wx)      exec_node dist/cli/wx.js "$@" ;;
   status)
     if out=$(http_get /status 2>/dev/null); then
       echo "$out" | jq . 2>/dev/null || echo "$out"

@@ -71,7 +71,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && chmod +x dist/cli/init.js dist/cli/migrate.js dist/cli/audit.js dist/daemon/index.js dist/mcp/server.js dist/svr/index.js",
+    "build": "tsc -p tsconfig.json && chmod +x dist/cli/init.js dist/cli/migrate.js dist/cli/audit.js dist/cli/wx.js dist/daemon/index.js dist/mcp/server.js dist/svr/index.js",
     "dev:daemon": "tsx daemon/index.ts",
     "dev:cli": "tsx cli/init.ts",
     "typecheck": "tsc --noEmit",
