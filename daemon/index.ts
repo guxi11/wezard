@@ -87,13 +87,14 @@ import {
 } from "./wizard.js";
 import { bindNoticeBox, createNoticeBox, createSeenRing, gcSeen, chatAudience, hears, noticeSuffixFor, type Notice, type Subject, type Part, type SeenRow, type SnapRow, type Via } from "./notices.js";
 import { createLedger, digest, pendingGc, renderDigest, renderTable, renderAwaiting, renderStalled, renderShelved, ago as agoMs, HEARD_EVERY_MS, type Item as PendingItem, type LiveOf, type Mark } from "./pending-items.js";
+import { checkDirection } from "./direction.js";
 import { loadJobStore, dutyLine, awaitingAccept, stalledRoots, shelvedRoots, nudgeDue, dayClamp, childrenOf as jobChildren, jobEpisode, rejectReason, ACCEPTS, JOB_MEMBER_MAX, JOB_DEPTH_MAX, depthOf, ancestorsOf as jobAncestors, treeOrder, jobStage, type Accept, type JobMark, type JobRecord, type MemberLive } from "./jobs.js";
 import type { MemberRole } from "../shared/world.js";
 import { cacheTouchMs, cacheTtlSec, clipMiddle, contextFiles, firstStamp, parseClosing, lastContextTokens, lastExchange, lastModel, openingTurn, replyClosedBefore, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { keepalivePingSigs } from "../shared/keepalive.js";
 import { expandHome } from "../shared/paths.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
-import { createReceipts, deadlineOf, kAttr, kOfAttr, newTurn, type InFlight, type ParentK, type Slot as ReceiptSlot } from "./receipts.js";
+import { createReceipts, deadlineOf, kAttr, kOfAttr, newTurn, type Hold, type HeldSeen, type InFlight, type ParentK, type Slot as ReceiptSlot } from "./receipts.js";
 import { renderInFlight } from "../shared/turn-state.js";
 import { startIdleNudge } from "./idle-nudge.js";
 import { renderReminder, type TurnTag } from "../shared/reminder.js";
@@ -764,6 +765,12 @@ const main = async (): Promise<void> => {
       nameOf: displayName,
       log,
       store: loadJsonMap<ReceiptSlot>(cfg.wrc.mirror.receiptsFile),
+      holdStore: loadJsonMap<Hold>(cfg.wrc.mirror.holdsFile),
+      // 放行停放着的 after 件: 走 tell_peer 同一条注入路径, 沿用停放时的件号 / 频道 / 父 k。
+      release: async (h, seen) => {
+        const r = await tellPeerAs(h.from, h.body as PeerBody, afterNote(h.after, seen), { turn: h.turn, channel: h.channel, ...(h.k ? { k: h.k } : {}), ...(h.asker ? { asker: h.asker } : {}) });
+        return r.status === 200 ? { ok: true } : { ok: false, reason: String(r.body.reason ?? `HTTP ${r.status}`) };
+      },
       handingOff,
       handedOff,
       replyFor: (to, fromName, since, turn) => m.replyToPeer(to, fromName, since, turn),
@@ -1173,9 +1180,29 @@ const main = async (): Promise<void> => {
     // 被冷门控退回过的 `self\0target` → 到期时刻: 老 MCP 进程原样重发即视为 force。
     const coldRefused = new Map<string, number>();
     type Reply = { status: number; body: Record<string, unknown> };
+    /** 入参 `after` → 件号数组 (去反引号 / 空白 / 重复)。 */
+    const afterTurnsOf = (body: PeerBody): string[] => {
+      const raw = (body as { after?: unknown }).after;
+      return [...new Set((Array.isArray(raw) ? raw : []).map((x) => String(x).replace(/[`\s]/g, "")).filter(Boolean))];
+    };
+    /** 放行时挂在信封后面的前置结论: 谁交的、件号、RESULT 与 ARTIFACT 原样 (只进对方输入框)。 */
+    const afterNote = (turns: readonly string[], seen: Readonly<Record<string, HeldSeen>>): string =>
+      renderReminder({ wezard: "after" }, [
+        "这件活排在下面这些前置之后, 它们都已落定; 结论原样附上 (谁交的 · 件号):",
+        ...turns.flatMap((t) => {
+          const x = seen[t];
+          if (!x) return [];
+          const c = parseClosing(x.body, 1500);
+          const clean = (v: string): string => v.replace(/<\/?system-reminder[^>]*>/g, "");
+          return [
+            `- ${displayName(x.to)} · ${t} · ${x.status}: ${c.kind === "result" ? `RESULT: ${clean(c.text)}` : clipLine(clean(x.body), 600) || "(没有正文)"}`,
+            ...c.artifacts.map((a) => `  ARTIFACT: ${a.path}${a.note ? ` — ${a.note}` : ""}`),
+          ];
+        }),
+      ]);
     /** tell_peer 的本体: 以 `self` 的名义说一句 —— HTTP 路由与 dispatch 共用。`extra` = 挂在信封后面的
      *  一段 (只进对方输入框, 不进 `text`: 公开时 text 会成群气泡)。 */
-    const tellPeerAs = async (self: string, body: PeerBody, extra = ""): Promise<Reply> => {
+    const tellPeerAs = async (self: string, body: PeerBody, extra = "", held?: { turn: string; channel: string; k?: ParentK; asker?: Asker }): Promise<Reply> => {
       const text = ((body as { text?: string }).text ?? "").toString();
       if (!text.trim()) { return { status: 400, body: { ok: false, reason: "text required" } }; }
       // 这句话要对方怎么接 (priority 管何时投, receipt 管要不要回执, 这个管它怎么接):
@@ -1187,7 +1214,8 @@ const main = async (): Promise<void> => {
       const { target, foreign } = r;
       // 件号先于一切: `re` 续问沿用那件活的件号、工单与频道 (见 receipts.prepare)。
       const re = ((body as { re?: string }).re ?? "").toString().trim();
-      const turn = receipts.prepare(self, target, re || undefined);
+      // 放行一件停放着的 (after): 件号 / 频道 / 父 k / 链头都沿用停放那一刻定的 —— 依赖边不改 k。
+      const turn = held ? { turn: held.turn, legs: 1, channel: held.channel } : receipts.prepare(self, target, re || undefined);
       // 续问只在那个工单还开着时沿用它: 收了工的工单不再收成员, 续问照样能发。
       // 没带工单的一句顶掉一份还没落定的工单活, 也算在那张工单上 (receipts.register 同理
       // 继承): 不然换个不带 job 的 tell_peer 就绕开了预算。
@@ -1201,9 +1229,27 @@ const main = async (): Promise<void> => {
       const leadJob = jobs.all().find((j) => j.kind === "req" && j.status === "open" && j.owner === self && j.members.some((x) => x.target === target && x.role === "lead"))?.id ?? "";
       const jobId = kind === "fyi" ? "" : askedJob || isOpen(turn.job) || (open?.deferred ? "" : isOpen(open?.job)) || (re && turn.reUnknown ? leadJob : "");
       if (jobId) {
-        const jc = checkJob(jobId, target, !!open?.need && open.turn === turn.turn);
+        const jc = checkJob(jobId, target, (!!open?.need && open.turn === turn.turn) || !!held);
         if (!jc.ok) { return { status: jc.status, body: { ok: false, reason: jc.reason } }; }
       }
+      // 派活方向闸 (见 direction.ts): 只拒不改投递路径, 不动回执 k。
+      const dr = held ? undefined : checkDirection({ self, target, kind, re: turn.legs > 1, jobId, jobs: jobs.all(), chain: receipts.ancestorsOf(self, parentKOf(self)), nameOf: displayName });
+      if (dr) { return { status: 409, body: { ok: false, gated: "direction", reason: dr } }; }
+      // 依赖 (after): 前置必须是自己派出去的件。查不到 → 400; 有失败的 → 409; 都 done → 照常投并附结论; 还有没落定的 → 停放 (见下)。
+      const afters = held ? [] : afterTurnsOf(body);
+      const prereqs = afters.length ? receipts.prereqs(self, afters) : [];
+      if (afters.length) {
+        if (kind !== "task" || re) { return { status: 400, body: { ok: false, reason: "`after` 只用于派新活 (kind:\"task\"、不带 re)" } }; }
+        const gone = afters.filter((_, i) => prereqs[i]!.state === "unknown");
+        if (gone.length) { return { status: 400, body: { ok: false, reason: `after 里的 ${gone.join(" ")} 在你的回执登记里查不到 —— 只能依赖你自己派出去的件号 (过期 / 被同一对的新一句顶掉的也查不到)` } }; }
+        const failed = afters.flatMap((t, i) => { const p = prereqs[i]!; return p.state === "failed" ? [`${t} (${displayName(p.seen.to)}) 以 ${p.seen.status} 收场`] : []; });
+        if (failed.length) { return { status: 409, body: { ok: false, reason: `前置 ${failed.join("; ")} —— 这件不投; 前置失败了就先处理它, 再重发` } }; }
+        const cur = receipts.pending(self, target);
+        if (cur && !afters.includes(cur.turn)) { return { status: 409, body: { ok: false, reason: `你已有一件活 (${cur.turn}) 在 ${displayName(target)} 手上没落定, 同一对只有一个回执槽 —— 等它交差, 或把它也列进 after` } }; }
+      }
+      const parkIt = prereqs.some((p) => p.state === "pending");
+      // 前置都已落定: 不停放, 结论附在信封后面照常投。
+      if (afters.length && !parkIt) extra += afterNote(afters, Object.fromEntries(afters.map((t, i) => [t, (prereqs[i] as { seen: HeldSeen }).seen])));
       // 公开与否由发话方 (LLM) 判断: 公开 = 在它这一轮的公开频道里说, 气泡进群、对方
       // 那一轮的回复也发进这个群; 私聊 (默认) = 只落双方的 rolepage, 回复靠 wait_peer 取。
       // 只有两端都是登记在册的 wizard 才能当着人说: 裸 target 冒充的发话方、forget
@@ -1253,6 +1299,25 @@ const main = async (): Promise<void> => {
           return { status: 409, body: { ok: false, gated: "cold", reason: gate + (force === undefined ? " (你的 MCP 是旧版、没有 force 参数: 10 分钟内原样再发一次即视为 force)" : "") } };
         }
       }
+      // 前置还没落定: 不注入, 登记一份停放 (见 receipts.Hold) —— 件号、频道、父 k、链头定在这一刻,
+      // 放行时原样沿用; 工单成员与预算也现在就记, 「齐了吗」照常数。
+      if (parkIt) {
+        const bp = body as { priority?: string; waitSec?: number; deadline?: number; receipt?: boolean; role?: string; chain?: boolean };
+        const pk = bp.chain === false ? undefined : parentKOf(self);
+        const pasker = askerOf(self);
+        receipts.hold({
+          from: self, to: target, turn: turn.turn, at: Date.now(), after: afters, channel, job: jobId,
+          ...(pk ? { k: pk } : {}), ...(pasker ? { asker: pasker } : {}),
+          // force: 冷门控上面已过一遍, 放行时缓存又凉了也不再退回。
+          body: { name: peerAddress(cfg, self, target), text, kind, force: true, ...(jobId ? { job: jobId } : {}), ...(bp.role ? { role: bp.role } : {}), ...(bp.priority ? { priority: bp.priority } : {}), ...(bp.waitSec ? { waitSec: bp.waitSec } : {}), ...(bp.deadline !== undefined ? { deadline: bp.deadline } : {}), ...(bp.receipt === false ? { receipt: false } : {}) },
+        });
+        if (jobId) {
+          const role = roleParam(bp.role);
+          jobs.attach(jobId, { target, task: text, spawned: false, ...(role ? { role } : {}) }, kind === "ask" ? "ask" : "task");
+          jobs.spend(jobId);
+        }
+        return { status: 200, body: { ok: true, parked: true, after: afters, turn: turn.turn, name: peerAddress(cfg, self, target), ...(jobId ? { job: jobId } : {}), receipt: `排在 ${afters.join(" ")} 之后: 前置都 done 才投 (带上它们的结论), 任一失败这件不投、按 canceled 回给你; 不要挂在 wait_peer 上等, 接着干你自己的事` } };
+      }
       // 「忙」= 这一轮还没结束, 或停在审批上等人 —— 都不是能接新活的时候。
       const wasBusy = !(await m.idleNow(target));
       // urgent 只打断你自己派的那一轮 (或它自己的回执轮): 手上若是别的 wizard / 人 / 定时任务的活,
@@ -1291,7 +1356,7 @@ const main = async (): Promise<void> => {
       // 是"放出去就不管了"的那种派活; fyi 一定不要。对方的信封据此改口, 不再让它收口。
       const wantReceipt = kind !== "fyi" && (body as { receipt?: boolean }).receipt !== false;
       const deadlineAt = deadlineOf(at, deadlineSec === undefined ? undefined : Number(deadlineSec));
-      const asker = askerOf(self);
+      const asker = held ? held.asker : askerOf(self);
       const inj = await m.injectText(target, text, undefined, {
         from: { kind: "peer", from: self, turn: turn.turn, ...(jobId ? { job: jobId } : {}), ...(isPublic ? { public: true } : {}), ...(asker ? { asker } : {}) },
         channel,
@@ -1309,7 +1374,7 @@ const main = async (): Promise<void> => {
       // 一份不守的槽会以同一对的 key 顶掉发话方还在等它答的那件活, 那件的回执就再也来不了。
       // 父 k: 默认这件活算发话方此刻在答的那件的子活 (链式续回); `chain:false` = 旁支,
       // 回执照常回来, 但不挂住它给上游的交代 —— 只有发话方知道这件活是不是为上游派的。
-      const k = (body as { chain?: boolean }).chain === false ? undefined : parentKOf(self);
+      const k = held ? held.k : (body as { chain?: boolean }).chain === false ? undefined : parentKOf(self);
       if (inj.ok && wantReceipt) receipts.register({ from: self, to: target, channel, job: jobId, at, turn: turn.turn, legs: turn.legs, deadlineAt, ...(k ? { k } : {}), ...(asker ? { asker } : {}) });
       if (inj.ok && wantReceipt) {
         if (turn.legs > 1) ledger.touch(self, turn.turn);
@@ -1324,7 +1389,8 @@ const main = async (): Promise<void> => {
         if (rj?.kind === "req" && self === rj.owner && !rj.gate?.g2 && !!open?.need && open.turn === turn.turn && rj.members.some((x) => x.target === target && x.role === "lead")) jobs.mark(jobId, { gate: { g2: Date.now() } });
         jobs.attach(jobId, { target, task: turn.legs > 1 ? "" : text, spawned: false, ...(role ? { role } : {}) }, kind === "ask" ? "ask" : "task");
       }
-      const spent = inj.ok && jobId ? jobs.spend(jobId) : undefined;
+      // 停放时已记过预算, 放行不再算一次。
+      const spent = inj.ok && jobId && !held ? jobs.spend(jobId) : undefined;
       if (inj.ok && isPublic) relayPeer(self, target, text, channel);
       // `wasBusy` 是给调用方的判断依据: 立刻投给一个正在生成的会话, 这句话会排在
       // 它这一轮后面, 而不是马上被读到。
@@ -2217,13 +2283,13 @@ const main = async (): Promise<void> => {
         const t = await tell(name, task, lead ? renderReminder({ wezard: "lead" }, wizards.get(r.target)?.lead ? renderLeadPlaybook() : renderLead()) : "");
         if (lead && t.status === 200) wizards.upsert(r.target, { lead: true });
         if (rootId && t.status === 200) jobs.attach(rootId, { target: r.target, task: "", spawned: false, role: "lead" });
-        // 自动选中的被冷门控退回 (decide 用名册的活动时刻, 门控用 transcript 的, 口径差一点): 改走 spawn。
-        if (!(t.body.gated === "cold" && !to)) {
+        // 自动选中的被冷门控 (decide 用名册的活动时刻, 门控用 transcript 的, 口径差一点) 或方向闸 (它归别人管 / 是借来的专家) 退回: 改走 spawn; 点名的不改。
+        if (!(!to && (t.body.gated === "cold" || t.body.gated === "direction"))) {
           settleRoot(t.status === 200);
           json(res, t.status, withRoot({ ...t.body, decision: "existing", reason: d.why, ...(shown.length ? { candidates: shown } : {}) }));
           return;
         }
-        d = { kind: "spawn", why: `${d.why}; 但它被冷门控退回 (${String(t.body.reason)}) —— 改为白板 spawn` };
+        d = { kind: "spawn", why: `${d.why}; 但它被${t.body.gated === "direction" ? "方向闸" : "冷门控"}退回 (${String(t.body.reason)}) —— 改为白板 spawn` };
       }
       const name = (b.name ?? "").toString().trim();
       const description = (b.description ?? "").toString().trim();
@@ -2316,6 +2382,9 @@ const main = async (): Promise<void> => {
         const jc = checkJob(jobId, undefined, !(b.task ?? "").toString().trim());
         if (!jc.ok) { return { status: jc.status, body: { ok: false, reason: jc.reason } }; }
       }
+      // 带 task 派下去 = 派活: 同样过方向闸, 不论带不带 job (新生的目标还不在任何单里, 实际只有 1 / 链深两条会拦)。
+      const dr = (b.task ?? "").toString().trim() ? checkDirection({ self, target: "", kind: "task", re: false, jobId, jobs: jobs.all(), chain: receipts.ancestorsOf(self, parentKOf(self)), nameOf: displayName }) : undefined;
+      if (dr) { return { status: 409, body: { ok: false, gated: "direction", reason: dr } }; }
       // `inherit` 没有默认值 —— 继承与否是两种完全不同的分身 (一种开局就带着你
       // 读过的一切, 另一种白纸一张), 猜错了要么白烧一份上下文, 要么让它从零重读。
       // 逼调用方每次自己说。
@@ -2662,6 +2731,8 @@ const main = async (): Promise<void> => {
         const sids = new Map([j.owner, ...j.members.map((mm) => mm.target)].map((t) => [t, m.sessionInfo(t)?.sessionId ?? ""]));
         // 取消: 还没落定的成员手上这张单派的活记成 canceled, 发起者不会再收到一串回执。
         if (how === "cancel") j.members.filter((mm) => !mm.outcome).forEach((mm) => receipts.cancel(mm.target, j.owner, (x) => x.from === j.owner));
+        // 这张单名下还排着没投的 (after 停放) 也不投了。
+        receipts.cancelHeld(j.id, j.owner);
         const closed = jobs.close(j.id, summary, mark)!;
         ledger.closeJob(j.id);
         // 收工结论留档到开单者名下 (与交接简报同一份 jsonl); 空工单 (没人、没结论) 不记。

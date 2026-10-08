@@ -411,6 +411,10 @@ const TELL_SCHEMA = {
     .boolean()
     .optional()
     .describe("派新活给一个缓存已冷、ctx ≥100k 的 wizard 时, 守护进程先退回一行代价说明不投递 (唤醒 ≈ 白板 spawn 的几倍)。确认这件活真依赖它那段上下文, 才带 `force:true` 重发; 否则白板 spawn。续问 (`re`)、`now`、`ask` / `fyi` 不受此限。"),
+  after: z
+    .array(z.string())
+    .optional()
+    .describe("依赖: 件号 (`t…`) 数组, 都得是你自己派出去的件 (含已落定的; 查不到 → 400)。全部已 done → 立即投; 有已失败的 (timeout / silent / dead / canceled) → 409; 否则**停放**: 不注入, 回包 `parked:true`, 前置全 done 时守护进程以你的名义投出 (信封后附每件前置的 RESULT / ARTIFACT 原样), 任一前置失败这件不投、按 canceled 回执回给你 (正文说明哪件以什么收场)。只用于派新活 (task、不带 re); 回执 k 不变, 停放期间仍挂住你给上游的交代; 带 `job` 时现在就记成员与预算; 目标手上若还有你另一件没落定的活 (且不是前置之一) → 409。`deadline` 从真正投出时起算。stop_wizard / close_job 取消覆盖停放件。"),
   chain: z
     .boolean()
     .optional()
@@ -420,9 +424,10 @@ const TELL_SCHEMA = {
 const TELL_DESC =
   "跟另一个 wizard 说话 —— 文本原样落进它的输入框, 它当成新的一轮接手 (派活、答它的问题、叫它继续都走这里)。目标不存在就先 spawn_wizard / clone_wizard。\n" +
   "**说完就返回**: 对方干完那一轮, 它的最后一条消息作为**新的一轮**自动送到你这里 (回执, 带信封说明是谁、哪场对话、工单还差几份); 你正忙时回执排队等你说完。\n" +
-  "默认私聊, 只记在双方 rolepage; 守护进程给 `text` 挂信封 (发话人、私聊/公开、`RESULT: …` 收口)。拒绝对自己发送。";
+  "默认私聊, 只记在双方 rolepage; 守护进程给 `text` 挂信封 (发话人、私聊/公开、`RESULT: …` 收口)。拒绝对自己发送。\n" +
+  "**派活方向 (守护进程拦, 返回 409 带改道说法)**: 带 `job` 的 task 只许开单者发; 同一张单的成员之间只许 `ask` / `fyi`, 不横向派 task; 上级单的开单者不越级给下层成员派活 (经它的 lead `re`); 目标正等你答复 (在你的 k 链上) 时 task / ask 都不行, 以 `NEED:` 收口; 自己已在 ≥3 层派活链底部不再往下派 task; 借来的专家 (role expert) 只答 ask; 一个 wizard 同时只在一张开着的单里当未落定的执行者。`fyi` 永远放行。";
 
-const tellBody = (a: { name: string; text: string; kind?: string; priority?: string; waitSec?: number; job?: string; role?: string; public?: boolean; receipt?: boolean; re?: string; deadline?: number; chain?: boolean; force?: boolean }) => ({
+const tellBody = (a: { name: string; text: string; kind?: string; priority?: string; waitSec?: number; job?: string; role?: string; public?: boolean; receipt?: boolean; re?: string; deadline?: number; chain?: boolean; force?: boolean; after?: string[] }) => ({
   name: a.name,
   text: a.text,
   ...(a.kind ? { kind: a.kind } : {}),
@@ -435,6 +440,7 @@ const tellBody = (a: { name: string; text: string; kind?: string; priority?: str
   ...(a.re ? { re: a.re } : {}),
   ...(a.deadline ? { deadline: a.deadline } : {}),
   ...(a.chain === false ? { chain: false } : {}),
+  ...(a.after?.length ? { after: a.after } : {}),
   // 一律显式带上: 守护进程据「有没有这个键」认出老 MCP 进程 (见 /peers/tell 的冷门控)。
   force: a.force === true,
 });

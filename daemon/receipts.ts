@@ -42,6 +42,8 @@ export const deadlineOf = (at: number, sec?: number): number =>
 /** 对方 pane 不在了, 隔这么久再看一眼才判 dead: 非交接的 pane 换新 (respawn) 也有
  *  几秒是死的。 */
 const DEAD_GRACE_MS = 5000;
+/** 停放件隔多久看一次前置落定了没有 (落定时另有事件触发, 这是兜底)。 */
+const HOLD_POLL_MS = 3000;
 /** 对方读进了我们这一句、停下了却没答 —— 再等下一次停下。连着这么多次都没答就认定
  *  它不会答了, 别守到天亮。我们那一句还没被读进 (排在别的轮后面) 的那几次不算: 那是
  *  在等前面的轮, 不是它不答; 只有整段 ramp 都闲着、问话仍不在 transcript 里, 才算一次
@@ -141,7 +143,40 @@ export interface ReceiptDeps {
   /** 一份回执有了 status (中途的 need / error 也报) —— 挂起事项表据此记账 (见 pending-items.ts)。
    *  `bySender` = 发话方自己收掉 / wait_peer 取走的。 */
   onOutcome?: (s: Slot, status: ReceiptStatus, body: string, bySender: boolean) => void;
+  /** 停放件的落盘处 (见 Hold)。缺省 = 纯内存。 */
+  holdStore?: JsonMap<Hold>;
+  /** 前置都 done 了: 以发话方的名义把这件活真正投出去 (走 tell_peer 同一条注入路径, 件号 / 父 k 沿用停放时的)。
+   *  `seen` = 前置各自的结论。失败 = 这件不投, 按 canceled 回给发话方。 */
+  release?: (h: Hold, seen: Readonly<Record<string, HeldSeen>>) => Promise<{ ok: boolean; reason?: string }>;
 }
+
+/** 一件前置的结论快照。 */
+export interface HeldSeen { to: string; status: ReceiptStatus; body: string }
+
+/** 一件停放着的活 (`tell_peer({after})`): 前置没落定之前不注入, 登记在这里而不是回执槽里 ——
+ *  槽按 from→to 一对一份, 停放件占一份就会顶掉同一对里在飞的那件的回执。放行时才进槽。
+ *  依赖边只是「什么时候投」, 不进 k: 父 k 是停放那一刻发话方的 k, 照旧挂住它给上游的交代。 */
+export interface Hold {
+  from: string;
+  to: string;
+  turn: string;
+  at: number;
+  /** 前置的件号 (都是发话方自己派出去的)。 */
+  after: string[];
+  /** 放行时重放给 tell_peer 的参数 (不含 after)。 */
+  body: Record<string, unknown>;
+  channel: string;
+  job: string;
+  k?: ParentK;
+  asker?: Asker;
+  /** 已落定前置的快照: 回执槽会被同一对的新一句顶掉, 结论不能跟着丢。 */
+  seen: Record<string, HeldSeen>;
+}
+
+/** 一件前置此刻是什么: done / failed 带结论; pending = 还在路上 (含它自己也停放着); unknown = 登记里查不到。 */
+export type Prereq =
+  | { state: "done" | "failed"; seen: HeldSeen }
+  | { state: "pending" | "unknown" };
 
 export interface Tell {
   from: string;
@@ -227,6 +262,9 @@ export interface Receipts {
    *  `channel` = 它这一轮的频道 ("" = 私聊轮, 没有 chat 父 k)。私聊来的而发话方没在等 (wait_peer 取走 / 不要回执)
    *  → undefined, 退回现状。 */
   parentOf: (self: string, env: Envelope | undefined, channel: string, opening: string) => ParentK | undefined;
+  /** `self` 此刻这一轮的 k 链: 它在答 `k.from`, `k.from` 又在答谁… 一路向上的 wizard (近的在前, 不含人)。
+   *  沿登记槽的父 k 往上走, 带环保护; 槽被顶掉 / 过期了链就在那里截断 (宁可少拦, 不错拦)。 */
+  ancestorsOf: (self: string, k: ParentK | undefined) => string[];
   /** `self` 此刻这一轮 (同伴派的活 / 回执) 的链头: 按件号找回登记时记下的那个。人开的轮不归这里。 */
   askerOf: (self: string, env: Envelope) => Asker | undefined;
   /** 还没落定的每一件活此刻的状态 (见 turn-state.ts) —— 名册 / peek / 工单清单读它。只读, 不落盘。 */
@@ -241,6 +279,12 @@ export interface Receipts {
    *  守着的 watcher 会把同一份报成 dead。`only` 收窄到其中几份 (interrupt 只停了它
    *  手上这一轮, 排着的别人的活照旧会被答)。返回落成 canceled 的件数。 */
   cancel: (target: string, by: string, only?: (x: { from: string; turn: string }) => boolean) => number;
+  /** `from` 派出的这些件号此刻各是什么 (含已落定的和自己也停放着的)。 */
+  prereqs: (from: string, turns: readonly string[]) => Prereq[];
+  /** 停放一件活: 前置都落定后由 `deps.release` 投出; 任一前置失败 → 不投, 落成 canceled 回给发话方。 */
+  hold: (h: Omit<Hold, "seen">) => void;
+  /** 工单收了: 它名下还停放着的不再投 (发话方是收工者自己的不回执)。 */
+  cancelHeld: (job: string, by: string) => number;
 }
 
 export interface InFlight { from: string; to: string; turn: string; job: string; state: TurnState; ageMs: number }
@@ -255,6 +299,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   const slots = new Map<string, Slot>(
     Object.values(deps.store?.all() ?? {}).filter(live).map((s) => [keyOf(s), s]),
   );
+  const holds = new Map<string, Hold>(Object.values(deps.holdStore?.all() ?? {}).map((h) => [keyOfTurn(h.from, h.to, h.turn), h]));
   /** 写穿到磁盘。被同一对的新一句顶掉的旧 slot 不写 —— 它的 key 已经归新的了。 */
   const save = (s: Slot): void => {
     if (!stale(s)) deps.store?.set(keyOf(s), s);
@@ -267,12 +312,17 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   const ofJob = (from: string, job: string): Slot[] =>
     [...slots.values()].filter((x) => x.from === from && x.job === job);
   /** P 的答话方在答 P 的那一轮里又派出去、还没落定的活。 */
-  const children = (p: Slot): Slot[] =>
-    [...slots.values()].filter((c) => c.from === p.to && c.k?.kind === "peer" && c.k.from === p.from && c.k.turn === p.turn && !c.settled);
+  const children = (p: Slot): Array<{ to: string }> => [
+    ...[...slots.values()].filter((c) => c.from === p.to && c.k?.kind === "peer" && c.k.from === p.from && c.k.turn === p.turn && !c.settled),
+    // 停放着的子活同样挂住上游: 它投出去、落定之前, 发话方给上游的交代不能先走。
+    ...[...holds.values()].filter((c) => c.from === p.to && c.k?.kind === "peer" && c.k.from === p.from && c.k.turn === p.turn),
+  ];
   /** 与 c 同一个发话方、同一个父 k、定论还没送进去的那几份 (不含 c)。送进去的只是一份
    *  error 的那种还没落定: 续跑出来的真答案还要来。 */
-  const siblings = (c: Slot): Slot[] =>
-    [...slots.values()].filter((x) => x !== c && x.from === c.from && !!x.k && sameK(x.k, c.k!) && !x.settled && !(x.delivered && x.resolved));
+  const siblings = (c: Slot): Array<unknown> => [
+    ...[...slots.values()].filter((x) => x !== c && x.from === c.from && !!x.k && sameK(x.k, c.k!) && !x.settled && !(x.delivered && x.resolved)),
+    ...[...holds.values()].filter((x) => x.from === c.from && !!x.k && sameK(x.k, c.k!)),
+  ];
   /** 这份回执送进去之后, 发话方那一轮的终句去哪 (§3.3)。只在投递那一刻算: 兄弟们是
    *  陆续回来的, 早算一步就会两份都以为自己不是最后一份。
    *  频道只由去向定: 续回进群 (父 k 是人在群里开的那一轮、兄弟都落定了) 才有频道, 其余
@@ -468,6 +518,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     save(s);
     deps.onOutcome?.(s, out.status, out.body, false);
     if (final && s.job) deps.settleJob?.(s.job, s.to, out.status as Terminal, parseClosing(out.body).artifacts);
+    if (final) nudgeHolds();
     // 发话方自己在交接: 重开的那几秒里 pane 是死的, 别把这当成"已经不在了"。
     await deps.handedOff?.(s.from);
     if (!(await deps.paneLive(s.from))) {
@@ -562,6 +613,84 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     return { at: s.at, turn: s.turn! };
   };
 
+  // ── 停放 (after) ─────────────────────────────────────────────────────
+
+  const holdKey = (h: Pick<Hold, "from" | "to" | "turn">): string => keyOfTurn(h.from, h.to, h.turn);
+  const saveHold = (h: Hold): void => { deps.holdStore?.set(holdKey(h), h); };
+  const dropHold = (h: Hold): void => { holds.delete(holdKey(h)); deps.holdStore?.drop(holdKey(h)); };
+  /** 前置件号 → 此刻的样子。先看回执槽 (按发话方 + 件号找, 不论发给谁), 再看自己也停放着的, 最后看快照。 */
+  const prereqOf = (from: string, turn: string, seen: Readonly<Record<string, HeldSeen>> = {}): Prereq => {
+    const s = [...slots.values()].find((x) => x.from === from && x.turn === turn);
+    const st = s?.outcome?.status;
+    if (s && s.resolved && st && isTerminal(st)) return { state: st === "done" ? "done" : "failed", seen: { to: s.to, status: st, body: s.outcome!.body } };
+    // wait_peer 取走的: resolved 而没有 outcome —— 结论已在发话方会话里, 算 done。
+    if (s && s.resolved && !st) return { state: "done", seen: { to: s.to, status: "done", body: "" } };
+    if (s || [...holds.values()].some((h) => h.from === from && h.turn === turn)) return { state: "pending" };
+    const old = seen[turn];
+    return old ? { state: old.status === "done" ? "done" : "failed", seen: old } : { state: "unknown" };
+  };
+  /** 同一对眼下有一件别的、没落定的活: 现在投会顶掉它的回执槽 —— 等它落定。 */
+  const pairBusy = (h: Hold): boolean => {
+    const cur = slots.get(keyOfPair(h.from, h.to));
+    return !!cur && !cur.resolved && !cur.claimed && cur.turn !== h.turn;
+  };
+  /** 不投了: 落成一份 canceled 回给发话方, 走与别的回执同一条路 (投递、计数、记账都在 watch 里)。
+   *  按件号停放着放进去 (parked), 绝不占 from→to 的位置 —— 那里可能有在飞的另一件。 */
+  const cancelHold = (h: Hold, why: string, silent = false): void => {
+    dropHold(h);
+    if (silent) return;
+    const at = Date.now();
+    const s: Slot = {
+      from: h.from, to: h.to, channel: h.channel, job: h.job, at, turn: h.turn, legs: 1, deadlineAt: at,
+      ...(h.k ? { k: h.k } : {}), ...(h.asker ? { asker: h.asker } : {}),
+      gen: (slots.get(keyOfTurn(h.from, h.to, h.turn))?.gen ?? 0) + 1,
+      claimed: false, delivered: false, resolved: false, parked: true,
+      outcome: { status: "canceled", body: `（守护进程: ${why}）` },
+    };
+    slots.set(keyOf(s), s);
+    save(s);
+    arm(s);
+  };
+  const releasing = new Set<string>();
+  /** 逐件看停放着的: 有失败的 → 不投; 都 done 了且这一对没被占着 → 放行; 超过保留期 → 不投。 */
+  const tickHolds = async (): Promise<void> => {
+    for (const h of [...holds.values()]) {
+      if (releasing.has(holdKey(h)) || !holds.has(holdKey(h))) continue;
+      const ps = h.after.map((t) => [t, prereqOf(h.from, t, h.seen)] as const);
+      const fresh = ps.filter(([t, p]) => (p.state === "done" || p.state === "failed") && !h.seen[t]);
+      if (fresh.length) { fresh.forEach(([t, p]) => { h.seen[t] = (p as { seen: HeldSeen }).seen; }); saveHold(h); }
+      const bad = ps.find(([, p]) => p.state === "failed" || p.state === "unknown");
+      if (bad) {
+        const [t, p] = bad;
+        cancelHold(h, p.state === "unknown"
+          ? `前置 ${t} 的登记找不到了 (被同一对的新一句顶掉或已过期), 这件 (${h.turn}) 没投。`
+          : `前置 ${t} (${deps.nameOf((p as { seen: HeldSeen }).seen.to)}) 以 ${(p as { seen: HeldSeen }).seen.status} 收场, 这件 (${h.turn}) 没投。`);
+        continue;
+      }
+      if (Date.now() - h.at >= KEEP_MS) { cancelHold(h, `这件 (${h.turn}) 排了超过 24 小时, 前置始终没落定, 不投了。`); continue; }
+      if (ps.some(([, p]) => p.state === "pending") || pairBusy(h)) continue;
+      // 放行可能要等目标闲下来 (几分钟): 不堵住巡检里别的停放件。
+      releasing.add(holdKey(h));
+      void (async () => {
+        try {
+          const r = (await deps.release?.(h, h.seen)) ?? { ok: false, reason: "没有放行通路" };
+          if (r.ok) dropHold(h);
+          else cancelHold(h, `前置都 done 了, 但这件 (${h.turn}) 投不出去: ${r.reason ?? "未知原因"}, 没投。`);
+        } catch (e) {
+          cancelHold(h, `放行时出错 (${(e as Error).message}), 这件 (${h.turn}) 没投。`);
+        } finally { releasing.delete(holdKey(h)); }
+      })();
+    }
+  };
+  let holdTimer: ReturnType<typeof setInterval> | undefined;
+  const startHolds = (): void => {
+    if (holdTimer) return;
+    holdTimer = setInterval(() => { void tickHolds().catch((e: unknown) => deps.log.warn({ err: (e as Error).message }, "receipt: 停放巡检出错")); }, HOLD_POLL_MS);
+    holdTimer.unref?.();
+  };
+  /** 事件驱动再补一刀: 前置一落定就立刻判, 不等下一个巡检周期。 */
+  const nudgeHolds = (): void => { if (holds.size) void tickHolds().catch(() => undefined); };
+
   return {
     register,
     reask: (from, to, turn) => {
@@ -622,9 +751,14 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
           from: s.from, to: s.to, turn: s.turn ?? "", job: s.job,
           state: turnState(s, { parked: !s.outcome && parked(s.to) }),
           ageMs: Date.now() - s.at,
-        }));
+        }))
+        // 停放着的 (等前置): 还没投出去, 但发话方在等它 —— 同样在飞。
+        .concat([...holds.values()].map((h) => ({ from: h.from, to: h.to, turn: h.turn, job: h.job, state: "queued" as TurnState, ageMs: Date.now() - h.at })));
     },
     cancel: (target, by, only = () => true) => {
+      // 排着还没投的 (停放): 不投了; 发起 stop 的那方自己知道, 不回执。
+      const held = [...holds.values()].filter((h) => h.to === target && only({ from: h.from, turn: h.turn }));
+      held.forEach((h) => cancelHold(h, `${deps.nameOf(target)} 被 ${deps.nameOf(by)} 收掉 / 打断了, 这件排着的活 (${h.turn}) 没投。`, h.from === by));
       const hit = [...slots.values()].filter((s) => s.to === target && !s.resolved && !s.claimed && only({ from: s.from, turn: s.turn ?? "" }));
       for (const s of hit) {
         const last = deps.lastWords?.(s.to, s.at).trim();
@@ -640,6 +774,20 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
         // 挂起等子活的没有 watcher 在守: 叫醒它去投这份 canceled。
         if (s.deferred) wake(s);
       }
+      if (hit.length) nudgeHolds();
+      return hit.length + held.length;
+    },
+    prereqs: (from, turns) => turns.map((t) => prereqOf(from, t.replace(/[`\s]/g, ""))),
+    hold: (h) => {
+      const x: Hold = { ...h, seen: {} };
+      holds.set(holdKey(x), x);
+      saveHold(x);
+      startHolds();
+      nudgeHolds();
+    },
+    cancelHeld: (job, by) => {
+      const hit = [...holds.values()].filter((h) => h.job === job);
+      hit.forEach((h) => cancelHold(h, `工单 ${job} 收了, 这件排着的活 (${h.turn}) 没投。`, h.from === by));
       return hit.length;
     },
     parentOf: (self, env, channel, opening) => {
@@ -650,6 +798,17 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       }
       // 私聊轮 (频道 "") 派出的活没有群可续: 不能回落成 home, 否则回执轮就进了群。
       return channel ? { kind: "chat", channel, turn: opening } : undefined;
+    },
+    ancestorsOf: (self, k) => {
+      // 第一跳 (self 此刻答的那件) 按定义在途; 往上每一跳都要那件活还没落定 / 没被 wait_peer 取走 ——
+      // 已结束的那一跳不再是在等, 链到此为止 (宁可少拦)。
+      const go = (who: string, cur: ParentK | undefined, seen: ReadonlySet<string>, first: boolean): string[] => {
+        if (cur?.kind !== "peer" || seen.has(cur.from)) return [];
+        const up = upstream(cur, who);
+        if (!first && (!up || up.resolved || up.claimed)) return [];
+        return [cur.from, ...go(cur.from, up?.k, new Set([...seen, cur.from]), false)];
+      };
+      return go(self, k, new Set([self]), true);
     },
     askerOf: (self, env) => {
       // 回执轮: 那件活是 self 派出去的; 派来的活: 那件活是派给 self 的。同一对后来又说了一句,
@@ -664,6 +823,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       // 投到一半被 reload 打断的那份: claimed 是上一个进程的占位, 这里重新来过。
       open.forEach((s) => { s.claimed = false; arm(s); });
       if (open.length) deps.log.info({ mod: "receipt", resumed: open.map((s) => `${deps.nameOf(s.from)}←${deps.nameOf(s.to)}`) }, "receipt: reload 后续守");
+      startHolds();
       return open.length;
     },
   };

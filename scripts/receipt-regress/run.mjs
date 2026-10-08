@@ -78,6 +78,9 @@ const receiptsIn = async (target, fromName) => {
     .filter((r) => r.attrs.wezard === "envelope" && r.attrs.receipt === "1" && (!fromName || r.attrs.from === `.${real(fromName)}`));
 };
 
+/** 分身 transcript 全文; 还没有 (从没收到过话) = ""。 */
+const textOf = async (name) => { try { const p = await jsonlOf(kids.get(name)); return p ? readFileSync(p, "utf8") : ""; } catch { return ""; } };
+
 /** daemon.log 里 `since` 之后满足 `pred` 的那一行 (json)。 */
 const logLine = (since, pred) =>
   readFileSync(join(STATE, "daemon.log"), "utf8").split("\n").slice(-4000).flatMap((l) => {
@@ -134,7 +137,7 @@ const turnsOf = (target) => {
 
 // ── 纯单元: 直接驱动 dist 里的 createReceipts, 依赖全是假的 —— 不生分身、不碰群 ──
 // target 是「忙着」的, 直到给了它这一件的答案; 答案按 (to, 件号) 记, 只认发话之后给的 (同 replyToPeer)。
-const fakeReceipts = async () => {
+const fakeReceipts = async (extra = {}) => {
   const { createReceipts } = await import(process.env.RR_RECEIPTS ?? new URL("../../dist/daemon/receipts.js", import.meta.url).href);
   const answers = [];
   const busy = new Set();
@@ -155,6 +158,7 @@ const fakeReceipts = async () => {
     deliver: async (to, body, meta) => { sent.push({ to, body, meta }); hooks.forEach((h) => h(to, meta)); return { ok: true }; },
     nameOf: (t) => `.${t}`,
     log,
+    ...extra,
   });
   const answer = (to, turn, text) => { answers.push({ to, turn, text, at: Date.now() }); busy.delete(to); };
   const tell = (x) => { busy.add(x.to); return r.register(x); };
@@ -224,6 +228,184 @@ const cases = {
     };
   } },
 
+  // 派活方向闸 (direction.ts) + k 链取祖先 (receipts.ancestorsOf): 纯单元。
+  // 成员横向 task 拒 / ask 放行; 非 owner 带 job 的 task 拒; 防环 task·ask 拒而 fyi 放行; 链深; 越级; 专家; 一人一单。
+  "direction-gate": { names: [], unit: true, run: async () => {
+    const { checkDirection } = await import(new URL("../../dist/daemon/direction.js", import.meta.url).href);
+    const f = await fakeReceipts();
+    const m = (target, role, outcome) => ({ target, task: "", spawned: false, at: 1, ...(role ? { role } : {}), ...(outcome ? { outcome } : {}) });
+    const job = (id, owner, members, parent) => ({ id, base: "c", owner, title: id, members, status: "open", openedAt: 1, ...(parent ? { parent } : {}) });
+    const jobs = [job("R", "boss", [m("lead", "lead")]), job("J", "lead", [m("a"), m("b"), m("x", "expert"), m("d", "exec", "done")], "R"), job("K", "lead", [m("c", "exec")], "R")];
+    const g = (o) => checkDirection({ self: "lead", target: "a", kind: "task", re: false, jobId: "", jobs, chain: [], nameOf: (t) => `.${t}`, ...o });
+    // k 链: boss → lead → a → b (b 此刻在答 a, a 在答 lead, lead 在答 boss); 槽被同一对新一句顶掉则链截断。
+    f.tell({ from: "boss", to: "lead", channel: "", turn: "t1" });
+    f.tell({ from: "lead", to: "a", channel: "", turn: "t2", k: { kind: "peer", from: "boss", turn: "t1" } });
+    f.tell({ from: "a", to: "b", channel: "", turn: "t3", k: { kind: "peer", from: "lead", turn: "t2" } });
+    const chain = f.r.ancestorsOf("b", { kind: "peer", from: "a", turn: "t3" });
+    f.tell({ from: "lead", to: "boss", channel: "", turn: "t9", k: { kind: "peer", from: "b", turn: "t3" } }); // 成环的坏数据
+    f.r.claim("lead", "a"); // lead→a 那件被 wait_peer 取走: a 已不在答 lead, 链从第二跳截断
+    const trunc = f.r.ancestorsOf("b", { kind: "peer", from: "a", turn: "t3" });
+    const loop = f.r.ancestorsOf("boss", { kind: "peer", from: "lead", turn: "t1" });
+    const cases = {
+      "非 owner 带 job 的 task 拒": !!g({ self: "a", target: "b", jobId: "J" }),
+      "owner 带 job 的 task 放行": !g({ jobId: "J" }),
+      "成员横向 task 拒": !!g({ self: "a", target: "b" }),
+      "成员横向 re 续问放行 (ask 兄弟、兄弟 NEED 回来)": !g({ self: "a", target: "b", re: true }),
+      "非 owner 带 job 的 re 仍拒 (规则 1)": !!g({ self: "a", target: "b", jobId: "J", re: true }),
+      "越级只数未落定的 exec/lead: 已落定的成员 / 专家不拦": !g({ self: "boss", target: "d" }) && !g({ self: "boss", target: "x" }),
+      "成员横向 ask 放行": !g({ self: "a", target: "b", kind: "ask" }),
+      "成员横向 fyi 放行": !g({ self: "a", target: "b", kind: "fyi" }),
+      "防环: task 拒": !!g({ self: "a", target: "lead", chain: ["lead", "boss"] }),
+      "防环: ask 拒": !!g({ self: "a", target: "boss", kind: "ask", chain: ["lead", "boss"] }),
+      "防环: fyi 放行": !g({ self: "a", target: "lead", kind: "fyi", chain: ["lead", "boss"] }),
+      "链深 ≥3 task 拒 / ask 放行": !!g({ self: "x1", target: "z", chain: ["a", "b", "c"] }) && !g({ self: "x1", target: "z", kind: "ask", chain: ["a", "b", "c"] }),
+      "越级: 上级单 owner 直派下层成员拒": !!g({ self: "boss", target: "a" }),
+      "越级: re 也拒, 经 lead 派的放行": !!g({ self: "boss", target: "a", re: true }) && !g({ self: "lead", target: "a", re: true }),
+      "越级: 只读式 ask 放行": !g({ self: "boss", target: "a", kind: "ask" }),
+      "owner 派借来的专家 task 拒 / ask 放行": !!g({ target: "x" }) && !g({ target: "x", kind: "ask" }),
+      "已在别单当未落定 exec 的再带 job 领活拒": !!g({ target: "c", jobId: "J" }) && !g({ target: "c", jobId: "K" }),
+      "ancestorsOf 沿槽走 (精确链)": chain.join() === "a,lead,boss",
+      "ancestorsOf 上游已落定则截断": trunc.join() === "a",
+      "ancestorsOf 带环保护": loop.length <= 3,
+    };
+    const bad = Object.entries(cases).filter(([, ok]) => !ok).map(([k]) => k);
+    return { pass: !bad.length, why: bad.length ? `没过: ${bad.join(" · ")} (链=${chain.join(">")})` : `${Object.keys(cases).length} 条规则都对` };
+  } },
+
+  // 依赖 after (纯单元, 停放 / 放行 / 失败 / reload 都在回执层): 停放不占回执槽、不改 k; 前置落定才放行并带上结论;
+  // 前置失败 → 不放行、落成 canceled 回给发话方; 停放登记落盘, 新进程接着判; 同一对有别的在飞件时放行让路; 取消覆盖停放件。
+  "after-unit": { names: [], unit: true, run: async () => {
+    const mem = () => { const m = new Map(); return { all: () => Object.fromEntries(m), get: (k) => m.get(k), set: (k, v) => (m.set(k, v), v), drop: (k) => m.delete(k) }; };
+    const store = mem(), holdStore = mem();
+    const released = [];
+    let f;
+    const mk = async (xs = {}) => {
+      f = await fakeReceipts({ store, holdStore, release: async (h, seen) => { released.push({ turn: h.turn, seen: Object.keys(seen).sort().join(), t: Date.now() }); f.tell({ from: h.from, to: h.to, channel: h.channel, turn: h.turn, ...(h.k ? { k: h.k } : {}) }); return { ok: true }; }, ...xs });
+      f.r.resume();
+      return f;
+    };
+    await mk();
+    const kx = { kind: "peer", from: "up", turn: "tu" };
+    const fails = [];
+    const ok = (c, why) => { if (!c) fails.push(why); };
+    // A 在飞; B after A (到 b); C after B (到 c) —— 都停放, 没有任何一件被放行, 不占槽 (a→b 的槽还是空的)。
+    f.tell({ from: "x", to: "a", channel: "", turn: "tA", k: kx });
+    f.r.hold({ from: "x", to: "b", turn: "tB", at: Date.now(), after: ["tA"], body: {}, channel: "", job: "", k: kx });
+    f.r.hold({ from: "x", to: "c", turn: "tC", at: Date.now(), after: ["tB"], body: {}, channel: "", job: "", k: kx });
+    ok(f.r.prereqs("x", ["tB"])[0].state === "pending", "停放着的前置 = pending");
+    ok(f.r.pending("x", "b") === undefined, "停放件不占 x→b 的槽");
+    ok(f.r.states().filter((s) => s.state === "queued").length === 2, "两件停放显示成 queued");
+    await sleep(3500);
+    ok(!released.length, "A 没落定前不放行");
+    f.answer("a", "tA", "RESULT: a-res\nARTIFACT: /tmp/a.txt — a");
+    await until(() => released.some((r) => r.turn === "tB"), 15_000, 100);
+    ok(released[0]?.turn === "tB" && released[0].seen === "tA", "A 落定 → 放行 B, 带 A 的结论");
+    ok(!released.some((r) => r.turn === "tC"), "B 没落定前 C 不放行");
+    f.answer("b", "tB", "RESULT: b-res");
+    await until(() => released.some((r) => r.turn === "tC"), 15_000, 100);
+    ok(released.map((r) => r.turn).join() === "tB,tC" && released[1].seen === "tB", "投递顺序 B 然后 C, C 带 B 的结论");
+    // 父 k 不变: 放行出来的槽 k = 停放时的 k。
+    ok(f.sent.length >= 1, "A 的回执送回了 x");
+    // 失败: D after E, E 超时被 cancel → D 不放行, x 收到 canceled。
+    f.tell({ from: "x", to: "e", channel: "", turn: "tE" });
+    f.r.hold({ from: "x", to: "d", turn: "tD", at: Date.now(), after: ["tE"], body: {}, channel: "", job: "", k: kx });
+    f.r.cancel("e", "someone");
+    const can = await until(() => f.sent.find((s) => s.meta.turn === "tD"), 15_000, 100);
+    ok(can?.meta.status === "canceled" && /tE/.test(can.body) && /没投/.test(can.body), `前置失败 → D 收 canceled 且说明哪件 (${can?.body.slice(0, 60)})`);
+    ok(!released.some((r) => r.turn === "tD"), "D 从未放行");
+    // 查不到的前置 (登记里没有) → 不放行。
+    f.r.hold({ from: "x", to: "g", turn: "tG", at: Date.now(), after: ["tNope"], body: {}, channel: "", job: "" });
+    const lost = await until(() => f.sent.find((s) => s.meta.turn === "tG"), 15_000, 100);
+    ok(lost?.meta.status === "canceled" && !released.some((r) => r.turn === "tG"), "前置查不到 → canceled 不放行");
+    // 同一对在飞着别的件: 放行让路, 不顶掉它的回执槽。
+    f.tell({ from: "x", to: "h1", channel: "", turn: "tH1" });
+    f.answer("h1", "tH1", "RESULT: h1");
+    await until(() => f.sent.some((s) => s.meta.turn === "tH1"), 15_000, 100);
+    f.tell({ from: "x", to: "p", channel: "", turn: "tBusy" });
+    f.r.hold({ from: "x", to: "p", turn: "tP", at: Date.now(), after: ["tH1"], body: {}, channel: "", job: "" });
+    await sleep(3500);
+    ok(!released.some((r) => r.turn === "tP") && f.r.pending("x", "p")?.turn === "tBusy", "同一对有在飞件: 停放件等它, 不顶它的槽");
+    f.answer("p", "tBusy", "RESULT: busy-done");
+    await until(() => released.some((r) => r.turn === "tP"), 20_000, 100);
+    ok(released.some((r) => r.turn === "tP"), "在飞件落定后放行");
+    // 取消覆盖停放件: stop 目标 → 不放行; 发起 stop 的是发话方自己 = 不回执。
+    f.tell({ from: "x", to: "s1", channel: "", turn: "tS1" });
+    f.r.hold({ from: "x", to: "s2", turn: "tS2", at: Date.now(), after: ["tS1"], body: {}, channel: "", job: "" });
+    f.r.cancel("s2", "x");
+    f.answer("s1", "tS1", "RESULT: s1");
+    await sleep(4000);
+    ok(!released.some((r) => r.turn === "tS2") && !f.sent.some((s) => s.meta.turn === "tS2"), "取消 (发话方自己) → 不放行、不回执");
+    // reload: 停放登记落盘, 新进程 (共用 store) 接着判 —— 前置在「重启期间」落定的立即放行。
+    f.tell({ from: "x", to: "r1", channel: "", turn: "tR1", k: kx });
+    f.r.hold({ from: "x", to: "r2", turn: "tR2", at: Date.now(), after: ["tR1"], body: {}, channel: "", job: "", k: kx });
+    ok(Object.keys(holdStore.all()).some((k) => k.endsWith("tR2")), "停放登记落盘");
+    const before = released.length;
+    const f1 = f;
+    f1.answer("r1", "tR1", "RESULT: r1-res");
+    await until(() => f1.sent.some((s) => s.meta.turn === "tR1"), 15_000, 100);
+    // 旧「进程」不再放行 (模拟被 reload 掉): 换个 release 为空, 新进程接手。
+    const released2 = [];
+    const f2 = await fakeReceipts({ store, holdStore, release: async (h, seen) => { released2.push({ turn: h.turn, seen: Object.keys(seen).join() }); return { ok: true }; } });
+    f2.r.resume();
+    await until(() => released2.length || released.length > before, 15_000, 100);
+    ok(released2.some((r) => r.turn === "tR2" && r.seen === "tR1") || released.length > before, "reload 后前置已落定的停放件照放");
+    return { pass: !fails.length, why: fails.length ? fails.join(" · ") : "停放 / 放行顺序 / 带结论 / 前置失败 / 查不到 / 让路 / 取消 / reload 都对" };
+  } },
+
+  // 依赖 (真 daemon): 根派 A (睡一会儿), B after A、C after B 都停放; A 落定 → B 带着 A 的结论投出, B 落定 → C 带着 B 的; 根各收一份回执。
+  "after-live": { names: ["rr-a1", "rr-b1", "rr-c1"], run: async () => {
+    const n = nonce();
+    await Promise.all(["rr-a1", "rr-b1", "rr-c1"].map((x) => spawn(x)));
+    const a = await tell("rr-a1", `${SLEEP(45)}, 然后回复一行: RESULT: a-${n}`);
+    const b = await tell("rr-b1", `不要调用任何工具, 直接回复一行: RESULT: b-${n}`, { after: [a.turn] });
+    const c = await tell("rr-c1", `不要调用任何工具, 直接回复一行: RESULT: c-${n}`, { after: [b.turn] });
+    if (!b.parked || !c.parked) return { pass: false, why: `没停放: b=${JSON.stringify(b).slice(0, 120)} c=${JSON.stringify(c).slice(0, 120)}` };
+    await sleep(3000);
+    const early = (await textOf("rr-b1")).includes(`b-${n}`);
+    const sc = await settledSlot("rr-c1", 6 * 60_000);
+    const sb = slotOf(root.target, kids.get("rr-b1"));
+    const tb = await textOf("rr-b1"), tc = await textOf("rr-c1");
+    const gb = await receiptsIn(root.target, "rr-b1"), gc = await receiptsIn(root.target, "rr-c1");
+    return {
+      pass: !early && sc?.outcome?.status === "done" && sb?.outcome?.status === "done" && tb.includes(`a-${n}`) && tc.includes(`b-${n}`) && gb.length === 1 && gc.length === 1,
+      why: `A 前 B 已被注入=${early} · B=${sb?.outcome?.status} C=${sc?.outcome?.status ?? "未落定"} · B 带 A 结论=${tb.includes(`a-${n}`)} C 带 B 结论=${tc.includes(`b-${n}`)} · 根收到 B ${gb.length} / C ${gc.length} 份`,
+    };
+  } },
+
+  // 依赖 + reload (真 daemon, solo): B 停放后 reload 整个 daemon, 之后 A 落定 → B 照投、带 A 的结论。
+  "after-reload": { names: ["rr-a3", "rr-b3"], solo: true, run: async () => {
+    const n = nonce();
+    await Promise.all(["rr-a3", "rr-b3"].map((x) => spawn(x)));
+    const a = await tell("rr-a3", `${SLEEP(50)}, 然后回复一行: RESULT: a-${n}`);
+    const b = await tell("rr-b3", `不要调用任何工具, 直接回复一行: RESULT: b-${n}`, { after: [a.turn] });
+    if (!b.parked) return { pass: false, why: `没停放: ${JSON.stringify(b).slice(0, 160)}` };
+    execFileSync("./cli/wezard.sh", ["reload"], { cwd: new URL("../..", import.meta.url).pathname, stdio: "ignore" });
+    const sb = await settledSlot("rr-b3", 6 * 60_000);
+    const tb = await textOf("rr-b3");
+    return {
+      pass: sb?.outcome?.status === "done" && tb.includes(`a-${n}`),
+      why: `B=${sb?.outcome?.status ?? "未落定"} B 带 A 结论=${tb.includes(`a-${n}`)}`,
+    };
+  } },
+
+  // 依赖 (真 daemon): 前置超时 → B 从未被注入, 根收到 B 的 canceled 回执。
+  "after-fail": { names: ["rr-a2", "rr-b2"], run: async () => {
+    const n = nonce();
+    await Promise.all(["rr-a2", "rr-b2"].map((x) => spawn(x)));
+    const a = await tell("rr-a2", `${SLEEP(150)}, 然后回复一行: RESULT: late`, { deadline: 60 });
+    const b = await tell("rr-b2", `回复一行: RESULT: never-${n}`, { after: [a.turn] });
+    if (!b.parked) return { pass: false, why: `没停放: ${JSON.stringify(b).slice(0, 160)}` };
+    // 不投的那份按件号停放着落盘 (不占 root→B 的位置), 所以按件号找。
+    const sb = await until(() => { const s = Object.values(readJson("receipts.json")).find((x) => x.turn === b.turn); return s?.settled && s; }, 4 * 60_000);
+    await sleep(3000);
+    const injected = (await textOf("rr-b2")).includes(`never-${n}`);
+    const gb = await receiptsIn(root.target, "rr-b2");
+    return {
+      pass: sb?.outcome?.status === "canceled" && !injected && gb.length === 1 && gb[0].attrs.status === "canceled",
+      why: `B slot=${sb?.outcome?.status ?? "未落定"} 被注入过=${injected} 根收到 ${gb.map((r) => r.attrs.status).join(",") || "0 份"}`,
+    };
+  } },
+
   // graph 的步骤与进度跟着发起那一轮的频道: 根这一轮是私聊 (发起者的 receipt:false 私聊 / 回执),
   // 节点那一轮就不能进它的 home 群。
   "graph-private": { names: ["rr-gn"], run: async () => {
@@ -246,17 +428,21 @@ const cases = {
   "handoff-owe": { names: ["rr-h", "rr-s"], run: async () => {
     const n = nonce();
     await Promise.all(["rr-h", "rr-s"].map((x) => spawn(x)));
-    await tell("rr-h", `${SLEEP(25)}, 然后回复一行: RESULT: h-root-${n}`);
+    await tell("rr-h", `${SLEEP(40)}, 然后回复一行: RESULT: h-root-${n}`);
     await sleep(6000);
     await post("/peers/tell", { target: kids.get("rr-s"), name: real("rr-h"), priority: "now", text: `回复一行: RESULT: h-s-${n}` });
     await sleep(3000);
-    const h = await post("/wizard/handoff-self", { target: kids.get("rr-h"), brief: `（receipt-regress 交接测试）手上没有别的活。新会话里每收到一份欠账, 只就那一份回复一行 RESULT: 加上它原来要的内容 —— 欠 ${real("rr-root")} 的是 h-root-${n}, 欠 ${real("rr-s")} 的是 h-s-${n}。不要调用任何工具。` });
+    const t0 = Date.now();
+    const h = await post("/wizard/handoff-self", { target: kids.get("rr-h"), brief: `（receipt-regress 交接测试）手上没有别的活。你会收到两轮, 一轮一个发话方 (看那一轮信封里的发话人): 每一轮只回复一行 RESULT:, 且只写那个发话人对应的值 —— 欠 ${real("rr-root")} 的是 h-root-${n}, 欠 ${real("rr-s")} 的是 h-s-${n}。收到这份简报的这一轮同样只写它信封发话人的那一个值, 不要复述简报、不要在任何一句里写出另一个值。不要调用任何工具。` });
     if (!h.ok) return { pass: false, why: `handoff-self: ${h.reason}` };
     const both = await until(() => { const a = slotOf(root.target, kids.get("rr-h")), b = slotOf(kids.get("rr-s"), kids.get("rr-h")); return a?.settled && b?.settled && [a, b]; }, 5 * 60_000);
     const p = await jsonlOf(kids.get("rr-h"));
     const lines = p ? readFileSync(p, "utf8").split("\n").filter((l) => l.includes('"type":"user"') && l.includes('wezard=\\"envelope\\"')) : [];
     const mixed = lines.filter((l) => l.includes(`.${real("rr-s")}`) && l.includes(`.${root.name}`)).length;
     const [a, b] = both ?? [];
+    // 前提: 交接发起时两份都还欠着 —— 交接把义务转进新会话 (transfer 把槽的发话锚改到交接时刻)。
+    // 旧轮在交接前已收口的话, 交接什么也没接到, 值对不对没有意义: 报前提没成立, 别报成值答串了。
+    if (both && (a.at < t0 || b.at < t0)) return { pass: false, why: "前提没成立: 旧轮在交接前已收口 (交接没接到欠账), 重跑这一条" };
     return {
       pass: !!both && a.outcome?.body.includes(`h-root-${n}`) && !a.outcome.body.includes(`h-s-${n}`) && b.outcome?.body.includes(`h-s-${n}`) && !b.outcome.body.includes(`h-root-${n}`) && !mixed,
       why: `根收到=${a?.outcome?.status ?? "未落定"}:${a?.outcome?.body.slice(0, 60) ?? ""} · rr-s 收到=${b?.outcome?.status ?? "未落定"}:${b?.outcome?.body.slice(0, 60) ?? ""} · 两份信封并在一句的 ${mixed} 句`,
@@ -539,7 +725,8 @@ const main = async () => {
   const pick = process.argv.slice(2);
   const bad = pick.filter((x) => !cases[x]);
   if (bad.length) throw new Error(`没有用例 ${bad.join(" ")} —— 有: ${Object.keys(cases).join(" ")}`);
-  const chosen = pick.length ? pick : Object.keys(cases);
+  // solo: 会 reload 整个 daemon, 与别的用例并跑会弄断它们 —— 默认不跑, 点名才跑 (`run.mjs after-reload`)。
+  const chosen = pick.length ? pick : Object.keys(cases).filter((x) => !cases[x].solo);
   // 只跑纯单元的不必生根 (它们不碰 daemon)。
   if (chosen.some((x) => !cases[x].unit)) {
     const r = await post("/wizard/clone", { ...ME, name: real("rr-root"), inherit: false, model: "haiku", keepalive: false, description: "receipt-regress 的根" });

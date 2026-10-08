@@ -8,7 +8,7 @@ import type { ReceiptStatus } from "./reminder.js";
 /** 落定了的那几种 (need / error 是中途的)。 */
 export type Terminal = Exclude<ReceiptStatus, "need" | "error">;
 export const isTerminal = (st: ReceiptStatus): st is Terminal => st !== "need" && st !== "error";
-export type TurnState = "working" | "blocked" | "needs-input" | "errored" | "deferred" | Terminal;
+export type TurnState = "working" | "blocked" | "needs-input" | "errored" | "deferred" | "queued" | Terminal;
 
 export interface TurnSlot {
   outcome?: { status: ReceiptStatus };
@@ -30,7 +30,7 @@ const ageOf = (ms: number): string =>
   ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))}s` : ms < 3_600_000 ? `${Math.round(ms / 60_000)}m` : `${Math.round(ms / 3_600_000)}h`;
 
 /** `working 12m` —— 状态 + 自派出以来多久。 */
-export const renderTurnState = (state: TurnState, ageMs: number): string => `${state} ${ageOf(ageMs)}`;
+export const renderTurnState = (state: TurnState, ageMs: number): string => `${state === "queued" ? "queued(等前置)" : state} ${ageOf(ageMs)}`;
 
 /** 名册 / peek 的那一行: `target` 在等谁 (它派出去的), 谁在等它 (派给它的)。都没有 = ""。 */
 export const renderInFlight = (
