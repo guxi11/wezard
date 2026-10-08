@@ -54,7 +54,7 @@ import {
 import { openTaskRegistry } from "./task-registry.js";
 import { describeTrigger, nextFire, parseTrigger, WHEN_HELP } from "../shared/trigger.js";
 import { isQuiet, slugify, uniqueId } from "../shared/task-file.js";
-import { baseOfKey, bindTagLinker, headed, isHost, isInternalKey, keyOf, linkTags, normalizeTag, speakerHead, tagFromCwd, tagHead, tagLink, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
+import { baseOfKey, bindTagLinker, headed, ownHead, isInternalKey, keyOf, linkTags, normalizeTag, speakerHead, tagFromCwd, tagHead, tagLink, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
 import { appendEpisode, clipForCharter, cwdOfMd, episodePath, inboxPath, mdsOf, proposedCwds, memoryPath, memoryRoot, proposeMemory, readMemory, type MemoryScope } from "./wizard-memory.js";
 import { retireStewardTask, startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
 import type { Asker, TurnFrom } from "../shared/detail-store.js";
@@ -706,9 +706,8 @@ const main = async (): Promise<void> => {
     /** 一个 wizard 在群里的称呼: `.name`, 挂它的 rolepage。名字全局唯一, 不再
      *  因为落在哪个群而换写法 —— 引用这一段就能跟它说话 (parseTagHeader 认得)。 */
     const relayLabel = (t: string): string => ((h) => (h ? tagLink(t, h) : ""))(tagHead(t));
-    /** 以 `self` 的名义往 `dest` 群发一条: 头独占一行; 群默认 wizard 在自己群里不报名 (isHost)。 */
-    const postAs = (self: string, dest: string, text: string): void =>
-      notifyChat(dest, headed(((me) => (me && !isHost(self, dest) ? speakerHead(me) : ""))(relayLabel(self)), text, "\n\n"));
+    /** 以 `self` 的名义往 `dest` 群发一条: 头独占一行; 头怎么写 (群默认 wizard 报不报名) 归 ownHead。 */
+    const postAs = (self: string, dest: string, text: string): void => notifyChat(dest, headed(ownHead(self, dest), text, "\n\n"));
     // 没开顶层模式的群里公开气泡多了 → 往那个群的管家 (群默认会话, target 就是 base principal) 信箱挂一行,
     // 让它问人要不要开顶层模式 (见 top-only-nudge.ts)。路径里写聊天名: 管家照抄就能 config_set。
     const topOnlyNudge = createTopOnlyNudge({

@@ -27,15 +27,19 @@ export const nickOf = (body: Record<string, unknown>): string =>
     .find((v): v is string => typeof v === "string" && v.trim() !== "")?.trim() ?? "";
 
 // ── 企微 markdown → 微信 ClawBot 认的子集 ─────────────────────────────
-// 对齐官方插件 StreamingMarkdownFilter (2.1.3 起): 链接 / 粗体 / 代码 / 表格 / H1-H4 / 引用原样留着,
-// 只剥它不认的。别再整段降纯文本 —— `[字](url)` 降成「字」就把链接吃了。
+// 对齐官方插件 StreamingMarkdownFilter (2.1.3 起): 粗体 / 代码 / 表格 / H1-H4 / 引用原样留着, 只剥它不认的。
+// 链接是例外: 人要微信里只见文字 —— `[字](url)` 降成「字」, rolepage 的票据 URL 不进微信。
 const rules: ReadonlyArray<readonly [RegExp, string]> = [
   [/!\[([^\]]*)\]\([^)]*\)/g, "$1"], // 图: 留 alt
   [/<\/?font[^>]*>/gi, ""], // 企微 markdown 的颜色标签
   [/^#{5,6}\s+/gm, ""],
   [/\n{3,}/g, "\n\n"],
 ];
-export const wxMarkdown = (md: string): string => rules.reduce((s, [re, to]) => s.replace(re, to), md ?? "").trim();
+// 代码里的 `[x](y)` 是字面量: 栅栏块与行内代码原样放过 (split 的捕获组落在奇数位)。
+const CODE_RE = /(```[\s\S]*?(?:```|$)|`[^`\n]*`)/;
+const unlink = (md: string): string =>
+  md.split(CODE_RE).map((seg, i) => (i % 2 ? seg : seg.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1"))).join("");
+export const wxMarkdown = (md: string): string => unlink(rules.reduce((s, [re, to]) => s.replace(re, to), md ?? "")).trim();
 
 /** 按段落 → 行 → 硬切的优先级切成 ≤max 字的片 (官方插件 4000)。 */
 export const chunkText = (s: string, max = 4000): string[] => {

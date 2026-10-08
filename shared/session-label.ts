@@ -239,7 +239,10 @@ export const tagHead = (target: string | undefined): string => {
 export const linkedTagHead = (target: string | undefined, url: string): string =>
   ((h) => (h ? `[${h}](${url})` : ""))(tagHead(target));
 
-/** 群的默认 wizard 在自己群里 (`dest` 缺省 = 它的 home): 人本来就在跟它说话, 不报名。
+/** 微信 ClawBot 的群聊 (`chat:wx_…`): 文本里不挂链接, 默认开顶层模式。 */
+export const isWxChat = (key: string): boolean => key.startsWith("chat:wx_");
+
+/** 群的默认 wizard 在自己群里 (`dest` 缺省 = 它的 home): 人本来就在跟它说话, 不必报名。
  *  slot 分身、被人从别的群点名过来的都不是 host, 照旧带头以示区分。 */
 export const isHost = (target: string | undefined, dest?: string): boolean =>
   !!target && !tagOfKey(target) && !isInternalKey(target) && (!dest || baseOfKey(dest) === baseOfKey(target));
@@ -247,11 +250,18 @@ export const isHost = (target: string | undefined, dest?: string): boolean =>
 /** 一条群气泡: 头 + 正文, 头为空就只有正文。 */
 export const headed = (head: string, body: string, sep = headSep(body)): string => (head ? `${head}${sep}${body}` : body);
 
-/** 发话方在 `dest` 群里的头: host 不报名; `to` = 说给谁 (公开 wizard 间), 有对象时 host 也得报名。 */
-export const chatHead = (target: string | undefined, url: string | undefined, to?: string, dest?: string): string =>
-  !to && isHost(target, dest)
-    ? ""
-    : ((me) => (me ? speakerHead(me, to) : ""))(url ? linkedTagHead(target, url) : tagHead(target));
+/** 发话方在 `dest` 群里的头; `to` = 说给谁 (公开 wizard 间), 有对象时谁都得报名。
+ *  host 不报名, 但企微里它的名字链接是进 rolepage 的入口: 有链接就留 `[.name](url):`, 只是不写裸名字;
+ *  微信那头链接本就降成文字 (wxMarkdown), 留下的只会是一句重复的自报身份, 整个头都不写。 */
+export const chatHead = (target: string | undefined, url: string | undefined, to?: string, dest?: string): string => {
+  const host = !to && isHost(target, dest);
+  if (host && (!url || isWxChat(baseOfKey(dest || target!)))) return "";
+  const me = url ? linkedTagHead(target, url) : tagHead(target);
+  return me ? speakerHead(me, to) : "";
+};
+
+/** `target` 自己往 `dest` 群说话的头, 链接取它自己的 rolepage (bindTagLinker)。 */
+export const ownHead = (target: string, dest?: string): string => chatHead(target, linker?.urlOf(target), undefined, dest);
 
 /** 头挂上指定的 rolepage 链接 (mirror 用本轮 turn 的票据), 正文里的名字一并挂链。
  *  url 为空时退回裸头 —— 头那一段是路由信息, 少了链接只是少一层可点, 不能因此不写。

@@ -3155,7 +3155,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 链接落到 chat 视图: 默认选中本 turn 所属的 #tag, 贴底显示整条会话。turnId 依旧
   // 是凭据 (不可枚举), 只是页面从"一个 turn"扩成"这个 chat 的全部会话"。
   // wizard 名字作为 ww_uniq 传下去, 让同一个 wizard 的所有 turn 详情都复用一个 WeCom 窗口。
-  // 默认 wizard 在 home 群不报名 (isHost): 头为空, 气泡里只剩正文 (正文也空时留 `…`, 不发空气泡)。
+  // 头怎么写归 chatHead (默认 wizard 在 home 群: 企微只留名字链接, 微信不写头); 头与正文都空时留 `…`, 不发空气泡。
   const briefLine = (a: AttachState, turnId: string, rest: string, dest = a.channel): string =>
     headed(chatHead(a.target, buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, turnId, roleUniq(a.target)), undefined, dest || undefined), rest) || "…";
 
