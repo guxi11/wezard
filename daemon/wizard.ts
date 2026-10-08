@@ -480,7 +480,7 @@ const renderStewardRules = (a: CharterArgs): string[] => {
     ]),
     "",
     bullet([
-      ...(a.stewardBudget < 0 ? [] : [`**守护进程替你守着**: 改文件、开子代理、读代码 (Read / Grep / Glob, 以及 cat / grep / sed / git show 之类读文件的命令) 直接被拒; 其余命令每轮超过 ${a.stewardBudget} 次也拒 —— 被拒就是该 \`dispatch\` 了, 别重试、别换工具绕`]),
+      ...(a.stewardBudget < 0 ? [] : [`**守护进程替你守着**: 改文件 (含用 Bash 写: sed -i / 重定向 / tee)、开子代理、读代码 (Read / Grep / Glob, 以及 cat / grep / sed / git show 之类读文件的命令) 直接被拒; 其余命令每轮超过 ${a.stewardBudget} 次也拒 —— 被拒就是该 \`dispatch\` 了, 别重试、别换工具绕`]),
       topOnlyLine(policyKeyOf(a.chat, a.principal), a.topOnly),
     ]),
   ];

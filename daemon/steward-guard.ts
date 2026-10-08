@@ -17,18 +17,36 @@ const SHELL_READ = /(?:^|[;&|(]\s*|\$\(\s*)(?:cat|head|tail|sed|awk|grep|egrep|r
 const shellReads = (cmd: string): boolean =>
   cmd.split(/\n/).some((line) => SHELL_READ.test(line.replace(/\|\|/g, ";").replace(/\|[^|;&]*/g, "")));
 
+// Bash 也能亲手干活: Edit/Write 被拦之后模型会绕到 sed -i / 重定向 / tee。这类判 hands,
+// 不算 look —— 否则每轮 budget 次机会足够它把文件改完。`>&2` / `2>&1` / `2>/dev/null`
+// 不写工作区, 放行; 引号里的 "-i" 可能误伤, 管家场景下宁严勿宽 (deny 只叫他去 dispatch)。
+const REDIRECT = /(?:^|[\s;|&(])\d*>>?\s*([^\s&|]+)/g;
+const bashWrites = (command: string): boolean => {
+  if (/\bsed\b[^|;&]*\s-\w*i/.test(command)) return true;
+  if (/\btee\b/.test(command)) return true;
+  for (const m of command.matchAll(REDIRECT)) {
+    if (!(m[1] ?? "").startsWith("/dev/")) return true;
+  }
+  return false;
+};
+
 type Kind = "free" | "hands" | "read" | "look";
 const kindOf = (toolName: string, toolInput: unknown): Kind => {
   if (FREE.has(toolName) || /wezard/i.test(toolName)) return "free";
   if (HANDS.has(toolName)) return "hands";
   if (READS.has(toolName)) return "read";
   const cmd = (toolInput as { command?: unknown } | null)?.command;
-  return toolName === "Bash" && typeof cmd === "string" && shellReads(cmd) ? "read" : "look";
+  if (toolName !== "Bash" || typeof cmd !== "string") return "look";
+  // 又读又写的 (sed -i 同时中两条) 先算写 —— 写比读严重, 拒的理由也要说对。
+  if (bashWrites(cmd)) return "hands";
+  return shellReads(cmd) ? "read" : "look";
 };
 
 const DISPATCH = "`dispatch({task, name, description})` 交出去 (task 写人的原话加你知道的背景)";
 const handsReason = (toolName: string): string =>
-  `你是这个群的管家, ${toolName} 是亲手干活 —— 改文件、开子代理管家一律不做, 用 ${DISPATCH}。这是守护进程拦的, 重试结果一样。`;
+  toolName === "Bash"
+    ? `你是这个群的管家, 这条 Bash 在写文件 —— 改文件管家一律不做 (sed -i / 重定向 / tee 也算), 用 ${DISPATCH}。这是守护进程拦的, 重试结果一样。`
+    : `你是这个群的管家, ${toolName} 是亲手干活 —— 改文件、开子代理管家一律不做, 用 ${DISPATCH}。这是守护进程拦的, 重试结果一样。`;
 const readReason = (toolName: string): string =>
   `你是这个群的管家, ${toolName} 是在读代码 —— 读代码就是一件活, 管家一次都不读, 哪怕看一眼就像能答 (机制 / 原理 / 「现在还会不会…」/ 方案 / 排查都算): 用 ${DISPATCH}, 结论回来再向人交代。这是守护进程拦的, 别重试、别换工具绕。`;
 const budgetReason = (budget: number): string =>
