@@ -1,6 +1,6 @@
 {
   "name": "wezard",
-  "version": "2.4.1",
+  "version": "2.5.0",
   "description": "Bridge Claude Code and WeCom: PreToolUse approval cards + bidirectional tmux session mirror with image paste",
   "type": "module",
   "license": "MIT",
@@ -41,6 +41,8 @@
     "dist/cli/sync.js.map",
     "dist/cli/audit.js",
     "dist/cli/audit.js.map",
+    "dist/cli/wx.js",
+    "dist/cli/wx.js.map",
     "dist/daemon/**/*.js",
     "dist/daemon/**/*.js.map",
     "dist/mcp/**/*.js",

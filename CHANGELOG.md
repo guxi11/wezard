@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-10-08
+
 ### Changed
 - rolepage 切换会话不再白屏: 新内容就绪后一次替换 (0c49684)。
 - wizard 发进群 (企微 / 微信) 的消息头统一为 `[.fix](rolepage): …`: 不再带 emoji (emoji 只是 rolepage 的头像), 名字后带冒号; 公开的 wizard 间对话由 `🦊 .a → 🐨 .b` 改为 `.a: .b` (无箭头、无 @, 名字前的 `.` 就是 wizard 的记号)。审批 / 提问卡、工具卡标题、notify、send_file 说明、定时任务、镜像气泡同一份实现。群的默认 wizard 在自己群里不再自报身份: 企微群里只留名字链接 `[.name](rolepage):` (进 rolepage 的入口, 没有链接时整个头不写), 微信群里整个头不写 (定时任务执行体替日程主人说话, 主人是群默认 wizard 时同样不写; 微信 outbox 里上个进程压着的老格式消息补发前按现行规矩重写头); slot 分身、被人从别的群点名来的照旧带头。引用旧格式 (带 emoji / @ / 箭头) 气泡照样认得出发话人, 引用不带头的默认 wizard 气泡落回本群默认 wizard。
@@ -1018,7 +1020,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.4.1...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.5.0...HEAD
+[2.5.0]: https://github.com/guxi11/wezard/compare/v2.4.1...v2.5.0
 [2.4.1]: https://github.com/guxi11/wezard/compare/v2.4.0...v2.4.1
 [2.4.0]: https://github.com/guxi11/wezard/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/guxi11/wezard/compare/v2.2.2...v2.3.0
