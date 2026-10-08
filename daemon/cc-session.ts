@@ -9,8 +9,10 @@
 //
 // jsonl 在首条消息之前根本不存在 (`--session-id` 新建与 `--fork-session` 都一样),
 // 所以「就绪」只能靠注册表; 「已提交」则注册表 (busy 翻转) 与 jsonl 任一确认即可。
-// 没有注册表的后端 (codebuddy / 旧版 CC) 一律返回 undefined, 由调用方退回读 pane。
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync, watch } from "node:fs";
+// 没有可用注册表的后端一律返回 undefined, 由调用方退回读 pane。注意目录在 ≠
+// 注册表可用: codebuddy 2.143+ 也写 sessions/<pid>.json, 但 schema 不同 (无
+// tmux/status 字段) —— 有没有 tmux 字段才是「这个注册表我们读得懂」的判据。
+import { closeSync, openSync, readdirSync, readFileSync, readSync, statSync, watch } from "node:fs";
 import { join } from "node:path";
 import { expandHome } from "../shared/paths.js";
 
@@ -27,8 +29,21 @@ export interface LiveSession {
 
 export const registryDirOf = (homeDir: string): string => join(expandHome(homeDir), "sessions");
 
-/** 这个后端会不会写注册表 —— 目录在就算。 */
-export const hasRegistry = (homeDir: string): boolean => existsSync(registryDirOf(homeDir));
+/** 这个后端写的注册表我们读得懂吗 —— 目录在不算数 (codebuddy 也写 sessions/,
+ *  但行里没有 tmux/status), 得至少有一行解析成功且带 `tmux` 字段 (不看值: 不在
+ *  tmux 里的进程会写空串)。半写/解析失败的行跳过; 目录很小, 不缓存。 */
+export const hasRegistry = (homeDir: string): boolean => {
+  let files: string[];
+  try { files = readdirSync(registryDirOf(homeDir)); } catch { return false; }
+  return files
+    .filter((f) => f.endsWith(".json"))
+    .some((f) => {
+      try {
+        const r = JSON.parse(readFileSync(join(registryDirOf(homeDir), f), "utf8")) as Record<string, unknown>;
+        return "tmux" in r;
+      } catch { return false; }
+    });
+};
 
 // 崩掉的进程会留下 pid 文件, 而 tmux server 重启后 `%N` 从头编号 —— 不核对 pid,
 // 一份陈年文件就能冒充新 pane 上的会话。EPERM = 进程在, 只是不归我们管。
