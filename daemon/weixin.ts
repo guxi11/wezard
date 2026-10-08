@@ -287,7 +287,7 @@ export const startWeixin = ({ cfg, log, onBound, notifyWecom }: WeixinDeps): Wei
     const cur = patch(a.botId, () => ({ state: "expired" as const, ctx: undefined, retryAt: Date.now() + STALE_PAUSE_MS }));
     if (!cur || was !== "live") return;
     log.warn({ botId: a.botId, chatId: a.chatId, why }, "weixin account expired");
-    tell(cur, `📵 微信通道 \`${a.chatId}\` 掉线 (${why})${cur.outbox.length ? `, 压着 ${cur.outbox.length} 条` : ""} —— 每小时自动重试一次; 若是被别处重新绑定顶替了, 在企微单聊发 \`/wx bind\` 重新扫码即可, 群聊与 wizard 都保留`);
+    tell(cur, `📵 微信通道 \`${a.chatId}\` 掉线 (${why})${cur.outbox.length ? `, 压着 ${cur.outbox.length} 条` : ""} —— 每小时自动重试一次; 若是被别处重新绑定顶替了, 发 \`/wx bind\` 重新扫码即可, 群聊与 wizard 都保留`);
   };
 
   /** 掉线的号重新可用: 轮询醒来接着收, 压着的接着发。`wake=false` = 调用者就是那条轮询本身。 */

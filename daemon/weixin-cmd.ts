@@ -1,7 +1,7 @@
 // `/wx` 命令、`/wx/*` 路由、绑定落定后的那几件事、微信侧的 SendMedia。
 //
-// 门槛: 二维码就是授权凭据 —— 谁扫了谁就能驱动本机。所以只有审批人 (wxAdmins) 能发起; 在群里
-// 发起也行, 但码私发到他的单聊, 不摊在群里 (群里谁都看得见)。本机终端 (`wezard wx bind`) 发起的
+// 门槛: 二维码就是授权凭据 —— 谁扫了谁就能驱动本机。所以只有审批人 (wxAdmins) 能发起; 判据只有
+// 发话人, 不看在哪个聊天 (对 wezard 单聊群聊都是 chat), 码与进度回发起的那个聊天。本机终端 (`wezard wx bind`) 发起的
 // 要先给审批人推一张确认卡, 点了才出码 —— 口令每个 wizard 都读得到, 光凭口令等于任何 wizard 都能
 // 给本机多开一个微信入口。
 import { mkdirSync, statSync, writeFileSync } from "node:fs";
@@ -49,7 +49,7 @@ const ago = (t?: number): string => {
 
 export const renderAccounts = (cfg: Config, xs: readonly WxAccount[]): string =>
   xs.length === 0
-    ? "[wezard] 还没有绑定微信。企微单聊里发 `/wx bind [群名]` 扫码绑定。"
+    ? "[wezard] 还没有绑定微信。发 `/wx bind [群名]` 扫码绑定 (仅审批人)。"
     : [
       `*微信 ClawBot* (${xs.length}/${cfg.weixin.maxAccounts}${cfg.weixin.enabled ? "" : " · ⚠️ 通道未开启"})`,
       ...xs.map((a, i) => {
@@ -62,7 +62,7 @@ export const renderAccounts = (cfg: Config, xs: readonly WxAccount[]): string =>
     ].join("\n");
 
 const HELP = [
-  "*/wx* 微信 ClawBot (仅审批人; 群里发起时二维码私发到你的单聊)",
+  "*/wx* 微信 ClawBot (仅审批人; 二维码与进度回发起的这个聊天)",
   "`/wx` 列出已绑定的微信",
   "`/wx bind [群名]` 出二维码, 用要绑定的那个微信扫 (约 2 分钟有效)",
   "`/wx code <配对码>` 微信上显示配对码时回填",
@@ -147,8 +147,7 @@ const pickAccount = (cfg: Config, xs: readonly WxAccount[], arg: string): WxAcco
 };
 
 /** 企微侧一次绑定的进度推送: 新码发图, 关键状态各一句。 */
-/** `to`: 二维码与进度发去哪 (发起人的单聊); `fallback`: 单聊发不出时退到发起的那个群。 */
-const wecomBindSink = (d: CmdDeps, to: string, fallback = to): ((v: BindView) => void) => {
+const wecomBindSink = (d: CmdDeps, to: string): ((v: BindView) => void) => {
   let lastQr = "";
   let last = "";
   return (v) => {
@@ -156,14 +155,8 @@ const wecomBindSink = (d: CmdDeps, to: string, fallback = to): ((v: BindView) =>
       lastQr = v.qrUrl;
       void (async () => {
         try {
-          const png = await qrPng(v.qrUrl);
-          const r = await d.sendWecomMedia(to, { path: png, kind: "image", name: "weixin-bind.png" });
-          if (!r.ok && fallback !== to) {
-            d.log.warn({ reason: r.reason, to }, "weixin qr to DM failed — falling back to the group");
-            to = fallback;
-            const g = await d.sendWecomMedia(to, { path: png, kind: "image", name: "weixin-bind.png" });
-            if (!g.ok) d.log.warn({ reason: g.reason }, "weixin qr image failed");
-          } else if (!r.ok) d.log.warn({ reason: r.reason }, "weixin qr image failed");
+          const r = await d.sendWecomMedia(to, { path: await qrPng(v.qrUrl), kind: "image", name: "weixin-bind.png" });
+          if (!r.ok) d.log.warn({ reason: r.reason }, "weixin qr image failed");
         } catch (e) { d.log.warn({ err: (e as Error).message }, "weixin qr render failed"); }
         d.sendWecom(to, `📱 ${v.refresh ? `二维码已换新 (${v.refresh}/3)。` : ""}用**要绑定的那个人的微信**扫上图 (约 2 分钟有效)。手机上只有这一台时: 长按图片存到相册, 微信「扫一扫」右上角选相册。\n\n扫不了也可以在微信里打开: ${v.qrUrl}`);
       })();
@@ -184,7 +177,6 @@ export interface WxCmdCtx {
 
 export const makeWxCommands = (d: CmdDeps) => async (ctx: WxCmdCtx, cmd: WxCommand): Promise<void> => {
   const { cfg, wx } = d;
-  const dm = ctx.chat.startsWith("user:");
   if (!isWxAdmin(cfg, ctx.sender)) {
     d.log.info({ sender: ctx.sender, chat: ctx.chat, admins: wxAdmins(cfg) }, "/wx rejected: not an admin");
     return ctx.reply(`[wezard] \`/wx\` 只有审批人能用 (approval.approvers; 空则 defaultChat 与 allowFrom 里的人), 你是 \`${ctx.sender}\``);
@@ -193,10 +185,8 @@ export const makeWxCommands = (d: CmdDeps) => async (ctx: WxCmdCtx, cmd: WxComma
   if (cmd.verb === "list") return ctx.reply(renderAccounts(cfg, wx.list()));
   if (cmd.verb === "bind") {
     if (!cfg.weixin.enabled) return ctx.reply("[wezard] 微信通道未开启: 先 `config_set weixin.enabled=true` (放权项, 会推卡确认), reload 后再 `/wx bind`");
-    // 审批人在群里发起也放行, 但二维码 (= 授权凭据) 私发到他的单聊, 不摊在群里; 单聊发不出才退回群里。
-    const r = wx.startBind(ctx.sender, cmd.name, wecomBindSink(d, dm ? ctx.chat : ctx.sender, ctx.chat));
-    if (!r.ok) return ctx.reply(`[wezard] ${r.reason}`);
-    return dm ? undefined : ctx.reply("📱 二维码已私发到你和机器人的单聊 (约 2 分钟有效), 用要绑定的那个微信扫; 进度也在单聊里报");
+    const r = wx.startBind(ctx.sender, cmd.name, wecomBindSink(d, ctx.chat));
+    return r.ok ? undefined : ctx.reply(`[wezard] ${r.reason}`);
   }
   if (cmd.verb === "code") {
     const r = wx.submitCode(ctx.sender, cmd.code);

@@ -196,7 +196,7 @@ const renderHelp = (): string =>
     "`/kill` 结束本会话并移除 tmux pane (下条消息自动让新的 wizard 就位)",
     "`/n` 向 CLI 输入回车 (Enter)",
     "`/reveal` 把终端的 tmux 窗口切到本会话",
-    "`/wx` 微信 ClawBot: 列出 / `bind` 扫码绑定 (每个微信号 = 一个群聊) / `unbind` (审批人; 群里发起二维码私发单聊)",
+    "`/wx` 微信 ClawBot: 列出 / `bind` 扫码绑定 (每个微信号 = 一个群聊) / `unbind` (仅审批人)",
     "",
     "▎切换 CLI 后端",
     "`/new codebuddy` 用指定 CLI 新开 (claude / claude-internal / codebuddy)",
