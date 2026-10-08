@@ -25,7 +25,6 @@ import { sleep, truncateWithCount, mapLimit } from "../shared/std.js";
 import {
   activeBackends,
   backendForPath,
-  primaryBackend,
   type CliBackend,
   type CliBackendName,
   projectDirFor,
@@ -1631,10 +1630,10 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
   //     所以 codebuddy 走 C-v 必然失败 —— 改走 @<path> 文本提及，让 LLM
   //     调 Read 工具读图（Read 支持图片，见 codebuddy tools-reference.md）。
   //     v2.52.4 之后 @<path> 不自动转 image block，但 LLM 看到路径会 Read。
+  // dispatch 已对 codebuddy 把 refs 合进 text (images 传空), 这里的
+  // withImageRefs 是其它调用方直传 images 时的兜底 —— 幂等, 不会贴两份。
   if (backendName === "codebuddy") {
-    const refs = images.map((p) => `@${p}`);
-    const textWithRefs = refs.length ? (text ? `${refs.join("\n")}\n${text}` : refs.join("\n")) : text;
-    return injectViaTmuxText(target, textWithRefs, log, freshSpawn, witness);
+    return injectViaTmuxText(target, withImageRefs(text, images), log, freshSpawn, witness);
   }
 
   // Pump images first via clipboard+C-v so each one is attached as a separate
@@ -1662,6 +1661,14 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
   }
 
   return injectViaTmuxText(target, text, log, freshSpawn, witness);
+};
+
+// 图片以 @<path> 文本提及的形式进会话 (codebuddy 的 tmux 路径、一切 spawn 路径)。
+// 提升为共享 helper: dispatch 侧的印章 / 回显去重 / turn 记录必须拿到与 inject
+// 完全相同的字符串, 否则落盘行认不出是自己注入的。
+const withImageRefs = (text: string, images: readonly string[]): string => {
+  const refs = images.map((p) => `@${p}`).join("\n");
+  return refs ? (text ? `${refs}\n${text}` : refs) : text;
 };
 
 // 文本 paste + Enter 提交 + 自校验。从 injectViaTmux 抽出来，让 codebuddy
@@ -1859,8 +1866,7 @@ const injectViaSpawn = (args: InjectArgs): Promise<{ ok: boolean; reason?: strin
   // Spawn-mode (no live TTY) can't do clipboard+C-v — fall back to `@<path>`,
   // which Claude parses at submit time and inlines as image content blocks
   // without a model-decided Read tool turn.
-  const refs = images.map((p) => `@${p}`).join("\n");
-  const finalText = refs ? (text ? `${refs}\n${text}` : refs) : text;
+  const finalText = withImageRefs(text, images);
   const cliArgs = [
     "-p",
     finalText,
@@ -5162,31 +5168,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     try { return charterOf?.(target, ctx); } catch { return undefined; }
   };
 
-  // 确切模型名的证据 (见 exactModelId): transcript 里 API 真答过的 model id, 只认同一个
-  // CLI 的。先问最可能的那几个会话 (自己、被克隆者), 再按新近扫其余 —— 惰性的,
-  // 第一个对上就停, 绝大多数时候只读一两个 transcript 的尾巴。
-  function* modelSightings(cli: CliBackendName | undefined, likely: readonly string[]): Generator<string> {
-    const name = cli ?? primaryBackend().name;
-    const pathOf = (t: string): string => byTarget.get(t)?.jsonlPath ?? expandHome(deps.store.get(t)?.jsonlPath ?? "");
-    const head = likely.map(pathOf).filter(Boolean);
-    // 生成器体到第一次取值才跑: 前几个就对上时, 其余几百个 stat 一个也不做。
-    const paths = function* (): Generator<string> {
-      yield* head;
-      yield* Object.values(deps.store.all())
-        .map((r) => expandHome(r.jsonlPath))
-        .filter((p) => !head.includes(p))
-        .map((p) => ({ p, m: mtimeOf(p) }))
-        .filter((x) => x.m > 0)
-        .sort((x, y) => y.m - x.m)
-        .map((x) => x.p);
-    };
-    for (const path of paths()) {
-      if (!existsSync(path) || backendForPath(path).name !== name) continue;
-      const id = lastModel(path);
-      if (id) yield id;
-    }
-  }
-
   /** 管家该跑的那一档 (模型 + effort); 不是管家 = undefined。 */
   const stewardSpec = (target: string): { model?: string; effort?: Effort } | undefined => {
     const tier = stewardTierOf(cfg, target);
@@ -5270,7 +5251,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       cwdOverride: eff,
       cli: effCli,
       model: effModel,
-      knownModels: modelSightings(effCli, [target, base]),
       effort: effEffort,
       systemPrompt: opts?.systemPrompt ?? charterFor(target, { cwd: eff }),
     }).catch((e: unknown) => { inFlightSids.delete(freshSid); throw e; });
@@ -5444,7 +5424,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       cwdOverride: parent.runningCwd,
       cli: parentCli,
       model,
-      knownModels: modelSightings(parentCli, [args.parent]),
       effort,
       systemPrompt: args.systemPrompt,
     });
@@ -6449,11 +6428,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // Same resume-fork hazard as dispatch: snapshot before spawn, re-bind
         // onto the forked jsonl once it appears (EOF offset — fork is seeded).
         const resumeBaseline = listJsonls(dirname(a.jsonlPath));
-        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: displayName(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, ...respawnSpec(a), knownModels: modelSightings(backendForPath(a.jsonlPath).name, [target]), systemPrompt: charterFor(target, { cwd: a.runningCwd }) });
+        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: displayName(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, ...respawnSpec(a), systemPrompt: charterFor(target, { cwd: a.runningCwd }) });
         if (!r.ok || !r.tmuxPane) return { ok: false, reason: `respawn failed: ${r.reason ?? "unknown"}` };
         a.tmuxPane = r.tmuxPane;
         a.tmuxSession = r.tmuxSession ?? a.tmuxSession;
         if (r.cwd) a.runningCwd = r.cwd;
+        // What the pane really landed on: a recorded string the CLI refused was
+        // relaunched past, and must not cost the same extra launch next time.
+        if (r.model !== undefined) a.model = r.model;
         deps.store.set(target, { sessionId: sid, jsonlPath: a.jsonlPath, tmuxSession: a.tmuxSession, tmuxPane: a.tmuxPane, cwd: a.runningCwd || undefined, model: a.model || undefined, effort: a.effort || undefined, pendingCwd: a.pendingCwd || undefined });
         startMigrationWatcher(a, resumeBaseline, forkOf(a.jsonlPath));
         fresh = true;
@@ -6773,6 +6755,16 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // 任意 slash 命令 (/context, /cost, /status…): 产物走 skill_output standalone,
       // 详情链接是纯噪声 —— brief 起 turn 时不推链接。
       const isSlash = /^\/[a-z]/i.test(text.trim());
+      // codebuddy 没有可用的剪贴板图片通道 (tmux 里 C-v 会被它自己的
+      // syncTmuxToSystemClipboard 冲掉, 见 injectViaTmux 分流注释) —— 图片只能以
+      // @<path> 文本进会话。既然如此, 问话 / 印章 / 回显去重 / 静默分叉跟随都按这个
+      // 最终落盘形态记 (与 inject 拿到的同一个字符串); 否则落盘的 `@<path>` 行认不出
+      // 是自己注入的: 被当成 CLI 手敲另开幽灵轮、触发 chatOriginOnly 吞回复, 而 IM 侧
+      // 预建的 turn 永远等不到问话改写, rolepage 的入消息丢了图 (rolepage 一律按 CLI
+      // 最终展示的那条消息渲染)。slash / /clear 判定仍用原始 text —— 命令不带图。
+      const refsFirst = backendForPath(a.jsonlPath).name === "codebuddy" && (images?.length ?? 0) > 0;
+      const effText = refsFirst ? withImageRefs(text, images ?? []) : text;
+      const effImages = refsFirst ? [] : images;
       // Auto-upgrade /clear → /new when the user has queued a project switch:
       // a plain /clear would only rotate sessionId in the same pane, which sits
       // in the OLD cwd. Killing+respawning is the only way to honor the switch.
@@ -6842,7 +6834,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // 挂 loading 气泡并起新 turn —— 上一 turn 若还在跑, startBriefTurn 内部
         // 会立刻把它收掉 (对话边界策略), 本轮直接成为活跃 turn。
         // 后续 onItem 走 handleBriefItem, 不再走 stream / defer 路径。
-        await startBriefTurn(a, frame, streamId, isSlash, text, channel ?? baseOfKey(principal), speaker);
+        await startBriefTurn(a, frame, streamId, isSlash, effText, channel ?? baseOfKey(principal), speaker);
       } else if (!armMigration && !eagerOpen) {
         enterDeferred(a, frame, streamId);
       }
@@ -6875,12 +6867,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           const resumeBaseline = !armMigration ? listJsonls(dirname(a.jsonlPath)) : undefined;
           // Respawn in the binding's runningCwd (pendingCwd doesn't apply to a
           // mid-turn reincarnation — only /new and /clear-with-pending swap cwd).
-          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: displayName(a.target) || a.target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, ...respawnSpec(a), knownModels: modelSightings(backendForPath(a.jsonlPath).name, [a.target]), systemPrompt: charterFor(a.target, { cwd: a.runningCwd }) });
+          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: displayName(a.target) || a.target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, ...respawnSpec(a), systemPrompt: charterFor(a.target, { cwd: a.runningCwd }) });
           if (r.ok && r.tmuxPane && r.tmuxSession) {
             a.tmuxPane = r.tmuxPane;
             a.tmuxSession = r.tmuxSession;
             if (r.cwd) a.runningCwd = r.cwd;
             freshSpawn = true;
+            if (r.model !== undefined) a.model = r.model; // 同 respawn-init: 记真落地的模型
             deps.store.set(a.target, {
               sessionId: sid,
               jsonlPath: a.jsonlPath,
@@ -6922,7 +6915,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           log.warn({ target: a.target, sessionId: sid, myGen, gen: a.injectGen }, "inject aborted — superseded by /stop or watchdog");
           return;
         }
-        rememberInject(text);
+        rememberInject(effText);
         // 解除静默必须在 inject 之前: inject 内部的 freshSpawn 验证循环可达 10+s
         // (paste-verify + settle + waitForCleared + retry), 而 LLM 的回复可能在 Enter
         // 发出后 2-3s 就落盘 —— tail 在 mute 期间读到的 item 会被 onItem 永久丢弃,
@@ -6931,7 +6924,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // 用户行有 isOwnInject 过滤 —— 提前解除不会泄漏脏数据。
         a.muteUntilInject = false;
         const r = await inject({
-          text, images, cfg, log: log.child({ principal, sessionId: sid }),
+          text: effText, images: effImages, cfg, log: log.child({ principal, sessionId: sid }),
           sessionId: sid, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn,
         });
         if (!r.ok) {
@@ -6972,7 +6965,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // live TUI) that would otherwise leave the tail — and the "…" bubble —
         // stuck on the dead old jsonl. /clear via WeCom (armMigration) has its
         // own watcher; skip spawn-mode (no shared pane to fork under us).
-        if (!armMigration && a.tmuxPane) armSilentForkRebind(a, text);
+        if (!armMigration && a.tmuxPane) armSilentForkRebind(a, effText);
         // Confirm the /model picker. Early Enter (before the picker renders)
         // would leave it unconfirmed, so settle first; a late Enter is a
         // harmless no-op in the empty input box. On confirm, claude writes

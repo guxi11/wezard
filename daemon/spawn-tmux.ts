@@ -34,7 +34,7 @@ import { expandHome } from "../shared/paths.js";
 import { augmentedPath } from "../shared/exec-path.js";
 import { sleep } from "../shared/std.js";
 import { activateBackend, CLI_BACKEND_DEFAULTS, primaryBackend, type CliBackend, type CliBackendName } from "../shared/cli-backends.js";
-import { exactModelId, isLaunchAlias, selectModel } from "./model-select.js";
+import { selectModel } from "./model-select.js";
 import type { Effort } from "../shared/effort.js";
 import { hasRegistry, sessionOnPane } from "./cc-session.js";
 
@@ -184,10 +184,59 @@ const TUI_READY_RE = /for shortcuts|auto mode|Try "|>\s*$/m;
 // command is sitting unsent in the shell line.
 const BLOCKER_RE = /Would you like to update|oh-my-zsh|Do you want to update/i;
 
-const capturePaneBottom = async (pane: string, rows: number): Promise<string> => {
-  const r = await runTmux(["capture-pane", "-t", pane, "-p", "-S", `-${rows}`]);
+const capturePaneBottom = async (pane: string, rows: number | "-"): Promise<string> => {
+  const r = await runTmux(["capture-pane", "-t", pane, "-p", "-S", rows === "-" ? "-" : `-${rows}`]);
   return r.ok ? r.stdout : "";
 };
+
+// The launch line ends in `; printf … __wezard_ cli_exit $?`, so a CLI that
+// quits hands the shell back a line no TUI ever prints. Split in two on the
+// typed line so the echoed command itself never matches.
+const EXIT_TAIL = `; printf '\\n%s%s:%s\\n' __wezard_ cli_exit "$?"`;
+const EXIT_RE = /__wezard_cli_exit:(\d+)/u;
+
+const nonBlank = (s: string): string[] => s.split("\n").map((l) => l.trimEnd()).filter(Boolean);
+
+/** The CLI quit back to the shell: the exit marker sits at the very bottom.
+ *  Only the bottom counts — a live TUI always ends in its input box, and a
+ *  resumed transcript replaying text that quotes the marker sits above it. */
+export const cliExit = (screen: string): string | undefined => {
+  const lines = nonBlank(screen);
+  const tail = lines.slice(-3);
+  const hit = tail.find((l) => EXIT_RE.test(l));
+  if (!hit) return undefined;
+  const at = lines.length - tail.length + tail.indexOf(hit);
+  const why = lines.slice(Math.max(0, at - 6), at).join(" ").replace(/\s+/gu, " ").slice(-300);
+  return `CLI 启动后退出 (exit ${EXIT_RE.exec(hit)![1]})${why ? `: ${why}` : ""}`;
+};
+
+/** The CLI took `--model` without recognizing it. A launch that knows the id
+ *  prints its display name in the welcome box ("Deepseek-V4.1-Flash · high");
+ *  one that doesn't echoes the raw string back ("no-such-model-9.9 · high") and
+ *  only fails on the first turn with "400 model [...] service info not found".
+ *  Read off the welcome box only — the first one titled with a version
+ *  ("╭─── CodeBuddy Code v2.143.1 ───"), else the first box at all: it comes
+ *  before any resumed history, which may quote anything. No box → false:
+ *  nothing to judge by. A valid id whose display name is byte-identical to it
+ *  would read as a miss — that costs one extra launch and lands on the same
+ *  model through the picker. */
+export const modelNotRecognized = (screen: string, wanted: string): boolean => {
+  const lines = screen.split("\n");
+  const isTop = (l: string): boolean => l.trimStart().startsWith("╭");
+  const titled = lines.findIndex((l) => isTop(l) && /\bv\d+\.\d+/u.test(l));
+  const top = titled >= 0 ? titled : lines.findIndex(isTop);
+  const end = top < 0 ? -1 : lines.findIndex((l, i) => i > top && l.trimStart().startsWith("╰"));
+  if (end < 0) return false;
+  return lines.slice(top + 1, end)
+    .flatMap((l) => l.split("│").map((s) => s.trim()))
+    .some((s) => s === wanted || s.startsWith(`${wanted} · `));
+};
+
+interface TuiState {
+  ready: boolean;
+  /** The CLI quit before it ever took input — why, as far as the screen says. */
+  exited?: string;
+}
 
 // Active verification that the AI session inside the pane is up and waiting
 // for input. On success returns true; on timeout returns false (caller decides
@@ -197,7 +246,10 @@ const capturePaneBottom = async (pane: string, rows: number): Promise<string> =>
 // 为准 —— 进程自己报的就绪, 不读 pane。注册表行一出现就说明 claude 已接管 pty,
 // 之后只管等它 idle; 只有行还没出现 (shell 还在 source rc / 被交互提示卡住 /
 // 后端根本不写注册表) 时 pane 才是唯一的证人, 这时才 capture 去认提示框与 TUI。
-const waitForTuiReady = async (pane: string, cmd: string, backend: CliBackend, log: Logger): Promise<boolean> => {
+//
+// 退出标记 (`cliExit`) 每次读屏都先看: CLI 一退回 shell 就不必等满预算, 而注册表
+// 里那行可能还没清掉 —— 所以注册表已认下会话时也照读屏, 只是不拿屏去判就绪。
+const waitForTuiReady = async (pane: string, cmd: string, backend: CliBackend, log: Logger): Promise<TuiState> => {
   const registry = hasRegistry(backend.homeDir);
   const t0 = Date.now();
   const deadline = t0 + MIN_SETTLE_MS + TUI_READY_TIMEOUT_MS;
@@ -209,8 +261,8 @@ const waitForTuiReady = async (pane: string, cmd: string, backend: CliBackend, l
     await sleep(registry ? REGISTRY_POLL_MS : POLL_MS);
     if (registry) {
       const s = sessionOnPane(backend.homeDir, pane);
-      if (s?.status === "idle") return true;
-      if (s) { sawSession = true; continue; }
+      if (s?.status === "idle") return { ready: true };
+      if (s) sawSession = true;
     }
     // Shell rc needs time to source before capture-pane shows anything meaningful.
     if (Date.now() - t0 < MIN_SETTLE_MS) continue;
@@ -218,7 +270,12 @@ const waitForTuiReady = async (pane: string, cmd: string, backend: CliBackend, l
     if (Date.now() - lastCap < POLL_MS) continue;
     lastCap = Date.now();
     const cap = await capturePaneBottom(pane, 20);
-    if (!registry && TUI_READY_RE.test(cap)) return true;
+    const exited = cliExit(cap);
+    if (exited) return { ready: false, exited };
+    // 注册表认不到这个 pane (schema 不认识 / 后端不写) 时, pane 读屏就是唯一证人;
+    // 注册表已认下 (sawSession) 则仍以它报的 idle 为准, 尾部裁决不变。
+    if (sawSession) continue;
+    if (TUI_READY_RE.test(cap)) return { ready: true };
     // Shell prompt eating our Enter: an interactive blocker (omz update, etc.)
     // swallowed it. Dismiss with "N" + Enter, then re-send the full command.
     if (!resent && BLOCKER_RE.test(cap)) {
@@ -238,9 +295,12 @@ const waitForTuiReady = async (pane: string, cmd: string, backend: CliBackend, l
     }
   }
   // 注册表认得这个会话却迟迟不 idle (启动期对话框? 状态字段改了名?) —— 最后让 pane 裁决一次。
-  if (sawSession && TUI_READY_RE.test(await capturePaneBottom(pane, 20))) return true;
+  const last = await capturePaneBottom(pane, 20);
+  const exited = cliExit(last);
+  if (exited) return { ready: false, exited };
+  if (sawSession && TUI_READY_RE.test(last)) return { ready: true };
   log.warn({ pane, registry, sawSession }, "spawn-tmux: TUI ready timeout, proceeding anyway");
-  return false;
+  return { ready: false };
 };
 
 export interface SpawnArgs {
@@ -266,16 +326,15 @@ export interface SpawnArgs {
   cli?: CliBackendName;
   /** Model to put the pane on. Lets sibling `#tag` sessions in one chat run on
    *  different models (a graph node can pick opus for design, haiku for lint).
-   *  `--model` is unvalidated (an unknown slug spawns fine and only fails on
-   *  the first real turn), so it is passed at launch only when `model` resolves
-   *  to an id some transcript already ran under (`knownModels`, see
-   *  `exactModelId`). Anything else — "opus", "最新的 opus", an unseen slug —
-   *  goes through the pane's own `/model` picker once the TUI is ready (see
-   *  `model-select.ts`). Undefined/empty → the CLI's own default. */
+   *  Passed as-is with `--model` — no guessing whether it is an id, a label or
+   *  "最新的 opus". A value the CLI can't take shows up right at launch: it
+   *  quits back to the shell (`cliExit`), or comes up echoing the raw string
+   *  where a known model's display name would be (`modelNotRecognized`). Then
+   *  the pane is thrown away and relaunched without `--model`, and the value
+   *  goes through the pane's own `/model` picker instead (see
+   *  `model-select.ts`) — a wrong id costs one extra launch, never the wizard.
+   *  Undefined/empty → the CLI's own default. */
   model?: string;
-  /** Model ids confirmed by transcripts, likeliest first; consumed lazily and
-   *  only when `model` is set. */
-  knownModels?: Iterable<string>;
   /** Reasoning effort, passed as `--effort` (session-scoped, unlike the
    *  `/effort <level>` command). Dropped for a backend with no such flag. */
   effort?: Effort;
@@ -307,12 +366,14 @@ export interface SpawnResult {
   cwd?: string;
   /** Backend actually launched. */
   cli?: CliBackendName;
-  /** What the pane is on: the exact id when it launched with `--model`, else
-   *  the picker label confirmed via `/model` (may differ from the requested
-   *  string — e.g. a colloquial "opus 最新" resolves to "Opus 5.5").
-   *  "" when no model was requested. On a failed resolution this still carries
-   *  the raw requested string (best-effort record) and `modelWarning` explains
-   *  why — the pane itself is left on whatever model it already had. */
+  /** What the pane is really on — this is what callers persist and a respawn
+   *  passes straight back to `--model`, so it must never be a string the CLI
+   *  already refused: the requested string when `--model` took it; else the
+   *  picker row `/model` landed on (its id, e.g. "最新的 opus" → "claude-opus-5.5");
+   *  else the ✔ row the pane was left on; else "" (the CLI's default). Only a
+   *  string nothing has disproved (no launch failure, picker skipped) is kept
+   *  as asked. Absent when no model was requested; `modelWarning` explains any
+   *  fallback. */
   model?: string;
   modelWarning?: string;
   /** Effort the pane was launched with; absent when none was asked or the
@@ -409,7 +470,7 @@ const charterArg = (cfg: Config, backend: CliBackend, sessionId: string, charter
   }
 };
 
-export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: freshSessionId, windowName, cwdOverride, cli, model, knownModels, effort, systemPrompt, forkSession }: SpawnArgs): Promise<SpawnResult> => {
+export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: freshSessionId, windowName, cwdOverride, cli, model, effort, systemPrompt, forkSession }: SpawnArgs): Promise<SpawnResult> => {
   const backend = backendFor(cfg, cli);
   const cwd = expandHome((cwdOverride ?? "").trim() || cfg.wrc.cwd);
   const projectDir = join(expandHome(backend.projectsDir), backend.encodeProjectDir(cwd));
@@ -460,22 +521,20 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
   // the prompt regardless of the user's zstyle config.
   const paneEnv = supportsE ? ["-e", "DISABLE_AUTO_UPDATE=true", "-e", "DISABLE_UPDATE_PROMPT=true"] : [];
   const cwdArg = supportsC ? ["-c", cwd] : [];
-  const has = await runTmux(["has-session", "-t", tmuxName]);
-  const created = has.code === 0
-    // `${tmuxName}:` (trailing colon) forces session-only resolution → next free
-    // window index. Bare `-t wezard` is ambiguous: if a *window* is also named
-    // `wezard`, tmux matches it and tries to reuse its index → "index N in use".
-    ? await runTmux(["new-window", "-d", "-t", `${tmuxName}:`, "-n", winName, ...cwdArg, ...paneEnv, "-P", "-F", "#{pane_id}"])
-    : await runTmux(["new-session", "-d", "-s", tmuxName, "-n", winName, ...cwdArg, ...paneEnv, "-P", "-F", "#{pane_id}"]);
-  if (!created.ok) {
-    const verb = has.code === 0 ? "new-window" : "new-session";
-    return { ok: false, reason: `tmux ${verb} failed: ${created.stderr.trim() || created.code}` };
-  }
-  const tmuxPane = created.stdout.split("\n").map((s) => s.trim()).filter(Boolean)[0] ?? "";
-  if (!tmuxPane) {
-    return { ok: false, reason: "tmux returned no pane id" };
-  }
-  log.info({ tmuxName, winName, tmuxPane, cwd, sessionId, cli: backend.name, reused: has.code === 0 }, "spawn-tmux: pane created");
+  const openPane = async (): Promise<{ pane: string } | { reason: string }> => {
+    const has = await runTmux(["has-session", "-t", tmuxName]);
+    const created = has.code === 0
+      // `${tmuxName}:` (trailing colon) forces session-only resolution → next free
+      // window index. Bare `-t wezard` is ambiguous: if a *window* is also named
+      // `wezard`, tmux matches it and tries to reuse its index → "index N in use".
+      ? await runTmux(["new-window", "-d", "-t", `${tmuxName}:`, "-n", winName, ...cwdArg, ...paneEnv, "-P", "-F", "#{pane_id}"])
+      : await runTmux(["new-session", "-d", "-s", tmuxName, "-n", winName, ...cwdArg, ...paneEnv, "-P", "-F", "#{pane_id}"]);
+    if (!created.ok) return { reason: `tmux ${has.code === 0 ? "new-window" : "new-session"} failed: ${created.stderr.trim() || created.code}` };
+    const pane = created.stdout.split("\n").map((s) => s.trim()).filter(Boolean)[0] ?? "";
+    if (!pane) return { reason: "tmux returned no pane id" };
+    log.info({ tmuxName, winName, tmuxPane: pane, cwd, sessionId, cli: backend.name, reused: has.code === 0 }, "spawn-tmux: pane created");
+    return { pane };
+  };
 
   // DISABLE_AUTOUPDATER=1 防止新 pane 启动时弹出 "An update is available" 询问 ——
   // 该交互会吞掉首条 paste-buffer 注入，导致仅落字符不进入 claude 输入框。
@@ -486,54 +545,92 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
     "DISABLE_AUTOUPDATER=1",
   ];
   const wanted = model?.trim() ?? "";
-  const exactId = wanted && backend.modelFlag ? (exactModelId(wanted, knownModels ?? []) ?? (isLaunchAlias(wanted) ? wanted : undefined)) : undefined;
   const effortArg = effort && backend.effortFlag ? effort : undefined;
-  const argv = [
-    ...(resumeSessionId ? ["--resume", sessionId, ...(forkSession ? ["--fork-session"] : [])] : ["--session-id", sessionId]),
-    ...(exactId ? [backend.modelFlag!, exactId] : []),
-    ...(effortArg ? [backend.effortFlag!, effortArg] : []),
-    ...cfg.wrc.extraArgs,
-  ].map(shQuote);
-  const cmd = [...envPrefix, backend.bin, ...argv, charterArg(cfg, backend, sessionId, systemPrompt, log)]
-    .filter(Boolean)
-    .join(" ");
-  // Old tmux couldn't set the pane's start-dir via `-c`; cd into it first.
-  const launch = supportsC ? cmd : `cd ${shQuote(cwd)} && ${cmd}`;
-  const sent = await runTmux(["send-keys", "-t", tmuxPane, launch, "Enter"]);
-  if (!sent.ok) {
-    // Kill only this window/pane, never the shared session.
-    await runTmux(["kill-pane", "-t", tmuxPane]);
-    return { ok: false, reason: `tmux send-keys failed: ${sent.stderr.trim() || sent.code}` };
-  }
+  const charter = charterArg(cfg, backend, sessionId, systemPrompt, log);
+  // A fresh session relaunched after a failed first try resumes instead if that
+  // try already wrote the transcript — `--session-id` refuses an existing one.
+  const commandFor = (flagModel: string | undefined, retry: boolean): string => {
+    const resume = !!resumeSessionId || (retry && existsSync(jsonlPath));
+    const argv = [
+      ...(resume ? ["--resume", sessionId, ...(forkSession ? ["--fork-session"] : [])] : ["--session-id", sessionId]),
+      ...(flagModel ? [backend.modelFlag!, flagModel] : []),
+      ...(effortArg ? [backend.effortFlag!, effortArg] : []),
+      ...cfg.wrc.extraArgs,
+    ].map(shQuote);
+    const cmd = [...envPrefix, backend.bin, ...argv, charter].filter(Boolean).join(" ");
+    // Old tmux couldn't set the pane's start-dir via `-c`; cd into it first.
+    return `${supportsC ? cmd : `cd ${shQuote(cwd)} && ${cmd}`}${EXIT_TAIL}`;
+  };
 
-  // Actively verify the TUI reached interactive state before returning.
-  // claude does NOT create the transcript jsonl until it processes the first
-  // user input, so we don't wait for the file — mirror tail tolerates a
-  // missing jsonl and starts emitting once claude writes the first line.
-  const tuiReady = await waitForTuiReady(tmuxPane, cmd, backend, log);
+  type Launched = { ok: true; pane: string; ready: boolean; failure?: string } | { ok: false; reason: string };
+  // One pane, one CLI process, verified up. `failure` = the CLI couldn't take
+  // `flagModel`: it quit, or came up not knowing it.
+  const launch = async (flagModel: string | undefined, retry = false): Promise<Launched> => {
+    const opened = await openPane();
+    if ("reason" in opened) return { ok: false, reason: opened.reason };
+    const { pane } = opened;
+    const line = commandFor(flagModel, retry);
+    const sent = await runTmux(["send-keys", "-t", pane, line, "Enter"]);
+    if (!sent.ok) {
+      // Kill only this window/pane, never the shared session.
+      await runTmux(["kill-pane", "-t", pane]);
+      return { ok: false, reason: `tmux send-keys failed: ${sent.stderr.trim() || sent.code}` };
+    }
+    // Actively verify the TUI reached interactive state before returning.
+    // claude does NOT create the transcript jsonl until it processes the first
+    // user input, so we don't wait for the file — mirror tail tolerates a
+    // missing jsonl and starts emitting once claude writes the first line.
+    const tui = await waitForTuiReady(pane, line, backend, log);
+    if (tui.exited) return { ok: true, pane, ready: false, failure: tui.exited };
+    const unknown = !!flagModel && tui.ready && modelNotRecognized(await capturePaneBottom(pane, "-"), flagModel);
+    return { ok: true, pane, ready: tui.ready, ...(unknown ? { failure: `CLI 不认识 --model ${flagModel} (欢迎框原样回显, 首轮会 400)` } : {}) };
+  };
+
+  // Whatever was asked goes straight in with `--model`. Only when the CLI
+  // proves it can't take it is the pane thrown away and relaunched bare —
+  // the ask then goes through the picker like any colloquial name.
+  const flagModel = wanted && backend.modelFlag ? wanted : undefined;
+  const first = await launch(flagModel);
+  if (!first.ok) return { ok: false, reason: first.reason };
+  let landed = first;
+  const launchFailure = flagModel ? first.failure : undefined;
+  if (launchFailure) {
+    log.warn({ tmuxPane: first.pane, model: flagModel, reason: launchFailure }, "spawn-tmux: launch failure with --model, relaunching without it");
+    await runTmux(["kill-pane", "-t", first.pane]);
+    const bare = await launch(undefined, true);
+    if (!bare.ok) return { ok: false, reason: `${launchFailure}; 不带 --model 重起也失败: ${bare.reason}` };
+    if (bare.failure) {
+      await runTmux(["kill-pane", "-t", bare.pane]);
+      return { ok: false, reason: `${launchFailure}; 不带 --model 重起也失败: ${bare.failure}` };
+    }
+    landed = bare;
+  }
+  const tmuxPane = landed.pane;
+  const viaFlag = !!flagModel && !launchFailure;
 
   // Model selection needs the TUI actually up (it types `/model` into the
   // input box and drives the picker) — skip it if readiness never confirmed, same as any other
   // post-launch step would have to.
-  // An exact id already went in with `--model`; persist the id itself, so the
-  // next respawn resolves on the first sighting.
-  let resolvedModel = exactId ?? "";
+  let resolvedModel = viaFlag ? wanted : "";
   let modelWarning: string | undefined;
-  if (wanted && !exactId && tuiReady) {
+  if (wanted && !viaFlag && landed.ready) {
     const sel = await selectModel(tmuxPane, wanted, log);
     if (sel.ok) {
       resolvedModel = sel.applied ?? wanted;
     } else {
-      resolvedModel = wanted;
+      // Record where the pane really is, not the ask that just failed twice.
+      resolvedModel = sel.current ?? "";
       modelWarning = sel.reason;
-      log.warn({ tmuxPane, wanted, reason: sel.reason }, "spawn-tmux: model selection failed, pane stays on its prior model");
+      log.warn({ tmuxPane, wanted, current: sel.current, reason: sel.reason }, "spawn-tmux: model selection failed, pane stays on its prior model");
     }
-  } else if (wanted && !exactId) {
-    resolvedModel = wanted;
+  } else if (wanted && !viaFlag) {
+    // Unverified either way; the raw ask is only kept when the CLI never refused it.
+    resolvedModel = launchFailure ? "" : wanted;
     modelWarning = "TUI 未就绪, 跳过了模型选择";
   }
+  if (launchFailure) modelWarning = `${launchFailure}; ${modelWarning ?? "已不带 --model 重起并改走 /model 选择器"}`;
 
-  log.info({ tmuxName, tmuxPane, sessionId, jsonlPath, cwd, cli: backend.name, model: resolvedModel, viaFlag: !!exactId, effort: effortArg }, "spawn-tmux: ready");
+  log.info({ tmuxName, tmuxPane, sessionId, jsonlPath, cwd, cli: backend.name, model: resolvedModel, viaFlag, relaunched: !!launchFailure, effort: effortArg }, "spawn-tmux: ready");
   return {
     ok: true, sessionId, jsonlPath, tmuxPane, tmuxSession: tmuxName, cwd, cli: backend.name,
     ...(wanted ? { model: resolvedModel, ...(modelWarning ? { modelWarning } : {}) } : {}),

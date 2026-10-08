@@ -264,10 +264,10 @@ const ADDRESS_DOC =
 
 // 生 wizard 的三个工具共用: 模型名是口语, 落地的是 `/model` 列表里最接近的那一项。
 const MODEL_DOC =
-  "跑在哪个模型上, 口语写 ('opus' / 'haiku' / 'sonnet 5'); 落地的是它 `/model` 列表里最接近的一项, 见返回的 `model`, 对不上时带 `modelWarning` (仍在跑, 停在默认模型)。写确切的 id ('claude-opus-5-5') 或列表标签 ('Opus 5.5') 且本机跑过它时, 直接带 `--model` 启动, 省掉选择器那一来回。省略 = 该 CLI 默认。之后换用 set_model。";
+  "跑在哪个模型上, 最好写确切的 id ('claude-opus-5.5' / 'deepseek-v4.1-flash')。原样带 `--model` 启动; CLI 不认 (口语名 'opus' / '最新的 opus' 也算) 就不带它重起一次, 再从它 `/model` 列表里挑最接近的一项 —— 多花一次启动, 不丢 wizard。落地的见返回的 `model`, 走了兜底或对不上时带 `modelWarning` (仍在跑, 对不上则停在默认模型)。省略 = 该 CLI 默认。之后换用 set_model。";
 
 const EFFORT_DOC =
-  "推理档位, 启动时就带上 (`--effort`), 之后它每次重启都沿用。判断密集的活给 high 以上, 跑腿的给 low。省略 = 该 CLI 默认 (克隆则跟被克隆者同档)。不支持的 CLI (codebuddy) 忽略它。之后换用 set_model 的 `effort`。";
+  "推理档位, 启动时就带上 (`--effort`), 之后它每次重启都沿用。判断密集的活给 high 以上, 跑腿的给 low。省略 = 该 CLI 默认 (克隆则跟被克隆者同档)。之后换用 set_model 的 `effort`。";
 
 // 造一个 wizard: 它的 home 默认是调用方自己的聊天 (所以走 `selfRef`); 给了 `chat`
 // 就落在另一个**起过名字**的聊天里。名字全局唯一, 与 home 无关。

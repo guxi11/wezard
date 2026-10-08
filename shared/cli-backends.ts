@@ -293,6 +293,9 @@ const makeCodebuddy = (bin: string): CliBackend => ({
   settingsPath: "~/.codebuddy/settings.json",
   projectDirEnv: "CODEBUDDY_PROJECT_DIR",
   pluginRootEnv: "CODEBUDDY_PLUGIN_ROOT",
+  systemPromptFlag: "--append-system-prompt",
+  modelFlag: "--model",
+  effortFlag: "--effort",
   encodeProjectDir: encodeCodebuddy,
   normalizeTranscriptLine: normalizeCodebuddy,
 });

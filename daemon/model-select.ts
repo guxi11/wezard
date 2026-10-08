@@ -1,10 +1,10 @@
-// Interactive, ground-truth model selection for a live pane — the ONE path
-// every model switch goes through (a fresh spawn, a respawn, `set_model`).
+// Interactive, ground-truth model selection for a live pane — the path a
+// running wizard switches through (`set_model`), and a spawn's fallback.
 //
-// `--model <slug>` at CLI launch is NOT validated: an unrecognized slug spawns
-// fine and the pane only reports "There's an issue with the selected model"
-// on its first real turn — by then the wizard has already been announced as
-// ready and the caller has moved on. `/model <name>` is validated but only
+// A spawn passes whatever it was asked with `--model` first; the CLI doesn't
+// reject an unknown slug at launch — it comes up echoing it raw and only fails
+// on the first real turn ("400 model [...] service info not found") — so
+// spawn-tmux reads that echo, relaunches bare and lands here. `/model <name>` is validated but only
 // takes the CLI's own aliases / ids: the labels its picker shows ("Opus 4.7",
 // "Sonnet 5") are NOT names it accepts, so a name rebuilt from a label is a
 // guess. The picker itself is the only thing that is both complete and
@@ -36,20 +36,40 @@ const CLOSE_TIMEOUT_MS = 3000;
 const ARROW_STEP_MS = 350; // faster repeats get dropped/coalesced by the TUI — this is the empirically-verified floor
 const MAX_STEPS = 60; // > any plausible catalog size, even with a few dropped arrows
 
-const HEADER_RE = /^\s*Select model\s*$/u;
-const FOOTER_RE = /Esc to cancel/u;
+// Two renders of the same picker have to be read: the older one titles itself
+// with a bare "Select model" and numbers its rows; the current one carries the
+// scope tabs in the title ("Select Model   Global   Session  (Tab/←→ to switch)")
+// and prints each row's id with no numbers:
+//   "   ❯ Hy4 preview            【hy4-preview-ioa】            (x0.00 credits) ✔"
+// A render we can't parse is a render we never select from — and the caller is
+// told nothing changed while the pane silently keeps the wrong model.
+const HEADER_RE = /^\s*Select Model\b/iu;
+const FOOTER_RE = /Esc to (?:cancel|exit)/u;
 const SESSION_ONLY_RE = /\bs to use this session only/u;
 // "   ❯ 2.  Opus 5.5 ✔             For complex work and everyday tasks" and its
 // scrolled-window siblings ("↑ 3. …" / "↓ 10. …"): mark, number, label,
 // current-model tick, description.
 const ROW_RE = /^\s*([❯>↑↓])?\s*(\d+)\.\s+(.+?)(?:\s+(✔))?(?:\s{2,}(.*))?$/u;
+// The current render: mark, label, 【id】, credits, current-model tick.
+const ID_ROW_RE = /^\s*([❯>↑↓])?\s*(.+?)\s+【([^】]+)】(?:[ \t]*\([^)]*\))?[ \t]*(✔)?\s*$/u;
+// The line under the title says which tab the picker is on: "Switch model for
+// this session only (won't persist)." / "Select a model for all future sessions."
+// Enter applies to THAT tab — applying the wrong one rewrites the machine-wide
+// default, so a caller asking for "session" must never Enter on "Global".
+const SCOPE_SESSION_RE = /for this session only/u;
+const SCOPE_GLOBAL_RE = /for all future sessions/u;
 const MORE_RE = /^\s*…\s*\+\d+\s+models?\b/u;
 // Switching away from a model the conversation is cached on asks once more:
 // "Switch model? … ❯ 1. Yes, switch to X / 2. No, go back".
 const CONFIRM_RE = /^\s*Switch model\?\s*$/u;
 const CONFIRM_LAST_RE = /^\s*[❯>]?\s*2\.\s+No\b/u;
-const READBACK_RE = /(?:Set model to|Kept model as) .+/u;
-const SESSION_RECEIPT_RE = /for this session only/u;
+// Receipts seen so far: "Set model to X" / "Kept model as X" (numbered render),
+// "Switch model to X (this session only)" and "Switched this session to X."
+// (2.143, the latter right after a fresh launch).
+const READBACK_RE = /(?:Set model to|Kept model as|Switch model to|Switched (?:this session )?to) .+/u;
+const APPLIED_RE = /^(?:Set model to|Switch model to|Switched\b)/u;
+// "… (this session only)" / "… for this session only" / "Switched this session to …".
+const SESSION_RECEIPT_RE = /\bthis session\b/u;
 
 export type ModelScope = "session" | "default";
 
@@ -57,6 +77,8 @@ export interface ModelRow {
   n: number;
   label: string;
   desc: string;
+  /** The id the current render prints in 【】; absent on the numbered render. */
+  id?: string;
   /** Carries the picker's ✔ — the model the pane is on right now. */
   current: boolean;
 }
@@ -68,6 +90,12 @@ interface Frame {
   /** The window shows the catalog's last row (no "↓" edge, no "… +N models"). */
   bottom: boolean;
   sessionOnly: boolean;
+  /** Rows were read off 【id】 — they carry no catalog numbers, so navigation
+   *  walks the cursor instead of jumping to a number. */
+  byId: boolean;
+  /** Which tab the picker is on. Undefined when the render says nothing about
+   *  scope — then Enter is the only key and its scope is whatever it is. */
+  scope?: ModelScope;
 }
 
 const linesOf = (screen: string): string[] => screen.split("\n").map((l) => l.trimEnd()).filter(Boolean);
@@ -83,12 +111,30 @@ export const parseFrame = (screen: string): Frame | undefined => {
   const foot = lines.at(-1) ?? "";
   if (head < 0 || !FOOTER_RE.test(foot)) return undefined;
   const body = lines.slice(head + 1);
+  const idHits = body.map((l) => ID_ROW_RE.exec(l)).filter((m): m is RegExpExecArray => !!m);
+  if (idHits.length) {
+    const at = idHits.findIndex((m) => m[1] === "❯" || m[1] === ">");
+    return {
+      rows: idHits.map((m, i) => ({ n: i + 1, label: m[2]!.trim(), id: m[3]!.trim(), desc: "", current: !!m[4] })),
+      cursor: at < 0 ? 0 : at + 1,
+      // No "… +N models" marker and no ↓ edge on this render, so there is no
+      // "last row" to read — navigation doesn't need one.
+      bottom: true,
+      sessionOnly: false,
+      byId: true,
+      scope: body.some((l) => SCOPE_SESSION_RE.test(l))
+        ? "session"
+        : body.some((l) => SCOPE_GLOBAL_RE.test(l)) ? "default" : undefined,
+    };
+  }
   const hits = body.map((l) => ROW_RE.exec(l)).filter((m): m is RegExpExecArray => !!m);
   return {
     rows: hits.map((m) => ({ n: Number(m[2]), label: m[3]!.trim(), desc: (m[5] ?? "").trim(), current: !!m[4] })),
     cursor: Number(hits.find((m) => m[1] === "❯" || m[1] === ">")?.[2] ?? 0),
     bottom: !body.some((l) => MORE_RE.test(l)) && !hits.some((m) => m[1] === "↓"),
     sessionOnly: SESSION_ONLY_RE.test(foot),
+    byId: false,
+    scope: SESSION_ONLY_RE.test(foot) ? "session" : undefined,
   };
 };
 
@@ -123,9 +169,14 @@ export const closestModel = (rows: readonly ModelRow[], wanted: string): ModelRo
   const want = wanted.toLowerCase();
   const words = new Set([...(want.match(/[a-z]+/gu) ?? []), ...(/默认/u.test(want) ? ["default"] : [])]);
   const ver = versionOf(want);
-  const fit = (r: ModelRow): number => versionFit(ver, versionOf(r.label));
+  // An id is the strongest evidence there is: "deepseek-v4.1-flash" names one
+  // row outright. Anything else is a family word ("sonnet") that only narrows
+  // the field — the id is part of what it is matched against, since a bare
+  // family name is often nowhere in the label ("claude-sonnet-5.5").
+  const fit = (r: ModelRow): number => (r.id?.toLowerCase() === want ? 100 : versionFit(ver, versionOf(r.label)));
+  const named = (r: ModelRow): string => `${r.label} ${r.id ?? ""}`.toLowerCase();
   return rows
-    .filter((r) => words.has(familyOf(r.label)))
+    .filter((r) => words.has(familyOf(r.label)) || [...words].some((w) => named(r).includes(w)))
     .reduce<ModelRow | undefined>((best, r) => (!best || fit(r) > fit(best) ? r : best), undefined);
 };
 
@@ -180,6 +231,73 @@ const closePicker = async (pane: string): Promise<void> => {
   await until(async () => (parseFrame(await screen(pane)) ? undefined : true), CLOSE_TIMEOUT_MS);
 };
 
+/** Escape out of a picker even when its rows can't be read. Giving up on a
+ *  selection HAS to leave the pane back at its prompt: left open, the picker
+ *  swallows whatever is typed into the pane next — the wizard's first task
+ *  never arrives, and it reads as a dead wizard rather than a mis-modelled one.
+ *  Only ever Escs on a screen that is showing a picker footer. */
+const dismissPicker = async (pane: string): Promise<void> => {
+  const footer = async (): Promise<boolean> => FOOTER_RE.test(linesOf(await screen(pane)).at(-1) ?? "");
+  if (!(await footer())) return;
+  await key(pane, "Escape");
+  await until(async () => ((await footer()) ? undefined : true), CLOSE_TIMEOUT_MS);
+};
+
+const cursorRow = (f: Frame): ModelRow | undefined => f.rows.find((r) => r.n === f.cursor);
+
+const byIdMerge = (seen: readonly ModelRow[], rows: readonly ModelRow[]): ModelRow[] =>
+  [...seen, ...rows.filter((r) => !seen.some((s) => s.id === r.id))];
+
+/** The whole catalog of the 【id】 render. It normally fits on one screen (32
+ *  rows here) and is read off the first frame; only when nothing on it fits the
+ *  ask is the cursor walked one full lap — in case the list is windowed on a
+ *  short pane — stopping the moment it wraps back onto the row it started on.
+ *  (The old walk had no wrap check: a miss always burned all 60 steps, ~21s,
+ *  and threw away what it had read.) */
+const lapCatalog = async (pane: string, startId: string | undefined, seen: ModelRow[], left = MAX_STEPS): Promise<ModelRow[]> => {
+  if (left <= 0) return seen;
+  await key(pane, "Down");
+  await sleep(ARROW_STEP_MS);
+  const f = parseFrame(await screen(pane));
+  if (!f) return seen;
+  const all = byIdMerge(seen, f.rows);
+  const at = cursorRow(f)?.id;
+  return startId && at === startId ? all : lapCatalog(pane, startId ?? at, all, left - 1);
+};
+
+/** Arrow the cursor onto the row carrying `id`, re-reading after every key (a
+ *  dropped arrow costs a step, not a wrong model). Direction comes from the
+ *  frame when both rows are on it; otherwise keep going down — the list wraps. */
+const moveToId = async (pane: string, id: string, left = MAX_STEPS): Promise<Frame | undefined> => {
+  const f = parseFrame(await screen(pane));
+  if (!f) return undefined;
+  if (cursorRow(f)?.id === id) return f;
+  if (left <= 0) return undefined;
+  const to = f.rows.find((r) => r.id === id)?.n ?? 0;
+  await key(pane, to && f.cursor && to < f.cursor ? "Up" : "Down");
+  await sleep(ARROW_STEP_MS);
+  return moveToId(pane, id, left - 1);
+};
+
+/** Why `want` matched no row — the words it was matched by, against what was there. */
+const missReason = (want: string, catalog: readonly string[]): string => {
+  const words = [...new Set(want.toLowerCase().match(/[a-z]+/gu) ?? [])];
+  return `'${want}' 不在列表里: 读到 ${catalog.length} 项, 没有 id 与它相同, 也没有一项含 ${words.map((w) => `'${w}'`).join(" / ") || "可比的词"} (列表: ${catalog.join(" / ")})`;
+};
+
+/** Puts the picker on the tab a caller asked for. Enter applies to the tab that
+ *  is showing, and the other one rewrites the model every new session starts
+ *  on — so a caller asking for "session" must never Enter on "Global". */
+const ensureScope = async (pane: string, scope: ModelScope, left = 4): Promise<ModelScope | undefined> => {
+  const f = parseFrame(await screen(pane));
+  if (!f) return undefined;
+  if (!f.scope || f.scope === scope) return f.scope;
+  if (left <= 0) return undefined;
+  await key(pane, "Tab");
+  await sleep(400);
+  return ensureScope(pane, scope, left - 1);
+};
+
 // After the select key: answer the cache-warning confirm if it comes up, then
 // wait for the picker to be gone and a receipt that wasn't there before.
 const settle = (pane: string, before: string): Promise<string | undefined> =>
@@ -197,9 +315,13 @@ const settle = (pane: string, before: string): Promise<string | undefined> =>
 
 export interface ModelSelectResult {
   ok: boolean;
-  /** The picker label that actually landed ("Opus 5.5") — persist THIS (not
-   *  the caller's raw input): it is what a later respawn matches exactly. */
+  /** What actually landed — the row's id when the render prints one
+   *  ("claude-opus-5.5"), else its label ("Opus 5.5"). Persist THIS, not the
+   *  caller's raw input: a respawn passes it straight to `--model`. */
   applied?: string;
+  /** The row carrying the picker's ✔ when the picker was read — the model the
+   *  pane is really on after a selection that did not land. */
+  current?: string;
   /** Where it landed, per the CLI's own receipt — "default" also rewrote the
    *  model every NEW session starts on. Can differ from what was asked: a
    *  picker with no session-only key can only set the default. */
@@ -222,65 +344,53 @@ export const selectModel = async (pane: string, wanted: string, log: Logger, sco
   await runTmux(["send-keys", "-t", pane, "-l", "/model"]);
   await sleep(150);
   await key(pane, "Enter");
-  if (!(await until(async () => parseFrame(await screen(pane)), OPEN_TIMEOUT_MS))) {
+  const opened = await until(async () => parseFrame(await screen(pane)), OPEN_TIMEOUT_MS);
+  if (!opened) {
     log.warn({ pane, wanted: want, tail: (await screen(pane)).slice(-300) }, "model-select: picker never opened");
-    return { ok: false, reason: "/model 的模型列表没有出现" };
+    // A picker we couldn't read is still a modal: Esc out of it, or the very
+    // next thing sent to this pane lands in the picker instead of the prompt.
+    await dismissPicker(pane);
+    return { ok: false, reason: "/model 的模型列表没有出现, 目录没读到" };
   }
-  const rows = await readCatalog(pane);
-  const catalog = rows.map((r) => r.label);
+  // Two renders, one goal: the best row for `want` over the WHOLE catalog (not
+  // the first row that merely shares a word with it), sitting under the cursor.
+  const firstRows = opened.byId && closestModel(opened.rows, want) ? opened.rows : undefined;
+  const rows = opened.byId
+    ? firstRows ?? (await lapCatalog(pane, cursorRow(opened)?.id, opened.rows))
+    : await readCatalog(pane);
   const row = closestModel(rows, want);
-  log.info({ pane, wanted: want, scope, catalog, match: row?.label }, "model-select: read live catalog");
-  if (!row) {
-    await closePicker(pane);
-    return { ok: false, catalog, reason: `'${want}' 对不上列表里的任何模型 (${catalog.join(" / ") || "读取失败"})` };
-  }
+  const catalog = rows.map((r) => r.id ?? r.label);
+  const current = rows.find((r) => r.current);
+  const currentKey = current ? current.id ?? current.label : undefined;
+  log.info({ pane, wanted: want, scope, rows: rows.length, catalog, current: currentKey, match: row?.id ?? row?.label }, "model-select: read live catalog");
+  const frame = !row ? undefined : opened.byId ? await moveToId(pane, row.id!) : (await moveTo(pane, row.n)) ?? undefined;
+  const miss = async (reason: string): Promise<ModelSelectResult> => {
+    await dismissPicker(pane);
+    log.warn({ pane, wanted: want, rows: rows.length, current: currentKey, reason }, "model-select: no selection");
+    return { ok: false, catalog, ...(currentKey ? { current: currentKey } : {}), reason };
+  };
+  if (!rows.length) return miss("选择器开了, 但一行也没认出来 —— 渲染多半又变了");
+  if (!row) return miss(missReason(want, catalog));
+  if (!frame) return miss(`列表 ${rows.length} 项里匹配到 '${row.id ?? row.label}', 但光标走了 ${MAX_STEPS} 步没停上去`);
+  const applied = row.id ?? row.label;
   // Already on it: nothing to do for this session — but making it the default
   // still takes the Enter.
   if (row.current && scope === "session") {
     await closePicker(pane);
-    return { ok: true, applied: row.label, scope, catalog };
+    return { ok: true, applied, scope, catalog };
   }
-  const at = await moveTo(pane, row.n);
-  if (!at) {
-    await closePicker(pane);
-    return { ok: false, catalog, reason: `光标没能停到 '${row.label}' 上` };
+  // The tabbed render applies Enter to whichever tab is showing, and the other
+  // one rewrites the default every new session starts on — so an ask for
+  // "session" never Enters on "Global".
+  if (frame.byId) {
+    const on = frame.scope === scope ? frame.scope : await ensureScope(pane, scope);
+    if (on !== scope) return miss(`选择器停在「${on ?? "未知"}」这一档, 按 Enter 会写到别处, 没按`);
   }
-  await key(pane, scope === "session" && at.sessionOnly ? "s" : "Enter");
+  await key(pane, !frame.byId && scope === "session" && frame.sessionOnly ? "s" : "Enter");
   const receipt = await settle(pane, readbacks(start).join("\n"));
-  if (receipt?.startsWith("Set model to")) return { ok: true, applied: row.label, scope: SESSION_RECEIPT_RE.test(receipt) ? "session" : "default", catalog };
-  log.warn({ pane, wanted: want, match: row.label, receipt, tail: (await screen(pane)).slice(-300) }, "model-select: selection did not land");
-  return { ok: false, catalog, reason: receipt ? `选中 '${row.label}' 后没有切换: ${receipt}` : `选中 '${row.label}' 后没等到回执` };
-};
-
-// ── Exact ids: when the picker round trip can be skipped ─────────────────────
-// `--model <id>` at launch saves the whole picker dance, but the flag is not
-// validated — so it only ever gets an id the API has already answered under:
-// one read back from a transcript's `message.model`. Those sightings are also
-// what pairs a picker label with its id ("Haiku 4.5" ↔ claude-haiku-4-5-…):
-// no table to keep, the evidence is already on disk.
-
-// A label naming exactly one model: "Opus 5.5" — not "Default (recommended)",
-// and not "Opus 4.6 (1M context)", whose transcript id drops the context tier.
-const PLAIN_LABEL_RE = /^([a-z]+)\s+(\d+(?:\.\d+)*)$/iu;
-
-/** `id` is the model `label` names: same family word, same version. */
-export const labelFitsId = (label: string, id: string): boolean => {
-  const m = PLAIN_LABEL_RE.exec(label.trim());
-  return !!m && (id.toLowerCase().match(/[a-z]+/gu) ?? ([] as string[])).includes(m[1]!.toLowerCase()) && versionOf(id) === m[2];
-};
-
-/** Claude Code's own `--model` aliases: valid launch args as-is, so a tier's
- *  "haiku" needs no `/model` picker (whose "Kept model as …" echo is chat noise). */
-export const isLaunchAlias = (wanted: string): boolean => /^(?:haiku|sonnet|opus)$/i.test(wanted.trim());
-
-/** The exact id to launch with, or undefined when `wanted` is colloquial
- *  ("opus", "最新的 opus") or names nothing ever seen. `seen` is consumed
- *  lazily, likeliest first — the first hit ends the scan. */
-export const exactModelId = (wanted: string, seen: Iterable<string>): string | undefined => {
-  const want = wanted.trim();
-  if (!want) return undefined;
-  for (const id of seen) if (id === want || labelFitsId(want, id)) return id;
-  return undefined;
+  if (receipt && APPLIED_RE.test(receipt)) return { ok: true, applied, scope: SESSION_RECEIPT_RE.test(receipt) ? "session" : "default", catalog };
+  log.warn({ pane, wanted: want, match: applied, receipt, tail: (await screen(pane)).slice(-300) }, "model-select: selection did not land");
+  return { ok: false, catalog, ...(currentKey ? { current: currentKey } : {}), reason: receipt ? `选中 '${applied}' 后没有切换: ${receipt}` : `选中 '${applied}' 后没等到回执` };
 };
 
 // ── Effort: the `/effort` slider ─────────────────────────────────────────────
