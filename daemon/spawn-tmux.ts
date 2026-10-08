@@ -138,7 +138,10 @@ export { parseTmuxVersion };
 
 
 // Single-quote shell-escape: wrap in '…' and escape embedded ' as '\''.
-const shQuote = (a: string): string => (/[\s"'`$\\]/.test(a) ? `'${a.replace(/'/g, "'\\''")}'` : a);
+// Allowlist, not a blocklist of metachars: the pane shell is often zsh, where a
+// bare glob (`mcp__x__*` in extraArgs) that matches nothing aborts the whole
+// launch line with "no matches found" — the pane drops straight to a prompt.
+const shQuote = (a: string): string => (/^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, "'\\''")}'`);
 
 // tmux window names are free-form but a status-bar friendly slug avoids
 // surprises (no whitespace / colons / quoting hazards). Principals are

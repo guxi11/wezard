@@ -22,6 +22,7 @@
 - 人对管家说的话注入时尾巴挂一行 `<system-reminder wezard="hint" role="steward">`: 一两句能答、不用读代码 → 自己答; 要读多处代码 / 改文件 / 跑很久 / 分好几步 → `dispatch`, 复杂的带 `lead:true` 开需求单。只挂人的话 (斜杠命令除外), 回执 / 同伴 / 定时那几轮不挂; 不进 `parseEnvelope`。
 
 ### Fixed
+- spawn 拼启动命令时 `shQuote` 只给含空白 / 引号 / `$` / 反斜杠的参数加引号, 通配符原样外露: `wrc.extraArgs` 新默认值里的 `mcp__claude_ai_Claude_Docs__*` 在 zsh 下 "no matches found", 整条启动行失败, 新起 / 重生 / 克隆的 wizard 的 pane 立刻落回 shell。改成白名单 (只有 `[\w@%+=:,./-]` 组成的参数不加引号, 其余一律单引号包裹)。
 - rolepage 不再有「未知」role: 认不出是谁的发话方 / 听话方 (群里没记下 speaker 的人话、没署名的同伴行、认不出的回执听话方) 一律归系统 role `wezard` (`system:`), 不再另立 `human:` 这个「未知」—— `senderOf` / `audienceOf` 的兜底改成 `SYSTEM`, 名册 `nameOf` 去掉「未知」, 老链接里的 `role=human:` 解析成 `system:`; 守护进程写进回执信封的听话方照旧是「认不出 = 空」。`wezard` 的头像改成 🧙‍♂️, 名字用紫金渐变 (`--wezard` #6b3fa0 → `--wezard-gold` #9a6a00, 文字裁剪渐变, 不支持时退紫色)。侧栏、关系图、消息行与搜索同一份 `kindOf` / `nameOf`, 「说给谁」不标的那一方从 `human:` 换成 `system:`。
 - rolepage 未读归属: 一句未读只要在某一项点开后的详情里看得见, 就只记在这一项的红点, 不再挂到名字旁 —— 此前名字旁 (`peerUnread`) 只减去红点在数的那几句 (页面视角的未读), 这一项主人自己的未读即使就在这一项的详情里也被算成「切过去才看得到的」, 点开这一项一上屏就从名字旁消失。现在服务端给每一项一份账 (`ledgerOf`), 按点开它看到的消息 (`windowOf`, 与详情区取消息同一个函数) 切成不相交的两份: 红点 = 这里看得见的未读 (页面视角的 + 这一项主人的), 名字旁 = 主人在这里看不见的; 群这一行并上它各子项的, 子项不会大过群。侧栏会话项 / 子项 (含与我无往来的) 与关系图卡片 (`/api/glance`) 同一个实现, 未读判定收成一份 `unreadIndex` (去掉 `pendingOf` / `unreadByRole` / 摘要的 `peerUnread`); 基线前的与已落盘的已读由服务端先筛掉, 不再下发 `seen`。关系图卡片的账随看的 role 缓存, 换视角后不再借用上一个视角的。
 
