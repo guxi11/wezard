@@ -53,7 +53,7 @@ import {
 import { openTaskRegistry } from "./task-registry.js";
 import { describeTrigger, nextFire, parseTrigger, WHEN_HELP } from "../shared/trigger.js";
 import { isQuiet, slugify, uniqueId } from "../shared/task-file.js";
-import { baseOfKey, bindTagLinker, isInternalKey, keyOf, linkTags, normalizeTag, tagFromCwd, tagHead, tagLink, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
+import { baseOfKey, bindTagLinker, isInternalKey, keyOf, linkTags, normalizeTag, speakerHead, tagFromCwd, tagHead, tagLink, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
 import { appendEpisode, clipForCharter, cwdOfMd, episodePath, inboxPath, mdsOf, proposedCwds, memoryPath, memoryRoot, proposeMemory, readMemory, type MemoryScope } from "./wizard-memory.js";
 import { retireStewardTask, startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
 import type { Asker, TurnFrom } from "../shared/detail-store.js";
@@ -669,7 +669,7 @@ const main = async (): Promise<void> => {
         .catch((e: unknown) => log.warn({ chatId, err: errText(e) }, "chat notify failed"));
     };
     // wizard 在群里的称呼, 只用在**正文**里。气泡的头照旧交给 withTagHeader ——
-    // 那一段是路由信息 (`emoji #tag`), parseTagHeader 靠它反解, 群里引用一条气泡
+    // 那一段是路由信息 (`emoji.name:`), parseTagHeader 靠它反解, 群里引用一条气泡
     // 就能直接跟那个 wizard 说话; 把它换成名字会把这条通路弄断。
     const displayName = (t: string): string => {
       const name = settleName(wizards, chatNameOf(cfg, t), t);
@@ -677,9 +677,9 @@ const main = async (): Promise<void> => {
     };
 
     // wizard 之间的往返默认是私聊, 不进群。只有发话方判断「该当着人说」的那一次
-    // (send_peer public:true) 在公开频道里成一条气泡, 头写成 `.a → .b`, 方向一眼可读。
+    // (send_peer public:true) 在公开频道里成一条气泡, 头写成 `.a: @.b`, 方向一眼可读。
     const RELAY_MAX = 1200;
-    /** 一个 wizard 在群里的称呼: `emoji .name`, 挂它的 rolepage。名字全局唯一, 不再
+    /** 一个 wizard 在群里的称呼: `emoji.name`, 挂它的 rolepage。名字全局唯一, 不再
      *  因为落在哪个群而换写法 —— 引用这一段就能跟它说话 (parseTagHeader 认得)。 */
     const relayLabel = (t: string, _dest?: string): string => tagLink(t, tagHead(t));
     // 没开顶层模式的群里公开气泡多了 → 往那个群的管家 (群默认会话, target 就是 base principal) 信箱挂一行,
@@ -697,7 +697,7 @@ const main = async (): Promise<void> => {
     const relayPeer = (from: string, to: string, body: string, channel: string): void => {
       const text = body.trim();
       if (!text || !channel) return;
-      const head = `${relayLabel(from)} → ${relayLabel(to)}`;
+      const head = speakerHead(relayLabel(from), to);
       const clipped = text.length > RELAY_MAX ? `${text.slice(0, RELAY_MAX)}…` : text;
       // 头独占一行, 正文自成一个块 —— 只隔一个换行的话, markdown 会把正文首行
       // 当成头那一段的续行; 表格因此整张塌成一行带竖线的文字 (表格不能打断段落)。
@@ -997,7 +997,7 @@ const main = async (): Promise<void> => {
       if (muted) { json(res, 409, muted); return; }
       const asker = askerOf(self);
       for (const dest of dests) {
-        notifyChat(dest, `${relayLabel(self)}\n\n${content}`);
+        notifyChat(dest, `${speakerHead(relayLabel(self))}\n\n${content}`);
         recordPost({ target: self, channel: dest, body: content, ...(asker ? { asker } : {}) });
       }
       json(res, 200, { ok: true, sent: dests.map((d) => chatNameOf(cfg, d) || d) });
@@ -1021,7 +1021,7 @@ const main = async (): Promise<void> => {
       const plan = media.plan(dest, { path, ...(b.kind ? { kind: b.kind } : {}) });
       if (!plan.ok) { json(res, 400, plan); return; }
       const caption = (b.caption ?? "").trim();
-      if (caption) notifyChat(dest, `${relayLabel(self)}\n\n${caption}`);
+      if (caption) notifyChat(dest, `${speakerHead(relayLabel(self))}\n\n${caption}`);
       const r = await sendMedia(dest, { path, kind: plan.kind, ...(b.title ? { title: b.title } : {}), ...(b.description ? { description: b.description } : {}) });
       if (!r.ok) { json(res, 502, r); return; }
       const asker = askerOf(self);
@@ -1585,7 +1585,7 @@ const main = async (): Promise<void> => {
         const one = xs.length === 1;
         const mark = (i: number): string => (one ? "" : "①②③④⑤⑥⑦⑧⑨⑩"[i] ?? `${i + 1}.`);
         const text = `有 ${xs.length} 件做完了等你看: ${xs.map(({ job, at }, i) => `${mark(i)}「${job.title}」(${agoZh(now - at)}交付)`).join(" ")} —— 回一句「好」就收, 或者说哪里不对。`;
-        notifyChat(chat, `${relayLabel(owner)}\n\n${text}`);
+        notifyChat(chat, `${speakerHead(relayLabel(owner))}\n\n${text}`);
         recordPost({ target: owner, channel: chat, body: text });
         xs.forEach(({ job }) => jobs.mark(job.id, { nudge: { n: (job.nudge?.n ?? 0) + 1, lastAt: now } }));
         notices.post([owner], `nudged the human (daemon, in your name) about finished requests; their next line may be the verdict on one: ${xs.map(({ job }) => `${job.id} "${job.title}"`).join(" · ")}`);

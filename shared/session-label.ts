@@ -101,27 +101,28 @@ export const uniqueTag = (want: string, taken: ReadonlySet<string>, n = 1): stri
   return taken.has(candidate) ? uniqueTag(want, taken, n + 1) : candidate;
 };
 
-// 出站气泡的头 (`🦊 .fix …`) 是可被「引用」的路由信息: 群里要跟某个 wizard 说话,
+// 出站气泡的头 (`🦊.fix: …`) 是可被「引用」的路由信息: 群里要跟某个 wizard 说话,
 // 引用它的气泡比手打名字快得多。这里做反向解析。头部 emoji 取自固定表 —— 用户
 // 消息以这些 emoji 开头且后接 `.name` 的概率可忽略。
-// 头有两种形态,都要认:裸 `🦊 .fix …`,以及 rolepage 链接形态 `[🦊 .fix](https://…) …`。
+// 头有两种形态,都要认:裸 `🦊.fix: …`,以及 rolepage 链接形态 `[🦊.fix](https://…): …`。
 // 链接里的 URL 若留在 body 里,既污染比对又会被当成用户内容贴进 prompt。
-// 旧气泡的 `#tag` 头 (改名前发出去的) 仍被认 —— 迁移时名字取自 tag, 所以它照旧指得对人。
-// 公开频道里 wizard 之间说话的头是 `🦊 .a → .b`, 路由信息取发话方 (引用它 = 跟 a 说)。
+// 旧气泡的写法仍被认: `#tag` 头 (改名前发出去的, 迁移时名字取自 tag, 照旧指得对人),
+// emoji 与名字间带空格、名字后不带冒号的 `🦊 .fix …`, 以及 wizard 之间的 `🦊 .a → .b`。
+// 公开频道里 wizard 之间说话的头是 `🦊.a: @🐨.b`, 路由信息取发话方 (引用它 = 跟 a 说)。
 // 分片序号 (`2/5`) 与折叠气泡的 `← View chat details` 提示同理,一并算作头。
 const HEAD_EMOJI = [...ANIMALS, "🧙", "❔"];
 const EMO = `(?:${HEAD_EMOJI.join("|")})`;
-const NAME_PART = `(?:\\s+[.#](${NAME_CHARS}{1,32}))?(?:\\s*→\\s*[.#]${NAME_CHARS}{1,32})?`;
-// `→ 对方` 那一半自己也带 emoji、也可能是链接 (`[🦊 .a](url) → [🐨 .b](url)`)。
-const PEER_NAME = `${EMO}\\s+[.#]${NAME_CHARS}{1,32}`;
-const TO_PART = `(?:\\s*→\\s*(?:\\[${PEER_NAME}\\]\\([^)]*\\)|${PEER_NAME}))?`;
+const NAME_PART = `(?:\\s*[.#](${NAME_CHARS}{1,32}))?(?:\\s*→\\s*[.#]${NAME_CHARS}{1,32})?`;
+// 对方那一半自己也带 emoji、也可能是链接: 新 `: @[🐨.b](url)`, 旧 `→ [🐨 .b](url)`。
+const PEER_NAME = `${EMO}\\s*[.#]${NAME_CHARS}{1,32}`;
+const TO_PART = `(?:\\s*(?:→|@)\\s*(?:\\[${PEER_NAME}\\]\\([^)]*\\)|${PEER_NAME}))?`;
 const HEADER_RE = new RegExp(
-  `^(?:\\[${EMO}${NAME_PART}\\]\\([^)]*\\)|${EMO}${NAME_PART})${TO_PART}` +
+  `^(?:\\[${EMO}${NAME_PART}\\]\\([^)]*\\)|${EMO}${NAME_PART})(?::)?${TO_PART}` +
     `(?:\\s+\\d+/\\d+)?(?:\\s*←\\s*View chat details)?(?![\\p{L}\\p{N}_-])\\s*`,
   "u",
 );
 
-/** 反解一条出站气泡的 `emoji .name` 头,返回名字与剥头后的正文。
+/** 反解一条出站气泡的 `emoji.name:` 头,返回名字与剥头后的正文。
  *  `fromBot=false` 表示这不是 wezard 发的,body 原样返回。
  *  只切掉头那一段; 正文里 linkNames 挂上的 `[.fix](url)` 还原成裸 `.fix` —— 引用
  *  内容要跟 transcript 尾部比对, 也可能被贴进 prompt, URL 两头都是噪声。 */
@@ -206,20 +207,25 @@ export const linkTags = (target: string | undefined, text: string): string => {
 /** linkTags 的逆: `[.fix](url)` → `.fix`。 */
 export const unlinkTags = (text: string): string => text.replace(LINKED_RE, "$1");
 
-/** 头的裸形态 `emoji .name`; 名字都拿不到时是 `🧙`。 */
+/** 头的裸形态 `emoji.name` (emoji 与名字间不留空格); 名字都拿不到时是 `🧙`。 */
 export const tagHead = (target: string | undefined): string => {
   const name = displayName(target);
-  return name ? `${labelFor(name)} .${name}` : "🧙";
+  return name ? `${labelFor(name)}.${name}` : "🧙";
 };
 
-/** 头的链接形态 `[emoji .name](url)` —— 点它就进那个 wizard 的 rolepage。
+/** 头的链接形态 `[emoji.name](url)` —— 点它就进那个 wizard 的 rolepage。
  *  HEADER_RE 认得这一形态, parseTagHeader 照样剥得掉。 */
 export const linkedTagHead = (target: string | undefined, url: string): string => `[${tagHead(target)}](${url})`;
 
+/** 一条 wizard 发言的头: 发话方名字后跟冒号; 对着另一个 wizard 说 (`to`) 时再接 `@对方`。
+ *  `🦊.a: @🐨.b` —— 名字都挂各自的 rolepage (拿不到票据就是裸名)。 */
+export const speakerHead = (me: string, to?: string): string =>
+  to ? `${me}: @${tagLink(to, tagHead(to))}` : `${me}:`;
+
 /** 头挂上指定的 rolepage 链接 (mirror 用本轮 turn 的票据), 正文里的名字一并挂链。
  *  url 为空时退回裸头 —— 头那一段是路由信息, 少了链接只是少一层可点, 不能因此不写。
- *  `to` = 这段话是答给哪个 wizard 的 (公开 peer 轮): 头写成 `.me → .它`, 与它问话
- *  那条气泡的 `.它 → .me` 对称。
+ *  `to` = 这段话是答给哪个 wizard 的 (公开 peer 轮): 头写成 `.me: @.它`, 与它问话
+ *  那条气泡的 `.它: @.me` 对称。
  *  `seq` ("2/5") marks one piece of a split push — it rides in the same header
  *  line so every chunk of a long reply is attributable on its own. */
 export const withLinkedTagHeader = (
@@ -230,11 +236,11 @@ export const withLinkedTagHeader = (
   to?: string,
 ): string => {
   const me = url ? linkedTagHead(target, url) : tagHead(target);
-  const head = [to ? `${me} → ${tagLink(to, tagHead(to))}` : me, seq ?? ""].filter(Boolean).join(" ");
+  const head = [speakerHead(me, to), seq ?? ""].filter(Boolean).join(" ");
   const body = linkTags(target, content);
   return `${head}${headSep(body)}${body}`;
 };
 
-/** 给气泡加 `emoji .name` 头, 链接取该 wizard 自己的 rolepage (bindTagLinker)。 */
+/** 给气泡加 `emoji.name:` 头, 链接取该 wizard 自己的 rolepage (bindTagLinker)。 */
 export const withTagHeader = (target: string | undefined, content: string, seq?: string): string =>
   withLinkedTagHeader(target, content, target ? linker?.urlOf(target) : undefined, seq);

@@ -48,7 +48,7 @@ import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from 
 import { knowsToolUse, recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnQuery, recordTurnInject, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, lastChannelOf, openTurnsOf, buildDetailUrl, buildChatUrl, roleUniq } from "./detail.js";
 import type { CtxCut, TurnFrom, TurnOrigin, TurnUsage } from "./detail.js";
 import { errText } from "./last-response.js";
-import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagHeader, withLinkedTagHeader, linkedTagHead, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey } from "../shared/session-label.js";
+import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagHeader, withLinkedTagHeader, linkedTagHead, speakerHead, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress, stewardTierOf } from "./chat-name.js";
@@ -2688,7 +2688,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const detailCardFor = (s: ActiveStream, target: string): TemplateCard | undefined => {
     if (s.tools.length === 0) return undefined;
     const name = displayName(target);
-    const titlePrefix = name ? `${labelFor(name)} .${name} · ` : "";
+    const titlePrefix = name ? `${labelFor(name)}.${name} · ` : "";
     return {
       card_type: "button_interaction" as const,
       main_title: { title: `${titlePrefix}本轮工具调用` },
@@ -3145,7 +3145,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 是凭据 (不可枚举), 只是页面从"一个 turn"扩成"这个 chat 的全部会话"。
   // wizard 名字作为 ww_uniq 传下去, 让同一个 wizard 的所有 turn 详情都复用一个 WeCom 窗口。
   const briefDetailLink = (turnId: string, target: string): string =>
-    linkedTagHead(target, buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, turnId, roleUniq(target)));
+    speakerHead(linkedTagHead(target, buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, turnId, roleUniq(target))));
 
   // ── 出处门 (chatOriginOnly) ───────────────────────────────────────────
   // 人在 CLI 里手敲的一轮, 镜像只发生在两处: 他眼前的终端, 和 chat 详情页 (turn
