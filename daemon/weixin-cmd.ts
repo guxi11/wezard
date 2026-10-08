@@ -1,8 +1,9 @@
 // `/wx` 命令、`/wx/*` 路由、绑定落定后的那几件事、微信侧的 SendMedia。
 //
-// 门槛: 二维码就是授权凭据 —— 谁扫了谁就能驱动本机。所以只有审批人 (approval.approvers,
-// 空则 defaultChat 那个人) 能在**企微单聊**里发起, 或在本机终端 (`wezard wx bind`, 能敲
-// 命令即已有权限)。群里发起直接拒绝: 群里谁都看得见码。
+// 门槛: 二维码就是授权凭据 —— 谁扫了谁就能驱动本机。所以只有审批人 (wxAdmins) 能在**企微单聊**
+// 里发起; 本机终端 (`wezard wx bind`) 发起的要先给审批人推一张确认卡, 点了才出码 —— 口令
+// 每个 wizard 都读得到, 光凭口令等于任何 wizard 都能给本机多开一个微信入口。群里发起直接拒绝:
+// 群里谁都看得见码。
 import { mkdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -32,9 +33,13 @@ export const parseWxCommand = (text: string): WxCommand | undefined => {
     : { verb: "help" };
 };
 
-/** 能发起绑定的人: 审批人名单; 名单空 = defaultChat 那个人。 */
-export const isWxAdmin = (cfg: Config, userPrincipal: string): boolean =>
-  cfg.approval.approvers.length ? cfg.approval.approvers.includes(userPrincipal) : cfg.defaultChat === userPrincipal;
+/** 能发起绑定的人: 审批人名单; 名单空 → defaultChat (是个人的话); 再不然 → allowFrom 里的人
+ *  (defaultChat 是群时, 认领那一步把认领人写进了 allowFrom)。 */
+export const wxAdmins = (cfg: Config): string[] =>
+  cfg.approval.approvers.length ? cfg.approval.approvers
+    : cfg.defaultChat?.startsWith("user:") ? [cfg.defaultChat]
+    : cfg.wrc.allowFrom.filter((p) => p.startsWith("user:"));
+export const isWxAdmin = (cfg: Config, userPrincipal: string): boolean => wxAdmins(cfg).includes(userPrincipal);
 
 const ago = (t?: number): string => {
   if (!t) return "—";
@@ -173,7 +178,7 @@ export interface WxCmdCtx {
 export const makeWxCommands = (d: CmdDeps) => async (ctx: WxCmdCtx, cmd: WxCommand): Promise<void> => {
   const { cfg, wx } = d;
   const dm = ctx.chat.startsWith("user:");
-  if (!isWxAdmin(cfg, ctx.sender)) return ctx.reply("[wezard] `/wx` 只有审批人能用 (approval.approvers; 空则 defaultChat)");
+  if (!isWxAdmin(cfg, ctx.sender)) return ctx.reply("[wezard] `/wx` 只有审批人能用 (approval.approvers; 空则 defaultChat / allowFrom 里的人)");
   if (cmd.verb === "help") return ctx.reply(HELP);
   if (cmd.verb === "list") return ctx.reply(renderAccounts(cfg, wx.list()));
   if (!dm && cmd.verb !== "unbind") return ctx.reply("[wezard] 绑定只能在和机器人的**单聊**里发起 —— 二维码就是授权凭据, 群里谁都能扫");
@@ -199,7 +204,13 @@ export const bindWxCommands = (fn: typeof handler): void => { handler = fn; };
 export const wxCommandHandler = (): typeof handler => handler;
 
 // ── 路由 (CLI / rolepage) ────────────────────────────────────────────
-export const wxRoutes = (d: Pick<CmdDeps, "cfg" | "wx" | "sourcePath">): Record<string, Handler> => ({
+export interface RouteDeps extends Pick<CmdDeps, "cfg" | "wx" | "sourcePath"> {
+  /** 推确认卡给审批人, 等人点; 发不出去就抛。 */
+  confirmBind: (name: string) => Promise<boolean>;
+}
+
+/** 全部要出示 daemon 口令 (index.ts 套 guarded); rolepage 读的是推送的 facts, 不走这里。 */
+export const wxRoutes = (d: RouteDeps): Record<string, Handler> => ({
   "GET /wx/list": (_req, res) => json(res, 200, {
     ok: true,
     enabled: d.cfg.weixin.enabled,
@@ -213,7 +224,12 @@ export const wxRoutes = (d: Pick<CmdDeps, "cfg" | "wx" | "sourcePath">): Record<
   }),
   "POST /wx/bind": async (req, res) => {
     const b = (await readBody(req)) as { name?: string };
-    const r = d.wx.startBind("cli", (b.name ?? "").trim(), () => undefined);
+    const name = (b.name ?? "").trim();
+    if (!d.cfg.weixin.enabled) { json(res, 400, { ok: false, reason: "微信通道未开启 (weixin.enabled=false)" }); return; }
+    const yes = await d.confirmBind(name).catch((e: Error) => { json(res, 503, { ok: false, reason: `确认卡发不出去: ${e.message}` }); return undefined; });
+    if (yes === undefined) return;
+    if (!yes) { json(res, 403, { ok: false, reason: "审批人没有同意 (拒绝或超时)" }); return; }
+    const r = d.wx.startBind("cli", name, () => undefined);
     json(res, r.ok ? 200 : 400, r);
   },
   "GET /wx/bind/status": (_req, res, url) => {

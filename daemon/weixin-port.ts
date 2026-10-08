@@ -8,16 +8,19 @@
 //          流式中间帧只亮「正在输入」, 卡片降成编号菜单); 其余原样交给 aibot。
 //   入站 — 微信消息翻成 aibot 形状的帧 `client.emit(...)`; 人回菜单数字 → 合成同一个
 //          `event.template_card_event`, 审批 / 提问 / 计划选择的处理器原样认。
-// 装在 installResponseTracker **之后** (外层): 微信出站不该等企微长连接连上。
+// 装在 installResponseTracker **之前** (内层): tracker 的空消息 gate 和 last-response 记录照样
+// 覆盖微信; tracker 只对微信 chat 不等企微长连接 (它注入的 ownTransport 谓词)。
 import type { WSClient, WsFrame, TemplateCard } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
-import { renderCard, renderAck, choicesOf, parseMenuReply, clickOf, mintCode, mdToPlain, type Choices } from "../shared/wx-text.js";
+import { renderCard, renderAck, choicesOf, parseMenuReply, clickOf, mintCode, mdToPlain, WX_REQ as REQ, type Choices } from "../shared/wx-text.js";
+import { getPending } from "./pending.js";
 import type { Weixin, WxInbound } from "./weixin.js";
 
 const CARD_TTL_MS = 24 * 3600_000;
-const REQ = "wx:";
 
-interface OpenCard { code: string; taskId: string; choices: Choices; cardType: string; at: number }
+/** `tracked`: 发卡时 task_id 在待决表里 (审批 / 提问 / 计划卡都是) —— 之后它不在了就是已了结,
+ *  不管是谁了结的 (超时、CLI 先答、⏱ 窗口自动放行、/ask) —— 那些路径都不改卡, 等不到 updateTemplateCard。 */
+interface OpenCard { code: string; taskId: string; choices: Choices; cardType: string; at: number; tracked: boolean }
 
 /** `wx:<chatId>:<n>` → chatId; 不是微信帧返回 undefined。 */
 const chatOfFrame = (frame: unknown): string | undefined => {
@@ -37,7 +40,7 @@ export const installWeixinPort = (client: WSClient, wx: Weixin, log: Logger): We
   const cards = new Map<string, OpenCard[]>();
   const live = (chatId: string): OpenCard[] => {
     const now = Date.now();
-    const xs = (cards.get(chatId) ?? []).filter((c) => now - c.at < CARD_TTL_MS);
+    const xs = (cards.get(chatId) ?? []).filter((c) => now - c.at < CARD_TTL_MS && (!c.tracked || !!getPending(c.taskId)));
     cards.set(chatId, xs);
     return xs;
   };
@@ -53,9 +56,13 @@ export const installWeixinPort = (client: WSClient, wx: Weixin, log: Logger): We
   };
   const card = (chatId: string, c: TemplateCard): void => {
     const choices = choicesOf(c);
-    const code = mintCode(new Set(live(chatId).map((x) => x.code)));
+    const taskId = c.task_id ?? "";
+    // 同一 task_id 重发 (reload 续接、改卡重推) 顶替旧条目, 沿用旧短码 —— 人手里那张菜单仍然作数。
+    const open = live(chatId);
+    const prev = taskId ? open.find((x) => x.taskId === taskId) : undefined;
+    const code = prev?.code ?? mintCode(new Set(open.map((x) => x.code)));
     if (choices.kind !== "none") {
-      cards.set(chatId, [...live(chatId), { code, taskId: c.task_id ?? "", choices, cardType: c.card_type, at: Date.now() }]);
+      cards.set(chatId, [...open.filter((x) => x !== prev), { code, taskId, choices, cardType: c.card_type, at: Date.now(), tracked: !!taskId && !!getPending(taskId) }]);
     }
     wx.send(chatId, renderCard(c, code), { card: true });
   };
@@ -116,7 +123,8 @@ export const installWeixinPort = (client: WSClient, wx: Weixin, log: Logger): We
   client.updateTemplateCard = async (frame, c0, userids) => {
     const c = chatOfFrame(frame);
     if (!isWx(c)) return orig.updateTemplateCard(frame, c0, userids);
-    const open = live(c);
+    // 查原表而不是 live(): 点击一 resolve, 这张卡就已不在待决表里了, 回执还要用它的短码。
+    const open = cards.get(c) ?? [];
     const hit = open.find((x) => x.taskId && x.taskId === c0.task_id);
     if (hit) cards.set(c, open.filter((x) => x !== hit));
     wx.send(c, renderAck(c0, hit?.code ?? "卡片"), { card: true });
@@ -164,6 +172,8 @@ export const installWeixinPort = (client: WSClient, wx: Weixin, log: Logger): We
   };
 
   // 人回的是菜单数字 → 合成点击; 返回 true = 已消费, 不再当普通消息派给 wizard。
+  // 拿不准是在答哪张卡 (短码对不上、多张待答又没带短码) 就不吞: 照常交给 wizard ——
+  // 「k7q 1」「top 3」也可能就是一句话。
   const answerCard = (m: WxInbound): boolean => {
     if (m.images.length || m.files.length) return false;
     const r = parseMenuReply(m.text);
@@ -171,10 +181,8 @@ export const installWeixinPort = (client: WSClient, wx: Weixin, log: Logger): We
     if (!r || open.length === 0) return false;
     const target = r.code ? open.find((x) => x.code === r.code) : open.length === 1 ? open[0] : undefined;
     if (!target) {
-      wx.send(m.chatId, r.code
-        ? `短码 ${r.code} 的卡片已处理或已过期。待答: ${open.map((x) => x.code).join(" / ")}`
-        : `有 ${open.length} 张待答卡 (${open.map((x) => x.code).join(" / ")}), 请带短码回, 如 "${open[0]!.code} 1"`);
-      return true;
+      if (!r.code) wx.send(m.chatId, `有 ${open.length} 张待答卡 (${open.map((x) => x.code).join(" / ")}), 要作答请带短码, 如 "${open[0]!.code} 1" —— 刚才那句已照常转给 wizard`);
+      return false;
     }
     const click = clickOf(target.choices, r.picks);
     if (!click) {

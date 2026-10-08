@@ -8,6 +8,14 @@
 export const chatIdOfUser = (ilinkUserId: string): string =>
   `wx_${(ilinkUserId.split("@")[0] ?? "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 48) || "anon"}`;
 
+/** 微信合成帧的 req_id 前缀 (`wx:<chatId>:<n>`): 帧本身就说明它属于微信, 不必查账号表。 */
+export const WX_REQ = "wx:";
+/** 这一帧来自微信 —— 没有企微 stream 的 ~6 分钟窗口, 也就不需要到点强制收口。 */
+export const isWxFrame = (frame: unknown): boolean => {
+  const id = (frame as { headers?: { req_id?: unknown } } | undefined)?.headers?.req_id;
+  return typeof id === "string" && id.startsWith(WX_REQ);
+};
+
 /** 取不到昵称时的群名: `wx-o9cq80`。 */
 export const shortNameOf = (ilinkUserId: string): string =>
   `wx-${(ilinkUserId.split("@")[0] ?? "").replace(/[^A-Za-z0-9]/g, "").slice(0, 6) || "user"}`;

@@ -70,7 +70,9 @@ const hasVisibleBody = (content: string): boolean => parseTagHeader(content).bod
 // Wrap replyStream + replyStreamWithCard (live stream finalize) AND
 // sendMessage (markdown standalone push) so EVERY user-visible bubble lands
 // in the tracker. Mutates the client in place; call once at daemon startup.
-export const installResponseTracker = (client: WSClient, log?: Logger): void => {
+// `ownTransport(chatid)`: 这个 chat 的出站不走企微长连接 (微信) —— 不必等 WS 连上。
+// 通道分流层装在这里面 (内层), 所以 gate / record 照样覆盖它。
+export const installResponseTracker = (client: WSClient, log?: Logger, ownTransport: (chatid: string) => boolean = () => false): void => {
   const origReplyStream = client.replyStream.bind(client);
   const origReplyStreamWithCard = client.replyStreamWithCard.bind(client);
   const origSendMessage = client.sendMessage.bind(client);
@@ -110,7 +112,7 @@ export const installResponseTracker = (client: WSClient, log?: Logger): void => 
   };
 
   client.sendMessage = async (chatid, body) => {
-    await untilConnected();
+    if (!ownTransport(chatid)) await untilConnected();
     // Only markdown pushes carry quotable text (and are the empty-message
     // risk class); template_card / media bubbles pass through untouched.
     if ((body as { msgtype?: string }).msgtype === "markdown") {

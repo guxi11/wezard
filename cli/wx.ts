@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// `wezard wx …` —— 在本机终端绑定 / 查看 / 解绑微信 ClawBot。能敲这条命令即已有本机权限,
-// 所以终端入口不再验审批人; 写操作仍要出示 daemon 口令 (路由由 guarded 守着)。
+// `wezard wx …` —— 在本机终端绑定 / 查看 / 解绑微信 ClawBot。路由都要出示 daemon 口令 (guarded);
+// 绑定另要审批人在企微点一张确认卡 —— 口令每个 wizard 都读得到, 光凭它不够。
 import QRCode from "qrcode";
 import { createInterface } from "node:readline/promises";
 import { DAEMON_TOKEN_HEADER, readDaemonToken } from "../shared/daemon-token.js";
@@ -29,6 +29,7 @@ const list = async (): Promise<void> => {
 };
 
 const bind = async (name: string): Promise<void> => {
+  console.log("· 已往企微给审批人推了一张确认卡, 点「同意」后这里出二维码 (3 分钟内有效)…");
   const r = await call("POST", "/wx/bind", { name });
   if (!r.ok) return void console.error(`❌ ${String(r.reason ?? "bind failed")}`);
   const rl = createInterface({ input: process.stdin, output: process.stdout });

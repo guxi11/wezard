@@ -34,6 +34,7 @@ import { tagBadge, tagOfKey, withTagHeader } from "../shared/session-label.js";
 import { chatPolicyOf } from "./chat-name.js";
 import { makeStewardGuard } from "./steward-guard.js";
 import { sessionNameFor } from "./session-name.js";
+import { reachable } from "./reach.js";
 
 // ── Routing helpers ────────────────────────────────────────────────────
 // 卡片跟着本轮的频道走: 人在群 B 里 `.fix` 叫住在 A 的 wizard, 这一轮的审批/提问卡
@@ -53,6 +54,9 @@ const targetChatId = (key: string): string => {
   const h = rest.indexOf("#");
   return h >= 0 ? rest.slice(0, h) : rest;
 };
+
+/** 卡片真正要去的那个聊天 (按频道换算之后) 此刻送得到吗 —— 微信 chat 不看企微长连接。 */
+const canReach = (client: WSClient, key: string): boolean => reachable(client, targetChatId(key));
 
 const pickApprover = (cfg: Config): string | undefined => {
   if (cfg.approval.approvers.length > 0) return cfg.approval.approvers[0];
@@ -830,7 +834,7 @@ const buildConfirmCard = (reqId: string, c: ConfirmContent, done?: ConfirmAction
 export const requestConfirm = async ({ client, principal, who, title, body, timeoutMs }: {
   client: WSClient; principal: string; who: string; title: string; body: string; timeoutMs: number;
 }): Promise<{ decided: Promise<boolean> }> => {
-  if (!client.isConnected) throw new Error("ws_disconnected");
+  if (!canReach(client, principal)) throw new Error("ws_disconnected");
   const { reqId, promise } = createPending({ meta: { kind: "generic", createdAt: Date.now(), chatKey: principal }, timeoutMs });
   const c = { who, title, body };
   confirmCards.set(reqId, c);
@@ -972,7 +976,7 @@ const handleExitPlanMode = async ({ cfg, log, client, body, getMirrorTarget, flu
 
   const approver = resolveApprover(cfg, body.session_id, getMirrorTarget);
   if (!approver) return { decision: "ask", reason: "no_approver" };
-  if (!client.isConnected) return { decision: "ask", reason: "ws_disconnected" };
+  if (!canReach(client, approver)) return { decision: "ask", reason: "ws_disconnected" };
 
   const longPollMs = cfg.approval.longPollSec * 1000;
   const { reqId, promise } = createPending({
@@ -1174,7 +1178,7 @@ export const runMirrorAskqFlow = async ({ cfg, log, client, sessionId, chatKey, 
   const questions = parseAskqInput(toolInput);
   if (!questions || questions.length === 0) return;
   if (questions.some((q) => q.options.length === 0)) return;
-  if (!client.isConnected) return;
+  if (!canReach(client, chatKey)) return;
 
   const target = targetChatId(chatKey);
   const total = questions.length;
@@ -1348,7 +1352,7 @@ interface MirrorPlanFlowArgs {
 }
 
 export const runMirrorPlanFlow = async ({ cfg, log, client, sessionId, chatKey, cwd, jsonlPath, voteTimeoutMs, sendKey }: MirrorPlanFlowArgs): Promise<void> => {
-  if (!client.isConnected) return;
+  if (!canReach(client, chatKey)) return;
   const target = targetChatId(chatKey);
   const note = async (content: string): Promise<void> => {
     try {
@@ -1497,7 +1501,7 @@ interface MirrorPickerFlowArgs {
 export const runMirrorPickerFlow = async (
   { log, client, cfg, sessionId, chatKey, cwd, jsonlPath, toolName, toolInput, agent, danger, voteTimeoutMs, press }: MirrorPickerFlowArgs,
 ): Promise<boolean> => {
-  if (!client.isConnected) return false;
+  if (!canReach(client, chatKey)) return false;
   const target = targetChatId(chatKey);
   const note = async (content: string): Promise<void> => {
     try {
@@ -1627,7 +1631,7 @@ const handleAskUserQuestion = async ({ cfg, log, client, body, getMirrorTarget, 
 
   const approver = resolveApprover(cfg, body.session_id, getMirrorTarget);
   if (!approver) return { decision: "ask", reason: "no_approver" };
-  if (!client.isConnected) return { decision: "ask", reason: "ws_disconnected" };
+  if (!canReach(client, approver)) return { decision: "ask", reason: "ws_disconnected" };
 
   const target = targetChatId(approver);
   const longPollMs = cfg.approval.longPollSec * 1000;
@@ -2318,7 +2322,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
       json(res, 200, fallback(cfg, "no_approver", mustCard || guardActive) satisfies ApproveResp);
       return;
     }
-    if (!client.isConnected) {
+    if (!canReach(client, approver)) {
       log.warn("ws not connected");
       json(res, 200, fallback(cfg, "ws_disconnected", mustCard || guardActive) satisfies ApproveResp);
       return;

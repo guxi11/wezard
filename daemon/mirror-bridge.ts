@@ -50,6 +50,7 @@ import type { CtxCut, TurnFrom, TurnOrigin, TurnUsage } from "./detail.js";
 import { errText } from "./last-response.js";
 import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagHeader, withLinkedTagHeader, linkedTagHead, speakerHead, nameHead, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
+import { isWxFrame } from "../shared/wx-text.js";
 import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress, stewardTierOf } from "./chat-name.js";
 import { stripAnsi, paneIsBusy, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, lastModel, cacheTouchMs, cacheTtlSec, keepaliveStamps, openKeepalivePing, lastUserTurn, talkRounds, openToolUses, renderDialog, type PeerInfo, type PeerReply } from "./peers.js";
@@ -2254,11 +2255,11 @@ interface ToolEntry {
  *  所以从收消息那一刻起群里就有可点的详情页入口, 而不是一个纯文本占位。后续:
  *  正文到位 → 以 `链接 正文` 覆盖收口; 一直没正文 → hardTimer 兜底以
  *  `链接 仍在处理中…` 的中间结束语收口 (turn 已被顶替则纯链接)。
- *  hardTimer 兜底 WeCom ~6min stream 窗口, 到点强制 finish=true。 */
+ *  hardTimer 兜底 WeCom ~6min stream 窗口, 到点强制 finish=true; 微信帧没有这个窗口, 不挂。 */
 interface BriefBubble {
   frame: WsFrameHeaders;
   streamId: string;
-  hardTimer: NodeJS.Timeout;
+  hardTimer?: NodeJS.Timeout;
   done: boolean;
 }
 
@@ -2767,7 +2768,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       capped: false, closed: false, dead: false, cardSent: false,
       tools: [], sawTool: false,
     };
-    s.hardTimer = setTimeout(() => void finalizeStream(a, s, true), HARD_TIMEOUT_MS);
+    // 微信帧没有 stream 窗口: 到点收口只会多发一条「仍在处理中」, 白占它那几格出站额度。
+    if (!isWxFrame(frame)) s.hardTimer = setTimeout(() => void finalizeStream(a, s, true), HARD_TIMEOUT_MS);
     log.info({ sessionId: a.sessionId, turnId: s.turnId, streamId }, "stream open");
     return s;
   };
@@ -3397,9 +3399,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const startBriefTurn = async (a: AttachState, frame: WsFrameHeaders, streamId: string, isSlash = false, userQuery = "", channel?: string, speaker?: string): Promise<void> => {
     const turnId = newTurnId();
     // hardTimer 兜底: turn 若无终句 / turn_end 收口 (卡死/漏收), 到点仍收气泡。
-    const bubble: BriefBubble = { frame, streamId, hardTimer: undefined as unknown as NodeJS.Timeout, done: false };
+    const bubble: BriefBubble = { frame, streamId, done: false };
     const q: QueuedTurn = { turnId, bubble, isSlash };
-    bubble.hardTimer = setTimeout(() => {
+    // 微信帧不挂: 没有 stream 窗口要赶, 气泡等终句来了再一次发出 (见 openStream 同一条)。
+    if (!isWxFrame(frame)) bubble.hardTimer = setTimeout(() => {
       // WeCom ~6min stream 窗口快到, 必须 finish=true 收口。finish 是整条替换 ——
       // 定格在一行过期的 CoT 进度上看着像卡死, 光链接又像说完了; 气泡仍是本轮活跃
       // 气泡 (turn 还在跑) 就明说「仍在处理中」, 已被顶替的旧轮只留链接。

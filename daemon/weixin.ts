@@ -7,7 +7,8 @@
 // 所以出站一律先进 outbox, 由 pump 按「额度 / 节流 / 暂停」决定何时合并发出; 发不出的压着,
 // 人下一次开口时先取回 —— 宁可晚到, 不丢。
 //
-// 账号间互不牵连: 各自一条轮询链、各自的 outbox / 暂停; 一个号 -14 掉线只停它自己。
+// 账号间互不牵连: 各自一条轮询链、各自的 outbox / 暂停; 一个号 -14 掉线只歇它自己 (一小时后再试)。
+// 出站一段发成功了才从 outbox 摘掉: reload / 掉线打断在半途, 没发的还在盘上。
 import { chmodSync, readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import type { Logger } from "pino";
@@ -17,13 +18,20 @@ import { expandHome } from "../shared/paths.js";
 import { chatIdOfUser, chunkText, nickOf } from "../shared/wx-text.js";
 import {
   ILINK_BASE, LONG_POLL_MS, STALE_TOKEN, ITEM,
-  getBotQrcode, getQrcodeStatus, getUpdates, sendText, sendItems, getTypingTicket, sendTyping, notifyLifecycle,
+  getBotQrcode, getQrcodeStatus, getUpdates, sendText, sendItems, getTypingTicket, sendTyping, notifyLifecycle, mintClientId,
   cdnDownloadUrl, downloadCdn, parseAesKey, MEDIA_TYPE, getUploadUrl, uploadCdn, cdnUploadUrl, encryptEcb, md5,
   type CdnMedia, type MessageItem, type WeixinMessage, type Res,
 } from "./ilink.js";
 
 // ── 数据 ─────────────────────────────────────────────────────────────
-export interface OutItem { text: string; card?: boolean; at: number }
+export interface OutItem {
+  id: string;
+  text: string;
+  card?: boolean;
+  at: number;
+  /** 上次发这一段超时了 (服务端可能已收下): 用同一个 client_id 原样单独重发, 不再与别的合并。 */
+  cid?: string;
+}
 export interface WxAccount {
   botId: string;
   botToken: string;
@@ -36,7 +44,9 @@ export interface WxAccount {
   boundBy: string;
   boundAt: number;
   cursor: string;
+  /** expired = token 被拒 (-14): 轮询歇到 retryAt 再试, 成功即复活。 */
   state: "live" | "expired";
+  retryAt?: number;
   /** 最近一份 context_token: 何时拿到、之后已发几条。 */
   ctx?: { token: string; at: number; used: number };
   outbox: OutItem[];
@@ -45,6 +55,10 @@ export interface WxAccount {
   pausedUntil?: number;
   /** 这一段静默里是否已往企微报过「压着 N 条」—— 人一开口清零。 */
   staleNoted?: boolean;
+  /** 这一段额度用完、有卡压着时是否已往企微报过 —— 人一开口清零。 */
+  capNoted?: boolean;
+  /** 队头连续被拒收 (非频控 / 非网络) 的次数: 第一次当 token 过期压着, 换了新 token 还拒就丢掉这一段。 */
+  rejects?: number;
   sent?: number;
   failed?: number;
 }
@@ -86,6 +100,8 @@ export interface Weixin {
   owns: (chatId: string) => boolean;
   accountOf: (chatId: string) => WxAccount | undefined;
   list: () => WxAccount[];
+  /** 已绑定、通道开着、没掉线 —— 此刻发得出去 (或压着等人开口) 的号。 */
+  live: (chatId: string) => boolean;
   send: (chatId: string, text: string, opts?: { card?: boolean }) => void;
   typing: (chatId: string, on: boolean) => void;
   download: (ref: string) => Promise<{ buffer: Buffer; filename?: string }>;
@@ -98,6 +114,8 @@ export interface Weixin {
   unbind: (chatId: string) => { ok: boolean; reason?: string };
   /** 切网: 掐断在途长轮询立即重连。 */
   kick: (reason: string) => void;
+  /** 开始收发。要等入站监听全装好再调: 首轮 getupdates 会立刻带回 reload 期间的消息, 游标随即前移。 */
+  start: () => void;
   stop: () => Promise<void>;
 }
 
@@ -111,6 +129,17 @@ const TYPING_EVERY_MS = 5_000;
 const LOGIN_DEADLINE_MS = 8 * 60_000;
 const MAX_QR_REFRESH = 3;
 const SEEN_MAX = 500;
+/** -14 后整号歇多久再试 (官方插件同款)。 */
+const STALE_PAUSE_MS = 3600_000;
+/** outbox 上限: 掉线 / 久没说话时出站一直往里堆, 满了先丢最老的正文 (卡片留着)。 */
+const OUTBOX_MAX = 50;
+/** 第几次被拒收 (换了新 token 之后仍拒) 就丢掉队头那一段。 */
+const REJECT_DROP = 2;
+const LAST_SLOT = "\n\n📭 这一轮额度用完, 之后的消息回任意一句取回";
+
+let outSeq = 0;
+const outId = (): string => `o${Date.now().toString(36)}${(outSeq++).toString(36)}`;
+export const outItem = (text: string, extra: Partial<OutItem> = {}): OutItem => ({ id: outId(), text, at: Date.now(), ...extra });
 
 const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
   new Promise((res) => {
@@ -120,12 +149,14 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
 const redact = (t: string): string => (t.length > 8 ? `${t.slice(0, 4)}…${t.slice(-2)}` : "***");
 
 // ── 账本 (纯) ────────────────────────────────────────────────────────
+export interface Chunk { text: string; cid?: string }
 export type Plan =
-  | { kind: "send"; chunks: string[]; rest: OutItem[] }
+  /** `take`: 这次发的是 outbox 里哪几条 (发出一段摘一段); `rest`: 超额留下的尾巴。 */
+  | { kind: "send"; chunks: Chunk[]; take: string[]; rest: OutItem[] }
   | { kind: "wait"; ms: number }
   | { kind: "hold"; why: "stale" | "cap" | "paused" | "empty" };
 
-/** 这一刻能发什么: 无 token / 过期 → 压着; 暂停中 / 未到间隔 → 等; 额度内合并发, 超了留尾巴并在最后一条挂提示。 */
+/** 这一刻能发什么: 无 token / 过期 → 压着; 暂停中 / 未到间隔 → 等; 额度内合并发, 用到最后一格就在那条挂提示, 超了留尾巴。 */
 export const planFlush = (a: Pick<WxAccount, "ctx" | "outbox" | "lastOutAt" | "pausedUntil">, now: number, w: Config["weixin"]): Plan => {
   if (a.outbox.length === 0) return { kind: "hold", why: "empty" };
   if (a.pausedUntil && a.pausedUntil > now) return { kind: "wait", ms: a.pausedUntil - now };
@@ -134,26 +165,37 @@ export const planFlush = (a: Pick<WxAccount, "ctx" | "outbox" | "lastOutAt" | "p
   if (budget <= 0) return { kind: "hold", why: "cap" };
   const gap = (a.lastOutAt ?? 0) + w.minGapSec * 1000 - now;
   if (gap > 0) return { kind: "wait", ms: gap };
+  const head = a.outbox[0]!;
+  if (head.cid) return { kind: "send", chunks: [{ text: head.text, cid: head.cid }], take: [head.id], rest: [] };
   // 卡片插队: 等人点的东西不能排在一长段正文后面被额度挡住。
   const ordered = [...a.outbox.filter((o) => o.card), ...a.outbox.filter((o) => !o.card)];
-  const chunks = chunkText(ordered.map((o) => o.text).join(SEP));
-  if (chunks.length <= budget) return { kind: "send", chunks, rest: [] };
-  const sendNow = chunks.slice(0, budget);
-  const left = chunks.slice(budget);
-  const tail = `\n\n📬 还有 ${left.length} 段没发出 (微信限额), 回任意一句取回`;
+  const texts = chunkText(ordered.map((o) => o.text).join(SEP));
+  const take = a.outbox.map((o) => o.id);
+  const hint = (xs: string[], tail: string): Chunk[] => [...xs.slice(0, -1), `${xs[xs.length - 1]}${tail}`].map((text) => ({ text }));
+  if (texts.length < budget) return { kind: "send", chunks: texts.map((text) => ({ text })), take, rest: [] };
+  if (texts.length === budget) return { kind: "send", chunks: hint(texts, LAST_SLOT), take, rest: [] };
+  const left = texts.slice(budget);
   return {
     kind: "send",
-    chunks: [...sendNow.slice(0, -1), `${sendNow[sendNow.length - 1]}${tail}`],
-    rest: [{ text: left.join("\n\n"), at: now }],
+    chunks: hint(texts.slice(0, budget), `\n\n📬 还有 ${left.length} 段没发出 (微信限额), 回任意一句取回`),
+    take,
+    rest: [{ id: `${take[0]}r`, text: left.join("\n\n"), at: now }],
   };
 };
 
-/** sendmessage 失败怎么办: 掉线 / token 失效 / 频控 / 网络 (重试)。 */
-export const classifySendFail = (r: Res<unknown>): "dead" | "stale" | "rate" | "net" =>
+/** sendmessage 失败怎么办: 掉线 / 频控 / 网络 (重试) / 拒收 (这一条本身不对, 或 context_token 失效)。 */
+export const classifySendFail = (r: Res<unknown>): "dead" | "rate" | "net" | "bad" =>
   r.ret === STALE_TOKEN || r.errcode === STALE_TOKEN ? "dead"
-    : /rate/i.test(r.errmsg ?? "") ? "rate"
+    : r.status === 429 || /rate/i.test(r.errmsg ?? "") ? "rate"
     : r.net ? "net"
-    : "stale";
+    : "bad";
+
+/** outbox 超上限: 先丢最老的正文, 卡片 (等人点的) 留到最后。 */
+export const trimOutbox = (xs: OutItem[], max = OUTBOX_MAX): OutItem[] => {
+  if (xs.length <= max) return xs;
+  const i = Math.max(0, xs.findIndex((o) => !o.card));
+  return trimOutbox([...xs.slice(0, i), ...xs.slice(i + 1)], max);
+};
 
 // ── 入站翻译 (纯) ────────────────────────────────────────────────────
 const mediaRef = (m: CdnMedia | undefined, hexKey?: string, name?: string): string | undefined =>
@@ -214,69 +256,124 @@ export const startWeixin = ({ cfg, log, onBound, notifyWecom }: WeixinDeps): Wei
   const polls = new Map<string, AbortController>();
   const seen = new Map<string, Set<string>>();
   const pumps = new Map<string, Promise<void>>();
-  const timers = new Map<string, NodeJS.Timeout>();
-  const typingState = new Map<string, { ticket?: string; ticketAt?: number; lastAt?: number; on?: boolean }>();
+  const timers = new Map<string, { t: NodeJS.Timeout; at: number }>();
+  interface Typing { ticket?: string; ticketAt?: number; lastAt?: number; on?: boolean; chain: Promise<void> }
+  const typingState = new Map<string, Typing>();
   let stopped = false;
+  let started = false;
 
   const fallbackOf = (a: WxAccount): string => w().fallbackChat || (a.boundBy.includes(":") ? a.boundBy : "");
   const tell = (a: WxAccount, md: string): void => {
     const to = fallbackOf(a);
     if (to) notifyWecom(to, md);
   };
+  const isLive = (a: WxAccount | undefined): a is WxAccount => !!a && a.state === "live" && w().enabled;
 
-  // ── 出站 ──
-  const expire = (a: WxAccount, why: string): void => {
-    log.warn({ botId: a.botId, chatId: a.chatId, why }, "weixin account expired");
-    polls.get(a.botId)?.abort();
-    polls.delete(a.botId);
-    const cur = patch(a.botId, () => ({ state: "expired" as const, ctx: undefined }));
-    if (cur) tell(cur, `📵 微信通道 \`${a.chatId}\` 掉线 (${why})${cur.outbox.length ? `, 压着 ${cur.outbox.length} 条` : ""} —— 在企微单聊发 \`/wx bind\` 重新扫码即可, 群聊与 wizard 都保留`);
+  // 一个号停用 (掉线 / 解绑 / 被重绑替下) 时: 它排着的定时 pump 和「正在输入」状态一并作废 ——
+  // 留着的话, 同 botId 重绑后旧的 10 分钟频控定时器会挡住新号的 15 秒间隔。
+  const clearBot = (botId: string): void => {
+    const t = timers.get(botId);
+    if (t) clearTimeout(t.t);
+    timers.delete(botId);
+    typingState.delete(botId);
   };
 
+  // ── 出站 ──
+  // -14: token 被拒 (多半是被别处重绑顶替)。不停轮询: 整号歇一小时再试, 成功即复活 (官方插件同款);
+  // 只在 live → expired 那一下报企微。
+  const expire = (a: WxAccount, why: string): void => {
+    const was = db.get(a.botId)?.state;
+    clearBot(a.botId);
+    const cur = patch(a.botId, () => ({ state: "expired" as const, ctx: undefined, retryAt: Date.now() + STALE_PAUSE_MS }));
+    if (!cur || was !== "live") return;
+    log.warn({ botId: a.botId, chatId: a.chatId, why }, "weixin account expired");
+    tell(cur, `📵 微信通道 \`${a.chatId}\` 掉线 (${why})${cur.outbox.length ? `, 压着 ${cur.outbox.length} 条` : ""} —— 每小时自动重试一次; 若是被别处重新绑定顶替了, 在企微单聊发 \`/wx bind\` 重新扫码即可, 群聊与 wizard 都保留`);
+  };
+
+  /** 掉线的号重新可用: 轮询醒来接着收, 压着的接着发。`wake=false` = 调用者就是那条轮询本身。 */
+  const revive = (botId: string, why: string, wake = true): void => {
+    const cur = patch(botId, () => ({ state: "live" as const, retryAt: undefined }));
+    if (!cur) return;
+    log.info({ botId, chatId: cur.chatId, why }, "weixin account revived");
+    if (wake && w().enabled) {
+      const c = polls.get(botId);
+      if (c) c.abort();
+      else startPoll(cur);
+    }
+    pump(botId);
+  };
+
+  // 同一账号只留一个定时器, 取较早的那一刻: 晚的会在早的那次 pump 里重新算出来。
   const schedule = (botId: string, ms: number): void => {
-    if (timers.has(botId)) return;
-    timers.set(botId, setTimeout(() => { timers.delete(botId); pump(botId); }, Math.max(50, ms)));
+    const at = Date.now() + Math.max(50, ms);
+    const cur = timers.get(botId);
+    if (cur && cur.at <= at) return;
+    if (cur) clearTimeout(cur.t);
+    timers.set(botId, { at, t: setTimeout(() => { timers.delete(botId); pump(botId); }, at - Date.now()) });
   };
 
   // 同一账号的出站串行: 两次 pump 交叠会把同一份 outbox 发两遍。
-  const pump = (botId: string): void => {
-    const prev = pumps.get(botId) ?? Promise.resolve();
-    const next = prev.then(() => flushOnce(botId)).catch((e) => log.error({ botId, err: (e as Error).message }, "weixin pump failed"));
+  const chain = (botId: string, f: () => Promise<void>): Promise<void> => {
+    const next = (pumps.get(botId) ?? Promise.resolve()).then(f).catch((e) => log.error({ botId, err: (e as Error).message }, "weixin pump failed"));
     pumps.set(botId, next);
+    return next;
+  };
+  const pump = (botId: string): void => void chain(botId, () => flushOnce(botId));
+
+  const cardTitle = (a: WxAccount): string => (a.outbox.find((o) => o.card)?.text.split("\n")[0] ?? "").slice(0, 40);
+  const noteHold = (a: WxAccount, why: Extract<Plan, { kind: "hold" }>["why"]): void => {
+    if (why === "stale" && !a.staleNoted) {
+      patch(a.botId, () => ({ staleNoted: true }));
+      tell(a, `📭 微信 \`${a.chatId}\` 那头久没说话, ${a.outbox.length} 条消息发不出去, 压着 —— 在微信里随便说一句就会取回`);
+    }
+    if (why === "cap") {
+      log.info({ botId: a.botId, held: a.outbox.length }, "weixin outbox held (cap)");
+      // 微信里那条「额度用完」提示人未必在意; 压着的是等人点的卡, 审批就挂着 —— 企微那头得知道。
+      if (a.outbox.some((o) => o.card) && !a.capNoted) {
+        patch(a.botId, () => ({ capNoted: true }));
+        tell(a, `🃏 微信 \`${a.chatId}\` 这一轮出站额度用完, 压着 ${a.outbox.length} 条, 含待答卡「${cardTitle(a)}」—— 对方在微信里随便说一句就会发出`);
+      }
+    }
   };
 
   const flushOnce = async (botId: string): Promise<void> => {
     const a = db.get(botId);
-    if (!a || stopped || a.state !== "live") return;
+    if (!isLive(a) || stopped) return;
     const plan = planFlush(a, Date.now(), w());
     if (plan.kind === "wait") return schedule(botId, plan.ms);
     if (plan.kind === "hold") {
-      if (plan.why === "stale" && !a.staleNoted) {
-        patch(botId, () => ({ staleNoted: true }));
-        tell(a, `📭 微信 \`${a.chatId}\` 那头久没说话, ${a.outbox.length} 条消息发不出去, 压着 —— 在微信里随便说一句就会取回`);
-      }
-      if (plan.why === "cap") log.info({ botId, held: a.outbox.length }, "weixin outbox held (cap)");
-      return;
+      stopTyping(botId);
+      return noteHold(a, plan.why);
     }
-    patch(botId, () => ({ outbox: [] }));
-    for (const [i, text] of plan.chunks.entries()) {
+    // 发出一段摘一段: 这次拿走的那几条 (mine) 换成「还没发的段 + 超额尾巴」, 发送期间新进来的原样留在后面。
+    let mine = new Set(plan.take);
+    const keep = (x: WxAccount, left: OutItem[]): OutItem[] => [...left, ...x.outbox.filter((o) => !mine.has(o.id))];
+    for (const [i, c] of plan.chunks.entries()) {
       const cur = db.get(botId);
-      if (!cur?.ctx) return;
-      const r = await sendText(cur.baseUrl, cur.botToken, cur.userId, cur.ctx.token, text);
+      if (stopped || !isLive(cur) || !cur.ctx) return;
+      const cid = c.cid ?? mintClientId();
+      const r = await sendText(cur.baseUrl, cur.botToken, cur.userId, cur.ctx.token, c.text, cid);
+      const later = plan.chunks.slice(i + 1).map((x) => outItem(x.text));
       if (r.ok) {
-        patch(botId, (x) => ({ ctx: x.ctx && { ...x.ctx, used: x.ctx.used + 1 }, lastOutAt: Date.now(), sent: (x.sent ?? 0) + 1 }));
-        log.info({ botId, len: text.length, msgId: (r.data as { message_id?: string } | undefined)?.message_id }, "weixin tx");
+        const left = [...later, ...plan.rest];
+        patch(botId, (x) => ({ outbox: keep(x, left), ctx: x.ctx && { ...x.ctx, used: x.ctx.used + 1 }, lastOutAt: Date.now(), sent: (x.sent ?? 0) + 1, rejects: 0 }));
+        mine = new Set(left.map((o) => o.id));
+        log.info({ botId, len: c.text.length, msgId: (r.data as { message_id?: string } | undefined)?.message_id }, "weixin tx");
         continue;
       }
-      // 没发出去的这一段和后面的, 原样塞回队头。
-      const back: OutItem[] = [...plan.chunks.slice(i).map((t) => ({ text: t, at: Date.now() })), ...plan.rest];
       const kind = classifySendFail(r);
-      log.warn({ botId, ret: r.ret, errcode: r.errcode, errmsg: r.errmsg, kind }, "weixin tx failed");
+      const rejects = kind === "bad" ? (cur.rejects ?? 0) + 1 : 0;
+      const drop = rejects >= REJECT_DROP;
+      log.warn({ botId, status: r.status, ret: r.ret, errcode: r.errcode, errmsg: r.errmsg, kind, rejects }, "weixin tx failed");
+      // 写回: 一段都没发、也不用重发同一个 client_id → outbox 原样不动 (卡片标记留着); 否则换成没发的那几段。
+      const untouched = i === 0 && kind !== "net" && !drop;
+      const back = [...(drop ? [] : [outItem(c.text, kind === "net" ? { cid } : {})]), ...later, ...plan.rest];
       patch(botId, (x) => ({
-        outbox: [...back, ...x.outbox],
+        ...(untouched ? {} : { outbox: keep(x, back) }),
         failed: (x.failed ?? 0) + 1,
+        rejects: drop ? 0 : rejects,
         ...(kind === "rate" ? { pausedUntil: Date.now() + w().ratePauseMin * 60_000 } : {}),
-        ...(kind === "stale" ? { ctx: undefined } : {}),
+        ...(kind === "bad" && !drop ? { ctx: undefined, staleNoted: true } : {}),
       }));
       const after = db.get(botId)!;
       if (kind === "dead") return expire(after, `token 失效 ${r.ret ?? r.errcode}`);
@@ -285,40 +382,52 @@ export const startWeixin = ({ cfg, log, onBound, notifyWecom }: WeixinDeps): Wei
         return schedule(botId, w().ratePauseMin * 60_000);
       }
       if (kind === "net") return schedule(botId, 30_000);
-      return void flushOnce(botId); // stale: 走 hold 分支报一次
+      const why = `${r.status && r.status >= 400 ? `HTTP ${r.status} ` : ""}${r.errmsg ?? r.ret ?? r.errcode ?? ""}`.trim();
+      if (drop) {
+        tell(after, `🗑️ 微信 \`${after.chatId}\` 换了新 token 仍拒收这一段 (${why}), 已丢弃, 后面的照发:\n> ${c.text.slice(0, 120).replace(/\n/g, " ")}`);
+        return pump(botId);
+      }
+      // 第一次拒收: 多半是 context_token 失效, 压着等人再开口; 换了新 token 还拒才丢 (见上)。
+      tell(after, `⚠️ 微信 \`${after.chatId}\` 拒收 (${why}), 先当 token 过期压着 ${after.outbox.length} 条 —— 对方再说一句会重试, 再被拒就丢弃那一段`);
+      return;
     }
-    const left = db.get(botId);
-    if (left && plan.rest.length) patch(botId, (x) => ({ outbox: [...plan.rest, ...x.outbox] }));
-    else if (left?.outbox.length) pump(botId); // 发送期间又进来的
     stopTyping(botId);
+    if (db.get(botId)?.outbox.length) pump(botId); // 超额的尾巴 (走 hold 报一次) / 发送期间又进来的
   };
 
   const send = (chatId: string, text: string, opts: { card?: boolean } = {}): void => {
     const a = byChat(chatId);
     if (!a || !text.trim()) return;
-    patch(a.botId, (x) => ({ outbox: [...x.outbox, { text, at: Date.now(), ...(opts.card ? { card: true } : {}) }] }));
+    const cur = patch(a.botId, (x) => ({ outbox: trimOutbox([...x.outbox, outItem(text, opts.card ? { card: true } : {})]) }));
+    if (cur && cur.outbox.length >= OUTBOX_MAX) log.warn({ botId: a.botId, live: isLive(cur) }, "weixin outbox full — oldest text dropped");
     pump(a.botId);
   };
 
   // ── 正在输入 ──
-  const typingOf = (botId: string): { ticket?: string; ticketAt?: number; lastAt?: number; on?: boolean } =>
-    typingState.get(botId) ?? (typingState.set(botId, {}), typingState.get(botId)!);
-  const stopTyping = (botId: string): void => {
+  // 开 / 关走同一条链: 开的请求还在取 ticket 时来了关, 关必须排在它后面, 否则一直亮着。
+  const typingOf = (botId: string): Typing =>
+    typingState.get(botId) ?? (typingState.set(botId, { chain: Promise.resolve() }), typingState.get(botId)!);
+  const typingStep = (botId: string, f: (t: Typing, a: WxAccount) => Promise<void>): void => {
     const t = typingOf(botId);
-    const a = db.get(botId);
-    if (!t.on || !t.ticket || !a) return;
-    t.on = false;
-    void sendTyping(a.baseUrl, a.botToken, a.userId, t.ticket, false);
+    t.chain = t.chain.then(() => {
+      const a = db.get(botId);
+      return isLive(a) ? f(t, a) : undefined;
+    }).catch(() => undefined);
   };
+  const stopTyping = (botId: string): void => typingStep(botId, async (t, a) => {
+    if (!t.on || !t.ticket) return;
+    t.on = false;
+    await sendTyping(a.baseUrl, a.botToken, a.userId, t.ticket, false);
+  });
   const typing = (chatId: string, on: boolean): void => {
     const a = byChat(chatId);
-    if (!a || !w().typing || a.state !== "live") return;
+    if (!a || !w().typing || !isLive(a)) return;
     if (!on) return stopTyping(a.botId);
     const t = typingOf(a.botId);
     const now = Date.now();
     if (t.lastAt && now - t.lastAt < TYPING_EVERY_MS) return;
     t.lastAt = now;
-    void (async () => {
+    typingStep(a.botId, async (t, a) => {
       if (!t.ticket || now - (t.ticketAt ?? 0) > TYPING_TICKET_MS) {
         const r = await getTypingTicket(a.baseUrl, a.botToken, a.userId, a.ctx?.token);
         if (!r.ok || !r.data?.typing_ticket) return;
@@ -327,7 +436,7 @@ export const startWeixin = ({ cfg, log, onBound, notifyWecom }: WeixinDeps): Wei
       }
       const r = await sendTyping(a.baseUrl, a.botToken, a.userId, t.ticket, true);
       t.on = r.ok;
-    })().catch(() => undefined);
+    });
   };
 
   // ── 入站 ──
@@ -347,7 +456,7 @@ export const startWeixin = ({ cfg, log, onBound, notifyWecom }: WeixinDeps): Wei
     }
     const now = Date.now();
     // 人一开口: 新 token、额度归零、静默提示复位 —— 然后先把压着的发出去。
-    patch(a.botId, () => ({ lastInAt: now, staleNoted: false, ...(m.context_token ? { ctx: { token: m.context_token, at: now, used: 0 } } : {}) }));
+    patch(a.botId, () => ({ lastInAt: now, staleNoted: false, capNoted: false, ...(m.context_token ? { ctx: { token: m.context_token, at: now, used: 0 } } : {}) }));
     pump(a.botId);
     const msg = normalizeInbound(a.chatId, m, now);
     log.info({ botId: a.botId, chatId: a.chatId, len: msg.text.length, images: msg.images.length, files: msg.files.length }, "weixin rx");
@@ -359,25 +468,38 @@ export const startWeixin = ({ cfg, log, onBound, notifyWecom }: WeixinDeps): Wei
     let timeoutMs = LONG_POLL_MS;
     while (!stopped) {
       const a = db.get(botId);
-      if (!a || a.state !== "live") return;
+      if (!a) return;
       const ctl = new AbortController();
       polls.set(botId, ctl);
+      // 掉线的号歇到 retryAt 再试; 歇着时被 kick (切网) 就再算一遍剩多久, 被 revive 就醒来接着收。
+      const rest = a.state === "expired" ? (a.retryAt ?? 0) - Date.now() : 0;
+      if (rest > 0) {
+        await sleep(rest, ctl.signal);
+        if (stopped || polls.get(botId) !== ctl) return;
+        continue;
+      }
       const r = await getUpdates(a.baseUrl, a.botToken, a.cursor, timeoutMs, ctl.signal);
       if (stopped || polls.get(botId) !== ctl) return; // 被 unbind / 重绑替下
       if (ctl.signal.aborted) continue; // kick: 立即重连
       if (r.ok) {
         fails = 0;
         timeoutMs = r.data?.longpolling_timeout_ms || LONG_POLL_MS;
+        // 歇够了还收得到 = token 又能用了。retryAt 没到 (发送那头刚报 -14) 先不信这一轮。
+        const cur = db.get(botId);
+        if (cur?.state === "expired" && (cur.retryAt ?? 0) <= Date.now()) revive(botId, "getupdates ok", false);
         const buf = r.data?.get_updates_buf;
         if (buf) patch(botId, () => ({ cursor: buf }));
         for (const m of r.data?.msgs ?? []) accept(db.get(botId)!, m);
         continue;
       }
-      if (r.ret === STALE_TOKEN || r.errcode === STALE_TOKEN) return expire(a, `getupdates ${r.ret ?? r.errcode} ${r.errmsg ?? ""}`.trim());
+      if (r.ret === STALE_TOKEN || r.errcode === STALE_TOKEN) {
+        expire(a, `getupdates ${r.ret ?? r.errcode} ${r.errmsg ?? ""}`.trim());
+        continue;
+      }
       fails += 1;
       // 合盖过夜 / 切网: 永不放弃, 封顶 30s (与 ws.ts 的 MAX_RECONNECT=-1 同一个理由)。
       const backoff = Math.min(30_000, 1000 * 2 ** Math.min(fails, 5));
-      log.warn({ botId, fails, backoff, net: r.net, ret: r.ret, errmsg: r.errmsg }, "weixin getupdates failed");
+      log.warn({ botId, fails, backoff, net: r.net, status: r.status, ret: r.ret, errmsg: r.errmsg }, "weixin getupdates failed");
       await sleep(backoff, ctl.signal);
     }
   };
@@ -385,7 +507,7 @@ export const startWeixin = ({ cfg, log, onBound, notifyWecom }: WeixinDeps): Wei
   const startPoll = (a: WxAccount): void => {
     polls.get(a.botId)?.abort();
     polls.delete(a.botId);
-    void notifyLifecycle(a.baseUrl, a.botToken, true);
+    if (a.state === "live") void notifyLifecycle(a.baseUrl, a.botToken, true);
     void poll(a.botId).catch((e) => log.error({ botId: a.botId, err: (e as Error).message }, "weixin poll crashed"));
     pump(a.botId);
   };
@@ -418,6 +540,7 @@ export const startWeixin = ({ cfg, log, onBound, notifyWecom }: WeixinDeps): Wei
     for (const o of olds) {
       polls.get(o.botId)?.abort();
       polls.delete(o.botId);
+      clearBot(o.botId);
       db.drop(o.botId);
     }
     const acct = save({
@@ -447,6 +570,8 @@ export const startWeixin = ({ cfg, log, onBound, notifyWecom }: WeixinDeps): Wei
     const deadline = l.startedAt + LOGIN_DEADLINE_MS;
     while (!l.ctl.signal.aborted && Date.now() < deadline) {
       const code = l.code;
+      // 只清这一轮带出去的那个码: 请求在途时人可能刚交了新码, 别把新码一起清掉。
+      const spent = (): void => { if (code && l.code === code) l.code = undefined; };
       const r = await getQrcodeStatus(l.base, l.qrcode, code, l.ctl.signal);
       if (l.ctl.signal.aborted) return;
       if (!r.ok) {
@@ -459,34 +584,41 @@ export const startWeixin = ({ cfg, log, onBound, notifyWecom }: WeixinDeps): Wei
         case "wait":
           break;
         case "scaned":
+          spent(); // 码已被接受, 之后别再带着它问
           if (l.status !== "scaned") set(l, { status: "scaned", message: "已扫码, 请在微信里点确认" });
           break;
         case "need_verifycode":
-          // 带着码还回 need_verifycode = 码不对; 清掉等人重输, 期间别空转。
-          if (code) { l.code = undefined; set(l, { status: "need_code", message: "配对码不对, 请重新输入" }); }
+          // 带着码还回 need_verifycode = 码不对; 清掉等人重输。
+          if (code) { spent(); set(l, { status: "need_code", message: "配对码不对, 请重新输入" }); }
           else if (l.status !== "need_code") set(l, { status: "need_code", message: "微信上显示了一串配对码, 请把它发回来" });
-          await sleep(2_000, l.ctl.signal);
           break;
         case "verify_code_blocked":
           return finish(l, { status: "failed", message: "配对码错误次数过多, 请稍后重新发起绑定" });
         case "scaned_but_redirect":
           if (typeof body.redirect_host === "string" && body.redirect_host) l.base = `https://${body.redirect_host}`;
           break;
-        case "binded_redirect":
-          return finish(l, { status: "already", message: "这个微信已经绑在本机, 无需重复绑定 —— 直接在微信里说话" });
+        case "binded_redirect": {
+          // 服务端认出了本机某个 token: 掉线 (-14) 的号可能其实还能用 —— 叫醒它们重试, 不行会再歇回去。
+          const dead = all().filter((a) => a.state === "expired");
+          for (const a of dead) revive(a.botId, "binded_redirect");
+          return finish(l, { status: "already", message: `这个微信已经绑在本机, 无需重复绑定 —— 直接在微信里说话${dead.length ? ` (掉线的 ${dead.length} 个号已唤醒重连)` : ""}` });
+        }
         case "expired": {
           if (l.refresh >= MAX_QR_REFRESH) return finish(l, { status: "failed", message: "二维码多次过期, 请重新发起绑定" });
           const q = await getBotQrcode(w().baseUrl || ILINK_BASE, all().map((a) => a.botToken));
           if (!q.ok || !q.data?.qrcode) return finish(l, { status: "failed", message: `刷新二维码失败: ${q.errmsg ?? q.ret ?? "unknown"}` });
           l.qrcode = q.data.qrcode;
+          l.code = undefined; // 旧码配的是旧二维码
           set(l, { status: "qr", qrUrl: q.data.qrcode_img_content, refresh: l.refresh + 1, message: `二维码已刷新 (${l.refresh + 1}/${MAX_QR_REFRESH})` });
           break;
         }
         case "confirmed":
           return confirm(l, body);
         default:
-          await sleep(1_000, l.ctl.signal);
+          break;
       }
+      // 每轮固定歇 1s (官方插件同款): 服务端对 scaned 之类不 hold 时, 不歇就是 8 分钟的热循环。
+      await sleep(1_000, l.ctl.signal);
     }
     if (!l.ctl.signal.aborted) finish(l, { status: "failed", message: "等扫码超时 (8 分钟), 请重新发起绑定" });
   };
@@ -528,6 +660,7 @@ export const startWeixin = ({ cfg, log, onBound, notifyWecom }: WeixinDeps): Wei
     if (!a) return { ok: false, reason: `没有绑定 ${chatId}` };
     polls.get(a.botId)?.abort();
     polls.delete(a.botId);
+    clearBot(a.botId);
     void notifyLifecycle(a.baseUrl, a.botToken, false);
     db.drop(a.botId);
     log.info({ botId: a.botId, chatId }, "weixin unbound");
@@ -546,8 +679,13 @@ export const startWeixin = ({ cfg, log, onBound, notifyWecom }: WeixinDeps): Wei
   };
 
   const uploadAndSend = async (botId: string, f: { path: string; kind: WxMediaKind; name: string }): Promise<{ ok: true } | { ok: false; reason: string }> => {
+    const a0 = db.get(botId);
+    if (!isLive(a0)) return { ok: false, reason: db.get(botId)?.state === "expired" ? "微信通道已掉线, 先 /wx bind 重新绑定" : "微信通道未开启" };
+    // 媒体也守最小间隔: 紧跟在 caption 后面直发, 正是频控盯的那种连发。
+    const gap = (a0.lastOutAt ?? 0) + w().minGapSec * 1000 - Date.now();
+    if (gap > 0) await sleep(gap);
     const a = db.get(botId);
-    if (!a || a.state !== "live") return { ok: false, reason: "微信通道已掉线, 先 /wx bind 重新绑定" };
+    if (!isLive(a)) return { ok: false, reason: "微信通道已掉线, 先 /wx bind 重新绑定" };
     const now = Date.now();
     if (a.pausedUntil && a.pausedUntil > now) return { ok: false, reason: `微信被频控, ${Math.ceil((a.pausedUntil - now) / 60_000)} 分钟后再试` };
     if (!a.ctx || now - a.ctx.at > w().ctxTtlHours * 3600_000) return { ok: false, reason: "微信那头久没说话, context_token 已过期 —— 等对方在微信里说一句再发" };
@@ -568,8 +706,9 @@ export const startWeixin = ({ cfg, log, onBound, notifyWecom }: WeixinDeps): Wei
       : { type: ITEM.file, file_item: { media, file_name: f.name, len: String(raw.length) } };
     const r = await sendItems(a.baseUrl, a.botToken, a.userId, a.ctx.token, [item]);
     if (!r.ok) {
+      // 拒收只回 reason 不清 token: 媒体不进账本, 调用方当场知道, 文字出站不该跟着被压。
       const kind = classifySendFail(r);
-      patch(botId, (x) => ({ failed: (x.failed ?? 0) + 1, ...(kind === "rate" ? { pausedUntil: Date.now() + w().ratePauseMin * 60_000 } : {}), ...(kind === "stale" ? { ctx: undefined } : {}) }));
+      patch(botId, (x) => ({ failed: (x.failed ?? 0) + 1, ...(kind === "rate" ? { pausedUntil: Date.now() + w().ratePauseMin * 60_000 } : {}) }));
       if (kind === "dead") expire(db.get(botId)!, `token 失效 ${r.ret ?? r.errcode}`);
       return { ok: false, reason: `微信拒收 (${kind}): ${r.errmsg ?? r.ret ?? ""}` };
     }
@@ -578,14 +717,32 @@ export const startWeixin = ({ cfg, log, onBound, notifyWecom }: WeixinDeps): Wei
     return { ok: true };
   };
 
+  // 排着的文字先发完 (按间隔等, 顺序不乱: caption 在前、文件在后); 被压着 (无 token / 额度) 的不等。
+  // 频控暂停这种长等待不在这里干等 —— uploadAndSend 会如实回 reason。
+  const drainText = async (botId: string): Promise<void> => {
+    for (let n = 0; n < 8; n++) {
+      const a = db.get(botId);
+      if (!isLive(a) || stopped) return;
+      const plan = planFlush(a, Date.now(), w());
+      if (plan.kind === "hold") return;
+      if (plan.kind === "wait") {
+        if (plan.ms > w().minGapSec * 1000 + 1_000) return;
+        await sleep(plan.ms);
+        continue;
+      }
+      await flushOnce(botId);
+    }
+  };
+
   const sendMedia: Weixin["sendMedia"] = (chatId, f) => {
     const a = byChat(chatId);
     if (!a) return Promise.resolve({ ok: false, reason: `没有绑定 ${chatId}` });
-    // 排进同一条出站链: 前面排着的文字先走 (仍受间隔约束 —— 媒体不等间隔, 但排在它们后面)。
-    const prev = pumps.get(a.botId) ?? Promise.resolve();
-    const run = prev.then(() => flushOnce(a.botId)).then(() => uploadAndSend(a.botId, f)).catch((e: Error) => ({ ok: false as const, reason: e.message }));
-    pumps.set(a.botId, run.then(() => undefined));
-    return run;
+    let out: { ok: true } | { ok: false; reason: string } = { ok: false, reason: "未执行" };
+    const run = chain(a.botId, async () => {
+      await drainText(a.botId);
+      out = await uploadAndSend(a.botId, f).catch((e: Error) => ({ ok: false as const, reason: e.message }));
+    });
+    return run.then(() => out);
   };
 
   const kick: Weixin["kick"] = (reason) => {
@@ -593,20 +750,33 @@ export const startWeixin = ({ cfg, log, onBound, notifyWecom }: WeixinDeps): Wei
     for (const c of polls.values()) c.abort();
   };
 
+  const start: Weixin["start"] = () => {
+    if (started) return;
+    started = true;
+    // 开机: 只在开关开着时收发; 关着的时候账号原样留着, 再开即续。掉线的号也起轮询 —— 它歇到 retryAt 再试。
+    if (w().enabled) for (const a of all()) startPoll(a);
+  };
+
   const stop: Weixin["stop"] = async () => {
     stopped = true;
     for (const c of polls.values()) c.abort();
-    for (const t of timers.values()) clearTimeout(t);
+    for (const t of timers.values()) clearTimeout(t.t);
     for (const l of logins.values()) l.ctl.abort();
+    // 等在途的那一段发完再走 (sendmessage 自带 15s 超时, 这里再封个顶): 发出一段才摘一段,
+    // 被打断的也还在 outbox 里, 等这一下只是少一次重发。
+    await Promise.race([Promise.allSettled([...pumps.values()]), sleep(5_000)]);
     await Promise.all(all().filter((a) => a.state === "live").map((a) => notifyLifecycle(a.baseUrl, a.botToken, false)));
   };
 
-  // 开机: 只在开关开着时收发; 关着的时候账号原样留着, 再开即续。
-  if (w().enabled) for (const a of all().filter((x) => x.state === "live")) startPoll(a);
+  // 老版本落盘的 outbox 条目没有 id (发出一段摘一段要靠它)。
+  for (const a of all().filter((x) => x.outbox.some((o) => !o.id))) {
+    patch(a.botId, (x) => ({ outbox: x.outbox.map((o) => (o.id ? o : outItem(o.text, { ...(o.card ? { card: true } : {}), at: o.at }))) }));
+  }
   log.info({ enabled: w().enabled, accounts: all().length }, "weixin init");
 
   return {
     owns: (chatId) => !!byChat(chatId),
+    live: (chatId) => isLive(byChat(chatId)),
     accountOf: byChat,
     list: all,
     send,
@@ -619,6 +789,7 @@ export const startWeixin = ({ cfg, log, onBound, notifyWecom }: WeixinDeps): Wei
     bindOf,
     unbind,
     kick,
+    start,
     stop,
   };
 };

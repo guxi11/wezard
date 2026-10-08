@@ -14,7 +14,8 @@ import { bindCliBackends, projectDirsFor, type CliBackendName } from "../shared/
 import { startWs } from "./ws.js";
 import { startWeixin } from "./weixin.js";
 import { installWeixinPort } from "./weixin-port.js";
-import { bindWxCommands, makeOnBound, makeWxCommands, routeSendMedia, weixinSendMedia, wxRoutes } from "./weixin-cmd.js";
+import { bindWxCommands, makeOnBound, makeWxCommands, routeSendMedia, weixinSendMedia, wxAdmins, wxRoutes } from "./weixin-cmd.js";
+import { bindChatReach } from "./reach.js";
 import { planMedia, type MediaKind, type SendMedia } from "./media.js";
 import { aibotSendMedia } from "./aibot-media.js";
 import { startNetWatch } from "./net-watch.js";
@@ -170,12 +171,9 @@ const main = async (): Promise<void> => {
     ws.reconnect(`network changed: ${from || "<offline>"} → ${to}`);
     wx.kick(`network changed → ${to}`);
   });
-  // Wrap replyStream / replyStreamWithCard before any module sends —
-  // last-response tracker enables inbound's `quote` dedup of bot self-replies,
-  // and its chat-gate drops header-only pushes (empty messages) daemon-wide.
-  installResponseTracker(ws.client, log.child({ mod: "chat-gate" }));
-  // 微信 ClawBot: 每个扫码绑定的微信用户 = 一个群聊 `chat:wx_…`。分流层套在 tracker 外面 ——
-  // 微信出站不该等企微长连接连上; 其余模块照旧只认 ws.client。onBound 用到的 bridge 在下面
+  // 微信 ClawBot: 每个扫码绑定的微信用户 = 一个群聊 `chat:wx_…`。分流层装在 tracker 里面 (先装) ——
+  // tracker 的空消息 gate / last-response 记录照样覆盖微信; 其余模块照旧只认 ws.client。
+  // 这里只建状态, 收发要等下面的入站监听全装好 (wx.start)。onBound 用到的 bridge 在下面
   // 才立起来, 绑定只会在开机很久之后发生, 闭包里取得到。
   const wxLog = log.child({ mod: "weixin" });
   const wx = startWeixin({
@@ -191,6 +189,13 @@ const main = async (): Promise<void> => {
       .catch((e: unknown) => wxLog.warn({ to: p, err: errText(e) }, "weixin → wecom notice failed")),
   });
   installWeixinPort(ws.client, wx, wxLog);
+  // 审批 / ask / outbound 的「送得到吗」: 微信 chat 看它自己的号, 不看企微长连接。
+  bindChatReach((c) => (wx.owns(c) ? wx.live(c) : undefined));
+  // Wrap replyStream / replyStreamWithCard before any module sends —
+  // last-response tracker enables inbound's `quote` dedup of bot self-replies,
+  // and its chat-gate drops header-only pushes (empty messages) daemon-wide.
+  // 微信出站不走企微长连接, 不必等它连上。
+  installResponseTracker(ws.client, log.child({ mod: "chat-gate" }), (c) => wx.owns(c));
   const mirrorStore = loadMirrorStore(cfg.wrc.mirror.attachmentsFile);
   // 定时任务表 —— 每条任务是 ~/.wezard/tasks/<id>.task.mjs 一份可注入代码的配置
   // (见 shared/task-file.ts)。目录是热加载的: wizard 改完文件不用 reload 守护进程。
@@ -276,7 +281,19 @@ const main = async (): Promise<void> => {
   http.register("POST /claim/reset", guarded(makeClaimResetHandler()));
   http.register("GET /detail", makeDetailHandler(log.child({ mod: "detail" })));
   for (const [key, handler] of Object.entries(chatHandlers())) http.register(key, handler);
-  for (const [key, handler] of Object.entries(wxRoutes({ cfg, wx, sourcePath }))) http.register(key, key === "GET /wx/list" ? handler : guarded(handler));
+  // 终端 / 持口令的进程发起绑定: 先推确认卡给审批人 (口令每个 wizard 都读得到), 点了才出二维码。
+  const confirmBind = async (name: string): Promise<boolean> => {
+    const to = wxAdmins(cfg)[0];
+    if (!to) throw new Error("没有审批人 (approval.approvers / defaultChat / allowFrom 里都没有 user:)");
+    const { decided } = await requestConfirm({
+      client: ws.client, principal: to, who: "本机 `wezard wx bind`",
+      title: "微信绑定待确认",
+      body: `本机有进程 (终端或持 daemon 口令的 wizard) 要绑定一个新微信${name ? ` (群名「${name}」)` : ""}: 同意才会出二维码, 扫码的那个微信将能驱动本机。`,
+      timeoutMs: 180_000,
+    });
+    return decided;
+  };
+  for (const [key, handler] of Object.entries(wxRoutes({ cfg, wx, sourcePath, confirmBind }))) http.register(key, guarded(handler));
   bindWxCommands(makeWxCommands({
     cfg, sourcePath, log: wxLog, wx,
     sendWecom: (p, md) => void ws.client
@@ -285,6 +302,9 @@ const main = async (): Promise<void> => {
     sendWecomMedia: aibotSendMedia(ws.client, log.child({ mod: "media" })),
   }));
   installAskEventListener(ws.client, log.child({ mod: "ask" }));
+  // 入站监听 (inbound / approval / ask) 都装好了才开收: 首轮 getupdates 会立刻带回 reload 期间
+  // 人发的话 (含回菜单的数字), 游标随即前移 —— 早了就是永久丢。
+  wx.start();
 
   // 智能机器人 doc / smartsheet / contact MCP 桥接 — 总是注册路由, 失败让
   // 错误透传到上游 (Claude / curl)。requesterUserId 解析顺序:

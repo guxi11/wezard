@@ -46,6 +46,12 @@ const botHeaders = (token?: string): Record<string, string> => ({
 const baseInfo = { channel_version: CHANNEL_VERSION, bot_agent: BOT_AGENT };
 const join = (base: string, path: string): string => `${base.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
 
+/** message_id 之类是 uint64: 超过 2^53 后 JSON.parse 会把相邻 id 舍入成同一个 double (去重误判、丢消息)。
+ *  解析前把这几个键的裸数字值加上引号 (官方插件 parseWeixinApiJson 同款)。只认对象键:
+ *  JSON 字符串里的引号都被转义了, `"message_id":` 不会出现在字符串值里。 */
+const LOSSLESS = /("(?:message_id|msg_id|svr_id)"\s*:\s*)(-?\d+)/g;
+export const parseLossless = (text: string): unknown => JSON.parse(text.replace(LOSSLESS, '$1"$2"'));
+
 /** 业务码: 有 ret 看 ret, 有 errcode 看 errcode; 两个都没有 = 成功 (sendTyping 之类不回码)。 */
 const verdict = <T>(status: number, body: unknown): Res<T> => {
   const b = (body ?? {}) as { ret?: number; errcode?: number; errmsg?: string };
@@ -61,9 +67,10 @@ const call = async <T>(url: string, init: RequestInit, timeoutMs: number, signal
   try {
     const res = await fetch(url, { ...init, signal: ctl.signal });
     const text = await res.text();
-    if (!res.ok) return { ok: false, net: true, status: res.status, errmsg: text.slice(0, 300) };
+    // 5xx / 429 是暂时的 (退避重试); 别的 4xx 是这一次请求本身不对, 重试同一份只会一直堵着队头。
+    if (!res.ok) return { ok: false, net: res.status >= 500 || res.status === 429, status: res.status, errmsg: text.slice(0, 300) };
     let body: unknown = {};
-    try { body = text ? JSON.parse(text) : {}; } catch { return { ok: false, status: res.status, errmsg: `non-json: ${text.slice(0, 200)}` }; }
+    try { body = text ? parseLossless(text) : {}; } catch { return { ok: false, status: res.status, errmsg: `non-json: ${text.slice(0, 200)}` }; }
     return verdict<T>(res.status, body);
   } catch (e) {
     const err = e as Error & { cause?: { code?: string } };
@@ -139,12 +146,15 @@ export const STALE_TOKEN = -14;
 export const getUpdates = (base: string, token: string, buf: string, timeoutMs: number, signal?: AbortSignal): Promise<Res<Updates>> =>
   post<Updates>(base, "ilink/bot/getupdates", token, { get_updates_buf: buf }, timeoutMs + 5_000, signal);
 
-export const sendItems = (base: string, token: string, to: string, contextToken: string, items: MessageItem[]): Promise<Res<{ message_id?: string }>> =>
+export const mintClientId = (): string => `wezard-${randomBytes(8).toString("hex")}`;
+
+/** `clientId`: 超时重发同一条时传回上次的 —— 服务端可能已经收下了, 同一个 client_id 才认得出是重发。 */
+export const sendItems = (base: string, token: string, to: string, contextToken: string, items: MessageItem[], clientId = mintClientId()): Promise<Res<{ message_id?: string }>> =>
   post(base, "ilink/bot/sendmessage", token, {
     msg: {
       from_user_id: "",
       to_user_id: to,
-      client_id: `wezard-${randomBytes(8).toString("hex")}`,
+      client_id: clientId,
       message_type: 2,
       message_state: 2,
       context_token: contextToken,
@@ -152,8 +162,8 @@ export const sendItems = (base: string, token: string, to: string, contextToken:
     },
   });
 
-export const sendText = (base: string, token: string, to: string, contextToken: string, text: string): ReturnType<typeof sendItems> =>
-  sendItems(base, token, to, contextToken, [{ type: ITEM.text, text_item: { text } }]);
+export const sendText = (base: string, token: string, to: string, contextToken: string, text: string, clientId?: string): ReturnType<typeof sendItems> =>
+  sendItems(base, token, to, contextToken, [{ type: ITEM.text, text_item: { text } }], clientId);
 
 export const getTypingTicket = (base: string, token: string, user: string, contextToken?: string): Promise<Res<{ typing_ticket?: string }>> =>
   post(base, "ilink/bot/getconfig", token, { ilink_user_id: user, ...(contextToken ? { context_token: contextToken } : {}) }, 10_000);

@@ -3,6 +3,7 @@ import type { WSClient, TemplateCard } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
 import type { Handler } from "./http.js";
 import { json, readBody } from "./http.js";
+import { reachable } from "./reach.js";
 import { createPending, resolvePending } from "./pending.js";
 import { tagBadge } from "../shared/session-label.js";
 
@@ -27,7 +28,7 @@ export const makeCardHandler = (client: WSClient, log: Logger): Handler => {
       json(res, 400, { ok: false, error: "missing chat or card" });
       return;
     }
-    if (!client.isConnected) {
+    if (!reachable(client, chat)) {
       json(res, 503, { ok: false, error: "ws_disconnected" });
       return;
     }
@@ -70,7 +71,7 @@ export const makeAskHandler = (client: WSClient, log: Logger): Handler => {
       json(res, 400, { ok: false, error: "missing chat / title / options" });
       return;
     }
-    if (!client.isConnected) {
+    if (!reachable(client, chat)) {
       json(res, 503, { ok: false, error: "ws_disconnected" });
       return;
     }

@@ -3,6 +3,7 @@ import type { WSClient } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
 import type { Handler } from "./http.js";
 import { json, readBody } from "./http.js";
+import { reachable } from "./reach.js";
 import { withTagHeader } from "../shared/session-label.js";
 
 // Strip principal prefix (`user:` / `chat:`) AND `#tag` suffix so callers
@@ -30,7 +31,7 @@ export const makeMessageHandler = (client: WSClient, log: Logger): Handler => {
       json(res, 400, { ok: false, error: "missing chat or text" });
       return;
     }
-    if (!client.isConnected) {
+    if (!reachable(client, chat)) {
       json(res, 503, { ok: false, error: "ws_disconnected" });
       return;
     }
