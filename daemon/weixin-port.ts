@@ -12,7 +12,7 @@
 // 覆盖微信; tracker 只对微信 chat 不等企微长连接 (它注入的 ownTransport 谓词)。
 import type { WSClient, WsFrame, TemplateCard } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
-import { renderCard, renderAck, choicesOf, parseMenuReply, clickOf, mintCode, mdToPlain, WX_REQ as REQ, type Choices } from "../shared/wx-text.js";
+import { renderCard, renderAck, choicesOf, parseMenuReply, clickOf, mintCode, wxMarkdown, WX_REQ as REQ, type Choices } from "../shared/wx-text.js";
 import { getPending } from "./pending.js";
 import type { Weixin, WxInbound } from "./weixin.js";
 
@@ -51,8 +51,8 @@ export const installWeixinPort = (client: WSClient, wx: Weixin, log: Logger): We
 
   // ── 出站 ──
   const text = (chatId: string, md: string): void => {
-    const plain = mdToPlain(md);
-    if (plain) wx.send(chatId, plain);
+    const out = wxMarkdown(md);
+    if (out) wx.send(chatId, out);
   };
   const card = (chatId: string, c: TemplateCard): void => {
     const choices = choicesOf(c);

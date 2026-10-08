@@ -1,7 +1,7 @@
 // 微信 ClawBot 那一侧的文本形态 —— 全是纯函数。
 //
-// 微信不渲染 markdown、没有卡片按钮。企微那一侧的输出 (markdown 气泡、模板卡片)
-// 在这里被降成纯文本; 卡片降成「编号菜单」, 人回的数字再被解析回卡片上那个按钮的
+// 微信 ClawBot 会话渲染 markdown 的一个子集 (链接、粗体、代码、表格、H1-H4), 但没有卡片按钮。
+// 企微那一侧的输出 (markdown 气泡、模板卡片) 在这里被降到那个子集; 卡片降成「编号菜单」, 人回的数字再被解析回卡片上那个按钮的
 // key —— 于是审批 / 提问 / 计划选择的全部逻辑不必知道微信存在。
 
 /** ilink_user_id (`o9cq80…@im.wechat`) → 群聊 id `wx_o9cq80…`。确定性: 同一人重扫得到同一个群。 */
@@ -26,19 +26,16 @@ export const nickOf = (body: Record<string, unknown>): string =>
     .map((k) => body[k])
     .find((v): v is string => typeof v === "string" && v.trim() !== "")?.trim() ?? "";
 
-// ── markdown → 纯文本 ────────────────────────────────────────────────
+// ── 企微 markdown → 微信 ClawBot 认的子集 ─────────────────────────────
+// 对齐官方插件 StreamingMarkdownFilter (2.1.3 起): 链接 / 粗体 / 代码 / 表格 / H1-H4 / 引用原样留着,
+// 只剥它不认的。别再整段降纯文本 —— `[字](url)` 降成「字」就把链接吃了。
 const rules: ReadonlyArray<readonly [RegExp, string]> = [
-  [/^```[^\n]*\n?/gm, ""], // 围栏行
   [/!\[([^\]]*)\]\([^)]*\)/g, "$1"], // 图: 留 alt
-  [/\[([^\]]+)\]\((?:[^()\s]|\([^)]*\))+\)/g, "$1"], // 链接: 留字
   [/<\/?font[^>]*>/gi, ""], // 企微 markdown 的颜色标签
-  [/^#{1,6}\s+/gm, ""],
-  [/\*\*([^*\n]+)\*\*/g, "$1"],
-  [/__([^_\n]+)__/g, "$1"],
-  [/`([^`\n]+)`/g, "$1"],
+  [/^#{5,6}\s+/gm, ""],
   [/\n{3,}/g, "\n\n"],
 ];
-export const mdToPlain = (md: string): string => rules.reduce((s, [re, to]) => s.replace(re, to), md ?? "").trim();
+export const wxMarkdown = (md: string): string => rules.reduce((s, [re, to]) => s.replace(re, to), md ?? "").trim();
 
 /** 按段落 → 行 → 硬切的优先级切成 ≤max 字的片 (官方插件 4000)。 */
 export const chunkText = (s: string, max = 4000): string[] => {
@@ -90,7 +87,7 @@ export const renderCard = (c: CardLike, code: string): string => {
     c.quote_area?.title,
     c.quote_area?.quote_text,
     ...(c.horizontal_content_list ?? []).map((h) => `${h.keyname ?? ""}: ${h.value ?? ""}`),
-  ].filter((x): x is string => !!x && x.trim() !== "").map(mdToPlain);
+  ].filter((x): x is string => !!x && x.trim() !== "").map(wxMarkdown);
   const menu = labels(c).map((t, i) => `【${i + 1}】${t}`);
   const how = ch.kind === "none" ? "" : ch.kind === "vote" && ch.multi ? `回数字作答 (可多选, 如 "1 3") · 短码 ${code}` : `回数字作答 · 短码 ${code}`;
   return [...body, menu.join("  "), how].filter(Boolean).join("\n");
@@ -99,7 +96,7 @@ export const renderCard = (c: CardLike, code: string): string => {
 /** 卡片被点之后的新卡 → 一行回执 (按钮被替换成了一个说明结果的按钮)。 */
 export const renderAck = (c: CardLike, code: string): string => {
   const verdict = c.button_list?.[0]?.text || c.submit_button?.text || c.main_title?.title || "已处理";
-  return `${code} → ${mdToPlain(verdict)}`;
+  return `${code} → ${wxMarkdown(verdict)}`;
 };
 
 /** `1` / `k7q 1` / `k7q 1 3` / `1,3` → {code?, picks}; 不是菜单回复返回 undefined。 */

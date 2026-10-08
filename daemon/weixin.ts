@@ -419,7 +419,9 @@ export const startWeixin = (deps: WeixinDeps): Weixin => {
       return isLive(a) ? f(t, a) : undefined;
     }).catch(() => undefined);
   };
+  // 关了就把节流复位: 一段话发出去 (flush 末尾会关) 之后, 下一帧进度要当场把「正在输入」点回来, 不该再等满 5 秒。
   const stopTyping = (botId: string): void => typingStep(botId, async (t, a) => {
+    t.lastAt = undefined;
     if (!t.on || !t.ticket) return;
     t.on = false;
     await sendTyping(a.baseUrl, a.botToken, a.userId, t.ticket, false);
@@ -464,7 +466,8 @@ export const startWeixin = (deps: WeixinDeps): Weixin => {
     patch(a.botId, () => ({ lastInAt: now, staleNoted: false, capNoted: false, ...(m.context_token ? { ctx: { token: m.context_token, at: now, used: 0 } } : {}) }));
     pump(a.botId);
     const msg = normalizeInbound(a.chatId, m, now);
-    log.info({ botId: a.botId, chatId: a.chatId, len: msg.text.length, images: msg.images.length, files: msg.files.length }, "weixin rx");
+    // lagMs = 人在手机上发出 → 长轮询交到我们手上 (服务端投递 + 网络), 量「人觉得慢」先看它。
+    log.info({ botId: a.botId, chatId: a.chatId, len: msg.text.length, images: msg.images.length, files: msg.files.length, ...(m.create_time_ms ? { lagMs: now - m.create_time_ms } : {}) }, "weixin rx");
     try { inbound(msg); } catch (e) { log.error({ err: (e as Error).message }, "weixin inbound handler threw"); }
   };
 
