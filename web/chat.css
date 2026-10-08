@@ -366,6 +366,9 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 .mrow.mine .mcol { align-items: flex-end }
 .mwho { font-size: 11.5px; color: var(--mute); display: flex; gap: 6px; align-items: center; flex-wrap: wrap }
 .mwho .nm { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+/* 发言头 `🦊.a:` (WZ.said): 头像贴着名字、冒号贴着名字, 不吃 .mwho 的 gap。 */
+.mwho .said { display: inline-flex; align-items: center; min-width: 0; max-width: 100% }
+.mwho .said .av { margin-right: 2px }
 .mwho .ch { font-size: 10.5px; border-radius: 4px; padding: 0 4px }
 .mwho .ch.priv { color: var(--priv); background: #9a5b1014 }
 /* 时刻只此一处 —— 气泡外, 跟着名字走。等宽数字让一列时间对得齐。 */
@@ -397,16 +400,16 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .mchip.rcpt:is(.st-timeout, .st-silent, .st-dead, .st-canceled) { color: #cf222e; background: #cf222e10 }
 /* 说给谁 (inline): 塞进正文第一段开头的头像 + 名字, 像行内 mention; 小圆角底色, 点它走移交行同一套跳转。 */
 .to-in {
-  display: inline-flex; align-items: center; gap: 3px; vertical-align: baseline; padding: 1px 6px; border-radius: 5px;
+  display: inline-flex; align-items: center; gap: 0; vertical-align: baseline; padding: 1px 6px; border-radius: 5px;
   line-height: 18px; background: color-mix(in srgb, #0969da 10%, transparent); color: var(--ink);
   cursor: pointer; transition: background .12s;
 }
 .to-in:hover { background: color-mix(in srgb, #0969da 20%, transparent) }
-.to-in .av { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--line); background: var(--card); font-size: 10px; line-height: 14px; text-align: center; align-self: center }
+.to-in .av { margin-right: 2px; width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--line); background: var(--card); font-size: 10px; line-height: 14px; text-align: center; align-self: center }
 .to-in .nm { font-weight: 500; font-size: 13px }
 .to-in .nm::before { content: none }
 /* 移交行里的对方: 小头像 + 名字。整行是入口 (开双方的往来), 悬停时整行提亮。 */
-.handoff .ho-who { display: inline-flex; align-items: center; gap: 3px; color: var(--ink) }
+.handoff .ho-who { display: inline-flex; align-items: center; gap: 2px; color: var(--ink) }
 .handoff .ho-line[data-hto]:hover { background: var(--av-hot); border-radius: 6px }
 .handoff .ho-who .av { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--line); background: var(--card); font-size: 10px; line-height: 14px; text-align: center }
 .handoff .ho-who .nm { font-weight: 500 }
@@ -921,8 +924,8 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .sk-it.on .k { opacity: 1; color: var(--accent) }
 .sk-it .ts { margin-left: auto; flex: none; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums }
 .sk-it .pv { display: block; font-size: 12px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.sk-it .l1 .nm + .nm, .sk-it .arr + .nm { font-weight: 500; color: var(--mute) }
-.sk-it .arr { flex: none; color: var(--faint); font-size: 11.5px }
+.sk-it .said { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.sk-it .said .nm + .nm { font-weight: 500; color: var(--mute) }
 .sk-it .tag { flex: none; font-size: 10.5px; color: var(--mute); background: var(--paper); border-radius: 4px; padding: 1px 5px }
 /* 命中的那一截: 正文色, 最多两行; 命中词是这一页的视角色淡底 —— 与选中态一个色系。 */
 .sk-it .sn {

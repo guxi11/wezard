@@ -8,7 +8,7 @@
 //
 // 选哪些消息是三级收窄, 与 rolepage 同一条轴: role (谁的视角) → chat (哪个群) →
 // target (和谁的往来), 每一级都可以不给; 再按时间窗与条数裁。
-import { stripSigil } from "../shared/session-label.js";
+import { labelFor, nameHead, speakerHead, stripSigil } from "../shared/session-label.js";
 import { truncateWithCount } from "../shared/std.js";
 import type { Envelope } from "../shared/reminder.js";
 import { talkRounds } from "./peers.js";
@@ -61,6 +61,9 @@ export const UNKNOWN_HUMAN = "未知";
  *  投递时就算好写进了信封; 信封上没有的老回执, 只有单聊 home 认得出是那个人, 其余如实未知。 */
 const audienceIn = (s: LogSession, env: Envelope, chat: string): string =>
   env.audience ?? (chat === s.homeChat && s.homeHuman !== UNKNOWN_HUMAN ? s.homeHuman : UNKNOWN_HUMAN);
+
+/** 记录里的称呼 → 发言头里的名字: wizard (`.name`) 带上它的头像, 与群里气泡同一个写法; 人与定时任务原样。 */
+const whoOf = (n: string): string => (n.startsWith(".") ? nameHead(labelFor(n.slice(1)), n) : n);
 
 const same = (a: string, b: string): boolean => stripSigil(a).toLowerCase() === stripSigil(b).toLowerCase();
 
@@ -156,7 +159,7 @@ export const renderChatLog = (
   const more = cut || deep;
   return {
     text: shown
-      .map((m) => `[${stamp(m.ts, now)}${where(m)}] ${m.from} → ${m.to}: ${body(m.text, q.per)}${m.pending ? "  (还没有回复)" : ""}`)
+      .map((m) => `[${stamp(m.ts, now)}${where(m)}] ${speakerHead(whoOf(m.from), whoOf(m.to))} ${body(m.text, q.per)}${m.pending ? "  (还没有回复)" : ""}`)
       .join("\n"),
     shown: shown.length,
     total: hits.length,

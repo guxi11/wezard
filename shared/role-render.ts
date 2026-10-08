@@ -11,6 +11,7 @@ import { isKeepaliveTurn } from "./keepalive.js";
 import type { DetailRecord, MarkDetailRecord, TurnDetailRecord } from "./detail-store.js";
 import { jobProgress, type MemberRole, type WorldFactJob } from "./world.js";
 import { channelOf, doneAt, injectTurnsOf, teammateOf, unwrapMates, type Directory, type Msg } from "./role-view.js";
+import { nameHead } from "./session-label.js";
 
 export interface MsgFragment {
   /** `<turnId>:in` / `<turnId>:out` / `m:<markId>`。 */
@@ -181,7 +182,7 @@ const handoffDeco = (r: TurnDetailRecord, records: readonly DetailRecord[], dir:
     who: (name) => {
       const id = dir.resolve(name);
       return id
-        ? `<span class="ho-who"><span class="av">${escHtml(dir.labelOf(id))}</span><span class="nm wizard">${escHtml(dir.nameOf(id))}</span></span>`
+        ? `<span class="ho-who">${nameHead(`<span class="av">${escHtml(dir.labelOf(id))}</span>`, `<span class="nm wizard">${escHtml(dir.nameOf(id))}</span>`)}</span>`
         : `<span class="ho-nm">.${escHtml(name)}</span>`;
     },
     role: (name) => ((id) => (id ? ` data-hrole="${escHtml(id)}" title="${escHtml(`以 .${dir.nameOf(id)} 为 viewpoint 看它的往来`)}"` : ""))(dir.resolve(name)),
@@ -305,8 +306,8 @@ export const STAGE_LABEL = (j: { stage?: string; kind?: string; status?: string;
 const memberLine = (mm: WorldFactJob["members"][number], dir: Directory, closed: boolean): string =>
   `<li><span class="jo st-${escHtml(mm.outcome ?? (closed ? "none" : "run"))}">${escHtml(mm.outcome ? OUTCOME[mm.outcome] ?? mm.outcome : closed ? "—" : OUTCOME[""]!)}</span>` +
   (dir.isWizard(mm.target)
-    ? `<button class="go" data-r="${escHtml(mm.target)}">${escHtml(dir.labelOf(mm.target))} .${escHtml(dir.nameOf(mm.target))}</button>`
-    : `<span>${escHtml(dir.labelOf(mm.target))} ${escHtml(dir.nameOf(mm.target))}</span>`) +
+    ? `<button class="go" data-r="${escHtml(mm.target)}">${escHtml(nameHead(dir.labelOf(mm.target), `.${dir.nameOf(mm.target)}`))}</button>`
+    : `<span>${escHtml(nameHead(dir.labelOf(mm.target), dir.nameOf(mm.target)))}</span>`) +
   (mm.role && ROLE_BADGE[mm.role] ? `<span class="jrole r-${mm.role}">${ROLE_BADGE[mm.role]}</span>` : "") +
   (mm.forkOf && dir.isWizard(mm.forkOf) ? `<span class="jfork" title="clone 自它: 材料来自它">材料来自 .${escHtml(dir.nameOf(mm.forkOf))}</span>` : "") +
   (mm.task ? `<em title="${escHtml(mm.task.trim())}">${escHtml(mm.task.trim())}</em>` : "") +

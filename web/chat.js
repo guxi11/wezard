@@ -1312,8 +1312,8 @@
     // 说给谁画进文本泡泡开头 (头像 + 名字); 点它走移交行同一套跳转 (data-hfrom/hto/hch + gid/gts), 不换页面视角。
     var toIn = dst
       ? '<span class="to-in" role="button" tabindex="0" data-hfrom="' + esc(m.from) + '" data-hto="' + esc(m.to) + '" data-hch="' + esc(m.channel || '') +
-        '" data-gid="' + esc(m.id) + '" data-gts="' + m.ts + '" title="' + esc('发给 ' + nameOf(m.to) + ' —— 看这段往来') + '"><span class="av">' +
-        esc(roleLabel(m.to)) + '</span><span class="nm ' + kindOf(m.to) + '">' + esc(nameOf(m.to)) + '</span></span>'
+        '" data-gid="' + esc(m.id) + '" data-gts="' + m.ts + '" title="' + esc('发给 ' + nameOf(m.to) + ' —— 看这段往来') + '">' +
+        WZ.at(WZ.nameHead('<span class="av">' + esc(roleLabel(m.to)) + '</span>', '<span class="nm ' + kindOf(m.to) + '">' + esc(nameOf(m.to)) + '</span>')) + '</span>'
       : '';
     var withTo = function (html) {
       if (!toIn) return html;
@@ -1332,7 +1332,7 @@
     var stat = m.meta ? '<span class="mstat">' + jobChips(m.meta) + '</span>' : '';
     var who = mine
       ? stamp(m.ts) + stat + avBtn(m.from)
-      : avBtn(m.from) + nm(m.from, '', true) + priv + stamp(m.ts) + stat;
+      : '<span class="said">' + WZ.said(WZ.nameHead(avBtn(m.from), nm(m.from, '', true))) + '</span>' + priv + stamp(m.ts) + stat;
     var sw = canSwitch(other);
     var flip = '<button class="flip" data-r="' + esc(other) + '"' + (sw ? '' : ' disabled tabindex="-1"') +
       ' aria-label="' + esc(sw ? '切到 ' + nameOf(other) + ' 的视角' : '') + '">' +
@@ -2590,12 +2590,11 @@
   };
   // 三层: 谁 → 对谁 · 何时 / 命中的那一截 / 在哪个会话。
   var msgItem = function (h, q) {
-    var to = h.to && h.to !== h.from && h.to !== 'system:'
-      ? '<span class="arr">→</span>' + nm(h.to, h.toName) : '';
+    var to = h.to && h.to !== h.from && h.to !== 'system:' ? nm(h.to, h.toName) : undefined;
     return {
       kind: 'msg',
       html: '<span class="av">' + esc(h.fromLabel) + '</span><span class="b"><span class="l1">' +
-        nm(h.from, h.fromName) + to + skTs(h.ts) + '</span>' +
+        '<span class="said">' + WZ.speakerHead(nm(h.from, h.fromName), to) + '</span>' + skTs(h.ts) + '</span>' +
         '<span class="sn">' + hl(h.snippet, q) + '</span>' +
         '<span class="l3">' + whereOf(h.convKind, h.convLabel, h.convName) +
           (h.hits > 1 ? '<span class="cnt">' + h.hits + ' 处命中</span>' : '') + '</span></span>',

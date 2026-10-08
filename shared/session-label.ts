@@ -207,20 +207,31 @@ export const linkTags = (target: string | undefined, text: string): string => {
 /** linkTags 的逆: `[.fix](url)` → `.fix`。 */
 export const unlinkTags = (text: string): string => text.replace(LINKED_RE, "$1");
 
-/** 头的裸形态 `emoji.name` (emoji 与名字间不留空格); 名字都拿不到时是 `🧙`。 */
+// ── 发言头 ─────────────────────────────────────────────────────────────
+// 谁说的、说给谁, 群气泡 (markdown 链接)、read_chat (纯文本)、rolepage (HTML) 写成同一个结构:
+// `🦊.a:` / `🦊.a: @🐨.b` —— emoji 贴着名字, 发话方后跟冒号, 对象前加 @。下面四个原子就是这份
+// 结构的全部; 各处只决定两边的名字各自怎么画 (裸名 / 链接 / 按钮)。它们原样送进浏览器
+// (SPEAKER_KIT, 由 chat-render 拼进 /chat/app.js), 所以只许是不引用模块里任何别的东西的纯函数。
+/** 头像 + 名字, 中间不留空格。 */
+export const nameHead = (label: string, name: string): string => `${label}${name}`;
+/** 发话方 + 冒号。 */
+export const said = (me: string): string => `${me}:`;
+/** 说给谁: `@对方`。 */
+export const at = (to: string): string => `@${to}`;
+/** 一条发言的头: 发话方后跟冒号; 对着谁说 (`to`) 时再接 `@对方`。 */
+export const speakerHead = (me: string, to?: string): string => (to ? `${said(me)} ${at(to)}` : said(me));
+/** 送进浏览器的那几个原子: 名字 → 源码。 */
+export const SPEAKER_KIT: Readonly<Record<string, (...a: never[]) => string>> = { nameHead, said, at, speakerHead };
+
+/** 头的裸形态 `emoji.name`; 名字都拿不到时是 `🧙`。 */
 export const tagHead = (target: string | undefined): string => {
   const name = displayName(target);
-  return name ? `${labelFor(name)}.${name}` : "🧙";
+  return name ? nameHead(labelFor(name), `.${name}`) : "🧙";
 };
 
 /** 头的链接形态 `[emoji.name](url)` —— 点它就进那个 wizard 的 rolepage。
  *  HEADER_RE 认得这一形态, parseTagHeader 照样剥得掉。 */
 export const linkedTagHead = (target: string | undefined, url: string): string => `[${tagHead(target)}](${url})`;
-
-/** 一条 wizard 发言的头: 发话方名字后跟冒号; 对着另一个 wizard 说 (`to`) 时再接 `@对方`。
- *  `🦊.a: @🐨.b` —— 名字都挂各自的 rolepage (拿不到票据就是裸名)。 */
-export const speakerHead = (me: string, to?: string): string =>
-  to ? `${me}: @${tagLink(to, tagHead(to))}` : `${me}:`;
 
 /** 头挂上指定的 rolepage 链接 (mirror 用本轮 turn 的票据), 正文里的名字一并挂链。
  *  url 为空时退回裸头 —— 头那一段是路由信息, 少了链接只是少一层可点, 不能因此不写。
@@ -236,7 +247,7 @@ export const withLinkedTagHeader = (
   to?: string,
 ): string => {
   const me = url ? linkedTagHead(target, url) : tagHead(target);
-  const head = [speakerHead(me, to), seq ?? ""].filter(Boolean).join(" ");
+  const head = [speakerHead(me, to && tagLink(to, tagHead(to))), seq ?? ""].filter(Boolean).join(" ");
   const body = linkTags(target, content);
   return `${head}${headSep(body)}${body}`;
 };

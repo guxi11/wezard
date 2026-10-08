@@ -697,7 +697,7 @@ const main = async (): Promise<void> => {
     const relayPeer = (from: string, to: string, body: string, channel: string): void => {
       const text = body.trim();
       if (!text || !channel) return;
-      const head = speakerHead(relayLabel(from), to);
+      const head = speakerHead(relayLabel(from), relayLabel(to));
       const clipped = text.length > RELAY_MAX ? `${text.slice(0, RELAY_MAX)}…` : text;
       // 头独占一行, 正文自成一个块 —— 只隔一个换行的话, markdown 会把正文首行
       // 当成头那一段的续行; 表格因此整张塌成一行带竖线的文字 (表格不能打断段落)。

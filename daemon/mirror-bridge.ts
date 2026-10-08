@@ -48,7 +48,7 @@ import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from 
 import { knowsToolUse, recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnQuery, recordTurnInject, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, lastChannelOf, openTurnsOf, buildDetailUrl, buildChatUrl, roleUniq } from "./detail.js";
 import type { CtxCut, TurnFrom, TurnOrigin, TurnUsage } from "./detail.js";
 import { errText } from "./last-response.js";
-import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagHeader, withLinkedTagHeader, linkedTagHead, speakerHead, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey } from "../shared/session-label.js";
+import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagHeader, withLinkedTagHeader, linkedTagHead, speakerHead, nameHead, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress, stewardTierOf } from "./chat-name.js";
@@ -2688,7 +2688,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const detailCardFor = (s: ActiveStream, target: string): TemplateCard | undefined => {
     if (s.tools.length === 0) return undefined;
     const name = displayName(target);
-    const titlePrefix = name ? `${labelFor(name)}.${name} · ` : "";
+    const titlePrefix = name ? `${nameHead(labelFor(name), `.${name}`)} · ` : "";
     return {
       card_type: "button_interaction" as const,
       main_title: { title: `${titlePrefix}本轮工具调用` },

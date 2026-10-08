@@ -17,6 +17,7 @@
 import { createHash } from "node:crypto";
 import { SHARED_CSS, TURN_CSS } from "./detail-render.js";
 import { readAsset, type Asset } from "./web-assets.js";
+import { SPEAKER_KIT } from "./session-label.js";
 
 /** 拼出来的资源的 ETag = 各片 ETag 之和 —— 任一片变了整体都失效, 缺片记 `-`。 */
 const etagOf = (parts: readonly (Asset | undefined)[]): string =>
@@ -47,8 +48,17 @@ export const chatVendor = (): Asset => {
   };
 };
 
-export const chatScript = (): Asset =>
-  readAsset("chat.js") ?? { body: "", type: "text/javascript; charset=utf-8", etag: 'W/"nojs"' };
+/** 发言头的原子 (session-label 的 SPEAKER_KIT) 原样拼成浏览器里的全局 `WZ` —— rolepage 与群里、
+ *  read_chat 走同一份实现, 不在 chat.js 里另抄一份。函数源码就是数据: toString 即可送达。 */
+const KIT: Asset = ((body) => ({ body, type: "text/javascript", etag: `W/"${createHash("sha1").update(body).digest("hex").slice(0, 12)}"` }))(
+  `var WZ = (function () {\n${Object.entries(SPEAKER_KIT).map(([k, f]) => `  var ${k} = ${f.toString()};`).join("\n")}\n` +
+    `  return { ${Object.keys(SPEAKER_KIT).map((k) => `${k}: ${k}`).join(", ")} };\n})();\n`,
+);
+
+export const chatScript = (): Asset => {
+  const own = readAsset("chat.js");
+  return { body: `${KIT.body}${own?.body ?? ""}`, type: "text/javascript; charset=utf-8", etag: etagOf([KIT, own]) };
+};
 
 export const renderChatPage = (): string =>
   `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
