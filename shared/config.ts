@@ -322,6 +322,25 @@ const Svr = z.object({
   logLevel: z.enum(LOG_LEVELS).default("info").describe("svr 日志级别"),
 });
 
+// 微信 ClawBot 通道 (daemon/weixin.ts)。每个扫码绑定的微信用户 = 一个群聊 `chat:wx_…`。
+// 送达约束全是社区实测、互相矛盾的数字 (context_token 时效、每份 token 的条数、~8 分钟 4 条
+// 频控), 所以账本的每个阈值都可调, 默认取保守值。账号凭据不进这里 (会进 dotfile 仓库),
+// 只在 stateFile (0600)。
+const Weixin = z.object({
+  // 放权: 开了才有 `/wx bind` 入口, 一次扫码 = 一个微信号能驱动本机。
+  enabled: knob(z.boolean().default(false).describe("开启微信 ClawBot 通道 (扫码绑定的微信用户各成一个群聊)"), { gate: "card" }),
+  maxAccounts: knob(z.number().int().min(1).max(64).default(8).describe("最多同时绑定几个微信号 (= 几个微信群聊)"), { gate: "card", apply: "hot" }),
+  sendCap: hot(z.number().int().min(1).default(3).describe("人每说一句 (一份 context_token) 之后最多发几条; 超出的压着, 等人再说话时取回")),
+  minGapSec: hot(z.number().int().min(0).default(15).describe("同一微信号两条出站至少隔几秒, 期间的待发合并成一条")),
+  ratePauseMin: hot(z.number().int().min(1).default(10).describe("被频控 (rate limited) 后暂停出站几分钟")),
+  ctxTtlHours: hot(z.number().positive().default(10).describe("人多久没说话就不再尝试主动发 (context_token 视为过期)")),
+  fallbackChat: hot(z.string().default("").describe("微信发不出 / 掉线时往哪个企微聊天报; 空 = 发起绑定的那个人")),
+  typing: hot(z.boolean().default(true).describe("回复生成中在微信里显示「对方正在输入」")),
+  baseUrl: z.string().default("https://ilinkai.weixin.qq.com").describe("iLink API 地址 (登录后以服务端给的为准)"),
+  cdnBaseUrl: hot(z.string().default("https://novac2c.cdn.weixin.qq.com/c2c").describe("iLink 媒体 CDN 地址")),
+  stateFile: z.string().default("~/.wezard/weixin.json").describe("已绑定账号与收发游标 (含凭据, 0600)"),
+});
+
 // 按难度分档: spawn_wizard / clone_wizard 的 `tier` 落到这里的 {cli, model, effort};
 // 显式给的 model / effort / cli 压过档位。档名固定、按由轻到重排 —— MCP 参数是 enum, 宪章逐档列。
 const Tier = z.object({
@@ -425,6 +444,7 @@ export const ConfigSchema = z.preprocess(liftLegacySchedules, z.object({
   approval: knob(Approval.default({}).describe("工具调用审批: 粒度、规则、危险名单、窗口"), { gate: "card", apply: "hot" }),
   models: hot(Models.default({}).describe("按任务难度分档的模型 / effort, 以及各群管家用哪一档")),
   sync: knob(Sync.default({ targets: [] }).describe("把 MCP / hook 注册写进各 CLI 的 settings.json; 改完跑 `wezard sync` 才生效"), { gate: "card" }),
+  weixin: Weixin.default({}).describe("微信 ClawBot 通道: 扫码绑定、收发节流"),
   svr: Svr.default({}).describe("独立详情中转服务 (wezard svr); svr 自己启动时读, 改完重启 svr 才生效"),
   schedules: knob(Schedules, { gate: "hidden" }),
 }));

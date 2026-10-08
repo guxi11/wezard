@@ -12,6 +12,9 @@ import { patchJsonc } from "../shared/config-writer.js";
 import { EFFORTS, parseEffort } from "../shared/effort.js";
 import { bindCliBackends, projectDirsFor, type CliBackendName } from "../shared/cli-backends.js";
 import { startWs } from "./ws.js";
+import { startWeixin } from "./weixin.js";
+import { installWeixinPort } from "./weixin-port.js";
+import { bindWxCommands, makeOnBound, makeWxCommands, routeSendMedia, weixinSendMedia, wxRoutes } from "./weixin-cmd.js";
 import { planMedia, type MediaKind, type SendMedia } from "./media.js";
 import { aibotSendMedia } from "./aibot-media.js";
 import { startNetWatch } from "./net-watch.js";
@@ -163,13 +166,31 @@ const main = async (): Promise<void> => {
   // 切网 (换 WiFi / VPN 起停) 后原地重建 WS, 等价于自动做了一次 reload 的
   // 联通性部分 — 但保留全部内存态 (graph 运行、pending 长轮询、镜像绑定),
   // 也不依赖 launchd/systemd 的 respawn 策略 (nohup fallback 没有 supervisor)。
-  const netWatch = startNetWatch(log.child({ mod: "net" }), (from, to) =>
-    ws.reconnect(`network changed: ${from || "<offline>"} → ${to}`),
-  );
+  const netWatch = startNetWatch(log.child({ mod: "net" }), (from, to) => {
+    ws.reconnect(`network changed: ${from || "<offline>"} → ${to}`);
+    wx.kick(`network changed → ${to}`);
+  });
   // Wrap replyStream / replyStreamWithCard before any module sends —
   // last-response tracker enables inbound's `quote` dedup of bot self-replies,
   // and its chat-gate drops header-only pushes (empty messages) daemon-wide.
   installResponseTracker(ws.client, log.child({ mod: "chat-gate" }));
+  // 微信 ClawBot: 每个扫码绑定的微信用户 = 一个群聊 `chat:wx_…`。分流层套在 tracker 外面 ——
+  // 微信出站不该等企微长连接连上; 其余模块照旧只认 ws.client。onBound 用到的 bridge 在下面
+  // 才立起来, 绑定只会在开机很久之后发生, 闭包里取得到。
+  const wxLog = log.child({ mod: "weixin" });
+  const wx = startWeixin({
+    cfg,
+    log: wxLog,
+    onBound: (acct, name) => makeOnBound({
+      cfg, sourcePath, log: wxLog,
+      hasSession: (t) => bridge.hasMirrorTarget(t),
+      newSession: (t, win) => bridge.newSession(t, win, undefined, { silent: true }),
+    })(acct, name),
+    notifyWecom: (p, md) => void ws.client
+      .sendMessage(baseOfKey(p).replace(/^(user|chat|group):/, ""), { msgtype: "markdown", markdown: { content: md } })
+      .catch((e: unknown) => wxLog.warn({ to: p, err: errText(e) }, "weixin → wecom notice failed")),
+  });
+  installWeixinPort(ws.client, wx, wxLog);
   const mirrorStore = loadMirrorStore(cfg.wrc.mirror.attachmentsFile);
   // 定时任务表 —— 每条任务是 ~/.wezard/tasks/<id>.task.mjs 一份可注入代码的配置
   // (见 shared/task-file.ts)。目录是热加载的: wizard 改完文件不用 reload 守护进程。
@@ -255,6 +276,14 @@ const main = async (): Promise<void> => {
   http.register("POST /claim/reset", guarded(makeClaimResetHandler()));
   http.register("GET /detail", makeDetailHandler(log.child({ mod: "detail" })));
   for (const [key, handler] of Object.entries(chatHandlers())) http.register(key, handler);
+  for (const [key, handler] of Object.entries(wxRoutes({ cfg, wx, sourcePath }))) http.register(key, key === "GET /wx/list" ? handler : guarded(handler));
+  bindWxCommands(makeWxCommands({
+    cfg, sourcePath, log: wxLog, wx,
+    sendWecom: (p, md) => void ws.client
+      .sendMessage(baseOfKey(p).replace(/^(user|chat|group):/, ""), { msgtype: "markdown", markdown: { content: md } })
+      .catch((e: unknown) => wxLog.warn({ to: p, err: errText(e) }, "wx cmd push failed")),
+    sendWecomMedia: aibotSendMedia(ws.client, log.child({ mod: "media" })),
+  }));
   installAskEventListener(ws.client, log.child({ mod: "ask" }));
 
   // 智能机器人 doc / smartsheet / contact MCP 桥接 — 总是注册路由, 失败让
@@ -630,7 +659,9 @@ const main = async (): Promise<void> => {
     // 已挂过的 linkTags 认得出, 不会再套一层。
     const chatIdOf = (t: string): string => baseOfKey(t).replace(/^(user|chat|group):/, "");
     // 出站媒体只经这一个口子 (通道无关, 见 media.ts); 别的通道接进来时在这里按 principal 分流。
-    const sendMedia: SendMedia = aibotSendMedia(ws.client, log.child({ mod: "media" }));
+    // 绑定过的微信群聊走微信 (上限不同, 校验也跟着各通道走 —— planFor)。
+    const media = routeSendMedia(wx, weixinSendMedia(wx), aibotSendMedia(ws.client, log.child({ mod: "media" })));
+    const sendMedia: SendMedia = media.send;
     const notifyChat = (base: string, markdown: string): void => {
       const chatId = chatIdOf(base);
       void ws.client
@@ -987,7 +1018,7 @@ const main = async (): Promise<void> => {
       if (!dest) { json(res, 400, { ok: false, reason: `认不出聊天: ${ref} (wizard_roster 每行有 home 聊天名, 人侧 /chats; 没起名的聊天寻址不到)` }); return; }
       const muted = topOnlyMuted(self, [dest]);
       if (muted) { json(res, 409, muted); return; }
-      const plan = planMedia({ path, ...(b.kind ? { kind: b.kind } : {}) });
+      const plan = media.plan(dest, { path, ...(b.kind ? { kind: b.kind } : {}) });
       if (!plan.ok) { json(res, 400, plan); return; }
       const caption = (b.caption ?? "").trim();
       if (caption) notifyChat(dest, `${relayLabel(self)}\n\n${caption}`);
@@ -3276,6 +3307,7 @@ const main = async (): Promise<void> => {
     steward?.stop();
     tasks.stop();
     netWatch.stop();
+    await wx.stop().catch(() => undefined);
     // 同 POST /shutdown: 先把挂着的审批长轮询了结成「稍后续接」, 再关连接。
     log.info(drainForReload(), "pending drained for reload");
     // Hard-exit watchdog: http.close() blocks until every in-flight connection
