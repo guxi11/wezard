@@ -135,6 +135,7 @@ const Mirror = z.object({
   // 复活, 对话不丢。与 /kill 的分界线就是那行 store.drop: reap 是"睡着", kill 是"死了"。
   // 名下有定时任务 / 挂着审批 / 正忙 / 人正盯着的不收, 所以实际数量可能暂时高于上限。
   maxPanes: z.number().int().nonnegative().default(20).describe("活着的会话 pane 上限, 超出从最久没动的收起; 0 = 关闭"),
+  paneSweepSec: z.number().int().nonnegative().default(600).describe("pane 上限定时清扫间隔 (秒), 含孤儿 pane; 0 = 只在新建 wizard 时扫"),
   // ── Prompt-cache keepalive ────────────────────────────────────────────
   // Anthropic prompt caching: cache-write costs 1.25x (5min TTL) / 2x (1h TTL),
   // cache-read 0.1x. A pane that goes idle (agent parked waiting on a peer, or a

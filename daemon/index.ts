@@ -3415,6 +3415,15 @@ const main = async (): Promise<void> => {
       if (r.reaped.length || r.orphans.length) log.info({ reaped: r.reaped.length, targets: r.reaped, orphans: r.orphans.length, max }, "pane cap sweep");
     };
     bridge.onSpawn(() => void sweep().catch((e) => log.warn({ err: (e as Error).message }, "pane cap sweep failed")));
+    // 定时清扫: 无绑定孤儿 (restore 丢绑定留下的老 window) 不靠 spawn 也会攒, 只在
+    // onSpawn 数等于没人收。绑定在 store 里启动即读, 新生 pane 有 ORPHAN_GRACE 宽限,
+    // 所以启动后扫一次是安全的。
+    const periodSec = cfg.wrc.mirror.paneSweepSec;
+    if (periodSec > 0) {
+      const timer = setInterval(() => void sweep().catch((e) => log.warn({ err: (e as Error).message }, "pane cap sweep failed")), periodSec * 1000);
+      timer.unref();
+    }
+    setTimeout(() => void sweep().catch((e) => log.warn({ err: (e as Error).message }, "pane cap sweep failed")), 15_000).unref();
   }
 
   const shutdown = async (signal: string): Promise<void> => {

@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Fixed
+- pane 上限的孤儿回收对 codebuddy 后端全盲: 孤儿判据要求 pane 出现在后端注册表 `sessions/<pid>.json` 的 `tmux` 字段里, 而 codebuddy 的注册表没有该字段, 失绑老 pane (restore 丢绑定后下一条消息另起新 pane、旧 pane 不杀) 永久逃回收、也不占 `maxPanes` 名额。改为直接看 pane 的进程树: 树里有任一后端注册表登记且还活着的 CLI pid (新增 `cc-session.liveSessionPids` + 一次 `ps` 快照向下找, pane_pid 是 shell, CLI 是子孙) 才算 wezard 的历史会话 pane; 人的 shell / ssh / 编辑器依旧「认不出就不动」。
+- pane 上限清扫此前只在新建 wizard 时触发, 无 spawn 不收。新增 `wrc.mirror.paneSweepSec` (默认 600, 0 = 只在 spawn 时扫) 定时清扫, daemon 启动 15s 后先扫一次。
+
 ## [2.5.1] - 2026-10-09
 
 ### Fixed

@@ -104,6 +104,11 @@ export const watchRegistry = (homeDir: string, onChange: () => void): (() => voi
 export const sessionPanes = (homeDir: string): Set<string> =>
   new Set(readRegistry(homeDir).filter((r) => r.pane && pidAlive(r.pid)).map((r) => r.pane));
 
+/** 注册表里进程还活着的会话 pid —— 不要求注册表带 `tmux` 字段 (codebuddy 的没有),
+ *  「这个 pane 里住着活会话吗」用它对 pane 的进程树认, 而不是对 pane id 认。 */
+export const liveSessionPids = (homeDir: string): Set<number> =>
+  new Set(readRegistry(homeDir).filter((r) => pidAlive(r.pid)).map((r) => r.pid));
+
 // ── 提交确认 ──────────────────────────────────────────────────────────
 
 const normalize = (s: string): string => s.replace(/\s+/gu, "");

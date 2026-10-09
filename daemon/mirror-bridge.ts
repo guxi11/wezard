@@ -40,7 +40,7 @@ import { dangerOf } from "./danger.js";
 import { renameWindow, runTmux, spawnTmuxClaude } from "./spawn-tmux.js";
 import { selectEffort, selectModel, type EffortSelectResult, type ModelScope, type ModelSelectResult } from "./model-select.js";
 import { parseEffort, type Effort } from "../shared/effort.js";
-import { hasRegistry, markTranscript, probeOf, sessionOnPane, sessionPanes, submittedSince, watchRegistry, type LiveSession, type TranscriptMark } from "./cc-session.js";
+import { hasRegistry, liveSessionPids, markTranscript, probeOf, sessionOnPane, submittedSince, watchRegistry, type LiveSession, type TranscriptMark } from "./cc-session.js";
 import { waitForIdle, type IdleResult } from "./graph.js";
 import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
@@ -1928,6 +1928,32 @@ const INJECT_JOB_TIMEOUT_MS = 90_000;
 /** 没有绑定的 pane 静默多久才算孤儿。刚 spawn、还没 attach 的 pane (并发 fan-out 时
  *  别人的 sweep 会撞见它) 在这段时间里一直有输出, 远大于一次 spawn → attach 的耗时。 */
 const ORPHAN_GRACE_MS = 10 * 60_000;
+/** `ps -axo pid,ppid,etimes` 快照: parent→children 表 + 每个进程的已运行秒数。
+ *  pane_pid 是 shell, CLI 是它的子孙, 「pane 里住着活会话吗」要沿进程树往下认;
+ *  etimes 给孤儿宽限用 —— codebuddy 的 TUI 空闲也持续重绘, window_activity 永远是
+ *  「刚动过」, 只有进程年龄分得清「刚 spawn 还没 attach」和「攒了几周的尸体」。
+ *  ps 失败 = 空表, 孤儿判定随之全 miss: 认不出就不收, 永远朝不杀的方向失败。 */
+interface PsSnap { kids: Map<number, number[]>; etimes: Map<number, number> }
+const psSnap = (): Promise<PsSnap> =>
+  new Promise((resolve) => {
+    const p = spawn("ps", ["-axo", "pid=,ppid=,etimes="], { env: { ...process.env, PATH: augmentedPath(process.env.PATH) }, stdio: ["ignore", "pipe", "ignore"] });
+    let out = "";
+    p.stdout?.on("data", (c: Buffer) => (out += c.toString("utf8")));
+    const done = (): void => {
+      const kids = new Map<number, number[]>();
+      const etimes = new Map<number, number>();
+      for (const line of out.split("\n")) {
+        const [pid, ppid, et] = line.trim().split(/\s+/).map(Number);
+        if (!pid || !ppid) continue;
+        const arr = kids.get(ppid);
+        if (arr) arr.push(pid); else kids.set(ppid, [pid]);
+        if (et !== undefined && !Number.isNaN(et)) etimes.set(pid, et);
+      }
+      resolve({ kids, etimes });
+    };
+    p.on("close", done);
+    p.on("error", () => resolve({ kids: new Map(), etimes: new Map() }));
+  });
 /** Drop a session's queue chain. A hung job can't be cancelled (it's parked in a
  *  tmux read), but detaching the chain means the NEXT message doesn't inherit
  *  its deadlock. Pair with an injectGen bump so the zombie can't act when it
@@ -6544,7 +6570,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // allTargets 是几百个 key, 见 target 就问 tmux 会打穿 fd (同 worldPeers 的
       // WORLD_PROBE 取舍)。
       const orphans: string[] = [];
-      const snap = await runTmux(["list-panes", "-a", "-F", "#{pane_id}\t#{window_active}:#{session_attached}\t#{session_name}\t#{window_activity}"]);
+      const snap = await runTmux(["list-panes", "-a", "-F", "#{pane_id}\t#{window_active}:#{session_attached}\t#{session_name}\t#{pane_pid}"]);
       if (snap.code !== 0) return { reaped, orphans, skipped };
       const rows = snap.stdout.split("\n").filter(Boolean).map((l) => l.split("\t"));
       const watchedBy = new Map(rows.map(([id = "", w = ""]) => {
@@ -6567,18 +6593,37 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // 丢了 pane id (restore 认不出 → 下一条消息另起新 pane, 旧 pane 不杀) 之后留下的。
       // 没有地址能再叫到它, 却不在下面 `live` 的账上, 攒多少都触不到上限; 所以不占
       // 名额、不等超限, 见到就收。刚起的 pane 在 attach 之前也长这样 (并发 spawn),
-      // 用 window_activity 留一段宽限。只收会话 pane: 注册表认得里面住着活的 AI 会话
-      // 才算; 普通 pane (人自己开的 shell / 编辑器, 会话已退回 shell 的, 没有注册表的
-      // 后端) 一律跳过 —— 认不出就不动。
+      // 用 window_activity 留一段宽限。只收会话 pane: pane 的进程树里有注册表登记且
+      // 还活着的 CLI 进程才算 (pane_pid 是 shell, CLI 是它的子孙, 所以沿 ps 快照往下
+      // 找)。不看注册表的 `tmux` 字段 —— codebuddy 的注册表没有它, 那条路对 codebuddy
+      // 全盲。普通 pane (人自己开的 shell / ssh / 编辑器, 会话已退回 shell 的) 树里
+      // 没有注册表 pid, 一律跳过 —— 认不出就不动。
       const bound = new Set(targets.map(paneOf).filter(Boolean));
-      const hosting = new Set(activeBackends().flatMap((b) => [...sessionPanes(b.homeDir)]));
-      for (const [pane = "", , session, activity] of rows) {
-        if (session !== cfg.wrc.tmuxPrefix || bound.has(pane) || !hosting.has(pane)) continue;
-        if (now - Number(activity) * 1000 < ORPHAN_GRACE_MS) continue;
+      const regPids = new Set(activeBackends().flatMap((b) => [...liveSessionPids(b.homeDir)]));
+      const ps = await psSnap();
+      // 沿进程树找注册表 pid; 找到返回那个 pid (它的 etimes 供宽限判), 找不到返回 0。
+      const hostedBy = (pid: number): number => {
+        const seen = new Set<number>();
+        const stack = [pid];
+        while (stack.length) {
+          const p = stack.pop() ?? 0;
+          if (regPids.has(p)) return p;
+          if (seen.has(p)) continue;
+          seen.add(p);
+          for (const k of ps.kids.get(p) ?? []) stack.push(k);
+        }
+        return 0;
+      };
+      for (const [pane = "", , session, pid] of rows) {
+        if (session !== cfg.wrc.tmuxPrefix || bound.has(pane)) continue;
+        const cliPid = hostedBy(Number(pid) || 0);
+        if (!cliPid) continue;
+        // 宽限按 CLI 进程年龄, 不按 window_activity: TUI 重绘会让它永远「刚动过」。
+        if ((ps.etimes.get(cliPid) ?? Number.POSITIVE_INFINITY) * 1000 < ORPHAN_GRACE_MS) continue;
         const why = await putDown(pane);
         if (why) { skipped[pane] = why; continue; }
         orphans.push(pane);
-        log.info({ pane, idleHours: Math.round((now - Number(activity) * 1000) / 3.6e6) }, "mirror pane cap — orphan pane killed (no binding)");
+        log.info({ pane, cliPid, cliAgeHours: Math.round((ps.etimes.get(cliPid) ?? 0) / 3600) }, "mirror pane cap — orphan pane killed (no binding)");
       }
       const live = targets.filter((t) => watchedBy.has(paneOf(t)));
       let over = live.length - max;
