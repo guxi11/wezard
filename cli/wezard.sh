@@ -108,7 +108,10 @@ DAEMON_ENTRY="$REPO_ROOT/dist/daemon/index.js"
 nohup_start() {
   [[ -f "$DAEMON_ENTRY" ]] || { echo "[wezard] missing $DAEMON_ENTRY — run 'npm run build'" >&2; return 1; }
   mkdir -p "$HOME_DIR/.wezard"
-  nohup "$(command -v node)" "$DAEMON_ENTRY" \
+  # Unlike systemd, nohup hands the daemon the caller's env — and `reload` is
+  # routinely run from inside a wizard's own tmux pane. A daemon carrying
+  # $TMUX/$TMUX_PANE gets its `tmux new-session` refused as nested.
+  env -u TMUX -u TMUX_PANE nohup "$(command -v node)" "$DAEMON_ENTRY" \
     >> "$HOME_DIR/.wezard/daemon.stdout.log" \
     2>> "$HOME_DIR/.wezard/daemon.stderr.log" &
   echo $! > "$PIDFILE"

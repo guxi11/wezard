@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [2.5.1] - 2026-10-09
+
+### Fixed
+- 守护进程带着 `$TMUX` / `$TMUX_PANE` 启动时 (在 tmux 里 `reload` 走 nohup 兜底路径会继承调用方环境) tmux 行为错乱: 客户端把每条命令路由到 `$TMUX` 指的那台 server 而非 launchd/systemd 启动时看到的默认 socket, 老版本 tmux 还会以 "sessions should be nested with care" 拒绝 `new-session` 即使带 `-d`。新增 `shared/exec-path.ts` 的 `tmuxClientEnv` (拓宽 PATH + 剥掉 tmux 座位变量), `spawn-tmux.ts` / `session-scan.ts` 里一切可能跑 `tmux` 的子进程改走它; `cli/wezard.sh` 的 nohup 启动同样 `env -u TMUX -u TMUX_PANE`。
+- 无客户端 attach 的后台 pane 窗口落到 tmux 默认 80x24: codebuddy `/model` 选择器 (30 多行无编号行、80 列截断) 的标题与 scope 切换条被顶出屏外, 读屏判据误判选择器没打开, spawn 卡在「模型没选上」。`new-session -d` 显式带 `-x 200 -y 60`, 已有会话补 `set-option default-size 200x60`; 只影响没人看的 pane, attach 的人的终端照旧说了算, tmux < 2.9 没有 default-size 时保持 80x24。
+
 ## [2.5.0] - 2026-10-08
 
 ### Changed
@@ -1020,7 +1026,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.5.0...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.5.1...HEAD
+[2.5.1]: https://github.com/guxi11/wezard/compare/v2.5.0...v2.5.1
 [2.5.0]: https://github.com/guxi11/wezard/compare/v2.4.1...v2.5.0
 [2.4.1]: https://github.com/guxi11/wezard/compare/v2.4.0...v2.4.1
 [2.4.0]: https://github.com/guxi11/wezard/compare/v2.3.0...v2.4.0

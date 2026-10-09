@@ -16,7 +16,7 @@ import { readdirSync, readFileSync, existsSync, statSync, readlinkSync } from "n
 import { join, basename } from "node:path";
 import { activeBackends, backendForPath, projectDirsFor, type CliBackendName } from "../shared/cli-backends.js";
 import { expandHome } from "../shared/paths.js";
-import { augmentedPath } from "../shared/exec-path.js";
+import { tmuxClientEnv } from "../shared/exec-path.js";
 import { labelFor } from "../shared/session-label.js";
 import { summarizeTail } from "./peers.js";
 
@@ -45,7 +45,7 @@ interface PaneOwner {
 }
 
 // lsof lives in /usr/sbin on macOS, which a stripped launchd PATH lacks.
-const scanPath = (orig: string | undefined): string => augmentedPath(orig, ["/usr/sbin", "/sbin"]);
+const SCAN_EXTRAS = ["/usr/sbin", "/sbin"];
 
 // A wedged tmux server (or an lsof blocked on a stuck mount) must not hang the
 // scan forever — /sessions would never answer and, worse, the caller's await
@@ -55,7 +55,7 @@ const SCAN_CMD_TIMEOUT_MS = 15_000;
 const runCmd = (cmd: string, args: string[]): Promise<{ ok: boolean; stdout: string }> =>
   new Promise((resolve) => {
     const p = spawn(cmd, args, {
-      env: { ...process.env, PATH: scanPath(process.env.PATH) },
+      env: tmuxClientEnv(process.env, SCAN_EXTRAS),
       stdio: ["ignore", "pipe", "ignore"],
     });
     let out = "";

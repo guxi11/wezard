@@ -31,7 +31,7 @@ import { basename, dirname, join } from "node:path";
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
 import { expandHome } from "../shared/paths.js";
-import { augmentedPath } from "../shared/exec-path.js";
+import { tmuxClientEnv } from "../shared/exec-path.js";
 import { sleep } from "../shared/std.js";
 import { activateBackend, CLI_BACKEND_DEFAULTS, primaryBackend, type CliBackend, type CliBackendName } from "../shared/cli-backends.js";
 import { selectModel } from "./model-select.js";
@@ -68,6 +68,9 @@ interface ExecResult {
  *  stayed locked behind a zombie job and that chat went permanently silent.
  *  Normal tmux commands finish in <100ms — 10s is a generous ceiling, not a
  *  latency budget. Override via WEZARD_TMUX_TIMEOUT_MS (0 disables, for debugging). */
+const DETACHED_COLS = 200;
+const DETACHED_ROWS = 60;
+
 export const TMUX_TIMEOUT_MS = ((): number => {
   const raw = Number(process.env.WEZARD_TMUX_TIMEOUT_MS);
   return Number.isFinite(raw) && raw >= 0 ? raw : 10_000;
@@ -95,7 +98,7 @@ export const runTmux = (args: string[], opts: RunTmuxOpts = {}): Promise<ExecRes
     // 于是按 tab 切的每一处 (boot 恢复的 pane 快照 / pane 漂移跟随 / pane 上限) 都认不出
     // 任何 pane, 而在带 locale 的 dev shell 里一切正常。
     const proc = spawn("tmux", ["-u", ...args], {
-      env: { ...process.env, PATH: augmentedPath(process.env.PATH) },
+      env: tmuxClientEnv(process.env),
       stdio: [opts.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     });
     let out = "";
@@ -521,14 +524,22 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
   // the prompt regardless of the user's zstyle config.
   const paneEnv = supportsE ? ["-e", "DISABLE_AUTO_UPDATE=true", "-e", "DISABLE_UPDATE_PROMPT=true"] : [];
   const cwdArg = supportsC ? ["-c", cwd] : [];
+  // With no client attached a window takes the session's default-size — tmux's
+  // own default is 80x24, and the codebuddy `/model` picker (30-odd unwindowed
+  // rows, ids truncated at 80 cols) then scrolls its title and scope tab off
+  // the screen: the picker reads as never opened. An attached human's terminal
+  // still wins; this only sizes the panes nobody is looking at. Best-effort —
+  // tmux < 2.9 has no default-size and keeps 80x24.
+  const sizeArg = ["-x", String(DETACHED_COLS), "-y", String(DETACHED_ROWS)];
   const openPane = async (): Promise<{ pane: string } | { reason: string }> => {
     const has = await runTmux(["has-session", "-t", tmuxName]);
+    if (has.code === 0) await runTmux(["set-option", "-t", tmuxName, "default-size", `${DETACHED_COLS}x${DETACHED_ROWS}`]);
     const created = has.code === 0
       // `${tmuxName}:` (trailing colon) forces session-only resolution → next free
       // window index. Bare `-t wezard` is ambiguous: if a *window* is also named
       // `wezard`, tmux matches it and tries to reuse its index → "index N in use".
       ? await runTmux(["new-window", "-d", "-t", `${tmuxName}:`, "-n", winName, ...cwdArg, ...paneEnv, "-P", "-F", "#{pane_id}"])
-      : await runTmux(["new-session", "-d", "-s", tmuxName, "-n", winName, ...cwdArg, ...paneEnv, "-P", "-F", "#{pane_id}"]);
+      : await runTmux(["new-session", "-d", "-s", tmuxName, "-n", winName, ...sizeArg, ...cwdArg, ...paneEnv, "-P", "-F", "#{pane_id}"]);
     if (!created.ok) return { reason: `tmux ${has.code === 0 ? "new-window" : "new-session"} failed: ${created.stderr.trim() || created.code}` };
     const pane = created.stdout.split("\n").map((s) => s.trim()).filter(Boolean)[0] ?? "";
     if (!pane) return { reason: "tmux returned no pane id" };

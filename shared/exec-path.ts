@@ -20,3 +20,17 @@ export const augmentedPath = (orig: string | undefined, extras: readonly string[
     .filter((p) => p !== "" && !seen.has(p) && (seen.add(p), true))
     .join(":");
 };
+
+// The daemon is a tmux *client* of the pane server, never a process seated in
+// one of its panes. Started from a tmux shell (the Linux nohup fallback inherits
+// the caller's env), it carries $TMUX / $TMUX_PANE, and then tmux (a) routes
+// every command to whatever server $TMUX names instead of the default socket a
+// launchd/systemd start sees, and (b) on older servers refuses `new-session`
+// even with `-d`: "sessions should be nested with care, unset $TMUX to force".
+const TMUX_SEAT = new Set(["TMUX", "TMUX_PANE"]);
+
+/** Child env for anything that may run `tmux`: widened PATH, no tmux seat. */
+export const tmuxClientEnv = (env: NodeJS.ProcessEnv, extras: readonly string[] = []): NodeJS.ProcessEnv => ({
+  ...Object.fromEntries(Object.entries(env).filter(([k]) => !TMUX_SEAT.has(k))),
+  PATH: augmentedPath(env.PATH, extras),
+});
