@@ -1684,8 +1684,18 @@ const withImageRefs = (text: string, images: readonly string[]): string => {
 // 证人不作声 (忙时排队、slash 命令、无注册表的后端) 才看框回没回到贴之前的样子。
 // 框认得出来时这条判据可信, 于是允许多补回车 (空框上的回车在 CLI 里是 no-op);
 // 每次补之前再问一遍证人, 已提交就不补。
-/** 具名粘贴 buffer 的序号 (见 loadAndPaste)。 */
-let pasteSeq = 0;
+// tmux < 2.0 的 buffer 命令只认内部名 (bufferNNNN): 自定义名在 load/show/delete 上
+// 一律 "buffer invalid" (devcloud tmux 1.8 实测, 与内容无关), 默认 buffer (不带 -b)
+// 正常 —— 跨 pane 并发隔离不能靠具名 buffer。改用默认 buffer + 进程内串行: load→paste
+// 这段临界区里不许第二个注入插进来, 否则共用 buffer 会让两段文本互换 pane (具名 buffer
+// 防的正是这个实测坑; 守护进程单进程, 一把 promise 锁就够)。临界区只有两条 tmux 命令
+// (<100ms), 串行不构成分延迟。
+let pasteQueue: Promise<unknown> = Promise.resolve();
+const withPasteLock = <T>(fn: () => Promise<T>): Promise<T> => {
+  const r = pasteQueue.then(fn);
+  pasteQueue = r.then(() => undefined, () => undefined);
+  return r;
+};
 const injectViaTmuxText = async (target: string, text: string, log: Logger, freshSpawn: boolean, witness: SubmitWitness = NO_WITNESS): Promise<{ ok: boolean; reason?: string; uncertain?: boolean }> => {
   // Warm pane: tight timings, low latency. Fresh spawn (claude --resume just
   // started, transcript still loading): extended timings — bracketed-paste
@@ -1729,15 +1739,14 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   const loadAndPaste = async (): Promise<{ ok: boolean; reason?: string }> => {
     // stdin variant of the shared exec path — it carries the same hard timeout,
     // which a hand-rolled spawn here did not.
-    // 每次注入用自己的具名 buffer: 不同 pane 的注入并发时, 共用 tmux 的默认 buffer 会让
-    // 一方 load 之后、paste 之前被另一方覆盖 —— 两段文本互换 pane (实测: 同一毫秒投的两份
-    // 回执, 发给 A 的进了 B)。同一 pane 的串行管不到跨 pane。
-    const buf = `wezard-${process.pid}-${++pasteSeq}`;
-    const loaded = await runTmux(["load-buffer", "-b", buf, "-"], { stdin: text });
-    if (!loaded.ok) return { ok: false, reason: `tmux load-buffer failed: ${loaded.stderr.slice(-200) || loaded.code}` };
-    const pasted = await runTmux(["paste-buffer", "-b", buf, "-p", "-d", "-t", target]);
-    if (!pasted.ok) return { ok: false, reason: `tmux paste-buffer failed: ${pasted.stderr.slice(-200)}` };
-    return { ok: true };
+    // 默认 buffer (不带 -b) 是新旧 tmux 都支持的唯一公共形式; 隔离由 withPasteLock 保证。
+    return withPasteLock(async () => {
+      const loaded = await runTmux(["load-buffer", "-"], { stdin: text });
+      if (!loaded.ok) return { ok: false, reason: `tmux load-buffer failed: ${loaded.stderr.slice(-200) || loaded.code}` };
+      const pasted = await runTmux(["paste-buffer", "-p", "-d", "-t", target]);
+      if (!pasted.ok) return { ok: false, reason: `tmux paste-buffer failed: ${pasted.stderr.slice(-200)}` };
+      return { ok: true };
+    });
   };
 
   // 框认得出来 → 看它变没变; 认不出来 → 退回宽窗口找 headFp (长文本会换行,

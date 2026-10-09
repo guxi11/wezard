@@ -27,7 +27,6 @@ const t = async (name: string, fn: () => Promise<void>): Promise<void> => {
 // `tmux wait-for <channel>` 阻塞直到有人 signal 同名 channel —— 一个真实存在、
 // 不依赖挂起的 server、也不会有副作用的"永久阻塞的 tmux 命令"。
 const BLOCKING = ["wait-for", `wezard-test-${process.pid}`];
-const BUF = `wezard-test-${process.pid}`;
 
 const hasTmux = (await runTmux(["-V"], { timeoutMs: 5_000 })).ok;
 if (!hasTmux) {
@@ -76,13 +75,15 @@ await t("正常完成的命令不上报超时", async () => {
 });
 
 await t("stdin 变体: load-buffer - 把文本喂进 tmux buffer (注入路径靠它)", async () => {
+  // 注入路径用的是默认 buffer (不带 -b): tmux < 2.0 拒绝自定义 buffer 名, 这里与
+  // mirror-bridge 保持同一形式。
   const text = "wezard timeout test 中文 & $pecial";
-  const load = await runTmux(["load-buffer", "-b", BUF, "-"], { stdin: text });
+  const load = await runTmux(["load-buffer", "-"], { stdin: text });
   assert.equal(load.ok, true, `load stderr=${load.stderr}`);
-  const show = await runTmux(["show-buffer", "-b", BUF]);
+  const show = await runTmux(["show-buffer"]);
   assert.equal(show.ok, true, `show stderr=${show.stderr}`);
   assert.equal(show.stdout.replace(/\n$/, ""), text);
-  await runTmux(["delete-buffer", "-b", BUF]);
+  await runTmux(["delete-buffer"]);
 });
 
 await t("timeoutMs=0 关闭超时后, 正常命令照常工作", async () => {
