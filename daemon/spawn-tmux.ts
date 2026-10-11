@@ -1,5 +1,5 @@
 import { recordCodexPaneSession } from "../shared/codex.js";
-import { codexHookLaunchArgs, codexHookCommand, prepareCodexSession } from "../shared/codex-hooks.js";
+import { codexHookLaunchArgs, codexHookCommand, prepareCodexSession, codexSandboxLaunchArgs, codexSandboxMode, codexSandboxArgConflict } from "../shared/codex-hooks.js";
 // Auto-spawn helper for mirror mode.
 //
 // Goal: from a WeCom inbound, materialize a fresh `claude` process inside a
@@ -511,13 +511,19 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
   if (backend.name !== "codex") trustWorkspace(backend.bin, cwd, log);
 
   let codexApprovalArgs: string[] = [];
+  const sandboxEnabled = cfg.wrc.cliBackends.codex.sandbox;
+  const codexSandboxArgs = backend.name === "codex" ? codexSandboxLaunchArgs(sandboxEnabled) : [];
   if (backend.name === "codex") {
+    const conflict = codexSandboxArgConflict(cfg.wrc.extraArgs);
+    if (conflict) return { ok: false, reason: `Codex extraArgs ${conflict} conflicts with wrc.cliBackends.codex.sandbox; remove the shortcut and use the sandbox config` };
     const hookEntry = fileURLToPath(new URL("../cli/codex-hook.js", import.meta.url));
     const command = codexHookCommand(loadConfig().sourcePath, `http://127.0.0.1:${cfg.daemon.port}`, hookEntry);
     try { codexApprovalArgs = await codexHookLaunchArgs(backend.bin, cwd, command, cfg.approval.hookTimeoutSec + 10, cfg.approval.enabled); }
     catch (e) { return { ok: false, reason: `Codex approval hooks unavailable: ${(e as Error).message}` }; }
     try {
-      const native = await prepareCodexSession(backend.bin, cwd, winName, codexApprovalArgs, { resumeSessionId, forkSession, model, systemPrompt });
+      const native = await prepareCodexSession(backend.bin, cwd, winName, [...codexApprovalArgs, ...codexSandboxArgs], {
+        resumeSessionId, forkSession, model, systemPrompt, sandboxMode: codexSandboxMode(sandboxEnabled),
+      });
       sessionId = native.sessionId;
       jsonlPath = native.jsonlPath;
     } catch (e) { return { ok: false, reason: `Codex session preparation failed: ${(e as Error).message}` }; }
@@ -589,6 +595,7 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
       ...(flagModel ? [backend.modelFlag!, flagModel] : []),
       ...(effortArg && backend.effortFlag ? [backend.effortFlag, effortArg] : []),
       ...cfg.wrc.extraArgs.filter((arg) => backend.name !== "codex" || !arg.startsWith("--disallowedTools")),
+      ...codexSandboxArgs,
     ].map(shQuote);
     const cmd = [...envPrefix, shQuote(backend.bin), ...argv, charter].filter(Boolean).join(" ");
     // Old tmux couldn't set the pane's start-dir via `-c`; cd into it first.

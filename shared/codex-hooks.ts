@@ -2,6 +2,17 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { augmentedPath } from "./exec-path.js";
 
+export const codexSandboxMode = (enabled = false): "workspace-write" | "danger-full-access" =>
+  enabled ? "workspace-write" : "danger-full-access";
+
+/** Both app-server and TUI accept config overrides; approval stays independent. */
+export const codexSandboxLaunchArgs = (enabled = false): string[] =>
+  ["-c", `sandbox_mode=${JSON.stringify(codexSandboxMode(enabled))}`];
+
+/** Native shortcut flags can override config or also change approval; fail closed. */
+export const codexSandboxArgConflict = (args: string[]): string | undefined => args.find(arg =>
+  /^(?:--sandbox(?:=|$)|-s(?:=|[^-]|$)|--(?:full-auto|approve-for-me|yolo|dangerously-bypass-approvals-and-sandbox)(?:=|$))/.test(arg));
+
 export interface CodexHook {
   enabled: boolean;
   key: string;
@@ -70,12 +81,14 @@ export const codexRequest = <T>(bin: string, cwd: string, method: string, params
 
 /** Create/resume/fork and persist an empty native thread, without starting a turn. */
 export const prepareCodexSession = async (bin: string, cwd: string, name: string, args: string[],
-  options: { resumeSessionId?: string; forkSession?: boolean; model?: string; systemPrompt?: string }): Promise<{ sessionId: string; jsonlPath: string }> => {
+  options: { resumeSessionId?: string; forkSession?: boolean; model?: string; systemPrompt?: string; sandboxMode?: "workspace-write" | "danger-full-access" }): Promise<{ sessionId: string; jsonlPath: string }> => {
   const method = options.resumeSessionId ? options.forkSession ? "thread/fork" : "thread/resume" : "thread/start";
   const result = await codexRequest<{ thread: { id: string; path: string | null } }>(bin, cwd, method, {
     cwd, ...(options.resumeSessionId ? { threadId: options.resumeSessionId } : { ephemeral: false }),
     ...(options.model ? { model: options.model } : {}),
     ...(options.systemPrompt ? { developerInstructions: options.systemPrompt } : {}),
+    // Resume/fork can inherit saved permissions: explicitly apply this launch's policy.
+    ...(options.sandboxMode ? { sandbox: options.sandboxMode } : {}),
   }, args, undefined, (r) => ({ method: "thread/name/set", params: { threadId: r.thread.id, name } }));
   if (!result.thread.id || !result.thread.path) throw new Error("Codex did not return a persistent thread id/path");
   return { sessionId: result.thread.id, jsonlPath: result.thread.path };

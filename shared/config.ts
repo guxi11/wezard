@@ -218,11 +218,14 @@ const Wrc = z.object({
     .object({
       claude: z.object({ bin: z.string().optional().describe("二进制路径") }).optional(),
       "claude-internal": z.object({ bin: z.string().optional().describe("二进制路径") }).optional(),
-      codex: z.object({ bin: z.string().optional().describe("二进制路径") }).optional(),
+      codex: z.object({
+        bin: z.string().optional().describe("二进制路径"),
+        sandbox: z.boolean().default(false).describe("Codex 使用工作区沙箱: true = workspace-write, false = danger-full-access; 不改变审批; reload 后仅对新启动/恢复/克隆的 pane 生效"),
+      }).default({}),
       codebuddy: z.object({ bin: z.string().optional().describe("二进制路径") }).optional(),
     })
     .default({})
-    .describe("各 CLI 后端的二进制路径覆盖; 缺省 = 内置默认"), { gate: "card" }),
+    .describe("各 CLI 后端的启动配置; 二进制缺省 = 内置默认"), { gate: "card" }),
   cwd: z.string().default("~/.wezard/workspace").describe("新会话的默认工作区"),
   // 默认摘掉 wizard 用不上、每个会话首轮白占 ~18k token 的工具 (Artifact 11.3k · Workflow/SendFeedback/ScheduleWakeup 5.6k · claude.ai Docs/Drive 1.0k)。
   // 显式写了 extraArgs 的 config 整份覆盖它, 不合并 —— 要留某个工具就把整串抄过去删掉那一项。
