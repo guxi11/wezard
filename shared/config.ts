@@ -370,8 +370,8 @@ const Weixin = z.object({
   stateFile: z.string().default("~/.wezard/weixin.json").describe("已绑定账号与收发游标 (含凭据, 0600)"),
 });
 
-// 按难度分档: spawn_wizard / clone_wizard 的 `tier` 落到这里的 {cli, model, effort};
-// 显式给的 model / effort / cli 压过档位。档名固定、按由轻到重排 —— MCP 参数是 enum, 宪章逐档列。
+// 按难度分档: 显式 model / effort 压过档位; CLI 统一由 wrc.defaultCli 决定。
+// 旧 cli 字段只用于识别不兼容的模型档位, 不再选择后端。
 const Tier = z.object({
   cli: z.enum(CLI_NAMES).optional().describe("兼容旧配置字段; 新建 pane 统一使用 wrc.defaultCli"),
   model: z.string().default("").describe("口语化模型名 ('haiku' / 'sonnet 5' / 'opus'), 只写家族 = 该家族最新; 空 = CLI 默认"),

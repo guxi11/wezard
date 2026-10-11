@@ -1474,9 +1474,33 @@ export interface InputBox {
 }
 const UNKNOWN_BOX: InputBox = { known: false, body: "" };
 
-export const parseInputBox = (cap: string): InputBox => {
+export const parseInputBox = (cap: string, styledLayout = cap): InputBox => {
   const lines = cap.split("\n");
   while (lines.length && lines[lines.length - 1]!.trim() === "") lines.pop();
+  // Codex has no rulers. Anchor the composer to its bottom shortcuts footer,
+  // then use the LAST › prompt: earlier prompts belong to the transcript.
+  // Requiring a status row and a blank separator avoids treating arbitrary
+  // output containing › as editable input. Collapsed pastes remain visible
+  // as a body change even though the original text fingerprints disappear.
+  const styledLines = styledLayout.split("\n");
+  const layout = styledLines.map((line) => line.replace(/\x1b\[[0-9;:]*m/gu, "").replace(OTHER_ESC_RE, ""));
+  while (layout.length && !layout[layout.length - 1]!.trim()) layout.pop();
+  const footer = layout.length - 1;
+  if (/\? for shortcuts\s*$/u.test(layout[footer] ?? "")) {
+    let status = footer - 1;
+    while (status >= 0 && !layout[status]!.trim()) status--;
+    if (status >= 0 && footer - status <= BOX_FOOTER_ROWS && layout[status]!.includes("·") && status > 0 && !layout[status - 1]!.trim()) {
+      let prompt = status - 2;
+      // Continuation rows are indented; a › inside pasted content is not a
+      // new composer prompt.
+      while (prompt >= 0 && !/^›(?:\s|$)/u.test(layout[prompt]!)) prompt--;
+      if (prompt >= 0) {
+        const body = dropDim(styledLines.slice(prompt, status).join("\n"))
+          .replace(/^\s*›\s?/u, "").replace(/[\s\u200b\ufeff]+/gu, " ").trim();
+        return { known: true, body };
+      }
+    }
+  }
   const rulers = lines.reduce<number[]>((acc, l, i) => (BOX_RULER_RE.test(l) ? [...acc, i] : acc), []);
   const bottom = rulers[rulers.length - 1];
   const top = rulers[rulers.length - 2];
@@ -1516,11 +1540,19 @@ export const dropDim = (styled: string): string => {
 
 const captureUndimmed = async (target: string, rows: number): Promise<string> => {
   const r = await runTmux(["capture-pane", "-t", target, "-p", "-e", "-S", `-${rows}`]);
-  return r.ok ? dropDim(r.stdout) : "";
+  // Negative -S includes scrollback plus the entire visible pane, not its
+  // last N rows. Crop before removing dim text so row boundaries survive.
+  return r.ok ? dropDim(r.stdout.replace(/\n$/u, "").split("\n").slice(-rows).join("\n")) : "";
 };
 
 // 24 行足够容纳展开后的多行粘贴 (折叠态只占一行)。
-const readInputBox = async (target: string): Promise<InputBox> => parseInputBox(await captureUndimmed(target, 24));
+const readPaneInput = async (target: string): Promise<{ cap: string; box: InputBox }> => {
+  const r = await runTmux(["capture-pane", "-t", target, "-p", "-e", "-S", "-24"]);
+  const raw = r.ok ? r.stdout : "";
+  const cap = dropDim(raw);
+  return { cap, box: parseInputBox(cap, raw) };
+};
+const readInputBox = async (target: string): Promise<InputBox> => (await readPaneInput(target)).box;
 
 // ── 注入门控的会话证人 (cc-session) ─────────────────────────────────
 // 能从会话自己写的 json 读到的判据, 就不读 pane: 就绪看注册表的 status, 提交看
@@ -1760,9 +1792,10 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   const sawLanded = async (timeoutMs: number): Promise<boolean> => {
     const t0 = Date.now();
     while (Date.now() - t0 < timeoutMs) {
-      const cap = await captureUndimmed(target, 24);
-      const box = parseInputBox(cap);
-      if (boxVerify && box.known ? !boxIntact(box) : Boolean(headFp) && stripWs(cap).includes(headFp)) return true;
+      const { cap, box } = await readPaneInput(target);
+      // A redraw can hide the baseline. Once the composer reappears, its
+      // nonempty body also proves landing of a collapsed paste.
+      if (box.known ? (boxVerify ? !boxIntact(box) : box.body !== "") : Boolean(headFp) && stripWs(cap).includes(headFp)) return true;
       await sleep(POLL_MS);
     }
     return false;
@@ -1776,12 +1809,17 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   };
 
   let pasteSeen = alreadyTyped;
+  let pastedAt = Date.now();
   if (alreadyTyped) {
     log.warn({ target, headFp }, "mirror inject: 输入框里已有这段文本 (上次未提交) — 不重贴, 直接提交");
   } else {
     const r = await loadAndPaste();
     if (!r.ok) return r;
-    pasteSeen = await sawLanded(PASTE_VERIFY_MS);
+    pastedAt = Date.now();
+    // An unknown layout cannot verify collapsed text by fingerprint. Bound
+    // that inconclusive probe by the catch-up budget instead of waiting 6s
+    // and then sleeping another 2.5s before the first Enter.
+    pasteSeen = await sawLanded(boxVerify ? PASTE_VERIFY_MS : POST_PASTE_SETTLE_FALLBACK_MS);
   }
   if (!pasteSeen) {
     const box = await readInputBox(target);
@@ -1794,13 +1832,18 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
     if (!empty) {
       log.warn({ target, headFp, boxKnown: box.known }, "mirror inject: 粘贴未验证但输入框非空 — 首次粘贴已落地, 不重贴");
       pasteSeen = true;
-    } else {
+    } else if (boxVerify && box.known) {
       log.warn({ target, headFp, boxKnown: box.known }, "mirror inject: 输入框确认为空, 重贴一次");
       await sleep(RETRY_SETTLE_MS);
       if (submitted()) return { ok: true };
       const r = await loadAndPaste();
       if (!r.ok) return r;
+      pastedAt = Date.now();
       pasteSeen = await sawLanded(PASTE_VERIFY_MS);
+    } else {
+      // Missing fingerprints are not proof of an empty composer: other TUIs
+      // may collapse pasted text. Never duplicate a paste on that evidence.
+      log.warn({ target, headFp }, "mirror inject: 输入框布局未知, 不重贴未确认的粘贴");
     }
   }
 
@@ -1820,8 +1863,8 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   // Bracketed-paste end + TUI catch-up. 框认不出来 / 粘贴没被看见时没有条件可查,
   // 维持固定等待 (fresh respawn: claude --resume is still loading the transcript)。
   if (!alreadyTyped) {
-    if (pasteSeen && boxVerify) await pasteSettled(POST_PASTE_SETTLE_MS);
-    else await sleep(pasteSeen ? POST_PASTE_SETTLE_MS : POST_PASTE_SETTLE_FALLBACK_MS);
+    if (pasteSeen) await pasteSettled(POST_PASTE_SETTLE_MS);
+    else await sleep(Math.max(0, POST_PASTE_SETTLE_FALLBACK_MS - (Date.now() - pastedAt)));
   }
 
   const sendEnter = async (): Promise<{ ok: boolean; reason?: string }> => {
@@ -1830,7 +1873,7 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   };
   const cleared = async (): Promise<boolean> => {
     const box = await readInputBox(target);
-    return boxVerify && box.known ? boxIntact(box) : !(await inputBoxStillHasTail());
+    return box.known ? (boxVerify ? boxIntact(box) : box.body === "") : !(await inputBoxStillHasTail());
   };
   /** 证人先答; 它的窗口过了还不作声, 才每轮加看一眼框。 */
   const waitForSubmit = async (timeoutMs: number): Promise<boolean> => {
@@ -1861,7 +1904,10 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
       if (submitted()) return { ok: true }; // 迟到的确认 —— 补的这一下会落在空框上, 省了
       log.warn({ target, tailFp, attempt: i + 1 }, "mirror inject: 回车后输入框未清空, 再补一次");
     }
-    if (i === 0) enterAt = Date.now();
+    if (i === 0) {
+      enterAt = Date.now();
+      log.info({ target, pasteToEnterMs: enterAt - pastedAt, pasteSeen, boxTrusted, freshSpawn }, "mirror inject: first Enter");
+    }
     const e = await sendEnter();
     if (!e.ok) return e;
     if (await waitForSubmit(CLEARED_TIMEOUT_MS)) return { ok: true };

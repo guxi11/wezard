@@ -19,8 +19,9 @@ export interface ApprovalReply {
   updated_input?: Record<string, unknown>;
 }
 
-/** Match the self-call exemptions in hooks/pre-tool-use.sh for both Codex events. */
+/** Self-call exemptions never authorize native sandbox escalation. */
 export const codexSelfCallBypass = (input: CodexApprovalInput): string | undefined => {
+  if (input.hook_event_name === "PermissionRequest") return undefined;
   const name = input.tool_name ?? "";
   const args = input.tool_input && typeof input.tool_input === "object"
     ? input.tool_input as Record<string, unknown> : {};

@@ -4,7 +4,7 @@
 // The card for a `card`-gated write and the actual file write are the caller's (index.ts).
 import type { Config } from "../shared/config.js";
 import { ConfigSchema, TIERS, configIssues, parseConfigText, readSecrets, type TierName } from "../shared/config.js";
-import type { CliBackendName } from "../shared/cli-backends.js";
+import { resolveCliBackend, type CliBackendName } from "../shared/cli-backends.js";
 import { parseEffort, type Effort } from "../shared/effort.js";
 import { previewPatch, readJsoncText } from "../shared/config-writer.js";
 import {
@@ -299,32 +299,40 @@ export interface TierPick {
   model?: string;
   effort?: Effort;
   /** 每个字段的来源; inherit = 不传, spawn 落到 CLI 默认, clone 跟被克隆者。 */
-  via: { cli: Via; model: Via; effort: Via };
+  via: { cli: "config"; model: Via; effort: Via };
   note?: string;
 }
 
-/** spawn / clone 的 {cli, model, effort}: 显式给的 > 档里写的 > 不传。clone 换不了 CLI —— fork 只能在同一后端里。 */
+/** CLI 只取全局配置; model / effort 才按显式值 > 兼容的档位 > CLI 默认解析。 */
 export const pickTier = (
-  models: Config["models"],
+  cfg: Config,
   tier: string | undefined,
   explicit: { cli?: CliBackendName; model?: string; effort?: Effort },
   inherit: boolean,
 ): TierPick | Err => {
   const name = (tier ?? "").trim();
   if (name && !(TIERS as readonly string[]).includes(name)) return { ok: false, reason: `tier 只有这几档: ${TIERS.join(" / ")}` };
-  const t = name ? models.tiers[name as TierName] : undefined;
+  const cli = resolveCliBackend(cfg.wrc).name;
+  const t = name ? cfg.models.tiers[name as TierName] : undefined;
   const one = <T>(x: T | undefined, y: T | undefined): [T | undefined, Via] =>
     x !== undefined ? [x, "explicit"] : y !== undefined ? [y, "tier"] : [undefined, "inherit"];
-  const tierCli = inherit ? undefined : t?.cli;
-  const [cli, viaCli] = one(explicit.cli, tierCli);
-  const [model, viaModel] = one(explicit.model?.trim() || undefined, t?.model.trim() || undefined);
-  const [effort, viaEffort] = one(explicit.effort, parseEffort(t?.effort));
+  // 旧配置的 Claude 档位不能把 opus / sonnet 或 max effort 传给 Codex。
+  // 显式 model 仍原样交给 CLI; 不猜用户自定义模型是否有效。
+  const foreignTier = !!t && ((!!t.cli && t.cli !== cli)
+    || (cli === "codex" && /^(?:claude|opus|sonnet|haiku)\b/i.test(t.model)));
+  const [model, viaModel] = one(explicit.model?.trim() || undefined, foreignTier ? undefined : t?.model.trim() || undefined);
+  const [effort, viaEffort] = one(explicit.effort, foreignTier ? undefined : parseEffort(t?.effort));
+  const ignoredCli = explicit.cli ?? t?.cli;
+  const notes = [
+    ...(ignoredCli && ignoredCli !== cli ? [`cli (${ignoredCli}) 不覆盖全局 wrc.defaultCli (${cli})`] : []),
+    ...(foreignTier ? [`档位 ${name} 属于其他后端, model / effort ${inherit ? "随被克隆会话" : "使用 CLI 默认"}`] : []),
+  ];
   return {
     ok: true,
     ...(name ? { tier: name as TierName } : {}),
     cli, model, effort,
-    via: { cli: viaCli, model: viaModel, effort: viaEffort },
-    ...(inherit && t?.cli ? { note: `档位里的 cli (${t.cli}) 没用上: 克隆只能留在被克隆者的 CLI 上` } : {}),
+    via: { cli: "config", model: viaModel, effort: viaEffort },
+    ...(notes.length ? { note: notes.join("; ") } : {}),
   };
 };
 

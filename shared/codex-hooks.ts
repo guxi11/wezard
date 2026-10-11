@@ -32,7 +32,11 @@ export const codexRequest = <T>(bin: string, cwd: string, method: string, params
       // EOF lets Codex flush its native thread state before another CLI resumes it.
       child.stdin.end();
       const shutdownTimer = setTimeout(() => { child.kill(); reject(new Error(`Codex ${method} did not close after EOF`)); }, 5000);
-      child.once("exit", () => { clearTimeout(shutdownTimer); resolve(result!); });
+      child.once("exit", (code, signal) => {
+        clearTimeout(shutdownTimer);
+        if (code !== 0) reject(new Error(`Codex ${method} failed during shutdown (${signal ?? code}): ${stderr}`));
+        else resolve(result!);
+      });
     };
     const timer = setTimeout(() => finish(new Error(`Codex ${method} timed out`)), 20_000);
     const send = (message: unknown): void => { child.stdin.write(JSON.stringify(message) + "\n"); };

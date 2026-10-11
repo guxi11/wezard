@@ -185,15 +185,12 @@ const looksLikeAgentCli = (cmd: string): boolean =>
   activeBackends().some((b) => cmd.toLowerCase().includes(basename(b.bin).toLowerCase()));
 
 // Transcript roots of every active backend, in registry order (primary first).
-const projectRoots = (): string[] => activeBackends().map((b) => expandHome(b.projectsDir));
+const projectRoots = (): string[] => activeBackends().filter((b) => b.name !== "codex").map((b) => expandHome(b.projectsDir));
 
 // Locate `<sessionId>.jsonl` (UUID is globally unique, so we don't have to
 // reverse the cwd→dir encoding). Skips subagent transcripts (they live under a
 // `<sid>/subagents/` subdir, never directly under a project dir).
 const findJsonl = (sessionId: string): string => {
-  const codex = activeBackends().find((b) => b.name === "codex");
-  const hit = codex && codexSessions(expandHome(codex.projectsDir)).find((x) => x.sessionId === sessionId);
-  if (hit) return hit.jsonlPath;
   const name = `${sessionId}.jsonl`;
   for (const root of projectRoots()) {
     if (!existsSync(root)) continue;
@@ -222,7 +219,7 @@ const findJsonl = (sessionId: string): string => {
 // a brand-new `new_claude_session` still shows up in the list immediately.
 const expectedJsonl = (cwd: string, sessionId: string): string => {
   if (!cwd || !sessionId) return "";
-  const cands = projectDirsFor(cwd);
+  const cands = projectDirsFor(cwd).filter(({ backend }) => backend.name !== "codex");
   const hit = cands.find(({ dir }) => existsSync(dir)) ?? cands[0];
   return hit ? join(hit.dir, `${sessionId}.jsonl`) : "";
 };
@@ -235,11 +232,8 @@ const expectedJsonl = (cwd: string, sessionId: string): string => {
 const inferByCwd = (cwd: string, taken: Set<string>): { sessionId: string; jsonlPath: string } | null => {
   if (!cwd) return null;
   for (const { backend, dir } of projectDirsFor(cwd)) {
-    if (backend.name === "codex") {
-      const hit = codexSessions(dir, cwd).filter((x) => !taken.has(x.sessionId)).sort((a, b) => statSync(b.jsonlPath).mtimeMs - statSync(a.jsonlPath).mtimeMs)[0];
-      if (hit) return hit;
-      continue;
-    }
+    // Codex identity comes from SessionStart or an explicit native thread id.
+    if (backend.name === "codex") continue;
     if (!existsSync(dir)) continue;
     let files: string[];
     try {
@@ -323,7 +317,13 @@ export const scanClaudeSessions = async (): Promise<SessionInfo[]> => {
 
   // Resolve cwd only for the chosen worker per pane (a handful of pids).
   const cwds = await cwdMapFor(Array.from(byPane.values()).map((w) => w.pid));
-  const panes = Array.from(byPane.values()).map((w) => ({ ...w, cwd: cwds.get(w.pid) ?? "" }));
+  const codexBackend = activeBackends().find((b) => b.name === "codex");
+  // Read date-partitioned rollouts at most once, and only for unregistered panes.
+  let codexPaths: Map<string, string> | undefined;
+  const panes = Array.from(byPane.values()).map((w) => ({
+    ...w, cwd: cwds.get(w.pid) ?? "",
+    isCodex: Boolean(codexBackend && w.cmd.toLowerCase().includes(basename(codexBackend.bin).toLowerCase())),
+  }));
 
   const seen = new Set<string>();
   const out: SessionInfo[] = [];
@@ -354,6 +354,18 @@ export const scanClaudeSessions = async (): Promise<SessionInfo[]> => {
   // session may not have written its jsonl yet — fall back to the expected
   // path so it still appears (summary reads as a new/empty session).
   for (const w of panes) {
+    if (w.isCodex) {
+      // Native /new and /resume leave the process argv pointing at the old id.
+      const registered = codexSessionForPane(w.owner.paneId);
+      if (registered && registered.cwd === w.cwd && backendForPath(registered.jsonlPath).name === "codex") {
+        emit(registered.sessionId, registered.jsonlPath, registered.cwd, w.owner);
+      } else if (w.explicitSid) {
+        codexPaths ??= new Map(codexSessions(expandHome(codexBackend!.projectsDir)).map((s) => [s.sessionId, s.jsonlPath]));
+        const path = codexPaths.get(w.explicitSid);
+        if (path) emit(w.explicitSid, path, w.cwd, w.owner);
+      }
+      continue;
+    }
     if (!w.explicitSid) continue;
     const jsonlPath = findJsonl(w.explicitSid) || expectedJsonl(w.cwd, w.explicitSid);
     if (jsonlPath) emit(w.explicitSid, jsonlPath, w.cwd, w.owner);
@@ -361,12 +373,7 @@ export const scanClaudeSessions = async (): Promise<SessionInfo[]> => {
   // Pass 2: resume-mode (`-r`/`--resume`, no id) — infer via cwd→newest jsonl,
   // skipping any session already claimed in pass 1.
   for (const w of panes) {
-    if (w.explicitSid) continue;
-    const codex = codexSessionForPane(w.owner.paneId);
-    if (codex && codex.cwd === w.cwd && backendForPath(codex.jsonlPath).name === "codex" && /codex/.test(w.cmd)) {
-      emit(codex.sessionId, codex.jsonlPath, codex.cwd, w.owner);
-      continue;
-    }
+    if (w.explicitSid || w.isCodex) continue;
     const inf = inferByCwd(w.cwd, seen);
     if (inf) emit(inf.sessionId, inf.jsonlPath, w.cwd, w.owner);
   }

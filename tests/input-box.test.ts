@@ -1,0 +1,20 @@
+import assert from "node:assert/strict";
+import { dropDim, parseInputBox } from "../daemon/mirror-bridge.js";
+
+const codex = (body: string) => `› old transcript\n• reply\n\n› ${body}\n\n  GPT-6.1-Sol low · ~/project · task\n  ← for agents · ? for shortcuts\n\n`;
+assert.deepEqual(parseInputBox(codex("hello")), { known: true, body: "hello" });
+assert.deepEqual(parseInputBox(codex("[Pasted Content 1496 chars]")), { known: true, body: "[Pasted Content 1496 chars]" });
+assert.deepEqual(parseInputBox(codex("first\n  second\n  › nested text")), { known: true, body: "first second › nested text" });
+assert.deepEqual(parseInputBox(codex("")), { known: true, body: "" });
+const styled = codex("\x1b[2mAsk Codex to do anything\x1b[0m");
+assert.deepEqual(parseInputBox(dropDim(styled), styled), { known: true, body: "" });
+const dimLayout = codex("hello").replace("› hello", "\x1b[2m› \x1b[0mhello").replace("  GPT", "\x1b[2m  GPT") + "\x1b[0m";
+assert.deepEqual(parseInputBox(dropDim(dimLayout), dimLayout), { known: true, body: "hello" });
+assert.equal(parseInputBox("› transcript only\n• answer").known, false);
+assert.equal(parseInputBox("› text\nGPT · project\n? for shortcuts").known, false);
+assert.equal(parseInputBox("Choose an option\n❯ 1. Yes\n  2. No\nEsc to cancel").known, false);
+const claude = (body: string) => `────────────────\n❯ ${body}\n────────────────\n  project`;
+assert.deepEqual(parseInputBox(claude("hello")), { known: true, body: "hello" });
+assert.deepEqual(parseInputBox(claude("[Pasted text #1 +5 lines]")), { known: true, body: "[Pasted text #1 +5 lines]" });
+assert.deepEqual(parseInputBox(claude("")), { known: true, body: "" });
+console.log("Input box compatibility checks passed");

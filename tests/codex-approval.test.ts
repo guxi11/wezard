@@ -83,8 +83,9 @@ const runHook = (payload: unknown, url = `http://127.0.0.1:${addr.port}`): Promi
 try {
   for (const hook_event_name of ["PreToolUse", "PermissionRequest"]) {
     const self = await runHook({ ...input, hook_event_name, tool_name: "mcp__wezard__dispatch", tool_input: { name: "cli-enter-delay" } }, "http://127.0.0.1:1");
-    assert.deepEqual(self, hook_event_name === "PreToolUse" ? {} : { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow" } } });
-    assert.equal(client.sent.length, 0, "self calls bypass cards even when daemon is unavailable");
+    if (hook_event_name === "PreToolUse") assert.deepEqual(self, {});
+    else assert.equal(self.hookSpecificOutput, undefined, "self-call escalation falls back to native approval when the bridge is unavailable");
+    assert.equal(client.sent.length, 0, "unavailable bridge sends no cards");
   }
   const allow = await runHook(input);
   assert.equal(allow.hookSpecificOutput.decision.behavior, "allow");

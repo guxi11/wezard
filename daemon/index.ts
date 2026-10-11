@@ -2412,7 +2412,7 @@ const main = async (): Promise<void> => {
       const b = body as { name?: string; tag?: string; description?: string; inherit?: boolean; detached?: boolean; from?: string; cwd?: string; chat?: string; cli?: CliBackendName; model?: string; effort?: string; tier?: string; task?: string; job?: string; keepalive?: boolean; lead?: boolean };
       const askedEffort = parseEffort(b.effort);
       if (b.effort !== undefined && !askedEffort) { return { status: 400, body: { ok: false, reason: `effort 只有这几档: ${EFFORTS.join(" / ")}` } }; }
-      const pick = pickTier(cfg.models, b.tier, { cli: b.cli, model: b.model, effort: askedEffort }, b.inherit === true);
+      const pick = pickTier(cfg, b.tier, { cli: b.cli, model: b.model, effort: askedEffort }, b.inherit === true);
       if (!pick.ok) { return { status: 400, body: pick }; }
       const effort = pick.effort;
       // 工单先验: 生完分身才发现工单号打错了, 那个分身就成了没人认领的孤儿。
