@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
 import pino from "pino";
 import type { WSClient } from "@wecom/aibot-node-sdk";
 import { ConfigSchema } from "../shared/config.js";
-import { codexHookOutput, codexApprovalRequest } from "../shared/codex-approval.js";
+import { codexHookOutput, codexApprovalRequest, codexSelfCallBypass } from "../shared/codex-approval.js";
 import { makeApproveHandler, installApprovalEventListener } from "../daemon/approval.js";
 
 for (const event of ["PreToolUse", "PermissionRequest"] as const) {
@@ -29,6 +29,16 @@ assert.equal(codexHookOutput("PermissionRequest", { decision: "ask" }).hookSpeci
 assert.equal((codexHookOutput("PermissionRequest", { decision: "allow", updated_input: { command: "other" } }) as any).hookSpecificOutput.updatedInput, undefined);
 const patch = codexApprovalRequest({ tool_name: "apply_patch", tool_input: { command: "*** Begin Patch\n*** Update File: .env\n@@\n-x\n+y\n*** End Patch" } }) as any;
 assert.deepEqual(patch.tool_input.file_paths, [".env"]);
+for (const tool_name of ["mcp__wezard__dispatch", "mcp__plugin_wezard_wezard__config_set"]) {
+  assert.ok(codexSelfCallBypass({ tool_name }));
+}
+assert.equal(codexSelfCallBypass({ tool_name: "mcp__other__dispatch" }), undefined);
+assert.equal(codexSelfCallBypass({ tool_name: "mcp__wezard__set_model", tool_input: { nested: { scope: "default" } } }), undefined);
+assert.ok(codexSelfCallBypass({ tool_name: "mcp__wezard__set_model", tool_input: { scope: "session" } }));
+for (const command of ["wezard status; rm -rf x", "wezard status\nrm -rf x", "wezard status $(id)", "wezard config set approval.enabled false"]) {
+  assert.equal(codexSelfCallBypass({ tool_name: "Bash", tool_input: { command } }), undefined);
+}
+assert.ok(codexSelfCallBypass({ tool_name: "Bash", tool_input: { command: "/opt/bin/wezard.sh status" } }));
 
 const log = pino({ level: "silent" });
 const cfg = ConfigSchema.parse({ bot: { botId: "test", secret: "test" }, defaultChat: "user:tester", approval: {
@@ -71,6 +81,11 @@ const runHook = (payload: unknown, url = `http://127.0.0.1:${addr.port}`): Promi
   child.stdin.end(JSON.stringify(payload));
 });
 try {
+  for (const hook_event_name of ["PreToolUse", "PermissionRequest"]) {
+    const self = await runHook({ ...input, hook_event_name, tool_name: "mcp__wezard__dispatch", tool_input: { name: "cli-enter-delay" } }, "http://127.0.0.1:1");
+    assert.deepEqual(self, hook_event_name === "PreToolUse" ? {} : { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow" } } });
+    assert.equal(client.sent.length, 0, "self calls bypass cards even when daemon is unavailable");
+  }
   const allow = await runHook(input);
   assert.equal(allow.hookSpecificOutput.decision.behavior, "allow");
   assert.equal(client.sent.length, 1, "native permission cannot disappear through matcher/skipAll/danger policies");

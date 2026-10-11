@@ -19,6 +19,30 @@ export interface ApprovalReply {
   updated_input?: Record<string, unknown>;
 }
 
+/** Match the self-call exemptions in hooks/pre-tool-use.sh for both Codex events. */
+export const codexSelfCallBypass = (input: CodexApprovalInput): string | undefined => {
+  const name = input.tool_name ?? "";
+  const args = input.tool_input && typeof input.tool_input === "object"
+    ? input.tool_input as Record<string, unknown> : {};
+  if (/^mcp__.*wezard__[A-Za-z0-9_]+$/.test(name)) {
+    const hasDefaultScope = (value: unknown): boolean => {
+      if (!value || typeof value !== "object") return false;
+      return Object.entries(value).some(([key, child]) =>
+        (key === "scope" && child === "default") || hasDefaultScope(child));
+    };
+    if (name.endsWith("wezard__set_model") && hasDefaultScope(args)) return undefined;
+    return "wezard mcp self-call bypass";
+  }
+  if (name === "Skill" && typeof args.skill === "string" && args.skill.startsWith("wezard:")) {
+    return "wezard skill self-call bypass";
+  }
+  const command = args.command ?? args.cmd;
+  if (["Bash", "exec_command", "shell_command"].includes(name) && typeof command === "string"
+    && /^\s*(?:[^\s]*\/)?wezard(?:\.sh)?\s+(?:status|logs|pending|audit|update|reload|config-path|mirror-status|version|help)(?:\s|$)/.test(command)
+    && !/[;|&><`$(\r\n]/.test(command)) return "wezard self-call bypass";
+  return undefined;
+};
+
 /** Codex has no PreToolUse 'ask': deny there; preserve native approval fallback. */
 export const codexHookOutput = (event: CodexHookEvent, reply: ApprovalReply): Record<string, unknown> => {
   const reason = `wezard: ${reply.reason ?? "approval bridge unavailable"}`;

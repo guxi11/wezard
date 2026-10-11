@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Codex's supported hook protocol → wezard's shared approval engine.
 import { loadConfig } from "../shared/config.js";
-import { codexApprovalRequest, codexHookOutput, type CodexApprovalInput, type CodexHookEvent, type ApprovalReply } from "../shared/codex-approval.js";
+import { codexApprovalRequest, codexHookOutput, codexSelfCallBypass, type CodexApprovalInput, type CodexHookEvent, type ApprovalReply } from "../shared/codex-approval.js";
 import { sleep } from "../shared/std.js";
 import { recordCodexPaneSession } from "../shared/codex.js";
 
@@ -57,6 +57,11 @@ const main = async (): Promise<void> => {
     if (input.hook_event_name !== "PreToolUse" && input.hook_event_name !== "PermissionRequest") throw new Error("unsupported Codex hook event");
     event = input.hook_event_name;
     if (!input.session_id || !input.tool_name) throw new Error("missing session_id or tool_name");
+    const bypass = codexSelfCallBypass(input);
+    if (bypass) {
+      console.log(JSON.stringify(codexHookOutput(event, { decision: "allow", reason: bypass })));
+      return;
+    }
     const { config: cfg } = loadConfig();
     const reply = await requestApproval(input);
     // Disabled hooks should not block ordinary tools, nor approve escalations.
