@@ -27,7 +27,7 @@ import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } 
 import { installInboundRouter } from "./inbound.js";
 import { loadMirrorStore } from "./mirror-store.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
-import { runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
+import { backendFor, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { installApprovalEventListener, makeApproveHandler, requestConfirm } from "./approval.js";
 import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, setWorldFactsProvider, currentHumanQueryOf, recordPost, recordCharter, backfillCharter } from "./detail.js";
 import { EMPTY_FACTS, type WorldFacts, type WorldFactWizard } from "../shared/world.js";
@@ -399,7 +399,7 @@ const main = async (): Promise<void> => {
         return;
       }
       const spawnLog = log.child({ mod: "mirror", sub: "spawn-init", target });
-      const r = await spawnTmuxClaude({ cfg, log: spawnLog, windowName: target, systemPrompt: charterFor(target, {}) });
+      const r = await spawnTmuxClaude({ cfg, log: spawnLog, windowName: target, systemPrompt: charterFor(target, { cli: backendFor(cfg).name }) });
       if (!r.ok) { json(res, 500, { ok: false, reason: r.reason }); return; }
       const att = m.attach({ sessionId: r.sessionId!, jsonlPath: r.jsonlPath!, target, tmuxPane: r.tmuxPane, tmuxSession: r.tmuxSession });
       json(res, att.ok ? 200 : 500, att.ok ? { ok: true, sessionId: r.sessionId, tmuxSession: r.tmuxSession, tmuxPane: r.tmuxPane, target } : { ok: false, reason: att.reason });
@@ -1962,7 +1962,7 @@ const main = async (): Promise<void> => {
     // 之后没有快照, 只指路不补发。
     const chartered = new Map<string, readonly string[]>();
 
-    type CharterOpts = { parent?: string; forkOf?: string; inherited?: boolean; cwd?: string };
+    type CharterOpts = { parent?: string; forkOf?: string; inherited?: boolean; cwd?: string; cli?: CliBackendName };
     const charterOptsOf = (target: string, cwd?: string): CharterOpts => {
       const rec = wizards.get(target);
       return { parent: rec?.parent, forkOf: rec?.forkOf, inherited: !!rec?.clonedFrom, cwd };
@@ -1989,7 +1989,7 @@ const main = async (): Promise<void> => {
           .sort((x, y) => y[1] - x[1])
           .map(([t]) => briefOf(target, t)),
         memory: wizards.get(target)?.memory ?? [],
-        tiers: forDiff ? [] : TIERS.map((n) => { const s = tiersForBackend(cfg, m.sessionInfo(target)?.cli)[n]; return `${n}=${s.model || "默认"}${s.effort ? `·${s.effort}` : ""}`; }),
+        tiers: forDiff ? [] : TIERS.map((n) => { const s = tiersForBackend(cfg, o.cli ?? m.sessionInfo(target)?.cli)[n]; return `${n}=${s.model || "默认"}${s.effort ? `·${s.effort}` : ""}`; }),
         chatMemory: sharedMemory("chat", baseOfKey(target)),
         workspaceMemory: (() => {
           const cwd = o.cwd || m.getCwd(target).runningCwd || m.getCwd(target).defaultCwd;
@@ -2037,7 +2037,7 @@ const main = async (): Promise<void> => {
       // 信箱里装的是相对上一份宪章的变化; 新宪章一渲染就都过期了 (名册、记忆都已在里面)。
       notices.drain(target);
       notices.forget(target);
-      return charterFor(target, charterOptsOf(target, ctx?.cwd));
+      return charterFor(target, { ...charterOptsOf(target, ctx?.cwd), cli: ctx?.cli });
     });
 
     // 宪章记录是后来才有的: 已经在跑的 wizard 拿 spawn 落盘的那份 (state/charters/<sid>.md) 补上,
@@ -2519,7 +2519,7 @@ const main = async (): Promise<void> => {
         spawning: BOOT_ID,
       });
       const name = wizards.rename(target, normalizeTag(askedName) || tag);
-      const charter = charterFor(target, { ...(detached ? {} : { parent: self }), forkOf, inherited: inherit });
+      const charter = charterFor(target, { ...(detached ? {} : { parent: self }), forkOf, inherited: inherit, cli: pick.cli });
       const task = (b.task ?? "").toString().trim();
       // 没点名就按配置的 keepalive.spawnDefault 来 —— 调用方明说的永远优先。
       const keepalive = typeof b.keepalive === "boolean" ? b.keepalive : cfg.wrc.mirror.keepalive.spawnDefault;

@@ -2271,7 +2271,7 @@ export interface MirrorBridge {
    *  respawn, a clone) asks it for the target's charter and presses the result
    *  into the new process's system prompt, so identity is a property of the
    *  session rather than of the one code path that happened to create it. */
-  setCharterProvider: (fn: (target: string, ctx?: { cwd?: string }) => string) => void;
+  setCharterProvider: (fn: (target: string, ctx?: { cwd?: string; cli?: CliBackendName }) => string) => void;
   /** Install the hook fired after a new session pane is up and attached
    *  (`newSession` / `cloneSession`). index.ts hangs the pane-cap sweep on it:
    *  the count only grows at a birth, so that is the only moment worth
@@ -5278,8 +5278,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 无论是群里手打的 /new、pane 死了的自愈重生, 还是编排生出来的分身, 新进程一
   // 睁眼就知道自己是谁 —— 而不是只有走 wizard 路由那一条路才有身份。
   // 由 index.ts 在启动时装上 (注册表活在那边); 没装 = 退回无身份行为, 全链路无回归。
-  let charterOf: ((target: string, ctx?: { cwd?: string }) => string) | undefined;
-  const setCharterProvider = (fn: (target: string, ctx?: { cwd?: string }) => string): void => { charterOf = fn; };
+  let charterOf: ((target: string, ctx?: { cwd?: string; cli?: CliBackendName }) => string) | undefined;
+  const setCharterProvider = (fn: (target: string, ctx?: { cwd?: string; cli?: CliBackendName }) => string): void => { charterOf = fn; };
   // 新 pane 落地后的钩子 —— pane 上限在这里数 (由 index.ts 装上; 没装 = 不数)。
   let afterSpawn: () => void = () => {};
   const onSpawn = (fn: () => void): void => { afterSpawn = fn; };
@@ -5292,7 +5292,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // `cwd` = 这个 pane 正要启动的目录。attach 在 spawn 之后才发生, 所以此刻 getCwd
   // 给的还是上一个 pane 的目录 —— 换目录重开时照它渲染, 新 wizard 会以为自己还在
   // 旧工作区里。
-  const charterFor = (target: string, ctx?: { cwd?: string }): string | undefined => {
+  const charterFor = (target: string, ctx?: { cwd?: string; cli?: CliBackendName }): string | undefined => {
     try { return charterOf?.(target, ctx); } catch { return undefined; }
   };
 
@@ -5381,7 +5381,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       cli: effCli,
       model: effModel,
       effort: effEffort,
-      systemPrompt: opts?.systemPrompt ?? charterFor(target, { cwd: eff }),
+      systemPrompt: opts?.systemPrompt ?? charterFor(target, { cwd: eff, cli: effCli }),
     }).catch((e: unknown) => { inFlightSids.delete(freshSid); throw e; });
     if (!r.ok) { inFlightSids.delete(freshSid); return { ok: false, reason: r.reason }; }
     const att = attach({
@@ -6561,7 +6561,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // Same resume-fork hazard as dispatch: snapshot before spawn, re-bind
         // onto the forked jsonl once it appears (EOF offset — fork is seeded).
         const resumeBaseline = listJsonls(dirname(a.jsonlPath));
-        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: displayName(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, ...respawnSpec(a), systemPrompt: charterFor(target, { cwd: a.runningCwd }) });
+        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: displayName(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, ...respawnSpec(a), systemPrompt: charterFor(target, { cwd: a.runningCwd, cli: backendForPath(a.jsonlPath).name }) });
         if (!r.ok || !r.tmuxPane) return { ok: false, reason: `respawn failed: ${r.reason ?? "unknown"}` };
         a.tmuxPane = r.tmuxPane;
         a.tmuxSession = r.tmuxSession ?? a.tmuxSession;
@@ -7019,7 +7019,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           const resumeBaseline = !armMigration ? listJsonls(dirname(a.jsonlPath)) : undefined;
           // Respawn in the binding's runningCwd (pendingCwd doesn't apply to a
           // mid-turn reincarnation — only /new and /clear-with-pending swap cwd).
-          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: displayName(a.target) || a.target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, ...respawnSpec(a), systemPrompt: charterFor(a.target, { cwd: a.runningCwd }) });
+          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: displayName(a.target) || a.target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, ...respawnSpec(a), systemPrompt: charterFor(a.target, { cwd: a.runningCwd, cli: backendForPath(a.jsonlPath).name }) });
           if (r.ok && r.tmuxPane && r.tmuxSession) {
             a.tmuxPane = r.tmuxPane;
             a.tmuxSession = r.tmuxSession;
