@@ -397,6 +397,7 @@ const CodexTiers = z.object({
   ultra: Tier.default({ model: "", effort: "xhigh" }).describe("架构取舍、疑难排障、关键评审"),
 }).default({});
 const Models = z.object({
+  router: z.enum(TIERS).default("standard").describe("router 创建时使用的档位; 仅存档位, 模型 / effort 按创建时实际 backend 的档位表解析。当前纯规则 dispatch 不创建模型 router, 不消费此项"),
   tiers: ClaudeTiers.describe("兼容旧配置的 Claude 系档位; 后端专属配置优先"),
   backends: z.object({
     claude: z.object({ tiers: ClaudeTiers }).optional(),

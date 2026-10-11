@@ -52,3 +52,10 @@ export const pickTier = (
   };
 };
 
+/** Resolve at router creation, with the actual backend and invocation overrides.
+ * No router creation entry exists yet; rule-based dispatch does not consume this. */
+export const pickRouter = (
+  cfg: Config,
+  backend: CliBackendName,
+  explicit: { model?: string; effort?: Effort } = {},
+): TierPick | Err => pickTier(cfg, cfg.models.router, explicit, false, backend);
