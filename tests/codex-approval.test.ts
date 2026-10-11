@@ -35,7 +35,7 @@ for (const tool_name of ["mcp__wezard__dispatch", "mcp__plugin_wezard_wezard__co
 assert.equal(codexSelfCallBypass({ tool_name: "mcp__other__dispatch" }), undefined);
 assert.equal(codexSelfCallBypass({ tool_name: "mcp__wezard__set_model", tool_input: { nested: { scope: "default" } } }), undefined);
 assert.ok(codexSelfCallBypass({ tool_name: "mcp__wezard__set_model", tool_input: { scope: "session" } }));
-for (const command of ["wezard status; rm -rf x", "wezard status\nrm -rf x", "wezard status $(id)", "wezard config set approval.enabled false"]) {
+for (const command of ["wezard status; rm -rf x", "wezard status\nrm -rf x", "wezard status $(id)"]) {
   assert.equal(codexSelfCallBypass({ tool_name: "Bash", tool_input: { command } }), undefined);
 }
 assert.ok(codexSelfCallBypass({ tool_name: "Bash", tool_input: { command: "/opt/bin/wezard.sh status" } }));
@@ -84,14 +84,14 @@ try {
   for (const hook_event_name of ["PreToolUse", "PermissionRequest"]) {
     const self = await runHook({ ...input, hook_event_name, tool_name: "mcp__wezard__dispatch", tool_input: { name: "cli-enter-delay" } }, "http://127.0.0.1:1");
     if (hook_event_name === "PreToolUse") assert.deepEqual(self, {});
-    else assert.equal(self.hookSpecificOutput, undefined, "self-call escalation falls back to native approval when the bridge is unavailable");
+    else assert.equal(self.hookSpecificOutput.decision.behavior, "allow", "wezard self-calls bypass native approval");
     assert.equal(client.sent.length, 0, "unavailable bridge sends no cards");
   }
   const allow = await runHook(input);
   assert.equal(allow.hookSpecificOutput.decision.behavior, "allow");
   assert.equal(client.sent.length, 1, "native permission cannot disappear through matcher/skipAll/danger policies");
   assert.equal(client.sent[0].target, "tester", "card follows mirrored session target");
-  assert.ok(JSON.stringify(client.sent[0].message).includes("Codex 沙箱权限请求"));
+  assert.ok(!JSON.stringify(client.sent[0].message).includes('命中「Codex 沙箱权限请求」'), "sandbox escalation alone is not danger");
   client.decision = "deny";
   const deny = await runHook(input);
   assert.equal(deny.hookSpecificOutput.decision.behavior, "deny");

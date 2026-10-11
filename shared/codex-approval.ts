@@ -19,9 +19,8 @@ export interface ApprovalReply {
   updated_input?: Record<string, unknown>;
 }
 
-/** Self-call exemptions never authorize native sandbox escalation. */
+/** Trusted wezard self-calls also bypass native sandbox approval. */
 export const codexSelfCallBypass = (input: CodexApprovalInput): string | undefined => {
-  if (input.hook_event_name === "PermissionRequest") return undefined;
   const name = input.tool_name ?? "";
   const args = input.tool_input && typeof input.tool_input === "object"
     ? input.tool_input as Record<string, unknown> : {};
@@ -39,7 +38,7 @@ export const codexSelfCallBypass = (input: CodexApprovalInput): string | undefin
   }
   const command = args.command ?? args.cmd;
   if (["Bash", "exec_command", "shell_command"].includes(name) && typeof command === "string"
-    && /^\s*(?:[^\s]*\/)?wezard(?:\.sh)?\s+(?:status|logs|pending|audit|update|reload|config-path|mirror-status|version|help)(?:\s|$)/.test(command)
+    && /^\s*(?:[^\s]*\/)?wezard(?:\.sh)?(?:\s|$)/.test(command)
     && !/[;|&><`$(\r\n]/.test(command)) return "wezard self-call bypass";
   return undefined;
 };

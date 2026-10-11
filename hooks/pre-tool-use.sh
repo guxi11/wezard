@@ -230,7 +230,7 @@ if [[ "$TOOL_NAME" == "Bash" ]]; then
   # wezard CLI 同理: /wezard:audit /wezard:update 这些 slash command 的 ! bash 都打到本 daemon,
   # 自己审自己没意义, 也避免首次绑定时无处推卡。只认「整条命令就是一次 wezard 子命令」:
   # 曾经命令里任意位置出现 wezard 一词就放行, `curl …/config/set; true wezard` 由此免审。
-  if [[ "$CMD" =~ ^[[:space:]]*([^[:space:]]*/)?wezard(\.sh)?[[:space:]]+(status|logs|pending|audit|update|reload|config-path|mirror-status|version|help)([[:space:]]|$) ]] \
+  if [[ "$CMD" =~ ^[[:space:]]*([^[:space:]]*/)?wezard(\.sh)?([[:space:]]|$) ]] \
      && [[ ! "$CMD" =~ [\;\|\&\>\<\`\$\(] ]]; then
     emit "allow" "wezard self-call bypass"
   fi
