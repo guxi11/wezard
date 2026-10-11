@@ -8,6 +8,7 @@ import { EMPTY_FACTS, type WorldFactWizard } from "../shared/world.js";
 const now = Date.now();
 const parent = "user:ZhangYuanYuan";
 const child = `${parent}#cfg-tiers`;
+const interjector = "user:OtherHuman";
 const wizard = (target: string, name: string, at: number): WorldFactWizard => ({
   target, name, description: "", chat: "wezard-old", cwd: "", model: "", cli: "codex",
   busy: false, alive: false, bornAt: at, lastActivity: at, summary: "",
@@ -16,16 +17,18 @@ const turn: TurnDetailRecord = {
   kind: "turn", id: "peer-turn", createdAt: now - 1000, updatedAt: now - 500,
   target: child, sessionId: "codex-session", channel: "", closed: true,
   from: { kind: "peer", from: parent }, userQuery: "Check tiers",
+  injects: [{ body: "Peer interjection", ts: now - 750, channel: "", from: { kind: "peer", from: interjector } }],
   items: [{ t: "text", body: "RESULT: checked", ts: now - 500, final: true }],
 };
 const records: TurnDetailRecord[] = [turn, {
-  ...turn, id: "human-turn", channel: parent, from: undefined, speaker: "ZhangYuanYuan", userQuery: "Human question",
+  ...turn, id: "human-turn", channel: parent, from: undefined, injects: undefined, speaker: "ZhangYuanYuan", userQuery: "Human question",
 }];
 const store = { get: (id: string) => records.find((r) => r.id === id), list: () => records } as DetailStore;
 const facts = {
   ...EMPTY_FACTS, absent: undefined,
   wizards: [wizard(parent, "wezard-old", now - 2 * HORIZON_MS),
     { ...wizard(child, "cfg-tiers", now), parent },
+    { ...wizard(interjector, "other-wizard", now - 2 * HORIZON_MS), lastActivity: 0 },
     wizard("user:unused", "unused", now - 2 * HORIZON_MS)],
 };
 const routes = createChatRoutes(store, () => facts);
@@ -44,12 +47,18 @@ const dm = role.convs.find((c: any) => c.key === `p:${parent}`);
 assert.equal(dm.name, "wezard-old");
 assert.equal(dm.count, 2);
 assert.ok(dm.status, "the peer remains a wizard even without recent own turns");
+const injected = role.convs.find((c: any) => c.key === `p:${interjector}`);
+assert.equal(injected.name, "other-wizard");
+assert.equal(injected.count, 1);
+assert.ok(injected.status, "a cold peer appearing only in injects keeps its wizard identity");
 const group = role.convs.find((c: any) => c.key === `c:${parent}`);
 assert.equal(group.subs[0].role, "human:ZhangYuanYuan");
 assert.equal(group.subs[0].name, "ZhangYuanYuan", "a real human speaker must remain separate from the wizard with the same principal");
 const world = await request(routes.world, query);
 assert.equal(world.nodes.find((n: any) => n.target === parent)?.name, "wezard-old");
 assert.equal(world.nodes.some((n: any) => n.target === "user:unused"), false);
+assert.equal(world.nodes.find((n: any) => n.target === interjector)?.name, "other-wizard");
+assert.equal(world.edges.find((e: any) => e.kind === "peer" && e.from === interjector && e.to === child)?.count, 1);
 const msgs = await request(routes.msgs, `${query}&conv=${encodeURIComponent(`p:${parent}`)}&viewpoint=${encodeURIComponent(parent)}`);
 assert.equal(msgs.ok, true);
 assert.ok(JSON.stringify(msgs).includes("wezard-old"));

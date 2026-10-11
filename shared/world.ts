@@ -21,7 +21,7 @@ import { baseOfKey, labelFor, stripSigil, tagOfKey } from "./session-label.js";
 import { withoutKeepaliveTurns } from "./keepalive.js";
 import { isTurn, staleAt, isGhostTurn } from "./chat-view.js";
 import type { CharterLineage, CharterRecord, DetailRecord, TurnDetailRecord, TurnItem } from "./detail-store.js";
-import { senderOf } from "./role-view.js";
+import { allMessages, injectTurnsOf, senderOf } from "./role-view.js";
 import type { TurnState } from "./turn-state.js";
 
 // ── 注册表侧 (daemon 独有) ────────────────────────────────────────────
@@ -338,7 +338,7 @@ const lineageOrder = (targets: readonly string[], parentOf: (t: string) => strin
  *  活着的照留: 刚 spawn 还没开口的分身就是这样。
  *  挂在被裁者名下的后代改认最近一个留下的祖先 (clone 的上下文来源同理), 家谱不断。 */
 export const withData = (facts: WorldFacts, records: readonly DetailRecord[], now: number): WorldFacts => {
-  const spoke = new Set(liveTurns(records, now).flatMap((r) => [r.target!, ...(r.from?.kind === "peer" && r.from.from ? [r.from.from] : [])]));
+  const spoke = new Set(allMessages(records, now).flatMap((m) => [m.from, m.to]));
   const keep = (w: WorldFactWizard): boolean => w.alive || w.busy || w.lastActivity > 0 || spoke.has(w.target);
   const byTarget = new Map(facts.wizards.map((w) => [w.target, w] as const));
   // 被裁者若还有留下的后代, 不把后代改挂祖父, 而是留一个占位 (ghost) 代表它 —— 家谱里那一层真实存在过。
@@ -453,7 +453,8 @@ export const buildWorld = (
 
   // 人也是对话方: 开过一轮的那个人 (认得出是谁的) 是一个节点, 它 → 那个 wizard 是一条对话边。
   // 不进 chats —— 人不住在哪个聊天里; 只跟着它连着的 wizard 一起下发。
-  const byHuman = turns.reduce((m, r) => {
+  const talks = turns.flatMap((r) => [r, ...injectTurnsOf(r)]);
+  const byHuman = talks.reduce((m, r) => {
     const who = senderOf(r);
     return isHuman(who) ? m.set(who, [...(m.get(who) ?? []), r]) : m;
   }, new Map<string, TurnDetailRecord[]>());
@@ -473,7 +474,7 @@ export const buildWorld = (
     known.has(from) && known.has(to) ? bumpEdge(m, kind, from, to, ts, tag) : m;
 
   // 观测边 —— 真的发生过的往来, 从 turn 记录里读。
-  const observed = turns.reduce((m, r) => {
+  const observed = talks.reduce((m, r) => {
     const to = r.target!;
     const f = r.from;
     // 定时任务没有"派活的一方" —— 它是节点上的计数 (taskTurns), 不是一条边。
