@@ -27,6 +27,7 @@ import { augmentedPath } from "../shared/exec-path.js";
 import { sleep, truncateWithCount, mapLimit } from "../shared/std.js";
 import {
   activeBackends,
+  resolveCliBackend,
   backendForPath,
   type CliBackend,
   type CliBackendName,
@@ -5293,16 +5294,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       (rec?.cwd?.trim()) ||
       chat.running ||
       expandedDefaultCwd;
-    // Inherit the outgoing session's CLI when the caller didn't name one: a
-    // `/new` (or a /clear upgraded to /new) on a codebuddy-bound chat must stay
-    // on codebuddy rather than silently reverting to `defaultCli`. Inheritance
-    // is chat-scoped like cwd — a FIRST `/new #tag` has no record of its own,
-    // so it falls back to the base session's binding instead of `defaultCli`
-    // (otherwise a tagged sibling silently forks onto a different CLI).
+    // Fresh panes always use the configured backend, regardless of old bindings
+    // or per-call / tier CLI values. Keep the old path only for model/effort reset.
+    const boundPath = prev?.jsonlPath ?? rec?.jsonlPath;
     const base = baseOfKey(target);
-    const baseBound = base === target ? undefined : byTarget.get(base)?.jsonlPath ?? deps.store.get(base)?.jsonlPath;
-    const boundPath = prev?.jsonlPath ?? rec?.jsonlPath ?? baseBound;
-    const effCli = cli ?? (boundPath ? backendForPath(expandHome(boundPath)).name : undefined);
+    const effCli = resolveCliBackend(cfg.wrc).name;
     // 管家 (群的默认会话) 新起的会话按管家档起 (models.steward / chatPolicy), 档压过绑定里记下的
     // effort —— `/new`、换目录、交接重开都是让改过的档位生效的那一下。点名了模型就整档让开。
     // 已在跑的管家不动 (换模型会让缓存整份重读); 死 pane 重生见 respawnSpec。

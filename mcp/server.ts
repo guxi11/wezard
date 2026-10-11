@@ -281,7 +281,7 @@ server.registerTool(
       cwd: z.string().describe("工作区绝对路径, 不存在会创建。"),
       name: z.string().optional().describe("它的名字, 全机唯一。省略按目录名生成。"),
       chat: z.string().optional().describe("home 聊天名。省略 = 你的聊天。"),
-      cli: z.enum(["claude", "claude-internal", "codebuddy", "codex"]).optional().describe("用哪个 CLI。省略则继承。"),
+      cli: z.enum(["claude", "claude-internal", "codebuddy", "codex"]).optional().describe("兼容旧参数; 新建 pane 统一使用配置的 wrc.defaultCli。"),
       model: z.string().optional().describe(MODEL_DOC),
       keepalive: z.boolean().optional().describe("要不要保温。省略按配置。"),
     },
@@ -542,7 +542,7 @@ registerRare(
         .array(
           z.object({
             tag: z.string().describe("wizard 的 tag, 不带 '#', 如 'fix'。"),
-            cli: z.enum(["claude", "claude-internal", "codebuddy", "codex"]).optional().describe("这个 wizard 用哪个 CLI。省略则继承本聊天的。"),
+            cli: z.enum(["claude", "claude-internal", "codebuddy", "codex"]).optional().describe("兼容旧参数; 新建 pane 统一使用配置的 wrc.defaultCli。"),
             model: z.string().optional().describe("要现造这个 wizard 时跑在哪个模型上, 口语化随便写 ('opus' / 'haiku' / '最新的 opus' 都行) —— 起来后在它的 `/model` 列表里挑最接近的一项选中。已经在跑的不受影响。"),
             cwd: z.string().optional().describe("这个 wizard 的工作区绝对路径。省略则继承本聊天的。"),
           }),
@@ -865,7 +865,7 @@ const offspringShape = {
   name: z.string().optional().describe("它的名字 (如 'docs'、'fix', 带不带 '.' 都行)。全机唯一。省略则按 description 首词生成。"),
   task: z.string().optional().describe("就位后立刻派下去的第一件活 (私聊)。省略则它就位待命。"),
   chat: z.string().optional().describe("把它生在另一个聊天里 (wizard_roster 里的 home 聊天名)。省略 = 你自己的聊天, 这是绝大多数情况。"),
-  cli: z.enum(["claude", "claude-internal", "codebuddy", "codex"]).optional().describe("用哪个 CLI。省略则继承。"),
+  cli: z.enum(["claude", "claude-internal", "codebuddy", "codex"]).optional().describe("兼容旧参数; 新建 pane 统一使用配置的 wrc.defaultCli。"),
   tier: z.enum(TIERS).optional().describe("按难度选档 (由轻到重), 落到配置 `models.tiers` 里那一档的 {cli, model, effort}: mini = 机械一步 (照单执行、不用判断), light = 跑腿 (查找、搬运、跑命令), standard = 常规实现, hard = 要判断 (设计、排障、审查), ultra = 最难 (架构取舍、疑难排障、关键评审)。同时给了 model / effort / cli 的, 以显式值为准; 克隆换不了 CLI。返回里的 `via` 说明每项来自显式、档位还是继承。当前各档是什么见宪章, 或 config_get({path:'models'})。"),
   model: z.string().optional().describe(MODEL_DOC),
   effort: z.enum(EFFORTS).optional().describe(EFFORT_DOC),

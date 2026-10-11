@@ -36,26 +36,18 @@ import { loadConfig, type Config } from "../shared/config.js";
 import { expandHome } from "../shared/paths.js";
 import { tmuxClientEnv } from "../shared/exec-path.js";
 import { sleep } from "../shared/std.js";
-import { activateBackend, CLI_BACKEND_DEFAULTS, primaryBackend, type CliBackend, type CliBackendName } from "../shared/cli-backends.js";
+import { activateBackend, resolveCliBackend, type CliBackend, type CliBackendName } from "../shared/cli-backends.js";
 import { selectModel } from "./model-select.js";
 import type { Effort } from "../shared/effort.js";
 import { hasRegistry, sessionOnPane } from "./cc-session.js";
 
 
-// A spawn has no transcript to derive a backend from, so the caller picks one
-// (`cli`) and we fall back to the primary (`wrc.defaultCli`). Everything the
-// pane needs — binary, transcript root, project-dir encoding, trust-marker file
-// — comes from that single descriptor, which is what lets one daemon host
-// claude and codebuddy panes at the same time.
-const backendFor = (cfg: Config, cli?: CliBackendName): CliBackend => {
-  const primary = primaryBackend();
-  if (!cli || cli === primary.name) return primary;
-  const base = CLI_BACKEND_DEFAULTS[cli];
-  const override = cfg.wrc.cliBackends?.[cli]?.bin;
-  // Activate before spawning: this CLI's transcript root may not exist yet, in
-  // which case the boot-time probe skipped it and backendForPath would misread
-  // the jsonl we are about to create as the primary's dialect.
-  return activateBackend(override ? { ...base, bin: override } : base);
+// Every new pane uses the configured backend, including resume and fork panes.
+// `cli` is retained on SpawnArgs only to identify a resumed transcript's owner.
+export const backendFor = (cfg: Config): CliBackend => {
+  const backend = resolveCliBackend(cfg.wrc);
+  activateBackend(backend);
+  return backend;
 };
 
 interface ExecResult {
@@ -327,8 +319,8 @@ export interface SpawnArgs {
    *  Mirror mode persists this in mirror-attachments.json so /new respawns
    *  in the user-bound project, not the global default. */
   cwdOverride?: string;
-  /** Which CLI to launch. Undefined → `wrc.defaultCli`. A respawn should pass
-   *  the backend that owns `resumeSessionId`, else the resume finds no session. */
+  /** Owner of a resumed transcript, used to reject cross-backend resume.
+   *  Fresh panes always use the configured backend. */
   cli?: CliBackendName;
   /** Model to put the pane on. Lets sibling `#tag` sessions in one chat run on
    *  different models (a graph node can pick opus for design, haiku for lint).
@@ -477,7 +469,10 @@ const charterArg = (cfg: Config, backend: CliBackend, sessionId: string, charter
 };
 
 export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: freshSessionId, windowName, cwdOverride, cli, model, effort, systemPrompt, forkSession }: SpawnArgs): Promise<SpawnResult> => {
-  const backend = backendFor(cfg, cli);
+  const backend = backendFor(cfg);
+  if (resumeSessionId && cli && cli !== backend.name) {
+    return { ok: false, reason: `会话属于 ${cli}, 当前配置后端是 ${backend.name}, 无法跨后端恢复或克隆。请用 /new 新建会话。` };
+  }
   const cwd = expandHome((cwdOverride ?? "").trim() || cfg.wrc.cwd);
   const projectDir = join(expandHome(backend.projectsDir), backend.encodeProjectDir(cwd));
   let sessionId = resumeSessionId ?? freshSessionId ?? randomUUID();

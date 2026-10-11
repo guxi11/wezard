@@ -212,7 +212,7 @@ const Wrc = z.object({
   // When unset, resolveCliBackend infers from claudeBin basename (so legacy
   // `claudeBin: "claude-internal"` configs still resolve correctly). The Wrc
   // transform below pins the inferred name back into v.defaultCli.
-  defaultCli: z.enum(CLI_NAMES).optional().describe("新开会话默认用哪个 CLI; 不设 = 按 claudeBin 推断"),
+  defaultCli: z.enum(CLI_NAMES).optional().describe("所有新建 pane 使用哪个 CLI; 不设 = 按 claudeBin 推断"),
   // Example: cliBackends: { codebuddy: { bin: "/usr/local/bin/codebuddy" } }
   cliBackends: knob(z
     .object({
@@ -373,7 +373,7 @@ const Weixin = z.object({
 // 按难度分档: spawn_wizard / clone_wizard 的 `tier` 落到这里的 {cli, model, effort};
 // 显式给的 model / effort / cli 压过档位。档名固定、按由轻到重排 —— MCP 参数是 enum, 宪章逐档列。
 const Tier = z.object({
-  cli: z.enum(CLI_NAMES).optional().describe("用哪个 CLI; 省略 = 继承调用方 (clone 一律继承父会话)"),
+  cli: z.enum(CLI_NAMES).optional().describe("兼容旧配置字段; 新建 pane 统一使用 wrc.defaultCli"),
   model: z.string().default("").describe("口语化模型名 ('haiku' / 'sonnet 5' / 'opus'), 只写家族 = 该家族最新; 空 = CLI 默认"),
   effort: z.enum(EFFORTS).optional().describe("推理档位; 省略 = CLI 默认"),
 });
