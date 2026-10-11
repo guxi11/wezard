@@ -35,10 +35,15 @@ const MAX_AUTH_FAIL = 5;
 const HANDSHAKE_TIMEOUT_MS = 15_000;
 // SDK 只拿它当媒体下载 (axios) 的超时; 默认 10s 下大图/慢链路时常超时, 图就被丢了。
 const MEDIA_TIMEOUT_MS = 60_000;
+// ws.handshakeTimeout is an idle timeout, not a deadline for DNS + TLS + auth.
+const CONNECT_DEADLINE_MS = 30_000;
 
-const sdkLogger = (log: Logger): SdkLogger => ({
+const sdkLogger = (log: Logger, onConnect: () => void): SdkLogger => ({
   debug: (msg, ...a) => log.debug({ a }, String(msg)),
-  info: (msg, ...a) => log.info({ a }, String(msg)),
+  info: (msg, ...a) => {
+    if (String(msg).startsWith("Connecting to WebSocket:")) onConnect();
+    log.info({ a }, String(msg));
+  },
   warn: (msg, ...a) => log.warn({ a }, String(msg)),
   error: (msg, ...a) => log.error({ a }, String(msg)),
 });
@@ -50,17 +55,44 @@ export interface DaemonWs {
   /** tear down + rebuild the socket in place (e.g. after a network switch) */
   reconnect: (reason: string) => void;
   shutdown: () => Promise<void>;
+  status: () => WsStatus;
+}
+
+export interface WsStatus {
+  phase: "connecting" | "authenticating" | "authenticated" | "reconnecting" | "failed" | "kicked" | "stopped";
+  authenticated: boolean;
+  reconnectAttempts: number;
+  lastError?: string;
+  lastErrorAt?: string;
+  authenticatedAt?: string;
 }
 
 export const startWs = (cfg: Config, log: Logger): DaemonWs => {
   const { bot } = cfg;
   log.info({ botId: bot.botId, ws: bot.websocketUrl }, "WS init");
+  let state: WsStatus = { phase: "connecting", authenticated: false, reconnectAttempts: 0 };
+  let connectTimer: NodeJS.Timeout | undefined;
+  let cancelRestart: (() => void) | undefined;
+  const clearConnectDeadline = (): void => { clearTimeout(connectTimer); connectTimer = undefined; };
+  const recordError = (message: string): void => {
+    state = { ...state, lastError: message, lastErrorAt: new Date().toISOString() };
+  };
+  const onConnect = (): void => {
+    state = { ...state, phase: "connecting", authenticated: false };
+    clearConnectDeadline();
+    connectTimer = setTimeout(() => {
+      const reason = "WebSocket DNS/TLS/authentication exceeded 30s";
+      recordError(reason);
+      reconnect(reason);
+    }, CONNECT_DEADLINE_MS);
+    connectTimer.unref();
+  };
 
   const client = new WSClient({
     botId: bot.botId,
     secret: bot.secret,
     wsUrl: bot.websocketUrl,
-    logger: sdkLogger(log),
+    logger: sdkLogger(log, onConnect),
     heartbeatInterval: HEARTBEAT_MS,
     maxReconnectAttempts: MAX_RECONNECT,
     maxAuthFailureAttempts: MAX_AUTH_FAIL,
@@ -77,20 +109,39 @@ export const startWs = (cfg: Config, log: Logger): DaemonWs => {
     rejectReady = rej;
   });
 
-  client.on("connected", () => log.info("WS connected"));
+  client.on("connected", () => {
+    state = { ...state, phase: "authenticating", authenticated: false };
+    log.info("WS connected");
+  });
   client.on("authenticated", () => {
+    clearConnectDeadline();
+    state = { phase: "authenticated", authenticated: true, reconnectAttempts: 0, authenticatedAt: new Date().toISOString() };
     log.info("WS authenticated");
     resolveReady();
   });
-  client.on("disconnected", (reason) => log.warn({ reason }, "WS disconnected"));
-  client.on("reconnecting", (attempt) => log.info({ attempt }, "WS reconnecting"));
+  client.on("disconnected", (reason) => {
+    clearConnectDeadline();
+    if (!["kicked", "stopped", "failed"].includes(state.phase)) state = { ...state, phase: "reconnecting", authenticated: false };
+    log.warn({ reason }, "WS disconnected");
+  });
+  client.on("reconnecting", (attempt) => {
+    state = { ...state, phase: "reconnecting", authenticated: false, reconnectAttempts: attempt };
+    log.info({ attempt }, "WS reconnecting");
+  });
   client.on("error", (err) => {
+    recordError(err.message);
     log.error({ err: err.message, kind: err.constructor.name }, "WS error");
     if (err instanceof WSAuthFailureError || err instanceof WSReconnectExhaustedError) {
+      clearConnectDeadline();
+      state = { ...state, phase: "failed", authenticated: false };
       rejectReady(err);
     }
   });
   client.on("event.disconnected_event", () => {
+    cancelRestart?.();
+    clearConnectDeadline();
+    state = { ...state, phase: "kicked", authenticated: false };
+    recordError("Another client connected using this bot; automatic reconnect suppressed");
     log.error("WS kicked by server (new connection elsewhere); auto-restart suppressed");
     client.disconnect();
   });
@@ -100,16 +151,40 @@ export const startWs = (cfg: Config, log: Logger): DaemonWs => {
   // 原地重建把恢复时间压到秒级。顺序不可颠倒: started=true 时 connect() 是
   // no-op, 必须先 disconnect() (置 started=false + 杀旧 socket + 清重连定时器)。
   const reconnect = (reason: string): void => {
+    if (cancelRestart) return;
+    clearConnectDeadline();
+    state = { ...state, phase: "connecting", authenticated: false };
     log.warn({ reason }, "WS force reconnect");
+    // SDK disconnect() terminates asynchronously. Its old close callback clears
+    // wsManager.ws; reconnecting before that callback would erase the NEW socket
+    // and start a second connection (then WeCom kicks us for duplicate logins).
+    let cancelled = false;
+    const cleanup = (): void => {
+      clearTimeout(waitClose);
+      client.off("disconnected", onClosed);
+    };
+    const onClosed = (): void => {
+      cleanup();
+      setImmediate(() => {
+        if (cancelled) return;
+        cancelRestart = undefined;
+        client.connect();
+      });
+    };
+    const waitClose = setTimeout(onClosed, 1000); // no old socket during backoff
+    cancelRestart = (): void => { cancelled = true; cleanup(); cancelRestart = undefined; };
+    client.once("disconnected", onClosed);
     try {
       client.disconnect();
     } catch (e) {
       log.warn({ err: (e as Error).message }, "disconnect threw");
     }
-    client.connect();
   };
 
   const shutdown = async (): Promise<void> => {
+    cancelRestart?.();
+    clearConnectDeadline();
+    state = { ...state, phase: "stopped", authenticated: false };
     log.info("WS shutdown");
     try {
       client.disconnect();
@@ -121,5 +196,5 @@ export const startWs = (cfg: Config, log: Logger): DaemonWs => {
   // SDK 构造不自动连接，需显式调用。
   client.connect();
 
-  return { client, ready, reconnect, shutdown };
+  return { client, ready, reconnect, shutdown, status: () => ({ ...state, authenticated: state.authenticated && client.isConnected }) };
 };

@@ -29,6 +29,7 @@ wezard <subcommand>
   migrate              upgrade an existing weclaude install (state + daemon + plugin + settings.json)
                        flags: --dry-run --force --purge -y
   status               daemon health + connection state
+  reconnect            reconnect WeCom without restarting sessions or pending approvals
   start                load resident daemon (launchd/systemd)
   stop                 unload resident daemon
   restart              stop + start
@@ -186,6 +187,10 @@ case "$cmd" in
     exit 1
     ;;
   start)   ensure_up && echo "daemon: started"   || { echo "daemon: start failed — 'wezard logs'" >&2; exit 1; } ;;
+  reconnect)
+    http_post /reconnect || exit 1
+    echo
+    ;;
   stop)    graceful_stop >/dev/null 2>&1 || true; svc_unregister; echo "daemon: stopped" ;;
   restart) graceful_stop >/dev/null 2>&1 || true; svc_unregister; ensure_up && echo "daemon: restarted" || { echo "daemon: restart failed — 'wezard logs'" >&2; exit 1; } ;;
   reload)

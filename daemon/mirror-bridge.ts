@@ -1,3 +1,6 @@
+import { codexSessions, codexSessionForPane } from "../shared/codex.js";
+import { codexHookLaunchArgs, codexHookCommand } from "../shared/codex-hooks.js";
+import { fileURLToPath } from "node:url";
 // Mirror-mode bridge.
 //
 // Strategy: a running interactive `claude` exposes no local IPC. Its only
@@ -113,7 +116,8 @@ const rankedJsonlsForCwd = (
 ): Array<{ sessionId: string; jsonlPath: string; mtime: number }> =>
   projectDirsFor(expandHome(cwd))
     .filter(({ backend }) => !only || backend.name === only.name)
-    .flatMap(({ dir }) => {
+    .flatMap(({ backend, dir }) => {
+      if (backend.name === "codex") return codexSessions(dir, expandHome(cwd)).filter((x) => !exclude?.has(x.sessionId)).map((x) => ({ ...x, mtime: statSync(x.jsonlPath).mtimeMs }));
       let names: string[];
       try { names = readdirSync(dir).filter((n) => n.endsWith(".jsonl")); } catch { return []; }
       return names.flatMap((n) => {
@@ -146,6 +150,7 @@ const findJsonlBySid = (sid: string, only?: CliBackend): string | undefined => {
   return (only ? [only] : activeBackends())
     .flatMap((b) => {
       const root = expandHome(b.projectsDir);
+      if (b.name === "codex") return codexSessions(root).filter((x) => x.sessionId === sid).map((x) => x.jsonlPath);
       try { return readdirSync(root).map((d) => join(root, d, sidFile)); } catch { return []; }
     })
     .flatMap((p) => { try { return [{ p, m: statSync(p).mtimeMs }]; } catch { return []; } })
@@ -1869,14 +1874,33 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   return { ok: true, uncertain: true, reason: "目标会话可能正忙或未消费输入(回车后输入框未清空)" };
 };
 
-const injectViaSpawn = (args: InjectArgs): Promise<{ ok: boolean; reason?: string }> => {
+const injectViaSpawn = async (args: InjectArgs): Promise<{ ok: boolean; reason?: string }> => {
   const { text, images = [], cfg, log, sessionId, jsonlPath } = args;
-  const bin = backendForPath(jsonlPath).bin;
+  const backend = backendForPath(jsonlPath);
+  const bin = backend.bin;
+  let cwd = expandHome(cfg.wrc.cwd);
+  let codexArgs: string[] = [];
+  if (backend.name === "codex") {
+    try {
+      const fd = openSync(jsonlPath, "r");
+      let head: string;
+      try { const buf = Buffer.alloc(256 * 1024); head = buf.subarray(0, readSync(fd, buf, 0, buf.length, 0)).toString("utf8"); }
+      finally { closeSync(fd); }
+      const meta = JSON.parse(head.split("\n", 1)[0]!).payload;
+      if (typeof meta?.cwd === "string") cwd = meta.cwd;
+      const hookEntry = fileURLToPath(new URL("../cli/codex-hook.js", import.meta.url));
+      const { loadConfig } = await import("../shared/config.js");
+      const command = codexHookCommand(loadConfig().sourcePath, `http://127.0.0.1:${cfg.daemon.port}`, hookEntry);
+      codexArgs = await codexHookLaunchArgs(bin, cwd, command, cfg.approval.hookTimeoutSec + 10, cfg.approval.enabled);
+    } catch (e) { return { ok: false, reason: `Codex resume setup failed: ${(e as Error).message}` }; }
+  }
   // Spawn-mode (no live TTY) can't do clipboard+C-v — fall back to `@<path>`,
   // which Claude parses at submit time and inlines as image content blocks
   // without a model-decided Read tool turn.
   const finalText = withImageRefs(text, images);
-  const cliArgs = [
+  const cliArgs = backend.name === "codex" ? ["exec", "resume", "--json", ...codexArgs,
+    ...cfg.wrc.extraArgs.filter((arg) => !arg.startsWith("--disallowedTools")),
+    ...images.flatMap((path) => ["--image", path]), sessionId, text] : [
     "-p",
     finalText,
     "--resume",
@@ -1889,7 +1913,7 @@ const injectViaSpawn = (args: InjectArgs): Promise<{ ok: boolean; reason?: strin
   log.info({ sessionId, bin, len: text.length }, "mirror inject");
   return new Promise((resolve) => {
     const proc = spawn(bin, cliArgs, {
-      cwd: expandHome(cfg.wrc.cwd),
+      cwd,
       env: { ...process.env, PATH: augmentedPath(process.env.PATH) },
       stdio: ["ignore", "ignore", "pipe"],
     });
@@ -4621,8 +4645,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // with the primary dialect would report a phantom drift for every
         // session belonging to a non-primary CLI.
         const paneDir = projectDirFor(jsonlAbs, expandHome(paneCwd));
-        if (paneDir !== dirname(jsonlAbs)) {
-          const live = liveSessionForCwd(paneCwd, backendForPath(jsonlAbs), sidsClaimedByOthers(principal));
+        const codexPane = backendForPath(jsonlAbs).name === "codex" ? codexSessionForPane(livePane) : undefined;
+        if (codexPane ? codexPane.sessionId !== rec.sessionId : backendForPath(jsonlAbs).name !== "codex" && paneDir !== dirname(jsonlAbs)) {
+          const live = codexPane?.cwd === expandHome(paneCwd) ? codexPane : backendForPath(jsonlAbs).name === "codex" ? undefined : liveSessionForCwd(paneCwd, backendForPath(jsonlAbs), sidsClaimedByOthers(principal));
           if (live && live.sessionId !== rec.sessionId) {
             log.info({ principal, from: rec.sessionId, to: live.sessionId, paneCwd }, "mirror restore: pane in worktree, re-homed to live session");
             rec.sessionId = live.sessionId;
@@ -4927,6 +4952,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     startOffset?: number,
     exclusive?: boolean,
   ): void => {
+    if (backendForPath(a.jsonlPath).name === "codex") return;
     if (a.migrationWatcher) a.migrationWatcher.cancel(); // re-armed (e.g. /clear twice, or respawn during a pending watch)
     const projectDir = dirname(a.jsonlPath);
     // baseline is captured by the caller BEFORE inject/respawn runs — claude
@@ -5018,6 +5044,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // narrows to transcripts born after the clear, which makes a short
   // fingerprint safe enough to accept.
   const armSilentForkRebind = (a: AttachState, text: string): void => {
+    if (backendForPath(a.jsonlPath).name === "codex") return; // SessionStart owns exact pane identity.
     const pendingClear = a.clearRebind;
     if (pendingClear) {
       // Hand over: the fingerprint is pane-certain, the dir-scan is not.
@@ -5123,8 +5150,16 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         if (a.liveStream && !a.liveStream.closed) continue;  // mid typewriter — don't yank the tail
         const cwd = paneCwd.get(a.tmuxPane);
         if (!cwd) continue;                                   // pane gone
+        if (backendForPath(a.jsonlPath).name === "codex") {
+          const registered = codexSessionForPane(a.tmuxPane);
+          if (registered && registered.cwd === expandHome(cwd) && registered.sessionId !== a.sessionId && !sidsClaimedByOthers(a.target).has(registered.sessionId)) {
+            a.runningCwd = registered.cwd;
+            migrateAttachment(a, registered.sessionId, registered.jsonlPath);
+          }
+          continue;
+        }
         const paneDir = projectDirFor(a.jsonlPath, expandHome(cwd));
-        if (paneDir === dirname(a.jsonlPath)) continue;       // same project dir — no drift
+        if (backendForPath(a.jsonlPath).name === "codex" ? expandHome(cwd) === a.runningCwd : paneDir === dirname(a.jsonlPath)) continue;       // same project dir — no drift
         const live = liveSessionForCwd(cwd, backendForPath(a.jsonlPath), sidsClaimedByOthers(a.target));
         if (!live || live.sessionId === a.sessionId) continue; // empty dir, or same-sid rename (tail follows it)
         a.runningCwd = expandHome(cwd);                        // migrateAttachment persists this to store
@@ -5271,9 +5306,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 管家 (群的默认会话) 新起的会话按管家档起 (models.steward / chatPolicy), 档压过绑定里记下的
     // effort —— `/new`、换目录、交接重开都是让改过的档位生效的那一下。点名了模型就整档让开。
     // 已在跑的管家不动 (换模型会让缓存整份重读); 死 pane 重生见 respawnSpec。
-    const steward = opts?.model?.trim() ? undefined : stewardSpec(target);
+    const stewardCandidate = opts?.model?.trim() ? undefined : stewardSpec(target);
+    // Existing installations carry Claude tier aliases. They aren't Codex model IDs.
+    const steward = effCli === "codex" && /^(?:claude|opus|sonnet|haiku)\b/i.test(stewardCandidate?.model ?? "") ? undefined : stewardCandidate;
     const effModel = opts?.model?.trim() || steward?.model || undefined;
-    const effEffort = opts?.effort ?? steward?.effort ?? parseEffort(prev?.effort ?? deps.store.get(target)?.effort);
+    const backendChanged = Boolean(boundPath && effCli && backendForPath(expandHome(boundPath)).name !== effCli);
+    const effEffort = opts?.effort ?? steward?.effort ?? (backendChanged ? undefined : parseEffort(prev?.effort ?? deps.store.get(target)?.effort));
     if (prev?.tmuxPane) {
       // Best-effort kill; ignore errors (pane may already be dead).
       void runTmux(["kill-pane", "-t", prev.tmuxPane]);
@@ -5475,14 +5513,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     rememberInject(hello);
     const boot = await inject({
       text: hello, images: [], cfg, log: lg,
-      sessionId: parent.sessionId, jsonlPath: parent.jsonlPath,
+      sessionId: parentCli === "codex" ? r.sessionId! : parent.sessionId, jsonlPath: parentCli === "codex" ? r.jsonlPath! : parent.jsonlPath,
       tmuxTarget: r.tmuxPane, freshSpawn: true,
     });
     if (!boot.ok) {
       await runTmux(["kill-pane", "-t", r.tmuxPane ?? ""]);
       return { ok: false, reason: `分身开场白注入失败: ${boot.reason ?? "unknown"}`, inherited: false };
     }
-    const fork = await awaitFork(projectDir, baseline, sidsClaimedByOthers(args.target), parent.jsonlPath, {
+    const fork = parentCli === "codex" ? { sessionId: r.sessionId!, jsonlPath: r.jsonlPath! } : await awaitFork(projectDir, baseline, sidsClaimedByOthers(args.target), parent.jsonlPath, {
       homeDir: backendForPath(parent.jsonlPath).homeDir, pane: r.tmuxPane ?? "", parentSid: parent.sessionId,
     });
     // 等不到分叉就必须收手: 此刻唯一已知的 sid 是父亲的, 认下去两个 target 会指向
@@ -6260,6 +6298,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     setModel: async (target, wanted, scope) => {
       const a = byTarget.get(target);
       if (!a?.tmuxPane || !(await tmuxPaneAlive(a.tmuxPane))) return { ok: false, reason: "它没有活着的 pane —— 模型是在 pane 里切的, 先叫醒它" };
+      if (backendForPath(a.jsonlPath).name === "codex") return { ok: false, reason: "Codex 运行中的模型请在终端 /model 切换；新开会话可指定 model" };
       const r = await selectModel(a.tmuxPane, wanted, log.child({ sub: "set-model", target }), scope);
       if (r.ok && r.applied) {
         a.model = r.applied;
@@ -6271,6 +6310,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     setEffort: async (target, effort) => {
       const a = byTarget.get(target);
       if (!a?.tmuxPane || !(await tmuxPaneAlive(a.tmuxPane))) return { ok: false, reason: "它没有活着的 pane —— 档位是在 pane 里切的, 先叫醒它" };
+      if (backendForPath(a.jsonlPath).name === "codex") return { ok: false, reason: "Codex 运行中的推理强度请在终端 /model 切换；新开会话可指定 effort" };
       const r = await selectEffort(a.tmuxPane, effort, log.child({ sub: "set-effort", target }));
       if (r.ok && r.applied) {
         a.effort = r.applied;

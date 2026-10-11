@@ -11,6 +11,7 @@ import { clipLine, sleep, truncate } from "../shared/std.js";
 import { patchJsonc } from "../shared/config-writer.js";
 import { EFFORTS, parseEffort } from "../shared/effort.js";
 import { bindCliBackends, projectDirsFor, type CliBackendName } from "../shared/cli-backends.js";
+import { bindCodexStateDir } from "../shared/codex.js";
 import { startWs } from "./ws.js";
 import { startWeixin } from "./weixin.js";
 import { installWeixinPort } from "./weixin-port.js";
@@ -147,6 +148,7 @@ const main = async (): Promise<void> => {
   // derives its dialect from its own jsonl path. Must run BEFORE any mirror
   // attach / tmux spawn.
   const { primary, backends } = bindCliBackends({ ...cfg.wrc, projectsDirOverride: cfg.wrc.mirror.projectsDir });
+  bindCodexStateDir(cfg.daemon.stateDir);
   log.info({ primary: primary.name, bin: primary.bin, backends: backends.map((b) => b.name) }, "cli backends bound");
 
   // A killed-on-timeout tmux call is the ONLY externally visible symptom of a
@@ -1505,12 +1507,14 @@ const main = async (): Promise<void> => {
 
     // 交接的「重开」一步: 走 /new (杀旧 pane、起新进程) 而不是往原 pane 注入 /clear。
     // /clear 只换会话不换进程 —— MCP 子进程、charter 都还是旧的, 新工具拿不到; 镜像
-    // 还得靠 sid 轮换探测才跟得上。CLI / cwd / keepalive 照旧沿用; 模型也沿用, 管家除外 ——
+    // 还得靠 sid 轮换探测才跟得上。CLI 使用 cfg 的默认 backend; cwd / keepalive 照旧沿用。
+    // 同 backend 时模型也沿用, 管家除外 ——
     // 它换上此刻的管家档 (newSession 里定), 改了 models.steward 后交接一次就是让它生效的那一下。
     const restartFresh = (target: string) => {
       const info = m.sessionInfo(target);
-      const model = stewardTierOf(cfg, target) ? undefined : info?.model || undefined;
-      return m.newSession(target, displayName(target) || tagOfKey(target) || target, info?.cli, { model, silent: true, warm: true });
+      const cli = cfg.wrc.defaultCli ?? primary.name;
+      const model = stewardTierOf(cfg, target) || info?.cli !== cli ? undefined : info?.model || undefined;
+      return m.newSession(target, displayName(target) || tagOfKey(target) || target, cli, { model, silent: true, warm: true });
     };
 
     // POST /handoff — 交接一个 pane 的会话给一个全新会话。先让目标会话把当前工作

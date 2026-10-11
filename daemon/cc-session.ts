@@ -12,6 +12,7 @@
 // 没有可用注册表的后端一律返回 undefined, 由调用方退回读 pane。注意目录在 ≠
 // 注册表可用: codebuddy 2.143+ 也写 sessions/<pid>.json, 但 schema 不同 (无
 // tmux/status 字段) —— 有没有 tmux 字段才是「这个注册表我们读得懂」的判据。
+import { normalizeCodex } from "../shared/codex.js";
 import { closeSync, openSync, readdirSync, readFileSync, readSync, statSync, watch } from "node:fs";
 import { join } from "node:path";
 import { expandHome } from "../shared/paths.js";
@@ -149,7 +150,9 @@ const textOfContent = (c: unknown): string =>
 const submissionOf = (line: string): { text: string; at: number } | undefined => {
   if (!line.includes('"user"') && !line.includes("queued_command")) return undefined; // 便宜的预过滤
   try {
-    const r = JSON.parse(line) as Record<string, unknown>;
+    const raw = JSON.parse(line) as Record<string, unknown>;
+    const r = (raw.type === "response_item" ? normalizeCodex(raw) : raw) as Record<string, unknown> | null;
+    if (!r) return undefined;
     const at = Date.parse(String(r.timestamp ?? ""));
     if (r.type === "user" && r.isMeta !== true) return { text: textOfContent((r.message as { content?: unknown } | undefined)?.content), at };
     const att = r.attachment as { type?: string; prompt?: unknown } | undefined;

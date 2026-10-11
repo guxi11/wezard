@@ -51,25 +51,27 @@ const step = (n: number, title: string): void =>
 // wrc.defaultCli 是单值, 由第一个选中项决定 —— 它只决定「新会话默认用哪个 CLI 起」。
 // daemon 会同时 tail 所有已安装 CLI 的 projectsDir (backend 由 transcript 路径反推),
 // 所以 claude 和 codebuddy 的会话可以并存、各自镜像到不同的 WeCom 会话。
-type AgentKind = "claude" | "claude-internal" | "codebuddy";
+type AgentKind = "claude" | "claude-internal" | "codebuddy" | "codex";
 const settingsPathFor = (kind: AgentKind): string => {
   switch (kind) {
     case "claude": return "~/.claude/settings.json";
     case "claude-internal": return "~/.claude-internal/settings.json";
+    case "codex": return `${process.env.CODEX_HOME ?? "~/.codex"}/hooks.json`;
     case "codebuddy": return "~/.codebuddy/settings.json";
   }
 };
 const claudeBinFor = (kind: AgentKind): string => {
   if (kind === "claude-internal") return "claude-internal";
+  if (kind === "codex") return "codex";
   if (kind === "codebuddy") return "codebuddy";
   return "claude";
 };
 // sync.targets[].kind: "claude-internal" 是 claude 家族的特例,
 // collapse 为 "claude" (settingsPath 已表达 internal 语义)。
-const syncKindFor = (kind: AgentKind): "claude" | "codebuddy" =>
-  kind === "codebuddy" ? "codebuddy" : "claude";
+const syncKindFor = (kind: AgentKind): "claude" | "codebuddy" | "codex" =>
+  kind === "codex" ? "codex" : kind === "codebuddy" ? "codebuddy" : "claude";
 // wrc.defaultCli: daemon active backend。与 sync.targets 多值独立。
-const backendNameFor = (kind: AgentKind): "claude" | "claude-internal" | "codebuddy" => kind;
+const backendNameFor = (kind: AgentKind): "claude" | "claude-internal" | "codebuddy" | "codex" => kind;
 
 // ── HTTP helpers (talk to local daemon) ──────────────────────────────
 const DAEMON = "http://127.0.0.1:17890";
@@ -294,11 +296,12 @@ const main = async (): Promise<void> => {
     ? existing.secret
     : await password({ message: "机器人 secret:", mask: "•" });
   const agentKinds = (await checkbox({
-    message: "选择 Claude agent (空格多选, 至少一个 — hook/MCP/env 会注入到每个选中项):",
+    message: "选择 Agent CLI (空格多选, 至少一个):",
     choices: [
       { name: "claude (Anthropic 官方)", value: "claude", checked: true },
       { name: "claude-internal (Tencent 内部)", value: "claude-internal" },
       { name: "codebuddy (Tencent CodeBuddy)", value: "codebuddy" },
+      { name: "codex (OpenAI; 支持企业微信审批卡)", value: "codex" },
     ],
     required: true,
     loop: false,
@@ -375,7 +378,7 @@ const main = async (): Promise<void> => {
   // marketplace 插件只存在于 claude 家族; codebuddy 的 hook 由 sync 直接
   // 写进 ~/.codebuddy/settings.json (插件未发布到其市场), 装插件必然失败。
   if (enableHook) {
-    const pluginBins = [...new Set(agentKinds.filter((k) => k !== "codebuddy").map(claudeBinFor))];
+    const pluginBins = [...new Set(agentKinds.filter((k) => k !== "codebuddy" && k !== "codex").map(claudeBinFor))];
     for (const bin of pluginBins) installPlugin(bin);
   }
   installSvr();

@@ -1739,6 +1739,8 @@ interface ApproveReq {
   /** hook 侧探测到的 CLI 后端 (pre-tool-use.sh 经 CODEBUDDY_* env 判定)。
    *  codebuddy 的 AskUserQuestion hook 只在本地面板提交后到达 → 走去重分支。 */
   cli_backend?: string;
+  /** Codex native sandbox/network approval has its own explicit human gate. */
+  hook_event_name?: string;
   /** Hook 侧原样透传。ExitPlanMode 在 codebuddy 下用它从 transcript 倒查
    *  ~/.codebuddy/plans/*.md 挖 plan 正文 (tool_input 里没有)。 */
   transcript_path?: string;
@@ -2019,7 +2021,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
         await sendCard(card);
       } catch (e) {
         // quote 体可能超平台未公开的长度上限 — 缩到安全值重试一次, 保住审批流。
-        log.warn({ batchId: batch.batchId, err: (e as Error).message }, "card send failed — retrying with shrunk quote");
+        log.warn({ batchId: batch.batchId, approver: batch.approver, chatId: targetChatId(batch.approver), err: (e as Error).message ?? (e as { errmsg?: string }).errmsg }, "card send failed — retrying with shrunk quote");
         await sendCard(shrinkQuote(card));
       }
       log.info(
@@ -2031,8 +2033,9 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
       // 没反应的卡。批量成员维持原行为 (drain → fallbackOnError)。
       if (!isMulti) markCardSent(batch.members[0]!.reqId);
     } catch (e) {
-      log.error({ batchId: batch.batchId, err: (e as Error).message }, "batch send failed");
-      const err = new Error(`send_card_fail:${(e as Error).message}`);
+      const message = (e as Error).message ?? (e as { errmsg?: string }).errmsg ?? String(e);
+      log.error({ batchId: batch.batchId, approver: batch.approver, chatId: targetChatId(batch.approver), err: message }, "batch send failed");
+      const err = new Error(`send_card_fail:${message}`);
       for (const m of batch.members) failPending(m.reqId, err);
       // 单成员 batch 摘除自己的 batchById 条目, 多成员保留 (后续 click 兜底
       // 时 build*Card 期望能找到 batch — 但失败时也没人会点了, 留着也无害)。
@@ -2047,6 +2050,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     }
 
     const body = (await readBody(req)) as Partial<ApproveReq>;
+    const nativePermission = body.cli_backend === "codex" && body.hook_event_name === "PermissionRequest";
     let sessionId = body.session_id ?? "";
     const { toolName, toolInput } = unwrapDeferredTool(body.tool_name ?? "", body.tool_input ?? {});
     const cwd = body.cwd ?? "";
@@ -2097,7 +2101,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // wezard 自改配置的写 (见 selfConfigWriteOf): matcher 也放不掉它。
     const selfWrite = selfConfigWriteOf(toolName, toolInput);
     // Matcher: only intercept matching tools — others pass.
-    if (!selfWrite && !new RegExp(cfg.approval.matcher).test(toolName)) {
+    if (!nativePermission && !selfWrite && !new RegExp(cfg.approval.matcher).test(toolName)) {
       json(res, 200, { decision: "allow", reason: "matcher_skip" } satisfies ApproveResp);
       return;
     }
@@ -2123,7 +2127,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // ⏱窗口 / 会话缓存), 批准后 settleClaudeConfigModal 去把框按掉。
     // 没有活 pane (未镜像的本地会话) → 不介入: 那种情形用户就在键盘前,
     // 自己按掉即可, 拦下来只是挡工作。
-    const guardHit = cfg.approval.claudeConfigGuard ? claudeConfigWrite(toolName, toolInput) : undefined;
+    const guardHit = cfg.approval.claudeConfigGuard && body.cli_backend !== "codex" ? claudeConfigWrite(toolName, toolInput) : undefined;
     const guardActive = Boolean(guardHit && nativeModal?.hasPane(sessionId));
     if (guardHit) {
       log.info(
@@ -2155,7 +2159,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
 
     // 必发卡 = 危险名单 或 askRules 命中。这两者的语义是「每次都要人单独看一眼」,
     // 所以压过放行/窗口/缓存。守卫不在其列 —— 见上面 settleGuard 的注释。
-    const mustCard = Boolean(danger) || Boolean(askHit);
+    const mustCard = nativePermission || Boolean(danger) || Boolean(askHit);
 
     // allowRules: matcher 拦下的工具里再挖细粒度豁免 (Bash 可按命令前缀区分)。
     // 交互卡工具 (AskUserQuestion 等) 在引擎内部硬保护, 规则写了也不放行。
@@ -2239,7 +2243,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // 否则请求挂在长轮询上等一张子代理场景下没人点的卡, 最终 ask 回退成远端看不见的
     // 原生 picker。denyRules 已在上方生效 (拒绝不是审批), AskUserQuestion / ExitPlanMode
     // 的交互卡也已在上方分支返回, 均不受影响。
-    if (BYPASS_MODES.has(body.permission_mode ?? "")) {
+    if (!nativePermission && BYPASS_MODES.has(body.permission_mode ?? "")) {
       log.info({ toolName, sessionId, mode: body.permission_mode }, "permission-mode bypass auto allow");
       json(res, 200, { decision: "allow", reason: `permission_mode:${body.permission_mode}` } satisfies ApproveResp);
       settleGuard();
@@ -2250,7 +2254,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // 名单 / askRules / ⏱窗口 / 会话缓存 (与 danger.skip 的区别: 那个只豁免命中
     // 名单的调用, 普通调用照审)。denyRules / EnterPlanMode 拦截在前面已生效
     // (拒绝不是审批); AskUserQuestion / ExitPlanMode 交互卡在上方分支已返回, 不受影响。
-    if (cfg.approval.danger.skipAll) {
+    if (!nativePermission && cfg.approval.danger.skipAll) {
       log.info({ toolName, sessionId }, "danger.skipAll auto allow");
       json(res, 200, { decision: "allow", reason: "danger_skip_all" } satisfies ApproveResp);
       settleGuard();
@@ -2270,7 +2274,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // danger.skip / danger 模式的早退。第三个参数是「除 danger 外还有没有别的必发卡
     // 理由」—— askRules 不能被 danger 的开关顺带关掉。守卫不在其列: 它要的是事后按框,
     // 早退照样能给 (settleGuard), 拿它挡早退等于把 danger 的开关废掉。
-    const earlyExit = dangerEarlyExit(cfg, danger, Boolean(askHit) || Boolean(selfWrite));
+    const earlyExit = dangerEarlyExit(cfg, danger, nativePermission || Boolean(askHit) || Boolean(selfWrite));
     if (earlyExit) {
       log.info({ toolName, sessionId, reason: earlyExit }, "danger switch early exit");
       json(res, 200, { decision: "allow", reason: earlyExit } satisfies ApproveResp);
@@ -2355,7 +2359,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
         sessionId,
         chatKey: approver,
         transcriptTail,
-        danger: danger?.rule,
+        danger: danger?.rule ?? (nativePermission ? "Codex 沙箱权限请求" : undefined),
         forceSingle: mustCard,
         sessionName,
         denyReason,
@@ -2395,7 +2399,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
         toolName,
         approver,
         windowMinutes: cfg.approval.windowMinutes,
-        danger: danger?.rule,
+        danger: danger?.rule ?? (nativePermission ? "Codex 沙箱权限请求" : undefined),
         forceSingle: mustCard,
         sessionName,
         denyReason,
@@ -2425,7 +2429,8 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
         return;
       }
       log.warn({ err: (e as Error).message, reqId }, "approval timed out");
-      json(res, 200, fallback(cfg, "approver_timeout", mustCard || guardActive) satisfies ApproveResp);
+      const failure = (e as Error).message?.startsWith("send_card_fail:") ? (e as Error).message : "approver_timeout";
+      json(res, 200, fallback(cfg, failure, mustCard || guardActive) satisfies ApproveResp);
       return;
     }
 

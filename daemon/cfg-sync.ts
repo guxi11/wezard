@@ -96,6 +96,7 @@ const participates = (b: CliBackend, root: ProjectRoot): boolean =>
 // claude and claude-internal share `.claude` — same tree, keep one.
 const rootsFor = (cwd: string): ProjectRoot[] =>
   activeBackends()
+    .filter((b) => b.name !== "codex")
     .map((b) => ({ b, root: projectRootOf(b, cwd) }))
     .filter(({ b, root }) => participates(b, root))
     .reduce<ProjectRoot[]>(

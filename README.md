@@ -22,7 +22,7 @@
 
 ![demo](images/demo.png)
 
-1. 🪞 **远程控制本机 Agent CLI** — 企业微信里发的消息原样落进 CLI 输入框；Agent 的回复、工具调用、思考过程实时同步回聊天。回到电脑前 `tmux attach -t wezard` 接着干，对话一字不少。支持 `claude` / `claude-internal` / `codebuddy`。
+1. 🪞 **远程控制本机 Agent CLI** — 企业微信里发的消息原样落进 CLI 输入框；Agent 的回复、工具调用、思考过程实时同步回聊天。回到电脑前 `tmux attach -t wezard` 接着干，对话一字不少。支持 `claude` / `claude-internal` / `codebuddy` / `codex`。
 2. 🛎 **远程审批** — Agent 要跑 `Bash` / `Edit` 时审批卡直推 IM：`✅` 放行一次、`⏱` 一段时间内自动放行、`✅总是` 记成规则、`❌` 拒绝。危险操作（`rm` / 强推 / `DROP` / 敏感路径）每次都要单独确认；做完计划推计划卡（`✅同意` / `✏️继续改`），Agent 提的选择题变成投票卡。
 3. 🧙 **多 wizard** — 每个会话是一个有名字的 wizard，写作 `.name`，全局唯一，在任何群里都叫得到；有职责、有记忆，看得见彼此在干什么。克隆一个分身让它继承当前上下文，或者从白板新起一个；按活的难度挑档位（`mini` → `ultra`，从 haiku 到 opus·max）。
 4. 🎩 **管家分派** — 没点名的话落到聊天的默认 wizard：一两句能答完的它自己答，其余一步 `dispatch` 给对口的那个或新起一个；要 coder + reviewer 来回几轮的复杂活交给一个 lead 带队。管家有手闸，想自己埋头改代码会被拦下改去分派。
@@ -447,3 +447,45 @@ npm run dev:daemon     # tsx 直跑 daemon，热迭代不用装
 ## License
 
 [MIT](LICENSE) © [guxi11](https://github.com/guxi11)
+
+
+## Codex backend
+
+安装 Codex CLI 并先在终端完成 `codex login` 和工作目录信任确认，然后设置 `~/.wezard/config.jsonc`：
+
+```jsonc
+{
+  "wrc": {
+    "defaultCli": "codex",
+    "cliBackends": { "codex": { "bin": "codex" } },
+    "extraArgs": [],
+    "mirror": { "projectsDir": "" }
+  }
+}
+```
+
+执行 `wezard reload` 后，企业微信 `/new` 使用配置的默认后端 Codex，即使该聊天之前绑定的是 Claude；`/new claude` 等显式参数可覆盖默认值。已有会话的恢复仍使用原后端。旧配置中的 Claude 模型档（opus / sonnet / haiku）不会作为 Codex 模型参数传入。`bin` 可以填写绝对路径，适合 launchd 的精简 PATH。
+
+Codex 会话从 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` 发现（支持 `CODEX_HOME`），按 `session_meta.cwd` 匹配工作目录。镜像支持用户消息、助手回复、工具调用与结果、公开的思考摘要；加密思考不展示。新会话的 UUID 由 Codex 分配，daemon 通过 Codex CLI 自带的临时 `app-server` 创建、恢复或克隆会话，并调用 `thread/name/set` 持久化日志，随后立即创建 tmux pane，运行 `codex resume <id>` 并绑定会话。无需初始化消息，不产生模型请求，也不需要额外 SDK 或常驻服务。已验证 Codex CLI 0.162.1，启动采用 `--no-daemon` 独立进程。模型使用 `--model`，推理强度和 wizard 身份使用 `-c` 配置覆盖。wezard 启动的 Codex 会话自动配置 wezard MCP server，无需写入全局 TOML。
+
+Codex 支持企业微信工具审批卡：`PreToolUse` 使用 wezard 的审批策略，`PermissionRequest` 将 Codex 的沙箱 / 网络权限请求转成单独的确认卡。沙箱权限不会沿用普通工具的自动放行窗口或跳过开关；拒绝规则仍生效。允许与拒绝会回传给 Codex。守护进程断线或审批超时后，普通工具请求被拒绝，原生沙箱权限请求回到 Codex 的本地审批界面。Codex 的交互提问仍需在终端处理。
+
+wezard 启动的会话自动装载审批 hook，并只信任当前 wezard hook 的精确哈希。手工启动 Codex 时，在 wezard 配置中添加同步目标并执行 `wezard sync`：
+
+```jsonc
+"sync": {
+  "targets": [
+    { "kind": "codex", "settingsPath": "~/.codex/hooks.json", "scope": "user" }
+  ]
+}
+```
+
+保留已有同步目标。使用 `CODEX_HOME` 时将路径改为该目录的 `hooks.json`。同步保留第三方 hook，使用 Codex 自身的配置接口更新 `config.toml` 中的精确信任记录；重复同步不会重复注册，`wezard unsync` 可移除 wezard 的注册。daemon 在 `/new` 时绑定已知的会话 ID、日志路径和 pane；SessionStart 更新原生会话切换后的身份，支持同目录多个会话。创建和恢复会话都不发送初始化消息。
+
+项目配置同步不将 Claude 的 commands / agents / memory 自动复制给 Codex。运行中的模型和推理强度切换请使用 Codex 终端的 `/model`；新开会话可指定 `model` 与 `effort`。Claude 专用的 `--disallowedTools` 参数在 Codex 启动时忽略，其余 `extraArgs` 必须使用 Codex 支持的参数。
+
+`wezard status` 的 `wsConnected` 与 `ws.authenticated` 表示已完成企业微信认证；`ws.phase`、`ws.reconnectAttempts` 和 `ws.lastError` 显示连接阶段与最近错误。握手超时会触发重试；被重复机器人连接踢下线时显示 `kicked`。执行 `wezard reconnect` 可重建连接，保留运行中的会话与审批请求。
+
+连接认证成功不代表收件人有效。审批日志出现 `93006 invalid chatid` 时，检查 `defaultChat` 或本轮镜像频道的用户 / 群 ID，并在对应机器人会话中发送消息确认其可用；不要用放行配置绕过发送失败。
+
+CLI 参数参考 [OpenAI 官方文档](https://developers.openai.com/codex/cli/reference)，审批协议参考 [Codex hooks](https://learn.chatgpt.com/docs/hooks)。

@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 import { parse as parseJsonc } from "jsonc-parser";
 import { loadConfig } from "../shared/config.js";
 import { expandHome } from "../shared/paths.js";
+import { codexHookCommand } from "../shared/codex-hooks.js";
+import { syncCodexHooks } from "./codex-sync.js";
 
 // ── Plugin root resolution ────────────────────────────────────────────
 // dist/cli/sync.js → repo root is two `..` up.
@@ -225,13 +227,13 @@ const syncOne = (
   writeJson(abs, settings);
 };
 
-const main = (): void => {
+const main = async (): Promise<void> => {
   const argv = process.argv.slice(2);
   const remove = argv.includes("--remove") || argv.includes("--uninstall");
   const dryRun = argv.includes("--dry-run");
 
-  const { config: cfg } = loadConfig();
-  requireJq();
+  const { config: cfg, sourcePath } = loadConfig();
+  if (cfg.sync.targets.some((t) => t.kind !== "codex")) requireJq();
   const targets = cfg.sync.targets;
   if (targets.length === 0) {
     // eslint-disable-next-line no-console
@@ -251,11 +253,16 @@ const main = (): void => {
     // eslint-disable-next-line no-console
     console.log(`[wezard-sync] ${action} ${t.kind} → ${t.settingsPath}`);
     if (dryRun) continue;
-    syncOne(t.settingsPath, t.kind, { remove }, lock, envVals);
+    if (t.kind === "codex") {
+      await syncCodexHooks(expandHome(t.settingsPath), cfg.wrc.cliBackends.codex?.bin ?? "codex", process.cwd(),
+        codexHookCommand(sourcePath, envVals.base, `${PLUGIN_ROOT}/dist/cli/codex-hook.js`), cfg.approval.hookTimeoutSec + 10, remove || !cfg.approval.enabled);
+      if (remove) delete lock.targets[targetKey(t.settingsPath)];
+      else lock.targets[targetKey(t.settingsPath)] = { wroteHooks: cfg.approval.enabled, wroteMcp: false, wroteEnv: [] };
+    } else syncOne(t.settingsPath, t.kind, { remove }, lock, envVals);
   }
   if (!dryRun) writeLock(lock);
   // eslint-disable-next-line no-console
   console.log(remove ? "[wezard-sync] removed." : "[wezard-sync] synced.");
 };
 
-main();
+await main();

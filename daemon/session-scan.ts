@@ -1,3 +1,4 @@
+import { codexSessions, codexSessionForPane } from "../shared/codex.js";
 // Scan the host for live `claude` sessions running inside tmux, and summarize
 // what each is doing from its transcript tail. Used by the /sessions/* routes
 // so a WeCom-side Claude can list / switch / describe sibling sessions.
@@ -172,7 +173,7 @@ const cwdMapFor = async (pids: number[]): Promise<Map<number, string>> => {
 // Pull a `--session-id <uuid>` out of a cmdline. Returns "" when absent
 // (e.g. claude launched with bare `-r`/`--resume` — no explicit id to bind).
 const sessionIdFromCmd = (cmd: string): string => {
-  const m = cmd.match(/--session-id[= ]+([0-9a-fA-F-]{36})/);
+  const m = cmd.match(/(?:--session-id[= ]+|\bresume\s+)([0-9a-fA-F-]{36})/);
   return m?.[1] ?? "";
 };
 
@@ -190,6 +191,9 @@ const projectRoots = (): string[] => activeBackends().map((b) => expandHome(b.pr
 // reverse the cwd→dir encoding). Skips subagent transcripts (they live under a
 // `<sid>/subagents/` subdir, never directly under a project dir).
 const findJsonl = (sessionId: string): string => {
+  const codex = activeBackends().find((b) => b.name === "codex");
+  const hit = codex && codexSessions(expandHome(codex.projectsDir)).find((x) => x.sessionId === sessionId);
+  if (hit) return hit.jsonlPath;
   const name = `${sessionId}.jsonl`;
   for (const root of projectRoots()) {
     if (!existsSync(root)) continue;
@@ -230,7 +234,12 @@ const expectedJsonl = (cwd: string, sessionId: string): string => {
 // sharing a cwd don't both resolve to the same newest file.
 const inferByCwd = (cwd: string, taken: Set<string>): { sessionId: string; jsonlPath: string } | null => {
   if (!cwd) return null;
-  for (const { dir } of projectDirsFor(cwd)) {
+  for (const { backend, dir } of projectDirsFor(cwd)) {
+    if (backend.name === "codex") {
+      const hit = codexSessions(dir, cwd).filter((x) => !taken.has(x.sessionId)).sort((a, b) => statSync(b.jsonlPath).mtimeMs - statSync(a.jsonlPath).mtimeMs)[0];
+      if (hit) return hit;
+      continue;
+    }
     if (!existsSync(dir)) continue;
     let files: string[];
     try {
@@ -300,7 +309,7 @@ export const scanClaudeSessions = async (): Promise<SessionInfo[]> => {
   // claude processes — shim + worker + nested — which must not each count as
   // a separate session). Per pane: prefer a process carrying an explicit
   // `--session-id`; else fall back to one resume-mode inference by cwd.
-  const byPane = new Map<string, { pid: number; owner: PaneOwner; explicitSid: string }>();
+  const byPane = new Map<string, { pid: number; owner: PaneOwner; explicitSid: string; cmd: string }>();
   for (const [pid, e] of procs) {
     if (!e.cmd || !looksLikeAgentCli(e.cmd)) continue;
     const owner = tmuxOwnerOf(pid, procs, paneIdx);
@@ -308,7 +317,7 @@ export const scanClaudeSessions = async (): Promise<SessionInfo[]> => {
     const explicitSid = sessionIdFromCmd(e.cmd);
     const prev = byPane.get(owner.paneId);
     if (!prev || (!prev.explicitSid && explicitSid)) {
-      byPane.set(owner.paneId, { pid, owner, explicitSid });
+      byPane.set(owner.paneId, { pid, owner, explicitSid, cmd: e.cmd });
     }
   }
 
@@ -353,6 +362,11 @@ export const scanClaudeSessions = async (): Promise<SessionInfo[]> => {
   // skipping any session already claimed in pass 1.
   for (const w of panes) {
     if (w.explicitSid) continue;
+    const codex = codexSessionForPane(w.owner.paneId);
+    if (codex && codex.cwd === w.cwd && backendForPath(codex.jsonlPath).name === "codex" && /codex/.test(w.cmd)) {
+      emit(codex.sessionId, codex.jsonlPath, codex.cwd, w.owner);
+      continue;
+    }
     const inf = inferByCwd(w.cwd, seen);
     if (inf) emit(inf.sessionId, inf.jsonlPath, w.cwd, w.owner);
   }

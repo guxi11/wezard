@@ -1,3 +1,5 @@
+import { recordCodexPaneSession } from "../shared/codex.js";
+import { codexHookLaunchArgs, codexHookCommand, prepareCodexSession } from "../shared/codex-hooks.js";
 // Auto-spawn helper for mirror mode.
 //
 // Goal: from a WeCom inbound, materialize a fresh `claude` process inside a
@@ -23,13 +25,14 @@
 // tail from offset 0). The brief post-launch settle exists only to give the
 // pane's shell time to finish sourcing rc + claude TUI time to grab the pty
 // before the first paste-buffer inject hits.
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { Logger } from "pino";
-import type { Config } from "../shared/config.js";
+import { loadConfig, type Config } from "../shared/config.js";
 import { expandHome } from "../shared/paths.js";
 import { tmuxClientEnv } from "../shared/exec-path.js";
 import { sleep } from "../shared/std.js";
@@ -181,7 +184,7 @@ const REGISTRY_POLL_MS = 100;
 
 // Patterns indicating the TUI reached interactive state (input box visible).
 // Covers Claude Code, Claude Internal, and CodeBuddy TUIs across versions.
-const TUI_READY_RE = /for shortcuts|auto mode|Try "|>\s*$/m;
+const TUI_READY_RE = /for shortcuts|auto mode|Try "|OpenAI Codex|[›>]\s*$/m;
 
 // Patterns indicating an interactive prompt that consumed our Enter — the
 // command is sitting unsent in the shell line.
@@ -477,8 +480,8 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
   const backend = backendFor(cfg, cli);
   const cwd = expandHome((cwdOverride ?? "").trim() || cfg.wrc.cwd);
   const projectDir = join(expandHome(backend.projectsDir), backend.encodeProjectDir(cwd));
-  const sessionId = resumeSessionId ?? freshSessionId ?? randomUUID();
-  const jsonlPath = join(projectDir, `${sessionId}.jsonl`);
+  let sessionId = resumeSessionId ?? freshSessionId ?? randomUUID();
+  let jsonlPath = join(projectDir, `${sessionId}.jsonl`);
   const tmuxName = cfg.wrc.tmuxPrefix; // shared session for all chats
   const winName = safeWindowName(windowName ?? sessionId);
 
@@ -510,7 +513,20 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
   // this folder?" / onboarding prompts — those prompts swallow paste-buffer
   // injects and the approval card never fires. Best-effort: log + continue
   // on failure (worst case the user clicks through the prompts manually).
-  trustWorkspace(backend.bin, cwd, log);
+  if (backend.name !== "codex") trustWorkspace(backend.bin, cwd, log);
+
+  let codexApprovalArgs: string[] = [];
+  if (backend.name === "codex") {
+    const hookEntry = fileURLToPath(new URL("../cli/codex-hook.js", import.meta.url));
+    const command = codexHookCommand(loadConfig().sourcePath, `http://127.0.0.1:${cfg.daemon.port}`, hookEntry);
+    try { codexApprovalArgs = await codexHookLaunchArgs(backend.bin, cwd, command, cfg.approval.hookTimeoutSec + 10, cfg.approval.enabled); }
+    catch (e) { return { ok: false, reason: `Codex approval hooks unavailable: ${(e as Error).message}` }; }
+    try {
+      const native = await prepareCodexSession(backend.bin, cwd, winName, codexApprovalArgs, { resumeSessionId, forkSession, model, systemPrompt });
+      sessionId = native.sessionId;
+      jsonlPath = native.jsonlPath;
+    } catch (e) { return { ok: false, reason: `Codex session preparation failed: ${(e as Error).message}` }; }
+  }
 
   // Reuse the shared session if alive; otherwise create it. Either way, end
   // up with a fresh window whose pane id we capture via `-P -F '#{pane_id}'`.
@@ -556,19 +572,30 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
     "DISABLE_AUTOUPDATER=1",
   ];
   const wanted = model?.trim() ?? "";
-  const effortArg = effort && backend.effortFlag ? effort : undefined;
+  const effortArg = effort && (backend.effortFlag || backend.name === "codex") ? effort : undefined;
   const charter = charterArg(cfg, backend, sessionId, systemPrompt, log);
   // A fresh session relaunched after a failed first try resumes instead if that
   // try already wrote the transcript — `--session-id` refuses an existing one.
   const commandFor = (flagModel: string | undefined, retry: boolean): string => {
     const resume = !!resumeSessionId || (retry && existsSync(jsonlPath));
     const argv = [
-      ...(resume ? ["--resume", sessionId, ...(forkSession ? ["--fork-session"] : [])] : ["--session-id", sessionId]),
+      ...(backend.name === "codex"
+        ? ["resume", sessionId]
+        : (resume ? ["--resume", sessionId, ...(forkSession ? ["--fork-session"] : [])] : ["--session-id", sessionId])),
+      ...(backend.name === "codex" ? [
+        "--no-daemon",
+        "-c", `mcp_servers.wezard.command=${JSON.stringify(process.execPath)}`,
+        "-c", `mcp_servers.wezard.args=${JSON.stringify([fileURLToPath(new URL("../mcp/server.js", import.meta.url))])}`,
+        "-c", `mcp_servers.wezard.env.WEZARD_DAEMON_BASE=${JSON.stringify(`http://127.0.0.1:${cfg.daemon.port}`)}`,
+      ] : []),
+      ...codexApprovalArgs,
+      ...(backend.name === "codex" && effort ? ["-c", `model_reasoning_effort=${JSON.stringify(effort)}`] : []),
+      ...(backend.name === "codex" && systemPrompt ? ["-c", `developer_instructions=${JSON.stringify(systemPrompt)}`] : []),
       ...(flagModel ? [backend.modelFlag!, flagModel] : []),
-      ...(effortArg ? [backend.effortFlag!, effortArg] : []),
-      ...cfg.wrc.extraArgs,
+      ...(effortArg && backend.effortFlag ? [backend.effortFlag, effortArg] : []),
+      ...cfg.wrc.extraArgs.filter((arg) => backend.name !== "codex" || !arg.startsWith("--disallowedTools")),
     ].map(shQuote);
-    const cmd = [...envPrefix, backend.bin, ...argv, charter].filter(Boolean).join(" ");
+    const cmd = [...envPrefix, shQuote(backend.bin), ...argv, charter].filter(Boolean).join(" ");
     // Old tmux couldn't set the pane's start-dir via `-c`; cd into it first.
     return `${supportsC ? cmd : `cd ${shQuote(cwd)} && ${cmd}`}${EXIT_TAIL}`;
   };
@@ -580,9 +607,15 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
     const opened = await openPane();
     if ("reason" in opened) return { ok: false, reason: opened.reason };
     const { pane } = opened;
-    const line = commandFor(flagModel, retry);
+    const fullCommand = commandFor(flagModel, retry);
+    // PTY canonical input truncates long hook/TOML arguments at ~4 KiB.
+    // Send only a short script invocation through the interactive shell.
+    const script = backend.name === "codex" ? join(tmpdir(), `wezard-codex-${randomUUID()}.sh`) : undefined;
+    if (script) writeFileSync(script, `${fullCommand}\n`, { mode: 0o600, flag: "wx" });
+    const line = script ? `/bin/sh ${shQuote(script)}` : fullCommand;
     const sent = await runTmux(["send-keys", "-t", pane, line, "Enter"]);
     if (!sent.ok) {
+      if (script) try { unlinkSync(script); } catch { /* already removed */ }
       // Kill only this window/pane, never the shared session.
       await runTmux(["kill-pane", "-t", pane]);
       return { ok: false, reason: `tmux send-keys failed: ${sent.stderr.trim() || sent.code}` };
@@ -591,7 +624,9 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
     // claude does NOT create the transcript jsonl until it processes the first
     // user input, so we don't wait for the file — mirror tail tolerates a
     // missing jsonl and starts emitting once claude writes the first line.
-    const tui = await waitForTuiReady(pane, line, backend, log);
+    let tui: TuiState;
+    try { tui = await waitForTuiReady(pane, line, backend, log); }
+    finally { if (script) try { unlinkSync(script); } catch { /* already removed */ } }
     if (tui.exited) return { ok: true, pane, ready: false, failure: tui.exited };
     const unknown = !!flagModel && tui.ready && modelNotRecognized(await capturePaneBottom(pane, "-"), flagModel);
     return { ok: true, pane, ready: tui.ready, ...(unknown ? { failure: `CLI 不认识 --model ${flagModel} (欢迎框原样回显, 首轮会 400)` } : {}) };
@@ -641,6 +676,14 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
   }
   if (launchFailure) modelWarning = `${launchFailure}; ${modelWarning ?? "已不带 --model 重起并改走 /model 选择器"}`;
 
+  if (backend.name === "codex") {
+    if (!landed.ready || !existsSync(jsonlPath)) {
+      const startupScreen = await capturePaneBottom(tmuxPane, 20);
+      await runTmux(["kill-pane", "-t", tmuxPane]);
+      return { ok: false, reason: `Codex pane did not resume its prepared session. ${startupScreen.slice(-500)}` };
+    }
+    recordCodexPaneSession({ sessionId, jsonlPath, cwd, pane: tmuxPane, startedAt: Date.now() }, cfg.daemon.stateDir);
+  }
   log.info({ tmuxName, tmuxPane, sessionId, jsonlPath, cwd, cli: backend.name, model: resolvedModel, viaFlag, relaunched: !!launchFailure, effort: effortArg }, "spawn-tmux: ready");
   return {
     ok: true, sessionId, jsonlPath, tmuxPane, tmuxSession: tmuxName, cwd, cli: backend.name,

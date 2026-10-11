@@ -9,7 +9,7 @@ import { tailTurnsWithTools, peerMentionPart, renderHumanEnvelope, renderSteward
 import { keepalivePingSigs } from "../shared/keepalive.js";
 import { noticeSuffixFor } from "./notices.js";
 import { expandHome, sanitizeId } from "../shared/paths.js";
-import type { CliBackendName } from "../shared/cli-backends.js";
+import { primaryBackend, type CliBackendName } from "../shared/cli-backends.js";
 import { parseWxCommand, wxCommandHandler } from "./weixin-cmd.js";
 import { tryConsumeClaim, persistClaim, ackClaim, shouldAutoClaim, ackAutoClaim } from "./claim.js";
 import { getLastResponse } from "./last-response.js";
@@ -129,10 +129,10 @@ const resolveAuditMirror = (
 };
 // `/new [cli] [model] [prompt…]` — 三个位置参数都可选, 从前往后逐个认领: 认得出
 // 的 CLI 名吃进后端, 认得出的模型别名吃进 `--model`, 剩下的整段就是新会话的第一
-// 句话 (spawn 完再照常走 dispatch 注入)。Bare `/new` 沿用当前会话的 CLI 与该 CLI
-// 自己的默认模型 —— 见 newSession 的继承规则, 只有要*换*后端时才需要写出来。
+// 句话 (spawn 完再照常走 dispatch 注入)。Bare `/new` 使用当前配置的默认 CLI；
+// 显式写 CLI 可覆盖默认值。
 const NEW_RE = /^\/new(?:\s+([\s\S]+))?$/i;
-const CLI_TOKEN_RE = /^(claude-internal|claude|codebuddy)$/i;
+const CLI_TOKEN_RE = /^(claude-internal|claude|codebuddy|codex)$/i;
 // `--model` 认的短别名与完整 slug。刻意收得窄: 认不出的一律当正文 —— 把
 // `/new 看看 sonnet 贵不贵` 的第一个词吃成模型, 比多打一个词烦得多。
 const MODEL_TOKEN_RE = /^(?:default|opus|opusplan|sonnet|haiku|(?:claude|gpt|gemini|deepseek)-[\w.-]+)(?:\[1m\])?$/i;
@@ -187,7 +187,7 @@ const renderHelp = (): string =>
     "*wezard 命令*",
     "",
     "▎会话",
-    "`/new` 让一个全新的 wizard 就位并绑定本聊天 (沿用当前的 CLI;不继承上下文)",
+    "`/new` 用配置的默认 CLI 新建 wizard 并绑定本聊天 (不继承上下文)",
     "`/new <模型>` 指定模型新开 (opus / sonnet / haiku / 完整 slug)",
     "`/new <问题>` 新开并把这句话作为第一句发过去",
     "`/clear` 清空当前会话上下文 (有待切项目时自动升级为 /new)",
@@ -199,7 +199,7 @@ const renderHelp = (): string =>
     "`/wx` 微信 ClawBot: 列出 / `bind` 扫码绑定 (每个微信号 = 一个群聊) / `unbind` (仅审批人)",
     "",
     "▎切换 CLI 后端",
-    "`/new codebuddy` 用指定 CLI 新开 (claude / claude-internal / codebuddy)",
+    "`/new codex` 用指定 CLI 新开 (claude / claude-internal / codebuddy / codex)",
     "位置参数可叠:`.docs /new codebuddy opus 先读一遍 README` = 名字 + 后端 + 模型 + 首句。",
     "不写则沿用本会话当前的 CLI;新叫出来的 wizard 继承本聊天的 CLI。",
     "切换后 `/clear`、`/stop`、`--resume` 自愈都仍绑在该 CLI 上。",
@@ -610,7 +610,7 @@ export const installInboundRouter = (
   // On success there is NO reply: newSession already pushed the single
   // "created + cwd" bubble. Only failures produce user-facing text.
   const spawnSession = async (who: string, cli?: CliBackendName, silent?: boolean, model?: string): Promise<{ err?: string }> => {
-    const r = await bridge.newSession(who, displayName(who) || tagOf(who) || who, cli, { silent, model });
+    const r = await bridge.newSession(who, displayName(who) || tagOf(who) || who, cli ?? primaryBackend().name, { silent, model });
     return r.ok ? {} : { err: `[wezard] /new failed: ${r.reason ?? "unknown"}` };
   };
 

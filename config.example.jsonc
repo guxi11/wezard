@@ -30,9 +30,11 @@
     // "all" = allow everyone (use with care).
     "allowFrom": [],             // ["user:zhangsan", "chat:wcXXXX", "all"]
     "claudeBin": "claude",
-    // CLI backend selection. Three built-ins: "claude" / "claude-internal" /
-    // "codebuddy". Empty/omitted → inferred from claudeBin basename (back-compat).
+    // CLI backend selection. Four built-ins: "claude" / "claude-internal" /
+    // "codebuddy" / "codex". Empty/omitted → inferred from claudeBin basename (back-compat).
     "defaultCli": "claude",
+    // Codex uses ~/.codex/sessions (or $CODEX_HOME/sessions), with native resume/fork.
+    // For Codex set extraArgs: []; PreToolUse approval cards are not supported.
     // Per-backend binary overrides (when the executable isn't on $PATH under
     // its canonical name). Missing entry → built-in default.
     // "cliBackends": {
@@ -141,10 +143,11 @@
     "steward": "light"
   },
 
-  // ── claude / codebuddy wrapper sync ───────────────────────────────
+  // ── CLI hook / MCP sync ──────────────────────────────────────────
   // `wezard sync` writes hooks/MCP/permissions into every target settings.json
   // listed below. Multi-CLI setups (claude + codebuddy 同时装) 列多项即可。
-  // kind: "claude" (含 claude-internal 等 fork) | "codebuddy"
+  // kind: "claude" (含 claude-internal 等 fork) | "codebuddy" | "codex"
+  // Codex uses hooks.json and exact trust hashes in config.toml, not settings.json.
   //   • claude-internal 通过 settingsPath: "~/.claude-internal/settings.json" 表达
   "sync": {
     "targets": [
@@ -155,6 +158,7 @@
       }
       // 多 CLI 并存示例 (取消注释即可):
       // ,{ "kind": "codebuddy", "settingsPath": "~/.codebuddy/settings.json", "scope": "user" }
+      // ,{ "kind": "codex", "settingsPath": "~/.codex/hooks.json", "scope": "user" }
       // ,{ "kind": "claude", "settingsPath": "~/.claude-internal/settings.json", "scope": "user" }
     ]
   },

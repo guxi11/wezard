@@ -14,7 +14,7 @@ import { knob } from "./config-meta.js";
 // 守护进程每次用时都现读 `cfg.x` 的项 —— 逐个核实过, 没核实的一律留默认 reload。
 const hot = <T extends z.ZodTypeAny>(s: T): T => knob(s, { apply: "hot" });
 
-const CLI_NAMES = ["claude", "claude-internal", "codebuddy"] as const;
+const CLI_NAMES = ["claude", "claude-internal", "codebuddy", "codex"] as const;
 const LOG_LEVELS = ["trace", "debug", "info", "warn", "error"] as const;
 
 // ── Schema ──────────────────────────────────────────────────────────
@@ -196,6 +196,7 @@ const Wrc = z.object({
     .object({
       claude: z.object({ bin: z.string().optional().describe("二进制路径") }).optional(),
       "claude-internal": z.object({ bin: z.string().optional().describe("二进制路径") }).optional(),
+      codex: z.object({ bin: z.string().optional().describe("二进制路径") }).optional(),
       codebuddy: z.object({ bin: z.string().optional().describe("二进制路径") }).optional(),
     })
     .default({})
@@ -306,7 +307,7 @@ const normalizeSyncKind = (v: unknown): unknown =>
 
 const SyncTarget = z.object({
   // 仅用于 sync 日志; 真正决定写入位置的是 settingsPath。
-  kind: z.preprocess(normalizeSyncKind, z.enum(["claude", "codebuddy"])).default("claude").describe("CLI 家族标签"),
+  kind: z.preprocess(normalizeSyncKind, z.enum(["claude", "codebuddy", "codex"])).default("claude").describe("CLI 家族标签"),
   settingsPath: z.string().describe("要写入 MCP / hook 注册的 settings.json 路径"),
   scope: z.enum(["user", "project", "local"]).default("user").describe("settings 的作用域"),
 });

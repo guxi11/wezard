@@ -11,10 +11,11 @@
 // TranscriptLine shape that mirror-bridge's renderLine consumes. Claude backends
 // are identity; codebuddy does the schema adapter work.
 
+import { normalizeCodex } from "./codex.js";
 import { join } from "node:path";
 import { expandHome } from "./paths.js";
 
-export type CliBackendName = "claude" | "claude-internal" | "codebuddy";
+export type CliBackendName = "claude" | "claude-internal" | "codebuddy" | "codex";
 
 // 人读的后端名 —— 详情页「X 正在思考」这类给人看的地方用它, 而不是配置里的标识符。
 // claude-internal 是 Claude Code 的内部构建, 对人来说仍然是 Claude。
@@ -22,6 +23,7 @@ const BACKEND_LABEL: Record<CliBackendName, string> = {
   "claude": "Claude",
   "claude-internal": "Claude",
   "codebuddy": "CodeBuddy",
+  "codex": "Codex",
 };
 
 /** 未知 / 缺省后端退回中性的「Agent」—— 宁可不说, 也别说错一个产品名。 */
@@ -47,6 +49,7 @@ export interface NormalizedContentBlock {
 }
 
 export interface NormalizedTranscriptLine {
+  timestamp?: string;
   type?: string;
   /** Present on `type:"system"` lines — e.g. "local_command" for slash-command
    *  invocation records (Claude Code only; codebuddy has no system lines). */
@@ -307,6 +310,13 @@ export const CLI_BACKEND_DEFAULTS: Record<CliBackendName, CliBackend> = {
   claude: makeClaude("claude", "claude"),
   "claude-internal": makeClaude("claude-internal", "claude-internal"),
   codebuddy: makeCodebuddy("codebuddy"),
+  codex: {
+    name: "codex", bin: "codex", homeDir: process.env.CODEX_HOME || "~/.codex",
+    projectsDir: `${process.env.CODEX_HOME || "~/.codex"}/sessions`,
+    settingsPath: `${process.env.CODEX_HOME || "~/.codex"}/config.toml`,
+    projectDirEnv: "CLAUDE_PROJECT_DIR", pluginRootEnv: "CLAUDE_PLUGIN_ROOT",
+    modelFlag: "--model", encodeProjectDir: () => "", normalizeTranscriptLine: normalizeCodex,
+  },
 };
 
 /** Minimal slice of Wrc that resolveCliBackend needs. */
@@ -325,6 +335,7 @@ export interface CliBackendsConfig {
 const inferDefaultFromClaudeBin = (bin: string): CliBackendName => {
   const base = bin.split("/").pop() ?? bin;
   if (base === "claude-internal") return "claude-internal";
+  if (base === "codex") return "codex";
   if (base === "codebuddy") return "codebuddy";
   return "claude";
 };

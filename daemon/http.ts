@@ -43,6 +43,8 @@ const routes: Record<string, Handler> = {
     json(res, 200, {
       ok: true,
       wsConnected: ws.client.isConnected,
+      ws: ws.status(),
+      backend: cfg.wrc.defaultCli,
       botId: cfg.bot.botId,
       defaultChat: cfg.defaultChat,
       pending: listPending().length,
@@ -53,6 +55,10 @@ const routes: Record<string, Handler> = {
   },
   "GET /pending": (_req, res) => {
     json(res, 200, { pending: listPending() });
+  },
+  "POST /reconnect": (_req, res, _url, { ws }) => {
+    ws.reconnect("manual reconnect via CLI");
+    json(res, 200, { ok: true, ws: ws.status() });
   },
   "POST /shutdown": async (_req, res, _url, { ws, log }) => {
     json(res, 200, { ok: true });
