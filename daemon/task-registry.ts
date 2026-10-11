@@ -98,7 +98,12 @@ export const openTaskRegistry = async (
   };
   const watcher = (() => {
     try {
-      return watch(dir, { persistent: false }, schedule);
+      const active = watch(dir, { persistent: false }, schedule);
+      active.on("error", (err) => {
+        active.close();
+        log.warn({ err: err.message }, "task dir watch failed; polling only");
+      });
+      return active;
     } catch (e) {
       log.warn({ err: (e as Error).message }, "task dir watch failed; polling only");
       return undefined;

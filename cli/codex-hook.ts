@@ -14,7 +14,7 @@ const requestApproval = async (input: CodexApprovalInput): Promise<ApprovalReply
   if (!["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) throw new Error("Codex approval bridge must use loopback");
   const deadline = Date.now() + cfg.approval.hookTimeoutSec * 1000;
   let resumeId: string | undefined;
-  let failures = 0;
+  let outageSince: number | undefined;
   while (Date.now() < deadline) {
     try {
       const resp = await fetch(url, {
@@ -24,14 +24,22 @@ const requestApproval = async (input: CodexApprovalInput): Promise<ApprovalReply
       });
       if (!resp.ok) throw new Error(`approval HTTP ${resp.status}`);
       const reply = await resp.json() as ApprovalReply;
+      outageSince = undefined;
       if (reply.decision !== "retry") return reply;
       if (!reply.req_id) throw new Error("reload response has no request id");
       resumeId = reply.req_id;
       await sleep(1000);
     } catch (e) {
-      // Preserve the same pending card across reload; bounded retry on outages.
-      if (++failures > 2 || Date.now() >= deadline) return { decision: "ask", reason: `bridge unavailable: ${(e as Error).message}` };
-      await sleep(1000);
+      // Restoring hundreds of mirrors can outlast two retries during reload.
+      // Keep the pending card id and bound each outage by the hook budget / 60s.
+      outageSince ??= Date.now();
+      const remaining = Math.min(deadline, outageSince + 60_000) - Date.now();
+      if (remaining <= 0) {
+        const error = e as Error & { cause?: { code?: string; message?: string } };
+        const cause = error.cause?.code ?? error.cause?.message;
+        return { decision: "ask", reason: `bridge unavailable (${url.origin}): ${error.message}${cause ? `: ${cause}` : ""}` };
+      }
+      await sleep(Math.min(1000, remaining));
     }
   }
   return { decision: "ask", reason: "approval timeout" };

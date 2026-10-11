@@ -1012,6 +1012,11 @@ export const startMirrorTail = (deps: TailDeps): TailHandle => {
     watchedPath = path;
     try {
       watcher = watch(path, { persistent: false }, () => drain());
+      const active = watcher;
+      active.on("error", (err) => {
+        active.close();
+        log.warn({ err: err.message }, "fs.watch failed; relying on poll");
+      });
     } catch (e) {
       watcher = undefined;
       log.warn({ err: (e as Error).message }, "fs.watch failed; relying on poll");

@@ -301,6 +301,11 @@ export const startSubagentWatch = (deps: SubagentWatchDeps): SubagentWatchHandle
       watchedDir = dir;
       try {
         watcher = watch(dir, { persistent: false }, () => scan());
+        const active = watcher;
+        active.on("error", (err) => {
+          active.close();
+          log.warn({ err: err.message }, "subagent watch failed; relying on poll");
+        });
       } catch {
         watcher = undefined;
       }
