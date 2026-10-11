@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfigSchema, TIERS, tiersForBackend } from "../shared/config.js";
 import { pickTier, planSet, tierEvidence } from "../daemon/config-api.js";
+import { pickTier as sharedPickTier } from "../shared/model-tiers.js";
+
+assert.equal(pickTier, sharedPickTier, "legacy import must use the shared resolver");
 
 const bot = { botId: "test", secret: "test" };
 const cfg = ConfigSchema.parse({ bot, wrc: { defaultCli: "codex" }, models: { tiers: { hard: { model: "legacy-opus", effort: "high" } } } });
@@ -31,6 +34,29 @@ const actual = pickTier(custom, "hard", {}, true, "claude");
 assert(actual.ok);
 assert.equal(actual.cli, "claude");
 assert.equal(actual.model, "custom-claude");
+
+for (const backend of ["claude", "claude-internal", "codebuddy", "codex"] as const) {
+  for (const tier of TIERS) {
+    const pick = sharedPickTier(cfg, tier, {}, false, backend);
+    assert(pick.ok);
+    assert.equal(pick.cli, backend);
+    assert.equal(pick.model, tiersForBackend(cfg, backend)[tier].model || undefined);
+    assert.equal(pick.effort, tiersForBackend(cfg, backend)[tier].effort);
+  }
+}
+const internal = ConfigSchema.parse({ bot, models: { backends: {
+  claude: { tiers: { hard: { model: "parent" } } },
+  "claude-internal": { tiers: { hard: { model: "internal" } } },
+} } });
+assert.equal(tiersForBackend(internal, "claude-internal").hard.model, "internal");
+const foreign = ConfigSchema.parse({ bot, wrc: { defaultCli: "codex" }, models: {
+  backends: { codex: { tiers: { hard: { cli: "claude", model: "opus", effort: "max" } } } },
+} });
+const fallback = sharedPickTier(foreign, "hard", {}, false);
+assert(fallback.ok);
+assert.equal(fallback.model, undefined);
+assert.equal(fallback.effort, undefined);
+assert.equal(fallback.via.model, "inherit");
 
 const dir = mkdtempSync(join(tmpdir(), "wezard-tiers-"));
 try {
