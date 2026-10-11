@@ -21,6 +21,7 @@ import type {
 import { truncate, clipLine } from "./std.js";
 import { parseReminders, stripReminders, type Reminder } from "./reminder.js";
 import { stripSigil } from "./session-label.js";
+import { HINT_TOOL, objectOf, toolReplies, execHintCalls } from "./tool-hints.js";
 
 const escHtml = (s: string): string =>
   s.replace(/[&<>"']/g, (c) =>
@@ -645,12 +646,7 @@ export type Hint =
   /** 排了一个定时任务: when / next 取回包里渲染好的那两句, text = prompt。 */
   | { k: "task"; id: string; when: string; next: string; note: string; text: string; state?: Handoff["state"]; reason?: string };
 
-const WEZARD_TOOL = /(?:^|__)(tell_peer|send_peer|dispatch|clone_wizard|spawn_wizard|open_job|close_job|stop_wizard|schedule_task)$/;
-
-const objOf = (v: unknown): Record<string, unknown> => (v && typeof v === "object" ? (v as Record<string, unknown>) : {});
-const parseObj = (s: string): Record<string, unknown> | undefined => {
-  try { const v: unknown = JSON.parse(s); return v && typeof v === "object" ? (v as Record<string, unknown>) : undefined; } catch { return undefined; }
-};
+const objOf = (v: unknown): Record<string, unknown> => objectOf(v) ?? {};
 const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
 const PRIORITIES = ["normal", "urgent", "now"] as const;
 const priorityOf = (v: unknown): Handoff["priority"] | undefined => PRIORITIES.find((p) => p === v);
@@ -658,7 +654,7 @@ const priorityOf = (v: unknown): Handoff["priority"] | undefined => PRIORITIES.f
 /** 一次调用的结局: 回包没回来 = undefined, ok:true = ok, ok:false / `xxx failed:` = failed, 其余 = lost。 */
 const outcomeOf = (result: ToolResult | undefined, j: Record<string, unknown> | undefined): Pick<Handoff, "state" | "reason"> => {
   if (!result) return {};
-  if (j && j.ok !== false) return { state: "ok" };
+  if (j?.ok === true) return { state: "ok" };
   const failed = j?.ok === false || /^\w+ failed: /.test(result.body);
   return { state: failed ? "failed" : "lost", reason: clipLine(str(j?.reason) ?? result.body.replace(/^\w+ failed: /, ""), 120) };
 };
@@ -684,10 +680,11 @@ const handoffFrom = (via: Handoff["via"], a: Record<string, unknown>, j: Record<
 
 /** 这次调用要不要挂一行提示; 要就读出它的事实。 */
 export const hintOf = (use: ToolUse, result: ToolResult | undefined): Hint | undefined => {
-  const tool = WEZARD_TOOL.exec(use.toolName)?.[1];
+  const tool = HINT_TOOL.exec(use.toolName)?.[1];
   if (!tool) return undefined;
   const a = objOf(use.toolInput);
-  const j = result ? parseObj(result.body) : undefined;
+  const replies = result ? toolReplies(result.body) : [];
+  const j = replies.length === 1 ? replies[0] : undefined;
   const out = outcomeOf(result, j);
   switch (tool) {
     case "tell_peer": case "send_peer": return handoffFrom("tell", a, j, out);
@@ -703,6 +700,20 @@ export const hintOf = (use: ToolUse, result: ToolResult | undefined): Hint | und
     case "schedule_task": return { k: "task", ...out, id: str(j?.id) ?? str(a.id) ?? "", when: str(j?.when) ?? str(a.when) ?? "", next: str(j?.next) ?? "", note: str(a.note) ?? "", text: str(a.prompt) ?? "" };
     default: return undefined;
   }
+};
+
+/** A code-mode bubble can contain several actual calls. Preserve the original bubble and attach
+ *  each unambiguously identified hint beneath it; direct MCP calls keep the same path. */
+export const hintsOf = (use: ToolUse, result: ToolResult | undefined): Hint[] => {
+  const direct = hintOf(use, result);
+  if (direct) return [direct];
+  if (!/^(?:functions[._])?exec$/.test(use.toolName) || !result) return [];
+  const source = typeof use.toolInput === "string" ? use.toolInput : objOf(use.toolInput).code;
+  if (typeof source !== "string") return [];
+  return execHintCalls(source, result.body).flatMap((c) => {
+    const h = hintOf({ ...use, ...c }, { ...result, body: JSON.stringify(c.reply) });
+    return h ? [h] : [];
+  });
 };
 
 /** 箭头的颜色: 这件活此刻的回执状态。 */
@@ -842,7 +853,7 @@ const renderToolBubble = (
   deco?: HandoffDeco,
 ): string => {
   const rawResult = result?.body ?? "";
-  const hint = hintOf(use, result);
+  const hints = hintsOf(use, result);
   // 头部一行: ⏺ 工具名(参数) — 参数取命令/路径等主字段, 与 Claude CLI 同款。
   const arg = oneLineCompact(use.toolInput, 72);
   const dur = result ? `<span class="tool-dur">${escHtml(fmtDuration(result.ts - use.ts))}</span>` : "";
@@ -857,7 +868,7 @@ const renderToolBubble = (
       <summary class="tool-summary"><span class="tool-dot">⏺</span><span class="tool-name">${escHtml(use.toolName)}</span>${arg ? `<span class="tool-arg">(${escHtml(arg)})</span>` : ""}${dur}${clock(use.ts)}</summary>
       ${body}
     </details>
-    <div class="tool-result-line">${preview}</div>${hint ? renderHint(hint, key, deco) : ""}
+    <div class="tool-result-line">${preview}</div>${hints.map((hint, i) => renderHint(hint, i ? `${key}:hint${i}` : key, deco)).join("")}
   </section>`;
 };
 
