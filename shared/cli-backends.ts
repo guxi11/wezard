@@ -81,6 +81,8 @@ export interface NormalizedTranscriptLine {
    *  收口 —— mirror-bridge 挂一小段静默期确认, 期间来了新 item 就撤销。原生 Claude
    *  有 end_turn / turn_duration 两个硬信号, 永远不置位。 */
   softTurnEnd?: boolean;
+  /** Final text precedes usage; close only on the backend completion event. */
+  awaitTurnEnd?: boolean;
 }
 
 export interface CliBackend {

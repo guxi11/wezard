@@ -31,7 +31,7 @@ assert.equal(normalizeCodex({ type: "event_msg", payload: { type: "agent_message
 assert.equal(normalizeCodex(wrap({ type: "reasoning", encrypted_content: "secret", summary: [] })), null);
 assert.equal(normalizeCodex({ type: "turn_context", payload: { model: "gpt-6.1-sol", effort: "high" } })?.message?.model, "gpt-6.1-sol");
 assert.deepEqual(normalizeCodex({ type: "token_usage_record", payload: { usage: { input_tokens: 100, cached_input_tokens: 70, output_tokens: 8 } } })?.message?.usage,
-  { input_tokens: 30, cache_read_input_tokens: 70, output_tokens: 8 });
+  { input_tokens: 100, cache_creation_input_tokens: 0, cache_read_input_tokens: 70, output_tokens: 8 });
 assert.equal(normalizeCodex({ type: "event_msg", payload: { type: "token_count", info: {} } }), null);
 assert.equal(resolveCliBackend({ defaultCli: "codex", cliBackends: { codex: { bin: "/opt/codex" } } }).bin, "/opt/codex");
 assert.equal(resolveCliBackend({ claudeBin: "/opt/codex" }).name, "codex");

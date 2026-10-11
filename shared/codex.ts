@@ -57,17 +57,19 @@ export const normalizeCodex = (raw: unknown): NormalizedTranscriptLine | null =>
   const r = raw as Record<string, any>;
   const p = r.payload;
   if (!p || typeof p !== "object") return null;
-  if (r.type === "turn_context") return { type: "assistant", timestamp: r.timestamp, effort: p.effort, message: { role: "assistant", content: [], model: p.model } };
+  if (r.type === "turn_context") return { type: "assistant", timestamp: r.timestamp, effort: p.effort ?? p.collaboration_mode?.settings?.reasoning_effort, message: { role: "assistant", content: [], model: p.model } };
   if (r.type === "token_usage_record" && p.usage) {
     const u = p.usage;
     const cached = Number(u.cached_input_tokens ?? 0);
-    return { type: "assistant", timestamp: r.timestamp, message: { role: "assistant", content: [], usage: {
-      input_tokens: Math.max(0, Number(u.input_tokens ?? 0) - cached),
+    return { type: "assistant", timestamp: r.timestamp, message: { role: "assistant", content: [], id: p.response_id, usage: {
+      // Keep Codex total input intact: the shared accounting layer splits cache once.
+      input_tokens: Number(u.input_tokens ?? 0),
+      cache_creation_input_tokens: Number(u.cache_write_input_tokens ?? 0),
       cache_read_input_tokens: cached, output_tokens: Number(u.output_tokens ?? 0),
     } } };
   }
   if (r.type === "event_msg" && ["task_complete", "task_completed", "turn_complete"].includes(p.type))
-    return { type: "assistant", message: { role: "assistant", content: [], stop_reason: "end_turn" } };
+    return { type: "system", subtype: "turn_duration", timestamp: r.timestamp };
   if (r.type !== "response_item") return null;
   const base = { uuid: p.id, timestamp: r.timestamp };
   if (p.type === "message" && ["user", "assistant"].includes(p.role)) {
@@ -77,7 +79,7 @@ export const normalizeCodex = (raw: unknown): NormalizedTranscriptLine | null =>
     // to it must still open a turn and retain its wezard envelope.
     if (p.role === "user" && !(Array.isArray(p.content) ? p.content : []).some((b: any) => b.type === "input_image") && text.trim() && /^(?:# AGENTS\.md instructions for [^\n]+\n+\s*<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>\s*)?(?:<environment_context>[\s\S]*?<\/environment_context>\s*)?$/.test(text.trim()))
       return { ...base, type: "user", isMeta: true, message: { role: "user", content: text } };
-    return { ...base, type: p.role, message: { role: p.role, content: p.role === "user" ? text : [{ type: "text", text }], ...(p.phase === "final_answer" ? { stop_reason: "end_turn" } : {}) } };
+    return { ...base, type: p.role, awaitTurnEnd: p.phase === "final_answer", message: { role: p.role, content: p.role === "user" ? text : [{ type: "text", text }], ...(p.phase === "final_answer" ? { stop_reason: "end_turn" } : {}) } };
   }
   if (["function_call", "custom_tool_call"].includes(p.type)) {
     let input: unknown = p.input ?? {};

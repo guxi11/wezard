@@ -366,6 +366,7 @@ interface TranscriptLine {
   isSidechain?: boolean;
   /** 见 NormalizedTranscriptLine.softTurnEnd —— 后端只能确认"这条消息写完了"。 */
   softTurnEnd?: boolean;
+  awaitTurnEnd?: boolean;
 }
 
 // Target keys are `user:xxx[#tag]` / `chat:xxx[#tag]`. Strip the principal
@@ -906,7 +907,7 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
     // 且此后整轮的 tool/text 全部退化成散装气泡。终态消息里必然有 text 块 (含
     // tool_use 的消息 stop_reason 恒为 "tool_use"), 且实测终态消息从不拆出第二个
     // text 行 —— 所以"本行带 text 块"精确等价于"本消息的最后一行"。
-    if (isFinal && blocks.some((b) => b?.type === "text")) out.push({ kind: "turn_end" });
+    if (isFinal && !line.awaitTurnEnd && blocks.some((b) => b?.type === "text")) out.push({ kind: "turn_end" });
     // 软收口 (codebuddy): 这条消息写完了, 但说不出后面还有没有 function_call。
     else if (line.softTurnEnd) out.push({ kind: "turn_end", soft: true });
     return out;
@@ -962,6 +963,21 @@ interface TailHandle {
 
 export const startMirrorTail = (deps: TailDeps): TailHandle => {
   const { log } = deps;
+
+  // Codex records model/effort separately from per-response usage. Keep that
+  // context local to this tail (never share it between sessions/normalizers).
+  if (backendForPath(deps.jsonlPath).name === "codex" && deps.normalizeLine) {
+    const normalize = deps.normalizeLine;
+    let model = deps.startOffset === 0 ? "" : lastModel(deps.jsonlPath);
+    let effort: string | undefined;
+    deps = { ...deps, normalizeLine: (raw) => {
+      const line = normalize(raw);
+      if (line?.message?.model) { model = line.message.model; effort = line.effort; }
+      return line?.message?.usage
+        ? { ...line, effort, message: { ...line.message, model } }
+        : line;
+    } };
+  }
 
   // A single logical tail follows ONE sessionId whose transcript file may move
   // between sibling project dirs — Claude Code's EnterWorktree/ExitWorktree
