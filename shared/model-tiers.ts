@@ -6,6 +6,7 @@ type Err = { ok: false; reason: string };
 
 // ── 档位 ────────────────────────────────────────────────────────────────
 type Via = "explicit" | "tier" | "inherit";
+const family = (backend: CliBackendName): CliBackendName => backend === "claude-internal" ? "claude" : backend;
 export interface TierPick {
   ok: true;
   tier?: TierName;
@@ -33,7 +34,7 @@ export const pickTier = (
     x !== undefined ? [x, "explicit"] : y !== undefined ? [y, "tier"] : [undefined, "inherit"];
   // 旧配置的 Claude 档位不能把 opus / sonnet 或 max effort 传给 Codex。
   // 显式 model 仍原样交给 CLI; 不猜用户自定义模型是否有效。
-  const foreignTier = !!t && ((!!t.cli && t.cli !== cli)
+  const foreignTier = !!t && ((!!t.cli && family(t.cli) !== family(cli))
     || (cli === "codex" && /^(?:claude|opus|sonnet|haiku)\b/i.test(t.model)));
   const [model, viaModel] = one(explicit.model?.trim() || undefined, foreignTier ? undefined : t?.model.trim() || undefined);
   const [effort, viaEffort] = one(explicit.effort, foreignTier ? undefined : parseEffort(t?.effort));

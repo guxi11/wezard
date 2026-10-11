@@ -58,6 +58,20 @@ assert.equal(fallback.model, undefined);
 assert.equal(fallback.effort, undefined);
 assert.equal(fallback.via.model, "inherit");
 
+for (const configured of ["claude", "claude-internal", "codebuddy", "codex"] as const) {
+  const legacy = ConfigSchema.parse({ bot, models: { tiers: {
+    hard: { cli: configured, model: "opus", effort: "high" },
+  } } });
+  for (const backend of ["claude", "claude-internal", "codebuddy"] as const) {
+    const pick = sharedPickTier(legacy, "hard", {}, false, backend);
+    assert(pick.ok);
+    const compatible = configured === backend || (["claude", "claude-internal"].includes(configured)
+      && ["claude", "claude-internal"].includes(backend));
+    assert.equal(pick.model, compatible ? "opus" : undefined, `${configured} → ${backend}`);
+    assert.equal(pick.effort, compatible ? "high" : undefined);
+  }
+}
+
 const dir = mkdtempSync(join(tmpdir(), "wezard-tiers-"));
 try {
   const path = join(dir, "config.jsonc");

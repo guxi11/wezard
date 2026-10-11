@@ -2412,8 +2412,6 @@ const main = async (): Promise<void> => {
       const b = body as { name?: string; tag?: string; description?: string; inherit?: boolean; detached?: boolean; from?: string; cwd?: string; chat?: string; cli?: CliBackendName; model?: string; effort?: string; tier?: string; task?: string; job?: string; keepalive?: boolean; lead?: boolean };
       const askedEffort = parseEffort(b.effort);
       if (b.effort !== undefined && !askedEffort) { return { status: 400, body: { ok: false, reason: `effort 只有这几档: ${EFFORTS.join(" / ")}` } }; }
-      let pick = pickTier(cfg, b.tier, { cli: b.cli, model: b.model, effort: askedEffort }, b.inherit === true);
-      if (!pick.ok) { return { status: 400, body: pick }; }
       // 工单先验: 生完分身才发现工单号打错了, 那个分身就成了没人认领的孤儿。
       const jobId = (b.job ?? "").trim();
       if (jobId) {
@@ -2447,11 +2445,10 @@ const main = async (): Promise<void> => {
       if (!fromR.ok) { return { status: fromR.status, body: { ok: false, reason: fromR.reason, ...(fromR.candidates ? { candidates: fromR.candidates } : {}) } }; }
       const source = fromR.target;
       const sourceInfo = m.sessionInfo(source);
-      if (inherit && sourceInfo && existsSync(sourceInfo.jsonlPath)
-        && (!b.cwd?.trim() || expandHome(b.cwd.trim()) === sourceInfo.cwd)) {
-        pick = pickTier(cfg, b.tier, { cli: b.cli, model: b.model, effort: askedEffort }, true, sourceInfo.cli);
-        if (!pick.ok) return { status: 400, body: pick };
-      }
+      const forkBackend = inherit && sourceInfo && existsSync(sourceInfo.jsonlPath)
+        && (!b.cwd?.trim() || expandHome(b.cwd.trim()) === sourceInfo.cwd) ? sourceInfo.cli : undefined;
+      const pick = pickTier(cfg, b.tier, { cli: b.cli, model: b.model, effort: askedEffort }, inherit, forkBackend);
+      if (!pick.ok) return { status: 400, body: pick };
       const effort = pick.effort;
       // 别人的会话 fork 不出来就是失败, 不能像克隆自己那样悄悄退化成白板 —— 调用方
       // 要的恰恰是它的上下文, 给一张白纸等于答非所问。

@@ -21,7 +21,8 @@ import { existsSync, readdirSync, readFileSync, statSync, watch, openSync, readS
 import { join, dirname } from "node:path";
 import type { WSClient, WsFrame, WsFrameHeaders, EventMessageWith, TemplateCard, TemplateCardEventData } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
-import { tiersForBackend, type Config } from "../shared/config.js";
+import type { Config } from "../shared/config.js";
+import { newStewardSpec, resumedStewardSpec } from "./steward-model.js";
 import { expandHome, sanitizeId } from "../shared/paths.js";
 import { augmentedPath } from "../shared/exec-path.js";
 import { sleep, truncateWithCount, mapLimit } from "../shared/std.js";
@@ -55,7 +56,7 @@ import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagH
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { isWxFrame } from "../shared/wx-text.js";
 import { randomTip } from "./tips.js";
-import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress, stewardTierOf } from "./chat-name.js";
+import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
 import { stripAnsi, paneIsBusy, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, lastModel, cacheTouchMs, cacheTtlSec, keepaliveStamps, openKeepalivePing, lastUserTurn, talkRounds, openToolUses, renderDialog, type PeerInfo, type PeerReply } from "./peers.js";
 import { keepalivePingSigs, isKeepalivePingText } from "../shared/keepalive.js";
 
@@ -5296,17 +5297,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     try { return charterOf?.(target, ctx); } catch { return undefined; }
   };
 
-  /** 管家该跑的那一档 (模型 + effort); 不是管家 = undefined。 */
-  const stewardSpec = (target: string, cli?: CliBackendName): { model?: string; effort?: Effort } | undefined => {
-    const tier = stewardTierOf(cfg, target);
-    const spec = tier ? tiersForBackend(cfg, cli)[tier] : undefined;
-    return spec ? { model: spec.model || undefined, effort: spec.effort } : undefined;
-  };
   /** 死 pane 重生 (`--resume` 同一个会话) 的模型: 绑定里记着的优先 —— set_model 换上的也记在那;
    *  没记 (老绑定 / CLI 默认) 的管家补上管家档。 */
   const respawnSpec = (a: { target: string; jsonlPath: string; model?: string; effort?: string }): { model?: string; effort?: Effort } => {
-    const fallback = stewardSpec(a.target, backendForPath(a.jsonlPath).name);
-    return { model: a.model || fallback?.model, effort: parseEffort(a.effort) ?? fallback?.effort };
+    return resumedStewardSpec(cfg, a.target, backendForPath(a.jsonlPath).name, a);
   };
 
   const newSession = async (
@@ -5358,12 +5352,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 管家 (群的默认会话) 新起的会话按管家档起 (models.steward / chatPolicy), 档压过绑定里记下的
     // effort —— `/new`、换目录、交接重开都是让改过的档位生效的那一下。点名了模型就整档让开。
     // 已在跑的管家不动 (换模型会让缓存整份重读); 死 pane 重生见 respawnSpec。
-    const stewardCandidate = opts?.model?.trim() ? undefined : stewardSpec(target, effCli);
-    // Existing installations carry Claude tier aliases. They aren't Codex model IDs.
-    const steward = effCli === "codex" && /^(?:claude|opus|sonnet|haiku)\b/i.test(stewardCandidate?.model ?? "") ? undefined : stewardCandidate;
-    const effModel = opts?.model?.trim() || steward?.model || undefined;
     const backendChanged = Boolean(boundPath && effCli && backendForPath(expandHome(boundPath)).name !== effCli);
-    const effEffort = opts?.effort ?? steward?.effort ?? (backendChanged ? undefined : parseEffort(prev?.effort ?? deps.store.get(target)?.effort));
+    const { model: effModel, effort: effEffort } = newStewardSpec(cfg, target, effCli, opts,
+      backendChanged ? undefined : prev?.effort ?? deps.store.get(target)?.effort);
     if (prev?.tmuxPane) {
       // Best-effort kill; ignore errors (pane may already be dead).
       void runTmux(["kill-pane", "-t", prev.tmuxPane]);
