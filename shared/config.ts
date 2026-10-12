@@ -7,7 +7,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { parse as parseJsonc } from "jsonc-parser";
 import { z } from "zod";
 import { expandHome } from "./paths.js";
-import { resolveCliBackend } from "./cli-backends.js";
+import { resolveCliBackend, type CliBackendName } from "./cli-backends.js";
 import { EFFORTS } from "./effort.js";
 import { knob } from "./config-meta.js";
 import { botOfKey, withBot } from "./session-label.js";
@@ -374,19 +374,33 @@ const Weixin = z.object({
 // 旧 cli 字段只用于识别不兼容的模型档位, 不再选择后端。
 const Tier = z.object({
   cli: z.enum(CLI_NAMES).optional().describe("兼容旧配置字段; 新建 pane 统一使用 wrc.defaultCli"),
-  model: z.string().default("").describe("口语化模型名 ('haiku' / 'sonnet 5' / 'opus'), 只写家族 = 该家族最新; 空 = CLI 默认"),
+  model: z.string().default("").describe("当前后端的模型名或 ID; Claude 可用 haiku / sonnet / opus; 空 = CLI 默认"),
   effort: z.enum(EFFORTS).optional().describe("推理档位; 省略 = CLI 默认"),
 });
 export const TIERS = ["mini", "light", "standard", "hard", "ultra"] as const;
 export type TierName = (typeof TIERS)[number];
+const ClaudeTiers = z.object({
+  mini: Tier.default({ model: "haiku", effort: "low" }).describe("机械一步: 照单执行、不用判断"),
+  light: Tier.default({ model: "sonnet", effort: "medium" }).describe("跑腿: 查找、搬运、跑命令; 也是管家的默认档"),
+  standard: Tier.default({ model: "sonnet", effort: "medium" }).describe("常规实现"),
+  hard: Tier.default({ model: "opus", effort: "high" }).describe("要判断: 设计、排障、审查"),
+  ultra: Tier.default({ model: "opus", effort: "max" }).describe("最难: 架构取舍、疑难排障、关键评审"),
+}).default({});
+const CodexTiers = z.object({
+  mini: Tier.default({ model: "", effort: "low" }).describe("机械一步"),
+  light: Tier.default({ model: "", effort: "medium" }).describe("跑腿; 管家默认档"),
+  standard: Tier.default({ model: "", effort: "medium" }).describe("常规实现"),
+  hard: Tier.default({ model: "", effort: "high" }).describe("设计、排障、审查"),
+  ultra: Tier.default({ model: "", effort: "xhigh" }).describe("架构取舍、疑难排障、关键评审"),
+}).default({});
 const Models = z.object({
-  tiers: z.object({
-    mini: Tier.default({ model: "haiku", effort: "low" }).describe("机械一步: 照单执行、不用判断"),
-    light: Tier.default({ model: "sonnet", effort: "medium" }).describe("跑腿: 查找、搬运、跑命令; 也是管家的默认档"),
-    standard: Tier.default({ model: "sonnet", effort: "medium" }).describe("常规实现"),
-    hard: Tier.default({ model: "opus", effort: "high" }).describe("要判断: 设计、排障、审查"),
-    ultra: Tier.default({ model: "opus", effort: "max" }).describe("最难: 架构取舍、疑难排障、关键评审"),
-  }).default({}).describe("spawn_wizard / clone_wizard / dispatch 的 tier 档位, 由轻到重"),
+  tiers: ClaudeTiers.describe("兼容旧配置的 Claude 系档位; 后端专属配置优先"),
+  backends: z.object({
+    claude: z.object({ tiers: ClaudeTiers }).optional(),
+    "claude-internal": z.object({ tiers: ClaudeTiers }).optional(),
+    codebuddy: z.object({ tiers: ClaudeTiers }).optional(),
+    codex: z.object({ tiers: CodexTiers }).default({}),
+  }).default({}).describe("各 backend 独立的五档模型配置; 按 wrc.defaultCli 取值"),
   // 只在起一个新的管家会话时落地 (首条消息 / `/new` / 交接重开; 死 pane 重生只在绑定没记模型时补);
   // 已在跑的管家不自动切 (换模型会让缓存整份重读)。
   steward: z.enum(TIERS).default("light").describe("各群管家 (群的默认会话) 用哪一档 (取值同 tiers); 群里要别的档 → chatPolicy.<chat>.steward。生效: 新起 / 交接重开的管家会话按它起, 已在跑的不动 —— 要它换上就 handoff 或 set_model"),
@@ -491,6 +505,12 @@ export const defaultChatOfBot = (cfg: Pick<Config, "defaultChat" | "bots">, bot:
   const own = cfg.bots.find((b) => b.id === bot)?.defaultChat.trim() ?? "";
   return own ? withBot(own, bot) : "";
 };
+
+/** 后端专属配置优先; Claude 系未配置时保留旧 tiers 的行为。 */
+export const tiersForBackend = (cfg: Pick<Config, "models" | "wrc">, backend: CliBackendName = resolveCliBackend(cfg.wrc).name): Config["models"]["tiers"] =>
+  cfg.models.backends[backend]?.tiers
+  ?? (backend === "claude-internal" ? cfg.models.backends.claude?.tiers : undefined)
+  ?? cfg.models.tiers;
 
 // ── Loader ──────────────────────────────────────────────────────────
 const DEFAULT_CONFIG_PATHS = [

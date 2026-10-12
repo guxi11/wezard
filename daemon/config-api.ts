@@ -3,7 +3,7 @@
 // from the schema itself (shared/config-meta.ts); this module only renders and plans.
 // The card for a `card`-gated write and the actual file write are the caller's (index.ts).
 import type { Config } from "../shared/config.js";
-import { ConfigSchema, TIERS, configIssues, parseConfigText, readSecrets, type TierName } from "../shared/config.js";
+import { ConfigSchema, TIERS, tiersForBackend, configIssues, parseConfigText, readSecrets, type TierName } from "../shared/config.js";
 import { resolveCliBackend, type CliBackendName } from "../shared/cli-backends.js";
 import { parseEffort, type Effort } from "../shared/effort.js";
 import { previewPatch, readJsoncText } from "../shared/config-writer.js";
@@ -309,11 +309,12 @@ export const pickTier = (
   tier: string | undefined,
   explicit: { cli?: CliBackendName; model?: string; effort?: Effort },
   inherit: boolean,
+  backend: CliBackendName = resolveCliBackend(cfg.wrc).name,
 ): TierPick | Err => {
   const name = (tier ?? "").trim();
   if (name && !(TIERS as readonly string[]).includes(name)) return { ok: false, reason: `tier 只有这几档: ${TIERS.join(" / ")}` };
-  const cli = resolveCliBackend(cfg.wrc).name;
-  const t = name ? cfg.models.tiers[name as TierName] : undefined;
+  const cli = backend;
+  const t = name ? tiersForBackend(cfg, cli)[name as TierName] : undefined;
   const one = <T>(x: T | undefined, y: T | undefined): [T | undefined, Via] =>
     x !== undefined ? [x, "explicit"] : y !== undefined ? [y, "tier"] : [undefined, "inherit"];
   // 旧配置的 Claude 档位不能把 opus / sonnet 或 max effort 传给 Codex。
@@ -351,14 +352,19 @@ const sumFor = (want: string, m: Map<string, UsageTotals>): UsageTotals =>
   [...m].filter(([id]) => matches(want, id)).reduce((a, [, x]) => ({ tokens: a.tokens + x.tokens, cost: a.cost + x.cost }), { tokens: 0, cost: 0 });
 
 export const tierEvidence = (
-  models: Config["models"],
+  cfg: Config,
   path: string[],
   usage: () => TierUsage,
   holders: (tier: TierName) => number,
   fmt: { tokens: (n: number) => string; cost: (usd: number) => string },
 ): string[] => {
   if (path[0] !== "models") return [];
-  const want = path[1] === "tiers" && path[2] ? [path[2]] : path[1] === "steward" ? [models.steward] : path[1] === "tiers" || !path[1] ? [...TIERS] : [];
+  const backend = path[1] === "backends" ? path[2] : undefined;
+  if (path[1] === "backends" && !backend) return [];
+  if (backend && !resolve(ConfigSchema, ["models", "backends", backend])) return [];
+  const models = { ...cfg.models, tiers: path[1] === "tiers" ? cfg.models.tiers : tiersForBackend(cfg, backend as CliBackendName | undefined) };
+  const tierPath = backend ? ["models", ...path.slice(3)] : path;
+  const want = tierPath[1] === "tiers" && tierPath[2] ? [tierPath[2]] : tierPath[1] === "steward" ? [models.steward] : tierPath[1] === "tiers" || !tierPath[1] ? [...TIERS] : [];
   const rows = want.filter((n): n is TierName => (TIERS as readonly string[]).includes(n));
   if (!rows.length) return [];
   const u = usage();

@@ -866,7 +866,7 @@ const offspringShape = {
   task: z.string().optional().describe("就位后立刻派下去的第一件活 (私聊)。省略则它就位待命。"),
   chat: z.string().optional().describe("把它生在另一个聊天里 (wizard_roster 里的 home 聊天名)。省略 = 你自己的聊天, 这是绝大多数情况。"),
   cli: z.enum(["claude", "claude-internal", "codebuddy", "codex"]).optional().describe("兼容旧参数; 新建 pane 统一使用配置的 wrc.defaultCli。"),
-  tier: z.enum(TIERS).optional().describe("按难度选档 (由轻到重), 落到配置 `models.tiers` 里那一档的 {cli, model, effort}: mini = 机械一步 (照单执行、不用判断), light = 跑腿 (查找、搬运、跑命令), standard = 常规实现, hard = 要判断 (设计、排障、审查), ultra = 最难 (架构取舍、疑难排障、关键评审)。同时给了 model / effort / cli 的, 以显式值为准; 克隆换不了 CLI。返回里的 `via` 说明每项来自显式、档位还是继承。当前各档是什么见宪章, 或 config_get({path:'models'})。"),
+  tier: z.enum(TIERS).optional().describe("按难度选档 (由轻到重), 按 wrc.defaultCli 取 `models.backends.<backend>.tiers` 的 model / effort; Claude 系兼容旧 models.tiers: mini = 机械一步, light = 跑腿, standard = 常规实现, hard = 设计、排障、审查, ultra = 架构取舍、疑难排障、关键评审。显式 model / effort 优先; cli 不覆盖全局配置, 克隆换不了后端。返回里的 via 说明每项来自显式、档位还是继承。当前各档见宪章或 config_get({path:'models'})。"),
   model: z.string().optional().describe(MODEL_DOC),
   effort: z.enum(EFFORTS).optional().describe(EFFORT_DOC),
   job: z

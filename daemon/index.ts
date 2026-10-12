@@ -5,7 +5,7 @@ import { timingSafeEqual } from "node:crypto";
 import { loadOrCreateSvrToken } from "../shared/svr-token.js";
 import { DAEMON_TOKEN_FILE, DAEMON_TOKEN_HEADER } from "../shared/daemon-token.js";
 import { homedir } from "node:os";
-import { TIERS, defaultChatFor, loadConfig } from "../shared/config.js";
+import { TIERS, defaultChatFor, tiersForBackend, loadConfig } from "../shared/config.js";
 import { makeLogger } from "../shared/log.js";
 import { clipLine, sleep, truncate } from "../shared/std.js";
 import { patchJsonc } from "../shared/config-writer.js";
@@ -1989,7 +1989,7 @@ const main = async (): Promise<void> => {
           .sort((x, y) => y[1] - x[1])
           .map(([t]) => briefOf(target, t)),
         memory: wizards.get(target)?.memory ?? [],
-        tiers: forDiff ? [] : TIERS.map((n) => { const s = cfg.models.tiers[n]; return `${n}=${s.model || "默认"}${s.effort ? `·${s.effort}` : ""}`; }),
+        tiers: forDiff ? [] : TIERS.map((n) => { const s = tiersForBackend(cfg, m.sessionInfo(target)?.cli)[n]; return `${n}=${s.model || "默认"}${s.effort ? `·${s.effort}` : ""}`; }),
         chatMemory: sharedMemory("chat", baseOfKey(target)),
         workspaceMemory: (() => {
           const cwd = o.cwd || m.getCwd(target).runningCwd || m.getCwd(target).defaultCwd;
@@ -2412,9 +2412,8 @@ const main = async (): Promise<void> => {
       const b = body as { name?: string; tag?: string; description?: string; inherit?: boolean; detached?: boolean; from?: string; cwd?: string; chat?: string; cli?: CliBackendName; model?: string; effort?: string; tier?: string; task?: string; job?: string; keepalive?: boolean; lead?: boolean };
       const askedEffort = parseEffort(b.effort);
       if (b.effort !== undefined && !askedEffort) { return { status: 400, body: { ok: false, reason: `effort 只有这几档: ${EFFORTS.join(" / ")}` } }; }
-      const pick = pickTier(cfg, b.tier, { cli: b.cli, model: b.model, effort: askedEffort }, b.inherit === true);
+      let pick = pickTier(cfg, b.tier, { cli: b.cli, model: b.model, effort: askedEffort }, b.inherit === true);
       if (!pick.ok) { return { status: 400, body: pick }; }
-      const effort = pick.effort;
       // 工单先验: 生完分身才发现工单号打错了, 那个分身就成了没人认领的孤儿。
       const jobId = (b.job ?? "").trim();
       if (jobId) {
@@ -2448,6 +2447,12 @@ const main = async (): Promise<void> => {
       if (!fromR.ok) { return { status: fromR.status, body: { ok: false, reason: fromR.reason, ...(fromR.candidates ? { candidates: fromR.candidates } : {}) } }; }
       const source = fromR.target;
       const sourceInfo = m.sessionInfo(source);
+      if (inherit && sourceInfo && existsSync(sourceInfo.jsonlPath)
+        && (!b.cwd?.trim() || expandHome(b.cwd.trim()) === sourceInfo.cwd)) {
+        pick = pickTier(cfg, b.tier, { cli: b.cli, model: b.model, effort: askedEffort }, true, sourceInfo.cli);
+        if (!pick.ok) return { status: 400, body: pick };
+      }
+      const effort = pick.effort;
       // 别人的会话 fork 不出来就是失败, 不能像克隆自己那样悄悄退化成白板 —— 调用方
       // 要的恰恰是它的上下文, 给一张白纸等于答非所问。
       if (source !== self && !sourceInfo?.sessionId) {
@@ -2964,7 +2969,7 @@ const main = async (): Promise<void> => {
       ];
     };
     const configEvidence = (p: string[]): string[] => [
-      ...tierEvidence(cfg.models, p, tierUsage, (tier) => wizards.all().filter((w) => w.tier === tier).length, { tokens: fmtTokens, cost: fmtCost }),
+      ...tierEvidence(cfg, p, tierUsage, (tier) => wizards.all().filter((w) => w.tier === tier).length, { tokens: fmtTokens, cost: fmtCost }),
       ...chatPolicyEvidence(p),
     ];
 

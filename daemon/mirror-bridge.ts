@@ -21,7 +21,7 @@ import { existsSync, readdirSync, readFileSync, statSync, watch, openSync, readS
 import { join, dirname } from "node:path";
 import type { WSClient, WsFrame, WsFrameHeaders, EventMessageWith, TemplateCard, TemplateCardEventData } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
-import type { Config } from "../shared/config.js";
+import { tiersForBackend, type Config } from "../shared/config.js";
 import { expandHome, sanitizeId } from "../shared/paths.js";
 import { augmentedPath } from "../shared/exec-path.js";
 import { sleep, truncateWithCount, mapLimit } from "../shared/std.js";
@@ -5297,14 +5297,17 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   };
 
   /** 管家该跑的那一档 (模型 + effort); 不是管家 = undefined。 */
-  const stewardSpec = (target: string): { model?: string; effort?: Effort } | undefined => {
+  const stewardSpec = (target: string, cli?: CliBackendName): { model?: string; effort?: Effort } | undefined => {
     const tier = stewardTierOf(cfg, target);
-    return tier ? { model: cfg.models.tiers[tier].model || undefined, effort: cfg.models.tiers[tier].effort } : undefined;
+    const spec = tier ? tiersForBackend(cfg, cli)[tier] : undefined;
+    return spec ? { model: spec.model || undefined, effort: spec.effort } : undefined;
   };
   /** 死 pane 重生 (`--resume` 同一个会话) 的模型: 绑定里记着的优先 —— set_model 换上的也记在那;
    *  没记 (老绑定 / CLI 默认) 的管家补上管家档。 */
-  const respawnSpec = (a: { target: string; model?: string; effort?: string }): { model?: string; effort?: Effort } =>
-    a.model ? { model: a.model, effort: parseEffort(a.effort) } : stewardSpec(a.target) ?? { effort: parseEffort(a.effort) };
+  const respawnSpec = (a: { target: string; jsonlPath: string; model?: string; effort?: string }): { model?: string; effort?: Effort } => {
+    const fallback = stewardSpec(a.target, backendForPath(a.jsonlPath).name);
+    return { model: a.model || fallback?.model, effort: parseEffort(a.effort) ?? fallback?.effort };
+  };
 
   const newSession = async (
     target: string,
@@ -5355,7 +5358,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 管家 (群的默认会话) 新起的会话按管家档起 (models.steward / chatPolicy), 档压过绑定里记下的
     // effort —— `/new`、换目录、交接重开都是让改过的档位生效的那一下。点名了模型就整档让开。
     // 已在跑的管家不动 (换模型会让缓存整份重读); 死 pane 重生见 respawnSpec。
-    const stewardCandidate = opts?.model?.trim() ? undefined : stewardSpec(target);
+    const stewardCandidate = opts?.model?.trim() ? undefined : stewardSpec(target, effCli);
     // Existing installations carry Claude tier aliases. They aren't Codex model IDs.
     const steward = effCli === "codex" && /^(?:claude|opus|sonnet|haiku)\b/i.test(stewardCandidate?.model ?? "") ? undefined : stewardCandidate;
     const effModel = opts?.model?.trim() || steward?.model || undefined;
