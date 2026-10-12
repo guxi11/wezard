@@ -75,8 +75,8 @@ await t("正常完成的命令不上报超时", async () => {
 });
 
 await t("stdin 变体: load-buffer - 把文本喂进 tmux buffer (注入路径靠它)", async () => {
-  // 注入路径用的是默认 buffer (不带 -b): tmux < 2.0 拒绝自定义 buffer 名, 这里与
-  // mirror-bridge 保持同一形式。
+  // 注入的旧版分支用默认 buffer (不带 -b): tmux 1.8 的 -b 只认数字索引。
+  // 新版命名 buffer 和两条分支的隔离由 tmux-buffer 测试覆盖。
   const text = "wezard timeout test 中文 & $pecial";
   const load = await runTmux(["load-buffer", "-"], { stdin: text });
   assert.equal(load.ok, true, `load stderr=${load.stderr}`);
