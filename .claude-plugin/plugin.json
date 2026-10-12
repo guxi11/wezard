@@ -1,6 +1,6 @@
 {
   "name": "wezard",
-  "version": "1.1.0",
+  "version": "2.6.0",
   "description": "Remote-control Claude Code from WeCom via WebSocket smart bot. Cards for tool approval, skills for doc r/w.",
   "author": {
     "name": "zyy"
