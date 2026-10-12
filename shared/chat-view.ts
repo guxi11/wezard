@@ -53,7 +53,7 @@ export interface TagSummary {
   model?: string;
   /** 给人看的模型简名 (modelLabel): 前端不另做归一。 */
   modelLabel?: string;
-  /** 主会话最近一轮 CLI 记下的 effort 档位; 没记过就没有 —— 不猜默认。 */
+  /** 主会话实报的 effort 档位; 尚未取得时用创建 session 的参数。 */
   effort?: string;
   turns: number;
   lastTs: number;
@@ -264,6 +264,13 @@ export const summarizeTag = (target: string, turns: readonly TurnDetailRecord[],
   // 所以轮数与预览都只看主会话自己的轮次; token/工具用量仍按全部计 (那是真花销)。
   const main = turns.filter((r) => !r.agent);
   const last = main[main.length - 1] ?? turns[turns.length - 1];
+  // 新 session 的创建参数不能被旧 session / 子 agent 的实报档位盖掉。
+  // 同 session 已有实报值时, 后续尚未出 usage 的轮也不退回启动别名。
+  const session = [...main].reverse().filter((r) => r.sessionId === last?.sessionId);
+  const model = session.find((r) => r.model)?.model || session.find((r) => r.initialModel)?.initialModel
+    || [...turns].reverse().find((r) => r.model)?.model;
+  const effort = session.find((r) => r.effort)?.effort || session.find((r) => r.initialEffort)?.initialEffort
+    || [...main].reverse().find((r) => r.effort)?.effort;
   const tag = tagOfKey(target);
   const until = turns.reduce((m, r) => Math.max(m, staleAt(r)), 0);
   return {
@@ -272,9 +279,9 @@ export const summarizeTag = (target: string, turns: readonly TurnDetailRecord[],
     label: labelFor(tag || target),
     sessionId: last?.sessionId,
     cwd: [...turns].reverse().find((r) => r.cwd)?.cwd,
-    model: [...turns].reverse().find((r) => r.model)?.model,
-    modelLabel: ((m) => m && modelLabel(m))([...turns].reverse().find((r) => r.model)?.model),
-    effort: [...main].reverse().find((r) => r.effort)?.effort,
+    model,
+    modelLabel: model && modelLabel(model),
+    effort,
     turns: main.length,
     lastTs: turns.reduce((m, r) => Math.max(m, r.updatedAt), 0),
     running: until > now,

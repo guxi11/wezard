@@ -191,6 +191,8 @@ export interface TurnDetailRecord {
   agent?: TurnAgentMeta; // 本轮是 subagent 跑的; undefined = 主会话自身的 turn
   injects?: TurnInject[]; // 这一轮跑着时被插进来的话 (tell_peer priority now 等); 没有 = 没人插话
   items: TurnItem[];
+  initialModel?: string; // 创建 session 的档位, 仅作展示兜底, 不参与计价
+  initialEffort?: string;
   model?: string;      // 首个见到的 model 名
   modelAlt?: number;   // 与 model 不同的后续行数, 用于渲染 "+N"
   effort?: string;     // 最后见到的 effort 档位 (CLI 写在 assistant 行上的), 没写过就没有
@@ -307,7 +309,7 @@ export interface DetailStore {
   ): void;
   /** 返回实际写入的 turn id —— tool_result 会改投到持有其 tool_use 的那一轮。 */
   appendTurnItem(id: string, item: TurnItem): string | undefined;
-  addTurnUsage(id: string, delta: { model?: string; effort?: string; messageId?: string; usage: TurnUsage }): void;
+  addTurnUsage(id: string, delta: { model?: string; effort?: string; messageId?: string; usage?: TurnUsage }): void;
   closeTurn(id: string): void;
   // 收尾所有仍开着的 turn (可选按 target / sessionId 限定, 可选排除若干 id)。返回被
   // 关闭的 id。用途: 新一轮发出 finish 消息时, 把此前遗留未关闭的 turn 一并标记结束。
@@ -492,26 +494,27 @@ export const createDetailStore = (opts: { stateDir: string; log?: Logger }): Det
       const seenIds = r.usageMsgIds ?? [];
       const dupe = delta.messageId ? seenIds.includes(delta.messageId) : false;
       const cur = r.usage;
-      const nextUsage: TurnUsage = dupe
+      const usage = delta.usage;
+      const nextUsage = !usage ? cur : dupe
         ? (cur ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 })
         : (() => {
             // 这一次调用送入的上下文 = 新鲜输入 + 缓存读 + 缓存写 (delta 恒为单次调用)。
-            const callCtx = delta.usage.input + delta.usage.cacheRead + delta.usage.cacheWrite;
+            const callCtx = usage.input + usage.cacheRead + usage.cacheWrite;
             return cur
               ? {
-                  input: cur.input + delta.usage.input,
-                  output: cur.output + delta.usage.output,
-                  cacheRead: cur.cacheRead + delta.usage.cacheRead,
-                  cacheWrite: cur.cacheWrite + delta.usage.cacheWrite,
-                  serviceTier: cur.serviceTier ?? delta.usage.serviceTier,
-                  calls: cur.calls + delta.usage.calls,
+                  input: cur.input + usage.input,
+                  output: cur.output + usage.output,
+                  cacheRead: cur.cacheRead + usage.cacheRead,
+                  cacheWrite: cur.cacheWrite + usage.cacheWrite,
+                  serviceTier: cur.serviceTier ?? usage.serviceTier,
+                  calls: cur.calls + usage.calls,
                   ctxPeak: Math.max(cur.ctxPeak ?? 0, callCtx),
                   ctxFirst: cur.ctxFirst,
                   ctxLast: callCtx,
                 }
-              : { ...delta.usage, ctxPeak: callCtx, ctxFirst: callCtx, ctxLast: callCtx };
+              : { ...usage, ctxPeak: callCtx, ctxFirst: callCtx, ctxLast: callCtx };
           })();
-      const nextIds = delta.messageId && !dupe ? [...seenIds, delta.messageId] : seenIds;
+      const nextIds = usage && delta.messageId && !dupe ? [...seenIds, delta.messageId] : seenIds;
       let model = r.model;
       let modelAlt = r.modelAlt;
       if (delta.model) {

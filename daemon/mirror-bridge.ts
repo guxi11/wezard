@@ -570,7 +570,7 @@ type RenderItem =
   // Per-assistant-line usage snapshot (model + token counts). Consumed only in
   // brief mode where it's fed into the turn store for aggregate chip display.
   // Non-brief onItem drops it silently — no bubble, no stream side effect.
-  | { kind: "turn_usage"; model?: string; effort?: string; messageId?: string; usage: TurnUsage };
+  | { kind: "turn_usage"; model?: string; effort?: string; messageId?: string; usage?: TurnUsage };
 
 const oneLineSummary = (s: string, max = 40): string => {
   const flat = s.replace(/\s+/g, " ").trim();
@@ -896,6 +896,11 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
           calls: 1,
         },
       });
+    }
+    // Codex turn_context reports the real tier before any token usage.
+    // Forward metadata without inventing an API call or resetting context counts.
+    if (!u && (line.message?.model || line.effort)) {
+      out.push({ kind: "turn_usage", model: line.message?.model, effort: line.effort });
     }
     // Terminal stop_reason → emit turn_end so onItem closes the live bubble.
     // `tool_use` is intentionally excluded — more turns will follow once the
@@ -3503,7 +3508,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.pendingBriefQuery = undefined;
     a.pendingChannel = { channel: s.channel ?? baseOfKey(a.target), speaker: s.speaker, at: Date.now() };
     consumeChannel(a, true, undefined);
-    recordTurnStart({ id: q.turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: s.query.trim() || undefined, createdAt: at, ...channelFields(a) });
+    recordTurnStart({ id: q.turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), initialModel: a.model || undefined, initialEffort: a.effort || undefined, cwd: a.runningCwd || undefined, userQuery: s.query.trim() || undefined, createdAt: at, ...channelFields(a) });
     if (a.briefTurnId) closeBriefTurn(a);
     openBriefTurn(a, q);
   };
@@ -3559,7 +3564,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 先建好, ack 里的链接点得开。斜杠命令的行未必露面, 当场接。
     const queued = !isSlash && idleVerdict(a.target) === false;
     pushSeal(a, seal);
-    if (queued) recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: userQuery.trim() || undefined, channel: channel ?? baseOfKey(a.target), speaker });
+    if (queued) recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), initialModel: a.model || undefined, initialEffort: a.effort || undefined, cwd: a.runningCwd || undefined, userQuery: userQuery.trim() || undefined, channel: channel ?? baseOfKey(a.target), speaker });
     else activateDispatch(a, seal);
     // 新消息 = 对话边界: 立刻收掉上一 turn, 新 turn 直接激活、不排队。收口语义见
     // closeBriefTurn: 有正文收入旧气泡, 没正文不写一个字 (绝不因边界结束凭空新发/
@@ -3627,7 +3632,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const fresh = consumeFrom(a);
     const opened = consumeChannel(a, fromCli, fresh);
     const from = fresh ?? a.convFrom;
-    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), cwd: a.runningCwd || undefined, userQuery: query || opened || undefined, origin: consumeOrigin(a), from, ...channelFields(a), ...(query && at ? { createdAt: at } : {}) });
+    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), initialModel: a.model || undefined, initialEffort: a.effort || undefined, cwd: a.runningCwd || undefined, userQuery: query || opened || undefined, origin: consumeOrigin(a), from, ...channelFields(a), ...(query && at ? { createdAt: at } : {}) });
     a.briefTurnId = turnId;
     a.briefBubble = undefined;
     a.briefIsSlash = false;
@@ -4121,7 +4126,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!a.keepaliveTurnId) {
       const turnId = newTurnId();
       a.keepaliveTurnId = turnId;
-      recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), userQuery: text });
+      recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), initialModel: a.model || undefined, initialEffort: a.effort || undefined, userQuery: text });
     }
   };
 
@@ -6131,7 +6136,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!a.keepaliveTurnId) {
       const turnId = newTurnId();
       a.keepaliveTurnId = turnId;
-      recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), userQuery: text });
+      recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), initialModel: a.model || undefined, initialEffort: a.effort || undefined, userQuery: text });
     }
   };
 
