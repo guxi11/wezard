@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+## [2.6.1] - 2026-10-12
+
+### Fixed
+- tmux 消息投递按版本分流: tmux < 3.0 (含 1.8) 使用默认 buffer 并串行执行 load→paste; tmux >= 3.0 使用独立具名 buffer, 保留跨 pane 并发与用户剪贴板。始终投递到指定 pane, 缺失目标不回退到当前 pane; 失败时清理具名 buffer, 版本探测失败允许下次重试。
+
 ## [2.6.0] - 2026-10-12
 
 ### Added
@@ -1046,7 +1051,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.6.0...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.6.1...HEAD
+[2.6.1]: https://github.com/guxi11/wezard/compare/v2.6.0...v2.6.1
 [2.6.0]: https://github.com/guxi11/wezard/compare/v2.5.1...v2.6.0
 [2.5.1]: https://github.com/guxi11/wezard/compare/v2.5.0...v2.5.1
 [2.5.0]: https://github.com/guxi11/wezard/compare/v2.4.1...v2.5.0
