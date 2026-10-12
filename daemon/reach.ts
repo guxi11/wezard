@@ -11,4 +11,12 @@ export const bindChatReach = (r: Reach): void => { other = r; };
 /** `chat:wx_…#tag` / `wx_…` 都认: 剥前缀与 slot。 */
 const bare = (chat: string): string => chat.replace(/^(user|chat|group):/, "").split("#")[0] ?? "";
 
-export const reachable = (client: WSClient, chat: string): boolean => other(bare(chat)) ?? client.isConnected;
+// 多机器人 (bot-mux.ts): 一个企微聊天走哪条长连接。没装 = 单机器人, 就是调用方手里那条。
+type Conn = (bareChatId: string) => WSClient | undefined;
+let conn: Conn = () => undefined;
+export const bindChatConn = (c: Conn): void => { conn = c; };
+
+/** 这个企微聊天归哪条长连接 —— 上传素材 / 等连上这类不带 chatid 的调用要先问它。 */
+export const connFor = (client: WSClient, chat: string): WSClient => conn(bare(chat)) ?? client;
+
+export const reachable = (client: WSClient, chat: string): boolean => other(bare(chat)) ?? connFor(client, chat).isConnected;

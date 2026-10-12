@@ -6,12 +6,12 @@ import { URL } from "node:url";
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
 import { expandHome } from "../shared/paths.js";
-import type { DaemonWs } from "./ws.js";
+import type { BotMux } from "./bot-mux.js";
 import { drainForReload, listPending } from "./pending.js";
 
 interface Ctx {
   cfg: Config;
-  ws: DaemonWs;
+  ws: BotMux;
   log: Logger;
   sourcePath: string;
 }
@@ -40,6 +40,7 @@ const routes: Record<string, Handler> = {
     json(res, 200, { ok: true, wsConnected: ws.client.isConnected });
   },
   "GET /status": (_req, res, _url, { cfg, ws, sourcePath }) => {
+    const bots = ws.bots();
     json(res, 200, {
       ok: true,
       wsConnected: ws.client.isConnected,
@@ -51,6 +52,8 @@ const routes: Record<string, Handler> = {
       uptimeSec: Math.round(process.uptime()),
       sourcePath,
       logFile: expandHome(cfg.daemon.logFile),
+      // 多机器人才有; wsConnected / botId 仍是主机器人的, 单机器人的输出一字不变。
+      ...(bots.length > 1 ? { bots } : {}),
     });
   },
   "GET /pending": (_req, res) => {

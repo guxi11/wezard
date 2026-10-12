@@ -75,6 +75,33 @@ export const baseOfKey = (target: string): string => {
   return h >= 0 ? target.slice(0, h) : target;
 };
 
+// 多机器人: 副机器人收到的聊天, base 带 `~<botId>` (`user:X~b2` / `chat:wr…~b2#slot`) —— 同一个人
+// 私聊两个机器人、同一个群里两个机器人, 落成两个聊天、两套 wizard。主机器人不带后缀, 所以单机器人与
+// 既有数据一个字不变。后缀只在 key 里, 不进名字; 出站时 bot-mux 认出它、剥掉、走那条连接。
+// `~` 不会出现在企微 userid / chatid 里, 也不在 `#slot` 的字符集里。
+export const BOT_SEP = "~";
+/** key 归哪个机器人: "" = 主机器人。 */
+export const botOfKey = (target: string): string => {
+  const b = baseOfKey(target);
+  const i = b.lastIndexOf(BOT_SEP);
+  return i >= 0 ? b.slice(i + 1) : "";
+};
+/** 裸 chatid / principal 挂上机器人后缀 ("" = 主机器人, 原样)。 */
+export const withBot = (id: string, bot: string): string => (bot ? `${id}${BOT_SEP}${bot}` : id);
+/** `X~b2` → { id: "X", bot: "b2" }; 无后缀 bot = ""。 */
+export const splitBot = (bare: string): { id: string; bot: string } => {
+  const i = bare.lastIndexOf(BOT_SEP);
+  return i >= 0 ? { id: bare.slice(0, i), bot: bare.slice(i + 1) } : { id: bare, bot: "" };
+};
+// 内部会话 (记忆整理者) 读全机的收件箱与 md, 多机器人时它不归任何一个机器人: 与任何非内部 key 都不 sameBot,
+// 否则主机器人的 wizard 能 peek / read_chat / rolepage 到别的机器人的记忆提议。单机器人时保持原状 (它算主机器人)。
+// 机器人数是进程启动时的配置 (bots 改了要重启), daemon 与 svr 各自在启动时 bindMultiBot。
+let multiBot = false;
+export const bindMultiBot = (on: boolean): void => { multiBot = on; };
+/** 两个 key 是否同属一个机器人 —— wizard 之间互相看得见、说得上话的唯一前提。 */
+export const sameBot = (a: string, b: string): boolean =>
+  botOfKey(a) === botOfKey(b) && (!multiBot || isInternalKey(a) === isInternalKey(b));
+
 /** Base of daemon-internal sessions (the memory steward): a home that is no chat,
  *  so it never shows in a chat roster, never gets auto-named, never takes a bubble. */
 export const INTERNAL_BASE = "wezard:internal";
@@ -163,8 +190,9 @@ export const headSep = (content: string): string =>
 export interface TagLinker {
   /** 该 wizard 的 rolepage; undefined = 拿不到票据。 */
   urlOf: (target: string) => string | undefined;
-  /** 全局名字 → 已知 wizard 的 target。 */
-  resolve: (name: string) => string | undefined;
+  /** 全局名字 → 已知 wizard 的 target。`from` = 这段话是谁说的 (其 key): 名字落在别的机器人名下
+   *  就当不认识 —— 链接带的是对方的票据, 点开就是别的机器人的整个 rolepage。 */
+  resolve: (name: string, from: string) => string | undefined;
   /** target → 它的全局名字 ("" = 名册里没有)。 */
   nameOf: (target: string) => string;
   /** 它在群里替谁说话 (定时任务执行体 = 日程主人); undefined = 替自己。 */
@@ -200,7 +228,7 @@ export const linkTags = (target: string | undefined, text: string): string => {
   const seen = new Set<string>();
   const link = (whole: string, lead: string, token: string, name: string): string => {
     if (seen.size >= MAX_BODY_LINKS || seen.has(token)) return whole;
-    const t = l.resolve(name);
+    const t = l.resolve(name, target);
     const linked = t ? tagLink(t, token) : token;
     if (linked === token) return whole;
     seen.add(token);
@@ -269,7 +297,7 @@ export const reheadFor = (text: string, dest: string): string => {
   const t = text.trim();
   const m = HEADER_RE.exec(t);
   if (!m) return text;
-  const who = linker?.resolve(m.slice(1).find(Boolean) ?? "");
+  const who = linker?.resolve(m.slice(1).find(Boolean) ?? "", dest);
   const rest = t.slice(m[0].length);
   if (who && isHost(who, dest)) return rest;
   const head = m[0].trimEnd().replace(new RegExp(`${EMO}\\s*`, "gu"), "").replace(/@/g, "").replace(/\s*→\s*/g, ": ");

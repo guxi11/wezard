@@ -23,7 +23,7 @@
 import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { URL } from "node:url";
-import { baseOfKey } from "./session-label.js";
+import { baseOfKey, sameBot } from "./session-label.js";
 import { isMark, isPost, isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, jobProgress, withData, type WorldFactJob, type WorldFacts } from "./world.js";
 import {
@@ -86,6 +86,28 @@ const recentFacts = (f: WorldFacts, cutoff: number): WorldFacts => ({
   wizards: f.wizards.filter((w) => w.busy || Math.max(w.lastActivity, w.bornAt ?? 0) >= cutoff),
   jobs: f.jobs.filter((j) => j.status === "open" || (j.closedAt ?? j.openedAt) >= cutoff),
 });
+
+// 多机器人隔离: 一张票据只看得见与它 (票据 selfTarget) sameBot 的记录与名册 (内部会话在多机器人时谁也看不见)。目录、会话列表、
+// 关系图、搜索、窗口都建在这两份上, 所以别的机器人的角色在这一页上与不存在同形 —— `?role=` 落空就回到
+// 票据自己, 同认不出的名字。没有 target 的记录 (审批卡) 不归谁, 留着; 单机器人时一切同属主机器人, 原样。
+const ofBot = (self: string) => (key: string | undefined): boolean => !key || sameBot(self, key);
+const botRecords = (records: readonly DetailRecord[], self: string): DetailRecord[] =>
+  records.filter((r) => ofBot(self)((r as { target?: string }).target));
+const botFacts = (f: WorldFacts, self: string): WorldFacts => {
+  const mine = ofBot(self);
+  const keep = <V>(o: Readonly<Record<string, V>>): Record<string, V> => Object.fromEntries(Object.entries(o).filter(([k]) => mine(k)));
+  return {
+    ...f,
+    wizards: f.wizards.filter((w) => mine(w.target)),
+    jobs: f.jobs.filter((j) => mine(j.base) && mine(j.owner)).map((j) => ({ ...j, members: j.members.filter((m) => mine(m.target)) })),
+    ...(f.inflight ? { inflight: f.inflight.filter((x) => mine(x.from) && mine(x.to)) } : {}),
+    schedules: f.schedules.filter((x) => mine(x.owner || x.createdBy || x.target)),
+    chatNames: keep(f.chatNames),
+    ...(f.humanNames ? { humanNames: keep(f.humanNames) } : {}),
+    ...(f.weixin ? { weixin: f.weixin.filter((x) => mine(x.base)) } : {}),
+  };
+};
+const viewerOf = (t: Ticket): string => t.selfTarget;
 
 const json = (res: ServerResponse, status: number, body: unknown): void => {
   res.statusCode = status;
@@ -155,13 +177,14 @@ interface View {
 
 /** seen = 落盘的已读记录 (seen-log); 不给 = 已读只活在页面内存里, POST /api/seen 回 ok:false。 */
 export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider, seen?: SeenLog): ChatRoutes => {
-  const getFacts = (): Promise<WorldFacts> =>
+  // 两份源头都按票据的机器人裁 (见 botFacts): 下游拿到的就只有那个机器人的世界。
+  const getFacts = (t: Ticket): Promise<WorldFacts> =>
     Promise.resolve(facts ? facts() : EMPTY_FACTS)
       // 没有消息数据的 wizard 在这里就退场 —— 会话列表、关系图、+N、搜索都只见得到这一份。
-      .then((f) => withData(recentFacts(f, Date.now() - HORIZON_MS), listRecent(), Date.now()))
+      .then((f) => withData(botFacts(recentFacts(f, Date.now() - HORIZON_MS), viewerOf(t)), listRecent(t), Date.now()))
       .catch(() => EMPTY_FACTS);
   // 票据校验 (store.get) 不受此限: 一条老链接照样打得开, 只是看到的是最近 3 天。
-  const listRecent = (): DetailRecord[] => recentRecords(store.list(), Date.now() - HORIZON_MS);
+  const listRecent = (t: Ticket): DetailRecord[] => botRecords(recentRecords(store.list(), Date.now() - HORIZON_MS), viewerOf(t));
 
   const page: SimpleHandler = (_req, res) => {
     res.statusCode = 200;
@@ -254,8 +277,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
   const role: SimpleHandler = (_req, res, url) => {
     const ticket = resolveTicket(store, url);
     if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
-    void getFacts().then((f) => {
-      const records = listRecent();
+    void getFacts(ticket).then((f) => {
+      const records = listRecent(ticket);
       const v = viewOf(records, makeDirectory(records, f), ticket, url);
       if (!v) { json(res, 404, { ok: false, error: "不认识这个 role" }); return; }
       json(res, 200, { ok: true, ...summary(records, f, v.role, url.searchParams.get("session"), landingOf(ticket, v.role), v, sinceOf(url, Date.now())) });
@@ -300,8 +323,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
   const msgs: SimpleHandler = (_req, res, url) => {
     const ticket = resolveTicket(store, url);
     if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
-    void getFacts().then((f) => {
-      const records = listRecent();
+    void getFacts(ticket).then((f) => {
+      const records = listRecent(ticket);
       const dir = makeDirectory(records, f);
       const v = viewOf(records, dir, ticket, url);
       if (!v || !v.conv) { json(res, 200, { ok: true, at: Date.now(), total: 0, truncated: false, msgs: [] }); return; }
@@ -331,9 +354,11 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
 
   // 票据照旧只证明「拿到过一条真链接」—— 任一有效票据可以看任一轮, 与 msgs 同一口径。
   const tool: SimpleHandler = (_req, res, url) => {
-    if (!resolveTicket(store, url)) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
+    const ticket = resolveTicket(store, url);
+    if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
     const r = store.get(url.searchParams.get("turn") ?? "");
-    const html = r && isTurn(r) ? renderToolBody(r, url.searchParams.get("use") ?? "") : undefined;
+    // 别的机器人的轮次与没有同形。
+    const html = r && isTurn(r) && ofBot(viewerOf(ticket))(r.target) ? renderToolBody(r, url.searchParams.get("use") ?? "") : undefined;
     if (html === undefined) { json(res, 404, { ok: false, error: "未找到该工具调用" }); return; }
     json(res, 200, { ok: true, html });
   };
@@ -362,9 +387,10 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
     let f: WorldFacts = EMPTY_FACTS;
     let factsAt = 0;
     const freshFacts = async (): Promise<WorldFacts> => {
-      if (Date.now() - factsAt > FACTS_MS) { f = await getFacts(); factsAt = Date.now(); }
+      if (Date.now() - factsAt > FACTS_MS) { f = await getFacts(ticket); factsAt = Date.now(); }
       return f;
     };
+    const mine = ofBot(viewerOf(ticket));
 
     const sentSig = new Map<string, string>();
     const pushFrag = (frag: MsgFragment): void => {
@@ -376,7 +402,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
     let v: View | undefined;
     const pushRole = async (): Promise<void> => {
       const ff = await freshFacts();
-      const records = listRecent();
+      const records = listRecent(ticket);
       v ??= viewOf(records, makeDirectory(records, ff), ticket, url);
       if (!v) return;
       send("role", summary(records, ff, v.role, url.searchParams.get("session"), landingOf(ticket, v.role), v, sinceOf(url, Date.now())));
@@ -390,7 +416,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
     const pushTurn = (id: string, records: readonly DetailRecord[], dir: Directory, now: number, deep = true): void => {
       if (!v || !v.conv) return;
       const r = store.get(id);
-      if (!r) return;
+      if (!r || !mine((r as { target?: string }).target)) return;
       if (isMark(r)) {
         if (!jobOfKey(v.conv) && !isWizardDm(v.role, v.conv, v.with || undefined, dir) && r.target === markRole(v) && inSpan(v.span)(r.createdAt)) pushFrag(renderMark(r, r.target ?? v.role, dir));
         return;
@@ -416,7 +442,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       if (roleDirty) { roleDirty = false; void pushRole(); }
       if (turnDirty.size) {
         const now = Date.now();
-        const records = listRecent();
+        const records = listRecent(ticket);
         const dir = makeDirectory(records, f);
         for (const id of turnDirty) pushTurn(id, records, dir, now);
         turnDirty.clear();
@@ -429,7 +455,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
 
     const unsub = store.subscribe((rec) => {
       if (!isTurn(rec) && !isMark(rec) && !isPost(rec)) return;
-      if (!rec.target) return;
+      if (!rec.target || !mine(rec.target)) return;
       // 侧栏的预览/时间只在与视角 role 有关的轮次变动时才需要重算。
       const involved = !v || rec.target === v.role || (isTurn(rec) && rec.from?.from === v.role) ||
         (isPost(rec) && !!v.conv && rec.channel === v.conv.slice(2)) ||
@@ -468,8 +494,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
   const world: SimpleHandler = (req, res, url) => {
     const ticket = resolveTicket(store, url);
     if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
-    void getFacts().then((f) => {
-      const records = listRecent();
+    void getFacts(ticket).then((f) => {
+      const records = listRecent(ticket);
       const self = pickRole(makeDirectory(records, f), ticket, url);
       const { at, ...w } = buildWorld(records, f, { base: baseOfKey(self), self }, Date.now());
       const tickets = ticketsByBase();
@@ -491,8 +517,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
   const search: SimpleHandler = (_req, res, url) => {
     const ticket = resolveTicket(store, url);
     if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
-    void getFacts().then((f) => {
-      const records = listRecent();
+    void getFacts(ticket).then((f) => {
+      const records = listRecent(ticket);
       const dir = makeDirectory(records, f);
       const now = Date.now();
       const r = pickRole(dir, ticket, url);
@@ -505,8 +531,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
   const glance: SimpleHandler = (_req, res, url) => {
     const ticket = resolveTicket(store, url);
     if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
-    void getFacts().then((f) => {
-      const records = listRecent();
+    void getFacts(ticket).then((f) => {
+      const records = listRecent(ticket);
       const dir = makeDirectory(records, f);
       const now = Date.now();
       const viewer = pickRole(dir, ticket, url);
@@ -524,9 +550,9 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
   const charter: SimpleHandler = (_req, res, url) => {
     const ticket = resolveTicket(store, url);
     if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
-    void getFacts().then((f) => {
-      const records = store.list();
-      const r = pickRole(makeDirectory(listRecent(), f), ticket, url);
+    void getFacts(ticket).then((f) => {
+      const records = botRecords(store.list(), viewerOf(ticket));
+      const r = pickRole(makeDirectory(listRecent(ticket), f), ticket, url);
       const v = r ? charterView(records, r) : undefined;
       json(res, 200, v ? { ok: true, role: r, ...v } : { ok: true, role: r, none: true });
     });

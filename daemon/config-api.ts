@@ -12,6 +12,8 @@ import {
   type Apply, type Gate, type Resolved,
 } from "../shared/config-meta.js";
 import { z } from "zod";
+import { sameBot } from "../shared/session-label.js";
+import { chatBaseOf } from "./chat-name.js";
 
 type Err = { ok: false; reason: string };
 type Obj = Record<string, unknown>;
@@ -361,3 +363,45 @@ export const tierEvidence = (
   };
   return [...rows.map(line), "(用量按模型统计, 同一模型的档外用量也算在内)"];
 };
+
+// ── 按聊天的配置键 (多机器人隔离) ──────────────────────────────────────
+/** 按聊天的两张表只留与调用方同机器人的 —— 别的机器人的聊天名 / 策略在它眼里不存在。单机器人原样。 */
+export const cfgSeenBy = (cfg: Config, self: string): Config => ({
+  ...cfg,
+  chats: Object.fromEntries(Object.entries(cfg.chats).filter(([, b]) => sameBot(self, b))),
+  chatPolicy: Object.fromEntries(Object.entries(cfg.chatPolicy).filter(([b]) => sameBot(self, b))),
+});
+
+// chatPolicy 的键一律落成 base principal: 聊天名会改, 拿它当键一改名策略就悄悄失效。写名字照收,
+// 换成它此刻指向的 principal; 认不出的拒写 (写错的键静默无效, 比报错难查)。unset 一个盘上原样存在的
+// 键不换 —— 留给清理老写法 / 失效的键。
+// 多机器人: 指向别的机器人的聊天与「没有这个聊天」同形 (`self` = 调用方); 整表写会抹掉别的机器人的
+// 那几行, 有这种行就拒整表写。单机器人时全都 sameBot, 这几道不拦任何东西。
+export const pinChatKeys = (cfg: Config, req: SetReq, self: string): SetReq | { ok: false; reason: string } => {
+  const p = parsePath(req.path);
+  const bad = (k: string) => ({ ok: false as const, reason: `认不出聊天 \`${k}\`: 键写 base principal (\`chat:wr…\` / \`user:…\`) 或聊天名 (/chats)` });
+  const foreignRows = (bases: readonly string[]): boolean => bases.some((b) => !sameBot(self, b));
+  if (p[0] === "chats") {
+    if (p.length === 1) {
+      const vals = req.value && typeof req.value === "object" && !Array.isArray(req.value) ? Object.values(req.value as Record<string, unknown>).map(String) : [];
+      return foreignRows([...Object.values(cfg.chats), ...vals]) ? { ok: false, reason: "chats 整表写会动到你看不见的聊天 —— 逐个写 chats.<名字>" } : req;
+    }
+    const cur = Object.entries(cfg.chats).find(([n]) => n.toLowerCase() === p[1]!.toLowerCase())?.[1];
+    if (cur && !sameBot(self, cur)) return bad(p[1]!);
+    if (typeof req.value === "string" && req.value.trim() && !sameBot(self, req.value.trim())) return bad(req.value.trim());
+    return req;
+  }
+  if (p[0] !== "chatPolicy") return req;
+  if (p.length === 1 && foreignRows(Object.keys(cfg.chatPolicy))) return { ok: false, reason: "chatPolicy 整表写会动到你看不见的聊天 —— 逐个写 chatPolicy.<聊天名>" };
+  if (p.length === 1) {
+    if (req.value === undefined || typeof req.value !== "object" || Array.isArray(req.value)) return req;
+    const pairs = Object.entries(req.value as Record<string, unknown>).map(([k, v]) => [k, chatBaseOf(cfg, k), v] as const);
+    const miss = pairs.find(([, b]) => !b || !sameBot(self, b));
+    return miss ? bad(miss[0]) : { ...req, value: Object.fromEntries(pairs.map(([, b, v]) => [b, v])) };
+  }
+  const key = p[1]!;
+  if (req.op === "unset" && p.length === 2 && key in cfg.chatPolicy) return sameBot(self, key) ? req : bad(key);
+  const base = chatBaseOf(cfg, key);
+  return base && sameBot(self, base) ? { ...req, path: ["chatPolicy", base, ...p.slice(2)].join(".") } : bad(key);
+};
+

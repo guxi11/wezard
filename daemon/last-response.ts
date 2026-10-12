@@ -15,7 +15,9 @@
 // reloads); in dev just avoid reloading mid-conversation when testing.
 import type { WSClient, WsFrame, BaseMessage, WsFrameHeaders } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
-import { parseTagHeader } from "../shared/session-label.js";
+import { parseTagHeader, withBot } from "../shared/session-label.js";
+import { botTagOf } from "./bot-mux.js";
+import { connFor } from "./reach.js";
 
 // Strip `chat:` / `user:` prefix to get the bare chatid/userid that
 // `sendMessage` takes. Chat ids and user ids don't collide in practice (group
@@ -33,8 +35,10 @@ const bareFromFrame = (frame: WsFrame<BaseMessage> | WsFrameHeaders | undefined)
   // frames have no chat context and we just skip recording.
   const body = (frame as WsFrame<BaseMessage> | undefined)?.body;
   if (!body) return "";
-  if (body.chattype === "group" && body.chatid) return body.chatid;
-  if (body.from?.userid) return body.from.userid;
+  // 副机器人收到的帧, 聊天键带 `~<bot>` —— 与会话 key 剥出来的 chatid (sendMessage 那一路) 对齐。
+  const bot = botTagOf(frame) || botTagOf(body);
+  if (body.chattype === "group" && body.chatid) return withBot(body.chatid, bot);
+  if (body.from?.userid) return withBot(body.from.userid, bot);
   return "";
 };
 
@@ -105,14 +109,16 @@ export const installResponseTracker = (client: WSClient, log?: Logger, ownTransp
   // "WebSocket not connected", 那条消息就永久丢了 (近两天十几条都是这么没的)。主动推送
   // 不赶这几秒: 先等连上再发, 等不到再照常失败。
   const CONNECT_WAIT_MS = 30_000;
-  const untilConnected = async (): Promise<void> => {
-    for (const t0 = Date.now(); !client.isConnected && Date.now() - t0 < CONNECT_WAIT_MS; ) {
+  // 等的是这个聊天归属的那条连接 (多机器人时不一定是主机器人)。
+  const untilConnected = async (chatid: string): Promise<void> => {
+    const conn = connFor(client, chatid);
+    for (const t0 = Date.now(); !conn.isConnected && Date.now() - t0 < CONNECT_WAIT_MS; ) {
       await new Promise((r) => setTimeout(r, 500));
     }
   };
 
   client.sendMessage = async (chatid, body) => {
-    if (!ownTransport(chatid)) await untilConnected();
+    if (!ownTransport(chatid)) await untilConnected(chatid);
     // Only markdown pushes carry quotable text (and are the empty-message
     // risk class); template_card / media bubbles pass through untouched.
     if ((body as { msgtype?: string }).msgtype === "markdown") {

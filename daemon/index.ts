@@ -5,14 +5,14 @@ import { timingSafeEqual } from "node:crypto";
 import { loadOrCreateSvrToken } from "../shared/svr-token.js";
 import { DAEMON_TOKEN_FILE, DAEMON_TOKEN_HEADER } from "../shared/daemon-token.js";
 import { homedir } from "node:os";
-import { TIERS, loadConfig } from "../shared/config.js";
+import { TIERS, defaultChatFor, loadConfig } from "../shared/config.js";
 import { makeLogger } from "../shared/log.js";
 import { clipLine, sleep, truncate } from "../shared/std.js";
 import { patchJsonc } from "../shared/config-writer.js";
 import { EFFORTS, parseEffort } from "../shared/effort.js";
 import { bindCliBackends, projectDirsFor, type CliBackendName } from "../shared/cli-backends.js";
 import { bindCodexStateDir } from "../shared/codex.js";
-import { startWs } from "./ws.js";
+import { startMux } from "./bot-mux.js";
 import { startWeixin } from "./weixin.js";
 import { installWeixinPort } from "./weixin-port.js";
 import { bindWxCommands, makeOnBound, makeWxCommands, routeSendMedia, wecomBindSink, weixinSendMedia, wxAdmins, wxRoutes } from "./weixin-cmd.js";
@@ -22,7 +22,7 @@ import { aibotSendMedia } from "./aibot-media.js";
 import { startNetWatch } from "./net-watch.js";
 import { startHttp, json, readBody, type Handler } from "./http.js";
 import { parsePath } from "../shared/config-meta.js";
-import { applyHot, patchedTop, configGet, fromLegacy, legacyGet, pickTier, planSet, renderPlan, tierEvidence, type Plan, type SetReq, type TierUsage, type UsageTotals } from "./config-api.js";
+import { applyHot, cfgSeenBy, patchedTop, pinChatKeys, configGet, fromLegacy, legacyGet, pickTier, planSet, renderPlan, tierEvidence, type Plan, type SetReq, type TierUsage, type UsageTotals } from "./config-api.js";
 import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } from "./usage.js";
 import { installInboundRouter } from "./inbound.js";
 import { loadMirrorStore } from "./mirror-store.js";
@@ -55,7 +55,7 @@ import {
 import { openTaskRegistry } from "./task-registry.js";
 import { describeTrigger, nextFire, parseTrigger, WHEN_HELP } from "../shared/trigger.js";
 import { isQuiet, slugify, uniqueId } from "../shared/task-file.js";
-import { baseOfKey, bindTagLinker, headed, ownHead, isInternalKey, keyOf, linkTags, normalizeTag, speakerHead, tagFromCwd, tagHead, tagLink, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
+import { baseOfKey, bindMultiBot, bindTagLinker, botOfKey, headed, ownHead, isInternalKey, keyOf, linkTags, normalizeTag, sameBot, speakerHead, tagFromCwd, tagHead, tagLink, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
 import { appendEpisode, clipForCharter, cwdOfMd, episodePath, inboxPath, mdsOf, proposedCwds, memoryPath, memoryRoot, proposeMemory, readMemory, type MemoryScope } from "./wizard-memory.js";
 import { retireStewardTask, startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
 import type { Asker, TurnFrom } from "../shared/detail-store.js";
@@ -126,6 +126,7 @@ const fatalExit = (msg: string, extra?: Record<string, unknown>): never => {
 
 const main = async (): Promise<void> => {
   const { config: cfg, sourcePath } = loadConfig();
+  bindMultiBot(cfg.bots.length > 0);
   const log = makeLogger({
     logFile: cfg.daemon.logFile,
     logLevel: cfg.daemon.logLevel,
@@ -166,7 +167,9 @@ const main = async (): Promise<void> => {
   initDetailPersistence(cfg.daemon.stateDir, log.child({ mod: "detail" }));
   configureRemoteForward(cfg.daemon.detailRemoteBase, cfg.daemon.detailRemoteToken);
 
-  const ws = startWs(cfg, log);
+  // 一个或多个企微机器人 (bot + bots): 对下面所有模块只露主机器人那个 client, 分流在 bot-mux 里。
+  // 必须先于 weixin-port / response-tracker 建好 —— 它们包在 mux 外层。
+  const ws = startMux(cfg, log);
   // 切网 (换 WiFi / VPN 起停) 后原地重建 WS, 等价于自动做了一次 reload 的
   // 联通性部分 — 但保留全部内存态 (graph 运行、pending 长轮询、镜像绑定),
   // 也不依赖 launchd/systemd 的 respawn 策略 (nohup fallback 没有 supervisor)。
@@ -228,9 +231,9 @@ const main = async (): Promise<void> => {
   // 名册在下面的 mirror 块里才绑 (bindWizardStore) —— 这里全走 wizardStore() 惰性取。
   bindTagLinker({
     urlOf: (t) => chatUrlFor(cfg.daemon, t),
-    resolve: (name) => {
+    resolve: (name, from) => {
       const t = wizardStore()?.byName(name)?.target;
-      return t && known(t) ? t : undefined;
+      return t && known(t) && sameBot(from, t) ? t : undefined;
     },
     nameOf: (t) => settleName(wizardStore(), chatNameOf(cfg, t), t),
     voiceOf: (t) => wizardStore()?.get(t)?.voiceOf,
@@ -450,7 +453,8 @@ const main = async (): Promise<void> => {
         return;
       }
       const sessions = await scanClaudeSessions();
-      const hit = sessions.find((s) => s.sessionId === sessionId);
+      // 已绑在别的机器人聊天上的会话与不存在同形。
+      const hit = sessions.find((s) => s.sessionId === sessionId && ((t) => !t || sameBot(target, t))(m.targetForSession(s.sessionId)));
       if (!hit) {
         json(res, 404, { ok: false, reason: `session ${sessionId} not found among live tmux sessions` });
         return;
@@ -496,12 +500,12 @@ const main = async (): Promise<void> => {
         return;
       }
       const wantChat = (body.chat ?? "").toString().trim();
-      const base = wantChat ? chatBaseOf(cfg, wantChat) : baseOfKey(self);
+      const base = ((b) => (b && sameBot(self, b) ? b : ""))(wantChat ? chatBaseOf(cfg, wantChat) : baseOfKey(self));
       if (!base) {
         json(res, 404, {
           ok: false,
           reason: `unknown chat '${wantChat}' — only NAMED chats can be spawned into; have someone run \`/name ${normChatName(wantChat) || "<name>"}\` there first`,
-          candidates: listChatNames(cfg).map((c) => c.name),
+          candidates: chatNamesFor(self),
         });
         return;
       }
@@ -599,6 +603,9 @@ const main = async (): Promise<void> => {
     // 地址语义见 mirror-bridge.resolvePeerTag: "" = 本聊天的默认 wizard (它是正当的
     // 协作对象 ——「回去跟主会话汇报」); 裸 `fix` 先找本聊天、再退回全机唯一的那个;
     // `daily#fix` 直接指名聊天, 不要求任何唯一性。
+    // 多机器人隔离: 别的机器人名下的 wizard 由 resolvePeerTag 当作查无此名 (同形、candidates 只列
+    // 同机器人的) —— 点名寻址 (peek / tell / wait / stop / clone from / handoff / set_model / pending /
+    // schedule) 全过这一道。
     const resolvePeer = (
       self: string,
       tag: string,
@@ -607,6 +614,9 @@ const main = async (): Promise<void> => {
       if (r.ok) return r;
       return { ok: false, status: 404, reason: r.reason, candidates: r.candidates };
     };
+    /** 聊天名候选只列与调用方同机器人的 —— 别的机器人的聊天名也是它的存在。指名别的机器人的聊天,
+     *  各路由一律走它们自己「认不出这个聊天」的分支 (同状态码同原话), 不说「那边有, 但归别人」。 */
+    const chatNamesFor = (self: string): string[] => listChatNames(cfg).filter((c) => sameBot(self, c.base)).map((c) => c.name);
 
     // ── Chat naming ────────────────────────────────────────────────────
     // A WeCom chat's identity is an unreadable `chat:wrkS…` id. Naming it is
@@ -615,7 +625,7 @@ const main = async (): Promise<void> => {
     http.register("POST /chats/list", async (req, res) => {
       const { self } = await readPeerBody(req);
       if (self) ensureChatNames(self);
-      const roster = self ? m.chatRoster(self) : listChatNames(cfg).map((c) => ({ ...c, self: false, targets: [] }));
+      const roster = self ? m.chatRoster(self).filter((c) => sameBot(self, c.base)) : listChatNames(cfg).map((c) => ({ ...c, self: false, targets: [] }));
       json(res, 200, {
         ok: true,
         self,
@@ -958,6 +968,11 @@ const main = async (): Promise<void> => {
     ): Promise<{ ok: true; target: string; slot: string } | { ok: false; status: number; body: Record<string, unknown> }> => {
       const asked = normalizeTag(want);
       const clash = asked ? wizards.byName(asked) : undefined;
+      // 名字全机唯一, 撞上别的机器人的 wizard 照样拒 —— 但不顶掉它、不复用它的槽, 也不报它的死活:
+      // 那边的 wizard 在这个机器人眼里不存在, 只剩「名字被占了」这一个事实。
+      if (clash && !sameBot(base, clash.target)) {
+        return { ok: false, status: 409, body: { ok: false, reason: `名字 '.${clash.name}' 已被占用 (名字全局唯一) —— 换个名字`, name: clash.name } };
+      }
       const bound = !!clash && m.chatTargets(baseOfKey(clash.target)).includes(clash.target);
       if (clash && !bound && baseOfKey(clash.target) === base && tagOfKey(clash.target)) {
         return { ok: true, target: clash.target, slot: tagOfKey(clash.target) };
@@ -1022,7 +1037,7 @@ const main = async (): Promise<void> => {
       // 认不出的名字原样报回去, 绝不静默跳过 ——「发了但没人收到」是这类工具最难查
       // 的故障; 有一个收件人错了整条就不发, 部分送达比不送达更难对账。
       const refs = (b.to ?? []).map((r) => (r ?? "").trim()).filter(Boolean);
-      const bad = refs.filter((r) => !chatBaseOf(cfg, r));
+      const bad = refs.filter((r) => ((b) => !b || !sameBot(self, b))(chatBaseOf(cfg, r)));
       if (bad.length) {
         json(res, 400, { ok: false, reason: `认不出这些聊天: ${bad.join(", ")} (wizard_roster 每行有 home 聊天名, 人侧 /chats; 没起名的聊天寻址不到)` });
         return;
@@ -1058,7 +1073,7 @@ const main = async (): Promise<void> => {
       ensureChatNames(self);
       const ref = (b.to ?? "").trim();
       const dest = ref ? chatBaseOf(cfg, ref) : channelOf(self);
-      if (!dest) { json(res, 400, { ok: false, reason: `认不出聊天: ${ref} (wizard_roster 每行有 home 聊天名, 人侧 /chats; 没起名的聊天寻址不到)` }); return; }
+      if (!dest || !sameBot(self, dest)) { json(res, 400, { ok: false, reason: `认不出聊天: ${ref} (wizard_roster 每行有 home 聊天名, 人侧 /chats; 没起名的聊天寻址不到)` }); return; }
       const muted = topOnlyMuted(self, [dest]);
       if (muted) { json(res, 409, muted); return; }
       const plan = media.plan(dest, { path, ...(b.kind ? { kind: b.kind } : {}) });
@@ -1136,7 +1151,8 @@ const main = async (): Promise<void> => {
       const [roleRef, chatRef, targetRef, sinceRef, untilRef] = [b.role, b.chat, b.with, b.since, b.until].map((x) => (x ?? "").toString().trim());
       // 什么都没给 = 调用方这一轮所在的群; 只给 target = 调用方与它的往来。
       const base = chatRef ? chatBaseOf(cfg, chatRef) : roleRef || targetRef ? "" : channelOf(self);
-      if (chatRef && !base) { json(res, 404, { ok: false, reason: `认不出聊天 '${chatRef}' (wizard_roster 每行有 home 聊天名, 人侧 /chats)` }); return; }
+      // 别的机器人的聊天与认不出同形 (不说它在)。
+      if (chatRef && (!base || !sameBot(self, base))) { json(res, 404, { ok: false, reason: `认不出聊天 '${chatRef}' (wizard_roster 每行有 home 聊天名, 人侧 /chats)` }); return; }
       const role = roleRef ? logRole(self, roleRef) : targetRef ? { name: displayName(self), target: self } : undefined;
       const target = targetRef ? logRole(self, targetRef) : undefined;
       const since = sinceRef ? parseWhen(sinceRef, now) : undefined;
@@ -1148,7 +1164,8 @@ const main = async (): Promise<void> => {
       const limit = Math.min(Math.max(Number(b.limit ?? 30) || 30, 1), 200);
       const per = Math.min(Math.max(Number(b.per ?? 500) || 500, 40), 4000);
       const pinned = new Set([self, role?.target, target?.target]);
-      const all = m.transcripts();
+      // 只读与调用方同机器人的会话 —— 别的机器人那边的往来连条数都不该露出来。
+      const all = m.transcripts().filter((t) => sameBot(self, t.target));
       // 两方之间的话只可能落在这两方里的 wizard 自己的 transcript 里 (人没有 transcript)
       // —— 不必去翻别的会话, 「往回还有没有」也因此答得准。
       const between = [role?.target, target?.target].filter((t): t is string => !!t);
@@ -1538,7 +1555,8 @@ const main = async (): Promise<void> => {
       let target: string | undefined;
       if (pane) {
         target = m.targetForPane(pane);
-        if (!target) { json(res, 404, { ok: false, reason: `no mirror session bound to pane ${pane}` }); return; }
+        // 别的机器人的 pane 与没绑定同形 —— pane 号是另一条绕过 resolvePeer 的寻址。
+        if (!target || !sameBot(self, target)) { json(res, 404, { ok: false, reason: `no mirror session bound to pane ${pane}` }); return; }
       } else {
         // 不点名不能落成「本聊天的默认 wizard」(resolvePeer 对 "" 的语义): 交接是把人家的
         // 上下文清掉重开, 一个漏传的参数不该把群管家交接掉。不点名的交接只能是交接自己。
@@ -1698,8 +1716,9 @@ const main = async (): Promise<void> => {
     };
     setInterval(() => { try { nudgeTick(); } catch (e) { log.warn({ err: (e as Error).message }, "accept nudge failed"); } }, NUDGE_TICK_MS).unref();
     /** `who` = 这次变动的当事人 (见 hears): 不给 = 聊天自己的事 (改名), 全群都听。 */
+    // 听众只在主角那个聊天里 (同 base ⇒ 同机器人); sameBot 再写一遍是隔离的明文, 不靠 key 的拼法兜着。
     const postRoster = (base: string, except: readonly string[], n: Notice, who?: Subject): void =>
-      notices.post(chatAudience(m.chatTargets(base), base, except).filter(who ? hears(who) : () => true), n);
+      notices.post(chatAudience(m.chatTargets(base), base, except).filter((t) => sameBot(base, t)).filter(who ? hears(who) : () => true), n);
     /** 注册表里的当事人。要在 forget 抹掉记录之前取; 没有记录 = 谁也不告诉。 */
     const subjectOf = (w: WizardRecord | undefined): Subject => (w
       ? { parent: w.parent, description: w.description, owners: jobs.all().filter((j) => j.status === "open" && j.members.some((x) => x.target === w.target)).map((j) => j.owner) }
@@ -1876,7 +1895,7 @@ const main = async (): Promise<void> => {
           const loadError = tasks.errors()[x.id];
           return {
             id: x.id,
-            target: x.target || (cfg.defaultChat ?? ""),
+            target: x.target || defaultChatFor(cfg, x.owner || (cfg.defaultChat ?? "")),
             when: describeTrigger(x.trigger),
             nextAt: nextFire(x.trigger, sinceOf(st), nowDate),
             lastFired: st.lastFired,
@@ -1927,8 +1946,8 @@ const main = async (): Promise<void> => {
     /** 自己的地址 = 全局名字, 与住在哪个群无关。 */
     const selfAddress = (target: string): string => settleName(wizards, chatNameOf(cfg, target), target);
 
-    const sharedMemory = (scope: MemoryScope, key: string): string => {
-      const path = memoryPath(cfg.daemon.stateDir, scope, key);
+    const sharedMemory = (scope: MemoryScope, key: string, bot = ""): string => {
+      const path = memoryPath(cfg.daemon.stateDir, scope, key, bot);
       return clipForCharter(readMemory(path), path);
     };
 
@@ -1963,7 +1982,8 @@ const main = async (): Promise<void> => {
         // 最近动过的排前面: 名册只点名前几个, 截掉的该是早就停了的那些。
         // 没有 transcript 的冷记录按 bornAt 算, 刚生下还没开口的照样在。
         siblings: m.chatTargets(baseOfKey(target))
-          .filter((t) => t !== target)
+          // 同 base 即同机器人; 显式再滤一道, 宪章名册的隔离不依赖 key 的拼法。
+          .filter((t) => t !== target && sameBot(target, t))
           .map((t) => [t, Math.max(lastTouched(t), wizards.get(t)?.bornAt ?? 0)] as const)
           .filter(([, at]) => Date.now() - at <= ROSTER_FRESH_MS)
           .sort((x, y) => y[1] - x[1])
@@ -1973,7 +1993,7 @@ const main = async (): Promise<void> => {
         chatMemory: sharedMemory("chat", baseOfKey(target)),
         workspaceMemory: (() => {
           const cwd = o.cwd || m.getCwd(target).runningCwd || m.getCwd(target).defaultCwd;
-          return cwd ? sharedMemory("workspace", cwd) : "";
+          return cwd ? sharedMemory("workspace", cwd, botOfKey(target)) : "";
         })(),
         steward: !tagOfKey(target),
         stewardBudget: chatPolicyOf(cfg, target).stewardBudget,
@@ -2038,10 +2058,11 @@ const main = async (): Promise<void> => {
       try { ensureChatNames(cfg.defaultChat ?? ""); } catch (e) { log.warn({ err: (e as Error).message }, "boot auto-name failed"); }
     }, 15_000).unref();
 
+    // 家谱只列与观察者同机器人的 (跨机器人的分身生不出来, 这是给老数据 / 手改注册表兜的底)。
     const kinOf = (self: string, all: readonly WizardRecord[], target: string) => ({
-      parent: wizards.get(target)?.parent ? briefOf(self, wizards.get(target)!.parent!) : undefined,
-      ancestors: ancestorsOf(all, target).map((t) => briefOf(self, t)),
-      clones: childrenOf(all, target).map((w) => briefOf(self, w.target)),
+      parent: ((p) => (p && sameBot(self, p) ? briefOf(self, p) : undefined))(wizards.get(target)?.parent),
+      ancestors: ancestorsOf(all, target).filter((t) => sameBot(self, t)).map((t) => briefOf(self, t)),
+      clones: childrenOf(all, target).filter((w) => sameBot(self, w.target)).map((w) => briefOf(self, w.target)),
     });
 
     const identityOf = (self: string, target: string) => {
@@ -2094,8 +2115,9 @@ const main = async (): Promise<void> => {
         };
       });
       const seen = new Set(live.map((r) => r.target));
+      // live 已由 peers (同 base) / foreignPeers (sameBot) 收窄; 冷记录在这里按机器人滤。
       const cold = all
-        .filter((w) => !seen.has(w.target))
+        .filter((w) => !seen.has(w.target) && sameBot(self, w.target))
         .map((w) => ({
           ...briefOf(self, w.target),
           target: w.target,
@@ -2346,8 +2368,10 @@ const main = async (): Promise<void> => {
         const key = scope === "chat" ? baseOfKey(self) : (m.getCwd(self).runningCwd || m.getCwd(self).defaultCwd);
         if (!key) { json(res, 400, { ok: false, reason: "这个 wizard 没有工作区, 记不了 workspace 记忆" }); return; }
         if (!note && !forget) { json(res, 400, { ok: false, reason: "note 和 forget 至少给一个" }); return; }
-        const path = memoryPath(cfg.daemon.stateDir, scope as MemoryScope, key);
-        const queued = proposeMemory(inboxPath(cfg.daemon.stateDir, scope as MemoryScope, key), {
+        // 工作区记忆按机器人分份 (见 wizard-memory.fileOf); chat 的 key 本身就带机器人。
+        const bot = botOfKey(self);
+        const path = memoryPath(cfg.daemon.stateDir, scope as MemoryScope, key, bot);
+        const queued = proposeMemory(inboxPath(cfg.daemon.stateDir, scope as MemoryScope, key, bot), {
           at: Date.now(),
           by: selfAddress(self),
           ...(scope === "workspace" ? { cwd: key } : {}),
@@ -2454,12 +2478,12 @@ const main = async (): Promise<void> => {
         log.info({ self, slept: idle.map((pp) => pp.target) }, "clone cap: idle clones put to sleep");
       }
       const wantChat = (b.chat ?? "").toString().trim();
-      const base = wantChat ? chatBaseOf(cfg, wantChat) : baseOfKey(self);
+      const base = ((b) => (b && sameBot(self, b) ? b : ""))(wantChat ? chatBaseOf(cfg, wantChat) : baseOfKey(self));
       if (!base) {
         return { status: 404, body: {
           ok: false,
           reason: `unknown chat '${wantChat}' — 只有起过名字的聊天能被指名; 让那边先 /name`,
-          candidates: listChatNames(cfg).map((c) => c.name),
+          candidates: chatNamesFor(self),
         } };
       }
       const askedName = String(b.name ?? b.tag ?? "");
@@ -2576,7 +2600,7 @@ const main = async (): Promise<void> => {
       const r = resolvePeer(self, addrOf(b));
       // 有身份没会话 (冷记录 / 生到一半的僵尸): resolvePeer 够不着它, 但收它不需要
       // 会话 —— end 视为早已结束, forget 删掉记录、腾出名字。interrupt 无从谈起。
-      const found = r.ok || r.candidates?.length ? undefined : wizards.byName(addrOf(b));
+      const found = r.ok || r.candidates?.length ? undefined : ((w) => (w && sameBot(self, w.target) ? w : undefined))(wizards.byName(addrOf(b)));
       const cold = found && !m.chatTargets(baseOfKey(found.target)).includes(found.target) ? found : undefined;
       if (cold && (b.mode ?? "end") === "end") {
         const detached = b.forget ? forgetWizard(cold.target) : [];
@@ -2817,7 +2841,7 @@ const main = async (): Promise<void> => {
           openedAt: j.openedAt,
           ...jobs.tally(j.id),
           ...(j.maxTurns ? { budget: `${j.turns ?? 0}/${j.maxTurns}` } : {}),
-          members: j.members.map((mm) => ({
+          members: j.members.filter((mm) => sameBot(self, mm.target)).map((mm) => ({
             address: peerAddress(cfg, self, mm.target),
             role: mm.role ?? "exec",
             task: mm.task.split("\n")[0] ?? "",
@@ -2855,6 +2879,8 @@ const main = async (): Promise<void> => {
         if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
         target = r.target;
       }
+      // owner = self; resolvePeer 已拦住别的机器人的名字, 这一道是给以后别的取 target 的路兜底。
+      if (!sameBot(self, target)) { json(res, 404, { ok: false, reason: `no wizard named '.${tag}' — wizard_roster lists every name` }); return; }
       // 到点是新建还是续用, 在**排班时**就定死。两条都指向新建:
       //   · 没点名 wizard —— 定时的 prompt 本就要求零上下文自洽, 没理由挑一个会话挤进去;
       //   · prompt 自己就在说「建两个 wizard 去干 xxx」—— 这时 tag 只是「在谁的聊天/
@@ -2881,10 +2907,10 @@ const main = async (): Promise<void> => {
       const now = new Date();
       const errs = tasks.errors();
       const rows = tasks.list()
-        .filter((t) => !mineOnly || ownerOf(t) === self)
+        .filter((t) => sameBot(self, ownerOf(t)) && (!mineOnly || ownerOf(t) === self))
         .map((t) => ({
           ...renderTask(t, tasks.stateOf(t.id), now, errs[t.id]),
-          address: peerAddress(cfg, self, t.target || (cfg.defaultChat ?? "")),
+          address: peerAddress(cfg, self, t.target || defaultChatFor(cfg, ownerOf(t))),
           owner: peerAddress(cfg, self, ownerOf(t)),
         }));
       // 加载失败的那些没有记录可回显, 但必须出现在列表里 —— 否则 wizard 改错了
@@ -2900,6 +2926,9 @@ const main = async (): Promise<void> => {
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       const id = ((body as { id?: string }).id ?? "").toString().trim();
       if (!id) { json(res, 400, { ok: false, reason: "id required (list_tasks 里那个 id)" }); return; }
+      // 别的机器人的日程与不存在同形。
+      const rec = tasks.get(id);
+      if (rec && !sameBot(self, ownerOf(rec))) { json(res, 404, { ok: false, reason: `no schedule with id ${id}` }); return; }
       const state = tasks.stateOf(id);
       const gone = tasks.remove(id);
       if (!gone) { json(res, 404, { ok: false, reason: `no schedule with id ${id}` }); return; }
@@ -2983,10 +3012,14 @@ const main = async (): Promise<void> => {
       const others = hits.filter((h) => h.target !== c.self);
       others.forEach((h) => notices.post([h.target], `${c.what} 改动了你的宪章 (系统提示, 变了的段: ${h.sections.join(" / ")}); 已在跑的你看不见新规矩 —— ${ask}${lag(h.target)}`));
       const mine = hits.find((h) => h.target === c.self);
+      // 提醒照旧全机发 (各收各的); 回给调用方的名单与人数只含它看得见的 (sameBot) —— 别的机器人的 wizard
+      // 连名字带个数都不报。没有调用方 (人 /name、自动补名) = 主机器人视角, 单机器人时就是全部。
+      const shown = hits.filter((h) => sameBot(c.self ?? "", h.target));
+      const shownOthers = shown.filter((h) => h.target !== c.self);
       return [
         "",
-        `⚠ 这次改动进了宪章 (系统提示): 已在跑的 wizard 看不见, 要 handoff 才换上。受影响 ${hits.length} 个: ${hits.map((h) => displayName(h.target)).join(" ")}`,
-        ...(others.length ? [`已给其余 ${others.length} 个各挂一条提醒 (随它们下一条消息到), 让它们${ask}`] : []),
+        `⚠ 这次改动进了宪章 (系统提示): 已在跑的 wizard 看不见, 要 handoff 才换上。受影响 ${shown.length} 个: ${shown.map((h) => displayName(h.target)).join(" ")}`,
+        ...(shownOthers.length ? [`已给其余 ${shownOthers.length} 个各挂一条提醒 (随它们下一条消息到), 让它们${ask}`] : []),
         ...(mine ? [`**你自己也在其中** (变了的段: ${mine.sections.join(" / ")}): 这一轮收尾后${ask}${lag(mine.target)}`] : []),
       ].join("\n");
     };
@@ -3009,35 +3042,21 @@ const main = async (): Promise<void> => {
       } catch (e) { return { r, note: Promise.resolve(fail(e)) }; }
     };
 
+    /** 配置的调用方: 只认 sessionId / pane, 不回落 defaultChat (同 config_set 的 caller)。认不出 = "" (主机器人)。 */
+    const configCaller = (b: { sessionId?: string; tmuxPane?: string }): string =>
+      (b.sessionId?.trim() && m.targetForSession(b.sessionId.trim())) || (b.tmuxPane?.trim() && m.targetForPane(b.tmuxPane.trim())) || "";
     // POST /config/get —— 新 MCP 带 `path` (可空) 拿渲染好的文本; 老 MCP 带 `key` 拿 {key, value}。
     http.register("POST /config/get", async (req, res) => {
-      const body = (await readBody(req)) as { key?: string; path?: string };
-      if (typeof body.key === "string") { const r = legacyGet(cfg, body.key); json(res, r.ok ? 200 : 400, r); return; }
+      const body = (await readBody(req)) as { key?: string; path?: string; sessionId?: string; tmuxPane?: string };
+      const seen = cfgSeenBy(cfg, configCaller(body));
+      if (typeof body.key === "string") { const r = legacyGet(seen, body.key); json(res, r.ok ? 200 : 400, r); return; }
       // chatPolicy.<聊天名>… 换成它指向的 principal 再查 (同 config_set 的 pinChatKeys); 认不出的原样查。
+      // 名字按调用方看得见的表解析: 别的机器人的聊天名认不出, principal 写法在 seen 里也查无此键。
       const p = parsePath(body.path);
-      const base = p[0] === "chatPolicy" && p[1] ? chatBaseOf(cfg, p[1]) : "";
-      const r = configGet(cfg, sourcePath, base ? ["chatPolicy", base, ...p.slice(2)].join(".") : body.path, configEvidence);
+      const base = p[0] === "chatPolicy" && p[1] ? chatBaseOf(seen, p[1]) : "";
+      const r = configGet(seen, sourcePath, base ? ["chatPolicy", base, ...p.slice(2)].join(".") : body.path, configEvidence);
       json(res, r.ok ? 200 : 400, r);
     });
-
-    // chatPolicy 的键一律落成 base principal: 聊天名会改, 拿它当键一改名策略就悄悄失效。写名字照收,
-    // 换成它此刻指向的 principal; 认不出的拒写 (写错的键静默无效, 比报错难查)。unset 一个盘上原样存在的
-    // 键不换 —— 留给清理老写法 / 失效的键。
-    const pinChatKeys = (req: SetReq): SetReq | { ok: false; reason: string } => {
-      const p = parsePath(req.path);
-      if (p[0] !== "chatPolicy") return req;
-      const bad = (k: string) => ({ ok: false as const, reason: `认不出聊天 \`${k}\`: 键写 base principal (\`chat:wr…\` / \`user:…\`) 或聊天名 (/chats)` });
-      if (p.length === 1) {
-        if (req.value === undefined || typeof req.value !== "object" || Array.isArray(req.value)) return req;
-        const pairs = Object.entries(req.value as Record<string, unknown>).map(([k, v]) => [k, chatBaseOf(cfg, k), v] as const);
-        const miss = pairs.find(([, b]) => !b);
-        return miss ? bad(miss[0]) : { ...req, value: Object.fromEntries(pairs.map(([, b, v]) => [b, v])) };
-      }
-      const key = p[1]!;
-      if (req.op === "unset" && p.length === 2 && key in cfg.chatPolicy) return req;
-      const base = chatBaseOf(cfg, key);
-      return base ? { ...req, path: ["chatPolicy", base, ...p.slice(2)].join(".") } : bad(key);
-    };
 
     // POST /config/set —— 口令门见 `guarded`。分级在这里而不在 hook: `card` 项由守护进程
     // 自己推确认卡, 所以 danger.skipAll / ⏱窗口 都放不掉它。卡等 CONFIRM_INLINE_MS 还没人点
@@ -3047,7 +3066,7 @@ const main = async (): Promise<void> => {
       const legacy = typeof body.key === "string";
       const asked = legacy ? fromLegacy(body.key!, body.value, body.action) : body;
       if ("ok" in asked) { json(res, 400, asked); return; }
-      const ask = pinChatKeys(asked);
+      const ask = pinChatKeys(cfg, asked, configCaller(body));
       if ("ok" in ask) { json(res, 400, ask); return; }
       const reply = (pl: Plan, text: string, extra: Record<string, unknown> = {}): void =>
         json(res, 200, legacy
@@ -3135,6 +3154,9 @@ const main = async (): Promise<void> => {
       };
       const bad = validateSpec(spec);
       if (bad) { json(res, 400, { ok: false, reason: bad }); return; }
+      // 节点是 base 下的 tag, 构造上与调用方同机器人; 这一道防的是 tag 里夹带别的机器人的 key。
+      const xnode = spec.nodes.find((n) => !sameBot(self, keyOf(spec.base, n.tag)));
+      if (xnode) { json(res, 400, { ok: false, reason: `node.tag \`${xnode.tag}\` 不是一个合法的 tag` }); return; }
       const graphLog = log.child({ mod: "graph", base: spec.base });
       // 每一步、每条进度都在发起这次 run 的那一轮的频道里: 人在群里叫它发起的才进群,
       // 私聊轮里发起的整场只进 rolepage —— 步骤不带频道就等于在节点的 home 群里开口。
@@ -3174,9 +3196,12 @@ const main = async (): Promise<void> => {
     });
 
     http.register("POST /graph/stop", async (req, res) => {
-      const body = (await readBody(req)) as Partial<{ runId: string }>;
+      const body = (await readBody(req)) as Partial<{ runId: string; target: string; sessionId: string; tmuxPane: string }>;
       const runId = (body.runId ?? "").trim();
       if (!runId) { json(res, 400, { ok: false, reason: "runId required" }); return; }
+      // 别的机器人那边跑的流水线与不存在同形。
+      const run = getRun(runId);
+      if (run && !sameBot(resolveSelf(body), run.base)) { json(res, 404, { ok: false, reason: `run ${runId} not found or already finished` }); return; }
       const stopped = stopRun(runId);
       json(res, stopped ? 200 : 404, stopped ? { ok: true, runId } : { ok: false, reason: `run ${runId} not found or already finished` });
     });
@@ -3206,6 +3231,9 @@ const main = async (): Promise<void> => {
     // 跑完自动收掉。只有排班时点名了某个 wizard (fresh=false) 且它此刻闲着,
     // 才把这句话直接投进它那一轮 —— 「在已有会话里继续」是要求出来的, 不是默认。
     scheduledTaskInject = async (target, text, { taskId, fresh, quiet }) => {
+      // 日程文件是可手改的源码: target 与排班者不同机器人就不放枪 (schedule_task 那头已拦, 这里拦手改的)。
+      const owner = ((r) => (r ? ownerOf(r) : target))(tasks.get(taskId));
+      if (!sameBot(owner, target)) return { ok: false, reason: `日程 ${taskId} 的目标与排班者归不同的企微机器人, 不跨机器人放枪` };
       // 安静任务私下跑 (channel ""): 镜像不推它的任何一句, 终句由 relayUnlessQuiet 判断要不要进群。
       const inNamed = async (): Promise<{ ok: boolean; reason?: string }> => {
         const at = Date.now();
@@ -3358,7 +3386,7 @@ const main = async (): Promise<void> => {
       refsOf: (md) => {
         // cwd 候选: 提议里带的 (提议者可能早收工了) + 在场绑定的; 再正向算出 md 比对。
         const cwds = [...new Set([...proposedCwds(stateDir), ...boundTargets().map(cwdOfTarget)].filter(Boolean))];
-        const cwd = cwdOfMd(stateDir, md, cwds);
+        const cwd = cwdOfMd(stateDir, md, cwds, ["", ...cfg.bots.map((b) => b.id)]);
         if (!cwd) return [];
         return [...PROJECT_DOCS.map((f) => join(cwd, f)), ...projectDirsFor(cwd).map((d) => join(d.dir, "memory", "MEMORY.md"))].filter((f) => existsSync(f));
       },
@@ -3389,7 +3417,8 @@ const main = async (): Promise<void> => {
     inject: scheduledTaskInject,
     // gate 里的 `sh` 默认就在目标 wizard 此刻的工作区跑 —— 任务文件里不必写死绝对路径。
     cwdOf: (t) => { const c = bridge.getCwd(t); return c.runningCwd || c.pendingCwd || c.defaultCwd; },
-    fallbackTarget: () => (cfg.defaultChat ?? "").trim(),
+    // 没写 target 的日程兜底到排班者那个机器人的默认聊天 (副机器人没配就不放枪, 不冒用主机器人)。
+    fallbackTarget: (t) => defaultChatFor(cfg, t.owner),
   });
 
   // 共享记忆整理 — daemon 内建, 不进任务表 / 日程, 不出任何气泡。

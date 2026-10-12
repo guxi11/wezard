@@ -264,6 +264,12 @@ export const currentHumanQueryOf = (target: string): string | undefined => {
 };
 
 /** 这个会话还开着的轮次 (子 agent 的不算), 新的在前 —— reload 时正跑着的那一轮旧进程没来得及收口, 也有排着还没接上的。 */
+/** 这个会话最近一轮记在谁名下 —— 镜像绑定已经对不上时 (/clear 换了 sid、绑定刚丢) 认它归哪个机器人用。 */
+export const targetOfSession = (sessionId: string): string | undefined =>
+  (store?.list() ?? [])
+    .filter((r): r is TurnDetailRecord => r.kind === "turn" && r.sessionId === sessionId && !!r.target)
+    .sort((x, y) => y.updatedAt - x.updatedAt)[0]?.target;
+
 export const openTurnsOf = (target: string, sessionId: string): TurnDetailRecord[] =>
   (store?.list() ?? [])
     .filter((r): r is TurnDetailRecord => r.kind === "turn" && r.target === target && r.sessionId === sessionId && !r.closed && !r.agent)

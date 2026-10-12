@@ -4,8 +4,9 @@
 // gating resumes. Single-shot; no concurrency story needed.
 import type { WSClient } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
-import type { Config } from "../shared/config.js";
-import { patchJsonc, appendUnique } from "../shared/config-writer.js";
+import { parse as parseJsonc } from "jsonc-parser";
+import { SECRETS_PATH, type Config } from "../shared/config.js";
+import { patchJsonc, appendUnique, readJsoncText } from "../shared/config-writer.js";
 import { json, readBody, type Handler } from "./http.js";
 
 interface ClaimState {
@@ -109,6 +110,51 @@ export const ackClaim = async (
  * a randomly-added bot in a group should never auto-promote. */
 export const shouldAutoClaim = (cfg: Config, isDm: boolean): boolean =>
   isDm && cfg.wrc.allowFrom.length === 0;
+
+// ── 副机器人各自的认领 ──────────────────────────────────────────────
+// 每个副机器人一份, 互不相干: 它自己的 allowFrom 还空着时, 第一个单聊它的人被写进
+// bots[id].allowFrom 并设为 bots[id].defaultChat。全局 defaultChat / wrc.allowFrom (主机器人那份)
+// 一个字不碰。不看全局名单: 主机器人的人碰巧先来, 也只是认领了这个副机器人。
+// 写回 `bots` 所在的那份文件: secrets.json 里的 bots 数组整体覆盖 config.jsonc 的,
+// 写错文件等于写进一份被盖掉的数组。存的是不带 `~bot` 后缀的 principal (授权按裸 id 比对,
+// defaultChatOfBot 取用时再挂后缀)。
+
+export const shouldBotAutoClaim = (cfg: Config, bot: string, isDm: boolean): boolean =>
+  !!bot && isDm && cfg.bots.find((b) => b.id === bot)?.allowFrom.length === 0;
+
+const botsArrayIn = (file: string): Array<{ id?: unknown }> | undefined => {
+  const v = (parseJsonc(readJsoncText(file)) as { bots?: unknown } | undefined)?.bots;
+  return Array.isArray(v) ? v : undefined;
+};
+
+/** principal 写进机器人 `bot` 的 allowFrom + defaultChat。同时改内存里的 cfg —— 下一条消息不必等重读。 */
+export const persistBotClaim = (cfg: Config, sourcePath: string, bot: string, principal: string): void => {
+  const entry = cfg.bots.find((b) => b.id === bot);
+  if (!entry) throw new Error(`no bot ${bot}`);
+  entry.defaultChat = principal;
+  if (!entry.allowFrom.includes(principal)) entry.allowFrom.push(principal);
+  const file = botsArrayIn(SECRETS_PATH) ? SECRETS_PATH : sourcePath;
+  const i = (botsArrayIn(file) ?? []).findIndex((b) => b.id === bot);
+  if (i < 0) throw new Error(`bots[id=${bot}] not found in ${file}`);
+  appendUnique(file, ["bots", i, "allowFrom"], principal);
+  patchJsonc(file, [{ path: ["bots", i, "defaultChat"], value: principal }]);
+};
+
+export const ackBotClaim = async (client: WSClient, chat: string, bot: string, log: Logger): Promise<void> => {
+  try {
+    await client.sendMessage(principalChatId(chat), {
+      msgtype: "markdown",
+      markdown: {
+        content:
+          `🛡️ **已设为机器人 \`${bot}\` 的管理员**\n\n` +
+          `你是第一个单聊它的人, 已写入 \`bots[id=${bot}].allowFrom\` 与 \`defaultChat\`。` +
+          `之后别人要用它, 把对方的 id 加进同一个 allowFrom。`,
+      },
+    });
+  } catch (e) {
+    log.warn({ err: (e as Error).message, bot }, "bot claim ack failed");
+  }
+};
 
 export const ackAutoClaim = async (
   client: WSClient,

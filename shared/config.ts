@@ -10,6 +10,7 @@ import { expandHome } from "./paths.js";
 import { resolveCliBackend } from "./cli-backends.js";
 import { EFFORTS } from "./effort.js";
 import { knob } from "./config-meta.js";
+import { botOfKey, withBot } from "./session-label.js";
 
 // 守护进程每次用时都现读 `cfg.x` 的项 —— 逐个核实过, 没核实的一律留默认 reload。
 const hot = <T extends z.ZodTypeAny>(s: T): T => knob(s, { apply: "hot" });
@@ -23,6 +24,27 @@ const Bot = z.object({
   secret: z.string().min(1).describe("企微智能机器人 secret"),
   websocketUrl: z.string().url().default("wss://openws.work.weixin.qq.com").describe("企微长连接地址"),
 });
+
+// 多机器人 (daemon/bot-mux.ts): `bot` 永远是主机器人 (id `main`), `bots` 是额外的几条长连接。
+// 各自的 allowFrom / defaultChat / approvers 只叠在全局那份之上 (并集 / 兜底), 不取代它;
+// wizard / 会话 / 名册全机共用一套 —— 机器人只决定一个聊天的话从哪条连接进出。
+export const PRIMARY_BOT = "main";
+const BotEntry = Bot.extend({
+  id: z.string().regex(/^[\w-]+$/, "只许字母数字 _ -").describe("机器人代号 (日志 / status / 归属表用), 全机唯一, 不许叫 main"),
+  allowFrom: z.array(z.string()).default([]).describe("只对这个机器人生效的授权名单, 与 wrc.allowFrom 取并集"),
+  defaultChat: z.string().default("").describe("这个机器人的默认聊天: 没收到过消息时它归这个机器人; 全局 defaultChat / approvers 都空时当审批兜底"),
+  approvers: z.array(z.string()).default([]).describe("这个机器人的审批人: 同上, 归属 + 审批兜底"),
+});
+export type BotEntry = z.infer<typeof BotEntry>;
+
+/** 同一个 botId 连两次, 后连上的会把先连上的踢下线 (event.disconnected_event) —— 配置期就拒。 */
+const uniqueBots = (c: { bot: { botId: string }; bots: BotEntry[] }, ctx: z.RefinementCtx): void => {
+  const dup = <T>(xs: T[]): T[] => xs.filter((x, i) => xs.indexOf(x) !== i);
+  const ids = c.bots.map((b) => b.id);
+  if (ids.includes(PRIMARY_BOT)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["bots"], message: `bots[].id 不能叫 ${PRIMARY_BOT} (那是 bot 节的主机器人)` });
+  dup(ids).forEach((id) => ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["bots"], message: `bots[].id 重复: ${id}` }));
+  dup([c.bot.botId, ...c.bots.map((b) => b.botId)]).forEach((id) => ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["bots"], message: `同一个 botId 配了两次: ${id} (两条连接会互踢下线)` }));
+};
 
 const Daemon = z.object({
   host: knob(z.string().default("127.0.0.1").describe("守护进程 HTTP 监听地址"), { gate: "card" }),
@@ -443,6 +465,7 @@ const liftLegacySchedules = (v: unknown): unknown => {
 // 出站默认聊天) —— 这些要人点卡; 口令一律 hidden; 其余 wizard 直接改。
 export const ConfigSchema = z.preprocess(liftLegacySchedules, z.object({
   bot: knob(Bot.describe("企微机器人凭据"), { gate: "hidden" }),
+  bots: knob(z.array(BotEntry).default([]).describe("额外的企微机器人 (多机器人; 含 secret, 整个数组可放进 secrets.json —— 数组整体覆盖不逐项合并); 改完重启守护进程生效"), { gate: "hidden" }),
   defaultChat: knob(z.string().default("").describe("出站默认聊天 (没有更具体去向时推往这里)"), { gate: "card", apply: "hot" }),
   chats: hot(Chats.default({}).describe("聊天命名表: 名字 → base principal")),
   chatPolicy: hot(z.record(z.string(), ChatPolicy).default({}).describe("群聊级策略: base principal (`chat:wr…` / `user:…`) → 开关; config_set 写聊天名会换成它的 principal 落盘; 进宪章, 已在跑的 wizard 要 handoff 才换上 (config_set 落盘时会点名受影响的)")),
@@ -454,16 +477,27 @@ export const ConfigSchema = z.preprocess(liftLegacySchedules, z.object({
   weixin: Weixin.default({}).describe("微信 ClawBot 通道: 扫码绑定、收发节流"),
   svr: Svr.default({}).describe("独立详情中转服务 (wezard svr); svr 自己启动时读, 改完重启 svr 才生效"),
   schedules: knob(Schedules, { gate: "hidden" }),
-}));
+}).superRefine(uniqueBots));
 
 export type Config = z.infer<typeof ConfigSchema>;
+
+/** `target` 那个 wizard 出站缺具体去向时的兜底聊天。主机器人 = 全局 defaultChat; 副机器人 b = 它自己的
+ *  defaultChat (挂 `~b`), 没配就 "" —— 回落到全局那个就是以主机器人的身份替别的机器人说话。 */
+export const defaultChatFor = (cfg: Pick<Config, "defaultChat" | "bots">, target: string): string =>
+  defaultChatOfBot(cfg, botOfKey(target));
+/** 同上, 按机器人代号给 ("" = 主机器人; 不认识的代号 = "")。 */
+export const defaultChatOfBot = (cfg: Pick<Config, "defaultChat" | "bots">, bot: string): string => {
+  if (!bot) return cfg.defaultChat.trim();
+  const own = cfg.bots.find((b) => b.id === bot)?.defaultChat.trim() ?? "";
+  return own ? withBot(own, bot) : "";
+};
 
 // ── Loader ──────────────────────────────────────────────────────────
 const DEFAULT_CONFIG_PATHS = [
   "~/.wezard/config.jsonc",
   "~/.wezard/config.json",
 ];
-const SECRETS_PATH = "~/.wezard/secrets.json";
+export const SECRETS_PATH = "~/.wezard/secrets.json";
 
 const readJsoncIfExists = (p: string): unknown | undefined => {
   const abs = expandHome(p);

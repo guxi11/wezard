@@ -128,8 +128,8 @@ interface SchedulerDeps {
   ) => Promise<{ ok: boolean; reason?: string }>;
   /** 目标 wizard 的工作区 —— gate 里 `sh("git log")` 默认就在那儿跑。 */
   cwdOf?: (target: string) => string;
-  /** 任务文件没写 target 时投给谁 (defaultChat)。 */
-  fallbackTarget: () => string;
+  /** 任务文件没写 target 时投给谁 (排班者那个机器人的 defaultChat)。 */
+  fallbackTarget: (t: TaskRecord) => string;
 }
 
 const announce = async (client: WSClient, target: string, markdown: string): Promise<void> => {
@@ -141,7 +141,7 @@ const announce = async (client: WSClient, target: string, markdown: string): Pro
 
 export const startScheduler = ({ client, registry, log, inject, cwdOf, fallbackTarget }: SchedulerDeps): { stop: () => void } => {
   const fire = async (t: TaskRecord): Promise<void> => {
-    const target = t.target || fallbackTarget();
+    const target = t.target || fallbackTarget(t);
     if (!inject) { log.warn({ id: t.id, target }, "scheduled task skipped: not in mirror mode"); return; }
     if (!target) { log.warn({ id: t.id }, "scheduled task skipped: no target"); return; }
 

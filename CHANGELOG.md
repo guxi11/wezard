@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Added
+- 多企微机器人, 按机器人隔离: 新增配置 `bots: [{id, botId, secret, websocketUrl?, allowFrom?, defaultChat?, approvers?}]`, 一个守护进程同时持有多条长连接 (`daemon/bot-mux.ts`); `bot` 节仍是主机器人 (id `main`), 只配它时什么都不包装, 行为与数据不变。机器人维度落在会话 key 上: 副机器人收到的聊天 principal 带后缀 (`user:X~b2` / `chat:wr…~b2#slot`, 主机器人不带), 同一人私聊两个机器人、同群拉两个机器人就是两个会话、两套 wizard; wizard 名字不加后缀, 仍全机唯一。wizard 的归属机器人由 key 推导 (`botOfKey`), 出站一律走归属连接: 被动回复与改卡按入站帧找回收到它的那条 (改卡必须用推卡的机器人), 主动推送与媒体按 key 后缀改道。可见性按机器人隔离 (群管家也不例外): 名册 / peek / read_chat / 派活 / spawn / clone / notify / send_file / 定时任务只作用于同一机器人的 wizard, 跨机器人寻址按「没有这个 wizard」拒; rolepage 同样按机器人隔离。入站授权 = `wrc.allowFrom` ∪ 该机器人自己的 `allowFrom`; 魔法短语认领只认主机器人, 主机器人的自动认领仍只看全局 `wrc.allowFrom` (行为不变); 每个副机器人各有一份自动认领: 它自己的 `allowFrom` 空着时, 第一个单聊它的人被写进 `bots[id].allowFrom` 并设为 `bots[id].defaultChat` (写回 `bots` 所在的那份文件, 通常是 secrets.json), 不碰全局 defaultChat / allowFrom, 群聊不触发; 无镜像会话的审批人在全局 approvers / defaultChat 都空时借副机器人的 (挂后缀, 卡由该机器人推)。任一机器人认证失败 / 被踢只降级 (`/status` 的 `bots` 里标 `failed` / `kicked`), 全部失败才 fatal; 切网重连跳过被踢的那条。同一 `botId` 配两次、`id` 重复或叫 `main` 配置期即拒 (两条连接会互踢下线)。
+
 ### Fixed
 - pane 上限的孤儿回收对 codebuddy 后端全盲: 孤儿判据要求 pane 出现在后端注册表 `sessions/<pid>.json` 的 `tmux` 字段里, 而 codebuddy 的注册表没有该字段, 失绑老 pane (restore 丢绑定后下一条消息另起新 pane、旧 pane 不杀) 永久逃回收、也不占 `maxPanes` 名额。改为直接看 pane 的进程树: 树里有任一后端注册表登记且还活着的 CLI pid (新增 `cc-session.liveSessionPids` + 一次 `ps` 快照向下找, pane_pid 是 shell, CLI 是子孙) 才算 wezard 的历史会话 pane; 人的 shell / ssh / 编辑器依旧「认不出就不动」。
 - pane 上限清扫此前只在新建 wizard 时触发, 无 spawn 不收。新增 `wrc.mirror.paneSweepSec` (默认 600, 0 = 只在 spawn 时扫) 定时清扫, daemon 启动 15s 后先扫一次。

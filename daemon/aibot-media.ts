@@ -7,6 +7,7 @@ import type { Logger } from "pino";
 import { baseOfKey } from "../shared/session-label.js";
 import { errText } from "./last-response.js";
 import { planMedia, type SendMedia } from "./media.js";
+import { connFor } from "./reach.js";
 
 // SDK 1.0.7 把每个回执的等待写死 5s (aibot-node-sdk #27), 大文件分片的回执常 6–8s 才到,
 // 被误判失败、重传又被服务端拒。上传期间放宽, 最后一个上传结束时还原 —— 期间别的发送
@@ -31,11 +32,14 @@ const ackState = new WeakMap<AckKnob, { n: number; orig: number }>();
 /** `chat:wr…#slot` → `wr…`: SDK 只认裸 chatid / userid。 */
 const chatIdOf = (target: string): string => baseOfKey(target).replace(/^(user|chat|group):/, "");
 
-export const aibotSendMedia = (client: WSClient, log: Logger): SendMedia => async (target, spec) => {
+export const aibotSendMedia = (face: WSClient, log: Logger): SendMedia => async (target, spec) => {
   const plan = planMedia(spec);
   if (!plan.ok) return plan;
   const chatId = chatIdOf(target);
   if (!chatId) return { ok: false, reason: `认不出收件聊天: ${target}` };
+  // 素材 id 归上传它的那个机器人: 上传走这个聊天归属的连接 (chatId 上的 `~<bot>`, 见 bot-mux),
+  // 推送交给 face —— 它按同一个后缀改道并剥掉后缀, 两步必落在同一条连接上。
+  const client = connFor(face, chatId);
   if (!client.isConnected) return { ok: false, reason: "企微长连接没连上, 稍后再试" };
   const { kind, name, bytes } = plan;
   const upload = async (): Promise<string> => {
@@ -48,7 +52,7 @@ export const aibotSendMedia = (client: WSClient, log: Logger): SendMedia => asyn
   };
   try {
     const video = kind === "video" ? { title: spec.title, description: spec.description } : undefined;
-    await client.sendMediaMessage(chatId, kind, await upload(), video);
+    await face.sendMediaMessage(chatId, kind, await upload(), video);
     log.info({ chatId, kind, name, bytes }, "tx media");
     return { ok: true, kind, name, bytes };
   } catch (e) {

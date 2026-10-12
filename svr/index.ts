@@ -29,6 +29,7 @@ import { openSeenLog } from "../shared/seen-log.js";
 import { EMPTY_FACTS, type WorldFacts } from "../shared/world.js";
 import { resolvePublicHost } from "../shared/lan-ip.js";
 import { loadConfig } from "../shared/config.js";
+import { bindMultiBot } from "../shared/session-label.js";
 
 interface Args {
   host: string;
@@ -51,6 +52,8 @@ const buildDefaults = (): Args => {
   };
   try {
     const { config } = loadConfig();
+    // 多机器人隔离 (内部会话不归任何机器人): 与 daemon 同一份配置才对得上。
+    bindMultiBot(config.bots.length > 0);
     const s = config.svr;
     return {
       host: s.host || fallback.host,
