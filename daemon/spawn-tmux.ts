@@ -99,6 +99,7 @@ export const runTmux = (args: string[], opts: RunTmuxOpts = {}): Promise<ExecRes
     });
     let out = "";
     let err = "";
+    let inputError = "";
     let settled = false;
     let timer: NodeJS.Timeout | undefined;
     const timeoutMs = opts.timeoutMs ?? TMUX_TIMEOUT_MS;
@@ -121,8 +122,13 @@ export const runTmux = (args: string[], opts: RunTmuxOpts = {}): Promise<ExecRes
     proc.stdout?.on("data", (c: Buffer) => (out += c.toString("utf8")));
     proc.stderr?.on("data", (c: Buffer) => (err += c.toString("utf8")));
     proc.on("error", (e) => finish({ ok: false, stdout: "", stderr: e.message, code: null }));
-    proc.on("close", (code) => finish({ ok: code === 0, stdout: out, stderr: err, code }));
-    if (opts.stdin !== undefined) proc.stdin?.end(opts.stdin);
+    proc.on("close", (code) => finish({ ok: code === 0 && !inputError, stdout: out, stderr: err || inputError, code }));
+    // An old tmux can reject -b before reading a large stdin. Its EPIPE must
+    // not crash the daemon or hide stderr (the buffer fallback needs that error).
+    if (opts.stdin !== undefined) {
+      proc.stdin?.on("error", (e: Error) => { inputError = e.message; });
+      proc.stdin?.end(opts.stdin);
+    }
   });
 
 

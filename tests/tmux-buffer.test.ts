@@ -7,7 +7,7 @@ const ok = (stdout = ""): Result => ({ ok: true, stdout, stderr: "", code: 0 });
 const fail = (stderr: string): Result => ({ ok: false, stdout: "", stderr, code: 1 });
 
 // Use the same parser as spawning, including suffixes, next builds and the
-// existing unknown-version policy (modern; command errors never trigger fallback).
+// existing unknown-version policy (modern unless named load explicitly rejects it).
 for (const [version, named] of [
   ["tmux 1.8", false], ["tmux 1.9a\n", false], ["tmux 2.9a", false],
   ["tmux 2.10", false], ["tmux 3.0", true], ["tmux 3.0a", true],
