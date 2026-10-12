@@ -397,6 +397,7 @@ const TELL_SCHEMA = {
     .optional()
     .describe("true = 在公开频道 (你这一轮所在的群) 里说: 群里出 `.你: .它` 气泡, 它的回复也进群 (同时照样回执给你)。默认 false = 私聊, 只记在 rolepage。需要人知道 / 该当着人讨论才用 true。带 `job` 时不起作用 —— 工单里的往来一律私聊。"),
   job: z.string().optional().describe("这次派活归到某个工单名下 (open_job 给的 id)。**fan-out 一定要带上它**: 回执里会带 `还差几份 / 全部到齐`, 「齐了吗」由守护进程数给你, 不用你自己在上下文里记。带了它就一律私聊, 往来与回执都不进群。"),
+  node: z.string().trim().min(1).optional().describe("Opt-in stable node name within your job. Every execution receives attemptId. Each dispatch leg reserves job budget before transport; unknown delivery is conservatively charged and sent/restart never charges twice. done awaits workflow_verdict accepted. Retries require stopped reconciliation. Without node, legacy receipt-done semantics apply."),
   role: z.enum(["exec", "reviewer", "expert"]).optional().describe("它在这张工单里的角色 (只在带 `job` 时有意义, 记进账本供工单页与名册显示): `exec` 执行 (默认) · `reviewer` 白板评审 · `expert` 借来答问的专家 (配 `kind:\"ask\"`; 长住 wizard, 名册任职行写「借给 J…」; 按名册的「专长」行挑)。"),
   receipt: z
     .boolean()
@@ -415,12 +416,21 @@ const TELL_SCHEMA = {
   after: z
     .array(z.string())
     .optional()
-    .describe("依赖: 件号 (`t…`) 数组, 都得是你自己派出去的件 (含已落定的; 查不到 → 400)。全部已 done → 立即投; 有已失败的 (timeout / silent / dead / canceled) → 409; 否则**停放**: 不注入, 回包 `parked:true`, 前置全 done 时守护进程以你的名义投出 (信封后附每件前置的 RESULT / ARTIFACT 原样), 任一前置失败这件不投、按 canceled 回执回给你 (正文说明哪件以什么收场)。只用于派新活 (task、不带 re); 回执 k 不变, 停放期间仍挂住你给上游的交代; 带 `job` 时现在就记成员与预算; 目标手上若还有你另一件没落定的活 (且不是前置之一) → 409。`deadline` 从真正投出时起算。stop_wizard / close_job 取消覆盖停放件。"),
+    .describe("依赖: tracked node 前置只有显式 accepted 且产物版本一致才放行，未验收等待、rejected 阻止。无 node 的旧任务沿用 legacy done（仅有回执，非业务成功）。件号 (`t…`) 数组, 都得是你自己派出去的件 (含已落定的; 查不到 → 400)。全部满足各自放行条件 → 立即投; 有已失败的 (timeout / silent / dead / canceled) → 409; 否则**停放**: 不注入, 回包 `parked:true`, 前置全满足放行条件时守护进程以你的名义投出 (信封后附每件前置的 RESULT / ARTIFACT 原样), 任一前置失败这件不投、按 canceled 回执回给你 (正文说明哪件以什么收场)。只用于派新活 (task、不带 re); 回执 k 不变, 停放期间仍挂住你给上游的交代; 带 `job` 时现在就记成员与预算; 目标手上若还有你另一件没落定的活 (且不是前置之一) → 409。`deadline` 从真正投出时起算。stop_wizard / close_job 取消覆盖停放件。"),
   chain: z
     .boolean()
     .optional()
     .describe("你此刻在答别的 wizard 派的活时, 这次派出的活默认算那件活的子活: 它回来之前你这一轮的终句不会先交给上游, 它回来那一轮的终句再续回上游。false = 这件活与上游无关 (顺手的测试、旁支), 回执照常回你, 但不挂住你给上游的交代。"),
 };
+
+server.registerTool("workflow_nodes", {
+  description: "Query your persistent node/attempt history, receipt execution status and independent acceptance. digest binds verdict to result body.",
+  inputSchema: { job: z.string().optional() },
+}, async (a) => unwrap("workflow_nodes", await daemonPost("/workflow/nodes", a)));
+server.registerTool("workflow_verdict", {
+  description: "Owner validates a terminal done attempt by digest. accepted/rejected is semantic judgment, not RESULT format. All declared ARTIFACT paths require complete absolute files+sha256 evidence. Pure text may omit files. Accepted files gain readonly content-addressed snapshots; after passes snapshot paths and checks versions at physical paste/submit. sent reconciles uncertain dispatch and idempotently restores job/member/budget/ledger and receipt watching (unknown is already conservatively charged); stopped requires evidence execution cannot continue and permits retry. No automatic replay or process stop is implied.",
+  inputSchema: { attemptId: z.string(), as: z.enum(["accepted", "rejected", "sent", "stopped"]), digest: z.string().optional(), reason: z.string().min(1), files: z.array(z.object({ path: z.string(), sha256: z.string() })).optional() },
+}, async (a) => unwrap("workflow_verdict", await daemonPost("/workflow/verdict", a)));
 
 const TELL_DESC =
   "跟另一个 wizard 说话 —— 文本原样落进它的输入框, 它当成新的一轮接手 (派活、答它的问题、叫它继续都走这里)。目标不存在就先 spawn_wizard / clone_wizard。独立新活先按目标与难度 dispatch; re / now 仅用于当前任务的补充证据、纠正或答问, 不把无关小活追加给正在处理复杂任务的 lead, 也不要用 ask 包装需要另行检查的新任务。\n" +
@@ -428,13 +438,14 @@ const TELL_DESC =
   "默认私聊, 只记在双方 rolepage; 守护进程给 `text` 挂信封 (发话人、私聊/公开、终句收口约定)。拒绝对自己发送。\n" +
   "**派活方向 (守护进程拦, 返回 409 带改道说法)**: 带 `job` 的 task 只许开单者发; 同一张单的成员之间只许 `ask` / `fyi`, 不横向派 task; 上级单的开单者不越级给下层成员派活 (经它的 lead `re`); 目标正等你答复 (在你的 k 链上) 时 task / ask 都不行, 以 `NEED:` 收口; 自己已在 ≥3 层派活链底部不再往下派 task; 借来的专家 (role expert) 只答 ask; 一个 wizard 同时只在一张开着的单里当未落定的执行者。`fyi` 永远放行。";
 
-const tellBody = (a: { name: string; text: string; kind?: string; priority?: string; waitSec?: number; job?: string; role?: string; public?: boolean; receipt?: boolean; re?: string; deadline?: number; chain?: boolean; force?: boolean; after?: string[] }) => ({
+const tellBody = (a: { name: string; text: string; kind?: string; priority?: string; waitSec?: number; job?: string; role?: string; public?: boolean; receipt?: boolean; re?: string; deadline?: number; chain?: boolean; force?: boolean; after?: string[]; node?: string }) => ({
   name: a.name,
   text: a.text,
   ...(a.kind ? { kind: a.kind } : {}),
   ...(a.priority ? { priority: a.priority } : {}),
   ...(a.waitSec ? { waitSec: a.waitSec } : {}),
   ...(a.job ? { job: a.job } : {}),
+  ...(a.node ? { node: a.node } : {}),
   ...(a.role ? { role: a.role } : {}),
   ...(a.public ? { public: true } : {}),
   ...(a.receipt === false ? { receipt: false } : {}),

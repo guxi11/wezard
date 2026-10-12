@@ -33,6 +33,8 @@ const DEADLINE_MAX_SEC = 12 * 3600;
 /** 交接把义务转进新会话时, 至少再给它这么久: 不然对方一交接, 这份就提前超时。 */
 const CARRY_GRACE_MS = 10 * 60_000;
 
+/** The same accepted quoting/whitespace syntax applies at every turn lookup. */
+export const canonicalTurn = (turn: string): string => turn.replace(/[`\s]/g, "");
 /** 一件活的编号: 注入之前生成, 写进信封, 回执按它定位答句。 */
 export const newTurn = (): string => `t${randomBytes(3).toString("hex")}`;
 
@@ -104,6 +106,7 @@ const sameK = (a: ParentK, b: ParentK): boolean => kAttr(a) === kAttr(b);
 export interface Outcome { status: ReceiptStatus; body: string }
 
 export interface ReceiptDeps {
+  workflowPrereq?: (owner: string, turn: string) => Prereq | undefined;
   /** 能接新一轮了吗 (轮已结束、没停在审批上) / 等到那一刻 —— 投递时机用, 见 tell_peer when:"idle"。 */
   idleNow: (target: string) => Promise<boolean>;
   untilIdle: (target: string, timeoutMs: number, opts?: { aborted?: () => boolean; confirm?: number }) => Promise<IdleResult>;
@@ -147,7 +150,7 @@ export interface ReceiptDeps {
   holdStore?: JsonMap<Hold>;
   /** 前置都 done 了: 以发话方的名义把这件活真正投出去 (走 tell_peer 同一条注入路径, 件号 / 父 k 沿用停放时的)。
    *  `seen` = 前置各自的结论。失败 = 这件不投, 按 canceled 回给发话方。 */
-  release?: (h: Hold, seen: Readonly<Record<string, HeldSeen>>) => Promise<{ ok: boolean; reason?: string }>;
+  release?: (h: Hold, seen: Readonly<Record<string, HeldSeen>>, alive: () => boolean) => Promise<{ ok: boolean; reason?: string }>;
 }
 
 /** 一件前置的结论快照。 */
@@ -179,6 +182,8 @@ export type Prereq =
   | { state: "pending" | "unknown" };
 
 export interface Tell {
+  /** Stable tracked dispatch leg; a continuation keeps turn but replaces this key. */
+  dispatchKey?: string;
   from: string;
   to: string;
   channel: string;
@@ -240,9 +245,11 @@ export interface Slot extends Tell {
 const KEEP_MS = 24 * 3600_000;
 
 export interface Receipts {
+  /** Is an unresolved watcher already observing this exact tracked dispatch leg? */
+  watching: (tell: Tell) => boolean;
   /** 登记这一次发话。`watch=false` 只记时刻 (供 wait_peer 定位「这一次」), 不守回执
    *  —— 调用方明说了不要自动回注。 */
-  register: (tell: Tell, watch?: boolean) => { at: number; turn: string };
+  register: (tell: Tell, watch?: boolean, interim?: Outcome) => { at: number; turn: string };
   /** 注入之前定件号。`re` 只认同一对 (from → to) 正在守的那件 —— 方向反了、过了保留期、
    *  写错了都当新活 (`reUnknown`), 不拒绝。 */
   prepare: (from: string, to: string, re?: string) => Turn;
@@ -280,7 +287,7 @@ export interface Receipts {
    *  手上这一轮, 排着的别人的活照旧会被答)。返回落成 canceled 的件数。 */
   cancel: (target: string, by: string, only?: (x: { from: string; turn: string }) => boolean) => number;
   /** `from` 派出的这些件号此刻各是什么 (含已落定的和自己也停放着的)。 */
-  prereqs: (from: string, turns: readonly string[]) => Prereq[];
+  prereqs: (from: string, turns: readonly string[], seen?: Readonly<Record<string, HeldSeen>>) => Prereq[];
   /** 停放一件活: 前置都落定后由 `deps.release` 投出; 任一前置失败 → 不投, 落成 canceled 回给发话方。 */
   hold: (h: Omit<Hold, "seen">) => void;
   /** 工单收了: 它名下还停放着的不再投 (发话方是收工者自己的不回执)。 */
@@ -501,7 +508,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     }
     // 工单验收: 交了个空 RESULT (或缺约定的 ARTIFACT) —— 不投、不计数, 以发话方的名义同件号
     // 打回一次; 再交上来的照收。新登记顶掉这一份 (它随即 stale), 守的是打回那一句的答案。
-    const why = out.status === "done" && s.job && !s.bounced ? deps.accept?.(s.job, out.body) : undefined;
+    const why = out.status === "done" && s.job && !s.bounced && !deps.workflowPrereq?.(s.from, s.turn ?? "") ? deps.accept?.(s.job, out.body) : undefined;
     if (why && deps.rebound) {
       const at = Date.now();
       const legs = (s.legs ?? 1) + 1;
@@ -580,7 +587,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     if (!s.delivered) release(s);
   };
 
-  const register = (tell: Tell, watchIt = true): { at: number; turn: string } => {
+  const register = (tell: Tell, watchIt = true, interim?: Outcome): { at: number; turn: string } => {
     const at = tell.at ?? Date.now();
     const turn = tell.turn ?? newTurn();
     // 续问一件停放着的: 接替它在停放处的位置, 不碰这一对眼下那一件。
@@ -595,6 +602,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     const job = tell.job || (!park && prev?.job && !prev.resolved ? prev.job : "");
     const s: Slot = {
       ...tell,
+      ...(interim && ["need", "error"].includes(interim.status) ? { outcome: interim } : {}),
       job,
       at,
       turn,
@@ -616,10 +624,23 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   // ── 停放 (after) ─────────────────────────────────────────────────────
 
   const holdKey = (h: Pick<Hold, "from" | "to" | "turn">): string => keyOfTurn(h.from, h.to, h.turn);
-  const saveHold = (h: Hold): void => { deps.holdStore?.set(holdKey(h), h); };
-  const dropHold = (h: Hold): void => { holds.delete(holdKey(h)); deps.holdStore?.drop(holdKey(h)); };
+  // A failed write pauses all releases, including closures already inside transport.
+  // Failed cancellation is not acknowledged: retain the original durable/memory row
+  // for operator reconciliation before restarting the store.
+  let holdWriteFailed = false;
+  const writeHold = (write: () => void): void => {
+    if (holdWriteFailed) throw new Error("hold persistence failed; reconcile storage before reload");
+    try { write(); } catch (e) { holdWriteFailed = true; throw e; }
+  };
+  const saveHold = (h: Hold): void => writeHold(() => { deps.holdStore?.set(holdKey(h), h); });
+  const dropHold = (h: Hold): void => {
+    writeHold(() => { deps.holdStore?.drop(holdKey(h)); });
+    holds.delete(holdKey(h));
+  };
   /** 前置件号 → 此刻的样子。先看回执槽 (按发话方 + 件号找, 不论发给谁), 再看自己也停放着的, 最后看快照。 */
   const prereqOf = (from: string, turn: string, seen: Readonly<Record<string, HeldSeen>> = {}): Prereq => {
+    const tracked = deps.workflowPrereq?.(from, turn);
+    if (tracked) return tracked;
     const s = [...slots.values()].find((x) => x.from === from && x.turn === turn);
     const st = s?.outcome?.status;
     if (s && s.resolved && st && isTerminal(st)) return { state: st === "done" ? "done" : "failed", seen: { to: s.to, status: st, body: s.outcome!.body } };
@@ -637,7 +658,9 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   /** 不投了: 落成一份 canceled 回给发话方, 走与别的回执同一条路 (投递、计数、记账都在 watch 里)。
    *  按件号停放着放进去 (parked), 绝不占 from→to 的位置 —— 那里可能有在飞的另一件。 */
   const cancelHold = (h: Hold, why: string, silent = false): void => {
+    if (holds.get(holdKey(h)) !== h) return;
     dropHold(h);
+    deps.onOutcome?.({ ...h, gen: 0, claimed: false, delivered: false, resolved: true } as Slot, "canceled", why, silent);
     if (silent) return;
     const at = Date.now();
     const s: Slot = {
@@ -654,11 +677,16 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   const releasing = new Set<string>();
   /** 逐件看停放着的: 有失败的 → 不投; 都 done 了且这一对没被占着 → 放行; 超过保留期 → 不投。 */
   const tickHolds = async (): Promise<void> => {
+    if (holdWriteFailed) return;
     for (const h of [...holds.values()]) {
       if (releasing.has(holdKey(h)) || !holds.has(holdKey(h))) continue;
       const ps = h.after.map((t) => [t, prereqOf(h.from, t, h.seen)] as const);
       const fresh = ps.filter(([t, p]) => (p.state === "done" || p.state === "failed") && !h.seen[t]);
-      if (fresh.length) { fresh.forEach(([t, p]) => { h.seen[t] = (p as { seen: HeldSeen }).seen; }); saveHold(h); }
+      if (fresh.length) {
+        const seen = { ...h.seen, ...Object.fromEntries(fresh.map(([t, p]) => [t, (p as { seen: HeldSeen }).seen])) };
+        saveHold({ ...h, seen });
+        h.seen = seen;
+      }
       const bad = ps.find(([, p]) => p.state === "failed" || p.state === "unknown");
       if (bad) {
         const [t, p] = bad;
@@ -673,11 +701,17 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       releasing.add(holdKey(h));
       void (async () => {
         try {
-          const r = (await deps.release?.(h, h.seen)) ?? { ok: false, reason: "没有放行通路" };
+          const r = (await deps.release?.(h, h.seen, () => !holdWriteFailed && holds.get(holdKey(h)) === h)) ?? { ok: false, reason: "没有放行通路" };
+          if (holds.get(holdKey(h)) !== h) return;
           if (r.ok) dropHold(h);
           else cancelHold(h, `前置都 done 了, 但这件 (${h.turn}) 投不出去: ${r.reason ?? "未知原因"}, 没投。`);
         } catch (e) {
-          cancelHold(h, `放行时出错 (${(e as Error).message}), 这件 (${h.turn}) 没投。`);
+          try {
+            if (!holdWriteFailed) cancelHold(h, `放行时出错 (${(e as Error).message}), 这件 (${h.turn}) 没投。`);
+          } catch (writeError) {
+            deps.log.error({ err: (writeError as Error).message, turn: h.turn }, "receipt: cancellation persistence failed");
+          }
+          if (holdWriteFailed) deps.log.error({ err: (e as Error).message, turn: h.turn }, "receipt: hold persistence failed; releases paused for reconciliation");
         } finally { releasing.delete(holdKey(h)); }
       })();
     }
@@ -693,6 +727,12 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
 
   return {
     register,
+    watching: (tell) => {
+      const s = upstream({ from: tell.from, turn: tell.turn ?? "" }, tell.to);
+      return !!s && !s.resolved && !s.claimed && (tell.dispatchKey
+        ? s.dispatchKey === tell.dispatchKey
+        : s.at === tell.at && (s.legs ?? 1) === (tell.legs ?? 1));
+    },
     reask: (from, to, turn) => {
       const s = upstream({ from, turn }, to);
       if (!s || s.resolved || s.claimed) return undefined;
@@ -701,7 +741,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       return { legs, channel: s.channel, ...(s.asker ? { asker: s.asker } : {}) };
     },
     prepare: (from, to, re) => {
-      const want = re?.replace(/[`\s]/g, "");
+      const want = re ? canonicalTurn(re) : undefined;
       const s = want ? upstream({ from, turn: want }, to) : undefined;
       return s?.turn && s.turn === want
         ? { turn: s.turn, legs: (s.legs ?? 1) + 1, job: s.job, channel: s.channel, asker: s.asker, k: s.k }
@@ -777,11 +817,11 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       if (hit.length) nudgeHolds();
       return hit.length + held.length;
     },
-    prereqs: (from, turns) => turns.map((t) => prereqOf(from, t.replace(/[`\s]/g, ""))),
+    prereqs: (from, turns, seen) => turns.map((t) => prereqOf(from, canonicalTurn(t), seen)),
     hold: (h) => {
       const x: Hold = { ...h, seen: {} };
-      holds.set(holdKey(x), x);
       saveHold(x);
+      holds.set(holdKey(x), x);
       startHolds();
       nudgeHolds();
     },

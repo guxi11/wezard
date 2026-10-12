@@ -75,6 +75,8 @@ export interface JobRecord {
   maxTurns?: number;
   /** 已经派了几次。 */
   turns?: number;
+  /** Durable per-dispatch accounting keys; recovery must not spend or reset a member twice. */
+  dispatches?: string[];
   /** 上级工单 (金字塔: 工单树); 缺省 = 树根。 */
   parent?: string;
   /** `req` = 需求根单 (管家派 lead 时开): 交付后不自动归档, 等人验收。 */
@@ -112,6 +114,7 @@ export interface JobStore {
   open: (base: string, owner: string, title: string, opts?: JobOpenOpts) => JobRecord;
   /** 记一次派活; 返回记完之后的用量。 */
   spend: (id: string) => { turns: number; maxTurns?: number } | undefined;
+  account: (id: string, key: string, member: Omit<JobMember, "at">, kind: "task" | "ask", free?: boolean, recovery?: boolean, g2?: boolean) => JobRecord;
   get: (id: string) => JobRecord | undefined;
   /** 同一个 target 再次 attach 更新它那一段活, 并清掉它已落定的那一份 (又在干了)。 */
   attach: (id: string, member: Omit<JobMember, "at">, kind?: "task" | "ask") => JobRecord | undefined;
@@ -260,8 +263,24 @@ export const nudgeDue = (deliveredAt: number, nudge: { n: number; lastAt: number
 export const shelvedRoots = (all: readonly JobRecord[], owner: string): JobRecord[] =>
   all.filter((j) => j.kind === "req" && j.owner === owner && j.status === "open" && j.hold);
 
+const attached = (j: JobRecord, member: Omit<JobMember, "at">, kind: "task" | "ask"): JobRecord => {
+  const prev = j.members.find((x) => x.target === member.target);
+  const rest = j.members.filter((x) => x.target !== member.target);
+  // 再派一段 (含 re 续问) = 它又在干了: 旧的定论作废, 不然「全部到齐」会提前报、
+  // close_job 会把还在干活的它收掉。
+  const role = member.role ?? prev?.role;
+  const forkOf = member.forkOf ?? prev?.forkOf;
+  // 根单上 owner 给 lead 派了新活 (task; ask 只是问一句, 不算返工): 不再搁置; 若这一句让 lead 的定论作废, 冒泡也从头计。
+  // 定论照旧一律作废 (它又在干了, 见上), 只是 ask 不动 hold / nudge。
+  const toLead = j.kind === "req" && role === "lead" && kind === "task";
+  const { hold: _h, ...unheld } = j;
+  const { nudge: _n, ...unnudged } = unheld;
+  const base = !toLead ? j : prev?.outcome ? unnudged : unheld;
+  return { ...base, members: [...rest, { ...member, task: member.task || prev?.task || "", spawned: member.spawned || !!prev?.spawned, ...(role ? { role } : {}), ...(forkOf ? { forkOf } : {}), at: Date.now() }] };
+};
+
 export const loadJobStore = (filePath: string): JobStore => {
-  const db = loadJsonMap<JobRecord>(filePath, dropStale);
+  const db = loadJsonMap<JobRecord>(filePath, dropStale, { strict: true });
   return {
     open: (base, owner, title, { plan, expect, maxTurns, accept, parent, kind, criteria, origin, gate } = {}) => {
       const id = newId();
@@ -274,24 +293,24 @@ export const loadJobStore = (filePath: string): JobStore => {
       db.set(id, { ...j, turns });
       return { turns, ...(j.maxTurns ? { maxTurns: j.maxTurns } : {}) };
     },
+    account: (id, key, member, kind, free = false, recovery = false, g2 = false) => {
+      const j = db.get(id);
+      if (!j || j.status !== "open") throw new Error("accounting requires open job");
+      if (j.dispatches?.includes(key)) return j;
+      if (!free && j.maxTurns && (j.turns ?? 0) >= j.maxTurns) throw new Error("job dispatch budget exhausted");
+      const prev = j.members.find((m) => m.target === member.target);
+      if (!prev && j.members.length >= JOB_MEMBER_MAX) throw new Error("job members full");
+      const next = recovery && prev ? j : attached(j, member, kind);
+      const gate = g2 && j.kind === "req" && prev?.role === "lead" && !next.gate?.g2 ? { ...next.gate, g2: Date.now() } : next.gate;
+      return db.set(id, { ...next, ...(gate ? { gate } : {}), turns: (j.turns ?? 0) + 1, dispatches: [...(j.dispatches ?? []), key] });
+    },
     get: db.get,
     attach: (id, member, kind = "task") => {
       const j = db.get(id);
       const prev = j?.members.find((x) => x.target === member.target);
       // 满员只拦新面孔: 已在册的再派一段 (re 续问) 必须照记, 否则它旧的定论不作废, 「全部到齐」提前报。
       if (!j || j.status !== "open" || (!prev && j.members.length >= JOB_MEMBER_MAX)) return undefined;
-      const rest = j.members.filter((x) => x.target !== member.target);
-      // 再派一段 (含 re 续问) = 它又在干了: 旧的定论作废, 不然「全部到齐」会提前报、
-      // close_job 会把还在干活的它收掉。
-      const role = member.role ?? prev?.role;
-      const forkOf = member.forkOf ?? prev?.forkOf;
-      // 根单上 owner 给 lead 派了新活 (task; ask 只是问一句, 不算返工): 不再搁置; 若这一句让 lead 的定论作废, 冒泡也从头计。
-      // 定论照旧一律作废 (它又在干了, 见上), 只是 ask 不动 hold / nudge。
-      const toLead = j.kind === "req" && role === "lead" && kind === "task";
-      const { hold: _h, ...unheld } = j;
-      const { nudge: _n, ...unnudged } = unheld;
-      const base = !toLead ? j : prev?.outcome ? unnudged : unheld;
-      return db.set(id, { ...base, members: [...rest, { ...member, task: member.task || prev?.task || "", spawned: member.spawned || !!prev?.spawned, ...(role ? { role } : {}), ...(forkOf ? { forkOf } : {}), at: Date.now() }] });
+      return db.set(id, attached(j, member, kind));
     },
     settle: (id, target, outcome, artifacts) => {
       const j = db.get(id);

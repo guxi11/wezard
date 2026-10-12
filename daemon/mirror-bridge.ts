@@ -1112,7 +1112,9 @@ export const startMirrorTail = (deps: TailDeps): TailHandle => {
 //  • tmux   — paste into the live TTY via tmux. Indistinguishable from the
 //             user typing; claude processes normally → response visible in BOTH
 //             the CLI and (via outbound tail) WeCom. Required for true mirror.
+type DispatchGuard = (phase: "paste" | "submit") => boolean;
 interface InjectArgs {
+  guard?: DispatchGuard;
   text: string;
   /** Image absolute paths. injectViaTmux pumps each via clipboard+Ctrl+V before
    *  the text paste; injectViaSpawn prepends `@<path>` to text. */
@@ -1662,7 +1664,7 @@ const witnessFor = (target: string, homeDir: string, jsonlPath: string, live: Li
 // but the trailing Enter is eaten while the TUI is still initializing, so
 // the prompt sits typed-but-unsent. 校验策略见 injectViaTmuxText —— 以输入框
 // 整块为判据, 粘贴只在「确凿看见框仍是空的」时才重来。
-const injectViaTmux = async (target: string, text: string, images: string[], log: Logger, freshSpawn: boolean, backend: CliBackend, jsonlPath: string, bypassModalGuard = false): Promise<{ ok: boolean; reason?: string; uncertain?: boolean }> => {
+const injectViaTmux = async (target: string, text: string, images: string[], log: Logger, freshSpawn: boolean, backend: CliBackend, jsonlPath: string, bypassModalGuard = false, guard?: DispatchGuard): Promise<{ ok: boolean; reason?: string; uncertain?: boolean }> => {
   const backendName = backend.name;
   log.info({ target, len: text.length, images: images.length, freshSpawn, backendName }, "mirror inject (tmux)");
 
@@ -1705,7 +1707,7 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
   // dispatch 已对 codebuddy 把 refs 合进 text (images 传空), 这里的
   // withImageRefs 是其它调用方直传 images 时的兜底 —— 幂等, 不会贴两份。
   if (backendName === "codebuddy") {
-    return injectViaTmuxText(target, withImageRefs(text, images), log, freshSpawn, witness);
+    return injectViaTmuxText(target, withImageRefs(text, images), log, freshSpawn, witness, guard);
   }
 
   // Pump images first via clipboard+C-v so each one is attached as a separate
@@ -1718,6 +1720,7 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
       log.warn({ imgPath, reason: cb.reason }, "mirror inject: clipboard set failed, skipping image");
       continue;
     }
+    if (guard && !guard("paste")) return { ok: false, reason: "image paste canceled by dispatch guard" };
     const cv = await runTmux(["send-keys", "-t", target, "C-v"]);
     if (!cv.ok) return { ok: false, reason: `tmux send-keys C-v failed: ${cv.stderr.slice(-200)}` };
     await sleep(IMG_SETTLE_MS);
@@ -1728,11 +1731,12 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
   // image refs, not text).
   if (!text) {
     if (images.length === 0) return { ok: true };
+    if (guard && !guard("submit")) return { ok: false, reason: "submit canceled by dispatch guard" };
     const e = await runTmux(["send-keys", "-t", target, "Enter"]);
     return e.ok ? { ok: true } : { ok: false, reason: `tmux send-keys Enter failed: ${e.stderr.slice(-200)}` };
   }
 
-  return injectViaTmuxText(target, text, log, freshSpawn, witness);
+  return injectViaTmuxText(target, text, log, freshSpawn, witness, guard);
 };
 
 // 图片以 @<path> 文本提及的形式进会话 (codebuddy 的 tmux 路径、一切 spawn 路径)。
@@ -1756,7 +1760,7 @@ const withImageRefs = (text: string, images: readonly string[]): string => {
 // 证人不作声 (忙时排队、slash 命令、无注册表的后端) 才看框回没回到贴之前的样子。
 // 框认得出来时这条判据可信, 于是允许多补回车 (空框上的回车在 CLI 里是 no-op);
 // 每次补之前再问一遍证人, 已提交就不补。
-const injectViaTmuxText = async (target: string, text: string, log: Logger, freshSpawn: boolean, witness: SubmitWitness = NO_WITNESS): Promise<{ ok: boolean; reason?: string; uncertain?: boolean }> => {
+const injectViaTmuxText = async (target: string, text: string, log: Logger, freshSpawn: boolean, witness: SubmitWitness = NO_WITNESS, guard?: DispatchGuard): Promise<{ ok: boolean; reason?: string; uncertain?: boolean }> => {
   // Warm pane: tight timings, low latency. Fresh spawn (claude --resume just
   // started, transcript still loading): extended timings — bracketed-paste
   // end can take 4-7s to be honored on a cold TUI. Only the fresh-spawn path
@@ -1796,7 +1800,7 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   /** 框里还是贴之前那样 (或彻底空了) = 我们的文本不在框里。 */
   const boxIntact = (b: InputBox): boolean => boxVerify && b.known && (b.body === "" || b.body === baseBody);
 
-  const loadAndPaste = (): Promise<{ ok: boolean; reason?: string }> => pasteTmuxBuffer(target, text);
+  const loadAndPaste = (): Promise<{ ok: boolean; reason?: string }> => pasteTmuxBuffer(target, text, guard ? () => guard("paste") : undefined);
 
   // 框认得出来 → 看它变没变; 认不出来 → 退回宽窗口找 headFp (长文本会换行,
   // 头部可能在框顶, 所以窗口要宽)。
@@ -1879,6 +1883,7 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   }
 
   const sendEnter = async (): Promise<{ ok: boolean; reason?: string }> => {
+    if (guard && !guard("submit")) return { ok: false, reason: "submit canceled by dispatch guard" };
     const e = await runTmux(["send-keys", "-t", target, "Enter"]);
     return e.ok ? { ok: true } : { ok: false, reason: `tmux send-keys failed: ${e.stderr.slice(-200)}` };
   };
@@ -1969,6 +1974,7 @@ const injectViaSpawn = async (args: InjectArgs): Promise<{ ok: boolean; reason?:
     ...cfg.wrc.extraArgs,
   ];
   log.info({ sessionId, bin, len: text.length }, "mirror inject");
+  if (args.guard && !args.guard("submit")) return { ok: false, reason: "spawn canceled by dispatch guard" };
   return new Promise((resolve) => {
     const proc = spawn(bin, cliArgs, {
       cwd,
@@ -2002,7 +2008,7 @@ const injectViaSpawn = async (args: InjectArgs): Promise<{ ok: boolean; reason?:
 const inject = (args: InjectArgs): Promise<{ ok: boolean; reason?: string; uncertain?: boolean }> => {
   const target = (args.tmuxTarget ?? "").trim();
   if (!target) return injectViaSpawn(args);
-  return injectViaTmux(target, args.text, args.images ?? [], args.log, args.freshSpawn ?? false, backendForPath(args.jsonlPath), args.jsonlPath, args.bypassModalGuard ?? false);
+  return injectViaTmux(target, args.text, args.images ?? [], args.log, args.freshSpawn ?? false, backendForPath(args.jsonlPath), args.jsonlPath, args.bypassModalGuard ?? false, args.guard);
 };
 
 // ── Per-session injection queue ───────────────────────────────────────
@@ -2178,7 +2184,7 @@ export interface MirrorBridge {
    *  参数留着是因为调用方 (定时任务) 仍在传。 */
   /** `channel`: 这一轮的回复发去哪个公开频道 (base); "" = 私聊, 回复不进任何群,
    *  只落 turn 记录; 省略 = target 的 home。 */
-  injectText: (target: string, text: string, origin?: TurnOrigin, opts?: { fromChat?: boolean; from?: TurnFrom; channel?: string; envelope?: string }) => Promise<{ ok: boolean; reason?: string }>;
+  injectText: (target: string, text: string, origin?: TurnOrigin, opts?: { fromChat?: boolean; from?: TurnFrom; channel?: string; envelope?: string; guard?: DispatchGuard }) => Promise<{ ok: boolean; reason?: string; uncertain?: boolean }>;
   /** 这个 wizard 当前这一轮的频道: 人从哪个群叫的它 / 公开 peer 轮的频道;
    *  私聊轮 ""; 还没有过轮次 → home base。 */
   currentChannel: (target: string) => string;
@@ -6587,7 +6593,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const clearing = isClearCommand(text);
       const preClearBaseline = clearing ? listJsonls(dirname(a.jsonlPath)) : undefined;
       const r = await inject({
-        text: full, images: [], cfg, log: log.child({ principal: target, sessionId: sid, sub: "init-demo" }),
+        text: full, images: [], cfg, guard: opts?.guard, log: log.child({ principal: target, sessionId: sid, sub: "init-demo" }),
         sessionId: sid, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn: fresh,
       });
       if (r.ok && a.tmuxPane) {

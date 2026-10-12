@@ -17,7 +17,7 @@ export const createTmuxBufferPaster = (run: typeof runTmux = runTmux) => {
     return result;
   };
 
-  return async (target: string, text: string): Promise<PasteResult> => {
+  return async (target: string, text: string, guard?: () => boolean): Promise<PasteResult> => {
     // Never let an absent target select tmux's current pane implicitly.
     if (!target.trim()) return { ok: false, reason: "tmux paste requires a target pane" };
     const probe = await (version ??= run(["-V"]));
@@ -39,6 +39,7 @@ export const createTmuxBufferPaster = (run: typeof runTmux = runTmux) => {
           return { ok: false, retryLegacy: true };
         }
         if (!loaded.ok) return { ok: false, reason: `tmux load-buffer failed: ${loaded.stderr.slice(-200) || loaded.code}` };
+        if (guard && !guard()) return { ok: false, reason: "paste canceled by dispatch guard" };
         const pasted = await run(["paste-buffer", ...buffer, "-p", "-d", "-t", target]);
         if (!pasted.ok) return { ok: false, reason: `tmux paste-buffer failed: ${pasted.stderr.slice(-200)}` };
         consumed = true;

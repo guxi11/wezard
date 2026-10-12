@@ -24,6 +24,7 @@ import type { ParentK } from "./receipts.js";
 
 export interface Item {
   turn: string;
+  dispatches?: string[];
   /** 派活的那方 (target key)。 */
   owner: string;
   to: string;
@@ -70,6 +71,8 @@ export const topicOf = (text: string): string =>
 const isFailure = (st?: ReceiptStatus): boolean => st === "timeout" || st === "silent" || st === "dead" || st === "canceled";
 
 export interface Ledger {
+  /** Idempotent tracked projection; recovery never reopens a settled leg. */
+  dispatch: (key: string, x: { turn: string; owner: string; to: string; text: string; for?: ParentK; asker?: Asker; job?: string; at: number }) => void;
   /** 一次新派活。同一对之前还开着的那件被顶掉 (回执登记也是一对一份, 旧那份不会再回来)。 */
   open: (x: { turn: string; owner: string; to: string; text: string; for?: ParentK; asker?: Asker; job?: string; at: number }) => void;
   /** 续问 (`re`) —— 同一件接着说: 清掉「等人」, 回到在飞; 已关掉的重新打开。 */
@@ -92,6 +95,13 @@ export const createLedger = (store: JsonMap<Item>, now: () => number = Date.now)
     return x && x.owner === owner && !x.closed ? x : undefined;
   };
   return {
+    dispatch: (key, { text, ...x }) => {
+      const old = store.get(x.turn);
+      if (old?.dispatches?.includes(key)) return;
+      all().filter((y) => !y.closed && y.owner === x.owner && y.to === x.to && y.turn !== x.turn).forEach((y) => close(y, "同一对又派了一件, 旧的回执不会再来"));
+      const { status: _s, ask: _a, waitHuman: _w, heard: _h, told: _t, closed: _c, ...rest } = old ?? {};
+      store.set(x.turn, { ...rest, ...x, topic: old?.topic ?? topicOf(text), touched: x.at, dispatches: [...(old?.dispatches ?? []), key] });
+    },
     open: ({ text, ...x }) => {
       all().filter((y) => !y.closed && y.owner === x.owner && y.to === x.to && y.turn !== x.turn).forEach((y) => close(y, "同一对又派了一件, 旧的回执不会再来"));
       store.set(x.turn, { ...x, topic: topicOf(text), touched: x.at });
