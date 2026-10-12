@@ -405,7 +405,7 @@ export const renderLeadRules = (pointer = false): string[] => [
   "## 我是这件活的 lead",
   "派你的 (管家或上级 lead) 把**整件**活交给了你, 你对结果负责, 过程自己组织; 只和相邻层说话:",
   bullet([
-    "**对上**: 终句 `RESULT:` (做成了什么 · commit · `ARTIFACT` 指针, **单列「取舍 / 遗留」一段**) 或 `NEED:`; 先自己判断, 答不了的才以 `NEED:` 上冒。你不对人说话, 由派你的那个代你对人交代",
+    "**对上**: 终句交代结论 (`RESULT:` 可选；做成了什么 · commit · `ARTIFACT` 指针, **单列「取舍 / 遗留」一段**) 或 `NEED:`; 先自己判断, 答不了的才以 `NEED:` 上冒。你不对人说话, 由派你的那个代你对人交代",
     "**对下**: 带 `job` 的 task 只发给自己这张单的成员; 成员之间只许 `ask` / `fyi`, 不越级、不碰别人单里的队员",
     "**管辖面**: 直接成员 ≤5, 预计超过 5 个就先留一个名额给子 lead (`spawn_wizard({tier:\"hard\", lead:true, job, task})`), task 里让它 `open_job({parent: 本单})` 自己拆; 工单树深度 ≤3",
     ...(pointer ? ["组队打法 (coder / 白板 reviewer / 何时收工) 随派活信封带"] : []),
@@ -417,7 +417,7 @@ export const renderLeadPlaybook = (): string[] => [
   "组队打法:",
   bullet([
     "**先想清楚再组队**: 读到能拆活、能判断 review 结论的程度就停, 别自己陷进实现细节; 只改一两处的小活自己做, 不必组队",
-    "**开工单**: `open_job({title, plan, accept:\"result\"})`, 之后每次派活都带 `job`",
+    "**开工单**: `open_job({title, plan})`, 之后每次派活都带 `job`",
     "**coder**: 要你读过的材料 → `clone_wizard({tier:\"standard\", job, task})`; 不需要 → `spawn_wizard({tier:\"standard\", job, task})`。task 写清改什么、验收标准、要 build + 验证; 多个 coder 只在改动互不重叠时并行",
     "**reviewer 必须白板起步**: `spawn_wizard({tier:\"hard\", job, role:\"reviewer\", task})` —— 不 clone、不带作者的上下文、不转述作者的思路, 只给改动范围 (commit / diff / 文件) 与验收标准, 让它独立找问题",
     "**节奏**: coder 交 `RESULT` → reviewer 审 → 有问题 `tell_peer({name: coder, re})` 打回去改 → 再审; 两轮还不过就自己判断取舍",
@@ -436,7 +436,7 @@ const renderTopOnly = (): string[] => [
   bullet([
     "守护进程强制: `tell_peer` / `dispatch` 的 `public:true` 不起作用, 一律私聊; 这一轮不是在服务人问的事的 wizard 调 `notify` 进本群会被退回",
     "这一轮在服务**人问的事** (人直接对你说的, 或那件事派出去的活回来了) → 你是顶层: 子 wizard 的结论回到你这儿, 你用自己的话向人解释 —— 讲结论、取舍和要人拍板的, 不转述过程、不贴它们的原话; 等得久的进展自己 `notify` 一句",
-    "这一轮是同伴私聊派来的活 → 你不是顶层: 不对人说话, 结论、反问都写进终句 (`RESULT:` / `NEED:`), 由派你的那个代你向人交代; 要人拍板的也以 `NEED:` 交回上游",
+    "这一轮是同伴私聊派来的活 → 你不是顶层: 不对人说话, 结论、反问都写进终句 (结论可用 `RESULT:`；反问用 `NEED:`), 由派你的那个代你向人交代; 要人拍板的也以 `NEED:` 交回上游",
   ]),
 ];
 

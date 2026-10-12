@@ -404,7 +404,7 @@ const TELL_SCHEMA = {
   kind: z
     .enum(["task", "ask", "fyi"])
     .optional()
-    .describe("对方该怎么接这句话 (与 `priority` 的何时投、`receipt` 的要不要回执正交): `task` (默认) 一件活, 干完收口 `RESULT:`; `ask` 只答一个问题, 别为它开工; `fyi` 知会, 不用回 —— 自动不要回执、不进工单、不进群。"),
+    .describe("对方该怎么接这句话 (与 `priority` 的何时投、`receipt` 的要不要回执正交): `task` (默认) 一件活, 干完在终句交代结论 (`RESULT:` 可选); `ask` 只答一个问题, 别为它开工; `fyi` 知会, 不用回 —— 自动不要回执、不进工单、不进群。"),
   re: z.string().optional().describe("续问: 回执或回包里的件号 (`t…`)。接着那件活说, 沿用它的工单与频道; 对不上就按新活发出 (`reUnknown`)。"),
   deadline: z.number().optional().describe("最多等它多少秒 (60-43200, 默认 3600); 到点没答完你收到一份 timeout 回执。"),
   force: z
@@ -424,7 +424,7 @@ const TELL_SCHEMA = {
 const TELL_DESC =
   "跟另一个 wizard 说话 —— 文本原样落进它的输入框, 它当成新的一轮接手 (派活、答它的问题、叫它继续都走这里)。目标不存在就先 spawn_wizard / clone_wizard。\n" +
   "**说完就返回**: 对方干完那一轮, 它的最后一条消息作为**新的一轮**自动送到你这里 (回执, 带信封说明是谁、哪场对话、工单还差几份); 你正忙时回执排队等你说完。\n" +
-  "默认私聊, 只记在双方 rolepage; 守护进程给 `text` 挂信封 (发话人、私聊/公开、`RESULT: …` 收口)。拒绝对自己发送。\n" +
+  "默认私聊, 只记在双方 rolepage; 守护进程给 `text` 挂信封 (发话人、私聊/公开、终句收口约定)。拒绝对自己发送。\n" +
   "**派活方向 (守护进程拦, 返回 409 带改道说法)**: 带 `job` 的 task 只许开单者发; 同一张单的成员之间只许 `ask` / `fyi`, 不横向派 task; 上级单的开单者不越级给下层成员派活 (经它的 lead `re`); 目标正等你答复 (在你的 k 链上) 时 task / ask 都不行, 以 `NEED:` 收口; 自己已在 ≥3 层派活链底部不再往下派 task; 借来的专家 (role expert) 只答 ask; 一个 wizard 同时只在一张开着的单里当未落定的执行者。`fyi` 永远放行。";
 
 const tellBody = (a: { name: string; text: string; kind?: string; priority?: string; waitSec?: number; job?: string; role?: string; public?: boolean; receipt?: boolean; re?: string; deadline?: number; chain?: boolean; force?: boolean; after?: string[] }) => ({
@@ -952,14 +952,14 @@ server.registerTool(
     title: "Open a job for a fan-out",
     description:
       "开一个**工单**: 你接下来要同时派出两个以上的分身干同一件事时, 先开它。返回一个 id, 把这个 id 传给 spawn_wizard / clone_wizard / tell_peer 的 `job` 参数, 它们就归到这个工单名下。\n" +
-      "开了工单之后有三件事不一样: ① 带这个 id 的派活一律私聊, 开工、派活、回执、收工都**不进群** —— 结构在 rolepage 的工单页里, 人在群里只看到你自己那一轮的最终回复。② list_jobs 能看到还开着哪些活。③ 默认验收: 成员交上来的答复没有非空的 `RESULT:` (按 `accept`), 守护进程以你的名义同件号打回一次, 那一份不投给你、不计数, 也不占 `maxTurns`; 再交上来的照收。\n" +
+      "开了工单之后有三件事不一样: ① 带这个 id 的派活一律私聊, 开工、派活、回执、收工都**不进群** —— 结构在 rolepage 的工单页里, 人在群里只看到你自己那一轮的最终回复。② list_jobs 能看到还开着哪些活。③ 默认不做格式验收；显式设置 `accept:result` 或 `artifact` 时，成员答复不符合格式要求， 守护进程以你的名义同件号打回一次, 那一份不投给你、不计数, 也不占 `maxTurns`; 再交上来的照收。\n" +
       "只派一个分身、或者只是推某个同伴一把, 不用开工单。",
     inputSchema: {
       title: z.string().describe("一句话说清这个工单要干成什么 —— 工单页与收工留档的标题。"),
       plan: z.string().optional().describe("计划 (打算分几路、各干什么), 记进工单账本给工单页读。"),
       expect: z.number().optional().describe("这批一共要几份回执。分身是陆续派的, 给了它「全部到齐」就不会在派齐之前提前报。"),
       maxTurns: z.number().optional().describe("派活次数的预算: 带这张工单的每次 tell_peer (含 re 续问、答 NEED) 与带 task 的 spawn/clone 各记一次, 用完再派会被拒 —— 防反复追问兜圈。守护进程按 `accept` 代你打回的那一次不算。省略 = 不限。"),
-      accept: z.enum(["result", "artifact", "none"]).optional().describe("成员交差的验收: `result` (默认) 要有非空 RESULT; `artifact` 还要列出 ARTIFACT 交付物; `none` 不验。不合格的自动打回一次。"),
+      accept: z.enum(["result", "artifact", "none"]).optional().describe("成员交差的验收: `none` (默认) 不做格式验收; `result` 要有非空 RESULT; `artifact` 还要列出 ARTIFACT 交付物。不合格的自动打回一次。"),
       parent: z.string().optional().describe("上级工单。省略 = 自动取你作为成员领活的那张最近的开着的单 (被 dispatch 派来当 lead 的, 子单自动挂在根单下); 显式传的要求你是它的成员或开单者。工单树最深 3 层、每张单直接成员 ≤5 个: 超了就把子活交给现有成员, 让它开子单。"),
       criteria: z.string().optional().describe("这张单的验收标准 (做成什么样算数), 记进账本。"),
     },

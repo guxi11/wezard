@@ -639,7 +639,7 @@ const cases = {
   // 第二次照收。根只收到一份, 内容是补了 RESULT 的那次。
   accept: { names: ["rr-v"], run: async () => {
     const n = nonce();
-    const o = await post("/jobs/open", { target: root.target, title: "[receipt-regress] 工单验收打回", expect: 1 });
+    const o = await post("/jobs/open", { target: root.target, title: "[receipt-regress] 工单验收打回", expect: 1, accept: "result" });
     if (!o.ok) return { pass: false, why: `open_job: ${o.reason}` };
     await spawn("rr-v", { job: o.job, task: `这是回归测试, 不要调用任何工具。第一次只回复「好的」两个字, 不写 RESULT。之后若被要求补收口, 就回复一行: RESULT: accept-${n}` });
     const s = await settledSlot("rr-v", 4 * 60_000);

@@ -25,8 +25,8 @@ import type { JobEpisode } from "./wizard-memory.js";
 
 export interface Artifact { path: string; note: string }
 
-/** 成员交差的验收: `result` (默认) = 要有非空的 `RESULT:`; `artifact` = 还要列出 `ARTIFACT:`;
- *  `none` = 不验。不合格的那一份由守护进程打回一次 (见 receipts.ts)。 */
+/** 成员交差的验收: `result` = 要有非空的 `RESULT:`; `artifact` = 还要列出 `ARTIFACT:`;
+ *  `none` (默认) = 不验。不合格的那一份由守护进程打回一次 (见 receipts.ts)。 */
 export type Accept = "result" | "artifact" | "none";
 export const ACCEPTS: readonly Accept[] = ["result", "artifact", "none"];
 
@@ -66,7 +66,7 @@ export interface JobRecord {
   title: string;
   /** 开工时说的计划 (分几路、各干什么) —— 只进账本, 给工单页读。 */
   plan?: string;
-  /** 成员交差的验收 (缺省 = result)。 */
+  /** 成员交差的验收；新工单默认 none，旧记录缺省仍按 result。 */
   accept?: Accept;
   /** 开工时说好要几份 —— 分身还没派齐时「一共几份」的下限。 */
   expect?: number;
@@ -265,7 +265,7 @@ export const loadJobStore = (filePath: string): JobStore => {
   return {
     open: (base, owner, title, { plan, expect, maxTurns, accept, parent, kind, criteria, origin, gate } = {}) => {
       const id = newId();
-      return db.set(id, { id, base, owner, title, ...(parent ? { parent } : {}), ...(kind ? { kind } : {}), ...(criteria ? { criteria } : {}), ...(origin ? { origin } : {}), ...(gate ? { gate } : {}), ...(plan ? { plan } : {}), ...(accept && accept !== "result" ? { accept } : {}), ...(expect ? { expect } : {}), ...(maxTurns ? { maxTurns, turns: 0 } : {}), members: [], status: "open", openedAt: Date.now() });
+      return db.set(id, { id, base, owner, title, ...(parent ? { parent } : {}), ...(kind ? { kind } : {}), ...(criteria ? { criteria } : {}), ...(origin ? { origin } : {}), ...(gate ? { gate } : {}), ...(plan ? { plan } : {}), accept: accept ?? "none", ...(expect ? { expect } : {}), ...(maxTurns ? { maxTurns, turns: 0 } : {}), members: [], status: "open", openedAt: Date.now() });
     },
     spend: (id) => {
       const j = db.get(id);

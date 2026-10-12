@@ -441,14 +441,13 @@ export const parseClosing = (text: string, max = 800): Closing => {
   // 标记之后的**全部**内容, 而不是"那一行" —— 结论常常不止一行 (路径一行、说明
   // 一行)。约定是收口在最后, 所以标记之后剩下的就是结论。取最后一个匹配: 模型常
   // 先复述一遍格式要求再给答案。ARTIFACT 行不算结论正文。
-  const after = (m: RegExpMatchArray): string => clipMiddle(text.slice((m.index ?? 0) + m[0].length).replace(ARTIFACT_RE, "").trim(), max);
   const marks = [...text.matchAll(CLOSING_RE)];
-  // 交差优先: 写了 RESULT 就是交差, 哪怕后面跟一句 `NEED: 无` —— 当成反问, 工单就卡到超时。
-  const result = marks.filter((m) => m[1] !== "NEED").at(-1);
-  if (result) return { kind: "result", text: after(result), artifacts };
-  const need = marks.at(-1);
-  const q = need ? after(need) : "";
-  return q && !/^(?:无|没有|none|n\/a|-+)[。.]?$/i.test(q) ? { kind: "need", text: q, artifacts } : { kind: "none", text: "", artifacts };
+  // 最后一个有效标记决定收口；忽略 NEED: 无，但不能让较早的 RESULT 吞掉后续求助。
+  const closing = marks.map((m, i) => {
+    const body = text.slice((m.index ?? 0) + m[0].length, marks[i + 1]?.index).replace(ARTIFACT_RE, "").trim();
+    return { kind: m[1] === "NEED" ? "need" as const : "result" as const, text: body };
+  }).filter((c) => c.kind === "result" || (c.text && !/^(?:无|没有|none|n\/a|-+)[。.]?$/i.test(c.text))).at(-1);
+  return closing ? { ...closing, text: clipMiddle(closing.text, max), artifacts } : { kind: "none", text: "", artifacts };
 };
 
 /** The peer's most recent assistant message — the handoff payload when one
@@ -636,7 +635,7 @@ export const renderPeerEnvelope = (from: string, chat?: string, t?: TurnTag & { 
             ? ["发话方**不收回执**: 你这一轮的终句不会送到任何地方 —— 别 tell_peer 回它, 也别为这一轮 notify。"]
             : [
                 "你这一轮的**最后一条消息**就是给它的回执 —— 你一停下, 守护进程自动送进它的输入框, **不需要再调任何工具**: 不要 send_peer 回它 (那会让它多跑一轮), 也不要为这一轮 notify。",
-                "对 wizard 直说: 不寒暄、不加对人的称呼、不复述它的话; 结论收口成末尾的 `RESULT: …` (交付物写进文件就回传路径); 要它补信息才能干下去, 就收口成 `NEED: <问题>` (这一份不算交差); 交付了文件, 每个加一行 `ARTIFACT: <路径> — 一句话`。",
+                "对 wizard 直说: 不寒暄、不加对人的称呼、不复述它的话; 终句直接交代结论 (`RESULT: …` 可选) (交付物写进文件就回传路径); 要它补信息才能干下去, 就收口成 `NEED: <问题>` (这一份不算交差); 交付了文件, 每个加一行 `ARTIFACT: <路径> — 一句话`。",
               ]),
         ]
       : [
@@ -644,10 +643,10 @@ export const renderPeerEnvelope = (from: string, chat?: string, t?: TurnTag & { 
         ]),
     ...(t?.re ? ["这是**续问**: 接着那件活说, 不是一件新活。"] : []),
     // 这句话要怎么接 —— 只有发话方知道, 不写出来对方一律当成一件活去干。
-    ...(t?.act === "ask" ? [`这是一个**提问**: 只答这一问, 几句话${t.quiet ? "" : "收口 (`RESULT: <答案>`)"}, 别为它开新活; 你手上原来的活答完接着干。`] : []),
+    ...(t?.act === "ask" ? [`这是一个**提问**: 只答这一问, 几句话${t.quiet ? "" : "收口 (`RESULT:` 可选)"}, 别为它开新活; 你手上原来的活答完接着干。`] : []),
     ...(t?.act === "fyi" ? ["这是一条**知会**: 不用回复、不用收口, 也别为它开新活 —— 与手头的活相关就顺手吸收, 无关就略过; 一句话收住这一轮即可。"] : []),
     // 来回多了就收口: 不在守护进程里拒绝 —— 拒了模型会换条通路接着乒乓。
-    ...((t?.legs ?? 0) > 3 ? [`这件活已经来回 ${t!.legs! - 1} 次: 这一次请直接给 \`RESULT:\`, 拿不准的写清你的假设。`] : []),
+    ...((t?.legs ?? 0) > 3 ? [`这件活已经来回 ${t!.legs! - 1} 次: 这一次请直接给结论, 拿不准的写清你的假设。`] : []),
     ...(t?.deadline ? [`期限 ${hhmm(t.deadline)}: 到点还没答完, 发话方收到的是一份超时回执。`] : []),
   ]);
 
@@ -677,7 +676,7 @@ export const renderReceiptEnvelope = (
         : [`这是**失败回执**: ${FAILED[status]}, 这一份不会再有答案了 (工单里按已落定计)。自己判断: 换人、再 tell_peer 追问, 或者在汇总里如实写缺了这一份。下面是守护进程的说明和它最后说的一句。`]),
     // 去向由守护进程按派活链算好 (receipts.routeOf), 这里只告诉模型终句会落到哪。
     ...(route?.replyTo?.startsWith(".")
-      ? ["你这一轮的**最后一条消息会作为回执送回 `reply-to`** (它当初把这件活派给你, 你转给了 `from`) —— 据此收口, 末尾写 `RESULT: …`。"]
+      ? ["你这一轮的**最后一条消息会作为回执送回 `reply-to`** (它当初把这件活派给你, 你转给了 `from`) —— 据此在终句交代结论 (`RESULT:` 可选)。"]
       : route?.replyTo
         ? [`你这一轮的**最后一条消息会发进 \`reply-to\` 那个群**, ${route.audience ? "`audience` " : "人"}在等这件事的结论 —— 写给人看: 做成了什么、没做成什么, 不复述它的原话。`]
         : route?.pending && !(job && job.job)
