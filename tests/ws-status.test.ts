@@ -5,6 +5,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import pino from "pino";
 import { ConfigSchema } from "../shared/config.js";
 import { startWs } from "../daemon/ws.js";
+import { startMux } from "../daemon/bot-mux.js";
 import { startHttp } from "../daemon/http.js";
 
 const log = pino({ level: "silent" });
@@ -15,7 +16,7 @@ let connections = 0;
 let socket: WebSocket;
 let beforeAuth: { connected: boolean; authenticated: boolean } | undefined;
 const cfg = ConfigSchema.parse({ bot: { botId: "test", secret: "test", websocketUrl: `ws://127.0.0.1:${port}` }, wrc: { defaultCli: "codex" } });
-const ws = startWs(cfg, log);
+const ws = startWs(cfg.bot, log);
 server.on("connection", (s) => {
   socket = s;
   connections++;
@@ -36,7 +37,7 @@ await new Promise<void>((resolve) => reserve.listen(0, "127.0.0.1", resolve));
 const httpPort = (reserve.address() as { port: number }).port;
 await new Promise<void>((resolve) => reserve.close(() => resolve()));
 cfg.daemon.port = httpPort;
-const http = startHttp({ cfg, ws, log, sourcePath: "/test/config.jsonc" });
+const http = startHttp({ cfg, ws: startMux(cfg, log, () => ws), log, sourcePath: "/test/config.jsonc" });
 try {
   const status = await (await fetch(`http://127.0.0.1:${httpPort}/status`)).json() as any;
   assert.equal(status.backend, "codex");
