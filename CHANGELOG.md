@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [2.6.2] - 2026-10-12
+
+### Fixed
+- tmux 命名 buffer 的 load 明确返回 `buffer invalid` 时，即使版本探测偏高也安全退回无名 buffer；先等待已开始的命名投递及清理结束，再串行执行 load→paste，始终保持原目标 pane。现代正常路径继续并发；paste 失败、超时和其他错误不自动重贴。
+- 旧 tmux 在读取大消息 stdin 前拒绝参数时，处理管道 `EPIPE`，避免 daemon 崩溃，并保留原始 tmux 退出码和错误以完成兼容降级。
+
 ## [2.6.1] - 2026-10-12
 
 ### Fixed
@@ -1051,7 +1057,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.6.1...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.6.2...HEAD
+[2.6.2]: https://github.com/guxi11/wezard/compare/v2.6.1...v2.6.2
 [2.6.1]: https://github.com/guxi11/wezard/compare/v2.6.0...v2.6.1
 [2.6.0]: https://github.com/guxi11/wezard/compare/v2.5.1...v2.6.0
 [2.5.1]: https://github.com/guxi11/wezard/compare/v2.5.0...v2.5.1
