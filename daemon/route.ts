@@ -13,11 +13,17 @@
 // 打上「不划算」—— 默认偏向省钱, 但仍只是标记, 拍板的还是管家。
 //
 // 全是纯函数: 候选的原料 (文件集 / 最近的话 / ctx) 由调用方从 transcript 读好送进来。
+import { resolve, basename } from "node:path";
+import type { JobRecord } from "./jobs.js";
+import type { InFlight } from "./receipts.js";
 import { addr, agoOf, ctxOf, type WizardBrief } from "./wizard.js";
 import type { TierName } from "../shared/config.js";
 
 export interface RouteRow extends WizardBrief {
   busy: boolean;
+  /** 身份上的 lead 与所有开放工单占用, 不随 spinner 消失。 */
+  lead?: boolean;
+  duties?: readonly string[];
   alive: boolean;
   lastActivity: number;
   contextTokens: number;
@@ -25,7 +31,7 @@ export interface RouteRow extends WizardBrief {
   cacheTtlMs?: number;
   /** 缓存最近一次被碰的时刻 = 最近一次真实请求的开始 (cacheTouchMs); 缺 = 退回 lastActivity (mtime)。 */
   cacheAt?: number;
-  /** 这段上下文里碰过的文件 (contextFiles), 绝对路径。 */
+  /** 这段上下文里碰过的文件 (contextFiles), 相对路径以候选 cwd 为基准。 */
   files: readonly string[];
   /** 最近几句问话 (去掉了保温 ping)。 */
   asks: readonly string[];
@@ -43,6 +49,8 @@ interface Evidence {
   /** 点到了、但几乎人人读过的公共文件: 不计证据, 只摆出来说明为什么被降权。 */
   common: string[];
   sameCwd: boolean;
+  continuity: boolean;
+  clues: string[];
 }
 
 // 这类词两边都常见, 撞上了也说明不了是同一件事。
@@ -64,7 +72,37 @@ export const termsOf = (text: string): Set<string> => {
   return new Set([...ascii, ...han].filter((t) => t.length >= 2 && !STOP.has(t) && !/^\d+$/.test(t)));
 };
 
-const shared = (task: Set<string>, text: string): string[] => [...termsOf(text)].filter((t) => task.has(t));
+// 项目指引不因候选池小、职责或最近问话里又提到而升级成强证据。
+const GUIDANCE = new Set(["agents", "claude", "readme", "contributing", "code_of_conduct", "changelog", "license", "copilot-instructions", "gemini"]);
+const withoutGuidance = (text: string): string => text.replace(/[A-Za-z0-9_][A-Za-z0-9_.\-/]{2,}/g,
+  (w) => GUIDANCE.has(stemOf(w).toLowerCase()) ? " " : w);
+const fileRefs = (text: string): string[] => text.match(/(?:\/|\.\/|\.\.\/)?[A-Za-z0-9_][A-Za-z0-9_.\/-]*\.[A-Za-z][A-Za-z0-9]*(?![A-Za-z0-9_.\/-])/g) ?? [];
+const CONTINUE_RE = /继续|接着|续篇|上一轮|上次|刚才|此前|follow[ -]?up|continue|previous (?:task|change)|your (?:change|patch)/i;
+// 独立验收与否定续篇优先; 历史背景里提到「刚才」不能把新活变成续篇。
+const SEPARATE_RE = /(?:不要|别|无需|不再|不是|并非|不用|不能|不应).{0,8}(?:继续|接着|续篇|上一轮|上次)|独立(?:的)?(?:新)?(?:任务|问题|事项|核查|核实|检查)|新(?:的)?(?:任务|问题)|(?:do not|don't|never|not)\s+(?:continue|resume|follow[ -]?up)|(?:independent|unrelated|separate|new)\s+(?:task|question|check)/i;
+
+const UNSETTLED = new Set<InFlight["state"]>(["working", "blocked", "needs-input", "deferred", "errored", "queued"]);
+type RouteInFlight = Pick<InFlight, "from" | "to" | "turn" | "state">;
+
+/** 没开工单的任务也占用: 接入的欠着, 派出的在等; spinner 闲不代表已交差。 */
+export const routeReceiptDutiesOf = (inflight: readonly RouteInFlight[], target: string): string[] => inflight
+  .filter((x) => UNSETTLED.has(x.state))
+  .flatMap((x) => [
+    ...(x.to === target ? [`${x.turn} 欠着 ${x.from}: ${x.state}`] : []),
+    ...(x.from === target ? [`${x.turn} 在等 ${x.to}: ${x.state}`] : []),
+  ]);
+
+/** 只读全表占用: 自己开的、跨群的单同样占用; 落定成员可释放, owner 要等关单。 */
+export const routeDutiesOf = (jobs: readonly JobRecord[], target: string, inflight: readonly RouteInFlight[] = []): string[] => [
+  ...jobs.filter((j) => j.status === "open").flatMap((j) => [
+    ...(j.owner === target ? [`${j.id} 开单者: ${j.title}`] : []),
+    ...j.members.filter((m) => m.target === target && !m.outcome)
+      .map((m) => `${j.id} ${m.role ?? "exec"}: ${m.task || j.title}`),
+  ]),
+  ...routeReceiptDutiesOf(inflight, target),
+];
+
+const shared = (task: Set<string>, text: string): string[] => [...termsOf(withoutGuidance(text))].filter((t) => task.has(t));
 
 const relTo = (cwd: string, p: string): string => (cwd && p.startsWith(`${cwd}/`) ? p.slice(cwd.length + 1) : p);
 
@@ -78,30 +116,35 @@ const near = (a: string, b: string): boolean => !!a && !!b && (a === b || a.star
 const stemsOf = (text: string): Set<string> =>
   new Set((text.match(/[A-Za-z0-9_][A-Za-z0-9_.\-/]{2,}/g) ?? []).map((w) => stemOf(w).toLowerCase()).filter((w) => w.length >= 3 && !STOP.has(w)));
 
-/** 同一个文件名只留最后碰的那一次 (`./wizard.js` 与 `daemon/wizard.ts` 是一回事)。 */
-const byStem = (files: readonly string[]): string[] =>
-  files.filter((f, i) => !files.slice(i + 1).some((g) => stemOf(g) === stemOf(f)));
+/** 同名文件可能是不同任务的材料, 只去除重复路径。 */
+const uniqueFiles = (files: readonly string[]): string[] => [...new Set(files)];
 
 /** 公共文件: 池子里不少候选都读过的文件名 (web/chat.js、shared/role-view.ts 这类) —— 谁都读过, 不构成选人理由。
- *  至少 3 个候选读过且占到池子的三成才算; 池子太小 (<3) 没有统计意义, 不判。 */
+ *  统计类至少 3 个候选读过且占到池子的三成; 项目指引在任何池子里固定降权。 */
 export const commonStems = (rows: readonly RouteRow[]): Set<string> => {
   const need = Math.max(3, Math.ceil(rows.length * 0.3));
   const tally = rows.flatMap((r) => [...new Set(r.files.map((f) => stemOf(f).toLowerCase()))])
     .reduce((m, s) => m.set(s, (m.get(s) ?? 0) + 1), new Map<string, number>());
-  return new Set([...tally].filter(([, n]) => n >= need).map(([s]) => s));
+  return new Set([...GUIDANCE, ...[...tally].filter(([, n]) => n >= need).map(([s]) => s)]);
 };
 
-const evidenceOf = (task: Set<string>, stems: Set<string>, common: Set<string>, taskCwd: string) => (row: RouteRow): Evidence => {
+const evidenceOf = (text: string, task: Set<string>, stems: Set<string>, common: Set<string>, taskCwd: string) => (row: RouteRow): Evidence => {
   // 文件只认整个文件名被点到: 目录名 (daemon/、web/) 几乎每个文件都带, 文件名里的
   // 半截词 (role-render 的 render) 又太常见 —— 撞上它们说明不了读过这一个。
-  const hit = byStem(row.files.filter((f) => stems.has(stemOf(f).toLowerCase())));
+  const hit = uniqueFiles(row.files.map((f) => resolve(row.cwd, f)).filter((f) => stems.has(stemOf(f).toLowerCase())));
   const isCommon = (f: string): boolean => common.has(stemOf(f).toLowerCase());
+  // 词面/同名文件只供人看。连续性还要有明确续篇、精确路径和近期任务里的同一文件。
+  const paths = new Set(fileRefs(text).map((f) => resolve(taskCwd, f)));
+  const files = hit.filter((f) => !isCommon(f) && !!taskCwd && paths.has(resolve(f)));
+  const recent = new Set(row.asks.flatMap(fileRefs).map((f) => resolve(row.cwd, f)));
   return {
     row,
+    continuity: !SEPARATE_RE.test(text) && CONTINUE_RE.test(text) && files.some((f) => recent.has(resolve(f))),
+    clues: hit.filter((f) => !isCommon(f) && !files.includes(f)),
     desc: shared(task, row.description),
     exp: shared(task, row.expertise ?? ""),
     asks: [...new Set(row.asks.flatMap((a) => shared(task, a)))],
-    files: hit.filter((f) => !isCommon(f)),
+    files,
     common: hit.filter(isCommon),
     sameCwd: near(row.cwd, taskCwd),
   };
@@ -109,14 +152,14 @@ const evidenceOf = (task: Set<string>, stems: Set<string>, common: Set<string>, 
 
 // 排序只是让最有证据的先被看到: 文件命中 (它真读过) > 职责 > 最近的话; 同工作区只用来打破平手。
 // 专长是它自己声明的「熟哪块」, 与职责同权。
-const weight = (e: Evidence): number => e.files.length * 3 + (e.desc.length + e.exp.length) * 2 + e.asks.length;
+const weight = (e: Evidence): number => e.files.length * 3 + e.clues.length + (e.desc.length + e.exp.length) * 2 + e.asks.length;
 
 /** 有交集的候选, 证据最强的在前。 */
 export const rankCandidates = (task: string, taskCwd: string, rows: readonly RouteRow[], hot?: { now: number; ttlMs: number }): Evidence[] => {
   // 平手时缓存热的优先 (同一把尺 wakeCostOf: 没冷 = 唤醒只读缓存); 不给 hot 就不分。
   const warm = (r: RouteRow): number => (hot && !wakeCostOf(r.contextTokens, touchOf(r), hot.now, r.cacheTtlMs ?? hot.ttlMs).cold ? 1 : 0);
   return rows
-    .map(evidenceOf(termsOf(task), stemsOf(task), commonStems(rows), taskCwd))
+    .map(evidenceOf(task, termsOf(withoutGuidance(task)), stemsOf(task), commonStems(rows), taskCwd))
     .filter((e) => weight(e) > 0 || e.common.length > 0)
     .sort((x, y) => weight(y) - weight(x) || Number(y.sameCwd) - Number(x.sameCwd) || warm(y.row) - warm(x.row) || y.row.lastActivity - x.row.lastActivity);
 };
@@ -169,9 +212,13 @@ export const coldGateOf = (name: string, ctx: number, touchedAt: number, now: nu
     : "";
 };
 
-/** 一句话就说得清的小活: 改样式 / 文案 / 单点修改 / 简单查询 —— 用不上谁的长上下文。 */
-const SMALL_RE = /样式|css|border|颜色|字号|字体|间距|边距|圆角|阴影|对齐|图标|文案|措辞|改名|重命名|typo|错别字|拼写|一行|单点|查一下|看一下|问一下|是多少|在哪/i;
-export const isSmallTask = (task: string): boolean => task.length <= 40 || (task.length <= 160 && SMALL_RE.test(task));
+/** 短句不等于简单: 先排除需要判断的任务, 再认明确的跑腿/单点动作。 */
+const COMPLEX_RE = /架构|疑难|排障|诊断|根因|设计|审查|评审|重构|竞态|死锁|性能|安全|architecture|design|review|debug|diagnos|root cause|refactor|race condition|deadlock/i;
+const SMALL_RE = /改(?:名|文案|颜色|字号|字体|间距|边距|圆角)|重命名|typo|错别字|拼写|(?:修改|调整).*(?:css|border|颜色|字号|字体|间距|边距|圆角)|(?:核实|确认|检查|查一下|查看|check|verify).*(?:文件.*(?:存在|加载|路径)|加载路径|file.*(?:exist|load|path))|(?:文件.*(?:存在|加载路径)).*(?:核实|确认|检查)|rename|fix (?:a )?typo/i;
+const FILE_CHECK_RE = /(?:核实|确认|检查|查一下|查看|check|verify).*(?:存在|加载|路径|exists?|load|path)/i;
+export const isSmallTask = (task: string): boolean => task.length <= 160 && !COMPLEX_RE.test(withoutGuidance(task))
+  && (SMALL_RE.test(task) || (fileRefs(task).length > 0 && FILE_CHECK_RE.test(task)));
+const smallFor = (task: string, tier?: TierName): boolean => tier ? tier === "mini" || tier === "light" : isSmallTask(task);
 
 /** 证据弱 (没碰过这件活点到的文件; 小活则少于 3 个) 又贵 (冷且 ≥60k, 或热但 ≥150k) → 不划算。 */
 const notWorth = (e: Evidence, w: WakeCost, small: boolean, ctx: number): boolean =>
@@ -218,7 +265,7 @@ const renderOne = (e: Evidence, c: Ctx): string[] => {
     e.desc.length ? `职责${quoted(e.desc)}` : "",
     e.exp.length ? `专长${quoted(e.exp)}` : "",
     e.asks.length ? `最近的话${quoted(e.asks)}` : "",
-    e.common.length ? `降权的公共文件 ${e.common.slice(-4).map((f) => relTo(r.cwd, f)).join(" ")}${e.common.length > 4 ? ` +${e.common.length - 4}` : ""} (不少人都读过, 不计证据)` : "",
+    e.common.length ? `降权的公共文件 ${e.common.slice(-4).map((f) => relTo(r.cwd, f)).join(" ")}${e.common.length > 4 ? ` +${e.common.length - 4}` : ""} (公共指引或多人读过, 不计证据)` : "",
   ].filter(Boolean);
   return [
     [`\`${addr(r)}\` ${r.busy ? "忙" : r.alive ? "闲" : "冷"}`, where, ctxOf(r.contextTokens) || "ctx ?", agoOf(r.lastActivity, now)]
@@ -226,6 +273,11 @@ const renderOne = (e: Evidence, c: Ctx): string[] => {
     ...(r.description ? [`  职责: ${r.description}`] : []),
     ...(r.expertise ? [`  专长: ${r.expertise}`] : []),
     `  命中: ${hits.join(" · ")}`,
+    ...(e.clues.length ? [`  同名文件线索: ${e.clues.map((f) => basename(f)).join(" ")} (路径未对上, 不证明连续性)`] : []),
+    ...(r.lead ? ["  占用: lead 身份"] : []),
+    ...(r.duties?.length ? [`  占用: ${r.duties.join(" · ")}`] : []),
+    `  连续性: ${e.continuity ? "续篇点到近期任务的同一文件" : "未证实; 文件/职责/问话的词面匹配仅是线索"}`,
+    `  自动复用: ${vetoOf(e, now, c.ttlMs, c.small, false) || "可选; 真实续篇优先 tell_peer re"}`,
     ...(r.files.length ? [`  上下文: 读过 ${r.files.length} 个文件 (${spread(r.cwd, r.files)})`] : []),
     ...costLines(e, c),
     ...(r.summary ? [`  最近: ${r.summary}`] : []),
@@ -239,7 +291,7 @@ export const renderCandidates = (task: string, cands: readonly Evidence[], now: 
     cands.length
       ? `和这件活有交集的已有 wizard ${cands.length} 个, 证据强的在前 (文件命中 = 它真读过; 词面重叠只是线索):`
       : "没有哪个已有 wizard 的职责、最近的话或读过的文件和这件活有交集。",
-    ...(c.small ? ["体量: 看着是小活 (一句话 / 样式 / 单点修改 / 简单查询) —— 默认白板 spawn 或交给 ctx 小的, 除非它真依赖某段上下文。"] : []),
+    ...(c.small ? ["体量: 看着是小活 (明确简单动作) —— 默认白板 spawn 或交给 ctx 小的, 除非它真依赖某段上下文。"] : []),
     ...cands.flatMap((e) => renderOne(e, c)),
     "",
     `· 新 spawn —— 白板起步, 不背任何历史 (起步 ctx 约 ${k(FRESH_CTX)})。`,
@@ -250,25 +302,25 @@ export const renderCandidates = (task: string, cands: readonly Evidence[], now: 
 // ── dispatch: 管家派活的默认决定 ──────────────────────────────────────
 // 上面的表是给模型读的; 这里把同一套事实收成一个默认决定 —— 管家愚笨也不会派错的那一半:
 // 证据够强、不忙、划算、过得了冷门控的头一个候选 → 转给它; 都不是 → 按档白板 spawn。
-// 模型不同意就显式推翻 (`to` 点名 / `force` 越过冷门控), 不推翻就照这个办。
+// `to` 显式点名保留人为选择; `force` 只越缓存成本, 不越复用保护。
 
 export type Decision =
   | { kind: "existing"; row: RouteRow; why: string }
   | { kind: "spawn"; why: string };
-
-/** 「真的是同一件事」的最低证据: 它读过这件活点到的文件, 或职责撞上两个以上的词。 */
-const strong = (e: Evidence): boolean => e.files.length > 0 || e.desc.length + e.exp.length >= 2;
 
 /** 一个候选为什么不转给它; "" = 可以转。 */
 const vetoOf = (e: Evidence, now: number, ttlMs: number, small: boolean, force: boolean): string => {
   const r = e.row;
   const ctx = r.contextTokens;
   const w = wakeCostOf(ctx, touchOf(r), now, r.cacheTtlMs ?? ttlMs);
-  return !strong(e) ? "证据弱 (只有词面重叠)"
-    : r.busy ? "正忙"
-      : notWorth(e, w, small, ctx) ? `不划算 (${small ? "小活" : "证据弱"}却要${w.cold ? "整段重写" : "一直背着"} ${k(ctx)})`
-        : w.cold && ctx >= BIG_COLD && !force ? `缓存冷且 ctx ${k(ctx)} (大 ctx 已冷默认不转; 活真依赖它的上下文就 to+force)`
-          : "";
+  return r.lead ? "lead 身份, 独立任务不自动复用 (续篇用 tell_peer re)"
+    : r.duties?.length ? `任务占用 (${r.duties.join(" · ")})`
+      : !r.alive ? "不在线"
+        : r.busy ? "正忙"
+          : !e.continuity ? "未证实实质上下文连续性 (词面/文件交集只是线索; 续篇用 tell_peer re)"
+            : notWorth(e, w, small, ctx) ? `不划算 (${small ? "小活" : "证据弱"}却要${w.cold ? "整段重写" : "一直背着"} ${k(ctx)})`
+              : w.cold && ctx >= BIG_COLD && !force ? `缓存冷且 ctx ${k(ctx)} (大 ctx 已冷默认不转; 活真依赖它的上下文就 to+force)`
+                : "";
 };
 
 const evidenceLine = (e: Evidence): string =>
@@ -280,8 +332,8 @@ const evidenceLine = (e: Evidence): string =>
   ].filter(Boolean).join(" · ");
 
 /** 默认决定: 候选按证据排好 (rankCandidates), 取头一个没被否决的; 一个都没有 → spawn, 理由写前几个为什么不行。 */
-export const decide = (task: string, cands: readonly Evidence[], now: number, ttlMs: number, force = false): Decision => {
-  const small = isSmallTask(task);
+export const decide = (task: string, cands: readonly Evidence[], now: number, ttlMs: number, force = false, tier?: TierName): Decision => {
+  const small = smallFor(task, tier);
   const vetoes = cands.map((e) => ({ e, veto: vetoOf(e, now, ttlMs, small, force) }));
   const hit = vetoes.find((v) => !v.veto);
   if (hit) return { kind: "existing", row: hit.e.row, why: `转给 ${addr(hit.e.row)}: ${evidenceLine(hit.e)}` };
@@ -293,6 +345,6 @@ export const decide = (task: string, cands: readonly Evidence[], now: number, tt
   };
 };
 
-/** spawn 时的默认档: lead 要判断 → hard; 一句话的小活 → light; 其余 standard。两头的 mini / ultra 只由调用方显式给。 */
+/** spawn 时的默认档: lead/架构排障设计评审 → hard; 明确简单动作 → light; 其余 standard。两头的 mini / ultra 只由调用方显式给。 */
 export const tierFor = (task: string, lead: boolean): TierName =>
-  lead ? "hard" : isSmallTask(task) ? "light" : "standard";
+  lead || COMPLEX_RE.test(withoutGuidance(task)) ? "hard" : isSmallTask(task) ? "light" : "standard";

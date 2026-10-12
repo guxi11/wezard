@@ -5,7 +5,7 @@ import { timingSafeEqual } from "node:crypto";
 import { loadOrCreateSvrToken } from "../shared/svr-token.js";
 import { DAEMON_TOKEN_FILE, DAEMON_TOKEN_HEADER } from "../shared/daemon-token.js";
 import { homedir } from "node:os";
-import { TIERS, defaultChatFor, tiersForBackend, loadConfig } from "../shared/config.js";
+import { TIERS, defaultChatFor, tiersForBackend, loadConfig, type TierName } from "../shared/config.js";
 import { makeLogger } from "../shared/log.js";
 import { clipLine, sleep, truncate } from "../shared/std.js";
 import { patchJsonc } from "../shared/config-writer.js";
@@ -100,7 +100,7 @@ import { renderInFlight } from "../shared/turn-state.js";
 import { startIdleNudge } from "./idle-nudge.js";
 import { askerFromEnvelope, renderReminder, type TurnTag } from "../shared/reminder.js";
 import { createHandoffs, handedOff, handingOff, type Owe, type Pending as PendingHandoff } from "./handoff.js";
-import { coldGateOf, decide, rankCandidates, renderCandidates, tierFor, wakeCostOf, wakeNoteOf, type RouteRow } from "./route.js";
+import { coldGateOf, decide, rankCandidates, renderCandidates, routeDutiesOf, tierFor, wakeCostOf, wakeNoteOf, type RouteRow } from "./route.js";
 import { parseWhen, renderChatLog, UNKNOWN_HUMAN, type LogSession } from "./chat-log.js";
 import { audienceOf } from "../shared/role-view.js";
 import {
@@ -2218,13 +2218,18 @@ const main = async (): Promise<void> => {
     const routeRowsOf = async (self: string): Promise<(RouteRow & { target: string })[]> => {
       ensureChatNames(self);
       const warm = keepalivePingSigs(cfg.wrc.mirror.keepalive.ping);
-      return (await rosterOf(self))
+      const roster = await rosterOf(self);
+      const openJobs = jobs.all();
+      const inflight = receipts.states();
+      return roster
         .filter((r) => !r.self)
         .map((r) => {
           const live = r.jsonlPath ? r.jsonlPath : "";
           const ttl = live ? cacheTtlSec(live) : 0;
           return {
             ...r,
+            lead: wizards.get(r.target)?.lead === true,
+            duties: routeDutiesOf(openJobs, r.target, inflight),
             contextTokens: live ? lastContextTokens(live) : 0,
             ...(ttl ? { cacheTtlMs: ttl * 1000 } : {}),
             ...(live ? { cacheAt: cacheTouchMs(live) } : {}),
@@ -2259,15 +2264,17 @@ const main = async (): Promise<void> => {
       const to = (b.to ?? "").toString().trim();
       const now = Date.now();
       const ttlMs = cfg.wrc.mirror.keepalive.ttlSec * 1000;
-      // 自动选只在这些里选: 在线的 (没 pane 的 ctx 量不出, 成本门会盲过)、不是哪个群的管家、
-      // 不是别人开着的工单里的队员 —— 点名 (`to`) 不受此限。
-      const inOthersJob = (t: string): boolean => jobs.openOf(baseOfKey(t)).some((j) => j.owner !== self && j.members.some((mm) => mm.target === t));
-      const pool = to || b.spawn || lead ? [] : (await routeRowsOf(self)).filter((r) => r.alive && !!tagOfKey(r.target) && !inOthersJob(r.target));
-      const cands = rankCandidates(task, m.getCwd(self).runningCwd, pool, { now, ttlMs }).slice(0, 5);
+      // 占用保护由 decide 统一判断, 留在候选表里说明为什么不能自动复用。
+      // 显式 to 保留人为选定; force 只影响成本门, 不绕 lead/工单/连续性保护。
+      const pool = to || b.spawn || lead ? [] : (await routeRowsOf(self)).filter((r) => r.alive && !!tagOfKey(r.target));
+      const tierArg = (b.tier ?? "").toString().trim();
+      if (tierArg && !TIERS.includes(tierArg as TierName)) { json(res, 400, { ok: false, reason: `unknown tier: ${tierArg}` }); return; }
+      const taskTier = (tierArg || tierFor(task, lead)) as TierName;
+      const cands = rankCandidates(task, m.getCwd(self).runningCwd, pool, { now, ttlMs });
       let d: { kind: "existing"; why: string; row?: RouteRow } | { kind: "spawn"; why: string } = to ? { kind: "existing" as const, why: `你点名了 ${to}` }
         : b.spawn ? { kind: "spawn" as const, why: "你要了新的" }
           : lead ? { kind: "spawn" as const, why: "复杂活: 白板起一个 hard 档的 lead, 由它组队" }
-            : decide(task, cands, now, ttlMs, force);
+            : decide(task, cands, now, ttlMs, force, taskTier);
       // 复杂活 (lead:true) 是一件「需求」: 先开需求根单 (账本, 不占 pane), 这一句带它派下去, lead 记成根单成员。
       // 小活不开单。dryRun 不落账, 所以放在它后面开 (见下)。
       const criteria = (b.criteria ?? "").toString().trim();
@@ -2280,7 +2287,7 @@ const main = async (): Promise<void> => {
       } as PeerBody, extra);
       const shown = cands.slice(0, 3).map((e) => `.${e.row.address || e.row.name}${e.row.busy ? " 忙" : ""}`);
       if (b.dryRun) {
-        json(res, 200, { ok: true, dryRun: true, decision: d.kind, reason: d.why, ...(d.kind === "existing" ? { name: to || (d.kind === "existing" && d.row ? d.row.address || d.row.name : "") } : { tier: (b.tier ?? "").toString().trim() || tierFor(task, lead) }), ...(shown.length ? { candidates: shown } : {}) });
+        json(res, 200, { ok: true, dryRun: true, decision: d.kind, reason: d.why, ...(d.kind === "existing" ? { name: to || (d.kind === "existing" && d.row ? d.row.address || d.row.name : "") } : { tier: taskTier }), ...(shown.length ? { candidates: shown } : {}) });
         return;
       }
       if (lead) {
@@ -2319,7 +2326,7 @@ const main = async (): Promise<void> => {
         json(res, 400, { ok: false, decision: "spawn", reason: `${d.why} —— 要新生一个, 带上 name (这件事的短名) 与 description (它的职责) 重发`, ...(shown.length ? { candidates: shown } : {}) });
         return;
       }
-      const tier = (b.tier ?? "").toString().trim() || tierFor(task, lead);
+      const tier = taskTier;
       const born = await bearAs(self, { inherit: false, name, description, tier, ...(lead ? { lead: true } : {}) } as PeerBody);
       if (born.status !== 200) { settleRoot(false); json(res, born.status, { ...born.body, decision: "spawn", reason: d.why }); return; }
       // 宪章里只有层级规矩, 打法随信封带 (宪章每轮都在上下文里, 打法只这一件活用得上)。
