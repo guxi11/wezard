@@ -220,6 +220,7 @@ registerRare(
 // (stable for the pane's lifetime), so one of the two always resolves.
 const selfRef = (): { sessionId?: string; tmuxPane?: string } => {
   const sessionId =
+    process.env.CODEX_THREAD_ID ??
     process.env.CODEBUDDY_SESSION_ID ??
     process.env.CLAUDE_CODE_SESSION_ID ??
     process.env.CLAUDE_SESSION_ID;

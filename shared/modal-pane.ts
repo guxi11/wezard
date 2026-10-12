@@ -175,6 +175,8 @@ export const pickAutoAllowAnswer = (options: ModalOption[]): ModalAnswer | undef
 export interface ConfirmContext {
   toolName: string;
   toolInput: unknown;
+  /** Only a delimited structured tool invocation with fully parsed arguments. */
+  complete?: boolean;
   /** "Confirm · @tag" 头里的子代理名, 有则供卡片标注来源。 */
   agent?: string;
 }
@@ -192,6 +194,7 @@ export const parseConfirmContext = (pane: string): ConfirmContext => {
     if (/^\s*(?:[❯>]\s*)?1\.\s+\S/u.test(lines[i]!)) { firstOpt = i; break; }
   }
   let agent: string | undefined;
+  let hasHeader = false;
   const body: string[] = [];
   // 正文收完后 (bodyDone) 继续上溯只为找 Confirm 头 —— 正文与头之间隔着空行,
   // 一碰空行就停会把 `@子代理名` 丢掉; 碰到头以外的实际内容才真正停。
@@ -199,7 +202,7 @@ export const parseConfirmContext = (pane: string): ConfirmContext => {
   for (let i = firstOpt - 1; i >= 0; i--) {
     const line = lines[i]!;
     const h = CONFIRM_HEADER.exec(line);
-    if (h) { agent = h[1] || undefined; break; }
+    if (h) { agent = h[1] || undefined; hasHeader = true; break; }
     if (BOX_RULE.test(line)) { bodyDone = body.length > 0; continue; }
     if (CONFIRM_QUESTION.test(line) || OPTION_ROW.test(line)) continue;
     if (bodyDone) break;
@@ -209,9 +212,21 @@ export const parseConfirmContext = (pane: string): ConfirmContext => {
   const inner = /(?:^|[^\w])toolName:\s*"([^"]+)"/u.exec(text)?.[1];
   const params = /params:\s*(\{[\s\S]*)$/u.exec(text)?.[1]?.trim();
   let input: unknown;
+  let complete = false;
   // params 可能被 pane 宽度截断 → JSON.parse 失败时保留原文, 卡上仍可读。
   if (params !== undefined) {
-    try { input = JSON.parse(params); } catch { input = { params }; }
+    try {
+      input = JSON.parse(params);
+      // Plain Claude Bash/edit displays may omit command text or patch rows.
+      // Keep those as human-readable context, never infer complete arguments.
+      complete = hasHeader && !!inner && /^[A-Za-z][A-Za-z0-9_]*$/u.test(inner)
+        && !!input && typeof input === "object" && !Array.isArray(input)
+        && !/(?:…|\.\.\.|truncated|omitted|\(\+\d+)/iu.test(text);
+      if (complete && /^(?:Bash|Shell)$/u.test(inner!)) {
+        const command = (input as Record<string, unknown>).command;
+        complete = typeof command === "string" && command.trim().length > 0;
+      }
+    } catch { input = { params }; }
   }
   const first = body.find((l) => l.length > 0);
   const toolName = inner ?? (first && first.length <= 60 ? first : undefined) ?? "权限确认";
@@ -219,5 +234,13 @@ export const parseConfirmContext = (pane: string): ConfirmContext => {
     const rest = body.filter((l) => l && l !== toolName).join("\n").trim();
     input = rest ? { 参数: rest } : {};
   }
-  return { toolName, toolInput: input, agent };
+  return { toolName, toolInput: input, agent, complete };
 };
+
+/** Highlight movement is harmless; any change to the displayed call is not. */
+export const modalFingerprint = (pane: string): string =>
+  stripBoxBorders(pane).split("\n")
+    .map((line) => {
+      const option = OPTION_ROW.exec(line);
+      return option ? `${option[1]}. ${option[2]}` : line.trimEnd();
+    }).join("\n");

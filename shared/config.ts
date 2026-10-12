@@ -220,7 +220,7 @@ const Wrc = z.object({
       "claude-internal": z.object({ bin: z.string().optional().describe("二进制路径") }).optional(),
       codex: z.object({
         bin: z.string().optional().describe("二进制路径"),
-        sandbox: z.boolean().default(false).describe("Codex 使用工作区沙箱: true = workspace-write, false = danger-full-access; 不改变审批; reload 后仅对新启动/恢复/克隆的 pane 生效"),
+        disableSandbox: z.boolean().default(false).describe("Codex 不使用沙箱: true = danger-full-access; false / 不设 = 不覆盖 Codex 原生沙箱配置; 不改变审批; reload 后仅对新启动/恢复/克隆的 pane 生效"),
       }).default({}),
       codebuddy: z.object({ bin: z.string().optional().describe("二进制路径") }).optional(),
     })
@@ -566,7 +566,7 @@ export const loadConfig = (explicitPath?: string): LoadResult => {
     );
   }
   const base = (readJsoncIfExists(sourcePath) ?? {}) as Record<string, unknown>;
-  const parsed = parseWithSecrets(base);
+  const parsed = parseWithSecrets(base, true);
   if (!parsed.success) throw new Error(`wezard config invalid (${sourcePath}):\n${configIssues(parsed.error)}`);
   return { config: parsed.data, sourcePath: expandHome(sourcePath) };
 };
@@ -575,10 +575,19 @@ export const loadConfig = (explicitPath?: string): LoadResult => {
 export const readSecrets = (): Record<string, unknown> =>
   (readJsoncIfExists(SECRETS_PATH) ?? {}) as Record<string, unknown>;
 
-const parseWithSecrets = (base: Record<string, unknown>) => ConfigSchema.safeParse(deepMerge(base, readSecrets()));
+// The retired router object configured the steward. Do not reinterpret its model
+// as a router tier; tolerate it only when loading an existing installation.
+const parseWithSecrets = (base: Record<string, unknown>, legacyRouter = false) => {
+  const merged = deepMerge(base, readSecrets());
+  const models = merged.models as Record<string, unknown> | undefined;
+  const router = models?.router;
+  const input = legacyRouter && router && typeof router === "object" && !Array.isArray(router)
+    ? { ...merged, models: { ...models, router: undefined } } : merged;
+  return ConfigSchema.safeParse(input);
+};
 
-/** 一份 config.jsonc 全文按 loadConfig 的同一口径 (叠 secrets、整份校验) 解析 —— 写之前先过它,
- *  任何一次写入都不会产出一份让守护进程起不来的配置。 */
+/** Validate proposed writes with secrets merged. Unlike startup, new writes must
+ * use the router tier string, never the retired model/effort object. */
 export const parseConfigText = (text: string) =>
   parseWithSecrets((parseJsonc(text) ?? {}) as Record<string, unknown>);
 

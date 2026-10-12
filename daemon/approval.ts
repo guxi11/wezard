@@ -508,6 +508,8 @@ interface ActiveBatch {
   sessionId: string;
   toolName: string;
   approver: string;
+  /** Destination captured when the request arrived, not when a batch flushes. */
+  chatId: string;
   windowMinutes: number;
   /** 危险名单规则名。危险请求永远是单成员批次 (不注册进 activeBatches,
    *  没人能 join), 只为复用 flushBatch 的发卡/失败路径。 */
@@ -538,7 +540,7 @@ const evictBatches = (): void => {
   }
 };
 const newBatchId = (): string => `b${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-const batchKeyOf = (sessionId: string, toolName: string): string => `${sessionId}|${toolName}`;
+const batchKeyOf = (sessionId: string, toolName: string, chatId: string): string => JSON.stringify([sessionId, toolName, chatId]);
 
 // 单条成员渲染: 展开第 N 项的输入摘要, 单行化以适配批量列表的紧凑布局。
 const PER_MEMBER_MAX = 120;
@@ -1900,7 +1902,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     if (cmd.length <= PRELUDE_TRIGGER_CHARS) return;
     const text = cmd.length > cap ? `${cmd.slice(0, cap)}\n…（已截断，完整命令共 ${cmd.length} 字）` : cmd;
     const chunks = chunkText(text, FULLCMD_CHUNK_CHARS);
-    const target = targetChatId(batch.approver);
+    const target = batch.chatId;
     for (let i = 0; i < chunks.length; i++) {
       const head = i === 0
         ? `🔐 待审批完整命令（${cmd.length} 字${chunks.length > 1 ? `，${i + 1}/${chunks.length}` : ""}）：\n`
@@ -1988,7 +1990,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
   const flushBatch = async (batch: ActiveBatch): Promise<void> => {
     if (batch.flushed) return;
     batch.flushed = true;
-    activeBatches.delete(batchKeyOf(batch.sessionId, batch.toolName));
+    activeBatches.delete(batchKeyOf(batch.sessionId, batch.toolName, batch.chatId));
     const isMulti = batch.members.length > 1;
     const card: TemplateCard = isMulti
       ? buildBatchCard(batch, batch.members[0]?.transcriptTail ?? "")
@@ -2027,12 +2029,12 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
         log.warn({ batchId: batch.batchId, err: (e as Error).message }, "command prelude send failed");
       }
       const sendCard = (c: TemplateCard): Promise<unknown> =>
-        client.sendMessage(targetChatId(batch.approver), { msgtype: "template_card", template_card: c });
+        client.sendMessage(batch.chatId, { msgtype: "template_card", template_card: c });
       try {
         await sendCard(card);
       } catch (e) {
         // quote 体可能超平台未公开的长度上限 — 缩到安全值重试一次, 保住审批流。
-        log.warn({ batchId: batch.batchId, approver: batch.approver, chatId: targetChatId(batch.approver), err: (e as Error).message ?? (e as { errmsg?: string }).errmsg }, "card send failed — retrying with shrunk quote");
+        log.warn({ batchId: batch.batchId, approver: batch.approver, chatId: batch.chatId, err: (e as Error).message ?? (e as { errmsg?: string }).errmsg }, "card send failed — retrying with shrunk quote");
         await sendCard(shrinkQuote(card));
       }
       log.info(
@@ -2045,7 +2047,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
       if (!isMulti) markCardSent(batch.members[0]!.reqId);
     } catch (e) {
       const message = (e as Error).message ?? (e as { errmsg?: string }).errmsg ?? String(e);
-      log.error({ batchId: batch.batchId, approver: batch.approver, chatId: targetChatId(batch.approver), err: message }, "batch send failed");
+      log.error({ batchId: batch.batchId, approver: batch.approver, chatId: batch.chatId, err: message }, "batch send failed");
       const err = new Error(`send_card_fail:${message}`);
       for (const m of batch.members) failPending(m.reqId, err);
       // 单成员 batch 摘除自己的 batchById 条目, 多成员保留 (后续 click 兜底
@@ -2147,6 +2149,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
       );
     }
     const approver = resolveApprover(cfg, sessionId, getMirrorTarget);
+    const chatId = approver ? targetChatId(approver) : "";
     // 守卫的收尾 = 把 CC 那个不过 hook 的原生确认框按掉。它挂在**每一条 allow 出口**
     // 上, 而不是靠"强制发卡 + 人工点"来触发 —— 死锁的成因是没人按框, 不是没人点卡。
     //
@@ -2394,13 +2397,13 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // 选择普通 buildCard 或 buildBatchCard。0 = 关闭聚合, 立即 flush。
     // 续接的请求不再进 batch: 卡已经在群里, 重发就是重复轰炸。
     const member: BatchMember = { reqId, toolInput: display, originalToolInput: toolInput, toolInputStr, cwd, transcriptTail };
-    const bk = batchKeyOf(sessionId, toolName);
+    const bk = batchKeyOf(sessionId, toolName, chatId);
     // 必发卡请求既不 join 也不被 join — 一次这样的操作 = 一张卡 = 一次点击。
     // 合流会把它塞进带「⏱全过 / ✅总是」的批量卡, 一次点击就连它一起放行了。
     const existing = mustCard ? undefined : activeBatches.get(bk);
     if (resumeId) {
       // no-op: 直接进下面的长轮询, 等旧卡上的点击。
-    } else if (existing && !existing.flushed) {
+    } else if (existing && !existing.flushed && existing.chatId === chatId) {
       existing.members.push(member);
       log.info({ batchId: existing.batchId, count: existing.members.length, reqId }, "batch joined");
     } else {
@@ -2409,6 +2412,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
         sessionId,
         toolName,
         approver,
+        chatId,
         windowMinutes: cfg.approval.windowMinutes,
         danger: danger?.rule,
         forceSingle: mustCard,

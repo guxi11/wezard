@@ -36,12 +36,12 @@ import {
   projectDirsFor,
   type NormalizedTranscriptLine,
 } from "../shared/cli-backends.js";
-import { isModalPane, isAskqSubmitPage, parseModalOptions, pickModalAnswer, pickAutoAllowAnswer, parseConfirmContext, looksLikePicker, type ModalPaneVerdict } from "../shared/modal-pane.js";
+import { isModalPane, isAskqSubmitPage, parseModalOptions, pickModalAnswer, pickAutoAllowAnswer, parseConfirmContext, modalFingerprint, looksLikePicker, type ModalPaneVerdict } from "../shared/modal-pane.js";
 import type { MirrorStore } from "./mirror-store.js";
-import { bindCardChannel, hasMirrorAskq, runMirrorAskqFlow, hasMirrorPlan, mootMirrorPlan, runMirrorPlanFlow, hasMirrorPicker, mootMirrorPicker, runMirrorPickerFlow, type PickerPress } from "./approval.js";
+import { hasMirrorAskq, runMirrorAskqFlow, hasMirrorPlan, mootMirrorPlan, runMirrorPlanFlow, hasMirrorPicker, mootMirrorPicker, runMirrorPickerFlow, type PickerPress } from "./approval.js";
 import { isAutoWindowActive } from "./session-cache.js";
 import { noticeSuffixFor } from "./notices.js";
-import { dangerOf } from "./danger.js";
+import { dispatchPickerPolicy, pickerPolicy } from "./picker-policy.js";
 import { renameWindow, runTmux, spawnTmuxClaude } from "./spawn-tmux.js";
 import { selectEffort, selectModel, type EffortSelectResult, type ModelScope, type ModelSelectResult } from "./model-select.js";
 import { parseEffort, type Effort } from "../shared/effort.js";
@@ -50,6 +50,7 @@ import { waitForIdle, type IdleResult } from "./graph.js";
 import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
 import { knowsToolUse, recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnQuery, recordTurnInject, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, lastChannelOf, openTurnsOf, buildDetailUrl, buildChatUrl, roleUniq } from "./detail.js";
+import type { Asker } from "../shared/detail-store.js";
 import type { CtxCut, TurnFrom, TurnOrigin, TurnUsage } from "./detail.js";
 import { errText } from "./last-response.js";
 import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagHeader, withLinkedTagHeader, chatHead, headed, tagBadge, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey, sameBot } from "../shared/session-label.js";
@@ -1346,18 +1347,18 @@ const extractPaneAssistantTail = (pane: string): string => {
 // long after the pane went back to accepting input — wedging the mirror shut
 // permanently. Bare `-p` captures only what is currently on screen.
 //
-// Trailing blank rows are trimmed first so the 15-row window lands on the
-// bottom-most *content* (a picker's footer is its last line); 15 rows spans
-// "title → options → footer" on every confirm layout we've seen.
-const MODAL_SCAN_ROWS = 15;
-// `screen` = 实际参与判定的那一屏文本, 一并返回给调用方做选项解析 —— 再 capture
-// 一次会拿到"下一瞬间"的屏幕, 与 verdict 不同源(框可能已被本地按掉), 按键就按错了。
+// Trim trailing blank rows so the bottom 15 rows locate the active picker.
+// Keep the full current screen from that same capture for operation context;
+// a second capture might already be a different invocation. -J joins terminal
+// wraps without reading scrollback or dropping long command arguments.
 const detectModalPicker = async (target: string): Promise<ModalPaneVerdict & { screen: string }> => {
-  const r = await runTmux(["capture-pane", "-t", target, "-p"]);
+  const r = await runTmux(["capture-pane", "-t", target, "-p", "-J"]);
   if (!r.ok) return { modal: false, screen: "" };
   const lines = r.stdout.replace(/\s+$/u, "").split("\n");
-  const screen = lines.slice(-MODAL_SCAN_ROWS).join("\n");
-  return { ...isModalPane(screen), screen };
+  const screen = lines.join("\n");
+  // Only the bottom picker may block input. Earlier completed pickers on the
+  // current screen remain useful context, but must not look like a live modal.
+  return { ...isModalPane(lines.slice(-15).join("\n")), screen };
 };
 
 // 按下确认框的第 index 号选项。Claude Code 的 picker 数字键即选即确认; CodeBuddy
@@ -1375,10 +1376,13 @@ const pressModalIndex = async (
   before: ModalPaneVerdict & { screen: string },
   index: number,
 ): Promise<ModalPaneVerdict & { screen: string }> => {
+  const fingerprint = modalFingerprint(before.screen);
+  const current = await detectModalPicker(pane);
+  if (!current.modal || modalFingerprint(current.screen) !== fingerprint) return current;
   await runTmux(["send-keys", "-t", pane, String(index)]);
   await sleep(MODAL_PRESS_SETTLE_MS);
   let after = await detectModalPicker(pane);
-  if (!after.modal || after.title !== before.title) return after;
+  if (!after.modal || modalFingerprint(after.screen) !== fingerprint) return after;
   // 数字键没关掉框: 把高亮挪到目标项。guard 上限盖过任何确认框的选项数。
   for (let guard = 0; guard < 8; guard++) {
     const cur = highlightedIndex(after.screen);
@@ -1386,7 +1390,7 @@ const pressModalIndex = async (
     await runTmux(["send-keys", "-t", pane, cur < index ? "Down" : "Up"]);
     await sleep(MODAL_ARROW_SETTLE_MS);
     after = await detectModalPicker(pane);
-    if (!after.modal || after.title !== before.title) return after;
+    if (!after.modal || modalFingerprint(after.screen) !== fingerprint) return after;
   }
   if (highlightedIndex(after.screen) !== index) return after; // 核不准, 绝不盲按
   await runTmux(["send-keys", "-t", pane, "Enter"]);
@@ -2195,6 +2199,7 @@ export interface MirrorBridge {
   /** 这个 wizard 当前这一轮的频道: 人从哪个群叫的它 / 公开 peer 轮的频道;
    *  私聊轮 ""; 还没有过轮次 → home base。 */
   currentChannel: (target: string) => string;
+  currentAsker: (target: string) => Asker | undefined;
   /** Send Esc to the live tmux pane bound to `target` — interrupts whatever
    *  Claude is currently doing (active generation / open prompt). No-op for
    *  spawn-mode attachments (no live TTY to interrupt).
@@ -3380,11 +3385,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!env) return undefined;
     const home = baseOfKey(a.target);
     const from: TurnFrom | undefined =
-      env.kind === "peer" ? { kind: "peer", from: wizardStore()?.byName(stripSigil(env.from))?.target, ...(env.private ? {} : { public: true }), ...(env.receipt ? { receipt: true } : {}), ...(env.status ? { status: env.status } : {}), ...(env.turn ? { turn: env.turn } : {}) }
+      env.kind === "peer" ? { kind: "peer", from: wizardStore()?.byName(stripSigil(env.from))?.target, ...(env.private ? {} : { public: true }), ...(env.receipt ? { receipt: true } : {}), ...(env.status ? { status: env.status } : {}), ...(env.turn ? { turn: env.turn } : {}), ...(env.asker ? { asker: env.asker } : {}) }
       : env.kind === "task" ? { kind: "task", taskId: env.from.replace(/^定时 /, "") }
       : undefined;
     return {
-      channel: env.private ? "" : (env.chat && chatBaseOf(cfg, env.chat)) || home,
+      channel: env.private ? "" : env.chatKey || (env.chat && chatBaseOf(cfg, env.chat)) || home,
       speaker: env.kind === "human" ? `user:${env.from}` : undefined,
       from,
       query: t!.text,
@@ -3442,8 +3447,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const isPrivate = (a: AttachState): boolean => a.channel === "";
   /** 本轮回复该推去的 chatId。 */
   const replyChatId = (a: AttachState): string => stripPrincipalPrefix(a.channel || a.target);
-  // 审批/提问卡同样回本轮的频道; 私聊轮 ("") 的卡回 home —— 要点它的人总得在某个群里。
-  bindCardChannel((key) => byTarget.get(key)?.channel || "");
+
 
   // 详情页要按后端的名字称呼它 ("Claude 正在思考" / "CodeBuddy 正在思考") —— 后端
   // 由 transcript 落盘路径唯一确定, 所以每次开 turn 时现算, 不必额外记在 AttachState 上。
@@ -6220,10 +6224,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 触发 / 根本不触发 (与 AskUserQuestion 的「本地面板先行」同源; 实测命中: 子代理
   // 里经 ToolSearch→DeferExecuteTool 派发的 MCP 工具)。hook 链路对这类调用完全
   // 失明 —— daemon 零日志、无卡可发, pane 就地阻塞。解法与 askq/plan 同源:
-  // mirror 读屏兜底, 按三件套形状 (pickAutoAllowAnswer) 认权限确认框, 分三路:
-  //   - danger.skipAll 开 → 代按一次性裸 "Yes" (放宽静态权限的变体永不自动选中);
-  //   - 本 chat 的 ⏱自动窗口内、且内层工具不踩危险名单 → 同上代按;
-  //   - 否则 → 把框转成标准审批卡发到本 chat (runMirrorPickerFlow), 点击后代按
+  // mirror 读屏兜底, 按三件套形状 (pickAutoAllowAnswer) 认权限确认框:
+  //   - 上下文完整且现有工具策略放行 → 只代按一次性裸 Yes;
+  //   - denyRules 命中 → 拒绝; 未知参数 / askRules / 强制审批不吃窗口;
+  //   - 其它 → 把框转成标准审批卡发到本 chat (runMirrorPickerFlow), 点击后代按
   //     对应选项; 本地先按掉则 moot 作废卡。代按/发卡都发 chat 回执留痕。
   // WEZARD_PICKER_SENTINEL=0 整体关闭。
   let pickerTicking = false;
@@ -6234,6 +6238,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     try {
       for (const a of byTarget.values()) {
         if (!a.tmuxPane || a.migrationWatcher) continue;
+        // Codex PermissionRequest has its own independent native gate. Screen
+        // options, tool windows and skipAll never authorize its sandbox.
+        if (cliOf(a) === "codex") continue;
         if (!(await tmuxPaneAlive(a.tmuxPane))) continue;
         const v = await detectModalPicker(a.tmuxPane);
         if (!v.modal) {
@@ -6260,47 +6267,53 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           continue;
         }
         const ctx = parseConfirmContext(v.screen);
-        const danger = dangerOf(cfg, ctx.toolName, ctx.toolInput);
-        // 自动代按的两个授权源。窗口路径要过危险名单 (窗口语义不覆盖 mustCard);
-        // skipAll 本就压过危险名单 (与 daemon 审批链一致), 不检。
-        const auto = cfg.approval.danger.skipAll
-          ? "skipAll"
-          : isAutoWindowActive(a.target) && !danger ? "⏱自动窗口" : undefined;
-        if (auto) {
-          const after = await pressModalIndex(a.tmuxPane, v, pick.index);
-          if (after.modal) {
-            // 没按掉: 指纹换成当前屏 — pane 静止就不再重试, 免得往一个不认识的框里刷数字键。
-            a.pickerSentinelFp = after.screen;
-            log.warn({ target: a.target, title: after.title, pressed: pick.index }, "picker sentinel: modal still on pane after press");
-            continue;
-          }
-          a.pickerSentinelFp = undefined;
-          log.info({ target: a.target, title: v.title, via: auto, pressed: `${pick.index}. ${pick.label}` }, "picker sentinel: native permission picker auto-allowed");
-          sendStandalone(a, `[mirror] 🔓 ${auto} 代按了 CLI 原生权限确认${v.title ? `「${v.title}」` : ""} → ${pick.index}. ${pick.label}`);
-          continue;
+        const policy = pickerPolicy(cfg, cliOf(a), ctx, isAutoWindowActive(a.target));
+        if (policy.decision === "leave") {
+          log.info({ target: a.target, reason: policy.reason }, "picker sentinel: independent approval left on CLI");
         }
-        // 卡片路径: fire-and-forget — 长轮询在 flow 里, 哨兵循环不能被一张卡挂住;
-        // 防重靠 hasMirrorPicker 槽位 (含代按窗口期, 见 flow 内 finally)。
-        log.info({ target: a.target, toolName: ctx.toolName, agent: ctx.agent, danger: danger?.rule }, "picker sentinel: forwarding native picker as approval card");
-        runMirrorPickerFlow({
-          log: log.child({ target: a.target, sessionId: a.sessionId, sub: "picker-card" }),
-          client,
-          cfg,
-          sessionId: a.sessionId,
-          chatKey: a.target,
-          cwd: a.runningCwd,
-          jsonlPath: a.jsonlPath,
-          toolName: ctx.toolName,
-          toolInput: ctx.toolInput,
-          agent: ctx.agent,
-          danger: danger?.rule,
-          voteTimeoutMs: cfg.approval.longPollSec * 1000,
-          press: (what) => pressNativePicker(a, ctx.toolName, what),
-        }).then((sent) => {
-          // 卡没发出去 (WS 断/发送失败): 清指纹, 让下一 tick 对同屏重试发卡,
-          // 否则这只框会被指纹永久静默。
-          if (!sent) a.pickerSentinelFp = undefined;
-        }).catch((e) => log.warn({ err: (e as Error).message, target: a.target }, "mirror picker flow failed"));
+        await dispatchPickerPolicy(policy, {
+          deny: async () => {
+            const result = await pressNativePicker(a, modalFingerprint(v.screen), "no");
+            log.info({ target: a.target, reason: policy.reason, result }, "picker sentinel: deny rule");
+            sendStandalone(a, `[mirror] 🚫 ${policy.reason}，${result.ok ? "已拒绝 CLI 确认" : "确认框已变更，请回 CLI 处理"}`);
+          },
+          allow: async () => {
+            const after = await pressModalIndex(a.tmuxPane, v, pick.index);
+            if (after.modal) {
+              // 没按掉: 指纹换成当前屏 — pane 静止就不再重试, 免得往一个不认识的框里刷数字键。
+              a.pickerSentinelFp = after.screen;
+              log.warn({ target: a.target, title: after.title, pressed: pick.index }, "picker sentinel: modal still on pane after press");
+              return;
+            }
+            a.pickerSentinelFp = undefined;
+            log.info({ target: a.target, title: v.title, via: policy.reason, pressed: `${pick.index}. ${pick.label}` }, "picker sentinel: native permission picker auto-allowed");
+            sendStandalone(a, `[mirror] 🔓 ${policy.reason} 代按了 CLI 原生权限确认${v.title ? `「${v.title}」` : ""} → ${pick.index}. ${pick.label}`);
+          },
+          manual: () => {
+            // 卡片路径: fire-and-forget — 长轮询在 flow 里, 哨兵循环不能被一张卡挂住;
+            // 防重靠 hasMirrorPicker 槽位 (含代按窗口期, 见 flow 内 finally)。
+            log.info({ target: a.target, toolName: ctx.toolName, agent: ctx.agent, reason: policy.reason }, "picker sentinel: forwarding native picker as approval card");
+            runMirrorPickerFlow({
+              log: log.child({ target: a.target, sessionId: a.sessionId, sub: "picker-card" }),
+              client,
+              cfg,
+              sessionId: a.sessionId,
+              chatKey: a.target,
+              cwd: a.runningCwd,
+              jsonlPath: a.jsonlPath,
+              toolName: ctx.toolName,
+              toolInput: ctx.toolInput,
+              agent: ctx.agent,
+              danger: policy.forceSingle,
+              voteTimeoutMs: cfg.approval.longPollSec * 1000,
+              press: (what) => pressNativePicker(a, modalFingerprint(v.screen), what),
+            }).then((sent) => {
+              // 卡没发出去 (WS 断/发送失败): 清指纹, 让下一 tick 对同屏重试发卡,
+              // 否则这只框会被指纹永久静默。
+              if (!sent) a.pickerSentinelFp = undefined;
+            }).catch((e) => log.warn({ err: (e as Error).message, target: a.target }, "mirror picker flow failed"));
+          },
+        });
       }
     } catch (e) {
       log.warn({ err: (e as Error).message }, "picker sentinel tick failed");
@@ -6315,15 +6328,18 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 替用户批准了他没看过的东西。
   const pressNativePicker = async (
     a: AttachState,
-    expectToolName: string,
+    expectFingerprint: string,
     what: PickerPress,
   ): Promise<{ ok: boolean; reason?: string; label?: string }> => {
     if (!a.tmuxPane || !(await tmuxPaneAlive(a.tmuxPane))) return { ok: false, reason: "pane 已不在" };
+    if (cliOf(a) === "codex") return { ok: false, reason: "Codex 原生沙箱审批必须单独处理" };
     const v = await detectModalPicker(a.tmuxPane);
     if (!v.modal) return { ok: false, reason: "确认框已不在（可能已在本地处理）" };
-    const now = parseConfirmContext(v.screen);
-    if (expectToolName && now.toolName !== expectToolName) {
-      return { ok: false, reason: `当前确认框已是另一个调用（${now.toolName}），不代按` };
+    if (pickerPolicy(cfg, cliOf(a), parseConfirmContext(v.screen), false).decision === "leave") {
+      return { ok: false, reason: "独立原生或交互审批，请在 CLI 中处理" };
+    }
+    if (modalFingerprint(v.screen) !== expectFingerprint) {
+      return { ok: false, reason: "当前确认框的操作或参数已变更，不代按" };
     }
     if (what === "no") {
       await runTmux(["send-keys", "-t", a.tmuxPane, "Escape"]);
@@ -6806,6 +6822,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     hasLivePane: (sessionId) => Boolean(bySessionId.get(sessionId)?.tmuxPane),
     answerNativeModal: async (sessionId, opts) => {
       const a = bySessionId.get(sessionId);
+      if (a && cliOf(a) === "codex") return { status: "no_modal", reason: "Codex native approval is independent" };
       if (!a?.tmuxPane) return { status: "no_pane", reason: "no live tmux pane for session" };
       if (!(await tmuxPaneAlive(a.tmuxPane))) return { status: "no_pane", reason: "tmux pane no longer alive" };
       const pane = a.tmuxPane;
@@ -6821,6 +6838,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       }
       // 没等到: 这次 CC 没弹框(会话内已授权过 / 命中盲点判断失误)。无事可做。
       if (!v.modal) return { status: "no_modal" };
+      if (pickerPolicy(cfg, cliOf(a), parseConfirmContext(v.screen), false).decision === "leave") {
+        return { status: "no_modal", reason: "independent native approval left on CLI" };
+      }
 
       const pick = pickModalAnswer(parseModalOptions(v.screen), v.title);
       if (!pick) {
@@ -6860,6 +6880,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       }
       bySessionId.clear();
       byTarget.clear();
+    },
+    currentAsker: (target) => {
+      const a = byTarget.get(target);
+      if (a?.convFrom) return a.convFrom.asker;
+      return a?.speaker ? { who: a.speaker, chat: a.channel ?? baseOfKey(target) } : undefined;
     },
     currentChannel: (target) => {
       const a = byTarget.get(target);

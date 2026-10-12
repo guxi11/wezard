@@ -3,9 +3,9 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "jsonc-parser";
-import { ConfigSchema, TIERS } from "../shared/config.js";
+import { ConfigSchema, TIERS, loadConfig } from "../shared/config.js";
 import { pickRouter, pickTier } from "../shared/model-tiers.js";
-import { planSet } from "../daemon/config-api.js";
+import { configGet, planSet } from "../daemon/config-api.js";
 import { patchJsonc } from "../shared/config-writer.js";
 
 const bot = { botId: "test", secret: "test" };
@@ -61,9 +61,20 @@ try {
   const plan = planSet(cfg, file, { path: "models.router", value: "standard" });
   assert(plan.ok);
   assert.equal(plan.apply, "hot");
-  patchJsonc(file, [{ path: ["models", "router"], value: "standard" }]);
+  patchJsonc(file, [{ path: plan.jsonPath, value: plan.value }]);
   const text = readFileSync(file, "utf8");
   assert(text.includes("// keep this comment"));
   assert.deepEqual(parse(text), { bot, models: { steward: "light", router: "standard" }, other: 42 });
+  const shown = configGet(loadConfig(file).config, file, "models.router");
+  assert(shown.ok);
+  assert(JSON.stringify(shown).includes("standard"));
+  assert(JSON.stringify(shown).includes("不消费此项"));
+  assert(!planSet(cfg, file, { path: "models.router", value: { model: "sonnet", effort: "low" } }).ok);
+  writeFileSync(file, JSON.stringify({ bot, models: { router: { model: "sonnet", effort: "low" } } }));
+  assert.equal(loadConfig(file).config.models.router, "standard", "legacy router object must not prevent startup");
+  const migrate = planSet(loadConfig(file).config, file, { path: "models.router", value: "standard" });
+  assert(migrate.ok);
+  patchJsonc(file, [{ path: migrate.jsonPath, value: migrate.value }]);
+  assert.equal(parse(readFileSync(file, "utf8")).models.router, "standard");
 } finally { rmSync(dir, { recursive: true, force: true }); }
 console.log("Router tier: single setting, creation-time backend resolution, overrides and persistence passed");

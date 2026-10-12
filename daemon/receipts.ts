@@ -200,7 +200,7 @@ export interface Tell {
 }
 
 /** 这一句该挂的件号: 新活领一个新的; `re` 续问沿用那件活的件号、工单与频道。 */
-export interface Turn { turn: string; legs: number; job?: string; channel?: string; reUnknown?: true }
+export interface Turn { turn: string; legs: number; job?: string; channel?: string; asker?: Asker; k?: ParentK; reUnknown?: true }
 
 export interface Slot extends Tell {
   job: string;
@@ -704,7 +704,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       const want = re?.replace(/[`\s]/g, "");
       const s = want ? upstream({ from, turn: want }, to) : undefined;
       return s?.turn && s.turn === want
-        ? { turn: s.turn, legs: (s.legs ?? 1) + 1, job: s.job, channel: s.channel }
+        ? { turn: s.turn, legs: (s.legs ?? 1) + 1, job: s.job, channel: s.channel, asker: s.asker, k: s.k }
         : { turn: newTurn(), legs: 1, ...(re ? { reUnknown: true as const } : {}) };
     },
     claim: (from, to) => {

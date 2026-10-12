@@ -28,7 +28,7 @@ import { codexHookLaunchArgs, codexHookCommand, prepareCodexSession, codexSandbo
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { Logger } from "pino";
@@ -40,6 +40,7 @@ import { activateBackend, resolveCliBackend, type CliBackend, type CliBackendNam
 import { selectModel } from "./model-select.js";
 import type { Effort } from "../shared/effort.js";
 import { hasRegistry, sessionOnPane } from "./cc-session.js";
+import { startupConfirmation, workspaceTrustPrompt, workspaceTrustConfig } from "../shared/workspace-trust.js";
 
 
 // Every new pane uses the configured backend, including resume and fork panes.
@@ -240,26 +241,48 @@ interface TuiState {
 // for input. On success returns true; on timeout returns false (caller decides
 // whether to treat as fatal).
 //
-// 判据按可信度取: 后端写注册表 (cc-session) 时, 以「这个 pane 上的会话 status=idle」
-// 为准 —— 进程自己报的就绪, 不读 pane。注册表行一出现就说明 claude 已接管 pty,
-// 之后只管等它 idle; 只有行还没出现 (shell 还在 source rc / 被交互提示卡住 /
-// 后端根本不写注册表) 时 pane 才是唯一的证人, 这时才 capture 去认提示框与 TUI。
+// 注册表的 idle 只在读屏排除启动确认框后认下: 信任框可能先于会话注册出现,
+// 也可能在已有注册记录时阻塞。未知确认框保持人工处理, 不能以 idle 或欢迎标题放行。
 //
 // 退出标记 (`cliExit`) 每次读屏都先看: CLI 一退回 shell 就不必等满预算, 而注册表
 // 里那行可能还没清掉 —— 所以注册表已认下会话时也照读屏, 只是不拿屏去判就绪。
-const waitForTuiReady = async (pane: string, cmd: string, backend: CliBackend, log: Logger): Promise<TuiState> => {
+export const answerWorkspaceTrust = async (pane: string, backend: CliBackendName, cwd: string, log: Logger): Promise<boolean> => {
+  const capture = async (): Promise<string> => {
+    const r = await runTmux(["capture-pane", "-t", pane, "-p"]);
+    return r.ok ? r.stdout : "";
+  };
+  const screen = await capture();
+  const before = workspaceTrustPrompt(screen, backend, cwd, realpathSync);
+  if (!before) return false;
+  if (before.selected !== before.choice) {
+    const moved = await runTmux(["send-keys", "-t", pane, before.selected < before.choice ? "Down" : "Up"]);
+    if (!moved.ok) return false;
+    await sleep(150);
+  }
+  // Re-read even if Yes was already selected: a local key may have changed the picker.
+  const after = workspaceTrustPrompt(await capture(), backend, cwd, realpathSync);
+  if (!after || after.selected !== after.choice || after.directory !== before.directory
+    || after.labels.join("\n") !== before.labels.join("\n")) return false;
+  const pressed = await runTmux(["send-keys", "-t", pane, "Enter"]);
+  if (!pressed.ok) return false;
+  log.info({ pane, backend, cwd }, "workspace trust: confirmed authorized directory");
+  await sleep(300);
+  return true;
+};
+
+const waitForTuiReady = async (pane: string, cmd: string, backend: CliBackend, cwd: string, log: Logger): Promise<TuiState> => {
   const registry = hasRegistry(backend.homeDir);
   const t0 = Date.now();
   const deadline = t0 + MIN_SETTLE_MS + TUI_READY_TIMEOUT_MS;
-  let retriedEnter = false;
   let resent = false;
   let sawSession = false;
   let lastCap = 0;
   while (Date.now() < deadline) {
     await sleep(registry ? REGISTRY_POLL_MS : POLL_MS);
+    let registryIdle = false;
     if (registry) {
       const s = sessionOnPane(backend.homeDir, pane);
-      if (s?.status === "idle") return { ready: true };
+      registryIdle = s?.status === "idle";
       if (s) sawSession = true;
     }
     // Shell rc needs time to source before capture-pane shows anything meaningful.
@@ -267,9 +290,14 @@ const waitForTuiReady = async (pane: string, cmd: string, backend: CliBackend, l
     // pane 那一路仍按 POLL_MS 的节奏读屏 —— 注册表查得再密也不多起 tmux。
     if (Date.now() - lastCap < POLL_MS) continue;
     lastCap = Date.now();
-    const cap = await capturePaneBottom(pane, 20);
+    const captured = await runTmux(["capture-pane", "-t", pane, "-p"]);
+    if (!captured.ok) continue;
+    const cap = captured.ok ? captured.stdout : "";
     const exited = cliExit(cap);
     if (exited) return { ready: false, exited };
+    if (await answerWorkspaceTrust(pane, backend.name, cwd, log)) continue;
+    if (startupConfirmation(cap)) continue;
+    if (registryIdle) return { ready: true };
     // 注册表认不到这个 pane (schema 不认识 / 后端不写) 时, pane 读屏就是唯一证人;
     // 注册表已认下 (sawSession) 则仍以它报的 idle 为准, 尾部裁决不变。
     if (sawSession) continue;
@@ -283,20 +311,13 @@ const waitForTuiReady = async (pane: string, cmd: string, backend: CliBackend, l
       await runTmux(["send-keys", "-t", pane, cmd, "Enter"]);
       resent = true;
     }
-    // If after half the budget we still see nothing, maybe Enter was lost in
-    // shell rc sourcing. Retry Enter once (safe: if claude already started, an
-    // extra Enter on an empty input box is a no-op).
-    if (!retriedEnter && !resent && Date.now() - t0 > MIN_SETTLE_MS + TUI_READY_TIMEOUT_MS / 2) {
-      log.warn({ pane }, "spawn-tmux: TUI not seen at half-budget, retrying Enter");
-      await runTmux(["send-keys", "-t", pane, "Enter"]);
-      retriedEnter = true;
-    }
   }
   // 注册表认得这个会话却迟迟不 idle (启动期对话框? 状态字段改了名?) —— 最后让 pane 裁决一次。
-  const last = await capturePaneBottom(pane, 20);
+  const captured = await runTmux(["capture-pane", "-t", pane, "-p"]);
+  const last = captured.ok ? captured.stdout : "";
   const exited = cliExit(last);
   if (exited) return { ready: false, exited };
-  if (sawSession && TUI_READY_RE.test(last)) return { ready: true };
+  if (!startupConfirmation(last) && sawSession && TUI_READY_RE.test(last)) return { ready: true };
   log.warn({ pane, registry, sawSession }, "spawn-tmux: TUI ready timeout, proceeding anyway");
   return { ready: false };
 };
@@ -389,14 +410,7 @@ export interface SpawnResult {
 //                     when neither exists we pick the dir-style path so the
 //                     write also creates the conventional layout.
 //
-// Idempotent: deep-merges into the existing file, preserves unrelated keys.
-type ClaudeProjectMeta = {
-  hasTrustDialogAccepted?: boolean;
-  projectOnboardingSeenCount?: number;
-  hasClaudeMdExternalIncludesApproved?: boolean;
-  hasClaudeMdExternalIncludesWarningShown?: boolean;
-  [k: string]: unknown;
-};
+// Patch only this directory's trust/onboarding markers; external includes stay separate.
 const claudeConfigCandidates = (claudeBin: string): string[] => {
   const home = homedir();
   const name = basename(claudeBin);
@@ -404,32 +418,20 @@ const claudeConfigCandidates = (claudeBin: string): string[] => {
   return [join(home, `.${name}`, ".claude.json"), join(home, `.${name}.json`)];
 };
 export const trustWorkspace = (claudeBin: string, cwd: string, log: Logger): void => {
+  if (basename(claudeBin) === "codex") return; // Native Codex trust belongs to its scoped TUI.
   const candidates = claudeConfigCandidates(claudeBin);
   const target: string = candidates.find(existsSync) ?? candidates[0]!;
-  let cfg: { projects?: Record<string, ClaudeProjectMeta>; [k: string]: unknown } = {};
   try {
-    if (existsSync(target)) cfg = JSON.parse(readFileSync(target, "utf8"));
-  } catch (e) {
-    log.warn({ target, err: (e as Error).message }, "trustWorkspace: parse failed; rewriting");
-  }
-  const projects = (cfg.projects ??= {});
-  const proj: ClaudeProjectMeta = projects[cwd] ?? {};
-  if (proj.hasTrustDialogAccepted && (proj.projectOnboardingSeenCount ?? 0) >= 1 && proj.hasClaudeMdExternalIncludesApproved) {
-    return; // already trusted — no write needed
-  }
-  projects[cwd] = {
-    ...proj,
-    hasTrustDialogAccepted: true,
-    projectOnboardingSeenCount: Math.max(proj.projectOnboardingSeenCount ?? 0, 1),
-    hasClaudeMdExternalIncludesApproved: true,
-    hasClaudeMdExternalIncludesWarningShown: true,
-  };
-  try {
+    const directory = realpathSync(cwd);
+    const original = existsSync(target) ? readFileSync(target, "utf8") : "{}\n";
+    const patched = workspaceTrustConfig(original, directory);
+    if (patched === original) return;
     mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, JSON.stringify(cfg, null, 2));
-    log.info({ target, cwd }, "trustWorkspace: marker written");
+    writeFileSync(target, patched);
+    log.info({ target, cwd: directory }, "trustWorkspace: marker written");
   } catch (e) {
-    log.warn({ target, err: (e as Error).message }, "trustWorkspace: write failed");
+    // A damaged user config is not ours to replace; the scoped pane path can recover.
+    log.warn({ target, err: (e as Error).message }, "trustWorkspace: config unchanged");
   }
 };
 
@@ -511,18 +513,18 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
   if (backend.name !== "codex") trustWorkspace(backend.bin, cwd, log);
 
   let codexApprovalArgs: string[] = [];
-  const sandboxEnabled = cfg.wrc.cliBackends.codex.sandbox;
-  const codexSandboxArgs = backend.name === "codex" ? codexSandboxLaunchArgs(sandboxEnabled) : [];
+  const sandboxDisabled = cfg.wrc.cliBackends.codex.disableSandbox;
+  const codexSandboxArgs = backend.name === "codex" ? codexSandboxLaunchArgs(sandboxDisabled) : [];
   if (backend.name === "codex") {
-    const conflict = codexSandboxArgConflict(cfg.wrc.extraArgs);
-    if (conflict) return { ok: false, reason: `Codex extraArgs ${conflict} conflicts with wrc.cliBackends.codex.sandbox; remove the shortcut and use the sandbox config` };
+    const conflict = sandboxDisabled ? codexSandboxArgConflict(cfg.wrc.extraArgs) : undefined;
+    if (conflict) return { ok: false, reason: `Codex extraArgs ${conflict} conflicts with wrc.cliBackends.codex.disableSandbox; remove the shortcut and use the sandbox config` };
     const hookEntry = fileURLToPath(new URL("../cli/codex-hook.js", import.meta.url));
     const command = codexHookCommand(loadConfig().sourcePath, `http://127.0.0.1:${cfg.daemon.port}`, hookEntry);
     try { codexApprovalArgs = await codexHookLaunchArgs(backend.bin, cwd, command, cfg.approval.hookTimeoutSec + 10, cfg.approval.enabled); }
     catch (e) { return { ok: false, reason: `Codex approval hooks unavailable: ${(e as Error).message}` }; }
     try {
       const native = await prepareCodexSession(backend.bin, cwd, winName, [...codexApprovalArgs, ...codexSandboxArgs], {
-        resumeSessionId, forkSession, model, systemPrompt, sandboxMode: codexSandboxMode(sandboxEnabled),
+        resumeSessionId, forkSession, model, systemPrompt, sandboxMode: codexSandboxMode(sandboxDisabled),
       });
       sessionId = native.sessionId;
       jsonlPath = native.jsonlPath;
@@ -577,7 +579,7 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
   const charter = charterArg(cfg, backend, sessionId, systemPrompt, log);
   // A fresh session relaunched after a failed first try resumes instead if that
   // try already wrote the transcript — `--session-id` refuses an existing one.
-  const commandFor = (flagModel: string | undefined, retry: boolean): string => {
+  const commandFor = (flagModel: string | undefined, retry: boolean, pane: string): string => {
     const resume = !!resumeSessionId || (retry && existsSync(jsonlPath));
     const argv = [
       ...(backend.name === "codex"
@@ -588,6 +590,8 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
         "-c", `mcp_servers.wezard.command=${JSON.stringify(process.execPath)}`,
         "-c", `mcp_servers.wezard.args=${JSON.stringify([fileURLToPath(new URL("../mcp/server.js", import.meta.url))])}`,
         "-c", `mcp_servers.wezard.env.WEZARD_DAEMON_BASE=${JSON.stringify(`http://127.0.0.1:${cfg.daemon.port}`)}`,
+        "-c", `mcp_servers.wezard.env.TMUX_PANE=${JSON.stringify(pane)}`,
+        "-c", `mcp_servers.wezard.env.CODEX_THREAD_ID=${JSON.stringify(sessionId)}`,
       ] : []),
       ...codexApprovalArgs,
       ...(backend.name === "codex" && effort ? ["-c", `model_reasoning_effort=${JSON.stringify(effort)}`] : []),
@@ -609,7 +613,7 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
     const opened = await openPane();
     if ("reason" in opened) return { ok: false, reason: opened.reason };
     const { pane } = opened;
-    const fullCommand = commandFor(flagModel, retry);
+    const fullCommand = commandFor(flagModel, retry, pane);
     // PTY canonical input truncates long hook/TOML arguments at ~4 KiB.
     // Send only a short script invocation through the interactive shell.
     const script = backend.name === "codex" ? join(tmpdir(), `wezard-codex-${randomUUID()}.sh`) : undefined;
@@ -627,7 +631,7 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
     // user input, so we don't wait for the file — mirror tail tolerates a
     // missing jsonl and starts emitting once claude writes the first line.
     let tui: TuiState;
-    try { tui = await waitForTuiReady(pane, line, backend, log); }
+    try { tui = await waitForTuiReady(pane, line, backend, cwd, log); }
     finally { if (script) try { unlinkSync(script); } catch { /* already removed */ } }
     if (tui.exited) return { ok: true, pane, ready: false, failure: tui.exited };
     const unknown = !!flagModel && tui.ready && modelNotRecognized(await capturePaneBottom(pane, "-"), flagModel);

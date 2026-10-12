@@ -603,11 +603,9 @@ const answerOf = (
 // 属性推不出的 —— 回复去向、该怎么接、规矩。
 export { parseEnvelope, type Envelope };
 
-/** 人说的那一轮的信封。只在 transcript 自己推不出来时才挂 (见 inbound.send): 一个
- *  wizard 被人从别的群叫到、或者住在多人的群里, 它和后来读记录的人都得知道这句是
- *  谁、在哪说的; 住在与一个人的单聊里的, 默认值就是对的, 不为它每轮多付一段。 */
-export const renderHumanEnvelope = (user: string, chat: string): string =>
-  renderReminder(envelopeAttrs.human(user, chat), ["你的回复发回 `chat` 那个群。"]);
+/** 身份来自入站 userid, 包括本聊天私信; home 不能代替真实发话人。 */
+export const renderHumanEnvelope = (user: string, chat: string, chatKey?: string): string =>
+  renderReminder(envelopeAttrs.human(user, chat, chatKey), ["你的回复发回 `chat` 那个聊天。"]);
 
 /** 人对管家说的那一轮挂一行「自己答还是派出去」: 宪章里的检查项离这句话太远, sonnet 档的管家一接到活
  *  就忘。只挂人的话 —— 回执、同伴、定时那几轮不是新来的活; 一行就够, 细则在宪章。 */

@@ -12,7 +12,9 @@
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
 import { expandHome } from "../shared/paths.js";
-import { parseTmuxVersion, runTmux, trustWorkspace } from "./spawn-tmux.js";
+import { answerWorkspaceTrust, parseTmuxVersion, runTmux, trustWorkspace } from "./spawn-tmux.js";
+import { startupConfirmation } from "../shared/workspace-trust.js";
+import { resolveCliBackend } from "../shared/cli-backends.js";
 import { sleep } from "../shared/std.js";
 
 
@@ -123,13 +125,11 @@ export const captureQuota = async (cfg: Config, log: Logger): Promise<QuotaRepor
     // Wait for the TUI to reach an interactive prompt. Clear a stray trust
     // dialog defensively (pre-trust usually handles it, but be robust).
     const ready = await pollUntil(async () => {
-      const cap = await capture(pane, 60);
-      if (/trust this folder|Yes, I trust/i.test(cap)) {
-        await runTmux(["send-keys", "-t", pane, "1"]);
-        await sleep(300);
-        await runTmux(["send-keys", "-t", pane, "Enter"]);
-        return undefined;
-      }
+      const current = await runTmux(["capture-pane", "-t", pane, "-p"]);
+      if (!current.ok) return undefined;
+      const cap = current.ok ? current.stdout : "";
+      if (await answerWorkspaceTrust(pane, resolveCliBackend({ claudeBin }).name, cwd, log)) return undefined;
+      if (startupConfirmation(cap)) return undefined;
       return /for shortcuts|auto mode on|Try "/i.test(cap) ? true : undefined;
     }, 30_000, 500);
     if (!ready) throw new Error("claude TUI did not reach interactive prompt in 30s");

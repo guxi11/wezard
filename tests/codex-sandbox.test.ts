@@ -7,10 +7,11 @@ import { resolve } from "../shared/config-meta.js";
 import { codexSandboxMode, codexSandboxLaunchArgs, codexSandboxArgConflict, prepareCodexSession } from "../shared/codex-hooks.js";
 
 const base = { bot: { botId: "test", secret: "test" } };
-assert.equal(ConfigSchema.parse(base).wrc.cliBackends.codex.sandbox, false);
-assert.equal(ConfigSchema.parse({ ...base, wrc: { cliBackends: { codex: { bin: "/opt/codex" } } } }).wrc.cliBackends.codex.sandbox, false);
-assert.equal(resolve(ConfigSchema, "wrc.cliBackends.codex.sandbox".split("."))?.gate, "card");
-assert.throws(() => ConfigSchema.parse({ ...base, wrc: { cliBackends: { codex: { sandbox: "false" } } } }));
+assert.equal(ConfigSchema.parse(base).wrc.cliBackends.codex.disableSandbox, false);
+assert.equal(ConfigSchema.parse({ ...base, wrc: { cliBackends: { codex: { bin: "/opt/codex" } } } }).wrc.cliBackends.codex.disableSandbox, false);
+assert.equal(resolve(ConfigSchema, "wrc.cliBackends.codex.disableSandbox".split("."))?.gate, "card");
+assert.throws(() => ConfigSchema.parse({ ...base, wrc: { cliBackends: { codex: { disableSandbox: "false" } } } }));
+assert.deepEqual(codexSandboxLaunchArgs(), []);
 for (const flag of ["--sandbox", "--sandbox=read-only", "-s", "-sread-only", "--full-auto", "--approve-for-me", "--yolo", "--dangerously-bypass-approvals-and-sandbox"]) {
   assert.equal(codexSandboxArgConflict([flag]), flag);
 }
@@ -31,12 +32,12 @@ rl.on('line', line => {
 });
 `, { mode: 0o755 });
 try {
-  for (const enabled of [false, true]) {
-    const cfg = ConfigSchema.parse({ ...base, wrc: { cliBackends: { codex: { sandbox: enabled } } } });
-    assert.equal(cfg.wrc.cliBackends.codex.sandbox, enabled);
+  for (const disabled of [false, true]) {
+    const cfg = ConfigSchema.parse({ ...base, wrc: { cliBackends: { codex: { disableSandbox: disabled } } } });
+    assert.equal(cfg.wrc.cliBackends.codex.disableSandbox, disabled);
     for (const options of [{}, { resumeSessionId: "parent" }, { resumeSessionId: "parent", forkSession: true }]) {
-      const args = codexSandboxLaunchArgs(enabled);
-      await prepareCodexSession(bin, root, "sandbox-test", args, { ...options, sandboxMode: codexSandboxMode(enabled) });
+      const args = codexSandboxLaunchArgs(disabled);
+      await prepareCodexSession(bin, root, "sandbox-test", args, { ...options, sandboxMode: codexSandboxMode(disabled) });
     }
   }
   const records = readFileSync(capture, "utf8").trim().split("\n").map(line => JSON.parse(line));
@@ -44,9 +45,10 @@ try {
   const requests = records.filter(r => r.id === 2);
   assert.deepEqual(requests.map(r => r.method), ["thread/start", "thread/resume", "thread/fork", "thread/start", "thread/resume", "thread/fork"]);
   requests.forEach((r, i) => {
-    assert.equal(r.params.sandbox, i < 3 ? "danger-full-access" : "workspace-write");
+    if (i < 3) assert.equal("sandbox" in r.params, false, "default must inherit native Codex settings");
+    else assert.equal(r.params.sandbox, "danger-full-access");
     assert.equal("approvalPolicy" in r.params, false, "sandbox must not change native approval");
-    assert.deepEqual(launches[i].argv, ["app-server", "--enable", "hooks", "-c", `sandbox_mode=${JSON.stringify(r.params.sandbox)}`]);
+    assert.deepEqual(launches[i].argv, ["app-server", "--enable", "hooks", ...(i < 3 ? [] : ["-c", 'sandbox_mode="danger-full-access"'])]);
   });
 } finally { rmSync(root, { recursive: true, force: true }); }
 console.log("Codex sandbox defaults, validation and start/resume/fork protocol checks passed");

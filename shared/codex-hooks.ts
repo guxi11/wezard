@@ -2,12 +2,12 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { augmentedPath } from "./exec-path.js";
 
-export const codexSandboxMode = (enabled = false): "workspace-write" | "danger-full-access" =>
-  enabled ? "workspace-write" : "danger-full-access";
+export const codexSandboxMode = (disabled = false): "danger-full-access" | undefined =>
+  disabled ? "danger-full-access" : undefined;
 
 /** Both app-server and TUI accept config overrides; approval stays independent. */
-export const codexSandboxLaunchArgs = (enabled = false): string[] =>
-  ["-c", `sandbox_mode=${JSON.stringify(codexSandboxMode(enabled))}`];
+export const codexSandboxLaunchArgs = (disabled = false): string[] =>
+  disabled ? ["-c", `sandbox_mode=${JSON.stringify(codexSandboxMode(disabled))}`] : [];
 
 /** Native shortcut flags can override config or also change approval; fail closed. */
 export const codexSandboxArgConflict = (args: string[]): string | undefined => args.find(arg =>

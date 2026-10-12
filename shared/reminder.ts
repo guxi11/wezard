@@ -14,6 +14,8 @@
 //   roster    正文里 `- ` 开头的每一行是一条变动
 //   hint      role=steward: 人对管家说的那一轮挂的「自己答还是派出去」(只给模型, 不读回)
 
+import type { Asker } from "./detail-store.js";
+
 export type Attrs = Readonly<Record<string, string>>;
 export interface Reminder {
   attrs: Attrs;
@@ -54,6 +56,10 @@ export interface Envelope {
   private: boolean;
   /** 公开轮所在群的名字; "" = 这个会话的 home 聊天。 */
   chat: string;
+  /** Stable inbound principal; chat is a display name and may be renamed. */
+  chatKey?: string;
+  /** Original human request, preserved across private dispatch and receipts. */
+  asker?: Asker;
   /** 这一轮是回执 (对方干完了, 守护进程把结论送回发话方), 不是新派的活。 */
   receipt?: boolean;
   /** 回执的定论 (见 ReceiptStatus); 老信封没有 = done。 */
@@ -70,23 +76,35 @@ export interface Envelope {
   audience?: string;
 }
 
+/** Human identity comes from inbound metadata; a private hop keeps that origin. */
+export const askerFromEnvelope = (env: Envelope, chatOf: (chat: string) => string): Asker | undefined => {
+  if (env.asker) return env.asker;
+  if (env.kind !== "human" || !env.from) return undefined;
+  const chat = env.chatKey || chatOf(env.chat);
+  return chat ? { who: `user:${env.from}`, chat } : undefined;
+};
+
 /** 回执那一轮的去向 (见 receipts.routeOf), 已渲染成给人 / 模型看的称呼。 */
-export interface ReceiptRoute { replyTo?: string; k?: string; audience?: string }
+export interface ReceiptRoute { replyTo?: string; k?: string; audience?: string; asker?: Asker }
 
 /** 一件活的编号: 写进派活与回执的信封。 */
 /** `act`: 这句话要对方怎么接 —— 缺省是一件活; ask = 只答一问; fyi = 知会, 不用回。
  *  `quiet`: 发话方不收回执 (fyi 一定是; task 带 receipt:false 也是)。 */
-export interface TurnTag { turn: string; re?: boolean; deadline?: number; act?: "ask" | "fyi"; quiet?: boolean }
+export interface TurnTag { turn: string; re?: boolean; deadline?: number; act?: "ask" | "fyi"; quiet?: boolean; asker?: Asker }
+
+const askerAttrs = (asker?: Asker): Attrs => asker
+  ? { "asker-user": asker.who, "asker-chat": asker.chat } : {};
 
 /** 回执落成什么。done = 答了; need = 它收口成 `NEED:` 反问发话方, 不是定论; error = 那一轮以 CLI 报错 (API Error) 收尾, 不是定论;
  *  timeout / silent / dead = 没等到答案 (超时 / 停下几次都没答 / pane 没了); canceled = 被人 stop 掉了。 */
 export type ReceiptStatus = "done" | "need" | "error" | "timeout" | "silent" | "dead" | "canceled";
 
 export const envelopeAttrs = {
-  human: (user: string, chat: string): Attrs => ({ wezard: "envelope", kind: "human", from: user, chat }),
+  human: (user: string, chat: string, chatKey?: string): Attrs => ({ wezard: "envelope", kind: "human", from: user, chat, ...(chatKey ? { "chat-key": chatKey } : {}) }),
   /** `chat` 不给 = 私聊。 */
   peer: (from: string, chat?: string, t?: TurnTag): Attrs => ({
     wezard: "envelope", kind: "peer", from, scope: chat === undefined ? "private" : "public", ...(chat ? { chat } : {}),
+    ...askerAttrs(t?.asker),
     ...(t ? { turn: t.turn, ...(t.re ? { re: t.turn } : {}), ...(t.deadline ? { deadline: new Date(t.deadline).toISOString() } : {}), ...(t.act ? { act: t.act } : {}) } : {}),
   }),
   /** `turn` = 这一枪的件号 (安静任务按它定位终句, 见 index.ts relayUnlessQuiet)。 */
@@ -97,6 +115,7 @@ export const envelopeAttrs = {
     ...envelopeAttrs.peer(from, chat, turn ? { turn } : undefined),
     receipt: "1",
     status,
+    ...askerAttrs(route?.asker),
     ...(route?.replyTo ? { "reply-to": route.replyTo } : {}),
     ...(route?.k ? { k: route.k } : {}),
     ...(route?.audience ? { audience: route.audience } : {}),
@@ -116,6 +135,8 @@ const envelopeOfAttrs = (a: Attrs): Envelope | undefined =>
         from: a.kind === "task" ? `定时 ${a.from ?? ""}` : a.from ?? "",
         private: a.scope === "private",
         chat: a.chat ?? "",
+        ...(a["chat-key"] ? { chatKey: a["chat-key"] } : {}),
+        ...(a["asker-user"] && a["asker-chat"] ? { asker: { who: a["asker-user"], chat: a["asker-chat"] } } : {}),
         ...(a.receipt === "1" ? { receipt: true } : {}),
         ...(a.status ? { status: a.status as ReceiptStatus } : {}),
         ...(a.turn ? { turn: a.turn } : {}),
@@ -138,7 +159,7 @@ const legacyEnvelope = (body: string): Envelope | undefined =>
 
 const envelopeOf = (r: Reminder): Envelope | undefined => envelopeOfAttrs(r.attrs) ?? legacyEnvelope(r.body);
 
-/** 一句落盘的输入上挂着的信封。只在 `<system-reminder>` 里找 —— 正文里引用这句
- *  措辞的人话不算。 */
+/** Daemon appends the authoritative envelope after the message. Quoted older
+ *  envelopes in the body must not override the actual inbound sender. */
 export const parseEnvelope = (raw: string): Envelope | undefined =>
-  parseReminders(raw).reduce<Envelope | undefined>((hit, r) => hit ?? envelopeOf(r), undefined);
+  parseReminders(raw).reduce<Envelope | undefined>((hit, r) => envelopeOf(r) ?? hit, undefined);

@@ -28,7 +28,7 @@ import { installInboundRouter } from "./inbound.js";
 import { loadMirrorStore } from "./mirror-store.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { backendFor, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
-import { installApprovalEventListener, makeApproveHandler, requestConfirm } from "./approval.js";
+import { bindCardChannel, installApprovalEventListener, makeApproveHandler, requestConfirm } from "./approval.js";
 import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, setWorldFactsProvider, currentHumanQueryOf, recordPost, recordCharter, backfillCharter } from "./detail.js";
 import { EMPTY_FACTS, type WorldFacts, type WorldFactWizard } from "../shared/world.js";
 import { clearAutoWindow, initAutoWindowPersistence, setAutoWindow } from "./session-cache.js";
@@ -98,7 +98,7 @@ import { loadJsonMap } from "../shared/json-map-store.js";
 import { createReceipts, deadlineOf, kAttr, kOfAttr, newTurn, type Hold, type HeldSeen, type InFlight, type ParentK, type Slot as ReceiptSlot } from "./receipts.js";
 import { renderInFlight } from "../shared/turn-state.js";
 import { startIdleNudge } from "./idle-nudge.js";
-import { renderReminder, type TurnTag } from "../shared/reminder.js";
+import { askerFromEnvelope, renderReminder, type TurnTag } from "../shared/reminder.js";
 import { createHandoffs, handedOff, handingOff, type Owe, type Pending as PendingHandoff } from "./handoff.js";
 import { coldGateOf, decide, rankCandidates, renderCandidates, tierFor, wakeCostOf, wakeNoteOf, type RouteRow } from "./route.js";
 import { parseWhen, renderChatLog, UNKNOWN_HUMAN, type LogSession } from "./chat-log.js";
@@ -404,18 +404,14 @@ const main = async (): Promise<void> => {
       const att = m.attach({ sessionId: r.sessionId!, jsonlPath: r.jsonlPath!, target, tmuxPane: r.tmuxPane, tmuxSession: r.tmuxSession });
       json(res, att.ok ? 200 : 500, att.ok ? { ok: true, sessionId: r.sessionId, tmuxSession: r.tmuxSession, tmuxPane: r.tmuxPane, target } : { ok: false, reason: att.reason });
     });
-    // Which chat is the caller? An MCP tool can only see its own process, so
-    // every route an agent drives has to be told: explicit target → sessionId
-    // → tmuxPane (stable across `/clear`, which rotates sessionId) → the
-    // configured defaultChat. Same precedence as /mirror/workspace.
+    // A missing agent identity is an error, never an invitation to impersonate defaultChat.
+    // Pane wins across native session switches; the MCP session id is a spawn-time snapshot.
     const resolveSelf = (b: Partial<{ target: string; sessionId: string; tmuxPane: string }>): string => {
       const explicit = (b.target ?? "").trim();
       if (explicit) return explicit;
-      const bySid = b.sessionId?.trim() ? m.targetForSession(b.sessionId.trim()) : undefined;
-      if (bySid) return bySid;
-      const byPane = b.tmuxPane?.trim() ? m.targetForPane(b.tmuxPane.trim()) : undefined;
-      if (byPane) return byPane;
-      return (cfg.defaultChat ?? "").trim();
+      const pane = b.tmuxPane?.trim();
+      if (pane) return m.targetForPane(pane) ?? "";
+      return b.sessionId?.trim() ? m.targetForSession(b.sessionId.trim()) ?? "" : "";
     };
     // ── Session discovery / switching (conversational, via MCP tools) ───────
     // GET /sessions/list — enumerate live claude sessions in tmux + a one-line
@@ -496,7 +492,7 @@ const main = async (): Promise<void> => {
       }
       const self = resolveSelf(body);
       if (!self) {
-        json(res, 400, { ok: false, reason: "cannot resolve caller chat (pass target/sessionId/tmuxPane, or set cfg.defaultChat)" });
+        json(res, 400, { ok: false, reason: "cannot resolve caller chat (pass target/sessionId/tmuxPane)" });
         return;
       }
       const wantChat = (body.chat ?? "").toString().trim();
@@ -556,26 +552,14 @@ const main = async (): Promise<void> => {
     // One-shot project switch: bind the chat-wide cwd AND apply it right here
     // by walking the exact /new path (kill pane → respawn in pendingCwd →
     // attach → "📂 当前项目" push). Resolved target
-    // precedence: explicit body.target → sessionId-derived (so MCP can omit
-    // it) → tmuxPane (stable across /clear) → cfg.defaultChat. When the caller
+    // precedence follows resolveSelf (explicit target, then stable pane, then session). When the caller
     // IS the session being replaced, its pane dies mid-tool-call — the
     // project-info bubble is the receipt. On spawn failure the pendingCwd
     // stays queued, so a manual /new from WeCom still completes the switch.
     http.register("POST /mirror/workspace", async (req, res) => {
       const body = (await readBody(req)) as Partial<{ target: string; sessionId: string; tmuxPane: string; cwd: string; keep: boolean }>;
       const cwd = (body.cwd ?? "").toString();
-      let target = (body.target ?? "").trim();
-      if (!target && body.sessionId) {
-        const t = m.targetForSession(body.sessionId.trim());
-        if (t) target = t;
-      }
-      // sessionId rotates on /clear; the MCP caller's env sessionId may be stale.
-      // Pane id is stable, so resolve by it before falling back to defaultChat.
-      if (!target && body.tmuxPane) {
-        const t = m.targetForPane(body.tmuxPane.trim());
-        if (t) target = t;
-      }
-      if (!target) target = (cfg.defaultChat ?? "").trim();
+      const target = resolveSelf(body);
       if (!target) { json(res, 400, { ok: false, reason: "target required (or pass sessionId of an attached chat)" }); return; }
       // keep = 人回答了「不用换, 就用现在这个」。只落一笔确认, 不碰 pane —— 把
       // 「保持现状」也走成 setPendingCwd + newSession 的话, 代价是白杀一个会话。
@@ -773,7 +757,7 @@ const main = async (): Promise<void> => {
       rebound: async (x, why) => (await m.injectText(x.to, `（守护进程代 ${displayName(x.from)} 打回一次: 这件活是工单里的一份, 你的回复${why}。请按约定收口 —— 末尾一行 \`RESULT: <结论>\`, 交付了文件每个加一行 \`ARTIFACT: <路径> — 一句话\`; 真缺信息就 \`NEED: <问题>\`。）`, undefined, {
         from: { kind: "peer", from: x.from, turn: x.turn, ...(x.asker ? { asker: x.asker } : {}) },
         channel: x.channel,
-        envelope: envelopeFor(x.from, x.channel, { turn: x.turn, legs: x.legs, re: true }),
+        envelope: envelopeFor(x.from, x.channel, { turn: x.turn, legs: x.legs, re: true, asker: x.asker }),
       })).ok,
       untilIdle: m.untilIdle,
       paneLive: m.paneLive,
@@ -805,6 +789,7 @@ const main = async (): Promise<void> => {
             {
               ...(meta.replyTo ? { replyTo: meta.replyTo.kind === "chat" ? chatNameOf(cfg, meta.replyTo.channel) : displayName(meta.replyTo.from) } : {}),
               ...(meta.k ? { k: kAttr(meta.k) } : {}),
+              ...(meta.asker ? { asker: meta.asker } : {}),
               ...(meta.pending ? { pending: meta.pending } : {}),
               ...(audienceName(meta.channel, meta.asker) ? { audience: audienceName(meta.channel, meta.asker) } : {}),
             },
@@ -857,7 +842,7 @@ const main = async (): Promise<void> => {
       return {
         from: { kind: "peer", from: o.from, ...(o.turn ? { turn: o.turn } : {}), ...(o.channel ? { public: true } : {}), ...(o.asker ? { asker: o.asker } : {}) },
         channel: o.channel,
-        envelope: envelopeFor(o.from, o.channel, o.turn ? { turn: o.turn } : undefined),
+        envelope: envelopeFor(o.from, o.channel, { turn: o.turn ?? "", asker: o.asker }),
       };
     }
     /** 简报那一轮之后, 余下的欠账一份一轮: 等它接住上一句 (至多 20s 动起来) 并答完, 再贴下一份。 */
@@ -909,13 +894,12 @@ const main = async (): Promise<void> => {
     const askerOf = (self: string): Asker | undefined => {
       const env = openingOfSelf(self)?.env;
       const home = baseOfKey(self);
-      if (!env) return home.startsWith("user:") ? { who: home, chat: home } : undefined;
-      if (env.kind === "human") {
-        const chat = env.chat ? chatBaseOf(cfg, env.chat) : home;
-        return chat ? { who: `user:${env.from}`, chat } : undefined;
-      }
-      return env.kind === "peer" ? receipts.askerOf(self, env) : undefined;
+      if (!env) return m.currentAsker(self);
+      return askerFromEnvelope(env, (chat) => chat ? chatBaseOf(cfg, chat) : home)
+        ?? (env.kind === "peer" ? receipts.askerOf(self, env) : undefined);
     };
+    // A private dispatch keeps its human origin even though its output channel is empty.
+    bindCardChannel((key) => askerOf(key)?.chat || m.currentChannel(key));
     // 交接先续做: 它的闸要在回执续守之前立起来, 否则续守的 watcher 会读到换了一半的会话。
     void m.restored.then(() => { handoffs.resume(); receipts.resume(); });
     // 闲置追问 (见 idle-nudge.ts): 对方持续闲着又没回执 → 代发话方同件号问一句进展, 答复照常回执。
@@ -933,7 +917,7 @@ const main = async (): Promise<void> => {
         return (await m.injectText(to, text, undefined, {
           from: { kind: "peer", from, turn, ...(x.asker ? { asker: x.asker } : {}) },
           channel: x.channel,
-          envelope: envelopeFor(from, x.channel, { turn, legs: x.legs, re: true }),
+          envelope: envelopeFor(from, x.channel, { turn, legs: x.legs, re: true, asker: x.asker }),
         })).ok;
       },
       nameOf: displayName,
@@ -1245,7 +1229,10 @@ const main = async (): Promise<void> => {
       // 件号先于一切: `re` 续问沿用那件活的件号、工单与频道 (见 receipts.prepare)。
       const re = ((body as { re?: string }).re ?? "").toString().trim();
       // 放行一件停放着的 (after): 件号 / 频道 / 父 k / 链头都沿用停放那一刻定的 —— 依赖边不改 k。
-      const turn = held ? { turn: held.turn, legs: 1, channel: held.channel } : receipts.prepare(self, target, re || undefined);
+      const turn = held ? { turn: held.turn, legs: 1, channel: held.channel, asker: held.asker, k: held.k } : receipts.prepare(self, target, re || undefined);
+      // Capture the origin before waiting for another pane; our own turn may change meanwhile.
+      const asker = held ? held.asker : turn.legs > 1 ? turn.asker : askerOf(self);
+      const k = held ? held.k : (body as { chain?: boolean }).chain === false ? undefined : turn.legs > 1 ? turn.k : parentKOf(self);
       // 续问只在那个工单还开着时沿用它: 收了工的工单不再收成员, 续问照样能发。
       // 没带工单的一句顶掉一份还没落定的工单活, 也算在那张工单上 (receipts.register 同理
       // 继承): 不然换个不带 job 的 tell_peer 就绕开了预算。
@@ -1333,11 +1320,9 @@ const main = async (): Promise<void> => {
       // 放行时原样沿用; 工单成员与预算也现在就记, 「齐了吗」照常数。
       if (parkIt) {
         const bp = body as { priority?: string; waitSec?: number; deadline?: number; receipt?: boolean; role?: string; chain?: boolean };
-        const pk = bp.chain === false ? undefined : parentKOf(self);
-        const pasker = askerOf(self);
         receipts.hold({
           from: self, to: target, turn: turn.turn, at: Date.now(), after: afters, channel, job: jobId,
-          ...(pk ? { k: pk } : {}), ...(pasker ? { asker: pasker } : {}),
+          ...(k ? { k } : {}), ...(asker ? { asker } : {}),
           // force: 冷门控上面已过一遍, 放行时缓存又凉了也不再退回。
           body: { name: peerAddress(cfg, self, target), text, kind, force: true, ...(jobId ? { job: jobId } : {}), ...(bp.role ? { role: bp.role } : {}), ...(bp.priority ? { priority: bp.priority } : {}), ...(bp.waitSec ? { waitSec: bp.waitSec } : {}), ...(bp.deadline !== undefined ? { deadline: bp.deadline } : {}), ...(bp.receipt === false ? { receipt: false } : {}) },
         });
@@ -1386,12 +1371,12 @@ const main = async (): Promise<void> => {
       // 是"放出去就不管了"的那种派活; fyi 一定不要。对方的信封据此改口, 不再让它收口。
       const wantReceipt = kind !== "fyi" && (body as { receipt?: boolean }).receipt !== false;
       const deadlineAt = deadlineOf(at, deadlineSec === undefined ? undefined : Number(deadlineSec));
-      const asker = held ? held.asker : askerOf(self);
       const inj = await m.injectText(target, text, undefined, {
         from: { kind: "peer", from: self, turn: turn.turn, ...(jobId ? { job: jobId } : {}), ...(isPublic ? { public: true } : {}), ...(asker ? { asker } : {}) },
         channel,
         envelope: envelopeFor(self, channel, {
           turn: turn.turn,
+          asker,
           legs: turn.legs,
           ...(turn.legs > 1 ? { re: true } : {}),
           // 期限只在发话方明说时写给对方看: 默认的一小时不值得每轮多一句。
@@ -1404,7 +1389,6 @@ const main = async (): Promise<void> => {
       // 一份不守的槽会以同一对的 key 顶掉发话方还在等它答的那件活, 那件的回执就再也来不了。
       // 父 k: 默认这件活算发话方此刻在答的那件的子活 (链式续回); `chain:false` = 旁支,
       // 回执照常回来, 但不挂住它给上游的交代 —— 只有发话方知道这件活是不是为上游派的。
-      const k = held ? held.k : (body as { chain?: boolean }).chain === false ? undefined : parentKOf(self);
       if (inj.ok && wantReceipt) receipts.register({ from: self, to: target, channel, job: jobId, at, turn: turn.turn, legs: turn.legs, deadlineAt, ...(k ? { k } : {}), ...(asker ? { asker } : {}) });
       if (inj.ok && wantReceipt) {
         if (turn.legs > 1) ledger.touch(self, turn.turn);
@@ -2410,6 +2394,8 @@ const main = async (): Promise<void> => {
     /** spawn_wizard / clone_wizard 的本体 —— HTTP 路由与 dispatch 共用。 */
     const bearAs = async (self: string, body: PeerBody): Promise<Reply> => {
       const b = body as { name?: string; tag?: string; description?: string; inherit?: boolean; detached?: boolean; from?: string; cwd?: string; chat?: string; cli?: CliBackendName; model?: string; effort?: string; tier?: string; task?: string; job?: string; keepalive?: boolean; lead?: boolean };
+      const asker = b.task?.trim() ? askerOf(self) : undefined;
+      const k = (body as { chain?: boolean }).chain === false ? undefined : parentKOf(self);
       const askedEffort = parseEffort(b.effort);
       if (b.effort !== undefined && !askedEffort) { return { status: 400, body: { ok: false, reason: `effort 只有这几档: ${EFFORTS.join(" / ")}` } }; }
       // 工单先验: 生完分身才发现工单号打错了, 那个分身就成了没人认领的孤儿。
@@ -2524,7 +2510,6 @@ const main = async (): Promise<void> => {
       // wait_peer 才不会把它们当成分身对这件活的答复。
       const taskAt = Date.now();
       const taskTurn = newTurn();
-      const asker = task ? askerOf(self) : undefined;
       const r = await m.cloneSession({
         parent: source,
         target,
@@ -2538,7 +2523,7 @@ const main = async (): Promise<void> => {
         // 继承路径上第一句话是分叉的触发器, 所以直接把活当开场白 —— 少一次往返,
         // 也少一次"就位了但没事干"的空转。
         // 子 lead 的宪章只有层级规矩, 打法跟第一句的信封走 (同 dispatch 对已有 wizard 的做法)。
-        bootstrap: task ? task + envelopeFor(self, "", { turn: taskTurn }) + (b.lead === true ? renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : "") : undefined,
+        bootstrap: task ? task + envelopeFor(self, "", { turn: taskTurn, asker }) + (b.lead === true ? renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : "") : undefined,
         ...(task ? { bootstrapFrom: { from: { kind: "peer" as const, from: self, turn: taskTurn, ...(jobId ? { job: jobId } : {}), ...(asker ? { asker } : {}) }, query: task } } : {}),
         keepalive,
       }).catch((e: unknown) => ({ ok: false as const, reason: `spawn threw: ${String(e)}`, inherited: false }));
@@ -2563,7 +2548,7 @@ const main = async (): Promise<void> => {
       // 继承路径上活已经随开场白进去了, 空白分身才需要在这里补一次注入 (私聊)。
       let dispatched = r.inherited && !!task;
       if (task && !r.inherited) {
-        const inj = await m.injectText(target, task, undefined, { from: { kind: "peer", from: self, turn: taskTurn, ...(jobId ? { job: jobId } : {}), ...(asker ? { asker } : {}) }, channel: "", envelope: envelopeFor(self, "", { turn: taskTurn }) });
+        const inj = await m.injectText(target, task, undefined, { from: { kind: "peer", from: self, turn: taskTurn, ...(jobId ? { job: jobId } : {}), ...(asker ? { asker } : {}) }, channel: "", envelope: envelopeFor(self, "", { turn: taskTurn, asker }) });
         dispatched = inj.ok;
       }
       if (jobId) {
@@ -2574,7 +2559,6 @@ const main = async (): Promise<void> => {
       if (jobId && dispatched) jobs.spend(jobId);
       // 分身的第一件活也守回执: fan-out 最常见的形状就是 clone_wizard({task}) × N,
       // 让它们干完自己把结论送回来, 发起方不必挂在 wait_peer 上。
-      const k = (body as { chain?: boolean }).chain === false ? undefined : parentKOf(self);
       if (dispatched) receipts.register({ from: self, to: target, channel: "", job: jobId, at: taskAt, turn: taskTurn, ...(k ? { k } : {}), ...(asker ? { asker } : {}) });
       if (dispatched) ledger.open({ turn: taskTurn, owner: self, to: target, text: task, at: taskAt, ...(jobId ? { job: jobId } : {}), ...(k ? { for: k } : {}), ...(asker ? { asker } : {}) });
       return { status: 200, body: { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, ...(dispatched ? { turn: taskTurn } : {}), keepalive, ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(r.effort ? { effort: r.effort } : {}), ...(pick.tier ? { tier: pick.tier } : {}), via: pick.via, ...(pick.note ? { tierNote: pick.note } : {}), ...(jobId ? { job: jobId } : {}), ...(detached ? { detached: true } : {}) } };
@@ -3080,8 +3064,7 @@ const main = async (): Promise<void> => {
 
       // 落盘时重算一遍: 等卡期间文件可能被别人改过, 按那一刻的文件打补丁、再校验。
       // 宪章快照取在落盘之前 (守卫里): hot 项一 applyHot, 活的 cfg 就已经是新的了。
-      // 不用 resolveSelf: 它最后回落到 defaultChat, 会把认不出的调用方当成那个群的管家。
-      const caller = (body.sessionId?.trim() && m.targetForSession(body.sessionId.trim())) || (body.tmuxPane?.trim() && m.targetForPane(body.tmuxPane.trim())) || undefined;
+      const caller = resolveSelf({ sessionId: body.sessionId, tmuxPane: body.tmuxPane }) || undefined;
       // 人发起 = 调用方这一轮的链头是人 (人在群里 / 单聊里叫它改的)。
       const byHuman = !!caller && !!askerOf(caller)?.who.startsWith("user:");
       const commit = async (): Promise<(Plan & { charter: string }) | { ok: false; reason: string }> => {
