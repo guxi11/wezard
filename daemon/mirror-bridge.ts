@@ -1112,7 +1112,8 @@ export const startMirrorTail = (deps: TailDeps): TailHandle => {
 //  • tmux   — paste into the live TTY via tmux. Indistinguishable from the
 //             user typing; claude processes normally → response visible in BOTH
 //             the CLI and (via outbound tail) WeCom. Required for true mirror.
-type DispatchGuard = (phase: "paste" | "submit") => boolean;
+// No phase is a read-only permission check; physical phases mark exposure.
+type DispatchGuard = (phase?: "paste" | "submit") => boolean;
 interface InjectArgs {
   guard?: DispatchGuard;
   text: string;
@@ -2271,13 +2272,13 @@ export interface MirrorBridge {
   /** Detach + respawn a target's pane in `cfg.wrc.cwd` or its pendingCwd
    *  override. Used by /new to give the user a fresh claude in the bound
    *  project. Returns the new attachment result. */
-  newSession: (target: string, windowName?: string, cli?: CliBackendName, opts?: { model?: string; effort?: Effort; cwd?: string; silent?: boolean; systemPrompt?: string; keepalive?: boolean; warm?: boolean }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; model?: string; modelWarning?: string; effort?: Effort }>;
+  newSession: (target: string, windowName?: string, cli?: CliBackendName, opts?: { model?: string; effort?: Effort; cwd?: string; silent?: boolean; systemPrompt?: string; keepalive?: boolean; warm?: boolean; guard?: () => boolean }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; model?: string; modelWarning?: string; effort?: Effort }>;
   /** Spawn `target` as a CLONE of `parent`: a fresh pane launched with
    *  `--resume <parent sid>`, which the CLI forks — the child starts holding
    *  everything the parent had read, the parent is untouched. `inherit: false`
    *  (or a different cwd, which `--resume` cannot honor) degrades to a plain
    *  `newSession`; the reply says which happened via `inherited`. */
-  cloneSession: (args: { parent: string; target: string; windowName?: string; cli?: CliBackendName; model?: string; effort?: Effort; cwd?: string; systemPrompt?: string; inherit?: boolean; bootstrap?: string; bootstrapFrom?: { from: TurnFrom; query: string }; keepalive?: boolean }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; inherited: boolean; model?: string; modelWarning?: string; effort?: Effort }>;
+  cloneSession: (args: { parent: string; target: string; windowName?: string; cli?: CliBackendName; model?: string; effort?: Effort; cwd?: string; systemPrompt?: string; inherit?: boolean; bootstrap?: string; bootstrapFrom?: { from: TurnFrom; query: string }; keepalive?: boolean; guard?: DispatchGuard }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; inherited: boolean; model?: string; modelWarning?: string; effort?: Effort }>;
   /** Install the wizard-identity provider. Every spawn path (`/new`, a dead-pane
    *  respawn, a clone) asks it for the target's charter and presses the result
    *  into the new process's system prompt, so identity is a property of the
@@ -4633,7 +4634,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   // `panes` = boot 快照; 给了就不再为每个 principal 单独问 tmux。lazy 调用方
   // 不传, 维持原来的逐个探活。
-  const restoreFromStore = async (principal: string, panes?: PaneSnapshot): Promise<AttachState | undefined> => {
+  const restoreFromStore = async (principal: string, panes?: PaneSnapshot, permitted?: () => boolean): Promise<AttachState | undefined> => {
+    if (permitted && !permitted()) return undefined;
     const rec = deps.store.get(principal);
     if (!rec) return undefined;
     let jsonlAbs = expandHome(rec.jsonlPath);
@@ -4650,6 +4652,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // unrelated newest-in-cwd file is exactly the cross-wire we must avoid.
     const storedPane = (rec.tmuxPane ?? "").trim();
     const livePane = storedPane && (panes ? panes.has(storedPane) : await tmuxPaneAlive(storedPane)) ? storedPane : "";
+    if (permitted && !permitted()) return undefined;
     if (!existsSync(jsonlAbs)) {
       // First: the SAME-sid transcript may have merely relocated to a sibling
       // project dir (Claude Code EnterWorktree/ExitWorktree moved it while the
@@ -4704,6 +4707,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const paneCwd = panes
         ? (panes.get(livePane) ?? "")
         : (await runTmux(["display-message", "-p", "-t", livePane, "#{pane_current_path}"])).stdout.trim();
+      if (permitted && !permitted()) return undefined;
       if (paneCwd) {
         // Encode under the backend that owns the bound transcript — comparing
         // with the primary dialect would report a phantom drift for every
@@ -4724,6 +4728,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       }
     }
 
+    if (permitted && !permitted()) return undefined;
     const r = attach({
       sessionId: rec.sessionId,
       jsonlPath: jsonlAbs,
@@ -5330,8 +5335,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       /** 交接重开: 新会话马上就要接着干原来的活, 不是一个空白开局 —— 不暂停 keepalive。
        *  否则简报那一轮短于恢复宽限时, 暂停就一直挂着, 交接过的 wizard 从此不再保温。 */
       warm?: boolean;
+      /** Withdraw agent-created births before replacing or binding a pane. */
+      guard?: () => boolean;
     },
   ): Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; info?: string; model?: string; modelWarning?: string; effort?: Effort }> => {
+    if (opts?.guard && !opts.guard()) return { ok: false, reason: "spawn guard withdrew permission" };
     const prev = byTarget.get(target);
     // Resolution precedence (all chat-scoped except the running-cwd fallback):
     //   base.pending > caller.pending > target.running > base.running > default
@@ -5384,6 +5392,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       systemPrompt: opts?.systemPrompt ?? charterFor(target, { cwd: eff, cli: effCli }),
     }).catch((e: unknown) => { inFlightSids.delete(freshSid); throw e; });
     if (!r.ok) { inFlightSids.delete(freshSid); return { ok: false, reason: r.reason }; }
+    if (opts?.guard && !opts.guard()) {
+      inFlightSids.delete(freshSid);
+      if (r.tmuxPane) await runTmux(["kill-pane", "-t", r.tmuxPane]);
+      return { ok: false, reason: "spawn completed after permission withdrawal; binding withheld" };
+    }
     const att = attach({
       sessionId: r.sessionId!,
       jsonlPath: r.jsonlPath!,
@@ -5524,15 +5537,17 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
      *  `keepalive.spawnDefault`。与 `justSpawned` 那种"直到第一次真活动才恢复"
      *  的临时暂停不同 —— 这个是终身的。 */
     keepalive?: boolean;
+    guard?: DispatchGuard;
   }): Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; inherited: boolean; model?: string; modelWarning?: string; effort?: Effort }> => {
-    const p = byTarget.get(args.parent) ?? (await restoreFromStore(args.parent));
+    if (args.guard && !args.guard("paste")) return { ok: false, reason: "spawn guard withdrew permission", inherited: false };
+    const p = byTarget.get(args.parent) ?? (await restoreFromStore(args.parent, undefined, () => !args.guard || args.guard()));
     // 继承上下文要求父亲有一个活着的 transcript, 且分身必须待在同一个项目目录 ——
     // `--resume` 是按项目目录寻址 session 的。调用方点名换目录 = 明确放弃继承。
     const sameCwd = !args.cwd?.trim() || expandHome(args.cwd.trim()) === (p?.runningCwd ?? "");
     const canInherit = args.inherit !== false && !!p?.sessionId && !!p.jsonlPath && existsSync(p.jsonlPath) && sameCwd;
     if (!canInherit) {
       const r = await newSession(args.target, args.windowName, args.cli, {
-        model: args.model, effort: args.effort, cwd: args.cwd, systemPrompt: args.systemPrompt, silent: true, keepalive: args.keepalive,
+        model: args.model, effort: args.effort, cwd: args.cwd, systemPrompt: args.systemPrompt, silent: true, keepalive: args.keepalive, guard: args.guard ? () => args.guard!("paste") : undefined,
       });
       return { ...r, inherited: false };
     }
@@ -5544,6 +5559,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const parentCli = backendForPath(parent.jsonlPath).name;
     const model = args.model?.trim() || parent.model || lastModel(parent.jsonlPath);
     const effort = args.effort ?? parseEffort(parent.effort);
+    if (args.guard && !args.guard("paste")) return { ok: false, reason: "spawn guard withdrew permission", inherited: false };
     const r = await spawnTmuxClaude({
       cfg,
       log: lg,
@@ -5566,7 +5582,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const boot = await inject({
       text: hello, images: [], cfg, log: lg,
       sessionId: parentCli === "codex" ? r.sessionId! : parent.sessionId, jsonlPath: parentCli === "codex" ? r.jsonlPath! : parent.jsonlPath,
-      tmuxTarget: r.tmuxPane, freshSpawn: true,
+      tmuxTarget: r.tmuxPane, freshSpawn: true, guard: args.guard,
     });
     if (!boot.ok) {
       await runTmux(["kill-pane", "-t", r.tmuxPane ?? ""]);
@@ -5581,6 +5597,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!fork) {
       await runTmux(["kill-pane", "-t", r.tmuxPane ?? ""]);
       return { ok: false, reason: "分身没能在超时内分叉出自己的会话 (CLI 可能不支持 --fork-session)", inherited: false };
+    }
+    if (args.guard && !args.guard("submit")) {
+      inFlightSids.delete(fork.sessionId);
+      // The bootstrap may already have executed; withhold binding, report the
+      // unconfirmed birth to its caller instead of claiming cancellation success.
+      return { ok: false, reason: "fork executed after permission withdrawal; reconcile pane manually", inherited: false };
     }
     const att = attach({
       sessionId: fork.sessionId,
@@ -6538,9 +6560,48 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // to in this process lifetime (or any session after a reload) has an empty
       // in-memory slot but a perfectly good persisted binding. Without this, an
       // agent driving a cold sibling gets "not attached" for a live pane.
-      const a = byTarget.get(target) ?? (await restoreFromStore(target));
-      if (!a) return { ok: false, reason: "no mirror attached for target" };
+      const permission = (): boolean => !opts?.guard || opts.guard();
+      const denied = { ok: false as const, reason: "inject permission withdrawn before respawn/binding" };
       if (!text.trim()) return { ok: false, reason: "empty text" };
+      if (!permission()) return denied;
+      const a = byTarget.get(target) ?? (await restoreFromStore(target, undefined, permission));
+      if (!permission()) return denied;
+      if (!a) return { ok: false, reason: "no mirror attached for target" };
+      const sid = a.sessionId;
+      const permitted = (): boolean => permission() && byTarget.get(target) === a && a.sessionId === sid;
+      const probedPane = a.tmuxPane;
+      const paneAlive = a.tmuxPane ? await paneUsable(a.tmuxPane, a.jsonlPath) : false;
+      if (!permitted() || a.tmuxPane !== probedPane) return denied;
+      // 同 dispatch: 只有刚生 / 刚重生的 pane 才要冷启动的宽限 —— 对一个热着、正忙的 pane 贴 `now`
+      // 也按冷启动等 idle 至多 15s, 「不等不打断」就成了「晚 15–20s 才进」(handoff-owe 的竞态即此)。
+      let fresh = a.justSpawned === true;
+      if (!paneAlive) {
+        log.warn({ target, sessionId: sid, oldPane: a.tmuxPane }, "injectText: pane not alive, respawning");
+        // Same resume-fork hazard as dispatch: snapshot before spawn, re-bind
+        // onto the forked jsonl once it appears (EOF offset — fork is seeded).
+        const resumeBaseline = listJsonls(dirname(a.jsonlPath));
+        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: displayName(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, ...respawnSpec(a), systemPrompt: charterFor(target, { cwd: a.runningCwd, cli: backendForPath(a.jsonlPath).name }) });
+        if (!r.ok || !r.tmuxPane) return { ok: false, reason: `respawn failed: ${r.reason ?? "unknown"}` };
+        if (!permitted() || a.tmuxPane !== probedPane) {
+          // This pane was born for an unsubmitted injection. Never kill the old
+          // executor or bind the withdrawn birth. A failed cleanup is explicitly
+          // uncertain and must be reconciled; it is not proof execution stopped.
+          const cleanup = await runTmux(["kill-pane", "-t", r.tmuxPane]).catch(() => undefined);
+          return { ...denied, ...(cleanup?.ok ? {} : { uncertain: true }), reason: cleanup?.ok
+            ? "respawn permission withdrawn; new pane removed before injection, binding withheld"
+            : `respawn permission withdrawn; binding withheld, reconcile new pane ${r.tmuxPane}` };
+        }
+        a.tmuxPane = r.tmuxPane;
+        a.tmuxSession = r.tmuxSession ?? a.tmuxSession;
+        if (r.cwd) a.runningCwd = r.cwd;
+        // What the pane really landed on: a recorded string the CLI refused was
+        // relaunched past, and must not cost the same extra launch next time.
+        if (r.model !== undefined) a.model = r.model;
+        deps.store.set(target, { sessionId: sid, jsonlPath: a.jsonlPath, tmuxSession: a.tmuxSession, tmuxPane: a.tmuxPane, cwd: a.runningCwd || undefined, model: a.model || undefined, effort: a.effort || undefined, pendingCwd: a.pendingCwd || undefined });
+        startMigrationWatcher(a, resumeBaseline, forkOf(a.jsonlPath));
+        fresh = true;
+      }
+      if (!permitted()) return denied;
       // 出处改写要早于 inject: tail 可能在 promise resolve 之前就开出 turn。
       // 守护进程注入的一轮 (回执 / peer / 定时任务 / graph) 不是人在 CLI 手敲的: 可见性
       // 只由频道定 ("" 私聊才静默)。pendingFromCli 必须一并清 —— 它是粘性的, 不开轮的
@@ -6563,28 +6624,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // resolve 之前就看到 user 行并开出 turn, 那时归因必须已经在位。
       // 印章随这一行走 (见 Seal): 行露面时才落成那一轮的出处 / 频道 / 问话。
       pushSeal(a, { keys: sealKeys(full), at: Date.now(), query: text, from: opts?.from, channel: opts?.channel, origin, fresh: idleVerdict(target) === true });
-      const sid = a.sessionId;
-      const paneAlive = a.tmuxPane ? await paneUsable(a.tmuxPane, a.jsonlPath) : false;
-      // 同 dispatch: 只有刚生 / 刚重生的 pane 才要冷启动的宽限 —— 对一个热着、正忙的 pane 贴 `now`
-      // 也按冷启动等 idle 至多 15s, 「不等不打断」就成了「晚 15–20s 才进」(handoff-owe 的竞态即此)。
-      let fresh = a.justSpawned === true;
-      if (!paneAlive) {
-        log.warn({ target, sessionId: sid, oldPane: a.tmuxPane }, "injectText: pane not alive, respawning");
-        // Same resume-fork hazard as dispatch: snapshot before spawn, re-bind
-        // onto the forked jsonl once it appears (EOF offset — fork is seeded).
-        const resumeBaseline = listJsonls(dirname(a.jsonlPath));
-        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: displayName(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, ...respawnSpec(a), systemPrompt: charterFor(target, { cwd: a.runningCwd, cli: backendForPath(a.jsonlPath).name }) });
-        if (!r.ok || !r.tmuxPane) return { ok: false, reason: `respawn failed: ${r.reason ?? "unknown"}` };
-        a.tmuxPane = r.tmuxPane;
-        a.tmuxSession = r.tmuxSession ?? a.tmuxSession;
-        if (r.cwd) a.runningCwd = r.cwd;
-        // What the pane really landed on: a recorded string the CLI refused was
-        // relaunched past, and must not cost the same extra launch next time.
-        if (r.model !== undefined) a.model = r.model;
-        deps.store.set(target, { sessionId: sid, jsonlPath: a.jsonlPath, tmuxSession: a.tmuxSession, tmuxPane: a.tmuxPane, cwd: a.runningCwd || undefined, model: a.model || undefined, effort: a.effort || undefined, pendingCwd: a.pendingCwd || undefined });
-        startMigrationWatcher(a, resumeBaseline, forkOf(a.jsonlPath));
-        fresh = true;
-      }
       // 同 dispatch: 在 inject 之前解除静默, 防止验证循环中 LLM 回复被永久吞掉。
       a.muteUntilInject = false;
       a.justSpawned = false;
@@ -6592,11 +6631,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // 漏了它 tail 就钉在旧 jsonl 上, 直到下一条人话经 dispatch 才把它拽回来。
       const clearing = isClearCommand(text);
       const preClearBaseline = clearing ? listJsonls(dirname(a.jsonlPath)) : undefined;
+      const injectPane = a.tmuxPane;
       const r = await inject({
-        text: full, images: [], cfg, guard: opts?.guard, log: log.child({ principal: target, sessionId: sid, sub: "init-demo" }),
+        text: full, images: [], cfg, guard: (phase) => permitted() && a.tmuxPane === injectPane && (!opts?.guard || opts.guard(phase)), log: log.child({ principal: target, sessionId: sid, sub: "init-demo" }),
         sessionId: sid, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn: fresh,
       });
-      if (r.ok && a.tmuxPane) {
+      if (r.ok && a.tmuxPane && permitted()) {
         if (preClearBaseline) {
           a.clearRebind = { baseline: preClearBaseline };
           startMigrationWatcher(a, preClearBaseline, jsonlIsPostClearChild, 0, true);

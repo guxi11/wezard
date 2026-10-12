@@ -96,6 +96,8 @@ import { keepalivePingSigs } from "../shared/keepalive.js";
 import { expandHome } from "../shared/paths.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { createWorkflowNodes, type FileVersion, type NodeAttempt } from "./workflow-nodes.js";
+import { loadWorkflowPlans, createWorkflowPlanRunner, type PlanPermit } from "./workflow-plans.js";
+import { registerWorkflowPlanRoutes } from "./workflow-plan-http.js";
 import { createReceipts, canonicalTurn, deadlineOf, kAttr, kOfAttr, newTurn, type Hold, type HeldSeen, type InFlight, type ParentK, type Slot as ReceiptSlot } from "./receipts.js";
 import { renderInFlight } from "../shared/turn-state.js";
 import { startIdleNudge } from "./idle-nudge.js";
@@ -399,9 +401,11 @@ const main = async (): Promise<void> => {
         json(res, 400, { ok: false, reason: "target required (and cfg.defaultChat empty)" });
         return;
       }
+      if (!planStore.allowExternal(target, wizards.get(target)?.name)) { json(res, 409, { ok: false, reason: "workflow plan reserves this executor" }); return; }
       const spawnLog = log.child({ mod: "mirror", sub: "spawn-init", target });
       const r = await spawnTmuxClaude({ cfg, log: spawnLog, windowName: target, systemPrompt: charterFor(target, { cli: backendFor(cfg).name }) });
       if (!r.ok) { json(res, 500, { ok: false, reason: r.reason }); return; }
+      if (!planStore.allowExternal(target, wizards.get(target)?.name)) { if (r.tmuxPane) await runTmux(["kill-pane", "-t", r.tmuxPane]); json(res, 409, { ok: false, reason: "executor reserved during spawn; binding withheld" }); return; }
       const att = m.attach({ sessionId: r.sessionId!, jsonlPath: r.jsonlPath!, target, tmuxPane: r.tmuxPane, tmuxSession: r.tmuxSession });
       json(res, att.ok ? 200 : 500, att.ok ? { ok: true, sessionId: r.sessionId, tmuxSession: r.tmuxSession, tmuxPane: r.tmuxPane, target } : { ok: false, reason: att.reason });
     });
@@ -449,6 +453,7 @@ const main = async (): Promise<void> => {
         json(res, 400, { ok: false, reason: "target required (and cfg.defaultChat empty)" });
         return;
       }
+      if (!planStore.allowExternal(target, wizards.get(target)?.name)) { json(res, 409, { ok: false, reason: "workflow plan reserves this executor" }); return; }
       const sessions = await scanClaudeSessions();
       // 已绑在别的机器人聊天上的会话与不存在同形。
       const hit = sessions.find((s) => s.sessionId === sessionId && ((t) => !t || sameBot(target, t))(m.targetForSession(s.sessionId)));
@@ -456,6 +461,7 @@ const main = async (): Promise<void> => {
         json(res, 404, { ok: false, reason: `session ${sessionId} not found among live tmux sessions` });
         return;
       }
+      if (!planStore.allowExternal(target, wizards.get(target)?.name) || !planStore.allowExternal(m.targetForSession(hit.sessionId))) { json(res, 409, { ok: false, reason: "workflow plan reserves this executor" }); return; }
       const att = m.attach({ sessionId: hit.sessionId, jsonlPath: hit.jsonlPath, target, tmuxPane: hit.tmuxPane, tmuxSession: hit.tmuxSession, cwd: hit.cwd });
       json(res, att.ok ? 200 : 500, att.ok
         ? { ok: true, sessionId: hit.sessionId, label: hit.label, target, cwd: hit.cwd, tmuxSession: hit.tmuxSession }
@@ -510,6 +516,7 @@ const main = async (): Promise<void> => {
       const slotR = await claimSlot(base, String(body.name ?? body.tag ?? ""), tagFromCwd(cwd) || "peer", [self]);
       if (!slotR.ok) { json(res, slotR.status, slotR.body); return; }
       const { target, slot: tag } = slotR;
+      if (!planStore.allowExternal(target, wizards.get(target)?.name ?? tag)) { json(res, 409, { ok: false, reason: "workflow plan reserves this executor" }); return; }
       const existed = !!wizards.get(target);
       const name = wizards.rename(target, normalizeTag(String(body.name ?? body.tag ?? "")) || tag);
       const model = (body.model ?? "").toString().trim();
@@ -517,7 +524,7 @@ const main = async (): Promise<void> => {
       const keepalive = typeof body.keepalive === "boolean" ? body.keepalive : cfg.wrc.mirror.keepalive.spawnDefault;
       log.child({ mod: "mirror", sub: "sessions-new", target }).info({ self, cwd, foreign, cli: body.cli, model, keepalive }, "spawning peer session");
       // silent: 新 wizard 就位不进群 (生命周期事件), 同群的 wizard 从名册增量里得知。
-      const r = await m.newSession(target, name, body.cli, { cwd, model, keepalive, silent: true });
+      const r = await m.newSession(target, name, body.cli, { cwd, model, keepalive, silent: true, guard: () => planStore.allowExternal(target, wizards.get(target)?.name ?? name) });
       if (!r.ok && !existed) wizards.drop(target);
       if (r.ok) postRoster(base, [target, self], { op: "born", name: `.${name}`, by: displayName(self), cwd: r.cwd }, subjectOf(wizards.get(target)));
       json(res, r.ok ? 200 : 500, r.ok
@@ -547,7 +554,9 @@ const main = async (): Promise<void> => {
       const text = (body.text ?? "").toString();
       if (!target) { json(res, 400, { ok: false, reason: "target required" }); return; }
       if (!text.trim()) { json(res, 400, { ok: false, reason: "text required" }); return; }
-      const r = await m.injectText(target, text);
+      const guard = () => planStore.allowExternal(target, wizards.get(target)?.name);
+      if (!guard()) { json(res, 409, { ok: false, reason: "workflow plan reserves this executor" }); return; }
+      const r = await m.injectText(target, text, undefined, { guard });
       json(res, r.ok ? 200 : 500, r);
     });
     // One-shot project switch: bind the chat-wide cwd AND apply it right here
@@ -562,6 +571,7 @@ const main = async (): Promise<void> => {
       const cwd = (body.cwd ?? "").toString();
       const target = resolveSelf(body);
       if (!target) { json(res, 400, { ok: false, reason: "target required (or pass sessionId of an attached chat)" }); return; }
+      if (!planStore.allowExternal(target, wizards.get(target)?.name)) { json(res, 409, { ok: false, reason: "workflow plan fixes executor cwd" }); return; }
       // keep = 人回答了「不用换, 就用现在这个」。只落一笔确认, 不碰 pane —— 把
       // 「保持现状」也走成 setPendingCwd + newSession 的话, 代价是白杀一个会话。
       if (body.keep === true) {
@@ -575,7 +585,7 @@ const main = async (): Promise<void> => {
       // Same shape as inbound's /new: windowName = tag for tagged sessions,
       // principal for the default one. No explicit cwd — newSession reads the
       // pendingCwd just queued and clears it once applied.
-      const r = await m.newSession(target, tagOfKey(target) || target, undefined, {});
+      const r = await m.newSession(target, tagOfKey(target) || target, undefined, { guard: () => planStore.allowExternal(target, wizards.get(target)?.name) });
       json(res, r.ok ? 200 : 500, r.ok
         ? { ok: true, target, sessionId: r.sessionId, cwd: r.cwd }
         : { ok: false, reason: r.reason, target, runningCwd: set.runningCwd, pendingCwd: set.pendingCwd });
@@ -749,18 +759,35 @@ const main = async (): Promise<void> => {
     // 挂起事项表 (见 pending-items.ts): 派活时记一行, 回执落定时由下面的 onOutcome 记账。
     const ledger = createLedger(loadJsonMap<PendingItem>(cfg.wrc.mirror.pendingFile, pendingGc, { strict: true }));
     const workflow = createWorkflowNodes(`${cfg.wrc.mirror.receiptsFile}.nodes.json`);
+    const planStore = loadWorkflowPlans(`${cfg.wrc.mirror.receiptsFile}.plans.json`, workflow.prereq);
+    const pendingBirthJobs = new Map<string, number>();
+    let advancePlans = (): void => {};
+    // Lifecycle continuations carry the same live attempt, never a new task.
+    // Human inbound remains an explicit intervention; agent handoff/receipts
+    // must not revive canceled or unconfirmed planned executions.
+    const planContinuationAllowed = (target: string): boolean => {
+      const r = planStore.reservation(target, wizards.get(target)?.name);
+      if (!r) return planStore.healthy();
+      const n = r.nodes.find((n) => n.to === target);
+      const a = n && workflow.byTurn(r.owner, n.turn);
+      return !!n && !!a && planStore.healthy() && r.state === "active" && n.phase === "observing"
+        && !a.canceled && a.acceptance !== "rejected" && jobs.get(r.plan.job)?.status === "open" && ["running", "needs-input", "errored"].includes(a.execution)
+        && (r.plan.nodes.find((x) => x.id === n.id)?.after ?? []).every((id) => workflow.prereq(r.owner, r.nodes.find((x) => x.id === id)!.turn)?.state === "done");
+    };
     const receipts = createReceipts({
       workflowPrereq: workflow.prereq,
       idleNow: m.idleNow,
       onOutcome: (s, status, bodyText, bySender) => {
         workflow.outcome(s.from, s.turn ?? "", status, bodyText);
+        advancePlans();
         ledger.outcome(s.from, s.turn ?? "", status, parseClosing(bodyText).text || bodyText, bySender);
       },
       jobTally: (id) => jobs.tally(id),
       parkedNow: m.parkedNow,
       settleJob: (id, target, outcome, artifacts) => { jobs.settle(id, target, outcome, artifacts); },
       accept: (id, body) => { const j = jobs.get(id); return j?.status === "open" ? rejectReason(j.accept ?? "result", parseClosing(body)) : undefined; },
-      rebound: async (x, why) => workflow.byTurn(x.from, x.turn) ? false : (await m.injectText(x.to, `（守护进程代 ${displayName(x.from)} 打回一次: 这件活是工单里的一份, 你的回复${why}。请按约定收口 —— 末尾一行 \`RESULT: <结论>\`, 交付了文件每个加一行 \`ARTIFACT: <路径> — 一句话\`; 真缺信息就 \`NEED: <问题>\`。）`, undefined, {
+      rebound: async (x, why) => workflow.byTurn(x.from, x.turn) || !planStore.allowExternal(x.to, wizards.get(x.to)?.name) ? false : (await m.injectText(x.to, `（守护进程代 ${displayName(x.from)} 打回一次: 这件活是工单里的一份, 你的回复${why}。请按约定收口 —— 末尾一行 \`RESULT: <结论>\`, 交付了文件每个加一行 \`ARTIFACT: <路径> — 一句话\`; 真缺信息就 \`NEED: <问题>\`。）`, undefined, {
+        guard: () => planStore.allowExternal(x.to, wizards.get(x.to)?.name),
         from: { kind: "peer", from: x.from, turn: x.turn, ...(x.asker ? { asker: x.asker } : {}) },
         channel: x.channel,
         envelope: envelopeFor(x.from, x.channel, { turn: x.turn, legs: x.legs, re: true, asker: x.asker }),
@@ -782,6 +809,7 @@ const main = async (): Promise<void> => {
       lastWords: m.lastReply,
       deliver: (to, bodyText, meta) =>
         m.injectText(to, clipMiddle(bodyText), undefined, {
+          guard: () => planContinuationAllowed(to),
           // receipt:true 是「这一轮不该再生回执」的记录 —— 回环在结构上就不成立:
           // 只有 tell_peer 那条路登记 watcher, 这里是直接注入。
           from: { kind: "peer", from: meta.from, receipt: true, status: meta.status, ...(meta.turn ? { turn: meta.turn } : {}), ...(meta.job ? { job: meta.job, done: meta.done, total: meta.total } : {}), ...(meta.asker ? { asker: meta.asker } : {}) },
@@ -819,8 +847,10 @@ const main = async (): Promise<void> => {
       // 那一轮就只有一个去向, 别的上游拿到的是答给第一份的话。
       inject: async (t, text, owe, channel) => {
         const [first, ...rest] = owe;
-        if (!first) return m.injectText(t, text, undefined, { channel });
-        const r = await m.injectText(t, text, undefined, carryOpts(first));
+        if (!planContinuationAllowed(t)) return { ok: false, reason: "workflow continuation withdrawn" };
+        if (!first && planStore.reservation(t, wizards.get(t)?.name)) return { ok: false, reason: "workflow handoff requires the original attempt" };
+        if (!first) return m.injectText(t, text, undefined, { channel, guard: () => planContinuationAllowed(t) });
+        const r = await m.injectText(t, text, undefined, { ...carryOpts(first), guard: () => planContinuationAllowed(t) });
         if (r.ok && rest.length) void carryRest(t, rest);
         return r;
       },
@@ -856,7 +886,7 @@ const main = async (): Promise<void> => {
       for (const o of owe) {
         for (const end = Date.now() + 20_000; Date.now() < end && (await m.idleNow(t)); ) await sleep(1000);
         await m.untilIdle(t, 3600_000);
-        const r = await m.injectText(t, `（交接续答）接着上面的简报: 你交接前还欠 ${displayName(o.from)} 一个交代${o.turn ? ` (件 \`${o.turn}\`)` : ""} —— 现在只就这件收口。`, undefined, carryOpts(o));
+        const r = await m.injectText(t, `（交接续答）接着上面的简报: 你交接前还欠 ${displayName(o.from)} 一个交代${o.turn ? ` (件 \`${o.turn}\`)` : ""} —— 现在只就这件收口。`, undefined, { ...carryOpts(o), guard: () => planContinuationAllowed(t) });
         log.info({ mod: "handoff", target: t, from: o.from, turn: o.turn, ok: r.ok, reason: r.reason }, "handoff: 欠账续答");
       }
     }
@@ -924,11 +954,12 @@ const main = async (): Promise<void> => {
       jobOpen: (id) => jobs.get(id)?.status === "open",
       policy: () => ({ afterMs: cfg.wrc.mirror.idleNudge.afterMin * 60_000, max: cfg.wrc.mirror.idleNudge.max }),
       ask: async ({ from, to, turn, text }) => {
-        if (workflow.byTurn(from, turn)) return false;
+        if (workflow.byTurn(from, turn) || !planStore.allowExternal(to, wizards.get(to)?.name)) return false;
         const x = receipts.reask(from, to, turn);
         if (!x) return false;
         ledger.touch(from, turn);
         return (await m.injectText(to, text, undefined, {
+          guard: () => planStore.allowExternal(to, wizards.get(to)?.name),
           from: { kind: "peer", from, turn, ...(x.asker ? { asker: x.asker } : {}) },
           channel: x.channel,
           envelope: envelopeFor(from, x.channel, { turn, legs: x.legs, re: true, asker: x.asker }),
@@ -944,7 +975,11 @@ const main = async (): Promise<void> => {
     /** 撞上的名字属于一个静默超过一天的 wizard → 顶掉它 (见 evictStaleName), 同群的
      *  wizard 收到一行名册变动; 返回是否腾出了名字。 */
     const displace = async (name: string, keep: readonly string[]): Promise<boolean> => {
-      const gone = await evictStaleName(wizards, name, keep, { lastActivity: m.lastActivity, retire: m.killPane });
+      if (!planStore.allowExternal(undefined, name)) return false;
+      const gone = await evictStaleName(wizards, name, keep, { lastActivity: m.lastActivity, retire: async (target) => {
+        if (!planStore.allowExternal(target, wizards.get(target)?.name)) throw new Error("workflow plan reserves this identity; eviction withheld");
+        return m.killPane(target);
+      } });
       if (!gone) return false;
       const slot = !!tagOfKey(gone.target);
       log.child({ mod: "wizard" }).info({ target: gone.target, name: gone.name, slot }, "stale name evicted");
@@ -963,14 +998,19 @@ const main = async (): Promise<void> => {
       want: string,
       fallback: string,
       keep: readonly string[] = [],
+      allowed: (target?: string, name?: string) => boolean = (target, name) => planStore.allowExternal(target, name) && planStore.allowExternal(target, target ? wizards.get(target)?.name : undefined),
     ): Promise<{ ok: true; target: string; slot: string } | { ok: false; status: number; body: Record<string, unknown> }> => {
       const asked = normalizeTag(want);
+      const denied = { ok: false as const, status: 409, body: { ok: false, reason: "workflow plan reserves this executor" } };
+      const candidate = asked || normalizeTag(fallback) || "wizard";
+      if (!allowed(keyOf(base, candidate), candidate)) return denied;
       const clash = asked ? wizards.byName(asked) : undefined;
       // 名字全机唯一, 撞上别的机器人的 wizard 照样拒 —— 但不顶掉它、不复用它的槽, 也不报它的死活:
       // 那边的 wizard 在这个机器人眼里不存在, 只剩「名字被占了」这一个事实。
       if (clash && !sameBot(base, clash.target)) {
         return { ok: false, status: 409, body: { ok: false, reason: `名字 '.${clash.name}' 已被占用 (名字全局唯一) —— 换个名字`, name: clash.name } };
       }
+      if (clash && !allowed(clash.target, clash.name)) return denied;
       const bound = !!clash && m.chatTargets(baseOfKey(clash.target)).includes(clash.target);
       if (clash && !bound && baseOfKey(clash.target) === base && tagOfKey(clash.target)) {
         return { ok: true, target: clash.target, slot: tagOfKey(clash.target) };
@@ -999,12 +1039,14 @@ const main = async (): Promise<void> => {
           },
         };
       }
+      if (!allowed(keyOf(base, candidate), candidate) || (clash && !allowed(clash.target, clash.name))) return denied;
       const taken = new Set([
         ...m.chatTargets(base).map(tagOfKey),
         ...wizards.all().filter((w) => baseOfKey(w.target) === base).map((w) => tagOfKey(w.target)),
       ].filter(Boolean));
       const slot = uniqueTag(asked || normalizeTag(fallback) || "wizard", taken);
-      return { ok: true, target: keyOf(base, slot), slot };
+      const target = keyOf(base, slot);
+      return allowed(target, asked || slot) ? { ok: true, target, slot } : denied;
     };
 
     // ── 给人看的消息 ──────────────────────────────────────────────────
@@ -1258,7 +1300,7 @@ const main = async (): Promise<void> => {
     };
     /** tell_peer 的本体: 以 `self` 的名义说一句 —— HTTP 路由与 dispatch 共用。`extra` = 挂在信封后面的
      *  一段 (只进对方输入框, 不进 `text`: 公开时 text 会成群气泡)。 */
-    const tellPeerAs = async (self: string, body: PeerBody, extra = "", held?: { turn: string; channel: string; after?: string[]; seen?: Readonly<Record<string, HeldSeen>>; alive?: () => boolean; k?: ParentK; asker?: Asker }): Promise<Reply> => {
+    const tellPeerAs = async (self: string, body: PeerBody, extra = "", held?: { turn: string; channel: string; after?: string[]; seen?: Readonly<Record<string, HeldSeen>>; alive?: () => boolean; k?: ParentK; asker?: Asker }, planned?: PlanPermit): Promise<Reply> => {
       if (held?.alive && !held.alive()) return { status: 409, body: { ok: false, reason: "held dispatch withdrawn" } };
       const text = ((body as { text?: string }).text ?? "").toString();
       if (!text.trim()) { return { status: 400, body: { ok: false, reason: "text required" } }; }
@@ -1272,10 +1314,10 @@ const main = async (): Promise<void> => {
       // 件号先于一切: `re` 续问沿用那件活的件号、工单与频道 (见 receipts.prepare)。
       const re = canonicalTurn(((body as { re?: string }).re ?? "").toString());
       // 放行一件停放着的 (after): 件号 / 频道 / 父 k / 链头都沿用停放那一刻定的 —— 依赖边不改 k。
-      const turn = held ? { turn: held.turn, legs: 1, channel: held.channel, asker: held.asker, k: held.k } : receipts.prepare(self, target, re || undefined);
+      const turn = planned ? { turn: planned.turn, legs: 1, channel: "", asker: planned.origin.asker, k: planned.origin.k } : held ? { turn: held.turn, legs: 1, channel: held.channel, asker: held.asker, k: held.k } : receipts.prepare(self, target, re || undefined);
       // Capture the origin before waiting for another pane; our own turn may change meanwhile.
-      const asker = held ? held.asker : turn.legs > 1 ? turn.asker : askerOf(self);
-      const k = held ? held.k : (body as { chain?: boolean }).chain === false ? undefined : turn.legs > 1 ? turn.k : parentKOf(self);
+      const asker = planned ? planned.origin.asker : held ? held.asker : turn.legs > 1 ? turn.asker : askerOf(self);
+      const k = planned ? planned.origin.k : held ? held.k : (body as { chain?: boolean }).chain === false ? undefined : turn.legs > 1 ? turn.k : parentKOf(self);
       // 续问只在那个工单还开着时沿用它: 收了工的工单不再收成员, 续问照样能发。
       // 没带工单的一句顶掉一份还没落定的工单活, 也算在那张工单上 (receipts.register 同理
       // 继承): 不然换个不带 job 的 tell_peer 就绕开了预算。
@@ -1298,6 +1340,8 @@ const main = async (): Promise<void> => {
       if (rawNode !== undefined && (typeof rawNode !== "string" || !rawNode.trim())) return { status: 400, body: { ok: false, reason: "node must not be blank" } };
       if (trackedRe && rawNode !== undefined && rawNode.trim() !== trackedRe.node) return { status: 409, body: { ok: false, reason: "tracked turn cannot change node" } };
       const node = rawNode?.trim() ?? trackedRe?.node ?? "";
+      const planAllowed = (): boolean => planStore.allowTell(self, jobId, node, target, re, planned, wizards.get(target)?.name);
+      if (!planAllowed()) return { status: 409, body: { ok: false, reason: "dedicated plan job/executor only allows runner dispatch or exact owner re" } };
       if (node && jobId && workflow.list(self, jobId).some((a) => !a.accountingVersion)) return { status: 409, body: { ok: false, reason: "historical job has incomplete dispatch accounting evidence; reconcile stopped, close the old job, and open a new job (no guessed budget migration)" } };
       if (node && (!jobId || jobs.get(jobId)?.owner !== self || kind !== "task" || (body as { receipt?: boolean }).receipt === false)) {
         return { status: 400, body: { ok: false, reason: "node requires owner job, task, and receipt" } };
@@ -1312,7 +1356,7 @@ const main = async (): Promise<void> => {
       }
       if (heldAttempt?.execution === "terminal" && heldAttempt.status === "done") return { status: 200, body: { ok: true, recovered: true, attemptId: heldAttempt.id } };
       // 派活方向闸 (见 direction.ts): 只拒不改投递路径, 不动回执 k。
-      const dr = held ? undefined : checkDirection({ self, target, kind, re: turn.legs > 1, jobId, jobs: jobs.all(), chain: receipts.ancestorsOf(self, parentKOf(self)), nameOf: displayName });
+      const dr = held ? undefined : checkDirection({ self, target, kind, re: turn.legs > 1, jobId, jobs: jobs.all(), chain: planned?.origin.chain ?? receipts.ancestorsOf(self, parentKOf(self)), nameOf: displayName });
       if (dr) { return { status: 409, body: { ok: false, gated: "direction", reason: dr } }; }
       // 依赖 (after): 前置必须是自己派出去的件。查不到 → 400; 有失败的 → 409; 都 done → 照常投并附结论; 还有没落定的 → 停放 (见下)。
       const afters = held ? [] : afterTurnsOf(body);
@@ -1381,7 +1425,10 @@ const main = async (): Promise<void> => {
       // 前置还没落定: 不注入, 登记一份停放 (见 receipts.Hold) —— 件号、频道、父 k、链头定在这一刻,
       // 放行时原样沿用; 工单成员与预算也现在就记, 「齐了吗」照常数。
       let attemptId: string | undefined;
-      const beginNode = (queued: boolean): string | undefined => node ? workflow.begin(self, jobId, node, turn.turn, target, queued).id : undefined;
+      const beginNode = (queued: boolean): string | undefined => {
+        if (!planAllowed() || (planned && !planned.alive())) throw new Error("plan dispatch canceled or job reserved");
+        return node ? workflow.begin(self, jobId, node, turn.turn, target, queued).id : undefined;
+      };
       if (parkIt) {
         try { attemptId = beginNode(true); } catch (e) { return { status: 409, body: { ok: false, reason: (e as Error).message } }; }
         const bp = body as { priority?: string; waitSec?: number; deadline?: number; receipt?: boolean; role?: string; chain?: boolean };
@@ -1405,7 +1452,7 @@ const main = async (): Promise<void> => {
         return { status: 200, body: { ok: true, parked: true, after: afters, turn: turn.turn, ...(attemptId ? { node, attemptId } : {}), name: peerAddress(cfg, self, target), ...(jobId ? { job: jobId } : {}), receipt: `排在 ${afters.join(" ")} 之后: 前置满足放行条件才投（tracked 要 accepted，legacy 要 done；带上结论）, 任一失败这件不投、按 canceled 回给你; 不要挂在 wait_peer 上等, 接着干你自己的事` } };
       }
       try { attemptId = beginNode(true); } catch (e) { return { status: 409, body: { ok: false, reason: (e as Error).message } }; }
-      const canceledBeforeDispatch = (): boolean => (!!held?.alive && !held.alive()) || !!workflow.byTurn(self, turn.turn)?.canceled || (!!jobId && jobs.get(jobId)?.status !== "open");
+      const canceledBeforeDispatch = (): boolean => !planAllowed() || (!!planned && !planned.alive()) || (!!held?.alive && !held.alive()) || !!workflow.byTurn(self, turn.turn)?.canceled || (!!jobId && jobs.get(jobId)?.status !== "open");
       // 「忙」= 这一轮还没结束, 或停在审批上等人 —— 都不是能接新活的时候。
       const wasBusy = !(await m.idleNow(target));
       // urgent 只打断你自己派的那一轮 (或它自己的回执轮): 手上若是别的 wizard / 人 / 定时任务的活,
@@ -1451,7 +1498,7 @@ const main = async (): Promise<void> => {
       if (receipts.prereqs(self, held?.after ?? afters, held?.seen).some((p) => p.state !== "done")) return { status: 409, body: { ok: false, reason: "prerequisite acceptance/version changed before injection" } };
       let physicalExposure = false;
       const dispatchGuard = (phase?: "paste" | "submit"): boolean => {
-        if (held?.alive && !held.alive()) return false;
+        if (!planAllowed() || (planned && !planned.alive()) || (held?.alive && !held.alive())) return false;
         if (jobId && jobs.get(jobId)?.status !== "open") { if (attemptId) workflow.cancel(target, self, jobId, turn.turn); return false; }
         const a = workflow.byTurn(self, turn.turn);
         if (a?.canceled || a?.execution === "dispatch-unknown" || a?.execution === "terminal") return false;
@@ -1487,7 +1534,7 @@ const main = async (): Promise<void> => {
         }) + extra,
       }).catch((e: unknown) => { if (attemptId) workflow.dispatched(attemptId, false); throw e; });
       if (attemptId) workflow.dispatched(attemptId, inj.ok && !inj.uncertain);
-      if (!dispatchGuard()) return { status: 409, body: { ok: false, attemptId, reason: "canceled/invalidated during transport; reconcile possible delivery", uncertain: physicalExposure || workflow.byTurn(self, turn.turn)?.execution === "dispatch-unknown" } };
+      if (!dispatchGuard()) return { status: 409, body: { ok: false, attemptId, reason: `canceled/invalidated during transport; reconcile possible delivery${inj.reason ? ": " + inj.reason : ""}`, uncertain: !!inj.uncertain || physicalExposure || workflow.byTurn(self, turn.turn)?.execution === "dispatch-unknown" } };
       // 注入失败就不守 —— 没有问话, 也不会有回答。不要回执 (receipt:false / fyi) 就不登记:
       // 一份不守的槽会以同一对的 key 顶掉发话方还在等它答的那件活, 那件的回执就再也来不了。
       // 父 k: 默认这件活算发话方此刻在答的那件的子活 (链式续回); `chain:false` = 旁支,
@@ -1568,6 +1615,7 @@ const main = async (): Promise<void> => {
         const a = workflow.verdict(self, b.attemptId ?? "", b.as as "accepted" | "rejected" | "sent" | "stopped", b.digest, b.reason ?? "", b.files);
         if (b.as === "sent" && a.tell) recoverWorkflow(a);
         if (b.as === "stopped") receipts.cancel(a.to, self, (x) => x.from === self && x.turn === a.turn);
+        advancePlans();
         json(res, 200, { ok: true, attempt: workflow.byTurn(self, a.turn) });
       } catch (e) { json(res, 409, { ok: false, reason: (e as Error).message }); }
     });
@@ -1646,7 +1694,8 @@ const main = async (): Promise<void> => {
       const info = m.sessionInfo(target);
       const cli = cfg.wrc.defaultCli ?? primary.name;
       const model = stewardTierOf(cfg, target) || info?.cli !== cli ? undefined : info?.model || undefined;
-      return m.newSession(target, displayName(target) || tagOfKey(target) || target, cli, { model, silent: true, warm: true });
+      if (!planContinuationAllowed(target)) return Promise.resolve({ ok: false, reason: "workflow continuation withdrawn" });
+      return m.newSession(target, displayName(target) || tagOfKey(target) || target, cli, { model, silent: true, warm: true, guard: () => planContinuationAllowed(target) });
     };
 
     // POST /handoff — 交接一个 pane 的会话给一个全新会话。先让目标会话把当前工作
@@ -1656,6 +1705,7 @@ const main = async (): Promise<void> => {
     /** 交接自己: 简报由调用方给, 排在它这一轮说完之后 (见 handoff.ts)。/handoff 点名点到
      *  自己与老路由 /wizard/handoff-self 共用。 */
     const handoffSelf = (self: string, brief: string): { status: number; body: Record<string, unknown> } => {
+      if (!planContinuationAllowed(self)) return { status: 409, body: { ok: false, reason: "workflow continuation withdrawn" } };
       if (brief.length < 40) return { status: 400, body: { ok: false, reason: "brief 太短 —— 要写到零上下文也能接手: 目标 / 已完成 / 当前状态 / 下一步 / 关键文件与坑" } };
       const info = m.sessionInfo(self);
       const r = handoffs.self(self, brief);
@@ -1689,6 +1739,7 @@ const main = async (): Promise<void> => {
         json(res, r.status, r.body);
         return;
       }
+      if (!planStore.allowExternal(target, wizards.get(target)?.name)) { json(res, 409, { ok: false, reason: "workflow executor may only hand off its own live attempt" }); return; }
       const focus = ((body as { focus?: string }).focus ?? "").toString().trim();
       const timeoutMs = Math.min(Math.max(Number((body as { timeoutSec?: number }).timeoutSec ?? 600) || 600, 30), 7200) * 1000;
       const r = await handoffs.other(target, focus, timeoutMs);
@@ -2271,6 +2322,7 @@ const main = async (): Promise<void> => {
       const description = (b.description ?? "").toString().trim();
       const expertise = (b.expertise ?? "").toString().trim();
       if ((b.name ?? "").toString().trim() && !asked) { json(res, 400, { ok: false, reason: "名字只能是 1-32 位字母/数字/`_`/`-`" }); return; }
+      if (asked && (!planStore.allowExternal(self, wizards.get(self)?.name) || !planStore.allowExternal(undefined, asked))) { json(res, 409, { ok: false, reason: "workflow plan reserves this identity" }); return; }
       const before = settleName(wizards, chatNameOf(cfg, self), self);
       const name = asked ? wizards.rename(self, asked) : before;
       if (description) wizards.upsert(self, { description });
@@ -2530,7 +2582,12 @@ const main = async (): Promise<void> => {
     // 生分身。默认 fork 调用方此刻的上下文 —— 这是"先把公共材料读进来, 再分出 N
     // 个干活的"之所以省事的原因: 材料只读一遍, 却进了 N 份上下文。
     /** spawn_wizard / clone_wizard 的本体 —— HTTP 路由与 dispatch 共用。 */
-    const bearAs = async (self: string, body: PeerBody): Promise<Reply> => {
+    const bearAs = async (self: string, body: PeerBody, planned?: PlanPermit): Promise<Reply> => {
+      // Legacy bootstrap can dispatch before attaching its member. An empty job
+      // is not available for plan ownership while that birth is still in flight.
+      const birthJob = ((body as { job?: string }).job ?? "").trim();
+      if (birthJob) pendingBirthJobs.set(birthJob, (pendingBirthJobs.get(birthJob) ?? 0) + 1);
+      try {
       const b = body as { name?: string; tag?: string; description?: string; inherit?: boolean; detached?: boolean; from?: string; cwd?: string; chat?: string; cli?: CliBackendName; model?: string; effort?: string; tier?: string; task?: string; job?: string; keepalive?: boolean; lead?: boolean };
       const asker = b.task?.trim() ? askerOf(self) : undefined;
       const k = (body as { chain?: boolean }).chain === false ? undefined : parentKOf(self);
@@ -2542,8 +2599,10 @@ const main = async (): Promise<void> => {
         const jc = checkJob(jobId, undefined, !(b.task ?? "").toString().trim());
         if (!jc.ok) { return { status: jc.status, body: { ok: false, reason: jc.reason } }; }
       }
+      const planBirthAllowed = (target?: string, name = normalizeTag(b.name ?? b.tag) || (b.detached && b.cwd ? tagFromCwd(b.cwd) : "") || normalizeTag(b.description?.split(/\s+/)[0]) || "clone"): boolean => planStore.allowSpawn(self, jobId, planned, name, target) && (!planned || planned.alive());
+      if (!planBirthAllowed() || (planned && !!b.task)) return { status: 409, body: { ok: false, reason: "dedicated plan job only permits taskless runner spawn" } };
       // 带 task 派下去 = 派活: 同样过方向闸, 不论带不带 job (新生的目标还不在任何单里, 实际只有 1 / 链深两条会拦)。
-      const dr = (b.task ?? "").toString().trim() ? checkDirection({ self, target: "", kind: "task", re: false, jobId, jobs: jobs.all(), chain: receipts.ancestorsOf(self, parentKOf(self)), nameOf: displayName }) : undefined;
+      const dr = planned || (b.task ?? "").toString().trim() ? checkDirection({ self, target: "", kind: "task", re: false, jobId, jobs: jobs.all(), chain: planned?.origin.chain ?? receipts.ancestorsOf(self, parentKOf(self)), nameOf: displayName }) : undefined;
       if (dr) { return { status: 409, body: { ok: false, gated: "direction", reason: dr } }; }
       // `inherit` 没有默认值 —— 继承与否是两种完全不同的分身 (一种开局就带着你
       // 读过的一切, 另一种白纸一张), 猜错了要么白烧一份上下文, 要么让它从零重读。
@@ -2590,7 +2649,7 @@ const main = async (): Promise<void> => {
         const parked = new Set(listPending().map((p) => p.meta.sessionId).filter(Boolean));
         const owing = new Set(receipts.states().map((x) => x.to));
         const idle = aliveKids
-          .filter((pp) => !pp.busy && !owing.has(pp.target) && !parked.has(m.sessionInfo(pp.target)?.sessionId ?? ""))
+          .filter((pp) => planStore.allowExternal(pp.target, wizards.get(pp.target)?.name) && !pp.busy && !owing.has(pp.target) && !parked.has(m.sessionInfo(pp.target)?.sessionId ?? ""))
           .sort((x, y) => x.lastActivity - y.lastActivity)
           .slice(0, over);
         const slept = (await Promise.all(idle.map((pp) => m.sleepPane(pp.target)))).filter((r) => r.ok).length;
@@ -2615,7 +2674,7 @@ const main = async (): Promise<void> => {
       const askedName = String(b.name ?? b.tag ?? "");
       // 没起名: 独立长住的按目录名 (同 /new 与 new_claude_session), 分身按职责的首词。
       const fallback = (detached && b.cwd ? tagFromCwd(b.cwd) : "") || normalizeTag(b.description?.split(/\s+/)[0]) || "clone";
-      const slotR = await claimSlot(base, askedName, fallback, [self, source]);
+      const slotR = await claimSlot(base, askedName, fallback, [self, source], (target, name) => planBirthAllowed(target, name) && (!target || planBirthAllowed(target, wizards.get(target)?.name ?? name)));
       if (!slotR.ok) { return { status: slotR.status, body: slotR.body }; }
       const { target, slot: tag } = slotR;
       // claimSlot 会复用同名的冷记录 (detached 正是「叫回一个老名字」的场景): 生不出来时
@@ -2623,6 +2682,7 @@ const main = async (): Promise<void> => {
       const existed = !!wizards.get(target);
       const forkOf = inherit && source !== self ? source : undefined;
       // 先落身份再 spawn: 宪章是从注册表渲染出来的, 记录不在就渲染出一个无名分身。
+      if (!planBirthAllowed(target, normalizeTag(askedName) || tag) || (jobId && jobs.get(jobId)?.status !== "open")) return { status: 409, body: { ok: false, reason: "plan canceled/job reserved during spawn preparation" } };
       wizards.upsert(target, {
         description: (b.description ?? "").toString().trim(),
         // 显式写 undefined: upsert 是合并写, 复用的冷记录里旧的 parent 会留下来。
@@ -2648,7 +2708,10 @@ const main = async (): Promise<void> => {
       // wait_peer 才不会把它们当成分身对这件活的答复。
       const taskAt = Date.now();
       const taskTurn = newTurn();
+      const birthGuard = (): boolean => planBirthAllowed(target, wizards.get(target)?.name ?? name) && (!jobId || jobs.get(jobId)?.status === "open");
+      if (!birthGuard()) return { status: 409, body: { ok: false, reason: "executor reservation changed before spawn" } };
       const r = await m.cloneSession({
+        guard: birthGuard,
         parent: source,
         target,
         windowName: name,
@@ -2685,11 +2748,11 @@ const main = async (): Promise<void> => {
       }
       // 继承路径上活已经随开场白进去了, 空白分身才需要在这里补一次注入 (私聊)。
       let dispatched = r.inherited && !!task;
-      if (task && !r.inherited) {
-        const inj = await m.injectText(target, task, undefined, { from: { kind: "peer", from: self, turn: taskTurn, ...(jobId ? { job: jobId } : {}), ...(asker ? { asker } : {}) }, channel: "", envelope: envelopeFor(self, "", { turn: taskTurn, asker }) });
+      if (task && !r.inherited && birthGuard()) {
+        const inj = await m.injectText(target, task, undefined, { from: { kind: "peer", from: self, turn: taskTurn, ...(jobId ? { job: jobId } : {}), ...(asker ? { asker } : {}) }, channel: "", envelope: envelopeFor(self, "", { turn: taskTurn, asker }), guard: birthGuard });
         dispatched = inj.ok;
       }
-      if (jobId) {
+      if (jobId && birthGuard()) {
         const role = roleParam((body as { role?: string }).role);
         const from = inherit ? source : undefined;
         jobs.attach(jobId, { target, task, spawned: true, ...(role ? { role } : {}), ...(from ? { forkOf: from } : {}) });
@@ -2700,7 +2763,40 @@ const main = async (): Promise<void> => {
       if (dispatched) receipts.register({ from: self, to: target, channel: "", job: jobId, at: taskAt, turn: taskTurn, ...(k ? { k } : {}), ...(asker ? { asker } : {}) });
       if (dispatched) ledger.open({ turn: taskTurn, owner: self, to: target, text: task, at: taskAt, ...(jobId ? { job: jobId } : {}), ...(k ? { for: k } : {}), ...(asker ? { asker } : {}) });
       return { status: 200, body: { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, ...(dispatched ? { turn: taskTurn } : {}), keepalive, ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(r.effort ? { effort: r.effort } : {}), ...(pick.tier ? { tier: pick.tier } : {}), via: pick.via, ...(pick.note ? { tierNote: pick.note } : {}), ...(jobId ? { job: jobId } : {}), ...(detached ? { detached: true } : {}) } };
+      } finally {
+        if (birthJob) {
+          const remaining = (pendingBirthJobs.get(birthJob) ?? 1) - 1;
+          if (remaining) pendingBirthJobs.set(birthJob, remaining); else pendingBirthJobs.delete(birthJob);
+        }
+      }
     };
+    const planRunner = createWorkflowPlanRunner(planStore, {
+      job: jobs.get, attempt: workflow.byTurn, prereq: workflow.prereq,
+      spawn: (run, node, state, permit) => bearAs(run.owner, {
+        inherit: false, name: state.name, description: node.criteria || `workflow node ${node.id}`,
+        tier: node.tier, cwd: run.plan.cwd, job: run.plan.job, keepalive: false,
+      } as PeerBody, permit),
+      tell: (run, node, state, after, permit) => tellPeerAs(run.owner, {
+        name: state.name, text: node.task + (node.criteria ? `\n\n验收标准: ${node.criteria}` : ""),
+        node: node.id, job: run.plan.job, ...(after.length ? { after } : {}),
+      } as PeerBody, "", undefined, permit),
+      cancel: (run) => {
+        workflow.cancel(undefined, run.owner, run.plan.job);
+        run.nodes.filter((n) => n.to).forEach((n) => receipts.cancel(n.to!, run.owner, (x) => x.from === run.owner && x.turn === n.turn));
+        receipts.cancelHeld(run.plan.job, run.owner);
+      },
+      error: (e) => log.error({ err: errText(e) }, "workflow plan advancement paused"),
+    });
+    advancePlans = planRunner.kick;
+    registerWorkflowPlanRoutes(http, {
+      read: readPeerBody, store: planStore, runner: planRunner,
+      job: jobs.get, attempts: workflow.list,
+      occupied: (self, job) => pendingBirthJobs.has(job) || receipts.states().some((s) => s.from === self && s.job === job),
+      origin: (self) => { const k = parentKOf(self); return { ...(k ? { k } : {}), ...(askerOf(self) ? { asker: askerOf(self) } : {}), chain: receipts.ancestorsOf(self, k) }; },
+      direction: (self, jobId, origin) => checkDirection({ self, target: "", kind: "task", re: false, jobId, jobs: jobs.all(), chain: origin.chain, nameOf: displayName }),
+    });
+    void m.restored.then(planRunner.start);
+
     http.register("POST /wizard/clone", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
@@ -2895,6 +2991,7 @@ const main = async (): Promise<void> => {
       const closeOne = async (j: JobRecord, summary: string, mark?: JobMark): Promise<{ members: number }> => {
         const sids = new Map([j.owner, ...j.members.map((mm) => mm.target)].map((t) => [t, m.sessionInfo(t)?.sessionId ?? ""]));
         // 取消: 还没落定的成员手上这张单派的活记成 canceled, 发起者不会再收到一串回执。
+        planRunner.cancelJob(j.owner, j.id);
         workflow.cancel(undefined, j.owner, j.id);
         if (how === "cancel") j.members.filter((mm) => !mm.outcome).forEach((mm) => receipts.cancel(mm.target, j.owner, (x) => x.from === j.owner));
         // 这张单名下还排着没投的 (after 停放) 也不投了。
@@ -3283,6 +3380,8 @@ const main = async (): Promise<void> => {
       // 节点是 base 下的 tag, 构造上与调用方同机器人; 这一道防的是 tag 里夹带别的机器人的 key。
       const xnode = spec.nodes.find((n) => !sameBot(self, keyOf(spec.base, n.tag)));
       if (xnode) { json(res, 400, { ok: false, reason: `node.tag \`${xnode.tag}\` 不是一个合法的 tag` }); return; }
+      const allowed = (target: string, name?: string): boolean => planStore.allowExternal(target, name) && planStore.allowExternal(target, wizards.get(target)?.name);
+      if (spec.nodes.some((n) => !allowed(keyOf(spec.base, n.tag), n.tag))) { json(res, 409, { ok: false, reason: "workflow plan reserves a graph executor" }); return; }
       const graphLog = log.child({ mod: "graph", base: spec.base });
       // 每一步、每条进度都在发起这次 run 的那一轮的频道里: 人在群里叫它发起的才进群,
       // 私聊轮里发起的整场只进 rolepage —— 步骤不带频道就等于在节点的 home 群里开口。
@@ -3292,15 +3391,22 @@ const main = async (): Promise<void> => {
         // (or its pane died). Re-spawning a healthy node would throw away the
         // context that makes a multi-round loop worth running.
         ensureNode: async (target, node) => {
+          if (!allowed(target, node.tag)) return { ok: false, reason: "workflow plan reserves this executor" };
           const existing = (await m.peers(target)).find((p) => p.target === target);
+          if (!allowed(target, node.tag)) return { ok: false, reason: "workflow plan reserves this executor" };
           if (existing?.paneAlive) return { ok: true };
           // No broadcast plumbing needed: a `base#tag` target strips down to the
           // same WeCom chatid as `base`, so the node's own pushes already land
           // in this chat — mirroring them again was pure duplication.
-          const r = await m.newSession(target, node.tag, node.cli, { model: node.model, cwd: node.cwd, silent: true });
+          const r = await m.newSession(target, node.tag, node.cli, { model: node.model, cwd: node.cwd, silent: true, guard: () => allowed(target, node.tag) });
           return { ok: r.ok, reason: r.reason };
         },
-        send: async (target, text, origin) => (await handedOff(target), m.injectText(target, text, origin, { channel })),
+        send: async (target, text, origin) => {
+          if (!allowed(target)) return { ok: false, reason: "workflow plan reserves this executor" };
+          await handedOff(target);
+          if (!allowed(target)) return { ok: false, reason: "workflow plan reserves this executor" };
+          return m.injectText(target, text, origin, { channel, guard: () => allowed(target) });
+        },
         isBusy: m.isBusy,
         lastText: async (target) => m.lastText(target),
         notify: (_base, markdown) => { if (channel) notifyChat(channel, markdown); },
@@ -3361,22 +3467,27 @@ const main = async (): Promise<void> => {
       const owner = ((r) => (r ? ownerOf(r) : target))(tasks.get(taskId));
       if (!sameBot(owner, target)) return { ok: false, reason: `日程 ${taskId} 的目标与排班者归不同的企微机器人, 不跨机器人放枪` };
       // 安静任务私下跑 (channel ""): 镜像不推它的任何一句, 终句由 relayUnlessQuiet 判断要不要进群。
+      const allowed = () => planStore.allowExternal(target, wizards.get(target)?.name);
+      if (!fresh && !allowed()) return { ok: false, reason: "workflow plan reserves this executor" };
       const inNamed = async (): Promise<{ ok: boolean; reason?: string }> => {
+        if (!allowed()) return { ok: false, reason: "workflow plan reserves this executor" };
         const at = Date.now();
         const turn = newTurn();
         const inj = await m.injectText(target, text, undefined, quiet
-          ? { from: { kind: "task", taskId }, channel: "", envelope: renderTaskEnvelope(taskId, { turn }) }
-          : { fromChat: true, from: { kind: "task", taskId }, envelope: renderTaskEnvelope(taskId) });
+          ? { guard: allowed, from: { kind: "task", taskId }, channel: "", envelope: renderTaskEnvelope(taskId, { turn }) }
+          : { guard: allowed, fromChat: true, from: { kind: "task", taskId }, envelope: renderTaskEnvelope(taskId) });
         if (inj.ok && quiet) void relayUnlessQuiet(target, at, turn, baseOfKey(target));
         return inj;
       };
       if (!fresh) await handedOff(target); // 交接中途 pane 是空的, 别当成闲着投进去
+      if (!fresh && !allowed()) return { ok: false, reason: "workflow plan reserves this executor" };
       const busy = fresh ? false : await m.isBusy(target);
       if (!fresh && !busy) return inNamed();
       // 点名的目标正忙: 顺延到它这一轮结束再投 (与 tell_peer 默认的 normal 同一口径) ——
       // 「在它那儿继续」是排班时要求的, 不该因为撞上它在干活就换成白板。后台等, 别拖住
       // 调度器的其它任务; 等满 30 分钟仍忙才退回起白板。
-      const inRunner = (wasBusy: boolean): Promise<{ ok: boolean; reason?: string }> => runTaskInRunner(target, text, taskId, quiet, wasBusy);
+      const inRunner = (wasBusy: boolean): Promise<{ ok: boolean; reason?: string }> => !fresh && !allowed()
+        ? Promise.resolve({ ok: false, reason: "workflow plan reserves this executor" }) : runTaskInRunner(target, text, taskId, quiet, wasBusy);
       if (!fresh && busy) {
         // 同一条任务已有一枪在等这个目标: 这一枪并进去 —— 等它闲下来时几枪一起投, 会挤进同一个输入框。
         if (postponed.has(taskId)) return { ok: true, reason: "上一枪还在等它闲下来, 这一枪并入" };
@@ -3434,6 +3545,8 @@ const main = async (): Promise<void> => {
       const slotR = await claimSlot(base, "", `${ownerName}-task-${taskId.slice(0, 4)}`);
       if (!slotR.ok) return { ok: false, reason: "起白板 wizard 失败: 挑不出槽位" };
       const runner = slotR.target;
+      const allowed = () => planStore.allowExternal(runner, wizards.get(runner)?.name);
+      if (!allowed()) return { ok: false, reason: "workflow plan reserves task runner" };
       const info = m.sessionInfo(target);
       const why = busy ? ` (起因: ${displayName(target)} 当时正忙)` : "";
       wizards.upsert(runner, {
@@ -3443,7 +3556,7 @@ const main = async (): Promise<void> => {
         bornAt: Date.now(),
       });
       const runnerName = wizards.rename(runner, `${ownerName}-task-${taskId.slice(0, 4)}`);
-      const spawned = await m.newSession(runner, runnerName, info?.cli, { cwd: info?.cwd, model: info?.model, silent: true });
+      const spawned = await m.newSession(runner, runnerName, info?.cli, { cwd: info?.cwd, model: info?.model, silent: true, guard: allowed });
       if (!spawned.ok) {
         wizards.drop(runner);
         return { ok: false, reason: `起白板 wizard 失败: ${spawned.reason ?? "unknown"}` };
@@ -3456,8 +3569,8 @@ const main = async (): Promise<void> => {
       const at = Date.now();
       const turn = newTurn();
       const inj = await m.injectText(runner, text, undefined, quiet
-        ? { from: { kind: "task", taskId }, channel: "", envelope: renderTaskEnvelope(taskId, { turn }) }
-        : { fromChat: true, from: { kind: "task", taskId }, envelope: renderTaskEnvelope(taskId) });
+        ? { guard: allowed, from: { kind: "task", taskId }, channel: "", envelope: renderTaskEnvelope(taskId, { turn }) }
+        : { guard: allowed, fromChat: true, from: { kind: "task", taskId }, envelope: renderTaskEnvelope(taskId) });
       if (!inj.ok) { wizards.drop(runner); return inj; }
       // 没有人会对这个一次性分身喊 stop_wizard, 只能自己等它闲下来再收。30min
       // 内没闲下来就放弃自动回收 (它大概率还在干一个长活), 留给人手动处理 ——

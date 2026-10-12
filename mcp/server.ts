@@ -7,6 +7,7 @@ import { z } from "zod";
 import { DAEMON_TOKEN_HEADER, readDaemonToken } from "../shared/daemon-token.js";
 import { EFFORTS } from "../shared/effort.js";
 import { TIERS } from "../shared/config.js";
+import { WorkflowPlanInputSchema } from "../shared/workflow-plan.js";
 
 const DAEMON_BASE = process.env.WEZARD_DAEMON_BASE ?? "http://127.0.0.1:17890";
 
@@ -427,6 +428,18 @@ server.registerTool("workflow_nodes", {
   description: "Query your persistent node/attempt history, receipt execution status and independent acceptance. digest binds verdict to result body.",
   inputSchema: { job: z.string().optional() },
 }, async (a) => unwrap("workflow_nodes", await daemonPost("/workflow/nodes", a)));
+registerTool("workflow_plan_create", {
+  description: "Start one immutable version-1 segment in your dedicated empty open job. At most five static nodes, all-accepted dependencies, one execution/validation at a time. Executors are spawned blank at their tier only when ready. The job/executors reject external tasks; only exact owner re can continue an existing attempt. Owner must use workflow_verdict for every result; NEED/error/unknown pause without replay. Job budget is inherited; no auto-retry or automatic acceptance. Repeating create returns existingRun to recover a lost response, without updating or restarting it.",
+  inputSchema: WorkflowPlanInputSchema,
+}, async (a) => unwrap("workflow_plan_create", await daemonPost("/workflow/plans/create", a)));
+registerTool("workflow_plan_status", {
+  description: "Inspect your fixed workflow segment, executor creation evidence and authoritative execution/acceptance. Unknown birth or delivery requires reconciliation; status never replays a task.",
+  inputSchema: z.object({ run: z.string() }).strict(),
+}, async (a) => unwrap("workflow_plan_status", await daemonPost("/workflow/plans/status", a)));
+registerTool("workflow_plan_cancel", {
+  description: "Persistently stop further advancement of your workflow segment and cancel its receipt obligations. Does not kill executing panes or confirm physical stop; reconcile exposed attempts separately. Canceled segments cannot resume.",
+  inputSchema: z.object({ run: z.string(), reason: z.string().trim().min(1) }).strict(),
+}, async (a) => unwrap("workflow_plan_cancel", await daemonPost("/workflow/plans/cancel", a)));
 server.registerTool("workflow_verdict", {
   description: "Owner validates a terminal done attempt by digest. accepted/rejected is semantic judgment, not RESULT format. All declared ARTIFACT paths require complete absolute files+sha256 evidence. Pure text may omit files. Accepted files gain readonly content-addressed snapshots; after passes snapshot paths and checks versions at physical paste/submit. sent reconciles uncertain dispatch and idempotently restores job/member/budget/ledger and receipt watching (unknown is already conservatively charged); stopped requires evidence execution cannot continue and permits retry. No automatic replay or process stop is implied.",
   inputSchema: { attemptId: z.string(), as: z.enum(["accepted", "rejected", "sent", "stopped"]), digest: z.string().optional(), reason: z.string().min(1), files: z.array(z.object({ path: z.string(), sha256: z.string() })).optional() },

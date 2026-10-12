@@ -1,88 +1,10 @@
-// Real source routes over localhost with controlled transport barriers; no live daemon.
+// First-stage routes and stores, shared with the declarative-plan integration cases.
 import assert from 'node:assert/strict';
-import {readFileSync,writeFileSync,mkdtempSync,renameSync,mkdirSync,existsSync} from 'node:fs';
-import {tmpdir} from 'node:os';
+import {readFileSync,writeFileSync,renameSync,mkdirSync,existsSync} from 'node:fs';
 import {join} from 'node:path';
-import {createServer} from 'node:http';
-import ts from 'typescript';
-import pino from 'pino';
-import {createWorkflowNodes,resultDigest} from '../daemon/workflow-nodes.ts';
-import {createReceipts,deadlineOf,canonicalTurn} from '../daemon/receipts.ts';
-import {parseClosing} from '../daemon/peers.ts';
-import {loadJobStore} from '../daemon/jobs.ts';
-import {createLedger,pendingGc} from '../daemon/pending-items.ts';
-import {loadJsonMap} from '../shared/json-map-store.ts';
-const src=readFileSync('daemon/index.ts','utf8');
-const start=src.indexOf('    // One durable key per tracked physical dispatch leg');
-const end=src.indexOf(' // 老 MCP 进程还在调这个名字',start);
-const closeStart=src.indexOf('    http.register("POST /jobs/close"');
-const closeEnd=src.indexOf('    // 挂起事项全表',closeStart);
-const stopStart=src.indexOf('    http.register("POST /wizard/stop"');
-const stopEnd=src.indexOf('    // 换模型',stopStart);
-const bootstrapStart=src.indexOf('      handoffs.resume();');
-const bootstrapEnd=src.indexOf('      receipts.resume();',bootstrapStart)+'      receipts.resume();'.length;
-const bootstrapCode=ts.transpileModule(src.slice(bootstrapStart,bootstrapEnd),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText;
-const routeCode=ts.transpileModule(src.slice(start,end)+src.slice(closeStart,closeEnd)+src.slice(stopStart,stopEnd)+'\nreturn {tellPeerAs,recoverWorkflow};',{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText;
-const checkStart=src.indexOf('    const checkJob = ');
-const checkEnd=src.indexOf('\n    };',checkStart)+7;
-const checkCode=ts.transpileModule(src.slice(checkStart,checkEnd)+'\nreturn checkJob;',{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText;
-const afterStart=src.indexOf('    const afterNote =');
-const afterEnd=src.indexOf('    // One durable key per tracked physical dispatch leg',afterStart);
-const afterCode=ts.transpileModule(src.slice(afterStart,afterEnd)+'\nreturn afterNote;', {compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText;
-const currentAskStart=src.indexOf('    const currentAsk =');
-const currentAskEnd=src.indexOf('\n    };',currentAskStart)+7;
-const currentAskCode=ts.transpileModule(src.slice(currentAskStart,currentAskEnd)+'\nreturn currentAsk;', {compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText;
-const noop=()=>{};
-const never=()=>new Promise(()=>{});
-const root=mkdtempSync(join(tmpdir(),'workflow-review-'));
-const cases=[];
-let n=0;
-async function setup(options={}){
- const dir=options.dir??join(root,String(++n));
- const workflow=createWorkflowNodes(join(dir,'nodes.json'));
- const afterNote=new Function('workflow','parseClosing','renderReminder','displayName','clipLine',afterCode)(workflow,parseClosing,(_tag,lines)=>lines.join('\n'),x=>x,(s,n)=>s.slice(0,n));
- let jobs=loadJobStore(join(dir,'jobs.json'));
- let job=options.dir?jobs.get('J'):jobs.open('chat','owner','test job',{maxTurns:options.maxTurns});
- // Stable id lets the source fixtures focus on HTTP behavior.
- const jobFile=join(dir,'jobs.json');if(!options.dir)writeFileSync(jobFile,JSON.stringify({J:{...job,id:'J'}}));jobs=loadJobStore(jobFile);
- const removeJob=()=>{writeFileSync(jobFile,'{}');jobs=loadJobStore(jobFile);};
- const jobView=new Proxy({}, {get:(_target,key)=>(...args)=>jobs[key](...args)});
- const ledgerStore=loadJsonMap(join(dir,'pending.json'),pendingGc,{strict:true});
- const ledger=createLedger(ledgerStore);
- let internal;
- const holdStore=loadJsonMap(join(dir,'holds.json'),undefined,{strict:true});
- if(options.hold)holdStore.set('owner\u0000consumer\u0000tHeld',options.hold);
- const outcomeEvents=[];
- const receipts=createReceipts({
-   holdStore,
-   release:async(h,seen,alive)=>{const r=await internal.tellPeerAs(h.from,h.body,afterNote(h.after,seen,h.from),{turn:h.turn,channel:h.channel,after:h.after,seen:h.seen,alive});options.onRelease?.(r);return {ok:r.status===200,reason:r.body.reason};},
-   workflowPrereq:workflow.prereq,log:pino({level:'silent'}),
-   idleNow:async()=>false,untilIdle:never,paneLive:async()=>true,
-   replyFor:()=>undefined,deliver:async()=>({ok:true}),nameOf:x=>x,
-   store:loadJsonMap(join(dir,'receipts.json')),
-   onOutcome:(s,status,body)=>{outcomeEvents.push({from:s.from,turn:s.turn,status});workflow.outcome(s.from,s.turn,status,body);}
- });
- const injected=[];const routes=new Map();
- const m={idleNow:async()=>true,untilIdle:async()=>({idle:true}),sessionInfo:()=>undefined,
- injectText:async(...a)=>{if(a[3]?.guard&&!a[3].guard('paste'))return {ok:false,reason:'guard'};if(a[3]?.guard&&!a[3].guard('submit'))return {ok:false,reason:'guard'};injected.push(a);return {ok:true};},interruptPane:async()=>({ok:true}),killPane:async()=>({ok:true})};
- const openingAsk=()=>options.opening;
- const currentAsk=new Function('openingAsk','displayName',currentAskCode)(openingAsk,x=>x);
- const env={canonicalTurn,baseOfKey:x=>x,jobAncestors:()=>[],jobChildren:()=>[],jobEpisode:()=>({name:'owner'}),appendEpisode:()=>true,episodePath:()=>'',episodeName:()=>'',chatNameOf:()=>'',openingAsk,currentAsk,notices:{post:noop},briefOf:()=>({name:'worker'}),forgetWizard:noop,subjectOf:noop,postRoster:noop,sameBot:()=>true,workflow,receipts,jobs:jobView,m,http:{register:(path,fn)=>routes.set(path,fn)},
- readPeerBody:async req=>{let raw='';for await(const c of req)raw+=c;return {self:'owner',body:JSON.parse(raw)};},
- json:(res,status,body)=>{res.writeHead(status,{'content-type':'application/json'});res.end(JSON.stringify(body));},
- resolvePeer:(_s,t)=>({ok:true,target:t,foreign:false}),addrOf:b=>b.name,askerOf:()=>undefined,parentKOf:()=>undefined,
- checkJob:new Function('jobs','JOB_MEMBER_MAX',checkCode)(jobView,5),checkDirection:()=>undefined,displayName:x=>x,
- afterTurnsOf:b=>[...new Set((b.after??[]).map(x=>String(x).replace(/[`\s]/g,'')))],
- afterNote,channelOf:()=>'',wizards:{get:()=>true},cfg:{daemon:{stateDir:dir}},chatPolicyOf:()=>({topOnly:false}),
- handedOff:async()=>{},othersTurn:async()=>options.others,coldRefused:new Map(),coldGateOf:()=>'',touchOf:()=>0,ttlOf:()=>0,
- peerAddress:(_cfg,_s,t)=>t,roleParam:x=>x,wakeNoteOf:()=>'',deadlineOf,envelopeFor:()=>'',ledger,log:pino({level:'silent'}),relayPeer:noop};
- internal=new Function(...Object.keys(env),routeCode)(...Object.values(env));
- const server=createServer((req,res)=>{const fn=routes.get(req.method+' '+req.url);if(!fn){res.writeHead(404);res.end();return;}Promise.resolve(fn(req,res)).catch(e=>{res.writeHead(500);res.end(e.message)});});
- await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
- const base='http://127.0.0.1:'+server.address().port;
- const post=async(route,body)=>{const r=await fetch(base+route,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});const raw=await r.text();let response;try{response=JSON.parse(raw);}catch{response={reason:raw};}return {status:r.status,body:response};};
- return {bootstrap:()=>new Function('workflow','receipts','handoffs','recoverWorkflow','log',bootstrapCode)(workflow,receipts,{resume:noop},internal.recoverWorkflow,pino({level:'silent'})),dir,workflow,receipts,outcomeEvents,jobs,ledgerStore,removeJob,m,injected,post,internal,close:()=>{server.closeAllConnections();server.close();}};
-}const tick=()=>new Promise(r=>setTimeout(r,3200));
+import {resultDigest} from '../daemon/workflow-nodes.ts';
+import {setup} from './workflow-http-fixture.mjs';
+const tick=()=>new Promise(r=>setTimeout(r,3200));
 const prepare=(x,turn='tA',node='build',to='worker')=>{const a=x.workflow.begin('owner','J',node,turn,to,false);x.workflow.recordLeg(a.id,{text:'fixture '+node,at:Date.now(),kind:'task'});x.workflow.intent(a.id,{from:'owner',to,job:'J',channel:'',turn});x.workflow.dispatched(a.id,true);return a;};
 const accept=async(x,a,body='RESULT: okay',files)=>{x.workflow.outcome('owner',a.turn,'done',body);const r=await x.post('/workflow/verdict',{attemptId:a.id,as:'accepted',digest:resultDigest(body),reason:'reviewed',files});assert.equal(r.status,200,JSON.stringify(r));};
 {
