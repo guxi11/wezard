@@ -72,6 +72,11 @@ export const normalizeCodex = (raw: unknown): NormalizedTranscriptLine | null =>
   const base = { uuid: p.id, timestamp: r.timestamp };
   if (p.type === "message" && ["user", "assistant"].includes(p.role)) {
     const text = (Array.isArray(p.content) ? p.content : []).filter((b: any) => ["input_text", "output_text", "text"].includes(b.type)).map((b: any) => b.text ?? "").join("\n");
+    // Codex persists repository instructions/environment as a user message.
+    // Only a complete context wrapper is metadata; an actual prompt appended
+    // to it must still open a turn and retain its wezard envelope.
+    if (p.role === "user" && !(Array.isArray(p.content) ? p.content : []).some((b: any) => b.type === "input_image") && text.trim() && /^(?:# AGENTS\.md instructions for [^\n]+\n+\s*<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>\s*)?(?:<environment_context>[\s\S]*?<\/environment_context>\s*)?$/.test(text.trim()))
+      return { ...base, type: "user", isMeta: true, message: { role: "user", content: text } };
     return { ...base, type: p.role, message: { role: p.role, content: p.role === "user" ? text : [{ type: "text", text }], ...(p.phase === "final_answer" ? { stop_reason: "end_turn" } : {}) } };
   }
   if (["function_call", "custom_tool_call"].includes(p.type)) {

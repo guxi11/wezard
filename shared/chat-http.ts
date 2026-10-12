@@ -81,11 +81,17 @@ const recentRecords = (records: readonly DetailRecord[], cutoff: number): Detail
   records.filter((r) => lastTsOf(r) >= cutoff);
 
 /** 注册表侧的源头裁剪: 久未活动的 wizard 连同它挂着的家谱一起退场; 开着的工单与日程是往后看的, 留下。 */
-const recentFacts = (f: WorldFacts, cutoff: number): WorldFacts => ({
-  ...f,
-  wizards: f.wizards.filter((w) => w.busy || Math.max(w.lastActivity, w.bornAt ?? 0) >= cutoff),
-  jobs: f.jobs.filter((j) => j.status === "open" || (j.closedAt ?? j.openedAt) >= cutoff),
-});
+const recentFacts = (f: WorldFacts, records: readonly DetailRecord[], now: number): WorldFacts => {
+  // 往来可能只落在对端的 transcript: 最近消息里出现的双方仍需保留登记身份,
+  // 不能按自己的 transcript 时刻裁掉名字, 再把 wizard 的 target 当成人的称呼。
+  const participants = new Set(allMessages(records, now).flatMap((m) => [m.from, m.to]));
+  const cutoff = now - HORIZON_MS;
+  return {
+    ...f,
+    wizards: f.wizards.filter((w) => participants.has(w.target) || w.busy || Math.max(w.lastActivity, w.bornAt ?? 0) >= cutoff),
+    jobs: f.jobs.filter((j) => j.status === "open" || (j.closedAt ?? j.openedAt) >= cutoff),
+  };
+};
 
 // 多机器人隔离: 一张票据只看得见与它 (票据 selfTarget) sameBot 的记录与名册 (内部会话在多机器人时谁也看不见)。目录、会话列表、
 // 关系图、搜索、窗口都建在这两份上, 所以别的机器人的角色在这一页上与不存在同形 —— `?role=` 落空就回到
@@ -181,7 +187,11 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
   const getFacts = (t: Ticket): Promise<WorldFacts> =>
     Promise.resolve(facts ? facts() : EMPTY_FACTS)
       // 没有消息数据的 wizard 在这里就退场 —— 会话列表、关系图、+N、搜索都只见得到这一份。
-      .then((f) => withData(botFacts(recentFacts(f, Date.now() - HORIZON_MS), viewerOf(t)), listRecent(t), Date.now()))
+      .then((f) => {
+        const now = Date.now();
+        const records = listRecent(t);
+        return withData(recentFacts(botFacts(f, viewerOf(t)), records, now), records, now);
+      })
       .catch(() => EMPTY_FACTS);
   // 票据校验 (store.get) 不受此限: 一条老链接照样打得开, 只是看到的是最近 3 天。
   const listRecent = (t: Ticket): DetailRecord[] => botRecords(recentRecords(store.list(), Date.now() - HORIZON_MS), viewerOf(t));

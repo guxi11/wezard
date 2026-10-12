@@ -6,10 +6,20 @@ import { codexSessions, normalizeCodex } from "../shared/codex.js";
 import { bindCliBackends, backendForPath, resolveCliBackend } from "../shared/cli-backends.js";
 import { submittedSince, probeOf } from "../daemon/cc-session.js";
 import { ConfigSchema } from "../shared/config.js";
+import { talkRounds } from "../daemon/peers.js";
 
 const wrap = (payload: unknown) => ({ type: "response_item", timestamp: "2026-10-11T00:00:00Z", payload });
 assert.equal(normalizeCodex(wrap({ type: "message", role: "developer", content: [] })), null);
 assert.equal(normalizeCodex(wrap({ type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] }))?.message?.content, "hello");
+const instructions = "# AGENTS.md instructions for /project\n\n<INSTRUCTIONS>Repository rules</INSTRUCTIONS>";
+const environment = "<environment_context>cwd: /project</environment_context>";
+const userLine = (text: string) => wrap({ type: "message", role: "user", content: [{ type: "input_text", text }] });
+for (const context of [instructions, environment, `${instructions}\n${environment}`])
+  assert.equal(normalizeCodex(userLine(context))?.isMeta, true);
+const peerPrompt = 'Check tiers\n<system-reminder wezard="envelope" kind="peer" from=".wezard-old" scope="private" turn="t123456">Task</system-reminder>';
+for (const text of [peerPrompt, `${instructions}\n${peerPrompt}`, `Explain ${environment}`, `${environment}\nhello`])
+  assert.notEqual(normalizeCodex(userLine(text))?.isMeta, true);
+assert.notEqual(normalizeCodex(wrap({ type: "message", role: "user", content: [{ type: "input_text", text: environment }, { type: "input_image" }] }))?.isMeta, true);
 const commentary = normalizeCodex(wrap({ type: "message", role: "assistant", phase: "commentary", content: [{ type: "output_text", text: "working" }] }));
 assert.equal(commentary?.message?.stop_reason, undefined);
 assert.equal(commentary?.timestamp, "2026-10-11T00:00:00Z");
@@ -40,6 +50,12 @@ try {
   assert.equal(submittedSince([{ path: witness, offset: 0 }], probeOf("hello codex"), Date.parse("2026-10-12T00:00:00Z")), false);
   bindCliBackends({ defaultCli: "codex", projectsDirOverride: root });
   assert.equal(backendForPath(path).name, "codex");
+  writeFileSync(witness, [userLine(`${instructions}\n${environment}`), userLine(peerPrompt), wrap({ type: "message", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: "RESULT: checked" }] })].map((r) => JSON.stringify(r)).join("\n") + "\n");
+  const rounds = talkRounds(witness, 10);
+  assert.equal(rounds.length, 1, "repository context must not create a human conversation");
+  assert.equal(rounds[0]?.[0]?.env?.from, ".wezard-old");
+  assert.equal(rounds[0]?.[0]?.env?.private, true);
+  assert.equal(rounds[0]?.at(-1)?.text, "RESULT: checked");
   assert.equal(ConfigSchema.parse({ bot: { botId: "id", secret: "secret" }, wrc: { defaultCli: "codex" } }).wrc.claudeBin, "codex");
 } finally { rmSync(root, { recursive: true, force: true }); bindCliBackends({}); }
 console.log("Codex backend checks passed");
