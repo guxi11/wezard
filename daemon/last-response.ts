@@ -15,7 +15,7 @@
 // reloads); in dev just avoid reloading mid-conversation when testing.
 import type { WSClient, WsFrame, BaseMessage, WsFrameHeaders } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
-import { parseTagHeader, withBot } from "../shared/session-label.js";
+import { rawTagHeader, withBot } from "../shared/session-label.js";
 import { botTagOf } from "./bot-mux.js";
 import { connFor } from "./reach.js";
 import { withMessageFooter, withoutMessageFooter, type MessageFooterPolicy } from "../shared/message-footer.js";
@@ -78,7 +78,10 @@ const record = (bareId: string, content: string): void => {
 //     暂时只有头, 下一帧会覆盖;
 //   • 附带 templateCard 的 finish —— 卡片才是载荷, 文本只是搭车, 丢卡片会
 //     卡死审批流。
-const hasVisibleBody = (content: string): boolean => parseTagHeader(content).body.length > 0;
+const hasVisibleBody = (content: string): boolean => {
+  const clean = withoutMessageFooter(content);
+  return (clean !== content ? clean : rawTagHeader(content)?.body ?? content).trim().length > 0;
+};
 
 // Wrap replyStream + replyStreamWithCard (live stream finalize) AND
 // sendMessage (markdown standalone push) so EVERY user-visible bubble lands
@@ -98,10 +101,10 @@ export const installResponseTracker = (client: WSClient, log?: Logger, ownTransp
 
   client.replyStream = async (frame, streamId, content, finish, msgItem, feedback) => {
     const format = policy?.({ chatid: bareFromFrame(frame), frame, body: (frame as WsFrame<BaseMessage>).body });
-    if (finish === true && !gate("replyStream", format?.topOnly ? withoutMessageFooter(content, format.url) : content)) {
+    content = withMessageFooter(content, format);
+    if (finish === true && !gate("replyStream", content)) {
       return undefined as unknown as WsFrame;
     }
-    content = withMessageFooter(content, format);
     const r = await origReplyStream(frame, streamId, content, finish, msgItem, feedback);
     if (finish) record(bareFromFrame(frame as WsFrame<BaseMessage>), content);
     return r;
@@ -109,10 +112,10 @@ export const installResponseTracker = (client: WSClient, log?: Logger, ownTransp
 
   client.replyStreamWithCard = async (frame, streamId, content, finish, options) => {
     const format = policy?.({ chatid: bareFromFrame(frame), frame, body: (frame as WsFrame<BaseMessage>).body });
-    if (finish === true && !options?.templateCard && !gate("replyStreamWithCard", format?.topOnly ? withoutMessageFooter(content, format.url) : content)) {
+    content = withMessageFooter(content, format);
+    if (finish === true && !options?.templateCard && !gate("replyStreamWithCard", content)) {
       return undefined as unknown as WsFrame;
     }
-    content = withMessageFooter(content, format);
     const r = await origReplyStreamWithCard(frame, streamId, content, finish, options);
     if (finish) record(bareFromFrame(frame as WsFrame<BaseMessage>), content);
     return r;
@@ -137,8 +140,8 @@ export const installResponseTracker = (client: WSClient, log?: Logger, ownTransp
     if (body.msgtype === "markdown") {
       const md = (body as { markdown?: { content?: string } }).markdown?.content ?? "";
       const format = policy?.({ chatid, body });
-      if (!gate("sendMessage", format?.topOnly ? withoutMessageFooter(md, format.url) : md)) return undefined as unknown as WsFrame;
       const content = withMessageFooter(md, format);
+      if (!gate("sendMessage", content)) return undefined as unknown as WsFrame;
       const r = await origSendMessage(chatid, { ...body, markdown: { ...body.markdown, content } });
       record(chatid, content);
       return r;

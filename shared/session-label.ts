@@ -166,8 +166,19 @@ export const parseTagHeader = (text: string): { fromBot: boolean; tag: string; b
   if (target) return { fromBot: true, tag: displayName(target), body: unlinkTags(t.slice(0, footer!.index).trim()) };
   const m = HEADER_RE.exec(t);
   if (!m) return { fromBot: false, tag: "", body: t };
+  const url = /^\[[^\]]+\]\(([^)]*)\)/.exec(t)?.[1];
+  const sender = url && linker?.targetOfUrl?.(url);
+  const raw = sender && rawTagHeader(t);
+  if (sender && raw) return { fromBot: true, tag: displayName(sender), body: unlinkTags(raw.body.trim()) };
   const tag = m.slice(1).find(Boolean) ?? "";
-  return { fromBot: true, tag, body: unlinkTags(t.slice(m[0].length).trim()) };
+  return { fromBot: true, tag: sender ? displayName(sender) : tag, body: unlinkTags(t.slice(m[0].length).trim()) };
+};
+
+/** Formatting needs the original body; quote parsing deliberately unlinks its names. */
+export const rawTagHeader = (text: string): { tag: string; header: string; body: string; url?: string } | undefined => {
+  const t = text.trimStart();
+  const m = new RegExp(`^(?:\\[(?:${EMO}\\s*)?[.#](${NAME_CHARS}{1,32})\\]\\(([^)]*)\\):|(?:${EMO}\\s*)?[.#](${NAME_CHARS}{1,32}):)(?:[ \\t]+\\d+/\\d+)?\\s*`, "u").exec(t);
+  return m ? { tag: m[1] || m[3] || "", header: m[0], body: t.slice(m[0].length), ...(m[2] ? { url: m[2] } : {}) } : undefined;
 };
 
 /** 卡片标题前的 `.name ` 徽标; 群默认 wizard 在自己群里不报名 (同 withTagHeader)。 */
@@ -207,6 +218,7 @@ let linker: TagLinker | undefined;
 export const bindTagLinker = (l: TagLinker): void => { linker = l; };
 export const resolveTagTarget = (name: string, from: string): string | undefined => linker?.resolve(name, from);
 export const tagUrlOf = (target: string): string | undefined => linker?.urlOf(target);
+export const targetOfTagUrl = (url: string): string | undefined => linker?.targetOfUrl?.(url);
 
 /** target 的对外名字: 名册里的全局名, 名册没绑定时退回 slot id。 */
 export const displayName = (target: string | undefined): string =>

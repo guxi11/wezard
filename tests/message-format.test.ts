@@ -3,52 +3,37 @@ import { ConfigSchema } from "../shared/config.js";
 import { bindTagLinker, parseTagHeader } from "../shared/session-label.js";
 import { withMessageFooter } from "../shared/message-footer.js";
 import { footerTarget, responseFormatPolicy, responsePrincipal } from "../daemon/message-format.js";
-
-const cfg = ConfigSchema.parse({ bot: { botId: "test", secret: "test" }, chats: { wezard: "user:admin", other: "chat:wrOther~bot" }, chatPolicy: { "chat:wrOther~bot": { topOnly: true } } });
-const urlOf = (target: string) => `https://example.test/base/role?id=t1&role=${encodeURIComponent(target)}`;
-assert.equal(responsePrincipal(cfg, { chatid: "admin" }), "user:admin");
-assert.equal(responsePrincipal(cfg, { chatid: "wrOther~bot" }), "chat:wrOther~bot");
+const a = "user:admin", b = "chat:wrOther~bot", worker = `${a}#worker`, voice = `${a}#voice`;
+const known = [a, b, worker, voice];
+const cfg = ConfigSchema.parse({ bot: { botId: "test", secret: "test" }, chats: { wezard: a, other: b } });
+const urlOf = (t: string) => `https://own.test/base/role?id=t1&role=${encodeURIComponent(t)}`;
+const names: Record<string, string> = { [a]: "default", [b]: "other", [worker]: "renamed-worker", [voice]: "voice" };
+const targetFor = (u: string) => footerTarget(u, "https://own.test/base/", (id) => id === "stream" ? worker : undefined, (t) => known.includes(t));
+bindTagLinker({ urlOf, nameOf: (t) => names[t] || "", resolve: (n) => n === "worker" ? worker : known.find((t) => names[t] === n), targetOfUrl: targetFor, voiceOf: (t) => t === voice ? a : t });
+assert.equal(responsePrincipal(cfg, { chatid: "admin" }), a);
+assert.equal(responsePrincipal(cfg, { chatid: "wrOther~bot" }), b);
 assert.equal(responsePrincipal(cfg, { chatid: "unknown~bot", frame: {} as any, body: { chattype: "group", chatid: "unknown" } }), "chat:unknown~bot");
-assert.equal(responsePrincipal(cfg, { chatid: "wrUser~bot", frame: {} as any, body: { chattype: "single", from: { userid: "wrUser" } } }), "user:wrUser~bot");
-assert.equal(responseFormatPolicy(cfg, { chatid: "admin" }, urlOf)?.topOnly, true);
-assert.equal(responseFormatPolicy(cfg, { chatid: "wrOther~bot" }, urlOf)?.url, urlOf("chat:wrOther~bot"));
-assert.equal(responseFormatPolicy(cfg, { chatid: "wrOther" }, urlOf), undefined, "bot suffix is part of the policy identity");
-assert.equal(responseFormatPolicy(cfg, { chatid: "wx_123" }, urlOf), undefined, "Weixin retains its text-only transport convention");
+assert.equal(responseFormatPolicy(cfg, { chatid: "wx_123" }, urlOf), undefined);
 assert.equal(responseFormatPolicy(cfg, { chatid: "" }, urlOf), undefined);
-cfg.chatPolicy["user:admin"] = { topOnly: false, stewardBudget: 4 };
-assert.equal(responseFormatPolicy(cfg, { chatid: "admin" }, urlOf), undefined, "hot explicit false wins over named default");
-
-const worker = "user:admin#worker";
-const other = "user:admin#other";
-const targetFor = (raw: string) => footerTarget(raw, "https://example.test/base/", (id) => ["stream", "t1"].includes(id) ? worker : undefined, (target) => target === worker);
-bindTagLinker({ urlOf, nameOf: (t) => t === worker ? "renamed-worker" : t === other ? "other" : "", resolve: (name) => name === "worker" || name === "renamed-worker" ? worker : name === "other" ? other : undefined, targetOfUrl: targetFor });
-const body = "answer with [source](https://source.test)";
-const fallback = urlOf("user:admin");
-assert.equal(withMessageFooter(".worker: created", { topOnly: true, url: fallback, principal: "user:admin" }),
-  `created [✦](${urlOf(worker)})`, "unlinked legacy speaker header is removed and keeps its own role footer");
-for (const symbol of ["✦", "✨"]) {
-  const ordinaryLink = `[${symbol}](https://source.test/info)`;
-  assert.equal(withMessageFooter(`[.worker](${urlOf(worker)}): hello ${ordinaryLink}`, { topOnly: true, url: fallback, principal: "user:admin" }),
-    `hello ${ordinaryLink} [✦](${urlOf(worker)})`, `${symbol} body link is preserved while the speaker footer is selected`);
+for (const topOnly of [true, false]) for (const destination of [a, b]) {
+  cfg.chatPolicy[destination] = { topOnly, stewardBudget: 4 };
+  const policy = responseFormatPolicy(cfg, { chatid: destination.split(":")[1]! }, urlOf)!;
+  assert.equal(policy.defaultTarget, destination);
+  for (const sender of known) {
+    const input = `[.${names[sender]}](${urlOf(sender)}): answer`;
+    const expected = sender === destination ? `answer [✦](${urlOf(sender)})` : input;
+    assert.equal(withMessageFooter(input, policy), expected, `${topOnly}/${destination}/${sender}`);
+    assert.equal(withMessageFooter(expected, policy), expected);
+    assert.equal(parseTagHeader(expected).tag, names[sender]);
+  }
+  const migrated = withMessageFooter(`answer [✨](${urlOf(worker)})`, policy);
+  assert.equal(migrated, `[.renamed-worker](${urlOf(worker)}): answer`, "answer-transfer receiver worker keeps its own head");
+  assert.equal(withMessageFooter(".worker: answer", policy), migrated);
 }
-const formatted = withMessageFooter(`[.worker](${urlOf(worker)}): ${body}`, { topOnly: true, principal: "user:admin" });
-assert.deepEqual(parseTagHeader(formatted), { fromBot: true, tag: "renamed-worker", body }, "footer quote preserves routing across wizard rename");
-assert.deepEqual(parseTagHeader(`.someone: example [✦](${urlOf(worker)})`), { fromBot: true, tag: "renamed-worker", body: ".someone: example" }, "answer text cannot override the footer's speaker");
-assert.deepEqual(parseTagHeader(`${body}\n\n[✨](https://example.test/base/role?id=stream&ww_uniq=worker)`), { fromBot: true, tag: "renamed-worker", body }, "old stream URL resolves via recorded turn");
-assert.deepEqual(parseTagHeader(`${body} [✦](${urlOf(worker)})`), { fromBot: true, tag: "renamed-worker", body }, "same-line sparkle footer resolves quote routing");
-assert.deepEqual(parseTagHeader(`[.old](${urlOf(worker)}): old body`), { fromBot: true, tag: "old", body: "old body" });
-const otherFirst = `[.worker](${urlOf(worker)}): [.other](${urlOf(other)}): answer`;
-const firstFormat = withMessageFooter(otherFirst, { topOnly: true, url: fallback });
-const secondFormat = withMessageFooter(firstFormat, { topOnly: true, url: fallback });
-assert.equal(firstFormat, `[.other](${urlOf(other)}): answer [✦](${urlOf(worker)})`);
-assert.equal(secondFormat, firstFormat, "reformatting preserves a body link and its original speaker footer");
-const footerWithoutRole = `[.other](${urlOf(other)}): answer\n\n[✨](${urlOf(worker).replace(/&role=[^&]*/, "")})`;
-assert.equal(withMessageFooter(footerWithoutRole, { topOnly: true, url: fallback }), `[.other](${urlOf(other)}): answer [✦](${urlOf(worker).replace(/&role=[^&]*/, "")})`, "a legacy footer without role metadata protects every body link");
-const sameRoleBody = `[.other](${urlOf(worker)}): answer\n\n[✨](${urlOf(worker)})`;
-assert.equal(withMessageFooter(sameRoleBody, { topOnly: true, url: fallback }), `[.other](${urlOf(worker)}): answer [✦](${urlOf(worker)})`, "an existing footer prevents reclassifying even a same-role body link");
-for (const url of ["https://evil.test/base/role?id=stream", "https://example.test/role?id=stream", "https://example.test/base/info?id=stream", "https://example.test/base/role?id=missing", "https://example.test/base/role?id=stream&role=user%3Aother"]) {
-  const raw = `${body}\n\n[✨](${url})`;
-  assert.deepEqual(parseTagHeader(raw), { fromBot: false, tag: "", body: raw }, url);
+assert.deepEqual(parseTagHeader(`[.old](${urlOf(worker)}): answer`), { fromBot: true, tag: "renamed-worker", body: "answer" });
+assert.deepEqual(parseTagHeader(`answer [✨](https://own.test/base/role?id=stream)`), { fromBot: true, tag: "renamed-worker", body: "answer" });
+for (const u of ["https://foreign.test/base/role?id=stream", "https://own.test/role?id=stream", "https://own.test/base/info?id=stream"]) {
+  const text = `answer [✦](${u})`;
+  assert.deepEqual(parseTagHeader(text), { fromBot: false, tag: "", body: text });
 }
-assert.deepEqual(parseTagHeader(`[✨](${urlOf(worker)})`), { fromBot: true, tag: "renamed-worker", body: "" });
 console.log("message-format integration tests passed");

@@ -1,40 +1,38 @@
-import { parseTagHeader, resolveTagTarget, tagUrlOf } from "./session-label.js";
+import { headed, linkedTagHead, rawTagHeader, resolveTagTarget, tagUrlOf, targetOfTagUrl } from "./session-label.js";
 
-export interface MessageFooterPolicy { topOnly: boolean; url?: string; principal?: string }
+export interface MessageFooterPolicy {
+  principal: string;
+  /** Stable target key of the destination chat's actual default session. */
+  defaultTarget: string;
+  url?: string;
+}
 
-/** A ticket is ours only when it belongs to this daemon's configured detail root. */
-const isRoleUrl = (value: string, ownUrl?: string): boolean => {
-  try {
-    const url = new URL(value);
-    if (!/^https?:$/.test(url.protocol) || !url.searchParams.get("id")) return false;
-    if (!ownUrl) return false;
-    const own = new URL(ownUrl);
-    const rootPath = own.pathname.replace(/\/(?:role|chat)\/?$/, "");
-    return url.origin === own.origin && ["role", "chat"].some((page) => url.pathname === `${rootPath}/${page}`);
-  } catch { return false; }
-};
+const footerUrl = (content: string): string | undefined => /\[[✨✦]\]\(([^\n)]*)\)\s*$/.exec(content)?.[1];
 
-/** Remove only the generated trailing footer, including repeated copies from older wrappers. */
-export const withoutMessageFooter = (content: string, ownUrl?: string): string => {
+/** Only the daemon's trusted ticket resolver can classify a generated footer. */
+export const withoutMessageFooter = (content: string, _ownUrl?: string): string => {
   const match = /(?:\n\s*)?\[[✨✦]\]\(([^\n)]*)\)\s*$/.exec(content);
-  return match && isRoleUrl(match[1]!, ownUrl) ? withoutMessageFooter(content.slice(0, match.index).trimEnd(), ownUrl) : content;
+  return match && targetOfTagUrl(match[1]!) ? withoutMessageFooter(content.slice(0, match.index).trimEnd()) : content;
 };
 
-/** Move the speaker's ticket to one stable footer without changing body links. */
+/** The real destination default uses a footer; every other known sender keeps a name header. */
 export const withMessageFooter = (content: string, policy?: MessageFooterPolicy): string => {
-  if (!policy?.topOnly) return content;
-  const candidate = /\[[✨✦]\]\(([^\n)]*)\)\s*$/.exec(content)?.[1];
-  const prior = candidate && isRoleUrl(candidate, policy.url) ? candidate : undefined;
-  const body = withoutMessageFooter(content, policy.url);
-  const head = /^\[([^\]\n]+)\]\(([^\n)]*)\)/.exec(body);
-  const parsedHead = parseTagHeader(body);
-  const namedTarget = parsedHead.fromBot && policy.principal ? resolveTagTarget(parsedHead.tag, policy.principal) : undefined;
-  const namedUrl = namedTarget ? tagUrlOf(namedTarget) : undefined;
-  const trustedRoot = policy.url ?? namedUrl;
-  const linkedHead = !prior && !!head && parsedHead.fromBot && isRoleUrl(head[2]!, trustedRoot) && (!policy.principal || !!namedTarget);
-  const text = linkedHead ? body.slice(head![0].length).replace(/^:\s*/, "").trimStart()
-    : !prior && namedTarget ? parsedHead.body : body;
-  const url = linkedHead ? head![2] : prior ?? namedUrl ?? policy.url;
-  if (!url || !isRoleUrl(url, url)) return content;
-  return `${text.trimEnd()} [✦](${url})`;
+  if (!policy) return content;
+  const candidate = footerUrl(content);
+  const footerTarget = candidate && targetOfTagUrl(candidate);
+  const clean = footerTarget ? withoutMessageFooter(content) : content;
+  // A previously generated footer owns the identity. A body link at the start stays body content.
+  const header = footerTarget ? undefined : rawTagHeader(clean);
+  const sender = footerTarget || (header?.url ? targetOfTagUrl(header.url) : header && resolveTagTarget(header.tag, policy.principal));
+  if (!sender) return content;
+  const url = footerTarget ? candidate : header?.url ?? tagUrlOf(sender);
+  if (!url) return content;
+  const body = header?.body ?? clean;
+  const emptyHeader = footerTarget && rawTagHeader(body);
+  const emptySender = emptyHeader && (emptyHeader.url ? targetOfTagUrl(emptyHeader.url) : resolveTagTarget(emptyHeader.tag, policy.principal));
+  const payload = emptyHeader && !emptyHeader.body.trim() && emptySender === sender ? "" : body;
+  if (sender === policy.defaultTarget) return `${payload.trimEnd()} [✦](${url})`;
+  if (header?.url) return content;
+  const seq = header?.header.match(/\b\d+\/\d+\b/)?.[0];
+  return headed([`${linkedTagHead(sender, url)}:`, seq].filter(Boolean).join(" "), payload);
 };

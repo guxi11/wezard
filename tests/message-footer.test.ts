@@ -1,78 +1,71 @@
 import assert from "node:assert/strict";
 import type { WSClient, WsFrame } from "@wecom/aibot-node-sdk";
+import { ConfigSchema } from "../shared/config.js";
+import { bindTagLinker, parseTagHeader } from "../shared/session-label.js";
 import { withMessageFooter, withoutMessageFooter } from "../shared/message-footer.js";
-import { getLastResponse, installResponseTracker, type ResponseFormatContext } from "../daemon/last-response.js";
+import { getLastResponse, installResponseTracker } from "../daemon/last-response.js";
+import { footerTarget, responseFormatPolicy } from "../daemon/message-format.js";
 
-const url = "https://example.test/role?id=t123&role=chat%3Awr1%23fix";
-const fallback = "https://example.test/role?id=other&role=user%3Aadmin";
-const footer = ` [✦](${url})`;
-const legacyFooter = `\n\n[✨](${url})`;
-const head = `[.fix](${url}): `;
-assert.equal(withMessageFooter(`${head}hello`, { topOnly: true, url }), `hello${footer}`);
-assert.equal(withMessageFooter(`${head}hello`, { topOnly: false, url: fallback }), `${head}hello`);
-assert.equal(withMessageFooter(`${head}hello`), `${head}hello`);
-assert.equal(withMessageFooter(`${head}hello`, { topOnly: true, url: fallback }), `hello${footer}`);
-assert.equal(withMessageFooter("hello", { topOnly: true, url: fallback }), `hello [✦](${fallback})`);
-assert.equal(withMessageFooter(`${head}\n| a |\n| --- |`, { topOnly: true, url }), `| a |\n| --- |${footer}`);
-assert.equal(withMessageFooter(`${head}\n\x60\x60\x60ts\nx\n\x60\x60\x60`, { topOnly: true, url }), `\x60\x60\x60ts\nx\n\x60\x60\x60 [✦](${url})`);
-const body = `hello [.other](${fallback}) and [source](https://example.test/info)`;
-assert.equal(withMessageFooter(`${head}${body}`, { topOnly: true, url }), `${body}${footer}`);
-assert.equal(withMessageFooter(`[source](${url}): hello`, { topOnly: true }), `[source](${url}): hello`);
-assert.equal(withMessageFooter("hello", { topOnly: true }), "hello");
-assert.equal(withMessageFooter(`hello${footer}${footer}`, { topOnly: true, url }), `hello${footer}`);
-assert.equal(withMessageFooter(`hello${legacyFooter}`, { topOnly: true, url: fallback }), `hello${footer}`);
-assert.equal(withMessageFooter(`hello${footer}`, { topOnly: true, url: fallback }), `hello${footer}`);
-assert.equal(withoutMessageFooter(`hello${footer}`, url), "hello");
-assert.equal(withoutMessageFooter(`hello${legacyFooter}`, url), "hello");
-assert.equal(withoutMessageFooter("hello [✨](https://example.test/info)", url), "hello [✨](https://example.test/info)");
-assert.equal(withMessageFooter(`${head}body [✦](https://external.test/info)`, { topOnly: true, url: fallback }), `body [✦](https://external.test/info) [✦](${url})`);
-assert.equal(withMessageFooter(`${head}body [✨](https://external.test/info)`, { topOnly: true, url: fallback }), `body [✨](https://external.test/info) [✦](${url})`);
-for (const symbol of ["✦", "✨"]) for (const page of ["role", "chat"]) {
-  const foreign = `[${symbol}](https://foreign.test/${page}?id=article)`;
-  assert.equal(withoutMessageFooter(foreign, fallback), foreign, "foreign role/chat URL is body content");
-  assert.equal(withMessageFooter(`正文 ${foreign}`, { topOnly: true, url: fallback }), `正文 ${foreign} [✦](${fallback})`);
+const home = "user:admin", worker = `${home}#worker`, foreignDefault = "chat:wrOther~bot", voice = `${home}#voice`;
+const known = [home, worker, foreignDefault, voice];
+const nameOf = (t: string) => t === home ? "default" : t === worker ? "worker" : t === voice ? "voice" : "other";
+const urlOf = (t: string) => `https://own.test/base/role?id=ticket&role=${encodeURIComponent(t)}`;
+const resolve = (n: string) => known.find((t) => nameOf(t) === n);
+const trusted = (u: string) => footerTarget(u, "https://own.test/base/", () => worker, (t) => known.includes(t));
+bindTagLinker({ urlOf, nameOf, resolve, targetOfUrl: trusted, voiceOf: (t) => t === voice ? home : t });
+const cfg = ConfigSchema.parse({ bot: { botId: "test", secret: "test" }, chats: { wezard: home, other: foreignDefault } });
+const policy = responseFormatPolicy(cfg, { chatid: "admin" }, urlOf)!;
+const head = (t: string) => `[.${nameOf(t)}](${urlOf(t)}): `;
+const footer = ` [✦](${urlOf(home)})`;
+const bodyLink = `[.worker](${urlOf(worker)})`;
+assert.equal(withMessageFooter(`${head(home)}hello \n\t`, policy), `hello${footer}`);
+assert.equal(withMessageFooter(`${head(worker)}hello`, policy), `${head(worker)}hello`);
+assert.equal(withMessageFooter(`${head(foreignDefault)}hello`, policy), `${head(foreignDefault)}hello`);
+assert.equal(withMessageFooter(`${head(voice)}hello`, policy), `${head(voice)}hello`, "voiceOf never impersonates the true default");
+assert.equal(withMessageFooter(`answer [✨](${urlOf(worker)})`, policy), `${head(worker)}answer`, "old worker footer migrates back to header");
+assert.equal(withMessageFooter(`answer [✨](${urlOf(home)}) [✦](${urlOf(home)})`, policy), `answer${footer}`);
+for (const input of [`${head(home)}${bodyLink}: answer`, `.default: ${bodyLink}: answer`, `${bodyLink}: answer [✨](${urlOf(home)})`]) {
+  const formatted = withMessageFooter(input, policy);
+  assert.equal(formatted, `${bodyLink}: answer${footer}`, "body-leading link survives formatting");
+  assert.equal(withMessageFooter(formatted, policy), formatted);
 }
+assert.equal(withMessageFooter("unknown raw text", policy), "unknown raw text", "unknown sender does not become default");
+assert.equal(withMessageFooter(`only [✦](https://foreign.test/role?id=article)`, policy), "only [✦](https://foreign.test/role?id=article)");
+assert.equal(withoutMessageFooter(`answer${footer}`), "answer");
+for (const glyph of ["✦", "✨"]) for (const u of ["https://foreign.test/role?id=article", "https://foreign.test/chat?id=article", "https://own.test/wrong/role?id=article"]) {
+  const external = `[${glyph}](${u})`;
+  assert.equal(withoutMessageFooter(external), external);
+  assert.equal(withMessageFooter(`${head(home)}answer ${external}`, policy), `answer ${external}${footer}`);
+}
+assert.deepEqual(parseTagHeader(`[.old](${urlOf(worker)}): ${bodyLink}`), { fromBot: true, tag: "worker", body: ".worker" });
 
-const calls: { kind: string; content: string; options?: unknown }[] = [];
-const contexts: ResponseFormatContext[] = [];
+const calls: string[] = [];
 const client = {
   isConnected: true,
-  replyStream: async (_frame: unknown, _id: string, content: string) => { calls.push({ kind: "stream", content }); return {} as WsFrame; },
-  replyStreamWithCard: async (_frame: unknown, _id: string, content: string, _finish: boolean, options: unknown) => { calls.push({ kind: "card", content, options }); return {} as WsFrame; },
-  sendMessage: async (_id: string, body: any) => { calls.push({ kind: "standalone", content: body.markdown?.content ?? "", options: body }); return {} as WsFrame; },
+  replyStream: async (_f: unknown, _id: string, c: string) => { calls.push(c); return {} as WsFrame; },
+  replyStreamWithCard: async (_f: unknown, _id: string, c: string) => { calls.push(c); return {} as WsFrame; },
+  sendMessage: async (_id: string, b: any) => { calls.push(b.markdown?.content ?? ""); return {} as WsFrame; },
 } as unknown as WSClient;
-installResponseTracker(client, undefined, () => true, (context) => {
-  contexts.push(context);
-  return { topOnly: context.chatid === "wr1~secondary" || context.chatid === "admin", url: fallback };
-});
+installResponseTracker(client, undefined, () => true, (c) => responseFormatPolicy(cfg, c, urlOf));
 const frame = { headers: { req_id: "test" }, body: { chattype: "single", from: { userid: "admin" } } } as any;
-await client.replyStream(frame, "s", `${head}hello`, false);
-assert.equal(calls.at(-1)?.content, `hello${footer}`);
-await client.replyStream(frame, "s", `${head}hello`, true);
-assert.equal(getLastResponse("user:admin"), `hello${footer}`);
-assert.equal(contexts.at(-1)?.chatid, "admin", "policy can enable a named chat homed in a user principal");
-assert.equal(contexts.at(-1)?.frame, frame);
-assert.equal(contexts.at(-1)?.body, frame.body);
-await client.sendMessage("wr1~secondary", { msgtype: "markdown", markdown: { content: `${head}hello` } });
-assert.equal(calls.at(-1)?.content, `hello${footer}`);
-assert.equal(getLastResponse("chat:wr1~secondary"), `hello${footer}`);
-assert.equal(contexts.at(-1)?.chatid, "wr1~secondary");
-await client.sendMessage("wrOff", { msgtype: "markdown", markdown: { content: `${head}hello` } });
-assert.equal(calls.at(-1)?.content, `${head}hello`);
-await client.sendMessage("admin", { msgtype: "markdown", markdown: { content: "[✦](https://foreign.test/role?id=article)" } });
-assert.equal(calls.at(-1)?.content, `[✦](https://foreign.test/role?id=article) [✦](${fallback})`, "standalone gate preserves a foreign rolepage-looking link");
-const card = { templateCard: { card_type: "text_notice" } } as any;
-await client.replyStreamWithCard(frame, "s", `${head}hello`, true, card);
-assert.equal(calls.at(-1)?.content, `hello${footer}`);
-assert.equal(calls.at(-1)?.options, card);
-const count = calls.length;
-await client.replyStream(frame, "s", head, true);
-await client.replyStream(frame, "s", `${head}${footer}`, true);
-await client.sendMessage("admin", { msgtype: "markdown", markdown: { content: footer } });
-assert.equal(calls.length, count, "generated footer cannot turn an empty body into a visible answer");
-await client.replyStreamWithCard(frame, "s", head, true, card);
-assert.equal(calls.length, count + 1, "card payload must still be delivered");
-await client.replyStream({ headers: { req_id: "header-only" } }, "s", `${head}hello`, true);
-assert.equal(contexts.at(-1)?.chatid, "");
-assert.equal(calls.at(-1)?.content, `${head}hello`, "unknown destination requires explicit policy evidence");
+const senders = [
+  (c: string) => client.replyStream(frame, "s", c, true),
+  (c: string) => client.replyStreamWithCard(frame, "s", c, true),
+  (c: string) => client.sendMessage("admin", { msgtype: "markdown", markdown: { content: c } }),
+];
+for (const topOnly of [true, false]) {
+  cfg.chatPolicy[home] = { topOnly, stewardBudget: 4 };
+  for (const send of senders) {
+    await send(`${head(home)}hello`); assert.equal(calls.at(-1), `hello${footer}`);
+    await send(`${head(worker)}hello`); assert.equal(calls.at(-1), `${head(worker)}hello`);
+    await send(`${head(home)}${bodyLink}`); assert.equal(calls.at(-1), `${bodyLink}${footer}`, "gate preserves a body containing only a name link");
+    const count = calls.length;
+    await send(head(home)); await send(`[✦](${urlOf(home)})`);
+    for (const sender of [home, worker]) for (const glyph of ["✦", "✨"]) await send(`${head(sender)} [${glyph}](${urlOf(sender)})`);
+    assert.equal(calls.length, count, "empty payload gate survives headers and old/new footer chrome");
+    const external = "[✦](https://foreign.test/role?id=article)";
+    await send(external); assert.equal(calls.at(-1), external, "foreign link-only message is delivered");
+  }
+}
+assert.equal(getLastResponse(home), "[✦](https://foreign.test/role?id=article)");
 console.log("message-footer tests passed");

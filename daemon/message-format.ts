@@ -1,6 +1,5 @@
 import type { Config } from "../shared/config.js";
 import { baseOfKey, isWxChat } from "../shared/session-label.js";
-import { chatPolicyOf } from "./chat-name.js";
 import type { ResponseFormatContext } from "./last-response.js";
 
 /** Resolve SDK destinations using frame evidence first, preserving the bot suffix. */
@@ -17,8 +16,8 @@ export const responsePrincipal = (cfg: Config, context: ResponseFormatContext): 
 
 export const responseFormatPolicy = (cfg: Config, context: ResponseFormatContext, urlOf: (target: string) => string | undefined) => {
   const target = responsePrincipal(cfg, context);
-  if (!target || isWxChat(target) || !chatPolicyOf(cfg, target).topOnly) return undefined;
-  return { topOnly: true, url: urlOf(target), principal: target };
+  if (!target || isWxChat(target)) return undefined;
+  return { defaultTarget: target, url: urlOf(target), principal: target };
 };
 
 /** A footer is routing metadata only when it belongs to this daemon's rolepage. */
