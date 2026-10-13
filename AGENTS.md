@@ -48,9 +48,9 @@ Tests exist despite the older “no tests” statement in `CLAUDE.md`. There is 
 inspect their prerequisites before running integration checks. Typechecking
 excludes `tests/`, so it does not replace running those scripts.
 
-For runtime TypeScript changes, run typecheck and relevant tests. Build when
-changing packaging or verifying generated entry points. Documentation-only
-changes need a review of links and commands.
+For runtime TypeScript changes, run typecheck and relevant tests.
+Documentation-only changes need a review of links and commands. All development
+task units also require the completion steps below.
 
 When asked to **reload**, run `npm run build && ./cli/wezard.sh reload` from the
 repository root. Use `./cli/wezard.sh` for local status/logs/reload operations.
@@ -63,6 +63,15 @@ the daemon if requested, then restart the existing svr service directly:
 starts svr in the foreground; use it when asked to run/start svr, not to restart
 an already-running service. Request sandbox escalation if required by a failed
 command rather than searching files for alternative commands.
+
+After completing each development task unit, promptly build and reload both
+services from the repository root: run `npm run build` once, then
+`./cli/wezard.sh reload` for the daemon, then restart svr with
+`launchctl kickstart -k "gui/$(id -u)/com.wezard.svr"` on macOS or
+`systemctl --user restart wezard-svr.service` on Linux. Proceed only after each
+step succeeds. Reuse a successful build of the completed changes if already run
+for this unit; do not build again between service restarts. Operational-only
+requests retain the requested scope described above.
 
 ## Editing conventions
 
