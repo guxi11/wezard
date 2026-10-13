@@ -26,6 +26,11 @@ const body = "answer with [source](https://source.test)";
 const fallback = urlOf("user:admin");
 assert.equal(withMessageFooter(".worker: created", { topOnly: true, url: fallback, principal: "user:admin" }),
   `created [✦](${urlOf(worker)})`, "unlinked legacy speaker header is removed and keeps its own role footer");
+for (const symbol of ["✦", "✨"]) {
+  const ordinaryLink = `[${symbol}](https://source.test/info)`;
+  assert.equal(withMessageFooter(`[.worker](${urlOf(worker)}): hello ${ordinaryLink}`, { topOnly: true, url: fallback, principal: "user:admin" }),
+    `hello ${ordinaryLink} [✦](${urlOf(worker)})`, `${symbol} body link is preserved while the speaker footer is selected`);
+}
 const formatted = withMessageFooter(`[.worker](${urlOf(worker)}): ${body}`, { topOnly: true });
 assert.deepEqual(parseTagHeader(formatted), { fromBot: true, tag: "renamed-worker", body }, "footer quote preserves routing across wizard rename");
 assert.deepEqual(parseTagHeader(`.someone: example [✦](${urlOf(worker)})`), { fromBot: true, tag: "renamed-worker", body: ".someone: example" }, "answer text cannot override the footer's speaker");
