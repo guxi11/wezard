@@ -161,6 +161,9 @@ const HEADER_RE = new RegExp(
  *  内容要跟 transcript 尾部比对, 也可能被贴进 prompt, URL 两头都是噪声。 */
 export const parseTagHeader = (text: string): { fromBot: boolean; tag: string; body: string } => {
   const t = text.trim();
+  const footer = /(?:^|\n)\s*\[✨\]\(([^\n)]*)\)\s*$/.exec(t);
+  const target = footer && linker?.targetOfUrl?.(footer[1]!);
+  if (target) return { fromBot: true, tag: displayName(target), body: unlinkTags(t.slice(0, footer!.index).trim()) };
   const m = HEADER_RE.exec(t);
   if (!m) return { fromBot: false, tag: "", body: t };
   const tag = m.slice(1).find(Boolean) ?? "";
@@ -188,6 +191,8 @@ export const headSep = (content: string): string =>
 // 的注入口 (同 bindWizardStore): 没绑定 (boot 早期 / 浏览器端) 一律退回 slot id /
 // 裸文本, 头照样写 —— 少了链接只是少一层可点。
 export interface TagLinker {
+  /** Resolve daemon-owned footer URLs for quote routing after the name header is removed. */
+  targetOfUrl?: (url: string) => string | undefined;
   /** 该 wizard 的 rolepage; undefined = 拿不到票据。 */
   urlOf: (target: string) => string | undefined;
   /** 全局名字 → 已知 wizard 的 target。`from` = 这段话是谁说的 (其 key): 名字落在别的机器人名下

@@ -29,7 +29,7 @@ import { loadMirrorStore } from "./mirror-store.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { backendFor, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { bindCardChannel, installApprovalEventListener, makeApproveHandler, requestConfirm } from "./approval.js";
-import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, setWorldFactsProvider, currentHumanQueryOf, recordPost, recordCharter, backfillCharter } from "./detail.js";
+import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, buildChatUrl, getDetail, setWorldFactsProvider, currentHumanQueryOf, recordPost, recordCharter, backfillCharter } from "./detail.js";
 import { EMPTY_FACTS, type WorldFacts, type WorldFactWizard } from "../shared/world.js";
 import { clearAutoWindow, initAutoWindowPersistence, setAutoWindow } from "./session-cache.js";
 import { makeMessageHandler } from "./outbound.js";
@@ -42,6 +42,7 @@ import {
 } from "./claim.js";
 import { makeWedocBridge } from "./wedoc.js";
 import { errText, installResponseTracker } from "./last-response.js";
+import { footerTarget, responseFormatPolicy } from "./message-format.js";
 import { scanClaudeSessions } from "./session-scan.js";
 import {
   startScheduler,
@@ -213,7 +214,8 @@ const main = async (): Promise<void> => {
   // last-response tracker enables inbound's `quote` dedup of bot self-replies,
   // and its chat-gate drops header-only pushes (empty messages) daemon-wide.
   // 微信出站不走企微长连接, 不必等它连上。
-  installResponseTracker(ws.client, log.child({ mod: "chat-gate" }), (c) => wx.owns(c));
+  installResponseTracker(ws.client, log.child({ mod: "chat-gate" }), (c) => wx.owns(c),
+    (context) => responseFormatPolicy(cfg, context, (target) => chatUrlFor(cfg.daemon, target)));
   const mirrorStore = loadMirrorStore(cfg.wrc.mirror.attachmentsFile);
   // 定时任务表 —— 每条任务是 ~/.wezard/tasks/<id>.task.mjs 一份可注入代码的配置
   // (见 shared/task-file.ts)。目录是热加载的: wizard 改完文件不用 reload 守护进程。
@@ -233,6 +235,9 @@ const main = async (): Promise<void> => {
   const known = (t: string): boolean => bridge.chatTargets(t).includes(t);
   // 名册在下面的 mirror 块里才绑 (bindWizardStore) —— 这里全走 wizardStore() 惰性取。
   bindTagLinker({
+    targetOfUrl: (url) => footerTarget(url,
+      new URL(".", buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, "")).href,
+      (id) => { const r = getDetail(id); return r && "target" in r ? r.target : undefined; }, known),
     urlOf: (t) => chatUrlFor(cfg.daemon, t),
     resolve: (name, from) => {
       const t = wizardStore()?.byName(name)?.target;
