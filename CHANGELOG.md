@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Changed
+- `approval.allowRules` 默认值从 `[]` 改为 `["ToolSearch"]` (`shared/config.ts` 与 `config.example.jsonc`): ToolSearch 只是 deferred 工具的 schema 查询, 无执行能力 (真正的执行走 DeferExecuteTool, hook 侧已下钻成内层工具再判定), 每次查 schema 都发卡是纯噪声。config 里显式写过 `allowRules` 的整份覆盖不合并 —— 要保留该豁免需在自己的规则里补上 `"ToolSearch"`。
+
 ## [2.6.2] - 2026-10-12
 
 ### Fixed

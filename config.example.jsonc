@@ -78,7 +78,9 @@
     //   | "Bash(npm run test:*)" 前缀(冒号-星) | "Bash(python3 .claude/skills/*)"
     // 安全语义: 复合命令(&&/;/|)逐段校验、段首 VAR= 前缀剥掉、含 $()/反引号不命中;
     // AskUserQuestion / ExitPlanMode / EnterPlanMode 永不可被规则放行。
-    "allowRules": [],            // 例: ["Bash(git log *)", "Bash(python3 .claude/skills/*)"]
+    // 默认 ["ToolSearch"] (deferred 工具的 schema 查询, 只读元工具); 这里显式写出会
+    // 整份覆盖默认值 —— 自定义时想保留它就把 "ToolSearch" 一并写上。
+    "allowRules": ["ToolSearch"],  // 例: ["Bash(git log *)", "Bash(python3 .claude/skills/*)"]
     // 三层语义 deny > ask > allow, 对齐 Claude Code permissions:
     // denyRules 命中直接拒绝不发卡(Bash 复合命令任一段命中即拒);
     // askRules 命中必发卡, 压过 allowRules / ⏱自动放行窗口 / 会话缓存 —— 给

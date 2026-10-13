@@ -302,7 +302,10 @@ const Approval = z.object({
   danger: Danger.default({}).describe("危险操作名单: 命中者强制单次审批"),
   // 语法子集见 shared/allow-rules.ts。matcher 决定哪些工具进入审批, allowRules 在其中
   // 再挖细粒度豁免 (对 Bash 可按命令前缀区分, matcher 只认工具名做不到)。
-  allowRules: z.array(z.string()).default([]).describe("Claude Code 风格的放行规则, 如 \"Bash(git log *)\""),
+  // 默认放行 ToolSearch: 它只是 deferred 工具的 schema 查询 (本身无执行能力,
+  // 真正的执行走 DeferExecuteTool, hook 侧会下钻成内层工具再按内层工具判定),
+  // 每次查 schema 都发卡是纯噪声。config 里显式写了 allowRules 的整份覆盖, 不合并。
+  allowRules: z.array(z.string()).default(["ToolSearch"]).describe("Claude Code 风格的放行规则, 如 \"Bash(git log *)\""),
   // Bash 复合命令任一段命中即拒。优先级最高: deny > ask > allow。
   denyRules: z.array(z.string()).default([]).describe("同语法的拒绝规则: 命中直接 deny"),
   // 用于给危险前缀 (如 "Bash(rm *)", "Bash(git push *)") 兜底 — 即使 ⏱ 窗口开着
