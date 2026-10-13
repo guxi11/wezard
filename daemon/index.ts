@@ -2716,15 +2716,17 @@ const main = async (): Promise<void> => {
 
     // 管家分派前的候选表: 事实在这里算 (交集、读过的文件、ctx), 权衡留给管家。
     // 只为活着的读 transcript —— 冷的没有 jsonl 可读, 靠职责命中进表。
-    /** 候选的原料: 除自己之外每个 wizard 的上下文事实 (文件集 / 最近的话 / ctx / 缓存 TTL)。 */
-    const routeRowsOf = async (self: string): Promise<(RouteRow & { target: string })[]> => {
+    /** 候选的原料: 除自己之外每个 wizard 的上下文事实 (文件集 / 最近的话 / ctx / 缓存 TTL)。
+     *  `keep` 在读 transcript **之前**收窄: 每行要扫几 MB 尾巴, 全机几百个绑定读一遍是秒级 ——
+     *  调用方只要活着的那几个时, 别替死掉的 pane 付这笔。 */
+    const routeRowsOf = async (self: string, keep: (r: { alive: boolean; target: string }) => boolean = () => true): Promise<(RouteRow & { target: string })[]> => {
       ensureChatNames(self);
       const warm = keepalivePingSigs(cfg.wrc.mirror.keepalive.ping);
       const roster = await rosterOf(self);
       const openJobs = jobs.all();
       const inflight = receipts.states();
       return roster
-        .filter((r) => !r.self)
+        .filter((r) => !r.self && keep(r))
         .map((r) => {
           const live = r.jsonlPath ? r.jsonlPath : "";
           const ttl = live ? cacheTtlSec(live) : 0;
@@ -2775,7 +2777,7 @@ const main = async (): Promise<void> => {
       const ttlMs = cfg.wrc.mirror.keepalive.ttlSec * 1000;
       // 占用保护由 decide 统一判断, 留在候选表里说明为什么不能自动复用。
       // 显式 to 保留人为选定; force 只影响成本门, 不绕 lead/工单/连续性保护。
-      const pool = to || b.spawn || lead ? [] : (await routeRowsOf(self)).filter((r) => r.alive && !!tagOfKey(r.target));
+      const pool = to || b.spawn || lead ? [] : await routeRowsOf(self, (r) => r.alive && !!tagOfKey(r.target));
       if (!controlValid(self, dispatchOrigin.authority)) { json(res, 409, { ok: false, reason: "dispatch source turn/control changed while routing; original task remains with source" }); return; }
       const tierArg = (b.tier ?? "").toString().trim();
       if (tierArg && !TIERS.includes(tierArg as TierName)) { json(res, 400, { ok: false, reason: `unknown tier: ${tierArg}` }); return; }
