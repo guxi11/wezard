@@ -387,20 +387,20 @@ export const TIERS = ["mini", "light", "standard", "hard", "ultra"] as const;
 export type TierName = (typeof TIERS)[number];
 const ClaudeTiers = z.object({
   mini: Tier.default({ model: "haiku", effort: "low" }).describe("机械一步: 照单执行、不用判断"),
-  light: Tier.default({ model: "sonnet", effort: "medium" }).describe("跑腿: 查找、搬运、跑命令; 也是管家的默认档"),
+  light: Tier.default({ model: "sonnet", effort: "medium" }).describe("跑腿: 查找、搬运、跑命令"),
   standard: Tier.default({ model: "sonnet", effort: "medium" }).describe("常规实现"),
   hard: Tier.default({ model: "opus", effort: "high" }).describe("要判断: 设计、排障、审查"),
   ultra: Tier.default({ model: "opus", effort: "max" }).describe("最难: 架构取舍、疑难排障、关键评审"),
 }).default({});
 const CodexTiers = z.object({
   mini: Tier.default({ model: "", effort: "low" }).describe("机械一步"),
-  light: Tier.default({ model: "", effort: "medium" }).describe("跑腿; 管家默认档"),
+  light: Tier.default({ model: "", effort: "medium" }).describe("跑腿"),
   standard: Tier.default({ model: "", effort: "medium" }).describe("常规实现"),
   hard: Tier.default({ model: "", effort: "high" }).describe("设计、排障、审查"),
   ultra: Tier.default({ model: "", effort: "xhigh" }).describe("架构取舍、疑难排障、关键评审"),
 }).default({});
 const Models = z.object({
-  router: z.enum(TIERS).default("standard").describe("router 创建时使用的档位; 仅存档位, 模型 / effort 按创建时实际 backend 的档位表解析。当前纯规则 dispatch 不创建模型 router, 不消费此项"),
+  router: z.enum(TIERS).default("standard").describe("群管家 (router) 创建时固定使用的档位; model / effort 按实际 backend 的档位表解析。首建、/new、交接、冷恢复均采用此档, 已在跑的会话不自动切换"),
   tiers: ClaudeTiers.describe("兼容旧配置的 Claude 系档位; 后端专属配置优先"),
   backends: z.object({
     claude: z.object({ tiers: ClaudeTiers }).optional(),
@@ -408,9 +408,8 @@ const Models = z.object({
     codebuddy: z.object({ tiers: ClaudeTiers }).optional(),
     codex: z.object({ tiers: CodexTiers }).default({}),
   }).default({}).describe("各 backend 独立的五档模型配置; 按 wrc.defaultCli 取值"),
-  // 只在起一个新的管家会话时落地 (首条消息 / `/new` / 交接重开; 死 pane 重生只在绑定没记模型时补);
-  // 已在跑的管家不自动切 (换模型会让缓存整份重读)。
-  steward: z.enum(TIERS).default("light").describe("各群管家 (群的默认会话) 用哪一档 (取值同 tiers); 群里要别的档 → chatPolicy.<chat>.steward。生效: 新起 / 交接重开的管家会话按它起, 已在跑的不动 —— 要它换上就 handoff 或 set_model"),
+  // 保留旧字段供已有配置加载; 管家的唯一档位来源是 router。
+  steward: z.enum(TIERS).default("light").describe("兼容旧配置, 不再控制管家模型; 请使用 models.router"),
 });
 
 // 定时任务的**旧**存法 (1.5 之前)。现在一条任务是 ~/.wezard/tasks/<id>.task.mjs
@@ -467,7 +466,7 @@ const Chats = z.record(z.string(), z.string().describe("base principal (`chat:wr
 export const ChatPolicy = z.object({
   topOnly: z.boolean().optional().describe("顶层模式: 人只和顶层 wizard (群管家 / 人 `.name` 点名的) 对话; wizard 之间一律私聊 (tell_peer / dispatch 的 public 失效), 被派活的 wizard 不能 notify 进群, 过程只在 rolepage。省略 = wezard 与微信 ClawBot 群聊 (`chat:wx_…`) 开, 其余关"),
   stewardBudget: z.number().int().min(-1).default(4).describe("群管家的手闸: 每轮自己跑命令 / 外部工具的次数上限, 用完拒并叫它 dispatch; 改文件、开子代理、读代码 (Read / Grep / Glob 与读文件的 shell 命令) 一律拒。-1 = 不设闸"),
-  steward: z.enum(TIERS).optional().describe("本群管家的档位, 覆盖 models.steward; 省略 = 跟全局"),
+  steward: z.enum(TIERS).optional().describe("兼容旧配置, 不再覆盖管家档位; 统一使用 models.router"),
 });
 export type ChatPolicy = z.infer<typeof ChatPolicy>;
 

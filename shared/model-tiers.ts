@@ -52,8 +52,7 @@ export const pickTier = (
   };
 };
 
-/** Resolve at router creation, with the actual backend and invocation overrides.
- * No router creation entry exists yet; rule-based dispatch does not consume this. */
+/** Resolve the router (chat steward) tier against the backend being launched. */
 export const pickRouter = (
   cfg: Config,
   backend: CliBackendName,

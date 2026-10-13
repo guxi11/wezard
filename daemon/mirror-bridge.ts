@@ -5384,8 +5384,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     try { return charterOf?.(target, ctx); } catch { return undefined; }
   };
 
-  /** 死 pane 重生 (`--resume` 同一个会话) 的模型: 绑定里记着的优先 —— set_model 换上的也记在那;
-   *  没记 (老绑定 / CLI 默认) 的管家补上管家档。 */
+  /** 死 pane 重生: 管家重新取 router 档位, 普通 wizard 沿用绑定模型。 */
   const respawnSpec = (a: { target: string; jsonlPath: string; model?: string; effort?: string }): { model?: string; effort?: Effort } => {
     return resumedStewardSpec(cfg, a.target, backendForPath(a.jsonlPath).name, a);
   };
@@ -5439,8 +5438,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const boundPath = prev?.jsonlPath ?? rec?.jsonlPath;
     const base = baseOfKey(target);
     const effCli = resolveCliBackend(cfg.wrc).name;
-    // 管家 (群的默认会话) 新起的会话按管家档起 (models.steward / chatPolicy), 档压过绑定里记下的
-    // effort —— `/new`、换目录、交接重开都是让改过的档位生效的那一下。点名了模型就整档让开。
+    // 管家 (群的默认会话) 固定按 models.router 起, 压过显式模型及绑定里记下的 effort;
+    // `/new`、换目录、交接重开都是让改过的档位生效的那一下。
     // 已在跑的管家不动 (换模型会让缓存整份重读); 死 pane 重生见 respawnSpec。
     const backendChanged = Boolean(boundPath && effCli && backendForPath(expandHome(boundPath)).name !== effCli);
     const { model: effModel, effort: effEffort } = newStewardSpec(cfg, target, effCli, opts,

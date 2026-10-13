@@ -319,13 +319,13 @@ export const tierEvidence = (
   if (backend && !resolve(ConfigSchema, ["models", "backends", backend])) return [];
   const models = { ...cfg.models, tiers: path[1] === "tiers" ? cfg.models.tiers : tiersForBackend(cfg, backend as CliBackendName | undefined) };
   const tierPath = backend ? ["models", ...path.slice(3)] : path;
-  const want = tierPath[1] === "tiers" && tierPath[2] ? [tierPath[2]] : tierPath[1] === "steward" ? [models.steward] : tierPath[1] === "tiers" || !tierPath[1] ? [...TIERS] : [];
+  const want = tierPath[1] === "tiers" && tierPath[2] ? [tierPath[2]] : tierPath[1] === "router" ? [models.router] : tierPath[1] === "tiers" || !tierPath[1] ? [...TIERS] : [];
   const rows = want.filter((n): n is TierName => (TIERS as readonly string[]).includes(n));
   if (!rows.length) return [];
   const u = usage();
   const line = (name: TierName): string => {
     const spec = models.tiers[name];
-    const label = `${spec.model || "CLI 默认"}${spec.effort ? `·${spec.effort}` : ""}${name === models.steward ? " · 管家档" : ""}`;
+    const label = `${spec.model || "CLI 默认"}${spec.effort ? `·${spec.effort}` : ""}${name === models.router ? " · 管家档" : ""}`;
     if (!spec.model) return `${name} (${label}): 用的是 CLI 默认模型, 按模型统计不出来`;
     const w = sumFor(spec.model, u.week), d = sumFor(spec.model, u.today);
     return `${name} (${label}): 本周 ${fmt.tokens(w.tokens)} tok ${fmt.cost(w.cost)} · 今日 ${fmt.tokens(d.tokens)} tok ${fmt.cost(d.cost)} · 名册里记作这一档的 ${holders(name)} 个`;

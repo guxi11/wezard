@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { parse } from "jsonc-parser";
 import { ConfigSchema, TIERS, loadConfig } from "../shared/config.js";
 import { pickRouter, pickTier } from "../shared/model-tiers.js";
-import { configGet, planSet } from "../daemon/config-api.js";
+import { configGet, planSet, tierEvidence } from "../daemon/config-api.js";
 import { patchJsonc } from "../shared/config-writer.js";
 
 const bot = { botId: "test", secret: "test" };
@@ -68,7 +68,7 @@ try {
   const shown = configGet(loadConfig(file).config, file, "models.router");
   assert(shown.ok);
   assert(JSON.stringify(shown).includes("standard"));
-  assert(JSON.stringify(shown).includes("不消费此项"));
+  assert(JSON.stringify(shown).includes("群管家 (router)"));
   assert(!planSet(cfg, file, { path: "models.router", value: { model: "sonnet", effort: "low" } }).ok);
   writeFileSync(file, JSON.stringify({ bot, models: { router: { model: "sonnet", effort: "low" } } }));
   assert.equal(loadConfig(file).config.models.router, "standard", "legacy router object must not prevent startup");
@@ -77,4 +77,8 @@ try {
   patchJsonc(file, [{ path: migrate.jsonPath, value: migrate.value }]);
   assert.equal(parse(readFileSync(file, "utf8")).models.router, "standard");
 } finally { rmSync(dir, { recursive: true, force: true }); }
+const evidence = tierEvidence(ConfigSchema.parse({ bot, models: { router: "standard", steward: "light" } }),
+  ["models", "router"], () => ({ today: new Map(), week: new Map() }), () => 0, { tokens: String, cost: String });
+assert(evidence.some((line) => line.startsWith("standard (") && line.includes("管家档")));
+assert(!evidence.some((line) => line.startsWith("light (")));
 console.log("Router tier: single setting, creation-time backend resolution, overrides and persistence passed");

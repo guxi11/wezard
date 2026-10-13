@@ -1813,7 +1813,7 @@ const main = async (): Promise<void> => {
     // /clear 只换会话不换进程 —— MCP 子进程、charter 都还是旧的, 新工具拿不到; 镜像
     // 还得靠 sid 轮换探测才跟得上。CLI 使用 cfg 的默认 backend; cwd / keepalive 照旧沿用。
     // 同 backend 时模型也沿用, 管家除外 ——
-    // 它换上此刻的管家档 (newSession 里定), 改了 models.steward 后交接一次就是让它生效的那一下。
+    // 它换上此刻的 router 档 (newSession 里定), 改了 models.router 后交接一次就是让它生效的那一下。
     const restartFresh = (target: string) => {
       const info = m.sessionInfo(target);
       const cli = cfg.wrc.defaultCli ?? primary.name;

@@ -75,9 +75,9 @@ export const chatBaseOf = (cfg: Config, ref: string): string => {
 export const chatPolicyOf = (cfg: Config, target: string): ChatPolicy & { topOnly: boolean } =>
   ((base, p) => ({ ...p, topOnly: p.topOnly ?? (isWxChat(base) || fold(chatNameOf(cfg, base)) === "wezard") }))(baseOfKey(target), ChatPolicy.parse(cfg.chatPolicy?.[baseOfKey(target)] ?? cfg.chatPolicy?.[chatNameOf(cfg, target)] ?? {}));
 
-/** `target` 是管家 (群的默认会话) 时它该跑的档: `chatPolicy.<chat>.steward` 压过 `models.steward`; 不是管家 = undefined。 */
+/** 群的默认会话就是 router; 统一取 models.router, 非管家不套档。 */
 export const stewardTierOf = (cfg: Config, target: string): TierName | undefined =>
-  tagOfKey(target) || isInternalKey(target) ? undefined : chatPolicyOf(cfg, target).steward ?? cfg.models.steward;
+  tagOfKey(target) || isInternalKey(target) ? undefined : cfg.models.router;
 
 /** 已命名的聊天, 按名字排序。 */
 export const listChatNames = (cfg: Config): Array<{ name: string; base: string }> =>
