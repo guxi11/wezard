@@ -17,7 +17,7 @@ const make=(fail=false)=>{
 {
  const x=make(),context=x.answerContext(x.a.target);
  assert.equal(context.prefix,'`existing progress`');
- x.takeAnswer('id',x.a.target);
+ assert.equal(x.takeAnswer('id',x.a.target,context.turn),true);
  assert.equal(x.a.briefBubble,undefined,'source can no longer finalize transferred bubble');
  assert.equal(x.a.channel,'','source late messages remain private');
  await x.deliverAnswer('id','chat:group#worker',context.turn,context.channel,context.prefix,'direct answer',false);
@@ -26,8 +26,15 @@ const make=(fail=false)=>{
  assert.match(x.calls[0].args[2],/existing progress[\s\S]*direct answer/);
  assert.match(x.calls[0].args[2],/role=chat%3Agroup%23worker/,'footer identifies target despite source ticket');
 }
+{
+ const x=make(),c=x.answerContext(x.a.target);
+ x.a.briefTurnId='new-human-turn';
+ assert.equal(x.takeAnswer('stale-transfer',x.a.target,c.turn),false,'a transfer whose injection crossed into a new turn cannot take the new human bubble');
+ assert.equal(x.answerContext(x.a.target).turn,'new-human-turn');
+ assert.ok(x.a.briefBubble,'the new turn bubble remains available to its owner');
+}
 for(const [failure,standalone] of [[false,true],[true,false]]){
- const x=make(failure),c=x.answerContext(x.a.target);x.takeAnswer('id',x.a.target);
+ const x=make(failure),c=x.answerContext(x.a.target);x.takeAnswer('id',x.a.target,c.turn);
  await x.deliverAnswer('id','chat:group#worker',c.turn,c.channel,c.prefix,'terminal answer',standalone);
  assert.deepEqual(x.calls.map(c=>c.kind),['stream','standalone']);
  assert.match(x.calls[1].args[1].markdown.content,/existing progress[\s\S]*terminal answer/);

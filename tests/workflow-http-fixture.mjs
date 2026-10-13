@@ -72,7 +72,7 @@ export async function setup(options={}){
  });
  const injected=[];const routes=new Map();
  const m={idleNow:async()=>true,untilIdle:async()=>({idle:true}),sessionInfo:()=>undefined,
- injectText:async(...a)=>{if(a[3]?.guard&&!a[3].guard('paste'))return {ok:false,reason:'guard'};if(a[3]?.guard&&!a[3].guard('submit'))return {ok:false,reason:'guard'};injected.push(a);return {ok:true};},interruptPane:async()=>({ok:true}),killPane:async()=>({ok:true})};
+ injectText:async(...a)=>{if(a[3]?.guard&&!a[3].guard('paste'))return {ok:false,reason:'guard'};options.transportHook?.();if(a[3]?.guard&&!a[3].guard('submit'))return {ok:false,reason:'guard'};injected.push(a);return {ok:true};},interruptPane:async()=>({ok:true}),killPane:async()=>({ok:true})};
  const openingAsk=()=>options.opening;
  const answers=createAnswerTransfers(loadJsonMap(join(dir,'answer-transfers.json'),undefined,{strict:true}));
  const answerDeliveries=[];

@@ -56,6 +56,17 @@ for (const override of [{topOnly:false},{answerContext:undefined},{origin:{k:{ki
  x.close();
 }
 {
+ const x=await setup({...opts(),transportHook:()=>{opts.current={turn:'next-human-turn',channel:'chat:group',prefix:'new progress'};}});
+ const original=x.m.answerContext;x.m.answerContext=()=>opts.current??original();
+ const r=await send(x);
+ assert.equal(r.status,200,'physical exposure preserves the transfer even when submit guard rejects a turn switch');
+ assert.equal(x.answers.all()[0].state,'delivered','uncertain exposed paste is terminally reconciled');
+ assert.equal(x.answers.all()[0].sourceTurn,'human-turn');
+ assert.equal(x.injected.length,0,'submit guard rejects the stale request');
+ assert.equal(x.answerDeliveries.length,1,'user receives one explicit uncertainty terminal');
+ x.close();
+}
+{
  const x=await setup(opts());let enter,release;
  const started=new Promise(r=>enter=r), barrier=new Promise(r=>release=r);
  x.m.idleNow=async()=>{enter();await barrier;return true;};
@@ -70,6 +81,14 @@ for (const override of [{topOnly:false},{answerContext:undefined},{origin:{k:{ki
  const r=await x.post('/peers/tell',{name:'worker',text:'old client'});
  assert.equal(r.status,200);assert.equal(r.body.answer,undefined);assert.equal(x.answers.all().length,0);
  x.close();
+}
+{
+ const x=await setup({...opts(),lostAnswer:true});let kills=0;x.m.killPane=async()=>{kills++;return {ok:true};};
+ const r=await x.post('/wizard/stop',{name:'worker',mode:'end'});
+ const interrupted=await x.post('/wizard/stop',{name:'worker',mode:'interrupt'});
+ assert.equal(r.status,409,'a source that transferred control cannot end the answer owner');
+ assert.equal(interrupted.status,409,'a source that transferred control cannot interrupt the answer owner');
+ assert.equal(kills,0);x.close();
 }
 {
  const x=await setup({openingEnv:{kind:'peer',private:true,turn:'tPinned'}});

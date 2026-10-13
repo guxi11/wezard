@@ -96,7 +96,7 @@ import { cacheTouchMs, cacheTtlSec, clipMiddle, contextFiles, firstStamp, parseC
 import { keepalivePingSigs } from "../shared/keepalive.js";
 import { expandHome } from "../shared/paths.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
-import { createAnswerTransfers, type AnswerTransfer } from "./answer-transfer.js";
+import { answerRecoveryAction, createAnswerTransfers, type AnswerTransfer } from "./answer-transfer.js";
 import { createWorkflowNodes, type FileVersion, type NodeAttempt } from "./workflow-nodes.js";
 import { loadWorkflowPlans, createWorkflowPlanRunner, type PlanPermit } from "./workflow-plans.js";
 import { registerWorkflowPlanRoutes } from "./workflow-plan-http.js";
@@ -780,14 +780,15 @@ const main = async (): Promise<void> => {
       const p = (async () => {
         const r = answers.outcome(id, out);
         if (!r) return true;
-        answers.delivering(id);
+        if (!answers.delivering(id)) return false;
         try {
           await m.deliverAnswer(id, r.target, r.sourceTurn, r.channel, r.prefix, r.outcome!.body, !["done", "need"].includes(r.outcome!.status));
           answers.delivered(id);
           recordPost({ target: r.target, channel: r.channel, body: r.outcome!.body, ...(r.tell.asker ? { asker: r.tell.asker } : {}) });
           return true;
         } catch (e) {
-          log.error({ id, err: (e as Error).message }, "transferred answer delivery failed; retained for retry");
+          answers.uncertain(id);
+          log.error({ id, err: (e as Error).message }, "transferred answer delivery acknowledgement uncertain; automatic retry withheld to prevent duplicate answers");
           return false;
         }
       })().finally(() => answerSends.delete(id));
@@ -975,11 +976,15 @@ const main = async (): Promise<void> => {
     void m.restored.then(() => {
       handoffs.resume();
       answers.all().filter((r) => r.state !== "delivered").forEach((r) => {
-        if (r.state === "reserved") {
+        const action = answerRecoveryAction(r);
+        if (action === "cancel-before-send") {
           answers.activate(r.id);
           void deliverTransferredAnswer(r.id, { status: "canceled", body: "daemon 重启时回答移交仍在投递，结果不确定；本轮已收止，请重新发送问题。" });
-        } else if (r.outcome) void deliverTransferredAnswer(r.id, r.outcome);
-        else if (!receipts.watching(r.tell)) receipts.register(r.tell);
+        } else if (action === "ambiguous") {
+          answers.uncertain(r.id);
+          log.error({ id: r.id }, "answer delivery may have reached the chat before restart; automatic retry withheld, user may resend if absent");
+        } else if (action === "deliver-outcome" && r.outcome) void deliverTransferredAnswer(r.id, r.outcome);
+        else if (action === "watch" && !receipts.watching(r.tell)) receipts.register(r.tell);
       });
       // Confirmed injections may outlive the legacy receipt-store write. Rebuild watching,
       // using the original turn and intent; uncertain injections remain manual reconciliation.
@@ -987,10 +992,6 @@ const main = async (): Promise<void> => {
         .forEach((a) => { try { recoverWorkflow(a); } catch (e) { log.error({ err: (e as Error).message, attemptId: a.id }, "workflow recovery accounting failed; watcher not restored"); } });
       receipts.resume();
     });
-    const answerRetry = setInterval(() => {
-      answers.all().filter((r) => r.outcome && r.state !== "delivered").forEach((r) => { void deliverTransferredAnswer(r.id, r.outcome!); });
-    }, 10_000);
-    answerRetry.unref();
     // 闲置追问 (见 idle-nudge.ts): 对方持续闲着又没回执 → 代发话方同件号问一句进展, 答复照常回执。
     // 注入照抄工单打回 (rebound) 那条: 私聊信封挂发话方的名义与件号, 父 k 等由 reask 沿用原件。
     void m.restored.then(() => startIdleNudge({
@@ -1605,11 +1606,11 @@ const main = async (): Promise<void> => {
         throw e;
       });
       if (answerContext) {
-        if (inj.ok || inj.uncertain) {
+        if (inj.ok || inj.uncertain || physicalExposure) {
           answers.activate(turn.turn);
-          m.takeAnswer(turn.turn, self);
+          if (m.answerContext(self)?.turn === answerContext.turn) m.takeAnswer(turn.turn, self, answerContext.turn);
           receipts.register(trackedTell);
-          if (inj.uncertain) void deliverTransferredAnswer(turn.turn, { status: "canceled", body: "回答移交的投递结果不确定，本轮已收止；请重新发送问题。" });
+          if (!inj.ok) void deliverTransferredAnswer(turn.turn, { status: "canceled", body: "回答移交的投递结果不确定，本轮已收止；若未收到回答，请重新发送问题。" });
           return { status: 200, body: { ...inj, ok: true, answer: "transfer", control: "transfer", name: peerAddress(cfg, self, target), turn: turn.turn, receipt: "目标将承接已有气泡并直接对人交付；本轮请停止派活与公开回答，静默收口" } };
         }
         answers.rollback(turn.turn);
@@ -2916,6 +2917,7 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/stop", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      if (lostAnswer(self)) { json(res, 409, { ok: false, reason: "本轮回答权和控制权已移交；不能打断或结束目标 wizard" }); return; }
       const b = body as { name?: string; tag?: string; mode?: string; forget?: boolean; turn?: string; force?: boolean };
       const r = resolvePeer(self, addrOf(b));
       // 有身份没会话 (冷记录 / 生到一半的僵尸): resolvePeer 够不着它, 但收它不需要

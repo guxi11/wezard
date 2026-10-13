@@ -2190,7 +2190,7 @@ export interface MirrorBridge {
   currentChannel: (target: string) => string;
   currentAsker: (target: string) => Asker | undefined;
   answerContext: (target: string) => { turn: string; channel: string; prefix: string } | undefined;
-  takeAnswer: (id: string, target: string) => void;
+  takeAnswer: (id: string, target: string, expectedTurn: string) => boolean;
   deliverAnswer: (id: string, target: string, turn: string, channel: string, prefix: string, body: string, standalone: boolean) => Promise<void>;
   setAnswerSilencer: (fn: (target: string, turn: string) => boolean) => void;
   /** Send Esc to the live tmux pane bound to `target` — interrupts whatever
@@ -3307,9 +3307,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const turn = a.briefTurnId ?? a.liveStream?.turnId;
     return turn ? { turn, channel: a.channel ?? baseOfKey(target), prefix: a.liveStream?.acc || (a.cotLastSent ? `\`${a.cotLastSent}\`` : "") } : undefined;
   };
-  const takeAnswer = (id: string, target: string): void => {
+  const takeAnswer = (id: string, target: string, expectedTurn: string): boolean => {
     const a = byTarget.get(target);
-    if (!a) return;
+    if (!a || (a.briefTurnId ?? a.liveStream?.turnId) !== expectedTurn) return false;
     clearCot(a);
     if (a.briefBubble && !a.briefBubble.done) {
       clearTimeout(a.briefBubble.hardTimer);
@@ -3324,6 +3324,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
     // All late source output stays private until a genuine new injection changes channel.
     a.channel = "";
+    return true;
   };
   const deliverAnswer = async (id: string, target: string, turn: string, channel: string, prefix: string, body: string, standalone: boolean): Promise<void> => {
     const held = answerBubbles.get(id);

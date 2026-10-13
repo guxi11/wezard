@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pino from "pino";
-import { createAnswerTransfers, type AnswerTransfer } from "../daemon/answer-transfer.js";
+import { answerRecoveryAction, createAnswerTransfers, type AnswerTransfer } from "../daemon/answer-transfer.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { createReceipts, type Outcome, type Slot } from "../daemon/receipts.js";
 import { ConfigSchema } from "../shared/config.js";
@@ -28,7 +28,19 @@ a.outcome(row.id, { status: "timeout", body: "timed out" });
 assert.equal(a.outcome(row.id, { status: "done", body: "late answer" })?.outcome?.status, "timeout", "late answer cannot replace terminal outcome");
 a.delivering(row.id); a.delivered(row.id);
 assert.equal(a.outcome(row.id, { status: "done", body: "duplicate" }), undefined);
+assert.equal(answerRecoveryAction({ ...row, state: "delivering", outcome: { status: "done", body: "sent" } }), "ambiguous");
+assert.equal(answerRecoveryAction({ ...row, state: "active", outcome: { status: "done", body: "not attempted" } }), "deliver-outcome");
+assert.equal(answerRecoveryAction({ ...row, state: "uncertain", outcome: { status: "done", body: "possibly sent" } }), "settled");
+assert.equal(a.delivering(row.id), false, "a settled transfer can never begin another external delivery");
 assert.throws(() => a.reserve({ ...row, id: "tFour", target: "other" }), /already transferred/, "human ownership stays exclusive after delivery");
+
+const recoveryRow = { ...row, id: "tCrash", state: "active" as const, outcome: { status: "done" as const, body: "answer" } };
+const recoveryStore = loadJsonMap<AnswerTransfer>(join(dir, "recovery.json"), undefined, { strict: true });
+const recovery = createAnswerTransfers(recoveryStore); recovery.reserve(recoveryRow); recovery.delivering(recoveryRow.id);
+const afterAckCrash = createAnswerTransfers(loadJsonMap<AnswerTransfer>(join(dir, "recovery.json"), undefined, { strict: true }));
+assert.equal(answerRecoveryAction(afterAckCrash.get(recoveryRow.id)!), "ambiguous");
+afterAckCrash.uncertain(recoveryRow.id);
+assert.equal(answerRecoveryAction(afterAckCrash.get(recoveryRow.id)!), "settled", "restart after external ACK never retries automatically");
 
 const cfg = (policies?: Record<string, unknown>) => ConfigSchema.parse({ bot: { botId: "test", secret: "test" }, chats: { wezard: "user:admin", other: "chat:other" }, ...(policies ? { chatPolicy: policies } : {}) });
 assert.equal(cfg().chatPolicy.wezard?.topOnly, true);
