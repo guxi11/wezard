@@ -27,6 +27,7 @@ import { newStewardSpec, resumedStewardSpec } from "./steward-model.js";
 import { expandHome, sanitizeId } from "../shared/paths.js";
 import { augmentedPath } from "../shared/exec-path.js";
 import { sleep, truncateWithCount, mapLimit } from "../shared/std.js";
+import { withPaneInput } from "./pane-input.js";
 import { withImageClipboard, pasteVerifiedImage } from "./image-input.js";
 import {
   activeBackends,
