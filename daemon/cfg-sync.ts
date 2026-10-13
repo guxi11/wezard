@@ -309,6 +309,6 @@ export const renderSyncReport = (r: SyncReport): string => {
   const tail = r.applied
     ? [`\n✅ 已写入 ${changed.length - conflicts} 项${conflicts ? `,${conflicts} 项冲突已跳过` : ""}`,
        ...(r.backupDir ? [`备份: \`${r.backupDir}\``] : [])]
-    : ["\n预演模式,未写入。执行同步: `/cfgsync apply`"];
+    : ["\n预演模式,未写入。"];
   return [head, "", ...lines, ...tail].join("\n");
 };

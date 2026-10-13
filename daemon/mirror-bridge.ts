@@ -57,7 +57,6 @@ import { errText } from "./last-response.js";
 import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagHeader, withLinkedTagHeader, chatHead, headed, tagBadge, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey, sameBot } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { isWxFrame } from "../shared/wx-text.js";
-import { randomTip } from "./tips.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
 import { stripAnsi, paneIsBusy, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, lastModel, cacheTouchMs, cacheTtlSec, keepaliveStamps, openKeepalivePing, lastUserTurn, talkRounds, openToolUses, renderDialog, type PeerInfo, type PeerReply } from "./peers.js";
 import { keepalivePingSigs, isKeepalivePingText } from "../shared/keepalive.js";
@@ -5254,10 +5253,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // `header` folds the caller's ack ("created") into this same bubble — /new
   // must land as exactly ONE WeCom message, not card + separate reply.
   // 会话边界回执一律不携带 cwd 信息 (📂 项目行 / 下次切换), 需要时 `/pwd` 可查。
-  // slashAckFirstLine 进一步省去 💡 tip, 只剩首行 ack。
   const pushProjectInfo = (target: string, header?: string): void => {
-    const concise = cfg.wrc.mirror.slashAckFirstLine && !!header;
-    const md = header ? (concise ? header : `${header}\n\n${randomTip()}`) : randomTip();
+    if (!header) return;
+    const md = header;
     const a = byTarget.get(target);
     if (a) {
       sendStandalone(a, md);
@@ -7194,10 +7192,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // and surface a standalone "cleared" so the user gets explicit
         // feedback (the skip-stream path otherwise leaves WeCom silent).
         if (armMigration) {
-          // cwd 不随回执下发 (/pwd 可查); slashAckFirstLine 连 tip 也省去 (与 /new 一致)。
-          sendStandalone(a, cfg.wrc.mirror.slashAckFirstLine
-            ? "cleared"
-            : `cleared\n\n${randomTip()}`);
+          sendStandalone(a, "cleared");
           a.clearRebind = { baseline: preClearBaseline! };
           startMigrationWatcher(a, preClearBaseline!, jsonlIsPostClearChild, 0, true);
         }

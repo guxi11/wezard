@@ -277,7 +277,6 @@ const renderSessionsList = (sessions: SessionInfo[], currentSid: string): string
   return [
     "[wezard] 正在运行的会话：",
     ...lines,
-    "> 切换：`/sessions <emoji 或 id>`，如 `/sessions 🐼`",
   ].join("\n");
 };
 
@@ -295,7 +294,7 @@ const dirOf = (p: PeerInfo): string => p.cwd.replace(/^.*\//, "") || p.cwd;
 // they actually differ. Rows are blank-line separated so a wrapped summary can't
 // visually merge into the next peer.
 const renderPeers = (peers: PeerInfo[], chatName: string): string => {
-  if (peers.length === 0) return "[wezard] 本聊天还没有 wizard。发消息或 `/new` 让一个就位。";
+  if (peers.length === 0) return "[wezard] 本聊天还没有 wizard。";
   const reg = wizardStore();
   const dirs = uniq(peers.map(dirOf));
   const clis = uniq(peers.map((p) => p.cli));
@@ -330,10 +329,6 @@ const renderPeers = (peers: PeerInfo[], chatName: string): string => {
     `[wezard] 本聊天${named ? ` \`${named}\`` : ""}的 wizard · ${peers.length} 个${shared.length ? ` · ${shared.join(" · ")}` : ""}`,
     "",
     ...rows,
-    "> 协作：直接说「看下 .fix 的进展并推动它」，AI 会读它最近的对话、派活、收它的回执直到跑完",
-    "> 分身：说「分个身去干 X」— AI 会 clone 一个带着当前上下文的 wizard，干完再收掉",
-    // 空行只在这一处按需省略 —— 上面那些是有意的分隔, 不能被一把 filter 掉。
-    ...(named ? [] : ["> 起名：`/name <名字>` — 聊天名就是这里默认 wizard 的名字"]),
   ].join("\n");
 };
 
@@ -351,7 +346,6 @@ const renderChats = (
     `[wezard] 已知的聊天 · ${roster.length} 个`,
     "",
     ...rows,
-    "> 寻址：`.名字`（如 `.fix`），全局唯一，在任何群里都叫得到",
   ].join("\n");
 };
 
@@ -598,11 +592,10 @@ export const installInboundRouter = (
     const { runningCwd, pendingCwd, defaultCwd } = bridge.getCwd(who);
     const lines = [`[wezard] 📂 当前项目: \`${runningCwd}\``];
     if (pendingCwd && pendingCwd !== runningCwd) {
-      lines.push(`下次切换: \`${pendingCwd}\` (使用 /new 或 /clear 生效)`);
+      lines.push(`下次切换: \`${pendingCwd}\``);
     }
     if (runningCwd !== defaultCwd) lines.push(`(默认: \`${defaultCwd}\`)`);
-    if (bridge.cwdUnconfirmed(who)) lines.push("⚠️ 这是默认兜底目录, 还没人确认过 —— 要换就说「切到 /path/to/proj」");
-    lines.push("> 切换其他项目: 对 AI 说「切到 /path/to/proj」(`set_workspace` 工具直接换目录重开)");
+    if (bridge.cwdUnconfirmed(who)) lines.push("⚠️ 这是默认兜底目录, 还没人确认过");
     return lines.join("\n");
   };
 
@@ -900,7 +893,7 @@ export const installInboundRouter = (
       if (!nc.arg) {
         await replyText(frame, msg, who, cur
           ? `[wezard] 本聊天名为 \`${cur}\``
-          : "[wezard] 本聊天还没起名。`/name <名字>` 起一个。");
+          : "[wezard] 本聊天还没起名。");
         return { stop: true };
       }
       // 聊天名进宪章 (home 群、管家那节的 config_set 路径): 过宪章守卫, 受影响的 wizard 被提醒 handoff。

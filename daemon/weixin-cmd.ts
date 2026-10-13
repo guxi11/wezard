@@ -49,7 +49,7 @@ const ago = (t?: number): string => {
 
 export const renderAccounts = (cfg: Config, xs: readonly WxAccount[]): string =>
   xs.length === 0
-    ? "[wezard] 还没有绑定微信。发 `/wx bind [群名]` 扫码绑定 (仅审批人)。"
+    ? "[wezard] 还没有绑定微信。"
     : [
       `*微信 ClawBot* (${xs.length}/${cfg.weixin.maxAccounts}${cfg.weixin.enabled ? "" : " · ⚠️ 通道未开启"})`,
       ...xs.map((a, i) => {
@@ -57,8 +57,6 @@ export const renderAccounts = (cfg: Config, xs: readonly WxAccount[]): string =>
         const ctx = a.ctx ? `额度 ${Math.max(0, cfg.weixin.sendCap - a.ctx.used)}/${cfg.weixin.sendCap}` : "无 token";
         return `${i + 1}. \`${name}\` ${a.state === "live" ? "🟢" : "🔴 掉线"} · 上次说话 ${ago(a.lastInAt)} · ${ctx}${a.outbox.length ? ` · 📬 压着 ${a.outbox.length}` : ""} · 发 ${a.sent ?? 0} / 败 ${a.failed ?? 0}`;
       }),
-      "",
-      "`/wx bind [群名]` 绑新号 · `/wx unbind <序号|群名>` 解绑",
     ].join("\n");
 
 const HELP = [
@@ -73,7 +71,7 @@ const viewLine = (v: BindView): string =>
   v.status === "qr" ? `📱 ${v.message}`
     : v.status === "scaned" ? "👀 已扫码, 请在微信里点「确认」"
     : v.status === "need_code" ? `🔢 ${v.message}: 发 \`/wx code <配对码>\``
-    : v.status === "done" ? `✅ 微信已绑定为群聊 \`${v.name}\` —— 去微信里先给「微信 ClawBot」发一句话 (机器人在你开口前不能说话); 之后像企微群一样用, \`.名字\` 点名 wizard`
+    : v.status === "done" ? `✅ 微信已绑定为群聊 \`${v.name}\` —— 请先给「微信 ClawBot」发一句话 (机器人在你开口前不能说话)`
     : v.status === "already" ? `ℹ️ ${v.message}`
     : `❌ 绑定失败: ${v.message}`;
 
