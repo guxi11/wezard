@@ -35,7 +35,7 @@ for (const override of [{topOnly:false},{answerContext:undefined},{origin:{k:{ki
  x.close();
 }
 {
- const x=await setup(opts());let taken=0;x.m.takeAnswer=()=>{taken++;return {taken:true};};
+ const x=await setup(opts());let taken=0;x.m.takeAnswer=async()=>{taken++;return {taken:true,cleared:true};};
  const r=await send(x);
  assert.equal(r.status,200,JSON.stringify(r));
  assert.equal(r.body.answer,'transfer');assert.equal(r.body.control,'transfer');
@@ -235,5 +235,27 @@ for (const answer of [undefined, 'transfer']) {
  assert.equal((await send(x)).status,200,'source can transfer while stop is waiting');
  release();assert.equal((await stop).status,409,'source stop rechecks ownership after transfer');
  assert.equal(x.counts().killCalls,0);x.close();
+}
+{
+ const x=await setup(opts());x.m.prepareAnswer=()=>false;
+ const r=await send(x);assert.equal(r.status,409);assert.equal(x.injected.length,0);assert.equal(x.answers.all().length,0,'unwritable stream rejects before target injection');x.close();
+}
+{
+ const x=await setup(opts());let prepared=false,entered,release,returned=false;
+ const ready=new Promise(r=>entered=r),barrier=new Promise(r=>release=r);
+ x.m.prepareAnswer=()=>{prepared=true;return true;};
+ x.m.injectText=async()=>{assert.equal(prepared,true,'association exists before receiver can produce');return {ok:true};};
+ x.m.takeAnswer=async()=>{entered();await barrier;return {taken:true,cleared:true};};
+ const pending=send(x).then(r=>{returned=true;return r;});await ready;await new Promise(r=>setTimeout(r,20));assert.equal(returned,false,'success cannot precede reset ACK');
+ release();const r=await pending;assert.equal(r.status,200);assert.equal(r.body.bubbleCleared,true);x.close();
+}
+{
+ const x=await setup(opts());x.m.takeAnswer=async()=>({taken:true,cleared:false});
+ const r=await send(x);assert.equal(r.status,202);assert.equal(r.body.ok,false);assert.equal(r.body.ownershipTransferred,true);assert.equal(r.body.bubbleCleared,false);assert.equal(r.body.retryable,false);
+ assert.equal(x.answers.all()[0].state,'active');assert.equal((await send(x)).status,409,'unconfirmed reset never allows duplicate transfer');x.close();
+}
+{
+ const x=await setup(opts());let canceled=0;x.m.cancelAnswerPreparation=()=>canceled++;x.m.injectText=async()=>({ok:false});
+ assert.equal((await send(x)).status,502);assert.equal(canceled,1,'definite failed injection drops buffered receiver progress');x.close();
 }
 console.log('answer transfer HTTP: eligibility, busy, failure, success, uncertain, concurrency, old client passed');

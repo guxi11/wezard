@@ -2190,7 +2190,10 @@ export interface MirrorBridge {
   currentChannel: (target: string) => string;
   currentAsker: (target: string) => Asker | undefined;
   answerContext: (target: string) => { turn: string; channel: string; prefix: string } | undefined;
-  takeAnswer: (id: string, target: string, expectedTurn: string) => { taken: boolean; prefix?: string };
+  prepareAnswer: (id: string, source: string, expectedTurn: string, receiver: string, channel: string) => boolean;
+  takeAnswer: (id: string, target: string, expectedTurn: string, receiver: string, channel: string) => Promise<{ taken: boolean; cleared: boolean }>;
+  cancelAnswerPreparation: (id: string) => void;
+  stopAnswerProgress: (id: string) => void;
   deliverAnswer: (id: string, target: string, turn: string, channel: string, prefix: string, body: string, standalone: boolean) => Promise<void>;
   setAnswerSilencer: (fn: (target: string, turn: string) => boolean) => void;
   /** Send Esc to the live tmux pane bound to `target` — interrupts whatever
@@ -2391,6 +2394,7 @@ interface ToolEntry {
  *  `链接 仍在处理中…` 的中间结束语收口 (turn 已被顶替则纯链接)。
  *  hardTimer 兜底 WeCom ~6min stream 窗口, 到点强制 finish=true; 微信帧没有这个窗口, 不挂。 */
 interface BriefBubble {
+  pending?: Promise<unknown>;
   frame: WsFrameHeaders;
   streamId: string;
   hardTimer?: NodeJS.Timeout;
@@ -2426,6 +2430,7 @@ interface Seal {
 }
 
 interface ActiveStream {
+  pending?: Promise<unknown>;
   turnId: string;
   frame: WsFrameHeaders;
   streamId: string;
@@ -2514,6 +2519,8 @@ interface AttachState {
   /** 这场对话的出处 —— 与 channel 同生同灭。续写轮 (没有新的印章) 沿用它: 私聊里的
    *  续写没有 from, rolepage 就认不出对面是谁, 整段往来掉出那段私聊。 */
   convFrom?: TurnFrom;
+  /** Set only when a peer's input is activated by bindLine, never by a queued injection. */
+  activePeerTurn?: string;
   /** 本进程里 channel 是否已经定过 —— 没定过的续写轮从 turn store 接回上一轮的频道。 */
   channelSeeded?: boolean;
   /** Set when `/clear` was injected: the next user prompt will land in a fresh
@@ -2599,10 +2606,10 @@ interface AttachState {
    *  brief 气泡的实时进度行。随 attach/migrate 创建, detach/migrate 时停掉。 */
   subagentWatch?: SubagentWatchHandle;
   /** 本 attachment 已见的 subagent run。key = agentId (文件名去前缀)。 */
-  subagents?: Map<string, { turnId: string; label: string; closed: boolean }>;
+  subagents?: Map<string, { turnId: string; label: string; closed: boolean; answerTurn?: string }>;
   /** 最近的 Task/Agent 工具调用入参 (prompt/type/description), 用于给 subagent
    *  turn 归属类型 — codebuddy 的 agent 文件没有 meta.json, 只能从父侧匹配。 */
-  agentCalls?: Array<{ prompt: string; type?: string; description?: string; at: number }>;
+  agentCalls?: Array<{ prompt: string; type?: string; description?: string; at: number; answerTurn?: string }>;
   /** 父转录里已派发、尚未确认结束的 Agent/Task 调用 —— callId → 派发记录。软收口
    *  (fireSoftTurnEnd) 期间非空 = 有子agent 调用中, 不得把上一段文本当 final 正文收口。
    *
@@ -2841,7 +2848,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const content = s.acc;
     s.lastSent = content;
     try {
-      await client.replyStream(s.frame, s.streamId, withLinkedTagHeader(s.target, content || "…", chatTurnUrl(s.target, s.turnId), undefined, undefined, s.dest), false);
+      await (s.pending = (s.pending ?? Promise.resolve()).catch(() => undefined).then(async () => {
+        if (s.closed || s.dead) return;
+        await client.replyStream(s.frame, s.streamId, withLinkedTagHeader(s.target, content || "…", chatTurnUrl(s.target, s.turnId), undefined, undefined, s.dest), false);
+      }));
       log.debug({ turnId: s.turnId, len: content.length }, "stream flush ok");
     } catch (e) {
       log.warn({ turnId: s.turnId, err: (e as Error).message }, "stream flush failed; marking dead");
@@ -2870,6 +2880,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!s.dead && body.trim()) {
       const card = detailCardFor(s, a.target);
       try {
+        await s.pending?.catch(() => undefined);
         if (card) {
           s.cardSent = true;
           await client.replyStreamWithCard(s.frame, s.streamId, withLinkedTag(a, body, undefined, s.turnId), true, { templateCard: card });
@@ -2939,13 +2950,15 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (answerSilent(a)) return;
     if (isPrivate(a) && !/^\[(mirror|wezard)\]/.test(content.trim())) return;
     const chatId = replyChatId(a);
-    const turnId = a.briefTurnId; // 推送是排队异步的, 到发出时 turn 早已收口
+    const turnId = a.briefTurnId ?? a.liveStream?.turnId; // 推送是排队异步的, 到发出时 turn 早已收口
     const pieces = splitMarkdown(content, Math.max(200, cfg.wrc.mirror.chunkBytes - TAG_HEADER_BUDGET));
     const chunks = pieces.map((p, i) =>
       withLinkedTag(a, p, pieces.length > 1 ? `${i + 1}/${pieces.length}` : undefined));
     a.standalonePending = a.standalonePending
       .then(async () => {
+        if (silenceAnswer(a.target, turnId ?? "")) return;
         for (const c of chunks) {
+          if (silenceAnswer(a.target, turnId ?? "")) return;
           try {
             const ack = await client.sendMessage(chatId, { msgtype: "markdown", markdown: { content: c } });
             log.info({ sessionId: a.sessionId, turnId, chatId, len: c.length, ack: JSON.stringify(ack ?? null).slice(0, 300) }, "standalone pushed");
@@ -2961,9 +2974,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const sendRaw = (a: AttachState, content: string): void => {
     if (!hasVisibleBody(content)) return;
     const chatId = replyChatId(a);
-    const turnId = a.briefTurnId;
+    const turnId = a.briefTurnId ?? a.liveStream?.turnId;
     a.standalonePending = a.standalonePending
       .then(async () => {
+        if (silenceAnswer(a.target, turnId ?? "")) return;
         try {
           await client.sendMessage(chatId, { msgtype: "markdown", markdown: { content } });
           log.info({ sessionId: a.sessionId, turnId, chatId, len: content.length }, "raw pushed");
@@ -3152,7 +3166,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // sees the bubble; subsequent items grow it as today.
       void (async () => {
         try {
-          await client.replyStream(frame, streamId, withTagHeader(a.target, "…"), false);
+          await (s.pending = client.replyStream(frame, streamId, withTagHeader(a.target, "…"), false));
         } catch (e) {
           log.warn({ sessionId: a.sessionId, err: (e as Error).message }, "stream initial ack failed");
         }
@@ -3264,7 +3278,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!text || !b || b.done || !turnId || a.briefConcluded || answerSilent(a)) return;
     a.cotLastSent = text;
     try {
-      await client.replyStream(b.frame, b.streamId, briefLine(a, turnId, `\`${text}\``), false);
+      await (b.pending = (b.pending ?? Promise.resolve()).catch(() => undefined).then(async () => {
+        if (b.done || a.briefBubble !== b || a.briefTurnId !== turnId || answerSilent(a)) return;
+        await client.replyStream(b.frame, b.streamId, briefLine(a, turnId, `\`${text}\``), false);
+      }));
     } catch (e) {
       log.debug({ sessionId: a.sessionId, turnId, err: (e as Error).message }, "brief: cot refresh failed");
     }
@@ -3299,48 +3316,124 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const answerSilent = (a: AttachState): boolean => silenceAnswer(a.target, a.briefTurnId ?? a.liveStream?.turnId ?? "");
   const turnSilent = (a: AttachState): boolean =>
     answerSilent(a) || isPrivate(a) || (cfg.wrc.mirror.brief && cfg.wrc.mirror.chatOriginOnly && a.turnFromChat === false);
-  const answerBubbles = new Map<string, { bubble: BriefBubble; prefix: string }>();
+  interface AnswerBubble {
+    bubble?: BriefBubble;
+    stream?: ActiveStream;
+    source: string;
+    active: boolean;
+    stopped: boolean;
+    receiver: string;
+    sourceTurn: string;
+    channel: string;
+    pending: Promise<unknown>;
+    timer?: NodeJS.Timeout;
+    progress?: string;
+  }
+  const answerBubbles = new Map<string, AnswerBubble>();
+  const answerLine = (held: AnswerBubble, text: string): string =>
+    withLinkedTagHeader(held.receiver, text, chatTurnUrl(held.receiver, held.sourceTurn), undefined, undefined, held.channel);
+  // Serialise the old owner's in-flight refresh, reset, progress and final.
+  // A delayed ACK must never let an earlier writer overtake the new owner.
+  const writeAnswerProgress = (held: AnswerBubble, text: string): void => {
+    held.pending = held.pending.catch(() => undefined).then(async () => {
+      if (!held.active || held.stopped || !held.bubble || held.bubble.done) return;
+      await client.replyStream(held.bubble.frame, held.bubble.streamId, answerLine(held, text), false);
+    }).catch((e) => log.warn({ err: errText(e) }, "answer transfer progress refresh failed"));
+  };
+  const updateAnswerProgress = (a: AttachState, item: RenderItem): void => {
+    // Queued metadata is not authority: only the input boundary activates a task.
+    const held = a.activePeerTurn ? answerBubbles.get(a.activePeerTurn) : undefined;
+    if (!held || held.receiver !== a.target || held.stopped || held.bubble?.done) return;
+    const raw = item.kind === "tool_use" ? cotToolLabel(item.calls)
+      : item.kind === "thinking" || (item.kind === "text" && item.final !== true) ? item.body : "";
+    const line = cotLine(raw);
+    if (!line) return;
+    held.progress = line;
+    if (!held.active) return;
+    if (held.timer) return;
+    held.timer = setTimeout(() => {
+      held.timer = undefined;
+      if (held.progress) writeAnswerProgress(held, `\`${held.progress}\``);
+    }, COT_FLUSH_MS);
+  };
 
   const answerContext = (target: string): { turn: string; channel: string; prefix: string } | undefined => {
     const a = byTarget.get(target);
     if (!a || a.briefConcluded || a.briefIsSlash || isPrivate(a) || a.turnFromChat === false) return undefined;
     const turn = a.briefTurnId ?? a.liveStream?.turnId;
-    return turn ? { turn, channel: a.channel ?? baseOfKey(target), prefix: a.liveStream?.acc || (a.cotLastSent ? `\`${a.cotLastSent}\`` : "") } : undefined;
+    return turn ? { turn, channel: a.channel ?? baseOfKey(target), prefix: "" } : undefined;
   };
-  const takeAnswer = (id: string, target: string, expectedTurn: string): { taken: boolean; prefix?: string } => {
-    const a = byTarget.get(target);
-    if (!a || (a.briefTurnId ?? a.liveStream?.turnId) !== expectedTurn) return { taken: false };
-    let prefix: string | undefined;
-    clearCot(a);
-    if (a.briefBubble && !a.briefBubble.done) {
-      clearTimeout(a.briefBubble.hardTimer);
-      answerBubbles.set(id, { bubble: a.briefBubble, prefix: "" });
-      a.briefBubble = undefined;
-    } else if (a.liveStream && !a.liveStream.closed && !a.liveStream.dead) {
-      const s = a.liveStream;
-      prefix = s.acc;
-      clearTimeout(s.flushTimer); clearTimeout(s.idleTimer); clearTimeout(s.hardTimer);
-      s.closed = true;
-      answerBubbles.set(id, { bubble: { frame: s.frame, streamId: s.streamId, done: false }, prefix: s.acc });
-      a.liveStream = undefined;
-    }
-    // All late source output stays private until a genuine new injection changes channel.
-    a.channel = "";
-    return { taken: true, ...(prefix ? { prefix } : {}) };
+  const prepareAnswer = (id: string, source: string, expectedTurn: string, receiver: string, channel: string): boolean => {
+    const a = byTarget.get(source);
+    if (!a || (a.briefTurnId ?? a.liveStream?.turnId) !== expectedTurn || answerBubbles.has(id)) return false;
+    if ((!a.briefBubble || a.briefBubble.done) && (!a.liveStream || a.liveStream.closed || a.liveStream.dead)) return false;
+    answerBubbles.set(id, {
+      source, receiver, sourceTurn: expectedTurn, channel, active: false, stopped: false,
+      bubble: a.briefBubble, stream: a.liveStream, pending: Promise.resolve(),
+    });
+    return true;
   };
-  const deliverAnswer = async (id: string, target: string, turn: string, channel: string, prefix: string, body: string, standalone: boolean): Promise<void> => {
+  const cancelAnswerPreparation = (id: string): void => {
     const held = answerBubbles.get(id);
-    // A live stream can advance while the router waits for target availability.
-    // `takeAnswer` snapshots that latest accumulator; its snapshot supersedes the
-    // earlier answerContext prefix so newly visible source text is not discarded.
-    const latestPrefix = held?.prefix || prefix;
-    const text = [latestPrefix.trim(), body.trim()].filter(Boolean).join("\n\n");
+    if (held && !held.active) answerBubbles.delete(id);
+  };
+  const stopAnswerProgress = (id: string): void => {
+    const held = answerBubbles.get(id);
+    if (!held) return;
+    held.stopped = true;
+    clearTimeout(held.timer);
+    held.timer = undefined;
+  };
+  const takeAnswer = async (id: string, target: string, expectedTurn: string, receiver: string, channel: string): Promise<{ taken: boolean; cleared: boolean }> => {
+    const a = byTarget.get(target);
+    const held = answerBubbles.get(id);
+    if (!held || held.active || held.source !== target || held.sourceTurn !== expectedTurn || held.receiver !== receiver || held.channel !== channel) return { taken: false, cleared: false };
+    const sameTurn = a && (a.briefTurnId ?? a.liveStream?.turnId) === expectedTurn;
+    if (sameTurn) {
+      clearCot(a);
+      a.cotLastSent = undefined;
+      if (a.standaloneBuf) { clearTimeout(a.standaloneBuf.timer); a.standaloneBuf = undefined; }
+      // Only this source turn becomes private; a concurrent new human turn is untouched.
+      a.channel = "";
+    }
+    const s = held.stream;
+    if (s && !s.closed && !s.dead) {
+      s.closed = true;
+      clearTimeout(s.flushTimer); clearTimeout(s.idleTimer); clearTimeout(s.hardTimer);
+      // Read the current chain, not prepare's snapshot: source may have flushed during injection.
+      held.bubble = { frame: s.frame, streamId: s.streamId, done: false, pending: s.pending };
+      if (a?.liveStream === s) a.liveStream = undefined;
+    } else if (s) held.bubble = undefined;
+    const b = held.bubble;
+    held.active = true;
+    if (!b || b.done) return { taken: true, cleared: false };
+    clearTimeout(b.hardTimer);
+    if (a?.briefBubble === b) a.briefBubble = undefined;
+    let cleared = false;
+    held.pending = (b.pending ?? Promise.resolve()).catch(() => undefined).then(async () => {
+      if (b.done) return;
+      await client.replyStream(b.frame, b.streamId, answerLine(held, "…"), false);
+      cleared = true;
+    });
+    try { await held.pending; }
+    catch (e) { cleared = false; log.warn({ id, err: errText(e) }, "answer transfer reset not acknowledged"); }
+    // Keep delivery possible after a reset error; reset never carries the final answer.
+    held.pending = held.pending.catch(() => undefined);
+    if (!held.stopped && held.progress) writeAnswerProgress(held, `\`${held.progress}\``);
+    return { taken: true, cleared };
+  };
+  const deliverAnswer = async (id: string, target: string, turn: string, channel: string, _prefix: string, body: string, standalone: boolean): Promise<void> => {
+    const held = answerBubbles.get(id);
+    const text = body.trim();
     const content = withLinkedTagHeader(target, text, chatTurnUrl(target, turn), undefined, undefined, channel);
-    if (held && !held.bubble.done) {
+    stopAnswerProgress(id);
+    if (held?.bubble && !held.bubble.done) {
       held.bubble.done = true;
+      clearTimeout(held.timer);
+      await held.pending;
       try {
         // Failure closes progress first; the terminal explanation is a standalone message.
-        const progress = withLinkedTagHeader(target, latestPrefix || "回答已转交", chatTurnUrl(target, turn), undefined, undefined, channel);
+        const progress = withLinkedTagHeader(target, "回答已转交", chatTurnUrl(target, turn), undefined, undefined, channel);
         await client.replyStream(held.bubble.frame, held.bubble.streamId, standalone ? progress : content, true);
         if (!standalone) { answerBubbles.delete(id); return; }
       } catch (e) {
@@ -3364,7 +3457,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     await client.sendMessage(channel.replace(/^(user|chat|group):/, ""), { msgtype: "markdown", markdown: { content } });
     answerBubbles.delete(id);
   };
-
   // 收口一条 loading 气泡: finish=true 写入最终内容, 只生效一次。发送失败退回 standalone。
   // raw=true skips withTagHeader (used when content already contains the linked tag header).
   // WeCom 客户端收到 finish=true 后仍有打字机动画要播放, 如果紧接着就下发
@@ -3556,6 +3648,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const activateDispatch = (a: AttachState, s: Seal, at = s.at): void => {
     const q = s.turn!;
     s.activated = true;
+    a.activePeerTurn = undefined;
     a.queryEpoch = (a.queryEpoch ?? 0) + 1; // WeCom 侧的新一轮同样是 query 边界
     a.turnFromChat = true;                  // 出处确凿: 这一轮有 frame, 群里就是它的主场
     a.pendingFromCli = false;               // 人改从聊天里说话了, 之前那条 CLI 输入不再是出处
@@ -3593,12 +3686,17 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (a.briefTurnId && !a.briefConcluded && !s.fresh) { injectInto(a.briefTurnId, a, s, Date.now()); return s; }
     if (a.briefTurnId) closeBriefTurn(a);
     const now = Date.now();
+    a.activePeerTurn = s.from?.kind === "peer" ? s.from.turn : undefined;
     a.pendingFrom = s.from ? { from: s.from, at: now } : undefined;
     a.pendingOrigin = s.origin ? { origin: s.origin, at: now } : undefined;
     // 没写频道的注入 (graph 步骤 / 手动 inject) 等同在 home 里开口: 印章就是全部出处, 不沿用上一轮的。
-    a.pendingChannel = { channel: s.channel ?? baseOfKey(a.target), at: now };
+    a.pendingChannel = { channel: s.channel ?? baseOfKey(a.target), speaker: s.speaker, at: now };
     a.pendingBriefQuery = s.query;
     a.pendingBriefAt = ts;
+    if (!cfg.wrc.mirror.brief) {
+      consumeChannel(a, false, consumeFrom(a));
+      if (a.liveStream && !a.liveStream.closed) a.liveStream.dest = s.channel ?? baseOfKey(a.target);
+    }
     return s;
   };
 
@@ -3635,7 +3733,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 也不必猜后端: codebuddy 那种几十秒后才落盘的轮, 入口从第一秒就在。
     // 尾随 `…` 表示"正文还没到", 正文到位时整条内容被 `链接 正文` 覆盖。
     try {
-      await client.replyStream(frame, streamId, briefLine(a, turnId, "…", channel), false);
+      await (bubble.pending = client.replyStream(frame, streamId, briefLine(a, turnId, "…", channel), false));
     } catch (e) {
       log.warn({ sessionId: a.sessionId, turnId, err: (e as Error).message }, "brief: turn ack failed");
     }
@@ -3657,6 +3755,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.channel = r.channel === undefined || r.channel === baseOfKey(a.target) ? undefined : r.channel;
     a.speaker = r.speaker;
     a.convFrom = r.from;
+    a.activePeerTurn = r.from?.kind === "peer" ? r.from.turn : undefined;
     a.replyTo = publicPeer(r.from);
     a.turnFromChat = a.turnFromChat ?? true;
     a.briefTurnId = r.id;
@@ -3836,7 +3935,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const meta = item.kind === "task" ? item.meta : {};
       const resolved = resolveSubagentMeta(a, task ?? "", meta);
       const turnId = newTurnId();
-      run = { turnId, label: resolved?.label ?? "subagent", closed: false };
+      // A child may first appear after its parent moved on. Only an exact,
+      // unambiguous dispatch prompt proves which transferred task owns it.
+      const calls = task ? (a.agentCalls ?? []).filter((c) => c.prompt === task) : [];
+      const answerTurn = calls.length && calls.every((c) => c.answerTurn === a.activePeerTurn) ? a.activePeerTurn : undefined;
+      run = { turnId, label: resolved?.label ?? "subagent", closed: false, answerTurn };
       a.subagents.set(agentId, run);
       recordTurnStart({
         id: turnId,
@@ -3881,7 +3984,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       : item.kind === "thinking" || item.kind === "text"
         ? item.body
         : "";
-    if (activity) updateBriefProgress(a, `🤖 ${run.label} · ${activity}`);
+    if (activity) {
+      const progress = `🤖 ${run.label} · ${activity}`;
+      updateBriefProgress(a, progress);
+      if (run.answerTurn && run.answerTurn === a.activePeerTurn) updateAnswerProgress(a, { kind: "thinking", body: progress });
+    }
   };
 
   // (重新) 挂上 subagent watch — attach 与 migrateAttachment 共用; 会话轮换后
@@ -4221,7 +4328,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // 不决定详情页记不记 —— 聊天不再下发 CLI 轮之后, 详情页是唯一的落点。
       a.pendingBriefQuery = item.body;
       a.pendingBriefAt = item.ts;
+      a.activePeerTurn = undefined;
+      a.pendingFrom = undefined;
+      a.pendingChannel = undefined;
       a.pendingFromCli = true;
+      if (!cfg.wrc.mirror.brief) consumeChannel(a, true, undefined);
     }
     if (item.kind === "user_inject") { interject(a, item.said, item.ts); return; }
     // 还有一轮等着懒建 (peer / graph 注入先记了 pendingBriefQuery) 就换掉它; 否则这句话
@@ -4283,6 +4394,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // BRIEF_TURN_OPENERS) 它会一路穿到底部的 standalone fallback —— includeUser=true
     // 的配置下, 人在 CLI 敲的那一行就这么原样回显进了群, 正好破了 chatOriginOnly。
     if (item.kind === "user_text" && (item.quiet || cfg.wrc.mirror.brief)) return;
+    updateAnswerProgress(a, item);
     // thinking 唯一的出口是 brief 气泡的 CoT 进度行。必须在这里就吃掉 —— 漏到下面任何
     // 一条通道 (deferred buf → renderBuf / standalone / stream append) 都会把它写进正文,
     // 那就变回已下线的 thinkStyle 了。
@@ -4325,6 +4437,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           const inp = c.input as { subagent_type?: unknown; description?: unknown; prompt?: unknown } | undefined;
           a.agentCalls = [...(a.agentCalls ?? []).slice(-8), {
             prompt: typeof inp?.prompt === "string" ? inp.prompt : "",
+            answerTurn: a.activePeerTurn,
             type: typeof inp?.subagent_type === "string" && inp.subagent_type ? inp.subagent_type : undefined,
             description: typeof inp?.description === "string" && inp.description ? inp.description : undefined,
             at: Date.now(),
@@ -4422,6 +4535,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         }
       }
     }
+    if (!cfg.wrc.mirror.brief && isPrivate(a)) return;
     // /goal mode overrides everything below: the session-scoped Stop hook
     // self-drives the model with no terminal stop_reason, so turn_end never fires
     // and brief-mode would swallow the entire run into the turn store (silent
@@ -6987,7 +7101,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (a?.convFrom) return a.convFrom.asker;
       return a?.speaker ? { who: a.speaker, chat: a.channel ?? baseOfKey(target) } : undefined;
     },
-    answerContext, takeAnswer, deliverAnswer,
+    answerContext, prepareAnswer, takeAnswer, cancelAnswerPreparation, stopAnswerProgress, deliverAnswer,
     setAnswerSilencer: (fn) => { silenceAnswer = fn; },
     currentChannel: (target) => {
       const a = byTarget.get(target);
@@ -7112,7 +7226,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (s) {
         a.liveStream = s;
         try {
-          await client.replyStream(frame, streamId, withTagHeader(a.target, "…"), false);
+          await (s.pending = client.replyStream(frame, streamId, withTagHeader(a.target, "…"), false));
         } catch (e) {
           log.warn({ sessionId: a.sessionId, err: (e as Error).message }, "stream initial ack failed");
         }
@@ -7202,6 +7316,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           log.warn({ target: a.target, sessionId: sid, myGen, gen: a.injectGen }, "inject aborted — superseded by /stop or watchdog");
           return;
         }
+        if (!brief) pushSeal(a, { keys: sealKeys(effText), at: Date.now(), query: effText, channel: channel ?? baseOfKey(principal), speaker, fresh: true });
         rememberInject(effText);
         // 解除静默必须在 inject 之前: inject 内部的 freshSpawn 验证循环可达 10+s
         // (paste-verify + settle + waitForCleared + retry), 而 LLM 的回复可能在 Enter

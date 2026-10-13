@@ -778,6 +778,7 @@ const main = async (): Promise<void> => {
       const pending = answerSends.get(id);
       if (pending) return pending;
       const p = (async () => {
+        m.stopAnswerProgress(id);
         const r = answers.outcome(id, out);
         if (!r) return true;
         if (!answers.delivering(id)) return false;
@@ -811,7 +812,7 @@ const main = async (): Promise<void> => {
       onOutcome: (s, status, bodyText, bySender) => {
         // Pin transferred-answer terminal state synchronously with the receipt
         // outcome; delivery may still be waiting for the target to become idle.
-        if (s.answerTransfer) answers.outcome(s.answerTransfer, { status, body: bodyText });
+        if (s.answerTransfer) { answers.outcome(s.answerTransfer, { status, body: bodyText }); m.stopAnswerProgress(s.answerTransfer); }
         workflow.outcome(s.from, s.turn ?? "", status, bodyText);
         advancePlans();
         ledger.outcome(s.from, s.turn ?? "", status, parseClosing(bodyText).text || bodyText, bySender);
@@ -1611,6 +1612,10 @@ const main = async (): Promise<void> => {
       if (answerContext && k?.kind === "chat") {
         try { answers.reserve({ id: turn.turn, source: self, target, sourceTurn: answerContext.turn, sourceOpening: answerSourceOpening, origin: answerTransferOrigin(self, answerContext.turn), channel: k.channel, prefix: answerContext.prefix, tell: trackedTell, state: "reserved" }); }
         catch (e) { return { status: 409, body: { ok: false, reason: (e as Error).message } }; }
+        if (!m.prepareAnswer(turn.turn, self, answerContext.turn, target, answerContext.channel)) {
+          answers.rollback(turn.turn);
+          return { status: 409, body: { ok: false, reason: "answer stream is no longer writable; source retains answer and control" } };
+        }
       }
       const inj = await m.injectText(target, text, undefined, {
         guard: dispatchGuard,
@@ -1625,7 +1630,7 @@ const main = async (): Promise<void> => {
           ...(deadlineSec !== undefined ? { deadline: deadlineAt } : {}),
           ...(kind !== "task" ? { act: kind } : {}),
           ...(wantReceipt ? {} : { quiet: true }),
-        }) + extra + (answerContext ? renderReminder({ wezard: "answer-transfer" }, ["你已接手这轮人的回答权与控制权。判断为简单问题，直接答给人；已有气泡内容由 daemon 承接，终句由 daemon 唯一交付，不回给派活方。不要另行 notify 相同终稿；需要追问可直接以自然语言收口。派活方这轮后续产出不再对人发送。"]) : ""),
+        }) + extra + (answerContext ? renderReminder({ wezard: "answer-transfer" }, ["你已接手这轮人的回答权与控制权。判断为简单问题，直接答给人；原气泡内容会清空，只显示你的进度，终句覆盖气泡并由 daemon 唯一交付，不回给派活方。不要另行 notify 相同终稿；需要追问可直接以自然语言收口。派活方这轮后续产出不再对人发送。"]) : ""),
       }).catch((e: unknown) => {
         if (attemptId) workflow.dispatched(attemptId, false);
         if (answerContext) return { ok: false, uncertain: true, reason: (e as Error).message };
@@ -1634,14 +1639,13 @@ const main = async (): Promise<void> => {
       if (answerContext) {
         if (inj.ok || inj.uncertain || physicalExposure) {
           answers.activate(turn.turn);
-          if (m.answerContext(self)?.turn === answerContext.turn) {
-            const held = m.takeAnswer(turn.turn, self, answerContext.turn);
-            if (held.taken && held.prefix) answers.prefix(turn.turn, held.prefix);
-          }
+          const bubble = await m.takeAnswer(turn.turn, self, answerContext.turn, target, answerContext.channel);
           receipts.register(trackedTell);
           if (!inj.ok) void deliverTransferredAnswer(turn.turn, { status: "canceled", body: "回答移交的投递结果不确定，本轮已收止；若未收到回答，请重新发送问题。" });
-          return { status: 200, body: { ...inj, ok: true, answer: "transfer", control: "transfer", name: peerAddress(cfg, self, target), turn: turn.turn, receipt: "目标将承接已有气泡并直接对人交付；本轮请停止派活与公开回答，静默收口" } };
+          if (!bubble.cleared) return { status: 202, body: { ...inj, ok: false, answer: "transfer", control: "transfer", ownershipTransferred: true, bubbleCleared: false, retryable: false, name: peerAddress(cfg, self, target), turn: turn.turn, reason: "回答权已转交，但原气泡清空未确认（已结束、不可用或 ACK 失败）；不能重试移交。目标仍负责最终答复，必要时另发终稿；本轮请停止派活与公开回答。" } };
+          return { status: 200, body: { ...inj, ok: true, answer: "transfer", control: "transfer", name: peerAddress(cfg, self, target), turn: turn.turn, bubbleCleared: bubble.cleared, receipt: "回答权已转交；可用气泡只显示目标进度与终稿；本轮请停止派活与公开回答，静默收口" } };
         }
+        m.cancelAnswerPreparation(turn.turn);
         answers.rollback(turn.turn);
       }
       if (attemptId) workflow.dispatched(attemptId, inj.ok && !inj.uncertain);
