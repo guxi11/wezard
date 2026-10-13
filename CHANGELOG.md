@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [2.6.3] - 2026-10-13
+
+### Added
+- workflow 节点尝试与验收状态独立记账；受限计划在验收通过后推进依赖节点，并约束执行者占用与异步撤销。
+
+### Fixed
+- 回答权移交绑定原始轮次，隔离并发、撤销与终态竞争；清空旧气泡后仅接入接手者的有效进度及终句，回执先持久化再异步投递。
+- topOnly 回复统一使用详情链接尾注，保留正文链接、引用路由和实际目标群的默认身份；slash 回复移除多余 tips。
+- 管家创建采用配置的 router 档位；Codex 输入识别兼容底部警告，图片附件核验完成后才提交提示。
+- 同一 tmux pane 的完整输入事务串行，锁内复核空闲状态，区分未发送与不确定投递，避免并发输入串轮或重复提交。
+- keepalive 与确认框巡检按 pane 调度，定时任务按目标排队并去重；慢任务不阻塞其他目标，取消和权限撤销在实际输入前复核，保留日程主人身份。
+
 ### Changed
 - `approval.allowRules` 默认值从 `[]` 改为 `["ToolSearch"]` (`shared/config.ts` 与 `config.example.jsonc`): ToolSearch 只是 deferred 工具的 schema 查询, 无执行能力 (真正的执行走 DeferExecuteTool, hook 侧已下钻成内层工具再判定), 每次查 schema 都发卡是纯噪声。config 里显式写过 `allowRules` 的整份覆盖不合并 —— 要保留该豁免需在自己的规则里补上 `"ToolSearch"`。
 
@@ -1060,7 +1072,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.6.2...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.6.3...HEAD
+[2.6.3]: https://github.com/guxi11/wezard/compare/v2.6.2...v2.6.3
 [2.6.2]: https://github.com/guxi11/wezard/compare/v2.6.1...v2.6.2
 [2.6.1]: https://github.com/guxi11/wezard/compare/v2.6.0...v2.6.1
 [2.6.0]: https://github.com/guxi11/wezard/compare/v2.5.1...v2.6.0
