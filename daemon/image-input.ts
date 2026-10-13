@@ -15,7 +15,7 @@ export const withImageClipboard = <T>(run: () => Promise<T>): Promise<T> => {
 const imageCount = (box: Composer): number =>
   [...box.body.matchAll(/\[Image #\d+\]/gu)].length;
 
-/** Confirm a ready composer and one new attachment; never blindly repeat C-v. */
+/** Confirm one new attachment, retrying three times without blindly repeating C-v. */
 export const pasteVerifiedImage = async (o: {
   read: () => Promise<Composer>;
   paste: () => Promise<Result>;
@@ -35,8 +35,23 @@ export const pasteVerifiedImage = async (o: {
   if (!before || !o.valid()) return { ok: false, reason: "图片未提交：未确认 CLI 输入框就绪或注入已撤回，请重发。" };
   const pasted = await o.paste();
   if (!pasted.ok) return pasted;
-  const after = await wait((box) => imageCount(box) === imageCount(before) + 1);
-  return after && o.valid()
-    ? { ok: true }
-    : { ok: false, reason: "图片附件未确认，已停止提交文字。请检查 CLI 输入框后重发，避免遗漏或重复附件。" };
+  const attached = (box: Composer): boolean => box.known && imageCount(box) === imageCount(before) + 1;
+  const verify = async (retries: number): Promise<Result> => {
+    const after = await wait(attached);
+    if (after && o.valid()) return { ok: true };
+    if (!o.valid()) return { ok: false, reason: "图片未提交：注入已撤回，请检查 CLI 输入框。" };
+    if (!retries) return { ok: false, reason: "图片附件经 3 次重试仍未确认，已停止提交文字。请检查 CLI 输入框后重发，避免遗漏或重复附件。" };
+
+    // A late render may have landed after the poll timed out. Recheck before
+    // C-v; an unknown or changed composer only permits another confirmation.
+    const current = await o.read();
+    if (!o.valid()) return { ok: false, reason: "图片未提交：注入已撤回，请检查 CLI 输入框。" };
+    if (attached(current)) return { ok: true };
+    if (current.known && current.body === before.body) {
+      const retry = await o.paste();
+      if (!retry.ok) return retry;
+    }
+    return verify(retries - 1);
+  };
+  return verify(3);
 };
