@@ -2566,9 +2566,9 @@ const main = async (): Promise<void> => {
       const b = body as { task?: string; name?: string; description?: string; tier?: string; to?: string; force?: boolean; lead?: boolean; spawn?: boolean; public?: boolean; deadline?: number; dryRun?: boolean; criteria?: string; answer?: string };
       const task = (b.task ?? "").toString().trim();
       if (!task) { json(res, 400, { ok: false, reason: "task is required" }); return; }
-      const dispatchOrigin: ActorOrigin | undefined = b.answer === "transfer" ? {
+      const dispatchOrigin: ActorOrigin = {
         authority: controlSnapshot(self), answerContext: m.answerContext(self), asker: askerOf(self), k: parentKOf(self),
-      } : undefined;
+      };
       const lead = b.lead === true;
       if (b.answer !== undefined && b.answer !== "transfer") { json(res, 400, { ok: false, reason: "answer must be transfer when supplied" }); return; }
       if (b.answer === "transfer" && lead) { json(res, 409, { ok: false, reason: "answer transfer is for simple direct answers; lead dispatch cannot transfer" }); return; }
@@ -2581,7 +2581,7 @@ const main = async (): Promise<void> => {
       // 占用保护由 decide 统一判断, 留在候选表里说明为什么不能自动复用。
       // 显式 to 保留人为选定; force 只影响成本门, 不绕 lead/工单/连续性保护。
       const pool = to || b.spawn || lead ? [] : (await routeRowsOf(self)).filter((r) => r.alive && !!tagOfKey(r.target));
-      if (dispatchOrigin && !controlValid(self, dispatchOrigin.authority)) { json(res, 409, { ok: false, reason: "dispatch source turn changed while routing; original answer remains with source" }); return; }
+      if (!controlValid(self, dispatchOrigin.authority)) { json(res, 409, { ok: false, reason: "dispatch source turn/control changed while routing; original task remains with source" }); return; }
       const tierArg = (b.tier ?? "").toString().trim();
       if (tierArg && !TIERS.includes(tierArg as TierName)) { json(res, 400, { ok: false, reason: `unknown tier: ${tierArg}` }); return; }
       const taskTier = (tierArg || tierFor(task, lead)) as TierName;
@@ -2645,7 +2645,7 @@ const main = async (): Promise<void> => {
       const tier = taskTier;
       const born = await bearAs(self, { inherit: false, name, description, tier, ...(lead ? { lead: true } : {}) } as PeerBody, undefined, dispatchOrigin?.authority);
       if (born.status !== 200) { settleRoot(false); json(res, born.status, { ...born.body, decision: "spawn", reason: d.why }); return; }
-      if (dispatchOrigin && !controlValid(self, dispatchOrigin.authority)) { settleRoot(false); json(res, 409, { ok: false, decision: "spawn", reason: "dispatch source turn changed during spawn; answer remains with original source turn" }); return; }
+      if (!controlValid(self, dispatchOrigin.authority)) { settleRoot(false); json(res, 409, { ok: false, decision: "spawn", reason: "dispatch source turn changed during spawn; task remains with original source turn" }); return; }
       // 宪章里只有层级规矩, 打法随信封带 (宪章每轮都在上下文里, 打法只这一件活用得上)。
       const t = await tell(String(born.body.name), task, lead ? renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : "");
       settleRoot(t.status === 200);

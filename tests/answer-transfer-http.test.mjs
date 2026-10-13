@@ -158,16 +158,16 @@ for (const override of [{topOnly:false},{answerContext:undefined},{origin:{k:{ki
  const r=await x.post('/notify',{markdown:'progress for A'},'worker');
  assert.equal(r.status,200);assert.deepEqual(sent,['chat:A'],'implicit notify follows the transferred answer source chat, not the target home chat');x.close();
 }
-{
+for (const answer of [undefined, 'transfer']) {
  const settings={...opts(),answerContext:()=>settings.current,origin:opts().origin};settings.current={turn:'human-A',channel:'chat:A',prefix:'A'};
  const x=await setup(settings);let enter,release;const started=new Promise(r=>enter=r),barrier=new Promise(r=>release=r);
  const src=readFileSync('daemon/index.ts','utf8'),start=src.indexOf('    http.register("POST /dispatch"'),end=src.indexOf('    // 记忆三种作用域',start);
  const code=ts.transpileModule(src.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText;
  const env={...x.env,http:{register:(path,fn)=>x.routes.set(path,fn)},routeRowsOf:async()=>{enter();await barrier;return [];},cfg:{wrc:{mirror:{keepalive:{ttlSec:3600}}}},tagOfKey:()=>true,controlSnapshot:self=>({opening:settings.openingMs,turn:x.m.answerContext(self)?.turn}),controlValid:(self,s)=>settings.openingMs===s.opening&&x.m.answerContext(self)?.turn===s.turn&&!x.env.lostAnswer(self)&&!x.env.terminalAnswerTurn(self),hasAnswerChildren:()=>false,peerDispatching:new Map(),parentKOf:()=>settings.origin.k,askerOf:()=>settings.origin.asker,rankCandidates:()=>[],decide:()=>({kind:'existing',why:'test'}),m:{...x.m,getCwd:()=>({runningCwd:''})}};
  new Function(...Object.keys(env),code)(...Object.values(env));
- const pending=x.post('/dispatch',{task:'TASK-FROM-A',answer:'transfer'});await started;
+ const pending=x.post('/dispatch',{task:answer?'TASK-FROM-A-TRANSFER':'ORDINARY-TASK-FROM-A',...(answer?{answer}:{})});await started;
  settings.current={turn:'human-B',channel:'chat:B',prefix:'B'};settings.openingMs=456;settings.origin={asker:{who:'user:B',chat:'chat:B'},k:{kind:'chat',channel:'chat:B',turn:'456'}};
- release();assert.equal((await pending).status,409,'dispatch route snapshot refuses A task after origin changes to B');
+ release();assert.equal((await pending).status,409,`dispatch ${answer??'without answer transfer'} keeps A's actor snapshot after routing crosses to B`);
  assert.equal(x.answers.all().length,0);assert.equal(x.injected.length,0);x.close();
 }
 {
