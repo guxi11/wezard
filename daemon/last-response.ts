@@ -15,8 +15,8 @@
 // reloads); in dev just avoid reloading mid-conversation when testing.
 import type { WSClient, WsFrame, BaseMessage, WsFrameHeaders } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
-import { rawTagHeader, withBot } from "../shared/session-label.js";
-import { botTagOf } from "./bot-mux.js";
+import { rawTagHeader, withBot, botOfKey } from "../shared/session-label.js";
+import { botTagOf, pinFrameBot } from "./bot-mux.js";
 import { connFor } from "./reach.js";
 import { withMessageFooter, withoutMessageFooter, type MessageFooterPolicy } from "../shared/message-footer.js";
 
@@ -88,7 +88,7 @@ const hasVisibleBody = (content: string): boolean => {
 // in the tracker. Mutates the client in place; call once at daemon startup.
 // `ownTransport(chatid)`: 这个 chat 的出站不走企微长连接 (微信) —— 不必等 WS 连上。
 // 通道分流层装在这里面 (内层), 所以 gate / record 照样覆盖它。
-export const installResponseTracker = (client: WSClient, log?: Logger, ownTransport: (chatid: string) => boolean = () => false, policy?: ResponseFormatPolicy): void => {
+export const installResponseTracker = (client: WSClient, log?: Logger, ownTransport: (chatid: string) => boolean = () => false, policy?: ResponseFormatPolicy) => {
   const origReplyStream = client.replyStream.bind(client);
   const origReplyStreamWithCard = client.replyStreamWithCard.bind(client);
   const origSendMessage = client.sendMessage.bind(client);
@@ -147,5 +147,21 @@ export const installResponseTracker = (client: WSClient, log?: Logger, ownTransp
       return r;
     }
     return origSendMessage(chatid, body);
+  };
+  return {
+    freeze: (chatid: string, content: string): string => withMessageFooter(content, policy?.({ chatid })),
+    sendFrozen: async (chatid: string, content: string, stream?: { frame: WsFrameHeaders; id: string }, guard?: () => boolean): Promise<WsFrame> => {
+      if (!gate("durable-final", content)) throw { headers: {}, errcode: -1, errmsg: "empty final rejected before send" };
+      if (!ownTransport(chatid)) {
+        await untilConnected(chatid);
+        if (!connFor(client, chatid).isConnected) throw { headers: {}, errcode: -1, errmsg: "disconnected before final send" };
+      }
+      if (guard && !guard()) throw { headers: {}, errcode: -1, errmsg: "final send stopped before transport" };
+      if (stream) pinFrameBot(stream.frame, botOfKey(chatid));
+      const ack = stream ? await origReplyStream(stream.frame, stream.id, content, true)
+        : await origSendMessage(chatid, { msgtype: "markdown", markdown: { content } });
+      record(chatid, content);
+      return ack;
+    },
   };
 };

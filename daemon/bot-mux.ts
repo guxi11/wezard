@@ -71,6 +71,10 @@ const REQ_CAP = 20_000;
 const tags = new WeakMap<object, string>();
 /** 这一帧 / 这条消息是哪个副机器人收到的: "" = 主机器人 (或单机器人、或认不出)。 */
 export const botTagOf = (o: unknown): string => (o && typeof o === "object" ? tags.get(o) ?? "" : "");
+/** Restore the frozen transport identity of a durable frame after JSON/restart. */
+export const pinFrameBot = (frame: object, bot: string): void => {
+  tags.set(frame, bot || PRIMARY_BOT);
+};
 
 /** `connect` 只为能拿假连接验证分流而可换; daemon 里永远是 startWs。 */
 export const startMux = (cfg: Config, log: Logger, connect: typeof startWs = startWs): BotMux => {

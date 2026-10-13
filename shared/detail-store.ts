@@ -168,6 +168,7 @@ export interface TurnAgentMeta {
 }
 
 export interface TurnDetailRecord {
+  eventId?: string;
   kind: "turn";
   id: string;
   createdAt: number;

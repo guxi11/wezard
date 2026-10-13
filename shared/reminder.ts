@@ -50,6 +50,7 @@ export const stripReminders = (text: string): string => text.replace(REMINDER_RE
 
 // ── 信封 ──────────────────────────────────────────────────────────────
 export interface Envelope {
+  eventId?: string;
   kind: "peer" | "human" | "task";
   /** 发话方的称呼: wizard 是 `.name`, 人是 userid, 定时任务是 `定时 <id>`。 */
   from: string;
@@ -166,5 +167,9 @@ const envelopeOf = (r: Reminder): Envelope | undefined => envelopeOfAttrs(r.attr
 
 /** Daemon appends the authoritative envelope after the message. Quoted older
  *  envelopes in the body must not override the actual inbound sender. */
-export const parseEnvelope = (raw: string): Envelope | undefined =>
-  parseReminders(raw).reduce<Envelope | undefined>((hit, r) => envelopeOf(r) ?? hit, undefined);
+export const parseEnvelope = (raw: string): Envelope | undefined => {
+  const reminders = parseReminders(raw);
+  const env = reminders.reduce<Envelope | undefined>((hit, r) => envelopeOf(r) ?? hit, undefined);
+  const eventId = reminders.filter((r) => ["message-event", "receipt-delivery"].includes(r.attrs.wezard ?? "")).at(-1)?.attrs.event;
+  return env && { ...env, ...(eventId ? { eventId } : {}) };
+};

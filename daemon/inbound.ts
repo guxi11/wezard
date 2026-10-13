@@ -5,6 +5,7 @@ import { attachmentLine, inboxName, saveToInbox } from "./media.js";
 import type { Logger } from "pino";
 import { PRIMARY_BOT, type Config } from "../shared/config.js";
 import type { MirrorBridge } from "./mirror-bridge.js";
+import { messageId } from "./message-events.js";
 import { tailTurnsWithTools, peerMentionPart, renderHumanEnvelope, renderStewardHint, type PeerInfo, type PeerMention } from "./peers.js";
 import { keepalivePingSigs } from "../shared/keepalive.js";
 import { noticeSuffixFor } from "./notices.js";
@@ -973,7 +974,7 @@ export const installInboundRouter = (
     // sender is already in allowFrom, we treat that authorization as license
     // to auto-spawn: this inbound becomes both the binding signal and the
     // first prompt — attach, then fall through to dispatch.
-    if (!bridge.hasMirrorTarget(who)) {
+    if (text.trimStart().startsWith("/") && !bridge.hasMirrorTarget(who)) {
       const { err } = await ensureSession(who, asked);
       if (err) {
         await replyText(frame, msg, who, err);
@@ -1060,7 +1061,7 @@ export const installInboundRouter = (
     const notice = noticeSuffixFor(who, text, { human: { channel } }, hint);
     try {
       // 回复回到发话的这个群 —— `who` 可能住在别的聊天 (名字全局可达)。
-      await bridge.dispatch({ principal: who, text: text + envelope + steward + notice, images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}` });
+      await bridge.dispatch({ eventId: slash ? undefined : messageId(botTagOf(msg), channel, msg.msgid), identity: JSON.stringify(msg), originalAt: msg.create_time ? (msg.create_time < 1e12 ? msg.create_time * 1000 : msg.create_time) : Date.now(), principal: who, text: text + envelope + steward + notice, images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}` });
     } catch (e) {
       log.error({ err: (e as Error).message }, "bridge dispatch failed");
       try { await client.replyStream(frame, msg.msgid, withTagHeader(who, `[wezard] error: ${(e as Error).message}`), true); } catch { /* ignore */ }

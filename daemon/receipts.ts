@@ -172,7 +172,8 @@ export interface ReceiptDeps {
   /** 工单成员这份答复不合工单的验收 → 理由; 合格 / 不在工单 = undefined (见 jobs.rejectReason)。 */
   accept?: (job: string, body: string) => string | undefined;
   /** 以发话方的名义把同一件活打回一次 (同件号续问, 私聊)。返回是否注入成功。 */
-  rebound?: (x: { from: string; to: string; turn: string; legs: number; channel: string; asker?: Asker }, why: string) => Promise<boolean>;
+  durableRebound?: boolean;
+  rebound?: (x: { from: string; to: string; turn: string; legs: number; channel: string; asker?: Asker }, why: string, tell?: Tell) => Promise<boolean>;
   /** 一份回执有了 status (中途的 need / error 也报) —— 挂起事项表据此记账 (见 pending-items.ts)。
    *  `bySender` = 发话方自己收掉 / wait_peer 取走的。 */
   onOutcome?: (s: Slot, status: ReceiptStatus, body: string, bySender: boolean) => void;
@@ -212,6 +213,7 @@ export type Prereq =
   | { state: "pending" | "unknown" };
 
 export interface Tell {
+  queued?: boolean;
   answerTransfer?: string;
   /** Stable tracked dispatch leg; a continuation keeps turn but replaces this key. */
   dispatchKey?: string;
@@ -285,6 +287,8 @@ export interface Receipts {
   watching: (tell: Tell) => boolean;
   /** 登记这一次发话。`watch=false` 只记时刻 (供 wait_peer 定位「这一次」), 不守回执
    *  —— 调用方明说了不要自动回注。 */
+  confirmDelivery: (eventId: string) => void;
+  commit: (tell: Tell) => void;
   register: (tell: Tell, watch?: boolean, interim?: Outcome) => { at: number; turn: string };
   /** 注入之前定件号。`re` 只认同一对 (from → to) 正在守的那件 —— 方向反了、过了保留期、
    *  写错了都当新活 (`reUnknown`), 不拒绝。 */
@@ -316,6 +320,7 @@ export interface Receipts {
   pending: (from: string, to: string) => { job: string; turn: string; need: boolean; deferred?: true } | undefined;
   /** 守护进程代 `from` 同件号再问 `to` 一句 (闲置追问, 见 idle-nudge.ts): 重新登记这件, 工单 / 频道 / 父 k /
    *  链头 / 期限都沿用原件 —— 追问不续期。件已落定 / 查不到 = undefined (不问)。注入由调用方做。 */
+  continuation: (from: string, to: string, turn: string) => Tell | undefined;
   reask: (from: string, to: string, turn: string) => { legs: number; channel: string; asker?: Asker } | undefined;
   /** `target` 被 `by` 收掉或打断: 发往它、还没落定的活都落成 canceled。`by` 自己那份
    *  不投 (它自己知道), 别的发话方各收一份 canceled 回执。必须先于 kill —— pane 一死,
@@ -412,7 +417,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   // 只是 finally 还没跑; 用 token 免得旧的 finally 删掉新登记的那个。
   const watching = new Map<Slot, symbol>();
   const arm = (s: Slot, force = false): void => {
-    if (watching.has(s) && !force) return;
+    if (s.queued || (watching.has(s) && !force)) return;
     const token = Symbol();
     watching.set(s, token);
     void watch(s)
@@ -683,8 +688,10 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     if (why && deps.rebound) {
       const at = Date.now();
       const legs = (s.legs ?? 1) + 1;
-      register({ from: s.from, to: s.to, channel: s.channel, job: s.job, at, turn: s.turn, legs, deadlineAt: deadlineOf(at), ...(s.k ? { k: s.k } : {}), ...(s.asker ? { asker: s.asker } : {}), bounced: out.body });
-      const ok = await deps.rebound({ from: s.from, to: s.to, turn: s.turn!, legs, channel: s.channel, ...(s.asker ? { asker: s.asker } : {}) }, why);
+      const tell = { from: s.from, to: s.to, channel: s.channel, job: s.job, at, turn: s.turn, legs, deadlineAt: deadlineOf(at), ...(s.k ? { k: s.k } : {}), ...(s.asker ? { asker: s.asker } : {}), bounced: out.body };
+      if (!deps.durableRebound) register(tell);
+      const ok = await deps.rebound({ from: s.from, to: s.to, turn: s.turn!, legs, channel: s.channel, ...(s.asker ? { asker: s.asker } : {}) }, why, tell);
+      if (!ok && deps.durableRebound) { enqueueOutcome(s, out); return; }
       lg.info({ why, ok }, "receipt: 不合工单验收, 打回一次");
       // 打回没注入进去: 原来那份照常交上去 (钉成新 slot 的答案, 它的 watcher 直接拿去投)。
       if (!ok) { const n = upstream({ from: s.from, turn: s.turn! }, s.to); if (n?.bounced) { n.answer = out.body; save(n); } }
@@ -746,7 +753,8 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     persist({ ...(park && prev && oldKey ? { [oldKey]: { ...prev, parked: true } } : {}), [keyOf(s)]: s });
     if (park && prev && oldKey) { prev.parked = true; slots.set(oldKey, prev); }
     slots.set(keyOf(s), s);
-    if (watchIt) arm(s);
+    if (tell.queued) { /* accepted obligation; no silent/dead watcher until submission */ }
+    else if (watchIt) arm(s);
     else { s.claimed = true; s.resolved = true; settle(s); } // 不守 = 这一份没人会投
     pump(s.from);
     return { at: s.at, turn: s.turn! };
@@ -865,11 +873,39 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     },
     inbox: (from) => mails(from).sort((a, b) => a.mail.order - b.mail.order).map(({ s, mail }) => structuredClone({ ...mail, from: s.from, to: s.to, turn: s.turn ?? "" })),
     register,
+    confirmDelivery: (eventId) => {
+      for (const s of slots.values()) {
+        const m = s.inbox?.find((m) => m.id === eventId && m.state === "uncertain");
+        if (!m) continue;
+        m.state = "delivered";
+        m.reason = "submission confirmed by durable event/transcript evidence";
+        if ((m.generation ?? s.gen) === s.gen) {
+          s.delivered = true;
+          delete s.undelivered;
+          if (isTerminal(m.outcome.status)) { s.claimed = true; s.settled = true; }
+        }
+        save(s);
+        finishMail(s, m);
+        pump(s.from);
+      }
+    },
+    commit: (tell) => {
+      const s = upstream({ from: tell.from, turn: tell.turn ?? "" }, tell.to);
+      if (!s || s.dispatchKey !== tell.dispatchKey || !s.queued) return;
+      s.queued = false;
+      save(s);
+      arm(s);
+    },
     watching: (tell) => {
       const s = upstream({ from: tell.from, turn: tell.turn ?? "" }, tell.to);
       return !!s && !s.resolved && !s.claimed && (tell.dispatchKey
         ? s.dispatchKey === tell.dispatchKey
         : s.at === tell.at && (s.legs ?? 1) === (tell.legs ?? 1));
+    },
+    continuation: (from, to, turn) => {
+      const s = upstream({ from, turn }, to);
+      return !s || s.resolved || s.claimed ? undefined : { from, to, turn, channel: s.channel, job: s.job,
+        at: Date.now(), legs: (s.legs ?? 1) + 1, deadlineAt: s.deadlineAt, k: s.k, asker: s.asker };
     },
     reask: (from, to, turn) => {
       const s = upstream({ from, turn }, to);
@@ -932,7 +968,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
         .filter((s) => !s.resolved && !s.claimed)
         .map((s) => ({
           from: s.from, to: s.to, turn: s.turn ?? "", job: s.job,
-          state: turnState(s, { parked: !s.outcome && parked(s.to) }),
+          state: s.queued ? "queued" as const : turnState(s, { parked: !s.outcome && parked(s.to) }),
           ageMs: Date.now() - s.at,
           ...(s.k ? { k: s.k } : {}),
         }))
@@ -958,7 +994,10 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
         deps.onOutcome?.(s, "canceled", s.outcome.body, s.from === by);
         // 发起 stop 的那方自己知道, 不投; 守着的 watcher 看到 claimed 就收尾。
         if (s.from === by && !s.answerTransfer) { s.claimed = true; s.resolved = true; settle(s); continue; }
+        const wasQueued = s.queued;
+        s.queued = false;
         save(s);
+        if (wasQueued) arm(s);
         // 挂起等子活的没有 watcher 在守: 叫醒它去投这份 canceled。
         if (s.deferred) wake(s);
       }
@@ -986,7 +1025,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
         return p && { kind: "peer", from: p.from, turn: p.turn! };
       }
       // 私聊轮 (频道 "") 派出的活没有群可续: 不能回落成 home, 否则回执轮就进了群。
-      return channel ? { kind: "chat", channel, turn: opening } : undefined;
+      return channel ? { kind: "chat", channel, turn: env?.eventId ?? opening } : undefined;
     },
     ancestorsOf: (self, k) => {
       // 第一跳 (self 此刻答的那件) 按定义在途; 往上每一跳都要那件活还没落定 / 没被 wait_peer 取走 ——

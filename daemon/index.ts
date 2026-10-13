@@ -12,7 +12,7 @@ import { patchJsonc } from "../shared/config-writer.js";
 import { EFFORTS, parseEffort } from "../shared/effort.js";
 import { bindCliBackends, projectDirsFor, type CliBackendName } from "../shared/cli-backends.js";
 import { bindCodexStateDir } from "../shared/codex.js";
-import { startMux } from "./bot-mux.js";
+import { startMux, pinFrameBot } from "./bot-mux.js";
 import { startWeixin } from "./weixin.js";
 import { installWeixinPort } from "./weixin-port.js";
 import { bindWxCommands, makeOnBound, makeWxCommands, routeSendMedia, wecomBindSink, weixinSendMedia, wxAdmins, wxRoutes } from "./weixin-cmd.js";
@@ -26,6 +26,7 @@ import { applyHot, cfgSeenBy, patchedTop, pinChatKeys, configGet, fromLegacy, le
 import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } from "./usage.js";
 import { installInboundRouter } from "./inbound.js";
 import { loadMirrorStore } from "./mirror-store.js";
+import { createMessageEvents, messageId, finalId, type MessageAdapters } from "./message-events.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { backendFor, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { bindCardChannel, installApprovalEventListener, makeApproveHandler, requestConfirm } from "./approval.js";
@@ -93,7 +94,7 @@ import { createLedger, digest, pendingGc, renderDigest, renderTable, renderAwait
 import { checkDirection } from "./direction.js";
 import { loadJobStore, dutyLine, awaitingAccept, stalledRoots, shelvedRoots, nudgeDue, dayClamp, childrenOf as jobChildren, jobEpisode, rejectReason, ACCEPTS, JOB_MEMBER_MAX, JOB_DEPTH_MAX, depthOf, ancestorsOf as jobAncestors, treeOrder, jobStage, type Accept, type JobMark, type JobRecord, type MemberLive } from "./jobs.js";
 import type { MemberRole } from "../shared/world.js";
-import { cacheTouchMs, cacheTtlSec, clipMiddle, contextFiles, firstStamp, parseClosing, lastContextTokens, lastExchange, lastModel, openingTurn, replyClosedBefore, talkTurns, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
+import { cacheTouchMs, cacheTtlSec, clipMiddle, contextFiles, firstStamp, parseClosing, lastContextTokens, lastExchange, lastModel, openingTurn, replyClosedBefore, talkTurns, turnsSince, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { keepalivePingSigs } from "../shared/keepalive.js";
 import { expandHome } from "../shared/paths.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
@@ -101,7 +102,7 @@ import { answerRecoveryAction, answerSourceLost, answerTargetOccupied, answerTra
 import { createWorkflowNodes, type FileVersion, type NodeAttempt } from "./workflow-nodes.js";
 import { loadWorkflowPlans, createWorkflowPlanRunner, type PlanPermit } from "./workflow-plans.js";
 import { registerWorkflowPlanRoutes } from "./workflow-plan-http.js";
-import { createReceipts, canonicalTurn, deadlineOf, kAttr, kOfAttr, newTurn, type Hold, type HeldSeen, type InFlight, type ParentK, type Outcome, type Slot as ReceiptSlot } from "./receipts.js";
+import { createReceipts, canonicalTurn, deadlineOf, kAttr, kOfAttr, newTurn, type Hold, type HeldSeen, type InFlight, type ParentK, type Tell, type Outcome, type Slot as ReceiptSlot } from "./receipts.js";
 import { renderInFlight } from "../shared/turn-state.js";
 import { startIdleNudge } from "./idle-nudge.js";
 import { askerFromEnvelope, renderReminder, type TurnTag } from "../shared/reminder.js";
@@ -217,7 +218,7 @@ const main = async (): Promise<void> => {
   // last-response tracker enables inbound's `quote` dedup of bot self-replies,
   // and its chat-gate drops header-only pushes (empty messages) daemon-wide.
   // 微信出站不走企微长连接, 不必等它连上。
-  installResponseTracker(ws.client, log.child({ mod: "chat-gate" }), (c) => wx.owns(c),
+  const responseTracker = installResponseTracker(ws.client, log.child({ mod: "chat-gate" }), (c) => wx.owns(c),
     (context) => responseFormatPolicy(cfg, context, (target) => chatUrlFor(cfg.daemon, target)));
   const mirrorStore = loadMirrorStore(cfg.wrc.mirror.attachmentsFile);
   // 定时任务表 —— 每条任务是 ~/.wezard/tasks/<id>.task.mjs 一份可注入代码的配置
@@ -232,7 +233,59 @@ const main = async (): Promise<void> => {
     log.child({ mod: "tasks" }),
     (added, removed) => log.info({ added, removed }, "task files changed"),
   );
-  const bridge = startMirror({ cfg, log: log.child({ mod: "mirror" }), client: ws.client, store: mirrorStore });
+  let peerEvents: Pick<MessageAdapters, "accepted" | "committed" | "canceled" | "valid" | "ready" | "inject"> | undefined;
+  const events = createMessageEvents(join(cfg.daemon.stateDir, "message-events.json"), {
+    resource: (target) => bridge.sessionInfo(target)?.tmuxPane || target,
+    transcript: (target) => bridge.sessionInfo(target)?.jsonlPath,
+    valid: (e) => e.payload.peer ? !!peerEvents?.valid(e) : true,
+    accepted: (e) => { if (e.payload.peer) peerEvents?.accepted(e); },
+    committed: (e) => { if (e.payload.peer) peerEvents?.committed(e); },
+    canceled: (e) => { if (e.payload.peer) peerEvents?.canceled(e); },
+    ready: async (e) => !handingOff(e.target) && (e.payload.peer ? !!(await peerEvents?.ready(e)) : !bridge.hasMirrorTarget(e.target) || await bridge.idleNow(e.target) || !(await bridge.paneLive(e.target))),
+    inject: async (e, boundary) => {
+      if (e.payload.peer) return peerEvents!.inject(e, boundary);
+      if (!bridge.hasMirrorTarget(e.target)) {
+        const spawned = await bridge.newSession(e.target, wizardStore()?.get(e.target)?.name || e.target, undefined, { silent: true });
+        if (!spawned.ok) return { ok: false, retryable: true, reason: spawned.reason };
+      }
+      let outcome: { ok: boolean; retryable?: boolean; uncertain?: boolean; reason?: string } | undefined;
+      pinFrameBot(e.payload.human!.frame, botOfKey(e.channel));
+      await bridge.dispatch({ ...e.payload.human!, eventId: e.id,
+        text: e.payload.text + renderReminder({ wezard: "message-event", event: e.id }, []),
+        guard: boundary, onSubmitted: (r) => { outcome = r; } });
+      return outcome ?? { ok: false, retryable: events.get(e.id)?.exposure === "none", uncertain: events.get(e.id)?.exposure !== "none", reason: "dispatch ended without a submission acknowledgement" };
+    },
+    evidence: async (e) => {
+      const paths = [...new Set([bridge.sessionInfo(e.target)?.jsonlPath, e.transcript].filter((p): p is string => !!p))];
+      for (const path of paths) {
+        const turns = turnsSince(expandHome(path), e.at - 60_000);
+        const start = turns.findIndex((t) => t.role === "user" && t.env?.eventId === e.id);
+        if (start < 0) continue;
+        const next = turns.findIndex((t, i) => i > start && t.role === "user" && !t.queued);
+        const replies = turns.slice(start + 1, next < 0 ? undefined : next).filter((t) => t.role === "assistant");
+        const last = replies.at(-1);
+        const ended = next >= 0 || await bridge.idleNow(e.target);
+        return { consumed: true, interjected: !!turns[start]!.queued, ...(ended && last && !last.mid && !last.apiError ? { body: last.text, revision: finalId(e.id, e.channel, last.text) } : {}) };
+      }
+      return { consumed: false };
+    },
+    recovered: (e) => bridge.recoverEventFinal(e),
+    format: (d) => ({ ...d, chunks: d.chunks.map((c) => responseTracker.freeze(d.channel.replace(/^(user|chat|group):/, ""), c)) }),
+    send: async (d, n) => {
+      await bridge.settleFinalProgress(d.id);
+      const chat = d.channel.replace(/^(user|chat|group):/, "");
+      const stream = d.stream && n === 0 && d.chunks.length === 1 && Date.now() < d.stream.expires ? d.stream : undefined;
+      const ack = d.transfer
+        ? await bridge.deliverAnswer(d.transfer.id, d.target, d.turn, d.channel, "", d.chunks[n]!, d.transfer.standalone || n > 0 || d.chunks.length > 1, true)
+        : await responseTracker.sendFrozen(chat, d.chunks[n]!, stream, events.running);
+      // The Weixin compatibility ACK is only an outbox enqueue, never proof of human delivery.
+      return wx.owns(chat) ? { ack: JSON.stringify(ack), uncertain: "Weixin accepted into its outbox; actual send ACK is not linked to this final" }
+        : ack && typeof ack === "object" && "errcode" in ack && ack.errcode === 0 ? { ack: JSON.stringify(ack) }
+          : { ack: JSON.stringify(ack), uncertain: "final transport returned no explicit success ACK" };
+    },
+    error: (e) => log.error({ err: errText(e) }, "message event scheduler"),
+  });
+  const bridge = startMirror({ cfg, log: log.child({ mod: "mirror" }), client: ws.client, store: mirrorStore, events, sendFrozen: (channel, content, stream) => responseTracker.sendFrozen(channel.replace(/^(user|chat|group):/, ""), content, stream, events.running) });
   // 群里每个 `.name` 都挂它的 rolepage (见 session-label 的 TagLinker)。正文提及
   // 只认真有其人的 —— 随手写的 `.gitignore` 不该变成一个开在空栏上的链接。
   const known = (t: string): boolean => bridge.chatTargets(t).includes(t);
@@ -253,7 +306,14 @@ const main = async (): Promise<void> => {
   // 重开的空档里 resume 回旧 sid。
   // 宪章守卫 (见「改配置会不会动到宪章」): 要等下面宪章渲染那一块立起来才有; 之前 (启动时那次自动补名) 只写不比对。
   let guardCharter: CharterGuard = (write) => ({ r: write(), note: Promise.resolve("") });
-  installInboundRouter(ws.client, cfg, log, { ...bridge, dispatch: async (a) => (await handedOff(a.principal), bridge.dispatch(a)) }, sourcePath, (w, c) => guardCharter(w, c));
+  installInboundRouter(ws.client, cfg, log, { ...bridge, dispatch: async (a) => {
+    if (a.text.trimStart().startsWith("/")) { await handedOff(a.principal); await bridge.dispatch(a); return; }
+    const id = a.eventId ?? messageId(botOfKey(a.principal), a.channel!, a.streamId);
+    events.accept({ id, identity: a.identity, originalAt: a.originalAt, target: a.principal, speaker: a.speaker!, channel: a.channel!,
+      asker: { who: a.speaker!, chat: a.channel! }, priority: "normal", deadline: Date.now() + 12 * 3600_000,
+      payload: { text: a.text, human: a } });
+    await ws.client.replyStream(a.frame, a.streamId, withTagHeader(a.principal, "已排队"), false).catch(() => undefined);
+  } }, sourcePath, (w, c) => guardCharter(w, c));
   // approval click → finalize 当前 liveStream, 后续 tool/text 落到 standalone。
   // 规则 2: 用户点击授权那一刻就是"上一段对话"的边界, 截断 stream 让授权后的
   // 工作单独成块, 比让 stream 一直长到下一个 inbound / hardTimer 更清晰。
@@ -396,6 +456,11 @@ const main = async (): Promise<void> => {
   {
     const m = bridge;
     installMirrorEventListener(ws.client, m, log.child({ mod: "mirror" }));
+    http.register("GET /message-events/status", (_req, res) => json(res, 200, events.status()));
+    http.register("POST /message-events/reconcile", async (req, res) => {
+      const body = await readBody(req) as { id?: string };
+      json(res, 200, await events.reconcile(String(body.id ?? "")) ?? { error: "unknown event" });
+    });
     http.register("GET /mirror/status", (_req, res) => json(res, 200, m.status()));
     // Manual auto-spawn trigger — used by `wezard init` to materialize a
     // tmux+claude pane immediately after claim, instead of waiting for the
@@ -785,7 +850,18 @@ const main = async (): Promise<void> => {
         if (!r) return true;
         if (!answers.delivering(id)) return false;
         try {
-          await m.deliverAnswer(id, r.target, r.sourceTurn, r.channel, r.prefix, r.outcome!.body, !["done", "need"].includes(r.outcome!.status));
+          const eventId = `answer:${id}`;
+          const revision = finalId(eventId, r.channel, r.outcome!.body);
+          const deliveryId = events.delivery({ id: finalId(eventId, r.channel, revision), eventId, target: r.target,
+            turn: r.sourceTurn, channel: r.channel, revision, body: r.outcome!.body,
+            chunks: m.formatFinal(r.target, r.sourceTurn, r.channel, r.outcome!.body),
+            transfer: { id, standalone: !["done", "need"].includes(r.outcome!.status) } });
+          for (;;) {
+            const states = events.deliveryStatus(deliveryId)!;
+            if (states.every((s) => s === "delivered")) break;
+            if (states.some((s) => s === "uncertain")) throw new Error(`final delivery uncertain: ${deliveryId}`);
+            await sleep(250);
+          }
           answers.delivered(id);
           recordPost({ target: r.target, channel: r.channel, body: r.outcome!.body, ...(r.tell.asker ? { asker: r.tell.asker } : {}) });
           return true;
@@ -807,6 +883,17 @@ const main = async (): Promise<void> => {
         && !a.canceled && a.acceptance !== "rejected" && jobs.get(r.plan.job)?.status === "open" && ["running", "needs-input", "errored"].includes(a.execution)
         && (r.plan.nodes.find((x) => x.id === n.id)?.after ?? []).every((id) => workflow.prereq(r.owner, r.nodes.find((x) => x.id === id)!.turn)?.state === "done");
     };
+    const acceptContinuation = (tell: Tell, text: string): boolean => {
+      if (workflow.byTurn(tell.from, tell.turn!) || !planStore.allowExternal(tell.to, wizards.get(tell.to)?.name)) return false;
+      const id = `p:${tell.from}:${tell.to}:${tell.turn}:${tell.legs}`;
+      events.accept({ id, target: tell.to, speaker: tell.from, channel: tell.channel, asker: tell.asker, k: tell.k,
+        priority: "normal", deadline: tell.deadlineAt ?? deadlineOf(tell.at ?? Date.now()), payload: { text, peer: {
+          from: { kind: "peer", from: tell.from, turn: tell.turn, ...(tell.asker ? { asker: tell.asker } : {}) },
+          envelope: envelopeFor(tell.from, tell.channel, { turn: tell.turn!, legs: tell.legs, re: true, asker: tell.asker }),
+          tell: { ...tell, dispatchKey: id }, job: tell.job ?? "", kind: "task", held: true,
+        } } });
+      return true;
+    };
     const receipts = createReceipts({
       deliverAnswer: deliverTransferredAnswer,
       workflowPrereq: workflow.prereq,
@@ -823,12 +910,8 @@ const main = async (): Promise<void> => {
       parkedNow: m.parkedNow,
       settleJob: (id, target, outcome, artifacts) => { jobs.settle(id, target, outcome, artifacts); },
       accept: (id, body) => { const j = jobs.get(id); return j?.status === "open" ? rejectReason(j.accept ?? "result", parseClosing(body)) : undefined; },
-      rebound: async (x, why) => workflow.byTurn(x.from, x.turn) || !planStore.allowExternal(x.to, wizards.get(x.to)?.name) ? false : (await m.injectText(x.to, `（守护进程代 ${displayName(x.from)} 打回一次: 这件活是工单里的一份, 你的回复${why}。请按约定收口 —— 末尾一行 \`RESULT: <结论>\`, 交付了文件每个加一行 \`ARTIFACT: <路径> — 一句话\`; 真缺信息就 \`NEED: <问题>\`。）`, undefined, {
-        guard: () => planStore.allowExternal(x.to, wizards.get(x.to)?.name),
-        from: { kind: "peer", from: x.from, turn: x.turn, ...(x.asker ? { asker: x.asker } : {}) },
-        channel: x.channel,
-        envelope: envelopeFor(x.from, x.channel, { turn: x.turn, legs: x.legs, re: true, asker: x.asker }),
-      })).ok,
+      durableRebound: true,
+      rebound: async (x, why, tell) => !!tell && acceptContinuation(tell, `（守护进程代 ${displayName(x.from)} 打回一次: 这件活是工单里的一份, 你的回复${why}。请按约定收口：RESULT: <结论>；交付文件逐项 ARTIFACT: <路径> — 一句话；真缺信息用 NEED: <问题>。）`),
       untilIdle: m.untilIdle,
       paneLive: m.paneLive,
       nameOf: displayName,
@@ -837,22 +920,22 @@ const main = async (): Promise<void> => {
       holdStore: loadJsonMap<Hold>(cfg.wrc.mirror.holdsFile, undefined, { strict: true }),
       // 放行停放着的 after 件: 走 tell_peer 同一条注入路径, 沿用停放时的件号 / 频道 / 父 k。
       release: async (h, seen, alive) => {
-        const r = await tellPeerAs(h.from, h.body as PeerBody, afterNote(h.after, seen, h.from), { turn: h.turn, channel: h.channel, after: h.after, seen: h.seen, alive, ...(h.k ? { k: h.k } : {}), ...(h.asker ? { asker: h.asker } : {}) });
+        const r = await tellPeerAs(h.from, h.body as PeerBody, afterNote(h.after, seen, h.from), { at: h.at, turn: h.turn, channel: h.channel, after: h.after, seen: h.seen, alive, ...(h.k ? { k: h.k } : {}), ...(h.asker ? { asker: h.asker } : {}) });
         return r.status === 200 ? { ok: true } : { ok: false, reason: String(r.body.reason ?? `HTTP ${r.status}`) };
       },
       handingOff,
       handedOff,
       replyFor: (to, fromName, since, turn) => m.replyToPeer(to, fromName, since, turn),
       lastWords: m.lastReply,
-      deliver: (to, bodyText, meta, alive) =>
-        m.injectText(to, clipMiddle(bodyText), undefined, {
-          requireIdle: true,
-          guard: () => (!alive || alive()) && planContinuationAllowed(to),
-          // receipt:true 是「这一轮不该再生回执」的记录 —— 回环在结构上就不成立:
-          // 只有 tell_peer 那条路登记 watcher, 这里是直接注入。
-          from: { kind: "peer", from: meta.from, receipt: true, status: meta.status, ...(meta.turn ? { turn: meta.turn } : {}), ...(meta.job ? { job: meta.job, done: meta.done, total: meta.total } : {}), ...(meta.asker ? { asker: meta.asker } : {}) },
-          channel: meta.channel,
-          envelope: renderReceiptEnvelope(
+      deliver: async (to, bodyText, meta, alive) => {
+        if ((alive && !alive()) || !planContinuationAllowed(to)) return { ok: false, retryable: true, reason: "receipt permission withdrawn" };
+        const id = meta.eventId!;
+        const text = clipMiddle(bodyText);
+        events.accept({ id, identity: JSON.stringify([to, text, meta]), target: to, speaker: meta.from, channel: meta.channel,
+          asker: meta.asker, k: meta.k, replyTo: meta.replyTo, priority: "normal", deadline: Date.now() + 12 * 3600_000,
+          payload: { text, peer: { job: "", kind: "fyi",
+            from: { kind: "peer", from: meta.from, receipt: true, status: meta.status, ...(meta.turn ? { turn: meta.turn } : {}), ...(meta.job ? { job: meta.job, done: meta.done, total: meta.total } : {}), ...(meta.asker ? { asker: meta.asker } : {}) },
+            envelope: renderReceiptEnvelope(
             displayName(meta.from),
             meta.channel ? chatNameOf(cfg, meta.channel) : undefined,
             meta.job ? { job: meta.job, done: meta.done, total: meta.total, closed: jobs.get(meta.job)?.status !== "open", ...(jobs.get(meta.job)?.kind === "req" ? { req: true } : {}) } : undefined,
@@ -865,8 +948,10 @@ const main = async (): Promise<void> => {
               ...(meta.pending ? { pending: meta.pending } : {}),
               ...(audienceName(meta.channel, meta.asker) ? { audience: audienceName(meta.channel, meta.asker) } : {}),
             },
-          ) + (meta.eventId ? renderReminder({ wezard: "receipt-delivery", event: meta.eventId }, []) : ""),
-        }),
+          ) + (meta.eventId ? renderReminder({ wezard: "receipt-delivery", event: meta.eventId }, []) : "")
+          } } });
+        return events.submission(id);
+      },
     });
     stopReceipts = receipts.stop;
     const turnsLine = (xs: readonly InFlight[], target: string): string => renderInFlight(xs, target, displayName);
@@ -991,6 +1076,8 @@ const main = async (): Promise<void> => {
     void m.restored.then(() => {
       handoffs.resume();
       answers.all().filter((r) => r.state !== "delivered").forEach((r) => {
+        const savedFinal = events.status().deliveries.find((d) => d.transfer?.id === r.id);
+        if (savedFinal?.parts.every((p) => p.state === "delivered")) { answers.delivered(r.id); return; }
         const action = answerRecoveryAction(r);
         if (action === "cancel-before-send") {
           answers.activate(r.id);
@@ -1017,15 +1104,8 @@ const main = async (): Promise<void> => {
       policy: () => ({ afterMs: cfg.wrc.mirror.idleNudge.afterMin * 60_000, max: cfg.wrc.mirror.idleNudge.max }),
       ask: async ({ from, to, turn, text }) => {
         if (workflow.byTurn(from, turn) || !planStore.allowExternal(to, wizards.get(to)?.name)) return false;
-        const x = receipts.reask(from, to, turn);
-        if (!x) return false;
-        ledger.touch(from, turn);
-        return (await m.injectText(to, text, undefined, {
-          guard: () => planStore.allowExternal(to, wizards.get(to)?.name),
-          from: { kind: "peer", from, turn, ...(x.asker ? { asker: x.asker } : {}) },
-          channel: x.channel,
-          envelope: envelopeFor(from, x.channel, { turn, legs: x.legs, re: true, asker: x.asker }),
-        })).ok;
+        const tell = receipts.continuation(from, to, turn);
+        return !!tell && acceptContinuation(tell, text);
       },
       nameOf: displayName,
       store: loadJsonMap<{ asks: number }>(join(cfg.daemon.stateDir, "idle-nudges.json")),
@@ -1362,15 +1442,70 @@ const main = async (): Promise<void> => {
         ...workflow.all().filter((a) => a.to === target && a.execution !== "terminal" && !a.canceled && only({ from: a.owner, turn: a.turn })).map((a) => `${a.owner}\0${a.turn}`),
         ...receipts.states().filter((s) => s.to === target && only(s)).map((s) => `${s.from}\0${s.turn}`),
       ]);
+      events.cancel((e) => e.target === target && !!e.payload.peer && only({ from: e.speaker, turn: e.payload.peer.from.turn ?? "" }));
       workflow.cancel(target, undefined, undefined, undefined, only);
       receipts.cancel(target, self, only);
       return keys.size;
     };
+    peerEvents = {
+      valid: (e) => {
+        const p = e.payload.peer!;
+        const attempt = p.attemptId ? workflow.byTurn(e.speaker, p.from.turn ?? "") : undefined;
+        return !e.canceled && (!p.from.receipt || planContinuationAllowed(e.target)) && (!p.job || jobs.get(p.job)?.status === "open") && !attempt?.canceled
+          && (!p.after?.length || receipts.prereqs(e.speaker, p.after).every((r) => r.state === "done" || r.state === "pending"))
+          && !answers.all().some((r) => r.target === e.target && answerTargetOccupied(r));
+      },
+      accepted: (e) => {
+        if (e.execution !== "queued") return;
+        const p = e.payload.peer!;
+        if (p.attemptId) accountWorkflow(workflow.byTurn(e.speaker, p.from.turn ?? "")!);
+        else if (p.job && !p.held) jobs.account(p.job, e.id, { target: e.target, task: (p.tell?.legs ?? 1) > 1 ? "" : e.payload.text, spawned: !!p.spawned, ...(p.role ? { role: p.role } : {}) }, p.kind === "ask" ? "ask" : "task", !!p.free || !!p.held, false, !!p.free);
+        if (p.tell) {
+          ledger.dispatch(e.id, { turn: p.tell.turn!, owner: e.speaker, to: e.target, text: e.payload.text, at: e.at, ...(p.job ? { job: p.job } : {}), ...(e.k ? { for: e.k } : {}), ...(e.asker ? { asker: e.asker } : {}) });
+          if (!receipts.watching(p.tell)) receipts.register({ ...p.tell, queued: true });
+        }
+      },
+      committed: (e) => {
+        const p = e.payload.peer!;
+        if (p.attemptId) {
+          const a = workflow.byTurn(e.speaker, p.from.turn ?? "");
+          if (a?.execution === "dispatch-unknown" && !a.canceled && !a.status && e.exposure === "consumed")
+            workflow.verdict(e.speaker, p.attemptId, "sent", undefined, `transcript confirms message event ${e.id}`);
+          else workflow.dispatched(p.attemptId, true);
+        }
+        if (p.tell) receipts.commit(p.tell);
+        if (p.from.receipt) receipts.confirmDelivery(e.id);
+      },
+      canceled: (e) => {
+        const p = e.payload.peer!;
+        if (p.attemptId) workflow.cancel(e.target, e.speaker, p.job, p.from.turn);
+        if (p.tell) receipts.cancel(e.target, "scheduler", (s) => s.from === e.speaker && s.turn === p.tell!.turn);
+      },
+      ready: async (e) => receipts.prereqs(e.speaker, e.payload.peer!.after ?? []).every((r) => r.state === "done")
+        && (e.priority === "now" || await m.idleNow(e.target) || !(await m.paneLive(e.target)) || (e.priority === "urgent" && !(await othersTurn(e.target, e.speaker)))),
+      inject: async (e, boundary) => {
+        const p = e.payload.peer!;
+        if (e.priority === "urgent" && !(await m.idleNow(e.target))) {
+          if (await othersTurn(e.target, e.speaker)) return { ok: false, retryable: true, reason: "urgent target now belongs to another actor" };
+          await m.interruptPane(e.target);
+        }
+        if (p.attemptId && p.tell) workflow.intent(p.attemptId, p.tell);
+        const r = await m.injectText(e.target, e.payload.text, undefined, {
+          from: p.from, channel: e.channel, requireIdle: e.priority === "normal",
+          envelope: p.envelope + (p.after?.length ? afterNote(p.after, Object.fromEntries(p.after.map((t, n) => [t, (receipts.prereqs(e.speaker, p.after!)[n] as { seen: HeldSeen }).seen])), e.speaker) : "") + renderReminder({ wezard: "message-event", event: e.id }, []),
+          guard: (phase) => peerEvents!.valid(e) && receipts.prereqs(e.speaker, p.after ?? []).every((r) => r.state === "done") && (!phase || ((!p.attemptId || workflow.boundary(p.attemptId)) && boundary(phase))),
+        });
+        if (p.attemptId && (r.uncertain || (!r.ok && !r.retryable))) workflow.dispatched(p.attemptId, false);
+        return r;
+      },
+    };
+    m.setEventFinalGate((e) => !e.canceled && !e.interjected && !answers.all().some((r) => r.source === e.target && (r.sourceTurn === e.turn || r.origin === e.id)));
+    void m.restored.then(() => events.resume());
     /** tell_peer 的本体: 以 `self` 的名义说一句 —— HTTP 路由与 dispatch 共用。`extra` = 挂在信封后面的
      *  一段 (只进对方输入框, 不进 `text`: 公开时 text 会成群气泡)。 */
     const peerDispatching = new Map<string, { count: number; transfer: boolean }>();
     type ActorOrigin = { authority: ReturnType<typeof controlSnapshot>; answerContext?: { turn: string; channel: string; prefix: string }; asker?: Asker; k?: ParentK };
-    const tellPeerAsInner = async (self: string, body: PeerBody, extra = "", held?: { turn: string; channel: string; after?: string[]; seen?: Readonly<Record<string, HeldSeen>>; alive?: () => boolean; k?: ParentK; asker?: Asker }, planned?: PlanPermit, actor?: ActorOrigin): Promise<Reply> => {
+    const tellPeerAsInner = async (self: string, body: PeerBody, extra = "", held?: { at?: number; turn: string; channel: string; after?: string[]; seen?: Readonly<Record<string, HeldSeen>>; alive?: () => boolean; k?: ParentK; asker?: Asker }, planned?: PlanPermit, actor?: ActorOrigin): Promise<Reply> => {
       const authority = actor?.authority ?? (!held && !planned ? controlSnapshot(self) : undefined);
       if (!held && !planned && lostAnswer(self)) return { status: 409, body: { ok: false, reason: "this turn transferred answer and control; stop dispatching and conclude silently" } };
       if (!held && !planned && terminalAnswerTurn(self)) return { status: 409, body: { ok: false, reason: "transferred answer is terminal; late control actions refused" } };
@@ -1456,9 +1591,7 @@ const main = async (): Promise<void> => {
         const cur = receipts.pending(self, target);
         if (cur && !afters.includes(cur.turn)) { return { status: 409, body: { ok: false, reason: `你已有一件活 (${cur.turn}) 在 ${displayName(target)} 手上没落定, 同一对只有一个回执槽 —— 等它交差, 或把它也列进 after` } }; }
       }
-      const parkIt = prereqs.some((p) => p.state === "pending");
-      // 前置都已落定: 不停放, 结论附在信封后面照常投。
-      if (afters.length && !parkIt) extra += afterNote(afters, Object.fromEntries(afters.map((t, i) => [t, (prereqs[i] as { seen: HeldSeen }).seen])), self);
+
       // 公开与否由发话方 (LLM) 判断: 公开 = 在它这一轮的公开频道里说, 气泡进群、对方
       // 那一轮的回复也发进这个群; 私聊 (默认) = 只落双方的 rolepage, 回复靠 wait_peer 取。
       // 只有两端都是登记在册的 wizard 才能当着人说: 裸 target 冒充的发话方、forget
@@ -1477,7 +1610,7 @@ const main = async (): Promise<void> => {
       // 它正在交接: 这句话等它换完会话再进 —— 投进旧会话会被交接一并带走, 投进重开中的
       // 空 pane 会 resume 回旧 sid (见 handoff.ts)。发话时刻取在这之后。
       if (answer === "transfer" && handingOff(target)) return { status: 409, body: { ok: false, reason: "answer target is handing off; source retains answer and control" } };
-      await handedOff(target);
+      if (answer === "transfer") await handedOff(target);
       if (!actorStillValid()) return { status: 409, body: { ok: false, reason: "caller turn/control changed while waiting; dispatch refused" } };
       // 投递策略。对方闲着三者一样 —— 立刻投; 只在它正忙时分岔:
       //   normal (默认) 等它这一轮结束再投 —— 派新活的常态: 两个 wizard 同时找第三个时,
@@ -1517,28 +1650,6 @@ const main = async (): Promise<void> => {
         if (!planAllowed() || (planned && !planned.alive())) throw new Error("plan dispatch canceled or job reserved");
         return node ? workflow.begin(self, jobId, node, turn.turn, target, queued).id : undefined;
       };
-      if (parkIt) {
-        try { attemptId = beginNode(true); } catch (e) { return { status: 409, body: { ok: false, reason: (e as Error).message } }; }
-        const bp = body as { priority?: string; waitSec?: number; deadline?: number; receipt?: boolean; role?: string; chain?: boolean };
-        if (attemptId) {
-          try {
-            workflow.recordLeg(attemptId, { text, at: Date.now(), tell: { from: self, to: target, channel, job: jobId, turn: turn.turn, at: Date.now(), legs: 1, ...(k ? { k } : {}), ...(asker ? { asker } : {}) }, kind: "task", ...(roleParam(bp.role) ? { role: roleParam(bp.role) } : {}) });
-            accountWorkflow(workflow.byTurn(self, turn.turn)!);
-          } catch (e) { return { status: 409, body: { ok: false, attemptId, reason: (e as Error).message } }; }
-        }
-        receipts.hold({
-          from: self, to: target, turn: turn.turn, at: Date.now(), after: afters, channel, job: jobId,
-          ...(k ? { k } : {}), ...(asker ? { asker } : {}),
-          // force: 冷门控上面已过一遍, 放行时缓存又凉了也不再退回。
-          body: { name: peerAddress(cfg, self, target), text, kind, force: true, ...(node ? { node } : {}), ...(jobId ? { job: jobId } : {}), ...(bp.role ? { role: bp.role } : {}), ...(bp.priority ? { priority: bp.priority } : {}), ...(bp.waitSec ? { waitSec: bp.waitSec } : {}), ...(bp.deadline !== undefined ? { deadline: bp.deadline } : {}), ...(bp.receipt === false ? { receipt: false } : {}) },
-        });
-        if (jobId && !attemptId) {
-          const role = roleParam(bp.role);
-          jobs.attach(jobId, { target, task: text, spawned: false, ...(role ? { role } : {}) }, kind === "ask" ? "ask" : "task");
-          jobs.spend(jobId);
-        }
-        return { status: 200, body: { ok: true, parked: true, after: afters, turn: turn.turn, ...(attemptId ? { node, attemptId } : {}), name: peerAddress(cfg, self, target), ...(jobId ? { job: jobId } : {}), receipt: `排在 ${afters.join(" ")} 之后: 前置满足放行条件才投（tracked 要 accepted，legacy 要 done；带上结论）, 任一失败这件不投、按 canceled 回给你; 不要挂在 wait_peer 上等, 接着干你自己的事` } };
-      }
       try { attemptId = beginNode(true); } catch (e) { return { status: 409, body: { ok: false, reason: (e as Error).message } }; }
       const canceledBeforeDispatch = (): boolean => !planAllowed() || (!!planned && !planned.alive()) || (!!held?.alive && !held.alive()) || !!workflow.byTurn(self, turn.turn)?.canceled || (!!jobId && jobs.get(jobId)?.status !== "open");
       // 「忙」= 这一轮还没结束, 或停在审批上等人 —— 都不是能接新活的时候。
@@ -1548,6 +1659,35 @@ const main = async (): Promise<void> => {
       // 打断就误伤了那件 —— 降成 normal, 等它这一轮做完再投。
       const others = asked === "urgent" && wasBusy ? await othersTurn(target, self) : undefined;
       const policy = others ? "normal" : asked;
+      if (answer !== "transfer") {
+        if (canceledBeforeDispatch() || !actorStillValid()) return { status: 409, body: { ok: false, reason: "caller authority or dispatch permit changed before acceptance" } };
+        if (jobId) {
+          const budget = checkJob(jobId, target, (!!open?.need && open.turn === turn.turn) || !!held);
+          if (!budget.ok) return { status: budget.status, body: { ok: false, reason: budget.reason } };
+        }
+        // All caller-dependent facts are frozen here; workers never reread the caller's current turn.
+        const at = held?.at ?? Date.now();
+        const deadlineAt = deadlineOf(at, (body as { deadline?: number }).deadline);
+        const wantReceipt = kind !== "fyi" && (body as { receipt?: boolean }).receipt !== false;
+        const eventId = `p:${self}:${target}:${turn.turn}:${turn.legs}`;
+        let tell = { from: self, to: target, channel, job: jobId, at, turn: turn.turn, legs: turn.legs, deadlineAt, k, asker, dispatchKey: eventId };
+        if (attemptId) {
+          const leg = workflow.recordLeg(attemptId, { text, tell, continuation: turn.legs > 1, at, kind: "task", role: roleParam((body as { role?: string }).role), free: !!open?.need && open.turn === turn.turn }, !!held);
+          tell = { ...tell, dispatchKey: leg.key };
+        }
+        const accepted = events.accept({ id: eventId, target, speaker: self, channel, asker, k, priority: policy, deadline: deadlineAt,
+          payload: { text, peer: {
+            from: { kind: "peer", from: self, turn: turn.turn, ...(jobId ? { job: jobId } : {}), ...(isPublic ? { public: true } : {}), ...(asker ? { asker } : {}) },
+            envelope: envelopeFor(self, channel, { turn: turn.turn, asker, legs: turn.legs, ...(turn.legs > 1 ? { re: true } : {}),
+              ...((body as { deadline?: number }).deadline !== undefined ? { deadline: deadlineAt } : {}), ...(kind !== "task" ? { act: kind } : {}), ...(wantReceipt ? {} : { quiet: true }) }) + extra,
+            ...(wantReceipt ? { tell } : {}), job: jobId, kind, attemptId, after: held?.after ?? afters,
+            role: roleParam((body as { role?: string }).role), free: !!open?.need && open.turn === turn.turn, held: !!held,
+          } } });
+        return { status: 200, body: { ...accepted, queued: true, turn: turn.turn, name: peerAddress(cfg, self, target), priority: policy, wasBusy,
+          ...(jobId ? { job: jobId } : {}), ...(attemptId ? { node, attemptId, acceptance: "pending" } : {}),
+          ...(wantReceipt ? { receipt: "已持久化排队；提交后观察原件回执，结论自动返回" } : {}),
+          ...(others ? { urgentDowngraded: "目标正在处理他人的轮次，按 normal 排队" } : {}) } };
+      }
       let waitedMs = 0;
       let interrupted: boolean | undefined;
       if (policy === "normal" && wasBusy) {
@@ -1614,7 +1754,7 @@ const main = async (): Promise<void> => {
         catch (e) { return { status: 409, body: { ok: false, reason: (e as Error).message } }; }
       }
       if (answerContext && k?.kind === "chat") {
-        try { answers.reserve({ id: turn.turn, source: self, target, sourceTurn: answerContext.turn, sourceOpening: answerSourceOpening, origin: answerTransferOrigin(self, answerContext.turn), channel: k.channel, prefix: answerContext.prefix, tell: trackedTell, state: "reserved" }); }
+        try { answers.reserve({ id: turn.turn, source: self, target, sourceTurn: answerContext.turn, sourceOpening: answerSourceOpening, origin: openingOfSelf(self)?.env?.eventId ?? answerTransferOrigin(self, answerContext.turn), channel: k.channel, prefix: answerContext.prefix, tell: trackedTell, state: "reserved" }); }
         catch (e) { return { status: 409, body: { ok: false, reason: (e as Error).message } }; }
         if (!m.prepareAnswer(turn.turn, self, answerContext.turn, target, answerContext.channel)) {
           answers.rollback(turn.turn);
@@ -2872,11 +3012,7 @@ const main = async (): Promise<void> => {
         cwd: b.cwd,
         systemPrompt: charter,
         inherit,
-        // 继承路径上第一句话是分叉的触发器, 所以直接把活当开场白 —— 少一次往返,
-        // 也少一次"就位了但没事干"的空转。
-        // 子 lead 的宪章只有层级规矩, 打法跟第一句的信封走 (同 dispatch 对已有 wizard 的做法)。
-        bootstrap: task ? task + envelopeFor(self, "", { turn: taskTurn, asker }) + (b.lead === true ? renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : "") : undefined,
-        ...(task ? { bootstrapFrom: { from: { kind: "peer" as const, from: self, turn: taskTurn, ...(jobId ? { job: jobId } : {}), ...(asker ? { asker } : {}) }, query: task } } : {}),
+        // Fork initialization carries no task; actual work is durably accepted below.
         keepalive,
       }).catch((e: unknown) => ({ ok: false as const, reason: `spawn threw: ${String(e)}`, inherited: false }));
       // 生不出来就回滚身份 —— 否则名字被一个永远没有会话的记录占住。
@@ -2897,23 +3033,21 @@ const main = async (): Promise<void> => {
           ...(kid.description ? { job: kid.description } : {}), cwd: r.cwd,
         }, subjectOf(wizards.get(target)));
       }
-      // 继承路径上活已经随开场白进去了, 空白分身才需要在这里补一次注入 (私聊)。
-      let dispatched = r.inherited && !!task;
-      if (task && !r.inherited && birthGuard()) {
-        const inj = await m.injectText(target, task, undefined, { from: { kind: "peer", from: self, turn: taskTurn, ...(jobId ? { job: jobId } : {}), ...(asker ? { asker } : {}) }, channel: "", envelope: envelopeFor(self, "", { turn: taskTurn, asker }), guard: birthGuard });
-        dispatched = inj.ok;
+      const dispatched = !!task && birthGuard();
+      if (dispatched) {
+        const eventId = `p:${self}:${target}:${taskTurn}:1`;
+        const deadlineAt = deadlineOf(taskAt);
+        events.accept({ id: eventId, target, speaker: self, channel: "", asker, k, priority: "normal", deadline: deadlineAt,
+          payload: { text: task, peer: {
+            from: { kind: "peer", from: self, turn: taskTurn, ...(jobId ? { job: jobId } : {}), ...(asker ? { asker } : {}) },
+            envelope: envelopeFor(self, "", { turn: taskTurn, asker }) + (b.lead === true ? renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : ""),
+            tell: { from: self, to: target, channel: "", job: jobId, at: taskAt, turn: taskTurn, legs: 1, deadlineAt, k, asker, dispatchKey: eventId },
+            job: jobId, kind: "task", spawned: true, role: roleParam((body as { role?: string }).role),
+          } } });
+      } else if (jobId && birthGuard()) {
+        jobs.attach(jobId, { target, task: "", spawned: true, ...(roleParam((body as { role?: string }).role) ? { role: roleParam((body as { role?: string }).role) } : {}) });
       }
-      if (jobId && birthGuard()) {
-        const role = roleParam((body as { role?: string }).role);
-        const from = inherit ? source : undefined;
-        jobs.attach(jobId, { target, task, spawned: true, ...(role ? { role } : {}), ...(from ? { forkOf: from } : {}) });
-      }
-      if (jobId && dispatched) jobs.spend(jobId);
-      // 分身的第一件活也守回执: fan-out 最常见的形状就是 clone_wizard({task}) × N,
-      // 让它们干完自己把结论送回来, 发起方不必挂在 wait_peer 上。
-      if (dispatched) receipts.register({ from: self, to: target, channel: "", job: jobId, at: taskAt, turn: taskTurn, ...(k ? { k } : {}), ...(asker ? { asker } : {}) });
-      if (dispatched) ledger.open({ turn: taskTurn, owner: self, to: target, text: task, at: taskAt, ...(jobId ? { job: jobId } : {}), ...(k ? { for: k } : {}), ...(asker ? { asker } : {}) });
-      return { status: 200, body: { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, ...(dispatched ? { turn: taskTurn } : {}), keepalive, ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(r.effort ? { effort: r.effort } : {}), ...(pick.tier ? { tier: pick.tier } : {}), via: pick.via, ...(pick.note ? { tierNote: pick.note } : {}), ...(jobId ? { job: jobId } : {}), ...(detached ? { detached: true } : {}) } };
+      return { status: 200, body: { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, queued: dispatched, ...(dispatched ? { turn: taskTurn } : {}), keepalive, ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(r.effort ? { effort: r.effort } : {}), ...(pick.tier ? { tier: pick.tier } : {}), via: pick.via, ...(pick.note ? { tierNote: pick.note } : {}), ...(jobId ? { job: jobId } : {}), ...(detached ? { detached: true } : {}) } };
       } finally {
         if (birthJob) {
           const remaining = (pendingBirthJobs.get(birthJob) ?? 1) - 1;
@@ -2934,6 +3068,7 @@ const main = async (): Promise<void> => {
       cancel: (run) => {
         workflow.cancel(undefined, run.owner, run.plan.job);
         run.nodes.filter((n) => n.to).forEach((n) => receipts.cancel(n.to!, run.owner, (x) => x.from === run.owner && x.turn === n.turn));
+        events.cancel((e) => e.speaker === run.owner && e.payload.peer?.job === run.plan.job);
         receipts.cancelHeld(run.plan.job, run.owner);
       },
       error: (e) => log.error({ err: errText(e) }, "workflow plan advancement paused"),
@@ -3154,6 +3289,7 @@ const main = async (): Promise<void> => {
         workflow.cancel(undefined, j.owner, j.id);
         if (how === "cancel") j.members.filter((mm) => !mm.outcome).forEach((mm) => receipts.cancel(mm.target, j.owner, (x) => x.from === j.owner));
         // 这张单名下还排着没投的 (after 停放) 也不投了。
+        events.cancel((e) => e.speaker === j.owner && e.payload.peer?.job === j.id);
         receipts.cancelHeld(j.id, j.owner);
         const closed = jobs.close(j.id, summary, mark)!;
         ledger.closeJob(j.id);
@@ -3850,6 +3986,7 @@ const main = async (): Promise<void> => {
 
   const shutdown = async (signal: string): Promise<void> => {
     log.info({ signal }, "shutdown signal");
+    events.stop();
     stopReceipts();
     scheduler.stop();
     steward?.stop();
