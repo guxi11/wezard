@@ -549,8 +549,9 @@ export const replyClosedBefore = (
  *  `turn` 给了就先按它找问话 (信封上的件号, 不受名字变动与时钟抖动影响); 老信封没有
  *  件号, 找不到再退回「`from` + 发话时刻」。
  *  续回 (receipts.relay): 答话方那一轮又派了活, 结论在子回执回来的那一轮 —— 那份回执
- *  挂着 `reply-to=<fromName>`, 它比原来的问话晚, 取两者中靠后的那一句当问话。 */
-type AskEnv = { kind: string; from: string; turn?: string; receipt?: boolean; replyTo?: string };
+ *  挂着 `reply-to=<fromName>` 和原件的 `k=peer:<turn>:<key>`, 取两者中靠后的
+ *  那一句当问话。只有名字的老调用仍按名字认; 已知件号不能拿另一件的续回顶替。 */
+type AskEnv = { kind: string; from: string; turn?: string; receipt?: boolean; quiet?: boolean; replyTo?: string; k?: string };
 type MarkedTurn = { role: string; text: string; apiError?: true; notice?: true; queued?: true; env?: AskEnv };
 /** 这一行是在续上一轮 (报错之后没有信封的 `continue` / 「继续」), 不起新的一轮。 */
 const resumesAt = (ts: readonly MarkedTurn[], i: number): boolean =>
@@ -575,10 +576,11 @@ const answerOf = (
 ): { text: string; closedAt?: number; error?: true } | undefined => {
   const lastAsk = (hit: (e: AskEnv) => boolean): number =>
     ts.reduce((at, t, i) => (t.role === "user" && t.env && hit(t.env) && (!t.ms || t.ms >= sinceMs - ASK_SLACK_MS) ? i : at), -1);
-  const byTurn = turn ? lastAsk((e) => !e.receipt && e.turn === turn) : -1;
+  const byTurn = turn ? lastAsk((e) => !e.receipt && !e.quiet && e.turn === turn) : -1;
   // 退回按人找时只认没有件号的老信封: 带件号的那些是别的件, 不是这一件。
-  const direct = byTurn >= 0 ? byTurn : lastAsk((e) => !e.receipt && e.kind === "peer" && e.from === fromName && !(turn && e.turn));
-  const asked = Math.max(direct, lastAsk((e) => !!e.receipt && e.replyTo === fromName));
+  const direct = byTurn >= 0 ? byTurn : lastAsk((e) => !e.receipt && !e.quiet && e.kind === "peer" && e.from === fromName && !(turn && e.turn));
+  const asked = Math.max(direct, lastAsk((e) => !!e.receipt && e.replyTo === fromName
+    && (!turn || (e.k?.startsWith(`peer:${turn}:`) === true && e.k.length > `peer:${turn}:`.length))));
   if (asked < 0) return undefined;
   const next = ts.findIndex((t, i) => i > asked && t.role === "user" && !t.queued && !resumesAt(ts, i));
   const last = ts.slice(asked + 1, next < 0 ? undefined : next).filter((t) => t.role === "assistant").at(-1);
@@ -600,12 +602,12 @@ const answerOf = (
 // 会话的 jsonl 之间拼出一个群 / 一段私聊的记录。事实写在开标签的属性上 (见
 // shared/reminder.ts), 正文只是给模型的规矩 —— 改措辞不影响解析; 老措辞在那边认。
 // 所以正文不再复述属性 (谁说的、在哪个群、件号、工单进度): 模型读得到开标签, 正文只写
-// 属性推不出的 —— 回复去向、该怎么接、规矩。
+// 属性推不出的表达语义与工具使用约定; 自动终句去向由 daemon 执行。
 export { parseEnvelope, type Envelope };
 
 /** 身份来自入站 userid, 包括本聊天私信; home 不能代替真实发话人。 */
 export const renderHumanEnvelope = (user: string, chat: string, chatKey?: string): string =>
-  renderReminder(envelopeAttrs.human(user, chat, chatKey), ["你的回复发回 `chat` 那个聊天。"]);
+  renderReminder(envelopeAttrs.human(user, chat, chatKey), []);
 
 /** 人对管家说的那一轮挂一行「自己答还是派出去」: 宪章里的检查项离这句话太远, sonnet 档的管家一接到活
  *  就忘。只挂人的话 —— 回执、同伴、定时那几轮不是新来的活; 一行就够, 细则在宪章。 */
@@ -628,16 +630,16 @@ export const renderPeerEnvelope = (from: string, chat?: string, t?: TurnTag & { 
   renderReminder(envelopeAttrs.peer(from, chat, t), [
     ...(chat === undefined
       ? [
-          "不是人说的, 人看不见这一轮。",
-          ...(t?.quiet
-            ? ["发话方**不收回执**: 你这一轮的终句不会送到任何地方 —— 别 tell_peer 回它, 也别为这一轮 notify。"]
+          "这是 wizard 私聊, 不是人说的。",
+          ...(t?.quiet || t?.act === "fyi"
+            ? ["发话方不收回执; 不要为确认收到而 tell_peer 或 notify。"]
             : [
-                "你这一轮的**最后一条消息**就是给它的回执 —— 你一停下, 守护进程自动送进它的输入框, **不需要再调任何工具**: 不要 send_peer 回它 (那会让它多跑一轮), 也不要为这一轮 notify。",
+                "终句面向派活方; 自动回执无需另调工具, 不要重复 tell_peer 或为这轮私聊 notify。",
                 "对 wizard 直说: 不寒暄、不加对人的称呼、不复述它的话; 终句直接交代结论 (`RESULT: …` 可选) (交付物写进文件就回传路径); 要它补信息才能干下去, 就收口成 `NEED: <问题>` (这一份不算交差); 交付了文件, 每个加一行 `ARTIFACT: <路径> — 一句话`。",
               ]),
         ]
       : [
-          "你的回复直接发进这个群, 人和发话方都看得到: 照对人说话的方式答; 别再 send_peer 把同一段话回给它 —— 你停下之后守护进程会自动把结论送回它。",
+          `面向群里的人表达${t?.quiet || t?.act === "fyi" ? "。发话方不收回执" : "; 自动回执无需另调工具"}, 不要重复 tell_peer 同一段结论。`,
         ]),
     ...(t?.re ? ["这是**续问**: 接着那件活说, 不是一件新活。"] : []),
     // 这句话要怎么接 —— 只有发话方知道, 不写出来对方一律当成一件活去干。
@@ -672,13 +674,13 @@ export const renderReceiptEnvelope = (
       : status === "error"
         ? [`这是**失败回执**: 它那一轮以 CLI 报错收尾, 下面是报错原文, 不是它的结论, **不计入工单**。它若被续跑、之后答出来, 结论会照常再送来一份; 等不及就 peek_peer 看它, 或者再 tell_peer 它一次。`]
         : [`这是**失败回执**: ${FAILED[status]}, 这一份不会再有答案了 (工单里按已落定计)。自己判断: 换人、再 tell_peer 追问, 或者在汇总里如实写缺了这一份。下面是守护进程的说明和它最后说的一句。`]),
-    // 去向由守护进程按派活链算好 (receipts.routeOf), 这里只告诉模型终句会落到哪。
+    // 去向由持久派活链算好, 提示只保留表达对象与内容语义。
     ...(route?.replyTo?.startsWith(".")
-      ? ["你这一轮的**最后一条消息会作为回执送回 `reply-to`** (它当初把这件活派给你, 你转给了 `from`) —— 据此在终句交代结论 (`RESULT:` 可选)。"]
+      ? ["面向 `reply-to` 的上游 wizard, 据此在终句交代结论 (`RESULT:` 可选)。"]
       : route?.replyTo
-        ? [`你这一轮的**最后一条消息会发进 \`reply-to\` 那个群**, ${route.audience ? "`audience` " : "人"}在等这件事的结论 —— 写给人看: 做成了什么、没做成什么, 不复述它的原话。`]
+        ? [`面向 \`reply-to\` 群里的${route.audience ? " `audience`" : "人"}: 做成了什么、没做成什么, 不复述它的原话。`]
         : route?.pending && !(job && job.job)
-          ? [`还有 ${route.pending} 份没回: 这一轮的回复只记在 rolepage, 不外发 —— 先记下这一份, 等最后一份到了再收口。`]
+          ? [`还有 ${route.pending} 份没回: 先记下这一份, 等最后一份到了再汇总。`]
           : chat === undefined
             ? ["人看不见这段私聊。"]
             : ["这段对话在群里, 人看得见你们俩。"]),

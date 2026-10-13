@@ -8,6 +8,7 @@
 // 属性一览 (`wezard` 区分种类):
 //   envelope  kind=human|peer|task  from  chat?  scope=private|public (仅 peer)
 //             receipt=1 (仅 peer): 这一轮是守护进程自动送回来的回执, 不是新活
+//             quiet=1 (仅 peer): 发话方不收回执; 不改变公开/私聊或工具授权
 //             reply-to (仅回执): 这一轮的终句会送到哪 (`.x` / 群名); 缺省 = 只进 rolepage
 //             k (仅回执): 机器读的父 k (`chat:<base>` / `peer:<turn>:<key>`), 下一跳继承
 //   mention   names  (空格分隔的 `.name`)
@@ -62,6 +63,8 @@ export interface Envelope {
   asker?: Asker;
   /** 这一轮是回执 (对方干完了, 守护进程把结论送回发话方), 不是新派的活。 */
   receipt?: boolean;
+  /** 发话方不收自动回执 (fyi / receipt:false); 与 private、工具授权无关。 */
+  quiet?: boolean;
   /** 回执的定论 (见 ReceiptStatus); 老信封没有 = done。 */
   status?: ReceiptStatus;
   /** 这件活的 id (`t` + 6 hex): 派活、续问、回执都带同一个, 回执按它定位答句。 */
@@ -105,6 +108,7 @@ export const envelopeAttrs = {
   peer: (from: string, chat?: string, t?: TurnTag): Attrs => ({
     wezard: "envelope", kind: "peer", from, scope: chat === undefined ? "private" : "public", ...(chat ? { chat } : {}),
     ...askerAttrs(t?.asker),
+    ...(t?.quiet || t?.act === "fyi" ? { quiet: "1" } : {}),
     ...(t ? { turn: t.turn, ...(t.re ? { re: t.turn } : {}), ...(t.deadline ? { deadline: new Date(t.deadline).toISOString() } : {}), ...(t.act ? { act: t.act } : {}) } : {}),
   }),
   /** `turn` = 这一枪的件号 (安静任务按它定位终句, 见 index.ts relayUnlessQuiet)。 */
@@ -138,6 +142,7 @@ const envelopeOfAttrs = (a: Attrs): Envelope | undefined =>
         ...(a["chat-key"] ? { chatKey: a["chat-key"] } : {}),
         ...(a["asker-user"] && a["asker-chat"] ? { asker: { who: a["asker-user"], chat: a["asker-chat"] } } : {}),
         ...(a.receipt === "1" ? { receipt: true } : {}),
+        ...(a.quiet === "1" || a.act === "fyi" ? { quiet: true } : {}),
         ...(a.status ? { status: a.status as ReceiptStatus } : {}),
         ...(a.turn ? { turn: a.turn } : {}),
         ...(a.re ? { re: a.re } : {}),
