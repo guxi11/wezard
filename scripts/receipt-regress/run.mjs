@@ -13,8 +13,8 @@
 // 根的开场白是发起者一句 receipt:false 的私聊 —— 它这一轮没有父 k, 测试活的回执只回到根,
 // 不会沿发起者手上那件活往上冒。工单用例会在根的 home 聊天里各出一对开 / 收工气泡。
 import { execFileSync } from "node:child_process";
-import { appendFileSync, readFileSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { loadConfig } from "../../dist/shared/config.js";
@@ -30,6 +30,7 @@ const TOKEN = (() => { try { return readFileSync(join(homedir(), ".wezard", "dae
 const STATE = process.env.RR_STATE_DIR ?? join(homedir(), ".wezard");
 const ME = { sessionId: process.env.CLAUDE_CODE_SESSION_ID ?? "", tmuxPane: process.env.TMUX_PANE ?? "" };
 const MAX_KIDS = 7;
+const gates = new Set();
 // 每次运行的名字后缀: 几个 wizard 可能同时在跑这个脚本 (改 receipts 的都要跑), 名字全局唯一,
 // 不带后缀就互相撞名、甚至收掉对方的分身。用例里写的是逻辑名 (`rr-a`), 在边界上换成真名。
 const RUN = randomBytes(2).toString("hex");
@@ -97,6 +98,33 @@ const logLine = (since, pred) =>
 const tmuxPaneOf = (window) =>
   execFileSync("tmux", ["list-panes", "-a", "-F", "#{pane_id}\t#{window_name}"], { encoding: "utf8" })
     .split("\n").map((l) => l.split("\t")).find(([, w]) => w === window)?.[0];
+
+// A foreground tool owns the gate until the driver releases it. A session_id is still
+// running even when the outer functions.exec cell says "Script completed".
+const foregroundGate = () => {
+  const dir = mkdtempSync(join(tmpdir(), "receipt-gate-"));
+  gates.add(dir);
+  const program = join(dir, "wait.py");
+  writeFileSync(program, `import pathlib, time
+p = pathlib.Path(__file__).parent
+(p / "ready").touch()
+end = time.monotonic() + 240
+while not (p / "release").exists():
+    if time.monotonic() >= end:
+        (p / "expired").touch()
+        raise SystemExit("gate expired")
+    time.sleep(0.1)
+(p / "exited").touch()
+print("GATE_RELEASED")
+`);
+  const quote = (x) => "'" + x.replaceAll("'", "'\"'\"'") + "'";
+  return {
+    prompt: `用 shell 工具前台执行 python3 ${quote(program)}，不要 run_in_background。若返回 session_id，必须继续 write_stdin 等到 exit_code；外层 Script completed 不代表子进程退出。只有看到 GATE_RELEASED 才能结束这一轮。期间插话也不许提前收口。`,
+    ready: () => existsSync(join(dir, "ready")),
+    intact: () => existsSync(join(dir, "ready")) && !existsSync(join(dir, "exited")) && !existsSync(join(dir, "expired")),
+    release: () => writeFileSync(join(dir, "release"), ""),
+  };
+};
 
 // ── 根与分身 ──────────────────────────────────────────────────────────
 let root; // { target, name, model }
@@ -174,6 +202,10 @@ const fakeReceipts = async (extra = {}) => {
 
 // ── 用例: 每条返回 { pass, why } ────────────────────────────────────────
 const cases = {
+  "receipt-timing": { names: [], unit: true, run: async () => {
+    execFileSync("npx", ["tsx", "tests/receipt-timing.test.ts"], { stdio: "pipe" });
+    return { pass: true, why: "5 个事件门控时序: NEED 已投/排队、单次/双次 re、交接前两份欠账/一份已答" };
+  } },
   // 回执轮的频道只由去向定: 续回进群 (chat 父 k, 兄弟落齐) 才有频道, 其余一律私聊 ——
   // 不能因为那件子活是 public:true 派的就沿用它的频道。三种回落: 没有父 k (chain:false)、
   // 中途回执 (NEED)、父 k 指向的上游那一份已不在 (被 wait_peer 取走 / 不要回执)。
@@ -435,25 +467,54 @@ const cases = {
   "handoff-owe": { names: ["rr-h", "rr-s"], run: async () => {
     const n = nonce();
     await Promise.all(["rr-h", "rr-s"].map((x) => spawn(x)));
-    await tell("rr-h", `${SLEEP(40)}, 然后回复一行: RESULT: h-root-${n}`);
-    await sleep(6000);
-    await post("/peers/tell", { target: kids.get("rr-s"), name: real("rr-h"), priority: "now", text: `回复一行: RESULT: h-s-${n}` });
-    await sleep(3000);
-    const t0 = Date.now();
-    const h = await post("/wizard/handoff-self", { target: kids.get("rr-h"), brief: `（receipt-regress 交接测试）手上没有别的活。你会收到两轮, 一轮一个发话方 (看那一轮信封里的发话人): 每一轮只回复一行 RESULT:, 且只写那个发话人对应的值 —— 欠 ${real("rr-root")} 的是 h-root-${n}, 欠 ${real("rr-s")} 的是 h-s-${n}。收到这份简报的这一轮同样只写它信封发话人的那一个值, 不要复述简报、不要在任何一句里写出另一个值。不要调用任何工具。` });
-    if (!h.ok) return { pass: false, why: `handoff-self: ${h.reason}` };
-    const both = await until(() => { const a = slotOf(root.target, kids.get("rr-h")), b = slotOf(kids.get("rr-s"), kids.get("rr-h")); return a?.settled && b?.settled && [a, b]; }, 5 * 60_000);
-    const p = await jsonlOf(kids.get("rr-h"));
-    const lines = p ? userTexts(p).filter((l) => l.includes('wezard="envelope"')) : [];
-    const mixed = lines.filter((l) => l.includes(`.${real("rr-s")}`) && l.includes(`.${root.name}`)).length;
-    const [a, b] = both ?? [];
-    // 前提: 交接发起时两份都还欠着 —— 交接把义务转进新会话 (transfer 把槽的发话锚改到交接时刻)。
-    // 旧轮在交接前已收口的话, 交接什么也没接到, 值对不对没有意义: 报前提没成立, 别报成值答串了。
-    if (both && (a.at < t0 || b.at < t0)) return { pass: false, why: "前提没成立: 旧轮在交接前已收口 (交接没接到欠账), 重跑这一条" };
-    return {
-      pass: !!both && a.outcome?.body.includes(`h-root-${n}`) && !a.outcome.body.includes(`h-s-${n}`) && b.outcome?.body.includes(`h-s-${n}`) && !b.outcome.body.includes(`h-root-${n}`) && !mixed,
-      why: `根收到=${a?.outcome?.status ?? "未落定"}:${a?.outcome?.body.slice(0, 60) ?? ""} · rr-s 收到=${b?.outcome?.status ?? "未落定"}:${b?.outcome?.body.slice(0, 60) ?? ""} · 两份信封并在一句的 ${mixed} 句`,
-    };
+    const gate = foregroundGate();
+    try {
+      // Start the blocking tool before either obligation: commentary before the second
+      // user envelope would otherwise close the first ask in replyClosedBefore.
+      const warm = await tell("rr-h", `${gate.prompt} 退出后只回 ok。`, { receipt: false });
+      if (!warm.ok || !await until(gate.ready, 120_000, 250)) return { pass: false, why: "前提没成立: 前台条件闸未启动" };
+      const first = await tell("rr-h", "继续等前台条件闸，不输出文字；这件活交接后再答。", { chain: false });
+      const second = await post("/peers/tell", { target: kids.get("rr-s"), name: real("rr-h"), priority: "now", chain: false, text: "继续等前台条件闸，不输出文字；这件活交接后再答。" });
+      if (!first.ok || !first.turn || !second.ok || !second.turn || first.turn === second.turn) return { pass: false, why: `前提没成立: 派活失败 ${JSON.stringify([first, second])}` };
+      const oldPath = await jsonlOf(kids.get("rr-h"));
+      const { replyClosedBefore } = await import("../../dist/daemon/peers.js");
+      const asks = [[root.target, `.${root.name}`, first.turn], [kids.get("rr-s"), `.${real("rr-s")}`, second.turn]];
+      const seen = await until(() => oldPath && asks.every(([, , turn]) => userTexts(oldPath).some((t) => t.includes(`turn="${turn}"`))), 60_000, 250);
+      const busy = await until(async () => (await post("/peers/peek", { target: root.target, name: real("rr-h"), turns: 1 })).busy, 15_000, 500);
+      const t0 = Date.now();
+      const owed = asks.every(([from, name, turn]) => {
+        const s = slotOf(from, kids.get("rr-h"));
+        return s?.turn === turn && !s.resolved && !s.claimed && !s.settled && replyClosedBefore(oldPath, name, s.at, t0, [], turn) === "";
+      });
+      if (!seen || !busy || !gate.intact() || !owed) return { pass: false, why: "前提没成立: 必须目标正忙、闸仍关闭、两件已读入且旧 transcript 都未收口" };
+      const h = await post("/wizard/handoff-self", { target: kids.get("rr-h"), brief: `（receipt-regress 交接测试）你会收到两轮，一轮一个发话方（只看信封 from 属性）。每轮只回复对应的一行 RESULT:。${real("rr-root")} 对应 h-root-${n}；${real("rr-s")} 对应 h-s-${n}。每轮不许提另一个值。不要调用任何工具。` });
+      if (!h.ok) return { pass: false, why: `handoff-self: ${h.reason}` };
+      gate.release();
+      const transfer = await until(() => logLine(t0, (o) => o.to === `.${real("rr-h")}` && o.msg === "receipt: 交接时转交"), 180_000);
+      const carried = transfer?.carried?.slice().sort();
+      const expected = asks.map(([, name]) => name).sort();
+      if (transfer?.answered !== 0 || JSON.stringify(carried) !== JSON.stringify(expected)) return { pass: false, why: `前提没成立: transfer answered=${transfer?.answered} carried=${carried}` };
+      const both = await until(() => {
+        const xs = asks.map(([from, , turn]) => slotOf(from, kids.get("rr-h")));
+        return xs.every((s, i) => s?.turn === asks[i][2] && s.settled) && xs;
+      }, 5 * 60_000);
+      const p = await jsonlOf(kids.get("rr-h"));
+      const lines = p ? userTexts(p).filter((l) => l.includes('wezard="envelope"')) : [];
+      const separate = p !== oldPath && asks.every(([, name, turn]) => lines.filter((l) => l.includes(`from="${name}"`) && l.includes(`turn="${turn}"`)).length === 1)
+        && !lines.some((l) => asks.every(([, name]) => l.includes(`from="${name}"`)));
+      const got = await until(async () => {
+        const xs = await Promise.all(asks.map(async ([from, , turn]) => (await receiptsIn(from, "rr-h")).filter((r) => r.attrs.turn === turn)));
+        return xs.every((rs) => rs.length) && xs;
+      }, 60_000) ?? [];
+      const [a, b] = both ?? [];
+      return {
+        pass: !!both && a.at >= t0 && b.at >= t0 && a.outcome?.status === "done" && b.outcome?.status === "done"
+          && a.outcome.body.includes(`h-root-${n}`) && !a.outcome.body.includes(`h-s-${n}`)
+          && b.outcome.body.includes(`h-s-${n}`) && !b.outcome.body.includes(`h-root-${n}`)
+          && separate && got.length === 2 && got.every((rs) => rs.length === 1 && rs[0].attrs.status === "done"),
+        why: `transfer answered=0 carried=${carried.join(",")} · 新会话独立信封=${separate} · 根=${a?.outcome?.status ?? "未落定"}:${a?.outcome?.body.slice(0, 60) ?? ""} · rr-s=${b?.outcome?.status ?? "未落定"}:${b?.outcome?.body.slice(0, 60) ?? ""} · 原件号回执数=${got.map((rs) => rs.length).join(",")}`,
+      };
+    } finally { gate.release(); }
   } },
 
   // fork 分身 (继承上下文) 的第一轮: 带 task 的是私聊派活, 不带的是开场白 —— 都不是人在群里
@@ -583,18 +644,32 @@ const cases = {
   } },
 
   // NEED → re 答复 → done: 中途那份 status=need 且不算定论, 续问沿用件号 (legs=2), 终态 done。
-  need: { names: ["rr-n"], run: async () => {
+  need: { names: ["rr-n", "rr-ns"], run: async () => {
     const n = nonce();
-    await spawn("rr-n");
-    await tell("rr-n", "这是一次反问测试。现在只回复一行: `NEED: 请给我口令`, 不做别的。之后收到口令, 回复一行: RESULT: need-<口令>");
-    const asked = await until(async () => (await receiptsIn(root.target, "rr-n")).find((r) => r.attrs.status === "need"), 180_000);
-    if (!asked) return { pass: false, why: `没收到 NEED 回执 (slot=${slotOf(root.target, kids.get("rr-n"))?.outcome?.status})` };
-    const mid = slotOf(root.target, kids.get("rr-n"));
-    await tell("rr-n", `口令是 ${n}`, { re: asked.attrs.turn });
-    const s = await settledSlot("rr-n", 180_000);
+    await Promise.all(["rr-n", "rr-ns"].map((x) => spawn(x)));
+    const sender = kids.get("rr-ns");
+    const setup = `你是自动测试的被动收件箱 ${n}。所有 NEED 由外部脚本答复；收到 NEED 也只回 ok，不调用工具，不发 tell_peer，不提供口令。现在只回 ok。`;
+    const warm = await tell("rr-ns", setup, { receipt: false });
+    const ready = warm.ok && await until(() => turnsOf(sender).some((t) => t.closed && t.userQuery?.includes(setup)), 120_000);
+    if (!ready) return { pass: false, why: "前提没成立: 被动收件箱未就绪" };
+    const send = (text, extra = {}) => post("/peers/tell", { target: sender, name: real("rr-n"), text, priority: "now", chain: false, ...extra });
+    const first = await send("这是一次反问测试。现在只回复一行: NEED: 请给我口令（自动测试，由外部脚本答复，收件箱只回 ok，禁止调用工具）。之后收到口令，回复一行: RESULT: need-<口令>");
+    if (!first.ok || !first.turn) return { pass: false, why: `tell: ${first.reason ?? "缺件号"}` };
+    const asked = await until(async () => (await receiptsIn(sender, "rr-n")).find((r) => r.attrs.status === "need" && r.attrs.turn === first.turn), 180_000);
+    if (!asked) return { pass: false, why: `没收到 NEED 回执 (slot=${slotOf(sender, kids.get("rr-n"))?.outcome?.status})` };
+    const read = await until(() => turnsOf(sender).some((t) => t.closed && t.from?.receipt && t.from.from === kids.get("rr-n") && t.from.turn === first.turn && t.from.status === "need"), 120_000);
+    const mid = slotOf(sender, kids.get("rr-n"));
+    if (!read || mid?.turn !== first.turn || mid.legs !== 1 || mid.resolved || mid.settled || mid.outcome?.status !== "need") return { pass: false, why: `前提没成立: NEED 收件轮未结束或发生额外续问 legs=${mid?.legs}` };
+    const re = await send(`口令是 ${n}`, { re: first.turn });
+    if (!re.ok || re.turn !== first.turn) return { pass: false, why: `re: ${re.reason ?? "件号改变"}` };
+    const s = await until(() => { const x = slotOf(sender, kids.get("rr-n")); return x?.settled && x; }, 180_000);
+    const got = await until(async () => { const xs = (await receiptsIn(sender, "rr-n")).filter((r) => r.attrs.turn === first.turn); return xs.some((r) => r.attrs.status === "done") && xs; }, 60_000) ?? [];
+    const path = await jsonlOf(kids.get("rr-n"));
+    const dispatches = path ? userTexts(path).filter((t) => t.includes(`from=".${real("rr-ns")}"`) && t.includes(`turn="${first.turn}"`)) : [];
     return {
-      pass: !mid?.resolved && s?.outcome?.status === "done" && s.outcome.body.includes(`need-${n}`) && s.legs === 2 && s.turn === asked.attrs.turn,
-      why: `NEED 时 resolved=${!!mid?.resolved} · 终态=${s?.outcome?.status ?? "未落定"} legs=${s?.legs} 同件号=${s?.turn === asked.attrs.turn}`,
+      pass: s?.outcome?.status === "done" && s.outcome.body.includes(`need-${n}`) && s.legs === 2 && s.turn === first.turn && got.map((r) => r.attrs.status).join(",") === "need,done"
+        && dispatches.length === 2 && !dispatches[0].includes(`re="${first.turn}"`) && dispatches[1].includes(`re="${first.turn}"`),
+      why: `NEED 前提成立 legs=${mid.legs} resolved=${mid.resolved} · 终态=${s?.outcome?.status ?? "未落定"} legs=${s?.legs} 同件号=${s?.turn === first.turn} · 派发=${dispatches.length} 信封=${got.map((r) => r.attrs.status).join(",")}`,
     };
   } },
 
@@ -719,14 +794,16 @@ const pool = (limit) => {
 };
 
 const cleanup = async () => {
+  for (const dir of gates) writeFileSync(join(dir, "release"), "");
   await Promise.all([...kids.keys()].map(stop));
+  for (const dir of gates) rmSync(dir, { recursive: true, force: true });
+  gates.clear();
   if (root) await post("/wizard/stop", { ...ME, name: root.name, mode: "end", forget: true });
   // 根开过工单, close_job 会把收工结论留档成它的情景记忆 —— 测试的不该留下。
   if (root) rmSync(join(STATE, "memory", "episodes", `${root.name}.jsonl`), { force: true });
 };
 
 const main = async () => {
-  if (!ME.sessionId && !ME.tmuxPane) throw new Error("要在 wizard 会话里跑 (缺 CLAUDE_CODE_SESSION_ID / TMUX_PANE)");
   console.log("typecheck…");
   execFileSync("npm", ["run", "-s", "typecheck"], { stdio: "inherit" });
   const pick = process.argv.slice(2);
@@ -736,6 +813,7 @@ const main = async () => {
   const chosen = pick.length ? pick : Object.keys(cases).filter((x) => !cases[x].solo);
   // 只跑纯单元的不必生根 (它们不碰 daemon)。
   if (chosen.some((x) => !cases[x].unit)) {
+    if (!ME.sessionId && !ME.tmuxPane) throw new Error("要在 wizard 会话里跑 (缺 CLAUDE_CODE_SESSION_ID / TMUX_PANE)");
     const r = await post("/wizard/clone", { ...ME, name: real("rr-root"), inherit: false, tier: "mini", keepalive: false, description: "receipt-regress 的根" });
     if (!r.ok) throw new Error(`spawn rr-root: ${r.reason}`);
     root = { target: r.target, name: r.name, model: r.model };
@@ -755,7 +833,7 @@ const main = async () => {
   }));
   const failed = results.filter((x) => !x).length;
   const rootAlive = !root || (!!(await jsonlOf(root.target)) && !!tmuxPaneOf(root.name));
-  if (!rootAlive) console.log("⚠ 根 rr-root 中途没了 (多半撞上了别人的 reload) —— 「根收到 N 份」类判定无效, 重跑");
+  if (!rootAlive) { console.log("FAIL 根 rr-root 中途没了 —— 「根收到 N 份」类判定无效, 重跑"); return Math.max(1, failed); }
   console.log(failed ? `${failed}/${results.length} FAIL` : `全部 ${results.length} 条 PASS`);
   return failed;
 };
