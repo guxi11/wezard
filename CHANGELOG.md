@@ -8,6 +8,7 @@
 - `set_workspace` 换工作区从「杀 pane 全新重开 (上下文丢弃)」改为**自动交接**: daemon 落 `setPendingCwd` 后走 handoff 机械 (请它写简报 → 原地重开落进新目录 → 简报贴回), 上下文带过去、新目录的宪章随之生效, 「📂 当前项目」气泡照发 (新增交接的 `announce` 标记); 路由一律立即回 `scheduled:true` (调用方常是被换的那个, 要先说完这一轮), 冷会话 (pane 不在) 仍按老路直接新开; 交接失败退回提醒 + pendingCwd 排队, 人手 /new 照样完成切换。
 - 宪章守卫 (`guardCharter`) 对**热生效**的宪章改动 (如 `chatPolicy.<chat>.topOnly`、聊天名) 不再只给受影响且 pane 活着的 wizard 挂 handoff 提醒, 而是自动替它们交接 (`handoffs.other`, 各写简报后原地重开); 交接不成 (一直忙 / 已在交接中 / 重开失败) 才退回挂提醒。reload 项此刻重开渲染的还是旧宪章, 维持提醒不变。比对剔除「出生时同群的 wizard」一节: 它是出生快照且渲染途中的懒定居会让前后两次渲染无辜不同 —— 此前一次无关的 `chats` 写入会把同群活着的 wizard 全部误判为受影响。
 - 交接简报贴回新会话后要看见它真的动起来 (转忙或新 transcript 有话) 才算数: 冷 pane 的首条注入可能被还没起好的 TUI 吞掉 (inject 只能信任提交, 日志 ok 而 pane 空白), 吞了 wizard 就空着醒来。看不见就重贴一次, 仍不行才算失败。
+- 名册变动提醒 (reminder 名册) 不再带上超过 2 天没活动的冷绑定 (`activeRows` / `ROSTER_ACTIVE_MS`, full / delta 同一口径; 在忙或挂在审批上的、刚 spawn 还没写过的照留): 机器上冷绑定越攒越多, 名册一变就往每个 wizard 塞一张大半是死人的表。`wizard_roster` 的全表语义不变 —— 只滤这份推送。
 
 ### Fixed
 - `dispatch` 自动选人先按「活着且是 slot」收窄候选池再读 transcript: 此前对全机几百个绑定 (多数 pane 早没了) 逐个扫尾巴算文件集 / 问话 / 缓存时刻, 读完才丢掉, 路由一步就要 ~2.8s; 收窄后 ~0.4s, 候选池与公共文件统计口径不变。自动派给已有 wizard 端到端从 ~3.5s 降到 ~1s, 自动转 spawn 从 ~9s 降到 ~6.5s (余下是 CLI 冷启动)。

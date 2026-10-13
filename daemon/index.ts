@@ -90,7 +90,7 @@ import {
   type WizardBrief,
   type WizardRecord,
 } from "./wizard.js";
-import { bindNoticeBox, createNoticeBox, createSeenRing, gcSeen, chatAudience, hears, noticeSuffixFor, type Notice, type Subject, type Part, type SeenRow, type SnapRow, type Via } from "./notices.js";
+import { activeRows, bindNoticeBox, createNoticeBox, createSeenRing, gcSeen, chatAudience, hears, noticeSuffixFor, type Notice, type Subject, type Part, type SeenRow, type TimedSnapRow, type Via } from "./notices.js";
 import { createLedger, digest, pendingGc, renderDigest, renderTable, renderAwaiting, renderStalled, renderShelved, ago as agoMs, HEARD_EVERY_MS, type Item as PendingItem, type LiveOf, type Mark } from "./pending-items.js";
 import { checkDirection } from "./direction.js";
 import { loadJobStore, dutyLine, awaitingAccept, stalledRoots, shelvedRoots, nudgeDue, dayClamp, childrenOf as jobChildren, jobEpisode, rejectReason, ACCEPTS, JOB_MEMBER_MAX, JOB_DEPTH_MAX, depthOf, ancestorsOf as jobAncestors, treeOrder, jobStage, type Accept, type JobMark, type JobRecord, type MemberLive } from "./jobs.js";
@@ -2154,17 +2154,21 @@ const main = async (): Promise<void> => {
       // 群况快照只给长住的 (没有 parent): 分身的协调人是生它的那位, 宪章里的出生快照够用。
       // 表里是这个群的常驻面: 管家、长住有职责的、管家生的 (群里的执行者)、收件人自己生的;
       // 再往下一层的 (分身的分身, 回归测试那批 rr-*) 不进表 —— 同名册变动 hears 的取舍。
-      snapshot: (t) => (wizards.get(t)?.parent ? undefined : () =>
-        m.chatTargets(t)
+      snapshot: (t) => (wizards.get(t)?.parent ? undefined : () => {
+        const now = Date.now();
+        // activeRows: 超阈值没活动的冷绑定不进表 (见 notices.ts); touch 复用冷门控那一次 stat, 不新增 IO。
+        return activeRows(m.chatTargets(t)
           .filter((x) => x !== t && wizards.get(x)?.name)
           .filter((x) => ((p) => !tagOfKey(x) || (!p ? !!wizards.get(x)?.description : p === t || p === baseOfKey(t)))(wizards.get(x)?.parent))
-          .map((x): SnapRow => {
+          .map((x): TimedSnapRow => {
             const i = m.sessionInfo(x);
             const state = ((v) => (v === undefined ? "-" : v ? "idle" : m.parkedNow(x) ? "parked" : "busy"))(m.idleVerdict(x));
+            const touch = i?.jsonlPath ? touchOf(i.jsonlPath) : 0;
             // 冷热与 route_candidates / tell_peer 冷门控同一口径 (touchOf / ttlOf)。
-            const warmth = i?.jsonlPath ? { ctx: i.contextTokens, cold: wakeCostOf(i.contextTokens, touchOf(i.jsonlPath), Date.now(), ttlOf(i.jsonlPath)).cold } : {};
-            return { name: displayName(x), state, ...warmth, job: wizards.get(x)?.description || (tagOfKey(x) ? "" : "steward") };
-          })),
+            const warmth = i?.jsonlPath ? { ctx: i.contextTokens, cold: wakeCostOf(i.contextTokens, touch, now, ttlOf(i.jsonlPath)).cold } : {};
+            return { name: displayName(x), state, ...warmth, job: wizards.get(x)?.description || (tagOfKey(x) ? "" : "steward"), touch };
+          }), now);
+      }),
       seen: createSeenRing(loadJsonMap<SeenRow>(cfg.wrc.mirror.noticeSeenFile, gcSeen), (t) => m.sessionInfo(t)?.sessionId ?? ""),
       cwdOf: (t) => ((c) => c.runningCwd || c.defaultCwd)(m.getCwd(t)),
     }));

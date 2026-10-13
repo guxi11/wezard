@@ -170,6 +170,18 @@ export const renderSnapshot = (rows: readonly SnapRow[]): string[] => [
   ...rows.slice(0, SNAP_MAX).map(snapRow),
   ...(rows.length > SNAP_MAX ? [`…(+${rows.length - SNAP_MAX}) wizard_roster`] : []),
 ];
+/** reminder 名册的活跃阈值: 超过 2 天没活动的冷绑定不进表 (full / delta 同一口径)。
+ *  wizard_roster 的全表语义不变 —— 只滤这份推送。 */
+export const ROSTER_ACTIVE_MS = 2 * 24 * 3600_000;
+/** 带着活动时刻的快照行 (touchOf: 缓存触碰或 transcript mtime; 0 = 还没写过 / 读不到)。
+ *  touch 只用于过滤, 不进表、不进 v: 签名。 */
+export interface TimedSnapRow extends SnapRow { touch: number }
+/** 只留活口: 在忙 / 挂在审批上的、刚 spawn 还没写过的 (touch=0)、阈值内有活动的。 */
+export const activeRows = (rows: readonly TimedSnapRow[], now = Date.now()): SnapRow[] =>
+  rows
+    .filter((r) => r.state === "busy" || r.state === "parked" || !r.touch || now - r.touch <= ROSTER_ACTIVE_MS)
+    .map(({ touch: _, ...r }) => r);
+
 /** 一行快照「变没变」的口径: ctx 按 CTX_STEP 分档 —— 每轮涨几 k 不值得再说一遍, 跨档 (含 COLD_GATE 100k) 才说。 */
 export const CTX_STEP = 50_000;
 const sigOf = (r: SnapRow): string =>
