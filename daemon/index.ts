@@ -3825,7 +3825,7 @@ const main = async (): Promise<void> => {
       const taskOwners = new Set(
         tasks.list()
           .filter((t) => t.enabled)
-          .map((t) => wizardStore()?.byName(t.owner)?.target)
+          .map((t) => wizardStore()?.get(t.owner)?.target ?? wizardStore()?.byName(t.owner)?.target)
           .filter((t): t is string => !!t),
       );
       const pendingSids = new Set(listPending().map((p) => p.meta.sessionId).filter((s): s is string => !!s));
