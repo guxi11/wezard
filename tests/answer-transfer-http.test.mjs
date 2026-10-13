@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import ts from 'typescript';
 import {setup} from './workflow-http-fixture.mjs';
 
 const opts = () => ({topOnly:true, openingMs:123, answerContext:{turn:'human-turn',channel:'chat:group',prefix:'existing progress'},origin:{asker:{who:'user:human',chat:'chat:group'},k:{kind:'chat',channel:'chat:group',turn:'123'}}});
@@ -68,5 +70,19 @@ for (const override of [{topOnly:false},{answerContext:undefined},{origin:{k:{ki
  const r=await x.post('/peers/tell',{name:'worker',text:'old client'});
  assert.equal(r.status,200);assert.equal(r.body.answer,undefined);assert.equal(x.answers.all().length,0);
  x.close();
+}
+{
+ const x=await setup({openingEnv:{kind:'peer',private:true,turn:'tPinned'}});
+ x.answers.reserve({id:'tPinned',source:'owner',target:'worker',sourceTurn:'human',sourceOpening:123,origin:'origin',channel:'chat:group',prefix:'',tell:{from:'owner',to:'worker',channel:'',turn:'tPinned'},state:'reserved'});
+ x.answers.activate('tPinned');
+ const src=readFileSync('daemon/index.ts','utf8'),start=src.indexOf('    const topOnlyMuted ='),end=src.indexOf('    http.register("POST /notify"',start);
+ const code=ts.transpileModule(src.slice(start,end)+'\nreturn topOnlyMuted;',{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText;
+ const env={...x.env,tagOfKey:()=> 'worker',kOfAttr:()=>undefined};
+ const mute=new Function(...Object.keys(env),code)(...Object.values(env));
+ assert.equal(mute('worker',['chat:group']),undefined,'active target owns notification control');
+ x.answers.outcome('tPinned',{status:'timeout',body:'timeout'});x.answers.delivering('tPinned');
+ assert.equal(mute('worker',['chat:group']).ok,false,'pinned terminal blocks late notify before ACK');
+ assert.equal((await x.post('/peers/tell',{name:'other',text:'late child'},'worker')).status,409,'pinned terminal blocks late dispatch before ACK');
+ assert.equal(x.injected.length,0);x.close();
 }
 console.log('answer transfer HTTP: eligibility, busy, failure, success, uncertain, concurrency, old client passed');

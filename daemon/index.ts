@@ -1107,7 +1107,7 @@ const main = async (): Promise<void> => {
       if (lostAnswer(self)) return { ok: false, reason: "本轮回答权和控制权已移交；由目标 wizard 对人交付" };
       const env = openingOfSelf(self)?.env;
       const transferred = env?.turn ? answers.target(self, env.turn) : undefined;
-      if (transferred) return transferred.state !== "delivered" ? undefined : { ok: false, reason: "本轮移交回答已经交付；迟到产出不能再次对人发送" };
+      if (transferred) return !transferred.outcome && transferred.state !== "delivered" ? undefined : { ok: false, reason: "本轮移交回答已经落定；迟到产出不能再次对人发送" };
       const belowTop = env?.kind === "peer" && (env.receipt ? kOfAttr(env.k ?? "")?.kind === "peer" : env.private);
       const muted = dests.filter((d) => chatPolicyOf(cfg, d).topOnly && !(!tagOfKey(self) && baseOfKey(self) === d));
       return muted.length && belowTop
@@ -1353,7 +1353,7 @@ const main = async (): Promise<void> => {
     const tellPeerAsInner = async (self: string, body: PeerBody, extra = "", held?: { turn: string; channel: string; after?: string[]; seen?: Readonly<Record<string, HeldSeen>>; alive?: () => boolean; k?: ParentK; asker?: Asker }, planned?: PlanPermit): Promise<Reply> => {
       if (lostAnswer(self)) return { status: 409, body: { ok: false, reason: "this turn transferred answer and control; stop dispatching and conclude silently" } };
       const selfTurn = openingOfSelf(self)?.env?.turn;
-      if (selfTurn && answers.target(self, selfTurn)?.state === "delivered") return { status: 409, body: { ok: false, reason: "transferred answer is terminal; late control actions refused" } };
+      if (selfTurn && answers.target(self, selfTurn)?.outcome) return { status: 409, body: { ok: false, reason: "transferred answer is terminal; late control actions refused" } };
       const answer = (body as { answer?: unknown }).answer;
       if (answer !== undefined && answer !== "transfer") return { status: 400, body: { ok: false, reason: "answer must be transfer when supplied" } };
       if (held?.alive && !held.alive()) return { status: 409, body: { ok: false, reason: "held dispatch withdrawn" } };
