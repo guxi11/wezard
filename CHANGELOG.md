@@ -11,6 +11,8 @@
 - 名册变动提醒 (reminder 名册) 不再带上超过 2 天没活动的冷绑定 (`activeRows` / `ROSTER_ACTIVE_MS`, full / delta 同一口径; 在忙或挂在审批上的、刚 spawn 还没写过的照留): 机器上冷绑定越攒越多, 名册一变就往每个 wizard 塞一张大半是死人的表。`wizard_roster` 的全表语义不变 —— 只滤这份推送。
 
 ### Fixed
+- rolepage 同一句话画两颗气泡: tail 软收口已按 `final:false` 记过终句, 收口时 `recoverEventFinal` 不再追加同文第二条而是就地升级 (`markTurnTextFinal`); 续答链把子事件终句误写进父事件 `result` 的 (continueResult) 也不再补进父轮记录。已双写的历史记录渲染时相邻同文只留终稿; 忙时插队被记两遍 (插话 + 真开一轮) 与 reload 切段后开头重印的入消息按重影剔除 (`injectEchoesOf`: 同文含互相包含认插话, 同 `eventId` 切段只留最早一段)。`DeferExecuteTool` 外壳下的调用剥壳按内层工具认提示行 —— 这层壳下的 `tell_peer` / `dispatch` 此前永远没有提示行。
+- 流式气泡定格在最后一行 CoT 进度、不更新到终句: 事件泵 evidence 探针 (observe → io.recovered) 与 brief 软收口同为 ~1s 周期赛跑, 探针常先跑到而它调 `recoverEventFinal` 不带气泡 —— 终句全走 standalone, 气泡定格; 现在没传气泡时按 target/turn 找回活着的 `briefBubble`。链式收口 (`eventFinalGate` 子活未落定) 只延后 closing 释放、不再扣住气泡: 气泡还在 stream 窗口内就把终句刷进气泡 (`finishBriefBubble`, 与正常收口同形), 已收 / 过期 / 终句超单条上限才 standalone。
 - `dispatch` 自动选人先按「活着且是 slot」收窄候选池再读 transcript: 此前对全机几百个绑定 (多数 pane 早没了) 逐个扫尾巴算文件集 / 问话 / 缓存时刻, 读完才丢掉, 路由一步就要 ~2.8s; 收窄后 ~0.4s, 候选池与公共文件统计口径不变。自动派给已有 wizard 端到端从 ~3.5s 降到 ~1s, 自动转 spawn 从 ~9s 降到 ~6.5s (余下是 CLI 冷启动)。
 
 ## [2.6.4] - 2026-10-13

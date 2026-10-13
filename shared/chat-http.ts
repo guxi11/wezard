@@ -27,7 +27,7 @@ import { baseOfKey, sameBot } from "./session-label.js";
 import { isMark, isPost, isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, jobProgress, withData, type WorldFactJob, type WorldFacts } from "./world.js";
 import {
-  allMessages, unreadIndex, ledgerOf, windowOf, spanFor, convKeyOf, chatKeysOf, isWizardDm, parseTalkKey, glanceOfTalk, convsOf, jobConvsOf, jobOfKey, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn,
+  allMessages, unreadIndex, ledgerOf, windowOf, spanFor, convKeyOf, chatKeysOf, isWizardDm, parseTalkKey, glanceOfTalk, convsOf, jobConvsOf, jobOfKey, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn, injectEchoesOf,
   roleInfo, roleStats, sessionsOf, talkArgs, talkOf, counterpartOf, windowStats, type Directory, type Heard, type Msg, type SessionSpan,
 } from "./role-view.js";
 import { dependentsOf, renderJobMarks, renderMark, renderMsg, type MsgFragment } from "./role-render.js";
@@ -440,7 +440,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       // 子 agent 的一轮渲染在父轮的出消息里 —— 推父轮。
       const top = r.agent?.parentTurnId ? store.get(r.agent.parentTurnId) : r;
       if (!top || !isTurn(top) || !top.target) return;
-      windowOf(messagesOfTurn(top), v.role, v.conv, v.with || undefined, v.span).forEach((m) => pushFrag(renderMsg(m, records, dir, now)));
+      windowOf(messagesOfTurn(top, injectEchoesOf(records)), v.role, v.conv, v.with || undefined, v.span).forEach((m) => pushFrag(renderMsg(m, records, dir, now)));
       if (deep) dependentsOf(top, records).forEach((d) => pushTurn(d, records, dir, now, false));
     };
 

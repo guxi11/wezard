@@ -220,6 +220,24 @@ export const recordTurnItem = (id: string, item: TurnItem): void => {
   if (full) forwardToRemote(full);
 };
 
+/** 把最后一枚同正文的 text 项升级为 final —— tail 已按软收口记过这句话 (final:false),
+ *  收口时别再追加一条同文的, 就地升级。返回是否升级成功。 */
+export const markTurnTextFinal = (id: string, body: string): boolean => {
+  if (!store) return false;
+  const r = store.get(id);
+  if (r?.kind !== "turn") return false;
+  let idx = -1;
+  for (let i = r.items.length - 1; i >= 0; i--) {
+    const x = r.items[i]!;
+    if (x.t === "text" && x.body === body && x.final !== true) { idx = i; break; }
+  }
+  if (idx < 0) return false;
+  store.put({ ...r, items: r.items.map((x, i) => (i === idx ? { ...x, final: true } : x)), updatedAt: Date.now() });
+  const full = store.get(id);
+  if (full) forwardToRemote(full);
+  return true;
+};
+
 export const recordTurnUsage = (id: string, delta: { model?: string; effort?: string; messageId?: string; usage?: TurnUsage }): void => {
   if (!store) return;
   store.addTurnUsage(id, delta);

@@ -95,6 +95,42 @@ export const audienceOf = (channel: string, asker: Asker | undefined): string =>
 /** 回执轮: 守护进程把同伴那一轮的终句原样转进发话方的会话。 */
 const isReceipt = (r: TurnDetailRecord): boolean => r.from?.kind === "peer" && r.from.receipt === true;
 
+/** 重影判定, 按 records 快照记一次:
+ *  injects  忙时插队的一句有时被记了两次: 先在跑着的那轮里记成插话 (queued_command 露面),
+ *           随后同一句话又真开了一轮 (打断后重新露面) —— 插话那条是重影, 不画。按 (主人,
+ *           规范正文) 认: 同一 target 真开过一轮、问话与这句同文 (含互相包含, 落盘版可能
+ *           多处 CLI 插进去的东西)。
+ *  splitIns 同一次投递 (同一 message-event) 在 reload / 重挂后被切成几段轮次记录, 开头那句
+ *           在每段上重印了一遍 —— 入消息只留最早那段的 (eventId 是投递身份, 人故意重发
+ *           同文是两件事两件号, 不会误伤)。 */
+export interface EchoIndex { injects: Map<string, string[]>; splitIns: Set<string> }
+const ECHOES = new WeakMap<readonly DetailRecord[], EchoIndex>();
+export const injectEchoesOf = (records: readonly DetailRecord[]): EchoIndex => {
+  const hit = ECHOES.get(records);
+  if (hit) return hit;
+  const norm = (s: string | undefined): string => (s ?? "").replace(/\s+/g, " ").trim();
+  const injects = new Map<string, string[]>();
+  const byEvent = new Map<string, TurnDetailRecord[]>();
+  for (const t of records.filter(isTurn)) {
+    if (t.id.includes("~")) continue;
+    if (t.userQuery?.trim())
+      injects.set(t.target ?? "", [...(injects.get(t.target ?? "") ?? []), norm(t.userQuery)]);
+    if (t.eventId)
+      byEvent.set(`${t.sessionId}\0${t.eventId}`, [...(byEvent.get(`${t.sessionId}\0${t.eventId}`) ?? []), t]);
+  }
+  const splitIns = new Set<string>();
+  for (const group of byEvent.values())
+    if (group.length > 1)
+      for (const t of group.slice().sort((a, b) => a.createdAt - b.createdAt).slice(1)) splitIns.add(t.id);
+  const v = { injects, splitIns };
+  ECHOES.set(records, v);
+  return v;
+};
+const isEcho = (echoes: EchoIndex, t: TurnDetailRecord): boolean => {
+  const body = (t.userQuery ?? "").replace(/\s+/g, " ").trim();
+  return body.length >= 8 && (echoes.injects.get(t.target ?? "") ?? []).some((q) => q.includes(body) || (q.length >= 8 && body.includes(q)));
+};
+
 /** 一轮 → 入/出两条消息。没问话的 (/clear 之后的续跑) 只有出; 还没产出也没在跑
  *  的只有入。
  *  回执轮例外: 入那一句就是同伴自己那一轮的出 (同一段话, 已在同伴的出消息里), 再画
@@ -109,20 +145,22 @@ export const injectTurnsOf = (r: TurnDetailRecord): TurnDetailRecord[] =>
     ...(x.from ? { from: x.from } : {}), ...(x.speaker ? { speaker: x.speaker } : {}),
   }));
 
-export const messagesOfTurn = (r: TurnDetailRecord): Msg[] => {
+export const messagesOfTurn = (r: TurnDetailRecord, echoes?: EchoIndex): Msg[] => {
   const w = r.target!;
   const who = senderOf(r);
   const channel = channelOf(r);
   const receipt = isReceipt(r);
   const to = receipt && channel ? audienceOf(channel, r.from?.asker) : who;
   const firstOut = r.items.reduce((m, it) => Math.min(m, it.ts), Infinity);
-  const inMsg: Msg[] = r.userQuery?.trim() && !receipt
+  const inMsg: Msg[] = r.userQuery?.trim() && !receipt && !echoes?.splitIns.has(r.id)
     ? [{ id: `${r.id}:in`, turn: r, dir: "in", from: who, to: w, channel, ts: r.createdAt }]
     : [];
   const outMsg: Msg[] = r.items.length > 0 || !r.closed
     ? [{ id: `${r.id}:out`, turn: r, dir: "out", from: w, to, channel, ts: Math.max(r.createdAt + 1, Number.isFinite(firstOut) ? firstOut : r.createdAt + 1) }]
     : [];
-  const injected: Msg[] = injectTurnsOf(r).map((t) => ({ id: `${t.id}:in`, turn: t, dir: "in", from: senderOf(t), to: w, channel: t.channel ?? "", ts: t.createdAt }));
+  const injected: Msg[] = injectTurnsOf(r)
+    .filter((t) => !echoes || !isEcho(echoes, t))
+    .map((t) => ({ id: `${t.id}:in`, turn: t, dir: "in", from: senderOf(t), to: w, channel: t.channel ?? "", ts: t.createdAt }));
   return [...inMsg, ...outMsg, ...injected];
 };
 
@@ -141,9 +179,11 @@ export const messageOfPost = (p: PostDetailRecord): Msg => ({
   ts: p.createdAt,
 });
 
-export const allMessages = (records: readonly DetailRecord[], now: number): Msg[] =>
-  [...convTurns(records, now).flatMap(messagesOfTurn), ...records.filter(isPost).map(messageOfPost)]
+export const allMessages = (records: readonly DetailRecord[], now: number): Msg[] => {
+  const echoes = injectEchoesOf(records);
+  return [...convTurns(records, now).flatMap((r) => messagesOfTurn(r, echoes)), ...records.filter(isPost).map(messageOfPost)]
     .sort((a, b) => a.ts - b.ts);
+};
 
 // ── 名录 ─────────────────────────────────────────────────────────────
 /** 一个 wizard 此刻的活体状态。「执行中」由客户端判: busy || 现在 < runningUntil ——

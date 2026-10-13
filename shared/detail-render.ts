@@ -707,6 +707,14 @@ export const hintOf = (use: ToolUse, result: ToolResult | undefined): Hint | und
 export const hintsOf = (use: ToolUse, result: ToolResult | undefined): Hint[] => {
   const direct = hintOf(use, result);
   if (direct) return [direct];
+  // CodeBuddy 的 deferred MCP 调用: transcript 记的是外壳 (toolName/params 在 input 里),
+  // 剥掉外壳按真身认一次 —— 否则这层壳下的 tell_peer / dispatch 永远没有提示行。
+  const wrap = objOf(use.toolInput);
+  const inner = str(wrap.toolName);
+  if (use.toolName === "DeferExecuteTool" && inner) {
+    const h = hintOf({ ...use, toolName: inner, toolInput: objectOf(wrap.params) ?? {} }, result);
+    if (h) return [h];
+  }
   if (!/^(?:functions[._])?exec$/.test(use.toolName) || !result) return [];
   const source = typeof use.toolInput === "string" ? use.toolInput : objOf(use.toolInput).code;
   if (typeof source !== "string") return [];
@@ -991,7 +999,14 @@ const turnParts = (r: TurnDetailRecord, keyPrefix = "", now = Date.now(), lazy =
   chips: string;
 } => {
   const items = [...r.items].sort((a, b) => a.ts - b.ts);
-  const paired = pairItems(items);
+  // 同一句话的草稿与终稿两条 (tail 先按软收口记下, 收口时 recoverEventFinal 再记 final
+  //  —— 2026-10-13 前的记录都这样双写): 相邻同文的只留后面那条。终稿没到时草稿照画,
+  //  终稿一到同索引顶替 (data-key 按位置, reconcile 复用节点)。
+  const deduped = items.filter((it, i) => {
+    const nx = items[i + 1];
+    return !(it.t === "text" && nx?.t === "text" && nx.body === it.body);
+  });
+  const paired = pairItems(deduped);
   // data-key = 稳定项键 (items 只追加、按 ts 单调, 位置永不前移 → 索引稳定唯一)。
   // 客户端 reconcile 按此键复用未变气泡的 DOM 节点, 从而保住用户手动展开/折叠的 <details>。
   // 结束判定统一收在 chat-view.turnDone (closed / final text / 静默超时), 详情页

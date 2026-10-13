@@ -55,7 +55,7 @@ import { hasRegistry, liveSessionPids, markTranscript, probeOf, sessionOnPane, s
 import { waitForIdle, type IdleResult } from "./graph.js";
 import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
-import { getDetail, knowsToolUse, recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnQuery, recordTurnInject, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, lastChannelOf, openTurnsOf, buildDetailUrl, buildChatUrl, roleUniq } from "./detail.js";
+import { getDetail, knowsToolUse, recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnQuery, recordTurnInject, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, lastChannelOf, openTurnsOf, buildDetailUrl, buildChatUrl, roleUniq, markTurnTextFinal } from "./detail.js";
 import type { Asker } from "../shared/detail-store.js";
 import type { CtxCut, TurnFrom, TurnOrigin, TurnUsage } from "./detail.js";
 import { errText } from "./last-response.js";
@@ -3432,12 +3432,26 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   };
   const recoverEventFinal = (event: MessageEvent, bubble?: BriefBubble): void => {
     if (!event.result || event.interjected || event.canceled) return;
+    // 事件泵的 evidence 探针 (observe → io.recovered) 与 brief 软收口赛跑: 两者同为
+    // ~1s 周期, 探针常先跑到, 而它调这里不带气泡 —— queueFinal 拿不到 stream, 终句
+    // 全部走 standalone, 气泡定格在最后一行 CoT 进度。没传气泡时按 target/turn 找回
+    // 活着的那只 (turn 已换人/气泡已收则不挂, 维持 standalone)。
+    bubble ??= (() => {
+      const a = byTarget.get(event.target);
+      return a && (!event.turn || a.briefTurnId === event.turn) && a.briefBubble && !a.briefBubble.done ? a.briefBubble : undefined;
+    })();
     const turn = event.turn || event.id;
     const record = getDetail(turn);
     if (!record) recordTurnStart({ id: turn, eventId: event.id, target: event.target,
       userQuery: event.payload.text, createdAt: event.originalAt ?? event.at, channel: event.channel,
       speaker: event.payload.human ? event.speaker : undefined, from: event.payload.peer?.from });
-    if (record?.kind !== "turn" || !record.items.some((x) => x.t === "text" && x.final && x.body === event.result!.body))
+    // tail 已按软收口记过这句话 (final:false —— 它不带终句语义, doneAt 不认): 就地升级,
+    // 不追加同文第二条, 否则 rolepage 上草稿与终稿各画一颗气泡。没有同文的才补 —— 但也
+    // 只补「这轮还没有任何终句」的: 已有终句而 body 不同, 是续答链把子事件的终句写进了
+    // 父事件的 result (continueResult) —— 那段话归子轮自己的记录, 再补进父轮, rolepage
+    // 上同一段话就出了两个气泡。
+    if (!(record?.kind === "turn" && markTurnTextFinal(turn, event.result.body)) &&
+        (record ? record.kind === "turn" && !record.items.some((x) => x.t === "text" && x.final) : true))
       recordTurnItem(turn, { t: "text", final: true, body: event.result.body, ts: event.result.at });
     recordTurnClose(turn);
     if (!event.turn) deps.events?.bind(event.id, turn);
@@ -3973,9 +3987,20 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
     const event = a.activeEventId ? deps.events?.get(a.activeEventId) : undefined;
     if (event) deps.events!.result(event.id, body, finalId(event.id, event.channel, body), turnId);
-    if (!answerSilent(a) && !turnSilent(a) && (!event || eventFinalGate(event))) {
+    const gated = !!event && !eventFinalGate(event);
+    if (!answerSilent(a) && !turnSilent(a) && !gated) {
       if (event) recoverEventFinal(deps.events!.get(event.id)!, a.briefBubble);
       else queueFinal(a.target, turnId, a.channel ?? baseOfKey(a.target), body, undefined, a.briefBubble);
+    } else if (gated && !answerSilent(a) && !turnSilent(a)) {
+      // 链式收口 (eventFinalGate: 子活未落定) 延后的是 closing 的释放, 不该扣住气泡:
+      // queueFinal 没跑 = 没人收气泡, 它会定格在最后一行 CoT 进度上 (看着像卡在 tool
+      // use), hardTimer 到点的空 finish 又被 chat-gate 当 empty push 丢掉。气泡还在
+      // stream 窗口内就把终句刷进气泡 (`链接 正文` 覆盖, 与正常收口同形); 气泡已收 /
+      // 过期 / 终句超单条上限则 standalone 展示终句。
+      const b = a.briefBubble;
+      const fitsOneChunk = splitMarkdown(body, Math.max(200, cfg.wrc.mirror.chunkBytes - TAG_HEADER_BUDGET)).length === 1;
+      if (b && !b.done && fitsOneChunk && Date.now() < (b.expires ?? 0)) void finishBriefBubble(a, body);
+      else sendStandalone(a, body);
     }
     // The durable result/outbox must exist before this in-memory dedup bit advances.
     a.briefConcluded = true;
