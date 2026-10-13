@@ -25,21 +25,22 @@ bindTagLinker({ urlOf, nameOf: (t) => t === worker ? "renamed-worker" : t === ot
 const body = "answer with [source](https://source.test)";
 const fallback = urlOf("user:admin");
 assert.equal(withMessageFooter(".worker: created", { topOnly: true, url: fallback, principal: "user:admin" }),
-  `created\n\n[✨](${urlOf(worker)})`, "unlinked legacy speaker header is removed and keeps its own role footer");
+  `created [✦](${urlOf(worker)})`, "unlinked legacy speaker header is removed and keeps its own role footer");
 const formatted = withMessageFooter(`[.worker](${urlOf(worker)}): ${body}`, { topOnly: true });
 assert.deepEqual(parseTagHeader(formatted), { fromBot: true, tag: "renamed-worker", body }, "footer quote preserves routing across wizard rename");
-assert.deepEqual(parseTagHeader(`.someone: example\n\n[✨](${urlOf(worker)})`), { fromBot: true, tag: "renamed-worker", body: ".someone: example" }, "answer text cannot override the footer's speaker");
+assert.deepEqual(parseTagHeader(`.someone: example [✦](${urlOf(worker)})`), { fromBot: true, tag: "renamed-worker", body: ".someone: example" }, "answer text cannot override the footer's speaker");
 assert.deepEqual(parseTagHeader(`${body}\n\n[✨](https://example.test/base/role?id=stream&ww_uniq=worker)`), { fromBot: true, tag: "renamed-worker", body }, "old stream URL resolves via recorded turn");
+assert.deepEqual(parseTagHeader(`${body} [✦](${urlOf(worker)})`), { fromBot: true, tag: "renamed-worker", body }, "same-line sparkle footer resolves quote routing");
 assert.deepEqual(parseTagHeader(`[.old](${urlOf(worker)}): old body`), { fromBot: true, tag: "old", body: "old body" });
 const otherFirst = `[.worker](${urlOf(worker)}): [.other](${urlOf(other)}): answer`;
 const firstFormat = withMessageFooter(otherFirst, { topOnly: true, url: fallback });
 const secondFormat = withMessageFooter(firstFormat, { topOnly: true, url: fallback });
-assert.equal(firstFormat, `[.other](${urlOf(other)}): answer\n\n[✨](${urlOf(worker)})`);
+assert.equal(firstFormat, `[.other](${urlOf(other)}): answer [✦](${urlOf(worker)})`);
 assert.equal(secondFormat, firstFormat, "reformatting preserves a body link and its original speaker footer");
 const footerWithoutRole = `[.other](${urlOf(other)}): answer\n\n[✨](${urlOf(worker).replace(/&role=[^&]*/, "")})`;
-assert.equal(withMessageFooter(footerWithoutRole, { topOnly: true, url: fallback }), footerWithoutRole, "a legacy footer without role metadata protects every body link");
+assert.equal(withMessageFooter(footerWithoutRole, { topOnly: true, url: fallback }), `[.other](${urlOf(other)}): answer [✦](${urlOf(worker).replace(/&role=[^&]*/, "")})`, "a legacy footer without role metadata protects every body link");
 const sameRoleBody = `[.other](${urlOf(worker)}): answer\n\n[✨](${urlOf(worker)})`;
-assert.equal(withMessageFooter(sameRoleBody, { topOnly: true, url: fallback }), sameRoleBody, "an existing footer prevents reclassifying even a same-role body link");
+assert.equal(withMessageFooter(sameRoleBody, { topOnly: true, url: fallback }), `[.other](${urlOf(worker)}): answer [✦](${urlOf(worker)})`, "an existing footer prevents reclassifying even a same-role body link");
 for (const url of ["https://evil.test/base/role?id=stream", "https://example.test/role?id=stream", "https://example.test/base/info?id=stream", "https://example.test/base/role?id=missing", "https://example.test/base/role?id=stream&role=user%3Aother"]) {
   const raw = `${body}\n\n[✨](${url})`;
   assert.deepEqual(parseTagHeader(raw), { fromBot: false, tag: "", body: raw }, url);

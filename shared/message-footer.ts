@@ -12,14 +12,14 @@ const isRoleUrl = (value: string): boolean => {
 
 /** Remove only the generated trailing footer, including repeated copies from older wrappers. */
 export const withoutMessageFooter = (content: string): string => {
-  const match = /(?:\n\s*)?\[✨\]\(([^\n)]*)\)\s*$/.exec(content);
+  const match = /(?:\n\s*)?\[[✨✦]\]\(([^\n)]*)\)\s*$/.exec(content);
   return match && isRoleUrl(match[1]!) ? withoutMessageFooter(content.slice(0, match.index).trimEnd()) : content;
 };
 
 /** Move the speaker's ticket to one stable footer without changing body links. */
 export const withMessageFooter = (content: string, policy?: MessageFooterPolicy): string => {
   if (!policy?.topOnly) return content;
-  const prior = /\[✨\]\(([^\n)]*)\)\s*$/.exec(content)?.[1];
+  const prior = /\[[✨✦]\]\(([^\n)]*)\)\s*$/.exec(content)?.[1];
   const body = withoutMessageFooter(content);
   const head = /^\[([^\]\n]+)\]\(([^\n)]*)\)/.exec(body);
   const parsedHead = parseTagHeader(body);
@@ -30,5 +30,7 @@ export const withMessageFooter = (content: string, policy?: MessageFooterPolicy)
   const namedUrl = namedTarget ? tagUrlOf(namedTarget) : undefined;
   const url = linkedHead ? head![2] : prior && isRoleUrl(prior) ? prior : namedUrl && isRoleUrl(namedUrl) ? namedUrl : policy.url;
   if (!url || !isRoleUrl(url)) return content;
-  return `${text.trimEnd()}\n\n[✨](${url})`;
+  const trimmed = text.trimEnd();
+  const sep = /(?:^|\n)\s*`{3,}[^\n]*$/.test(trimmed) ? "\n\n" : " ";
+  return `${trimmed}${sep}[✦](${url})`;
 };

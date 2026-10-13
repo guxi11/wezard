@@ -161,7 +161,7 @@ const HEADER_RE = new RegExp(
  *  内容要跟 transcript 尾部比对, 也可能被贴进 prompt, URL 两头都是噪声。 */
 export const parseTagHeader = (text: string): { fromBot: boolean; tag: string; body: string } => {
   const t = text.trim();
-  const footer = /(?:^|\n)\s*\[✨\]\(([^\n)]*)\)\s*$/.exec(t);
+  const footer = /(?:^|\s)\[[✨✦]\]\(([^\n)]*)\)\s*$/.exec(t);
   const target = footer && linker?.targetOfUrl?.(footer[1]!);
   if (target) return { fromBot: true, tag: displayName(target), body: unlinkTags(t.slice(0, footer!.index).trim()) };
   const m = HEADER_RE.exec(t);

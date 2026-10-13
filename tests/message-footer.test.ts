@@ -5,23 +5,26 @@ import { getLastResponse, installResponseTracker, type ResponseFormatContext } f
 
 const url = "https://example.test/role?id=t123&role=chat%3Awr1%23fix";
 const fallback = "https://example.test/role?id=other&role=user%3Aadmin";
-const footer = `\n\n[✨](${url})`;
+const footer = ` [✦](${url})`;
+const legacyFooter = `\n\n[✨](${url})`;
 const head = `[.fix](${url}): `;
 assert.equal(withMessageFooter(`${head}hello`, { topOnly: true }), `hello${footer}`);
 assert.equal(withMessageFooter(`${head}hello`, { topOnly: false, url: fallback }), `${head}hello`);
 assert.equal(withMessageFooter(`${head}hello`), `${head}hello`);
 assert.equal(withMessageFooter(`${head}hello`, { topOnly: true, url: fallback }), `hello${footer}`);
-assert.equal(withMessageFooter("hello", { topOnly: true, url: fallback }), `hello\n\n[✨](${fallback})`);
+assert.equal(withMessageFooter("hello", { topOnly: true, url: fallback }), `hello [✦](${fallback})`);
 assert.equal(withMessageFooter(`${head}\n| a |\n| --- |`, { topOnly: true }), `| a |\n| --- |${footer}`);
-assert.equal(withMessageFooter(`${head}\n\x60\x60\x60ts\nx\n\x60\x60\x60`, { topOnly: true }), `\x60\x60\x60ts\nx\n\x60\x60\x60${footer}`);
+assert.equal(withMessageFooter(`${head}\n\x60\x60\x60ts\nx\n\x60\x60\x60`, { topOnly: true }), `\x60\x60\x60ts\nx\n\x60\x60\x60\n\n[✦](${url})`);
 const body = `hello [.other](${fallback}) and [source](https://example.test/info)`;
 assert.equal(withMessageFooter(`${head}${body}`, { topOnly: true }), `${body}${footer}`);
 assert.equal(withMessageFooter(`[source](${url}): hello`, { topOnly: true }), `[source](${url}): hello`);
 assert.equal(withMessageFooter("hello", { topOnly: true }), "hello");
 assert.equal(withMessageFooter(`hello${footer}${footer}`, { topOnly: true }), `hello${footer}`);
+assert.equal(withMessageFooter(`hello${legacyFooter}`, { topOnly: true, url: fallback }), `hello${footer}`);
 assert.equal(withMessageFooter(`hello${footer}`, { topOnly: true, url: fallback }), `hello${footer}`);
 assert.equal(withoutMessageFooter(`hello${footer}`), "hello");
-assert.equal(withoutMessageFooter("hello\n\n[✨](https://example.test/info)"), "hello\n\n[✨](https://example.test/info)");
+assert.equal(withoutMessageFooter(`hello${legacyFooter}`), "hello");
+assert.equal(withoutMessageFooter("hello [✨](https://example.test/info)"), "hello [✨](https://example.test/info)");
 
 const calls: { kind: string; content: string; options?: unknown }[] = [];
 const contexts: ResponseFormatContext[] = [];
