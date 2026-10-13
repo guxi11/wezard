@@ -14,6 +14,7 @@
 - rolepage 同一句话画两颗气泡: tail 软收口已按 `final:false` 记过终句, 收口时 `recoverEventFinal` 不再追加同文第二条而是就地升级 (`markTurnTextFinal`); 续答链把子事件终句误写进父事件 `result` 的 (continueResult) 也不再补进父轮记录。已双写的历史记录渲染时相邻同文只留终稿; 忙时插队被记两遍 (插话 + 真开一轮) 与 reload 切段后开头重印的入消息按重影剔除 (`injectEchoesOf`: 同文含互相包含认插话, 同 `eventId` 切段只留最早一段)。`DeferExecuteTool` 外壳下的调用剥壳按内层工具认提示行 —— 这层壳下的 `tell_peer` / `dispatch` 此前永远没有提示行。
 - 流式气泡定格在最后一行 CoT 进度、不更新到终句: 事件泵 evidence 探针 (observe → io.recovered) 与 brief 软收口同为 ~1s 周期赛跑, 探针常先跑到而它调 `recoverEventFinal` 不带气泡 —— 终句全走 standalone, 气泡定格; 现在没传气泡时按 target/turn 找回活着的 `briefBubble`。链式收口 (`eventFinalGate` 子活未落定) 只延后 closing 释放、不再扣住气泡: 气泡还在 stream 窗口内就把终句刷进气泡 (`finishBriefBubble`, 与正常收口同形), 已收 / 过期 / 终句超单条上限才 standalone。
 - `dispatch` 自动选人先按「活着且是 slot」收窄候选池再读 transcript: 此前对全机几百个绑定 (多数 pane 早没了) 逐个扫尾巴算文件集 / 问话 / 缓存时刻, 读完才丢掉, 路由一步就要 ~2.8s; 收窄后 ~0.4s, 候选池与公共文件统计口径不变。自动派给已有 wizard 端到端从 ~3.5s 降到 ~1s, 自动转 spawn 从 ~9s 降到 ~6.5s (余下是 CLI 冷启动)。
+- 孤儿 pane 清扫把正在出生的 pane 生出就杀 (新 wizard 秒死 / TUI ready timeout, 日志里 `orphan pane killed` 的 `cliAgeHours` 恒为 0): 进程年龄快照用的 `ps -o etimes` 在 macOS 的 BSD ps 上不存在 (`keyword not found`), 年龄表恒空又按 `Infinity` 兜底, 10 分钟宽限形同虚设。改用 BSD/GNU 都认的 `etime` ([[dd-]hh:]mm:ss) 解析成秒, 拿不到年龄按刚生跳过; 分身在开场白 + 等分叉期间的 pane 挂进 `spawningPanes` 排除出孤儿判定, 绑定改为逐 pane 现查 (清扫途中别人刚 attach 上的不再按开头的快照误收)。开机收「生到一半」窗口的 `reapUnborn` 同样不再误收本进程自己生的 pane (只收 shell 比 daemon 进程老的、逐 pane 现查绑定并跳过 `spawningPanes`) —— sweepUnborn 腾出的名字被同名重生、或 spawn 等 TUI 就绪还没回 pane id 时, 此前会按窗口名直接杀掉。
 
 ## [2.6.4] - 2026-10-13
 

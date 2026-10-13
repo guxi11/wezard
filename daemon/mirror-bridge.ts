@@ -2091,26 +2091,36 @@ const INJECT_JOB_TIMEOUT_MS = 90_000;
 /** 没有绑定的 pane 静默多久才算孤儿。刚 spawn、还没 attach 的 pane (并发 fan-out 时
  *  别人的 sweep 会撞见它) 在这段时间里一直有输出, 远大于一次 spawn → attach 的耗时。 */
 const ORPHAN_GRACE_MS = 10 * 60_000;
-/** `ps -axo pid,ppid,etimes` 快照: parent→children 表 + 每个进程的已运行秒数。
+/** ps 的 `etime` ([[dd-]hh:]mm:ss) → 秒; 认不出 = NaN。 */
+const etimeSec = (s: string): number => {
+  const m = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/.exec(s);
+  if (!m) return Number.NaN;
+  const [d = 0, h = 0, mi = 0, se = 0] = m.slice(1).map((x) => Number(x ?? 0));
+  return ((d * 24 + h) * 60 + mi) * 60 + se;
+};
+/** `ps -axo pid,ppid,etime` 快照: parent→children 表 + 每个进程的已运行秒数。
  *  pane_pid 是 shell, CLI 是它的子孙, 「pane 里住着活会话吗」要沿进程树往下认;
  *  etimes 给孤儿宽限用 —— codebuddy 的 TUI 空闲也持续重绘, window_activity 永远是
  *  「刚动过」, 只有进程年龄分得清「刚 spawn 还没 attach」和「攒了几周的尸体」。
+ *  用 `etime` 不用 `etimes`: macOS 的 BSD ps 没有 etimes (`keyword not found`, 整表空,
+ *  宽限随之失效、新生 pane 生出就被当孤儿杀), etime 是 BSD/GNU 都认的。
  *  ps 失败 = 空表, 孤儿判定随之全 miss: 认不出就不收, 永远朝不杀的方向失败。 */
 interface PsSnap { kids: Map<number, number[]>; etimes: Map<number, number> }
 const psSnap = (): Promise<PsSnap> =>
   new Promise((resolve) => {
-    const p = spawn("ps", ["-axo", "pid=,ppid=,etimes="], { env: { ...process.env, PATH: augmentedPath(process.env.PATH) }, stdio: ["ignore", "pipe", "ignore"] });
+    const p = spawn("ps", ["-axo", "pid=,ppid=,etime="], { env: { ...process.env, PATH: augmentedPath(process.env.PATH) }, stdio: ["ignore", "pipe", "ignore"] });
     let out = "";
     p.stdout?.on("data", (c: Buffer) => (out += c.toString("utf8")));
     const done = (): void => {
       const kids = new Map<number, number[]>();
       const etimes = new Map<number, number>();
       for (const line of out.split("\n")) {
-        const [pid, ppid, et] = line.trim().split(/\s+/).map(Number);
+        const [pidS = "", ppidS = "", etS = ""] = line.trim().split(/\s+/);
+        const pid = Number(pidS), ppid = Number(ppidS), et = etimeSec(etS);
         if (!pid || !ppid) continue;
         const arr = kids.get(ppid);
         if (arr) arr.push(pid); else kids.set(ppid, [pid]);
-        if (et !== undefined && !Number.isNaN(et)) etimes.set(pid, et);
+        if (!Number.isNaN(et)) etimes.set(pid, et);
       }
       resolve({ kids, etimes });
     };
@@ -2312,9 +2322,11 @@ export interface MirrorBridge {
   ) => Promise<{ reaped: string[]; orphans: string[]; skipped: Record<string, string> }>;
   /** Kill the panes of windows named after a wizard whose spawn never finished
    *  (a reload landed mid-spawn): in the daemon's own tmux session, window name
-   *  `name` / `.name`, and NO binding points at the pane. No grace period — unlike
-   *  `reapOverflow`'s orphans these are known-dead by name, so callers must only
-   *  pass names nobody has re-claimed since. Returns the killed pane ids. */
+   *  `name` / `.name`, NO binding points at the pane, and the pane predates this
+   *  process (anything younger is one of our own spawns, possibly reusing the
+   *  freed name). No grace period otherwise — unlike `reapOverflow`'s orphans these
+   *  are known-dead by name, so callers must only pass names nobody has re-claimed
+   *  since. Returns the killed pane ids. */
   reapUnborn: (names: readonly string[]) => Promise<string[]>;
   /** Send a bare Enter to the live tmux pane bound to `target` — confirms a
    *  prompt / press-enter-to-continue, or submits the input box as-is. No-op
@@ -4976,6 +4988,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 文件。同一个 cwd 下别的 target 的迁移 / 自愈 / 分叉跟随也在扫这个目录里「新出现的
   // jsonl」, 不挡住的话它会先一步把别人的新会话认走, 正主 attach 时反撞 "already bound"。
   const inFlightSids = new Set<string>();
+  // 已 spawn、还没 attach 的 pane: 分身要先说开场白、等分叉文件才能绑定, 这段里它在
+  // tmux 里活着却不在任何绑定上 —— 孤儿清扫必须认得它, 不能只靠进程年龄宽限。
+  const spawningPanes = new Set<string>();
   const sidsClaimedByOthers = (principal: string): Set<string> => {
     const s = new Set<string>(inFlightSids);
     for (const [k, v] of Object.entries(deps.store.all())) if (k !== principal && v.sessionId) s.add(v.sessionId);
@@ -5922,51 +5937,61 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       systemPrompt: args.systemPrompt,
     });
     if (!r.ok) return { ok: false, reason: r.reason, inherited: false };
-    // 分叉文件不是开机就有的: CLI 在这个 pane **收到第一条消息**的那一刻才把父亲的
-    // transcript 复制成新文件。所以必须先说一句话, 分身才会有自己的 sid —— 这句话
-    // 顺便就是它的开场白 (「你是谁、继承了什么、准备接什么」)。
-    const hello = args.bootstrap?.trim()
-      || "（wezard 分身初始化）用一句话说明: 你是谁、从谁那里继承了哪些上下文、准备接什么活。不要复述这条指令。";
-    rememberInject(hello);
-    const boot = await inject({
-      text: hello, images: [], cfg, log: lg,
-      sessionId: parentCli === "codex" ? r.sessionId! : parent.sessionId, jsonlPath: parentCli === "codex" ? r.jsonlPath! : parent.jsonlPath,
-      tmuxTarget: r.tmuxPane, freshSpawn: true, guard: args.guard,
-    });
-    if (!boot.ok) {
-      await runTmux(["kill-pane", "-t", r.tmuxPane ?? ""]);
-      return { ok: false, reason: `分身开场白注入失败: ${boot.reason ?? "unknown"}`, inherited: false };
-    }
-    const fork = parentCli === "codex" ? { sessionId: r.sessionId!, jsonlPath: r.jsonlPath! } : await awaitFork(projectDir, baseline, sidsClaimedByOthers(args.target), parent.jsonlPath, {
-      homeDir: backendForPath(parent.jsonlPath).homeDir, pane: r.tmuxPane ?? "", parentSid: parent.sessionId,
-    });
-    // 等不到分叉就必须收手: 此刻唯一已知的 sid 是父亲的, 认下去两个 target 会指向
-    // 同一个会话 (attach 也会正当地拒绝)。留一个孤儿 pane 比留一条错绑更好收拾 ——
-    // 所以连 pane 一起杀掉, 调用方拿到的是一个干净的失败。
-    if (!fork) {
-      await runTmux(["kill-pane", "-t", r.tmuxPane ?? ""]);
-      return { ok: false, reason: "分身没能在超时内分叉出自己的会话 (CLI 可能不支持 --fork-session)", inherited: false };
-    }
-    if (args.guard && !args.guard("submit")) {
+    // 开场白 + 等分叉期间 pane 活着却没绑定: 挂上 spawningPanes, 别被孤儿清扫当尸体收掉。
+    const pane = r.tmuxPane ?? "";
+    spawningPanes.add(pane);
+    let att: ReturnType<typeof attach>;
+    let fork: { sessionId: string; jsonlPath: string };
+    try {
+      // 分叉文件不是开机就有的: CLI 在这个 pane **收到第一条消息**的那一刻才把父亲的
+      // transcript 复制成新文件。所以必须先说一句话, 分身才会有自己的 sid —— 这句话
+      // 顺便就是它的开场白 (「你是谁、继承了什么、准备接什么」)。
+      const hello = args.bootstrap?.trim()
+        || "（wezard 分身初始化）用一句话说明: 你是谁、从谁那里继承了哪些上下文、准备接什么活。不要复述这条指令。";
+      rememberInject(hello);
+      const boot = await inject({
+        text: hello, images: [], cfg, log: lg,
+        sessionId: parentCli === "codex" ? r.sessionId! : parent.sessionId, jsonlPath: parentCli === "codex" ? r.jsonlPath! : parent.jsonlPath,
+        tmuxTarget: r.tmuxPane, freshSpawn: true, guard: args.guard,
+      });
+      if (!boot.ok) {
+        await runTmux(["kill-pane", "-t", r.tmuxPane ?? ""]);
+        return { ok: false, reason: `分身开场白注入失败: ${boot.reason ?? "unknown"}`, inherited: false };
+      }
+      const forked = parentCli === "codex" ? { sessionId: r.sessionId!, jsonlPath: r.jsonlPath! } : await awaitFork(projectDir, baseline, sidsClaimedByOthers(args.target), parent.jsonlPath, {
+        homeDir: backendForPath(parent.jsonlPath).homeDir, pane: r.tmuxPane ?? "", parentSid: parent.sessionId,
+      });
+      // 等不到分叉就必须收手: 此刻唯一已知的 sid 是父亲的, 认下去两个 target 会指向
+      // 同一个会话 (attach 也会正当地拒绝)。留一个孤儿 pane 比留一条错绑更好收拾 ——
+      // 所以连 pane 一起杀掉, 调用方拿到的是一个干净的失败。
+      if (!forked) {
+        await runTmux(["kill-pane", "-t", r.tmuxPane ?? ""]);
+        return { ok: false, reason: "分身没能在超时内分叉出自己的会话 (CLI 可能不支持 --fork-session)", inherited: false };
+      }
+      fork = forked;
+      if (args.guard && !args.guard("submit")) {
+        inFlightSids.delete(fork.sessionId);
+        // The bootstrap may already have executed; withhold binding, report the
+        // unconfirmed birth to its caller instead of claiming cancellation success.
+        return { ok: false, reason: "fork executed after permission withdrawal; reconcile pane manually", inherited: false };
+      }
+      att = attach({
+        sessionId: fork.sessionId,
+        jsonlPath: fork.jsonlPath,
+        target: args.target,
+        tmuxPane: r.tmuxPane,
+        tmuxSession: r.tmuxSession,
+        cwd: r.cwd,
+        pendingCwd: "",
+        model: r.model ?? model,
+        effort: r.effort ?? "",
+        keepaliveDisabled: args.keepalive === undefined ? undefined : !args.keepalive,
+      });
+      // 绑上 (或没绑上) 之后预留就没用了: 绑上的 sid 由 sidsClaimedByOthers 挡住别人。
       inFlightSids.delete(fork.sessionId);
-      // The bootstrap may already have executed; withhold binding, report the
-      // unconfirmed birth to its caller instead of claiming cancellation success.
-      return { ok: false, reason: "fork executed after permission withdrawal; reconcile pane manually", inherited: false };
+    } finally {
+      spawningPanes.delete(pane);
     }
-    const att = attach({
-      sessionId: fork.sessionId,
-      jsonlPath: fork.jsonlPath,
-      target: args.target,
-      tmuxPane: r.tmuxPane,
-      tmuxSession: r.tmuxSession,
-      cwd: r.cwd,
-      pendingCwd: "",
-      model: r.model ?? model,
-      effort: r.effort ?? "",
-      keepaliveDisabled: args.keepalive === undefined ? undefined : !args.keepalive,
-    });
-    // 绑上 (或没绑上) 之后预留就没用了: 绑上的 sid 由 sidsClaimedByOthers 挡住别人。
-    inFlightSids.delete(fork.sessionId);
     if (!att.ok) return { ok: false, reason: att.reason, inherited: false };
     const spawned = byTarget.get(args.target);
     if (spawned) {
@@ -7121,14 +7146,20 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     reapUnborn: async (names) => {
       const want = new Set(names.flatMap((n) => [n, `.${n}`]));
       if (!want.size) return [];
-      const snap = await runTmux(["list-panes", "-a", "-F", "#{pane_id}\t#{session_name}\t#{window_name}"]);
+      const snap = await runTmux(["list-panes", "-a", "-F", "#{pane_id}\t#{session_name}\t#{window_name}\t#{pane_pid}"]);
       if (snap.code !== 0) return [];
-      const bound = new Set(allTargets().map(paneOf).filter(Boolean));
+      // 「生到一半」只可能是上一个进程留下的: 本进程自己 spawn 的 pane (名字被 sweepUnborn
+      // 腾出后同名重生、或 spawnTmux 等 TUI 就绪那十几秒里还没回 pane id 的) 一律不碰 ——
+      // pane 的 shell 比本进程年轻就是本进程生的。拿不到年龄 = 认不出, 不收。
+      const ps = await psSnap();
+      const bornBeforeUs = (pid: string): boolean => (ps.etimes.get(Number(pid)) ?? 0) > process.uptime();
       const doomed = snap.stdout.split("\n").filter(Boolean).map((l) => l.split("\t"))
-        .filter(([pane = "", session, win = ""]) => session === cfg.wrc.tmuxPrefix && want.has(win) && !bound.has(pane))
+        .filter(([, session, win = "", pid = ""]) => session === cfg.wrc.tmuxPrefix && want.has(win) && bornBeforeUs(pid))
         .map(([pane = ""]) => pane);
       const killed: string[] = [];
       for (const pane of doomed) {
+        // 绑定现查: 逐个收的 await 期间别人可能刚 attach 上。
+        if (spawningPanes.has(pane) || allTargets().some((t) => paneOf(t) === pane)) continue;
         // 与 killPane 同款前戏: Esc 给可能已起来的 CLI 一个收束落盘的机会。
         await runTmux(["send-keys", "-t", pane, "Escape"]);
         await sleep(250);
@@ -7172,7 +7203,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // 找)。不看注册表的 `tmux` 字段 —— codebuddy 的注册表没有它, 那条路对 codebuddy
       // 全盲。普通 pane (人自己开的 shell / ssh / 编辑器, 会话已退回 shell 的) 树里
       // 没有注册表 pid, 一律跳过 —— 认不出就不动。
-      const bound = new Set(targets.map(paneOf).filter(Boolean));
       const regPids = new Set(activeBackends().flatMap((b) => [...liveSessionPids(b.homeDir)]));
       const ps = await psSnap();
       // 沿进程树找注册表 pid; 找到返回那个 pid (它的 etimes 供宽限判), 找不到返回 0。
@@ -7189,11 +7219,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         return 0;
       };
       for (const [pane = "", , session, pid] of rows) {
-        if (session !== cfg.wrc.tmuxPrefix || bound.has(pane)) continue;
+        // 绑定现查而非用开头的快照: 前面几轮 putDown 的 await 期间别人可能刚 attach 上。
+        if (session !== cfg.wrc.tmuxPrefix || spawningPanes.has(pane) || allTargets().some((t) => paneOf(t) === pane)) continue;
         const cliPid = hostedBy(Number(pid) || 0);
         if (!cliPid) continue;
         // 宽限按 CLI 进程年龄, 不按 window_activity: TUI 重绘会让它永远「刚动过」。
-        if ((ps.etimes.get(cliPid) ?? Number.POSITIVE_INFINITY) * 1000 < ORPHAN_GRACE_MS) continue;
+        // 拿不到年龄按刚生算 (跳过): 认不出就不收。
+        if ((ps.etimes.get(cliPid) ?? 0) * 1000 < ORPHAN_GRACE_MS) continue;
         const why = await putDown(pane);
         if (why) { skipped[pane] = why; continue; }
         orphans.push(pane);
