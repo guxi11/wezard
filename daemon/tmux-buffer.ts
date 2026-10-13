@@ -1,6 +1,6 @@
 import { parseTmuxVersion, runTmux } from "./spawn-tmux.js";
 
-type PasteResult = { ok: boolean; reason?: string };
+type PasteResult = { ok: boolean; reason?: string; uncertain?: boolean; retryable?: boolean };
 type PasteAttempt = PasteResult & { retryLegacy?: true };
 
 /** One instance per daemon: all mirror/peer/receipt pastes share the legacy lock. */
@@ -19,16 +19,20 @@ export const createTmuxBufferPaster = (run: typeof runTmux = runTmux) => {
 
   return async (target: string, text: string, guard?: () => boolean): Promise<PasteResult> => {
     // Never let an absent target select tmux's current pane implicitly.
-    if (!target.trim()) return { ok: false, reason: "tmux paste requires a target pane" };
-    const probe = await (version ??= run(["-V"]));
+    if (!target.trim()) return { ok: false, retryable: true, reason: "tmux paste requires a target pane" };
+    const probe = await (version ??= run(["-V"])).catch((error: unknown) => {
+      version = undefined;
+      return { ok: false, stdout: "", stderr: String(error), code: null };
+    });
     if (!probe.ok) {
       version = undefined; // A transient probe failure must not poison future deliveries.
-      return { ok: false, reason: `tmux version probe failed: ${probe.stderr.trim() || probe.code}` };
+      return { ok: false, retryable: true, reason: `tmux version probe failed: ${probe.stderr.trim() || probe.code}` };
     }
     // Match spawn's treatment of next/suffixed versions and unknown version strings.
     const paste = async (named: boolean): Promise<PasteAttempt> => {
       const buffer = named ? ["-b", `wezard-${process.pid}-${++seq}`] : [];
       let consumed = false;
+      let exposed = false;
       try {
         const loaded = await run(["load-buffer", ...buffer, "-"], { stdin: text });
         // 1.8 rejects a string buffer index before loading anything. Only this
@@ -38,12 +42,15 @@ export const createTmuxBufferPaster = (run: typeof runTmux = runTmux) => {
           legacy = true;
           return { ok: false, retryLegacy: true };
         }
-        if (!loaded.ok) return { ok: false, reason: `tmux load-buffer failed: ${loaded.stderr.slice(-200) || loaded.code}` };
-        if (guard && !guard()) return { ok: false, reason: "paste canceled by dispatch guard" };
+        if (!loaded.ok) return { ok: false, retryable: true, reason: `tmux load-buffer failed: ${loaded.stderr.slice(-200) || loaded.code}` };
+        if (guard && !guard()) return { ok: false, retryable: true, reason: "paste canceled by dispatch guard" };
+        exposed = true;
         const pasted = await run(["paste-buffer", ...buffer, "-p", "-d", "-t", target]);
-        if (!pasted.ok) return { ok: false, reason: `tmux paste-buffer failed: ${pasted.stderr.slice(-200)}` };
+        if (!pasted.ok) return { ok: false, uncertain: true, reason: `tmux paste-buffer failed: ${pasted.stderr.slice(-200)}` };
         consumed = true;
         return { ok: true };
+      } catch (error) {
+        return { ok: false, ...(exposed ? { uncertain: true } : { retryable: true }), reason: String(error) };
       } finally {
         // A failed/expired client may have loaded its buffer. Named buffers do
         // not age out; best-effort cleanup must preserve the original error.

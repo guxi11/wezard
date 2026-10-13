@@ -1115,8 +1115,15 @@ export const startMirrorTail = (deps: TailDeps): TailHandle => {
 //             the CLI and (via outbound tail) WeCom. Required for true mirror.
 // No phase is a read-only permission check; physical phases mark exposure.
 type DispatchGuard = (phase?: "paste" | "submit") => boolean;
+type InjectResult = { ok: boolean; reason?: string; uncertain?: boolean; retryable?: boolean };
 interface InjectArgs {
   guard?: DispatchGuard;
+  /** Called under the pane lock and again before its first physical input. */
+  requireIdle?: () => boolean;
+  /** Defer destructive notice rendering until the lane grants delivery. */
+  prepareText?: () => string;
+  /** Attribution must exist before input can appear in the transcript. */
+  beforeInput?: () => void;
   text: string;
   /** Image absolute paths. injectViaTmux pumps each via clipboard+Ctrl+V before
    *  the text paste; injectViaSpawn prepends `@<path>` to text. */
@@ -1666,7 +1673,7 @@ const witnessFor = (target: string, homeDir: string, jsonlPath: string, live: Li
 // but the trailing Enter is eaten while the TUI is still initializing, so
 // the prompt sits typed-but-unsent. 校验策略见 injectViaTmuxText —— 以输入框
 // 整块为判据, 粘贴只在「确凿看见框仍是空的」时才重来。
-const injectViaTmux = async (target: string, text: string, images: string[], log: Logger, freshSpawn: boolean, backend: CliBackend, jsonlPath: string, bypassModalGuard = false, guard?: DispatchGuard): Promise<{ ok: boolean; reason?: string; uncertain?: boolean }> => {
+const injectViaTmux = async (target: string, text: string, images: string[], log: Logger, freshSpawn: boolean, backend: CliBackend, jsonlPath: string, bypassModalGuard = false, guard?: DispatchGuard): Promise<InjectResult> => {
   const backendName = backend.name;
   log.info({ target, len: text.length, images: images.length, freshSpawn, backendName }, "mirror inject (tmux)");
 
@@ -1777,7 +1784,7 @@ const withImageRefs = (text: string, images: readonly string[]): string => {
 // 证人不作声 (忙时排队、slash 命令、无注册表的后端) 才看框回没回到贴之前的样子。
 // 框认得出来时这条判据可信, 于是允许多补回车 (空框上的回车在 CLI 里是 no-op);
 // 每次补之前再问一遍证人, 已提交就不补。
-const injectViaTmuxText = async (target: string, text: string, log: Logger, freshSpawn: boolean, witness: SubmitWitness = NO_WITNESS, guard?: DispatchGuard): Promise<{ ok: boolean; reason?: string; uncertain?: boolean }> => {
+const injectViaTmuxText = async (target: string, text: string, log: Logger, freshSpawn: boolean, witness: SubmitWitness = NO_WITNESS, guard?: DispatchGuard): Promise<InjectResult> => {
   // Warm pane: tight timings, low latency. Fresh spawn (claude --resume just
   // started, transcript still loading): extended timings — bracketed-paste
   // end can take 4-7s to be honored on a cold TUI. Only the fresh-spawn path
@@ -1817,7 +1824,7 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   /** 框里还是贴之前那样 (或彻底空了) = 我们的文本不在框里。 */
   const boxIntact = (b: InputBox): boolean => boxVerify && b.known && (b.body === "" || b.body === baseBody);
 
-  const loadAndPaste = (): Promise<{ ok: boolean; reason?: string }> => pasteTmuxBuffer(target, text, guard ? () => guard("paste") : undefined);
+  const loadAndPaste = (): Promise<InjectResult> => pasteTmuxBuffer(target, text, guard ? () => guard("paste") : undefined);
 
   // 框认得出来 → 看它变没变; 认不出来 → 退回宽窗口找 headFp (长文本会换行,
   // 头部可能在框顶, 所以窗口要宽)。
@@ -1843,6 +1850,8 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   let pasteSeen = alreadyTyped;
   let pastedAt = Date.now();
   if (alreadyTyped) {
+    // Existing text is already exposed, even if permission was just withdrawn.
+    if (guard && !guard("paste")) return { ok: false, uncertain: true, reason: "existing input submission canceled by dispatch guard" };
     log.warn({ target, headFp }, "mirror inject: 输入框里已有这段文本 (上次未提交) — 不重贴, 直接提交");
   } else {
     const r = await loadAndPaste();
@@ -2022,10 +2031,42 @@ const injectViaSpawn = async (args: InjectArgs): Promise<{ ok: boolean; reason?:
   });
 };
 
-const inject = (args: InjectArgs): Promise<{ ok: boolean; reason?: string; uncertain?: boolean }> => {
+const inject = async (args: InjectArgs): Promise<InjectResult> => {
   const target = (args.tmuxTarget ?? "").trim();
-  if (!target) return injectViaSpawn(args);
-  return injectViaTmux(target, args.text, args.images ?? [], args.log, args.freshSpawn ?? false, backendForPath(args.jsonlPath), args.jsonlPath, args.bypassModalGuard ?? false, args.guard);
+  if (!target) {
+    if (args.requireIdle) return { ok: false, retryable: true, reason: "idle delivery requires a live pane" };
+    try {
+      if (args.guard && !args.guard()) return { ok: false, retryable: true, reason: "spawn permission withdrawn" };
+      const text = args.prepareText?.() ?? args.text;
+      let activated = false;
+      const result = await injectViaSpawn({ ...args, text, guard: (phase) => {
+        if (args.guard && !args.guard(phase)) return false;
+        if (phase && !activated) { activated = true; args.beforeInput?.(); }
+        return true;
+      } });
+      return result.ok ? result : { ...result, uncertain: true };
+    } catch (error) { return { ok: false, uncertain: true, reason: String(error) }; }
+  }
+  let exposed = false;
+  const classify = (result: InjectResult): InjectResult => result.ok ? result
+    : result.uncertain || exposed ? { ...result, uncertain: true, retryable: false }
+      : { ...result, retryable: true };
+  try {
+    return classify(await withPaneInput(target, async (live) => {
+      // Busy and unknown are both a deferred delivery. Never hold the input
+      // lock while waiting for a model's whole turn to finish.
+      if (args.requireIdle && !args.requireIdle()) return { ok: false, reason: "target has no confirmed idle evidence" };
+      const text = args.prepareText?.() ?? args.text;
+      const guard: DispatchGuard = (phase) => {
+        if (!live() || (!exposed && args.requireIdle && !args.requireIdle()) || (args.guard && !args.guard(phase))) return false;
+        if (phase && !exposed) { exposed = true; args.beforeInput?.(); }
+        return true;
+      };
+      return injectViaTmux(target, text, args.images ?? [], args.log, args.freshSpawn ?? false, backendForPath(args.jsonlPath), args.jsonlPath, args.bypassModalGuard ?? false, guard);
+    }, { guard: args.guard }));
+  } catch (error) {
+    return classify({ ok: false, reason: String(error) });
+  }
 };
 
 // ── Per-session injection queue ───────────────────────────────────────
@@ -2201,7 +2242,7 @@ export interface MirrorBridge {
    *  参数留着是因为调用方 (定时任务) 仍在传。 */
   /** `channel`: 这一轮的回复发去哪个公开频道 (base); "" = 私聊, 回复不进任何群,
    *  只落 turn 记录; 省略 = target 的 home。 */
-  injectText: (target: string, text: string, origin?: TurnOrigin, opts?: { fromChat?: boolean; from?: TurnFrom; channel?: string; envelope?: string; guard?: DispatchGuard }) => Promise<{ ok: boolean; reason?: string; uncertain?: boolean }>;
+  injectText: (target: string, text: string, origin?: TurnOrigin, opts?: { fromChat?: boolean; from?: TurnFrom; channel?: string; envelope?: string; guard?: DispatchGuard; requireIdle?: boolean }) => Promise<InjectResult>;
   /** 这个 wizard 当前这一轮的频道: 人从哪个群叫的它 / 公开 peer 轮的频道;
    *  私聊轮 ""; 还没有过轮次 → home base。 */
   currentChannel: (target: string) => string;
@@ -6758,14 +6799,15 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // in-memory slot but a perfectly good persisted binding. Without this, an
       // agent driving a cold sibling gets "not attached" for a live pane.
       const permission = (): boolean => !opts?.guard || opts.guard();
-      const denied = { ok: false as const, reason: "inject permission withdrawn before respawn/binding" };
-      if (!text.trim()) return { ok: false, reason: "empty text" };
+      const denied = { ok: false as const, retryable: true, reason: "inject permission withdrawn before respawn/binding" };
+      if (!text.trim()) return { ok: false, retryable: true, reason: "empty text" };
       if (!permission()) return denied;
       const a = byTarget.get(target) ?? (await restoreFromStore(target, undefined, permission));
       if (!permission()) return denied;
-      if (!a) return { ok: false, reason: "no mirror attached for target" };
+      if (!a) return { ok: false, retryable: true, reason: "no mirror attached for target" };
       const sid = a.sessionId;
-      const permitted = (): boolean => permission() && byTarget.get(target) === a && a.sessionId === sid;
+      const generation = a.injectGen ?? 0;
+      const permitted = (): boolean => permission() && byTarget.get(target) === a && a.sessionId === sid && (a.injectGen ?? 0) === generation;
       const probedPane = a.tmuxPane;
       const paneAlive = a.tmuxPane ? await paneUsable(a.tmuxPane, a.jsonlPath) : false;
       if (!permitted() || a.tmuxPane !== probedPane) return denied;
@@ -6778,13 +6820,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // onto the forked jsonl once it appears (EOF offset — fork is seeded).
         const resumeBaseline = listJsonls(dirname(a.jsonlPath));
         const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: displayName(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, ...respawnSpec(a), systemPrompt: charterFor(target, { cwd: a.runningCwd, cli: backendForPath(a.jsonlPath).name }) });
-        if (!r.ok || !r.tmuxPane) return { ok: false, reason: `respawn failed: ${r.reason ?? "unknown"}` };
+        if (!r.ok || !r.tmuxPane) return { ok: false, retryable: true, reason: `respawn failed: ${r.reason ?? "unknown"}` };
         if (!permitted() || a.tmuxPane !== probedPane) {
           // This pane was born for an unsubmitted injection. Never kill the old
           // executor or bind the withdrawn birth. A failed cleanup is explicitly
           // uncertain and must be reconciled; it is not proof execution stopped.
           const cleanup = await runTmux(["kill-pane", "-t", r.tmuxPane]).catch(() => undefined);
-          return { ...denied, ...(cleanup?.ok ? {} : { uncertain: true }), reason: cleanup?.ok
+          return { ...denied, ...(cleanup?.ok ? {} : { uncertain: true, retryable: false }), reason: cleanup?.ok
             ? "respawn permission withdrawn; new pane removed before injection, binding withheld"
             : `respawn permission withdrawn; binding withheld, reconcile new pane ${r.tmuxPane}` };
         }
@@ -6799,31 +6841,19 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         fresh = true;
       }
       if (!permitted()) return denied;
-      // 出处改写要早于 inject: tail 可能在 promise resolve 之前就开出 turn。
-      // 守护进程注入的一轮 (回执 / peer / 定时任务 / graph) 不是人在 CLI 手敲的: 可见性
-      // 只由频道定 ("" 私聊才静默)。pendingFromCli 必须一并清 —— 它是粘性的, 不开轮的
-      // CLI 行 (spawn 时 model-select 按下的 `/model`) 会把它一直挂到下一轮, 让紧跟着的
-      // 注入轮被认成 CLI 发起, 公开频道里的回复因此被出处门吞掉。
-      a.pendingFromCli = false;
-      a.turnFromChat = true;
-      // 名册增量搭这趟车进去 —— 同伴派活 / 定时任务 / graph 步骤都走这里, 所以
-      // 一个从不被人直接说话的分身也能知道群里多了谁、少了谁。人说的话那一条
-      // 路径在 inbound.send 上挂 (dispatch 有自己的 inject)。
-      // 信封 (谁说的、私聊还是公开、回执怎么交) 同理挂在尾巴上; slash 命令按行解析,
-      // 多挂一段就不再是命令, 跳过。`pendingBriefQuery` 记的仍是不带信封的原话。
+      // Busy/queued retries must not consume notices or stamp a future turn.
+      // Render only after the pane lane grants delivery, then stamp exactly at
+      // the first permitted input. activePeerTurn still changes in bindLine.
       const envelope = text.trimStart().startsWith("/") ? "" : opts?.envelope ?? "";
-      const full = text + envelope + noticeSuffixFor(target, text);
-      // Pre-record so the tail's user-line emission is suppressed by the
-      // recentInjects dedupe (otherwise the user sees their own demo prompt
-      // echoed back as a quoted bubble).
-      rememberInject(full);
-      // 印章要早于 inject 落地 —— tail 是独立轮询的, 它可能在 inject 的 promise
-      // resolve 之前就看到 user 行并开出 turn, 那时归因必须已经在位。
-      // 印章随这一行走 (见 Seal): 行露面时才落成那一轮的出处 / 频道 / 问话。
-      pushSeal(a, { keys: sealKeys(full), at: Date.now(), query: text, from: opts?.from, channel: opts?.channel, origin, fresh: idleVerdict(target) === true });
-      // 同 dispatch: 在 inject 之前解除静默, 防止验证循环中 LLM 回复被永久吞掉。
-      a.muteUntilInject = false;
-      a.justSpawned = false;
+      let full = text + envelope;
+      const beforeInput = (): void => {
+        a.pendingFromCli = false;
+        a.turnFromChat = true;
+        rememberInject(full);
+        pushSeal(a, { keys: sealKeys(full), at: Date.now(), query: text, from: opts?.from, channel: opts?.channel, origin, fresh: idleVerdict(target) === true });
+        a.muteUntilInject = false;
+        a.justSpawned = false;
+      };
       // 同 dispatch 的 /clear 与静默分叉跟随: self-handoff / 同伴 / 定时任务也走这里注入,
       // 漏了它 tail 就钉在旧 jsonl 上, 直到下一条人话经 dispatch 才把它拽回来。
       const clearing = isClearCommand(text);
@@ -6832,6 +6862,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const r = await inject({
         text: full, images: [], cfg, guard: (phase) => permitted() && a.tmuxPane === injectPane && (!opts?.guard || opts.guard(phase)), log: log.child({ principal: target, sessionId: sid, sub: "init-demo" }),
         sessionId: sid, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn: fresh,
+        requireIdle: opts?.requireIdle ? () => idleVerdict(target) === true : undefined,
+        prepareText: () => (full = text + envelope + noticeSuffixFor(target, text)),
+        beforeInput,
       });
       if (r.ok && a.tmuxPane && permitted()) {
         if (preClearBaseline) {
@@ -7336,9 +7369,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // 安全性: newSession 的 fresh pane 在 inject 前只写过 system/init (→ 无 item),
         // 用户行有 isOwnInject 过滤 —— 提前解除不会泄漏脏数据。
         a.muteUntilInject = false;
+        const injectPane = a.tmuxPane;
         const r = await inject({
           text: effText, images: effImages, cfg, log: log.child({ principal, sessionId: sid }),
           sessionId: sid, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn,
+          guard: () => byTarget.get(a.target) === a && a.tmuxPane === injectPane && (a.injectGen ?? 0) === myGen,
         });
         if (!r.ok) {
           if (s) {

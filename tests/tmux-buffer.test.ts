@@ -77,6 +77,8 @@ for (const version of ["tmux 1.8", "tmux 3.4"]) {
     });
     const [first, second] = await Promise.all([paste("%9001", "first"), paste("%9002", "second")]);
     assert.equal(first.ok, false);
+    assert.equal(first.retryable === true, failedCommand === "load-buffer");
+    assert.equal(first.uncertain === true, failedCommand === "paste-buffer");
     assert.equal(second.ok, true, "legacy lock must release after failure");
     const pastes = calls.filter((a) => a[0] === "paste-buffer");
     assert.deepEqual(pastes.map((a) => a.at(-1)), failedCommand === "load-buffer" ? ["%9002"] : ["%9001", "%9002"]);
@@ -108,7 +110,22 @@ for (const version of ["tmux 1.8", "tmux 3.4"]) {
     if (args[0] === "delete-buffer") throw new Error("cleanup failed");
     return args[0] === "paste-buffer" ? fail("original paste error") : ok();
   });
-  assert.deepEqual(await paste("%1", "text"), { ok: false, reason: "tmux paste-buffer failed: original paste error" });
+  assert.deepEqual(await paste("%1", "text"), { ok: false, uncertain: true, reason: "tmux paste-buffer failed: original paste error" });
+}
+
+for (const version of ["tmux 1.8", "tmux 3.4"]) {
+  for (const command of ["-V", "load-buffer", "paste-buffer"]) {
+    let throws = true;
+    const paste = createTmuxBufferPaster(async (args) => {
+      if (args[0] === command && throws) { throws = false; throw new Error("transport disconnected"); }
+      return ok(args[0] === "-V" ? version : "");
+    });
+    const failed = await paste("%throw", "text");
+    assert.equal(failed.ok, false);
+    assert.equal(failed.retryable === true, command !== "paste-buffer", `${version} ${command}`);
+    assert.equal(failed.uncertain === true, command === "paste-buffer", `${version} ${command}`);
+    assert.equal((await paste("%throw", "next")).ok, true, "errors cannot poison version/legacy queue");
+  }
 }
 
 console.log("tmux buffer: version/argv, 40 concurrent routes, isolation, failures and probe recovery passed");
