@@ -31,7 +31,7 @@ for (const symbol of ["✦", "✨"]) {
   assert.equal(withMessageFooter(`[.worker](${urlOf(worker)}): hello ${ordinaryLink}`, { topOnly: true, url: fallback, principal: "user:admin" }),
     `hello ${ordinaryLink} [✦](${urlOf(worker)})`, `${symbol} body link is preserved while the speaker footer is selected`);
 }
-const formatted = withMessageFooter(`[.worker](${urlOf(worker)}): ${body}`, { topOnly: true });
+const formatted = withMessageFooter(`[.worker](${urlOf(worker)}): ${body}`, { topOnly: true, principal: "user:admin" });
 assert.deepEqual(parseTagHeader(formatted), { fromBot: true, tag: "renamed-worker", body }, "footer quote preserves routing across wizard rename");
 assert.deepEqual(parseTagHeader(`.someone: example [✦](${urlOf(worker)})`), { fromBot: true, tag: "renamed-worker", body: ".someone: example" }, "answer text cannot override the footer's speaker");
 assert.deepEqual(parseTagHeader(`${body}\n\n[✨](https://example.test/base/role?id=stream&ww_uniq=worker)`), { fromBot: true, tag: "renamed-worker", body }, "old stream URL resolves via recorded turn");

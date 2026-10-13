@@ -98,7 +98,7 @@ export const installResponseTracker = (client: WSClient, log?: Logger, ownTransp
 
   client.replyStream = async (frame, streamId, content, finish, msgItem, feedback) => {
     const format = policy?.({ chatid: bareFromFrame(frame), frame, body: (frame as WsFrame<BaseMessage>).body });
-    if (finish === true && !gate("replyStream", format?.topOnly ? withoutMessageFooter(content) : content)) {
+    if (finish === true && !gate("replyStream", format?.topOnly ? withoutMessageFooter(content, format.url) : content)) {
       return undefined as unknown as WsFrame;
     }
     content = withMessageFooter(content, format);
@@ -109,7 +109,7 @@ export const installResponseTracker = (client: WSClient, log?: Logger, ownTransp
 
   client.replyStreamWithCard = async (frame, streamId, content, finish, options) => {
     const format = policy?.({ chatid: bareFromFrame(frame), frame, body: (frame as WsFrame<BaseMessage>).body });
-    if (finish === true && !options?.templateCard && !gate("replyStreamWithCard", format?.topOnly ? withoutMessageFooter(content) : content)) {
+    if (finish === true && !options?.templateCard && !gate("replyStreamWithCard", format?.topOnly ? withoutMessageFooter(content, format.url) : content)) {
       return undefined as unknown as WsFrame;
     }
     content = withMessageFooter(content, format);
@@ -137,7 +137,7 @@ export const installResponseTracker = (client: WSClient, log?: Logger, ownTransp
     if (body.msgtype === "markdown") {
       const md = (body as { markdown?: { content?: string } }).markdown?.content ?? "";
       const format = policy?.({ chatid, body });
-      if (!gate("sendMessage", format?.topOnly ? withoutMessageFooter(md) : md)) return undefined as unknown as WsFrame;
+      if (!gate("sendMessage", format?.topOnly ? withoutMessageFooter(md, format.url) : md)) return undefined as unknown as WsFrame;
       const content = withMessageFooter(md, format);
       const r = await origSendMessage(chatid, { ...body, markdown: { ...body.markdown, content } });
       record(chatid, content);
