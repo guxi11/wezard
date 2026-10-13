@@ -54,6 +54,7 @@ import {
   TASK_QUIET_WAIT_MS,
 } from "./tasks.js";
 import { openTaskRegistry } from "./task-registry.js";
+import { deliverScheduled, type ScheduledDispatchOptions, type ScheduledResult } from "./scheduled-delivery.js";
 import { describeTrigger, nextFire, parseTrigger, WHEN_HELP } from "../shared/trigger.js";
 import { isQuiet, slugify, uniqueId } from "../shared/task-file.js";
 import { baseOfKey, bindMultiBot, bindTagLinker, botOfKey, headed, ownHead, isInternalKey, keyOf, linkTags, normalizeTag, sameBot, speakerHead, tagFromCwd, tagHead, tagLink, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
@@ -146,7 +147,7 @@ const main = async (): Promise<void> => {
   let stewardRun: ((prompt: string) => Promise<{ ok: boolean; reason?: string }>) | undefined;
   let stewardWiring: { refsOf?: RefsOf; onMerged?: (mds: readonly string[]) => void } = {};
   let scheduledTaskInject:
-    | ((target: string, text: string, opts: { taskId: string; fresh: boolean; quiet: boolean }) => Promise<{ ok: boolean; reason?: string }>)
+    | ((target: string, text: string, opts: ScheduledDispatchOptions) => Promise<ScheduledResult>)
     | undefined;
 
   // Bind the CLI backend registry. `primary` (= defaultCli) drives new-session
@@ -3620,49 +3621,34 @@ const main = async (): Promise<void> => {
     // 还要连触发时间点一起被它那一轮拖走。所以到点起一个白板 wizard 单独执行,
     // 跑完自动收掉。只有排班时点名了某个 wizard (fresh=false) 且它此刻闲着,
     // 才把这句话直接投进它那一轮 —— 「在已有会话里继续」是要求出来的, 不是默认。
-    scheduledTaskInject = async (target, text, { taskId, fresh, quiet }) => {
-      // 日程文件是可手改的源码: target 与排班者不同机器人就不放枪 (schedule_task 那头已拦, 这里拦手改的)。
+    scheduledTaskInject = async (target, text, opts) => {
+      const { taskId, fresh, quiet } = opts;
       const owner = ((r) => (r ? ownerOf(r) : target))(tasks.get(taskId));
       if (!sameBot(owner, target)) return { ok: false, reason: `日程 ${taskId} 的目标与排班者归不同的企微机器人, 不跨机器人放枪` };
-      // 安静任务私下跑 (channel ""): 镜像不推它的任何一句, 终句由 relayUnlessQuiet 判断要不要进群。
-      const allowed = () => planStore.allowExternal(target, wizards.get(target)?.name);
-      if (!fresh && !allowed()) return { ok: false, reason: "workflow plan reserves this executor" };
-      const inNamed = async (): Promise<{ ok: boolean; reason?: string }> => {
-        if (!allowed()) return { ok: false, reason: "workflow plan reserves this executor" };
-        const at = Date.now();
-        const turn = newTurn();
-        const inj = await m.injectText(target, text, undefined, quiet
-          ? { guard: allowed, from: { kind: "task", taskId }, channel: "", envelope: renderTaskEnvelope(taskId, { turn }) }
-          : { guard: allowed, fromChat: true, from: { kind: "task", taskId }, envelope: renderTaskEnvelope(taskId) });
-        if (inj.ok && quiet) void relayUnlessQuiet(target, at, turn, baseOfKey(target));
-        return inj;
-      };
-      if (!fresh) await handedOff(target); // 交接中途 pane 是空的, 别当成闲着投进去
-      if (!fresh && !allowed()) return { ok: false, reason: "workflow plan reserves this executor" };
-      const busy = fresh ? false : await m.isBusy(target);
-      if (!fresh && !busy) return inNamed();
-      // 点名的目标正忙: 顺延到它这一轮结束再投 (与 tell_peer 默认的 normal 同一口径) ——
-      // 「在它那儿继续」是排班时要求的, 不该因为撞上它在干活就换成白板。后台等, 别拖住
-      // 调度器的其它任务; 等满 30 分钟仍忙才退回起白板。
-      const inRunner = (wasBusy: boolean): Promise<{ ok: boolean; reason?: string }> => !fresh && !allowed()
-        ? Promise.resolve({ ok: false, reason: "workflow plan reserves this executor" }) : runTaskInRunner(target, text, taskId, quiet, wasBusy);
-      if (!fresh && busy) {
-        // 同一条任务已有一枪在等这个目标: 这一枪并进去 —— 等它闲下来时几枪一起投, 会挤进同一个输入框。
-        if (postponed.has(taskId)) return { ok: true, reason: "上一枪还在等它闲下来, 这一枪并入" };
-        postponed.add(taskId);
-        void (async () => {
-          const wr = await m.untilIdle(target, TASK_POSTPONE_MS);
-          postponed.delete(taskId);
-          const r = wr.idle ? await inNamed() : await inRunner(true);
-          log.info({ taskId, target, postponed: true, idle: wr.idle, ok: r.ok, reason: r.reason }, "scheduled task: 目标正忙, 顺延");
-          if (!r.ok) notifyChat(baseOfKey(target), withTagHeader(target, `⏰ 定时任务 \`${taskId}\` 顺延后注入失败: ${r.reason ?? "unknown"}`));
-        })();
-        return { ok: true, reason: "目标正忙, 顺延到它闲下来" };
-      }
-      return inRunner(busy);
+      const allowed = () => opts.guard() && planStore.allowExternal(target, wizards.get(target)?.name);
+      return deliverScheduled({ ...opts, guard: () => opts.guard() && (fresh || allowed()) }, {
+        postponeMs: TASK_POSTPONE_MS,
+        handedOff: () => handedOff(target),
+        idleNow: () => m.idleNow(target),
+        untilIdle: (timeoutMs, aborted) => m.untilIdle(target, timeoutMs, { aborted }),
+        named: async (live) => {
+          const guard = () => live() && allowed();
+          if (!guard()) return { ok: false, reason: "scheduled target permission withdrawn" };
+          const at = Date.now();
+          const turn = newTurn();
+          // Confirm idle inside the physical pane transaction; a race is unsent
+          // and returns to the target consumer, without releasing task dedup.
+          const inj = await m.injectText(target, text, undefined, quiet
+            ? { guard, requireIdle: true, from: { kind: "task", taskId }, channel: "", envelope: renderTaskEnvelope(taskId, { turn }) }
+            : { guard, requireIdle: true, fromChat: true, from: { kind: "task", taskId }, envelope: renderTaskEnvelope(taskId) });
+          if (inj.ok && quiet) void relayUnlessQuiet(target, at, turn, baseOfKey(target));
+          return inj;
+        },
+        runner: (busy, live) => !fresh && !allowed()
+          ? Promise.resolve({ ok: false, reason: "scheduled target permission withdrawn" })
+          : runTaskInRunner(target, text, taskId, quiet, busy, live),
+      });
     };
-    /** 顺延中的任务 (内存即可: reload 丢了只是少放一枪, 下一次到点照常)。 */
-    const postponed = new Set<string>();
     /** 安静任务那一轮的终句: 它私下跑, 镜像不推; 等它这一轮跑完, 终句不是 `QUIET` 就替它
      *  发进群 (头写它的名字, 人知道是谁说的)。按信封件号定位答句 (同回执): 按时刻取会把紧随
      *  其后的私聊 / 人话那一轮的答案当成它的, 把私下内容发进群。 */
@@ -3692,7 +3678,8 @@ const main = async (): Promise<void> => {
     );
     void m.restored.then(() => Object.entries(quietRelays.all()).forEach(([turn, r]) => void relayUnlessQuiet(r.target, r.at, turn, r.base)));
     /** 到点起一个白板 wizard 执行这一枪, 跑完自动收掉。 */
-    const runTaskInRunner = async (target: string, text: string, taskId: string, quiet: boolean, busy: boolean): Promise<{ ok: boolean; reason?: string }> => {
+    const runTaskInRunner = async (target: string, text: string, taskId: string, quiet: boolean, busy: boolean, guard: () => boolean): Promise<ScheduledResult> => {
+      if (!guard()) return { ok: false, reason: "scheduled runner withdrawn" };
 
       // 执行体挂在日程的主人名下: 名字 `<主人>-task-xxxx`, parent = 主人 —— 它的
       // rolepage 里看得见这一枪是谁的日程放的。落在执行目标的群/目录里。
@@ -3701,9 +3688,10 @@ const main = async (): Promise<void> => {
       const owner = rec ? ownerOf(rec) : target;
       const ownerName = settleName(wizards, chatNameOf(cfg, owner), owner) || "task";
       const slotR = await claimSlot(base, "", `${ownerName}-task-${taskId.slice(0, 4)}`);
+      if (!guard()) return { ok: false, reason: "scheduled runner withdrawn during slot selection" };
       if (!slotR.ok) return { ok: false, reason: "起白板 wizard 失败: 挑不出槽位" };
       const runner = slotR.target;
-      const allowed = () => planStore.allowExternal(runner, wizards.get(runner)?.name);
+      const allowed = () => guard() && planStore.allowExternal(runner, wizards.get(runner)?.name);
       if (!allowed()) return { ok: false, reason: "workflow plan reserves task runner" };
       const info = m.sessionInfo(target);
       const why = busy ? ` (起因: ${displayName(target)} 当时正忙)` : "";
@@ -3718,6 +3706,10 @@ const main = async (): Promise<void> => {
       if (!spawned.ok) {
         wizards.drop(runner);
         return { ok: false, reason: `起白板 wizard 失败: ${spawned.reason ?? "unknown"}` };
+      }
+      if (!allowed()) {
+        if (m.sessionInfo(runner)?.sessionId === spawned.sessionId) { await m.killPane(runner); wizards.drop(runner); }
+        return { ok: false, reason: "scheduled runner withdrawn after spawn" };
       }
       if (!quiet) {
         notifyChat(base, withTagHeader(target, busy

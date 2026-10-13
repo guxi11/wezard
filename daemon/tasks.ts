@@ -21,6 +21,8 @@ import { describeTrigger, isDue, nextFire, triggerOfLegacyWhen } from "../shared
 import { slugify, uniqueId, type TaskRecord, type TaskState } from "../shared/task-file.js";
 import type { TaskRegistry } from "./task-registry.js";
 import { runGate } from "./task-gate.js";
+import { createKeyedScheduler } from "../shared/keyed-scheduler.js";
+import type { ScheduledDispatchOptions, ScheduledResult } from "./scheduled-delivery.js";
 
 const stripPrefix = (s: string): string => {
   const i = s.indexOf(":");
@@ -124,8 +126,8 @@ interface SchedulerDeps {
   inject?: (
     target: string,
     text: string,
-    opts: { taskId: string; fresh: boolean; quiet: boolean },
-  ) => Promise<{ ok: boolean; reason?: string }>;
+    opts: ScheduledDispatchOptions,
+  ) => Promise<ScheduledResult>;
   /** 目标 wizard 的工作区 —— gate 里 `sh("git log")` 默认就在那儿跑。 */
   cwdOf?: (target: string) => string;
   /** 任务文件没写 target 时投给谁 (排班者那个机器人的 defaultChat)。 */
@@ -139,11 +141,29 @@ const announce = async (client: WSClient, target: string, markdown: string): Pro
   });
 };
 
-export const startScheduler = ({ client, registry, log, inject, cwdOf, fallbackTarget }: SchedulerDeps): { stop: () => void } => {
-  const fire = async (t: TaskRecord): Promise<void> => {
+export const startScheduler = ({ client, registry, log, inject, cwdOf, fallbackTarget }: SchedulerDeps): { stop: () => void; tick: () => void } => {
+  const fires = createKeyedScheduler(4);
+  // Gates use task slots; only the injection needs the target's exclusive slot.
+  const injections = createKeyedScheduler(4);
+  // One readiness waiter per target; waiting does not reserve an injection worker.
+  const consumers = createKeyedScheduler(Number.MAX_SAFE_INTEGER);
+  const inFlight = new Set<string>();
+  const stamps = new Map<string, { at: number; previous?: number }>();
+  const finish = (t: TaskRecord, restore = false): void => {
+    inFlight.delete(t.id);
+    const stamp = stamps.get(t.id);
+    stamps.delete(t.id);
+    // Cancellation before physical exposure must not consume a once firing.
+    if (restore && stamp && registry.list().some((r) => r.id === t.id)
+      && registry.stateOf(t.id).lastFired === stamp.at) registry.patchState(t.id, { lastFired: stamp.previous });
+    if (restore) return;
+    if (!fires.signal.aborted && t.trigger.clock.kind === "once") registry.remove(t.id);
+  };
+  const failed = (t: TaskRecord, e: unknown): void => log.error({ id: t.id, err: (e as Error).message }, "scheduled fire failed");
+  const fire = async (t: TaskRecord, signal: AbortSignal): Promise<boolean> => {
     const target = t.target || fallbackTarget(t);
-    if (!inject) { log.warn({ id: t.id, target }, "scheduled task skipped: not in mirror mode"); return; }
-    if (!target) { log.warn({ id: t.id }, "scheduled task skipped: no target"); return; }
+    if (!inject) { log.warn({ id: t.id, target }, "scheduled task skipped: not in mirror mode"); return false; }
+    if (!target) { log.warn({ id: t.id }, "scheduled task skipped: no target"); return false; }
 
     // gate: 有活才继续。没活是**静默**的 —— 它存在的全部意义就是不惊动任何人。
     const st = registry.stateOf(t.id);
@@ -156,6 +176,7 @@ export const startScheduler = ({ client, registry, log, inject, cwdOf, fallbackT
         log,
       })
       : { go: true, vars: {}, logs: [] as string[] };
+    if (signal.aborted) return false;
     if (v.logs.length) log.info({ id: t.id, logs: v.logs }, "gate log");
     if (!v.go) {
       // 没活是静默的, 但**炸了**必须出声: gate 一坏这条定时就再也不放枪了, 而它
@@ -173,7 +194,7 @@ export const startScheduler = ({ client, registry, log, inject, cwdOf, fallbackT
         await announce(client, target, `⏰ 定时任务 \`${t.id}\` 的 gate 出错, 本轮未放枪 (下次照常重试):\n> ${v.error!.split("\n")[0]!.slice(0, 200)}\n修它: \`${t.file}\``)
           .catch(() => {});
       }
-      return;
+      return false;
     }
     registry.patchState(t.id, {
       lastGate: "go", lastGateAt: Date.now(), lastError: undefined,
@@ -185,29 +206,56 @@ export const startScheduler = ({ client, registry, log, inject, cwdOf, fallbackT
     // 冒出一轮对话, 没人知道是谁点的火。
     const how = t.fresh ? " · 新建 wizard 执行" : "";
     // 安静任务不预告: 「有事才说」, 预告本身就是一句没事也说的话。
-    if (!t.quiet) await announce(client, target, `⏰ **定时任务** · ${describeTrigger(t.trigger)}${how}\n> ${prompt.split("\n")[0]!.slice(0, 120)}`)
-      .catch((e: unknown) => log.warn({ id: t.id, err: (e as Error).message }, "task announce failed"));
-    const r = await inject(target, prompt, { taskId: t.id, fresh: t.fresh, quiet: t.quiet });
-    log.info({ id: t.id, target, ok: r.ok, reason: r.reason }, "scheduled task fired");
-    if (!r.ok) await announce(client, target, `⏰ 定时任务注入失败:${r.reason ?? "unknown"}`).catch(() => {});
+    const resource = t.fresh ? `fresh:${t.id}` : target;
+    let leg = 0;
+    const sent = consumers.schedule(t.id, resource, async (dispatchSignal) => {
+      const guard = () => !dispatchSignal.aborted && registry.list().some((r) => r.id === t.id && r.enabled);
+      if (!guard()) return undefined;
+      if (!t.quiet) await announce(client, target, `⏰ **定时任务** · ${describeTrigger(t.trigger)}${how}\n> ${prompt.split("\n")[0]!.slice(0, 120)}`)
+        .catch((e: unknown) => log.warn({ id: t.id, err: (e as Error).message }, "task announce failed"));
+      if (!guard()) return undefined;
+      return inject(target, prompt, {
+        taskId: t.id, fresh: t.fresh, quiet: t.quiet, signal: dispatchSignal, guard,
+        submit: async (action) => {
+          const r = await injections.schedule(`${t.id}:${++leg}`, resource, async () =>
+            guard() ? action() : { ok: false, reason: "scheduled delivery withdrawn", retryable: true });
+          return r ?? { ok: false, reason: "scheduler stopped", retryable: true };
+        },
+      });
+    });
+    if (!sent) return false;
+    // Do not retain a gate worker while this target waits for its injection slot.
+    let restoreAfterStop = false;
+    void sent.then(async (r) => {
+      const withdrawn = signal.aborted || !registry.list().some((row) => row.id === t.id && row.enabled)
+        || r?.reason === "scheduled delivery withdrawn";
+      restoreAfterStop = withdrawn && (!r || (!r.ok && r.retryable === true && !r.uncertain));
+      if (!r || signal.aborted) return;
+      log.info({ id: t.id, target, ok: r.ok, reason: r.reason }, "scheduled task fired");
+      if (!r.ok) await announce(client, target, `⏰ 定时任务注入失败:${r.reason ?? "unknown"}`).catch(() => {});
+    }).catch((e: unknown) => failed(t, e)).finally(() => finish(t, restoreAfterStop));
+    return true;
   };
 
-  const tick = async (): Promise<void> => {
+  const tick = (): void => {
+    if (fires.signal.aborted) return;
     const now = new Date();
-    const due = registry.list().filter((t) => t.enabled && isDue(t.trigger, now, sinceOf(registry.stateOf(t.id))));
+    const due = registry.list().filter((t) => t.enabled && !inFlight.has(t.id) && isDue(t.trigger, now, sinceOf(registry.stateOf(t.id))));
     if (!due.length) return;
-    const firedAt = now.getTime();
-    for (const t of due) registry.patchState(t.id, { lastFired: firedAt });
     for (const t of due) {
-      try {
-        await fire(t);
-      } catch (e) {
-        log.error({ id: t.id, err: (e as Error).message }, "scheduled fire failed");
-      }
-      // once 放完这一枪就没有下一枪了, 留着只会让列表越来越脏。
-      if (t.trigger.clock.kind === "once") registry.remove(t.id);
+      inFlight.add(t.id);
+      const fired = fires.schedule(t.id, t.id, async (signal) => {
+        if (!registry.list().some((r) => r.id === t.id && r.enabled)) { inFlight.delete(t.id); return true; }
+        // Stamp on start: stop must not consume once-tasks still in the queue.
+        const at = Date.now();
+        stamps.set(t.id, { at, previous: registry.stateOf(t.id).lastFired });
+        registry.patchState(t.id, { lastFired: at });
+        return fire(t, signal);
+      });
+      void fired?.then((handedToInjection) => { if (!handedToInjection) finish(t, fires.signal.aborted); })
+        .catch((e: unknown) => { failed(t, e); finish(t); });
     }
   };
-  const timer = setInterval(() => { void tick(); }, 20_000);
-  return { stop: () => clearInterval(timer) };
+  const timer = setInterval(tick, 20_000);
+  return { tick, stop: () => { clearInterval(timer); fires.stop(); consumers.stop(); injections.stop(); } };
 };

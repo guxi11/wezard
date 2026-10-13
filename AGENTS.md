@@ -75,6 +75,11 @@ requests retain the requested scope described above.
 
 ## Editing conventions
 
+- Once the user authorizes a release, complete npm publishing and the Git push/tag
+  without asking for another release confirmation or waiting for the user to
+  confirm npm publishing succeeded. Record the actual publish command result;
+  never claim success when the command fails or its result is unknown.
+
 - Preserve existing uncommitted work and keep edits scoped to the task.
 - Edit source files; regenerate `dist/` through the build when needed.
 - Follow existing ESM imports with `.js` extensions in TypeScript source.

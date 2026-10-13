@@ -27,8 +27,9 @@ import { newStewardSpec, resumedStewardSpec } from "./steward-model.js";
 import { expandHome, sanitizeId } from "../shared/paths.js";
 import { augmentedPath } from "../shared/exec-path.js";
 import { sleep, truncateWithCount, mapLimit } from "../shared/std.js";
-import { withPaneInput } from "./pane-input.js";
 import { withImageClipboard, pasteVerifiedImage } from "./image-input.js";
+import { createKeyedScheduler } from "../shared/keyed-scheduler.js";
+import { withPaneInput } from "./pane-input.js";
 import {
   activeBackends,
   resolveCliBackend,
@@ -1392,16 +1393,18 @@ const pressModalIndex = async (
   pane: string,
   before: ModalPaneVerdict & { screen: string },
   index: number,
+  live: () => boolean = () => true,
 ): Promise<ModalPaneVerdict & { screen: string }> => {
   const fingerprint = modalFingerprint(before.screen);
   const current = await detectModalPicker(pane);
-  if (!current.modal || modalFingerprint(current.screen) !== fingerprint) return current;
+  if (!live() || !current.modal || modalFingerprint(current.screen) !== fingerprint) return current;
   await runTmux(["send-keys", "-t", pane, String(index)]);
   await sleep(MODAL_PRESS_SETTLE_MS);
   let after = await detectModalPicker(pane);
   if (!after.modal || modalFingerprint(after.screen) !== fingerprint) return after;
   // 数字键没关掉框: 把高亮挪到目标项。guard 上限盖过任何确认框的选项数。
   for (let guard = 0; guard < 8; guard++) {
+    if (!live()) return after;
     const cur = highlightedIndex(after.screen);
     if (cur === undefined || cur === index) break;
     await runTmux(["send-keys", "-t", pane, cur < index ? "Down" : "Up"]);
@@ -1409,7 +1412,7 @@ const pressModalIndex = async (
     after = await detectModalPicker(pane);
     if (!after.modal || modalFingerprint(after.screen) !== fingerprint) return after;
   }
-  if (highlightedIndex(after.screen) !== index) return after; // 核不准, 绝不盲按
+  if (!live() || highlightedIndex(after.screen) !== index) return after; // 核不准, 绝不盲按
   await runTmux(["send-keys", "-t", pane, "Enter"]);
   await sleep(MODAL_PRESS_SETTLE_MS);
   return detectModalPicker(pane);
@@ -6338,7 +6341,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return { lastMs, lastRealMs, seenMtime: mtime, pinging: false, pingMtime: 0, round, settledAt: 0, ttlSec: cacheTtlSec(jsonlPath), cacheAt: cacheTouchMs(jsonlPath) };
   };
 
-  const fireKeepalive = async (a: AttachState): Promise<void> => {
+  const fireKeepalive = async (a: AttachState, guard: () => boolean): Promise<void> => {
+    if (!guard()) return;
     const kc = cfg.wrc.mirror.keepalive;
     // The SAME full instruction every round: a bare "ping" used to be sent from round 2 on
     // (the instruction was already in context), but the model reads a bare "ping"
@@ -6352,13 +6356,20 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // ping turn (reply included). The 60s fail-safe clears the quiet window if
     // the turn somehow never emits turn_end, so a later real turn is never muted;
     // it also closes the detail turn so it can't hang open in the chat timeline.
-    rememberInject(text);
-    a.keepaliveQuiet = setTimeout(() => {
-      a.keepaliveQuiet = undefined;
-      if (a.keepaliveTurnId) { recordTurnClose(a.keepaliveTurnId); a.keepaliveTurnId = undefined; }
-    }, 60_000);
     const r = await inject({
       text, images: [], cfg,
+      guard,
+      requireIdle: () => idleVerdict(a.target) === true,
+      beforeInput: () => {
+        // A queued heartbeat must not mute the peer turn that won the lane.
+        // Drain its tail first, then open swallow only at permitted physical input.
+        a.tail.drain();
+        rememberInject(text);
+        a.keepaliveQuiet = setTimeout(() => {
+          a.keepaliveQuiet = undefined;
+          if (a.keepaliveTurnId) { recordTurnClose(a.keepaliveTurnId); a.keepaliveTurnId = undefined; }
+        }, 60_000);
+      },
       log: log.child({ target: a.target, sessionId: a.sessionId, sub: "keepalive" }),
       sessionId: a.sessionId, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane,
     });
@@ -6368,6 +6379,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       log.warn({ target: a.target, reason: r.reason }, "keepalive: inject failed");
       return;
     }
+    if (!guard()) return;
     const tokens = lastContextTokens(a.jsonlPath);
     const round = a.keepalive ? (a.keepalive.round += 1) : 1;
     log.info({ target: a.target, tokens, round, totalRounds: Math.max(1, kc.rounds) }, "keepalive: ping injected");
@@ -6384,86 +6396,100 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
   };
 
-  let keepaliveTicking = false;
-  const keepaliveTick = async (): Promise<void> => {
+  // One pool for both maintenance paths: slow panes do not stall other panes,
+  // and a keepalive never overlaps a picker scan/automatic press on the same pane.
+  const maintenance = createKeyedScheduler(4);
+  const maintenanceValid = (a: AttachState, pane: string, sid: string, gen: number, signal: AbortSignal): boolean =>
+    !signal.aborted && byTarget.get(a.target) === a && a.tmuxPane === pane && a.sessionId === sid
+    && (a.injectGen ?? 0) === gen && !a.migrationWatcher;
+  const keepaliveOne = async (a: AttachState, pane: string, sid: string, gen: number, signal: AbortSignal): Promise<void> => {
+    const valid = () => maintenanceValid(a, pane, sid, gen, signal) && cfg.wrc.mirror.keepalive.enabled;
+    if (!valid()) return;
     const kc = cfg.wrc.mirror.keepalive;
-    if (!kc.enabled || keepaliveTicking) return;
-    keepaliveTicking = true;
-    try {
-      const pingSigs = [normAssistant(kc.ping).slice(0, 40)].filter((s) => s.length > 0);
-      const now = Date.now();
-      for (const a of byTarget.values()) {
-        if (a.keepaliveDisabled) continue;                    // sticky spawn-time opt-out — never pings
-        if (!a.tmuxPane) continue;                            // spawn-mode: no live pane to warm
-        if (a.migrationWatcher) continue;                     // session rotating — skip
-        if (a.liveStream && !a.liveStream.closed) continue;   // mid typewriter — don't inject
-        if (!(await tmuxPaneAlive(a.tmuxPane))) continue;     // dead pane — nothing to keep alive
-        let mtime = 0;
-        try { mtime = statSync(a.jsonlPath).mtimeMs; } catch { continue; }
-        if (!mtime) continue;
-        const k = (a.keepalive ??= initKeepalive(a.jsonlPath, mtime, pingSigs))!;
-        // File mtime is only a cheap "did anything change → re-read the tail" gate.
-        // The clocks themselves come from message turns, so metadata churn (which
-        // bumps mtime but is not a turn) can never move them. `grewSinceLast` now
-        // means a NEW message turn appeared — not that the file grew.
-        const prevRealMs = k.lastRealMs;
-        if (mtime > k.seenMtime + 1000) {
-          const s = keepaliveStamps(a.jsonlPath, pingSigs);
-          if (s.stamped) { k.lastMs = s.lastMs; k.lastRealMs = s.lastRealMs; }
-          else { k.lastMs = mtime; k.lastRealMs = mtime; } // backend without timestamps → fall back to mtime
-          k.ttlSec = cacheTtlSec(a.jsonlPath) || k.ttlSec;
-          k.cacheAt = cacheTouchMs(a.jsonlPath) || k.cacheAt;
-        }
-        k.seenMtime = mtime;
-        // Round reset / real-activity re-anchor keys off REAL turns only — a
-        // keepalive ping+pong advances lastMs but NOT lastRealMs, so the heartbeat
-        // no longer reads as activity to itself (which was pinning round at 1/N).
-        const grewSinceLast = k.lastRealMs > prevRealMs + 1000;
-        const paneTail = await capturePaneTail(a.tmuxPane, 16);
-        const busy = paneIsBusy(paneTail);
+    const pingSigs = [normAssistant(kc.ping).slice(0, 40)].filter((s) => s.length > 0);
+    const now = Date.now();
+    if (a.keepaliveDisabled) return;                    // sticky spawn-time opt-out — never pings
+    if (!a.tmuxPane) return;                            // spawn-mode: no live pane to warm
+    if (a.migrationWatcher) return;                     // session rotating — skip
+    if (a.liveStream && !a.liveStream.closed) return;   // mid typewriter — don't inject
+    if (!(await tmuxPaneAlive(pane)) || !valid()) return;     // dead pane — nothing to keep alive
+    let mtime = 0;
+    try { mtime = statSync(a.jsonlPath).mtimeMs; } catch { return; }
+    if (!mtime) return;
+    const k = (a.keepalive ??= initKeepalive(a.jsonlPath, mtime, pingSigs))!;
+    // File mtime is only a cheap "did anything change → re-read the tail" gate.
+    // The clocks themselves come from message turns, so metadata churn (which
+    // bumps mtime but is not a turn) can never move them. `grewSinceLast` now
+    // means a NEW message turn appeared — not that the file grew.
+    const prevRealMs = k.lastRealMs;
+    if (mtime > k.seenMtime + 1000) {
+      const s = keepaliveStamps(a.jsonlPath, pingSigs);
+      if (s.stamped) { k.lastMs = s.lastMs; k.lastRealMs = s.lastRealMs; }
+      else { k.lastMs = mtime; k.lastRealMs = mtime; } // backend without timestamps → fall back to mtime
+      k.ttlSec = cacheTtlSec(a.jsonlPath) || k.ttlSec;
+      k.cacheAt = cacheTouchMs(a.jsonlPath) || k.cacheAt;
+    }
+    k.seenMtime = mtime;
+    // Round reset / real-activity re-anchor keys off REAL turns only — a
+    // keepalive ping+pong advances lastMs but NOT lastRealMs, so the heartbeat
+    // no longer reads as activity to itself (which was pinning round at 1/N).
+    const grewSinceLast = k.lastRealMs > prevRealMs + 1000;
+    const paneTail = await capturePaneTail(pane, 16);
+    if (!valid()) return;
+    const busy = paneIsBusy(paneTail);
 
-        if (k.pinging) {
-          // Waiting for our own ping to land and settle: until a NEWER message turn
-          // (the ping's own user line) appears and the pane goes idle, keep waiting.
-          if (busy || k.lastMs <= k.pingMtime) continue;
-          k.pinging = false;
-          k.settledAt = now;
-          continue;
-        }
-        // A new real message turn (or a busy pane) re-anchors: reset the round
-        // counter, and past the /stop grace lift a busy-resume. grewSinceLast is
-        // message-based now, so `/stop`'s Esc settling writes (metadata, no new
-        // turn) can no longer self-resume the pause — only a busy pane past grace,
-        // or a WeCom inbound in dispatch, does.
-        // Suppress the grewSinceLast reset for 30s after pinging settles — the
-        // pong's tail flush can lag a tick and would otherwise fake real activity.
-        const justSettled = k.settledAt > 0 && now - k.settledAt < 30_000;
-        if (busy || (grewSinceLast && !justSettled)) {
-          k.round = 0; k.settledAt = 0;
-          if (a.keepaliveOff && busy && now - (a.keepaliveOffAt ?? 0) > RESUME_GRACE_MS) { a.keepaliveOff = false; persistPause(a); }
-          if (busy) continue;
-        }
-        if (a.keepaliveOff) continue;                          // paused by /stop until real activity returns
-        // Cache clock = start of the newest answered request (TTL runs from there),
-        // not the last turn's write time; no request on record → the turn clock.
-        const sinceCache = now - (k.cacheAt || k.lastMs || mtime);
-        // The TTL the session's cache entries were actually written with (1h on a
-        // Claude Code subscription), not a guess: pinging at the 5min cadence
-        // against a 1h entry re-reads the whole context ~14x per hour for nothing.
-        const ttlMs = (k.ttlSec || kc.ttlSec) * 1000;
-        const idleTriggerMs = Math.max(30_000, ttlMs - kc.marginSec * 1000);
-        if (sinceCache < idleTriggerMs) continue;              // cache still comfortably warm
-        if (sinceCache >= ttlMs) continue;                     // cache already cold — a ping would cold-rewrite for nothing
-        if (sinceCache > KEEPALIVE_MAX_IDLE_MS) continue;      // idle past 10min (a long-TTL entry) — not worth warming
-        if (k.round >= kc.rounds) continue;                    // budget spent — let it go cold
-        k.pinging = true;
-        k.pingMtime = k.lastMs;                                // settles when a newer turn (the ping's own) appears
-        await fireKeepalive(a);
-      }
-    } catch (e) {
-      log.warn({ err: (e as Error).message }, "keepalive tick failed");
-    } finally {
-      keepaliveTicking = false;
+    if (k.pinging) {
+      // Waiting for our own ping to land and settle: until a NEWER message turn
+      // (the ping's own user line) appears and the pane goes idle, keep waiting.
+      if (busy || k.lastMs <= k.pingMtime) return;
+      k.pinging = false;
+      k.settledAt = now;
+      return;
+    }
+    // A new real message turn (or a busy pane) re-anchors: reset the round
+    // counter, and past the /stop grace lift a busy-resume. grewSinceLast is
+    // message-based now, so `/stop`'s Esc settling writes (metadata, no new
+    // turn) can no longer self-resume the pause — only a busy pane past grace,
+    // or a WeCom inbound in dispatch, does.
+    // Suppress the grewSinceLast reset for 30s after pinging settles — the
+    // pong's tail flush can lag a tick and would otherwise fake real activity.
+    const justSettled = k.settledAt > 0 && now - k.settledAt < 30_000;
+    if (busy || (grewSinceLast && !justSettled)) {
+      k.round = 0; k.settledAt = 0;
+      if (a.keepaliveOff && busy && now - (a.keepaliveOffAt ?? 0) > RESUME_GRACE_MS) { a.keepaliveOff = false; persistPause(a); }
+      if (busy) return;
+    }
+    if (a.keepaliveOff) return;                          // paused by /stop until real activity returns
+    // Cache clock = start of the newest answered request (TTL runs from there),
+    // not the last turn's write time; no request on record → the turn clock.
+    const sinceCache = now - (k.cacheAt || k.lastMs || mtime);
+    // The TTL the session's cache entries were actually written with (1h on a
+    // Claude Code subscription), not a guess: pinging at the 5min cadence
+    // against a 1h entry re-reads the whole context ~14x per hour for nothing.
+    const ttlMs = (k.ttlSec || kc.ttlSec) * 1000;
+    const idleTriggerMs = Math.max(30_000, ttlMs - kc.marginSec * 1000);
+    if (sinceCache < idleTriggerMs) return;              // cache still comfortably warm
+    if (sinceCache >= ttlMs) return;                     // cache already cold — a ping would cold-rewrite for nothing
+    if (sinceCache > KEEPALIVE_MAX_IDLE_MS) return;      // idle past 10min (a long-TTL entry) — not worth warming
+    if (k.round >= kc.rounds) return;                    // budget spent — let it go cold
+    if (idleVerdict(a.target) !== true) return;          // no confirmed idle → no heartbeat input
+    k.pinging = true;
+    k.pingMtime = k.lastMs;                                // settles when a newer turn (the ping's own) appears
+    await fireKeepalive(a, () => valid() && !a.keepaliveOff);
+  };
+  const keepaliveTick = (): void => {
+    if (!cfg.wrc.mirror.keepalive.enabled) return;
+    for (const a of byTarget.values()) {
+      if (!a.tmuxPane || a.keepaliveDisabled) continue;
+      const pane = a.tmuxPane, sid = a.sessionId, gen = a.injectGen ?? 0;
+      void maintenance.schedule(`keepalive:${a.target}`, pane, (signal) => keepaliveOne(a, pane, sid, gen, signal))
+        ?.catch((e: unknown) => {
+          if (maintenanceValid(a, pane, sid, gen, maintenance.signal)) {
+            if (a.keepalive) a.keepalive.pinging = false;
+            endKeepaliveSwallow(a);
+          }
+          log.warn({ target: a.target, err: (e as Error).message }, "keepalive tick failed");
+        });
     }
   };
   const keepaliveTimer = setInterval(() => void keepaliveTick(), 15_000);
@@ -6479,95 +6505,111 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   //   - 其它 → 把框转成标准审批卡发到本 chat (runMirrorPickerFlow), 点击后代按
   //     对应选项; 本地先按掉则 moot 作废卡。代按/发卡都发 chat 回执留痕。
   // WEZARD_PICKER_SENTINEL=0 整体关闭。
-  let pickerTicking = false;
-  const pickerTick = async (): Promise<void> => {
-    if (pickerTicking || process.env.WEZARD_PICKER_SENTINEL === "0") return;
-    if (!cfg.approval.enabled) return;
-    pickerTicking = true;
-    try {
-      for (const a of byTarget.values()) {
-        if (!a.tmuxPane || a.migrationWatcher) continue;
-        // Codex PermissionRequest has its own independent native gate. Screen
-        // options, tool windows and skipAll never authorize its sandbox.
-        if (cliOf(a) === "codex") continue;
-        if (!(await tmuxPaneAlive(a.tmuxPane))) continue;
-        const v = await detectModalPicker(a.tmuxPane);
-        if (!v.modal) {
-          // 审批卡在途而框已消失 = 本地先按掉了 → 作废卡等待 (无卡则 no-op)。
-          mootMirrorPicker(a.sessionId);
-          // 诊断: 屏上有高亮编号行却没判成 modal = 布局盲区候选 (askq/plan 面板
-          // 也长这样, 属正常)。每屏记一次日志, 供远端排查"哨兵为何没反应"。
-          if (looksLikePicker(v.screen)) {
-            if (a.pickerSentinelFp !== v.screen) {
-              a.pickerSentinelFp = v.screen;
-              log.info({ target: a.target, tail: v.screen.split("\n").slice(-8).join("\\n").slice(-600) }, "picker sentinel: numbered picker shape on pane but not judged modal");
-            }
-          } else {
-            a.pickerSentinelFp = undefined;
+  const pickerOne = async (a: AttachState, pane: string, sid: string, gen: number, signal: AbortSignal): Promise<void> => {
+    const guard = () => maintenanceValid(a, pane, sid, gen, signal) && cfg.approval.enabled
+      && process.env.WEZARD_PICKER_SENTINEL !== "0";
+    if (!guard()) return;
+    await withPaneInput(pane, async (live) => {
+      const valid = () => guard() && live();
+      if (!a.tmuxPane || a.migrationWatcher) return;
+      // Codex PermissionRequest has its own independent native gate. Screen
+      // options, tool windows and skipAll never authorize its sandbox.
+      if (cliOf(a) === "codex") return;
+      if (!(await tmuxPaneAlive(pane)) || !valid()) return;
+      const v = await detectModalPicker(pane);
+      if (!valid()) return;
+      if (!v.modal) {
+        // 审批卡在途而框已消失 = 本地先按掉了 → 作废卡等待 (无卡则 no-op)。
+        mootMirrorPicker(a.sessionId);
+        // 诊断: 屏上有高亮编号行却没判成 modal = 布局盲区候选 (askq/plan 面板
+        // 也长这样, 属正常)。每屏记一次日志, 供远端排查"哨兵为何没反应"。
+        if (looksLikePicker(v.screen)) {
+          if (a.pickerSentinelFp !== v.screen) {
+            a.pickerSentinelFp = v.screen;
+            log.info({ target: a.target, tail: v.screen.split("\n").slice(-8).join("\\n").slice(-600) }, "picker sentinel: numbered picker shape on pane but not judged modal");
           }
-          continue;
+        } else {
+          a.pickerSentinelFp = undefined;
         }
-        if (hasMirrorPicker(a.sessionId)) continue; // 审批卡在途, 等点击 / moot
-        if (a.pickerSentinelFp === v.screen) continue; // 同一屏已处理过, 等它变化
-        a.pickerSentinelFp = v.screen;
-        const pick = pickAutoAllowAnswer(parseModalOptions(v.screen));
-        if (!pick) {
-          log.info({ target: a.target, title: v.title }, "picker sentinel: modal on pane but not a trustworthy permission picker — leaving it");
-          continue;
-        }
-        const ctx = parseConfirmContext(v.screen);
-        const policy = pickerPolicy(cfg, cliOf(a), ctx, isAutoWindowActive(a.target));
-        if (policy.decision === "leave") {
-          log.info({ target: a.target, reason: policy.reason }, "picker sentinel: independent approval left on CLI");
-        }
-        await dispatchPickerPolicy(policy, {
-          deny: async () => {
-            const result = await pressNativePicker(a, modalFingerprint(v.screen), "no");
-            log.info({ target: a.target, reason: policy.reason, result }, "picker sentinel: deny rule");
-            sendStandalone(a, `[mirror] 🚫 ${policy.reason}，${result.ok ? "已拒绝 CLI 确认" : "确认框已变更，请回 CLI 处理"}`);
-          },
-          allow: async () => {
-            const after = await pressModalIndex(a.tmuxPane, v, pick.index);
-            if (after.modal) {
-              // 没按掉: 指纹换成当前屏 — pane 静止就不再重试, 免得往一个不认识的框里刷数字键。
-              a.pickerSentinelFp = after.screen;
-              log.warn({ target: a.target, title: after.title, pressed: pick.index }, "picker sentinel: modal still on pane after press");
-              return;
-            }
-            a.pickerSentinelFp = undefined;
-            log.info({ target: a.target, title: v.title, via: policy.reason, pressed: `${pick.index}. ${pick.label}` }, "picker sentinel: native permission picker auto-allowed");
-            sendStandalone(a, `[mirror] 🔓 ${policy.reason} 代按了 CLI 原生权限确认${v.title ? `「${v.title}」` : ""} → ${pick.index}. ${pick.label}`);
-          },
-          manual: () => {
-            // 卡片路径: fire-and-forget — 长轮询在 flow 里, 哨兵循环不能被一张卡挂住;
-            // 防重靠 hasMirrorPicker 槽位 (含代按窗口期, 见 flow 内 finally)。
-            log.info({ target: a.target, toolName: ctx.toolName, agent: ctx.agent, reason: policy.reason }, "picker sentinel: forwarding native picker as approval card");
-            runMirrorPickerFlow({
-              log: log.child({ target: a.target, sessionId: a.sessionId, sub: "picker-card" }),
-              client,
-              cfg,
-              sessionId: a.sessionId,
-              chatKey: a.target,
-              cwd: a.runningCwd,
-              jsonlPath: a.jsonlPath,
-              toolName: ctx.toolName,
-              toolInput: ctx.toolInput,
-              agent: ctx.agent,
-              danger: policy.forceSingle,
-              voteTimeoutMs: cfg.approval.longPollSec * 1000,
-              press: (what) => pressNativePicker(a, modalFingerprint(v.screen), what),
-            }).then((sent) => {
-              // 卡没发出去 (WS 断/发送失败): 清指纹, 让下一 tick 对同屏重试发卡,
-              // 否则这只框会被指纹永久静默。
-              if (!sent) a.pickerSentinelFp = undefined;
-            }).catch((e) => log.warn({ err: (e as Error).message, target: a.target }, "mirror picker flow failed"));
-          },
-        });
+        return;
       }
-    } catch (e) {
-      log.warn({ err: (e as Error).message }, "picker sentinel tick failed");
-    } finally {
-      pickerTicking = false;
+      if (hasMirrorPicker(a.sessionId)) return; // 审批卡在途, 等点击 / moot
+      if (a.pickerSentinelFp === v.screen) return; // 同一屏已处理过, 等它变化
+      a.pickerSentinelFp = v.screen;
+      const pick = pickAutoAllowAnswer(parseModalOptions(v.screen));
+      if (!pick) {
+        log.info({ target: a.target, title: v.title }, "picker sentinel: modal on pane but not a trustworthy permission picker — leaving it");
+        return;
+      }
+      const ctx = parseConfirmContext(v.screen);
+      const policy = pickerPolicy(cfg, cliOf(a), ctx, isAutoWindowActive(a.target));
+      if (policy.decision === "leave") {
+        log.info({ target: a.target, reason: policy.reason }, "picker sentinel: independent approval left on CLI");
+      }
+      await dispatchPickerPolicy(policy, {
+        deny: async () => {
+          if (!valid()) return;
+          const result = await pressNativePickerUnlocked(a, modalFingerprint(v.screen), "no", valid);
+          if (!valid()) return;
+          log.info({ target: a.target, reason: policy.reason, result }, "picker sentinel: deny rule");
+          sendStandalone(a, `[mirror] 🚫 ${policy.reason}，${result.ok ? "已拒绝 CLI 确认" : "确认框已变更，请回 CLI 处理"}`);
+        },
+        allow: async () => {
+          if (!valid()) return;
+          const after = await pressModalIndex(pane, v, pick.index, valid);
+          if (!valid()) return;
+          if (after.modal) {
+            // 没按掉: 指纹换成当前屏 — pane 静止就不再重试, 免得往一个不认识的框里刷数字键。
+            a.pickerSentinelFp = after.screen;
+            log.warn({ target: a.target, title: after.title, pressed: pick.index }, "picker sentinel: modal still on pane after press");
+            return;
+          }
+          a.pickerSentinelFp = undefined;
+          log.info({ target: a.target, title: v.title, via: policy.reason, pressed: `${pick.index}. ${pick.label}` }, "picker sentinel: native permission picker auto-allowed");
+          sendStandalone(a, `[mirror] 🔓 ${policy.reason} 代按了 CLI 原生权限确认${v.title ? `「${v.title}」` : ""} → ${pick.index}. ${pick.label}`);
+        },
+        manual: () => {
+          if (!valid()) return;
+          // 卡片路径: fire-and-forget — 长轮询在 flow 里, 哨兵循环不能被一张卡挂住;
+          // 防重靠 hasMirrorPicker 槽位 (含代按窗口期, 见 flow 内 finally)。
+          log.info({ target: a.target, toolName: ctx.toolName, agent: ctx.agent, reason: policy.reason }, "picker sentinel: forwarding native picker as approval card");
+          runMirrorPickerFlow({
+            log: log.child({ target: a.target, sessionId: a.sessionId, sub: "picker-card" }),
+            client,
+            cfg,
+            sessionId: a.sessionId,
+            chatKey: a.target,
+            cwd: a.runningCwd,
+            jsonlPath: a.jsonlPath,
+            toolName: ctx.toolName,
+            toolInput: ctx.toolInput,
+            agent: ctx.agent,
+            danger: policy.forceSingle,
+            voteTimeoutMs: cfg.approval.longPollSec * 1000,
+            // Human waiting is outside the lock; the eventual press obtains a new transaction.
+            press: (what) => pressNativePicker(a, modalFingerprint(v.screen), what, guard),
+          }).then((sent) => {
+            // 卡没发出去 (WS 断/发送失败): 清指纹, 让下一 tick 对同屏重试发卡,
+            // 否则这只框会被指纹永久静默。
+            if (!sent && guard()) a.pickerSentinelFp = undefined;
+          }).catch((e) => {
+            if (guard()) a.pickerSentinelFp = undefined;
+            log.warn({ err: (e as Error).message, target: a.target }, "mirror picker flow failed");
+          });
+        },
+      });
+    }, { guard });
+  };
+  const pickerTick = (): void => {
+    if (!cfg.approval.enabled || process.env.WEZARD_PICKER_SENTINEL === "0") return;
+    for (const a of byTarget.values()) {
+      if (!a.tmuxPane || cliOf(a) === "codex") continue;
+      const pane = a.tmuxPane, sid = a.sessionId, gen = a.injectGen ?? 0;
+      void maintenance.schedule(`picker:${a.target}`, pane, (signal) => pickerOne(a, pane, sid, gen, signal))
+        ?.catch((e: unknown) => {
+          if (maintenanceValid(a, pane, sid, gen, maintenance.signal)) a.pickerSentinelFp = undefined;
+          log.warn({ target: a.target, err: (e as Error).message }, "picker sentinel tick failed");
+        });
     }
   };
   const pickerTimer = setInterval(() => void pickerTick(), 5_000);
@@ -6575,14 +6617,16 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 审批卡点击后的代按回调。点击与本地按键之间隔着人的反应时间, 必须重读屏并
   // 校验仍是**同一个调用**的确认框 —— 期间本地按掉旧框又弹了新框的话, 盲按就是
   // 替用户批准了他没看过的东西。
-  const pressNativePicker = async (
+  const pressNativePickerUnlocked = async (
     a: AttachState,
     expectFingerprint: string,
     what: PickerPress,
+    live: () => boolean,
   ): Promise<{ ok: boolean; reason?: string; label?: string }> => {
-    if (!a.tmuxPane || !(await tmuxPaneAlive(a.tmuxPane))) return { ok: false, reason: "pane 已不在" };
+    if (!live() || !a.tmuxPane || !(await tmuxPaneAlive(a.tmuxPane))) return { ok: false, reason: "pane 已不在" };
     if (cliOf(a) === "codex") return { ok: false, reason: "Codex 原生沙箱审批必须单独处理" };
     const v = await detectModalPicker(a.tmuxPane);
+    if (!live()) return { ok: false, reason: "pane 事务已撤回" };
     if (!v.modal) return { ok: false, reason: "确认框已不在（可能已在本地处理）" };
     if (pickerPolicy(cfg, cliOf(a), parseConfirmContext(v.screen), false).decision === "leave") {
       return { ok: false, reason: "独立原生或交互审批，请在 CLI 中处理" };
@@ -6601,11 +6645,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const sess = what === "yes_session" ? opts.find((o) => /^yes,\s/iu.test(o.label)) : undefined;
     const pick = sess ?? bare;
     if (!pick) return { ok: false, reason: "确认框上找不到可按的 Yes 选项" };
-    const after = await pressModalIndex(a.tmuxPane, v, pick.index);
+    const after = await pressModalIndex(a.tmuxPane, v, pick.index, live);
     return after.modal
       ? { ok: false, reason: `按下 ${pick.index} 后确认框仍在` }
       : { ok: true, label: `${pick.index}. ${pick.label}` };
   };
+  const pressNativePicker = async (a: AttachState, fingerprint: string, what: PickerPress, guard: () => boolean) =>
+    withPaneInput(a.tmuxPane, (live) => pressNativePickerUnlocked(a, fingerprint, what, live), { guard });
 
   return {
     attach,
@@ -7131,6 +7177,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       clearInterval(paneDriftTimer);
       clearInterval(keepaliveTimer);
       clearInterval(pickerTimer);
+      maintenance.stop();
       for (const a of bySessionId.values()) {
         if (a.outbound?.kind === "deferred") clearTimeout(a.outbound.timer);
         a.outbound = undefined;
