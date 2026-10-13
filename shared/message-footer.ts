@@ -19,7 +19,8 @@ export const withoutMessageFooter = (content: string): string => {
 /** Move the speaker's ticket to one stable footer without changing body links. */
 export const withMessageFooter = (content: string, policy?: MessageFooterPolicy): string => {
   if (!policy?.topOnly) return content;
-  const prior = /\[[✨✦]\]\(([^\n)]*)\)\s*$/.exec(content)?.[1];
+  const candidate = /\[[✨✦]\]\(([^\n)]*)\)\s*$/.exec(content)?.[1];
+  const prior = candidate && isRoleUrl(candidate) ? candidate : undefined;
   const body = withoutMessageFooter(content);
   const head = /^\[([^\]\n]+)\]\(([^\n)]*)\)/.exec(body);
   const parsedHead = parseTagHeader(body);
@@ -30,7 +31,5 @@ export const withMessageFooter = (content: string, policy?: MessageFooterPolicy)
   const namedUrl = namedTarget ? tagUrlOf(namedTarget) : undefined;
   const url = linkedHead ? head![2] : prior && isRoleUrl(prior) ? prior : namedUrl && isRoleUrl(namedUrl) ? namedUrl : policy.url;
   if (!url || !isRoleUrl(url)) return content;
-  const trimmed = text.trimEnd();
-  const sep = /(?:^|\n)\s*`{3,}[^\n]*$/.test(trimmed) ? "\n\n" : " ";
-  return `${trimmed}${sep}[✦](${url})`;
+  return `${text.trimEnd()} [✦](${url})`;
 };
