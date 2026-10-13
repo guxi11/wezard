@@ -2606,10 +2606,10 @@ interface AttachState {
    *  brief 气泡的实时进度行。随 attach/migrate 创建, detach/migrate 时停掉。 */
   subagentWatch?: SubagentWatchHandle;
   /** 本 attachment 已见的 subagent run。key = agentId (文件名去前缀)。 */
-  subagents?: Map<string, { turnId: string; label: string; closed: boolean; answerTurn?: string }>;
+  subagents?: Map<string, { turnId: string; label: string; closed: boolean }>;
   /** 最近的 Task/Agent 工具调用入参 (prompt/type/description), 用于给 subagent
    *  turn 归属类型 — codebuddy 的 agent 文件没有 meta.json, 只能从父侧匹配。 */
-  agentCalls?: Array<{ prompt: string; type?: string; description?: string; at: number; answerTurn?: string }>;
+  agentCalls?: Array<{ prompt: string; type?: string; description?: string; at: number }>;
   /** 父转录里已派发、尚未确认结束的 Agent/Task 调用 —— callId → 派发记录。软收口
    *  (fireSoftTurnEnd) 期间非空 = 有子agent 调用中, 不得把上一段文本当 final 正文收口。
    *
@@ -3935,11 +3935,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const meta = item.kind === "task" ? item.meta : {};
       const resolved = resolveSubagentMeta(a, task ?? "", meta);
       const turnId = newTurnId();
-      // A child may first appear after its parent moved on. Only an exact,
-      // unambiguous dispatch prompt proves which transferred task owns it.
-      const calls = task ? (a.agentCalls ?? []).filter((c) => c.prompt === task) : [];
-      const answerTurn = calls.length && calls.every((c) => c.answerTurn === a.activePeerTurn) ? a.activePeerTurn : undefined;
-      run = { turnId, label: resolved?.label ?? "subagent", closed: false, answerTurn };
+      run = { turnId, label: resolved?.label ?? "subagent", closed: false };
       a.subagents.set(agentId, run);
       recordTurnStart({
         id: turnId,
@@ -3984,11 +3980,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       : item.kind === "thinking" || item.kind === "text"
         ? item.body
         : "";
-    if (activity) {
-      const progress = `🤖 ${run.label} · ${activity}`;
-      updateBriefProgress(a, progress);
-      if (run.answerTurn && run.answerTurn === a.activePeerTurn) updateAnswerProgress(a, { kind: "thinking", body: progress });
-    }
+    // A prompt (even an exact match) is not a child/parent-call identity. Late
+    // children can reuse prompts after history eviction, so their content must
+    // never enter a transferred answer bubble without a verifiable ID binding.
+    if (activity) updateBriefProgress(a, `🤖 ${run.label} · ${activity}`);
   };
 
   // (重新) 挂上 subagent watch — attach 与 migrateAttachment 共用; 会话轮换后
@@ -4437,7 +4432,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           const inp = c.input as { subagent_type?: unknown; description?: unknown; prompt?: unknown } | undefined;
           a.agentCalls = [...(a.agentCalls ?? []).slice(-8), {
             prompt: typeof inp?.prompt === "string" ? inp.prompt : "",
-            answerTurn: a.activePeerTurn,
             type: typeof inp?.subagent_type === "string" && inp.subagent_type ? inp.subagent_type : undefined,
             description: typeof inp?.description === "string" && inp.description ? inp.description : undefined,
             at: Date.now(),

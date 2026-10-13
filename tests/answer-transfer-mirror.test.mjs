@@ -18,7 +18,7 @@ const make=(states=[sourceState()],transport,standaloneTransport)=>{
  const cfg={wrc:{mirror:{brief:true,chunkBytes:1000}}};const noop=()=>{};
  const env={cfg,SEAL_TTL_MS:60000,ORIGIN_TTL_MS:60000,SOFT_END_CANCELLERS:new Set(['text','thinking','tool_use','turn_end','goal_start']),PONG_RE:/pong/i,BRIEF_TURN_OPENERS:new Set(['text','tool_use']),
   recordTurnItem:noop,resolveSubagentMeta:()=>({label:'child'}),newTurnId:()=>`child-${++timer}`,endKeepaliveSwallow:noop,voidTurnAgents:noop,closeBriefTurn:a=>{a.briefTurnId=undefined;},publicPeer:()=>undefined,openingOf:()=>undefined,lastChannelOf:()=>undefined,updateBriefProgress:noop,injectInto:noop,mergedAway:noop,recordTurnQuery:noop,recordTurnStart:noop,cliOf:()=>'',channelFields:()=>({}),openBriefTurn:(a,q)=>{a.briefTurnId=q.turnId;a.briefBubble=q.bubble;},
-  scheduleFlush:noop,STREAM_SOFT_CAP:10000,enqueueStandalone:()=>{throw new Error('private receiver leaked standalone');},hasVisibleBody:s=>!!s,answerSilent:a=>lost.has(a.briefTurnId??a.liveStream?.turnId??''),silenceAnswer:(_target,turn)=>lost.has(turn),replyChatId:a=>a.channel||'group',splitMarkdown:s=>s.split('|'),TAG_HEADER_BUDGET:0,withLinkedTag:(_a,s)=>s,briefLine:(_a,_t,s)=>s,
+  toolUseSig:(name,input)=>JSON.stringify([name,input]),RECENT_SIGS_MAX:100,handleBriefItem:noop,ensureBriefTurn:a=>{a.briefTurnId='active-detail';},scheduleFlush:noop,STREAM_SOFT_CAP:10000,enqueueStandalone:()=>{throw new Error('private receiver leaked standalone');},hasVisibleBody:s=>!!s,answerSilent:a=>lost.has(a.briefTurnId??a.liveStream?.turnId??''),silenceAnswer:(_target,turn)=>lost.has(turn),replyChatId:a=>a.channel||'group',splitMarkdown:s=>s.split('|'),TAG_HEADER_BUDGET:0,withLinkedTag:(_a,s)=>s,briefLine:(_a,_t,s)=>s,
   byTarget:new Map(states.map(a=>[a.target,a])),isPrivate:a=>a.channel==='',baseOfKey:t=>t.split('#')[0],clearCot:a=>{timers.delete(a.cotTimer);a.cotText=undefined;},
   setTimeout:fn=>{timers.set(++timer,fn);return timer;},clearTimeout:id=>timers.delete(id),COT_FLUSH_MS:1500,cotLine:s=>s.trim()?s.replace(/\s+/g,' ').slice(0,100)+'…':'',cotToolLabel:calls=>calls.map(c=>c.name).join(' / '),
   client:{replyStream:async(...args)=>{calls.push({kind:'stream',args});await transport?.(...args);},sendMessage:async(...args)=>{calls.push({kind:'standalone',args});await standaloneTransport?.(...args);}},log:{warn:noop,debug:noop,info:noop},errText:String,withLinkedTagHeader,chatTurnUrl:(target,turn)=>buildChatUrl('http://test','localhost',17890,turn,target,target)};
@@ -157,18 +157,6 @@ for(const raw of [false,true])for(const live of [false,true]){
  x.lost.add('human-A');release();await x.a.standalonePending;assert.equal(x.calls.length,1,'ownership transfer between chunks suppresses the remaining old source');
 }
 {
- const x=make(),receiver={...worker(),agentCalls:[{prompt:'child task',answerTurn:'transfer-A'}]};await take(x);
- x.handleSubagentItem(receiver,'child',{kind:'task',body:'child task',meta:{}});
- x.handleSubagentItem(receiver,'child',{kind:'thinking',body:'CHILD PROGRESS'});await x.flush();assert.match(x.calls[1].args[2],/child.*CHILD PROGRESS/);
- receiver.activePeerTurn='unrelated';x.handleSubagentItem(receiver,'child',{kind:'thinking',body:'OLD CHILD'});await x.flush();assert.equal(x.calls.length,2);
- receiver.activePeerTurn='transfer-A';x.stopAnswerProgress('transfer-A');x.handleSubagentItem(receiver,'child',{kind:'thinking',body:'AFTER OUTCOME'});await x.flush();assert.equal(x.calls.length,2);await deliver(x);
-}
-{
- const x=make(),receiver={...worker(),agentCalls:[{prompt:'old child',answerTurn:'other-turn'}]};await take(x);
- x.handleSubagentItem(receiver,'late-child',{kind:'task',body:'old child',meta:{}});
- x.handleSubagentItem(receiver,'late-child',{kind:'thinking',body:'OLD CHILD FIRST SEEN AFTER TAKE'});await x.flush();assert.equal(x.calls.length,1);await deliver(x);
-}
-{
  const x=make(),receiver={...worker(),channel:'',channelSeeded:true};x.cfg.wrc.mirror.brief=false;
  // Run the actual nonbrief dispatch stamp, then the actual onItem boundary.
  const stamp=source.match(/        if \(!brief\) pushSeal\(a, .*\);/)[0];
@@ -177,5 +165,23 @@ for(const raw of [false,true])for(const live of [false,true]){
  x.onItem(receiver,{kind:'user_query',said:'new human B',body:'new human B'});
  assert.equal(receiver.activePeerTurn,undefined);assert.equal(receiver.channel,'chat:B');assert.equal(receiver.liveStream.dest,'chat:B');
  x.onItem(receiver,{kind:'text',body:'ANSWER B',final:false});assert.equal(receiver.liveStream.acc,'ANSWER B','new public answer survives private predecessor');
+}
+{
+ const x=make(),receiver={target:'chat:group#worker-A',channel:'chat:old-human',briefTurnId:'old-human',recentToolSigs:new Map()};
+ const agent=prompt=>x.onItem(receiver,{kind:'tool_use',calls:[{name:'Agent',input:{prompt}}]});
+ agent('reused prompt');
+ receiver.seals=[{keys:['task A'],fresh:true,at:Date.now(),query:'task A',channel:'',from:{kind:'peer',turn:'transfer-A'}}];
+ x.onItem(receiver,{kind:'user_query',said:'task A',body:'task A'});
+ await take(x);
+ for(let i=0;i<8;i++)agent(`new task ${i}`);
+ agent('reused prompt');await x.flush();
+ assert.equal(receiver.agentCalls.length,9);
+ assert.equal(receiver.agentCalls.filter(c=>c.prompt==='reused prompt').length,1,'old identical prompt was evicted by actual onItem cache truncation');
+ const before=x.calls.length;
+ x.handleSubagentItem(receiver,'old-child-first-seen-late',{kind:'task',body:'reused prompt',meta:{}});
+ x.handleSubagentItem(receiver,'old-child-first-seen-late',{kind:'thinking',body:'OLD HUMAN PRIVATE CONTENT'});await x.flush();
+ assert.equal(x.calls.length,before,'prompt reuse after cache eviction cannot authorize child content in a transferred stream');
+ assert.ok(x.calls.every(c=>!c.args[2]?.includes('OLD HUMAN PRIVATE CONTENT')));
+ x.onItem(receiver,{kind:'thinking',body:'CURRENT RECEIVER PROGRESS'});await x.flush();assert.match(x.calls.at(-1).args[2],/CURRENT RECEIVER PROGRESS/);await deliver(x);
 }
 console.log('answer transfer mirror: reset, receiver-only progress, final overwrite, concurrent turns, in-flight ordering, rejected/uncertain ACK and reload passed');
