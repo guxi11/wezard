@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pino from "pino";
-import { answerRecoveryAction, createAnswerTransfers, type AnswerTransfer } from "../daemon/answer-transfer.js";
+import { answerRecoveryAction, answerSourceLost, answerTargetOccupied, answerTransferOrigin, createAnswerTransfers, type AnswerTransfer } from "../daemon/answer-transfer.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { createReceipts, type Outcome, type Slot } from "../daemon/receipts.js";
 import { ConfigSchema } from "../shared/config.js";
@@ -22,8 +22,14 @@ a.rollback(row.id);
 assert.equal(a.source("router", "human"), false);
 a.reserve(row); a.activate(row.id); a.rollback(row.id);
 assert.equal(a.get(row.id)?.state, "active", "committed ownership cannot roll back");
+a.prefix(row.id, "latest visible progress");
 a = createAnswerTransfers(loadJsonMap(file, undefined, { strict: true }));
-assert.equal(a.get(row.id)?.prefix, "existing stream");
+assert.equal(a.get(row.id)?.prefix, "latest visible progress", "latest taken stream prefix survives reload");
+assert.equal(answerTransferOrigin("router-A", "turn"), answerTransferOrigin("router-A", "turn"));
+assert.notEqual(answerTransferOrigin("router-A", "turn"), answerTransferOrigin("router-B", "turn"), "different sources cannot collide at the same millisecond");
+assert.equal(answerSourceLost([row], "router", "human", 123), true);
+assert.equal(answerSourceLost([row], "router", "new-human", 123), false, "same-millisecond next turn retains source ownership");
+assert.equal(answerTargetOccupied({ ...row, state: "uncertain" }), false, "ambiguous settled delivery releases target for new work");
 a.outcome(row.id, { status: "timeout", body: "timed out" });
 assert.equal(a.outcome(row.id, { status: "done", body: "late answer" })?.outcome?.status, "timeout", "late answer cannot replace terminal outcome");
 a.delivering(row.id); a.delivered(row.id);
@@ -76,9 +82,30 @@ for (const status of ["done", "need", "error", "timeout", "canceled", "dead", "s
   } else receipts.register(told);
   await awaitEvent(() => sent.length === 1);
   assert.equal(sent[0]?.status, status);
+  if (["timeout", "canceled", "dead", "silent"].includes(status)) {
+    assert.doesNotMatch(sent[0]?.body ?? "", /OTHER_HUMAN_PRIVATE_ANSWER/, "transfer failure cannot quote another turn's time-only transcript tail");
+  }
   assert.deepEqual(injected, [], "transferred answer never wakes sender");
   createReceipts(deps).resume(); await tick();
   assert.equal(sent.length, 1, "receipt restart does not repeat already settled delivery");
+}
+for (const ending of ["timeout", "interrupt"] as const) {
+  const sent: Outcome[] = [];
+  const now = Date.now();
+  const deps = { log: pino({ level: "silent" }), idleNow: async () => true,
+    untilIdle: async () => ({ idle: true }), paneLive: async () => true,
+    replyFor: (_to: string, _from: string, _since: number, turn?: string) => turn === "human-A" ? undefined : { text: "WRONG TURN" },
+    lastWords: () => "OTHER_HUMAN_PRIVATE_ANSWER",
+    deliver: async () => ({ ok: true }), nameOf: (x: string) => x,
+    deliverAnswer: async (_id: string, out: Outcome) => { sent.push(out); return true; } };
+  const r = createReceipts(deps);
+  const transfer = { ...row.tell, turn: "human-A", answerTransfer: `transfer-${ending}`, at: now,
+    ...(ending === "timeout" ? { deadlineAt: now - 1 } : {}) };
+  r.register(transfer);
+  if (ending === "interrupt") assert.equal(r.cancel("worker", "router", (s) => s.turn === "human-A"), 1);
+  await awaitEvent(() => sent.length === 1);
+  assert.equal(sent[0]?.status, ending === "timeout" ? "timeout" : "canceled");
+  assert.doesNotMatch(sent[0]?.body ?? "", /OTHER_HUMAN_PRIVATE_ANSWER|WRONG TURN/, `${ending} only uses a reply bound to human-A, never the target's other turn`);
 }
 {
   const sent: Outcome[] = [];

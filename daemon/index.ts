@@ -96,7 +96,7 @@ import { cacheTouchMs, cacheTtlSec, clipMiddle, contextFiles, firstStamp, parseC
 import { keepalivePingSigs } from "../shared/keepalive.js";
 import { expandHome } from "../shared/paths.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
-import { answerRecoveryAction, createAnswerTransfers, type AnswerTransfer } from "./answer-transfer.js";
+import { answerRecoveryAction, answerSourceLost, answerTargetOccupied, answerTransferOrigin, createAnswerTransfers, type AnswerTransfer } from "./answer-transfer.js";
 import { createWorkflowNodes, type FileVersion, type NodeAttempt } from "./workflow-nodes.js";
 import { loadWorkflowPlans, createWorkflowPlanRunner, type PlanPermit } from "./workflow-plans.js";
 import { registerWorkflowPlanRoutes } from "./workflow-plan-http.js";
@@ -809,6 +809,9 @@ const main = async (): Promise<void> => {
       workflowPrereq: workflow.prereq,
       idleNow: m.idleNow,
       onOutcome: (s, status, bodyText, bySender) => {
+        // Pin transferred-answer terminal state synchronously with the receipt
+        // outcome; delivery may still be waiting for the target to become idle.
+        if (s.answerTransfer) answers.outcome(s.answerTransfer, { status, body: bodyText });
         workflow.outcome(s.from, s.turn ?? "", status, bodyText);
         advancePlans();
         ledger.outcome(s.from, s.turn ?? "", status, parseClosing(bodyText).text || bodyText, bySender);
@@ -951,9 +954,16 @@ const main = async (): Promise<void> => {
       return p ? openingTurn(expandHome(p), pingSigs) : undefined;
     };
     const lostAnswer = (self: string): boolean => {
-      const rows = answers.all().filter((r) => r.source === self);
-      return rows.length > 0 && rows.some((r) => r.sourceOpening === openingOfSelf(self)?.ms);
+      return answerSourceLost(answers.all(), self, m.answerContext(self)?.turn, openingOfSelf(self)?.ms);
     };
+    const terminalAnswerTurn = (self: string): AnswerTransfer | undefined => {
+      const turn = openingOfSelf(self)?.env?.turn;
+      return turn ? answers.terminalTarget(self, turn) : undefined;
+    };
+    const controlSnapshot = (self: string) => ({ opening: openingOfSelf(self)?.ms, turn: m.answerContext(self)?.turn });
+    const controlValid = (self: string, snapshot: ReturnType<typeof controlSnapshot>): boolean =>
+      openingOfSelf(self)?.ms === snapshot.opening && m.answerContext(self)?.turn === snapshot.turn && !lostAnswer(self) && !terminalAnswerTurn(self);
+    const hasAnswerChildren = (self: string, k: ParentK | undefined): boolean => !!k && receipts.states().some((s) => s.from === self && !!s.k && kAttr(s.k) === kAttr(k));
     m.setAnswerSilencer((target, turn) => answers.source(target, turn) || lostAnswer(target));
     const parentKOf = (self: string): ParentK | undefined => {
       const opening = openingOfSelf(self);
@@ -1132,7 +1142,8 @@ const main = async (): Promise<void> => {
         json(res, 400, { ok: false, reason: `认不出这些聊天: ${bad.join(", ")} (wizard_roster 每行有 home 聊天名, 人侧 /chats; 没起名的聊天寻址不到)` });
         return;
       }
-      const dests = [...new Set(refs.length ? refs.map((r) => chatBaseOf(cfg, r)) : [channelOf(self)])];
+      const activeTransfer = (() => { const t = openingOfSelf(self)?.env?.turn; return t ? answers.target(self, t) : undefined; })();
+      const dests = [...new Set(refs.length ? refs.map((r) => chatBaseOf(cfg, r)) : [activeTransfer?.channel ?? channelOf(self)])];
       const muted = topOnlyMuted(self, dests);
       if (muted) { json(res, 409, muted); return; }
       const asker = askerOf(self);
@@ -1162,7 +1173,9 @@ const main = async (): Promise<void> => {
       if (!path) { json(res, 400, { ok: false, reason: "path required" }); return; }
       ensureChatNames(self);
       const ref = (b.to ?? "").trim();
-      const dest = ref ? chatBaseOf(cfg, ref) : channelOf(self);
+      const transferTurn = openingOfSelf(self)?.env?.turn;
+      const transfer = transferTurn ? answers.target(self, transferTurn) : undefined;
+      const dest = ref ? chatBaseOf(cfg, ref) : transfer?.channel ?? channelOf(self);
       if (!dest || !sameBot(self, dest)) { json(res, 400, { ok: false, reason: `认不出聊天: ${ref} (wizard_roster 每行有 home 聊天名, 人侧 /chats; 没起名的聊天寻址不到)` }); return; }
       const muted = topOnlyMuted(self, [dest]);
       if (muted) { json(res, 409, muted); return; }
@@ -1351,10 +1364,11 @@ const main = async (): Promise<void> => {
     /** tell_peer 的本体: 以 `self` 的名义说一句 —— HTTP 路由与 dispatch 共用。`extra` = 挂在信封后面的
      *  一段 (只进对方输入框, 不进 `text`: 公开时 text 会成群气泡)。 */
     const peerDispatching = new Map<string, { count: number; transfer: boolean }>();
-    const tellPeerAsInner = async (self: string, body: PeerBody, extra = "", held?: { turn: string; channel: string; after?: string[]; seen?: Readonly<Record<string, HeldSeen>>; alive?: () => boolean; k?: ParentK; asker?: Asker }, planned?: PlanPermit): Promise<Reply> => {
-      if (lostAnswer(self)) return { status: 409, body: { ok: false, reason: "this turn transferred answer and control; stop dispatching and conclude silently" } };
-      const selfTurn = openingOfSelf(self)?.env?.turn;
-      if (selfTurn && answers.target(self, selfTurn)?.outcome) return { status: 409, body: { ok: false, reason: "transferred answer is terminal; late control actions refused" } };
+    type ActorOrigin = { authority: ReturnType<typeof controlSnapshot>; answerContext?: { turn: string; channel: string; prefix: string }; asker?: Asker; k?: ParentK };
+    const tellPeerAsInner = async (self: string, body: PeerBody, extra = "", held?: { turn: string; channel: string; after?: string[]; seen?: Readonly<Record<string, HeldSeen>>; alive?: () => boolean; k?: ParentK; asker?: Asker }, planned?: PlanPermit, actor?: ActorOrigin): Promise<Reply> => {
+      const authority = actor?.authority ?? (!held && !planned ? controlSnapshot(self) : undefined);
+      if (!held && !planned && lostAnswer(self)) return { status: 409, body: { ok: false, reason: "this turn transferred answer and control; stop dispatching and conclude silently" } };
+      if (!held && !planned && terminalAnswerTurn(self)) return { status: 409, body: { ok: false, reason: "transferred answer is terminal; late control actions refused" } };
       const answer = (body as { answer?: unknown }).answer;
       if (answer !== undefined && answer !== "transfer") return { status: 400, body: { ok: false, reason: "answer must be transfer when supplied" } };
       if (held?.alive && !held.alive()) return { status: 409, body: { ok: false, reason: "held dispatch withdrawn" } };
@@ -1372,8 +1386,8 @@ const main = async (): Promise<void> => {
       // 放行一件停放着的 (after): 件号 / 频道 / 父 k / 链头都沿用停放那一刻定的 —— 依赖边不改 k。
       const turn = planned ? { turn: planned.turn, legs: 1, channel: "", asker: planned.origin.asker, k: planned.origin.k } : held ? { turn: held.turn, legs: 1, channel: held.channel, asker: held.asker, k: held.k } : receipts.prepare(self, target, re || undefined);
       // Capture the origin before waiting for another pane; our own turn may change meanwhile.
-      const asker = planned ? planned.origin.asker : held ? held.asker : turn.legs > 1 ? turn.asker : askerOf(self);
-      const k = planned ? planned.origin.k : held ? held.k : (body as { chain?: boolean }).chain === false ? undefined : turn.legs > 1 ? turn.k : parentKOf(self);
+      const asker = planned ? planned.origin.asker : held ? held.asker : actor?.asker ?? (turn.legs > 1 ? turn.asker : askerOf(self));
+      const k = planned ? planned.origin.k : held ? held.k : actor?.k ?? ((body as { chain?: boolean }).chain === false ? undefined : turn.legs > 1 ? turn.k : parentKOf(self));
       // 续问只在那个工单还开着时沿用它: 收了工的工单不再收成员, 续问照样能发。
       // 没带工单的一句顶掉一份还没落定的工单活, 也算在那张工单上 (receipts.register 同理
       // 继承): 不然换个不带 job 的 tell_peer 就绕开了预算。
@@ -1386,8 +1400,15 @@ const main = async (): Promise<void> => {
       // 没带 re 的普通 task / ask / dispatch 一律不并进根单。
       const leadJob = jobs.all().find((j) => j.kind === "req" && j.status === "open" && j.owner === self && j.members.some((x) => x.target === target && x.role === "lead"))?.id ?? "";
       const jobId = kind === "fyi" ? "" : askedJob || isOpen(turn.job) || (open?.deferred ? "" : isOpen(open?.job)) || (re && turn.reUnknown ? leadJob : "");
-      const answerContext = answer === "transfer" ? m.answerContext(self) : undefined;
-      if (answer === "transfer" && (!answerContext || !asker?.who.startsWith("user:") || k?.kind !== "chat" || !chatPolicyOf(cfg, k.channel).topOnly || kind === "fyi" || re || jobId || held || planned || (body as { node?: string; after?: unknown[]; receipt?: boolean; chain?: boolean }).node || (body as { after?: unknown[] }).after?.length || (body as { receipt?: boolean }).receipt === false || (body as { chain?: boolean }).chain === false || receipts.states().some((s) => s.from === self))) {
+      const answerContext = answer === "transfer" ? actor?.answerContext ?? m.answerContext(self) : undefined;
+      const answerSourceOpening = answerContext ? actor?.authority.opening ?? openingOfSelf(self)?.ms ?? 0 : 0;
+      const actorStillValid = (): boolean => {
+        if (!authority) return true; // held/planned work carries its captured permit.
+        if (openingOfSelf(self)?.ms !== authority.opening || m.answerContext(self)?.turn !== authority.turn || terminalAnswerTurn(self)) return false;
+        if (answer === "transfer") return !answers.all().some((r) => r.source === self && r.sourceTurn === authority.turn && r.id !== turn.turn);
+        return !lostAnswer(self);
+      };
+      if (answer === "transfer" && (!answerContext || !asker?.who.startsWith("user:") || k?.kind !== "chat" || !chatPolicyOf(cfg, k.channel).topOnly || kind === "fyi" || re || jobId || held || planned || (body as { node?: string; after?: unknown[]; receipt?: boolean; chain?: boolean }).node || (body as { after?: unknown[] }).after?.length || (body as { receipt?: boolean }).receipt === false || (body as { chain?: boolean }).chain === false || hasAnswerChildren(self, k))) {
         return { status: 409, body: { ok: false, reason: "answer transfer requires an active human topOnly turn with no child work, job, re, node, after, chain:false or receipt:false" } };
       }
       if (jobId) {
@@ -1452,6 +1473,7 @@ const main = async (): Promise<void> => {
       // 空 pane 会 resume 回旧 sid (见 handoff.ts)。发话时刻取在这之后。
       if (answer === "transfer" && handingOff(target)) return { status: 409, body: { ok: false, reason: "answer target is handing off; source retains answer and control" } };
       await handedOff(target);
+      if (!actorStillValid()) return { status: 409, body: { ok: false, reason: "caller turn/control changed while waiting; dispatch refused" } };
       // 投递策略。对方闲着三者一样 —— 立刻投; 只在它正忙时分岔:
       //   normal (默认) 等它这一轮结束再投 —— 派新活的常态: 两个 wizard 同时找第三个时,
       //     两段文本会挤进同一个输入框、被当成一轮读掉, 这在协同网络里不是边角情况而是常态;
@@ -1528,12 +1550,14 @@ const main = async (): Promise<void> => {
         // 它那一轮一结束就投: 注册表 status 翻 idle 是事件, 不抽样也不等稳定期。
         const wr = await m.untilIdle(target, waitSec * 1000, { aborted: canceledBeforeDispatch });
         waitedMs = Date.now() - t0;
+        if (!actorStillValid()) return { status: 409, body: { ok: false, attemptId, reason: "caller turn/control changed while waiting for idle" } };
         if (!wr.idle) {
           if (canceledBeforeDispatch()) return { status: 409, body: { ok: false, attemptId, reason: "dispatch canceled while waiting for idle" } };
           return { status: 409, body: { ok: false, target, foreign, wasBusy, waitedMs, reason: `它一直在忙, ${waitSec}s 内没闲下来 —— peek_peer 看看它卡在哪; 真急就 priority:"urgent" 打断它` } };
         }
       }
       if (canceledBeforeDispatch()) return { status: 409, body: { ok: false, attemptId, reason: "dispatch canceled while waiting for idle" } };
+      if (!actorStillValid()) return { status: 409, body: { ok: false, attemptId, reason: "caller turn/control changed before target control" } };
       if (policy === "urgent" && wasBusy) {
         // 只按 Esc, 不走 /stop 的 teardown: 那会清掉它的注入队列 (别人排着的话一起丢)
         // 并暂停 keepalive —— 这里打断它是为了马上接着干, 不是让它安静。
@@ -1542,6 +1566,7 @@ const main = async (): Promise<void> => {
         // 等 Esc 生效、这一轮真收住再投; 收不住也照投 —— 落进输入框排在后面, 退化成 now。
         interrupted = esc.ok && (await m.untilIdle(target, 15_000)).idle;
         waitedMs = Date.now() - t0;
+        if (!actorStillValid()) return { status: 409, body: { ok: false, attemptId, reason: "caller turn/control changed during interrupt wait" } };
       }
       // 时刻取在注入**之前**: 晚于那一句落盘的话, 回执定位的下界就偏了。
       const at = Date.now();
@@ -1560,7 +1585,8 @@ const main = async (): Promise<void> => {
       if (receipts.prereqs(self, held?.after ?? afters, held?.seen).some((p) => p.state !== "done")) return { status: 409, body: { ok: false, reason: "prerequisite acceptance/version changed before injection" } };
       let physicalExposure = false;
       const dispatchGuard = (phase?: "paste" | "submit"): boolean => {
-        if (answers.all().some((r) => r.target === target && r.state !== "delivered" && r.id !== turn.turn)) return false;
+        if (!actorStillValid()) return false;
+        if (answers.all().some((r) => r.target === target && answerTargetOccupied(r) && r.id !== turn.turn)) return false;
         if (answerContext && m.answerContext(self)?.turn !== answerContext.turn) return false;
         if (!planAllowed() || (planned && !planned.alive()) || (held?.alive && !held.alive())) return false;
         if (jobId && jobs.get(jobId)?.status !== "open") { if (attemptId) workflow.cancel(target, self, jobId, turn.turn); return false; }
@@ -1583,7 +1609,7 @@ const main = async (): Promise<void> => {
         catch (e) { return { status: 409, body: { ok: false, reason: (e as Error).message } }; }
       }
       if (answerContext && k?.kind === "chat") {
-        try { answers.reserve({ id: turn.turn, source: self, target, sourceTurn: answerContext.turn, sourceOpening: openingOfSelf(self)?.ms ?? 0, origin: kAttr(k), channel: k.channel, prefix: answerContext.prefix, tell: trackedTell, state: "reserved" }); }
+        try { answers.reserve({ id: turn.turn, source: self, target, sourceTurn: answerContext.turn, sourceOpening: answerSourceOpening, origin: answerTransferOrigin(self, answerContext.turn), channel: k.channel, prefix: answerContext.prefix, tell: trackedTell, state: "reserved" }); }
         catch (e) { return { status: 409, body: { ok: false, reason: (e as Error).message } }; }
       }
       const inj = await m.injectText(target, text, undefined, {
@@ -1608,7 +1634,10 @@ const main = async (): Promise<void> => {
       if (answerContext) {
         if (inj.ok || inj.uncertain || physicalExposure) {
           answers.activate(turn.turn);
-          if (m.answerContext(self)?.turn === answerContext.turn) m.takeAnswer(turn.turn, self, answerContext.turn);
+          if (m.answerContext(self)?.turn === answerContext.turn) {
+            const held = m.takeAnswer(turn.turn, self, answerContext.turn);
+            if (held.taken && held.prefix) answers.prefix(turn.turn, held.prefix);
+          }
           receipts.register(trackedTell);
           if (!inj.ok) void deliverTransferredAnswer(turn.turn, { status: "canceled", body: "回答移交的投递结果不确定，本轮已收止；若未收到回答，请重新发送问题。" });
           return { status: 200, body: { ...inj, ok: true, answer: "transfer", control: "transfer", name: peerAddress(cfg, self, target), turn: turn.turn, receipt: "目标将承接已有气泡并直接对人交付；本轮请停止派活与公开回答，静默收口" } };
@@ -2537,11 +2566,14 @@ const main = async (): Promise<void> => {
       const b = body as { task?: string; name?: string; description?: string; tier?: string; to?: string; force?: boolean; lead?: boolean; spawn?: boolean; public?: boolean; deadline?: number; dryRun?: boolean; criteria?: string; answer?: string };
       const task = (b.task ?? "").toString().trim();
       if (!task) { json(res, 400, { ok: false, reason: "task is required" }); return; }
+      const dispatchOrigin: ActorOrigin | undefined = b.answer === "transfer" ? {
+        authority: controlSnapshot(self), answerContext: m.answerContext(self), asker: askerOf(self), k: parentKOf(self),
+      } : undefined;
       const lead = b.lead === true;
       if (b.answer !== undefined && b.answer !== "transfer") { json(res, 400, { ok: false, reason: "answer must be transfer when supplied" }); return; }
       if (b.answer === "transfer" && lead) { json(res, 409, { ok: false, reason: "answer transfer is for simple direct answers; lead dispatch cannot transfer" }); return; }
-      const answerParent = b.answer === "transfer" ? parentKOf(self) : undefined;
-      if (b.answer === "transfer" && (lostAnswer(self) || !m.answerContext(self) || answerParent?.kind !== "chat" || !askerOf(self)?.who.startsWith("user:") || !chatPolicyOf(cfg, answerParent.channel).topOnly || receipts.states().some((s) => s.from === self) || peerDispatching.has(self))) { json(res, 409, { ok: false, reason: "no exclusive active human topOnly answer available to transfer" }); return; }
+      const answerParent = dispatchOrigin?.k;
+      if (b.answer === "transfer" && (lostAnswer(self) || !dispatchOrigin?.answerContext || answerParent?.kind !== "chat" || !dispatchOrigin.asker?.who.startsWith("user:") || !chatPolicyOf(cfg, answerParent.channel).topOnly || hasAnswerChildren(self, answerParent) || peerDispatching.has(self))) { json(res, 409, { ok: false, reason: "no exclusive active human topOnly answer available to transfer" }); return; }
       const force = b.force === true;
       const to = (b.to ?? "").toString().trim();
       const now = Date.now();
@@ -2549,6 +2581,7 @@ const main = async (): Promise<void> => {
       // 占用保护由 decide 统一判断, 留在候选表里说明为什么不能自动复用。
       // 显式 to 保留人为选定; force 只影响成本门, 不绕 lead/工单/连续性保护。
       const pool = to || b.spawn || lead ? [] : (await routeRowsOf(self)).filter((r) => r.alive && !!tagOfKey(r.target));
+      if (dispatchOrigin && !controlValid(self, dispatchOrigin.authority)) { json(res, 409, { ok: false, reason: "dispatch source turn changed while routing; original answer remains with source" }); return; }
       const tierArg = (b.tier ?? "").toString().trim();
       if (tierArg && !TIERS.includes(tierArg as TierName)) { json(res, 400, { ok: false, reason: `unknown tier: ${tierArg}` }); return; }
       const taskTier = (tierArg || tierFor(task, lead)) as TierName;
@@ -2567,7 +2600,7 @@ const main = async (): Promise<void> => {
         // lead 的活远超默认的 1h: 不给 deadline 就按 12h (回执的上限)。
         ...(b.deadline !== undefined ? { deadline: b.deadline } : lead ? { deadline: 43200 } : {}),
         ...(rootId ? { job: rootId } : {}),
-      } as PeerBody, extra);
+      } as PeerBody, extra, undefined, undefined, dispatchOrigin);
       const shown = cands.slice(0, 3).map((e) => `.${e.row.address || e.row.name}${e.row.busy ? " 忙" : ""}`);
       if (b.dryRun) {
         json(res, 200, { ok: true, dryRun: true, decision: d.kind, reason: d.why, ...(d.kind === "existing" ? { name: to || (d.kind === "existing" && d.row ? d.row.address || d.row.name : "") } : { tier: taskTier }), ...(shown.length ? { candidates: shown } : {}) });
@@ -2610,8 +2643,9 @@ const main = async (): Promise<void> => {
         return;
       }
       const tier = taskTier;
-      const born = await bearAs(self, { inherit: false, name, description, tier, ...(lead ? { lead: true } : {}) } as PeerBody);
+      const born = await bearAs(self, { inherit: false, name, description, tier, ...(lead ? { lead: true } : {}) } as PeerBody, undefined, dispatchOrigin?.authority);
       if (born.status !== 200) { settleRoot(false); json(res, born.status, { ...born.body, decision: "spawn", reason: d.why }); return; }
+      if (dispatchOrigin && !controlValid(self, dispatchOrigin.authority)) { settleRoot(false); json(res, 409, { ok: false, decision: "spawn", reason: "dispatch source turn changed during spawn; answer remains with original source turn" }); return; }
       // 宪章里只有层级规矩, 打法随信封带 (宪章每轮都在上下文里, 打法只这一件活用得上)。
       const t = await tell(String(born.body.name), task, lead ? renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : "");
       settleRoot(t.status === 200);
@@ -2682,8 +2716,9 @@ const main = async (): Promise<void> => {
     // 生分身。默认 fork 调用方此刻的上下文 —— 这是"先把公共材料读进来, 再分出 N
     // 个干活的"之所以省事的原因: 材料只读一遍, 却进了 N 份上下文。
     /** spawn_wizard / clone_wizard 的本体 —— HTTP 路由与 dispatch 共用。 */
-    const bearAs = async (self: string, body: PeerBody, planned?: PlanPermit): Promise<Reply> => {
-      if (lostAnswer(self)) return { status: 409, body: { ok: false, reason: "this turn transferred control; cannot spawn more work" } };
+    const bearAs = async (self: string, body: PeerBody, planned?: PlanPermit, capturedAuthority?: ReturnType<typeof controlSnapshot>): Promise<Reply> => {
+      const authority = planned ? undefined : capturedAuthority ?? controlSnapshot(self);
+      if (authority && !controlValid(self, authority)) return { status: 409, body: { ok: false, reason: "this turn no longer owns control; cannot spawn more work" } };
       // Legacy bootstrap can dispatch before attaching its member. An empty job
       // is not available for plan ownership while that birth is still in flight.
       const birthJob = ((body as { job?: string }).job ?? "").trim();
@@ -2740,6 +2775,7 @@ const main = async (): Promise<void> => {
         return { status: 409, body: { ok: false, reason: `${displayName(source)} 没有可 fork 的会话 (还没说过话, 或绑定已失效)` } };
       }
       const alivePeers = detached ? [] : await m.peers(self);
+      if (authority && !controlValid(self, authority)) return { status: 409, body: { ok: false, reason: "caller turn/control changed while preparing spawn" } };
       // 预算。撞到上限由守护进程腾位, 不叫调用方去收: 最久没动的闲分身只关 pane、绑定留着
       // (同 maxPanes 的 reap), 再找它 `--resume` 带全上下文复活。忙的、停在审批上的、手上
       // 还有没落定的活的不动; 全都动不了才拒。只数**本聊天里**活着的 ——
@@ -2809,7 +2845,7 @@ const main = async (): Promise<void> => {
       // wait_peer 才不会把它们当成分身对这件活的答复。
       const taskAt = Date.now();
       const taskTurn = newTurn();
-      const birthGuard = (): boolean => planBirthAllowed(target, wizards.get(target)?.name ?? name) && (!jobId || jobs.get(jobId)?.status === "open");
+      const birthGuard = (): boolean => (!authority || controlValid(self, authority)) && planBirthAllowed(target, wizards.get(target)?.name ?? name) && (!jobId || jobs.get(jobId)?.status === "open");
       if (!birthGuard()) return { status: 409, body: { ok: false, reason: "executor reservation changed before spawn" } };
       const r = await m.cloneSession({
         guard: birthGuard,
@@ -2917,7 +2953,8 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/stop", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      if (lostAnswer(self)) { json(res, 409, { ok: false, reason: "本轮回答权和控制权已移交；不能打断或结束目标 wizard" }); return; }
+      const authority = controlSnapshot(self);
+      if (!controlValid(self, authority)) { json(res, 409, { ok: false, reason: "本轮回答权和控制权已移交或失效；不能打断或结束目标 wizard" }); return; }
       const b = body as { name?: string; tag?: string; mode?: string; forget?: boolean; turn?: string; force?: boolean };
       const r = resolvePeer(self, addrOf(b));
       // 有身份没会话 (冷记录 / 生到一半的僵尸): resolvePeer 够不着它, 但收它不需要
@@ -2925,6 +2962,7 @@ const main = async (): Promise<void> => {
       const found = r.ok || r.candidates?.length ? undefined : ((w) => (w && sameBot(self, w.target) ? w : undefined))(wizards.byName(addrOf(b)));
       const cold = found && !m.chatTargets(baseOfKey(found.target)).includes(found.target) ? found : undefined;
       if (cold && (b.mode ?? "end") === "end") {
+        if (!controlValid(self, authority)) { json(res, 409, { ok: false, reason: "本轮控制权已变化；拒绝结束目标 wizard" }); return; }
         workflow.cancel(cold.target);
         const detached = b.forget ? forgetWizard(cold.target) : [];
         json(res, 200, { ok: true, target: cold.target, name: cold.name, mode: "end", forgotten: !!b.forget, note: "它本来就没有会话在跑", ...(detached.length ? { canceledIn: detached } : {}) });
@@ -2945,12 +2983,14 @@ const main = async (): Promise<void> => {
         if (mine?.turn !== turn && workflow.byTurn(self, turn)?.to !== target && !receipts.states().some((s) => s.from === self && s.to === target && s.turn === turn && s.state === "queued")) { json(res, 404, { ok: false, reason: `你没有在等 ${victim.name ? `.${victim.name}` : target} 答 '${turn}' 这件 (已落定、件号写错, 或不是你派的)` }); return; }
         // 先落 canceled 再按 Esc: 被打断那一轮的半截话不该被 watcher 当成答案投回来。
         const busy = !(await m.idleNow(target));
+        if (!controlValid(self, authority)) { json(res, 409, { ok: false, reason: "等待期间本轮控制权已变化；未撤回或打断目标" }); return; }
         const canceled = cancelPeerWork(target, self, (x) => x.from === self && x.turn === turn);
         // 按 Esc 之前再认一次手上这一轮: 上面那次 await 期间它可能已经做完这件、接了别人的下一件。
         const current = busy && openingAsk(target)?.turn === turn;
         // 还没轮到 / 排在后面: 捎一句给它, 轮到那句话时别再做了 (notices 挂在下一条注入的尾巴上)。
         if (!current) notices.post([target], `${displayName(self)} 撤回了它派给你的 ${turn} —— 那件活不用做了; 读到它时直接略过, 不必回复。`);
         // 只按 Esc, 不 teardown: teardown 会清掉它的注入队列, 别人排着的话一起丢。
+        if (current && !controlValid(self, authority)) { json(res, 409, { ok: false, reason: "物理操作前本轮控制权已变化；已登记撤回但未发送 Esc" }); return; }
         const esc = current ? await m.interruptPane(target) : undefined;
         // Esc 没按成也不回滚撤回: 这件已经不等了, 只是它手上那一轮还在跑 —— 如实说。
         json(res, 200, {
@@ -2962,6 +3002,7 @@ const main = async (): Promise<void> => {
       }
       // 不带件号的打断会停掉它手上整轮: 那一轮若是别的 wizard 派的, 先拒 —— 误伤的是别人的活。
       const others = !end && !b.force ? await othersTurn(target, self) : undefined;
+      if (!controlValid(self, authority)) { json(res, 409, { ok: false, reason: "等待期间本轮控制权已变化；未取消或打断目标" }); return; }
       if (others) {
         json(res, 409, { ok: false, target, reason: `它此刻在做 ${others.from} 派的活${others.turn ? ` (${others.turn})` : ""}, 打断会连那件一起停掉 —— 只想撤回你自己派的那件, 传 turn (件号); 确要打断它这一轮, 加 force:true` });
         return;
@@ -2969,7 +3010,9 @@ const main = async (): Promise<void> => {
       // 先落 canceled 再动 pane: pane 一死, 守着的 watcher 会把同一份报成 dead。
       // 打断只停它手上这一轮: 只掐这一轮开头那句派来的活 (人 / 定时 / 回执轮不掐任何一份)。
       const only = end ? undefined : currentAsk(target);
+      if (!controlValid(self, authority)) { json(res, 409, { ok: false, reason: "物理操作前本轮控制权已变化；未取消或打断目标" }); return; }
       const canceled = cancelPeerWork(target, self, only);
+      if (!controlValid(self, authority)) { json(res, 409, { ok: false, reason: "物理操作前本轮控制权已变化；未打断或结束目标" }); return; }
       const done = end ? await m.killPane(target) : await m.interruptPane(target, { teardown: true });
       if (!done.ok) { json(res, 502, { ok: false, target, reason: done.reason }); return; }
       const detached = end && b.forget ? forgetWizard(target) : [];

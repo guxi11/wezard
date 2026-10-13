@@ -2190,7 +2190,7 @@ export interface MirrorBridge {
   currentChannel: (target: string) => string;
   currentAsker: (target: string) => Asker | undefined;
   answerContext: (target: string) => { turn: string; channel: string; prefix: string } | undefined;
-  takeAnswer: (id: string, target: string, expectedTurn: string) => boolean;
+  takeAnswer: (id: string, target: string, expectedTurn: string) => { taken: boolean; prefix?: string };
   deliverAnswer: (id: string, target: string, turn: string, channel: string, prefix: string, body: string, standalone: boolean) => Promise<void>;
   setAnswerSilencer: (fn: (target: string, turn: string) => boolean) => void;
   /** Send Esc to the live tmux pane bound to `target` — interrupts whatever
@@ -3307,9 +3307,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const turn = a.briefTurnId ?? a.liveStream?.turnId;
     return turn ? { turn, channel: a.channel ?? baseOfKey(target), prefix: a.liveStream?.acc || (a.cotLastSent ? `\`${a.cotLastSent}\`` : "") } : undefined;
   };
-  const takeAnswer = (id: string, target: string, expectedTurn: string): boolean => {
+  const takeAnswer = (id: string, target: string, expectedTurn: string): { taken: boolean; prefix?: string } => {
     const a = byTarget.get(target);
-    if (!a || (a.briefTurnId ?? a.liveStream?.turnId) !== expectedTurn) return false;
+    if (!a || (a.briefTurnId ?? a.liveStream?.turnId) !== expectedTurn) return { taken: false };
+    let prefix: string | undefined;
     clearCot(a);
     if (a.briefBubble && !a.briefBubble.done) {
       clearTimeout(a.briefBubble.hardTimer);
@@ -3317,6 +3318,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       a.briefBubble = undefined;
     } else if (a.liveStream && !a.liveStream.closed && !a.liveStream.dead) {
       const s = a.liveStream;
+      prefix = s.acc;
       clearTimeout(s.flushTimer); clearTimeout(s.idleTimer); clearTimeout(s.hardTimer);
       s.closed = true;
       answerBubbles.set(id, { bubble: { frame: s.frame, streamId: s.streamId, done: false }, prefix: s.acc });
@@ -3324,20 +3326,40 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
     // All late source output stays private until a genuine new injection changes channel.
     a.channel = "";
-    return true;
+    return { taken: true, ...(prefix ? { prefix } : {}) };
   };
   const deliverAnswer = async (id: string, target: string, turn: string, channel: string, prefix: string, body: string, standalone: boolean): Promise<void> => {
     const held = answerBubbles.get(id);
-    const text = [prefix.trim(), body.trim()].filter(Boolean).join("\n\n");
+    // A live stream can advance while the router waits for target availability.
+    // `takeAnswer` snapshots that latest accumulator; its snapshot supersedes the
+    // earlier answerContext prefix so newly visible source text is not discarded.
+    const latestPrefix = held?.prefix || prefix;
+    const text = [latestPrefix.trim(), body.trim()].filter(Boolean).join("\n\n");
     const content = withLinkedTagHeader(target, text, chatTurnUrl(target, turn), undefined, undefined, channel);
     if (held && !held.bubble.done) {
       held.bubble.done = true;
       try {
         // Failure closes progress first; the terminal explanation is a standalone message.
-        const progress = withLinkedTagHeader(target, prefix || "回答已转交", chatTurnUrl(target, turn), undefined, undefined, channel);
+        const progress = withLinkedTagHeader(target, latestPrefix || "回答已转交", chatTurnUrl(target, turn), undefined, undefined, channel);
         await client.replyStream(held.bubble.frame, held.bubble.streamId, standalone ? progress : content, true);
         if (!standalone) { answerBubbles.delete(id); return; }
-      } catch (e) { log.warn({ id, err: errText(e) }, "answer transfer stream failed; standalone fallback"); }
+      } catch (e) {
+        const ack = e && typeof e === "object" ? e as { headers?: unknown; errcode?: unknown; errmsg?: unknown } : undefined;
+        // Only a structured non-zero server ACK proves the stream frame was
+        // rejected. Timeout/disconnect errors are ambiguous: standalone retry
+        // could publish the same final answer twice, so let the caller persist
+        // `uncertain` and require a human resend instead.
+        const rejected = !!ack && typeof ack.headers === "object" && !!ack.headers && typeof ack.errcode === "number" && ack.errcode !== 0 && typeof ack.errmsg === "string";
+        if (!rejected && !standalone) { answerBubbles.delete(id); throw e; }
+        if (!rejected) {
+          log.warn({ id, err: errText(e) }, "answer transfer progress close acknowledgement uncertain; continuing with the one standalone terminal explanation");
+          // In standalone mode this stream only closes progress; it never
+          // carries the final body, so sending the terminal explanation once
+          // remains necessary even when progress-close ACK is ambiguous.
+        } else {
+          log.warn({ id, err: errText(e), errcode: ack.errcode }, "answer transfer stream was explicitly rejected; standalone fallback");
+        }
+      }
     }
     await client.sendMessage(channel.replace(/^(user|chat|group):/, ""), { msgtype: "markdown", markdown: { content } });
     answerBubbles.delete(id);

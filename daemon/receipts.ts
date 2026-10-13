@@ -297,7 +297,7 @@ export interface Receipts {
   cancelHeld: (job: string, by: string) => number;
 }
 
-export interface InFlight { from: string; to: string; turn: string; job: string; state: TurnState; ageMs: number }
+export interface InFlight { from: string; to: string; turn: string; job: string; state: TurnState; ageMs: number; k?: ParentK }
 
 export const createReceipts = (deps: ReceiptDeps): Receipts => {
   const keyOfPair = (from: string, to: string): string => `${from}\u0000${to}`;
@@ -481,7 +481,12 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       silent: `它停下了 ${MAX_FRUITLESS} 次, 都没答这一句`,
       dead: "它的 pane 没了",
     };
-    const last = deps.lastWords?.(s.to, s.at).trim();
+    // An answer transfer belongs to a specific human turn. The target may have
+    // handled another person's message since then, so a time-only transcript
+    // tail can disclose that unrelated message in the failure receipt.
+    const last = (s.answerTransfer
+      ? (s.turn ? deps.replyFor(s.to, deps.nameOf(s.from), s.at, s.turn)?.text : undefined)
+      : deps.lastWords?.(s.to, s.at))?.trim();
     return `（守护进程: ${deps.nameOf(s.to)} 没有给出结论 —— ${why[status] ?? status}。）${last ? `\n它最后说的: ${clipMiddle(last, 600)}` : ""}`;
   };
 
@@ -803,9 +808,10 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
           from: s.from, to: s.to, turn: s.turn ?? "", job: s.job,
           state: turnState(s, { parked: !s.outcome && parked(s.to) }),
           ageMs: Date.now() - s.at,
+          ...(s.k ? { k: s.k } : {}),
         }))
         // 停放着的 (等前置): 还没投出去, 但发话方在等它 —— 同样在飞。
-        .concat([...holds.values()].map((h) => ({ from: h.from, to: h.to, turn: h.turn, job: h.job, state: "queued" as TurnState, ageMs: Date.now() - h.at })));
+        .concat([...holds.values()].map((h) => ({ from: h.from, to: h.to, turn: h.turn, job: h.job, state: "queued" as TurnState, ageMs: Date.now() - h.at, ...(h.k ? { k: h.k } : {}) })));
     },
     cancel: (target, by, only = () => true) => {
       // 排着还没投的 (停放): 不投了; 发起 stop 的那方自己知道, 不回执。
@@ -813,7 +819,11 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       held.forEach((h) => cancelHold(h, `${deps.nameOf(target)} 被 ${deps.nameOf(by)} 收掉 / 打断了, 这件排着的活 (${h.turn}) 没投。`, h.from === by));
       const hit = [...slots.values()].filter((s) => s.to === target && !s.resolved && !s.claimed && only({ from: s.from, turn: s.turn ?? "" }));
       for (const s of hit) {
-        const last = deps.lastWords?.(s.to, s.at).trim();
+        // Keep cancellation consistent with timeout/dead/silent: transferred
+        // answers may only quote text tied to their own source turn.
+        const last = (s.answerTransfer
+          ? (s.turn ? deps.replyFor(s.to, deps.nameOf(s.from), s.at, s.turn)?.text : undefined)
+          : deps.lastWords?.(s.to, s.at))?.trim();
         s.outcome = {
           status: "canceled",
           body: `（守护进程: ${deps.nameOf(s.to)} 被 ${deps.nameOf(by)} 收掉 / 打断了, 这件活没有结论。）${last ? `\n它最后说的: ${clipMiddle(last, 600)}` : ""}`,
