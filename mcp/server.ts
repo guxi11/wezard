@@ -72,20 +72,21 @@ const normalizeTarget = (raw: string | undefined): string | undefined => {
   return raw;
 };
 
-// set_workspace — one-shot project switch: the daemon applies the switch
-// itself by walking the exact /new path — setPendingCwd → kill pane →
-// respawn in the new cwd → attach → "📂 当前项目" push. NOTE: when the
-// caller IS the chat's session being replaced (the common case), its own
-// pane is killed mid-tool-call — the tool result never returns, and the
-// project-info bubble in the chat is the receipt. On spawn failure the
-// pendingCwd stays queued, so a manual /new from WeCom still completes
-// the switch.
+// set_workspace — one-shot project switch. Live sessions go through the
+// handoff machinery (daemon writes pendingCwd → asks the wizard for a brief →
+// restarts it in the new cwd → pastes the brief back), so context carries
+// over and the new-cwd charter takes effect on respawn; the 📂 bubble in the
+// chat is the human-facing receipt. The route answers immediately
+// (scheduled:true) because the caller is usually the session being replaced —
+// it must finish its turn before the handoff can start. Cold sessions (no
+// live pane) just respawn fresh. On handoff failure the pendingCwd stays
+// queued, so a manual /new from WeCom still completes the switch.
 server.registerTool(
   "set_workspace",
   {
     title: "Switch workspace directory",
     description:
-      "一步换掉这个 wizard 的**工作区**: 杀掉当前 pane, 在给定目录下重开一个全新的会话 —— 等价于往那个目录 `/new`。群里收到新会话的 📂 项目信息气泡当回执; 对话上下文**不会**带过去 (和 /new 一样是全新会话, 但身份的系统提示还在)。调用方就是被替换的那一个时, 它在调用当口就被终结 —— 这是预期行为, 群里那条气泡就是回执。用绝对路径 (或 `~` 开头)。想换目录又想保住手上的上下文: 先 handoff 把自己的工作压成简报, 或者 spawn_wizard({cwd}) 生一个子 wizard 去那边干。\n"
+      "一步换掉这个 wizard 的**工作区**: 守护进程让它把手上工作压成交接简报, 在给定目录下原地重开 (同 handoff), 简报贴回新会话 —— **上下文带过去**, 新目录的宪章 (系统提示) 也随之生效; 群里那条 📂 项目信息气泡是给人看的回执。调用方就是被替换的那一个时, 它先拿到「已安排 (scheduled)」的应答, 把这一轮说完, 随后被请去写简报、重开。用绝对路径 (或 `~` 开头)。想换目录又不想动自己: spawn_wizard({cwd}) 生一个子 wizard 去那边干。\n"
       + "**`keep:true` 是另一支**: 人回答「不用换, 就用现在这个目录」时调它 —— 不重开会话, 只把「这个工作区是人认过的」记下来, 此后新会话的开局不再问这件事。一个新聊天的第一个 wizard 落在默认兜底目录里, 开局会被要求先问一句要去哪个项目; 人给路径就走 `cwd`, 人说不用换就走 `keep`。",
     inputSchema: {
       cwd: z.string().optional().describe("Absolute project path, e.g. /Users/foo/projects/bar. ~ is expanded. 与 `keep` 二选一。"),
@@ -116,7 +117,7 @@ server.registerTool(
       const queued = j.pendingCwd ? ` (switch queued for ${j.pendingCwd as string} — send /new from WeCom to apply)` : "";
       return fail(`set_workspace failed: ${(j.reason as string) ?? "unknown"}${queued}`);
     }
-    return ok({ ok: true, target: j.target, sessionId: j.sessionId, cwd: j.cwd, ...(j.confirmed ? { confirmed: true } : {}) });
+    return ok({ ok: true, target: j.target, sessionId: j.sessionId, cwd: j.cwd, ...(j.scheduled ? { scheduled: true } : {}), ...(j.confirmed ? { confirmed: true } : {}) });
   },
 );
 

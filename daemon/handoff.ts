@@ -16,6 +16,7 @@
 import type { Logger } from "pino";
 import type { JsonMap } from "../shared/json-map-store.js";
 import type { Asker } from "../shared/detail-store.js";
+import { sleep } from "../shared/std.js";
 import { waitForIdle } from "./graph.js";
 import type { Receipts, Slot } from "./receipts.js";
 
@@ -70,14 +71,17 @@ export interface Pending {
   /** 自我交接那一刻它这一轮的频道 ("" = 私聊): 重开后「接着干」那一轮还在答同一件 ask,
    *  终句回同一处。交接别人时它是闲着的, 没有在答的 ask —— "". */
   channel?: string;
+  /** 重开时往家里群发「📂 当前项目」气泡 —— 换工作区 (set_workspace) 给人的回执;
+   *  普通交接是生命周期事件, 静默。 */
+  announce?: boolean;
   timeoutMs: number;
 }
 
 export interface HandoffDeps {
   isBusy: (target: string) => Promise<boolean>;
   sessionId: (target: string) => string;
-  /** 杀旧 pane、起新进程 (同名 / cwd / 模型 / charter)。 */
-  restart: (target: string) => Promise<{ ok: boolean; reason?: string }>;
+  /** 杀旧 pane、起新进程 (同名 / cwd / 模型 / charter); `p.announce` 时重开发「📂 当前项目」气泡。 */
+  restart: (target: string, p: Pending) => Promise<{ ok: boolean; reason?: string }>;
   /** 往会话里贴一段话; `owe` 非空时挂上那些发话方的信封 (频道随它们), 否则这一轮的频道是 `channel`。 */
   inject: (target: string, text: string, owe: readonly Owe[], channel: string) => Promise<{ ok: boolean; reason?: string }>;
   /** 它此刻这一轮的频道 ("" = 私聊)。 */
@@ -100,8 +104,8 @@ export type HandoffResult = { ok: true; brief: string } | { ok: false; status: n
 export interface Handoffs {
   /** 自我交接: 立刻返回, 等它这一轮说完再动手。 */
   self: (target: string, brief: string) => { ok: boolean; reason?: string };
-  /** 交接别人: 等到简报贴回新会话才返回。 */
-  other: (target: string, focus: string, timeoutMs: number) => Promise<HandoffResult>;
+  /** 交接别人: 等到简报贴回新会话才返回。`extra.announce` = 重开时发「📂 当前项目」气泡。 */
+  other: (target: string, focus: string, timeoutMs: number, extra?: { announce?: boolean }) => Promise<HandoffResult>;
   /** 把落盘里没做完的交接接着做。须在 receipts.resume 之前调: 闸要先立起来。 */
   resume: () => number;
 }
@@ -135,6 +139,15 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
     return { ok: false, status, reason, ...(p.brief ? { brief: p.brief } : {}) };
   };
   const idle = (p: Pending, ms: number) => waitForIdle(p.target, deps.isBusy, ms, () => false);
+
+  /** 新会话接住简报的凭证: 转忙, 或新 transcript 里出现它的话 (重开后 lastText 读的就是新会话)。 */
+  const landed = async (p: Pending, ms: number): Promise<boolean> => {
+    for (const end = Date.now() + ms; Date.now() < end; await sleep(2000)) {
+      if (await deps.isBusy(p.target)) return true;
+      if (deps.lastText(p.target).trim()) return true;
+    }
+    return false;
+  };
 
   /** 一步一步推到底; 每一步先落盘再动手, reload 后从 `stage` 接着来。 */
   const step = async (p: Pending): Promise<HandoffResult> => {
@@ -171,12 +184,21 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
           Date.now(),
         );
         const next = saved({ ...p, stage: "restarting", owe: carried.map((s) => ({ from: s.from, channel: s.channel, ...(s.turn ? { turn: s.turn } : {}), ...(s.asker ? { asker: s.asker } : {}) })) });
-        const r = await deps.restart(p.target);
+        const r = await deps.restart(p.target, p);
         if (!r.ok) return fail(next, 502, `/new failed: ${r.reason ?? "unknown"}`);
         return step(saved({ ...next, stage: "restarted" }));
       }
       case "restarted": {
-        const r = await deps.inject(p.target, carryOf(p), p.owe ?? [], p.channel ?? "");
+        // 简报是新会话的第一条注入, 可能撞上冷 pane: TUI 还没起好时注入只能「信任提交」
+        // (日志 ok 而 pane 其实空白), 吞了 wizard 就空着醒来 —— 简报是它唯一的开场白。
+        // 所以贴完要看见它真的动起来 (转忙, 或新 transcript 里有了它的话), 看不见就重贴一次。
+        const text = carryOf(p);
+        let r = await deps.inject(p.target, text, p.owe ?? [], p.channel ?? "");
+        if (r.ok && !(await landed(p, 60_000))) {
+          deps.log.warn({ mod: "handoff", target: p.target }, "handoff: 简报贴回后新会话没动静 (冷 pane 吞了?), 重贴一次");
+          r = await deps.inject(p.target, text, p.owe ?? [], p.channel ?? "");
+          if (r.ok && !(await landed(p, 60_000))) r = { ok: false, reason: "简报两次都没让新会话动起来 (冷 pane 吞注入)" };
+        }
         drop(p);
         deps.log.info({ mod: "handoff", target: p.target, ok: r.ok, reason: r.reason, owe: p.owe?.length ?? 0 }, "handoff: 简报已贴回");
         if (!r.ok) return fail(p, 502, `handoff carry inject failed: ${r.reason}`);
@@ -209,8 +231,8 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
       void run(p);
       return { ok: true };
     },
-    other: async (target, focus, timeoutMs) => {
-      const p = begin(target, "other", { focus, timeoutMs });
+    other: async (target, focus, timeoutMs, extra) => {
+      const p = begin(target, "other", { focus, timeoutMs, ...extra });
       if (!p) return { ok: false, status: 409, reason: "它已经在交接中" };
       return run(p);
     },

@@ -648,13 +648,16 @@ const main = async (): Promise<void> => {
       const r = await m.injectText(target, text, undefined, { guard });
       json(res, r.ok ? 200 : 500, r);
     });
-    // One-shot project switch: bind the chat-wide cwd AND apply it right here
-    // by walking the exact /new path (kill pane → respawn in pendingCwd →
-    // attach → "📂 当前项目" push). Resolved target
-    // precedence follows resolveSelf (explicit target, then stable pane, then session). When the caller
-    // IS the session being replaced, its pane dies mid-tool-call — the
-    // project-info bubble is the receipt. On spawn failure the pendingCwd
-    // stays queued, so a manual /new from WeCom still completes the switch.
+    // One-shot project switch: bind the chat-wide cwd AND apply it right here.
+    // 活会话走交接 (handoff): 守护进程请它写简报 → 重开 (pendingCwd 在这一步被消费,
+    // 落进新目录, 宪章随之重渲染) → 简报贴回, 上下文跟着过去, 「📂 当前项目」气泡
+    // 照发 (announce —— 那是人看得见的回执)。一律 fire-and-forget: 调用方常常就是被换
+    // 的那个, 它得先拿到这份应答、把这一轮说完, 交接才动得了手 (other 的第一拍就是等它
+    // 闲)。交接没做成 → 捎一条提醒给它, pendingCwd 仍排着队, 人手 /new 照样完成切换
+    // (若它本就在交接中, 那场交接的重开同样会消费这笔 pendingCwd)。冷会话 (pane 不在)
+    // 没有可交接的上下文, 按老路直接新开。Resolved target
+    // precedence: explicit body.target → sessionId-derived (so MCP can omit
+    // it) → tmuxPane (stable across /clear) → cfg.defaultChat.
     http.register("POST /mirror/workspace", async (req, res) => {
       const body = (await readBody(req)) as Partial<{ target: string; sessionId: string; tmuxPane: string; cwd: string; keep: boolean }>;
       const cwd = (body.cwd ?? "").toString();
@@ -671,6 +674,14 @@ const main = async (): Promise<void> => {
       if (!cwd) { json(res, 400, { ok: false, reason: "cwd required (or keep:true to confirm the current one)" }); return; }
       const set = m.setPendingCwd(target, cwd);
       if (!set.ok) { json(res, 400, { ...set, target }); return; }
+      if ((await liveOf([target])).length) {
+        const focus = `工作区切到 ${set.pendingCwd}: 简报里点一句手头活在新目录下怎么接着干`;
+        void handoffs.other(target, focus, CHARTER_HANDOFF_MS, { announce: true }).then((r) => {
+          if (!r.ok) notices.post([target], `换工作区到 ${set.pendingCwd} 的自动交接没做成: ${r.reason} —— 切换仍排着队, 手上这件告一段落后自己 \`handoff({brief})\`, 或让人在群里 /new 一下`);
+        });
+        json(res, 200, { ok: true, target, cwd: set.pendingCwd, scheduled: true });
+        return;
+      }
       // Same shape as inbound's /new: windowName = tag for tagged sessions,
       // principal for the default one. No explicit cwd — newSession reads the
       // pendingCwd just queued and clears it once applied.
@@ -981,7 +992,7 @@ const main = async (): Promise<void> => {
     const handoffs = createHandoffs({
       isBusy: m.isBusy,
       sessionId: (t) => m.sessionInfo(t)?.sessionId ?? "",
-      restart: (t) => restartFresh(t),
+      restart: (t, p) => restartFresh(t, p),
       // 欠着回执的发话方挂上它的信封: 新会话那一轮就是在答它, 回执照常按信封定位, 频道也接回
       // 原来那一句所在的地方 (私聊不进群)。欠好几份时每份各开一轮 (见 carryRest): 并成一句,
       // 那一轮就只有一个去向, 别的上游拿到的是答给第一份的话。
@@ -1993,15 +2004,17 @@ const main = async (): Promise<void> => {
 
     // 交接的「重开」一步: 走 /new (杀旧 pane、起新进程) 而不是往原 pane 注入 /clear。
     // /clear 只换会话不换进程 —— MCP 子进程、charter 都还是旧的, 新工具拿不到; 镜像
-    // 还得靠 sid 轮换探测才跟得上。CLI 使用 cfg 的默认 backend; cwd / keepalive 照旧沿用。
+    // 还得靠 sid 轮换探测才跟得上。CLI 使用 cfg 的默认 backend; cwd / keepalive 照旧沿用
+    // (排着队的 pendingCwd —— set_workspace 先落的那笔 —— 在这一步被消费, 重开落进新目录)。
     // 同 backend 时模型也沿用, 管家除外 ——
     // 它换上此刻的 router 档 (newSession 里定), 改了 models.router 后交接一次就是让它生效的那一下。
-    const restartFresh = (target: string) => {
+    // `announce` (换工作区) 时那条「📂 当前项目」气泡照发 —— 那是人看得见的回执; 普通交接静默。
+    const restartFresh = (target: string, p?: PendingHandoff) => {
       const info = m.sessionInfo(target);
       const cli = cfg.wrc.defaultCli ?? primary.name;
       const model = stewardTierOf(cfg, target) || info?.cli !== cli ? undefined : info?.model || undefined;
       if (!planContinuationAllowed(target)) return Promise.resolve({ ok: false, reason: "workflow continuation withdrawn" });
-      return m.newSession(target, displayName(target) || tagOfKey(target) || target, cli, { model, silent: true, warm: true, guard: () => planContinuationAllowed(target) });
+      return m.newSession(target, displayName(target) || tagOfKey(target) || target, cli, { model, silent: !p?.announce, warm: true, guard: () => planContinuationAllowed(target) });
     };
 
     // POST /handoff — 交接一个 pane 的会话给一个全新会话。先让目标会话把当前工作
@@ -3521,9 +3534,14 @@ const main = async (): Promise<void> => {
     // 清单迟早漏; 改前改后各渲染一遍有会话的 wizard 的宪章, 变了的就是受影响的。
     const charterSections = (text: string): Map<string, string> =>
       new Map(text.split(/^(?=## )/m).map((sec) => [sec.split("\n", 1)[0]!.replace(/^## /, ""), sec] as const));
+    // 「出生时同群的 wizard」是出生快照 (宪章自己声明名册随时可查), 且渲染途中的懒定居
+    // (settleName / 自动补名写注册表) 会让前后两次渲染无辜地不同 —— 只它变不触发交接
+    // (档位行同此待遇, 见 charterText 的 forDiff)。它一参与比对, 一次无关的 config_set
+    // 就会把同群还活着的 wizard 全量交接一遍。
+    const VOLATILE_SECTIONS = new Set(["出生时同群的 wizard"]);
     const changedSections = (a: string, b: string): string[] => {
       const x = charterSections(a), y = charterSections(b);
-      return [...new Set([...x.keys(), ...y.keys()])].filter((k) => x.get(k) !== y.get(k));
+      return [...new Set([...x.keys(), ...y.keys()])].filter((k) => !VOLATILE_SECTIONS.has(k) && x.get(k) !== y.get(k));
     };
     /** 宪章挂在 pane 上的 wizard —— 候选。同步取: 守卫要在写之前拍快照, 中间不能 await。 */
     const attachedWizards = (): string[] => wizards.all().map((w) => w.target).filter((t) => !!m.sessionInfo(t)?.tmuxPane);
@@ -3548,21 +3566,38 @@ const main = async (): Promise<void> => {
     type CharterHit = { target: string; sections: string[] };
     const charterImpact = (before: Map<string, string>, after: Map<string, string>): CharterHit[] =>
       [...before].flatMap(([t, a]) => { const secs = changedSections(a, after.get(t) ?? a); return secs.length ? [{ target: t, sections: secs }] : []; });
-    /** 受影响的 wizard 各挂一条提醒 (随它下一条消息到); 给调用方的那段话。调用方自己受影响就直说要它 handoff。
-     *  人发起的改动多一句「交接之前还是旧规矩」: 管家要知道它此刻向人汇报的方式还没变, 别让人以为已经生效。 */
+    /** 宪章改动自动交接的时限 (写简报 + 重开), 与 /handoff 路由同档。 */
+    const CHARTER_HANDOFF_MS = 600_000;
+    /** 受影响的 wizard 的处理分两档:
+     *  - hot: 自动交接 —— 守护进程请它写简报、原地重开 (宪章在重开时重渲染)、简报贴回;
+     *    交接不成 (一直忙 / 已在交接中 / 重开失败) 才退回老规矩, 挂一条提醒让它自己 handoff。
+     *  - reload: 此刻重开渲染的还是旧宪章, 自动交接无意义 —— 维持挂提醒, reload 之后它自己交。
+     * 给调用方的那段话照旧回; 调用方自己受影响就直说。人发起的改动多一句「交接之前还是旧规矩」:
+     * 自动交接也要等它这一轮说完才动手, 这句话仍成立。 */
     const announceCharterImpact = (c: CharterChange, hits: CharterHit[]): string => {
       if (!hits.length) return "";
       const ask = `${c.reload ? "等守护进程 reload 之后再" : ""}调 \`handoff({brief})\` 原地重开 (手上这件告一段落就交; 宪章在 handoff 时重新生成)`;
       const lag = (t: string): string => !c.byHuman ? "" : tagOfKey(t)
         ? " —— 这是人发起的改动: 交接之前你仍按旧规矩做事, handoff 之后才按新的"
         : " —— 这是人发起的改动: 交接之前你仍按旧规矩向人汇报, handoff 之后才会按新规矩汇报; 回人时说一句「交接后生效」";
-      const others = hits.filter((h) => h.target !== c.self);
-      others.forEach((h) => notices.post([h.target], `${c.what} 改动了你的宪章 (系统提示, 变了的段: ${h.sections.join(" / ")}); 已在跑的你看不见新规矩 —— ${ask}${lag(h.target)}`));
       const mine = hits.find((h) => h.target === c.self);
       // 提醒照旧全机发 (各收各的); 回给调用方的名单与人数只含它看得见的 (sameBot) —— 别的机器人的 wizard
       // 连名字带个数都不报。没有调用方 (人 /name、自动补名) = 主机器人视角, 单机器人时就是全部。
       const shown = hits.filter((h) => sameBot(c.self ?? "", h.target));
       const shownOthers = shown.filter((h) => h.target !== c.self);
+      if (!c.reload) {
+        hits.forEach((h) => void handoffs.other(h.target, `${c.what} 改动了你的宪章 (变了的段: ${h.sections.join(" / ")}); 简报里点一句手头活在新规矩下怎么接着干`, CHARTER_HANDOFF_MS).then((r) => {
+          if (!r.ok) notices.post([h.target], `${c.what} 改动了你的宪章 (系统提示, 变了的段: ${h.sections.join(" / ")}); 自动交接没做成 (${r.reason}) —— 已在跑的你看不见新规矩, 手上这件告一段落后自己${ask}${lag(h.target)}`);
+        }));
+        return [
+          "",
+          `⚠ 这次改动进了宪章 (系统提示): 已在跑的 wizard 看不见, 要 handoff 才换上。受影响 ${shown.length} 个: ${shown.map((h) => displayName(h.target)).join(" ")}`,
+          ...(shown.length ? ["已自动安排它们交接 (各自写简报 → 原地重开 → 接回简报); 交接不成的会收到提醒, 再自己 handoff"] : []),
+          ...(mine ? [`**你自己也在其中** (变了的段: ${mine.sections.join(" / ")}): 这一轮说完就会自动交接${lag(mine.target)}`] : []),
+        ].join("\n");
+      }
+      const others = hits.filter((h) => h.target !== c.self);
+      others.forEach((h) => notices.post([h.target], `${c.what} 改动了你的宪章 (系统提示, 变了的段: ${h.sections.join(" / ")}); 已在跑的你看不见新规矩 —— ${ask}${lag(h.target)}`));
       return [
         "",
         `⚠ 这次改动进了宪章 (系统提示): 已在跑的 wizard 看不见, 要 handoff 才换上。受影响 ${shown.length} 个: ${shown.map((h) => displayName(h.target)).join(" ")}`,
@@ -3571,8 +3606,8 @@ const main = async (): Promise<void> => {
       ].join("\n");
     };
     // 所有会动宪章的写入 (config_set、人 `/name`、name_chat、自动补名) 共用这一个守卫: 写前写后各渲染一遍
-    // 挂在 pane 上的 wizard 的宪章, 变了的、pane 还活着的挂提醒。快照到写完之间不能有 await —— 别人的写入
-    // 插进来, 前后就对不上了。已经写了: 比对失败只少一句提醒, 不能让调用方以为没写而重发。
+    // 挂在 pane 上的 wizard 的宪章, 变了的、pane 还活着的自动交接 (hot) 或挂提醒 (reload, 见 announceCharterImpact)。
+    // 快照到写完之间不能有 await —— 别人的写入插进来, 前后就对不上了。已经写了: 比对失败只少一句提醒, 不能让调用方以为没写而重发。
     guardCharter = (write, change) => {
       const targets = attachedWizards();
       const before = charterSnapshot(targets);
