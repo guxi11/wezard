@@ -27,6 +27,7 @@ import { newStewardSpec, resumedStewardSpec } from "./steward-model.js";
 import { expandHome, sanitizeId } from "../shared/paths.js";
 import { augmentedPath } from "../shared/exec-path.js";
 import { sleep, truncateWithCount, mapLimit } from "../shared/std.js";
+import { withImageClipboard, pasteVerifiedImage } from "./image-input.js";
 import {
   activeBackends,
   resolveCliBackend,
@@ -1714,17 +1715,30 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
   // image content block. Each C-v needs a brief settle for Claude Code's TUI
   // to read the clipboard before the next overwrite. Fresh spawn extends.
   const IMG_SETTLE_MS = freshSpawn ? 700 : 350;
-  for (const imgPath of images) {
-    const cb = await setMacClipboardImage(imgPath);
-    if (!cb.ok) {
-      log.warn({ imgPath, reason: cb.reason }, "mirror inject: clipboard set failed, skipping image");
-      continue;
+  const pumped = images.length ? await withImageClipboard(async () => {
+    for (const imgPath of images) {
+      const paste = async (): Promise<{ ok: boolean; reason?: string }> => {
+        const cb = await setMacClipboardImage(imgPath);
+        if (!cb.ok) return cb;
+        if (guard && !guard("paste")) return { ok: false, reason: "image paste canceled by dispatch guard" };
+        const cv = await runTmux(["send-keys", "-t", target, "C-v"]);
+        return cv.ok ? { ok: true } : { ok: false, reason: `tmux send-keys C-v failed: ${cv.stderr.slice(-200)}` };
+      };
+      // Cold Codex can ignore C-v before its composer exists. Do not submit
+      // the text until the composer proves this attachment has landed.
+      const result = backendName === "codex"
+        ? await pasteVerifiedImage({ read: () => readInputBox(target), paste, valid: () => !guard || guard("paste") })
+        : await paste();
+      if (!result.ok) {
+        log.warn({ target, imgPath, reason: result.reason }, "mirror inject: image not confirmed, refusing text submission");
+        return result;
+      }
+      if (backendName !== "codex") await sleep(IMG_SETTLE_MS);
+      log.info({ target, imgPath, verified: backendName === "codex" }, "mirror inject: image attached");
     }
-    if (guard && !guard("paste")) return { ok: false, reason: "image paste canceled by dispatch guard" };
-    const cv = await runTmux(["send-keys", "-t", target, "C-v"]);
-    if (!cv.ok) return { ok: false, reason: `tmux send-keys C-v failed: ${cv.stderr.slice(-200)}` };
-    await sleep(IMG_SETTLE_MS);
-  }
+    return { ok: true };
+  }) : { ok: true };
+  if (!pumped.ok) return { ...pumped, uncertain: true };
 
   // Image-only message: TUI input box now holds the attached images; press
   // Enter and we're done. No fingerprint to verify (the input itself is binary
