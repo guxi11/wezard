@@ -1733,7 +1733,9 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
         log.warn({ target, imgPath, reason: result.reason }, "mirror inject: image not confirmed, refusing text submission");
         return result;
       }
-      if (backendName !== "codex") await sleep(IMG_SETTLE_MS);
+      // Attachment rendering can precede the TUI finishing its paste handler.
+      // Preserve the key settle interval before another C-v or text paste.
+      await sleep(IMG_SETTLE_MS);
       log.info({ target, imgPath, verified: backendName === "codex" }, "mirror inject: image attached");
     }
     return { ok: true };
