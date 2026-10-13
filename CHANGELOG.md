@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [2.6.4] - 2026-10-13
+
+### Fixed
+- daemon 统一持久化用户与 wizard 消息调度及终句投递；续接绑定原始事件与目标会话，恢复时补齐终句确认，避免并发串轮、重复投递及回执丢失。
+- CLI 图片附件确认最多重试三次，确认成功后才提交输入，失败保留输入并明确报错。
+
 ## [2.6.3] - 2026-10-13
 
 ### Added
@@ -1072,7 +1078,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.6.3...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.6.4...HEAD
+[2.6.4]: https://github.com/guxi11/wezard/compare/v2.6.3...v2.6.4
 [2.6.3]: https://github.com/guxi11/wezard/compare/v2.6.2...v2.6.3
 [2.6.2]: https://github.com/guxi11/wezard/compare/v2.6.1...v2.6.2
 [2.6.1]: https://github.com/guxi11/wezard/compare/v2.6.0...v2.6.1
