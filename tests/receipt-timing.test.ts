@@ -54,7 +54,7 @@ for (const continuations of [1, 2]) {
   const first = f.register({ from: "sender", to: "worker", turn: "task", channel: "" });
   await drain(() => f.waits.has("worker"), "first dispatch is running");
   f.answer("worker", first.turn, "NEED: password");
-  await drain(() => f.sent.length === 1 && f.waits.has("worker"), "NEED delivered and watcher awaiting re");
+  await drain(() => f.sent.length === 1, "NEED delivered independently of worker observation");
   assert.equal(f.sent[0].meta.status, "need");
   assert.equal(f.row().resolved, false);
   assert.equal(f.row().settled, undefined);

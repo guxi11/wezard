@@ -142,6 +142,7 @@ const main = async (): Promise<void> => {
   // 定时调度器的 `inject` 真正实现, 赋值在 mirror-mode 的大块里 (要用到那里面的
   // wizards / m / notifyChat), 但 startScheduler 在那块外面接线 —— 见文件尾。
   // 记忆整理者的执行体, 同样只有 mirror 模式给得出 —— 赋值见 scheduledTaskInject 旁边。
+  let stopReceipts = (): void => {};
   let stewardRun: ((prompt: string) => Promise<{ ok: boolean; reason?: string }>) | undefined;
   let stewardWiring: { refsOf?: RefsOf; onMerged?: (mds: readonly string[]) => void } = {};
   let scheduledTaskInject:
@@ -831,7 +832,7 @@ const main = async (): Promise<void> => {
       paneLive: m.paneLive,
       nameOf: displayName,
       log,
-      store: loadJsonMap<ReceiptSlot>(cfg.wrc.mirror.receiptsFile),
+      store: loadJsonMap<ReceiptSlot>(cfg.wrc.mirror.receiptsFile, undefined, { strict: true }),
       holdStore: loadJsonMap<Hold>(cfg.wrc.mirror.holdsFile, undefined, { strict: true }),
       // 放行停放着的 after 件: 走 tell_peer 同一条注入路径, 沿用停放时的件号 / 频道 / 父 k。
       release: async (h, seen, alive) => {
@@ -842,9 +843,10 @@ const main = async (): Promise<void> => {
       handedOff,
       replyFor: (to, fromName, since, turn) => m.replyToPeer(to, fromName, since, turn),
       lastWords: m.lastReply,
-      deliver: (to, bodyText, meta) =>
+      deliver: (to, bodyText, meta, alive) =>
         m.injectText(to, clipMiddle(bodyText), undefined, {
-          guard: () => planContinuationAllowed(to),
+          requireIdle: true,
+          guard: () => (!alive || alive()) && planContinuationAllowed(to),
           // receipt:true 是「这一轮不该再生回执」的记录 —— 回环在结构上就不成立:
           // 只有 tell_peer 那条路登记 watcher, 这里是直接注入。
           from: { kind: "peer", from: meta.from, receipt: true, status: meta.status, ...(meta.turn ? { turn: meta.turn } : {}), ...(meta.job ? { job: meta.job, done: meta.done, total: meta.total } : {}), ...(meta.asker ? { asker: meta.asker } : {}) },
@@ -862,9 +864,10 @@ const main = async (): Promise<void> => {
               ...(meta.pending ? { pending: meta.pending } : {}),
               ...(audienceName(meta.channel, meta.asker) ? { audience: audienceName(meta.channel, meta.asker) } : {}),
             },
-          ),
+          ) + (meta.eventId ? renderReminder({ wezard: "receipt-delivery", event: meta.eventId }, []) : ""),
         }),
     });
+    stopReceipts = receipts.stop;
     const turnsLine = (xs: readonly InFlight[], target: string): string => renderInFlight(xs, target, displayName);
     // reload 前在飞的回执: 等 mirror 把绑定都恢复了再续守 —— 早一步读 target 会拿不到
     // transcript, 退回按时刻取就可能把上一件事的结论当回执。
@@ -1720,6 +1723,11 @@ const main = async (): Promise<void> => {
       const r = await tellPeerAs(self, body);
       json(res, r.status, r.body);
     };
+    http.register("POST /peers/inbox", async (req, res) => {
+      const { self } = await readPeerBody(req);
+      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller" }); return; }
+      json(res, 200, { ok: true, events: receipts.inbox(self) });
+    });
     http.register("POST /workflow/nodes", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller" }); return; }
@@ -1787,19 +1795,20 @@ const main = async (): Promise<void> => {
         // 取走就占位: 同一段话不会再作为回执 paste 进来一遍 (见 receipts.claim)。
         const full = wr.idle ? m.lastReply(h.target, receipts.sentAt(self, h.target)) : "";
         const already = full ? receipts.claim(self, h.target) : false;
-        const closing = parseClosing(full);
+        const closing = parseClosing(already === "uncertain" ? "" : full);
         const result = closing.kind === "result" ? closing.text : "";
         return {
           name: h.address,
           idle: wr.idle,
           // 回执早一步到了: 这段话已经作为新的一轮进过你的会话, 别再处理第二遍。
-          ...(already ? { delivered: true } : {}),
+          ...(already === true ? { delivered: true } : {}),
+          ...(already === "uncertain" ? { delivery: "uncertain", reason: "回执可能已递交，需按 receipt eventId 对账；没有自动重投或再次领取。" } : {}),
           ...(wr.reason ? { reason: wr.reason } : {}),
           ...(closing.kind === "need" ? { need: closing.text } : {}),
           ...(closing.artifacts.length ? { artifacts: closing.artifacts } : {}),
           ...(result
             ? { result, ...(full.length > result.length + 200 ? { omitted: full.length - result.length } : {}) }
-            : full
+            : already === "uncertain" ? {} : full
               ? { lastText: clipMiddle(full) }
               : wr.idle
                 ? { stale: true, reason: "它停下了, 但自你上次 send_peer 以来没有新回复 —— 多半停在一个等人点的弹窗上, 或那句话没被接住; peek_peer 看一眼" }
@@ -3849,6 +3858,7 @@ const main = async (): Promise<void> => {
 
   const shutdown = async (signal: string): Promise<void> => {
     log.info({ signal }, "shutdown signal");
+    stopReceipts();
     scheduler.stop();
     steward?.stop();
     tasks.stop();
@@ -3864,6 +3874,10 @@ const main = async (): Promise<void> => {
     await Promise.allSettled([ws.shutdown(), http.close()]);
     process.exit(0);
   };
+  http.register("POST /shutdown", (_req, res) => {
+    json(res, 200, { ok: true });
+    return shutdown("HTTP");
+  });
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 

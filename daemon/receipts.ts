@@ -64,6 +64,8 @@ const IDLE_STEP_MS = 5 * 60_000;
 const IDLE_CONFIRM = 3;
 
 export interface ReceiptMeta {
+  /** Stable inbox event identity, including retries and restart recovery. */
+  eventId?: string;
   /** 答话方的 target key。 */
   from: string;
   /** 回执那一轮的频道: 只有续回进群 (见 routeOf) 才不是 "" —— 派那件活时公开与否不算数。 */
@@ -105,6 +107,31 @@ const sameK = (a: ParentK, b: ParentK): boolean => kAttr(a) === kAttr(b);
  *  发话方等的是一个定论, 「没有答案」也是定论 —— 静默丢弃它就只能永远等。 */
 export interface Outcome { status: ReceiptStatus; body: string }
 
+/** Outcome and inbox intent are committed together in the receipt's slot. */
+export interface ReceiptMail {
+  id: string;
+  order: number;
+  queuedAt: number;
+  generation?: number;
+  outcome: Outcome;
+  state: "queued" | "delivering" | "delivered" | "uncertain" | "superseded" | "claimed";
+  attempts: number;
+  retryAt?: number;
+  reason?: string;
+  accounted?: boolean;
+  sentAt?: number;
+  meta?: ReceiptMeta;
+  relayed?: boolean;
+}
+
+export interface ReceiptDelivery {
+  ok: boolean;
+  reason?: string;
+  uncertain?: boolean;
+  /** Positive evidence that no input was exposed to the recipient. */
+  retryable?: boolean;
+}
+
 export interface ReceiptDeps {
   /** Transferred answers are delivered to the human, never injected back into the router. */
   deliverAnswer?: (id: string, outcome: Outcome) => Promise<boolean>;
@@ -112,8 +139,7 @@ export interface ReceiptDeps {
   /** 能接新一轮了吗 (轮已结束、没停在审批上) / 等到那一刻 —— 投递时机用, 见 tell_peer when:"idle"。 */
   idleNow: (target: string) => Promise<boolean>;
   untilIdle: (target: string, timeoutMs: number, opts?: { aborted?: () => boolean; confirm?: number }) => Promise<IdleResult>;
-  /** 发话方还在不在。死了就把回执丢掉 —— 为了送一份结论把一个已经收工的 wizard
-   *  重新拉起来是本末倒置。 */
+  /** 发话方还在不在。离线时保留队列并退避, 不为送回执重开会话。 */
   paneLive: (target: string) => Promise<boolean>;
   /** `to` 答 `fromName` 那一句的那段话。三态, 缺一不可 (见 peers.replyToPeer):
    *  非空 = 答案; `""` = 问话在, 但还没答 (接着等); `undefined` = 连问话都定位不到
@@ -123,7 +149,9 @@ export interface ReceiptDeps {
    *  那句是上一件事的, 引它只会误导)。 */
   lastWords?: (to: string, sinceMs: number) => string;
   /** 把回执 paste 进发话方的输入框 (调用方负责拼信封)。 */
-  deliver: (to: string, body: string, meta: ReceiptMeta) => Promise<{ ok: boolean; reason?: string }>;
+  deliver: (to: string, body: string, meta: ReceiptMeta, guard?: () => boolean) => Promise<ReceiptDelivery>;
+  /** Retry backoff base; injectable for deterministic transport tests. */
+  retryMs?: number;
   nameOf: (target: string) => string;
   /** 工单账本的计数 (已落定几份 / 一共几份)。只数回执登记会漏: 登记按发话方 →
    *  答话方一对一份, 同一对后来又说了一句, 这份就被顶掉, 总数跟着少一, 「全部到齐」
@@ -211,10 +239,12 @@ export interface Tell {
 export interface Turn { turn: string; legs: number; job?: string; channel?: string; asker?: Asker; k?: ParentK; reUnknown?: true }
 
 export interface Slot extends Tell {
+  /** Durable asker inbox; observing the worker never waits for consumption. */
+  inbox?: ReceiptMail[];
   job: string;
   /** 发话时刻 —— replyFor 的下界, 也是 wait_peer 判断「这一次」的那个锚。 */
   at: number;
-  /** 同一对 wizard 又说了一句 → 旧 watcher 作废 (后一句的回执才是要的那个)。 */
+  /** 同一件的续问代数; 不同件号保留自己的 watcher 与 inbox。 */
   gen: number;
   /** 已经有人取走/送出 → 不再投第二遍。 */
   claimed: boolean;
@@ -226,10 +256,9 @@ export interface Slot extends Tell {
    *  答出来的照样投)。先于投递落盘: reload 打断投递后重投的仍是同一份, 迟到的答案
    *  不会把已投的 timeout 改写成 done。 */
   outcome?: Outcome;
-  /** 投递失败 (paste 没成) —— 留给观察面, 不重试。 */
+  /** Delivery failed or is uncertain; the inbox records whether retry is safe. */
   undelivered?: true;
-  /** 收尾了 (送达 / 不回注 / 被 wait_peer 取走 / 放弃) —— boot 时只续守没收尾的。
-   *  与 `claimed` 分开: claimed 在投递**之前**就占位, 投到一半 reload 仍要重投。 */
+  /** 已送达 / 不回注 / 被 wait_peer 取走。递交不确定不会收尾或自动重投。 */
   settled?: boolean;
   /** 交接时在旧会话里已经收口的那段答案 (见 Receipts.transfer) —— 换了会话之后
    *  replyFor 读的是新 transcript, 旧答案只能在交接当口取出来存在这里。 */
@@ -248,6 +277,10 @@ export interface Slot extends Tell {
 const KEEP_MS = 24 * 3600_000;
 
 export interface Receipts {
+  /** Stop this instance's consumers/watchers (also prevents late transport). */
+  stop: () => void;
+  /** Delivery diagnostics include resolved tasks awaiting consumption. */
+  inbox: (from?: string) => Array<ReceiptMail & { from: string; to: string; turn: string }>;
   /** Is an unresolved watcher already observing this exact tracked dispatch leg? */
   watching: (tell: Tell) => boolean;
   /** 登记这一次发话。`watch=false` 只记时刻 (供 wait_peer 定位「这一次」), 不守回执
@@ -257,7 +290,7 @@ export interface Receipts {
    *  写错了都当新活 (`reUnknown`), 不拒绝。 */
   prepare: (from: string, to: string, re?: string) => Turn;
   /** wait_peer 取走了这一次的回复。返回「是否已经 paste 过」。 */
-  claim: (from: string, to: string) => boolean;
+  claim: (from: string, to: string) => boolean | "uncertain";
   /** 这一次发话的时刻 (0 = 没登记过) —— wait_peer 的 sinceMs。 */
   sentAt: (from: string, to: string) => number;
   /** 还没有定论的那些 (名字), 供诊断与退化后的 wait_peer 回话。 */
@@ -300,22 +333,27 @@ export interface Receipts {
 export interface InFlight { from: string; to: string; turn: string; job: string; state: TurnState; ageMs: number; k?: ParentK }
 
 export const createReceipts = (deps: ReceiptDeps): Receipts => {
+  let stopped = false;
+  let writeFailed = false;
   const keyOfPair = (from: string, to: string): string => `${from}\u0000${to}`;
   const keyOfTurn = (from: string, to: string, turn: string): string => `${keyOfPair(from, to)}\u0000${turn}`;
   const keyOf = (s: Slot): string => (s.parked ? keyOfTurn(s.from, s.to, s.turn ?? "") : keyOfPair(s.from, s.to));
-  const live = (s: Slot): boolean => Date.now() - s.at < KEEP_MS;
+  const live = (s: Slot): boolean => Date.now() - s.at < KEEP_MS || !!s.inbox?.some((m) => ["queued", "delivering", "uncertain"].includes(m.state));
   // 过了保留期的行开机时从盘上抹掉: 同一对的位置会被下一句覆盖, 按件号停放的不会。
   Object.entries(deps.store?.all() ?? {}).filter(([, s]) => !live(s)).forEach(([key]) => deps.store?.drop(key));
   const slots = new Map<string, Slot>(
-    Object.values(deps.store?.all() ?? {}).filter(live).map((s) => [keyOf(s), s]),
+    Object.values(deps.store?.all() ?? {}).filter(live).map((s) => { const row = structuredClone(s); return [keyOf(row), row]; }),
   );
   const holds = new Map<string, Hold>(Object.values(deps.holdStore?.all() ?? {}).map((h) => [keyOfTurn(h.from, h.to, h.turn), h]));
   /** 写穿到磁盘。被同一对的新一句顶掉的旧 slot 不写 —— 它的 key 已经归新的了。 */
-  const save = (s: Slot): void => {
-    if (!stale(s)) deps.store?.set(keyOf(s), s);
+  const persist = (rows: Record<string, Slot>): void => {
+    if (writeFailed) throw new Error("receipt persistence failed; consumers paused for reconciliation");
+    try { deps.store?.merge(structuredClone(rows)); }
+    catch (e) { writeFailed = true; throw e; }
   };
+  const save = (s: Slot): void => { if (!stale(s)) persist({ [keyOf(s)]: s }); };
   const settle = (s: Slot): void => { s.settled = true; save(s); };
-  const stale = (s: Slot): boolean => slots.get(keyOf(s))?.gen !== s.gen;
+  const stale = (s: Slot): boolean => stopped || slots.get(keyOf(s)) !== s;
   /** `to` 答 `k` 那件活的那一份 —— 在 `from→to` 的位置上, 或已按件号停放。 */
   const upstream = (k: { from: string; turn: string }, to: string): Slot | undefined =>
     [slots.get(keyOfPair(k.from, to)), slots.get(keyOfTurn(k.from, to, k.turn))].find((p) => p?.turn === k.turn);
@@ -367,15 +405,6 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   const release = (s: Slot): void => {
     const p = routeOf(s, true).parent;
     if (p) wake(p);
-  };
-
-  // 同一个 pane 的回执串行投递。两份回执同时等到发话方 idle 时, 两次 paste 会挤进
-  // 同一个输入框被当成一轮读掉 —— 正是异步化最容易带进来的那个故障。
-  const chains = new Map<string, Promise<unknown>>();
-  const serial = <T>(k: string, job: () => Promise<T>): Promise<T> => {
-    const next = (chains.get(k) ?? Promise.resolve()).then(job, job);
-    chains.set(k, next.catch(() => undefined));
-    return next;
   };
 
   // 一份 slot 同时只有一个 watcher: reload 续守与 relay 叫醒可能撞在一起, 两个 watcher
@@ -490,6 +519,140 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     return `（守护进程: ${deps.nameOf(s.to)} 没有给出结论 —— ${why[status] ?? status}。）${last ? `\n它最后说的: ${clipMiddle(last, 600)}` : ""}`;
   };
 
+  // Inbox consumers are independent of outcome watchers. One consumer per asker
+  // waits for that pane; every other asker can consume while it is busy/offline.
+  let mailOrder = Math.max(0, ...[...slots.values()].flatMap((s) => (s.inbox ?? []).map((m) => m.order)));
+  const consumers = new Set<string>();
+  const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const mails = (from?: string) => [...slots.values()].filter((s) => !from || s.from === from)
+    .flatMap((s) => (s.inbox ?? []).map((mail) => ({ s, mail })));
+  const queued = (from: string) => mails(from).filter(({ mail }) => mail.state === "queued")
+    .sort((a, b) => a.mail.order - b.mail.order);
+  const activeMail = (s: Slot, m: ReceiptMail): boolean => !writeFailed && !stale(s)
+    && !!s.inbox?.includes(m) && ["queued", "delivering"].includes(m.state);
+  const retry = (s: Slot, m: ReceiptMail, reason: string): void => {
+    m.state = "queued";
+    m.reason = reason;
+    m.retryAt = Date.now() + Math.min(30_000, (deps.retryMs ?? 1000) * 2 ** Math.min(m.attempts, 5));
+    s.undelivered = true;
+    save(s);
+  };
+  const account = (s: Slot, m: ReceiptMail): void => {
+    if (m.accounted) return;
+    deps.onOutcome?.(s, m.outcome.status, m.outcome.body, false);
+    if (isTerminal(m.outcome.status) && s.job) deps.settleJob?.(s.job, s.to, m.outcome.status, parseClosing(m.outcome.body).artifacts);
+    m.accounted = true;
+    save(s);
+    if (isTerminal(m.outcome.status)) nudgeHolds();
+  };
+  // The ACK is durable before waking a parent. Replay only the local relay after
+  // a crash between these writes, never the external paste.
+  const finishMail = (s: Slot, m: ReceiptMail): void => {
+    if (m.state !== "delivered" || m.relayed) return;
+    const k = m.meta?.replyTo;
+    const p = k?.kind === "peer" ? upstream(k, s.from) : undefined;
+    if (p && !p.resolved && !p.claimed && m.sentAt !== undefined && (p.deferred || p.at < m.sentAt)) relay(p, m.sentAt);
+    m.relayed = true;
+    save(s);
+  };
+  const consume = async (from: string): Promise<void> => {
+    while (!stopped && !writeFailed) {
+      const next = queued(from)[0];
+      if (!next) return;
+      const { s, mail: m } = next;
+      if ((m.retryAt ?? 0) > Date.now()) return;
+      if (!activeMail(s, m)) { m.state = "superseded"; save(s); continue; }
+      account(s, m);
+      await deps.handedOff?.(from);
+      if (!activeMail(s, m)) continue;
+      if (!(await deps.paneLive(from))) { retry(s, m, "asker unavailable; retained in inbox"); return; }
+      if (!activeMail(s, m)) continue;
+      if (!(await deps.idleNow(from))) {
+        await deps.untilIdle(from, IDLE_STEP_MS, { aborted: () => !activeMail(s, m) });
+        continue;
+      }
+      if (!activeMail(s, m) || deps.handingOff?.(from)) continue;
+      const final = isTerminal(m.outcome.status);
+      const current = (m.generation ?? s.gen) === s.gen;
+      const { parent: _parent, ...route } = routeOf(s, final && current);
+      const peers = s.job ? ofJob(from, s.job) : [s];
+      const tally = s.job ? deps.jobTally?.(s.job) : undefined;
+      m.meta = {
+        eventId: m.id, from: s.to, job: s.job, status: m.outcome.status, turn: s.turn ?? "",
+        done: Math.max(peers.filter((x) => x.resolved).length, tally?.done ?? 0),
+        total: Math.max(peers.length, tally?.total ?? 0),
+        ...(s.asker ? { asker: s.asker } : {}), ...route,
+      };
+      m.state = "delivering";
+      m.attempts++;
+      m.sentAt = Date.now();
+      // Persist the ambiguous boundary before transport. A restarted delivering
+      // event is uncertain even if its ACK never made it to disk.
+      save(s);
+      let result: ReceiptDelivery;
+      try { result = await deps.deliver(from, m.outcome.body, m.meta, () => activeMail(s, m)); }
+      catch (e) { result = { ok: false, uncertain: true, reason: (e as Error).message }; }
+      if (stale(s)) continue;
+      if (!result.uncertain && result.ok) {
+        m.state = "delivered";
+        if (current) {
+          s.delivered = true;
+          delete s.undelivered;
+          if (final) { s.claimed = true; s.settled = true; }
+        }
+        save(s);
+        finishMail(s, m);
+      } else if (!result.uncertain && result.retryable === true) {
+        if (!activeMail(s, m)) { m.state = "superseded"; save(s); continue; }
+        retry(s, m, result.reason ?? "transport confirmed no input sent");
+        return;
+      } else {
+        m.state = "uncertain";
+        m.reason = result.reason ?? "delivery acknowledgement unknown; reconciliation required";
+        s.undelivered = true;
+        save(s);
+        // No settle/release: an uncertain last sibling cannot acquire answer
+        // ownership for an unrelated later receipt, nor be sent twice on restart.
+      }
+      deps.log.info({ from, turn: s.turn, eventId: m.id, state: m.state, attempts: m.attempts }, "receipt inbox: delivery");
+    }
+  };
+  const pump = (from: string, retryReady = false): void => {
+    if (stopped || writeFailed || consumers.has(from)) return;
+    const old = retryTimers.get(from);
+    if (old) { clearTimeout(old); retryTimers.delete(from); }
+    const head = queued(from)[0];
+    if (!head) return;
+    const delay = (head.mail.retryAt ?? 0) - Date.now();
+    if (delay > 0 || (head.mail.retryAt !== undefined && !retryReady)) {
+      // Even expired backoff yields to the event loop (slow fsync can consume it).
+      const timer = setTimeout(() => { retryTimers.delete(from); pump(from, true); }, Math.max(0, delay));
+      timer.unref?.();
+      retryTimers.set(from, timer);
+      return;
+    }
+    consumers.add(from);
+    void consume(from).catch((e: unknown) => {
+      deps.log.warn({ from, err: (e as Error).message }, "receipt inbox: consumer failed");
+      const head = queued(from)[0];
+      if (head && !writeFailed && !stopped) retry(head.s, head.mail, (e as Error).message);
+    }).finally(() => { consumers.delete(from); pump(from); });
+  };
+  const enqueueOutcome = (s: Slot, out: Outcome): void => {
+    // A newer result makes a not-yet-consumed NEED/error obsolete. Anything
+    // already exposed retains its delivery evidence in the event history.
+    (s.inbox ?? []).filter((m) => m.state === "queued" && !isTerminal(m.outcome.status))
+      .forEach((m) => { m.state = "superseded"; });
+    const m: ReceiptMail = { id: `r${randomBytes(12).toString("hex")}`, order: ++mailOrder,
+      queuedAt: Date.now(), generation: s.gen, outcome: out, state: "queued", attempts: 0 };
+    s.outcome = out;
+    s.resolved = isTerminal(out.status);
+    s.delivered = false;
+    s.inbox = [...(s.inbox ?? []), m];
+    save(s); // outcome + queued event in one durable write, before any asker IO
+    try { account(s, m); } finally { pump(s.from); }
+  };
+
   const watch = async (s: Slot): Promise<void> => {
     const lg = deps.log.child({ mod: "receipt", from: deps.nameOf(s.from), to: deps.nameOf(s.to), ...(s.job ? { job: s.job } : {}) });
     const anchor = s.at;
@@ -527,14 +690,14 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       if (!ok) { const n = upstream({ from: s.from, turn: s.turn! }, s.to); if (n?.bounced) { n.answer = out.body; save(n); } }
       return;
     }
-    const final = isTerminal(out.status);
-    s.outcome = out;
-    s.resolved = final;
-    save(s);
-    deps.onOutcome?.(s, out.status, out.body, false);
-    if (final && s.job) deps.settleJob?.(s.job, s.to, out.status as Terminal, parseClosing(out.body).artifacts);
-    if (final) nudgeHolds();
     if (s.answerTransfer) {
+      // Human answer transfers have their own durable delivery protocol.
+      s.outcome = out;
+      s.resolved = isTerminal(out.status);
+      save(s);
+      deps.onOutcome?.(s, out.status, out.body, false);
+      if (s.resolved && s.job) deps.settleJob?.(s.job, s.to, out.status as Terminal, parseClosing(out.body).artifacts);
+      if (s.resolved) nudgeHolds();
       s.claimed = true;
       save(s);
       s.delivered = await deps.deliverAnswer?.(s.answerTransfer, out) ?? false;
@@ -542,65 +705,9 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       settle(s);
       return;
     }
-    // 发话方自己在交接: 重开的那几秒里 pane 是死的, 别把这当成"已经不在了"。
-    await deps.handedOff?.(s.from);
-    if (!(await deps.paneLive(s.from))) {
-      lg.info({ status: out.status }, "receipt: 发话方已经不在了, 丢弃");
-      settle(s);
-      if (final) release(s);
-      return;
-    }
-    if (final) s.claimed = true; // 占位先于投递: 这中间来的 wait_peer 不该把同一段再取一遍
-    const peers = s.job ? ofJob(s.from, s.job) : [s];
-    const tally = s.job ? deps.jobTally?.(s.job) : undefined;
-    const meta: ReceiptMeta = {
-      from: s.to,
-      channel: s.channel,
-      job: s.job,
-      done: Math.max(peers.filter((x) => x.resolved).length, tally?.done ?? 0),
-      total: Math.max(peers.length, tally?.total ?? 0),
-      status: out.status,
-      turn: s.turn ?? "",
-      ...(s.asker ? { asker: s.asker } : {}),
-    };
-    const sent = await serial(s.from, async () => {
-      // 发话方正在生成 → 等它这一轮说完, 一结束就投。它的 pane 还活着就一直等 (上限是
-      // 登记的保留期): 回执到了却因为它在跑长活而扔掉, 它就只能永远等。
-      // 等的过程中它开始交接 → 等交接完再来一圈: 投进旧会话会被交接一并带走 (简报
-      // 已经写完了, 不含这一段), 投进还没贴回简报的新会话会抢在简报前面。
-      // 每圈都查 stale: 等发话方闲下来可能要很久, 同一对的新一句正是在这期间来的。
-      for (;;) {
-        await deps.handedOff?.(s.from);
-        // settled 只可能是 wait_peer 在这期间取走了 (watcher 自己投完才 settle)。
-        // 排队期间被 cancel 落了终态: 手上这份 (need / error) 已经过时, 改投 canceled。
-        if (stale(s) || s.settled || (canceled(s) && out !== s.outcome)) return false;
-        if (Date.now() >= s.at + KEEP_MS || !(await deps.paneLive(s.from))) {
-          lg.warn({ status: out.status }, "receipt: 发话方一直没空或已不在, 放弃回注");
-          return false;
-        }
-        if (!(await deps.idleNow(s.from))) {
-          await deps.untilIdle(s.from, Math.min(IDLE_STEP_MS, s.at + KEEP_MS - Date.now()), { aborted: () => stale(s) });
-          continue;
-        }
-        if (!deps.handingOff?.(s.from)) break;
-      }
-      // 上面最后一圈的 await 期间可能被 wait_peer 取走; 从这里到 deliver 之间不能有 await。
-      if (stale(s) || s.settled) return false;
-      const { parent, ...route } = routeOf(s, final);
-      const at = Date.now();
-      // 先记成已投: 投递途中被 wait_peer 取走的, 要告诉它「这段已经在你会话里了」。
-      s.delivered = true;
-      const r = await deps.deliver(s.from, out.body, { ...meta, ...route });
-      if (!r.ok) { s.delivered = false; s.undelivered = true; }
-      if (r.ok && parent) relay(parent, at);
-      lg.info({ ok: r.ok, reason: r.reason, status: out.status, len: out.body.length, done: meta.done, total: meta.total, ...(route.replyTo ? { replyTo: kAttr(route.replyTo) } : {}), ...(route.pending ? { pending: route.pending } : {}) }, "receipt: 回注");
-      return true;
-    });
-    if (stale(s)) { lg.info("receipt: 被同一对的新一句顶掉, 不回注"); return; }
-    // error / need 只是中途报了一声: 接着守续跑 (或答复之后) 出来的答案。
-    if (!final && (sent || canceled(s))) return watch(s);
-    settle(s);
-    if (!s.delivered) release(s);
+    enqueueOutcome(s, out);
+    // Watching the worker continues even if the asker cannot consume NEED/error.
+    if (!isTerminal(out.status)) return watch(s);
   };
 
   const register = (tell: Tell, watchIt = true, interim?: Outcome): { at: number; turn: string } => {
@@ -609,10 +716,9 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     // 续问一件停放着的: 接替它在停放处的位置, 不碰这一对眼下那一件。
     const parked = slots.get(keyOfTurn(tell.from, tell.to, turn));
     const prev = parked ?? slots.get(keyOfPair(tell.from, tell.to));
-    // 挂起等子活的那份被另一件顶下来: 按件号停放, 不作废 (见 Slot.parked)。还没标上挂起、
-    // 但它已经为这件派了活的也算 —— watcher 可能还没读到那句「已派」。
-    const park = !parked && !!prev && !prev.settled && prev.turn !== turn && (!!prev.deferred || children(prev).length > 0);
-    if (park) { prev.parked = true; slots.set(keyOf(prev), prev); save(prev); }
+    // The pair remains a compatibility index for wait_peer/pending. Every older
+    // turn, including completed but unconsumed results, keeps its own slot.
+    const park = !parked && !!prev && prev.turn !== turn;
     // 顶掉一份还没落定的工单活、自己又没带工单: 继承那张工单 —— 旧那份不会再投了,
     // 这一句的答案就是那个成员的交代; 不继承它就永远不计 done, 工单齐不了。停放的那份还会投, 不让。
     const job = tell.job || (!park && prev?.job && !prev.resolved ? prev.job : "");
@@ -629,11 +735,20 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       delivered: false,
       resolved: false,
       ...(parked ? { parked: true as const } : {}),
+      ...(!park && prev?.inbox ? { inbox: prev.inbox.map((m) => ({ ...m,
+        generation: m.generation ?? prev.gen,
+        state: m.state === "queued" && !isTerminal(m.outcome.status) ? "superseded" as const : m.state === "delivering" ? "uncertain" as const : m.state,
+      })) } : {}),
     };
+    // Commit both keys atomically; a crash cannot leave two live aliases for
+    // the same turn or erase an old event between parking and registering.
+    const oldKey = prev && keyOfTurn(prev.from, prev.to, prev.turn ?? "");
+    persist({ ...(park && prev && oldKey ? { [oldKey]: { ...prev, parked: true } } : {}), [keyOf(s)]: s });
+    if (park && prev && oldKey) { prev.parked = true; slots.set(oldKey, prev); }
     slots.set(keyOf(s), s);
     if (watchIt) arm(s);
-    else { s.claimed = true; s.resolved = true; s.settled = true; } // 不守 = 这一份没人会投
-    save(s);
+    else { s.claimed = true; s.resolved = true; settle(s); } // 不守 = 这一份没人会投
+    pump(s.from);
     return { at: s.at, turn: s.turn! };
   };
 
@@ -693,7 +808,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   const releasing = new Set<string>();
   /** 逐件看停放着的: 有失败的 → 不投; 都 done 了且这一对没被占着 → 放行; 超过保留期 → 不投。 */
   const tickHolds = async (): Promise<void> => {
-    if (holdWriteFailed) return;
+    if (stopped || writeFailed || holdWriteFailed) return;
     for (const h of [...holds.values()]) {
       if (releasing.has(holdKey(h)) || !holds.has(holdKey(h))) continue;
       const ps = h.after.map((t) => [t, prereqOf(h.from, t, h.seen)] as const);
@@ -717,7 +832,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       releasing.add(holdKey(h));
       void (async () => {
         try {
-          const r = (await deps.release?.(h, h.seen, () => !holdWriteFailed && holds.get(holdKey(h)) === h)) ?? { ok: false, reason: "没有放行通路" };
+          const r = (await deps.release?.(h, h.seen, () => !stopped && !writeFailed && !holdWriteFailed && holds.get(holdKey(h)) === h)) ?? { ok: false, reason: "没有放行通路" };
           if (holds.get(holdKey(h)) !== h) return;
           if (r.ok) dropHold(h);
           else cancelHold(h, `前置都 done 了, 但这件 (${h.turn}) 投不出去: ${r.reason ?? "未知原因"}, 没投。`);
@@ -742,6 +857,13 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   const nudgeHolds = (): void => { if (holds.size) void tickHolds().catch(() => undefined); };
 
   return {
+    stop: () => {
+      stopped = true;
+      retryTimers.forEach(clearTimeout);
+      retryTimers.clear();
+      if (holdTimer) clearInterval(holdTimer);
+    },
+    inbox: (from) => mails(from).sort((a, b) => a.mail.order - b.mail.order).map(({ s, mail }) => structuredClone({ ...mail, from: s.from, to: s.to, turn: s.turn ?? "" })),
     register,
     watching: (tell) => {
       const s = upstream({ from: tell.from, turn: tell.turn ?? "" }, tell.to);
@@ -767,7 +889,11 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       const s = slots.get(keyOfPair(from, to));
       if (!s) return false;
       if (s.answerTransfer) return s.delivered;
+      // Transport may already have exposed this event. Do not let a concurrent
+      // wait_peer take a second copy, or turn an unknown ACK into a success.
+      if (s.inbox?.some((m) => (m.generation ?? s.gen) === s.gen && ["delivering", "uncertain"].includes(m.state))) return "uncertain";
       const fresh = !s.settled;
+      s.inbox?.filter((m) => m.state === "queued" && (m.generation ?? s.gen) === s.gen).forEach((m) => { m.state = "claimed"; });
       s.claimed = true;
       s.resolved = true;
       settle(s);
@@ -853,6 +979,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       return hit.length;
     },
     parentOf: (self, env, channel, opening) => {
+      if (env?.quiet) return undefined;
       if (env?.receipt) return env.k ? kOfAttr(env.k) : undefined;
       if (env?.kind === "peer" && env.private) {
         const p = [...slots.values()].find((x) => x.to === self && !x.resolved && !x.claimed && (env.turn ? x.turn === env.turn : deps.nameOf(x.from) === env.from));
@@ -882,8 +1009,35 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     resume: () => {
       // 挂起且子活还没落定的不守: 叫醒它是 relay / release 的事, 这里再 arm 一个就是两个 watcher。
       const open = [...slots.values()].filter((s) => !s.settled && !(s.deferred && children(s).length));
-      // 投到一半被 reload 打断的那份: claimed 是上一个进程的占位, 这里重新来过。
-      open.forEach((s) => { s.claimed = false; arm(s); });
+      // Restore durable inboxes before observing new worker results. The
+      // delivering boundary is ambiguous after a crash, never an automatic retry.
+      for (const s of slots.values()) {
+        for (const m of s.inbox ?? []) {
+          if (m.state === "delivering") {
+            m.state = "uncertain";
+            m.reason = "daemon restarted during delivery; reconciliation required";
+            s.undelivered = true;
+            save(s);
+          }
+          if (!m.accounted && !["superseded", "claimed"].includes(m.state)) account(s, m);
+          finishMail(s, m);
+        }
+        pump(s.from);
+      }
+      open.forEach((s) => {
+        if (s.resolved && s.inbox?.some((m) => (m.generation ?? s.gen) === s.gen)) return;
+        if (!s.answerTransfer && s.outcome && isTerminal(s.outcome.status) && (s.claimed || s.delivered)) {
+          // Old-format transport had no intent journal. Preserve it explicitly
+          // rather than replaying a possibly delivered legacy result.
+          s.inbox = [{ id: `r${randomBytes(12).toString("hex")}`, order: ++mailOrder, queuedAt: Date.now(),
+            outcome: s.outcome, state: "uncertain", attempts: 1, reason: "legacy delivery boundary unknown" }];
+          s.undelivered = true;
+          save(s);
+          return;
+        }
+        s.claimed = false;
+        arm(s);
+      });
       if (open.length) deps.log.info({ mod: "receipt", resumed: open.map((s) => `${deps.nameOf(s.from)}←${deps.nameOf(s.to)}`) }, "receipt: reload 后续守");
       startHolds();
       return open.length;
