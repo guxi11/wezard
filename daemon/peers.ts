@@ -93,6 +93,22 @@ const readTailUntil = <T>(
   return walk(Math.min(TAIL_BYTES, ceiling));
 };
 
+/** Native Codex lifecycle survives tool waits and dimmed/hidden spinner footers. */
+export const codexTurnBusy = (jsonlPath: string, since = 0): boolean | undefined =>
+  readTailUntil(jsonlPath, (raw) => raw.split("\n").reverse().reduce<boolean | undefined>((busy, line) => {
+    if (busy !== undefined || !line.includes('"event_msg"')) return busy;
+    try {
+      const r = JSON.parse(line);
+      if (r.type !== "event_msg") return undefined;
+      // A resumed CLI cannot still be running a turn from its previous process.
+      if (Date.parse(r.timestamp) < since) return undefined;
+      const type = r.payload?.type;
+      return type === "task_started" ? true
+        : ["task_complete", "task_completed", "turn_complete", "turn_aborted"].includes(type) ? false
+        : undefined;
+    } catch { return undefined; }
+  }, undefined), (busy) => busy !== undefined, Infinity);
+
 
 export interface Turn {
   role: "user" | "assistant";

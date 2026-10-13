@@ -63,7 +63,7 @@ import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagH
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { isWxFrame } from "../shared/wx-text.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
-import { stripAnsi, paneIsBusy, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, lastModel, cacheTouchMs, cacheTtlSec, keepaliveStamps, openKeepalivePing, lastUserTurn, talkRounds, openToolUses, renderDialog, type PeerInfo, type PeerReply } from "./peers.js";
+import { stripAnsi, paneIsBusy, codexTurnBusy, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, lastModel, cacheTouchMs, cacheTtlSec, keepaliveStamps, openKeepalivePing, lastUserTurn, talkRounds, openToolUses, renderDialog, type PeerInfo, type PeerReply } from "./peers.js";
 import { keepalivePingSigs, isKeepalivePingText } from "../shared/keepalive.js";
 
 // PATH augmentation: launchd / systemd start the daemon
@@ -6186,13 +6186,16 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const jsonlOf = (target: string): string =>
     expandHome(byTarget.get(target)?.jsonlPath || deps.store.get(target)?.jsonlPath || "");
 
-  // Busy ≡ the pane is showing an interrupt hint. A dead or unbound pane is
+  // Busy comes from the native lifecycle or an interrupt hint. A dead/unbound pane is
   // reported idle, not busy: "nothing is running there" is the truthful answer
   // and it keeps a graph step from blocking forever on a session that vanished.
   const paneBusy = async (pane: string): Promise<boolean> =>
     !!pane && (await tmuxPaneAlive(pane)) && paneIsBusy(await capturePaneTail(pane, 12));
 
-  const isBusy = (target: string): Promise<boolean> => paneBusy(paneOf(target));
+  const isBusy = async (target: string): Promise<boolean> => {
+    const pane = paneOf(target);
+    return !!pane && (await tmuxPaneAlive(pane)) && (idleVerdict(target) === false || await paneBusy(pane));
+  };
 
   // 「它这一轮结束了、可以投了」。注册表认得这个 pane 时以它为准: status 在整轮里
   // (工具调用之间、PreToolUse 审批 hook 挂着时) 一直是 busy, 只在轮结束那一刻翻成
@@ -6200,7 +6203,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 调用 = 停在本地审批框上等人点, 不算闲。注册表不认得 (codebuddy / 旧版 CC /
   // 会话已退出) 返回 undefined, 交给 pane 裁决。
   const idleVerdict = (target: string): boolean | undefined => {
+    const path = jsonlOf(target);
     const pane = paneOf(target);
+    if (path && backendForPath(path).name === "codex") {
+      const session = codexSessionForPane(pane);
+      const busy = codexTurnBusy(path, session?.jsonlPath === path ? session.startedAt : 0);
+      if (busy !== undefined) return !busy;
+    }
     const live = pane ? activeBackends().map((b) => sessionOnPane(b.homeDir, pane)).find(Boolean) : undefined;
     if (!live) return undefined;
     if (live.status === "busy") return false;
@@ -6220,6 +6229,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return live?.status === "idle" && hanging(target, live.sessionId);
   };
   const idleNow = async (target: string): Promise<boolean> => {
+    // An interrupt footer vetoes stale idle records; never strip its dim text.
+    if (await isBusy(target)) return false;
     const registry = idleVerdict(target);
     if (registry !== undefined) return registry;
     const pane = paneOf(target);
@@ -6236,7 +6247,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     timeoutMs: number,
     { aborted = () => false, confirm = 2 }: { aborted?: () => boolean; confirm?: number } = {},
   ): Promise<IdleResult> => {
-    if (idleVerdict(target) === undefined) return waitForIdle(target, isBusy, timeoutMs, aborted, { rampMs: 0, confirm });
+    // A vanished pane ends a wait, but must not become eligible for injection.
+    const waiting = async (t: string): Promise<boolean> =>
+      !!paneOf(t) && (await tmuxPaneAlive(paneOf(t))) && !(await idleNow(t));
+    if (idleVerdict(target) === undefined) return waitForIdle(target, waiting, timeoutMs, aborted, { rampMs: 0, confirm });
     return new Promise((resolve) => {
       let done = false;
       const finish = (r: IdleResult): void => {
@@ -6251,8 +6265,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const check = async (): Promise<void> => {
         if (done) return;
         if (aborted()) { finish({ idle: false, reason: "stopped" }); return; }
-        const v = idleVerdict(target);
-        if (v ?? !(await isBusy(target))) finish({ idle: true });
+        if (!(await waiting(target))) finish({ idle: true });
       };
       const unwatch = activeBackends().map((b) => watchRegistry(b.homeDir, () => void check()));
       const tick = setInterval(() => void check(), IDLE_SAFETY_POLL_MS);
@@ -6331,7 +6344,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       tmuxPane: pane,
       attached: !!a,
       paneAlive,
-      busy: paneAlive ? paneIsBusy(await capturePaneTail(pane, 12)) : false,
+      busy: paneAlive ? await isBusy(t) : false,
       lastActivity,
       summary: jsonlPath ? summarizeTail(jsonlPath, 3, 80, pingSigs) : "(未绑定会话)",
       self: t === self,
