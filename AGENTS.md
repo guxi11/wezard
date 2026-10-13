@@ -75,10 +75,11 @@ requests retain the requested scope described above.
 
 ## Editing conventions
 
-- Once the user authorizes a release, complete npm publishing and the Git push/tag
-  without asking for another release confirmation or waiting for the user to
-  confirm npm publishing succeeded. Record the actual publish command result;
-  never claim success when the command fails or its result is unknown.
+- Once the user authorizes a release, complete the required Git push/tag before
+  `npm publish`, without asking for another release confirmation. When the publish
+  command returns, report its actual exit result and end the task immediately;
+  do not run `npm view`, poll the registry, or otherwise check publication status.
+  Never claim success when the command fails or its result is unknown.
 
 - Preserve existing uncommitted work and keep edits scoped to the task.
 - Edit source files; regenerate `dist/` through the build when needed.
