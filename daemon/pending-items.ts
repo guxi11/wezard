@@ -21,6 +21,7 @@ import { renderReminder, type ReceiptStatus } from "../shared/reminder.js";
 import type { TurnState } from "../shared/turn-state.js";
 import { clipLine } from "../shared/std.js";
 import type { ParentK } from "./receipts.js";
+import type { Frame, ReturnMode } from "./receiver-stack.js";
 
 export interface Item {
   turn: string;
@@ -32,6 +33,9 @@ export interface Item {
   topic: string;
   /** 为谁派的: 群里哪句人话 / 上游哪件 (回执的父 k)。 */
   for?: ParentK;
+  /** 派活那一刻冻结的整条 receiver stack (`for` = `stack[0]`)。 */
+  stack?: Frame[];
+  mode?: ReturnMode;
   asker?: Asker;
   job?: string;
   at: number;
@@ -72,9 +76,9 @@ const isFailure = (st?: ReceiptStatus): boolean => st === "timeout" || st === "s
 
 export interface Ledger {
   /** Idempotent tracked projection; recovery never reopens a settled leg. */
-  dispatch: (key: string, x: { turn: string; owner: string; to: string; text: string; for?: ParentK; asker?: Asker; job?: string; at: number }) => void;
+  dispatch: (key: string, x: { turn: string; owner: string; to: string; text: string; for?: ParentK; stack?: Frame[]; mode?: ReturnMode; asker?: Asker; job?: string; at: number }) => void;
   /** 一次新派活。同一对之前还开着的那件被顶掉 (回执登记也是一对一份, 旧那份不会再回来)。 */
-  open: (x: { turn: string; owner: string; to: string; text: string; for?: ParentK; asker?: Asker; job?: string; at: number }) => void;
+  open: (x: { turn: string; owner: string; to: string; text: string; for?: ParentK; stack?: Frame[]; mode?: ReturnMode; asker?: Asker; job?: string; at: number }) => void;
   /** 续问 (`re`) —— 同一件接着说: 清掉「等人」, 回到在飞; 已关掉的重新打开。 */
   touch: (owner: string, turn: string) => void;
   /** 回执落了一份。`bySender` = 发话方自己收掉 / 取走的, 它自己知道, 直接关。 */

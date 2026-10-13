@@ -23,6 +23,7 @@ import { clipMiddle, parseClosing, type PeerReply } from "./peers.js";
 import { isTerminal, turnState, type Terminal, type TurnState } from "../shared/turn-state.js";
 import type { Envelope, ReceiptStatus } from "../shared/reminder.js";
 import { sleep } from "../shared/std.js";
+import { framing, type Frame, type ReturnMode, type Owed } from "./receiver-stack.js";
 
 /** 对方最长允许干多久 (超过就投一份 timeout 回执, 不占着内存等到天亮)。默认值;
  *  tell_peer 的 `deadline` 可在 [MIN, MAX] 里改 —— 上限留在 KEEP_MS 之内, 超时那份
@@ -85,6 +86,8 @@ export interface ReceiptMeta {
   pending?: number;
   /** 这条链的链头 (见 Asker) —— 记进回执那一轮, rolepage 据此知道终句答给谁。 */
   asker?: Asker;
+  /** 这份结论是谁替 `from` 答的 (peer 帧被 transfer 出去后, 叶子的结论直接落到上游这一份)。 */
+  via?: string;
 }
 
 /** 发出这次 tell_peer 的那一轮, 结论本该交给谁 (docs/evolve/b2-reply-routing.md §3.1):
@@ -202,6 +205,9 @@ export interface Hold {
   channel: string;
   job: string;
   k?: ParentK;
+  /** 停放那一刻冻结的去向 (取代 k), 放行原样带回。 */
+  stack?: Frame[];
+  mode?: ReturnMode;
   asker?: Asker;
   /** 已落定前置的快照: 回执槽会被同一对的新一句顶掉, 结论不能跟着丢。 */
   seen: Record<string, HeldSeen>;
@@ -230,8 +236,15 @@ export interface Tell {
   legs?: number;
   /** 到这一刻还没答完就投 timeout (见 deadlineOf)。 */
   deadlineAt?: number;
-  /** 发话方那一轮的父 k (见 parentOf) —— 这份回执回来那一轮的终句据此续回。 */
+  /** 发话方那一轮的父 k (见 parentOf) —— 这份回执回来那一轮的终句据此续回。`stack[0]` 的冗余, 旧读者照读。 */
   k?: ParentK;
+  /** 派活那一刻冻结的整条 receiver stack (docs/evolve/receiver-stack.md §3.1): 祖先不再沿槽现拼,
+   *  槽被顶掉 / 过期也不截断。老盘没有 → `[k]` + 现拼兜底 (stackOfSlot)。 */
+  stack?: Frame[];
+  /** transfer = 尾调用: 这件活的结论直接顶替发话方对 `stack[0]` 的交代, 不回发话方 (§3.3 R3)。 */
+  mode?: ReturnMode;
+  /** 只在 transfer 头一次登记时带: 发话方交出的那一帧 (槽 `adopts.from → from` 的件 `adopts.turn`)。 */
+  adopts?: { from: string; turn: string };
   /** 守护进程因为不合工单验收打回过一次, 这是被打回的那段原文 —— 再交上来的照收, 不再打回;
    *  打回那一句还没落盘时按件号会先定位到原来的问话, 取到的这段原文不算答案。 */
   bounced?: string;
@@ -240,7 +253,7 @@ export interface Tell {
 }
 
 /** 这一句该挂的件号: 新活领一个新的; `re` 续问沿用那件活的件号、工单与频道。 */
-export interface Turn { turn: string; legs: number; job?: string; channel?: string; asker?: Asker; k?: ParentK; reUnknown?: true }
+export interface Turn { turn: string; legs: number; job?: string; channel?: string; asker?: Asker; k?: ParentK; stack?: Frame[]; mode?: ReturnMode; reUnknown?: true }
 
 export interface Slot extends Tell {
   /** Durable asker inbox; observing the worker never waits for consumption. */
@@ -275,6 +288,9 @@ export interface Slot extends Tell {
   /** 挂起时同一对又派了另一件, 这一份让出 `from→to` 的位置, 按件号另存 (见 register) ——
    *  子活回来时它的终句仍要回到这一件, 不能因为「这一对最后一件」换了就作废。 */
   parked?: true;
+  /** 这一份 (owner 欠 from 的一帧) 已被 owner transfer 出去: 结论由叶子 `delegate` 的那件活直接落进来。
+   *  守它的不再读 owner 的 transcript / pane; 连续 transfer 只前移这一指针, 中间层不经手。 */
+  delegate?: { from: string; to: string; turn: string };
 }
 
 /** 落盘的登记留多久。比对方最长允许干的时长宽, 好让续守的那一份仍数得进工单。 */
@@ -313,9 +329,22 @@ export interface Receipts {
    *  `channel` = 它这一轮的频道 ("" = 私聊轮, 没有 chat 父 k)。私聊来的而发话方没在等 (wait_peer 取走 / 不要回执)
    *  → undefined, 退回现状。 */
   parentOf: (self: string, env: Envelope | undefined, channel: string, opening: string) => ParentK | undefined;
-  /** `self` 此刻这一轮的 k 链: 它在答 `k.from`, `k.from` 又在答谁… 一路向上的 wizard (近的在前, 不含人)。
-   *  沿登记槽的父 k 往上走, 带环保护; 槽被顶掉 / 过期了链就在那里截断 (宁可少拦, 不错拦)。 */
-  ancestorsOf: (self: string, k: ParentK | undefined) => string[];
+  /** `self` 所服务那一帧的栈 (见 stackFor) 上一路向上在等它的 wizard (近的在前, 不含人) —— 方向闸的 chain。
+   *  读冻结的栈, 不因槽被顶掉 / 过期而截断; 只在某一帧确知已落定 (取走 / 答完) 时到此为止。
+   *  被 transfer 来的那一层不算: 交出去的那位已脱身, 不在接手方的链上, transfer 也不增深。 */
+  ancestorsOf: (self: string, stack: readonly Frame[]) => string[];
+  /** `[f, ...f 那笔欠账 (owner 欠的) 自己落盘的栈]`; chat 帧是根。 */
+  stackFor: (owner: string, f: Frame | undefined) => Frame[];
+  /** owner 把 f 交出去时子活的栈: f 本身就是 transfer 来的 → 它承接的那条 (一跳直达), 否则同 stackFor。 */
+  handover: (owner: string, f: Frame) => Frame[];
+  /** `self` 此刻欠着、还没交代的 peer 帧 (未落定未取走、没交出去的 X→self)。 */
+  owed: (self: string) => Owed[];
+  /** `self` 这一轮 (开头信封 `env`) 所服务的那一帧已被它 transfer 出去了。 */
+  yielded: (self: string, env: Envelope | undefined) => boolean;
+  /** owner 所服务的 peer 帧 f 的那一份 (见 Slot.delegate 判互斥、期限)。只读快照。 */
+  frameSlot: (owner: string, f: Frame) => Readonly<Slot> | undefined;
+  /** `from` 对 `to` 的件 `turn` 已被 transfer 出去: 此刻接手的叶子那一件 (续问按它转过去)。 */
+  leafOf: (from: string, to: string, turn: string) => Readonly<Slot> | undefined;
   /** `self` 此刻这一轮 (同伴派的活 / 回执) 的链头: 按件号找回登记时记下的那个。人开的轮不归这里。 */
   askerOf: (self: string, env: Envelope) => Asker | undefined;
   /** 还没落定的每一件活此刻的状态 (见 turn-state.ts) —— 名册 / peek / 工单清单读它。只读, 不落盘。 */
@@ -331,6 +360,8 @@ export interface Receipts {
    *  守着的 watcher 会把同一份报成 dead。`only` 收窄到其中几份 (interrupt 只停了它
    *  手上这一轮, 排着的别人的活照旧会被答)。返回落成 canceled 的件数。 */
   cancel: (target: string, by: string, only?: (x: { from: string; turn: string }) => boolean) => number;
+  /** cancel 会落的那几件, 按 `发话方\0件号` (交出去的那一份记它自己的件号, 不重复记叶子) —— 报数用。 */
+  cancelKeys: (target: string, by: string, only?: (x: { from: string; turn: string }) => boolean) => string[];
   /** `from` 派出的这些件号此刻各是什么 (含已落定的和自己也停放着的)。 */
   prereqs: (from: string, turns: readonly string[], seen?: Readonly<Record<string, HeldSeen>>) => Prereq[];
   /** 停放一件活: 前置都落定后由 `deps.release` 投出; 任一前置失败 → 不投, 落成 canceled 回给发话方。 */
@@ -339,7 +370,8 @@ export interface Receipts {
   cancelHeld: (job: string, by: string) => number;
 }
 
-export interface InFlight { from: string; to: string; turn: string; job: string; state: TurnState; ageMs: number; k?: ParentK }
+/** `delegated` = 这一份已被原接手方 transfer 出去, `to` 是此刻接手的叶子。 */
+export interface InFlight { from: string; to: string; turn: string; job: string; state: TurnState; ageMs: number; k?: ParentK; delegated?: true }
 
 export const createReceipts = (deps: ReceiptDeps): Receipts => {
   let stopped = false;
@@ -366,6 +398,23 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   /** `to` 答 `k` 那件活的那一份 —— 在 `from→to` 的位置上, 或已按件号停放。 */
   const upstream = (k: { from: string; turn: string }, to: string): Slot | undefined =>
     [slots.get(keyOfPair(k.from, to)), slots.get(keyOfTurn(k.from, to, k.turn))].find((p) => p?.turn === k.turn);
+  /** 一份槽的栈: 冻结的那份; 老盘只有 k → `[k]` + 沿槽现拼的祖先 (带环保护), 槽不在了就到那里为止。 */
+  const stackOfSlot = (s: Slot | undefined, seen: ReadonlySet<string> = new Set()): Frame[] =>
+    !s ? [] : s.stack ? [...s.stack] : s.k ? framesFrom(s.from, s.k, seen) : [];
+  /** `[f, ...owner 欠的 f 那一份自己的栈]`: 人 (chat 帧) 是根。 */
+  const framesFrom = (owner: string, f: Frame, seen: ReadonlySet<string>): Frame[] => {
+    if (f.kind === "chat") return [f];
+    const key = `${owner}\u0000${kAttr(f)}`;
+    return seen.has(key) ? [] : [f, ...stackOfSlot(upstream(f, owner), new Set([...seen, key]))];
+  };
+  /** peer 帧上的尾调用叶子 (chat 帧的回答移交另走 answerTransfer 协议)。 */
+  const peerLeaf = (s: Slot): boolean => s.mode === "transfer" && !s.answerTransfer;
+  /** 叶子 c 此刻顶替的那一份 (delegate 指着它的上游槽)。连续 transfer 时中间那一层也留着同一个 delegate
+   *  (它据此知道自己已交出), 但它已收尾 —— 只认还没落定的那一份, 落定了的才退而取其一。 */
+  const adopterOf = (c: Slot): Slot | undefined => {
+    const hit = [...slots.values()].filter((p) => p.delegate?.from === c.from && p.delegate.to === c.to && p.delegate.turn === c.turn);
+    return hit.find((p) => !p.resolved && !p.claimed) ?? hit.find((p) => !peerLeaf(p));
+  };
   const ofJob = (from: string, job: string): Slot[] =>
     [...slots.values()].filter((x) => x.from === from && x.job === job);
   /** P 的答话方在答 P 的那一轮里又派出去、还没落定的活。 */
@@ -399,9 +448,12 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
    *  正在守的那个 watcher 自己会发现锚变了; 挂起 (deferred) 的才要重新 arm。 */
   const relay = (p: Slot, at: number): void => {
     p.at = at;
-    p.deadlineAt = Math.max(p.deadlineAt ?? 0, deadlineOf(at));
+    p.deadlineAt = lift(p, deadlineOf(at));
     wake(p);
   };
+  /** 续期: 只往后挪, 但交出去的叶子封顶在它顶替的那一份的期限 —— 那一帧的期限不因转手而延长。 */
+  const lift = (s: Slot, until: number): number =>
+    Math.min(Math.max(s.deadlineAt ?? 0, until), (peerLeaf(s) ? adopterOf(s)?.deadlineAt : undefined) ?? Infinity);
   const wake = (p: Slot): void => {
     const was = p.deferred;
     delete p.deferred;
@@ -421,7 +473,8 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   // 只是 finally 还没跑; 用 token 免得旧的 finally 删掉新登记的那个。
   const watching = new Map<Slot, symbol>();
   const arm = (s: Slot, force = false): void => {
-    if (s.queued || (watching.has(s) && !force)) return;
+    // 交出去的那一份不守: 它的答案来自叶子 (adopt), 读 owner 的 transcript 只会读到「已转」。
+    if (s.queued || s.delegate || (watching.has(s) && !force)) return;
     const token = Symbol();
     watching.set(s, token);
     void watch(s)
@@ -468,8 +521,8 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     // 锚在发话时刻而不是此刻: reload 后续守的那一份不该重新领一整份时长。交接转过来
     // 的那份改锚到贴回简报的时刻, 所以每圈重算。
     const deadline = (): number => s.deadlineAt ?? s.at + TARGET_WAIT_SEC * 1000;
-    // cancel 落的终态也算: 守到一半被别人收掉, 不再等它的答案。
-    const aborted = (): boolean => s.claimed || stale(s) || canceled(s);
+    // cancel 落的终态也算: 守到一半被别人收掉, 不再等它的答案。交出去了 (delegate) 也不再等 owner。
+    const aborted = (): boolean => s.claimed || stale(s) || canceled(s) || !!s.delegate;
     const reported = (): boolean => s.outcome?.status === "error";
     // 反问过了: 同一段 NEED 不再投第二遍, 等发话方 tell_peer({re}) 答 (那会顶掉这份)。
     const asked = (): boolean => s.outcome?.status === "need";
@@ -590,7 +643,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
         eventId: m.id, from: s.to, job: s.job, status: m.outcome.status, turn: s.turn ?? "",
         done: Math.max(peers.filter((x) => x.resolved).length, tally?.done ?? 0),
         total: Math.max(peers.length, tally?.total ?? 0),
-        ...(s.asker ? { asker: s.asker } : {}), ...route,
+        ...(s.asker ? { asker: s.asker } : {}), ...(s.delegate ? { via: s.delegate.to } : {}), ...route,
       };
       m.state = "delivering";
       m.attempts++;
@@ -647,7 +700,9 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       if (head && !writeFailed && !stopped) retry(head.s, head.mail, (e as Error).message);
     }).finally(() => { consumers.delete(from); pump(from); });
   };
-  const enqueueOutcome = (s: Slot, out: Outcome): void => {
+  /** `with` = 与这份邮件同一次落盘的另一份 (adopt: 叶子自己的 outcome 与上游那一份的邮件要么都在、要么都不在,
+   *  中途崩了 reload 既不重投、也不漏投 —— 叶子的 outcome 是 awaitReply 判「新答案」的基准)。 */
+  const enqueueOutcome = (s: Slot, out: Outcome, with_?: Slot): void => {
     // A newer result makes a not-yet-consumed NEED/error obsolete. Anything
     // already exposed retains its delivery evidence in the event history.
     (s.inbox ?? []).filter((m) => m.state === "queued" && !isTerminal(m.outcome.status))
@@ -659,7 +714,8 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     s.resolved = isTerminal(out.status);
     s.delivered = false;
     s.inbox = [...(s.inbox ?? []), m];
-    save(s); // outcome + queued event in one durable write, before any asker IO
+    // outcome + queued event in one durable write, before any asker IO
+    if (!stale(s)) persist({ [keyOf(s)]: s, ...(with_ && !stale(with_) ? { [keyOf(with_)]: with_ } : {}) });
     try { account(s, m); } finally { pump(s.from); }
   };
 
@@ -670,7 +726,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     const got = s.outcome && isTerminal(s.outcome.status) ? s.outcome : await awaitReply(s);
     // 等的过程中被 cancel 落了终态: 以它为准 (pane 随后被杀, awaitReply 可能报的是 dead)。
     const out = canceled(s) ? s.outcome : got;
-    if (stale(s)) return;
+    if (stale(s) || s.delegate) return;
     if (canceled(s) && s.cancellationId && s.inbox?.some((m) => m.id === s.cancellationId)) { pump(s.from); return; }
     if (s.claimed || !out) { // wait_peer 抢先取走了
       s.resolved = true;
@@ -694,13 +750,18 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     if (why && deps.rebound) {
       const at = Date.now();
       const legs = (s.legs ?? 1) + 1;
-      const tell = { from: s.from, to: s.to, channel: s.channel, job: s.job, at, turn: s.turn, legs, deadlineAt: deadlineOf(at), ...(s.k ? { k: s.k } : {}), ...(s.asker ? { asker: s.asker } : {}), bounced: out.body, jobDispatchKey: s.jobDispatchKey ?? s.dispatchKey };
+      const tell = { from: s.from, to: s.to, channel: s.channel, job: s.job, at, turn: s.turn, legs, deadlineAt: deadlineOf(at), ...(s.k ? { k: s.k } : {}), ...framed(s), ...(s.asker ? { asker: s.asker } : {}), bounced: out.body, jobDispatchKey: s.jobDispatchKey ?? s.dispatchKey };
       if (!deps.durableRebound) register(tell);
       const ok = await deps.rebound({ from: s.from, to: s.to, turn: s.turn!, legs, channel: s.channel, ...(s.asker ? { asker: s.asker } : {}) }, why, tell);
       if (!ok && deps.durableRebound) { enqueueOutcome(s, out); return; }
       lg.info({ why, ok }, "receipt: 不合工单验收, 打回一次");
       // 打回没注入进去: 原来那份照常交上去 (钉成新 slot 的答案, 它的 watcher 直接拿去投)。
       if (!ok) { const n = upstream({ from: s.from, turn: s.turn! }, s.to); if (n?.bounced) { n.answer = out.body; save(n); } }
+      return;
+    }
+    if (peerLeaf(s)) {
+      await adopt(s, out);
+      if (!isTerminal(out.status) && !stale(s) && !s.claimed) return watch(s);
       return;
     }
     if (s.answerTransfer) {
@@ -723,6 +784,33 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     if (!isTerminal(out.status)) return watch(s);
   };
 
+  /** 叶子落定 (含 need / error / 失败, §3.3 R3): 以它的 outcome 直接落到它顶替的那一份, 按那一份的去向投递 ——
+   *  交出去的那位不收、不转述。上游已取走 / 已落定 → 等同 release: 叶子静默收尾。中途的 need / error 也直达
+   *  上游 (transfer 即放弃中转), 叶子接着守, 上游 `re` 那一份时按 delegate 转给它 (leafOf)。 */
+  const adopt = async (c: Slot, out: Outcome): Promise<void> => {
+    c.outcome = out;
+    const root = adopterOf(c);
+    if (root && !root.resolved && !root.claimed) {
+      // 验收作用在上游那一份落定时的正文上; 打回沿 delegate 打给叶子 (同件号续问, 照旧只打一次)。
+      const why = out.status === "done" && root.job && !c.bounced && !deps.workflowPrereq?.(root.from, root.turn ?? "") ? deps.accept?.(root.job, out.body) : undefined;
+      if (why && deps.rebound) {
+        const at = Date.now();
+        const legs = (c.legs ?? 1) + 1;
+        const tell: Tell = { from: c.from, to: c.to, channel: c.channel, job: c.job, at, turn: c.turn, legs, ...(c.deadlineAt ? { deadlineAt: c.deadlineAt } : {}), ...framed(c), ...(c.asker ? { asker: c.asker } : {}), bounced: out.body };
+        if (!deps.durableRebound) register(tell);
+        const ok = await deps.rebound({ from: c.from, to: c.to, turn: c.turn!, legs, channel: c.channel, ...(c.asker ? { asker: c.asker } : {}) }, why, tell);
+        deps.log.info({ mod: "receipt", why, ok, via: deps.nameOf(c.to) }, "receipt: 叶子的交代不合上游工单验收, 打回一次");
+        if (ok) return;
+      }
+    }
+    // 叶子自己先落定 (终态即收尾), 与上游那一份的邮件同一次落盘。
+    if (isTerminal(out.status)) Object.assign(c, { claimed: true, resolved: true, settled: true });
+    if (root && !root.resolved && !root.claimed) enqueueOutcome(root, out, c);
+    else save(c);
+  };
+  /** 槽上的去向字段原样带走 (续问 / 追问 / 打回): 老盘没有 stack 的现拼一次, 之后就冻结了。 */
+  const framed = (s: Slot): Pick<Tell, "stack" | "mode" | "k"> => framing(stackOfSlot(s), s.mode);
+
   const register = (tell: Tell, watchIt = true, interim?: Outcome): { at: number; turn: string } => {
     const at = tell.at ?? Date.now();
     const turn = tell.turn ?? newTurn();
@@ -735,14 +823,23 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     // 顶掉一份还没落定的工单活、自己又没带工单: 继承那张工单 —— 旧那份不会再投了,
     // 这一句的答案就是那个成员的交代; 不继承它就永远不计 done, 工单齐不了。停放的那份还会投, 不让。
     const job = tell.job || (!park && prev?.job && !prev.resolved ? prev.job : "");
+    // transfer 头一次登记: 交出的那一帧 (它本身是被 transfer 来的 → 它所承接的上游那一份) 改由这一件作答;
+    // 中间那一层随即收尾 —— 它的 watcher 不再读那个 wizard, 它对那一帧也不再有话语权。
+    const handed = tell.mode === "transfer" && tell.adopts ? upstream(tell.adopts, tell.from) : undefined;
+    const root = handed && peerLeaf(handed) ? adopterOf(handed) : handed;
+    const heir = root && !root.resolved && !root.claimed && !root.answerTransfer ? root : undefined;
+    const delegate = heir ? { from: tell.from, to: tell.to, turn } : undefined;
+    const { adopts: _adopts, ...told } = tell;
     const s: Slot = {
-      ...tell,
+      ...told,
+      ...(tell.stack ? { k: tell.stack[0] } : {}),
       ...(interim && ["need", "error"].includes(interim.status) ? { outcome: interim } : {}),
       job,
       at,
       turn,
       legs: tell.legs ?? 1,
-      deadlineAt: tell.deadlineAt ?? deadlineOf(at),
+      // 期限继承上游较早者: 那一帧的期限不因转手而延长。
+      deadlineAt: Math.min(tell.deadlineAt ?? deadlineOf(at), heir?.deadlineAt ?? Infinity),
       gen: (prev?.gen ?? 0) + 1,
       claimed: false,
       delivered: false,
@@ -755,9 +852,18 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     };
     // Commit both keys atomically; a crash cannot leave two live aliases for
     // the same turn or erase an old event between parking and registering.
+    if (tell.stack && !tell.stack[0]) delete s.k;
     const oldKey = prev && keyOfTurn(prev.from, prev.to, prev.turn ?? "");
-    persist({ ...(park && prev && oldKey ? { [oldKey]: { ...prev, parked: true } } : {}), [keyOf(s)]: s });
+    const mid = heir && handed !== heir ? handed : undefined;
+    persist({
+      ...(park && prev && oldKey ? { [oldKey]: { ...prev, parked: true } } : {}),
+      ...(heir && delegate ? { [keyOf(heir)]: { ...heir, delegate } } : {}),
+      ...(mid && delegate ? { [keyOf(mid)]: { ...mid, delegate, claimed: true, resolved: true, settled: true } } : {}),
+      [keyOf(s)]: s,
+    });
     if (park && prev && oldKey) { prev.parked = true; slots.set(oldKey, prev); }
+    if (heir && delegate) heir.delegate = delegate;
+    if (mid && delegate) Object.assign(mid, { delegate, claimed: true, resolved: true, settled: true });
     slots.set(keyOf(s), s);
     if (tell.queued) { /* accepted obligation; no silent/dead watcher until submission */ }
     else if (watchIt) arm(s);
@@ -809,7 +915,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     const at = Date.now();
     const s: Slot = {
       from: h.from, to: h.to, channel: h.channel, job: h.job, at, turn: h.turn, legs: 1, deadlineAt: at,
-      ...(h.k ? { k: h.k } : {}), ...(h.asker ? { asker: h.asker } : {}),
+      ...(h.k ? { k: h.k } : {}), ...framing(h.stack, h.mode), ...(h.asker ? { asker: h.asker } : {}),
       gen: (slots.get(keyOfTurn(h.from, h.to, h.turn))?.gen ?? 0) + 1,
       claimed: silent, delivered: false, resolved: silent, settled: silent, parked: true,
       outcome: { status: "canceled", body: `（守护进程: ${why}）` },
@@ -871,6 +977,34 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   /** 事件驱动再补一刀: 前置一落定就立刻判, 不等下一个巡检周期。 */
   const nudgeHolds = (): void => { if (holds.size) void tickHolds().catch(() => undefined); };
 
+  /** 收掉 target 会落哪些: `hit` = 在它手上的 (含交给它的叶子); 交出去的那一份已不在交出方手上 (§3.4),
+   *  收掉交出方不殃及它 —— 除非发起收的就是那一份的发话方 (它在收自己那件), 或收的正是此刻接手的叶子:
+   *  这两种按 only 认的是上游那一件, 落的是它的叶子 (`adopted`, 与 `roots` 一一对应; 叶子已在 hit 里的不重复)。 */
+  const cancelable = (target: string, by: string, only: (x: { from: string; turn: string }) => boolean) => {
+    const live = (s: Slot): boolean => !s.resolved && !s.claimed && !canceled(s);
+    const asked = (s: Slot): boolean => only({ from: s.from, turn: s.turn ?? "" });
+    const hit = [...slots.values()].filter((s) => s.to === target && live(s) && !s.delegate && asked(s));
+    const roots = [...slots.values()].filter((s) => !!s.delegate && live(s) && asked(s) && ((s.to === target && by === s.from) || s.delegate.to === target));
+    const leaves = roots.map((s) => upstream({ from: s.delegate!.from, turn: s.delegate!.turn }, s.delegate!.to));
+    const adopted = leaves.filter((c, i): c is Slot => !!c && live(c) && !hit.includes(c) && leaves.indexOf(c) === i);
+    return { hit, adopted, roots: roots.filter((_, i) => !!leaves[i] && adopted.includes(leaves[i]!)) };
+  };
+  /** 叶子被收掉: canceled 落到它顶替的那一份; 发起 stop 的正是那一份的发话方 → 它自己知道, 不投。 */
+  const cancelLeaf = (c: Slot, by: string): void => {
+    const root = adopterOf(c);
+    c.claimed = true;
+    c.resolved = true;
+    settle(c);
+    if (!root || root.resolved || root.claimed) return;
+    if (root.from !== by) { enqueueOutcome(root, c.outcome!); return; }
+    root.outcome = c.outcome;
+    deps.onOutcome?.(root, "canceled", c.outcome!.body, true);
+    if (root.job) deps.settleJob?.(root.job, root.to, "canceled", [], { turn: root.turn, dispatchKey: root.jobDispatchKey ?? root.dispatchKey });
+    root.claimed = true;
+    root.resolved = true;
+    settle(root);
+  };
+
   return {
     stop: () => {
       stopped = true;
@@ -913,20 +1047,20 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     continuation: (from, to, turn) => {
       const s = upstream({ from, turn }, to);
       return !s || s.resolved || s.claimed ? undefined : { from, to, turn, channel: s.channel, job: s.job,
-        at: Date.now(), legs: (s.legs ?? 1) + 1, deadlineAt: s.deadlineAt, k: s.k, asker: s.asker, jobDispatchKey: s.jobDispatchKey ?? s.dispatchKey };
+        at: Date.now(), legs: (s.legs ?? 1) + 1, deadlineAt: s.deadlineAt, k: s.k, ...framed(s), asker: s.asker, jobDispatchKey: s.jobDispatchKey ?? s.dispatchKey };
     },
     reask: (from, to, turn) => {
       const s = upstream({ from, turn }, to);
       if (!s || s.resolved || s.claimed) return undefined;
       const legs = (s.legs ?? 1) + 1;
-      register({ from, to, channel: s.channel, job: s.job, turn, legs, ...(s.answerTransfer ? { answerTransfer: s.answerTransfer } : {}), ...(s.deadlineAt ? { deadlineAt: s.deadlineAt } : {}), ...(s.k ? { k: s.k } : {}), ...(s.asker ? { asker: s.asker } : {}) });
+      register({ from, to, channel: s.channel, job: s.job, turn, legs, ...(s.answerTransfer ? { answerTransfer: s.answerTransfer } : {}), ...(s.deadlineAt ? { deadlineAt: s.deadlineAt } : {}), ...(s.k ? { k: s.k } : {}), ...framed(s), ...(s.asker ? { asker: s.asker } : {}) });
       return { legs, channel: s.channel, ...(s.asker ? { asker: s.asker } : {}) };
     },
     prepare: (from, to, re) => {
       const want = re ? canonicalTurn(re) : undefined;
       const s = want ? upstream({ from, turn: want }, to) : undefined;
       return s?.turn && s.turn === want
-        ? { turn: s.turn, legs: (s.legs ?? 1) + 1, job: s.job, channel: s.channel, asker: s.asker, k: s.k }
+        ? { turn: s.turn, legs: (s.legs ?? 1) + 1, job: s.job, channel: s.channel, asker: s.asker, k: s.k, ...framed(s) }
         : { turn: newTurn(), legs: 1, ...(re ? { reUnknown: true as const } : {}) };
     },
     pendingDelivery: (from, k, except) => [...slots.values()].some((s) => s.from === from && !!s.k && sameK(s.k, k)
@@ -935,6 +1069,9 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       const s = turn ? upstream({ from, turn }, to) : slots.get(keyOfPair(from, to));
       if (!s) return false;
       if (s.answerTransfer) return s.delivered;
+      // 交出去的叶子不归发话方取: 它的结论属于上游那一份, 取走了上游就永远等不到。
+      // 上游也不取已交出的那一份: 交出方的话不是答案, 叶子的结论会作为回执回来 (wait_peer 据 leafOf 如实说)。
+      if (peerLeaf(s) || s.delegate) return false;
       // Transport may already have exposed this event. Do not let a concurrent
       // wait_peer take a second copy, or turn an unknown ACK into a success.
       if (s.inbox?.some((m) => (m.generation ?? s.gen) === s.gen && ["delivering", "uncertain"].includes(m.state))) return "uncertain";
@@ -953,13 +1090,14 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
         .filter((s) => s.from === from && !s.resolved && (job === undefined || s.job === job))
         .map((s) => deps.nameOf(s.to)),
     transfer: (to, answered, carryAt) => {
-      const owed = [...slots.values()].filter((s) => s.to === to && !s.resolved && !s.claimed);
+      // 交出去的那几份不随它走: 它已不欠那一帧 (答案来自叶子)。
+      const owed = [...slots.values()].filter((s) => s.to === to && !s.resolved && !s.claimed && !s.delegate);
       const carried = owed.filter((s) => {
         const got = answered(s);
         if (got.trim()) s.answer = got;
         else {
           s.at = carryAt;
-          s.deadlineAt = Math.max(s.deadlineAt ?? 0, carryAt + CARRY_GRACE_MS);
+          s.deadlineAt = lift(s, carryAt + CARRY_GRACE_MS);
         }
         save(s);
         return !got.trim();
@@ -977,11 +1115,13 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       const parked = (t: string): boolean => probed.get(t) ?? probed.set(t, deps.parkedNow?.(t) ?? false).get(t)!;
       return [...slots.values()]
         .filter((s) => !s.resolved && !s.claimed)
-        .map((s) => ({
-          from: s.from, to: s.to, turn: s.turn ?? "", job: s.job,
-          state: s.queued ? "queued" as const : turnState(s, { parked: !s.outcome && parked(s.to) }),
+        .map((s) => ({ s, to: s.delegate?.to ?? s.to })) // 交出去的那一份此刻在叶子手上
+        .map(({ s, to }) => ({
+          from: s.from, to, turn: s.turn ?? "", job: s.job,
+          state: s.queued ? "queued" as const : turnState(s, { parked: !s.outcome && parked(to) }),
           ageMs: Date.now() - s.at,
           ...(s.k ? { k: s.k } : {}),
+          ...(s.delegate ? { delegated: true as const } : {}),
         }))
         // 停放着的 (等前置): 还没投出去, 但发话方在等它 —— 同样在飞。
         .concat([...holds.values()].map((h) => ({ from: h.from, to: h.to, turn: h.turn, job: h.job, state: "queued" as TurnState, ageMs: Date.now() - h.at, ...(h.k ? { k: h.k } : {}) })));
@@ -990,8 +1130,8 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       // 排着还没投的 (停放): 不投了; 发起 stop 的那方自己知道, 不回执。
       const held = [...holds.values()].filter((h) => h.to === target && only({ from: h.from, turn: h.turn }));
       held.forEach((h) => cancelHold(h, `${deps.nameOf(target)} 被 ${deps.nameOf(by)} 收掉 / 打断了, 这件排着的活 (${h.turn}) 没投。`, h.from === by));
-      const hit = [...slots.values()].filter((s) => s.to === target && !s.resolved && !s.claimed && !canceled(s) && only({ from: s.from, turn: s.turn ?? "" }));
-      for (const s of hit) {
+      const { hit, adopted } = cancelable(target, by, only);
+      for (const s of [...hit, ...adopted]) {
         // Keep cancellation consistent with timeout/dead/silent: transferred
         // answers may only quote text tied to their own source turn.
         const last = (s.answerTransfer
@@ -1002,6 +1142,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
           body: `（守护进程: ${deps.nameOf(s.to)} 被 ${deps.nameOf(by)} 收掉 / 打断了, 这件活没有结论。）${last ? `\n它最后说的: ${clipMiddle(last, 600)}` : ""}`,
         };
         if (s.job) deps.settleJob?.(s.job, s.to, "canceled", [], { turn: s.turn, dispatchKey: s.jobDispatchKey ?? s.dispatchKey });
+        if (peerLeaf(s)) { cancelLeaf(s, by); continue; }
         // 发起 stop 的那方自己知道, 不投; 守着的 watcher 看到 claimed 就收尾。
         if (s.from === by && !s.answerTransfer) { deps.onOutcome?.(s, "canceled", s.outcome.body, true); s.claimed = true; s.resolved = true; settle(s); continue; }
         s.queued = false;
@@ -1009,8 +1150,16 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
         if (s.answerTransfer) arm(s, true);
         else enqueueOutcome(s, s.outcome);
       }
-      if (hit.length) nudgeHolds();
-      return hit.length + held.length;
+      if (hit.length || adopted.length) nudgeHolds();
+      return hit.length + adopted.length + held.length;
+    },
+    cancelKeys: (target, by, only = () => true) => {
+      const { hit, roots } = cancelable(target, by, only);
+      return [
+        ...[...holds.values()].filter((h) => h.to === target && only({ from: h.from, turn: h.turn })).map((h) => `${h.from}\u0000${h.turn}`),
+        ...hit.map((s) => `${s.from}\u0000${s.turn ?? ""}`),
+        ...roots.map((s) => `${s.from}\u0000${s.turn ?? ""}`),
+      ];
     },
     prereqs: (from, turns, seen) => turns.map((t) => prereqOf(from, canonicalTurn(t), seen)),
     hold: (h) => {
@@ -1035,16 +1184,38 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       // 私聊轮 (频道 "") 派出的活没有群可续: 不能回落成 home, 否则回执轮就进了群。
       return channel ? { kind: "chat", channel, turn: env?.eventId ?? opening } : undefined;
     },
-    ancestorsOf: (self, k) => {
-      // 第一跳 (self 此刻答的那件) 按定义在途; 往上每一跳都要那件活还没落定 / 没被 wait_peer 取走 ——
-      // 已结束的那一跳不再是在等, 链到此为止 (宁可少拦)。
-      const go = (who: string, cur: ParentK | undefined, seen: ReadonlySet<string>, first: boolean): string[] => {
-        if (cur?.kind !== "peer" || seen.has(cur.from)) return [];
-        const up = upstream(cur, who);
-        if (!first && (!up || up.resolved || up.claimed)) return [];
-        return [cur.from, ...go(cur.from, up?.k, new Set([...seen, cur.from]), false)];
+    ancestorsOf: (self, stack) => {
+      // 每一跳都读冻结的栈; 只在那一份确知已落定 (取走 / 答完, 且不是交出去待叶子作答的) 时到此为止 ——
+      // 查不到的那一份 (被顶掉 / 过期) 不再截断链。被 transfer 来的那一层不算一级。
+      const go = (owner: string, xs: readonly Frame[], seen: ReadonlySet<string>): string[] => {
+        const [f, ...rest] = xs;
+        if (f?.kind !== "peer" || seen.has(f.from)) return [];
+        const s = upstream(f, owner);
+        if (s && (s.resolved || s.claimed) && !s.delegate) return [];
+        const up = go(f.from, rest, new Set([...seen, f.from]));
+        return s && peerLeaf(s) ? up : [f.from, ...up];
       };
-      return go(self, k, new Set([self]), true);
+      return go(self, stack, new Set([self]));
+    },
+    stackFor: (owner, f) => (f ? framesFrom(owner, f, new Set()) : []),
+    handover: (owner, f) => {
+      const s = f.kind === "peer" ? upstream(f, owner) : undefined;
+      return s && peerLeaf(s) ? stackOfSlot(s) : framesFrom(owner, f, new Set());
+    },
+    owed: (self) => [...slots.values()]
+      .filter((x) => x.to === self && !!x.turn && !x.resolved && !x.claimed && !x.delegate && !x.queued)
+      .map((x) => ({ frame: { kind: "peer" as const, from: x.from, turn: x.turn! }, id: x.turn!, label: `${deps.nameOf(x.from)} 派的件` })),
+    yielded: (self, env) => {
+      if (!env || env.quiet) return false;
+      if (env.receipt) { const k = env.k ? kOfAttr(env.k) : undefined; return k?.kind === "peer" && !!upstream(k, self)?.delegate; }
+      return env.kind === "peer" && env.private && !!env.turn && [...slots.values()].some((x) => x.to === self && x.turn === env.turn && !!x.delegate);
+    },
+    frameSlot: (owner, f) => { const s = f.kind === "peer" ? upstream(f, owner) : undefined; return s && structuredClone(s); },
+    leafOf: (from, to, turn) => {
+      const p = upstream({ from, turn }, to);
+      const d = p && !p.resolved && !p.claimed ? p.delegate : undefined;
+      const c = d ? upstream({ from: d.from, turn: d.turn }, d.to) : undefined;
+      return c && !c.resolved && !c.claimed ? structuredClone(c) : undefined;
     },
     askerOf: (self, env) => {
       // 回执轮: 那件活是 self 派出去的; 派来的活: 那件活是派给 self 的。同一对后来又说了一句,

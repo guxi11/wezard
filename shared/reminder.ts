@@ -11,6 +11,7 @@
 //             quiet=1 (仅 peer): 发话方不收回执; 不改变公开/私聊或工具授权
 //             reply-to (仅回执): 这一轮的终句会送到哪 (`.x` / 群名); 缺省 = 只进 rolepage
 //             k (仅回执): 机器读的父 k (`chat:<base>` / `peer:<turn>:<key>`), 下一跳继承
+//             via (仅回执): 这份结论是谁替 `from` 答的 (`from` 把那件活 transfer 给了它)
 //   mention   names  (空格分隔的 `.name`)
 //   roster    正文里 `- ` 开头的每一行是一条变动
 //   hint      role=steward: 人对管家说的那一轮挂的「自己答还是派出去」(只给模型, 不读回)
@@ -78,6 +79,8 @@ export interface Envelope {
   k?: string;
   /** 回执: 这一轮在群里的终句答给的那个人 (userid, 见 role-view.audienceOf); 认不出 = 没有。 */
   audience?: string;
+  /** 回执: 替 `from` 作答的接手方 (`.x`) —— `from` 把那件活 transfer 了出去。 */
+  via?: string;
 }
 
 /** Human identity comes from inbound metadata; a private hop keeps that origin. */
@@ -89,7 +92,7 @@ export const askerFromEnvelope = (env: Envelope, chatOf: (chat: string) => strin
 };
 
 /** 回执那一轮的去向 (见 receipts.routeOf), 已渲染成给人 / 模型看的称呼。 */
-export interface ReceiptRoute { replyTo?: string; k?: string; audience?: string; asker?: Asker }
+export interface ReceiptRoute { replyTo?: string; k?: string; audience?: string; asker?: Asker; via?: string }
 
 /** 一件活的编号: 写进派活与回执的信封。 */
 /** `act`: 这句话要对方怎么接 —— 缺省是一件活; ask = 只答一问; fyi = 知会, 不用回。
@@ -124,6 +127,7 @@ export const envelopeAttrs = {
     ...(route?.replyTo ? { "reply-to": route.replyTo } : {}),
     ...(route?.k ? { k: route.k } : {}),
     ...(route?.audience ? { audience: route.audience } : {}),
+    ...(route?.via ? { via: route.via } : {}),
     // 工单的「齐了吗」由守护进程数出来写在属性上, 不让模型自己记: 异步回执是 N 个
     // 独立的轮次陆续进来的, 靠模型在上下文里数到五是最容易出错的那种事。
     ...(job && job.job
@@ -150,6 +154,7 @@ const envelopeOfAttrs = (a: Attrs): Envelope | undefined =>
         ...(a["reply-to"] ? { replyTo: a["reply-to"] } : {}),
         ...(a.k ? { k: a.k } : {}),
         ...(a.audience ? { audience: a.audience } : {}),
+        ...(a.via ? { via: a.via } : {}),
       }
     : undefined;
 

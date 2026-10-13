@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Added
+- 回执的金字塔路由 (receiver stack, `docs/evolve/receiver-stack.md` ①-③): `tell_peer` / `dispatch` / `spawn_wizard` / `clone_wizard` 新增 `return: self|transfer|detach|none` 与 `for: <件号>`。栈由 daemon 在派活那一刻物化并随件落盘 (`Slot` / `Hold` / `MessageEvent` / 挂起账 增 `stack`、`mode`, `k` 留作 `stack[0]` 的冗余; 老盘无 stack 的行按 `[k]` + 现拼兜底), 所有写入点收进 `resolveReturn`; 方向闸的 chain 改读冻结的栈, 槽被顶掉 / 过期不再截断 —— **有意的行为变化**: 同一对的新一句顶掉旧槽后, 链比改前长 (改前在查不到的那一格截断、宁可少拦), 防环与 ≥3 层链深会比改前多拦; 带 `for` 时防环取本轮推断帧与 `for` 帧两条链的并集, 链深只看实际挂的那一帧。已知余项: 被 adopt 那一帧的叶子槽本身被顶掉 / 过期后, 交出方会重新出现在接手方的链上 (多拦一层, 不漏拦)。`for` 可把子活挂到自己欠着的任一笔 (查不到 → 400 并列出欠着的几笔)。旧写法永久接受: `chain:false`→`detach`、`receipt:false`→`none`、`answer:"transfer"`→`transfer`, 新旧矛盾 → 400; `dispatch` 由此获得 `detach`。
+- peer 帧尾调用 (`return:"transfer"` 用在 wizard 派来的那一帧): 上游那一份改由叶子作答 (`Slot.delegate`), 守它的不再读交出方的 transcript / pane; 叶子落定 (含 NEED / error / 失败) 直接作为上游那件的回执投出, 信封带 `via=.叶子`, 交出方不收不转; 连续 transfer 一跳直达; 期限继承上游较早者; 收掉交出方不殃及已交出的那一份, 收掉叶子才落它; 上游 `re` 那一件按 delegate 同件号转给叶子。transfer 与 job / re / node / after / fyi 及同帧下未落定的子活互斥, 一帧只能交一次; 交出方对那一帧再派活 / notify → 409; 上游 `re` 已交出的那件带 `kind:"fyi"` / `return:"none"` 只知会叶子不登记, 带 transfer / detach / for → 400, 照记上游工单预算; 上游 `wait_peer` 不取走已交出的那件; 上游收自己那件 (close_job cancel / 带件号 stop / 节点 stopped / plan 取消) 或收此刻的叶子都落到叶子上。旧写法 `answer:"transfer"` 同带 `receipt:false` / `kind:"fyi"` / `chain:false` 照旧拒 (400)。宪章与工具描述加「想自己接 NEED 就别 transfer」。
+
 ### Changed
 - `set_workspace` 换工作区从「杀 pane 全新重开 (上下文丢弃)」改为**自动交接**: daemon 落 `setPendingCwd` 后走 handoff 机械 (请它写简报 → 原地重开落进新目录 → 简报贴回), 上下文带过去、新目录的宪章随之生效, 「📂 当前项目」气泡照发 (新增交接的 `announce` 标记); 路由一律立即回 `scheduled:true` (调用方常是被换的那个, 要先说完这一轮), 冷会话 (pane 不在) 仍按老路直接新开; 交接失败退回提醒 + pendingCwd 排队, 人手 /new 照样完成切换。
 - 宪章守卫 (`guardCharter`) 对**热生效**的宪章改动 (如 `chatPolicy.<chat>.topOnly`、聊天名) 不再只给受影响且 pane 活着的 wizard 挂 handoff 提醒, 而是自动替它们交接 (`handoffs.other`, 各写简报后原地重开); 交接不成 (一直忙 / 已在交接中 / 重开失败) 才退回挂提醒。reload 项此刻重开渲染的还是旧宪章, 维持提醒不变。比对剔除「出生时同群的 wizard」一节: 它是出生快照且渲染途中的懒定居会让前后两次渲染无辜不同 —— 此前一次无关的 `chats` 写入会把同群活着的 wizard 全部误判为受影响。

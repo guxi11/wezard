@@ -690,6 +690,7 @@ export const renderReceiptEnvelope = (
       : status === "error"
         ? [`这是**失败回执**: 它那一轮以 CLI 报错收尾, 下面是报错原文, 不是它的结论, **不计入工单**。它若被续跑、之后答出来, 结论会照常再送来一份; 等不及就 peek_peer 看它, 或者再 tell_peer 它一次。`]
         : [`这是**失败回执**: ${FAILED[status]}, 这一份不会再有答案了 (工单里按已落定计)。自己判断: 换人、再 tell_peer 追问, 或者在汇总里如实写缺了这一份。下面是守护进程的说明和它最后说的一句。`]),
+    ...(route?.via ? [`这份结论是 \`via\` 接手作答的: ${from} 把这件活整件交给了它 (transfer), 自己不再经手。要续问 / 答它的 NEED 仍按下面的件号 re ${from}, 守护进程会转给 \`via\`。`] : []),
     // 去向由持久派活链算好, 提示只保留表达对象与内容语义。
     ...(route?.replyTo?.startsWith(".")
       ? ["面向 `reply-to` 的上游 wizard, 据此在终句交代结论 (`RESULT:` 可选)。"]

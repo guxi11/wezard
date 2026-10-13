@@ -10,15 +10,18 @@ import type { JobRecord } from "./jobs.js";
 import type { NodeAttempt } from "./workflow-nodes.js";
 import type { Prereq } from "./receipts.js";
 
+const FrameSchema = z.union([
+  z.object({ kind: z.literal("chat"), channel: z.string(), turn: z.string() }).strict(),
+  z.object({ kind: z.literal("peer"), from: z.string(), turn: z.string() }).strict(),
+]);
 const OriginSchema = z.object({
-  k: z.union([
-    z.object({ kind: z.literal("chat"), channel: z.string(), turn: z.string() }).strict(),
-    z.object({ kind: z.literal("peer"), from: z.string(), turn: z.string() }).strict(),
-  ]).optional(),
+  k: FrameSchema.optional(),
+  // 老 run 没有 stack: 放行时按 [k] + 现拼兜底 (receiver-stack.frozenStack)。
+  stack: z.array(FrameSchema).optional(),
   asker: z.object({ who: z.string(), chat: z.string() }).strict().optional(),
   chain: z.array(z.string()),
 }).strict();
-export interface PlanOrigin { k?: ParentK; asker?: Asker; chain: string[] }
+export interface PlanOrigin { k?: ParentK; stack?: ParentK[]; asker?: Asker; chain: string[] }
 const PhaseSchema = z.enum(["waiting", "spawning", "spawn-unknown", "spawned", "dispatching", "observing", "blocked"]);
 const NodeStateSchema = z.object({
   id: z.string(), turn: z.string().min(1), name: z.string().min(1), phase: PhaseSchema,

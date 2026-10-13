@@ -3,6 +3,7 @@ import { loadJsonMap } from "../shared/json-map-store.js";
 import type { Asker, TurnFrom } from "../shared/detail-store.js";
 import type { MirrorDispatchArgs } from "./mirror-bridge.js";
 import type { Tell, ParentK, HeldSeen } from "./receipts.js";
+import type { Frame, ReturnMode } from "./receiver-stack.js";
 
 export interface MessageInput {
   id: string;
@@ -13,6 +14,9 @@ export interface MessageInput {
   channel: string;
   asker?: Asker;
   k?: ParentK;
+  /** 派活事件冻结的 receiver stack (`k` = `stack[0]`, 见 receiver-stack.ts)。 */
+  stack?: Frame[];
+  mode?: ReturnMode;
   replyTo?: ParentK;
   priority: "normal" | "now" | "urgent";
   deadline: number;
@@ -33,6 +37,8 @@ export interface MessageInput {
       free?: boolean;
       held?: boolean;
       spawned?: boolean;
+      /** 上游 `re` 一份已交出去的件, 按 delegate 转给了叶子: 不是发话方自己的一件新活 (不进它的挂起账)。 */
+      relayed?: boolean;
     };
   };
 }

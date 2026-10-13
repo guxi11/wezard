@@ -310,11 +310,13 @@ const cases = {
     f.tell({ from: "boss", to: "lead", channel: "", turn: "t1" });
     f.tell({ from: "lead", to: "a", channel: "", turn: "t2", k: { kind: "peer", from: "boss", turn: "t1" } });
     f.tell({ from: "a", to: "b", channel: "", turn: "t3", k: { kind: "peer", from: "lead", turn: "t2" } });
-    const chain = f.r.ancestorsOf("b", { kind: "peer", from: "a", turn: "t3" });
+    // 方向闸的链读 b 所服务那一帧的栈 (老盘没有 stack 的槽按 [k] + 现拼兜底)。
+    const chainOf = (who, k) => f.r.ancestorsOf(who, f.r.stackFor(who, k));
+    const chain = chainOf("b", { kind: "peer", from: "a", turn: "t3" });
     f.tell({ from: "lead", to: "boss", channel: "", turn: "t9", k: { kind: "peer", from: "b", turn: "t3" } }); // 成环的坏数据
     f.r.claim("lead", "a"); // lead→a 那件被 wait_peer 取走: a 已不在答 lead, 链从第二跳截断
-    const trunc = f.r.ancestorsOf("b", { kind: "peer", from: "a", turn: "t3" });
-    const loop = f.r.ancestorsOf("boss", { kind: "peer", from: "lead", turn: "t1" });
+    const trunc = chainOf("b", { kind: "peer", from: "a", turn: "t3" });
+    const loop = chainOf("boss", { kind: "peer", from: "lead", turn: "t1" });
     const cases = {
       "非 owner 带 job 的 task 拒": !!g({ self: "a", target: "b", jobId: "J" }),
       "owner 带 job 的 task 放行": !g({ jobId: "J" }),
@@ -339,6 +341,243 @@ const cases = {
     };
     const bad = Object.entries(cases).filter(([, ok]) => !ok).map(([k]) => k);
     return { pass: !bad.length, why: bad.length ? `没过: ${bad.join(" · ")} (链=${chain.join(">")})` : `${Object.keys(cases).length} 条规则都对` };
+  } },
+
+  // ── receiver stack (docs/evolve/receiver-stack.md §4 末尾的 6 个场景, 纯单元) ──────────────
+  // transfer 两连跳直达: x→a 的件 F; a 把 F 整件 transfer 给 b, b 再 transfer 给 c。c 的结论直接作为 F 的回执回 x
+  // (from=.a via=.c), a / b 都不收; a、b 各自的「已转」不算 F 的答案; c 的方向链上只有 x (交出去的那两层已脱身)。
+  "transfer-hops": { names: [], unit: true, run: async () => {
+    const f = await fakeReceipts();
+    const F = { kind: "peer", from: "x", turn: "tF" };
+    f.tell({ from: "x", to: "a", channel: "", turn: "tF" });
+    f.tell({ from: "a", to: "b", channel: "", turn: "tc", stack: [F], k: F, mode: "transfer", adopts: { from: "x", turn: "tF" } });
+    f.answer("a", "tF", "已转给 b");
+    const st = f.r.handover("b", { kind: "peer", from: "a", turn: "tc" });
+    f.tell({ from: "b", to: "c", channel: "", turn: "td", stack: st, k: st[0], mode: "transfer", adopts: { from: "a", turn: "tc" } });
+    f.answer("b", "tc", "已转给 c");
+    await sleep(2500);
+    const early = f.sent.find((s) => s.to === "x");
+    const chain = f.r.ancestorsOf("c", f.r.stackFor("c", { kind: "peer", from: "b", turn: "td" }));
+    f.answer("c", "td", "RESULT: leaf");
+    const got = await until(() => f.sent.find((s) => s.to === "x"), 20_000, 100);
+    await sleep(500);
+    const toX = f.sent.filter((s) => s.to === "x");
+    const leaked = f.sent.filter((s) => s.to === "a" || s.to === "b");
+    return {
+      pass: !early && st.length === 1 && st[0].turn === "tF" && toX.length === 1 && got?.body === "RESULT: leaf" && got.meta.turn === "tF" && got.meta.from === "a" && got.meta.via === "c" && !leaked.length && chain.join() === "x",
+      why: `直达栈=${st.map((x) => x.turn).join(">")} · 提前投=${!!early} · x 收到 ${toX.map((s) => `${s.meta.turn}:${s.body} via=${s.meta.via}`).join(" / ") || "无"} · 漏给中间层 ${leaked.length} 份 · c 的链=${chain.join(">")}`,
+    };
+  } },
+
+  // transfer 后 stop 源头: 收掉 a (连 pane 一起没了) 不殃及已交出去的 F; b 答完 x 照收 done。收掉叶子 b2 才落 F2 (canceled, via=.b2)。
+  "transfer-stop": { names: [], unit: true, run: async () => {
+    const f = await fakeReceipts({ paneLive: async (t) => t !== "a" });
+    const F = { kind: "peer", from: "x", turn: "tF" }, G = { kind: "peer", from: "x", turn: "tG" };
+    f.tell({ from: "x", to: "a", channel: "", turn: "tF" });
+    f.tell({ from: "a", to: "b", channel: "", turn: "tc", stack: [F], k: F, mode: "transfer", adopts: { from: "x", turn: "tF" } });
+    f.tell({ from: "x", to: "a2", channel: "", turn: "tG" });
+    f.tell({ from: "a2", to: "b2", channel: "", turn: "tc2", stack: [G], k: G, mode: "transfer", adopts: { from: "x", turn: "tG" } });
+    const hitA = f.r.cancel("a", "boss");
+    await sleep(6000); // > DEAD_GRACE: a 的 pane 不在了, F 也不该落 dead
+    const early = f.sent.find((s) => s.meta.turn === "tF");
+    f.answer("b", "tc", "RESULT: b-done");
+    const hitB2 = f.r.cancel("b2", "boss");
+    const got = await until(() => f.sent.find((s) => s.meta.turn === "tF"), 20_000, 100);
+    const can = await until(() => f.sent.find((s) => s.meta.turn === "tG"), 20_000, 100);
+    return {
+      pass: hitA === 0 && !early && got?.meta.status === "done" && got.body === "RESULT: b-done" && hitB2 === 1 && can?.meta.status === "canceled" && can.meta.via === "b2",
+      why: `stop a 落了 ${hitA} 件 · 提前投=${early ? early.meta.status : "无"} · F=${got?.meta.status ?? "未投"}:${got?.body ?? ""} · stop b2 落了 ${hitB2} 件 → G=${can?.meta.status ?? "未投"} via=${can?.meta.via}`,
+    };
+  } },
+
+  // 叶子 NEED 直达 U 且 U 的 re 落到叶子: b 的 NEED 作为 F 的中途回执直接回 x (via=.b); x re F → leafOf 给出叶子那一件,
+  // 同件号续问 b; b 再答 → F done。a 一份都不收。叶子期限继承 F 的 (较早者)。
+  "transfer-need": { names: [], unit: true, run: async () => {
+    const f = await fakeReceipts();
+    const F = { kind: "peer", from: "x", turn: "tF" };
+    const dl = Date.now() + 120_000;
+    f.tell({ from: "x", to: "a", channel: "", turn: "tF", deadlineAt: dl });
+    f.tell({ from: "a", to: "b", channel: "", turn: "tc", stack: [F], k: F, mode: "transfer", adopts: { from: "x", turn: "tF" } });
+    f.answer("b", "tc", "NEED: 口令?");
+    const need = await until(() => f.sent.find((s) => s.to === "x" && s.meta.status === "need"), 20_000, 100);
+    const leaf = f.r.leafOf("x", "a", "tF");
+    if (leaf) f.tell({ from: leaf.from, to: leaf.to, channel: "", turn: leaf.turn, legs: (leaf.legs ?? 1) + 1, stack: leaf.stack, k: leaf.k, mode: "transfer", deadlineAt: leaf.deadlineAt });
+    await sleep(300);
+    f.answer("b", "tc", "RESULT: pw-ok");
+    const done = await until(() => f.sent.find((s) => s.to === "x" && s.meta.status === "done"), 20_000, 100);
+    return {
+      pass: need?.meta.turn === "tF" && need.meta.via === "b" && leaf?.to === "b" && leaf.turn === "tc" && leaf.deadlineAt === dl && done?.body === "RESULT: pw-ok" && done.meta.turn === "tF" && !f.sent.some((s) => s.to === "a"),
+      why: `NEED→x=${need ? `${need.meta.turn} via=${need.meta.via}` : "无"} · re 落到=${leaf ? `${leaf.to}/${leaf.turn}` : "无"} 期限继承=${leaf?.deadlineAt === dl} · done=${done?.body ?? "无"} · a 收到 ${f.sent.filter((s) => s.to === "a").length} 份`,
+    };
+  } },
+
+  // for 挂到非开头那笔欠账: a 同时欠 x (t1, 本轮开头) 与 y (t2)。for:"t2" → 子活挂住给 y 的交代, 不挂 x 的; 查不到的 for → 400
+  // 并列出欠着的两笔; 本轮帧已交出时不带 for → 409, 带 for 挂到另一笔照常。
+  "for-owed": { names: [], unit: true, run: async () => {
+    const { resolveReturn } = await import(new URL("../../dist/daemon/receiver-stack.js", import.meta.url).href);
+    const f = await fakeReceipts();
+    f.onDeliver((to, meta) => { if (to === "a" && meta.turn === "tc") setTimeout(() => f.answer("a", "t2", "RESULT: final-2"), 200); });
+    f.tell({ from: "x", to: "a", channel: "", turn: "t1" });
+    f.tell({ from: "y", to: "a", channel: "", turn: "t2" });
+    const deps = (yielded = false) => ({ inferred: () => ({ kind: "peer", from: "x", turn: "t1" }), owed: () => f.r.owed("a"),
+      stackFor: (fr) => f.r.stackFor("a", fr), handover: (fr) => f.r.handover("a", fr), yielded: () => yielded });
+    const bad = resolveReturn(deps(), { for: "tZ" });
+    const gone = resolveReturn(deps(true), {});
+    const side = resolveReturn(deps(true), { for: "t2" });
+    const r = resolveReturn(deps(), { for: "`t2`" });
+    f.tell({ from: "a", to: "c", channel: "", turn: "tc", stack: r.stack, k: r.stack[0], mode: r.mode });
+    f.answer("a", "t1", "RESULT: one");
+    f.answer("a", "t2", "已派");
+    const one = await until(() => f.sent.find((s) => s.to === "x"), 20_000, 100);
+    await sleep(2500);
+    const early = f.sent.find((s) => s.to === "y");
+    f.answer("c", "tc", "RESULT: c");
+    const two = await until(() => f.sent.find((s) => s.to === "y"), 20_000, 100);
+    const relay = f.sent.find((s) => s.to === "a" && s.meta.turn === "tc");
+    return {
+      pass: !bad.ok && bad.status === 400 && /t1/.test(bad.reason) && /t2/.test(bad.reason) && !gone.ok && gone.status === 409 && side.ok
+        && r.ok && r.frame.from === "y" && r.stack[0].turn === "t2" && one?.body === "RESULT: one" && !early && two?.body === "RESULT: final-2" && relay?.meta.replyTo?.from === "y",
+      why: `坏 for=${bad.status}${/t1/.test(bad.reason ?? "") && /t2/.test(bad.reason ?? "") ? "(列出两笔)" : ""} · 已交出不带 for=${gone.status ?? "放行"} 带 for=${side.ok} · for t2 → 帧 ${r.frame?.from}:${r.stack?.[0]?.turn} · x=${one?.body ?? "无"} · y 提前=${!!early} 终=${two?.body ?? "无"} · c 的回执 reply-to=${relay?.meta.replyTo?.from ?? "无"}`,
+    };
+  } },
+
+  // dispatch detach 不挂住上游: dispatch 在入口按 return:"detach" 冻结去向 → 栈为空, a 给 x 的交代不等 d; d 的回执回 a 不带 reply-to。
+  // 新旧写法: chain:false ≡ detach; return 与旧写法矛盾 → 400。
+  "dispatch-detach": { names: [], unit: true, run: async () => {
+    const { resolveReturn, returnOpOf } = await import(new URL("../../dist/daemon/receiver-stack.js", import.meta.url).href);
+    const f = await fakeReceipts();
+    f.tell({ from: "x", to: "a", channel: "", turn: "tF" });
+    const deps = { inferred: () => ({ kind: "peer", from: "x", turn: "tF" }), owed: () => f.r.owed("a"),
+      stackFor: (fr) => f.r.stackFor("a", fr), handover: (fr) => f.r.handover("a", fr), yielded: () => false };
+    const r = resolveReturn(deps, { return: "detach" });
+    f.tell({ from: "a", to: "d", channel: "", turn: "td", stack: r.stack, mode: r.mode });
+    f.answer("a", "tF", "RESULT: own");
+    const own = await until(() => f.sent.find((s) => s.to === "x"), 20_000, 100);
+    const heldUp = f.sent.some((s) => s.meta.turn === "td");
+    f.answer("d", "td", "RESULT: side");
+    const side = await until(() => f.sent.find((s) => s.to === "a" && s.meta.turn === "td"), 20_000, 100);
+    const legacy = returnOpOf({ chain: false }), clash = returnOpOf({ return: "self", chain: false }), fyi = returnOpOf({ return: "detach", kind: "fyi" });
+    return {
+      pass: r.ok && !r.stack.length && r.frame?.from === "x" && r.served.length === 1 && own?.body === "RESULT: own" && !heldUp && !!side && !side.meta.replyTo
+        && legacy.op === "detach" && !clash.ok && !fyi.ok,
+      why: `detach 栈=${r.stack?.length} 服务帧=${r.frame?.from} · x 先收=${own?.body ?? "无"} (d 未回=${!heldUp}) · d 回执 reply-to=${side?.meta.replyTo?.from ?? "无"} · chain:false→${legacy.op} 矛盾→${clash.ok ? "放行" : "400"} fyi+detach→${fyi.ok ? "放行" : "400"}`,
+    };
+  } },
+
+  // 老盘无 stack 行的续守: 盘上只有 k 的两行 (x→a 的 tP, a→b 的 tC 挂在 tP 下) 被新进程 resume —— 祖先按 [k] + 现拼
+  // 兜底 (b 的链 = a,x); a 答「已派」照样挂起等 b; b 回来 → 回执 reply-to=.x, a 那一轮的终句作为 tP 回 x; 续问冻结出完整的栈。
+  "legacy-resume": { names: [], unit: true, run: async () => {
+    const mem = () => { const m = new Map(); return { all: () => Object.fromEntries(m), get: (k) => m.get(k), merge: (rows) => Object.entries(rows).forEach(([k, v]) => m.set(k, v)), set: (k, v) => (m.set(k, v), v), drop: (k) => m.delete(k) }; };
+    const store = mem();
+    const at = Date.now();
+    const row = (x) => ({ channel: "", job: "", at, legs: 1, deadlineAt: at + 3600_000, gen: 1, claimed: false, delivered: false, resolved: false, ...x });
+    store.merge({ "x\u0000a": row({ from: "x", to: "a", turn: "tP" }), "a\u0000b": row({ from: "a", to: "b", turn: "tC", k: { kind: "peer", from: "x", turn: "tP" } }) });
+    const f = await fakeReceipts({ store });
+    f.onDeliver((to, meta) => { if (to === "a" && meta.turn === "tC") setTimeout(() => f.answer("a", "tP", "RESULT: legacy-final"), 200); });
+    f.r.resume();
+    const chain = f.r.ancestorsOf("b", f.r.stackFor("b", { kind: "peer", from: "a", turn: "tC" }));
+    const frozen = f.r.prepare("a", "b", "tC");
+    f.answer("a", "tP", "已派");
+    await sleep(2500);
+    const early = f.sent.find((s) => s.to === "x");
+    f.answer("b", "tC", "RESULT: b");
+    const got = await until(() => f.sent.find((s) => s.to === "x"), 20_000, 100);
+    const relay = f.sent.find((s) => s.to === "a" && s.meta.turn === "tC");
+    return {
+      pass: chain.join() === "a,x" && frozen.stack?.map((x) => x.turn).join() === "tP" && !early && got?.body === "RESULT: legacy-final" && relay?.meta.replyTo?.from === "x",
+      why: `兜底链=${chain.join(">")} · 续问冻结栈=${frozen.stack?.map((x) => x.turn).join(">") ?? "无"} · 提前投=${!!early} · x=${got?.body ?? "无"} · reply-to=${relay?.meta.replyTo?.from ?? "无"}`,
+    };
+  } },
+
+  // 评审打回补的五条 (B1 B2 B3 S3 S7)。
+  // B1 上游 re 已交出的件但不要回执 (fyi / return:none): 只知会叶子, 不登记; 改去向 / for → 400。
+  "transfer-relay-quiet": { names: [], unit: true, run: async () => {
+    const { leafRelayOf } = await import(new URL("../../dist/daemon/receiver-stack.js", import.meta.url).href);
+    const v = [{ kind: "fyi" }, { return: "none" }, { receipt: false }, {}, { return: "transfer" }, { return: "detach" }, { for: "t1" }].map(leafRelayOf);
+    const ok = v[0].ok && v[0].quiet && v[1].ok && v[1].quiet && v[2].ok && v[2].quiet && v[3].ok && !v[3].quiet && !v[4].ok && !v[5].ok && !v[6].ok;
+    return { pass: ok, why: v.map((x) => (x.ok ? (x.quiet ? "quiet" : "tell") : "400")).join(" / ") + " (fyi / none / receipt:false / 缺省 / transfer / detach / for)" };
+  } },
+
+  // B2 上游收自己已交出的那件 (close_job cancel / stop 带件号 / 节点 stopped / plan 取消都是 cancel(A, x, only x 的件)):
+  // 落到叶子, x 自己发起 → 静默; 叶子之后答出来不再投。收叶子 b2 按上游件号 (stop_wizard(b2, turn:tG)) 同样命中;
+  // 收掉叶子 b3 本身 (only 全放) 报数 1 件不是 2 件。
+  "transfer-cancel-own": { names: [], unit: true, run: async () => {
+    const f = await fakeReceipts();
+    const mk = (a, b, t, c) => { const F = { kind: "peer", from: "x", turn: t }; f.tell({ from: "x", to: a, channel: "", turn: t }); f.tell({ from: a, to: b, channel: "", turn: c, stack: [F], k: F, mode: "transfer", adopts: { from: "x", turn: t } }); };
+    mk("a", "b", "tF", "tc"); mk("a2", "b2", "tG", "tc2"); mk("a3", "b3", "tH", "tc3");
+    const kF = f.r.cancelKeys("a", "x", (s) => s.from === "x");
+    const nF = f.r.cancel("a", "x", (s) => s.from === "x");
+    const kG = f.r.cancelKeys("b2", "x", (s) => s.from === "x" && s.turn === "tG");
+    const nG = f.r.cancel("b2", "x", (s) => s.from === "x" && s.turn === "tG");
+    const kH = f.r.cancelKeys("b3", "boss");
+    const nH = f.r.cancel("b3", "boss");
+    f.answer("b", "tc", "RESULT: late");
+    const H = await until(() => f.sent.find((s) => s.meta.turn === "tH"), 20_000, 100);
+    await sleep(2500);
+    const late = f.sent.filter((s) => s.meta.turn === "tF" || s.meta.turn === "tG");
+    return {
+      pass: nF === 1 && kF.length === 1 && nG === 1 && kG.length === 1 && nH === 1 && new Set(kH).size === 1 && !late.length && H?.meta.status === "canceled" && !f.r.leafOf("x", "a", "tF") && !f.r.states().some((s) => s.turn === "tF" || s.turn === "tG"),
+      why: `收 a(x 的件)=${nF}/${kF.length} · 收 b2(tG)=${nG}/${kG.length} · 收 b3=${nH} 键 ${kH.length} · 迟到投了 ${late.length} 份 · tH=${H?.meta.status ?? "未投"}`,
+    };
+  } },
+
+  // B3 旧写法 answer:"transfer" 同带 receipt:false / fyi / chain:false: 改前一律拒, 现在照旧拒 (不映射成 transfer)。
+  "legacy-transfer-mix": { names: [], unit: true, run: async () => {
+    const { returnOpOf } = await import(new URL("../../dist/daemon/receiver-stack.js", import.meta.url).href);
+    const v = [{ answer: "transfer", receipt: false }, { answer: "transfer", kind: "fyi" }, { answer: "transfer", chain: false }, { answer: "transfer" }, { receipt: false, chain: false }].map(returnOpOf);
+    return { pass: !v[0].ok && !v[1].ok && !v[2].ok && v[3].op === "transfer" && v[4].op === "none", why: v.map((x) => (x.ok ? x.op : "400")).join(" / ") };
+  } },
+
+  // S3 上游 wait_peer 已交出的那件: 不取走 (取走了叶子的结论就被静默丢掉), 叶子答完照常回执。
+  "transfer-claim": { names: [], unit: true, run: async () => {
+    const f = await fakeReceipts();
+    const F = { kind: "peer", from: "x", turn: "tF" };
+    f.tell({ from: "x", to: "a", channel: "", turn: "tF" });
+    f.tell({ from: "a", to: "b", channel: "", turn: "tc", stack: [F], k: F, mode: "transfer", adopts: { from: "x", turn: "tF" } });
+    const took = f.r.claim("x", "a", "tF");
+    const leaf = f.r.leafOf("x", "a", "tF");
+    f.answer("b", "tc", "RESULT: kept");
+    const got = await until(() => f.sent.find((s) => s.meta.turn === "tF"), 20_000, 100);
+    return { pass: took === false && leaf?.to === "b" && got?.body === "RESULT: kept", why: `claim=${took} · leafOf=${leaf?.to} · 回执=${got?.body ?? "无"}` };
+  } },
+
+  // S7 叶子自己派子活 (self), 子回执续回时 relay 续期 —— 封顶在上游那一份的期限, 不因转手而延长。
+  "transfer-deadline-cap": { names: [], unit: true, run: async () => {
+    const f = await fakeReceipts();
+    const F = { kind: "peer", from: "x", turn: "tF" }, C = { kind: "peer", from: "a", turn: "tc" };
+    const dl = Date.now() + 120_000;
+    f.tell({ from: "x", to: "a", channel: "", turn: "tF", deadlineAt: dl });
+    f.tell({ from: "a", to: "b", channel: "", turn: "tc", stack: [F], k: F, mode: "transfer", adopts: { from: "x", turn: "tF" } });
+    f.tell({ from: "b", to: "d", channel: "", turn: "td", stack: [C, F], k: C });
+    const at0 = f.r.leafOf("x", "a", "tF")?.at;
+    f.answer("b", "tc", "已派");
+    await sleep(2500);
+    f.answer("d", "td", "RESULT: d");
+    await until(() => f.sent.find((s) => s.to === "b" && s.meta.turn === "td"), 20_000, 100);
+    await sleep(500);
+    const leaf = f.r.leafOf("x", "a", "tF");
+    // relay 真发生了 (锚挪到了子回执那一刻), 才说明封顶起了作用。
+    return { pass: !!leaf && leaf.at !== at0 && leaf.deadlineAt === dl, why: `relay=${leaf?.at !== at0} · relay 后叶子期限=${leaf ? (leaf.deadlineAt === dl ? "= 上游" : `${Math.round((leaf.deadlineAt - dl) / 1000)}s 超出`) : "叶子不在"}` };
+  } },
+
+  // 链深闸看实际挂的那一帧, 不看并集: a 本轮答 u (u 上有 v), 又 for 挂到 y (y 上有 z) —— 两条各 2 层, 并集 4 层。
+  // 向下派 task 放行 (链深 2); 防环仍看并集: 反过来给 u (本轮在服务、不是 for 那一帧) 派活照拦。
+  "direction-depth-for": { names: [], unit: true, run: async () => {
+    const { checkDirection } = await import(new URL("../../dist/daemon/direction.js", import.meta.url).href);
+    const f = await fakeReceipts();
+    f.tell({ from: "v", to: "u", channel: "", turn: "tV" });
+    f.tell({ from: "u", to: "a", channel: "", turn: "tU", stack: [{ kind: "peer", from: "v", turn: "tV" }] });
+    f.tell({ from: "z", to: "y", channel: "", turn: "tZ" });
+    f.tell({ from: "y", to: "a", channel: "", turn: "tY", stack: [{ kind: "peer", from: "z", turn: "tZ" }] });
+    const inferred = f.r.ancestorsOf("a", f.r.stackFor("a", { kind: "peer", from: "u", turn: "tU" }));
+    const depth = f.r.ancestorsOf("a", f.r.stackFor("a", { kind: "peer", from: "y", turn: "tY" }));
+    const chain = [...new Set([...inferred, ...depth])];
+    const g = (target, o = {}) => checkDirection({ self: "a", target, kind: "task", re: false, jobId: "", jobs: [], chain, depth, nameOf: (t) => `.${t}`, ...o });
+    const down = g("w"), loop = g("u"), old = g("w", { depth: undefined });
+    return {
+      pass: chain.length === 4 && depth.length === 2 && !down && !!loop && !!old,
+      why: `并集=${chain.join(",")} 链深=${depth.join(",")} · 向下派=${down ? "拦" : "放行"} · 反派 u=${loop ? "拦" : "放行"} · 按并集算深度=${old ? "拦" : "放行"}`,
+    };
   } },
 
   // 依赖 after (纯单元, 停放 / 放行 / 失败 / reload 都在回执层): 停放不占回执槽、不改 k; 前置落定才放行并带上结论;

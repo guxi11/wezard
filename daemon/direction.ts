@@ -21,6 +21,9 @@ export interface DirectionIn {
   jobs: readonly JobRecord[];
   /** 发话方此刻这一轮的 k 链: 它在答谁、谁又在答谁… (target key, 近的在前; 见 receipts.ancestorsOf)。 */
   chain: readonly string[];
+  /** 链深闸看的那一条: 这件活实际挂的那一帧 (for 选中的, 没 for 就本轮推断帧) 自己的链。缺省 = `chain`。
+   *  `chain` 可以是几条帧链的并集 (防环要把所有在等你的都算上), 拿并集的长度算深度会误拦。 */
+  depth?: readonly string[];
   nameOf: (target: string) => string;
 }
 
@@ -50,7 +53,8 @@ export const checkDirection = (i: DirectionIn): string | undefined => {
   const sibling = open.find((j) => j.owner !== i.self && j.owner !== i.target && isMember(j, i.self) && isMember(j, i.target));
   if (sibling) return `你和 ${nm(i.target)} 同是工单 ${sibling.id} 的成员, 成员之间不横向派 task —— 问一句用 kind:"ask"、知会用 kind:"fyi"; 要它干活以 \`NEED:\` 告诉开单者 ${nm(sibling.owner)}, 由它派`;
   // 5 链深: 再往下派说明该交还上级拆。
-  if (i.chain.length >= K_CHAIN_MAX) return `你这一轮已在 ${i.chain.length} 层派活链的底部 (${i.chain.map(nm).reverse().join(" → ")} → 你), 不再往下派 task —— 活太大就以 \`NEED:\` 请上级重新拆, 或自己做完`;
+  const deep = i.depth ?? i.chain;
+  if (deep.length >= K_CHAIN_MAX) return `你这一轮已在 ${deep.length} 层派活链的底部 (${deep.map(nm).reverse().join(" → ")} → 你), 不再往下派 task —— 活太大就以 \`NEED:\` 请上级重新拆, 或自己做完`;
   // 6 专家只答 ask; 一个 wizard 同时只在一张开着的单里当未落定的 exec。
   const lent = open.find((j) => j.owner === i.self && j.members.some((m) => m.target === i.target && m.role === "expert"));
   if (lent) return `${nm(i.target)} 是工单 ${lent.id} 里借来的专家, 只答 kind:"ask"; 要它领活先从原单释放 (以 role:"exec" 重新归入工单)`;
