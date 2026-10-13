@@ -13,6 +13,7 @@ import {loadJobStore} from '../daemon/jobs.ts';
 import {createLedger,pendingGc} from '../daemon/pending-items.ts';
 import {loadJsonMap} from '../shared/json-map-store.ts';
 import {loadWorkflowPlans} from '../daemon/workflow-plans.ts';
+import {createAnswerTransfers} from '../daemon/answer-transfer.ts';
 const src=readFileSync('daemon/index.ts','utf8');
 const start=src.indexOf('    // One durable key per tracked physical dispatch leg');
 const end=src.indexOf(' // 老 MCP 进程还在调这个名字',start);
@@ -73,20 +74,25 @@ export async function setup(options={}){
  const m={idleNow:async()=>true,untilIdle:async()=>({idle:true}),sessionInfo:()=>undefined,
  injectText:async(...a)=>{if(a[3]?.guard&&!a[3].guard('paste'))return {ok:false,reason:'guard'};if(a[3]?.guard&&!a[3].guard('submit'))return {ok:false,reason:'guard'};injected.push(a);return {ok:true};},interruptPane:async()=>({ok:true}),killPane:async()=>({ok:true})};
  const openingAsk=()=>options.opening;
+ const answers=createAnswerTransfers(loadJsonMap(join(dir,'answer-transfers.json'),undefined,{strict:true}));
+ const answerDeliveries=[];
+ const deliverTransferredAnswer=async(id,out)=>{const r=answers.outcome(id,out);if(r){answerDeliveries.push({id,out});answers.delivered(id);}return true;};
+ m.answerContext=()=>options.answerContext;
+ m.takeAnswer=()=>{};
  const currentAsk=new Function('openingAsk','displayName',currentAskCode)(openingAsk,x=>x);
- const env={canonicalTurn,baseOfKey:x=>x,jobAncestors:()=>[],jobChildren:()=>[],jobEpisode:()=>({name:'owner'}),appendEpisode:()=>true,episodePath:()=>'',episodeName:()=>'',chatNameOf:()=>'',openingAsk,currentAsk,notices:{post:noop},briefOf:()=>({name:'worker'}),forgetWizard:noop,subjectOf:noop,postRoster:noop,sameBot:()=>true,workflow,planStore,pendingBirthJobs:new Map(),planRunner:{cancelJob:(...a)=>planRunner.cancelJob(...a)},advancePlans:()=>advancePlans(),receipts,jobs:jobView,m,http:{register:(path,fn)=>routes.set(path,fn)},
+ const env={answers,lostAnswer:()=>options.lostAnswer??false,openingOfSelf:()=>({ms:options.openingMs??123}),kAttr:k=>`${k.kind}:${k.turn}:${k.channel??k.from}`,renderReminder:(_tag,lines)=>lines.join('\n'),deliverTransferredAnswer,canonicalTurn,baseOfKey:x=>x,jobAncestors:()=>[],jobChildren:()=>[],jobEpisode:()=>({name:'owner'}),appendEpisode:()=>true,episodePath:()=>'',episodeName:()=>'',chatNameOf:()=>'',openingAsk,currentAsk,notices:{post:noop},briefOf:()=>({name:'worker'}),forgetWizard:noop,subjectOf:noop,postRoster:noop,sameBot:()=>true,workflow,planStore,pendingBirthJobs:new Map(),planRunner:{cancelJob:(...a)=>planRunner.cancelJob(...a)},advancePlans:()=>advancePlans(),receipts,jobs:jobView,m,http:{register:(path,fn)=>routes.set(path,fn)},
  readPeerBody:async req=>{let raw='';for await(const c of req)raw+=c;const body=JSON.parse(raw);return {self:req.headers['x-caller']??'owner',body};},
  json:(res,status,body)=>{res.writeHead(status,{'content-type':'application/json'});res.end(JSON.stringify(body));},
  resolvePeer:(self,t)=>options.resolvePeer?.(self,t)??({ok:true,target:t,foreign:false}),addrOf:b=>b.name,askerOf:()=>options.origin?.asker,parentKOf:()=>options.origin?.k,
  checkJob:new Function('jobs','JOB_MEMBER_MAX',checkCode)(jobView,5),checkDirection:(i)=>options.direction?.(i),displayName:x=>x,
  afterTurnsOf:b=>[...new Set((b.after??[]).map(x=>String(x).replace(/[`\s]/g,'')))],
- afterNote,channelOf:()=>'',wizards:{get:()=>true},cfg:{daemon:{stateDir:dir}},chatPolicyOf:()=>({topOnly:false}),
- handedOff:async t=>{await options.handedOff?.(t);},othersTurn:async()=>options.others,coldRefused:new Map(),coldGateOf:()=>'',touchOf:()=>0,ttlOf:()=>0,
+ afterNote,channelOf:()=>'',wizards:{get:()=>true},cfg:{daemon:{stateDir:dir}},chatPolicyOf:()=>({topOnly:options.topOnly??false}),
+ handingOff:()=>false,handedOff:async t=>{await options.handedOff?.(t);},othersTurn:async()=>options.others,coldRefused:new Map(),coldGateOf:()=>'',touchOf:()=>0,ttlOf:()=>0,
  peerAddress:(_cfg,_s,t)=>t,roleParam:x=>x,wakeNoteOf:()=>'',deadlineOf,envelopeFor:()=>'',ledger,log:pino({level:'silent'}),relayPeer:noop};
  internal=new Function(...Object.keys(env),routeCode)(...Object.values(env));
  const server=createServer((req,res)=>{const fn=routes.get(req.method+' '+req.url);if(!fn){res.writeHead(404);res.end();return;}Promise.resolve(fn(req,res)).catch(e=>{res.writeHead(500);res.end(e.message)});});
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
  const base='http://127.0.0.1:'+server.address().port;
  const post=async(route,body,caller='owner')=>{const r=await fetch(base+route,{method:'POST',headers:{'content-type':'application/json','x-caller':caller},body:JSON.stringify(body)});const raw=await r.text();let response;try{response=JSON.parse(raw);}catch{response={reason:raw};}return {status:r.status,body:response};};
- return {planStore,env,routes,jobView,setRunner:r=>{planRunner=r;advancePlans=r.kick;},bootstrap:()=>new Function('workflow','receipts','handoffs','recoverWorkflow','log',bootstrapCode)(workflow,receipts,{resume:noop},internal.recoverWorkflow,pino({level:'silent'})),dir,workflow,receipts,outcomeEvents,jobs,ledgerStore,removeJob,m,injected,post,internal,close:()=>{server.closeAllConnections();server.close();}};
+ return {answers,answerDeliveries,planStore,env,routes,jobView,setRunner:r=>{planRunner=r;advancePlans=r.kick;},bootstrap:()=>{const e={...env,handoffs:{resume:noop},recoverWorkflow:internal.recoverWorkflow};new Function(...Object.keys(e),bootstrapCode)(...Object.values(e));},dir,workflow,receipts,outcomeEvents,jobs,ledgerStore,removeJob,m,injected,post,internal,close:()=>{server.closeAllConnections();server.close();}};
 }

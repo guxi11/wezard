@@ -404,6 +404,7 @@ const TELL_SCHEMA = {
     .boolean()
     .optional()
     .describe("false = 放出去就不管了, 不要回执 (纯通知、或者你根本不关心它说什么)。默认 true。"),
+  answer: z.literal("transfer").optional().describe("简单问题由目标直接对人回答：移交当前真实人类 topOnly 轮的回答权与控制权，并承接已有 stream 内容。忙目标拒绝409，失败保留原权；成功后你静默收口，daemon 唯一交付目标终句，timeout/interrupt/dead 改 standalone。不能与 job/node/after/re/receipt:false/chain:false/fyi 并用。省略沿用普通回执。"),
   kind: z
     .enum(["task", "ask", "fyi"])
     .optional()
@@ -451,9 +452,10 @@ const TELL_DESC =
   "默认私聊, 只记在双方 rolepage; 守护进程给 `text` 挂信封 (发话人、私聊/公开、终句收口约定)。拒绝对自己发送。\n" +
   "**派活方向 (守护进程拦, 返回 409 带改道说法)**: 带 `job` 的 task 只许开单者发; 同一张单的成员之间只许 `ask` / `fyi`, 不横向派 task; 上级单的开单者不越级给下层成员派活 (经它的 lead `re`); 目标正等你答复 (在你的 k 链上) 时 task / ask 都不行, 以 `NEED:` 收口; 自己已在 ≥3 层派活链底部不再往下派 task; 借来的专家 (role expert) 只答 ask; 一个 wizard 同时只在一张开着的单里当未落定的执行者。`fyi` 永远放行。";
 
-const tellBody = (a: { name: string; text: string; kind?: string; priority?: string; waitSec?: number; job?: string; role?: string; public?: boolean; receipt?: boolean; re?: string; deadline?: number; chain?: boolean; force?: boolean; after?: string[]; node?: string }) => ({
+const tellBody = (a: { name: string; text: string; kind?: string; priority?: string; waitSec?: number; job?: string; role?: string; public?: boolean; receipt?: boolean; re?: string; deadline?: number; chain?: boolean; force?: boolean; after?: string[]; node?: string; answer?: "transfer" }) => ({
   name: a.name,
   text: a.text,
+  ...(a.answer ? { answer: a.answer } : {}),
   ...(a.kind ? { kind: a.kind } : {}),
   ...(a.priority ? { priority: a.priority } : {}),
   ...(a.waitSec ? { waitSec: a.waitSec } : {}),
@@ -844,6 +846,7 @@ server.registerTool(
       "你不同意就**显式推翻**: `to` 用于人明确指定或已确认必需的上下文连续性, `spawn:true` 硬要新的, `force:true` 只越过缓存成本门控, 不放宽自动复用的相关性/lead/占用约束。同一验收目标的续篇用 tell_peer 的原件号 re, 不能用 re/to 给复杂 lead 顺便追加独立小活。`lead:true` = 要统筹 coder + reviewer、多轮协作: 白板起 lead 由它组队 (带 `to` 则让那个已有 wizard 当 lead)。",
     inputSchema: {
       task: z.string().describe("这件活, 原样转给对方的文本。写清目标与交付, 带文件名 / 模块名帮助找上下文; 公共规则文件或同目录不构成复用理由。不要把独立核查改写成原 lead 的附加交付。"),
+      answer: z.literal("transfer").optional().describe("简单问题移交回答权与控制权，目标承接已有气泡直接回答人；成功后你静默收口。忙目标409保留原权，失败终态 standalone；省略维持旧回执语义，不能配 lead:true。"),
       name: z.string().describe("若决定新 spawn, 它的名字: 这件事的短名 (全机唯一)。转给已有的时不用。"),
       description: z.string().describe("若决定新 spawn, 它往后的职责, 一句话。"),
       tier: z.enum(TIERS).optional().describe("本次任务难度及 spawn 档位 (mini / light / standard / hard / ultra)。按所需判断而非句长选: 文件存在/加载路径核查 light, 常规实现 standard, 设计/疑难排障/审查 hard。复用已有 wizard 不会切换它的模型。"),

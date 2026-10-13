@@ -106,6 +106,8 @@ const sameK = (a: ParentK, b: ParentK): boolean => kAttr(a) === kAttr(b);
 export interface Outcome { status: ReceiptStatus; body: string }
 
 export interface ReceiptDeps {
+  /** Transferred answers are delivered to the human, never injected back into the router. */
+  deliverAnswer?: (id: string, outcome: Outcome) => Promise<boolean>;
   workflowPrereq?: (owner: string, turn: string) => Prereq | undefined;
   /** 能接新一轮了吗 (轮已结束、没停在审批上) / 等到那一刻 —— 投递时机用, 见 tell_peer when:"idle"。 */
   idleNow: (target: string) => Promise<boolean>;
@@ -182,6 +184,7 @@ export type Prereq =
   | { state: "pending" | "unknown" };
 
 export interface Tell {
+  answerTransfer?: string;
   /** Stable tracked dispatch leg; a continuation keeps turn but replaces this key. */
   dispatchKey?: string;
   from: string;
@@ -526,6 +529,14 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     deps.onOutcome?.(s, out.status, out.body, false);
     if (final && s.job) deps.settleJob?.(s.job, s.to, out.status as Terminal, parseClosing(out.body).artifacts);
     if (final) nudgeHolds();
+    if (s.answerTransfer) {
+      s.claimed = true;
+      save(s);
+      s.delivered = await deps.deliverAnswer?.(s.answerTransfer, out) ?? false;
+      s.resolved = true;
+      settle(s);
+      return;
+    }
     // 发话方自己在交接: 重开的那几秒里 pane 是死的, 别把这当成"已经不在了"。
     await deps.handedOff?.(s.from);
     if (!(await deps.paneLive(s.from))) {
@@ -737,7 +748,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       const s = upstream({ from, turn }, to);
       if (!s || s.resolved || s.claimed) return undefined;
       const legs = (s.legs ?? 1) + 1;
-      register({ from, to, channel: s.channel, job: s.job, turn, legs, ...(s.deadlineAt ? { deadlineAt: s.deadlineAt } : {}), ...(s.k ? { k: s.k } : {}), ...(s.asker ? { asker: s.asker } : {}) });
+      register({ from, to, channel: s.channel, job: s.job, turn, legs, ...(s.answerTransfer ? { answerTransfer: s.answerTransfer } : {}), ...(s.deadlineAt ? { deadlineAt: s.deadlineAt } : {}), ...(s.k ? { k: s.k } : {}), ...(s.asker ? { asker: s.asker } : {}) });
       return { legs, channel: s.channel, ...(s.asker ? { asker: s.asker } : {}) };
     },
     prepare: (from, to, re) => {
@@ -750,6 +761,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     claim: (from, to) => {
       const s = slots.get(keyOfPair(from, to));
       if (!s) return false;
+      if (s.answerTransfer) return s.delivered;
       const fresh = !s.settled;
       s.claimed = true;
       s.resolved = true;
@@ -809,7 +821,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
         if (s.job) deps.settleJob?.(s.job, s.to, "canceled", []);
         deps.onOutcome?.(s, "canceled", s.outcome.body, s.from === by);
         // 发起 stop 的那方自己知道, 不投; 守着的 watcher 看到 claimed 就收尾。
-        if (s.from === by) { s.claimed = true; s.resolved = true; settle(s); continue; }
+        if (s.from === by && !s.answerTransfer) { s.claimed = true; s.resolved = true; settle(s); continue; }
         save(s);
         // 挂起等子活的没有 watcher 在守: 叫醒它去投这份 canceled。
         if (s.deferred) wake(s);

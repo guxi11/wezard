@@ -2096,7 +2096,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // 群管家的手闸 (见 steward-guard.ts): 排在所有审批之前 —— 拦的不是危险, 是越位,
     // 放行窗口 / allowRules / skipAll 都不该替它开门。
     const owner = getMirrorTarget?.(sessionId);
-    if (owner && !tagOfKey(owner)) {
+    if (owner && !tagOfKey(owner) && chatPolicyOf(cfg, owner).topOnly) {
       const reason = stewardGuard({
         sessionId,
         turn: openTurnsOf(owner, sessionId)[0]?.id ?? "",

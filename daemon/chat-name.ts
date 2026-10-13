@@ -70,10 +70,10 @@ export const chatBaseOf = (cfg: Config, ref: string): string => {
 };
 
 /** `target` 所在聊天的群聊级策略 (`chatPolicy`, 键是 base principal)。 */
-// topOnly 没写 = 按通道取默认: 微信 ClawBot 群聊开, 其余关。
+// topOnly 没写 = wezard 与微信 ClawBot 群聊开, 其余关。
 // 默认不落盘, 已有的微信群聊不必迁移; 写了 false 照样关。
 export const chatPolicyOf = (cfg: Config, target: string): ChatPolicy & { topOnly: boolean } =>
-  ((base, p) => ({ ...p, topOnly: p.topOnly ?? isWxChat(base) }))(baseOfKey(target), ChatPolicy.parse(cfg.chatPolicy?.[baseOfKey(target)] ?? {}));
+  ((base, p) => ({ ...p, topOnly: p.topOnly ?? (isWxChat(base) || fold(chatNameOf(cfg, base)) === "wezard") }))(baseOfKey(target), ChatPolicy.parse(cfg.chatPolicy?.[baseOfKey(target)] ?? cfg.chatPolicy?.[chatNameOf(cfg, target)] ?? {}));
 
 /** `target` 是管家 (群的默认会话) 时它该跑的档: `chatPolicy.<chat>.steward` 压过 `models.steward`; 不是管家 = undefined。 */
 export const stewardTierOf = (cfg: Config, target: string): TierName | undefined =>

@@ -2189,6 +2189,10 @@ export interface MirrorBridge {
    *  私聊轮 ""; 还没有过轮次 → home base。 */
   currentChannel: (target: string) => string;
   currentAsker: (target: string) => Asker | undefined;
+  answerContext: (target: string) => { turn: string; channel: string; prefix: string } | undefined;
+  takeAnswer: (id: string, target: string) => void;
+  deliverAnswer: (id: string, target: string, turn: string, channel: string, prefix: string, body: string, standalone: boolean) => Promise<void>;
+  setAnswerSilencer: (fn: (target: string, turn: string) => boolean) => void;
   /** Send Esc to the live tmux pane bound to `target` — interrupts whatever
    *  Claude is currently doing (active generation / open prompt). No-op for
    *  spawn-mode attachments (no live TTY to interrupt).
@@ -2913,7 +2917,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // `emoji #tag` (withLinkedTagHeader 自己兜)。
   const chatTurnUrl = (target: string, turnId: string | undefined): string | undefined =>
     turnId
-      ? buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, turnId, roleUniq(target))
+      ? buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, turnId, roleUniq(target), target)
       : undefined;
 
   // `[mirror]` / `[wezard]` 系统提示不是答给谁的话, 不标方向。
@@ -2932,6 +2936,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // `[wezard]` 系统提示 (它们回 home)。
   const sendStandalone = (a: AttachState, content: string): void => {
     if (!hasVisibleBody(content)) return;
+    if (answerSilent(a)) return;
     if (isPrivate(a) && !/^\[(mirror|wezard)\]/.test(content.trim())) return;
     const chatId = replyChatId(a);
     const turnId = a.briefTurnId; // 推送是排队异步的, 到发出时 turn 早已收口
@@ -3256,7 +3261,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const b = a.briefBubble;
     const turnId = a.briefTurnId;
     // 收口后这一路全部失效: 气泡要么已 done, 要么 turn 已经换人/清空。
-    if (!text || !b || b.done || !turnId || a.briefConcluded) return;
+    if (!text || !b || b.done || !turnId || a.briefConcluded || answerSilent(a)) return;
     a.cotLastSent = text;
     try {
       await client.replyStream(b.frame, b.streamId, briefLine(a, turnId, `\`${text}\``), false);
@@ -3290,8 +3295,52 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // `[mirror]` 系统提示 —— 它们都不走这道门。
   // 只在 brief 下生效: 抑制的前提是详情页兜得住内容, 而 turn store 只有 brief 在写。
   // 私聊轮 (wizard 之间, 非 public) 同理: 它的回复属于那场私聊, 只进双方的 rolepage。
+  let silenceAnswer: (target: string, turn: string) => boolean = () => false;
+  const answerSilent = (a: AttachState): boolean => silenceAnswer(a.target, a.briefTurnId ?? a.liveStream?.turnId ?? "");
   const turnSilent = (a: AttachState): boolean =>
-    isPrivate(a) || (cfg.wrc.mirror.brief && cfg.wrc.mirror.chatOriginOnly && a.turnFromChat === false);
+    answerSilent(a) || isPrivate(a) || (cfg.wrc.mirror.brief && cfg.wrc.mirror.chatOriginOnly && a.turnFromChat === false);
+  const answerBubbles = new Map<string, { bubble: BriefBubble; prefix: string }>();
+
+  const answerContext = (target: string): { turn: string; channel: string; prefix: string } | undefined => {
+    const a = byTarget.get(target);
+    if (!a || a.briefConcluded || a.briefIsSlash || isPrivate(a) || a.turnFromChat === false) return undefined;
+    const turn = a.briefTurnId ?? a.liveStream?.turnId;
+    return turn ? { turn, channel: a.channel ?? baseOfKey(target), prefix: a.liveStream?.acc || (a.cotLastSent ? `\`${a.cotLastSent}\`` : "") } : undefined;
+  };
+  const takeAnswer = (id: string, target: string): void => {
+    const a = byTarget.get(target);
+    if (!a) return;
+    clearCot(a);
+    if (a.briefBubble && !a.briefBubble.done) {
+      clearTimeout(a.briefBubble.hardTimer);
+      answerBubbles.set(id, { bubble: a.briefBubble, prefix: "" });
+      a.briefBubble = undefined;
+    } else if (a.liveStream && !a.liveStream.closed && !a.liveStream.dead) {
+      const s = a.liveStream;
+      clearTimeout(s.flushTimer); clearTimeout(s.idleTimer); clearTimeout(s.hardTimer);
+      s.closed = true;
+      answerBubbles.set(id, { bubble: { frame: s.frame, streamId: s.streamId, done: false }, prefix: s.acc });
+      a.liveStream = undefined;
+    }
+    // All late source output stays private until a genuine new injection changes channel.
+    a.channel = "";
+  };
+  const deliverAnswer = async (id: string, target: string, turn: string, channel: string, prefix: string, body: string, standalone: boolean): Promise<void> => {
+    const held = answerBubbles.get(id);
+    const text = [prefix.trim(), body.trim()].filter(Boolean).join("\n\n");
+    const content = withLinkedTagHeader(target, text, chatTurnUrl(target, turn), undefined, undefined, channel);
+    if (held && !held.bubble.done) {
+      held.bubble.done = true;
+      try {
+        // Failure closes progress first; the terminal explanation is a standalone message.
+        const progress = withLinkedTagHeader(target, prefix || "回答已转交", chatTurnUrl(target, turn), undefined, undefined, channel);
+        await client.replyStream(held.bubble.frame, held.bubble.streamId, standalone ? progress : content, true);
+        if (!standalone) { answerBubbles.delete(id); return; }
+      } catch (e) { log.warn({ id, err: errText(e) }, "answer transfer stream failed; standalone fallback"); }
+    }
+    await client.sendMessage(channel.replace(/^(user|chat|group):/, ""), { msgtype: "markdown", markdown: { content } });
+    answerBubbles.delete(id);
+  };
 
   // 收口一条 loading 气泡: finish=true 写入最终内容, 只生效一次。发送失败退回 standalone。
   // raw=true skips withTagHeader (used when content already contains the linked tag header).
@@ -3332,6 +3381,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.briefHadTool = false;
     a.briefConcluded = false;
     a.briefLastText = undefined;
+    a.cotLastSent = undefined;
     clearCot(a); // turn 级状态 —— 进度行跟着气泡走, 不能跨 turn 残留
     log.info({ sessionId: a.sessionId, turnId: q.turnId, isSlash: q.isSlash }, "brief: turn started");
   };
@@ -3670,7 +3720,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.lastConcludedBody = body;
     a.lastConcludedEpoch = a.queryEpoch ?? 0;
     a.lastConcludedAt = Date.now();
-    if (a.briefBubble && !a.briefBubble.done) {
+    if (answerSilent(a)) {
+      log.info({ target: a.target, turnId }, "answer transferred; source conclusion suppressed");
+    } else if (a.briefBubble && !a.briefBubble.done) {
       void finishBriefBubble(a, briefLine(a, turnId, linkTags(a.target, body)), true);
     } else if (turnSilent(a)) {
       // CLI 手敲的一轮: 终稿只留在 turn store, 详情页照常实时可见。
@@ -6913,6 +6965,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (a?.convFrom) return a.convFrom.asker;
       return a?.speaker ? { who: a.speaker, chat: a.channel ?? baseOfKey(target) } : undefined;
     },
+    answerContext, takeAnswer, deliverAnswer,
+    setAnswerSilencer: (fn) => { silenceAnswer = fn; },
     currentChannel: (target) => {
       const a = byTarget.get(target);
       return a?.channel ?? baseOfKey(target);

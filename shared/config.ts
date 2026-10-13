@@ -465,7 +465,7 @@ const Chats = z.record(z.string(), z.string().describe("base principal (`chat:wr
 // config_set 收名字, 落盘前换成它此刻指向的 principal。会进宪章 (系统提示): 已在跑的 wizard 要 handoff
 // 才换上新规矩 —— config_set 落盘时按宪章前后对比点名受影响的那些。
 export const ChatPolicy = z.object({
-  topOnly: z.boolean().optional().describe("顶层模式: 人只和顶层 wizard (群管家 / 人 `.name` 点名的) 对话; wizard 之间一律私聊 (tell_peer / dispatch 的 public 失效), 被派活的 wizard 不能 notify 进群, 过程只在 rolepage。省略 = 微信 ClawBot 群聊 (`chat:wx_…`) 开, 其余关"),
+  topOnly: z.boolean().optional().describe("顶层模式: 人只和顶层 wizard (群管家 / 人 `.name` 点名的) 对话; wizard 之间一律私聊 (tell_peer / dispatch 的 public 失效), 被派活的 wizard 不能 notify 进群, 过程只在 rolepage。省略 = wezard 与微信 ClawBot 群聊 (`chat:wx_…`) 开, 其余关"),
   stewardBudget: z.number().int().min(-1).default(4).describe("群管家的手闸: 每轮自己跑命令 / 外部工具的次数上限, 用完拒并叫它 dispatch; 改文件、开子代理、读代码 (Read / Grep / Glob 与读文件的 shell 命令) 一律拒。-1 = 不设闸"),
   steward: z.enum(TIERS).optional().describe("本群管家的档位, 覆盖 models.steward; 省略 = 跟全局"),
 });
@@ -489,7 +489,7 @@ export const ConfigSchema = z.preprocess(liftLegacySchedules, z.object({
   bots: knob(z.array(BotEntry).default([]).describe("额外的企微机器人 (多机器人; 含 secret, 整个数组可放进 secrets.json —— 数组整体覆盖不逐项合并); 改完重启守护进程生效"), { gate: "hidden" }),
   defaultChat: knob(z.string().default("").describe("出站默认聊天 (没有更具体去向时推往这里)"), { gate: "card", apply: "hot" }),
   chats: hot(Chats.default({}).describe("聊天命名表: 名字 → base principal")),
-  chatPolicy: hot(z.record(z.string(), ChatPolicy).default({}).describe("群聊级策略: base principal (`chat:wr…` / `user:…`) → 开关; config_set 写聊天名会换成它的 principal 落盘; 进宪章, 已在跑的 wizard 要 handoff 才换上 (config_set 落盘时会点名受影响的)")),
+  chatPolicy: hot(z.record(z.string(), ChatPolicy).default({ wezard: { topOnly: true, stewardBudget: 4 } }).describe("群聊级策略: base principal (`chat:wr…` / `user:…`) → 开关; wezard 默认 topOnly 开，显式 false 关闭；config_set 写聊天名会换成它的 principal 落盘; 进宪章, 已在跑的 wizard 要 handoff 才换上 (config_set 落盘时会点名受影响的)")),
   daemon: Daemon.default({}).describe("守护进程: 监听、日志、详情页"),
   wrc: Wrc.default({}).describe("远程驱动: 授权名单、CLI 后端、工作区、镜像"),
   approval: knob(Approval.default({}).describe("工具调用审批: 粒度、规则、危险名单、窗口"), { gate: "card", apply: "hot" }),
