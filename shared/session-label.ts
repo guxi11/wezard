@@ -205,6 +205,8 @@ export interface TagLinker {
 }
 let linker: TagLinker | undefined;
 export const bindTagLinker = (l: TagLinker): void => { linker = l; };
+export const resolveTagTarget = (name: string, from: string): string | undefined => linker?.resolve(name, from);
+export const tagUrlOf = (target: string): string | undefined => linker?.urlOf(target);
 
 /** target 的对外名字: 名册里的全局名, 名册没绑定时退回 slot id。 */
 export const displayName = (target: string | undefined): string =>
