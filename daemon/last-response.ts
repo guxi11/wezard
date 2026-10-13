@@ -16,6 +16,7 @@
 import type { WSClient, WsFrame, BaseMessage, WsFrameHeaders } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
 import { rawTagHeader, withBot, botOfKey } from "../shared/session-label.js";
+import { PRIMARY_BOT } from "../shared/config.js";
 import { botTagOf, pinFrameBot } from "./bot-mux.js";
 import { connFor } from "./reach.js";
 import { withMessageFooter, withoutMessageFooter, type MessageFooterPolicy } from "../shared/message-footer.js";
@@ -45,7 +46,7 @@ const bareFromFrame = (frame: WsFrame<BaseMessage> | WsFrameHeaders | undefined)
   const body = (frame as WsFrame<BaseMessage> | undefined)?.body;
   if (!body) return "";
   // 副机器人收到的帧, 聊天键带 `~<bot>` —— 与会话 key 剥出来的 chatid (sendMessage 那一路) 对齐。
-  const bot = botTagOf(frame) || botTagOf(body);
+  const bot = [botTagOf(frame), botTagOf(body)].find((tag) => tag && tag !== PRIMARY_BOT) ?? "";
   if (body.chattype === "group" && body.chatid) return withBot(body.chatid, bot);
   if (body.from?.userid) return withBot(body.from.userid, bot);
   return "";
