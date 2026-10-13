@@ -1522,7 +1522,7 @@ export const parseInputBox = (cap: string, styledLayout = cap): InputBox => {
   while (layout.length && !layout[layout.length - 1]!.trim()) layout.pop();
   const footer = layout.length - 1;
   // Codex hides the shortcuts row while the composer contains text.
-  const shortcuts = /\? for shortcuts\s*$/u.test(layout[footer] ?? "");
+  const shortcuts = /(?:^|\s)\? for shortcuts(?:\s|$)/u.test(layout[footer] ?? "");
   if (shortcuts || (layout[footer] ?? "").includes("·")) {
     let status = shortcuts ? footer - 1 : footer;
     while (status >= 0 && !layout[status]!.trim()) status--;
