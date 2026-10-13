@@ -9,6 +9,8 @@
 // —— 不经 MCP, 所以不受「本会话的 MCP 进程是旧代码」影响。判定只读守护进程落的账 (receipts.json /
 // jobs.json) 和根的 transcript 里收到的回执信封, 不信分身自己说了什么。跑完 (含失败 / Ctrl-C)
 // 把生的分身全部收掉。
+// live 前提: resident daemon 必须包含 35b8d8a (task owner target-key sweep 豁免)。
+// 由部署方确认干净候选已加载；工作树 HEAD / dist 文件本身不能证明 resident 版本。
 //
 // 根的开场白是发起者一句 receipt:false 的私聊 —— 它这一轮没有父 k, 测试活的回执只回到根,
 // 不会沿发起者手上那件活往上冒。工单用例会在根的 home 聊天里各出一对开 / 收工气泡。
@@ -17,6 +19,9 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFil
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
+import { pathToFileURL } from "node:url";
+import { createPaneGuards, GuardPrerequisiteError } from "./pane-guards.mjs";
+import { normalizeTask } from "../../dist/shared/task-file.js";
 import { loadConfig } from "../../dist/shared/config.js";
 import { bindCliBackends, backendForPath } from "../../dist/shared/cli-backends.js";
 
@@ -129,6 +134,20 @@ print("GATE_RELEASED")
 // ── 根与分身 ──────────────────────────────────────────────────────────
 let root; // { target, name, model }
 const kids = new Map(); // name → target
+let shuttingDown = false;
+const paneGuards = createPaneGuards({
+  post, run: RUN,
+  log: (event) => console.log(`[guard] ${JSON.stringify(event)}`),
+  alive: async (_target, name) => !!(tmuxPaneOf(name) || tmuxPaneOf(`.${name}`)),
+  inspect: async (file) => {
+    if (!existsSync(file)) return undefined;
+    const mod = await import(`${pathToFileURL(file).href}?check=${nonce()}`);
+    const r = normalizeTask(mod.default, "guard", file);
+    if (!r.ok) throw new GuardPrerequisiteError(`保活任务无法读取: ${file}: ${r.reason}`);
+    return r.task;
+  },
+  remove: (file) => rmSync(file, { force: true }),
+});
 const SLEEP = (sec) => `先用你的 shell 工具 **前台**执行 \`python3 -c "import time; time.sleep(${sec})"\`, 必须等待进程退出再回复 (不要 run_in_background, 不要用 sleep 命令)`;
 const TELL = (name, text, extra = "") =>
   `用 wezard 的 tell_peer 工具 (若工具未加载, 使用你可用的工具发现机制加载) 发给 name "${real(name)}"${extra}, text 原样是下面 <<< >>> 之间的内容:\n<<<\n${text}\n>>>`;
@@ -137,14 +156,20 @@ const TELL = (name, text, extra = "") =>
 let spawning = Promise.resolve();
 const spawnOnce = async (name, extra) => {
   const r = await post("/wizard/clone", { target: root.target, name: real(name), inherit: false, tier: "mini", keepalive: false, description: "receipt-regress 临时分身", ...extra });
-  if (r.ok) kids.set(name, r.target);
+  if (r.ok) {
+    kids.set(name, r.target);
+    await paneGuards.protect(r.target, r.name ?? real(name));
+  }
   return r;
 };
 const spawn = (name, extra = {}) => {
   const run = spawning.then(async () => {
+    if (shuttingDown) throw new GuardPrerequisiteError("保护前提不成立: 正在清理，不再 spawn");
+    await paneGuards.assertAll();
     const r = await spawnOnce(name, extra);
     const ok = r.ok ? r : /already bound/.test(r.reason ?? "") ? await spawnOnce(name, extra) : r;
     if (!ok.ok) throw new Error(`spawn ${name}: ${ok.reason}`);
+    await paneGuards.assertAll();
     return ok.target;
   });
   spawning = run.catch(() => undefined);
@@ -152,8 +177,12 @@ const spawn = (name, extra = {}) => {
 };
 const stop = async (name) => {
   if (!kids.has(name)) return;
-  await post("/wizard/stop", { target: root.target, name: real(name), mode: "end", forget: true });
-  kids.delete(name);
+  try { await paneGuards.release(kids.get(name)); }
+  finally {
+    const r = await post("/wizard/stop", { target: root.target, name: real(name), mode: "end", forget: true });
+    if (r.ok) kids.delete(name);
+    else throw new Error(`stop ${name}: ${r.reason}`);
+  }
 };
 const tell = (to, text, extra = {}) => post("/peers/tell", { target: root.target, name: real(to), text, priority: "now", ...extra });
 /** 根 → `to` 那一份落定 (settled) 为止。 */
@@ -204,7 +233,8 @@ const fakeReceipts = async (extra = {}) => {
 const cases = {
   "receipt-timing": { names: [], unit: true, run: async () => {
     execFileSync("npx", ["tsx", "tests/receipt-timing.test.ts"], { stdio: "pipe" });
-    return { pass: true, why: "5 个事件门控时序: NEED 已投/排队、单次/双次 re、交接前两份欠账/一份已答" };
+    execFileSync("node", ["tests/receipt-guards.test.mjs"], { stdio: "pipe" });
+    return { pass: true, why: "保活清理 + 5 个事件门控时序: NEED 已投/排队、单次/双次 re、交接前两份欠账/一份已答" };
   } },
   // 回执轮的频道只由去向定: 续回进群 (chat 父 k, 兄弟落齐) 才有频道, 其余一律私聊 ——
   // 不能因为那件子活是 public:true 派的就沿用它的频道。三种回落: 没有父 k (chain:false)、
@@ -450,6 +480,7 @@ const cases = {
   "graph-private": { names: ["rr-gn"], run: async () => {
     const n = nonce();
     const tag = real("rr-gn");
+    await spawn("rr-gn"); // Graph reuses this already-protected node.
     const g = await post("/graph/run", { target: root.target, nodes: [{ tag, model: root.model }], steps: [{ to: tag, prompt: `这是回归测试, 不要调用任何工具, 直接回复一行: RESULT: [receipt-regress] graph-${n}` }], rounds: 1, idleTimeoutSec: 180 });
     if (!g.ok) return { pass: false, why: `graph/run: ${g.reason}` };
     kids.set("rr-gn", `${g.base}#${tag}`);
@@ -633,6 +664,7 @@ const cases = {
     await sleep(10_000);
     const pane = tmuxPaneOf(real("rr-z"));
     if (!pane) return { pass: false, why: "找不到 rr-z 的 tmux pane" };
+    await paneGuards.release(kids.get("rr-z")); // Deliberate death is no longer a protected receiver.
     execFileSync("tmux", ["kill-pane", "-t", pane]);
     const t0 = Date.now();
     const s = await settledSlot("rr-z", 120_000);
@@ -793,15 +825,26 @@ const pool = (limit) => {
   };
 };
 
-const cleanup = async () => {
+let cleaning;
+const cleanup = () => cleaning ??= (async () => {
+  shuttingDown = true;
   for (const dir of gates) writeFileSync(join(dir, "release"), "");
-  await Promise.all([...kids.keys()].map(stop));
+  await spawning.catch(() => undefined);
+  const errors = [];
+  const stopped = await Promise.allSettled([...kids.keys()].map(stop));
+  errors.push(...stopped.filter((r) => r.status === "rejected").map((r) => r.reason));
+  // Keep root protected until it has finished stopping its children.
+  try { await paneGuards.close(); } catch (e) { errors.push(e); }
   for (const dir of gates) rmSync(dir, { recursive: true, force: true });
   gates.clear();
-  if (root) await post("/wizard/stop", { ...ME, name: root.name, mode: "end", forget: true });
-  // 根开过工单, close_job 会把收工结论留档成它的情景记忆 —— 测试的不该留下。
-  if (root) rmSync(join(STATE, "memory", "episodes", `${root.name}.jsonl`), { force: true });
-};
+  if (root) {
+    const r = await post("/wizard/stop", { ...ME, name: root.name, mode: "end", forget: true });
+    if (!r.ok) errors.push(new Error(`stop root: ${r.reason}`));
+    rmSync(join(STATE, "memory", "episodes", `${root.name}.jsonl`), { force: true });
+  }
+  if (errors.length) throw new AggregateError(errors, "receipt-regress cleanup failed");
+  console.log("CLEANUP done: 本轮 guards/children/root 已清理");
+})();
 
 const main = async () => {
   console.log("typecheck…");
@@ -814,9 +857,16 @@ const main = async () => {
   // 只跑纯单元的不必生根 (它们不碰 daemon)。
   if (chosen.some((x) => !cases[x].unit)) {
     if (!ME.sessionId && !ME.tmuxPane) throw new Error("要在 wizard 会话里跑 (缺 CLAUDE_CODE_SESSION_ID / TMUX_PANE)");
-    const r = await post("/wizard/clone", { ...ME, name: real("rr-root"), inherit: false, tier: "mini", keepalive: false, description: "receipt-regress 的根" });
-    if (!r.ok) throw new Error(`spawn rr-root: ${r.reason}`);
-    root = { target: r.target, name: r.name, model: r.model };
+    const birth = spawning.then(async () => {
+      const r = await post("/wizard/clone", { ...ME, name: real("rr-root"), inherit: false, tier: "mini", keepalive: false, description: "receipt-regress 的根" });
+      if (!r.ok) throw new Error(`spawn rr-root: ${r.reason}`);
+      root = { target: r.target, name: r.name, model: r.model };
+      if (shuttingDown) throw new GuardPrerequisiteError("根创建期间开始清理");
+      await paneGuards.protect(root.target, root.name);
+    });
+    spawning = birth.catch(() => undefined);
+    await birth;
+    if (shuttingDown) throw new GuardPrerequisiteError("根创建期间开始清理");
     await post("/peers/tell", { ...ME, name: root.name, receipt: false, priority: "now", text: "你是回执回归测试的根。之后进来的每一份回执, 只回一个词 ok, 不调用任何工具。现在回 ok。" });
     await sleep(20_000);
   }
@@ -825,7 +875,10 @@ const main = async () => {
     const c = cases[name];
     await slots.take(c.names.length);
     const t0 = Date.now();
-    const out = await c.run().catch((e) => ({ pass: false, why: `抛错: ${e.message}` }));
+    const out = await c.run().catch((e) => {
+      if (e instanceof GuardPrerequisiteError) throw e;
+      return { pass: false, why: `抛错: ${e.message}` };
+    });
     console.log(`${out.pass ? "PASS" : "FAIL"} ${name.padEnd(9)} ${Math.round((Date.now() - t0) / 1000)}s · ${out.why}`);
     await Promise.all(c.names.map(stop));
     slots.give(c.names.length);
@@ -833,12 +886,14 @@ const main = async () => {
   }));
   const failed = results.filter((x) => !x).length;
   const rootAlive = !root || (!!(await jsonlOf(root.target)) && !!tmuxPaneOf(root.name));
-  if (!rootAlive) { console.log("FAIL 根 rr-root 中途没了 —— 「根收到 N 份」类判定无效, 重跑"); return Math.max(1, failed); }
-  console.log(failed ? `${failed}/${results.length} FAIL` : `全部 ${results.length} 条 PASS`);
-  return failed;
+  if (!rootAlive) console.log("FAIL 根 rr-root 中途没了 —— 「根收到 N 份」类判定无效, 重跑");
+  console.log(`${results.length - failed}/${results.length} PASS · ${failed}/${results.length} FAIL${rootAlive ? "" : " · 收件前提失效"}`);
+  return rootAlive ? failed : Math.max(1, failed);
 };
 
-process.on("SIGINT", () => void cleanup().finally(() => process.exit(130)));
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]]) process.on(signal, () => {
+  void cleanup().catch((e) => console.error(e)).finally(() => process.exit(code));
+});
 main()
   .then(async (failed) => { await cleanup(); process.exit(failed ? 1 : 0); })
-  .catch(async (e) => { console.error(e.message); await cleanup(); process.exit(2); });
+  .catch(async (e) => { console.error(e); await cleanup().catch((e) => console.error(e)); process.exit(2); });
