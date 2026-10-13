@@ -233,7 +233,7 @@ const parseTurns = (jsonlPath: string, raw: string, keepLines = false, marks = f
       // writes (plus snapshot/summary churn) read as REAL activity that reset
       // the round budget without bound.
       const ms = stampMs((parsed as { timestamp?: unknown }).timestamp);
-      const mid = role === "assistant" && row.message?.stop_reason === "tool_use";
+      const mid = role === "assistant" && (row.mid === true || row.message?.stop_reason === "tool_use");
       if (!text && marks && role === "user" && raw.includes("<task-notification")) return [{ role, text: "", ms, notice: true } as Turn];
       const apiError = role === "assistant" && (parsed as { isApiErrorMessage?: unknown }).isApiErrorMessage === true;
       return text ? [{ role, text, ms, ...(env ? { env } : {}), ...(mid ? { mid: true } : {}), ...(apiError ? { apiError: true } : {}) } as Turn] : [];
@@ -584,7 +584,7 @@ const answerOf = (
   if (asked < 0) return undefined;
   const next = ts.findIndex((t, i) => i > asked && t.role === "user" && !t.queued && !resumesAt(ts, i));
   const last = ts.slice(asked + 1, next < 0 ? undefined : next).filter((t) => t.role === "assistant").at(-1);
-  const text = last && !(last.mid && next < 0) ? last.text : "";
+  const text = last && !last.mid ? last.text : "";
   return { text, ...(next < 0 ? {} : { closedAt: ts[next]!.ms ?? 0 }), ...(text && last?.apiError ? { error: true } : {}) };
 };
 

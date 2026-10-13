@@ -373,6 +373,7 @@ interface TranscriptLine {
   /** 见 NormalizedTranscriptLine.softTurnEnd —— 后端只能确认"这条消息写完了"。 */
   softTurnEnd?: boolean;
   awaitTurnEnd?: boolean;
+  mid?: boolean;
 }
 
 // Target keys are `user:xxx[#tag]` / `chat:xxx[#tag]`. Strip the principal
@@ -1123,7 +1124,7 @@ type InjectResult = { ok: boolean; reason?: string; uncertain?: boolean; retryab
 interface InjectArgs {
   guard?: DispatchGuard;
   /** Called under the pane lock and again before its first physical input. */
-  requireIdle?: () => boolean;
+  requireIdle?: () => boolean | Promise<boolean>;
   /** Defer destructive notice rendering until the lane grants delivery. */
   prepareText?: () => string;
   /** Attribution must exist before input can appear in the transcript. */
@@ -2061,10 +2062,11 @@ const inject = async (args: InjectArgs): Promise<InjectResult> => {
     return classify(await withPaneInput(target, async (live) => {
       // Busy and unknown are both a deferred delivery. Never hold the input
       // lock while waiting for a model's whole turn to finish.
-      if (args.requireIdle && !args.requireIdle()) return { ok: false, reason: "target has no confirmed idle evidence" };
+      const idleApproved = !args.requireIdle || await args.requireIdle();
+      if (!idleApproved) return { ok: false, reason: "target has no confirmed idle evidence" };
       const text = args.prepareText?.() ?? args.text;
       const guard: DispatchGuard = (phase) => {
-        if (!live() || (!exposed && args.requireIdle && !args.requireIdle()) || (args.guard && !args.guard(phase))) return false;
+        if (!live() || (!exposed && !idleApproved) || (args.guard && !args.guard(phase))) return false;
         if (phase && !exposed) { exposed = true; args.beforeInput?.(); }
         return true;
       };
@@ -2281,7 +2283,7 @@ export interface MirrorBridge {
    *  and reports `torndown` (bubbles closed) plus whether the Esc landed. */
   interruptPane: (
     target: string,
-    opts?: { teardown?: boolean },
+    opts?: { teardown?: boolean; guard?: () => boolean },
   ) => Promise<{ ok: boolean; reason?: string; torndown?: number; escOk?: boolean; escReason?: string }>;
   /** Tear the session down: Esc the pane, kill it, detach, and drop the
    *  persisted binding so nothing resurrects it. The chat auto-spawns a fresh
@@ -3428,8 +3430,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (bubble) { bubble.done = true; clearTimeout(bubble.hardTimer); }
     return id;
   };
-  const recoverEventFinal = (event: MessageEvent): void => {
-    if (!event.result || event.interjected) return;
+  const recoverEventFinal = (event: MessageEvent, bubble?: BriefBubble): void => {
+    if (!event.result || event.interjected || event.canceled) return;
     const turn = event.turn || event.id;
     const record = getDetail(turn);
     if (!record) recordTurnStart({ id: turn, eventId: event.id, target: event.target,
@@ -3439,7 +3441,15 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       recordTurnItem(turn, { t: "text", final: true, body: event.result.body, ts: event.result.at });
     recordTurnClose(turn);
     if (!event.turn) deps.events?.bind(event.id, turn);
-    if (event.channel && eventFinalGate(event)) queueFinal(event.target, turn, event.channel, event.result.body, event.id);
+    const parent = event.replyTo?.kind === "chat" ? deps.events?.get(event.replyTo.turn) : undefined;
+    if (parent && event.channel === parent.channel) {
+      const original = deps.events!.continueResult(event.id);
+      if (!original) return;
+      if (eventFinalGate({ ...original, awaitingContinuation: false })) deps.events!.defer(original.id, false);
+      const fresh = deps.events!.get(original.id)!;
+      if (fresh.replyTo?.kind === "chat") recoverEventFinal(fresh, bubble);
+      else if (eventFinalGate(fresh)) queueFinal(fresh.target, fresh.turn || fresh.id, fresh.channel, event.result.body, fresh.id, bubble);
+    } else if (event.channel && eventFinalGate(event)) queueFinal(event.target, turn, event.channel, event.result.body, event.id, bubble);
   };
   const answerBubbles = new Map<string, AnswerBubble>();
   const answerLine = (held: AnswerBubble, text: string): string =>
@@ -3964,7 +3974,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const event = a.activeEventId ? deps.events?.get(a.activeEventId) : undefined;
     if (event) deps.events!.result(event.id, body, finalId(event.id, event.channel, body), turnId);
     if (!answerSilent(a) && !turnSilent(a) && (!event || eventFinalGate(event))) {
-      queueFinal(a.target, turnId, event?.channel ?? a.channel ?? baseOfKey(a.target), body, event?.id, a.briefBubble);
+      if (event) recoverEventFinal(deps.events!.get(event.id)!, a.briefBubble);
+      else queueFinal(a.target, turnId, a.channel ?? baseOfKey(a.target), body, undefined, a.briefBubble);
     }
     // The durable result/outbox must exist before this in-memory dedup bit advances.
     a.briefConcluded = true;
@@ -4658,7 +4669,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         if (item.final !== true) return;
         const turn = a.liveStream?.turnId ?? e.id;
         deps.events.result(e.id, item.body, finalId(e.id, e.channel, item.body), turn);
-        if (eventFinalGate(e)) queueFinal(a.target, turn, e.channel, item.body, e.id);
+        if (eventFinalGate(e)) recoverEventFinal(deps.events!.get(e.id)!);
         return;
       }
     }
@@ -6208,7 +6219,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const live = pane ? activeBackends().map((b) => sessionOnPane(b.homeDir, pane)).find(Boolean) : undefined;
     return live?.status === "idle" && hanging(target, live.sessionId);
   };
-  const idleNow = async (target: string): Promise<boolean> => idleVerdict(target) ?? !(await isBusy(target));
+  const idleNow = async (target: string): Promise<boolean> => {
+    const registry = idleVerdict(target);
+    if (registry !== undefined) return registry;
+    const pane = paneOf(target);
+    if (!pane || !(await tmuxPaneAlive(pane))) return false;
+    const { cap, box } = await readPaneInput(pane);
+    return !!cap.trim() && box.known && !paneIsBusy(cap) && !isModalPane(cap).modal;
+  };
 
   // 等到它闲下来, 事件驱动: 注册表目录一有写入就重判, 翻成 idle 的那一刻即返回。
   // 兜底轮询只防 watch 漏事件 (以及悬着的审批被点掉后 status 没再动的边角)。
@@ -6980,7 +6998,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const r = await inject({
         text: full, images: [], cfg, guard: (phase) => permitted() && a.tmuxPane === injectPane && (!opts?.guard || opts.guard(phase)), log: log.child({ principal: target, sessionId: sid, sub: "init-demo" }),
         sessionId: sid, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn: fresh,
-        requireIdle: opts?.requireIdle ? () => idleVerdict(target) === true : undefined,
+        requireIdle: opts?.requireIdle ? () => idleNow(target) : undefined,
         prepareText: () => (full = text + envelope + noticeSuffixFor(target, text)),
         beforeInput,
       });
@@ -6993,9 +7011,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       return r;
     },
     interruptPane: async (target, opts) => {
-      if (opts?.teardown) deps.events?.cancel((e) => e.target === target);
+      if (opts?.guard && !opts.guard()) return { ok: false, reason: "interrupt authority changed" };
       const a = byTarget.get(target);
       if (!a) return { ok: false, reason: "no mirror attached for target" };
+      const interruptedEvent = a.activeEventId;
+      const interruptedPane = a.tmuxPane;
+      if (opts?.teardown && interruptedEvent) deps.events?.cancel((e) => e.id === interruptedEvent);
       // `/stop` (teardown: true) must work when tmux itself is the problem, so
       // the order is: local state first, pane second. The old implementation
       // probed the pane FIRST and returned early on failure — meaning a wedged
@@ -7029,7 +7050,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       } else if (!(await tmuxPaneAlive(a.tmuxPane))) {
         escReason = "tmux pane no longer alive";
       } else {
-        const r = await runTmux(["send-keys", "-t", a.tmuxPane, "Escape"]);
+        if (byTarget.get(target) !== a || a.tmuxPane !== interruptedPane || a.activeEventId !== interruptedEvent || (opts?.guard && !opts.guard()))
+          return { ok: false, reason: "turn changed during interrupt probe; Escape withheld" };
+        const r = await withPaneInput(interruptedPane, async (live) => {
+          if (!live() || a.activeEventId !== interruptedEvent || a.tmuxPane !== interruptedPane || (opts?.guard && !opts.guard()))
+            return { ok: false, stderr: "turn changed before Escape", stdout: "", code: 1 };
+          return runTmux(["send-keys", "-t", interruptedPane, "Escape"]);
+        });
         escOk = r.ok;
         if (!r.ok) escReason = `send-keys Escape failed: ${(r.stderr || r.stdout).slice(-200) || r.code}`;
       }
@@ -7301,7 +7328,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         }
         return;
       }
-      if (eventId && !(await idleNow(principal))) {
+      if (eventId && a.tmuxPane && await tmuxPaneAlive(a.tmuxPane) && !(await idleNow(principal))) {
         onSubmitted?.({ ok: false, retryable: true, reason: "target became busy before opening the human turn" });
         return;
       }
@@ -7507,7 +7534,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         const r = await inject({
           text: effText, images: effImages, cfg, log: log.child({ principal, sessionId: sid }),
           sessionId: sid, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn,
-          requireIdle: eventId ? () => idleVerdict(a.target) === true : undefined,
+          requireIdle: eventId ? () => idleNow(a.target) : undefined,
           guard: (phase) => byTarget.get(a.target) === a && a.tmuxPane === injectPane && (a.injectGen ?? 0) === myGen && (!guard || guard(phase)),
         });
         onSubmitted?.(r);

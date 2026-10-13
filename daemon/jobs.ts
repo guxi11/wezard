@@ -41,6 +41,8 @@ export interface JobMember {
   target: string;
   /** 派给它的那一段活 —— 工单页与收工留档里按成员列出来。 */
   task: string;
+  turn?: string;
+  dispatchKey?: string;
   /** 为这个工单**临时生出来**的; 只有这些会在收工时被回收。已经存在的 wizard
    *  被拉进来帮忙不该因为工单结束就被杀掉。 */
   spawned: boolean;
@@ -119,7 +121,7 @@ export interface JobStore {
   /** 同一个 target 再次 attach 更新它那一段活, 并清掉它已落定的那一份 (又在干了)。 */
   attach: (id: string, member: Omit<JobMember, "at">, kind?: "task" | "ask") => JobRecord | undefined;
   /** 记下某个成员那一份的定论。不在册 / 已收工 = 不记; 已有定论不改写 (终态写一次)。 */
-  settle: (id: string, target: string, outcome: Terminal, artifacts?: Artifact[]) => JobRecord | undefined;
+  settle: (id: string, target: string, outcome: Terminal, artifacts?: Artifact[], identity?: { turn?: string; dispatchKey?: string }) => JobRecord | undefined;
   /** 已落定几份 / 一共几份 (成员数与 expect 取大)。 */
   tally: (id: string) => { done: number; total: number } | undefined;
   close: (id: string, summary: string, mark?: JobMark) => JobRecord | undefined;
@@ -300,7 +302,7 @@ export const loadJobStore = (filePath: string): JobStore => {
       if (!free && j.maxTurns && (j.turns ?? 0) >= j.maxTurns) throw new Error("job dispatch budget exhausted");
       const prev = j.members.find((m) => m.target === member.target);
       if (!prev && j.members.length >= JOB_MEMBER_MAX) throw new Error("job members full");
-      const next = recovery && prev ? j : attached(j, member, kind);
+      const next = recovery && prev ? j : attached(j, { ...member, dispatchKey: key }, kind);
       const gate = g2 && j.kind === "req" && prev?.role === "lead" && !next.gate?.g2 ? { ...next.gate, g2: Date.now() } : next.gate;
       return db.set(id, { ...next, ...(gate ? { gate } : {}), turns: (j.turns ?? 0) + 1, dispatches: [...(j.dispatches ?? []), key] });
     },
@@ -312,9 +314,12 @@ export const loadJobStore = (filePath: string): JobStore => {
       if (!j || j.status !== "open" || (!prev && j.members.length >= JOB_MEMBER_MAX)) return undefined;
       return db.set(id, attached(j, member, kind));
     },
-    settle: (id, target, outcome, artifacts) => {
+    settle: (id, target, outcome, artifacts, identity) => {
       const j = db.get(id);
-      if (!j || j.status !== "open" || !j.members.some((x) => x.target === target && !x.outcome)) return undefined;
+      const member = j?.members.find((x) => x.target === target);
+      if (!j || j.status !== "open" || !member || member.outcome) return undefined;
+      if (member.dispatchKey && identity?.dispatchKey !== member.dispatchKey) return undefined;
+      if (member.turn && identity?.turn !== member.turn) return undefined;
       return db.set(id, {
         ...j,
         members: j.members.map((x) => (x.target === target ? { ...x, outcome, settledAt: Date.now(), ...(artifacts?.length ? { artifacts } : {}) } : x)),

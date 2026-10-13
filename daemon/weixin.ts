@@ -32,6 +32,7 @@ export interface OutItem {
   at: number;
   /** 上次发这一段超时了 (服务端可能已收下): 用同一个 client_id 原样单独重发, 不再与别的合并。 */
   cid?: string;
+  finalId?: string;
 }
 export interface WxAccount {
   botId: string;
@@ -60,6 +61,7 @@ export interface WxAccount {
   capNoted?: boolean;
   /** 队头连续被拒收 (非频控 / 非网络) 的次数: 第一次当 token 过期压着, 换了新 token 还拒就丢掉这一段。 */
   rejects?: number;
+  finalAcks?: string[];
   sent?: number;
   failed?: number;
 }
@@ -99,12 +101,17 @@ export interface WeixinDeps {
   sinkFor?: (to: string) => (v: BindView) => void;
 }
 
+export interface WxFinalStatus { state: "queued" | "sending" | "delivered" | "uncertain" | "failed"; ack?: string; reason?: string }
+interface WxFinal extends WxFinalStatus { id: string; parent: string; chatId: string; text: string; cid: string; at: number; ackAt?: number; token?: string; retryAt?: number; attempts?: number }
+
 export interface Weixin {
   owns: (chatId: string) => boolean;
   accountOf: (chatId: string) => WxAccount | undefined;
   list: () => WxAccount[];
   /** 已绑定、通道开着、没掉线 —— 此刻发得出去 (或压着等人开口) 的号。 */
   live: (chatId: string) => boolean;
+  sendFinal: (chatId: string, text: string, id: string) => WxFinalStatus;
+  finalStatus: (id: string) => WxFinalStatus | undefined;
   send: (chatId: string, text: string, opts?: { card?: boolean }) => void;
   typing: (chatId: string, on: boolean) => void;
   download: (ref: string) => Promise<{ buffer: Buffer; filename?: string }>;
@@ -170,6 +177,8 @@ export const planFlush = (a: Pick<WxAccount, "ctx" | "outbox" | "lastOutAt" | "p
   if (budget <= 0) return { kind: "hold", why: "cap" };
   const gap = (a.lastOutAt ?? 0) + w.minGapSec * 1000 - now;
   if (gap > 0) return { kind: "wait", ms: gap };
+  const tracked = a.outbox.find((o) => o.finalId);
+  if (tracked) return { kind: "send", chunks: [{ text: tracked.text, cid: tracked.cid }], take: [tracked.id], rest: [] };
   const head = a.outbox[0]!;
   if (head.cid) return { kind: "send", chunks: [{ text: head.text, cid: head.cid }], take: [head.id], rest: [] };
   // 卡片插队: 等人点的东西不能排在一长段正文后面被额度挡住。
@@ -198,8 +207,11 @@ export const classifySendFail = (r: Res<unknown>): "dead" | "rate" | "net" | "ba
 /** outbox 超上限: 先丢最老的正文, 卡片 (等人点的) 留到最后。 */
 export const trimOutbox = (xs: OutItem[], max = OUTBOX_MAX): OutItem[] => {
   if (xs.length <= max) return xs;
-  const i = Math.max(0, xs.findIndex((o) => !o.card));
-  return trimOutbox([...xs.slice(0, i), ...xs.slice(i + 1)], max);
+  const removable = xs.filter((o) => !o.finalId);
+  if (!removable.length) return xs;
+  const i = xs.findIndex((o) => !o.finalId && !o.card);
+  const index = i < 0 ? xs.findIndex((o) => !o.finalId) : i;
+  return trimOutbox([...xs.slice(0, index), ...xs.slice(index + 1)], max);
 };
 
 // ── 入站翻译 (纯) ────────────────────────────────────────────────────
@@ -247,7 +259,8 @@ export const startWeixin = (deps: WeixinDeps): Weixin => {
   const w = (): Config["weixin"] => cfg.weixin;
   const file = expandHome(w().stateFile);
   // 凭据在里面: 每次写完收紧权限 (json-map-store 自己不管 mode)。
-  const db = loadJsonMap<WxAccount>(w().stateFile);
+  const db = loadJsonMap<WxAccount>(w().stateFile, undefined, { strict: true });
+  const finalDb = loadJsonMap<WxFinal>(`${w().stateFile}.finals`, undefined, { strict: true });
   const tighten = (): void => { try { chmodSync(file, 0o600); } catch { /* 文件还没有 */ } };
   tighten();
   const save = (a: WxAccount): WxAccount => { db.set(a.botId, a); tighten(); return a; };
@@ -269,7 +282,7 @@ export const startWeixin = (deps: WeixinDeps): Weixin => {
     const old = legacy;
     if (!old || !a?.outbox.some((o) => old.has(o.id))) return;
     const dest = `chat:${a.chatId}`;
-    patch(botId, (x) => ({ outbox: x.outbox.map((o) => (old.delete(o.id) && !o.card ? { ...o, text: reheadFor(o.text, dest) } : o)) }));
+    patch(botId, (x) => ({ outbox: x.outbox.map((o) => (old.delete(o.id) && !o.card && !o.finalId ? { ...o, text: reheadFor(o.text, dest) } : o)) }));
   };
   const timers = new Map<string, { t: NodeJS.Timeout; at: number }>();
   interface Typing { ticket?: string; ticketAt?: number; lastAt?: number; on?: boolean; chain: Promise<void> }
@@ -364,12 +377,48 @@ export const startWeixin = (deps: WeixinDeps): Weixin => {
     // 发出一段摘一段: 这次拿走的那几条 (mine) 换成「还没发的段 + 超额尾巴」, 发送期间新进来的原样留在后面。
     let mine = new Set(plan.take);
     const keep = (x: WxAccount, left: OutItem[]): OutItem[] => [...left, ...x.outbox.filter((o) => !mine.has(o.id))];
-    for (const [i, c] of plan.chunks.entries()) {
+    const physicalChunks = plan.chunks.map((c) => ({ ...c, cid: c.cid ?? mintClientId() }));
+    const physicalItems = physicalChunks.map((c) => outItem(c.text, { cid: c.cid }));
+    if (!a.outbox.some((o) => mine.has(o.id) && o.finalId)) {
+      patch(botId, (x) => ({ outbox: keep(x, [...physicalItems, ...plan.rest]) }));
+      mine = new Set([...physicalItems, ...plan.rest].map((o) => o.id));
+    }
+    for (const [i, c] of physicalChunks.entries()) {
       const cur = db.get(botId);
       if (stopped || !isLive(cur) || !cur.ctx) return;
-      const cid = c.cid ?? mintClientId();
+      const cid = c.cid!;
+      const tracked = cur.outbox.find((o) => mine.has(o.id) && o.finalId);
+      if (tracked?.finalId) {
+        const f = finalDb.get(tracked.finalId)!;
+        const blocked = Object.values(finalDb.all()).some((x) => x.parent === f.parent && ["uncertain", "failed"].includes(x.state));
+        if (f.state !== "queued" || blocked) {
+          patch(botId, (x) => ({ outbox: x.outbox.filter((o) => o.id !== tracked.id) }));
+          return pump(botId);
+        }
+        if ((f.retryAt ?? 0) > Date.now()) return schedule(botId, f.retryAt! - Date.now());
+        finalDb.set(f.id, { ...f, state: "sending", token: cur.ctx.token, attempts: (f.attempts ?? 0) + 1 });
+      }
       const r = await sendText(cur.baseUrl, cur.botToken, cur.userId, cur.ctx.token, c.text, cid);
-      const later = plan.chunks.slice(i + 1).map((x) => outItem(x.text));
+      if (tracked?.finalId) {
+        const f = finalDb.get(tracked.finalId)!;
+        const rejected = !r.ok && ((r.status !== undefined && r.status >= 400 && r.status < 500)
+          || (r.ret !== undefined && r.ret !== 0) || (r.errcode !== undefined && r.errcode !== 0));
+        const kind = classifySendFail(r);
+        const permanent = rejected && kind === "bad" && (cur.rejects ?? 0) + 1 >= REJECT_DROP;
+        const state = r.ok ? "delivered" : !rejected ? "uncertain" : permanent ? "failed" : "queued";
+        const retryAt = Date.now() + (kind === "rate" ? w().ratePauseMin * 60_000 : 30_000);
+        finalDb.set(f.id, { ...f, state, ack: JSON.stringify(r), ...(r.ok ? { ackAt: Date.now() } : {}), retryAt, reason: r.ok ? undefined : r.errmsg ?? "send acknowledgement unknown" });
+        if (r.ok) accountFinal(f.id);
+        else patch(botId, (x) => ({
+          outbox: state === "queued" ? x.outbox : x.outbox.filter((o) => o.id !== tracked.id),
+          failed: (x.failed ?? 0) + 1, rejects: kind === "bad" ? (x.rejects ?? 0) + 1 : 0,
+          ...(kind === "rate" ? { pausedUntil: retryAt } : {}),
+          ...(kind === "bad" && !permanent ? { ctx: undefined } : {}),
+        }));
+        if (kind === "dead" && !r.ok) return expire(db.get(botId)!, `token rejected ${r.ret ?? r.errcode}`);
+        return state === "queued" ? schedule(botId, retryAt - Date.now()) : pump(botId);
+      }
+      const later = physicalItems.slice(i + 1);
       if (r.ok) {
         const left = [...later, ...plan.rest];
         patch(botId, (x) => ({ outbox: keep(x, left), ctx: x.ctx && { ...x.ctx, used: x.ctx.used + 1 }, lastOutAt: Date.now(), sent: (x.sent ?? 0) + 1, rejects: 0 }));
@@ -417,6 +466,51 @@ export const startWeixin = (deps: WeixinDeps): Weixin => {
     const cur = patch(a.botId, (x) => ({ outbox: trimOutbox([...x.outbox, outItem(text, opts.card ? { card: true } : {})]) }));
     if (cur && cur.outbox.length >= OUTBOX_MAX) log.warn({ botId: a.botId, live: isLive(cur) }, "weixin outbox full — oldest text dropped");
     pump(a.botId);
+  };
+
+  const accountFinal = (id: string): void => {
+    const f = finalDb.get(id);
+    if (!f || f.state !== "delivered") return;
+    const a = byChat(f.chatId);
+    if (!a || a.finalAcks?.includes(id)) return;
+    patch(a.botId, (x) => ({ finalAcks: [...(x.finalAcks ?? []), id],
+      outbox: x.outbox.filter((o) => o.finalId !== id),
+      ctx: x.ctx && { ...x.ctx, used: x.ctx.used + (x.ctx.token === f.token ? 1 : 0) },
+      lastOutAt: Math.max(x.lastOutAt ?? 0, f.ackAt ?? f.at), sent: (x.sent ?? 0) + 1, rejects: 0 }));
+  };
+  const finalStatus = (id: string): WxFinalStatus | undefined => {
+    const rows = Object.values(finalDb.all()).filter((f) => f.parent === id);
+    if (!rows.length) return undefined;
+    const state = rows.some((f) => f.state === "uncertain") ? "uncertain" : rows.some((f) => f.state === "failed") ? "failed"
+      : rows.every((f) => f.state === "delivered") ? "delivered" : "queued";
+    return { state, ack: JSON.stringify(rows.map((f) => ({ cid: f.cid, ack: f.ack }))), reason: rows.find((f) => f.reason)?.reason };
+  };
+  const restoreFinals = (): void => {
+    Object.values(finalDb.all()).forEach((f) => {
+      if (f.state === "delivered") accountFinal(f.id);
+      if (f.state === "sending") finalDb.set(f.id, { ...f, state: "uncertain", reason: "restarted after send intent; actual ACK not persisted" });
+    });
+    all().forEach((a) => {
+      const queued = Object.values(finalDb.all()).filter((f) => f.chatId === a.chatId && f.state === "queued");
+      const old = a.outbox.filter((o) => !o.finalId || finalDb.get(o.finalId)?.state === "queued");
+      const missing = queued.filter((f) => !old.some((o) => o.finalId === f.id));
+      if (missing.length || old.length !== a.outbox.length) patch(a.botId, () => ({ outbox: [...old, ...missing.map((f) => ({ id: f.id, finalId: f.id, text: f.text, cid: f.cid, at: f.at }))] }));
+    });
+  };
+  const sendFinal: Weixin["sendFinal"] = (chatId, text, id) => {
+    const existing = Object.values(finalDb.all()).filter((f) => f.parent === id);
+    if (existing.length) {
+      if (existing.some((f) => f.chatId !== chatId) || existing.map((f) => f.text).join("") !== chunkText(text).join("")) throw new Error("Weixin final identity conflict");
+      return finalStatus(id)!;
+    }
+    const a = byChat(chatId);
+    if (!a) throw { headers: {}, errcode: -1, errmsg: "Weixin chat unbound before final enqueue" };
+    const rows = chunkText(text).map((body, n): WxFinal => ({ id: `${id}:${n}`, parent: id, chatId, text: body, cid: mintClientId(), at: Date.now(), state: "queued" }));
+    if (!rows.length) throw { headers: {}, errcode: -1, errmsg: "empty Weixin final" };
+    finalDb.merge(Object.fromEntries(rows.map((f) => [f.id, f])));
+    patch(a.botId, (x) => ({ outbox: [...x.outbox, ...rows.map((f) => ({ id: f.id, finalId: f.id, text: f.text, cid: f.cid, at: f.at }))] }));
+    pump(a.botId);
+    return finalStatus(id)!;
   };
 
   // ── 正在输入 ──
@@ -807,6 +901,7 @@ export const startWeixin = (deps: WeixinDeps): Weixin => {
     await Promise.all(all().filter((a) => a.state === "live").map((a) => notifyLifecycle(a.baseUrl, a.botToken, false)));
   };
 
+  restoreFinals();
   // 老版本落盘的 outbox 条目没有 id (发出一段摘一段要靠它)。
   for (const a of all().filter((x) => x.outbox.some((o) => !o.id))) {
     patch(a.botId, (x) => ({ outbox: x.outbox.map((o) => (o.id ? o : outItem(o.text, { ...(o.card ? { card: true } : {}), at: o.at }))) }));
@@ -823,6 +918,8 @@ export const startWeixin = (deps: WeixinDeps): Weixin => {
     accountOf: byChat,
     list: all,
     send,
+    sendFinal,
+    finalStatus,
     typing,
     download,
     sendMedia,

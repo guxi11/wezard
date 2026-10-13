@@ -1,3 +1,4 @@
+import { wxMarkdown } from "../shared/wx-text.js";
 // Daemon entry. Resident process — exits only on signal or fatal WS auth failure.
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -240,7 +241,16 @@ const main = async (): Promise<void> => {
     valid: (e) => e.payload.peer ? !!peerEvents?.valid(e) : true,
     accepted: (e) => { if (e.payload.peer) peerEvents?.accepted(e); },
     committed: (e) => { if (e.payload.peer) peerEvents?.committed(e); },
-    canceled: (e) => { if (e.payload.peer) peerEvents?.canceled(e); },
+    canceled: (e) => {
+      if (e.payload.peer) peerEvents?.canceled(e);
+      else if (e.payload.human && e.exposure === "none") {
+        const body = `这条消息未执行：${e.reason ?? "已取消"}。`;
+        events.result(e.id, body, finalId(e.id, e.channel, body));
+        // A canceled, unexposed input has a terminal response owned by its original channel.
+        events.delivery({ id: finalId(e.id, e.channel, body), eventId: e.id, target: e.target, turn: e.turn || e.id,
+          channel: e.channel, revision: finalId(e.id, e.channel, body), body, chunks: bridge.formatFinal(e.target, e.turn || e.id, e.channel, body) });
+      }
+    },
     ready: async (e) => !handingOff(e.target) && (e.payload.peer ? !!(await peerEvents?.ready(e)) : !bridge.hasMirrorTarget(e.target) || await bridge.idleNow(e.target) || !(await bridge.paneLive(e.target))),
     inject: async (e, boundary) => {
       if (e.payload.peer) return peerEvents!.inject(e, boundary);
@@ -256,6 +266,7 @@ const main = async (): Promise<void> => {
       return outcome ?? { ok: false, retryable: events.get(e.id)?.exposure === "none", uncertain: events.get(e.id)?.exposure !== "none", reason: "dispatch ended without a submission acknowledgement" };
     },
     evidence: async (e) => {
+      if (e.canceled && await bridge.idleNow(e.target)) events.released(e.id);
       const paths = [...new Set([bridge.sessionInfo(e.target)?.jsonlPath, e.transcript].filter((p): p is string => !!p))];
       for (const path of paths) {
         const turns = turnsSince(expandHome(path), e.at - 60_000);
@@ -274,15 +285,20 @@ const main = async (): Promise<void> => {
     send: async (d, n) => {
       await bridge.settleFinalProgress(d.id);
       const chat = d.channel.replace(/^(user|chat|group):/, "");
+      if (wx.owns(chat)) {
+        const result = wx.sendFinal(chat, wxMarkdown(d.chunks[n]!), `${d.id}:${n}`);
+        return { ack: result.ack, queued: result.state === "queued" || result.state === "sending",
+          uncertain: result.state === "uncertain" ? result.reason ?? "Weixin send ACK unknown" : undefined,
+          failed: result.state === "failed" ? result.reason ?? "Weixin final rejected" : undefined };
+      }
       const stream = d.stream && n === 0 && d.chunks.length === 1 && Date.now() < d.stream.expires ? d.stream : undefined;
       const ack = d.transfer
         ? await bridge.deliverAnswer(d.transfer.id, d.target, d.turn, d.channel, "", d.chunks[n]!, d.transfer.standalone || n > 0 || d.chunks.length > 1, true)
         : await responseTracker.sendFrozen(chat, d.chunks[n]!, stream, events.running);
-      // The Weixin compatibility ACK is only an outbox enqueue, never proof of human delivery.
-      return wx.owns(chat) ? { ack: JSON.stringify(ack), uncertain: "Weixin accepted into its outbox; actual send ACK is not linked to this final" }
-        : ack && typeof ack === "object" && "errcode" in ack && ack.errcode === 0 ? { ack: JSON.stringify(ack) }
-          : { ack: JSON.stringify(ack), uncertain: "final transport returned no explicit success ACK" };
+      return ack && typeof ack === "object" && "errcode" in ack && ack.errcode === 0 ? { ack: JSON.stringify(ack) }
+        : { ack: JSON.stringify(ack), uncertain: "final transport returned no explicit success ACK" };
     },
+    deliveryEvidence: (d, n) => wx.finalStatus(`${d.id}:${n}`) as { state: "queued" | "delivered" | "uncertain" | "failed"; ack?: string; reason?: string } | undefined,
     error: (e) => log.error({ err: errText(e) }, "message event scheduler"),
   });
   const bridge = startMirror({ cfg, log: log.child({ mod: "mirror" }), client: ws.client, store: mirrorStore, events, sendFrozen: (channel, content, stream) => responseTracker.sendFrozen(channel.replace(/^(user|chat|group):/, ""), content, stream, events.running) });
@@ -859,7 +875,7 @@ const main = async (): Promise<void> => {
           for (;;) {
             const states = events.deliveryStatus(deliveryId)!;
             if (states.every((s) => s === "delivered")) break;
-            if (states.some((s) => s === "uncertain")) throw new Error(`final delivery uncertain: ${deliveryId}`);
+            if (states.some((s) => s === "uncertain" || s === "failed")) throw new Error(`final delivery uncertain: ${deliveryId}`);
             await sleep(250);
           }
           answers.delivered(id);
@@ -908,7 +924,7 @@ const main = async (): Promise<void> => {
       },
       jobTally: (id) => jobs.tally(id),
       parkedNow: m.parkedNow,
-      settleJob: (id, target, outcome, artifacts) => { jobs.settle(id, target, outcome, artifacts); },
+      settleJob: (id, target, outcome, artifacts, identity) => { jobs.settle(id, target, outcome, artifacts, identity); },
       accept: (id, body) => { const j = jobs.get(id); return j?.status === "open" ? rejectReason(j.accept ?? "result", parseClosing(body)) : undefined; },
       durableRebound: true,
       rebound: async (x, why, tell) => !!tell && acceptContinuation(tell, `（守护进程代 ${displayName(x.from)} 打回一次: 这件活是工单里的一份, 你的回复${why}。请按约定收口：RESULT: <结论>；交付文件逐项 ARTIFACT: <路径> — 一句话；真缺信息用 NEED: <问题>。）`),
@@ -1053,7 +1069,11 @@ const main = async (): Promise<void> => {
     const controlSnapshot = (self: string) => ({ opening: openingOfSelf(self)?.ms, turn: m.answerContext(self)?.turn });
     const controlValid = (self: string, snapshot: ReturnType<typeof controlSnapshot>): boolean =>
       openingOfSelf(self)?.ms === snapshot.opening && m.answerContext(self)?.turn === snapshot.turn && !lostAnswer(self) && !terminalAnswerTurn(self);
-    const hasAnswerChildren = (self: string, k: ParentK | undefined): boolean => !!k && receipts.states().some((s) => s.from === self && !!s.k && kAttr(s.k) === kAttr(k));
+    const hasAnswerChildren = (self: string, k: ParentK | undefined): boolean => !!k && (
+      receipts.states().some((s) => s.from === self && !!s.k && kAttr(s.k) === kAttr(k))
+      || events.status().events.some((e) => e.speaker === self && e.k && kAttr(e.k) === kAttr(k) && e.payload.peer?.tell && !["complete", "canceled"].includes(e.execution))
+      || workflow.all().some((a) => a.owner === self && a.tell?.k && kAttr(a.tell.k) === kAttr(k) && !a.canceled && a.execution !== "terminal")
+    );
     m.setAnswerSilencer((target, turn) => answers.source(target, turn) || lostAnswer(target));
     const parentKOf = (self: string): ParentK | undefined => {
       const opening = openingOfSelf(self);
@@ -1427,7 +1447,7 @@ const main = async (): Promise<void> => {
     const accountWorkflow = (a: NodeAttempt, recovery = false): void => {
       if (!a.dispatches?.length) throw new Error("historical tracked attempt lacks dispatch accounting evidence; reconcile stopped before retry (no blind budget import)");
       for (const d of a.dispatches!) {
-        jobs.account(a.job, d.key, { target: a.to, task: d.continuation ? "" : d.text, spawned: false, ...(d.role ? { role: d.role } : {}) }, d.kind, d.free, recovery, !!d.free && !!d.continuation);
+        jobs.account(a.job, d.key, { target: a.to, task: d.continuation ? "" : d.text, spawned: false, turn: (d.tell ?? a.tell)?.turn, ...(d.role ? { role: d.role } : {}) }, d.kind, d.free, recovery, !!d.free && !!d.continuation);
         const t = d.tell ?? a.tell;
         ledger.dispatch(d.key, { turn: a.turn, owner: a.owner, to: a.to, text: d.text, at: d.at, job: a.job, ...(t?.k ? { for: t.k } : {}), ...(t?.asker ? { asker: t.asker } : {}) });
       }
@@ -1451,17 +1471,18 @@ const main = async (): Promise<void> => {
       valid: (e) => {
         const p = e.payload.peer!;
         const attempt = p.attemptId ? workflow.byTurn(e.speaker, p.from.turn ?? "") : undefined;
-        return !e.canceled && (!p.from.receipt || planContinuationAllowed(e.target)) && (!p.job || jobs.get(p.job)?.status === "open") && !attempt?.canceled
-          && (!p.after?.length || receipts.prereqs(e.speaker, p.after).every((r) => r.state === "done" || r.state === "pending"))
+        return planStore.healthy() && !e.canceled && (!p.controlTransfer || !answers.get(p.controlTransfer)?.outcome) && (!p.from.receipt || planContinuationAllowed(e.target)) && (!p.job || jobs.get(p.job)?.status === "open") && !attempt?.canceled
+          && (!p.after?.length || receipts.prereqs(e.speaker, p.after, p.afterSeen).every((r) => r.state === "done" || r.state === "pending"))
           && !answers.all().some((r) => r.target === e.target && answerTargetOccupied(r));
       },
       accepted: (e) => {
         if (e.execution !== "queued") return;
         const p = e.payload.peer!;
+        if (p.tell && e.k?.kind === "chat") events.defer(e.k.turn, true);
         if (p.attemptId) accountWorkflow(workflow.byTurn(e.speaker, p.from.turn ?? "")!);
-        else if (p.job && !p.held) jobs.account(p.job, e.id, { target: e.target, task: (p.tell?.legs ?? 1) > 1 ? "" : e.payload.text, spawned: !!p.spawned, ...(p.role ? { role: p.role } : {}) }, p.kind === "ask" ? "ask" : "task", !!p.free || !!p.held, false, !!p.free);
+        else if (p.job && !p.held) jobs.account(p.job, e.id, { target: e.target, turn: p.from.turn, task: (p.tell?.legs ?? 1) > 1 ? "" : e.payload.text, spawned: !!p.spawned, ...(p.role ? { role: p.role } : {}) }, p.kind === "ask" ? "ask" : "task", !!p.free || !!p.held, false, !!p.free);
         if (p.tell) {
-          ledger.dispatch(e.id, { turn: p.tell.turn!, owner: e.speaker, to: e.target, text: e.payload.text, at: e.at, ...(p.job ? { job: p.job } : {}), ...(e.k ? { for: e.k } : {}), ...(e.asker ? { asker: e.asker } : {}) });
+          if (!p.attemptId) ledger.dispatch(e.id, { turn: p.tell.turn!, owner: e.speaker, to: e.target, text: e.payload.text, at: e.at, ...(p.job ? { job: p.job } : {}), ...(e.k ? { for: e.k } : {}), ...(e.asker ? { asker: e.asker } : {}) });
           if (!receipts.watching(p.tell)) receipts.register({ ...p.tell, queued: true });
         }
       },
@@ -1481,25 +1502,30 @@ const main = async (): Promise<void> => {
         if (p.attemptId) workflow.cancel(e.target, e.speaker, p.job, p.from.turn);
         if (p.tell) receipts.cancel(e.target, "scheduler", (s) => s.from === e.speaker && s.turn === p.tell!.turn);
       },
-      ready: async (e) => receipts.prereqs(e.speaker, e.payload.peer!.after ?? []).every((r) => r.state === "done")
+      ready: async (e) => receipts.prereqs(e.speaker, e.payload.peer!.after ?? [], e.payload.peer!.afterSeen).every((r) => r.state === "done")
         && (e.priority === "now" || await m.idleNow(e.target) || !(await m.paneLive(e.target)) || (e.priority === "urgent" && !(await othersTurn(e.target, e.speaker)))),
       inject: async (e, boundary) => {
         const p = e.payload.peer!;
         if (e.priority === "urgent" && !(await m.idleNow(e.target))) {
           if (await othersTurn(e.target, e.speaker)) return { ok: false, retryable: true, reason: "urgent target now belongs to another actor" };
-          await m.interruptPane(e.target);
+          const path = m.sessionInfo(e.target)?.jsonlPath;
+          const opening = path ? openingTurn(expandHome(path), pingSigs)?.ms : undefined;
+          const r = await m.interruptPane(e.target, { guard: () => peerEvents!.valid(e)
+            && m.sessionInfo(e.target)?.jsonlPath === path && (!path || openingTurn(expandHome(path), pingSigs)?.ms === opening) });
+          if (!r.ok) return { ok: false, retryable: true, reason: r.reason };
         }
         if (p.attemptId && p.tell) workflow.intent(p.attemptId, p.tell);
-        const r = await m.injectText(e.target, e.payload.text, undefined, {
+        const raw = await m.injectText(e.target, e.payload.text, undefined, {
           from: p.from, channel: e.channel, requireIdle: e.priority === "normal",
-          envelope: p.envelope + (p.after?.length ? afterNote(p.after, Object.fromEntries(p.after.map((t, n) => [t, (receipts.prereqs(e.speaker, p.after!)[n] as { seen: HeldSeen }).seen])), e.speaker) : "") + renderReminder({ wezard: "message-event", event: e.id }, []),
-          guard: (phase) => peerEvents!.valid(e) && receipts.prereqs(e.speaker, p.after ?? []).every((r) => r.state === "done") && (!phase || ((!p.attemptId || workflow.boundary(p.attemptId)) && boundary(phase))),
+          envelope: p.envelope + (p.after?.length ? afterNote(p.after, Object.fromEntries(p.after.map((t, n) => [t, (receipts.prereqs(e.speaker, p.after!, p.afterSeen)[n] as { seen: HeldSeen }).seen])), e.speaker) : "") + renderReminder({ wezard: "message-event", event: e.id }, []),
+          guard: (phase) => peerEvents!.valid(e) && receipts.prereqs(e.speaker, p.after ?? [], p.afterSeen).every((r) => r.state === "done") && (!phase || ((!p.attemptId || workflow.boundary(p.attemptId)) && boundary(phase))),
         });
+        const r = !raw.ok && !raw.uncertain && !raw.retryable && events.get(e.id)?.exposure === "none" ? { ...raw, retryable: true } : raw;
         if (p.attemptId && (r.uncertain || (!r.ok && !r.retryable))) workflow.dispatched(p.attemptId, false);
         return r;
       },
     };
-    m.setEventFinalGate((e) => !e.canceled && !e.interjected && !answers.all().some((r) => r.source === e.target && (r.sourceTurn === e.turn || r.origin === e.id)));
+    m.setEventFinalGate((e) => !e.awaitingContinuation && !e.canceled && !e.interjected && !receipts.pendingDelivery(e.target, { kind: "chat", channel: e.channel, turn: e.id }, e.currentContinuation) && !hasAnswerChildren(e.target, { kind: "chat", channel: e.channel, turn: e.id }) && !answers.all().some((r) => r.source === e.target && (r.sourceTurn === e.turn || r.origin === e.id)));
     void m.restored.then(() => events.resume());
     /** tell_peer 的本体: 以 `self` 的名义说一句 —— HTTP 路由与 dispatch 共用。`extra` = 挂在信封后面的
      *  一段 (只进对方输入框, 不进 `text`: 公开时 text 会成群气泡)。 */
@@ -1675,15 +1701,17 @@ const main = async (): Promise<void> => {
           const leg = workflow.recordLeg(attemptId, { text, tell, continuation: turn.legs > 1, at, kind: "task", role: roleParam((body as { role?: string }).role), free: !!open?.need && open.turn === turn.turn }, !!held);
           tell = { ...tell, dispatchKey: leg.key };
         }
-        const accepted = events.accept({ id: eventId, target, speaker: self, channel, asker, k, priority: policy, deadline: deadlineAt,
+        let accepted;
+        try { accepted = events.accept({ id: eventId, target, speaker: self, channel, asker, k, priority: policy, deadline: deadlineAt,
           payload: { text, peer: {
             from: { kind: "peer", from: self, turn: turn.turn, ...(jobId ? { job: jobId } : {}), ...(isPublic ? { public: true } : {}), ...(asker ? { asker } : {}) },
             envelope: envelopeFor(self, channel, { turn: turn.turn, asker, legs: turn.legs, ...(turn.legs > 1 ? { re: true } : {}),
               ...((body as { deadline?: number }).deadline !== undefined ? { deadline: deadlineAt } : {}), ...(kind !== "task" ? { act: kind } : {}), ...(wantReceipt ? {} : { quiet: true }) }) + extra,
-            ...(wantReceipt ? { tell } : {}), job: jobId, kind, attemptId, after: held?.after ?? afters,
+            ...(wantReceipt ? { tell } : {}), job: jobId, kind, attemptId, after: held?.after ?? afters, afterSeen: held?.seen,
+            controlTransfer: answers.all().find((r) => r.target === self && r.tell.turn === openingOfSelf(self)?.env?.turn && !r.outcome)?.id,
             role: roleParam((body as { role?: string }).role), free: !!open?.need && open.turn === turn.turn, held: !!held,
-          } } });
-        return { status: 200, body: { ...accepted, queued: true, turn: turn.turn, name: peerAddress(cfg, self, target), priority: policy, wasBusy,
+          } } }); } catch (error) { return { status: 409, body: { ok: false, eventId, reason: errText(error) } }; }
+        return { status: 200, body: { ...accepted, queued: true, ...(prereqs.some((p) => p.state === "pending") ? { parked: true, after: afters } : {}), turn: turn.turn, name: peerAddress(cfg, self, target), priority: policy, wasBusy,
           ...(jobId ? { job: jobId } : {}), ...(attemptId ? { node, attemptId, acceptance: "pending" } : {}),
           ...(wantReceipt ? { receipt: "已持久化排队；提交后观察原件回执，结论自动返回" } : {}),
           ...(others ? { urgentDowngraded: "目标正在处理他人的轮次，按 normal 排队" } : {}) } };
@@ -1919,7 +1947,7 @@ const main = async (): Promise<void> => {
       const hits = resolved.map((x) => ({ address: x.address, ...(x.r as { ok: true; target: string; foreign: boolean }) }));
       if (hits.some((h) => h.target === self)) { json(res, 400, { ok: false, reason: "refusing to wait on the calling session itself" }); return; }
       // 同一个 wizard 写两遍不该顶掉两个名额。
-      const uniq = hits.filter((h, i) => hits.findIndex((o) => o.target === h.target) === i);
+      const uniq = hits.filter((h, i) => hits.findIndex((o) => o.target === h.target) === i).map((h) => ({ ...h, turn: receipts.sentTurn(self, h.target), at: receipts.sentAt(self, h.target) }));
       const need = Math.min(Math.max(Number(b.need ?? uniq.length) || uniq.length, 1), uniq.length);
       const timeoutMs = Math.min(Math.max(Number(b.timeoutSec ?? 900) || 900, 10), 7200) * 1000;
       const wrs = await waitForQuorum(uniq.map((h) => h.target), m.isBusy, timeoutMs, need);
@@ -1934,8 +1962,8 @@ const main = async (): Promise<void> => {
       const results = uniq.map((h, i) => {
         const wr = wrs[i]!;
         // 取走就占位: 同一段话不会再作为回执 paste 进来一遍 (见 receipts.claim)。
-        const full = wr.idle ? m.lastReply(h.target, receipts.sentAt(self, h.target)) : "";
-        const already = full ? receipts.claim(self, h.target) : false;
+        const full = wr.idle && h.turn ? m.replyToPeer(h.target, displayName(self), h.at, h.turn)?.text ?? "" : "";
+        const already = full ? receipts.claim(self, h.target, h.turn) : false;
         const closing = parseClosing(already === "uncertain" ? "" : full);
         const result = closing.kind === "result" ? closing.text : "";
         return {
@@ -3774,6 +3802,7 @@ const main = async (): Promise<void> => {
           const turn = newTurn();
           // Confirm idle inside the physical pane transaction; a race is unsent
           // and returns to the target consumer, without releasing task dedup.
+          if (quiet) quietRelays.set(turn, { target, at, base: baseOfKey(target) });
           const inj = await m.injectText(target, text, undefined, quiet
             ? { guard, requireIdle: true, from: { kind: "task", taskId }, channel: "", envelope: renderTaskEnvelope(taskId, { turn }) }
             : { guard, requireIdle: true, fromChat: true, from: { kind: "task", taskId }, envelope: renderTaskEnvelope(taskId) });
@@ -3793,11 +3822,18 @@ const main = async (): Promise<void> => {
       const end = at + TASK_QUIET_WAIT_MS;
       // 先等它动起来: 刚注入时注册表还报 idle。
       await sleep(5000);
-      while (Date.now() < end) {
-        await m.untilIdle(t, end - Date.now());
+      let firstObservation = true;
+      while (firstObservation || Date.now() < end) {
+        firstObservation = false;
+        if (Date.now() < end) await m.untilIdle(t, end - Date.now());
         const reply = (m.replyToPeer(t, "", at, turn)?.text ?? "").trim();
         if (reply && (await m.idleNow(t))) {
-          if (!isQuiet(reply)) notifyChat(base, withTagHeader(t, reply, undefined, base));
+          if (!isQuiet(reply)) {
+            const eventId = `quiet:${t}:${turn}`;
+            const revision = finalId(eventId, base, reply);
+            events.delivery({ id: finalId(eventId, base, revision), eventId, target: t, turn, channel: base,
+              revision, body: reply, chunks: m.formatFinal(t, turn, base, reply) });
+          }
           log.info({ target: t, quiet: isQuiet(reply), len: reply.length }, "quiet task: 一轮结束");
           quietRelays.drop(turn);
           return;
@@ -3805,12 +3841,11 @@ const main = async (): Promise<void> => {
         await sleep(5000);
       }
       log.warn({ target: t }, "quiet task: 等满仍没收口, 不转发");
-      quietRelays.drop(turn);
+      quietRelays.set(turn, { target: t, at, base, reason: "deadline passed; final not observed, retained for reconciliation" });
     };
     // 落盘: 这个仓库里 reload 是常态, 守在内存里的那一轮一 reload 就既不转发也不说 QUIET 了。
-    const quietRelays = loadJsonMap<{ target: string; at: number; base: string }>(
-      join(cfg.daemon.stateDir, "quiet-relays.json"),
-      (rows) => Object.fromEntries(Object.entries(rows).filter(([, r]) => Date.now() - r.at < TASK_QUIET_WAIT_MS)),
+    const quietRelays = loadJsonMap<{ target: string; at: number; base: string; reason?: string }>(
+      join(cfg.daemon.stateDir, "quiet-relays.json"), undefined, { strict: true },
     );
     void m.restored.then(() => Object.entries(quietRelays.all()).forEach(([turn, r]) => void relayUnlessQuiet(r.target, r.at, turn, r.base)));
     /** 到点起一个白板 wizard 执行这一枪, 跑完自动收掉。 */
@@ -3854,6 +3889,7 @@ const main = async (): Promise<void> => {
       }
       const at = Date.now();
       const turn = newTurn();
+      if (quiet) quietRelays.set(turn, { target: runner, at, base });
       const inj = await m.injectText(runner, text, undefined, quiet
         ? { guard: allowed, from: { kind: "task", taskId }, channel: "", envelope: renderTaskEnvelope(taskId, { turn }) }
         : { guard: allowed, fromChat: true, from: { kind: "task", taskId }, envelope: renderTaskEnvelope(taskId) });

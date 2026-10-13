@@ -89,13 +89,13 @@ for(const prereqKind of ['tracked','legacy'])for(const barrier of ['idle','paste
 {
  const x=await setup({maxTurns:1});
  x.m.injectText=async(...a)=>{assert.ok(a[3].guard('paste'));x.injected.push(a);return {ok:true,uncertain:true};};
- const first=await x.post('/peers/tell',{name:'worker',text:'perform one effect',role:'reviewer',job:'J',node:'one',priority:'now'});assert.equal(first.status,409);
+ const first=await x.post('/peers/tell',{name:'worker',text:'perform one effect',role:'reviewer',job:'J',node:'one',priority:'now'});assert.equal(first.status,200);
  const a=x.workflow.list('owner')[0],key=a.dispatches[0].key;
  assert.equal(x.jobs.get('J').turns,1,'unknown conservatively reserves before delivery');
  assert.equal(x.jobs.get('J').members[0].task,'perform one effect');assert.equal(x.jobs.get('J').members[0].role,'reviewer');
  for(let n=0;n<2;n++)assert.equal((await x.post('/workflow/verdict',{attemptId:a.id,as:'sent',reason:'turn observed'})).status,200);
  assert.equal(x.jobs.get('J').turns,1);assert.deepEqual(x.jobs.get('J').dispatches,[key]);
- x.jobs.settle('J','worker','done');const item=x.ledgerStore.get(a.turn);x.ledgerStore.set(a.turn,{...item,closed:{at:Date.now(),why:'settled'}});
+ x.jobs.settle('J','worker','done',[],{dispatchKey:key,turn:a.turn});const item=x.ledgerStore.get(a.turn);x.ledgerStore.set(a.turn,{...item,closed:{at:Date.now(),why:'settled'}});
  assert.equal((await x.post('/workflow/verdict',{attemptId:a.id,as:'sent',reason:'repeat confirmation'})).status,200);
  assert.equal(x.jobs.get('J').members[0].outcome,'done');assert.ok(x.ledgerStore.get(a.turn).closed);
  const y=await setup({dir:x.dir});y.bootstrap();assert.equal(y.jobs.get('J').turns,1);assert.equal(y.jobs.get('J').members[0].outcome,'done');assert.ok(y.ledgerStore.get(a.turn).closed);
@@ -121,7 +121,7 @@ for(const prereqKind of ['tracked','legacy'])for(const barrier of ['idle','paste
 }
 {
  const x=await setup({maxTurns:1});let release,entered;let count=0;const reached=new Promise(r=>entered=r),paused=new Promise(r=>release=r);
- x.m.idleNow=async()=>false;x.m.untilIdle=async()=>{if(++count===2)entered();await paused;return {idle:true};};
+ x.m.idleNow=async()=>false;x.m.untilIdle=async()=>{if(++count===1)entered();await paused;return {idle:true};};
  const requests=['one','two'].map(node=>x.post('/peers/tell',{name:'worker-'+node,text:node,job:'J',node,priority:'normal'}));await reached;release();
  const results=await Promise.all(requests);assert.deepEqual(results.map(r=>r.status).sort(),[200,409]);assert.equal(x.injected.length,1);assert.equal(x.jobs.get('J').turns,1);x.close();
 }
@@ -157,7 +157,7 @@ for(const barrier of ['idle','before-paste','after-paste']){
  const request=x.post('/peers/tell',{name:'worker',text:'effect',job:'J',node:'build',priority:barrier==='idle'?'normal':'now'});await entered;
  const query=await x.post('/workflow/nodes',{});assert.equal(query.body.nodes.length,1);
  assert.equal((await x.post('/jobs/close',{job:'J',as:'cancel'})).status,200);
- release();const result=await request;assert.notEqual(result.status,200);assert.equal(x.injected.length,barrier==='after-paste'?1:0);
+ release();const result=await request;assert.equal(result.status,200);assert.equal(x.injected.length,barrier==='after-paste'?1:0);
  const a=x.workflow.list('owner')[0];assert.equal(a.execution,barrier==='after-paste'?'dispatch-unknown':'terminal');
  assert.equal((await x.post('/workflow/verdict',{attemptId:a.id,as:'stopped',reason:'verified stopped'})).status,200);
  x.removeJob();assert.equal((await x.post('/workflow/verdict',{attemptId:a.id,as:'stopped',reason:'still stopped, job deleted'})).status,200);x.close();
@@ -167,7 +167,7 @@ for(const barrier of ['idle','before-paste','after-paste']){
  x.m.injectText=async(...a)=>{reached();await paused;if(!a[3].guard('paste'))return {ok:false,reason:'guard'};x.injected.push(a);return {ok:true};};
  const pending=x.post('/peers/tell',{name:'worker',text:'effect',job:'J',node:'build',priority:'now'});await entered;
  assert.equal((await x.post('/wizard/stop',{name:'worker',mode:'interrupt',turn:x.workflow.list('owner')[0].turn})).status,200);
- release();assert.notEqual((await pending).status,200);assert.equal(x.injected.length,0);x.close();
+ release();assert.equal((await pending).status,200);assert.equal(x.injected.length,0);x.close();
 }
 {
  const x=await setup(),a=prepare(x),artifact=join(x.dir,'artifact.txt');writeFileSync(artifact,'v1');
@@ -197,7 +197,7 @@ for(const barrier of ['idle','before-paste','after-paste']){
 }
 {
  const x=await setup();x.m.injectText=async(...a)=>{assert.ok(a[3].guard('paste'));x.injected.push(a);return {ok:true,uncertain:true};};
- const r=await x.post('/peers/tell',{name:'worker',text:'effect',job:'J',node:'build',priority:'now'});assert.equal(r.status,409);
+ const r=await x.post('/peers/tell',{name:'worker',text:'effect',job:'J',node:'build',priority:'now'});assert.equal(r.status,200);
  const a=x.workflow.list('owner')[0];assert.equal(a.execution,'dispatch-unknown');
  assert.equal((await x.post('/workflow/verdict',{attemptId:a.id,as:'sent',reason:'turn observed in transcript'})).status,200);assert.equal(x.injected.length,1,'sent reconciliation never repastes');x.close();
 }
@@ -218,7 +218,7 @@ for(const recovery of ['sent','restart']){
  x.receipts.register(original.tell,true,{status:'need',body:'NEED: clarify'});
  x.m.injectText=async(...args)=>{assert.ok(args[3].guard('paste'));x.injected.push(args);return {ok:true,uncertain:true};};
  const continued=await x.post('/peers/tell',{name:'worker',text:'answer the one NEED',re:original.turn,priority:'now'});
- assert.equal(continued.status,409);assert.equal(x.jobs.get('J').turns,2);
+ assert.equal(continued.status,200);assert.equal(x.jobs.get('J').turns,2);
  const latest=x.workflow.byTurn('owner',original.turn);
  assert.notEqual(latest.tell.dispatchKey,original.tell.dispatchKey);
  let current=x;
@@ -243,18 +243,18 @@ for(const recovery of ['sent','restart']){
  assert.equal(current.receipts.pending('owner','worker').need,true);
  current.close();if(current!==x)x.close();
 }
-// Strict hold mutations publish only after persistence. A fault also revokes
+// Strict queued-event mutations publish only after persistence. A fault also revokes
 // closures already inside transport, even when the successor has no node.
 await Promise.all([true,false].flatMap(tracked=>['set','seen','drop'].map(async failure=>{
  const releases=[];const x=await setup({maxTurns:1,onRelease:r=>releases.push(r)});x.bootstrap();
  x.receipts.register({from:'owner',to:'preworker',channel:'',turn:'tPre'});
- const failStore=()=>{const file=join(x.dir,'holds.json');if(!existsSync(file))writeFileSync(file,'{}');renameSync(file,file+'.backup');mkdirSync(file);};
+ const failStore=()=>{const file=join(x.dir,'events.json');if(!existsSync(file))writeFileSync(file,'{}');renameSync(file,file+'.backup');mkdirSync(file);};
  const request={name:'consumer',text:'hold fault must not dispatch',job:'J',...(tracked?{node:'held'}:{}),after:['tPre'],priority:'now'};
  let entered,release;
  const reached=new Promise(r=>entered=r),paused=new Promise(r=>release=r);
  if(failure==='drop')x.m.injectText=async(...a)=>{entered();await paused;if(!a[3].guard('paste'))return {ok:false,reason:'hold write fault'};x.injected.push(a);return {ok:true};};
  if(failure==='set'){
-  failStore();await assert.rejects(x.internal.tellPeerAs('owner',request));
+  failStore();assert.equal((await x.internal.tellPeerAs('owner',request)).status,409);
   assert.ok(!x.receipts.states().some(s=>s.to==='consumer'),'unpersisted hold must not be published');
  }else{
   assert.equal((await x.post('/peers/tell',request)).body.parked,true);
@@ -268,8 +268,8 @@ await Promise.all([true,false].flatMap(tracked=>['set','seen','drop'].map(async 
  }
  await new Promise(r=>setTimeout(r,6500));
  assert.equal(x.injected.length,0,`${tracked?'tracked':'legacy'} ${failure} failure must not dispatch`);
- assert.equal(x.receipts.pending('owner','consumer'),undefined,'failed hold cannot recreate watcher');
- assert.equal(x.jobs.get('J').turns??0,failure==='set'&&!tracked?0:1,'failed reservation cannot become uncharged execution');
+ assert.equal(!!x.receipts.pending('owner','consumer'),failure!=='set','accepted queued obligation survives a later strict event-store fault without starting a watcher');
+ assert.equal(x.jobs.get('J').turns??0,failure==='set'?0:1,'failed reservation cannot become uncharged execution');
  assert.equal(x.outcomeEvents.filter(e=>e.turn!=='tPre').length,0,'failed drop cannot announce successful cancellation');
  assert.ok(releases.every(r=>r.status!==200));x.close();
 })));

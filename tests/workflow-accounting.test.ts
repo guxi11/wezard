@@ -13,7 +13,7 @@ let jobs = loadJobStore(file);
 const j = jobs.open("chat", "owner", "one dispatch", { maxTurns: 1 });
 const member = { target: "worker", task: "original task", spawned: false, role: "expert" as const };
 jobs.account(j.id, "leg1", member, "task");
-jobs.settle(j.id, "worker", "done");
+jobs.settle(j.id, "worker", "done", [], { dispatchKey: "leg1" });
 jobs = loadJobStore(file);
 jobs.account(j.id, "leg1", member, "task", false, true);
 assert.equal(jobs.get(j.id)?.turns, 1);

@@ -158,7 +158,7 @@ export interface ReceiptDeps {
    *  就提前报了 —— 或者被顶掉的那个成员永远不计 done。账本按成员记, 不会。 */
   jobTally?: (job: string) => { done: number; total: number } | undefined;
   /** 成员那一份落定了: 记进账本 (终态写一次; need / error 不来这里)。 */
-  settleJob?: (job: string, target: string, outcome: Terminal, artifacts: { path: string; note: string }[]) => void;
+  settleJob?: (job: string, target: string, outcome: Terminal, artifacts: { path: string; note: string }[], identity?: { turn?: string; dispatchKey?: string }) => void;
   log: Logger;
   /** 登记的落盘处。缺省 = 纯内存 (reload 即丢)。 */
   store?: JsonMap<Slot>;
@@ -214,9 +214,11 @@ export type Prereq =
 
 export interface Tell {
   queued?: boolean;
+  cancellationId?: string;
   answerTransfer?: string;
   /** Stable tracked dispatch leg; a continuation keeps turn but replaces this key. */
   dispatchKey?: string;
+  jobDispatchKey?: string;
   from: string;
   to: string;
   channel: string;
@@ -294,8 +296,10 @@ export interface Receipts {
    *  写错了都当新活 (`reUnknown`), 不拒绝。 */
   prepare: (from: string, to: string, re?: string) => Turn;
   /** wait_peer 取走了这一次的回复。返回「是否已经 paste 过」。 */
-  claim: (from: string, to: string) => boolean | "uncertain";
+  pendingDelivery: (from: string, k: ParentK, except?: string) => boolean;
+  claim: (from: string, to: string, turn?: string) => boolean | "uncertain";
   /** 这一次发话的时刻 (0 = 没登记过) —— wait_peer 的 sinceMs。 */
+  sentTurn: (from: string, to: string) => string | undefined;
   sentAt: (from: string, to: string) => number;
   /** 还没有定论的那些 (名字), 供诊断与退化后的 wait_peer 回话。 */
   outstanding: (from: string, job?: string) => string[];
@@ -343,7 +347,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   const keyOfPair = (from: string, to: string): string => `${from}\u0000${to}`;
   const keyOfTurn = (from: string, to: string, turn: string): string => `${keyOfPair(from, to)}\u0000${turn}`;
   const keyOf = (s: Slot): string => (s.parked ? keyOfTurn(s.from, s.to, s.turn ?? "") : keyOfPair(s.from, s.to));
-  const live = (s: Slot): boolean => Date.now() - s.at < KEEP_MS || !!s.inbox?.some((m) => ["queued", "delivering", "uncertain"].includes(m.state));
+  const live = (s: Slot): boolean => !s.settled || Date.now() - s.at < KEEP_MS || !!s.inbox?.some((m) => ["queued", "delivering", "uncertain"].includes(m.state));
   // 过了保留期的行开机时从盘上抹掉: 同一对的位置会被下一句覆盖, 按件号停放的不会。
   Object.entries(deps.store?.all() ?? {}).filter(([, s]) => !live(s)).forEach(([key]) => deps.store?.drop(key));
   const slots = new Map<string, Slot>(
@@ -520,7 +524,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     // tail can disclose that unrelated message in the failure receipt.
     const last = (s.answerTransfer
       ? (s.turn ? deps.replyFor(s.to, deps.nameOf(s.from), s.at, s.turn)?.text : undefined)
-      : deps.lastWords?.(s.to, s.at))?.trim();
+      : !s.turn ? deps.lastWords?.(s.to, s.at) : undefined)?.trim();
     return `（守护进程: ${deps.nameOf(s.to)} 没有给出结论 —— ${why[status] ?? status}。）${last ? `\n它最后说的: ${clipMiddle(last, 600)}` : ""}`;
   };
 
@@ -545,7 +549,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
   const account = (s: Slot, m: ReceiptMail): void => {
     if (m.accounted) return;
     deps.onOutcome?.(s, m.outcome.status, m.outcome.body, false);
-    if (isTerminal(m.outcome.status) && s.job) deps.settleJob?.(s.job, s.to, m.outcome.status, parseClosing(m.outcome.body).artifacts);
+    if (isTerminal(m.outcome.status) && s.job) deps.settleJob?.(s.job, s.to, m.outcome.status, parseClosing(m.outcome.body).artifacts, { turn: s.turn, dispatchKey: s.jobDispatchKey ?? s.dispatchKey });
     m.accounted = true;
     save(s);
     if (isTerminal(m.outcome.status)) nudgeHolds();
@@ -651,6 +655,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     const m: ReceiptMail = { id: `r${randomBytes(12).toString("hex")}`, order: ++mailOrder,
       queuedAt: Date.now(), generation: s.gen, outcome: out, state: "queued", attempts: 0 };
     s.outcome = out;
+    if (out.status === "canceled") s.cancellationId = m.id;
     s.resolved = isTerminal(out.status);
     s.delivered = false;
     s.inbox = [...(s.inbox ?? []), m];
@@ -666,10 +671,11 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     // 等的过程中被 cancel 落了终态: 以它为准 (pane 随后被杀, awaitReply 可能报的是 dead)。
     const out = canceled(s) ? s.outcome : got;
     if (stale(s)) return;
+    if (canceled(s) && s.cancellationId && s.inbox?.some((m) => m.id === s.cancellationId)) { pump(s.from); return; }
     if (s.claimed || !out) { // wait_peer 抢先取走了
       s.resolved = true;
       settle(s);
-      if (s.job) deps.settleJob?.(s.job, s.to, "done", []);
+      if (s.job) deps.settleJob?.(s.job, s.to, "done", [], { turn: s.turn, dispatchKey: s.jobDispatchKey ?? s.dispatchKey });
       return;
     }
     // 下面到 save 之间不能有 await: relay 与这里的判定必须看到同一个状态。
@@ -688,7 +694,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     if (why && deps.rebound) {
       const at = Date.now();
       const legs = (s.legs ?? 1) + 1;
-      const tell = { from: s.from, to: s.to, channel: s.channel, job: s.job, at, turn: s.turn, legs, deadlineAt: deadlineOf(at), ...(s.k ? { k: s.k } : {}), ...(s.asker ? { asker: s.asker } : {}), bounced: out.body };
+      const tell = { from: s.from, to: s.to, channel: s.channel, job: s.job, at, turn: s.turn, legs, deadlineAt: deadlineOf(at), ...(s.k ? { k: s.k } : {}), ...(s.asker ? { asker: s.asker } : {}), bounced: out.body, jobDispatchKey: s.jobDispatchKey ?? s.dispatchKey };
       if (!deps.durableRebound) register(tell);
       const ok = await deps.rebound({ from: s.from, to: s.to, turn: s.turn!, legs, channel: s.channel, ...(s.asker ? { asker: s.asker } : {}) }, why, tell);
       if (!ok && deps.durableRebound) { enqueueOutcome(s, out); return; }
@@ -703,7 +709,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       s.resolved = isTerminal(out.status);
       save(s);
       deps.onOutcome?.(s, out.status, out.body, false);
-      if (s.resolved && s.job) deps.settleJob?.(s.job, s.to, out.status as Terminal, parseClosing(out.body).artifacts);
+      if (s.resolved && s.job) deps.settleJob?.(s.job, s.to, out.status as Terminal, parseClosing(out.body).artifacts, { turn: s.turn, dispatchKey: s.jobDispatchKey ?? s.dispatchKey });
       if (s.resolved) nudgeHolds();
       s.claimed = true;
       save(s);
@@ -798,20 +804,21 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
    *  按件号停放着放进去 (parked), 绝不占 from→to 的位置 —— 那里可能有在飞的另一件。 */
   const cancelHold = (h: Hold, why: string, silent = false): void => {
     if (holds.get(holdKey(h)) !== h) return;
-    dropHold(h);
-    deps.onOutcome?.({ ...h, gen: 0, claimed: false, delivered: false, resolved: true } as Slot, "canceled", why, silent);
-    if (silent) return;
+    const existing = slots.get(keyOfTurn(h.from, h.to, h.turn));
+    if (existing?.outcome?.status === "canceled") { dropHold(h); if (!existing.claimed) arm(existing); return; }
     const at = Date.now();
     const s: Slot = {
       from: h.from, to: h.to, channel: h.channel, job: h.job, at, turn: h.turn, legs: 1, deadlineAt: at,
       ...(h.k ? { k: h.k } : {}), ...(h.asker ? { asker: h.asker } : {}),
       gen: (slots.get(keyOfTurn(h.from, h.to, h.turn))?.gen ?? 0) + 1,
-      claimed: false, delivered: false, resolved: false, parked: true,
+      claimed: silent, delivered: false, resolved: silent, settled: silent, parked: true,
       outcome: { status: "canceled", body: `（守护进程: ${why}）` },
     };
     slots.set(keyOf(s), s);
     save(s);
-    arm(s);
+    if (silent) deps.onOutcome?.(s, "canceled", s.outcome!.body, true);
+    if (!silent) enqueueOutcome(s, s.outcome!);
+    dropHold(h);
   };
   const releasing = new Set<string>();
   /** 逐件看停放着的: 有失败的 → 不投; 都 done 了且这一对没被占着 → 放行; 超过保留期 → 不投。 */
@@ -890,7 +897,8 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       }
     },
     commit: (tell) => {
-      const s = upstream({ from: tell.from, turn: tell.turn ?? "" }, tell.to);
+      let s = upstream({ from: tell.from, turn: tell.turn ?? "" }, tell.to);
+      if (!s) { register({ ...tell, queued: true }); s = upstream({ from: tell.from, turn: tell.turn ?? "" }, tell.to); }
       if (!s || s.dispatchKey !== tell.dispatchKey || !s.queued) return;
       s.queued = false;
       save(s);
@@ -905,7 +913,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
     continuation: (from, to, turn) => {
       const s = upstream({ from, turn }, to);
       return !s || s.resolved || s.claimed ? undefined : { from, to, turn, channel: s.channel, job: s.job,
-        at: Date.now(), legs: (s.legs ?? 1) + 1, deadlineAt: s.deadlineAt, k: s.k, asker: s.asker };
+        at: Date.now(), legs: (s.legs ?? 1) + 1, deadlineAt: s.deadlineAt, k: s.k, asker: s.asker, jobDispatchKey: s.jobDispatchKey ?? s.dispatchKey };
     },
     reask: (from, to, turn) => {
       const s = upstream({ from, turn }, to);
@@ -921,8 +929,10 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
         ? { turn: s.turn, legs: (s.legs ?? 1) + 1, job: s.job, channel: s.channel, asker: s.asker, k: s.k }
         : { turn: newTurn(), legs: 1, ...(re ? { reUnknown: true as const } : {}) };
     },
-    claim: (from, to) => {
-      const s = slots.get(keyOfPair(from, to));
+    pendingDelivery: (from, k, except) => [...slots.values()].some((s) => s.from === from && !!s.k && sameK(s.k, k)
+      && s.inbox?.some((m) => m.id !== except && ["queued", "delivering", "uncertain"].includes(m.state))),
+    claim: (from, to, turn) => {
+      const s = turn ? upstream({ from, turn }, to) : slots.get(keyOfPair(from, to));
       if (!s) return false;
       if (s.answerTransfer) return s.delivered;
       // Transport may already have exposed this event. Do not let a concurrent
@@ -936,6 +946,7 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       if (fresh) { release(s); deps.onOutcome?.(s, "done", "", true); }
       return s.delivered;
     },
+    sentTurn: (from, to) => slots.get(keyOfPair(from, to))?.turn,
     sentAt: (from, to) => slots.get(keyOfPair(from, to))?.at ?? 0,
     outstanding: (from, job) =>
       [...slots.values()]
@@ -979,27 +990,24 @@ export const createReceipts = (deps: ReceiptDeps): Receipts => {
       // 排着还没投的 (停放): 不投了; 发起 stop 的那方自己知道, 不回执。
       const held = [...holds.values()].filter((h) => h.to === target && only({ from: h.from, turn: h.turn }));
       held.forEach((h) => cancelHold(h, `${deps.nameOf(target)} 被 ${deps.nameOf(by)} 收掉 / 打断了, 这件排着的活 (${h.turn}) 没投。`, h.from === by));
-      const hit = [...slots.values()].filter((s) => s.to === target && !s.resolved && !s.claimed && only({ from: s.from, turn: s.turn ?? "" }));
+      const hit = [...slots.values()].filter((s) => s.to === target && !s.resolved && !s.claimed && !canceled(s) && only({ from: s.from, turn: s.turn ?? "" }));
       for (const s of hit) {
         // Keep cancellation consistent with timeout/dead/silent: transferred
         // answers may only quote text tied to their own source turn.
         const last = (s.answerTransfer
           ? (s.turn ? deps.replyFor(s.to, deps.nameOf(s.from), s.at, s.turn)?.text : undefined)
-          : deps.lastWords?.(s.to, s.at))?.trim();
+          : !s.turn ? deps.lastWords?.(s.to, s.at) : undefined)?.trim();
         s.outcome = {
           status: "canceled",
           body: `（守护进程: ${deps.nameOf(s.to)} 被 ${deps.nameOf(by)} 收掉 / 打断了, 这件活没有结论。）${last ? `\n它最后说的: ${clipMiddle(last, 600)}` : ""}`,
         };
-        if (s.job) deps.settleJob?.(s.job, s.to, "canceled", []);
-        deps.onOutcome?.(s, "canceled", s.outcome.body, s.from === by);
+        if (s.job) deps.settleJob?.(s.job, s.to, "canceled", [], { turn: s.turn, dispatchKey: s.jobDispatchKey ?? s.dispatchKey });
         // 发起 stop 的那方自己知道, 不投; 守着的 watcher 看到 claimed 就收尾。
-        if (s.from === by && !s.answerTransfer) { s.claimed = true; s.resolved = true; settle(s); continue; }
-        const wasQueued = s.queued;
+        if (s.from === by && !s.answerTransfer) { deps.onOutcome?.(s, "canceled", s.outcome.body, true); s.claimed = true; s.resolved = true; settle(s); continue; }
         s.queued = false;
         save(s);
-        if (wasQueued) arm(s);
-        // 挂起等子活的没有 watcher 在守: 叫醒它去投这份 canceled。
-        if (s.deferred) wake(s);
+        if (s.answerTransfer) arm(s, true);
+        else enqueueOutcome(s, s.outcome);
       }
       if (hit.length) nudgeHolds();
       return hit.length + held.length;

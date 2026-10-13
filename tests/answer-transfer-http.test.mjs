@@ -84,7 +84,7 @@ for (const override of [{topOnly:false},{answerContext:undefined},{origin:{k:{ki
  x.m.idleNow=async()=>false;x.m.untilIdle=async()=>{enter();await barrier;return {idle:true};};
  const pending=x.post('/peers/tell',{name:'other',text:'ordinary child'},'worker');await started;
  x.answers.outcome('tPinned',{status:'timeout',body:'timeout'});release();
- const result=await pending;assert.equal(result.status,409,'terminal target cannot resume a child tell after its idle wait');
+ const result=await pending;assert.equal(result.status,200,'child was accepted before the terminal result; its queued execution is revoked');
  assert.equal(x.injected.length,0);x.close();
 }
 {

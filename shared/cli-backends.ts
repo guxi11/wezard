@@ -83,6 +83,7 @@ export interface NormalizedTranscriptLine {
   softTurnEnd?: boolean;
   /** Final text precedes usage; close only on the backend completion event. */
   awaitTurnEnd?: boolean;
+  mid?: boolean;
 }
 
 export interface CliBackend {

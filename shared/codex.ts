@@ -90,7 +90,7 @@ export const normalizeCodex = (raw: unknown): NormalizedTranscriptLine | null =>
     // to it must still open a turn and retain its wezard envelope.
     if (p.role === "user" && !(Array.isArray(p.content) ? p.content : []).some((b: any) => b.type === "input_image") && text.trim() && /^(?:# AGENTS\.md instructions for [^\n]+\n+\s*<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>\s*)?(?:<environment_context>[\s\S]*?<\/environment_context>\s*)?$/.test(text.trim()))
       return { ...base, type: "user", isMeta: true, message: { role: "user", content: text } };
-    return { ...base, type: p.role, awaitTurnEnd: p.phase === "final_answer", message: { role: p.role, content: p.role === "user" ? (withImages ? content : text) : [{ type: "text", text }], ...(p.phase === "final_answer" ? { stop_reason: "end_turn" } : {}) } };
+    return { ...base, type: p.role, awaitTurnEnd: p.phase === "final_answer", mid: p.role === "assistant" && p.phase === "commentary", message: { role: p.role, content: p.role === "user" ? (withImages ? content : text) : [{ type: "text", text }], ...(p.phase === "final_answer" ? { stop_reason: "end_turn" } : {}) } };
   }
   if (["function_call", "custom_tool_call"].includes(p.type)) {
     let input: unknown = p.input ?? {};

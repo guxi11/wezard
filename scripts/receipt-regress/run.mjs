@@ -344,7 +344,7 @@ const cases = {
   // 依赖 after (纯单元, 停放 / 放行 / 失败 / reload 都在回执层): 停放不占回执槽、不改 k; 前置落定才放行并带上结论;
   // 前置失败 → 不放行、落成 canceled 回给发话方; 停放登记落盘, 新进程接着判; 同一对有别的在飞件时放行让路; 取消覆盖停放件。
   "after-unit": { names: [], unit: true, run: async () => {
-    const mem = () => { const m = new Map(); return { all: () => Object.fromEntries(m), get: (k) => m.get(k), set: (k, v) => (m.set(k, v), v), drop: (k) => m.delete(k) }; };
+    const mem = () => { const m = new Map(); return { all: () => Object.fromEntries(m), get: (k) => m.get(k), merge: (rows) => Object.entries(rows).forEach(([k, v]) => m.set(k, v)), set: (k, v) => (m.set(k, v), v), drop: (k) => m.delete(k) }; };
     const store = mem(), holdStore = mem();
     const released = [];
     let f;
