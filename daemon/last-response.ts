@@ -18,6 +18,15 @@ import type { Logger } from "pino";
 import { parseTagHeader, withBot } from "../shared/session-label.js";
 import { botTagOf } from "./bot-mux.js";
 import { connFor } from "./reach.js";
+import { withMessageFooter, withoutMessageFooter, type MessageFooterPolicy } from "../shared/message-footer.js";
+
+export interface ResponseFormatContext {
+  /** SDK bare id including the ~bot suffix. Empty for header-only frames. */
+  chatid: string;
+  frame?: WsFrameHeaders;
+  body?: unknown;
+}
+export type ResponseFormatPolicy = (context: ResponseFormatContext) => MessageFooterPolicy | undefined;
 
 // Strip `chat:` / `user:` prefix to get the bare chatid/userid that
 // `sendMessage` takes. Chat ids and user ids don't collide in practice (group
@@ -76,7 +85,7 @@ const hasVisibleBody = (content: string): boolean => parseTagHeader(content).bod
 // in the tracker. Mutates the client in place; call once at daemon startup.
 // `ownTransport(chatid)`: 这个 chat 的出站不走企微长连接 (微信) —— 不必等 WS 连上。
 // 通道分流层装在这里面 (内层), 所以 gate / record 照样覆盖它。
-export const installResponseTracker = (client: WSClient, log?: Logger, ownTransport: (chatid: string) => boolean = () => false): void => {
+export const installResponseTracker = (client: WSClient, log?: Logger, ownTransport: (chatid: string) => boolean = () => false, policy?: ResponseFormatPolicy): void => {
   const origReplyStream = client.replyStream.bind(client);
   const origReplyStreamWithCard = client.replyStreamWithCard.bind(client);
   const origSendMessage = client.sendMessage.bind(client);
@@ -88,18 +97,22 @@ export const installResponseTracker = (client: WSClient, log?: Logger, ownTransp
   };
 
   client.replyStream = async (frame, streamId, content, finish, msgItem, feedback) => {
-    if (finish === true && !gate("replyStream", content)) {
+    const format = policy?.({ chatid: bareFromFrame(frame), frame, body: (frame as WsFrame<BaseMessage>).body });
+    if (finish === true && !gate("replyStream", format?.topOnly ? withoutMessageFooter(content) : content)) {
       return undefined as unknown as WsFrame;
     }
+    content = withMessageFooter(content, format);
     const r = await origReplyStream(frame, streamId, content, finish, msgItem, feedback);
     if (finish) record(bareFromFrame(frame as WsFrame<BaseMessage>), content);
     return r;
   };
 
   client.replyStreamWithCard = async (frame, streamId, content, finish, options) => {
-    if (finish === true && !options?.templateCard && !gate("replyStreamWithCard", content)) {
+    const format = policy?.({ chatid: bareFromFrame(frame), frame, body: (frame as WsFrame<BaseMessage>).body });
+    if (finish === true && !options?.templateCard && !gate("replyStreamWithCard", format?.topOnly ? withoutMessageFooter(content) : content)) {
       return undefined as unknown as WsFrame;
     }
+    content = withMessageFooter(content, format);
     const r = await origReplyStreamWithCard(frame, streamId, content, finish, options);
     if (finish) record(bareFromFrame(frame as WsFrame<BaseMessage>), content);
     return r;
@@ -121,11 +134,13 @@ export const installResponseTracker = (client: WSClient, log?: Logger, ownTransp
     if (!ownTransport(chatid)) await untilConnected(chatid);
     // Only markdown pushes carry quotable text (and are the empty-message
     // risk class); template_card / media bubbles pass through untouched.
-    if ((body as { msgtype?: string }).msgtype === "markdown") {
+    if (body.msgtype === "markdown") {
       const md = (body as { markdown?: { content?: string } }).markdown?.content ?? "";
-      if (!gate("sendMessage", md)) return undefined as unknown as WsFrame;
-      const r = await origSendMessage(chatid, body);
-      record(chatid, md);
+      const format = policy?.({ chatid, body });
+      if (!gate("sendMessage", format?.topOnly ? withoutMessageFooter(md) : md)) return undefined as unknown as WsFrame;
+      const content = withMessageFooter(md, format);
+      const r = await origSendMessage(chatid, { ...body, markdown: { ...body.markdown, content } });
+      record(chatid, content);
       return r;
     }
     return origSendMessage(chatid, body);
