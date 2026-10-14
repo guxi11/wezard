@@ -1931,12 +1931,14 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
     while (Date.now() - t0 < budget) {
       await sleep(POLL_MS);
       if (submitted()) return true;
-      if (Date.now() - t0 >= WITNESS_ONLY_MS && (await cleared())) return true;
+      // An unchanged empty composer proves submission only after we actually
+      // saw this paste land. Otherwise a swallowed paste produces a false ACK.
+      if (pasteSeen && Date.now() - t0 >= WITNESS_ONLY_MS && (await cleared())) return true;
     }
     return false;
   };
 
-  if (!pasteSeen) log.warn({ target }, "mirror inject: submitted without paste verification (capture-pane lag)");
+  if (!pasteSeen) log.warn({ target }, "mirror inject: paste unverified, requiring session submission evidence");
   if (!tailFp) {
     // empty/whitespace text — nothing to verify, fire once and go.
     const e = await sendEnter();

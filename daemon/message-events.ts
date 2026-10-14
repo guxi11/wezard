@@ -129,8 +129,16 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
   let probeCursor = 0;
   let probeCount = 0;
   const probeTargets = new Set<string>();
+  // An exposed event belongs to the session that received it, not a replacement
+  // pane now bound to the same wizard. Keep its uncertain history for reconciliation.
+  const resourceOf = (e: MessageEvent): string => {
+    const transcript = io.transcript(e.target);
+    return e.exposure !== "none" && e.transcript && transcript && e.transcript !== transcript
+      ? `transcript:${e.transcript}` : io.resource(e.target);
+  };
   const bounded = <T>(id: string, read: () => Promise<T>): Promise<T> => {
-    const target = db.get(id)?.target ?? id;
+    const e = db.get(id);
+    const target = e ? resourceOf(e) : id;
     if (probing.has(id) || probeTargets.has(target) || probeCount >= 16) return Promise.reject(new Error("probe already running or probe capacity occupied"));
     probing.add(id);
     probeTargets.add(target);
@@ -237,6 +245,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
       const boundary = (phase?: "paste" | "submit"): boolean => {
         const current = db.get(id)!;
         if (stopped || current.canceled || !io.valid(current)) return false;
+        if (current.exposure !== "none" && current.transcript && current.transcript !== io.transcript(e.target)) return false;
         if (phase) patch(id, { exposure: "possible", transcript: io.transcript(e.target) ?? current.transcript });
         return true;
       };
@@ -246,7 +255,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
       const latest = db.get(id)!;
       if (latest.result || latest.execution === "complete") { if (!latest.canceled) io.committed(latest); return; }
       if (r.ok && !r.uncertain) {
-        const committed = patch(id, { execution: latest.canceled ? "uncertain" : "awaiting-result", exposure: "submitted", transcript: io.transcript(e.target) ?? latest.transcript });
+        const committed = patch(id, { execution: latest.canceled ? "uncertain" : "awaiting-result", exposure: "submitted", transcript: latest.transcript ?? io.transcript(e.target) });
         if (!latest.canceled) io.committed(committed);
       } else if (r.retryable && !r.uncertain && !latest.canceled) {
         patch(id, { execution: "queued", exposure: "none", retryAt: backoff(latest.attempts), reason: r.reason });
@@ -263,7 +272,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     const resource = io.resource(e.target);
     return !stopped && e.execution === "queued" && !e.canceled && e.deadline > Date.now() && io.valid(e)
       && !targets.has(e.target) && !active.has(resource) && active.size < 4
-      && !rows.some((x) => x.id !== e.id && io.resource(x.target) === resource
+      && !rows.some((x) => x.id !== e.id && resourceOf(x) === resource
         && (["dispatching", "uncertain"].includes(x.execution) || (e.priority === "normal"
           && (x.execution === "awaiting-result" || (x.execution === "queued" && older.has(x.id))))));
   };
@@ -288,7 +297,14 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
       const rows = Object.values(db.all()).sort((a, b) => a.at - b.at);
       const fair = [...rows.slice(probeCursor), ...rows.slice(0, probeCursor)];
       fair.forEach((e) => {
-        if (stopped || probing.has(e.id) || probeTargets.has(e.target) || probeCount >= 16) return;
+        if (stopped) return;
+        // Expiration and permission withdrawal are ledger work; a busy or hung
+        // probe on this pane must not prevent queued messages from expiring.
+        if (e.execution === "queued" && (e.deadline <= Date.now() || !io.valid(e))) {
+          cancel((x) => x.id === e.id, e.deadline <= Date.now() ? "deadline expired before submission" : "permission withdrawn");
+          return;
+        }
+        if (probing.has(e.id) || probeTargets.has(resourceOf(e)) || probeCount >= 16) return;
         probeCursor = (rows.findIndex((x) => x.id === e.id) + 1) % Math.max(1, rows.length);
         const failed = (error: unknown): void => { if (!stopped) patch(e.id, { reason: `${db.get(e.id)?.reason ?? ""}; ${why(error)}` }); io.error(error); };
         if (["awaiting-result", "uncertain"].includes(e.execution)) {
@@ -307,7 +323,6 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
           return;
         }
         if (e.execution !== "queued") return;
-        if (e.deadline <= Date.now() || !io.valid(e)) { cancel((x) => x.id === e.id, e.deadline <= Date.now() ? "deadline expired before submission" : "permission withdrawn"); return; }
         if ((e.retryAt ?? 0) > Date.now()) return;
         if (injectable(e)) void bounded(e.id, () => io.ready(e)).then((ready) => {
           const current = db.get(e.id)!;
