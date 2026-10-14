@@ -5,10 +5,10 @@
 // 去看; 交接 / `/clear` / 压缩之后, 手上挂着什么整个没了。这三种都不是「判断」出错,
 // 是「记账」出错 —— 记账是确定性的事, 放进 daemon。
 //
-// 一行 = 一次派活 (tell_peer / spawn 带 task): 件号、对象、一句话题、为谁派的。状态不
-// 由模型报: 在飞的那几种 (working / blocked / deferred) 读时从回执登记现算, 落定的那
-// 一刻由回执回调写一次。「等人」= 回执是 NEED; 人在那件活的群里再开口 → 记「人已回话」,
-// 发话方续问 (`re`) 或同一对改派 → 消掉。
+// 一行 = 一次派活 (tell_peer / spawn 带 task): 口径是一笔路由 event —— 对象、一句话题、
+// 这条结论收给谁 (receiver 快照)。状态不由模型报: 在飞的那几种 (working / blocked / deferred)
+// 读时从路由表现算, 落定的那一刻由回执回调写一次。「等人」= 行上是 NEED; 人在那件活的群里
+// 再开口 → 记「人已回话」, 发话方续问 (`re`) 或同一对改派 → 消掉。
 //
 // 提醒分两档, 都搭 notices 的那趟车 (注入边界上的 `<system-reminder>`), 不另占一轮:
 //   增量 —— 只挂必要的一行: 某件刚变成「等人」、人在那个群里开口了、某件派出很久还没回执;
@@ -20,22 +20,21 @@ import type { Asker } from "../shared/detail-store.js";
 import { renderReminder, type ReceiptStatus } from "../shared/reminder.js";
 import type { TurnState } from "../shared/turn-state.js";
 import { clipLine } from "../shared/std.js";
-import type { ParentK } from "./receipts.js";
-import type { Frame, ReturnMode } from "./receiver-stack.js";
+import type { Receiver } from "./router.js";
 
 export interface Item {
-  turn: string;
+  /** 路由表的 event id —— 这一笔的唯一定位 (§9.5: 主键从件号换成 event)。 */
+  event: string;
+  /** 老的件号 (T10 前写下的行只有它; 新旧两种 id 都能拿来点这一行)。 */
+  turn?: string;
   dispatches?: string[];
   /** 派活的那方 (target key)。 */
   owner: string;
   to: string;
   /** 派活文本的头一句。 */
   topic: string;
-  /** 为谁派的: 群里哪句人话 / 上游哪件 (回执的父 k)。 */
-  for?: ParentK;
-  /** 派活那一刻冻结的整条 receiver stack (`for` = `stack[0]`)。 */
-  stack?: Frame[];
-  mode?: ReturnMode;
+  /** 这一笔的结论收给谁 (派活那一刻从路由行拷的快照): 群里那句人话 / 上游某一笔。 */
+  receiver?: Receiver;
   asker?: Asker;
   job?: string;
   at: number;
@@ -55,8 +54,8 @@ export interface Item {
 }
 type Nudge = "need" | "slow" | "idle";
 
-/** 在飞的那件此刻的状态 (receipts.states 按件号给)。 */
-export type LiveOf = (turn: string) => { state: TurnState } | undefined;
+/** 在飞的那件此刻的状态 (路由表按 event 给)。 */
+export type LiveOf = (event: string) => { state: TurnState } | undefined;
 
 // ── 账本 ────────────────────────────────────────────────────────────
 
@@ -76,15 +75,15 @@ const isFailure = (st?: ReceiptStatus): boolean => st === "timeout" || st === "s
 
 export interface Ledger {
   /** Idempotent tracked projection; recovery never reopens a settled leg. */
-  dispatch: (key: string, x: { turn: string; owner: string; to: string; text: string; for?: ParentK; stack?: Frame[]; mode?: ReturnMode; asker?: Asker; job?: string; at: number }) => void;
+  dispatch: (key: string, x: { event: string; turn?: string; owner: string; to: string; text: string; receiver?: Receiver; asker?: Asker; job?: string; at: number }) => void;
   /** 一次新派活。同一对之前还开着的那件被顶掉 (回执登记也是一对一份, 旧那份不会再回来)。 */
-  open: (x: { turn: string; owner: string; to: string; text: string; for?: ParentK; stack?: Frame[]; mode?: ReturnMode; asker?: Asker; job?: string; at: number }) => void;
-  /** 续问 (`re`) —— 同一件接着说: 清掉「等人」, 回到在飞; 已关掉的重新打开。 */
-  touch: (owner: string, turn: string) => void;
+  open: (x: { event: string; turn?: string; owner: string; to: string; text: string; receiver?: Receiver; asker?: Asker; job?: string; at: number }) => void;
+  /** 续问 (`re`) —— 同一件接着说: 清掉「等人」, 回到在飞; 已关掉的重新打开。`id` = event 或老件号。 */
+  touch: (owner: string, id: string) => void;
   /** 回执落了一份。`bySender` = 发话方自己收掉 / 取走的, 它自己知道, 直接关。 */
-  outcome: (owner: string, turn: string, status: ReceiptStatus, body: string, bySender?: boolean) => void;
+  outcome: (owner: string, event: string, status: ReceiptStatus, body: string, bySender?: boolean) => void;
   /** 显式消项; 返回消掉的。 */
-  drop: (owner: string, turns: readonly string[], why: string) => Item[];
+  drop: (owner: string, events: readonly string[], why: string) => Item[];
   closeJob: (job: string) => void;
   openOf: (owner: string) => Item[];
   /** 改一行 (提醒标记 / 人已回话)。 */
@@ -92,51 +91,51 @@ export interface Ledger {
 }
 
 export const createLedger = (store: JsonMap<Item>, now: () => number = Date.now): Ledger => {
-  const all = (): Item[] => Object.values(store.all());
-  const close = (x: Item, why: string): void => { store.set(x.turn, { ...x, closed: { at: now(), why } }); };
-  const find = (owner: string, turn: string): Item | undefined => {
-    const x = store.get(turn);
-    return x && x.owner === owner && !x.closed ? x : undefined;
-  };
+  // 盘上还留着只写件号的老行 (T10 才归档这个文件): 读出来时把件号补成 event, 免得渲染成 undefined;
+  // 那一栏此后既认 event 也认件号, 老行照旧点得动。
+  const all = (): Item[] => Object.values(store.all()).map((x) => (x.event ? x : { ...x, event: x.turn ?? "" }));
+  const close = (x: Item, why: string): void => { store.set(x.event, { ...x, closed: { at: now(), why } }); };
+  const find = (owner: string, id: string): Item | undefined =>
+    all().find((x) => (x.event === id || x.turn === id) && x.owner === owner && !x.closed);
   return {
     dispatch: (key, { text, ...x }) => {
-      const old = store.get(x.turn);
+      const old = store.get(x.event);
       if (old?.dispatches?.includes(key)) return;
-      all().filter((y) => !y.closed && y.owner === x.owner && y.to === x.to && y.turn !== x.turn).forEach((y) => close(y, "同一对又派了一件, 旧的回执不会再来"));
+      all().filter((y) => !y.closed && y.owner === x.owner && y.to === x.to && y.event !== x.event).forEach((y) => close(y, "同一对又派了一件, 旧的回执不会再来"));
       const { status: _s, ask: _a, waitHuman: _w, heard: _h, told: _t, closed: _c, ...rest } = old ?? {};
-      store.set(x.turn, { ...rest, ...x, topic: old?.topic ?? topicOf(text), touched: x.at, dispatches: [...(old?.dispatches ?? []), key] });
+      store.set(x.event, { ...rest, ...x, topic: old?.topic ?? topicOf(text), touched: x.at, dispatches: [...(old?.dispatches ?? []), key] });
     },
     open: ({ text, ...x }) => {
-      all().filter((y) => !y.closed && y.owner === x.owner && y.to === x.to && y.turn !== x.turn).forEach((y) => close(y, "同一对又派了一件, 旧的回执不会再来"));
-      store.set(x.turn, { ...x, topic: topicOf(text), touched: x.at });
+      all().filter((y) => !y.closed && y.owner === x.owner && y.to === x.to && y.event !== x.event).forEach((y) => close(y, "同一对又派了一件, 旧的回执不会再来"));
+      store.set(x.event, { ...x, topic: topicOf(text), touched: x.at });
     },
-    touch: (owner, turn) => {
+    touch: (owner, id) => {
       // 关掉了的也认: 对 done / drop / 失败的那件 re, 这一句又在飞了。
-      const x = store.get(turn);
-      if (!x || x.owner !== owner) return;
+      const x = all().find((y) => (y.event === id || y.turn === id) && y.owner === owner);
+      if (!x) return;
       const { status: _s, ask: _a, waitHuman: _w, heard: _h, told: _t, closed: _c, ...rest } = x;
-      store.set(turn, { ...rest, touched: now() });
+      store.set(x.event, { ...rest, touched: now() });
     },
-    outcome: (owner, turn, status, body, bySender) => {
-      const x = find(owner, turn);
+    outcome: (owner, event, status, body, bySender) => {
+      const x = find(owner, event);
       if (!x) return;
       if (status === "done" || bySender) { close(x, bySender ? "你自己收掉 / 取走了" : "done"); return; }
       // 有了新回执就是有动静: 「挂太久」「派出太久」的提醒从这里重新计。
       const base = { ...x, status, touched: now(), told: { ...x.told, idle: undefined, slow: undefined } };
       // 为上游 wizard 派的活, 反问是问发话方的 (它去问上游), 不挂「等人」。
       const ask = clipLine(body.replace(/^[\s\S]*NEED\s*[:：]\s*/, ""), 120);
-      store.set(turn, status !== "need" ? base
-        : x.for?.kind === "peer" ? { ...base, ask }
+      store.set(x.event, status !== "need" ? base
+        : x.receiver?.kind === "wizard" ? { ...base, ask }
           : { ...base, ask, waitHuman: now(), heard: undefined, told: { ...base.told, need: undefined } });
     },
-    drop: (owner, turns, why) => {
-      const hit = turns.map((t) => find(owner, t.replace(/[`\s]/g, ""))).filter((x): x is Item => !!x);
+    drop: (owner, events, why) => {
+      const hit = events.map((t) => find(owner, t.replace(/[`\s]/g, ""))).filter((x): x is Item => !!x);
       hit.forEach((x) => close(x, why || "发话方消掉"));
       return hit;
     },
     closeJob: (job) => all().filter((x) => !x.closed && x.job === job).forEach((x) => close(x, "工单收了")),
     openOf: (owner) => all().filter((x) => !x.closed && x.owner === owner).sort((a, b) => a.at - b.at),
-    put: (x) => { store.set(x.turn, x); },
+    put: (x) => { store.set(x.event, x); },
   };
 };
 
@@ -151,7 +150,7 @@ export const stateOf = (x: Item, live: LiveOf, at: number): string =>
     : x.status === "need" ? "它在反问, 等你答"
       : x.status === "error" ? "CLI 报错停了"
         : isFailure(x.status) ? `没结论 (${x.status})`
-          : live(x.turn)?.state ?? "在飞";
+          : live(x.event)?.state ?? "在飞";
 
 export interface Names {
   nameOf: (target: string) => string;
@@ -159,19 +158,19 @@ export interface Names {
 }
 
 const forOf = (x: Item, n: Names): string =>
-  x.for?.kind === "peer" ? `为 ${n.nameOf(x.for.from)} 的 \`${x.for.turn}\``
-    : x.for?.kind === "chat" ? `为群 ${n.chatOf(x.for.channel)}${x.asker ? ` 的 ${x.asker.who.replace(/^user:/, "")}` : ""}`
+  x.receiver?.kind === "wizard" ? `为 ${n.nameOf(x.receiver.to)}${x.receiver.event ? ` 的 \`${x.receiver.event}\`` : " (detach)"}`
+    : x.receiver?.kind === "chat" ? `为群 ${n.chatOf(x.receiver.channel)}${x.asker ? ` 的 ${x.asker.who.replace(/^user:/, "")}` : ""}`
       : "";
 
 export const renderRow = (x: Item, live: LiveOf, n: Names, at: number): string =>
   [
-    `- \`${x.turn}\` → ${n.nameOf(x.to)} · ${stateOf(x, live, at)} ${ago(at - (x.waitHuman ?? x.at))}`,
+    `- \`${x.event}\` → ${n.nameOf(x.to)} · ${stateOf(x, live, at)} ${ago(at - (x.waitHuman ?? x.at))}`,
     `「${x.topic}」`,
     forOf(x, n),
     x.job ? `工单 ${x.job}` : "",
   ].filter(Boolean).join(" · ") + (x.ask ? `\n  它问: ${x.ask}` : "");
 
-const HOWTO = "答它 / 转达人的话 → `tell_peer({name, re: 件号})`; 没结论的改派或 re 追问; 不再要了 → `pending_items({drop:[件号]})`";
+const HOWTO = "答它 / 转达人的话 → `tell_peer({name, re: <event>})`; 没结论的改派或 re 追问; 不再要了 → `pending_items({drop:[<event>]})`";
 
 /** 等人验收的一行: 需求已交付、根单还开着, 等人说「好」或「不对」。 */
 export const renderAwaiting = (title: string, job: string, deliveredAt: number, at: number): string =>
@@ -238,7 +237,7 @@ export interface DigestOut {
   mark: Mark;
 }
 
-const chatOfItem = (x: Item): string => (x.for?.kind === "chat" ? x.for.channel : x.asker?.chat ?? "");
+const chatOfItem = (x: Item): string => (x.receiver?.kind === "chat" ? x.receiver.channel : x.asker?.chat ?? "");
 
 /** 这一次注入该挂什么 —— 纯函数: 全表的触发、增量的那几行、要记下的「提过了」。 */
 export const digest = (d: DigestIn): DigestOut => {
@@ -253,13 +252,13 @@ export const digest = (d: DigestIn): DigestOut => {
     d.cut ? (d.cut === "clear" ? "刚 /clear 过" : "上下文刚被压缩过") : "",
     m.drains + 1 >= FULL_EVERY ? `离上次全表已经 ${m.drains + 1} 轮` : "",
     cur.ctx - m.ctxAtFull >= FULL_CTX_GROWTH ? `离上次全表 ctx 又涨了 ${Math.round((cur.ctx - m.ctxAtFull) / 1000)}k` : "",
-    idle.length ? `${idle.map((x) => `\`${x.turn}\``).join(" ")} 挂了 ${ago(d.now - Math.min(...idle.map((x) => x.touched)))} 没动静` : "",
+    idle.length ? `${idle.map((x) => `\`${x.event}\``).join(" ")} 挂了 ${ago(d.now - Math.min(...idle.map((x) => x.touched)))} 没动静` : "",
   ].filter(Boolean)[0] ?? "";
   const to = (x: Item): string => d.nameOf(x.to);
   const inChat = (x: Item): boolean => !!d.human && (!chatOfItem(x) || chatOfItem(x) === d.human.channel);
   // 「这句可能在答哪件」与全表无关: 全表只摆出等人的件, 不知道人此刻开了口。
   const heard = (x: Item): boolean => !!x.waitHuman && inChat(x) && (!x.heard || d.now - x.heard >= HEARD_EVERY_MS);
-  const heardLine = (x: Item): string => `heard? ${x.turn} ${to(x)} asked: ${x.ask ?? x.topic}`;
+  const heardLine = (x: Item): string => `heard? ${x.event} ${to(x)} asked: ${x.ask ?? x.topic}`;
   if (why) {
     // 全表把各件都摆出来了: 它们各自那一行增量不必再提。
     const touched = d.items.map((x) => ({
@@ -272,10 +271,10 @@ export const digest = (d: DigestIn): DigestOut => {
   const steps = d.items.map((x): { line: string; next: Item } | undefined => {
     if (heard(x)) return { line: heardLine(x), next: { ...x, heard: d.now, told: { ...x.told, need: true } } };
     if (x.waitHuman && !x.told?.need) {
-      return { line: `need ${x.turn} ${to(x)} asks the human: ${x.ask ?? x.topic}`, next: { ...x, told: { ...x.told, need: true } } };
+      return { line: `need ${x.event} ${to(x)} asks the human: ${x.ask ?? x.topic}`, next: { ...x, told: { ...x.told, need: true } } };
     }
     if (!x.status && !x.told?.slow && d.now - x.touched >= SLOW_MS) {
-      return { line: `slow ${x.turn} → ${to(x)} ${ago(d.now - x.touched)} since ${x.touched > x.at ? "re-ask" : "sent"}, no receipt: ${x.topic}`, next: { ...x, told: { ...x.told, slow: true } } };
+      return { line: `slow ${x.event} → ${to(x)} ${ago(d.now - x.touched)} since ${x.touched > x.at ? "re-ask" : "sent"}, no receipt: ${x.topic}`, next: { ...x, told: { ...x.told, slow: true } } };
     }
     return undefined;
   });

@@ -1,8 +1,8 @@
 // 一件在飞的活此刻是什么状态 —— 名册、peek、工单清单看同一个词。
 //
-// 只从两处现算, 不落盘: 回执登记 (receipts 的 slot: 落定了没有、反问过没有、挂起等子活
-// 没有) 和 pane 的一次探针 (是不是停在审批卡上)。终态就是回执的 status; 其余几种都是
-// 「还没定论」的细分 —— 发起者据此判断该等、该答、还是该去点那张卡。
+// 只从两处现算, 不落盘: 一行状态 (回执路由表: 前置落定了没有 / 交出定论了没有 / 还挂着
+// 没落定的子活) 和 pane 的一次探针 (是不是停在审批卡上)。终态就是行上那份定论的 status;
+// 其余几种都是「还没定论」的细分 —— 发起者据此判断该等、该答、还是该去点那张卡。
 import type { ReceiptStatus } from "./reminder.js";
 
 /** 落定了的那几种 (need / error 是中途的)。 */
@@ -10,20 +10,25 @@ export type Terminal = Exclude<ReceiptStatus, "need" | "error">;
 export const isTerminal = (st: ReceiptStatus): st is Terminal => st !== "need" && st !== "error";
 export type TurnState = "working" | "blocked" | "needs-input" | "errored" | "deferred" | "queued" | Terminal;
 
+/** 路由行 (`daemon/router.ts` 的 Status) 到这一层词表的适配 (§9.5):
+ *  `held` (前置没落定) → `queued`, 还挂着没落定的子行 → `deferred`, 定了论的直接报它。 */
 export interface TurnSlot {
-  outcome?: { status: ReceiptStatus };
-  resolved: boolean;
-  deferred?: boolean;
+  status: RouteStatus;
+  /** `waiting(event)` 非空 = 它还挂着没落定的子行。 */
+  waiting: boolean;
+  /** 落了定论的才给 (answered / handed)。 */
+  outcome?: Terminal;
 }
+export type RouteStatus = "held" | "open" | "need" | "error" | "answered" | "handed";
 
 export const turnState = (s: TurnSlot, probe: { parked: boolean }): TurnState => {
-  const st = s.outcome?.status;
-  return st && s.resolved ? (st as Terminal)
-    : st === "need" ? "needs-input"
-      : s.deferred ? "deferred"
-        : st === "error" ? "errored"
-          : probe.parked ? "blocked"
-            : "working";
+  return s.status === "held" ? "queued"
+    : s.status === "need" ? "needs-input"
+      : s.waiting ? "deferred"
+        : s.status === "error" ? "errored"
+          : s.status === "answered" || s.status === "handed" ? s.outcome ?? "done"
+            : probe.parked ? "blocked"
+              : "working";
 };
 
 const ageOf = (ms: number): string =>

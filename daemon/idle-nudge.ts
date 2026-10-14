@@ -1,8 +1,8 @@
 // 闲置追问: 派出去的活, 对方闲着不动、也没有回执 —— 守护进程代发话方问一句「进展如何 / 卡在哪」。
 //
 // 回执 watcher 只管「等它停下、取它答这一句的话」; 停下了却一直没有定论的那段时间没人看。
-// 这里补的就是那段: 每隔一会儿扫一遍在飞的件 (receipts.states), 对方**持续**闲够阈值
-// (没在忙、没停在审批卡上、没在交接), 就同件号续问一次 (receipts.reask, 父 k / 链头 / 期限
+// 这里补的就是那段: 每隔一会儿扫一遍在飞的件 (路由表), 对方**持续**闲够阈值
+// (没在忙、没停在审批卡上、没在交接), 就在同一笔上续问一次 (件号 / 链头 / 期限
 // 沿用原件) —— 它的答复照常作为那件活的回执回给发话方。
 //
 // 只追问还在「干活」的件: 反问着的 (needs-input) 在等发话方、挂起等子活的 (deferred) 在等
@@ -59,7 +59,7 @@ export const nudgeText = (fromName: string, turn: string, idleMs: number, n: num
   `（守护进程代 ${fromName} 追问${max > 1 ? ` (${n}/${max})` : ""}: 这件活 (${turn}) 你已经闲了 ${Math.max(1, Math.round(idleMs / 60_000))} 分钟, 还没有交回结论。进展如何? 卡在哪? 做完了就按约定收口 \`RESULT: <结论>\`; 缺信息 \`NEED: <问题>\`; 还在等什么 (后台任务 / 别人) 就说清楚在等什么、大概多久。）`;
 
 export interface NudgeDeps {
-  /** 在飞的件 (receipts.states)。 */
+  /** 在飞的件 (index.ts 的 routeInFlight)。 */
   inflight: () => readonly { from: string; to: string; turn: string; job: string; state: TurnState; ageMs: number }[];
   idleNow: (target: string) => Promise<boolean>;
   handingOff: (target: string) => boolean;

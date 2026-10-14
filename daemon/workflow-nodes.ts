@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, openSync, fsyncSync, closeSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import type { MemberRole } from "../shared/world.js";
-import type { Tell, Prereq } from "./receipts.js";
+import type { Tell, Prereq } from "./dispatch.js";
 import type { ReceiptStatus } from "../shared/reminder.js";
 import { parseClosing } from "./peers.js";
 import { expandHome } from "../shared/paths.js";
@@ -39,8 +39,8 @@ export const createWorkflowNodes = (file: string) => {
     || (a.acceptance === "accepted" && (a.execution !== "terminal" || a.status !== "done" || !a.body?.trim() || a.digest !== resultDigest(a.body)))
     || (a.files !== undefined && (!Array.isArray(a.files) || a.files.some((f) => typeof f.path !== "string" || typeof f.sha256 !== "string" || (f.snapshot !== undefined && (typeof f.snapshot !== "string" || !isAbsolute(f.snapshot))))))
     || (a.accountingVersion !== undefined && a.accountingVersion !== 1)
-    || (a.dispatches !== undefined && (!Array.isArray(a.dispatches) || a.dispatches.some((d) => typeof d.key !== "string" || !d.key || (d.tell && (d.tell.from !== a.owner || d.tell.to !== a.to || d.tell.turn !== a.turn)) || typeof d.text !== "string" || !Number.isFinite(d.at) || !["task", "ask"].includes(d.kind) || ([d.free, d.continuation].some((v) => v !== undefined && typeof v !== "boolean"))) || new Set(a.dispatches.map((d) => d.key)).size !== a.dispatches.length))
-    || (a.tell && (a.tell.from !== a.owner || a.tell.to !== a.to || a.tell.turn !== a.turn))
+    || (a.dispatches !== undefined && (!Array.isArray(a.dispatches) || a.dispatches.some((d) => typeof d.key !== "string" || !d.key || (d.tell && (d.tell.from !== a.owner || d.tell.to !== a.to || d.tell.event !== a.turn)) || typeof d.text !== "string" || !Number.isFinite(d.at) || !["task", "ask"].includes(d.kind) || ([d.free, d.continuation].some((v) => v !== undefined && typeof v !== "boolean"))) || new Set(a.dispatches.map((d) => d.key)).size !== a.dispatches.length))
+    || (a.tell && (a.tell.from !== a.owner || a.tell.to !== a.to || a.tell.event !== a.turn))
   )) throw new Error("invalid workflow node history");
   if (new Set(rows.map((a) => a.id)).size !== rows.length || new Set(rows.map((a) => `${a.owner}\0${a.turn}`)).size !== rows.length) throw new Error("duplicate workflow attempt identity");
   const write = (next: NodeAttempt[]): void => {
@@ -91,8 +91,8 @@ export const createWorkflowNodes = (file: string) => {
     list: (owner: string, job?: string) => structuredClone(rows.filter((a) => a.owner === owner && (!job || a.job === job))),
     byTurn: (owner: string, turn: string) => { const a = byTurn(owner, turn); return a && structuredClone(a); },
     begin,
-    cancel: (to: string | undefined, owner?: string, job?: string, turn?: string, only: (x: { from: string; turn: string }) => boolean = () => true): number => {
-      const hit = rows.filter((a) => (!to || a.to === to) && (!owner || a.owner === owner) && (!job || a.job === job) && (!turn || a.turn === turn) && a.execution !== "terminal" && !a.canceled && only({ from: a.owner, turn: a.turn }));
+    cancel: (to: string | undefined, owner?: string, job?: string, turn?: string, only: (x: { from: string; event: string }) => boolean = () => true): number => {
+      const hit = rows.filter((a) => (!to || a.to === to) && (!owner || a.owner === owner) && (!job || a.job === job) && (!turn || a.turn === turn) && a.execution !== "terminal" && !a.canceled && only({ from: a.owner, event: a.turn }));
       if (hit.length) write(rows.map((a) => hit.some((b) => b.id === a.id) ? { ...a, canceled: true, acceptance: "rejected" as const, execution: a.exposed || a.execution === "dispatch-unknown" || ["running", "needs-input", "errored"].includes(a.execution) ? "dispatch-unknown" as const : "terminal" as const, status: "canceled" as const, stopped: !a.exposed && ["queued", "dispatching"].includes(a.execution), reason: "canceled; physical exposure requires stopped reconciliation" } : a));
       return hit.length;
     },

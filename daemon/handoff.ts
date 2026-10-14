@@ -3,22 +3,22 @@
 //
 // 身份、工单、日程、名册信箱都挂在 target / 名字上, 换会话碰不到它们; 会断的是那些
 // 隐含着「这个会话」的东西:
-//   - 回执的**答方**: 欠着别人的那一句, 答案要么已经在旧 transcript 里 (换了会话
-//     replyFor 就读不到了), 要么还没答 —— 义务得跟着简报转进新会话, 而不是把简报那
-//     一轮的回复错当成回执;
+//   - 回执的**答方**: 欠着别人的那一句, 换了会话旧 transcript 就读不到了 —— 义务得跟着
+//     简报转进新会话, 而不是把简报那一轮的回复错当成回执;
 //   - 回执的**发方**与一切注入: 重开的那几秒 pane 是死的, 此刻投进来的话要么被当成
 //     "发话方已经不在"丢掉, 要么 resume 回旧 sid, 要么抢在简报前面成了新会话的开场白;
 //   - 交接本身: 旧实现是一段纯内存的 async, reload 落在「杀了旧 pane、还没贴回简报」
 //     之间, 新会话就空着醒来, 简报没了。
 // 所以这里做三件事: 交接期间立一道闸 (`handingOff` / `handedOff`), 闸内一切注入都等;
-// 在旧会话还在的那一刻把欠着的回执清点完 (receipts.transfer); 每一步落盘, boot 时
-// 从断点接着做。
+// 简报贴回新会话, 然后**按路由表**把它交接前还欠着、还没交代的那几笔一笔一轮地
+// 「继续 `<event>`」(T8 起; 从前是 receipts.transfer 在旧会话还在那一刻清点答案 ——
+// 那条路要把答案钉在旧 transcript 上, 换会话就断, 欠账反倒没了下文)。
+// 每一步落盘, boot 时从断点接着做。
 import type { Logger } from "pino";
 import type { JsonMap } from "../shared/json-map-store.js";
-import type { Asker } from "../shared/detail-store.js";
 import { sleep } from "../shared/std.js";
 import { waitForIdle } from "./graph.js";
-import type { Receipts, Slot } from "./receipts.js";
+import type { EventId } from "./router.js";
 
 // ── 闸 ──────────────────────────────────────────────────────────────
 // 进程级的单例: 人话的入口 (inbound) 在 mirror 块之前就装好了, 拿不到这里的实例。
@@ -44,30 +44,21 @@ const hold = (target: string): (() => void) => {
 
 // ── 一次交接 ────────────────────────────────────────────────────────
 
-/** 简报贴回新会话时要挂的那些信封: 交接时还欠着回执的发话方。 */
-export interface Owe {
-  from: string;
-  channel: string;
-  /** 那件活的件号 —— 新会话贴回简报那一句照样挂上, 回执仍按它定位。 */
-  turn?: string;
-  /** 那件活的链头 —— 新会话那一轮照样记上 (见 Asker)。 */
-  asker?: Asker;
-}
-
 export interface Pending {
   target: string;
   /** self = 简报由它自己写在入参里; other = 守护进程让它写。 */
   mode: "self" | "other";
-  /** 发起交接的时刻 —— 自我交接时, 在它之前就收口的那一轮才算旧会话答过。 */
+  /** 发起交接的时刻 —— 自我交接时, 在它之前就收口的那一轮才算旧会话答过; 也是这一场交接的
+   *  代数 (欠账续答的注入幂等 id 按它区分: 同一场重放同一条, 换一场才配新的)。 */
   at: number;
   /** 交接前的 sid: reload 后据它分辨「重开」做没做完。 */
   sid: string;
-  /** waiting: 等它停下 · briefing: 已请它写简报 (other) · restarting: 已清点回执、正在重开 ·
-   *  restarted: 新会话已起, 待贴回简报。 */
-  stage: "waiting" | "briefing" | "restarting" | "restarted";
+  /** waiting: 等它停下 · briefing: 已请它写简报 (other) · restarting: 正在重开 (已不再清点
+   *  回执, 欠账由路由表兜着) · restarted: 新会话已起, 待贴回简报 · resuming: 简报已贴回,
+   *  正逐笔续答它还欠着的那些 (reload 落在这里就重放一次, 注入幂等不会重复催)。 */
+  stage: "waiting" | "briefing" | "restarting" | "restarted" | "resuming";
   brief?: string;
   focus?: string;
-  owe?: Owe[];
   /** 自我交接那一刻它这一轮的频道 ("" = 私聊): 重开后「接着干」那一轮还在答同一件 ask,
    *  终句回同一处。交接别人时它是闲着的, 没有在答的 ask —— "". */
   channel?: string;
@@ -82,15 +73,17 @@ export interface HandoffDeps {
   sessionId: (target: string) => string;
   /** 杀旧 pane、起新进程 (同名 / cwd / 模型 / charter); `p.announce` 时重开发「📂 当前项目」气泡。 */
   restart: (target: string, p: Pending) => Promise<{ ok: boolean; reason?: string }>;
-  /** 往会话里贴一段话; `owe` 非空时挂上那些发话方的信封 (频道随它们), 否则这一轮的频道是 `channel`。 */
-  inject: (target: string, text: string, owe: readonly Owe[], channel: string) => Promise<{ ok: boolean; reason?: string }>;
+  /** 往会话里贴一段话; 这一轮的频道是 `channel` ("" = 私聊)。简报那一句不挂任何信封 ——
+   *  它不服务任何一笔, 回执不会误落到它上面。 */
+  inject: (target: string, text: string, channel: string) => Promise<{ ok: boolean; reason?: string }>;
   /** 它此刻这一轮的频道 ("" = 私聊)。 */
   channelOf: (target: string) => string;
   lastText: (target: string) => string;
-  /** `from` 那一句在 `to` 的**当前** transcript 里, `untilMs` 之前就收口的答案 (见
-   *  peers.replyClosedBefore); 定位不到问话 → undefined。 */
-  answeredBefore: (to: string, from: string, sinceMs: number, untilMs: number, turn?: string) => string | undefined;
-  receipts: Receipts;
+  /** 交接前它欠着、还没交代的那几笔 (路由表 `owedBy(W)` 里 status 仍 open 的, 见 §9.5)。 */
+  owed: (target: string) => readonly EventId[];
+  /** 让它接着干那一笔: 注入「继续 `<event>`」, 该轮的终句因此落到那一行上, 回执照常闭合。
+   *  `at` = 这一场交接的起点 —— 同一场重放用同一条注入 (幂等), 换一场才配新的。 */
+  resume: (target: string, event: EventId, at: number) => Promise<{ ok: boolean; reason?: string }>;
   /** 交接没做成时告诉**它自己** (下一条进它会话的话尾巴上捎带)。生命周期事件不进群。 */
   notify: (target: string, text: string) => void;
   log: Logger;
@@ -106,7 +99,7 @@ export interface Handoffs {
   self: (target: string, brief: string) => { ok: boolean; reason?: string };
   /** 交接别人: 等到简报贴回新会话才返回。`extra.announce` = 重开时发「📂 当前项目」气泡。 */
   other: (target: string, focus: string, timeoutMs: number, extra?: { announce?: boolean }) => Promise<HandoffResult>;
-  /** 把落盘里没做完的交接接着做。须在 receipts.resume 之前调: 闸要先立起来。 */
+  /** 把落盘里没做完的交接接着做。须在注入队列 resume 之前调: 闸要先立起来。 */
   resume: () => number;
 }
 
@@ -149,6 +142,28 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
     return false;
   };
 
+  /** 简报贴回之后: 它交接前欠着、还 open 的每一笔, 一笔一轮地接着说 (§9.5)。
+   *  简报那一轮没挂信封、服务不着任何一笔 —— 让那些回执闭合的只有这几句。逐笔等它闲下来
+   *  再贴下一句, 免得两句挤成一轮 (注入本身也按 id 幂等, reload 重放不会催第二遍)。
+   *  这一步不阻塞交接的收尾 (闸已经放了), 失败只记日志: 交接本身已经做成了。
+   *  等不到它闲下来就**留着这一行** (stage 还是 resuming): 那几笔还没催到, 下一次 reload 接着催
+   *  —— 丢了这一行就等于把这笔债悄悄丢了, 正是交接最容易出的那个事故。 */
+  const resumeOwed = async (p: Pending): Promise<void> => {
+    let done = true;
+    try {
+      for (const event of deps.owed(p.target)) {
+        const w = await idle(p, p.timeoutMs);
+        if (!w.idle) { deps.log.warn({ mod: "handoff", target: p.target, event, reason: w.reason }, "handoff: 欠账续答放弃 (它一直没闲下来), 留待 reload 再催"); done = false; break; }
+        const r = await deps.resume(p.target, event, p.at);
+        deps.log.info({ mod: "handoff", target: p.target, event, ok: r.ok, reason: r.reason }, "handoff: 欠账续答 (继续)");
+        if (r.ok) await landed(p, 60_000);
+      }
+    } catch (e) {
+      deps.log.warn({ mod: "handoff", target: p.target, err: (e as Error).message }, "handoff: 欠账续答中断");
+    }
+    if (done) drop(p);
+  };
+
   /** 一步一步推到底; 每一步先落盘再动手, reload 后从 `stage` 接着来。 */
   const step = async (p: Pending): Promise<HandoffResult> => {
     switch (p.stage) {
@@ -159,7 +174,7 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
         if (!w.idle) return fail(p, 504, `一直没能闲下来 (${w.reason}), 上下文没动`);
         if (p.mode === "self") return step({ ...p, stage: "restarting" });
         // 守护进程请它写简报, 不是谁在群里问的: 私聊。
-        const r = await deps.inject(p.target, briefPrompt(p.focus), [], "");
+        const r = await deps.inject(p.target, briefPrompt(p.focus), "");
         if (!r.ok) return fail(p, 502, `summary inject failed: ${r.reason}`);
         return step(saved({ ...p, stage: "briefing" }));
       }
@@ -174,37 +189,35 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
       case "restarting": {
         // reload 落在重开中途: sid 已经换了就是做完了, 别再杀一次新会话。
         if (deps.sessionId(p.target) !== p.sid) return step(saved({ ...p, stage: "restarted" }));
-        // 旧会话此刻还在: 欠着的回执就在这里清点 —— 一重开, 旧 transcript 就再也读不到了。
-        // 自我交接只认调用之前就收口的那些轮 (调用这一轮的收尾话不是答案); 交接别人时
-        // 简报那一句已把它之前的每一轮都关上了。
-        const until = p.mode === "self" ? p.at : Number.MAX_SAFE_INTEGER;
-        const carried = deps.receipts.transfer(
-          p.target,
-          (s: Slot) => deps.answeredBefore(p.target, s.from, s.at, until, s.turn) ?? "",
-          Date.now(),
-        );
-        const next = saved({ ...p, stage: "restarting", owe: carried.map((s) => ({ from: s.from, channel: s.channel, ...(s.turn ? { turn: s.turn } : {}), ...(s.asker ? { asker: s.asker } : {}) })) });
+        // 它欠着谁、欠哪几笔 (路由表) 不受换会话影响: 表按 target 记, 新会话照样查得到 (见 resumeOwed)。
         const r = await deps.restart(p.target, p);
-        if (!r.ok) return fail(next, 502, `/new failed: ${r.reason ?? "unknown"}`);
-        return step(saved({ ...next, stage: "restarted" }));
+        if (!r.ok) return fail(p, 502, `/new failed: ${r.reason ?? "unknown"}`);
+        return step(saved({ ...p, stage: "restarted" }));
       }
       case "restarted": {
         // 简报是新会话的第一条注入, 可能撞上冷 pane: TUI 还没起好时注入只能「信任提交」
         // (日志 ok 而 pane 其实空白), 吞了 wizard 就空着醒来 —— 简报是它唯一的开场白。
         // 所以贴完要看见它真的动起来 (转忙, 或新 transcript 里有了它的话), 看不见就重贴一次。
         const text = carryOf(p);
-        let r = await deps.inject(p.target, text, p.owe ?? [], p.channel ?? "");
+        let r = await deps.inject(p.target, text, p.channel ?? "");
         if (r.ok && !(await landed(p, 60_000))) {
           deps.log.warn({ mod: "handoff", target: p.target }, "handoff: 简报贴回后新会话没动静 (冷 pane 吞了?), 重贴一次");
-          r = await deps.inject(p.target, text, p.owe ?? [], p.channel ?? "");
+          r = await deps.inject(p.target, text, p.channel ?? "");
           if (r.ok && !(await landed(p, 60_000))) r = { ok: false, reason: "简报两次都没让新会话动起来 (冷 pane 吞注入)" };
         }
-        drop(p);
-        deps.log.info({ mod: "handoff", target: p.target, ok: r.ok, reason: r.reason, owe: p.owe?.length ?? 0 }, "handoff: 简报已贴回");
+        deps.log.info({ mod: "handoff", target: p.target, ok: r.ok, reason: r.reason }, "handoff: 简报已贴回");
         if (!r.ok) return fail(p, 502, `handoff carry inject failed: ${r.reason}`);
         try {
           deps.archive?.({ target: p.target, mode: p.mode, at: p.at, sid: p.sid, nextSid: deps.sessionId(p.target), brief: p.brief ?? "" });
         } catch (e) { deps.log.warn({ mod: "handoff", target: p.target, err: (e as Error).message }, "handoff: 简报留档失败"); }
+        // 欠账续答排在最后一步: 先落盘再动手 —— reload 正好落在这一刻就重放它 (注入幂等)。
+        const next = saved({ ...p, stage: "resuming" });
+        void resumeOwed(next);
+        return { ok: true, brief: p.brief ?? "" };
+      }
+      case "resuming": {
+        // reload 落在续答中途: 重放一次 —— 已经贴过的那几笔按 id 判重, 不会催第二遍。
+        void resumeOwed(p);
         return { ok: true, brief: p.brief ?? "" };
       }
     }

@@ -87,8 +87,8 @@ const INDEX = new WeakMap<readonly DetailRecord[], TurnIndex>();
 const indexOf = (records: readonly DetailRecord[]): TurnIndex => {
   const hit = INDEX.get(records);
   if (hit) return hit;
-  const asks = asksWhere(records, (t) => t.from?.kind === "peer" && !t.from.receipt && !!t.from.turn && !!t.userQuery?.trim());
-  const dispatch = asks.reduce((m, t) => (m.has(t.from!.turn!) ? m : m.set(t.from!.turn!, t)), new Map<string, TurnDetailRecord>());
+  const asks = asksWhere(records, (t) => t.from?.kind === "peer" && !t.from.receipt && !!t.from.event && !!t.userQuery?.trim());
+  const dispatch = asks.reduce((m, t) => (m.has(t.from!.event!) ? m : m.set(t.from!.event!, t)), new Map<string, TurnDetailRecord>());
   const byTarget = turnsWhere(records, (t) => !!t.target && !t.agent)
     .reduce((m, t) => m.set(t.target!, [...(m.get(t.target!) ?? []), t]), new Map<string, TurnDetailRecord[]>());
   const ix = { dispatch, byTarget };
@@ -120,11 +120,11 @@ const finalHead = (t: TurnDetailRecord): string =>
 const answerOf = (rc: TurnDetailRecord, records: readonly DetailRecord[]): TurnDetailRecord | undefined => {
   const f = rc.from;
   if (f?.kind !== "peer" || !f.receipt || !f.from) return undefined;
-  const d = f.turn ? dispatchOf(records, f.turn) : undefined;
+  const d = f.event ? dispatchOf(records, f.event) : undefined;
   const mine = (indexOf(records).byTarget.get(f.from) ?? []).filter((t) => t.createdAt <= rc.createdAt && t.createdAt >= (d?.createdAt ?? 0));
   const said = squash(rc.userQuery ?? "");
   const byText = mine.filter((t) => ((p) => p.length >= 4 && said.includes(p))(finalHead(t))).at(-1);
-  return byText ?? mine.filter((t) => t.from?.kind === "peer" && !t.from.receipt && t.from.turn === f.turn).at(-1);
+  return byText ?? mine.filter((t) => t.from?.kind === "peer" && !t.from.receipt && t.from.event === f.event).at(-1);
 };
 
 /** 答话方的轮次 id → 交回它的那份回执 (同一轮被认领多次取最新)。按 records 快照记一次: 每条出消息都要查。 */
@@ -145,10 +145,10 @@ const receiptChip = (r: TurnDetailRecord, records: readonly DetailRecord[], dir:
   if (!rc || f?.kind !== "peer") return "";
   const st = f.status ?? "done";
   const seq = f.job && f.total ? ` · ${escHtml(f.job)} 第 ${f.done ?? 0}/${f.total} 份` : "";
-  const d = f.turn ? dispatchOf(records, f.turn) : undefined;
-  const what = `.${dir.nameOf(r.target ?? "")} 把 ${f.turn ? `${f.turn} ` : ""}的结论交回给 .${dir.nameOf(rc.target ?? "")}`;
-  const [tag, attrs] = f.turn && d
-    ? ["button", `${gotoAttrs(f.turn, d)} title="${escHtml(`${what} · 点击跳到派活那句`)}"`]
+  const d = f.event ? dispatchOf(records, f.event) : undefined;
+  const what = `.${dir.nameOf(r.target ?? "")} 把 ${f.event ? `${f.event} ` : ""}的结论交回给 .${dir.nameOf(rc.target ?? "")}`;
+  const [tag, attrs] = f.event && d
+    ? ["button", `${gotoAttrs(f.event, d)} title="${escHtml(`${what} · 点击跳到派活那句`)}"`]
     : ["span", ` title="${escHtml(`${what} · 派活那句已不在记录里`)}"`];
   return `<${tag} class="mchip rcpt st-${escHtml(st)}"${attrs}>↩ 回执 · ${RCPT[st] ?? escHtml(st)}${seq}</${tag}>`;
 };
@@ -156,7 +156,7 @@ const receiptChip = (r: TurnDetailRecord, records: readonly DetailRecord[], dir:
 /** 这一行移交落成的那句。同一个活号续问多次就有多句 (每次 tell_peer 一句): 按原文认 ——
  *  落地的那句就是原文贴进去的 (外面裹着信封), 取首段比对; 认不出 (没原文) 退回最早那句。 */
 const dispatchFor = (records: readonly DetailRecord[], h: Handoff & { turn: string }): TurnDetailRecord | undefined => {
-  const all = asksWhere(records, (t) => t.from?.kind === "peer" && !t.from.receipt && t.from.turn === h.turn && !!t.userQuery?.trim());
+  const all = asksWhere(records, (t) => t.from?.kind === "peer" && !t.from.receipt && t.from.event === h.turn && !!t.userQuery?.trim());
   const head = squash(h.text).slice(0, 80);
   return (head.length >= 4 ? all.find((t) => squash(t.userQuery ?? "").includes(head)) : undefined) ?? all[0];
 };
@@ -175,7 +175,7 @@ const FAIL = new Set(["timeout", "silent", "dead", "canceled"]);
 const handoffDeco = (r: TurnDetailRecord, records: readonly DetailRecord[], dir: Directory, now: number): HandoffDeco => {
   // 老的 clone / spawn 回包不带活号: 分身的开场白就是这件活, 从它收到的第一句 (r 的主人私聊派来的) 读回来。
   const turnOf = (h: Handoff): string | undefined => h.turn ?? ((id) => id && (h.via === "clone" || h.via === "spawn")
-    ? asksWhere(records, (t) => t.target === id && t.from?.kind === "peer" && !t.from.receipt && t.from.from === r.target && t.createdAt >= r.createdAt)[0]?.from?.turn
+    ? asksWhere(records, (t) => t.target === id && t.from?.kind === "peer" && !t.from.receipt && t.from.from === r.target && t.createdAt >= r.createdAt)[0]?.from?.event
     : undefined)(dir.resolve(h.name));
   const landed = (h: Handoff): TurnDetailRecord | undefined => ((turn) => (turn ? dispatchFor(records, { ...h, turn }) : undefined))(turnOf(h));
   return {
@@ -195,7 +195,7 @@ const handoffDeco = (r: TurnDetailRecord, records: readonly DetailRecord[], dir:
       const h = { ...h0, turn: turnOf(h0) };
       if (!h.turn || !h.receipt) return { key: "plain", tip: h.kind === "fyi" ? "只是知会, 不等回执" : "不等回执" };
       const d = landed(h);
-      const rc = turnsWhere(records, (t) => t.from?.kind === "peer" && !!t.from.receipt && t.from.turn === h.turn && t.createdAt >= (d?.createdAt ?? 0))[0];
+      const rc = turnsWhere(records, (t) => t.from?.kind === "peer" && !!t.from.receipt && t.from.event === h.turn && t.createdAt >= (d?.createdAt ?? 0))[0];
       if (!rc) return { key: "run", tip: d ? "在办 · 等回执" : "等它接手" };
       const st = rc.from?.status ?? "done";
       const key = st === "done" || st === "need" || st === "error" ? st : FAIL.has(st) ? "fail" : "run";
@@ -207,7 +207,7 @@ const handoffDeco = (r: TurnDetailRecord, records: readonly DetailRecord[], dir:
 
 /** 派活 / 续问那句带上它的活号, 回执凭它定位回来。 */
 const pturnAttr = (r: TurnDetailRecord): string =>
-  r.from?.kind === "peer" && r.from.turn && !r.from.receipt ? ` data-pturn="${escHtml(r.from.turn)}"` : "";
+  r.from?.kind === "peer" && r.from.event && !r.from.receipt ? ` data-pturn="${escHtml(r.from.event)}"` : "";
 
 const renderIn = (r: TurnDetailRecord): string => {
   const q = splitReminders(unwrapMates(r.userQuery ?? ""));
@@ -259,8 +259,8 @@ export const dependentsOf = (r: TurnDetailRecord, records: readonly DetailRecord
         // 插话那句的入消息渲染在它落进的那一轮里, 重推的是那一轮
         (x.injects ?? []).some((i) => i.from?.kind === "peer" && i.from.from === r.target && mine(i.ts))));
   const f = r.from?.kind === "peer" ? r.from : undefined;
-  const owner = f?.turn ? (f.receipt ? r.target : f.from) : undefined;
-  const handed = owner ? records.filter(isTurn).filter((t) => t.target === owner && t.items.some((it) => it.t === "tool_result" && it.body.includes(f!.turn!))) : [];
+  const owner = f?.event ? (f.receipt ? r.target : f.from) : undefined;
+  const handed = owner ? records.filter(isTurn).filter((t) => t.target === owner && t.items.some((it) => it.t === "tool_result" && it.body.includes(f!.event!))) : [];
   const answered = f?.receipt ? [answerOf(r, records)].filter((t): t is TurnDetailRecord => !!t) : [];
   return [...new Set([...said, ...handed, ...answered].map((x) => x.id))].filter((id) => id !== r.id);
 };

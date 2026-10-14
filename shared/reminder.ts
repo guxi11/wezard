@@ -7,11 +7,14 @@
 //
 // 属性一览 (`wezard` 区分种类):
 //   envelope  kind=human|peer|task  from  chat?  scope=private|public (仅 peer)
+//             event (peer/task): 这一轮对应的**路由行** id (`route:<event>` 注入事件的那一笔)
+//             serves (仅回执): 这一轮的终句落在哪一笔上 (= receiver.event)
 //             receipt=1 (仅 peer): 这一轮是守护进程自动送回来的回执, 不是新活
 //             quiet=1 (仅 peer): 发话方不收回执; 不改变公开/私聊或工具授权
-//             reply-to (仅回执): 这一轮的终句会送到哪 (`.x` / 群名); 缺省 = 只进 rolepage
-//             k (仅回执): 机器读的父 k (`chat:<base>` / `peer:<turn>:<key>`), 下一跳继承
-//             via (仅回执): 这份结论是谁替 `from` 答的 (`from` 把那件活 transfer 给了它)
+//             via (仅回执): 这份结论是谁替 `from` 送到的 —— 收方已不在 (stop / 注销) 时沿链
+//                  升级, 被跳过的那些 wizard (由近及远, `, ` 分隔)
+//             late=1 (仅回执): 这一笔的上一环已经收口 (孤儿), 结论迟到了 —— 那一轮服务的
+//                  那一笔已关, 它的终句只进 rolepage
 //   mention   names  (空格分隔的 `.name`)
 //   roster    正文里 `- ` 开头的每一行是一条变动
 //   hint      role=steward: 人对管家说的那一轮挂的「自己答还是派出去」(只给模型, 不读回)
@@ -69,18 +72,18 @@ export interface Envelope {
   quiet?: boolean;
   /** 回执的定论 (见 ReceiptStatus); 老信封没有 = done。 */
   status?: ReceiptStatus;
-  /** 这件活的 id (`t` + 6 hex): 派活、续问、回执都带同一个, 回执按它定位答句。 */
-  turn?: string;
-  /** 续问 (`tell_peer({re})`): 这一句接着那件活说, 不是新活。值同 `turn`。 */
-  re?: string;
-  /** 回执: 这一轮的终句会送到哪 (`.x` = 作为回执回给它; 群名 = 进那个群)。 */
-  replyTo?: string;
-  /** 回执: 父 k 的机器表示 (见 receipts.kAttr)。 */
-  k?: string;
+  /** 这一轮对应的路由行 id (§9.1): 派活/续问 = 新开的子行; 回执 = 刚落定的那一笔;
+   *  定时任务 = 为它开的群根行。 */
+  event?: string;
+  /** 回执: 这一轮的终句落在哪一笔上 (= 收方自己欠的 `receiver.event`, §9.4)。 */
+  serves?: string;
   /** 回执: 这一轮在群里的终句答给的那个人 (userid, 见 role-view.audienceOf); 认不出 = 没有。 */
   audience?: string;
-  /** 回执: 替 `from` 作答的接手方 (`.x`) —— `from` 把那件活 transfer 了出去。 */
+  /** 回执: 这份结论是谁替 `from` 送到的 (`.x`, 多个用 `, ` 分隔) —— 收方已不在时沿链升级
+   *  跳过的那些 (见 router.escalate); transfer 接手作答的旧义。 */
   via?: string;
+  /** 回执: 这一笔的上一环已经收口 —— 结论迟到了, 它服务的那一笔已关 (见 router.isOrphaned)。 */
+  late?: boolean;
 }
 
 /** Human identity comes from inbound metadata; a private hop keeps that origin. */
@@ -91,13 +94,16 @@ export const askerFromEnvelope = (env: Envelope, chatOf: (chat: string) => strin
   return chat ? { who: `user:${env.from}`, chat } : undefined;
 };
 
-/** 回执那一轮的去向 (见 receipts.routeOf), 已渲染成给人 / 模型看的称呼。 */
-export interface ReceiptRoute { replyTo?: string; k?: string; audience?: string; asker?: Asker; via?: string }
+/** 回执那一轮的去向, 已渲染成给人 / 模型看的称呼 (§9.5: 去向由路由行的 receiver 边决定)。
+ *  `up` = 这一轮的终句会落到另一笔同伴的欠账上 (结论回给上游 wizard); 缺省 = 只进 rolepage
+ *  或落回那个群 (看 chat)。只用于信封正文措辞, 不写成属性。 */
+export interface ReceiptRoute { up?: boolean; audience?: string; asker?: Asker; via?: string; late?: boolean; pending?: number }
 
-/** 一件活的编号: 写进派活与回执的信封。 */
-/** `act`: 这句话要对方怎么接 —— 缺省是一件活; ask = 只答一问; fyi = 知会, 不用回。
+/** 这句话挂在哪一笔上、怎么接 (§9.4) —— 写进派活信封。
+ *  `act`: 这句话要对方怎么接 —— 缺省是一件活; ask = 只答一问; fyi = 知会, 不用回。
+ *  `re`: 续问 (接着那一笔说); 只影响信封正文的措辞。
  *  `quiet`: 发话方不收回执 (fyi 一定是; task 带 receipt:false 也是)。 */
-export interface TurnTag { turn: string; re?: boolean; deadline?: number; act?: "ask" | "fyi"; quiet?: boolean; asker?: Asker }
+export interface TurnTag { event?: string; re?: boolean; legs?: number; deadline?: number; act?: "ask" | "fyi"; quiet?: boolean; asker?: Asker }
 
 const askerAttrs = (asker?: Asker): Attrs => asker
   ? { "asker-user": asker.who, "asker-chat": asker.chat } : {};
@@ -113,21 +119,22 @@ export const envelopeAttrs = {
     wezard: "envelope", kind: "peer", from, scope: chat === undefined ? "private" : "public", ...(chat ? { chat } : {}),
     ...askerAttrs(t?.asker),
     ...(t?.quiet || t?.act === "fyi" ? { quiet: "1" } : {}),
-    ...(t ? { turn: t.turn, ...(t.re ? { re: t.turn } : {}), ...(t.deadline ? { deadline: new Date(t.deadline).toISOString() } : {}), ...(t.act ? { act: t.act } : {}) } : {}),
+    ...(t?.event ? { event: t.event } : {}),
+    ...(t?.deadline ? { deadline: new Date(t.deadline).toISOString() } : {}),
+    ...(t?.act ? { act: t.act } : {}),
   }),
-  /** `turn` = 这一枪的件号 (安静任务按它定位终句, 见 index.ts relayUnlessQuiet)。 */
-  task: (taskId: string, turn?: string): Attrs => ({ wezard: "envelope", kind: "task", from: taskId, ...(turn ? { turn } : {}) }),
+  /** `event` = 这一枪为它开的那条群根行 (安静任务按它定位终句, 见 index.ts relayUnlessQuiet)。 */
+  task: (taskId: string, event?: string): Attrs => ({ wezard: "envelope", kind: "task", from: taskId, ...(event ? { event } : {}) }),
   /** 回执也是「`from` 在对你说话」, 所以仍是 peer 信封 —— read_chat / rolepage 照旧
    *  把它归到那场对话里; 多一个 `receipt` 属性说明它是自动送回来的结论而不是新活。 */
-  receipt: (from: string, chat?: string, job?: { job: string; done: number; total: number }, status: ReceiptStatus = "done", turn?: string, route?: ReceiptRoute): Attrs => ({
-    ...envelopeAttrs.peer(from, chat, turn ? { turn } : undefined),
+  receipt: (from: string, chat?: string, job?: { job: string; done: number; total: number }, status: ReceiptStatus = "done", event?: string, route?: ReceiptRoute): Attrs => ({
+    ...envelopeAttrs.peer(from, chat, event ? { event } : undefined),
     receipt: "1",
     status,
     ...askerAttrs(route?.asker),
-    ...(route?.replyTo ? { "reply-to": route.replyTo } : {}),
-    ...(route?.k ? { k: route.k } : {}),
     ...(route?.audience ? { audience: route.audience } : {}),
     ...(route?.via ? { via: route.via } : {}),
+    ...(route?.late ? { late: "1" } : {}),
     // 工单的「齐了吗」由守护进程数出来写在属性上, 不让模型自己记: 异步回执是 N 个
     // 独立的轮次陆续进来的, 靠模型在上下文里数到五是最容易出错的那种事。
     ...(job && job.job
@@ -149,12 +156,11 @@ const envelopeOfAttrs = (a: Attrs): Envelope | undefined =>
         ...(a.receipt === "1" ? { receipt: true } : {}),
         ...(a.quiet === "1" || a.act === "fyi" ? { quiet: true } : {}),
         ...(a.status ? { status: a.status as ReceiptStatus } : {}),
-        ...(a.turn ? { turn: a.turn } : {}),
-        ...(a.re ? { re: a.re } : {}),
-        ...(a["reply-to"] ? { replyTo: a["reply-to"] } : {}),
-        ...(a.k ? { k: a.k } : {}),
+        ...(a.event ? { event: a.event } : {}),
+        ...(a.serves ? { serves: a.serves } : {}),
         ...(a.audience ? { audience: a.audience } : {}),
         ...(a.via ? { via: a.via } : {}),
+        ...(a.late === "1" ? { late: true } : {}),
       }
     : undefined;
 

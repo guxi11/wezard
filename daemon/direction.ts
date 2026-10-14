@@ -19,10 +19,10 @@ export interface DirectionIn {
   jobId: string;
   /** 全部工单 (函数自己筛开着的)。 */
   jobs: readonly JobRecord[];
-  /** 发话方此刻这一轮的 k 链: 它在答谁、谁又在答谁… (target key, 近的在前; 见 receipts.ancestorsOf)。 */
+  /** 发话方此刻这一轮的派活链: 它在答谁、谁又在答谁… (target key, 近的在前; 见 router.chain)。 */
   chain: readonly string[];
-  /** 链深闸看的那一条: 这件活实际挂的那一帧 (for 选中的, 没 for 就本轮推断帧) 自己的链。缺省 = `chain`。
-   *  `chain` 可以是几条帧链的并集 (防环要把所有在等你的都算上), 拿并集的长度算深度会误拦。 */
+  /** 链深闸看的那一条: 这件活实际挂的那一笔 (for 选中的, 没 for 就本轮服务的那笔) 自己的链。缺省 = `chain`。
+   *  `chain` 可以是几条链的并集 (防环要把所有在等你的都算上), 拿并集的长度算深度会误拦。 */
   depth?: readonly string[];
   nameOf: (target: string) => string;
 }

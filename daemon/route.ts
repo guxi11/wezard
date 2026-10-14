@@ -15,7 +15,7 @@
 // 全是纯函数: 候选的原料 (文件集 / 最近的话 / ctx) 由调用方从 transcript 读好送进来。
 import { resolve, basename } from "node:path";
 import type { JobRecord } from "./jobs.js";
-import type { InFlight } from "./receipts.js";
+import type { InFlight } from "./dispatch.js";
 import { addr, agoOf, ctxOf, type WizardBrief } from "./wizard.js";
 import type { TierName } from "../shared/config.js";
 

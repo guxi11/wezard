@@ -26,7 +26,7 @@ import type { JobEpisode } from "./wizard-memory.js";
 export interface Artifact { path: string; note: string }
 
 /** 成员交差的验收: `result` = 要有非空的 `RESULT:`; `artifact` = 还要列出 `ARTIFACT:`;
- *  `none` (默认) = 不验。不合格的那一份由守护进程打回一次 (见 receipts.ts)。 */
+ *  `none` (默认) = 不验。不合格的那一份由守护进程打回一次 (见 index.ts 的 acceptanceOf / rebound)。 */
 export type Accept = "result" | "artifact" | "none";
 export const ACCEPTS: readonly Accept[] = ["result", "artifact", "none"];
 

@@ -5,23 +5,22 @@ import { z } from "zod";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { WorkflowPlanSchema, type WorkflowPlan, type WorkflowPlanNode } from "../shared/workflow-plan.js";
 import type { Asker } from "../shared/detail-store.js";
-import type { ParentK } from "./receipts.js";
 import type { JobRecord } from "./jobs.js";
 import type { NodeAttempt } from "./workflow-nodes.js";
-import type { Prereq } from "./receipts.js";
+import type { Prereq } from "./dispatch.js";
 
-const FrameSchema = z.union([
-  z.object({ kind: z.literal("chat"), channel: z.string(), turn: z.string() }).strict(),
-  z.object({ kind: z.literal("peer"), from: z.string(), turn: z.string() }).strict(),
-]);
 const OriginSchema = z.object({
-  k: FrameSchema.optional(),
-  // 老 run 没有 stack: 放行时按 [k] + 现拼兜底 (receiver-stack.frozenStack)。
-  stack: z.array(FrameSchema).optional(),
+  // 发起者那一笔的路由 event (docs/evolve/receipt-router.md §9.5): 节点开行挂在它下面 (同 tell)。
+  // 老 run 没有 —— 节点只能另起一根, 不猜。
+  event: z.string().optional(),
   asker: z.object({ who: z.string(), chat: z.string() }).strict().optional(),
-  chain: z.array(z.string()),
+  // T10: 老 run 的 k / stack / chain 不再读 (边由 receiver 算), 但照收 —— 已经落盘的 run
+  // 不该因为换了一版就加载失败 (`.strict()` 会把不认识的键判成非法)。
+  k: z.unknown().optional(),
+  stack: z.unknown().optional(),
+  chain: z.unknown().optional(),
 }).strict();
-export interface PlanOrigin { k?: ParentK; stack?: ParentK[]; asker?: Asker; chain: string[] }
+export interface PlanOrigin { event?: string; asker?: Asker }
 const PhaseSchema = z.enum(["waiting", "spawning", "spawn-unknown", "spawned", "dispatching", "observing", "blocked"]);
 const NodeStateSchema = z.object({
   id: z.string(), turn: z.string().min(1), name: z.string().min(1), phase: PhaseSchema,

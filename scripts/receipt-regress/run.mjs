@@ -1,19 +1,37 @@
 #!/usr/bin/env node
-// 回执回归: 改 daemon/receipts.ts / jobs.ts / peers.ts 之后跑一遍。
+// 回执回归: 改 daemon/router.ts / dispatch.ts / direction.ts / jobs.ts / peers.ts 之后跑一遍。
+//
+// T11 重写 (T10b 之后): 旧的两个回执模块 (`daemon/receipts.ts` / `daemon/receiver-stack.ts`) 已退役,
+// 判定一律改读**路由表** —— `GET /routes` 的 `rows[]` (完整 Route 对象) 取代 `receipts.json`
+// 的 `from\u0000to` 槽。行主键就是 event, 一件活一行: `<event, owner, receiver>`。
+//   * 「我派给 X 的那一笔」= `owner === X.target && receiver.to === 我` —— 与旧槽 (from\0to) 同义;
+//   * 「落定」= `row.outcome !== undefined`; 「还在飞」= status ∈ held/open/need/error;
+//   * 递 `after` / `re` / `stop` 一律给**行 id** (T10a 的 `re` 走 router.get、`after` 两者都认),
+//     唯独 `/wizard/stop` 的 `turn` 值在旧世界要**件号**、新世界要**行 id** —— 见下面的词汇探测。
+//
+// 词汇探测 (本脚本跑在 resident daemon 上, 它可能**没 reload**): reload 前是 T10a —— peer 信封写
+// `turn="<件号>"`, 注入事件 id 是 `p:<self>:<target>:<turn>:<legs>`; reload 后是 T10b —— 信封写
+// `event="<行 id>"`, 注入事件 id 是 `route:<serves>`。两条分支各自断言, 输出里明说探测到哪一套;
+// 全仓唯一必须分支的参数是 `/wizard/stop` 的 `turn` 值, 以及信封里「轮次 id」该比哪个属性。
+// 需要 reload 才能表达的用例 (reload 落在 answered 与 hand 之间) 标 `pending-reload`, 不计通过。
 //
 //   node scripts/receipt-regress/run.mjs            # 全部
 //   node scripts/receipt-regress/run.mjs chain need # 只跑这几条
+//   RR_ALLOW_RELOAD=1 node scripts/receipt-regress/run.mjs reload-answered-hand   # 会真的 reload, 单独跑
 //
-// 必须在一个 wizard 会话里跑 (要 CLAUDE_CODE_SESSION_ID / TMUX_PANE 认出发起者)。它先生一个
+// 旧版里的两个纯单元用例随模块一起下线: `receipt-timing` (跑 tests/receipt-timing.test.ts, 它 import 的是
+// 已删的 daemon/receipts.js —— 那个文件现在也是死代码, 该删) 与一批 `fakeReceipts` 驱动的槽/栈语义用例
+// (route-fallback / same-pair / transfer-* / for-owed / legacy-resume / after-unit), 它们表达的是
+// receiver-stack 的冻结栈与件号, 目标态里没有对应物; 覆盖由 `router-core` 接手。
+//
+// 必须在一个 wizard 会话里跑 (要会话 id / TMUX_PANE 认出发起者; 只跑纯 unit 用例时不必)。它先生一个
 // mini 档根 `rr-root-<后缀>` (发起者的分身), 每条用例再由根生同档临时分身、直接 POST daemon 驱动
-// —— 不经 MCP, 所以不受「本会话的 MCP 进程是旧代码」影响。判定只读守护进程落的账 (receipts.json /
-// jobs.json) 和根的 transcript 里收到的回执信封, 不信分身自己说了什么。跑完 (含失败 / Ctrl-C)
-// 把生的分身全部收掉。
-// live 前提: resident daemon 必须包含 35b8d8a (task owner target-key sweep 豁免)。
-// 由部署方确认干净候选已加载；工作树 HEAD / dist 文件本身不能证明 resident 版本。
+// —— 不经 MCP, 所以不受「本会话的 MCP 进程是旧代码」影响。判定只读守护进程落的账 (routes.jsonl /
+// jobs.json) 和会话 transcript 里收到的信封, 不信分身自己说了什么。跑完 (含失败 / Ctrl-C) 把生的
+// 分身全部收掉。
 //
-// 根的开场白是发起者一句 receipt:false 的私聊 —— 它这一轮没有父 k, 测试活的回执只回到根,
-// 不会沿发起者手上那件活往上冒。工单用例会在根的 home 聊天里各出一对开 / 收工气泡。
+// 跑前看一眼 `GET /routes` 有没有 `deadlineAt` 已过的在飞行 (T6/T7 探针故意推后, 别动它们);
+// 别在 reload 后 30s 内起 —— daemon 的孤儿 pane 清扫在 macOS 上会误杀新生的分身。
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -31,12 +49,15 @@ bindCliBackends({ ...config.wrc, projectsDirOverride: config.wrc.mirror.projects
 const DAEMON = process.env.WEZARD_DAEMON_BASE ?? "http://127.0.0.1:17890";
 // 写敏感路由 (/tasks/schedule 等) 要出示口令, 同 MCP / CLI (见 shared/daemon-token.ts)。
 const TOKEN = (() => { try { return readFileSync(join(homedir(), ".wezard", "daemon-token"), "utf8").trim(); } catch { return ""; } })();
-// receipts.json / jobs.json 在 ~/.wezard 下 (WEZARD_STATE_DIR 是 hook 的另一处目录, 不是它)。
+// routes.jsonl / jobs.json 在 ~/.wezard 下 (WEZARD_STATE_DIR 是 hook 的另一处目录, 不是它)。
 const STATE = process.env.RR_STATE_DIR ?? join(homedir(), ".wezard");
-const ME = { sessionId: process.env.CLAUDE_CODE_SESSION_ID ?? "", tmuxPane: process.env.TMUX_PANE ?? "" };
+const ME = {
+  sessionId: process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID || process.env.CODEBUDDY_SESSION_ID || "",
+  tmuxPane: process.env.TMUX_PANE ?? "",
+};
 const MAX_KIDS = 7;
 const gates = new Set();
-// 每次运行的名字后缀: 几个 wizard 可能同时在跑这个脚本 (改 receipts 的都要跑), 名字全局唯一,
+// 每次运行的名字后缀: 几个 wizard 可能同时在跑这个脚本 (改 router 的都要跑), 名字全局唯一,
 // 不带后缀就互相撞名、甚至收掉对方的分身。用例里写的是逻辑名 (`rr-a`), 在边界上换成真名。
 const RUN = randomBytes(2).toString("hex");
 const real = (x) => `${x}-${RUN}`; // 根名下同时活着的分身 (cloneMax 默认 8, 留一个余量)
@@ -57,7 +78,6 @@ const post = async (route, body, tries = 60) => {
   return r.json().catch(() => ({ ok: false, reason: `HTTP ${r.status}` }));
 };
 const readJson = (f) => { try { return JSON.parse(readFileSync(join(STATE, f), "utf8")); } catch { return {}; } };
-const slotOf = (from, to) => readJson("receipts.json")[`${from}\u0000${to}`];
 const jobOf = (id) => readJson("jobs.json")[id];
 
 /** `pred()` 为真就返回它的值; 超时返回 undefined。 */
@@ -67,6 +87,24 @@ const until = async (pred, ms, every = 2000) => {
     if (v) return v;
   }
   return undefined;
+};
+
+// ── 路由表 (§9): 全部判定都从这儿来, 不再有 receipts.json ────────────────
+const LIVE = new Set(["held", "open", "need", "error"]);
+const settled = (r) => !!r?.outcome;
+/** `/routes` 的 rows (已按 at 定序, 新的在后)。 */
+const routeRows = async () =>
+  (await fetch(`${DAEMON}/routes`).then((r) => r.json()).catch(() => ({}))).rows ?? [];
+/** 「`from` 排给 `to` 的那一笔」= 旧的 `slotOf(from, to)` 槽: owner = 领活的人, receiver.to = 交代回给谁。 */
+const rowsOfPair = async (from, to) =>
+  (await routeRows()).filter((r) => r.owner === to && r.receiver?.kind === "wizard" && r.receiver.to === from);
+const rowOf = async (from, to) => (await rowsOfPair(from, to)).at(-1);
+const liveRowOf = async (from, to) => (await rowsOfPair(from, to)).filter((r) => LIVE.has(r.status)).at(-1);
+/** 刚派出的那一轮对应的行 (表在同一请求里就落了盘, 立刻读得到)。 */
+const dispatchRow = async (from, to, at, resp) => {
+  const rs = (await rowsOfPair(from, to)).filter((r) => r.at >= at - 5000);
+  if (VOCAB?.new && resp?.event) { const hit = rs.find((r) => r.event === resp.event); if (hit) return hit; }
+  return rs.at(-1);
 };
 
 const jsonlOf = async (target) =>
@@ -81,15 +119,23 @@ const userTexts = (path) => readFileSync(path, "utf8").split("\n").flatMap((line
   } catch { return []; }
 });
 
+const attrsIn = (text) =>
+  [...text.matchAll(/<system-reminder ([^>]*)>/g)]
+    .map((m) => Object.fromEntries([...m[1].matchAll(/([\w-]+)="([^"]*)"/g)].map((a) => [a[1], a[2]])));
+
 /** `target` 的 transcript 里收到的回执信封 (属性 + 正文), 可按发话方收窄。 */
 const receiptsIn = async (target, fromName) => {
   const p = await jsonlOf(target);
   if (!p) return [];
-  const texts = userTexts(p);
-  return texts.flatMap((t) => [...t.matchAll(/<system-reminder ([^>]*)>([\s\S]*?)<\/system-reminder>/g)])
+  return userTexts(p).flatMap((t) => [...t.matchAll(/<system-reminder ([^>]*)>([\s\S]*?)<\/system-reminder>/g)])
     .map((m) => ({ attrs: Object.fromEntries([...m[1].matchAll(/([\w-]+)="([^"]*)"/g)].map((a) => [a[1], a[2]])), body: m[2] }))
     .filter((r) => r.attrs.wezard === "envelope" && r.attrs.receipt === "1" && (!fromName || r.attrs.from === `.${real(fromName)}`));
 };
+/** 回执信封上这一轮的行 id: 旧世界写 `turn`, 新世界写 `event` —— 两边的值都是路由行 id。 */
+const roundId = (r) => r.attrs.event ?? r.attrs.turn ?? "";
+/** 等 `n` 份回执落到 `target` 的 transcript 里 (投递是注入, 要等它排到那一轮)。 */
+const waitReceipts = async (target, fromName, n = 1, ms = 90_000) =>
+  (await until(async () => { const xs = await receiptsIn(target, fromName); return xs.length >= n && xs; }, ms, 2000)) ?? [];
 
 /** 分身 transcript 全文; 还没有 (从没收到过话) = ""。 */
 const textOf = async (name) => { try { const p = await jsonlOf(kids.get(name)); return p ? readFileSync(p, "utf8") : ""; } catch { return ""; } };
@@ -185,8 +231,15 @@ const stop = async (name) => {
   }
 };
 const tell = (to, text, extra = {}) => post("/peers/tell", { target: root.target, name: real(to), text, priority: "now", ...extra });
+/** 派一件活, 连 `at` 一起带回来 (定位它的路由行要这个下界)。 */
+const tellAt = async (to, text, extra = {}) => {
+  const at = Date.now();
+  return { ...(await tell(to, text, extra)), at };
+};
+/** 根派给 `to` 那一笔的行 (tell 之后立刻读; 不用等)。 */
+const tellRow = async (to, r) => dispatchRow(root.target, kids.get(to), r.at, r);
 /** 根 → `to` 那一份落定 (settled) 为止。 */
-const settledSlot = (to, ms) => until(() => { const s = slotOf(root.target, kids.get(to)); return s?.settled && s; }, ms);
+const settledRow = (to, ms) => until(async () => { const r = await rowOf(root.target, kids.get(to)); return settled(r) && r; }, ms);
 
 /** 那个 target 落在轮次记录里的每一轮 (同 id 后写覆盖前写): 频道、出处。只读尾巴。 */
 const turnsOf = (target) => {
@@ -199,125 +252,262 @@ const turnsOf = (target) => {
   return [...rows.reduce((m, o) => m.set(o.id, { ...(m.get(o.id) ?? {}), ...o }), new Map()).values()];
 };
 
-// ── 纯单元: 直接驱动 dist 里的 createReceipts, 依赖全是假的 —— 不生分身、不碰群 ──
-// target 是「忙着」的, 直到给了它这一件的答案; 答案按 (to, 件号) 记, 只认发话之后给的 (同 replyToPeer)。
-const fakeReceipts = async (extra = {}) => {
-  const { createReceipts } = await import(process.env.RR_RECEIPTS ?? new URL("../../dist/daemon/receipts.js", import.meta.url).href);
-  const answers = [];
-  const busy = new Set();
-  const sent = [];
-  const hooks = [];
-  const log = { info() {}, warn() {}, debug() {}, child: () => log };
-  const r = createReceipts({
-    idleNow: async (t) => !busy.has(t),
-    untilIdle: async (t, ms, o) => {
-      for (const end = Date.now() + ms; busy.has(t) && Date.now() < end && !o?.aborted?.(); ) await sleep(50);
-      return { idle: !busy.has(t) };
-    },
-    paneLive: async () => true,
-    replyFor: (to, _from, since, turn) => {
-      const a = answers.filter((x) => x.to === to && x.turn === turn && x.at >= since).at(-1);
-      return a && { text: a.text };
-    },
-    deliver: async (to, body, meta) => { sent.push({ to, body, meta }); hooks.forEach((h) => h(to, meta)); return { ok: true }; },
-    nameOf: (t) => `.${t}`,
-    log,
-    ...extra,
-  });
-  const answer = (to, turn, text) => { answers.push({ to, turn, text, at: Date.now() }); busy.delete(to); };
-  const tell = (x) => { busy.add(x.to); return r.register(x); };
-  return { r, sent, answer, tell, onDeliver: (h) => hooks.push(h) };
+// ── 词汇探测: 旧世界 (resident 没 reload) 还是新世界 (T10b) ────────────────
+// 判据取自**目标会话里那句注入的 peer 信封**: 有 `event=` = 新世界, 只有 `turn=` = 旧世界。
+// 拿不到样例 (root 还没收到过话) 时退回 tell 响应的字段名, 再退不回就按新世界走并说明。
+let VOCAB;
+const probeVocab = async (hint) => {
+  if (VOCAB) return VOCAB;
+  const p = root ? await jsonlOf(root.target) : undefined;
+  const envs = p ? userTexts(p).flatMap(attrsIn).filter((a) => a.wezard === "envelope" && a.kind === "peer" && a.receipt !== "1") : [];
+  const last = envs.at(-1);
+  const fromEnv = last ? (last.event !== undefined ? "event" : last.turn !== undefined ? "turn" : undefined) : undefined;
+  const attr = fromEnv ?? (hint?.event !== undefined ? "event" : "turn");
+  VOCAB = { attr, new: attr === "event", sample: last?.[attr] ?? hint?.[attr] ?? "", samples: envs.length, src: fromEnv ? "transcript" : "tell 响应" };
+  console.log(`[vocab] ${VOCAB.new ? "T10b 新世界" : "T10a 旧世界 (resident 未 reload)"} · 轮次 id 属性=${attr} · 据=${VOCAB.src} · 样例=${VOCAB.sample} · peer 信封 ${VOCAB.samples} 份`);
+  return VOCAB;
+};
+/** 一轮的**对外的句柄**: 旧世界 = 件号 (`t...`, 回执登记 / `after` / 信封 turn 都认它),
+ *  新世界 = 行 id (T10b 里件号那套桥全退役)。`after` / `/wizard/stop` 的 `turn` / 信封属性
+ *  三处都比它 —— 只有 `re` 例外: 两套世界都按行 id 认 (`router.get(re)`)。 */
+const handleOf = (resp, row) => (VOCAB?.new ? (row?.event ?? resp?.event ?? "") : (resp?.turn ?? ""));
+
+// ── 纯 unit: 路由表核心 (不发分身、不碰群) ──────────────────────────────
+// 覆盖 T11 要求的可离线表达的场景: 扇出全回/部分失败、同一对并发两件、W 欠三笔交错、
+// 同笔回执合并、NEED 往返、transfer 两连跳 + 叶子 NEED 直达、RESULT 提前收口后 late、
+// stop 中层级联、receiver 被 stop 后升级、撕裂尾行、失败合成与期限夹取。
+const routerCore = async () => {
+  const R = await import(new URL("../../dist/daemon/router.js", import.meta.url).href);
+  const { step, ops, EMPTY, foldJournal } = R;
+  const fails = [];
+  let n = 0;
+  const ok = (c, why) => { n++; if (!c) fails.push(why); };
+  const add = (t, ...xs) => xs.reduce(step, t);
+  const T0 = 1_700_000_000_000;
+  const DL = T0 + 3_600_000;
+  const chat = { kind: "chat", channel: "chat:G", message: "m1" };
+  const wiz = (to, event) => (event ? { kind: "wizard", to, event } : { kind: "wizard", to });
+  const open = (event, owner, receiver, at, extra = {}) => ops.open({ event, owner, receiver, at, deadlineAt: DL, ...extra });
+
+  // ── 1 扇出: 全回 / 部分失败 / 提前收口后 late ──
+  {
+    const rootE = "e1";
+    let t = T0 && add(EMPTY, open(rootE, "me", chat, T0));
+    t = add(t, open("e1.1", "a", wiz("me", rootE), T0 + 1), open("e1.2", "b", wiz("me", rootE), T0 + 2), open("e1.3", "c", wiz("me", rootE), T0 + 3));
+    ok(R.waiting(t, rootE).length === 3, "扇出三件 → waiting(e1)=3");
+    ok(R.finalKind(t, rootE, "已派") === "progress", "子行未落定、无标记 → 终句算进展 (不落定)");
+    ok(R.onFinal(t, "me", rootE, { text: "已派" }).length === 0, "进展不产 op");
+    ok(R.onFinal(t, "me", rootE, { text: "RESULT: premature" }).length === 1, "显式 RESULT 不等子行, 立刻收口");
+    t = add(t, ops.answer({ at: T0 + 4, event: rootE, outcome: R.makeOutcome("done", "RESULT: premature") }));
+    ok(R.isOrphaned(t, rootE) === true, "根行已定论 → 之后交差的子行是孤儿 (标 late)");
+    t = add(t,
+      ops.answer({ at: T0 + 5, event: "e1.1", outcome: R.makeOutcome("done", "RESULT: a") }),
+      ops.answer({ at: T0 + 6, event: "e1.2", outcome: R.makeOutcome("timeout", "（守护进程: .b 没有给出结论 —— 等了 60 分钟它还没答完。）") }));
+    ok(R.settledTo(t, "me").length === 2, "已交回 me 两份 (a done + b 部分失败 timeout)");
+    ok(R.waiting(t, rootE).length === 3 && t["e1.3"].status === "open" && R.owedBy(t, "c")[0].event === "e1.3", "c 还在飞; a/b 落定但没入箱, 仍挡着父行的终句");
+    t = add(t, ops.answer({ at: T0 + 7, event: "e1.3", outcome: R.makeOutcome("done", "RESULT: c"), late: true }));
+    ok(t["e1.3"].late === true, "迟到的结论标 late");
+  }
+
+  // ── 2 同一对并发两件: 互不顶掉 ──
+  {
+    let t = add(EMPTY, open("f1", "me", chat, T0), open("f1.1", "a", wiz("me", "f1"), T0 + 1), open("f1.2", "a", wiz("me", "f1"), T0 + 2));
+    t = add(t, ops.answer({ at: T0 + 3, event: "f1.2", outcome: R.makeOutcome("done", "RESULT: two") }));
+    ok(t["f1.1"].status === "open" && !t["f1.1"].outcome, "答第二件不顶掉第一件挂着的状态");
+    ok(t["f1.2"].outcome.body === "RESULT: two", "第二件自有结论");
+    t = add(t, ops.answer({ at: T0 + 4, event: "f1.1", outcome: R.makeOutcome("done", "RESULT: one") }));
+    ok(R.settledTo(t, "me").map((r) => r.event).join() === "f1.1,f1.2", "两笔各留各的定论 (按件, 不按对)");
+  }
+
+  // ── 3 W 同时欠三笔 (owner = W, 交代各回 x / y / z), 交错回来 ──
+  {
+    let t = add(EMPTY,
+      ops.open({ event: "g1", owner: "W", receiver: wiz("x"), at: T0, deadlineAt: DL }),
+      ops.open({ event: "g2", owner: "W", receiver: wiz("y"), at: T0 + 1, deadlineAt: DL }),
+      ops.open({ event: "g3", owner: "W", receiver: wiz("z"), at: T0 + 2, deadlineAt: DL }));
+    ok(R.owedBy(t, "W").length === 3 && R.awaitedBy(t, "x").length === 1, "W 欠三笔 (欠账与「派出去的」是同一张表的两面)");
+    const need = R.onFinal(t, "W", "g1", { text: "NEED: 口令?" });
+    ok(need.length === 1 && need[0].op === "mark" && need[0].status === "need", "第一笔反问 → mark need");
+    t = add(t, ...need);
+    ok(R.owedBy(t, "W").length === 3 && R.settledTo(t, "x")[0].status === "need", "NEED 只是中途态, 债还在、正文也交回 x");
+    t = add(t, ops.answer({ at: T0 + 5, event: "g3", outcome: R.makeOutcome("done", "RESULT: z") }));
+    ok(R.settledTo(t, "z").length === 1 && R.settledTo(t, "y").length === 0, "z 那笔先落定, 不串到 y");
+    t = add(t, ops.mark({ at: T0 + 6, event: "g1", status: "open" }), ops.answer({ at: T0 + 7, event: "g1", outcome: R.makeOutcome("done", "RESULT: x") }));
+    t = add(t, ops.answer({ at: T0 + 8, event: "g2", outcome: R.makeOutcome("done", "RESULT: y") }));
+    ok(R.settledTo(t, "x")[0].outcome.body === "RESULT: x" && R.settledTo(t, "y")[0].outcome.body === "RESULT: y", "三笔交错各回各家");
+    ok(R.owedBy(t, "W").length === 3, "还没入箱 (answered 未 hand) —— 账上仍挂着");
+  }
+
+  // ── 4 同笔回执合并 / 落定只写一次 / rev 与内容绑定 ──
+  {
+    const body = "RESULT: same";
+    let t = add(EMPTY, open("h1", "A", wiz("W"), T0));
+    t = add(t, ops.answer({ at: T0 + 1, event: "h1", outcome: R.makeOutcome("done", body) }));
+    const rev = t["h1"].outcome.rev;
+    ok(rev === R.contentRev(body) && rev.length === 12, "rev = sha256(body).slice(0,12)");
+    t = add(t, ops.hand({ at: T0 + 2, event: "h1", inbox: `rcpt:h1:${rev}` }));
+    const t2 = add(t, ops.hand({ at: T0 + 3, event: "h1", inbox: `rcpt:h1:${rev}` }));
+    ok(t2["h1"].status === "handed" && t2["h1"].outcome.body === body, "重复 hand 不改行 (入箱幂等)");
+    const t3 = add(t2, ops.answer({ at: T0 + 4, event: "h1", outcome: R.makeOutcome("done", "RESULT: again") }));
+    ok(t3["h1"].outcome.body === body, "已 handed 的行不被第二次 answer 改写 (定论写一次)");
+    ok(R.contentRev(body) === R.contentRev(body) && R.contentRev(body) !== R.contentRev(body + "!"), "同内容同 rev / 改内容换 rev");
+    // 合成失败交差之后 owner 真答 → late 补投一次
+    let u = add(EMPTY, open("h2", "A", wiz("W"), T0));
+    u = add(u,
+      ops.answer({ at: T0 + 1, event: "h2", outcome: R.makeOutcome("timeout", "（守护进程: .A 没有给出结论 —— 等了 1 分钟它还没答完。）") }),
+      ops.hand({ at: T0 + 2, event: "h2", inbox: "rcpt:h2:x" }));
+    const late = R.onFinal(u, "A", "h2", { text: "RESULT: real" });
+    ok(late.length === 1 && late[0].late === true && late[0].outcome.status === "done", "失败交差后 owner 真答 → late 补投");
+    // canceled 不收迟答
+    let c = add(EMPTY, open("h3", "A", wiz("W"), T0));
+    c = add(c,
+      ops.answer({ at: T0 + 1, event: "h3", outcome: R.makeOutcome("canceled", "（守护进程: 被收掉了, 这件活没有结论。）") }),
+      ops.hand({ at: T0 + 2, event: "h3", inbox: "rcpt:h3:x" }));
+    ok(R.onFinal(c, "A", "h3", { text: "RESULT: real" }).length === 0, "被收掉的件收迟答 = 静默丢掉, 不收");
+    // 自己答过的 done 不再收第二遍
+    let d = add(EMPTY, open("h4", "A", wiz("W"), T0));
+    d = add(d, ops.answer({ at: T0 + 1, event: "h4", outcome: R.makeOutcome("done", "RESULT: own") }), ops.hand({ at: T0 + 2, event: "h4", inbox: "rcpt:h4:x" }));
+    ok(R.onFinal(d, "A", "h4", { text: "RESULT: again" }).length === 0, "自己答过的 done 不再收");
+  }
+
+  // ── 5 NEED 往返 (上冒 + re 拉回) ──
+  {
+    let t = add(EMPTY, open("k1", "A", wiz("W", "k0"), T0));
+    const need = R.onFinal(t, "A", "k1", { text: "NEED: 口令?" });
+    ok(need.length === 1 && need[0].status === "need", "NEED → mark need");
+    t = add(t, ...need);
+    ok(t["k1"].status === "need" && R.onFinal(t, "A", "k1", { text: "NEED: 还是口令?" }).length === 0, "同一中途态只报一次 (行状态就是去重记号)");
+    t = add(t, ops.mark({ at: T0 + 2, event: "k1", status: "open" })); // `re`
+    const fin = R.onFinal(t, "A", "k1", { text: "RESULT: 口令对" });
+    ok(fin.length === 1 && fin[0].op === "answer", "re 拉回 open 后再答 → 定论");
+    // CLI 报错 = 中途态, 同构
+    let e = add(EMPTY, open("k2", "A", wiz("W"), T0));
+    const err = R.onFinal(e, "A", "k2", { text: "API Error", error: true });
+    ok(err.length === 1 && err[0].status === "error" && !err[0].outcome, "error 是中途态 (不改写定论)");
+    e = add(e, ...err);
+    ok(R.onFinal(e, "A", "k2", { text: "API Error", error: true }).length === 0, "同一 error 不重复报");
+  }
+
+  // ── 6 transfer = move (两连跳) + 叶子 NEED 直达 ──
+  {
+    let t = add(EMPTY, open("p1", "A", chat, T0));
+    t = add(t, ops.move({ at: T0 + 1, event: "p1", owner: "B" }), ops.move({ at: T0 + 2, event: "p1", owner: "C" }));
+    ok(t["p1"].owner === "C" && t["p1"].receiver.kind === "chat", "transfer 只改 owner, receiver 边不动");
+    ok(R.chain(t, "p1").length === 1, "transfer 两连跳不留中间行 (链上只有自己)");
+    ok(R.waiting(t, "p1").length === 0, "transfer 过的行没有子行挂着");
+    const nd = R.onFinal(t, "C", "p1", { text: "NEED: 口令?" });
+    ok(nd.length === 1 && nd[0].status === "need", "叶子 NEED 直接落原行 (直达发话方)");
+    ok(R.onFinal(t, "B", "p1", { text: "RESULT: 旧 owner" }).length === 0, "交出去的那位再答不算数");
+  }
+
+  // ── 7 stop 中层级联: 叶子先落 ──
+  {
+    let t = add(EMPTY, open("q1", "me", chat, T0), open("q1.1", "A", wiz("me", "q1"), T0 + 1), open("q1.1.1", "B", wiz("A", "q1.1"), T0 + 2));
+    ok(R.subtree(t, "q1.1").map((r) => r.event).join() === "q1.1.1", "subtree 叶子先出");
+    const cs = R.cancelOps(t, ["q1.1"], { at: T0 + 3, reason: () => "被收掉了, 这件活没有结论。" });
+    ok(cs.map((o) => o.event).join() === "q1.1.1,q1.1", "级联顺序: 叶子先落, 中层最后");
+    ok(cs.every((o) => o.outcome.status === "canceled"), "整支落 canceled");
+    ok(!add(t, ...cs)["q1"].outcome, "根行不受波及");
+  }
+
+  // ── 8 receiver 被 stop 后升级 ──
+  {
+    let t = add(EMPTY, open("r1", "me", wiz("up"), T0), open("r1.1", "A", wiz("dead", "r1"), T0 + 1));
+    const esc = R.escalate(t, "r1.1", (k) => k !== "dead");
+    ok(!!esc && esc.receiver.to === "up" && esc.via.join() === "dead", "收方已不在 → 沿 receiver 边升到上一层 (信封带 via)");
+    ok(R.escalate(t, "r1.1", () => true) === undefined, "收方还在 → 原样投 (不升级)");
+    let t2 = add(EMPTY, open("s1", "me", chat, T0), open("s1.1", "A", wiz("dead", "s1"), T0 + 1));
+    const dl = R.escalate(t2, "s1.1", (k) => k !== "dead");
+    ok(!!dl && dl.receiver.kind === "chat" && dl.serves === "", "一路升到群 = Dead Letter");
+  }
+
+  // ── 9 撕裂尾行 / 中间坏行 ──
+  {
+    const good = JSON.stringify(open("z1", "A", wiz("W"), T0));
+    const f1 = foldJournal(`${good}\n{"op":"open","event":"z2","owner":"B"`);
+    ok(f1.dropped === 1 && Object.keys(f1.table).length === 1 && f1.table.z1, "撕裂的尾行丢掉, 其余 fold 正确");
+    let threw = false;
+    try { foldJournal(`${good}\n坏行\n${good}`); } catch { threw = true; }
+    ok(threw, "中间行坏 → 拒绝启动 (丢表 = 丢回执)");
+    ok(foldJournal("")  .table && Object.keys(foldJournal("").table).length === 0, "空日志 fold 成空表");
+  }
+
+  // ── 10 失败合成 (sweeper) + 期限夹取 ──
+  {
+    const t = add(EMPTY, ops.open({ event: "y1", owner: "A", receiver: wiz("W"), at: T0, deadlineAt: T0 + 60_000 }));
+    const sig = (o = {}) => ({ now: T0 + 1_000, paneDeadForMs: () => undefined, fruitless: () => 0, nameOf: (w) => `.${w}`, ...o });
+    const sw = R.sweepOps(t, sig({ now: T0 + 61_000 }));
+    ok(sw.length === 1 && sw[0].outcome.status === "timeout" && /没有给出结论/.test(sw[0].outcome.body), "超期 → 合成 timeout (正文带守护进程说明)");
+    const sw2 = R.sweepOps(t, sig({ paneDeadForMs: () => R.DEAD_GRACE_MS }));
+    ok(sw2.length === 1 && sw2[0].outcome.status === "dead", "pane 死过宽限 → dead");
+    const sw3 = R.sweepOps(t, sig({ fruitless: () => R.MAX_FRUITLESS }));
+    ok(sw3.length === 1 && sw3[0].outcome.status === "silent", "停下 N 次没答 → silent");
+    ok(R.sweepOps(t, sig()).length === 0, "没到期没死没静默 → 不产 op");
+    // held 前置失败 → canceled 且说明哪件
+    let h = add(EMPTY, open("u1", "A", wiz("W"), T0), ops.open({ event: "u2", owner: "B", receiver: chat, at: T0 + 1, deadlineAt: DL, after: ["u1"] }));
+    ok(h["u2"].status === "held", "带 after 的行先 held (没投给 owner)");
+    ok(R.onFinal(h, "B", "u2", { text: "RESULT: 不该收" }).length === 0, "held 的行不收终句");
+    h = add(h, ops.answer({ at: T0 + 2, event: "u1", outcome: R.makeOutcome("timeout", "（守护进程: .A 没有给出结论。）") }));
+    const sw4 = R.sweepOps(h, sig({ now: T0 + 3 }));
+    ok(sw4.length === 1 && sw4[0].event === "u2" && sw4[0].outcome.status === "canceled" && /u1/.test(sw4[0].outcome.body), "前置非 done → held 件 canceled 并说明哪件没投");
+    // 前置 done → 不放失败, release 后可投
+    let h2 = add(EMPTY, open("v1", "A", wiz("W"), T0), ops.open({ event: "v2", owner: "B", receiver: chat, at: T0 + 1, deadlineAt: DL, after: ["v1"] }));
+    h2 = add(h2, ops.answer({ at: T0 + 2, event: "v1", outcome: R.makeOutcome("done", "RESULT: 前置") }));
+    ok(R.sweepOps(h2, sig({ now: T0 + 3 })).length === 0, "前置 done → held 件不放失败");
+    h2 = add(h2, ops.release({ at: T0 + 3, event: "v2" }));
+    ok(h2["v2"].status === "open", "release → held 转 open");
+    // 子行期限不超过父行剩余
+    const c = add(EMPTY, ops.open({ event: "w1", owner: "A", receiver: chat, at: T0, deadlineAt: T0 + 1_000 }), ops.open({ event: "w1.1", owner: "B", receiver: wiz("A", "w1"), at: T0 + 1, deadlineAt: T0 + 999_000 }));
+    ok(c["w1.1"].deadlineAt === T0 + 1_000, "子行期限夹到父行剩余 (不因转手延长)");
+    ok(R.deadlineOf(T0, 30) === T0 + 60_000 && R.deadlineOf(T0) === T0 + 3_600_000, "期限默认 1h / 下限 60s");
+  }
+
+  // ── 11 派生: chain / speaksToHuman (方向闸读的那两样) ──
+  {
+    const t = add(EMPTY, open("x1", "W", chat, T0), open("x1.1", "A", wiz("W", "x1"), T0 + 1), open("x1.1.1", "B", wiz("A", "x1.1"), T0 + 2));
+    ok(R.chain(t, "x1.1.1").map((r) => r.event).join() === "x1.1.1,x1.1,x1", "chain 沿 receiver 边往上走到 chat");
+    ok(R.speaksToHuman(t, "x1") === true && R.speaksToHuman(t, "x1.1") === false, "只有收给群的那一笔对人可见");
+    ok(R.routesOf(t, "A").length === 1 && R.allRows(t).length === 3, "routesOf / allRows 现算");
+    ok(R.renderRoute(t["x1"]).includes("x1") && R.renderRoute(t["x1"]).includes("chat chat:G"), "renderRoute 给人看的一行");
+  }
+
+  return { pass: !fails.length, why: fails.length ? `${fails.length}/${n} 条没过: ${fails.join(" · ")}` : `${n} 条路由表断言全过` };
 };
 
-// ── 用例: 每条返回 { pass, why } ────────────────────────────────────────
+// ── 用例: 每条返回 { pass, why } (跳过返回 { pending, why }) ──────────────
 const cases = {
-  "receipt-timing": { names: [], unit: true, run: async () => {
-    execFileSync("npx", ["tsx", "tests/receipt-timing.test.ts"], { stdio: "pipe" });
+  // 保活任务闸 (pane-guards) 的纯单元 —— 与回执无关, 但同一批守护改动会同撞。
+  "receipt-guards": { names: [], unit: true, run: async () => {
     execFileSync("node", ["tests/receipt-guards.test.mjs"], { stdio: "pipe" });
-    return { pass: true, why: "保活清理 + 5 个事件门控时序: NEED 已投/排队、单次/双次 re、交接前两份欠账/一份已答" };
+    return { pass: true, why: "保活任务的清理 / 前提门控 全过" };
   } },
-  // 回执轮的频道只由去向定: 续回进群 (chat 父 k, 兄弟落齐) 才有频道, 其余一律私聊 ——
-  // 不能因为那件子活是 public:true 派的就沿用它的频道。三种回落: 没有父 k (chain:false)、
-  // 中途回执 (NEED)、父 k 指向的上游那一份已不在 (被 wait_peer 取走 / 不要回执)。
-  "route-fallback": { names: [], unit: true, run: async () => {
-    const f = await fakeReceipts();
-    f.tell({ from: "a", to: "b1", channel: "chat:G", turn: "t1" });
-    f.tell({ from: "a", to: "b2", channel: "chat:G", turn: "t2", k: { kind: "chat", channel: "chat:G", turn: "1" } });
-    f.tell({ from: "a", to: "b3", channel: "chat:G", turn: "t3", k: { kind: "peer", from: "x", turn: "tx" } });
-    f.answer("b1", "t1", "RESULT: side");
-    f.answer("b2", "t2", "NEED: 口令?");
-    f.answer("b3", "t3", "RESULT: orphan");
-    await until(() => f.sent.length >= 3, 20_000, 100);
-    const leak = f.sent.filter((s) => s.meta.channel !== "");
-    // 私聊轮 (频道 "", 例如没挂信封的分身开场白那轮) 派出的活没有 chat 父 k —— 不能回落成 home 群。
-    const k = f.r.parentOf("a", undefined, "", "1");
+
+  "router-core": { names: [], unit: true, run: routerCore },
+
+  // 回执去向只有四个词; 旧写法 (`chain`/`receipt`/`answer`) 自 T10b 起不再映射 (旧世界仍映射, 见词汇探测)。
+  "return-op": { names: [], unit: true, run: async () => {
+    const { returnOpOf, RETURN_OPS } = await import(new URL("../../dist/daemon/dispatch.js", import.meta.url).href);
+    const four = RETURN_OPS.map((x) => returnOpOf({ return: x }));
+    const dflt = returnOpOf({});
+    const bad = returnOpOf({ return: "sideways" });
+    const legacy = { chain: false, receipt: false, answer: "transfer" };
+    const legacyOps = Object.entries(legacy).map(([k, v]) => [k, returnOpOf({ [k]: v })]);
+    const pass = four.every((x, i) => x.ok && x.op === RETURN_OPS[i]) && dflt.ok && dflt.op === "self" && !bad.ok;
     return {
-      pass: f.sent.length === 3 && !leak.length && !k,
-      why: `回执 ${f.sent.length}/3 · 带频道的 ${leak.map((s) => `${s.meta.turn}→${s.meta.channel}`).join(",") || "无"} · 私聊轮的父 k=${k ? `${k.kind}:${k.channel}` : "无"}`,
+      pass,
+      why: `四个词=${four.map((x) => x.op).join("/")} · 缺省=${dflt.op} · 坏值=${bad.ok ? "放行" : "400"}`
+        + ` · 旧写法 (T10b 起不映射, 旧世界仍映射)=${legacyOps.map(([k, x]) => `${k}→${x.ok ? x.op : "400"}`).join(" ")}`,
     };
   } },
 
-  // 同一对的第二件活不能顶掉第一件挂起 (等子活) 的那份: x 派 a 件一, a 派 b 后先停下 (挂起);
-  // x 又派 a 件二。b 回来时, a 那一轮的终句仍要作为件一的回执回到 x —— 按件号, 不按「这一对最后一件」。
-  "same-pair": { names: [], unit: true, run: async () => {
-    const f = await fakeReceipts();
-    f.onDeliver((to, meta) => { if (to === "a" && meta.turn === "tc") setTimeout(() => f.answer("a", "t1", "RESULT: final-1"), 200); });
-    f.tell({ from: "a", to: "b", channel: "", turn: "tc", k: { kind: "peer", from: "x", turn: "t1" } });
-    f.tell({ from: "x", to: "a", channel: "", turn: "t1" });
-    f.answer("a", "t1", "已派");
-    await sleep(500);
-    f.tell({ from: "x", to: "a", channel: "", turn: "t2" });
-    f.answer("a", "t2", "RESULT: two");
-    await until(() => f.sent.some((s) => s.to === "x" && s.meta.turn === "t2"), 10_000, 100);
-    f.answer("b", "tc", "RESULT: b");
-    const got = await until(() => f.sent.find((s) => s.to === "x" && s.meta.turn === "t1"), 20_000, 100);
-    const relay = f.sent.find((s) => s.to === "a" && s.meta.turn === "tc");
-    return {
-      pass: got?.body === "RESULT: final-1" && relay?.meta.replyTo?.from === "x",
-      why: `x 收到 ${f.sent.filter((s) => s.to === "x").map((s) => `${s.meta.turn}:${s.body}`).join(" / ") || "无"} · b 的回执 reply-to=${relay?.meta.replyTo ? `${relay.meta.replyTo.kind}:${relay.meta.replyTo.from ?? relay.meta.replyTo.channel}` : "无"}`,
-    };
-  } },
-
-  // 同上, 但件二进来时件一还没被认出「已派」(watcher 没读到那句): 它已为件一派了活, 照样停放。
-  "same-pair-early": { names: [], unit: true, run: async () => {
-    const f = await fakeReceipts();
-    f.onDeliver((to, meta) => { if (to === "a" && meta.turn === "tc") setTimeout(() => f.answer("a", "t1", "RESULT: final-1"), 200); });
-    f.tell({ from: "a", to: "b", channel: "", turn: "tc", k: { kind: "peer", from: "x", turn: "t1" } });
-    f.tell({ from: "x", to: "a", channel: "", turn: "t1" });
-    f.tell({ from: "x", to: "a", channel: "", turn: "t2" });
-    f.answer("a", "t1", "已派");
-    await sleep(500);
-    f.answer("a", "t2", "RESULT: two");
-    await until(() => f.sent.some((s) => s.to === "x" && s.meta.turn === "t2"), 10_000, 100);
-    f.answer("b", "tc", "RESULT: b");
-    const got = await until(() => f.sent.find((s) => s.to === "x" && s.meta.turn === "t1"), 20_000, 100);
-    return {
-      pass: got?.body === "RESULT: final-1",
-      why: `x 收到 ${f.sent.filter((s) => s.to === "x").map((s) => `${s.meta.turn}:${s.body}`).join(" / ") || "无"}`,
-    };
-  } },
-
-  // 派活方向闸 (direction.ts) + k 链取祖先 (receipts.ancestorsOf): 纯单元。
-  // 成员横向 task 拒 / ask 放行; 非 owner 带 job 的 task 拒; 防环 task·ask 拒而 fyi 放行; 链深; 越级; 专家; 一人一单。
+  // 派活方向闸 (direction.ts): 纯单元, 链 / 深度由调用方算好传进来 (旧版从 receipts.ancestorsOf 取)。
   "direction-gate": { names: [], unit: true, run: async () => {
     const { checkDirection } = await import(new URL("../../dist/daemon/direction.js", import.meta.url).href);
-    const f = await fakeReceipts();
     const m = (target, role, outcome) => ({ target, task: "", spawned: false, at: 1, ...(role ? { role } : {}), ...(outcome ? { outcome } : {}) });
     const job = (id, owner, members, parent) => ({ id, base: "c", owner, title: id, members, status: "open", openedAt: 1, ...(parent ? { parent } : {}) });
     const jobs = [job("R", "boss", [m("lead", "lead")]), job("J", "lead", [m("a"), m("b"), m("x", "expert"), m("d", "exec", "done")], "R"), job("K", "lead", [m("c", "exec")], "R")];
     const g = (o) => checkDirection({ self: "lead", target: "a", kind: "task", re: false, jobId: "", jobs, chain: [], nameOf: (t) => `.${t}`, ...o });
-    // k 链: boss → lead → a → b (b 此刻在答 a, a 在答 lead, lead 在答 boss); 槽被同一对新一句顶掉则链截断。
-    f.tell({ from: "boss", to: "lead", channel: "", turn: "t1" });
-    f.tell({ from: "lead", to: "a", channel: "", turn: "t2", k: { kind: "peer", from: "boss", turn: "t1" } });
-    f.tell({ from: "a", to: "b", channel: "", turn: "t3", k: { kind: "peer", from: "lead", turn: "t2" } });
-    // 方向闸的链读 b 所服务那一帧的栈 (老盘没有 stack 的槽按 [k] + 现拼兜底)。
-    const chainOf = (who, k) => f.r.ancestorsOf(who, f.r.stackFor(who, k));
-    const chain = chainOf("b", { kind: "peer", from: "a", turn: "t3" });
-    f.tell({ from: "lead", to: "boss", channel: "", turn: "t9", k: { kind: "peer", from: "b", turn: "t3" } }); // 成环的坏数据
-    f.r.claim("lead", "a"); // lead→a 那件被 wait_peer 取走: a 已不在答 lead, 链从第二跳截断
-    const trunc = chainOf("b", { kind: "peer", from: "a", turn: "t3" });
-    const loop = chainOf("boss", { kind: "peer", from: "lead", turn: "t1" });
-    const cases = {
+    const table = {
       "非 owner 带 job 的 task 拒": !!g({ self: "a", target: "b", jobId: "J" }),
       "owner 带 job 的 task 放行": !g({ jobId: "J" }),
       "成员横向 task 拒": !!g({ self: "a", target: "b" }),
@@ -335,347 +525,75 @@ const cases = {
       "越级: 只读式 ask 放行": !g({ self: "boss", target: "a", kind: "ask" }),
       "owner 派借来的专家 task 拒 / ask 放行": !!g({ target: "x" }) && !g({ target: "x", kind: "ask" }),
       "已在别单当未落定 exec 的再带 job 领活拒": !!g({ target: "c", jobId: "J" }) && !g({ target: "c", jobId: "K" }),
-      "ancestorsOf 沿槽走 (精确链)": chain.join() === "a,lead,boss",
-      "ancestorsOf 上游已落定则截断": trunc.join() === "a",
-      "ancestorsOf 带环保护": loop.length <= 3,
     };
-    const bad = Object.entries(cases).filter(([, ok]) => !ok).map(([k]) => k);
-    return { pass: !bad.length, why: bad.length ? `没过: ${bad.join(" · ")} (链=${chain.join(">")})` : `${Object.keys(cases).length} 条规则都对` };
+    const bad = Object.entries(table).filter(([, ok]) => !ok).map(([k]) => k);
+    return { pass: !bad.length, why: bad.length ? `没过: ${bad.join(" · ")}` : `${Object.keys(table).length} 条规则都对` };
   } },
 
-  // ── receiver stack (docs/evolve/receiver-stack.md §4 末尾的 6 个场景, 纯单元) ──────────────
-  // transfer 两连跳直达: x→a 的件 F; a 把 F 整件 transfer 给 b, b 再 transfer 给 c。c 的结论直接作为 F 的回执回 x
-  // (from=.a via=.c), a / b 都不收; a、b 各自的「已转」不算 F 的答案; c 的方向链上只有 x (交出去的那两层已脱身)。
-  "transfer-hops": { names: [], unit: true, run: async () => {
-    const f = await fakeReceipts();
-    const F = { kind: "peer", from: "x", turn: "tF" };
-    f.tell({ from: "x", to: "a", channel: "", turn: "tF" });
-    f.tell({ from: "a", to: "b", channel: "", turn: "tc", stack: [F], k: F, mode: "transfer", adopts: { from: "x", turn: "tF" } });
-    f.answer("a", "tF", "已转给 b");
-    const st = f.r.handover("b", { kind: "peer", from: "a", turn: "tc" });
-    f.tell({ from: "b", to: "c", channel: "", turn: "td", stack: st, k: st[0], mode: "transfer", adopts: { from: "a", turn: "tc" } });
-    f.answer("b", "tc", "已转给 c");
-    await sleep(2500);
-    const early = f.sent.find((s) => s.to === "x");
-    const chain = f.r.ancestorsOf("c", f.r.stackFor("c", { kind: "peer", from: "b", turn: "td" }));
-    f.answer("c", "td", "RESULT: leaf");
-    const got = await until(() => f.sent.find((s) => s.to === "x"), 20_000, 100);
-    await sleep(500);
-    const toX = f.sent.filter((s) => s.to === "x");
-    const leaked = f.sent.filter((s) => s.to === "a" || s.to === "b");
-    return {
-      pass: !early && st.length === 1 && st[0].turn === "tF" && toX.length === 1 && got?.body === "RESULT: leaf" && got.meta.turn === "tF" && got.meta.from === "a" && got.meta.via === "c" && !leaked.length && chain.join() === "x",
-      why: `直达栈=${st.map((x) => x.turn).join(">")} · 提前投=${!!early} · x 收到 ${toX.map((s) => `${s.meta.turn}:${s.body} via=${s.meta.via}`).join(" / ") || "无"} · 漏给中间层 ${leaked.length} 份 · c 的链=${chain.join(">")}`,
-    };
-  } },
-
-  // transfer 后 stop 源头: 收掉 a (连 pane 一起没了) 不殃及已交出去的 F; b 答完 x 照收 done。收掉叶子 b2 才落 F2 (canceled, via=.b2)。
-  "transfer-stop": { names: [], unit: true, run: async () => {
-    const f = await fakeReceipts({ paneLive: async (t) => t !== "a" });
-    const F = { kind: "peer", from: "x", turn: "tF" }, G = { kind: "peer", from: "x", turn: "tG" };
-    f.tell({ from: "x", to: "a", channel: "", turn: "tF" });
-    f.tell({ from: "a", to: "b", channel: "", turn: "tc", stack: [F], k: F, mode: "transfer", adopts: { from: "x", turn: "tF" } });
-    f.tell({ from: "x", to: "a2", channel: "", turn: "tG" });
-    f.tell({ from: "a2", to: "b2", channel: "", turn: "tc2", stack: [G], k: G, mode: "transfer", adopts: { from: "x", turn: "tG" } });
-    const hitA = f.r.cancel("a", "boss");
-    await sleep(6000); // > DEAD_GRACE: a 的 pane 不在了, F 也不该落 dead
-    const early = f.sent.find((s) => s.meta.turn === "tF");
-    f.answer("b", "tc", "RESULT: b-done");
-    const hitB2 = f.r.cancel("b2", "boss");
-    const got = await until(() => f.sent.find((s) => s.meta.turn === "tF"), 20_000, 100);
-    const can = await until(() => f.sent.find((s) => s.meta.turn === "tG"), 20_000, 100);
-    return {
-      pass: hitA === 0 && !early && got?.meta.status === "done" && got.body === "RESULT: b-done" && hitB2 === 1 && can?.meta.status === "canceled" && can.meta.via === "b2",
-      why: `stop a 落了 ${hitA} 件 · 提前投=${early ? early.meta.status : "无"} · F=${got?.meta.status ?? "未投"}:${got?.body ?? ""} · stop b2 落了 ${hitB2} 件 → G=${can?.meta.status ?? "未投"} via=${can?.meta.via}`,
-    };
-  } },
-
-  // 叶子 NEED 直达 U 且 U 的 re 落到叶子: b 的 NEED 作为 F 的中途回执直接回 x (via=.b); x re F → leafOf 给出叶子那一件,
-  // 同件号续问 b; b 再答 → F done。a 一份都不收。叶子期限继承 F 的 (较早者)。
-  "transfer-need": { names: [], unit: true, run: async () => {
-    const f = await fakeReceipts();
-    const F = { kind: "peer", from: "x", turn: "tF" };
-    const dl = Date.now() + 120_000;
-    f.tell({ from: "x", to: "a", channel: "", turn: "tF", deadlineAt: dl });
-    f.tell({ from: "a", to: "b", channel: "", turn: "tc", stack: [F], k: F, mode: "transfer", adopts: { from: "x", turn: "tF" } });
-    f.answer("b", "tc", "NEED: 口令?");
-    const need = await until(() => f.sent.find((s) => s.to === "x" && s.meta.status === "need"), 20_000, 100);
-    const leaf = f.r.leafOf("x", "a", "tF");
-    if (leaf) f.tell({ from: leaf.from, to: leaf.to, channel: "", turn: leaf.turn, legs: (leaf.legs ?? 1) + 1, stack: leaf.stack, k: leaf.k, mode: "transfer", deadlineAt: leaf.deadlineAt });
-    await sleep(300);
-    f.answer("b", "tc", "RESULT: pw-ok");
-    const done = await until(() => f.sent.find((s) => s.to === "x" && s.meta.status === "done"), 20_000, 100);
-    return {
-      pass: need?.meta.turn === "tF" && need.meta.via === "b" && leaf?.to === "b" && leaf.turn === "tc" && leaf.deadlineAt === dl && done?.body === "RESULT: pw-ok" && done.meta.turn === "tF" && !f.sent.some((s) => s.to === "a"),
-      why: `NEED→x=${need ? `${need.meta.turn} via=${need.meta.via}` : "无"} · re 落到=${leaf ? `${leaf.to}/${leaf.turn}` : "无"} 期限继承=${leaf?.deadlineAt === dl} · done=${done?.body ?? "无"} · a 收到 ${f.sent.filter((s) => s.to === "a").length} 份`,
-    };
-  } },
-
-  // for 挂到非开头那笔欠账: a 同时欠 x (t1, 本轮开头) 与 y (t2)。for:"t2" → 子活挂住给 y 的交代, 不挂 x 的; 查不到的 for → 400
-  // 并列出欠着的两笔; 本轮帧已交出时不带 for → 409, 带 for 挂到另一笔照常。
-  "for-owed": { names: [], unit: true, run: async () => {
-    const { resolveReturn } = await import(new URL("../../dist/daemon/receiver-stack.js", import.meta.url).href);
-    const f = await fakeReceipts();
-    f.onDeliver((to, meta) => { if (to === "a" && meta.turn === "tc") setTimeout(() => f.answer("a", "t2", "RESULT: final-2"), 200); });
-    f.tell({ from: "x", to: "a", channel: "", turn: "t1" });
-    f.tell({ from: "y", to: "a", channel: "", turn: "t2" });
-    const deps = (yielded = false) => ({ inferred: () => ({ kind: "peer", from: "x", turn: "t1" }), owed: () => f.r.owed("a"),
-      stackFor: (fr) => f.r.stackFor("a", fr), handover: (fr) => f.r.handover("a", fr), yielded: () => yielded });
-    const bad = resolveReturn(deps(), { for: "tZ" });
-    const gone = resolveReturn(deps(true), {});
-    const side = resolveReturn(deps(true), { for: "t2" });
-    const r = resolveReturn(deps(), { for: "`t2`" });
-    f.tell({ from: "a", to: "c", channel: "", turn: "tc", stack: r.stack, k: r.stack[0], mode: r.mode });
-    f.answer("a", "t1", "RESULT: one");
-    f.answer("a", "t2", "已派");
-    const one = await until(() => f.sent.find((s) => s.to === "x"), 20_000, 100);
-    await sleep(2500);
-    const early = f.sent.find((s) => s.to === "y");
-    f.answer("c", "tc", "RESULT: c");
-    const two = await until(() => f.sent.find((s) => s.to === "y"), 20_000, 100);
-    const relay = f.sent.find((s) => s.to === "a" && s.meta.turn === "tc");
-    return {
-      pass: !bad.ok && bad.status === 400 && /t1/.test(bad.reason) && /t2/.test(bad.reason) && !gone.ok && gone.status === 409 && side.ok
-        && r.ok && r.frame.from === "y" && r.stack[0].turn === "t2" && one?.body === "RESULT: one" && !early && two?.body === "RESULT: final-2" && relay?.meta.replyTo?.from === "y",
-      why: `坏 for=${bad.status}${/t1/.test(bad.reason ?? "") && /t2/.test(bad.reason ?? "") ? "(列出两笔)" : ""} · 已交出不带 for=${gone.status ?? "放行"} 带 for=${side.ok} · for t2 → 帧 ${r.frame?.from}:${r.stack?.[0]?.turn} · x=${one?.body ?? "无"} · y 提前=${!!early} 终=${two?.body ?? "无"} · c 的回执 reply-to=${relay?.meta.replyTo?.from ?? "无"}`,
-    };
-  } },
-
-  // dispatch detach 不挂住上游: dispatch 在入口按 return:"detach" 冻结去向 → 栈为空, a 给 x 的交代不等 d; d 的回执回 a 不带 reply-to。
-  // 新旧写法: chain:false ≡ detach; return 与旧写法矛盾 → 400。
-  "dispatch-detach": { names: [], unit: true, run: async () => {
-    const { resolveReturn, returnOpOf } = await import(new URL("../../dist/daemon/receiver-stack.js", import.meta.url).href);
-    const f = await fakeReceipts();
-    f.tell({ from: "x", to: "a", channel: "", turn: "tF" });
-    const deps = { inferred: () => ({ kind: "peer", from: "x", turn: "tF" }), owed: () => f.r.owed("a"),
-      stackFor: (fr) => f.r.stackFor("a", fr), handover: (fr) => f.r.handover("a", fr), yielded: () => false };
-    const r = resolveReturn(deps, { return: "detach" });
-    f.tell({ from: "a", to: "d", channel: "", turn: "td", stack: r.stack, mode: r.mode });
-    f.answer("a", "tF", "RESULT: own");
-    const own = await until(() => f.sent.find((s) => s.to === "x"), 20_000, 100);
-    const heldUp = f.sent.some((s) => s.meta.turn === "td");
-    f.answer("d", "td", "RESULT: side");
-    const side = await until(() => f.sent.find((s) => s.to === "a" && s.meta.turn === "td"), 20_000, 100);
-    const legacy = returnOpOf({ chain: false }), clash = returnOpOf({ return: "self", chain: false }), fyi = returnOpOf({ return: "detach", kind: "fyi" });
-    return {
-      pass: r.ok && !r.stack.length && r.frame?.from === "x" && r.served.length === 1 && own?.body === "RESULT: own" && !heldUp && !!side && !side.meta.replyTo
-        && legacy.op === "detach" && !clash.ok && !fyi.ok,
-      why: `detach 栈=${r.stack?.length} 服务帧=${r.frame?.from} · x 先收=${own?.body ?? "无"} (d 未回=${!heldUp}) · d 回执 reply-to=${side?.meta.replyTo?.from ?? "无"} · chain:false→${legacy.op} 矛盾→${clash.ok ? "放行" : "400"} fyi+detach→${fyi.ok ? "放行" : "400"}`,
-    };
-  } },
-
-  // 老盘无 stack 行的续守: 盘上只有 k 的两行 (x→a 的 tP, a→b 的 tC 挂在 tP 下) 被新进程 resume —— 祖先按 [k] + 现拼
-  // 兜底 (b 的链 = a,x); a 答「已派」照样挂起等 b; b 回来 → 回执 reply-to=.x, a 那一轮的终句作为 tP 回 x; 续问冻结出完整的栈。
-  "legacy-resume": { names: [], unit: true, run: async () => {
-    const mem = () => { const m = new Map(); return { all: () => Object.fromEntries(m), get: (k) => m.get(k), merge: (rows) => Object.entries(rows).forEach(([k, v]) => m.set(k, v)), set: (k, v) => (m.set(k, v), v), drop: (k) => m.delete(k) }; };
-    const store = mem();
-    const at = Date.now();
-    const row = (x) => ({ channel: "", job: "", at, legs: 1, deadlineAt: at + 3600_000, gen: 1, claimed: false, delivered: false, resolved: false, ...x });
-    store.merge({ "x\u0000a": row({ from: "x", to: "a", turn: "tP" }), "a\u0000b": row({ from: "a", to: "b", turn: "tC", k: { kind: "peer", from: "x", turn: "tP" } }) });
-    const f = await fakeReceipts({ store });
-    f.onDeliver((to, meta) => { if (to === "a" && meta.turn === "tC") setTimeout(() => f.answer("a", "tP", "RESULT: legacy-final"), 200); });
-    f.r.resume();
-    const chain = f.r.ancestorsOf("b", f.r.stackFor("b", { kind: "peer", from: "a", turn: "tC" }));
-    const frozen = f.r.prepare("a", "b", "tC");
-    f.answer("a", "tP", "已派");
-    await sleep(2500);
-    const early = f.sent.find((s) => s.to === "x");
-    f.answer("b", "tC", "RESULT: b");
-    const got = await until(() => f.sent.find((s) => s.to === "x"), 20_000, 100);
-    const relay = f.sent.find((s) => s.to === "a" && s.meta.turn === "tC");
-    return {
-      pass: chain.join() === "a,x" && frozen.stack?.map((x) => x.turn).join() === "tP" && !early && got?.body === "RESULT: legacy-final" && relay?.meta.replyTo?.from === "x",
-      why: `兜底链=${chain.join(">")} · 续问冻结栈=${frozen.stack?.map((x) => x.turn).join(">") ?? "无"} · 提前投=${!!early} · x=${got?.body ?? "无"} · reply-to=${relay?.meta.replyTo?.from ?? "无"}`,
-    };
-  } },
-
-  // 评审打回补的五条 (B1 B2 B3 S3 S7)。
-  // B1 上游 re 已交出的件但不要回执 (fyi / return:none): 只知会叶子, 不登记; 改去向 / for → 400。
-  "transfer-relay-quiet": { names: [], unit: true, run: async () => {
-    const { leafRelayOf } = await import(new URL("../../dist/daemon/receiver-stack.js", import.meta.url).href);
-    const v = [{ kind: "fyi" }, { return: "none" }, { receipt: false }, {}, { return: "transfer" }, { return: "detach" }, { for: "t1" }].map(leafRelayOf);
-    const ok = v[0].ok && v[0].quiet && v[1].ok && v[1].quiet && v[2].ok && v[2].quiet && v[3].ok && !v[3].quiet && !v[4].ok && !v[5].ok && !v[6].ok;
-    return { pass: ok, why: v.map((x) => (x.ok ? (x.quiet ? "quiet" : "tell") : "400")).join(" / ") + " (fyi / none / receipt:false / 缺省 / transfer / detach / for)" };
-  } },
-
-  // B2 上游收自己已交出的那件 (close_job cancel / stop 带件号 / 节点 stopped / plan 取消都是 cancel(A, x, only x 的件)):
-  // 落到叶子, x 自己发起 → 静默; 叶子之后答出来不再投。收叶子 b2 按上游件号 (stop_wizard(b2, turn:tG)) 同样命中;
-  // 收掉叶子 b3 本身 (only 全放) 报数 1 件不是 2 件。
-  "transfer-cancel-own": { names: [], unit: true, run: async () => {
-    const f = await fakeReceipts();
-    const mk = (a, b, t, c) => { const F = { kind: "peer", from: "x", turn: t }; f.tell({ from: "x", to: a, channel: "", turn: t }); f.tell({ from: a, to: b, channel: "", turn: c, stack: [F], k: F, mode: "transfer", adopts: { from: "x", turn: t } }); };
-    mk("a", "b", "tF", "tc"); mk("a2", "b2", "tG", "tc2"); mk("a3", "b3", "tH", "tc3");
-    const kF = f.r.cancelKeys("a", "x", (s) => s.from === "x");
-    const nF = f.r.cancel("a", "x", (s) => s.from === "x");
-    const kG = f.r.cancelKeys("b2", "x", (s) => s.from === "x" && s.turn === "tG");
-    const nG = f.r.cancel("b2", "x", (s) => s.from === "x" && s.turn === "tG");
-    const kH = f.r.cancelKeys("b3", "boss");
-    const nH = f.r.cancel("b3", "boss");
-    f.answer("b", "tc", "RESULT: late");
-    const H = await until(() => f.sent.find((s) => s.meta.turn === "tH"), 20_000, 100);
-    await sleep(2500);
-    const late = f.sent.filter((s) => s.meta.turn === "tF" || s.meta.turn === "tG");
-    return {
-      pass: nF === 1 && kF.length === 1 && nG === 1 && kG.length === 1 && nH === 1 && new Set(kH).size === 1 && !late.length && H?.meta.status === "canceled" && !f.r.leafOf("x", "a", "tF") && !f.r.states().some((s) => s.turn === "tF" || s.turn === "tG"),
-      why: `收 a(x 的件)=${nF}/${kF.length} · 收 b2(tG)=${nG}/${kG.length} · 收 b3=${nH} 键 ${kH.length} · 迟到投了 ${late.length} 份 · tH=${H?.meta.status ?? "未投"}`,
-    };
-  } },
-
-  // B3 旧写法 answer:"transfer" 同带 receipt:false / fyi / chain:false: 改前一律拒, 现在照旧拒 (不映射成 transfer)。
-  "legacy-transfer-mix": { names: [], unit: true, run: async () => {
-    const { returnOpOf } = await import(new URL("../../dist/daemon/receiver-stack.js", import.meta.url).href);
-    const v = [{ answer: "transfer", receipt: false }, { answer: "transfer", kind: "fyi" }, { answer: "transfer", chain: false }, { answer: "transfer" }, { receipt: false, chain: false }].map(returnOpOf);
-    return { pass: !v[0].ok && !v[1].ok && !v[2].ok && v[3].op === "transfer" && v[4].op === "none", why: v.map((x) => (x.ok ? x.op : "400")).join(" / ") };
-  } },
-
-  // S3 上游 wait_peer 已交出的那件: 不取走 (取走了叶子的结论就被静默丢掉), 叶子答完照常回执。
-  "transfer-claim": { names: [], unit: true, run: async () => {
-    const f = await fakeReceipts();
-    const F = { kind: "peer", from: "x", turn: "tF" };
-    f.tell({ from: "x", to: "a", channel: "", turn: "tF" });
-    f.tell({ from: "a", to: "b", channel: "", turn: "tc", stack: [F], k: F, mode: "transfer", adopts: { from: "x", turn: "tF" } });
-    const took = f.r.claim("x", "a", "tF");
-    const leaf = f.r.leafOf("x", "a", "tF");
-    f.answer("b", "tc", "RESULT: kept");
-    const got = await until(() => f.sent.find((s) => s.meta.turn === "tF"), 20_000, 100);
-    return { pass: took === false && leaf?.to === "b" && got?.body === "RESULT: kept", why: `claim=${took} · leafOf=${leaf?.to} · 回执=${got?.body ?? "无"}` };
-  } },
-
-  // S7 叶子自己派子活 (self), 子回执续回时 relay 续期 —— 封顶在上游那一份的期限, 不因转手而延长。
-  "transfer-deadline-cap": { names: [], unit: true, run: async () => {
-    const f = await fakeReceipts();
-    const F = { kind: "peer", from: "x", turn: "tF" }, C = { kind: "peer", from: "a", turn: "tc" };
-    const dl = Date.now() + 120_000;
-    f.tell({ from: "x", to: "a", channel: "", turn: "tF", deadlineAt: dl });
-    f.tell({ from: "a", to: "b", channel: "", turn: "tc", stack: [F], k: F, mode: "transfer", adopts: { from: "x", turn: "tF" } });
-    f.tell({ from: "b", to: "d", channel: "", turn: "td", stack: [C, F], k: C });
-    const at0 = f.r.leafOf("x", "a", "tF")?.at;
-    f.answer("b", "tc", "已派");
-    await sleep(2500);
-    f.answer("d", "td", "RESULT: d");
-    await until(() => f.sent.find((s) => s.to === "b" && s.meta.turn === "td"), 20_000, 100);
-    await sleep(500);
-    const leaf = f.r.leafOf("x", "a", "tF");
-    // relay 真发生了 (锚挪到了子回执那一刻), 才说明封顶起了作用。
-    return { pass: !!leaf && leaf.at !== at0 && leaf.deadlineAt === dl, why: `relay=${leaf?.at !== at0} · relay 后叶子期限=${leaf ? (leaf.deadlineAt === dl ? "= 上游" : `${Math.round((leaf.deadlineAt - dl) / 1000)}s 超出`) : "叶子不在"}` };
-  } },
-
-  // 链深闸看实际挂的那一帧, 不看并集: a 本轮答 u (u 上有 v), 又 for 挂到 y (y 上有 z) —— 两条各 2 层, 并集 4 层。
-  // 向下派 task 放行 (链深 2); 防环仍看并集: 反过来给 u (本轮在服务、不是 for 那一帧) 派活照拦。
+  // 链深闸看**实际挂的那一帧**, 不看并集; 防环仍看并集 —— chain / depth 都由调用方算好。
   "direction-depth-for": { names: [], unit: true, run: async () => {
     const { checkDirection } = await import(new URL("../../dist/daemon/direction.js", import.meta.url).href);
-    const f = await fakeReceipts();
-    f.tell({ from: "v", to: "u", channel: "", turn: "tV" });
-    f.tell({ from: "u", to: "a", channel: "", turn: "tU", stack: [{ kind: "peer", from: "v", turn: "tV" }] });
-    f.tell({ from: "z", to: "y", channel: "", turn: "tZ" });
-    f.tell({ from: "y", to: "a", channel: "", turn: "tY", stack: [{ kind: "peer", from: "z", turn: "tZ" }] });
-    const inferred = f.r.ancestorsOf("a", f.r.stackFor("a", { kind: "peer", from: "u", turn: "tU" }));
-    const depth = f.r.ancestorsOf("a", f.r.stackFor("a", { kind: "peer", from: "y", turn: "tY" }));
-    const chain = [...new Set([...inferred, ...depth])];
+    const chain = ["u", "v", "y", "z"]; // 两帧各 2 层, 并集 4
+    const depth = ["y", "z"];           // 本轮实际服务那一帧的链深 2
     const g = (target, o = {}) => checkDirection({ self: "a", target, kind: "task", re: false, jobId: "", jobs: [], chain, depth, nameOf: (t) => `.${t}`, ...o });
-    const down = g("w"), loop = g("u"), old = g("w", { depth: undefined });
+    const down = g("w"), loop = g("u"), deep = g("w", { depth: undefined });
     return {
-      pass: chain.length === 4 && depth.length === 2 && !down && !!loop && !!old,
-      why: `并集=${chain.join(",")} 链深=${depth.join(",")} · 向下派=${down ? "拦" : "放行"} · 反派 u=${loop ? "拦" : "放行"} · 按并集算深度=${old ? "拦" : "放行"}`,
+      pass: !down && !!loop && !!deep,
+      why: `并集链=${chain.join(",")} 链深=${depth.join(",")} · 向下派=${down ? "拦" : "放行"} · 反派 u=${loop ? "拦" : "放行"} · 按并集算深度=${deep ? "拦" : "放行"}`,
     };
   } },
 
-  // 依赖 after (纯单元, 停放 / 放行 / 失败 / reload 都在回执层): 停放不占回执槽、不改 k; 前置落定才放行并带上结论;
-  // 前置失败 → 不放行、落成 canceled 回给发话方; 停放登记落盘, 新进程接着判; 同一对有别的在飞件时放行让路; 取消覆盖停放件。
-  "after-unit": { names: [], unit: true, run: async () => {
-    const mem = () => { const m = new Map(); return { all: () => Object.fromEntries(m), get: (k) => m.get(k), merge: (rows) => Object.entries(rows).forEach(([k, v]) => m.set(k, v)), set: (k, v) => (m.set(k, v), v), drop: (k) => m.delete(k) }; };
-    const store = mem(), holdStore = mem();
-    const released = [];
-    let f;
-    const mk = async (xs = {}) => {
-      f = await fakeReceipts({ store, holdStore, release: async (h, seen) => { released.push({ turn: h.turn, seen: Object.keys(seen).sort().join(), t: Date.now() }); f.tell({ from: h.from, to: h.to, channel: h.channel, turn: h.turn, ...(h.k ? { k: h.k } : {}) }); return { ok: true }; }, ...xs });
-      f.r.resume();
-      return f;
+  // 待 reload: 往 routes.jsonl 追一条 answer 行再 reload, 验「answered 未 hand 的件重入箱一次且只一次」。
+  // 默认就在名单里, 但不带 RR_ALLOW_RELOAD 时**只报 pending-reload 不 spawn**, 于是它永远出现在
+  // 汇总的 SKIP 行上 —— reload 由人按收尾顺序批, 用 RR_ALLOW_RELOAD=1 单独跑才真做。
+  "reload-answered-hand": { names: ["rr-rh"], run: async () => {
+    if (!process.env.RR_ALLOW_RELOAD) {
+      return { pending: "需 reload: 造一条 answered 未 hand 的行 → reload → 验重入箱一次", why: "本轮不 reload (由人批), 用 RR_ALLOW_RELOAD=1 单独跑" };
+    }
+    const n = nonce();
+    await spawn("rr-rh");
+    const t0 = Date.now();
+    const r = await tellAt("rr-rh", `${SLEEP(300)}, 然后回复一行: RESULT: 绝不会到`);
+    const row = await tellRow("rr-rh", r);
+    if (!row) return { pass: false, why: "没找到刚开的行" };
+    const rev = "t11reload01";
+    appendFileSync(join(STATE, "routes.jsonl"), `${JSON.stringify({
+      op: "answer", at: Date.now(), event: row.event,
+      outcome: { status: "done", body: `RESULT: reload-${n}`, rev },
+    })}\n`);
+    execFileSync("./cli/wezard.sh", ["reload"], { cwd: new URL("../..", import.meta.url).pathname, stdio: "ignore" });
+    const got = await until(async () => { const xs = (await receiptsIn(root.target, "rr-rh")); return xs.length && xs; }, 2 * 60_000, 2000) ?? [];
+    await sleep(5000);
+    const again = await receiptsIn(root.target, "rr-rh");
+    const after = await rowOf(root.target, kids.get("rr-rh"));
+    return {
+      pass: got.length >= 1 && again.length === got.length && after?.status === "handed",
+      why: `reload 后收到 ${got.length} 份 (reload 前后共 ${again.length} 份, 不重投) · 行=${after?.status ?? "查不到"} · 用时 ${Math.round((Date.now() - t0) / 1000)}s`,
     };
-    await mk();
-    const kx = { kind: "peer", from: "up", turn: "tu" };
-    const fails = [];
-    const ok = (c, why) => { if (!c) fails.push(why); };
-    // A 在飞; B after A (到 b); C after B (到 c) —— 都停放, 没有任何一件被放行, 不占槽 (a→b 的槽还是空的)。
-    f.tell({ from: "x", to: "a", channel: "", turn: "tA", k: kx });
-    f.r.hold({ from: "x", to: "b", turn: "tB", at: Date.now(), after: ["tA"], body: {}, channel: "", job: "", k: kx });
-    f.r.hold({ from: "x", to: "c", turn: "tC", at: Date.now(), after: ["tB"], body: {}, channel: "", job: "", k: kx });
-    ok(f.r.prereqs("x", ["tB"])[0].state === "pending", "停放着的前置 = pending");
-    ok(f.r.pending("x", "b") === undefined, "停放件不占 x→b 的槽");
-    ok(f.r.states().filter((s) => s.state === "queued").length === 2, "两件停放显示成 queued");
-    await sleep(3500);
-    ok(!released.length, "A 没落定前不放行");
-    f.answer("a", "tA", "RESULT: a-res\nARTIFACT: /tmp/a.txt — a");
-    await until(() => released.some((r) => r.turn === "tB"), 15_000, 100);
-    ok(released[0]?.turn === "tB" && released[0].seen === "tA", "A 落定 → 放行 B, 带 A 的结论");
-    ok(!released.some((r) => r.turn === "tC"), "B 没落定前 C 不放行");
-    f.answer("b", "tB", "RESULT: b-res");
-    await until(() => released.some((r) => r.turn === "tC"), 15_000, 100);
-    ok(released.map((r) => r.turn).join() === "tB,tC" && released[1].seen === "tB", "投递顺序 B 然后 C, C 带 B 的结论");
-    // 父 k 不变: 放行出来的槽 k = 停放时的 k。
-    ok(f.sent.length >= 1, "A 的回执送回了 x");
-    // 失败: D after E, E 超时被 cancel → D 不放行, x 收到 canceled。
-    f.tell({ from: "x", to: "e", channel: "", turn: "tE" });
-    f.r.hold({ from: "x", to: "d", turn: "tD", at: Date.now(), after: ["tE"], body: {}, channel: "", job: "", k: kx });
-    f.r.cancel("e", "someone");
-    const can = await until(() => f.sent.find((s) => s.meta.turn === "tD"), 15_000, 100);
-    ok(can?.meta.status === "canceled" && /tE/.test(can.body) && /没投/.test(can.body), `前置失败 → D 收 canceled 且说明哪件 (${can?.body.slice(0, 60)})`);
-    ok(!released.some((r) => r.turn === "tD"), "D 从未放行");
-    // 查不到的前置 (登记里没有) → 不放行。
-    f.r.hold({ from: "x", to: "g", turn: "tG", at: Date.now(), after: ["tNope"], body: {}, channel: "", job: "" });
-    const lost = await until(() => f.sent.find((s) => s.meta.turn === "tG"), 15_000, 100);
-    ok(lost?.meta.status === "canceled" && !released.some((r) => r.turn === "tG"), "前置查不到 → canceled 不放行");
-    // 同一对在飞着别的件: 放行让路, 不顶掉它的回执槽。
-    f.tell({ from: "x", to: "h1", channel: "", turn: "tH1" });
-    f.answer("h1", "tH1", "RESULT: h1");
-    await until(() => f.sent.some((s) => s.meta.turn === "tH1"), 15_000, 100);
-    f.tell({ from: "x", to: "p", channel: "", turn: "tBusy" });
-    f.r.hold({ from: "x", to: "p", turn: "tP", at: Date.now(), after: ["tH1"], body: {}, channel: "", job: "" });
-    await sleep(3500);
-    ok(!released.some((r) => r.turn === "tP") && f.r.pending("x", "p")?.turn === "tBusy", "同一对有在飞件: 停放件等它, 不顶它的槽");
-    f.answer("p", "tBusy", "RESULT: busy-done");
-    await until(() => released.some((r) => r.turn === "tP"), 20_000, 100);
-    ok(released.some((r) => r.turn === "tP"), "在飞件落定后放行");
-    // 取消覆盖停放件: stop 目标 → 不放行; 发起 stop 的是发话方自己 = 不回执。
-    f.tell({ from: "x", to: "s1", channel: "", turn: "tS1" });
-    f.r.hold({ from: "x", to: "s2", turn: "tS2", at: Date.now(), after: ["tS1"], body: {}, channel: "", job: "" });
-    f.r.cancel("s2", "x");
-    f.answer("s1", "tS1", "RESULT: s1");
-    await sleep(4000);
-    ok(!released.some((r) => r.turn === "tS2") && !f.sent.some((s) => s.meta.turn === "tS2"), "取消 (发话方自己) → 不放行、不回执");
-    // reload: 停放登记落盘, 新进程 (共用 store) 接着判 —— 前置在「重启期间」落定的立即放行。
-    f.tell({ from: "x", to: "r1", channel: "", turn: "tR1", k: kx });
-    f.r.hold({ from: "x", to: "r2", turn: "tR2", at: Date.now(), after: ["tR1"], body: {}, channel: "", job: "", k: kx });
-    ok(Object.keys(holdStore.all()).some((k) => k.endsWith("tR2")), "停放登记落盘");
-    const before = released.length;
-    const f1 = f;
-    f1.answer("r1", "tR1", "RESULT: r1-res");
-    await until(() => f1.sent.some((s) => s.meta.turn === "tR1"), 15_000, 100);
-    // 旧「进程」不再放行 (模拟被 reload 掉): 换个 release 为空, 新进程接手。
-    const released2 = [];
-    const f2 = await fakeReceipts({ store, holdStore, release: async (h, seen) => { released2.push({ turn: h.turn, seen: Object.keys(seen).join() }); return { ok: true }; } });
-    f2.r.resume();
-    await until(() => released2.length || released.length > before, 15_000, 100);
-    ok(released2.some((r) => r.turn === "tR2" && r.seen === "tR1") || released.length > before, "reload 后前置已落定的停放件照放");
-    return { pass: !fails.length, why: fails.length ? fails.join(" · ") : "停放 / 放行顺序 / 带结论 / 前置失败 / 查不到 / 让路 / 取消 / reload 都对" };
   } },
 
-  // 依赖 (真 daemon): 根派 A (睡一会儿), B after A、C after B 都停放; A 落定 → B 带着 A 的结论投出, B 落定 → C 带着 B 的; 根各收一份回执。
+  // ── 依赖 (真 daemon): 根派 A (睡一会儿), B after A、C after B 都停放; A 落定 → B 带着 A 的结论投出,
+  // B 落定 → C 带着 B 的; 根各收一份回执。after 递的是**行 id** (两套词汇都认)。 ──────────────
   "after-live": { names: ["rr-a1", "rr-b1", "rr-c1"], run: async () => {
     const n = nonce();
     await Promise.all(["rr-a1", "rr-b1", "rr-c1"].map((x) => spawn(x)));
-    const a = await tell("rr-a1", `${SLEEP(45)}, 然后回复一行: RESULT: a-${n}`);
-    const b = await tell("rr-b1", `不要调用任何工具, 直接回复一行: RESULT: b-${n}`, { after: [a.turn] });
-    const c = await tell("rr-c1", `不要调用任何工具, 直接回复一行: RESULT: c-${n}`, { after: [b.turn] });
-    if (!b.parked || !c.parked) return { pass: false, why: `没停放: b=${JSON.stringify(b).slice(0, 120)} c=${JSON.stringify(c).slice(0, 120)}` };
+    await probeVocab();
+    const a = await tellAt("rr-a1", `${SLEEP(45)}, 然后回复一行: RESULT: a-${n}`);
+    const ra = await tellRow("rr-a1", a);
+    if (!ra) return { pass: false, why: `找不到 A 的路由行: tell=${JSON.stringify({ ok: a.ok, turn: a.turn, reason: a.reason })} 行=${JSON.stringify((await rowsOfPair(root.target, kids.get("rr-a1"))).map((r) => [r.event, r.status, r.at]))}` };
+    const b = await tellAt("rr-b1", `不要调用任何工具, 直接回复一行: RESULT: b-${n}`, { after: [handleOf(a, ra)] });
+    const rb = await tellRow("rr-b1", b);
+    if (!rb) return { pass: false, why: `找不到 B 的路由行: tell=${JSON.stringify({ ok: b.ok, turn: b.turn, parked: b.parked, reason: b.reason })} 行=${JSON.stringify((await rowsOfPair(root.target, kids.get("rr-b1"))).map((r) => [r.event, r.status, r.at, r.after]))}` };
+    const c = await tellAt("rr-c1", `不要调用任何工具, 直接回复一行: RESULT: c-${n}`, { after: [handleOf(b, rb)] });
+    if (!b.parked || !c.parked) return { pass: false, why: `没停放: b=${JSON.stringify(b).slice(0, 140)} c=${JSON.stringify(c).slice(0, 140)}` };
     await sleep(3000);
     const early = (await textOf("rr-b1")).includes(`b-${n}`);
-    const sc = await settledSlot("rr-c1", 6 * 60_000);
-    const sb = slotOf(root.target, kids.get("rr-b1"));
+    const sc = await settledRow("rr-c1", 6 * 60_000);
+    const sb = await rowOf(root.target, kids.get("rr-b1"));
     const tb = await textOf("rr-b1"), tc = await textOf("rr-c1");
-    const gb = await receiptsIn(root.target, "rr-b1"), gc = await receiptsIn(root.target, "rr-c1");
+    const gb = await waitReceipts(root.target, "rr-b1"), gc = await waitReceipts(root.target, "rr-c1");
     return {
-      pass: !early && sc?.outcome?.status === "done" && sb?.outcome?.status === "done" && tb.includes(`a-${n}`) && tc.includes(`b-${n}`) && gb.length === 1 && gc.length === 1,
+      pass: !early && settled(sc) && sc.outcome.status === "done" && settled(sb) && sb.outcome.status === "done" && tb.includes(`a-${n}`) && tc.includes(`b-${n}`) && gb.length === 1 && gc.length === 1,
       why: `A 前 B 已被注入=${early} · B=${sb?.outcome?.status} C=${sc?.outcome?.status ?? "未落定"} · B 带 A 结论=${tb.includes(`a-${n}`)} C 带 B 结论=${tc.includes(`b-${n}`)} · 根收到 B ${gb.length} / C ${gc.length} 份`,
     };
   } },
@@ -684,14 +602,16 @@ const cases = {
   "after-reload": { names: ["rr-a3", "rr-b3"], solo: true, run: async () => {
     const n = nonce();
     await Promise.all(["rr-a3", "rr-b3"].map((x) => spawn(x)));
-    const a = await tell("rr-a3", `${SLEEP(50)}, 然后回复一行: RESULT: a-${n}`);
-    const b = await tell("rr-b3", `不要调用任何工具, 直接回复一行: RESULT: b-${n}`, { after: [a.turn] });
+    await probeVocab();
+    const a = await tellAt("rr-a3", `${SLEEP(50)}, 然后回复一行: RESULT: a-${n}`);
+    const ra = await tellRow("rr-a3", a);
+    const b = await tellAt("rr-b3", `不要调用任何工具, 直接回复一行: RESULT: b-${n}`, { after: [handleOf(a, ra)] });
     if (!b.parked) return { pass: false, why: `没停放: ${JSON.stringify(b).slice(0, 160)}` };
     execFileSync("./cli/wezard.sh", ["reload"], { cwd: new URL("../..", import.meta.url).pathname, stdio: "ignore" });
-    const sb = await settledSlot("rr-b3", 6 * 60_000);
+    const sb = await settledRow("rr-b3", 6 * 60_000);
     const tb = await textOf("rr-b3");
     return {
-      pass: sb?.outcome?.status === "done" && tb.includes(`a-${n}`),
+      pass: settled(sb) && sb.outcome.status === "done" && tb.includes(`a-${n}`),
       why: `B=${sb?.outcome?.status ?? "未落定"} B 带 A 结论=${tb.includes(`a-${n}`)}`,
     };
   } },
@@ -700,21 +620,23 @@ const cases = {
   "after-fail": { names: ["rr-a2", "rr-b2"], run: async () => {
     const n = nonce();
     await Promise.all(["rr-a2", "rr-b2"].map((x) => spawn(x)));
-    const a = await tell("rr-a2", `${SLEEP(150)}, 然后回复一行: RESULT: late`, { deadline: 60 });
-    const b = await tell("rr-b2", `回复一行: RESULT: never-${n}`, { after: [a.turn] });
+    await probeVocab();
+    const a = await tellAt("rr-a2", `${SLEEP(150)}, 然后回复一行: RESULT: late`, { deadline: 60 });
+    const ra = await tellRow("rr-a2", a);
+    const b = await tellAt("rr-b2", `回复一行: RESULT: never-${n}`, { after: [handleOf(a, ra)] });
     if (!b.parked) return { pass: false, why: `没停放: ${JSON.stringify(b).slice(0, 160)}` };
-    // 不投的那份按件号停放着落盘 (不占 root→B 的位置), 所以按件号找。
-    const sb = await until(() => { const s = Object.values(readJson("receipts.json")).find((x) => x.turn === b.turn); return s?.settled && s; }, 4 * 60_000);
+    // 不投的那份停放着落盘 (不占 root→B 的位置), 所以按对找它的行。
+    const sb = await until(async () => { const x = await rowOf(root.target, kids.get("rr-b2")); return settled(x) && x; }, 4 * 60_000);
     await sleep(3000);
     const injected = (await textOf("rr-b2")).includes(`never-${n}`);
-    const gb = await receiptsIn(root.target, "rr-b2");
+    const gb = await waitReceipts(root.target, "rr-b2");
     return {
       pass: sb?.outcome?.status === "canceled" && !injected && gb.length === 1 && gb[0].attrs.status === "canceled",
-      why: `B slot=${sb?.outcome?.status ?? "未落定"} 被注入过=${injected} 根收到 ${gb.map((r) => r.attrs.status).join(",") || "0 份"}`,
+      why: `B 行=${sb?.outcome?.status ?? "未落定"} 被注入过=${injected} 根收到 ${gb.map((r) => r.attrs.status).join(",") || "0 份"}`,
     };
   } },
 
-  // graph 的步骤与进度跟着发起那一轮的频道: 根这一轮是私聊 (发起者的 receipt:false 私聊 / 回执),
+  // graph 的步骤与进度跟着发起那一轮的频道: 根这一轮是私聊 (发起者的 return:none 私聊 / 回执),
   // 节点那一轮就不能进它的 home 群。
   "graph-private": { names: ["rr-gn"], run: async () => {
     const n = nonce();
@@ -737,43 +659,57 @@ const cases = {
   "handoff-owe": { names: ["rr-h", "rr-s"], run: async () => {
     const n = nonce();
     await Promise.all(["rr-h", "rr-s"].map((x) => spawn(x)));
+    await probeVocab();
     const gate = foregroundGate();
     try {
       // Start the blocking tool before either obligation: commentary before the second
       // user envelope would otherwise close the first ask in replyClosedBefore.
-      const warm = await tell("rr-h", `${gate.prompt} 退出后只回 ok。`, { receipt: false });
+      const warm = await tell("rr-h", `${gate.prompt} 退出后只回 ok。`, { return: "none" });
       if (!warm.ok || !await until(gate.ready, 120_000, 250)) return { pass: false, why: "前提没成立: 前台条件闸未启动" };
-      const first = await tell("rr-h", "继续等前台条件闸，不输出文字；这件活交接后再答。", { chain: false });
-      const second = await post("/peers/tell", { target: kids.get("rr-s"), name: real("rr-h"), priority: "now", chain: false, text: "继续等前台条件闸，不输出文字；这件活交接后再答。" });
-      if (!first.ok || !first.turn || !second.ok || !second.turn || first.turn === second.turn) return { pass: false, why: `前提没成立: 派活失败 ${JSON.stringify([first, second])}` };
+      const firstAt = Date.now();
+      const first = await tell("rr-h", "继续等前台条件闸，不输出文字；这件活交接后再答。", { return: "detach" });
+      const secondAt = Date.now();
+      const second = await post("/peers/tell", { target: kids.get("rr-s"), name: real("rr-h"), priority: "now", return: "detach", text: "继续等前台条件闸，不输出文字；这件活交接后再答。" });
+      if (!first.ok || !second.ok) return { pass: false, why: `前提没成立: 派活失败 ${JSON.stringify([first, second].map((x) => ({ ok: x.ok, reason: x.reason })))}` };
+      const r1 = await dispatchRow(root.target, kids.get("rr-h"), firstAt, first);
+      const r2 = await dispatchRow(kids.get("rr-s"), kids.get("rr-h"), secondAt, second);
+      if (!r1 || !r2) return { pass: false, why: "前提没成立: 找不到那两笔的路由行" };
       const oldPath = await jsonlOf(kids.get("rr-h"));
       const { replyClosedBefore } = await import("../../dist/daemon/peers.js");
-      const asks = [[root.target, `.${root.name}`, first.turn], [kids.get("rr-s"), `.${real("rr-s")}`, second.turn]];
-      const seen = await until(() => oldPath && asks.every(([, , turn]) => userTexts(oldPath).some((t) => t.includes(`turn="${turn}"`))), 60_000, 250);
+      const asks = [[root.target, `.${root.name}`, handleOf(first, r1), r1], [kids.get("rr-s"), `.${real("rr-s")}`, handleOf(second, r2), r2]];
+      const seen = await until(() => oldPath && asks.every(([, , ref]) => userTexts(oldPath).some((t) => t.includes(`${VOCAB.attr}="${ref}"`))), 60_000, 250);
       const busy = await until(async () => (await post("/peers/peek", { target: root.target, name: real("rr-h"), turns: 1 })).busy, 15_000, 500);
       const t0 = Date.now();
-      const owed = asks.every(([from, name, turn]) => {
-        const s = slotOf(from, kids.get("rr-h"));
-        return s?.turn === turn && !s.resolved && !s.claimed && !s.settled && replyClosedBefore(oldPath, name, s.at, t0, [], turn) === "";
-      });
-      if (!seen || !busy || !gate.intact() || !owed) return { pass: false, why: "前提没成立: 必须目标正忙、闸仍关闭、两件已读入且旧 transcript 都未收口" };
+      const owed = asks.every(([, name, handle, row]) =>
+        LIVE.has(row.status) && replyClosedBefore(oldPath, name, row.at, t0, [], handle) === "");
+      if (!seen || !busy || !gate.intact() || !owed) return { pass: false, why: `前提没成立: 必须目标正忙、闸仍关闭、两件已读入且旧 transcript 都未收口 (seen=${!!seen} busy=${!!busy} gate=${gate.intact()} owed=${owed})` };
       const h = await post("/wizard/handoff-self", { target: kids.get("rr-h"), brief: `（receipt-regress 交接测试）你会收到两轮，一轮一个发话方（只看信封 from 属性）。每轮只回复对应的一行 RESULT:。${real("rr-root")} 对应 h-root-${n}；${real("rr-s")} 对应 h-s-${n}。每轮不许提另一个值。不要调用任何工具。` });
       if (!h.ok) return { pass: false, why: `handoff-self: ${h.reason}` };
       gate.release();
-      const transfer = await until(() => logLine(t0, (o) => o.to === `.${real("rr-h")}` && o.msg === "receipt: 交接时转交"), 180_000);
-      const carried = transfer?.carried?.slice().sort();
+      // 交接把两笔欠账各续答一轮: 旧世界由 receipts.transfer 清点 (answered=0 / carried), 新世界走
+      // handoff 自己的「欠账续答 (继续)」, 一笔一行。两边都当**前提**核。
+      const carried = [`.${real("rr-h")}`];
       const expected = asks.map(([, name]) => name).sort();
-      if (transfer?.answered !== 0 || JSON.stringify(carried) !== JSON.stringify(expected)) return { pass: false, why: `前提没成立: transfer answered=${transfer?.answered} carried=${carried}` };
-      const both = await until(() => {
-        const xs = asks.map(([from, , turn]) => slotOf(from, kids.get("rr-h")));
-        return xs.every((s, i) => s?.turn === asks[i][2] && s.settled) && xs;
+      const oldLog = await until(() => logLine(t0, (o) => o.to === `.${real("rr-h")}` && o.msg === "receipt: 交接时转交"), 180_000);
+      const newLog = VOCAB.new
+        ? await until(() => {
+          const lines = readFileSync(join(STATE, "daemon.log"), "utf8").split("\n").slice(-4000).flatMap((l) => { try { const o = JSON.parse(l); return o.time >= t0 && o.msg === "handoff: 欠账续答 (继续)" ? [o] : []; } catch { return []; } });
+          return lines.length >= 2 && lines;
+        }, 180_000)
+        : undefined;
+      if (VOCAB.new ? !newLog : (oldLog?.answered !== 0 || JSON.stringify((oldLog?.carried ?? []).slice().sort()) !== JSON.stringify(carried))) {
+        return { pass: false, why: `前提没成立: 交接续答计数 (旧 ${JSON.stringify(oldLog && { answered: oldLog.answered, carried: oldLog.carried })} / 新 ${newLog?.length ?? 0} 行)` };
+      }
+      const both = await until(async () => {
+        const rs = await Promise.all(asks.map(([from]) => rowOf(from, kids.get("rr-h"))));
+        return rs.every((r, i) => r?.event === asks[i][3].event && settled(r)) && rs;
       }, 5 * 60_000);
       const p = await jsonlOf(kids.get("rr-h"));
       const lines = p ? userTexts(p).filter((l) => l.includes('wezard="envelope"')) : [];
-      const separate = p !== oldPath && asks.every(([, name, turn]) => lines.filter((l) => l.includes(`from="${name}"`) && l.includes(`turn="${turn}"`)).length === 1)
+      const separate = p !== oldPath && asks.every(([, name]) => lines.filter((l) => l.includes(`from="${name}"`)).length === 1)
         && !lines.some((l) => asks.every(([, name]) => l.includes(`from="${name}"`)));
       const got = await until(async () => {
-        const xs = await Promise.all(asks.map(async ([from, , turn]) => (await receiptsIn(from, "rr-h")).filter((r) => r.attrs.turn === turn)));
+        const xs = await Promise.all(asks.map(async ([from, , , row]) => (await receiptsIn(from, "rr-h")).filter((r) => roundId(r) === row.event)));
         return xs.every((rs) => rs.length) && xs;
       }, 60_000) ?? [];
       const [a, b] = both ?? [];
@@ -782,7 +718,7 @@ const cases = {
           && a.outcome.body.includes(`h-root-${n}`) && !a.outcome.body.includes(`h-s-${n}`)
           && b.outcome.body.includes(`h-s-${n}`) && !b.outcome.body.includes(`h-root-${n}`)
           && separate && got.length === 2 && got.every((rs) => rs.length === 1 && rs[0].attrs.status === "done"),
-        why: `transfer answered=0 carried=${carried.join(",")} · 新会话独立信封=${separate} · 根=${a?.outcome?.status ?? "未落定"}:${a?.outcome?.body.slice(0, 60) ?? ""} · rr-s=${b?.outcome?.status ?? "未落定"}:${b?.outcome?.body.slice(0, 60) ?? ""} · 原件号回执数=${got.map((rs) => rs.length).join(",")}`,
+        why: `交接续答计数=${VOCAB.new ? `${newLog?.length ?? 0} 行` : `answered=${oldLog?.answered} carried=${(oldLog?.carried ?? []).join(",")}`} · 新会话独立信封=${separate} · 根=${a?.outcome?.status ?? "未落定"}:${a?.outcome?.body.slice(0, 60) ?? ""} · rr-s=${b?.outcome?.status ?? "未落定"}:${b?.outcome?.body.slice(0, 60) ?? ""} · 回执数=${got.map((rs) => rs.length).join(",")}`,
       };
     } finally { gate.release(); }
   } },
@@ -793,12 +729,12 @@ const cases = {
     const n = nonce();
     await spawn("rr-f", { inherit: true, task: `这是回归测试, 不要调用任何工具, 直接回复一行: RESULT: [receipt-regress] fork-${n}` });
     await spawn("rr-g", { inherit: true });
-    const s = await settledSlot("rr-f", 3 * 60_000);
+    const s = await settledRow("rr-f", 3 * 60_000);
     await until(() => turnsOf(kids.get("rr-g")).some((t) => t.closed), 90_000);
     await sleep(5000);
     const pub = ["rr-f", "rr-g"].flatMap((x) => turnsOf(kids.get(x)).filter((t) => t.channel !== "").map((t) => `${x}:${t.channel}`));
     return {
-      pass: s?.outcome?.status === "done" && !pub.length,
+      pass: settled(s) && s.outcome.status === "done" && !pub.length,
       why: `rr-f 回执=${s?.outcome?.status ?? "未落定"} · 进了群的轮 ${pub.join(",") || "无"}`,
     };
   } },
@@ -807,25 +743,29 @@ const cases = {
   chain: { names: ["rr-a", "rr-b", "rr-c"], run: async () => {
     const n = nonce();
     await Promise.all(["rr-a", "rr-b", "rr-c"].map((x) => spawn(x)));
+    await probeVocab();
     const c = `直接回复一行: RESULT: chain-${n}`;
     const b = `${TELL("rr-c", c)}\n发完立刻结束这一轮, 只回「已派」。之后收到 rr-c 的回执, 最后一行原样写它的 RESULT 行。`;
     const a = `${TELL("rr-b", b)}\n发完立刻结束这一轮, 只回「已派」。之后收到 rr-b 的回执, 最后一行原样写它的 RESULT 行。`;
     await tell("rr-a", a);
-    const s = await settledSlot("rr-a", 8 * 60_000);
+    const s = await settledRow("rr-a", 8 * 60_000);
     // haiku 偶尔先答「已派」收了这一轮、下一轮才真派 —— 那件活就不挂在根的这件下面, 是分身没照做。
-    const ab = slotOf(kids.get("rr-a"), kids.get("rr-b"));
-    if (s && !s.outcome?.body.includes(`chain-${n}`) && ab?.k?.from !== root.target) return { pass: false, why: "rr-a 没在答根的那一轮里派活 (haiku 没照做), 重跑这一条" };
-    const got = await receiptsIn(root.target, "rr-a");
+    const ab = await rowOf(kids.get("rr-a"), kids.get("rr-b"));
+    const rootedUp = ab?.receiver?.event === (await rowOf(root.target, kids.get("rr-a")))?.event;
+    if (s && !s.outcome?.body.includes(`chain-${n}`) && !rootedUp) return { pass: false, why: "rr-a 没在答根的那一轮里派活 (haiku 没照做), 重跑这一条" };
+    const got = await waitReceipts(root.target, "rr-a");
+    const all = await receiptsIn(root.target);
     return {
       pass: !!s && s.outcome?.status === "done" && s.outcome.body.includes(`chain-${n}`) && got.length === 1,
-      why: `slot=${s?.outcome?.status ?? "未落定"} 含结论=${!!s?.outcome?.body.includes(`chain-${n}`)} 根收到 ${got.length} 份`,
+      why: `行=${s?.outcome?.status ?? "未落定"} 含结论=${!!s?.outcome?.body.includes(`chain-${n}`)} 根收到 ${got.length} 份 (transcript 里回执 ${all.length} 份, 根 jsonl=${!!(await jsonlOf(root.target))})`,
     };
   } },
 
-  // 并发两子: p 同一轮派 q1、q2; 第一份回执轮不外发, 第二份带 reply-to 回根, 根只收一份且含两份结论。
+  // 并发两子: p 同一轮派 q1、q2; 第一份回执轮不外发, 第二份把结论带上去, 根只收一份且含两份结论。
   fanout: { names: ["rr-p", "rr-q1", "rr-q2"], run: async () => {
     const n = nonce();
     await Promise.all(["rr-p", "rr-q1", "rr-q2"].map((x) => spawn(x, x === "rr-p" ? { tier: "standard" } : {})));
+    await probeVocab();
     const p = [
       TELL("rr-q1", `直接回复一行: RESULT: q1-${n}`),
       TELL("rr-q2", `直接回复一行: RESULT: q2-${n}`),
@@ -833,18 +773,18 @@ const cases = {
     ].join("\n\n");
     const t0 = Date.now();
     await tell("rr-p", p);
-    const s = await settledSlot("rr-p", 8 * 60_000);
+    const s = await settledRow("rr-p", 8 * 60_000);
     // haiku 偶尔只回「已派」却没真调 tell_peer —— 那是分身没照做, 不是回执的问题, 分开报。
-    const sent = ["rr-q1", "rr-q2"].filter((q) => (slotOf(kids.get("rr-p"), kids.get(q))?.at ?? 0) >= t0).length;
+    const sent = (await Promise.all(["rr-q1", "rr-q2"].map((q) => rowOf(kids.get("rr-p"), kids.get(q))))).filter((r) => (r?.at ?? 0) >= t0).length;
     if (sent < 2) return { pass: false, why: `rr-p 只真派出了 ${sent}/2 件 (haiku 没照做), 重跑这一条` };
-    const got = await receiptsIn(root.target, "rr-p");
+    const got = await waitReceipts(root.target, "rr-p");
     // 子活偶尔先 NEED 反问一次 (中途回执, 不算定论), 只数定论那两份。
-    const atP = [...(await receiptsIn(kids.get("rr-p"), "rr-q1")), ...(await receiptsIn(kids.get("rr-p"), "rr-q2"))].filter((r) => r.attrs.status !== "need");
-    const routed = atP.filter((r) => r.attrs["reply-to"] === `.${root.name}`).length;
+    const atP = [...(await waitReceipts(kids.get("rr-p"), "rr-q1")), ...(await waitReceipts(kids.get("rr-p"), "rr-q2"))].filter((r) => r.attrs.status !== "need");
+    const routed = atP.filter((r) => (VOCAB.new ? r.attrs.serves !== undefined || r.attrs.up !== undefined : r.attrs["reply-to"] === `.${root.name}`)).length;
     const body = s?.outcome?.body ?? "";
     return {
-      pass: s?.outcome?.status === "done" && body.includes(`q1-${n}`) && body.includes(`q2-${n}`) && got.length === 1 && atP.length === 2 && routed === 1,
-      why: `slot=${s?.outcome?.status ?? "未落定"} 含两份=${body.includes(`q1-${n}`) && body.includes(`q2-${n}`)} 根收到 ${got.length} 份 · p 收到 ${atP.length} 份, 带 reply-to 的 ${routed} 份`,
+      pass: settled(s) && s.outcome.status === "done" && body.includes(`q1-${n}`) && body.includes(`q2-${n}`) && got.length === 1 && atP.length === 2 && (VOCAB.new || routed === 1),
+      why: `行=${s?.outcome?.status ?? "未落定"} 含两份=${body.includes(`q1-${n}`) && body.includes(`q2-${n}`)} 根收到 ${got.length} 份 · p 收到 ${atP.length} 份${VOCAB.new ? " (新世界: 去向不再写进属性)" : `, 带 reply-to 的 ${routed} 份`}`,
     };
   } },
 
@@ -856,10 +796,13 @@ const cases = {
     await sleep(6000);
     const w = await post("/peers/wait", { target: root.target, name: real("rr-x"), timeoutSec: 180 });
     await sleep(30_000);
-    const got = await receiptsIn(root.target, "rr-x");
+    const got = await waitReceipts(root.target, "rr-x");
     const text = `${w.result ?? ""}${w.lastText ?? ""}`;
+    // 两种结局都算对: 取走前那份已排进我方收件箱 → `delivered:true` 且不回正文 (我方只收到那一份);
+    // 还没排到 → wait 把正文交给我 (`result`), 撤单后我方收件箱里不该再出现第二份。
+    const pass = w.delivered ? got.length === 1 : text.includes(`wait-${n}`) && got.length === 0;
     return {
-      pass: text.includes(`wait-${n}`) && got.length === (w.delivered ? 1 : 0),
+      pass,
       why: `wait 取到=${text.includes(`wait-${n}`)} delivered=${!!w.delivered} 根收到 ${got.length} 份`,
     };
   } },
@@ -875,11 +818,11 @@ const cases = {
     if (!p) return { pass: false, why: "找不到 rr-l 的 transcript" };
     const pad = "x".repeat(50 * 1024);
     for (let i = 0; i < 50; i++) appendFileSync(p, JSON.stringify({ type: "rr-filler", timestamp: new Date().toISOString(), pad }) + "\n");
-    const s = await settledSlot("rr-l", 4 * 60_000);
-    const got = await receiptsIn(root.target, "rr-l");
+    const s = await settledRow("rr-l", 4 * 60_000);
+    const got = await waitReceipts(root.target, "rr-l");
     return {
-      pass: s?.outcome?.status === "done" && s.outcome.body.includes(`long-${n}`) && got.length === 1,
-      why: `slot=${s?.outcome?.status ?? "未落定"} 含结论=${!!s?.outcome?.body.includes(`long-${n}`)} 根收到 ${got.length} 份`,
+      pass: settled(s) && s.outcome.status === "done" && s.outcome.body.includes(`long-${n}`) && got.length === 1,
+      why: `行=${s?.outcome?.status ?? "未落定"} 含结论=${!!s?.outcome?.body.includes(`long-${n}`)} 根收到 ${got.length} 份`,
     };
   } },
 
@@ -888,11 +831,11 @@ const cases = {
     await spawn("rr-y");
     const t0 = Date.now();
     await tell("rr-y", `${SLEEP(150)}, 然后回复一行: RESULT: late`, { deadline: 60 });
-    const s = await settledSlot("rr-y", 150_000);
-    const got = await receiptsIn(root.target, "rr-y");
+    const s = await settledRow("rr-y", 150_000);
+    const got = await waitReceipts(root.target, "rr-y");
     return {
       pass: s?.outcome?.status === "timeout" && got.length === 1 && got[0].attrs.status === "timeout",
-      why: `slot=${s?.outcome?.status ?? "未落定"} 用时 ${Math.round((Date.now() - t0) / 1000)}s 根收到 ${got.map((r) => r.attrs.status).join(",") || "0 份"}`,
+      why: `行=${s?.outcome?.status ?? "未落定"} 用时 ${Math.round((Date.now() - t0) / 1000)}s 根收到 ${got.map((r) => r.attrs.status).join(",") || "0 份"}`,
     };
   } },
 
@@ -906,41 +849,57 @@ const cases = {
     await paneGuards.release(kids.get("rr-z")); // Deliberate death is no longer a protected receiver.
     execFileSync("tmux", ["kill-pane", "-t", pane]);
     const t0 = Date.now();
-    const s = await settledSlot("rr-z", 120_000);
-    const got = await receiptsIn(root.target, "rr-z");
+    const s = await settledRow("rr-z", 120_000);
+    const got = await waitReceipts(root.target, "rr-z");
     return {
       pass: s?.outcome?.status === "dead" && got.length === 1,
-      why: `slot=${s?.outcome?.status ?? "未落定"} 杀 pane 后 ${Math.round((Date.now() - t0) / 1000)}s 根收到 ${got.length} 份`,
+      why: `行=${s?.outcome?.status ?? "未落定"} 杀 pane 后 ${Math.round((Date.now() - t0) / 1000)}s 根收到 ${got.length} 份`,
     };
   } },
 
-  // NEED → re 答复 → done: 中途那份 status=need 且不算定论, 续问沿用件号 (legs=2), 终态 done。
+  // NEED → re 答复 → done: 中途那份 status=need 且不算定论, 续问沿用**同一行** (两轮都服务它), 终态 done。
   need: { names: ["rr-n", "rr-ns"], run: async () => {
     const n = nonce();
     await Promise.all(["rr-n", "rr-ns"].map((x) => spawn(x)));
+    await probeVocab();
     const sender = kids.get("rr-ns");
     const setup = `你是自动测试的被动收件箱 ${n}。所有 NEED 由外部脚本答复；收到 NEED 也只回 ok，不调用工具，不发 tell_peer，不提供口令。现在只回 ok。`;
-    const warm = await tell("rr-ns", setup, { receipt: false });
+    const warm = await tell("rr-ns", setup, { return: "none" });
     const ready = warm.ok && await until(() => turnsOf(sender).some((t) => t.closed && t.userQuery?.includes(setup)), 120_000);
     if (!ready) return { pass: false, why: "前提没成立: 被动收件箱未就绪" };
-    const send = (text, extra = {}) => post("/peers/tell", { target: sender, name: real("rr-n"), text, priority: "now", chain: false, ...extra });
+    const send = async (text, extra = {}) => {
+      const at = Date.now();
+      return { ...(await post("/peers/tell", { target: sender, name: real("rr-n"), text, priority: "now", return: "detach", ...extra })), at };
+    };
     const first = await send("这是一次反问测试。现在只回复一行: NEED: 请给我口令（自动测试，由外部脚本答复，收件箱只回 ok，禁止调用工具）。之后收到口令，回复一行: RESULT: need-<口令>");
-    if (!first.ok || !first.turn) return { pass: false, why: `tell: ${first.reason ?? "缺件号"}` };
-    const asked = await until(async () => (await receiptsIn(sender, "rr-n")).find((r) => r.attrs.status === "need" && r.attrs.turn === first.turn), 180_000);
-    if (!asked) return { pass: false, why: `没收到 NEED 回执 (slot=${slotOf(sender, kids.get("rr-n"))?.outcome?.status})` };
-    const read = await until(() => turnsOf(sender).some((t) => t.closed && t.from?.receipt && t.from.from === kids.get("rr-n") && t.from.turn === first.turn && t.from.status === "need"), 120_000);
-    const mid = slotOf(sender, kids.get("rr-n"));
-    if (!read || mid?.turn !== first.turn || mid.legs !== 1 || mid.resolved || mid.settled || mid.outcome?.status !== "need") return { pass: false, why: `前提没成立: NEED 收件轮未结束或发生额外续问 legs=${mid?.legs}` };
-    const re = await send(`口令是 ${n}`, { re: first.turn });
-    if (!re.ok || re.turn !== first.turn) return { pass: false, why: `re: ${re.reason ?? "件号改变"}` };
-    const s = await until(() => { const x = slotOf(sender, kids.get("rr-n")); return x?.settled && x; }, 180_000);
-    const got = await until(async () => { const xs = (await receiptsIn(sender, "rr-n")).filter((r) => r.attrs.turn === first.turn); return xs.some((r) => r.attrs.status === "done") && xs; }, 60_000) ?? [];
+    if (!first.ok) return { pass: false, why: `tell: ${first.reason}` };
+    const row = await dispatchRow(sender, kids.get("rr-n"), first.at, first);
+    if (!row) return { pass: false, why: "找不到这一笔的路由行" };
+    const asked = await until(async () => (await receiptsIn(sender, "rr-n")).find((r) => r.attrs.status === "need" && roundId(r) === row.event), 180_000);
+    if (!asked) return { pass: false, why: `没收到 NEED 回执 (行=${(await rowOf(sender, kids.get("rr-n")))?.outcome?.status ?? "未落定"})` };
+    const read = await until(() => turnsOf(sender).some((t) => t.closed && t.from?.receipt && t.from.from === kids.get("rr-n") && (t.from.turn ?? t.from.event) === row.event && t.from.status === "need"), 120_000);
+    const mid = await rowOf(sender, kids.get("rr-n"));
+    if (!read || mid?.event !== row.event || mid.status !== "need") return { pass: false, why: `前提没成立: NEED 收件轮未结束或状态不对 (status=${mid?.status})` };
+    const re = await send(`口令是 ${n}`, { re: row.event });
+    if (!re.ok) return { pass: false, why: `re: ${re.reason}` };
+    const s = await until(async () => { const x = await rowOf(sender, kids.get("rr-n")); return settled(x) && x; }, 180_000);
+    const got = (await waitReceipts(sender, "rr-n", 2)).filter((r) => roundId(r) === row.event);
     const path = await jsonlOf(kids.get("rr-n"));
-    const dispatches = path ? userTexts(path).filter((t) => t.includes(`from=".${real("rr-ns")}"`) && t.includes(`turn="${first.turn}"`)) : [];
+    const ref = handleOf(first, row);
+    const fromHere = path ? userTexts(path).filter((t) => t.includes(`from=".${real("rr-ns")}"`)) : [];
+    const dispatches = fromHere.filter((t) => t.includes(`${VOCAB.attr}="${ref}"`));
+    const attrs = fromHere.map((t) => {
+      const a = attrsIn(t).find((x) => x.wezard === "envelope") ?? {};
+      return `${a[VOCAB.attr] ?? "-"}${a.re ?? ""}`;
+    });
+    // 真判据是「续问沿用同一笔」—— 行 id 没变 + 两份回执挂在同一个 roundId 上 (上面已断言)。
+    // 信封那层只再核一句: 旧世界这一轮注入了两次 (件号每次新发), 新世界两轮都写着同一个 event。
+    const reconf = VOCAB.new
+      ? dispatches.length === 2 && dispatches[1].includes(`${VOCAB.attr}="${ref}"`)
+      : fromHere.length === 2;
     return {
-      pass: s?.outcome?.status === "done" && s.outcome.body.includes(`need-${n}`) && s.legs === 2 && s.turn === first.turn && got.map((r) => r.attrs.status).join(",") === "need,done"
-        && dispatches.length === 2 && !dispatches[0].includes(`re="${first.turn}"`) && dispatches[1].includes(`re="${first.turn}"`),
-      why: `NEED 前提成立 legs=${mid.legs} resolved=${mid.resolved} · 终态=${s?.outcome?.status ?? "未落定"} legs=${s?.legs} 同件号=${s?.turn === first.turn} · 派发=${dispatches.length} 信封=${got.map((r) => r.attrs.status).join(",")}`,
+      pass: settled(s) && s.outcome.status === "done" && s.outcome.body.includes(`need-${n}`) && s.event === row.event && got.map((r) => r.attrs.status).join(",") === "need,done" && reconf,
+      why: `NEED 前提成立 status=${mid.status} · 终态=${s?.outcome?.status ?? "未落定"} 同一行=${s?.event === row.event} · 注入=${dispatches.length}/${fromHere.length} 轮 (句柄 ${ref}; rr-n 收到的 ${VOCAB.attr}=[${attrs.join(", ")}]) · 信封=${got.map((r) => r.attrs.status).join(",")}`,
     };
   } },
 
@@ -973,57 +932,65 @@ const cases = {
     };
   } },
 
-  // chain:false —— a 在答根那一轮里派的旁支活不挂住 a 给根的交代: 根先拿到 a 自己的结论, 且只一份。
+  // return:detach —— a 在答根那一轮里派的旁支活不挂住 a 给根的交代: 根先拿到 a 自己的结论, 且只一份。
   detach: { names: ["rr-e", "rr-d"], run: async () => {
     const n = nonce();
     await Promise.all(["rr-e", "rr-d"].map((x) => spawn(x)));
-    await tell("rr-e", `${TELL("rr-d", `${SLEEP(30)}, 然后回复一行: RESULT: side-${n}`, ", 参数 chain 设为 false")}\n发完不必等它, 直接回复一行: RESULT: own-${n}。之后收到 rr-d 的回执只回 ok。`);
-    const s = await settledSlot("rr-e", 3 * 60_000);
-    const side = await until(() => { const x = slotOf(kids.get("rr-e"), kids.get("rr-d")); return x?.settled && x; }, 3 * 60_000);
+    await probeVocab();
+    await tell("rr-e", `${TELL("rr-d", `${SLEEP(30)}, 然后回复一行: RESULT: side-${n}`, ', 参数 return 设为 "detach"')}\n发完不必等它, 直接回复一行: RESULT: own-${n}。之后收到 rr-d 的回执只回 ok。`);
+    const s = await settledRow("rr-e", 3 * 60_000);
+    const side = await until(async () => { const x = await rowOf(kids.get("rr-e"), kids.get("rr-d")); return settled(x) && x; }, 3 * 60_000);
     await sleep(30_000);
-    const got = await receiptsIn(root.target, "rr-e");
+    const got = await waitReceipts(root.target, "rr-e");
+    const detached = side ? side.receiver.event === undefined : false;
     return {
-      pass: s?.outcome?.status === "done" && s.outcome.body.includes(`own-${n}`) && !!side && !side.k && got.length === 1,
-      why: `slot=${s?.outcome?.status ?? "未落定"} 是自己的结论=${!!s?.outcome?.body.includes(`own-${n}`)} 旁支 k=${side ? side.k?.kind ?? "无" : "未落定"} 根收到 ${got.length} 份`,
+      pass: settled(s) && s.outcome.status === "done" && s.outcome.body.includes(`own-${n}`) && !!side && detached && got.length === 1,
+      why: `行=${s?.outcome?.status ?? "未落定"} 是自己的结论=${!!s?.outcome?.body.includes(`own-${n}`)} 旁支 detach=${side ? detached : "未落定"} 根收到 ${got.length} 份`,
     };
   } },
 
-  // 工单验收 (B4 ⑦): 成员第一次交了没有 RESULT 的答复 → 守护进程同件号打回一次, 那份不投给根;
+  // 工单验收 (B4 ⑦): 成员第一次交了没有 RESULT 的答复 → 守护进程同件打回一次, 那份不投给根;
   // 第二次照收。根只收到一份, 内容是补了 RESULT 的那次。
   accept: { names: ["rr-v"], run: async () => {
     const n = nonce();
+    const t0 = Date.now();
     const o = await post("/jobs/open", { target: root.target, title: "[receipt-regress] 工单验收打回", expect: 1, accept: "result" });
     if (!o.ok) return { pass: false, why: `open_job: ${o.reason}` };
     await spawn("rr-v", { job: o.job, task: `这是回归测试, 不要调用任何工具。第一次只回复「好的」两个字, 不写 RESULT。之后若被要求补收口, 就回复一行: RESULT: accept-${n}` });
-    const s = await settledSlot("rr-v", 4 * 60_000);
-    const got = await receiptsIn(root.target, "rr-v");
+    const s = await settledRow("rr-v", 4 * 60_000);
+    const got = await waitReceipts(root.target, "rr-v");
+    const bounced = await until(() => logLine(t0, (lo) => /不合工单验收/.test(lo.msg ?? "")), 60_000);
     await post("/jobs/close", { target: root.target, job: o.job, summary: "receipt-regress" });
     return {
-      pass: s?.outcome?.status === "done" && s.outcome.body.includes(`accept-${n}`) && s.legs === 2 && got.length === 1,
-      why: `slot=${s?.outcome?.status ?? "未落定"} legs=${s?.legs} 含补交=${!!s?.outcome?.body.includes(`accept-${n}`)} 根收到 ${got.length} 份`,
+      pass: settled(s) && s.outcome.status === "done" && s.outcome.body.includes(`accept-${n}`) && got.length === 1 && !!bounced,
+      why: `行=${s?.outcome?.status ?? "未落定"} 含补交=${!!s?.outcome?.body.includes(`accept-${n}`)} 打回过=${!!bounced} 根收到 ${got.length} 份`,
     };
   } },
 
-  // 按件号撤回 / 不误伤 (B4 ⑧): rr-k 先做根派的活, rr-o 的活排在后面 (normal 等它闲)。
-  // 根按件号撤回自己那件 → 只停这一轮; rr-k 接着做 rr-o 的活时, 根不带件号的打断被拒 (409)、
+  // 按行撤回 / 不误伤 (B4 ⑧): rr-k 先做根派的活, rr-o 的活排在后面 (normal 等它闲)。
+  // 根按件撤回自己那件 → 只停这一轮; rr-k 接着做 rr-o 的活时, 根不带件号的打断被拒、
   // urgent 降成 normal; rr-o 那件最终照常答完。
   "cancel-turn": { names: ["rr-k", "rr-o"], run: async () => {
     const n = nonce();
     await Promise.all(["rr-k", "rr-o"].map((x) => spawn(x)));
+    await probeVocab();
+    const mineAt = Date.now();
     const mine = await tell("rr-k", `${SLEEP(60)}, 然后回复一行: RESULT: root-${n}`);
+    const mineRow = await dispatchRow(root.target, kids.get("rr-k"), mineAt, mine);
+    if (!mineRow) return { pass: false, why: "找不到根派给 rr-k 的那一行" };
     await sleep(8000);
     const theirs = post("/peers/tell", { target: kids.get("rr-o"), name: real("rr-k"), priority: "normal", text: `${SLEEP(40)}, 然后回复一行: RESULT: o-${n}` });
     await sleep(3000);
-    const byTurn = await post("/wizard/stop", { target: root.target, name: real("rr-k"), mode: "interrupt", turn: mine.turn });
+    const byTurn = await post("/wizard/stop", { target: root.target, name: real("rr-k"), mode: "interrupt", turn: handleOf(mine, mineRow) });
     await theirs;
     await sleep(8000);
     const blunt = await post("/wizard/stop", { target: root.target, name: real("rr-k"), mode: "interrupt" });
     const urgent = await tell("rr-k", "直接回复一行: RESULT: ok", { priority: "urgent" });
-    const o = await until(() => { const x = slotOf(kids.get("rr-o"), kids.get("rr-k")); return x?.settled && x; }, 3 * 60_000);
-    const m = slotOf(root.target, kids.get("rr-k"));
+    const o = await until(async () => { const x = await rowOf(kids.get("rr-o"), kids.get("rr-k")); return settled(x) && x; }, 3 * 60_000);
+    const m = await rowOf(root.target, kids.get("rr-k"));
     return {
       pass: byTurn.interrupted === true && blunt.ok === false && /别的|派的活/.test(blunt.reason ?? "") && !!urgent.urgentDowngraded && o?.outcome?.status === "done" && o.outcome.body.includes(`o-${n}`),
-      why: `按件号撤回 interrupted=${byTurn.interrupted} · 不带件号打断=${blunt.ok ? "放行了" : "被拒"} · urgent 降级=${!!urgent.urgentDowngraded} · rr-o 那件=${o?.outcome?.status ?? "未落定"}${o?.outcome?.body.includes(`o-${n}`) ? "(答完)" : ""} · 根最后那件=${m?.outcome?.status ?? "在跑"}`,
+      why: `按件撤回 interrupted=${byTurn.interrupted} (值=${VOCAB.new ? mineRow.event : `件号 ${mine.turn}`}) · 不带件号打断=${blunt.ok ? "放行了" : "被拒"} · urgent 降级=${!!urgent.urgentDowngraded} · rr-o 那件=${o?.outcome?.status ?? "未落定"}${o?.outcome?.body.includes(`o-${n}`) ? "(答完)" : ""} · 根最后那件=${m?.outcome?.status ?? (LIVE.has(m?.status) ? "在跑" : "无")}`,
     };
   } },
 
@@ -1093,9 +1060,9 @@ const main = async () => {
   if (bad.length) throw new Error(`没有用例 ${bad.join(" ")} —— 有: ${Object.keys(cases).join(" ")}`);
   // solo: 会 reload 整个 daemon, 与别的用例并跑会弄断它们 —— 默认不跑, 点名才跑 (`run.mjs after-reload`)。
   const chosen = pick.length ? pick : Object.keys(cases).filter((x) => !cases[x].solo);
-  // 只跑纯单元的不必生根 (它们不碰 daemon)。
+  // 只跑纯 unit 的不必生根 (它们不碰 daemon)。
   if (chosen.some((x) => !cases[x].unit)) {
-    if (!ME.sessionId && !ME.tmuxPane) throw new Error("要在 wizard 会话里跑 (缺 CLAUDE_CODE_SESSION_ID / TMUX_PANE)");
+    if (!ME.sessionId && !ME.tmuxPane) throw new Error("要在 wizard 会话里跑 (缺会话 id / TMUX_PANE)");
     const birth = spawning.then(async () => {
       const r = await post("/wizard/clone", { ...ME, name: real("rr-root"), inherit: false, tier: "mini", keepalive: false, description: "receipt-regress 的根" });
       if (!r.ok) throw new Error(`spawn rr-root: ${r.reason}`);
@@ -1106,7 +1073,8 @@ const main = async () => {
     spawning = birth.catch(() => undefined);
     await birth;
     if (shuttingDown) throw new GuardPrerequisiteError("根创建期间开始清理");
-    await post("/peers/tell", { ...ME, name: root.name, receipt: false, priority: "now", text: "你是回执回归测试的根。之后进来的每一份回执, 只回一个词 ok, 不调用任何工具。现在回 ok。" });
+    const open = await post("/peers/tell", { ...ME, name: root.name, return: "none", priority: "now", text: "你是回执回归测试的根。之后进来的每一份回执, 只回一个词 ok, 不调用任何工具。现在回 ok。" });
+    await probeVocab(open);
     await sleep(20_000);
   }
   const slots = pool(MAX_KIDS);
@@ -1118,15 +1086,18 @@ const main = async () => {
       if (e instanceof GuardPrerequisiteError) throw e;
       return { pass: false, why: `抛错: ${e.message}` };
     });
-    console.log(`${out.pass ? "PASS" : "FAIL"} ${name.padEnd(9)} ${Math.round((Date.now() - t0) / 1000)}s · ${out.why}`);
+    const tag = out.pending ? "SKIP" : out.pass ? "PASS" : "FAIL";
+    console.log(`${tag} ${name.padEnd(21)} ${Math.round((Date.now() - t0) / 1000)}s · ${out.why}`);
     await Promise.all(c.names.map(stop));
     slots.give(c.names.length);
-    return out.pass;
+    return { name, ...out };
   }));
-  const failed = results.filter((x) => !x).length;
+  const failed = results.filter((x) => !x.pending && !x.pass).length;
+  const skipped = results.filter((x) => !!x.pending);
   const rootAlive = !root || (!!(await jsonlOf(root.target)) && !!tmuxPaneOf(root.name));
   if (!rootAlive) console.log("FAIL 根 rr-root 中途没了 —— 「根收到 N 份」类判定无效, 重跑");
-  console.log(`${results.length - failed}/${results.length} PASS · ${failed}/${results.length} FAIL${rootAlive ? "" : " · 收件前提失效"}`);
+  console.log(`${results.length - failed - skipped.length}/${results.length - skipped.length} PASS · ${failed}/${results.length - skipped.length} FAIL · ${skipped.length} pending-reload`);
+  skipped.forEach((x) => console.log(`  SKIP ${x.name} (${x.pending}): ${x.why}`));
   return rootAlive ? failed : Math.max(1, failed);
 };
 

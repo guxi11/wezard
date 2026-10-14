@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import type { Asker, TurnFrom } from "../shared/detail-store.js";
 import type { MirrorDispatchArgs } from "./mirror-bridge.js";
-import type { Tell, ParentK, HeldSeen } from "./receipts.js";
-import type { Frame, ReturnMode } from "./receiver-stack.js";
+import type { Tell, HeldSeen } from "./dispatch.js";
+import type { EventId, FinalVerdict } from "./router.js";
 
 export interface MessageInput {
   id: string;
@@ -13,11 +13,10 @@ export interface MessageInput {
   speaker: string;
   channel: string;
   asker?: Asker;
-  k?: ParentK;
-  /** 派活事件冻结的 receiver stack (`k` = `stack[0]`, 见 receiver-stack.ts)。 */
-  stack?: Frame[];
-  mode?: ReturnMode;
-  replyTo?: ParentK;
+  /** 这一轮服务路由表上的哪一笔 (§9.4)。人话 = 为它开的根 event; 派活 / 续问 = 新开的子行
+   *  event (transfer 就是被 move 的那个); 回执 = `receiver.event`; 缺省 = 不服务任何一笔
+   *  (人在 CLI 里直接敲的轮) —— 那一轮派活等同 detach。 */
+  serves?: EventId;
   priority: "normal" | "now" | "urgent";
   deadline: number;
   payload: {
@@ -30,7 +29,6 @@ export interface MessageInput {
       attemptId?: string;
       after?: string[];
       afterSeen?: Readonly<Record<string, HeldSeen>>;
-      controlTransfer?: string;
       job: string;
       kind: "task" | "ask" | "fyi";
       role?: "exec" | "reviewer" | "expert";
@@ -39,6 +37,8 @@ export interface MessageInput {
       spawned?: boolean;
       /** 上游 `re` 一份已交出去的件, 按 delegate 转给了叶子: 不是发话方自己的一件新活 (不进它的挂起账)。 */
       relayed?: boolean;
+      /** `return:"transfer"`: 这一笔的 owner 已经改成了收件方, 不是发话方自己在等的一件。 */
+      transferred?: boolean;
     };
   };
 }
@@ -62,10 +62,6 @@ export interface MessageEvent extends MessageInput {
   turn?: string;
   finalized?: boolean;
   interjected?: boolean;
-  awaitingContinuation?: boolean;
-  continuationGeneration?: number;
-  currentContinuation?: string;
-  parentGeneration?: number;
   result?: { body: string; revision: string; at: number };
 }
 export interface DeliveryInput {
@@ -85,7 +81,10 @@ export interface FinalDelivery extends DeliveryInput {
   parts: Array<{ state: "pending" | "sending" | "waiting-ack" | "delivered" | "uncertain" | "failed"; attempts: number; reason?: string; ack?: string; retryAt?: number }>;
 }
 export interface EventTransport { ok: boolean; uncertain?: boolean; retryable?: boolean; reason?: string }
-export interface EventEvidence { consumed: boolean; interjected?: boolean; body?: string; revision?: string; turn?: string; closedAt?: number }
+export interface EventEvidence { consumed: boolean; interjected?: boolean; body?: string; revision?: string; turn?: string; closedAt?: number;
+  /** 这一轮以 CLI 报错收尾 (`isApiErrorMessage`): 没有可当定论的正文 —— `body` 是那段报错
+   *  原文, 交给 `final` 落成中途态 error (见 §9.4), 不是 result。 */
+  error?: boolean }
 export interface MessageAdapters {
   resource: (target: string) => string;
   transcript: (target: string) => string | undefined;
@@ -98,6 +97,10 @@ export interface MessageAdapters {
   inject: (event: MessageEvent, boundary: (phase?: "paste" | "submit", identity?: { sessionId?: string; transcript?: string }) => boolean) => Promise<EventTransport>;
   evidence: (event: MessageEvent) => Promise<EventEvidence>;
   recovered: (event: MessageEvent) => void;
+  /** 这一轮有定论了 (result 落定 / 重放恢复 / 读到 CLI 报错收尾): 路由表据此落 mark / answer
+   *  (§9.4)。与 `recovered` 并排 —— 后者管投递恢复, 它管路由判定。可选: 没有它的消费者
+   *  (测试夹具 / 老装配) 照常跑, 只是不做路由判定。 */
+  final?: (event: MessageEvent, verdict: FinalVerdict) => void;
   format?: (delivery: DeliveryInput) => DeliveryInput;
   send: (delivery: FinalDelivery, part: number) => Promise<{ ack?: string; uncertain?: string; queued?: boolean; failed?: string }>;
   deliveryEvidence?: (delivery: FinalDelivery, part: number) => { ack?: string; state: "queued" | "delivered" | "uncertain" | "failed"; reason?: string } | undefined;
@@ -120,7 +123,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
   const db = loadJsonMap<MessageEvent>(file, undefined, { strict: true });
   const outbox = loadJsonMap<FinalDelivery>(`${file}.finals`, undefined, { strict: true });
   Object.entries(db.all()).forEach(([id, e]) => {
-    if (!e || e.id !== id || typeof e.fingerprint !== "string" || !e.target || typeof e.speaker !== "string" || typeof e.channel !== "string" || !e.payload || typeof e.payload.text !== "string" || (!e.payload.human === !e.payload.peer) || !Number.isFinite(e.at) || !Number.isFinite(e.attempts) || !Number.isFinite(e.deadline) || !["queued", "dispatching", "awaiting-result", "complete", "canceled", "uncertain"].includes(e.execution)) throw new Error(`invalid message event ${id}`);
+    if (!e || e.id !== id || typeof e.fingerprint !== "string" || !e.target || typeof e.speaker !== "string" || typeof e.channel !== "string" || (e.serves !== undefined && typeof e.serves !== "string") || !e.payload || typeof e.payload.text !== "string" || (!e.payload.human === !e.payload.peer) || !Number.isFinite(e.at) || !Number.isFinite(e.attempts) || !Number.isFinite(e.deadline) || !["queued", "dispatching", "awaiting-result", "complete", "canceled", "uncertain"].includes(e.execution)) throw new Error(`invalid message event ${id}`);
   });
   Object.entries(outbox.all()).forEach(([id, d]) => {
     if (!d || d.id !== id || !Array.isArray(d.parts) || d.parts.length !== d.chunks?.length || !d.chunks.every((c) => typeof c === "string") || !d.parts.every((p) => ["pending", "sending", "waiting-ack", "delivered", "uncertain", "failed"].includes(p.state)) || !d.channel) throw new Error(`invalid final delivery ${id}`);
@@ -182,17 +185,16 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
   const accept = (input: MessageInput): { ok: true; queued: boolean; eventId: string } => {
     if (!accepting) throw new Error("message scheduler is stopped");
     const clean = clone(input);
-    const fingerprint = digest(clean.identity ? [JSON.parse(clean.identity), clean.speaker, clean.channel] : clean);
+    // `serves` 是路由元数据, 不参与身份: 同一个 id 重放 (含 reload 后重入箱) 带着同一份
+    // 内容就该是同一条消息, 哪怕 serves 的来历变了 —— 它不算内容的一部分。
+    const { serves: _routing, ...identified } = clean;
+    const fingerprint = digest(identified.identity ? [JSON.parse(identified.identity), identified.speaker, identified.channel] : identified);
     const old = db.get(input.id);
     if (old && old.fingerprint !== fingerprint) throw new Error(`event identity conflict: ${input.id}`);
     let e = old;
     if (!e) {
-      const parentId = (clean.replyTo?.kind === "chat" ? clean.replyTo.turn : undefined);
-      const parent = parentId ? db.get(parentId) : undefined;
-      const generation = (parent?.continuationGeneration ?? 0) + 1;
-      e = { ...clean, fingerprint, at: Date.now(), execution: "queued", exposure: "none", attempts: 0,
-        ...(parent ? { parentGeneration: generation } : {}) };
-      db.merge({ [e.id]: e, ...(parent ? { [parent.id]: { ...parent, continuationGeneration: generation, currentContinuation: e.id, awaitingContinuation: true } } : {}) });
+      e = { ...clean, fingerprint, at: Date.now(), execution: "queued", exposure: "none", attempts: 0 };
+      db.merge({ [e.id]: e });
     }
     if (e.execution === "queued") {
       try { io.accepted(e); }
@@ -201,10 +203,11 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     void pump();
     return { ok: true, queued: e.execution === "queued", eventId: e.id };
   };
-  const result = (id: string, body: string, revision: string, turn?: string, continuation?: string): void => {
+  const result = (id: string, body: string, revision: string, turn?: string): void => {
     const e = db.get(id);
-    if (!e || (e.currentContinuation && e.currentContinuation !== continuation) || e.result?.revision === revision) return;
+    if (!e || e.result?.revision === revision) return;
     patch(id, { finalized: false, result: { body, revision, at: Date.now() }, execution: "complete", exposure: "consumed", ...(turn ? { turn } : {}) });
+    io.final?.(db.get(id)!, { text: body });
   };
   const delivery = (input: DeliveryInput): string => {
     const old = outbox.get(input.id);
@@ -251,15 +254,38 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
       ...(evidence.closedAt ? { turnClosedAt: evidence.closedAt } : {}), turn: evidence.turn ?? current.turn,
     });
     if (!current.canceled) io.committed(db.get(e.id)!);
-    if (evidence.body !== undefined && evidence.revision) {
+    if (evidence.body !== undefined && evidence.error) {
+      // CLI 报错收尾: 那段报错不是定论 (§5), 交路由表落中途态 —— 事件本身不动, 它的执行态
+      // 自有 deadline / 续跑那条路管 (与改动前一致)。
+      io.final?.(db.get(e.id)!, { text: evidence.body, error: true });
+    } else if (evidence.body !== undefined && evidence.revision) {
       result(e.id, evidence.body, evidence.revision, evidence.turn);
       io.recovered(db.get(e.id)!);
     }
+  };
+  /** 收件箱里的回执事件 (`rcpt:<event>:<rev>`): 只有它带路由归属 (serves), 也只有它该合并。 */
+  const isRcpt = (e: MessageEvent): boolean => e.id.startsWith("rcpt:") && !!e.serves;
+  /** §9.3 Aggregator: 同一个 target、服务同一笔 (`serves` = `receiver.event`) 还排着队的其它回执,
+   *  并进这一次注入 —— 扇出的兄弟陆续回来时是一轮, 不是一人一轮。被吸收的那些各自收口
+   *  (`execution: complete`, 它们的 id 已终态, 重放不再注入); 结论由这一轮的终句统一交代。
+   *  回执的正文与信封是分开的两件 (`payload.text` 不含信封), 所以并的只是正文, 信封留注入那一份。 */
+  const absorb = (id: string): void => {
+    const e = db.get(id);
+    if (!e || !isRcpt(e)) return;
+    const absorbed = Object.values(db.all())
+      .filter((x) => x.id !== e.id && isRcpt(x) && x.target === e.target && x.serves === e.serves
+        && x.execution === "queued" && !x.canceled)
+      .sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : 1));
+    if (!absorbed.length) return;
+    patch(e.id, { payload: { ...e.payload, text: [e.payload.text,
+      ...absorbed.map((x) => `（另一份回执 ${x.id} · ${x.speaker}）\n${x.payload.text}`)].join("\n\n") } });
+    absorbed.forEach((x) => patch(x.id, { execution: "complete", exposure: "consumed", finalized: true, reason: `merged into ${e.id}` }));
   };
   const inject = async (id: string, resource: string): Promise<void> => {
     active.add(resource);
     targets.add(db.get(id)!.target);
     try {
+      absorb(id);
       const e = db.get(id)!;
       if (stopped || e.execution !== "queued" || !io.valid(e)) return;
       io.accepted(e);
@@ -388,7 +414,12 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
         if (e.execution === "complete") {
           if (!e.finalized) {
             if (!e.canceled) io.committed(e);
-            if (e.result) io.recovered(e);
+            if (e.result) {
+              io.recovered(e);
+              // reload 落在 result 与 finalized 之间: 重放这一刻补上路由判定 (幂等 —— 同一条
+              // 定论重放只会在表上再写一次同样的 op)。
+              io.final?.(e, { text: e.result.body });
+            }
             patch(e.id, { finalized: true });
           }
           return;
@@ -418,16 +449,6 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
   };
   return {
     accept, pump, resume, result, delivery, cancel, blocker, release,
-    continueResult: (childId: string): MessageEvent | undefined => {
-      const child = db.get(childId);
-      if (!child?.result || child.canceled) return undefined;
-      const parentId = (child.replyTo?.kind === "chat" ? child.replyTo.turn : undefined);
-      const parent = parentId ? db.get(parentId) : undefined;
-      if (!parent || parent.canceled || parent.currentContinuation !== childId || parent.continuationGeneration !== child.parentGeneration) return undefined;
-      result(parent.id, child.result.body, finalId(parent.id, parent.channel, child.result.body), parent.turn, childId);
-      return db.get(parent.id);
-    },
-    defer: (id: string, pending: boolean) => { if (db.get(id)) patch(id, { awaitingContinuation: pending }); },
     running: () => !stopped,
     bind: (id: string, turn: string) => { if (db.get(id)) patch(id, { turn }); },
     finished: (id: string) => { const e = db.get(id); if (e && !e.canceled && !e.result) patch(id, { execution: "complete", exposure: "consumed" }); },
@@ -446,7 +467,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     stop: () => { accepting = false; stopped = true; clearInterval(timer); timer = undefined; },
     get: (id: string) => { const e = db.get(id); return e && clone(e); },
     status: () => ({ events: Object.values(db.all()).map((e) => ({ ...clone(e),
-      status: e.awaitingContinuation ? "awaiting-result" : e.execution === "dispatching" ? "executing" : e.execution,
+      status: e.execution === "dispatching" ? "executing" : e.execution,
       ...(e.execution === "queued" && blocker(e.id) ? { blockedBy: blocker(e.id) } : {}),
       delivery: (() => { const parts = Object.values(outbox.all()).filter((d) => d.eventId === e.id).flatMap((d) => d.parts);
         return parts.some((p) => p.state === "failed") ? "failed" : parts.some((p) => p.state === "uncertain") ? "uncertain" : parts.some((p) => p.state !== "delivered") ? "delivery-pending" : parts.length ? "delivered" : "none"; })(),

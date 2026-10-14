@@ -129,9 +129,9 @@ export interface TurnFrom {
    *  不是它派来的新活。回执不再生回执 (见 index.ts 的 receipts), 所以这也是一条
    *  「这一轮不该再触发回注」的记录。 */
   receipt?: boolean;
-  /** 这件活的编号 (`t` + 6 hex, 见 reminder.TurnTag): 派活那句、续问与回执带同一个 ——
-   *  rolepage 凭它从回执跳回派活那句。老记录没有。 */
-  turn?: string;
+  /** 这一轮对应的路由行 id (T10 起取代件号, 见 reminder.TurnTag): 派活那句、续问与回执
+   *  带同一个 —— rolepage 凭它从回执跳回派活那句。老记录里叫 turn。 */
+  event?: string;
   /** 回执: 定论 (见 ReceiptStatus)。 */
   status?: ReceiptStatus;
   /** 回执: 工单里已落定几份 / 一共几份 —— 「第 i/n 份」。不走工单的没有。 */
