@@ -3509,9 +3509,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const COT_MAX_CHARS = 100;
   const COT_FLUSH_MS = 1500;
 
-  // 压成一行的进度片段。safeForMarkdown 必须先于截断: thinking 里一个裸反引号就能提前
-  // 闭合代码段, 让后面的正文裸奔在链接旁边。尾随的省略号 = "还在进行中"; 截断与进行中
-  // 共用同一个 …, 不叠加两个。
+  // 压成一行的进度片段, 纯文本上气泡 (不包代码段)。safeForMarkdown 必须先于截断:
+  // 进度行与链接头同行, thinking 里的 `[]`<>` 会戳破链接与排版。尾随的省略号 =
+  // "还在进行中"; 截断与进行中共用同一个 …, 不叠加两个。
   const cotLine = (s: string): string => {
     const flat = safeForMarkdown(s.replace(/\s+/g, " ").trim());
     return flat ? `${flat.slice(0, COT_MAX_CHARS)}…` : "";
@@ -3540,7 +3540,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     try {
       await (b.pending = (b.pending ?? Promise.resolve()).catch(() => undefined).then(async () => {
         if (b.done || a.briefBubble !== b || a.briefTurnId !== turnId) return;
-        await client.replyStream(b.frame, b.streamId, briefLine(a, turnId, `\`${text}\``), false);
+        await client.replyStream(b.frame, b.streamId, briefLine(a, turnId, text), false);
       }));
     } catch (e) {
       log.debug({ sessionId: a.sessionId, turnId, err: (e as Error).message }, "brief: cot refresh failed");

@@ -149,8 +149,10 @@ const BARE_NAME = `[.#](${NAME_CHARS}{1,32})`;
 const PEER_NAME = `(?:${EMO}\\s*)?[.#]${NAME_CHARS}{1,32}`;
 const PEER_LINK = `\\[@?${PEER_NAME}\\]\\([^)]*\\)`;
 const TO_PART = `(?:\\s*(?:(?:→|@)\\s*(?:${PEER_LINK}|${PEER_NAME})|${PEER_LINK}|${EMO}\\s*[.#]${NAME_CHARS}{1,32}))?`;
+// 署名形态的头 (非 default wizard): 名字包一层反引号 —— `\`.name\`:` / `[\`.name\`](url):`,
+// 与裸头一并认。
 const HEADER_RE = new RegExp(
-  `^(?:\\[(?:${EMO}${NAME_PART}|${BARE_NAME})\\]\\([^)]*\\)(?::)?|${EMO}${NAME_PART}(?::)?|${BARE_NAME}:)${TO_PART}` +
+  `^(?:\\[\`?(?:${EMO}${NAME_PART}|${BARE_NAME})\`?\\]\\([^)]*\\)(?::)?|${EMO}${NAME_PART}(?::)?|\`?${BARE_NAME}\`?:)${TO_PART}` +
     `(?:\\s+\\d+/\\d+)?(?:\\s*←\\s*View chat details)?(?![\\p{L}\\p{N}_-])\\s*`,
   "u",
 );
@@ -182,7 +184,7 @@ export const parseTagHeader = (text: string): { fromBot: boolean; tag: string; b
 /** Formatting needs the original body; quote parsing deliberately unlinks its names. */
 export const rawTagHeader = (text: string): { tag: string; header: string; body: string; url?: string } | undefined => {
   const t = text.trimStart();
-  const m = new RegExp(`^(?:\\[(?:${EMO}\\s*)?[.#](${NAME_CHARS}{1,32})\\]\\(([^)]*)\\):|(?:${EMO}\\s*)?[.#](${NAME_CHARS}{1,32}):)(?:[ \\t]+\\d+/\\d+)?\\s*`, "u").exec(t);
+  const m = new RegExp(`^(?:\\[\`?(?:${EMO}\\s*)?[.#](${NAME_CHARS}{1,32})\`?\\]\\(([^)]*)\\):|\`?(?:${EMO}\\s*)?[.#](${NAME_CHARS}{1,32})\`?:)(?:[ \\t]+\\d+/\\d+)?\\s*`, "u").exec(t);
   return m ? { tag: m[1] || m[3] || "", header: m[0], body: t.slice(m[0].length), ...(m[2] ? { url: m[2] } : {}) } : undefined;
 };
 
@@ -307,11 +309,14 @@ export const headed = (head: string, body: string, sep = headSep(body)): string 
 
 /** 发话方在 `dest` 群里的头; `to` = 说给谁 (公开 wizard 间), 有对象时谁都得报名。
  *  host 不报名, 但企微里它的名字链接是进 rolepage 的入口: 有链接就留 `[.name](url):`, 只是不写裸名字;
- *  微信那头链接本就降成文字 (wxMarkdown), 留下的只会是一句重复的自报身份, 整个头都不写。 */
+ *  微信那头链接本就降成文字 (wxMarkdown), 留下的只会是一句重复的自报身份, 整个头都不写。
+ *  署名: 非 default wizard (isHost 为假 —— slot 会话 / 从别群点名过来的) 名字包一层反引号,
+ *  `\`.name\`` / `[\`.name\`](url)`, 与 default wizard 的裸头区分; HEADER_RE / rawTagHeader 两种形态都认。 */
 export const chatHead = (target: string | undefined, url: string | undefined, to?: string, dest?: string): string => {
   const host = !to && isHost(target, dest);
   if (host && (!url || isWxChat(baseOfKey(dest || target!)))) return "";
-  const me = url ? linkedTagHead(target, url) : tagHead(target);
+  const head = ((h) => (h && !isHost(target, dest) ? `\`${h}\`` : h))(tagHead(target));
+  const me = url ? ((h) => (h ? `[${h}](${url})` : ""))(head) : head;
   return me ? speakerHead(me, to) : "";
 };
 
