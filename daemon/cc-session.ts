@@ -89,6 +89,20 @@ export const sessionOnPane = (homeDir: string, pane: string): LiveSession | unde
     .filter((r) => r.pane === pane && pidAlive(r.pid))
     .sort((a, b) => b.statusUpdatedAt - a.statusUpdatedAt)[0];
 
+/** 注册表里这个 pid 那一行, 只读它那一个文件 —— 注入的每个物理边界都要复核一次,
+ *  全量扫目录太贵。行里没有 `tmux` 字段的后端 (codebuddy) 只拿它当「这一个登记过
+ *  的 CLI 进程还活着」的证据: 那行的 sessionId 是续接链的根, 会话换过 sid 之后
+ *  不更新, 说不出这个 pane 此刻在写哪份转录 (那份以 mirror 自己的绑定为准)。
+ *  进程死了就作废: 崩溃的进程会留下陈年的 pid 文件, 而 tmux server 重启后 `%N`
+ *  从头编号 —— 不核对 pid, 一个旧文件就能冒充 pane 上的会话。 */
+export const sessionOfPid = (homeDir: string, pid: number): LiveSession | undefined => {
+  if (!Number.isInteger(pid) || pid <= 0) return undefined;
+  try {
+    const row = parseRow(readFileSync(join(registryDirOf(homeDir), `${pid}.json`), "utf8"));
+    return row && row.pid === pid && pidAlive(row.pid) ? row : undefined;
+  } catch { return undefined; }
+};
+
 /** 注册表目录一有写入就回调 —— status 翻转的事件源, 省得按固定间隔去抽样。
  *  CC 以整文件改写 (可能是 rename) 落盘, 所以看目录而不是单个文件。返回撤销函数;
  *  目录不在 / watch 起不来时是空操作, 调用方自带的兜底轮询照样能收尾。 */
@@ -147,6 +161,9 @@ const textOfContent = (c: unknown): string =>
       ? c.map((b) => (b && (b as { type?: string }).type === "text" ? String((b as { text?: unknown }).text ?? "") : "")).join("")
       : "";
 
+/** codebuddy 的 timestamp 是 epoch-ms 数字, CC / codex 是 ISO 串 —— 两态都认。 */
+const msOf = (t: unknown): number => (typeof t === "number" ? t : Date.parse(String(t ?? "")));
+
 /** 一行 jsonl 若是一次人类提交 (直接落成 user 行, 或忙时排队后落成 queued_command), 返回它的文本与时刻。 */
 const submissionOf = (line: string): { text: string; at: number } | undefined => {
   if (!line.includes('"user"') && !line.includes("queued_command")) return undefined; // 便宜的预过滤
@@ -154,8 +171,11 @@ const submissionOf = (line: string): { text: string; at: number } | undefined =>
     const raw = JSON.parse(line) as Record<string, unknown>;
     const r = (raw.type === "response_item" ? normalizeCodex(raw) : raw) as Record<string, unknown> | null;
     if (!r) return undefined;
-    const at = Date.parse(String(r.timestamp ?? ""));
+    const at = msOf(r.timestamp);
     if (r.type === "user" && r.isMeta !== true) return { text: textOfContent((r.message as { content?: unknown } | undefined)?.content), at };
+    // codebuddy: `{type:"message", role:"user", content:[{type:"input_text", text}]}`
+    if (r.type === "message" && r.role === "user" && Array.isArray(r.content))
+      return { text: (r.content as { text?: unknown }[]).map((b) => (typeof b?.text === "string" ? b.text : "")).join(""), at };
     const att = r.attachment as { type?: string; prompt?: unknown } | undefined;
     if (r.type === "attachment" && att?.type === "queued_command") return { text: textOfContent(att.prompt), at };
   } catch { /* 写到一半的行 */ }

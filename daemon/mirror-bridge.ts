@@ -21,7 +21,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { pasteTmuxBuffer } from "./tmux-buffer.js";
 import { existsSync, readdirSync, readFileSync, statSync, watch, openSync, readSync, closeSync, type FSWatcher } from "node:fs";
-import { join, dirname } from "node:path";
+import { basename, join, dirname } from "node:path";
 import type { WSClient, WsFrame, WsFrameHeaders, EventMessageWith, TemplateCard, TemplateCardEventData } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
@@ -51,7 +51,7 @@ import { dispatchPickerPolicy, pickerPolicy } from "./picker-policy.js";
 import { renameWindow, runTmux, spawnTmuxClaude } from "./spawn-tmux.js";
 import { selectEffort, selectModel, type EffortSelectResult, type ModelScope, type ModelSelectResult } from "./model-select.js";
 import { parseEffort, type Effort } from "../shared/effort.js";
-import { hasRegistry, liveSessionPids, markTranscript, probeOf, sessionOnPane, submittedSince, submittedEventSince, watchRegistry, type LiveSession, type TranscriptMark } from "./cc-session.js";
+import { hasRegistry, liveSessionPids, markTranscript, probeOf, sessionOfPid, sessionOnPane, submittedSince, submittedEventSince, watchRegistry, type LiveSession, type TranscriptMark } from "./cc-session.js";
 import { waitForIdle, type IdleResult } from "./graph.js";
 import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
@@ -1620,10 +1620,87 @@ const paneRunsShell = async (target: string): Promise<boolean> => {
   return r.ok && SHELL_RE.test(r.stdout.trim());
 };
 
-/** pane 活着且里面住着 AI 会话。注册表认得它就是; 不认得时只在前台确是 shell 才判否 ——
- *  注册表缺席 (codebuddy / 旧版 CC / 进程不在 tmux 里记的行) 不能被当成会话不在。 */
-const paneHostsSession = async (target: string, homeDir: string): Promise<boolean> =>
-  !hasRegistry(homeDir) || sessionOnPane(homeDir, target) !== undefined || !(await paneRunsShell(target));
+/** pane 还在吗 —— 三态。tmux 明确报「没有这个 pane / 没有 server」才算 `gone`; 超时
+ *  (server 卡住) 和「问不出来」一律 `unknown`。把后者当 `gone` 就会凭空重生一个 pane ——
+ *  而重生要换掉整个会话, 代价远大于「这一条晚一点到」: 2026-10-14 实测 7 分钟内重生 3 次,
+ *  每次都是 display-message 超时被当成 pane 死了。 */
+type PaneLiveness = "alive" | "gone" | "unknown";
+const paneLiveness = async (paneId: string): Promise<PaneLiveness> => {
+  if (!paneId) return "gone";
+  const r = await runTmux(["display-message", "-p", "-t", paneId, "#{pane_id}"]);
+  if (r.timedOut || r.code === null) return "unknown";
+  if (r.code === 0) return r.stdout.trim() === paneId ? "alive" : "unknown";
+  return "gone"; // "can't find pane: %N" / "no server running" —— 两条都等于它没了
+};
+
+/** 沿 ps 快照从某个 pid 往下找「会话注册表登记过、进程还活着」的那个 pid。注册表没有
+ *  `tmux` 字段的后端 (codebuddy) 只能这样把 pane 和进程对上: pane_pid 是 shell, CLI 是
+ *  它的子孙。认不出返回 undefined。 */
+const registeredPidUnder = (root: number, livePids: ReadonlySet<number>, kids: ReadonlyMap<number, number[]>): number | undefined => {
+  const stack = [root];
+  const seen = new Set<number>();
+  while (stack.length) {
+    const p = stack.pop() ?? 0;
+    if (!p || seen.has(p)) continue;
+    if (livePids.has(p)) return p;
+    seen.add(p);
+    for (const k of kids.get(p) ?? []) stack.push(k);
+  }
+  return undefined;
+};
+
+const panePidOf = async (paneId: string): Promise<number> => {
+  const r = await runTmux(["display-message", "-p", "-t", paneId, "#{pane_pid}"]);
+  return r.ok ? Number(r.stdout.trim()) || 0 : 0;
+};
+
+/** pane 里有没有活着的 CLI 会话进程。注册表带 `tmux` 字段的后端按 pane 直接认; codebuddy
+ *  不写那个字段, 只能沿 pane 的进程树找到注册表登记过的 pid。
+ *  **它只证明「里面有活的 CLI」, 不证明「里面是哪份转录」** —— codebuddy 的注册行里
+ *  sessionId 是续接链的根, 会话换过 sid 之后不更新 (2026-10-14 实测: pid 84679 报
+ *  3d51b76b, 而那个进程实际在写 01a13ae5)。要认会话得另找权威来源, 别拿这个 sid 用。 */
+const paneHasLiveSession = async (paneId: string, homeDir: string, panePid?: number, ps?: PsSnap): Promise<boolean> => {
+  if (sessionOnPane(homeDir, paneId)) return true;
+  const root = panePid ?? (await panePidOf(paneId));
+  if (!root) return false;
+  const { kids } = ps ?? (await psSnap());
+  return registeredPidUnder(root, liveSessionPids(homeDir), kids) !== undefined;
+};
+
+type PaneProbe = { state: PaneLiveness | "shell" | "session" };
+/** 注入前问 pane 一句话: 还在吗 / 里面还有 AI 会话吗。
+ *  `unknown` 必须由调用方按「不知道」处理 —— 不许当 pane 死了去重生。 */
+const probePane = async (paneId: string, jsonlPath: string): Promise<PaneProbe> => {
+  const live = await paneLiveness(paneId);
+  if (live !== "alive") return { state: live };
+  if (await paneHasLiveSession(paneId, backendForPath(jsonlPath).homeDir)) return { state: "session" };
+  // 认不出会话进程 (注册表缺席 / 进程不在 tmux 里记的行) 不能被当成会话不在: 只有前台确实
+  // 退回 shell 才判否。而这一次探问自己也可能是超时 —— 那仍旧只能算 unknown。
+  const cmd = await runTmux(["display-message", "-p", "-t", paneId, "#{pane_current_command}"]);
+  if (cmd.timedOut || !cmd.ok) return { state: "unknown" };
+  return SHELL_RE.test(cmd.stdout.trim()) ? { state: "shell" } : { state: "session" };
+};
+
+/** 注册表没有 tmux 字段的后端 (codebuddy): pane 里住着谁只能沿 pane 的进程树往下找
+ *  注册表登记过、还活着的 pid。冷 pane 的注册行晚于进程出生, `waitMs` 内轮询。 */
+const hostPidOnPane = async (target: string, homeDir: string, waitMs: number): Promise<number | undefined> => {
+  const deadline = Date.now() + waitMs;
+  const probe = async (): Promise<number | undefined> => {
+    const r = await runTmux(["display-message", "-p", "-t", target, "#{pane_pid}"]);
+    const root = r.ok ? Number(r.stdout.trim()) : 0;
+    if (!root) return undefined;
+    const reg = liveSessionPids(homeDir);
+    const { kids } = await psSnap();
+    return registeredPidUnder(root, reg, kids);
+  };
+  const poll = async (): Promise<number | undefined> => {
+    const pid = await probe();
+    if (pid || Date.now() >= deadline) return pid;
+    await sleep(300);
+    return poll();
+  };
+  return poll();
+};
 
 const SESSION_READY_TIMEOUT_MS = 15_000;
 /** 冷 pane 等注册表报 idle (会话建好、输入框等人); 热 pane 只核一次会话还在 —— 忙也照贴,
@@ -1692,10 +1769,18 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
   // 这一步只读注册表, 会话都不在时也就不必去 capture pane 找对话框了。
   const gate = await awaitSession(target, backend.homeDir, freshSpawn, log);
   if (!gate.ok) return gate;
+  const tmuxRegistry = hasRegistry(backend.homeDir);
+  const eventNeedsIdentity = !!eventId && !text.trimStart().startsWith("/");
+  // codebuddy 的注册行有 pid/sessionId 却没有 tmux, 而且 sessionId 在会话内换 sid
+  // (handoff / 续接) 后不更新 —— 只能证明「pane 里住着一个活的 CLI 进程」, 收件的
+  // 会话以 mirror 自己绑定的那份为准 (expectedSessionId / jsonlPath)。
+  const hostPid = !tmuxRegistry && backendName !== "codex" && eventNeedsIdentity
+    ? await hostPidOnPane(target, backend.homeDir, freshSpawn ? SESSION_READY_TIMEOUT_MS : 0)
+    : undefined;
   const paneIdentity = (): InputIdentity | undefined => {
     // A readable live-session registry is the physical pane authority. Codex's
     // SessionStart map is the fallback on installations without that registry.
-    if (hasRegistry(backend.homeDir)) {
+    if (tmuxRegistry) {
       const session = sessionOnPane(backend.homeDir, target);
       return session ? { sessionId: session.sessionId, transcript: join(dirname(jsonlPath), `${session.sessionId}.jsonl`) } : undefined;
     }
@@ -1703,13 +1788,16 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
       const session = codexSessionForPane(target);
       return session ? { sessionId: session.sessionId, transcript: session.jsonlPath } : undefined;
     }
+    if (hostPid && sessionOfPid(backend.homeDir, hostPid)) {
+      const sessionId = expectedSessionId || basename(jsonlPath, ".jsonl");
+      return { sessionId, transcript: jsonlPath };
+    }
     return undefined;
   };
-  const eventNeedsIdentity = !!eventId && !text.trimStart().startsWith("/");
   const observedIdentity = paneIdentity();
   if (eventNeedsIdentity && (!observedIdentity?.sessionId || !observedIdentity.transcript)) {
     const reason = backendName === "codebuddy"
-      ? "CodeBuddy has no readable pane session registry; refusing event injection before input exposure because the receiving session/transcript cannot be verified"
+      ? "CodeBuddy pane hosts no live registered CLI process; refusing event injection before input exposure"
       : backendName === "codex"
         ? "Codex SessionStart pane identity is unavailable; refusing event injection before input exposure"
         : "Claude pane session identity is unavailable; refusing event injection before input exposure because the receiving session/transcript cannot be verified";
@@ -4894,16 +4982,15 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // the pane is alive — and tmux pane ids monotonically increment within a
   // server lifetime, so a freed id will not be silently reused. We don't need
   // the session name, which matters because some attaches carry only a pane id.
-  const tmuxPaneAlive = async (paneId: string): Promise<boolean> => {
-    if (!paneId) return false;
-    const r = await runTmux(["display-message", "-p", "-t", paneId, "#{pane_id}"]);
-    return r.code === 0 && r.stdout.trim() === paneId;
-  };
-  // 注入前的存活判定要多问一句「里面还有 AI 会话吗」: pane 在、claude 却退回了 shell,
+  // 布尔形式留给只问「这个 pane 还在不在」的调用点 (submitPane / 忙闲判定): 三态里的
+  // `unknown` 仍旧是 false —— 它们不动会话, 判错没有副作用。决定要不要重生 pane 的地方
+  // 必须自己看 `probePane` 的三态, 见 injectText / inject job。
+  const tmuxPaneAlive = async (paneId: string): Promise<boolean> => (await paneLiveness(paneId)) === "alive";
+  // 注入前的存活判定要多问一句「里面还有 AI 会话吗」: pane 在、CLI 却退回了 shell,
   // 照旧往里贴就是把用户的话当 shell 命令跑。判否即走 respawn (旧 pane 不杀 —— 它可能是
   // 用户自己的终端, 经 switch 绑进来的)。
   const paneUsable = async (paneId: string, jsonlPath: string): Promise<boolean> =>
-    (await tmuxPaneAlive(paneId)) && (await paneHostsSession(paneId, backendForPath(jsonlPath).homeDir));
+    (await probePane(paneId, jsonlPath)).state === "session";
 
   // Re-attach a stored binding for `principal`. Returns the resulting state, or
   // undefined if the on-disk transcript is gone (in which case the entry is
@@ -6950,13 +7037,20 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const generation = a.injectGen ?? 0;
       const permitted = (): boolean => permission() && byTarget.get(target) === a && a.sessionId === sid && (a.injectGen ?? 0) === generation;
       const probedPane = a.tmuxPane;
-      const paneAlive = a.tmuxPane ? await paneUsable(a.tmuxPane, a.jsonlPath) : false;
+      const probe = a.tmuxPane ? await probePane(a.tmuxPane, a.jsonlPath) : ({ state: "gone" } as const);
       if (!permitted() || a.tmuxPane !== probedPane) return denied;
+      // tmux 没给出定论 (server 卡住时 display-message 会超时): 既不能贴 (不知道往哪贴),
+      // 也不能重生 —— pane 很可能好端端的。按「稍后重发」交回去: 超时是分钟级的偶发, 重发
+      // 几乎总能落地, 而重生的代价是这个会话被整个换掉。
+      if (probe.state === "unknown") {
+        log.warn({ target, sessionId: sid, pane: a.tmuxPane }, "injectText: pane 探活无定论 (tmux 无响应), 不重生");
+        return { ok: false, retryable: true, reason: "tmux 探活无定论 (server 可能卡住), 未重生 pane, 稍后重发即可" };
+      }
       // 同 dispatch: 只有刚生 / 刚重生的 pane 才要冷启动的宽限 —— 对一个热着、正忙的 pane 贴 `now`
       // 也按冷启动等 idle 至多 15s, 「不等不打断」就成了「晚 15–20s 才进」(handoff-owe 的竞态即此)。
       let fresh = a.justSpawned === true;
-      if (!paneAlive) {
-        log.warn({ target, sessionId: sid, oldPane: a.tmuxPane }, "injectText: pane not alive, respawning");
+      if (probe.state !== "session") {
+        log.warn({ target, sessionId: sid, oldPane: a.tmuxPane, why: probe.state }, "injectText: pane not alive, respawning");
         // Same resume-fork hazard as dispatch: snapshot before spawn, re-bind
         // onto the forked jsonl once it appears (EOF offset — fork is seeded).
         const resumeBaseline = listJsonls(dirname(a.jsonlPath));
@@ -7475,11 +7569,18 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // First step of the job and the historical hang point — log BEFORE the
         // probe so a stall is attributable to it next time, not invisible.
         log.info({ target: a.target, sessionId: sid, pane: a.tmuxPane, gen: myGen }, "inject job start");
-        const paneAlive = a.tmuxPane ? await paneUsable(a.tmuxPane, a.jsonlPath) : false;
+        const probe = a.tmuxPane ? await probePane(a.tmuxPane, a.jsonlPath) : ({ state: "gone" } as const);
         let freshSpawn = a.justSpawned === true;
         a.justSpawned = false;
-        if (!paneAlive) {
-          log.warn({ target: a.target, sessionId: sid, oldPane: a.tmuxPane, oldSession: a.tmuxSession }, "mirror: no live tmux pane, respawning");
+        // tmux 没给出定论: 不重生 (同 injectText)。turn 已经开了头 (气泡可能已挂), 所以
+        // 报一个可重试的失败让调用方收口 —— 比换掉整个会话温和得多。
+        if (probe.state === "unknown") {
+          log.warn({ target: a.target, sessionId: sid, pane: a.tmuxPane }, "mirror: pane 探活无定论 (tmux 无响应), 不重生");
+          onSubmitted?.({ ok: false, retryable: true, reason: "tmux 探活无定论 (server 可能卡住), 未重生 pane" });
+          return;
+        }
+        if (probe.state !== "session") {
+          log.warn({ target: a.target, sessionId: sid, oldPane: a.tmuxPane, oldSession: a.tmuxSession, why: probe.state }, "mirror: no live tmux pane, respawning");
           // Interactive `claude --resume <sid>` does NOT keep appending to the
           // same <sid>.jsonl — it FORKS to a fresh <newSid>.jsonl seeded with a
           // copy of the transcript. Our tail stays bound to the OLD, now-frozen

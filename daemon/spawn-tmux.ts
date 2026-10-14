@@ -56,6 +56,10 @@ interface ExecResult {
   stdout: string;
   stderr: string;
   code: number | null;
+  /** 超时被 SIGKILL (server 卡住), 或根本没起得来。绝大多数调用点只关心 `ok`, 但探活
+   *  那类「失败 = 对象不存在」的调用必须把它和真正的失败分开: tmux 卡住一次就判 pane
+   *  死掉, 代价是整个会话被重生一遍 (2026-10-14 实测: 7 分钟重生 3 次)。 */
+  timedOut?: boolean;
 }
 
 /** Hard ceiling for ANY tmux subcommand. A wedged tmux server used to hang the
@@ -114,17 +118,18 @@ export const runTmux = (args: string[], opts: RunTmuxOpts = {}): Promise<ExecRes
     };
     // SIGKILL, not SIGTERM: a tmux client blocked on a wedged server ignores
     // TERM. Resolving as a normal failure lets every existing `if (!r.ok)`
-    // branch handle it — no call site needs to know about timeouts.
+    // branch handle it — `timedOut` is there for the probe-style call sites that
+    // must tell "server 卡住, 问不出来" apart from "对象真的不存在" (probePane).
     if (timeoutMs > 0) {
       timer = setTimeout(() => {
         proc.kill("SIGKILL");
         timeoutReporter?.({ args, timeoutMs });
-        finish({ ok: false, stdout: out, stderr: `tmux timeout after ${timeoutMs}ms: ${args.slice(0, 3).join(" ")}`, code: null });
+        finish({ ok: false, stdout: out, stderr: `tmux timeout after ${timeoutMs}ms: ${args.slice(0, 3).join(" ")}`, code: null, timedOut: true });
       }, timeoutMs);
     }
     proc.stdout?.on("data", (c: Buffer) => (out += c.toString("utf8")));
     proc.stderr?.on("data", (c: Buffer) => (err += c.toString("utf8")));
-    proc.on("error", (e) => finish({ ok: false, stdout: "", stderr: e.message, code: null }));
+    proc.on("error", (e) => finish({ ok: false, stdout: "", stderr: e.message, code: null, timedOut: true }));
     proc.on("close", (code) => finish({ ok: code === 0 && !inputError, stdout: out, stderr: err || inputError, code }));
     // An old tmux can reject -b before reading a large stdin. Its EPIPE must
     // not crash the daemon or hide stderr (the buffer fallback needs that error).
