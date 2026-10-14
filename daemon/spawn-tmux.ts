@@ -67,6 +67,9 @@ interface ExecResult {
 const DETACHED_COLS = 200;
 const DETACHED_ROWS = 60;
 
+// stderr signatures of a transient server-side fork failure (ENOMEM/EAGAIN).
+const TRANSIENT_FORK_RE = /Cannot allocate memory|Resource temporarily unavailable/;
+
 export const TMUX_TIMEOUT_MS = ((): number => {
   const raw = Number(process.env.WEZARD_TMUX_TIMEOUT_MS);
   return Number.isFinite(raw) && raw >= 0 ? raw : 10_000;
@@ -559,13 +562,26 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
   const openPane = async (): Promise<{ pane: string } | { reason: string }> => {
     const has = await runTmux(["has-session", "-t", tmuxName]);
     if (has.code === 0) await runTmux(["set-option", "-t", tmuxName, "default-size", `${DETACHED_COLS}x${DETACHED_ROWS}`]);
-    const created = has.code === 0
-      // `${tmuxName}:` (trailing colon) forces session-only resolution → next free
-      // window index. Bare `-t wezard` is ambiguous: if a *window* is also named
-      // `wezard`, tmux matches it and tries to reuse its index → "index N in use".
-      ? await runTmux(["new-window", "-d", "-t", `${tmuxName}:`, "-n", winName, ...cwdArg, ...paneEnv, "-P", "-F", "#{pane_id}"])
-      : await runTmux(["new-session", "-d", "-s", tmuxName, "-n", winName, ...sizeArg, ...cwdArg, ...paneEnv, "-P", "-F", "#{pane_id}"]);
-    if (!created.ok) return { reason: `tmux ${has.code === 0 ? "new-window" : "new-session"} failed: ${created.stderr.trim() || created.code}` };
+    // `${tmuxName}:` (trailing colon) forces session-only resolution → next free
+    // window index. Bare `-t wezard` is ambiguous: if a *window* is also named
+    // `wezard`, tmux matches it and tries to reuse its index → "index N in use".
+    const create = () => has.code === 0
+      ? runTmux(["new-window", "-d", "-t", `${tmuxName}:`, "-n", winName, ...cwdArg, ...paneEnv, "-P", "-F", "#{pane_id}"])
+      : runTmux(["new-session", "-d", "-s", tmuxName, "-n", winName, ...sizeArg, ...cwdArg, ...paneEnv, "-P", "-F", "#{pane_id}"]);
+    let created = await create();
+    // Server-side fork failing ENOMEM/EAGAIN is transient on swap-less macOS
+    // (a momentary pressure spike, e.g. >20 CLI panes, fails fork outright) —
+    // retry briefly before giving up.
+    for (let retry = 0; !created.ok && retry < 2 && TRANSIENT_FORK_RE.test(created.stderr); retry++) {
+      await sleep(500 * (retry + 1));
+      created = await create();
+    }
+    // Every caller just returns this reason — without the warn a failed spawn
+    // leaves zero trace in daemon.log (the 2026-10-14 ENOMEM was unfindable).
+    if (!created.ok) {
+      log.warn({ tmuxName, winName, stderr: created.stderr.trim(), code: created.code }, "spawn-tmux: pane creation failed");
+      return { reason: `tmux ${has.code === 0 ? "new-window" : "new-session"} failed: ${created.stderr.trim() || created.code}` };
+    }
     const pane = created.stdout.split("\n").map((s) => s.trim()).filter(Boolean)[0] ?? "";
     if (!pane) return { reason: "tmux returned no pane id" };
     log.info({ tmuxName, winName, tmuxPane: pane, cwd, sessionId, cli: backend.name, reused: has.code === 0 }, "spawn-tmux: pane created");
