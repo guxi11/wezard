@@ -7339,8 +7339,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         }
         return;
       }
-      if (eventId && a.tmuxPane && await tmuxPaneAlive(a.tmuxPane) && !(await idleNow(principal))) {
-        onSubmitted?.({ ok: false, retryable: true, reason: "target became busy before opening the human turn" });
+      // 人说的普通消息不再问「你现在忙不忙」: 忙就贴进去, 顺序交给 CLI 自己的输入队列 ——
+      // 贴进运行中的一轮会由 startBriefTurn 记成 queued 轮, 等它在 transcript 里露面再 bindLine,
+      // 终句照样归到这条 event。只有 slash 命令仍旧等它闲: /clear、/model 这些要改会话状态,
+      // 落在运行中的一轮上会跟 armMigration / 原生 picker 抢 pane。(modal 那一层守卫在
+      // injectViaTmux 里照旧管着: 停在确认框上时既不贴也不吞。)
+      const slashCmd = /^\/[a-z]/i.test(text.trim());
+      if (eventId && slashCmd && a.tmuxPane && await tmuxPaneAlive(a.tmuxPane) && !(await idleNow(principal))) {
+        onSubmitted?.({ ok: false, retryable: true, reason: "target became busy before opening the slash command turn" });
         return;
       }
       // `/clear` resets to an empty session — nothing in the cache to keep warm,
@@ -7370,7 +7376,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const isModelSwitch = /^\/model\s+\S/.test(text.trim());
       // 任意 slash 命令 (/context, /cost, /status…): 产物走 skill_output standalone,
       // 详情链接是纯噪声 —— brief 起 turn 时不推链接。
-      const isSlash = /^\/[a-z]/i.test(text.trim());
+      const isSlash = slashCmd;
       // codebuddy 没有可用的剪贴板图片通道 (tmux 里 C-v 会被它自己的
       // syncTmuxToSystemClipboard 冲掉, 见 injectViaTmux 分流注释) —— 图片只能以
       // @<path> 文本进会话。既然如此, 问话 / 印章 / 回显去重 / 静默分叉跟随都按这个
@@ -7542,16 +7548,25 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // 用户行有 isOwnInject 过滤 —— 提前解除不会泄漏脏数据。
         a.muteUntilInject = false;
         const injectPane = a.tmuxPane;
+        // 人话不再等 pane 闲 (§人话直入): `requireIdle` 在这一层只剩一个作用 —— 必须有 pane,
+        // 不许退化成 spawn-mode (`--resume -p`) 的无窗口注入。忙闲交给 CLI 自己的输入队列:
+        // 贴进运行中的一轮会被记成 queued 轮, 等它在 transcript 露面再接上这条 event。
+        // slash 命令要等闲, 那一道在上面 (dispatch 开头) 已经拦过了。
         const r = await inject({
           text: effText, images: effImages, cfg, log: log.child({ principal, sessionId: sid }),
           sessionId: sid, eventId, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn,
-          requireIdle: eventId ? () => idleNow(a.target) : undefined,
+          requireIdle: eventId ? () => true : undefined,
           guard: (phase, identity) => byTarget.get(a.target) === a && a.tmuxPane === injectPane && (a.injectGen ?? 0) === myGen && (!guard || guard(phase, identity)),
         });
         onSubmitted?.(r);
         if (!r.ok) {
+          // retryable = 一个字都没进输入框, 消息事件层会稍后重投 —— 不是失败, 别报 ✗
+          // (每次退避重试都会走到这里, 报 ✗ 就是一串假警报)。
+          const note = r.retryable && eventId
+            ? `[mirror] ⏳ 暂未送达, 稍后自动重投 (${r.reason ?? "deferred"})`
+            : `[mirror] ✗ ${r.reason ?? "failed"}`;
           if (s) {
-            s.acc = s.acc ? `${s.acc}\n\n[mirror] ✗ ${r.reason ?? "failed"}` : `[mirror] ✗ ${r.reason ?? "failed"}`;
+            s.acc = s.acc ? `${s.acc}\n\n${note}` : note;
             await finalizeStream(a, s);
           } else if (armMigration) {
             // /clear path has no live stream — surface failure as a one-shot
@@ -7563,7 +7578,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
             // ahead of inject completion — in that case just send the error.
             if (a.outbound?.kind === "deferred") clearTimeout(a.outbound.timer);
             a.outbound = undefined;
-            sendStandalone(a, `[mirror] ✗ ${r.reason ?? "failed"}`);
+            sendStandalone(a, note);
           }
           return;
         }

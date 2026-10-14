@@ -315,26 +315,34 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     }
     finally { active.delete(resource); targets.delete(db.get(id)!.target); void pump(); }
   };
-  const injectable = (e: MessageEvent): boolean => {
+  /** 人说的这一句不受 daemon 的顺序管辖 (§9.1): 只要同一只 pane 上没有正在贴的那一次
+   *  (物理互斥), 就贴进去 —— 排在它前面的回执、正在跑的那一轮都不挡它, 顺序交给 backend CLI
+   *  自己的输入队列 (贴进运行中的一轮会被记成 queued 轮, 终句照样归到这条 event)。多笔 event
+   *  因此天然并行: 人话补一句还是新起一件, 由读它的 LLM 判。回执 (peer) 仍按老规矩排 ——
+   *  它要的是结果归属, 不是语义。 */
+  const direct = (e: MessageEvent): boolean => !!e.payload.human;
+  /** 同一资源上, 排在 `e` 前面且此刻真挡得住它的那一行; 没有 = 它可以贴了。
+   *  `retryAt` 未到的行不算挡住 —— 它在退避, 不该把整条 pane 的后来者一起钉住: 队头一次
+   *  探测超时 (5s) 就能把一个 target 静音十几分钟, 人话排在后面时是纯损失。
+   *  injectable 与 blocker 共用这一条 —— 判据分家过一次, 表现是「对外说没人挡着, 实际谁也进不去」。 */
+  const pinOf = (e: MessageEvent): MessageEvent | undefined => {
     const rows = Object.values(db.all()).sort((a, b) => a.at - b.at);
-    const older = new Set(rows.slice(0, rows.findIndex((x) => x.id === e.id)).map((x) => x.id));
     const resource = io.resource(e.target);
-    return !stopped && e.execution === "queued" && !e.canceled && e.deadline > Date.now() && io.valid(e)
-      && !targets.has(e.target) && !active.has(resource) && active.size < 4
-      && !rows.some((x) => x.id !== e.id && resourceOf(x) === resource
-        && (x.execution === "dispatching" || (x.execution === "uncertain" && !x.releasedAt) || (e.priority === "normal"
-          && (x.execution === "awaiting-result" || (x.execution === "queued" && older.has(x.id))))));
+    const older = new Set(rows.slice(0, rows.findIndex((x) => x.id === e.id)).map((x) => x.id));
+    return rows.find((x) => x.id !== e.id && resourceOf(x) === resource
+      && (x.execution === "dispatching"
+        || (!direct(e) && ((x.execution === "uncertain" && !x.releasedAt)
+          || (e.priority === "normal" && (x.execution === "awaiting-result"
+            || (x.execution === "queued" && (x.retryAt ?? 0) <= Date.now() && older.has(x.id))))))));
   };
+  const injectable = (e: MessageEvent): boolean =>
+    !stopped && e.execution === "queued" && !e.canceled && e.deadline > Date.now() && io.valid(e)
+    && !targets.has(e.target) && !active.has(io.resource(e.target)) && active.size < 4
+    && pinOf(e) === undefined;
   const blocker = (id: string): { id: string; execution: MessageEvent["execution"]; reason: string } | undefined => {
     const e = db.get(id);
     if (!e || e.execution !== "queued") return undefined;
-    const rows = Object.values(db.all()).sort((a, b) => a.at - b.at);
-    const resource = io.resource(e.target);
-    const prior = rows.slice(0, rows.findIndex((x) => x.id === id));
-    const hit = rows.find((x) => x.id !== id && resourceOf(x) === resource
-      && (x.execution === "dispatching" || (x.execution === "uncertain" && !x.releasedAt)
-        || (e.priority === "normal" && (x.execution === "awaiting-result"
-          || (x.execution === "queued" && prior.some((p) => p.id === x.id))))));
+    const hit = pinOf(e);
     return hit ? { id: hit.id, execution: hit.execution,
       reason: hit.reason ?? (hit.execution === "uncertain" ? "旧事件投递结果不确定，需对账" : `等待较早事件（${hit.execution}）`) } : undefined;
   };

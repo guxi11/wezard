@@ -277,7 +277,11 @@ const main = async (): Promise<void> => {
           channel: e.channel, revision: finalId(e.id, e.channel, body), body, chunks: bridge.formatFinal(e.target, e.turn || e.id, e.channel, body) });
       }
     },
-    ready: async (e) => !handingOff(e.target) && (e.payload.peer ? !!(await peerEvents?.ready(e)) : !bridge.hasMirrorTarget(e.target) || await bridge.idleNow(e.target) || !(await bridge.paneLive(e.target))),
+    // 人话 (非 peer) 不再问「pane 闲不闲」: 忙就贴进去, 顺序交给 backend CLI 自己的输入队列
+    // (贴进运行中的一轮记成 queued 轮, 终句照样归到这条 event —— 见 brief 的 seal/bindLine)。
+    // 这一句曾是要 idleNow 的, 也就是那个反复 5s 超时的探测源头: 一超时就退避, 把同一 target
+    // 后面排着的每一笔 (含后到的人话) 一起钉住十几分钟。交接期间照旧等 —— 那几秒 pane 真是死的。
+    ready: async (e) => !handingOff(e.target) && (e.payload.peer ? !!(await peerEvents?.ready(e)) : true),
     inject: async (e, boundary) => {
       if (e.payload.peer) return peerEvents!.inject(e, boundary);
       if (!bridge.hasMirrorTarget(e.target)) {
