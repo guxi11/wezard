@@ -239,6 +239,7 @@ const main = async (): Promise<void> => {
   const events = createMessageEvents(join(cfg.daemon.stateDir, "message-events.json"), {
     resource: (target) => bridge.sessionInfo(target)?.tmuxPane || target,
     transcript: (target) => bridge.sessionInfo(target)?.jsonlPath,
+    sessionId: (target) => bridge.sessionInfo(target)?.sessionId,
     valid: (e) => e.payload.peer ? !!peerEvents?.valid(e) : true,
     accepted: (e) => { if (e.payload.peer) peerEvents?.accepted(e); },
     committed: (e) => { if (e.payload.peer) peerEvents?.committed(e); },
@@ -267,7 +268,10 @@ const main = async (): Promise<void> => {
       return outcome ?? { ok: false, retryable: events.get(e.id)?.exposure === "none", uncertain: events.get(e.id)?.exposure !== "none", reason: "dispatch ended without a submission acknowledgement" };
     },
     evidence: async (e) => {
-      if (e.canceled && await bridge.idleNow(e.target)) events.released(e.id);
+      const info = bridge.sessionInfo(e.target);
+      const sameSession = e.sessionId ? e.sessionId === info?.sessionId
+        : !e.transcript || e.transcript === info?.jsonlPath;
+      if (e.canceled && sameSession && await bridge.idleNow(e.target)) events.released(e.id);
       const paths = [...new Set([bridge.sessionInfo(e.target)?.jsonlPath, e.transcript].filter((p): p is string => !!p))];
       for (const path of paths) {
         const turns = turnsSince(expandHome(path), e.at - 60_000);
@@ -276,8 +280,10 @@ const main = async (): Promise<void> => {
         const next = turns.findIndex((t, i) => i > start && t.role === "user" && !t.queued);
         const replies = turns.slice(start + 1, next < 0 ? undefined : next).filter((t) => t.role === "assistant");
         const last = replies.at(-1);
-        const ended = next >= 0 || await bridge.idleNow(e.target);
-        return { consumed: true, interjected: !!turns[start]!.queued, ...(ended && last && !last.mid && !last.apiError ? { body: last.text, revision: finalId(e.id, e.channel, last.text) } : {}) };
+        const ended = next >= 0 || (last && !last.mid && !last.apiError) || (sameSession && await bridge.idleNow(e.target));
+        return { consumed: true, interjected: !!turns[start]!.queued,
+          ...(next >= 0 ? { closedAt: turns[next]!.ms ?? Date.now() } : {}),
+          ...(ended && last && !last.mid && !last.apiError ? { body: last.text, revision: finalId(e.id, e.channel, last.text) } : {}) };
       }
       return { consumed: false };
     },
@@ -329,7 +335,11 @@ const main = async (): Promise<void> => {
     events.accept({ id, identity: a.identity, originalAt: a.originalAt, target: a.principal, speaker: a.speaker!, channel: a.channel!,
       asker: { who: a.speaker!, chat: a.channel! }, priority: "normal", deadline: Date.now() + 12 * 3600_000,
       payload: { text: a.text, human: a } });
-    await ws.client.replyStream(a.frame, a.streamId, withTagHeader(a.principal, "已排队"), false).catch(() => undefined);
+    const blocked = events.blocker(id);
+    const failure = events.get(id)?.reason;
+    const receipt = blocked ? `已排队：${blocked.reason}（事件 ${blocked.id}）`
+      : failure ? `已排队：等待重试；${failure}` : "已排队";
+    await ws.client.replyStream(a.frame, a.streamId, withTagHeader(a.principal, receipt), false).catch(() => undefined);
   } }, sourcePath, (w, c) => guardCharter(w, c));
   // approval click → finalize 当前 liveStream, 后续 tool/text 落到 standalone。
   // 规则 2: 用户点击授权那一刻就是"上一段对话"的边界, 截断 stream 让授权后的
@@ -478,6 +488,11 @@ const main = async (): Promise<void> => {
       const body = await readBody(req) as { id?: string };
       json(res, 200, await events.reconcile(String(body.id ?? "")) ?? { error: "unknown event" });
     });
+    http.register("POST /message-events/release", guarded(async (req, res) => {
+      const body = await readBody(req) as { id?: string; reason?: string };
+      const result = events.release(String(body.id ?? ""), String(body.reason ?? ""));
+      json(res, result.ok ? 200 : 409, result);
+    }));
     http.register("GET /mirror/status", (_req, res) => json(res, 200, m.status()));
     // Manual auto-spawn trigger — used by `wezard init` to materialize a
     // tmux+claude pane immediately after claim, instead of waiting for the

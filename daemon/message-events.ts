@@ -52,6 +52,13 @@ export interface MessageEvent extends MessageInput {
   reason?: string;
   canceled?: boolean;
   transcript?: string;
+  sessionId?: string;
+  supersededBy?: string;
+  turnClosedAt?: number;
+  releasedAt?: number;
+  releaseReason?: string;
+  releaseSource?: "manual" | "deadline";
+  probeAttempts?: number;
   turn?: string;
   finalized?: boolean;
   interjected?: boolean;
@@ -78,10 +85,11 @@ export interface FinalDelivery extends DeliveryInput {
   parts: Array<{ state: "pending" | "sending" | "waiting-ack" | "delivered" | "uncertain" | "failed"; attempts: number; reason?: string; ack?: string; retryAt?: number }>;
 }
 export interface EventTransport { ok: boolean; uncertain?: boolean; retryable?: boolean; reason?: string }
-export interface EventEvidence { consumed: boolean; interjected?: boolean; body?: string; revision?: string; turn?: string }
+export interface EventEvidence { consumed: boolean; interjected?: boolean; body?: string; revision?: string; turn?: string; closedAt?: number }
 export interface MessageAdapters {
   resource: (target: string) => string;
   transcript: (target: string) => string | undefined;
+  sessionId: (target: string) => string | undefined;
   ready: (event: MessageEvent) => Promise<boolean>;
   valid: (event: MessageEvent) => boolean;
   accepted: (event: MessageEvent) => void;
@@ -124,31 +132,39 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
   const active = new Set<string>();
   const targets = new Set<string>();
   const delivering = new Set<string>();
-  const probing = new Set<string>();
+  const probing = new Map<string, symbol>();
   let deliveryCursor = 0;
   let probeCursor = 0;
   let probeCount = 0;
-  const probeTargets = new Set<string>();
+  const probeTargets = new Map<string, symbol>();
   // An exposed event belongs to the session that received it, not a replacement
   // pane now bound to the same wizard. Keep its uncertain history for reconciliation.
   const resourceOf = (e: MessageEvent): string => {
     const transcript = io.transcript(e.target);
-    return e.exposure !== "none" && e.transcript && transcript && e.transcript !== transcript
-      ? `transcript:${e.transcript}` : io.resource(e.target);
+    const sessionId = io.sessionId(e.target);
+    if (e.exposure === "none") return io.resource(e.target);
+    if (e.sessionId) return e.sessionId === sessionId ? io.resource(e.target) : `session:${e.sessionId}`;
+    if (e.transcript) return e.transcript === transcript ? io.resource(e.target) : `transcript:${e.transcript}`;
+    return io.resource(e.target);
   };
   const bounded = <T>(id: string, read: () => Promise<T>): Promise<T> => {
     const e = db.get(id);
     const target = e ? resourceOf(e) : id;
     if (probing.has(id) || probeTargets.has(target) || probeCount >= 16) return Promise.reject(new Error("probe already running or probe capacity occupied"));
-    probing.add(id);
-    probeTargets.add(target);
+    const token = Symbol(id);
+    probing.set(id, token);
+    probeTargets.set(target, token);
     probeCount++;
+    const release = (): void => {
+      if (probing.get(id) === token) probing.delete(id);
+      if (probeTargets.get(target) === token) probeTargets.delete(target);
+    };
     let timer: ReturnType<typeof setTimeout>;
     const work = Promise.resolve().then(read);
-    void work.finally(() => { probing.delete(id); probeTargets.delete(target); }).catch(() => undefined);
+    void work.finally(release).catch(() => undefined);
     return Promise.race([work, new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error("pane probe exceeded 5s; no transport attempted")), 5000);
-    })]).finally(() => { clearTimeout(timer); probeCount--; });
+    })]).finally(() => { clearTimeout(timer); probeCount--; release(); });
   };
   const patch = (id: string, p: Partial<MessageEvent>): MessageEvent => db.set(id, { ...db.get(id)!, ...p });
   const part = (id: string, n: number, p: Partial<FinalDelivery["parts"][number]>): void => {
@@ -227,7 +243,13 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     if (!evidence.consumed) return;
     const current = db.get(e.id)!;
     if (["complete", "canceled"].includes(current.execution)) return;
-    if (current.exposure !== "consumed") patch(e.id, { exposure: "consumed", interjected: evidence.interjected, execution: current.canceled ? "uncertain" : "awaiting-result", reason: current.canceled ? current.reason : undefined, turn: evidence.turn ?? current.turn });
+    if (current.exposure !== "consumed" || (evidence.closedAt && !current.turnClosedAt)) patch(e.id, {
+      exposure: "consumed", interjected: evidence.interjected,
+      execution: current.canceled || (evidence.closedAt && !evidence.body) ? "uncertain" : "awaiting-result",
+      reason: current.canceled ? current.reason : evidence.closedAt && !evidence.body
+        ? "input turn closed without a final assistant answer; delivery remains uncertain and will not be retried" : undefined,
+      ...(evidence.closedAt ? { turnClosedAt: evidence.closedAt } : {}), turn: evidence.turn ?? current.turn,
+    });
     if (!current.canceled) io.committed(db.get(e.id)!);
     if (evidence.body !== undefined && evidence.revision) {
       result(e.id, evidence.body, evidence.revision, evidence.turn);
@@ -246,7 +268,8 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
         const current = db.get(id)!;
         if (stopped || current.canceled || !io.valid(current)) return false;
         if (current.exposure !== "none" && current.transcript && current.transcript !== io.transcript(e.target)) return false;
-        if (phase) patch(id, { exposure: "possible", transcript: io.transcript(e.target) ?? current.transcript });
+        if (phase) patch(id, { exposure: "possible", sessionId: io.sessionId(e.target) ?? current.sessionId,
+          transcript: io.transcript(e.target) ?? current.transcript });
         return true;
       };
       let r: EventTransport;
@@ -273,8 +296,34 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     return !stopped && e.execution === "queued" && !e.canceled && e.deadline > Date.now() && io.valid(e)
       && !targets.has(e.target) && !active.has(resource) && active.size < 4
       && !rows.some((x) => x.id !== e.id && resourceOf(x) === resource
-        && (["dispatching", "uncertain"].includes(x.execution) || (e.priority === "normal"
+        && (x.execution === "dispatching" || (x.execution === "uncertain" && !x.releasedAt) || (e.priority === "normal"
           && (x.execution === "awaiting-result" || (x.execution === "queued" && older.has(x.id))))));
+  };
+  const blocker = (id: string): { id: string; execution: MessageEvent["execution"]; reason: string } | undefined => {
+    const e = db.get(id);
+    if (!e || e.execution !== "queued") return undefined;
+    const rows = Object.values(db.all()).sort((a, b) => a.at - b.at);
+    const resource = io.resource(e.target);
+    const prior = rows.slice(0, rows.findIndex((x) => x.id === id));
+    const hit = rows.find((x) => x.id !== id && resourceOf(x) === resource
+      && (x.execution === "dispatching" || (x.execution === "uncertain" && !x.releasedAt)
+        || (e.priority === "normal" && (x.execution === "awaiting-result"
+          || (x.execution === "queued" && prior.some((p) => p.id === x.id))))));
+    return hit ? { id: hit.id, execution: hit.execution,
+      reason: hit.reason ?? (hit.execution === "uncertain" ? "旧事件投递结果不确定，需对账" : `等待较早事件（${hit.execution}）`) } : undefined;
+  };
+  const release = (id: string, reason: string): { ok: boolean; event?: MessageEvent; reason?: string } => {
+    const e = db.get(id);
+    const note = reason.trim().slice(0, 500);
+    if (!e) return { ok: false, reason: "unknown event" };
+    if (!note) return { ok: false, reason: "a reconciliation reason is required" };
+    if (!["awaiting-result", "uncertain"].includes(e.execution) || e.exposure === "none")
+      return { ok: false, reason: `event is not an exposed unresolved delivery (${e.execution}/${e.exposure})` };
+    if (e.releaseSource === "manual") return { ok: false, event: clone(e), reason: "event already manually released" };
+    const next = patch(id, { execution: "uncertain", releasedAt: e.releasedAt ?? Date.now(), releaseSource: "manual", releaseReason: note,
+      reason: `manually released from queue; delivery remains uncertain: ${note}` });
+    void pump();
+    return { ok: true, event: clone(next) };
   };
   async function pump(): Promise<void> {
     if (stopped || pumping) return;
@@ -304,10 +353,32 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
           cancel((x) => x.id === e.id, e.deadline <= Date.now() ? "deadline expired before submission" : "permission withdrawn");
           return;
         }
+        if (["awaiting-result", "uncertain"].includes(e.execution) && e.deadline <= Date.now() && !e.releasedAt) {
+          patch(e.id, { execution: "uncertain", releasedAt: Date.now(),
+            releaseSource: "deadline",
+            releaseReason: "event deadline elapsed; uncertainty retained and automatic retry withheld",
+            reason: `${e.reason ? `${e.reason}; ` : ""}event deadline elapsed; queue released with uncertain delivery` });
+          return;
+        }
         if (probing.has(e.id) || probeTargets.has(resourceOf(e)) || probeCount >= 16) return;
         probeCursor = (rows.findIndex((x) => x.id === e.id) + 1) % Math.max(1, rows.length);
-        const failed = (error: unknown): void => { if (!stopped) patch(e.id, { reason: `${db.get(e.id)?.reason ?? ""}; ${why(error)}` }); io.error(error); };
+        const failed = (error: unknown): void => {
+          const current = db.get(e.id);
+          if (!stopped && current && !["complete", "canceled"].includes(current.execution)) {
+            const probeAttempts = (current.probeAttempts ?? 0) + 1;
+            patch(e.id, { probeAttempts, retryAt: backoff(probeAttempts), reason: `${current.reason ? `${current.reason}; ` : ""}${why(error)}` });
+          }
+          io.error(error);
+        };
         if (["awaiting-result", "uncertain"].includes(e.execution)) {
+          if (e.execution === "uncertain" && (e.turnClosedAt || e.releasedAt)) return;
+          if ((e.retryAt ?? 0) > Date.now()) return;
+          const currentSession = io.sessionId(e.target);
+          const currentTranscript = io.transcript(e.target);
+          const replaced = e.exposure !== "none" && (e.sessionId
+            ? e.sessionId !== currentSession : !!e.transcript && e.transcript !== currentTranscript);
+          if (replaced && !e.supersededBy) patch(e.id, { supersededBy: currentSession ?? (currentTranscript ? `transcript:${currentTranscript}` : "replacement-session-unavailable"),
+            reason: `${e.reason ? `${e.reason}; ` : ""}session replaced; old execution remains uncertain pending transcript reconciliation` });
           void observe(e).then(() => {
             if (!stopped && e.deadline <= Date.now() && db.get(e.id)!.execution === "awaiting-result")
               patch(e.id, { execution: "uncertain", reason: "deadline exceeded; result/physical completion not confirmed" });
@@ -346,7 +417,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     void pump();
   };
   return {
-    accept, pump, resume, result, delivery, cancel,
+    accept, pump, resume, result, delivery, cancel, blocker, release,
     continueResult: (childId: string): MessageEvent | undefined => {
       const child = db.get(childId);
       if (!child?.result || child.canceled) return undefined;
@@ -376,6 +447,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     get: (id: string) => { const e = db.get(id); return e && clone(e); },
     status: () => ({ events: Object.values(db.all()).map((e) => ({ ...clone(e),
       status: e.awaitingContinuation ? "awaiting-result" : e.execution === "dispatching" ? "executing" : e.execution,
+      ...(e.execution === "queued" && blocker(e.id) ? { blockedBy: blocker(e.id) } : {}),
       delivery: (() => { const parts = Object.values(outbox.all()).filter((d) => d.eventId === e.id).flatMap((d) => d.parts);
         return parts.some((p) => p.state === "failed") ? "failed" : parts.some((p) => p.state === "uncertain") ? "uncertain" : parts.some((p) => p.state !== "delivered") ? "delivery-pending" : parts.length ? "delivered" : "none"; })(),
     })), deliveries: Object.values(outbox.all()).map(clone) }),
