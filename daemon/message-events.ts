@@ -95,7 +95,7 @@ export interface MessageAdapters {
   accepted: (event: MessageEvent) => void;
   committed: (event: MessageEvent) => void;
   canceled: (event: MessageEvent) => void;
-  inject: (event: MessageEvent, boundary: (phase?: "paste" | "submit") => boolean) => Promise<EventTransport>;
+  inject: (event: MessageEvent, boundary: (phase?: "paste" | "submit", identity?: { sessionId?: string; transcript?: string }) => boolean) => Promise<EventTransport>;
   evidence: (event: MessageEvent) => Promise<EventEvidence>;
   recovered: (event: MessageEvent) => void;
   format?: (delivery: DeliveryInput) => DeliveryInput;
@@ -264,12 +264,12 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
       if (stopped || e.execution !== "queued" || !io.valid(e)) return;
       io.accepted(e);
       patch(id, { execution: "dispatching", attempts: e.attempts + 1, transcript: io.transcript(e.target) ?? e.transcript });
-      const boundary = (phase?: "paste" | "submit"): boolean => {
+      const boundary = (phase?: "paste" | "submit", identity?: { sessionId?: string; transcript?: string }): boolean => {
         const current = db.get(id)!;
         if (stopped || current.canceled || !io.valid(current)) return false;
         if (current.exposure !== "none" && current.transcript && current.transcript !== io.transcript(e.target)) return false;
-        if (phase) patch(id, { exposure: "possible", sessionId: io.sessionId(e.target) ?? current.sessionId,
-          transcript: io.transcript(e.target) ?? current.transcript });
+        if (phase) patch(id, { exposure: "possible", sessionId: identity?.sessionId,
+          transcript: identity?.transcript ?? io.transcript(e.target) ?? current.transcript });
         return true;
       };
       let r: EventTransport;

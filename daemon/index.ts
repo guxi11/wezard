@@ -238,8 +238,8 @@ const main = async (): Promise<void> => {
   let peerEvents: Pick<MessageAdapters, "accepted" | "committed" | "canceled" | "valid" | "ready" | "inject"> | undefined;
   const events = createMessageEvents(join(cfg.daemon.stateDir, "message-events.json"), {
     resource: (target) => bridge.sessionInfo(target)?.tmuxPane || target,
-    transcript: (target) => bridge.sessionInfo(target)?.jsonlPath,
-    sessionId: (target) => bridge.sessionInfo(target)?.sessionId,
+    transcript: (target) => bridge.inputSessionInfo(target)?.jsonlPath ?? bridge.sessionInfo(target)?.jsonlPath,
+    sessionId: (target) => bridge.inputSessionInfo(target)?.sessionId,
     valid: (e) => e.payload.peer ? !!peerEvents?.valid(e) : true,
     accepted: (e) => { if (e.payload.peer) peerEvents?.accepted(e); },
     committed: (e) => { if (e.payload.peer) peerEvents?.committed(e); },
@@ -264,7 +264,7 @@ const main = async (): Promise<void> => {
       pinFrameBot(e.payload.human!.frame, botOfKey(e.channel));
       await bridge.dispatch({ ...e.payload.human!, eventId: e.id,
         text: e.payload.text + renderReminder({ wezard: "message-event", event: e.id }, []),
-        guard: boundary, onSubmitted: (r) => { outcome = r; } });
+        guard: (phase, identity) => boundary(phase, identity), onSubmitted: (r) => { outcome = r; } });
       return outcome ?? { ok: false, retryable: events.get(e.id)?.exposure === "none", uncertain: events.get(e.id)?.exposure !== "none", reason: "dispatch ended without a submission acknowledgement" };
     },
     evidence: async (e) => {
@@ -1578,7 +1578,8 @@ const main = async (): Promise<void> => {
         const raw = await m.injectText(e.target, e.payload.text, undefined, {
           from: p.from, channel: e.channel, requireIdle: e.priority === "normal",
           envelope: p.envelope + (p.after?.length ? afterNote(p.after, Object.fromEntries(p.after.map((t, n) => [t, (receipts.prereqs(e.speaker, p.after!, p.afterSeen)[n] as { seen: HeldSeen }).seen])), e.speaker) : "") + renderReminder({ wezard: "message-event", event: e.id }, []),
-          guard: (phase) => peerEvents!.valid(e) && receipts.prereqs(e.speaker, p.after ?? [], p.afterSeen).every((r) => r.state === "done") && (!phase || ((!p.attemptId || workflow.boundary(p.attemptId)) && boundary(phase))),
+          guard: (phase, identity) => peerEvents!.valid(e) && receipts.prereqs(e.speaker, p.after ?? [], p.afterSeen).every((r) => r.state === "done") && (!phase || ((!p.attemptId || workflow.boundary(p.attemptId)) && boundary(phase, identity))),
+          eventId: e.id,
         });
         const r = !raw.ok && !raw.uncertain && !raw.retryable && events.get(e.id)?.exposure === "none" ? { ...raw, retryable: true } : raw;
         if (p.attemptId && (r.uncertain || (!r.ok && !r.retryable))) workflow.dispatched(p.attemptId, false);

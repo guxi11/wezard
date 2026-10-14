@@ -51,7 +51,7 @@ import { dispatchPickerPolicy, pickerPolicy } from "./picker-policy.js";
 import { renameWindow, runTmux, spawnTmuxClaude } from "./spawn-tmux.js";
 import { selectEffort, selectModel, type EffortSelectResult, type ModelScope, type ModelSelectResult } from "./model-select.js";
 import { parseEffort, type Effort } from "../shared/effort.js";
-import { hasRegistry, liveSessionPids, markTranscript, probeOf, sessionOnPane, submittedSince, watchRegistry, type LiveSession, type TranscriptMark } from "./cc-session.js";
+import { hasRegistry, liveSessionPids, markTranscript, probeOf, sessionOnPane, submittedSince, submittedEventSince, watchRegistry, type LiveSession, type TranscriptMark } from "./cc-session.js";
 import { waitForIdle, type IdleResult } from "./graph.js";
 import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
@@ -1119,7 +1119,8 @@ export const startMirrorTail = (deps: TailDeps): TailHandle => {
 //             user typing; claude processes normally → response visible in BOTH
 //             the CLI and (via outbound tail) WeCom. Required for true mirror.
 // No phase is a read-only permission check; physical phases mark exposure.
-type DispatchGuard = (phase?: "paste" | "submit") => boolean;
+type InputIdentity = { sessionId?: string; transcript?: string };
+type DispatchGuard = (phase?: "paste" | "submit", identity?: InputIdentity) => boolean;
 type InjectResult = { ok: boolean; reason?: string; uncertain?: boolean; retryable?: boolean };
 interface InjectArgs {
   guard?: DispatchGuard;
@@ -1136,6 +1137,7 @@ interface InjectArgs {
   cfg: Config;
   log: Logger;
   sessionId: string;
+  eventId?: string;
   /** Bound transcript path. Identifies which CLI owns the session, so the
    *  spawn-mode inject resumes it with THAT binary — resuming a codebuddy
    *  session with `claude` (or vice versa) just errors "session not found". */
@@ -1653,26 +1655,28 @@ interface SubmitWitness {
   status: string;
   /** 这段文本已被会话收下: 注册表 idle→busy 翻转在 `enterAt` 之后, 或 jsonl 落了带探针的提交。 */
   submitted: (probe: string, since: number, enterAt: number) => boolean;
+  submittedEvent: (eventId: string, since: number) => boolean;
 }
-const NO_WITNESS: SubmitWitness = { status: "", submitted: () => false };
+const NO_WITNESS: SubmitWitness = { status: "", submitted: () => false, submittedEvent: () => false };
 
 /** 贴之前给会话可能落盘的 jsonl 打书签: 绑定的那份, 加上注册表报的当前 sid 那份
  *  (resume / fork 会换 sid)。提交后 sid 若又变了, 新文件从 0 读 —— 时间门挡掉 fork 里的旧话。 */
-const witnessFor = (target: string, homeDir: string, jsonlPath: string, live: LiveSession | undefined): SubmitWitness => {
-  if (!live) return NO_WITNESS;
+const witnessFor = (target: string, homeDir: string, jsonlPath: string, live: LiveSession | undefined, actualTranscript?: string): SubmitWitness => {
   const dir = dirname(jsonlPath);
   const marks = new Map<string, TranscriptMark>(
-    [jsonlPath, join(dir, `${live.sessionId}.jsonl`)].map((p) => [p, markTranscript(p)] as const),
+    [...new Set([jsonlPath, actualTranscript, ...(live ? [join(dir, `${live.sessionId}.jsonl`)] : [])].filter((p): p is string => !!p))]
+      .map((p) => [p, markTranscript(p)] as const),
   );
   return {
-    status: live.status,
+    status: live?.status ?? "",
     submitted: (probe, since, enterAt) => {
       const now = sessionOnPane(homeDir, target);
-      if (now && live.status !== "busy" && now.status === "busy" && now.statusUpdatedAt >= enterAt) return true;
+      if (live && now && live.status !== "busy" && now.status === "busy" && now.statusUpdatedAt >= enterAt) return true;
       const p = now && join(dir, `${now.sessionId}.jsonl`);
       if (p && !marks.has(p)) marks.set(p, { path: p, offset: 0 });
       return submittedSince([...marks.values()], probe, since);
     },
+    submittedEvent: (eventId, since) => submittedEventSince([...marks.values()], eventId, since),
   };
 };
 
@@ -1680,7 +1684,7 @@ const witnessFor = (target: string, homeDir: string, jsonlPath: string, live: Li
 // but the trailing Enter is eaten while the TUI is still initializing, so
 // the prompt sits typed-but-unsent. 校验策略见 injectViaTmuxText —— 以输入框
 // 整块为判据, 粘贴只在「确凿看见框仍是空的」时才重来。
-const injectViaTmux = async (target: string, text: string, images: string[], log: Logger, freshSpawn: boolean, backend: CliBackend, jsonlPath: string, bypassModalGuard = false, guard?: DispatchGuard): Promise<InjectResult> => {
+const injectViaTmux = async (target: string, text: string, images: string[], log: Logger, freshSpawn: boolean, backend: CliBackend, jsonlPath: string, bypassModalGuard = false, guard?: DispatchGuard, eventId?: string, expectedSessionId?: string): Promise<InjectResult> => {
   const backendName = backend.name;
   log.info({ target, len: text.length, images: images.length, freshSpawn, backendName }, "mirror inject (tmux)");
 
@@ -1688,7 +1692,62 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
   // 这一步只读注册表, 会话都不在时也就不必去 capture pane 找对话框了。
   const gate = await awaitSession(target, backend.homeDir, freshSpawn, log);
   if (!gate.ok) return gate;
-  const witness = witnessFor(target, backend.homeDir, jsonlPath, gate.live);
+  const paneIdentity = (): InputIdentity | undefined => {
+    // A readable live-session registry is the physical pane authority. Codex's
+    // SessionStart map is the fallback on installations without that registry.
+    if (hasRegistry(backend.homeDir)) {
+      const session = sessionOnPane(backend.homeDir, target);
+      return session ? { sessionId: session.sessionId, transcript: join(dirname(jsonlPath), `${session.sessionId}.jsonl`) } : undefined;
+    }
+    if (backendName === "codex") {
+      const session = codexSessionForPane(target);
+      return session ? { sessionId: session.sessionId, transcript: session.jsonlPath } : undefined;
+    }
+    return undefined;
+  };
+  const eventNeedsIdentity = !!eventId && !text.trimStart().startsWith("/");
+  const observedIdentity = paneIdentity();
+  if (eventNeedsIdentity && (!observedIdentity?.sessionId || !observedIdentity.transcript)) {
+    const reason = backendName === "codebuddy"
+      ? "CodeBuddy has no readable pane session registry; refusing event injection before input exposure because the receiving session/transcript cannot be verified"
+      : backendName === "codex"
+        ? "Codex SessionStart pane identity is unavailable; refusing event injection before input exposure"
+        : "Claude pane session identity is unavailable; refusing event injection before input exposure because the receiving session/transcript cannot be verified";
+    return { ok: false, retryable: true, reason };
+  }
+  const initialIdentity = observedIdentity ?? (gate.live
+    ? { sessionId: gate.live.sessionId, transcript: join(dirname(jsonlPath), `${gate.live.sessionId}.jsonl`) }
+    : { transcript: jsonlPath });
+  const witness = witnessFor(target, backend.homeDir, jsonlPath, gate.live, initialIdentity.transcript);
+  let guardFailureReason = "dispatch guard rejected input";
+  let inputGuardRejected = false;
+  const boundGuard: DispatchGuard = (phase) => {
+    // Resolve again at each physical paste/submit boundary. The mapping can
+    // change after awaitSession or while an image is being staged.
+    const current = paneIdentity();
+    if (eventNeedsIdentity && (!current?.sessionId || !current.transcript)) {
+      guardFailureReason = "receiving pane session identity became unavailable before input";
+      inputGuardRejected = true;
+      return false;
+    }
+    if (!current) return !eventNeedsIdentity && (!guard || guard(phase, { transcript: jsonlPath }));
+    if (current.sessionId !== initialIdentity.sessionId || current.transcript !== initialIdentity.transcript) {
+      guardFailureReason = "receiving pane session changed before input; refusing to attach event to a different session";
+      inputGuardRejected = true;
+      return false;
+    }
+    if (expectedSessionId && current.sessionId && current.sessionId !== expectedSessionId) {
+      guardFailureReason = "receiving pane session no longer matches the queued event target";
+      inputGuardRejected = true;
+      return false;
+    }
+    const allowed = !guard || guard(phase, current);
+    if (!allowed) {
+      guardFailureReason = "dispatch guard withdrew permission before input";
+      inputGuardRejected = true;
+    }
+    return allowed;
+  };
 
   // Never type into a modal picker (see detectModalPicker). Checked before the
   // image pump too — a C-v into a picker is just as destructive as a paste.
@@ -1723,26 +1782,30 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
   // dispatch 已对 codebuddy 把 refs 合进 text (images 传空), 这里的
   // withImageRefs 是其它调用方直传 images 时的兜底 —— 幂等, 不会贴两份。
   if (backendName === "codebuddy") {
-    return injectViaTmuxText(target, withImageRefs(text, images), log, freshSpawn, witness, guard);
+    return injectViaTmuxText(target, withImageRefs(text, images), log, freshSpawn, witness, boundGuard, eventId);
   }
 
   // Pump images first via clipboard+C-v so each one is attached as a separate
   // image content block. Each C-v needs a brief settle for Claude Code's TUI
   // to read the clipboard before the next overwrite. Fresh spawn extends.
   const IMG_SETTLE_MS = freshSpawn ? 700 : 350;
+  let imagePasteMayHaveExposed = false;
   const pumped = images.length ? await withImageClipboard(async () => {
     for (const imgPath of images) {
       const paste = async (): Promise<{ ok: boolean; reason?: string }> => {
         const cb = await setMacClipboardImage(imgPath);
         if (!cb.ok) return cb;
-        if (guard && !guard("paste")) return { ok: false, reason: "image paste canceled by dispatch guard" };
+        if (!boundGuard("paste")) return { ok: false, reason: guardFailureReason };
+        // Once send-keys starts, a failed client result cannot prove C-v was
+        // not delivered; preserve uncertainty to prevent duplicate attachments.
+        imagePasteMayHaveExposed = true;
         const cv = await runTmux(["send-keys", "-t", target, "C-v"]);
         return cv.ok ? { ok: true } : { ok: false, reason: `tmux send-keys C-v failed: ${cv.stderr.slice(-200)}` };
       };
       // Cold Codex can ignore C-v before its composer exists. Do not submit
       // the text until the composer proves this attachment has landed.
       const result = backendName === "codex"
-        ? await pasteVerifiedImage({ read: () => readInputBox(target), paste, valid: () => !guard || guard("paste") })
+        ? await pasteVerifiedImage({ read: () => readInputBox(target), paste, valid: () => boundGuard("paste") })
         : await paste();
       if (!result.ok) {
         log.warn({ target, imgPath, reason: result.reason }, "mirror inject: image not confirmed, refusing text submission");
@@ -1755,19 +1818,21 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
     }
     return { ok: true };
   }) : { ok: true };
-  if (!pumped.ok) return { ...pumped, uncertain: true };
+  if (!pumped.ok) return imagePasteMayHaveExposed
+    ? { ...pumped, ...(inputGuardRejected ? { reason: guardFailureReason } : {}), uncertain: true, retryable: false }
+    : { ...pumped, ...(inputGuardRejected ? { reason: guardFailureReason } : {}), uncertain: false, retryable: true };
 
   // Image-only message: TUI input box now holds the attached images; press
   // Enter and we're done. No fingerprint to verify (the input itself is binary
   // image refs, not text).
   if (!text) {
     if (images.length === 0) return { ok: true };
-    if (guard && !guard("submit")) return { ok: false, reason: "submit canceled by dispatch guard" };
+    if (!boundGuard("submit")) return { ok: false, reason: "submit canceled by dispatch guard" };
     const e = await runTmux(["send-keys", "-t", target, "Enter"]);
     return e.ok ? { ok: true } : { ok: false, reason: `tmux send-keys Enter failed: ${e.stderr.slice(-200)}` };
   }
 
-  return injectViaTmuxText(target, text, log, freshSpawn, witness, guard);
+  return injectViaTmuxText(target, text, log, freshSpawn, witness, boundGuard, eventId);
 };
 
 // 图片以 @<path> 文本提及的形式进会话 (codebuddy 的 tmux 路径、一切 spawn 路径)。
@@ -1791,7 +1856,7 @@ const withImageRefs = (text: string, images: readonly string[]): string => {
 // 证人不作声 (忙时排队、slash 命令、无注册表的后端) 才看框回没回到贴之前的样子。
 // 框认得出来时这条判据可信, 于是允许多补回车 (空框上的回车在 CLI 里是 no-op);
 // 每次补之前再问一遍证人, 已提交就不补。
-const injectViaTmuxText = async (target: string, text: string, log: Logger, freshSpawn: boolean, witness: SubmitWitness = NO_WITNESS, guard?: DispatchGuard): Promise<InjectResult> => {
+const injectViaTmuxText = async (target: string, text: string, log: Logger, freshSpawn: boolean, witness: SubmitWitness = NO_WITNESS, guard?: DispatchGuard, eventId?: string): Promise<InjectResult> => {
   // Warm pane: tight timings, low latency. Fresh spawn (claude --resume just
   // started, transcript still loading): extended timings — bracketed-paste
   // end can take 4-7s to be honored on a cold TUI. Only the fresh-spawn path
@@ -1808,6 +1873,7 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   // (会话正忙 → 只是排队; slash 命令 → 不一定落 user 行) 不空等, 直接看框。
   const witnessQuiet = witness.status === "" || witness.status === "busy" || text.trimStart().startsWith("/");
   const WITNESS_ONLY_MS = witnessQuiet ? 0 : freshSpawn ? 2500 : 1000;
+  const requireEventEvidence = !!eventId && !text.trimStart().startsWith("/");
 
   const { headFp, tailFp } = fingerprints(text);
   const probe = probeOf(text);
@@ -1816,7 +1882,8 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   // 时间门往前放 1s: jsonl 的 timestamp 与本机时钟同源, 只差写盘的毫秒。
   const since = Date.now() - 1000;
   let enterAt = Number.POSITIVE_INFINITY;
-  const submitted = (): boolean => witness.submitted(probe, since, enterAt);
+  const submitted = (): boolean => requireEventEvidence
+    ? witness.submittedEvent(eventId!, since) : witness.submitted(probe, since, enterAt);
 
   // 贴之前框里是什么: 空框、幽灵提示 (`Try "how do I log an error?"`)、甚至用户
   // 自己敲了一半的字 —— 一律作为基线, 免得去维护一张「哪些文案算空」的清单。
@@ -1877,6 +1944,9 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
       log.info({ target }, "mirror inject: 会话已收到这段文本, 不重贴");
       return { ok: true };
     }
+    if (requireEventEvidence && empty) {
+      return { ok: false, uncertain: true, reason: "composer is empty but this event is absent from the transcript; delivery remains uncertain and will not be pasted again" };
+    }
     if (!empty) {
       log.warn({ target, headFp, boxKnown: box.known }, "mirror inject: 粘贴未验证但输入框非空 — 首次粘贴已落地, 不重贴");
       pasteSeen = true;
@@ -1933,7 +2003,7 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
       if (submitted()) return true;
       // An unchanged empty composer proves submission only after we actually
       // saw this paste land. Otherwise a swallowed paste produces a false ACK.
-      if (pasteSeen && Date.now() - t0 >= WITNESS_ONLY_MS && (await cleared())) return true;
+      if (!requireEventEvidence && pasteSeen && Date.now() - t0 >= WITNESS_ONLY_MS && (await cleared())) return true;
     }
     return false;
   };
@@ -1948,7 +2018,7 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   // 回车可能被冷启动中的 TUI 吞掉 (框里躺着没提交的提示)。框认得出来时判据可信,
   // 多补一次; 认不出来时维持原来的「只补一次」, 免得判据出错往真实对话里灌回车。
   const boxTrusted = boxVerify && (await readInputBox(target)).known;
-  const attempts = boxTrusted ? 3 : 2;
+  const attempts = requireEventEvidence ? 1 : boxTrusted ? 3 : 2;
   for (let i = 0; i < attempts; i++) {
     if (i > 0) {
       await sleep(RETRY_SETTLE_MS);
@@ -1962,8 +2032,13 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
     const e = await sendEnter();
     if (!e.ok) return e;
     if (await waitForSubmit(CLEARED_TIMEOUT_MS)) return { ok: true };
+    if (requireEventEvidence && await cleared())
+      return { ok: false, uncertain: true, reason: "composer cleared without this event's transcript marker; delivery remains uncertain and will not be resubmitted" };
   }
   if (submitted()) return { ok: true };
+
+  if (requireEventEvidence && await cleared())
+    return { ok: false, uncertain: true, reason: "composer cleared without this event's transcript marker; delivery remains uncertain and will not be resubmitted" };
 
   // 补到头还没清空。通常是渲染滞后 (回车其实落了), 但也可能是目标会话正忙 /
   // 上下文满了不消费输入 —— 那样用户这条消息会悄无声息地消失。不报硬失败 (用户
@@ -1972,7 +2047,7 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   return { ok: true, uncertain: true, reason: "目标会话可能正忙或未消费输入(回车后输入框未清空)" };
 };
 
-const injectViaSpawn = async (args: InjectArgs): Promise<{ ok: boolean; reason?: string }> => {
+const injectViaSpawn = async (args: InjectArgs): Promise<InjectResult> => {
   const { text, images = [], cfg, log, sessionId, jsonlPath } = args;
   const backend = backendForPath(jsonlPath);
   const bin = backend.bin;
@@ -1996,6 +2071,8 @@ const injectViaSpawn = async (args: InjectArgs): Promise<{ ok: boolean; reason?:
   // which Claude parses at submit time and inlines as image content blocks
   // without a model-decided Read tool turn.
   const finalText = withImageRefs(text, images);
+  const eventMark = args.eventId && !text.trimStart().startsWith("/") ? markTranscript(jsonlPath) : undefined;
+  const eventSince = Date.now() - 1000;
   const cliArgs = backend.name === "codex" ? ["exec", "resume", "--json", ...codexArgs,
     ...cfg.wrc.extraArgs.filter((arg) => !arg.startsWith("--disallowedTools")),
     ...images.flatMap((path) => ["--image", path]), sessionId, text] : [
@@ -2009,7 +2086,7 @@ const injectViaSpawn = async (args: InjectArgs): Promise<{ ok: boolean; reason?:
     ...cfg.wrc.extraArgs,
   ];
   log.info({ sessionId, bin, len: text.length }, "mirror inject");
-  if (args.guard && !args.guard("submit")) return { ok: false, reason: "spawn canceled by dispatch guard" };
+  if (args.guard && !args.guard("submit", { sessionId, transcript: jsonlPath })) return { ok: false, reason: "spawn canceled by dispatch guard" };
   return new Promise((resolve) => {
     const proc = spawn(bin, cliArgs, {
       cwd,
@@ -2035,6 +2112,10 @@ const injectViaSpawn = async (args: InjectArgs): Promise<{ ok: boolean; reason?:
         resolve({ ok: false, reason: `${bin} exited ${code}: ${stderrTail.slice(-300)}` });
         return;
       }
+      if (eventMark && args.eventId && !submittedEventSince([eventMark], args.eventId, eventSince)) {
+        resolve({ ok: false, uncertain: true, reason: "CLI exited successfully but this event's transcript marker is absent; delivery remains uncertain" });
+        return;
+      }
       resolve({ ok: true });
     });
   });
@@ -2048,8 +2129,8 @@ const inject = async (args: InjectArgs): Promise<InjectResult> => {
       if (args.guard && !args.guard()) return { ok: false, retryable: true, reason: "spawn permission withdrawn" };
       const text = args.prepareText?.() ?? args.text;
       let activated = false;
-      const result = await injectViaSpawn({ ...args, text, guard: (phase) => {
-        if (args.guard && !args.guard(phase)) return false;
+      const result = await injectViaSpawn({ ...args, text, guard: (phase, identity) => {
+        if (args.guard && !args.guard(phase, identity)) return false;
         if (phase && !activated) { activated = true; args.beforeInput?.(); }
         return true;
       } });
@@ -2067,12 +2148,12 @@ const inject = async (args: InjectArgs): Promise<InjectResult> => {
       const idleApproved = !args.requireIdle || await args.requireIdle();
       if (!idleApproved) return { ok: false, reason: "target has no confirmed idle evidence" };
       const text = args.prepareText?.() ?? args.text;
-      const guard: DispatchGuard = (phase) => {
-        if (!live() || (!exposed && !idleApproved) || (args.guard && !args.guard(phase))) return false;
+      const guard: DispatchGuard = (phase, identity) => {
+        if (!live() || (!exposed && !idleApproved) || (args.guard && !args.guard(phase, identity))) return false;
         if (phase && !exposed) { exposed = true; args.beforeInput?.(); }
         return true;
       };
-      return injectViaTmux(target, text, args.images ?? [], args.log, args.freshSpawn ?? false, backendForPath(args.jsonlPath), args.jsonlPath, args.bypassModalGuard ?? false, guard);
+      return injectViaTmux(target, text, args.images ?? [], args.log, args.freshSpawn ?? false, backendForPath(args.jsonlPath), args.jsonlPath, args.bypassModalGuard ?? false, guard, args.eventId, args.sessionId);
     }, { guard: args.guard }));
   } catch (error) {
     return classify({ ok: false, reason: String(error) });
@@ -2273,7 +2354,7 @@ export interface MirrorBridge {
    *  参数留着是因为调用方 (定时任务) 仍在传。 */
   /** `channel`: 这一轮的回复发去哪个公开频道 (base); "" = 私聊, 回复不进任何群,
    *  只落 turn 记录; 省略 = target 的 home。 */
-  injectText: (target: string, text: string, origin?: TurnOrigin, opts?: { fromChat?: boolean; from?: TurnFrom; channel?: string; envelope?: string; guard?: DispatchGuard; requireIdle?: boolean }) => Promise<InjectResult>;
+  injectText: (target: string, text: string, origin?: TurnOrigin, opts?: { fromChat?: boolean; from?: TurnFrom; channel?: string; envelope?: string; eventId?: string; guard?: DispatchGuard; requireIdle?: boolean }) => Promise<InjectResult>;
   /** 这个 wizard 当前这一轮的频道: 人从哪个群叫的它 / 公开 peer 轮的频道;
    *  私聊轮 ""; 还没有过轮次 → home base。 */
   currentChannel: (target: string) => string;
@@ -2394,6 +2475,8 @@ export interface MirrorBridge {
   /** Hard facts about one session — sessionId, transcript, cwd, backend, pane,
    *  and how full its context window is (prompt tokens of the last turn). */
   sessionInfo: (target: string) => { sessionId: string; jsonlPath: string; cwd: string; cli: CliBackendName; model: string; effort: string; tmuxPane: string; contextTokens: number } | undefined;
+  /** Identity read from the session actually attached to the current input pane. */
+  inputSessionInfo: (target: string) => { sessionId: string; jsonlPath: string } | undefined;
   /** Every target key of `target`'s chat (default + every `#tag`), live or
    *  merely persisted. Sync and cheap — the `peers` probe shells out to tmux,
    *  far too much for answering "is this tag taken". */
@@ -6237,6 +6320,17 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     byTarget.get(target)?.tmuxPane || deps.store.get(target)?.tmuxPane || "";
   const jsonlOf = (target: string): string =>
     expandHome(byTarget.get(target)?.jsonlPath || deps.store.get(target)?.jsonlPath || "");
+  const inputSessionInfo = (target: string): { sessionId: string; jsonlPath: string } | undefined => {
+    const pane = paneOf(target);
+    const transcript = jsonlOf(target);
+    if (!pane || !transcript) return undefined;
+    if (backendForPath(transcript).name === "codex") {
+      const session = codexSessionForPane(pane);
+      return session && { sessionId: session.sessionId, jsonlPath: session.jsonlPath };
+    }
+    const live = activeBackends().map((b) => sessionOnPane(b.homeDir, pane)).find((s) => s?.pane === pane);
+    return live && { sessionId: live.sessionId, jsonlPath: join(dirname(transcript), `${live.sessionId}.jsonl`) };
+  };
 
   // Busy comes from the native lifecycle or an interrupt hint. A dead/unbound pane is
   // reported idle, not busy: "nothing is running there" is the truthful answer
@@ -7061,8 +7155,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const preClearBaseline = clearing ? listJsonls(dirname(a.jsonlPath)) : undefined;
       const injectPane = a.tmuxPane;
       const r = await inject({
-        text: full, images: [], cfg, guard: (phase) => permitted() && a.tmuxPane === injectPane && (!opts?.guard || opts.guard(phase)), log: log.child({ principal: target, sessionId: sid, sub: "init-demo" }),
-        sessionId: sid, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn: fresh,
+        text: full, images: [], cfg, guard: (phase, identity) => permitted() && a.tmuxPane === injectPane && (!opts?.guard || opts.guard(phase, identity)), log: log.child({ principal: target, sessionId: sid, sub: "init-demo" }),
+        sessionId: sid, eventId: opts?.eventId, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn: fresh,
         requireIdle: opts?.requireIdle ? () => idleNow(target) : undefined,
         prepareText: () => (full = text + envelope + noticeSuffixFor(target, text)),
         beforeInput,
@@ -7347,6 +7441,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     newSession,
     cloneSession,
     sessionInfo,
+    inputSessionInfo,
     setCharterProvider,
     onSpawn,
     onContextCut,
@@ -7605,9 +7700,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         const injectPane = a.tmuxPane;
         const r = await inject({
           text: effText, images: effImages, cfg, log: log.child({ principal, sessionId: sid }),
-          sessionId: sid, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn,
+          sessionId: sid, eventId, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn,
           requireIdle: eventId ? () => idleNow(a.target) : undefined,
-          guard: (phase) => byTarget.get(a.target) === a && a.tmuxPane === injectPane && (a.injectGen ?? 0) === myGen && (!guard || guard(phase)),
+          guard: (phase, identity) => byTarget.get(a.target) === a && a.tmuxPane === injectPane && (a.injectGen ?? 0) === myGen && (!guard || guard(phase, identity)),
         });
         onSubmitted?.(r);
         if (!r.ok) {
