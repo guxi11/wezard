@@ -2743,6 +2743,9 @@ interface AttachState {
   /** brief 气泡的 CoT 进度 —— 最新一条 thinking / 工具调用, 已压成单行。只在正文落地前
    *  覆盖气泡: 结论一到, 气泡被 `链接 正文` 整条替换掉, 进度不会残留在最终气泡里。 */
   cotText?: string;
+  /** brief 气泡 CoT 进度的 tool 槽 —— 最新一条 tool_use 单行。展示优先级低于 cotText:
+   *  flush 先取 cotText (assistant text/thinking), 没有新 text 才落它。 */
+  cotTool?: string;
   /** CoT 进度的节流计时器 —— 每次刷新都是整条内容重发, 高频 thinking 不能 1:1 打上去。 */
   cotTimer?: NodeJS.Timeout;
   /** 最近一条已发上气泡的 CoT 进度行。cotText 是"待发"; 引用比对要看"已发" ——
@@ -3444,12 +3447,15 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const clearCot = (a: AttachState): void => {
     if (a.cotTimer) { clearTimeout(a.cotTimer); a.cotTimer = undefined; }
     a.cotText = undefined;
+    a.cotTool = undefined;
   };
 
   const flushCot = async (a: AttachState): Promise<void> => {
     a.cotTimer = undefined;
-    const text = a.cotText;
+    // 展示选取: assistant text (含 thinking) 优先; 没有新 text 时才落最新 tool_use。
+    const text = a.cotText ?? a.cotTool;
     a.cotText = undefined;
+    a.cotTool = undefined;
     const b = a.briefBubble;
     const turnId = a.briefTurnId;
     // 收口后这一路全部失效: 气泡要么已 done, 要么 turn 已经换人/清空。
@@ -3472,6 +3478,18 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const line = cotLine(raw);
     if (!line) return;
     a.cotText = line;
+    if (a.cotTimer) return;
+    a.cotTimer = setTimeout(() => void flushCot(a), COT_FLUSH_MS);
+  };
+
+  /** tool_use 进度进 tool 槽 (不顶掉待发的 assistant text): flush 时 text 优先,
+   *  只有没有新 text 的窗口才把最新 tool 行刷上气泡。节流与 text 共用一个计时器。 */
+  const updateBriefToolProgress = (a: AttachState, raw: string): void => {
+    const b = a.briefBubble;
+    if (!b || b.done || a.briefConcluded) return;
+    const line = cotLine(raw);
+    if (!line) return;
+    a.cotTool = line;
     if (a.cotTimer) return;
     a.cotTimer = setTimeout(() => void flushCot(a), COT_FLUSH_MS);
   };
@@ -4328,7 +4346,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const now = Date.now();
     if (item.kind === "tool_use") {
       markBriefTool(a);
-      updateBriefProgress(a, cotToolLabel(item.calls));
+      updateBriefToolProgress(a, cotToolLabel(item.calls));
       for (const c of item.calls) {
         // 也走单卡 detail record — turn 页里 tool_use 段可点开链到独立详情 (以后有需要时)。
         if (c.toolUseId) {
@@ -6448,7 +6466,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const quoteCanon = (s: string): string => s.replace(OPEN_QUOTE_URL_RE, " ").replace(/[^\p{L}\p{N}]/gu, "");
   const openBubbleBodies = (a: AttachState): string[] => {
     if (a.briefBubble && !a.briefBubble.done && !a.briefConcluded) {
-      return [a.cotLastSent, a.cotText].filter((s): s is string => !!s);
+      return [a.cotLastSent, a.cotText, a.cotTool].filter((s): s is string => !!s);
     }
     const s = a.liveStream;
     return s && !s.closed && !s.dead ? [s.acc, s.lastSent] : [];
