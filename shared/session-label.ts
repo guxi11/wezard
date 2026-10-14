@@ -163,7 +163,12 @@ export const parseTagHeader = (text: string): { fromBot: boolean; tag: string; b
   const t = text.trim();
   const footer = /(?:^|\s)\[[✨✦]\]\(([^\n)]*)\)\s*$/.exec(t);
   const target = footer && linker?.targetOfUrl?.(footer[1]!);
-  if (target) return { fromBot: true, tag: displayName(target), body: unlinkTags(t.slice(0, footer!.index).trim()) };
+  if (target) {
+    const clean = t.slice(0, footer!.index).trim();
+    const header = rawTagHeader(clean);
+    const ownHeader = header && !header.url && resolveTagTarget(header.tag, target) === target;
+    return { fromBot: true, tag: displayName(target), body: unlinkTags((ownHeader ? header.body : clean).trim()) };
+  }
   const m = HEADER_RE.exec(t);
   if (!m) return { fromBot: false, tag: "", body: t };
   const url = /^\[[^\]]+\]\(([^)]*)\)/.exec(t)?.[1];

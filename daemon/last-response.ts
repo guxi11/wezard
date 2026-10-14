@@ -15,7 +15,7 @@
 // reloads); in dev just avoid reloading mid-conversation when testing.
 import type { WSClient, WsFrame, BaseMessage, WsFrameHeaders } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
-import { rawTagHeader, withBot, botOfKey } from "../shared/session-label.js";
+import { rawTagHeader, resolveTagTarget, targetOfTagUrl, withBot, botOfKey } from "../shared/session-label.js";
 import { PRIMARY_BOT } from "../shared/config.js";
 import { botTagOf, pinFrameBot } from "./bot-mux.js";
 import { connFor } from "./reach.js";
@@ -81,7 +81,11 @@ const record = (bareId: string, content: string): void => {
 //     卡死审批流。
 const hasVisibleBody = (content: string): boolean => {
   const clean = withoutMessageFooter(content);
-  return (clean !== content ? clean : rawTagHeader(content)?.body ?? content).trim().length > 0;
+  const header = rawTagHeader(clean);
+  const footer = /\[[✨✦]\]\(([^\n)]*)\)\s*$/.exec(content)?.[1];
+  const sender = footer && targetOfTagUrl(footer);
+  const ownHeader = header && (!sender || (!header.url && resolveTagTarget(header.tag, sender) === sender));
+  return (ownHeader ? header.body : clean).trim().length > 0;
 };
 
 // Wrap replyStream + replyStreamWithCard (live stream finalize) AND
