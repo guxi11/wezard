@@ -5584,6 +5584,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // different project dir whose live session has a different sid, migrate onto
   // it. Tail from EOF (undefined startOffset): the worktree session already
   // carries full history we don't want to re-dump to WeCom.
+  //
+  // 同目录的轮换 (人在 TUI 里敲 `/clear`、或 CLI 自己换了会话) 走下面同一张表的 sameDir
+  // 分支 —— 目录没变, 但「旧 jsonl 从此没人写」的后果一模一样, 而它比 worktree 常见得多
+  // (人就在 pane 里敲命令)。
   let paneDriftTicking = false;
   const followPaneDrift = async (): Promise<void> => {
     if (paneDriftTicking) return; // skip overlapping ticks (tmux call is async)
@@ -5612,7 +5616,25 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           continue;
         }
         const paneDir = projectDirFor(a.jsonlPath, expandHome(cwd));
-        if (backendForPath(a.jsonlPath).name === "codex" ? expandHome(cwd) === a.runningCwd : paneDir === dirname(a.jsonlPath)) continue;       // same project dir — no drift
+        const sameDir = backendForPath(a.jsonlPath).name === "codex" ? expandHome(cwd) === a.runningCwd : paneDir === dirname(a.jsonlPath);
+        if (sameDir) {
+          // 同一个项目目录里的会话轮换: 人在 TUI 里直接敲了 `/clear` (或 CLI 自己换了会话)。
+          // 目录没变, 下面那条按目录判的漂移看不见它, 结果一样是「旧 jsonl 再没人写, 气泡
+          // 永远停在最后一格」, 而每次 reload 的 boot 恢复都会把这份死绑定再恢复一遍。
+          //   判据只认**注册表按 pane 报的会话** —— 只有写 `tmux` 字段的后端有这条路。
+          // codebuddy 没有: 它的注册行里 sessionId 是续接链的根, 换过 sid 后不更新 (实测
+          // pid 84679 报 3d51b76b 而进程实际在写 01a13ae5), 沿进程树只能认出「有活的 CLI」
+          // 而不是「哪份转录」; 而「目录里最新的是谁」在共用 cwd 下会把别人的转录认到自己
+          // 身上。两条都不能用, 所以这里对 codebuddy 什么都不做 —— 认不出就不动。
+          const liveOnPane = sessionOnPane(backendForPath(a.jsonlPath).homeDir, a.tmuxPane);
+          if (!liveOnPane || liveOnPane.sessionId === a.sessionId || sidsClaimedByOthers(a.target).has(liveOnPane.sessionId)) continue;
+          // 从 EOF 起读 (不给 startOffset): 轮换之后新文件已经自己长了一段 (轮换那一刻到这一
+          // tick 之间人敲进去的话), 从 0 重读等于把整段会话倒进聊天窗口。补不上接缝,
+          // 但从此往后是通的 —— 比一直不通强。
+          log.info({ target: a.target, pane: a.tmuxPane, from: a.sessionId, to: liveOnPane.sessionId }, "mirror: pane 里的会话轮换 (同目录), 跟随它");
+          migrateAttachment(a, liveOnPane.sessionId, join(dirname(a.jsonlPath), `${liveOnPane.sessionId}.jsonl`));
+          continue;
+        }
         const live = liveSessionForCwd(cwd, backendForPath(a.jsonlPath), sidsClaimedByOthers(a.target));
         if (!live || live.sessionId === a.sessionId) continue; // empty dir, or same-sid rename (tail follows it)
         a.runningCwd = expandHome(cwd);                        // migrateAttachment persists this to store
