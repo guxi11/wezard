@@ -63,7 +63,12 @@ export type NoteAttrs = { [K in Kind]: KindAttrs<K> }[Kind];
 export const TAIL_ORDER: readonly string[] = ["envelope", "message-event", "hint", "lead", "after", "mention", "roster", "pending"];
 
 // 开标签容许属性: 我们自己的, 以及 codebuddy 的 `data-role="command-caveat"`。
-export const REMINDER_RE = /<system-reminder(\s[^>]*)?>([\s\S]*?)<\/system-reminder>/g;
+// 开标签锚定行首 (渲染方永远 `\n` 起头, 见 renderReminder): 正文里行中提及的
+// `<system-reminder>` 字面量 (讨论这个 tag 本身时很常见) 一旦当成开标签, 懒惰匹配会
+// 从那里一路吞掉后面真正的信封块 —— 整句的信封 / 注入事件 id 全丢, 轮次再也绑不回
+// 路由行 (2026-10-15 .remindtrim e3c34b4.1: 派活正文里写了 `<system-reminder>` 四个字,
+// 那轮 RESULT: 终句永远没认领, sweeper 误判闲置追问)。
+export const REMINDER_RE = /^<system-reminder(\s[^>]*)?>([\s\S]*?)<\/system-reminder>/gm;
 
 const ENT: ReadonlyArray<[string, string]> = [["&", "&amp;"], ['"', "&quot;"], ["<", "&lt;"], [">", "&gt;"]];
 const escAttr = (s: string): string => ENT.reduce((a, [c, e]) => a.split(c).join(e), s);

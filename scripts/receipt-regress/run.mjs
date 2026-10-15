@@ -562,6 +562,10 @@ const cases = {
     check(R.parseEnvelope(oldRcpt)?.eventId === "rcpt:e7:r1", "老形状 receipt-delivery");
     const legacy = "x\n<system-reminder>\n这一轮是 wizard `.z` 发来的**私聊**\n</system-reminder>";
     check(R.parseEnvelope(legacy)?.from === ".z", "LEGACY 措辞信封");
+    // 正文里行中提及 `<system-reminder>` 字面量不得吞掉后面的真信封 (e3c34b4.1: 信封被吞 →
+    // 轮次绑不回路由行 → RESULT 终句永不落定, sweeper 误判闲置)。
+    const mention = R.withMsg(`讨论 <system-reminder> 与 </system-reminder> 这两个 tag\n正文`, "route:e8") + R.renderTail(blocks[1]);
+    check(R.parseEnvelope(mention)?.eventId === "route:e8" && R.parseEnvelope(mention)?.from === ".a", "行中字面量不吞信封");
     // rolepage 标签。
     const label = (t) => R.parseReminders(t).map((r) => R.reminderLabel(r).label).join("|");
     check(label(blocks[1]) === "envelope · .a", `标签 ${label(blocks[1])}`);
