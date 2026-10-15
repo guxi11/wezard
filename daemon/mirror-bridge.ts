@@ -1661,8 +1661,12 @@ const paneHasLiveSession = async (paneId: string, homeDir: string, panePid?: num
   if (sessionOnPane(homeDir, paneId)) return true;
   const root = panePid ?? (await panePidOf(paneId));
   if (!root) return false;
-  const { kids } = ps ?? (await psSnap());
-  return registeredPidUnder(root, liveSessionPids(homeDir), kids) !== undefined;
+  const snapshot = ps ?? (await psSnap());
+  // Codex runs under a foreground bash wrapper and has no Claude registry.
+  const codexPids = codexSessionForPane(paneId)
+    ? [...snapshot.commands].filter(([, command]) => basename(command) === "codex").map(([pid]) => pid)
+    : [];
+  return registeredPidUnder(root, new Set([...liveSessionPids(homeDir), ...codexPids]), snapshot.kids) !== undefined;
 };
 
 type PaneProbe = { state: PaneLiveness | "shell" | "session" };
@@ -1677,6 +1681,17 @@ const probePane = async (paneId: string, jsonlPath: string): Promise<PaneProbe> 
   const cmd = await runTmux(["display-message", "-p", "-t", paneId, "#{pane_current_command}"]);
   if (cmd.timedOut || !cmd.ok) return { state: "unknown" };
   return SHELL_RE.test(cmd.stdout.trim()) ? { state: "shell" } : { state: "session" };
+};
+
+// Recover only an exact SessionStart transcript match; a shared cwd is not identity.
+const codexPaneForTranscript = async (jsonlPath: string): Promise<string> => {
+  if (backendForPath(jsonlPath).name !== "codex") return "";
+  const panes = await runTmux(["list-panes", "-a", "-F", "#{pane_id}"]);
+  if (!panes.ok) return "";
+  for (const pane of panes.stdout.trim().split("\n")) {
+    if (codexSessionForPane(pane)?.jsonlPath === jsonlPath && (await probePane(pane, jsonlPath)).state === "session") return pane;
+  }
+  return "";
 };
 
 /** 注册表没有 tmux 字段的后端 (codebuddy): pane 里住着谁只能沿 pane 的进程树往下找
@@ -2326,27 +2341,29 @@ const etimeSec = (s: string): number => {
  *  用 `etime` 不用 `etimes`: macOS 的 BSD ps 没有 etimes (`keyword not found`, 整表空,
  *  宽限随之失效、新生 pane 生出就被当孤儿杀), etime 是 BSD/GNU 都认的。
  *  ps 失败 = 空表, 孤儿判定随之全 miss: 认不出就不收, 永远朝不杀的方向失败。 */
-interface PsSnap { kids: Map<number, number[]>; etimes: Map<number, number> }
+interface PsSnap { kids: Map<number, number[]>; etimes: Map<number, number>; commands: Map<number, string> }
 const psSnap = (): Promise<PsSnap> =>
   new Promise((resolve) => {
-    const p = spawn("ps", ["-axo", "pid=,ppid=,etime="], { env: { ...process.env, PATH: augmentedPath(process.env.PATH) }, stdio: ["ignore", "pipe", "ignore"] });
+    const p = spawn("ps", ["-axo", "pid=,ppid=,etime=,comm="], { env: { ...process.env, PATH: augmentedPath(process.env.PATH) }, stdio: ["ignore", "pipe", "ignore"] });
     let out = "";
     p.stdout?.on("data", (c: Buffer) => (out += c.toString("utf8")));
     const done = (): void => {
       const kids = new Map<number, number[]>();
       const etimes = new Map<number, number>();
+      const commands = new Map<number, string>();
       for (const line of out.split("\n")) {
-        const [pidS = "", ppidS = "", etS = ""] = line.trim().split(/\s+/);
+        const [pidS = "", ppidS = "", etS = "", ...command] = line.trim().split(/\s+/);
         const pid = Number(pidS), ppid = Number(ppidS), et = etimeSec(etS);
         if (!pid || !ppid) continue;
+        commands.set(pid, command.join(" "));
         const arr = kids.get(ppid);
         if (arr) arr.push(pid); else kids.set(ppid, [pid]);
         if (!Number.isNaN(et)) etimes.set(pid, et);
       }
-      resolve({ kids, etimes });
+      resolve({ kids, etimes, commands });
     };
     p.on("close", done);
-    p.on("error", () => resolve({ kids: new Map(), etimes: new Map() }));
+    p.on("error", () => resolve({ kids: new Map(), etimes: new Map(), commands: new Map() }));
   });
 /** Drop a session's queue chain. A hung job can't be cancelled (it's parked in a
  *  tmux read), but detaching the chain means the NEXT message doesn't inherit
@@ -4953,7 +4970,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // jsonl means "no input yet", NOT "rotated away" — healing it onto some
     // unrelated newest-in-cwd file is exactly the cross-wire we must avoid.
     const storedPane = (rec.tmuxPane ?? "").trim();
-    const livePane = storedPane && (panes ? panes.has(storedPane) : await tmuxPaneAlive(storedPane)) ? storedPane : "";
+    const livePane = storedPane && (panes ? panes.has(storedPane) : await tmuxPaneAlive(storedPane)) ? storedPane : await codexPaneForTranscript(jsonlAbs);
     if (permitted && !permitted()) return undefined;
     if (!existsSync(jsonlAbs)) {
       // First: the SAME-sid transcript may have merely relocated to a sibling
@@ -6752,6 +6769,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const sid = a.sessionId;
       const generation = a.injectGen ?? 0;
       const permitted = (): boolean => permission() && byTarget.get(target) === a && a.sessionId === sid && (a.injectGen ?? 0) === generation;
+      if (!a.tmuxPane) {
+        const recovered = await codexPaneForTranscript(a.jsonlPath);
+        if (!permitted()) return denied;
+        if (!a.tmuxPane) a.tmuxPane = recovered;
+      }
       const probedPane = a.tmuxPane;
       const probe = a.tmuxPane ? await probePane(a.tmuxPane, a.jsonlPath) : ({ state: "gone" } as const);
       if (!permitted() || a.tmuxPane !== probedPane) return denied;
@@ -7261,6 +7283,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // First step of the job and the historical hang point — log BEFORE the
         // probe so a stall is attributable to it next time, not invisible.
         log.info({ target: a.target, sessionId: sid, pane: a.tmuxPane, gen: myGen }, "inject job start");
+        if (!a.tmuxPane) {
+          const recovered = await codexPaneForTranscript(a.jsonlPath);
+          if (byTarget.get(a.target) !== a || (a.injectGen ?? 0) !== myGen || (guard && !guard())) {
+            onSubmitted?.({ ok: false, retryable: true, reason: "pane recovery permission withdrawn" });
+            return;
+          }
+          if (!a.tmuxPane) a.tmuxPane = recovered;
+        }
         const probe = a.tmuxPane ? await probePane(a.tmuxPane, a.jsonlPath) : ({ state: "gone" } as const);
         let freshSpawn = a.justSpawned === true;
         a.justSpawned = false;
@@ -7310,7 +7340,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           } else {
             // Drop only the stale pane id; keep tmuxSession (if any) so the
             // store still reflects "user wanted tmux" — next turn retries.
-            log.error({ reason: r.reason }, "mirror: tmux respawn failed, this turn falls back to spawn-mode");
+            log.error({ reason: r.reason }, "mirror: tmux respawn failed");
+            if (eventId) {
+              onSubmitted?.({ ok: false, retryable: true, reason: `respawn failed: ${r.reason ?? "unknown"}` });
+              if (s) await finalizeStream(a, s);
+              if (a.outbound?.kind === "deferred") clearTimeout(a.outbound.timer);
+              a.outbound = undefined;
+              return;
+            }
             a.tmuxPane = "";
           }
         }
@@ -7355,9 +7392,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         if (!r.ok) {
           // retryable = 一个字都没进输入框, 消息事件层会稍后重投 —— 不是失败, 别报 ✗
           // (每次退避重试都会走到这里, 报 ✗ 就是一串假警报)。
-          const note = r.retryable && eventId
-            ? `[mirror] ⏳ 暂未送达, 稍后自动重投 (${r.reason ?? "deferred"})`
-            : `[mirror] ✗ ${r.reason ?? "failed"}`;
+          if (r.retryable && eventId) {
+            if (s) await finalizeStream(a, s);
+            if (a.outbound?.kind === "deferred") clearTimeout(a.outbound.timer);
+            a.outbound = undefined;
+            return;
+          }
+          const note = `[mirror] ✗ ${r.reason ?? "failed"}`;
           if (s) {
             s.acc = s.acc ? `${s.acc}\n\n${note}` : note;
             await finalizeStream(a, s);
