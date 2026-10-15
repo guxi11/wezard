@@ -32,6 +32,7 @@
 - **BREAKING** prompt-cache 保温 (keepalive) 整组删除: `shared/keepalive.ts`、配置节 `wrc.mirror.keepalive`、`spawn_wizard` / `clone_wizard` / `new_claude_session` 的 `keepalive` 参数、`/stop` 与 `/clear` 的保温暂停、rolepage 的 🏓 ping 折叠一并下线; 老配置里残留的 keepalive 键被 schema 静默忽略。缓存冷热判定 (route_candidates / dispatch 冷门控) 保留, transcript 读不到分层写入记录时按 300s 兜底 (原读 `keepalive.ttlSec`)。
 
 ### Fixed
+- 冷目标拉起期的人话排队气泡只显 `…` (loading): 原先那句「正在拉起 X 的会话」带着 `.x:` 头, 而此刻冷目标还没进名册的 known —— 头里的半截链接改写落空, `[`.x`](url):` 进群被企微渲染成空链接, 还抢先 mirror 的 ack 进气泡、紧接着被顶掉白闪一下。loading 是纯文案不带头。同 pane 队空且无否决项时也不再多说一句「排队中（前面 0 件）」去顶掉气泡; 队列离开 queued/dispatching 后 watchQueue 即收工, 气泡从此归 mirror。
 - 内建整理者执行体 (`wezard:internal#steward`) 吃不上管家档: `stewardTierOf` 把「带 slot 名」一概排除, 而它正带着 `#steward` —— 不给档就落 CLI 自己的默认模型 (本机实测 opus/high), 比 router 那档重得多。现在内部 key 与群默认会话同样固定吃 `models.router`, 显式 model / 记录值都不再覆盖它; 真 slot 分身照旧不套档。
 - `tell_peer` 带 `re` 续问一律被 409「这一轮服务的那一笔你已经 transfer 出去了」挡下 (T10 起): `planReturn` 把续问沿用的原件 (本来就欠在对方手上) 当成了本轮服务的那笔; 该判据只对本轮服务的那笔生效。receipt-regress `need` 用例的续问同步去掉与 re 冲突的 `detach`。
 - 指名 (`.name`) 开一个新 wizard 时 tmux 窗口名不是那个名字, 而是它所在聊天的主 id (`user:T03880027A` → `u-T03880`), 同一个群里几个新 wizard 的窗口名一模一样: 隐含建会话那条路 (`events.inject`) 在名册里还没有名字时把**会话 key** 当窗口名传下去, `safeWindowName` 又把 `user:…` 开头的 key 按 principal 截成 8 字符。窗口名现在统一由 `windowLabel` (`shared/session-label.ts`) 定: 调用方给的名字照用, 给的是会话 key 或没给就用名册 / 聊天名推并落定, 收口在 `newSession` / `cloneSession` / `spawnTmuxClaude` 三处; 名字的 `.fix` 与 `fix` 两种拼法在 `safeWindowName` 里也归成一个窗口名 (2026-10-15 实测: `#naming` / `#naming-pane` / `#unhookwhendaemon` 的窗口都印成 `u-T03880`)。

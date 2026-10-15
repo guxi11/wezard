@@ -365,26 +365,36 @@ const main = async (): Promise<void> => {
   const ago = (at: number): string => { const s = Math.max(0, Math.round((Date.now() - at) / 1000)); return s < 60 ? `${s}s` : `${Math.round(s / 60)}m`; };
   const rowLabel = (x: MessageEvent): string => `${x.payload.human ? "人话" : x.id.startsWith("rcpt:") ? `回执 ← ${x.speaker}` : `派活 ← ${x.speaker}`}`
     + `「${clipLine(x.payload.text, 24)}」${({ queued: "排队", dispatching: "正在贴", "awaiting-result": "在跑" } as Record<string, string>)[x.execution] ?? x.execution} ${ago(x.at)}`;
-  /** 人话的排队实况; undefined = 它已经不在 daemon 队里了 (贴进去 / 了结), 气泡交给 mirror。 */
-  const queueNote = (id: string, target: string, cold: boolean): string | undefined => {
-    const q = events.queue(id);
-    if (!q) return undefined;
-    if (q.execution === "dispatching") return cold ? `正在拉起 ${who(target)} 的会话，起好就贴进去` : undefined;
-    if (q.execution !== "queued") return undefined;
+  /** 会话还没起好时气泡里那三个点 —— 不是提示文案, 就是 loading。 */
+  const LOADING = "…";
+  /** 人话的排队实况; "" = 这一刻没什么可说的 (气泡归 mirror 的 ack 或上一句实况)。 */
+  const queueNote = (q: NonNullable<ReturnType<typeof events.queue>>, target: string, cold: boolean): string => {
+    // 起会话那一段只留 loading, 不再写「正在拉起 … 的会话」: 那句话带着 `.x:` 头, 而此刻冷目标
+    // 还没进名册的 known —— 头里的半截链接改写落空 (withMessageFooter 找不到 sender 就原样放行),
+    // `[`.x`](url):` 进群被企微渲染成一个空链接; 它还会抢先 mirror 的 ack 进气泡、紧接着被顶掉,
+    // 白闪一下。loading 才是这一段该有的内容。
+    if (q.execution === "dispatching") return cold ? LOADING : "";
+    if (q.execution !== "queued") return "";
     const holds = [handingOff(target) ? `${who(target)} 正在交接，交接完贴进新会话` : "", ...q.holds].filter(Boolean);
+    // 前面既没有别的件、也没有否决项 ⇒ 没什么可报的, 别拿一句「排队中（前面 0 件）」去顶掉气泡。
+    if (!q.ahead.length && !holds.length) return "";
     return [`排队中（同 pane 前面 ${q.ahead.length} 件）`,
       ...holds.map((h) => `- ${h}`),
       ...q.ahead.slice(0, 5).map((x, i) => `${i + 1}. ${rowLabel(x)}`),
       ...(q.ahead.length > 5 ? [`… 另 ${q.ahead.length - 5} 件`] : [])].join("\n");
   };
   /** 1.5s 内贴进去了就不出声 (mirror 会开它自己的气泡); 还在队里就把实况写进这条气泡, 每 3s
-   *  刷一次, 直到它离队。企微流式气泡活不过 6 分钟, 刷到 5 分钟为止。 */
+   *  刷一次, 直到它离队。企微流式气泡活不过 6 分钟, 刷到 5 分钟为止。
+   *  loading 是纯文案, 不带头 —— 冷目标此刻还挂不出链接 (见 queueNote)。 */
   const watchQueue = async (a: { frame: Parameters<typeof ws.client.replyStream>[0]; streamId: string; principal: string }, id: string, cold: boolean, last = "", until = Date.now() + 300_000, wait = 1500): Promise<void> => {
     await sleep(wait);
-    const note = queueNote(id, a.principal, cold);
-    if (!note || Date.now() > until) return;
-    if (note !== last) await ws.client.replyStream(a.frame, a.streamId, withTagHeader(a.principal, note), false).catch(() => undefined);
-    return watchQueue(a, id, cold, note, until, 3000);
+    const q = events.queue(id);
+    if (!q || Date.now() > until) return;
+    const note = queueNote(q, a.principal, cold);
+    if (note && note !== last) await ws.client.replyStream(a.frame, a.streamId, note === LOADING ? note : withTagHeader(a.principal, note), false).catch(() => undefined);
+    // queued / dispatching 之外没有「排队实况」可言 —— 收工, 气泡从此归 mirror。
+    if (!["queued", "dispatching"].includes(q.execution)) return;
+    return watchQueue(a, id, cold, note || last, until, 3000);
   };
   installInboundRouter(ws.client, cfg, log, { ...bridge, dispatch: async (a) => {
     if (a.text.trimStart().startsWith("/")) { await handedOff(a.principal); await bridge.dispatch(a); return; }
