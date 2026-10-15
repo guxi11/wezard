@@ -7,7 +7,6 @@
 //   断点 视角 role 自己的 /clear /new
 import { renderCutMark, renderTurnGroup, splitReminders, escHtml, fmtTs, hashStr, tagSig, turnUsageChips, type Handoff, type HandoffDeco, type TurnFragment } from "./detail-render.js";
 import { isTurn, staleAt, turnDone } from "./chat-view.js";
-import { isKeepaliveTurn } from "./keepalive.js";
 import type { DetailRecord, MarkDetailRecord, TurnDetailRecord } from "./detail-store.js";
 import { jobProgress, type MemberRole, type WorldFactJob } from "./world.js";
 import { channelOf, doneAt, injectTurnsOf, teammateOf, unwrapMates, type Directory, type Msg } from "./role-view.js";
@@ -27,8 +26,6 @@ export interface MsgFragment {
   /** 公开频道 base; "" = 私聊。 */
   channel: string;
   ts: number;
-  /** 保温 ping —— 客户端把相邻的几条折成一行, 不当气泡画。 */
-  ping: boolean;
   html: string;
   /** 出消息这一轮的账 (呼吸点 + 模型 / token / 耗时) —— 写在气泡外名字那一行; 其余为 ""。 */
   meta: string;
@@ -279,7 +276,6 @@ export const renderMsg = (m: Msg, records: readonly DetailRecord[], dir: Directo
   const fin = doneAt(m);
   return {
     id: m.id, turnId: r.id, dir: m.dir, ...base(m, dir), ts: m.ts,
-    ping: isKeepaliveTurn(r),
     html, meta, sig: hashStr(html + meta),
     staleAt: live ? staleAt(r) : 0,
     ...(fin !== undefined ? { fin } : {}),
@@ -290,7 +286,7 @@ export const renderMark = (mk: MarkDetailRecord, role: string, dir: Directory): 
   const f = renderCutMark(mk);
   return {
     id: `m:${mk.id}`, turnId: mk.id, dir: "mark", ...base({ from: role, to: role, channel: "" }, dir),
-    ts: mk.createdAt, ping: false, html: f.html, meta: "", sig: f.sig, staleAt: 0,
+    ts: mk.createdAt, html: f.html, meta: "", sig: f.sig, staleAt: 0,
   };
 };
 
@@ -326,7 +322,7 @@ export const renderJobMarks = (j: WorldFactJob, dir: Directory, all: readonly Wo
   const members = j.members.length ? `<ul class="jmem">${j.members.map((mm) => memberLine(mm, dir, j.status === "closed")).join("")}</ul>` : "";
   const row = (phase: "open" | "close", ts: number, body: string): MsgFragment => {
     const html = tagSig(`<div class="tg-job ${phase}" data-key="j:${escHtml(j.id)}:${phase}">${body}</div>`);
-    return { id: `j:${j.id}:${phase}`, turnId: j.id, dir: "mark", ...base(owner, dir), ts, ping: false, html, meta: "", sig: hashStr(html), staleAt: 0 };
+    return { id: `j:${j.id}:${phase}`, turnId: j.id, dir: "mark", ...base(owner, dir), ts, html, meta: "", sig: hashStr(html), staleAt: 0 };
   };
   // 计划 / 结论是人写的 markdown, 换行要留着: 交给客户端同一个 markdown 渲染 (breaks:true)。
   const md = (cls: string, text?: string) =>

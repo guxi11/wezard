@@ -14,8 +14,8 @@
 //     rename the whole project dir; per-agent offsets survive the move since a
 //     rename preserves the byte prefix);
 //   • line classification reuses the backend normalizer (claude identity,
-//     codebuddy schema adapter), then emits a lean item stream — no keepalive
-//     / goal / inject-echo logic, those are main-transcript concerns.
+//     codebuddy schema adapter), then emits a lean item stream — no
+//     goal / inject-echo logic, those are main-transcript concerns.
 //
 // Claude subagent lines carry `isSidechain:true` — the main renderLine drops
 // those; here they are the content, so the gate is intentionally absent.
@@ -108,7 +108,7 @@ const resultText = (c: { content?: string | Array<{ type?: string; text?: string
 };
 
 // 单条归一化行 → items。与 mirror-bridge 的 renderLine 同源逻辑的精简版:
-// 去掉 keepalive / goal / inject-echo / skill_output (主会话专属), 保留
+// 去掉 goal / inject-echo / skill_output (主会话专属), 保留
 // text(three-state final) / tool_use 分组 / tool_result / usage / 终态判定。
 const classifyLine = (line: LineShape): SubagentItem[] => {
   const out: SubagentItem[] = [];

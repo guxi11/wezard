@@ -286,17 +286,15 @@ server.registerTool(
       chat: z.string().optional().describe("home 聊天名。省略 = 你的聊天。"),
       cli: z.enum(["claude", "claude-internal", "codebuddy", "codex"]).optional().describe("兼容旧参数; 新建 pane 统一使用配置的 wrc.defaultCli。"),
       model: z.string().optional().describe(MODEL_DOC),
-      keepalive: z.boolean().optional().describe("要不要保温。省略按配置。"),
     },
   },
-  async ({ cwd, name, chat, cli, model, keepalive }) =>
+  async ({ cwd, name, chat, cli, model }) =>
     unwrap("new_claude_session", await daemonPost("/sessions/new", {
       cwd,
       ...(name ? { name } : {}),
       ...(chat ? { chat } : {}),
       ...(cli ? { cli } : {}),
       ...(model ? { model } : {}),
-      ...(keepalive !== undefined ? { keepalive } : {}),
     })),
 );
 
@@ -339,7 +337,7 @@ server.registerTool(
   {
     title: "Read what another wizard has been saying",
     description:
-      "**不打扰**地读另一个 wizard 的会话: 首行是它此刻的状态 (正在生成 / 空闲 / 停在哪个工具调用上等人点), 下面是它最近 N 个来回的正文 —— `▸` 是别人对它说的, `◂` 是它对这句最新说的一句 (跑完的是终句, 还在跑的是途中最近那句), 最后一条给得最全; 截掉的地方都标了 `…(+N)` / `…(略 N 字)…`。全部从它的 transcript 读: 只有说出来的话, 没有工具调用的过程, 保温的 ping/pong 已经剔掉。回答「.fix 进展如何」「它卡在哪」, 或者判断要不要推它一把, 都读这里。这是**一个会话**的视角 (它从各处听到的都在里面); 要看**一个群**里谁对谁说了什么、或你和它的私聊往来, 用 read_chat。只读, 随便轮询。",
+      "**不打扰**地读另一个 wizard 的会话: 首行是它此刻的状态 (正在生成 / 空闲 / 停在哪个工具调用上等人点), 下面是它最近 N 个来回的正文 —— `▸` 是别人对它说的, `◂` 是它对这句最新说的一句 (跑完的是终句, 还在跑的是途中最近那句), 最后一条给得最全; 截掉的地方都标了 `…(+N)` / `…(略 N 字)…`。全部从它的 transcript 读: 只有说出来的话, 没有工具调用的过程, 回答「.fix 进展如何」「它卡在哪」, 或者判断要不要推它一把, 都读这里。这是**一个会话**的视角 (它从各处听到的都在里面); 要看**一个群**里谁对谁说了什么、或你和它的私聊往来, 用 read_chat。只读, 随便轮询。",
     inputSchema: {
       name: z.string().describe(ADDRESS_DOC),
       turns: z.number().optional().describe("回最近多少个来回 (1-40, 默认 6); 一个来回 = 一句问话 + 它的回答。"),
@@ -355,7 +353,7 @@ server.registerTool(
     description:
       "像人翻聊天记录那样读往来, 一行一句: `[时刻] .谁: .谁 说了什么` (wizard 名字前带 `.`, 人只写名字)。三级收窄, 每一级都可以不给: `role` (谁的视角 —— 只留它说的或听的) → `chat` (哪个群 —— 只留那个群里公开说的) → `target` (和谁 —— 只留与它的往来)。什么都不给 = 你这一轮所在的群: 人说的、各个 wizard 答的、wizard 之间公开说的都在里面。只给 `target` = 你和它的全部往来 (含 tell_peer 默认走的私聊, 群里看不见的那部分); `role` + `target` = 那两方之间; 只给 `role` = 它在所有群与私聊里的往来; 再加 `chat` 就限定在那个群里。没给 `chat` 时每行会标出这句是在哪个聊天 / 私聊里说的。一条消息一行起头, 正文的续行缩进; 还没等到回答的问话行尾标 `(还没有回复)`。\n" +
       "按时间和条数读: 默认回最新的 `limit` 条; `until` = 只看那之前的 (往回翻页), `since` = 从那时起 (只给 `since` 就从它往后数 `limit` 条)。回执末尾给出翻页用的时刻, 原样传回即可; 往回已经没有了会明说到头。\n" +
-      "只有正文: 每个来回取问话和终句, 工具调用的过程不在里面, 保温的 ping/pong 已经剔掉。记录是从各个 wizard 当前会话的 transcript 现拼的: 一个 wizard `/clear` 或交接之前说的不在里面, 除点名的 role / target 外只并最近一周动过的会话。用户说「群里刚才聊了什么」「.fix 之前怎么答的」「我上次让 .docs 干了什么」, 或者你被叫进一个已经聊了一阵的群、需要来龙去脉时调它。要读**某一个 wizard** 会话里的原始对话用 peek_peer。",
+      "只有正文: 每个来回取问话和终句, 工具调用的过程不在里面, 记录是从各个 wizard 当前会话的 transcript 现拼的: 一个 wizard `/clear` 或交接之前说的不在里面, 除点名的 role / target 外只并最近一周动过的会话。用户说「群里刚才聊了什么」「.fix 之前怎么答的」「我上次让 .docs 干了什么」, 或者你被叫进一个已经聊了一阵的群、需要来龙去脉时调它。要读**某一个 wizard** 会话里的原始对话用 peek_peer。",
     inputSchema: {
       role: z.string().optional().describe("谁的视角: wizard 的名字 ('fix' / '.fix') 或人的 userid。省略 = 不限 (给了 `target` 时默认是你自己)。"),
       chat: z.string().optional().describe("哪个群: 聊天名 (wizard_roster 里的 home 聊天名) 或裸 principal。省略 = 不限群 (公开与私聊都算); 三个都省略 = 你这一轮所在的群。"),
@@ -726,7 +724,7 @@ server.registerTool(
   {
     title: "Read wezard config",
     description:
-      "读 wezard 守护进程的配置, 一层一层展开: 不给 path 列各节一行说明; 给 path (点分, 如 'approval.danger' / 'models.tiers.light.model') 列这一层的子项 —— 类型、当前值、默认值、说明, 以及 ✋ (改动要人在卡片上确认) / ↻ (改完要 reload 才生效) 标记, * 标出与默认不同的项; 叶子给完整详情。`models` 下附带各档模型的实际用量做依据。想给人提配置建议时先读它, 再用 config_set 的 dryRun 拿 diff。机器人凭据与口令不可见。Keywords: 设置、配置、cfg、allowFrom、审批、窗口、danger、模型分档、tier、keepalive。",
+      "读 wezard 守护进程的配置, 一层一层展开: 不给 path 列各节一行说明; 给 path (点分, 如 'approval.danger' / 'models.tiers.light.model') 列这一层的子项 —— 类型、当前值、默认值、说明, 以及 ✋ (改动要人在卡片上确认) / ↻ (改完要 reload 才生效) 标记, * 标出与默认不同的项; 叶子给完整详情。`models` 下附带各档模型的实际用量做依据。想给人提配置建议时先读它, 再用 config_set 的 dryRun 拿 diff。机器人凭据与口令不可见。Keywords: 设置、配置、cfg、allowFrom、审批、窗口、danger、模型分档、tier。",
     inputSchema: {
       path: z.string().optional().describe("点分路径, 省略 = 顶层各节。数组项用下标 ('sync.targets.0')。"),
     },
@@ -741,7 +739,7 @@ server.registerTool(
     description:
       "改一项 wezard 配置: 先过 schema 校验 (整份配置一起验, 不会写出让守护进程起不来的值), 再经 config-writer 写进 config.jsonc (注释保留)。`dryRun:true` 只返回改前→改后与 jsonc diff, 不写。权限按路径分级 (config_get 里的 ✋): 放权项 —— allowFrom、approval.*、CLI 二进制与启动参数、sync、监听 / 外送地址、defaultChat —— 守护进程会推一张确认卡给人, 点了才落盘 (几分钟没人点就先回 pending, 点了之后自动写, 结果捎在你下一条消息上, 别重发); 其余直接写。热生效的项写完即用, 其余回包会说要 reload。人让你「改个设置」时先 config_get 找到确切路径。",
     inputSchema: {
-      path: z.string().describe("点分路径, 如 'models.tiers.light.model'、'wrc.mirror.keepalive.rounds'。"),
+      path: z.string().describe("点分路径, 如 'models.tiers.light.model'、'wrc.mirror.brief'。"),
       value: z.any().optional().describe("新值, 按该项类型给 JSON (true / 5 / \"opus\" / [\"a\"] / {...}); 写成字符串的也会按类型解析。op=unset 时省略。"),
       op: z.enum(["set", "add", "remove", "unset"]).optional().describe("set (默认) 整体替换; add / remove 往数组里加 / 删一项 (value 可以是单项或数组); unset 删掉这一项, 回到默认值。"),
       dryRun: z.boolean().optional().describe("true = 只看 diff 与校验结果, 不写、不发卡。"),
@@ -902,13 +900,9 @@ const offspringShape = {
   role: z.enum(["exec", "reviewer", "expert"]).optional().describe("它在这张工单里的角色 (只在带 `job` 时有意义, 记进账本供工单页与名册显示): `exec` 执行 (默认) · `reviewer` 白板评审 · `expert` 借来答问的专家。"),
   return: z.enum(["self", "transfer", "detach", "none"]).optional().describe("带了 task 时这件活的回执去哪, 同 tell_peer 的 `return` (transfer 只用于 wizard 那一笔; 人问的那一轮不在此列)。"),
   for: z.string().optional().describe("带了 task 时这件活为你欠着的哪一笔派的, 同 tell_peer 的 `for`。"),
-  keepalive: z
-    .boolean()
-    .optional()
-    .describe("要不要被 keepalive 心跳保温 (空闲时定期 ping 一下防 prompt cache 过期)。false = 永远不保温, 省下那份 ping 的钱 —— 适合跑腿一次就收工的; true = 明确要保温 —— 适合会长期挂着、随时可能被叫醒接手的。省略则按 daemon 配置的默认值。"),
 };
 
-type Offspring = { lead?: boolean; description: string; name?: string; task?: string; from?: string; detached?: boolean; cwd?: string; chat?: string; cli?: string; model?: string; effort?: string; tier?: string; job?: string; role?: string; keepalive?: boolean; return?: string; for?: string };
+type Offspring = { lead?: boolean; description: string; name?: string; task?: string; from?: string; detached?: boolean; cwd?: string; chat?: string; cli?: string; model?: string; effort?: string; tier?: string; job?: string; role?: string; return?: string; for?: string };
 
 const bear = (tool: string, inherit: boolean) => async (a: Offspring) =>
   unwrap(tool, await daemonPost("/wizard/clone", {
@@ -926,7 +920,6 @@ const bear = (tool: string, inherit: boolean) => async (a: Offspring) =>
     ...(a.model ? { model: a.model } : {}),
     ...(a.effort ? { effort: a.effort } : {}),
     ...(a.tier ? { tier: a.tier } : {}),
-    ...(a.keepalive !== undefined ? { keepalive: a.keepalive } : {}),
     ...(a.return ? { return: a.return } : {}),
     ...(a.for ? { for: a.for } : {}),
     ...(a.lead ? { lead: true } : {}),

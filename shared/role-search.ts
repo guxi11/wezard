@@ -3,9 +3,9 @@
 //
 // 「看得到」与会话窗口同一口径: 公开频道里的每一句 (群窗不按人过滤), 私聊里与我有关的那些;
 // 范围是视角参与过的会话 (convsOf), 不受 session 切片 —— 搜的是全部时间, 跳过去时客户端
-// 自己把 session 放宽到能看见那一句。保温 ping 不是话, 不进结果。
+// 自己把 session 放宽到能看见那一句。
 import { splitReminders } from "./detail-render.js";
-import { convKeyOf, convsOf, isPing, unwrapMates, type Directory, type Msg } from "./role-view.js";
+import { convKeyOf, convsOf, unwrapMates, type Directory, type Msg } from "./role-view.js";
 
 export interface RoleHit { id: string; name: string; label: string; wizard: boolean; description: string }
 export interface ConvHit { key: string; kind: string; name: string; label: string; preview: string; lastTs: number }
@@ -111,7 +111,7 @@ export const searchRole = (msgs: readonly Msg[], role: string, dir: Directory, q
   // 私聊只有与我有关的那几句进得了我的窗口; 公开频道的每一句都在群窗里。
   const visible = (m: Msg): boolean => (!!m.channel || m.from === role || m.to === role) && convBy.has(convKeyOf(m, role));
   const found = msgs
-    .filter((m) => !isPing(m) && visible(m))
+    .filter((m) => visible(m))
     .map((m) => ({ m, text: textOf(m) }))
     .filter((x) => x.text && hit(x.text))
     .reverse();

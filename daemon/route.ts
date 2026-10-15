@@ -33,7 +33,7 @@ export interface RouteRow extends WizardBrief {
   cacheAt?: number;
   /** 这段上下文里碰过的文件 (contextFiles), 相对路径以候选 cwd 为基准。 */
   files: readonly string[];
-  /** 最近几句问话 (去掉了保温 ping)。 */
+  /** 最近几句问话。 */
   asks: readonly string[];
   /** 最近一个来回的一行摘要。 */
   summary: string;

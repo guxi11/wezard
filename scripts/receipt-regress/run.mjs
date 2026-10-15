@@ -201,7 +201,7 @@ const TELL = (name, text, extra = "") =>
 // 生分身串行: 同一 cwd 里同时起几个会话, daemon 认新 sid 时会认错 (「sessionId … already bound」)。
 let spawning = Promise.resolve();
 const spawnOnce = async (name, extra) => {
-  const r = await post("/wizard/clone", { target: root.target, name: real(name), inherit: false, tier: "mini", keepalive: false, description: "receipt-regress 临时分身", ...extra });
+  const r = await post("/wizard/clone", { target: root.target, name: real(name), inherit: false, tier: "mini", description: "receipt-regress 临时分身", ...extra });
   if (r.ok) {
     kids.set(name, r.target);
     await paneGuards.protect(r.target, r.name ?? real(name));
@@ -1064,7 +1064,7 @@ const main = async () => {
   if (chosen.some((x) => !cases[x].unit)) {
     if (!ME.sessionId && !ME.tmuxPane) throw new Error("要在 wizard 会话里跑 (缺会话 id / TMUX_PANE)");
     const birth = spawning.then(async () => {
-      const r = await post("/wizard/clone", { ...ME, name: real("rr-root"), inherit: false, tier: "mini", keepalive: false, description: "receipt-regress 的根" });
+      const r = await post("/wizard/clone", { ...ME, name: real("rr-root"), inherit: false, tier: "mini", description: "receipt-regress 的根" });
       if (!r.ok) throw new Error(`spawn rr-root: ${r.reason}`);
       root = { target: r.target, name: r.name, model: r.model };
       if (shuttingDown) throw new GuardPrerequisiteError("根创建期间开始清理");

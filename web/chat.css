@@ -436,8 +436,8 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .mrow .mb .tool-body section > h2, .mrow .mb .diff-meta,
 .mrow .mb .tool-call > summary:hover { background: var(--bub-soft); border-color: var(--bub-line) }
 .mrow .mb .md-body pre code { background: transparent }
-/* 不是说给人听的 (工具过程框、保温 ping、reminder) 一律白底 —— 底色只留给真正的对话。 */
-.mrow .mb .steps, .ping-fold .mrow { --bub: #fff; --bub-soft: #f6f8fa; --bub-line: #d0d7de }
+/* 不是说给人听的 (工具过程框、reminder) 一律白底 —— 底色只留给真正的对话。 */
+.mrow .mb .steps { --bub: #fff; --bub-soft: #f6f8fa; --bub-line: #d0d7de }
 /* 展开的工具正文 (command / diff / 文件内容) 是裸 section, 吃的是 TURN_CSS 的白底。 */
 .mrow .mb .tool-body section { background: transparent; border-color: var(--bub-line) }
 .mrow .mb .bubble details { border-color: var(--bub-line) }
@@ -509,37 +509,6 @@ button.mchip.rcpt:hover { text-decoration: underline }
 }
 .tg-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; display: none }
 .tg-dot.live { display: block; background: #1a7f37; animation: pulse 1.4s infinite }
-
-/* ── 🏓 keepalive 折叠 ──────────────────────────────────────────────
-   保温 ping 不是对话, 但它是真花销 —— 所以留在时间轴上, 只是收成一行虚线。 */
-/* summary 的灰底 / 底线是 SHARED_CSS 里通用 details 的 —— 圆角得自己裁, 底线只在展开时才是分割线。 */
-.ping-fold { border: 1px dashed #d8dee4; border-radius: 10px; background: #fff; overflow: hidden }
-/* 暂时整条藏起来 —— 行仍折在 details 里, 折叠 / FLIP 逻辑照旧, 删掉这行即恢复。 */
-.ping-fold { display: none }
-.ping-fold:not([open]) > .ping-sum { border-bottom: 0 }
-.ping-fold > .ping-sum {
-  display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: #fff;
-  cursor: pointer; list-style: none; font-size: 11.5px; color: #8c959f;
-  font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums;
-  text-transform: none; letter-spacing: 0; /* SHARED_CSS 的 details summary 会转大写 —— 这里是 wizard 名, 大小写敏感 */
-}
-.ping-fold > .ping-sum::-webkit-details-marker { display: none }
-.ping-fold > .ping-sum::after {
-  content: "›"; margin-left: auto; font-size: 14px; color: #b1bac4;
-  transition: transform .12s;
-}
-.ping-fold[open] > .ping-sum::after { transform: rotate(90deg) }
-.ping-fold > .ping-sum:hover { color: #57606a }
-.ping-fold .pb { color: #57606a; font-weight: 700; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.ping-fold .ps { overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.ping-fold .pt { flex: none; opacity: .8 }
-.ping-fold .ping-body {
-  display: flex; flex-direction: column; gap: 10px; padding: 10px 10px 4px;
-}
-.ping-fold .mcol { max-width: 100% }
-.ping-fold .flip { display: none }
-.ping-fold /* 折叠里的气泡同是白底 —— 描一圈虚线跟对话气泡分开, 与外框一个语气。 */
-.ping-fold .mb :is(.bubble.mq, .say > .bubble) { border: 1px dashed var(--bub-line) }
 
 @media (max-width: 760px) {
   .app { flex-direction: column }

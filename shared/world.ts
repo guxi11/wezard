@@ -18,7 +18,6 @@
 //
 // 纯函数, 无 IO: 注册表侧的东西由调用方以 WorldFacts 喂进来。
 import { baseOfKey, labelFor, stripSigil, tagOfKey } from "./session-label.js";
-import { withoutKeepaliveTurns } from "./keepalive.js";
 import { isTurn, staleAt, isGhostTurn } from "./chat-view.js";
 import type { CharterLineage, CharterRecord, DetailRecord, TurnDetailRecord, TurnItem } from "./detail-store.js";
 import { allMessages, injectTurnsOf, senderOf } from "./role-view.js";
@@ -413,8 +412,7 @@ export const buildWorld = (
     const f = factOf.get(target);
     const rs = (byTarget.get(target) ?? []).sort((a, b) => a.createdAt - b.createdAt);
     const last = rs[rs.length - 1];
-    // 卡片上的「最近一句」是它说过的话, 保温的 pong 不算。
-    const said = withoutKeepaliveTurns(rs).at(-1);
+    const said = rs.at(-1);
     const tag = tagOfKey(target);
     const base = baseOfKey(target);
     const chat = f?.chat ?? facts.chatNames[base] ?? "";

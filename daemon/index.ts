@@ -97,7 +97,6 @@ import { checkDirection } from "./direction.js";
 import { loadJobStore, dutyLine, awaitingAccept, stalledRoots, shelvedRoots, nudgeDue, dayClamp, childrenOf as jobChildren, jobEpisode, rejectReason, ACCEPTS, JOB_MEMBER_MAX, JOB_DEPTH_MAX, depthOf, ancestorsOf as jobAncestors, treeOrder, jobStage, type Accept, type JobMark, type JobRecord, type MemberLive } from "./jobs.js";
 import type { MemberRole } from "../shared/world.js";
 import { cacheTouchMs, cacheTtlSec, clipMiddle, contextFiles, firstStamp, parseClosing, lastContextTokens, lastExchange, lastModel, openingTurn, replyClosedBefore, talkTurns, turnsSince, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
-import { keepalivePingSigs } from "../shared/keepalive.js";
 import { expandHome } from "../shared/paths.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { createWorkflowNodes, type FileVersion, type NodeAttempt } from "./workflow-nodes.js";
@@ -642,7 +641,7 @@ const main = async (): Promise<void> => {
     // `chat:wr…` id nobody can read is how you strand a session in a group the
     // caller has no business in.
     http.register("POST /sessions/new", async (req, res) => {
-      const body = (await readBody(req)) as Partial<{ cwd: string; name: string; tag: string; chat: string; target: string; sessionId: string; tmuxPane: string; cli: CliBackendName; model: string; keepalive: boolean }>;
+      const body = (await readBody(req)) as Partial<{ cwd: string; name: string; tag: string; chat: string; target: string; sessionId: string; tmuxPane: string; cli: CliBackendName; model: string }>;
       const cwd = (body.cwd ?? "").toString().trim();
       if (!cwd) {
         json(res, 400, { ok: false, reason: "cwd required" });
@@ -671,11 +670,9 @@ const main = async (): Promise<void> => {
       const existed = !!wizards.get(target);
       const name = wizards.rename(target, normalizeTag(String(body.name ?? body.tag ?? "")) || tag);
       const model = (body.model ?? "").toString().trim();
-      // 没点名就按配置的 keepalive.spawnDefault 来 —— 调用方明说的永远优先。
-      const keepalive = typeof body.keepalive === "boolean" ? body.keepalive : cfg.wrc.mirror.keepalive.spawnDefault;
-      log.child({ mod: "mirror", sub: "sessions-new", target }).info({ self, cwd, foreign, cli: body.cli, model, keepalive }, "spawning peer session");
+      log.child({ mod: "mirror", sub: "sessions-new", target }).info({ self, cwd, foreign, cli: body.cli, model }, "spawning peer session");
       // silent: 新 wizard 就位不进群 (生命周期事件), 同群的 wizard 从名册增量里得知。
-      const r = await m.newSession(target, name, body.cli, { cwd, model, keepalive, silent: true, guard: () => planStore.allowExternal(target, wizards.get(target)?.name ?? name) });
+      const r = await m.newSession(target, name, body.cli, { cwd, model, silent: true, guard: () => planStore.allowExternal(target, wizards.get(target)?.name ?? name) });
       if (!r.ok && !existed) wizards.drop(target);
       if (r.ok) postRoster(base, [target, self], { op: "born", name: `.${name}`, by: displayName(self), cwd: r.cwd }, subjectOf(wizards.get(target)));
       json(res, r.ok ? 200 : 500, r.ok
@@ -690,7 +687,6 @@ const main = async (): Promise<void> => {
             ...(r.model ? { model: r.model } : {}),
             ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}),
             foreign,
-            keepalive,
             // 调用方之后拿这个串 send_peer / peek_peer 驱动它。
             address: peerAddress(cfg, self, target),
           }
@@ -985,7 +981,6 @@ const main = async (): Promise<void> => {
     // transcript, 退回按时刻取就可能把上一件事的结论当回执。
     // 交接 (见 handoff.ts): 换会话不换身份。这里给它重开、贴话、读旧 transcript 的能力,
     // 闸、回执清点与断点续做在那边。
-    const pingSigs = keepalivePingSigs(cfg.wrc.mirror.keepalive.ping);
     /** 情景记忆 (memory/episodes/<name>.jsonl) 按名字归档; 默认会话没名字时退回 slot / "default"。 */
     const episodeName = (t: string): string => wizards.get(t)?.name || tagOfKey(t) || "default";
     const handoffs = createHandoffs({
@@ -1556,7 +1551,7 @@ const main = async (): Promise<void> => {
       if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
       const { target, foreign } = r;
       const turns = Math.min(Math.max(Number((body as { turns?: number }).turns ?? 6) || 6, 1), 40);
-      // 对话只从 transcript 读 (正文轮次, 去掉保温 ping/pong), 不刮终端: pane 是
+      // 对话只从 transcript 读 (正文轮次), 不刮终端: pane 是
       // 截断的视口加一层 TUI 装饰, 而「它卡在哪」transcript 答得更准 —— 不在转圈
       // 却悬着工具调用, 就是停在审批卡 / 本地弹窗上等人点。
       const peek = await m.peekTurns(target, turns);
@@ -1641,7 +1636,6 @@ const main = async (): Promise<void> => {
       const log_ = renderChatLog(
         sessions.map(logSession),
         { role: role?.name, chat, target: target?.name, since, until, limit, per },
-        keepalivePingSigs(cfg.wrc.mirror.keepalive.ping),
         now,
       );
       const scope = [
@@ -1666,9 +1660,10 @@ const main = async (): Promise<void> => {
     // `/peers/send` 保留为同一个处理函数: 正在跑的 wizard 的 MCP 进程是旧代码, 换名字
     // 不能把它们的通路掐断。
     // 冷与否 = 缓存最近一次被碰 (最近一次真实请求的开始; 读不到退回 mtime) 距今多久 vs 它实际按多长 TTL 写的
-    // (与 route_candidates 同一口径)。
+    // (与 route_candidates 同一口径)。transcript 里没有分层写入记录时按 5min 兜底。
+    const CACHE_TTL_FALLBACK_SEC = 300;
     const touchOf = (p: string): number => { try { return cacheTouchMs(p) || statSync(p).mtimeMs; } catch { return 0; } };
-    const ttlOf = (p: string): number => (cacheTtlSec(p) || cfg.wrc.mirror.keepalive.ttlSec) * 1000;
+    const ttlOf = (p: string): number => (cacheTtlSec(p) || CACHE_TTL_FALLBACK_SEC) * 1000;
     // 被冷门控退回过的 `self\0target` → 到期时刻: 老 MCP 进程原样重发即视为 force。
     const coldRefused = new Map<string, number>();
     type Reply = { status: number; body: Record<string, unknown> };
@@ -1781,9 +1776,9 @@ const main = async (): Promise<void> => {
         if (e.priority === "urgent" && !(await m.idleNow(e.target))) {
           if (await othersTurn(e.target, e.speaker)) return { ok: false, retryable: true, reason: "urgent target now belongs to another actor" };
           const path = m.sessionInfo(e.target)?.jsonlPath;
-          const opening = path ? openingTurn(expandHome(path), pingSigs)?.ms : undefined;
+          const opening = path ? openingTurn(expandHome(path))?.ms : undefined;
           const r = await m.interruptPane(e.target, { guard: () => peerEvents!.valid(e)
-            && m.sessionInfo(e.target)?.jsonlPath === path && (!path || openingTurn(expandHome(path), pingSigs)?.ms === opening) });
+            && m.sessionInfo(e.target)?.jsonlPath === path && (!path || openingTurn(expandHome(path))?.ms === opening) });
           if (!r.ok) return { ok: false, retryable: true, reason: r.reason };
         }
         if (p.attemptId && p.tell) workflow.intent(p.attemptId, p.tell);
@@ -2199,7 +2194,7 @@ const main = async (): Promise<void> => {
 
     // 交接的「重开」一步: 走 /new (杀旧 pane、起新进程) 而不是往原 pane 注入 /clear。
     // /clear 只换会话不换进程 —— MCP 子进程、charter 都还是旧的, 新工具拿不到; 镜像
-    // 还得靠 sid 轮换探测才跟得上。CLI 使用 cfg 的默认 backend; cwd / keepalive 照旧沿用
+    // 还得靠 sid 轮换探测才跟得上。CLI 使用 cfg 的默认 backend; cwd 照旧沿用
     // (排着队的 pendingCwd —— set_workspace 先落的那笔 —— 在这一步被消费, 重开落进新目录)。
     // 同 backend 时模型也沿用, 管家除外 ——
     // 它换上此刻的 router 档 (newSession 里定), 改了 models.router 后交接一次就是让它生效的那一下。
@@ -2209,7 +2204,7 @@ const main = async (): Promise<void> => {
       const cli = cfg.wrc.defaultCli ?? primary.name;
       const model = stewardTierOf(cfg, target) || info?.cli !== cli ? undefined : info?.model || undefined;
       if (!planContinuationAllowed(target)) return Promise.resolve({ ok: false, reason: "workflow continuation withdrawn" });
-      return m.newSession(target, displayName(target) || tagOfKey(target) || target, cli, { model, silent: !p?.announce, warm: true, guard: () => planContinuationAllowed(target) });
+      return m.newSession(target, displayName(target) || tagOfKey(target) || target, cli, { model, silent: !p?.announce, guard: () => planContinuationAllowed(target) });
     };
 
     // POST /handoff — 交接一个 pane 的会话给一个全新会话。先让目标会话把当前工作
@@ -2888,14 +2883,13 @@ const main = async (): Promise<void> => {
       // 「最近」与模型都从 transcript 读, 而且只为列出来的这一页读: 摘要用不指代任何人
       // 的箭头 (读名册的是另一个 wizard), 模型取它真正跑的那个 —— 绑定里的 model 只在
       // 有人显式选过时才有。
-      const warm = keepalivePingSigs(cfg.wrc.mirror.keepalive.ping);
       const inflight = routeInFlight();
       const shown = ranked.slice(0, limit).map((r) => ({
         ...r,
         turns: turnsLine(inflight, r.target),
         duty: dutyLine(jobs.all(), r.target, (t) => `.${displayName(t)}`),
         model: r.model || (r.jsonlPath ? lastModel(r.jsonlPath) : ""),
-        summary: r.jsonlPath ? lastExchange(r.jsonlPath, 80, warm) : "",
+        summary: r.jsonlPath ? lastExchange(r.jsonlPath, 80) : "",
         contextTokens: r.jsonlPath ? lastContextTokens(r.jsonlPath) : 0,
       }));
       json(res, 200, {
@@ -2920,7 +2914,6 @@ const main = async (): Promise<void> => {
      *  调用方只要活着的那几个时, 别替死掉的 pane 付这笔。 */
     const routeRowsOf = async (self: string, keep: (r: { alive: boolean; target: string }) => boolean = () => true): Promise<(RouteRow & { target: string })[]> => {
       ensureChatNames(self);
-      const warm = keepalivePingSigs(cfg.wrc.mirror.keepalive.ping);
       const roster = await rosterOf(self);
       const openJobs = jobs.all();
       const inflight = routeInFlight();
@@ -2937,8 +2930,8 @@ const main = async (): Promise<void> => {
             ...(ttl ? { cacheTtlMs: ttl * 1000 } : {}),
             ...(live ? { cacheAt: cacheTouchMs(live) } : {}),
             files: live ? contextFiles(live) : [],
-            asks: live ? talkTurns(live, 12, warm).filter((t) => t.role === "user").map((t) => t.text) : [],
-            summary: live ? lastExchange(live, 80, warm) : "",
+            asks: live ? talkTurns(live, 12).filter((t) => t.role === "user").map((t) => t.text) : [],
+            summary: live ? lastExchange(live, 80) : "",
           };
         });
     };
@@ -2949,8 +2942,8 @@ const main = async (): Promise<void> => {
       const task = (b.task ?? "").trim();
       if (!task) { json(res, 400, { ok: false, reason: "task is required" }); return; }
       const limit = Math.min(Math.max(Number(b.limit ?? 5) || 5, 1), 20);
-      const cands = rankCandidates(task, (b.cwd ?? "").trim() || m.getCwd(self).runningCwd, await routeRowsOf(self), { now: Date.now(), ttlMs: cfg.wrc.mirror.keepalive.ttlSec * 1000 }).slice(0, limit);
-      json(res, 200, { ok: true, text: renderCandidates(task, cands, Date.now(), cfg.wrc.mirror.keepalive.ttlSec * 1000, homedir()) });
+      const cands = rankCandidates(task, (b.cwd ?? "").trim() || m.getCwd(self).runningCwd, await routeRowsOf(self), { now: Date.now(), ttlMs: CACHE_TTL_FALLBACK_SEC * 1000 }).slice(0, limit);
+      json(res, 200, { ok: true, text: renderCandidates(task, cands, Date.now(), CACHE_TTL_FALLBACK_SEC * 1000, homedir()) });
     });
 
     // 派活收成一步 (见 route.decide): 查候选 → 过成本门控 → 转给已有的或按档白板 spawn →
@@ -2976,7 +2969,7 @@ const main = async (): Promise<void> => {
       const force = b.force === true;
       const to = (b.to ?? "").toString().trim();
       const now = Date.now();
-      const ttlMs = cfg.wrc.mirror.keepalive.ttlSec * 1000;
+      const ttlMs = CACHE_TTL_FALLBACK_SEC * 1000;
       // 占用保护由 decide 统一判断, 留在候选表里说明为什么不能自动复用。
       // 显式 to 保留人为选定; force 只影响成本门, 不绕 lead/工单/连续性保护。
       const pool = to || b.spawn || lead ? [] : await routeRowsOf(self, (r) => r.alive && !!tagOfKey(r.target));
@@ -3123,7 +3116,7 @@ const main = async (): Promise<void> => {
       const birthJob = ((body as { job?: string }).job ?? "").trim();
       if (birthJob) pendingBirthJobs.set(birthJob, (pendingBirthJobs.get(birthJob) ?? 0) + 1);
       try {
-      const b = body as { name?: string; tag?: string; description?: string; inherit?: boolean; detached?: boolean; from?: string; cwd?: string; chat?: string; cli?: CliBackendName; model?: string; effort?: string; tier?: string; task?: string; job?: string; keepalive?: boolean; lead?: boolean };
+      const b = body as { name?: string; tag?: string; description?: string; inherit?: boolean; detached?: boolean; from?: string; cwd?: string; chat?: string; cli?: CliBackendName; model?: string; effort?: string; tier?: string; task?: string; job?: string; lead?: boolean };
       const asker = b.task?.trim() ? askerOf(self) : undefined;
       // 带 task 才是派活: 回执去向同 tell_peer (return / for)。
       const plan = b.task?.trim() && !planned ? planReturn(self, body as Record<string, unknown>) : undefined;
@@ -3245,8 +3238,6 @@ const main = async (): Promise<void> => {
       const name = wizards.rename(target, normalizeTag(askedName) || tag);
       const charter = charterFor(target, { ...(detached ? {} : { parent: self }), forkOf, inherited: inherit, cli: pick.cli });
       const task = (b.task ?? "").toString().trim();
-      // 没点名就按配置的 keepalive.spawnDefault 来 —— 调用方明说的永远优先。
-      const keepalive = typeof b.keepalive === "boolean" ? b.keepalive : cfg.wrc.mirror.keepalive.spawnDefault;
       // 先盖章再生: 分叉出来的 transcript 里躺着被克隆者的旧回复, 时刻早于这一枚章,
       // wait_peer 才不会把它们当成分身对这件活的答复。
       const taskAt = Date.now();
@@ -3264,7 +3255,6 @@ const main = async (): Promise<void> => {
         systemPrompt: charter,
         inherit,
         // Fork initialization carries no task; actual work is durably accepted below.
-        keepalive,
       }).catch((e: unknown) => ({ ok: false as const, reason: `spawn threw: ${String(e)}`, inherited: false }));
       // 生不出来就回滚身份 —— 否则名字被一个永远没有会话的记录占住。
       if (!r.ok) {
@@ -3277,7 +3267,7 @@ const main = async (): Promise<void> => {
       // 出生不再发群气泡 (人要看的是结论, 不是谁生了谁 —— 过程在 rolepage 里);
       // 同群的 wizard 仍要知道群里多了一个成员。工单里的临时工连这条也省掉。
       if (!jobId) {
-        // 模型 / keepalive 不报: 那是生它的那位的事, 旁人要时 wizard_roster 有。
+        // 模型不报: 那是生它的那位的事, 旁人要时 wizard_roster 有。
         postRoster(base, [target, self], {
           op: "born", name: `.${name}`, by: displayName(self), clone: !detached,
           ...(r.inherited ? { ctx: forkOf ? displayName(forkOf) : displayName(self) } : {}),
@@ -3307,7 +3297,7 @@ const main = async (): Promise<void> => {
       } else if (jobId && birthGuard()) {
         jobs.attach(jobId, { target, task: "", spawned: true, ...(roleParam((body as { role?: string }).role) ? { role: roleParam((body as { role?: string }).role) } : {}) });
       }
-      return { status: 200, body: { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, queued: dispatched, ...(dispatched ? { event: dispatchedEvent } : {}), keepalive, ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(r.effort ? { effort: r.effort } : {}), ...(pick.tier ? { tier: pick.tier } : {}), via: pick.via, ...(pick.note ? { tierNote: pick.note } : {}), ...(jobId ? { job: jobId } : {}), ...(detached ? { detached: true } : {}) } };
+      return { status: 200, body: { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, queued: dispatched, ...(dispatched ? { event: dispatchedEvent } : {}), ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(r.effort ? { effort: r.effort } : {}), ...(pick.tier ? { tier: pick.tier } : {}), via: pick.via, ...(pick.note ? { tierNote: pick.note } : {}), ...(jobId ? { job: jobId } : {}), ...(detached ? { detached: true } : {}) } };
       } finally {
         if (birthJob) {
           const remaining = (pendingBirthJobs.get(birthJob) ?? 1) - 1;
@@ -3319,7 +3309,7 @@ const main = async (): Promise<void> => {
       job: jobs.get, attempt: workflow.byTurn, prereq: workflow.prereq,
       spawn: (run, node, state, permit) => bearAs(run.owner, {
         inherit: false, name: state.name, description: node.criteria || `workflow node ${node.id}`,
-        tier: node.tier, cwd: run.plan.cwd, job: run.plan.job, keepalive: false,
+        tier: node.tier, cwd: run.plan.cwd, job: run.plan.job,
       } as PeerBody, permit),
       tell: (run, node, state, after, permit) => tellPeerAs(run.owner, {
         name: state.name, text: node.task + (node.criteria ? `\n\n验收标准: ${node.criteria}` : ""),
@@ -4203,7 +4193,7 @@ const main = async (): Promise<void> => {
         clearAutoWindow(target);
         return r;
       };
-      const spawned = await m.newSession(target, name, undefined, { cwd: memoryRoot(cfg.daemon.stateDir), silent: true, keepalive: false });
+      const spawned = await m.newSession(target, name, undefined, { cwd: memoryRoot(cfg.daemon.stateDir), silent: true });
       if (!spawned.ok) return done({ ok: false, reason: `spawn: ${spawned.reason ?? "unknown"}` });
       const inj = await m.injectText(target, prompt, undefined, { from: { kind: "task", taskId: STEWARD_ID }, channel: "", envelope: stewardEnvelope() });
       if (!inj.ok) return done(inj);

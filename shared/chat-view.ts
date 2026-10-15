@@ -211,11 +211,6 @@ const previewOf = (r: TurnDetailRecord): string => {
   return stripMd(src).slice(0, 120);
 };
 
-// ── keepalive 心跳 ────────────────────────────────────────────────────
-// 保温 ping 记成了一轮 (那份花销是真的), 但它不是对话: 挂机一晚能攒出几十轮
-// ping/pong, 在时间轴上与真实对话等宽排开, 说过的话就被挤出了屏幕。标出来,
-// 让视图把连续的几轮折成一行 (见 web/chat.js 的 foldPings)。识别在 shared/keepalive.ts。
-
 export const isTurn = (r: DetailRecord): r is TurnDetailRecord => r.kind === "turn";
 
 export const isMark = (r: DetailRecord): r is MarkDetailRecord => r.kind === "mark";

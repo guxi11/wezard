@@ -18,7 +18,6 @@
 // 「与这个人的单聊」里默认 wizard 的 target, 两者字面相同, 同一条消息会变成自己对自己说。
 import { baseOfKey, labelFor, stripSigil, tagOfKey } from "./session-label.js";
 import { isGhostTurn, isMark, isPost, isTurn, staleAt, summarizeTag, type TagSummary } from "./chat-view.js";
-import { isKeepaliveTurn } from "./keepalive.js";
 import type { Asker, DetailRecord, MarkDetailRecord, PostDetailRecord, TurnDetailRecord } from "./detail-store.js";
 import { jobProgress, type WorldFactJob, type WorldFacts, type WorldFactWeixin, type WorldFactWizard } from "./world.js";
 
@@ -62,8 +61,6 @@ export const unwrapMates = (q: string): string =>
 export const senderOf = (r: TurnDetailRecord): string => {
   if (r.from?.kind === "peer") return r.from.from || SYSTEM;
   if (r.from?.kind === "task") return `task:${r.from.taskId || "?"}`;
-  // 保温 ping 是守护进程打的, 不是人: 频道上挂着的 speaker 是上一句人话留下的。
-  if (isKeepaliveTurn(r)) return SYSTEM;
   // 先于 speaker: 队友的话落进来时, 频道上挂着的可能还是上一句人话的 speaker。
   const mate = teammateOf(r.userQuery);
   if (mate !== undefined) return SYSTEM;
@@ -73,18 +70,9 @@ export const senderOf = (r: TurnDetailRecord): string => {
   return ch.startsWith("user:") ? humanOf(ch) : SYSTEM;
 };
 
-/** 顶层会话里的轮次: 去空壳、去子 agent (它内联在父轮里)。保温 ping 留着 ——
- *  它不是对话, 但它是真花销, 时间轴上抹掉就等于说这段时间什么都没发生;
- *  视图把它折成一行 (见 isPing)。 */
+/** 顶层会话里的轮次: 去空壳、去子 agent (它内联在父轮里)。 */
 const convTurns = (records: readonly DetailRecord[], now: number): TurnDetailRecord[] =>
   records.filter(isTurn).filter((r) => !!r.target && !r.agent && !isGhostTurn(r, now));
-
-/** 保温 ping 的那一条 —— 进时间轴, 但不进会话列表的条数/预览, 也不算一条关系。 */
-export const isPing = (m: Msg): boolean =>
-  PINGS.get(m.turn) ?? ((v) => (PINGS.set(m.turn, v), v))(isKeepaliveTurn(m.turn));
-/** 按轮次对象记: 判定要对问话跑一串正则, 而 /api/glance 每张卡片都把全部消息筛一遍 ——
- *  关系图几十张卡片就是几十万次。store 里的对象跨请求不变, 轮次一写就换新对象。 */
-const PINGS = new WeakMap<TurnDetailRecord, boolean>();
 
 /** 一个公开频道里听话的那一方: 与人的单聊是那个人; 群里是这条链的链头 (守护进程写 turn /
  *  post 时顺着派活链记下的, 见 Asker) —— 只在他正是在这个群里开的口时才算; 认不出就是
@@ -336,13 +324,10 @@ export const convKeyOf = (m: Msg, role: string): string => (m.channel ? `c:${m.c
 
 /** 「某 role 与某些对端的往来」—— 侧栏会话项 / 子项、会话窗口、关系图卡片的窗口都是它。
  *  peers 空 = 不限对端 (role 参与的全部); chat 给了就只在那个频道 ("" = 私聊), 不给 = 不限。
- *  保温 ping 的对端是系统, 不是这一对里的谁 —— 限定了对端时按它保温的那个 wizard 归:
- *  保温的是 role 或其中一个对端就留着。时间序不变。 */
+ *  时间序不变。 */
 export const talkOf = (msgs: readonly Msg[], role: string, peers: readonly string[] = [], chat?: string): Msg[] => {
   const pick = new Set(peers);
-  const withPeer = (m: Msg): boolean =>
-    isPing(m) ? m.turn.target === role || pick.has(m.turn.target ?? "") : involves(m, role) && pick.has(other(m, role));
-  return msgs.filter((m) => (chat === undefined || m.channel === chat) && (pick.size ? withPeer(m) : involves(m, role)));
+  return msgs.filter((m) => (chat === undefined || m.channel === chat) && (pick.size ? involves(m, role) && pick.has(other(m, role)) : involves(m, role)));
 };
 
 /** `a:<x>` = x 参与的全部对话; `a:<x>|<p1>,<p2>` = x 与这几个对端之间的 —— 不分会话, 按时间排开。
@@ -382,9 +367,9 @@ const speakerPrefix = (dir: Directory, viewer: string, peers?: readonly string[]
     ? undefined
     : (m) => (m.from === viewer ? "" : `${dir.isWizard(m.from) ? "." : ""}${dir.nameOf(m.from)}: `);
 
-/** 一个 talkOf 窗口在列表里的那一行: 最近一句 (按上面的规则带说话人) 与时刻。ping 不是话。 */
+/** 一个 talkOf 窗口在列表里的那一行: 最近一句 (按上面的规则带说话人) 与时刻。 */
 export const glanceOfTalk = (msgs: readonly Msg[], viewer: string, dir: Directory, who: string, peers: readonly string[], chat?: string): Glance => {
-  const ms = talkOf(msgs.filter((m) => !isPing(m)), who, peers, chat);
+  const ms = talkOf(msgs, who, peers, chat);
   return glanceOr(ms, speakerPrefix(dir, viewer, peers));
 };
 
@@ -438,7 +423,7 @@ export interface UnreadIndex {
 }
 
 export const unreadIndex = (all_: readonly Msg[]): UnreadIndex => {
-  const all = all_.filter((m) => !isPing(m));
+  const all = all_;
   const inChannel = channelsOf(all);
   // 谁在哪个群里开过口、私聊里说给谁的 —— 一遍建好, 每个 role 只看它听得到的那几处。
   const speakers = all.reduce((idx, m) => (m.channel ? idx.set(m.channel, (idx.get(m.channel) ?? new Set<string>()).add(m.from)) : idx), new Map<string, Set<string>>());
@@ -457,7 +442,7 @@ export const unreadIndex = (all_: readonly Msg[]): UnreadIndex => {
       return said(from === undefined ? inChannel(ch) : talkOf(inChannel(ch), role, [from]));
     });
     return (m: Msg): boolean => {
-      if (m.from === role || isPing(m) || (m.channel ? !speakers.get(m.channel)?.has(role) : m.to !== role)) return false;
+      if (m.from === role || (m.channel ? !speakers.get(m.channel)?.has(role) : m.to !== role)) return false;
       const ts = finOf(m);
       return ts !== undefined && ts > mark(m.to === role || !m.channel ? `${m.channel}\0${m.from}` : m.channel);
     };
@@ -506,8 +491,7 @@ export interface ConvsOpts {
 /** 一个 role 参与的全部会话, 最近活动在前。群聊只列它**自己开过口**的 —— 住在里面
  *  (home) 或只是被人叫过一声却没答话的, 都不算参与; 私聊则有往来就在列。 */
 export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now: number, opts: ConvsOpts = {}): Conv[] => {
-  // 会话列表讲的是"谁跟谁说过什么", ping 不是话: 条数与预览都不该被它顶掉。
-  const msgs = all_.filter((m) => !isPing(m) && inSpan(opts.span)(m.ts));
+  const msgs = all_.filter((m) => inSpan(opts.span)(m.ts));
   const mine = talkOf(msgs, role);
   // 每一项的账都拿点开它时的那一窗来切 —— 详情区取消息的同一个 windowOf。
   const book = (key: string, withRole: string | undefined, owner: string | undefined): Ledger =>
@@ -572,7 +556,7 @@ const withJobs = (msgs: readonly Msg[]): { jobs?: string[] } => ((js) => (js.len
 
 /** 视角开的、或在里面的工单 —— 主区工单列表的一行, 数据与群 / 私聊同一套 (glance)。不进侧栏。 */
 export const jobConvsOf = (all_: readonly Msg[], role: string, dir: Directory, jobs: readonly WorldFactJob[]): Conv[] => {
-  const msgs = all_.filter((m) => !isPing(m));
+  const msgs = all_;
   return jobs
     .filter((j) => j.owner === role || j.members.some((mm) => mm.target === role))
     .map((j): Conv => {
@@ -593,7 +577,7 @@ export const jobConvsOf = (all_: readonly Msg[], role: string, dir: Directory, j
  *  key 取绝对的 (`c:<base>|<a>|<b>` / `p:<a>|<b>`, 两端排序), 与视角无关。定时与系统不是聊天的一方。 */
 export const chatKeysOf = (all_: readonly Msg[]): Record<string, string[]> => {
   const party = (r: string): boolean => !!r && !r.startsWith("task:") && r !== SYSTEM;
-  const index = all_.filter((m) => !isPing(m)).reduce((idx, m) => {
+  const index = all_.reduce((idx, m) => {
     const add = (r: string, k: string) => idx.set(r, (idx.get(r) ?? new Set<string>()).add(k));
     if (party(m.from) && party(m.to)) {
       const pair = [m.from, m.to].sort().join("|");
@@ -729,7 +713,7 @@ export const roleInfo = (id: string, dir: Directory, facts: WorldFacts, stats: T
   };
 };
 
-/** 页脚总账: 视角 role 自己跑过的全部轮次 (含子 agent 与 ping —— 那都是真花销)。 */
+/** 页脚总账: 视角 role 自己跑过的全部轮次 (含子 agent —— 那都是真花销)。 */
 export const roleStats = (records: readonly DetailRecord[], role: string, now: number, span?: SessionSpan): TagSummary | undefined => {
   const turns = records.filter(isTurn)
     .filter((r) => r.target === role && !isGhostTurn(r, now) && inSpan(span)(r.createdAt))

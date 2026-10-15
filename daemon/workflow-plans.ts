@@ -185,7 +185,7 @@ export const createWorkflowPlanRunner = (store: WorkflowPlans, d: RunnerDeps) =>
         r = store.node(id, node.id, { phase: "spawning" });
         const born = await d.spawn(r, node, r.nodes.find((n) => n.id === node.id)!, p);
         if (born.status !== 200 || typeof born.body.target !== "string" || !born.body.target || born.body.dispatched !== false
-          || born.body.inherited !== false || born.body.keepalive !== false || born.body.cwd !== r.plan.cwd || born.body.name !== state.name) {
+          || born.body.inherited !== false || born.body.cwd !== r.plan.cwd || born.body.name !== state.name) {
           store.node(id, node.id, { phase: "spawn-unknown", reason: String(born.body.reason ?? "executor creation unconfirmed"), birth: born.body });
           return;
         }

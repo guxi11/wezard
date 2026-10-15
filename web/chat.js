@@ -1338,61 +1338,11 @@
       ' aria-label="' + esc(sw ? '切到 ' + nameOf(other) + ' 的视角' : '') + '">' +
       (sw ? '<span class="fi"><span class="fn">' + esc(nameOf(other)) + '</span>' + CHEVRON + '</span>' : '') + '</button>';
     return '<div class="mrow ' + (mine ? 'mine' : 'them') + (two ? ' two' : '') + '" data-id="' + esc(m.id) + '" data-turn="' + esc(m.turnId || m.id) + '" data-ts="' + m.ts + '"' +
-      (m.ping ? ' data-ping="1" data-ping-who="' + esc(roleName(m.dir === 'in' ? m.to : m.from)) + '"' : '') + ' data-sig="' + esc(m.sig) + '" data-stale-at="' + (m.staleAt || 0) + '">' +
+      ' data-sig="' + esc(m.sig) + '" data-stale-at="' + (m.staleAt || 0) + '">' +
       '<div class="mcol"><div class="mwho">' + who + '</div><div class="mb">' + jobChips(withTo(m.dir === 'out' ? signCut(m.html, m.from) : m.html)) + '</div></div>' +
       flip +
     '</div>';
   };
-  // ── 🏓 保温 ping 的折叠 ──
-  // ping 不是对话, 但它是真花销, 从时间轴上抹掉就等于说这段时间什么都没发生。
-  // 一次 ping 落成两行 (问 + pong); 相邻的整串收进一条虚线, 展开才见正文。
-  // 展开态是整页一个开关 —— 折行没有稳定 id, 而"想看 ping"是个一次性的念头。
-  var PING_OPEN = false;
-  var unfoldPings = function (root) {
-    root.querySelectorAll('.ping-fold').forEach(function (f) {
-      var body = f.querySelector('.ping-body');
-      while (body && body.firstChild) root.insertBefore(body.firstChild, f);
-      f.remove();
-    });
-  };
-  var foldPings = function (root) {
-    var run = [];
-    var flush = function (before) {
-      if (!run.length) { return; }
-      // 群窗里几个 wizard 同时挂机, 它们的 ping 会交错成一串 —— 按 wizard 分开计数, 不相加。
-      var seen = {}, per = {}, order = [];
-      run.forEach(function (r) {
-        var t = r.getAttribute('data-turn') || r.getAttribute('data-id');
-        var w = r.getAttribute('data-ping-who') || '';
-        if (seen[t]) { return; }
-        seen[t] = 1;
-        if (!per[w]) { per[w] = 0; order.push(w); }
-        per[w]++;
-      });
-      var tally = order.map(function (w) { return (w ? '.' + w + ' ' : '') + '×' + per[w]; }).join(' · ');
-      var t0 = Number(run[0].getAttribute('data-ts') || 0);
-      var t1 = Number(run[run.length - 1].getAttribute('data-ts') || 0);
-      var span = fmtHM(t0) + (fmtHM(t1) !== fmtHM(t0) ? ' – ' + fmtHM(t1) : '');
-      var d = document.createElement('details');
-      d.className = 'ping-fold';
-      d.open = PING_OPEN;
-      d.innerHTML = '<summary class="ping-sum"><span class="pb">🏓 ' + esc(tally) + '</span>' +
-        '<span class="ps">保温 ping</span><span class="pt">' + esc(span) + '</span></summary>' +
-        '<div class="ping-body"></div>';
-      root.insertBefore(d, before);
-      var body = d.querySelector('.ping-body');
-      run.forEach(function (r) { body.appendChild(r); });
-      d.addEventListener('toggle', function () { PING_OPEN = d.open; });
-      run = [];
-    };
-    // 先取快照 —— flush 会把行搬进 details, 边遍历边改 children 会漏行。
-    [].slice.call(root.children).forEach(function (el) {
-      if (el.classList && el.classList.contains('mrow') && el.getAttribute('data-ping') === '1') { run.push(el); return; }
-      flush(el);
-    });
-    flush(null);
-  };
-
   var bindRow = function (el) {
     bindGo(el, '.flip[data-r]:not([disabled]), .mwho .go[data-r], .tg-cut .go[data-r], .tg-mark .go[data-r], .tg-job .go[data-r]');
     // 定时行开的是页面视角自己的日程: 片段不随视角 (服务端只标发话方), 能不能点在这里按 ROLE 定;
@@ -1450,12 +1400,10 @@
       // 按时刻兜底的那一页可能带回同一毫秒、已经画着的几条 —— 按 id 去重。
       var fresh = d.msgs.filter(function (m) { return !rowNode(m.id); });
       fresh.forEach(function (m) { S.frags[m.id] = m; });
-      unfoldPings(inner);
       var page = frag(moreBtn(d) + fresh.map(rowHTML).join(''));
       bindRow(page); render(page);
       while (page.lastChild) inner.insertBefore(page.lastChild, inner.firstChild);
       bindMore();
-      foldPings(inner);
       expireRows();
       if (keep) keep();
       see(fresh);
@@ -1478,7 +1426,6 @@
       bindMore();
       bindRow(inner);
       render(inner);
-      foldPings(inner);
       expireRows();
       settleAbove();
       applyFold(inner);
@@ -1497,8 +1444,6 @@
     S.frags[m.id] = m;
     see([m]);
     if (cur && cur.getAttribute('data-sig') === m.sig) return;
-    // 折行会把 .mrow 收进 details, 而下面的按时间插位假定它们都是 inner 的直接子节点。
-    unfoldPings(inner);
     var next = frag(rowHTML(m)).firstElementChild;
     if (!cur) {
       // 按时间插: SSE 推来的可能是一条更早的消息 (长轮次的入消息晚于别人的回复落盘)。
@@ -1521,7 +1466,6 @@
         cur.replaceWith(next); bindRow(next); render(next);
       }
     }
-    foldPings(inner);
     settleAbove();
     applyFold(inner);
     if (stick) toBottom(true);
@@ -1803,7 +1747,6 @@
   };
   /** 已上屏的行拿手里的片段就地重包 (左右、署名), 已渲染的正文整块搬过去。dropMarks: 断点一并撤下。 */
   var rewrapRows = function (dropMarks) {
-    unfoldPings(inner);
     [].slice.call(inner.querySelectorAll('.mrow')).forEach(function (row) {
       var m = S.frags[row.getAttribute('data-id')];
       if (!m || (dropMarks && m.dir === 'mark')) { if (dropMarks) row.remove(); return; }
@@ -1813,7 +1756,6 @@
       row.replaceWith(next);
       bindRow(next);
     });
-    foldPings(inner);
     expireRows();
   };
   /** 同一窗口换视角: 拿手里的片段就地重包左右, 已渲染的正文整块搬过去。

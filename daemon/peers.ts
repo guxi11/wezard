@@ -13,7 +13,6 @@ import { existsSync, openSync, readSync, closeSync, statSync } from "node:fs";
 import { backendForPath, type CliBackendName } from "../shared/cli-backends.js";
 import { clipLine, truncate, truncateWithCount } from "../shared/std.js";
 import { tildePath, type Part } from "./notices.js";
-import { isKeepalivePingText, withoutKeepalive } from "../shared/keepalive.js";
 import { envelopeAttrs, parseEnvelope, renderReminder, type Envelope, type ReceiptRoute, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
 import type { Terminal } from "../shared/turn-state.js";
 
@@ -29,7 +28,7 @@ const TAIL_BYTES = 64 * 1024;
 // …除非单行本身就比窗口大。Claude Code 每轮往 transcript 里写若干 `attachment`
 // 行, 其中 `prompt_snapshot` 带完整系统提示 + skill 清单 —— 实测一行 157KB。一条
 // 这样的行就能把 64K 的窗口整个吃掉, 于是尾部根本够不到真正的对话行: lastText 空、
-// summarizeTail 空、keepalive 的两个时钟一起退化成 mtime。窗口因此按需长大: 常见
+// summarizeTail 空。窗口因此按需长大: 常见
 // 情况仍然只读 64K, 读不到要的东西才翻四倍, 到这个上限为止 (再大就不是"尾巴"了)。
 const TAIL_BYTES_MAX = 2 * 1024 * 1024;
 
@@ -115,8 +114,7 @@ export interface Turn {
   text: string;
   /** 这一句挂着的信封 (谁说的、在哪说的); 没挂 = 人在这个会话的 home 聊天里说的。 */
   env?: Envelope;
-  /** Wall-clock epoch ms from the line's own `timestamp`; 0 if absent/unparsable.
-   *  Lets keepalive anchor realIdle to a message's actual time, not file mtime. */
+  /** Wall-clock epoch ms from the line's own `timestamp`; 0 if absent/unparsable. */
   ms?: number;
   /** assistant 的中途句: 这条 message 以工具调用收尾 (stop_reason=tool_use), 后面还有
    *  话, 不可能是这一轮的终句。后端不写 stop_reason (codebuddy) 就不标。 */
@@ -163,23 +161,16 @@ export const lastUserTurn = (jsonlPath: string): Turn | undefined =>
   readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, true), (ts) => ts.some((t) => t.role === "user"))
     .filter((t) => t.role === "user").at(-1);
 
-/** `tailTurns` 去掉保温 ping/pong 之后的最后 `n` 轮 —— 凡是交给另一个 wizard (或人)
- *  **读**的都走这里: 挂机一晚的会话尾巴上全是 ping/pong, 照 tailTurns 数出来的
- *  「最近 6 轮」一句真话都没有, 「最后一条回复」是一个 pong。 */
-export const talkTurns = (jsonlPath: string, n: number, pingSigs: readonly string[] = [], keepLines = false, marks = false): Turn[] => {
-  const clean = (ts: Turn[]): Turn[] => withoutKeepalive(ts, pingSigs);
-  return clean(readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, keepLines, marks), (ts) => clean(ts).length >= n)).slice(-n);
-};
+/** 最后 `n` 轮对话 —— 凡是交给另一个 wizard (或人)**读**的都走这里。 */
+export const talkTurns = (jsonlPath: string, n: number, keepLines = false, marks = false): Turn[] =>
+  readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, keepLines, marks), (ts) => ts.length >= n).slice(-n);
 
 /** 从 `sinceMs` 起的全部来回 (带标记): 往回读到越过它的第一行为止, **不受 TAIL_BYTES_MAX
  *  限制**。按条数读尾巴的 talkTurns 管不了一轮很长的情形: 一轮里的大段工具输出 (读文件、
  *  跑命令) 能把开这一轮的那句推到 2MB 之外 —— 回执就再也定位不到问话, 对方答完了也只能
  *  报 silent。问话一定晚于发话时刻, 所以读到发话时刻之前就够了, 再大的文件也只读这一段。 */
-export const turnsSince = (jsonlPath: string, sinceMs: number, pingSigs: readonly string[] = []): Turn[] =>
-  withoutKeepalive(
-    readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, true, true), (ts) => ts.some((t) => !!t.ms && t.ms < sinceMs), Infinity),
-    pingSigs,
-  );
+export const turnsSince = (jsonlPath: string, sinceMs: number): Turn[] =>
+  readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, true, true), (ts) => ts.some((t) => !!t.ms && t.ms < sinceMs), Infinity);
 
 /** 一个会话的来回, 每个来回 = 一句问话 + 它之后的全部回答 (途中的话在前, 终句在
  *  最后), 旧的在前。读多深由时间窗定, 调用方再按时刻与条数裁:
@@ -190,18 +181,16 @@ export const turnsSince = (jsonlPath: string, sinceMs: number, pingSigs: readonl
 export const talkRounds = (
   jsonlPath: string,
   rounds: number,
-  pingSigs: readonly string[] = [],
   win: { since?: number; until?: number } = {},
 ): Turn[][] => {
   const { since, until = Infinity } = win;
-  const clean = (ts: Turn[]): Turn[] => withoutKeepalive(ts, pingSigs);
   const enough = (ts: Turn[]): boolean => {
-    const seen = clean(ts).filter((t) => (t.ms ?? 0) < until);
+    const seen = ts.filter((t) => (t.ms ?? 0) < until);
     return since !== undefined
       ? seen.length > 0 && (seen[0]!.ms ?? 0) < since
       : seen.filter((t) => t.role === "user").length > rounds;
   };
-  return clean(readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, true), enough))
+  return readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, true), enough)
     .reduce<Turn[][]>((acc, t) => {
       if (t.role === "user" || acc.length === 0) acc.push([t]);
       else acc[acc.length - 1]!.push(t);
@@ -244,10 +233,7 @@ const parseTurns = (jsonlPath: string, raw: string, keepLines = false, marks = f
       const text = (keepLines ? bare : bare.replace(/\s+/g, " ")).trim();
       // Claude writes ISO timestamp strings; CodeBuddy writes epoch-ms NUMBERS.
       // Date.parse(number) coerces to a bare digit-string and returns NaN —
-      // which silently stamped every CodeBuddy turn ms=0, degraded
-      // keepaliveStamps to mtime fallback, and let the keepalive's own ping
-      // writes (plus snapshot/summary churn) read as REAL activity that reset
-      // the round budget without bound.
+      // which silently stamped every CodeBuddy turn ms=0.
       const ms = stampMs((parsed as { timestamp?: unknown }).timestamp);
       const mid = role === "assistant" && (row.mid === true || row.message?.stop_reason === "tool_use");
       if (!text && marks && role === "user" && raw.includes("<task-notification")) return [{ role, text: "", ms, notice: true } as Turn];
@@ -282,26 +268,12 @@ const blockTextWithTools = (content: unknown): string => {
     .join(" ");
 };
 
-/** The keepalive ping this session's newest words answer: the text of the LAST
- *  user turn when that turn is a ping, else undefined. Read from the transcript
- *  on purpose — "was a keepalive sent" must survive whatever forgot the
- *  in-memory swallow (a daemon reload lands between the ping and its pong, and
- *  the restored tail starts past the ping line). tool_result-only user lines
- *  carry no text and are not turns, so a ping answered through a tool call
- *  still reads as open. */
-export const openKeepalivePing = (jsonlPath: string, pingSigs: readonly string[]): string | undefined => {
-  const last = tailTurns(jsonlPath, 8).filter((t) => t.role === "user").at(-1);
-  return last && isKeepalivePingText(last.text, pingSigs) ? last.text : undefined;
-};
-
 /** Like `tailTurns` but the flattened text includes tool_use/tool_result
  *  content — the dedup-only reader so quoted tool bubbles match context.
  *  `n` counts logical conversation turns (user→assistant transitions), not
  *  individual transcript records — essential for backends like CodeBuddy
  *  where a single turn is split across many jsonl lines (text, function_call,
- *  function_call_result, reasoning, …).
- *  `pingSigs` 剔除 keepalive ping 及其应答后再数轮次(有效 tail) —— 挂机久了
- *  ping/pong 会把真实轮次挤出窗口,引用去重 miss → 原文被重复注入。 */
+ *  function_call_result, reasoning, …). */
 interface ToolEntry { role: string; text: string }
 
 /** 纯解析: transcript 原文 → 条目 (文本含 tool_use/tool_result)。 */
@@ -335,14 +307,11 @@ const cutForTurns = (entries: readonly ToolEntry[], n: number): number => {
   return 0;
 };
 
-export const tailTurnsWithTools = (jsonlPath: string, n = 3, pingSigs: readonly string[] = []): string => {
-  const entries = withoutKeepalive(
-    readTailUntil(
-      jsonlPath,
-      (raw) => parseToolEntries(jsonlPath, raw),
-      (es) => countTurns(withoutKeepalive(es, pingSigs)) >= n,
-    ),
-    pingSigs,
+export const tailTurnsWithTools = (jsonlPath: string, n = 3): string => {
+  const entries = readTailUntil(
+    jsonlPath,
+    (raw) => parseToolEntries(jsonlPath, raw),
+    (es) => countTurns(es) >= n,
   );
   return entries.slice(cutForTurns(entries, n)).map((e) => e.text).join("\n");
 };
@@ -353,9 +322,9 @@ export const tailTurnsWithTools = (jsonlPath: string, n = 3, pingSigs: readonly 
 const stripMd = (s: string): string => s.replace(/[`*_~|]/g, "").replace(/\s+/g, " ").trim();
 
 /** One-line "what is this session doing" preview, for list rendering. */
-export const summarizeTail = (jsonlPath: string, n = 3, per = 80, pingSigs: readonly string[] = []): string => {
+export const summarizeTail = (jsonlPath: string, n = 3, per = 80): string => {
   if (!existsSync(jsonlPath)) return "(新会话 · 暂无对话)";
-  const turns = talkTurns(jsonlPath, n, pingSigs);
+  const turns = talkTurns(jsonlPath, n);
   if (turns.length === 0) return "(暂无对话)";
   // 截了就得看得出截了: 裸 slice 出来的半句话, 读的人会当成它就说了这么多。
   return turns.map((t) => `${t.role === "user" ? "你" : "AI"}: ${truncate(stripMd(t.text), per)}`).join(" · ");
@@ -364,8 +333,8 @@ export const summarizeTail = (jsonlPath: string, n = 3, per = 80, pingSigs: read
 /** 最近一个来回, 压成一行: `▸ 问话 ◂ 它最新的一句`。名册用它 —— 读名册的是另一个
  *  wizard, summarizeTail 的「你:」在它眼里指的是它自己; 这里用 peek_peer 同款的
  *  箭头, 不指代任何人。没有对话 = ""。 */
-export const lastExchange = (jsonlPath: string, per = 80, pingSigs: readonly string[] = []): string => {
-  const round = talkRounds(jsonlPath, 1, pingSigs).at(-1);
+export const lastExchange = (jsonlPath: string, per = 80): string => {
+  const round = talkRounds(jsonlPath, 1).at(-1);
   if (!round) return "";
   const line = (t: Turn): string => truncate(stripMd(t.text), per);
   return [`▸ ${line(round[0]!)}`, ...(round.length > 1 ? [`◂ ${line(round.at(-1)!)}`] : [])].join(" ");
@@ -468,8 +437,8 @@ export const parseClosing = (text: string, max = 800): Closing => {
 
 /** The peer's most recent assistant message — the handoff payload when one
  *  agent drives another ("take #fix's conclusion and review it"). */
-export const lastAssistantText = (jsonlPath: string, max = 4000, pingSigs: readonly string[] = []): string =>
-  clipMiddle(talkTurns(jsonlPath, 40, pingSigs).filter((t) => t.role === "assistant").at(-1)?.text ?? "", max);
+export const lastAssistantText = (jsonlPath: string, max = 4000): string =>
+  clipMiddle(talkTurns(jsonlPath, 40).filter((t) => t.role === "assistant").at(-1)?.text ?? "", max);
 
 /** 掐中间: 来龙去脉在头、结论在尾, 超长时丢的该是中段。(从尾巴截会把收口那一行
  *  截掉 —— 而那恰恰是对方最想读的。) */
@@ -490,10 +459,9 @@ const inFence = (s: string): boolean => (s.match(/^[ \t]*(?:```|~~~)/gm)?.length
  *  「最后一条 assistant 文本」本身不带归属: 那句话没被接住、或者它停在一个等人点
  *  的弹窗上时, 最后一条是**上一件事**的答案, 原样交回去就是拿旧结论冒充新结论。
  *  发话时刻是最便宜的关联 id (A2A 的 taskId 在这里的等价物): 早于它的一律不算。
- *  没有时间戳的行 (ms=0) 无从判断, 放行 —— 退化成旧行为, 而不是把回复吞掉。
- *  保温的 pong 不算回复: 它比真正的答案晚, 不剔掉的话等的人拿到的就是一个 "pong"。 */
-export const lastReply = (jsonlPath: string, sinceMs = 0, pingSigs: readonly string[] = []): string =>
-  talkTurns(jsonlPath, 40, pingSigs, true, true)
+ *  没有时间戳的行 (ms=0) 无从判断, 放行 —— 退化成旧行为, 而不是把回复吞掉。 */
+export const lastReply = (jsonlPath: string, sinceMs = 0): string =>
+  talkTurns(jsonlPath, 40, true, true)
     .filter((t) => t.role === "assistant" && (!t.ms || t.ms >= sinceMs))
     .at(-1)?.text ?? "";
 
@@ -513,17 +481,16 @@ const ASK_SLACK_MS = 60_000;
  *  接着等, 绝不能退回按时刻取把上一件事的结论当成这一次的回执 (receipts 只用前者分辨
  *  「它在忙前面的轮」与「读进了却没答」)。 */
 /** 找问话的那一段: 有发话时刻就读到它之前 (问话可以离尾巴很远), 没有 (老调用) 退回最近 80 条。 */
-const askWindow = (jsonlPath: string, sinceMs: number, pingSigs: readonly string[]): Turn[] =>
-  sinceMs > 0 ? turnsSince(jsonlPath, sinceMs - ASK_SLACK_MS, pingSigs) : talkTurns(jsonlPath, 80, pingSigs, true, true);
+const askWindow = (jsonlPath: string, sinceMs: number): Turn[] =>
+  sinceMs > 0 ? turnsSince(jsonlPath, sinceMs - ASK_SLACK_MS) : talkTurns(jsonlPath, 80, true, true);
 
 export const replyToPeer = (
   jsonlPath: string,
   fromName: string,
   sinceMs = 0,
-  pingSigs: readonly string[] = [],
   turn?: string,
 ): PeerReply | undefined => {
-  const r = answerOf(askWindow(jsonlPath, sinceMs, pingSigs), fromName, sinceMs, turn);
+  const r = answerOf(askWindow(jsonlPath, sinceMs), fromName, sinceMs, turn);
   return r && { text: r.text, ...(r.error ? { error: true } : {}) };
 };
 
@@ -541,10 +508,9 @@ export const replyClosedBefore = (
   fromName: string,
   sinceMs: number,
   untilMs: number,
-  pingSigs: readonly string[] = [],
   turn?: string,
 ): string | undefined => {
-  const r = answerOf(askWindow(jsonlPath, sinceMs, pingSigs), fromName, sinceMs, turn);
+  const r = answerOf(askWindow(jsonlPath, sinceMs), fromName, sinceMs, turn);
   return r && (r.closedAt !== undefined && r.closedAt < untilMs && !r.error ? r.text : "");
 };
 
@@ -559,7 +525,7 @@ export const replyClosedBefore = (
  *  接着答, 终句即答案。`closedAt` = 关上这一轮的那一行的时刻
  *  (还开着 = undefined)。
  *  例外: 以 CLI 报错 (`apiError`) 收尾之后紧跟的那句**没有信封**、只是叫它接着干的
- *  user 行 (保温的 `continue` 续跑、或人敲的「继续」) 是在续这一轮, 不切 —— 否则续跑
+ *  user 行 (报错后的 `continue` 续跑、或人敲的「继续」) 是在续这一轮, 不切 —— 否则续跑
  *  出来的答案永远定位不到, 回执只拿得到那句报错。人说的别的话照样切: 那是一件新事,
  *  它的答案不能当回执投出去。`error` = 终句是报错。
  *  `turn` 给了就先按它找问话 (信封上的件号, 不受名字变动与时钟抖动影响); 老信封没有
@@ -579,11 +545,8 @@ export const openingOf = <T extends MarkedTurn>(ts: readonly T[]): T | undefined
 
 /** 开最近这一轮的那句 user 行, 往回读到有为止 (不受 TAIL_BYTES_MAX 限制) —— 一轮再长,
  *  「这一轮是谁发起的」也要认得出 (父 k、链头、打断会不会误伤别人的活都靠它)。 */
-export const openingTurn = (jsonlPath: string, pingSigs: readonly string[] = []): Turn | undefined =>
-  openingOf(withoutKeepalive(
-    readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, false, true), (ts) => !!openingOf(withoutKeepalive(ts, pingSigs)), Infinity),
-    pingSigs,
-  ));
+export const openingTurn = (jsonlPath: string): Turn | undefined =>
+  openingOf(readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, false, true), (ts) => !!openingOf(ts), Infinity));
 const answerOf = (
   ts: readonly { role: string; text: string; ms?: number; mid?: true; apiError?: true; notice?: true; queued?: true; env?: AskEnv }[],
   fromName: string,
@@ -734,8 +697,8 @@ const FAILED: Record<Exclude<Terminal, "done">, string> = {
 /** Prompt-token size of the session's most recent turn: input + both cache
  *  tiers = how full the context window is, i.e. exactly what a cold cache would
  *  have to re-write at 1.25x. Read from the last assistant usage snapshot in
- *  the tail; 0 when no usage is on record yet. Drives the keepalive decision
- *  and the "session size" note. */
+ *  the tail; 0 when no usage is on record yet. Drives the "session size" note
+ *  and route-candidate wake-cost estimates. */
 export const lastContextTokens = (jsonlPath: string): number =>
   readTailUntil(jsonlPath, (raw) => pickContextTokens(jsonlPath, raw), (v) => v > 0);
 
@@ -856,71 +819,6 @@ const toolPaths = (input: unknown): string[] => {
   return [...named, ...shell.filter((w) => !/^\d/.test(w)).filter((w) => w.includes("/") || /\.(?:ts|tsx|js|mjs|json|jsonc|md|css|html|py|go|rs|sh)$/.test(w))];
 };
 
-/** The two clocks keepalive actually needs, read from MESSAGE-turn timestamps —
- *  never from file mtime. Claude Code appends `file-history-snapshot` / `ai-title`
- *  / `mode` / `permission-mode` lines that carry no `timestamp` yet bump the file
- *  mtime; keying the schedule off mtime lets that non-conversational churn fake
- *  "activity", resetting the idle clocks and pinning a long-dead session in an
- *  endless keepalive loop. Deriving from turns kills that at the source.
- *   `lastMs`     newest user/assistant turn (real OR our own ping) — the prompt-cache
- *                warmth clock; only a real model request actually re-warms the cache.
- *   `lastRealMs` newest GENUINE turn (non-keepalive) — the real-idle cutoff; 0
- *                when none sits in the read window ⇒ real work predates the tail.
- *   `streak`     pings already sent since that last genuine turn — the round
- *                counter's seed. The budget is "N pings after real work", a fact
- *                of the transcript: a counter that lives only in memory restarts
- *                at 0 on every daemon reload and hands the session a fresh N.
- *   `stamped`    false when no turn carried a timestamp (backend without them), so
- *                the caller can fall back to mtime instead of judging all idle. */
-export const keepaliveStamps = (
-  jsonlPath: string,
-  pingSigs: string[],
-): { lastMs: number; lastRealMs: number; streak: number; stamped: boolean } => {
-  const turns = tailTurns(jsonlPath, 24);
-  // Every warmer ping now carries the full instruction; a stall-recovery ping
-  // carries a different one. Match every injected form (`pingSigs` = normalized
-  // prefixes of each) plus the bare "ping" that streak pings used to shrink to
-  // (transcripts written before that changed still hold them) — otherwise a
-  // keepalive user line reads as REAL activity and re-anchors lastRealMs /
-  // resets the round counter before the model has even replied. What counts as
-  // keepalive (the ping AND every record of its reply) is `withoutKeepalive`'s
-  // rule — one definition for the clocks, the quote dedup and the peer readers.
-  const newest = (ts: readonly Turn[]): number => ts.reduce((m, t) => Math.max(m, t.ms ?? 0), 0);
-  const real = withoutKeepalive(turns, pingSigs);
-  // Everything past the last genuine turn is keepalive; its user turns are the pings.
-  const sinceReal = real.length ? turns.slice(turns.lastIndexOf(real[real.length - 1]!) + 1) : turns;
-  // Turns are text-only, so a long tool chain after the last prose line would
-  // read as idle — the tool rows are real work and each one touched the cache.
-  // A ping's reply is a bare "pong", never a tool call, so they can't be warmer traffic.
-  const work = lastToolMs(jsonlPath);
-  const pingsAfterWork = work > newest(sinceReal) ? [] : sinceReal;
-  return {
-    lastMs: Math.max(newest(turns), work),
-    lastRealMs: Math.max(newest(real), work),
-    streak: pingsAfterWork.filter((t) => t.role === "user").length,
-    stamped: turns.some((t) => (t.ms ?? 0) > 0),
-  };
-};
-
-/** Timestamp of the newest main-thread tool_use / tool_result row in the tail (0 = none). */
-const lastToolMs = (jsonlPath: string): number => {
-  const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
-  return readTailBytes(jsonlPath, TAIL_BYTES)
-    .split("\n")
-    .reduce((m, line) => {
-      if (!line.includes("tool_")) return m; // cheap prefilter
-      try {
-        const parsed = JSON.parse(line) as { timestamp?: unknown };
-        const row = normalize(parsed);
-        if (!row || row.isMeta || row.isSidechain) return m;
-        const content = row.message?.content;
-        const tooly = Array.isArray(content) && content.some((b) => /^tool_(use|result)$/.test((b as { type?: string })?.type ?? ""));
-        const ms = stampMs(parsed.timestamp);
-        return tooly && ms ? Math.max(m, ms) : m;
-      } catch { return m; }
-    }, 0);
-};
-
 // ── Pane liveness ─────────────────────────────────────────────────────
 // "Is this agent still working?" answered from outside the process. The pane is
 // the only honest source: transcript mtime goes quiet during long tool calls,
@@ -938,7 +836,7 @@ const lastToolMs = (jsonlPath: string): number => {
 const SPINNER_RE = /\S*…\s*\((?:\d+h\s*)?(?:\d+m\s*)?\d+(?:\.\d+)?s\b/;
 // The CLI's own auto-retry footer (`✻ API error · Retrying in 0s · attempt 2/10`)
 // has neither an ellipsis nor a timer parenthetical, yet the turn is still in
-// flight — read as idle it both lets keepalive in and trips paneIsStalled's
+// flight — read as idle it trips paneIsStalled's
 // /API Error/, so a healthy session gets a stray "continue" queued behind the retry.
 const RETRY_RE = /Retrying in \d+(?:\.\d+)?s\b.*attempt \d+\/\d+/i;
 const BUSY_MARKERS = [SPINNER_RE, RETRY_RE, /esc to interrupt/i, /按\s*esc[^\n]*中断/, /esc\s*中断/i];

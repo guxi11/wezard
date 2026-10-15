@@ -158,47 +158,6 @@ const Mirror = z.object({
   // 名下有定时任务 / 挂着审批 / 正忙 / 人正盯着的不收, 所以实际数量可能暂时高于上限。
   maxPanes: z.number().int().nonnegative().default(20).describe("活着的会话 pane 上限, 超出从最久没动的收起; 0 = 关闭"),
   paneSweepSec: z.number().int().nonnegative().default(600).describe("pane 上限定时清扫间隔 (秒), 含孤儿 pane; 0 = 只在新建 wizard 时扫"),
-  // ── Prompt-cache keepalive ────────────────────────────────────────────
-  // Anthropic prompt caching: cache-write costs 1.25x (5min TTL) / 2x (1h TTL),
-  // cache-read 0.1x. A pane that goes idle (agent parked waiting on a peer, or a
-  // long background task) lets that cache expire — so the next real turn pays a
-  // full re-write of the entire context. keepalive injects a tiny ping just
-  // before expiry: it re-reads the cached prefix and slides the TTL forward, so
-  // the eventual real turn only writes the delta.
-  // Off by default: it was built for the API's 5min default, but Claude Code on a
-  // subscription writes 1h entries (measured here: 1490/1491 main sessions, and
-  // 229/230 requests 6–60min apart still hit in full), so idle gaps within the
-  // hour need no warmer — and every ping is a real model turn in a live pane.
-  // Turn it on where transcripts show 5min writes (`ephemeral_5m`, e.g. a bare API key).
-  // 保温 tick 每 15s 现读整节; 只有 ping 另被启动时建成的识别表用着。
-  // A cache idle past 10min is never warmed (1h entries need no warmer) — so in
-  // practice only 5min entries are.
-  keepalive: hot(z
-    .object({
-      enabled: z.boolean().default(false).describe("prompt-cache 保温总开关; 订阅下缓存本是 1h, 默认关"),
-      // The warm-ping cadence follows the TTL each session's cache was actually
-      // written with (`cache_creation.ephemeral_1h/5m` in its transcript — 1h on a
-      // Claude Code subscription); this only applies when no such split is on record.
-      ttlSec: z.number().int().positive().default(300).describe("缓存 TTL 兜底值 (s)"),
-      // The ping needs slack to land and settle. Effective idle trigger = ttlSec - marginSec.
-      marginSec: z.number().int().nonnegative().default(45).describe("提前 TTL 到期多少秒打 ping"),
-      // Real activity resets the count, so bridging restarts from each genuine
-      // turn: 6 pings = ~26min on a 5min cache. Each ping is a
-      // near-free cache-read (0.1x); a single cold-rewrite of a large context
-      // costs 1.25x (5min) / 2x (1h) of its full size, so a handful of pings beats
-      // letting it expire while the user is still around.
-      rounds: z.number().int().positive().default(6).describe("最后一次真实轮次之后最多保温几次"),
-      // Tiny (small cache-write delta) and self-describing so a human glancing at
-      // the pane sees why it's there. The reply is swallowed — never mirrored to
-      // chat, the detail store, or usage accounting.
-      ping: knob(z.string().default('keepalive — reply with just "pong", take no other action').describe("保温 ping 的文本"), { apply: "reload" }),
-      // A spawn that passes the param explicitly always wins. false → useful when
-      // most spawns are short-lived task runners and only a few should be kept warm,
-      // at which point those few pass `keepalive:true` explicitly.
-      spawnDefault: z.boolean().default(true).describe("spawn/clone 没传 keepalive 时, 新 wizard 是否保温"),
-    })
-    .default({})
-    .describe("prompt-cache 保温: 空闲 pane 在缓存过期前打一个小 ping")),
 });
 
 const Wrc = z.object({
@@ -230,7 +189,7 @@ const Wrc = z.object({
   // 默认摘掉 wizard 用不上、每个会话首轮白占 ~18k token 的工具 (Artifact 11.3k · Workflow/SendFeedback/ScheduleWakeup 5.6k · claude.ai Docs/Drive 1.0k)。
   // 显式写了 extraArgs 的 config 整份覆盖它, 不合并 —— 要留某个工具就把整串抄过去删掉那一项。
   extraArgs: knob(z.array(z.string()).default(["--disallowedTools=Artifact,Workflow,SendFeedback,ScheduleWakeup,mcp__claude_ai_Claude_Docs__*,mcp__claude_ai_Google_Drive__*"]).describe("启动 CLI 时追加的参数"), { gate: "card", apply: "hot" }),
-  mirror: Mirror.default({}).describe("会话镜像: 推送、分页、详情页、pane 上限、保温"),
+  mirror: Mirror.default({}).describe("会话镜像: 推送、分页、详情页、pane 上限"),
   // Auto-spawn fires when an authorized inbound finds no mirror attached for that
   // chat — allowFrom IS the authorization.
   tmuxPrefix: z.string().default("wezard").describe("自动起的 tmux 会话名前缀 (`<prefix>-<short>`)"),

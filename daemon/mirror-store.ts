@@ -32,17 +32,6 @@ export interface MirrorAttachment {
    *  换去别的目录不必记 —— 那时 runningCwd 已经不是默认兜底目录, 「该不该问」自然为假。
    *  聊天级, 与 cwd/pendingCwd 一样挂在 base principal 上。 */
   cwdConfirmed?: boolean;
-  /** `/stop` keepalive pause, persisted so a daemon reload doesn't resurrect a
-   *  session the user explicitly quieted. Lifted (→ false) by a real inbound or a
-   *  busy-resume, both of which re-persist. `keepaliveOffAt` = when paused (ms),
-   *  gating the busy-resume grace across restarts. */
-  keepaliveOff?: boolean;
-  keepaliveOffAt?: number;
-  /** Sticky per-session opt-out, set at spawn time (`spawn_wizard` / `clone_wizard` /
-   *  `new_claude_session`'s `keepalive:false`). Unlike `keepaliveOff` this
-   *  never auto-resumes on real activity — the session was deliberately
-   *  created as a disposable worker that shouldn't be kept warm. */
-  keepaliveDisabled?: boolean;
 }
 
 export type MirrorStore = JsonMap<MirrorAttachment>;

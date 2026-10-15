@@ -101,7 +101,7 @@ async function fixture(options={}){
 // cannot birth the reviewer, and completed history survives normal job archive.
 {
  const x=await fixture({maxTurns:2}),id=await x.create();await wait(()=>x.injected.length===1);
- assert.equal(x.spawned.length,1);assert.equal(x.spawned[0].model,'fixture-light');assert.equal(x.spawned[0].inherit,false);assert.equal(x.spawned[0].keepalive,false);assert.equal(x.spawned[0].bootstrap,undefined);
+ assert.equal(x.spawned.length,1);assert.equal(x.spawned[0].model,'fixture-light');assert.equal(x.spawned[0].inherit,false);assert.equal(x.spawned[0].bootstrap,undefined);
  const a=x.current(id);x.workflow.outcome('owner',a.turn,'done','RESULT: tests failed');x.planRunner.kick();await new Promise(r=>setTimeout(r,10));assert.equal(x.spawned.length,1);assert.equal(x.run(id).nodes[0].state,'validating');
  for(const caller of ['intruder','owner']){
   const r=await x.post('/peers/tell',{name:x.run(id).nodes[0].name,text:'pollute',job:'J',node:'other'},caller);assert.equal(r.status,409);

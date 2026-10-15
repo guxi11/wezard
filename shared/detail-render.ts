@@ -5,7 +5,6 @@ import { structuredPatch, parsePatch, type StructuredPatchHunk } from "diff";
 import { highlightCode, langFromPath } from "./highlight.js";
 import { ansiToHtml } from "./ansi.js";
 import { staleAt, turnDone } from "./chat-view.js";
-import { isKeepaliveTurn } from "./keepalive.js";
 import { backendLabel } from "./cli-backends.js";
 import { modelLabel } from "./pricing.js";
 import type {
@@ -1183,8 +1182,7 @@ export const renderTurnGroup = (
   const head = standalone ? `<div class="tg-head">${meta}</div>` : "";
   // staleAt 只走 JSON, 绝不进 HTML —— 它跟着 updatedAt 变, 一旦计入 sig, SSE 的
   // "内容没变就不重发" 会彻底失效 (一个 turn 的 HTML 可以是几十 KB)。
-  // `ping` 只是个标记 —— 连续几轮折成一行由客户端做 (它才知道相邻是谁)。
-  const body = `<section class="turn-group${r.cut ? ` cut cut-${r.cut}` : ""}${r.origin ? " graph" : ""}${r.agent ? " subagent" : ""}${isKeepaliveTurn(r) ? " ping" : ""}" data-key="t:${escHtml(r.id)}">${renderCut(r)}${renderOrigin(r)}${renderAgent(r)}${head}<div class="bubbles">${inner}</div></section>`;
+  const body = `<section class="turn-group${r.cut ? ` cut cut-${r.cut}` : ""}${r.origin ? " graph" : ""}${r.agent ? " subagent" : ""}" data-key="t:${escHtml(r.id)}">${renderCut(r)}${renderOrigin(r)}${renderAgent(r)}${head}<div class="bubbles">${inner}</div></section>`;
   return {
     id: r.id, html: tagSig(body), meta, sig: hashStr(body + meta),
     createdAt: r.createdAt, updatedAt: r.updatedAt,

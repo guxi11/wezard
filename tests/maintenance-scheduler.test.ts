@@ -10,7 +10,7 @@ const source = readFileSync(new URL("../daemon/mirror-bridge.ts", import.meta.ur
 const start = source.indexOf("  const maintenance = createKeyedScheduler(4);");
 const end = source.indexOf("  const pickerTimer =", start);
 assert(start >= 0 && end > start);
-const code = ts.transpileModule(source.slice(start, end) + "\nglobalThis.harness={keepaliveTick,pickerTick,stop:()=>maintenance.stop()};", {
+const code = ts.transpileModule(source.slice(start, end) + "\nglobalThis.harness={pickerTick,stop:()=>maintenance.stop()};", {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
 }).outputText;
 const deferred = () => {
@@ -27,11 +27,11 @@ const calls = new Map<string, number>(), active = new Map<string, number>();
 const scanned: string[] = [], errors: string[] = [];
 let fail = true, maximum = 0;
 const ctx = vm.createContext({
-  createKeyedScheduler, byTarget: panes, cfg: { wrc: { mirror: { keepalive: { enabled: true, ping: "ping" } } }, approval: { enabled: true } },
+  createKeyedScheduler, byTarget: panes, cfg: { wrc: { mirror: {} }, approval: { enabled: true } },
   process: { env: {} }, Date, setInterval: () => 0,
   normAssistant: (text: string) => text, statSync: () => ({ mtimeMs: 0 }), cliOf: () => "codebuddy",
   log: { warn: (e: { target: string }) => errors.push(e.target), info() {} },
-  endKeepaliveSwallow() {}, mootMirrorPicker() {}, looksLikePicker: () => false,
+  mootMirrorPicker() {}, looksLikePicker: () => false,
   withPaneInput: async (_pane: string, action: (live: () => boolean) => Promise<void>, opts: { guard: () => boolean }) => {
     if (opts.guard()) await action(opts.guard);
   },
@@ -39,7 +39,7 @@ const ctx = vm.createContext({
     calls.set(pane, (calls.get(pane) ?? 0) + 1);
     active.set(pane, (active.get(pane) ?? 0) + 1);
     maximum = Math.max(maximum, [...active.values()].reduce((a, b) => a + b, 0));
-    assert.equal(active.get(pane), 1, "keepalive and picker must not probe the same pane concurrently");
+    assert.equal(active.get(pane), 1, "overlapping ticks must not probe the same pane concurrently");
     try {
       if (pane === "%slow") await slow.promise;
       if (pane === "%bad" && fail) throw new Error("probe failed");
@@ -49,13 +49,13 @@ const ctx = vm.createContext({
   detectModalPicker: async (pane: string) => { scanned.push(pane); return { modal: false, screen: "" }; },
 });
 vm.runInContext(code, ctx);
-const harness = ctx.harness as { keepaliveTick: () => void; pickerTick: () => void; stop: () => void };
-harness.keepaliveTick(); harness.pickerTick();
+const harness = ctx.harness as { pickerTick: () => void; stop: () => void };
+harness.pickerTick(); harness.pickerTick();
 await flush(); await flush();
 assert(scanned.includes("%fast"), "slow A must not block B's picker scan");
 assert.equal(calls.get("%slow"), 1);
 assert(errors.includes("bad"), "single probe failure is reported without aborting the other panes");
-harness.keepaliveTick(); harness.pickerTick();
+harness.pickerTick(); harness.pickerTick();
 await flush();
 assert.equal(calls.get("%slow"), 1, "overlapping ticks must coalesce the running key and pending picker");
 fail = false;
@@ -68,7 +68,7 @@ slow.resolve();
 await flush(); await flush();
 assert.equal(scanned.includes("%slow"), false, "stop cancels queued scans and invalidates a late probe");
 const count = calls.get("%fast");
-harness.keepaliveTick(); harness.pickerTick();
+harness.pickerTick(); harness.pickerTick();
 await flush();
 assert.equal(calls.get("%fast"), count);
 

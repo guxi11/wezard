@@ -3,7 +3,7 @@
 // 来源只有各个会话自己的 transcript (jsonl), 不经过 turn store: 一个群的记录 =
 // 每个在里面说过话的 wizard 的「问话 + 终句」, 按时刻并起来。一句话属于哪个频道、
 // 是谁说的, 读它挂着的信封 (peers.parseEnvelope); 没挂信封的就是人在这个会话的
-// home 聊天里说的。只要正文: 一个来回取问话与终句, 不要工具调用, 不要保温 ping,
+// home 聊天里说的。只要正文: 一个来回取问话与终句, 不要工具调用,
 // 不回 json —— 读的是模型, 每一个字段名都是它要付的 token。
 //
 // 选哪些消息是三级收窄, 与 rolepage 同一条轴: role (谁的视角) → chat (哪个群) →
@@ -67,8 +67,8 @@ const same = (a: string, b: string): boolean => stripSigil(a).toLowerCase() === 
 /** 一个会话的来回 → 入/出两条消息。`deep` = 这个会话往回还可能有没读到的:
  *  talkRounds 攒够 `depth` 个来回就停, 没攒够说明已经读到了文件头 (对分身来说,
  *  读过了出生那一刻也算到头 —— 再往前是父亲的历史)。 */
-const messagesOf = (s: LogSession, q: ChatLogQuery, depth: number, pingSigs: readonly string[]): { msgs: LogMsg[]; deep: boolean } => {
-  const rounds = talkRounds(s.jsonlPath, depth, pingSigs, q);
+const messagesOf = (s: LogSession, q: ChatLogQuery, depth: number): { msgs: LogMsg[]; deep: boolean } => {
+  const rounds = talkRounds(s.jsonlPath, depth, q);
   const before = rounds.filter((r) => (r[0]!.ms ?? 0) < (q.until ?? Infinity));
   const msgs = rounds
     .flatMap((round, i): LogMsg[] => {
@@ -128,7 +128,6 @@ export const parseWhen = (raw: string, now: number): number | undefined => {
 export const renderChatLog = (
   sessions: readonly LogSession[],
   q: ChatLogQuery,
-  pingSigs: readonly string[],
   now: number,
 ): { text: string; shown: number; total: number; earlier?: string; later?: string } => {
   const involves = (m: LogMsg, who?: string): boolean => !who || same(who, m.from) || same(who, m.to);
@@ -136,7 +135,7 @@ export const renderChatLog = (
   // 最近 30 个来回里可能一句私聊都没有。所以没凑够、又有会话没读到头, 就加深四倍
   // 再读 —— 到凑够、到头、或加深三次为止 (单个文件的读取另有 2MB 的上限)。
   const dig = (depth: number, left: number): { hits: LogMsg[]; deep: boolean } => {
-    const read = sessions.map((s) => messagesOf(s, q, depth, pingSigs));
+    const read = sessions.map((s) => messagesOf(s, q, depth));
     const hits = read
       .flatMap((r) => r.msgs)
       .filter((m) => (q.chat === undefined || (!m.private && same(m.chat, q.chat))) && involves(m, q.role) && involves(m, q.target))
