@@ -954,7 +954,7 @@ const main = async (): Promise<void> => {
       events.accept({ id, target: tell.to, speaker: tell.from, channel: tell.channel, serves: event, asker: tell.asker,
         priority: "normal", deadline: tell.deadlineAt ?? deadlineOf(tell.at ?? Date.now()), payload: { text, peer: {
           from: { kind: "peer", from: tell.from, event, ...(tell.asker ? { asker: tell.asker } : {}) },
-          envelope: envelopeFor(tell.from, tell.channel, { event, legs, re: true, asker: tell.asker }),
+          envelope: envelopeFor(tell.from, tell.channel, { legs, re: true, asker: tell.asker }),
           tell: { ...tell, event, legs, dispatchKey: id }, job: tell.job ?? "", kind: "task", held: true,
         } } });
       return true;
@@ -1038,7 +1038,7 @@ const main = async (): Promise<void> => {
             from: { kind: "peer", from: waiting, ...(row.asker ? { asker: row.asker } : {}) },
             // 不是一件新活 (没有件号、不收新回执): 它只是把那一笔重新指给 owner。
             job: "", kind: "task",
-            // 信封按 `event` 认这一笔 (不再造新件号)。
+            // 这一笔由注入事件的 `serves` 认 (信封不带 event)。
             envelope: envelopeFor(waiting, channel, { ...(row.asker ? { asker: row.asker } : {}) }),
           } },
         });
@@ -1052,8 +1052,14 @@ const main = async (): Promise<void> => {
     /** `target` 手上这一轮若是某个 wizard 派来的活: 发话方的称呼 (`.x`) 与件号。人 / 定时 / 回执轮 = undefined。 */
     const openingAsk = (target: string): { from: string; event?: string } | undefined => {
       const p = m.sessionInfo(target)?.jsonlPath;
-      const env = p ? openingTurn(expandHome(p), pingSigs)?.env : undefined;
-      return env?.kind === "peer" && !env.receipt ? { from: env.from, ...(env.event ? { event: env.event } : {}) } : undefined;
+      const env = p ? openingTurn(expandHome(p))?.env : undefined;
+      return env?.kind === "peer" && !env.receipt ? peerAsk(env) : undefined;
+    };
+    /** 一句同伴派活的出处: 发话方与它服务的那一笔 —— 派活信封不再带 event, 问注入事件的 `serves`;
+     *  老信封带着的照用。 */
+    const peerAsk = (env: { from: string; event?: string; eventId?: string }): { from: string; event?: string } => {
+      const event = env.event ?? (env.eventId ? events.get(env.eventId)?.serves : undefined);
+      return { from: env.from, ...(event ? { event } : {}) };
     };
     // ── 新路由表 (T3): 写入点 ──────────────────────────────────────────────
     // 一件活 = 一行 (§3.1)。这一层只做 open / move 与 serves 真值 —— 件号 (`t…`) 那套桥随
@@ -1153,13 +1159,8 @@ const main = async (): Promise<void> => {
     //   wizard → 进它的持久化收件箱: 复用 message-events 的注入队列, id = `rcpt:<event>:<rev>`。
     //   chat   → 只落 `hand`: 定论就是那句人话的答复气泡, 放行由 mirror-bridge 的 final 通道
     //            (eventFinalGate 读同一张表) 给出。
-    // T7: 投之前先看收方 (§4.3 / §4.4) —— 收方 wizard 已注销 → 沿链升级 (信封标 `via`);
-    // 一路走到 chat 根 → Dead Letter; 要服务的那一笔已收口 = 孤儿 → 照投, 标 `late`。
-    /** 升级 / 迟到时给收方的一句说明 —— 信封属性 (via / late) 的正文版: 模型先读正文。 */
-    const deliverNote = (via: readonly string[], late: boolean): string =>
-      [...(via.length ? [`（守护进程: ${via.join("、")} 已不在 —— 这份结论沿链升级投给你, 由你接着交代。）`] : []),
-       ...(late ? ["（守护进程: 这一笔的上一环已经收口, 结论迟到了 —— 你这一轮的终句只进 rolepage, 要人知道就明说。）"] : [])]
-        .map((l) => `${l}\n`).join("");
+    // T7: 投之前先看收方 (§4.3 / §4.4) —— 收方 wizard 已注销 → 沿链升级 (信封正文说明跳过了谁);
+    // 一路走到 chat 根 → Dead Letter; 要服务的那一笔已收口 = 孤儿 → 照投, 信封正文标迟到。
     const deliverRoute = (event: EventId, out: { status: ReceiptStatus; body: string; rev: string }): void => {
       const row = router.get(event);
       if (!row) return;
@@ -1200,7 +1201,7 @@ const main = async (): Promise<void> => {
         target: to, speaker: row.owner, channel, serves,
         ...(row.asker ? { asker: row.asker } : {}),
         priority: "normal", deadline: Date.now() + 12 * 3600_000,
-        payload: { text: deliverNote(via, late) + clipMiddle(out.body), peer: {
+        payload: { text: clipMiddle(out.body), peer: {
           // 回执不是一件新活: `job` 留空 (否则 jobs.account 会把它当成工单的第二份派活数一遍)。
           from: { kind: "peer", from: row.owner, receipt: true, status: out.status, event },
           job: "", kind: "fyi",
@@ -1215,7 +1216,7 @@ const main = async (): Promise<void> => {
               ...(audienceName(channel, row.asker) ? { audience: audienceName(channel, row.asker) } : {}),
               ...(via.length ? { via: via.join(", ") } : {}),
               ...(late ? { late: true } : {}) },
-          ) + renderReminder({ wezard: "receipt-delivery", event: inbox }, []),
+          ),
         } },
       });
       router.commit(ops.hand({ event, inbox }));
@@ -1313,14 +1314,14 @@ const main = async (): Promise<void> => {
     const othersTurn = async (target: string, self: string): Promise<{ from: string; event?: string } | undefined> => {
       if (await m.idleNow(target)) return undefined;
       const p = m.sessionInfo(target)?.jsonlPath;
-      const env = p ? openingTurn(expandHome(p), pingSigs)?.env : undefined;
+      const env = p ? openingTurn(expandHome(p))?.env : undefined;
       if (env?.receipt) return undefined;
-      if (env?.kind === "peer") return env.from === displayName(self) ? undefined : { from: env.from, ...(env.event ? { event: env.event } : {}) };
+      if (env?.kind === "peer") return env.from === displayName(self) ? undefined : peerAsk(env);
       return { from: env?.kind === "task" ? env.from : env?.from ? `人 (${env.from})` : "人" };
     };
     const openingOfSelf = (self: string) => {
       const p = m.sessionInfo(self)?.jsonlPath;
-      return p ? openingTurn(expandHome(p), pingSigs) : undefined;
+      return p ? openingTurn(expandHome(p)) : undefined;
     };
     const controlSnapshot = (self: string) => ({ opening: openingOfSelf(self)?.ms });
     const controlValid = (self: string, snapshot: ReturnType<typeof controlSnapshot>): boolean =>
@@ -1679,7 +1680,7 @@ const main = async (): Promise<void> => {
     /** 放行时挂在信封后面的前置结论: 谁交的、件号、RESULT 与 ARTIFACT 原样 (只进对方输入框)。 */
     const afterNote = (turns: readonly string[], seen: Readonly<Record<string, HeldSeen>>, owner: string): string =>
       renderReminder({ wezard: "after" }, [
-        "这件活排在下面这些前置之后, 它们都已落定; 结论原样附上 (谁交的 · 件号):",
+        "这件活排在下面这些前置之后, 它们都已落定; 结论原样附上 (谁交的 · event):",
         ...turns.flatMap((t) => {
           const x = seen[t];
           if (!x) return [];
@@ -2043,7 +2044,7 @@ const main = async (): Promise<void> => {
       try { accepted = events.accept({ id: eventId, target, speaker: self, channel, serves, asker, priority: policy, deadline: deadlineAt,
         payload: { text, peer: {
           from: { kind: "peer", from: self, event: serves, ...(jobId ? { job: jobId } : {}), ...(isPublic ? { public: true } : {}), ...(asker ? { asker } : {}) },
-          envelope: envelopeFor(self, channel, { event: serves, asker, legs, ...(legs > 1 ? { re: true } : {}),
+          envelope: envelopeFor(self, channel, { asker, legs, ...(legs > 1 ? { re: true } : {}),
             ...((body as { deadline?: number }).deadline !== undefined ? { deadline: deadlineAt } : {}), ...(kind !== "task" ? { act: kind } : {}), ...(wantReceipt ? {} : { quiet: true }) }) + extra,
           ...(wantReceipt ? { tell } : {}), job: jobId, kind, attemptId, after: afters,
           role: roleParam((body as { role?: string }).role), free: freed,
@@ -3298,7 +3299,7 @@ const main = async (): Promise<void> => {
         events.accept({ id: eventId, target, speaker: self, channel: "", serves, asker, priority: "normal", deadline: deadlineAt,
           payload: { text: task, peer: {
             from: { kind: "peer", from: self, event: serves, ...(jobId ? { job: jobId } : {}), ...(asker ? { asker } : {}) },
-            envelope: envelopeFor(self, "", { event: serves, asker, ...(quiet ? { quiet: true } : {}) }) + (b.lead === true ? renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : ""),
+            envelope: envelopeFor(self, "", { asker, ...(quiet ? { quiet: true } : {}) }) + (b.lead === true ? renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : ""),
             ...(quiet ? {} : { tell: birthTell }),
             job: jobId, kind: "task", spawned: true, role: roleParam((body as { role?: string }).role),
             ...(plan?.ok && plan.op === "transfer" ? { transferred: true } : {}),

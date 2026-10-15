@@ -3709,6 +3709,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   /** reload 后 tail 从 EOF 接上: 正在跑的这一轮的开头那句已在身后, 它的印章随旧进程没了。
    *  那句话自己挂着信封 (谁说的、私聊还是哪个群) —— 读回来就是这一轮的出处。没挂信封 = undefined。 */
+  /** 这一轮挂在哪一笔上: 回执 (与老派活信封) 写在信封上; 新派活信封不带, 问注入事件的 `serves`。 */
+  const rowOf = (env: { event?: string; eventId?: string }): string | undefined =>
+    env.event ?? (env.eventId ? deps.events?.get(env.eventId)?.serves : undefined);
   const openingOf = (a: AttachState): { channel: string; speaker?: string; from?: TurnFrom; query: string } | undefined => {
     const t = a.jsonlPath ? lastUserTurn(a.jsonlPath) : undefined;
     const env = t?.env;
@@ -3716,7 +3719,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!env) return undefined;
     const home = baseOfKey(a.target);
     const from: TurnFrom | undefined =
-      env.kind === "peer" ? { kind: "peer", from: wizardStore()?.byName(stripSigil(env.from))?.target, ...(env.private ? {} : { public: true }), ...(env.receipt ? { receipt: true } : {}), ...(env.status ? { status: env.status } : {}), ...(env.event ? { turn: env.event } : {}), ...(env.asker ? { asker: env.asker } : {}) }
+      env.kind === "peer" ? { kind: "peer", from: wizardStore()?.byName(stripSigil(env.from))?.target, ...(env.private ? {} : { public: true }), ...(env.receipt ? { receipt: true } : {}), ...(env.status ? { status: env.status } : {}), ...((turn) => (turn ? { turn } : {}))(rowOf(env)), ...(env.asker ? { asker: env.asker } : {}) }
       : env.kind === "task" ? { kind: "task", taskId: env.from.replace(/^定时 /, "") }
       : undefined;
     return {

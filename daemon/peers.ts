@@ -642,7 +642,7 @@ export const renderTaskEnvelope = (taskId: string, quiet?: { event: string }): s
 /** `from` = 发话方的称呼 (`.name`); `chat` 给了 = 公开轮 (那个群的名字, 可以是 ""),
  *  不给 = 私聊。 */
 export const renderPeerEnvelope = (from: string, chat?: string, t?: TurnTag & { legs?: number }): string =>
-  renderReminder(envelopeAttrs.peer(from, chat, t), [
+  renderReminder(envelopeAttrs.peer(from, chat, t?.asker), [
     ...(chat === undefined
       ? [
           "这是 wizard 私聊, 不是人说的。",
@@ -685,13 +685,16 @@ export const renderReceiptEnvelope = (
     ...(status === "done"
       ? ["这是**回执**: 它那一轮干完了, 下面是它的结论 —— 不是人说的, 也不是新派给你的活。"]
       : status === "need"
-        ? [`这是**反问**: 它缺信息干不下去, 下面 \`NEED:\` 后面就是它要的 —— 按下面的 \`event\` 续问答它; 这一份**不计入工单**, 它拿到答复干完会再送一份回执。`]
+        ? [`这是**反问**: 它缺信息干不下去, 下面 \`NEED:\` 后面就是它要的 —— 照下面的 re 续问答它; 这一份**不计入工单**, 它拿到答复干完会再送一份回执。`]
       : status === "error"
         ? [`这是**失败回执**: 它那一轮以 CLI 报错收尾, 下面是报错原文, 不是它的结论, **不计入工单**。它若被续跑、之后答出来, 结论会照常再送来一份; 等不及就 peek_peer 看它, 或者再 tell_peer 它一次。`]
         : [`这是**失败回执**: ${FAILED[status]}, 这一份不会再有答案了 (工单里按已落定计)。自己判断: 换人、再 tell_peer 追问, 或者在汇总里如实写缺了这一份。下面是守护进程的说明和它最后说的一句。`]),
-    ...(route?.via ? [`这份结论是**沿链升级**投给你的: \`via\` = ${route.via} —— 它已经不在了, 原来该由它收口的那一笔落到你头上, 由你接着交代。要续问 / 答它的 NEED 按下面的 \`event\` re, 守护进程按路由表投给此刻的 owner。`] : []),
-    // 去向由路由行的 receiver 边算好 (§9.5): up = 终句落到上游那一笔上; chat 给了 = 落回那个群。
-    ...(route?.up
+    ...(route?.via ? [`这份结论是**沿链升级**投给你的: ${route.via} 已经不在了, 原来该由它收口的那一笔落到你头上, 由你接着交代。要续问 / 答它的 NEED 照下面的 re 发, 守护进程按路由表投给此刻的 owner。`] : []),
+    // 去向由路由行的 receiver 边算好 (§9.5): up = 终句落到上游那一笔上; chat 给了 = 落回那个群;
+    // late = 它服务的那一笔已收口 (孤儿), 终句哪儿也不去 —— 压过前两种。
+    ...(route?.late
+      ? ["这一笔的上一环已经收口, 结论**迟到了**: 你这一轮的终句只进 rolepage, 要人知道就明说。"]
+      : route?.up
       ? ["面向上游 wizard, 据此在终句交代结论 (`RESULT:` 可选)。"]
       : chat !== undefined
         ? [`面向群里的${route?.audience ? " `audience`" : "人"}: 做成了什么、没做成什么, 不复述它的原话。`]

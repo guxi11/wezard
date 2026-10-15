@@ -385,7 +385,7 @@ server.registerTool(
 // `send_peer` 留着当别名 —— 正在跑的 wizard 的 MCP 进程是旧代码, 换个名字不能把
 // 它们的通路掐断。
 const RETURN_DOC =
-  "这件活的回执去哪 (守护进程按 receiver 边投递, 你不递栈): `self` (默认) 结论先回你, 你据此再交代上一层 · `transfer` 尾调用: 把你此刻欠着的那一笔整件交给对方 (把那一笔 move 给它, 不再回到你), 你不再收回执、不再交代 —— 它的结论 (含 NEED / 失败) 直接落到你的上游 (信封带 `via`); **想自己接 NEED 就别 transfer**; 不能与 job / re / node / after / fyi 并用, 那一笔下你还有没落定的子活时不行, 一笔只能交一次 · `detach` 旁支: 结论回你, 但不挂住你给上游的交代 · `none` 放出去不管, 没有回执 (`kind:\"fyi\"` 隐含它)。";
+  "这件活的回执去哪 (守护进程按 receiver 边投递, 你不递栈): `self` (默认) 结论先回你, 你据此再交代上一层 · `transfer` 尾调用: 把你此刻欠着的那一笔整件交给对方 (把那一笔 move 给它, 不再回到你), 你不再收回执、不再交代 —— 它的结论 (含 NEED / 失败) 直接落到你的上游 (回执信封的 `from` 是接手方); **想自己接 NEED 就别 transfer**; 不能与 job / re / node / after / fyi 并用, 那一笔下你还有没落定的子活时不行, 一笔只能交一次 · `detach` 旁支: 结论回你, 但不挂住你给上游的交代 · `none` 放出去不管, 没有回执 (`kind:\"fyi\"` 隐含它)。";
 const FOR_DOC =
   "这件活为你欠着的**哪一笔**派的: 那一笔的 **event id** (`e…` / `<event>.<n>`, 见回执里的 `event` 与 `GET /routes`)。默认 = 本轮开头那一笔。挂错会压住别人的交代, 所以对不上 → 400 并列出你欠着的那几笔。";
 const TELL_SCHEMA = {
@@ -1032,7 +1032,7 @@ server.registerTool(
       "挂起事项全表: 你派出去 (tell_peer / 带 task 的 spawn) 还没了结的每一件 —— 件号、对象、一句话题、为谁派的, 状态由守护进程按回执算 (在飞 / 等人拍板 / 人已回话 / 它在反问 / 没结论)。回执 done 了的、同一对改派了的、工单收了的自动消掉; 没结论的留着, 直到你改派、`re` 追问, 或用 `drop` 显式消掉。\n" +
       "管家平时只会在注入尾巴上收到必要的一行增量, 快忘的时候 (交接 / 压缩后、隔了很多轮) 收到一次全表; 其余时候想看就调它。",
     inputSchema: {
-      drop: z.array(z.string()).optional().describe("要消掉的件号 (`t...`): 不再需要、或已经另行处理了。"),
+      drop: z.array(z.string()).optional().describe("要消掉的那几笔的 event id (表里每行开头那个; T10 前的老件号 `t…` 也认): 不再需要、或已经另行处理了。"),
       why: z.string().optional().describe("消掉的理由, 一句话 (记进账本)。"),
       name: z.string().optional().describe("看别人的挂起事项 (只读)。省略 = 你自己的。"),
     },

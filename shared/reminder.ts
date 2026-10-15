@@ -5,19 +5,21 @@
 //   事实只写一次、按名取, 改措辞不再牵连解析。
 // 属性出现之前落盘的 transcript / 轮次记录里只有正文, 那些靠 LEGACY 表按措辞认。
 //
-// 属性一览 (`wezard` 区分种类):
-//   envelope  kind=human|peer|task  from  chat?  scope=private|public (仅 peer)
-//             event (peer/task): 这一轮对应的**路由行** id (`route:<event>` 注入事件的那一笔)
-//             serves (仅回执): 这一轮的终句落在哪一笔上 (= receiver.event)
-//             receipt=1 (仅 peer): 这一轮是守护进程自动送回来的回执, 不是新活
-//             quiet=1 (仅 peer): 发话方不收回执; 不改变公开/私聊或工具授权
-//             via (仅回执): 这份结论是谁替 `from` 送到的 —— 收方已不在 (stop / 注销) 时沿链
-//                  升级, 被跳过的那些 wizard (由近及远, `, ` 分隔)
-//             late=1 (仅回执): 这一笔的上一环已经收口 (孤儿), 结论迟到了 —— 那一轮服务的
-//                  那一笔已关, 它的终句只进 rolepage
+// 属性一览 (`wezard` 区分种类)。只留两种属性: 有机器读回的 (下面标了读者), 和模型要原样抄进
+// 工具参数的 id。只给模型看的语义 (知会 / 期限 / 沿链升级 / 迟到) 写正文, 不再在开标签上抄一遍。
+//   envelope  kind=human|peer|task  from  chat?  (read_chat / rolepage / mirror 认出处)
+//             scope=private|public (仅 peer)   chat-key (仅 human: 改名不变的群 key)
+//             asker-user / asker-chat: 链头那句人话 (askerOf: 卡片落哪个群、audience)
+//             event (仅 task / 回执): task = 这一枪开的群根行 (servesOfTurn); 回执 = 刚落定的那一笔
+//                  —— 发话方 `tell_peer({re})` 抄的就是它。派活 / 续问不写: 收方不需要自己那一笔的 id,
+//                  守护进程从 message-event 的 id 反查 (`events.get(id).serves`)
+//             receipt=1 status audience job/done/total/complete (仅回执; regress 与 chat-log 读)
+//   message-event  event: 这句话的注入事件 id —— 提交见证 (submittedEventSince) 与轮次↔事件绑定的
+//             唯一凭据; 回执也走它 (id = `rcpt:<event>:<rev>`)
 //   mention   names  (空格分隔的 `.name`)
-//   roster    正文里 `- ` 开头的每一行是一条变动
-//   hint      role=steward: 人对管家说的那一轮挂的「自己答还是派出去」(只给模型, 不读回)
+//   roster / pending / hint / lead / after: 只给模型, 属性只区分种类与 mode
+// 退役不再写、只为老 transcript 照认的: receipt-delivery (与 message-event 同值重复), 派活信封的
+// event / quiet / act / deadline, 回执的 serves / via / late。
 
 import type { Asker } from "./detail-store.js";
 
@@ -68,22 +70,13 @@ export interface Envelope {
   asker?: Asker;
   /** 这一轮是回执 (对方干完了, 守护进程把结论送回发话方), 不是新派的活。 */
   receipt?: boolean;
-  /** 发话方不收自动回执 (fyi / receipt:false); 与 private、工具授权无关。 */
-  quiet?: boolean;
   /** 回执的定论 (见 ReceiptStatus); 老信封没有 = done。 */
   status?: ReceiptStatus;
-  /** 这一轮对应的路由行 id (§9.1): 派活/续问 = 新开的子行; 回执 = 刚落定的那一笔;
-   *  定时任务 = 为它开的群根行。 */
+  /** 回执 = 刚落定的那一笔; 定时任务 = 为它开的群根行。派活 / 续问轮不带 (老信封带的照读) ——
+   *  那一轮服务哪一笔按 `eventId` 问注入事件。 */
   event?: string;
-  /** 回执: 这一轮的终句落在哪一笔上 (= 收方自己欠的 `receiver.event`, §9.4)。 */
-  serves?: string;
   /** 回执: 这一轮在群里的终句答给的那个人 (userid, 见 role-view.audienceOf); 认不出 = 没有。 */
   audience?: string;
-  /** 回执: 这份结论是谁替 `from` 送到的 (`.x`, 多个用 `, ` 分隔) —— 收方已不在时沿链升级
-   *  跳过的那些 (见 router.escalate); transfer 接手作答的旧义。 */
-  via?: string;
-  /** 回执: 这一笔的上一环已经收口 —— 结论迟到了, 它服务的那一笔已关 (见 router.isOrphaned)。 */
-  late?: boolean;
 }
 
 /** Human identity comes from inbound metadata; a private hop keeps that origin. */
@@ -99,11 +92,11 @@ export const askerFromEnvelope = (env: Envelope, chatOf: (chat: string) => strin
  *  或落回那个群 (看 chat)。只用于信封正文措辞, 不写成属性。 */
 export interface ReceiptRoute { up?: boolean; audience?: string; asker?: Asker; via?: string; late?: boolean; pending?: number }
 
-/** 这句话挂在哪一笔上、怎么接 (§9.4) —— 写进派活信封。
- *  `act`: 这句话要对方怎么接 —— 缺省是一件活; ask = 只答一问; fyi = 知会, 不用回。
- *  `re`: 续问 (接着那一笔说); 只影响信封正文的措辞。
+/** 这句话怎么接 —— 只影响派活信封的正文措辞 (挂在哪一笔上由注入事件的 `serves` 定, 不进信封)。
+ *  `act`: 缺省是一件活; ask = 只答一问; fyi = 知会, 不用回。
+ *  `re`: 续问 (接着那一笔说)。
  *  `quiet`: 发话方不收回执 (fyi 一定是; task 带 receipt:false 也是)。 */
-export interface TurnTag { event?: string; re?: boolean; legs?: number; deadline?: number; act?: "ask" | "fyi"; quiet?: boolean; asker?: Asker }
+export interface TurnTag { re?: boolean; legs?: number; deadline?: number; act?: "ask" | "fyi"; quiet?: boolean; asker?: Asker }
 
 const askerAttrs = (asker?: Asker): Attrs => asker
   ? { "asker-user": asker.who, "asker-chat": asker.chat } : {};
@@ -115,26 +108,20 @@ export type ReceiptStatus = "done" | "need" | "error" | "timeout" | "silent" | "
 export const envelopeAttrs = {
   human: (user: string, chat: string, chatKey?: string): Attrs => ({ wezard: "envelope", kind: "human", from: user, chat, ...(chatKey ? { "chat-key": chatKey } : {}) }),
   /** `chat` 不给 = 私聊。 */
-  peer: (from: string, chat?: string, t?: TurnTag): Attrs => ({
+  peer: (from: string, chat?: string, asker?: Asker): Attrs => ({
     wezard: "envelope", kind: "peer", from, scope: chat === undefined ? "private" : "public", ...(chat ? { chat } : {}),
-    ...askerAttrs(t?.asker),
-    ...(t?.quiet || t?.act === "fyi" ? { quiet: "1" } : {}),
-    ...(t?.event ? { event: t.event } : {}),
-    ...(t?.deadline ? { deadline: new Date(t.deadline).toISOString() } : {}),
-    ...(t?.act ? { act: t.act } : {}),
+    ...askerAttrs(asker),
   }),
   /** `event` = 这一枪为它开的那条群根行 (安静任务按它定位终句, 见 index.ts relayUnlessQuiet)。 */
   task: (taskId: string, event?: string): Attrs => ({ wezard: "envelope", kind: "task", from: taskId, ...(event ? { event } : {}) }),
   /** 回执也是「`from` 在对你说话」, 所以仍是 peer 信封 —— read_chat / rolepage 照旧
    *  把它归到那场对话里; 多一个 `receipt` 属性说明它是自动送回来的结论而不是新活。 */
   receipt: (from: string, chat?: string, job?: { job: string; done: number; total: number }, status: ReceiptStatus = "done", event?: string, route?: ReceiptRoute): Attrs => ({
-    ...envelopeAttrs.peer(from, chat, event ? { event } : undefined),
+    ...envelopeAttrs.peer(from, chat, route?.asker),
+    ...(event ? { event } : {}),
     receipt: "1",
     status,
-    ...askerAttrs(route?.asker),
     ...(route?.audience ? { audience: route.audience } : {}),
-    ...(route?.via ? { via: route.via } : {}),
-    ...(route?.late ? { late: "1" } : {}),
     // 工单的「齐了吗」由守护进程数出来写在属性上, 不让模型自己记: 异步回执是 N 个
     // 独立的轮次陆续进来的, 靠模型在上下文里数到五是最容易出错的那种事。
     ...(job && job.job
@@ -154,13 +141,9 @@ const envelopeOfAttrs = (a: Attrs): Envelope | undefined =>
         ...(a["chat-key"] ? { chatKey: a["chat-key"] } : {}),
         ...(a["asker-user"] && a["asker-chat"] ? { asker: { who: a["asker-user"], chat: a["asker-chat"] } } : {}),
         ...(a.receipt === "1" ? { receipt: true } : {}),
-        ...(a.quiet === "1" || a.act === "fyi" ? { quiet: true } : {}),
         ...(a.status ? { status: a.status as ReceiptStatus } : {}),
         ...(a.event ? { event: a.event } : {}),
-        ...(a.serves ? { serves: a.serves } : {}),
         ...(a.audience ? { audience: a.audience } : {}),
-        ...(a.via ? { via: a.via } : {}),
-        ...(a.late === "1" ? { late: true } : {}),
       }
     : undefined;
 
@@ -181,6 +164,7 @@ const envelopeOf = (r: Reminder): Envelope | undefined => envelopeOfAttrs(r.attr
 export const parseEnvelope = (raw: string): Envelope | undefined => {
   const reminders = parseReminders(raw);
   const env = reminders.reduce<Envelope | undefined>((hit, r) => envelopeOf(r) ?? hit, undefined);
+  // receipt-delivery: 退役前回执多挂的一块, 值与 message-event 相同 —— 老 transcript 照认。
   const eventId = reminders.filter((r) => ["message-event", "receipt-delivery"].includes(r.attrs.wezard ?? "")).at(-1)?.attrs.event;
   return env && { ...env, ...(eventId ? { eventId } : {}) };
 };
