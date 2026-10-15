@@ -36,11 +36,11 @@ const fileSize = (jsonlPath: string): number => {
   try { return statSync(jsonlPath).size; } catch { return 0; }
 };
 
-const readTailBytes = (jsonlPath: string, want: number): string => {
+const readTailBytes = (jsonlPath: string, want: number, endOffset?: number): string => {
   if (!existsSync(jsonlPath)) return "";
   let fd: number | undefined;
   try {
-    const size = statSync(jsonlPath).size;
+    const size = Math.min(statSync(jsonlPath).size, endOffset ?? Infinity);
     const len = Math.min(size, want);
     const buf = Buffer.allocUnsafe(len);
     fd = openSync(jsonlPath, "r");
@@ -82,11 +82,12 @@ const readTailUntil = <T>(
   parse: (raw: string) => T,
   enough: (parsed: T) => boolean,
   max = TAIL_BYTES_MAX,
+  endOffset?: number,
 ): T => {
-  const size = fileSize(jsonlPath);
+  const size = Math.min(fileSize(jsonlPath), endOffset ?? Infinity);
   const ceiling = Math.min(size || TAIL_BYTES, max);
   const walk = (win: number): T => {
-    const parsed = parse(readTailBytes(jsonlPath, win));
+    const parsed = parse(readTailBytes(jsonlPath, win, endOffset));
     return enough(parsed) || win >= ceiling ? parsed : walk(Math.min(win * 4, ceiling));
   };
   return walk(Math.min(TAIL_BYTES, ceiling));
@@ -162,8 +163,8 @@ export const tailTurns = (jsonlPath: string, n = 3, keepLines = false): Turn[] =
   readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, keepLines), (ts) => ts.length >= n).slice(-n);
 
 /** 最后一句进到模型的话 (带信封), 往回读到有为止 —— 中间隔着多少轮工具都不怕。 */
-export const lastUserTurn = (jsonlPath: string): Turn | undefined =>
-  readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, true), (ts) => ts.some((t) => t.role === "user"))
+export const lastUserTurn = (jsonlPath: string, endOffset?: number): Turn | undefined =>
+  readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, true), (ts) => ts.some((t) => t.role === "user"), TAIL_BYTES_MAX, endOffset)
     .filter((t) => t.role === "user").at(-1);
 
 /** 最后 `n` 轮对话 —— 凡是交给另一个 wizard (或人)**读**的都走这里。 */

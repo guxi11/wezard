@@ -7,6 +7,7 @@
 // 用法:
 //   node scripts/commit-own.mjs -m <msg> [-m <段>…] <path>…        这些文件的工作树全文 = 我的改动 (含新建 / 删除)
 //   node scripts/commit-own.mjs -m <msg> --patch <file|->            文件里混着别人的 hunk: 交一份只含自己 hunk 的补丁
+//   --merge-parent <ref>  把已审查并由 path / patch 提供的合并结果记录为双亲提交, 不改写历史。
 //   -F <file> 从文件读提交信息 · --no-check 跳过 tsc · --dry-run 只拼树、跑检查, 不落 HEAD
 //
 // 补丁要对 HEAD、带上下文 (`git diff HEAD -- f` 剪掉别人的 hunk; 别用 -U0: 纯插入会落错位置且不报错)。
@@ -26,6 +27,7 @@ const parse = ([a, ...rest], o = { msg: [], paths: [], check: true, dry: false }
   return a === "-m" ? parse(after, { ...o, msg: [...o.msg, v] })
     : a === "-F" ? parse(after, { ...o, msg: [...o.msg, readFileSync(v, "utf8").trimEnd()] })
     : a === "--patch" ? parse(after, { ...o, patch: readFileSync(v === "-" ? 0 : v, "utf8") })
+    : a === "--merge-parent" ? parse(after, { ...o, mergeParent: git(["rev-parse", "--verify", "--end-of-options", `${v}^{commit}`]) })
     : a === "--no-check" ? parse(rest, { ...o, check: false })
     : a === "--dry-run" ? parse(rest, { ...o, dry: true })
     : parse(rest, { ...o, paths: [...o.paths, a] });
@@ -95,9 +97,9 @@ const missingInWorktree = (old, neu) => changed(old, neu).filter((p) => {
 const commit = (opts, attempt = 1) => {
   const old = git(["rev-parse", "HEAD"]);
   const tree = buildTree(old, opts);
-  if (tree === git(["rev-parse", `${old}^{tree}`])) return console.log("没有可提交的改动"), 0;
+  if (tree === git(["rev-parse", `${old}^{tree}`]) && !opts.mergeParent) return console.log("没有可提交的改动"), 0;
   if (opts.check) typecheck(tree);
-  const neu = git(["commit-tree", tree, "-p", old, "-F", "-"], { input: opts.msg.join("\n\n") + "\n" });
+  const neu = git(["commit-tree", tree, "-p", old, ...(opts.mergeParent ? ["-p", opts.mergeParent] : []), "-F", "-"], { input: opts.msg.join("\n\n") + "\n" });
   if (opts.dry) return console.log(`dry-run: ${neu.slice(0, 7)} (未落 HEAD)\n${git(["diff", "--stat", old, neu])}`), 0;
   if (tryGit(["update-ref", "HEAD", neu, old]) === null) {
     if (attempt >= TRIES) throw new Error(`HEAD 一直在动, ${TRIES} 次都没落下`);

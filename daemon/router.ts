@@ -420,7 +420,7 @@ const retellOps = (table: Table, row: Route, verdict: FinalVerdict): Op[] => {
 export const finalReleased = (table: Table, owner: Key, serves: EventId | undefined, body: string): boolean => {
   const row = serves ? table[serves] : undefined;
   if (!row) return true;
-  if (row.status === "held") return false;
+  if (row.owner !== owner || row.status === "held") return false;
   if (row.status !== "answered" && row.status !== "handed") return waiting(table, row.event).length === 0;
   const o = row.outcome;
   return row.owner === owner && !!o && o.status !== "canceled"

@@ -571,6 +571,20 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     drain: () => { draining = true; stopped = true; clearInterval(timer); timer = undefined; },
     stop: () => { accepting = false; stopped = true; clearInterval(timer); timer = undefined; },
     get: (id: string) => { const e = db.get(id); return e && clone(e); },
+    // A transfer moves the route, not the human's original reply stream. Derive the
+    // binding from durable inputs so chained transfers and reload use the same bubble.
+    latestTransfer: (serves: string): MessageEvent | undefined => {
+      const transfers = Object.values(db.all()).filter((e) => e.serves === serves && e.payload.peer?.transferred && !e.canceled);
+      const last = transfers.at(-1);
+      return last && clone(last);
+    },
+    hasReplyDelivery: (streamId: string): boolean => Object.values(outbox.all()).some((d) => d.stream?.id === streamId),
+    replyOrigin: (event: MessageEvent): MessageEvent | undefined => {
+      const origin = event.payload.human ? db.get(event.id) : event.serves
+        ? Object.values(db.all()).find((e) => e.serves === event.serves && !!e.payload.human && e.channel === event.channel)
+        : undefined;
+      return origin && clone(origin);
+    },
     status: () => scan(() => {
       const parts = partsByEvent();
       return { events: Object.values(db.all()).map((e) => view(e, parts.get(e.id) ?? [])), deliveries: Object.values(outbox.all()).map(clone) };
