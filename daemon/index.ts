@@ -3126,12 +3126,8 @@ const main = async (): Promise<void> => {
         d = { kind: "spawn", why: `${d.why}; 但它被${t.body.gated === "direction" ? "方向闸" : "冷门控"}退回 (${String(t.body.reason)}) —— 改为白板 spawn` };
       }
       const name = (b.name ?? "").toString().trim();
-      const description = (b.description ?? "").toString().trim();
-      if (!name || !description) {
-        settleRoot(false);
-        json(res, 400, { ok: false, decision: "spawn", reason: `${d.why} —— 要新生一个, 带上 name (这件事的短名) 与 description (它的职责) 重发`, ...(shown.length ? { candidates: shown } : {}) });
-        return;
-      }
+      const description = (b.description ?? "").toString().trim() || clipLine(task, 120);
+      // 空 name 交给 bearAs / claimSlot 按职责自动取名避重, 不当作显式点名复用旧记录。
       const tier = taskTier;
       const born = await bearAs(self, { inherit: false, name, description, tier, ...(lead ? { lead: true } : {}) } as PeerBody, undefined, dispatchOrigin?.authority);
       if (born.status !== 200) { settleRoot(false); json(res, born.status, { ...born.body, decision: "spawn", reason: d.why }); return; }

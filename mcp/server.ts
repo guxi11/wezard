@@ -836,15 +836,15 @@ server.registerTool(
   {
     title: "Dispatch a task (default decision by the daemon)",
     description:
-      "派活一步到位: 守护进程查候选 (同 route_candidates) → 过成本门控 → 决定转给已有的 wizard 还是按档白板 spawn → 用 tell_peer 投出去 (默认公开: 气泡与它的回复进你这一轮的群, 回执照常回你), 返回 `decision` (existing / spawn)、`reason`、落到谁 (`name`)、件号 `turn`, spawn 的还有 `tier` / `model`。\n" +
+      "派活一步到位: 只需必填 task; name / description 可省略, 新建时自动取名并用任务文本补职责。守护进程查候选 (同 route_candidates) → 过成本门控 → 决定转给已有的 wizard 还是按档白板 spawn → 用 tell_peer 投出去 (默认公开: 气泡与它的回复进你这一轮的群, 回执照常回你), 返回 `decision` (existing / spawn)、`reason`、落到谁 (`name`)、件号 `turn`, spawn 的还有 `tier` / `model`。\n" +
       "先按验收目标分清独立新活和原任务续篇。独立新活按本次难度派, 不因同项目、公共 AGENTS.md/CLAUDE.md 或词面重叠塞给已有 lead。自动复用要求实质上下文证据、无 lead/任务占用、成本合适; 其余白板 spawn。难度看所需判断而非句长: **默认 standard (不给 tier 就是它)**, 跑腿/核查 light, 只有确实要判断 (设计取舍、疑难排障、关键评审) 才显式 hard。\n" +
       "你不同意就**显式推翻**: `to` 用于人明确指定或已确认必需的上下文连续性, `spawn:true` 硬要新的, `force:true` 只越过缓存成本门控, 不放宽自动复用的相关性/lead/占用约束。同一验收目标的续篇用 tell_peer 的 re, 不能用 re/to 给复杂 lead 顺便追加独立小活。`lead:true` = 要统筹 coder + reviewer、多轮协作: 白板起 lead 由它组队 (带 `to` 则让那个已有 wizard 当 lead)。",
     inputSchema: {
       task: z.string().describe("这件活, 原样转给对方的文本。写清目标与交付, 带文件名 / 模块名帮助找上下文; 公共规则文件或同目录不构成复用理由。不要把独立核查改写成原 lead 的附加交付。"),
       return: z.enum(["self", "transfer", "detach", "none"]).optional().describe(RETURN_DOC + " dispatch 不能配 lead:true 用 transfer。"),
       for: z.string().optional().describe(FOR_DOC),
-      name: z.string().describe("若决定新 spawn, 它的名字: 这件事的短名 (全机唯一)。转给已有的时不用。"),
-      description: z.string().describe("若决定新 spawn, 它往后的职责, 一句话。"),
+      name: z.string().optional().describe("可选的新 wizard 短名, 不是已有执行者的地址 (指定已有执行者用 to)。省略或空白 = 新建时按职责自动取全机唯一名; 复用时忽略。"),
+      description: z.string().optional().describe("可选的新 wizard 职责, 一句话。省略或空白 = 取 task 摘要; 复用时忽略。"),
       tier: z.enum(TIERS).optional().describe("本次任务难度及 spawn 档位 (mini / light / standard / hard / ultra)。**不写就是 standard (默认)**; 跑腿/核查 light; 只有确实要判断 (设计取舍、疑难排障、关键评审) 才 hard / ultra。按所需判断而非句长选。复用已有 wizard 不会切换它的模型。"),
       to: z.string().optional().describe("显式选定已有 wizard (名字), 绕过自动选人。仅在人明确指定执行者或必需上下文已确认时使用; 不能仅因同项目或已有 lead 在场。原任务续篇用 tell_peer re。"),
       spawn: z.boolean().optional().describe("推翻默认: 不看候选, 一定白板 spawn。"),
