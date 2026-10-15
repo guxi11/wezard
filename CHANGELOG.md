@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [2.7.3] - 2026-10-15
 
 ### Fixed
 - transfer 人问的那一笔后气泡不随行移交 (T10 删掉旧 answerBubbles 交接后的回归): 交出方这一轮的终句 (「已移交 .x」) 照旧占住那句人话的流式气泡 —— `finalReleased` 对在飞的行不核 owner —— 接手方的终句只能另起一条 standalone。现在 `finalReleased` 在飞的行也只放 owner 的终句, 交出方这一轮的终句只留 rolepage (`setEventHandedAway`, 不走链式收口的「气泡先展示」); 气泡在 transfer 落地时从交出方摘下、按接手方注入事件寄存 (`handBubble`), 接手方开轮时接过去续写 CoT 与终句 (到期点仍从人那句话起算; 寄存只在内存, reload 或过期退回 standalone)。
@@ -1160,7 +1160,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.7.2...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.7.3...HEAD
+[2.7.3]: https://github.com/guxi11/wezard/compare/v2.7.2...v2.7.3
 [2.7.2]: https://github.com/guxi11/wezard/compare/v2.7.1...v2.7.2
 [2.7.1]: https://github.com/guxi11/wezard/compare/v2.7.0...v2.7.1
 [2.7.0]: https://github.com/guxi11/wezard/compare/v2.6.4...v2.7.0
