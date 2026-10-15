@@ -976,7 +976,8 @@ const cases = {
     const read = await until(() => turnsOf(sender).some((t) => t.closed && t.from?.receipt && t.from.from === kids.get("rr-n") && (t.from.turn ?? t.from.event) === row.event && t.from.status === "need"), 120_000);
     const mid = await rowOf(sender, kids.get("rr-n"));
     if (!read || mid?.event !== row.event || mid.status !== "need") return { pass: false, why: `前提没成立: NEED 收件轮未结束或状态不对 (status=${mid?.status})` };
-    const re = await send(`口令是 ${n}`, { re: row.event });
+    // 续问只沿用原件, 不能带 detach (send 默认带); `re: true` = 续哪一笔由路由表推断 (本轮读的那份 NEED 回执)。
+    const re = await send(`口令是 ${n}`, { re: true, return: "self" });
     if (!re.ok) return { pass: false, why: `re: ${re.reason}` };
     const s = await until(async () => { const x = await rowOf(sender, kids.get("rr-n")); return settled(x) && x; }, 180_000);
     const got = (await waitReceipts(sender, "rr-n", 2)).filter((r) => roundId(r) === row.event);

@@ -170,7 +170,7 @@ export const renderRow = (x: Item, live: LiveOf, n: Names, at: number): string =
     x.job ? `工单 ${x.job}` : "",
   ].filter(Boolean).join(" · ") + (x.ask ? `\n  它问: ${x.ask}` : "");
 
-const HOWTO = "答它 / 转达人的话 → `tell_peer({name, re: <event>})`; 没结论的改派或 re 追问; 不再要了 → `pending_items({drop:[<event>]})`";
+const HOWTO = "答它 / 转达人的话 → `tell_peer({name, re: true})`; 没结论的改派或 re 追问; 不再要了 → `pending_items({drop:[<name>]})`";
 
 /** 等人验收的一行: 需求已交付、根单还开着, 等人说「好」或「不对」。 */
 export const renderAwaiting = (title: string, job: string, deliveredAt: number, at: number): string =>

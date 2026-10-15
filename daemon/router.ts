@@ -292,6 +292,29 @@ export const settledTo = (table: Table, owner: Key): Route[] =>
   byAt(Object.values(table).filter((r) => r.receiver.kind === "wizard" && r.receiver.to === owner
     && (r.outcome !== undefined || r.status === "need" || r.status === "error")));
 
+// ── 工具参数的引用解析: 模型只说「对谁」, 那一笔由表推断 ──────────────────
+
+/** 模型抄来的引用 → event id: 剥掉信封上 message-event 的 `route:` / `rcpt:` 前缀与
+ *  `:rN` / `:resume` / `:<rev>` 后缀 (最常见的抄错就是抄了那一个)。 */
+export const eventRef = (raw: unknown): string =>
+  String(raw ?? "").replace(/[`\s]/g, "").replace(/^(?:route|rcpt|canceled|chat):/, "").replace(/:.*$/, "");
+/** 是 event id (`e<hex>[.n…]`, T10 前的老件号 `t<hex>`) 而不是名字。 */
+export const isEventRef = (s: string): boolean => /^[et][0-9a-f]{6,}(?:\.\d+)*$/.test(s);
+
+const PAIR_LIVE: ReadonlySet<Status> = new Set<Status>(["held", "open", "need", "error"]);
+export type PairPick = { ok: true; row?: Route } | { ok: false; many: Route[] };
+/** `from` 派给 `to` (此刻的 owner, transfer 过就是接手方) 的「那一笔」: `hint` (本轮在读的那份回执)
+ *  命中 → 它; 在飞的唯一 → 它; 多于一笔 → 歧义, 交给调用方列出来让模型指明; 没有在飞的 →
+ *  最近一笔 (可能已落定, 也可能从没派过 = undefined)。 */
+export const pickPair = (table: Table, from: Key, to: Key, hint?: EventId): PairPick => {
+  // hint 不看 receiver: 沿链升级投来的回执, 行上的 receiver 还是那个已不在的 wizard。
+  const hit = hint !== undefined && table[hint]?.owner === to ? table[hint] : undefined;
+  if (hit) return { ok: true, row: hit };
+  const rows = byAt(Object.values(table).filter((r) => r.receiver.kind === "wizard" && r.receiver.to === from && r.owner === to)).reverse();
+  const live = rows.filter((r) => PAIR_LIVE.has(r.status));
+  return live.length > 1 ? { ok: false, many: live } : { ok: true, ...(live[0] ?? rows[0] ? { row: live[0] ?? rows[0] } : {}) };
+};
+
 // ── 投递前的两处判定: 孤儿 (§4.3) 与升级 (§4.4) ────────────────────────────
 
 /** 一笔结论实际要投给谁 —— 升级之后可能与行上写的 receiver 不同。 */

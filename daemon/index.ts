@@ -27,7 +27,7 @@ import { applyHot, cfgSeenBy, patchedTop, pinChatKeys, configGet, fromLegacy, le
 import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } from "./usage.js";
 import { installInboundRouter } from "./inbound.js";
 import { loadMirrorStore } from "./mirror-store.js";
-import { cancelOps, deadlineOf, makeOutcome, openRouter, ops, type EventId, type FinalVerdict, type Op, type Receiver, type Route } from "./router.js";
+import { cancelOps, deadlineOf, eventRef, isEventRef, makeOutcome, openRouter, ops, pickPair, type EventId, type FinalVerdict, type Op, type Receiver, type Route } from "./router.js";
 import { createMessageEvents, messageId, finalId, type MessageAdapters, type MessageEvent } from "./message-events.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { backendFor, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
@@ -1090,6 +1090,12 @@ const main = async (): Promise<void> => {
       const e = env.eventId ? events.get(env.eventId) : undefined;
       return e?.serves || (env.kind === "task" ? env.event : undefined) || undefined;
     };
+    /** 本轮若是一份回执: 它回的是哪一笔 (owner = 回执的发话方) —— `re` / 撤回不必再抄 id 的依据。 */
+    const receiptOfTurn = (self: string): EventId | undefined => {
+      const id = openingOfSelf(self)?.env?.eventId;
+      const from = id ? events.get(id)?.payload.peer?.from : undefined;
+      return from?.receipt ? from.event : undefined;
+    };
     /** 开一行 (owner = 领活的人)。子行挂在自己服务的那一笔下, 挂不上就是新根 —— 建行这一处
      *  只认这两条, 别的判定 (§3.4 transfer 前置、409) 都在入口先做完。 */
     const openRow = (p: { event?: EventId; owner: string; receiver: Receiver; deadlineAt: number; job?: string; asker?: Asker; after?: readonly EventId[] }): EventId => {
@@ -1142,22 +1148,30 @@ const main = async (): Promise<void> => {
     const planReturn = (self: string, body: Record<string, unknown>, origin?: EventId): ReturnPlan => {
       const r = returnOpOf(body);
       if (!r.ok) return { ok: false, status: 400, reason: r.reason };
-      const want = typeof body.for === "string" ? body.for.replace(/[`\s]/g, "") : "";
+      const want = typeof body.for === "string" ? body.for.trim() : "";
       if (origin !== undefined && want) return { ok: false, status: 400, reason: "`re` 续问沿用原件的那一笔, 不能再带 `for`" };
       // 续问只沿用原件: 改去向 (交出 / 旁支) 会让原件永远收不到结论 (§3.2)。
       if (origin !== undefined && (r.op === "transfer" || r.op === "detach"))
         return { ok: false, status: 400, reason: "`re` 续问只沿用原件: 不能带 transfer / detach" };
       if (want) {
-        const row = router.get(want);
-        if (!row || row.owner !== self || row.status === "answered" || row.status === "handed")
+        // `for` 说的是「为谁」: 派活方的名字 / 群名; 同一方欠着两笔才需要 event id。
+        const id = eventRef(want);
+        const who = isEventRef(id) ? undefined : resolvePeer(self, want);
+        const rows = router.owedBy(self).filter((x) => x.status !== "answered" && (isEventRef(id)
+          ? x.event === id
+          : x.receiver.kind === "wizard" ? !!who?.ok && x.receiver.to === who.target : [chatNameOf(cfg, x.receiver.channel), x.receiver.channel].includes(want)));
+        if (rows.length > 1)
+          return { ok: false, status: 400, reason: `for "${want}" 对上你欠着的 ${rows.length} 笔, 用 event id 指明: ${rows.map((x) => `\`${x.event}\``).join(" ")}` };
+        if (!rows[0])
           return { ok: false, status: 400, reason: `for "${want}" 不是你此刻欠着、还没交代的一笔 —— 你欠着的: ${owedList(self)}` };
-        return { ok: true, op: r.op, serves: row.event };
+        return { ok: true, op: r.op, serves: rows[0].event };
       }
       const inferred = origin ?? servesOfTurn(self);
       const row = inferred ? router.get(inferred) : undefined;
       // 本轮服务的那一笔已经被自己 transfer 出去了: 它的交代归接手方 (§3.4) —— 静默收口;
       // 真有与它无关的事, 显式 `for` 挂到你欠着的另一笔。
-      if (row && row.owner !== self && r.op !== "transfer")
+      // 续问 (origin) 的那一行本来就欠在对方手上 —— 只有本轮服务的那笔才谈得上「交出去了」。
+      if (origin === undefined && row && row.owner !== self && r.op !== "transfer")
         return { ok: false, status: 409, reason: "这一轮服务的那一笔你已经 transfer 出去了: 它的交代归接手方, 不再由你派活或对人说话 —— 静默收口; 有别的要说, 用 `for` 挂到你欠着的另一笔" };
       return { ok: true, op: r.op, serves: row?.owner === self ? row.event : inferred };
     };
@@ -1700,15 +1714,25 @@ const main = async (): Promise<void> => {
     // 被冷门控退回过的 `self\0target` → 到期时刻: 老 MCP 进程原样重发即视为 force。
     const coldRefused = new Map<string, number>();
     type Reply = { status: number; body: Record<string, unknown> };
-    /** 入参 `after` → 件号数组 (去反引号 / 空白 / 重复)。 */
-    const afterTurnsOf = (body: PeerBody): string[] => {
+    /** 入参 `after` → event 数组: 每项是名字 (= 我派给它的那一笔, 见 pickPair) 或 event id。 */
+    const afterTurnsOf = (self: string, body: PeerBody): { ok: true; ids: string[] } | { ok: false; reason: string } => {
       const raw = (body as { after?: unknown }).after;
-      return [...new Set((Array.isArray(raw) ? raw : []).map((x) => String(x).replace(/[`\s]/g, "")).filter(Boolean))];
+      const picked = [...new Set((Array.isArray(raw) ? raw : []).map((x) => String(x).trim()).filter(Boolean))].map((x): { id: string } | { bad: string } => {
+        const id = eventRef(x);
+        if (isEventRef(id)) return { id };
+        const who = resolvePeer(self, x);
+        if (!who.ok) return { bad: `${x}: ${who.reason}` };
+        const p = pickPair(router.table(), self, who.target);
+        if (!p.ok) return { bad: `${x} 手上有你 ${p.many.length} 笔没落定 (${p.many.map((r) => r.event).join(" ")}), 用 event id 指明` };
+        return p.row ? { id: p.row.event } : { bad: `你没派过活给 ${x}` };
+      });
+      const bad = picked.flatMap((p) => ("bad" in p ? [p.bad] : []));
+      return bad.length ? { ok: false, reason: `after 认不出: ${bad.join("; ")}` } : { ok: true, ids: [...new Set(picked.flatMap((p) => ("id" in p ? [p.id] : [])))] };
     };
     /** 放行时挂在信封后面的前置结论: 谁交的、件号、RESULT 与 ARTIFACT 原样 (只进对方输入框)。 */
     const afterNote = (turns: readonly string[], seen: Readonly<Record<string, HeldSeen>>, owner: string): string =>
       renderReminder({ wezard: "after" }, [
-        "这件活排在下面这些前置之后, 它们都已落定; 结论原样附上 (谁交的 · event):",
+        "这件活排在下面这些前置之后, 它们都已落定; 结论原样附上 (谁交的):",
         ...turns.flatMap((t) => {
           const x = seen[t];
           if (!x) return [];
@@ -1716,7 +1740,7 @@ const main = async (): Promise<void> => {
           const versions = workflow.list(owner).find((a) => a.turn === t && a.acceptance === "accepted")?.files ?? [];
           const clean = (v: string): string => v.replace(/<\/?system-reminder[^>]*>/g, "");
           return [
-            `- ${displayName(x.to)} · ${t} · ${x.status}: ${c.kind === "result" ? `RESULT: ${clean(c.text)}` : clipLine(clean(x.body), 600) || "(没有正文)"}`,
+            `- ${displayName(x.to)} · ${x.status}: ${c.kind === "result" ? `RESULT: ${clean(c.text)}` : clipLine(clean(x.body), 600) || "(没有正文)"}`,
             ...c.artifacts.map((a) => {
               const f = versions.find((f) => f.path === a.path);
               return f ? `  ARTIFACT: ${f.snapshot} — accepted version sha256 ${f.sha256}; original source ${f.path}` : `  ARTIFACT: ${a.path}${a.note ? ` — ${a.note}` : ""}`;
@@ -1902,16 +1926,29 @@ const main = async (): Promise<void> => {
       const kind: "task" | "ask" | "fyi" = rawKind === "ask" || rawKind === "fyi" ? rawKind : "task";
       // `re` 的值是那一笔的**路由 event** (§9.5): 欠它的是谁由表说了算 —— transfer 之后 owner 已经
       // 换人, 按旧件号找反而会投给交出去的那位。表上没有 / 已落定 = 这句按新活发。
-      const re = ((body as { re?: unknown }).re ?? "").toString().replace(/[`\s]/g, "");
-      const reRow = re ? router.get(re) : undefined;
-      const r = resolvePeer(self, addrOf(body) || (reRow ? displayName(reRow.owner) : ""));
+      // `re` 只是「续不续」这一位; 续哪一笔由表推断 (pickPair: 本轮在读的那份回执 → 这一对唯一在飞的 →
+      // 最近一笔)。event id 照收: 老 MCP 进程、以及一对之间并发两笔时的兜底。省略 = 本轮是它的
+      // NEED 回执、又对它说话才默认续 —— 答它的反问; 显式 `re:false` 推翻。
+      const rawRe = (body as { re?: unknown }).re;
+      const reFlag = rawRe === true || rawRe === "true" ? true : rawRe === false || rawRe === "false" ? false : undefined;
+      const reId = reFlag === undefined && typeof rawRe === "string" ? eventRef(rawRe) : "";
+      const idRow = reId ? router.get(reId) : undefined;
+      const r = resolvePeer(self, addrOf(body) || (idRow ? displayName(idRow.owner) : ""));
       if (!r.ok) { return { status: r.status, body: { ok: false, reason: r.reason, candidates: r.candidates } }; }
       const { target } = r;
+      const hint = planned || actor ? undefined : receiptOfTurn(self);
+      const hintRow = hint ? router.get(hint) : undefined;
+      const wantRe = !!reId || (reFlag ?? (kind !== "fyi" && hintRow?.status === "need" && hintRow.owner === target));
+      const pick = wantRe && !reId ? pickPair(router.table(), self, target, hint) : undefined;
+      if (pick && !pick.ok)
+        return { status: 400, body: { ok: false, reason: `你在 ${displayName(target)} 手上有 ${pick.many.length} 笔没落定, 续哪一笔用 event id 指明 (re: "<event>"): ${pick.many.map((x) => `\`${x.event}\``).join(" ")}` } };
+      const reRow = idRow ?? (pick?.ok ? pick.row : undefined);
+      const re = reRow?.event ?? reId;
       const reTarget = reRow && ["open", "need", "error"].includes(reRow.status) ? reRow : undefined;
       // 续问必须点到现在欠着它的那位: 点错了收件的不是 owner, 它的终句就落不到那一笔上。
       if (reTarget && reTarget.owner !== target)
         return { status: 409, body: { ok: false, reason: `这一笔现在欠在 ${displayName(reTarget.owner)} 手上 —— 要续问就点名它 (re 按路由表走, 不再按旧件号找人)` } };
-      const reUnknown = !!re && !reTarget;
+      const reUnknown = wantRe && !reTarget;
       const legs = reTarget ? legsOf(reTarget.event) + 1 : 1;
       // Capture the origin before waiting for another pane; our own turn may change meanwhile.
       const asker = planned ? planned.origin.asker : actor?.asker ?? (reTarget ? reTarget.asker : askerOf(self));
@@ -1931,7 +1968,7 @@ const main = async (): Promise<void> => {
       const isOpen = (id?: string): string => (id && jobs.get(id)?.status === "open" ? id : "");
       const askedJob = ((body as { job?: string }).job ?? "").trim();
       const leadJob = jobs.all().find((j) => j.kind === "req" && j.status === "open" && j.owner === self && j.members.some((x) => x.target === target && x.role === "lead"))?.id ?? "";
-      const jobId = kind === "fyi" ? "" : askedJob || isOpen(reTarget?.job) || (open && router.waiting(open.event).length > 0 ? "" : isOpen(open?.job)) || (reUnknown ? leadJob : "");
+      const jobId = kind === "fyi" ? "" : askedJob || isOpen(reTarget?.job) || (open && router.waiting(open.event).length > 0 ? "" : isOpen(open?.job)) || (reUnknown ? isOpen(reRow?.job) || leadJob : "");
       /** 答它的反问不算新的一件 (不花预算、不数成员)。 */
       const freed = open?.status === "need";
       const actorStillValid = (): boolean => {
@@ -1969,7 +2006,9 @@ const main = async (): Promise<void> => {
         ...chainNow(self, planned?.origin.event ?? plan.serves), nameOf: displayName });
       if (dr) { return { status: 409, body: { ok: false, gated: "direction", reason: dr } }; }
       // 依赖 (after): 前置必须是自己派出去的那几笔。查不到 → 400; 有失败的 → 409; 都 done → 照常投并附结论; 还有没落定的 → 停放 (先 held)。
-      const afters = afterTurnsOf(body);
+      const afterIds = afterTurnsOf(self, body);
+      if (!afterIds.ok) return { status: 400, body: { ok: false, reason: afterIds.reason } };
+      const afters = afterIds.ids;
       const prereqs = afters.length ? prereqsOf(self, afters) : [];
       if (afters.length) {
         if (kind !== "task" || re) { return { status: 400, body: { ok: false, reason: "`after` 只用于派新活 (kind:\"task\"、不带 re)" } }; }
@@ -2087,7 +2126,8 @@ const main = async (): Promise<void> => {
         ...(jobId ? { job: jobId } : {}), ...(attemptId ? { node, attemptId, acceptance: "pending" } : {}),
         ...(wantReceipt && plan.op !== "transfer" ? { receipt: "已持久化排队；提交后观察那一笔的回执，结论自动返回" } : {}),
         ...(plan.op === "transfer" && serves ? { transfer: transferNote(serves, target) } : {}),
-        ...(others ? { urgentDowngraded: "目标正在处理他人的轮次，按 normal 排队" } : {}) } };
+        ...(others ? { urgentDowngraded: "目标正在处理他人的轮次，按 normal 排队" } : {}),
+        ...(reUnknown ? { reUnknown: "它手上没有你在飞的那一笔可续 (已落定或从没派过): 这句按新活发出" } : {}) } };
     };
     const tellPeerAs: typeof tellPeerAsInner = async (...args) => {
       const [self, body] = args;
@@ -3414,7 +3454,11 @@ const main = async (): Promise<void> => {
       if (!end && target === self) { json(res, 400, { ok: false, reason: "打断自己没有意义 —— 你就是正在生成的那一个" }); return; }
       // 按件号撤回自己派的那一件: 它此刻正在做的就是这件才按 Esc; 否则 (排着 / 在做别人的)
       // 只把这件记成 canceled —— 它之后答出来也不再回执, 手上别人的那一轮不受影响。
-      const turn = (b.turn ?? "").replace(/[`\s]/g, "");
+      // 不带 turn / force 的打断 = 撤回你派给它、还在飞的那一笔 (唯一时) —— 不必抄 event; 歧义才要指明。
+      const own = !end && !b.turn && !b.force ? pickPair(router.table(), self, target) : undefined;
+      if (own && !own.ok) { json(res, 400, { ok: false, target, reason: `你在它手上有 ${own.many.length} 笔没落定, 撤回哪一笔用 turn 指明: ${own.many.map((x) => `\`${x.event}\``).join(" ")}` }); return; }
+      const ownLive = own?.ok && own.row && ["held", "open", "need", "error"].includes(own.row.status) ? own.row.event : "";
+      const turn = eventRef(b.turn) || ownLive;
       if (!end && turn) {
         const mine = router.awaitedBy(self).find((x) => x.owner === target);
         const known = router.get(turn);
@@ -3616,7 +3660,14 @@ const main = async (): Promise<void> => {
       const drop = Array.isArray(b.drop) ? b.drop.map(String) : typeof b.drop === "string" ? [b.drop] : [];
       if (drop.length && owner !== self) { json(res, 403, { ok: false, reason: "只能消自己派出去的" }); return; }
       // 消项: 主键是 event, 但老行只记着件号 —— 两种写法都收 (见 pending-items 的 find)。
-      const dropKeys = drop.map((v) => v.replace(/[`\s]/g, ""));
+      // 名字 = 你派给它、还开着的那几项 (同一对再派会顶掉旧项, 通常就一项)。
+      const dropKeys = drop.flatMap((v) => {
+        const id = eventRef(v);
+        if (isEventRef(id)) return [id];
+        const who = resolvePeer(self, v.trim());
+        const hit = who.ok ? ledger.openOf(self).filter((x) => x.to === who.target).map((x) => x.event) : [];
+        return hit.length ? hit : [v.trim()];
+      });
       const dropped = dropKeys.length ? ledger.drop(self, dropKeys, (b.why ?? "").toString().trim()) : [];
       const now = Date.now();
       const items = ledger.openOf(owner);

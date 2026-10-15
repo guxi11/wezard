@@ -385,7 +385,7 @@ server.registerTool(
 const RETURN_DOC =
   "这件活的回执去哪 (守护进程按 receiver 边投递, 你不递栈): `self` (默认) 结论先回你, 你据此再交代上一层 · `transfer` 尾调用: 把你此刻欠着的那一笔整件交给对方 (把那一笔 move 给它, 不再回到你), 你不再收回执、不再交代 —— 它的结论 (含 NEED / 失败) 直接落到你的上游 (回执信封的 `from` 是接手方); **想自己接 NEED 就别 transfer**; 不能与 job / re / node / after / fyi 并用, 那一笔下你还有没落定的子活时不行, 一笔只能交一次 · `detach` 旁支: 结论回你, 但不挂住你给上游的交代 · `none` 放出去不管, 没有回执 (`kind:\"fyi\"` 隐含它)。";
 const FOR_DOC =
-  "这件活为你欠着的**哪一笔**派的: 那一笔的 **event id** (`e…` / `<event>.<n>`, 见回执里的 `event` 与 `GET /routes`)。默认 = 本轮开头那一笔。挂错会压住别人的交代, 所以对不上 → 400 并列出你欠着的那几笔。";
+  "这件活为你欠着的**哪一笔**派的, 写**派活方的名字** (`.x`) 或群名。默认 = 本轮开头那一笔, 通常不用给; 本轮不服务你欠着的那一笔时才给。同一方欠着两笔才需要 event id (400 会列出来)。挂错会压住别人的交代, 所以对不上 → 400 并列出你欠着的那几笔。";
 const TELL_SCHEMA = {
   name: z.string().describe(ADDRESS_DOC),
   text: z.string().describe("Message to inject. Plain prompt text; slash commands like '/clear' also work."),
@@ -409,7 +409,7 @@ const TELL_SCHEMA = {
     .enum(["task", "ask", "fyi"])
     .optional()
     .describe("对方该怎么接这句话 (与 `priority` 的何时投、`return` 的要不要回执正交): `task` (默认) 一件活, 干完在终句交代结论 (`RESULT:` 可选); `ask` 只答一个问题, 别为它开工; `fyi` 知会, 不用回 —— 自动不要回执、不进工单、不进群。"),
-  re: z.string().optional().describe("同一验收目标的续问/纠正/返工: 欠着的那一笔的 **event id** (`e…` / `<event>.<n>`, 见回执里的 `event` 与 `GET /routes`); 沿用它的工单与频道, 默认 now 插进原轮。按 event 找行解析 owner —— 那一笔被 transfer 过就投给此刻的接手方。能独立验收的新问题必须另派, 不能因同项目或对方读过文件就借 re 追加 (例如编辑器排障中顺带核查 AGENTS.md/CLAUDE.md)。对不上就按新活发出 (`reUnknown`)。"),
+  re: z.union([z.boolean(), z.string()]).optional().describe("`true` = 同一验收目标的续问/纠正/返工, 接着你派给 `name` 的那一笔说 —— 哪一笔守护进程按路由表定 (本轮读的那份回执 → 你在它手上唯一在飞的 → 最近一笔), 不用抄 id; 沿用它的工单与频道, 默认 now 插进原轮。那一笔被 transfer 过, `name` 写接手方 (回执的发话方)。省略时: 本轮是它的 NEED 回执就默认续 (答它的反问), `false` 推翻。你在它手上并发两笔才需写那一笔的 event id (400 会列出来)。能独立验收的新问题必须另派, 不能因同项目或对方读过文件就借 re 追加 (例如编辑器排障中顺带核查 AGENTS.md/CLAUDE.md)。没有在飞的可续 (已落定 / 没派过) 就按新活发出, 回包带 `reUnknown`。"),
   deadline: z.number().optional().describe("最多等它多少秒 (60-43200, 默认 3600); 到点没答完你收到一份 timeout 回执。"),
   force: z
     .boolean()
@@ -418,7 +418,7 @@ const TELL_SCHEMA = {
   after: z
     .array(z.string())
     .optional()
-    .describe("依赖: tracked node 前置只有显式 accepted 且产物版本一致才放行，未验收等待、rejected 阻止。无 node 的旧任务沿用 legacy done（仅有回执，非业务成功）。event id (`e…`) 数组, 都得是你自己派出去的件 (含已落定的; 查不到 → 400)。全部满足各自放行条件 → 立即投; 有已失败的 (timeout / silent / dead / canceled) → 409; 否则**停放**: 不注入, 回包 `parked:true`, 前置全满足放行条件时守护进程以你的名义投出 (信封后附每件前置的 RESULT / ARTIFACT 原样), 任一前置失败这件不投、按 canceled 回执回给你 (正文说明哪件以什么收场)。只用于派新活 (task、不带 re); 回执去向不变, 停放期间仍挂住你给上游的交代; 带 `job` 时现在就记成员与预算; 目标手上若还有你另一件没落定的活 (且不是前置之一) → 409。`deadline` 从真正投出时起算。stop_wizard / close_job 取消覆盖停放件。"),
+    .describe("依赖: tracked node 前置只有显式 accepted 且产物版本一致才放行，未验收等待、rejected 阻止。无 node 的旧任务沿用 legacy done（仅有回执，非业务成功）。wizard 名字数组 (= 你派给它的那一笔: 在飞的优先, 否则最近落定的; 并发两笔才需写 event id), 都得是你自己派出去的件 (查不到 → 400)。全部满足各自放行条件 → 立即投; 有已失败的 (timeout / silent / dead / canceled) → 409; 否则**停放**: 不注入, 回包 `parked:true`, 前置全满足放行条件时守护进程以你的名义投出 (信封后附每件前置的 RESULT / ARTIFACT 原样), 任一前置失败这件不投、按 canceled 回执回给你 (正文说明哪件以什么收场)。只用于派新活 (task、不带 re); 回执去向不变, 停放期间仍挂住你给上游的交代; 带 `job` 时现在就记成员与预算; 目标手上若还有你另一件没落定的活 (且不是前置之一) → 409。`deadline` 从真正投出时起算。stop_wizard / close_job 取消覆盖停放件。"),
 };
 
 server.registerTool("workflow_nodes", {
@@ -448,7 +448,7 @@ const TELL_DESC =
   "默认私聊, 只记在双方 rolepage; 守护进程给 `text` 挂信封 (发话人、私聊/公开、终句收口约定)。拒绝对自己发送。\n" +
   "**派活方向 (守护进程拦, 返回 409 带改道说法)**: 带 `job` 的 task 只许开单者发; 同一张单的成员之间只许 `ask` / `fyi`, 不横向派 task; 上级单的开单者不越级给下层成员派活 (经它的 lead `re`); 目标正等你答复 (在你的 k 链上) 时 task / ask 都不行, 以 `NEED:` 收口; 自己已在 ≥3 层派活链底部不再往下派 task; 借来的专家 (role expert) 只答 ask; 一个 wizard 同时只在一张开着的单里当未落定的执行者。`fyi` 永远放行。";
 
-const tellBody = (a: { name: string; text: string; kind?: string; priority?: string; waitSec?: number; job?: string; role?: string; public?: boolean; re?: string; deadline?: number; force?: boolean; after?: string[]; node?: string; return?: string; for?: string }) => ({
+const tellBody = (a: { name: string; text: string; kind?: string; priority?: string; waitSec?: number; job?: string; role?: string; public?: boolean; re?: boolean | string; deadline?: number; force?: boolean; after?: string[]; node?: string; return?: string; for?: string }) => ({
   name: a.name,
   text: a.text,
   ...(a.return ? { return: a.return } : {}),
@@ -460,7 +460,7 @@ const tellBody = (a: { name: string; text: string; kind?: string; priority?: str
   ...(a.node ? { node: a.node } : {}),
   ...(a.role ? { role: a.role } : {}),
   ...(a.public ? { public: true } : {}),
-  ...(a.re ? { re: a.re } : {}),
+  ...(a.re !== undefined ? { re: a.re } : {}),
   ...(a.deadline ? { deadline: a.deadline } : {}),
   ...(a.after?.length ? { after: a.after } : {}),
   // 一律显式带上: 守护进程据「有没有这个键」认出老 MCP 进程 (见 /peers/tell 的冷门控)。
@@ -820,7 +820,7 @@ server.registerTool(
   {
     title: "Who could take this task",
     description:
-      "一件活要不要转给**已有**的 wizard, 拿不准该给谁、或拿不准值不值时调它。守护进程列出职责 / 最近问话 / 文件线索、lead 与工单/回执占用、上下文连续性、忙闲、ctx 和缓存成本, 并说明自动复用为何受阻。公共 AGENTS.md/CLAUDE.md 等指引文件不算复用证据; 同工作区、同名文件或职责撞词也不证明是同一任务。候选按线索排序不等于推荐追加任务; 不要给正在处理复杂任务的 lead 塞独立核查。真实续篇用原件号 re, 独立新活按本次难度 dispatch, 默认保留白板 spawn。",
+      "一件活要不要转给**已有**的 wizard, 拿不准该给谁、或拿不准值不值时调它。守护进程列出职责 / 最近问话 / 文件线索、lead 与工单/回执占用、上下文连续性、忙闲、ctx 和缓存成本, 并说明自动复用为何受阻。公共 AGENTS.md/CLAUDE.md 等指引文件不算复用证据; 同工作区、同名文件或职责撞词也不证明是同一任务。候选按线索排序不等于推荐追加任务; 不要给正在处理复杂任务的 lead 塞独立核查。真实续篇用 tell_peer 的 re, 独立新活按本次难度 dispatch, 默认保留白板 spawn。",
     inputSchema: {
       task: z.string().describe("这件活及验收目标, 原话或一句概括都行。文件名 / 模块名 / 函数名帮助找线索; 公共规则文件、同工作区和关键词重叠不证明是同一任务。"),
       cwd: z.string().optional().describe("这件活落在哪个工作区。省略 = 你自己的工作区。"),
@@ -838,7 +838,7 @@ server.registerTool(
     description:
       "派活一步到位: 守护进程查候选 (同 route_candidates) → 过成本门控 → 决定转给已有的 wizard 还是按档白板 spawn → 用 tell_peer 投出去 (默认公开: 气泡与它的回复进你这一轮的群, 回执照常回你), 返回 `decision` (existing / spawn)、`reason`、落到谁 (`name`)、件号 `turn`, spawn 的还有 `tier` / `model`。\n" +
       "先按验收目标分清独立新活和原任务续篇。独立新活按本次难度派, 不因同项目、公共 AGENTS.md/CLAUDE.md 或词面重叠塞给已有 lead。自动复用要求实质上下文证据、无 lead/任务占用、成本合适; 其余白板 spawn。难度看所需判断而非句长: 简单核查 light、常规实现 standard、设计/疑难排障/审查 hard; 不确定 standard, 可显式 tier。\n" +
-      "你不同意就**显式推翻**: `to` 用于人明确指定或已确认必需的上下文连续性, `spawn:true` 硬要新的, `force:true` 只越过缓存成本门控, 不放宽自动复用的相关性/lead/占用约束。同一验收目标的续篇用 tell_peer 的原件号 re, 不能用 re/to 给复杂 lead 顺便追加独立小活。`lead:true` = 要统筹 coder + reviewer、多轮协作: 白板起 lead 由它组队 (带 `to` 则让那个已有 wizard 当 lead)。",
+      "你不同意就**显式推翻**: `to` 用于人明确指定或已确认必需的上下文连续性, `spawn:true` 硬要新的, `force:true` 只越过缓存成本门控, 不放宽自动复用的相关性/lead/占用约束。同一验收目标的续篇用 tell_peer 的 re, 不能用 re/to 给复杂 lead 顺便追加独立小活。`lead:true` = 要统筹 coder + reviewer、多轮协作: 白板起 lead 由它组队 (带 `to` 则让那个已有 wizard 当 lead)。",
     inputSchema: {
       task: z.string().describe("这件活, 原样转给对方的文本。写清目标与交付, 带文件名 / 模块名帮助找上下文; 公共规则文件或同目录不构成复用理由。不要把独立核查改写成原 lead 的附加交付。"),
       return: z.enum(["self", "transfer", "detach", "none"]).optional().describe(RETURN_DOC + " dispatch 不能配 lead:true 用 transfer。"),
@@ -1025,7 +1025,7 @@ server.registerTool(
       "挂起事项全表: 你派出去 (tell_peer / 带 task 的 spawn) 还没了结的每一件 —— 件号、对象、一句话题、为谁派的, 状态由守护进程按回执算 (在飞 / 等人拍板 / 人已回话 / 它在反问 / 没结论)。回执 done 了的、同一对改派了的、工单收了的自动消掉; 没结论的留着, 直到你改派、`re` 追问, 或用 `drop` 显式消掉。\n" +
       "管家平时只会在注入尾巴上收到必要的一行增量, 快忘的时候 (交接 / 压缩后、隔了很多轮) 收到一次全表; 其余时候想看就调它。",
     inputSchema: {
-      drop: z.array(z.string()).optional().describe("要消掉的那几笔的 event id (表里每行开头那个; T10 前的老件号 `t…` 也认): 不再需要、或已经另行处理了。"),
+      drop: z.array(z.string()).optional().describe("要消掉的那几项: 写对方的名字 (= 你派给它、还开着的那项), 或表里每行开头的 event id: 不再需要、或已经另行处理了。"),
       why: z.string().optional().describe("消掉的理由, 一句话 (记进账本)。"),
       name: z.string().optional().describe("看别人的挂起事项 (只读)。省略 = 你自己的。"),
     },
@@ -1044,7 +1044,7 @@ server.registerTool(
       name: z.string().describe(ADDRESS_DOC),
       mode: z.enum(["end", "interrupt"]).optional().describe("'end' 强制结束 (默认); 'interrupt' 只打断当前这一轮。"),
       forget: z.boolean().optional().describe("仅对 end 有效: 连身份记录 (名字/职责/记忆) 一起删除。默认 false —— 身份留着, 下次它回来还是它。"),
-      turn: z.string().optional().describe("仅对 interrupt: 只撤回**你自己派的**这一件 (回执 / tell_peer 回包里的件号)。它正在做的就是这件才按 Esc; 还排着或它在做别人的活, 就只把这件记成取消, 不碰它手上那一轮。"),
+      turn: z.string().optional().describe("仅对 interrupt, 通常不用给: 不带 turn / force 时就是撤回你派给它、还在飞的那一笔 (唯一时); 你在它手上并发两笔才写那一笔的 event id (400 会列出来)。只撤回**你自己派的**那一件:它正在做的就是这件才按 Esc; 还排着或它在做别人的活, 就只把这件记成取消, 不碰它手上那一轮。"),
       force: z.boolean().optional().describe("仅对 interrupt: 它此刻在做别的 wizard 派的活时, 不带 turn 的打断默认被拒 (会误伤那件); 确要打断加 true。"),
     },
   },

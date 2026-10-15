@@ -581,7 +581,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "先在自己这里把**公共材料**读进上下文, 再 `clone_wizard({task})` 分出去 (材料已在某个同伴那里就 `from` 它), 每个只交代各自那份差异 —— 别让每个分身各读一遍",
       "两个以上分身先 `open_job`, 之后每次派活都带 `job` —— 回执会替你数还差几份",
       "**派完就放手**: 不 `wait_peer` 守着, 不轮询 `peek_peer`, 不必去催; 没齐之前别汇总、别向人报进度",
-      "按回执的 `status` 处理: `need` = 它在反问, 用 `tell_peer({name, re: event})` 答 · `error` = CLI 报错停了, 等它续跑或 `re` 叫它继续 · `timeout` / `silent` / `dead` / `canceled` = 这一份没有答案了: 换人、`re` 追问, 或在汇总里如实写缺了它",
+      "按回执的 `status` 处理: `need` = 它在反问, 用 `tell_peer({name, re: true})` 答 · `error` = CLI 报错停了, 等它续跑或 `re` 叫它继续 · `timeout` / `silent` / `dead` / `canceled` = 这一份没有答案了: 换人、`re` 追问, 或在汇总里如实写缺了它",
       "慢活给 `tell_peer({deadline})` 定期限; 可能来回追问的工单给 `open_job({maxTurns})` 定派活预算, 分身陆续派的给 `expect` 定份数",
       "齐了 → `close_job(summary)` 留档; 给人的结论是你自己这一轮的最终回复, 用你的话收口",
       "派活文本只写**活本身** —— 你是谁、私聊与否、收口成 `RESULT:` / `NEED:` / `ARTIFACT:`, 信封替你说",

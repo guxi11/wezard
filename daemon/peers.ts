@@ -658,11 +658,11 @@ export const renderReceiptEnvelope = (
     ...(status === "done"
       ? ["这是**回执**: 它那一轮干完了, 下面是它的结论 —— 不是人说的, 也不是新派给你的活。"]
       : status === "need"
-        ? [`这是**反问**: 它缺信息干不下去, 下面 \`NEED:\` 后面就是它要的 —— 照下面的 re 续问答它; 这一份**不计入工单**, 它拿到答复干完会再送一份回执。`]
+        ? [`这是**反问**: 它缺信息干不下去, 下面 \`NEED:\` 后面就是它要的 —— 直接 tell_peer 它答 (这一轮里对它说话默认就是续这一笔); 这一份**不计入工单**, 它拿到答复干完会再送一份回执。`]
       : status === "error"
         ? [`这是**失败回执**: 它那一轮以 CLI 报错收尾, 下面是报错原文, 不是它的结论, **不计入工单**。它若被续跑、之后答出来, 结论会照常再送来一份; 等不及就 peek_peer 看它, 或者再 tell_peer 它一次。`]
         : [`这是**失败回执**: ${FAILED[status]}, 这一份不会再有答案了 (工单里按已落定计)。自己判断: 换人、再 tell_peer 追问, 或者在汇总里如实写缺了这一份。下面是守护进程的说明和它最后说的一句。`]),
-    ...(route?.via ? [`这份结论是**沿链升级**投给你的: ${route.via} 已经不在了, 原来该由它收口的那一笔落到你头上, 由你接着交代。要续问 / 答它的 NEED 照下面的 re 发, 守护进程按路由表投给此刻的 owner。`] : []),
+    ...(route?.via ? [`这份结论是**沿链升级**投给你的: ${route.via} 已经不在了, 原来该由它收口的那一笔落到你头上, 由你接着交代。要续问 / 答它的 NEED 就 \`tell_peer({name: 回执的发话方, re: true})\`, 守护进程按路由表投给此刻的 owner。`] : []),
     ...(route?.retold ? ["这是它对这件活的**追述**: 之前已经交过一份 (定论或失败回执), 这一份是之后补的, 以这一份为准。"] : []),
     // 去向由路由行的 receiver 边算好 (§9.5): up = 终句落到上游那一笔上; chat 给了 = 落回那个群;
     // late = 它服务的那一笔已收口 (孤儿) —— 压过前两种: 只有带 `RESULT:` 的终句作为追述沿原路再投。
@@ -685,7 +685,7 @@ export const renderReceiptEnvelope = (
           "它可能还没干完全部 —— 读 `RESULT:` 那一行 (如果有) 作为它的收口结论; 要更多细节用 peek_peer 读它的对话, 不要猜。",
         ]
       : []),
-    ...(turn ? [`要就这件活追问、补充, 用 \`tell_peer({name: "${from}", re: "${turn}"})\` —— 沿用同一个频道, 工单还开着就沿用工单。`] : []),
+    ...(turn ? [`要就这件活追问、补充, 用 \`tell_peer({name: "${from}", re: true})\` —— 沿用同一个频道, 工单还开着就沿用工单。`] : []),
     // 「齐了吗」是守护进程数的, 不让模型在上下文里自己数 —— 异步回执是 N 个独立
     // 的轮次陆续进来的, 数错一个就会提前收口或者永远等。
     ...(job && job.job && status !== "need" && !(job.req && status === "error")
@@ -694,8 +694,8 @@ export const renderReceiptEnvelope = (
         : job.req
           // 需求根单: 不走「汇总 → close_job」—— 关单 = 归档, 要等人验收。
           ? [status === "done"
-            ? `这是需求根单 \`${job.job}\` 的交付: lead 交差了。向人交代结果后**别 close_job**, 等人验收 —— 认可 → \`close_job({job: "${job.job}"})\` 归档; 说不对 → \`tell_peer({name: "${from}", re: "${turn}", job: "${job.job}"})\` 返工 (同一张单)。对人别提单号。`
-            : `这是需求根单 \`${job.job}\`, 但 lead 没交差 (${status}): 向人说明卡在哪。lead 还在 → \`tell_peer({name: "${from}", re: "${turn}", job: "${job.job}"})\` 叫它续; 否则 \`close_job({job: "${job.job}"})\` 关掉, 需要的话重新 \`dispatch({lead:true})\` 开新单。对人别提单号。`]
+            ? `这是需求根单 \`${job.job}\` 的交付: lead 交差了。向人交代结果后**别 close_job**, 等人验收 —— 认可 → \`close_job({job: "${job.job}"})\` 归档; 说不对 → \`tell_peer({name: "${from}", re: true, job: "${job.job}"})\` 返工 (同一张单)。对人别提单号。`
+            : `这是需求根单 \`${job.job}\`, 但 lead 没交差 (${status}): 向人说明卡在哪。lead 还在 → \`tell_peer({name: "${from}", re: true, job: "${job.job}"})\` 叫它续; 否则 \`close_job({job: "${job.job}"})\` 关掉, 需要的话重新 \`dispatch({lead:true})\` 开新单。对人别提单号。`]
         : job.done >= job.total
           ? [`这是工单的**最后一份** (全部到齐): 现在可以汇总收口了 —— close_job(summary) 留档 (不发群); 给人的结论就是你这一轮的最后一条消息, 用你自己的话写${chat !== undefined ? " —— 它会进群" : ""}。`]
           : [`工单**还差 ${job.total - job.done} 份**: 先把这一份记住 (或落到文件里), 不要现在汇总、也不要向人汇报进度; 等最后一份到了会明确告诉你「全部到齐」。`]
