@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [2.7.2] - 2026-10-15
 
 ### Added
 - `GET /message-events/event?id=<event>`: 单条注入事件的 status 视图 (形状同 `/message-events/status` 的一行, 不认识 = 404)。receipt-regress 轮询单条事件改走它, 不再每 2s 拉一次全表。
@@ -1152,7 +1152,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.7.1...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.7.2...HEAD
+[2.7.2]: https://github.com/guxi11/wezard/compare/v2.7.1...v2.7.2
 [2.7.1]: https://github.com/guxi11/wezard/compare/v2.7.0...v2.7.1
 [2.7.0]: https://github.com/guxi11/wezard/compare/v2.6.4...v2.7.0
 [2.6.4]: https://github.com/guxi11/wezard/compare/v2.6.3...v2.6.4
