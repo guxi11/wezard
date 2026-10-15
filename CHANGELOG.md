@@ -2,6 +2,11 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.7.1] - 2026-10-15
+
+### Fixed
+- 2.7.0 发布存疑的重发: 2.7.0 的 PUT 被 npm 延迟数分钟才生效 (期间 `npm view` 一路 404, 曾误判为坏包), 落定后核实 tarball 完好、dist 齐全 (284 files)。2.7.1 与 2.7.0 内容相同, 仅版本号不同, 让 `latest` 指向发布即确认可见的版本。
+
 ## [2.7.0] - 2026-10-15
 
 ### Added
@@ -1129,7 +1134,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.7.0...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.7.1...HEAD
+[2.7.1]: https://github.com/guxi11/wezard/compare/v2.7.0...v2.7.1
 [2.7.0]: https://github.com/guxi11/wezard/compare/v2.6.4...v2.7.0
 [2.6.4]: https://github.com/guxi11/wezard/compare/v2.6.3...v2.6.4
 [2.6.3]: https://github.com/guxi11/wezard/compare/v2.6.2...v2.6.3
