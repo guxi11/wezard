@@ -4356,6 +4356,7 @@ const main = async (): Promise<void> => {
     registry: tasks,
     log: log.child({ mod: "tasks" }),
     inject: scheduledTaskInject,
+    ready: bridge.restored,
     // gate 里的 `sh` 默认就在目标 wizard 此刻的工作区跑 —— 任务文件里不必写死绝对路径。
     cwdOf: (t) => { const c = bridge.getCwd(t); return c.runningCwd || c.pendingCwd || c.defaultCwd; },
     // 没写 target 的日程兜底到排班者那个机器人的默认聊天 (副机器人没配就不放枪, 不冒用主机器人)。

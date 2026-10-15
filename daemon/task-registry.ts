@@ -11,6 +11,7 @@
 // 留一份, 靠 ?v= 绕缓存的代价是永久驻留, 所以不能见 tick 就重载)。
 import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, watch, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { expandHome } from "../shared/paths.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
@@ -45,44 +46,60 @@ export const openTaskRegistry = async (
 ): Promise<TaskRegistry> => {
   const dir = expandHome(dirPath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  const state = loadJsonMap<TaskState>("~/.wezard/task-state.json");
+  const state = loadJsonMap<TaskState>("~/.wezard/task-state.json", undefined, { strict: true });
 
   let tasks = new Map<string, TaskRecord>();
   let errors: Record<string, string> = {};
-  const mtimes = new Map<string, number>();
-  const cache = new Map<string, unknown>();
+  let mtimes = new Map<string, number>();
+  let cache = new Map<string, unknown>();
+  let revision = 0;
 
-  const loadOne = async (id: string, file: string): Promise<void> => {
+  const loadOne = async (id: string, file: string, next: Map<string, TaskRecord>, nextErrors: Record<string, string>, nextMtimes: Map<string, number>, nextCache: Map<string, unknown>): Promise<void> => {
     const mtime = statSync(file).mtimeMs;
-    if (mtimes.get(id) !== mtime || !cache.has(id)) {
-      mtimes.set(id, mtime);
-      cache.set(id, (await import(`${pathToFileURL(file).href}?v=${mtime}`)).default);
+    if (nextMtimes.get(id) !== mtime || !nextCache.has(id)) {
+      nextMtimes.set(id, mtime);
+      nextCache.set(id, (await import(`${pathToFileURL(file).href}?v=${mtime}`)).default);
     }
-    const r = normalizeTask(cache.get(id), id, file);
-    if (r.ok) tasks.set(id, r.task);
-    else errors[id] = r.reason;
+    const r = normalizeTask(nextCache.get(id), id, file);
+    if (r.ok) {
+      // 手写文件也要有稳定的计时起点, 否则每次读取都从「现在」重新计时。
+      const saved = state.get(id);
+      if (saved?.createdAt === undefined || !saved.instance) state.set(id, {
+        ...saved, createdAt: saved?.createdAt ?? (statSync(file).birthtimeMs || mtime), instance: saved?.instance ?? randomUUID(),
+      });
+      next.set(id, { ...r.task, instance: state.get(id)!.instance });
+    }
+    else nextErrors[id] = r.reason;
   };
 
   const reload = async (): Promise<void> => {
+    const version = ++revision;
     const files = readdirSync(dir).filter((f) => f.endsWith(TASK_EXT)).sort();
     const before = new Set(tasks.keys());
     const next = new Map<string, TaskRecord>();
-    errors = {};
+    const nextErrors: Record<string, string> = {};
+    const nextMtimes = new Map(mtimes);
+    const nextCache = new Map(cache);
     const keep = tasks;
-    tasks = next;
     for (const f of files) {
       const id = taskIdOfFile(f);
       try {
-        await loadOne(id, `${dir}/${f}`);
+        await loadOne(id, `${dir}/${f}`, next, nextErrors, nextMtimes, nextCache);
       } catch (e) {
-        errors[id] = (e as Error).message;
-        cache.delete(id);
-        mtimes.delete(id);
+        nextErrors[id] = (e as Error).message;
+        nextCache.delete(id);
+        nextMtimes.delete(id);
         // 语法错到 import 都进不去: 保住上一版, 免得改到一半存盘就丢一条定时。
         const prev = keep.get(id);
-        if (prev) tasks.set(id, prev);
+        if (prev) next.set(id, prev);
       }
     }
+    // import 会让出事件循环: 不暴露半张表, 不把其间取消/创建的记录复活或抹掉。
+    if (version !== revision) return;
+    tasks = next;
+    errors = nextErrors;
+    mtimes = nextMtimes;
+    cache = nextCache;
     const added = [...tasks.keys()].filter((k) => !before.has(k));
     const removed = [...before].filter((k) => !tasks.has(k));
     if (added.length || removed.length) onChange?.(added, removed);
@@ -119,6 +136,7 @@ export const openTaskRegistry = async (
     errors: () => ({ ...errors }),
     takenIds: () => new Set([...tasks.keys(), ...Object.keys(errors)]),
     create: (draft) => {
+      revision++;
       const file = fileOfTaskId(dir, draft.id);
       writeFileSync(file, renderTaskFile(draft), "utf8");
       const r = normalizeTask(
@@ -128,14 +146,18 @@ export const openTaskRegistry = async (
       if (!r.ok) { try { unlinkSync(file); } catch { /* 写进去又立刻删不掉, 下次 reload 会报出来 */ } return { error: r.reason }; }
       mtimes.set(draft.id, statSync(file).mtimeMs);
       cache.delete(draft.id);
-      tasks.set(draft.id, r.task);
-      return r.task;
+      const instance = randomUUID();
+      state.set(draft.id, { createdAt: Date.now(), instance });
+      const task = { ...r.task, instance };
+      tasks.set(draft.id, task);
+      return task;
     },
     remove: (id) => {
+      revision++;
       const hit = tasks.get(id);
       const file = fileOfTaskId(dir, id);
       if (!hit && !existsSync(file)) return undefined;
-      try { unlinkSync(file); } catch { /* 已经不在了 */ }
+      try { unlinkSync(file); } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
       tasks.delete(id);
       cache.delete(id);
       mtimes.delete(id);

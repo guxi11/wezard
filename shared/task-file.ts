@@ -61,6 +61,8 @@ export interface TaskModule {
 /** 规范化之后的一条任务 —— registry 与调度器只认这个形状。 */
 export interface TaskRecord {
   id: string;
+  /** 注册表分配的创建实例, 热加载保留, 删除后重建更换。 */
+  instance?: string;
   file: string;
   trigger: Trigger;
   when: string;
@@ -79,9 +81,12 @@ export interface TaskRecord {
 
 /** 运行时状态。任务文件是源码 (人与 AI 写), 状态由 daemon 写 —— 两者不混住一个文件。 */
 export interface TaskState {
+  instance?: string;
   /** 建表那一刻。第一次 isDue 的 `since` —— 刚建好的任务不立刻打一枪。 */
   createdAt?: number;
   lastFired?: number;
+  /** 一轮尚未结束。dispatching 已可能触及 pane, 重启后不得自动重投。 */
+  pending?: { at: number; phase: "gate" | "ready" | "dispatching"; prompt?: string };
   /** 上一轮 gate 的去向, 只为回显: go = 放了, skip = 被 gate 挡下, error = gate 炸了。 */
   lastGate?: "go" | "skip" | "error";
   lastGateAt?: number;

@@ -60,7 +60,9 @@ export const renderTask = (
 ): Record<string, unknown> => ({
   id: t.id,
   when: describeTrigger(t.trigger),
-  next: t.enabled ? new Date(nextFire(t.trigger, sinceOf(s), now)).toLocaleString("zh-CN", { hour12: false }) : "(已暂停)",
+  next: !t.enabled ? "(已暂停)" : s.pending ? "(等待执行)"
+    : t.trigger.clock.kind === "once" && (s.lastFired ?? 0) >= t.trigger.clock.at ? "(已结束)"
+      : new Date(nextFire(t.trigger, sinceOf(s), now)).toLocaleString("zh-CN", { hour12: false }),
   lastFired: s.lastFired ? new Date(s.lastFired).toLocaleString("zh-CN", { hour12: false }) : "",
   note: t.note,
   runIn: t.fresh ? "每次新建一个白板 wizard 执行, 跑完自动回收" : "注入已有会话 (它正忙就等它闲下来, 最多 30 分钟)",
@@ -72,6 +74,7 @@ export const renderTask = (
   file: t.file,
   ...(t.hasGate ? { gate: `有 (上一轮: ${s.lastGate ?? "未跑过"})` } : {}),
   ...(s.lastError ? { lastError: s.lastError } : {}),
+  ...(s.pending ? { pending: s.pending.phase } : {}),
   ...(error ? { loadError: error } : {}),
 });
 
@@ -132,6 +135,8 @@ interface SchedulerDeps {
   cwdOf?: (target: string) => string;
   /** 任务文件没写 target 时投给谁 (排班者那个机器人的 defaultChat)。 */
   fallbackTarget: (t: TaskRecord) => string;
+  /** 会话绑定恢复完毕之后才允许投递。 */
+  ready?: Promise<void>;
 }
 
 const announce = async (client: WSClient, target: string, markdown: string): Promise<void> => {
@@ -141,7 +146,7 @@ const announce = async (client: WSClient, target: string, markdown: string): Pro
   });
 };
 
-export const startScheduler = ({ client, registry, log, inject, cwdOf, fallbackTarget }: SchedulerDeps): { stop: () => void; tick: () => void } => {
+export const startScheduler = ({ client, registry, log, inject, cwdOf, fallbackTarget, ready }: SchedulerDeps): { stop: () => void; tick: () => void } => {
   const fires = createKeyedScheduler(4);
   // Gates use task slots; only the injection needs the target's exclusive slot.
   const injections = createKeyedScheduler(4);
@@ -149,22 +154,32 @@ export const startScheduler = ({ client, registry, log, inject, cwdOf, fallbackT
   const consumers = createKeyedScheduler(Number.MAX_SAFE_INTEGER);
   const inFlight = new Set<string>();
   const stamps = new Map<string, { at: number; previous?: number }>();
+  const current = (t: TaskRecord): TaskRecord | undefined => registry.list().find((r) => r.id === t.id && r.instance === t.instance);
+  let restored = !ready;
+  const recoverUncertain = (t: TaskRecord): void => {
+    const s = registry.stateOf(t.id);
+    if (s.pending?.phase !== "dispatching" || inFlight.has(t.id)) return;
+    // 落盘与 pane 注入不能组成事务。宁可留一轮待核查, 不重放可能已执行的指令。
+    registry.patchState(t.id, { pending: undefined, lastFired: Math.max(s.lastFired ?? 0, s.pending.at), lastError: "reload interrupted delivery; outcome unknown, not replayed" });
+    log.warn({ id: t.id }, "scheduled delivery interrupted; not replaying uncertain exposure");
+  };
+  registry.list().forEach(recoverUncertain);
   const finish = (t: TaskRecord, restore = false): void => {
     inFlight.delete(t.id);
     const stamp = stamps.get(t.id);
     stamps.delete(t.id);
     // Cancellation before physical exposure must not consume a once firing.
-    if (restore && stamp && registry.list().some((r) => r.id === t.id)
-      && registry.stateOf(t.id).lastFired === stamp.at) registry.patchState(t.id, { lastFired: stamp.previous });
+    if (!current(t)) return;
+    if (restore && stamp
+      && registry.stateOf(t.id).pending && registry.stateOf(t.id).lastFired === stamp.at) registry.patchState(t.id, { lastFired: stamp.previous });
     if (restore) return;
-    if (!fires.signal.aborted && t.trigger.clock.kind === "once") registry.remove(t.id);
+    const live = current(t)!;
+    if (!live.enabled && registry.stateOf(t.id).pending?.phase !== "dispatching") return;
+    registry.patchState(t.id, { pending: undefined });
+    if (!fires.signal.aborted && live.enabled && t.trigger.clock.kind === "once") registry.remove(t.id);
   };
   const failed = (t: TaskRecord, e: unknown): void => log.error({ id: t.id, err: (e as Error).message }, "scheduled fire failed");
-  const fire = async (t: TaskRecord, signal: AbortSignal): Promise<boolean> => {
-    const target = t.target || fallbackTarget(t);
-    if (!inject) { log.warn({ id: t.id, target }, "scheduled task skipped: not in mirror mode"); return false; }
-    if (!target) { log.warn({ id: t.id }, "scheduled task skipped: no target"); return false; }
-
+  const prepare = async (t: TaskRecord, target: string, signal: AbortSignal): Promise<string | undefined> => {
     // gate: 有活才继续。没活是**静默**的 —— 它存在的全部意义就是不惊动任何人。
     const st = registry.stateOf(t.id);
     const v = t.hasGate
@@ -176,7 +191,7 @@ export const startScheduler = ({ client, registry, log, inject, cwdOf, fallbackT
         log,
       })
       : { go: true, vars: {}, logs: [] as string[] };
-    if (signal.aborted) return false;
+    if (signal.aborted || !current(t)?.enabled) return undefined;
     if (v.logs.length) log.info({ id: t.id, logs: v.logs }, "gate log");
     if (!v.go) {
       // 没活是静默的, 但**炸了**必须出声: gate 一坏这条定时就再也不放枪了, 而它
@@ -188,20 +203,29 @@ export const startScheduler = ({ client, registry, log, inject, cwdOf, fallbackT
         lastGateAt: Date.now(),
         lastError: v.error,
         ...(v.state ? { memo: v.state } : {}),
+        pending: undefined,
       });
       log.info({ id: t.id, err: v.error }, v.error ? "task gate errored, holding fire" : "task gate said no, holding fire");
       if (first) {
         await announce(client, target, `⏰ 定时任务 \`${t.id}\` 的 gate 出错, 本轮未放枪 (下次照常重试):\n> ${v.error!.split("\n")[0]!.slice(0, 200)}\n修它: \`${t.file}\``)
           .catch(() => {});
       }
-      return false;
+      return undefined;
     }
     registry.patchState(t.id, {
       lastGate: "go", lastGateAt: Date.now(), lastError: undefined,
       ...(v.state ? { memo: v.state } : {}),
+      pending: { at: st.pending!.at, phase: "ready", prompt: interpolate(t.prompt, v.vars) },
     });
-
-    const prompt = interpolate(t.prompt, v.vars);
+    return interpolate(t.prompt, v.vars);
+  };
+  const fire = async (t: TaskRecord, signal: AbortSignal): Promise<boolean> => {
+    const target = t.target || fallbackTarget(t);
+    if (!inject) { log.warn({ id: t.id, target }, "scheduled task skipped: not in mirror mode"); return false; }
+    if (!target) { log.warn({ id: t.id }, "scheduled task skipped: no target"); return false; }
+    const pending = registry.stateOf(t.id).pending;
+    const prompt = pending?.phase === "ready" ? pending.prompt : await prepare(t, target, signal);
+    if (prompt === undefined || signal.aborted) return false;
     // 先 announce 后注入: 被唤醒的 wizard 接下来在群里说的话才有出处, 否则群里凭空
     // 冒出一轮对话, 没人知道是谁点的火。
     const how = t.fresh ? " · 新建 wizard 执行" : "";
@@ -209,7 +233,7 @@ export const startScheduler = ({ client, registry, log, inject, cwdOf, fallbackT
     const resource = t.fresh ? `fresh:${t.id}` : target;
     let leg = 0;
     const sent = consumers.schedule(t.id, resource, async (dispatchSignal) => {
-      const guard = () => !dispatchSignal.aborted && registry.list().some((r) => r.id === t.id && r.enabled);
+      const guard = () => !dispatchSignal.aborted && current(t)?.enabled === true;
       if (!guard()) return undefined;
       if (!t.quiet) await announce(client, target, `⏰ **定时任务** · ${describeTrigger(t.trigger)}${how}\n> ${prompt.split("\n")[0]!.slice(0, 120)}`)
         .catch((e: unknown) => log.warn({ id: t.id, err: (e as Error).message }, "task announce failed"));
@@ -217,8 +241,16 @@ export const startScheduler = ({ client, registry, log, inject, cwdOf, fallbackT
       return inject(target, prompt, {
         taskId: t.id, fresh: t.fresh, quiet: t.quiet, signal: dispatchSignal, guard,
         submit: async (action) => {
-          const r = await injections.schedule(`${t.id}:${++leg}`, resource, async () =>
-            guard() ? action() : { ok: false, reason: "scheduled delivery withdrawn", retryable: true });
+          const r = await injections.schedule(`${t.id}:${++leg}`, resource, async () => {
+            if (!guard()) return { ok: false, reason: "scheduled delivery withdrawn", retryable: true };
+            const pending = registry.stateOf(t.id).pending!;
+            registry.patchState(t.id, { pending: { ...pending, phase: "dispatching" } });
+            const result = await action();
+            if (!result.ok && result.retryable && !result.uncertain && current(t)) {
+              registry.patchState(t.id, { pending: { ...pending, phase: "ready" } });
+            }
+            return result;
+          });
           return r ?? { ok: false, reason: "scheduler stopped", retryable: true };
         },
       });
@@ -227,7 +259,7 @@ export const startScheduler = ({ client, registry, log, inject, cwdOf, fallbackT
     // Do not retain a gate worker while this target waits for its injection slot.
     let restoreAfterStop = false;
     void sent.then(async (r) => {
-      const withdrawn = signal.aborted || !registry.list().some((row) => row.id === t.id && row.enabled)
+      const withdrawn = signal.aborted || !current(t)?.enabled
         || r?.reason === "scheduled delivery withdrawn";
       restoreAfterStop = withdrawn && (!r || (!r.ok && r.retryable === true && !r.uncertain));
       if (!r || signal.aborted) return;
@@ -238,18 +270,20 @@ export const startScheduler = ({ client, registry, log, inject, cwdOf, fallbackT
   };
 
   const tick = (): void => {
-    if (fires.signal.aborted) return;
+    if (fires.signal.aborted || !restored) return;
+    registry.list().forEach(recoverUncertain);
     const now = new Date();
-    const due = registry.list().filter((t) => t.enabled && !inFlight.has(t.id) && isDue(t.trigger, now, sinceOf(registry.stateOf(t.id))));
+    const due = registry.list().filter((t) => t.enabled && !inFlight.has(t.id)
+      && (registry.stateOf(t.id).pending || isDue(t.trigger, now, sinceOf(registry.stateOf(t.id)))));
     if (!due.length) return;
     for (const t of due) {
       inFlight.add(t.id);
       const fired = fires.schedule(t.id, t.id, async (signal) => {
-        if (!registry.list().some((r) => r.id === t.id && r.enabled)) { inFlight.delete(t.id); return true; }
+        if (!current(t)?.enabled) { inFlight.delete(t.id); return true; }
         // Stamp on start: stop must not consume once-tasks still in the queue.
         const at = Date.now();
         stamps.set(t.id, { at, previous: registry.stateOf(t.id).lastFired });
-        registry.patchState(t.id, { lastFired: at });
+        registry.patchState(t.id, { lastFired: at, pending: registry.stateOf(t.id).pending ?? { at, phase: "gate" } });
         return fire(t, signal);
       });
       void fired?.then((handedToInjection) => { if (!handedToInjection) finish(t, fires.signal.aborted); })
@@ -257,5 +291,6 @@ export const startScheduler = ({ client, registry, log, inject, cwdOf, fallbackT
     }
   };
   const timer = setInterval(tick, 20_000);
+  if (ready) void ready.then(() => { restored = true; tick(); }).catch((e: unknown) => log.error({ err: (e as Error).message }, "task restore failed"));
   return { tick, stop: () => { clearInterval(timer); fires.stop(); consumers.stop(); injections.stop(); } };
 };
