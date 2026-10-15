@@ -991,8 +991,9 @@ const main = async (): Promise<void> => {
         } } });
       return true;
     };
-    /** 已经因为不合工单验收被打回过的那些笔 (行状态会随打回留在 `open`, 光看它认不出「打回过」)。 */
-    const bounced = new Set<EventId>();
+    /** 已经因为不合工单验收被打回过的那些笔 (行状态会随打回留在 `open`, 光看它认不出「打回过」)
+     *  → 被打回的那一轮的注入事件 id: 同一轮的终句重放 (见 deliverFinal) 认得出不是补交。 */
+    const bounced = new Map<EventId, string>();
     /** 工单验收 (§9.6, 从 receipts 的 watcher 重建): 交的活不合规格 → 这一份不算交差。
      *  计划节点有自己的验收 (workflow), 不经这里。 */
     const acceptanceOf = (row: Route, body: string): string | undefined => {
@@ -1003,8 +1004,8 @@ const main = async (): Promise<void> => {
       return j?.status === "open" ? rejectReason(j.accept ?? "result", parseClosing(body)) : undefined;
     };
     /** 以工单 owner 的名义在同一笔上打回一次: 不新开行, 行留在 `open` 等它按约定再交一份。 */
-    const rebound = (row: Route, why: string): void => {
-      bounced.add(row.event);
+    const rebound = (row: Route, why: string, eventId: string): void => {
+      bounced.set(row.event, eventId);
       const from = ledgerOwnerOf(row.event) || row.owner;
       acceptContinuation({
         from, to: row.owner, channel: "", event: row.event, legs: legsOf(row.event) + 1,
@@ -1297,13 +1298,17 @@ const main = async (): Promise<void> => {
      *  也最多再多打回一次)。**这是「轮终 evidence → onFinal」那条主触发链的落点**: 没有它,
      *  answer 就只能靠 sweeper / 级联取消 / boot 重放合成, 谁答完都不会有回执。 */
     deliverFinal = (e, verdict) => {
+      // 同一轮的终句会递进来两次: result() 当场递一次, 泵见 complete 未 finalized 再补判一次
+      // (message-events)。被打回那一轮的重放不是补交 —— 丢掉; 否则 bounced 已记着这一笔,
+      // 第二次就把被打回的原文照收成 done (打回的续问还没注入, 定论先落了)。
+      if (e.serves && bounced.get(e.serves) === e.id) return;
       const plans = router.onFinal(e.target, e.serves, verdict);
       const answer = plans.flatMap((op) => (op.op === "answer" && op.outcome.status === "done" ? [op] : []))[0];
       const row = answer ? router.get(answer.event) : undefined;
       const why = answer && row ? acceptanceOf(row, answer.outcome.body) : undefined;
       if (row && why) {
         if (row.status === "need" || row.status === "error") commitRoute(ops.mark({ event: row.event, status: "open" }));
-        rebound(row, why);
+        rebound(row, why, e.id);
         return;
       }
       plans.forEach(commitRoute);

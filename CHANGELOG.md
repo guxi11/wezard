@@ -2,6 +2,11 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Fixed
+- 工单验收打回被同一轮的终句重放绕过: message-events 对每个终句递两次 `final` (`result()` 当场一次, 泵见 `complete` 未 `finalized` 再补判一次 —— 打回的续问 `events.accept` 里 `void pump()` 同步就触发), 第一次判不合规格打回、记进 `bounced`, 第二次因「已打回过一次」直接照收, 把被打回的原文 (如「好的」) 落成 done 并投出回执, 早于打回日志 ~0.4s。`bounced` 改记被打回那一轮的注入事件 id, 同一事件的重放直接丢掉, 只收续问那一轮的补交。
+
 ## [2.7.1] - 2026-10-15
 
 ### Fixed
