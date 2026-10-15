@@ -121,6 +121,23 @@ const userTexts = (path) => readFileSync(path, "utf8").split("\n").flatMap((line
   } catch { return []; }
 });
 
+/** transcript 的 user / assistant 文本行, 带时刻 (codebuddy 是 epoch-ms 数字, claude 是 ISO)。 */
+const rawLines = (path) => {
+  if (!path) return [];
+  try {
+    return readFileSync(path, "utf8").split("\n").flatMap((line) => {
+      try {
+        const raw = JSON.parse(line);
+        const o = backendForPath(path).normalizeTranscriptLine(raw);
+        if (!o || o.isMeta || !["user", "assistant"].includes(o.type)) return [];
+        const c = o.message?.content;
+        const text = typeof c === "string" ? c : Array.isArray(c) ? c.filter((x) => x.type === "text").map((x) => x.text).join("\n") : "";
+        const ts = raw.timestamp ?? o.timestamp;
+        return text ? [{ role: o.type, text, ms: typeof ts === "number" ? ts : Date.parse(ts ?? "") }] : [];
+      } catch { return []; }
+    });
+  } catch { return []; }
+};
 const attrsIn = (text) => parseReminders(text).map((r) => r.attrs);
 
 /** `target` 的 transcript 里收到的回执信封 (属性 + 正文), 可按发话方收窄。 */
@@ -1100,15 +1117,23 @@ const cases = {
     const b = await mk("rr-t2", `rr-loud-${n}`, `有一件人必须知道的事要报告 (不是 QUIET): 不要调用任何工具, 你的最后一条消息原样写这一行: [receipt-regress] 安静任务有事转发 ${n}`);
     if (!a.ok || !b.ok) return { pass: false, why: `schedule_task: ${a.reason ?? b.reason}` };
     const tq = kids.get("rr-t"), tl = kids.get("rr-t2");
-    const postponed = await until(() => logLine(t0, (o) => o.taskId === a.id && /顺延/.test(o.msg ?? "")), 5 * 60_000, 5000);
-    const quiet = await until(() => logLine(t0, (o) => o.target === tq && /quiet task/.test(o.msg ?? "")), 4 * 60_000, 5000);
+    const quiet = await until(() => logLine(t0, (o) => o.target === tq && /quiet task/.test(o.msg ?? "")), 6 * 60_000, 5000);
     const loud = await until(() => logLine(t0, (o) => o.target === tl && /quiet task/.test(o.msg ?? "")), 60_000, 5000);
-    // 转发确实发生了、且只落在伪群: notifyChat 投向 SINK 的那一次被企微拒收。
-    const relayed = loud && await until(() => logLine(t0, (o) => o.chatId === SINK_ID && /chat notify failed/.test(o.msg ?? "")), 30_000, 2000);
+    // 顺延 (scheduled-delivery 起不再打「顺延」日志): 读 rr-t 自己的 transcript —— 到点 (排班 +60s) 时
+    // 它那句 busy-done 还没说完 = 到点正忙; 任务那句排在 busy-done 之后、且进的就是 rr-t (不是白板
+    // runner) = 等到它闲下来才投 (idle) 并投成了 (ok)。
+    const lines = rawLines(await jsonlOf(tq));
+    const busyAt = lines.findIndex((l) => l.role === "assistant" && l.text.includes("busy-done"));
+    const taskAt = lines.findIndex((l) => l.role === "user" && attrsIn(l.text).some((x) => x.wezard === "envelope" && x.kind === "task" && x.from === a.id));
+    const postponed = busyAt >= 0 && taskAt >= 0 && { idle: taskAt > busyAt, ok: true, busyAtFire: lines[busyAt].ms > t0 + 60_000 };
+    // 转发确实发生了、且只落在伪群: quiet 转发走终句投递 (outbox), 那一份的频道是 SINK (企微拒收 93006)。
+    const deliveries = async () => (await fetch(`${DAEMON}/message-events/status`).then((r) => r.json()).catch(() => ({}))).deliveries ?? [];
+    const relayed = loud && await until(async () => (await deliveries()).find((d) => d.eventId?.startsWith(`quiet:${tl}:`) && d.channel === SINK && d.body?.includes(n)), 30_000, 2000);
+    const quietRelayed = (await deliveries()).some((d) => d.eventId?.startsWith(`quiet:${tq}:`));
     const inSink = [tq, tl].every((t) => t?.startsWith(`${SINK}#`));
     return {
-      pass: inSink && !!postponed?.idle && postponed.ok && quiet?.quiet === true && loud?.quiet === false && !!relayed,
-      why: `${inSink ? "" : "分身没生在伪群 · "}顺延=${postponed ? `idle:${postponed.idle} ok:${postponed.ok}` : "没发生"} · 安静那轮 quiet=${quiet?.quiet ?? "没收口"} · 有事那轮 quiet=${loud?.quiet ?? "没收口"} · 转发到伪群=${relayed ? "是" : "没看到"}`,
+      pass: inSink && !!postponed?.idle && postponed.ok && postponed.busyAtFire && quiet?.quiet === true && loud?.quiet === false && !!relayed && !quietRelayed,
+      why: `${inSink ? "" : "分身没生在伪群 · "}顺延=${postponed ? `idle:${postponed.idle} ok:${postponed.ok} 到点正忙:${postponed.busyAtFire}` : "没发生"} · 安静那轮 quiet=${quiet?.quiet ?? "没收口"}${quietRelayed ? " (却被转发了)" : ""} · 有事那轮 quiet=${loud?.quiet ?? "没收口"} · 转发到伪群=${relayed ? "是" : "没看到"}`,
     };
   } },
 };
