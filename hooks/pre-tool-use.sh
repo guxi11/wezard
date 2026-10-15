@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # wezard PreToolUse hook: forward to local daemon → long-poll → emit decision.
-# Any failure → ask (never break workflow).
+# daemon 不可达 / 回包坏了 → allow (没有审批人可问, 别卡住工作流); 其它失败 → ask。
 set -uo pipefail
 
 # --noproxy '*' on every daemon curl below: the daemon is on 127.0.0.1, but an
@@ -13,9 +13,6 @@ DAEMON_URL="${WEZARD_DAEMON_URL:-http://127.0.0.1:17890/approve}"
 # 的 timeout, 否则卡在 WeCom 里挂 >30min 后 curl 先死, 用户的点击写进死 socket。
 HOOK_TIMEOUT="${WEZARD_HOOK_TIMEOUT:-43210}"
 STATE_DIR="${WEZARD_STATE_DIR:-$HOME/.wezard/state}"
-# Fallback policy when the daemon is unreachable / replies garbage. ask|allow|deny.
-# Default keeps the safe behavior; set to `allow` in trusted local-only setups.
-FALLBACK="${WEZARD_HOOK_FALLBACK:-ask}"
 # daemon 重启 (wezard reload / launchd 拉起) 时等它回来的最长秒数。等回来后带着
 # 上一轮的 req_id 续接同一张卡, 而不是 fallback 把权限框弹回本地 CLI。
 RESUME_WAIT="${WEZARD_RESUME_WAIT:-60}"
@@ -39,26 +36,9 @@ emit() {
 }
 ask() { emit "ask" "${1:-bridge unreachable}"; }
 
-# Daemon-down fallback. Consults the persisted auto-approve window first so a
-# session-level "allow N min" survives daemon restart / outage; otherwise falls
-# back to FALLBACK. SESSION_ID must already be parsed.
-bridge_down() {
-  local reason="$1"
-  local sf="$STATE_DIR/auto-windows.json"
-  if [[ -n "${SESSION_ID:-}" && -r "$sf" ]] && command -v jq >/dev/null 2>&1; then
-    local active
-    active=$(jq -r --arg s "$SESSION_ID" \
-      'if (.windows[$s].until // 0) > (now * 1000) then "1" else "0" end' \
-      "$sf" 2>/dev/null) || active=""
-    if [[ "$active" == "1" ]]; then
-      emit "allow" "auto-window (offline): $reason"
-    fi
-  fi
-  case "$FALLBACK" in
-    allow|deny|ask) emit "$FALLBACK" "$reason" ;;
-    *) emit "ask" "$reason" ;;
-  esac
-}
+# daemon 出问题 (连不上 / 重启没回来 / 回包坏了) 一律放行: 审批人只活在 daemon
+# 里, 它不在时回 ask 只会弹出远端看不见的本地 picker, 把无人值守的 wizard 卡死。
+bridge_down() { emit "allow" "daemon down, auto-allow: $1"; }
 
 PAYLOAD=$(cat) || ask "stdin read failed"
 command -v jq >/dev/null 2>&1 || ask "jq not installed — approval cards disabled; run: apt-get install jq (or yum/apk/brew) then reload"
@@ -314,7 +294,7 @@ RESUME_ID=""
 COLD_RETRIES=0
 while :; do
   REMAIN=$(( HOOK_TIMEOUT - SECONDS ))
-  (( REMAIN > 5 )) || bridge_down "hook budget exhausted"
+  (( REMAIN > 5 )) || ask "hook budget exhausted"
 
   RESP=$(curl -sS "${NOPROXY[@]}" --max-time "$REMAIN" \
     -H 'Content-Type: application/json' \

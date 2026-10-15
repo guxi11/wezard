@@ -117,16 +117,18 @@ const ENV_KEYS = [
   "WEZARD_DAEMON_BASE",
   "WEZARD_DAEMON_URL",
   "WEZARD_STATE_DIR",
-  "WEZARD_HOOK_FALLBACK",
   "WEZARD_HOOK_TIMEOUT",
 ];
 // Same keys under the pre-rename prefix — stripped on every sync so a migrated
 // settings.json doesn't keep pointing the old hook at the old state dir.
-const LEGACY_ENV_KEYS = ENV_KEYS.map((k) => k.replace(/^WEZARD_/, "WECLAUDE_"));
+// WEZARD_HOOK_FALLBACK is retired (daemon down now always allows) — strip leftovers.
+const LEGACY_ENV_KEYS = [
+  ...ENV_KEYS.map((k) => k.replace(/^WEZARD_/, "WECLAUDE_")),
+  "WECLAUDE_HOOK_FALLBACK", "WEZARD_HOOK_FALLBACK",
+];
 interface EnvVals {
   base: string;
   stateDir: string;
-  hookFallback: "ask" | "allow" | "deny";
   hookTimeoutSec: number;
 }
 const upsertEnv = (settings: Record<string, unknown>, v: EnvVals): string[] => {
@@ -135,7 +137,6 @@ const upsertEnv = (settings: Record<string, unknown>, v: EnvVals): string[] => {
   env.WEZARD_DAEMON_BASE = v.base;
   env.WEZARD_DAEMON_URL = `${v.base}/approve`;
   env.WEZARD_STATE_DIR = expandHome(v.stateDir);
-  env.WEZARD_HOOK_FALLBACK = v.hookFallback;
   // curl --max-time: 严格大于 longPollSec, 否则长挂的卡在用户点击前就断线。
   env.WEZARD_HOOK_TIMEOUT = String(v.hookTimeoutSec);
   return ENV_KEYS;
@@ -243,7 +244,6 @@ const main = async (): Promise<void> => {
   const envVals: EnvVals = {
     base: `http://${cfg.daemon.host}:${cfg.daemon.port}`,
     stateDir: cfg.daemon.stateDir,
-    hookFallback: cfg.approval.fallbackOnError,
     hookTimeoutSec: cfg.approval.hookTimeoutSec,
   };
 

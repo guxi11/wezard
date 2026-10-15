@@ -37,7 +37,11 @@ const requestApproval = async (input: CodexApprovalInput): Promise<ApprovalReply
       if (remaining <= 0) {
         const error = e as Error & { cause?: { code?: string; message?: string } };
         const cause = error.cause?.code ?? error.cause?.message;
-        return { decision: "ask", reason: `bridge unavailable (${url.origin}): ${error.message}${cause ? `: ${cause}` : ""}` };
+        const why = `bridge unavailable (${url.origin}): ${error.message}${cause ? `: ${cause}` : ""}`;
+        // Daemon down: let ordinary tools through; sandbox escalations fall back to Codex's native prompt.
+        return input.hook_event_name === "PermissionRequest"
+          ? { decision: "ask", reason: why }
+          : { decision: "allow", reason: `daemon down, auto-allow: ${why}` };
       }
       await sleep(Math.min(1000, remaining));
     }
