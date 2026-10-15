@@ -898,7 +898,7 @@ const offspringShape = {
     .optional()
     .describe("归到某个工单名下 (open_job 给的 id)。过程在各自的 rolepage 与工单页, 不进群。"),
   role: z.enum(["exec", "reviewer", "expert"]).optional().describe("它在这张工单里的角色 (只在带 `job` 时有意义, 记进账本供工单页与名册显示): `exec` 执行 (默认) · `reviewer` 白板评审 · `expert` 借来答问的专家。"),
-  return: z.enum(["self", "transfer", "detach", "none"]).optional().describe("带了 task 时这件活的回执去哪, 同 tell_peer 的 `return` (transfer 只用于 wizard 那一笔; 人问的那一轮不在此列)。"),
+  return: z.enum(["self", "transfer", "detach", "none"]).optional().describe("带了 task 时这件活的回执去哪, 同 tell_peer 的 `return`: `transfer` = 把这一轮欠着的那一笔 (人问的那一轮也算) 整件交给新生的它, 它的终句直接交付人, 你静默收口。"),
   for: z.string().optional().describe("带了 task 时这件活为你欠着的哪一笔派的, 同 tell_peer 的 `for`。"),
 };
 

@@ -3056,7 +3056,9 @@ const main = async (): Promise<void> => {
       const lead = b.lead === true;
       const transfer = plan.op === "transfer";
       if (transfer && lead) { json(res, 409, { ok: false, reason: "transfer hands over the row this turn owes; a lead dispatch cannot transfer" }); return; }
-      if (transfer && (!plan.serves || router.get(plan.serves)?.receiver.kind !== "wizard")) { json(res, 409, { ok: false, reason: "这一轮没有欠着的同伴活可以交出去 (transfer 只用于同伴派给你的那一笔)" }); return; }
+      // 交出人问的那一笔同样合法 (同 tell_peer): 那一行归 chat receiver, 与同伴派的件走同一条
+      // move —— 接手方终句就是那句人话的答复。没得交 (`serves` 落空 / 已不在手上) 由
+      // transferRefusal 在投递前拦, 不在这里按 receiver 种类预判。
       const force = b.force === true;
       const to = (b.to ?? "").toString().trim();
       const now = Date.now();
@@ -3212,9 +3214,8 @@ const main = async (): Promise<void> => {
       // 带 task 才是派活: 回执去向同 tell_peer (return / for)。
       const plan = b.task?.trim() && !planned ? planReturn(self, body as Record<string, unknown>) : undefined;
       if (plan && !plan.ok) return { status: plan.status, body: { ok: false, reason: plan.reason } };
-      // transfer 只对同伴派给你的那一笔有意义 (要交出去的那一行得真的欠在同伴头上)。
-      if (plan?.ok && plan.op === "transfer" && (!plan.serves || router.get(plan.serves)?.receiver.kind !== "wizard"))
-        return { status: 409, body: { ok: false, reason: "这一轮没有欠着的同伴活可以交出去 (transfer 只用于同伴派给你的那一笔)" } };
+      // transfer 交出人问的那一笔同样合法 (同 tell_peer, 那一行归 chat receiver) —— 没得交 /
+      // 已不在手上由下面的 transferRefusal 拦, 不在这里按 receiver 种类预判。
       const askedEffort = parseEffort(b.effort);
       if (b.effort !== undefined && !askedEffort) { return { status: 400, body: { ok: false, reason: `effort 只有这几档: ${EFFORTS.join(" / ")}` } }; }
       // 工单先验: 生完分身才发现工单号打错了, 那个分身就成了没人认领的孤儿。
@@ -3370,17 +3371,22 @@ const main = async (): Promise<void> => {
       if (dispatched) {
         const deadlineAt = deadlineOf(taskAt);
         const quiet = !!plan?.ok && plan.op === "none";
+        // transfer 交出的是人问的那一笔 (同 tell_peer): 注入事件得带上那个群, 否则频道为空被当
+        // 私聊轮扣下, 刚出生的接手方那句终句人永远收不到 (见 mirror-bridge 的 final 通道)。
+        // 同伴派的件 (receiver 是 wizard) 仍旧私聊 —— handedChat 为空, 行为不变。
+        const handed = plan?.ok && plan.op === "transfer" && plan.serves ? router.get(plan.serves)?.receiver : undefined;
+        const handedChat = handed?.kind === "chat" ? handed.channel : "";
         // 路由行 (§3.1): 生出来的那个领活, 结论回生它的这位。
         const serves = plan?.ok
           ? openDispatchRow({ self, target, op: plan.op, deadlineAt, job: jobId, ...(asker ? { asker } : {}), ...(plan.serves ? { serves: plan.serves } : {}) })
           : "";
         dispatchedEvent = serves;
         const eventId = serves ? `route:${serves}` : `p:${self}:${target}:${taskAt}:1`;
-        const birthTell: Tell = { from: self, to: target, channel: "", job: jobId, at: taskAt, event: serves, legs: 1, deadlineAt, asker, dispatchKey: eventId };
-        events.accept({ id: eventId, target, speaker: self, channel: "", serves, asker, priority: "normal", deadline: deadlineAt,
+        const birthTell: Tell = { from: self, to: target, channel: handedChat, job: jobId, at: taskAt, event: serves, legs: 1, deadlineAt, asker, dispatchKey: eventId };
+        events.accept({ id: eventId, target, speaker: self, channel: handedChat, serves, asker, priority: "normal", deadline: deadlineAt,
           payload: { text: task, peer: {
-            from: { kind: "peer", from: self, event: serves, ...(jobId ? { job: jobId } : {}), ...(asker ? { asker } : {}) },
-            envelope: envelopeFor(self, "", { asker, ...(quiet ? { quiet: true } : {}) }) + (b.lead === true ? renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : ""),
+            from: { kind: "peer", from: self, event: serves, ...(jobId ? { job: jobId } : {}), ...(handedChat ? { transferred: true } : {}), ...(asker ? { asker } : {}) },
+            envelope: envelopeFor(self, handedChat, { asker, ...(quiet ? { quiet: true } : {}) }) + (b.lead === true ? renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : ""),
             ...(quiet ? {} : { tell: birthTell }),
             job: jobId, kind: "task", spawned: true, role: roleParam((body as { role?: string }).role),
             ...(plan?.ok && plan.op === "transfer" ? { transferred: true } : {}),
