@@ -160,8 +160,8 @@ const dispatchFor = (records: readonly DetailRecord[], h: Handoff & { turn: stri
 
 /** 整行点了要开的那段往来: 移交双方 (发话方 = 这一轮的 role, 收信方) 在哪个频道 —— 派活那句在就以它为准
  *  并带上落点; 还没接手就按这次调用公开与否推 (公开的落在发话方此刻的群)。会话键随视角, 由客户端算。 */
-const pairAttrs = (r: TurnDetailRecord, to: string, h: Handoff, d: TurnDetailRecord | undefined): string =>
-  ` data-hfrom="${escHtml(r.target ?? "")}" data-hto="${escHtml(to)}" data-hch="${escHtml(d ? channelOf(d) : h.public ? channelOf(r) : "")}"` +
+const pairAttrs = (r: TurnDetailRecord, to: string, h: Handoff, d: TurnDetailRecord | undefined, pub: boolean): string =>
+  ` data-hfrom="${escHtml(r.target ?? "")}" data-hto="${escHtml(to)}" data-hch="${escHtml(d ? channelOf(d) : pub ? channelOf(r) : "")}"` +
   (d ? ` data-gid="${escHtml(d.id)}:in" data-gts="${d.createdAt}"` : "");
 
 const FAIL = new Set(["timeout", "silent", "dead", "canceled"]);
@@ -175,6 +175,16 @@ const handoffDeco = (r: TurnDetailRecord, records: readonly DetailRecord[], dir:
     ? asksWhere(records, (t) => t.target === id && t.from?.kind === "peer" && !t.from.receipt && t.from.from === r.target && t.createdAt >= r.createdAt)[0]?.from?.event
     : undefined)(dir.resolve(h.name));
   const landed = (h: Handoff): TurnDetailRecord | undefined => ((turn) => (turn ? dispatchFor(records, { ...h, turn }) : undefined))(turnOf(h));
+  // 回包 T10 后不再带活号, `landed` 于是常常落空 —— 原文落没落进群里改按正文认:
+  // 对方接手的哪一轮在问话里带着这段原文的首行, 它就是这一行的那一轮 (同 dispatchFor 的认法)。
+  const landedByText = (h: Handoff, id: string): TurnDetailRecord | undefined => {
+    const head = squash(h.text).slice(0, 80);
+    return head.length < 4 ? undefined : asksWhere(records, (t) =>
+      t.target === id && t.from?.kind === "peer" && !t.from.receipt && t.from.from === r.target &&
+      t.createdAt >= r.createdAt && squash(t.userQuery ?? "").includes(head))[0];
+  };
+  /** 原文真落进公开频道了吗 —— 读对方接手那一轮的频道; 窗口里读不到 = 不知道 (退回调用参数推的那份)。 */
+  const pubOf = (h: Handoff): boolean | undefined => ((id) => (id ? ((d) => (d ? !!channelOf(d) : undefined))(landedByText(h, id)) : undefined))(dir.resolve(h.name));
   return {
     who: (name) => {
       const id = dir.resolve(name);
@@ -182,11 +192,12 @@ const handoffDeco = (r: TurnDetailRecord, records: readonly DetailRecord[], dir:
         ? `<span class="ho-who">${nameHead(`<span class="av">${escHtml(dir.labelOf(id))}</span>`, `<span class="nm wizard">${escHtml(dir.nameOf(id))}</span>`)}</span>`
         : `<span class="ho-nm">.${escHtml(name)}</span>`;
     },
+    pub: pubOf,
     role: (name) => ((id) => (id ? ` data-hrole="${escHtml(id)}" title="${escHtml(`以 .${dir.nameOf(id)} 为 viewpoint 看它的往来`)}"` : ""))(dir.resolve(name)),
     plan: () => (r.target ? ` data-hplan="${escHtml(r.target)}"` : ""),
     attrs: (h) => {
       const id = dir.resolve(h.name);
-      return id ? `${pairAttrs(r, id, h, landed(h))} title="${escHtml(`打开 .${dir.nameOf(r.target ?? "")} 与 .${dir.nameOf(id)} 的往来, 定位到这一句`)}"` : "";
+      return id ? `${pairAttrs(r, id, h, landed(h), pubOf(h) ?? h.public)} title="${escHtml(`打开 .${dir.nameOf(r.target ?? "")} 与 .${dir.nameOf(id)} 的往来, 定位到这一句`)}"` : "";
     },
     status: (h0) => {
       const h = { ...h0, turn: turnOf(h0) };

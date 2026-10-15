@@ -487,6 +487,7 @@ const TURN_CSS = `
   .handoff .ho-tag{border-radius:4px;padding:0 5px;font-size:10.5px;line-height:16px;background:#f1f3f6;color:#656d76}
   .handoff .ho-tag.pub{color:#0969da;background:#0969da12}
   .handoff .ho-tag.priv{color:#9a5b10;background:#9a5b1014}
+  .handoff .ho-tag.xfer{color:#8250df;background:#8250df14}
   .handoff .ho-why{color:#9a6700;min-width:0;overflow:hidden;text-overflow:ellipsis}
   .handoff.fail .ho-why{color:#cf222e}
   /* ── 上下文断点条 ── */
@@ -617,7 +618,11 @@ export interface Handoff {
   name: string;
   /** 活号; 投递失败 / 回包还没回来时没有。 */
   turn?: string;
+  /** 落进公开频道了吗。回包 (`public`) 是权威 —— 顶层模式 / 工单 / fyi / transfer 都会把调用参数里
+   *  声明的那个降级; 没回包时才是按调用参数推的一份预判。 */
   public: boolean;
+  /** 整件交出 (`return:"transfer"` 尾调用): 这一笔交出去就不回你了, 结论直接落你的上游。 */
+  handed?: boolean;
   /** 实际的投递方式 —— urgent 被降级时回包写的是 normal。 */
   priority: "normal" | "urgent" | "now";
   /** 投的那一刻对方在忙 —— priority 只在这时才真起作用。undefined = 回包没说。 */
@@ -667,6 +672,8 @@ const handoffFrom = (via: Handoff["via"], a: Record<string, unknown>, j: Record<
     name: stripSigil(str(j?.name) ?? str(a.name) ?? str(a.to) ?? str(a.tag) ?? ""),
     turn: str(j?.turn),
     public: typeof j?.public === "boolean" ? j.public : a.public === true || (via === "dispatch" && a.public !== false),
+    // 交出的那一笔回包不带 `receipt` 而是带 `transfer` (一句交接口径); 还没回包就看 `return`。
+    ...(str(a.return) === "transfer" || str(j?.transfer) ? { handed: true as const } : {}),
     priority: priorityOf(j?.priority) ?? priorityOf(a.priority) ?? (a.re ? "now" : "normal"),
     busy: typeof j?.wasBusy === "boolean" ? j.wasBusy : undefined,
     kind: kind === "ask" || kind === "fyi" ? kind : undefined,
@@ -732,6 +739,9 @@ export interface HandoffDeco {
   who: (name: string) => string;
   attrs: (h: Handoff) => string;
   status: (h: Handoff) => HandoffStatus;
+  /** 这一行的原文真落进公开频道了吗 —— 从对方接手的那一轮读回来的**事实** (回包不带 `public` 的
+   *  老记录 / 顶层模式降级都靠它纠); 窗口里读不到那一轮 = undefined, 退回调用参数推的那份。 */
+  pub: (h: Handoff) => boolean | undefined;
   /** 接手这件活的那一轮的账 (模型 / ctx / 耗时); 还没接手 = ""。 */
   acct: (h: Handoff) => string;
   /** 整行点了开这个 wizard (新生的 / 被收的) 的往来、viewpoint 站到它身上; 名录里没有 = ""。 */
@@ -790,9 +800,13 @@ const renderHandoff = (h: Handoff, key: string, deco?: HandoffDeco): string => {
   if (h.state === "failed")
     return hoBox(" fail", attrs, `${hoArrow({ key: "fail", tip: "没交出去" }, glyph)}没交出去 ${who}<span class="ho-why">${escHtml(h.reason ?? "")}</span>`, h.text);
   const [pt, tip] = PRIORITY_TAG[h.priority];
+  // 公开与否以落地那一轮为准 (见 HandoffDeco.pub): 私聊的那句原文默认收起、只跟一行摘要,
+  // 公开的才当成一条气泡摊开。
+  const pub = deco?.pub(h) ?? h.public;
   const tags = [
     h.decision ? hoTag("pri", h.decision.kind === "existing" ? "选中" : "新生", h.decision.why) : "",
-    h.public ? hoTag("pub", "公开", "在群里说的, 回复也进群") : hoTag("priv", "私聊", "只在双方的 rolepage"),
+    h.handed ? hoTag("xfer", "整件交出", "尾调用: 这一笔交给它, 结论直接回你的上游, 不回你") : "",
+    pub ? hoTag("pub", "公开", "在群里说的, 回复也进群") : hoTag("priv", "私聊", "只在双方的 rolepage"),
     h.busy === true ? hoTag("pri", pt, `${tip} —— 投的时候它正忙`) : "",
     h.kind === "ask" ? hoTag("kind", "只问", "只问一句") : h.kind === "fyi" ? hoTag("kind", "知会", "只是知会, 不要回话") : "",
   ].join("");
@@ -804,7 +818,7 @@ const renderHandoff = (h: Handoff, key: string, deco?: HandoffDeco): string => {
   const acct = deco ? deco.acct(h) : "";
   // 移交体「发给谁」就是被移交的那个 wizard; 点它与移交行同一套跳转 (同一份 attrs)。
   const to = attrs ? `<span class="to-in" role="button" tabindex="0"${attrs}>${who}</span>` : "";
-  return hoBox("", attrs, `${hoArrow(st, glyph)}${verb} ${who}${turn}${tags}${lost}${acct ? `<span class="ho-acct">${acct}</span>` : ""}`, h.text, h.public ? `${key}:ho` : undefined, undefined, to);
+  return hoBox("", attrs, `${hoArrow(st, glyph)}${verb} ${who}${turn}${tags}${lost}${acct ? `<span class="ho-acct">${acct}</span>` : ""}`, h.text, pub ? `${key}:ho` : undefined, undefined, to);
 };
 
 const PLAIN: HandoffStatus = { key: "plain", tip: "" };

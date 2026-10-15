@@ -2141,7 +2141,9 @@ const main = async (): Promise<void> => {
       // 已经报过了」的去重记号 —— 不拉回去, owner 下一轮交同一个中途态就被静默吞掉 (往返断在这里)。
       if (reTarget && (reTarget.status === "need" || reTarget.status === "error"))
         router.commit(ops.mark({ event: reTarget.event, status: "open" }));
-      return { status: 200, body: { ...accepted, queued: true, ...(prereqs.some((p) => p.state === "pending") ? { parked: true, after: afters } : {}), event: serves, name: peerAddress(cfg, self, target), priority: policy, wasBusy,
+      // `public` 回真实落地的哪一档 (顶层模式 / 工单 / fyi / transfer 都会把入口声明的 public 降级) ——
+      // rolepage 的提示行照它判「公开 / 私聊」, 不能凭调用参数推。
+      return { status: 200, body: { ...accepted, queued: true, ...(prereqs.some((p) => p.state === "pending") ? { parked: true, after: afters } : {}), event: serves, name: peerAddress(cfg, self, target), priority: policy, wasBusy, public: isPublic,
         ...(jobId ? { job: jobId } : {}), ...(attemptId ? { node, attemptId, acceptance: "pending" } : {}),
         ...(wantReceipt && plan.op !== "transfer" ? { receipt: "已持久化排队；提交后观察那一笔的回执，结论自动返回" } : {}),
         ...(plan.op === "transfer" && serves ? { transfer: transferNote(serves, target) } : {}),
