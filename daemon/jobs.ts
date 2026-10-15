@@ -318,8 +318,13 @@ export const loadJobStore = (filePath: string): JobStore => {
       const j = db.get(id);
       const member = j?.members.find((x) => x.target === target);
       if (!j || j.status !== "open" || !member || member.outcome) return undefined;
-      if (member.dispatchKey && identity?.dispatchKey !== member.dispatchKey) return undefined;
+      // 锚是 member.turn (account 时从 tell.event 写入 = 派活那一路由行的 event, 落定从
+      // deliverRoute 进来带的正是同一个 row.event)。dispatchKey 不当主判据: account 给成员
+      // 挂的 key 是最新一腿的注入事件 id (re/续问会换), settle 侧没有它, 先校它必然拦下 ——
+      // 工单成员的 outcome 从此不落 (Jc9a3e6 4/5)。只在调用方显式给出时才校。
       if (member.turn && identity?.turn !== member.turn) return undefined;
+      if (identity?.dispatchKey !== undefined && member.dispatchKey !== undefined
+        && identity.dispatchKey !== member.dispatchKey) return undefined;
       return db.set(id, {
         ...j,
         members: j.members.map((x) => (x.target === target ? { ...x, outcome, settledAt: Date.now(), ...(artifacts?.length ? { artifacts } : {}) } : x)),
