@@ -1813,7 +1813,9 @@ const main = async (): Promise<void> => {
       valid: (e) => {
         const p = e.payload.peer!;
         const attempt = p.attemptId ? workflow.byTurn(e.speaker, p.from.event ?? "") : undefined;
-        return planStore.healthy() && !e.canceled && (!p.from.receipt || planContinuationAllowed(e.target)) && (!p.job || jobs.get(p.job)?.status === "open") && !attempt?.canceled
+        // 单已收但这一笔的行还 open = 收工前就派出去的活, 照投 (见 close_job)。
+        return planStore.healthy() && !e.canceled && (!p.from.receipt || planContinuationAllowed(e.target))
+          && (!p.job || jobs.get(p.job)?.status === "open" || (!!e.serves && router.get(e.serves)?.status === "open")) && !attempt?.canceled
           && (!p.after?.length || prereqsOf(e.speaker, p.after).every((r) => r.state === "done" || r.state === "pending"))
       },
       accepted: (e) => {
@@ -3656,8 +3658,10 @@ const main = async (): Promise<void> => {
         // (注入的闸要求单还开着)。receipts.cancelHeld 同一条, 那边只做账 (T6)。
         cancelRoutes(router.rows().filter((r) => r.status === "held" && r.job === j.id).map((r) => r.event),
           () => `随工单 ${j.id} 收了, 这件排着的活没投。`, j.owner);
-        // 这张单名下还排着没投的 (after 停放) 也不投了。
-        events.cancel((e) => e.speaker === j.owner && e.payload.peer?.job === j.id);
+        // 这张单名下还排着没投的 (after 停放) 也不投了。行还 open 的那笔是已经派出去的活
+        // (出生事件常在冷 pane 上排着没注入): 收工 (accept) 不收活 —— 照投、照答, 回执标「已经收工」;
+        // 行被上面级联落定 (cancel / held) 的、没开行的才撤。
+        events.cancel((e) => e.speaker === j.owner && e.payload.peer?.job === j.id && router.get(e.serves ?? "")?.status !== "open");
         const closed = jobs.close(j.id, summary, mark)!;
         ledger.closeJob(j.id);
         // 收工结论留档到开单者名下 (与交接简报同一份 jsonl); 空工单 (没人、没结论) 不记。

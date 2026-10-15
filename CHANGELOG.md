@@ -6,6 +6,7 @@
 
 ### Fixed
 - 工单验收打回被同一轮的终句重放绕过: message-events 对每个终句递两次 `final` (`result()` 当场一次, 泵见 `complete` 未 `finalized` 再补判一次 —— 打回的续问 `events.accept` 里 `void pump()` 同步就触发), 第一次判不合规格打回、记进 `bounced`, 第二次因「已打回过一次」直接照收, 把被打回的原文 (如「好的」) 落成 done 并投出回执, 早于打回日志 ~0.4s。`bounced` 改记被打回那一轮的注入事件 id, 同一事件的重放直接丢掉, 只收续问那一轮的补交。
+- `close_job` 吞掉已派出、还没注入的活 (常见于冷 pane 上排着的出生事件): 收工时 `events.cancel` 按「owner + job」把这张单名下排着的事件一并撤掉, 即便行仍 `open`; 漏网的也被 `valid` (要求单还开着) 与注入前重投影的 `jobs.account` (`accounting requires open job`) 永久扣住 —— 行一直挂到 deadline, 发起者收不到迟到回执。现在 accept 收工只撤行已落定 (cancel 级联 / held 撤销) 或没开行的事件; 单已收但行还 open 的照投 (`valid` 放行), `jobs.account` 先认已记过的 key 再查单开没开 —— 活照常答完, 回执标「已经收工」。
 
 ## [2.7.1] - 2026-10-15
 

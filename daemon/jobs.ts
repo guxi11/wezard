@@ -297,8 +297,9 @@ export const loadJobStore = (filePath: string): JobStore => {
     },
     account: (id, key, member, kind, free = false, recovery = false, g2 = false) => {
       const j = db.get(id);
+      // 已记过的那一笔先认 (注入前每次重投影都会再记一遍): 收工前派出去、收工后才注入的活不算新派。
+      if (j?.dispatches?.includes(key)) return j;
       if (!j || j.status !== "open") throw new Error("accounting requires open job");
-      if (j.dispatches?.includes(key)) return j;
       if (!free && j.maxTurns && (j.turns ?? 0) >= j.maxTurns) throw new Error("job dispatch budget exhausted");
       const prev = j.members.find((m) => m.target === member.target);
       if (!prev && j.members.length >= JOB_MEMBER_MAX) throw new Error("job members full");
