@@ -48,11 +48,19 @@ assert.deepEqual(newStewardSpec(cfg, target, "codex"), { model: "updated", effor
 assert.deepEqual(newStewardSpec(cfg, target, "claude"), { model: "sonnet", effort: "medium" });
 cfg.models.router = "mini";
 assert.deepEqual(newStewardSpec(cfg, target, "claude"), { model: "haiku", effort: "low" });
-for (const name of [`${target}#child`, INTERNAL_BASE]) {
-  // Tagged and internal sessions must not receive a steward tier.
-  assert.deepEqual(newStewardSpec(cfg, name, "claude"), { model: undefined, effort: undefined });
-  assert.deepEqual(resumedStewardSpec(cfg, name, "claude", {}), { model: undefined, effort: undefined });
-  assert.deepEqual(newStewardSpec(cfg, name, "claude", { model: "task", effort: "high" }), { model: "task", effort: "high" });
-  assert.deepEqual(resumedStewardSpec(cfg, name, "claude", { model: "recorded", effort: "high" }), { model: "recorded", effort: "high" });
+// slot 分身不是管家: 不套 router 档 (显式 / 记录值照旧生效)。
+const slot = `${target}#child`;
+assert.deepEqual(newStewardSpec(cfg, slot, "claude"), { model: undefined, effort: undefined });
+assert.deepEqual(resumedStewardSpec(cfg, slot, "claude", {}), { model: undefined, effort: undefined });
+assert.deepEqual(newStewardSpec(cfg, slot, "claude", { model: "task", effort: "high" }), { model: "task", effort: "high" });
+assert.deepEqual(resumedStewardSpec(cfg, slot, "claude", { model: "recorded", effort: "high" }), { model: "recorded", effort: "high" });
+// daemon 内建的整理者执行体 (`wezard:internal#steward`) 也是管家型: 固定吃 router 档 ——
+// 它不给档就会落 CLI 自己的默认 (本机实测 opus/high), 显式 model / 记录值都不覆盖。
+for (const internal of [INTERNAL_BASE, `${INTERNAL_BASE}#steward`]) {
+  const want = { model: "haiku", effort: "low" };
+  assert.deepEqual(newStewardSpec(cfg, internal, "claude"), want);
+  assert.deepEqual(resumedStewardSpec(cfg, internal, "claude", {}), want);
+  assert.deepEqual(newStewardSpec(cfg, internal, "claude", { model: "task", effort: "high" }), want);
+  assert.deepEqual(resumedStewardSpec(cfg, internal, "claude", { model: "recorded", effort: "high" }), want);
 }
 console.log("Steward models: router fixed across creation/resume, backend mapping and ordinary wizard overrides passed");

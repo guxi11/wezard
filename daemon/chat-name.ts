@@ -75,9 +75,12 @@ export const chatBaseOf = (cfg: Config, ref: string): string => {
 export const chatPolicyOf = (cfg: Config, target: string): ChatPolicy & { topOnly: boolean } =>
   ((base, p) => ({ ...p, topOnly: p.topOnly ?? (isWxChat(base) || fold(chatNameOf(cfg, base)) === "wezard") }))(baseOfKey(target), ChatPolicy.parse(cfg.chatPolicy?.[baseOfKey(target)] ?? cfg.chatPolicy?.[chatNameOf(cfg, target)] ?? {}));
 
-/** 群的默认会话就是 router; 统一取 models.router, 非管家不套档。 */
+/** 群的默认会话就是 router; 统一取 models.router, 非管家不套档。
+ *  内部 key (daemon 内建的记忆整理执行体, `wezard:internal#steward`) 同属管家型: 它带着 slot 名,
+ *  但既不属于任何群、也不是谁的分身 —— 不给档它就落 CLI 自己的默认模型 (本机那个目录实测是
+ *  opus/high, 转录里 providerData.model=claude-opus-5.5), 比 router 那档重得多。真 slot 分身才不套档。 */
 export const stewardTierOf = (cfg: Config, target: string): TierName | undefined =>
-  tagOfKey(target) || isInternalKey(target) ? undefined : cfg.models.router;
+  isInternalKey(target) || !tagOfKey(target) ? cfg.models.router : undefined;
 
 /** 已命名的聊天, 按名字排序。 */
 export const listChatNames = (cfg: Config): Array<{ name: string; base: string }> =>
