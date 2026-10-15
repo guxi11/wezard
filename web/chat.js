@@ -31,7 +31,7 @@
   // 服务端时钟, 否则客户端时钟偏几分钟就会把运行中的会话判成已结束。
   var R = { at: 0, recvAt: 0, role: null, sessions: [], convs: [], relations: false, schedules: 0, plan: null, charter: null, stats: null, winStats: null };
   // frags: 当前窗口的原始片段 (id → 片段)。片段不带方向, 换视角时拿它就地重包左右。
-  var S = { es: null, pinned: true, gen: 0, frags: {} };
+  var S = { es: null, pinned: true, top: 0, gen: 0, frags: {} };
   // 关系/日程两栏共用的世界快照。treeFor = 已把谁滚进过视野。
   var W = {
     at: 0, nodes: [], edges: [], chats: [], jobs: [], schedules: [],
@@ -307,7 +307,7 @@
   // ── 滚动: 默认到底; 用户手动上翻后解除吸附, 回到底部再吸附 ──
   var atBottom = function () { return thread.scrollHeight - thread.scrollTop - thread.clientHeight < 80; };
   var toBottom = function (force) { if (force || S.pinned) thread.scrollTop = thread.scrollHeight; };
-  thread.addEventListener('scroll', function () { S.pinned = atBottom(); });
+  thread.addEventListener('scroll', function () { S.pinned = atBottom(); S.top = thread.scrollTop; });
   inner.addEventListener('toggle', function (e) {
     var d = e.target;
     if (d.open && d.classList && d.classList.contains('tool-call')) loadTool(d);
@@ -618,7 +618,14 @@
     var vp = viewpoint && viewpoint !== ROLE ? viewpoint : '';
     if (key !== CONV || (withRole || '') !== WITH || VIEW !== 'msgs' || VIEWPOINT !== vp) return selectConv(key, withRole, undefined, viewpoint);
     // 窄屏退回列表后再点它是要回去读, 不是要取消。
-    if (!app.classList.contains('reading')) { app.classList.add('reading'); return seeAll(); }
+    // 退回期间 .main 整棵 display:none, 浏览器把滚动位置清零、隐藏中的 toBottom 全落空 ——
+    // 回来时本在底部的吸底 (新消息落地也由 upsertMsg 继续吸), 在翻历史的回到离开时的位置。
+    if (!app.classList.contains('reading')) {
+      app.classList.add('reading');
+      if (S.pinned) toBottom(true);
+      else if (S.top) thread.scrollTop = S.top;
+      return seeAll();
+    }
     var fold = !withRole && OPEN[key];
     if (fold) OPEN[key] = false;
     selectConv('a:' + ROLE, '', undefined, '');
