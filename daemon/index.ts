@@ -65,7 +65,6 @@ import { appendEpisode, clipForCharter, cwdOfMd, episodePath, inboxPath, mdsOf, 
 import { retireStewardTask, startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
 import type { Asker, TurnFrom } from "../shared/detail-store.js";
 import { applyChatNames, chatBaseOf, chatNameOf, chatPolicyOf, clearChatName, listChatNames, normChatName, peerAddress, planChatNames, setChatName, stewardTierOf, type CharterChange, type CharterGuard } from "./chat-name.js";
-import { createTopOnlyNudge, gcNudge, policyKeyOf, renderNudge, type NudgeRow } from "./top-only-nudge.js";
 import {
   bindWizardStore,
   loadWizardStore,
@@ -910,17 +909,6 @@ const main = async (): Promise<void> => {
     const relayLabel = (t: string): string => ((h) => (h ? tagLink(t, h) : ""))(tagHead(t));
     /** 以 `self` 的名义往 `dest` 群发一条: 头独占一行; 头怎么写 (群默认 wizard 报不报名) 归 ownHead。 */
     const postAs = (self: string, dest: string, text: string): void => notifyChat(dest, headed(ownHead(self, dest), text, "\n\n"));
-    // 没开顶层模式的群里公开气泡多了 → 往那个群的管家 (群默认会话, target 就是 base principal) 信箱挂一行,
-    // 让它问人要不要开顶层模式 (见 top-only-nudge.ts)。路径里写聊天名: 管家照抄就能 config_set。
-    const topOnlyNudge = createTopOnlyNudge({
-      store: loadJsonMap<NudgeRow>("~/.wezard/top-only-nudge.json", gcNudge),
-      policy: () => ((p) => ({ windowMs: p.windowMin * 60_000, threshold: p.threshold, cooldownMs: p.cooldownH * 3_600_000 }))(cfg.wrc.mirror.topOnlyNudge),
-      nudge: (chat, n) => {
-        const p = cfg.wrc.mirror.topOnlyNudge;
-        notices.post([chat], renderNudge(policyKeyOf(chatNameOf(cfg, chat), chat), n, p.windowMin, p.cooldownH));
-        log.info({ chat, n }, "top-only nudge: 已提醒管家问人要不要开顶层模式");
-      },
-    });
     /** 公开的 wizard 间对话: 落在 `channel` 这个群。 */
     const relayPeer = (from: string, to: string, body: string, channel: string): void => {
       const text = body.trim();
@@ -930,7 +918,6 @@ const main = async (): Promise<void> => {
       // 头独占一行, 正文自成一个块 —— 只隔一个换行的话, markdown 会把正文首行
       // 当成头那一段的续行; 表格因此整张塌成一行带竖线的文字 (表格不能打断段落)。
       notifyChat(channel, `${head}\n\n${clipped}`);
-      if (!chatPolicyOf(cfg, channel).topOnly) topOnlyNudge.count(baseOfKey(channel));
     };
     /** 调用方这一轮所在的公开频道: 人从哪个群叫的它 / 公开 peer 轮的那个群;
      *  私聊轮或无记录 → 它的 home 群。notify 与 public send_peer 默认发到这里。 */

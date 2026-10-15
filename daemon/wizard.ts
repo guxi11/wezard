@@ -15,7 +15,6 @@
 import { randomUUID } from "node:crypto";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { normalizeTag, stripSigil, tagOfKey, uniqueTag } from "../shared/session-label.js";
-import { policyKeyOf } from "./top-only-nudge.js";
 
 export interface WizardRecord {
   /** 会话 key, 即身份本身: `chat:xxx` 或 `chat:xxx#tag`。 */
@@ -440,8 +439,11 @@ const renderTopOnly = (): string[] => [
   ]),
 ];
 
-/** 管家的顶层模式开关 (开没开都给一行): 人问起、或守护进程提醒群里 wizard 间公开往来太多时, 管家得知道它是什么、怎么开关。
- *  开着时规矩在「本群开着顶层模式」那一节, 这里只给关法。 */
+/** config_set 路径里写哪个键: 聊天名好认, 但路径按 `.` 切段 —— 名字里带点就退回 principal。 */
+const policyKeyOf = (name: string, base: string): string => (name && !name.includes(".") ? name : base);
+
+/** 管家的顶层模式开关 (开没开都给一行): 默认开着, 所以这一行的用处是**关法** —— 人问起、或想让某个群照旧
+ *  (人能看见 wizard 之间说话、默认会话也自己动手干活) 时它得知道按哪个键。 */
 const topOnlyLine = (chat: string, on: boolean): string => {
   const set = (v: boolean): string => `\`config_set({path:"chatPolicy.${chat}.topOnly", value:${v}})\``;
   return on

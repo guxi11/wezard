@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING** 顶层模式改为**默认开**: `chatPolicy.<chat>.topOnly` 不写即开, 只有显式 `false` 才关 (`daemon/chat-name.ts` 的 `chatPolicyOf`)。此前默认只覆盖 wezard 与微信 ClawBot 群聊, 其余群要人一个个点头才开 —— 漏掉的那个群里 wizard 之间照样当着人派活、干活那一方的回复也进群, 人看到的是「管家和干活的人各回一遍」(实测 pagesite 群: 管家的派活气泡 + 分身的完整 RESULT + 管家自己的结论, 三条)。连带两件事, 都在明面上: ① 顶层模式的开关同时管着**管家手闸** —— 聊天默认会话从此不能改文件 / 开子代理 / 读代码、自己跑命令每轮限 `stewardBudget` 次, 想某个群照旧自己动手就把它显式设 `false`; ② 已在跑的 wizard 宪章里还是旧话 (本群没开), 守进程侧的强制立刻生效、宪章文本要重开或交接后才换。
+
+### Removed
+- `wrc.mirror.topOnlyNudge` 配置与 `daemon/top-only-nudge.ts`: 顶层模式默认开之后「该开而没开的群」不存在了 —— 还会公开往来的群只剩人**显式**关掉的那些, 那是人自己的决定, 不该再被劝。「公开往来一多就提醒群管家问人要不要开」的发现器连同它的落盘账 (`~/.wezard/top-only-nudge.json`, 残留不再读) 一并删掉。
+
 ### Fixed
 - 工单验收打回被同一轮的终句重放绕过: message-events 对每个终句递两次 `final` (`result()` 当场一次, 泵见 `complete` 未 `finalized` 再补判一次 —— 打回的续问 `events.accept` 里 `void pump()` 同步就触发), 第一次判不合规格打回、记进 `bounced`, 第二次因「已打回过一次」直接照收, 把被打回的原文 (如「好的」) 落成 done 并投出回执, 早于打回日志 ~0.4s。`bounced` 改记被打回那一轮的注入事件 id, 同一事件的重放直接丢掉, 只收续问那一轮的补交。
 - `close_job` 吞掉已派出、还没注入的活 (常见于冷 pane 上排着的出生事件): 收工时 `events.cancel` 按「owner + job」把这张单名下排着的事件一并撤掉, 即便行仍 `open`; 漏网的也被 `valid` (要求单还开着) 与注入前重投影的 `jobs.account` (`accounting requires open job`) 永久扣住 —— 行一直挂到 deadline, 发起者收不到迟到回执。现在 accept 收工只撤行已落定 (cancel 级联 / held 撤销) 或没开行的事件; 单已收但行还 open 的照投 (`valid` 放行), `jobs.account` 先认已记过的 key 再查单开没开 —— 活照常答完, 回执标「已经收工」。

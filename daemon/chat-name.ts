@@ -12,7 +12,7 @@
 // 名字是用户手写的长期配置, 不是运行时状态, 不该躺在 state 目录里。
 import { ChatPolicy, type Config, type TierName } from "../shared/config.js";
 import { patchJsonc } from "../shared/config-writer.js";
-import { baseOfKey, isInternalKey, isWxChat, tagOfKey } from "../shared/session-label.js";
+import { baseOfKey, isInternalKey, tagOfKey } from "../shared/session-label.js";
 import { settleName, wizardStore } from "./wizard.js";
 
 /** 一次会动到宪章的写入 (见 index.ts 的宪章守卫): 聊天名、chatPolicy 都进宪章, 已在跑的 wizard 看不见,
@@ -70,10 +70,12 @@ export const chatBaseOf = (cfg: Config, ref: string): string => {
 };
 
 /** `target` 所在聊天的群聊级策略 (`chatPolicy`, 键是 base principal)。 */
-// topOnly 没写 = wezard 与微信 ClawBot 群聊开, 其余关。
-// 默认不落盘, 已有的微信群聊不必迁移; 写了 false 照样关。
+// topOnly 没写 = **开** (2026-10-15 起): 顶层模式是每个聊天的默认规矩, 只有人显式写 `false` 才关。
+// 此前默认只覆盖 wezard 与微信 ClawBot 群聊, 其余群靠管家问人一句才开 —— 每新起一个群都要人再点一次头,
+// 漏掉的那个群里 wizard 之间就当着人派活、回复也进群 (pagesite 就是这样冒的泡)。
+// 默认不落盘, 已有的聊天不必迁移。
 export const chatPolicyOf = (cfg: Config, target: string): ChatPolicy & { topOnly: boolean } =>
-  ((base, p) => ({ ...p, topOnly: p.topOnly ?? (isWxChat(base) || fold(chatNameOf(cfg, base)) === "wezard") }))(baseOfKey(target), ChatPolicy.parse(cfg.chatPolicy?.[baseOfKey(target)] ?? cfg.chatPolicy?.[chatNameOf(cfg, target)] ?? {}));
+  ((p) => ({ ...p, topOnly: p.topOnly ?? true }))(ChatPolicy.parse(cfg.chatPolicy?.[baseOfKey(target)] ?? cfg.chatPolicy?.[chatNameOf(cfg, target)] ?? {}));
 
 /** 群的默认会话就是 router; 统一取 models.router, 非管家不套档。
  *  内部 key (daemon 内建的记忆整理执行体, `wezard:internal#steward`) 同属管家型: 它带着 slot 名,
