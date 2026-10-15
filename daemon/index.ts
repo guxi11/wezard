@@ -105,7 +105,7 @@ import { registerWorkflowPlanRoutes } from "./workflow-plan-http.js";
 import { returnOpOf, type HeldSeen, type InFlight, type Prereq, type ReturnOp, type Tell } from "./dispatch.js";
 import { isTerminal, renderInFlight, turnState } from "../shared/turn-state.js";
 import { startIdleNudge } from "./idle-nudge.js";
-import { askerFromEnvelope, renderReminder, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
+import { askerFromEnvelope, renderReminder, withMsg, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
 import { createHandoffs, handedOff, handingOff, type Pending as PendingHandoff } from "./handoff.js";
 import { coldGateOf, decide, rankCandidates, renderCandidates, routeDutiesOf, tierFor, wakeCostOf, wakeNoteOf, type RouteRow } from "./route.js";
 import { parseWhen, renderChatLog, UNKNOWN_HUMAN, type LogSession } from "./chat-log.js";
@@ -290,7 +290,7 @@ const main = async (): Promise<void> => {
       let outcome: { ok: boolean; retryable?: boolean; uncertain?: boolean; reason?: string } | undefined;
       pinFrameBot(e.payload.human!.frame, botOfKey(e.channel));
       await bridge.dispatch({ ...e.payload.human!, eventId: e.id,
-        text: e.payload.text + renderReminder({ wezard: "message-event", event: e.id }, []),
+        text: withMsg(e.payload.text, e.id),
         guard: (phase, identity) => boundary(phase, identity), onSubmitted: (r) => { outcome = r; } });
       return outcome ?? { ok: false, retryable: events.get(e.id)?.exposure === "none", uncertain: events.get(e.id)?.exposure !== "none", reason: "dispatch ended without a submission acknowledgement" };
     },
@@ -1817,7 +1817,7 @@ const main = async (): Promise<void> => {
         if (p.attemptId && p.tell) workflow.intent(p.attemptId, p.tell);
         const raw = await m.injectText(e.target, e.payload.text, undefined, {
           from: p.from, channel: e.channel, requireIdle: e.priority === "normal",
-          envelope: p.envelope + (p.after?.length ? afterNote(p.after, Object.fromEntries(p.after.flatMap((t) => { const x = seenOf(t); return x ? [[t, x] as const] : []; })), e.speaker) : "") + renderReminder({ wezard: "message-event", event: e.id }, []),
+          envelope: withMsg(p.envelope + (p.after?.length ? afterNote(p.after, Object.fromEntries(p.after.flatMap((t) => { const x = seenOf(t); return x ? [[t, x] as const] : []; })), e.speaker) : ""), e.id),
           guard: (phase, identity) => peerEvents!.valid(e) && prereqsOf(e.speaker, p.after ?? []).every((r) => r.state === "done") && (!phase || ((!p.attemptId || workflow.boundary(p.attemptId)) && boundary(phase, identity))),
           eventId: e.id,
         });

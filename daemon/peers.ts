@@ -600,7 +600,7 @@ export const renderHumanEnvelope = (user: string, chat: string, chatKey?: string
 /** 人对管家说的那一轮挂一行「自己答还是派出去」: 宪章里的检查项离这句话太远, sonnet 档的管家一接到活
  *  就忘。只挂人的话 —— 回执、同伴、定时那几轮不是新来的活; 一行就够, 细则在宪章。 */
 export const renderStewardHint = (): string =>
-  renderReminder({ wezard: "hint", role: "steward" }, [
+  renderReminder({ wezard: "hint" }, [
     "管家自查: 进度 / 闲聊 / 你已知道的 → 自己答; 要看代码才答得了的 (机制、原理、「现在还会不会…」、方案、排查、改动), 哪怕看一眼就像能答 → 先 `dispatch` 派出去, 别自己读 (守护进程拦着); 多处改动或要 coder + reviewer 的带 `lead:true` 开需求单。",
   ]);
 
@@ -904,7 +904,7 @@ export const peerMentionPart = (mentions: readonly PeerMention[], cwd = ""): Par
   const row = (m: PeerMention): string =>
     `- .${m.tag}${m.job ? ` job="${clipLine(m.job, 80).replace(/"/g, "'")}"` : ""}${m.foreign ? ` chat=${m.chat || "(other)"}` : ""}${m.cwd && m.cwd !== cwd ? ` cwd=${tildePath(m.cwd)}` : ""}`;
   return {
-    text: renderReminder({ wezard: "mention", names: mentions.map((m) => `.${m.tag}`).join(" ") }, [
+    text: renderReminder({ wezard: "mention" }, [
       ...(rule
         ? ["`.name` tokens above are live wizards, not literal text. To involve / check / relay to one: tell_peer · peek_peer · wait_peer(name) — never answer for it; wizard_roster for all. A passing mention needs no tool."]
         : []),

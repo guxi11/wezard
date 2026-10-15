@@ -42,6 +42,8 @@ import { createPaneGuards, GuardPrerequisiteError } from "./pane-guards.mjs";
 import { normalizeTask } from "../../dist/shared/task-file.js";
 import { loadConfig } from "../../dist/shared/config.js";
 import { bindCliBackends, backendForPath } from "../../dist/shared/cli-backends.js";
+// 信封 / 属性只用守护进程自己那一份解析器读 —— 契约只有一份 (反转义、LEGACY、`msg` 新旧两形都在里面)。
+import { parseEnvelope, parseReminders } from "../../dist/shared/reminder.js";
 
 const { config } = loadConfig();
 bindCliBackends({ ...config.wrc, projectsDirOverride: config.wrc.mirror.projectsDir });
@@ -119,17 +121,23 @@ const userTexts = (path) => readFileSync(path, "utf8").split("\n").flatMap((line
   } catch { return []; }
 });
 
-const attrsIn = (text) =>
-  [...text.matchAll(/<system-reminder ([^>]*)>/g)]
-    .map((m) => Object.fromEntries([...m[1].matchAll(/([\w-]+)="([^"]*)"/g)].map((a) => [a[1], a[2]])));
+const attrsIn = (text) => parseReminders(text).map((r) => r.attrs);
 
 /** `target` 的 transcript 里收到的回执信封 (属性 + 正文), 可按发话方收窄。 */
 const receiptsIn = async (target, fromName) => {
   const p = await jsonlOf(target);
   if (!p) return [];
-  return userTexts(p).flatMap((t) => [...t.matchAll(/<system-reminder ([^>]*)>([\s\S]*?)<\/system-reminder>/g)])
-    .map((m) => ({ attrs: Object.fromEntries([...m[1].matchAll(/([\w-]+)="([^"]*)"/g)].map((a) => [a[1], a[2]])), body: m[2] }))
+  return userTexts(p).flatMap(parseReminders)
     .filter((r) => r.attrs.wezard === "envelope" && r.attrs.receipt === "1" && (!fromName || r.attrs.from === `.${real(fromName)}`));
+};
+/** 注入事件 id → 它挂的那一行: `route:<行>` / `route:<行>:r<n>` / `route:<行>:resume…` / `rcpt:<行>:<rev>`。 */
+const rowOfMsg = (id = "") => id.match(/^(?:route|rcpt):([^:]+)/)?.[1] ?? "";
+/** 一句注入挂在哪一行上: 回执 (与 T10b 初期的派活信封) 写在 `event`, T10a 写 `turn`; 现在的派活 /
+ *  续问信封都不写, 从注入事件 id (信封 `msg`, 老形状是 message-event 块) 剥出来。 */
+const roundOf = (text) => {
+  const env = parseEnvelope(text);
+  if (!env) return "";
+  return env.event || parseReminders(text).filter((r) => r.attrs.wezard === "envelope").at(-1)?.attrs.turn || rowOfMsg(env.eventId);
 };
 /** 回执信封上这一轮的行 id: 旧世界写 `turn`, 新世界写 `event` —— 两边的值都是路由行 id。 */
 const roundId = (r) => r.attrs.event ?? r.attrs.turn ?? "";
@@ -253,17 +261,21 @@ const turnsOf = (target) => {
 };
 
 // ── 词汇探测: 旧世界 (resident 没 reload) 还是新世界 (T10b) ────────────────
-// 判据取自**目标会话里那句注入的 peer 信封**: 有 `event=` = 新世界, 只有 `turn=` = 旧世界。
+// 判据取自**目标会话里那句注入的 peer 信封**: 写 `turn=` = 旧世界; 否则 (写 `event=`, 或注入事件 id
+// 是 `route:…`) = 新世界 —— 现在的派活信封不再写 event, 只剩 msg / message-event 上的 `route:` 认得出。
 // 拿不到样例 (root 还没收到过话) 时退回 tell 响应的字段名, 再退不回就按新世界走并说明。
 let VOCAB;
 const probeVocab = async (hint) => {
   if (VOCAB) return VOCAB;
   const p = root ? await jsonlOf(root.target) : undefined;
-  const envs = p ? userTexts(p).flatMap(attrsIn).filter((a) => a.wezard === "envelope" && a.kind === "peer" && a.receipt !== "1") : [];
+  const envs = p ? userTexts(p).flatMap((t) => {
+    const a = attrsIn(t).filter((x) => x.wezard === "envelope").at(-1);
+    return a && a.kind === "peer" && a.receipt !== "1" ? [{ ...a, msg: parseEnvelope(t)?.eventId }] : [];
+  }) : [];
   const last = envs.at(-1);
-  const fromEnv = last ? (last.event !== undefined ? "event" : last.turn !== undefined ? "turn" : undefined) : undefined;
+  const fromEnv = last ? (last.turn !== undefined ? "turn" : last.event !== undefined || last.msg?.startsWith("route:") ? "event" : undefined) : undefined;
   const attr = fromEnv ?? (hint?.event !== undefined ? "event" : "turn");
-  VOCAB = { attr, new: attr === "event", sample: last?.[attr] ?? hint?.[attr] ?? "", samples: envs.length, src: fromEnv ? "transcript" : "tell 响应" };
+  VOCAB = { attr, new: attr === "event", sample: last?.[attr] ?? last?.msg ?? hint?.[attr] ?? "", samples: envs.length, src: fromEnv ? "transcript" : "tell 响应" };
   console.log(`[vocab] ${VOCAB.new ? "T10b 新世界" : "T10a 旧世界 (resident 未 reload)"} · 轮次 id 属性=${attr} · 据=${VOCAB.src} · 样例=${VOCAB.sample} · peer 信封 ${VOCAB.samples} 份`);
   return VOCAB;
 };
@@ -507,6 +519,58 @@ const cases = {
 
   "router-core": { names: [], unit: true, run: routerCore },
 
+  // reminder 的形状契约: 注册表 (只写登记过的属性) / 尾巴顺序 / `msg` 并进信封 / 老形状照认 / rolepage 标签。
+  "reminder-shape": { names: [], unit: true, run: async () => {
+    const R = await import(new URL("../../dist/shared/reminder.js", import.meta.url).href);
+    const P = await import(new URL("../../dist/daemon/peers.js", import.meta.url).href);
+    const fails = [];
+    const check = (ok, what) => { if (!ok) fails.push(what); };
+    const asker = { who: "user:u1", chat: "chat:c1" };
+    const blocks = [
+      P.renderHumanEnvelope("u1", "群", "chat:c1"),
+      P.renderPeerEnvelope(".a", undefined, { asker, re: true, legs: 5, deadline: Date.now(), act: "fyi", quiet: true }),
+      P.renderPeerEnvelope(".a", "群", { act: "ask" }),
+      P.renderReceiptEnvelope(".b", "群", { job: "j1", done: 2, total: 2 }, "need", "e1.2", { asker, audience: "u1", via: ".c", late: true, retellTo: "群", retold: true, up: true }),
+      P.renderTaskEnvelope("t1", { event: "e9" }),
+      P.renderStewardHint(),
+    ];
+    blocks.flatMap(R.parseReminders).forEach((r) => check(R.unregisteredAttrs(r.attrs).length === 0, `未登记属性 ${R.unregisteredAttrs(r.attrs)} @${r.attrs.wezard}`));
+    check(!R.parseReminders(blocks[1])[0].attrs.event, "派活信封不该写 event");
+    check(R.parseReminders(blocks[3])[0].attrs.event === "e1.2", "回执信封的 event = 路由行 id");
+    check(R.renderReminder({ wezard: "roster", mode: "full" }, []).includes("mode") === false, "未登记属性 (mode) 渲染时丢掉");
+    // 尾巴顺序: 信封打头, 旁注按 TAIL_ORDER, 表外的 (codebuddy 的块) 垫底。
+    const note = (w) => R.renderReminder({ wezard: w }, [w]);
+    const foreign = '\n<system-reminder data-role="memory">m</system-reminder>';
+    const tail = R.renderTail(note("pending") + foreign, note("roster"), blocks[1], note("mention"), note("hint"), note("lead"), note("after"));
+    const order = R.parseReminders(tail).map((r) => r.attrs.wezard ?? r.attrs["data-role"]).join(",");
+    check(order === "envelope,hint,lead,after,mention,roster,pending,memory", `尾巴顺序 ${order}`);
+    check(R.renderTail("正文", note("roster")) === note("roster"), "renderTail 只收块");
+    // msg 并进信封: 取最后一个信封 (正文里引用的老信封不动); 提交见证与 parseEnvelope 都认。
+    const quoted = `引用 ${P.renderPeerEnvelope(".old")}\n正文`;
+    const injected = R.withMsg(quoted + R.renderTail(blocks[1], note("roster")), "route:e5.1:r2");
+    const envs = R.parseReminders(injected).filter((r) => r.attrs.wezard === "envelope");
+    check(envs.length === 2 && !envs[0].attrs.msg && envs[1].attrs.msg === "route:e5.1:r2", "msg 落在最后一个信封上");
+    check(R.parseEnvelope(injected)?.eventId === "route:e5.1:r2" && R.carriesMsg(injected, "route:e5.1:r2"), "新形状: parseEnvelope / carriesMsg");
+    check(!injected.includes('wezard="message-event"'), "有信封就不再挂 message-event 块");
+    check(R.withMsg(R.withMsg(blocks[1], "x"), "y").match(/msg="/g)?.length === 1 && R.parseEnvelope(R.withMsg(R.withMsg(blocks[1], "x"), "y"))?.eventId === "y", "withMsg 幂等改写");
+    const bare = R.withMsg("没信封", "p:a:b:1:1");
+    check(R.carriesMsg(bare, "p:a:b:1:1") && bare.includes('wezard="message-event"'), "没信封: 兜底挂 message-event");
+    // 老形状 (投递时信封外挂块) 照认; LEGACY 措辞信封照认。
+    const old = "x" + blocks[1] + R.renderReminder({ wezard: "message-event", event: "route:e7" }, []);
+    check(R.parseEnvelope(old)?.eventId === "route:e7" && R.carriesMsg(old, "route:e7"), "老形状 message-event");
+    const oldRcpt = "x" + '\n<system-reminder wezard="envelope" kind="peer" from=".b" scope="private" event="e7" receipt="1" status="done">\n</system-reminder>\n<system-reminder wezard="receipt-delivery" event="rcpt:e7:r1">\n</system-reminder>';
+    check(R.parseEnvelope(oldRcpt)?.eventId === "rcpt:e7:r1", "老形状 receipt-delivery");
+    const legacy = "x\n<system-reminder>\n这一轮是 wizard `.z` 发来的**私聊**\n</system-reminder>";
+    check(R.parseEnvelope(legacy)?.from === ".z", "LEGACY 措辞信封");
+    // rolepage 标签。
+    const label = (t) => R.parseReminders(t).map((r) => R.reminderLabel(r).label).join("|");
+    check(label(blocks[1]) === "envelope · .a", `标签 ${label(blocks[1])}`);
+    check(label(blocks[3]) === "回执 · .b · need", `标签 ${label(blocks[3])}`);
+    check(label(note("roster") + foreign + legacy) === "roster|memory|envelope · .z", `标签 ${label(note("roster") + foreign + legacy)}`);
+    check(R.reminderLabel(R.parseReminders(bare)[0]).machine === true, "message-event 标成机器块");
+    return { pass: fails.length === 0, why: fails.length ? fails.join("; ") : "注册表 / 尾巴顺序 / msg 并进信封 / 老形状 / 标签 全过" };
+  } },
+
   // 回执去向只有四个词; 旧写法 (`chain`/`receipt`/`answer`) 自 T10b 起不再映射 (旧世界仍映射, 见词汇探测)。
   "return-op": { names: [], unit: true, run: async () => {
     const { returnOpOf, RETURN_OPS } = await import(new URL("../../dist/daemon/dispatch.js", import.meta.url).href);
@@ -700,7 +764,7 @@ const cases = {
       const oldPath = await jsonlOf(kids.get("rr-h"));
       const { replyClosedBefore } = await import("../../dist/daemon/peers.js");
       const asks = [[root.target, `.${root.name}`, handleOf(first, r1), r1], [kids.get("rr-s"), `.${real("rr-s")}`, handleOf(second, r2), r2]];
-      const seen = await until(() => oldPath && asks.every(([, , ref]) => userTexts(oldPath).some((t) => t.includes(`${VOCAB.attr}="${ref}"`))), 60_000, 250);
+      const seen = await until(() => oldPath && asks.every(([, , ref]) => userTexts(oldPath).some((t) => roundOf(t) === ref)), 60_000, 250);
       const busy = await until(async () => (await post("/peers/peek", { target: root.target, name: real("rr-h"), turns: 1 })).busy, 15_000, 500);
       const t0 = Date.now();
       const owed = asks.every(([, name, handle, row]) =>
@@ -803,11 +867,16 @@ const cases = {
     const got = await waitReceipts(root.target, "rr-p");
     // 子活偶尔先 NEED 反问一次 (中途回执, 不算定论), 只数定论那两份。
     const atP = [...(await waitReceipts(kids.get("rr-p"), "rr-q1")), ...(await waitReceipts(kids.get("rr-p"), "rr-q2"))].filter((r) => r.attrs.status !== "need");
-    const routed = atP.filter((r) => (VOCAB.new ? r.attrs.serves !== undefined || r.attrs.up !== undefined : r.attrs["reply-to"] === `.${root.name}`)).length;
+    // 去向不写进属性 (reminder 不是路由真相): 新世界看路由表 —— 两件子行的 receiver 都挂在 p 那一行上,
+    // p 的回执轮才会把结论接着交给根。旧世界仍数信封上的 reply-to。
+    const kidRows = await Promise.all(["rr-q1", "rr-q2"].map((q) => rowOf(kids.get("rr-p"), kids.get(q))));
+    const routed = VOCAB.new
+      ? kidRows.filter((r) => !!s?.event && r?.receiver?.event === s.event).length
+      : atP.filter((r) => r.attrs["reply-to"] === `.${root.name}`).length;
     const body = s?.outcome?.body ?? "";
     return {
-      pass: settled(s) && s.outcome.status === "done" && body.includes(`q1-${n}`) && body.includes(`q2-${n}`) && got.length === 1 && atP.length === 2 && (VOCAB.new || routed === 1),
-      why: `行=${s?.outcome?.status ?? "未落定"} 含两份=${body.includes(`q1-${n}`) && body.includes(`q2-${n}`)} 根收到 ${got.length} 份 · p 收到 ${atP.length} 份${VOCAB.new ? " (新世界: 去向不再写进属性)" : `, 带 reply-to 的 ${routed} 份`}`,
+      pass: settled(s) && s.outcome.status === "done" && body.includes(`q1-${n}`) && body.includes(`q2-${n}`) && got.length === 1 && atP.length === 2 && routed === (VOCAB.new ? 2 : 1),
+      why: `行=${s?.outcome?.status ?? "未落定"} 含两份=${body.includes(`q1-${n}`) && body.includes(`q2-${n}`)} 根收到 ${got.length} 份 · p 收到 ${atP.length} 份${VOCAB.new ? ` · 挂在 p 那一行下的子行 ${routed}/2` : `, 带 reply-to 的 ${routed} 份`}`,
     };
   } },
 
@@ -910,19 +979,15 @@ const cases = {
     const path = await jsonlOf(kids.get("rr-n"));
     const ref = handleOf(first, row);
     const fromHere = path ? userTexts(path).filter((t) => t.includes(`from=".${real("rr-ns")}"`)) : [];
-    const dispatches = fromHere.filter((t) => t.includes(`${VOCAB.attr}="${ref}"`));
-    const attrs = fromHere.map((t) => {
-      const a = attrsIn(t).find((x) => x.wezard === "envelope") ?? {};
-      return `${a[VOCAB.attr] ?? "-"}${a.re ?? ""}`;
-    });
+    const dispatches = fromHere.filter((t) => roundOf(t) === ref);
+    const attrs = fromHere.map((t) => roundOf(t) || "-");
     // 真判据是「续问沿用同一笔」—— 行 id 没变 + 两份回执挂在同一个 roundId 上 (上面已断言)。
-    // 信封那层只再核一句: 旧世界这一轮注入了两次 (件号每次新发), 新世界两轮都写着同一个 event。
-    const reconf = VOCAB.new
-      ? dispatches.length === 2 && dispatches[1].includes(`${VOCAB.attr}="${ref}"`)
-      : fromHere.length === 2;
+    // 信封那层只再核一句: 旧世界这一轮注入了两次 (件号每次新发), 新世界两轮都挂在同一行上
+    // (注入事件 `route:<行>` 与 `route:<行>:r2`)。
+    const reconf = VOCAB.new ? dispatches.length === 2 : fromHere.length === 2;
     return {
       pass: settled(s) && s.outcome.status === "done" && s.outcome.body.includes(`need-${n}`) && s.event === row.event && got.map((r) => r.attrs.status).join(",") === "need,done" && reconf,
-      why: `NEED 前提成立 status=${mid.status} · 终态=${s?.outcome?.status ?? "未落定"} 同一行=${s?.event === row.event} · 注入=${dispatches.length}/${fromHere.length} 轮 (句柄 ${ref}; rr-n 收到的 ${VOCAB.attr}=[${attrs.join(", ")}]) · 信封=${got.map((r) => r.attrs.status).join(",")}`,
+      why: `NEED 前提成立 status=${mid.status} · 终态=${s?.outcome?.status ?? "未落定"} 同一行=${s?.event === row.event} · 注入=${dispatches.length}/${fromHere.length} 轮 (句柄 ${ref}; rr-n 收到的轮次=[${attrs.join(", ")}]) · 信封=${got.map((r) => r.attrs.status).join(",")}`,
     };
   } },
 
@@ -1078,7 +1143,8 @@ const cleanup = () => cleaning ??= (async () => {
 const main = async () => {
   console.log("typecheck…");
   execFileSync("npm", ["run", "-s", "typecheck"], { stdio: "inherit" });
-  const pick = process.argv.slice(2);
+  // `unit` = 全部纯 unit 用例 (不生分身、不碰 daemon)。
+  const pick = process.argv.slice(2).flatMap((x) => (x === "unit" ? Object.keys(cases).filter((k) => cases[k].unit) : [x]));
   const bad = pick.filter((x) => !cases[x]);
   if (bad.length) throw new Error(`没有用例 ${bad.join(" ")} —— 有: ${Object.keys(cases).join(" ")}`);
   // solo: 会 reload 整个 daemon, 与别的用例并跑会弄断它们 —— 默认不跑, 点名才跑 (`run.mjs after-reload`)。

@@ -1,25 +1,22 @@
 // `<system-reminder>`: 注入时挂在一句话尾巴上的机器信息 —— 信封 (谁、在哪说的) /
-// 点名提示 / 名册增量。两个读者各取一半:
+// 点名提示 / 名册增量 / 挂起事项。两个读者各取一半:
 //   模型读正文 —— 规矩是写给它的, 措辞随时会改;
-//   读回来的一方 (read_chat 的 parseEnvelope) 读开标签上的属性 ——
+//   读回来的一方 (parseEnvelope / 提交见证 / rolepage / regress) 读开标签上的属性 ——
 //   事实只写一次、按名取, 改措辞不再牵连解析。
 // 属性出现之前落盘的 transcript / 轮次记录里只有正文, 那些靠 LEGACY 表按措辞认。
 //
-// 属性一览 (`wezard` 区分种类)。只留两种属性: 有机器读回的 (下面标了读者), 和模型要原样抄进
-// 工具参数的 id。只给模型看的语义 (知会 / 期限 / 沿链升级 / 迟到) 写正文, 不再在开标签上抄一遍。
-//   envelope  kind=human|peer|task  from  chat?  (read_chat / rolepage / mirror 认出处)
-//             scope=private|public (仅 peer)   chat-key (仅 human: 改名不变的群 key)
-//             asker-user / asker-chat: 链头那句人话 (askerOf: 卡片落哪个群、audience)
-//             event (仅 task / 回执): task = 这一枪开的群根行 (servesOfTurn); 回执 = 刚落定的那一笔
-//                  —— 发话方 `tell_peer({re})` 抄的就是它。派活 / 续问不写: 收方不需要自己那一笔的 id,
-//                  守护进程从 message-event 的 id 反查 (`events.get(id).serves`)
-//             receipt=1 status audience job/done/total/complete (仅回执; regress 与 chat-log 读)
-//   message-event  event: 这句话的注入事件 id —— 提交见证 (submittedEventSince) 与轮次↔事件绑定的
-//             唯一凭据; 回执也走它 (id = `rcpt:<event>:<rev>`)
-//   mention   names  (空格分隔的 `.name`)
-//   roster / pending / hint / lead / after: 只给模型, 属性只区分种类与 mode
-// 退役不再写、只为老 transcript 照认的: receipt-delivery (与 message-event 同值重复), 派活信封的
-// event / quiet / act / deadline, 回执的 serves / via / late。
+// 形状 (一句话): 一个信封块打头 (属性只放机器读回的与模型要抄的 id; 注入事件 id 作为 `msg`
+// 并在信封上), 后面按 TAIL_ORDER 平铺只给模型看的旁注块 —— 全是 `<system-reminder wezard=…>`,
+// 由 REMINDER_KINDS 约束、renderTail 拼出。不嵌套、不另起 tag 名、属性不塞 JSON、不打版本号: 有没有 `msg`
+// 本身就分得出新旧。
+//
+// reminder **不是路由的真相来源**: 去向 / 放行闸 / 追述 / GC 只读 router 的 journal; 这里是
+// 给模型的快照, 与 mirror / chat-log 认出处的回读。会过期的派生量 (行状态、是否追述) 不写成属性。
+//
+// 退役不再写、只为老 transcript 照认的: message-event 块 (event = 注入事件 id, 现为信封 `msg`;
+// 没有信封的注入仍挂它兜底), receipt-delivery (与 message-event 同值重复), 派活信封的
+// event / quiet / act / deadline, 回执的 serves / via / late, 名册 / 挂起事项的 mode,
+// mention 的 names, hint 的 role。
 
 import type { Asker } from "./detail-store.js";
 
@@ -29,6 +26,41 @@ export interface Reminder {
   body: string;
   raw: string;
 }
+
+/** 一个属性的读者: `M` = 机器读回 (写了就有代码读它); `C` = 模型要原样抄进工具参数的 id
+ *  (`re` / `for` / `drop`), 机器也读。两者都不是的 —— 只给模型看的语义 —— 写正文, 不进属性。 */
+type Use = "M" | "C";
+
+/** 种类注册表: 每种块允许写哪些属性 (`wezard` 自己不列)。渲染只认这里登记过的; 新增一个属性
+ *  = 在这里加一行并说清谁读它。读者在行尾。 */
+export const REMINDER_KINDS = {
+  envelope: {
+    kind: "M", from: "M", scope: "M", chat: "M",      // 出处: parseEnvelope → read_chat / rolepage / mirror
+    "chat-key": "M",                                  // 人话: 改名不变的群 key (mirror 恢复频道)
+    "asker-user": "M", "asker-chat": "M",              // 链头那句人话 (askerOf: 卡片落哪个群)
+    msg: "M",                                         // 注入事件 id: 提交见证 / 轮次↔事件绑定 / serves 反查
+    event: "C",                                       // 路由行 id (仅回执 / 定时): `tell_peer({re})` 抄它
+    receipt: "M", status: "M", audience: "M",          // 回执: mirror / chat-log / regress
+    job: "M", done: "M", total: "M", complete: "M",    // 工单进度: regress (齐没齐由守护进程数)
+  },
+  /** 退役中: 只在没有信封的注入上兜底 (见 withMsg)。 */
+  "message-event": { event: "M" },
+  hint: {},
+  lead: {},
+  after: {},
+  mention: {},
+  roster: {},
+  pending: {},
+} as const satisfies Record<string, Record<string, Use>>;
+export type Kind = keyof typeof REMINDER_KINDS;
+type AttrOf<K extends Kind> = keyof (typeof REMINDER_KINDS)[K] & string;
+/** 某一种块的开标签属性。 */
+export type KindAttrs<K extends Kind> = { readonly wezard: K } & { readonly [A in AttrOf<K>]?: string };
+export type NoteAttrs = { [K in Kind]: KindAttrs<K> }[Kind];
+
+/** 尾巴上的固定顺序: 信封打头 (parseEnvelope 取最后一个信封, 而尾巴只有一个), 旁注按
+ *  「这一轮怎么接 → 附件 → 环境」排。表外的 (codebuddy 自己的块、老种类) 排最后, 相对顺序不变。 */
+export const TAIL_ORDER: readonly string[] = ["envelope", "message-event", "hint", "lead", "after", "mention", "roster", "pending"];
 
 // 开标签容许属性: 我们自己的, 以及 codebuddy 的 `data-role="command-caveat"`。
 export const REMINDER_RE = /<system-reminder(\s[^>]*)?>([\s\S]*?)<\/system-reminder>/g;
@@ -40,22 +72,57 @@ const unescAttr = (s: string): string => [...ENT].reverse().reduce((a, [c, e]) =
 const attrsOf = (s = ""): Attrs =>
   Object.fromEntries([...s.matchAll(/([\w-]+)="([^"]*)"/g)].map((m) => [m[1]!, unescAttr(m[2]!)]));
 
+/** 没在 REMINDER_KINDS 登记的属性 (含未登记的种类)。渲染时直接丢掉 —— 类型挡住了字面量, 这里挡住展开进来的。 */
+export const unregisteredAttrs = (attrs: Attrs): string[] => {
+  const known = (REMINDER_KINDS as Record<string, Record<string, Use>>)[attrs.wezard ?? ""];
+  return Object.keys(attrs).filter((k) => k !== "wezard" && !(known && k in known));
+};
+
+const openTag = (attrs: Attrs): string => {
+  const bad = new Set(unregisteredAttrs(attrs));
+  return `<system-reminder${Object.entries(attrs).filter(([k, v]) => !bad.has(k) && v !== undefined).map(([k, v]) => ` ${k}="${escAttr(v)}"`).join("")}>`;
+};
+
 /** 以换行起头 —— 直接接在正文后面。 */
-export const renderReminder = (attrs: Attrs, lines: readonly string[]): string =>
-  [
-    "",
-    `<system-reminder${Object.entries(attrs).map(([k, v]) => ` ${k}="${escAttr(v)}"`).join("")}>`,
-    ...lines,
-    "</system-reminder>",
-  ].join("\n");
+export const renderReminder = (attrs: NoteAttrs, lines: readonly string[]): string =>
+  ["", openTag(attrs), ...lines, "</system-reminder>"].join("\n");
 
 export const parseReminders = (text: string): Reminder[] =>
   [...text.matchAll(REMINDER_RE)].map((m) => ({ attrs: attrsOf(m[1]), body: (m[2] ?? "").trim(), raw: m[0] }));
 
 export const stripReminders = (text: string): string => text.replace(REMINDER_RE, "").trim();
 
+const rankOf = (attrs: Attrs): number => {
+  const i = TAIL_ORDER.indexOf(attrs.wezard ?? "");
+  return i < 0 ? TAIL_ORDER.length : i;
+};
+
+/** 一次注入的尾巴: 把各处拼好的块 (信封、旁注、通知) 按 TAIL_ORDER 稳定排序后接起来。
+ *  只收 reminder 块 —— 段里块以外的字会被丢掉, 所以只喂渲染出来的尾巴, 别喂正文。 */
+export const renderTail = (...parts: readonly string[]): string =>
+  parts.flatMap((p) => [...p.matchAll(REMINDER_RE)].map((m) => ({ raw: m[0], rank: rankOf(attrsOf(m[1])) })))
+    .map((b, i) => ({ ...b, i }))
+    .sort((a, b) => a.rank - b.rank || a.i - b.i)
+    .map((b) => `\n${b.raw}`)
+    .join("");
+
+/** 投递那一刻把注入事件 id 写进这句话的信封 (`msg`): 取**最后一个**信封 (正文里引用的老信封在它前面)。
+ *  没有信封的注入 (slash 之外的少数) 兜底挂一块老形状的 message-event —— 提交见证照样认得。 */
+export const withMsg = (text: string, msg: string): string => {
+  const hit = [...text.matchAll(REMINDER_RE)].filter((m) => attrsOf(m[1]).wezard === "envelope").at(-1);
+  if (!hit || hit.index === undefined) return text + renderReminder({ wezard: "message-event", event: msg }, []);
+  const old = `<system-reminder${hit[1] ?? ""}>`;
+  return text.slice(0, hit.index) + openTag({ ...attrsOf(hit[1]), msg }) + text.slice(hit.index + old.length);
+};
+
+/** 这句话是不是带着注入事件 `id` 进来的 (提交见证用): 任一信封的 `msg`, 或老形状的块。 */
+export const carriesMsg = (text: string, id: string): boolean =>
+  !!id && parseReminders(text).some((r) =>
+    (r.attrs.wezard === "envelope" && r.attrs.msg === id) || (r.attrs.wezard === "message-event" && r.attrs.event === id));
+
 // ── 信封 ──────────────────────────────────────────────────────────────
 export interface Envelope {
+  /** 这句话的注入事件 id (message-events 的主键): 信封的 `msg`, 老形状读信封外的 message-event 块。 */
   eventId?: string;
   kind: "peer" | "human" | "task";
   /** 发话方的称呼: wizard 是 `.name`, 人是 userid, 定时任务是 `定时 <id>`。 */
@@ -113,18 +180,19 @@ const askerAttrs = (asker?: Asker): Attrs => asker
  *  timeout / silent / dead = 没等到答案 (超时 / 停下几次都没答 / pane 没了); canceled = 被人 stop 掉了。 */
 export type ReceiptStatus = "done" | "need" | "error" | "timeout" | "silent" | "dead" | "canceled";
 
+type EnvelopeAttrs = KindAttrs<"envelope">;
 export const envelopeAttrs = {
-  human: (user: string, chat: string, chatKey?: string): Attrs => ({ wezard: "envelope", kind: "human", from: user, chat, ...(chatKey ? { "chat-key": chatKey } : {}) }),
+  human: (user: string, chat: string, chatKey?: string): EnvelopeAttrs => ({ wezard: "envelope", kind: "human", from: user, chat, ...(chatKey ? { "chat-key": chatKey } : {}) }),
   /** `chat` 不给 = 私聊。 */
-  peer: (from: string, chat?: string, asker?: Asker): Attrs => ({
+  peer: (from: string, chat?: string, asker?: Asker): EnvelopeAttrs => ({
     wezard: "envelope", kind: "peer", from, scope: chat === undefined ? "private" : "public", ...(chat ? { chat } : {}),
     ...askerAttrs(asker),
   }),
   /** `event` = 这一枪为它开的那条群根行 (安静任务按它定位终句, 见 index.ts relayUnlessQuiet)。 */
-  task: (taskId: string, event?: string): Attrs => ({ wezard: "envelope", kind: "task", from: taskId, ...(event ? { event } : {}) }),
+  task: (taskId: string, event?: string): EnvelopeAttrs => ({ wezard: "envelope", kind: "task", from: taskId, ...(event ? { event } : {}) }),
   /** 回执也是「`from` 在对你说话」, 所以仍是 peer 信封 —— read_chat / rolepage 照旧
    *  把它归到那场对话里; 多一个 `receipt` 属性说明它是自动送回来的结论而不是新活。 */
-  receipt: (from: string, chat?: string, job?: { job: string; done: number; total: number }, status: ReceiptStatus = "done", event?: string, route?: ReceiptRoute): Attrs => ({
+  receipt: (from: string, chat?: string, job?: { job: string; done: number; total: number }, status: ReceiptStatus = "done", event?: string, route?: ReceiptRoute): EnvelopeAttrs => ({
     ...envelopeAttrs.peer(from, chat, route?.asker),
     ...(event ? { event } : {}),
     receipt: "1",
@@ -138,9 +206,9 @@ export const envelopeAttrs = {
   }),
 };
 
-const KINDS = new Set(["peer", "human", "task"]);
+const ENVELOPE_KINDS = new Set(["peer", "human", "task"]);
 const envelopeOfAttrs = (a: Attrs): Envelope | undefined =>
-  a.wezard === "envelope" && KINDS.has(a.kind ?? "")
+  a.wezard === "envelope" && ENVELOPE_KINDS.has(a.kind ?? "")
     ? {
         kind: a.kind as Envelope["kind"],
         from: a.kind === "task" ? `定时 ${a.from ?? ""}` : a.from ?? "",
@@ -151,6 +219,7 @@ const envelopeOfAttrs = (a: Attrs): Envelope | undefined =>
         ...(a.receipt === "1" ? { receipt: true } : {}),
         ...(a.status ? { status: a.status as ReceiptStatus } : {}),
         ...(a.event ? { event: a.event } : {}),
+        ...(a.msg ? { eventId: a.msg } : {}),
         ...(a.audience ? { audience: a.audience } : {}),
       }
     : undefined;
@@ -172,7 +241,20 @@ const envelopeOf = (r: Reminder): Envelope | undefined => envelopeOfAttrs(r.attr
 export const parseEnvelope = (raw: string): Envelope | undefined => {
   const reminders = parseReminders(raw);
   const env = reminders.reduce<Envelope | undefined>((hit, r) => envelopeOf(r) ?? hit, undefined);
-  // receipt-delivery: 退役前回执多挂的一块, 值与 message-event 相同 —— 老 transcript 照认。
+  if (!env || env.eventId) return env;
+  // 老形状: 注入事件 id 挂在信封外的 message-event 块上 (receipt-delivery: 退役前回执多挂的一块,
+  // 值与 message-event 相同) —— 老 transcript 照认。
   const eventId = reminders.filter((r) => ["message-event", "receipt-delivery"].includes(r.attrs.wezard ?? "")).at(-1)?.attrs.event;
-  return env && { ...env, ...(eventId ? { eventId } : {}) };
+  return { ...env, ...(eventId ? { eventId } : {}) };
+};
+
+/** rolepage 折叠态的标签: 认得出种类就写种类 (信封带上发话方, 回执带上定论), codebuddy 自己的块写
+ *  它的 `data-role`, 认不出的仍叫 reminder。`machine` = 只给机器的空块 (老形状的 message-event /
+ *  receipt-delivery) —— 画淡一点。老措辞的信封 (LEGACY) 也按信封标。 */
+export const reminderLabel = (r: Reminder): { label: string; machine?: boolean } => {
+  const w = r.attrs.wezard ?? "";
+  if (w === "message-event" || w === "receipt-delivery") return { label: "msg", machine: true };
+  const env = envelopeOf(r);
+  if (env) return { label: env.receipt ? `回执 · ${env.from} · ${env.status ?? "done"}` : `envelope · ${env.from}` };
+  return { label: w || r.attrs["data-role"] || "reminder" };
 };

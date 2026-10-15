@@ -293,14 +293,14 @@ const RULE = "Pending (daemon-tracked). need: the human must answer → relay vi
 /** 增量那几行 / 全表 → 挂在注入尾巴上的那段。 */
 export const renderDigest = (o: DigestOut, table: string, rule = true): string =>
   o.full
-    ? renderReminder({ wezard: "pending", mode: "full" }, [
+    ? renderReminder({ wezard: "pending" }, [
         ...(rule ? [RULE] : []),
         `Full list (${o.full}):`,
         table,
         ...o.lines.map((l) => `- ${l}`),
       ])
     : o.lines.length
-      ? renderReminder({ wezard: "pending", mode: "delta" }, [
+      ? renderReminder({ wezard: "pending" }, [
           ...(rule ? [RULE] : []),
           ...o.lines.map((l) => `- ${l}`),
         ])

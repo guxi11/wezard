@@ -654,6 +654,7 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .rem.raw { flex-basis: 100% }
 .rem.raw .rem-raw { display: block }
 .rem.raw .rem-tag { display: none }
+.rem-m .rem-tag { opacity: .5 }
 
 /* ══ 忙闲: 名字右边唯一的状态位 (名片 · 关系树 · 侧栏共用 stTag) ══
    只有执行中带颜色与呼吸; 空字 (侧栏) 就只剩那盏灯。 */

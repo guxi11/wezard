@@ -8,6 +8,7 @@ import type { MirrorBridge } from "./mirror-bridge.js";
 import { messageId } from "./message-events.js";
 import { tailTurnsWithTools, peerMentionPart, renderHumanEnvelope, renderStewardHint, type PeerInfo, type PeerMention } from "./peers.js";
 import { noticeSuffixFor } from "./notices.js";
+import { renderTail } from "../shared/reminder.js";
 import { expandHome, sanitizeId } from "../shared/paths.js";
 import { primaryBackend, type CliBackendName } from "../shared/cli-backends.js";
 import { parseWxCommand, wxCommandHandler } from "./weixin-cmd.js";
@@ -1058,7 +1059,7 @@ export const installInboundRouter = (
     const notice = noticeSuffixFor(who, text, { human: { channel } }, hint);
     try {
       // 回复回到发话的这个群 —— `who` 可能住在别的聊天 (名字全局可达)。
-      await bridge.dispatch({ eventId: slash ? undefined : messageId(botTagOf(msg), channel, msg.msgid), identity: JSON.stringify(msg), originalAt: msg.create_time ? (msg.create_time < 1e12 ? msg.create_time * 1000 : msg.create_time) : Date.now(), principal: who, text: text + envelope + steward + notice, images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}` });
+      await bridge.dispatch({ eventId: slash ? undefined : messageId(botTagOf(msg), channel, msg.msgid), identity: JSON.stringify(msg), originalAt: msg.create_time ? (msg.create_time < 1e12 ? msg.create_time * 1000 : msg.create_time) : Date.now(), principal: who, text: text + renderTail(envelope, steward, notice), images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}` });
     } catch (e) {
       log.error({ err: (e as Error).message }, "bridge dispatch failed");
       try { await client.replyStream(frame, msg.msgid, withTagHeader(who, `[wezard] error: ${(e as Error).message}`), true); } catch { /* ignore */ }

@@ -1,5 +1,5 @@
 import { finalId, type MessageEvent, type MessageEvents } from "./message-events.js";
-import { parseEnvelope } from "../shared/reminder.js";
+import { parseEnvelope, renderTail } from "../shared/reminder.js";
 import { codexSessions, codexSessionForPane } from "../shared/codex.js";
 import { codexHookLaunchArgs, codexHookCommand } from "../shared/codex-hooks.js";
 import { fileURLToPath } from "node:url";
@@ -743,7 +743,8 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
       const text = cleanUserText(c);
       if (!text) return []; // pure slash-command meta / stdout — drop
       // 自己注入的那一行不回显, 但要报个到: 它的印章 (谁说的、回复去哪) 在这一刻认领。
-      const eventId = c.includes('wezard="message-event"') ? parseEnvelope(c)?.eventId : undefined;
+      // 注入事件 id: 信封的 `msg` (老形状是信封外的 message-event 块) —— 认得出就是守护进程投的。
+      const eventId = parseEnvelope(c)?.eventId;
       if (eventId || deps.isOwnInject(text)) return [{ kind: "user_query", eventId, body: unwrapPasted(c).trim(), said: text, ts: lineTs(line) }];
       const quoted = text.split("\n").map((l) => `> ${l}`).join("\n");
       // includeUser 只决定"渲不渲染", 不决定"算不算边界" —— quiet 的这一条照样发出,
@@ -6763,7 +6764,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // Render only after the pane lane grants delivery, then stamp exactly at
       // the first permitted input.
       const envelope = text.trimStart().startsWith("/") ? "" : opts?.envelope ?? "";
-      let full = text + envelope;
+      let full = text + renderTail(envelope);
       const beforeInput = (): void => {
         a.pendingFromCli = false;
         a.turnFromChat = true;
@@ -6781,7 +6782,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         text: full, images: [], cfg, guard: (phase, identity) => permitted() && a.tmuxPane === injectPane && (!opts?.guard || opts.guard(phase, identity)), log: log.child({ principal: target, sessionId: sid, sub: "init-demo" }),
         sessionId: sid, eventId: opts?.eventId, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn: fresh,
         requireIdle: opts?.requireIdle ? () => idleNow(target) : undefined,
-        prepareText: () => (full = text + envelope + noticeSuffixFor(target, text)),
+        prepareText: () => (full = text + renderTail(envelope, noticeSuffixFor(target, text))),
         beforeInput,
       });
       if (r.ok && a.tmuxPane && permitted()) {

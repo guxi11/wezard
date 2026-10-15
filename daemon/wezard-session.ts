@@ -13,7 +13,7 @@
 // 注册表可用: codebuddy 2.143+ 也写 sessions/<pid>.json, 但 schema 不同 (无
 // tmux/status 字段) —— 有没有 tmux 字段才是「这个注册表我们读得懂」的判据。
 import { normalizeCodex } from "../shared/codex.js";
-import { parseReminders } from "../shared/reminder.js";
+import { carriesMsg } from "../shared/reminder.js";
 import { closeSync, openSync, readdirSync, readFileSync, readSync, statSync, watch } from "node:fs";
 import { join } from "node:path";
 import { expandHome } from "../shared/paths.js";
@@ -192,11 +192,12 @@ export const submittedSince = (marks: readonly TranscriptMark[], probe: string, 
       .map(submissionOf)
       .some((s) => s !== undefined && !(s.at < since) && normalize(s.text).includes(probe)));
 
-/** A message event is submitted only when its own event marker lands in a user transcript row. */
+/** A message event is submitted only when its own event marker lands in a user transcript row
+ *  (the envelope's `msg`, or the older standalone message-event block). */
 export const submittedEventSince = (marks: readonly TranscriptMark[], eventId: string, since: number): boolean =>
   Boolean(eventId) && marks.some((m) =>
     readFrom(m.path, m.offset)
       .split("\n")
       .map(submissionOf)
       .some((submission) => submission !== undefined && !(submission.at < since)
-        && parseReminders(submission.text).some((r) => r.attrs.wezard === "message-event" && r.attrs.event === eventId)));
+        && carriesMsg(submission.text, eventId)));

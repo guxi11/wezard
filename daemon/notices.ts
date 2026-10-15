@@ -209,7 +209,7 @@ export const rosterPart = (ns: readonly Notice[], cwd: string, snap?: () => read
   if (table?.length) {
     const notes = fresh.filter(([, n]) => !subsumed(n));
     return {
-      text: renderReminder({ wezard: "roster", mode: "full" }, [
+      text: renderReminder({ wezard: "roster" }, [
         "Wizards in this chat now (as of this message; truth: wizard_roster). FYI only — don't reply.",
         // 列义只随整表给 (每个窗口一次), 变动行不重复。dispatch 不点名时自己算冷热, 这几列只在点名 `to` / tell_peer 时要看。
         "state: busy=mid-turn (a new task queues behind it) · parked=waiting on an approval click · idle=free · -=no live session (waking respawns it). cache cold = waking it rewrites its whole ctx (≈ctx/25k × a fresh spawn); only weigh this when you name `to` — dispatch already does.",
@@ -223,7 +223,7 @@ export const rosterPart = (ns: readonly Notice[], cwd: string, snap?: () => read
   const rows = groupRows(fresh.map(([, n]) => n), cwd);
   const rule = !seen("rule:roster");
   return {
-    text: renderReminder({ wezard: "roster", ...(moved.length ? { mode: "delta" } : {}) }, [
+    text: renderReminder({ wezard: "roster" }, [
       ...(rule ? ["Roster changes since your charter snapshot (truth: wizard_roster). FYI only — don't reply or relay; skip if irrelevant."] : []),
       ...(moved.length ? ["Rows changed since the last table (name,state,ctx,cache,job; as of this message):", ...moved.map(snapRow)] : []),
       ...rows.map((r) => `- ${r}`),
