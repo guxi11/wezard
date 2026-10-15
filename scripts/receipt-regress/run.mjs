@@ -138,6 +138,10 @@ const rawLines = (path) => {
     });
   } catch { return []; }
 };
+/** 注入事件现在的执行 / 暴露态 (`GET /message-events/status`)。 */
+const eventOf = async (id) =>
+  (await fetch(`${DAEMON}/message-events/status`).then((r) => r.json()).catch(() => ({}))).events?.find((e) => e.id === id);
+
 const attrsIn = (text) => parseReminders(text).map((r) => r.attrs);
 
 /** `target` 的 transcript 里收到的回执信封 (属性 + 正文), 可按发话方收窄。 */
@@ -184,7 +188,7 @@ const foregroundGate = () => {
   writeFileSync(program, `import pathlib, time
 p = pathlib.Path(__file__).parent
 (p / "ready").touch()
-end = time.monotonic() + 240
+end = time.monotonic() + 600
 while not (p / "release").exists():
     if time.monotonic() >= end:
         (p / "expired").touch()
@@ -779,18 +783,30 @@ const cases = {
       const secondAt = Date.now();
       const second = await post("/peers/tell", { target: kids.get("rr-s"), name: real("rr-h"), priority: "now", return: "detach", text: "继续等前台条件闸，不输出文字；这件活交接后再答。" });
       if (!first.ok || !second.ok) return { pass: false, why: `前提没成立: 派活失败 ${JSON.stringify([first, second].map((x) => ({ ok: x.ok, reason: x.reason })))}` };
-      const r1 = await dispatchRow(root.target, kids.get("rr-h"), firstAt, first);
-      const r2 = await dispatchRow(kids.get("rr-s"), kids.get("rr-h"), secondAt, second);
-      if (!r1 || !r2) return { pass: false, why: "前提没成立: 找不到那两笔的路由行" };
+      const r1 = await until(() => dispatchRow(root.target, kids.get("rr-h"), firstAt, first), 10_000, 500);
+      const r2 = await until(() => dispatchRow(kids.get("rr-s"), kids.get("rr-h"), secondAt, second), 10_000, 500);
+      if (!r1 || !r2) return { pass: false, why: `前提没成立: 找不到那两笔的路由行 (r1=${!!r1} r2=${!!r2} tell=${JSON.stringify([first, second].map((x) => ({ event: x.event, queued: x.queued, delivered: x.delivered })))} 表上 rr-h 的行=${JSON.stringify((await routeRows()).filter((r) => r.owner === kids.get("rr-h")).map((r) => [r.event, r.status, r.at - firstAt, r.receiver?.to]))})` };
       const oldPath = await jsonlOf(kids.get("rr-h"));
       const { replyClosedBefore } = await import("../../dist/daemon/peers.js");
       const asks = [[root.target, `.${root.name}`, handleOf(first, r1), r1], [kids.get("rr-s"), `.${real("rr-s")}`, handleOf(second, r2), r2]];
-      const seen = await until(() => oldPath && asks.every(([, , ref]) => userTexts(oldPath).some((t) => roundOf(t) === ref)), 60_000, 250);
+      // 「已读入」: claude 把运行中吃进的排队消息当场写进 transcript; codebuddy 要等手上这次工具调用
+      // 返回才落盘 (闸关着就一直不落) —— 那边以注入事件已提交进输入框 (exposure=submitted) 为准。
+      const inBox = async (row) => ["submitted", "consumed"].includes((await eventOf(`route:${row.event}`))?.exposure);
+      // 两句同 pane 串行注入, 每句在忙 pane 上要等提交证据 (codebuddy 最长 LATE_LAND_MS 15s 宽限),
+      // tmux 慢时一句就十几秒 —— 60s 不够两句都进框 (实测 rr-h-4b09: 第二句 +57s 才贴)。
+      const seen = await until(async () => oldPath && (await Promise.all(asks.map(async ([, , ref, row]) =>
+        userTexts(oldPath).some((t) => roundOf(t) === ref) || await inBox(row)))).every(Boolean), 180_000, 250);
       const busy = await until(async () => (await post("/peers/peek", { target: root.target, name: real("rr-h"), turns: 1 })).busy, 15_000, 500);
       const t0 = Date.now();
-      const owed = asks.every(([, name, handle, row]) =>
-        LIVE.has(row.status) && replyClosedBefore(oldPath, name, row.at, t0, [], handle) === "");
-      if (!seen || !busy || !gate.intact() || !owed) return { pass: false, why: `前提没成立: 必须目标正忙、闸仍关闭、两件已读入且旧 transcript 都未收口 (seen=${!!seen} busy=${!!busy} gate=${gate.intact()} owed=${owed})` };
+      const now = await routeRows();
+      // 没收口 = 行仍在飞、仍欠在 rr-h 头上, 且旧 transcript 里那一轮没被关上 (还没落盘的问话关不上)。
+      const owes = await Promise.all(asks.map(async ([, name, handle, row]) => {
+        const cur = now.find((x) => x.event === row.event);
+        const closed = replyClosedBefore(oldPath, name, row.at, t0, handle);
+        return { event: row.event, status: cur?.status, owner: cur?.owner === kids.get("rr-h"), closed: closed ?? (await inBox(row) ? "(未落盘)" : undefined) };
+      }));
+      const owed = owes.every((x) => LIVE.has(x.status) && x.owner && (x.closed === "" || x.closed === "(未落盘)"));
+      if (!seen || !busy || !gate.intact() || !owed) return { pass: false, why: `前提没成立: 必须目标正忙、闸仍关闭、两件已读入且旧 transcript 都未收口 (seen=${!!seen} busy=${!!busy} gate=${gate.intact()} owed=${JSON.stringify(owes)})` };
       const h = await post("/wizard/handoff-self", { target: kids.get("rr-h"), brief: `（receipt-regress 交接测试）你会收到两轮，一轮一个发话方（只看信封 from 属性）。每轮只回复对应的一行 RESULT:。${real("rr-root")} 对应 h-root-${n}；${real("rr-s")} 对应 h-s-${n}。每轮不许提另一个值。不要调用任何工具。` });
       if (!h.ok) return { pass: false, why: `handoff-self: ${h.reason}` };
       gate.release();

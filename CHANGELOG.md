@@ -8,6 +8,7 @@
 - 工单验收打回被同一轮的终句重放绕过: message-events 对每个终句递两次 `final` (`result()` 当场一次, 泵见 `complete` 未 `finalized` 再补判一次 —— 打回的续问 `events.accept` 里 `void pump()` 同步就触发), 第一次判不合规格打回、记进 `bounced`, 第二次因「已打回过一次」直接照收, 把被打回的原文 (如「好的」) 落成 done 并投出回执, 早于打回日志 ~0.4s。`bounced` 改记被打回那一轮的注入事件 id, 同一事件的重放直接丢掉, 只收续问那一轮的补交。
 - `close_job` 吞掉已派出、还没注入的活 (常见于冷 pane 上排着的出生事件): 收工时 `events.cancel` 按「owner + job」把这张单名下排着的事件一并撤掉, 即便行仍 `open`; 漏网的也被 `valid` (要求单还开着) 与注入前重投影的 `jobs.account` (`accounting requires open job`) 永久扣住 —— 行一直挂到 deadline, 发起者收不到迟到回执。现在 accept 收工只撤行已落定 (cancel 级联 / held 撤销) 或没开行的事件; 单已收但行还 open 的照投 (`valid` 放行), `jobs.account` 先认已记过的 key 再查单开没开 —— 活照常答完, 回执标「已经收工」。
 - receipt-regress `task-quiet` 判据过期 (脚本侧, daemon 行为正常): 9ef3d55 把定时任务投递收进 `scheduled-delivery` 后不再打「scheduled task: 目标正忙, 顺延」日志, quiet 转发也从 `notifyChat` 改走终句 outbox (不再有 `chat notify failed`), 脚本却还在等这两行。改读事实: 顺延 = rr-t transcript 里到点 (+60s) 时 busy-done 还没说完、任务那句排在其后且投进的就是 rr-t; 转发 = `/message-events/status` 的 outbox 里有一份 `quiet:<rr-t2>:*` 投向伪群, 且安静那轮没有。
+- 自我交接时被切断那一轮的收尾终句被当成欠账的定论 (**未经 live 验证**): T10 后 `onFinal` 不再有旧 `replyClosedBefore` 的「交接那一轮不算收口」语义, 交接发起后、旧会话重开前那一轮的终句 (「已交接」或模型抢答) 直接把最后打开的那一笔落成 done, `resumeOwed` 查 open 行时已少一笔, 新会话只续答剩下的 (live 实测 rr-h-33e5: ed0b434 在重开前 6s 被收尾句落定, 「欠账续答」只出 1 行)。新增 `cuttingTurn` (自我交接从发起到 restarting 之间), 期间 `deliverFinal` 丢掉该 target 的终句, 行留 open 交给新会话的「继续 <event>」。receipt-regress `handoff-owe` 同步修前提: codebuddy 运行中吃进的话要等手上工具返回才落盘, 「已读入 / 未收口」改认注入事件 exposure=submitted, 两句串行注入的等待窗 60s→180s、前台闸寿命 240s→600s。
 
 ## [2.7.1] - 2026-10-15
 

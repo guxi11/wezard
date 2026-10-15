@@ -27,6 +27,11 @@ const gates = new Map<string, Promise<void>>();
 /** 这个 wizard 正在交接。 */
 export const handingOff = (target: string): boolean => gates.has(target);
 
+/** 自我交接从发起到旧会话被重开之前: 它手上这一轮是被交接切断的 —— 收尾那句 (「已交接」/ 抢答)
+ *  不是它欠着的那几笔的答案, 那几笔由新会话里的「继续 <event>」逐笔续答 (见 resumeOwed)。 */
+const cutting = new Set<string>();
+export const cuttingTurn = (target: string): boolean => cutting.has(target);
+
 /** 等它交接完; 没在交接就立刻返回。一次交接收尾后紧接着又开了一次, 接着等。 */
 export const handedOff = async (target: string): Promise<void> => {
   for (let g = gates.get(target); g; g = gates.get(target)) await g;
@@ -187,6 +192,7 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
         return step({ ...p, brief, stage: "restarting" });
       }
       case "restarting": {
+        cutting.delete(p.target); // 旧会话停下了: 之后的终句都是新会话的
         // reload 落在重开中途: sid 已经换了就是做完了, 别再杀一次新会话。
         if (deps.sessionId(p.target) !== p.sid) return step(saved({ ...p, stage: "restarted" }));
         // 它欠着谁、欠哪几笔 (路由表) 不受换会话影响: 表按 target 记, 新会话照样查得到 (见 resumeOwed)。
@@ -227,9 +233,10 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
   /** 闸立在整场交接上: 发起之后进来的话 (人、同伴、回执、日程) 都进新会话。 */
   const run = (p: Pending): Promise<HandoffResult> => {
     const release = hold(p.target);
+    if (p.mode === "self" && p.stage === "waiting") cutting.add(p.target);
     return step(p)
       .catch((e: unknown) => fail(p, 500, (e as Error).message))
-      .finally(release);
+      .finally(() => { cutting.delete(p.target); release(); });
   };
 
   const begin = (target: string, mode: Pending["mode"], extra: Partial<Pending>): Pending | undefined =>

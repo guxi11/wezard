@@ -106,7 +106,7 @@ import { returnOpOf, type HeldSeen, type InFlight, type Prereq, type ReturnOp, t
 import { isTerminal, renderInFlight, turnState } from "../shared/turn-state.js";
 import { startIdleNudge } from "./idle-nudge.js";
 import { askerFromEnvelope, renderReminder, withMsg, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
-import { createHandoffs, handedOff, handingOff, type Pending as PendingHandoff } from "./handoff.js";
+import { createHandoffs, cuttingTurn, handedOff, handingOff, type Pending as PendingHandoff } from "./handoff.js";
 import { coldGateOf, decide, rankCandidates, renderCandidates, routeDutiesOf, tierFor, wakeCostOf, wakeNoteOf, type RouteRow } from "./route.js";
 import { parseWhen, renderChatLog, UNKNOWN_HUMAN, type LogSession } from "./chat-log.js";
 import { audienceOf } from "../shared/role-view.js";
@@ -1302,6 +1302,8 @@ const main = async (): Promise<void> => {
       // (message-events)。被打回那一轮的重放不是补交 —— 丢掉; 否则 bounced 已记着这一笔,
       // 第二次就把被打回的原文照收成 done (打回的续问还没注入, 定论先落了)。
       if (e.serves && bounced.get(e.serves) === e.id) return;
+      // 自我交接切断的那一轮: 收尾那句不是欠着的那几笔的答案 —— 行留 open, 交给新会话的「继续 <event>」。
+      if (cuttingTurn(e.target)) { log.info({ event: e.id, target: e.target, serves: e.serves }, "handoff: 交接切断的那一轮终句不落定"); return; }
       const plans = router.onFinal(e.target, e.serves, verdict);
       const answer = plans.flatMap((op) => (op.op === "answer" && op.outcome.status === "done" ? [op] : []))[0];
       const row = answer ? router.get(answer.event) : undefined;
