@@ -1520,17 +1520,19 @@ export const parseInputBox = (cap: string, styledLayout = cap): InputBox => {
   const layout = styledLines.map((line) => line.replace(/\x1b\[[0-9;:]*m/gu, "").replace(OTHER_ESC_RE, ""));
   while (layout.length && !layout[layout.length - 1]!.trim()) layout.pop();
   const footer = layout.length - 1;
-  // Codex hides the shortcuts row while the composer contains text.
-  const shortcuts = /(?:^|\s)\? for shortcuts(?:\s|$)/u.test(layout[footer] ?? "");
-  if (shortcuts || (layout[footer] ?? "").includes("·")) {
-    let status = shortcuts ? footer - 1 : footer;
+  // A populated Codex composer replaces shortcuts with "tab to queue message"
+  // and may have no background SGR. Its footer still anchors the editable box;
+  // missing it sends collapsed pastes through the 15s late-landing window.
+  const inputHint = /(?:^|\s)(?:\? for shortcuts|tab to queue message)(?:\s|$)/u.test(layout[footer] ?? "");
+  if (inputHint || (layout[footer] ?? "").includes("·")) {
+    let status = inputHint ? footer - 1 : footer;
     while (status >= 0 && !layout[status]!.trim()) status--;
     if (status >= 0 && footer - status <= BOX_FOOTER_ROWS && layout[status]!.includes("·") && status > 0 && !layout[status - 1]!.trim()) {
       let prompt = status - 2;
       // Continuation rows are indented; a › inside pasted content is not a
       // new composer prompt.
       while (prompt >= 0 && !/^›(?:\s|$)/u.test(layout[prompt]!)) prompt--;
-      if (prompt >= 0 && (shortcuts || /\x1b\[[0-9;:]*48[;:]/u.test(styledLines[prompt]!))) {
+      if (prompt >= 0 && (inputHint || /\x1b\[[0-9;:]*48[;:]/u.test(styledLines[prompt]!))) {
         const body = dropDim(styledLines.slice(prompt, status).join("\n"))
           .replace(/^\s*›\s?/u, "").replace(/[\s\u200b\ufeff]+/gu, " ").trim();
         return { known: true, body };
