@@ -59,7 +59,7 @@ import { getDetail, knowsToolUse, recordTool, recordToolResult, recordMark, reco
 import type { Asker } from "../shared/detail-store.js";
 import type { CtxCut, TurnFrom, TurnOrigin, TurnUsage } from "./detail.js";
 import { errText } from "./last-response.js";
-import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagHeader, withLinkedTagHeader, chatHead, headed, tagBadge, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey, sameBot } from "../shared/session-label.js";
+import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, windowLabel, withTagHeader, withLinkedTagHeader, chatHead, headed, tagBadge, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey, sameBot } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { isWxFrame } from "../shared/wx-text.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
@@ -5649,7 +5649,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       cfg,
       log: log.child({ sub: "new-session", target }),
       sessionId: freshSid,
-      windowName: windowName ?? target,
+      windowName: windowLabel(target, windowName),
       cwdOverride: eff,
       cli: effCli,
       model: effModel,
@@ -5816,7 +5816,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       log: lg,
       resumeSessionId: parent.sessionId,
       forkSession: true,
-      windowName: args.windowName ?? args.target,
+      windowName: windowLabel(args.target, args.windowName),
       cwdOverride: parent.runningCwd,
       cli: parentCli,
       model,

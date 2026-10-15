@@ -36,6 +36,7 @@ import { loadConfig, type Config } from "../shared/config.js";
 import { expandHome } from "../shared/paths.js";
 import { tmuxClientEnv } from "../shared/exec-path.js";
 import { sleep } from "../shared/std.js";
+import { isSessionKey, windowLabel } from "../shared/session-label.js";
 import { activateBackend, resolveCliBackend, type CliBackend, type CliBackendName } from "../shared/cli-backends.js";
 import { selectModel } from "./model-select.js";
 import type { Effort } from "../shared/effort.js";
@@ -163,12 +164,13 @@ const shQuote = (a: string): string => (/^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.r
 // we always address windows by pane id, never by name). Explicit tag names
 // (not `user:`/`chat:` prefixed) are treated as user-authored labels and kept
 // up to 24 chars so `/new #my-tag` shows readably in the tmux status bar.
+// 名字的写法 `.fix` 与 `fix` 是同一个人: 前导点在这里剥掉, 两种拼法印同一个窗口名。
 const safeWindowName = (s: string): string => {
   const isPrincipal = s.startsWith("user:") || s.startsWith("chat:");
   const compact = s.startsWith("user:") ? `u-${s.slice(5)}`
     : s.startsWith("chat:") ? `c-${s.slice(5)}`
     : s;
-  const slug = compact.replace(/[^A-Za-z0-9_.\-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+  const slug = compact.replace(/^\.+/, "").replace(/[^A-Za-z0-9_.\-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
   return (slug || "claude").slice(0, isPrincipal ? 8 : 24);
 };
 
@@ -494,7 +496,9 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
   let sessionId = resumeSessionId ?? freshSessionId ?? randomUUID();
   let jsonlPath = join(projectDir, `${sessionId}.jsonl`);
   const tmuxName = cfg.wrc.tmuxPrefix; // shared session for all chats
-  const winName = safeWindowName(windowName ?? sessionId);
+  // 调用方手里只有会话 key 时 (init 的自动建会话), 窗口名照旧取那个 wizard 的名字 ——
+  // key 印上去只会被截成 `u-T03880`, 和它所在聊天的窗口一模一样。
+  const winName = safeWindowName(windowName && isSessionKey(windowName) ? windowLabel(windowName) : windowName ?? sessionId);
 
   // Probe tmux availability up front — clearer error than a generic spawn fail.
   // Also gate two flags on version: `-c <start-dir>` on new-session/new-window

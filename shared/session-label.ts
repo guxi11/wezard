@@ -231,6 +231,18 @@ export const targetOfTagUrl = (url: string): string | undefined => linker?.targe
 export const displayName = (target: string | undefined): string =>
   target ? linker?.nameOf(target) || tagOfKey(target) : "";
 
+/** 会话 key 的形态 (`user:xxx#slot` / `chat:wr…` / 内部 `wezard:internal`) —— 它永远不是名字。 */
+export const isSessionKey = (s: string): boolean => /^(?:user|chat|group|wezard):/.test(s.trim());
+
+/** tmux 窗口 (pane) 的标签 —— 一律是 wizard 的**名字**。`want` 是调用方给的那一个:
+ *  名字照用, 是会话 key (手里只有 key) 或没给, 就用名册 / 聊天名推、落定名字。
+ *  窗口名会被 safeWindowName 截断, key 印出去看不出是谁 —— `user:T03880027A#naming`
+ *  和它所在的聊天都印成 `u-T03880`。 */
+export const windowLabel = (target: string, want?: string): string => {
+  const w = (want ?? "").trim();
+  return (w && !isSessionKey(w) ? w : "") || displayName(target) || target;
+};
+
 // 正文里最多挂几个链接: 一条 URL 两百来字节, 分片预算 (mirror 的 TAG_HEADER_BUDGET)
 // 按「头 + 这么多个」留的余量。同一个名字只挂第一次出现。
 export const MAX_BODY_LINKS = 2;
