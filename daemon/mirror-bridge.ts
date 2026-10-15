@@ -1509,8 +1509,6 @@ export interface InputBox {
 const UNKNOWN_BOX: InputBox = { known: false, body: "" };
 
 export const parseInputBox = (cap: string, styledLayout = cap): InputBox => {
-  const lines = cap.split("\n");
-  while (lines.length && lines[lines.length - 1]!.trim() === "") lines.pop();
   // Codex has no rulers. Anchor the composer to its bottom shortcuts footer,
   // then use the LAST › prompt: earlier prompts belong to the transcript.
   // Requiring a status row and a blank separator avoids treating arbitrary
@@ -1524,29 +1522,38 @@ export const parseInputBox = (cap: string, styledLayout = cap): InputBox => {
   // and may have no background SGR. Its footer still anchors the editable box;
   // missing it sends collapsed pastes through the 15s late-landing window.
   const inputHint = /(?:^|\s)(?:\? for shortcuts|tab to queue message)(?:\s|$)/u.test(layout[footer] ?? "");
-  if (inputHint || (layout[footer] ?? "").includes("·")) {
-    let status = inputHint ? footer - 1 : footer;
+  // Idle Codex hides the left hint after a paste but keeps a right-aligned
+  // warnings footer. Its middle dot is not the status row's separator.
+  const warnings = /^\s*⚠\s*\d+\s+warnings?\s*·\s*f2 to view\s*$/u.test(layout[footer] ?? "");
+  if (inputHint || warnings || (layout[footer] ?? "").includes("·")) {
+    let status = inputHint || warnings ? footer - 1 : footer;
     while (status >= 0 && !layout[status]!.trim()) status--;
     if (status >= 0 && footer - status <= BOX_FOOTER_ROWS && layout[status]!.includes("·") && status > 0 && !layout[status - 1]!.trim()) {
       let prompt = status - 2;
-      // Continuation rows are indented; a › inside pasted content is not a
-      // new composer prompt.
-      while (prompt >= 0 && !/^›(?:\s|$)/u.test(layout[prompt]!)) prompt--;
-      if (prompt >= 0 && (inputHint || /\x1b\[[0-9;:]*48[;:]/u.test(styledLines[prompt]!))) {
+      // Only contiguous, indented continuation rows belong to this composer.
+      // Crossing a blank/output row can otherwise select a historical user
+      // prompt (which may carry the same background SGR as the live box).
+      while (prompt >= 0 && /^\s{2,}\S/u.test(layout[prompt]!)) prompt--;
+      if (prompt >= 0 && /^›(?:\s|$)/u.test(layout[prompt]!)
+        && (prompt === 0 || !layout[prompt - 1]!.trim())
+        && (inputHint || /\x1b\[[0-9;:]*48[;:]/u.test(styledLines[prompt]!))) {
         const body = dropDim(styledLines.slice(prompt, status).join("\n"))
           .replace(/^\s*›\s?/u, "").replace(/[\s\u200b\ufeff]+/gu, " ").trim();
         return { known: true, body };
       }
     }
   }
-  const rulers = lines.reduce<number[]>((acc, l, i) => (BOX_RULER_RE.test(l) ? [...acc, i] : acc), []);
+  // Dim is presentation, not layout: removing it before locating rulers also
+  // removes dim borders/prompts, leaving collapsed pastes unverifiable.
+  const rulers = layout.reduce<number[]>((acc, l, i) => (BOX_RULER_RE.test(l) ? [...acc, i] : acc), []);
   const bottom = rulers[rulers.length - 1];
   const top = rulers[rulers.length - 2];
   if (top === undefined || bottom === undefined || bottom - top < 1) return UNKNOWN_BOX;
-  if (lines.length - bottom > BOX_FOOTER_ROWS) return UNKNOWN_BOX;
-  const rows = lines.slice(top + 1, bottom);
+  if (layout.length - bottom > BOX_FOOTER_ROWS) return UNKNOWN_BOX;
+  const rows = layout.slice(top + 1, bottom);
   if (!rows.length || !BOX_PROMPT_RE.test(rows[0]!)) return UNKNOWN_BOX;
-  const body = [rows[0]!.replace(BOX_PROMPT_RE, ""), ...rows.slice(1)].join("\n").replace(/[\s\u200b\ufeff]+/gu, " ").trim();
+  const body = dropDim(styledLines.slice(top + 1, bottom).join("\n"))
+    .replace(BOX_PROMPT_RE, "").replace(/[\s\u200b\ufeff]+/gu, " ").trim();
   return { known: true, body };
 };
 
@@ -1778,7 +1785,7 @@ const witnessFor = (target: string, homeDir: string, jsonlPath: string, live: Li
 // 整块为判据, 粘贴只在「确凿看见框仍是空的」时才重来。
 const injectViaTmux = async (target: string, text: string, images: string[], log: Logger, freshSpawn: boolean, backend: CliBackend, jsonlPath: string, bypassModalGuard = false, guard?: DispatchGuard, eventId?: string, expectedSessionId?: string): Promise<InjectResult> => {
   const backendName = backend.name;
-  log.info({ target, len: text.length, images: images.length, freshSpawn, backendName }, "mirror inject (tmux)");
+  log.info({ target, eventId, len: text.length, images: images.length, freshSpawn, backendName }, "mirror inject (tmux)");
 
   // 就绪门: pane 里得真有一个进入了交互态的 AI 会话, 才轮得到贴。先于 modal guard ——
   // 这一步只读注册表, 会话都不在时也就不必去 capture pane 找对话框了。
@@ -1885,7 +1892,7 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
   // dispatch 已对 codebuddy 把 refs 合进 text (images 传空), 这里的
   // withImageRefs 是其它调用方直传 images 时的兜底 —— 幂等, 不会贴两份。
   if (backendName === "codebuddy") {
-    return injectViaTmuxText(target, withImageRefs(text, images), log, freshSpawn, witness, boundGuard, eventId);
+    return injectViaTmuxText(target, withImageRefs(text, images), log, freshSpawn, witness, boundGuard, eventId, bypassModalGuard);
   }
 
   // Pump images first via clipboard+C-v so each one is attached as a separate
@@ -1935,7 +1942,7 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
     return e.ok ? { ok: true } : { ok: false, reason: `tmux send-keys Enter failed: ${e.stderr.slice(-200)}` };
   }
 
-  return injectViaTmuxText(target, text, log, freshSpawn, witness, boundGuard, eventId);
+  return injectViaTmuxText(target, text, log, freshSpawn, witness, boundGuard, eventId, bypassModalGuard);
 };
 
 // 图片以 @<path> 文本提及的形式进会话 (codebuddy 的 tmux 路径、一切 spawn 路径)。
@@ -1959,7 +1966,7 @@ const withImageRefs = (text: string, images: readonly string[]): string => {
 // 证人不作声 (忙时排队、slash 命令、无注册表的后端) 才看框回没回到贴之前的样子。
 // 框认得出来时这条判据可信, 于是允许多补回车 (空框上的回车在 CLI 里是 no-op);
 // 每次补之前再问一遍证人, 已提交就不补。
-const injectViaTmuxText = async (target: string, text: string, log: Logger, freshSpawn: boolean, witness: SubmitWitness = NO_WITNESS, guard?: DispatchGuard, eventId?: string): Promise<InjectResult> => {
+const injectViaTmuxText = async (target: string, text: string, log: Logger, freshSpawn: boolean, witness: SubmitWitness = NO_WITNESS, guard?: DispatchGuard, eventId?: string, bypassModalGuard = false): Promise<InjectResult> => {
   // Warm pane: tight timings, low latency. Fresh spawn (claude --resume just
   // started, transcript still loading): extended timings — bracketed-paste
   // end can take 4-7s to be honored on a cold TUI. Only the fresh-spawn path
@@ -1988,8 +1995,16 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   // 时间门往前放 1s: jsonl 的 timestamp 与本机时钟同源, 只差写盘的毫秒。
   const since = Date.now() - 1000;
   let enterAt = Number.POSITIVE_INFINITY;
-  const submitted = (): boolean => requireEventEvidence
-    ? witness.submittedEvent(eventId!, since) : witness.submitted(probe, since, enterAt);
+  let confirmed = false;
+  const submitted = (): boolean => {
+    const yes = requireEventEvidence
+      ? witness.submittedEvent(eventId!, since) : witness.submitted(probe, since, enterAt);
+    if (yes && !confirmed) {
+      confirmed = true;
+      log.info({ target, eventId, enterToEvidenceMs: Number.isFinite(enterAt) ? Date.now() - enterAt : undefined }, "mirror inject: submission confirmed");
+    }
+    return yes;
+  };
 
   // 贴之前框里是什么: 空框、幽灵提示 (`Try "how do I log an error?"`)、甚至用户
   // 自己敲了一半的字 —— 一律作为基线, 免得去维护一张「哪些文案算空」的清单。
@@ -2004,10 +2019,23 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   const alreadyTyped = boxVerify && Boolean(probe) && stripWs(preBox.body).includes(probe);
   // 提交后框该回到的样子: 正常是贴之前的基线; 文本本就在框里时基线就是它, 只能以「空」为准。
   const baseBody = alreadyTyped ? "" : preBox.body;
+  let landedBody: string | undefined = alreadyTyped ? preBox.body : undefined;
   /** 框里还是贴之前那样 (或彻底空了) = 我们的文本不在框里。 */
   const boxIntact = (b: InputBox): boolean => boxVerify && b.known && (b.body === "" || b.body === baseBody);
 
-  const loadAndPaste = (): Promise<InjectResult> => pasteTmuxBuffer(target, text, guard ? () => guard("paste") : undefined);
+  const loadAndPaste = async (): Promise<InjectResult> => {
+    const start = Date.now();
+    const result = await pasteTmuxBuffer(target, text, guard ? () => guard("paste") : undefined);
+    log.info({ target, eventId, tmuxPasteMs: Date.now() - start, boxVerify, ok: result.ok }, "mirror inject: paste completed");
+    return result;
+  };
+  const landed = (cap: string, box: InputBox): boolean => {
+    const seen = box.known ? (boxVerify ? !boxIntact(box) : box.body !== "") : Boolean(headFp) && stripWs(cap).includes(headFp);
+    // Bind recovery to the first observed paste, not arbitrary contents found
+    // after settling: another writer may have replaced the draft meanwhile.
+    if (seen && box.known && landedBody === undefined) landedBody = box.body;
+    return seen;
+  };
 
   // 框认得出来 → 看它变没变; 认不出来 → 退回宽窗口找 headFp (长文本会换行,
   // 头部可能在框顶, 所以窗口要宽)。
@@ -2017,7 +2045,7 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
       const { cap, box } = await readPaneInput(target);
       // A redraw can hide the baseline. Once the composer reappears, its
       // nonempty body also proves landing of a collapsed paste.
-      if (box.known ? (boxVerify ? !boxIntact(box) : box.body !== "") : Boolean(headFp) && stripWs(cap).includes(headFp)) return true;
+      if (landed(cap, box)) return true;
       await sleep(POLL_MS);
     }
     return false;
@@ -2028,7 +2056,7 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   const lateLanding = async (timeoutMs: number, t0 = Date.now()): Promise<"submitted" | "landed" | "intact" | "unknown"> => {
     if (submitted()) return "submitted";
     const { cap, box } = await readPaneInput(target);
-    if (box.known ? (boxVerify ? !boxIntact(box) : box.body !== "") : Boolean(headFp) && stripWs(cap).includes(headFp)) return "landed";
+    if (landed(cap, box)) return "landed";
     if (Date.now() - t0 >= timeoutMs) return box.known ? "intact" : "unknown";
     await sleep(LATE_POLL_MS);
     return lateLanding(timeoutMs, t0);
@@ -2119,7 +2147,24 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   }
 
   const sendEnter = async (): Promise<{ ok: boolean; reason?: string }> => {
+    // A picker can open after the pre-paste gate, especially during a delayed
+    // render. Check again before every Enter; askq text entry keeps its bypass.
+    if (process.env.WEZARD_MODAL_GUARD !== "0" && !bypassModalGuard) {
+      const modal = await detectModalPicker(target);
+      if (modal.modal || !modal.screen.trim())
+        return { ok: false, reason: "native picker or unreadable pane before submission; refusing Enter" };
+    }
+    if (submitted()) return { ok: true };
+    if (landedBody !== undefined) {
+      const box = await readInputBox(target);
+      if (!box.known || box.body !== landedBody)
+        return { ok: false, reason: "composer changed after paste verification; refusing Enter" };
+    }
     if (guard && !guard("submit")) return { ok: false, reason: "submit canceled by dispatch guard" };
+    if (tailFp && !Number.isFinite(enterAt)) {
+      enterAt = Date.now();
+      log.info({ target, eventId, pasteToEnterMs: enterAt - pastedAt, pasteSeen, boxTrusted, freshSpawn }, "mirror inject: first Enter");
+    }
     const e = await runTmux(["send-keys", "-t", target, "Enter"]);
     return e.ok ? { ok: true } : { ok: false, reason: `tmux send-keys failed: ${e.stderr.slice(-200)}` };
   };
@@ -2164,17 +2209,23 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
 
   // 回车可能被冷启动中的 TUI 吞掉 (框里躺着没提交的提示)。框认得出来时判据可信,
   // 多补一次; 认不出来时维持原来的「只补一次」, 免得判据出错往真实对话里灌回车。
-  const boxTrusted = boxVerify && (await readInputBox(target)).known;
-  const attempts = requireEventEvidence ? 1 : boxTrusted ? 3 : 2;
+  const pendingBox = await readInputBox(target);
+  const boxTrusted = boxVerify && pendingBox.known;
+  // An event may retry Enter only while the very same landed composer remains.
+  // Empty/unknown/changed boxes need transcript evidence, never another paste
+  // or a blind Enter that could confirm a newly opened native picker.
+  const pendingBody = pasteSeen && pendingBox.known && pendingBox.body === landedBody
+    ? landedBody : undefined;
+  const attempts = requireEventEvidence ? pendingBody ? 3 : 1 : boxTrusted ? 3 : 2;
   for (let i = 0; i < attempts; i++) {
     if (i > 0) {
       await sleep(RETRY_SETTLE_MS);
       if (submitted()) return { ok: true }; // 迟到的确认 —— 补的这一下会落在空框上, 省了
+      if (requireEventEvidence) {
+        const box = await readInputBox(target);
+        if (!box.known || box.body !== pendingBody) break;
+      }
       log.warn({ target, tailFp, attempt: i + 1 }, "mirror inject: 回车后输入框未清空, 再补一次");
-    }
-    if (i === 0) {
-      enterAt = Date.now();
-      log.info({ target, pasteToEnterMs: enterAt - pastedAt, pasteSeen, boxTrusted, freshSpawn }, "mirror inject: first Enter");
     }
     const e = await sendEnter();
     if (!e.ok) return e;
@@ -2195,11 +2246,10 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
     return { ok: false, uncertain: true, reason: "composer cleared without this event's transcript marker; delivery remains uncertain and will not be resubmitted" };
   }
 
-  // 补到头还没清空。通常是渲染滞后 (回车其实落了), 但也可能是目标会话正忙 /
-  // 上下文满了不消费输入 —— 那样用户这条消息会悄无声息地消失。不报硬失败 (用户
-  // 多半已经被服务到了), 标 uncertain 让调用方按需提示。
-  log.warn({ target, tailFp, freshSpawn, boxTrusted, witness: witness.status }, "mirror inject: clear not observed, trusting submit");
-  return { ok: true, uncertain: true, reason: "目标会话可能正忙或未消费输入(回车后输入框未清空)" };
+  // 补到头仍没证据: 可能只是渲染/落盘迟到, 也可能根本没提交。
+  // 保留 uncertain 阻止重贴, 但不能让只看 ok 的调用方把它当成已送达。
+  log.warn({ target, tailFp, freshSpawn, boxTrusted, witness: witness.status }, "mirror inject: submission unconfirmed, stopping input");
+  return { ok: false, uncertain: true, reason: "目标会话未确认收下消息，停止输入以避免误提交或重复投递" };
 };
 
 const injectViaSpawn = async (args: InjectArgs): Promise<InjectResult> => {

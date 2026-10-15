@@ -58,6 +58,11 @@ export interface ModalPaneVerdict {
  */
 export const isModalPane = (pane: string): ModalPaneVerdict => {
   const p = stripBoxBorders(pane ?? "");
+  // Codex uses › and a different footer for native selection menus. Keep this
+  // detection separate from permission-option parsing: detecting a menu must
+  // not make Claude/CodeBuddy's auto-answer strategy operate it.
+  if (/^\s*›\s*\d+\.\s+\S/mu.test(p)
+    && /(?:^|\n)\s*enter select\s*·\s*esc back\s*$/u.test(p)) return { modal: true };
   if (!p || !MODAL_OPTION_ROW.test(p)) return { modal: false };
   if (!MODAL_FOOTER.test(p) && !hasPermissionShape(parseModalOptions(p))) return { modal: false };
   return { modal: true, title: p.match(MODAL_TITLE)?.[1] };
