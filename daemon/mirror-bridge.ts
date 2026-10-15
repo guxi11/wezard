@@ -2125,6 +2125,18 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
     }
     return false;
   };
+  /** 回车后的证据也是会迟到的 —— 粘贴有迟到窗, 提交同样要有。
+   *  CodeBuddy 的 user 行按「接受输入的时刻」打时间戳、却要等 TUI 把这一轮消化完才落盘: 忙时
+   *  能晚好几秒 (2026-10-14 h687c3a5 实测: 标记 23:06:50.834 写进转录, 但 CLEARED_TIMEOUT_MS 的
+   *  1.5s 窗内读不到, 于是判成「框空了却没有这一笔」, 往群里发了一条 ✗ —— 消息其实到了, 还被并进
+   *  同一秒另一条注入的提交里)。判据是「宽限到 LATE_LAND_MS 仍没有」, 不是「1.5s 内还没看到」。 */
+  const lateEvidence = async (timeoutMs: number, t0 = Date.now()): Promise<boolean> => {
+    if (submitted()) return true;
+    if (await queued()) return true;
+    if (Date.now() - t0 >= timeoutMs) return false;
+    await sleep(LATE_POLL_MS);
+    return lateEvidence(timeoutMs, t0);
+  };
 
   if (!pasteSeen) log.warn({ target }, "mirror inject: paste unverified, requiring session submission evidence");
   if (!tailFp) {
@@ -2150,13 +2162,21 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
     const e = await sendEnter();
     if (!e.ok) return e;
     if (await waitForSubmit(CLEARED_TIMEOUT_MS)) return { ok: true };
-    if (requireEventEvidence && await cleared())
-      return await queued() ? { ok: true } : { ok: false, uncertain: true, reason: "composer cleared without this event's transcript marker; delivery remains uncertain and will not be resubmitted" };
+    if (requireEventEvidence && await cleared()) {
+      if (await lateEvidence(LATE_LAND_MS)) return { ok: true };
+      // 宽限用完仍没有这一笔的证据才是真不确定 —— 这条会以 `[mirror] ✗` 的面目出现在
+      // 问话的那个群里, 所以留一行日志, 免得事后只剩群里那句话可查。
+      log.warn({ target, eventId, freshSpawn, boxTrusted, witness: witness.status }, "mirror inject: 框空了且转录里始终没有这一笔, 判不确定并停止重贴");
+      return { ok: false, uncertain: true, reason: "composer cleared without this event's transcript marker; delivery remains uncertain and will not be resubmitted" };
+    }
   }
   if (submitted() || await queued()) return { ok: true };
 
-  if (requireEventEvidence && await cleared())
+  if (requireEventEvidence && await cleared()) {
+    if (await lateEvidence(LATE_LAND_MS)) return { ok: true };
+    log.warn({ target, eventId, freshSpawn, boxTrusted, witness: witness.status }, "mirror inject: 框空了且转录里始终没有这一笔, 判不确定并停止重贴");
     return { ok: false, uncertain: true, reason: "composer cleared without this event's transcript marker; delivery remains uncertain and will not be resubmitted" };
+  }
 
   // 补到头还没清空。通常是渲染滞后 (回车其实落了), 但也可能是目标会话正忙 /
   // 上下文满了不消费输入 —— 那样用户这条消息会悄无声息地消失。不报硬失败 (用户
