@@ -63,7 +63,7 @@ import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, withTagH
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { isWxFrame } from "../shared/wx-text.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
-import { stripAnsi, paneIsBusy, codexTurnBusy, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, lastModel, lastUserTurn, talkRounds, openToolUses, renderDialog, type PeerInfo, type PeerReply } from "./peers.js";
+import { stripAnsi, paneIsBusy, codexTurnBusy, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, lastModel, lastUserTurn, talkRounds, openToolUses, renderDialog, stripForChat, type PeerInfo, type PeerReply } from "./peers.js";
 
 // PATH augmentation: launchd / systemd start the daemon
 // with a stripped PATH that often lacks nvm / homebrew, breaking spawn(claudeBin).
@@ -3573,12 +3573,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     finalProgress.delete(id);
   };
   const queueFinal = (target: string, turn: string, channel: string, body: string, eventId?: string, bubble?: BriefBubble): string | undefined => {
-    if (!deps.events || !channel || !body.trim()) return undefined;
-    const revision = finalId(eventId || turn, channel, body);
+    // 投递出口剥掉行首收口标记与 ARTIFACT 行 (peers.stripForChat): 判定读原文, 群里只看结论。
+    const text = stripForChat(body);
+    if (!deps.events || !channel || !text.trim()) return undefined;
+    const revision = finalId(eventId || turn, channel, text);
     const id = finalId(eventId || turn, channel, revision);
-    const chunks = formatFinal(target, turn, channel, body);
+    const chunks = formatFinal(target, turn, channel, text);
     if (bubble?.pending) finalProgress.set(id, bubble.pending);
-    deps.events.delivery({ id, eventId, target, turn, channel, body, revision, chunks,
+    deps.events.delivery({ id, eventId, target, turn, channel, body: text, revision, chunks,
       ...(bubble && !bubble.done ? { stream: { frame: bubble.frame, id: bubble.streamId, expires: bubble.expires ?? Date.now() } } : {}) });
     if (bubble) { bubble.done = true; clearTimeout(bubble.hardTimer); }
     return id;
@@ -4011,9 +4013,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // stream 窗口内就把终句刷进气泡 (`链接 正文` 覆盖, 与正常收口同形); 气泡已收 /
       // 过期 / 终句超单条上限则 standalone 展示终句。
       const b = a.briefBubble;
-      const fitsOneChunk = splitMarkdown(body, Math.max(200, cfg.wrc.mirror.chunkBytes - TAG_HEADER_BUDGET)).length === 1;
-      if (b && !b.done && fitsOneChunk && Date.now() < (b.expires ?? 0)) void finishBriefBubble(a, body);
-      else sendStandalone(a, body);
+      const text = stripForChat(body); // 同 queueFinal: 群气泡不带收口标记 / ARTIFACT 行
+      const fitsOneChunk = splitMarkdown(text, Math.max(200, cfg.wrc.mirror.chunkBytes - TAG_HEADER_BUDGET)).length === 1;
+      if (b && !b.done && fitsOneChunk && Date.now() < (b.expires ?? 0)) void finishBriefBubble(a, text);
+      else if (text.trim()) sendStandalone(a, text);
     }
     // The durable result/outbox must exist before this in-memory dedup bit advances.
     a.briefConcluded = true;

@@ -435,6 +435,16 @@ export const parseClosing = (text: string, max = 800): Closing => {
   return closing ? { ...closing, text: clipMiddle(closing.text, max), artifacts } : { kind: "none", text: "", artifacts };
 };
 
+// 行首收口标记只起定位/判定作用: 剥只发生在投递出口 (群气泡 / wizard 收件箱),
+// 判定 (parseClosing / finalKind / finalReleased) 一律读原文。NEED 的语义由路由行
+// 状态与信封 status 携带, 正文里再带一个 `NEED:` 前缀只会让人疑惑。
+const LEADING_MARK_RE = /^[ \t]*(?:RESULT|Result|result|结论|NEED)[ \t]*[:：][ \t]*/;
+/** 剥掉正文行首的 `RESULT:` / `NEED:` 收口标记 (含全角冒号)。 */
+export const stripClosingMark = (text: string): string => text.replace(LEADING_MARK_RE, "");
+/** 群气泡版: 再剥掉 ARTIFACT 交付行 —— 本机路径对群里的读者没有用途 (要文件走 send_file)。 */
+export const stripForChat = (text: string): string =>
+  stripClosingMark(text).replace(new RegExp(ARTIFACT_RE.source, "gm"), "").replace(/\n{3,}/g, "\n\n").trim();
+
 /** The peer's most recent assistant message — the handoff payload when one
  *  agent drives another ("take #fix's conclusion and review it"). */
 export const lastAssistantText = (jsonlPath: string, max = 4000): string =>

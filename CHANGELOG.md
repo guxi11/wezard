@@ -39,6 +39,7 @@
 - 非 default wizard 的 `` `name` `` 反引号署名不生效 (5655850 只在 chatHead 写了署名): 出站气泡的最后一道头改写 `withMessageFooter` 按旧式链接头重写, 把上游已写好的署名又抹掉。署名定式收进 footer: 非 default 一律 `` `.name`: `` 起头 (名字不挂链接, rolepage 入口归尾部 ✦), 幂等。
 - rolepage 窄屏 (移动端) 退回会话列表再点进同一会话后停在顶部: 列表态 `.main` 整棵 `display:none`, 浏览器把滚动位置清零、隐藏期间的 `toBottom` 全部落空。重进时按离开时的吸附状态恢复: 本在底部 (`pinned`) 的吸底 (之后新消息照跟), 在翻历史的回到离开时的 `scrollTop`。
 - 流式 (brief) 气泡头的详情页链接与终句 (standalone) 气泡对齐: `briefLine` 拼 URL 时漏传 role (target), 两种气泡的链接落到不同角色视图; 改走与 standalone 同一条 `chatTurnUrl`。
+- 投递正文剥掉行首 `RESULT:` / `NEED:` 收口标记 (`peers.stripClosingMark` / `stripForChat`, 群气泡再剥 `ARTIFACT:` 交付行 —— 本机路径对群里读者没有用途): 三条群气泡出口 (`queueFinal` / brief 收口 / quiet 转发) 与回执的 wizard 收件箱统一剥除, 群里只看结论、收方不再被正文里的 `NEED:` 前缀误导。剥只发生在投递出口 —— 判定 (`parseClosing` / `finalKind` / `finalReleased`) 与账本 (路由行 outcome、收件箱幂等 rev 上游) 仍读原文。
 
 ## [2.6.4] - 2026-10-13
 

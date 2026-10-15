@@ -96,7 +96,7 @@ import { createLedger, digest, pendingGc, renderDigest, renderTable, renderAwait
 import { checkDirection } from "./direction.js";
 import { loadJobStore, dutyLine, awaitingAccept, stalledRoots, shelvedRoots, nudgeDue, dayClamp, childrenOf as jobChildren, jobEpisode, rejectReason, ACCEPTS, JOB_MEMBER_MAX, JOB_DEPTH_MAX, depthOf, ancestorsOf as jobAncestors, treeOrder, jobStage, type Accept, type JobMark, type JobRecord, type MemberLive } from "./jobs.js";
 import type { MemberRole } from "../shared/world.js";
-import { cacheTouchMs, cacheTtlSec, clipMiddle, contextFiles, firstStamp, parseClosing, lastContextTokens, lastExchange, lastModel, openingTurn, replyClosedBefore, talkTurns, turnsSince, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
+import { cacheTouchMs, cacheTtlSec, clipMiddle, contextFiles, firstStamp, parseClosing, stripClosingMark, stripForChat, lastContextTokens, lastExchange, lastModel, openingTurn, replyClosedBefore, talkTurns, turnsSince, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { expandHome } from "../shared/paths.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { createWorkflowNodes, type FileVersion, type NodeAttempt } from "./workflow-nodes.js";
@@ -1225,7 +1225,9 @@ const main = async (): Promise<void> => {
         target: to, speaker: row.owner, channel, serves,
         ...(row.asker ? { asker: row.asker } : {}),
         priority: "normal", deadline: Date.now() + 12 * 3600_000,
-        payload: { text: clipMiddle(out.body), peer: {
+        // 行首 RESULT:/NEED: 只是判定记号, 语义已由信封的 status 携带 —— 投递时剥掉
+        // (ARTIFACT 行保留: 路径对收方 wizard 有实际用途)。
+        payload: { text: clipMiddle(stripClosingMark(out.body)), peer: {
           // 回执不是一件新活: `job` 留空 (否则 jobs.account 会把它当成工单的第二份派活数一遍)。
           from: { kind: "peer", from: row.owner, receipt: true, status: out.status, event },
           job: "", kind: "fyi",
@@ -4127,11 +4129,12 @@ const main = async (): Promise<void> => {
         if (Date.now() < end) await m.untilIdle(t, end - Date.now());
         const reply = (m.replyToPeer(t, "", at, turn)?.text ?? "").trim();
         if (reply && (await m.idleNow(t))) {
-          if (!isQuiet(reply)) {
+          const text = stripForChat(reply); // 进群的转发不带收口标记 / ARTIFACT 行
+          if (text && !isQuiet(reply)) {
             const eventId = `quiet:${t}:${turn}`;
-            const revision = finalId(eventId, base, reply);
+            const revision = finalId(eventId, base, text);
             events.delivery({ id: finalId(eventId, base, revision), eventId, target: t, turn, channel: base,
-              revision, body: reply, chunks: m.formatFinal(t, turn, base, reply) });
+              revision, body: text, chunks: m.formatFinal(t, turn, base, text) });
           }
           log.info({ target: t, quiet: isQuiet(reply), len: reply.length }, "quiet task: 一轮结束");
           quietRelays.drop(turn);
