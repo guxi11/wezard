@@ -33,6 +33,8 @@ export const withMessageFooter = (content: string, policy?: MessageFooterPolicy)
   const emptySender = emptyHeader && (emptyHeader.url ? targetOfTagUrl(emptyHeader.url) : resolveTagTarget(emptyHeader.tag, policy.principal));
   const payload = emptyHeader && !emptyHeader.body.trim() && emptySender === sender ? "" : body;
   const seq = header?.header.match(/\b\d+\/\d+\b/)?.[0];
-  const head = [sender === policy.defaultTarget ? "" : `${tagHead(sender)}:`, seq].filter(Boolean).join(" ");
+  // 这一层是所有出站气泡 (stream / standalone / frozen final) 的最后一道改写: 上游 chatHead 写的头在这里被剥掉重写,
+  // 所以非 default wizard 的 code 样式署名只能在这里定 —— 名字不挂链接, rolepage 入口归尾部 ✦。
+  const head = [sender === policy.defaultTarget ? "" : `\`${tagHead(sender)}\`:`, seq].filter(Boolean).join(" ");
   return `${headed(head, payload).trimEnd()} [✦](${url})`;
 };

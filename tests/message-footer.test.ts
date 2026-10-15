@@ -18,11 +18,14 @@ const policy = responseFormatPolicy(cfg, { chatid: "admin" }, urlOf)!;
 const head = (t: string) => `[.${nameOf(t)}](${urlOf(t)}): `;
 const footer = ` [✦](${urlOf(home)})`;
 const bodyLink = `[.worker](${urlOf(worker)})`;
+// 非 default wizard: code 样式署名在前, 不挂链接; rolepage 链接统一落尾部 ✦。
+const signed = (t: string, body: string) => `\`.${nameOf(t)}\`: ${body} [✦](${urlOf(t)})`;
 assert.equal(withMessageFooter(`${head(home)}hello \n\t`, policy), `hello${footer}`);
-assert.equal(withMessageFooter(`${head(worker)}hello`, policy), `${head(worker)}hello`);
-assert.equal(withMessageFooter(`${head(foreignDefault)}hello`, policy), `${head(foreignDefault)}hello`);
-assert.equal(withMessageFooter(`${head(voice)}hello`, policy), `${head(voice)}hello`, "voiceOf never impersonates the true default");
-assert.equal(withMessageFooter(`answer [✨](${urlOf(worker)})`, policy), `${head(worker)}answer`, "old worker footer migrates back to header");
+assert.equal(withMessageFooter(`${head(worker)}hello`, policy), signed(worker, "hello"));
+assert.equal(withMessageFooter(signed(worker, "hello"), policy), signed(worker, "hello"), "signed header is idempotent");
+assert.equal(withMessageFooter(`${head(foreignDefault)}hello`, policy), signed(foreignDefault, "hello"));
+assert.equal(withMessageFooter(`${head(voice)}hello`, policy), signed(voice, "hello"), "voiceOf never impersonates the true default");
+assert.equal(withMessageFooter(`answer [✨](${urlOf(worker)})`, policy), signed(worker, "answer"), "old worker footer migrates to signed header");
 assert.equal(withMessageFooter(`answer [✨](${urlOf(home)}) [✦](${urlOf(home)})`, policy), `answer${footer}`);
 for (const input of [`${head(home)}${bodyLink}: answer`, `.default: ${bodyLink}: answer`, `${bodyLink}: answer [✨](${urlOf(home)})`]) {
   const formatted = withMessageFooter(input, policy);
@@ -57,7 +60,7 @@ for (const topOnly of [true, false]) {
   cfg.chatPolicy[home] = { topOnly, stewardBudget: 4 };
   for (const send of senders) {
     await send(`${head(home)}hello`); assert.equal(calls.at(-1), `hello${footer}`);
-    await send(`${head(worker)}hello`); assert.equal(calls.at(-1), `${head(worker)}hello`);
+    await send(`${head(worker)}hello`); assert.equal(calls.at(-1), signed(worker, "hello"));
     await send(`${head(home)}${bodyLink}`); assert.equal(calls.at(-1), `${bodyLink}${footer}`, "gate preserves a body containing only a name link");
     const count = calls.length;
     await send(head(home)); await send(`[✦](${urlOf(home)})`);
