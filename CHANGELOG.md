@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [2.7.0] - 2026-10-15
 
 ### Added
 - 回执的金字塔路由 (receiver stack, `docs/evolve/receiver-stack.md` ①-③): `tell_peer` / `dispatch` / `spawn_wizard` / `clone_wizard` 新增 `return: self|transfer|detach|none` 与 `for: <件号>`。栈由 daemon 在派活那一刻物化并随件落盘 (`Slot` / `Hold` / `MessageEvent` / 挂起账 增 `stack`、`mode`, `k` 留作 `stack[0]` 的冗余; 老盘无 stack 的行按 `[k]` + 现拼兜底), 所有写入点收进 `resolveReturn`; 方向闸的 chain 改读冻结的栈, 槽被顶掉 / 过期不再截断 —— **有意的行为变化**: 同一对的新一句顶掉旧槽后, 链比改前长 (改前在查不到的那一格截断、宁可少拦), 防环与 ≥3 层链深会比改前多拦; 带 `for` 时防环取本轮推断帧与 `for` 帧两条链的并集, 链深只看实际挂的那一帧。已知余项: 被 adopt 那一帧的叶子槽本身被顶掉 / 过期后, 交出方会重新出现在接手方的链上 (多拦一层, 不漏拦)。`for` 可把子活挂到自己欠着的任一笔 (查不到 → 400 并列出欠着的几笔)。旧写法永久接受: `chain:false`→`detach`、`receipt:false`→`none`、`answer:"transfer"`→`transfer`, 新旧矛盾 → 400; `dispatch` 由此获得 `detach`。
@@ -1128,7 +1128,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.6.4...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.7.0...HEAD
+[2.7.0]: https://github.com/guxi11/wezard/compare/v2.6.4...v2.7.0
 [2.6.4]: https://github.com/guxi11/wezard/compare/v2.6.3...v2.6.4
 [2.6.3]: https://github.com/guxi11/wezard/compare/v2.6.2...v2.6.3
 [2.6.2]: https://github.com/guxi11/wezard/compare/v2.6.1...v2.6.2
