@@ -4400,9 +4400,13 @@ const main = async (): Promise<void> => {
     setTimeout(() => void sweep().catch((e) => log.warn({ err: (e as Error).message }, "pane cap sweep failed")), 15_000).unref();
   }
 
+  let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     log.info({ signal }, "shutdown signal");
-    events.stop();
+    // Pause delivery, but persist arrivals while transports/in-flight handlers drain.
+    events.drain();
     stopSweep();
     scheduler.stop();
     steward?.stop();
@@ -4417,6 +4421,7 @@ const main = async (): Promise<void> => {
     setTimeout(() => process.exit(0), 1500).unref();
     await new Promise((r) => setTimeout(r, 200));
     await Promise.allSettled([ws.shutdown(), http.close()]);
+    events.stop();
     process.exit(0);
   };
   http.register("POST /shutdown", (_req, res) => {

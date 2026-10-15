@@ -135,6 +135,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
   });
   let stopped = true;
   let accepting = true;
+  let draining = false;
   let pumping = false;
   let timer: ReturnType<typeof setInterval> | undefined;
   const active = new Set<string>();
@@ -535,6 +536,8 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     finally { pumping = false; }
   }
   const resume = (): void => {
+    // Boot restoration may finish after shutdown has begun; never restart delivery then.
+    if (draining) return;
     Object.values(db.all()).filter((e) => e.execution === "dispatching").forEach((e) => patch(e.id, {
       execution: e.exposure === "none" ? "queued" : "uncertain", reason: "daemon restarted at input boundary; transcript evidence required",
     }));
@@ -564,6 +567,8 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
     },
+    // Keep ingress durable until WS/HTTP and their in-flight handlers have closed.
+    drain: () => { draining = true; stopped = true; clearInterval(timer); timer = undefined; },
     stop: () => { accepting = false; stopped = true; clearInterval(timer); timer = undefined; },
     get: (id: string) => { const e = db.get(id); return e && clone(e); },
     status: () => scan(() => {
