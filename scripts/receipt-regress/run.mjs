@@ -837,8 +837,10 @@ const cases = {
         return xs.every((rs) => rs.length) && xs;
       }, 60_000) ?? [];
       const [a, b] = both ?? [];
+      // T10b: 行不重建 (留 open、交新会话续同一 event), 故 row.at 是派活时刻, 恒 < t0。
+      // 「续答在交接后」改比答复落定时刻 settledAt。
       return {
-        pass: !!both && a.at >= t0 && b.at >= t0 && a.outcome?.status === "done" && b.outcome?.status === "done"
+        pass: !!both && a.settledAt >= t0 && b.settledAt >= t0 && a.outcome?.status === "done" && b.outcome?.status === "done"
           && a.outcome.body.includes(`h-root-${n}`) && !a.outcome.body.includes(`h-s-${n}`)
           && b.outcome.body.includes(`h-s-${n}`) && !b.outcome.body.includes(`h-root-${n}`)
           && separate && got.length === 2 && got.every((rs) => rs.length === 1 && rs[0].attrs.status === "done"),
