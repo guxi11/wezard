@@ -138,9 +138,9 @@ const rawLines = (path) => {
     });
   } catch { return []; }
 };
-/** 注入事件现在的执行 / 暴露态 (`GET /message-events/status`)。 */
+/** 注入事件现在的执行 / 暴露态 (`GET /message-events/event?id=`; 不认识 = undefined)。 */
 const eventOf = async (id) =>
-  (await fetch(`${DAEMON}/message-events/status`).then((r) => r.json()).catch(() => ({}))).events?.find((e) => e.id === id);
+  fetch(`${DAEMON}/message-events/event?id=${encodeURIComponent(id)}`).then((r) => (r.ok ? r.json() : undefined)).catch(() => undefined);
 
 const attrsIn = (text) => parseReminders(text).map((r) => r.attrs);
 

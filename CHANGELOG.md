@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Added
+- `GET /message-events/event?id=<event>`: 单条注入事件的 status 视图 (形状同 `/message-events/status` 的一行, 不认识 = 404)。receipt-regress 轮询单条事件改走它, 不再每 2s 拉一次全表。
+
 ### Changed
 - **BREAKING** 顶层模式改为**默认开**: `chatPolicy.<chat>.topOnly` 不写即开, 只有显式 `false` 才关 (`daemon/chat-name.ts` 的 `chatPolicyOf`)。此前默认只覆盖 wezard 与微信 ClawBot 群聊, 其余群要人一个个点头才开 —— 漏掉的那个群里 wizard 之间照样当着人派活、干活那一方的回复也进群, 人看到的是「管家和干活的人各回一遍」(实测 pagesite 群: 管家的派活气泡 + 分身的完整 RESULT + 管家自己的结论, 三条)。连带两件事, 都在明面上: ① 顶层模式的开关同时管着**管家手闸** —— 聊天默认会话从此不能改文件 / 开子代理 / 读代码、自己跑命令每轮限 `stewardBudget` 次, 想某个群照旧自己动手就把它显式设 `false`; ② 已在跑的 wizard 宪章里还是旧话 (本群没开), 守进程侧的强制立刻生效、宪章文本要重开或交接后才换。
 
@@ -11,6 +14,7 @@
 - `wrc.mirror.topOnlyNudge` 配置与 `daemon/top-only-nudge.ts`: 顶层模式默认开之后「该开而没开的群」不存在了 —— 还会公开往来的群只剩人**显式**关掉的那些, 那是人自己的决定, 不该再被劝。「公开往来一多就提醒群管家问人要不要开」的发现器连同它的落盘账 (`~/.wezard/top-only-nudge.json`, 残留不再读) 一并删掉。
 
 ### Fixed
+- daemon 主线程被 message-events 调度器同步卡住 (单线程 ~99% CPU, `/status` 偶发停顿 6-17s, 日志里成百的 `tmux command timed out` / `pane probe exceeded 5s` 多是停顿造成的假超时): 事件表上千行时 `pinOf` / `queue` 对每一行先问 `resourceOf` (三个适配器各读一次注册表目录、`sessionInfo` 还顺手读 transcript 尾巴算 contextTokens), 再判执行态 —— 九成多的终态行也付 I/O, 每条排队行又扫全表, 成了 O(R²)×I/O; `/message-events/status` 每条排队行还重复扫 3-4 遍。修法 (语义不变): 先判执行态再问资源 (A1); 一次 pump / status 内适配器按 target 只问一次 (A2); `sessionInfo.contextTokens` 改惰性、`inputSessionInfo` 读注册表走目录快照 (fs.watch 作废 + 1s TTL 兜底; 注入闸门的忙闲判断仍现读) (A3); status 每行只扫一次队、终句投递按 event 预分组 (A4)。
 - 工单验收打回被同一轮的终句重放绕过: message-events 对每个终句递两次 `final` (`result()` 当场一次, 泵见 `complete` 未 `finalized` 再补判一次 —— 打回的续问 `events.accept` 里 `void pump()` 同步就触发), 第一次判不合规格打回、记进 `bounced`, 第二次因「已打回过一次」直接照收, 把被打回的原文 (如「好的」) 落成 done 并投出回执, 早于打回日志 ~0.4s。`bounced` 改记被打回那一轮的注入事件 id, 同一事件的重放直接丢掉, 只收续问那一轮的补交。
 - `close_job` 吞掉已派出、还没注入的活 (常见于冷 pane 上排着的出生事件): 收工时 `events.cancel` 按「owner + job」把这张单名下排着的事件一并撤掉, 即便行仍 `open`; 漏网的也被 `valid` (要求单还开着) 与注入前重投影的 `jobs.account` (`accounting requires open job`) 永久扣住 —— 行一直挂到 deadline, 发起者收不到迟到回执。现在 accept 收工只撤行已落定 (cancel 级联 / held 撤销) 或没开行的事件; 单已收但行还 open 的照投 (`valid` 放行), `jobs.account` 先认已记过的 key 再查单开没开 —— 活照常答完, 回执标「已经收工」。
 - receipt-regress `task-quiet` 判据过期 (脚本侧, daemon 行为正常): 9ef3d55 把定时任务投递收进 `scheduled-delivery` 后不再打「scheduled task: 目标正忙, 顺延」日志, quiet 转发也从 `notifyChat` 改走终句 outbox (不再有 `chat notify failed`), 脚本却还在等这两行。改读事实: 顺延 = rr-t transcript 里到点 (+60s) 时 busy-done 还没说完、任务那句排在其后且投进的就是 rr-t; 转发 = `/message-events/status` 的 outbox 里有一份 `quiet:<rr-t2>:*` 投向伪群, 且安静那轮没有。

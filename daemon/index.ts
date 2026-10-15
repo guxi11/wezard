@@ -559,6 +559,11 @@ const main = async (): Promise<void> => {
     const m = bridge;
     installMirrorEventListener(ws.client, m, log.child({ mod: "mirror" }));
     http.register("GET /message-events/status", (_req, res) => json(res, 200, events.status()));
+    // 单条 event 的 status 视图 (`?id=`; id 里带冒号, 不走路径段) —— 轮询单条不必把全表算一遍。
+    http.register("GET /message-events/event", (_req, res, url) => {
+      const e = events.event(url.searchParams.get("id") ?? "");
+      json(res, e ? 200 : 404, e ?? { error: "unknown event" });
+    });
     // 路由表的诊断视图 (`?owner=` = 那个 wizard 名下的行, 缺省 = 全表)。
     http.register("GET /routes", (_req, res, url) => {
       const owner = url.searchParams.get("owner")?.trim();

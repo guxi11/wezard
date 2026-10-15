@@ -51,7 +51,7 @@ import { dispatchPickerPolicy, pickerPolicy } from "./picker-policy.js";
 import { renameWindow, runTmux, spawnTmuxClaude } from "./spawn-tmux.js";
 import { selectEffort, selectModel, type EffortSelectResult, type ModelScope, type ModelSelectResult } from "./model-select.js";
 import { parseEffort, type Effort } from "../shared/effort.js";
-import { hasRegistry, liveSessionPids, markTranscript, probeOf, sessionOfPid, sessionOnPane, submittedSince, submittedEventSince, watchRegistry, type LiveSession, type TranscriptMark } from "./wezard-session.js";
+import { hasRegistry, liveSessionPids, markTranscript, probeOf, registrySnapshot, sessionOfPid, sessionOnPane, submittedSince, submittedEventSince, watchRegistry, type LiveSession, type TranscriptMark } from "./wezard-session.js";
 import { waitForIdle, type IdleResult } from "./graph.js";
 import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
@@ -5937,7 +5937,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       model: a?.model || rec?.model || "",
       effort: a?.effort || rec?.effort || "",
       tmuxPane: a?.tmuxPane ?? rec?.tmuxPane ?? "",
-      contextTokens: lastContextTokens(jsonlPath),
+      // 惰性: 读 transcript 尾巴 (64K 起, 最多 2MB), 只要 pane / sid 的调用方 (调度器每秒逐行问) 不该替它付。
+      get contextTokens() { return lastContextTokens(jsonlPath); },
     };
   };
 
@@ -6149,7 +6150,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const session = codexSessionForPane(pane);
       return session && { sessionId: session.sessionId, jsonlPath: session.jsonlPath };
     }
-    const live = activeBackends().map((b) => sessionOnPane(b.homeDir, pane)).find((s) => s?.pane === pane);
+    // 只喂调度器 (message-events 的 transcript / sessionId 适配器): 每秒逐行问, 走目录快照。
+    const live = activeBackends().map((b) => sessionOnPane(b.homeDir, pane, registrySnapshot)).find((s) => s?.pane === pane);
     return live && { sessionId: live.sessionId, jsonlPath: join(dirname(transcript), `${live.sessionId}.jsonl`) };
   };
 

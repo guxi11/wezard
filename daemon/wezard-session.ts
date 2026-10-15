@@ -83,9 +83,30 @@ export const readRegistry = (homeDir: string): LiveSession[] => {
     .filter((r): r is LiveSession => r !== undefined);
 };
 
-/** 住在 `pane` 里、进程还活着的那个会话。同一 pane 先后起过几个进程时取最近更新的。 */
-export const sessionOnPane = (homeDir: string, pane: string): LiveSession | undefined =>
-  readRegistry(homeDir)
+/** 注册表目录快照: 目录一有写入就作废 (fs.watch, 不拖住进程), 无论如何最多活 `ttlMs`
+ *  (watch 起不来时就靠它)。给每秒扫一遍事件表的调度器用 —— 每行现读整个目录是 O(R) 次
+ *  open。只存解析后的行, pid 存活仍在查询时核对。注入闸门的忙闲判断 (idleVerdict) 不走这里。 */
+const snaps = new Map<string, { at: number; rows: LiveSession[] }>();
+const watching = new Set<string>();
+export const registrySnapshot = (homeDir: string, ttlMs = 1000): LiveSession[] => {
+  if (!watching.has(homeDir)) {
+    watching.add(homeDir);
+    try {
+      const w = watch(registryDirOf(homeDir), { persistent: false }, () => snaps.delete(homeDir));
+      w.on("error", () => { w.close(); snaps.delete(homeDir); });
+    } catch { /* 目录还不在: 只剩 TTL 兜底 */ }
+  }
+  const hit = snaps.get(homeDir);
+  if (hit && Date.now() - hit.at < ttlMs) return hit.rows;
+  const rows = readRegistry(homeDir);
+  snaps.set(homeDir, { at: Date.now(), rows });
+  return rows;
+};
+
+/** 住在 `pane` 里、进程还活着的那个会话。同一 pane 先后起过几个进程时取最近更新的。
+ *  `read` 换成 `registrySnapshot` 即走快照。 */
+export const sessionOnPane = (homeDir: string, pane: string, read: (homeDir: string) => LiveSession[] = readRegistry): LiveSession | undefined =>
+  read(homeDir)
     .filter((r) => r.pane === pane && pidAlive(r.pid))
     .sort((a, b) => b.statusUpdatedAt - a.statusUpdatedAt)[0];
 

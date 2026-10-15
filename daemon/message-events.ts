@@ -154,15 +154,31 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     holding.set(e.id, due ? { ...h, told: { why, at: now } } : h);
     if (due) io.held?.(e, why, now - h.since);
   };
+  /** 一次同步扫描 (pump 的一轮 / status 的一次) 内, 三个适配器按 target 只问一次: 它们读注册表、
+   *  读绑定, 每行现问就是 O(行数) 次 I/O, 而 pinOf / queue 又对每行扫全表 —— 那就是 O(R²)。
+   *  同一次同步调用里 pane / 会话本来不会变, 快照反而让一次扫描内各行口径一致。扫描外 (异步
+   *  回调、注入边界) 不在 scope 里, 照旧现问。 */
+  let pass: Map<string, string | undefined> | undefined;
+  const scan = <T>(run: () => T): T => {
+    if (pass) return run();
+    pass = new Map();
+    try { return run(); } finally { pass = undefined; }
+  };
+  const ask = (kind: "resource" | "transcript" | "sessionId", target: string): string | undefined => {
+    const key = `${kind}\0${target}`;
+    if (pass?.has(key)) return pass.get(key);
+    const v = io[kind](target);
+    pass?.set(key, v);
+    return v;
+  };
+  const resourceAt = (target: string): string => ask("resource", target)!;
   // An exposed event belongs to the session that received it, not a replacement
   // pane now bound to the same wizard. Keep its uncertain history for reconciliation.
   const resourceOf = (e: MessageEvent): string => {
-    const transcript = io.transcript(e.target);
-    const sessionId = io.sessionId(e.target);
-    if (e.exposure === "none") return io.resource(e.target);
-    if (e.sessionId) return e.sessionId === sessionId ? io.resource(e.target) : `session:${e.sessionId}`;
-    if (e.transcript) return e.transcript === transcript ? io.resource(e.target) : `transcript:${e.transcript}`;
-    return io.resource(e.target);
+    if (e.exposure === "none") return resourceAt(e.target);
+    if (e.sessionId) return e.sessionId === ask("sessionId", e.target) ? resourceAt(e.target) : `session:${e.sessionId}`;
+    if (e.transcript) return e.transcript === ask("transcript", e.target) ? resourceAt(e.target) : `transcript:${e.transcript}`;
+    return resourceAt(e.target);
   };
   const bounded = <T>(id: string, read: () => Promise<T>): Promise<T> => {
     const e = db.get(id);
@@ -339,37 +355,38 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
    *  `retryAt` 未到的行不算挡住 —— 它在退避, 不该把整条 pane 的后来者一起钉住: 队头一次
    *  探测超时 (5s) 就能把一个 target 静音十几分钟, 人话排在后面时是纯损失。
    *  injectable 与 blocker 共用这一条 —— 判据分家过一次, 表现是「对外说没人挡着, 实际谁也进不去」。 */
-  const pinOf = (e: MessageEvent): MessageEvent | undefined => {
+  // 先判执行态 (纯字段), 再问 resourceOf: 表里九成多是终态行, 不该替它们付 I/O。
+  const pinOf = (e: MessageEvent): MessageEvent | undefined => scan(() => {
     const rows = Object.values(db.all()).sort((a, b) => a.at - b.at);
-    const resource = io.resource(e.target);
+    const resource = resourceAt(e.target);
     const older = new Set(rows.slice(0, rows.findIndex((x) => x.id === e.id)).map((x) => x.id));
-    return rows.find((x) => x.id !== e.id && resourceOf(x) === resource
+    return rows.find((x) => x.id !== e.id
       && (x.execution === "dispatching"
         || (!direct(e) && ((x.execution === "uncertain" && !x.releasedAt)
           || (e.priority === "normal" && (x.execution === "awaiting-result"
-            || (x.execution === "queued" && (x.retryAt ?? 0) <= Date.now() && older.has(x.id))))))));
-  };
+            || (x.execution === "queued" && (x.retryAt ?? 0) <= Date.now() && older.has(x.id)))))))
+      && resourceOf(x) === resource);
+  });
   /** 全局 4 路并发只限回执 / 派活: 人话之间、人话与别的 pane 都互不相干, 只认同 pane 物理互斥。 */
   const injectable = (e: MessageEvent): boolean =>
     !stopped && e.execution === "queued" && !e.canceled && e.deadline > Date.now() && io.valid(e)
-    && !targets.has(e.target) && !active.has(io.resource(e.target)) && (direct(e) || active.size < 4)
+    && !targets.has(e.target) && !active.has(resourceAt(e.target)) && (direct(e) || active.size < 4)
     && pinOf(e) === undefined;
-  const blocker = (id: string): { id: string; execution: MessageEvent["execution"]; reason: string } | undefined => {
+  type Blocker = { id: string; execution: MessageEvent["execution"]; reason: string };
+  const blockerOf = (hit: MessageEvent | undefined): Blocker | undefined => hit && { id: hit.id, execution: hit.execution,
+    reason: hit.reason ?? (hit.execution === "uncertain" ? "旧事件投递结果不确定，需对账" : `等待较早事件（${hit.execution}）`) };
+  const blocker = (id: string): Blocker | undefined => {
     const e = db.get(id);
-    if (!e || e.execution !== "queued") return undefined;
-    const hit = pinOf(e);
-    return hit ? { id: hit.id, execution: hit.execution,
-      reason: hit.reason ?? (hit.execution === "uncertain" ? "旧事件投递结果不确定，需对账" : `等待较早事件（${hit.execution}）`) } : undefined;
+    return e?.execution === "queued" ? blockerOf(pinOf(e)) : undefined;
   };
   /** 一条还没贴出去的 event 此刻的排队全貌: 同 pane 上排在它前面的未了结行, 以及 injectable
-   *  的每一条否决项各自落在哪 —— 给人看「卡在谁后面、为什么、几时再试」, 不是一句「已排队」。 */
-  const queue = (id: string): { execution: MessageEvent["execution"]; ahead: MessageEvent[]; holds: string[] } | undefined => {
-    const e = db.get(id);
-    if (!e) return undefined;
-    const resource = io.resource(e.target);
+   *  的每一条否决项各自落在哪 —— 给人看「卡在谁后面、为什么、几时再试」, 不是一句「已排队」。
+   *  `pin` 一并交回, 让 status 不必为 blocker 再扫一遍全表。 */
+  const queueOf = (e: MessageEvent): { execution: MessageEvent["execution"]; ahead: MessageEvent[]; holds: string[]; pin?: MessageEvent } => scan(() => {
+    const resource = resourceAt(e.target);
     const ahead = Object.values(db.all())
-      .filter((x) => x.id !== e.id && x.at <= e.at && resourceOf(x) === resource
-        && ["queued", "dispatching", "awaiting-result"].includes(x.execution) && !x.canceled)
+      .filter((x) => x.id !== e.id && x.at <= e.at && ["queued", "dispatching", "awaiting-result"].includes(x.execution) && !x.canceled
+        && resourceOf(x) === resource)
       .sort((a, b) => a.at - b.at);
     const pin = pinOf(e);
     const holds = [
@@ -379,7 +396,30 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
       !direct(e) && active.size >= 4 ? `全局同时投递已满 ${active.size} 路` : "",
       pin ? `挡在前面: ${pin.id.slice(0, 10)}（${pin.execution}${pin.reason ? ` · ${pin.reason}` : ""}）` : "",
     ].filter(Boolean);
-    return { execution: e.execution, ahead: ahead.map(clone), holds };
+    return { execution: e.execution, ahead: ahead.map(clone), holds, pin };
+  });
+  const queue = (id: string): { execution: MessageEvent["execution"]; ahead: MessageEvent[]; holds: string[] } | undefined => {
+    const e = db.get(id);
+    if (!e) return undefined;
+    const { pin: _pin, ...q } = queueOf(e);
+    return q;
+  };
+  const partsByEvent = (): Map<string, FinalDelivery["parts"]> => Object.values(outbox.all()).reduce((m, d) =>
+    d.eventId ? m.set(d.eventId, [...(m.get(d.eventId) ?? []), ...d.parts]) : m, new Map<string, FinalDelivery["parts"]>());
+  const deliveryOf = (parts: FinalDelivery["parts"]): string => parts.some((p) => p.state === "failed") ? "failed"
+    : parts.some((p) => p.state === "uncertain") ? "uncertain" : parts.some((p) => p.state !== "delivered") ? "delivery-pending" : parts.length ? "delivered" : "none";
+  /** status 里的一行: 排着的行只扫一次队 (blocker 取 queueOf 交回的 pin)。 */
+  const view = (e: MessageEvent, parts: FinalDelivery["parts"]) => {
+    const q = e.execution === "queued" ? queueOf(e) : undefined;
+    const blockedBy = blockerOf(q?.pin);
+    const held = holding.get(e.id);
+    return { ...clone(e),
+      status: e.execution === "dispatching" ? "executing" : e.execution,
+      ...(blockedBy ? { blockedBy } : {}),
+      // 回执 / 派活排着时把扣住它的每一条都摆出来 (含 ready=false 这种 queue() 看不见的)。
+      ...(q && !direct(e) ? { holds: [...q.holds, ...(held ? [`${held.why} · 已扣 ${Math.round((Date.now() - held.since) / 1000)}s`] : [])] } : {}),
+      delivery: deliveryOf(parts),
+    };
   };
   const release = (id: string, reason: string): { ok: boolean; event?: MessageEvent; reason?: string } => {
     const e = db.get(id);
@@ -397,7 +437,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
   async function pump(): Promise<void> {
     if (stopped || pumping) return;
     pumping = true;
-    try {
+    try { scan(() => {
       // Scan the first unfinished part; later pending parts cannot jump an uncertain predecessor.
       Object.values(outbox.all()).forEach((d) => d.parts.forEach((p, n) => {
         if (!["waiting-ack", "uncertain"].includes(p.state)) return;
@@ -456,8 +496,8 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
         if (["awaiting-result", "uncertain"].includes(e.execution)) {
           if (e.execution === "uncertain" && (e.turnClosedAt || e.releasedAt)) return;
           if ((e.retryAt ?? 0) > Date.now()) return;
-          const currentSession = io.sessionId(e.target);
-          const currentTranscript = io.transcript(e.target);
+          const currentSession = ask("sessionId", e.target);
+          const currentTranscript = ask("transcript", e.target);
           const replaced = e.exposure !== "none" && (e.sessionId
             ? e.sessionId !== currentSession : !!e.transcript && e.transcript !== currentTranscript);
           if (replaced && !e.supersededBy) patch(e.id, { supersededBy: currentSession ?? (currentTranscript ? `transcript:${currentTranscript}` : "replacement-session-unavailable"),
@@ -491,7 +531,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
           else if (current.execution === "queued") hold(current, ready ? "injectable=false (ready 之后)" : "ready=false (前置未落定 / owner 未判闲)");
         }).catch(failed);
       });
-    } catch (e) { io.error(e); }
+    }); } catch (e) { io.error(e); }
     finally { pumping = false; }
   }
   const resume = (): void => {
@@ -526,15 +566,12 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     },
     stop: () => { accepting = false; stopped = true; clearInterval(timer); timer = undefined; },
     get: (id: string) => { const e = db.get(id); return e && clone(e); },
-    status: () => ({ events: Object.values(db.all()).map((e) => ({ ...clone(e),
-      status: e.execution === "dispatching" ? "executing" : e.execution,
-      ...(e.execution === "queued" && blocker(e.id) ? { blockedBy: blocker(e.id) } : {}),
-      // 回执 / 派活排着时把扣住它的每一条都摆出来 (含 ready=false 这种 queue() 看不见的)。
-      ...(e.execution === "queued" && !direct(e) ? { holds: [...queue(e.id)!.holds,
-        ...(holding.get(e.id) ? [`${holding.get(e.id)!.why} · 已扣 ${Math.round((Date.now() - holding.get(e.id)!.since) / 1000)}s`] : [])] } : {}),
-      delivery: (() => { const parts = Object.values(outbox.all()).filter((d) => d.eventId === e.id).flatMap((d) => d.parts);
-        return parts.some((p) => p.state === "failed") ? "failed" : parts.some((p) => p.state === "uncertain") ? "uncertain" : parts.some((p) => p.state !== "delivered") ? "delivery-pending" : parts.length ? "delivered" : "none"; })(),
-    })), deliveries: Object.values(outbox.all()).map(clone) }),
+    status: () => scan(() => {
+      const parts = partsByEvent();
+      return { events: Object.values(db.all()).map((e) => view(e, parts.get(e.id) ?? [])), deliveries: Object.values(outbox.all()).map(clone) };
+    }),
+    /** 一条 event 的 status 视图 —— 轮询单条的调用方 (回归脚本) 不必为它把全表算一遍。 */
+    event: (id: string) => { const e = db.get(id); return e && scan(() => view(e, partsByEvent().get(id) ?? [])); },
     deliveryStatus: (id: string) => outbox.get(id)?.parts.map((p) => p.state),
     reconcile: async (id: string) => { const e = db.get(id); if (e) await observe(e); return db.get(id); },
   };
