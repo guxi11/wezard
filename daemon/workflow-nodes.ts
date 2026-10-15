@@ -23,10 +23,27 @@ const versionsMatch = (files: FileVersion[]): boolean => files.every((f) => {
   try { return isAbsolute(f.path) && /^[a-f0-9]{64}$/.test(f.sha256) && fileDigest(f.path) === f.sha256 && (!f.snapshot || fileDigest(f.snapshot) === f.sha256); } catch { return false; }
 });
 
+const migrateTell = (tell: Tell & { turn?: unknown }): Tell => {
+  if (tell.event !== undefined || typeof tell.turn !== "string") return tell;
+  const { turn, ...rest } = tell;
+  return { ...rest, event: turn };
+};
+
 export const createWorkflowNodes = (file: string) => {
   const abs = resolve(expandHome(file));
   // Corrupt/unwritable execution history must fail closed, unlike advisory stores.
   let rows: NodeAttempt[] = existsSync(abs) ? JSON.parse(readFileSync(abs, "utf8")) as NodeAttempt[] : [];
+  // Pre-router histories used tell.turn; migrate before checking identity, but
+  // preserve an explicit event so conflicting/corrupt identities still fail closed.
+  const migrated = Array.isArray(rows) ? rows.map((a) => ({
+    ...a,
+    ...(a.tell ? { tell: migrateTell(a.tell) } : {}),
+    ...(Array.isArray(a.dispatches) ? { dispatches: a.dispatches.map((d) => ({
+      ...d, ...(d.tell ? { tell: migrateTell(d.tell) } : {}),
+    })) } : {}),
+  })) : rows;
+  const needsMigration = JSON.stringify(rows) !== JSON.stringify(migrated);
+  rows = migrated;
   if (!Array.isArray(rows) || rows.some((a) =>
     ![a.id, a.node, a.owner, a.job, a.turn, a.to].every((s) => typeof s === "string" && s.length > 0)
     || !Number.isFinite(a.at)
@@ -54,6 +71,7 @@ export const createWorkflowNodes = (file: string) => {
     try { fsyncSync(dir); } finally { closeSync(dir); }
     rows = next;
   };
+  if (needsMigration) write(rows);
   const update = (id: string, change: Partial<NodeAttempt>): NodeAttempt => {
     const old = rows.find((a) => a.id === id);
     if (!old) throw new Error("attempt not found");
