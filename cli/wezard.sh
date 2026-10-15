@@ -249,8 +249,15 @@ case "$cmd" in
       echo "[wezard] already latest ($LATEST)"
       exit 0
     fi
-    echo "[wezard] global $GLOBAL_VER → $LATEST: npm i -g wezard@latest ..."
-    npm i -g wezard@latest --no-audit --no-fund || { echo "[wezard] npm install failed" >&2; exit 1; }
+    # Install the version we just RESOLVED, online — never the bare `latest`
+    # tag off npm's cached metadata. `npm view` forces a network read
+    # (preferOnline) but `npm install` does not, and a packument is cacheable
+    # for 5 minutes: right after a release the install could still resolve the
+    # previous version's tag entry and die on a tarball 404 for a version
+    # nobody asked for, while the line above happily printed the new one.
+    echo "[wezard] global $GLOBAL_VER → $LATEST: npm i -g wezard@$LATEST ..."
+    npm i -g "wezard@$LATEST" --prefer-online --no-audit --no-fund \
+      || { echo "[wezard] npm install failed ($LATEST) — if it was just published the registry may still be propagating, rerun 'wezard update'" >&2; exit 1; }
     [[ -f "$NPM_WEZARD/cli/wezard.sh" ]] \
       || { echo "[wezard] $NPM_WEZARD/cli/wezard.sh missing after install" >&2; exit 1; }
     # postinstall (run by npm above) refreshed the Claude plugin marketplace
