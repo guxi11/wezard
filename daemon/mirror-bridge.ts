@@ -3552,7 +3552,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // wizard 名字作为 ww_uniq 传下去, 让同一个 wizard 的所有 turn 详情都复用一个 WeCom 窗口。
   // 头怎么写归 chatHead (默认 wizard 在 home 群: 企微只留名字链接, 微信不写头); 头与正文都空时留 `…`, 不发空气泡。
   const briefLine = (a: AttachState, turnId: string, rest: string, dest = a.channel): string =>
-    headed(chatHead(a.target, buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, turnId, roleUniq(a.target)), undefined, dest || undefined), rest) || "…";
+    headed(chatHead(a.target, chatTurnUrl(a.target, turnId), undefined, dest || undefined), rest) || "…";
 
   // ── 出处门 (chatOriginOnly) ───────────────────────────────────────────
   // 人在 CLI 里手敲的一轮, 镜像只发生在两处: 他眼前的终端, 和 chat 详情页 (turn

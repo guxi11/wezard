@@ -38,6 +38,7 @@
 - 孤儿 pane 清扫把正在出生的 pane 生出就杀 (新 wizard 秒死 / TUI ready timeout, 日志里 `orphan pane killed` 的 `cliAgeHours` 恒为 0): 进程年龄快照用的 `ps -o etimes` 在 macOS 的 BSD ps 上不存在 (`keyword not found`), 年龄表恒空又按 `Infinity` 兜底, 10 分钟宽限形同虚设。改用 BSD/GNU 都认的 `etime` ([[dd-]hh:]mm:ss) 解析成秒, 拿不到年龄按刚生跳过; 分身在开场白 + 等分叉期间的 pane 挂进 `spawningPanes` 排除出孤儿判定, 绑定改为逐 pane 现查 (清扫途中别人刚 attach 上的不再按开头的快照误收)。开机收「生到一半」窗口的 `reapUnborn` 同样不再误收本进程自己生的 pane (只收 shell 比 daemon 进程老的、逐 pane 现查绑定并跳过 `spawningPanes`) —— sweepUnborn 腾出的名字被同名重生、或 spawn 等 TUI 就绪还没回 pane id 时, 此前会按窗口名直接杀掉。
 - 非 default wizard 的 `` `name` `` 反引号署名不生效 (5655850 只在 chatHead 写了署名): 出站气泡的最后一道头改写 `withMessageFooter` 按旧式链接头重写, 把上游已写好的署名又抹掉。署名定式收进 footer: 非 default 一律 `` `.name`: `` 起头 (名字不挂链接, rolepage 入口归尾部 ✦), 幂等。
 - rolepage 窄屏 (移动端) 退回会话列表再点进同一会话后停在顶部: 列表态 `.main` 整棵 `display:none`, 浏览器把滚动位置清零、隐藏期间的 `toBottom` 全部落空。重进时按离开时的吸附状态恢复: 本在底部 (`pinned`) 的吸底 (之后新消息照跟), 在翻历史的回到离开时的 `scrollTop`。
+- 流式 (brief) 气泡头的详情页链接与终句 (standalone) 气泡对齐: `briefLine` 拼 URL 时漏传 role (target), 两种气泡的链接落到不同角色视图; 改走与 standalone 同一条 `chatTurnUrl`。
 
 ## [2.6.4] - 2026-10-13
 
