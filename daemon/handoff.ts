@@ -71,6 +71,9 @@ export interface Pending {
    *  普通交接是生命周期事件, 静默。 */
   announce?: boolean;
   timeoutMs: number;
+  /** 自我交接切断的那一轮里被扣下没落定的终句 (注入事件 id): 交接做成了由新会话「继续 <event>」
+   *  续答, 用不着它们; 交接没做成就得按原行补投回去, 否则那几笔再没人交代。 */
+  cut?: string[];
 }
 
 export interface HandoffDeps {
@@ -91,6 +94,8 @@ export interface HandoffDeps {
   resume: (target: string, event: EventId, at: number) => Promise<{ ok: boolean; reason?: string }>;
   /** 交接没做成时告诉**它自己** (下一条进它会话的话尾巴上捎带)。生命周期事件不进群。 */
   notify: (target: string, text: string) => void;
+  /** 交接没做成: 切断那一轮扣下的终句 (注入事件 id) 按原行补投。 */
+  uncut: (target: string, events: readonly string[]) => void;
   log: Logger;
   store?: JsonMap<Pending>;
   /** 简报贴回成功后把它留档 (情景记忆): 新会话第一条消息之外, 简报原本无处可寻。 */
@@ -106,6 +111,8 @@ export interface Handoffs {
   other: (target: string, focus: string, timeoutMs: number, extra?: { announce?: boolean }) => Promise<HandoffResult>;
   /** 把落盘里没做完的交接接着做。须在注入队列 resume 之前调: 闸要先立起来。 */
   resume: () => number;
+  /** 切断那一轮的终句被扣下了 (`cuttingTurn` 为真时): 记在这场交接上, 失败时补投。 */
+  cut: (target: string, event: string) => void;
 }
 
 const SELF_IDLE_MS = 10 * 60_000;
@@ -128,12 +135,20 @@ const carryOf = (p: Pending): string =>
     : `以下是上一个会话交接过来的工作简报,请据此无缝接手并继续:\n\n${p.brief}`;
 
 export const createHandoffs = (deps: HandoffDeps): Handoffs => {
-  const save = (p: Pending): void => void deps.store?.set(p.target, p);
-  const drop = (p: Pending): void => deps.store?.drop(p.target);
+  /** 每场交接扣下的终句: step 一路传的是不可变快照, 扣下发生在它之外 —— 记在这里, 落盘时并进去。 */
+  const cuts = new Map<string, readonly string[]>();
+  const withCut = (p: Pending): Pending => { const c = cuts.get(p.target); return c?.length ? { ...p, cut: [...c] } : p; };
+  const save = (p: Pending): void => void deps.store?.set(p.target, withCut(p));
+  const drop = (p: Pending): void => { cuts.delete(p.target); deps.store?.drop(p.target); };
   const fail = (p: Pending, status: number, reason: string): HandoffResult => {
+    const cut = withCut(p).cut ?? [];
     drop(p);
-    deps.log.warn({ mod: "handoff", target: p.target, stage: p.stage, reason }, "handoff: 放弃");
-    if (p.mode === "self") deps.notify(p.target, `上下文交接没做成: ${reason}`);
+    deps.log.warn({ mod: "handoff", target: p.target, stage: p.stage, reason, cut }, "handoff: 放弃");
+    if (p.mode === "self") {
+      deps.notify(p.target, `上下文交接没做成: ${reason}`);
+      // 新会话没接上, 没人会「继续 <event>」: 切断那一轮扣下的终句就是那几笔仅有的交代。
+      if (cut.length) deps.uncut(p.target, cut);
+    }
     return { ok: false, status, reason, ...(p.brief ? { brief: p.brief } : {}) };
   };
   const idle = (p: Pending, ms: number) => waitForIdle(p.target, deps.isBusy, ms, () => false);
@@ -217,7 +232,9 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
           deps.archive?.({ target: p.target, mode: p.mode, at: p.at, sid: p.sid, nextSid: deps.sessionId(p.target), brief: p.brief ?? "" });
         } catch (e) { deps.log.warn({ mod: "handoff", target: p.target, err: (e as Error).message }, "handoff: 简报留档失败"); }
         // 欠账续答排在最后一步: 先落盘再动手 —— reload 正好落在这一刻就重放它 (注入幂等)。
-        const next = saved({ ...p, stage: "resuming" });
+        // 交接做成了: 扣下的终句由「继续 <event>」续答取代, 不再补投。
+        cuts.delete(p.target);
+        const next = saved({ ...p, cut: undefined, stage: "resuming" });
         void resumeOwed(next);
         return { ok: true, brief: p.brief ?? "" };
       }
@@ -233,6 +250,7 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
   /** 闸立在整场交接上: 发起之后进来的话 (人、同伴、回执、日程) 都进新会话。 */
   const run = (p: Pending): Promise<HandoffResult> => {
     const release = hold(p.target);
+    if (p.cut?.length) cuts.set(p.target, p.cut);
     if (p.mode === "self" && p.stage === "waiting") cutting.add(p.target);
     return step(p)
       .catch((e: unknown) => fail(p, 500, (e as Error).message))
@@ -261,6 +279,13 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
       open.forEach((p) => void run(p));
       if (open.length) deps.log.info({ mod: "handoff", resumed: open.map((p) => `${p.target}@${p.stage}`) }, "handoff: reload 后续做");
       return open.length;
+    },
+    cut: (target, event) => {
+      const c = cuts.get(target) ?? [];
+      if (c.includes(event)) return;
+      cuts.set(target, [...c, event]);
+      const p = deps.store?.get(target);
+      if (p) save(p);
     },
   };
 };

@@ -6,6 +6,9 @@
 
 ### Fixed
 - transfer 人问的那一笔后气泡不随行移交 (T10 删掉旧 answerBubbles 交接后的回归): 交出方这一轮的终句 (「已移交 .x」) 照旧占住那句人话的流式气泡 —— `finalReleased` 对在飞的行不核 owner —— 接手方的终句只能另起一条 standalone。现在 `finalReleased` 在飞的行也只放 owner 的终句, 交出方这一轮的终句只留 rolepage (`setEventHandedAway`, 不走链式收口的「气泡先展示」); 气泡在 transfer 落地时从交出方摘下、按接手方注入事件寄存 (`handBubble`), 接手方开轮时接过去续写 CoT 与终句 (到期点仍从人那句话起算; 寄存只在内存, reload 或过期退回 standalone)。
+- 注入事件表 (`state/message-events.json`) 从不 GC: 了结 (canceled / complete 且 finalized) 满 24h 的行在落盘时裁成墓碑 `{id, fingerprint, execution, endedAt}`, 墓碑满 7 天删除。墓碑只给 `accept` 判重 —— WS 重放 / 收件箱重入撞上它返回已了结, 不复活、不再注入; 自配 id 的调用方 (续问序号 `legsOf`、交接续答 `injectResume`、`wait_peer` 判投过没有) 改问含墓碑的 `ids` / `known` / `executionOf`, 不会撞号。
+- 回执投给已不存在的收方 (被 stop 的分身) 空转到 12h 期限: `injectText` 恢复绑定失败且 store 里已无绑定时报 `gone`, 事件收成 canceled, 回执沿 receiver 边重走升级 (能收的上层 wizard / 群根 Dead Letter); 无处可升时 canceled 定论不再投 (收掉它的一方自己知道), 其余退到收方家群 (Dead Letter)。派活 / 续问不另做, 由 sweeper 的 dead 判定上浮。还有绑定只是 attach 失败的照旧退避重试。
+- 自我交接失败时切断那一轮的终句丢失 (938122b 遗留): 被扣下的终句记在这场交接上 (`handoffs.json` 的 `cut`, reload 可续), 交接没做成 (重开 / 贴回简报失败) 时按原行补投 (`settleFinal`, 与轮终同一条 onFinal); 交接做成则由新会话「继续 <event>」续答, 不补投。
 
 ## [2.7.2] - 2026-10-15
 

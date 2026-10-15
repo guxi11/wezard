@@ -63,7 +63,29 @@ export interface MessageEvent extends MessageInput {
   finalized?: boolean;
   interjected?: boolean;
   result?: { body: string; revision: string; at: number };
+  /** 进终态 (complete / canceled) 的时刻 —— 墓碑化的起点。老行没有, 按已知时刻估。 */
+  endedAt?: number;
 }
+/** 终态行过了 TOMB_AFTER_MS 只剩判重要用的那几样: accept 认 id + fingerprint 判「同一条消息」,
+ *  WS 重放 / 收件箱重入 (`rcpt:<event>:<rev>`) 撞上它就是已投过、不再注入; 丢了它就会再投一次。
+ *  墓碑再过 TOMB_TTL_MS (自 endedAt 起) 才删 —— 重放窗口远小于它。 */
+export interface Tombstone { id: string; fingerprint: string; execution: "complete" | "canceled"; endedAt: number; tomb: true }
+type Row = MessageEvent | Tombstone;
+const TOMB_AFTER_MS = 24 * 3600_000;
+const TOMB_TTL_MS = 7 * 24 * 3600_000;
+const isTomb = (x: Row): x is Tombstone => (x as Tombstone).tomb === true;
+const terminal = (x: MessageEvent["execution"]): x is Tombstone["execution"] => x === "complete" || x === "canceled";
+/** complete 要等 finalized (路由判定补完) 才算了结; canceled 本身就是了结。 */
+const settled = (e: MessageEvent): boolean => e.execution === "canceled" || (e.execution === "complete" && !!e.finalized);
+const endedAt = (e: MessageEvent): number => e.endedAt ?? Math.max(e.at, e.result?.at ?? 0, e.turnClosedAt ?? 0, e.releasedAt ?? 0);
+const entomb = (e: MessageEvent & { execution: Tombstone["execution"] }): Tombstone =>
+  ({ id: e.id, fingerprint: e.fingerprint, execution: e.execution, endedAt: endedAt(e), tomb: true });
+/** 每次落盘前跑: 了结满一天的行裁成墓碑, 墓碑满七天删掉。 */
+export const gcEvents = (now: number) => (rows: Record<string, Row>): Record<string, Row> =>
+  Object.fromEntries(Object.entries(rows).flatMap(([id, x]): Array<[string, Row]> =>
+    isTomb(x) ? (now - x.endedAt >= TOMB_TTL_MS ? [] : [[id, x]])
+    : settled(x) && terminal(x.execution) && now - endedAt(x) >= TOMB_AFTER_MS ? [[id, entomb({ ...x, execution: x.execution })]]
+    : [[id, x]]));
 export interface DeliveryInput {
   transfer?: { id: string; standalone: boolean };
   id: string;
@@ -80,7 +102,9 @@ export interface FinalDelivery extends DeliveryInput {
   at: number;
   parts: Array<{ state: "pending" | "sending" | "waiting-ack" | "delivered" | "uncertain" | "failed"; attempts: number; reason?: string; ack?: string; retryAt?: number }>;
 }
-export interface EventTransport { ok: boolean; uncertain?: boolean; retryable?: boolean; reason?: string }
+export interface EventTransport { ok: boolean; uncertain?: boolean; retryable?: boolean; reason?: string;
+  /** 收方已不存在 (没有绑定, 按 store 恢复也失败): 不是「稍后再试」, 而是这条投不到它了。 */
+  gone?: boolean }
 export interface EventEvidence { consumed: boolean; interjected?: boolean; body?: string; revision?: string; turn?: string; closedAt?: number;
   /** 这一轮以 CLI 报错收尾 (`isApiErrorMessage`): 没有可当定论的正文 —— `body` 是那段报错
    *  原文, 交给 `final` 落成中途态 error (见 §9.4), 不是 result。 */
@@ -97,6 +121,8 @@ export interface MessageAdapters {
   inject: (event: MessageEvent, boundary: (phase?: "paste" | "submit", identity?: { sessionId?: string; transcript?: string }) => boolean) => Promise<EventTransport>;
   evidence: (event: MessageEvent) => Promise<EventEvidence>;
   recovered: (event: MessageEvent) => void;
+  /** 注入报收方已不存在 (`EventTransport.gone`), 事件已收成 canceled: 由调用方决定它的结论往哪上浮。 */
+  gone?: (event: MessageEvent) => void;
   /** 这一轮有定论了 (result 落定 / 重放恢复 / 读到 CLI 报错收尾): 路由表据此落 mark / answer
    *  (§9.4)。与 `recovered` 并排 —— 后者管投递恢复, 它管路由判定。可选: 没有它的消费者
    *  (测试夹具 / 老装配) 照常跑, 只是不做路由判定。 */
@@ -125,14 +151,21 @@ export const rejectedAck = (e: unknown): boolean => !!e && typeof e === "object"
   && typeof (e as { errmsg?: unknown }).errmsg === "string" && !!(e as { headers?: unknown }).headers;
 
 export const createMessageEvents = (file: string, io: MessageAdapters) => {
-  const db = loadJsonMap<MessageEvent>(file, undefined, { strict: true });
+  const db = loadJsonMap<Row>(file, (rows) => gcEvents(Date.now())(rows), { strict: true });
   const outbox = loadJsonMap<FinalDelivery>(`${file}.finals`, undefined, { strict: true });
   Object.entries(db.all()).forEach(([id, e]) => {
+    if (e && isTomb(e)) {
+      if (e.id !== id || typeof e.fingerprint !== "string" || !terminal(e.execution) || !Number.isFinite(e.endedAt)) throw new Error(`invalid message event tombstone ${id}`);
+      return;
+    }
     if (!e || e.id !== id || typeof e.fingerprint !== "string" || !e.target || typeof e.speaker !== "string" || typeof e.channel !== "string" || (e.serves !== undefined && typeof e.serves !== "string") || !e.payload || typeof e.payload.text !== "string" || (!e.payload.human === !e.payload.peer) || !Number.isFinite(e.at) || !Number.isFinite(e.attempts) || !Number.isFinite(e.deadline) || !["queued", "dispatching", "awaiting-result", "complete", "canceled", "uncertain"].includes(e.execution)) throw new Error(`invalid message event ${id}`);
   });
   Object.entries(outbox.all()).forEach(([id, d]) => {
     if (!d || d.id !== id || !Array.isArray(d.parts) || d.parts.length !== d.chunks?.length || !d.chunks.every((c) => typeof c === "string") || !d.parts.every((p) => ["pending", "sending", "waiting-ack", "delivered", "uncertain", "failed"].includes(p.state)) || !d.channel) throw new Error(`invalid final delivery ${id}`);
   });
+  /** 调度只看活行; 墓碑只给 accept 判重 (与 `known`)。 */
+  const live = (id: string): MessageEvent | undefined => { const x = db.get(id); return x && !isTomb(x) ? x : undefined; };
+  const liveRows = (): MessageEvent[] => Object.values(db.all()).filter((x): x is MessageEvent => !isTomb(x));
   let stopped = true;
   let accepting = true;
   let draining = false;
@@ -182,7 +215,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     return resourceAt(e.target);
   };
   const bounded = <T>(id: string, read: () => Promise<T>): Promise<T> => {
-    const e = db.get(id);
+    const e = live(id);
     const target = e ? resourceOf(e) : id;
     if (probing.has(id) || probeTargets.has(target) || probeCount >= 16) return Promise.reject(new Error("probe already running or probe capacity occupied"));
     const token = Symbol(id);
@@ -200,13 +233,17 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
       timer = setTimeout(() => reject(new Error("pane probe exceeded 5s; no transport attempted")), 5000);
     })]).finally(() => { clearTimeout(timer); probeCount--; release(); });
   };
-  const patch = (id: string, p: Partial<MessageEvent>): MessageEvent => db.set(id, { ...db.get(id)!, ...p });
+  const patch = (id: string, p: Partial<MessageEvent>): MessageEvent => {
+    const prev = live(id)!;
+    const next = { ...prev, ...p };
+    return db.set(id, terminal(next.execution) && !terminal(prev.execution) ? { ...next, endedAt: Date.now() } : next) as MessageEvent;
+  };
   const part = (id: string, n: number, p: Partial<FinalDelivery["parts"][number]>): void => {
     const d = outbox.get(id)!;
     outbox.set(id, { ...d, parts: d.parts.map((x, i) => i === n ? { ...x, ...p } : x) });
   };
   const cancel = (select: (e: MessageEvent) => boolean, reason = "canceled by owner"): number => {
-    const rows = Object.values(db.all()).filter((e) => !["complete", "canceled"].includes(e.execution) && select(e));
+    const rows = liveRows().filter((e) => !["complete", "canceled"].includes(e.execution) && select(e));
     rows.forEach((e) => {
       const next = patch(e.id, { canceled: true, reason, execution: e.exposure === "none" ? "canceled" : "uncertain" });
       io.canceled(next); // Cancellation after exposure never asserts the pane stopped.
@@ -220,9 +257,11 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     // 内容就该是同一条消息, 哪怕 serves 的来历变了 —— 它不算内容的一部分。
     const { serves: _routing, ...identified } = clean;
     const fingerprint = digest(identified.identity ? [JSON.parse(identified.identity), identified.speaker, identified.channel] : identified);
-    const old = db.get(input.id);
-    if (old && old.fingerprint !== fingerprint) throw new Error(`event identity conflict: ${input.id}`);
-    let e = old;
+    const prior = db.get(input.id);
+    if (prior && prior.fingerprint !== fingerprint) throw new Error(`event identity conflict: ${input.id}`);
+    // 墓碑 = 早已投过并了结: 重放 / 重入箱到此为止, 不复活、不再注入。
+    if (prior && isTomb(prior)) return { ok: true, queued: false, eventId: prior.id };
+    let e = prior;
     if (!e) {
       e = { ...clean, fingerprint, at: Date.now(), execution: "queued", exposure: "none", attempts: 0 };
       db.merge({ [e.id]: e });
@@ -235,10 +274,10 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     return { ok: true, queued: e.execution === "queued", eventId: e.id };
   };
   const result = (id: string, body: string, revision: string, turn?: string): void => {
-    const e = db.get(id);
+    const e = live(id);
     if (!e || e.result?.revision === revision) return;
     patch(id, { finalized: false, result: { body, revision, at: Date.now() }, execution: "complete", exposure: "consumed", ...(turn ? { turn } : {}) });
-    io.final?.(db.get(id)!, { text: body });
+    io.final?.(live(id)!, { text: body });
   };
   const delivery = (input: DeliveryInput): string => {
     const old = outbox.get(input.id);
@@ -275,7 +314,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     const evidence = await bounded(e.id, () => io.evidence(e));
     if (stopped) return;
     if (!evidence.consumed) return;
-    const current = db.get(e.id)!;
+    const current = live(e.id)!;
     if (["complete", "canceled"].includes(current.execution)) return;
     if (current.exposure !== "consumed" || (evidence.closedAt && !current.turnClosedAt)) patch(e.id, {
       exposure: "consumed", interjected: evidence.interjected,
@@ -284,14 +323,14 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
         ? "input turn closed without a final assistant answer; delivery remains uncertain and will not be retried" : undefined,
       ...(evidence.closedAt ? { turnClosedAt: evidence.closedAt } : {}), turn: evidence.turn ?? current.turn,
     });
-    if (!current.canceled) io.committed(db.get(e.id)!);
+    if (!current.canceled) io.committed(live(e.id)!);
     if (evidence.body !== undefined && evidence.error) {
       // CLI 报错收尾: 那段报错不是定论 (§5), 交路由表落中途态 —— 事件本身不动, 它的执行态
       // 自有 deadline / 续跑那条路管 (与改动前一致)。
-      io.final?.(db.get(e.id)!, { text: evidence.body, error: true });
+      io.final?.(live(e.id)!, { text: evidence.body, error: true });
     } else if (evidence.body !== undefined && evidence.revision) {
       result(e.id, evidence.body, evidence.revision, evidence.turn);
-      io.recovered(db.get(e.id)!);
+      io.recovered(live(e.id)!);
     }
   };
   /** 收件箱里的回执事件 (`rcpt:<event>:<rev>`): 只有它带路由归属 (serves), 也只有它该合并。 */
@@ -301,9 +340,9 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
    *  (`execution: complete`, 它们的 id 已终态, 重放不再注入); 结论由这一轮的终句统一交代。
    *  回执的正文与信封是分开的两件 (`payload.text` 不含信封), 所以并的只是正文, 信封留注入那一份。 */
   const absorb = (id: string): void => {
-    const e = db.get(id);
+    const e = live(id);
     if (!e || !isRcpt(e)) return;
-    const absorbed = Object.values(db.all())
+    const absorbed = liveRows()
       .filter((x) => x.id !== e.id && isRcpt(x) && x.target === e.target && x.serves === e.serves
         && x.execution === "queued" && !x.canceled)
       .sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : 1));
@@ -313,16 +352,17 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     absorbed.forEach((x) => patch(x.id, { execution: "complete", exposure: "consumed", finalized: true, reason: `merged into ${e.id}` }));
   };
   const inject = async (id: string, resource: string): Promise<void> => {
+    const target = live(id)!.target;
     active.add(resource);
-    targets.add(db.get(id)!.target);
+    targets.add(target);
     try {
       absorb(id);
-      const e = db.get(id)!;
+      const e = live(id)!;
       if (stopped || e.execution !== "queued" || !io.valid(e)) return;
       io.accepted(e);
       patch(id, { execution: "dispatching", attempts: e.attempts + 1, transcript: io.transcript(e.target) ?? e.transcript });
       const boundary = (phase?: "paste" | "submit", identity?: { sessionId?: string; transcript?: string }): boolean => {
-        const current = db.get(id)!;
+        const current = live(id)!;
         if (stopped || current.canceled || !io.valid(current)) return false;
         if (current.exposure !== "none" && current.transcript && current.transcript !== io.transcript(e.target)) return false;
         if (phase) patch(id, { exposure: "possible", sessionId: identity?.sessionId,
@@ -330,21 +370,24 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
         return true;
       };
       let r: EventTransport;
-      try { r = await io.inject(db.get(id)!, boundary); }
-      catch (error) { r = { ok: false, uncertain: db.get(id)!.exposure !== "none", retryable: db.get(id)!.exposure === "none", reason: why(error) }; }
-      const latest = db.get(id)!;
+      try { r = await io.inject(live(id)!, boundary); }
+      catch (error) { r = { ok: false, uncertain: live(id)!.exposure !== "none", retryable: live(id)!.exposure === "none", reason: why(error) }; }
+      const latest = live(id)!;
       if (latest.result || latest.execution === "complete") { if (!latest.canceled) io.committed(latest); return; }
       if (r.ok && !r.uncertain) {
         const committed = patch(id, { execution: latest.canceled ? "uncertain" : "awaiting-result", exposure: "submitted", transcript: latest.transcript ?? io.transcript(e.target) });
         if (!latest.canceled) io.committed(committed);
+      } else if (r.gone && !r.uncertain && latest.exposure === "none" && !latest.canceled) {
+        // 收方真没了 (绑定按 store 也恢复不了): 退避重投只会空转到期限, 收成 canceled 交给路由层上浮。
+        io.gone?.(patch(id, { execution: "canceled", reason: r.reason || "target gone" }));
       } else if (r.retryable && !r.uncertain && !latest.canceled) {
         patch(id, { execution: "queued", exposure: "none", retryAt: backoff(latest.attempts), reason: r.reason });
       } else patch(id, { execution: "uncertain", reason: r.reason || "submission acknowledgement unknown" });
     } catch (e) {
-      try { patch(id, { reason: why(e), retryAt: backoff(db.get(id)!.attempts) }); } catch { accepting = false; stopped = true; clearInterval(timer); timer = undefined; }
+      try { patch(id, { reason: why(e), retryAt: backoff(live(id)!.attempts) }); } catch { accepting = false; stopped = true; clearInterval(timer); timer = undefined; }
       io.error(e);
     }
-    finally { active.delete(resource); targets.delete(db.get(id)!.target); void pump(); }
+    finally { active.delete(resource); targets.delete(target); void pump(); }
   };
   /** 人说的这一句不受 daemon 的顺序管辖 (§9.1): 只要同一只 pane 上没有正在贴的那一次
    *  (物理互斥), 就贴进去 —— 排在它前面的回执、正在跑的那一轮都不挡它, 顺序交给 backend CLI
@@ -358,7 +401,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
    *  injectable 与 blocker 共用这一条 —— 判据分家过一次, 表现是「对外说没人挡着, 实际谁也进不去」。 */
   // 先判执行态 (纯字段), 再问 resourceOf: 表里九成多是终态行, 不该替它们付 I/O。
   const pinOf = (e: MessageEvent): MessageEvent | undefined => scan(() => {
-    const rows = Object.values(db.all()).sort((a, b) => a.at - b.at);
+    const rows = liveRows().sort((a, b) => a.at - b.at);
     const resource = resourceAt(e.target);
     const older = new Set(rows.slice(0, rows.findIndex((x) => x.id === e.id)).map((x) => x.id));
     return rows.find((x) => x.id !== e.id
@@ -377,7 +420,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
   const blockerOf = (hit: MessageEvent | undefined): Blocker | undefined => hit && { id: hit.id, execution: hit.execution,
     reason: hit.reason ?? (hit.execution === "uncertain" ? "旧事件投递结果不确定，需对账" : `等待较早事件（${hit.execution}）`) };
   const blocker = (id: string): Blocker | undefined => {
-    const e = db.get(id);
+    const e = live(id);
     return e?.execution === "queued" ? blockerOf(pinOf(e)) : undefined;
   };
   /** 一条还没贴出去的 event 此刻的排队全貌: 同 pane 上排在它前面的未了结行, 以及 injectable
@@ -385,7 +428,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
    *  `pin` 一并交回, 让 status 不必为 blocker 再扫一遍全表。 */
   const queueOf = (e: MessageEvent): { execution: MessageEvent["execution"]; ahead: MessageEvent[]; holds: string[]; pin?: MessageEvent } => scan(() => {
     const resource = resourceAt(e.target);
-    const ahead = Object.values(db.all())
+    const ahead = liveRows()
       .filter((x) => x.id !== e.id && x.at <= e.at && ["queued", "dispatching", "awaiting-result"].includes(x.execution) && !x.canceled
         && resourceOf(x) === resource)
       .sort((a, b) => a.at - b.at);
@@ -400,7 +443,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     return { execution: e.execution, ahead: ahead.map(clone), holds, pin };
   });
   const queue = (id: string): { execution: MessageEvent["execution"]; ahead: MessageEvent[]; holds: string[] } | undefined => {
-    const e = db.get(id);
+    const e = live(id);
     if (!e) return undefined;
     const { pin: _pin, ...q } = queueOf(e);
     return q;
@@ -423,7 +466,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     };
   };
   const release = (id: string, reason: string): { ok: boolean; event?: MessageEvent; reason?: string } => {
-    const e = db.get(id);
+    const e = live(id);
     const note = reason.trim().slice(0, 500);
     if (!e) return { ok: false, reason: "unknown event" };
     if (!note) return { ok: false, reason: "a reconciliation reason is required" };
@@ -453,8 +496,8 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
         deliveryCursor = (finals.findIndex((x) => x.id === d.id) + 1) % Math.max(1, finals.length);
         void send(d.id).catch(io.error);
       });
-      const rows = Object.values(db.all()).sort((a, b) => a.at - b.at);
-      [...holding.keys()].filter((id) => db.get(id)?.execution !== "queued").forEach((id) => holding.delete(id));
+      const rows = liveRows().sort((a, b) => a.at - b.at);
+      [...holding.keys()].filter((id) => live(id)?.execution !== "queued").forEach((id) => holding.delete(id));
       const fair = [...rows.slice(probeCursor), ...rows.slice(0, probeCursor)];
       fair.forEach((e) => {
         if (stopped) return;
@@ -476,7 +519,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
         if (e.execution === "queued" && direct(e)) {
           if ((e.retryAt ?? 0) > Date.now() || !injectable(e)) return;
           void io.ready(e).then((ready) => {
-            const current = db.get(e.id)!;
+            const current = live(e.id)!;
             if (ready && injectable(current)) void inject(e.id, io.resource(current.target));
           }).catch(io.error);
           return;
@@ -487,7 +530,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
         }
         probeCursor = (rows.findIndex((x) => x.id === e.id) + 1) % Math.max(1, rows.length);
         const failed = (error: unknown): void => {
-          const current = db.get(e.id);
+          const current = live(e.id);
           if (!stopped && current && !["complete", "canceled"].includes(current.execution)) {
             const probeAttempts = (current.probeAttempts ?? 0) + 1;
             patch(e.id, { probeAttempts, retryAt: backoff(probeAttempts), reason: `${current.reason ? `${current.reason}; ` : ""}${why(error)}` });
@@ -504,7 +547,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
           if (replaced && !e.supersededBy) patch(e.id, { supersededBy: currentSession ?? (currentTranscript ? `transcript:${currentTranscript}` : "replacement-session-unavailable"),
             reason: `${e.reason ? `${e.reason}; ` : ""}session replaced; old execution remains uncertain pending transcript reconciliation` });
           void observe(e).then(() => {
-            if (!stopped && e.deadline <= Date.now() && db.get(e.id)!.execution === "awaiting-result")
+            if (!stopped && e.deadline <= Date.now() && live(e.id)!.execution === "awaiting-result")
               patch(e.id, { execution: "uncertain", reason: "deadline exceeded; result/physical completion not confirmed" });
           }).catch(failed);
           return;
@@ -527,7 +570,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
         if ((e.retryAt ?? 0) > Date.now()) { hold(e, `投递失败退避中${e.reason ? `（${e.reason}）` : ""}`); return; }
         if (!injectable(e)) { hold(e, `injectable=false: ${queue(e.id)?.holds.join("; ") || "无效 / 过期"}`); return; }
         void bounded(e.id, () => io.ready(e)).then((ready) => {
-          const current = db.get(e.id)!;
+          const current = live(e.id)!;
           if (ready && injectable(current)) void inject(e.id, io.resource(current.target));
           else if (current.execution === "queued") hold(current, ready ? "injectable=false (ready 之后)" : "ready=false (前置未落定 / owner 未判闲)");
         }).catch(failed);
@@ -538,7 +581,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
   const resume = (): void => {
     // Boot restoration may finish after shutdown has begun; never restart delivery then.
     if (draining) return;
-    Object.values(db.all()).filter((e) => e.execution === "dispatching").forEach((e) => patch(e.id, {
+    liveRows().filter((e) => e.execution === "dispatching").forEach((e) => patch(e.id, {
       execution: e.exposure === "none" ? "queued" : "uncertain", reason: "daemon restarted at input boundary; transcript evidence required",
     }));
     Object.values(outbox.all()).forEach((d) => d.parts.forEach((p, n) => {
@@ -553,13 +596,13 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
   return {
     accept, pump, resume, result, delivery, cancel, blocker, queue, release,
     running: () => !stopped,
-    bind: (id: string, turn: string) => { if (db.get(id)) patch(id, { turn }); },
-    finished: (id: string) => { const e = db.get(id); if (e && !e.canceled && !e.result) patch(id, { execution: "complete", exposure: "consumed" }); },
-    released: (id: string) => { const e = db.get(id); if (e?.canceled) patch(id, { execution: "canceled", reason: `${e.reason ?? "canceled"}; pane idle confirmed` }); },
-    stopped: (target: string, reason: string) => Object.values(db.all()).filter((e) => e.target === target && e.canceled).forEach((e) => patch(e.id, { execution: "canceled", reason })),
+    bind: (id: string, turn: string) => { if (live(id)) patch(id, { turn }); },
+    finished: (id: string) => { const e = live(id); if (e && !e.canceled && !e.result) patch(id, { execution: "complete", exposure: "consumed" }); },
+    released: (id: string) => { const e = live(id); if (e?.canceled) patch(id, { execution: "canceled", reason: `${e.reason ?? "canceled"}; pane idle confirmed` }); },
+    stopped: (target: string, reason: string) => liveRows().filter((e) => e.target === target && e.canceled).forEach((e) => patch(e.id, { execution: "canceled", reason })),
     submission: async (id: string): Promise<EventTransport> => {
       for (;;) {
-        const e = db.get(id);
+        const e = live(id);
         if (!e) return { ok: false, retryable: true, reason: "event missing" };
         if (["submitted", "consumed"].includes(e.exposure)) return { ok: true };
         if (e.execution === "uncertain" || stopped) return { ok: false, uncertain: true, reason: e.reason || "scheduler stopped" };
@@ -570,15 +613,20 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     // Keep ingress durable until WS/HTTP and their in-flight handlers have closed.
     drain: () => { draining = true; stopped = true; clearInterval(timer); timer = undefined; },
     stop: () => { accepting = false; stopped = true; clearInterval(timer); timer = undefined; },
-    get: (id: string) => { const e = db.get(id); return e && clone(e); },
+    get: (id: string) => { const e = live(id); return e && clone(e); },
+    /** 这个 id 用过没有 (含墓碑): 自己配 id 的调用方 (续问序号 / 交接续答) 据此避开撞号。 */
+    known: (id: string) => db.get(id) !== undefined,
+    ids: () => Object.keys(db.all()),
+    /** 只问执行态 (含墓碑): 判「这份投过没有」的调用方不必在乎它是不是已被裁掉。 */
+    executionOf: (id: string) => db.get(id)?.execution,
     status: () => scan(() => {
       const parts = partsByEvent();
-      return { events: Object.values(db.all()).map((e) => view(e, parts.get(e.id) ?? [])), deliveries: Object.values(outbox.all()).map(clone) };
+      return { events: liveRows().map((e) => view(e, parts.get(e.id) ?? [])), deliveries: Object.values(outbox.all()).map(clone) };
     }),
     /** 一条 event 的 status 视图 —— 轮询单条的调用方 (回归脚本) 不必为它把全表算一遍。 */
-    event: (id: string) => { const e = db.get(id); return e && scan(() => view(e, partsByEvent().get(id) ?? [])); },
+    event: (id: string) => { const e = live(id); return e && scan(() => view(e, partsByEvent().get(id) ?? [])); },
     deliveryStatus: (id: string) => outbox.get(id)?.parts.map((p) => p.state),
-    reconcile: async (id: string) => { const e = db.get(id); if (e) await observe(e); return db.get(id); },
+    reconcile: async (id: string) => { const e = live(id); if (e) await observe(e); return live(id); },
   };
 };
 export type MessageEvents = ReturnType<typeof createMessageEvents>;
