@@ -361,6 +361,31 @@ const main = async (): Promise<void> => {
   // 重开的空档里 resume 回旧 sid。
   // 宪章守卫 (见「改配置会不会动到宪章」): 要等下面宪章渲染那一块立起来才有; 之前 (启动时那次自动补名) 只写不比对。
   let guardCharter: CharterGuard = (write) => ({ r: write(), note: Promise.resolve("") });
+  const who = (t: string): string => `.${wizardStore()?.get(t)?.name || t}`;
+  const ago = (at: number): string => { const s = Math.max(0, Math.round((Date.now() - at) / 1000)); return s < 60 ? `${s}s` : `${Math.round(s / 60)}m`; };
+  const rowLabel = (x: MessageEvent): string => `${x.payload.human ? "人话" : x.id.startsWith("rcpt:") ? `回执 ← ${x.speaker}` : `派活 ← ${x.speaker}`}`
+    + `「${clipLine(x.payload.text, 24)}」${({ queued: "排队", dispatching: "正在贴", "awaiting-result": "在跑" } as Record<string, string>)[x.execution] ?? x.execution} ${ago(x.at)}`;
+  /** 人话的排队实况; undefined = 它已经不在 daemon 队里了 (贴进去 / 了结), 气泡交给 mirror。 */
+  const queueNote = (id: string, target: string, cold: boolean): string | undefined => {
+    const q = events.queue(id);
+    if (!q) return undefined;
+    if (q.execution === "dispatching") return cold ? `正在拉起 ${who(target)} 的会话，起好就贴进去` : undefined;
+    if (q.execution !== "queued") return undefined;
+    const holds = [handingOff(target) ? `${who(target)} 正在交接，交接完贴进新会话` : "", ...q.holds].filter(Boolean);
+    return [`排队中（同 pane 前面 ${q.ahead.length} 件）`,
+      ...holds.map((h) => `- ${h}`),
+      ...q.ahead.slice(0, 5).map((x, i) => `${i + 1}. ${rowLabel(x)}`),
+      ...(q.ahead.length > 5 ? [`… 另 ${q.ahead.length - 5} 件`] : [])].join("\n");
+  };
+  /** 1.5s 内贴进去了就不出声 (mirror 会开它自己的气泡); 还在队里就把实况写进这条气泡, 每 3s
+   *  刷一次, 直到它离队。企微流式气泡活不过 6 分钟, 刷到 5 分钟为止。 */
+  const watchQueue = async (a: { frame: Parameters<typeof ws.client.replyStream>[0]; streamId: string; principal: string }, id: string, cold: boolean, last = "", until = Date.now() + 300_000, wait = 1500): Promise<void> => {
+    await sleep(wait);
+    const note = queueNote(id, a.principal, cold);
+    if (!note || Date.now() > until) return;
+    if (note !== last) await ws.client.replyStream(a.frame, a.streamId, withTagHeader(a.principal, note), false).catch(() => undefined);
+    return watchQueue(a, id, cold, note, until, 3000);
+  };
   installInboundRouter(ws.client, cfg, log, { ...bridge, dispatch: async (a) => {
     if (a.text.trimStart().startsWith("/")) { await handedOff(a.principal); await bridge.dispatch(a); return; }
     const id = a.eventId ?? messageId(botOfKey(a.principal), a.channel!, a.streamId);
@@ -375,11 +400,7 @@ const main = async (): Promise<void> => {
     events.accept({ id, identity: a.identity, originalAt: a.originalAt, target: a.principal, speaker: a.speaker!, channel: a.channel!, serves: root,
       asker: { who: a.speaker!, chat: a.channel! }, priority: "normal", deadline: deadlineAt,
       payload: { text: a.text, human: a } });
-    const blocked = events.blocker(id);
-    const failure = events.get(id)?.reason;
-    const receipt = blocked ? `已排队：${blocked.reason}（事件 ${blocked.id}）`
-      : failure ? `已排队：等待重试；${failure}` : "已排队";
-    await ws.client.replyStream(a.frame, a.streamId, withTagHeader(a.principal, receipt), false).catch(() => undefined);
+    void watchQueue(a, id, !bridge.hasMirrorTarget(a.principal));
   } }, sourcePath, (w, c) => guardCharter(w, c));
   // approval click → finalize 当前 liveStream, 后续 tool/text 落到 standalone。
   // 规则 2: 用户点击授权那一刻就是"上一段对话"的边界, 截断 stream 让授权后的

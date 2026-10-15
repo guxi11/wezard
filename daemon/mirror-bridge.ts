@@ -1547,6 +1547,22 @@ export const parseInputBox = (cap: string, styledLayout = cap): InputBox => {
   return { known: true, body };
 };
 
+// CodeBuddy 忙时回车不落盘: 那句挂进输入框上方的待发队列, 一条一行
+//   Messages to be submitted after next tool call (…)
+//    ↳ <整段压成一行, 过长以 … 截断>
+// 直到出队才写进 transcript —— 这期间「框清空了、transcript 里没有」是正常的排队态, 不是丢了。
+const QUEUED_ROW_RE = /^\s*↳\s?(.+)$/u;
+const QUEUED_HEAD_CHARS = 24;
+/** 队列里有几行是这段文本 (按去空白后的开头比对; 截断的行只比它露出的那截)。 */
+export const queuedCopies = (cap: string, text: string): number => {
+  const head = text.replace(/\s+/gu, "").slice(0, QUEUED_HEAD_CHARS);
+  if (!head) return 0;
+  return cap.split("\n")
+    .map((l) => QUEUED_ROW_RE.exec(l)?.[1]?.replace(/\s+/gu, "").replace(/…$/u, "") ?? "")
+    .filter((row) => row.length >= Math.min(8, head.length) && (row.startsWith(head) || head.startsWith(row)))
+    .length;
+};
+
 // 空框里的灰字不是输入: 幽灵提示 (`Try "…"`) 和 CC 预测的下一句 (prompt suggestion,
 // 回车不采纳) 都以 SGR 2 (dim) 渲染。纯文本 capture 看不出区别 —— 预测句
 // `commit 这次改动…` 曾让一条 `commit` 被判成「已在框里」, 于是没贴, 只按了三下
@@ -1943,6 +1959,9 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   const witnessQuiet = witness.status === "" || witness.status === "busy" || text.trimStart().startsWith("/");
   const WITNESS_ONLY_MS = witnessQuiet ? 0 : freshSpawn ? 2500 : 1000;
   const requireEventEvidence = !!eventId && !text.trimStart().startsWith("/");
+  // 粘贴迟到的追加观察窗: 只走在「本来就要判 uncertain」的那条路上, 正常注入不付这笔。
+  const LATE_LAND_MS = 15_000;
+  const LATE_POLL_MS = 250;
 
   const { headFp, tailFp } = fingerprints(text);
   const probe = probeOf(text);
@@ -1956,7 +1975,10 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
 
   // 贴之前框里是什么: 空框、幽灵提示 (`Try "how do I log an error?"`)、甚至用户
   // 自己敲了一半的字 —— 一律作为基线, 免得去维护一张「哪些文案算空」的清单。
-  const preBox = await readInputBox(target);
+  const pre = await readPaneInput(target);
+  const preBox = pre.box;
+  // 贴之前队列里已有几份同样开头的 (同一段文本上次排进去了 / 兄弟回执同开头): 只认新增的。
+  const preQueued = queuedCopies(pre.cap, text);
   // 基线读不出来 (框被模态顶掉 / 正在重绘) 就整条退回指纹法: 没有基线,「框变了」
   // 无从谈起, 而把幽灵提示 (`Try "…"`) 误当成「贴进去了」会让这条消息静静消失。
   const boxVerify = preBox.known;
@@ -1983,6 +2005,20 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
     return false;
   };
 
+  /** 粘贴过了 PASTE_VERIFY_MS 还没露面, 再盯一阵, 直到四者之一: 会话已收下 / 框变了 (迟到落地) /
+   *  到点时框认得出且原样 (确实没进框) / 到点时框仍认不出 (无从判断)。 */
+  const lateLanding = async (timeoutMs: number, t0 = Date.now()): Promise<"submitted" | "landed" | "intact" | "unknown"> => {
+    if (submitted()) return "submitted";
+    const { cap, box } = await readPaneInput(target);
+    if (box.known ? (boxVerify ? !boxIntact(box) : box.body !== "") : Boolean(headFp) && stripWs(cap).includes(headFp)) return "landed";
+    if (Date.now() - t0 >= timeoutMs) return box.known ? "intact" : "unknown";
+    await sleep(LATE_POLL_MS);
+    return lateLanding(timeoutMs, t0);
+  };
+
+  /** 回车后它进了 CodeBuddy 的待发队列 (见 queuedCopies) —— 提交已确凿, 只是还没落盘。 */
+  const queued = async (): Promise<boolean> => queuedCopies((await readPaneInput(target)).cap, text) > preQueued;
+
   // 窄窗口 = 只有输入框本身。tailFp 紧挨光标, 提交前必在窗内、提交后消失。
   // 仅用于 parseInputBox 认不出布局的后端。
   const inputBoxStillHasTail = async (): Promise<boolean> => {
@@ -2005,16 +2041,26 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
     // and then sleeping another 2.5s before the first Enter.
     pasteSeen = await sawLanded(boxVerify ? PASTE_VERIFY_MS : POST_PASTE_SETTLE_FALLBACK_MS);
   }
-  if (!pasteSeen) {
+  if (!pasteSeen && requireEventEvidence) {
+    // 事件注入不重贴, 但也绝不能把一份可能已进框的粘贴撂下不交: CodeBuddy 在轮次交接 (提交 /
+    // 收尾的 hook、摘要) 时会把粘贴的渲染拖过 PASTE_VERIFY_MS, 撂下的那份等 TUI 缓过来才冒出,
+    // 被下一次注入接在后面一起回车 —— 两件事并成一行提交 (2026-10-14 两起: 人话 + 回执)。
+    // 所以先多等它一阵; 认不出框 ≠ 框是空的, 那种情况照样回车, 交给证人判。
+    const late = await lateLanding(LATE_LAND_MS);
+    if (late === "submitted") return { ok: true };
+    if (late === "intact") {
+      log.warn({ target, headFp, waitedMs: Date.now() - pastedAt }, "mirror inject: 粘贴始终没进框, 事件不重贴");
+      return { ok: false, uncertain: true, reason: "composer is empty but this event is absent from the transcript; delivery remains uncertain and will not be pasted again" };
+    }
+    pasteSeen = late === "landed";
+    log.warn({ target, headFp, late, waitedMs: Date.now() - pastedAt }, "mirror inject: 粘贴迟到, 按迟到结果继续提交");
+  } else if (!pasteSeen) {
     const box = await readInputBox(target);
     const empty = boxVerify && box.known ? boxIntact(box) : !(await inputBoxStillHasTail());
     if (submitted()) {
       // 框看着空, 是因为粘贴连同某次回车一起被收下了 —— 再贴就是第二份。
       log.info({ target }, "mirror inject: 会话已收到这段文本, 不重贴");
       return { ok: true };
-    }
-    if (requireEventEvidence && empty) {
-      return { ok: false, uncertain: true, reason: "composer is empty but this event is absent from the transcript; delivery remains uncertain and will not be pasted again" };
     }
     if (!empty) {
       log.warn({ target, headFp, boxKnown: box.known }, "mirror inject: 粘贴未验证但输入框非空 — 首次粘贴已落地, 不重贴");
@@ -2070,9 +2116,11 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
     while (Date.now() - t0 < budget) {
       await sleep(POLL_MS);
       if (submitted()) return true;
+      if (Date.now() - t0 < WITNESS_ONLY_MS) continue;
+      if (await queued()) return true;
       // An unchanged empty composer proves submission only after we actually
       // saw this paste land. Otherwise a swallowed paste produces a false ACK.
-      if (!requireEventEvidence && pasteSeen && Date.now() - t0 >= WITNESS_ONLY_MS && (await cleared())) return true;
+      if (!requireEventEvidence && pasteSeen && (await cleared())) return true;
     }
     return false;
   };
@@ -2102,9 +2150,9 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
     if (!e.ok) return e;
     if (await waitForSubmit(CLEARED_TIMEOUT_MS)) return { ok: true };
     if (requireEventEvidence && await cleared())
-      return { ok: false, uncertain: true, reason: "composer cleared without this event's transcript marker; delivery remains uncertain and will not be resubmitted" };
+      return await queued() ? { ok: true } : { ok: false, uncertain: true, reason: "composer cleared without this event's transcript marker; delivery remains uncertain and will not be resubmitted" };
   }
-  if (submitted()) return { ok: true };
+  if (submitted() || await queued()) return { ok: true };
 
   if (requireEventEvidence && await cleared())
     return { ok: false, uncertain: true, reason: "composer cleared without this event's transcript marker; delivery remains uncertain and will not be resubmitted" };

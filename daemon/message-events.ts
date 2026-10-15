@@ -335,9 +335,10 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
           || (e.priority === "normal" && (x.execution === "awaiting-result"
             || (x.execution === "queued" && (x.retryAt ?? 0) <= Date.now() && older.has(x.id))))))));
   };
+  /** 全局 4 路并发只限回执 / 派活: 人话之间、人话与别的 pane 都互不相干, 只认同 pane 物理互斥。 */
   const injectable = (e: MessageEvent): boolean =>
     !stopped && e.execution === "queued" && !e.canceled && e.deadline > Date.now() && io.valid(e)
-    && !targets.has(e.target) && !active.has(io.resource(e.target)) && active.size < 4
+    && !targets.has(e.target) && !active.has(io.resource(e.target)) && (direct(e) || active.size < 4)
     && pinOf(e) === undefined;
   const blocker = (id: string): { id: string; execution: MessageEvent["execution"]; reason: string } | undefined => {
     const e = db.get(id);
@@ -345,6 +346,26 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     const hit = pinOf(e);
     return hit ? { id: hit.id, execution: hit.execution,
       reason: hit.reason ?? (hit.execution === "uncertain" ? "旧事件投递结果不确定，需对账" : `等待较早事件（${hit.execution}）`) } : undefined;
+  };
+  /** 一条还没贴出去的 event 此刻的排队全貌: 同 pane 上排在它前面的未了结行, 以及 injectable
+   *  的每一条否决项各自落在哪 —— 给人看「卡在谁后面、为什么、几时再试」, 不是一句「已排队」。 */
+  const queue = (id: string): { execution: MessageEvent["execution"]; ahead: MessageEvent[]; holds: string[] } | undefined => {
+    const e = db.get(id);
+    if (!e) return undefined;
+    const resource = io.resource(e.target);
+    const ahead = Object.values(db.all())
+      .filter((x) => x.id !== e.id && x.at <= e.at && resourceOf(x) === resource
+        && ["queued", "dispatching", "awaiting-result"].includes(x.execution) && !x.canceled)
+      .sort((a, b) => a.at - b.at);
+    const pin = pinOf(e);
+    const holds = [
+      stopped ? "调度器未运行 (daemon 正在启停)" : "",
+      (e.retryAt ?? 0) > Date.now() ? `上次投递失败, ${new Date(e.retryAt!).toTimeString().slice(0, 8)} 重试${e.reason ? `（${e.reason}）` : ""}` : "",
+      targets.has(e.target) || active.has(resource) ? "同一 pane 正在贴另一条" : "",
+      !direct(e) && active.size >= 4 ? `全局同时投递已满 ${active.size} 路` : "",
+      pin ? `挡在前面: ${pin.id.slice(0, 10)}（${pin.execution}${pin.reason ? ` · ${pin.reason}` : ""}）` : "",
+    ].filter(Boolean);
+    return { execution: e.execution, ahead: ahead.map(clone), holds };
   };
   const release = (id: string, reason: string): { ok: boolean; event?: MessageEvent; reason?: string } => {
     const e = db.get(id);
@@ -392,6 +413,16 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
             releaseSource: "deadline",
             releaseReason: "event deadline elapsed; uncertainty retained and automatic retry withheld",
             reason: `${e.reason ? `${e.reason}; ` : ""}event deadline elapsed; queue released with uncertain delivery` });
+          return;
+        }
+        // 人话的 ready 不碰 pane (只看交接闸), 不必占探测位: 否则同 pane 上一条 awaiting-result
+        // 每秒一次的 evidence 探测 (最长 5s) 几乎一直占着 probeTargets, 人话被反复跳过或误判失败退避。
+        if (e.execution === "queued" && direct(e)) {
+          if ((e.retryAt ?? 0) > Date.now() || !injectable(e)) return;
+          void io.ready(e).then((ready) => {
+            const current = db.get(e.id)!;
+            if (ready && injectable(current)) void inject(e.id, io.resource(current.target));
+          }).catch(io.error);
           return;
         }
         if (probing.has(e.id) || probeTargets.has(resourceOf(e)) || probeCount >= 16) return;
@@ -456,7 +487,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     void pump();
   };
   return {
-    accept, pump, resume, result, delivery, cancel, blocker, release,
+    accept, pump, resume, result, delivery, cancel, blocker, queue, release,
     running: () => !stopped,
     bind: (id: string, turn: string) => { if (db.get(id)) patch(id, { turn }); },
     finished: (id: string) => { const e = db.get(id); if (e && !e.canceled && !e.result) patch(id, { execution: "complete", exposure: "consumed" }); },
