@@ -1782,18 +1782,24 @@ const decisionToHook = (d: Decision): "allow" | "deny" => (d === "deny" ? "deny"
 // 与 hooks/pre-tool-use.sh 的 is_bypass_mode 保持同一份名单。
 const BYPASS_MODES = new Set(["bypassPermissions", "fullAccess"]);
 
-// 必发卡的请求 (危险名单 / askRules) 永不走 fallbackOnError: "allow" — 超时/断线时
+// 必发卡的请求 (危险名单 / askRules) 永不走 fallbackOnError: "allow" — 没人点的超时
 // 降级为 ask, 交回本地 CLI 由人来确认, 而不是静默放行一次 rm。只判 danger 的话,
 // 用户自己配的 askRules 在 daemon 挂掉时反而失效。
 //
 // `.claude/**` 守卫虽然不进 mustCard, 但在**错误面**也要走同一条降级: 正常出口靠
-// settleGuard 事后按框, 而这三条 (no_approver / ws_disconnected / approver_timeout)
+// settleGuard 事后按框, 而这几条 (no_approver / approver_timeout; 机器人断线见 botDown)
 // 要么没有 approver 可按、要么 pane 早已在等框 —— 静默 allow 就是把死锁原样放回来。
-// 所以调用点传的是 `mustCard || guardActive`, 见 handler 里那三处。
+// 所以调用点传的是 `mustCard || guardActive`。
 const fallback = (cfg: Config, reason: string, forceSingle?: unknown): ApproveResp => ({
   decision: forceSingle && cfg.approval.fallbackOnError === "allow" ? "ask" : cfg.approval.fallbackOnError,
   reason: forceSingle ? `${reason}:force_single` : reason,
 });
+
+// 机器人连不上 (企微长连接断了 / 卡发不出去): 没人看得见卡, 审批这一环就当不存在, 放行 ——
+// 别让 hook 拖住失联期间 CLI 的正常工作。`.claude/**` 守卫例外: 放行后 CLI 照样弹原生框,
+// 只能交回本地 (理由同上)。
+const botDown = (reason: string, guardActive: boolean): ApproveResp =>
+  guardActive ? { decision: "ask", reason: `${reason}:guard` } : { decision: "allow", reason: `${reason}:auto_allow` };
 
 interface ApprovalDeps {
   cfg: Config;
@@ -2342,7 +2348,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     }
     if (!canReach(client, approver)) {
       log.warn("ws not connected");
-      json(res, 200, fallback(cfg, "ws_disconnected", mustCard || guardActive) satisfies ApproveResp);
+      json(res, 200, botDown("ws_disconnected", guardActive) satisfies ApproveResp);
       return;
     }
 
@@ -2445,7 +2451,10 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
       }
       log.warn({ err: (e as Error).message, reqId }, "approval timed out");
       const failure = (e as Error).message?.startsWith("send_card_fail:") ? (e as Error).message : "approver_timeout";
-      json(res, 200, fallback(cfg, failure, mustCard || guardActive) satisfies ApproveResp);
+      // 卡没发出去且此刻机器人确实断着 → 同上放行; 连接好好的发送失败 / 没人点的超时仍走 fallback。
+      json(res, 200, (failure !== "approver_timeout" && !canReach(client, approver)
+        ? botDown(failure, guardActive)
+        : fallback(cfg, failure, mustCard || guardActive)) satisfies ApproveResp);
       return;
     }
 
