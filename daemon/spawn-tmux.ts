@@ -39,7 +39,7 @@ import { sleep } from "../shared/std.js";
 import { activateBackend, resolveCliBackend, type CliBackend, type CliBackendName } from "../shared/cli-backends.js";
 import { selectModel } from "./model-select.js";
 import type { Effort } from "../shared/effort.js";
-import { hasRegistry, sessionOnPane } from "./cc-session.js";
+import { hasRegistry, sessionOnPane } from "./wezard-session.js";
 import { startupConfirmation, workspaceTrustPrompt, workspaceTrustConfig } from "../shared/workspace-trust.js";
 
 

@@ -51,7 +51,7 @@ import { dispatchPickerPolicy, pickerPolicy } from "./picker-policy.js";
 import { renameWindow, runTmux, spawnTmuxClaude } from "./spawn-tmux.js";
 import { selectEffort, selectModel, type EffortSelectResult, type ModelScope, type ModelSelectResult } from "./model-select.js";
 import { parseEffort, type Effort } from "../shared/effort.js";
-import { hasRegistry, liveSessionPids, markTranscript, probeOf, sessionOfPid, sessionOnPane, submittedSince, submittedEventSince, watchRegistry, type LiveSession, type TranscriptMark } from "./cc-session.js";
+import { hasRegistry, liveSessionPids, markTranscript, probeOf, sessionOfPid, sessionOnPane, submittedSince, submittedEventSince, watchRegistry, type LiveSession, type TranscriptMark } from "./wezard-session.js";
 import { waitForIdle, type IdleResult } from "./graph.js";
 import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
@@ -1608,7 +1608,7 @@ const readPaneInput = async (target: string): Promise<{ cap: string; box: InputB
 };
 const readInputBox = async (target: string): Promise<InputBox> => (await readPaneInput(target)).box;
 
-// ── 注入门控的会话证人 (cc-session) ─────────────────────────────────
+// ── 注入门控的会话证人 (wezard-session) ──────────────────────────────
 // 能从会话自己写的 json 读到的判据, 就不读 pane: 就绪看注册表的 status, 提交看
 // 注册表的 busy 翻转或 jsonl 里新落的那一行。输入框里「贴进去没有」是唯一只有
 // pane 知道的事 (未提交的输入不落任何盘), 那一段仍旧 capture。

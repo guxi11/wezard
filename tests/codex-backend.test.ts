@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { codexSessions, normalizeCodex } from "../shared/codex.js";
 import { bindCliBackends, backendForPath, resolveCliBackend } from "../shared/cli-backends.js";
-import { submittedSince, probeOf } from "../daemon/cc-session.js";
+import { submittedSince, probeOf } from "../daemon/wezard-session.js";
 import { ConfigSchema } from "../shared/config.js";
 import { talkRounds } from "../daemon/peers.js";
 

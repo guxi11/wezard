@@ -10,7 +10,7 @@
 // (jsonl 的 summary 行实测 0/20 覆盖 — CC 2.1.x 不写, 不可用。)
 import { closeSync, openSync, readSync } from "node:fs";
 import { tagOfKey } from "../shared/session-label.js";
-import { readRegistry } from "./cc-session.js";
+import { readRegistry } from "./wezard-session.js";
 
 const NAME_MAX = 16;
 const TRUNC = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
