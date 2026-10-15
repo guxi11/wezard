@@ -170,7 +170,8 @@ assert.equal(decision(followup, [large], false, "mini").kind, "spawn");
 
 for (const task of ["架构设计", "疑难排障", "审查方案", "评审改动", "设计 API", "debug deadlock", "architecture review"]) {
   assert.equal(isSmallTask(task), false, task);
-  assert.equal(tierFor(task, false), "hard", task);
+  // 默认不上 hard: 措辞里带「设计 / 排障 / 审查」不再是升档依据 (hard 只由调用方显式给)。
+  assert.equal(tierFor(task, false), "standard", task);
 }
 for (const task of ["核实 AGENTS.md 文件存在", "核实 AGENTS.md 是否存在", "确认 CLAUDE.md 从哪加载", "确认 CLAUDE.md 加载路径", "检查 README.md 文件是否存在", "verify file exists", "修正错别字", "改文案"]) {
   assert.equal(isSmallTask(task), true, task);

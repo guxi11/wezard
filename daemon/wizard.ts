@@ -467,7 +467,7 @@ const renderStewardRules = (a: CharterArgs): string[] => {
       "先判续篇还是新活: 只有服务于原任务同一验收目标的补充证据、纠正或返工才用 `tell_peer({name: 原来接活的那个, re})`。能独立验收、无需原任务结论或在途状态的新问题必须另派; 同项目、同目录、刚联系过、读过公共规则文件都不算续篇, 不得把它改写成「同时核实 / 顺便检查 / 最终交付中补充」塞回原 lead",
       "保护复杂 lead 的注意力: 正在排查编辑器问题时, 新问「有没有 AGENTS.md、如何加载 CLAUDE.md」是独立核查 → 另派 light; 不用同一笔 re, 不用 priority:now / ask 把新工作插进去。真正依赖原排障证据的纠正仍交回原 lead",
       `小活、彼此独立的几件 → 各 \`dispatch({task, name, description})\` 一次; task 写人的原话 + 你知道的背景。守护进程选人并${a.topOnly ? "私聊投出去" : "公开投出去 (`.你: .它` 进群, 它的回复也进群)"}, 结论作为回执回到你这儿`,
-      "难度按本次所需判断选 tier, 不按句长或已有 wizard 的档位: 文件存在/加载路径核查 light, 常规实现 standard, 设计/疑难排障/审查 hard; 要统筹多轮实施评审才 lead:true。追加了背景或交付要求也不自动变成复杂活",
+      "难度按本次所需判断选 tier, 不按句长或已有 wizard 的档位: **默认就是 standard, 别自动上 hard** —— 只有这件活确实要判断 (设计取舍、疑难排障、关键评审) 才显式 `tier:\"hard\"`, 跑腿/机械一步 `light` / `mini`; 要统筹多轮实施评审才 lead:true (lead 那档就是 hard)。追加了背景或交付要求也不自动变成复杂活",
       "简单问题可以让目标直接答人 → `dispatch({…, return:\"transfer\"})` 或 `tell_peer({…, return:\"transfer\"})` 显式移交本轮回答权与控制权；成功后停止派活与对人答复、静默收口。daemon 承接已有气泡，目标终句直接交付人；忙目标返回 409、你仍负责回答。不带 return 保持普通回执。移交不能带 lead/job/node/after/re，也不能已有子活; 想自己接它的 NEED 就别 transfer",
       "复杂活 (多处改动、要 coder + reviewer、多轮、有先后或要共享材料) → `dispatch({…, lead:true, criteria})` 开需求根单; criteria 由你写, 是猜的就先向人复述一遍",
       "dispatch 选的人默认照办, 只在看得出它错时推翻: 人明确指定执行者或你能说明必需的上下文连续性 → `to`; 同一任务续篇仍用同一笔 re (re: 那一笔的 event id); 只是字面沾边 → `spawn:true`; 真要依赖冷的大 ctx wizard → `to` + `force:true`; 档位不对 → `tier`; 想看证据 → `route_candidates`。to/force 不是给已有 lead 追加独立小活的捷径, 复用前要核对验收目标、所需判断和原上下文是否必需",

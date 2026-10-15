@@ -345,6 +345,9 @@ export const decide = (task: string, cands: readonly Evidence[], now: number, tt
   };
 };
 
-/** spawn 时的默认档: lead/架构排障设计评审 → hard; 明确简单动作 → light; 其余 standard。两头的 mini / ultra 只由调用方显式给。 */
+/** spawn 时的默认档: 明确简单动作 → light; 其余 standard —— 默认不上 hard。
+ *  以前按 COMPLEX_RE 把「设计 / 排障 / 审查」这类措辞自动升到 hard, 而这些词在真活里太常见,
+ *  于是几乎每个派出去的活都落 opus; 现在 hard / ultra 只由调用方显式给 (`tier:"hard"`),
+ *  lead 是唯一的例外 (它本来就是「要判断」的那一档)。 */
 export const tierFor = (task: string, lead: boolean): TierName =>
-  lead || COMPLEX_RE.test(withoutGuidance(task)) ? "hard" : isSmallTask(task) ? "light" : "standard";
+  lead ? "hard" : isSmallTask(task) ? "light" : "standard";
