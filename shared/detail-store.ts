@@ -129,6 +129,8 @@ export interface TurnFrom {
    *  不是它派来的新活。回执不再生回执 (见 index.ts 的 receipts), 所以这也是一条
    *  「这一轮不该再触发回注」的记录。 */
   receipt?: boolean;
+  /** kind=peer: 发话方把它欠人的那一笔 transfer 了过来 —— 不是私聊派活, 这一轮的终句直接答进群。 */
+  transferred?: boolean;
   /** 这一轮对应的路由行 id (T10 起取代件号, 见 reminder.TurnTag): 派活那句、续问与回执
    *  带同一个 —— rolepage 凭它从回执跳回派活那句。老记录里叫 turn。 */
   event?: string;

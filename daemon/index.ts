@@ -2048,7 +2048,11 @@ const main = async (): Promise<void> => {
         && !!wizards.get(self) && !!wizards.get(target);
       const topOnly = wantPublic && chatPolicyOf(cfg, reuseChannel || channelOf(self)).topOnly;
       const isPublic = wantPublic && !topOnly;
-      const channel = isPublic ? reuseChannel || channelOf(self) : "";
+      // transfer 交出的是人问的那一笔: 接手方的终句就是那句人话的答复, 注入事件得带上那个群 ——
+      // chat 行只落 `hand`, 气泡靠 final 通道放行; 频道为空就被当私聊轮扣下, 人永远收不到。
+      const handed = plan.op === "transfer" && plan.serves ? router.get(plan.serves)?.receiver : undefined;
+      const handedChat = handed?.kind === "chat" ? handed.channel : "";
+      const channel = isPublic ? reuseChannel || channelOf(self) : handedChat;
       // Injecting into your own pane would type into the box you're generating
       // from — Claude Code queues it and the caller deadlocks waiting for itself.
       if (target === self) { return { status: 400, body: { ok: false, reason: "refusing to inject into the calling session itself" } }; }
@@ -2126,7 +2130,7 @@ const main = async (): Promise<void> => {
       let accepted;
       try { accepted = events.accept({ id: eventId, target, speaker: self, channel, serves, asker, priority: policy, deadline: deadlineAt,
         payload: { text, peer: {
-          from: { kind: "peer", from: self, event: serves, ...(jobId ? { job: jobId } : {}), ...(isPublic ? { public: true } : {}), ...(asker ? { asker } : {}) },
+          from: { kind: "peer", from: self, event: serves, ...(jobId ? { job: jobId } : {}), ...(isPublic ? { public: true } : {}), ...(handedChat ? { transferred: true } : {}), ...(asker ? { asker } : {}) },
           envelope: envelopeFor(self, channel, { asker, legs, ...(legs > 1 ? { re: true } : {}),
             ...((body as { deadline?: number }).deadline !== undefined ? { deadline: deadlineAt } : {}), ...(kind !== "task" ? { act: kind } : {}), ...(wantReceipt ? {} : { quiet: true }) }) + extra,
           ...(wantReceipt ? { tell } : {}), job: jobId, kind, attemptId, after: afters,

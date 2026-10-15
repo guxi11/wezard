@@ -33,6 +33,7 @@
 - **BREAKING** prompt-cache 保温 (keepalive) 整组删除: `shared/keepalive.ts`、配置节 `wrc.mirror.keepalive`、`spawn_wizard` / `clone_wizard` / `new_claude_session` 的 `keepalive` 参数、`/stop` 与 `/clear` 的保温暂停、rolepage 的 🏓 ping 折叠一并下线; 老配置里残留的 keepalive 键被 schema 静默忽略。缓存冷热判定 (route_candidates / dispatch 冷门控) 保留, transcript 读不到分层写入记录时按 300s 兜底 (原读 `keepalive.ttlSec`)。
 
 ### Fixed
+- 把人问的那一笔 `tell_peer({return:"transfer"})` 交给另一个 wizard 后, 接手方的终句从不进群: 路由表照常 `move` → `answer` → `hand chat:…`, 但 transfer 被当私聊派活, 注入事件 `channel:""` —— chat 行的气泡只由 final 通道按事件频道放行, 频道为空就被当私聊轮扣下 (轮内频道印章也因「非公开非回执的 peer 轮必私聊」被清空)。现在交出的是 chat 行时, 注入事件带上那句人话的群, 出处标 `transferred` 免于私聊兜底 (reload 后从信封读回也不再误标成公开派活、把回复头标给交出方)。交出的是同伴派的那一笔时不变。
 - 冷目标拉起期的人话排队气泡只显 `…` (loading): 原先那句「正在拉起 X 的会话」带着 `.x:` 头, 而此刻冷目标还没进名册的 known —— 头里的半截链接改写落空, `[`.x`](url):` 进群被企微渲染成空链接, 还抢先 mirror 的 ack 进气泡、紧接着被顶掉白闪一下。loading 是纯文案不带头。同 pane 队空且无否决项时也不再多说一句「排队中（前面 0 件）」去顶掉气泡; 队列离开 queued/dispatching 后 watchQueue 即收工, 气泡从此归 mirror。
 - 内建整理者执行体 (`wezard:internal#steward`) 吃不上管家档: `stewardTierOf` 把「带 slot 名」一概排除, 而它正带着 `#steward` —— 不给档就落 CLI 自己的默认模型 (本机实测 opus/high), 比 router 那档重得多。现在内部 key 与群默认会话同样固定吃 `models.router`, 显式 model / 记录值都不再覆盖它; 真 slot 分身照旧不套档。
 - `tell_peer` 带 `re` 续问一律被 409「这一轮服务的那一笔你已经 transfer 出去了」挡下 (T10 起): `planReturn` 把续问沿用的原件 (本来就欠在对方手上) 当成了本轮服务的那笔; 该判据只对本轮服务的那笔生效。receipt-regress `need` 用例的续问同步去掉与 re 冲突的 `detach`。

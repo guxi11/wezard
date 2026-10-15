@@ -3698,8 +3698,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.activeEventId = env?.eventId;
     if (!env) return undefined;
     const home = baseOfKey(a.target);
+    // transfer 过来的那一笔信封上写着群 (不是 private), 但它不是公开派活: 回复不标给发话方。
+    const handed = !!(env.eventId && deps.events?.get(env.eventId)?.payload.peer?.from?.transferred);
     const from: TurnFrom | undefined =
-      env.kind === "peer" ? { kind: "peer", from: wizardStore()?.byName(stripSigil(env.from))?.target, ...(env.private ? {} : { public: true }), ...(env.receipt ? { receipt: true } : {}), ...(env.status ? { status: env.status } : {}), ...((turn) => (turn ? { turn } : {}))(rowOf(env)), ...(env.asker ? { asker: env.asker } : {}) }
+      env.kind === "peer" ? { kind: "peer", from: wizardStore()?.byName(stripSigil(env.from))?.target, ...(handed ? { transferred: true } : env.private ? {} : { public: true }), ...(env.receipt ? { receipt: true } : {}), ...(env.status ? { status: env.status } : {}), ...((turn) => (turn ? { turn } : {}))(rowOf(env)), ...(env.asker ? { asker: env.asker } : {}) }
       : env.kind === "task" ? { kind: "task", taskId: env.from.replace(/^定时 /, "") }
       : undefined;
     return {
@@ -3747,7 +3749,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
     // 私聊派来的活 (不是回执) 这一轮必是私聊, 不论印章带没带频道: 进群的只能是人问的事的
     // 交代与显式公开。带 task 的 fork 分身就只有出处、没有频道印章, 退回 home 就把私聊派的活答进了群。
-    if (from?.kind === "peer" && !from.public && !from.receipt) {
+    if (from?.kind === "peer" && !from.public && !from.receipt && !from.transferred) {
       a.channel = "";
       a.speaker = undefined;
       a.replyTo = undefined;
