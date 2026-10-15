@@ -27,7 +27,7 @@ import { applyHot, cfgSeenBy, patchedTop, pinChatKeys, configGet, fromLegacy, le
 import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } from "./usage.js";
 import { installInboundRouter } from "./inbound.js";
 import { loadMirrorStore } from "./mirror-store.js";
-import { cancelOps, deadlineOf, eventRef, isEventRef, makeOutcome, openRouter, ops, pickPair, type EventId, type FinalVerdict, type Op, type Receiver, type Route } from "./router.js";
+import { cancelOps, deadlineOf, eventRef, isEventRef, makeOutcome, openRouter, ops, pickPair, type Delivery, type EventId, type FinalVerdict, type Op, type Receiver, type Route } from "./router.js";
 import { createMessageEvents, messageId, finalId, type MessageAdapters, type MessageEvent, type MessageInput } from "./message-events.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { backendFor, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
@@ -255,7 +255,7 @@ const main = async (): Promise<void> => {
     log.child({ mod: "tasks" }),
     (added, removed) => log.info({ added, removed }, "task files changed"),
   );
-  let peerEvents: Pick<MessageAdapters, "accepted" | "committed" | "canceled" | "valid" | "ready" | "inject"> | undefined;
+  let peerEvents: Pick<MessageAdapters, "accepted" | "committed" | "canceled" | "valid" | "ready" | "inject" | "gone"> | undefined;
   /** T4: 路由表的投递层 —— 在 mirror 大块里接线 (要用到 jobs / 回执信封 / 事件泵), 这里先留个口。 */
   let deliverFinal: ((e: MessageEvent, verdict: FinalVerdict) => void) | undefined;
   const events = createMessageEvents(join(cfg.daemon.stateDir, "message-events.json"), {
@@ -265,6 +265,7 @@ const main = async (): Promise<void> => {
     valid: (e) => e.payload.peer ? !!peerEvents?.valid(e) : true,
     accepted: (e) => { if (e.payload.peer) peerEvents?.accepted(e); },
     committed: (e) => { if (e.payload.peer) peerEvents?.committed(e); },
+    gone: (e) => { if (e.payload.peer) peerEvents?.gone?.(e); },
     canceled: (e) => {
       if (e.payload.peer) peerEvents?.canceled(e);
       else if (e.payload.human && e.exposure === "none") {
@@ -963,8 +964,8 @@ const main = async (): Promise<void> => {
     /** 一笔活第几个来回 (§3.2): 同一行上已经注入过的续问数 + 1 —— 现算, 不落第二份数据。
      *  续问的注入事件 id 是 `route:<event>:r<legs>`, 所以从它自己就能数回来 (reload 也在盘上)。 */
     const legsOf = (event: EventId): number =>
-      events.status().events.reduce((n, e) => {
-        const m = e.id.startsWith(`route:${event}:r`) ? Number(e.id.slice(`route:${event}:r`.length)) : NaN;
+      events.ids().reduce((n, id) => {
+        const m = id.startsWith(`route:${event}:r`) ? Number(id.slice(`route:${event}:r`.length)) : NaN;
         return Number.isInteger(m) && m > n ? m : n;
       }, 1);
     /** 同一笔活上的一句续问 (idle-nudge 追问 / 工单打回): 不新开行, 注入事件 id
@@ -1031,6 +1032,13 @@ const main = async (): Promise<void> => {
       // 交接是生命周期事件, 不进群; 失败只捎给它自己 (它调完 handoff_self 拿到的是
       // scheduled:true, 不说的话它不知道上下文其实没换)。
       notify: (t, text) => notices.post([t], text),
+      // 交接没做成: 切断那一轮扣下的终句按原行补投 —— 走与轮终同一条 onFinal (行已被合成失败落定的, 照追述规则处理)。
+      uncut: (t, ids) => ids.forEach((id) => {
+        const e = events.get(id);
+        if (!e?.result) { log.warn({ target: t, event: id }, "handoff: 扣下的终句已不在事件库, 补投不了"); return; }
+        log.info({ target: t, event: id, serves: e.serves }, "handoff: 交接没做成, 补投切断那一轮的终句");
+        settleFinal(e, { text: e.result.body });
+      }),
       log,
       store: loadJsonMap<PendingHandoff>(cfg.wrc.mirror.handoffsFile),
       archive: (e) => {
@@ -1051,7 +1059,7 @@ const main = async (): Promise<void> => {
       const waiting = r.kind === "wizard" ? r.to : baseOfKey(r.channel);   // 等着它交代的那一方 (信封挂在它名下)
       const channel = r.kind === "chat" ? r.channel : "";                  // 结论要落回群里时才带频道 (§9.4)
       const base = `route:${event}:resume`;
-      const id = events.status().events.some((e) => e.id === base) ? `${base}:${at}` : base;
+      const id = events.known(base) ? `${base}:${at}` : base;
       try {
         events.accept({
           id, identity: JSON.stringify([t, event, "resume", at]),
@@ -1238,7 +1246,12 @@ const main = async (): Promise<void> => {
         if (row.job && isTerminal(out.status) && !row.late)
           jobs.settle(row.job, row.owner, out.status, parseClosing(out.body).artifacts, { turn: event });
       }
-      const esc = router.escalate(event, (k) => !!wizards.get(k));
+      postRoute(row, out, router.escalate(event, (k) => !!wizards.get(k)), `rcpt:${event}:${out.rev}`);
+    };
+    /** 一份定论的投递 (账本已记过): 投给升级后的收方 `esc` (没有 = 行上的 receiver)。群收方只落
+     *  `hand`; wizard 收方 (含 Dead Letter 退到的群默认 wizard) 进收件箱, id = `inbox`。 */
+    const postRoute = (row: Route, out: { status: ReceiptStatus; body: string; rev: string }, esc: Delivery | undefined, inbox: string, retire?: string): void => {
+      const event = row.event;
       const receiver: Receiver = esc?.receiver ?? row.receiver;
       const via = (esc?.via ?? []).map(displayName);
       // 升级落在 chat 根 = Dead Letter: 退到那个群, 由它的默认 wizard 收下这份结论。
@@ -1267,7 +1280,6 @@ const main = async (): Promise<void> => {
       const retellTo = late && servedRow && servedRow.owner === to && servedRow.outcome?.status !== "canceled"
         ? servedRow.receiver.kind === "wizard" ? displayName(servedRow.receiver.to) : chatNameOf(cfg, servedRow.receiver.channel) || servedRow.receiver.channel
         : undefined;
-      const inbox = `rcpt:${event}:${out.rev}`;
       const job = row.job ? jobs.get(row.job) : undefined;
       const tally = row.job ? jobs.tally(row.job) : undefined;
       events.accept({
@@ -1296,8 +1308,30 @@ const main = async (): Promise<void> => {
               ...(row.late ? { retold: true } : {}) },
           ),
         } },
-      });
+      }, retire);
       router.commit(ops.hand({ event, inbox }));
+    };
+    /** 收件箱里那份回执投不到了 (`gone`: 收方没有绑定, 按 store 也恢复不了) —— 投进去时它还在
+     *  注册表上, 升级没跳过它。现在把它当不在, 沿 receiver 边重走一次升级: 能收的上层 wizard /
+     *  群根 (Dead Letter) 收下。链上无处可升 (根行的收方自己没了): canceled 是收掉它的那一方自己
+     *  发起的, 没人在等, 不再投; 别的定论退到收方的家群 (Dead Letter)。账本不再记第二遍。 */
+    const rerouteGone = (e: MessageEvent): void => {
+      const from = e.payload.peer?.from;
+      const event = from?.receipt ? from.event : undefined;
+      const row = event ? router.get(event) : undefined;
+      if (!event || !row || !from?.status) { log.warn({ id: e.id, target: e.target }, "receipt reroute: 认不出回执的那一行, 投不出去"); return; }
+      const reachable = (k: string): boolean => k !== e.target && !!wizards.get(k) && !!mirrorStore.get(k);
+      const home = baseOfKey(e.target);
+      const esc: Delivery | null | undefined = router.escalate(event, reachable)
+        ?? (row.receiver.kind === "wizard" && reachable(row.receiver.to) ? undefined
+          : from.status === "canceled" || home === e.target ? null
+          : { receiver: { kind: "chat", channel: home, message: "" }, serves: "", via: [e.target] });
+      if (esc === null) { log.info({ id: e.id, target: e.target, event, status: from.status }, "receipt reroute: 收方已不在且无处可升, 不再投"); return; }
+      const rev = e.id.slice(`rcpt:${event}:`.length).split("~")[0]!;
+      // Replaying a torn reroute must target the same durable inbox entry.
+      const inbox = `${e.id}~${finalId(e.id, JSON.stringify(esc?.receiver ?? row.receiver), rev)}`;
+      log.info({ id: e.id, target: e.target, event, to: esc?.receiver ?? row.receiver, inbox }, "receipt reroute: 收方已不在, 改投");
+      postRoute(row, { status: from.status, body: e.payload.text, rev }, esc, inbox, e.id);
     };
     /** 一条路由 op: 先落盘, 再投该投的 (need / error 带正文入箱; answer 按 receiver 投递)。这里
      *  只管 `re` (`mark open`) 把那一行拉回在飞 —— 账本与工单跟着 deliverRoute 走。 */
@@ -1324,7 +1358,16 @@ const main = async (): Promise<void> => {
       // 第二次就把被打回的原文照收成 done (打回的续问还没注入, 定论先落了)。
       if (e.serves && bounced.get(e.serves) === e.id) return;
       // 自我交接切断的那一轮: 收尾那句不是欠着的那几笔的答案 —— 行留 open, 交给新会话的「继续 <event>」。
-      if (cuttingTurn(e.target)) { log.info({ event: e.id, target: e.target, serves: e.serves }, "handoff: 交接切断的那一轮终句不落定"); return; }
+      // 扣下记在这场交接上: 交接没做成 (新会话没起来), 它就是那几笔仅有的交代, 由 uncut 补投。
+      if (cuttingTurn(e.target)) {
+        log.info({ event: e.id, target: e.target, serves: e.serves }, "handoff: 交接切断的那一轮终句不落定");
+        if (!verdict.error) handoffs.cut(e.target, e.id);
+        return;
+      }
+      settleFinal(e, verdict);
+    };
+    /** 一轮的终句落到它服务的那一行上 (定论 / 中途态), 验收不合规格就打回续问。 */
+    const settleFinal = (e: MessageEvent, verdict: FinalVerdict): void => {
       const plans = router.onFinal(e.target, e.serves, verdict);
       const answer = plans.flatMap((op) => (op.op === "answer" && op.outcome.status === "done" ? [op] : []))[0];
       const row = answer ? router.get(answer.event) : undefined;
@@ -1885,6 +1928,13 @@ const main = async (): Promise<void> => {
         const p = e.payload.peer!;
         if (p.attemptId) workflow.cancel(e.target, e.speaker, p.job, p.from.event);
       },
+      // 收方没了: 回执沿链改投; 派活 / 续问不另做 —— 那一行的 owner 就是它, sweeper 见 pane 不在判 dead 上浮。
+      gone: (e) => {
+        const p = e.payload.peer!;
+        log.warn({ id: e.id, target: e.target, receipt: !!p.from.receipt }, "message event: 收方已不在 (无绑定, 恢复失败), 不再重投");
+        if (p.attemptId) workflow.dispatched(p.attemptId, false);
+        if (p.from.receipt) rerouteGone(e);
+      },
       ready: async (e) => prereqsOf(e.speaker, e.payload.peer!.after ?? []).every((r) => r.state === "done")
         && (e.priority === "now" || await m.idleNow(e.target) || !(await m.paneLive(e.target)) || (e.priority === "urgent" && !(await othersTurn(e.target, e.speaker)))),
       inject: async (e, boundary) => {
@@ -2161,8 +2211,7 @@ const main = async (): Promise<void> => {
       // urgent 只打断你自己派的那一轮 (或它自己的回执轮): 手上若是别的 wizard / 人 / 定时任务的活,
       // 打断就误伤了那件 —— 降成 normal, 等它这一轮做完再投。
       const others = asked === "urgent" && wasBusy ? await othersTurn(target, self) : undefined;
-      // A transfer needs its own input turn; an interjection can be consumed by
-      // the previous turn and lose the new owner's final reply.
+      // Transfers need a separate input turn, including when the receiver becomes busy.
       const policy = others || plan.op === "transfer" ? "normal" : asked;
       if (canceledBeforeDispatch() || !actorStillValid()) { dropRow(); return { status: 409, body: { ok: false, reason: "caller authority or dispatch permit changed before acceptance" } }; }
       if (jobId) {
@@ -2297,7 +2346,7 @@ const main = async (): Promise<void> => {
         // 同一对并发多笔是允许的 (§4.1): 先取**还在排队**的那份 (那份还没进过你的会话); 都取过了就
         // 报最新那件已交付 —— 绝不把已经 paste 过的那份当成新答案交回来。
         const mine = router.settledTo(self).filter((r) => r.owner === h.target).reverse()   // byAt → 新在前
-          .map((row) => { const box = receiptOf(row); return { row, box, ev: events.get(box.id) }; });
+          .map((row) => { const box = receiptOf(row); const execution = events.executionOf(box.id); return { row, box, ev: execution && { execution } }; });
         const pick = mine.find((x) => x.ev?.execution === "queued") ?? mine[0];
         if (!pick) return { name: h.address, idle: wr.idle, ...(wr.reason ? { reason: wr.reason } : {}),
           ...(wr.idle ? { stale: true, reason: "它停下了, 但路由表上没有交回给你的定论 —— 多半停在一个等人点的弹窗上, 或那句话没被接住; peek_peer 看一眼" } : {}) };

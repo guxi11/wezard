@@ -454,6 +454,7 @@ const routerCore = async () => {
     const nd = R.onFinal(t, "C", "p1", { text: "NEED: 口令?" });
     ok(nd.length === 1 && nd[0].status === "need", "叶子 NEED 直接落原行 (直达发话方)");
     ok(R.onFinal(t, "B", "p1", { text: "RESULT: 旧 owner" }).length === 0, "交出去的那位再答不算数");
+    ok(R.finalReleased(t, "B", "p1", "已移交") === false && R.finalReleased(t, "C", "p1", "答") === true, "在飞的那一笔: 交出方终句不进群, 接手方的放行");
   }
 
   // ── 7 stop 中层级联: 叶子先落 ──

@@ -1103,7 +1103,7 @@ export const startMirrorTail = (deps: TailDeps): TailHandle => {
 // No phase is a read-only permission check; physical phases mark exposure.
 type InputIdentity = { sessionId?: string; transcript?: string };
 type DispatchGuard = (phase?: "paste" | "submit", identity?: InputIdentity) => boolean;
-type InjectResult = { ok: boolean; reason?: string; uncertain?: boolean; retryable?: boolean };
+type InjectResult = { ok: boolean; reason?: string; uncertain?: boolean; retryable?: boolean; gone?: boolean };
 interface InjectArgs {
   guard?: DispatchGuard;
   /** Called under the pane lock and again before its first physical input. */
@@ -6944,7 +6944,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (!permission()) return denied;
       const a = byTarget.get(target) ?? (await restoreFromStore(target, undefined, permission));
       if (!permission()) return denied;
-      if (!a) return { ok: false, retryable: true, reason: "no mirror attached for target" };
+      // A missing binding cannot recover on retry; let receipts escalate.
+      if (!a) return { ok: false, retryable: true, reason: "no mirror attached for target", ...(deps.store.get(target) ? {} : { gone: true }) };
       const sid = a.sessionId;
       const generation = a.injectGen ?? 0;
       const permitted = (): boolean => permission() && byTarget.get(target) === a && a.sessionId === sid && (a.injectGen ?? 0) === generation;
