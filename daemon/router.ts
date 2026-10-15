@@ -420,10 +420,11 @@ const retellOps = (table: Table, row: Route, verdict: FinalVerdict): Op[] => {
 export const finalReleased = (table: Table, owner: Key, serves: EventId | undefined, body: string): boolean => {
   const row = serves ? table[serves] : undefined;
   if (!row) return true;
-  if (row.status === "held") return false;
+  // 已 transfer 给别人的那一笔: 旧 owner 的终句不再算数 (§3.4, 同 onFinal) —— 交代与气泡都归接手方。
+  if (row.owner !== owner || row.status === "held") return false;
   if (row.status !== "answered" && row.status !== "handed") return waiting(table, row.event).length === 0;
   const o = row.outcome;
-  return row.owner === owner && !!o && o.status !== "canceled"
+  return !!o && o.status !== "canceled"
     && (o.rev === contentRev(body) || parseClosing(body).kind === "result");
 };
 

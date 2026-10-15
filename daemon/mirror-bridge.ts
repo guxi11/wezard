@@ -2510,6 +2510,11 @@ export interface MirrorBridge {
   formatFinal: (target: string, turn: string, channel: string, body: string) => string[];
   recoverEventFinal: (event: MessageEvent) => void;
   setEventFinalGate: (gate: (event: MessageEvent) => boolean) => void;
+  /** 这一轮服务的那一笔已 transfer 给别人: 它的终句一个字都不进群 (不是链式收口的「延后」)。 */
+  setEventHandedAway: (away: (event: MessageEvent) => boolean) => void;
+  /** transfer 交出人问的那一笔: `source` 这一轮 (服务 `serves`) 的气泡移交给接手方 `target`,
+   *  它开出注入事件 `eventId` 那一轮时接过去续写。交出方这一轮没有活气泡 = false。 */
+  handBubble: (source: string, serves: string, eventId: string, target: string) => boolean;
   settleFinalProgress: (id: string) => Promise<void>;
   dispatch: (args: MirrorDispatchArgs) => Promise<void>;
   shutdown: () => void;
@@ -3154,6 +3159,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   const TOOL_DETAIL_PREFIX = "TOOL_DETAIL|";
   let eventFinalGate: (event: MessageEvent) => boolean = () => true;
+  let eventHandedAway: (event: MessageEvent) => boolean = () => false;
   const newTurnId = (): string => `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
   const newMarkId = (): string => `m${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
@@ -3733,6 +3739,58 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   const finishBriefBubble = (a: AttachState, content: string, raw = false): Promise<void> => finishBubble(a, a.briefBubble, content, raw);
 
+  // ── transfer 的气泡移交 ───────────────────────────────────────────────
+  // 人问的那一笔 transfer 出去, 气泡 (那句人话的 frame/streamId) 跟着行走: 从交出方这一轮摘下,
+  // 按接手方的注入事件 id 寄存, 接手方开出那一轮时 (ensureBriefTurn) 接过去 —— CoT 进度与终句
+  // 续写同一颗气泡, 不另开新的。寄存只在内存: reload 后丢了就退回 standalone, 与过期同。
+  const handedBubbles = new Map<string, { bubble: BriefBubble; timer?: NodeJS.Timeout }>();
+  const writeBubble = (b: BriefBubble, content: string, finish: boolean): Promise<unknown> =>
+    (b.pending = (b.pending ?? Promise.resolve()).catch(() => undefined)
+      .then(() => client.replyStream(b.frame, b.streamId, content, finish))
+      .catch((e) => log.warn({ err: (e as Error).message, finish }, "transfer: handed bubble write failed")));
+  /** 6min 窗口的兜底收口按气泡自己的到期点算 (它从人那句话起算, 不因转手重置)。 */
+  const untilExpiry = (b: BriefBubble): number => Math.max(0, (b.expires ?? Date.now()) - Date.now());
+  const handBubble = (source: string, serves: string, eventId: string, target: string): boolean => {
+    const a = byTarget.get(source);
+    const b = a?.briefBubble;
+    const turnId = a?.briefTurnId;
+    // 只交「这一轮正服务着那一笔」的气泡: 别的轮的气泡与这次移交无关。
+    if (!a || !b || b.done || !turnId || !a.activeEventId || deps.events?.get(a.activeEventId)?.serves !== serves) return false;
+    clearTimeout(b.hardTimer);
+    a.briefBubble = undefined;
+    clearCot(a);
+    const channel = a.channel || undefined;
+    const line = (rest: string): string => headed(chatHead(target, chatTurnUrl(target, turnId), undefined, channel), rest) || "…";
+    void writeBubble(b, line("…"), false);
+    const held: { bubble: BriefBubble; timer?: NodeJS.Timeout } = { bubble: b };
+    // 接手方迟迟不开轮 (在忙 / 被并进别的轮): 到期前收口成「仍在处理中」, 终句届时走 standalone。
+    if (!isWxFrame(b.frame)) held.timer = setTimeout(() => {
+      if (handedBubbles.get(eventId) !== held) return;
+      handedBubbles.delete(eventId);
+      b.done = true;
+      void writeBubble(b, line(STILL_WORKING), true);
+    }, untilExpiry(b));
+    handedBubbles.set(eventId, held);
+    log.info({ source, target, serves, eventId, turnId }, "transfer: bubble handed to new owner");
+    return true;
+  };
+  /** 接手方这一轮 (`a.activeEventId`) 若有寄存的气泡: 接成本轮气泡, 头换成它自己的链接。 */
+  const adoptBubble = (a: AttachState, turnId: string): BriefBubble | undefined => {
+    const held = a.activeEventId ? handedBubbles.get(a.activeEventId) : undefined;
+    if (!held) return undefined;
+    handedBubbles.delete(a.activeEventId!);
+    clearTimeout(held.timer);
+    const b = held.bubble;
+    if (b.done || untilExpiry(b) === 0) return undefined;
+    if (!isWxFrame(b.frame)) b.hardTimer = setTimeout(() => {
+      const live = a.briefBubble === b && !a.briefConcluded;
+      void finishBubble(a, b, briefLine(a, turnId, live ? STILL_WORKING : ""), true);
+    }, untilExpiry(b));
+    void writeBubble(b, briefLine(a, turnId, "…"), false);
+    log.info({ sessionId: a.sessionId, turnId, eventId: a.activeEventId }, "transfer: handed bubble adopted");
+    return b;
+  };
+
   // 让一个已建好记录的 turn 成为活跃 turn。turn 级状态在这里统一归零 —— 唯一入口。
   const openBriefTurn = (a: AttachState, q: QueuedTurn): void => {
     a.briefTurnId = q.turnId;
@@ -4044,12 +4102,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), initialModel: a.model || undefined, initialEffort: a.effort || undefined, cwd: a.runningCwd || undefined, userQuery: query || opened || undefined, origin: consumeOrigin(a), from, ...channelFields(a), ...(query && at ? { createdAt: at } : {}) });
     a.briefTurnId = turnId;
     if (a.activeEventId) deps.events?.bind(a.activeEventId, turnId);
-    a.briefBubble = undefined;
     a.briefIsSlash = false;
     a.briefHadTool = false;
     a.briefConcluded = false;
     a.briefLastText = undefined;
     clearCot(a);
+    // transfer 接过来的那一笔: 续写人那句话的气泡 —— 这一轮就是在答群里的人。
+    a.briefBubble = adoptBubble(a, turnId);
+    if (a.briefBubble) a.turnFromChat = true;
     // 详情链接不在这里单独发 — 本轮的每条 standalone 都由 withLinkedTag 自带
     // (chatTurnUrl 读的正是 a.briefTurnId)。静默轮没有 standalone 可搭车, 那就
     // 一条都不发: 群里只该出现有正文的消息, 纯入口提示是噪音。
@@ -4095,7 +4155,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const event = a.activeEventId ? deps.events?.get(a.activeEventId) : undefined;
     if (event) deps.events!.result(event.id, body, finalId(event.id, event.channel, body), turnId);
     const gated = !!event && !eventFinalGate(event);
-    if (!turnSilent(a) && !gated) {
+    // 那一笔已交出: 交代归接手方, 这句只留 rolepage —— 不进气泡 (已移交) 也不 standalone。
+    if (event && eventHandedAway(event)) log.info({ sessionId: a.sessionId, turnId, event: event.id }, "brief: final of a transferred-away row kept off chat");
+    else if (!turnSilent(a) && !gated) {
       if (event) recoverEventFinal(deps.events!.get(event.id)!, a.briefBubble);
       else queueFinal(a.target, turnId, a.channel ?? baseOfKey(a.target), body, undefined, a.briefBubble);
     } else if (gated && !turnSilent(a)) {
@@ -7191,6 +7253,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     formatFinal,
     recoverEventFinal,
     setEventFinalGate: (gate) => { eventFinalGate = gate; },
+    setEventHandedAway: (away) => { eventHandedAway = away; },
+    handBubble,
     settleFinalProgress,
     dispatch: async ({ principal, text, images, frame, streamId, channel, speaker, eventId, guard, onSubmitted }) => {
       // Route by inbound principal — the WeCom chat the user just messaged us

@@ -1875,6 +1875,7 @@ const main = async (): Promise<void> => {
       if (e.canceled || e.interjected) return false;
       return router.finalReleased(e.target, e.serves, (events.get(e.id) ?? e).result?.body ?? "");
     });
+    m.setEventHandedAway((e) => { const row = e.serves ? router.get(e.serves) : undefined; return !!row && row.owner !== e.target; });
     // boot 的路由表侧恢复 (T8): held 重查前置、answered 重投一次; 二者幂等, 与 events.resume
     // 重放的注入/回执撞上无害。
     void m.restored.then(() => { events.resume(); settleHeld(); replayAnswered(); });
@@ -2138,6 +2139,8 @@ const main = async (): Promise<void> => {
           role: roleParam((body as { role?: string }).role), free: freed,
           ...(plan.op === "transfer" ? { transferred: true } : {}),
         } } }); } catch (error) { return { status: 409, body: { ok: false, eventId, reason: errText(error) } }; }
+      // 交出的是人问的那一笔: 那句话的气泡跟着行走, 接手方开轮时接过去续写 (不另开新气泡)。
+      if (handedChat && serves) m.handBubble(self, serves, eventId, target);
       // `re` 把那一笔从 need / error 拉回 open (§3.2 的 need→open / error→open): 行状态是「这份中途态
       // 已经报过了」的去重记号 —— 不拉回去, owner 下一轮交同一个中途态就被静默吞掉 (往返断在这里)。
       if (reTarget && (reTarget.status === "need" || reTarget.status === "error"))
@@ -3392,6 +3395,7 @@ const main = async (): Promise<void> => {
             job: jobId, kind: "task", spawned: true, role: roleParam((body as { role?: string }).role),
             ...(plan?.ok && plan.op === "transfer" ? { transferred: true } : {}),
           } } });
+        if (handedChat && serves) m.handBubble(self, serves, eventId, target);
       } else if (jobId && birthGuard()) {
         jobs.attach(jobId, { target, task: "", spawned: true, ...(roleParam((body as { role?: string }).role) ? { role: roleParam((body as { role?: string }).role) } : {}) });
       }
