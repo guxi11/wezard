@@ -1176,7 +1176,8 @@ const main = async (): Promise<void> => {
     //   chat   → 只落 `hand`: 定论就是那句人话的答复气泡, 放行由 mirror-bridge 的 final 通道
     //            (eventFinalGate 读同一张表) 给出。
     // T7: 投之前先看收方 (§4.3 / §4.4) —— 收方 wizard 已注销 → 沿链升级 (信封正文说明跳过了谁);
-    // 一路走到 chat 根 → Dead Letter; 要服务的那一笔已收口 = 孤儿 → 照投, 信封正文标迟到。
+    // 一路走到 chat 根 → Dead Letter; 要服务的那一笔已收口 = 孤儿 → 照投, 信封正文标迟到, 并写明
+    // 收方这一轮带 `RESULT:` 的终句会作为那一笔的追述投到哪 (一环一环走, 不抄近路)。
     const deliverRoute = (event: EventId, out: { status: ReceiptStatus; body: string; rev: string }): void => {
       const row = router.get(event);
       if (!row) return;
@@ -1188,7 +1189,8 @@ const main = async (): Promise<void> => {
         // 这一份原来只挂在旧回执 watcher 的 onOutcome 上, T10b 随它一起在这里重建。
         workflow.outcome(row.receiver.to, event, out.status, out.body);
         advancePlans();
-        if (row.job && isTerminal(out.status))
+        // 追述 (row.late) 不是工单成员的第二份结局: 账只记第一次落定。
+        if (row.job && isTerminal(out.status) && !row.late)
           jobs.settle(row.job, row.owner, out.status, parseClosing(out.body).artifacts, { turn: event });
       }
       const esc = router.escalate(event, (k) => !!wizards.get(k));
@@ -1205,10 +1207,16 @@ const main = async (): Promise<void> => {
       const to = receiver.kind === "wizard" ? receiver.to : baseOfKey(receiver.channel);
       const group = receiver.kind === "chat" ? receiver.channel : "";
       const serves = esc ? esc.serves : row.receiver.kind === "wizard" ? row.receiver.event ?? "" : "";
-      const served = serves ? router.get(serves)?.receiver : undefined;
+      const servedRow = serves ? router.get(serves) : undefined;
+      const served = servedRow?.receiver;
       // 只有要去群里收口时才带频道 (它服务的那一笔的 receiver 就是那句人话, 或 Dead Letter 退到群)。
       const channel = group || (served?.kind === "chat" ? served.channel : "");
-      const late = row.late === true || router.isOrphaned(serves);
+      const late = router.isOrphaned(serves);
+      // 迟到时收方的追述去向: served 行还在 (未回收)、没被收掉、owner 仍是收方 → 沿它的 receiver 原路;
+      // 否则无处可冒, 只进 rolepage。
+      const retellTo = late && servedRow && servedRow.owner === to && servedRow.outcome?.status !== "canceled"
+        ? servedRow.receiver.kind === "wizard" ? displayName(servedRow.receiver.to) : chatNameOf(cfg, servedRow.receiver.channel) || servedRow.receiver.channel
+        : undefined;
       const inbox = `rcpt:${event}:${out.rev}`;
       const job = row.job ? jobs.get(row.job) : undefined;
       const tally = row.job ? jobs.tally(row.job) : undefined;
@@ -1231,7 +1239,9 @@ const main = async (): Promise<void> => {
               ...(served?.kind === "wizard" ? { up: true } : {}),
               ...(audienceName(channel, row.asker) ? { audience: audienceName(channel, row.asker) } : {}),
               ...(via.length ? { via: via.join(", ") } : {}),
-              ...(late ? { late: true } : {}) },
+              ...(late ? { late: true } : {}),
+              ...(retellTo ? { retellTo } : {}),
+              ...(row.late ? { retold: true } : {}) },
           ),
         } },
       });
@@ -1817,10 +1827,11 @@ const main = async (): Promise<void> => {
     // T4: final 放行只读路由表 (§9.5) —— 这一轮服务的那一笔不再挂着未落定的子行 (`waiting`),
     // 且行不在 held (前置没落定就还没轮到它)。旧的四重推断全由这一条取代。
     // 没有行 (老事件 / 不带 serves 的注入) → 照旧放行。
+    // 已落定的那一笔只放追述 (§4.3): 判据与 onFinal 的 retellOps 同源 (router.finalReleased)。
+    // 调用方可能拿着 result 落定前的快照, 正文按事件库现读。
     m.setEventFinalGate((e) => {
       if (e.canceled || e.interjected) return false;
-      const row = e.serves ? router.get(e.serves) : undefined;
-      return !row || (row.status !== "held" && router.waiting(row.event).length === 0);
+      return router.finalReleased(e.target, e.serves, (events.get(e.id) ?? e).result?.body ?? "");
     });
     // boot 的路由表侧恢复 (T8): held 重查前置、answered 重投一次; 二者幂等, 与 events.resume
     // 重放的注入/回执撞上无害。

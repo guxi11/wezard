@@ -358,6 +358,10 @@ const routerCore = async () => {
       ops.hand({ at: T0 + 2, event: "h2", inbox: "rcpt:h2:x" }));
     const late = R.onFinal(u, "A", "h2", { text: "RESULT: real" });
     ok(late.length === 1 && late[0].late === true && late[0].outcome.status === "done", "失败交差后 owner 真答 → late 补投");
+    const u2 = add(u, ...late, ops.hand({ at: T0 + 4, event: "h2", inbox: "rcpt:h2:y" }));
+    ok(u2["h2"].settledAs === "timeout" && u2["h2"].settledAt === late[0].at, "追述推后 settledAt, settledAs 只认第一次");
+    ok(R.onFinal(u2, "A", "h2", { text: "又补一句" }).length === 1, "起初是合成失败: 未标记的追述可收多次");
+    ok(R.onFinal(u2, "A", "h2", { text: "RESULT: real" }).length === 0, "同内容重放不再产 op");
     // canceled 不收迟答
     let c = add(EMPTY, open("h3", "A", wiz("W"), T0));
     c = add(c,
@@ -367,7 +371,26 @@ const routerCore = async () => {
     // 自己答过的 done 不再收第二遍
     let d = add(EMPTY, open("h4", "A", wiz("W"), T0));
     d = add(d, ops.answer({ at: T0 + 1, event: "h4", outcome: R.makeOutcome("done", "RESULT: own") }), ops.hand({ at: T0 + 2, event: "h4", inbox: "rcpt:h4:x" }));
-    ok(R.onFinal(d, "A", "h4", { text: "RESULT: again" }).length === 0, "自己答过的 done 不再收");
+    ok(R.onFinal(d, "A", "h4", { text: "收到" }).length === 0, "自己答过的 done: 未标记的不收");
+    const re4 = R.onFinal(d, "A", "h4", { text: "RESULT: again" });
+    ok(re4.length === 1 && re4[0].late === true, "自己答过的 done: 显式 RESULT 作为追述收下");
+    ok(R.onFinal(d, "B", "h4", { text: "RESULT: again" }).length === 0, "追述只认 owner");
+    ok(R.finalReleased(d, "A", "h4", "收到") === false && R.finalReleased(d, "A", "h4", "RESULT: x") === true
+      && R.finalReleased(d, "A", "h4", "RESULT: own") === true, "已落定的那一笔: 终句只放追述 (或就是表上那份)");
+    ok(R.finalReleased(c, "A", "h3", "RESULT: x") === false, "被收掉的那一笔不放追述");
+    // 墓碑回收: 满 TTL + 子树闭合 + 无 held 等它
+    const H = R.TOMBSTONE_TTL_MS;
+    let g = add(EMPTY, open("g1", "A", chat, T0), open("g1.1", "B", wiz("A", "g1"), T0 + 1), open("g2", "C", wiz("W"), T0 + 2));
+    g = add(g,
+      ops.answer({ at: T0 + 3, event: "g1.1", outcome: R.makeOutcome("done", "RESULT: b") }), ops.hand({ at: T0 + 3, event: "g1.1", inbox: "x" }),
+      ops.answer({ at: T0 + H, event: "g1", outcome: R.makeOutcome("done", "RESULT: a") }), ops.hand({ at: T0 + H, event: "g1", inbox: "y" }),
+      ops.answer({ at: T0 + 4, event: "g2", outcome: R.makeOutcome("done", "RESULT: c") }), ops.hand({ at: T0 + 4, event: "g2", inbox: "z" }),
+      open("g3", "D", wiz("W"), T0 + 5, { after: ["g2"] }));
+    const gone = R.collectable(g, T0 + H + 10);
+    ok(gone.has("g1.1") && !gone.has("g1"), "满 TTL 的叶子收, 未满的父留着");
+    ok(!gone.has("g2"), "held 行的 after 还引用 → 不收");
+    ok(!R.collectable(g, T0 + H - 10).has("g1.1"), "未满 TTL 不收");
+    ok(Object.keys(R.collect(g, T0 + 2 * H + 10)).sort().join() === "g2,g3", "父子都满 TTL → 整支回收");
   }
 
   // ── 5 NEED 往返 (上冒 + re 拉回) ──

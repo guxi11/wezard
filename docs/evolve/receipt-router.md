@@ -62,7 +62,9 @@ interface Route {
   job?: string;
   after?: EventId[];        // 仅 held
   outcome?: { status: "done" | "timeout" | "silent" | "dead" | "canceled"; body: string; rev: string };
-  late?: true;              // 先以失败交差, owner 之后又真答了 —— 迟到的那份再投一次即删
+  settledAt?: number;       // 最近一次落定 (answer op 的 at), 追述会推后 —— 墓碑回收的起点 (§4.6)
+  settledAs?: Terminal;     // 第一次落定的结局, 只写一次 —— 追述换掉 outcome 后仍认得出「起初是合成失败」
+  late?: true;              // 落定后 owner 又追述过 (§4.3), 当前 outcome 是追述那份
 }
 ```
 
@@ -118,8 +120,8 @@ stateDiagram-v2
   need --> answered: 超时 / 取消 / 死
   error --> answered: 超时 / 取消 / 死
   answered --> handed: 入 receiver 收件箱 (幂等)
-  handed --> handed: 失败交差后 owner 迟到的真答 (late, 只投一次)
-  handed --> [*]: gc (无活着的子行 且 > 24h)
+  handed --> answered: owner 的追述 (late, 新 rev; 规则见 §4.3)
+  handed --> [*]: gc (落定满 24h · 子树闭合 · 无 held 等它, §4.6)
 ```
 
 ### 3.1 插入 (谁、何时)
@@ -151,7 +153,7 @@ owner 一轮结束时, daemon 拿到 `(owner, servedEvent, closingText)` (来自
 | 未标记 | 非空 | **进展**: 只进 rolepage, 行不动 (= 旧 deferred, 但条件是表里看得见的 `waiting`) |
 | (空 / 连续 N 次停下没答) | — | `answer silent` |
 
-`answer` 之后立刻走 outbox 两步: ① 按 receiver 投递 —— `chat` → 排进那句人话的答复 (message-events 的 final 通道); `wizard` → 往 receiver 的收件箱 enqueue 一份回执, id = `rcpt:<event>:<rev>` (幂等); ② 入箱成功落 `hand`。「从数组中删掉」= `hand` 之后这一行不再出现在 `owedBy` / `waiting` 里; 墓碑留着只为两件事: 子行还要沿它往上走 `chain`, 以及失败交差后的 `late`。
+`answer` 之后立刻走 outbox 两步: ① 按 receiver 投递 —— `chat` → 排进那句人话的答复 (message-events 的 final 通道); `wizard` → 往 receiver 的收件箱 enqueue 一份回执, id = `rcpt:<event>:<rev>` (幂等); ② 入箱成功落 `hand`。「从数组中删掉」= `hand` 之后这一行不再出现在 `owedBy` / `waiting` 里; 墓碑 = 只读的投递路标: 子行沿它往上走 `chain` / 升级, owner 的追述沿它的 receiver 原路再投 (§4.3); 满 TTL 后压实时回收 (§4.6)。
 
 回执进 receiver 那一轮, **所服务的那一笔 = `receiver.event`** —— 于是 W 在这一轮的终句又落到 W 自己那一行上, 按上表再走一遍。递归在这里闭合: 叶子交差 → 回执轮 → 父交差 → … → 根交进群。
 
@@ -199,7 +201,7 @@ interface HeldInjection {
     };
   };
 }
-Route.injection?: HeldInjection   // release 后留在墓碑里供审计, gc 随行走
+Route.injection?: HeldInjection   // release 后留在墓碑里供审计, 随墓碑回收 (§4.6) 一起走
 ```
 
 target / speaker / serves / asker / deadline **不重复存** —— 从行推导 (`owner` / `receiver.to` / `event` / `asker` / `deadlineAt`; held ⇒ receiver 必为 wizard, 入口已保证)。`open` op 增可选 `injection`, `parseOp` 核形状 (`id` 带 `route:` 前缀、`payload.text`/`peer.envelope` 非空、priority 三词之一); `row` 快照行自动携带。
@@ -213,6 +215,7 @@ target / speaker / serves / asker / deadline **不重复存** —— 从行推�
 **边界**:
 - **目标已死**: 放行即正常派活 —— 死 pane / 重试 / timeout 全走 message-events 与 sweeper 的现成路, 无特例。
 - **前置失败**: sweepOps 与 settleHeld 两处 `answer canceled` (带前置快照) 幂等共存 (定论写一次); 不注入, injection 留墓碑。
+- **前置事后追述**: 前置行以合成失败收场后 owner 又追述 (outcome 变 done, §4.3), 已按 `canceled` 落定的 held 行**不复活** —— 定论写一次, canceled 也不收追述; 要这件活就重新派。
 - **停放期 reload**: 载荷在 routes.jsonl (严格读盘, 坏行拒启动), 与收件箱 (宽松存储, 坏了当空) 解耦 —— 收件箱丢了, 停放的活照样放得出去。boot: settleHeld 重查前置, 全 done 就地放行, pending 继续停。
 - **held 超期** (前置一直没落定, `deadlineAt` 先到): sweepOps 的 held 分支补 `deadlineAt <= now` → `answer timeout` (理由「等前置等过头」) —— 现状 held 永不超时是个洞。
 - **取消**: `cancelOps` 不区分状态, held 行直接 canceled; 没有队列事件要撤 (比旧实现少一步 `events.cancel`)。
@@ -232,7 +235,7 @@ target / speaker / serves / asker / deadline **不重复存** —— 从行推�
 
 | 情形 | 判定 | 本行 | 子树 |
 |---|---|---|---|
-| `timeout` | 单个 sweeper 扫 `deadlineAt` (绝对时刻, reload 后照扫) | `answer timeout` (正文附 owner 最后一句) → 投递 | 不动 (ABANDON): owner 之后的真答以 `late` 再投一次 |
+| `timeout` | 单个 sweeper 扫 `deadlineAt` (绝对时刻, reload 后照扫) | `answer timeout` (正文附 owner 最后一句) → 投递 | 不动 (ABANDON): owner 之后的真答作为追述 (`late`) 再投, 可多次 (§4.3) |
 | `silent` | owner 停下 N 次没交终句 | `answer silent` | 同上 |
 | `dead` | owner pane 没了且不在交接, 宽限 5s | `answer dead` | 子行照常干, 回执会投给已死的 owner → 走 4.4 升级 |
 | `canceled` | `stop_wizard(B)` / `close_job` / interrupt | `answer canceled` (发起取消者若就是 receiver 则不投, 它自己知道) | **TERMINATE**: `subtree(e)` 全部 canceled, 叶子先落 |
@@ -242,7 +245,30 @@ target / speaker / serves / asker / deadline **不重复存** —— 从行推�
 
 ### 4.3 孤儿 (父行先收口)
 
-父行 f 已 `handed` (LLM 提前 RESULT, 或 f 超时), 子行 c 之后才交差: c 照常投给 receiver `{W, f}`, 信封标 `late` / `detached`; 那一轮服务的 f 已关 → 终句只进 rolepage。**结果不丢, 只是不再往上冒** —— 要不要追加交代, W (LLM) 自己决定 (比如 notify 或对 X 新开一件)。
+父行 f 已 `handed` (LLM 提前 RESULT, 或 f 超时), 子行 c 之后才交差: c 照常投给 receiver `{W, f}`, 信封标迟到。那一轮服务的仍是 f —— f 的 receiver 边一直在, 所以 W 这一轮的终句可以作为 **f 的追述** 沿原路再投 (一环一环走, 不抄近路: 到上游 wizard 进它的收件箱, 到群根是一颗独立气泡, 由根 owner 用自己的话说)。
+
+**追述规则** (`router.onFinal` 已落定支 `retellOps`, daemon 定路由、LLM 定语义):
+
+| f 的落定 | owner 这一轮的终句 | 结果 |
+|---|---|---|
+| 起初是合成失败 (`settledAs` ∈ timeout / silent / dead) | `RESULT:` 或未标记的定论 | `answer{late}` 新 rev, 可收多次 |
+| 起初是 done | 只认显式 `RESULT:` | `answer{late}` 新 rev; 未标记 = 收到回执后的随口一句, 只进 rolepage |
+| `canceled` | 任意 | 不收 (子树已 TERMINATE) |
+| 任意 | 与当前 outcome 同内容 / CLI 报错 / 不是 owner (已 transfer) | 无 op |
+
+- **群那一跳的闸**: `eventFinalGate` 对 served 行已落定的那一轮走同一判据 (`router.finalReleased`): 表上的 outcome 就是这句, 或这句带 `RESULT:` 且 owner 是它、那一笔没被收掉 —— 与 onFinal 谁先跑无关。
+- **追述不改账**: `deliverRoute` 对 `row.late` 跳过 `jobs.settle` (成员结局只记第一次); 回执的注入事件 `job` 本就留空, 追述不计 `maxTurns`。
+- **信封措辞**: 中间环「终句带 `RESULT:` 才作为追述沿原路投给 X; 不带只进 rolepage」; 根跳「带 `RESULT:` 才作为追述进群」; f 已被收掉 / 已回收才说「终句只进 rolepage」。回执本身是追述时另注一句「以这一份为准」。
+- **刷屏有界**: 追述只沿 receiver 边往根走 (`chain` 带环保护), 每一环要 owner 显式 `RESULT:` 才再冒一层。
+
+### 4.6 墓碑回收
+
+`compact` 时的纯过滤 (`router.collect`), 不新增 IO 点 —— 压实本来就整份重写。一行可回收 ⇔
+- `handed`, 且 `now - (settledAt ?? deadlineAt) ≥ 24h` (`TOMBSTONE_TTL_MS`, 与工单已关行的保留期对齐; 无 settledAt 的老行按 deadlineAt 起算);
+- 没有 held 行的 `after` 引用它;
+- 整棵子树都可回收 (子树闭合: 收一行必收全部后代, 留下的行往上走 chain 永远走得通)。
+
+回收之后迟到的结论退回旧行为: 照投原收方 (`escalate` 认不出更上一层就停在原收方), 信封说「终句只进 rolepage」, 不再往上冒。
 
 ### 4.4 receiver 不在了 (升级)
 
@@ -346,10 +372,10 @@ handoff: owner 是 target key, 换 sid 不换 key → 表不动。新会话贴�
 | `release` | `{event}` | held → open (前置全落定, 已投给 owner) |
 | `mark` | `{event, status:"need"\|"error"\|"open", body?, rev?}` | 中途态; 带 body = 这份 NEED/error 正文同时入 receiver 收件箱 (`rcpt:<event>:<rev>`) |
 | `move` | `{event, owner}` | transfer (前置 `waiting(event)` 为空, 否则 409) |
-| `answer` | `{event, outcome:{status, body, rev}, late?}` | 定论落 outbox; `late` = 行已 handed 后 owner 迟到的真答 |
+| `answer` | `{event, outcome:{status, body, rev}, late?}` | 定论落 outbox, 写 `settledAt = at`、`settledAs` (首次); `late` = 行已落定后 owner 的追述 (§4.3) |
 | `hand` | `{event, inbox}` | 已入 receiver 收件箱 / 已排进群答复; `inbox` = 投递幂等 id |
 | `drop` | `{event}` | `pending_items({drop})`: receiver.wizard 的 `event` 摘掉 (变 detach), 行不动 —— 结论回来时只进收件箱, 不挂任何一笔 |
-| `gc` | `{event}` | 墓碑回收 |
+| `gc` | `{event}` | 删行 (现只用于派活中途作废的那一行; 墓碑回收走压实过滤, §4.6) |
 | `row` | `{...Route}` | **压实快照行** (仅压实产生): fold 时等价于把该行整体置为这份状态 |
 
 读盘规则照 §2.3 (仅尾行容许撕裂); 压实 = 把 fold 结果里未 gc 的行各写一行 `row`, tmp+rename。
@@ -419,7 +445,7 @@ handoff: owner 是 target key, 换 sid 不换 key → 表不动。新会话贴�
 ### 9.7 不变量 (实施时每次验收都要守住)
 
 1. 先写 journal 后改内存; 任何投递先落 `answer` 再入箱, 入箱成功才落 `hand`。
-2. 一个 event 的定论只有一个 (终态写一次); `need`/`error` 不改写定论。
+2. 一个 event 的定论只有一个 (终态写一次); `need`/`error` 不改写定论; 唯一例外是 owner 的追述 (`answer{late}`, §4.3), 它不改 `settledAs`、不再记工单账。
 3. 收件箱幂等键 = `rcpt:<event>:<rev>`; 重放任何 op 序列不产生第二份投递。
 4. `waiting(e)`/`chain(e)` 全部是派生查询, 不落第二份数据。
-5. 工单账本 (`jobs.ts`) 的接口不变: 行 `answer` 时 `settleJob` 一次, done/total 照旧按成员读。
+5. 工单账本 (`jobs.ts`) 的接口不变: 行首次 `answer` 时 `settleJob` 一次 (追述不记), done/total 照旧按成员读。

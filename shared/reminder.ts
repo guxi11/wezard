@@ -90,7 +90,15 @@ export const askerFromEnvelope = (env: Envelope, chatOf: (chat: string) => strin
 /** 回执那一轮的去向, 已渲染成给人 / 模型看的称呼 (§9.5: 去向由路由行的 receiver 边决定)。
  *  `up` = 这一轮的终句会落到另一笔同伴的欠账上 (结论回给上游 wizard); 缺省 = 只进 rolepage
  *  或落回那个群 (看 chat)。只用于信封正文措辞, 不写成属性。 */
-export interface ReceiptRoute { up?: boolean; audience?: string; asker?: Asker; via?: string; late?: boolean; pending?: number }
+export interface ReceiptRoute {
+  up?: boolean; audience?: string; asker?: Asker; via?: string; pending?: number;
+  /** 收方这一轮服务的那一笔已收口 (孤儿, §4.3)。 */
+  late?: boolean;
+  /** 迟到时, 收方带 `RESULT:` 的终句作为那一笔的追述沿原路投给谁 (上游 wizard / 群的称呼); 缺省 = 无处可冒。 */
+  retellTo?: string;
+  /** 这份回执本身是追述 (对方之前已交过一份)。 */
+  retold?: boolean;
+}
 
 /** 这句话怎么接 —— 只影响派活信封的正文措辞 (挂在哪一笔上由注入事件的 `serves` 定, 不进信封)。
  *  `act`: 缺省是一件活; ask = 只答一问; fyi = 知会, 不用回。
