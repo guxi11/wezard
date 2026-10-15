@@ -52,7 +52,7 @@ export interface NormalizedTranscriptLine {
   timestamp?: string;
   type?: string;
   /** Present on `type:"system"` lines — e.g. "local_command" for slash-command
-   *  invocation records (Claude Code only; codebuddy has no system lines). */
+   *  invocation records (Claude Code); codebuddy only maps `turn-metrics` here (TURN_METRICS). */
   subtype?: string;
   /** Top-level content for `type:"system"` lines. */
   content?: string;
@@ -81,7 +81,8 @@ export interface NormalizedTranscriptLine {
    *  收口 —— mirror-bridge 挂一小段静默期确认, 期间来了新 item 就撤销。原生 Claude
    *  有 end_turn / turn_duration 两个硬信号, 永远不置位。 */
   softTurnEnd?: boolean;
-  /** Final text precedes usage; close only on the backend completion event. */
+  /** Final text precedes usage; close only on the backend completion event.
+   *  不带 stop_reason:"end_turn" 时 (codebuddy) 连「这句是终句」都要等那个事件确认。 */
   awaitTurnEnd?: boolean;
   mid?: boolean;
 }
@@ -198,6 +199,9 @@ const normalizeCbUsage = (pd: Record<string, unknown>) => {
   };
 };
 
+/** codebuddy `turn-metrics` 归一化后的 system subtype (见 normalizeCodebuddy 末尾)。 */
+export const TURN_METRICS = "turn_metrics";
+
 const normalizeCodebuddy = (raw: unknown): NormalizedTranscriptLine | null => {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
@@ -234,8 +238,10 @@ const normalizeCodebuddy = (raw: unknown): NormalizedTranscriptLine | null => {
       // 写成同形的独立 message, 映射成 stop_reason:"end_turn" 会让"中间说一句"就把
       // 整个 turn 收掉 (后半轮全部退化成散装气泡)。改为软收口, 交给 mirror-bridge
       // 用静默期确认。
+      // awaitTurnEnd: 同理, 这句是不是终句只有轮终证据说了算 (紧随的 turn-metrics / 下一句
+      // user 行 / CLI 已闲) —— peers 据此不把中途叙述当定论 (见 parseTurns 的 soft)。
       const status = r.status as string | undefined;
-      return { type: "assistant", ...uuids, message: msg, softTurnEnd: status === "completed" };
+      return { type: "assistant", ...uuids, message: msg, softTurnEnd: status === "completed", awaitTurnEnd: true };
     }
     return null;
   }
@@ -286,6 +292,12 @@ const normalizeCodebuddy = (raw: unknown): NormalizedTranscriptLine | null => {
       message: { role: "assistant", content: [{ type: "thinking", thinking }] },
     };
   }
+
+  // turn-metrics (时长 / token 增量): 一段模型调用收尾时写一行。紧跟在 assistant 正文后面
+  // = 这一轮说完了 —— codebuddy 唯一的轮终证据; 但长工具调用 (TaskOutput 阻塞等后台) 中途
+  // 也会写, 那时前一条是 function_call / result。所以不映射成 turn_duration (mirror 会当硬
+  // 收口、中途关轮), 单开一个 subtype, 只由 peers 按「紧跟正文」读 (TURN_METRICS)。
+  if (type === "turn-metrics") return { type: "system", subtype: TURN_METRICS };
 
   // file-history-snapshot / ai-title / summary → drop.
   return null;

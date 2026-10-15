@@ -307,7 +307,10 @@ const main = async (): Promise<void> => {
         const next = turns.findIndex((t, i) => i > start && t.role === "user" && !t.queued);
         const replies = turns.slice(start + 1, next < 0 ? undefined : next).filter((t) => t.role === "assistant");
         const last = replies.at(-1);
-        const ended = next >= 0 || (last && !last.mid && !last.apiError) || (sameSession && await bridge.idleNow(e.target));
+        // 软后端 (codebuddy 不写 stop_reason) 的「写完了」不是终句: 中途叙述 (「先跑 typecheck」)
+        // 与终稿同形, 下一秒就跟着 function_call —— 必须见到轮终证据 (紧跟的 turn-metrics /
+        // 下一句 user 行 / CLI 已闲) 才算这一轮说完, 否则假定论先落 answer、真结论再落一个 rev。
+        const ended = next >= 0 || (last && !last.mid && !last.apiError && (!last.soft || last.end)) || (sameSession && await bridge.idleNow(e.target));
         // 一轮以 CLI 报错收尾: 那段报错不是定论, 但要作为中途态 (error) 报给 receiver ——
         // 所以照旧不落成 result, 只把原文交给 final (见 §9.4)。
         return { consumed: true, interjected: !!turns[start]!.queued,
@@ -338,6 +341,8 @@ const main = async (): Promise<void> => {
         : { ack: JSON.stringify(ack), uncertain: "final transport returned no explicit success ACK" };
     },
     deliveryEvidence: (d, n) => wx.finalStatus(`${d.id}:${n}`) as { state: "queued" | "delivered" | "uncertain" | "failed"; ack?: string; reason?: string } | undefined,
+    held: (e, why, forMs) => log.warn({ event: e.id, target: e.target, speaker: e.speaker, priority: e.priority,
+      serves: e.serves, after: e.payload.peer?.after, why, heldSec: Math.round(forMs / 1000) }, "message event held in queue"),
     error: (e) => log.error({ err: errText(e) }, "message event scheduler"),
   });
   const bridge = startMirror({ cfg, log: log.child({ mod: "mirror" }), client: ws.client, store: mirrorStore, events, sendFrozen: (channel, content, stream) => responseTracker.sendFrozen(channel.replace(/^(user|chat|group):/, ""), content, stream, events.running) });

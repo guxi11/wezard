@@ -63,7 +63,7 @@ import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, windowLa
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { isWxFrame } from "../shared/wx-text.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
-import { stripAnsi, paneIsBusy, codexTurnBusy, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, lastModel, lastUserTurn, talkRounds, openToolUses, renderDialog, stripForChat, type PeerInfo, type PeerReply } from "./peers.js";
+import { stripAnsi, paneIsBusy, codexTurnBusy, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, lastModel, lastUserTurn, talkRounds, openToolUses, turnClosed, renderDialog, stripForChat, type PeerInfo, type PeerReply } from "./peers.js";
 
 // PATH augmentation: launchd / systemd start the daemon
 // with a stripped PATH that often lacks nvm / homebrew, breaking spawn(claudeBin).
@@ -4054,6 +4054,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     voidTurnAgents(a);
     closeSubagentTurns(a); // 父 turn 收口 = 它派出的 subagent 都已结束
     clearCot(a);
+    // 它闲下来了: 收件箱里等它闲的回执 / 派活此刻就该贴, 不等下一拍定时泵。
+    void deps.events?.pump();
   };
 
   // ── Subagent turns ─────────────────────────────────────────────────
@@ -6179,7 +6181,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const pane = paneOf(target);
     if (!pane || !(await tmuxPaneAlive(pane))) return false;
     const { cap, box } = await readPaneInput(pane);
-    return !!cap.trim() && box.known && !paneIsBusy(cap) && !isModalPane(cap).modal;
+    if (paneIsBusy(cap) || isModalPane(cap).modal) return false;
+    // 注册表说不出 (codebuddy 的注册表没有 status) 时, 转录里这一轮紧跟正文落了轮终记录
+    // (turn-metrics) 就是确定闲了, 不必再认出输入框 —— 只读屏曾把闲了 5 分钟的 owner 一直
+    // 判成不闲, 回执卡在收件箱里直到它下一轮结束。CLI 退回 shell 的 pane 照旧不算。
+    const path = jsonlOf(target);
+    if (path && turnClosed(path)) return !(await paneRunsShell(pane));
+    return !!cap.trim() && box.known;
   };
 
   // 等到它闲下来, 事件驱动: 注册表目录一有写入就重判, 翻成 idle 的那一刻即返回。

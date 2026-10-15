@@ -10,7 +10,7 @@
 // no tmux, no WeCom, no daemon state. The mirror bridge (which owns the live
 // attachments) and the graph runner (which drives them) both compose on top.
 import { existsSync, openSync, readSync, closeSync, statSync } from "node:fs";
-import { backendForPath, type CliBackendName } from "../shared/cli-backends.js";
+import { backendForPath, TURN_METRICS, type CliBackendName, type NormalizedTranscriptLine } from "../shared/cli-backends.js";
 import { clipLine, truncate, truncateWithCount } from "../shared/std.js";
 import { tildePath, type Part } from "./notices.js";
 import { envelopeAttrs, parseEnvelope, renderReminder, type Envelope, type ReceiptRoute, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
@@ -116,9 +116,14 @@ export interface Turn {
   env?: Envelope;
   /** Wall-clock epoch ms from the line's own `timestamp`; 0 if absent/unparsable. */
   ms?: number;
-  /** assistant 的中途句: 这条 message 以工具调用收尾 (stop_reason=tool_use), 后面还有
-   *  话, 不可能是这一轮的终句。后端不写 stop_reason (codebuddy) 就不标。 */
+  /** assistant 的中途句: 这条 message 以工具调用收尾 (stop_reason=tool_use), 或后面紧跟着
+   *  工具调用记录 (codebuddy 的 function_call 是独立一行), 不可能是这一轮的终句。 */
   mid?: true;
+  /** 后端不写 stop_reason (codebuddy): 这句是不是终句要看轮终证据 (`end` / 下一句 user 行 /
+   *  CLI 已闲), 光凭「写完了」不算。 */
+  soft?: true;
+  /** 紧跟这句落了轮终记录 (claude `turn_duration` / codebuddy `turn-metrics`): 这一轮说完了。 */
+  end?: true;
   /** CLI 自己插进来的一行 user (后台任务完成的 `<task-notification>`): 没有话, 但它
    *  起了新的一轮 —— 只有要按 user 行切轮的调用方 (`marks`) 才拿得到。 */
   notice?: true;
@@ -202,13 +207,23 @@ export const talkRounds = (
 /** 纯解析: 一段 transcript 原文 → 里面的对话轮次。`keepLines` 保留换行 —— 摘要与
  *  预览要压成一行, 但交给另一个 wizard 读的回复不能: 表格 / 列表 / 代码块压成一行
  *  之后对模型就是一团字。`marks` 把 CLI 自插的 user 行留成空的 `notice` 轮 (见 Turn)。 */
-const parseTurns = (jsonlPath: string, raw: string, keepLines = false, marks = false): Turn[] => {
+const parseTurns = (jsonlPath: string, raw: string, keepLines = false, marks = false): Turn[] =>
+  foldMarks(lineItems(jsonlPath, raw, keepLines, marks));
+
+/** 一行记录在对话轮次里的身份: 一句话 (Turn), 或只对前一句有意义的标记 —— `tool` 工具
+ *  调用、`end` 轮终记录、`gap` 别的有内容的行 (tool_result / reasoning / 空 user 行)。 */
+type Item = Turn | "tool" | "end" | "gap";
+
+const isTurnEnd = (row: NormalizedTranscriptLine): boolean =>
+  row.type === "system" && (row.subtype === "turn_duration" || row.subtype === TURN_METRICS);
+
+const lineItems = (jsonlPath: string, raw: string, keepLines: boolean, marks: boolean): Item[] => {
   if (!raw) return [];
   const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
   return raw
     .split("\n")
     .filter((l) => l.trim())
-    .flatMap((line) => {
+    .flatMap((line): Item[] => {
       let parsed: unknown;
       try { parsed = JSON.parse(line); } catch { return []; }
       // The first line of a truncated tail is usually a fragment — normalize
@@ -222,8 +237,9 @@ const parseTurns = (jsonlPath: string, raw: string, keepLines = false, marks = f
       let row;
       try { row = normalize(parsed); } catch { return []; }
       if (!row || row.isMeta || row.isSidechain) return [];
+      if (isTurnEnd(row)) return ["end"];
       const role = row.message?.role;
-      if (role !== "user" && role !== "assistant") return [];
+      if (role !== "user" && role !== "assistant") return ["gap"];
       const raw = blockText(row.message?.content);
       // 剥 meta 只对 user 行: 信封 / slash 包装只会被注入进 user 行。assistant 是模型自己
       // 的话, 它引用一段 `<system-reminder …>` 原文 (行内代码里写开头、代码块里写结尾)
@@ -236,10 +252,35 @@ const parseTurns = (jsonlPath: string, raw: string, keepLines = false, marks = f
       // which silently stamped every CodeBuddy turn ms=0.
       const ms = stampMs((parsed as { timestamp?: unknown }).timestamp);
       const mid = role === "assistant" && (row.mid === true || row.message?.stop_reason === "tool_use");
+      const soft = role === "assistant" && row.awaitTurnEnd === true && row.message?.stop_reason !== "end_turn";
+      const tool = role === "assistant" && Array.isArray(row.message?.content) && row.message.content.some((b) => b?.type === "tool_use");
       if (!text && marks && role === "user" && raw.includes("<task-notification")) return [{ role, text: "", ms, notice: true } as Turn];
       const apiError = role === "assistant" && (parsed as { isApiErrorMessage?: unknown }).isApiErrorMessage === true;
-      return text ? [{ role, text, ms, ...(env ? { env } : {}), ...(mid ? { mid: true } : {}), ...(apiError ? { apiError: true } : {}) } as Turn] : [];
+      const turn: Item[] = text ? [{ role, text, ms, ...(env ? { env } : {}), ...(mid ? { mid: true } : {}), ...(soft ? { soft: true } : {}), ...(apiError ? { apiError: true } : {}) } as Turn] : [];
+      return tool ? [...turn, "tool"] : turn.length ? turn : ["gap"];
     });
+};
+
+/** 标记折回前一句 assistant: 后面跟着工具调用 → 中途句 (`mid`); **紧跟**着轮终记录 → 终句
+ *  (`end`)。中间隔了别的行 (function_call / result) 的轮终记录不算 —— codebuddy 在长工具
+ *  调用 (TaskOutput 阻塞等后台) 中途也写 turn-metrics。 */
+const foldMarks = (items: readonly Item[]): Turn[] =>
+  items.reduce<Turn[]>((acc, it, i) => {
+    if (typeof it !== "string") { acc.push(it); return acc; }
+    const last = acc.at(-1);
+    if (last?.role !== "assistant") return acc;
+    if (it === "tool") acc[acc.length - 1] = { ...last, mid: true };
+    else if (it === "end" && items[i - 1] === last) acc[acc.length - 1] = { ...last, end: true };
+    return acc;
+  }, []);
+
+/** 这一轮已经说完、CLI 闲着: 转录最后一行是轮终记录, 且紧跟在一句 assistant 正文 (非中途句)
+ *  后面。说不准 (没有轮终记录、之后又起了动静、读不到) 一律 false —— 调用方退回 pane 裁决,
+ *  这里只给得出「确定闲了」。 */
+export const turnClosed = (jsonlPath: string): boolean => {
+  const items = readTailUntil(jsonlPath, (raw) => lineItems(jsonlPath, raw, false, true), (xs) => xs.length >= 2);
+  const [prev, last] = items.slice(-2);
+  return last === "end" && typeof prev === "object" && prev.role === "assistant" && !prev.mid;
 };
 
 // Flatten a message's content for QUOTE DEDUP only — unlike `blockText` this

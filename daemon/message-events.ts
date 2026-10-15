@@ -104,8 +104,13 @@ export interface MessageAdapters {
   format?: (delivery: DeliveryInput) => DeliveryInput;
   send: (delivery: FinalDelivery, part: number) => Promise<{ ack?: string; uncertain?: string; queued?: boolean; failed?: string }>;
   deliveryEvidence?: (delivery: FinalDelivery, part: number) => { ack?: string; state: "queued" | "delivered" | "uncertain" | "failed"; reason?: string } | undefined;
+  /** 回执 / 派活排着却被扣着超过 HOLD_LOG_MS (ready=false / injectable=false / 退避 / 探测位被占):
+   *  报一次带原因的日志 —— 扣得没声是这条路最难查的样子。原因变了或扣满 HOLD_RELOG_MS 再报。 */
+  held?: (event: MessageEvent, why: string, forMs: number) => void;
   error: (error: unknown) => void;
 }
+const HOLD_LOG_MS = 30_000;
+const HOLD_RELOG_MS = 5 * 60_000;
 const canonical = (x: unknown): unknown => Array.isArray(x) ? x.map(canonical)
   : x && typeof x === "object" ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, canonical(v)])) : x;
 const digest = (x: unknown): string => createHash("sha256").update(JSON.stringify(canonical(x))).digest("hex");
@@ -140,6 +145,15 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
   let probeCursor = 0;
   let probeCount = 0;
   const probeTargets = new Map<string, symbol>();
+  /** 排队的回执 / 派活从哪一刻起被扣、此刻为什么、上次报到哪 (只在内存: 日志与 status 用)。 */
+  const holding = new Map<string, { since: number; why: string; told?: { why: string; at: number } }>();
+  const hold = (e: MessageEvent, why: string): void => {
+    const now = Date.now();
+    const h = { since: now, ...holding.get(e.id), why };
+    const due = now - h.since >= HOLD_LOG_MS && (!h.told || h.told.why !== why || now - h.told.at >= HOLD_RELOG_MS);
+    holding.set(e.id, due ? { ...h, told: { why, at: now } } : h);
+    if (due) io.held?.(e, why, now - h.since);
+  };
   // An exposed event belongs to the session that received it, not a replacement
   // pane now bound to the same wizard. Keep its uncertain history for reconciliation.
   const resourceOf = (e: MessageEvent): string => {
@@ -399,6 +413,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
         void send(d.id).catch(io.error);
       });
       const rows = Object.values(db.all()).sort((a, b) => a.at - b.at);
+      [...holding.keys()].filter((id) => db.get(id)?.execution !== "queued").forEach((id) => holding.delete(id));
       const fair = [...rows.slice(probeCursor), ...rows.slice(0, probeCursor)];
       fair.forEach((e) => {
         if (stopped) return;
@@ -425,7 +440,10 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
           }).catch(io.error);
           return;
         }
-        if (probing.has(e.id) || probeTargets.has(resourceOf(e)) || probeCount >= 16) return;
+        if (probing.has(e.id) || probeTargets.has(resourceOf(e)) || probeCount >= 16) {
+          if (e.execution === "queued") hold(e, "探测位被占 (同 pane 上另一条正在探测)");
+          return;
+        }
         probeCursor = (rows.findIndex((x) => x.id === e.id) + 1) % Math.max(1, rows.length);
         const failed = (error: unknown): void => {
           const current = db.get(e.id);
@@ -464,10 +482,13 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
           return;
         }
         if (e.execution !== "queued") return;
-        if ((e.retryAt ?? 0) > Date.now()) return;
-        if (injectable(e)) void bounded(e.id, () => io.ready(e)).then((ready) => {
+        // 原因里不带重试时刻: 每次退避时刻都在变, 带上就成了「原因变了」, 日志每轮重报。
+        if ((e.retryAt ?? 0) > Date.now()) { hold(e, `投递失败退避中${e.reason ? `（${e.reason}）` : ""}`); return; }
+        if (!injectable(e)) { hold(e, `injectable=false: ${queue(e.id)?.holds.join("; ") || "无效 / 过期"}`); return; }
+        void bounded(e.id, () => io.ready(e)).then((ready) => {
           const current = db.get(e.id)!;
           if (ready && injectable(current)) void inject(e.id, io.resource(current.target));
+          else if (current.execution === "queued") hold(current, ready ? "injectable=false (ready 之后)" : "ready=false (前置未落定 / owner 未判闲)");
         }).catch(failed);
       });
     } catch (e) { io.error(e); }
@@ -508,6 +529,9 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     status: () => ({ events: Object.values(db.all()).map((e) => ({ ...clone(e),
       status: e.execution === "dispatching" ? "executing" : e.execution,
       ...(e.execution === "queued" && blocker(e.id) ? { blockedBy: blocker(e.id) } : {}),
+      // 回执 / 派活排着时把扣住它的每一条都摆出来 (含 ready=false 这种 queue() 看不见的)。
+      ...(e.execution === "queued" && !direct(e) ? { holds: [...queue(e.id)!.holds,
+        ...(holding.get(e.id) ? [`${holding.get(e.id)!.why} · 已扣 ${Math.round((Date.now() - holding.get(e.id)!.since) / 1000)}s`] : [])] } : {}),
       delivery: (() => { const parts = Object.values(outbox.all()).filter((d) => d.eventId === e.id).flatMap((d) => d.parts);
         return parts.some((p) => p.state === "failed") ? "failed" : parts.some((p) => p.state === "uncertain") ? "uncertain" : parts.some((p) => p.state !== "delivered") ? "delivery-pending" : parts.length ? "delivered" : "none"; })(),
     })), deliveries: Object.values(outbox.all()).map(clone) }),
