@@ -134,9 +134,15 @@ export interface Turn {
   queued?: true;
 }
 
-// Meta wrappers Claude Code injects around slash commands / hook output. They
-// are machinery, not conversation — drop them before any summary or handoff.
-const META_RE = /<(system-reminder|command-[^>\s]*|local-command-[^>\s]*|task-notification)(?:\s[^>]*)?>[\s\S]*?<\/\1>/g;
+// Meta wrappers the CLIs inject around slash commands / hook output. They are
+// machinery, not conversation — drop them before any summary or handoff.
+// 认的是「行首起、只隔空白的一串 meta 标签」(照 shared/reminder.ts:71 的 REMINDER_RE 锚行首
+// 那一手): 注入方永远 `\n` 起头 (见 renderReminder), slash 包装的后继标签同行紧跟
+// (`<command-message>X</command-message> <command-name>/X</command-name>`)。正文里行中提及
+// 的字面量 (人讨论这个 tag、或粘贴的文本含它) 不是注入 —— 若当成开标签, 懒惰匹配会从那里
+// 一路吞到消息末尾真正的 `</system-reminder>`, 整段显示文本消失。
+const META_NAME = "(system-reminder|command-[^>\\s]*|local-command-[^>\\s]*|task-notification)";
+const META_RE = new RegExp(`^[ \\t]*(?:<${META_NAME}(?:\\s[^>]*)?>[\\s\\S]*?<\\/${META_NAME}>[ \\t]*)+`, "gm");
 
 // Claude Code (2.1.27x+) 把折叠成 `[Pasted text #N]` 的粘贴在 transcript 里包成
 // `<pasted_content id="…">…</pasted_content id="…">`。wezard 的注入走 tmux paste, 所以
