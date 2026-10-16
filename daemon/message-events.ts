@@ -769,6 +769,12 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     ids: () => Object.keys(db.all()),
     /** 只问执行态 (含墓碑): 判「这份投过没有」的调用方不必在乎它是不是已被裁掉。 */
     executionOf: (id: string) => db.get(id)?.execution,
+    exposureOf: (id: string) => {
+      const e = live(id);
+      // Absorbed siblings are complete/consumed before their carrier is injected.
+      // Without their own result, that bookkeeping is not consumption evidence.
+      return e?.execution === "complete" && !e.result ? undefined : e?.exposure;
+    },
     authorityOf: (id: string): EventAuthority | undefined => {
       const authority = sourceOf(id);
       return authority && clone(authority);

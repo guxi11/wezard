@@ -2493,20 +2493,24 @@ const main = async (): Promise<void> => {
       const results = uniq.map((h, i) => {
         const wr = wrs[i]!;
         // 同一对并发多笔是允许的 (§4.1): 先取**还在排队**的那份 (那份还没进过你的会话); 都取过了就
-        // 报最新那件已交付 —— 绝不把已经 paste 过的那份当成新答案交回来。
+        // 报最新那件的投递状态 —— 绝不把已经 paste 过的那份当成新答案交回来。
         const mine = router.settledTo(self).filter((r) => r.owner === h.target).reverse()   // byAt → 新在前
-          .map((row) => { const box = receiptOf(row); const execution = events.executionOf(box.id); return { row, box, ev: execution && { execution } }; });
-        const pick = mine.find((x) => x.ev?.execution === "queued") ?? mine[0];
+          .map((row) => { const box = receiptOf(row); return { row, box,
+            execution: events.executionOf(box.id), exposure: events.exposureOf(box.id) }; });
+        const pick = mine.find((x) => x.execution === "queued" && x.exposure === "none") ?? mine[0];
         if (!pick) return { name: h.address, idle: wr.idle, ...(wr.reason ? { reason: wr.reason } : {}),
           ...(wr.idle ? { stale: true, reason: "它停下了, 但路由表上没有交回给你的定论 —— 多半停在一个等人点的弹窗上, 或那句话没被接住; peek_peer 看一眼" } : {}) };
-        // 回执早一步到了: 这段话已经作为新的一轮进过你的会话, 别处理第二遍。
-        if (pick.ev && pick.ev.execution !== "queued") return { name: h.address, idle: wr.idle,
-          ...(pick.ev.execution === "uncertain"
-            ? { delivery: "uncertain", reason: "回执可能已递交，需按 receipt eventId 对账；没有自动重投或再次领取。" }
-            : { delivered: true }) };
+        // Only an unexposed queued input can be claimed. Execution state alone
+        // proves neither consumption nor non-delivery, including old tombstones.
+        if (pick.execution !== "queued" || pick.exposure !== "none") return { name: h.address, idle: wr.idle,
+          eventId: pick.box.id, delivered: pick.exposure === "consumed", exposure: pick.exposure ?? "unknown",
+          delivery: pick.exposure === "consumed" ? "consumed"
+            : pick.execution === "uncertain" || !pick.exposure || pick.exposure === "possible" ? "uncertain" : pick.execution,
+          reason: pick.exposure === "consumed" ? "回执已由会话消费，不重复领取。"
+            : "结果已保存，尚未确认回执消费；按 eventId 对账，不自动重投或再次领取。" };
         // 取走就撤单: 这一笔在收件箱里排着的**全部**回执一起作废 (need 之后又答完时排着两份, 取走
         // 的那一份就是新结论, 旧的那份不再 paste 第二遍); `hand` 确认已交付 (已 handed 的是 no-op)。
-        if (pick.ev) {
+        if (pick.execution === "queued") {
           events.cancel((x) => x.id.startsWith(`rcpt:${pick.row.event}:`) && x.execution === "queued", "taken by wait_peer");
           router.commit(ops.hand({ event: pick.row.event, inbox: pick.box.id }));
         }
