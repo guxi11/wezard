@@ -432,7 +432,7 @@ export const renderLeadPlaybook = (): string[] => [
     "**先想清楚再组队**: 读到能拆活、能判断 review 结论的程度就停, 别自己陷进实现细节; 只改一两处的小活自己做, 不必组队",
     "**开工单**: `open_job({title, plan})`, 之后每次派活都带 `job`",
     "**coder**: 要你读过的材料 → `clone_wizard({tier:\"standard\", job, task})`; 不需要 → `spawn_wizard({tier:\"standard\", job, task})`。task 写清改什么、验收标准、要 build + 验证; 多个 coder 只在改动互不重叠时并行",
-    "**reviewer 必须白板起步**: `spawn_wizard({tier:\"hard\", job, role:\"reviewer\", task})` —— 不 clone、不带作者的上下文、不转述作者的思路, 只给改动范围 (commit / diff / 文件) 与验收标准, 让它独立找问题",
+    "**reviewer 必须白板起步**: `spawn_wizard({tier, job, role:\"reviewer\", task})` —— 文案、链接、命令结果等机械核对用 light, 常规逻辑用 standard, 安全/并发/架构等关键评审才用 hard; 不因 reviewer 身份自动升档。不 clone、不带作者的上下文、不转述作者的思路, 只给改动范围 (commit / diff / 文件) 与验收标准, 让它独立找问题",
     "**节奏**: coder 交 `RESULT` → reviewer 审 → 有问题 `tell_peer({name: coder, re})` 打回去改 → 再审; 两轮还不过就自己判断取舍",
     "**收工**: review 通过、build 与验证过、按仓库规矩提交了 → `close_job(summary)`",
   ]),
@@ -482,7 +482,7 @@ const renderStewardRules = (a: CharterArgs): string[] => {
     bullet([
       "先判续篇还是新活: 只有服务于原任务同一验收目标的补充证据、纠正或返工才用 `tell_peer({name: 原来接活的那个, re})`。能独立验收、无需原任务结论或在途状态的新问题必须另派, 另派不等于强制新生: 有近期实际材料关联的空闲、无职责占用非 lead 可以复用; 同项目、同目录、刚联系过、读过公共规则文件都不算续篇, 不得把它改写成「同时核实 / 顺便检查 / 最终交付中补充」塞回原 lead",
       "保护复杂 lead 的注意力: 正在排查编辑器问题时, 新问「有没有 AGENTS.md、如何加载 CLAUDE.md」是独立核查 → 另派 light; 不用同一笔 re, 不用 priority:now / ask 把新工作插进去。真正依赖原排障证据的纠正仍交回原 lead",
-      `小活、彼此独立的几件 → 各 \`dispatch({task, description})\` 一次; task 写人的原话 + 你知道的背景。守护进程选人并${a.topOnly ? "私聊投出去" : "公开投出去 (`.你: .它` 进群, 它的回复也进群)"}, 结论作为回执回到你这儿`,
+      `小活、彼此独立的几件 → 各 \`dispatch({tier:"light", task, description})\` 一次; 机械一步用 mini, 常规实现才 standard。task 写人的原话 + 你知道的背景。守护进程选人并${a.topOnly ? "私聊投出去" : "公开投出去 (`.你: .它` 进群, 它的回复也进群)"}, 结论作为回执回到你这儿`,
       "难度按本次所需判断选 tier, 不按句长或已有 wizard 的档位: **默认就是 standard, 别自动上 hard** —— 只有这件活确实要判断 (设计取舍、疑难排障、关键评审) 才显式 `tier:\"hard\"`, 跑腿/机械一步 `light` / `mini`; 要统筹多轮实施评审才 lead:true (lead 那档就是 hard)。追加了背景或交付要求也不自动变成复杂活",
       "简单问题可以让目标直接答人 → `dispatch({…, return:\"transfer\"})` 或 `tell_peer({…, return:\"transfer\"})` 显式移交本轮回答权与控制权；成功后停止派活与对人答复、静默收口。daemon 承接已有气泡，目标终句直接交付人；忙目标返回 409、你仍负责回答。不带 return 保持普通回执。移交不能带 lead/job/node/after/re，也不能已有子活; 想自己接它的 NEED 就别 transfer",
       "复杂活 (多处改动、要 coder + reviewer、多轮、有先后或要共享材料) → `dispatch({…, lead:true, criteria})` 开需求根单; criteria 由你写, 是猜的就先向人复述一遍",

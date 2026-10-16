@@ -3284,7 +3284,12 @@ const main = async (): Promise<void> => {
           };
         });
     };
-    const autoRouteRowsOf = (self: string) => routeRowsOf(self, (r) => r.alive && !!tagOfKey(r.target));
+    const autoRouteRowsOf = async (self: string, tier: TierName) => {
+      const pick = pickTier(cfg, tier, {}, false);
+      const budgetModel = (tier === "mini" || tier === "light") && pick.ok ? pick.model : undefined;
+      return (await routeRowsOf(self, (r) => r.alive && !!tagOfKey(r.target)))
+        .map((r) => ({ ...r, ...(budgetModel ? { budgetModel } : {}) }));
+    };
     http.register("POST /wizard/route", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
@@ -3296,7 +3301,7 @@ const main = async (): Promise<void> => {
       if (tierArg && !TIERS.includes(tierArg as TierName)) { json(res, 400, { ok: false, reason: `unknown tier: ${tierArg}` }); return; }
       const tier = (tierArg || tierFor(task, false)) as TierName;
       const force = b.force === true;
-      const rows = await autoRouteRowsOf(self);
+      const rows = await autoRouteRowsOf(self, tier);
       const now = Date.now();
       const cands = rankCandidates(task, (b.cwd ?? "").trim() || m.getCwd(self).runningCwd, rows, { now, ttlMs: CACHE_TTL_FALLBACK_SEC * 1000 });
       const decision = decide(task, cands, now, CACHE_TTL_FALLBACK_SEC * 1000, force, tier);
@@ -3331,11 +3336,11 @@ const main = async (): Promise<void> => {
       const ttlMs = CACHE_TTL_FALLBACK_SEC * 1000;
       // 占用保护由 decide 统一判断, 留在候选表里说明为什么不能自动复用。
       // 显式 to 保留人为选定; force 只影响成本门, 不绕 lead/工单/连续性保护。
-      const pool = to || b.spawn || lead ? [] : await autoRouteRowsOf(self);
-      if (!controlValid(self, dispatchOrigin.authority)) { json(res, 409, { ok: false, reason: "dispatch source turn/control changed while routing; original task remains with source" }); return; }
       const tierArg = (b.tier ?? "").toString().trim();
       if (tierArg && !TIERS.includes(tierArg as TierName)) { json(res, 400, { ok: false, reason: `unknown tier: ${tierArg}` }); return; }
       const taskTier = (tierArg || tierFor(task, lead)) as TierName;
+      const pool = to || b.spawn || lead ? [] : await autoRouteRowsOf(self, taskTier);
+      if (!controlValid(self, dispatchOrigin.authority)) { json(res, 409, { ok: false, reason: "dispatch source turn/control changed while routing; original task remains with source" }); return; }
       const cands = rankCandidates(task, m.getCwd(self).runningCwd, pool, { now, ttlMs });
       let d: { kind: "existing"; why: string; row?: RouteRow } | { kind: "spawn"; why: string } = to ? { kind: "existing" as const, why: `你点名了 ${to}` }
         : b.spawn ? { kind: "spawn" as const, why: "你要了新的" }
@@ -3348,6 +3353,10 @@ const main = async (): Promise<void> => {
           const rec = wizards.get(target), info = m.sessionInfo(target);
           if (target !== selected.target || !selected.sessionId || info?.sessionId !== selected.sessionId
             || rec?.name !== selected.name || rec?.birthToken !== selected.birthToken) return "candidate session/name/birthToken changed";
+          if (selected.budgetModel) {
+            const model = (info?.jsonlPath ? lastModel(info.jsonlPath) : "") || info?.model;
+            if (model?.trim().toLowerCase() !== selected.budgetModel.trim().toLowerCase()) return "candidate model no longer fits light task budget";
+          }
           if (rec?.lead) return "candidate became lead";
           const duties = [
             ...routeDutiesOf(jobs.all(), target, routeInFlight().filter((x) => x.turn !== ownEvent)),

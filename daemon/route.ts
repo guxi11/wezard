@@ -41,6 +41,8 @@ export interface RouteRow extends WizardBrief {
   birthToken?: string;
   target?: string;
   model?: string;
+  /** 本次轻任务允许的实际模型; 出生 tier 可能已被 set_model 改掉, 不作依据。 */
+  budgetModel?: string;
   /** 最近几句问话。 */
   asks: readonly string[];
   /** 最近一个来回的一行摘要。 */
@@ -505,6 +507,8 @@ const vetoesOf = (e: Evidence, now: number, ttlMs: number, small: boolean, force
   const r = e.row, ctx = r.contextTokens;
   const w = wakeCostOf(ctx, touchOf(r), now, r.cacheTtlMs ?? ttlMs);
   return [
+    ...(small && r.budgetModel && r.model?.trim().toLowerCase() !== r.budgetModel.trim().toLowerCase()
+      ? [`轻任务模型不符 (当前 ${r.model || "未知"}, 本次 ${r.budgetModel}); 按本次档位白板执行`] : []),
     ...(r.lead ? ["lead 身份, 独立任务不自动复用 (续篇用 tell_peer re)"] : []),
     ...(r.duties?.length ? [`任务占用 (${r.duties.join(" · ")})`] : []),
     ...(!r.alive ? ["不在线"] : []), ...(r.busy ? ["正忙"] : []),
