@@ -498,8 +498,10 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
       const boundary = (phase?: "paste" | "submit", identity?: { sessionId?: string; transcript?: string }): boolean => {
         const current = live(id)!;
         if (stopped || current.canceled || !io.valid(current)) return false;
+        // 已收下的输入不再允许迟到的边界回调触碰 pane 或降级消费见证。
+        if (current.execution === "complete" || ["submitted", "consumed"].includes(current.exposure)) return false;
         if (current.exposure !== "none" && current.transcript && current.transcript !== io.transcript(e.target)) return false;
-        if (phase) patch(id, { exposure: "possible", sessionId: identity?.sessionId,
+        if (phase) patch(id, { exposure: "possible", sessionId: identity?.sessionId ?? current.sessionId,
           transcript: identity?.transcript ?? io.transcript(e.target) ?? current.transcript });
         return true;
       };
@@ -508,6 +510,8 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
       catch (error) { r = { ok: false, uncertain: live(id)!.exposure !== "none", retryable: live(id)!.exposure === "none", reason: why(error) }; }
       const latest = live(id)!;
       if (latest.result || latest.execution === "complete") { if (!latest.canceled) io.committed(latest); return; }
+      // 原生消费/收口证据比迟到的注入 ACK 强；既不降回 submitted，也不覆盖真实的收口原因。
+      if (latest.exposure === "consumed") { if (!latest.canceled) io.committed(latest); return; }
       if (r.ok && !r.uncertain) {
         const committed = patch(id, { execution: latest.canceled ? "uncertain" : "awaiting-result", exposure: "submitted", transcript: latest.transcript ?? io.transcript(e.target) });
         if (!latest.canceled) io.committed(committed);

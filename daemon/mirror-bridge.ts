@@ -2256,8 +2256,10 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
 
   // 补到头仍没证据: 可能只是渲染/落盘迟到, 也可能根本没提交。
   // 保留 uncertain 阻止重贴, 但不能让只看 ok 的调用方把它当成已送达。
+  // 冷 TUI 的框布局未知时也可能已经提交；同样等原生事件见证，期间不再输入。
+  if (requireEventEvidence && await lateEvidence(LATE_LAND_MS)) return { ok: true };
   log.warn({ target, tailFp, freshSpawn, boxTrusted, witness: witness.status }, "mirror inject: submission unconfirmed, stopping input");
-  return { ok: false, uncertain: true, reason: "目标会话未确认收下消息，停止输入以避免误提交或重复投递" };
+  return { ok: false, uncertain: true, reason: "暂时无法确认目标会话是否收到消息，已停止继续输入；为避免重复执行，不会自动重发" };
 };
 
 const injectViaSpawn = async (args: InjectArgs): Promise<InjectResult> => {
@@ -3290,7 +3292,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (s.flushTimer || s.closed || s.dead) return;
     s.flushTimer = setTimeout(() => void flushStream(s), FLUSH_MS);
   };
-  const finalizeStream = async (a: AttachState, s: ActiveStream, timedOut = false): Promise<void> => {
+  const finalizeStream = async (a: AttachState, s: ActiveStream, timedOut = false, stillWanted?: () => boolean): Promise<void> => {
     if (s.closed) return;
     s.closed = true;
     // 非 brief 路径的父 turn 收口 — subagent turns 一并关 (brief 路径在
@@ -3310,13 +3312,15 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       try {
         await s.pending?.catch(() => undefined);
         if (!eventOwned(s.eventId)) return;
-        if (card) {
-          s.cardSent = true;
-          await client.replyStreamWithCard(s.frame, s.streamId, withLinkedTag(a, body, undefined, s.turnId), true, { templateCard: card });
-        } else {
-          await client.replyStream(s.frame, s.streamId, withLinkedTag(a, body, undefined, s.turnId), true);
+        if (stillWanted?.() !== false) {
+          if (card) {
+            s.cardSent = true;
+            await client.replyStreamWithCard(s.frame, s.streamId, withLinkedTag(a, body, undefined, s.turnId), true, { templateCard: card });
+          } else {
+            await client.replyStream(s.frame, s.streamId, withLinkedTag(a, body, undefined, s.turnId), true);
+          }
+          log.info({ sessionId: a.sessionId, turnId: s.turnId, accLen: s.acc.length, tools: s.tools.length, withCard: !!card, timedOut }, "stream finalize");
         }
-        log.info({ sessionId: a.sessionId, turnId: s.turnId, accLen: s.acc.length, tools: s.tools.length, withCard: !!card, timedOut }, "stream finalize");
       } catch (e) {
         log.warn({ sessionId: a.sessionId, turnId: s.turnId, err: (e as Error).message }, "stream finalize failed");
         s.dead = true;
@@ -3379,7 +3383,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 推到本轮的频道 (人从别的群叫它 → 回那个群)。私聊轮的正文 brief 下在上游
   // turnSilent 已被拦下; 非 brief 的逐条推送在这里兜一道 —— 只放 `[mirror]` /
   // `[wezard]` 系统提示 (它们回 home)。
-  const sendStandalone = (a: AttachState, content: string): void => {
+  const sendStandalone = (a: AttachState, content: string, stillWanted?: () => boolean): void => {
     const eventId = a.activeEventId;
     if (!hasVisibleBody(content) || !eventOwned(eventId)) return;
     if (isPrivate(a) && !/^\[(mirror|wezard)\]/.test(content.trim())) return;
@@ -3391,7 +3395,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.standalonePending = a.standalonePending
       .then(async () => {
         for (const c of chunks) {
-          if (!eventOwned(eventId)) return;
+          if (!eventOwned(eventId) || stillWanted?.() === false) return;
           try {
             const ack = await client.sendMessage(chatId, { msgtype: "markdown", markdown: { content: c } });
             log.info({ sessionId: a.sessionId, turnId, chatId, len: c.length, ack: JSON.stringify(ack ?? null).slice(0, 300) }, "standalone pushed");
@@ -7756,12 +7760,23 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // 不许退化成 spawn-mode (`--resume -p`) 的无窗口注入。忙闲交给 CLI 自己的输入队列:
         // 贴进运行中的一轮会被记成 queued 轮, 等它在 transcript 露面再接上这条 event。
         // slash 命令要等闲, 那一道在上面 (dispatch 开头) 已经拦过了。
-        const r = await inject({
+        let r = await inject({
           text: effText, images: effImages, cfg, log: log.child({ principal, sessionId: sid }),
           sessionId: sid, eventId, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn,
           requireIdle: eventId ? () => true : undefined,
           guard: (phase, identity) => byTarget.get(a.target) === a && a.tmuxPane === injectPane && (a.injectGen ?? 0) === myGen && (!guard || guard(phase, identity)),
         });
+        // 注入失败可以迟于转录消费；只认这一笔在原绑定转录里的标记，不用别轮产出猜 ACK。
+        const submissionConfirmed = (): boolean => {
+          const event = eventId ? deps.events?.get(eventId) : undefined;
+          return !!event && !event.canceled
+            && (event.exposure === "consumed" || event.execution === "complete"
+              || !!event.transcript && submittedEventSince([{ path: event.transcript, offset: 0 }], event.id, event.at));
+        };
+        if (!r.ok && r.uncertain && submissionConfirmed()) {
+          log.info({ target: a.target, eventId, reason: r.reason }, "mirror inject: late failure superseded by event submission evidence");
+          r = { ok: true };
+        }
         onSubmitted?.(r);
         if (!r.ok) {
           // retryable = 一个字都没进输入框, 消息事件层会稍后重投 —— 不是失败, 别报 ✗
@@ -7772,10 +7787,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
             a.outbound = undefined;
             return;
           }
-          const note = `[mirror] ✗ ${r.reason ?? "failed"}`;
+          const note = r.uncertain
+            ? "[mirror] ⚠ 暂时无法确认目标会话是否收到消息，已停止继续输入；为避免重复执行，不会自动重发"
+            : `[mirror] ✗ ${r.reason ?? "failed"}`;
+          // 提示也会排发送队列；真正发出前再认一次同事件证据，撤销过期告警。
+          const stillWanted = (): boolean => !r.uncertain || !submissionConfirmed();
           if (s) {
             s.acc = s.acc ? `${s.acc}\n\n${note}` : note;
-            await finalizeStream(a, s);
+            await finalizeStream(a, s, false, stillWanted);
           } else if (armMigration) {
             // /clear path has no live stream — surface failure as a one-shot
             // terse reply ("clean" per project convention).
@@ -7786,7 +7805,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
             // ahead of inject completion — in that case just send the error.
             if (a.outbound?.kind === "deferred") clearTimeout(a.outbound.timer);
             a.outbound = undefined;
-            sendStandalone(a, note);
+            sendStandalone(a, note, stillWanted);
           }
           return;
         }
