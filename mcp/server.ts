@@ -282,7 +282,7 @@ server.registerTool(
       "同 `spawn_wizard({detached:true, cwd})` —— 在某个目录生一个独立长住的白板 wizard (旧名, 只为不打断正在跑的旧会话而保留)。新调用一律用 spawn_wizard。",
     inputSchema: {
       cwd: z.string().describe("工作区绝对路径, 不存在会创建。"),
-      name: z.string().optional().describe("它的名字, 全机唯一。省略按目录名生成。"),
+      name: z.string().optional().describe("它的名字, 全机唯一。推荐省略，由 daemon 分配中性英文名，职责另存。"),
       chat: z.string().optional().describe("home 聊天名。省略 = 你的聊天。"),
       cli: z.enum(["claude", "claude-internal", "codebuddy", "codex"]).optional().describe("兼容旧参数; 新建 pane 统一使用配置的 wrc.defaultCli。"),
       model: z.string().optional().describe(MODEL_DOC),
@@ -843,7 +843,7 @@ server.registerTool(
       task: z.string().describe("这件活, 原样转给对方的文本。写清目标与交付, 带文件名 / 模块名帮助找上下文; 公共规则文件或同目录不构成复用理由。不要把独立核查改写成原 lead 的附加交付。"),
       return: z.enum(["self", "transfer", "detach", "none"]).optional().describe(RETURN_DOC + " dispatch 不能配 lead:true 用 transfer。"),
       for: z.string().optional().describe(FOR_DOC),
-      name: z.string().optional().describe("可选的新 wizard 短名, 不是已有执行者的地址 (指定已有执行者用 to)。省略或空白 = 新建时按职责自动取全机唯一名; 复用时忽略。"),
+      name: z.string().optional().describe("可选的新 wizard 短名, 不是已有执行者的地址 (指定已有执行者用 to)。推荐省略或空白，新建时由 daemon 分配全机唯一中性英文名，职责另存; 复用时忽略。"),
       description: z.string().optional().describe("可选的新 wizard 职责, 一句话。省略或空白 = 取 task 摘要; 复用时忽略。"),
       tier: z.enum(TIERS).optional().describe("本次任务难度及 spawn 档位 (mini / light / standard / hard / ultra)。**不写就是 standard (默认)**; 跑腿/核查 light; 只有确实要判断 (设计取舍、疑难排障、关键评审) 才 hard / ultra。按所需判断而非句长选。复用已有 wizard 不会切换它的模型。"),
       to: z.string().optional().describe("显式选定已有 wizard (名字), 绕过自动选人。仅在人明确指定执行者或必需上下文已确认时使用; 不能仅因同项目或已有 lead 在场。原任务续篇用 tell_peer re。"),
@@ -886,7 +886,7 @@ server.registerTool(
 // 而不是在一个布尔上猜。两者落到同一条路由 (`inherit` 由工具定死)。
 const offspringShape = {
   description: z.string().describe("它负责什么, 一句话。它会写进它的系统提示, 也会出现在名册里让别人看到。"),
-  name: z.string().optional().describe("它的名字 (如 'docs'、'fix', 带不带 '.' 都行)。全机唯一。省略则按 description 首词生成。"),
+  name: z.string().optional().describe("它的名字 (如 'docs'、'fix', 带不带 '.' 都行)。全机唯一。推荐省略，由 daemon 分配中性英文名，职责另存。"),
   task: z.string().optional().describe("就位后立刻派下去的第一件活 (私聊)。省略则它就位待命。"),
   chat: z.string().optional().describe("把它生在另一个聊天里 (wizard_roster 里的 home 聊天名)。省略 = 你自己的聊天, 这是绝大多数情况。"),
   cli: z.enum(["claude", "claude-internal", "codebuddy", "codex"]).optional().describe("兼容旧参数; 新建 pane 统一使用配置的 wrc.defaultCli。"),

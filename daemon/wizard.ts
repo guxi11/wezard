@@ -14,6 +14,7 @@
 // 纯函数。真正的动作 (spawn / inject / kill) 全在 mirror-bridge, 这里一个都不做。
 import { randomUUID } from "node:crypto";
 import { loadJsonMap } from "../shared/json-map-store.js";
+import { loadAutoNames } from "./wizard-names.js";
 import { normalizeTag, stripSigil, tagOfKey, uniqueTag } from "../shared/session-label.js";
 
 export interface WizardRecord {
@@ -43,11 +44,17 @@ export interface WizardRecord {
   /** 正在 spawn 它的那个 daemon 进程的代号 (BOOT_ID) —— 身份先于会话落盘, 生成功了才清掉。
    *  留着别的代号 = 生到一半那个进程就没了 (reload / 崩溃), 记录成了僵尸。不用 pid: 重启后会复用。 */
   spawning?: string;
+  /** 每次出生的所有权; 旧异步请求不能修改同槽重生的新身份。 */
+  birthToken?: string;
+  /** 复用旧身份的出生中断时只清标记, 保留它的记忆和家谱。 */
+  spawnReused?: boolean;
   /** 自己写下的长期记忆, 每次 spawn 重新注入上下文。 */
   memory: string[];
 }
 
 export interface WizardStore {
+  /** Consume the next durable automatic name, skipping globally occupied strings. */
+  nextName: () => string;
   get: (target: string) => WizardRecord | undefined;
   /** 全局名字 → 记录 (大小写不敏感; `.fix` / `fix` 都认)。 */
   byName: (name: string) => WizardRecord | undefined;
@@ -84,7 +91,8 @@ export const pickName = (want: string, others: readonly string[]): string => {
 // 新记录的 bornAt: 已有会话 (开机迁移 / 懒认领一个老 session) 取 transcript 首条 ——
 // 「写进注册表的时刻」不是出生; 真新生的还没有 transcript, 才退回此刻。
 export const loadWizardStore = (filePath: string, bornOf: BornOf = () => undefined): WizardStore => {
-  const db = loadJsonMap<WizardRecord>(filePath);
+  const db = loadJsonMap<WizardRecord>(filePath, undefined, { strict: true });
+  const nextAutoName = loadAutoNames(`${filePath}.names.json`);
   // drop 过的 target: claim 只推名字、不落盘, 直到有人明确 upsert (重新 spawn) 它。
   // 收工播报、rolepage、回执日志这些只读路径都会问一句名字 —— 不拦的话 forget 之后
   // 几毫秒就又落下一条没会话、没家谱的空壳, 名册里找得到名字却找不到人。
@@ -98,6 +106,12 @@ export const loadWizardStore = (filePath: string, bornOf: BornOf = () => undefin
   const namesExcept = (t: string): string[] => all().filter((w) => w.target !== t).map((w) => w.name);
   const rename = (t: string, want: string): string => upsert(t, { name: pickName(want, namesExcept(t)) }).name;
   return {
+    nextName: () => {
+      const taken = new Set(all().map((w) => foldName(w.name)));
+      let name = nextAutoName();
+      while (taken.has(foldName(name))) name = nextAutoName();
+      return name;
+    },
     get: db.get,
     byName: (n) => {
       const k = foldName(n);
@@ -212,8 +226,8 @@ export const sweepUnborn = (
 ): WizardRecord[] =>
   store.all()
     .filter((w) => w.spawning !== undefined && w.spawning !== boot)
-    .flatMap((w) => isBound(w.target)
-      ? (store.upsert(w.target, { spawning: undefined }), [])
+    .flatMap((w) => isBound(w.target) || w.spawnReused
+      ? (store.upsert(w.target, { spawning: undefined, spawnReused: undefined }), [])
       : (store.drop(w.target), [w]));
 
 /** 直系分身。 */
@@ -468,7 +482,7 @@ const renderStewardRules = (a: CharterArgs): string[] => {
     bullet([
       "先判续篇还是新活: 只有服务于原任务同一验收目标的补充证据、纠正或返工才用 `tell_peer({name: 原来接活的那个, re})`。能独立验收、无需原任务结论或在途状态的新问题必须另派; 同项目、同目录、刚联系过、读过公共规则文件都不算续篇, 不得把它改写成「同时核实 / 顺便检查 / 最终交付中补充」塞回原 lead",
       "保护复杂 lead 的注意力: 正在排查编辑器问题时, 新问「有没有 AGENTS.md、如何加载 CLAUDE.md」是独立核查 → 另派 light; 不用同一笔 re, 不用 priority:now / ask 把新工作插进去。真正依赖原排障证据的纠正仍交回原 lead",
-      `小活、彼此独立的几件 → 各 \`dispatch({task, name, description})\` 一次; task 写人的原话 + 你知道的背景。守护进程选人并${a.topOnly ? "私聊投出去" : "公开投出去 (`.你: .它` 进群, 它的回复也进群)"}, 结论作为回执回到你这儿`,
+      `小活、彼此独立的几件 → 各 \`dispatch({task, description})\` 一次; task 写人的原话 + 你知道的背景。守护进程选人并${a.topOnly ? "私聊投出去" : "公开投出去 (`.你: .它` 进群, 它的回复也进群)"}, 结论作为回执回到你这儿`,
       "难度按本次所需判断选 tier, 不按句长或已有 wizard 的档位: **默认就是 standard, 别自动上 hard** —— 只有这件活确实要判断 (设计取舍、疑难排障、关键评审) 才显式 `tier:\"hard\"`, 跑腿/机械一步 `light` / `mini`; 要统筹多轮实施评审才 lead:true (lead 那档就是 hard)。追加了背景或交付要求也不自动变成复杂活",
       "简单问题可以让目标直接答人 → `dispatch({…, return:\"transfer\"})` 或 `tell_peer({…, return:\"transfer\"})` 显式移交本轮回答权与控制权；成功后停止派活与对人答复、静默收口。daemon 承接已有气泡，目标终句直接交付人；忙目标返回 409、你仍负责回答。不带 return 保持普通回执。移交不能带 lead/job/node/after/re，也不能已有子活; 想自己接它的 NEED 就别 transfer",
       "复杂活 (多处改动、要 coder + reviewer、多轮、有先后或要共享材料) → `dispatch({…, lead:true, criteria})` 开需求根单; criteria 由你写, 是猜的就先向人复述一遍",
@@ -562,6 +576,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "`tell_peer` 驱动另一个 wizard (派活、答它、叫它继续), 它的结论自动回执给你 · 插话 / 答它的问 → `priority:\"now\"`, 真紧急 → `\"urgent\"`; 只问一句 → `kind:\"ask\"`, 只知会 → `\"fyi\"`",
       `\`notify\` 只是告诉**人**一件事, 不驱动谁${a.topOnly ? " (顶层模式: 只有顶层 wizard 能 notify 进本群)" : ""} · 要给人看的截图 / 图表 / 文件 → \`send_file\` (别只贴本地路径, 人打不开)`,
       `\`clone_wizard\` 分身要共享我 (或 \`from\` 某个同伴) 已读的材料 · \`spawn_wizard\` 白板起步或要去别的目录 (\`detached\` = 独立长住、不归你管) —— ${tierLine(a.tiers)}`,
+      "新建 wizard 推荐省略 `name`: daemon 按稳定序号分配中性英文名, 职责写 `description`; 仅明确指定新名字时才传 `name`, 指定已有执行者用 `to`",
       "`stop_wizard` 打断或强制结束一个 wizard",
       "`open_job` / `close_job` 一次派两个以上分身时开 / 收工单 · `list_jobs` 找回工单 id · `pending_items` 我派出去还没了结的事 (`drop` 消项)",
       "`wizard_whoami` 我的上下文用量与分身 · `wizard_identity` 改名 / 写职责 · `wizard_remember` 跨会话记忆 (`self` / `chat` / `workspace`)",

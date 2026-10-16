@@ -2,7 +2,7 @@ import { wxMarkdown } from "../shared/wx-text.js";
 // Daemon entry. Resident process — exits only on signal or fatal WS auth failure.
 import { existsSync, readFileSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { timingSafeEqual, randomBytes } from "node:crypto";
+import { timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
 import { loadOrCreateSvrToken } from "../shared/svr-token.js";
 import { DAEMON_TOKEN_FILE, DAEMON_TOKEN_HEADER } from "../shared/daemon-token.js";
 import { homedir } from "node:os";
@@ -60,7 +60,7 @@ import { openTaskRegistry } from "./task-registry.js";
 import { deliverScheduled, type ScheduledDispatchOptions, type ScheduledResult } from "./scheduled-delivery.js";
 import { describeTrigger, nextFire, parseTrigger, WHEN_HELP } from "../shared/trigger.js";
 import { isQuiet, slugify, uniqueId } from "../shared/task-file.js";
-import { baseOfKey, bindMultiBot, bindTagLinker, botOfKey, headed, ownHead, isInternalKey, keyOf, linkTags, normalizeTag, sameBot, speakerHead, tagFromCwd, tagHead, tagLink, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
+import { baseOfKey, bindMultiBot, bindTagLinker, botOfKey, headed, ownHead, isInternalKey, keyOf, linkTags, normalizeTag, sameBot, speakerHead, tagHead, tagLink, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
 import { appendEpisode, clipForCharter, cwdOfMd, episodePath, inboxPath, mdsOf, proposedCwds, memoryPath, memoryRoot, proposeMemory, readMemory, type MemoryScope } from "./wizard-memory.js";
 import { retireStewardTask, startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
 import type { Asker, TurnFrom } from "../shared/detail-store.js";
@@ -68,6 +68,7 @@ import { applyChatNames, chatBaseOf, chatNameOf, chatPolicyOf, clearChatName, li
 import {
   bindWizardStore,
   loadWizardStore,
+  pickName,
   wizardStore,
   settleName,
   settleAll,
@@ -704,17 +705,17 @@ const main = async (): Promise<void> => {
         return;
       }
       const foreign = base !== baseOfKey(self);
-      const slotR = await claimSlot(base, String(body.name ?? body.tag ?? ""), tagFromCwd(cwd) || "peer", [self]);
+      const slotR = await claimSlot(base, String(body.name ?? body.tag ?? ""), [self]);
       if (!slotR.ok) { json(res, slotR.status, slotR.body); return; }
-      const { target, slot: tag } = slotR;
-      if (!planStore.allowExternal(target, wizards.get(target)?.name ?? tag)) { json(res, 409, { ok: false, reason: "workflow plan reserves this executor" }); return; }
-      const existed = !!wizards.get(target);
-      const name = wizards.rename(target, normalizeTag(String(body.name ?? body.tag ?? "")) || tag);
+      const { target, name } = slotR;
       const model = (body.model ?? "").toString().trim();
       log.child({ mod: "mirror", sub: "sessions-new", target }).info({ self, cwd, foreign, cli: body.cli, model }, "spawning peer session");
       // silent: 新 wizard 就位不进群 (生命周期事件), 同群的 wizard 从名册增量里得知。
-      const r = await m.newSession(target, name, body.cli, { cwd, model, silent: true, guard: () => planStore.allowExternal(target, wizards.get(target)?.name ?? name) });
-      if (!r.ok && !existed) wizards.drop(target);
+      const r = await m.newSession(target, name, body.cli, { cwd, model, silent: true, guard: () => ownsSlot(slotR) && planStore.allowExternal(target, wizards.get(target)?.name ?? name) })
+        .catch((e: unknown) => ({ ok: false as const, reason: `spawn threw: ${String(e)}` }));
+      if (!ownsSlot(slotR)) { json(res, 409, { ok: false, reason: "birth identity replaced during spawn" }); return; }
+      if (!r.ok) releaseSlot(slotR);
+      else finishSlot(slotR);
       if (r.ok) postRoster(base, [target, self], { op: "born", name: `.${name}`, by: displayName(self), cwd: r.cwd }, subjectOf(wizards.get(target)));
       json(res, r.ok ? 200 : 500, r.ok
         ? {
@@ -1543,60 +1544,87 @@ const main = async (): Promise<void> => {
      *  - 撞上的 wizard 静默超过一天 (不在 `keep` 里) → 顶掉它, 名字归新的;
      *  - 其余 (还新鲜的) → 409, 附上它的死活, 调用方据此换名或先收掉它。
      *  槽位 (key 里的 `#k`) 只是内部 id: 默认取名字本身, 被占了就加序号, 与名字无关。 */
+    const namingClaims = new Set<string>();
+    type BirthSlot = { target: string; name: string; existed: boolean; token: string };
+    const ownsSlot = (s: BirthSlot): boolean => wizards.get(s.target)?.birthToken === s.token;
+    const releaseSlot = (s: BirthSlot): void => {
+      if (!ownsSlot(s)) return;
+      if (s.existed) wizards.upsert(s.target, { spawning: undefined, spawnReused: undefined });
+      else wizards.drop(s.target);
+    };
+    const finishSlot = (s: BirthSlot): void => {
+      if (ownsSlot(s)) wizards.upsert(s.target, { spawning: undefined, spawnReused: undefined });
+    };
     const claimSlot = async (
       base: string,
       want: string,
-      fallback: string,
       keep: readonly string[] = [],
       allowed: (target?: string, name?: string) => boolean = (target, name) => planStore.allowExternal(target, name) && planStore.allowExternal(target, target ? wizards.get(target)?.name : undefined),
-    ): Promise<{ ok: true; target: string; slot: string } | { ok: false; status: number; body: Record<string, unknown> }> => {
+      internalName?: string,
+    ): Promise<({ ok: true } & BirthSlot) | { ok: false; status: number; body: Record<string, unknown> }> => {
       const asked = normalizeTag(want);
       const denied = { ok: false as const, status: 409, body: { ok: false, reason: "workflow plan reserves this executor" } };
-      const candidate = asked || normalizeTag(fallback) || "wizard";
-      if (!allowed(keyOf(base, candidate), candidate)) return denied;
-      const clash = asked ? wizards.byName(asked) : undefined;
-      // 名字全机唯一, 撞上别的机器人的 wizard 照样拒 —— 但不顶掉它、不复用它的槽, 也不报它的死活:
-      // 那边的 wizard 在这个机器人眼里不存在, 只剩「名字被占了」这一个事实。
-      if (clash && !sameBot(base, clash.target)) {
-        return { ok: false, status: 409, body: { ok: false, reason: `名字 '.${clash.name}' 已被占用 (名字全局唯一) —— 换个名字`, name: clash.name } };
-      }
-      if (clash && !allowed(clash.target, clash.name)) return denied;
-      const bound = !!clash && m.chatTargets(baseOfKey(clash.target)).includes(clash.target);
-      if (clash && !bound && baseOfKey(clash.target) === base && tagOfKey(clash.target)) {
-        return { ok: true, target: clash.target, slot: tagOfKey(clash.target) };
-      }
-      if (clash && !(await displace(asked, keep))) {
-        const info = bound ? (await m.peers(clash.target)).find((p) => p.target === clash.target) : undefined;
-        const alive = info?.paneAlive ?? false;
-        const idleForMs = info?.lastActivity ? Date.now() - info.lastActivity : undefined;
-        const idleDesc = idleForMs !== undefined ? `静默 ${Math.round(idleForMs / 60000)} 分钟` : "从没动过";
-        const advice = alive
-          ? "它的 pane 还活着 —— 除非这就是同一件事的延续, 否则换个名字重新生, 别把不相关的活塞给一个已经有职责的 wizard"
-          : bound
-            ? `pane 已经不在了 (${idleDesc}), 真要复用这个名字就先 stop_wizard({name:"${clash.name}", mode:"end"}) 收掉, 再用同一个名字重新生 —— 拿到干净的上下文; 别直接 send_peer 唤醒它接手, 它会带着上一件事的记忆答你这件`
-            : "这个名字被一个一天内还活动过、眼下没有会话的 wizard 占着 —— 换个名字 (它静默满一天后名字会自动让出)";
-        return {
-          ok: false,
-          status: 409,
-          body: {
-            ok: false,
-            reason: `名字 '.${clash.name}' 已经属于一个${alive ? "活着的" : "不再活跃的"} wizard (名字全局唯一) —— ${advice}`,
-            name: clash.name,
-            address: clash.name,
-            alive,
-            busy: info?.busy ?? false,
-            idleForMs,
-          },
+      const claimKey = asked.toLowerCase();
+      if (asked && namingClaims.has(claimKey)) return { ok: false, status: 409, body: { ok: false, reason: "wizard name is being claimed" } };
+      if (asked) namingClaims.add(claimKey);
+      try {
+        const candidate = asked || (internalName ? pickName(internalName, wizards.all().map((w) => w.name)) : wizards.nextName());
+        if (!allowed(keyOf(base, candidate), candidate)) return denied;
+        const reserve = (target: string, existed: boolean): { ok: true } & BirthSlot => {
+          // No await between uniqueness check and durable registration.
+          const token = randomUUID();
+          wizards.upsert(target, { name: candidate, spawning: BOOT_ID, birthToken: token, spawnReused: existed || undefined });
+          return { ok: true, target, name: candidate, existed, token };
         };
+        const clash = asked ? wizards.byName(asked) : undefined;
+        if (clash?.spawning) return { ok: false, status: 409, body: { ok: false, reason: "wizard is being spawned", name: clash.name } };
+        // 名字全机唯一, 撞上别的机器人的 wizard 照样拒 —— 但不顶掉它、不复用它的槽, 也不报它的死活:
+        // 那边的 wizard 在这个机器人眼里不存在, 只剩「名字被占了」这一个事实。
+        if (clash && !sameBot(base, clash.target)) {
+          return { ok: false, status: 409, body: { ok: false, reason: `名字 '.${clash.name}' 已被占用 (名字全局唯一) —— 换个名字`, name: clash.name } };
+        }
+        if (clash && !allowed(clash.target, clash.name)) return denied;
+        const bound = !!clash && m.chatTargets(baseOfKey(clash.target)).includes(clash.target);
+        if (clash && !bound && baseOfKey(clash.target) === base && tagOfKey(clash.target)) {
+          return reserve(clash.target, true);
+        }
+        if (clash && !(await displace(asked, keep))) {
+          const info = bound ? (await m.peers(clash.target)).find((p) => p.target === clash.target) : undefined;
+          const alive = info?.paneAlive ?? false;
+          const idleForMs = info?.lastActivity ? Date.now() - info.lastActivity : undefined;
+          const idleDesc = idleForMs !== undefined ? `静默 ${Math.round(idleForMs / 60000)} 分钟` : "从没动过";
+          const advice = alive
+            ? "它的 pane 还活着 —— 除非这就是同一件事的延续, 否则换个名字重新生, 别把不相关的活塞给一个已经有职责的 wizard"
+            : bound
+              ? `pane 已经不在了 (${idleDesc}), 真要复用这个名字就先 stop_wizard({name:"${clash.name}", mode:"end"}) 收掉, 再用同一个名字重新生 —— 拿到干净的上下文; 别直接 send_peer 唤醒它接手, 它会带着上一件事的记忆答你这件`
+              : "这个名字被一个一天内还活动过、眼下没有会话的 wizard 占着 —— 换个名字 (它静默满一天后名字会自动让出)";
+          return {
+            ok: false,
+            status: 409,
+            body: {
+              ok: false,
+              reason: `名字 '.${clash.name}' 已经属于一个${alive ? "活着的" : "不再活跃的"} wizard (名字全局唯一) —— ${advice}`,
+              name: clash.name,
+              address: clash.name,
+              alive,
+              busy: info?.busy ?? false,
+              idleForMs,
+            },
+          };
+        }
+        if (!allowed(keyOf(base, candidate), candidate) || (clash && !allowed(clash.target, clash.name))) return denied;
+        const taken = new Set([
+          ...m.chatTargets(base).map(tagOfKey),
+          ...wizards.all().filter((w) => baseOfKey(w.target) === base).map((w) => tagOfKey(w.target)),
+        ].filter(Boolean));
+        const slot = uniqueTag(candidate, taken);
+        const target = keyOf(base, slot);
+        // An identity rename may have claimed the address while stale eviction awaited IO.
+        if (wizards.byName(candidate)) return { ok: false, status: 409, body: { ok: false, reason: "wizard name was claimed during spawn preparation" } };
+        return allowed(target, candidate) ? reserve(target, false) : denied;
+      } finally {
+        if (asked) namingClaims.delete(claimKey);
       }
-      if (!allowed(keyOf(base, candidate), candidate) || (clash && !allowed(clash.target, clash.name))) return denied;
-      const taken = new Set([
-        ...m.chatTargets(base).map(tagOfKey),
-        ...wizards.all().filter((w) => baseOfKey(w.target) === base).map((w) => tagOfKey(w.target)),
-      ].filter(Boolean));
-      const slot = uniqueTag(asked || normalizeTag(fallback) || "wizard", taken);
-      const target = keyOf(base, slot);
-      return allowed(target, asked || slot) ? { ok: true, target, slot } : denied;
     };
 
     // ── 给人看的消息 ──────────────────────────────────────────────────
@@ -3222,7 +3250,7 @@ const main = async (): Promise<void> => {
       }
       const name = (b.name ?? "").toString().trim();
       const description = (b.description ?? "").toString().trim() || clipLine(task, 120);
-      // 空 name 交给 bearAs / claimSlot 按职责自动取名避重, 不当作显式点名复用旧记录。
+      // 空 name 交给 bearAs / claimSlot 按持久序号自动取名避重, 不当作显式点名复用旧记录。
       const tier = taskTier;
       const born = await bearAs(self, { inherit: false, name, description, tier, ...(lead ? { lead: true } : {}) } as PeerBody, undefined, dispatchOrigin?.authority);
       if (born.status !== 200) { settleRoot(false); json(res, born.status, { ...born.body, decision: "spawn", reason: d.why }); return; }
@@ -3320,7 +3348,7 @@ const main = async (): Promise<void> => {
         const jc = checkJob(jobId, undefined, !(b.task ?? "").toString().trim());
         if (!jc.ok) { return { status: jc.status, body: { ok: false, reason: jc.reason } }; }
       }
-      const planBirthAllowed = (target?: string, name = normalizeTag(b.name ?? b.tag) || (b.detached && b.cwd ? tagFromCwd(b.cwd) : "") || normalizeTag(b.description?.split(/\s+/)[0]) || "clone"): boolean => planStore.allowSpawn(self, jobId, planned, name, target) && (!planned || planned.alive());
+      const planBirthAllowed = (target?: string, name = normalizeTag(b.name ?? b.tag)): boolean => planStore.allowSpawn(self, jobId, planned, name, target) && (!planned || planned.alive());
       if (!planBirthAllowed() || (planned && !!b.task)) return { status: 409, body: { ok: false, reason: "dedicated plan job only permits taskless runner spawn" } };
       // 带 task 派下去 = 派活: 同样过方向闸, 不论带不带 job (新生的目标还不在任何单里, 实际只有 1 / 链深两条会拦)。
       const dr = planned || (b.task ?? "").toString().trim() ? checkDirection({ self, target: "", kind: "task", re: false, jobId, jobs: jobs.all(), ...chainNow(self, planned?.origin.event ?? (plan?.ok ? plan.serves : undefined)), nameOf: displayName }) : undefined;
@@ -3396,17 +3424,15 @@ const main = async (): Promise<void> => {
         } };
       }
       const askedName = String(b.name ?? b.tag ?? "");
-      // 没起名: 独立长住的按目录名 (同 /new 与 new_claude_session), 分身按职责的首词。
-      const fallback = (detached && b.cwd ? tagFromCwd(b.cwd) : "") || normalizeTag(b.description?.split(/\s+/)[0]) || "clone";
-      const slotR = await claimSlot(base, askedName, fallback, [self, source], (target, name) => planBirthAllowed(target, name) && (!target || planBirthAllowed(target, wizards.get(target)?.name ?? name)));
+      const slotR = await claimSlot(base, askedName, [self, source], (target, name) => planBirthAllowed(target, name) && (!target || planBirthAllowed(target, wizards.get(target)?.name ?? name)));
       if (!slotR.ok) { return { status: slotR.status, body: slotR.body }; }
-      const { target, slot: tag } = slotR;
+      const { target, name } = slotR;
+      const releaseBirth = (): void => releaseSlot(slotR);
       // claimSlot 会复用同名的冷记录 (detached 正是「叫回一个老名字」的场景): 生不出来时
       // 只回滚这一次的新记录, 不能把那个老 wizard 的记忆和家谱一起删掉。
-      const existed = !!wizards.get(target);
       const forkOf = inherit && source !== self ? source : undefined;
       // 先落身份再 spawn: 宪章是从注册表渲染出来的, 记录不在就渲染出一个无名分身。
-      if (!planBirthAllowed(target, normalizeTag(askedName) || tag) || (jobId && jobs.get(jobId)?.status !== "open")) return { status: 409, body: { ok: false, reason: "plan canceled/job reserved during spawn preparation" } };
+      if (!ownsSlot(slotR) || !planBirthAllowed(target, name) || (jobId && jobs.get(jobId)?.status !== "open")) { releaseBirth(); return { status: 409, body: { ok: false, reason: "plan canceled/job reserved during spawn preparation" } }; }
       wizards.upsert(target, {
         description: (b.description ?? "").toString().trim(),
         // 显式写 undefined: upsert 是合并写, 复用的冷记录里旧的 parent 会留下来。
@@ -3423,14 +3449,13 @@ const main = async (): Promise<void> => {
         // 生完才清; 这个进程中途没了, 下次开机由 sweepUnborn 认出并收掉。
         spawning: BOOT_ID,
       });
-      const name = wizards.rename(target, normalizeTag(askedName) || tag);
       const charter = charterFor(target, { ...(detached ? {} : { parent: self }), forkOf, inherited: inherit, cli: pick.cli });
       const task = (b.task ?? "").toString().trim();
       // 先盖章再生: 分叉出来的 transcript 里躺着被克隆者的旧回复, 时刻早于这一枚章,
       // wait_peer 才不会把它们当成分身对这件活的答复。
       const taskAt = Date.now();
-      const birthGuard = (): boolean => (!authority || controlValid(self, authority)) && planBirthAllowed(target, wizards.get(target)?.name ?? name) && (!jobId || jobs.get(jobId)?.status === "open");
-      if (!birthGuard()) return { status: 409, body: { ok: false, reason: "executor reservation changed before spawn" } };
+      const birthGuard = (): boolean => ownsSlot(slotR) && (!authority || controlValid(self, authority)) && planBirthAllowed(target, wizards.get(target)?.name ?? name) && (!jobId || jobs.get(jobId)?.status === "open");
+      if (!birthGuard()) { releaseBirth(); return { status: 409, body: { ok: false, reason: "executor reservation changed before spawn" } }; }
       const r = await m.cloneSession({
         guard: birthGuard,
         parent: source,
@@ -3446,11 +3471,12 @@ const main = async (): Promise<void> => {
       }).catch((e: unknown) => ({ ok: false as const, reason: `spawn threw: ${String(e)}`, inherited: false }));
       // 生不出来就回滚身份 —— 否则名字被一个永远没有会话的记录占住。
       if (!r.ok) {
-        if (existed) wizards.upsert(target, { spawning: undefined });
-        else wizards.drop(target);
+        releaseBirth();
         return { status: 500, body: { ok: false, reason: r.reason } };
       }
-      wizards.upsert(target, { spawning: undefined, clonedFrom: r.inherited ? sourceInfo?.sessionId ?? "" : "", ...(r.inherited ? {} : { forkOf: undefined }) });
+      if (!ownsSlot(slotR)) return { status: 409, body: { ok: false, reason: "birth identity replaced during spawn" } };
+      finishSlot(slotR);
+      wizards.upsert(target, { clonedFrom: r.inherited ? sourceInfo?.sessionId ?? "" : "", ...(r.inherited ? {} : { forkOf: undefined }) });
       const kid = briefOf(self, target);
       // 出生不再发群气泡 (人要看的是结论, 不是谁生了谁 —— 过程在 rolepage 里);
       // 同群的 wizard 仍要知道群里多了一个成员。工单里的临时工连这条也省掉。
@@ -4333,12 +4359,15 @@ const main = async (): Promise<void> => {
       const rec = tasks.get(taskId);
       const owner = rec ? ownerOf(rec) : target;
       const ownerName = settleName(wizards, chatNameOf(cfg, owner), owner) || "task";
-      const slotR = await claimSlot(base, "", `${ownerName}-task-${taskId.slice(0, 4)}`);
-      if (!guard()) return { ok: false, reason: "scheduled runner withdrawn during slot selection" };
+      const slotR = await claimSlot(base, "", [], undefined, `${ownerName}-task-${taskId.slice(0, 4)}`);
+      if (!guard()) {
+        if (slotR.ok) releaseSlot(slotR);
+        return { ok: false, reason: "scheduled runner withdrawn during slot selection" };
+      }
       if (!slotR.ok) return { ok: false, reason: "起白板 wizard 失败: 挑不出槽位" };
       const runner = slotR.target;
-      const allowed = () => guard() && planStore.allowExternal(runner, wizards.get(runner)?.name);
-      if (!allowed()) return { ok: false, reason: "workflow plan reserves task runner" };
+      const allowed = () => ownsSlot(slotR) && guard() && planStore.allowExternal(runner, wizards.get(runner)?.name);
+      if (!allowed()) { releaseSlot(slotR); return { ok: false, reason: "workflow plan reserves task runner" }; }
       const info = m.sessionInfo(target);
       const why = busy ? ` (起因: ${displayName(target)} 当时正忙)` : "";
       wizards.upsert(runner, {
@@ -4347,14 +4376,17 @@ const main = async (): Promise<void> => {
         voiceOf: owner,
         bornAt: Date.now(),
       });
-      const runnerName = wizards.rename(runner, `${ownerName}-task-${taskId.slice(0, 4)}`);
-      const spawned = await m.newSession(runner, runnerName, info?.cli, { cwd: info?.cwd, model: info?.model, silent: true, guard: allowed });
+      const runnerName = slotR.name;
+      const spawned = await m.newSession(runner, runnerName, info?.cli, { cwd: info?.cwd, model: info?.model, silent: true, guard: allowed })
+        .catch((e: unknown) => ({ ok: false as const, reason: `spawn threw: ${String(e)}` }));
       if (!spawned.ok) {
-        wizards.drop(runner);
+        releaseSlot(slotR);
         return { ok: false, reason: `起白板 wizard 失败: ${spawned.reason ?? "unknown"}` };
       }
+      if (!ownsSlot(slotR)) return { ok: false, reason: "task runner identity replaced during spawn" };
+      finishSlot(slotR);
       if (!allowed()) {
-        if (m.sessionInfo(runner)?.sessionId === spawned.sessionId) { await m.killPane(runner); wizards.drop(runner); }
+        if (ownsSlot(slotR) && m.sessionInfo(runner)?.sessionId === spawned.sessionId) { await m.killPane(runner); releaseSlot(slotR); }
         return { ok: false, reason: "scheduled runner withdrawn after spawn" };
       }
       if (!quiet) {
@@ -4369,7 +4401,7 @@ const main = async (): Promise<void> => {
       const inj = await m.injectText(runner, text, undefined, quiet
         ? { guard: allowed, from: { kind: "task", taskId }, channel: "", envelope: renderTaskEnvelope(taskId, { event: turn }) }
         : { guard: allowed, fromChat: true, from: { kind: "task", taskId }, envelope: renderTaskEnvelope(taskId) });
-      if (!inj.ok) { wizards.drop(runner); return inj; }
+      if (!inj.ok) { releaseSlot(slotR); return inj; }
       // 没有人会对这个一次性分身喊 stop_wizard, 只能自己等它闲下来再收。30min
       // 内没闲下来就放弃自动回收 (它大概率还在干一个长活), 留给人手动处理 ——
       // 比杀掉一个还在跑的 pane 安全。
@@ -4381,8 +4413,9 @@ const main = async (): Promise<void> => {
           log.warn({ runner, reason: idle.reason }, "task runner: 30min 未闲下来, 放弃自动回收");
           return;
         }
+        if (!ownsSlot(slotR) || m.sessionInfo(runner)?.sessionId !== spawned.sessionId) return;
         await m.killPane(runner);
-        wizards.drop(runner);
+        releaseSlot(slotR);
       })();
       return inj;
     };
