@@ -2,6 +2,11 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.7.7] - 2026-10-16
+
+### Fixed
+- `wait_peer` 区分回执投递与实际消费状态，不再把 dispatching 等未消费状态误报为 delivered；已领取回执不重复返回正文。
+
 ## [2.7.6] - 2026-10-16
 
 ### Fixed
@@ -1182,7 +1187,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.7.6...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.7.7...HEAD
+[2.7.7]: https://github.com/guxi11/wezard/compare/v2.7.6...v2.7.7
 [2.7.6]: https://github.com/guxi11/wezard/compare/v2.7.5...v2.7.6
 [2.7.5]: https://github.com/guxi11/wezard/compare/v2.7.4...v2.7.5
 [2.7.4]: https://github.com/guxi11/wezard/compare/v2.7.3...v2.7.4
