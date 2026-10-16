@@ -2,7 +2,7 @@ import type { ClearAttempt } from "./handoff.js";
 import { finalId, receiptCoverage, receiptQuiet, type MessageEvent, type MessageEvents, type DeliveryInput } from "./message-events.js";
 import { parseEnvelope, renderTail } from "../shared/reminder.js";
 import { codexSessions, codexSessionForPane, recordCodexPaneSession } from "../shared/codex.js";
-import { codexHookLaunchArgs, codexHookCommand } from "../shared/codex-hooks.js";
+import { codexHookLaunchArgs, codexHookCommand, inspectCodexHooks, trustCodexHookSet, type CodexHook } from "../shared/codex-hooks.js";
 import { fileURLToPath } from "node:url";
 // Mirror-mode bridge.
 //
@@ -43,7 +43,7 @@ import {
   projectDirsFor,
   type NormalizedTranscriptLine,
 } from "../shared/cli-backends.js";
-import { isModalPane, isAskqSubmitPage, parseModalOptions, pickModalAnswer, pickAutoAllowAnswer, parseConfirmContext, modalFingerprint, looksLikePicker, type ModalPaneVerdict } from "../shared/modal-pane.js";
+import { isModalPane, isCodexHookReviewPane, isAskqSubmitPage, parseModalOptions, pickModalAnswer, pickAutoAllowAnswer, parseConfirmContext, modalFingerprint, looksLikePicker, type ModalPaneVerdict } from "../shared/modal-pane.js";
 import type { MirrorStore } from "./mirror-store.js";
 import { hasMirrorAskq, runMirrorAskqFlow, hasMirrorPlan, mootMirrorPlan, runMirrorPlanFlow, hasMirrorPicker, mootMirrorPicker, runMirrorPickerFlow, type PickerPress } from "./approval.js";
 import { isAutoWindowActive } from "./session-cache.js";
@@ -6623,9 +6623,263 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // One pool for the picker sentinel's pane probes: slow panes do not stall
   // other panes, and scans on the same pane never overlap.
   const maintenance = createKeyedScheduler(4);
+  type HookReview = {
+    id: string; a: AttachState; pane: string; sid: string; gen: number; pid: number; rootPid: number;
+    fingerprint: string; screen: string; hooks: CodexHook[]; busy: boolean; resultPending?: boolean; active: boolean; signal: AbortSignal;
+    frame?: WsFrame<EventMessageWith<TemplateCardEventData>>; valid: () => boolean; canNotify: () => boolean;
+  };
+  let hookReviewStopping = false;
+  const hookReviews = new Map<string, HookReview>();
+  const hookReviewBySession = new Map<string, string>();
+  const hookCardFailures = new Map<string, { fingerprint: string; attempts: number; retryAt: number }>();
+  const hookDetails = (hooks: CodexHook[]): string =>
+    `Codex 待审 hooks 清单（逐项展示来源、事件、matcher、命令和 hash）：\n\n\`\`\`json\n${JSON.stringify(hooks.map((h) => ({ source: h.sourcePath, event: h.eventName, matcher: h.matcher, key: h.key, enabled: h.enabled, trust: h.trustStatus, hash: h.currentHash, command: h.command })), null, 2).replace(/```/gu, "\\u0060\\u0060\\u0060")}\n\`\`\``;
+  const renderHookReviewCard = (id: string, hooks: CodexHook[], status = "等待选择"): TemplateCard => ({
+    card_type: "button_interaction",
+    source: { desc: "Codex hook 信任审查" },
+    main_title: { title: "Codex hooks 需要审查" },
+    sub_title_text: `${hooks.length} 个待审 · 本次跳过 hooks · ${status}`,
+    task_id: id,
+    button_list: [
+      { text: "查看 hooks", style: 1, key: `codex-hook-review:${id}:review` },
+      { text: "精确授信并继续", style: 1, key: `codex-hook-review:${id}:trust` },
+      { text: "不授信并继续", style: 4, key: `codex-hook-review:${id}:skip` },
+    ],
+  } as TemplateCard);
+  const sendHookDetails = async (review: HookReview): Promise<void> => {
+    const content = hookDetails(review.hooks);
+    const chatId = replyChatId(review.a);
+    const chunks = splitMarkdown(withLinkedTag(review.a, content), Math.max(200, cfg.wrc.mirror.chunkBytes - TAG_HEADER_BUDGET));
+    for (const chunk of chunks) {
+      if (!review.valid()) return;
+      await client.sendMessage(chatId, { msgtype: "markdown", markdown: { content: chunk } });
+    }
+  };
+  const sendHookResult = async (review: HookReview, text: string): Promise<boolean> => {
+    for (let attempt = 0; attempt <= 5; attempt++) {
+      if (!review.canNotify()) return false;
+      try {
+        await client.sendMessage(replyChatId(review.a), { msgtype: "markdown", markdown: { content: withLinkedTag(review.a, text) } });
+        return true;
+      } catch (error) {
+        log.warn({ err: errText(error), id: review.id, attempt }, "Codex hook result delivery failed; retrying");
+        if (attempt < 5) await sleep(Math.min(60_000, 2_000 * 2 ** attempt));
+      }
+    }
+    if (review.canNotify() && review.frame) {
+      try { await client.updateTemplateCard(review.frame, renderHookReviewCard(review.id, review.hooks, "结果消息发送失败，请查看本机 CLI")); }
+      catch (fallbackError) { log.error({ err: errText(fallbackError), id: review.id }, "Codex hook result and fallback card delivery failed"); }
+    }
+    return false;
+  };
+  const codexPid = async (pane: string): Promise<number | undefined> => {
+    const root = await panePidOf(pane);
+    const ps = await psSnap();
+    const pids = new Set([...ps.commands].filter(([, command]) => basename(command) === "codex").map(([pid]) => pid));
+    return root ? registeredPidUnder(root, pids, ps.kids) : undefined;
+  };
+  const chooseCodexHookOption = async (review: HookReview, v: ModalPaneVerdict & { screen: string }, index: number, live: () => Promise<boolean>): Promise<boolean> => {
+    if (!isCodexHookReviewPane(v.screen) || modalFingerprint(v.screen) !== review.fingerprint) return false;
+    const options = parseModalOptions(v.screen);
+    const target = options.find((option) => option.index === index);
+    if ((index === 2 && target?.label !== "Trust all and continue")
+      || (index === 3 && !/^Continue without trusting\b/u.test(target?.label ?? ""))) return false;
+    let selected = options.find((option) => option.selected)?.index;
+    if (!target || selected === undefined) return false;
+    for (let n = 0; selected !== index && n < options.length; n++) {
+      if (!(await live())) return false;
+      await runTmux(["send-keys", "-t", review.pane, selected < index ? "Down" : "Up"]);
+      await sleep(MODAL_ARROW_SETTLE_MS);
+      const next = await detectModalPicker(review.pane);
+      if (!(await live()) || !isCodexHookReviewPane(next.screen) || modalFingerprint(next.screen) !== review.fingerprint) return false;
+      selected = parseModalOptions(next.screen).find((option) => option.selected)?.index;
+      if (selected === undefined) return false;
+    }
+    const current = await detectModalPicker(review.pane);
+    if (!(await live()) || !isCodexHookReviewPane(current.screen) || modalFingerprint(current.screen) !== review.fingerprint
+      || parseModalOptions(current.screen).find((option) => option.selected)?.index !== index) return false;
+    if (!(await runTmux(["send-keys", "-t", review.pane, "Enter"])).ok) return false;
+    for (let end = Date.now() + 3000; Date.now() < end; await sleep(100)) {
+      const after = await detectModalPicker(review.pane);
+      if (!(await live())) return false;
+      if (!isCodexHookReviewPane(after.screen)) return Boolean(after.screen.trim());
+    }
+    return false;
+  };
+  client.on("event.template_card_event", async (frame: WsFrame<EventMessageWith<TemplateCardEventData>>) => {
+    const ev = frame.body?.event as (TemplateCardEventData & { template_card_event?: { event_key?: string } }) | undefined;
+    const key = ev?.template_card_event?.event_key ?? ev?.event_key ?? "";
+    const match = /^codex-hook-review:([^:]+):(review|trust|skip)$/u.exec(key);
+    const review = match ? hookReviews.get(match[1]!) : undefined;
+    if (!review || !review.valid()) return;
+    if (match![2] === "review") {
+      try { await sendHookDetails(review); }
+      catch (error) {
+        log.warn({ err: errText(error), pane: review.pane }, "Codex hook detail delivery failed");
+        await sendHookResult(review, "完整 hook 清单发送失败；请稍后重试查看，未执行任何授权。");
+      }
+      return;
+    }
+    if (review.busy) return;
+    review.busy = true;
+    review.frame = frame;
+    try { await client.updateTemplateCard(frame, renderHookReviewCard(review.id, review.hooks, "处理中…")); }
+    catch (error) { log.warn({ err: errText(error), id: review.id }, "Codex hook processing card update failed"); }
+    if (!review.valid()) { review.busy = false; return; }
+    let status = "授权未完成；确认卡已失效";
+    let terminal = false;
+    try {
+      const result = await withPaneInput(review.pane, async (live) => {
+        const valid = async () => {
+          if (!review.valid() || !live() || await panePidOf(review.pane) !== review.rootPid) return false;
+          const currentSession = codexSessionForPane(review.pane, cfg.daemon.stateDir)?.sessionId;
+          if (currentSession && currentSession !== review.sid) return false;
+          return await codexPid(review.pane) === review.pid;
+        };
+        if (!(await valid())) return "pane 身份已变化，未执行操作";
+        let before = await detectModalPicker(review.pane);
+        if (!isCodexHookReviewPane(before.screen) || modalFingerprint(before.screen) !== review.fingerprint) return "弹窗已变化或已由本地处理，未执行操作";
+        const backend = backendForPath(review.a.jsonlPath);
+        const homeDir = expandHome(backend.homeDir);
+        const current = await inspectCodexHooks(backend.bin, review.a.runningCwd, [], homeDir);
+        if (!(await valid())) return "daemon 已停止或 pane 身份改变；未执行操作";
+        const currentByKey = new Map(current.map((hook) => [hook.key, hook]));
+        if (review.hooks.some((hook) => {
+          const now = currentByKey.get(hook.key);
+          return !now || !now.enabled || now.sourcePath !== hook.sourcePath || now.currentHash !== hook.currentHash
+            || now.eventName !== hook.eventName || now.command !== hook.command || now.matcher !== hook.matcher;
+        })) return "Codex hooks changed since review; 卡片已失效，未继续";
+        const pending = current.filter((hook) => hook.enabled && hook.trustStatus !== "trusted");
+        const reviewedKeys = new Set(review.hooks.map((hook) => hook.key));
+        if (pending.some((hook) => !reviewedKeys.has(hook.key))) return "出现未展示的待审 hook；卡片已失效，未继续";
+        // “Trust all” can authorize hooks outside this card. Exact hashes have
+        // been persisted and verified above; continue via the native skip path.
+        const option = 3;
+        if (match![2] === "trust") {
+          if (pending.length) {
+            await trustCodexHookSet(backend.bin, review.a.runningCwd, homeDir,
+              pending.map(({ key, currentHash, sourcePath }) => ({ key, currentHash, sourcePath })), valid);
+          }
+          if (!(await valid())) return "hash 已写入，但 pane 身份改变；请在 CLI 核对继续状态";
+          const verified = await inspectCodexHooks(backend.bin, review.a.runningCwd, [], homeDir);
+          if (!(await valid())) return "daemon 已停止或 pane 身份改变；未继续操作";
+          if (review.hooks.some((hook) => {
+            const now = verified.find((item) => item.key === hook.key);
+            return !now || !now.enabled || now.sourcePath !== hook.sourcePath || now.currentHash !== hook.currentHash
+              || now.eventName !== hook.eventName || now.command !== hook.command || now.matcher !== hook.matcher;
+          }) || verified.some((hook) => hook.enabled && hook.trustStatus !== "trusted"
+            && !review.hooks.some((item) => item.key === hook.key))) {
+            return "hash 验证后 hook 集发生变化；弹窗已失效，未继续";
+          }
+          const afterTrust = await detectModalPicker(review.pane);
+          if (!afterTrust.modal) return "审查清单中的 hook 已精确授信；弹窗已消失，未代为继续";
+          if (!isCodexHookReviewPane(afterTrust.screen) || modalFingerprint(afterTrust.screen) !== review.fingerprint) {
+            return "hash 已验证，但弹窗已变化；请在 CLI 核对继续状态";
+          }
+          before = afterTrust;
+        }
+        const liveGuard = valid;
+        const pressed = await chooseCodexHookOption(review, before, option, liveGuard);
+        if (!pressed) return match![2] === "trust"
+          ? "hash 已按审查清单写入并验证；CLI 确认未完成，请在本地继续"
+          : "未信任任何 hook；CLI 确认未完成，请在本地继续";
+        return match![2] === "trust"
+          ? "审查清单中的 hook 已精确授信；本次启动选择了不信任继续，hooks 本次不会运行"
+          : "未信任 hook，Codex 已继续；hooks 本次不会运行";
+      }, { guard: review.valid });
+      status = result;
+      terminal = /Codex 已继续|本次启动选择了不信任继续/u.test(result);
+    } catch (error) {
+      status = `授权未完成：${errText(error)}`;
+      log.warn({ err: errText(error), pane: review.pane }, "Codex hook trust action failed");
+    }
+    review.resultPending = true;
+    await sendHookResult(review, status);
+    review.resultPending = false;
+    review.busy = false;
+    if (terminal || /弹窗已变化|pane 身份已变化|卡片已失效|未展示的待审 hook|hook 集发生变化/u.test(status)) {
+      review.active = false;
+      hookReviews.delete(review.id);
+      hookReviewBySession.delete(review.sid);
+      review.valid = () => false;
+    }
+  });
   const maintenanceValid = (a: AttachState, pane: string, sid: string, gen: number, signal: AbortSignal): boolean =>
     !signal.aborted && byTarget.get(a.target) === a && a.tmuxPane === pane && a.sessionId === sid
     && (a.injectGen ?? 0) === gen && !a.migrationWatcher;
+  const codexHookReviewOne = async (a: AttachState, pane: string, sid: string, gen: number, signal: AbortSignal): Promise<void> => {
+    const v = await detectModalPicker(pane);
+    if (!isCodexHookReviewPane(v.screen)) {
+      const stale = hookReviewBySession.get(sid);
+      if (stale) {
+        const previous = hookReviews.get(stale);
+        if (previous?.busy || previous?.resultPending) return;
+        if (previous) previous.active = false;
+        hookReviewBySession.delete(sid);
+        hookReviews.delete(stale);
+      }
+      a.pickerSentinelFp = undefined;
+      return;
+    }
+    if (hookReviewBySession.has(sid)) return;
+    const fingerprint = modalFingerprint(v.screen);
+    const failure = hookCardFailures.get(sid);
+    if (failure?.fingerprint === fingerprint && Date.now() < failure.retryAt) return;
+    if (failure && failure.fingerprint !== fingerprint) hookCardFailures.delete(sid);
+    const rootPid = await panePidOf(pane);
+    const pid = await codexPid(pane);
+    const currentSession = codexSessionForPane(pane, cfg.daemon.stateDir)?.sessionId;
+    if (!rootPid || !pid || (currentSession && currentSession !== sid)
+      || byTarget.get(a.target) !== a || a.tmuxPane !== pane || a.sessionId !== sid || (a.injectGen ?? 0) !== gen) return;
+    const backend = backendForPath(a.jsonlPath);
+    let hooks: CodexHook[];
+    try { hooks = await inspectCodexHooks(backend.bin, a.runningCwd, [], expandHome(backend.homeDir)); }
+    catch (error) {
+      log.warn({ err: errText(error), target: a.target }, "Codex hook review enumeration failed");
+      return;
+    }
+    const pending = hooks.filter((hook) => hook.enabled && hook.trustStatus !== "trusted");
+    const summary = /(?:^|\n)\s*(\d+)\s+hooks?\s+(?:is|are)\s+new or changed\./iu.exec(v.screen);
+    if (!summary || Number(summary[1]) !== pending.length || !pending.length || pending.some((hook) => !hook.key || !hook.eventName || !hook.sourcePath
+      || !hook.currentHash || !/^sha256:[0-9a-f]{64}$/iu.test(hook.currentHash) || !hook.command)) {
+      log.info({ target: a.target, screenCount: summary?.[1], count: pending.length }, "Codex hook review not forwarded: incomplete or empty review set");
+      return;
+    }
+    const id = randomUUID();
+    const review: HookReview = {
+      id, a, pane, sid, gen, pid, rootPid, fingerprint, screen: v.screen,
+      hooks: pending, busy: false, active: true, signal,
+      valid: () => review.active && !hookReviewStopping && !maintenance.signal.aborted && !signal.aborted
+        && byTarget.get(a.target) === a && a.tmuxPane === pane && a.sessionId === sid
+        && (a.injectGen ?? 0) === gen && !a.migrationWatcher,
+      canNotify: () => !hookReviewStopping && !maintenance.signal.aborted && !signal.aborted,
+    };
+    try {
+      const chatId = replyChatId(a);
+      const chunks = splitMarkdown(withLinkedTag(a, hookDetails(pending)), Math.max(200, cfg.wrc.mirror.chunkBytes - TAG_HEADER_BUDGET));
+      for (const content of chunks) {
+        if (!review.valid()) return;
+        await client.sendMessage(chatId, { msgtype: "markdown", markdown: { content } });
+      }
+      if (!review.valid()) return;
+      hookReviews.set(id, review);
+      hookReviewBySession.set(sid, id);
+      await client.sendMessage(chatId, { msgtype: "template_card", template_card: renderHookReviewCard(id, pending) });
+      hookCardFailures.delete(sid);
+      a.pickerSentinelFp = v.screen;
+      log.info({ target: a.target, sessionId: sid, id, count: pending.length }, "Codex hook review card sent");
+    } catch (error) {
+      review.active = false;
+      hookReviews.delete(id);
+      hookReviewBySession.delete(sid);
+      const previous = hookCardFailures.get(sid);
+      const attempts = previous?.fingerprint === fingerprint ? previous.attempts + 1 : 1;
+      const retryMs = Math.min(5 * 60_000, 5_000 * 2 ** (attempts - 1));
+      hookCardFailures.set(sid, { fingerprint, attempts, retryAt: Date.now() + retryMs });
+      a.pickerSentinelFp = v.screen;
+      log.warn({ err: errText(error), target: a.target, attempts, retryMs }, "Codex hook review card send failed; retry backed off");
+    }
+  };
   // ── 原生权限 picker 哨兵 ──────────────────────────────────────────────
   // CodeBuddy 对一部分调用先弹自家权限 picker、PreToolUse hook 在人点掉之后才
   // 触发 / 根本不触发 (与 AskUserQuestion 的「本地面板先行」同源; 实测命中: 子代理
@@ -6638,16 +6892,19 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   //     对应选项; 本地先按掉则 moot 作废卡。代按/发卡都发 chat 回执留痕。
   // WEZARD_PICKER_SENTINEL=0 整体关闭。
   const pickerOne = async (a: AttachState, pane: string, sid: string, gen: number, signal: AbortSignal): Promise<void> => {
-    const guard = () => maintenanceValid(a, pane, sid, gen, signal) && cfg.approval.enabled
+    const guard = () => maintenanceValid(a, pane, sid, gen, signal) && (cliOf(a) === "codex" || cfg.approval.enabled)
       && process.env.WEZARD_PICKER_SENTINEL !== "0";
     if (!guard()) return;
     await withPaneInput(pane, async (live) => {
       const valid = () => guard() && live();
       if (!a.tmuxPane || a.migrationWatcher) return;
-      // Codex PermissionRequest has its own independent native gate. Screen
-      // options, tool windows and skipAll never authorize its sandbox.
-      if (cliOf(a) === "codex") return;
       if (!(await tmuxPaneAlive(pane)) || !valid()) return;
+      // Hook trust is a distinct startup gate: enumerate and display its exact
+      // hash set; ordinary tool approval rules have no authority over it.
+      if (cliOf(a) === "codex") {
+        await codexHookReviewOne(a, pane, sid, gen, signal);
+        return;
+      }
       const v = await detectModalPicker(pane);
       if (!valid()) return;
       if (!v.modal) {
@@ -6733,9 +6990,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }, { guard });
   };
   const pickerTick = (): void => {
-    if (!cfg.approval.enabled || process.env.WEZARD_PICKER_SENTINEL === "0") return;
+    if (process.env.WEZARD_PICKER_SENTINEL === "0") return;
     for (const a of byTarget.values()) {
-      if (!a.tmuxPane || cliOf(a) === "codex") continue;
+      if (!a.tmuxPane || (cliOf(a) !== "codex" && !cfg.approval.enabled)) continue;
       const pane = a.tmuxPane, sid = a.sessionId, gen = a.injectGen ?? 0;
       void maintenance.schedule(`picker:${a.target}`, pane, (signal) => pickerOne(a, pane, sid, gen, signal))
         ?.catch((e: unknown) => {
@@ -7489,9 +7746,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     onSpawn,
     onContextCut,
     shutdown: () => {
+      hookReviewStopping = true;
       clearInterval(paneDriftTimer);
       clearInterval(pickerTimer);
       maintenance.stop();
+      for (const review of hookReviews.values()) review.active = false;
+      hookReviews.clear();
+      hookReviewBySession.clear();
+      hookCardFailures.clear();
       for (const a of bySessionId.values()) {
         if (a.outbound?.kind === "deferred") clearTimeout(a.outbound.timer);
         a.outbound = undefined;

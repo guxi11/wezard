@@ -58,6 +58,7 @@ export interface ModalPaneVerdict {
  */
 export const isModalPane = (pane: string): ModalPaneVerdict => {
   const p = stripBoxBorders(pane ?? "");
+  if (isCodexHookReviewPane(p)) return { modal: true, title: "Hooks need review" };
   // Codex uses › and a different footer for native selection menus. Keep this
   // detection separate from permission-option parsing: detecting a menu must
   // not make Claude/CodeBuddy's auto-answer strategy operate it.
@@ -66,6 +67,21 @@ export const isModalPane = (pane: string): ModalPaneVerdict => {
   if (!p || !MODAL_OPTION_ROW.test(p)) return { modal: false };
   if (!MODAL_FOOTER.test(p) && !hasPermissionShape(parseModalOptions(p))) return { modal: false };
   return { modal: true, title: p.match(MODAL_TITLE)?.[1] };
+};
+
+/** Codex's startup hook trust gate has a distinct footer and must only be
+ * classified as a blocker; its option semantics are handled by its own flow. */
+export const isCodexHookReviewPane = (pane: string): boolean => {
+  const p = stripBoxBorders(pane ?? "");
+  const options = parseModalOptions(p);
+  return /(?:^|\n)\s*Hooks need review\s*(?:\n|$)/iu.test(p)
+    && /(?:^|\n)\s*\d+\s+hooks?\s+(?:is|are)\s+new or changed\./iu.test(p)
+    && options.length === 3
+    && options.some((option) => option.index === 1 && option.label === "Review hooks")
+    && options.some((option) => option.index === 2 && option.label === "Trust all and continue")
+    && options.some((option) => option.index === 3 && /^Continue without trusting\b/u.test(option.label))
+    && options.filter((option) => option.selected).length === 1
+    && /(?:^|\n)\s*enter confirm\s*·\s*esc skip\s*$/iu.test(p);
 };
 
 /** 弱形状: 屏上有高亮编号行 (isModalPane 的必要不充分条件)。哨兵用它区分
@@ -86,7 +102,7 @@ export const looksLikePicker = (pane: string): boolean =>
 // 解析不出可信选项 → 返回 undefined, 调用方走取消+告知的兜底路径。
 
 /** 编号选项行: "❯ 1. Yes" / "  2. No, and tell Claude…"。 */
-const OPTION_ROW = /^\s*(?:[❯>]\s*)?(\d+)\.\s+(\S.*?)\s*$/u;
+const OPTION_ROW = /^\s*(?:[❯›>]\s*)?(\d+)\.\s+(\S.*?)\s*$/u;
 
 /** 权限确认框的标题形状。plan review("Would you like to proceed?")也在此列 —— 但它
  *  的选项文案不是裸 "Yes", pickModalAnswer 会自然放弃, 不需要在标题上再排除。
@@ -117,7 +133,7 @@ export const parseModalOptions = (pane: string): ModalOption[] => {
       continue;
     }
     const index = Number(m[1]);
-    const opt: ModalOption = { index, label: m[2]!, selected: /^\s*[❯>]/u.test(line) };
+    const opt: ModalOption = { index, label: m[2]!, selected: /^\s*[❯›>]/u.test(line) };
     // 编号回到 1 = 新的一组开始。
     if (index === 1 && cur.length > 0) { groups.push(cur); cur = []; }
     cur.push(opt);

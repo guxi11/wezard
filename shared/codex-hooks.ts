@@ -18,6 +18,7 @@ export interface CodexHook {
   key: string;
   eventName: string;
   command?: string;
+  matcher?: string;
   sourcePath: string;
   currentHash: string;
   trustStatus: string;
@@ -99,7 +100,75 @@ export const inspectCodexHooks = async (bin: string, cwd: string, args: string[]
   if (!Array.isArray(result.data)) throw new Error("Codex returned no hooks/list data");
   const errors = result.data.flatMap((d) => d.errors ?? []);
   if (errors.length) throw new Error(`Codex hook config errors: ${JSON.stringify(errors)}`);
+  if (result.data.some((entry) => !Array.isArray(entry.hooks))) throw new Error("Codex returned incomplete hooks/list data");
   return result.data.flatMap((d) => d.hooks);
+};
+
+/** Persist trust only for the exact hook set a human reviewed, then verify Codex's view. */
+export const trustCodexHookSet = async (
+  bin: string,
+  cwd: string,
+  homeDir: string,
+  reviewed: Pick<CodexHook, "key" | "currentHash" | "sourcePath">[],
+  live?: () => boolean | Promise<boolean>,
+): Promise<CodexHook[]> => {
+  const assertLive = async (): Promise<void> => {
+    if (live && !(await live())) throw new Error("Codex hook review is no longer live; trust was not written");
+  };
+  await assertLive();
+  if (!reviewed.length || new Set(reviewed.map((h) => h.key)).size !== reviewed.length) {
+    throw new Error("Codex hook review set is empty or has duplicate keys");
+  }
+  const current = await inspectCodexHooks(bin, cwd, [], homeDir);
+  await assertLive();
+  const byKey = new Map(current.map((hook) => [hook.key, hook]));
+  const pending = current.filter((hook) => hook.enabled && hook.trustStatus !== "trusted");
+  if (pending.length !== reviewed.length || pending.some((hook) => {
+    const item = reviewed.find(({ key }) => key === hook.key);
+    return !item || item.currentHash !== hook.currentHash || item.sourcePath !== hook.sourcePath;
+  })) throw new Error("The pending Codex hook set changed since review; trust was not written");
+  if (reviewed.some(({ key, currentHash, sourcePath }) => {
+    const hook = byKey.get(key);
+    return !hook || hook.currentHash !== currentHash || hook.sourcePath !== sourcePath || !hook.enabled;
+  })) throw new Error("Codex hooks changed since review; trust was not written");
+
+  const config = await codexRequest<{
+    layers: Array<{
+      name: { type: string; profile?: string | null };
+      version: string;
+      config: { hooks?: { state?: Record<string, { trusted_hash?: string; enabled?: boolean }> } };
+    }>;
+  }>(bin, cwd, "config/read", { includeLayers: true, cwd }, [], homeDir);
+  const user = config.layers.find((layer) => layer.name.type === "user" && !layer.name.profile);
+  if (!user) throw new Error("Codex user config layer is unavailable");
+  const state = user.config.hooks?.state ?? {};
+  const updates = Object.fromEntries(reviewed.map(({ key, currentHash }) => [key, { ...state[key], enabled: true, trusted_hash: currentHash }]));
+  // Re-read immediately before the write: hooks may change while config/read
+  // is in flight, and the daemon session may have stopped in the meantime.
+  const latest = await inspectCodexHooks(bin, cwd, [], homeDir);
+  await assertLive();
+  const latestPending = latest.filter((hook) => hook.enabled && hook.trustStatus !== "trusted");
+  if (latestPending.length !== reviewed.length || latestPending.some((hook) => {
+    const item = reviewed.find(({ key }) => key === hook.key);
+    return !item || item.currentHash !== hook.currentHash || item.sourcePath !== hook.sourcePath;
+  })) throw new Error("The pending Codex hook set changed before trust was written");
+  await assertLive();
+  await codexRequest(bin, cwd, "config/batchWrite", {
+    filePath: `${homeDir.replace(/\/$/u, "")}/config.toml`,
+    expectedVersion: user.version,
+    edits: [{ keyPath: "hooks.state", value: { ...state, ...updates }, mergeStrategy: "replace" }],
+  }, [], homeDir);
+
+  const verified = await inspectCodexHooks(bin, cwd, [], homeDir);
+  const trusted = new Map(verified.map((hook) => [hook.key, hook]));
+  if (verified.some((hook) => hook.enabled && hook.trustStatus !== "trusted")) {
+    throw new Error("New or changed Codex hooks appeared during trust; the review card is stale");
+  }
+  if (reviewed.some(({ key, currentHash }) => {
+    const hook = trusted.get(key);
+    return !hook || hook.currentHash !== currentHash || hook.trustStatus !== "trusted";
+  })) throw new Error("Codex did not verify trust for the reviewed hooks");
+  return verified;
 };
 
 export const shellQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
