@@ -1,5 +1,5 @@
 // 交接 (handoff): 一个 wizard 把工作压成简报, 换一个全新的会话接着干 —— 同一个 target、
-// 同一个名字, 新的 sid、新的 pane。
+// 同一个名字、同一个 pane 与 CLI 进程; 原生 /clear 是否换 sid 由后端决定。
 //
 // 身份、工单、日程、名册信箱都挂在 target / 名字上, 换会话碰不到它们; 会断的是那些
 // 隐含着「这个会话」的东西:
@@ -7,7 +7,7 @@
 //     简报转进新会话, 而不是把简报那一轮的回复错当成回执;
 //   - 回执的**发方**与一切注入: 重开的那几秒 pane 是死的, 此刻投进来的话要么被当成
 //     "发话方已经不在"丢掉, 要么 resume 回旧 sid, 要么抢在简报前面成了新会话的开场白;
-//   - 交接本身: 旧实现是一段纯内存的 async, reload 落在「杀了旧 pane、还没贴回简报」
+//   - 交接本身: reload 落在「清空了旧上下文、还没贴回简报」
 //     之间, 新会话就空着醒来, 简报没了。
 // 所以这里做三件事: 交接期间立一道闸 (`handingOff` / `handedOff`), 闸内一切注入都等;
 // 简报贴回新会话, 然后**按路由表**把它交接前还欠着、还没交代的那几笔一笔一轮地
@@ -49,6 +49,15 @@ const hold = (target: string): (() => void) => {
 
 // ── 一次交接 ────────────────────────────────────────────────────────
 
+export interface ClearAttempt {
+  pane: string;
+  pid: number;
+  panePid?: number;
+  nextSid?: string;
+  sid: string;
+  at: number;
+}
+
 export interface Pending {
   target: string;
   /** self = 简报由它自己写在入参里; other = 守护进程让它写。 */
@@ -74,20 +83,24 @@ export interface Pending {
   /** 自我交接切断的那一轮里被扣下没落定的终句 (注入事件 id): 交接做成了由新会话「继续 <event>」
    *  续答, 用不着它们; 交接没做成就得按原行补投回去, 否则那几笔再没人交代。 */
   cut?: string[];
-  failure?: { status: number; reason: string };
+  clear?: ClearAttempt;
+  failure?: { status: number; reason: string; compensated?: boolean };
 }
 
 export interface HandoffDeps {
   isBusy: (target: string) => Promise<boolean>;
+  currentEvents?: (target: string) => readonly string[];
+  suppress?: (events: readonly string[]) => void;
   sessionId: (target: string) => string;
-  /** 杀旧 pane、起新进程 (同名 / cwd / 模型 / charter); `p.announce` 时重开发「📂 当前项目」气泡。 */
-  restart: (target: string, p: Pending) => Promise<{ ok: boolean; reason?: string }>;
+  /** 原 pane 的原生 /clear; 提交凭证必须先落盘, 不能回退新进程。 */
+  restart: (target: string, p: Pending, submitted: (attempt: ClearAttempt) => void) => Promise<{ ok: boolean; reason?: string }>;
   /** 往会话里贴一段话; 这一轮的频道是 `channel` ("" = 私聊)。简报那一句不挂任何信封 ——
    *  它不服务任何一笔, 回执不会误落到它上面。 */
-  inject: (target: string, text: string, channel: string) => Promise<{ ok: boolean; reason?: string }>;
+  inject: (target: string, text: string, channel: string, id: string, timeoutMs: number, clear?: ClearAttempt) => Promise<{ ok: boolean; reason?: string }>;
   /** 它此刻这一轮的频道 ("" = 私聊)。 */
   channelOf: (target: string) => string;
   lastText: (target: string) => string;
+  summary: (id: string) => string | undefined;
   /** 交接前它欠着、还没交代的那几笔 (路由表 `owedBy(W)` 里 status 仍 open 的, 见 §9.5)。 */
   owed: (target: string) => readonly EventId[];
   /** 让它接着干那一笔: 注入「继续 `<event>`」, 该轮的终句因此落到那一行上, 回执照常闭合。
@@ -144,14 +157,16 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
   const fail = (p: Pending, status: number, reason: string): HandoffResult => {
     const cut = withCut(p).cut ?? [];
     // Resume compensation after a crash, rather than restarting the handoff.
-    save({ ...p, failure: { status, reason } });
+    const failure = { status, reason, ...(p.failure?.compensated ? { compensated: true } : {}) };
+    save({ ...p, failure });
     deps.log.warn({ mod: "handoff", target: p.target, stage: p.stage, reason, cut }, "handoff: 放弃");
-    if (p.mode === "self") {
+    if (p.mode === "self" && !failure.compensated) {
       deps.notify(p.target, `上下文交接没做成: ${reason}`);
-      // 新会话没接上, 没人会「继续 <event>」: 切断那一轮扣下的终句就是那几笔仅有的交代。
+      // 简报没接上, 没人会「继续 <event>」: 切断那一轮扣下的终句就是那几笔仅有的交代。
       if (cut.length) deps.uncut(p.target, cut);
     }
-    drop(p);
+    if (!failure.compensated) save({ ...p, failure: { ...failure, compensated: true } });
+    // 保留简报与可能已暴露的 clear 凭证, 失败后不自动重做破坏性清空。
     return { ok: false, status, reason, ...(p.brief ? { brief: p.brief } : {}) };
   };
   const idle = (p: Pending, ms: number) => waitForIdle(p.target, deps.isBusy, ms, () => false);
@@ -180,8 +195,10 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
         const r = await deps.resume(p.target, event, p.at);
         deps.log.info({ mod: "handoff", target: p.target, event, ok: r.ok, reason: r.reason }, "handoff: 欠账续答 (继续)");
         if (r.ok) await landed(p, 60_000);
+        else done = false;
       }
     } catch (e) {
+      done = false;
       deps.log.warn({ mod: "handoff", target: p.target, err: (e as Error).message }, "handoff: 欠账续答中断");
     }
     if (done) drop(p);
@@ -189,6 +206,8 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
 
   /** 一步一步推到底; 每一步先落盘再动手, reload 后从 `stage` 接着来。 */
   const step = async (p: Pending): Promise<HandoffResult> => {
+    save(p);
+    if (p.mode === "self" && !p.failure?.compensated && p.cut?.length) deps.suppress?.(p.cut);
     if (p.failure) return fail(p, p.failure.status, p.failure.reason);
     switch (p.stage) {
       case "waiting": {
@@ -198,38 +217,29 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
         if (!w.idle) return fail(p, 504, `一直没能闲下来 (${w.reason}), 上下文没动`);
         if (p.mode === "self") return step({ ...p, stage: "restarting" });
         // 守护进程请它写简报, 不是谁在群里问的: 私聊。
-        const r = await deps.inject(p.target, briefPrompt(p.focus), "");
+        const r = await deps.inject(p.target, briefPrompt(p.focus), "", `handoff:${p.target}:${p.at}:summary`, p.timeoutMs);
         if (!r.ok) return fail(p, 502, `summary inject failed: ${r.reason}`);
         return step(saved({ ...p, stage: "briefing" }));
       }
       case "briefing": {
         const w = await idle(p, p.timeoutMs);
-        const brief = deps.lastText(p.target);
+        const brief = deps.summary(`handoff:${p.target}:${p.at}:summary`) ?? "";
         // 没等到 idle 就不能重开 —— 那会丢掉这次还在生成的交接总结。
         if (!w.idle) return fail(p, 504, `target still working: ${w.reason}; not restarting to avoid losing the turn`);
         if (!brief.trim()) return fail(p, 502, "target produced no summary text");
         return step({ ...p, brief, stage: "restarting" });
       }
       case "restarting": {
-        cutting.delete(p.target); // 旧会话停下了: 之后的终句都是新会话的
-        // reload 落在重开中途: sid 已经换了就是做完了, 别再杀一次新会话。
-        if (deps.sessionId(p.target) !== p.sid) return step(saved({ ...p, stage: "restarted" }));
-        // 它欠着谁、欠哪几笔 (路由表) 不受换会话影响: 表按 target 记, 新会话照样查得到 (见 resumeOwed)。
-        const r = await deps.restart(p.target, p);
-        if (!r.ok) return fail(p, 502, `/new failed: ${r.reason ?? "unknown"}`);
+        // 每次物理提交前先保存, reload 只核对凭证, 不能再次发送 /clear。
+        const r = await deps.restart(p.target, p, (clear) => { p = saved({ ...p, clear }); });
+        if (!r.ok) return fail(p, 502, `/clear failed: ${r.reason ?? "unknown"}`);
+        cutting.delete(p.target);
         return step(saved({ ...p, stage: "restarted" }));
       }
       case "restarted": {
-        // 简报是新会话的第一条注入, 可能撞上冷 pane: TUI 还没起好时注入只能「信任提交」
-        // (日志 ok 而 pane 其实空白), 吞了 wizard 就空着醒来 —— 简报是它唯一的开场白。
-        // 所以贴完要看见它真的动起来 (转忙, 或新 transcript 里有了它的话), 看不见就重贴一次。
-        const text = carryOf(p);
-        let r = await deps.inject(p.target, text, p.channel ?? "");
-        if (r.ok && !(await landed(p, 60_000))) {
-          deps.log.warn({ mod: "handoff", target: p.target }, "handoff: 简报贴回后新会话没动静 (冷 pane 吞了?), 重贴一次");
-          r = await deps.inject(p.target, text, p.channel ?? "");
-          if (r.ok && !(await landed(p, 60_000))) r = { ok: false, reason: "简报两次都没让新会话动起来 (冷 pane 吞注入)" };
-        }
+        if (!p.clear?.nextSid || !p.clear.panePid) return fail(p, 409, "handoff has no complete original-pane clear evidence; refusing carry replay");
+        // 同一场交接始终用同一事件 id; reload 从收件事件恢复, 不凭忙闲猜测后重贴。
+        const r = await deps.inject(p.target, carryOf(p), p.channel ?? "", `handoff:${p.target}:${p.at}:carry`, p.timeoutMs, p.clear);
         deps.log.info({ mod: "handoff", target: p.target, ok: r.ok, reason: r.reason }, "handoff: 简报已贴回");
         if (!r.ok) return fail(p, 502, `handoff carry inject failed: ${r.reason}`);
         try {
@@ -255,41 +265,50 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
   const run = (p: Pending): Promise<HandoffResult> => {
     const release = hold(p.target);
     if (p.cut?.length) cuts.set(p.target, p.cut);
-    if (p.mode === "self" && p.stage === "waiting") cutting.add(p.target);
+    if (p.mode === "self" && ["waiting", "restarting"].includes(p.stage)) cutting.add(p.target);
     return step(p)
-      .catch((e: unknown) => fail(p, 500, (e as Error).message))
+      .catch((e: unknown): HandoffResult => {
+        const latest = deps.store?.get(p.target) ?? p;
+        try { return fail(latest, 500, (e as Error).message); }
+        catch (persistError) {
+          deps.log.error({ target: p.target, err: String(persistError) }, "handoff: durable state unavailable, refusing further input");
+          deps.notify(p.target, `交接存储失败，已停止自动交接: ${String(persistError)}`);
+          return { ok: false, status: 500, reason: "handoff durable state unavailable; automatic continuation stopped", ...(latest.brief ? { brief: latest.brief } : {}) };
+        }
+      })
       .finally(() => { cutting.delete(p.target); release(); });
   };
 
   const begin = (target: string, mode: Pending["mode"], extra: Partial<Pending>): Pending | undefined =>
-    handingOff(target)
+    (handingOff(target) || !!deps.store?.get(target))
       ? undefined
       : saved({ target, mode, at: Date.now(), sid: deps.sessionId(target), stage: "waiting", timeoutMs: SELF_IDLE_MS, channel: mode === "self" ? deps.channelOf(target) : "", ...extra });
 
   return {
     self: (target, brief) => {
-      const p = begin(target, "self", { brief });
-      if (!p) return { ok: false, reason: "已经在交接中" };
+      const p = begin(target, "self", { brief, cut: [...(deps.currentEvents?.(target) ?? [])] });
+      if (!p) return { ok: false, reason: "已有交接记录 (可能失败待核查), 不重复清空" };
       void run(p);
       return { ok: true };
     },
     other: async (target, focus, timeoutMs, extra) => {
       const p = begin(target, "other", { focus, timeoutMs, ...extra });
-      if (!p) return { ok: false, status: 409, reason: "它已经在交接中" };
+      if (!p) return { ok: false, status: 409, reason: "已有交接记录 (可能失败待核查), 不重复清空" };
       return run(p);
     },
     resume: () => {
-      const open = Object.values(deps.store?.all() ?? {});
+      const open = Object.values(deps.store?.all() ?? {}).filter((p) => !p.failure || !p.failure.compensated);
       open.forEach((p) => void run(p));
       if (open.length) deps.log.info({ mod: "handoff", resumed: open.map((p) => `${p.target}@${p.stage}`) }, "handoff: reload 后续做");
       return open.length;
     },
     cut: (target, event) => {
-      const c = cuts.get(target) ?? [];
-      if (c.includes(event)) return;
-      cuts.set(target, [...c, event]);
       const p = deps.store?.get(target);
-      if (p) save(p);
+      if (deps.store && !p) throw new Error("handoff transaction unavailable; refusing non-durable final suppression");
+      const cut = [...new Set([...(p?.cut ?? []), ...(cuts.get(target) ?? []), event])];
+      // 先保存事务凭证, 再发布内存切断状态; 写失败后的重试也必须重新尝试落盘。
+      if (p) deps.store!.set(target, { ...p, cut });
+      cuts.set(target, cut);
     },
   };
 };

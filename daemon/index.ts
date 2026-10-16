@@ -260,11 +260,13 @@ const main = async (): Promise<void> => {
   let peerEvents: Pick<MessageAdapters, "accepted" | "committed" | "canceled" | "valid" | "ready" | "inject" | "gone"> | undefined;
   /** T4: 路由表的投递层 —— 在 mirror 大块里接线 (要用到 jobs / 回执信封 / 事件泵), 这里先留个口。 */
   let deliverFinal: ((e: MessageEvent, verdict: FinalVerdict) => void) | undefined;
+  let handoffAllowed: (target: string) => boolean = () => false;
+  let handoffFinalSuppressed: (event: MessageEvent) => boolean = (e) => !!e.handoffCut && !e.handoffRestored;
   const events = createMessageEvents(join(cfg.daemon.stateDir, "message-events.json"), {
     resource: (target) => bridge.sessionInfo(target)?.tmuxPane || target,
     transcript: (target) => bridge.inputSessionInfo(target)?.jsonlPath ?? bridge.sessionInfo(target)?.jsonlPath,
     sessionId: (target) => bridge.inputSessionInfo(target)?.sessionId,
-    valid: (e) => e.payload.peer ? !!peerEvents?.valid(e) : true,
+    valid: (e) => (!(e.payload.handoff || (e.id.startsWith("route:") && e.id.includes(":resume:"))) || handoffAllowed(e.target)) && (e.payload.peer ? !!peerEvents?.valid(e) : true),
     accepted: (e) => { if (e.payload.peer) peerEvents?.accepted(e); },
     committed: (e) => { if (e.payload.peer) peerEvents?.committed(e); },
     gone: (e) => { if (e.payload.peer) peerEvents?.gone?.(e); },
@@ -282,8 +284,17 @@ const main = async (): Promise<void> => {
     // (贴进运行中的一轮记成 queued 轮, 终句照样归到这条 event —— 见 brief 的 seal/bindLine)。
     // 这一句曾是要 idleNow 的, 也就是那个反复 5s 超时的探测源头: 一超时就退避, 把同一 target
     // 后面排着的每一笔 (含后到的人话) 一起钉住十几分钟。交接期间照旧等 —— 那几秒 pane 真是死的。
-    ready: async (e) => !handingOff(e.target) && (e.payload.peer ? !!(await peerEvents?.ready(e)) : true),
+    ready: async (e) => e.payload.handoff ? handoffAllowed(e.target) && bridge.idleNow(e.target) : !handingOff(e.target) && (e.payload.peer ? !!(await peerEvents?.ready(e)) : true),
     inject: async (e, boundary) => {
+      if (e.payload.handoff) {
+        const expected = e.payload.handoff;
+        const same = (): boolean => { const info = bridge.sessionInfo(e.target); return info?.tmuxPane === expected.pane && info?.sessionId === expected.sessionId; };
+        if (!same()) return { ok: false, reason: "handoff original pane/session changed; refusing brief injection" };
+        return bridge.injectText(e.target, e.payload.text, undefined, {
+        channel: e.channel, eventId: e.id, envelope: renderReminder({ wezard: "envelope", kind: "peer", from: wizardStore()?.get(e.target)?.name || e.target, scope: "private", msg: e.id }, []), requireIdle: true, noRespawn: true, handoff: expected.clear,
+        guard: (phase, identity) => handoffAllowed(e.target) && same() && (!identity?.sessionId || identity.sessionId === expected.sessionId) && boundary(phase, identity),
+        });
+      }
       if (e.payload.peer) return peerEvents!.inject(e, boundary);
       if (!bridge.hasMirrorTarget(e.target)) {
         const spawned = await bridge.newSession(e.target, wizardStore()?.get(e.target)?.name || e.target, undefined, { silent: true });
@@ -323,7 +334,7 @@ const main = async (): Promise<void> => {
       }
       return { consumed: false };
     },
-    recovered: (e) => bridge.recoverEventFinal(e),
+    recovered: (e) => { if (!handoffFinalSuppressed(e)) bridge.recoverEventFinal(e); },
     // T4: 终句 → 路由表。onFinal 连同投递一起做 —— 定论先落盘 (`answer`), 再按 receiver
     // 投出去 (§9.3/§9.4); 实现在 mirror 大块里 (要 jobs / 信封 / 事件泵)。
     final: (e, verdict) => deliverFinal?.(e, verdict),
@@ -749,16 +760,7 @@ const main = async (): Promise<void> => {
       const r = await m.injectText(target, text, undefined, { guard });
       json(res, r.ok ? 200 : 500, r);
     });
-    // One-shot project switch: bind the chat-wide cwd AND apply it right here.
-    // 活会话走交接 (handoff): 守护进程请它写简报 → 重开 (pendingCwd 在这一步被消费,
-    // 落进新目录, 宪章随之重渲染) → 简报贴回, 上下文跟着过去, 「📂 当前项目」气泡
-    // 照发 (announce —— 那是人看得见的回执)。一律 fire-and-forget: 调用方常常就是被换
-    // 的那个, 它得先拿到这份应答、把这一轮说完, 交接才动得了手 (other 的第一拍就是等它
-    // 闲)。交接没做成 → 捎一条提醒给它, pendingCwd 仍排着队, 人手 /new 照样完成切换
-    // (若它本就在交接中, 那场交接的重开同样会消费这笔 pendingCwd)。冷会话 (pane 不在)
-    // 没有可交接的上下文, 按老路直接新开。Resolved target
-    // precedence: explicit body.target → sessionId-derived (so MCP can omit
-    // it) → tmuxPane (stable across /clear) → cfg.defaultChat.
+    // 工作目录属于 CLI 进程; 活会话只记录 pending, 必须由人显式 /new 应用。
     http.register("POST /mirror/workspace", async (req, res) => {
       const body = (await readBody(req)) as Partial<{ target: string; sessionId: string; tmuxPane: string; cwd: string; keep: boolean }>;
       const cwd = (body.cwd ?? "").toString();
@@ -776,11 +778,8 @@ const main = async (): Promise<void> => {
       const set = m.setPendingCwd(target, cwd);
       if (!set.ok) { json(res, 400, { ...set, target }); return; }
       if ((await liveOf([target])).length) {
-        const focus = `工作区切到 ${set.pendingCwd}: 简报里点一句手头活在新目录下怎么接着干`;
-        void handoffs.other(target, focus, CHARTER_HANDOFF_MS, { announce: true }).then((r) => {
-          if (!r.ok) notices.post([target], `换工作区到 ${set.pendingCwd} 的自动交接没做成: ${r.reason} —— 切换仍排着队, 手上这件告一段落后自己 \`handoff({brief})\`, 或让人在群里 /new 一下`);
-        });
-        json(res, 200, { ok: true, target, cwd: set.pendingCwd, scheduled: true });
+        json(res, 409, { ok: false, target, runningCwd: set.runningCwd, pendingCwd: set.pendingCwd,
+          reason: "原 CLI 进程不能切换工作目录；请求已保留为 pendingCwd，需要显式 /new 才生效，handoff /clear 不会应用它" });
         return;
       }
       // Same shape as inbound's /new: windowName = tag for tagged sessions,
@@ -963,6 +962,7 @@ const main = async (): Promise<void> => {
         && !a.canceled && a.acceptance !== "rejected" && jobs.get(r.plan.job)?.status === "open" && ["running", "needs-input", "errored"].includes(a.execution)
         && (r.plan.nodes.find((x) => x.id === n.id)?.after ?? []).every((id) => workflow.prereq(r.owner, r.nodes.find((x) => x.id === id)!.turn)?.state === "done");
     };
+    handoffAllowed = (target) => planContinuationAllowed(target) && !planStore.reservation(target, wizards.get(target)?.name);
     /** 一笔活第几个来回 (§3.2): 同一行上已经注入过的续问数 + 1 —— 现算, 不落第二份数据。
      *  续问的注入事件 id 是 `route:<event>:r<legs>`, 所以从它自己就能数回来 (reload 也在盘上)。 */
     const legsOf = (event: EventId): number =>
@@ -1015,19 +1015,58 @@ const main = async (): Promise<void> => {
     // 闸、回执清点与断点续做在那边。
     /** 情景记忆 (memory/episodes/<name>.jsonl) 按名字归档; 默认会话没名字时退回 slot / "default"。 */
     const episodeName = (t: string): string => wizards.get(t)?.name || tagOfKey(t) || "default";
+    const handoffStore = loadJsonMap<PendingHandoff>(cfg.wrc.mirror.handoffsFile, undefined, { strict: true });
+    handoffFinalSuppressed = (event) => {
+      const e = events.get(event.id) ?? event;
+      if (e.handoffRestored) return false;
+      if (e.handoffCut) return true;
+      const p = handoffStore.get(e.target);
+      // 先读在飞事务的明确旧事件集合, 覆盖 result 已写而事件 cut 尚未写的崩溃缝。
+      return !!p && p.mode === "self" && !p.failure?.compensated && !!p.cut?.includes(e.id);
+    };
     const handoffs = createHandoffs({
-      isBusy: m.isBusy,
+      currentEvents: (t) => {
+        const info = m.sessionInfo(t);
+        const active = info?.jsonlPath ? openingTurn(expandHome(info.jsonlPath))?.env?.eventId : undefined;
+        return events.ids().filter((id) => {
+          const e = events.get(id);
+          return !!e && e.target === t && !e.payload.handoff && (id === active || (!e.finalized && e.execution !== "canceled" && e.exposure !== "none" && (!e.sessionId || e.sessionId === info?.sessionId)));
+        });
+      },
+      suppress: (ids) => ids.forEach((id) => events.suppressHandoffFinal(id)),
+      isBusy: async (t) => {
+        if (!(await m.idleNow(t))) return true;
+        // TUI 已 idle 不代表旧 final 已被事件泵消费; 先落旧轮结果, 再允许切断上下文。
+        const old = events.ids().map((id) => events.get(id)).filter((e): e is MessageEvent => !!e && e.target === t && !e.id.startsWith("handoff:") && e.exposure !== "none" && !e.finalized && !e.releasedAt && e.execution !== "canceled" && (!e.sessionId || e.sessionId === m.sessionInfo(t)?.sessionId));
+        await old.reduce(async (before, e) => { await before; await events.reconcile(e.id); }, Promise.resolve());
+        return old.some((e) => { const now = events.get(e.id); return now && !now.finalized && now.execution !== "canceled"; });
+      },
       sessionId: (t) => m.sessionInfo(t)?.sessionId ?? "",
-      restart: (t, p) => restartFresh(t, p),
+      restart: (t, p, submitted) => clearForHandoff(t, p, submitted),
       // 简报是新会话的开场白, 但它不挂任何信封 (服务不着哪一笔) —— 交接前欠着的那几笔由
       // 「继续 <event>」逐笔续答 (见 resume), 别把简报那一轮的回复当成回执。
-      inject: async (t, text, channel) => {
+      inject: async (t, text, channel, id, timeoutMs, clear) => {
         if (!planContinuationAllowed(t)) return { ok: false, reason: "workflow continuation withdrawn" };
         if (planStore.reservation(t, wizards.get(t)?.name)) return { ok: false, reason: "workflow handoff requires the original attempt" };
-        return m.injectText(t, text, undefined, { channel, guard: () => planContinuationAllowed(t) });
+        if (clear && !(await m.verifyClearContext(t, clear))) return { ok: false, reason: "original cleared CLI process/session changed before carry" };
+        // 事件先落盘; 同一 id 重入只恢复状态, 不重贴。内部事件没有 serves, 不替任何欠账收口。
+        if (!events.known(id)) {
+          const info = clear ? { tmuxPane: clear.pane, sessionId: clear.nextSid } : m.sessionInfo(t);
+          if (!info?.tmuxPane || !info.sessionId) return { ok: false, reason: "original handoff pane/session binding is unavailable" };
+          events.accept({ id, identity: JSON.stringify({ pane: info.tmuxPane, sid: info.sessionId }), target: t, speaker: t, channel, priority: "now", deadline: Date.now() + timeoutMs,
+            payload: { text, handoff: { pane: info.tmuxPane, sessionId: info.sessionId, ...(clear ? { clear } : {}) } } });
+        }
+        for (const end = Date.now() + timeoutMs; Date.now() < end; await sleep(200)) {
+          const e = await events.reconcile(id);
+          if (e?.execution === "complete" || (!id.endsWith(":summary") && e?.exposure === "consumed")) return { ok: true };
+          if (e?.execution === "uncertain" || e?.execution === "canceled") return { ok: false, reason: e.reason ?? "handoff event delivery is uncertain; not resubmitting" };
+        }
+        events.cancel((e) => e.id === id && e.exposure === "none", "handoff stopped before confirmed delivery");
+        return { ok: false, reason: "handoff event consumption not confirmed; durable event retained" };
       },
       channelOf: m.currentChannel,
       lastText: m.lastText,
+      summary: (id) => { const e = events.get(id); return e?.execution === "complete" && e.exposure === "consumed" && typeof e.result?.body === "string" ? e.result.body : undefined; },
       // 欠账不落盘在交接里: 路由表按 target 记着它欠谁、欠哪几笔, 换会话不影响 (T8)。
       owed: (t) => router.owedBy(t).filter((r) => r.status === "open").map((r) => r.event),
       resume: async (t, event, at) => injectResume(t, event, at),
@@ -1037,12 +1076,16 @@ const main = async (): Promise<void> => {
       // 交接没做成: 切断那一轮扣下的终句按原行补投 —— 走与轮终同一条 onFinal (行已被合成失败落定的, 照追述规则处理)。
       uncut: (t, ids) => ids.forEach((id) => {
         const e = events.get(id);
-        if (!e?.result) { log.warn({ target: t, event: id }, "handoff: 扣下的终句已不在事件库, 补投不了"); return; }
+        if (!e) { log.warn({ target: t, event: id }, "handoff: 扣下的事件已不在事件库, 补投不了"); return; }
+        // 超时可能发生在旧轮尚未产出 final 时; 先释放耐久标记, 让它稍后的真终句正常落定。
+        events.restoreHandoffFinal(id);
+        if (!e.result) return;
         log.info({ target: t, event: id, serves: e.serves }, "handoff: 交接没做成, 补投切断那一轮的终句");
         settleFinal(e, { text: e.result.body });
+        m.recoverEventFinal(events.get(id)!);
       }),
       log,
-      store: loadJsonMap<PendingHandoff>(cfg.wrc.mirror.handoffsFile),
+      store: handoffStore,
       archive: (e) => {
         if (!e.brief.trim()) return;
         const name = episodeName(e.target);
@@ -1054,14 +1097,15 @@ const main = async (): Promise<void> => {
      *  `serves` 指回那一行 (注入事件 id `route:<event>:resume`), 于是它的终句照旧落定、
      *  照旧投给 receiver —— 换会话丢掉的只是 transcript, 不是这笔账。
      *  id 按这一场交接的起点 (`at`) 区分: 同一场 reload 重放判重不重投, 换一场才配一条新的。 */
-    function injectResume(t: string, event: EventId, at: number): { ok: boolean; reason?: string } {
+    async function injectResume(t: string, event: EventId, at: number): Promise<{ ok: boolean; reason?: string }> {
+      if (!handoffAllowed(t)) return { ok: false, reason: "workflow continuation withdrawn or executor reserved" };
       const row = router.get(event);
       if (!row || row.owner !== t || row.status !== "open") return { ok: false, reason: "no open row to resume" };
       const r = row.receiver;
       const waiting = r.kind === "wizard" ? r.to : baseOfKey(r.channel);   // 等着它交代的那一方 (信封挂在它名下)
       const channel = r.kind === "chat" ? r.channel : "";                  // 结论要落回群里时才带频道 (§9.4)
       const base = `route:${event}:resume`;
-      const id = events.known(base) ? `${base}:${at}` : base;
+      const id = `${base}:${at}`;
       try {
         events.accept({
           id, identity: JSON.stringify([t, event, "resume", at]),
@@ -1076,7 +1120,13 @@ const main = async (): Promise<void> => {
             envelope: envelopeFor(waiting, channel, { ...(row.asker ? { asker: row.asker } : {}) }),
           } },
         });
-        return { ok: true };
+        // accept 仅表示排队; 等该 id 真被消费后才让交接记录收尾。
+        for (const end = Date.now() + 600_000; Date.now() < end; await sleep(200)) {
+          const e = await events.reconcile(id);
+          if (e?.exposure === "consumed" || e?.execution === "complete") return { ok: true };
+          if (e?.execution === "uncertain" || e?.execution === "canceled") return { ok: false, reason: e.reason ?? "resume delivery uncertain" };
+        }
+        return { ok: false, reason: "resume consumption not confirmed; handoff retained" };
       } catch (e) { return { ok: false, reason: errText(e) }; }
     }
     /** `self` 此刻这一轮派出去的活, 结论该交给谁 (见 planReturn)。只读它自己
@@ -1354,7 +1404,7 @@ const main = async (): Promise<void> => {
      *  也最多再多打回一次)。**这是「轮终 evidence → onFinal」那条主触发链的落点**: 没有它,
      *  answer 就只能靠 sweeper / 级联取消 / boot 重放合成, 谁答完都不会有回执。 */
     deliverFinal = (e, verdict) => {
-      if (!ownsReplyEvent(e)) return;
+      if (handoffFinalSuppressed(e) || !ownsReplyEvent(e)) return;
       // 同一轮的终句会递进来两次: result() 当场递一次, 泵见 complete 未 finalized 再补判一次
       // (message-events)。被打回那一轮的重放不是补交 —— 丢掉; 否则 bounced 已记着这一笔,
       // 第二次就把被打回的原文照收成 done (打回的续问还没注入, 定论先落了)。
@@ -1362,8 +1412,9 @@ const main = async (): Promise<void> => {
       // 自我交接切断的那一轮: 收尾那句不是欠着的那几笔的答案 —— 行留 open, 交给新会话的「继续 <event>」。
       // 扣下记在这场交接上: 交接没做成 (新会话没起来), 它就是那几笔仅有的交代, 由 uncut 补投。
       if (cuttingTurn(e.target)) {
+        handoffs.cut(e.target, e.id);
+        events.suppressHandoffFinal(e.id);
         log.info({ event: e.id, target: e.target, serves: e.serves }, "handoff: 交接切断的那一轮终句不落定");
-        if (!verdict.error) handoffs.cut(e.target, e.id);
         return;
       }
       settleFinal(e, verdict);
@@ -1981,7 +2032,7 @@ const main = async (): Promise<void> => {
         }
         if (p.attemptId && p.tell) workflow.intent(p.attemptId, p.tell);
         const raw = await m.injectText(e.target, e.payload.text, undefined, {
-          from: p.from, channel: e.channel, requireIdle: e.priority === "normal",
+          from: p.from, channel: e.channel, requireIdle: e.priority === "normal", noRespawn: e.id.startsWith("route:") && e.id.includes(":resume:"),
           envelope: withMsg(p.envelope + (p.after?.length ? afterNote(p.after, Object.fromEntries(p.after.flatMap((t) => { const x = seenOf(t); return x ? [[t, x] as const] : []; })), e.speaker) : ""), e.id),
           guard: (phase, identity) => peerEvents!.valid(e) && prereqsOf(e.speaker, p.after ?? []).every((r) => r.state === "done") && (!phase || ((!p.attemptId || workflow.boundary(p.attemptId)) && boundary(phase, identity))),
           eventId: e.id,
@@ -1998,6 +2049,7 @@ const main = async (): Promise<void> => {
     // 调用方可能拿着 result 落定前的快照, 正文按事件库现读。
     m.setEventOwnerGate(ownsReplyEvent);
     m.setEventFinalGate((e) => {
+      if (handoffFinalSuppressed(e)) return false;
       if (e.canceled || e.interjected || !ownsReplyEvent(e)) return false;
       return router.finalReleased(e.target, e.serves, (events.get(e.id) ?? e).result?.body ?? "");
     });
@@ -2415,29 +2467,17 @@ const main = async (): Promise<void> => {
         : { ok: true, need, done, satisfied: done >= need, results });
     });
 
-    // 交接的「重开」一步: 走 /new (杀旧 pane、起新进程) 而不是往原 pane 注入 /clear。
-    // /clear 只换会话不换进程 —— MCP 子进程、charter 都还是旧的, 新工具拿不到; 镜像
-    // 还得靠 sid 轮换探测才跟得上。CLI 使用 cfg 的默认 backend; cwd 照旧沿用
-    // (排着队的 pendingCwd —— set_workspace 先落的那笔 —— 在这一步被消费, 重开落进新目录)。
-    // 同 backend 时模型也沿用, 管家除外 ——
-    // 它换上此刻的 router 档 (newSession 里定), 改了 models.router 后交接一次就是让它生效的那一下。
-    // `announce` (换工作区) 时那条「📂 当前项目」气泡照发 —— 那是人看得见的回执; 普通交接静默。
-    const restartFresh = (target: string, p?: PendingHandoff) => {
-      const info = m.sessionInfo(target);
-      const cli = cfg.wrc.defaultCli ?? primary.name;
-      const model = stewardTierOf(cfg, target) || info?.cli !== cli ? undefined : info?.model || undefined;
-      if (!planContinuationAllowed(target)) return Promise.resolve({ ok: false, reason: "workflow continuation withdrawn" });
-      return m.newSession(target, displayName(target) || tagOfKey(target) || target, cli, { model, silent: !p?.announce, guard: () => planContinuationAllowed(target) });
+    // handoff 只清空原 pane 的原生上下文; 不更新 CLI 进程、工作目录或出生时的宪章。
+    const clearForHandoff = (target: string, p: PendingHandoff, submitted: (attempt: NonNullable<PendingHandoff["clear"]>) => void) => {
+      if (!handoffAllowed(target)) return Promise.resolve({ ok: false, reason: "workflow continuation withdrawn or executor reserved" });
+      if (!p.clear && m.sessionInfo(target)?.sessionId !== p.sid) return Promise.resolve({ ok: false, reason: "native session changed before the clear attempt; refusing another clear" });
+      return m.clearContext(target, p.clear, submitted, () => handoffAllowed(target));
     };
 
-    // POST /handoff — 交接一个 pane 的会话给一个全新会话。先让目标会话把当前工作
-    // 压成一份"零上下文也能接手"的交接简报,等它写完并抓取,再 restartFresh 换一个
-    // 全新的进程(同名、同 cwd),把简报作为新会话的首条消息贴进去。拒绝对调用方
-    // 自身操作(会 deadlock,同 /peers/send)。
     /** 交接自己: 简报由调用方给, 排在它这一轮说完之后 (见 handoff.ts)。/handoff 点名点到
      *  自己与老路由 /wizard/handoff-self 共用。 */
     const handoffSelf = (self: string, brief: string): { status: number; body: Record<string, unknown> } => {
-      if (!planContinuationAllowed(self)) return { status: 409, body: { ok: false, reason: "workflow continuation withdrawn" } };
+      if (!handoffAllowed(self)) return { status: 409, body: { ok: false, reason: "workflow continuation withdrawn or executor reserved" } };
       if (brief.length < 40) return { status: 400, body: { ok: false, reason: "brief 太短 —— 要写到零上下文也能接手: 目标 / 已完成 / 当前状态 / 下一步 / 关键文件与坑" } };
       const info = m.sessionInfo(self);
       const r = handoffs.self(self, brief);
@@ -3992,7 +4032,7 @@ const main = async (): Promise<void> => {
 
     // ── 改配置会不会动到宪章 ─────────────────────────────────────────
     // 宪章是 --append-system-prompt 压进去的, 随进程终身: 改了进宪章的配置, 已在跑的 wizard
-    // 看不见, 要 handoff 重开 (重新渲染宪章) 才换上。不按字段清单判 —— 宪章读哪些配置随代码变,
+    // 看不见, 需要显式 /new 才重新渲染宪章; handoff /clear 保留启动时的系统提示。不按字段清单判 —— 宪章读哪些配置随代码变,
     // 清单迟早漏; 改前改后各渲染一遍有会话的 wizard 的宪章, 变了的就是受影响的。
     const charterSections = (text: string): Map<string, string> =>
       new Map(text.split(/^(?=## )/m).map((sec) => [sec.split("\n", 1)[0]!.replace(/^## /, ""), sec] as const));
@@ -4028,47 +4068,22 @@ const main = async (): Promise<void> => {
     type CharterHit = { target: string; sections: string[] };
     const charterImpact = (before: Map<string, string>, after: Map<string, string>): CharterHit[] =>
       [...before].flatMap(([t, a]) => { const secs = changedSections(a, after.get(t) ?? a); return secs.length ? [{ target: t, sections: secs }] : []; });
-    /** 宪章改动自动交接的时限 (写简报 + 重开), 与 /handoff 路由同档。 */
-    const CHARTER_HANDOFF_MS = 600_000;
-    /** 受影响的 wizard 的处理分两档:
-     *  - hot: 自动交接 —— 守护进程请它写简报、原地重开 (宪章在重开时重渲染)、简报贴回;
-     *    交接不成 (一直忙 / 已在交接中 / 重开失败) 才退回老规矩, 挂一条提醒让它自己 handoff。
-     *  - reload: 此刻重开渲染的还是旧宪章, 自动交接无意义 —— 维持挂提醒, reload 之后它自己交。
-     * 给调用方的那段话照旧回; 调用方自己受影响就直说。人发起的改动多一句「交接之前还是旧规矩」:
-     * 自动交接也要等它这一轮说完才动手, 这句话仍成立。 */
+    /** /clear 不重新渲染进程启动时的宪章; 只通知, 不暗中重启会话。 */
     const announceCharterImpact = (c: CharterChange, hits: CharterHit[]): string => {
       if (!hits.length) return "";
-      const ask = `${c.reload ? "等守护进程 reload 之后再" : ""}调 \`handoff({brief})\` 原地重开 (手上这件告一段落就交; 宪章在 handoff 时重新生成)`;
-      const lag = (t: string): string => !c.byHuman ? "" : tagOfKey(t)
-        ? " —— 这是人发起的改动: 交接之前你仍按旧规矩做事, handoff 之后才按新的"
-        : " —— 这是人发起的改动: 交接之前你仍按旧规矩向人汇报, handoff 之后才会按新规矩汇报; 回人时说一句「交接后生效」";
-      const mine = hits.find((h) => h.target === c.self);
-      // 提醒照旧全机发 (各收各的); 回给调用方的名单与人数只含它看得见的 (sameBot) —— 别的机器人的 wizard
-      // 连名字带个数都不报。没有调用方 (人 /name、自动补名) = 主机器人视角, 单机器人时就是全部。
+      const ask = `${c.reload ? "守护进程 reload 之后, " : ""}需要显式 /new 才能载入新宪章；handoff /clear 保留原进程的系统提示，不会使这次改动生效`;
+      hits.filter((h) => h.target !== c.self).forEach((h) => notices.post([h.target],
+        `${c.what} 改动了你的宪章 (系统提示, 变了的段: ${h.sections.join(" / ")}); ${ask}`));
       const shown = hits.filter((h) => sameBot(c.self ?? "", h.target));
-      const shownOthers = shown.filter((h) => h.target !== c.self);
-      if (!c.reload) {
-        hits.forEach((h) => void handoffs.other(h.target, `${c.what} 改动了你的宪章 (变了的段: ${h.sections.join(" / ")}); 简报里点一句手头活在新规矩下怎么接着干`, CHARTER_HANDOFF_MS).then((r) => {
-          if (!r.ok) notices.post([h.target], `${c.what} 改动了你的宪章 (系统提示, 变了的段: ${h.sections.join(" / ")}); 自动交接没做成 (${r.reason}) —— 已在跑的你看不见新规矩, 手上这件告一段落后自己${ask}${lag(h.target)}`);
-        }));
-        return [
-          "",
-          `⚠ 这次改动进了宪章 (系统提示): 已在跑的 wizard 看不见, 要 handoff 才换上。受影响 ${shown.length} 个: ${shown.map((h) => displayName(h.target)).join(" ")}`,
-          ...(shown.length ? ["已自动安排它们交接 (各自写简报 → 原地重开 → 接回简报); 交接不成的会收到提醒, 再自己 handoff"] : []),
-          ...(mine ? [`**你自己也在其中** (变了的段: ${mine.sections.join(" / ")}): 这一轮说完就会自动交接${lag(mine.target)}`] : []),
-        ].join("\n");
-      }
-      const others = hits.filter((h) => h.target !== c.self);
-      others.forEach((h) => notices.post([h.target], `${c.what} 改动了你的宪章 (系统提示, 变了的段: ${h.sections.join(" / ")}); 已在跑的你看不见新规矩 —— ${ask}${lag(h.target)}`));
+      const mine = hits.find((h) => h.target === c.self);
       return [
         "",
-        `⚠ 这次改动进了宪章 (系统提示): 已在跑的 wizard 看不见, 要 handoff 才换上。受影响 ${shown.length} 个: ${shown.map((h) => displayName(h.target)).join(" ")}`,
-        ...(shownOthers.length ? [`已给其余 ${shownOthers.length} 个各挂一条提醒 (随它们下一条消息到), 让它们${ask}`] : []),
-        ...(mine ? [`**你自己也在其中** (变了的段: ${mine.sections.join(" / ")}): 这一轮收尾后${ask}${lag(mine.target)}`] : []),
+        `⚠ 这次改动进了宪章 (系统提示)。${ask}。受影响 ${shown.length} 个: ${shown.map((h) => displayName(h.target)).join(" ")}`,
+        ...(mine ? [`**你自己也在其中** (变了的段: ${mine.sections.join(" / ")})`] : []),
       ].join("\n");
     };
     // 所有会动宪章的写入 (config_set、人 `/name`、name_chat、自动补名) 共用这一个守卫: 写前写后各渲染一遍
-    // 挂在 pane 上的 wizard 的宪章, 变了的、pane 还活着的自动交接 (hot) 或挂提醒 (reload, 见 announceCharterImpact)。
+    // 挂在 pane 上的 wizard 的宪章, 变了的、pane 还活着的挂提醒 (见 announceCharterImpact)。
     // 快照到写完之间不能有 await —— 别人的写入插进来, 前后就对不上了。已经写了: 比对失败只少一句提醒, 不能让调用方以为没写而重发。
     guardCharter = (write, change) => {
       const targets = attachedWizards();
@@ -4078,7 +4093,7 @@ const main = async (): Promise<void> => {
       if (!c) return { r, note: Promise.resolve("") };
       const fail = (e: unknown): string => {
         log.warn({ err: errText(e), what: c.what }, "宪章影响比对失败");
-        return `\n(宪章影响没比对出来: ${errText(e)} —— 改的若是进宪章的内容, 受影响的 wizard 要 handoff 才换上)`;
+        return `\n(宪章影响没比对出来: ${errText(e)} —— 改的若是进宪章的内容, 受影响的 wizard 需要显式 /new 才载入；handoff /clear 不刷新系统提示)`;
       };
       try {
         const hits = charterImpact(before, (c.after ?? charterSnapshot)(targets));

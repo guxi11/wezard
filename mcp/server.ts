@@ -72,21 +72,13 @@ const normalizeTarget = (raw: string | undefined): string | undefined => {
   return raw;
 };
 
-// set_workspace — one-shot project switch. Live sessions go through the
-// handoff machinery (daemon writes pendingCwd → asks the wizard for a brief →
-// restarts it in the new cwd → pastes the brief back), so context carries
-// over and the new-cwd charter takes effect on respawn; the 📂 bubble in the
-// chat is the human-facing receipt. The route answers immediately
-// (scheduled:true) because the caller is usually the session being replaced —
-// it must finish its turn before the handoff can start. Cold sessions (no
-// live pane) just respawn fresh. On handoff failure the pendingCwd stays
-// queued, so a manual /new from WeCom still completes the switch.
+// Running CLI processes keep their cwd; explicit /new applies pendingCwd.
 server.registerTool(
   "set_workspace",
   {
     title: "Switch workspace directory",
     description:
-      "一步换掉这个 wizard 的**工作区**: 守护进程让它把手上工作压成交接简报, 在给定目录下原地重开 (同 handoff), 简报贴回新会话 —— **上下文带过去**, 新目录的宪章 (系统提示) 也随之生效; 群里那条 📂 项目信息气泡是给人看的回执。调用方就是被替换的那一个时, 它先拿到「已安排 (scheduled)」的应答, 把这一轮说完, 随后被请去写简报、重开。用绝对路径 (或 `~` 开头)。想换目录又不想动自己: spawn_wizard({cwd}) 生一个子 wizard 去那边干。\n"
+      "设置这个 wizard 的工作区 (绝对路径或 ~ 开头)。活 CLI 进程不能切换 cwd：请求保留为 pendingCwd 并返回明确失败，需要显式 /new 才应用；handoff /clear 不切工作区、不重渲染系统提示。没有活 pane 时可直接在新目录启动。\n"
       + "**`keep:true` 是另一支**: 人回答「不用换, 就用现在这个目录」时调它 —— 不重开会话, 只把「这个工作区是人认过的」记下来, 此后新会话的开局不再问这件事。一个新聊天的第一个 wizard 落在默认兜底目录里, 开局会被要求先问一句要去哪个项目; 人给路径就走 `cwd`, 人说不用换就走 `keep`。",
     inputSchema: {
       cwd: z.string().optional().describe("Absolute project path, e.g. /Users/foo/projects/bar. ~ is expanded. 与 `keep` 二选一。"),
@@ -633,9 +625,9 @@ server.registerTool(
   {
     title: "Hand work over to a fresh context (yourself or another wizard)",
     description:
-      "把一段工作压成简报、原地换一个全新的会话接着干 (新进程、上下文清零; 名字 / cwd / 模型 / 身份的系统提示照旧), 简报作为新会话的第一条消息贴回去。\n" +
-      "**不传 `name` = 交接你自己**: 简报由你写在 `brief` 里, 守护进程等你这一轮说完再重开 (新会话里 MCP 工具也换成最新的)。简报要写到零上下文的自己仅凭它就能接着干: 总目标 / 已完成与关键决策 / 当前状态 / 有序的下一步 / 关键文件与非显然的坑。\n" +
-      "**传 `name` = 替那个 wizard 交接**: 守护进程让它自己写简报 (`focus` 指定要特别交代的点), 抓到后给它重开并贴回; 返回被带过去的那份简报。",
+      "把一段工作压成简报, 等原 CLI 真正空闲后在原 pane 执行原生 /clear, 确认完成后接回简报; 保留原 CLI 进程、cwd 与身份。原生清空若换 session/thread ID, 同一 wizard 会接回新 ID。不支持或无法确认就明确失败、保留现场, 不新建 pane 或重启 CLI。\n" +
+      "**不传 `name` = 交接你自己**: 简报由你写在 `brief` 里, 守护进程等你这一轮说完、旧终句消费后再清空。/clear 不刷新进程内 MCP 工具或出生时的系统提示, 也不执行待切换工作区。简报要写到零上下文的自己仅凭它就能接着干: 总目标 / 已完成与关键决策 / 当前状态 / 有序的下一步 / 关键文件与非显然的坑。\n" +
+      "**传 `name` = 替那个 wizard 交接**: 守护进程让它自己写简报 (`focus` 指定要特别交代的点), 抓到后在原 pane 清空并贴回; 返回被带过去的那份简报。",
     inputSchema: {
       name: z.string().optional().describe("替谁交接 —— wizard 的名字 ('fix' / '.fix')。省略 = 你自己。"),
       brief: z.string().optional().describe("交接你自己时必填: 简报全文, 自洽、具体、可执行。"),

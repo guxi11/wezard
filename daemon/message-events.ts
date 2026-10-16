@@ -1,3 +1,4 @@
+import type { ClearAttempt } from "./handoff.js";
 import { createHash } from "node:crypto";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import type { Asker, TurnFrom } from "../shared/detail-store.js";
@@ -22,6 +23,8 @@ export interface MessageInput {
   payload: {
     text: string;
     human?: MirrorDispatchArgs;
+    /** daemon 内部交接输入, 没有路由任务或外部发话方。 */
+    handoff?: { pane: string; sessionId: string; clear?: ClearAttempt };
     peer?: {
       from: TurnFrom;
       envelope: string;
@@ -61,6 +64,10 @@ export interface MessageEvent extends MessageInput {
   probeAttempts?: number;
   turn?: string;
   finalized?: boolean;
+  /** 自交接切断的旧轮终句: 跨 reload 永久排除路由补判, 失败补偿由 handoff 显式执行。 */
+  handoffCut?: boolean;
+  /** 失败补偿显式释放的旧轮; 覆盖尚未落补偿完成标记的 handoff 行。 */
+  handoffRestored?: boolean;
   interjected?: boolean;
   result?: { body: string; revision: string; at: number };
   /** 进终态 (complete / canceled) 的时刻 —— 墓碑化的起点。老行没有, 按已知时刻估。 */
@@ -158,7 +165,10 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
       if (e.id !== id || typeof e.fingerprint !== "string" || !terminal(e.execution) || !Number.isFinite(e.endedAt)) throw new Error(`invalid message event tombstone ${id}`);
       return;
     }
-    if (!e || e.id !== id || typeof e.fingerprint !== "string" || !e.target || typeof e.speaker !== "string" || typeof e.channel !== "string" || (e.serves !== undefined && typeof e.serves !== "string") || !e.payload || typeof e.payload.text !== "string" || (!e.payload.human === !e.payload.peer) || !Number.isFinite(e.at) || !Number.isFinite(e.attempts) || !Number.isFinite(e.deadline) || !["queued", "dispatching", "awaiting-result", "complete", "canceled", "uncertain"].includes(e.execution)) throw new Error(`invalid message event ${id}`);
+    if (!e || e.id !== id || typeof e.fingerprint !== "string" || !e.target || typeof e.speaker !== "string" || typeof e.channel !== "string" || (e.serves !== undefined && typeof e.serves !== "string") || !e.payload || typeof e.payload.text !== "string" || ([e.payload.human, e.payload.peer, e.payload.handoff].filter(Boolean).length !== 1) || !Number.isFinite(e.at) || !Number.isFinite(e.attempts) || !Number.isFinite(e.deadline) || !["queued", "dispatching", "awaiting-result", "complete", "canceled", "uncertain"].includes(e.execution)) throw new Error(`invalid message event ${id}`);
+    if (e.payload.handoff && (typeof e.payload.handoff.pane !== "string" || !e.payload.handoff.pane || typeof e.payload.handoff.sessionId !== "string" || !e.payload.handoff.sessionId || !e.id.startsWith("handoff:"))) throw new Error(`invalid handoff event ${id}`);
+    const clear = e.payload.handoff?.clear;
+    if (e.payload.handoff && e.id.endsWith(":carry") && (!clear || clear.pane !== e.payload.handoff.pane || clear.nextSid !== e.payload.handoff.sessionId || !Number.isSafeInteger(clear.pid) || clear.pid <= 0 || !Number.isSafeInteger(clear.panePid) || !clear.panePid)) throw new Error(`invalid handoff clear evidence ${id}`);
   });
   Object.entries(outbox.all()).forEach(([id, d]) => {
     if (!d || d.id !== id || !Array.isArray(d.parts) || d.parts.length !== d.chunks?.length || !d.chunks.every((c) => typeof c === "string") || !d.parts.every((p) => ["pending", "sending", "waiting-ack", "delivered", "uncertain", "failed"].includes(p.state)) || !d.channel) throw new Error(`invalid final delivery ${id}`);
@@ -562,10 +572,11 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
           if (!e.finalized) {
             if (!e.canceled) io.committed(e);
             if (e.result) {
-              io.recovered(e);
               // reload 落在 result 与 finalized 之间: 重放这一刻补上路由判定 (幂等 —— 同一条
               // 定论重放只会在表上再写一次同样的 op)。
               io.final?.(e, { text: e.result.body });
+              // 先落交接切断标记与路由归属, 再恢复外发; 否则旧 final 会抢在闸前公开。
+              io.recovered(live(e.id)!);
             }
             patch(e.id, { finalized: true });
           }
@@ -620,6 +631,8 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     drain: () => { draining = true; stopped = true; clearInterval(timer); timer = undefined; },
     stop: () => { accepting = false; stopped = true; clearInterval(timer); timer = undefined; },
     get: (id: string) => { const e = live(id); return e && clone(e); },
+    suppressHandoffFinal: (id: string) => { if (live(id)) patch(id, { handoffCut: true, handoffRestored: false }); },
+    restoreHandoffFinal: (id: string) => { if (live(id)) patch(id, { handoffCut: false, handoffRestored: true }); },
     /** 这个 id 用过没有 (含墓碑): 自己配 id 的调用方 (续问序号 / 交接续答) 据此避开撞号。 */
     known: (id: string) => db.get(id) !== undefined,
     ids: () => Object.keys(db.all()),
@@ -646,7 +659,12 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     /** 一条 event 的 status 视图 —— 轮询单条的调用方 (回归脚本) 不必为它把全表算一遍。 */
     event: (id: string) => { const e = live(id); return e && scan(() => view(e, partsByEvent().get(id) ?? [])); },
     deliveryStatus: (id: string) => outbox.get(id)?.parts.map((p) => p.state),
-    reconcile: async (id: string) => { const e = live(id); if (e) await observe(e); return live(id); },
+    // 泵可能正在同一 pane 上取证; 外部交接轮询复用在飞探针, 不能把 busy 当投递失败。
+    reconcile: async (id: string) => {
+      const e = live(id);
+      if (e && !probing.has(id) && !probeTargets.has(resourceOf(e)) && probeCount < 16) await observe(e);
+      return live(id);
+    },
   };
 };
 export type MessageEvents = ReturnType<typeof createMessageEvents>;

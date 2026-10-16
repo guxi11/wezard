@@ -1,6 +1,7 @@
+import type { ClearAttempt } from "./handoff.js";
 import { finalId, type MessageEvent, type MessageEvents } from "./message-events.js";
 import { parseEnvelope, renderTail } from "../shared/reminder.js";
-import { codexSessions, codexSessionForPane } from "../shared/codex.js";
+import { codexSessions, codexSessionForPane, recordCodexPaneSession } from "../shared/codex.js";
 import { codexHookLaunchArgs, codexHookCommand } from "../shared/codex-hooks.js";
 import { fileURLToPath } from "node:url";
 // Mirror-mode bridge.
@@ -1103,9 +1104,11 @@ export const startMirrorTail = (deps: TailDeps): TailHandle => {
 // No phase is a read-only permission check; physical phases mark exposure.
 type InputIdentity = { sessionId?: string; transcript?: string };
 type DispatchGuard = (phase?: "paste" | "submit", identity?: InputIdentity) => boolean;
+type PhysicalInputGuard = (phase: "paste" | "submit") => Promise<boolean>;
 type InjectResult = { ok: boolean; reason?: string; uncertain?: boolean; retryable?: boolean; gone?: boolean };
 interface InjectArgs {
   guard?: DispatchGuard;
+  physicalGuard?: PhysicalInputGuard;
   /** Called under the pane lock and again before its first physical input. */
   requireIdle?: () => boolean | Promise<boolean>;
   /** Defer destructive notice rendering until the lane grants delivery. */
@@ -1525,6 +1528,9 @@ export const parseInputBox = (cap: string, styledLayout = cap): InputBox => {
   // Idle Codex hides the left hint after a paste but keeps a right-aligned
   // warnings footer. Its middle dot is not the status row's separator.
   const warnings = /^\s*⚠\s*\d+\s+warnings?\s*·\s*f2 to view\s*$/u.test(layout[footer] ?? "");
+  // --no-alt-screen 的 composer 没有背景 SGR; 原生 Context + cwd 行才是状态锚, warning 的 · 不能充当它。
+  const inlineStatus = /\bContext\s+\d+%\s+used\b/u.test(layout[footer] ?? "")
+    && /·\s+(?:\/|~\/)/u.test(layout[footer] ?? "");
   if (inputHint || warnings || (layout[footer] ?? "").includes("·")) {
     let status = inputHint || warnings ? footer - 1 : footer;
     while (status >= 0 && !layout[status]!.trim()) status--;
@@ -1536,7 +1542,7 @@ export const parseInputBox = (cap: string, styledLayout = cap): InputBox => {
       while (prompt >= 0 && /^\s{2,}\S/u.test(layout[prompt]!)) prompt--;
       if (prompt >= 0 && /^›(?:\s|$)/u.test(layout[prompt]!)
         && (prompt === 0 || !layout[prompt - 1]!.trim())
-        && (inputHint || /\x1b\[[0-9;:]*48[;:]/u.test(styledLines[prompt]!))) {
+        && (inputHint || inlineStatus || /\x1b\[[0-9;:]*48[;:]/u.test(styledLines[prompt]!))) {
         const body = dropDim(styledLines.slice(prompt, status).join("\n"))
           .replace(/^\s*›\s?/u, "").replace(/[\s\u200b\ufeff]+/gu, " ").trim();
         return { known: true, body };
@@ -1783,7 +1789,7 @@ const witnessFor = (target: string, homeDir: string, jsonlPath: string, live: Li
 // but the trailing Enter is eaten while the TUI is still initializing, so
 // the prompt sits typed-but-unsent. 校验策略见 injectViaTmuxText —— 以输入框
 // 整块为判据, 粘贴只在「确凿看见框仍是空的」时才重来。
-const injectViaTmux = async (target: string, text: string, images: string[], log: Logger, freshSpawn: boolean, backend: CliBackend, jsonlPath: string, bypassModalGuard = false, guard?: DispatchGuard, eventId?: string, expectedSessionId?: string): Promise<InjectResult> => {
+const injectViaTmux = async (target: string, text: string, images: string[], log: Logger, freshSpawn: boolean, backend: CliBackend, jsonlPath: string, bypassModalGuard = false, guard?: DispatchGuard, eventId?: string, expectedSessionId?: string, physicalGuard?: PhysicalInputGuard): Promise<InjectResult> => {
   const backendName = backend.name;
   log.info({ target, eventId, len: text.length, images: images.length, freshSpawn, backendName }, "mirror inject (tmux)");
 
@@ -1892,7 +1898,7 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
   // dispatch 已对 codebuddy 把 refs 合进 text (images 传空), 这里的
   // withImageRefs 是其它调用方直传 images 时的兜底 —— 幂等, 不会贴两份。
   if (backendName === "codebuddy") {
-    return injectViaTmuxText(target, withImageRefs(text, images), log, freshSpawn, witness, boundGuard, eventId, bypassModalGuard);
+    return injectViaTmuxText(target, withImageRefs(text, images), log, freshSpawn, witness, boundGuard, eventId, bypassModalGuard, physicalGuard);
   }
 
   // Pump images first via clipboard+C-v so each one is attached as a separate
@@ -1942,7 +1948,7 @@ const injectViaTmux = async (target: string, text: string, images: string[], log
     return e.ok ? { ok: true } : { ok: false, reason: `tmux send-keys Enter failed: ${e.stderr.slice(-200)}` };
   }
 
-  return injectViaTmuxText(target, text, log, freshSpawn, witness, boundGuard, eventId, bypassModalGuard);
+  return injectViaTmuxText(target, text, log, freshSpawn, witness, boundGuard, eventId, bypassModalGuard, physicalGuard);
 };
 
 // 图片以 @<path> 文本提及的形式进会话 (codebuddy 的 tmux 路径、一切 spawn 路径)。
@@ -1966,7 +1972,7 @@ const withImageRefs = (text: string, images: readonly string[]): string => {
 // 证人不作声 (忙时排队、slash 命令、无注册表的后端) 才看框回没回到贴之前的样子。
 // 框认得出来时这条判据可信, 于是允许多补回车 (空框上的回车在 CLI 里是 no-op);
 // 每次补之前再问一遍证人, 已提交就不补。
-const injectViaTmuxText = async (target: string, text: string, log: Logger, freshSpawn: boolean, witness: SubmitWitness = NO_WITNESS, guard?: DispatchGuard, eventId?: string, bypassModalGuard = false): Promise<InjectResult> => {
+const injectViaTmuxText = async (target: string, text: string, log: Logger, freshSpawn: boolean, witness: SubmitWitness = NO_WITNESS, guard?: DispatchGuard, eventId?: string, bypassModalGuard = false, physicalGuard?: PhysicalInputGuard): Promise<InjectResult> => {
   // Warm pane: tight timings, low latency. Fresh spawn (claude --resume just
   // started, transcript still loading): extended timings — bracketed-paste
   // end can take 4-7s to be honored on a cold TUI. Only the fresh-spawn path
@@ -2025,7 +2031,7 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
 
   const loadAndPaste = async (): Promise<InjectResult> => {
     const start = Date.now();
-    const result = await pasteTmuxBuffer(target, text, guard ? () => guard("paste") : undefined);
+    const result = await pasteTmuxBuffer(target, text, async () => (!physicalGuard || await physicalGuard("paste")) && (!guard || guard("paste")));
     log.info({ target, eventId, tmuxPasteMs: Date.now() - start, boxVerify, ok: result.ok }, "mirror inject: paste completed");
     return result;
   };
@@ -2076,6 +2082,7 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
   let pastedAt = Date.now();
   if (alreadyTyped) {
     // Existing text is already exposed, even if permission was just withdrawn.
+    if (physicalGuard && !(await physicalGuard("submit"))) return { ok: false, uncertain: true, reason: "original handoff CLI identity changed before existing input submission" };
     if (guard && !guard("paste")) return { ok: false, uncertain: true, reason: "existing input submission canceled by dispatch guard" };
     log.warn({ target, headFp }, "mirror inject: 输入框里已有这段文本 (上次未提交) — 不重贴, 直接提交");
   } else {
@@ -2160,6 +2167,7 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
       if (!box.known || box.body !== landedBody)
         return { ok: false, reason: "composer changed after paste verification; refusing Enter" };
     }
+    if (physicalGuard && !(await physicalGuard("submit"))) return { ok: false, reason: "original handoff CLI identity changed before submit" };
     if (guard && !guard("submit")) return { ok: false, reason: "submit canceled by dispatch guard" };
     if (tailFp && !Number.isFinite(enterAt)) {
       enterAt = Date.now();
@@ -2358,7 +2366,7 @@ const inject = async (args: InjectArgs): Promise<InjectResult> => {
         if (phase && !exposed) { exposed = true; args.beforeInput?.(); }
         return true;
       };
-      return injectViaTmux(target, text, args.images ?? [], args.log, args.freshSpawn ?? false, backendForPath(args.jsonlPath), args.jsonlPath, args.bypassModalGuard ?? false, guard, args.eventId, args.sessionId);
+      return injectViaTmux(target, text, args.images ?? [], args.log, args.freshSpawn ?? false, backendForPath(args.jsonlPath), args.jsonlPath, args.bypassModalGuard ?? false, guard, args.eventId, args.sessionId, args.physicalGuard);
     }, { guard: args.guard }));
   } catch (error) {
     return classify({ ok: false, reason: String(error) });
@@ -2561,7 +2569,10 @@ export interface MirrorBridge {
    *  参数留着是因为调用方 (定时任务) 仍在传。 */
   /** `channel`: 这一轮的回复发去哪个公开频道 (base); "" = 私聊, 回复不进任何群,
    *  只落 turn 记录; 省略 = target 的 home。 */
-  injectText: (target: string, text: string, origin?: TurnOrigin, opts?: { fromChat?: boolean; from?: TurnFrom; channel?: string; envelope?: string; eventId?: string; guard?: DispatchGuard; requireIdle?: boolean }) => Promise<InjectResult>;
+  injectText: (target: string, text: string, origin?: TurnOrigin, opts?: { fromChat?: boolean; from?: TurnFrom; channel?: string; envelope?: string; eventId?: string; guard?: DispatchGuard; requireIdle?: boolean; noRespawn?: boolean; handoff?: ClearAttempt }) => Promise<InjectResult>;
+  /** 原 pane 的原生清空事务; 已暴露的尝试只核验, 不重发。 */
+  verifyClearContext: (target: string, clear: ClearAttempt) => Promise<boolean>;
+  clearContext: (target: string, attempt: ClearAttempt | undefined, submitted: (attempt: ClearAttempt) => void, guard?: () => boolean) => Promise<{ ok: boolean; reason?: string }>;
   /** 这个 wizard 当前这一轮的频道: 人从哪个群叫的它 / 公开 peer 轮的频道;
    *  私聊轮 ""; 还没有过轮次 → home base。 */
   currentChannel: (target: string) => string;
@@ -3780,7 +3791,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return id;
   };
   const recoverEventFinal = (event: MessageEvent, bubble?: BriefBubble): void => {
-    if (!event.result || event.interjected || event.canceled || !eventOwnerGate(event)) return;
+    if ((deps.events?.get(event.id) ?? event).handoffCut || !event.result || event.interjected || event.canceled || !eventOwnerGate(event)) return;
     // 事件泵的 evidence 探针 (observe → io.recovered) 与 brief 软收口赛跑: 两者同为
     // ~1s 周期, 探针常先跑到, 而它调这里不带气泡 —— queueFinal 拿不到 stream, 终句
     // 全部走 standalone, 气泡定格在最后一行 CoT 进度。没传气泡时按 target/turn 找回
@@ -5423,7 +5434,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // freshly-rotated jsonl (only holds the /clear line + new content); resume
   // migration omits it (→ tail from EOF) because the fork file is seeded with
   // the FULL prior transcript and replaying from 0 would re-dump it to WeCom.
-  const migrateAttachment = (a: AttachState, newSessionId: string, newJsonlPath: string, startOffset?: number): void => {
+  const migrateAttachment = (a: AttachState, newSessionId: string, newJsonlPath: string, startOffset?: number, knownClear = false): void => {
     // Guard: if newSessionId is already bound to a DIFFERENT principal, abort —
     // prevents silent cross-wire (path B: /clear rotation or drift landing on
     // a sibling's live session).
@@ -5437,7 +5448,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 迁移是所有会话轮换的唯一漏斗 (注入的 /clear、TUI 里手打的 /clear、resume fork、
     // worktree drift)。只有目标 jsonl 首条用户行是 /clear 的那种才是真清空 —— fork /
     // drift 上下文是延续的, 画中性的 "switch"。
-    const cleared = jsonlIsPostClearChild(newJsonlPath);
+    const cleared = knownClear || jsonlIsPostClearChild(newJsonlPath);
     markCut(a.target, newSessionId, cleared ? "clear" : "switch");
     if (cleared) contextCut(a.target, "clear");
     a.tail.stop();
@@ -5473,6 +5484,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       tmuxSession: a.tmuxSession || undefined,
       tmuxPane: a.tmuxPane || undefined,
       cwd: a.runningCwd || undefined,
+      model: a.model || undefined,
+      effort: a.effort || undefined,
       pendingCwd: a.pendingCwd || undefined,
     });
     log.info({ target: a.target, oldSessionId, newSessionId, oldJsonlPath, newJsonlPath, startOffset }, "mirror migrated session");
@@ -6755,8 +6768,157 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const pressNativePicker = async (a: AttachState, fingerprint: string, what: PickerPress, guard: () => boolean) =>
     withPaneInput(a.tmuxPane, (live) => pressNativePickerUnlocked(a, fingerprint, what, live), { guard });
 
+  // 调用方持有 pane 输入锁; clear 与 carry 的原生身份探测共用同一条 slash 提交流程。
+  const nativeCommands = (target: string, pane: string, codex: boolean, sameProcess: () => Promise<boolean>, sameSession: () => boolean | Promise<boolean>, allowed: () => boolean = () => true) => {
+    // 每次 slash 都在同一个物理输入锁里核对空框、idle 与进程; 不借用有补 Enter 的通用注入器。
+    const command = async (text: string, before?: () => void): Promise<boolean> => {
+      if (!allowed() || !(await sameProcess()) || !(await idleNow(target))) return false;
+      const input = await readPaneInput(pane);
+      if (!input.box.known || input.box.body || paneIsBusy(input.cap) || isModalPane(input.cap).modal) return false;
+      if (!(await sameSession())) return false;
+      if (!(await sameProcess())) return false;
+      if (!allowed()) return false;
+      before?.();
+      if (!allowed()) return false;
+      if (!(await runTmux(["send-keys", "-t", pane, "-l", text])).ok) return false;
+      for (const end = Date.now() + 3000; Date.now() < end; await sleep(50)) {
+        const typed = await readPaneInput(pane);
+        if (!(await sameProcess()) || await isBusy(target)) return false;
+        if (!(await sameSession())) return false;
+        // Codex 的 slash 菜单会暂时藏掉 model/cwd 状态行, 只留精确命令框与 queue footer。
+        const rows = typed.cap.trimEnd().split("\n");
+        const end = rows.length - 1;
+        const slashBox = codex && /^\s*tab to queue message(?:\s|$)/u.test(rows[end] ?? "")
+          && !rows[end - 1]?.trim() && !rows[end - 3]?.trim() && rows[end - 2]?.trim() === `› ${text}`;
+        if (((typed.box.known && typed.box.body === text) || slashBox) && !paneIsBusy(typed.cap)) {
+          if (!allowed()) return false;
+          return (await runTmux(["send-keys", "-t", pane, "Enter"])).ok;
+        }
+      }
+      return false;
+    };
+    const emptyComposer = async (): Promise<boolean> => {
+      const input = await readPaneInput(pane);
+      return input.box.known && !input.box.body && !paneIsBusy(input.cap) && !isModalPane(input.cap).modal;
+    };
+    const statusId = async (): Promise<string | undefined> => {
+      const before = await runTmux(["capture-pane", "-t", pane, "-p", "-J", "-S", "-200"]);
+      if (!before.ok || !(await command("/status"))) return undefined;
+      for (const end = Date.now() + 5000; Date.now() < end; await sleep(100)) {
+        const screen = await runTmux(["capture-pane", "-t", pane, "-p", "-J", "-S", "-200"]);
+        if (!screen.ok || !(await sameProcess())) return undefined;
+        const lastStatus = [...screen.stdout.matchAll(/(?:^|\n)(?:›\s*)?\/status\s*\n/gu)].at(-1);
+        const id = [...screen.stdout.matchAll(/\bSession:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gu)].at(-1);
+        if (screen.stdout !== before.stdout && lastStatus && id && id.index! > lastStatus.index! && await emptyComposer()) return id[1];
+      }
+      return undefined;
+    };
+    return { command, emptyComposer, statusId };
+  };
+
+  const verifyClearContext: MirrorBridge["verifyClearContext"] = async (target, clear) => {
+    const a = byTarget.get(target);
+    if (!a || !clear.nextSid || !clear.panePid || a.tmuxPane !== clear.pane || a.sessionId !== clear.nextSid || await panePidOf(clear.pane) !== clear.panePid) return false;
+    const backend = backendForPath(a.jsonlPath);
+    if (backend.name === "claude") {
+      const actual = sessionOnPane(backend.homeDir, clear.pane);
+      return actual?.pid === clear.pid && actual.sessionId === clear.nextSid;
+    }
+    if (backend.name !== "codex" || codexSessionForPane(clear.pane)?.sessionId !== clear.nextSid) return false;
+    const ps = await psSnap();
+    const pids = new Set([...ps.commands].filter(([, command]) => basename(command) === "codex").map(([pid]) => pid));
+    return registeredPidUnder(clear.panePid, pids, ps.kids) === clear.pid;
+  };
+
+  const verifyClearInput = async (target: string, clear: ClearAttempt, phase: "paste" | "submit", allowed: () => boolean): Promise<boolean> => {
+    if (!allowed() || !(await verifyClearContext(target, clear))) return false;
+    const a = byTarget.get(target)!;
+    if (phase === "paste" && backendForPath(a.jsonlPath).name === "codex") {
+      // 本机 Codex 不触发 SessionStart; 同 PID 原生 /new 也会让旧映射失真。
+      // brief 尚未粘贴时用 /status 重取当前 ID; submit 阶段由原进程 + 原框内容核验保护。
+      const { statusId } = nativeCommands(target, clear.pane, true, () => verifyClearContext(target, clear), () => true, allowed);
+      return await statusId() === clear.nextSid && await verifyClearContext(target, clear) && allowed();
+    }
+    return true;
+  };
+
+  const clearContext: MirrorBridge["clearContext"] = async (target, attempt, submitted, guard = () => true) => {
+    if (!guard()) return { ok: false, reason: "handoff continuation authority withdrawn; no input" };
+    const a = byTarget.get(target);
+    if (!a?.tmuxPane) return { ok: false, reason: "handoff requires the original live pane; no respawn" };
+    const backend = backendForPath(a.jsonlPath);
+    // 只开放本机真实探针验证过的后端; 不能因家族相近就假定 slash/注册表语义相同。
+    if (!["claude", "codex"].includes(backend.name)) return { ok: false, reason: `${backend.name} native /clear completion is not verified; pane unchanged` };
+    if (a.pendingCwd && a.pendingCwd !== a.runningCwd) return { ok: false, reason: "pending workspace switch requires an explicit /new; /clear keeps the original process cwd" };
+    const pane = a.tmuxPane;
+    const valid = (): boolean => guard() && byTarget.get(target) === a && a.tmuxPane === pane;
+    try {
+      return await withPaneInput(pane, async (live) => {
+        const codex = backend.name === "codex";
+        const nativePid = async (): Promise<number | undefined> => {
+          if (!codex) return sessionOnPane(backend.homeDir, pane)?.pid;
+          const root = await panePidOf(pane);
+          const ps = await psSnap();
+          return registeredPidUnder(root, new Set([...ps.commands].filter(([, command]) => basename(command) === "codex").map(([pid]) => pid)), ps.kids);
+        };
+        const pid = await nativePid();
+        const panePid = await panePidOf(pane);
+        if (!pid || !panePid || !(await tmuxPaneAlive(pane))) return { ok: false, reason: "original CLI process identity is unavailable" };
+        const original = sessionOnPane(backend.homeDir, pane);
+        let transaction = attempt ?? { pane, pid, panePid, sid: a.sessionId, at: Date.now() };
+        if (transaction.pane !== pane || transaction.pid !== pid || (transaction.panePid && transaction.panePid !== panePid)) return { ok: false, reason: "original pane/CLI process changed; refusing /clear" };
+        const sameProcess = async (): Promise<boolean> => live() && valid() && await nativePid() === transaction.pid && await panePidOf(pane) === panePid;
+        const { command, emptyComposer, statusId } = nativeCommands(target, pane, codex, sameProcess, () => codex || (sessionOnPane(backend.homeDir, pane)?.sessionId === transaction.sid && sessionOnPane(backend.homeDir, pane)?.status === "idle"), guard);
+        if (!attempt) {
+          const actualSid = codex ? await statusId() : original?.sessionId;
+          if (actualSid !== transaction.sid) return { ok: false, reason: "native pane session changed/unconfirmed before /clear; refusing to clear an unbound context" };
+          // 凭证先于第一下 /clear 按键落盘; reload 只核验原生状态, 绝不再次清空。
+          if (!(await command("/clear", () => submitted(transaction)))) return { ok: false, reason: "native /clear submission unconfirmed; no retry" };
+        }
+        if (codex) {
+          let empty = false;
+          for (const end = Date.now() + 5000; Date.now() < end; await sleep(100)) {
+            if (!(await sameProcess())) return { ok: false, reason: "Codex CLI process changed during /clear" };
+            if (await emptyComposer()) { empty = true; break; }
+          }
+          const nextSid = empty ? await statusId() : undefined;
+          if (!nextSid || nextSid === transaction.sid || (transaction.nextSid && transaction.nextSid !== nextSid)) return { ok: false, reason: "Codex native /status did not confirm the cleared thread; no retry" };
+          if (sidsClaimedByOthers(target).has(nextSid)) return { ok: false, reason: "native Codex thread belongs to another wizard" };
+          transaction = { ...transaction, nextSid };
+          submitted(transaction);
+          const actualRollout = () => codexSessions(expandHome(backend.projectsDir), expandHome(a.runningCwd)).find((s) => s.sessionId === nextSid);
+          // 空 thread 不会先写 rollout; /rename 原生持久化当前 thread, 不发模型消息、不另起 thread。
+          if (!actualRollout() && !(await command(`/rename ${displayName(target).replace(/[\r\n]/gu, " ") || "wezard"}`))) return { ok: false, reason: "Codex /rename persistence unconfirmed; thread preserved" };
+          let rollout = actualRollout();
+          for (const end = Date.now() + 5000; !rollout && Date.now() < end; await sleep(100)) rollout = actualRollout();
+          // rename 和 metadata 扫描之间仍可能有人原生切 thread; 最后再读当前 ID, 不绑错现场。
+          if (!rollout || await statusId() !== nextSid || !(await sameProcess())) return { ok: false, reason: "Codex current thread/actual rollout metadata not confirmed; refusing binding" };
+          recordCodexPaneSession({ sessionId: nextSid, jsonlPath: rollout.jsonlPath, cwd: a.runningCwd, pane, startedAt: transaction.at }, cfg.daemon.stateDir);
+          if (a.sessionId !== nextSid) migrateAttachment(a, nextSid, rollout.jsonlPath, 0, true);
+          log.info({ target, pane, pid, panePid, oldSessionId: transaction.sid, sessionId: nextSid, jsonlPath: rollout.jsonlPath }, "handoff: Codex native clear/status/rename confirmed in original CLI process");
+          return { ok: true };
+        }
+        for (const end = Date.now() + 20_000; Date.now() < end; await sleep(200)) {
+          if (!(await sameProcess())) return { ok: false, reason: "CLI process changed during /clear" };
+          const current = sessionOnPane(backend.homeDir, pane);
+          if (!current || current.sessionId === transaction.sid || current.status !== "idle" || !(await emptyComposer())) continue;
+          if (sidsClaimedByOthers(target).has(current.sessionId)) return { ok: false, reason: "native session identity belongs to another wizard" };
+          if (transaction.nextSid && transaction.nextSid !== current.sessionId) return { ok: false, reason: "Claude native session changed after clear confirmation" };
+          transaction = { ...transaction, nextSid: current.sessionId };
+          submitted(transaction);
+          if (a.sessionId !== current.sessionId) migrateAttachment(a, current.sessionId, join(dirname(a.jsonlPath), `${current.sessionId}.jsonl`), 0, true);
+          log.info({ target, pane, pid, panePid, oldSessionId: transaction.sid, sessionId: current.sessionId }, "handoff: native /clear confirmed in original CLI process");
+          return { ok: true };
+        }
+        return { ok: false, reason: "native /clear completion unconfirmed; original pane preserved, brief retained, no retry" };
+      }, { guard: valid, timeoutMs: 60_000 });
+    } catch (e) { return { ok: false, reason: String(e) }; }
+  };
+
   return {
     attach,
+    clearContext,
+    verifyClearContext,
     chatTargets,
     peers,
     foreignPeers,
@@ -6955,6 +7117,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (!permission()) return denied;
       // A missing binding cannot recover on retry; let receipts escalate.
       if (!a) return { ok: false, retryable: true, reason: "no mirror attached for target", ...(deps.store.get(target) ? {} : { gone: true }) };
+      if (opts?.handoff && !(await verifyClearContext(target, opts.handoff))) return { ok: false, retryable: false, reason: "original cleared CLI process/session changed; handoff carry withheld" };
       const sid = a.sessionId;
       const generation = a.injectGen ?? 0;
       const permitted = (): boolean => permission() && byTarget.get(target) === a && a.sessionId === sid && (a.injectGen ?? 0) === generation;
@@ -6977,6 +7140,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // 也按冷启动等 idle 至多 15s, 「不等不打断」就成了「晚 15–20s 才进」(handoff-owe 的竞态即此)。
       let fresh = a.justSpawned === true;
       if (probe.state !== "session") {
+        if (opts?.noRespawn) return { ok: false, retryable: false, reason: "original CLI is unavailable; handoff never respawns" };
         log.warn({ target, sessionId: sid, oldPane: a.tmuxPane, why: probe.state }, "injectText: pane not alive, respawning");
         // Same resume-fork hazard as dispatch: snapshot before spawn, re-bind
         // onto the forked jsonl once it appears (EOF offset — fork is seeded).
@@ -7021,13 +7185,16 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const clearing = isClearCommand(text);
       const preClearBaseline = clearing ? listJsonls(dirname(a.jsonlPath)) : undefined;
       const injectPane = a.tmuxPane;
+      let pinRejected = false;
       const r = await inject({
         text: full, images: [], cfg, guard: (phase, identity) => permitted() && a.tmuxPane === injectPane && (!opts?.guard || opts.guard(phase, identity)), log: log.child({ principal: target, sessionId: sid, sub: "init-demo" }),
         sessionId: sid, eventId: opts?.eventId, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn: fresh,
+        physicalGuard: opts?.handoff ? async (phase) => { const ok = permission() && await verifyClearInput(target, opts.handoff!, phase, permission) && permission(); if (!ok) pinRejected = true; return ok; } : undefined,
         requireIdle: opts?.requireIdle ? () => idleNow(target) : undefined,
         prepareText: () => (full = text + renderTail(envelope, noticeSuffixFor(target, text))),
         beforeInput,
       });
+      if (pinRejected) return { ...r, ok: false, retryable: false, reason: "handoff process/session or continuation authority changed at physical input; carry withheld" };
       if (r.ok && a.tmuxPane && permitted()) {
         if (preClearBaseline) {
           a.clearRebind = { baseline: preClearBaseline };
