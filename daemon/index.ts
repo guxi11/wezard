@@ -333,8 +333,9 @@ const main = async (): Promise<void> => {
         // 一轮以 CLI 报错收尾: 那段报错不是定论, 但要作为中途态 (error) 报给 receiver ——
         // 所以照旧不落成 result, 只把原文交给 final (见 §9.4)。
         return { consumed: true, interjected: !!turns[start]!.queued,
-          ...(next >= 0 ? { closedAt: turns[next]!.ms ?? Date.now() } : {}),
-          ...(ended && last && !last.mid
+          ...(next >= 0 ? { closedAt: turns[next]!.ms ?? Date.now() }
+            : last?.end && !last.text ? { closedAt: last.ms ?? Date.now() } : {}),
+          ...(ended && last?.text && !last.mid
             ? last.apiError ? { body: last.text, error: true } : { body: last.text, revision: finalId(e.id, e.channel, last.text) }
             : {}) };
       }
@@ -2130,7 +2131,8 @@ const main = async (): Promise<void> => {
       // 自己就是计数器, 不另落一份。一次 tick 扫一遍收件箱就够 (这一轮不会再产新事件)。
       const fruitless = new Map<EventId, number>();
       events.status().events.forEach((e) => {
-        if (!e.serves || e.result || e.canceled || e.payload.peer?.from.receipt || e.execution !== "complete") return;
+        if (!e.serves || e.result || e.canceled || e.payload.peer?.from.receipt
+            || !(e.execution === "complete" || e.execution === "uncertain" && e.exposure === "consumed" && e.turnClosedAt)) return;
         fruitless.set(e.serves, (fruitless.get(e.serves) ?? 0) + 1);
       });
       // 前置刚被这一轮判失败时, 挂它的 held 行要下一轮才看得到 —— 多跑几轮直到不再出新 op。

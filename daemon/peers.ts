@@ -261,6 +261,10 @@ const lineItems = (jsonlPath: string, raw: string, keepLines: boolean, marks: bo
       const mid = role === "assistant" && (row.mid === true || row.message?.stop_reason === "tool_use");
       const soft = role === "assistant" && row.awaitTurnEnd === true && row.message?.stop_reason !== "end_turn";
       const tool = role === "assistant" && Array.isArray(row.message?.content) && row.message.content.some((b) => b?.type === "tool_use");
+      // An explicit empty final closes the physical turn without answering the
+      // task. Evidence readers need that boundary; conversation views stay empty.
+      if (!text && marks && role === "assistant" && !mid && !tool && row.message?.stop_reason === "end_turn")
+        return [{ role, text: "", ms, end: true } as Turn];
       if (!text && marks && role === "user" && raw.includes("<task-notification")) return [{ role, text: "", ms, notice: true } as Turn];
       const apiError = role === "assistant" && (parsed as { isApiErrorMessage?: unknown }).isApiErrorMessage === true;
       const turn: Item[] = text ? [{ role, text, ms, ...(env ? { env } : {}), ...(mid ? { mid: true } : {}), ...(soft ? { soft: true } : {}), ...(apiError ? { apiError: true } : {}) } as Turn] : [];

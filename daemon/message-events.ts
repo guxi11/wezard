@@ -543,7 +543,10 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     const older = new Set(rows.slice(0, rows.findIndex((x) => x.id === e.id)).map((x) => x.id));
     return rows.find((x) => x.id !== e.id
       && (x.execution === "dispatching"
-        || (!direct(e) && ((x.execution === "uncertain" && !x.releasedAt)
+        // A consumed, closed input cannot own the next turn. Keep its unknown
+        // result for reconciliation without replaying it or pinning later inputs.
+        || (!direct(e) && ((x.execution === "uncertain" && !x.releasedAt
+          && !(x.exposure === "consumed" && x.turnClosedAt))
           || (e.priority === "normal" && (x.execution === "awaiting-result"
             || (x.execution === "queued" && (x.retryAt ?? 0) <= Date.now() && older.has(x.id)))))))
       && resourceOf(x) === resource);
@@ -735,7 +738,14 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     accept, pump, resume, result, delivery, cancel, blocker, queue, release,
     running: () => !stopped,
     bind: (id: string, turn: string) => { if (live(id)) patch(id, { turn }); },
-    finished: (id: string) => { const e = live(id); if (e && !e.canceled && !e.result) patch(id, { execution: "complete", exposure: "consumed" }); },
+    finished: (id: string) => {
+      const e = live(id);
+      // Physical completion is not a task answer. Keep the missing outcome
+      // visible while allowing the next input to use this pane.
+      if (e && !e.canceled && !e.result) patch(id, { execution: "uncertain", exposure: "consumed",
+        turnClosedAt: e.turnClosedAt ?? Date.now(),
+        reason: "input turn ended without a final assistant answer; automatic retry withheld" });
+    },
     released: (id: string) => { const e = live(id); if (e?.canceled) patch(id, { execution: "canceled", reason: `${e.reason ?? "canceled"}; pane idle confirmed` }); },
     stopped: (target: string, reason: string) => liveRows().filter((e) => e.target === target && e.canceled).forEach((e) => patch(e.id, { execution: "canceled", reason })),
     submission: async (id: string): Promise<EventTransport> => {
