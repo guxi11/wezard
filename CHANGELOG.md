@@ -2,6 +2,18 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.7.4] - 2026-10-16
+
+### Changed
+- wizard 自动命名使用 31 个 Firstname 与 37 个 Lastname；首次单名用完后轮转 1147 个组合，走完一圈回收已释放名字，不再递增数字后缀。仍占用的名字跳过，名字池耗尽时明确失败；旧游标自动迁移。
+- handoff 等原 CLI 空闲后在原 pane 执行原生 `/clear`，确认新 session/thread 身份后接回完整简报，保留 CLI 进程与 cwd；无法确认时保留现场并明确失败。
+
+### Fixed
+- handoff 清空前和简报提交前重新核验控制权限与 CLI 身份；交接状态、旧终句抑制及失败补偿持久化，跨 reload 继续处理欠账。
+- 回收名字时校验退役结果和出生身份，避免旧停止请求清理复用后的新身份。
+- 定时任务跨 daemon reload 恢复调度和执行状态。
+- transfer 将原回复气泡及收口权随任务移交，持久化所有权并恢复中断后的投递。
+
 ## [2.7.3] - 2026-10-15
 
 ### Fixed
@@ -1160,7 +1172,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.7.3...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.7.4...HEAD
+[2.7.4]: https://github.com/guxi11/wezard/compare/v2.7.3...v2.7.4
 [2.7.3]: https://github.com/guxi11/wezard/compare/v2.7.2...v2.7.3
 [2.7.2]: https://github.com/guxi11/wezard/compare/v2.7.1...v2.7.2
 [2.7.1]: https://github.com/guxi11/wezard/compare/v2.7.0...v2.7.1
