@@ -2,6 +2,11 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.7.6] - 2026-10-16
+
+### Fixed
+- 恢复仅有闭合标记、无 final 正文的已消费回执时释放 pane 占用，避免后续回执长时间积压；未知结果保留待定，不伪造任务结论。
+
 ## [2.7.5] - 2026-10-16
 
 ### Fixed
@@ -1177,7 +1182,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.7.5...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.7.6...HEAD
+[2.7.6]: https://github.com/guxi11/wezard/compare/v2.7.5...v2.7.6
 [2.7.5]: https://github.com/guxi11/wezard/compare/v2.7.4...v2.7.5
 [2.7.4]: https://github.com/guxi11/wezard/compare/v2.7.3...v2.7.4
 [2.7.3]: https://github.com/guxi11/wezard/compare/v2.7.2...v2.7.3
