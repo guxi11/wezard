@@ -521,6 +521,8 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
         const gone = patch(id, { execution: "queued", retryAt: backoff(latest.attempts), reason: r.reason || "target gone" });
         io.gone?.(gone);
         patch(id, { execution: "canceled" });
+      } else if (!r.uncertain && latest.exposure === "none" && !latest.canceled && (!r.retryable || latest.attempts >= 5)) {
+        cancel((e) => e.id === id, `${r.reason || "submission failed"}${r.retryable ? "; retry limit reached" : ""}`);
       } else if (r.retryable && !r.uncertain && !latest.canceled) {
         patch(id, { execution: "queued", exposure: "none", retryAt: backoff(latest.attempts), reason: r.reason });
       } else patch(id, { execution: "uncertain", reason: r.reason || "submission acknowledgement unknown" });

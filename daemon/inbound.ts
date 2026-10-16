@@ -179,7 +179,7 @@ const parseNameCommand = (text: string): { arg: string } | undefined => {
 // `/chats` — 跨聊天目录: 谁有名字、谁没有、各自跑着哪些会话。
 const isChatsCommand = (text: string): boolean => /^\/chats?$/i.test(text.trim());
 const isUsageCommand = (text: string): boolean => text.trim() === "/usage";
-const isStopCommand = (text: string): boolean => text.trim() === "/stop";
+const isStopCommand = (text: string): boolean => /^(?:\/stop|stop)$/i.test(text.trim());
 const isKillCommand = (text: string): boolean => text.trim() === "/kill";
 const isEnterCommand = (text: string): boolean => text.trim() === "/n";
 const isRevealCommand = (text: string): boolean => text.trim() === "/reveal";

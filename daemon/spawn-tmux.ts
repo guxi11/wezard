@@ -44,8 +44,7 @@ import { hasRegistry, sessionOnPane } from "./wezard-session.js";
 import { startupConfirmation, workspaceTrustPrompt, workspaceTrustConfig } from "../shared/workspace-trust.js";
 
 
-// Every new pane uses the configured backend, including resume and fork panes.
-// `cli` is retained on SpawnArgs only to identify a resumed transcript's owner.
+// New sessions follow configuration; resumed transcripts retain their backend.
 export const backendFor = (cfg: Config): CliBackend => {
   const backend = resolveCliBackend(cfg.wrc);
   activateBackend(backend);
@@ -356,7 +355,7 @@ export interface SpawnArgs {
    *  Mirror mode persists this in mirror-attachments.json so /new respawns
    *  in the user-bound project, not the global default. */
   cwdOverride?: string;
-  /** Owner of a resumed transcript, used to reject cross-backend resume.
+  /** Owner of a resumed transcript, used to select its original backend.
    *  Fresh panes always use the configured backend. */
   cli?: CliBackendName;
   /** Model to put the pane on. Lets sibling `#tag` sessions in one chat run on
@@ -392,6 +391,7 @@ export interface SpawnArgs {
 export interface SpawnResult {
   ok: boolean;
   reason?: string;
+  retryable?: boolean;
   sessionId?: string;
   jsonlPath?: string;
   tmuxPane?: string;
@@ -487,10 +487,10 @@ const charterArg = (cfg: Config, backend: CliBackend, sessionId: string, charter
 };
 
 export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: freshSessionId, windowName, cwdOverride, cli, model, effort, systemPrompt, forkSession }: SpawnArgs): Promise<SpawnResult> => {
-  const backend = backendFor(cfg);
-  if (resumeSessionId && cli && cli !== backend.name) {
-    return { ok: false, reason: `会话属于 ${cli}, 当前配置后端是 ${backend.name}, 无法跨后端恢复或克隆。请用 /new 新建会话。` };
-  }
+  const backend = resumeSessionId && cli
+    ? resolveCliBackend({ ...cfg.wrc, defaultCli: cli })
+    : backendFor(cfg);
+  activateBackend(backend);
   const cwd = expandHome((cwdOverride ?? "").trim() || cfg.wrc.cwd);
   const projectDir = join(expandHome(backend.projectsDir), backend.encodeProjectDir(cwd));
   let sessionId = resumeSessionId ?? freshSessionId ?? randomUUID();
@@ -535,7 +535,7 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
   const codexSandboxArgs = backend.name === "codex" ? codexSandboxLaunchArgs(sandboxDisabled) : [];
   if (backend.name === "codex") {
     const conflict = sandboxDisabled ? codexSandboxArgConflict(cfg.wrc.extraArgs) : undefined;
-    if (conflict) return { ok: false, reason: `Codex extraArgs ${conflict} conflicts with wrc.cliBackends.codex.disableSandbox; remove the shortcut and use the sandbox config` };
+    if (conflict) return { ok: false, retryable: false, reason: `Codex extraArgs ${conflict} conflicts with wrc.cliBackends.codex.disableSandbox; remove the shortcut and use the sandbox config` };
     const hookEntry = fileURLToPath(new URL("../cli/codex-hook.js", import.meta.url));
     const command = codexHookCommand(loadConfig().sourcePath, `http://127.0.0.1:${cfg.daemon.port}`, hookEntry);
     try { codexApprovalArgs = await codexHookLaunchArgs(backend.bin, cwd, command, cfg.approval.hookTimeoutSec + 10, cfg.approval.enabled); }

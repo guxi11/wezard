@@ -7163,7 +7163,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // onto the forked jsonl once it appears (EOF offset — fork is seeded).
         const resumeBaseline = listJsonls(dirname(a.jsonlPath));
         const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: displayName(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, ...respawnSpec(a), systemPrompt: charterFor(target, { cwd: a.runningCwd, cli: backendForPath(a.jsonlPath).name }) });
-        if (!r.ok || !r.tmuxPane) return { ok: false, retryable: true, reason: `respawn failed: ${r.reason ?? "unknown"}` };
+        if (!r.ok || !r.tmuxPane) return { ok: false, retryable: r.retryable !== false, reason: `respawn failed: ${r.reason ?? "unknown"}` };
         if (!permitted() || a.tmuxPane !== probedPane) {
           // This pane was born for an unsubmitted injection. Never kill the old
           // executor or bind the withdrawn birth. A failed cleanup is explicitly
@@ -7222,6 +7222,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     },
     interruptPane: async (target, opts) => {
       if (opts?.guard && !opts.guard()) return { ok: false, reason: "interrupt authority changed" };
+      if (opts?.teardown) deps.events?.cancel((e) => e.target === target);
       const a = byTarget.get(target);
       if (!a) return { ok: false, reason: "no mirror attached for target" };
       const interruptedEvent = a.activeEventId;
@@ -7692,6 +7693,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           // Respawn in the binding's runningCwd (pendingCwd doesn't apply to a
           // mid-turn reincarnation — only /new and /clear-with-pending swap cwd).
           const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: displayName(a.target) || a.target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, ...respawnSpec(a), systemPrompt: charterFor(a.target, { cwd: a.runningCwd, cli: backendForPath(a.jsonlPath).name }) });
+          if (byTarget.get(a.target) !== a || a.sessionId !== sid || (a.injectGen ?? 0) !== myGen || (guard && !guard())) {
+            // A stop or replacement during startup revokes this birth before binding.
+            if (r.tmuxPane) await runTmux(["kill-pane", "-t", r.tmuxPane]);
+            onSubmitted?.({ ok: false, retryable: false, reason: "respawn permission withdrawn; binding withheld" });
+            return;
+          }
           if (r.ok && r.tmuxPane && r.tmuxSession) {
             a.tmuxPane = r.tmuxPane;
             a.tmuxSession = r.tmuxSession;
@@ -7720,7 +7727,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
             // store still reflects "user wanted tmux" — next turn retries.
             log.error({ reason: r.reason }, "mirror: tmux respawn failed");
             if (eventId) {
-              onSubmitted?.({ ok: false, retryable: true, reason: `respawn failed: ${r.reason ?? "unknown"}` });
+              onSubmitted?.({ ok: false, retryable: r.retryable !== false, reason: `respawn failed: ${r.reason ?? "unknown"}` });
               if (s) await finalizeStream(a, s);
               if (a.outbound?.kind === "deferred") clearTimeout(a.outbound.timer);
               a.outbound = undefined;
