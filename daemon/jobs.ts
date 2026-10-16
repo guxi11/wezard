@@ -50,6 +50,7 @@ export interface JobMember {
   /** 这一份落定了没有、落成什么。「齐了吗」只数它: 回执登记按发话方 → 答话方一对一份,
    *  会被同一对的后一句顶掉, 账本不会。need / error 是中途的, 不进账。 */
   outcome?: Terminal;
+  firstOutcome?: Terminal;
   /** 定论落下的时刻 (根单的「交付于」从 lead 的它读)。 */
   settledAt?: number;
   artifacts?: Artifact[];
@@ -278,7 +279,7 @@ const attached = (j: JobRecord, member: Omit<JobMember, "at">, kind: "task" | "a
   const { hold: _h, ...unheld } = j;
   const { nudge: _n, ...unnudged } = unheld;
   const base = !toLead ? j : prev?.outcome ? unnudged : unheld;
-  return { ...base, members: [...rest, { ...member, task: member.task || prev?.task || "", spawned: member.spawned || !!prev?.spawned, ...(role ? { role } : {}), ...(forkOf ? { forkOf } : {}), at: Date.now() }] };
+  return { ...base, members: [...rest, { ...member, ...(member.turn && member.turn === prev?.turn && (prev.firstOutcome ?? prev.outcome) ? { firstOutcome: prev.firstOutcome ?? prev.outcome } : {}), task: member.task || prev?.task || "", spawned: member.spawned || !!prev?.spawned, ...(role ? { role } : {}), ...(forkOf ? { forkOf } : {}), at: Date.now() }] };
 };
 
 export const loadJobStore = (filePath: string): JobStore => {
@@ -318,7 +319,8 @@ export const loadJobStore = (filePath: string): JobStore => {
     settle: (id, target, outcome, artifacts, identity) => {
       const j = db.get(id);
       const member = j?.members.find((x) => x.target === target);
-      if (!j || j.status !== "open" || !member || member.outcome) return undefined;
+      if (!j || !member || (!member.outcome && j.status !== "open") || j.end === "cancel" || member.outcome === "canceled") return undefined;
+      if (member.outcome === outcome && JSON.stringify(member.artifacts ?? []) === JSON.stringify(artifacts ?? member.artifacts ?? [])) return undefined;
       // 锚是 member.turn (account 时从 tell.event 写入 = 派活那一路由行的 event, 落定从
       // deliverRoute 进来带的正是同一个 row.event)。dispatchKey 不当主判据: account 给成员
       // 挂的 key 是最新一腿的注入事件 id (re/续问会换), settle 侧没有它, 先校它必然拦下 ——
@@ -328,12 +330,12 @@ export const loadJobStore = (filePath: string): JobStore => {
         && identity.dispatchKey !== member.dispatchKey) return undefined;
       return db.set(id, {
         ...j,
-        members: j.members.map((x) => (x.target === target ? { ...x, outcome, settledAt: Date.now(), ...(artifacts?.length ? { artifacts } : {}) } : x)),
+        members: j.members.map((x) => (x.target === target ? { ...x, outcome, firstOutcome: x.firstOutcome ?? x.outcome ?? outcome, settledAt: x.settledAt ?? Date.now(), ...(artifacts !== undefined ? { artifacts } : {}) } : x)),
       });
     },
     tally: (id) => {
       const j = db.get(id);
-      return j && { done: j.members.filter((x) => x.outcome).length, total: Math.max(j.members.length, j.expect ?? 0) };
+      return j && { done: j.members.filter((x) => x.firstOutcome ?? x.outcome).length, total: Math.max(j.members.length, j.expect ?? 0) };
     },
     close: (id, summary, mark) => {
       const j = db.get(id);
@@ -379,6 +381,7 @@ export const jobEpisode = (
     spawned: mm.spawned,
     task: mm.task,
     ...(mm.outcome ? { outcome: mm.outcome } : {}),
+    ...(mm.firstOutcome ? { firstOutcome: mm.firstOutcome } : {}),
     ...(mm.artifacts?.length ? { artifacts: mm.artifacts } : {}),
   })),
 });

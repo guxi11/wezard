@@ -1,5 +1,5 @@
 import type { ClearAttempt } from "./handoff.js";
-import { finalId, type MessageEvent, type MessageEvents } from "./message-events.js";
+import { finalId, receiptCoverage, receiptQuiet, type MessageEvent, type MessageEvents, type DeliveryInput } from "./message-events.js";
 import { parseEnvelope, renderTail } from "../shared/reminder.js";
 import { codexSessions, codexSessionForPane, recordCodexPaneSession } from "../shared/codex.js";
 import { codexHookLaunchArgs, codexHookCommand } from "../shared/codex-hooks.js";
@@ -64,7 +64,7 @@ import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, windowLa
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { isWxFrame } from "../shared/wx-text.js";
 import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
-import { stripAnsi, paneIsBusy, codexTurnBusy, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, lastModel, lastUserTurn, talkRounds, openToolUses, turnClosed, renderDialog, stripForChat, type PeerInfo, type PeerReply } from "./peers.js";
+import { stripAnsi, paneIsBusy, codexTurnBusy, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, lastModel, lastUserTurn, talkRounds, openToolUses, turnClosed, renderDialog, stripForChat, parseClosing, type PeerInfo, type PeerReply } from "./peers.js";
 
 // PATH augmentation: launchd / systemd start the daemon
 // with a stripped PATH that often lacks nvm / homebrew, breaking spawn(claudeBin).
@@ -2517,9 +2517,10 @@ export type NativeModalAnswer =
 export interface MirrorBridge {
   formatFinal: (target: string, turn: string, channel: string, body: string) => string[];
   recoverEventFinal: (event: MessageEvent) => void;
-  deliverTransferredFinal: (event: MessageEvent, body: string) => void;
+  deliverTransferredFinal: (event: MessageEvent, body: string, status?: DeliveryInput["reportKind"]) => void;
   transferReply: (event: MessageEvent) => void;
   setEventFinalGate: (gate: (event: MessageEvent) => boolean) => void;
+  setEventProgressGate: (gate: (event: MessageEvent) => boolean) => void;
   setEventOwnerGate: (gate: (event: MessageEvent) => boolean) => void;
   settleFinalProgress: (id: string) => Promise<void>;
   dispatch: (args: MirrorDispatchArgs) => Promise<void>;
@@ -3175,13 +3176,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   const TOOL_DETAIL_PREFIX = "TOOL_DETAIL|";
   let eventFinalGate: (event: MessageEvent) => boolean = () => true;
+  let eventProgressGate: (event: MessageEvent) => boolean = () => false;
   let eventOwnerGate: (event: MessageEvent) => boolean = () => true;
   const eventOwned = (id: string | undefined): boolean => {
     const event = id ? deps.events?.get(id) : undefined;
     return !event || eventOwnerGate(event);
   };
   const briefMode = (a: AttachState): boolean => cfg.wrc.mirror.brief
-    || !!(a.activeEventId && deps.events?.get(a.activeEventId)?.payload.peer?.transferred);
+    || !!(a.activeEventId && (deps.events?.get(a.activeEventId)?.payload.peer?.transferred || deps.events?.get(a.activeEventId)?.payload.peer?.from.receipt));
   const bubbleOwned = (a: AttachState, b: BriefBubble): boolean => {
     const event = b.owner ? deps.events?.get(b.owner) : undefined;
     return !event || event.target === a.target && eventOwnerGate(event);
@@ -3708,6 +3710,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.cotTool = undefined;
   };
 
+  const receiptProgress = (a: AttachState, text?: string): boolean => {
+    const e = a.activeEventId ? deps.events?.get(a.activeEventId) : undefined;
+    return !e?.payload.peer?.from.receipt || (!e.quiet && !(text && receiptQuiet(e, text)) && eventProgressGate(e));
+  };
   const flushCot = async (a: AttachState): Promise<void> => {
     a.cotTimer = undefined;
     // 展示选取: assistant text (含 thinking) 优先; 没有新 text 时才落最新 tool_use。
@@ -3717,11 +3723,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const b = a.briefBubble;
     const turnId = a.briefTurnId;
     // 收口后这一路全部失效: 气泡要么已 done, 要么 turn 已经换人/清空。
-    if (!text || !b || b.done || !turnId || a.briefConcluded || !bubbleOwned(a, b)) return;
+    if (!text || !b || b.done || !turnId || a.briefConcluded || !bubbleOwned(a, b) || !receiptProgress(a, text)) return;
     a.cotLastSent = text;
     try {
       await (b.pending = (b.pending ?? Promise.resolve()).catch(() => undefined).then(async () => {
-        if (b.done || a.briefBubble !== b || a.briefTurnId !== turnId || !bubbleOwned(a, b)) return;
+        if (b.done || a.briefBubble !== b || a.briefTurnId !== turnId || !bubbleOwned(a, b) || !receiptProgress(a, text)) return;
         await client.replyStream(b.frame, b.streamId, briefLine(a, turnId, text), false);
       }));
     } catch (e) {
@@ -3732,7 +3738,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   /** 推进气泡里的 CoT 进度。节流窗口内到达的多条只留最后一条 —— 进度永远只展示"最新"。 */
   const updateBriefProgress = (a: AttachState, raw: string): void => {
     const b = a.briefBubble;
-    if (!b || b.done || a.briefConcluded || !bubbleOwned(a, b)) return;
+    if (!b || b.done || a.briefConcluded || !bubbleOwned(a, b) || !receiptProgress(a, raw)) return;
     const line = cotLine(raw);
     if (!line) return;
     a.cotText = line;
@@ -3744,7 +3750,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
    *  只有没有新 text 的窗口才把最新 tool 行刷上气泡。节流与 text 共用一个计时器。 */
   const updateBriefToolProgress = (a: AttachState, raw: string): void => {
     const b = a.briefBubble;
-    if (!b || b.done || a.briefConcluded || !bubbleOwned(a, b)) return;
+    if (!b || b.done || a.briefConcluded || !bubbleOwned(a, b) || !receiptProgress(a, raw)) return;
     const line = cotLine(raw);
     if (!line) return;
     a.cotTool = line;
@@ -3777,7 +3783,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     await finalProgress.get(id)?.catch(() => undefined);
     finalProgress.delete(id);
   };
-  const queueFinal = (target: string, turn: string, channel: string, body: string, eventId?: string, bubble?: BriefBubble): string | undefined => {
+  const queueFinal = (target: string, turn: string, channel: string, body: string, eventId?: string, bubble?: BriefBubble, reportKind: DeliveryInput["reportKind"] = parseClosing(body).kind === "need" ? "need" : "done"): string | undefined => {
     // 投递出口剥掉行首收口标记与 ARTIFACT 行 (peers.stripForChat): 判定读原文, 群里只看结论。
     const text = stripForChat(body);
     if (!deps.events || !channel || !text.trim()) return undefined;
@@ -3785,13 +3791,15 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const id = finalId(eventId || turn, channel, revision);
     const chunks = formatFinal(target, turn, channel, text);
     if (bubble?.pending) finalProgress.set(id, bubble.pending);
-    deps.events.delivery({ id, eventId, target, turn, channel, body: text, revision, chunks,
+    const claimed = deps.events.delivery({ id, eventId, target, turn, channel, body: text, revision, chunks, reportKind,
+      ...(eventId && deps.events.get(eventId) ? { coverage: receiptCoverage(deps.events.get(eventId)!, channel, parseClosing(body).kind === "need", body) } : {}),
       ...(bubble && !bubble.done ? { stream: { frame: bubble.frame, id: bubble.streamId, expires: bubble.expires ?? Date.now() } } : {}) });
+    if (claimed !== id || deps.events.deliveryStatus(id)?.every((s) => s === "delivered")) finalProgress.delete(id);
     if (bubble) { bubble.done = true; clearTimeout(bubble.hardTimer); }
-    return id;
+    return claimed;
   };
   const recoverEventFinal = (event: MessageEvent, bubble?: BriefBubble): void => {
-    if ((deps.events?.get(event.id) ?? event).handoffCut || !event.result || event.interjected || event.canceled || !eventOwnerGate(event)) return;
+    if ((deps.events?.get(event.id) ?? event).handoffCut || event.quiet || !event.result || event.interjected || event.canceled || !eventOwnerGate(event)) return;
     // 事件泵的 evidence 探针 (observe → io.recovered) 与 brief 软收口赛跑: 两者同为
     // ~1s 周期, 探针常先跑到, 而它调这里不带气泡 —— queueFinal 拿不到 stream, 终句
     // 全部走 standalone, 气泡定格在最后一行 CoT 进度。没传气泡时按 target/turn 找回
@@ -3818,12 +3826,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 终句按事件自己的 `serves` 放行 (§9.4/§9.5): 收口与否由路由表判 (eventFinalGate)。
     if (event.channel && eventFinalGate(event)) queueFinal(event.target, turn, event.channel, event.result.body, event.id, bubble);
   };
-  const deliverTransferredFinal = (event: MessageEvent, body: string): void => {
+  const deliverTransferredFinal = (event: MessageEvent, body: string, status: DeliveryInput["reportKind"] = "error"): void => {
     if (!eventOwnerGate(event) || !event.channel) return;
     const turn = event.turn || event.id;
     if (!getDetail(turn)) recordTurnStart({ id: turn, eventId: event.id, target: event.target,
       userQuery: event.payload.text, createdAt: event.at, channel: event.channel, from: event.payload.peer?.from });
-    queueFinal(event.target, turn, event.channel, body, event.id, claimReplyBubble(event));
+    queueFinal(event.target, turn, event.channel, body, event.id, claimReplyBubble(event), status);
   };
   // 收口一条 loading 气泡: finish=true 写入最终内容, 只生效一次。发送失败退回 standalone。
   // raw=true skips withTagHeader (used when content already contains the linked tag header).
@@ -4223,17 +4231,22 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!turnSilent(a) && !gated) {
       if (event) recoverEventFinal(deps.events!.get(event.id)!, a.briefBubble);
       else queueFinal(a.target, turnId, a.channel ?? baseOfKey(a.target), body, undefined, a.briefBubble);
-    } else if (gated && eventOwned(a.activeEventId) && !turnSilent(a)) {
-      // 链式收口 (eventFinalGate: 子活未落定) 延后的是 closing 的释放, 不该扣住气泡:
-      // queueFinal 没跑 = 没人收气泡, 它会定格在最后一行 CoT 进度上 (看着像卡在 tool
-      // use), hardTimer 到点的空 finish 又被 chat-gate 当 empty push 丢掉。气泡还在
-      // stream 窗口内就把终句刷进气泡 (`链接 正文` 覆盖, 与正常收口同形); 气泡已收 /
-      // 过期 / 终句超单条上限则 standalone 展示终句。
+    } else if (event && gated && !turnSilent(a) && eventProgressGate(deps.events!.get(event.id)!)) {
+      // A live parent may report progress; settled/canceled rows never use this outlet.
+      const text = stripForChat(body);
+      const channel = event.channel;
+      const id = finalId(event.id, channel, `progress:${text}`);
       const b = a.briefBubble;
-      const text = stripForChat(body); // 同 queueFinal: 群气泡不带收口标记 / ARTIFACT 行
-      const fitsOneChunk = splitMarkdown(text, Math.max(200, cfg.wrc.mirror.chunkBytes - TAG_HEADER_BUDGET)).length === 1;
-      if (b && !b.done && fitsOneChunk && Date.now() < (b.expires ?? 0)) void finishBriefBubble(a, text);
-      else if (text.trim()) sendStandalone(a, text);
+      if (b?.pending) finalProgress.set(id, b.pending);
+      if (text && channel) deps.events!.delivery({ id, eventId: event.id, target: event.target, turn: turnId,
+        channel, body: text, revision: id, purpose: "progress", chunks: formatFinal(event.target, turnId, channel, text),
+        ...(b && !b.done ? { stream: { frame: b.frame, id: b.streamId, expires: b.expires ?? Date.now() } } : {}) });
+      if (b) { b.done = true; clearTimeout(b.hardTimer); }
+    }
+    const current = event ? deps.events!.get(event.id)! : undefined;
+    if (current && (current.quiet || gated && !eventProgressGate(current))) {
+      const b = a.briefBubble;
+      if (b) { b.done = true; clearTimeout(b.hardTimer); }
     }
     // The durable result/outbox must exist before this in-memory dedup bit advances.
     a.briefConcluded = true;
@@ -7497,6 +7510,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     deliverTransferredFinal,
     transferReply,
     setEventFinalGate: (gate) => { eventFinalGate = gate; },
+    setEventProgressGate: (gate) => { eventProgressGate = gate; },
     setEventOwnerGate: (gate) => { eventOwnerGate = gate; },
     settleFinalProgress,
     dispatch: async ({ principal, text, images, frame, streamId, channel, speaker, eventId, guard, onSubmitted }) => {

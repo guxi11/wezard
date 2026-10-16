@@ -4,7 +4,18 @@ import { loadJsonMap } from "../shared/json-map-store.js";
 import type { Asker, TurnFrom } from "../shared/detail-store.js";
 import type { MirrorDispatchArgs } from "./mirror-bridge.js";
 import type { Tell, HeldSeen } from "./dispatch.js";
-import type { EventId, FinalVerdict } from "./router.js";
+import type { EventId, FinalVerdict, Receiver, ReportSource, Report } from "./router.js";
+
+export interface ReceiptFact {
+  event: EventId;
+  version: string;
+  status: string;
+  receiver: Receiver;
+  body: string;
+  source?: ReportSource;
+  speaker: string;
+  envelope: string;
+}
 
 export interface MessageInput {
   id: string;
@@ -22,6 +33,7 @@ export interface MessageInput {
   deadline: number;
   payload: {
     text: string;
+    receipts?: ReceiptFact[];
     human?: MirrorDispatchArgs;
     /** daemon 内部交接输入, 没有路由任务或外部发话方。 */
     handoff?: { pane: string; sessionId: string; clear?: ClearAttempt };
@@ -69,6 +81,7 @@ export interface MessageEvent extends MessageInput {
   /** 失败补偿显式释放的旧轮; 覆盖尚未落补偿完成标记的 handoff 行。 */
   handoffRestored?: boolean;
   interjected?: boolean;
+  quiet?: true;
   result?: { body: string; revision: string; at: number };
   /** 进终态 (complete / canceled) 的时刻 —— 墓碑化的起点。老行没有, 按已知时刻估。 */
   endedAt?: number;
@@ -76,7 +89,8 @@ export interface MessageEvent extends MessageInput {
 /** 终态行过了 TOMB_AFTER_MS 只剩判重要用的那几样: accept 认 id + fingerprint 判「同一条消息」,
  *  WS 重放 / 收件箱重入 (`rcpt:<event>:<rev>`) 撞上它就是已投过、不再注入; 丢了它就会再投一次。
  *  墓碑再过 TOMB_TTL_MS (自 endedAt 起) 才删 —— 重放窗口远小于它。 */
-export interface Tombstone { id: string; fingerprint: string; execution: "complete" | "canceled"; endedAt: number; tomb: true }
+export type EventAuthority = Pick<MessageEvent, "id" | "target" | "serves" | "at" | "execution" | "canceled" | "interjected" | "handoffCut" | "handoffRestored"> & { unexposedHuman?: true };
+export interface Tombstone { id: string; fingerprint: string; execution: "complete" | "canceled"; endedAt: number; tomb: true; authority?: EventAuthority }
 type Row = MessageEvent | Tombstone;
 const TOMB_AFTER_MS = 24 * 3600_000;
 const TOMB_TTL_MS = 7 * 24 * 3600_000;
@@ -85,8 +99,12 @@ const terminal = (x: MessageEvent["execution"]): x is Tombstone["execution"] => 
 /** complete 要等 finalized (路由判定补完) 才算了结; canceled 本身就是了结。 */
 const settled = (e: MessageEvent): boolean => e.execution === "canceled" || (e.execution === "complete" && !!e.finalized);
 const endedAt = (e: MessageEvent): number => e.endedAt ?? Math.max(e.at, e.result?.at ?? 0, e.turnClosedAt ?? 0, e.releasedAt ?? 0);
+const authorityOf = (e: MessageEvent): EventAuthority => ({ id: e.id, target: e.target, serves: e.serves,
+  at: e.at, execution: e.execution, canceled: e.canceled || e.execution === "canceled", interjected: e.interjected,
+  handoffCut: e.handoffCut, handoffRestored: e.handoffRestored,
+  ...(e.payload.human && e.exposure === "none" ? { unexposedHuman: true as const } : {}) });
 const entomb = (e: MessageEvent & { execution: Tombstone["execution"] }): Tombstone =>
-  ({ id: e.id, fingerprint: e.fingerprint, execution: e.execution, endedAt: endedAt(e), tomb: true });
+  ({ id: e.id, fingerprint: e.fingerprint, execution: e.execution, endedAt: endedAt(e), tomb: true, authority: authorityOf(e) });
 /** 每次落盘前跑: 了结满一天的行裁成墓碑, 墓碑满七天删掉。 */
 export const gcEvents = (now: number) => (rows: Record<string, Row>): Record<string, Row> =>
   Object.fromEntries(Object.entries(rows).flatMap(([id, x]): Array<[string, Row]> =>
@@ -95,6 +113,9 @@ export const gcEvents = (now: number) => (rows: Record<string, Row>): Record<str
     : [[id, x]]));
 export interface DeliveryInput {
   transfer?: { id: string; standalone: boolean };
+  coverage?: { context: string; facts: string[] };
+  purpose?: "progress" | "report" | "cancellation" | "task";
+  reportKind?: Report["kind"];
   id: string;
   eventId?: string;
   target: string;
@@ -157,24 +178,81 @@ export const rejectedAck = (e: unknown): boolean => !!e && typeof e === "object"
   && typeof (e as { errcode?: unknown }).errcode === "number" && (e as { errcode: number }).errcode !== 0
   && typeof (e as { errmsg?: unknown }).errmsg === "string" && !!(e as { headers?: unknown }).headers;
 
+/** Legacy inbox rows retain their original receipt identity while acquiring structured facts. */
+export const receiptFacts = (e: MessageEvent): ReceiptFact[] => e.payload.receipts ??
+  (e.payload.peer?.from.receipt ? [{ event: e.payload.peer.from.event ?? e.id,
+    version: e.payload.peer.from.event && e.id.startsWith(`rcpt:${e.payload.peer.from.event}:`)
+      ? e.id.slice(`rcpt:${e.payload.peer.from.event}:`.length).split("~")[0]! : e.id, status: e.payload.peer.from.status ?? "done", body: e.payload.text,
+    receiver: { kind: "wizard", to: e.target, ...(e.serves ? { event: e.serves } : {}) },
+    speaker: e.speaker, envelope: e.payload.peer.envelope }] : []);
+/** Receipt QUIET is a whole-message control word, never a suffix of a real answer. */
+export const receiptQuiet = (e: MessageEvent, body: string): boolean =>
+  !!e.payload.peer?.from.receipt && !e.payload.human && !e.interjected && body.trim() === "QUIET";
+export const reportSource = (e: MessageEvent): ReportSource => ({ input: e.id,
+  ...(e.turn ? { turn: e.turn } : {}),
+  ...(receiptFacts(e).length ? { facts: receiptFacts(e).map((f) => JSON.stringify([f.event, f.version, f.receiver])) } : {}) });
+export const receiptCoverage = (e: MessageEvent, channel = e.channel, question = false, questionText?: string): DeliveryInput["coverage"] => {
+  const refs = (facts: ReceiptFact[]): string[] => [...new Set(facts.map((f) => JSON.stringify([f.event, f.version, f.receiver])))].sort();
+  const receipts = receiptFacts(e);
+  // Publishing one question does not certify that all incoming NEEDs were handled.
+  // Claim the generated question version, leaving every input risk fact unclaimed.
+  const risks = receipts.some((f) => f.status !== "done");
+  const facts = question && receipts.length ? [JSON.stringify(["question", e.serves ?? "", refs(receipts), digest((questionText ?? e.result?.body ?? "").trim())])]
+    : [...refs(receipts.filter((f) => f.status === "done")),
+      ...(risks ? [JSON.stringify(["summary", e.serves ?? "", refs(receipts)])] : [])];
+  return facts.length ? { context: JSON.stringify([e.target, e.serves ?? "", channel]), facts } : undefined;
+};
+
+const receiptFactOk = (f: ReceiptFact): boolean => !!f && typeof f.event === "string" && !!f.event
+  && typeof f.version === "string" && !!f.version && typeof f.body === "string" && typeof f.envelope === "string"
+  && typeof f.speaker === "string" && ["done", "need", "error", "timeout", "silent", "dead", "canceled"].includes(f.status)
+  && !!f.receiver && (f.receiver.kind === "wizard" ? typeof f.receiver.to === "string"
+    && (f.receiver.event === undefined || typeof f.receiver.event === "string")
+    : f.receiver.kind === "chat" && typeof f.receiver.channel === "string" && typeof f.receiver.message === "string")
+  && (f.source === undefined || !!f.source && typeof f.source.input === "string");
+const coverageOk = (c: NonNullable<DeliveryInput["coverage"]>): boolean => !!c && typeof c.context === "string"
+  && Array.isArray(c.facts) && c.facts.every((f) => typeof f === "string");
+
 export const createMessageEvents = (file: string, io: MessageAdapters) => {
   const db = loadJsonMap<Row>(file, (rows) => gcEvents(Date.now())(rows), { strict: true });
   const outbox = loadJsonMap<FinalDelivery>(`${file}.finals`, undefined, { strict: true });
   Object.entries(db.all()).forEach(([id, e]) => {
     if (e && isTomb(e)) {
       if (e.id !== id || typeof e.fingerprint !== "string" || !terminal(e.execution) || !Number.isFinite(e.endedAt)) throw new Error(`invalid message event tombstone ${id}`);
+      const a = e.authority;
+      if (a !== undefined && (!a || a.id !== id || !a.target || typeof a.target !== "string" || !Number.isFinite(a.at)
+          || a.execution !== e.execution || (e.execution === "canceled" && a.canceled !== true) || (a.serves !== undefined && typeof a.serves !== "string")
+          || [a.canceled, a.interjected, a.handoffCut, a.handoffRestored].some((v) => v !== undefined && typeof v !== "boolean")
+          || (a.unexposedHuman !== undefined && a.unexposedHuman !== true))) throw new Error(`invalid event authority ${id}`);
       return;
     }
     if (!e || e.id !== id || typeof e.fingerprint !== "string" || !e.target || typeof e.speaker !== "string" || typeof e.channel !== "string" || (e.serves !== undefined && typeof e.serves !== "string") || !e.payload || typeof e.payload.text !== "string" || ([e.payload.human, e.payload.peer, e.payload.handoff].filter(Boolean).length !== 1) || !Number.isFinite(e.at) || !Number.isFinite(e.attempts) || !Number.isFinite(e.deadline) || !["queued", "dispatching", "awaiting-result", "complete", "canceled", "uncertain"].includes(e.execution)) throw new Error(`invalid message event ${id}`);
+    if (e.payload.receipts !== undefined && (!e.payload.peer?.from.receipt || !Array.isArray(e.payload.receipts)
+        || !e.payload.receipts.every(receiptFactOk))) throw new Error(`invalid receipt facts ${id}`);
     if (e.payload.handoff && (typeof e.payload.handoff.pane !== "string" || !e.payload.handoff.pane || typeof e.payload.handoff.sessionId !== "string" || !e.payload.handoff.sessionId || !e.id.startsWith("handoff:"))) throw new Error(`invalid handoff event ${id}`);
     const clear = e.payload.handoff?.clear;
     if (e.payload.handoff && e.id.endsWith(":carry") && (!clear || clear.pane !== e.payload.handoff.pane || clear.nextSid !== e.payload.handoff.sessionId || !Number.isSafeInteger(clear.pid) || clear.pid <= 0 || !Number.isSafeInteger(clear.panePid) || !clear.panePid)) throw new Error(`invalid handoff clear evidence ${id}`);
   });
   Object.entries(outbox.all()).forEach(([id, d]) => {
+    if (d?.coverage !== undefined && !coverageOk(d.coverage)) throw new Error(`invalid final coverage ${id}`);
     if (!d || d.id !== id || !Array.isArray(d.parts) || d.parts.length !== d.chunks?.length || !d.chunks.every((c) => typeof c === "string") || !d.parts.every((p) => ["pending", "sending", "waiting-ack", "delivered", "uncertain", "failed"].includes(p.state)) || !d.channel) throw new Error(`invalid final delivery ${id}`);
   });
+  // Unknown legacy text cannot certify that its input facts were reported.
+  const migrated = Object.fromEntries(Object.values(outbox.all()).flatMap((d): Array<[string, FinalDelivery]> => {
+    // Quiet schedules have their own durable intent, without a message inbox row.
+    if (!d.purpose && d.eventId === `quiet:${d.target}:${d.turn}`) return [[d.id, { ...d, purpose: "task" as const }]];
+    if (d.coverage || d.purpose === "progress" || !d.eventId || (d.reportKind !== "done" && d.reportKind !== "need")) return [];
+    const e = db.get(d.eventId!);
+    const coverage = e && !isTomb(e) ? receiptCoverage(e, d.channel, d.reportKind === "need", d.body) : undefined;
+    return coverage ? [[d.id, { ...d, coverage }]] : [];
+  }));
+  if (Object.keys(migrated).length) outbox.merge(migrated);
   /** 调度只看活行; 墓碑只给 accept 判重 (与 `known`)。 */
   const live = (id: string): MessageEvent | undefined => { const x = db.get(id); return x && !isTomb(x) ? x : undefined; };
+  const sourceOf = (id: string): EventAuthority | undefined => {
+    const row = db.get(id);
+    return row ? isTomb(row) ? row.authority : authorityOf(row) : undefined;
+  };
   const liveRows = (): MessageEvent[] => Object.values(db.all()).filter((x): x is MessageEvent => !isTomb(x));
   let stopped = true;
   let accepting = true;
@@ -252,6 +330,14 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     const d = outbox.get(id)!;
     outbox.set(id, { ...d, parts: d.parts.map((x, i) => i === n ? { ...x, ...p } : x) });
   };
+  const claimsOf = (coverage: DeliveryInput["coverage"]): FinalDelivery[] => {
+    if (!coverage) return [];
+    const rows = Object.values(outbox.all()).filter((d) => d.coverage?.context === coverage.context
+      && d.coverage.facts.some((f) => coverage.facts.includes(f)));
+    const whole = rows.filter((d) => coverage.facts.every((f) => d.coverage!.facts.includes(f)));
+    const best = whole.find((d) => d.parts.every((p) => p.state !== "failed")) ?? whole[0];
+    return best ? [best] : rows;
+  };
   const cancel = (select: (e: MessageEvent) => boolean, reason = "canceled by owner"): number => {
     const rows = liveRows().filter((e) => !["complete", "canceled"].includes(e.execution) && select(e));
     rows.forEach((e) => {
@@ -288,17 +374,38 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
   };
   const result = (id: string, body: string, revision: string, turn?: string): void => {
     const e = live(id);
-    if (!e || e.result?.revision === revision) return;
-    patch(id, { finalized: false, result: { body, revision, at: Date.now() }, execution: "complete", exposure: "consumed", ...(turn ? { turn } : {}) });
-    io.final?.(live(id)!, { text: body });
+    if (!e || e.canceled || e.execution === "canceled" || e.result?.revision === revision) return;
+    const quiet = receiptQuiet(e, body);
+    patch(id, { finalized: quiet, quiet: quiet ? true : undefined, result: { body, revision, at: Date.now() }, execution: "complete", exposure: "consumed", ...(turn ? { turn } : {}) });
+    if (!quiet) io.final?.(live(id)!, { text: body });
   };
   const delivery = (input: DeliveryInput): string => {
+    const source = input.eventId ? live(input.eventId) : undefined;
+    const coverage = input.coverage ?? (input.purpose !== "progress" && source
+      ? receiptCoverage(source, input.channel) ?? (!source.payload.peer?.from.receipt
+        ? { context: JSON.stringify([source.target, source.serves ?? "", input.channel]), facts: [JSON.stringify([source.serves ?? "", source.id, input.reportKind ?? "done",
+          input.reportKind === "need" || input.reportKind === "error" ? digest(input.body.trim()) : undefined])] } : undefined)
+      : undefined);
+    const covering = claimsOf(coverage);
+    if (coverage && covering?.length) {
+      const claimed = new Set(covering.flatMap((d) => d.coverage!.facts));
+      if (coverage.facts.every((f) => claimed.has(f))) {
+        // An explicit retry reuses the frozen delivery and only retries proven failures.
+        // Delivered and uncertain parts retain their original claims and transport identity.
+        const retries = covering.filter((d) => d.coverage!.facts.some((f) => coverage.facts.includes(f)) && d.parts.some((p) => p.state === "failed"));
+        if (retries.length) outbox.merge(Object.fromEntries(retries.map((d) => [d.id, { ...d,
+          parts: d.parts.map((p) => p.state === "failed" ? { ...p, state: "pending" as const, retryAt: undefined } : p) }])));
+        void pump();
+        return covering[0]!.id;
+      }
+    }
     const old = outbox.get(input.id);
     if (old) {
       if (old.body !== input.body || old.channel !== input.channel || old.revision !== input.revision) throw new Error(`final identity conflict: ${input.id}`);
       return old.id;
     }
-    const frozen = clone(io.format?.(input) ?? input);
+    const covered = { ...input, ...(coverage ? { coverage } : {}) };
+    const frozen = clone(io.format?.(covered) ?? covered);
     outbox.set(input.id, { ...frozen, at: Date.now(), parts: frozen.chunks.map(() => ({ state: "pending", attempts: 0 })) });
     void pump();
     return input.id;
@@ -309,6 +416,13 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
       for (let n = 0; n < outbox.get(id)!.parts.length && !stopped; n++) {
         const d = outbox.get(id)!;
         const p = d.parts[n]!;
+        const source = d.eventId ? sourceOf(d.eventId) : undefined;
+        const cancellation = d.purpose === "cancellation" && source?.canceled && source.unexposedHuman;
+        if ((d.eventId && !source && d.purpose !== "task") || (source && source.target !== d.target)
+            || ((source?.canceled || source?.interjected || source?.handoffCut && !source.handoffRestored) && !cancellation)) {
+          if (p.state === "pending") part(id, n, { state: "failed", reason: "source event canceled or cut before delivery" });
+          break;
+        }
         if (p.state === "delivered") continue;
         if (p.state !== "pending" || (p.retryAt ?? 0) > Date.now()) break;
         part(id, n, { state: "sending", attempts: p.attempts + 1 });
@@ -347,22 +461,29 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     }
   };
   /** 收件箱里的回执事件 (`rcpt:<event>:<rev>`): 只有它带路由归属 (serves), 也只有它该合并。 */
-  const isRcpt = (e: MessageEvent): boolean => e.id.startsWith("rcpt:") && !!e.serves;
+  const isRcpt = (e: MessageEvent): boolean => e.id.startsWith("rcpt:") && !!e.payload.peer?.from.receipt && !!e.serves;
   /** §9.3 Aggregator: 同一个 target、服务同一笔 (`serves` = `receiver.event`) 还排着队的其它回执,
    *  并进这一次注入 —— 扇出的兄弟陆续回来时是一轮, 不是一人一轮。被吸收的那些各自收口
    *  (`execution: complete`, 它们的 id 已终态, 重放不再注入); 结论由这一轮的终句统一交代。
-   *  回执的正文与信封是分开的两件 (`payload.text` 不含信封), 所以并的只是正文, 信封留注入那一份。 */
+   *  每项保留独立事实、状态与信封, 合并正文与被吸收行的终态在同一次落盘中提交。 */
   const absorb = (id: string): void => {
     const e = live(id);
-    if (!e || !isRcpt(e)) return;
+    if (!e || !isRcpt(e) || !io.valid(e)) return;
     const absorbed = liveRows()
       .filter((x) => x.id !== e.id && isRcpt(x) && x.target === e.target && x.serves === e.serves
-        && x.execution === "queued" && !x.canceled)
-      .sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : 1));
+        && x.channel === e.channel && x.execution === "queued" && x.exposure === "none" && !x.canceled
+        && x.deadline > Date.now() && io.valid(x))
+      .sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
     if (!absorbed.length) return;
-    patch(e.id, { payload: { ...e.payload, text: [e.payload.text,
-      ...absorbed.map((x) => `（另一份回执 ${x.id} · ${x.speaker}）\n${x.payload.text}`)].join("\n\n") } });
-    absorbed.forEach((x) => patch(x.id, { execution: "complete", exposure: "consumed", finalized: true, reason: `merged into ${e.id}` }));
+    const rows = [e, ...absorbed];
+    // Each item keeps its own status and envelope: a NEED must never inherit a sibling's done.
+    const receipts = rows.flatMap(receiptFacts);
+    const payload = { ...e.payload, receipts, text: receipts.map((f) =>
+      `${f.envelope}\n（回执 event=${f.event} version=${f.version} status=${f.status} receiver=${JSON.stringify(f.receiver)}）\n${f.body}`).join("\n\n"),
+      peer: { ...e.payload.peer!, envelope: "以下是同一件活的多份回执。逐项读取各自的状态、来源与正文。" } };
+    // One atomic store write: a crash cannot expose a merged input and an unretired sibling.
+    db.merge({ [e.id]: { ...e, payload }, ...Object.fromEntries(absorbed.map((x) => [x.id,
+      { ...x, execution: "complete", exposure: "consumed", finalized: true, endedAt: Date.now(), reason: `merged into ${e.id}` }])) });
   };
   const inject = async (id: string, resource: string): Promise<void> => {
     const target = live(id)!.target;
@@ -638,6 +759,10 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     ids: () => Object.keys(db.all()),
     /** 只问执行态 (含墓碑): 判「这份投过没有」的调用方不必在乎它是不是已被裁掉。 */
     executionOf: (id: string) => db.get(id)?.execution,
+    authorityOf: (id: string): EventAuthority | undefined => {
+      const authority = sourceOf(id);
+      return authority && clone(authority);
+    },
     // A transfer moves the route, not the human's original reply stream. Derive the
     // binding from durable inputs so chained transfers and reload use the same bubble.
     latestTransfer: (serves: string): MessageEvent | undefined => {
@@ -659,6 +784,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     /** 一条 event 的 status 视图 —— 轮询单条的调用方 (回归脚本) 不必为它把全表算一遍。 */
     event: (id: string) => { const e = live(id); return e && scan(() => view(e, partsByEvent().get(id) ?? [])); },
     deliveryStatus: (id: string) => outbox.get(id)?.parts.map((p) => p.state),
+    deliveryClaims: (coverage: DeliveryInput["coverage"]) => claimsOf(coverage).map((d) => ({ id: d.id, states: d.parts.map((p) => p.state) })),
     // 泵可能正在同一 pane 上取证; 外部交接轮询复用在飞探针, 不能把 busy 当投递失败。
     reconcile: async (id: string) => {
       const e = live(id);

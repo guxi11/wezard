@@ -703,6 +703,7 @@ export const renderReceiptEnvelope = (
   route?: ReceiptRoute & { pending?: number },
 ): string =>
   renderReminder(envelopeAttrs.receipt(from, chat, job, status, turn, route), [
+    "只处理回执、没有新的结果或风险要交代时，终句必须只写一行 QUIET（精确大写，不加称呼或解释）。QUIET 只表示已读，不代表主任务完成，也不代表反问或风险已通知；有待处理 NEED 要先答它或交代阻塞。明确还在等依赖时用 WAIT: 说明，不要写 RESULT。回执轮 notify 的正式报告须带 RESULT:，反问带 NEED:；普通文字只作进度，不代表事实已报告。",
     ...(status === "done"
       ? ["这是**回执**: 它那一轮干完了, 下面是它的结论 —— 不是人说的, 也不是新派给你的活。"]
       : status === "need"
