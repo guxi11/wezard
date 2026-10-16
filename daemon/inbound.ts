@@ -630,7 +630,7 @@ export const installInboundRouter = (
   // 聊天名若被一个静默超过一天的 wizard 占着, 先顶掉它 —— 否则默认会话只能退避成 `-N`。
   const staleDeps: EvictDeps = {
     lastActivity: (t) => bridge.lastActivity(t),
-    retire: async (t) => { await bridge.killPane(t); },
+    retire: (t) => bridge.killPane(t),
   };
   // 新开的 slot 先按人写的名字落名: slot 只是内部 id, 被一个改过名的冷 wizard 占着
   // 时会挪成 `foo-N` —— 名字不该跟着它退避。已有名字的 wizard 不受影响 (claim 不改)。

@@ -108,9 +108,7 @@ export const loadWizardStore = (filePath: string, bornOf: BornOf = () => undefin
   return {
     nextName: () => {
       const taken = new Set(all().map((w) => foldName(w.name)));
-      let name = nextAutoName();
-      while (taken.has(foldName(name))) name = nextAutoName();
-      return name;
+      return nextAutoName((name) => taken.has(foldName(name)));
     },
     get: db.get,
     byName: (n) => {
@@ -166,7 +164,7 @@ export interface EvictDeps {
   /** 会话最后一次活跃的时刻 (transcript mtime); 0 = 没有会话。 */
   lastActivity: (target: string) => number;
   /** 收掉它的 pane 与绑定。 */
-  retire: (target: string) => Promise<unknown>;
+  retire: (target: string) => Promise<{ ok: boolean }>;
 }
 
 /** 创建同名 wizard 前腾名字: `want` 被别人占着、且那人静默超过 NAME_STALE_MS →
@@ -186,7 +184,9 @@ export const evictStaleName = async (
   if (!store || !rec || keep.includes(rec.target)) return undefined;
   if (now - Math.max(deps.lastActivity(rec.target), rec.bornAt) <= NAME_STALE_MS) return undefined;
   if (!tagOfKey(rec.target)) { store.upsert(rec.target, { name: "" }); return rec; }
-  await deps.retire(rec.target);
+  if (!(await deps.retire(rec.target)).ok) return undefined;
+  const current = store.get(rec.target);
+  if (!current || current.birthToken !== rec.birthToken) return undefined;
   store.drop(rec.target);
   return rec;
 };

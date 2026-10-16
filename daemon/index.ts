@@ -91,6 +91,7 @@ import {
   type WizardBrief,
   type WizardRecord,
 } from "./wizard.js";
+import { AutoNameExhausted } from "./wizard-names.js";
 import { activeRows, bindNoticeBox, createNoticeBox, createSeenRing, gcSeen, chatAudience, hears, noticeSuffixFor, type Notice, type Subject, type Part, type SeenRow, type TimedSnapRow, type Via } from "./notices.js";
 import { createLedger, digest, pendingGc, renderDigest, renderTable, renderAwaiting, renderStalled, renderShelved, ago as agoMs, HEARD_EVERY_MS, type Item as PendingItem, type LiveOf, type Mark } from "./pending-items.js";
 import { checkDirection } from "./direction.js";
@@ -1622,6 +1623,9 @@ const main = async (): Promise<void> => {
         // An identity rename may have claimed the address while stale eviction awaited IO.
         if (wizards.byName(candidate)) return { ok: false, status: 409, body: { ok: false, reason: "wizard name was claimed during spawn preparation" } };
         return allowed(target, candidate) ? reserve(target, false) : denied;
+      } catch (e) {
+        if (e instanceof AutoNameExhausted) return { ok: false, status: 409, body: { ok: false, reason: e.message } };
+        throw e;
       } finally {
         if (asked) namingClaims.delete(claimKey);
       }
@@ -3644,6 +3648,7 @@ const main = async (): Promise<void> => {
       if (!controlValid(self, authority)) { json(res, 409, { ok: false, reason: "物理操作前本轮控制权已变化；未打断或结束目标" }); return; }
       const done = end ? await m.killPane(target) : await m.interruptPane(target, { teardown: true });
       if (!done.ok) { json(res, 502, { ok: false, target, reason: done.reason }); return; }
+      if (wizards.get(target)?.birthToken !== victimRec?.birthToken) { json(res, 409, { ok: false, target, reason: "wizard identity changed during stop; identity cleanup withheld" }); return; }
       const detached = end && b.forget ? forgetWizard(target) : [];
       // 打断只是停了它这一轮, 它还在; 只有结束才是名册变了。
       if (end) postRoster(baseOfKey(target), [target, self], { op: "ended", name: victim.name ? `.${victim.name}` : target, by: displayName(self), ...(b.forget ? { why: "forgotten" } : {}) }, subjectOf(victimRec));

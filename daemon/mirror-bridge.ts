@@ -6246,15 +6246,24 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // store — e.g. after a reload that couldn't re-attach — is still killable.
     const a = byTarget.get(target);
     const pane = a?.tmuxPane || paneOf(target);
+    const sid = a?.sessionId ?? deps.store.get(target)?.sessionId;
+    const birth = wizardStore()?.get(target)?.birthToken;
+    const same = (): boolean => byTarget.get(target) === a && (a?.tmuxPane || paneOf(target)) === pane
+      && (a?.sessionId ?? deps.store.get(target)?.sessionId) === sid && wizardStore()?.get(target)?.birthToken === birth;
+    const replaced = { ok: false, reason: "target identity changed during pane cleanup; cleanup withheld" };
     if (!a && !pane) return { ok: false, reason: "no session bound to target" };
     if (pane && (await tmuxPaneAlive(pane))) {
+      if (!same()) return replaced;
       // Esc first, like /stop: a mid-generation CLI gets a beat to unwind and
       // flush its transcript before the TTY is yanked out from under it.
       await runTmux(["send-keys", "-t", pane, "Escape"]);
       await sleep(250);
+      if (!same()) return replaced;
       const r = await runTmux(["kill-pane", "-t", pane]);
       if (r.code !== 0) return { ok: false, reason: `kill-pane failed: ${r.stdout.slice(-200) || r.code}` };
     }
+    // A late stop must not detach a new wizard that reused this target/name.
+    if (!same()) return replaced;
     if (a) detach(a, drop ? "/kill" : "sleep");
     if (!drop) {
       log.info({ target, sessionId: a?.sessionId, pane }, "mirror sleep — pane killed, binding kept");
