@@ -812,15 +812,17 @@ server.registerTool(
   {
     title: "Who could take this task",
     description:
-      "一件活要不要转给**已有**的 wizard, 拿不准该给谁、或拿不准值不值时调它。守护进程列出职责 / 最近问话 / 文件线索、lead 与工单/回执占用、上下文连续性、忙闲、ctx 和缓存成本, 并说明自动复用为何受阻。公共 AGENTS.md/CLAUDE.md 等指引文件不算复用证据; 同工作区、同名文件或职责撞词也不证明是同一任务。候选按线索排序不等于推荐追加任务; 不要给正在处理复杂任务的 lead 塞独立核查。真实续篇用 tell_peer 的 re, 独立新活按本次难度 dispatch, 默认保留白板 spawn。",
+      "一件活要不要转给**已有**的 wizard, 拿不准该给谁、或拿不准值不值时调它。守护进程列出职责 / 最近问话 / 文件线索、lead 与工单/回执占用、上下文连续性、忙闲、ctx 和缓存成本, 并说明自动复用为何受阻。公共 AGENTS.md/CLAUDE.md 等指引文件不算复用证据; 同工作区、同名文件或职责撞词也不证明是同一任务。候选按线索排序不等于推荐追加任务; 不要给正在处理复杂任务的 lead 塞独立核查。真实同验收目标续篇用 tell_peer 的 re; 独立新活按本次难度 dispatch, 可复用近期实际材料相关、空闲且无职责占用的非 lead, 证据不足再白板 spawn。",
     inputSchema: {
       task: z.string().describe("这件活及验收目标, 原话或一句概括都行。文件名 / 模块名 / 函数名帮助找线索; 公共规则文件、同工作区和关键词重叠不证明是同一任务。"),
       cwd: z.string().optional().describe("这件活落在哪个工作区。省略 = 你自己的工作区。"),
+      tier: z.enum(TIERS).optional().describe("与 dispatch 相同的本次任务档位；省略按任务判断。"),
+      force: z.boolean().optional().describe("与 dispatch 相同，仅越过冷缓存成本门槛。"),
       limit: z.number().optional().describe("最多列几个候选 (1-20, 默认 5)。"),
     },
   },
-  async ({ task, cwd, limit }) =>
-    unwrapText("route_candidates", await daemonPost("/wizard/route", { task, ...(cwd ? { cwd } : {}), ...(limit ? { limit } : {}) })),
+  async ({ task, cwd, limit, tier, force }) =>
+    unwrap("route_candidates", await daemonPost("/wizard/route", { task, ...(tier ? { tier } : {}), ...(force !== undefined ? { force } : {}), ...(cwd ? { cwd } : {}), ...(limit ? { limit } : {}) })),
 );
 
 server.registerTool(
@@ -829,7 +831,7 @@ server.registerTool(
     title: "Dispatch a task (default decision by the daemon)",
     description:
       "派活一步到位: 只需必填 task; name / description 可省略, 新建时自动取名并用任务文本补职责。守护进程查候选 (同 route_candidates) → 过成本门控 → 决定转给已有的 wizard 还是按档白板 spawn → 用 tell_peer 投出去 (默认公开: 气泡与它的回复进你这一轮的群, 回执照常回你), 返回 `decision` (existing / spawn)、`reason`、落到谁 (`name`)、件号 `turn`, spawn 的还有 `tier` / `model`。\n" +
-      "先按验收目标分清独立新活和原任务续篇。独立新活按本次难度派, 不因同项目、公共 AGENTS.md/CLAUDE.md 或词面重叠塞给已有 lead。自动复用要求实质上下文证据、无 lead/任务占用、成本合适; 其余白板 spawn。难度看所需判断而非句长: **默认 standard (不给 tier 就是它)**, 跑腿/核查 light, 只有确实要判断 (设计取舍、疑难排障、关键评审) 才显式 hard。\n" +
+      "先按验收目标分清独立新活和原任务续篇。独立新活另派不等于强制新生, 允许复用近期实际材料相关、空闲且无职责占用的非 lead; 按本次难度派, 不因同项目、公共 AGENTS.md/CLAUDE.md 或词面重叠塞给已有 lead。自动复用要求实质上下文证据、无 lead/任务占用、成本合适; 其余白板 spawn。难度看所需判断而非句长: **默认 standard (不给 tier 就是它)**, 跑腿/核查 light, 只有确实要判断 (设计取舍、疑难排障、关键评审) 才显式 hard。\n" +
       "你不同意就**显式推翻**: `to` 用于人明确指定或已确认必需的上下文连续性, `spawn:true` 硬要新的, `force:true` 只越过缓存成本门控, 不放宽自动复用的相关性/lead/占用约束。同一验收目标的续篇用 tell_peer 的 re, 不能用 re/to 给复杂 lead 顺便追加独立小活。`lead:true` = 要统筹 coder + reviewer、多轮协作: 白板起 lead 由它组队 (带 `to` 则让那个已有 wizard 当 lead)。",
     inputSchema: {
       task: z.string().describe("这件活, 原样转给对方的文本。写清目标与交付, 带文件名 / 模块名帮助找上下文; 公共规则文件或同目录不构成复用理由。不要把独立核查改写成原 lead 的附加交付。"),

@@ -50,7 +50,7 @@ const literal = (n: Syntax | undefined, bindings: Map<string, unknown>): unknown
 };
 
 export interface HintCall { toolName: string; toolInput: Facts }
-export const callsInExec = (source: string): HintCall[] => {
+export const callsInExec = (source: string, accept: (name: string) => boolean = (name) => name.startsWith("mcp__wezard__") && HINT_TOOL.test(name)): HintCall[] => {
   if (source.length > 200_000) return [];
   try {
     const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowAwaitOutsideFunction: true }) as Syntax;
@@ -76,7 +76,7 @@ export const callsInExec = (source: string): HintCall[] => {
       if (n.type === "CallExpression" && n.callee.type === "MemberExpression" && !n.callee.computed && n.callee.object.type === "Identifier" && n.callee.object.name === "tools") {
         const name = n.callee.property.name;
         const input = n.arguments.length === 0 ? {} : literal(n.arguments[0], bindings);
-        if (name.startsWith("mcp__wezard__") && HINT_TOOL.test(name) && objectOf(input)) calls.push({ toolName: name, toolInput: input as Facts });
+        if (accept(name) && objectOf(input)) calls.push({ toolName: name, toolInput: input as Facts });
       }
       for (const value of Object.values(n)) {
         if (Array.isArray(value)) value.forEach((x) => { if (x?.type) walk(x); });

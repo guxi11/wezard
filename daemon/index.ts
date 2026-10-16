@@ -97,7 +97,7 @@ import { createLedger, digest, pendingGc, renderDigest, renderTable, renderAwait
 import { checkDirection } from "./direction.js";
 import { loadJobStore, dutyLine, awaitingAccept, stalledRoots, shelvedRoots, nudgeDue, dayClamp, childrenOf as jobChildren, jobEpisode, rejectReason, ACCEPTS, JOB_MEMBER_MAX, JOB_DEPTH_MAX, depthOf, ancestorsOf as jobAncestors, treeOrder, jobStage, type Accept, type JobMark, type JobRecord, type MemberLive } from "./jobs.js";
 import type { MemberRole } from "../shared/world.js";
-import { cacheTouchMs, cacheTtlSec, clipMiddle, contextFiles, firstStamp, parseClosing, stripClosingMark, stripForChat, lastContextTokens, lastExchange, lastModel, openingTurn, replyClosedBefore, talkTurns, turnsSince, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
+import { cacheTouchMs, cacheTtlSec, clipMiddle, contextMaterials, firstStamp, parseClosing, stripClosingMark, stripForChat, lastContextTokens, lastExchange, lastModel, openingTurn, replyClosedBefore, talkTurns, turnsSince, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { expandHome } from "../shared/paths.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { createWorkflowNodes, type FileVersion, type NodeAttempt } from "./workflow-nodes.js";
@@ -108,7 +108,7 @@ import { isTerminal, renderInFlight, turnState } from "../shared/turn-state.js";
 import { startIdleNudge } from "./idle-nudge.js";
 import { askerFromEnvelope, renderReminder, withMsg, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
 import { createHandoffs, cuttingTurn, handedOff, handingOff, type Pending as PendingHandoff } from "./handoff.js";
-import { coldGateOf, decide, rankCandidates, renderCandidates, routeDutiesOf, tierFor, wakeCostOf, wakeNoteOf, type RouteRow } from "./route.js";
+import { coldGateOf, decide, rankCandidates, routeDiagnostics, renderCandidates, routeDutiesOf, tierFor, wakeCostOf, wakeNoteOf, type RouteRow } from "./route.js";
 import { parseWhen, renderChatLog, UNKNOWN_HUMAN, type LogSession } from "./chat-log.js";
 import { audienceOf } from "../shared/role-view.js";
 import {
@@ -2174,7 +2174,7 @@ const main = async (): Promise<void> => {
     const transferNote = (f: EventId, target: string): string =>
       `这一笔 (${f}) 已整件交给 ${displayName(target)}: 它的结论 (含 NEED / 失败) 直接回你服务的上游, 不回你 —— 本轮静默收口, 别再为这件派活或对人说话`;
     /** dispatch 在入口冻结的那一轮: 控制权快照、链头, 与回执去向 (planReturn 算好的)。 */
-    type ActorOrigin = { authority: ReturnType<typeof controlSnapshot>; asker?: Asker; plan: { op: ReturnOp; serves?: EventId } };
+    type ActorOrigin = { reuseCheck?: (target: string, ownEvent?: string) => string; authority: ReturnType<typeof controlSnapshot>; asker?: Asker; plan: { op: ReturnOp; serves?: EventId } };
     const tellPeerAsInner = async (self: string, body: PeerBody, extra = "", planned?: PlanPermit, actor?: ActorOrigin): Promise<Reply> => {
       const authority = actor?.authority ?? (!planned ? controlSnapshot(self) : undefined);
       const text = ((body as { text?: string }).text ?? "").toString();
@@ -2331,6 +2331,11 @@ const main = async (): Promise<void> => {
           return { status: 409, body: { ok: false, gated: "cold", reason: gate + (force === undefined ? " (你的 MCP 是旧版、没有 force 参数: 10 分钟内原样再发一次即视为 force)" : "") } };
         }
       }
+      if (actor?.reuseCheck) {
+        const idle = await m.idleNow(target);
+        const refusal = actor.reuseCheck(target) || (!idle ? "candidate became busy" : "");
+        if (refusal) return { status: 409, body: { ok: false, gated: "reuse", reason: refusal } };
+      }
       // All caller-dependent facts are frozen here; workers never reread the caller's current turn.
       const at = Date.now();
       const deadlineAt = deadlineOf(at, (body as { deadline?: number }).deadline);
@@ -2357,6 +2362,10 @@ const main = async (): Promise<void> => {
       const canceledBeforeDispatch = (): boolean => !planAllowed() || (!!planned && !planned.alive()) || !!workflow.byTurn(self, planned ? planned.turn : serves)?.canceled || (!!jobId && jobs.get(jobId)?.status !== "open");
       // 「忙」= 这一轮还没结束, 或停在审批上等人 —— 都不是能接新活的时候。
       const wasBusy = !(await m.idleNow(target));
+      if (actor?.reuseCheck) {
+        const refusal = actor.reuseCheck(target, serves) || (wasBusy ? "candidate became busy" : "");
+        if (refusal) { dropRow(); return { status: 409, body: { ok: false, gated: "reuse", reason: refusal } }; }
+      }
       // urgent 只打断你自己派的那一轮 (或它自己的回执轮): 手上若是别的 wizard / 人 / 定时任务的活,
       // 打断就误伤了那件 —— 降成 normal, 等它这一轮做完再投。
       const others = asked === "urgent" && wasBusy ? await othersTurn(target, self) : undefined;
@@ -3249,33 +3258,47 @@ const main = async (): Promise<void> => {
       const roster = await rosterOf(self);
       const openJobs = jobs.all();
       const inflight = routeInFlight();
+      const queued = events.status().events.filter((e) => e.execution === "queued" || e.execution === "dispatching");
       return roster
         .filter((r) => !r.self && keep(r))
         .map((r) => {
           const live = r.jsonlPath ? r.jsonlPath : "";
           const ttl = live ? cacheTtlSec(live) : 0;
+          const materials = live ? contextMaterials(live) : [];
           return {
             ...r,
             lead: wizards.get(r.target)?.lead === true,
-            duties: routeDutiesOf(openJobs, r.target, inflight),
+            duties: [...routeDutiesOf(openJobs, r.target, inflight), ...queued.filter((e) => e.target === r.target).map((e) => `${e.id} ${e.execution}`)],
             contextTokens: live ? lastContextTokens(live) : 0,
             ...(ttl ? { cacheTtlMs: ttl * 1000 } : {}),
             ...(live ? { cacheAt: cacheTouchMs(live) } : {}),
-            files: live ? contextFiles(live) : [],
+            sessionId: m.sessionInfo(r.target)?.sessionId,
+            birthToken: wizards.get(r.target)?.birthToken,
+            model: live ? lastModel(live) || r.model : r.model,
+            materials,
+            files: [...new Set(materials.filter((m) => m.confirmed && m.kind === "read").map((m) => m.path))],
             asks: live ? talkTurns(live, 12).filter((t) => t.role === "user").map((t) => t.text) : [],
             summary: live ? lastExchange(live, 80) : "",
           };
         });
     };
+    const autoRouteRowsOf = (self: string) => routeRowsOf(self, (r) => r.alive && !!tagOfKey(r.target));
     http.register("POST /wizard/route", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { task?: string; cwd?: string; limit?: number };
+      const b = body as { task?: string; cwd?: string; limit?: number; tier?: string; force?: boolean };
       const task = (b.task ?? "").trim();
       if (!task) { json(res, 400, { ok: false, reason: "task is required" }); return; }
       const limit = Math.min(Math.max(Number(b.limit ?? 5) || 5, 1), 20);
-      const cands = rankCandidates(task, (b.cwd ?? "").trim() || m.getCwd(self).runningCwd, await routeRowsOf(self), { now: Date.now(), ttlMs: CACHE_TTL_FALLBACK_SEC * 1000 }).slice(0, limit);
-      json(res, 200, { ok: true, text: renderCandidates(task, cands, Date.now(), CACHE_TTL_FALLBACK_SEC * 1000, homedir()) });
+      const tierArg = (b.tier ?? "").trim();
+      if (tierArg && !TIERS.includes(tierArg as TierName)) { json(res, 400, { ok: false, reason: `unknown tier: ${tierArg}` }); return; }
+      const tier = (tierArg || tierFor(task, false)) as TierName;
+      const force = b.force === true;
+      const rows = await autoRouteRowsOf(self);
+      const now = Date.now();
+      const cands = rankCandidates(task, (b.cwd ?? "").trim() || m.getCwd(self).runningCwd, rows, { now, ttlMs: CACHE_TTL_FALLBACK_SEC * 1000 });
+      const decision = decide(task, cands, now, CACHE_TTL_FALLBACK_SEC * 1000, force, tier);
+      json(res, 200, { ok: true, decision: decision.kind, reason: decision.why, tier, diagnostics: routeDiagnostics(task, cands, now, CACHE_TTL_FALLBACK_SEC * 1000, force, tier), text: `${cands.length > limit ? `共 ${cands.length} 个候选, 展示 ${limit} 个; diagnostics 保留全量。\n` : ""}${renderCandidates(task, cands.slice(0, limit), now, CACHE_TTL_FALLBACK_SEC * 1000, homedir(), { tier, force })}` });
     });
 
     // 派活收成一步 (见 route.decide): 查候选 → 过成本门控 → 转给已有的或按档白板 spawn →
@@ -3306,7 +3329,7 @@ const main = async (): Promise<void> => {
       const ttlMs = CACHE_TTL_FALLBACK_SEC * 1000;
       // 占用保护由 decide 统一判断, 留在候选表里说明为什么不能自动复用。
       // 显式 to 保留人为选定; force 只影响成本门, 不绕 lead/工单/连续性保护。
-      const pool = to || b.spawn || lead ? [] : await routeRowsOf(self, (r) => r.alive && !!tagOfKey(r.target));
+      const pool = to || b.spawn || lead ? [] : await autoRouteRowsOf(self);
       if (!controlValid(self, dispatchOrigin.authority)) { json(res, 409, { ok: false, reason: "dispatch source turn/control changed while routing; original task remains with source" }); return; }
       const tierArg = (b.tier ?? "").toString().trim();
       if (tierArg && !TIERS.includes(tierArg as TierName)) { json(res, 400, { ok: false, reason: `unknown tier: ${tierArg}` }); return; }
@@ -3316,6 +3339,22 @@ const main = async (): Promise<void> => {
         : b.spawn ? { kind: "spawn" as const, why: "你要了新的" }
           : lead ? { kind: "spawn" as const, why: "复杂活: 白板起一个 hard 档的 lead, 由它组队" }
             : decide(task, cands, now, ttlMs, force, taskTier);
+      const diagnostics = { ...routeDiagnostics(task, cands, now, ttlMs, force, taskTier), deliveryFallback: "" };
+      if (!to && d.kind === "existing" && d.row) {
+        const selected = d.row;
+        dispatchOrigin.reuseCheck = (target, ownEvent) => {
+          const rec = wizards.get(target), info = m.sessionInfo(target);
+          if (target !== selected.target || !selected.sessionId || info?.sessionId !== selected.sessionId
+            || rec?.name !== selected.name || rec?.birthToken !== selected.birthToken) return "candidate session/name/birthToken changed";
+          if (rec?.lead) return "candidate became lead";
+          const duties = [
+            ...routeDutiesOf(jobs.all(), target, routeInFlight().filter((x) => x.turn !== ownEvent)),
+            ...events.status().events.filter((e) => e.target === target && (e.execution === "queued" || e.execution === "dispatching"))
+              .map((e) => `${e.id} ${e.execution}`),
+          ];
+          return duties.length ? `candidate acquired duties: ${duties.join(" · ")}` : "";
+        };
+      }
       // 复杂活 (lead:true) 是一件「需求」: 先开需求根单 (账本, 不占 pane), 这一句带它派下去, lead 记成根单成员。
       // 小活不开单。dryRun 不落账, 所以放在它后面开 (见下)。
       const criteria = (b.criteria ?? "").toString().trim();
@@ -3327,9 +3366,9 @@ const main = async (): Promise<void> => {
         ...(b.deadline !== undefined ? { deadline: b.deadline } : lead ? { deadline: 43200 } : {}),
         ...(rootId ? { job: rootId } : {}),
       } as PeerBody, extra, undefined, dispatchOrigin);
-      const shown = cands.slice(0, 3).map((e) => `.${e.row.address || e.row.name}${e.row.busy ? " 忙" : ""}`);
+      const shown = cands.map((e) => `.${e.row.address || e.row.name}${e.row.busy ? " 忙" : ""}`);
       if (b.dryRun) {
-        json(res, 200, { ok: true, dryRun: true, decision: d.kind, reason: d.why, ...(d.kind === "existing" ? { name: to || (d.kind === "existing" && d.row ? d.row.address || d.row.name : "") } : { tier: taskTier }), ...(shown.length ? { candidates: shown } : {}) });
+        json(res, 200, { ok: true, dryRun: true, diagnostics, decision: d.kind, reason: d.why, ...(d.kind === "existing" ? { name: to || (d.kind === "existing" && d.row ? d.row.address || d.row.name : "") } : { tier: taskTier }), ...(shown.length ? { candidates: shown } : {}) });
         return;
       }
       if (lead) {
@@ -3342,8 +3381,17 @@ const main = async (): Promise<void> => {
       // 没投成的根单当场收掉: 留着只是一张没人干的空单。
       const settleRoot = (ok: boolean): void => { if (rootId && !ok) jobs.close(rootId, "派活没投成"); };
       const withRoot = (body: Record<string, unknown>): Record<string, unknown> => rootId
-        ? { ...body, job: rootId, hint: "需求根单已开, 对人**别提单号**。lead 交付后根单仍开着, 等人验收: 人认可 → close_job(job) 归档; 人说不对 → tell_peer({name, re, job}) 给 lead 返工 (同一张单, 不开新单); 人说不要了 → close_job({job, as:\"cancel\"}); 先放着 → close_job({job, as:\"shelve\"}) (停提醒, 不关单)。" }
-        : body;
+        ? { ...body, diagnostics, job: rootId, hint: "需求根单已开, 对人**别提单号**。lead 交付后根单仍开着, 等人验收: 人认可 → close_job(job) 归档; 人说不对 → tell_peer({name, re, job}) 给 lead 返工 (同一张单, 不开新单); 人说不要了 → close_job({job, as:\"cancel\"}); 先放着 → close_job({job, as:\"shelve\"}) (停提醒, 不关单)。" }
+        : { ...body, diagnostics };
+      if (d.kind === "existing" && !to && d.row?.target) {
+        const idle = await m.idleNow(d.row.target);
+        const refusal = dispatchOrigin.reuseCheck?.(d.row.target) || (!idle ? "candidate became busy" : "");
+        if (refusal) {
+          diagnostics.deliveryFallback = refusal;
+          delete dispatchOrigin.reuseCheck;
+          d = { kind: "spawn", why: `${d.why}; 投递前复核退回 (${refusal}), 白板 spawn` };
+        }
+      }
       if (d.kind === "existing") {
         const name = to || (d.kind === "existing" && d.row ? d.row.address || d.row.name : "");
         const r = resolvePeer(self, name);
@@ -3354,19 +3402,21 @@ const main = async (): Promise<void> => {
         if (lead && t.status === 200) wizards.upsert(r.target, { lead: true });
         if (rootId && t.status === 200) jobs.attach(rootId, { target: r.target, task: "", spawned: false, role: "lead" });
         // 自动选中的被冷门控 (decide 用名册的活动时刻, 门控用 transcript 的, 口径差一点) 或方向闸 (它归别人管 / 是借来的专家) 退回: 改走 spawn; 点名的不改。
-        if (!(!to && (t.body.gated === "cold" || t.body.gated === "direction"))) {
+        if (!(!to && (t.body.gated === "cold" || t.body.gated === "direction" || t.body.gated === "reuse"))) {
           settleRoot(t.status === 200);
           json(res, t.status, withRoot({ ...t.body, decision: "existing", reason: d.why, ...(shown.length ? { candidates: shown } : {}) }));
           return;
         }
-        d = { kind: "spawn", why: `${d.why}; 但它被${t.body.gated === "direction" ? "方向闸" : "冷门控"}退回 (${String(t.body.reason)}) —— 改为白板 spawn` };
+        diagnostics.deliveryFallback = String(t.body.reason);
+        delete dispatchOrigin.reuseCheck;
+        d = { kind: "spawn", why: `${d.why}; 但它被${t.body.gated === "reuse" ? "投递前复核" : t.body.gated === "direction" ? "方向闸" : "冷门控"}退回 (${String(t.body.reason)}) —— 改为白板 spawn` };
       }
       const name = (b.name ?? "").toString().trim();
       const description = (b.description ?? "").toString().trim() || clipLine(task, 120);
       // 空 name 交给 bearAs / claimSlot 按持久序号自动取名避重, 不当作显式点名复用旧记录。
       const tier = taskTier;
       const born = await bearAs(self, { inherit: false, name, description, tier, ...(lead ? { lead: true } : {}) } as PeerBody, undefined, dispatchOrigin?.authority);
-      if (born.status !== 200) { settleRoot(false); json(res, born.status, { ...born.body, decision: "spawn", reason: d.why }); return; }
+      if (born.status !== 200) { settleRoot(false); json(res, born.status, { ...born.body, diagnostics, decision: "spawn", reason: d.why }); return; }
       if (!controlValid(self, dispatchOrigin.authority)) { settleRoot(false); json(res, 409, { ok: false, decision: "spawn", reason: "dispatch source turn changed during spawn; task remains with original source turn" }); return; }
       // 宪章里只有层级规矩, 打法随信封带 (宪章每轮都在上下文里, 打法只这一件活用得上)。
       const t = await tell(String(born.body.name), task, lead ? renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : "");

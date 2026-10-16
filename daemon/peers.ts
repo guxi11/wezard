@@ -9,6 +9,10 @@
 // Everything here is pure parsing over a transcript tail or a captured pane —
 // no tmux, no WeCom, no daemon state. The mirror bridge (which owns the live
 // attachments) and the graph runner (which drives them) both compose on top.
+import { resolve, isAbsolute, basename } from "node:path";
+import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
+import { callsInExec } from "../shared/tool-hints.js";
 import { existsSync, openSync, readSync, closeSync, statSync } from "node:fs";
 import { backendForPath, TURN_METRICS, type CliBackendName, type NormalizedTranscriptLine } from "../shared/cli-backends.js";
 import { clipLine, truncate, truncateWithCount } from "../shared/std.js";
@@ -847,6 +851,220 @@ const pickCacheTouch = (jsonlPath: string, raw: string): number => {
 const stampMs = (ts: unknown): number => {
   const ms = typeof ts === "number" ? ts : Date.parse(String(ts ?? ""));
   return Number.isNaN(ms) ? 0 : ms;
+};
+
+export interface ContextMaterial {
+  path: string;
+  kind: "read" | "scan";
+  source: string;
+  at: number;
+  cwd: string;
+  task: string;
+  taskAt: number;
+  turn: string;
+  session: string;
+  call: string;
+  reply?: string;
+  confirmed: boolean;
+  truncated: boolean;
+}
+
+const materialPath = (path: string, cwd: string): string => {
+  try {
+    const p = path.startsWith("file://") ? fileURLToPath(path) : path.startsWith("~/") ? resolve(homedir(), path.slice(2)) : path;
+    return isAbsolute(p) ? resolve(p) : cwd ? resolve(cwd, p) : p;
+  } catch { return ""; }
+};
+
+// Shell arguments are filesystem operands, unlike native cwd metadata. Quoted tilde
+// forms are rejected by the lexer, so only an unquoted ~/ can reach this expansion.
+const shellOperandPath = (path: string, cwd: string): string => {
+  if (/^file:/i.test(path) || (path.startsWith("~") && !path.startsWith("~/"))) return "";
+  const p = path.startsWith("~/") ? resolve(homedir(), path.slice(2)) : path;
+  return isAbsolute(p) ? resolve(p) : cwd ? resolve(cwd, p) : "";
+};
+
+// Read's path argument is not cwd metadata either; ambiguous tilde/URI inputs stay unknown.
+const readOperandPath = (path: string, cwd: string): string =>
+  path.startsWith("~") ? "" : shellOperandPath(path, cwd);
+
+// A deliberately small shell reader: literal operands and unquoted ~/ only; no variables, redirects or pipelines.
+// On ';' only the final command's exit status is known; && proves all preceding commands succeeded.
+const shellMaterials = (command: string): { path: string; kind: "read" | "scan" }[] => {
+  if (/[(){}#$`<>\\]|(?:^|\s)cd(?:\s|$)/.test(command)) return [];
+  const lexemes = [...command.matchAll(/'[^']*'|"[^"]*"|&&|[;\n|&]|[^\s;'"|&]+/g)];
+  const tokens = lexemes.map((m) => m[0]);
+  // Quoted tilde is literal, and shell file operands are never file URLs. Do not apply
+  // the cwd decoder to either ambiguous form; accepting fewer operands is intentional.
+  if (tokens.some((t) => /^['"]~/.test(t) || /^['"]?file:/i.test(t))) return [];
+  // Quoted/unquoted word concatenation is shell syntax, not two arguments.
+  if (lexemes.some((m, i) => i > 0 && m.index === lexemes[i - 1]!.index! + lexemes[i - 1]![0].length
+    && ![";", "\n", "&&"].includes(m[0]) && ![";", "\n", "&&"].includes(lexemes[i - 1]![0]))) return [];
+  if (tokens.join("").replace(/\s/g, "") !== command.replace(/\s/g, "")) return [];
+  if (tokens.some((t) => t === "|" || t === "&")) return [];
+  const readers = new Set(["cat", "head", "tail", "sed", "ls", "find", "rg", "grep"]);
+  const starts = [tokens[0], ...tokens.flatMap((t, i) => [";", "\n", "&&"].includes(t) ? [tokens[i + 1]] : [])];
+  if (starts.some((tool) => tool && !readers.has(basename(tool)))) return [];
+  const last = Math.max(tokens.lastIndexOf(";"), tokens.lastIndexOf("\n"));
+  const groups: string[][] = [[]];
+  tokens.slice(last + 1).forEach((t) => t === "&&" ? groups.push([]) : groups[groups.length - 1]!.push(t.replace(/^(['"])(.*)\1$/s, "$2")));
+  return groups.flatMap(([tool, ...args]) => {
+    const name = basename(tool ?? "");
+    let paths: string[] = [];
+    let kind: "read" | "scan" = "read";
+    if (name === "cat") {
+      if (args.some((a) => a.startsWith("-") && !/^(?:--|-[nbEvTAs]+)$/.test(a))) return [];
+      paths = args.filter((a) => !a.startsWith("-"));
+    } else if (name === "head" || name === "tail") {
+      const offset = args[0] === "-n" && /^\d+$/.test(args[1] ?? "") ? 2 : /^-\d+$/.test(args[0] ?? "") ? 1 : 0;
+      paths = args.slice(offset);
+      if (paths.some((a) => a.startsWith("-"))) return [];
+    } else if (name === "sed" && args[0] === "-n" && /^\d+(?:,\d+|,\$)?p$/.test(args[1] ?? "")) {
+      paths = args.slice(2);
+      if (paths.some((p) => p.startsWith("-"))) return [];
+    }
+    else if (name === "ls") {
+      if (args.some((a) => a.startsWith("-") && !/^(?:--|--all|--almost-all|-[aAlhpF1]+)$/.test(a))) return [];
+      paths = args.filter((a) => !a.startsWith("-")); kind = "scan";
+    }
+    else if (name === "find") {
+      const end = args.findIndex((a) => a.startsWith("-"));
+      paths = args.slice(0, end < 0 ? args.length : end);
+      const values = new Set(["-maxdepth", "-mindepth", "-name", "-iname", "-path", "-ipath", "-type"]);
+      for (let i = end < 0 ? args.length : end; i < args.length; i++) {
+        const option = args[i]!;
+        if (values.has(option)) {
+          const value = args[++i];
+          if (!value || value.startsWith("-") || (["-maxdepth", "-mindepth"].includes(option) && !/^\d+$/.test(value))
+            || (option === "-maxdepth" && Number(value) === 0)
+            || (option === "-type" && !/^[fdl]$/.test(value))) return [];
+        }
+        else if (!["-print", "-print0", "-o", "-a"].includes(option)) return [];
+      }
+      kind = "scan";
+    } else if (name === "rg" || name === "grep") {
+      const positional: string[] = [];
+      const values = new Set(["--glob", "-g", "--type", "-t", "--type-not", "--max-count", "-m", "--max-depth"]);
+      for (let i = 0; i < args.length; i++) {
+        const a = args[i]!;
+        if (values.has(a)) { i++; continue; }
+        if (a.startsWith("-") && !/^(?:--files|--hidden|--no-ignore|--line-number|--ignore-case|--fixed-strings|--|-[nilsrRFHh]+)$/.test(a)) return [];
+        if (!a.startsWith("-")) positional.push(a);
+      }
+      paths = args.includes("--files") ? positional : positional.slice(1);
+      kind = "scan"; // search never proves a whole file was read
+    }
+    return paths.filter((p) => p && !/^file:/i.test(p) && !/[?*\[\]{}]/.test(p)).map((path) => ({ path, kind }));
+  });
+};
+
+// Exit status belongs to the tool envelope, never to text printed by the command.
+const commandSucceeded = (output: string): boolean => {
+  try {
+    const result = JSON.parse(output);
+    return result !== null && typeof result === "object" && result.exit_code === 0;
+  } catch {
+    const header = output.split(/\n(?:Final output|Output):/i, 1)[0] ?? "";
+    return /^Chunk ID:/m.test(header) && /^Process exited with code 0\s*$/m.test(header);
+  }
+};
+
+/** Latest real task only, after compact and within a bounded tail; never execute transcript code. */
+export const contextMaterials = (jsonlPath: string): ContextMaterial[] => {
+  const normalize = backendForPath(jsonlPath).normalizeTranscriptLine;
+  const raw = readTailBytes(jsonlPath, CONTEXT_FILES_BYTES);
+  const truncated = fileSize(jsonlPath) > CONTEXT_FILES_BYTES;
+  const lines = raw.split("\n");
+  const cut = lines.reduce((at, l, i) => l.includes('"compact_boundary"') || /"type"\s*:\s*"compacted"/.test(l) ? i : at, -1);
+  let cwd = "", session = "", task = "", taskAt = 0, turn = "";
+  let nativeTurn = "", taskNativeTurn = "", taskRaw = "";
+  const nativeOwners = new Map<string, string>();
+  // Header identity is allowed outside the material window; header work is not imported.
+  try {
+    const head = JSON.parse(readTailBytes(jsonlPath, HEAD_BYTES, HEAD_BYTES).split("\n")[0]!);
+    const meta = head.type === "session_meta" ? head.payload : head;
+    session = meta.session_id ?? meta.sessionId ?? meta.id ?? "";
+    cwd = materialPath(meta.cwd ?? "", "");
+  } catch { /* A truncated/missing identity remains unknown. */ }
+  let reply = "";
+  let materials: ContextMaterial[] = [];
+  const pending = new Map<string, { name: string; input: any; at: number; cwd: string; turn: string }>();
+  const add = (paths: { path: string; kind: "read" | "scan" }[], source: string, at: number, call: string, confirmed: boolean, dir = cwd, pathOf = readOperandPath): void => {
+    materials.push(...paths.map((p) => ({ ...p, path: pathOf(p.path, dir), source, at, cwd: dir, task, taskAt, turn: source === "CommandExecution" ? taskNativeTurn : turn, session, call, confirmed: confirmed && isAbsolute(pathOf(p.path, dir)),
+      truncated: truncated && cut < 0 })).filter((p) => !!p.path));
+  };
+  lines.slice(cut + 1).forEach((line, i) => {
+    let r: any;
+    try { r = JSON.parse(line); } catch {
+      if (line.trim()) { task = ""; turn = ""; taskNativeTurn = ""; materials = []; pending.clear(); }
+      return;
+    }
+    const p = r.payload ?? {};
+    const at = stampMs(r.timestamp);
+    if (r.cwd || p.cwd) cwd = materialPath(r.cwd ?? p.cwd, "");
+    if (r.type === "session_meta") session = p.id ?? p.session_id ?? "";
+    if (typeof r.sessionId === "string") session = r.sessionId;
+    if ((r.type === "turn_context" || (r.type === "event_msg" && p.type === "task_started")) && typeof p.turn_id === "string") {
+      if (p.turn_id !== nativeTurn) taskNativeTurn = "";
+      nativeTurn = p.turn_id;
+    }
+    const row = normalize(r);
+    const content = row?.message?.content;
+    const blocks = Array.isArray(content) ? content : [];
+    if (row?.isSidechain) return;
+    const text = typeof content === "string" ? content : blocks.filter((b) => b.type === "text").map((b) => b.text ?? "").join("\n");
+    if (row?.type === "user" && !row.isMeta && text.trim() && !blocks.some((b) => b.type === "tool_result")) {
+      // Receipts are not fresh work; do not graft their paths onto an earlier read.
+      const env = parseEnvelope(text);
+      task = env?.receipt ? "" : text.replace(/<system-reminder\b[\s\S]*?<\/system-reminder>/g, "").trim();
+      taskAt = at; turn = env?.eventId ?? `${at}:${i}`; taskRaw = text.trim(); taskNativeTurn = ""; reply = ""; materials = []; pending.clear();
+    }
+    if (row?.type === "assistant" && text && (row.message?.stop_reason === "end_turn" || p.phase === "final_answer")) reply = text;
+    const item = p.item;
+    if (r.type === "event_msg" && p.type === "item_completed" && item?.type === "UserMessage"
+      && p.thread_id === session && nativeTurn && p.turn_id === nativeTurn) {
+      const nativeText = Array.isArray(item.content) ? item.content.map((b: any) => typeof b.text === "string" ? b.text : "").join("\n").trim() : "";
+      // A second user task in one native turn makes late completion ownership ambiguous.
+      const owner = nativeOwners.get(nativeTurn);
+      if (task && nativeText === taskRaw && at >= taskAt && (!owner || owner === turn)) {
+        nativeOwners.set(nativeTurn, turn);
+        taskNativeTurn = nativeTurn;
+      }
+    }
+    if (r.type === "event_msg" && p.type === "item_completed" && item?.type === "CommandExecution") {
+      const command = item.command;
+      if (typeof item.id !== "string" || !item.id || !taskNativeTurn || p.thread_id !== session || p.turn_id !== taskNativeTurn || p.turn_id !== nativeTurn
+        || (typeof p.started_at_ms === "number" && p.started_at_ms < taskAt)
+        || item.status !== "completed" || item.exit_code !== 0 || !Array.isArray(command) || command.length !== 3 || !/\/(?:ba|z|fi)?sh$/.test(command[0]) || !["-lc", "-c"].includes(command[1]) || typeof command[2] !== "string") return;
+      add(shellMaterials(command[2]), "CommandExecution", at, item.id ?? "", true, materialPath(item.cwd ?? cwd, ""), shellOperandPath);
+      return;
+    }
+    blocks.forEach((b: any) => {
+      if (b.type === "tool_use" && b.id) pending.set(b.id, { name: b.name ?? "", input: b.input, at, cwd, turn });
+      if (b.type !== "tool_result") return;
+      const c = pending.get(b.tool_use_id);
+      if (!c || c.turn !== turn) return;
+      pending.delete(b.tool_use_id);
+      const output = typeof b.content === "string" ? b.content : JSON.stringify(b.content);
+      if (b.is_error || /(?:exited with code [1-9]|exit_code["\s:]+[1-9]|"isError"\s*:\s*true|cancelled|canceled)/i.test(output ?? "")) return;
+      const input = c.input ?? {};
+      if (c.name === "Read" && typeof input.file_path === "string") add([{ path: input.file_path, kind: "read" }], "Read/result", at, b.tool_use_id, true, c.cwd);
+      if (c.name === "Bash" && typeof input.command === "string" && !input.run_in_background && !/running in background|background task|still running/i.test(output ?? "")) add(shellMaterials(input.command), "Bash/result", at, b.tool_use_id, true, c.cwd, shellOperandPath);
+      if (/^(?:functions[._])?exec_command$/.test(c.name) && commandSucceeded(output ?? "")) add(shellMaterials(input.cmd ?? input.command ?? ""), "exec_command/result", at, b.tool_use_id, true, materialPath(input.workdir ?? input.cwd ?? c.cwd, ""), shellOperandPath);
+      if (/^(?:functions[._])?exec$/.test(c.name) && typeof c.input === "string") {
+        const calls = callsInExec(c.input, () => true);
+        // Static JavaScript cannot prove execution or the identity of tools. It remains a clue only.
+        if (calls.length === 1 && calls[0]!.toolName === "exec_command" && commandSucceeded(output ?? "")) {
+          const a = calls[0]!.toolInput;
+          add(shellMaterials(String(a.cmd ?? a.command ?? "")), "exec/result", at, b.tool_use_id, false, materialPath(String(a.workdir ?? a.cwd ?? c.cwd), ""), shellOperandPath);
+        }
+      }
+    });
+  });
+  const authoritative = materials.some((m) => m.source === "CommandExecution");
+  const filtered = materials.filter((m) => !authoritative || !["exec/result", "exec_command/result"].includes(m.source));
+  return filtered.filter((m, i) => !filtered.slice(i + 1).some((n) => n.path === m.path && n.kind === m.kind))
+    .map((m) => ({ ...m, ...(reply ? { reply } : {}) }));
 };
 
 /** 这段上下文里读过 / 改过的文件 (旧的在前、去重, 同一文件按最后一次碰它的位置排)。

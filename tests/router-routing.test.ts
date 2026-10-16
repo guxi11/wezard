@@ -2,35 +2,45 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { contextFiles } from "../daemon/peers.js";
+import { contextFiles, contextMaterials } from "../daemon/peers.js";
 import { commonStems, decide, isSmallTask, rankCandidates, renderCandidates, routeDutiesOf, routeReceiptDutiesOf, tierFor, type RouteRow } from "../daemon/route.js";
 import type { JobRecord } from "../daemon/jobs.js";
-import type { InFlight } from "../daemon/receipts.js";
+import type { InFlight } from "../daemon/dispatch.js";
 
 const now = 1_000_000;
 const ttlMs = 60_000;
 const cwd = "/repo/a";
-const row = (patch: Partial<RouteRow> = {}): RouteRow => ({
-  name: "worker", address: "worker", cwd, description: "路由任务实现", busy: false, alive: true,
-  lastActivity: now, contextTokens: 20_000, files: [`${cwd}/daemon/route.ts`],
-  asks: ["实现 daemon/route.ts 的自动路由约束"], summary: "已交付路由约束", ...patch,
-});
+const row = (patch: Partial<RouteRow> = {}): RouteRow => {
+  const r = {
+    name: "worker", address: "worker", cwd, description: "路由任务实现", busy: false, alive: true,
+    lastActivity: now, contextTokens: 20_000, files: [`${cwd}/daemon/route.ts`],
+    asks: ["实现 daemon/route.ts 的自动路由约束"], summary: "已交付路由约束", ...patch,
+  };
+  return { ...r, materials: patch.materials ?? r.files.map((path) => ({
+    path, kind: "read", source: "Read/result", at: now - 100, cwd: r.cwd,
+    task: r.asks[0] ?? "", taskAt: now - 200, turn: "task", session: "session", call: "read",
+    confirmed: true, truncated: false,
+  })) };
+};
 const candidates = (task: string, rows = [row()], taskCwd = cwd) => rankCandidates(task, taskCwd, rows, { now, ttlMs });
 const decision = (task: string, rows = [row()], force = false, tier?: Parameters<typeof decide>[5]) =>
   decide(task, candidates(task, rows), now, ttlMs, force, tier);
-const followup = "继续完善上一轮 daemon/route.ts 的路由约束";
+const followup = "完善 daemon/route.ts 的路由约束";
 
-// 有路径、近期任务和明确续篇的空闲小上下文才能自动复用。
+// 确认材料与近期任务同对象、空闲且成本合适；独立新活也可复用。
 assert.equal(decision(followup).kind, "existing");
 for (const task of [
-  "不要继续上一轮 daemon/route.ts 的路由实现；这是独立新问题，只核实 daemon/route.ts 文件是否存在",
   "刚才做过 daemon/route.ts，这次独立核实同一文件是否存在",
   "这不是上一轮 daemon/route.ts 的续篇，只核实文件存在",
-  "Do not continue your patch in daemon/route.ts; verify the file exists",
-  "A separate task after your patch in daemon/route.ts: check the file exists",
 ]) {
   assert.equal(decision(task, [row()], true).kind, "spawn", task);
 }
+
+for (const task of [
+  "独立核实 daemon/route.ts 文件是否存在",
+  "不要继续上一轮的实现；这次核实 daemon/route.ts 文件是否存在",
+]) assert.equal(decision(task).kind, "existing", task);
+assert.equal(decision(followup, [row({ materials: [] })]).kind, "spawn", "files-only 不升级为确认读取");
 
 // 真实供数保留 Bash 相对路径, 应以候选 cwd 解析而非 daemon 的 process.cwd()。
 const fixtureDir = mkdtempSync(join(tmpdir(), "router-context-paths-"));
@@ -41,10 +51,16 @@ try {
   ] } }) + "\n");
   const files = contextFiles(fixture);
   assert.deepEqual(files, ["daemon/route.ts"]);
-  assert.equal(decision(followup, [row({ files })]).kind, "existing");
+  assert.equal(decision(followup, [row({ files, materials: contextMaterials(fixture) })]).kind, "spawn", "无结果的调用不作强证据");
   assert.equal(decision(followup, [row({ cwd: "/repo/b", files })]).kind, "spawn");
+  writeFileSync(fixture, [
+    { type: "user", timestamp: new Date(now - 200).toISOString(), cwd, sessionId: "session", message: { role: "user", content: "核查 daemon/route.ts" } },
+    { type: "assistant", timestamp: new Date(now - 150).toISOString(), cwd, message: { role: "assistant", content: [{ type: "tool_use", id: "r", name: "Read", input: { file_path: "daemon/route.ts" } }] } },
+    { type: "user", timestamp: new Date(now - 100).toISOString(), message: { role: "user", content: [{ type: "tool_result", tool_use_id: "r", content: "source" }] } },
+  ].map((r) => JSON.stringify(r)).join("\n") + "\n");
+  assert.equal(decision(followup, [row({ files, materials: contextMaterials(fixture) })]).kind, "existing");
 } finally { rmSync(fixtureDir, { recursive: true, force: true }); }
-assert.equal(decision("核实 daemon/route.ts 文件存在").kind, "spawn");
+assert.equal(decision("核实 daemon/route.ts 文件存在").kind, "existing");
 assert.equal(decision("实现路由任务自动约束", [row({ files: [] })]).kind, "spawn");
 assert.equal(decision(followup, [row({ asks: ["核实别的文件存在"] })]).kind, "spawn");
 assert.equal(decision(followup, [row({ busy: true })], true).kind, "spawn");
@@ -54,7 +70,7 @@ assert.equal(decision(followup, [row({ alive: false })], true).kind, "spawn");
 for (const file of ["AGENTS.md", "CLAUDE.md", "README.md", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "GEMINI.md", "copilot-instructions.md"]) {
   const task = `继续核实 ${file} 文件存在及加载路径`;
   const rows = [row({ files: [`${cwd}/${file}`], description: file, expertise: file, asks: [task] })];
-  assert(commonStems(rows).has(file.replace(/\.[^.]+$/, "").toLowerCase()));
+  assert.equal(candidates(task, rows)[0]!.files.length, 0);
   const cands = candidates(task, rows);
   assert.equal(cands.length, 1);
   assert.equal(cands[0]!.files.length, 0);
@@ -74,7 +90,7 @@ for (const task of [
   assert.equal(decision(task, [lead], true, "light").kind, "spawn", "实际核查语句不能经公共指引/职责/问话复用 lead");
 }
 const popular = [row(), row({ name: "second" }), row({ name: "third" })];
-assert(commonStems(popular).has("route"));
+assert(commonStems(popular).has(`${cwd}/daemon/route.ts`));
 assert.equal(decide(followup, candidates(followup, popular), now, ttlMs, true).kind, "spawn", "统计公共文件也不作强证据");
 const guidanceWords = "继续核实 AGENTS.md 文件存在及加载路径";
 assert.equal(decision(guidanceWords, [row({ description: guidanceWords, asks: [guidanceWords] })], true).kind, "spawn");
@@ -161,7 +177,7 @@ const cold = row({ contextTokens: 100_000, lastActivity: now - ttlMs - 1 });
 assert.equal(decision(followup, [cold], false, "hard").kind, "spawn");
 assert.equal(decision(followup, [cold], true, "hard").kind, "existing");
 assert.equal(decision(followup, [cold], true, "light").kind, "spawn");
-assert.equal(decision("核实 daemon/route.ts 文件存在", [cold], true, "hard").kind, "spawn");
+assert.equal(decision("核实 daemon/route.ts 文件存在", [cold], true, "hard").kind, "existing");
 const large = row({ contextTokens: 160_000 });
 const simpleFollowup = "继续核实 daemon/route.ts 文件存在";
 assert.equal(decision(simpleFollowup, [large]).kind, "spawn");

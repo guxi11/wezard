@@ -13,10 +13,13 @@
 // 打上「不划算」—— 默认偏向省钱, 但仍只是标记, 拍板的还是管家。
 //
 // 全是纯函数: 候选的原料 (文件集 / 最近的话 / ctx) 由调用方从 transcript 读好送进来。
-import { resolve, basename } from "node:path";
+import { resolve, basename, dirname, isAbsolute } from "node:path";
 import type { JobRecord } from "./jobs.js";
 import type { InFlight } from "./dispatch.js";
 import { addr, agoOf, ctxOf, type WizardBrief } from "./wizard.js";
+import type { ContextMaterial } from "./peers.js";
+import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
 import type { TierName } from "../shared/config.js";
 
 export interface RouteRow extends WizardBrief {
@@ -33,6 +36,11 @@ export interface RouteRow extends WizardBrief {
   cacheAt?: number;
   /** 这段上下文里碰过的文件 (contextFiles), 相对路径以候选 cwd 为基准。 */
   files: readonly string[];
+  materials?: readonly ContextMaterial[];
+  sessionId?: string;
+  birthToken?: string;
+  target?: string;
+  model?: string;
   /** 最近几句问话。 */
   asks: readonly string[];
   /** 最近一个来回的一行摘要。 */
@@ -50,6 +58,10 @@ interface Evidence {
   common: string[];
   sameCwd: boolean;
   continuity: boolean;
+  matched: ContextMaterial[];
+  objects: string[];
+  materialIssues: string[];
+  targetRoles: { direct: string[]; operationSources: string[]; referenceObjects: string[]; snapshots: string[]; archiveBackground: string[] };
   clues: string[];
 }
 
@@ -77,10 +89,6 @@ const GUIDANCE = new Set(["agents", "claude", "readme", "contributing", "code_of
 const withoutGuidance = (text: string): string => text.replace(/[A-Za-z0-9_][A-Za-z0-9_.\-/]{2,}/g,
   (w) => GUIDANCE.has(stemOf(w).toLowerCase()) ? " " : w);
 const fileRefs = (text: string): string[] => text.match(/(?:\/|\.\/|\.\.\/)?[A-Za-z0-9_][A-Za-z0-9_.\/-]*\.[A-Za-z][A-Za-z0-9]*(?![A-Za-z0-9_.\/-])/g) ?? [];
-const CONTINUE_RE = /继续|接着|续篇|上一轮|上次|刚才|此前|follow[ -]?up|continue|previous (?:task|change)|your (?:change|patch)/i;
-// 独立验收与否定续篇优先; 历史背景里提到「刚才」不能把新活变成续篇。
-const SEPARATE_RE = /(?:不要|别|无需|不再|不是|并非|不用|不能|不应).{0,8}(?:继续|接着|续篇|上一轮|上次)|独立(?:的)?(?:新)?(?:任务|问题|事项|核查|核实|检查)|新(?:的)?(?:任务|问题)|(?:do not|don't|never|not)\s+(?:continue|resume|follow[ -]?up)|(?:independent|unrelated|separate|new)\s+(?:task|question|check)/i;
-
 const UNSETTLED = new Set<InFlight["state"]>(["working", "blocked", "needs-input", "deferred", "errored", "queued"]);
 type RouteInFlight = Pick<InFlight, "from" | "to" | "turn" | "state">;
 
@@ -119,48 +127,231 @@ const stemsOf = (text: string): Set<string> =>
 /** 同名文件可能是不同任务的材料, 只去除重复路径。 */
 const uniqueFiles = (files: readonly string[]): string[] => [...new Set(files)];
 
-/** 公共文件: 池子里不少候选都读过的文件名 (web/chat.js、shared/role-view.ts 这类) —— 谁都读过, 不构成选人理由。
+/** 公共文件: 按规范化完整路径、每候选一次统计 (web/chat.js、shared/role-view.ts 这类) —— 谁都读过, 不构成选人理由。
  *  统计类至少 3 个候选读过且占到池子的三成; 项目指引在任何池子里固定降权。 */
-export const commonStems = (rows: readonly RouteRow[]): Set<string> => {
-  const need = Math.max(3, Math.ceil(rows.length * 0.3));
-  const tally = rows.flatMap((r) => [...new Set(r.files.map((f) => stemOf(f).toLowerCase()))])
-    .reduce((m, s) => m.set(s, (m.get(s) ?? 0) + 1), new Map<string, number>());
-  return new Set([...GUIDANCE, ...[...tally].filter(([, n]) => n >= need).map(([s]) => s)]);
+const fullPath = (cwd: string, path: string): string => {
+  try {
+    const p = path.startsWith("file://") ? fileURLToPath(path) : path.startsWith("~/") ? resolve(homedir(), path.slice(2)) : path;
+    return cwd || isAbsolute(p) ? resolve(cwd, p) : "";
+  }
+  catch { return ""; }
 };
 
-const evidenceOf = (text: string, task: Set<string>, stems: Set<string>, common: Set<string>, taskCwd: string) => (row: RouteRow): Evidence => {
-  // 文件只认整个文件名被点到: 目录名 (daemon/、web/) 几乎每个文件都带, 文件名里的
-  // 半截词 (role-render 的 render) 又太常见 —— 撞上它们说明不了读过这一个。
-  const hit = uniqueFiles(row.files.map((f) => resolve(row.cwd, f)).filter((f) => stems.has(stemOf(f).toLowerCase())));
-  const isCommon = (f: string): boolean => common.has(stemOf(f).toLowerCase());
-  // 词面/同名文件只供人看。连续性还要有明确续篇、精确路径和近期任务里的同一文件。
-  const paths = new Set(fileRefs(text).map((f) => resolve(taskCwd, f)));
-  const files = hit.filter((f) => !isCommon(f) && !!taskCwd && paths.has(resolve(f)));
-  const recent = new Set(row.asks.flatMap(fileRefs).map((f) => resolve(row.cwd, f)));
+export const commonStems = (rows: readonly RouteRow[]): Set<string> => {
+  const need = Math.max(3, Math.ceil(rows.length * 0.3));
+  const tally = rows.flatMap((r) => [...new Set((r.materials ?? []).filter((m) => m.confirmed).map((m) => fullPath(r.cwd, m.path)))])
+    .reduce((m, p) => m.set(p, (m.get(p) ?? 0) + 1), new Map<string, number>());
+  return new Set([...tally].filter(([, n]) => n >= need).map(([p]) => p));
+};
+
+// Strong targets use a small affirmative instruction grammar, not arbitrary prose.
+// Negated/conditional/reference clauses and unsupported sentence shapes stay unknown.
+const TARGET_ACTION = /^(?:(?:请|只读|独立|本次|这次|现在|直接|继续|先|再|负责|帮我|协助|需要|实际|只|已|已经)\s*)*(?:检查|核查|核实|查看|查明|查找|读取|读|扫描|审查|审阅|评审|修复|实现|完善|优化|修改|调整|维护|验证|确认|迁移|移动|移除|卸载|删除|定位|排查|搜索|查验|找出|找到|更新|完成|交付|check\b|verify\b|inspect\b|read\b|scan\b|audit\b|review\b|fix\b|implement\b|update\b|move\b|remove\b|uninstall\b|delete\b|locate\b|find\b|search\b)/i;
+const targetText = (text: string): string => text.split(/[。；;\n，,]/).map((clause) => clause.trim()
+  .replace(/^(?:(?:用户(?:原话|要求|问)|任务|目标|需求|RESULT)\s*[:：]\s*)+/i, "")
+  .replace(/^[『「“"'`]+/, "")).filter((clause) =>
+  !/[不别勿未无非()（）\[\]【】{}]|依据|基于|根据|参照|借助|对照|用作|作为|例如|比如|否定|否认|禁止|停止|取消|省略|免于|避免|排除|忽略|之外|以外|背景|历史|刚才|此前|上次|上一轮|已知|已确证|已有核查|归档副本|当前上下文|来源路径|另有|参考|示例|假设|假如|如果|\b(?:no|not|never|without|except|exclude|skip|avoid|ignore|omit|stop|cancel|background|previous|unless|if)\b/i.test(clause)
+  && !/(?:使用|用 |应用|遵循|请读取|先.*读|use |using |apply ).*(?:skill|技能|SKILL\.md)/i.test(clause)
+  && TARGET_ACTION.test(clause)).filter((clause) => {
+    const paths = refsOf(clause, "/");
+    if (paths.size !== 1) return paths.size === 0;
+    const object = clause.replace(TARGET_ACTION, "").trim().replace(/^(?:文件|目录|技能|模块|代码文件|路径|对)\s*/, "");
+    const first = /^(?:[`"']([^`"']+)[`"']|(\S+))/.exec(object);
+    // A path must be the instruction's direct object, not an incidental reference later
+    // in an otherwise positive sentence. Multiple/unknown path roles remain ambiguous.
+    return !!first && paths.has(fullPath("/", first[1] ?? first[2]!));
+  }).join("\n");
+// Match a whole token once, including ~/ and its trailing slash. Searching separately
+// for absolute/relative fragments invented extra paths inside the same operand.
+const pathTokensOf = (text: string, cwd: string): { path: string; start: number; end: number }[] => {
+  const local = text.replace(/\b(?!file:)[a-z][a-z0-9+.-]*:\/\/[^\s`"'，。；;<>]+/gi, (url) => " ".repeat(url.length));
+  return [...local.matchAll(/[`"']([^`"'\n]+)[`"']|(?<![A-Za-z0-9_./~%+:一-鿿-])((?:file:\/\/)?[A-Za-z0-9_./~%+-]+)/g)].flatMap((m) => {
+    const raw = m[1] ?? m[2]!;
+    if (!raw.includes("/") && !/\.[a-z][a-z0-9]*$/i.test(raw)) return [];
+    if (!m[1] && raw.endsWith("/") && /[^\s，。；;、:：)）\]]/.test(local[m.index! + m[0].length] ?? "")) return [];
+    const path = fullPath(cwd, raw);
+    return path ? [{ path, start: m.index!, end: m.index! + m[0].length }] : [];
+  });
+};
+const refsOf = (text: string, cwd: string): Set<string> => new Set(pathTokensOf(text, cwd).map((p) => p.path));
+const roleClauses = (text: string): string[] => text.split(/[。；;\n，,]/).map((s) => s.trim().replace(/^RESULT\s*[:：]\s*/i, "")).filter(Boolean);
+const NEGATIVE_ROLE = /[不别勿未无非]|否认|否定|禁止|停止|取消|省略|免于|避免|排除|忽略|之外|以外|假设|假如|如果|\b(?:no|not|never|without|except|exclude|skip|avoid|ignore|omit|stop|cancel|unless|if)\b/i;
+
+/** Only a label followed by exactly one path can assert a snapshot/authority location. */
+const labeledLocations = (text: string, cwd: string, label: RegExp): Set<string> => new Set(roleClauses(text).flatMap((clause) => {
+  if (NEGATIVE_ROLE.test(clause) || TARGET_ACTION.test(clause)) return [];
+  const value = label.exec(clause)?.[1]?.trim();
+  if (!value) return [];
+  const paths = pathTokensOf(value, cwd);
+  return paths.length === 1 && paths[0]!.start === 0 && !value.slice(paths[0]!.end).trim() ? [paths[0]!.path] : [];
+}));
+
+/** A delivered location list states where the objects are, without claiming any file read. */
+const deliveredLocations = (text: string, cwd: string): Set<string> => new Set(roleClauses(text).flatMap((clause) => {
+  if (NEGATIVE_ROLE.test(clause) || /背景|示例|参考|假设/.test(clause)) return [];
+  const value = /^(?:[一-鿿A-Za-z -]{0,24})(?:目录|路径|位置)(?:是|为|[:：])\s*(.+)$/.exec(clause)?.[1];
+  if (!value) return [];
+  const paths = pathTokensOf(value, cwd);
+  const remainder = paths.reduceRight((v, p) => v.slice(0, p.start) + v.slice(p.end), value);
+  return paths.length && /^(?:\s|和|及|以及|and|、)*$/i.test(remainder) ? paths.map((p) => p.path) : [];
+}));
+
+/** Unknown operation suffixes cannot confirm a source, even without repeating its path. */
+const affirmativeOperationTail = (tail: string): boolean => {
+  const bare = "[~./A-Za-z0-9_<>-][A-Za-z0-9_<>./~-]*/[A-Za-z0-9_<>./~-]*";
+  const path = `(?:${[bare, ...["`", '"', "'"].map((q) => `${q}${bare}${q}`)].join("|")})`;
+  const location = new RegExp(`^(?:${path}|(?:扫描|原)路径之外的(?:带时间戳)?备份目录)$`);
+  const suggestions = new RegExp(`^建议\\s*${path}(?:\\s*(?:和|及|以及|、|and)\\s*${path})*$`);
+  const [destination, ...constraints] = tail.split(/[，,]/).map((c) => c.trim());
+  const target = /^(?:到|至|进|出|回)\s*(.+)$/.exec(destination ?? "")?.[1];
+  return (!destination || !!target && location.test(target)) && constraints.every((c) =>
+    suggestions.test(c) || /^保留(?:各自|原有)?来源层级$/.test(c) || /^不覆盖(?:已有|现有)?备份$/.test(c));
+};
+
+/** Operation roles are closed: unclassified qualifications retract prior sources. */
+const allowsOperationSource = (clause: string, sources: readonly string[], cwd: string): boolean => {
+  const paths = pathTokensOf(clause, cwd);
+  // Only a complete direct instruction can prove that a path names another object.
+  if (paths.length === 1 && sources.every((p) => !near(p, paths[0]!.path))
+    && /^(?:不|不要|别|勿|无需|不需要)?(?:检查|核查|扫描|读取|移动|迁移|删除|复制|备份|操作)\s*$/.test(clause.slice(0, paths[0]!.start))
+    && !clause.slice(paths[0]!.end).trim()) return true;
+  if (paths.length === 1 && /^(?:检查|核查|扫描|读取|验证|确认)\s*$/.test(clause.slice(0, paths[0]!.start))
+    && !clause.slice(paths[0]!.end).trim()) return true;
+  if (/^(?:保留(?:各自|原有)?来源层级|不覆盖(?:已有|现有)?备份|(?:移动|迁移)链接本身|(?:勿|不要|不)操作链接目标)$/.test(clause)) return true;
+  if (/^(?:验证|检查|核查|确认)(?:移动|迁移|复制|备份)(?:结果|完整性|数量|项完整|是否完成|成功)$/.test(clause)
+    || /^验证备份项完整(?:、原扫描路径(?:用户)?(?:技能|文件|目录|资源|对象)已移出)?$/.test(clause)
+    || /^(?:交付|报告)(?:确切)?备份(?:绝对)?路径(?:、(?:移动|迁移|复制|备份)数量(?:与原目录状态)?)?$/.test(clause)
+    || /^(?:移动|迁移|复制|备份)数量(?:与原目录状态)?$/.test(clause)
+    || /^先核查当前实物后(?:移动|迁移|移除|复制|备份)所有(?:该范围)?(?:用户)?(?:技能|文件|目录|资源|对象)$/.test(clause)
+    || /^(?:此为|这是)?用户(?:明确)?授权的可逆(?:移动|迁移|复制|备份)$/.test(clause)) return true;
+  // Resource inventories are data-only lists, not free-form background prose.
+  if (/^(?:已知\s+)?[A-Za-z0-9_-]+\s+有\s+[A-Za-z0-9_.-]+(?:、[A-Za-z0-9_.-]+)*$/.test(clause)) return true;
+  if (paths.length === 1 && /^明确排除\s*$/.test(clause.slice(0, paths[0]!.start))
+    && /^(?:系统技能|系统文件|系统目录)(?:、插件缓存和 [A-Za-z0-9_-]+ 内容存储)?$/.test(clause.slice(paths[0]!.end).trim())) return true;
+  if (/^(?:包括(?:目录|文件)(?:或符号链接)?|无需再次确认|不要自动重启会话)$/.test(clause)
+    || /^不(?:改|修改)(?:任何)?(?:配置真源|配置|锁文件|项目文档)(?:、(?:配置真源|配置|锁文件|项目文档))*(?:或(?:配置真源|配置|锁文件|项目文档))?$/.test(clause)
+    || /^说明(?:当前)?会话启动快照(?:仍)?可能显示旧清单(?:即可)?$/.test(clause)) return true;
+  // Every later clause needs a complete known role. Unrecognized wording is not
+  // evidence that the operation still stands, regardless of nouns or pronouns.
+  return false;
+};
+
+/** A supported 将/把 source list and its complete operation must be affirmative. */
+const operationSources = (text: string, cwd: string): Set<string> => {
+  const denied = new Set(roleClauses(text).filter((c) => NEGATIVE_ROLE.test(c)).flatMap((c) => [...refsOf(c, cwd)]));
+  const sentences = text.split(/[。；;\n]/);
+  return new Set(sentences.flatMap((sentence, index) => {
+    const operation = /^(?:请\s*)?(?:将|把)\s+(.+?)\s*(?:实际|统一|全部)?(?:移动|迁移|移除|删除|复制|搬移|备份)(?=到|至|进|出|回|[，,]|$)/.exec(sentence.trim());
+    const source = operation?.[1];
+    if (!source || NEGATIVE_ROLE.test(source) || !affirmativeOperationTail(sentence.trim().slice(operation[0].length))) return [];
+    const entries = source.replace(/[，,]\s*$/, "").split(/[，,]\s*(?:以及|和|及|and)?\s*|\s+and\s+/i);
+    const paths = entries.map((entry) => {
+      const value = entry.trim(), tokens = pathTokensOf(value, cwd);
+      if (tokens.length !== 1 || tokens[0]!.start !== 0) return "";
+      const selector = value.slice(tokens[0]!.end).trim();
+      return !selector || /^下(?:的)?[一-鿿A-Za-z0-9_ -]{0,32}(?:技能|文件|目录|资源|对象)$/.test(selector) ? tokens[0]!.path : "";
+    });
+    const later = roleClauses(sentences.slice(index + 1).join("。").replace(/[()（）]/g, "，"));
+    const objects = [...paths, ...refsOf(sentence, cwd)];
+    return paths.length && paths.every(Boolean) && later.every((c) => allowsOperationSource(c, objects, cwd))
+      ? paths.filter((p) => !denied.has(p)) : [];
+  }));
+};
+
+const mentions = (text: string, object: string): boolean => object.length >= 4 && !["skills", "plugins", "cache", "tree", ".system"].includes(object)
+  && new RegExp(`(?<![A-Za-z0-9_-])${object.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_-])`, "i").test(text);
+
+const evidenceOf = (text: string, task: Set<string>, stems: Set<string>, common: Set<string>, taskCwd: string, now: number) => (row: RouteRow): Evidence => {
+  const active = targetText(text);
+  const positions = refsOf(text, taskCwd);
+  const sources = operationSources(text, taskCwd);
+  const targets = new Set([...refsOf(active, taskCwd), ...sources]);
+  const clauses = roleClauses(text);
+  const denied = new Set(clauses.filter((c) => NEGATIVE_ROLE.test(c)).flatMap((c) => [...refsOf(c, taskCwd)]));
+  const referenceObjects = clauses.flatMap((c) => {
+    if (NEGATIVE_ROLE.test(c)) return [];
+    const ref = /^指(?:刚刚|刚)?(?:找到|查到|发现|确认)的\s*[`"']?([A-Za-z0-9_][A-Za-z0-9_.-]*)[`"']?(?:\s*[（(][^（）()]*[）)])?$/.exec(c);
+    return ref ? [ref[1]!] : [];
+  });
+  const identityQuery = active.split("\n").some((c) => /^(?:其|该技能的?|该对象的?|它的|这个技能的?)(?:上游)?(?:来源|身份|出处|作者|仓库|元数据)/.test(c.replace(TARGET_ACTION, "").trim()));
+  const snapshots = labeledLocations(text, taskCwd, /^(?:已知)?本地快照\s*[:：]?\s*(.+)$/);
+  const archives = labeledLocations(text, taskCwd, /^(?:[A-Za-z0-9_.-]+\s+)?归档副本\s*[:：]?\s*(.+)$/);
+  const materials = row.materials ?? [];
+  const hit = uniqueFiles(row.files.map((f) => fullPath(row.cwd, f)).filter((f) => stems.has(stemOf(f).toLowerCase())));
+  const isCommon = (f: string): boolean => GUIDANCE.has(stemOf(f).toLowerCase()) || common.has(f);
+  const current = materials.filter((m) => m.confirmed && m.task && m.taskAt > 0 && m.at >= m.taskAt
+    && now >= m.at && now - m.taskAt <= 3_600_000 && now - m.at <= 3_600_000
+    && (!row.sessionId || m.session === row.sessionId));
+  const related = current.filter((m) => {
+    const path = fullPath(row.cwd, m.path);
+    if (isCommon(path)) return false;
+    const object = basename(dirname(path));
+    const skill = basename(path).toLowerCase() === "skill.md";
+    // A helper's skill read is not expertise. The skill itself must be the delivered object.
+    if (skill) {
+      if (m.kind !== "read") return false;
+      const instance = dirname(path);
+      // Explicit child files constrain the instance too. Unknown/negative positions cannot
+      // be recovered through a same-name fallback, even when that costs a valid reuse.
+      const discovered = refsOf(m.reply ?? "", m.cwd).has(path) && (m.reply ?? "").split(/[。；;\n]/).some((clause) =>
+        !NEGATIVE_ROLE.test(clause) && mentions(clause, object) && /最匹配|找到|找出|发现|\bfound\b|\bidentified\b|\bmatch\b/i.test(clause));
+      const authority = labeledLocations(m.reply ?? "", m.cwd, /^(?:权威源文件|源文件|技能文件|技能路径)\s*[:：]\s*(.+)$/);
+      const excluded = [...denied].some((p) => p === instance || p.startsWith(`${instance}/`));
+      const archiveQuery = clauses.some((c) => /归档副本/.test(c)
+        && !labeledLocations(c, taskCwd, /^(?:[A-Za-z0-9_.-]+\s+)?归档副本\s*[:：]?\s*(.+)$/).size);
+      const deliveredObjects = roleClauses(m.reply ?? "").flatMap((c) => {
+        if (NEGATIVE_ROLE.test(c)) return [];
+        const name = /^(?:最匹配的是|找到的(?:技能|对象)是|发现的(?:技能|对象)是|已找到|已确认)\s*([A-Za-z0-9_][A-Za-z0-9_.-]*)$/.exec(c.replace(/[*`"']/g, ""))?.[1];
+        return name ? [name] : [];
+      });
+      const sameObject = (name: string) => name.toLowerCase() === object.toLowerCase();
+      const referenced = !excluded && identityQuery && referenceObjects.some(sameObject) && referenceObjects.every(sameObject)
+        && deliveredObjects.some(sameObject) && deliveredObjects.every(sameObject)
+        && snapshots.size === 1 && snapshots.has(path) && authority.size === 1 && authority.has(path) && discovered;
+      const compatible = [...positions].every((p) => referenced && (snapshots.has(p) || archives.has(p) && !targets.has(p) && !archiveQuery)
+        || targets.has(p) && (p === instance || p.startsWith(`${instance}/`)));
+      if (!compatible) return false;
+      const helper = m.task.split(/[。；;\n，,]/).some((clause) => mentions(clause, object)
+        && /(?:使用|应用|遵循|用(?!户|途)|\buse\b|\busing\b|\bapply\b)/i.test(clause));
+      if (helper || !mentions(m.reply ?? "", object)) return false;
+      const originalTarget = refsOf(targetText(m.task), m.cwd).has(path);
+      return (originalTarget || discovered) && (referenced || targets.has(path)
+        || active.split("\n").some((clause) => /skill|技能/i.test(clause) && mentions(clause, object)));
+    }
+    if (m.kind === "scan" && [fullPath(row.cwd, "."), "/", homedir()].includes(path)) return false;
+    // Scans match that exact directory only; they never claim files under it were read.
+    return targets.has(path) && (refsOf(targetText(m.task), m.cwd).has(path) || refsOf(targetText(m.reply ?? ""), m.cwd).has(path) || deliveredLocations(m.reply ?? "", m.cwd).has(path));
+  });
+  const files = uniqueFiles(related.filter((m) => m.kind === "read").map((m) => fullPath(row.cwd, m.path)));
   return {
-    row,
-    continuity: !SEPARATE_RE.test(text) && CONTINUE_RE.test(text) && files.some((f) => recent.has(resolve(f))),
+    row, continuity: related.length > 0, matched: related,
+    targetRoles: { direct: [...refsOf(active, taskCwd)], operationSources: [...sources], referenceObjects,
+      snapshots: [...snapshots], archiveBackground: [...archives] },
+    objects: [...new Set(related.map((m) => basename(m.path).toLowerCase() === "skill.md" ? basename(dirname(m.path)) : m.path))],
+    materialIssues: [
+      ...(materials.some((m) => !m.confirmed) ? ["未确认的工具形状仅作线索, 不计材料"] : []),
+      ...(!materials.length ? ["无确认材料 (缺失、尾部截断或最新轮无可识别读取)"] : []),
+      ...(materials.some((m) => m.truncated) ? ["仅取 compact 后 1MB 尾部, 更早证据未知"] : []),
+      ...(materials.length && !current.length ? ["材料不属已知当前任务/session 或已超过 1 小时"] : []),
+    ],
     clues: hit.filter((f) => !isCommon(f) && !files.includes(f)),
-    desc: shared(task, row.description),
-    exp: shared(task, row.expertise ?? ""),
-    asks: [...new Set(row.asks.flatMap((a) => shared(task, a)))],
-    files,
-    common: hit.filter(isCommon),
+    desc: shared(task, row.description), exp: shared(task, row.expertise ?? ""),
+    asks: [...new Set(row.asks.flatMap((a) => shared(task, a)))], files,
+    common: uniqueFiles([...hit, ...materials.map((m) => fullPath(row.cwd, m.path))].filter(isCommon)),
     sameCwd: near(row.cwd, taskCwd),
   };
 };
 
 // 排序只是让最有证据的先被看到: 文件命中 (它真读过) > 职责 > 最近的话; 同工作区只用来打破平手。
 // 专长是它自己声明的「熟哪块」, 与职责同权。
-const weight = (e: Evidence): number => e.files.length * 3 + e.clues.length + (e.desc.length + e.exp.length) * 2 + e.asks.length;
+const weight = (e: Evidence): number => e.matched.length * 3 + e.clues.length + (e.desc.length + e.exp.length) * 2 + e.asks.length;
 
 /** 有交集的候选, 证据最强的在前。 */
 export const rankCandidates = (task: string, taskCwd: string, rows: readonly RouteRow[], hot?: { now: number; ttlMs: number }): Evidence[] => {
   // 平手时缓存热的优先 (同一把尺 wakeCostOf: 没冷 = 唤醒只读缓存); 不给 hot 就不分。
   const warm = (r: RouteRow): number => (hot && !wakeCostOf(r.contextTokens, touchOf(r), hot.now, r.cacheTtlMs ?? hot.ttlMs).cold ? 1 : 0);
   return rows
-    .map(evidenceOf(task, termsOf(withoutGuidance(task)), stemsOf(task), commonStems(rows), taskCwd))
-    .filter((e) => weight(e) > 0 || e.common.length > 0)
+    .map(evidenceOf(task, termsOf(withoutGuidance(task)), stemsOf(task), commonStems(rows), taskCwd, hot?.now ?? Date.now()))
     .sort((x, y) => weight(y) - weight(x) || Number(y.sameCwd) - Number(x.sameCwd) || warm(y.row) - warm(x.row) || y.row.lastActivity - x.row.lastActivity);
 };
 
@@ -236,7 +427,7 @@ const spread = (cwd: string, files: readonly string[]): string => {
   return [...tally].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([d, n]) => `${d} ${n}`).join(", ");
 };
 
-interface Ctx { now: number; home: string; ttlMs: number; small: boolean }
+interface Ctx { now: number; home: string; ttlMs: number; small: boolean; force: boolean }
 
 const costLines = (e: Evidence, c: Ctx): string[] => {
   const ctx = e.row.contextTokens;
@@ -245,7 +436,7 @@ const costLines = (e: Evidence, c: Ctx): string[] => {
   const w = wakeCostOf(ctx, touchOf(e.row), c.now, ttlMs);
   const ttl = `${Math.round(ttlMs / 60_000)} 分钟`;
   const wake = w.cold
-    ? `缓存冷 (超过 TTL ${ttl}) · 唤醒要重写 ~${k(w.write)} 缓存 ≈ 白板 spawn 的 ${w.times} 倍${ctx >= BIG_COLD ? " · 大 ctx 已冷, 默认不转" : ""}`
+    ? `缓存冷 (超过 TTL ${ttl}) · 唤醒要重写 ~${k(w.write)} 缓存 ≈ 白板 spawn 的 ${w.times} 倍${ctx >= BIG_COLD ? c.force ? " · force 已越过冷成本门槛" : " · 大 ctx 已冷, 默认不转" : ""}`
     : `缓存热 (TTL ${ttl}内) · 唤醒只读缓存`;
   const need = e.files.length
     ? `这件活点到它读过的 ${e.files.length}/${e.row.files.length} 个文件`
@@ -268,7 +459,7 @@ const renderOne = (e: Evidence, c: Ctx): string[] => {
     e.common.length ? `降权的公共文件 ${e.common.slice(-4).map((f) => relTo(r.cwd, f)).join(" ")}${e.common.length > 4 ? ` +${e.common.length - 4}` : ""} (公共指引或多人读过, 不计证据)` : "",
   ].filter(Boolean);
   return [
-    [`\`${addr(r)}\` ${r.busy ? "忙" : r.alive ? "闲" : "冷"}`, where, ctxOf(r.contextTokens) || "ctx ?", agoOf(r.lastActivity, now)]
+    [`\`${addr(r)}\` ${r.busy ? "忙" : r.alive ? "闲" : "冷"}`, where, ctxOf(r.contextTokens) || "ctx ?", r.model || "model ?", agoOf(r.lastActivity, now)]
       .filter(Boolean).join(" · "),
     ...(r.description ? [`  职责: ${r.description}`] : []),
     ...(r.expertise ? [`  专长: ${r.expertise}`] : []),
@@ -276,8 +467,9 @@ const renderOne = (e: Evidence, c: Ctx): string[] => {
     ...(e.clues.length ? [`  同名文件线索: ${e.clues.map((f) => basename(f)).join(" ")} (路径未对上, 不证明连续性)`] : []),
     ...(r.lead ? ["  占用: lead 身份"] : []),
     ...(r.duties?.length ? [`  占用: ${r.duties.join(" · ")}`] : []),
-    `  连续性: ${e.continuity ? "续篇点到近期任务的同一文件" : "未证实; 文件/职责/问话的词面匹配仅是线索"}`,
-    `  自动复用: ${vetoOf(e, now, c.ttlMs, c.small, false) || "可选; 真实续篇优先 tell_peer re"}`,
+    `  材料关联: ${e.continuity ? e.matched.map((m) => `${m.kind} ${m.path} · ${m.source} · ${agoOf(m.at, now)}`).join("; ") : "未证实"}`,
+    ...e.materialIssues.map((x) => `  证据范围: ${x}`),
+    `  自动复用: ${vetoOf(e, now, c.ttlMs, c.small, c.force) || "可选; 真实续篇优先 tell_peer re"}`,
     ...(r.files.length ? [`  上下文: 读过 ${r.files.length} 个文件 (${spread(r.cwd, r.files)})`] : []),
     ...costLines(e, c),
     ...(r.summary ? [`  最近: ${r.summary}`] : []),
@@ -285,8 +477,8 @@ const renderOne = (e: Evidence, c: Ctx): string[] => {
 };
 
 /** 给管家读的候选表。末尾永远留着「新 spawn」这一项 —— 它是没有好候选时的默认。 */
-export const renderCandidates = (task: string, cands: readonly Evidence[], now: number, ttlMs: number, home = ""): string => {
-  const c: Ctx = { now, home, ttlMs, small: isSmallTask(task) };
+export const renderCandidates = (task: string, cands: readonly Evidence[], now: number, ttlMs: number, home = "", options: { tier?: TierName; force?: boolean } = {}): string => {
+  const c: Ctx = { now, home, ttlMs, small: smallFor(task, options.tier), force: options.force === true };
   return [
     cands.length
       ? `和这件活有交集的已有 wizard ${cands.length} 个, 证据强的在前 (文件命中 = 它真读过; 词面重叠只是线索):`
@@ -309,29 +501,46 @@ export type Decision =
   | { kind: "spawn"; why: string };
 
 /** 一个候选为什么不转给它; "" = 可以转。 */
-const vetoOf = (e: Evidence, now: number, ttlMs: number, small: boolean, force: boolean): string => {
-  const r = e.row;
-  const ctx = r.contextTokens;
+const vetoesOf = (e: Evidence, now: number, ttlMs: number, small: boolean, force: boolean): string[] => {
+  const r = e.row, ctx = r.contextTokens;
   const w = wakeCostOf(ctx, touchOf(r), now, r.cacheTtlMs ?? ttlMs);
-  return r.lead ? "lead 身份, 独立任务不自动复用 (续篇用 tell_peer re)"
-    : r.duties?.length ? `任务占用 (${r.duties.join(" · ")})`
-      : !r.alive ? "不在线"
-        : r.busy ? "正忙"
-          : !e.continuity ? "未证实实质上下文连续性 (词面/文件交集只是线索; 续篇用 tell_peer re)"
-            : notWorth(e, w, small, ctx) ? `不划算 (${small ? "小活" : "证据弱"}却要${w.cold ? "整段重写" : "一直背着"} ${k(ctx)})`
-              : w.cold && ctx >= BIG_COLD && !force ? `缓存冷且 ctx ${k(ctx)} (大 ctx 已冷默认不转; 活真依赖它的上下文就 to+force)`
-                : "";
+  return [
+    ...(r.lead ? ["lead 身份, 独立任务不自动复用 (续篇用 tell_peer re)"] : []),
+    ...(r.duties?.length ? [`任务占用 (${r.duties.join(" · ")})`] : []),
+    ...(!r.alive ? ["不在线"] : []), ...(r.busy ? ["正忙"] : []),
+    ...(!(ctx > 0 && Number.isFinite(ctx)) ? ["ctx 未知, 不能按免费上下文复用"] : []),
+    ...(!e.continuity ? ["未证实近期真实任务的实际材料关联"] : []),
+    ...(notWorth(e, w, small, ctx) ? [`不划算 (${small ? "小活" : "证据弱"}却要${w.cold ? "整段重写" : "一直背着"} ${k(ctx)})`] : []),
+    ...(w.cold && ctx >= BIG_COLD && !force ? [`缓存冷且 ctx ${k(ctx)} (大 ctx 已冷默认不转; 活真依赖它的上下文就 to+force)`] : []),
+  ];
 };
+const vetoOf = (e: Evidence, now: number, ttlMs: number, small: boolean, force: boolean): string =>
+  vetoesOf(e, now, ttlMs, small, force).join("; ");
+
+export const routeDiagnostics = (task: string, cands: readonly Evidence[], now: number, ttlMs: number, force = false, tier?: TierName) => ({
+  total: cands.length, shown: cands.length, truncated: false,
+  scope: "current session, latest real task, compact boundary / 1MB tail, <=1h",
+  candidates: cands.map((e) => ({
+    name: e.row.address || e.row.name, sessionId: e.row.sessionId, model: e.row.model || "unknown",
+    targetRoles: e.targetRoles,
+    matchedPaths: e.matched.map((m) => m.path), objects: e.objects, materials: e.matched,
+    observed: (e.row.materials ?? []).map(({ path, kind, source, at, taskAt, turn, session, confirmed }) => ({ path, kind, source, at, taskAt, turn, session, confirmed })),
+    common: e.common, issues: e.materialIssues, contextTokens: e.row.contextTokens || null, contextKnown: e.row.contextTokens > 0,
+    cache: wakeCostOf(e.row.contextTokens, touchOf(e.row), now, e.row.cacheTtlMs ?? ttlMs),
+    veto: vetoOf(e, now, ttlMs, smallFor(task, tier), force),
+    vetoes: vetoesOf(e, now, ttlMs, smallFor(task, tier), force),
+  })),
+});
 
 const evidenceLine = (e: Evidence): string =>
   [
-    e.files.length ? `读过点到的 ${e.files.length} 个文件` : "",
+    e.matched.length ? `实际材料 ${e.matched.map((m) => `${m.kind} ${m.path}`).join(", ")}` : "",
     e.desc.length ? `职责${quoted(e.desc, 3)}` : "",
     e.exp.length ? `专长${quoted(e.exp, 3)}` : "",
     e.row.contextTokens ? ctxOf(e.row.contextTokens) : "",
   ].filter(Boolean).join(" · ");
 
-/** 默认决定: 候选按证据排好 (rankCandidates), 取头一个没被否决的; 一个都没有 → spawn, 理由写前几个为什么不行。 */
+/** 默认决定: 候选按证据排好 (rankCandidates), 取头一个没被否决的; 一个都没有 → spawn, 理由保留全部候选的否决。 */
 export const decide = (task: string, cands: readonly Evidence[], now: number, ttlMs: number, force = false, tier?: TierName): Decision => {
   const small = smallFor(task, tier);
   const vetoes = cands.map((e) => ({ e, veto: vetoOf(e, now, ttlMs, small, force) }));
@@ -340,7 +549,7 @@ export const decide = (task: string, cands: readonly Evidence[], now: number, tt
   return {
     kind: "spawn",
     why: vetoes.length
-      ? `白板 spawn —— ${vetoes.slice(0, 3).map((v) => `${addr(v.e.row)} ${v.veto}`).join("; ")}`
+      ? `白板 spawn —— ${vetoes.map((v) => `${addr(v.e.row)} ${v.veto}`).join("; ")}`
       : "白板 spawn —— 没有哪个已有 wizard 和这件活有交集",
   };
 };
