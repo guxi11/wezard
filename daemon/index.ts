@@ -2094,7 +2094,7 @@ const main = async (): Promise<void> => {
           guard: (phase, identity) => peerEvents!.valid(e) && prereqsOf(e.speaker, p.after ?? []).every((r) => r.state === "done") && (!phase || ((!p.attemptId || workflow.boundary(p.attemptId)) && boundary(phase, identity))),
           eventId: e.id,
         });
-        const r = !raw.ok && !raw.uncertain && !raw.retryable && events.get(e.id)?.exposure === "none" ? { ...raw, retryable: true } : raw;
+        const r = !raw.ok && !raw.uncertain && raw.retryable === undefined && events.get(e.id)?.exposure === "none" ? { ...raw, retryable: true } : raw;
         if (p.attemptId && (r.uncertain || (!r.ok && !r.retryable))) workflow.dispatched(p.attemptId, false);
         return r;
       },
@@ -2520,7 +2520,9 @@ const main = async (): Promise<void> => {
         // 取走就撤单: 这一笔在收件箱里排着的**全部**回执一起作废 (need 之后又答完时排着两份, 取走
         // 的那一份就是新结论, 旧的那份不再 paste 第二遍); `hand` 确认已交付 (已 handed 的是 no-op)。
         if (pick.execution === "queued") {
-          events.cancel((x) => x.id.startsWith(`rcpt:${pick.row.event}:`) && x.execution === "queued", "taken by wait_peer");
+          const claim = events.claimReceipt(pick.box.id);
+          if (!claim.ok) return { name: h.address, idle: wr.idle, eventId: pick.box.id,
+            delivery: "pending-reconciliation", reason: claim.reason };
           router.commit(ops.hand({ event: pick.row.event, inbox: pick.box.id }));
         }
         const closing = parseClosing(pick.box.text);
