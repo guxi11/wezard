@@ -2,6 +2,11 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.7.5] - 2026-10-16
+
+### Fixed
+- 回执按业务事实去重，重复终句与迟到回执不再重复公开刷屏；恢复投递保留稳定身份，并在公开输出前核验当前路由与收口权限。
+
 ## [2.7.4] - 2026-10-16
 
 ### Changed
@@ -1172,7 +1177,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.7.4...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.7.5...HEAD
+[2.7.5]: https://github.com/guxi11/wezard/compare/v2.7.4...v2.7.5
 [2.7.4]: https://github.com/guxi11/wezard/compare/v2.7.3...v2.7.4
 [2.7.3]: https://github.com/guxi11/wezard/compare/v2.7.2...v2.7.3
 [2.7.2]: https://github.com/guxi11/wezard/compare/v2.7.1...v2.7.2
