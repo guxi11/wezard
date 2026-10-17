@@ -411,6 +411,17 @@ const SMALL_RE = /改(?:名|文案|颜色|字号|字体|间距|边距|圆角)|�
 const FILE_CHECK_RE = /(?:核实|确认|检查|查一下|查看|check|verify).*(?:存在|加载|路径|exists?|load|path)/i;
 export const isSmallTask = (task: string): boolean => task.length <= 160 && !COMPLEX_RE.test(withoutGuidance(task))
   && (SMALL_RE.test(task) || (fileRefs(task).length > 0 && FILE_CHECK_RE.test(task)));
+const CODING_RE = /(?:实现|编写|新增|添加|修改|修复|调整|删除|迁移|更新|重构|(?<![A-Za-z0-9_])(?:implement|write|add|create|change|modify|fix|update|remove|refactor)(?![A-Za-z0-9_]))/i;
+const CODE_TARGET_RE = /(?:\b[\w./-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|swift|vue|svelte|css|scss|html|sql|rb|php|c|h|cpp)\b|(?:登录|提交|保存|确认|取消|搜索|发送|解析|认证|用户|订单|支付)(?:函数|接口|按钮|方法|组件|路由)|(?:函数|接口|按钮|方法|组件|路由)(?:的)?(?:逻辑|定义|返回值|参数|点击|校验|空字符串|空值|回调|状态|错误处理)|\b(?:login|submit|save|confirm|cancel|search|send|parse|auth|user|order|payment)[ -](?:function|interface|button|method|component|route|class|endpoint)\b)/i;
+const CODE_SYMBOL_RE = /(?<![A-Za-z0-9_])[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*(?![A-Za-z0-9_])/;
+const CODE_CONTEXT_RE = /函数|方法|参数|返回(?:值)?|空字符串|空输入|空值|回调|调用|校验|处理|点击|function|parameter|argument|return|empty (?:string|input)|callback|handler/i;
+const CODING_RISK_RE = /并发|竞态|死锁|安全|权限|认证|授权|隐私|加密|漏洞|支付|扣款|幂等|事务|回滚|迁移|(?<![A-Za-z0-9_])(?:security|concurren(?:cy|t)|race|deadlock|auth(?:entication|orization)?|permissions?|privacy|crypt(?:o|graph)|vulnerabilit(?:y|ies)|exploit|payment|charge|idempotenc\w*|transaction|rollback|migration)(?![A-Za-z0-9_])/i;
+const GLOBAL_SCOPE_RE = /全部|所有|整个|全局|全量|各个模块|跨(?:多个)?模块|跨项目|(?<![A-Za-z0-9_])(?:all|entire|across)(?![A-Za-z0-9_])/i;
+const isCodingTask = (task: string): boolean => !CODING_RISK_RE.test(task)
+  && !COMPLEX_RE.test(withoutGuidance(task))
+  && CODING_RE.test(withoutGuidance(task))
+  && (CODE_TARGET_RE.test(withoutGuidance(task))
+    || (CODE_SYMBOL_RE.test(withoutGuidance(task)) && CODE_CONTEXT_RE.test(withoutGuidance(task))));
 const smallFor = (task: string, tier?: TierName): boolean => tier ? tier === "mini" || tier === "light" : isSmallTask(task);
 
 /** 证据弱 (没碰过这件活点到的文件; 小活则少于 3 个) 又贵 (冷且 ≥60k, 或热但 ≥150k) → 不划算。 */
@@ -558,9 +569,9 @@ export const decide = (task: string, cands: readonly Evidence[], now: number, tt
   };
 };
 
-/** spawn 时的默认档: 明确简单动作 → light; 其余 standard —— 默认不上 hard。
+/** spawn 时的默认档: 明确简单动作或有可识别代码对象的普通实现 → light; 其余 standard —— 默认不上 hard。
  *  以前按 COMPLEX_RE 把「设计 / 排障 / 审查」这类措辞自动升到 hard, 而这些词在真活里太常见,
  *  于是几乎每个派出去的活都落 opus; 现在 hard / ultra 只由调用方显式给 (`tier:"hard"`),
  *  lead 是唯一的例外 (它本来就是「要判断」的那一档)。 */
 export const tierFor = (task: string, lead: boolean): TierName =>
-  lead ? "hard" : isSmallTask(task) ? "light" : "standard";
+  lead ? "hard" : CODING_RISK_RE.test(task) || GLOBAL_SCOPE_RE.test(task) ? "standard" : isSmallTask(task) || isCodingTask(task) ? "light" : "standard";
