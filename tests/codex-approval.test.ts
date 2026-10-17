@@ -97,7 +97,8 @@ try {
   assert.equal(deny.hookSpecificOutput.decision.behavior, "deny");
   assert.ok(client.updates >= 2, "card callbacks update the resolved card");
   client.isConnected = false;
-  assert.equal((await runHook(input)).hookSpecificOutput, undefined, "native approval remains local on disconnect");
+  const disconnected = await runHook(input);
+  assert.equal(disconnected.hookSpecificOutput.decision.behavior, "deny", "native permission fails closed when WeCom disconnects");
   const before = client.sent.length;
   const pre = await runHook({ ...input, hook_event_name: "PreToolUse" });
   assert.deepEqual(pre, {}, "ordinary approval emits a successful no-op");

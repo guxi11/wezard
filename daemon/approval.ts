@@ -1795,11 +1795,12 @@ const fallback = (cfg: Config, reason: string, forceSingle?: unknown): ApproveRe
   reason: forceSingle ? `${reason}:force_single` : reason,
 });
 
-// 机器人连不上 (企微长连接断了 / 卡发不出去): 没人看得见卡, 审批这一环就当不存在, 放行 ——
-// 别让 hook 拖住失联期间 CLI 的正常工作。`.claude/**` 守卫例外: 放行后 CLI 照样弹原生框,
-// 只能交回本地 (理由同上)。
-const botDown = (reason: string, guardActive: boolean): ApproveResp =>
-  guardActive ? { decision: "ask", reason: `${reason}:guard` } : { decision: "allow", reason: `${reason}:auto_allow` };
+// 机器人连不上时保留各后端既有降级；Codex native PermissionRequest 必须拒绝，
+// 因为它没有本地二次确认 fallback，allow 会直接绕过原生权限确认。
+const botDown = (reason: string, guardActive: boolean, nativePermission = false): ApproveResp =>
+  nativePermission ? { decision: "deny", reason: `${reason}:native_permission_unavailable` }
+    : guardActive ? { decision: "ask", reason: `${reason}:guard` }
+      : { decision: "allow", reason: `${reason}:auto_allow` };
 
 interface ApprovalDeps {
   cfg: Config;
@@ -2348,7 +2349,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     }
     if (!canReach(client, approver)) {
       log.warn("ws not connected");
-      json(res, 200, botDown("ws_disconnected", guardActive) satisfies ApproveResp);
+      json(res, 200, botDown("ws_disconnected", guardActive, nativePermission) satisfies ApproveResp);
       return;
     }
 
@@ -2453,7 +2454,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
       const failure = (e as Error).message?.startsWith("send_card_fail:") ? (e as Error).message : "approver_timeout";
       // 卡没发出去且此刻机器人确实断着 → 同上放行; 连接好好的发送失败 / 没人点的超时仍走 fallback。
       json(res, 200, (failure !== "approver_timeout" && !canReach(client, approver)
-        ? botDown(failure, guardActive)
+        ? botDown(failure, guardActive, nativePermission)
         : fallback(cfg, failure, mustCard || guardActive)) satisfies ApproveResp);
       return;
     }
