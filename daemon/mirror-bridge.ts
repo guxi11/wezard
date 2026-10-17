@@ -6634,17 +6634,23 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const hookCardFailures = new Map<string, { fingerprint: string; attempts: number; retryAt: number }>();
   const hookDetails = (hooks: CodexHook[]): string =>
     `Codex 待审 hooks 清单（逐项展示来源、事件、matcher、命令和 hash）：\n\n\`\`\`json\n${JSON.stringify(hooks.map((h) => ({ source: h.sourcePath, event: h.eventName, matcher: h.matcher, key: h.key, enabled: h.enabled, trust: h.trustStatus, hash: h.currentHash, command: h.command })), null, 2).replace(/```/gu, "\\u0060\\u0060\\u0060")}\n\`\`\``;
-  const renderHookReviewCard = (id: string, hooks: CodexHook[], status = "等待选择"): TemplateCard => ({
-    card_type: "button_interaction",
+  const renderHookReviewCard = (id: string, hooks: CodexHook[], status = "选择操作"): TemplateCard => ({
+    card_type: "vote_interaction",
     source: { desc: "Codex hook 信任审查" },
-    main_title: { title: "Codex hooks 需要审查" },
-    sub_title_text: `${hooks.length} 个待审 · 本次跳过 hooks · ${status}`,
+    main_title: { title: `${hooks.length} 个 Codex hooks 需要审查` },
     task_id: id,
-    button_list: [
-      { text: "查看 hooks", style: 1, key: `codex-hook-review:${id}:review` },
-      { text: "精确授信并继续", style: 1, key: `codex-hook-review:${id}:trust` },
-      { text: "不授信并继续", style: 4, key: `codex-hook-review:${id}:skip` },
-    ],
+    checkbox: { question_key: "action", mode: 0, option_list: [
+      { id: "review", text: "查看 hooks" },
+      { id: "trust", text: "精确授信并继续" },
+      { id: "skip", text: "不授信并继续" },
+    ] },
+    submit_button: { text: status, key: `codex-hook-review:${id}:submit` },
+  } as TemplateCard);
+  const renderHookReviewProgress = (id: string, status: string): TemplateCard => ({
+    card_type: "vote_interaction", source: { desc: "Codex hook 信任审查" },
+    main_title: { title: status }, task_id: id,
+    checkbox: { question_key: "status", mode: 0, option_list: [{ id: "pending", text: "请稍候" }] },
+    submit_button: { text: "处理中…", key: `codex-hook-review:${id}:pending` },
   } as TemplateCard);
   const sendHookDetails = async (review: HookReview): Promise<void> => {
     const content = hookDetails(review.hooks);
@@ -6667,7 +6673,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       }
     }
     if (review.canNotify() && review.frame) {
-      try { await client.updateTemplateCard(review.frame, renderHookReviewCard(review.id, review.hooks, "结果消息发送失败，请查看本机 CLI")); }
+      try { await client.updateTemplateCard(review.frame, renderHookReviewProgress(review.id, "结果消息发送失败，请查看本机 CLI")); }
       catch (fallbackError) { log.error({ err: errText(fallbackError), id: review.id }, "Codex hook result and fallback card delivery failed"); }
     }
     return false;
@@ -6709,10 +6715,19 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   client.on("event.template_card_event", async (frame: WsFrame<EventMessageWith<TemplateCardEventData>>) => {
     const ev = frame.body?.event as (TemplateCardEventData & { template_card_event?: { event_key?: string } }) | undefined;
     const key = ev?.template_card_event?.event_key ?? ev?.event_key ?? "";
-    const match = /^codex-hook-review:([^:]+):(review|trust|skip)$/u.exec(key);
+    const match = /^codex-hook-review:([^:]+):submit$/u.exec(key);
     const review = match ? hookReviews.get(match[1]!) : undefined;
     if (!review || !review.valid()) return;
-    if (match![2] === "review") {
+    const selected = (ev?.template_card_event as { selected_items?: unknown } | undefined)?.selected_items as
+      | Array<{ option_ids?: string[] | { option_id?: string[] } }>
+      | { selected_item?: Array<{ option_ids?: string[] | { option_id?: string[] } }> }
+      | undefined;
+    const first = Array.isArray(selected) ? selected[0] : selected?.selected_item?.[0];
+    const optionIds = first?.option_ids;
+    const action = (Array.isArray(optionIds) ? optionIds : optionIds?.option_id ?? [])[0];
+    if (action === "review") {
+      try { await client.updateTemplateCard(frame, renderHookReviewCard(review.id, review.hooks)); }
+      catch (error) { log.warn({ err: errText(error), id: review.id }, "Codex hook review card reset failed"); }
       try { await sendHookDetails(review); }
       catch (error) {
         log.warn({ err: errText(error), pane: review.pane }, "Codex hook detail delivery failed");
@@ -6720,10 +6735,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       }
       return;
     }
+    if (action !== "trust" && action !== "skip") return;
     if (review.busy) return;
     review.busy = true;
     review.frame = frame;
-    try { await client.updateTemplateCard(frame, renderHookReviewCard(review.id, review.hooks, "处理中…")); }
+    try { await client.updateTemplateCard(frame, renderHookReviewProgress(review.id, "正在处理 Codex hooks")); }
     catch (error) { log.warn({ err: errText(error), id: review.id }, "Codex hook processing card update failed"); }
     if (!review.valid()) { review.busy = false; return; }
     let status = "授权未完成；确认卡已失效";
@@ -6755,7 +6771,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // “Trust all” can authorize hooks outside this card. Exact hashes have
         // been persisted and verified above; continue via the native skip path.
         const option = 3;
-        if (match![2] === "trust") {
+        if (action === "trust") {
           if (pending.length) {
             await trustCodexHookSet(backend.bin, review.a.runningCwd, homeDir,
               pending.map(({ key, currentHash, sourcePath }) => ({ key, currentHash, sourcePath })), valid);
@@ -6780,10 +6796,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         }
         const liveGuard = valid;
         const pressed = await chooseCodexHookOption(review, before, option, liveGuard);
-        if (!pressed) return match![2] === "trust"
+        if (!pressed) return action === "trust"
           ? "hash 已按审查清单写入并验证；CLI 确认未完成，请在本地继续"
           : "未信任任何 hook；CLI 确认未完成，请在本地继续";
-        return match![2] === "trust"
+        return action === "trust"
           ? "审查清单中的 hook 已精确授信；本次启动选择了不信任继续，hooks 本次不会运行"
           : "未信任 hook，Codex 已继续；hooks 本次不会运行";
       }, { guard: review.valid });
