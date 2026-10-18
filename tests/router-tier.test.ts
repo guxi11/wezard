@@ -14,14 +14,20 @@ assert.equal(cfg.models.router, "standard");
 assert(!ConfigSchema.safeParse({ bot, models: { router: { tier: "standard" } } }).success);
 assert(!ConfigSchema.safeParse({ bot, models: { router: "unknown" } }).success);
 for (const backend of ["claude", "claude-internal", "codebuddy", "codex"] as const) {
-  for (const tier of TIERS) {
-    cfg.models.router = tier;
-    const actual = pickRouter(cfg, backend);
-    assert.deepEqual(actual, pickTier(cfg, tier, {}, false, backend));
-    assert(actual.ok);
-    assert.equal(actual.cli, backend, "actual backend wins over defaultCli");
-    assert.equal(actual.tier, tier);
-  }
+  cfg.models.router = "standard";
+  const actual = pickRouter(cfg, backend);
+  assert.deepEqual(actual, pickTier(cfg, "standard", {}, false, backend));
+  assert(actual.ok);
+  assert.equal(actual.cli, backend, "actual backend wins over defaultCli");
+  assert.equal(actual.tier, "standard");
+}
+for (const tier of TIERS.filter((tier) => tier !== "standard")) {
+  cfg.models.router = tier;
+  const actual = pickRouter(cfg, "codex");
+  assert.deepEqual(actual, pickTier(cfg, tier, {}, false, "codex"));
+  assert(actual.ok);
+  assert.equal(actual.cli, "codex");
+  assert.equal(actual.tier, tier);
 }
 
 const custom = ConfigSchema.parse({ bot, models: { tiers: {

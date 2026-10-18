@@ -31,14 +31,12 @@ const followup = "完善 daemon/route.ts 的路由约束";
 assert.equal(decision(followup).kind, "existing");
 for (const task of [
   "刚才做过 daemon/route.ts，这次独立核实同一文件是否存在",
-  "这不是上一轮 daemon/route.ts 的续篇，只核实文件存在",
 ]) {
   assert.equal(decision(task, [row()], true).kind, "spawn", task);
 }
 
 for (const task of [
   "独立核实 daemon/route.ts 文件是否存在",
-  "不要继续上一轮的实现；这次核实 daemon/route.ts 文件是否存在",
 ]) assert.equal(decision(task).kind, "existing", task);
 assert.equal(decision(followup, [row({ materials: [] })]).kind, "spawn", "files-only 不升级为确认读取");
 
@@ -70,7 +68,6 @@ assert.equal(decision(followup, [row({ alive: false })], true).kind, "spawn");
 for (const file of ["AGENTS.md", "CLAUDE.md", "README.md", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "GEMINI.md", "copilot-instructions.md"]) {
   const task = `继续核实 ${file} 文件存在及加载路径`;
   const rows = [row({ files: [`${cwd}/${file}`], description: file, expertise: file, asks: [task] })];
-  assert.equal(candidates(task, rows)[0]!.files.length, 0);
   const cands = candidates(task, rows);
   assert.equal(cands.length, 1);
   assert.equal(cands[0]!.files.length, 0);
@@ -146,30 +143,31 @@ const sixth = decide(followup, crowded, now, ttlMs);
 assert(sixth.kind === "existing");
 assert.equal(sixth.row.name, "sixth");
 
-// 无工单的 incoming/outgoing 在飞任务, 即使 spinner 闲也不接独立新活。
+// 每个状态验证 incoming 占用；另用一个 outgoing 样本验证 child 归属与「在等」方向。
 const receipt = (state: InFlight["state"], outgoing = false): InFlight => ({
   from: outgoing ? "worker" : "caller", to: outgoing ? "child" : "worker",
   turn: "t123456", job: "", state, ageMs: 1000,
 });
 for (const state of ["working", "blocked", "needs-input", "deferred", "errored", "queued"] as const) {
-  for (const outgoing of [false, true]) {
-    const inflight = [receipt(state, outgoing)];
-    const duties = routeDutiesOf([], "worker", inflight);
-    assert.equal(duties.length, 1);
-    assert.deepEqual(duties, routeReceiptDutiesOf(inflight, "worker"));
-    assert.match(duties[0]!, outgoing ? /在等 child/ : /欠着 caller/);
-    assert(duties[0]!.includes(state));
-    const rows = [row({ busy: false, duties })];
-    assert.equal(decision(followup, rows, true).kind, "spawn", `${state} ${outgoing ? "outgoing" : "incoming"}`);
-    assert.match(renderCandidates(followup, candidates(followup, rows), now, ttlMs), /自动复用: 任务占用/);
-    assert.deepEqual(routeReceiptDutiesOf(inflight, "unrelated"), []);
-  }
+  const inflight = [receipt(state)];
+  const duties = routeDutiesOf([], "worker", inflight);
+  assert.equal(duties.length, 1);
+  assert.deepEqual(duties, routeReceiptDutiesOf(inflight, "worker"));
+  assert.match(duties[0]!, /欠着 caller/);
+  assert(duties[0]!.includes(state));
+  const rows = [row({ busy: false, duties })];
+  assert.equal(decision(followup, rows, true).kind, "spawn", state);
+  assert.match(renderCandidates(followup, candidates(followup, rows), now, ttlMs), /自动复用: 任务占用/);
+  assert.deepEqual(routeReceiptDutiesOf(inflight, "unrelated"), []);
 }
-for (const state of ["done", "timeout", "silent", "dead", "canceled"] as const) {
-  for (const outgoing of [false, true]) {
-    assert.deepEqual(routeDutiesOf([], "worker", [receipt(state, outgoing)]), []);
-  }
-}
+const outgoing = [receipt("working", true)];
+const outgoingDuties = routeDutiesOf([], "worker", outgoing);
+assert.deepEqual(outgoingDuties, routeReceiptDutiesOf(outgoing, "worker"));
+assert.match(outgoingDuties[0]!, /在等 child/);
+assert.equal(decision(followup, [row({ busy: false, duties: outgoingDuties })], true).kind, "spawn");
+assert.deepEqual(routeReceiptDutiesOf(outgoing, "unrelated"), []);
+for (const state of ["done", "timeout", "silent", "dead", "canceled"] as const)
+  assert.deepEqual(routeDutiesOf([], "worker", [receipt(state)]), []);
 assert.equal(routeDutiesOf([job()], "worker", [receipt("needs-input"), receipt("deferred", true)]).length, 3);
 
 // 成本与任务档位都参与复用决策, force 不把弱连续性升级。

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 回执回归: 改 daemon/router.ts / dispatch.ts / direction.ts / jobs.ts / peers.ts 之后跑一遍。
+// 分方向回归: 默认只跑离线核心; live daemon 用例必须显式选择。
 //
 // T11 重写 (T10b 之后): 旧的两个回执模块 (`daemon/receipts.ts` / `daemon/receiver-stack.ts`) 已退役,
 // 判定一律改读**路由表** —— `GET /routes` 的 `rows[]` (完整 Route 对象) 取代 `receipts.json`
@@ -13,11 +13,16 @@
 // `turn="<件号>"`, 注入事件 id 是 `p:<self>:<target>:<turn>:<legs>`; reload 后是 T10b —— 信封写
 // `event="<行 id>"`, 注入事件 id 是 `route:<serves>`。两条分支各自断言, 输出里明说探测到哪一套;
 // 全仓唯一必须分支的参数是 `/wizard/stop` 的 `turn` 值, 以及信封里「轮次 id」该比哪个属性。
-// 需要 reload 才能表达的用例 (reload 落在 answered 与 hand 之间) 标 `pending-reload`, 不计通过。
+// 真正 reload 的用例单独点名, 且必须 RR_ALLOW_RELOAD=1; 参数预检在任何 config 读取 / pane spawn 前完成。
 //
-//   node scripts/receipt-regress/run.mjs            # 全部
-//   node scripts/receipt-regress/run.mjs chain need # 只跑这几条
+//   node scripts/receipt-regress/run.mjs --list
+//   node scripts/receipt-regress/run.mjs --group charter
+//   node scripts/receipt-regress/run.mjs --group dispatch
+//   node scripts/receipt-regress/run.mjs --group receipt-core
+//   node scripts/receipt-regress/run.mjs --group runtime
+//   node scripts/receipt-regress/run.mjs --full
 //   RR_ALLOW_RELOAD=1 node scripts/receipt-regress/run.mjs reload-answered-hand   # 会真的 reload, 单独跑
+//   RR_ALLOW_RELOAD=1 node scripts/receipt-regress/run.mjs after-reload          # reload 专项, 单独跑
 //
 // 旧版里的两个纯单元用例随模块一起下线: `receipt-timing` (跑 tests/receipt-timing.test.ts, 它 import 的是
 // 已删的 daemon/receipts.js —— 那个文件现在也是死代码, 该删) 与一批 `fakeReceipts` 驱动的槽/栈语义用例
@@ -40,13 +45,18 @@ import { randomBytes } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { createPaneGuards, GuardPrerequisiteError } from "./pane-guards.mjs";
 import { normalizeTask } from "../../dist/shared/task-file.js";
-import { loadConfig } from "../../dist/shared/config.js";
 import { bindCliBackends, backendForPath } from "../../dist/shared/cli-backends.js";
 // 信封 / 属性只用守护进程自己那一份解析器读 —— 契约只有一份 (反转义、LEGACY、`msg` 新旧两形都在里面)。
 import { parseEnvelope, parseReminders } from "../../dist/shared/reminder.js";
 
-const { config } = loadConfig();
-bindCliBackends({ ...config.wrc, projectsDirOverride: config.wrc.mirror.projectsDir });
+let backendReady = false;
+const initBackend = async () => {
+  if (backendReady) return;
+  const { loadConfig } = await import("../../dist/shared/config.js");
+  const { config } = loadConfig();
+  bindCliBackends({ ...config.wrc, projectsDirOverride: config.wrc.mirror.projectsDir });
+  backendReady = true;
+};
 
 const DAEMON = process.env.WEZARD_DAEMON_BASE ?? "http://127.0.0.1:17890";
 // 写敏感路由 (/tasks/schedule 等) 要出示口令, 同 MCP / CLI (见 shared/daemon-token.ts)。
@@ -208,6 +218,7 @@ print("GATE_RELEASED")
 
 // ── 根与分身 ──────────────────────────────────────────────────────────
 let root; // { target, name, model }
+let listing = false;
 const kids = new Map(); // name → target
 let shuttingDown = false;
 const paneGuards = createPaneGuards({
@@ -322,7 +333,7 @@ const routerCore = async () => {
   const wiz = (to, event) => (event ? { kind: "wizard", to, event } : { kind: "wizard", to });
   const open = (event, owner, receiver, at, extra = {}) => ops.open({ event, owner, receiver, at, deadlineAt: DL, ...extra });
 
-  // ── 1 扇出: 全回 / 部分失败 / 提前收口后 late ──
+  // Progress and explicit finality are separate: dispatch chatter stays open, RESULT closes immediately.
   {
     const rootE = "e1";
     let t = T0 && add(EMPTY, open(rootE, "me", chat, T0));
@@ -342,7 +353,7 @@ const routerCore = async () => {
     ok(t["e1.3"].late === true, "迟到的结论标 late");
   }
 
-  // ── 2 同一对并发两件: 互不顶掉 ──
+  // Event identity, rather than the owner/receiver pair, isolates concurrent work.
   {
     let t = add(EMPTY, open("f1", "me", chat, T0), open("f1.1", "a", wiz("me", "f1"), T0 + 1), open("f1.2", "a", wiz("me", "f1"), T0 + 2));
     t = add(t, ops.answer({ at: T0 + 3, event: "f1.2", outcome: R.makeOutcome("done", "RESULT: two") }));
@@ -352,26 +363,83 @@ const routerCore = async () => {
     ok(R.settledTo(t, "me").map((r) => r.event).join() === "f1.1,f1.2", "两笔各留各的定论 (按件, 不按对)");
   }
 
-  // ── 3 W 同时欠三笔 (owner = W, 交代各回 x / y / z), 交错回来 ──
+  // One owner can owe several distinct receivers; settling one event cannot settle its siblings.
   {
     let t = add(EMPTY,
       ops.open({ event: "g1", owner: "W", receiver: wiz("x"), at: T0, deadlineAt: DL }),
       ops.open({ event: "g2", owner: "W", receiver: wiz("y"), at: T0 + 1, deadlineAt: DL }),
       ops.open({ event: "g3", owner: "W", receiver: wiz("z"), at: T0 + 2, deadlineAt: DL }));
-    ok(R.owedBy(t, "W").length === 3 && R.awaitedBy(t, "x").length === 1, "W 欠三笔 (欠账与「派出去的」是同一张表的两面)");
-    const need = R.onFinal(t, "W", "g1", { text: "NEED: 口令?" });
-    ok(need.length === 1 && need[0].op === "mark" && need[0].status === "need", "第一笔反问 → mark need");
-    t = add(t, ...need);
-    ok(R.owedBy(t, "W").length === 3 && R.settledTo(t, "x")[0].status === "need", "NEED 只是中途态, 债还在、正文也交回 x");
-    t = add(t, ops.answer({ at: T0 + 5, event: "g3", outcome: R.makeOutcome("done", "RESULT: z") }));
-    ok(R.settledTo(t, "z").length === 1 && R.settledTo(t, "y").length === 0, "z 那笔先落定, 不串到 y");
-    t = add(t, ops.mark({ at: T0 + 6, event: "g1", status: "open" }), ops.answer({ at: T0 + 7, event: "g1", outcome: R.makeOutcome("done", "RESULT: x") }));
-    t = add(t, ops.answer({ at: T0 + 8, event: "g2", outcome: R.makeOutcome("done", "RESULT: y") }));
-    ok(R.settledTo(t, "x")[0].outcome.body === "RESULT: x" && R.settledTo(t, "y")[0].outcome.body === "RESULT: y", "三笔交错各回各家");
-    ok(R.owedBy(t, "W").length === 3, "还没入箱 (answered 未 hand) —— 账上仍挂着");
+    ok(R.owedBy(t, "W").length === 3 && R.awaitedBy(t, "x").length === 1, "owner 与各 receiver 的欠账从同一事件表派生");
+    t = add(t, ...R.onFinal(t, "W", "g1", { text: "NEED: 口令?" }));
+    ok(t.g1.status === "need" && R.owedBy(t, "W").length === 3, "其中一笔 NEED 不解除其他欠账");
+    ok(R.settledTo(t, "x")[0]?.status === "need" && R.settledTo(t, "x")[0]?.notice?.body === "NEED: 口令?", "NEED 通知可由 settledTo(receiver) 查询");
+    t = add(t, ops.answer({ at: T0 + 3, event: "g3", outcome: R.makeOutcome("done", "RESULT: z") }));
+    ok(R.settledTo(t, "z").length === 1 && R.settledTo(t, "y").length === 0 && t.g2.status === "open", "完成一笔不串到另一 receiver");
+    ok(R.owedBy(t, "W").some((r) => r.event === "g3" && r.status === "answered"), "已 answer 未 hand 的行仍欠在 owner 名下");
   }
 
-  // ── 4 同笔回执合并 / 落定只写一次 / rev 与内容绑定 ──
+  // An answered child still blocks its parent until hand; after hand, an unmarked parent answer is releasable.
+  {
+    let t = add(EMPTY, open("l1", "A", chat, T0), open("l1.1", "B", wiz("A", "l1"), T0 + 1));
+    t = add(t, ops.answer({ at: T0 + 2, event: "l1.1", outcome: R.makeOutcome("done", "RESULT: child") }));
+    ok(R.waiting(t, "l1").length === 1
+      && R.onFinal(t, "A", "l1", { text: "父任务已处理" }).length === 0
+      && R.finalReleased(t, "A", "l1", "父任务已处理") === false,
+    "子行 answered 未 hand 仍阻塞父行的无标记终句");
+    t = add(t, ops.hand({ at: T0 + 3, event: "l1.1", inbox: "rcpt:l1.1:child" }));
+    const parentDone = R.onFinal(t, "A", "l1", { text: "父任务已处理" });
+    ok(R.waiting(t, "l1").length === 0 && parentDone.length === 1 && parentDone[0].op === "answer"
+      && R.finalReleased(t, "A", "l1", "父任务已处理") === true,
+    "子行 hand 后 waiting 清空, 父行无标记终句可落定并放行");
+  }
+
+  // Modern done reports deduplicate by execution input, while a new input can report a new result.
+  {
+    let t = add(EMPTY, open("src-done", "A", wiz("W"), T0));
+    const first = R.onFinal(t, "A", "src-done", { text: "RESULT: 原措辞", source: { input: "execution-1" } });
+    ok(first.length === 1 && first[0].op === "answer" && first[0].outcome.report?.source.input === "execution-1", "source done 首次执行产生带 report 的 answer");
+    t = add(t, ...first, ops.hand({ at: T0 + 1, event: "src-done", inbox: "rcpt:src-done:first" }));
+    ok(R.onFinal(t, "A", "src-done", { text: "RESULT: 换一种说法", source: { input: "execution-1" } }).length === 0,
+      "同一 execution input 的 done 重述换措辞仍去重");
+    const re = R.onFinal(t, "A", "src-done", { text: "RESULT: 新执行", source: { input: "execution-2" } });
+    ok(re.length === 1 && re[0].late === true && re[0].outcome.report?.source.input === "execution-2",
+      "新 execution input 可作为新 done 追述报告");
+    t = add(t, ...re, ops.hand({ at: T0 + 2, event: "src-done", inbox: "rcpt:src-done:second" }));
+  }
+
+  // NEED report identity includes its execution input and question text independently.
+  {
+    let t = add(EMPTY, open("src-need", "A", wiz("W"), T0));
+    const ask = (input, text) => R.onFinal(t, "A", "src-need", { text, source: { input } });
+    const first = ask("need-exec-1", "NEED: 口令?");
+    ok(first.length === 1 && first[0].op === "mark" && first[0].report?.source.input === "need-exec-1", "source NEED 首次问题产生带 report 的 mark");
+    t = add(t, ...first);
+    ok(ask("need-exec-1", "NEED: 口令?").length === 0, "同 input 同问题的 NEED 去重");
+    const nextInput = ask("need-exec-2", "NEED: 口令?");
+    ok(nextInput.length === 1 && nextInput[0].report?.source.input === "need-exec-2", "新 input 可再次提出同一 NEED");
+    t = add(t, ...nextInput);
+    ok(ask("need-exec-2", "NEED: 还是口令?").length === 1, "同 input 的新 NEED 问题可再次报告");
+  }
+
+  // Receipt facts are set-like and take precedence over the input id; adding a fact creates a new report.
+  {
+    let t = add(EMPTY, open("src-facts", "A", wiz("W"), T0));
+    const first = R.onFinal(t, "A", "src-facts", {
+      text: "RESULT: facts 1", source: { input: "receipt-input-1", facts: ["fact-a", "fact-b", "fact-a"] },
+    });
+    ok(first.length === 1 && first[0].op === "answer", "facts receipt 首次产生 answer");
+    t = add(t, ...first, ops.hand({ at: T0 + 1, event: "src-facts", inbox: "rcpt:src-facts:first" }));
+    ok(R.onFinal(t, "A", "src-facts", {
+      text: "RESULT: facts reordered", source: { input: "receipt-input-2", facts: ["fact-b", "fact-a"] },
+    }).length === 0, "facts 忽略顺序与重复项并优先于 input 去重");
+    const more = R.onFinal(t, "A", "src-facts", {
+      text: "RESULT: new fact", source: { input: "receipt-input-2", facts: ["fact-a", "fact-b", "fact-c"] },
+    });
+    ok(more.length === 1 && more[0].late === true, "新增 receipt fact 可再次报告");
+    t = add(t, ...more, ops.hand({ at: T0 + 2, event: "src-facts", inbox: "rcpt:src-facts:second" }));
+  }
+
+  // One receipt checks content-keyed idempotency and late recovery after a synthesized failure.
   {
     const body = "RESULT: same";
     let t = add(EMPTY, open("h1", "A", wiz("W"), T0));
@@ -393,7 +461,7 @@ const routerCore = async () => {
     ok(late.length === 1 && late[0].late === true && late[0].outcome.status === "done", "失败交差后 owner 真答 → late 补投");
     const u2 = add(u, ...late, ops.hand({ at: T0 + 4, event: "h2", inbox: "rcpt:h2:y" }));
     ok(u2["h2"].settledAs === "timeout" && u2["h2"].settledAt === late[0].at, "追述推后 settledAt, settledAs 只认第一次");
-    ok(R.onFinal(u2, "A", "h2", { text: "又补一句" }).length === 1, "起初是合成失败: 未标记的追述可收多次");
+    ok(R.onFinal(u2, "A", "h2", { text: "又补一句" }).length === 0, "首次真实定论后, 未标记追述不再重开合成失败");
     ok(R.onFinal(u2, "A", "h2", { text: "RESULT: real" }).length === 0, "同内容重放不再产 op");
     // canceled 不收迟答
     let c = add(EMPTY, open("h3", "A", wiz("W"), T0));
@@ -426,13 +494,16 @@ const routerCore = async () => {
     ok(Object.keys(R.collect(g, T0 + 2 * H + 10)).sort().join() === "g2,g3", "父子都满 TTL → 整支回收");
   }
 
-  // ── 5 NEED 往返 (上冒 + re 拉回) ──
+  // NEED is a resumable intermediate state; error is also nonterminal.
   {
     let t = add(EMPTY, open("k1", "A", wiz("W", "k0"), T0));
     const need = R.onFinal(t, "A", "k1", { text: "NEED: 口令?" });
     ok(need.length === 1 && need[0].status === "need", "NEED → mark need");
     t = add(t, ...need);
-    ok(t["k1"].status === "need" && R.onFinal(t, "A", "k1", { text: "NEED: 还是口令?" }).length === 0, "同一中途态只报一次 (行状态就是去重记号)");
+    ok(t["k1"].status === "need"
+      && R.onFinal(t, "A", "k1", { text: "NEED: 口令?" }).length === 0
+      && R.onFinal(t, "A", "k1", { text: "NEED: 还是口令?" }).length === 1,
+    "同一问题去重, 新问题即使仍是 NEED 也可再报");
     t = add(t, ops.mark({ at: T0 + 2, event: "k1", status: "open" })); // `re`
     const fin = R.onFinal(t, "A", "k1", { text: "RESULT: 口令对" });
     ok(fin.length === 1 && fin[0].op === "answer", "re 拉回 open 后再答 → 定论");
@@ -444,20 +515,18 @@ const routerCore = async () => {
     ok(R.onFinal(e, "A", "k2", { text: "API Error", error: true }).length === 0, "同一 error 不重复报");
   }
 
-  // ── 6 transfer = move (两连跳) + 叶子 NEED 直达 ──
+  // Ownership transfer keeps the original receiver edge and permits only the new owner to answer.
   {
     let t = add(EMPTY, open("p1", "A", chat, T0));
     t = add(t, ops.move({ at: T0 + 1, event: "p1", owner: "B" }), ops.move({ at: T0 + 2, event: "p1", owner: "C" }));
     ok(t["p1"].owner === "C" && t["p1"].receiver.kind === "chat", "transfer 只改 owner, receiver 边不动");
-    ok(R.chain(t, "p1").length === 1, "transfer 两连跳不留中间行 (链上只有自己)");
-    ok(R.waiting(t, "p1").length === 0, "transfer 过的行没有子行挂着");
     const nd = R.onFinal(t, "C", "p1", { text: "NEED: 口令?" });
     ok(nd.length === 1 && nd[0].status === "need", "叶子 NEED 直接落原行 (直达发话方)");
     ok(R.onFinal(t, "B", "p1", { text: "RESULT: 旧 owner" }).length === 0, "交出去的那位再答不算数");
     ok(R.finalReleased(t, "B", "p1", "已移交") === false && R.finalReleased(t, "C", "p1", "答") === true, "在飞的那一笔: 交出方终句不进群, 接手方的放行");
   }
 
-  // ── 7 stop 中层级联: 叶子先落 ──
+  // Stop cancels descendants before their parent.
   {
     let t = add(EMPTY, open("q1", "me", chat, T0), open("q1.1", "A", wiz("me", "q1"), T0 + 1), open("q1.1.1", "B", wiz("A", "q1.1"), T0 + 2));
     ok(R.subtree(t, "q1.1").map((r) => r.event).join() === "q1.1.1", "subtree 叶子先出");
@@ -467,7 +536,7 @@ const routerCore = async () => {
     ok(!add(t, ...cs)["q1"].outcome, "根行不受波及");
   }
 
-  // ── 8 receiver 被 stop 后升级 ──
+  // A missing receiver escalates to a live ancestor, then the chat root.
   {
     let t = add(EMPTY, open("r1", "me", wiz("up"), T0), open("r1.1", "A", wiz("dead", "r1"), T0 + 1));
     const esc = R.escalate(t, "r1.1", (k) => k !== "dead");
@@ -478,7 +547,7 @@ const routerCore = async () => {
     ok(!!dl && dl.receiver.kind === "chat" && dl.serves === "", "一路升到群 = Dead Letter");
   }
 
-  // ── 9 撕裂尾行 / 中间坏行 ──
+  // Journal recovery distinguishes a torn final write from corruption in the middle.
   {
     const good = JSON.stringify(open("z1", "A", wiz("W"), T0));
     const f1 = foldJournal(`${good}\n{"op":"open","event":"z2","owner":"B"`);
@@ -489,16 +558,20 @@ const routerCore = async () => {
     ok(foldJournal("")  .table && Object.keys(foldJournal("").table).length === 0, "空日志 fold 成空表");
   }
 
-  // ── 10 失败合成 (sweeper) + 期限夹取 ──
+  // Sweeper terminal outcomes and dependency release/cancel behavior.
   {
     const t = add(EMPTY, ops.open({ event: "y1", owner: "A", receiver: wiz("W"), at: T0, deadlineAt: T0 + 60_000 }));
     const sig = (o = {}) => ({ now: T0 + 1_000, paneDeadForMs: () => undefined, fruitless: () => 0, nameOf: (w) => `.${w}`, ...o });
-    const sw = R.sweepOps(t, sig({ now: T0 + 61_000 }));
+    const sw = R.sweepOps(t, sig({ now: T0 + 60_000 }));
     ok(sw.length === 1 && sw[0].outcome.status === "timeout" && /没有给出结论/.test(sw[0].outcome.body), "超期 → 合成 timeout (正文带守护进程说明)");
     const sw2 = R.sweepOps(t, sig({ paneDeadForMs: () => R.DEAD_GRACE_MS }));
     ok(sw2.length === 1 && sw2[0].outcome.status === "dead", "pane 死过宽限 → dead");
     const sw3 = R.sweepOps(t, sig({ fruitless: () => R.MAX_FRUITLESS }));
     ok(sw3.length === 1 && sw3[0].outcome.status === "silent", "停下 N 次没答 → silent");
+    ok(R.sweepOps(t, sig({ paneDeadForMs: () => R.DEAD_GRACE_MS - 1 })).length === 0, "pane 死亡未到宽限边界不判 dead");
+    ok(R.sweepOps(t, sig({ fruitless: () => R.MAX_FRUITLESS - 1 })).length === 0, "fruitless 未到上限不判 silent");
+    ok(R.sweepOps(t, sig({ now: T0 + 1_000, paneDeadForMs: () => R.DEAD_GRACE_MS, handingOff: () => true, fruitless: () => 0 })).length === 0,
+      "交接中的 pane 即使达到 dead 宽限也不判 dead");
     ok(R.sweepOps(t, sig()).length === 0, "没到期没死没静默 → 不产 op");
     // held 前置失败 → canceled 且说明哪件
     let h = add(EMPTY, open("u1", "A", wiz("W"), T0), ops.open({ event: "u2", owner: "B", receiver: chat, at: T0 + 1, deadlineAt: DL, after: ["u1"] }));
@@ -519,7 +592,7 @@ const routerCore = async () => {
     ok(R.deadlineOf(T0, 30) === T0 + 60_000 && R.deadlineOf(T0) === T0 + 3_600_000, "期限默认 1h / 下限 60s");
   }
 
-  // ── 11 派生: chain / speaksToHuman (方向闸读的那两样) ──
+  // Derived ancestry and human visibility are checked once at the core boundary.
   {
     const t = add(EMPTY, open("x1", "W", chat, T0), open("x1.1", "A", wiz("W", "x1"), T0 + 1), open("x1.1.1", "B", wiz("A", "x1.1"), T0 + 2));
     ok(R.chain(t, "x1.1.1").map((r) => r.event).join() === "x1.1.1,x1.1,x1", "chain 沿 receiver 边往上走到 chat");
@@ -531,18 +604,30 @@ const routerCore = async () => {
   return { pass: !fails.length, why: fails.length ? `${fails.length}/${n} 条没过: ${fails.join(" · ")}` : `${n} 条路由表断言全过` };
 };
 
-// ── 用例: 每条返回 { pass, why } (跳过返回 { pending, why }) ──────────────
+// ── 用例: 每条返回 { pass, why } ─────────────────────────────────────────
 const cases = {
+  charter: { direction: "charter", unit: true, default: true, summary: "renderCharter structure", names: [], run: async () => {
+    execFileSync("npx", ["tsx", "tests/charter.test.ts"], { stdio: "pipe" });
+    return { pass: true, why: "身份、能力与条件指引契约通过" };
+  } },
+  "router-routing": { direction: "dispatch", unit: true, default: true, summary: "candidate continuity, occupancy and tier boundaries", names: [], run: async () => {
+    execFileSync("npx", ["tsx", "tests/router-routing.test.ts"], { stdio: "pipe" });
+    return { pass: true, why: "路由连续性、占用及档位边界通过" };
+  } },
+  "router-tier": { direction: "dispatch", unit: true, default: true, summary: "backend resolution and tier selection", names: [], run: async () => {
+    execFileSync("npx", ["tsx", "tests/router-tier.test.ts"], { stdio: "pipe" });
+    return { pass: true, why: "后端解析与档位选择通过" };
+  } },
   // 保活任务闸 (pane-guards) 的纯单元 —— 与回执无关, 但同一批守护改动会同撞。
-  "receipt-guards": { names: [], unit: true, run: async () => {
+  "receipt-guards": { direction: "runtime", unit: true, summary: "pane guard prerequisite/cleanup", names: [], run: async () => {
     execFileSync("node", ["tests/receipt-guards.test.mjs"], { stdio: "pipe" });
     return { pass: true, why: "保活任务的清理 / 前提门控 全过" };
   } },
 
-  "router-core": { names: [], unit: true, run: routerCore },
+  "router-core": { direction: "receipt-core", unit: true, default: true, summary: "state transitions, isolation, failure, recovery", names: [], run: routerCore },
 
   // reminder 的形状契约: 注册表 (只写登记过的属性) / 尾巴顺序 / `msg` 并进信封 / 老形状照认 / rolepage 标签。
-  "reminder-shape": { names: [], unit: true, run: async () => {
+  "reminder-shape": { direction: "receipt-core", unit: true, default: true, summary: "envelope parsing and compatibility", names: [], run: async () => {
     const R = await import(new URL("../../dist/shared/reminder.js", import.meta.url).href);
     const P = await import(new URL("../../dist/daemon/peers.js", import.meta.url).href);
     const fails = [];
@@ -598,7 +683,7 @@ const cases = {
   } },
 
   // 回执去向只有四个词; 旧写法 (`chain`/`receipt`/`answer`) 自 T10b 起不再映射 (旧世界仍映射, 见词汇探测)。
-  "return-op": { names: [], unit: true, run: async () => {
+  "return-op": { direction: "dispatch", unit: true, default: true, summary: "return policy vocabulary", names: [], run: async () => {
     const { returnOpOf, RETURN_OPS } = await import(new URL("../../dist/daemon/dispatch.js", import.meta.url).href);
     const four = RETURN_OPS.map((x) => returnOpOf({ return: x }));
     const dflt = returnOpOf({});
@@ -614,7 +699,7 @@ const cases = {
   } },
 
   // 派活方向闸 (direction.ts): 纯单元, 链 / 深度由调用方算好传进来 (旧版从 receipts.ancestorsOf 取)。
-  "direction-gate": { names: [], unit: true, run: async () => {
+  "direction-gate": { direction: "dispatch", unit: true, default: true, summary: "job ownership, hierarchy, cycles", names: [], run: async () => {
     const { checkDirection } = await import(new URL("../../dist/daemon/direction.js", import.meta.url).href);
     const m = (target, role, outcome) => ({ target, task: "", spawned: false, at: 1, ...(role ? { role } : {}), ...(outcome ? { outcome } : {}) });
     const job = (id, owner, members, parent) => ({ id, base: "c", owner, title: id, members, status: "open", openedAt: 1, ...(parent ? { parent } : {}) });
@@ -644,7 +729,7 @@ const cases = {
   } },
 
   // 链深闸看**实际挂的那一帧**, 不看并集; 防环仍看并集 —— chain / depth 都由调用方算好。
-  "direction-depth-for": { names: [], unit: true, run: async () => {
+  "direction-depth-for": { direction: "dispatch", unit: true, default: true, summary: "active ancestry depth", names: [], run: async () => {
     const { checkDirection } = await import(new URL("../../dist/daemon/direction.js", import.meta.url).href);
     const chain = ["u", "v", "y", "z"]; // 两帧各 2 层, 并集 4
     const depth = ["y", "z"];           // 本轮实际服务那一帧的链深 2
@@ -657,12 +742,7 @@ const cases = {
   } },
 
   // 待 reload: 往 routes.jsonl 追一条 answer 行再 reload, 验「answered 未 hand 的件重入箱一次且只一次」。
-  // 默认就在名单里, 但不带 RR_ALLOW_RELOAD 时**只报 pending-reload 不 spawn**, 于是它永远出现在
-  // 汇总的 SKIP 行上 —— reload 由人按收尾顺序批, 用 RR_ALLOW_RELOAD=1 单独跑才真做。
-  "reload-answered-hand": { names: ["rr-rh"], run: async () => {
-    if (!process.env.RR_ALLOW_RELOAD) {
-      return { pending: "需 reload: 造一条 answered 未 hand 的行 → reload → 验重入箱一次", why: "本轮不 reload (由人批), 用 RR_ALLOW_RELOAD=1 单独跑" };
-    }
+  "reload-answered-hand": { direction: "reload", reload: true, summary: "restart recovery after answer before hand", names: ["rr-rh"], solo: true, run: async () => {
     const n = nonce();
     await spawn("rr-rh");
     const t0 = Date.now();
@@ -685,11 +765,10 @@ const cases = {
     };
   } },
 
-  // ── 依赖 (真 daemon): 根派 A (睡一会儿), B after A、C after B 都停放; A 落定 → B 带着 A 的结论投出,
-  // B 落定 → C 带着 B 的; 根各收一份回执。after 递的是**行 id** (两套词汇都认)。 ──────────────
-  "after-live": { names: ["rr-a1", "rr-b1", "rr-c1"], run: async () => {
+  // ── 依赖 (真 daemon): B after A 先停放; A 落定后 B 收到前置正文并给根一份完成回执。 ──
+  "after-live": { direction: "runtime", summary: "parked prerequisite, forwarded body and completion receipt", names: ["rr-a1", "rr-b1"], run: async () => {
     const n = nonce();
-    await Promise.all(["rr-a1", "rr-b1", "rr-c1"].map((x) => spawn(x)));
+    await Promise.all(["rr-a1", "rr-b1"].map((x) => spawn(x)));
     await probeVocab();
     const a = await tellAt("rr-a1", `${SLEEP(45)}, 然后回复一行: RESULT: a-${n}`);
     const ra = await tellRow("rr-a1", a);
@@ -697,22 +776,22 @@ const cases = {
     const b = await tellAt("rr-b1", `不要调用任何工具, 直接回复一行: RESULT: b-${n}`, { after: [handleOf(a, ra)] });
     const rb = await tellRow("rr-b1", b);
     if (!rb) return { pass: false, why: `找不到 B 的路由行: tell=${JSON.stringify({ ok: b.ok, turn: b.turn, parked: b.parked, reason: b.reason })} 行=${JSON.stringify((await rowsOfPair(root.target, kids.get("rr-b1"))).map((r) => [r.event, r.status, r.at, r.after]))}` };
-    const c = await tellAt("rr-c1", `不要调用任何工具, 直接回复一行: RESULT: c-${n}`, { after: [handleOf(b, rb)] });
-    if (!b.parked || !c.parked) return { pass: false, why: `没停放: b=${JSON.stringify(b).slice(0, 140)} c=${JSON.stringify(c).slice(0, 140)}` };
+    if (!b.parked) return { pass: false, why: `B 没停放: ${JSON.stringify(b).slice(0, 140)}` };
     await sleep(3000);
     const early = (await textOf("rr-b1")).includes(`b-${n}`);
-    const sc = await settledRow("rr-c1", 6 * 60_000);
-    const sb = await rowOf(root.target, kids.get("rr-b1"));
-    const tb = await textOf("rr-b1"), tc = await textOf("rr-c1");
-    const gb = await waitReceipts(root.target, "rr-b1"), gc = await waitReceipts(root.target, "rr-c1");
+    const sb = await settledRow("rr-b1", 6 * 60_000);
+    const tb = await textOf("rr-b1");
+    const gb = await waitReceipts(root.target, "rr-b1");
+    const body = sb?.outcome?.body ?? "";
+    const receiptDone = gb.length === 1 && gb[0].attrs.status === "done" && roundId(gb[0]) === sb?.event;
     return {
-      pass: !early && settled(sc) && sc.outcome.status === "done" && settled(sb) && sb.outcome.status === "done" && tb.includes(`a-${n}`) && tc.includes(`b-${n}`) && gb.length === 1 && gc.length === 1,
-      why: `A 前 B 已被注入=${early} · B=${sb?.outcome?.status} C=${sc?.outcome?.status ?? "未落定"} · B 带 A 结论=${tb.includes(`a-${n}`)} C 带 B 结论=${tc.includes(`b-${n}`)} · 根收到 B ${gb.length} / C ${gc.length} 份`,
+      pass: !early && settled(sb) && sb.outcome.status === "done" && tb.includes(`a-${n}`) && body.includes(`b-${n}`) && receiptDone,
+      why: `A 前 B 已被注入=${early} · B=${sb?.outcome?.status ?? "未落定"} 且定论含结果=${body.includes(`b-${n}`)} · B 收到前置正文=${tb.includes(`a-${n}`)} · 根收到同事件 done 回执=${receiptDone}`,
     };
   } },
 
   // 依赖 + reload (真 daemon, solo): B 停放后 reload 整个 daemon, 之后 A 落定 → B 照投、带 A 的结论。
-  "after-reload": { names: ["rr-a3", "rr-b3"], solo: true, run: async () => {
+  "after-reload": { direction: "reload", reload: true, summary: "dependency recovery across daemon restart", names: ["rr-a3", "rr-b3"], solo: true, run: async () => {
     const n = nonce();
     await Promise.all(["rr-a3", "rr-b3"].map((x) => spawn(x)));
     await probeVocab();
@@ -730,7 +809,7 @@ const cases = {
   } },
 
   // 依赖 (真 daemon): 前置超时 → B 从未被注入, 根收到 B 的 canceled 回执。
-  "after-fail": { names: ["rr-a2", "rr-b2"], run: async () => {
+  "after-fail": { direction: "runtime", summary: "failed prerequisite cancels dependent work", names: ["rr-a2", "rr-b2"], run: async () => {
     const n = nonce();
     await Promise.all(["rr-a2", "rr-b2"].map((x) => spawn(x)));
     await probeVocab();
@@ -751,7 +830,7 @@ const cases = {
 
   // graph 的步骤与进度跟着发起那一轮的频道: 根这一轮是私聊 (发起者的 return:none 私聊 / 回执),
   // 节点那一轮就不能进它的 home 群。
-  "graph-private": { names: ["rr-gn"], run: async () => {
+  "graph-private": { direction: "runtime", summary: "graph turns preserve private-channel routing", names: ["rr-gn"], run: async () => {
     const n = nonce();
     const tag = real("rr-gn");
     await spawn("rr-gn"); // Graph reuses this already-protected node.
@@ -769,7 +848,7 @@ const cases = {
 
   // 交接时欠着两份 (根的活在跑, rr-s 的一句插进同一轮): 新会话里每份各开一轮、各带各的信封,
   // 两个上游各收到答给自己那件的交代 —— 不是并成一句、两边拿到同一段。
-  "handoff-owe": { names: ["rr-h", "rr-s"], run: async () => {
+  "handoff-owe": { direction: "runtime", summary: "handoff carries independent outstanding obligations", names: ["rr-h", "rr-s"], run: async () => {
     const n = nonce();
     await Promise.all(["rr-h", "rr-s"].map((x) => spawn(x)));
     await probeVocab();
@@ -852,7 +931,7 @@ const cases = {
 
   // fork 分身 (继承上下文) 的第一轮: 带 task 的是私聊派活, 不带的是开场白 —— 都不是人在群里
   // 问的, 终句不能进分身的 home 群。实测于 .irisfit-coder (10-03 04:33) / .eff-d (10-02 15:09)。
-  "clone-private": { names: ["rr-f", "rr-g"], run: async () => {
+  "clone-private": { direction: "runtime", summary: "clone opening turns stay private", names: ["rr-f", "rr-g"], run: async () => {
     const n = nonce();
     await spawn("rr-f", { inherit: true, task: `这是回归测试, 不要调用任何工具, 直接回复一行: RESULT: [receipt-regress] fork-${n}` });
     await spawn("rr-g", { inherit: true });
@@ -866,8 +945,9 @@ const cases = {
     };
   } },
 
-  // 三级 root→a→b→c: c 的结论经 b、a 冒泡回根, 根只收到一份, 内容是真结论而不是「已派」。
-  chain: { names: ["rr-a", "rr-b", "rr-c"], run: async () => {
+  // 并发两子: p 同一轮派 q1、q2; 第一份回执轮不外发, 第二份把结论带上去, 根只收一份且含两份结论。
+  // 连续两次回执上冒: 最深叶子的定论经两个中间人各自收件、续答后到根, 根只收到最终一份。
+  chain: { direction: "runtime", summary: "two consecutive receipt hops reach the root", names: ["rr-a", "rr-b", "rr-c"], run: async () => {
     const n = nonce();
     await Promise.all(["rr-a", "rr-b", "rr-c"].map((x) => spawn(x)));
     await probeVocab();
@@ -876,10 +956,10 @@ const cases = {
     const a = `${TELL("rr-b", b)}\n发完立刻结束这一轮, 只回「已派」。之后收到 rr-b 的回执, 最后一行原样写它的 RESULT 行。`;
     await tell("rr-a", a);
     const s = await settledRow("rr-a", 8 * 60_000);
-    // haiku 偶尔先答「已派」收了这一轮、下一轮才真派 —— 那件活就不挂在根的这件下面, 是分身没照做。
     const ab = await rowOf(kids.get("rr-a"), kids.get("rr-b"));
     const rootedUp = ab?.receiver?.event === (await rowOf(root.target, kids.get("rr-a")))?.event;
-    if (s && !s.outcome?.body.includes(`chain-${n}`) && !rootedUp) return { pass: false, why: "rr-a 没在答根的那一轮里派活 (haiku 没照做), 重跑这一条" };
+    if (s && !s.outcome?.body.includes(`chain-${n}`) && !rootedUp)
+      return { pass: false, why: "rr-a 没在答根的那一轮里派活 (haiku 没照做), 重跑这一条" };
     const got = await waitReceipts(root.target, "rr-a");
     const all = await receiptsIn(root.target);
     return {
@@ -889,7 +969,7 @@ const cases = {
   } },
 
   // 并发两子: p 同一轮派 q1、q2; 第一份回执轮不外发, 第二份把结论带上去, 根只收一份且含两份结论。
-  fanout: { names: ["rr-p", "rr-q1", "rr-q2"], run: async () => {
+  fanout: { direction: "runtime", summary: "sibling progress and final receipt aggregation", names: ["rr-p", "rr-q1", "rr-q2"], run: async () => {
     const n = nonce();
     await Promise.all(["rr-p", "rr-q1", "rr-q2"].map((x) => spawn(x, x === "rr-p" ? { tier: "standard" } : {})));
     await probeVocab();
@@ -921,7 +1001,7 @@ const cases = {
   } },
 
   // wait_peer 同步取走: 回执不再投第二遍 (取走前已投 → delivered:true 且只有那一份)。
-  wait: { names: ["rr-x"], run: async () => {
+  wait: { direction: "runtime", summary: "wait observes receipt without duplicate delivery", names: ["rr-x"], run: async () => {
     const n = nonce();
     await spawn("rr-x");
     await tell("rr-x", `${SLEEP(20)}, 然后回复一行: RESULT: wait-${n}`);
@@ -941,7 +1021,7 @@ const cases = {
 
   // 长轮: 问话之后那一轮的 transcript 涨过 2MB (大段工具输出), 问话被推出尾巴的读窗 —— 答完了
   // 也要定位得到, 不能报 silent。对方睡着时往它的 jsonl 尾巴追加 2.5MB 解析器不认的填充行来模拟。
-  "long-turn": { names: ["rr-l"], run: async () => {
+  "long-turn": { direction: "runtime", summary: "large transcript tail still yields the completed result", names: ["rr-l"], run: async () => {
     const n = nonce();
     await spawn("rr-l");
     await tell("rr-l", `${SLEEP(40)}, 然后回复一行: RESULT: long-${n}`);
@@ -959,7 +1039,7 @@ const cases = {
   } },
 
   // deadline: 60s 期限, 对方要睡 150s → 落 timeout, 根收到一份 status=timeout。
-  deadline: { names: ["rr-y"], run: async () => {
+  deadline: { direction: "runtime", summary: "deadline emits one timeout receipt", names: ["rr-y"], run: async () => {
     await spawn("rr-y");
     const t0 = Date.now();
     await tell("rr-y", `${SLEEP(150)}, 然后回复一行: RESULT: late`, { deadline: 60 });
@@ -972,7 +1052,7 @@ const cases = {
   } },
 
   // 对方 pane 被直接杀掉 (不经 stop_wizard, 那会落 canceled) → dead。
-  dead: { names: ["rr-z"], run: async () => {
+  dead: { direction: "runtime", summary: "lost pane emits a dead receipt", names: ["rr-z"], run: async () => {
     await spawn("rr-z");
     await tell("rr-z", `${SLEEP(120)}, 然后回复一行: RESULT: never`);
     await sleep(10_000);
@@ -990,7 +1070,7 @@ const cases = {
   } },
 
   // NEED → re 答复 → done: 中途那份 status=need 且不算定论, 续问沿用**同一行** (两轮都服务它), 终态 done。
-  need: { names: ["rr-n", "rr-ns"], run: async () => {
+  need: { direction: "runtime", summary: "NEED resumes the same event to a final result", names: ["rr-n", "rr-ns"], run: async () => {
     const n = nonce();
     await Promise.all(["rr-n", "rr-ns"].map((x) => spawn(x)));
     await probeVocab();
@@ -1033,7 +1113,7 @@ const cases = {
   } },
 
   // 工单 expect=2: 两份回执的信封依次写 1/2、2/2 (complete), 账本两名成员都落 done。
-  job: { names: ["rr-j1", "rr-j2"], run: async () => {
+  job: { direction: "runtime", summary: "job member outcomes and aggregate counts", names: ["rr-j1", "rr-j2"], run: async () => {
     const n = nonce();
     const o = await post("/jobs/open", { target: root.target, title: "[receipt-regress] 工单 expect 计数", expect: 2 });
     if (!o.ok) return { pass: false, why: `open_job: ${o.reason}` };
@@ -1049,7 +1129,7 @@ const cases = {
   } },
 
   // 工单收工之后才到的回执: 信封说明工单已收, 不再催 close_job。
-  "job-late": { names: ["rr-j3"], run: async () => {
+  "job-late": { direction: "runtime", summary: "late result after job closure", names: ["rr-j3"], run: async () => {
     const o = await post("/jobs/open", { target: root.target, title: "[receipt-regress] 收工后迟到的回执", expect: 1 });
     if (!o.ok) return { pass: false, why: `open_job: ${o.reason}` };
     await spawn("rr-j3", { job: o.job, task: `${SLEEP(20)}, 然后回复一行: RESULT: late` });
@@ -1062,7 +1142,7 @@ const cases = {
   } },
 
   // return:detach —— a 在答根那一轮里派的旁支活不挂住 a 给根的交代: 根先拿到 a 自己的结论, 且只一份。
-  detach: { names: ["rr-e", "rr-d"], run: async () => {
+  detach: { direction: "runtime", summary: "detached side work leaves owner's result independent", names: ["rr-e", "rr-d"], run: async () => {
     const n = nonce();
     await Promise.all(["rr-e", "rr-d"].map((x) => spawn(x)));
     await probeVocab();
@@ -1080,7 +1160,7 @@ const cases = {
 
   // 工单验收 (B4 ⑦): 成员第一次交了没有 RESULT 的答复 → 守护进程同件打回一次, 那份不投给根;
   // 第二次照收。根只收到一份, 内容是补了 RESULT 的那次。
-  accept: { names: ["rr-v"], run: async () => {
+  accept: { direction: "runtime", summary: "job result acceptance retries incomplete finality", names: ["rr-v"], run: async () => {
     const n = nonce();
     const t0 = Date.now();
     const o = await post("/jobs/open", { target: root.target, title: "[receipt-regress] 工单验收打回", expect: 1, accept: "result" });
@@ -1099,7 +1179,7 @@ const cases = {
   // 按行撤回 / 不误伤 (B4 ⑧): rr-k 先做根派的活, rr-o 的活排在后面 (normal 等它闲)。
   // 根按件撤回自己那件 → 只停这一轮; rr-k 接着做 rr-o 的活时, 根不带件号的打断被拒、
   // urgent 降成 normal; rr-o 那件最终照常答完。
-  "cancel-turn": { names: ["rr-k", "rr-o"], run: async () => {
+  "cancel-turn": { direction: "runtime", summary: "per-turn cancellation preserves another owner's queued work", names: ["rr-k", "rr-o"], run: async () => {
     const n = nonce();
     await Promise.all(["rr-k", "rr-o"].map((x) => spawn(x)));
     await probeVocab();
@@ -1126,7 +1206,7 @@ const cases = {
   // 定时任务 (B4 ⑤): 点名目标到点正忙 → 顺延到它闲下来再投; quiet 任务终句是 QUIET 就不进群,
   // 不是就由守护进程转进「它的 home 群」。两个分身都生在伪群 SINK 里, 转发落在那儿 (企微拒收,
   // daemon.log 记一行 chat notify failed) —— 人所在的真实群里什么也不出现。
-  "task-quiet": { names: ["rr-t", "rr-t2"], run: async () => {
+  "task-quiet": { direction: "runtime", summary: "scheduled delivery waits for busy pane and respects quiet routing", names: ["rr-t", "rr-t2"], run: async () => {
     const n = nonce();
     await Promise.all(["rr-t", "rr-t2"].map((x) => spawn(x, { chat: SINK })));
     const t0 = Date.now();
@@ -1189,16 +1269,52 @@ const cleanup = () => cleaning ??= (async () => {
   console.log("CLEANUP done: 本轮 guards/children/root 已清理");
 })();
 
+const entries = Object.entries(cases);
+const directions = [...new Set(entries.map(([, c]) => c.direction))];
+const groupCases = (direction) => entries.filter(([, c]) => c.direction === direction).map(([name]) => name);
+const parseArgs = (args) => {
+  let list = false, full = false;
+  const groups = [], names = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--list") list = true;
+    else if (args[i] === "--full") full = true;
+    else if (args[i] === "--group") groups.push(args[++i] ?? "");
+    else if (args[i].startsWith("-")) throw new Error(`未知参数 ${args[i]}`);
+    else names.push(args[i]);
+  }
+  if (list && (full || groups.length || names.length)) throw new Error("--list 不能与运行参数组合");
+  if (full && (groups.length || names.length)) throw new Error("--full 不能与分组或单例组合");
+  const invalid = groups.filter((x) => !directions.includes(x));
+  if (invalid.length) throw new Error(`未知方向 ${invalid.join(", ")}；可选: ${directions.join(", ")}`);
+  const picked = [...new Set([...names.flatMap((x) => x === "unit" ? entries.filter(([, c]) => c.unit).map(([name]) => name) : [x]), ...groups.flatMap(groupCases)])];
+  const unknown = picked.filter((x) => !Object.hasOwn(cases, x));
+  if (unknown.length) throw new Error(`没有用例 ${unknown.join(" ")}；使用 --list 查看`);
+  const chosen = picked.length ? picked : full ? entries.filter(([, c]) => !c.solo).map(([name]) => name) : entries.filter(([, c]) => c.default).map(([name]) => name);
+  const reload = chosen.filter((x) => cases[x].reload);
+  if (reload.length && (reload.length !== 1 || chosen.length !== 1 || full || groups.length))
+    throw new Error("reload 用例必须单独按名称运行");
+  return { list, full, chosen, reload };
+};
+
+const listCases = () => {
+  for (const group of directions) {
+    console.log(`${group}:`);
+    for (const name of groupCases(group)) {
+      const c = cases[name];
+      console.log(`  ${name.padEnd(22)} ${c.unit ? "offline" : c.solo ? "live/solo" : "live"} · ${c.summary}`);
+    }
+  }
+  console.log(`default: ${entries.filter(([, c]) => c.default).length} offline cases; --full selects all non-solo cases`);
+};
+
 const main = async () => {
-  console.log("typecheck…");
-  execFileSync("npm", ["run", "-s", "typecheck"], { stdio: "inherit" });
-  // `unit` = 全部纯 unit 用例 (不生分身、不碰 daemon)。
-  const pick = process.argv.slice(2).flatMap((x) => (x === "unit" ? Object.keys(cases).filter((k) => cases[k].unit) : [x]));
-  const bad = pick.filter((x) => !cases[x]);
-  if (bad.length) throw new Error(`没有用例 ${bad.join(" ")} —— 有: ${Object.keys(cases).join(" ")}`);
-  // solo: 会 reload 整个 daemon, 与别的用例并跑会弄断它们 —— 默认不跑, 点名才跑 (`run.mjs after-reload`)。
-  const chosen = pick.length ? pick : Object.keys(cases).filter((x) => !cases[x].solo);
-  // 只跑纯 unit 的不必生根 (它们不碰 daemon)。
+  const parsed = parseArgs(process.argv.slice(2));
+  if (parsed.list) { listing = true; listCases(); process.exit(0); }
+  const chosen = parsed.chosen;
+  if (parsed.reload.length && process.env.RR_ALLOW_RELOAD !== "1")
+    throw new Error(`运行 ${parsed.reload[0]} 会 reload daemon；须先设置 RR_ALLOW_RELOAD=1 单独执行`);
+  if (chosen.some((x) => !cases[x].unit)) await initBackend();
+  // Only live cases need a wizard identity, daemon access, and disposable panes.
   if (chosen.some((x) => !cases[x].unit)) {
     if (!ME.sessionId && !ME.tmuxPane) throw new Error("要在 wizard 会话里跑 (缺会话 id / TMUX_PANE)");
     const birth = spawning.then(async () => {
@@ -1224,18 +1340,16 @@ const main = async () => {
       if (e instanceof GuardPrerequisiteError) throw e;
       return { pass: false, why: `抛错: ${e.message}` };
     });
-    const tag = out.pending ? "SKIP" : out.pass ? "PASS" : "FAIL";
+    const tag = out.pass ? "PASS" : "FAIL";
     console.log(`${tag} ${name.padEnd(21)} ${Math.round((Date.now() - t0) / 1000)}s · ${out.why}`);
     await Promise.all(c.names.map(stop));
     slots.give(c.names.length);
     return { name, ...out };
   }));
-  const failed = results.filter((x) => !x.pending && !x.pass).length;
-  const skipped = results.filter((x) => !!x.pending);
+  const failed = results.filter((x) => !x.pass).length;
   const rootAlive = !root || (!!(await jsonlOf(root.target)) && !!tmuxPaneOf(root.name));
   if (!rootAlive) console.log("FAIL 根 rr-root 中途没了 —— 「根收到 N 份」类判定无效, 重跑");
-  console.log(`${results.length - failed - skipped.length}/${results.length - skipped.length} PASS · ${failed}/${results.length - skipped.length} FAIL · ${skipped.length} pending-reload`);
-  skipped.forEach((x) => console.log(`  SKIP ${x.name} (${x.pending}): ${x.why}`));
+  console.log(`${results.length - failed}/${results.length} PASS · ${failed}/${results.length} FAIL`);
   return rootAlive ? failed : Math.max(1, failed);
 };
 
@@ -1243,5 +1357,12 @@ for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]]) process.on(sig
   void cleanup().catch((e) => console.error(e)).finally(() => process.exit(code));
 });
 main()
-  .then(async (failed) => { await cleanup(); process.exit(failed ? 1 : 0); })
-  .catch(async (e) => { console.error(e); await cleanup().catch((e) => console.error(e)); process.exit(2); });
+  .then(async (failed) => {
+    if (root || kids.size || gates.size) await cleanup();
+    process.exit(failed ? 1 : 0);
+  })
+  .catch(async (e) => {
+    console.error(e);
+    if (!listing && (root || kids.size || gates.size)) await cleanup().catch((e) => console.error(e));
+    process.exit(2);
+  });
