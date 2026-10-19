@@ -9,6 +9,19 @@ export interface MessageFooterPolicy {
 
 const footerUrl = (content: string): string | undefined => /\[[✨✦]\]\(([^\n)]*)\)\s*$/.exec(content)?.[1];
 
+const endsWithClosedFence = (content: string): boolean => {
+  const lines = content.split("\n");
+  const open = lines.reduce<{ char: string; size: number } | undefined>((fence, line) => {
+    const marker = /^\s*(`{3,}|~{3,})(.*)$/.exec(line);
+    if (!marker) return fence;
+    const token = marker[1]!;
+    if (!fence) return { char: token[0]!, size: token.length };
+    return token[0] === fence.char && token.length >= fence.size && !marker[2]!.trim() ? undefined : fence;
+  }, undefined);
+  return !open && /^\s*(`{3,}|~{3,})\s*$/.test(lines.at(-1) ?? "") &&
+    lines.slice(0, -1).some((line) => /^\s*(`{3,}|~{3,})/.test(line));
+};
+
 /** Only the daemon's trusted ticket resolver can classify a generated footer. */
 export const withoutMessageFooter = (content: string, _ownUrl?: string): string => {
   const match = /(?:\n\s*)?\[[✨✦]\]\(([^\n)]*)\)\s*$/.exec(content);
@@ -36,5 +49,6 @@ export const withMessageFooter = (content: string, policy?: MessageFooterPolicy)
   // 这一层是所有出站气泡 (stream / standalone / frozen final) 的最后一道改写: 上游 chatHead 写的头在这里被剥掉重写,
   // 所以非 default wizard 的 code 样式署名只能在这里定 —— 名字不挂链接, rolepage 入口归尾部 ✦。
   const head = [sender === policy.defaultTarget ? "" : `\`${tagHead(sender)}\`:`, seq].filter(Boolean).join(" ");
-  return `${headed(head, payload).trimEnd()} [✦](${url})`;
+  const message = headed(head, payload).trimEnd();
+  return `${message}${endsWithClosedFence(payload) ? "\n\n" : " "}[✦](${url})`;
 };

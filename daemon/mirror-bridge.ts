@@ -6632,8 +6632,21 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const hookReviews = new Map<string, HookReview>();
   const hookReviewBySession = new Map<string, string>();
   const hookCardFailures = new Map<string, { fingerprint: string; attempts: number; retryAt: number }>();
-  const hookDetails = (hooks: CodexHook[]): string =>
-    `Codex 待审 hooks 清单（逐项展示来源、事件、matcher、命令和 hash）：\n\n\`\`\`json\n${JSON.stringify(hooks.map((h) => ({ source: h.sourcePath, event: h.eventName, matcher: h.matcher, key: h.key, enabled: h.enabled, trust: h.trustStatus, hash: h.currentHash, command: h.command })), null, 2).replace(/```/gu, "\\u0060\\u0060\\u0060")}\n\`\`\``;
+  const hookDetails = (hooks: CodexHook[]): string => {
+    const allEnabled = hooks.every((hook) => hook.enabled);
+    const items = hooks.map((hook, index) => [
+      `${index + 1}. Codex hook`,
+      `source: ${hook.sourcePath}`,
+      `event: ${hook.eventName}`,
+      `matcher: ${hook.matcher}`,
+      `key: ${hook.key}`,
+      `enabled: ${hook.enabled}`,
+      `trust: ${hook.trustStatus}`,
+      `hash: ${hook.currentHash}`,
+      `command: ${hook.command}`,
+    ].join("\n")).join("\n\n");
+    return `Codex 待审 hooks 清单（${allEnabled ? "以下 hooks 均已启用" : "逐项审查"}）：\n\n${items}`;
+  };
   const renderHookReviewCard = (id: string, hooks: CodexHook[], status = "选择操作"): TemplateCard => ({
     card_type: "vote_interaction",
     source: { desc: "Codex hook 信任审查" },
