@@ -777,7 +777,7 @@ const main = async (): Promise<void> => {
       const r = await m.injectText(target, text, undefined, { guard });
       json(res, r.ok ? 200 : 500, r);
     });
-    // 工作目录属于 CLI 进程; 活会话只记录 pending, 必须由人显式 /new 应用。
+    // 工作目录属于 CLI 进程; 活会话先记录 pending, 由调用方收尾后 self-handoff 应用。
     http.register("POST /mirror/workspace", async (req, res) => {
       const body = (await readBody(req)) as Partial<{ target: string; sessionId: string; tmuxPane: string; cwd: string; keep: boolean }>;
       const cwd = (body.cwd ?? "").toString();
@@ -795,8 +795,8 @@ const main = async (): Promise<void> => {
       const set = m.setPendingCwd(target, cwd);
       if (!set.ok) { json(res, 400, { ...set, target }); return; }
       if ((await liveOf([target])).length) {
-        json(res, 409, { ok: false, target, runningCwd: set.runningCwd, pendingCwd: set.pendingCwd,
-          reason: "原 CLI 进程不能切换工作目录；请求已保留为 pendingCwd，需要显式 /new 才生效，handoff /clear 不会应用它" });
+        json(res, 200, { ok: true, target, runningCwd: set.runningCwd, pendingCwd: set.pendingCwd, handoffRequired: true,
+          message: "工作区切换已排入 pendingCwd。当前任务收尾并整理简报后，调用方须对自己执行 handoff；daemon 将在新 CLI 进程中应用该目录并继续简报。当前进程尚未切换。" });
         return;
       }
       // Same shape as inbound's /new: windowName = tag for tagged sessions,
@@ -2560,9 +2560,20 @@ const main = async (): Promise<void> => {
       if (!handoffAllowed(self)) return { status: 409, body: { ok: false, reason: "workflow continuation withdrawn or executor reserved" } };
       if (brief.length < 40) return { status: 400, body: { ok: false, reason: "brief 太短 —— 要写到零上下文也能接手: 目标 / 已完成 / 当前状态 / 下一步 / 关键文件与坑" } };
       const info = m.sessionInfo(self);
+      const cwd = m.getCwd(self);
+      const workspaceSwitch = !!cwd.pendingCwd && cwd.pendingCwd !== cwd.runningCwd;
       const r = handoffs.self(self, brief);
       return r.ok
-        ? { status: 200, body: { ok: true, target: self, contextTokens: info?.contextTokens ?? 0, scheduled: true } }
+        ? { status: 200, body: {
+            ok: true,
+            target: self,
+            contextTokens: info?.contextTokens ?? 0,
+            scheduled: true,
+            ...(workspaceSwitch ? {
+              pendingCwd: cwd.pendingCwd,
+              message: `handoff 已排队；当前任务收尾后，daemon 将启动新 CLI 并在 ${cwd.pendingCwd} 中继续简报。旧进程不会原地切换目录。`,
+            } : {}),
+          } }
         : { status: 409, body: { ok: false, reason: r.reason } };
     };
     http.register("POST /handoff", async (req, res) => {

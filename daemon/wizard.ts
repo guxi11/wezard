@@ -540,7 +540,7 @@ export const renderCharter = (a: CharterArgs): string => {
     parts.push(
       "> ⚠️ 上面这个工作区是**没人选过的默认兜底目录**, 不是人指定的。",
       "> 所以**开工前先问一句**: 要在哪个项目目录下干活?",
-      "> 给了路径 → `set_workspace({cwd})` (当场换目录重开; 这一轮上下文会没, 让他把活再说一遍)。",
+      "> 给了路径 → `set_workspace({cwd})` 排入切换; 当前任务收尾后调用自身 `handoff({brief})`, daemon 会在新 CLI 进程的新目录中继续简报。旧进程不会原地切目录, 不要让人手动发 `/new`。",
       "> 说就用这个 / 不用换 → `set_workspace({keep:true})` 记一笔, 此后谁都不会再问。",
       "> 只问这一次 —— 他不答就照这个目录干, 别反复追问。",
       "",
@@ -580,7 +580,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "`stop_wizard` 打断或强制结束一个 wizard",
       "`open_job` / `close_job` 一次派两个以上分身时开 / 收工单 · `list_jobs` 找回工单 id · `pending_items` 我派出去还没了结的事 (`drop` 消项)",
       "`wizard_whoami` 我的上下文用量与分身 · `wizard_identity` 改名 / 写职责 · `wizard_remember` 跨会话记忆 (`self` / `chat` / `workspace`)",
-      "`handoff` 交接自己原地重开 (时机见「自我管理」; 点名则替别人) · `set_workspace` 换项目目录 (自己调, 不必让人敲命令) · `set_model` 换模型 / effort",
+      "`handoff` 交接自己: 无待切工作区时清空当前上下文; 有 `pendingCwd` 时启动新 CLI 并应用该目录 (时机见「自我管理」; 点名则替别人) · `set_workspace` 排入工作区切换, 当前任务收尾后须 handoff 自己 · `set_model` 换模型 / effort",
       "`schedule_task` / `list_tasks` / `cancel_task` 到点自动执行的活",
       "`config_get` 逐层看 wezard 配置 (说明、默认、谁能改、何时生效) · `config_set` 改它 (先 `dryRun` 看 diff; 放权项会推卡等人点)",
       "`wait_peer` 仅当这一轮非拿到答案不可 (平时等回执), 或要等一个不是你派活的 wizard 停下 · `name_chat` 给聊天起名",

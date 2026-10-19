@@ -6181,7 +6181,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   };
 
   // Write `pendingCwd` to the BASE principal so the switch applies chat-wide —
-  // the next /new in any tagged/untagged session picks it up. `set_workspace`
+  // the next /new or self-handoff in any tagged/untagged session picks it up. `set_workspace`
   // from a tagged session still writes to the shared slot, not the tagged
   // session's own record, matching "sessions share the chat's cwd".
   const setPendingCwd = (
@@ -7123,13 +7123,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const a = byTarget.get(target);
     if (!a || !clear.nextSid || !clear.panePid || a.tmuxPane !== clear.pane || a.sessionId !== clear.nextSid || await panePidOf(clear.pane) !== clear.panePid) return false;
     const backend = backendForPath(a.jsonlPath);
-    if (backend.name === "claude") {
+    if (backend.name === "claude" || backend.name === "claude-internal") {
       const actual = sessionOnPane(backend.homeDir, clear.pane);
       return actual?.pid === clear.pid && actual.sessionId === clear.nextSid;
     }
-    if (backend.name !== "codex" || codexSessionForPane(clear.pane)?.sessionId !== clear.nextSid) return false;
+    if (backend.name === "codex" && codexSessionForPane(clear.pane)?.sessionId !== clear.nextSid) return false;
     const ps = await psSnap();
-    const pids = new Set([...ps.commands].filter(([, command]) => basename(command) === "codex").map(([pid]) => pid));
+    const executable = backend.name === "codex" ? "codex" : basename(backend.bin);
+    const pids = new Set([...ps.commands].filter(([, command]) => basename(command) === executable).map(([pid]) => pid));
     return registeredPidUnder(clear.panePid, pids, ps.kids) === clear.pid;
   };
 
@@ -7150,24 +7151,90 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const a = byTarget.get(target);
     if (!a?.tmuxPane) return { ok: false, reason: "handoff requires the original live pane; no respawn" };
     const backend = backendForPath(a.jsonlPath);
-    // 只开放本机真实探针验证过的后端; 不能因家族相近就假定 slash/注册表语义相同。
-    if (!["claude", "codex"].includes(backend.name)) return { ok: false, reason: `${backend.name} native /clear completion is not verified; pane unchanged` };
-    if (a.pendingCwd && a.pendingCwd !== a.runningCwd) return { ok: false, reason: "pending workspace switch requires an explicit /new; /clear keeps the original process cwd" };
     const pane = a.tmuxPane;
     const valid = (): boolean => guard() && byTarget.get(target) === a && a.tmuxPane === pane;
     try {
       return await withPaneInput(pane, async (live) => {
         const codex = backend.name === "codex";
         const nativePid = async (): Promise<number | undefined> => {
-          if (!codex) return sessionOnPane(backend.homeDir, pane)?.pid;
           const root = await panePidOf(pane);
+          if (!root) return undefined;
+          if (backend.name === "claude" || backend.name === "claude-internal") return sessionOnPane(backend.homeDir, pane)?.pid;
           const ps = await psSnap();
-          return registeredPidUnder(root, new Set([...ps.commands].filter(([, command]) => basename(command) === "codex").map(([pid]) => pid)), ps.kids);
+          const executable = codex ? "codex" : basename(backend.bin);
+          return registeredPidUnder(root, new Set([...ps.commands].filter(([, command]) => basename(command) === executable).map(([pid]) => pid)), ps.kids);
         };
         const pid = await nativePid();
         const panePid = await panePidOf(pane);
         if (!pid || !panePid || !(await tmuxPaneAlive(pane))) return { ok: false, reason: "original CLI process identity is unavailable" };
         const original = sessionOnPane(backend.homeDir, pane);
+        const queuedCwd = chatCwdFallback(target).pending || a.pendingCwd;
+        const pendingCwd = queuedCwd || attempt?.workspaceCwd || "";
+        const workspaceStillNeedsHandoff = pendingCwd && (expandHome(pendingCwd) !== expandHome(a.runningCwd) || (!!attempt && a.sessionId !== attempt.sid));
+        if (workspaceStillNeedsHandoff) {
+          const prior = attempt ?? { pane, pid, panePid, sid: a.sessionId, at: Date.now(), workspaceCwd: pendingCwd };
+          const actualCwd = (binding: typeof a): string => expandHome(binding.runningCwd.trim());
+          const processEvidence = async (binding: typeof a): Promise<ClearAttempt | undefined> => {
+            if (!binding.tmuxPane || !binding.sessionId || actualCwd(binding) !== expandHome(pendingCwd)) return undefined;
+            const nextPanePid = await panePidOf(binding.tmuxPane);
+            if (!nextPanePid) return undefined;
+            const nextBackend = backendForPath(binding.jsonlPath);
+            let nextPid: number | undefined;
+            if (nextBackend.name === "claude" || nextBackend.name === "claude-internal") {
+              const session = sessionOnPane(nextBackend.homeDir, binding.tmuxPane);
+              if (session?.sessionId === binding.sessionId) nextPid = session.pid;
+            }
+            if (nextBackend.name !== "claude" && nextBackend.name !== "claude-internal") {
+              const ps = await psSnap();
+              const executable = nextBackend.name === "codex" ? "codex" : basename(nextBackend.bin);
+              const processIds = new Set([...ps.commands].filter(([, command]) => basename(command) === executable).map(([childPid]) => childPid));
+              nextPid = registeredPidUnder(nextPanePid, processIds, ps.kids);
+              if (nextBackend.name === "codex" && codexSessionForPane(binding.tmuxPane)?.sessionId !== binding.sessionId) nextPid = undefined;
+            }
+            return nextPid ? { ...prior, pane: binding.tmuxPane, pid: nextPid, panePid: nextPanePid, nextSid: binding.sessionId } : undefined;
+          };
+
+          // A queued workspace switch must replace the CLI process, not clear its
+          // context in place. Persist the old process identity before spawning so
+          // a daemon reload can distinguish an unapplied switch from a completed one.
+          if (attempt?.nextSid) {
+            return await verifyClearContext(target, attempt)
+              ? { ok: true }
+              : { ok: false, reason: "new workspace handoff process/session changed; refusing brief replay" };
+          }
+          const current = byTarget.get(target);
+          if (!current) return { ok: false, reason: "workspace handoff attachment disappeared" };
+          if (current.sessionId !== prior.sid) {
+            const recovered = await processEvidence(current);
+            if (!recovered) return { ok: false, reason: "workspace handoff changed session without a verifiable pending-cwd process" };
+            submitted(recovered);
+            return { ok: true };
+          }
+          if (current.tmuxPane !== prior.pane || pid !== prior.pid || panePid !== prior.panePid) {
+            return { ok: false, reason: "original pane/CLI process changed before workspace handoff" };
+          }
+          if (!attempt || !attempt.workspaceCwd) {
+            const actualSid = codex ? codexSessionForPane(pane)?.sessionId : original?.sessionId;
+            if ((backend.name === "claude" || codex) && actualSid !== prior.sid) return { ok: false, reason: "original session changed before workspace handoff" };
+            submitted({ ...prior, workspaceCwd: pendingCwd });
+          }
+          const nextCli = resolveCliBackend(cfg.wrc).name;
+          if (!(["claude", "codex", "claude-internal", "codebuddy"] as string[]).includes(nextCli)) return { ok: false, reason: `${nextCli} fresh-process workspace handoff is not verified` };
+          if (!live() || !valid() || !guard()) return { ok: false, reason: "workspace handoff permission withdrawn before respawn" };
+          const spawned = await newSession(target, displayName(target) || target, undefined, { cwd: pendingCwd, guard });
+          if (!spawned.ok) return { ok: false, reason: `new workspace CLI failed to start: ${spawned.reason ?? "unknown"}` };
+          const next = byTarget.get(target);
+          const evidence = next && spawned.cwd && expandHome(spawned.cwd) === expandHome(pendingCwd)
+            ? await processEvidence(next)
+            : undefined;
+          if (!evidence) return { ok: false, reason: "new CLI did not confirm the requested workspace and session" };
+          submitted(evidence);
+          log.info({ target, oldSessionId: prior.sid, sessionId: evidence.nextSid, cwd: spawned.cwd }, "handoff: pending workspace applied in fresh CLI process");
+          return { ok: true };
+        }
+        // Native /clear is separately restricted to backends with verified
+        // completion; pending workspace switches use fresh-process evidence above.
+        if (!["claude", "codex"].includes(backend.name)) return { ok: false, reason: `${backend.name} native /clear completion is not verified; pane unchanged` };
         let transaction = attempt ?? { pane, pid, panePid, sid: a.sessionId, at: Date.now() };
         if (transaction.pane !== pane || transaction.pid !== pid || (transaction.panePid && transaction.panePid !== panePid)) return { ok: false, reason: "original pane/CLI process changed; refusing /clear" };
         const sameProcess = async (): Promise<boolean> => live() && valid() && await nativePid() === transaction.pid && await panePidOf(pane) === panePid;

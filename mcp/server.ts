@@ -72,13 +72,13 @@ const normalizeTarget = (raw: string | undefined): string | undefined => {
   return raw;
 };
 
-// Running CLI processes keep their cwd; explicit /new applies pendingCwd.
+// A live CLI keeps its cwd until its current task is handed off to a fresh process.
 server.registerTool(
   "set_workspace",
   {
     title: "Switch workspace directory",
     description:
-      "设置这个 wizard 的工作区 (绝对路径或 ~ 开头)。活 CLI 进程不能切换 cwd：请求保留为 pendingCwd 并返回明确失败，需要显式 /new 才应用；handoff /clear 不切工作区、不重渲染系统提示。没有活 pane 时可直接在新目录启动。\n"
+      "设置这个 wizard 的工作区 (绝对路径或 ~ 开头)。活 CLI 进程不能原地切换 cwd：请求会排入 pendingCwd。调用后先完成当前任务并整理可续接的简报，再调用自身 handoff (handoff({brief}))；daemon 会在新 CLI 进程中应用新目录并继续简报。不要让用户手动发 /new，也不要声称当前进程已切目录。没有活 pane 时可直接在新目录启动。\n"
       + "**`keep:true` 是另一支**: 人回答「不用换, 就用现在这个目录」时调它 —— 不重开会话, 只把「这个工作区是人认过的」记下来, 此后新会话的开局不再问这件事。一个新聊天的第一个 wizard 落在默认兜底目录里, 开局会被要求先问一句要去哪个项目; 人给路径就走 `cwd`, 人说不用换就走 `keep`。",
     inputSchema: {
       cwd: z.string().optional().describe("Absolute project path, e.g. /Users/foo/projects/bar. ~ is expanded. 与 `keep` 二选一。"),
@@ -105,11 +105,20 @@ server.registerTool(
       ...(sessionId ? { sessionId } : {}),
       ...(tmuxPane ? { tmuxPane } : {}),
     });
-    if (!j.ok) {
-      const queued = j.pendingCwd ? ` (switch queued for ${j.pendingCwd as string} — send /new from WeCom to apply)` : "";
-      return fail(`set_workspace failed: ${(j.reason as string) ?? "unknown"}${queued}`);
-    }
-    return ok({ ok: true, target: j.target, sessionId: j.sessionId, cwd: j.cwd, ...(j.scheduled ? { scheduled: true } : {}), ...(j.confirmed ? { confirmed: true } : {}) });
+    if (!j.ok) return fail(`set_workspace failed: ${(j.reason as string) ?? "unknown"}`);
+    return ok({
+      ok: true,
+      target: j.target,
+      sessionId: j.sessionId,
+      cwd: j.cwd,
+      ...(j.pendingCwd ? { pendingCwd: j.pendingCwd } : {}),
+      ...(j.handoffRequired ? {
+        handoffRequired: true,
+        nextStep: "当前任务完成后，整理剩余工作的简报并调用 handoff({brief}) 自己交接。daemon 会在新 CLI 进程中应用待切换目录并继续简报；当前进程尚未切目录，不要让用户手动发 /new。",
+      } : {}),
+      ...(j.scheduled ? { scheduled: true } : {}),
+      ...(j.confirmed ? { confirmed: true } : {}),
+    });
   },
 );
 
@@ -625,8 +634,8 @@ server.registerTool(
   {
     title: "Hand work over to a fresh context (yourself or another wizard)",
     description:
-      "把一段工作压成简报, 等原 CLI 真正空闲后在原 pane 执行原生 /clear, 确认完成后接回简报; 保留原 CLI 进程、cwd 与身份。原生清空若换 session/thread ID, 同一 wizard 会接回新 ID。不支持或无法确认就明确失败、保留现场, 不新建 pane 或重启 CLI。\n" +
-      "**不传 `name` = 交接你自己**: 简报由你写在 `brief` 里, 守护进程等你这一轮说完、旧终句消费后再清空。/clear 不刷新进程内 MCP 工具或出生时的系统提示, 也不执行待切换工作区。简报要写到零上下文的自己仅凭它就能接着干: 总目标 / 已完成与关键决策 / 当前状态 / 有序的下一步 / 关键文件与非显然的坑。\n" +
+      "把工作压成简报并在当前轮结束后交给新上下文。没有待切换工作区时，守护进程在原 pane 清空上下文并接回简报；存在 pendingCwd 时，会启动新的 CLI 进程，在待切换目录中接回简报。\n" +
+      "**不传 `name` = 交接你自己**: 简报由你写在 `brief` 里, 守护进程等你这一轮说完、旧终句消费后再交接。调用 `set_workspace({cwd})` 后，先收尾当前任务，再调用自身 handoff 并在简报中写清剩余工作；不要要求用户手动发 `/new`，也不要声称旧进程已经切换 cwd。简报要写到零上下文的自己仅凭它就能接着干: 总目标 / 已完成与关键决策 / 当前状态 / 有序的下一步 / 关键文件与非显然的坑。\n" +
       "**传 `name` = 替那个 wizard 交接**: 守护进程让它自己写简报 (`focus` 指定要特别交代的点), 抓到后在原 pane 清空并贴回; 返回被带过去的那份简报。",
     inputSchema: {
       name: z.string().optional().describe("替谁交接 —— wizard 的名字 ('fix' / '.fix')。省略 = 你自己。"),

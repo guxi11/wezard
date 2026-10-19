@@ -1,5 +1,5 @@
-// 交接 (handoff): 一个 wizard 把工作压成简报, 换一个全新的会话接着干 —— 同一个 target、
-// 同一个名字、同一个 pane 与 CLI 进程; 原生 /clear 是否换 sid 由后端决定。
+// 交接 (handoff): 一个 wizard 把工作压成简报, 换一个全新的上下文接着干 —— 同一个 target
+// 与名字。普通交接沿用 pane/CLI 并原生 /clear; 有 pending workspace 时启动新 CLI 进程。
 //
 // 身份、工单、日程、名册信箱都挂在 target / 名字上, 换会话碰不到它们; 会断的是那些
 // 隐含着「这个会话」的东西:
@@ -56,6 +56,8 @@ export interface ClearAttempt {
   nextSid?: string;
   sid: string;
   at: number;
+  /** Destination applied by a handoff-created fresh CLI, retained for reload recovery. */
+  workspaceCwd?: string;
 }
 
 export interface Pending {
@@ -92,7 +94,7 @@ export interface HandoffDeps {
   currentEvents?: (target: string) => readonly string[];
   suppress?: (events: readonly string[]) => void;
   sessionId: (target: string) => string;
-  /** 原 pane 的原生 /clear; 提交凭证必须先落盘, 不能回退新进程。 */
+  /** 原生清空, 或在有 pending workspace 时启动新 CLI; 重启动作凭证须先落盘。 */
   restart: (target: string, p: Pending, submitted: (attempt: ClearAttempt) => void) => Promise<{ ok: boolean; reason?: string }>;
   /** 往会话里贴一段话; 这一轮的频道是 `channel` ("" = 私聊)。简报那一句不挂任何信封 ——
    *  它不服务任何一笔, 回执不会误落到它上面。 */
