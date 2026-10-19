@@ -2,6 +2,24 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.8.0] - 2026-10-19
+
+### Added
+- Codex hooks 清单审查支持逐项精确授信，并以投票卡呈现。
+- 默认 coding 编排按任务范围选择 light 档，保持轻量 wizard 的模型预算。
+
+### Changed
+- 回执回归按正交方向拆分，便于离线定向验证。
+
+### Fixed
+- daemon 不可用时拒绝 Codex 原生权限请求，避免审批失效时放行。
+- 回执投递失败后可恢复，并确保结果只领取一次。
+- 恢复 wizard 时保留原 backend；重试投递设有上限。
+- 复用空闲 wizard 前确认其材料与任务匹配。
+- pane 恢复后补认延迟到达的输入确认。
+- Codex hooks 信任审查消息保留完整清单与精确 hash 授权信息。
+- rolepage 消息 footer 链接在闭合 Markdown code fence 后保持为独立链接。
+
 ## [2.7.7] - 2026-10-16
 
 ### Fixed
@@ -1187,7 +1205,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.7.7...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.8.0...HEAD
+[2.8.0]: https://github.com/guxi11/wezard/compare/v2.7.7...v2.8.0
 [2.7.7]: https://github.com/guxi11/wezard/compare/v2.7.6...v2.7.7
 [2.7.6]: https://github.com/guxi11/wezard/compare/v2.7.5...v2.7.6
 [2.7.5]: https://github.com/guxi11/wezard/compare/v2.7.4...v2.7.5
