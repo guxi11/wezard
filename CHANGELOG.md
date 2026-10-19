@@ -2,6 +2,11 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Added
+- spawn 撞上认不出的启动确认框 (预写信任与目录信任代按都覆盖不到的启动期弹框) 时, 向该 spawn 的企微频道发一条通知: 哪个 wizard、哪个 tmux pane (含 `tmux attach` 指引)、工作目录与屏上原文摘要, 只告知不等点击; 同一 pane 同一形状只发一次, 发送失败只记日志, 不按任何键、不阻塞 ready 判定。
+
 ## [2.7.7] - 2026-10-16
 
 ### Fixed

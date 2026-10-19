@@ -5906,6 +5906,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       handoffId: opts?.handoffId,
       windowName: windowLabel(target, windowName),
       cwdOverride: eff,
+      chatKey: target,
       cli: effCli,
       model: effModel,
       effort: effEffort,
@@ -6073,6 +6074,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       forkSession: true,
       windowName: windowLabel(args.target, args.windowName),
       cwdOverride: parent.runningCwd,
+      chatKey: args.target,
       cli: parentCli,
       model,
       effort,
@@ -7570,7 +7572,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // Same resume-fork hazard as dispatch: snapshot before spawn, re-bind
         // onto the forked jsonl once it appears (EOF offset — fork is seeded).
         const resumeBaseline = listJsonls(dirname(a.jsonlPath));
-        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: displayName(target) || target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, ...respawnSpec(a), systemPrompt: charterFor(target, { cwd: a.runningCwd, cli: backendForPath(a.jsonlPath).name }) });
+        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: displayName(target) || target, cwdOverride: a.runningCwd, chatKey: target, cli: backendForPath(a.jsonlPath).name, ...respawnSpec(a), systemPrompt: charterFor(target, { cwd: a.runningCwd, cli: backendForPath(a.jsonlPath).name }) });
         if (!r.ok || !r.tmuxPane) return { ok: false, retryable: r.retryable !== false, reason: `respawn failed: ${r.reason ?? "unknown"}` };
         if (!permitted() || a.tmuxPane !== probedPane) {
           // This pane was born for an unsubmitted injection. Never kill the old
@@ -8105,7 +8107,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           const resumeBaseline = !armMigration ? listJsonls(dirname(a.jsonlPath)) : undefined;
           // Respawn in the binding's runningCwd (pendingCwd doesn't apply to a
           // mid-turn reincarnation — only /new and /clear-with-pending swap cwd).
-          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: displayName(a.target) || a.target, cwdOverride: a.runningCwd, cli: backendForPath(a.jsonlPath).name, ...respawnSpec(a), systemPrompt: charterFor(a.target, { cwd: a.runningCwd, cli: backendForPath(a.jsonlPath).name }) });
+          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: displayName(a.target) || a.target, cwdOverride: a.runningCwd, chatKey: a.target, cli: backendForPath(a.jsonlPath).name, ...respawnSpec(a), systemPrompt: charterFor(a.target, { cwd: a.runningCwd, cli: backendForPath(a.jsonlPath).name }) });
           if (byTarget.get(a.target) !== a || a.sessionId !== sid || (a.injectGen ?? 0) !== myGen || (guard && !guard())) {
             // A stop or replacement during startup revokes this birth before binding.
             if (r.tmuxPane) await runTmux(["kill-pane", "-t", r.tmuxPane]);

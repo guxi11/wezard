@@ -42,6 +42,7 @@ import { selectModel } from "./model-select.js";
 import type { Effort } from "../shared/effort.js";
 import { hasRegistry, sessionOnPane } from "./wezard-session.js";
 import { startupConfirmation, workspaceTrustPrompt, workspaceTrustConfig } from "../shared/workspace-trust.js";
+import { unknownStartupNotice } from "../shared/startup-notice.js";
 
 
 // New sessions follow configuration; resumed transcripts retain their backend.
@@ -87,6 +88,12 @@ let timeoutReporter: ((info: { args: string[]; timeoutMs: number }) => void) | u
 export const setTmuxTimeoutReporter = (fn: (info: { args: string[]; timeoutMs: number }) => void): void => {
   timeoutReporter = fn;
 };
+
+/** spawn 撞上认不出的启动确认框时的广播出口: daemon 接线时装上 (向该 spawn 的企微
+ * 频道发一条 markdown, 与审批卡同源的频道换算)。没装 / 抛错 = 只记日志, 不回灌 spawn。 */
+export type StartupNoticeFn = (chatKey: string, text: string) => void;
+let _startupNotice: StartupNoticeFn | undefined;
+export const bindStartupNotice = (fn: StartupNoticeFn): void => { _startupNotice = fn; };
 
 export interface RunTmuxOpts {
   /** Written to the child's stdin, which is then closed. For `tmux load-buffer -`. */
@@ -285,13 +292,43 @@ export const answerWorkspaceTrust = async (pane: string, backend: CliBackendName
   return true;
 };
 
-const waitForTuiReady = async (pane: string, cmd: string, backend: CliBackend, cwd: string, log: Logger): Promise<TuiState> => {
+/** 该 spawn 的企微频道上下文; 有则认不出的启动确认框会广播一条通知过去。 */
+interface SpawnNoticeCtx {
+  /** 该 spawn 服务的会话 principal; 空 = 无通道, 只记日志。 */
+  chatKey?: string;
+  who: string;
+  tmuxSession: string;
+}
+
+const waitForTuiReady = async (
+  pane: string,
+  cmd: string,
+  backend: CliBackend,
+  cwd: string,
+  notice: SpawnNoticeCtx | undefined,
+  log: Logger,
+): Promise<TuiState> => {
   const registry = hasRegistry(backend.homeDir);
   const t0 = Date.now();
   const deadline = t0 + MIN_SETTLE_MS + TUI_READY_TIMEOUT_MS;
   let resent = false;
   let sawSession = false;
   let lastCap = 0;
+  // 认不出的启动确认框: ready 判定照旧不放行 (留给本地人工, 不按任何键), 但把这只
+  // 远端看不见的框广播到该 spawn 的频道 —— 同一形状只发一次 (指纹), 一次 spawn 最多
+  // 3 条 (框里带动态内容时兜底)。fire-and-forget: 失败只记日志, 不阻塞轮询。
+  let noticedFp: string | undefined;
+  let noticeCount = 0;
+  const notifyUnknownFrame = (screen: string): void => {
+    if (!notice?.chatKey || noticeCount >= 3) return;
+    const n = unknownStartupNotice({ who: notice.who, pane, tmuxSession: notice.tmuxSession, cwd, screen });
+    if (!n.fp || n.fp === noticedFp) return;
+    noticedFp = n.fp;
+    noticeCount += 1;
+    log.info({ pane, cwd, who: notice.who }, "spawn-tmux: unknown startup confirmation, notifying chat");
+    try { _startupNotice?.(notice.chatKey, n.text); }
+    catch (e) { log.warn({ pane, err: (e as Error).message }, "spawn-tmux: startup notice dispatch failed"); }
+  };
   while (Date.now() < deadline) {
     await sleep(registry ? REGISTRY_POLL_MS : POLL_MS);
     let registryIdle = false;
@@ -311,7 +348,10 @@ const waitForTuiReady = async (pane: string, cmd: string, backend: CliBackend, c
     const exited = cliExit(cap);
     if (exited) return { ready: false, exited };
     if (await answerWorkspaceTrust(pane, backend.name, cwd, log)) continue;
-    if (startupConfirmation(cap)) continue;
+    if (startupConfirmation(cap)) {
+      notifyUnknownFrame(cap);
+      continue;
+    }
     if (registryIdle) return { ready: true };
     // 注册表认不到这个 pane (schema 不认识 / 后端不写) 时, pane 读屏就是唯一证人;
     // 注册表已认下 (sawSession) 则仍以它报的 idle 为准, 尾部裁决不变。
@@ -357,6 +397,9 @@ export interface SpawnArgs {
    *  Mirror mode persists this in mirror-attachments.json so /new respawns
    *  in the user-bound project, not the global default. */
   cwdOverride?: string;
+  /** 该 spawn 服务的会话 principal (mirror 的 target key)。认不出的启动确认框
+   * 把通知发到这个频道 (daemon 侧按审批卡同源换算 chatid); 不传 = 只记日志。 */
+  chatKey?: string;
   /** Owner of a resumed transcript, used to select its original backend.
    *  Fresh panes always use the configured backend. */
   cli?: CliBackendName;
@@ -488,7 +531,7 @@ const charterArg = (cfg: Config, backend: CliBackend, sessionId: string, charter
   }
 };
 
-export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: freshSessionId, handoffId, windowName, cwdOverride, cli, model, effort, systemPrompt, forkSession }: SpawnArgs): Promise<SpawnResult> => {
+export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: freshSessionId, handoffId, windowName, cwdOverride, chatKey, cli, model, effort, systemPrompt, forkSession }: SpawnArgs): Promise<SpawnResult> => {
   const backend = resumeSessionId && cli
     ? resolveCliBackend({ ...cfg.wrc, defaultCli: cli })
     : backendFor(cfg);
@@ -671,7 +714,7 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
     // user input, so we don't wait for the file — mirror tail tolerates a
     // missing jsonl and starts emitting once claude writes the first line.
     let tui: TuiState;
-    try { tui = await waitForTuiReady(pane, line, backend, cwd, log); }
+    try { tui = await waitForTuiReady(pane, line, backend, cwd, { chatKey: chatKey?.trim() || undefined, who: winName, tmuxSession: tmuxName ?? "" }, log); }
     finally { if (script) try { unlinkSync(script); } catch { /* already removed */ } }
     if (tui.exited) return { ok: true, pane, ready: false, failure: tui.exited };
     const unknown = !!flagModel && tui.ready && modelNotRecognized(await capturePaneBottom(pane, "-"), flagModel);

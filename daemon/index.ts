@@ -30,7 +30,7 @@ import { loadMirrorStore } from "./mirror-store.js";
 import { cancelOps, deadlineOf, eventRef, finalKind, isEventRef, makeOutcome, openRouter, ops, pickPair, type Delivery, type EventId, type FinalVerdict, type Op, type Receiver, type Route } from "./router.js";
 import { createMessageEvents, messageId, finalId, reportSource, receiptCoverage, receiptFacts, type EventAuthority, type MessageAdapters, type MessageEvent, type MessageInput } from "./message-events.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
-import { backendFor, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
+import { backendFor, bindStartupNotice, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { bindCardChannel, installApprovalEventListener, makeApproveHandler, requestConfirm } from "./approval.js";
 import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, buildChatUrl, getDetail, setWorldFactsProvider, currentHumanQueryOf, recordPost, recordCharter, backfillCharter } from "./detail.js";
 import { EMPTY_FACTS, type WorldFacts, type WorldFactWizard } from "../shared/world.js";
@@ -624,7 +624,7 @@ const main = async (): Promise<void> => {
       }
       if (!planStore.allowExternal(target, wizards.get(target)?.name)) { json(res, 409, { ok: false, reason: "workflow plan reserves this executor" }); return; }
       const spawnLog = log.child({ mod: "mirror", sub: "spawn-init", target });
-      const r = await spawnTmuxClaude({ cfg, log: spawnLog, windowName: target, systemPrompt: charterFor(target, { cli: backendFor(cfg).name }) });
+      const r = await spawnTmuxClaude({ cfg, log: spawnLog, windowName: target, chatKey: target, systemPrompt: charterFor(target, { cli: backendFor(cfg).name }) });
       if (!r.ok) { json(res, 500, { ok: false, reason: r.reason }); return; }
       if (!planStore.allowExternal(target, wizards.get(target)?.name)) { if (r.tmuxPane) await runTmux(["kill-pane", "-t", r.tmuxPane]); json(res, 409, { ok: false, reason: "executor reserved during spawn; binding withheld" }); return; }
       const att = m.attach({ sessionId: r.sessionId!, jsonlPath: r.jsonlPath!, target, tmuxPane: r.tmuxPane, tmuxSession: r.tmuxSession });
@@ -1571,6 +1571,11 @@ const main = async (): Promise<void> => {
     };
     // A private dispatch keeps its human origin even though its output channel is empty.
     bindCardChannel((key) => askerOf(key)?.chat || m.currentChannel(key));
+    // spawn 读屏撞上认不出的启动确认框 → 通知该 wizard 此刻的频道 (与审批卡同源的
+    // 频道换算, 不硬编 home 群)。只告知不等点击; 发送失败只记日志, spawn 侧频控去重。
+    bindStartupNotice((key, text) => void ws.client
+      .sendMessage(baseOfKey(askerOf(key)?.chat || m.currentChannel(key) || key).replace(/^(user|chat|group):/, ""), { msgtype: "markdown", markdown: { content: text } })
+      .catch((e: unknown) => log.child({ mod: "spawn" }).warn({ to: key, err: errText(e) }, "startup notice push failed")));
     // 交接先续做: 它的闸要在回执续守之前立起来, 否则续守的 watcher 会读到换了一半的会话。
     void m.restored.then(() => {
       handoffs.resume();
