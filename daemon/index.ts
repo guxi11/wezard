@@ -2571,6 +2571,7 @@ const main = async (): Promise<void> => {
             scheduled: true,
             ...(workspaceSwitch ? {
               pendingCwd: cwd.pendingCwd,
+              workspaceStatus: "queued_not_applied",
               message: `handoff 已排队；当前任务收尾后，daemon 将启动新 CLI 并在 ${cwd.pendingCwd} 中继续简报。旧进程不会原地切换目录。`,
             } : {}),
           } }

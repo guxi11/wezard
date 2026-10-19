@@ -105,7 +105,16 @@ server.registerTool(
       ...(sessionId ? { sessionId } : {}),
       ...(tmuxPane ? { tmuxPane } : {}),
     });
-    if (!j.ok) return fail(`set_workspace failed: ${(j.reason as string) ?? "unknown"}`);
+    if (!j.ok) return fail(JSON.stringify({
+      ok: false,
+      tool: "set_workspace",
+      reason: j.reason ?? "unknown",
+      ...(j.pendingCwd ? {
+        pendingCwd: j.pendingCwd,
+        workspaceStatus: "queued_not_applied",
+        nextStep: "新 CLI 未能启动，工作区尚未应用；pendingCwd 仍保留。确认启动条件恢复后重试 set_workspace，之后在活会话中收尾当前任务并调用自身 handoff({brief})。",
+      } : {}),
+    }));
     return ok({
       ok: true,
       target: j.target,
@@ -114,6 +123,7 @@ server.registerTool(
       ...(j.pendingCwd ? { pendingCwd: j.pendingCwd } : {}),
       ...(j.handoffRequired ? {
         handoffRequired: true,
+        workspaceStatus: "queued_not_applied",
         nextStep: "当前任务完成后，整理剩余工作的简报并调用 handoff({brief}) 自己交接。daemon 会在新 CLI 进程中应用待切换目录并继续简报；当前进程尚未切目录，不要让用户手动发 /new。",
       } : {}),
       ...(j.scheduled ? { scheduled: true } : {}),
