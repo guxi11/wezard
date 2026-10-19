@@ -7129,6 +7129,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
     if (backend.name === "codex" && codexSessionForPane(clear.pane)?.sessionId !== clear.nextSid) return false;
     const ps = await psSnap();
+    if (backend.name === "codebuddy") return registeredPidUnder(clear.panePid, liveSessionPids(backend.homeDir), ps.kids) === clear.pid;
     const executable = backend.name === "codex" ? "codex" : basename(backend.bin);
     const pids = new Set([...ps.commands].filter(([, command]) => basename(command) === executable).map(([pid]) => pid));
     return registeredPidUnder(clear.panePid, pids, ps.kids) === clear.pid;
@@ -7161,6 +7162,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           if (!root) return undefined;
           if (backend.name === "claude" || backend.name === "claude-internal") return sessionOnPane(backend.homeDir, pane)?.pid;
           const ps = await psSnap();
+          if (backend.name === "codebuddy") return registeredPidUnder(root, liveSessionPids(backend.homeDir), ps.kids);
           const executable = codex ? "codex" : basename(backend.bin);
           return registeredPidUnder(root, new Set([...ps.commands].filter(([, command]) => basename(command) === executable).map(([pid]) => pid)), ps.kids);
         };
@@ -7187,7 +7189,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
             if (nextBackend.name !== "claude" && nextBackend.name !== "claude-internal") {
               const ps = await psSnap();
               const executable = nextBackend.name === "codex" ? "codex" : basename(nextBackend.bin);
-              const processIds = new Set([...ps.commands].filter(([, command]) => basename(command) === executable).map(([childPid]) => childPid));
+              const processIds = nextBackend.name === "codebuddy"
+                ? liveSessionPids(nextBackend.homeDir)
+                : new Set([...ps.commands].filter(([, command]) => basename(command) === executable).map(([childPid]) => childPid));
               nextPid = registeredPidUnder(nextPanePid, processIds, ps.kids);
               if (nextBackend.name === "codex" && codexSessionForPane(binding.tmuxPane)?.sessionId !== binding.sessionId) nextPid = undefined;
             }
@@ -7215,11 +7219,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           }
           if (!attempt || !attempt.workspaceCwd) {
             const actualSid = codex ? codexSessionForPane(pane)?.sessionId : original?.sessionId;
-            if ((backend.name === "claude" || codex) && actualSid !== prior.sid) return { ok: false, reason: "original session changed before workspace handoff" };
+            if ((backend.name === "claude" || backend.name === "claude-internal" || codex) && actualSid !== prior.sid) return { ok: false, reason: "original session changed before workspace handoff" };
             submitted({ ...prior, workspaceCwd: pendingCwd });
           }
-          const nextCli = resolveCliBackend(cfg.wrc).name;
-          if (!(["claude", "codex", "claude-internal", "codebuddy"] as string[]).includes(nextCli)) return { ok: false, reason: `${nextCli} fresh-process workspace handoff is not verified` };
           if (!live() || !valid() || !guard()) return { ok: false, reason: "workspace handoff permission withdrawn before respawn" };
           const spawned = await newSession(target, displayName(target) || target, undefined, { cwd: pendingCwd, guard });
           if (!spawned.ok) return { ok: false, reason: `new workspace CLI failed to start: ${spawned.reason ?? "unknown"}` };
