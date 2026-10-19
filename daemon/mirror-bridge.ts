@@ -52,7 +52,7 @@ import { dispatchPickerPolicy, pickerPolicy } from "./picker-policy.js";
 import { renameWindow, runTmux, spawnTmuxClaude } from "./spawn-tmux.js";
 import { selectEffort, selectModel, type EffortSelectResult, type ModelScope, type ModelSelectResult } from "./model-select.js";
 import { parseEffort, type Effort } from "../shared/effort.js";
-import { hasRegistry, liveSessionPids, markTranscript, probeOf, registrySnapshot, sessionOfPid, sessionOnPane, submittedSince, submittedEventSince, watchRegistry, type LiveSession, type TranscriptMark } from "./wezard-session.js";
+import { hasRegistry, liveSessionPids, markTranscript, probeOf, readRegistry, registrySnapshot, sessionOfPid, sessionOnPane, submittedSince, submittedEventSince, watchRegistry, type LiveSession, type TranscriptMark } from "./wezard-session.js";
 import { waitForIdle, type IdleResult } from "./graph.js";
 import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
@@ -2664,7 +2664,7 @@ export interface MirrorBridge {
   /** Detach + respawn a target's pane in `cfg.wrc.cwd` or its pendingCwd
    *  override. Used by /new to give the user a fresh claude in the bound
    *  project. Returns the new attachment result. */
-  newSession: (target: string, windowName?: string, cli?: CliBackendName, opts?: { model?: string; effort?: Effort; cwd?: string; silent?: boolean; systemPrompt?: string; guard?: () => boolean }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; model?: string; modelWarning?: string; effort?: Effort }>;
+  newSession: (target: string, windowName?: string, cli?: CliBackendName, opts?: { model?: string; effort?: Effort; cwd?: string; silent?: boolean; systemPrompt?: string; guard?: () => boolean; preservePrevious?: boolean; sessionId?: string }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; model?: string; modelWarning?: string; effort?: Effort }>;
   /** Spawn `target` as a CLONE of `parent`: a fresh pane launched with
    *  `--resume <parent sid>`, which the CLI forks — the child starts holding
    *  everything the parent had read, the parent is untouched. `inherit: false`
@@ -5849,6 +5849,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       cwd?: string;
       silent?: boolean;
       systemPrompt?: string;
+      /** Retain the current pane until the replacement is attached successfully. */
+      preservePrevious?: boolean;
+      /** Stable session identity for a durable replacement transaction. */
+      sessionId?: string;
+      handoffId?: string;
       /** Withdraw agent-created births before replacing or binding a pane. */
       guard?: () => boolean;
     },
@@ -5886,18 +5891,19 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const backendChanged = Boolean(boundPath && effCli && backendForPath(expandHome(boundPath)).name !== effCli);
     const { model: effModel, effort: effEffort } = newStewardSpec(cfg, target, effCli, opts,
       backendChanged ? undefined : prev?.effort ?? deps.store.get(target)?.effort);
-    if (prev?.tmuxPane) {
+    if (prev?.tmuxPane && !opts?.preservePrevious) {
       // Best-effort kill; ignore errors (pane may already be dead).
       void runTmux(["kill-pane", "-t", prev.tmuxPane]);
     }
-    if (prev) detach(prev, "/new respawn");
+    if (prev && !opts?.preservePrevious) detach(prev, "/new respawn");
     // sid 由这里先定, 出生到 attach 之间挂在 inFlightSids 上 (见那里)。
-    const freshSid = randomUUID();
+    const freshSid = opts?.sessionId ?? randomUUID();
     inFlightSids.add(freshSid);
     const r = await spawnTmuxClaude({
       cfg,
       log: log.child({ sub: "new-session", target }),
       sessionId: freshSid,
+      handoffId: opts?.handoffId,
       windowName: windowLabel(target, windowName),
       cwdOverride: eff,
       cli: effCli,
@@ -7212,26 +7218,73 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
             const recovered = await processEvidence(current);
             if (!recovered) return { ok: false, reason: "workspace handoff changed session without a verifiable pending-cwd process" };
             submitted(recovered);
+            if (prior.pane !== recovered.pane) await runTmux(["kill-pane", "-t", prior.pane]);
             return { ok: true };
           }
           if (current.tmuxPane !== prior.pane || pid !== prior.pid || panePid !== prior.panePid) {
             return { ok: false, reason: "original pane/CLI process changed before workspace handoff" };
           }
-          if (!attempt || !attempt.workspaceCwd) {
+          let durable = attempt ?? prior;
+          if (!attempt || !attempt.workspaceCwd || !attempt.spawnSid) {
             const actualSid = codex ? codexSessionForPane(pane)?.sessionId : original?.sessionId;
             if ((backend.name === "claude" || backend.name === "claude-internal" || codex) && actualSid !== prior.sid) return { ok: false, reason: "original session changed before workspace handoff" };
-            submitted({ ...prior, workspaceCwd: pendingCwd });
+            durable = { ...prior, workspaceCwd: pendingCwd, spawnSid: attempt?.spawnSid ?? prior.spawnSid ?? randomUUID() };
+            submitted(durable);
           }
+          const spawnSid = durable.spawnSid ?? randomUUID();
+          if (!durable.spawnSid) { durable = { ...durable, spawnSid }; submitted(durable); }
           if (!live() || !valid() || !guard()) return { ok: false, reason: "workspace handoff permission withdrawn before respawn" };
-          const spawned = await newSession(target, displayName(target) || target, undefined, { cwd: pendingCwd, guard });
-          if (!spawned.ok) return { ok: false, reason: `new workspace CLI failed to start: ${spawned.reason ?? "unknown"}` };
+          // A daemon may have died after tmux launched the stable session but
+          // before attach() persisted it. Recover that pane by its durable SID.
+          const backendForSpawn = resolveCliBackend(cfg.wrc);
+          const orphan = backendForSpawn.name === "claude" || backendForSpawn.name === "claude-internal"
+            ? readRegistry(backendForSpawn.homeDir).find((s) => s.sessionId === spawnSid && s.pane && s.pid > 0)
+            : undefined;
+          const codexOrphan = backendForSpawn.name === "codex" ? await (async () => {
+            const panes = await runTmux(["list-panes", "-a", "-F", "#{pane_id}"]);
+            if (!panes.ok) return undefined;
+            for (const candidate of panes.stdout.split("\n").map((s) => s.trim()).filter(Boolean)) {
+              const [tag, session] = await Promise.all([
+                runTmux(["show-options", "-p", "-t", candidate, "-v", "@wezard_handoff_id"]),
+                Promise.resolve(codexSessionForPane(candidate)),
+              ]);
+              if (tag.ok && tag.stdout.trim() === spawnSid && session?.sessionId) return session;
+            }
+            return undefined;
+          })() : undefined;
+          const recovery = orphan ? { pane: orphan.pane, sessionId: orphan.sessionId,
+            jsonlPath: join(projectDirFor(a.jsonlPath, expandHome(pendingCwd)), `${orphan.sessionId}.jsonl`) } : codexOrphan;
+          let launchedCwd = "";
+          if (recovery && await tmuxPaneAlive(recovery.pane)) {
+            const session = await runTmux(["display-message", "-p", "-t", recovery.pane, "#{session_name}"]);
+            const attached = attach({ sessionId: recovery.sessionId, jsonlPath: recovery.jsonlPath, target, tmuxPane: recovery.pane,
+              tmuxSession: session.ok ? session.stdout.trim() : "", cwd: pendingCwd, model: "", effort: "", pendingCwd: "" });
+            if (!attached.ok) return { ok: false, reason: `recovered workspace pane could not bind: ${attached.reason}` };
+            launchedCwd = pendingCwd;
+          } else {
+            let spawned: Awaited<ReturnType<typeof newSession>> | undefined;
+            for (let retry = 0; retry < 3; retry++) {
+              spawned = await newSession(target, displayName(target) || target, undefined, {
+                cwd: pendingCwd, guard, preservePrevious: true, sessionId: spawnSid, handoffId: spawnSid,
+              });
+              if (spawned.ok || !guard()) break;
+              if (retry < 2) await sleep(500 * (retry + 1));
+            }
+            if (!spawned?.ok) return { ok: false, reason: `new workspace CLI failed to start: ${spawned?.reason ?? "unknown"}` };
+            launchedCwd = spawned.cwd ?? "";
+          }
           const next = byTarget.get(target);
-          const evidence = next && spawned.cwd && expandHome(spawned.cwd) === expandHome(pendingCwd)
+          const evidence = next && launchedCwd && expandHome(launchedCwd) === expandHome(pendingCwd)
             ? await processEvidence(next)
             : undefined;
           if (!evidence) return { ok: false, reason: "new CLI did not confirm the requested workspace and session" };
           submitted(evidence);
-          log.info({ target, oldSessionId: prior.sid, sessionId: evidence.nextSid, cwd: spawned.cwd }, "handoff: pending workspace applied in fresh CLI process");
+          if (prior.pane !== evidence.pane) {
+            // attach() replaced the target binding; kill the former pane only
+            // after the replacement process and binding have both been verified.
+            await runTmux(["kill-pane", "-t", prior.pane]);
+          }
+          log.info({ target, oldSessionId: prior.sid, sessionId: evidence.nextSid, cwd: launchedCwd }, "handoff: pending workspace applied in fresh CLI process");
           return { ok: true };
         }
         // Native /clear is separately restricted to backends with verified

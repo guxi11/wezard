@@ -53,6 +53,8 @@ export interface ClearAttempt {
   pane: string;
   pid: number;
   panePid?: number;
+  /** Stable identity persisted before a workspace replacement process is spawned. */
+  spawnSid?: string;
   nextSid?: string;
   sid: string;
   at: number;

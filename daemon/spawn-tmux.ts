@@ -348,6 +348,8 @@ export interface SpawnArgs {
    *  so the caller can fence it off from sibling sessions' dir scans before the
    *  pre-created jsonl appears. Omitted = minted here. */
   sessionId?: string;
+  /** Durable workspace-handoff key stored on the pane before the CLI starts. */
+  handoffId?: string;
   /** Cosmetic tmux window name (status-bar label). Falls back to sessionId.
    *  Pass the principal (e.g. "user:xxx") to make windows easy to skim. */
   windowName?: string;
@@ -486,7 +488,7 @@ const charterArg = (cfg: Config, backend: CliBackend, sessionId: string, charter
   }
 };
 
-export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: freshSessionId, windowName, cwdOverride, cli, model, effort, systemPrompt, forkSession }: SpawnArgs): Promise<SpawnResult> => {
+export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: freshSessionId, handoffId, windowName, cwdOverride, cli, model, effort, systemPrompt, forkSession }: SpawnArgs): Promise<SpawnResult> => {
   const backend = resumeSessionId && cli
     ? resolveCliBackend({ ...cfg.wrc, defaultCli: cli })
     : backendFor(cfg);
@@ -593,6 +595,13 @@ export const spawnTmuxClaude = async ({ cfg, log, resumeSessionId, sessionId: fr
     }
     const pane = created.stdout.split("\n").map((s) => s.trim()).filter(Boolean)[0] ?? "";
     if (!pane) return { reason: "tmux returned no pane id" };
+    if (handoffId) {
+      const tagged = await runTmux(["set-option", "-p", "-t", pane, "@wezard_handoff_id", handoffId]);
+      if (!tagged.ok) {
+        await runTmux(["kill-pane", "-t", pane]);
+        return { reason: `could not persist workspace handoff pane identity: ${tagged.stderr.trim() || tagged.code}` };
+      }
+    }
     log.info({ tmuxName, winName, tmuxPane: pane, cwd, sessionId, cli: backend.name, reused: has.code === 0 }, "spawn-tmux: pane created");
     return { pane };
   };
