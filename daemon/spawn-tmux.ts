@@ -41,7 +41,7 @@ import { activateBackend, resolveCliBackend, type CliBackend, type CliBackendNam
 import { selectModel } from "./model-select.js";
 import type { Effort } from "../shared/effort.js";
 import { hasRegistry, sessionOnPane } from "./wezard-session.js";
-import { startupConfirmation, workspaceTrustPrompt, workspaceTrustConfig } from "../shared/workspace-trust.js";
+import { codebuddyTrustPrompt, startupConfirmation, workspaceTrustPrompt, workspaceTrustConfig } from "../shared/workspace-trust.js";
 import { unknownStartupNotice } from "../shared/startup-notice.js";
 
 
@@ -292,6 +292,29 @@ export const answerWorkspaceTrust = async (pane: string, backend: CliBackendName
   return true;
 };
 
+// CodeBuddy 的四选项目录信任选择器 (形状见 shared/workspace-trust.ts 的 codebuddyTrustPrompt):
+// 自动选第 1 项 Trust folder only —— 与预写信任 (trustWorkspace) 同一授权范围, 只限本目录。
+// 实测按键语义 (v2.167): 高亮默认在第 1 项, 单发 Enter 即确认; 数字键则「选中即确认」,
+// 单发 1 就落。因此按高亮位置二选一, 永远只发一个键; 发送后等一拍必须看到框已消失且
+// CLI 没退 —— 框还在说明键没生效, 立即返回 false 退回「只通知」路径, 绝不补发第二个键。
+export const answerCodebuddyTrust = async (pane: string, cwd: string, log: Logger): Promise<boolean> => {
+  const capture = async (): Promise<string> => {
+    const r = await runTmux(["capture-pane", "-t", pane, "-p"]);
+    return r.ok ? r.stdout : "";
+  };
+  const before = codebuddyTrustPrompt(await capture(), cwd, realpathSync);
+  if (!before) return false;
+  const key = before.selected === 0 ? "Enter" : "1";
+  const sent = await runTmux(["send-keys", "-t", pane, key]);
+  if (!sent.ok) return false;
+  await sleep(600);
+  const screen = await capture();
+  if (codebuddyTrustPrompt(screen, cwd, realpathSync) !== undefined) return false;
+  if (cliExit(screen)) return false;
+  log.info({ pane, cwd, key }, "codebuddy trust: confirmed folder-only trust");
+  return true;
+};
+
 /** 该 spawn 的企微频道上下文; 有则认不出的启动确认框会广播一条通知过去。 */
 interface SpawnNoticeCtx {
   /** 该 spawn 服务的会话 principal; 空 = 无通道, 只记日志。 */
@@ -348,6 +371,7 @@ const waitForTuiReady = async (
     const exited = cliExit(cap);
     if (exited) return { ready: false, exited };
     if (await answerWorkspaceTrust(pane, backend.name, cwd, log)) continue;
+    if (await answerCodebuddyTrust(pane, cwd, log)) continue;
     if (startupConfirmation(cap)) {
       notifyUnknownFrame(cap);
       continue;
