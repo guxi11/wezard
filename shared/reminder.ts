@@ -188,17 +188,19 @@ export type ReceiptStatus = "done" | "need" | "error" | "timeout" | "silent" | "
 type EnvelopeAttrs = KindAttrs<"envelope">;
 export const envelopeAttrs = {
   human: (user: string, chat: string, chatKey?: string): EnvelopeAttrs => ({ wezard: "envelope", kind: "human", from: user, chat, ...(chatKey ? { "chat-key": chatKey } : {}) }),
-  /** `chat` 不给 = 私聊。 */
-  peer: (from: string, chat?: string, asker?: Asker): EnvelopeAttrs => ({
+  /** `chat` 不给 = 私聊。`chatKey` = 公开轮所在聊天的稳定 key —— 名字会被 rename 换主,
+   *  read_chat / 无参视图按它归档 (chat 只做显示); 与人话信封同一个属性。 */
+  peer: (from: string, chat?: string, asker?: Asker, chatKey?: string): EnvelopeAttrs => ({
     wezard: "envelope", kind: "peer", from, scope: chat === undefined ? "private" : "public", ...(chat ? { chat } : {}),
+    ...(chatKey ? { "chat-key": chatKey } : {}),
     ...askerAttrs(asker),
   }),
   /** `event` = 这一枪为它开的那条群根行 (安静任务按它定位终句, 见 index.ts relayUnlessQuiet)。 */
   task: (taskId: string, event?: string): EnvelopeAttrs => ({ wezard: "envelope", kind: "task", from: taskId, ...(event ? { event } : {}) }),
   /** 回执也是「`from` 在对你说话」, 所以仍是 peer 信封 —— read_chat / rolepage 照旧
    *  把它归到那场对话里; 多一个 `receipt` 属性说明它是自动送回来的结论而不是新活。 */
-  receipt: (from: string, chat?: string, job?: { job: string; done: number; total: number }, status: ReceiptStatus = "done", event?: string, route?: ReceiptRoute): EnvelopeAttrs => ({
-    ...envelopeAttrs.peer(from, chat, route?.asker),
+  receipt: (from: string, chat?: string, job?: { job: string; done: number; total: number }, status: ReceiptStatus = "done", event?: string, route?: ReceiptRoute, chatKey?: string): EnvelopeAttrs => ({
+    ...envelopeAttrs.peer(from, chat, route?.asker, chatKey),
     ...(event ? { event } : {}),
     receipt: "1",
     status,

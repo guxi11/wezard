@@ -946,9 +946,9 @@ const main = async (): Promise<void> => {
     /** 调用方这一轮所在的公开频道: 人从哪个群叫的它 / 公开 peer 轮的那个群;
      *  私聊轮或无记录 → 它的 home 群。notify 与 public send_peer 默认发到这里。 */
     const channelOf = (self: string): string => m.currentChannel(self) || baseOfKey(self);
-    /** 同伴注入的信封: 公开轮写上那个群的名字, 私聊不写 (见 peers.renderPeerEnvelope)。 */
+    /** 同伴注入的信封: 公开轮写上那个群的 key 与名字 (key 归档, 名字显示), 私聊都不写 (见 peers.renderPeerEnvelope)。 */
     const envelopeFor = (from: string, channel: string, t?: TurnTag & { legs?: number }): string =>
-      renderPeerEnvelope(displayName(from), channel ? chatNameOf(cfg, channel) : undefined, t);
+      renderPeerEnvelope(displayName(from), channel ? chatNameOf(cfg, channel) : undefined, channel || undefined, t);
     // 回执 (见 receipts.ts): 一次 tell_peer 之后对方干完那一轮, 它的结论自动 paste
     // 回发话方的输入框, 发话方全程不阻塞。这里只提供四样能力给那个模块 —— 忙闲、
     // 死活、「它答我那一句的是哪段话」、以及怎么把一段话送进去 —— 投递逻辑在那边。
@@ -1360,6 +1360,7 @@ const main = async (): Promise<void> => {
               ...(late ? { late: true } : {}),
               ...(retellTo ? { retellTo } : {}),
               ...(row.late ? { retold: true } : {}) },
+            channel || undefined,
           );
       events.accept({
         id: inbox, identity: JSON.stringify([to, event, out.status, out.rev]),
@@ -1868,8 +1869,10 @@ const main = async (): Promise<void> => {
       const rec = wizards.get(t.target);
       return {
         name: displayName(t.target),
+        key: t.target,
         jsonlPath: t.jsonlPath,
         homeChat: chatNameOf(cfg, home),
+        homeKey: home,
         homeHuman: home.startsWith("user:") ? home.slice(5) : UNKNOWN_HUMAN,
         since: rec?.clonedFrom ? rec.bornAt : 0,
       };
@@ -1918,7 +1921,11 @@ const main = async (): Promise<void> => {
       const chat = base ? chatNameOf(cfg, base) : undefined;
       const log_ = renderChatLog(
         sessions.map(logSession),
-        { role: role?.name, chat, target: target?.name, since, until, limit, per },
+        { role: role?.name, chat, target: target?.name, since, until, limit, per,
+          // 无参视图 (channelOf) 与点名聊天都拿着 base key 进来 —— 匹配按 key, 名字只做显示。
+          ...(base ? { chatKey: base } : {}),
+          ...(role?.target ? { roleKey: role.target } : {}),
+          ...(target?.target ? { targetKey: target.target } : {}) },
         now,
       );
       const scope = [

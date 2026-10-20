@@ -3,7 +3,9 @@
 // 来源只有各个会话自己的 transcript (jsonl), 不经过 turn store: 一个群的记录 =
 // 每个在里面说过话的 wizard 的「问话 + 终句」, 按时刻并起来。一句话属于哪个频道、
 // 是谁说的, 读它挂着的信封 (peers.parseEnvelope); 没挂信封的就是人在这个会话的
-// home 聊天里说的。只要正文: 一个来回取问话与终句, 不要工具调用,
+// home 聊天里说的。频道与身份优先按 key 认 (信封的 chat-key / 会话的 target key),
+// 名字只做显示 —— 聊天名与 wizard 名都可能被释放后换主; 信封里没有 key 的旧记录
+// 回落按名 (见 chatHit / involves)。只要正文: 一个来回取问话与终句, 不要工具调用,
 // 不回 json —— 读的是模型, 每一个字段名都是它要付的 token。
 //
 // 选哪些消息是三级收窄, 与 rolepage 同一条轴: role (谁的视角) → chat (哪个群) →
@@ -17,9 +19,13 @@ import { talkRounds } from "./peers.js";
 export interface LogSession {
   /** 它在记录里的称呼 (`.name`)。 */
   name: string;
+  /** 它的 target key —— 身份认它, `name` 只是显示 (名字会被释放给别的 wizard 复用)。 */
+  key: string;
   jsonlPath: string;
   /** home 聊天的名字 —— 没挂信封的话落在这里。 */
   homeChat: string;
+  /** home 聊天的 base key —— 没挂信封的人话归档按它 (名字只做显示)。 */
+  homeKey: string;
   /** home 聊天里说话的人 (单聊就是那个人, 群里不知道是谁)。 */
   homeHuman: string;
   /** 早于这个时刻的不算它的: 分身的 transcript 开头是从父亲那里 fork 来的整段历史。 */
@@ -29,10 +35,17 @@ export interface LogSession {
 export interface ChatLogQuery {
   /** 只留这个 role 说的或听的 (wizard 的 `.name` / 人的 userid)。 */
   role?: string;
+  /** role 的 target key —— 有它认会话主人比名字准; 没有按名 (人 / 已不在的 wizard)。 */
+  roleKey?: string;
   /** 只留这个群 (名字) 里公开说的; 不给 = 公开与私聊都算, 每行标出在哪说的。 */
   chat?: string;
+  /** 那个群的稳定 key —— 信封带了 key 的行按 key 比 (名字会被 rename 换主),
+   *  没带的 (旧 transcript) 回落按名, 不能因为没 key 就把整段历史漏掉。 */
+  chatKey?: string;
   /** 只留与这个 role 的往来 —— 通常与 `role` 同给, 即两方之间。 */
   target?: string;
+  /** target 的 target key, 同 `roleKey`。 */
+  targetKey?: string;
   /** 时间窗 [since, until), epoch ms。 */
   since?: number;
   until?: number;
@@ -49,6 +62,14 @@ interface LogMsg {
   private: boolean;
   /** 公开轮所在聊天的名字。 */
   chat: string;
+  /** 公开轮所在聊天的 key —— 信封带的, 或没挂信封时 (home 里的人话) 会话的 home key;
+   *  老信封没带 = 不确定 (回落按名)。 */
+  chatKey?: string;
+  /** 产生这条记录的会话 (target key) —— role 轴认它。 */
+  sessionKey: string;
+  /** 哪一侧是会话主人 (问话的 `to` / 答复的 `from`): 主人侧按 sessionKey 认,
+   *  名字只做显示 —— 答复行的 from 也是主人的名字, 不标就会从名字侧漏回来。 */
+  own: "from" | "to";
   text: string;
   /** 这句问话还没等到回答 —— 标在它自己那一行上, 不另占一条的名额。 */
   pending?: boolean;
@@ -64,6 +85,21 @@ const audienceIn = (s: LogSession, env: Envelope, chat: string): string =>
 
 const same = (a: string, b: string): boolean => stripSigil(a).toLowerCase() === stripSigil(b).toLowerCase();
 
+/** 两层认一个聊天: 行和查询都有 key 按 key比 (名字会换主, key 不会 —— 同名的新群读不走
+ *  旧群的记录); 哪一边没有 key 才回落按名 (旧 transcript 的信封不带 key, 按名才能读到)。 */
+const chatHit = (m: LogMsg, q: ChatLogQuery): boolean =>
+  q.chatKey && m.chatKey ? m.chatKey === q.chatKey : same(m.chat, q.chat ?? "");
+
+/** role / target 轴的两层: 会话主人那一侧, 解析出 key 时按 session key 认 (显示名对不上
+ *  也算, 同名的别的会话也不算); 没 key 才按名。对方 (信封里的发话方 / home 里的人)
+ *  只有名字, 始终按名。 */
+const involves = (m: LogMsg, who?: string, key?: string): boolean => {
+  if (!who) return true;
+  const ownName = m.own === "from" ? m.from : m.to;
+  const otherName = m.own === "from" ? m.to : m.from;
+  return (key !== undefined ? m.sessionKey === key : same(who, ownName)) || same(who, otherName);
+};
+
 /** 一个会话的来回 → 入/出两条消息。`deep` = 这个会话往回还可能有没读到的:
  *  talkRounds 攒够 `depth` 个来回就停, 没攒够说明已经读到了文件头 (对分身来说,
  *  读过了出生那一刻也算到头 —— 再往前是父亲的历史)。 */
@@ -76,11 +112,15 @@ const messagesOf = (s: LogSession, q: ChatLogQuery, depth: number): { msgs: LogM
       const answer = round.filter((t) => t.role === "assistant").at(-1);
       const env = ask.env;
       const from = env?.from ?? s.homeHuman;
-      const where = { private: !!env?.private, chat: env?.private ? "" : env?.chat || s.homeChat };
+      // 没挂信封 = 人在 home 聊天里说的 → 频道就是 home, key 也拿 home 的 (稳)。
+      // 挂了信封但没有 chat-key = 老形状 → key 不确定, 匹配回落按名。
+      const where = env?.private
+        ? { private: true, chat: "" }
+        : { private: false, chat: env?.chat || s.homeChat, ...(env?.chatKey ? { chatKey: env.chatKey } : !env && s.homeKey ? { chatKey: s.homeKey } : {}) };
       const at = ask.ms ?? 0;
       return [
-        { ts: at, from, to: s.name, ...where, text: ask.text, ...(!answer && i === rounds.length - 1 ? { pending: true } : {}) },
-        ...(answer ? [{ ts: answer.ms ?? at, from: s.name, to: env?.receipt && !env.private ? audienceIn(s, env, where.chat) : from, ...where, text: answer.text }] : []),
+        { ts: at, from, to: s.name, sessionKey: s.key, own: "to", ...where, text: ask.text, ...(!answer && i === rounds.length - 1 ? { pending: true } : {}) },
+        ...(answer ? [{ ts: answer.ms ?? at, from: s.name, to: env?.receipt && !env.private ? audienceIn(s, env, where.chat) : from, sessionKey: s.key, own: "from" as const, ...where, text: answer.text }] : []),
       ];
     })
     .filter((m) => m.ts >= s.since);
@@ -130,7 +170,7 @@ export const renderChatLog = (
   q: ChatLogQuery,
   now: number,
 ): { text: string; shown: number; total: number; earlier?: string; later?: string } => {
-  const involves = (m: LogMsg, who?: string): boolean => !who || same(who, m.from) || same(who, m.to);
+  const involvesQ = (m: LogMsg): boolean => involves(m, q.role, q.roleKey) && involves(m, q.target, q.targetKey);
   // 每个会话读多深是按**全部**来回数的, 而要的只是其中对得上的那些: 一个忙会话的
   // 最近 30 个来回里可能一句私聊都没有。所以没凑够、又有会话没读到头, 就加深四倍
   // 再读 —— 到凑够、到头、或加深三次为止 (单个文件的读取另有 2MB 的上限)。
@@ -138,7 +178,7 @@ export const renderChatLog = (
     const read = sessions.map((s) => messagesOf(s, q, depth));
     const hits = read
       .flatMap((r) => r.msgs)
-      .filter((m) => (q.chat === undefined || (!m.private && same(m.chat, q.chat))) && involves(m, q.role) && involves(m, q.target))
+      .filter((m) => (q.chat === undefined || (!m.private && chatHit(m, q))) && involvesQ(m))
       .filter((m) => m.ts >= (q.since ?? 0) && m.ts < (q.until ?? Infinity))
       .sort((a, b) => a.ts - b.ts);
     const deep = q.since === undefined && read.some((r) => r.deep);
