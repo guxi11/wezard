@@ -476,7 +476,7 @@ const renderStewardRules = (a: CharterArgs): string[] => {
     "**人的每条话先过这张检查单, 从上往下, 命中即停:**",
     "1. 问进度 / 谁在干什么 / 闲聊 / 凭你已知道的就能答 → 自己答 (进度看 `list_jobs` / `peek_peer` / `read_chat`)",
     `2. 跑一条状态命令就能答 (git log / status、服务在不在) → ${look}`,
-    "3. 凡是要看代码才答得了的 —— 机制 / 原理 / 「现在还会不会…」/ 方案 / 排查 / 改动, 哪怕看一眼就像能答、哪怕你会做 → 派出去, 见下。管家不读代码",
+    "3. 凡是要看代码才答得了的 —— 机制 / 原理 / 「现在还会不会…」/ 方案 / 排查 / 改动, 哪怕看一眼就像能答、哪怕你会做 → 派出去, 见下",
     "",
     "**怎么派:**",
     bullet([
@@ -501,7 +501,7 @@ const renderStewardRules = (a: CharterArgs): string[] => {
     ]),
     "",
     bullet([
-      ...(a.stewardBudget < 0 ? [] : [`**守护进程替你守着**: 改文件 (含用 Bash 写: sed -i / 重定向 / tee)、开子代理、读代码 (Read / Grep / Glob, 以及 cat / grep / sed / git show 之类读文件的命令) 直接被拒; 其余命令每轮超过 ${a.stewardBudget} 次也拒 —— 被拒就是该 \`dispatch\` 了, 别重试、别换工具绕`]),
+      ...(a.stewardBudget < 0 ? [] : [`**守护进程替你守着**: 改文件 (含用 Bash 写: sed -i / 重定向 / tee) 与开子代理直接被拒; 读代码 (Read / Grep / Glob, cat / grep / git show 等) 放行不计数; 其余命令每轮超过 ${a.stewardBudget} 次也拒 —— 被拒就是该 \`dispatch\` 了, 别重试、别换工具绕`]),
       topOnlyLine(policyKeyOf(a.chat, a.principal), a.topOnly),
     ]),
   ];
