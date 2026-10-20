@@ -30,9 +30,16 @@ const bashWrites = (command: string): boolean => {
   return false;
 };
 
+// 读 SKILL.md 是加载技能, 不是读代码: modeck 之类注入的技能索引不进原生 Skill 工具,
+// 只能 Read 入口文件 —— 与上面放行 Skill 同理, 否则管家永远加载不了这类技能。
+const loadsSkill = (toolName: string, toolInput: unknown): boolean => {
+  const p = (toolInput as { file_path?: unknown } | null)?.file_path;
+  return toolName === "Read" && typeof p === "string" && /\/SKILL\.md$/.test(p);
+};
+
 type Kind = "free" | "hands" | "read" | "look";
 const kindOf = (toolName: string, toolInput: unknown): Kind => {
-  if (FREE.has(toolName) || /wezard/i.test(toolName)) return "free";
+  if (FREE.has(toolName) || /wezard/i.test(toolName) || loadsSkill(toolName, toolInput)) return "free";
   if (HANDS.has(toolName)) return "hands";
   if (READS.has(toolName)) return "read";
   const cmd = (toolInput as { command?: unknown } | null)?.command;
