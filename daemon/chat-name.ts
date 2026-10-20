@@ -10,8 +10,11 @@
 //
 // 落盘走 config.jsonc (`chats`), 与定时表同一套 patchJsonc + in-place cfg 变更 ——
 // 名字是用户手写的长期配置, 不是运行时状态, 不该躺在 state 目录里。
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { ChatPolicy, type Config, type TierName } from "../shared/config.js";
 import { patchJsonc } from "../shared/config-writer.js";
+import { expandHome } from "../shared/paths.js";
 import { baseOfKey, isInternalKey, tagOfKey } from "../shared/session-label.js";
 import { settleName, wizardStore } from "./wizard.js";
 
@@ -91,8 +94,36 @@ export const listChatNames = (cfg: Config): Array<{ name: string; base: string }
     .sort((a, b) => a.name.localeCompare(b.name));
 
 const writeChats = (cfg: Config, sourcePath: string, next: Record<string, string>): void => {
+  retire(cfg, [...Object.keys(cfg.chats ?? {}), ...Object.keys(next)]);
   cfg.chats = next;
   patchJsonc(sourcePath, [{ path: ["chats"], value: next }]);
+};
+
+// ── 墓碑 ──────────────────────────────────────────────────────────────
+// 名字是读侧的身份: read_chat / rolepage 按信封里的聊天名认「这个群的往来」。一个名字被人
+// rename 释放、再自动分给新聊天, 新聊天里的 wizard 就把上一任持有者的全部记录读成自己群的
+// (cc-wecom-3 一天里先后属于 modeck、bias、mail_modules 三个群)。所以凡在 `chats` 里出现过
+// 的名字都留墓碑, 自动命名永不再分配; 人手动 `/name` 不受限 —— 那是人自己指定的。
+// 墓碑是运行时历史, 不是人写的配置: 落在 state 目录, 不进 config.jsonc。
+const retiredPath = (cfg: Config): string => join(expandHome(cfg.daemon.stateDir), "chat-names-retired.json");
+
+/** 出现过的全部聊天名 (已折叠大小写)。读不到当空 —— 下一次写会把当前 `chats` 并进来。 */
+export const retiredChatNames = (cfg: Config): Set<string> => {
+  try {
+    const xs: unknown = JSON.parse(readFileSync(retiredPath(cfg), "utf8"));
+    return new Set(Array.isArray(xs) ? xs.filter((x): x is string => typeof x === "string").map(fold) : []);
+  } catch { return new Set(); }
+};
+
+/** 把这些名字并进墓碑。写失败不抛: 丢一次墓碑最坏是一个名字可能被复用, 不该搞崩命名本身。 */
+const retire = (cfg: Config, names: readonly string[]): void => {
+  const have = retiredChatNames(cfg);
+  const next = [...new Set([...have, ...names.map(fold)])].sort();
+  if (next.length === have.size) return;
+  try {
+    mkdirSync(dirname(retiredPath(cfg)), { recursive: true });
+    writeFileSync(retiredPath(cfg), JSON.stringify(next, null, 2) + "\n");
+  } catch { /* 见上 */ }
 };
 
 /** 给 `target` 所在的聊天起名 (改名 = 覆盖, 一个聊天只留一个名字)。名字被别的
@@ -146,19 +177,34 @@ export const uniqueChatName = (want: string, taken: ReadonlySet<string>): string
   return walk(1);
 };
 
+/** 自动名只递增、永不回填: 取 `want` 这一支 (`want` / `want-N`) 在 `used` (占用 ∪ 墓碑) 里的最大序号 +1。
+ *  空号也不回填 —— 空号多半是某个已改名的群留下的, 它的旧往来还挂在这个名字上。 */
+export const nextAutoName = (want: string, used: ReadonlySet<string>): string => {
+  const w = fold(want);
+  const seq = (name: string): number => {
+    if (name === w) return 1;
+    const m = /^(.*)-(\d+)$/.exec(name);
+    return m && m[1] === w.slice(0, 31 - m[2]!.length) ? Number(m[2]) : 0;
+  };
+  const n = Math.max(0, ...[...used].map(seq)) + 1;
+  return n === 1 ? want : `${want.slice(0, 31 - String(n).length)}-${n}`;
+};
+
 /** 给一批没名字的聊天算名字 (纯函数)。批内互不重名 —— 三个聊天都在 lisct 下就是
- *  lisct / lisct-2 / lisct-3。已有名字的、以及工作区推不出名字的, 都不在结果里。 */
+ *  lisct / lisct-2 / lisct-3。已有名字的、以及工作区推不出名字的, 都不在结果里。
+ *  `retired` = 出现过的全部名字 (墓碑), 默认读盘。 */
 export const planChatNames = (
   cfg: Config,
   chats: ReadonlyArray<{ base: string; cwd: string }>,
+  retired: ReadonlySet<string> = retiredChatNames(cfg),
 ): Record<string, string> => {
-  const taken = new Set(entries(cfg).map(([n]) => fold(n)));
+  const used = new Set([...entries(cfg).map(([n]) => fold(n)), ...retired]);
   return chats.reduce<Record<string, string>>((acc, c) => {
     if (!c.base || chatNameOf(cfg, c.base)) return acc;
     const want = nameFromCwd(c.cwd);
     if (!NAME_RE.test(want)) return acc;
-    const name = uniqueChatName(want, taken);
-    taken.add(fold(name));
+    const name = nextAutoName(want, used);
+    used.add(fold(name));
     return { ...acc, [c.base]: name };
   }, {});
 };

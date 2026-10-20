@@ -106,8 +106,8 @@ import { registerWorkflowPlanRoutes } from "./workflow-plan-http.js";
 import { returnOpOf, type HeldSeen, type InFlight, type Prereq, type ReturnOp, type Tell } from "./dispatch.js";
 import { isTerminal, renderInFlight, turnState } from "../shared/turn-state.js";
 import { startIdleNudge } from "./idle-nudge.js";
-import { askerFromEnvelope, renderReminder, withMsg, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
-import { createHandoffs, cuttingTurn, handedOff, handingOff, type Pending as PendingHandoff } from "./handoff.js";
+import { askerFromEnvelope, renderReminder, stripReminders, withMsg, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
+import { createHandoffs, cuttingTurn, handedOff, handingOff, resumeText, settlesCut, type Pending as PendingHandoff } from "./handoff.js";
 import { coldGateOf, decide, rankCandidates, routeDiagnostics, renderCandidates, routeDutiesOf, tierFor, wakeCostOf, wakeNoteOf, type RouteRow } from "./route.js";
 import { parseWhen, renderChatLog, UNKNOWN_HUMAN, type LogSession } from "./chat-log.js";
 import { audienceOf } from "../shared/role-view.js";
@@ -1123,13 +1123,20 @@ const main = async (): Promise<void> => {
       const channel = r.kind === "chat" ? r.channel : "";                  // 结论要落回群里时才带频道 (§9.4)
       const base = `route:${event}:resume`;
       const id = `${base}:${at}`;
+      // 那一笔的原话 = 服务它的最早一条注入 (不是续问 / 回执 / 交接内部事件); 收尾 = 交接扣下的那句终句。
+      const serving = events.ids().map((x) => events.get(x)).filter((x): x is MessageEvent => !!x && x.serves === event && x.target === t)
+        .sort((a, b) => (a.originalAt ?? a.at) - (b.originalAt ?? b.at));
+      const ask = serving.find((x) => !x.id.startsWith(base) && !x.id.startsWith("rcpt:") && !x.id.startsWith("handoff:"));
+      const closing = serving.filter((x) => x.handoffCut && !x.handoffRestored && x.result).at(-1)?.result?.body;
+      const head = row.asker ? `${row.asker.who}${row.asker.chat ? ` (在 ${chatNameOf(cfg, row.asker.chat) || row.asker.chat})` : ""}` : "";
+      const asker = r.kind === "wizard" ? `${displayName(r.to)}${head ? ` · 链头 ${head}` : ""}` : head;
       try {
         events.accept({
           id, identity: JSON.stringify([t, event, "resume", at]),
           target: t, speaker: waiting, channel, serves: event,
           ...(row.asker ? { asker: row.asker } : {}),
           priority: "normal", deadline: Date.now() + 12 * 3600_000,
-          payload: { text: `继续 ${event}` + " —— 这是你交接前还没交代的那一笔: 现在就把它做完并收口 (RESULT 交差 / NEED 反问)。", peer: {
+          payload: { text: resumeText(event, { asker, ask: ask ? stripReminders(ask.payload.text) : undefined, closing }), peer: {
             from: { kind: "peer", from: waiting, ...(row.asker ? { asker: row.asker } : {}) },
             // 不是一件新活 (没有件号、不收新回执): 它只是把那一笔重新指给 owner。
             job: "", kind: "task",
@@ -1429,15 +1436,28 @@ const main = async (): Promise<void> => {
      *  owner 的名义在同一笔上续问一次 —— `bounced` 记住那一笔, 同一笔最多打回一次 (reload 后
      *  也最多再多打回一次)。**这是「轮终 evidence → onFinal」那条主触发链的落点**: 没有它,
      *  answer 就只能靠 sweeper / 级联取消 / boot 重放合成, 谁答完都不会有回执。 */
+    const cutSettles = (e: MessageEvent, verdict: FinalVerdict): boolean => {
+      const row = e.serves ? router.get(e.serves) : undefined;
+      const closing = parseClosing(verdict.text).kind;
+      return !verdict.error && settlesCut(row?.receiver.kind, closing === "none" ? undefined : closing);
+    };
     deliverFinal = (e, verdict) => {
+      // 自我交接切断的那一轮: 它的终句若就是那一笔的交代 (见 settlesCut), 摘掉切断标记照常落定 ——
+      // 不然行留 open, 新会话被「继续 <event>」重问一件已经答完的事 (set_workspace 那一轮就是这样)。
+      const keep = cuttingTurn(e.target) && cutSettles(e, verdict);
+      if (keep && handoffFinalSuppressed(e)) {
+        handoffs.keep(e.target, e.id);
+        events.restoreHandoffFinal(e.id);
+        log.info({ event: e.id, target: e.target, serves: e.serves }, "handoff: 切断那一轮的终句即交代, 照常落定");
+      }
       if (handoffFinalSuppressed(e) || !ownsReplyEvent(e)) return;
       // 同一轮的终句会递进来两次: result() 当场递一次, 泵见 complete 未 finalized 再补判一次
       // (message-events)。被打回那一轮的重放不是补交 —— 丢掉; 否则 bounced 已记着这一笔,
       // 第二次就把被打回的原文照收成 done (打回的续问还没注入, 定论先落了)。
       if (e.serves && bounced.get(e.serves) === e.id) return;
-      // 自我交接切断的那一轮: 收尾那句不是欠着的那几笔的答案 —— 行留 open, 交给新会话的「继续 <event>」。
+      // 自我交接切断的那一轮 (终句不算交代的): 收尾那句不是欠着的那几笔的答案 —— 行留 open, 交给新会话的「继续 <event>」。
       // 扣下记在这场交接上: 交接没做成 (新会话没起来), 它就是那几笔仅有的交代, 由 uncut 补投。
-      if (cuttingTurn(e.target)) {
+      if (cuttingTurn(e.target) && !keep) {
         handoffs.cut(e.target, e.id);
         events.suppressHandoffFinal(e.id);
         log.info({ event: e.id, target: e.target, serves: e.serves }, "handoff: 交接切断的那一轮终句不落定");

@@ -16,7 +16,7 @@
 // 每一步落盘, boot 时从断点接着做。
 import type { Logger } from "pino";
 import type { JsonMap } from "../shared/json-map-store.js";
-import { sleep } from "../shared/std.js";
+import { sleep, truncate } from "../shared/std.js";
 import { waitForIdle } from "./graph.js";
 import type { EventId } from "./router.js";
 
@@ -131,7 +131,36 @@ export interface Handoffs {
   resume: () => number;
   /** 切断那一轮的终句被扣下了 (`cuttingTurn` 为真时): 记在这场交接上, 失败时补投。 */
   cut: (target: string, event: string) => void;
+  /** 切断那一轮的终句其实就是那一笔的交代 (见 `settlesCut`): 从这场交接的扣下集合里摘掉,
+   *  照常落定 —— 交接做成了也不再续问它, 没做成也不再补投第二遍。 */
+  keep: (target: string, event: string) => void;
 }
+
+/** 交接切断那一轮的终句算不算那一笔的交代 —— 算就照常落定投出, 不留成欠账给新会话续问。
+ *  - 结论回**群里** (`chat`): 新会话贴回简报那一轮本就在同一个群里说话, 收尾即便只是「已交接」
+ *    也不丢东西; 扣下它反倒让新会话再被「继续 <event>」点一次, 而它手里只有一个事件号
+ *    (set_workspace 那一轮就这样被重问, 新管家去 read_chat 猜, 撞上了复用的群名)。
+ *  - 结论回 **wizard**: 简报那一轮是私聊、不服务任何一笔, 抢答 (「已交接, 新会话接着干」)
+ *    一旦落定, 真结论就再也到不了派活方 —— 只有显式 `RESULT:` / `NEED:` 才算数, 未标记的照旧扣下。 */
+export const settlesCut = (receiver: "chat" | "wizard" | undefined, closing: "need" | "result" | undefined): boolean =>
+  receiver === "chat" || (receiver === "wizard" && closing !== undefined);
+
+const quote = (s: string, max: number): string =>
+  truncate(s.trim(), max).split("\n").map((l) => `> ${l}`).join("\n");
+
+/** 交接后续答那一笔的注入正文: 带上谁问的、原话、交接切断那一轮被扣下的收尾。新会话没有旧
+ *  transcript, 只给事件号它只能去翻记录猜; 有了原话与收尾, 那一笔若其实已答完 (假欠账),
+ *  它一句 RESULT 就能自己收掉。 */
+export const resumeText = (event: string, ctx: { asker?: string; ask?: string; closing?: string }): string =>
+  [
+    `继续 ${event} —— 这是你交接前还没交代的那一笔: 现在就把它做完并收口 (RESULT 交差 / NEED 反问)。`,
+    ctx.asker ? `问的是: ${ctx.asker}` : "",
+    ctx.ask?.trim() ? `原话:\n${quote(ctx.ask, 1500)}` : "",
+    ctx.closing?.trim() ? `你交接前那一轮的收尾 (被交接扣下, 没投出去):\n${quote(ctx.closing, 1500)}` : "",
+    ctx.ask?.trim() || ctx.closing?.trim()
+      ? "就按上面这件事收口; 收尾其实已经答完了, 就以 `RESULT:` 把它交差。别为找这一笔去 read_chat / peek_peer 翻别的记录。"
+      : "",
+  ].filter(Boolean).join("\n\n");
 
 const SELF_IDLE_MS = 10 * 60_000;
 
@@ -313,6 +342,13 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
       // 先保存事务凭证, 再发布内存切断状态; 写失败后的重试也必须重新尝试落盘。
       if (p) deps.store!.set(target, { ...p, cut });
       cuts.set(target, cut);
+    },
+    keep: (target, event) => {
+      const p = deps.store?.get(target);
+      const cut = (xs?: readonly string[]): string[] => (xs ?? []).filter((x) => x !== event);
+      // 先落盘再改内存, 与 cut 同序: 崩在中间 = 事件仍带切断标记, 退回旧行为 (由新会话续答)。
+      if (p?.cut?.includes(event)) deps.store!.set(target, { ...p, cut: cut(p.cut) });
+      if (cuts.has(target)) cuts.set(target, cut(cuts.get(target)));
     },
   };
 };
