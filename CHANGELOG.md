@@ -4,18 +4,40 @@
 
 ## [Unreleased]
 
-### Changed
-- 管家手闸不再拦读代码：`Read` / `Grep` / `Glob` 及 `cat` / `grep` / `git show` 等只读命令对管家放行、不计次数预算；改文件与开子代理的拦截、每轮 look 命令预算保持不变。宪章、管家提示与配置描述同步改写。
-- spawn 撞上 CodeBuddy 四选项目录信任选择器时不再只发通知等人：形状完整命中 (标题 + 唯一绝对路径 = 本次 spawn 的 cwd + 四个逐字对得上的选项行 + Enter 尾行) 就自动选第 1 项 `Trust folder only` 并确认 —— 与预写信任同一授权范围，只限本目录。高亮默认在第 1 项时单发 Enter，否则单发数字 `1` (实测两者皆一键即确认)，永远只发一个键；发送后必须看到框已消失且 CLI 未退，框还在即停手退回「只通知」路径 (附当前屏)，绝不补发。形状任一不符 —— 目录不是本次 cwd、选项文本对不上、屏上有其它数字选项或「另需授权」语义 —— 一律不碰键盘，照旧只通知。
+## [2.8.1] - 2026-10-21
 
 ### Added
 - spawn 撞上认不出的启动确认框 (预写信任与目录信任代按都覆盖不到的启动期弹框) 时, 向该 spawn 的企微频道发一条通知: 哪个 wizard、哪个 tmux pane (含 `tmux attach` 指引)、工作目录与屏上原文摘要, 只告知不等点击; 同一 pane 同一形状只发一次, 发送失败只记日志, 不按任何键、不阻塞 ready 判定。
 
+### Changed
+- 管家手闸不再拦读代码：`Read` / `Grep` / `Glob` 及 `cat` / `grep` / `git show` 等只读命令对管家放行、不计次数预算；改文件与开子代理的拦截、每轮 look 命令预算保持不变。宪章、管家提示与配置描述同步改写。
+- spawn 撞上 CodeBuddy 四选项目录信任选择器时不再只发通知等人：形状完整命中 (标题 + 唯一绝对路径 = 本次 spawn 的 cwd + 四个逐字对得上的选项行 + Enter 尾行) 就自动选第 1 项 `Trust folder only` 并确认 —— 与预写信任同一授权范围，只限本目录。高亮默认在第 1 项时单发 Enter，否则单发数字 `1` (实测两者皆一键即确认)，永远只发一个键；发送后必须看到框已消失且 CLI 未退，框还在即停手退回「只通知」路径 (附当前屏)，绝不补发。形状任一不符 —— 目录不是本次 cwd、选项文本对不上、屏上有其它数字选项或「另需授权」语义 —— 一律不碰键盘，照旧只通知。
+
 ### Fixed
-- 信封渲染对 number 型属性值不再崩溃：`openTag` 渲染前统一 `String(v)`，此前 `renderPeerEnvelope` 塞进 `legs` / `deadline` 等 number 会让 `escAttr` 在 `.split` 上抛 TypeError，`reminder-shape` 回归组整组红。
 - `approval.danger.skipAll` 真正压住 CLI 原生权限选择框：CodeBuddy 对一部分调用先弹自家权限 picker、hook 事后才触发或根本不触发，这条链路只有 mirror 的 picker 哨兵能代答 —— 但真实 CodeBuddy picker 的屏面 (标题 `Hook PreToolUse: … requires confirmation:` / 裸 `Bash command` 正文) 解不出 `Confirm` 头与 `toolName`/`params`，哨兵按「上下文不完整」一律转审批卡，skipAll 在哨兵上永远轮空，调用卡死在原生选择框 (devcloud 实测症状)。现在 skipAll 在不完整上下文分支直接放行 (与 hook 路径「盲放」同语义，不依赖入参匹配；仍只代按一次性裸 Yes，交互工具与原生沙箱请求照旧不碰)；「不完整且无 skipAll」「判成 modal 但无可信选项」两条路径补屏面 tail 诊断日志，远端布局变体排查不再需要守屏抓 capture。
+- 信封渲染对 number 型属性值不再崩溃：`openTag` 渲染前统一 `String(v)`，此前 `renderPeerEnvelope` 塞进 `legs` / `deadline` 等 number 会让 `escAttr` 在 `.split` 上抛 TypeError，`reminder-shape` 回归组整组红。
 - 自我交接不再把已答完的那一轮当欠账重问: 被交接切断那一轮的终句, 结论回群里的、或显式 `RESULT:` / `NEED:` 的照常落定投出 (回 wizard 的未标记收尾仍扣下, 防抢答误折); 仍需续答的「继续 <event>」带上问话人、原话与被扣下的收尾, 接手方不必再去 read_chat 猜。
 - 聊天自动名不再复用: 凡在 `chats` 里出现过的名字都记墓碑 (`state/chat-names-retired.json`), 自动命名只取该前缀最大序号 +1 (`cc-wecom-10`、`-11` …), 人 rename 释放的旧名不回流给新聊天; 手动 `/name` 不受限。
+- `read_chat` 与无参视图按信封 chat-key 匹配聊天身份, 仅对无 key 的旧信封按名回落, 名字只做显示; 复用的聊天自动名不再把一个聊天的历史串给另一个。
+- `set_workspace` 交接真正落地并可恢复: 工作区切换在 handoff 时生效并核验交接进程身份, 未决交接的结果表述清晰, 切换中断后可恢复续接。
+
+## [2.8.0] - 2026-10-19
+
+### Added
+- Codex hooks 清单审查支持逐项精确授信，并以投票卡呈现。
+- 默认 coding 编排按任务范围选择 light 档，保持轻量 wizard 的模型预算。
+
+### Changed
+- 回执回归按正交方向拆分，便于离线定向验证。
+
+### Fixed
+- daemon 不可用时拒绝 Codex 原生权限请求，避免审批失效时放行。
+- 回执投递失败后可恢复，并确保结果只领取一次。
+- 恢复 wizard 时保留原 backend；重试投递设有上限。
+- 复用空闲 wizard 前确认其材料与任务匹配。
+- pane 恢复后补认延迟到达的输入确认。
+- Codex hooks 信任审查消息保留完整清单与精确 hash 授权信息。
+- rolepage 消息 footer 链接在闭合 Markdown code fence 后保持为独立链接。
 
 ## [2.7.7] - 2026-10-16
 
@@ -1202,7 +1224,9 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.7.7...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.8.1...HEAD
+[2.8.1]: https://github.com/guxi11/wezard/compare/v2.8.0...v2.8.1
+[2.8.0]: https://github.com/guxi11/wezard/compare/v2.7.7...v2.8.0
 [2.7.7]: https://github.com/guxi11/wezard/compare/v2.7.6...v2.7.7
 [2.7.6]: https://github.com/guxi11/wezard/compare/v2.7.5...v2.7.6
 [2.7.5]: https://github.com/guxi11/wezard/compare/v2.7.4...v2.7.5
