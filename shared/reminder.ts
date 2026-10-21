@@ -85,7 +85,9 @@ export const unregisteredAttrs = (attrs: Attrs): string[] => {
 
 const openTag = (attrs: Attrs): string => {
   const bad = new Set(unregisteredAttrs(attrs));
-  return `<system-reminder${Object.entries(attrs).filter(([k, v]) => !bad.has(k) && v !== undefined).map(([k, v]) => ` ${k}="${escAttr(v)}"`).join("")}>`;
+  // String(v): 类型上属性是 string, 但调用方 (renderPeerEnvelope 的 legs/deadline 等)
+  // 会塞进 number —— escAttr 拿到非字符串就在 .split 上炸, 渲染整条链路瘫痪。
+  return `<system-reminder${Object.entries(attrs).filter(([k, v]) => !bad.has(k) && v !== undefined).map(([k, v]) => ` ${k}="${escAttr(String(v))}"`).join("")}>`;
 };
 
 /** 以换行起头 —— 直接接在正文后面。 */
