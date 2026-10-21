@@ -269,7 +269,13 @@ const lineItems = (jsonlPath: string, raw: string, keepLines: boolean, marks: bo
       // task. Evidence readers need that boundary; conversation views stay empty.
       if (!text && marks && role === "assistant" && !mid && !tool && row.message?.stop_reason === "end_turn")
         return [{ role, text: "", ms, end: true } as Turn];
-      if (!text && marks && role === "user" && raw.includes("<task-notification")) return [{ role, text: "", ms, notice: true } as Turn];
+      // 认形状不认「剥完为空」: CodeBuddy 的后台完成通知在 `<task-notification>` 块后面还
+      // 跟着机器附言 ("Use the TaskOutput tool…" / "[SYSTEM NOTIFICATION - NOT USER INPUT]…"),
+      // stripMeta 剥完块仍有剩余正文 —— 若按剩余正文当普通 user 轮, 这条无信封的机器行会被
+      // openingOf 当成开轮行, servesOfTurn 随之断链: 人在群里的那一轮中途派活查不到服务的那笔,
+      // 开出 detach 根行, 回执 channel="" 进收件箱, 顶层 wizard 回执轮的终句进不了群
+      // (2026-10-21 mono 21:30, ed955ca)。
+      if (marks && role === "user" && /^\s*<task-notification[>\s]/.test(raw)) return [{ role, text: "", ms, notice: true } as Turn];
       const apiError = role === "assistant" && (parsed as { isApiErrorMessage?: unknown }).isApiErrorMessage === true;
       const turn: Item[] = text ? [{ role, text, ms, ...(env ? { env } : {}), ...(mid ? { mid: true } : {}), ...(soft ? { soft: true } : {}), ...(apiError ? { apiError: true } : {}) } as Turn] : [];
       return tool ? [...turn, "tool"] : turn.length ? turn : ["gap"];
