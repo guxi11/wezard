@@ -6964,7 +6964,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       a.pickerSentinelFp = v.screen;
       const pick = pickAutoAllowAnswer(parseModalOptions(v.screen));
       if (!pick) {
-        log.info({ target: a.target, title: v.title }, "picker sentinel: modal on pane but not a trustworthy permission picker — leaving it");
+        // tail 与上面「未判成 modal」分支同款: 远端 (devcloud) 选项文案变体排查靠它,
+        // 不必再守着屏抓 capture。
+        log.info({ target: a.target, title: v.title, tail: v.screen.split("\n").slice(-8).join("\\n").slice(-600) }, "picker sentinel: modal on pane but not a trustworthy permission picker — leaving it");
         return;
       }
       const ctx = parseConfirmContext(v.screen);

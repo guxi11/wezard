@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { ConfigSchema } from "../shared/config.js";
-import { modalFingerprint, parseConfirmContext, parseModalOptions, pickAutoAllowAnswer } from "../shared/modal-pane.js";
+import { modalFingerprint, parseConfirmContext, parseModalOptions, pickAutoAllowAnswer, isModalPane } from "../shared/modal-pane.js";
 import { dispatchPickerPolicy, pickerPolicy } from "../daemon/picker-policy.js";
 
 const cfg = () => ConfigSchema.parse({ bot: { botId: "test", secret: "test" } });
@@ -65,9 +65,34 @@ assert.equal(pickerPolicy(skip, "codebuddy", { ...context, toolInput: { command:
 for (const screen of unknown) {
   const ctx = parseConfirmContext(screen);
   assert.equal(ctx.complete, false, screen);
-  assert.equal(pickerPolicy(skip, "codebuddy", ctx, true).decision, "manual");
-  assert.ok(pickerPolicy(skip, "codebuddy", ctx, true).forceSingle);
+  // 无 skipAll: 不完整上下文仍转审批卡逐次确认; 有 skipAll: 与 hook 路径同语义盲放
+  // (真实 CodeBuddy 权限 picker 的正文解不出 Confirm 头/toolName, 否则 skipAll 永远轮空)。
+  const plain = pickerPolicy(cfg(), "codebuddy", ctx, true);
+  assert.equal(plain.decision, "manual", screen);
+  assert.ok(plain.forceSingle, screen);
+  assert.equal(pickerPolicy(skip, "codebuddy", ctx, true).decision, "allow", screen);
 }
+
+// 真屏回归: 本机 CodeBuddy hook-ask 回退 picker (transcript 0b6b5d46, 2026-10-13)。
+// sentinel 链路逐环验收: modal → 裸 Yes → ctx 不完整 → skipAll 下放行。
+const realCodebuddyPicker = `∴ Thought
+● Bash(ls -la /Users/zyy/.codebuddy/projects/x/memory/)
+────────────────────────────────────────────────────────────────────────────────
+ Bash command
+   ls -la /Users/zyy/.codebuddy/projects/x/memory/
+   列出 memory 目录与两个工作区
+────────────────────────────────────────────────────────────────────────────────
+ Hook PreToolUse: Bash requires confirmation:
+   wezard: send_card_fail:invalid chatid, hint: [123]
+ > 1. Yes
+   2. Yes, and don't ask again for session (shift + tab)
+   3. No, and tell CodeBuddy what to do differently (escape)`;
+const realV = isModalPane(realCodebuddyPicker);
+assert.equal(realV.modal, true);
+assert.equal(pickAutoAllowAnswer(parseModalOptions(realCodebuddyPicker))?.label, "Yes");
+const realCtx = parseConfirmContext(realCodebuddyPicker);
+assert.equal(realCtx.complete, false);
+assert.equal(pickerPolicy(skip, "codebuddy", realCtx, false).decision, "allow");
 for (const tool of ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "PermissionRequest"]) {
   assert.equal(pickerPolicy(skip, "codebuddy", parseConfirmContext(frame("unused", tool)), true).decision, "leave");
 }

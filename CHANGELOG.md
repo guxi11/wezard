@@ -12,6 +12,7 @@
 - spawn 撞上认不出的启动确认框 (预写信任与目录信任代按都覆盖不到的启动期弹框) 时, 向该 spawn 的企微频道发一条通知: 哪个 wizard、哪个 tmux pane (含 `tmux attach` 指引)、工作目录与屏上原文摘要, 只告知不等点击; 同一 pane 同一形状只发一次, 发送失败只记日志, 不按任何键、不阻塞 ready 判定。
 
 ### Fixed
+- `approval.danger.skipAll` 真正压住 CLI 原生权限选择框：CodeBuddy 对一部分调用先弹自家权限 picker、hook 事后才触发或根本不触发，这条链路只有 mirror 的 picker 哨兵能代答 —— 但真实 CodeBuddy picker 的屏面 (标题 `Hook PreToolUse: … requires confirmation:` / 裸 `Bash command` 正文) 解不出 `Confirm` 头与 `toolName`/`params`，哨兵按「上下文不完整」一律转审批卡，skipAll 在哨兵上永远轮空，调用卡死在原生选择框 (devcloud 实测症状)。现在 skipAll 在不完整上下文分支直接放行 (与 hook 路径「盲放」同语义，不依赖入参匹配；仍只代按一次性裸 Yes，交互工具与原生沙箱请求照旧不碰)；「不完整且无 skipAll」「判成 modal 但无可信选项」两条路径补屏面 tail 诊断日志，远端布局变体排查不再需要守屏抓 capture。
 - 自我交接不再把已答完的那一轮当欠账重问: 被交接切断那一轮的终句, 结论回群里的、或显式 `RESULT:` / `NEED:` 的照常落定投出 (回 wizard 的未标记收尾仍扣下, 防抢答误折); 仍需续答的「继续 <event>」带上问话人、原话与被扣下的收尾, 接手方不必再去 read_chat 猜。
 - 聊天自动名不再复用: 凡在 `chats` 里出现过的名字都记墓碑 (`state/chat-names-retired.json`), 自动命名只取该前缀最大序号 +1 (`cc-wecom-10`、`-11` …), 人 rename 释放的旧名不回流给新聊天; 手动 `/name` 不受限。
 

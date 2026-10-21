@@ -42,6 +42,13 @@ export const pickerPolicy = (
     return { decision: "leave", reason: "interactive approval outside picker authority" };
   }
   if (!ctx.complete) {
+    // skipAll 是「所有审批都不要问」的显式授权, 在 hook 路径上它盲放 (approval.ts 只看
+    // !nativePermission), 不依赖入参匹配。真实 CodeBuddy 权限 picker (标题
+    // "Hook PreToolUse: … requires confirmation:" / 裸 "Bash command" 正文) 解不出
+    // Confirm 头与 toolName/params, complete 恒 false —— skipAll 若被这道闸门挡住,
+    // 在哨兵上永远轮空, 调用卡死在原生选择框。代价: 屏面解不出入参时 denyRules 同样
+    // 匹配不上 —— 开 skipAll 的人已接受「不再逐条问」。
+    if (cfg.approval.danger.skipAll) return { decision: "allow", reason: "skipAll" };
     return { decision: "manual", reason: "unknown or interactive context", forceSingle: "无法完整识别此次操作，请逐次确认" };
   }
   const deny = ruleMatchesAny(cfg.approval.denyRules, ctx.toolName, ctx.toolInput);
