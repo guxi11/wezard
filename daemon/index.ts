@@ -30,7 +30,7 @@ import { loadMirrorStore } from "./mirror-store.js";
 import { cancelOps, deadlineOf, eventRef, finalKind, isEventRef, makeOutcome, openRouter, ops, pickPair, type Delivery, type EventId, type FinalVerdict, type Op, type Receiver, type Route } from "./router.js";
 import { createMessageEvents, messageId, finalId, reportSource, receiptCoverage, receiptFacts, type EventAuthority, type MessageAdapters, type MessageEvent, type MessageInput } from "./message-events.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
-import { backendFor, bindStartupNotice, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
+import { backendFor, bindStartupNotice, prewarmShell, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { bindCardChannel, installApprovalEventListener, makeApproveHandler, requestConfirm } from "./approval.js";
 import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, buildChatUrl, getDetail, setWorldFactsProvider, currentHumanQueryOf, recordPost, recordCharter, backfillCharter } from "./detail.js";
 import { EMPTY_FACTS, type WorldFacts, type WorldFactWizard } from "../shared/world.js";
@@ -4723,6 +4723,11 @@ const main = async (): Promise<void> => {
     }
     setTimeout(() => void sweep().catch((e) => log.warn({ err: (e as Error).message }, "pane cap sweep failed")), 15_000).unref();
   }
+
+  // 暖 shell: 默认 workspace 先养一条空壳, 开机后第一次 spawn 就能直接领 (省掉整段 rc)。
+  // 延后到启动那一波过去: 活着几十个会话时 boot 正在恢复一大片 pane, 一条空壳不必去抢
+  // 第一波 fork (macOS 无 swap, 瞬时 ENOMEM 就是这么来的)。
+  setTimeout(() => void prewarmShell(cfg, cfg.wrc.cwd, log.child({ mod: "mirror", sub: "warm" })), 20_000).unref();
 
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {

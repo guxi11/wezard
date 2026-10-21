@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Changed
+- 白板 spawn 提速: 在独立 tmux session `<prefix>-warm` 里按 cwd 预养空 shell (每 cwd 1 条、总量 ≤3、20 分钟换新), spawn 时整窗搬进主 session 再打启动行, 省掉新 pane 登录 shell 源 rc 的那一段 (实测 ~1s, 高负载下 ~2s); 认领前核 pane 活着、前台是 shell、目录一致, 否则退回原冷路径。`WEZARD_WARM_SHELL=0` 关闭。TUI 就绪读屏节奏 400ms → 150ms, 信任框应答复用本拍已读的屏。
+
 ## [2.8.1] - 2026-10-21
 
 ### Added
