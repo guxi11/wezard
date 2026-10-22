@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [2.8.3] - 2026-10-22
+
 ### Added
 - `GET /status` 新增 `capabilities: string[]` (本版含 `dispatch.taskFile`) 与 `version` (正在跑的 daemon 的版本)。外部调用方以 `capabilities` 含 `dispatch.taskFile` 作为切换 taskFile 派活的判据 —— `~/.wezard/templates/` 目录存在与否不再有任何意义 (2.8.3 起新代码不读它, 存量目录会是假阳性)。
 
@@ -1248,7 +1250,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.8.2...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.8.3...HEAD
+[2.8.3]: https://github.com/guxi11/wezard/compare/v2.8.2...v2.8.3
 [2.8.2]: https://github.com/guxi11/wezard/compare/v2.8.1...v2.8.2
 [2.8.1]: https://github.com/guxi11/wezard/compare/v2.8.0...v2.8.1
 [2.8.0]: https://github.com/guxi11/wezard/compare/v2.7.7...v2.8.0
