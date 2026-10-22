@@ -265,3 +265,82 @@ export const modalFingerprint = (pane: string): string =>
       const option = OPTION_ROW.exec(line);
       return option ? `${option[1]}. ${option[2]}` : line.trimEnd();
     }).join("\n");
+
+// ── 按调用取指纹 (代按前后校验「人批准的还是同一件事」) ────────────────
+// modalFingerprint 比的是整屏: 框外的实时进度行 ("running 3m ago")、状态栏、
+// spinner 在等人点击的窗口里持续变化, 满宽分隔线还会随 pane 宽度重排 —— 带进度
+// 行的 TUI 上代按会永久失败, 且每次"变化"都触发重发卡。代按要守的是「换框绝不
+// 盲按」, 为此指纹只认调用本身, 分两层:
+//   • complete:true → 结构化调用: agent + toolName + 参数 (键序稳定化后序列化,
+//     pane 宽度重排后 JSON 重新解析结果不变);
+//   • 否则 → 框本体: 从最后一组选项向上收的确认区正文 (命令、参数、diff 都在
+//     内), 框外的进度行 / agent 输出 / 滚动内容不参与; 跨分隔线只发生在紧邻的
+//     上一行仍是纯内容时 (CodeBuddy 的 "Bash command" 小节与问题行之间隔着一条
+//     ──── 分隔线)。
+// 认不出 (无编号选项, 或确认区里没有任何随调用变化的行) → undefined, 调用方
+// 一律不代按 —— 认不出就不按。
+
+const stableStringify = (v: unknown): string => {
+  if (v === null || typeof v !== "object") return JSON.stringify(v) ?? "null";
+  if (Array.isArray(v)) return `[${v.map(stableStringify).join(",")}]`;
+  const entries = Object.entries(v as Record<string, unknown>)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, val]) => `${JSON.stringify(k)}:${stableStringify(val)}`).join(",")}}`;
+};
+
+// 确认区的分隔线/框线: 比 BOX_RULE 多收 ╌┄┅┈┉ (Claude 编辑确认的虚线), 且只供
+// 指纹分区用, 不动 parseConfirmContext 的正文边界。
+const REGION_RULE = /^[\s─━╌┄┅┈┉╭╮╰╯┌┐└┘├┤┬┴═║╔╗╚╝]*$/u;
+// transcript 侧行首标记: 这些行只会因滚动/进度变化而变, 不属于确认区。
+const TRANSCRIPT_MARK = /^\s*[∴●✳✢✻✽⎿✓✗✘✔⚠⏺⏳⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏❯›]/u;
+// 纯计时/进度行 ("running 3m ago"、"(6m 22s · ↓ 14.6k tokens)"): 去掉计时词与
+// 数字/单位/标点后不剩任何实词 → 框外噪声。命令行 ("sleep 5m") 一定剩下实词,
+// 不会被误伤。
+const isTimerLine = (line: string): boolean => {
+  if (!/\d/.test(line)) return false;
+  const rest = line
+    .replace(/\b(?:ago|running|elapsed|tokens?|esc|to|interrupt|down|up|cultivating|brewing|thinking|working)\b/giu, "")
+    .replace(/[0-9\s.:·|()\[\]%↓↑kKbBmMsShH—–-]/gu, "");
+  return rest === "";
+};
+// 每次确认都长得一样的行: 不携带调用身份, 不能作为「认得出这个调用」的证据
+// (仍参与指纹内容本身)。
+const genericConfirmLine = (line: string): boolean =>
+  CONFIRM_QUESTION.test(line)
+  || /^\s*Confirm\b/u.test(line)
+  || /^Hook\b.*requires confirmation/iu.test(line)
+  || /^\s*(?:Bash|Shell)\s+command\s*$/iu.test(line);
+
+export const modalCallFingerprint = (pane: string): string | undefined => {
+  const ctx = parseConfirmContext(pane);
+  if (ctx.complete) {
+    return `call|${ctx.agent ?? ""}|${ctx.toolName}|${stableStringify(ctx.toolInput)}`;
+  }
+  const lines = stripBoxBorders(pane ?? "").split("\n");
+  let firstOpt = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/^\s*(?:[❯>]\s*)?1\.\s+\S/u.test(lines[i]!)) { firstOpt = i; break; }
+  }
+  if (firstOpt < 0) return undefined;
+  const body: string[] = [];
+  for (let i = firstOpt - 1; i >= 0; i--) {
+    const line = lines[i]!;
+    if (TRANSCRIPT_MARK.test(line) || isTimerLine(line)) break;
+    if (REGION_RULE.test(line) || line.trim() === "") {
+      // 分隔线/空行: 紧邻的上一行仍是纯内容 → 围的是同一块确认区, 跨过去;
+      // 上面是转录/计时/又一条线 → 确认区到此为止。
+      const above = lines[i - 1] ?? "";
+      if (above.trim() === "" || REGION_RULE.test(above) || TRANSCRIPT_MARK.test(above) || isTimerLine(above)) break;
+      continue;
+    }
+    body.unshift(line.trim());
+  }
+  if (!body.some((l) => l !== "" && !genericConfirmLine(l))) return undefined;
+  const options: string[] = [];
+  for (let i = firstOpt; i < lines.length; i++) {
+    const m = OPTION_ROW.exec(lines[i]!);
+    if (!m) break;
+    options.push(`${m[1]}. ${m[2]}`);
+  }
+  return `box|${body.join("\n")}|${options.join("\n")}`;
+};

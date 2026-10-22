@@ -43,7 +43,7 @@ import {
   projectDirsFor,
   type NormalizedTranscriptLine,
 } from "../shared/cli-backends.js";
-import { isModalPane, isCodexHookReviewPane, isAskqSubmitPage, parseModalOptions, pickModalAnswer, pickAutoAllowAnswer, parseConfirmContext, modalFingerprint, looksLikePicker, type ModalPaneVerdict } from "../shared/modal-pane.js";
+import { isModalPane, isCodexHookReviewPane, isAskqSubmitPage, parseModalOptions, pickModalAnswer, pickAutoAllowAnswer, parseConfirmContext, modalFingerprint, modalCallFingerprint, looksLikePicker, type ModalPaneVerdict } from "../shared/modal-pane.js";
 import type { MirrorStore } from "./mirror-store.js";
 import { hasMirrorAskq, runMirrorAskqFlow, hasMirrorPlan, mootMirrorPlan, runMirrorPlanFlow, hasMirrorPicker, mootMirrorPicker, runMirrorPickerFlow, type PickerPress } from "./approval.js";
 import { isAutoWindowActive } from "./session-cache.js";
@@ -7023,7 +7023,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       await dispatchPickerPolicy(policy, {
         deny: async () => {
           if (!valid()) return;
-          const result = await pressNativePickerUnlocked(a, modalFingerprint(v.screen), "no", valid);
+          const result = await pressNativePickerUnlocked(a, modalCallFingerprint(v.screen), "no", valid);
           if (!valid()) return;
           log.info({ target: a.target, reason: policy.reason, result }, "picker sentinel: deny rule");
           sendStandalone(a, `[mirror] 🚫 ${policy.reason}，${result.ok ? "已拒绝 CLI 确认" : "确认框已变更，请回 CLI 处理"}`);
@@ -7061,7 +7061,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
             danger: policy.forceSingle,
             voteTimeoutMs: cfg.approval.longPollSec * 1000,
             // Human waiting is outside the lock; the eventual press obtains a new transaction.
-            press: (what) => pressNativePicker(a, modalFingerprint(v.screen), what, guard),
+            press: (what) => pressNativePicker(a, modalCallFingerprint(v.screen), what, guard),
           }).then((sent) => {
             // 卡没发出去 (WS 断/发送失败): 清指纹, 让下一 tick 对同屏重试发卡,
             // 否则这只框会被指纹永久静默。
@@ -7090,10 +7090,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   // 审批卡点击后的代按回调。点击与本地按键之间隔着人的反应时间, 必须重读屏并
   // 校验仍是**同一个调用**的确认框 —— 期间本地按掉旧框又弹了新框的话, 盲按就是
-  // 替用户批准了他没看过的东西。
+  // 替用户批准了他没看过的东西。比对按调用指纹 (modalCallFingerprint): 框外的
+  // 实时进度行/状态栏变化不算变更; 任一侧认不出调用 (undefined) 也不按。
   const pressNativePickerUnlocked = async (
     a: AttachState,
-    expectFingerprint: string,
+    expectCall: string | undefined,
     what: PickerPress,
     live: () => boolean,
   ): Promise<{ ok: boolean; reason?: string; label?: string }> => {
@@ -7105,7 +7106,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (pickerPolicy(cfg, cliOf(a), parseConfirmContext(v.screen), false).decision === "leave") {
       return { ok: false, reason: "独立原生或交互审批，请在 CLI 中处理" };
     }
-    if (modalFingerprint(v.screen) !== expectFingerprint) {
+    // 按调用比对: 认不出就不按 (undefined 也不等), 换框绝不盲按。
+    const call = modalCallFingerprint(v.screen);
+    if (call === undefined || call !== expectCall) {
       return { ok: false, reason: "当前确认框的操作或参数已变更，不代按" };
     }
     if (what === "no") {
@@ -7124,8 +7127,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       ? { ok: false, reason: `按下 ${pick.index} 后确认框仍在` }
       : { ok: true, label: `${pick.index}. ${pick.label}` };
   };
-  const pressNativePicker = async (a: AttachState, fingerprint: string, what: PickerPress, guard: () => boolean) =>
-    withPaneInput(a.tmuxPane, (live) => pressNativePickerUnlocked(a, fingerprint, what, live), { guard });
+  const pressNativePicker = async (a: AttachState, call: string | undefined, what: PickerPress, guard: () => boolean) =>
+    withPaneInput(a.tmuxPane, (live) => pressNativePickerUnlocked(a, call, what, live), { guard });
 
   // 调用方持有 pane 输入锁; clear 与 carry 的原生身份探测共用同一条 slash 提交流程。
   const nativeCommands = (target: string, pane: string, codex: boolean, sameProcess: () => Promise<boolean>, sameSession: () => boolean | Promise<boolean>, allowed: () => boolean = () => true) => {
