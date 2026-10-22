@@ -29,7 +29,47 @@ const bashWrites = (command: string): boolean => {
 };
 
 type Kind = "free" | "hands" | "look";
+
+// ── REPL (CodeBuddy PTC 模式) ──────────────────────────────────────────
+// CodeBuddy 把一切工具调用 (Read / Bash / MCP) 包进 REPL 这一个工具的 code 参数里,
+// 只按 toolName 判会把管家的读和 dispatch 全记成自查看吃配额; 配额一满连 dispatch
+// 也被拒 —— 管家唯一合法的出路被自己人堵死 (死锁)。所以 REPL 下钻到内层调用名判:
+// 读 / 派活 (mcp_wezard.*) 放行, 写文件 / 开子代理 / 写文件的 Bash 仍按原规则拦。
+/** REPL 自带的元调用 (工具发现); ToolSearch 同级, 不碰工作区。 */
+const REPL_META = new Set(["REPL.searchTools", "REPL.describeTool", "REPL.describeTools"]);
+/** 调用位: 名字前不能是 `.` 或标识符字符 —— rows.map( 不算工具调用。 */
+const CALL = /(?<![.\w$])([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\(/g;
+/** REPL 里 Bash 的 command 字面量; 变量拼的认不出 → 保守按 look 计。 */
+const BASH_CMD = /\bBash\s*\(\s*\{[^{}]*?command\s*:\s*(`(?:[^`\\]|\\.)*`|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/g;
+const unquote = (lit: string): string => {
+  if (lit[0] === '"') { try { return JSON.parse(lit); } catch { return lit.slice(1, -1); } }
+  return lit.slice(1, -1).replace(/\\(.)/gs, "$1");
+};
+/** 名字级判级; 不认识的调用不是工具, 返回 undefined 不参与判级。 */
+const nameKind = (name: string): Kind | undefined =>
+  REPL_META.has(name) || FREE.has(name) || /wezard/i.test(name) ? "free"
+  : HANDS.has(name) ? "hands"
+  : undefined;
+const replKind = (code: string): Kind => {
+  const names = [...code.matchAll(CALL)].map((m) => m[1] ?? "").filter(Boolean);
+  const bashCalls = names.filter((n) => n === "Bash").length;
+  const cmds = [...code.matchAll(BASH_CMD)].map((m) => unquote(m[1] ?? "")).filter(Boolean);
+  const kinds = names.map(nameKind).filter((k): k is Kind => k !== undefined);
+  if (bashCalls > 0) {
+    // Bash 条数对不上字面量条数 = 有 command 是变量拼的, 认不出 → 保守。
+    kinds.push(cmds.length < bashCalls ? "look"
+      : cmds.some(bashWrites) ? "hands" : cmds.every(shellReads) ? "free" : "look");
+  }
+  // 又读又写的先算写 (写比读严重); 无可识别调用 = 纯计算, 仍按 look 吃配额。
+  if (kinds.includes("hands")) return "hands";
+  return kinds.length > 0 && kinds.every((k) => k === "free") ? "free" : "look";
+};
+
 const kindOf = (toolName: string, toolInput: unknown): Kind => {
+  if (toolName === "REPL") {
+    const code = (toolInput as { code?: unknown } | null)?.code;
+    return typeof code === "string" ? replKind(code) : "look";
+  }
   if (FREE.has(toolName) || /wezard/i.test(toolName)) return "free";
   if (HANDS.has(toolName)) return "hands";
   const cmd = (toolInput as { command?: unknown } | null)?.command;
@@ -41,7 +81,9 @@ const kindOf = (toolName: string, toolInput: unknown): Kind => {
 
 const DISPATCH = "`dispatch({task, name, description})` 交出去 (task 写人的原话加你知道的背景)";
 const handsReason = (toolName: string): string =>
-  toolName === "Bash"
+  toolName === "REPL"
+    ? `你是这个群的管家, 这段 REPL 在亲手干活 (写文件 / 开子代理) —— 管家一律不做, 用 ${DISPATCH}。这是守护进程拦的, 重试结果一样。`
+    : toolName === "Bash"
     ? `你是这个群的管家, 这条 Bash 在写文件 —— 改文件管家一律不做 (sed -i / 重定向 / tee 也算), 用 ${DISPATCH}。这是守护进程拦的, 重试结果一样。`
     : `你是这个群的管家, ${toolName} 是亲手干活 —— 改文件、开子代理管家一律不做, 用 ${DISPATCH}。这是守护进程拦的, 重试结果一样。`;
 const budgetReason = (budget: number): string =>
