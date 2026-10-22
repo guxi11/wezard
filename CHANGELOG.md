@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+## [2.8.4] - 2026-10-22
+
+### Fixed
+- CodeBuddy PTC 后端把工具调用包进 REPL 程序时, 顶层群管家的配额判级认不出内层调用 —— 只见 REPL 包装行, 读代码与 `dispatch` 等编排调用也被计进 look 配额并在耗尽后被拒, 管家死锁。现在下钻 REPL 内层调用名判级: 读类命令与 `mcp_wezard` 编排调用免配额, 写文件与开子代理照旧拦。
+
 ## [2.8.3] - 2026-10-22
 
 ### Added
@@ -1250,7 +1255,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.8.3...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.8.4...HEAD
+[2.8.4]: https://github.com/guxi11/wezard/compare/v2.8.3...v2.8.4
 [2.8.3]: https://github.com/guxi11/wezard/compare/v2.8.2...v2.8.3
 [2.8.2]: https://github.com/guxi11/wezard/compare/v2.8.1...v2.8.2
 [2.8.1]: https://github.com/guxi11/wezard/compare/v2.8.0...v2.8.1
