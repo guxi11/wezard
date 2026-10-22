@@ -51,6 +51,10 @@ export const REMINDER_KINDS = {
   mention: {},
   roster: {},
   pending: {},
+  /** 宪章 preamble: 只随一个 pane 的**首条注入**打头 (mirror-bridge charterPending),
+   *  永远不在尾巴上 —— 所以 TAIL_ORDER 不收它。没有属性: 谁的宪章看正文,
+   *  机器只认得出「这一行开头有一块宪章」并把它剥掉/折叠。 */
+  charter: {},
 } as const satisfies Record<string, Record<string, Use>>;
 export type Kind = keyof typeof REMINDER_KINDS;
 type AttrOf<K extends Kind> = keyof (typeof REMINDER_KINDS)[K] & string;

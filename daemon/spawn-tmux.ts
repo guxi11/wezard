@@ -42,6 +42,7 @@ import { selectModel } from "./model-select.js";
 import type { Effort } from "../shared/effort.js";
 import { hasRegistry, sessionOnPane } from "./wezard-session.js";
 import { codebuddyTrustPrompt, startupConfirmation, workspaceTrustPrompt, workspaceTrustConfig } from "../shared/workspace-trust.js";
+import { isModalPane } from "../shared/modal-pane.js";
 import { unknownStartupNotice } from "../shared/startup-notice.js";
 
 
@@ -229,6 +230,55 @@ const trimWarmPool = (log: Logger): void => {
   }
 };
 
+// 暖 shell 与备用 CLI 共用一条 warm session。建那条 session 的那一下必须串起来: 一方
+// new-session、另一方 new-window, 会撞出 "duplicate session" / "no server running"
+// (warm session 空掉时 tmux 会把它整个销毁, 池里的 pane 一搬走就可能空)。
+let warmSessionLock: Promise<unknown> = Promise.resolve();
+const warmSessionExclusive = <T>(fn: () => Promise<T>): Promise<T> => {
+  const run = warmSessionLock.then(fn, fn);
+  warmSessionLock = run.catch(() => undefined);
+  return run;
+};
+
+/** 在 warm session 里开一条新窗口, 返回 pane id。undefined = 建不出来 (只记日志)。 */
+const openWarmPane = (
+  warm: string,
+  dir: string,
+  name: string,
+  flags: { cwd: boolean; env: boolean },
+  log: Logger,
+): Promise<string | undefined> => warmSessionExclusive(async () => {
+  const argv = (sessionless: boolean): string[] => [
+    ...(sessionless ? [] : ["-d", "-t", `${warm}:`]),
+    "-n", name,
+    ...(sessionless ? ["-x", String(DETACHED_COLS), "-y", String(DETACHED_ROWS)] : []),
+    ...(flags.cwd ? ["-c", dir] : []),
+    ...(flags.env ? ANTI_UPDATE_ENV : []),
+    "-P", "-F", "#{pane_id}",
+  ];
+  const create = async (): Promise<ExecResult> => {
+    const has = await runTmux(["has-session", "-t", warm]);
+    // 首次建 session 时它自带的那个 pane 就是第一片 —— 不再 new-window, 否则 session
+    // 里永远多躺一条没人认领的空 shell。
+    return has.code === 0
+      ? runTmux(["new-window", ...argv(false)])
+      : runTmux(["new-session", "-d", "-s", warm, ...argv(true)]);
+  };
+  let made = await create();
+  // "没 server / 刚被别人建出来 / 刚被销毁" 都是竞态而不是结论: 再问一次。
+  for (let retry = 0; !made.ok && retry < 2 && /duplicate session|no server running|can't find session|no current session/i.test(made.stderr); retry++) {
+    await sleep(150);
+    made = await create();
+  }
+  if (!made.ok) {
+    log.warn({ warm, cwd: dir, stderr: made.stderr.trim(), code: made.code }, `${name}: pane creation failed`);
+    return undefined;
+  }
+  // 没人 attach 的窗口取 session 的 default-size, tmux 自己的默认是 80x24。
+  await runTmux(["set-option", "-t", warm, "default-size", `${DETACHED_COLS}x${DETACHED_ROWS}`]);
+  return made.stdout.split("\n").map((s) => s.trim()).filter(Boolean)[0] || undefined;
+});
+
 /** 一次性清掉上一个 daemon 进程留下的暖 pane (池里没有的都不是本进程的)。 */
 const sweepWarmSession = async (warm: string, log: Logger): Promise<void> => {
   if (warmSwept) return;
@@ -238,7 +288,9 @@ const sweepWarmSession = async (warm: string, log: Logger): Promise<void> => {
   // 算扫过 —— 没有 pane 就没什么可清的)。
   if (r.timedOut) { warmSwept = false; return; }
   if (!r.ok) return;
-  const known = new Set([...warmPool.values()].map((e) => e.pane));
+  // 备用 CLI 与暖 shell 同住一个 session, 两条池都要认 —— 不然第一次补位就把本进程
+  // 刚建好的备用当上一个进程的残件杀了。
+  const known = new Set([...[...warmPool.values()].map((e) => e.pane), ...spares.map((s) => s.pane)]);
   const doomed = r.stdout.split("\n").map((s) => s.trim()).filter((p) => p && !known.has(p));
   for (const pane of doomed) await runTmux(["kill-pane", "-t", pane]);
   if (doomed.length) log.info({ panes: doomed }, "warm shell: killed panes left by a previous process");
@@ -260,19 +312,7 @@ export const prewarmShell = async (cfg: Config, cwd: string, log: Logger): Promi
     // 清理得排在问 session 之前: tmux 会销毁没有窗口的 session, 清掉最后一个暖 pane 之后
     // 这条 session 就没了 ("can't find session"), 必须重新问一次才能建窗口。
     if (!warmSwept) await sweepWarmSession(warm, log);
-    const has = await runTmux(["has-session", "-t", warm]);
-    // 首次建 session 时它自带的那个 pane 就是第一片暖 pane, 不再 new-window ——
-    // 否则 warm session 里永远多躺一条没人认领的空 shell。
-    const made = has.code === 0
-      ? await runTmux(["new-window", "-d", "-t", `${warm}:`, "-n", "warm", "-c", dir, ...ANTI_UPDATE_ENV, "-P", "-F", "#{pane_id}"])
-      : await runTmux(["new-session", "-d", "-s", warm, "-n", "warm", "-x", String(DETACHED_COLS), "-y", String(DETACHED_ROWS), "-c", dir, ...ANTI_UPDATE_ENV, "-P", "-F", "#{pane_id}"]);
-    if (!made.ok) {
-      log.warn({ warm, cwd: key, stderr: made.stderr.trim(), code: made.code }, "warm shell: pane creation failed");
-      return;
-    }
-    // 没人 attach 的窗口取 session 的 default-size, tmux 自己的默认是 80x24。
-    await runTmux(["set-option", "-t", warm, "default-size", `${DETACHED_COLS}x${DETACHED_ROWS}`]);
-    const pane = made.stdout.split("\n").map((s) => s.trim()).filter(Boolean)[0] ?? "";
+    const pane = await openWarmPane(warm, dir, "warm", { cwd: true, env: true }, log);
     if (!pane) return;
     const entry: WarmShell = { pane, usedAt: Date.now() };
     warmPool.set(key, entry);
@@ -314,6 +354,253 @@ const claimWarmShell = async (cfg: Config, log: Logger, cwd: string, tmuxName: s
   await renameWindow(entry.pane, winName);
   log.info({ pane: entry.pane, cwd: key, tmuxName }, "warm shell: claimed");
   return entry.pane;
+};
+
+// ── 空白备用池 ──────────────────────────────────────────────────────────
+//
+// 冷启动一条空白 CLI 要 2.4–2.9s, 而这段时间的输入 —— cwd / 后端 / model / effort ——
+// 在会话建起来之前就定了。于是可以按这四元组提前建好、白养着, 新会话来了把窗口搬进主
+// session 直接用。备用是**冷启动**而不是 fork: 实测 fork 既不省就绪时间, 又会和父会话
+// 抢首条消息 (POOL-DESIGN 的测量)。
+//
+// 住在 `<prefix>-warm` (与暖 shell 同住): pane 上限与孤儿清扫只认主 session, 池里的
+// pane 在搬过去之前恰好都是「没绑定」的。
+//
+// 备用**不带宪章**: 宪章按会话不同, 池按四元组共享 —— 领用方的身份由它的首条消息补
+// (mirror-bridge 的 charterPending)。所以池与「宪章改走首条消息」必须同批上线。
+const SPARE_CLAIM_WAIT_MS = 2000;
+// 领走之后 sid 还要在别人的目录扫描面前挡一会儿: attach 落定之前它仍是一条「住在
+// 这个 cwd 里、没有任何绑定指着」的 jsonl。
+const SPARE_FENCE_MS = 5 * 60_000;
+
+interface Spare {
+  key: string;
+  pane: string;
+  sessionId: string;
+  jsonlPath: string;
+  cwd: string;
+  cli: CliBackendName;
+  model: string;
+  builtAt: number;
+  timer?: NodeJS.Timeout;
+}
+
+const spares: Spare[] = [];
+// 同键只建一条: 补位是 fire-and-forget, 连着两次冷启动不该各补一条。
+const spareInflight = new Map<string, Promise<void>>();
+// 池里 / 刚被领走的 sid。mirror 的目录扫描 (newest-in-cwd 自愈、分叉跟随) 与 /sessions
+// 扫描都要绕开它们 —— 一条没绑定的会话在别人眼里就是可以认领的孤儿。
+const pooledSids = new Set<string>();
+const claimedSids = new Map<string, number>();
+
+const sparePoolEnabled = (cfg: Config): boolean =>
+  process.env.WEZARD_SPARE_POOL !== "0" && cfg.wrc.sparePool.enabled;
+
+export const sparePoolFencedSids = (now = Date.now()): string[] => {
+  for (const [sid, at] of claimedSids) if (now - at > SPARE_FENCE_MS) claimedSids.delete(sid);
+  return [...pooledSids, ...claimedSids.keys()];
+};
+
+const spareKeyOf = (cwd: string, cli: CliBackendName, model: string, effort: string): string =>
+  `${warmKey(cwd)}\u0000${cli}\u0000${model.trim()}\u0000${effort}`;
+
+/** `--effort` 只在这把后端认它时才算进键: 后端不收的档位, 起出来的都是同一个东西。 */
+const spareEffort = (backend: CliBackend, effort: Effort | undefined): Effort | undefined =>
+  effort && backend.effortFlag ? effort : undefined;
+
+const dropSpare = (spare: Spare, why: "expired" | "evicted" | "unusable", log: Logger): void => {
+  const at = spares.indexOf(spare);
+  if (at >= 0) spares.splice(at, 1);
+  if (spare.timer) clearTimeout(spare.timer);
+  pooledSids.delete(spare.sessionId);
+  claimedSids.delete(spare.sessionId);
+  void runTmux(["kill-pane", "-t", spare.pane]);
+  log.info({ pane: spare.pane, sessionId: spare.sessionId, key: spare.key, ageMs: Date.now() - spare.builtAt, why }, `spawn-tmux: spare ${why}`);
+};
+
+const armSpareTtl = (cfg: Config, log: Logger, spare: Spare): void => {
+  spare.timer = setTimeout(() => {
+    // 到点不补: 没人要它才轮到过期, 再养一条还是没人要。
+    if (spares.includes(spare)) dropSpare(spare, "expired", log);
+  }, cfg.wrc.sparePool.ttlMin * 60_000);
+  spare.timer.unref();
+};
+
+/** 同键超量先收新建的 (池里的备用都一样热, 留老的不吃亏); 全局超量按最久未用跨键收。 */
+const trimSpares = (cfg: Config, log: Logger): void => {
+  const { perKey, maxTotal } = cfg.wrc.sparePool;
+  for (const key of new Set(spares.map((s) => s.key))) {
+    const same = spares.filter((s) => s.key === key).sort((a, b) => a.builtAt - b.builtAt);
+    for (const extra of same.slice(perKey)) dropSpare(extra, "evicted", log);
+  }
+  while (spares.length > maxTotal) {
+    const oldest = [...spares].sort((a, b) => a.builtAt - b.builtAt)[0]!;
+    dropSpare(oldest, "evicted", log);
+  }
+};
+
+/** 建一条备用。唯一入口, 只记日志不抛错 —— 备用是提速, 不是前提。 */
+const buildSpare = async (
+  cfg: Config,
+  log: Logger,
+  spec: { cwd: string; backend: CliBackend; model: string; effort?: Effort; key: string },
+): Promise<void> => {
+  const t0 = Date.now();
+  const dir = spec.cwd;
+  const sessionId = randomUUID();
+  const projectDir = join(expandHome(spec.backend.projectsDir), spec.backend.encodeProjectDir(dir));
+  const jsonlPath = join(projectDir, `${sessionId}.jsonl`);
+  const warm = warmSessionOf(cfg);
+  // 从建窗那刻就挡住目录扫描 —— CLI 一起来就可能写 jsonl。
+  pooledSids.add(sessionId);
+  try {
+    mkdirSync(dir, { recursive: true });
+    mkdirSync(projectDir, { recursive: true });
+    trustWorkspace(spec.backend.bin, dir, log);
+    const probe = await tmuxProbeResult();
+    if (!probe.ok) { poolRemove(sessionId); return; }
+    const ver = parseTmuxVersion(probe.stdout);
+    const supportsC = ver >= 1.9;
+    const supportsE = ver >= 3.0;
+    if (!warmSwept) await sweepWarmSession(warm, log);
+    const pane = await openWarmPane(warm, dir, "spare", { cwd: supportsC, env: supportsE }, log);
+    if (!pane) { poolRemove(sessionId); return; }
+    // 与 commandFor 同形的启动行: 不带宪章、不带 resume, 只把这一档的环境定下来。
+    const envPrefix = [
+      ...(supportsE ? [] : ["DISABLE_AUTO_UPDATE=true", "DISABLE_UPDATE_PROMPT=true"]),
+      "DISABLE_AUTOUPDATER=1",
+    ];
+    const argv = [
+      "--session-id", sessionId,
+      ...(spec.model && spec.backend.modelFlag ? [spec.backend.modelFlag, spec.model] : []),
+      ...(spec.effort && spec.backend.effortFlag ? [spec.backend.effortFlag, spec.effort] : []),
+      ...cfg.wrc.extraArgs,
+    ].map(shQuote);
+    const cmd = [...envPrefix, shQuote(spec.backend.bin), ...argv].join(" ");
+    const line = `${supportsC ? cmd : `cd ${shQuote(dir)} && ${cmd}`}${EXIT_TAIL}`;
+    const sent = await runTmux(["send-keys", "-t", pane, line, "Enter"]);
+    if (!sent.ok) {
+      await runTmux(["kill-pane", "-t", pane]);
+      poolRemove(sessionId);
+      return;
+    }
+    log.info({ tmuxName: warm, winName: "spare", tmuxPane: pane, cwd: dir, sessionId, cli: spec.backend.name, spare: true }, "spawn-tmux: pane created");
+    // 与正常启动同一套就绪判据 (注册表 idle / 输入框 / 退出标记)。
+    const tui = await waitForTuiReady(pane, line, spec.backend, dir, undefined, log);
+    // 建不成就是建不成: 失败只 kill, 绝不重试 —— 认不出的 model id 会被重试一次次砸在
+    // 同一个判据上, 而备用本来只是提速。
+    if (!tui.ready || tui.exited) {
+      await runTmux(["kill-pane", "-t", pane]);
+      poolRemove(sessionId);
+      log.warn({ pane, cwd: dir, reason: tui.exited ?? "TUI 未就绪", ms: Date.now() - t0 }, "spawn-tmux: spare unusable");
+      return;
+    }
+    if (spec.model && spec.backend.modelFlag && modelNotRecognized(await capturePaneBottom(pane, "-"), spec.model)) {
+      await runTmux(["kill-pane", "-t", pane]);
+      poolRemove(sessionId);
+      log.warn({ pane, model: spec.model }, "spawn-tmux: spare unusable (CLI 不认识这个 --model)");
+      return;
+    }
+    const spare: Spare = { key: spec.key, pane, sessionId, jsonlPath, cwd: dir, cli: spec.backend.name, model: spec.model, builtAt: Date.now() };
+    spares.push(spare);
+    armSpareTtl(cfg, log, spare);
+    trimSpares(cfg, log);
+    log.info({ pane, sessionId, key: spec.key, cwd: dir, cli: spec.backend.name, model: spec.model, effort: spec.effort, ms: Date.now() - t0 }, "spawn-tmux: spare built");
+  } catch (e) {
+    if (!spares.some((s) => s.sessionId === sessionId)) poolRemove(sessionId);
+    log.warn({ cwd: dir, err: (e as Error).message }, "spawn-tmux: spare build failed");
+  }
+};
+
+/** 从扫描围栏里摘掉 sid。池里那条由 dropSpare 自己管。 */
+const poolRemove = (sessionId: string): void => {
+  pooledSids.delete(sessionId);
+  claimedSids.delete(sessionId);
+};
+
+/** 领一条同键的备用搬进主 session。undefined = 没有可用的, 调用方走冷路径。 */
+const claimSpare = async (
+  cfg: Config,
+  log: Logger,
+  want: { cwd: string; backend: CliBackend; model: string; effort?: Effort; tmuxName: string; winName: string },
+): Promise<Spare | undefined> => {
+  if (!sparePoolEnabled(cfg)) return undefined;
+  const key = spareKeyOf(want.cwd, want.backend.name, want.model, want.effort ?? "");
+  // 同键正在补的那条马上就好时, 等它一拍比另起一条冷启动划算 (冷路径 4–5s)。
+  if (!spares.some((s) => s.key === key)) {
+    const inflight = spareInflight.get(key);
+    if (inflight) await Promise.race([inflight, sleep(SPARE_CLAIM_WAIT_MS)]);
+  }
+  const at = spares.findIndex((s) => s.key === key);
+  if (at < 0) return undefined;
+  // 先摘再 await: 两个并发 spawn 不能领到同一条。
+  const [spare] = spares.splice(at, 1);
+  if (!spare) return undefined;
+  if (spare.timer) clearTimeout(spare.timer);
+  pooledSids.delete(spare.sessionId);
+  claimedSids.set(spare.sessionId, Date.now());
+  const reject = async (why: string, detail: Record<string, unknown> = {}): Promise<undefined> => {
+    await runTmux(["kill-pane", "-t", spare.pane]);
+    poolRemove(spare.sessionId);
+    log.debug({ pane: spare.pane, key, why, ...detail }, "spawn-tmux: spare rejected, falling back to cold spawn");
+    return undefined;
+  };
+  const probe = await runTmux(["display-message", "-p", "-t", spare.pane, "#{pane_dead}\t#{pane_current_command}\t#{window_id}"]);
+  const [dead = "", foreground = "", window = ""] = probe.ok ? probe.stdout.trim().split("\t") : [];
+  // pane 活着、前台还是那个 CLI (退回 shell = 它已经退出)、窗口还在。
+  if (!probe.ok || dead !== "0" || SHELL_CMD_RE.test(basename(foreground)) || !window) {
+    return reject("pane not live", { foreground, dead, stderr: probe.stderr.trim() });
+  }
+  // 只看当前屏 (bare `-p`): 卷进 scrollback 会把已经关掉的框当成活模态。
+  const captured = await runTmux(["capture-pane", "-t", spare.pane, "-p"]);
+  const screen = captured.ok ? captured.stdout : "";
+  const tuiUp = TUI_READY_RE.test(screen) || sessionOnPane(want.backend.homeDir, spare.pane)?.status === "idle";
+  if (cliExit(screen)) return reject("cli exited");
+  if (startupConfirmation(screen)) return reject("startup confirmation on screen");
+  if (workspaceTrustPrompt(screen, want.backend.name, want.cwd, realpathSync)) return reject("workspace trust prompt on screen");
+  if (codebuddyTrustPrompt(screen, want.cwd, realpathSync)) return reject("codebuddy trust prompt on screen");
+  if (isModalPane(screen).modal) return reject("modal on screen");
+  if (!tuiUp) return reject("no input box");
+  // 主 session 可能刚被 reap 掉 (最后一个 pane 收掉时 tmux 连 session 一起销毁): 先把它
+  // 建起来再把备用搬进来, 用完收掉占位窗口 —— 与冷路径 new-session 那一支同形。
+  const has = await runTmux(["has-session", "-t", want.tmuxName]);
+  let seedPane = "";
+  if (has.code !== 0) {
+    const seed = await runTmux(["new-session", "-d", "-s", want.tmuxName, "-n", want.winName, "-x", String(DETACHED_COLS), "-y", String(DETACHED_ROWS), "-P", "-F", "#{pane_id}"]);
+    if (!seed.ok) return reject("main session creation failed", { stderr: seed.stderr.trim(), code: seed.code });
+    seedPane = seed.stdout.trim();
+    await runTmux(["set-option", "-t", want.tmuxName, "default-size", `${DETACHED_COLS}x${DETACHED_ROWS}`]);
+  }
+  // 尾冒号 = 只按 session 解析 (同 openPane 里 new-window 的理由)。搬家不改 pane id。
+  const moved = await runTmux(["move-window", "-d", "-s", window, "-t", `${want.tmuxName}:`]);
+  if (seedPane) await runTmux(["kill-pane", "-t", seedPane]);
+  if (!moved.ok) return reject("move-window failed", { stderr: moved.stderr.trim(), code: moved.code });
+  await renameWindow(spare.pane, want.winName);
+  log.info({ pane: spare.pane, sessionId: spare.sessionId, key, cwd: spare.cwd, cli: spare.cli, model: spare.model, ageMs: Date.now() - spare.builtAt, ms: Date.now() - spare.builtAt }, "spawn-tmux: spare claimed");
+  return spare;
+};
+
+/** 补一条该键的备用 (fire-and-forget)。冷启动成功与领用之后都走这里。 */
+export const ensureSpare = async (cfg: Config, log: Logger, cwd: string, model: string | undefined, effort: Effort | undefined): Promise<void> => {
+  if (!sparePoolEnabled(cfg) || !existsSync(cwd)) return;
+  const backend = backendFor(cfg);
+  // codex 的会话由 app-server 预热出来, 不是一条命令 —— 备用的形状不一样, 不掺和。
+  if (backend.name === "codex") return;
+  const eff = spareEffort(backend, effort);
+  const key = spareKeyOf(cwd, backend.name, model ?? "", eff ?? "");
+  if (spareInflight.has(key)) return;
+  if (spares.filter((s) => s.key === key).length >= cfg.wrc.sparePool.perKey) return;
+  if (cfg.wrc.sparePool.maxTotal <= 0) return;
+  // 全局满了先按 LRU 腾位置: 这条冷启动刚证明可用, 比一条躺着没人要的更值钱。
+  while (spares.length >= cfg.wrc.sparePool.maxTotal) {
+    const oldest = [...spares].sort((a, b) => a.builtAt - b.builtAt)[0];
+    if (!oldest) break;
+    dropSpare(oldest, "evicted", log);
+  }
+  const job = buildSpare(cfg, log, { cwd, backend, model: model?.trim() ?? "", effort: eff, key })
+    .catch((e: unknown) => log.warn({ cwd, err: (e as Error).message }, "spawn-tmux: spare build failed"))
+    .finally(() => spareInflight.delete(key));
+  spareInflight.set(key, job);
 };
 
 // Single-quote shell-escape: wrap in '…' and escape embedded ' as '\''.
@@ -609,13 +896,13 @@ export interface SpawnArgs {
    *  cross-wire irrecoverably. The CLI writes the forked transcript (a seeded
    *  copy of the parent) the moment the new pane takes its first message. */
   forkSession?: boolean;
-  /** Wizard charter — pressed into the pane's SYSTEM prompt at launch
-   *  (`--append-system-prompt`), not injected as a first message. Two reasons:
-   *  a first message costs a turn and shows up in the chat, and it is the first
-   *  thing `/clear` throws away — while identity is exactly what must survive a
-   *  clear. Passed via `"$(cat <file>)"` so a multi-KB charter never travels
-   *  through `send-keys` (a literal newline there would submit a half-typed
-   *  command line). Ignored for backends with no such flag. */
+  /** Wizard charter. Recorded to `state/charters/<sid>.md` for rolepage's
+   *  backfill; the identity itself now rides the session's FIRST INJECTED
+   *  message (mirror-bridge `charterPending` → `<system-reminder
+   *  wezard="charter">` preamble) — launch no longer pays the CLI's
+   *  prompt-assembly cost for it, and a pane is idle until that first message
+   *  anyway. codex is the exception: its charter still travels as
+   *  `developer_instructions` in the launch command. */
   systemPrompt?: string;
 }
 
@@ -697,10 +984,16 @@ const pruneCharters = (dir: string): void => {
   } catch { /* ignore */ }
 };
 
-/** Park a charter next to the daemon's other state and hand back the shell
- *  fragment that feeds it to the CLI. "" when the backend has no flag for it,
- *  or the write failed — a missing charter degrades the wizard's self-awareness,
- *  it must never cost us the pane. */
+/** Park a charter next to the daemon's other state — rolepage's backfill reads
+ *  it (`state/charters/<sid>.md`, see index.ts boot). Always returns "" now:
+ *  the charter rides the session's FIRST INJECTED message instead (mirror-bridge
+ *  `charterPending` → `<system-reminder wezard="charter">` preamble) —
+ *  `--append-system-prompt` made every cold start drag the whole charter through
+ *  the CLI's launch-time prompt assembly (measured +1.4s median), and a fresh
+ *  pane sits idle until that first message anyway. codex keeps its
+ *  developer_instructions (assembled in commandFor), so it never lands here.
+ *  A missing charter degrades the wizard's self-awareness, it must never cost
+ *  us the pane. */
 const charterArg = (cfg: Config, backend: CliBackend, sessionId: string, charter: string | undefined, log: Logger): string => {
   const text = (charter ?? "").trim();
   if (!text || !backend.systemPromptFlag) return "";
@@ -710,7 +1003,7 @@ const charterArg = (cfg: Config, backend: CliBackend, sessionId: string, charter
     const file = join(dir, `${sessionId}.md`);
     writeFileSync(file, text, "utf8");
     pruneCharters(dir);
-    return `${backend.systemPromptFlag} "$(cat ${shQuote(file)})"`;
+    return "";
   } catch (e) {
     log.warn({ err: (e as Error).message }, "spawn-tmux: charter write failed; spawning without identity");
     return "";
@@ -837,7 +1130,7 @@ const spawnTmuxInner = async ({ cfg, log, resumeSessionId, sessionId: freshSessi
         return { reason: `could not persist workspace handoff pane identity: ${tagged.stderr.trim() || tagged.code}` };
       }
     }
-    log.info({ tmuxName, winName, tmuxPane: pane, cwd, sessionId, cli: backend.name, reused: has.code === 0, warm: !!warmPane }, "spawn-tmux: pane created");
+    log.info({ tmuxName, winName, tmuxPane: pane, cwd, sessionId, cli: backend.name, reused: has.code === 0, warm: !!warmPane, spare: false }, "spawn-tmux: pane created");
     return { pane, warm: !!warmPane };
   };
 
@@ -851,7 +1144,6 @@ const spawnTmuxInner = async ({ cfg, log, resumeSessionId, sessionId: freshSessi
   ];
   const wanted = model?.trim() ?? "";
   const effortArg = effort && (backend.effortFlag || backend.name === "codex") ? effort : undefined;
-  const charter = charterArg(cfg, backend, sessionId, systemPrompt, log);
   // A fresh session relaunched after a failed first try resumes instead if that
   // try already wrote the transcript — `--session-id` refuses an existing one.
   const commandFor = (flagModel: string | undefined, retry: boolean, pane: string): string => {
@@ -876,7 +1168,7 @@ const spawnTmuxInner = async ({ cfg, log, resumeSessionId, sessionId: freshSessi
       ...cfg.wrc.extraArgs.filter((arg) => backend.name !== "codex" || !arg.startsWith("--disallowedTools")),
       ...codexSandboxArgs,
     ].map(shQuote);
-    const cmd = [...envPrefix, shQuote(backend.bin), ...argv, charter].filter(Boolean).join(" ");
+    const cmd = [...envPrefix, shQuote(backend.bin), ...argv].filter(Boolean).join(" ");
     // Old tmux couldn't set the pane's start-dir via `-c`; cd into it first.
     return `${supportsC ? cmd : `cd ${shQuote(cwd)} && ${cmd}`}${EXIT_TAIL}`;
   };
@@ -917,7 +1209,21 @@ const spawnTmuxInner = async ({ cfg, log, resumeSessionId, sessionId: freshSessi
   // proves it can't take it is the pane thrown away and relaunched bare —
   // the ask then goes through the picker like any colloquial name.
   const flagModel = wanted && backend.modelFlag ? wanted : undefined;
-  const first = await launch(flagModel);
+  // 池里能领就先领: 领用只是搬窗口 + 核屏, 比冷启动省一个数量级。只有全新会话可以领 ——
+  // resume/fork 的 sid 是给定的, 交接那条路的 sid 要按 id 复活 (池里那条不是它)。
+  const claimable = !resumeSessionId && !forkSession && !handoffId && (!wanted || !!flagModel);
+  const spare = claimable
+    ? await claimSpare(cfg, log, { cwd, backend, model: wanted, effort: effortArg, tmuxName, winName })
+    : undefined;
+  if (spare) {
+    sessionId = spare.sessionId;
+    jsonlPath = spare.jsonlPath;
+  }
+  // 只落盘 (rolepage 回填按 sid 读), 不进启动行 —— 宪章改由首条注入的 preamble
+  // 交给 pane (mirror-bridge charterPending)。必须在领用**之后**: 领用会换 sid,
+  // 文件要落在真实接手的那个会话名下。
+  charterArg(cfg, backend, sessionId, systemPrompt, log);
+  const first: Launched = spare ? { ok: true, pane: spare.pane, ready: true } : await launch(flagModel);
   if (!first.ok) return { ok: false, reason: first.reason };
   let landed = first;
   const launchFailure = flagModel ? first.failure : undefined;
@@ -965,7 +1271,7 @@ const spawnTmuxInner = async ({ cfg, log, resumeSessionId, sessionId: freshSessi
     }
     recordCodexPaneSession({ sessionId, jsonlPath, cwd, pane: tmuxPane, startedAt: Date.now() }, cfg.daemon.stateDir);
   }
-  log.info({ tmuxName, tmuxPane, sessionId, jsonlPath, cwd, cli: backend.name, model: resolvedModel, viaFlag, relaunched: !!launchFailure, effort: effortArg }, "spawn-tmux: ready");
+  log.info({ tmuxName, tmuxPane, sessionId, jsonlPath, cwd, cli: backend.name, model: resolvedModel, viaFlag, relaunched: !!launchFailure, effort: effortArg, spare: !!spare }, "spawn-tmux: ready");
   return {
     ok: true, sessionId, jsonlPath, tmuxPane, tmuxSession: tmuxName, cwd, cli: backend.name,
     ...(wanted ? { model: resolvedModel, ...(modelWarning ? { modelWarning } : {}) } : {}),
@@ -973,12 +1279,18 @@ const spawnTmuxInner = async ({ cfg, log, resumeSessionId, sessionId: freshSessi
   };
 };
 
-/** spawn 的对外入口: 只是「跑一次 spawn + 把暖 shell 补回去」。补位必须挂在最外层 ——
- *  里面十几处提前 return, 挂进任何一处都得漏; 而无论成败, 该 cwd 的暖 pane 都已经被
+/** spawn 的对外入口: 「跑一次 spawn + 把暖 shell / 空白备用补回去」。补位必须挂在最外层
+ *  —— 里面十几处提前 return, 挂进任何一处都得漏; 而无论成败, 该 cwd 的暖 pane 都已经被
  *  领走或根本没建, 补一条下次才省得下来。补位是 fire-and-forget, 绝不影响这次的结果。 */
 export const spawnTmuxClaude = async (args: SpawnArgs): Promise<SpawnResult> => {
   const result = await spawnTmuxInner(args);
   const cwd = expandHome((args.cwdOverride ?? "").trim() || args.cfg.wrc.cwd);
   if (warmEnabled() && existsSync(cwd)) void prewarmShell(args.cfg, cwd, args.log);
+  // 一次全新会话成功 = 这个 (cwd, 后端, model, effort) 刚被证明能用, 顺手补一条备用:
+  // 下一个同键会话直接领。resume / fork / 交接 / codex 都不补 —— 它们的启动形状不一样,
+  // 备用帮不上; 领用之后也走这里补回 (它是 fresh 路径的一次成功)。
+  if (result.ok && !args.resumeSessionId && !args.forkSession && !args.handoffId) {
+    void ensureSpare(args.cfg, args.log, cwd, args.model, args.effort);
+  }
   return result;
 };

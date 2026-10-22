@@ -9,6 +9,7 @@
 // Nothing here touches tmux or the mirror bridge, so the standalone svr derives
 // exactly the same view from the records that were POSTed to it.
 import { baseOfKey, labelFor, tagOfKey } from "./session-label.js";
+import { stripReminders } from "./reminder.js";
 import type { DetailRecord, MarkDetailRecord, PostDetailRecord, TurnDetailRecord, TurnOrigin, TurnUsage } from "./detail-store.js";
 import { costOf, modelLabel, priceOf, type Price, type Tokens } from "./pricing.js";
 
@@ -207,7 +208,8 @@ const stripMd = (s: string): string => s.replace(/[`*_~|#>]/g, "").replace(/\s+/
 const previewOf = (r: TurnDetailRecord): string => {
   const texts = r.items.filter((it): it is Extract<typeof it, { t: "text" }> => it.t === "text");
   const last = texts[texts.length - 1]?.body ?? "";
-  const src = last || r.userQuery || "";
+  // 问话行开头可能顶着宪章 preamble / 信封 (reminder 块) —— 先剥再截, 预览才轮得到正文。
+  const src = last || stripReminders(r.userQuery || "");
   return stripMd(src).slice(0, 120);
 };
 

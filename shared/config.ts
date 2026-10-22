@@ -183,6 +183,19 @@ const Wrc = z.object({
   // Auto-spawn fires when an authorized inbound finds no mirror attached for that
   // chat — allowFrom IS the authorization.
   tmuxPrefix: z.string().default("wezard").describe("自动起的 tmux 会话名前缀 (`<prefix>-<short>`)"),
+  // 空白备用池 (daemon/spawn-tmux.ts): 一个会话的输入 (cwd / 后端 / model / effort) 在启
+  // 动前就定了, 所以可以提前按这四个值冷启动好空白 CLI 白养着, 新会话直接领 —— 省掉冷启
+  // 动的 2.4–2.9s。一条备用常驻 0.3GB 起步 (CLI 本体), 本机实测 ~1.3GB —— MCP 子进程
+  // 占大头 (npx shim + 每个 server 一份), 所以默认上限压得低: 这是内存预算, 不是能力上限。
+  sparePool: knob(z
+    .object({
+      enabled: z.boolean().default(true).describe("养空白备用 CLI, 同键的新会话直接领用 (另可用 WEZARD_SPARE_POOL=0 关掉)"),
+      perKey: z.number().int().positive().default(2).describe("同一个 (cwd, 后端, model, effort) 最多养几条备用"),
+      maxTotal: z.number().int().nonnegative().default(4).describe("全机备用总上限; 超出按最久未用跨键淘汰"),
+      ttlMin: z.number().int().positive().default(60).describe("一条备用最多养多少分钟, 到点收掉且不补"),
+    })
+    .default({})
+    .describe("空白备用池: 冷启动好的 CLI 先养着, 新会话直接领"), { gate: "card" }),
   // 机器人显示名由建机器人的人自己取, 我们无法从消息里读到。群里 @ 它 / 引用它的
   // 气泡时, WeCom 会把 `@<显示名>` 塞进正文; 配上真名才能把它从 prompt 里剥干净。
   botNames: z.array(z.string()).default([]).describe("机器人在企微里的显示名 (可多个别名), 用于剥掉 @; 内置 wezard / weclaude 恒生效"),

@@ -263,6 +263,9 @@ const inferByCwd = (cwd: string, taken: Set<string>): { sessionId: string; jsonl
 
 // Build pane_pid → {paneId, session}. We map the *pane's* root pid; the claude
 // worker is a descendant, so we walk its ppid chain up to find a matching pane.
+// `<prefix>-warm` is excluded: that session holds warm shells and the blank spare
+// pool — idle CLIs nobody bound to a chat, which must not show up as switchable
+// sessions (picking one would bind a chat to a pooled pane).
 const tmuxPaneIndex = async (): Promise<Map<number, PaneOwner>> => {
   const r = await runTmux(["list-panes", "-a", "-F", "#{pane_pid}|#{pane_id}|#{session_name}"]);
   const idx = new Map<number, PaneOwner>();
@@ -270,7 +273,7 @@ const tmuxPaneIndex = async (): Promise<Map<number, PaneOwner>> => {
   for (const line of r.stdout.split("\n")) {
     const [panePid, paneId, session] = line.split("|");
     const pid = parseInt(panePid ?? "", 10);
-    if (Number.isInteger(pid) && paneId) idx.set(pid, { paneId, session: session ?? "" });
+    if (Number.isInteger(pid) && paneId && !(session ?? "").endsWith("-warm")) idx.set(pid, { paneId, session: session ?? "" });
   }
   return idx;
 };

@@ -4,7 +4,11 @@
 
 ## [Unreleased]
 
+### Added
+- 空白备用池: 每次全新冷 spawn 成功后在 `<prefix>-warm` 里后台冷启动一个同 (工作区, 后端, 模型, effort) 的空白 CLI 备用, 下次同键 spawn 直接领用 (校验 pane / CLI 进程 / 输入框 / 无模态后整窗搬进主 session), 领走即补。每键 ≤2、全局 ≤`wrc.sparePool.maxTotal` (默认 4, 跨键 LRU)、闲置 1h 回收、启动失败不重试; 未命中或校验失败照旧冷启动。每个备用常驻约 1.2GB (含 MCP 子进程)。`wrc.sparePool.enabled=false` 或 `WEZARD_SPARE_POOL=0` 关闭。
+
 ### Changed
+- 宪章不再经 `--append-system-prompt` 进系统提示 (claude/codebuddy 冷启动省 ~1.4s), 改为 `<system-reminder wezard="charter">` 顶在该 pane 首条非斜杠注入的最前; `/new`、备用领用、死 pane 重生、`/clear` 与压缩后都会重挂, 分身开场白带子宪章取代继承的身份。read_chat / peek_peer / rolepage 剥离或折叠, 不进群聊气泡、不进问话行。codex 仍走 `developer_instructions`。
 - 白板 spawn 提速: 在独立 tmux session `<prefix>-warm` 里按 cwd 预养空 shell (每 cwd 1 条、总量 ≤3、20 分钟换新), spawn 时整窗搬进主 session 再打启动行, 省掉新 pane 登录 shell 源 rc 的那一段 (实测 ~1s, 高负载下 ~2s); 认领前核 pane 活着、前台是 shell、目录一致, 否则退回原冷路径。`WEZARD_WARM_SHELL=0` 关闭。TUI 就绪读屏节奏 400ms → 150ms, 信任框应答复用本拍已读的屏。
 
 ### Fixed

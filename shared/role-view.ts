@@ -18,6 +18,7 @@
 // 「与这个人的单聊」里默认 wizard 的 target, 两者字面相同, 同一条消息会变成自己对自己说。
 import { baseOfKey, labelFor, stripSigil, tagOfKey } from "./session-label.js";
 import { isGhostTurn, isMark, isPost, isTurn, staleAt, summarizeTag, type TagSummary } from "./chat-view.js";
+import { stripReminders } from "./reminder.js";
 import type { Asker, DetailRecord, MarkDetailRecord, PostDetailRecord, TurnDetailRecord } from "./detail-store.js";
 import { jobProgress, type WorldFactJob, type WorldFacts, type WorldFactWeixin, type WorldFactWizard } from "./world.js";
 
@@ -340,9 +341,11 @@ export const parseTalkKey = (key: string): { who: string; peers: string[]; chat?
 
 const stripMd = (s: string): string => s.replace(/[`*_~|#>]/g, "").replace(/\s+/g, " ").trim();
 /** 一条消息里最后那句话与它说出的时刻: 入 = 问话 (轮次开始); 出 = 最后一段 text ——
- *  工具调用之间的独白也算, 时刻取那段 text 自己的, 而不是这一轮开口的时刻。 */
+ *  工具调用之间的独白也算, 时刻取那段 text 自己的, 而不是这一轮开口的时刻。
+ *  入消息的预览先剥 reminder 块再截: 问话行开头可能顶着宪章 preamble / 信封,
+ *  不剥的话预览全是 `<system-reminder …>`, 人一句正文都看不见。 */
 const saidOf = (m: Msg): { body: string; ts: number } => {
-  if (m.dir === "in") return { body: stripMd(unwrapMates(m.turn.userQuery ?? "")).slice(0, 80), ts: m.ts };
+  if (m.dir === "in") return { body: stripMd(unwrapMates(stripReminders(m.turn.userQuery ?? ""))).slice(0, 80), ts: m.ts };
   const t = [...m.turn.items].reverse().find((it): it is Extract<typeof it, { t: "text" }> => it.t === "text");
   return { body: stripMd(t?.body ?? "").slice(0, 80), ts: t?.ts ?? m.ts };
 };

@@ -624,10 +624,13 @@ const main = async (): Promise<void> => {
       }
       if (!planStore.allowExternal(target, wizards.get(target)?.name)) { json(res, 409, { ok: false, reason: "workflow plan reserves this executor" }); return; }
       const spawnLog = log.child({ mod: "mirror", sub: "spawn-init", target });
-      const r = await spawnTmuxClaude({ cfg, log: spawnLog, windowName: target, chatKey: target, systemPrompt: charterFor(target, { cli: backendFor(cfg).name }) });
+      const charter = charterFor(target, { cli: backendFor(cfg).name });
+      const r = await spawnTmuxClaude({ cfg, log: spawnLog, windowName: target, chatKey: target, systemPrompt: charter });
       if (!r.ok) { json(res, 500, { ok: false, reason: r.reason }); return; }
       if (!planStore.allowExternal(target, wizards.get(target)?.name)) { if (r.tmuxPane) await runTmux(["kill-pane", "-t", r.tmuxPane]); json(res, 409, { ok: false, reason: "executor reserved during spawn; binding withheld" }); return; }
       const att = m.attach({ sessionId: r.sessionId!, jsonlPath: r.jsonlPath!, target, tmuxPane: r.tmuxPane, tmuxSession: r.tmuxSession });
+      // spawn 不再带宪章 (省冷启动), 身份改挂到这个 pane 的首条注入上。
+      if (att.ok) m.armCharter(target, charter);
       json(res, att.ok ? 200 : 500, att.ok ? { ok: true, sessionId: r.sessionId, tmuxSession: r.tmuxSession, tmuxPane: r.tmuxPane, target } : { ok: false, reason: att.reason });
     });
     // A missing agent identity is an error, never an invitation to impersonate defaultChat.
@@ -3077,6 +3080,10 @@ const main = async (): Promise<void> => {
 
     m.onContextCut((t, cut) => {
       pendingCuts.set(t, cut);
+      // 宪章跟着消息走 (不再在系统提示里), /clear 与压缩都会把它从上下文里抹掉 ——
+      // 现渲染一份挂到下一次注入上, 让身份跨过这次截断。reload 后没有附着表也照挂:
+      // armCharter 只对活着的附着生效, 冷记录等重生时再挂。
+      m.armCharter(t);
       // 之前挂过的提示随对话一起没了: 去重窗口清零, 下一次该给的规矩照给。
       notices.forget(t);
       const now = wizards.get(t)?.memory ?? [];

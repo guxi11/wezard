@@ -49,7 +49,7 @@ import { hasMirrorAskq, runMirrorAskqFlow, hasMirrorPlan, mootMirrorPlan, runMir
 import { isAutoWindowActive } from "./session-cache.js";
 import { noticeSuffixFor } from "./notices.js";
 import { dispatchPickerPolicy, pickerPolicy } from "./picker-policy.js";
-import { renameWindow, runTmux, spawnTmuxClaude } from "./spawn-tmux.js";
+import { renameWindow, runTmux, sparePoolFencedSids, spawnTmuxClaude } from "./spawn-tmux.js";
 import { selectEffort, selectModel, type EffortSelectResult, type ModelScope, type ModelSelectResult } from "./model-select.js";
 import { parseEffort, type Effort } from "../shared/effort.js";
 import { hasRegistry, liveSessionPids, markTranscript, probeOf, readRegistry, registrySnapshot, sessionOfPid, sessionOnPane, submittedSince, submittedEventSince, watchRegistry, type LiveSession, type TranscriptMark } from "./wezard-session.js";
@@ -2676,6 +2676,10 @@ export interface MirrorBridge {
    *  into the new process's system prompt, so identity is a property of the
    *  session rather than of the one code path that happened to create it. */
   setCharterProvider: (fn: (target: string, ctx?: { cwd?: string; cli?: CliBackendName }) => string) => void;
+  /** 把宪章挂到 target 的首条注入上 (见 AttachState.charterPending): index.ts 的
+   *  init 自动建会话在 attach 之后调它; /clear 与压缩后的记忆重挂也走它
+   *  (现渲染, 带上此后的 roster / 记忆增量)。false = 这个 target 还没有附着。 */
+  armCharter: (target: string, charter?: string) => boolean;
   /** Install the hook fired after a new session pane is up and attached
    *  (`newSession` / `cloneSession`). index.ts hangs the pane-cap sweep on it:
    *  the count only grows at a birth, so that is the only moment worth
@@ -2892,6 +2896,14 @@ interface AttachState {
   /** 新 spawn 的 pane 在首次 inject 落地前会产出初始输出 (greeting / system),
    *  设为 true 时 onItem 全部吞掉, inject 成功后清除。 */
   muteUntilInject?: boolean;
+  /** 待发的宪章 preamble: claude/codebuddy 的 spawn 不再 --append-system-prompt
+   *  (冷启动实测 +1.4s), 宪章改由这个 pane 的**首条注入**顶在最前面带进去
+   *  (`<system-reminder wezard="charter">…</system-reminder>`, 见 charterPreamble)。
+   *  挂上它的时机 = 一切「pane 里住进了一个还没读过宪章的会话」的时刻: newSession、
+   *  死 pane 重生、/clear 与压缩后的重挂 (armCharter)。注入确认 ok 后由注入方清除;
+   *  失败可重试的路径不清 —— 重投的下一条接着带。codex 不用: 它的宪章仍在
+   *  developer_instructions 里, 再贴一份是重复。 */
+  charterPending?: string;
   /** 待记账的 graph 归因: injectText 盖章, 下一次 recordTurnStart
    *  消费一次。带时间戳是因为注入未必真的开出一轮 (pane 死了 / 文本被吞), 陈旧的
    *  印章若一直留着, 会把很久以后某条真人消息误标成 graph 派的。 */
@@ -5152,6 +5164,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const spawningPanes = new Set<string>();
   const sidsClaimedByOthers = (principal: string): Set<string> => {
     const s = new Set<string>(inFlightSids);
+    // 空白备用池里的会话 (以及刚被领走、attach 还没落定的那几秒) 同样不能认领:
+    // 它们住在同一个 cwd 的 project dir 里, 却还没有任何绑定指着。
+    for (const sid of sparePoolFencedSids()) s.add(sid);
     for (const [k, v] of Object.entries(deps.store.all())) if (k !== principal && v.sessionId) s.add(v.sessionId);
     for (const [k, a] of byTarget) if (k !== principal && a.sessionId) s.add(a.sessionId);
     return s;
@@ -5833,6 +5848,28 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     try { return charterOf?.(target, ctx); } catch { return undefined; }
   };
 
+  /** 宪章 → 首条注入顶在最前的 reminder 块。认/剥/折叠全靠它是合法 reminder 块
+   *  (kind "charter", shared/reminder.ts): cleanUserText 剥它 → 回显去重与印章
+   *  认到的仍是纯正文; peers.stripMeta 剥它 → talkTurns / read_chat 的问话干净;
+   *  rolepage 把它折叠成 `<charter>` 标签。正文里出现闭合标签字面量会截断这些
+   *  剥离 (懒惰匹配到第一个闭合就停), 顺手转义掉。 */
+  const charterPreamble = (charter: string): string =>
+    `<system-reminder wezard="charter">\n${charter.trim().replace(/<\/(system-reminder|pasted_content)/g, "<\\/$1")}\n</system-reminder>\n`;
+  /** 这一条注入该带的前置宪章: 挂了 charterPending 且不是斜杠命令才有 —— preamble
+   *  会把命令顶得不再是命令, 宪章留到下一条非命令消息。 */
+  const charterPrefixOf = (a: AttachState, text: string): string =>
+    a.charterPending?.trim() && !text.trimStart().startsWith("/") ? charterPreamble(a.charterPending) : "";
+  /** 把宪章挂到 target 的首条注入上 (见 AttachState.charterPending)。给了 `charter`
+   *  就用它, 没给现渲染。codex 免: developer_instructions 已带, 不必重复。 */
+  const armCharter = (target: string, charter?: string): boolean => {
+    const a = byTarget.get(target);
+    if (!a) return false;
+    const cli = backendForPath(a.jsonlPath).name;
+    const text = (charter ?? charterFor(target, { cwd: a.runningCwd, cli }) ?? "").trim();
+    a.charterPending = cli === "codex" || !text ? undefined : text;
+    return true;
+  };
+
   /** 死 pane 重生: 管家重新取 router 档位, 普通 wizard 沿用绑定模型。 */
   const respawnSpec = (a: { target: string; jsonlPath: string; model?: string; effort?: string }): { model?: string; effort?: Effort } => {
     return resumedStewardSpec(cfg, a.target, backendForPath(a.jsonlPath).name, a);
@@ -5899,6 +5936,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // sid 由这里先定, 出生到 attach 之间挂在 inFlightSids 上 (见那里)。
     const freshSid = opts?.sessionId ?? randomUUID();
     inFlightSids.add(freshSid);
+    // 宪章只用来落盘 (spawn 侧 charters/<sid>.md) 与 codex 的 developer_instructions;
+    // claude/codebuddy 的身份改由首条注入带 (下面挂到新附着上)。
+    const charter = opts?.systemPrompt ?? charterFor(target, { cwd: eff, cli: effCli });
     const r = await spawnTmuxClaude({
       cfg,
       log: log.child({ sub: "new-session", target }),
@@ -5910,7 +5950,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       cli: effCli,
       model: effModel,
       effort: effEffort,
-      systemPrompt: opts?.systemPrompt ?? charterFor(target, { cwd: eff, cli: effCli }),
+      systemPrompt: charter,
     }).catch((e: unknown) => { inFlightSids.delete(freshSid); throw e; });
     if (!r.ok) { inFlightSids.delete(freshSid); return { ok: false, reason: r.reason }; }
     if (opts?.guard && !opts.guard()) {
@@ -5942,6 +5982,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (spawned) {
       spawned.justSpawned = true;
       spawned.muteUntilInject = true;
+      // 全新的会话 = 一份它还没读过的宪章; codex 的已在 developer_instructions。
+      spawned.charterPending = effCli === "codex" || !charter?.trim() ? undefined : charter;
       // 只有换过 pane 才是断点 —— 首次建会话时 prev 为空, 那不是"不连续", 是开局。
       if (prev) markCut(target, spawned.sessionId, "new");
     }
@@ -6092,9 +6134,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // 顺便就是它的开场白 (「你是谁、继承了什么、准备接什么」)。
       const hello = args.bootstrap?.trim()
         || "（wezard 分身初始化）用一句话说明: 你是谁、从谁那里继承了哪些上下文、准备接什么活。不要复述这条指令。";
+      // 子宪章随开场白一起进 pane (此刻还没有附着, 不走 charterPending): 分叉继承了
+      // 父亲转录里父亲的 preamble, 子宪章必须声明取代那份继承来的身份。codex 例外 ——
+      // 它的宪章仍在 developer_instructions 里。
+      const pre = parentCli !== "codex" && args.systemPrompt?.trim() ? charterPreamble(args.systemPrompt) : "";
       rememberInject(hello);
       const boot = await inject({
-        text: hello, images: [], cfg, log: lg,
+        text: pre + hello, images: [], cfg, log: lg,
         sessionId: parentCli === "codex" ? r.sessionId! : parent.sessionId, jsonlPath: parentCli === "codex" ? r.jsonlPath! : parent.jsonlPath,
         tmuxTarget: r.tmuxPane, freshSpawn: true, guard: args.guard,
       });
@@ -7574,7 +7620,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // Same resume-fork hazard as dispatch: snapshot before spawn, re-bind
         // onto the forked jsonl once it appears (EOF offset — fork is seeded).
         const resumeBaseline = listJsonls(dirname(a.jsonlPath));
-        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: displayName(target) || target, cwdOverride: a.runningCwd, chatKey: target, cli: backendForPath(a.jsonlPath).name, ...respawnSpec(a), systemPrompt: charterFor(target, { cwd: a.runningCwd, cli: backendForPath(a.jsonlPath).name }) });
+        const respawnCli = backendForPath(a.jsonlPath).name;
+        const charter = charterFor(target, { cwd: a.runningCwd, cli: respawnCli });
+        const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: displayName(target) || target, cwdOverride: a.runningCwd, chatKey: target, cli: respawnCli, ...respawnSpec(a), systemPrompt: charter });
         if (!r.ok || !r.tmuxPane) return { ok: false, retryable: r.retryable !== false, reason: `respawn failed: ${r.reason ?? "unknown"}` };
         if (!permitted() || a.tmuxPane !== probedPane) {
           // This pane was born for an unsubmitted injection. Never kill the old
@@ -7593,6 +7641,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         if (r.model !== undefined) a.model = r.model;
         deps.store.set(target, { sessionId: sid, jsonlPath: a.jsonlPath, tmuxSession: a.tmuxSession, tmuxPane: a.tmuxPane, cwd: a.runningCwd || undefined, model: a.model || undefined, effort: a.effort || undefined, pendingCwd: a.pendingCwd || undefined });
         startMigrationWatcher(a, resumeBaseline, forkOf(a.jsonlPath));
+        // 重生出的 pane 里是同一份会话, 但宪章要重挂: --resume 读的是 CLI 自己的
+        // 系统提示, 我们的宪章只跟着消息走。下面的注入 (本函数尾部) 会带上它。
+        a.charterPending = respawnCli === "codex" || !charter?.trim() ? undefined : charter;
         fresh = true;
       }
       if (!permitted()) return denied;
@@ -7600,7 +7651,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // Render only after the pane lane grants delivery, then stamp exactly at
       // the first permitted input.
       const envelope = text.trimStart().startsWith("/") ? "" : opts?.envelope ?? "";
-      let full = text + renderTail(envelope);
+      // 首条注入带上宪章 preamble (newSession/重生/清空后挂上的那份)。印章与回显
+      // 去重都记纯正文 —— cleanUserText 两侧都会剥掉 preamble, 认出的仍是同一句。
+      const pre = charterPrefixOf(a, text);
+      let full = pre + text + renderTail(envelope);
       const beforeInput = (): void => {
         a.pendingFromCli = false;
         a.turnFromChat = true;
@@ -7620,10 +7674,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         sessionId: sid, eventId: opts?.eventId, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn: fresh,
         physicalGuard: opts?.handoff ? async (phase) => { const ok = permission() && await verifyClearInput(target, opts.handoff!, phase, permission) && permission(); if (!ok) pinRejected = true; return ok; } : undefined,
         requireIdle: opts?.requireIdle ? () => idleNow(target) : undefined,
-        prepareText: () => (full = text + renderTail(envelope, noticeSuffixFor(target, text))),
+        prepareText: () => (full = pre + text + renderTail(envelope, noticeSuffixFor(target, text))),
         beforeInput,
       });
       if (pinRejected) return { ...r, ok: false, retryable: false, reason: "handoff process/session or continuation authority changed at physical input; carry withheld" };
+      // 带进去的宪章随这一条落定; 失败可重试 (r.ok=false) 的不清 —— 重投的下一条接着带。
+      if (r.ok) a.charterPending = undefined;
       if (r.ok && a.tmuxPane && permitted()) {
         if (preClearBaseline) {
           a.clearRebind = { baseline: preClearBaseline };
@@ -7898,6 +7954,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     sessionInfo,
     inputSessionInfo,
     setCharterProvider,
+    armCharter,
     onSpawn,
     onContextCut,
     shutdown: () => {
@@ -8109,7 +8166,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           const resumeBaseline = !armMigration ? listJsonls(dirname(a.jsonlPath)) : undefined;
           // Respawn in the binding's runningCwd (pendingCwd doesn't apply to a
           // mid-turn reincarnation — only /new and /clear-with-pending swap cwd).
-          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: displayName(a.target) || a.target, cwdOverride: a.runningCwd, chatKey: a.target, cli: backendForPath(a.jsonlPath).name, ...respawnSpec(a), systemPrompt: charterFor(a.target, { cwd: a.runningCwd, cli: backendForPath(a.jsonlPath).name }) });
+          const respawnCli = backendForPath(a.jsonlPath).name;
+          const charter = charterFor(a.target, { cwd: a.runningCwd, cli: respawnCli });
+          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: displayName(a.target) || a.target, cwdOverride: a.runningCwd, chatKey: a.target, cli: respawnCli, ...respawnSpec(a), systemPrompt: charter });
           if (byTarget.get(a.target) !== a || a.sessionId !== sid || (a.injectGen ?? 0) !== myGen || (guard && !guard())) {
             // A stop or replacement during startup revokes this birth before binding.
             if (r.tmuxPane) await runTmux(["kill-pane", "-t", r.tmuxPane]);
@@ -8133,6 +8192,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
               pendingCwd: a.pendingCwd || undefined,
             });
             log.info({ target: a.target, sessionId: sid, newPane: a.tmuxPane, newSession: a.tmuxSession }, "mirror: tmux respawned");
+            // 重挂宪章 (同 injectText 的 respawn-init): --resume 只带回对话内容,
+            // 我们的宪章跟着消息走。本条注入 (下面) 会带上它。
+            a.charterPending = respawnCli === "codex" || !charter?.trim() ? undefined : charter;
             // Re-bind onto the resume fork once it appears (EOF offset: the fork
             // already holds the full prior transcript — replaying from 0 would
             // re-dump it). If --resume happens to keep the same jsonl, no new
@@ -8172,6 +8234,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         }
         if (!brief) pushSeal(a, { eventId: a.activeEventId, keys: sealKeys(effText), at: Date.now(), query: effText, channel: channel ?? baseOfKey(principal), speaker, fresh: true });
         rememberInject(effText);
+        // 首条注入带上宪章 preamble (印章/去重/轮次问话都记纯正文 —— cleanUserText
+        // 在两侧剥掉 preamble, 认出的仍是同一句, 回执链的认领不受影响)。
         // 解除静默必须在 inject 之前: inject 内部的 freshSpawn 验证循环可达 10+s
         // (paste-verify + settle + waitForCleared + retry), 而 LLM 的回复可能在 Enter
         // 发出后 2-3s 就落盘 —— tail 在 mute 期间读到的 item 会被 onItem 永久丢弃,
@@ -8185,7 +8249,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // 贴进运行中的一轮会被记成 queued 轮, 等它在 transcript 露面再接上这条 event。
         // slash 命令要等闲, 那一道在上面 (dispatch 开头) 已经拦过了。
         let r = await inject({
-          text: effText, images: effImages, cfg, log: log.child({ principal, sessionId: sid }),
+          text: charterPrefixOf(a, effText) + effText, images: effImages, cfg, log: log.child({ principal, sessionId: sid }),
           sessionId: sid, eventId, jsonlPath: a.jsonlPath, tmuxTarget: a.tmuxPane, freshSpawn,
           requireIdle: eventId ? () => true : undefined,
           guard: (phase, identity) => byTarget.get(a.target) === a && a.tmuxPane === injectPane && (a.injectGen ?? 0) === myGen && (!guard || guard(phase, identity)),
@@ -8201,6 +8265,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           log.info({ target: a.target, eventId, reason: r.reason }, "mirror inject: late failure superseded by event submission evidence");
           r = { ok: true };
         }
+        // 宪章已随这一条进了 pane; 失败可重试的 (消息事件层会重投) 不清 —— 重投接着带。
+        // /clear 例外: 它自己不带 preamble, 而 tail 认出会话轮换 → contextCut → armCharter
+        // 可能先于这里的返回发生, 清了就会把刚挂上的下一份宪章抹掉。
+        if (r.ok && !armMigration) a.charterPending = undefined;
         onSubmitted?.(r);
         if (!r.ok) {
           // retryable = 一个字都没进输入框, 消息事件层会稍后重投 —— 不是失败, 别报 ✗

@@ -19,6 +19,7 @@
 // 纯函数, 无 IO: 注册表侧的东西由调用方以 WorldFacts 喂进来。
 import { baseOfKey, labelFor, stripSigil, tagOfKey } from "./session-label.js";
 import { isTurn, staleAt, isGhostTurn } from "./chat-view.js";
+import { stripReminders } from "./reminder.js";
 import type { CharterLineage, CharterRecord, DetailRecord, TurnDetailRecord, TurnItem } from "./detail-store.js";
 import { allMessages, injectTurnsOf, senderOf } from "./role-view.js";
 import type { TurnState } from "./turn-state.js";
@@ -278,7 +279,8 @@ const stripMd = (s: string): string => s.replace(/[`*_~|#>]/g, "").replace(/\s+/
 
 const previewOf = (r: TurnDetailRecord): string => {
   const texts = r.items.filter((it): it is Extract<typeof it, { t: "text" }> => it.t === "text");
-  return stripMd(texts[texts.length - 1]?.body ?? r.userQuery ?? "").slice(0, 100);
+  // 问话行开头可能顶着宪章 preamble / 信封 (reminder 块) —— 先剥再截, 预览才轮得到正文。
+  return stripMd(texts[texts.length - 1]?.body ?? stripReminders(r.userQuery ?? "")).slice(0, 100);
 };
 
 const isHuman = (id: string): boolean => id.startsWith("human:") && id !== "human:";
