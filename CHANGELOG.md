@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [2.8.2] - 2026-10-22
+
 ### Added
 - `dispatch` / `tell_peer` 支持「模板文件 + 参数」派活: 新增 `taskFile` (`~/.wezard/templates/` 下, 支持子目录) 与 `params`, daemon 在入口展开成投递全文 —— 调用方的工具 input/output 不再逐字抄长协议正文。校验全在开行/起 wizard 之前: 根外路径 (含软链/`..` 越界)、非普通文件、>64KB、坏 UTF-8、缺/多参数、参数行首 `<` 转义 (防信封劫持)、展开后空或以 `/` 开头, 一律 400 并带人话 reason, 调用方可回退内联重发。`taskFile` 可单独成立 (`task` 不必陪跑); 给了 `taskFile` 时选人/选档/description 用 `clipLine(params.header ?? 展开全文, 120)` 派生。`payload.text` 存展开全文 (userQuery / read_chat / transcript 三方一致), `payload.peer` 带可选 `templateRef{path,sha}` 供审计。daemon 启动时 `mkdir -p ~/.wezard/templates` (0700) 作为能力握手 (失败静默 = 能力关闭)。`spawn_wizard` / `clone_wizard` 第一期不接 `taskFile`, 传了显式 400。
 - 空白备用池: 每次全新冷 spawn 成功后在 `<prefix>-warm` 里后台冷启动一个同 (工作区, 后端, 模型, effort) 的空白 CLI 备用, 下次同键 spawn 直接领用 (校验 pane / CLI 进程 / 输入框 / 无模态后整窗搬进主 session), 领走即补。每键 ≤2、全局 ≤`wrc.sparePool.maxTotal` (默认 2, 跨键 LRU)、闲置 1h 回收、启动失败不重试; 未命中或校验失败照旧冷启动。每个备用常驻约 1.2GB (含 MCP 子进程)。`wrc.sparePool.enabled=false` 或 `WEZARD_SPARE_POOL=0` 关闭。
@@ -15,6 +17,7 @@
 ### Fixed
 - 回执信封不再把「这份结论要交代给谁」当成「这句话是在哪个群说的」：有去向（回给上游 wizard / 落回某个群）的回执不再发放 `QUIET` 许可，只允许用 `RESULT:` / `WAIT:` / `NEED:` 收口；没人等着听的回执（纯同伴链）保持原样。此前一份已经到了的答案可以被 `QUIET` 吞掉，而账本记的是「已送达」—— 发起方那边看不出任何回复（2026-10-22 .teammate 收到 .wezard 的结论后即如此）。
 - 同一份结论不再被两个轮次各投一次：追述判重此前拿正文指纹去比一份「执行版本」号，恒不相等，于是 `re` 腿 / 被切断那轮补交的同文定论会再进一次收方收件箱（2026-10-22 edf7056.1：两份相同回执相隔 18s，第二份落进对方已经跑起来的输入框并把它的输入取消掉）。改按正文判重。
+- CodeBuddy 后台完成通知 (`<task-notification>` 块后跟 `Use the TaskOutput` / `[SYSTEM NOTIFICATION]` 机器附言) 不再被误判为普通 user 开轮行：此前剥完元信息仍剩附言正文，无信封机器行被当成开轮，回执链断开 —— 人在群里那轮派出的活开成 detach 根行，回执轮终句进不了群。改为按形状认 (行首起即通知块)。
 
 ## [2.8.1] - 2026-10-21
 
@@ -1236,7 +1239,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.8.1...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.8.2...HEAD
+[2.8.2]: https://github.com/guxi11/wezard/compare/v2.8.1...v2.8.2
 [2.8.1]: https://github.com/guxi11/wezard/compare/v2.8.0...v2.8.1
 [2.8.0]: https://github.com/guxi11/wezard/compare/v2.7.7...v2.8.0
 [2.7.7]: https://github.com/guxi11/wezard/compare/v2.7.6...v2.7.7
