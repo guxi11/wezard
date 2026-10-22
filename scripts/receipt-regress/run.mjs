@@ -1135,19 +1135,27 @@ const cases = {
       await post("/peers/tell", { target: kids.get("rr-tpl-a"), name: root.name, priority: "now", text: `${SLEEP(90)}, 然后回复一行: RESULT: root-${n}` });
       const owed = await until(() => liveRowOf(kids.get("rr-tpl-a"), root.target), 30_000);
       if (!owed) return { pass: false, why: "前提没成立: root 没接下 rr-tpl-a 的问话 (行没开)" };
+      // 行先于 transcript 开轮行落地; dispatch 的控制权快照取的是 root 的开轮时刻, 早拍会在 spawn 期间失效。
+      const opened = await until(() => turnsOf(root.target).some((t) => t.userQuery?.includes(`root-${n}`)), 60_000);
+      if (!opened) return { pass: false, why: "前提没成立: root 的 transcript 没出现这一轮开轮行" };
       const d = await post("/dispatch", { target: root.target, return: "transfer", spawn: true, tier: "mini", taskFile: tplRel, params: { header, question } });
       if (!d.ok) return { pass: false, why: `dispatch 失败: ${d.reason} (taskFile=${tplRel})` };
       execName = String(d.name ?? "");
-      const moved = await until(async () => { const r = (await rowsOfPair(kids.get("rr-tpl-a"), root.target)).at(-1); return r && r.owner !== root.target && r; }, 30_000);
+      // transfer 后 owner 已不是 root, 按 pair (owner=root) 再也查不到 —— 跟着那一笔的 event 走。
+      const askRow = async () => (await routeRows()).filter((r) => r.event === owed.event).at(-1);
+      const moved = await until(async () => { const r = await askRow(); return r && r.owner !== root.target && r; }, 30_000);
       if (!moved) return { pass: false, why: "transfer 没落: 行的 owner 还是 root" };
       const exec = moved.owner;
       // userQuery 逐字 = 展开全文 (rolepage / read_chat / transcript 三方一致的锚点)。
       const uq = await until(() => turnsOf(exec).find((t) => t.userQuery === full), 60_000);
-      const settledAsk = await until(async () => { const r = (await rowsOfPair(kids.get("rr-tpl-a"), root.target)).at(-1); return settled(r) && r; }, 6 * 60_000);
+      const settledAsk = await until(async () => { const r = await askRow(); return settled(r) && r; }, 6 * 60_000);
       const got = await waitReceipts(kids.get("rr-tpl-a"), undefined, 1, 90_000);
+      // 结论在回执那条 user 行的正文里, 不在信封 reminder 的 body (那是给模型的说明)。
+      const askerPath = await jsonlOf(kids.get("rr-tpl-a"));
+      const receiptLines = askerPath ? userTexts(askerPath).filter((t) => parseReminders(t).some((r) => r.attrs.wezard === "envelope" && r.attrs.receipt === "1")) : [];
       const toAsker = moved.receiver?.kind === "wizard" && moved.receiver?.to === kids.get("rr-tpl-a");
       return {
-        pass: !!uq && toAsker && settledAsk?.outcome?.status === "done" && (settledAsk.outcome.body ?? "").includes(`tpl-${header}`) && got.some((r) => (r.body ?? "").includes(`tpl-${header}`)),
+        pass: !!uq && toAsker && settledAsk?.outcome?.status === "done" && (settledAsk.outcome.body ?? "").includes(`tpl-${header}`) && receiptLines.some((t) => t.includes(`tpl-${header}`)),
         why: `userQuery=全文 ${!!uq} · receiver 仍是提问方 ${toAsker} · 终态=${settledAsk?.outcome?.status ?? "未落定"} 含结论=${(settledAsk?.outcome?.body ?? "").includes(`tpl-${header}`)} · 提问方回执=${got.length} 份 (执行者 ${execName || "未知名"}, taskFile=${tplRel})`,
       };
     } finally {
