@@ -6,15 +6,18 @@
 // 调用方的工具 input/output 只剩路径与参数, 投递正文逐字节来自文件; 模板缺失、
 // 缺参、越界都在开行 / 起 wizard 之前变成 400, 调用方回退内联重发即可, 一问不丢。
 //
+// 路径语义 (人定的边界): `taskFile` 是**相对调用方工作区**的相对路径 —— 绝对路径
+// 与 `~` 开头一律 400 (不展开、不接受); 解析基点是 daemon 传入的 `baseDir`
+// (调用方 session 的 cwd, 见 daemon 侧 callerBaseOf), realpath 之后必须仍在
+// baseDir 子树内 —— `../` 与软链逃到工作区外都被这条挡住。
+//
 // 失败一律抛 `TemplateError` (reason 是给模型看的人话): 调用方 (daemon 路由) 把它
 // 映射成 400。其它异常 (意外的 IO 崩溃等) 原样上抛, 由调用方按 5xx 处理。
 import { createHash } from "node:crypto";
 import { readFile, realpath, stat } from "node:fs/promises";
-import { isAbsolute, relative, sep } from "node:path";
-import { expandHome } from "./paths.js";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { interpolate } from "./std.js";
 
-export const TEMPLATE_ROOT = "~/.wezard/templates";
 export const MAX_TEMPLATE_BYTES = 64 * 1024;
 /** 参数尺寸上限: 值 8KB / 总量 16KB —— 参数是「这一问的变量」, 不是第二条正文。 */
 export const MAX_PARAM_VALUE_BYTES = 8 * 1024;
@@ -28,7 +31,7 @@ const bad = (reason: string): never => {
 
 /** 展开结果的回溯指针: rolepage 显示「来自模板 x@sha」, sha 随模板内容定版。 */
 export interface TemplateRef {
-  /** 相对模板根的路径 (统一正斜杠, 供审计显示)。 */
+  /** 相对调用方工作区的路径 (统一正斜杠, 供审计显示)。 */
   path: string;
   /** 模板文件内容 sha256 的前 12 位 hex。 */
   sha: string;
@@ -40,8 +43,8 @@ export interface ExpandTaskInput {
 }
 
 export interface ExpandTaskOptions {
-  /** 模板根, 默认 `~/.wezard/templates`。测试注入临时目录用。 */
-  root?: string;
+  /** 解析基点: 调用方工作区 (daemon 从 self 的 session cwd 解析; 拿不到时退 daemon 进程 cwd)。 */
+  baseDir: string;
   /** 模板体积上限 (字节), 默认 64KB。 */
   maxBytes?: number;
 }
@@ -77,22 +80,25 @@ const realpathOrBad = async (p: string, enoentReason: string): Promise<string> =
 };
 
 /**
- * 把「模板 + 参数」展开成投递正文。依次校验 (spec §6): 根存在 (否则视为能力
- * 关闭) → realpath 后仍在根内 → 普通文件且 ≤ maxBytes → 合法 UTF-8 → 占位符
- * 与参数恰好互为补集 → 参数值行首 `<` 转义 → 展开结果非空且不以 `/` 开头。
+ * 把「模板 + 参数」展开成投递正文。依次校验: 相对路径 (拒绝对路径 / `~`) → realpath
+ * 后仍在 baseDir 子树内 → 普通文件且 ≤ maxBytes → 合法 UTF-8 → 占位符与参数恰好
+ * 互为补集 → 参数值行首 `<` 转义 → 展开结果非空且不以 `/` 开头。
  */
 export const expandTask = async (
   input: ExpandTaskInput,
-  opts: ExpandTaskOptions = {},
+  opts: ExpandTaskOptions,
 ): Promise<ExpandedTask> => {
-  // 根不存在 = 整个能力关闭 (没配模板目录的机器), 说「disabled」而不是 5xx。
-  const root = await realpathOrBad(expandHome(opts.root ?? TEMPLATE_ROOT), "templates disabled");
-
-  const real = await realpathOrBad(expandHome(input.taskFile), `template not found: ${input.taskFile}`);
-  // relative() 而不是「根 + sep」前缀比对: 根 /a/b 与路径 /a/bb 这类兄弟目录
-  // 前缀撞车也挡得住; real === root (taskFile 就是根本身) 一并拒绝。
-  const rel = relative(root, real);
-  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) bad("taskFile outside template root");
+  if (isAbsolute(input.taskFile)) bad("taskFile must be relative to the caller workspace (absolute path rejected)");
+  if (input.taskFile.startsWith("~")) bad("taskFile must be relative to the caller workspace (~ is not expanded)");
+  // 基点先 canonical 化: 调用方 cwd 自带软链时 (/tmp → /private/tmp、符号链接的开发目录),
+  // 两侧都走 realpath 才不会把合法的子树内路径误判成越界。
+  const base = await realpathOrBad(opts.baseDir, "cannot resolve caller workspace");
+  const real = await realpathOrBad(resolve(base, input.taskFile), `template not found: ${input.taskFile}`);
+  // relative() 而不是「基点 + sep」前缀比对: 基点 /a/b 与路径 /a/bb 这类兄弟目录
+  // 前缀撞车也挡得住。解析结果就是基点本身 (taskFile 是 "." 之类) 不在这里拒 ——
+  // 它是目录, 交给下面的「必须是普通文件」按准确理由拒。
+  const rel = relative(base, real);
+  if (rel.startsWith("..") || isAbsolute(rel)) bad("taskFile outside caller workspace");
 
   // realpath 之后文件被换掉/删掉是极小窗口的竞态, 折成同一个 400 语义。
   const st = await stat(real).catch((e) => bad(`template unreadable: ${(e as NodeJS.ErrnoException).code ?? "?"}`));

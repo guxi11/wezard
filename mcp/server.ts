@@ -402,7 +402,7 @@ const TELL_SCHEMA = {
   text: z.string().optional().describe("Message to inject. Plain prompt text; slash commands like '/clear' also work. 与 `taskFile` 至少给一个; 两者都给时以 `text` 为准, `taskFile` 被忽略。"),
   // 长协议正文走「模板 + daemon 展开」: 调用方只出路径与参数, 免去逐字手抄
   // (手抄既贵又无完整性校验, 抄丢一节对方会带着缺规则静默作答)。
-  taskFile: z.string().optional().describe("模板文件路径, 必须位于 `~/.wezard/templates/` 下 (`~` 展开)。daemon 读模板、用 `params` 插值出**注入的全文**; 与 `text` 至少给一个, 长正文别逐字抄进 `text`。"),
+  taskFile: z.string().optional().describe("模板文件路径, **相对你的工作区**的相对路径 (绝对路径与 `~` 开头一律 400)。daemon 读模板、用 `params` 插值出**注入的全文**; 与 `text` 至少给一个, 长正文别逐字抄进 `text`。"),
   params: z.record(z.string()).optional().describe("`taskFile` 模板里 `{{name}}` 占位符的参数值 (全为字符串)。缺参数 / 多余参数都会被 400 拒绝。"),
   priority: z
     .enum(["normal", "urgent", "now"])
@@ -489,7 +489,7 @@ server.registerTool(
   { title: "Say something to another wizard (reply comes back by itself)", description: TELL_DESC, inputSchema: TELL_SCHEMA },
   async (a) => {
     if (a.text === undefined && a.taskFile === undefined)
-      return fail("tell_peer: `text` 与 `taskFile` 至少给一个 (后者是 `~/.wezard/templates/` 下的模板, 由 daemon 展开)");
+      return fail("tell_peer: `text` 与 `taskFile` 至少给一个 (后者是相对你工作区的模板路径, 由 daemon 展开)");
     return unwrap("tell_peer", await daemonPost("/peers/tell", tellBody(a)));
   },
 );
@@ -505,7 +505,7 @@ server.registerTool(
   },
   async (a) => {
     if (a.text === undefined && a.taskFile === undefined)
-      return fail("send_peer: `text` 与 `taskFile` 至少给一个 (后者是 `~/.wezard/templates/` 下的模板, 由 daemon 展开)");
+      return fail("send_peer: `text` 与 `taskFile` 至少给一个 (后者是相对你工作区的模板路径, 由 daemon 展开)");
     return unwrap("send_peer", await daemonPost("/peers/tell", tellBody(a)));
   },
 );
@@ -871,7 +871,7 @@ server.registerTool(
       // task 当正文投出去, 摘要进 pane 就等于静默丢卡。选人/选档/description 由
       // daemon 用展开文本或 params.header 派生 (阶段 2)。
       task: z.string().optional().describe("这件活的正文, 与 `taskFile` 二选一。给了 `taskFile` 就别再给 task —— 守护进程用展开后的全文派生选人与默认 description。写清目标与交付, 带文件名 / 模块名帮助找上下文; 公共规则文件或同目录不构成复用理由。不要把独立核查改写成原 lead 的附加交付。"),
-      taskFile: z.string().optional().describe("模板文件路径, 必须位于 `~/.wezard/templates/` 下 (`~` 展开)。给了它, 投递正文由 daemon 用模板 + `params` 展开; 与 `task` 至少给一个。"),
+      taskFile: z.string().optional().describe("模板文件路径, **相对你的工作区**的相对路径 (绝对路径与 `~` 开头一律 400)。给了它, 投递正文由 daemon 用模板 + `params` 展开; 与 `task` 至少给一个。"),
       params: z.record(z.string()).optional().describe("`taskFile` 模板里 `{{name}}` 占位符的参数值 (全为字符串)。缺参数 / 多余参数都会被 400 拒绝。"),
       return: z.enum(["self", "transfer", "detach", "none"]).optional().describe(RETURN_DOC + " dispatch 不能配 lead:true 用 transfer。"),
       for: z.string().optional().describe(FOR_DOC),
@@ -890,7 +890,7 @@ server.registerTool(
   },
   async (a) => {
     if (a.task === undefined && a.taskFile === undefined)
-      return fail("dispatch: `task` 与 `taskFile` 至少给一个 (后者是 `~/.wezard/templates/` 下的模板, 由 daemon 展开)");
+      return fail("dispatch: `task` 与 `taskFile` 至少给一个 (后者是相对你工作区的模板路径, 由 daemon 展开)");
     return unwrap("dispatch", await daemonPost("/dispatch", a));
   },
 );

@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Changed
+- `taskFile` 的路径语义重定 (推翻 2.8.2 的模板根设计): 模板不再要求位于 `~/.wezard/templates/`, 也不再有 daemon 启动时的 mkdir 能力握手 —— `taskFile` 是**相对调用方工作区**的相对路径, 绝对路径与 `~` 开头一律 400 (不展开、不接受); 解析基点取调用方 session 的 cwd (拿不到时退 daemon 进程 cwd), realpath 之后必须仍在该工作区子树内 (`../` 与软链逃到工作区外被拒)。其余校验 (64KB / 普通文件 / UTF-8 / 参数严格相等 / 行首 `<` 转义 / 首字符 `/` / TOCTOU 同一 400) 不变; `templateRef.path` 相应变为相对调用方工作区的路径。
+
 ### Fixed
 - `dispatch` 白板 spawn 分支 (以及点名/自动选中已有 wizard 的投递分支) 失败时不再用选人理由覆盖真实错误: 此前 `bearAs` 起 wizard 失败或 `tell` 投递失败, 回包的 `reason` 一律被改写成选人理由 (如「你要了新的」), 真实原因全丢。现在失败时 `reason` 是真实错误, 选人理由挪到 `why`; 成功时 `reason` 仍是选人理由, 不变。
 

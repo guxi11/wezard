@@ -40,9 +40,9 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { randomBytes } from "node:crypto";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createPaneGuards, GuardPrerequisiteError } from "./pane-guards.mjs";
 import { normalizeTask } from "../../dist/shared/task-file.js";
 import { bindCliBackends, backendForPath } from "../../dist/shared/cli-backends.js";
@@ -1069,35 +1069,46 @@ const cases = {
     };
   } },
 
-  // 模板派活的失败面 (taskFile spec §6/§8): 入口展开失败 = 400, 且不 bearAs、不开行 ——
-  // 调用方回退内联重发, 一问不丢。旧 daemon (未 reload) 不认 taskFile → "task is required",
-  // 按词汇探测的惯例 SKIP; reload 后才全断言。
+  // 模板派活的失败面 (taskFile spec): 入口展开失败 = 400, 且不 bearAs、不开行 ——
+  // 调用方回退内联重发, 一问不丢。taskFile 是相对调用方工作区的相对路径 (绝对/~ 拒)。
+  // 旧 daemon (未 reload) 不认 taskFile → "task is required", 按词汇探测的惯例 SKIP;
+  // reload 后才全断言。模板 fixture 落在本目录 (调用方工作区子树内), 相对路径传参。
   "tpl-fail-no-wizard": { direction: "runtime", summary: "taskFile dispatch failure yields 400 with no wizard/row", names: [], run: async () => {
     const probe = await post("/dispatch", { target: root.target, taskFile: "/nonexistent/rr-probe.md" });
     if ((probe.reason ?? "").includes("task is required"))
       return { pass: true, why: "SKIP: resident daemon 未 reload (不认 taskFile), reload 后重跑" };
-    if ((probe.reason ?? "").includes("templates disabled"))
-      return { pass: true, why: "SKIP: 模板根不存在 (能力关闭), 属设计内" };
-    if (probe.ok || !(probe.reason ?? "").includes("template"))
-      return { pass: false, why: `探测异常: ok=${probe.ok} reason=${probe.reason}` };
+    if (probe.ok || !(probe.reason ?? "").includes("must be relative"))
+      return { pass: false, why: `探测异常 (期望新语义拒绝绝对路径): ok=${probe.ok} reason=${probe.reason}` };
     const n = nonce();
-    const tpl = join(STATE, "templates", `rr-tpl-${n}.md`);
-    writeFileSync(tpl, "[rr-tpl]\n{{header}}\n");
+    const here = dirname(fileURLToPath(import.meta.url));
+    const tplAbs = join(here, `rr-tpl-${n}.md`);
+    // 相对调用方 (root, 继承跑本脚本的 wizard 的工作区 = 本仓) 的 taskFile。
+    const tplRel = relative(process.cwd(), tplAbs);
+    const outsideAbs = join(tmpdir(), `rr-outside-${n}.md`);
+    writeFileSync(tplAbs, "[rr-tpl]\n{{header}}\n");
+    writeFileSync(outsideAbs, "outside\n");
     const kidsOfRoot = () => Object.values(readJson("wizards.json")).filter((x) => x.parent === root.target).length;
     const before = { kids: kidsOfRoot(), rows: (await routeRows()).length };
     try {
-      const miss = await post("/dispatch", { target: root.target, taskFile: tpl, spawn: true }); // 缺参数
-      const outside = await post("/dispatch", { target: root.target, taskFile: "/etc/hosts", spawn: true }); // 根外绝对路径
+      const miss = await post("/dispatch", { target: root.target, taskFile: tplRel, spawn: true }); // 缺参数
+      const escape = await post("/dispatch", { target: root.target, taskFile: relative(process.cwd(), outsideAbs), spawn: true }); // ../ 逃出工作区
+      const absolute = await post("/dispatch", { target: root.target, taskFile: outsideAbs, spawn: true }); // 绝对路径
+      const tilde = await post("/dispatch", { target: root.target, taskFile: "~/rr-tpl.md", spawn: true }); // ~ 开头
       const empty = await post("/dispatch", { target: root.target, spawn: true }); // 空 task 且缺 taskFile
       const after = { kids: kidsOfRoot(), rows: (await routeRows()).length };
       return {
         pass: !miss.ok && (miss.reason ?? "").includes("missing params")
-          && !outside.ok && (outside.reason ?? "").includes("outside template root")
+          && !escape.ok && (escape.reason ?? "").includes("outside caller workspace")
+          && !absolute.ok && (absolute.reason ?? "").includes("must be relative")
+          && !tilde.ok && (tilde.reason ?? "").includes("must be relative")
           && !empty.ok && (empty.reason ?? "").includes("task is required")
           && after.kids === before.kids && after.rows === before.rows,
-        why: `缺参=${miss.reason} · 根外=${outside.reason} · 双空=${empty.reason} · root 子数 ${before.kids}→${after.kids} · 行数 ${before.rows}→${after.rows}`,
+        why: `缺参=${miss.reason} · 越界=${escape.reason} · 绝对=${absolute.reason} · ~=${tilde.reason} · 双空=${empty.reason} · root 子数 ${before.kids}→${after.kids} · 行数 ${before.rows}→${after.rows}`,
       };
-    } finally { rmSync(tpl, { force: true }); }
+    } finally {
+      rmSync(tplAbs, { force: true });
+      rmSync(outsideAbs, { force: true });
+    }
   } },
 
   // 模板派活 + transfer: taskFile 单独成立 (task 不陪跑), 投递的是**展开全文** ——
@@ -1107,15 +1118,15 @@ const cases = {
     const probe = await post("/dispatch", { target: root.target, taskFile: "/nonexistent/rr-probe.md" });
     if ((probe.reason ?? "").includes("task is required"))
       return { pass: true, why: "SKIP: resident daemon 未 reload (不认 taskFile), reload 后重跑" };
-    if ((probe.reason ?? "").includes("templates disabled"))
-      return { pass: true, why: "SKIP: 模板根不存在 (能力关闭), 属设计内" };
-    if (probe.ok || !(probe.reason ?? "").includes("template"))
-      return { pass: false, why: `探测异常: ok=${probe.ok} reason=${probe.reason}` };
+    if (probe.ok || !(probe.reason ?? "").includes("must be relative"))
+      return { pass: false, why: `探测异常 (期望新语义拒绝绝对路径): ok=${probe.ok} reason=${probe.reason}` };
     const n = nonce();
-    const tpl = join(STATE, "templates", `rr-tpl2-${n}.md`);
+    const here = dirname(fileURLToPath(import.meta.url));
+    const tplAbs = join(here, `rr-tpl2-${n}.md`);
+    const tplRel = relative(process.cwd(), tplAbs);
     const header = `h${n}`, question = `q${n}`;
     const full = `[rr-tpl] ${header}\n${question}\n不要调用任何工具, 直接回复一行: RESULT: tpl-${header}`;
-    writeFileSync(tpl, "[rr-tpl] {{header}}\n{{question}}\n不要调用任何工具, 直接回复一行: RESULT: tpl-{{header}}");
+    writeFileSync(tplAbs, "[rr-tpl] {{header}}\n{{question}}\n不要调用任何工具, 直接回复一行: RESULT: tpl-{{header}}");
     let execName = "";
     try {
       await spawn("rr-tpl-a");
@@ -1124,8 +1135,8 @@ const cases = {
       await post("/peers/tell", { target: kids.get("rr-tpl-a"), name: root.name, priority: "now", text: `${SLEEP(90)}, 然后回复一行: RESULT: root-${n}` });
       const owed = await until(() => liveRowOf(kids.get("rr-tpl-a"), root.target), 30_000);
       if (!owed) return { pass: false, why: "前提没成立: root 没接下 rr-tpl-a 的问话 (行没开)" };
-      const d = await post("/dispatch", { target: root.target, return: "transfer", spawn: true, tier: "mini", taskFile: tpl, params: { header, question } });
-      if (!d.ok) return { pass: false, why: `dispatch 失败: ${d.reason}` };
+      const d = await post("/dispatch", { target: root.target, return: "transfer", spawn: true, tier: "mini", taskFile: tplRel, params: { header, question } });
+      if (!d.ok) return { pass: false, why: `dispatch 失败: ${d.reason} (taskFile=${tplRel})` };
       execName = String(d.name ?? "");
       const moved = await until(async () => { const r = (await rowsOfPair(kids.get("rr-tpl-a"), root.target)).at(-1); return r && r.owner !== root.target && r; }, 30_000);
       if (!moved) return { pass: false, why: "transfer 没落: 行的 owner 还是 root" };
@@ -1137,10 +1148,10 @@ const cases = {
       const toAsker = moved.receiver?.kind === "wizard" && moved.receiver?.to === kids.get("rr-tpl-a");
       return {
         pass: !!uq && toAsker && settledAsk?.outcome?.status === "done" && (settledAsk.outcome.body ?? "").includes(`tpl-${header}`) && got.some((r) => (r.body ?? "").includes(`tpl-${header}`)),
-        why: `userQuery=全文 ${!!uq} · receiver 仍是提问方 ${toAsker} · 终态=${settledAsk?.outcome?.status ?? "未落定"} 含结论=${(settledAsk?.outcome?.body ?? "").includes(`tpl-${header}`)} · 提问方回执=${got.length} 份 (执行者 ${execName || exec})`,
+        why: `userQuery=全文 ${!!uq} · receiver 仍是提问方 ${toAsker} · 终态=${settledAsk?.outcome?.status ?? "未落定"} 含结论=${(settledAsk?.outcome?.body ?? "").includes(`tpl-${header}`)} · 提问方回执=${got.length} 份 (执行者 ${execName || "未知名"}, taskFile=${tplRel})`,
       };
     } finally {
-      rmSync(tpl, { force: true });
+      rmSync(tplAbs, { force: true });
       // dispatch 自动取名的执行者是 root 的孩子, 不在 kids 表里 —— 显式收掉, 不留活 pane。
       if (execName) await post("/wizard/stop", { target: root.target, name: execName, mode: "end", forget: true }).catch(() => undefined);
     }

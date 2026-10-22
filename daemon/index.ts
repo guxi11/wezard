@@ -1,6 +1,6 @@
 import { wxMarkdown } from "../shared/wx-text.js";
 // Daemon entry. Resident process — exits only on signal or fatal WS auth failure.
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
 import { loadOrCreateSvrToken } from "../shared/svr-token.js";
@@ -99,7 +99,7 @@ import { loadJobStore, dutyLine, awaitingAccept, stalledRoots, shelvedRoots, nud
 import type { MemberRole } from "../shared/world.js";
 import { cacheTouchMs, cacheTtlSec, clipMiddle, contextMaterials, firstStamp, parseClosing, stripClosingMark, stripForChat, lastContextTokens, lastExchange, lastModel, openingTurn, replyClosedBefore, talkTurns, turnsSince, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { expandHome } from "../shared/paths.js";
-import { expandTask, TemplateError, TEMPLATE_ROOT, type ExpandedTask, type TemplateRef } from "../shared/task-template.js";
+import { expandTask, TemplateError, type ExpandedTask, type TemplateRef } from "../shared/task-template.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { createWorkflowNodes, type FileVersion, type NodeAttempt } from "./workflow-nodes.js";
 import { loadWorkflowPlans, createWorkflowPlanRunner, type PlanPermit } from "./workflow-plans.js";
@@ -161,11 +161,6 @@ const main = async (): Promise<void> => {
   // attach / tmux spawn.
   const { primary, backends } = bindCliBackends({ ...cfg.wrc, projectsDirOverride: cfg.wrc.mirror.projectsDir });
   bindCodexStateDir(cfg.daemon.stateDir);
-  // 模板能力握手 (§8): 管家以「根目录存在」为切 taskFile 的唯一开关, 所以这个 mkdir
-  // 必须与入口展开**同车**落地 —— 只建目录不接展开, 管家切过去就全 400。失败只当
-  // 能力关闭 (expandTask 对缺失的根报 templates disabled), 绝不能拦 daemon 启动,
-  // 也不喷栈。
-  try { mkdirSync(expandHome(TEMPLATE_ROOT), { recursive: true, mode: 0o700 }); } catch { /* 静默是故意的 */ }
   log.info({ primary: primary.name, bin: primary.bin, backends: backends.map((b) => b.name) }, "cli backends bound");
 
   // A killed-on-timeout tmux call is the ONLY externally visible symptom of a
@@ -2216,6 +2211,10 @@ const main = async (): Promise<void> => {
       `这一笔 (${f}) 已整件交给 ${displayName(target)}: 它的结论 (含 NEED / 失败) 直接回你服务的上游, 不回你 —— 本轮静默收口, 别再为这件派活或对人说话`;
     /** dispatch 在入口冻结的那一轮: 控制权快照、链头, 与回执去向 (planReturn 算好的)。 */
     type ActorOrigin = { reuseCheck?: (target: string, ownEvent?: string) => string; authority: ReturnType<typeof controlSnapshot>; asker?: Asker; plan: { op: ReturnOp; serves?: EventId } };
+    /** taskFile 模板的解析基点: 调用方工作区 —— session 的 runningCwd (冷会话落
+     *  defaultCwd, 见 mirror-bridge 的 getCwd), 都为空才退 daemon 进程 cwd。模板
+     *  路径相对它解析, realpath 后必须仍在它子树内 (防 ../ 与软链逃出工作区)。 */
+    const callerBaseOf = (self: string): string => m.getCwd(self).runningCwd || m.getCwd(self).defaultCwd || process.cwd();
     const tellPeerAsInner = async (self: string, body: PeerBody, extra = "", planned?: PlanPermit, actor?: ActorOrigin): Promise<Reply> => {
       const authority = actor?.authority ?? (!planned ? controlSnapshot(self) : undefined);
       const tb = body as { text?: string; taskFile?: string; params?: Record<string, string>; templateRef?: TemplateRef };
@@ -2226,7 +2225,7 @@ const main = async (): Promise<void> => {
       // 入口已展开过的正文原样走, 不重复读文件。
       if (!text.trim() && (tb.taskFile ?? "") !== "") {
         try {
-          const expanded = await expandTask({ taskFile: tb.taskFile!, params: tb.params ?? {} });
+          const expanded = await expandTask({ taskFile: tb.taskFile!, params: tb.params ?? {} }, { baseDir: callerBaseOf(self) });
           text = expanded.text;
           templateRef = expanded.templateRef;
         } catch (e) {
@@ -3399,7 +3398,7 @@ const main = async (): Promise<void> => {
       let templateRef: TemplateRef | undefined;
       if ((b.taskFile ?? "") !== "") {
         let expanded: ExpandedTask;
-        try { expanded = await expandTask({ taskFile: b.taskFile!, params: b.params ?? {} }); }
+        try { expanded = await expandTask({ taskFile: b.taskFile!, params: b.params ?? {} }, { baseDir: callerBaseOf(self) }); }
         catch (e) { json(res, 400, { ok: false, reason: e instanceof TemplateError ? e.message : `template expansion failed: ${errText(e)}` }); return; }
         text = expanded.text;
         task = clipLine((b.params?.header ?? "").toString().trim() || expanded.text, 120);
