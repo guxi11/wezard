@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- `dispatch` 白板 spawn 分支 (以及点名/自动选中已有 wizard 的投递分支) 失败时不再用选人理由覆盖真实错误: 此前 `bearAs` 起 wizard 失败或 `tell` 投递失败, 回包的 `reason` 一律被改写成选人理由 (如「你要了新的」), 真实原因全丢。现在失败时 `reason` 是真实错误, 选人理由挪到 `why`; 成功时 `reason` 仍是选人理由, 不变。
+
 ## [2.8.2] - 2026-10-22
 
 ### Added

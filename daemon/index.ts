@@ -3383,6 +3383,10 @@ const main = async (): Promise<void> => {
     // 派活收成一步 (见 route.decide): 查候选 → 过成本门控 → 转给已有的或按档白板 spawn →
     // tell_peer 投出去, 回决定与理由。默认决定由守护进程算; 管家不同意就 `to` 点名、
     // `force` 越过冷门控、`spawn:true` 硬要新的 —— 推翻要显式说。
+    /** dispatch 回包的 reason: 投成了是选人理由; 投递 / 起 wizard 失败时 reason 必须是真实错误,
+     *  选人理由降到 why —— 否则「你要了新的」会盖掉 bearAs / tell 的失败原因。 */
+    const dispatchReason = (ok: boolean, real: unknown, why: string): { reason: string; why?: string } =>
+      ok ? { reason: why } : { reason: String(real ?? "delivery failed (no reason)"), why };
     http.register("POST /dispatch", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
@@ -3501,7 +3505,7 @@ const main = async (): Promise<void> => {
         // 自动选中的被冷门控 (decide 用名册的活动时刻, 门控用 transcript 的, 口径差一点) 或方向闸 (它归别人管 / 是借来的专家) 退回: 改走 spawn; 点名的不改。
         if (!(!to && (t.body.gated === "cold" || t.body.gated === "direction" || t.body.gated === "reuse"))) {
           settleRoot(t.status === 200);
-          json(res, t.status, withRoot({ ...t.body, decision: "existing", reason: d.why, ...(shown.length ? { candidates: shown } : {}) }));
+          json(res, t.status, withRoot({ ...t.body, decision: "existing", ...dispatchReason(t.status === 200, t.body.reason, d.why), ...(shown.length ? { candidates: shown } : {}) }));
           return;
         }
         diagnostics.deliveryFallback = String(t.body.reason);
@@ -3513,7 +3517,7 @@ const main = async (): Promise<void> => {
       // 空 name 交给 bearAs / claimSlot 按持久序号自动取名避重, 不当作显式点名复用旧记录。
       const tier = taskTier;
       const born = await bearAs(self, { inherit: false, name, description, tier, ...(lead ? { lead: true } : {}) } as PeerBody, undefined, dispatchOrigin?.authority);
-      if (born.status !== 200) { settleRoot(false); json(res, born.status, { ...born.body, diagnostics, decision: "spawn", reason: d.why }); return; }
+      if (born.status !== 200) { settleRoot(false); json(res, born.status, { ...born.body, diagnostics, decision: "spawn", ...dispatchReason(false, born.body.reason, d.why) }); return; }
       if (!controlValid(self, dispatchOrigin.authority)) { settleRoot(false); json(res, 409, { ok: false, decision: "spawn", reason: "dispatch source turn changed during spawn; task remains with original source turn" }); return; }
       // 宪章里只有层级规矩, 打法随信封带 (宪章每轮都在上下文里, 打法只这一件活用得上)。
       const t = await tell(String(born.body.name), text, lead ? renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : "");
@@ -3523,7 +3527,7 @@ const main = async (): Promise<void> => {
       json(res, t.status, withRoot({
         ...t.body,
         decision: "spawn",
-        reason: d.why,
+        ...dispatchReason(t.status === 200, t.body.reason, d.why),
         tier,
         ...(born.body.model ? { model: born.body.model } : {}),
         ...(born.body.effort ? { effort: born.body.effort } : {}),
