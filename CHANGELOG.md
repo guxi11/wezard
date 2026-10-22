@@ -5,7 +5,7 @@
 ## [Unreleased]
 
 ### Added
-- 空白备用池: 每次全新冷 spawn 成功后在 `<prefix>-warm` 里后台冷启动一个同 (工作区, 后端, 模型, effort) 的空白 CLI 备用, 下次同键 spawn 直接领用 (校验 pane / CLI 进程 / 输入框 / 无模态后整窗搬进主 session), 领走即补。每键 ≤2、全局 ≤`wrc.sparePool.maxTotal` (默认 4, 跨键 LRU)、闲置 1h 回收、启动失败不重试; 未命中或校验失败照旧冷启动。每个备用常驻约 1.2GB (含 MCP 子进程)。`wrc.sparePool.enabled=false` 或 `WEZARD_SPARE_POOL=0` 关闭。
+- 空白备用池: 每次全新冷 spawn 成功后在 `<prefix>-warm` 里后台冷启动一个同 (工作区, 后端, 模型, effort) 的空白 CLI 备用, 下次同键 spawn 直接领用 (校验 pane / CLI 进程 / 输入框 / 无模态后整窗搬进主 session), 领走即补。每键 ≤2、全局 ≤`wrc.sparePool.maxTotal` (默认 2, 跨键 LRU)、闲置 1h 回收、启动失败不重试; 未命中或校验失败照旧冷启动。每个备用常驻约 1.2GB (含 MCP 子进程)。`wrc.sparePool.enabled=false` 或 `WEZARD_SPARE_POOL=0` 关闭。
 
 ### Changed
 - 宪章不再经 `--append-system-prompt` 进系统提示 (claude/codebuddy 冷启动省 ~1.4s), 改为 `<system-reminder wezard="charter">` 顶在该 pane 首条非斜杠注入的最前; `/new`、备用领用、死 pane 重生、`/clear` 与压缩后都会重挂, 分身开场白带子宪章取代继承的身份。read_chat / peek_peer / rolepage 剥离或折叠, 不进群聊气泡、不进问话行。codex 仍走 `developer_instructions`。

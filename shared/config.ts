@@ -191,7 +191,7 @@ const Wrc = z.object({
     .object({
       enabled: z.boolean().default(true).describe("养空白备用 CLI, 同键的新会话直接领用 (另可用 WEZARD_SPARE_POOL=0 关掉)"),
       perKey: z.number().int().positive().default(2).describe("同一个 (cwd, 后端, model, effort) 最多养几条备用"),
-      maxTotal: z.number().int().nonnegative().default(4).describe("全机备用总上限; 超出按最久未用跨键淘汰"),
+      maxTotal: z.number().int().nonnegative().default(2).describe("全机备用总上限; 超出按最久未用跨键淘汰。默认 2: 每个备用连 MCP 子进程实测常驻 ~1.27GB, 本机无 swap, 4 个就是 ~5GB"),
       ttlMin: z.number().int().positive().default(60).describe("一条备用最多养多少分钟, 到点收掉且不补"),
     })
     .default({})
