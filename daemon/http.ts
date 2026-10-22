@@ -1,8 +1,10 @@
 // Local control HTTP — talks to hooks, slash commands, MCP server.
 // Bound to 127.0.0.1; trust = "anyone with loopback access".
 // Endpoints intentionally tiny & sync-friendly.
+import { existsSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { URL } from "node:url";
+import { dirname, join } from "node:path";
+import { URL, fileURLToPath } from "node:url";
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
 import { expandHome } from "../shared/paths.js";
@@ -15,6 +17,17 @@ interface Ctx {
   log: Logger;
   sourcePath: string;
 }
+
+/** 外部调用方的能力判据 (/status): 按名字查有没有, 别靠盘上目录之类的副作用猜。 */
+const CAPABILITIES = ["dispatch.taskFile"] as const;
+
+// 加载时读一次: 报的是正在跑的这份代码的版本, 不是盘上刚 pull 下来的。源码跑 daemon/ → ../,
+// 编译后与 npm 安装 dist/daemon/ → ../../ (同 web-assets 的双候选)。
+const HERE = dirname(fileURLToPath(import.meta.url));
+const VERSION = ((): string => {
+  const p = [join(HERE, "..", "package.json"), join(HERE, "..", "..", "package.json")].find(existsSync);
+  try { return p ? String(JSON.parse(readFileSync(p, "utf8")).version ?? "") : ""; } catch { return ""; }
+})();
 
 type Handler = (req: IncomingMessage, res: ServerResponse, url: URL, ctx: Ctx) => Promise<void> | void;
 
@@ -43,6 +56,8 @@ const routes: Record<string, Handler> = {
     const bots = ws.bots();
     json(res, 200, {
       ok: true,
+      version: VERSION,
+      capabilities: CAPABILITIES,
       wsConnected: ws.client.isConnected,
       ws: ws.status(),
       backend: cfg.wrc.defaultCli,

@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Added
+- `GET /status` 新增 `capabilities: string[]` (本版含 `dispatch.taskFile`) 与 `version` (正在跑的 daemon 的版本)。外部调用方以 `capabilities` 含 `dispatch.taskFile` 作为切换 taskFile 派活的判据 —— `~/.wezard/templates/` 目录存在与否不再有任何意义 (2.8.3 起新代码不读它, 存量目录会是假阳性)。
+
 ### Changed
 - `taskFile` 的路径语义重定 (推翻 2.8.2 的模板根设计): 模板不再要求位于 `~/.wezard/templates/`, 也不再有 daemon 启动时的 mkdir 能力握手 —— `taskFile` 是**相对调用方工作区**的相对路径, 绝对路径与 `~` 开头一律 400 (不展开、不接受); 解析基点取调用方 session 的 cwd (拿不到时退 daemon 进程 cwd), realpath 之后必须仍在该工作区子树内 (`../` 与软链逃到工作区外被拒)。其余校验 (64KB / 普通文件 / UTF-8 / 参数严格相等 / 行首 `<` 转义 / 首字符 `/` / TOCTOU 同一 400) 不变; `templateRef.path` 相应变为相对调用方工作区的路径。
 
