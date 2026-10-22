@@ -716,9 +716,16 @@ export const renderReceiptEnvelope = (
   turn?: string,
   route?: ReceiptRoute & { pending?: number },
   chatKey?: string,
-): string =>
-  renderReminder(envelopeAttrs.receipt(from, chat, job, status, turn, route, chatKey), [
-    "只处理回执、没有新的结果或风险要交代时，终句必须只写一行 QUIET（精确大写，不加称呼或解释）。QUIET 只表示已读，不代表主任务完成，也不代表反问或风险已通知；有待处理 NEED 要先答它或交代阻塞。明确还在等依赖时用 WAIT: 说明，不要写 RESULT。回执轮 notify 的正式报告须带 RESULT:，反问带 NEED:；普通文字只作进度，不代表事实已报告。",
+): string => {
+  // 这份结论有没有人等着听: 回给上游 wizard (up) / 落回那个群 (chat) / 迟到但有追述去处。
+  // QUIET 只在「没人等着听」时才是一个合法收口 —— 否则它就是把一份已经到了的结论丢掉:
+  // 发起方那边记的是「已送达」, 人这边永远看不出发生过什么 (2026-10-22 .teammate 收到
+  // .wezard 的答案后按老措辞写了 QUIET, 群里和私聊里都没留下一个字)。
+  const speaks = chat !== undefined || route?.up === true || (route?.late === true && !!route.retellTo);
+  return renderReminder(envelopeAttrs.receipt(from, chat, job, status, turn, route, chatKey), [
+    speaks
+      ? "这一份的结论有人等着听: 终句写清做成了什么、没做成什么 (常用 `RESULT:` 起头), 用你自己的话, 不复述原话。**不要只写 QUIET** —— QUIET 只表示已读, 会把这份结论连同它带来的进展一起吞掉。还在等别的依赖就写 `WAIT: <在等什么>`, 缺信息写 `NEED: <要什么>`, 有待处理的 NEED 先答它。回执轮 notify 的正式报告须带 `RESULT:`; 普通文字只作进度, 不代表事实已报告。"
+      : "只处理回执、没有新的结果或风险要交代时，终句必须只写一行 QUIET（精确大写，不加称呼或解释）。QUIET 只表示已读，不代表主任务完成，也不代表反问或风险已通知；有待处理 NEED 要先答它或交代阻塞。明确还在等依赖时用 WAIT: 说明，不要写 RESULT。回执轮 notify 的正式报告须带 RESULT:，反问带 NEED:；普通文字只作进度，不代表事实已报告。",
     ...(status === "done"
       ? ["这是**回执**: 它那一轮干完了, 下面是它的结论 —— 不是人说的, 也不是新派给你的活。"]
       : status === "need"
@@ -765,6 +772,7 @@ export const renderReceiptEnvelope = (
           : [`工单**还差 ${job.total - job.done} 份**: 先把这一份记住 (或落到文件里), 不要现在汇总、也不要向人汇报进度; 等最后一份到了会明确告诉你「全部到齐」。`]
       : []),
   ]);
+};
 
 const FAILED: Record<Exclude<Terminal, "done">, string> = {
   timeout: "等到期限它还没答完",

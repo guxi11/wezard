@@ -456,7 +456,11 @@ const SYNTH: ReadonlySet<Terminal> = new Set<Terminal>(["timeout", "silent", "de
  *  - `canceled` 一律不收: 那一笔是被人 / 随工单收掉的, 子树整支 TERMINATE (§4.2)。 */
 const retellOps = (table: Table, row: Route, verdict: FinalVerdict): Op[] => {
   const o = row.outcome;
-  if (verdict.error || !o || o.status === "canceled" || contentRev(verdict.text) === o.rev) return [];
+  // 「同内容重放 = 无 op」按**正文**判: 有 report 的定论 `o.rev` 是执行版本 (见 reportOf), 不是
+  // 正文指纹 —— 拿它跟 contentRev(text) 比永远不等, 于是同一份结论从两轮各报一次 (re 腿、被切断
+  // 那轮的补交) 会各投一份回执, 收方被同一个结论糊两次 (2026-10-22 edf7056.1: 两份 rcpt 相隔 18s,
+  // 第二份正落进它已经跑起来的输入框)。
+  if (verdict.error || !o || o.status === "canceled" || verdict.text.trim() === o.body.trim()) return [];
   const kind = finalKind(table, row.event, verdict.text);
   const take = kind === "result" || (kind === "done" && SYNTH.has(o.status));
   const outcome = reportedOutcome(row, verdict);
