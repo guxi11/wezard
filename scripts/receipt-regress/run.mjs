@@ -1069,6 +1069,83 @@ const cases = {
     };
   } },
 
+  // 模板派活的失败面 (taskFile spec §6/§8): 入口展开失败 = 400, 且不 bearAs、不开行 ——
+  // 调用方回退内联重发, 一问不丢。旧 daemon (未 reload) 不认 taskFile → "task is required",
+  // 按词汇探测的惯例 SKIP; reload 后才全断言。
+  "tpl-fail-no-wizard": { direction: "runtime", summary: "taskFile dispatch failure yields 400 with no wizard/row", names: [], run: async () => {
+    const probe = await post("/dispatch", { target: root.target, taskFile: "/nonexistent/rr-probe.md" });
+    if ((probe.reason ?? "").includes("task is required"))
+      return { pass: true, why: "SKIP: resident daemon 未 reload (不认 taskFile), reload 后重跑" };
+    if ((probe.reason ?? "").includes("templates disabled"))
+      return { pass: true, why: "SKIP: 模板根不存在 (能力关闭), 属设计内" };
+    if (probe.ok || !(probe.reason ?? "").includes("template"))
+      return { pass: false, why: `探测异常: ok=${probe.ok} reason=${probe.reason}` };
+    const n = nonce();
+    const tpl = join(STATE, "templates", `rr-tpl-${n}.md`);
+    writeFileSync(tpl, "[rr-tpl]\n{{header}}\n");
+    const kidsOfRoot = () => Object.values(readJson("wizards.json")).filter((x) => x.parent === root.target).length;
+    const before = { kids: kidsOfRoot(), rows: (await routeRows()).length };
+    try {
+      const miss = await post("/dispatch", { target: root.target, taskFile: tpl, spawn: true }); // 缺参数
+      const outside = await post("/dispatch", { target: root.target, taskFile: "/etc/hosts", spawn: true }); // 根外绝对路径
+      const empty = await post("/dispatch", { target: root.target, spawn: true }); // 空 task 且缺 taskFile
+      const after = { kids: kidsOfRoot(), rows: (await routeRows()).length };
+      return {
+        pass: !miss.ok && (miss.reason ?? "").includes("missing params")
+          && !outside.ok && (outside.reason ?? "").includes("outside template root")
+          && !empty.ok && (empty.reason ?? "").includes("task is required")
+          && after.kids === before.kids && after.rows === before.rows,
+        why: `缺参=${miss.reason} · 根外=${outside.reason} · 双空=${empty.reason} · root 子数 ${before.kids}→${after.kids} · 行数 ${before.rows}→${after.rows}`,
+      };
+    } finally { rmSync(tpl, { force: true }); }
+  } },
+
+  // 模板派活 + transfer: taskFile 单独成立 (task 不陪跑), 投递的是**展开全文** ——
+  // 接手方那一轮的 userQuery 逐字等于展开结果; transfer 后行的 receiver 仍是提问方,
+  // 它的终句 (含结论) 直达提问方, 交出方 (root) 静默。旧 daemon 按 SKIP 报。
+  "tpl-transfer": { direction: "runtime", summary: "taskFile+transfer delivers expanded text and routes final to asker", names: ["rr-tpl-a"], run: async () => {
+    const probe = await post("/dispatch", { target: root.target, taskFile: "/nonexistent/rr-probe.md" });
+    if ((probe.reason ?? "").includes("task is required"))
+      return { pass: true, why: "SKIP: resident daemon 未 reload (不认 taskFile), reload 后重跑" };
+    if ((probe.reason ?? "").includes("templates disabled"))
+      return { pass: true, why: "SKIP: 模板根不存在 (能力关闭), 属设计内" };
+    if (probe.ok || !(probe.reason ?? "").includes("template"))
+      return { pass: false, why: `探测异常: ok=${probe.ok} reason=${probe.reason}` };
+    const n = nonce();
+    const tpl = join(STATE, "templates", `rr-tpl2-${n}.md`);
+    const header = `h${n}`, question = `q${n}`;
+    const full = `[rr-tpl] ${header}\n${question}\n不要调用任何工具, 直接回复一行: RESULT: tpl-${header}`;
+    writeFileSync(tpl, "[rr-tpl] {{header}}\n{{question}}\n不要调用任何工具, 直接回复一行: RESULT: tpl-{{header}}");
+    let execName = "";
+    try {
+      await spawn("rr-tpl-a");
+      // rr-tpl-a 以发话方身份问 root 一件慢活 → root 欠它一笔; root 睡着期间把那一笔
+      // transfer 给模板派出的新执行者 (与群管家的 qa 派发同一条链)。
+      await post("/peers/tell", { target: kids.get("rr-tpl-a"), name: root.name, priority: "now", text: `${SLEEP(90)}, 然后回复一行: RESULT: root-${n}` });
+      const owed = await until(() => liveRowOf(kids.get("rr-tpl-a"), root.target), 30_000);
+      if (!owed) return { pass: false, why: "前提没成立: root 没接下 rr-tpl-a 的问话 (行没开)" };
+      const d = await post("/dispatch", { target: root.target, return: "transfer", spawn: true, tier: "mini", taskFile: tpl, params: { header, question } });
+      if (!d.ok) return { pass: false, why: `dispatch 失败: ${d.reason}` };
+      execName = String(d.name ?? "");
+      const moved = await until(async () => { const r = (await rowsOfPair(kids.get("rr-tpl-a"), root.target)).at(-1); return r && r.owner !== root.target && r; }, 30_000);
+      if (!moved) return { pass: false, why: "transfer 没落: 行的 owner 还是 root" };
+      const exec = moved.owner;
+      // userQuery 逐字 = 展开全文 (rolepage / read_chat / transcript 三方一致的锚点)。
+      const uq = await until(() => turnsOf(exec).find((t) => t.userQuery === full), 60_000);
+      const settledAsk = await until(async () => { const r = (await rowsOfPair(kids.get("rr-tpl-a"), root.target)).at(-1); return settled(r) && r; }, 6 * 60_000);
+      const got = await waitReceipts(kids.get("rr-tpl-a"), undefined, 1, 90_000);
+      const toAsker = moved.receiver?.kind === "wizard" && moved.receiver?.to === kids.get("rr-tpl-a");
+      return {
+        pass: !!uq && toAsker && settledAsk?.outcome?.status === "done" && (settledAsk.outcome.body ?? "").includes(`tpl-${header}`) && got.some((r) => (r.body ?? "").includes(`tpl-${header}`)),
+        why: `userQuery=全文 ${!!uq} · receiver 仍是提问方 ${toAsker} · 终态=${settledAsk?.outcome?.status ?? "未落定"} 含结论=${(settledAsk?.outcome?.body ?? "").includes(`tpl-${header}`)} · 提问方回执=${got.length} 份 (执行者 ${execName || exec})`,
+      };
+    } finally {
+      rmSync(tpl, { force: true });
+      // dispatch 自动取名的执行者是 root 的孩子, 不在 kids 表里 —— 显式收掉, 不留活 pane。
+      if (execName) await post("/wizard/stop", { target: root.target, name: execName, mode: "end", forget: true }).catch(() => undefined);
+    }
+  } },
+
   // NEED → re 答复 → done: 中途那份 status=need 且不算定论, 续问沿用**同一行** (两轮都服务它), 终态 done。
   need: { direction: "runtime", summary: "NEED resumes the same event to a final result", names: ["rr-n", "rr-ns"], run: async () => {
     const n = nonce();

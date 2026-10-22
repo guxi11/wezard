@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Added
+- `dispatch` / `tell_peer` 支持「模板文件 + 参数」派活: 新增 `taskFile` (`~/.wezard/templates/` 下, 支持子目录) 与 `params`, daemon 在入口展开成投递全文 —— 调用方的工具 input/output 不再逐字抄长协议正文。校验全在开行/起 wizard 之前: 根外路径 (含软链/`..` 越界)、非普通文件、>64KB、坏 UTF-8、缺/多参数、参数行首 `<` 转义 (防信封劫持)、展开后空或以 `/` 开头, 一律 400 并带人话 reason, 调用方可回退内联重发。`taskFile` 可单独成立 (`task` 不必陪跑); 给了 `taskFile` 时选人/选档/description 用 `clipLine(params.header ?? 展开全文, 120)` 派生。`payload.text` 存展开全文 (userQuery / read_chat / transcript 三方一致), `payload.peer` 带可选 `templateRef{path,sha}` 供审计。daemon 启动时 `mkdir -p ~/.wezard/templates` (0700) 作为能力握手 (失败静默 = 能力关闭)。`spawn_wizard` / `clone_wizard` 第一期不接 `taskFile`, 传了显式 400。
 - 空白备用池: 每次全新冷 spawn 成功后在 `<prefix>-warm` 里后台冷启动一个同 (工作区, 后端, 模型, effort) 的空白 CLI 备用, 下次同键 spawn 直接领用 (校验 pane / CLI 进程 / 输入框 / 无模态后整窗搬进主 session), 领走即补。每键 ≤2、全局 ≤`wrc.sparePool.maxTotal` (默认 2, 跨键 LRU)、闲置 1h 回收、启动失败不重试; 未命中或校验失败照旧冷启动。每个备用常驻约 1.2GB (含 MCP 子进程)。`wrc.sparePool.enabled=false` 或 `WEZARD_SPARE_POOL=0` 关闭。
 
 ### Changed

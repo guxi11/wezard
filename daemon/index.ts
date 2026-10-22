@@ -1,6 +1,6 @@
 import { wxMarkdown } from "../shared/wx-text.js";
 // Daemon entry. Resident process — exits only on signal or fatal WS auth failure.
-import { existsSync, readFileSync, renameSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
 import { loadOrCreateSvrToken } from "../shared/svr-token.js";
@@ -99,6 +99,7 @@ import { loadJobStore, dutyLine, awaitingAccept, stalledRoots, shelvedRoots, nud
 import type { MemberRole } from "../shared/world.js";
 import { cacheTouchMs, cacheTtlSec, clipMiddle, contextMaterials, firstStamp, parseClosing, stripClosingMark, stripForChat, lastContextTokens, lastExchange, lastModel, openingTurn, replyClosedBefore, talkTurns, turnsSince, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { expandHome } from "../shared/paths.js";
+import { expandTask, TemplateError, TEMPLATE_ROOT, type ExpandedTask, type TemplateRef } from "../shared/task-template.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { createWorkflowNodes, type FileVersion, type NodeAttempt } from "./workflow-nodes.js";
 import { loadWorkflowPlans, createWorkflowPlanRunner, type PlanPermit } from "./workflow-plans.js";
@@ -160,6 +161,11 @@ const main = async (): Promise<void> => {
   // attach / tmux spawn.
   const { primary, backends } = bindCliBackends({ ...cfg.wrc, projectsDirOverride: cfg.wrc.mirror.projectsDir });
   bindCodexStateDir(cfg.daemon.stateDir);
+  // 模板能力握手 (§8): 管家以「根目录存在」为切 taskFile 的唯一开关, 所以这个 mkdir
+  // 必须与入口展开**同车**落地 —— 只建目录不接展开, 管家切过去就全 400。失败只当
+  // 能力关闭 (expandTask 对缺失的根报 templates disabled), 绝不能拦 daemon 启动,
+  // 也不喷栈。
+  try { mkdirSync(expandHome(TEMPLATE_ROOT), { recursive: true, mode: 0o700 }); } catch { /* 静默是故意的 */ }
   log.info({ primary: primary.name, bin: primary.bin, backends: backends.map((b) => b.name) }, "cli backends bound");
 
   // A killed-on-timeout tmux call is the ONLY externally visible symptom of a
@@ -2212,7 +2218,21 @@ const main = async (): Promise<void> => {
     type ActorOrigin = { reuseCheck?: (target: string, ownEvent?: string) => string; authority: ReturnType<typeof controlSnapshot>; asker?: Asker; plan: { op: ReturnOp; serves?: EventId } };
     const tellPeerAsInner = async (self: string, body: PeerBody, extra = "", planned?: PlanPermit, actor?: ActorOrigin): Promise<Reply> => {
       const authority = actor?.authority ?? (!planned ? controlSnapshot(self) : undefined);
-      const text = ((body as { text?: string }).text ?? "").toString();
+      const tb = body as { text?: string; taskFile?: string; params?: Record<string, string>; templateRef?: TemplateRef };
+      let text = (tb.text ?? "").toString();
+      let templateRef = tb.templateRef;
+      // 模板展开同样在一切副作用之前 (路由行要到下面的 openDispatchRow 才开): text 空
+      // 而 taskFile 给了 → 入口展开, 失败 400; text 非空时 taskFile 忽略 —— dispatch
+      // 入口已展开过的正文原样走, 不重复读文件。
+      if (!text.trim() && (tb.taskFile ?? "") !== "") {
+        try {
+          const expanded = await expandTask({ taskFile: tb.taskFile!, params: tb.params ?? {} });
+          text = expanded.text;
+          templateRef = expanded.templateRef;
+        } catch (e) {
+          return { status: 400, body: { ok: false, reason: e instanceof TemplateError ? e.message : `template expansion failed: ${errText(e)}` } };
+        }
+      }
       if (!text.trim()) { return { status: 400, body: { ok: false, reason: "text required" } }; }
       // 这句话要对方怎么接 (priority 管何时投, receipt 管要不要回执, 这个管它怎么接):
       // task 一件活 (默认) / ask 只答一问 / fyi 知会 —— fyi 不要回执、不进工单、不进群。
@@ -2425,6 +2445,7 @@ const main = async (): Promise<void> => {
           ...(wantReceipt ? { tell } : {}), job: jobId, kind, attemptId, after: afters,
           role: roleParam((body as { role?: string }).role), free: freed,
           ...(plan.op === "transfer" ? { transferred: true } : {}),
+          ...(templateRef ? { templateRef } : {}),
         } } }, plan.op === "transfer"); } catch (error) { dropRow(); return { status: 409, body: { ok: false, eventId, reason: errText(error) } }; }
       // `re` 把那一笔从 need / error 拉回 open (§3.2 的 need→open / error→open): 行状态是「这份中途态
       // 已经报过了」的去重记号 —— 不拉回去, owner 下一轮交同一个中途态就被静默吞掉 (往返断在这里)。
@@ -3365,9 +3386,22 @@ const main = async (): Promise<void> => {
     http.register("POST /dispatch", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { task?: string; name?: string; description?: string; tier?: string; to?: string; force?: boolean; lead?: boolean; spawn?: boolean; public?: boolean; deadline?: number; dryRun?: boolean; criteria?: string; return?: string; for?: string };
-      const task = (b.task ?? "").toString().trim();
-      if (!task) { json(res, 400, { ok: false, reason: "task is required" }); return; }
+      const b = body as { task?: string; taskFile?: string; params?: Record<string, string>; name?: string; description?: string; tier?: string; to?: string; force?: boolean; lead?: boolean; spawn?: boolean; public?: boolean; deadline?: number; dryRun?: boolean; criteria?: string; return?: string; for?: string };
+      // 模板展开 (§6/§8) 必须发生在一切副作用之前 —— 选人、开根单、bearAs 全在后面:
+      // 失败 400, 不留孤儿 wizard、不开路由行。taskFile 单独成立 (task 不必陪跑);
+      // 选人/选档/description 用的摘要从展开文本 (或 params.header) 派生, 投递的是全文。
+      let task = (b.task ?? "").toString().trim();
+      let text = task;
+      let templateRef: TemplateRef | undefined;
+      if ((b.taskFile ?? "") !== "") {
+        let expanded: ExpandedTask;
+        try { expanded = await expandTask({ taskFile: b.taskFile!, params: b.params ?? {} }); }
+        catch (e) { json(res, 400, { ok: false, reason: e instanceof TemplateError ? e.message : `template expansion failed: ${errText(e)}` }); return; }
+        text = expanded.text;
+        task = clipLine((b.params?.header ?? "").toString().trim() || expanded.text, 120);
+        templateRef = expanded.templateRef;
+      }
+      if (!text.trim()) { json(res, 400, { ok: false, reason: "task is required" }); return; }
       // 回执去向在入口冻结 (dispatch 不再永远挂到当前帧: return:"detach" 即旁支, 修 G4)。
       const plan = planReturn(self, b as Record<string, unknown>);
       if (!plan.ok) { json(res, plan.status, { ok: false, reason: plan.reason }); return; }
@@ -3423,6 +3457,7 @@ const main = async (): Promise<void> => {
       let rootId = "";
       const tell = (name: string, text: string, extra = ""): Promise<Reply> => tellPeerAs(self, {
         name, text, public: b.public !== false, force,
+        ...(templateRef ? { templateRef } : {}),
         ...(plan.op !== "self" ? { return: plan.op } : {}),
         // lead 的活远超默认的 1h: 不给 deadline 就按 12h (回执的上限)。
         ...(b.deadline !== undefined ? { deadline: b.deadline } : lead ? { deadline: 43200 } : {}),
@@ -3460,7 +3495,7 @@ const main = async (): Promise<void> => {
         if (!r.ok) { settleRoot(false); json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
         // 已有 wizard 当 lead: 宪章是出生时定的 (里面没有 lead 一节), 规矩加打法挂在信封后面带过去;
         // 已是 lead 的宪章里已有层级规矩, 只带打法。投成了才记 lead, 它下次重生宪章里就有。
-        const t = await tell(name, task, lead ? renderReminder({ wezard: "lead" }, wizards.get(r.target)?.lead ? renderLeadPlaybook() : renderLead()) : "");
+        const t = await tell(name, text, lead ? renderReminder({ wezard: "lead" }, wizards.get(r.target)?.lead ? renderLeadPlaybook() : renderLead()) : "");
         if (lead && t.status === 200) wizards.upsert(r.target, { lead: true });
         if (rootId && t.status === 200) jobs.attach(rootId, { target: r.target, task: "", spawned: false, role: "lead" });
         // 自动选中的被冷门控 (decide 用名册的活动时刻, 门控用 transcript 的, 口径差一点) 或方向闸 (它归别人管 / 是借来的专家) 退回: 改走 spawn; 点名的不改。
@@ -3481,7 +3516,7 @@ const main = async (): Promise<void> => {
       if (born.status !== 200) { settleRoot(false); json(res, born.status, { ...born.body, diagnostics, decision: "spawn", reason: d.why }); return; }
       if (!controlValid(self, dispatchOrigin.authority)) { settleRoot(false); json(res, 409, { ok: false, decision: "spawn", reason: "dispatch source turn changed during spawn; task remains with original source turn" }); return; }
       // 宪章里只有层级规矩, 打法随信封带 (宪章每轮都在上下文里, 打法只这一件活用得上)。
-      const t = await tell(String(born.body.name), task, lead ? renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : "");
+      const t = await tell(String(born.body.name), text, lead ? renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : "");
       settleRoot(t.status === 200);
       // 为这张根单生出来的 (tell 记的是 spawned:false, 再 attach 一次补上; lead 角色也在这里记)。
       if (rootId && t.status === 200) jobs.attach(rootId, { target: String(born.body.target), task: "", spawned: true, role: "lead" });
@@ -3553,6 +3588,11 @@ const main = async (): Promise<void> => {
     const bearAs = async (self: string, body: PeerBody, planned?: PlanPermit, capturedAuthority?: ReturnType<typeof controlSnapshot>): Promise<Reply> => {
       const authority = planned ? undefined : capturedAuthority ?? controlSnapshot(self);
       if (authority && !controlValid(self, authority)) return { status: 409, body: { ok: false, reason: "this turn no longer owns control; cannot spawn more work" } };
+      // 出生投递 (下方 acceptPeerDispatch) 不经 tellPeerAsInner 的模板展开入口 ——
+      // 第一期不接 taskFile; MCP 层已拦, 这里兜直连 HTTP / 旧 MCP 进程: 显式 400,
+      // 不让调用方以为模板生效了而实际投出去的是空正文。
+      if ((body as { taskFile?: string }).taskFile !== undefined)
+        return { status: 400, body: { ok: false, reason: "taskFile not supported on spawn_wizard; use dispatch" } };
       // Legacy bootstrap can dispatch before attaching its member. An empty job
       // is not available for plan ownership while that birth is still in flight.
       const birthJob = ((body as { job?: string }).job ?? "").trim();

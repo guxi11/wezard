@@ -5,6 +5,7 @@ import type { Asker, TurnFrom } from "../shared/detail-store.js";
 import type { MirrorDispatchArgs } from "./mirror-bridge.js";
 import type { Tell, HeldSeen } from "./dispatch.js";
 import type { EventId, FinalVerdict, Receiver, ReportSource, Report } from "./router.js";
+import type { TemplateRef } from "../shared/task-template.js";
 
 export interface ReceiptFact {
   event: EventId;
@@ -54,6 +55,8 @@ export interface MessageInput {
       relayed?: boolean;
       /** `return:"transfer"`: 这一笔的 owner 已经改成了收件方, 不是发话方自己在等的一件。 */
       transferred?: boolean;
+      /** 模板派活 (taskFile) 的回溯指针: rolepage/审计显示「来自模板 x@sha」, 不参与任何判定。 */
+      templateRef?: TemplateRef;
     };
   };
 }
