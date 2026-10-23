@@ -5,7 +5,7 @@
 // 其余几种都是「还没定论」的细分 —— 发起者据此判断该等、该答、还是该去点那张卡。
 import type { ReceiptStatus } from "./reminder.js";
 
-/** Finite legacy wire value; it must never be passed to Date or a timer. */
+/** Finite persisted sentinel; it must never be passed to Date or a timer. */
 export const NO_DEADLINE = Number.MAX_SAFE_INTEGER;
 export const hasDeadline = (value: number): boolean => value < NO_DEADLINE;
 

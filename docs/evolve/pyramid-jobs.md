@@ -1,5 +1,7 @@
 # 金字塔 + 需求即工单 —— 组织结构设计 (方案; 第 1+2 步落地中, 人的决议见 §6)
 
+> 本文仍记录工单治理提案；其中提到的父 k / receipts slot / `receipts.ts` receiver 行为已过时，不作为当前回执契约。receiver task 与 durable recovery 以 [receipt-router.md](receipt-router.md) 为准。
+
 前置: `.ownermode` 的「责任树 + 四类非责任边」(turn tf383f5)。本方案保留它的核心不变量 —— **每件活只有一个负责人, 回执父 k 是严格的树** —— 但不再把依赖 / 评审 / 借调 / 上下文来源单独做成图, 而是把它们都挂进**工单树**里作为节点和成员的属性。
 
 ## 0. 一句话

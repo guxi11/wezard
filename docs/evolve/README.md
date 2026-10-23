@@ -16,8 +16,8 @@
 
 1. **wezard 已经有两个求值器, 分工要画死。** LLM 是最好的 `if` / 拆分 / 汇总; 守护进程擅长 LLM 做不了的: **跨时间等、数数、计时、熬过 reload**。任何新机制先问「它属于哪一边」—— 控制流不进 daemon (`jobs.ts` 头注释的取舍继续成立), daemon 不替模型判断。
 2. **原语核心已经事实存在**: 说 (`tell_peer`) / 看 (`peek_peer` `read_chat`) / 生 (`spawn` `clone`) / 等 (回执) 占 30 天 1133 次调用的 ~80%。演进不是造新语言, 而是**补齐这几个原语的语义缺口, 并把其余工具降为别名、镜头或人侧操作**。
-3. **最实在的语义洞在 continuation 上**: 回执只在对方答了时才投递; 超时 / 不答 / 死掉 → 静默丢弃 (`receipts.ts:177` 不答/超时, `:207` 发话方一直忙), 工单最后一份若是这种, 发起者永远等不到「全部到齐」。补上失败分支, 超时 / 重试两格打开 (竞速另需收掉输家: `cancelRest` 或按 turn 的 cancel), charter 里「迟迟不来就 peek」的补丁可以删。
-4. **一次委托要有名字。** A2A 的 Task、MCP tasks、LangGraph interrupt 都把「派出去的一件活」做成有 id、有状态的东西。wezard 的同类信息散在 receipts Slot / JobMember / paneIsBusy / openToolUses / wait_peer 的 stale 五处。统一成一个 `TurnState` + 信封里的 turn id, 模型、回执、rolepage 三处共用: 进行中的状态从活体派生, **终态 (done / timeout / canceled …) 写进已落盘的回执 Slot** —— reload 或对方 pane 死后无从重算; 只加字段, 不加文件。turn id **不是** A2A 那种可并发的 task: 沿用 `receipts.ts` 的模型, 同一对 wizard 同时只有一件在飞, 续问 (`re`) 沿用原 turn id。详细设计见 [b2-continuation.md](b2-continuation.md)。
+3. **派活结果需要可恢复的归属证据。** 当前 route journal 记录 owner、receiver 与结论；message-events 持久化输入身份、`serves`、`inputIds`、执行/暴露状态和最终发送意图。恢复依靠 event、transcript、pane/session 与 ACK 证据；无法证明是否投出的内容保留为 `uncertain`，不因超时或 pane 消失合成失败回执。具体行为见唯一权威方案 [receipt-router.md](receipt-router.md)。
+4. **一次 task 要有明确地址。** 对同一 owner+wizard receiver 同时只保留一件 unfinished task；显式 `@.name RESULT:` 支持一轮多接收者，按 event 和已消费输入 coverage 绑定。`kind` 表示消息意图并参与派活方向闸，route 是否创建及 receiver 由 `return` 决定：缺省 `self`，`none` 不建 route，`self` / `detach` 新建或补充 receiver task，`transfer` 沿已有 route 转移 owner。因此 `ask` / `fyi` 也会依 `return` 创建或复用 route。MCP `fyi` 文案承诺不收回执，但实现不会自动把 `return` 设为 `none`；需确保不建 route 时显式传 `return:"none"`。NEED、CLI error 是中间态。名册与工单展示状态由 route 行和 pane 探针派生，不另存一份状态。现行细节见唯一权威方案 [receipt-router.md](receipt-router.md)。
 5. **上下文是预算, 不是仓库。** charter ~4.4k tok 里 1/3 是只会过期的出生名册, 另有 ~2.5k 与工具描述复述; 在 Claude Code 上工具描述是 deferred 的 (只有名字常驻), 所以**charter 是唯一保证在场的那份**。自描述分三层: L0 charter 一行「何时用」→ L1 工具描述讲参数与边界 → L2 文档按需读。
 6. **记忆的病在时机与检索, 不在体积。** 所有记忆只在出生时进 system prompt: 在跑的 wizard 看不到新规矩, `/clear` 后自己的 self 记忆也没了; 交接简报这类最好的情景摘要用完即删。先修通路 (notices 推送、跨 /clear、episode 归档), 再谈检索。
 7. **UI 的单位要从「消息」升到「一件事」。** 工单成为一等会话, 忙闲补上「卡在审批」, 一个「要我处理」的托盘 —— 人管一群 wizard 时只关心这两件事: 这件事到哪了、谁在等我。
@@ -38,10 +38,12 @@
 (ask   human question :choices …)                                          ; 把控制交给人
 ```
 
+以上代数是 2026-10-02 的研究草图，不是当前接口契约；其中 `send` 的 `:k` / `:deadline` 是旧抽象。当前 receiver route 由 `return` 选择，期限与恢复规则见 [receipt-router.md](receipt-router.md)。
+
 | 原语 | 现有入口 | 要补的语义 |
 |---|---|---|
 | `make` | `spawn_wizard` `clone_wizard` (`new_claude_session` = `:owner nil`) | spawn 加 `detached` 吸收 new_claude_session; 失败不留僵尸身份 |
-| `send/k` | `tell_peer` (`send_peer` 别名) | **失败 k** (timeout/silent/dead) · `deadline` · turn id + `re` · 收口三态 `RESULT:` / `NEED:` / `ARTIFACT:` · `kind` |
+| `send/k` | `tell_peer` | route task 与显式 RESULT 地址 · NEED / re · 持久 inbox 与证据恢复 · uncertain ACK 对账 |
 | `observe` | 9 个镜头 | 统一输出 `TurnState`; 镜头保持分开 (工具名就是发现机制) |
 | `define` | `wizard_remember` | 写完对在跑的 wizard 可见; self 可 replace; episode 归档 |
 | `set!` | `wizard_identity` `set_model` `set_workspace` `name_chat` | 不合并 |
@@ -53,11 +55,13 @@
 
 **不做的**: 让 LLM 写 s-expression; 把 observe 镜头合成一个工具; 宏 / 自定义特殊形式; 确定性重放; daemon 里跑模型生成的编排脚本; 自动认领任务的调度器; 向量记忆; 默认心跳。理由见各调研的「不该学」一节。
 
-**Flow AST (`run_flow`) 不做** (2026-10-02 定): 可续跑的 daemon 侧解释器与「控制流不进 daemon」直接冲突。graph 降格为「工单 + 预算」(a2a L1): `rounds`/`until` 变成工单的 `maxTurns`/`deadline`, 控制流留在发起 wizard。只有出现「无人值守必须跑完」的真实需求才重开。rolepage 的编排视图同理: 画 ledger + `TurnState` 的实际轨迹, 不存 `expr`。
+**Flow AST (`run_flow`) 不做** (2026-10-02 历史研究决议): 可续跑的 daemon 侧解释器与「控制流不进 daemon」直接冲突。graph 降格为「工单 + 预算」(a2a L1): `rounds`/`until` 变成工单的 `maxTurns`/`deadline`, 控制流留在发起 wizard。这里只记录当时的工单设想；`deadline` 不描述当前 receiver route 的期限规则，也不是当前接口约束。只有出现「无人值守必须跑完」的真实需求才重开。rolepage 的编排视图同理: 画 ledger + `TurnState` 的实际轨迹, 不存 `expr`。
 
 ## 3. 工具面处置
 
-依据 [inventory.md](research/inventory.md) §4, 注意「工具名是地址」—— 不删旧名, 只降级为别名。
+依据 [inventory.md](research/inventory.md) §4 的**历史工具面研究快照**，当时建议「工具名是地址」—— 不删旧名, 只降级为别名。此处不是当前兼容承诺；各工具现行名称与兼容行为以实现和对应文档为准。
+
+下表保留当时的处置建议，仅作研究记录，不表示当前工具库存或兼容状态。
 
 | 处置 | 工具 |
 |---|---|
@@ -72,7 +76,7 @@
 
 | 维度 | 头三件 (按收益/成本) |
 |---|---|
-| **架构 / 协议** | 失败 continuation + deadline · turn id / `NEED:` / `ARTIFACT:` 收口 · 派生 `TurnState` |
+| **架构 / 协议** | receiver route task · 显式多接收者 RESULT 与 input coverage · durable recovery · 派生 `TurnState` |
 | **用法** (charter / 描述 / 编排) | 审批免审漏洞 · 描述里 send_peer/wait_peer 的过期引导清零 · charter 瘦身 (名册只列有职责的, 三层自描述去重) |
 | **记忆** | 合并后经 notices 推给在跑的 wizard · self 记忆跨 /clear + clone 继承 · 交接简报 / 收工结论归档为 episode (+ 压缩前刷记忆提醒) |
 | **UI** | 「卡在审批」第四态 · 回执 chip + 序号 · 工单一等会话 `j:<id>` (+ 只读待办托盘) |

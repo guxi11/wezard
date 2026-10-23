@@ -1,4 +1,3 @@
-import { hasDeadline } from "../shared/turn-state.js";
 // 同伴感知: 「这个聊天里还有谁在干活」的读侧。
 //
 // 一个企微聊天里住着一个默认 wizard 加任意多个 `#tag` wizard (inbound.ts 按 tag
@@ -584,17 +583,17 @@ const ASK_SLACK_MS = 60_000;
  *  输入框里没读进) 返回 `undefined`; 找到了问话但它后面还没有回答返回 "" —— 两种都要
  *  接着等, 绝不能退回按时刻取把上一件事的结论当成这一次的回执 (receipts 只用前者分辨
  *  「它在忙前面的轮」与「读进了却没答」)。 */
-/** 找问话的那一段: 有发话时刻就读到它之前 (问话可以离尾巴很远), 没有 (老调用) 退回最近 80 条。 */
+/** 找问话的那一段: 有发话时刻就读到它之前 (问话可以离尾巴很远), 否则读最近 80 条。 */
 const askWindow = (jsonlPath: string, sinceMs: number): Turn[] =>
   sinceMs > 0 ? turnsSince(jsonlPath, sinceMs - ASK_SLACK_MS) : talkTurns(jsonlPath, 80, true, true);
 
 export const replyToPeer = (
   jsonlPath: string,
-  fromName: string,
+  _fromName: string,
   sinceMs = 0,
   turn?: string,
 ): PeerReply | undefined => {
-  const r = answerOf(askWindow(jsonlPath, sinceMs), fromName, sinceMs, turn);
+  const r = answerOf(askWindow(jsonlPath, sinceMs), sinceMs, turn);
   return r && { text: r.text, ...(r.error ? { error: true } : {}) };
 };
 
@@ -609,12 +608,12 @@ export interface PeerReply { text: string; error?: true }
  *  还开着 (就是交接这一轮) → "", 这份回执的义务跟着简报转进新会话。三态同 replyToPeer。 */
 export const replyClosedBefore = (
   jsonlPath: string,
-  fromName: string,
+  _fromName: string,
   sinceMs: number,
   untilMs: number,
   turn?: string,
 ): string | undefined => {
-  const r = answerOf(askWindow(jsonlPath, sinceMs), fromName, sinceMs, turn);
+  const r = answerOf(askWindow(jsonlPath, sinceMs), sinceMs, turn);
   return r && (r.closedAt !== undefined && r.closedAt < untilMs && !r.error ? r.text : "");
 };
 
@@ -632,11 +631,8 @@ export const replyClosedBefore = (
  *  user 行 (报错后的 `continue` 续跑、或人敲的「继续」) 是在续这一轮, 不切 —— 否则续跑
  *  出来的答案永远定位不到, 回执只拿得到那句报错。人说的别的话照样切: 那是一件新事,
  *  它的答案不能当回执投出去。`error` = 终句是报错。
- *  `turn` 给了就先按它找问话 (信封上的件号, 不受名字变动与时钟抖动影响); 老信封没有
- *  件号, 找不到再退回「`from` + 发话时刻」。
- *  续回: 答话方那一轮又派了活, 结论在子回执回来的那一轮 —— 那份回执
- *  挂着 `reply-to=<fromName>` 和原件的 `k=peer:<turn>:<key>`, 取两者中靠后的
- *  那一句当问话。只有名字的老调用仍按名字认; 已知件号不能拿另一件的续回顶替。 */
+ *  只按传入的 `turn` 匹配当前带 event 的信封; 缺 turn 或找不到精确 event 都返回
+ *  `undefined`, 不按发话方名字或时刻猜测旧问话。 */
 type AskEnv = { kind: string; from: string; event?: string; receipt?: boolean; quiet?: boolean };
 type MarkedTurn = { role: string; text: string; apiError?: true; notice?: true; queued?: true; env?: AskEnv };
 /** 这一行是在续上一轮 (报错之后没有信封的 `continue` / 「继续」), 不起新的一轮。 */
@@ -653,16 +649,13 @@ export const openingTurn = (jsonlPath: string): Turn | undefined =>
   openingOf(readTailUntil(jsonlPath, (raw) => parseTurns(jsonlPath, raw, false, true), (ts) => !!openingOf(ts), Infinity));
 const answerOf = (
   ts: readonly { role: string; text: string; ms?: number; mid?: true; apiError?: true; notice?: true; queued?: true; env?: AskEnv }[],
-  fromName: string,
   sinceMs: number,
   turn?: string,
 ): { text: string; closedAt?: number; error?: true } | undefined => {
   const lastAsk = (hit: (e: AskEnv) => boolean): number =>
     ts.reduce((at, t, i) => (t.role === "user" && t.env && hit(t.env) && (!t.ms || t.ms >= sinceMs - ASK_SLACK_MS) ? i : at), -1);
   const byTurn = turn ? lastAsk((e) => !e.receipt && !e.quiet && e.event === turn) : -1;
-  // 退回按人找时只认没有 event 的老信封: 带 event 的那些是别的件, 不是这一件。
-  const direct = byTurn >= 0 ? byTurn : lastAsk((e) => !e.receipt && !e.quiet && e.kind === "peer" && e.from === fromName && !(turn && e.event));
-  const asked = direct;
+  const asked = byTurn;
   if (asked < 0) return undefined;
   const next = ts.findIndex((t, i) => i > asked && t.role === "user" && !t.queued && !resumesAt(ts, i));
   const last = ts.slice(asked + 1, next < 0 ? undefined : next).filter((t) => t.role === "assistant").at(-1);
@@ -729,10 +722,7 @@ export const renderPeerEnvelope = (from: string, chat?: string, chatKey?: string
     ...(t?.act === "fyi" ? ["这是一条**知会**: 不用回复、不用收口, 也别为它开新活 —— 与手头的活相关就顺手吸收, 无关就略过; 一句话收住这一轮即可。"] : []),
     // 来回多了就收口: 不在守护进程里拒绝 —— 拒了模型会换条通路接着乒乓。
     ...((t?.legs ?? 0) > 3 ? [`这件活已经来回 ${t!.legs! - 1} 次: 这一次请直接给结论, 拿不准的写清你的假设。`] : []),
-    ...(t?.deadline && hasDeadline(t.deadline) ? [`期限 ${hhmm(t.deadline)}: 到点还没答完, 发话方收到的是一份超时回执。`] : []),
   ]);
-
-const hhmm = (ms: number): string => new Date(ms).toTimeString().slice(0, 5);
 
 /** 回执的信封 —— 这一轮是对方干完活、守护进程自动送回来的结论, 不是新派的活。
  *

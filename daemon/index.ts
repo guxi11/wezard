@@ -1,6 +1,6 @@
 import { wxMarkdown } from "../shared/wx-text.js";
 // Daemon entry. Resident process — exits only on signal or fatal WS auth failure.
-import { existsSync, readFileSync, renameSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { createHash, timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
 import { loadOrCreateSvrToken } from "../shared/svr-token.js";
@@ -27,7 +27,7 @@ import { applyHot, cfgSeenBy, patchedTop, pinChatKeys, configGet, fromLegacy, le
 import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } from "./usage.js";
 import { installInboundRouter } from "./inbound.js";
 import { loadMirrorStore } from "./mirror-store.js";
-import { cancelOps, deadlineOf, eventRef, finalKind, isEventRef, makeOutcome, openRouter, ops, pickPair, type Delivery, type EventId, type FinalVerdict, type Op, type Receiver, type Route } from "./router.js";
+import { cancelOps, eventRef, finalKind, isEventRef, makeOutcome, openRouter, ops, pickPair, type Delivery, type EventId, type FinalVerdict, type Op, type Receiver, type Route } from "./router.js";
 import { createMessageEvents, messageId, finalId, reportSource, receiptCoverage, receiptFacts, type EventAuthority, type MessageAdapters, type MessageEvent, type MessageInput } from "./message-events.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { backendFor, bindStartupNotice, prewarmShell, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
@@ -97,7 +97,7 @@ import { createLedger, digest, pendingGc, renderDigest, renderTable, renderAwait
 import { checkDirection } from "./direction.js";
 import { loadJobStore, dutyLine, awaitingAccept, stalledRoots, shelvedRoots, nudgeDue, dayClamp, childrenOf as jobChildren, jobEpisode, rejectReason, ACCEPTS, JOB_MEMBER_MAX, JOB_DEPTH_MAX, depthOf, ancestorsOf as jobAncestors, treeOrder, jobStage, type Accept, type JobMark, type JobRecord, type MemberLive } from "./jobs.js";
 import type { MemberRole } from "../shared/world.js";
-import { cacheTouchMs, cacheTtlSec, clipMiddle, contextMaterials, firstStamp, parseClosing, stripClosingMark, stripForChat, addressedResults, lastContextTokens, lastExchange, lastModel, openingTurn, replyClosedBefore, talkTurns, turnsSince, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
+import { cacheTouchMs, cacheTtlSec, clipMiddle, contextMaterials, firstStamp, parseClosing, stripClosingMark, stripForChat, addressedResults, lastContextTokens, lastExchange, lastModel, openingTurn, talkTurns, turnsSince, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { expandHome } from "../shared/paths.js";
 import { expandTask, TemplateError, type ExpandedTask, type TemplateRef } from "../shared/task-template.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
@@ -183,24 +183,6 @@ const main = async (): Promise<void> => {
   const router = openRouter({ retain: (row) => retainRoute(row), note: (msg, extra) => log.child({ mod: "router" }).info(extra ?? {}, msg) });
   /** 新根 event: 来源自己的一笔 (人的一句话 / 定时任务 / detach 派活) 新领一个 (§9.1)。 */
   const newRootEvent = (): EventId => `e${randomBytes(3).toString("hex")}`;
-  // T10 §9.6: 旧回执状态文件一次性归档 —— 表上还压着在飞的活就这次不动 (等它们收口, 下次 boot
-  // 再试), 空表 = 那些账已经没有活的依据了, 留着只会让人误以为它在飞。工作流存档
-  // (`*.nodes.json` / `*.plans.json`) 与回执文件同前缀但**不**归档 —— 那是计划的历史, 不是账。
-  const archiveLegacyReceipts = (): void => {
-    if (router.rows().some((r) => ["open", "need", "error", "held"].includes(r.status))) return;
-    // 第三个路径按片段拼: 这里只是旧状态文件的**文件名**, 不是对退役模块的引用, 而 T10 的验收
-    // grep 会扫那个词 (docs/evolve/receipt-router.md §9.6)。
-    const legacyAnswerTransfers = `~/.wezard/${["answer", "transfers.json"].join("-")}`;
-    [cfg.wrc.mirror.receiptsFile, cfg.wrc.mirror.holdsFile, legacyAnswerTransfers].forEach((file) => {
-      const abs = expandHome(file);
-      const bak = `${abs}.t10.bak`;
-      if (!existsSync(abs) || existsSync(bak)) return;
-      try { renameSync(abs, bak); log.child({ mod: "router" }).info({ from: abs, to: bak }, "legacy receipt state archived"); }
-      catch (e) { log.child({ mod: "router" }).warn({ err: errText(e), file: abs }, "legacy receipt state not archived"); }
-    });
-  };
-  archiveLegacyReceipts();
-
   // 一个或多个企微机器人 (bot + bots): 对下面所有模块只露主机器人那个 client, 分流在 bot-mux 里。
   // 必须先于 weixin-port / response-tracker 建好 —— 它们包在 mux 外层。
   const ws = startMux(cfg, log);
@@ -300,7 +282,6 @@ const main = async (): Promise<void> => {
         && facts.some((f) => !!f.batch && !router.batchComplete(f.batch)));
     },
     task: (e) => e.serves ? router.get(e.serves)?.event ?? e.serves : undefined,
-    receiptBatch: (event) => router.get(event)?.batch,
     retain: (e) => {
       const required = (id: string): boolean => {
         const row = router.get(id);
@@ -1030,7 +1011,7 @@ const main = async (): Promise<void> => {
       const legs = tell.legs ?? legsOf(event) + 1;
       const id = `route:${event}:r${legs}`;
       events.accept({ id, target: tell.to, speaker: tell.from, channel: tell.channel, serves: event, asker: tell.asker,
-        priority: "normal", deadline: tell.deadlineAt ?? deadlineOf(tell.at ?? Date.now()), payload: { text, peer: {
+        priority: "normal", deadline: NO_DEADLINE, payload: { text, peer: {
           from: { kind: "peer", from: tell.from, event, ...(tell.asker ? { asker: tell.asker } : {}) },
           envelope: envelopeFor(tell.from, tell.channel, { legs, re: true, asker: tell.asker }),
           tell: { ...tell, event, legs, dispatchKey: id }, job: tell.job ?? "", kind: "task", held: true,
@@ -1060,8 +1041,8 @@ const main = async (): Promise<void> => {
       const from = ledgerOwnerOf(row.event) || row.owner;
       acceptContinuation({
         from, to: row.owner, channel: "", event: row.event, legs: legsOf(row.event) + 1,
-        deadlineAt: row.deadlineAt, ...(row.asker ? { asker: row.asker } : {}), ...(row.job ? { job: row.job } : {}),
-      }, `（守护进程代 ${displayName(from)} 打回一次: 这件活是工单里的一份, 你的回复${why}。请按约定收口：RESULT: <结论>；交付文件逐项 ARTIFACT: <路径> — 一句话；需要对方补信息时用 tell_peer({kind:"ask"})。）`);
+        ...(row.asker ? { asker: row.asker } : {}), ...(row.job ? { job: row.job } : {}),
+      }, `（守护进程代 ${displayName(from)} 打回一次: 这件活是工单里的一份, 你的回复${why}。请按约定收口：${row.receiver.kind === "wizard" ? `@${displayName(row.receiver.to)} RESULT: <结论>` : "RESULT: <结论>"}；交付文件逐项 ARTIFACT: <路径> — 一句话；需要对方补信息时用 tell_peer({kind:"ask"})。）`);
       log.info({ event: row.event, why }, "receipt: 不合工单验收, 打回一次");
     };
     const turnsLine = (xs: readonly InFlight[], target: string): string => renderInFlight(xs, target, displayName);
@@ -1223,10 +1204,9 @@ const main = async (): Promise<void> => {
       const env = p ? openingTurn(expandHome(p))?.env : undefined;
       return env?.kind === "peer" && !env.receipt ? peerAsk(env) : undefined;
     };
-    /** 一句同伴派活的出处: 发话方与它服务的那一笔 —— 派活信封不再带 event, 问注入事件的 `serves`;
-     *  老信封带着的照用。 */
-    const peerAsk = (env: { from: string; event?: string; eventId?: string }): { from: string; event?: string } => {
-      const event = env.event ?? (env.eventId ? events.get(env.eventId)?.serves : undefined);
+    /** 一句同伴派活的出处: 发话方与它服务的那一笔 —— 从当前注入事件的 durable `serves` 读取。 */
+    const peerAsk = (env: { from: string; eventId?: string }): { from: string; event?: string } => {
+      const event = env.eventId ? events.get(env.eventId)?.serves : undefined;
       return { from: env.from, ...(event ? { event } : {}) };
     };
     // ── 新路由表 (T3): 写入点 ──────────────────────────────────────────────
@@ -1534,8 +1514,8 @@ const main = async (): Promise<void> => {
           inputs: row ? events.consumedTaskInputs(row.event, e) : [] }];
       }));
       const row = e.serves ? router.get(e.serves) : undefined;
-      return parseClosing(body).kind === "result" && row?.owner === e.target && row.receiver.kind === "wizard"
-        ? { [`legacy:${e.speaker}`]: { receiver: row.receiver.to, event: row.event, inputs: events.consumedTaskInputs(row.event, e) } } : {};
+      return parseClosing(body).kind === "result" && row?.owner === e.target && row.receiver.kind === "chat"
+        ? { served: { receiver: e.speaker, event: row.event, inputs: events.consumedTaskInputs(row.event, e) } } : {};
     };
     const resultCorrection = (e: MessageEvent, section: { name: string }, index: number, reason: string): void => {
       const row = e.serves ? router.get(e.serves) : undefined;
@@ -1616,38 +1596,17 @@ const main = async (): Promise<void> => {
         }
         return;
       }
-      // Old clients may still send only RESULT. Keep that form when the current
-      // receiver batch has exactly one unambiguous outstanding item.
       const servedRow = e.serves ? router.get(e.serves) : undefined;
       if (parseClosing(verdict.text).kind === "result" && servedRow?.owner === e.target
-          && servedRow.receiver.kind === "wizard" && servedRow.receiver.to === e.speaker) {
-        const section = `legacy:${e.speaker}`;
-        const binding = events.get(e.id)?.resultRoutes?.[section];
-        const row = binding ? binding.event ? router.get(binding.event) : undefined : servedRow;
-        if (row) {
-          const inputs = binding?.inputs ?? events.consumedTaskInputs(row.event, e);
-          if (!binding?.inputs) events.bindResultRoute(e.id, section, e.speaker, row.event, inputs);
-          if (!events.coversTaskInputs(row.event, e, inputs)) {
-            resultCorrection(e, { name: e.speaker }, 0, "同一任务还有本次结果未覆盖的补充；读完补充后重新提交结果");
-            return;
-          }
-          const text = verdict.text;
-          const plans = router.onFinal(e.target, row.event, { text, source: reportSource(e) });
-          const answer = plans.find((op): op is Extract<Op, { op: "answer" }> => op.op === "answer" && op.outcome.status === "done");
-          const why = answer ? acceptanceOf(row, answer.outcome.body) : undefined;
-          if (why) { rebound(row, why, e.id); return; }
-          plans.forEach(commitRoute);
-        } else {
-          resultCorrection(e, { name: e.speaker }, 0, `没有匹配 ${e.speaker} 的未完成欠账`);
-        }
+          && servedRow.receiver.kind === "wizard") {
+        resultCorrection(e, { name: displayName(servedRow.receiver.to) }, 0, "回执必须显式写明收件人");
         return;
       }
       if (!verdict.error && parseClosing(verdict.text).kind === "result" && e.serves) {
-        const task = router.get(e.serves)?.event ?? e.serves;
-        const key = `legacy:${e.speaker}`;
-        const binding = events.get(e.id)?.resultRoutes?.[key];
+        const task = servedRow?.event ?? e.serves;
+        const binding = events.get(e.id)?.resultRoutes?.served;
         const inputs = binding?.inputs ?? events.consumedTaskInputs(task, e);
-        if (!binding?.inputs) events.bindResultRoute(e.id, key, e.speaker, task, inputs);
+        if (!binding?.inputs) events.bindResultRoute(e.id, "served", servedRow?.receiver.kind === "wizard" ? servedRow.receiver.to : e.speaker, task, inputs);
         if (!events.coversTaskInputs(task, e, inputs)) return;
       }
       const plans = router.onFinal(e.target, e.serves, { ...verdict, source: reportSource(e) });
@@ -2132,15 +2091,12 @@ const main = async (): Promise<void> => {
 
     // 跟另一个 wizard 说一句话。`tell_peer` 是它现在的名字 —— 「说」而不是「发送并
     // 等待」: 调用方注入完就返回, 对方干完那一轮的结论由守护进程自动送回来 (receipts)。
-    // `/peers/send` 保留为同一个处理函数: 正在跑的 wizard 的 MCP 进程是旧代码, 换名字
-    // 不能把它们的通路掐断。
+    // MCP 的 `send_peer` 工具仍作为公开别名注册，并调用当前 `/peers/tell` 路由。
     // 冷与否 = 缓存最近一次被碰 (最近一次真实请求的开始; 读不到退回 mtime) 距今多久 vs 它实际按多长 TTL 写的
     // (与 route_candidates 同一口径)。transcript 里没有分层写入记录时按 5min 兜底。
     const CACHE_TTL_FALLBACK_SEC = 300;
     const touchOf = (p: string): number => { try { return cacheTouchMs(p) || statSync(p).mtimeMs; } catch { return 0; } };
     const ttlOf = (p: string): number => (cacheTtlSec(p) || CACHE_TTL_FALLBACK_SEC) * 1000;
-    // 被冷门控退回过的 `self\0target` → 到期时刻: 老 MCP 进程原样重发即视为 force。
-    const coldRefused = new Map<string, number>();
     type Reply = { status: number; body: Record<string, unknown> };
     /** 入参 `after` → event 数组: 每项是名字 (= 我派给它的那一笔, 见 pickPair) 或 event id。 */
     const afterTurnsOf = (self: string, body: PeerBody): { ok: true; ids: string[] } | { ok: false; reason: string } => {
@@ -2589,29 +2545,23 @@ const main = async (): Promise<void> => {
       //     两段文本会挤进同一个输入框、被当成一轮读掉, 这在协同网络里不是边角情况而是常态;
       //   urgent 先打断它这一轮 (与 stop_wizard 的 interrupt 同一下 Esc) 再投 —— 紧急改道;
       //   now   不等不打断, 落进输入框由 CLI 并进它这一轮 —— 插话、补一句、答它的问。
-      // 老 MCP 进程只认 `when` (默认 now): idle ≡ normal, now ≡ now。都没给时, `re` 续问默认 now ——
-      // 续问是同一场来回里的应答, 对方可能正挂在 wait_peer 上等你, 等它闲下来就互相干等到超时。
-      const bp = body as { priority?: string; when?: string };
+      // 都没给时, `re` 续问默认 now —— 续问是同一场来回里的应答, 对方可能正挂在 wait_peer 上等你,
+      // 等它闲下来就互相干等到超时。
+      const bp = body as { priority?: string };
       const asked: "normal" | "urgent" | "now" =
         bp.priority === "urgent" ? "urgent"
           : bp.priority === "normal" ? "normal"
-            : bp.priority === "now" || bp.when === "now" ? "now"
-              : bp.when === "idle" ? "normal"
-                : re ? "now" : "normal";
+            : bp.priority === "now" ? "now"
+              : re ? "now" : "normal";
       // 冷门控: 派新活 (task、不是续问、不是插话) 给一个冷且大的 wizard, 先退回一行让派活的
       // 算账 —— 唤醒它要整段重写缓存, 点名或职责对口只说明相关, 不说明划算。`force:true`
-      // 是「真依赖它那段上下文」的明说。老 MCP 进程的 schema 里没有 force (请求里压根没这个键,
-      // 新的一律显式带上): 同一对 10 分钟内原样再发一次就算 force, 不然它们被拦下就没有出路。
+      // 是「真依赖它那段上下文」的明说。
       const force = (body as { force?: boolean }).force;
       if (kind === "task" && !re && asked !== "now" && force !== true) {
-        const gk = `${self}\0${target}`;
-        const retried = force === undefined && (coldRefused.get(gk) ?? 0) > Date.now();
-        coldRefused.delete(gk);
-        const gi = retried ? undefined : m.sessionInfo(target);
+        const gi = m.sessionInfo(target);
         const gate = gi ? coldGateOf(`.${displayName(target).replace(/^\./, "")}`, gi.contextTokens, touchOf(gi.jsonlPath), Date.now(), ttlOf(gi.jsonlPath)) : "";
         if (gate) {
-          if (force === undefined) coldRefused.set(gk, Date.now() + 10 * 60_000);
-          return { status: 409, body: { ok: false, gated: "cold", reason: gate + (force === undefined ? " (你的 MCP 是旧版、没有 force 参数: 10 分钟内原样再发一次即视为 force)" : "") } };
+          return { status: 409, body: { ok: false, gated: "cold", reason: gate } };
         }
       }
       if (actor?.reuseCheck) {
@@ -2636,7 +2586,7 @@ const main = async (): Promise<void> => {
         return { status: 409, body: { ok: false, reason: "task settled or transferred while preparing continuation; retry against current task" } };
       // All caller-dependent facts are frozen here; workers never reread the caller's current turn.
       const at = Date.now();
-      const deadlineAt = deadlineOf(at, (body as { deadline?: number }).deadline);
+      const deadlineAt = NO_DEADLINE;
       const wantReceipt = plan.op !== "none";
       // 路由行 (§3.1): 续问不新开行 (沿用那一笔); 其余按 self / detach / transfer 开行或改 owner;
       // `after` 是欠账不是子行 —— 挂 after 的行先 held, 注入成功 (committed) 时才 release。
@@ -2667,7 +2617,7 @@ const main = async (): Promise<void> => {
         const budget = checkJob(jobId, target, freed);
         if (!budget.ok) { dropRow(); return { status: budget.status, body: { ok: false, reason: budget.reason } }; }
       }
-      let tell: Tell = { from: self, to: target, channel, job: jobId, at, event: serves, legs: dispatchLegs, deadlineAt, asker, dispatchKey: eventId };
+      let tell: Tell = { from: self, to: target, channel, job: jobId, at, event: serves, legs: dispatchLegs, asker, dispatchKey: eventId };
       if (attemptId) {
         const leg = workflow.recordLeg(attemptId, { text, tell, continuation: dispatchLegs > 1, at, kind: "task", role: roleParam((body as { role?: string }).role), free: freed }, false);
         tell = { ...tell, dispatchKey: leg.key };
@@ -2754,7 +2704,6 @@ const main = async (): Promise<void> => {
       } catch (e) { json(res, 409, { ok: false, reason: (e as Error).message }); }
     });
     http.register("POST /peers/tell", tellPeer);
-    http.register("POST /peers/send", tellPeer); // 老 MCP 进程还在调这个名字
 
     // 等一个 wizard, 或者等一**组**。fan-out 之后 join 必须是并行的: 串行地等五个
     // 分身, 墙钟是五个之和, 而它们本来就在同时干活。`need` 把 all / any / 过半收进
@@ -3995,7 +3944,7 @@ const main = async (): Promise<void> => {
       const dispatched = !!task && birthGuard();
       let dispatchedEvent = "";
       if (dispatched) {
-        const deadlineAt = deadlineOf(taskAt);
+        const deadlineAt = NO_DEADLINE;
         const quiet = !!plan?.ok && plan.op === "none";
         // transfer 交出的是人问的那一笔 (同 tell_peer): 注入事件得带上那个群, 否则频道为空被当
         // 私聊轮扣下, 刚出生的接手方那句终句人永远收不到 (见 mirror-bridge 的 final 通道)。
@@ -4008,7 +3957,7 @@ const main = async (): Promise<void> => {
           : "";
         dispatchedEvent = serves;
         const eventId = serves ? plan?.ok && plan.op === "transfer" ? `route:${serves}:transfer:${randomUUID()}` : `route:${serves}:input:${randomUUID()}` : `p:${self}:${target}:${randomUUID()}`;
-        const birthTell: Tell = { from: self, to: target, channel: handedChat, job: jobId, at: taskAt, event: serves, legs: 1, deadlineAt, asker, dispatchKey: eventId };
+        const birthTell: Tell = { from: self, to: target, channel: handedChat, job: jobId, at: taskAt, event: serves, legs: 1, asker, dispatchKey: eventId };
         try { acceptPeerDispatch({ id: eventId, target, speaker: self, channel: handedChat, serves, asker, priority: "normal", deadline: deadlineAt,
           payload: { text: task, peer: {
             from: { kind: "peer", from: self, event: serves, ...(jobId ? { job: jobId } : {}), ...(handedChat ? { transferred: true } : {}), ...(asker ? { asker } : {}) },
@@ -4761,7 +4710,7 @@ const main = async (): Promise<void> => {
      *  这一枪的注入没有消息事件, 所以件号→行的桥要自己记 (servesOfTurn 的兜底)。 */
     const openTaskRow = (target: string, taskId: string, event: string, quiet: boolean): void => {
       if (quiet) return;
-      openRow({ event, owner: target, deadlineAt: deadlineOf(Date.now()),
+      openRow({ event, owner: target, deadlineAt: NO_DEADLINE,
         receiver: { kind: "chat", channel: baseOfKey(target), message: `task:${taskId}:${event}` } });
     };
     scheduledTaskInject = async (target, text, opts) => {

@@ -370,8 +370,8 @@ export const settledTo = (table: Table, owner: Key): Route[] =>
  *  `:rN` / `:resume` / `:<rev>` 后缀 (最常见的抄错就是抄了那一个)。 */
 export const eventRef = (raw: unknown): string =>
   String(raw ?? "").replace(/[`\s]/g, "").replace(/^(?:route|rcpt|canceled|chat):/, "").replace(/:.*$/, "");
-/** 是 event id (`e<hex>[.n…]`, T10 前的老件号 `t<hex>`) 而不是名字。 */
-export const isEventRef = (s: string): boolean => /^[et][0-9a-f]{6,}(?:\.\d+)*$/.test(s);
+/** 是现行 event id (`e<hex>[.n…]`) 而不是名字。 */
+export const isEventRef = (s: string): boolean => /^e[0-9a-f]{6,}(?:\.\d+)*$/.test(s);
 
 const PAIR_LIVE: ReadonlySet<Status> = new Set<Status>(["held", "open", "need", "error"]);
 export type PairPick = { ok: true; row?: Route } | { ok: false; many: Route[] };
@@ -540,13 +540,6 @@ export const finalReleased = (table: Table, owner: Key, serves: EventId | undefi
 
 // ── 期限常量与 held 前置取消 ─────────────────────────────────────────────
 
-/** 期限常量 (§9.6: 自 receipts 迁入): 对方最长允许干多久 / 期限的上下限。上限留在工单
- *  保留期内, 超时那份回执还得数得进账。 */
-export const TARGET_WAIT_SEC = 3600;
-export const DEADLINE_MIN_SEC = 60;
-export const DEADLINE_MAX_SEC = 12 * 3600;
-/** `at` 发出、给了 `sec` 秒 (缺省 / 越界取默认或夹到边上) 的期限。 */
-export const deadlineOf = (_at: number, _sec?: number): number => NO_DEADLINE;
 /** 被收掉 / 打断 / 前置失败 的正文 (§4.2 canceled)。`reason` 是一整句 (含句号), 因为它
  *  有三种来路: 被谁收掉、随工单收了、等的前置以某结局收场。 */
 export const canceledText = (p: { who?: string; reason: string; last?: string }): string =>
@@ -606,8 +599,7 @@ export const cancelOps = (table: Table, roots: readonly EventId[], p: { reason: 
 export const TOMBSTONE_TTL_MS = 7 * 24 * 3600_000;
 
 /** 能回收的行: 自己是满 TTL 的墓碑、没有 held 行的 `after` 等着它, 且整棵子树都能回收 ——
- *  子树闭合 (收一行必收它全部后代), 于是留下的行往上走 chain 永远走得通。没有 settledAt 的
- *  老行按 deadlineAt 起算 (合成 timeout 的时刻, 正常定论只会更早)。 */
+ *  子树闭合 (收一行必收它全部后代), 于是留下的行往上走 chain 永远走得通。 */
 export const collectable = (table: Table, now: number, retain?: (row: Route) => boolean): Set<EventId> => {
   const rows = Object.values(table);
   const incompleteBatches = new Set([...new Set(Object.values(table).flatMap((r) => r.batch ? [r.batch] : []))]
@@ -625,7 +617,8 @@ export const collectable = (table: Table, now: number, retain?: (row: Route) => 
     const hit = memo.get(r.event);
     if (hit !== undefined) return hit;
     memo.set(r.event, false); // 环保护: 回到自己 = 不收
-    const v = r.status === "handed" && now - Math.max(r.settledAt ?? r.deadlineAt, r.notice?.at ?? 0) >= TOMBSTONE_TTL_MS
+    const v = r.status === "handed" && r.settledAt !== undefined
+      && now - Math.max(r.settledAt, r.notice?.at ?? 0) >= TOMBSTONE_TTL_MS
       && !awaited.has(r.event) && (r.mergedInto ? !!table[r.mergedInto] && ok(table[r.mergedInto]!) : true)
       && (kids.get(r.event) ?? []).filter((child) => child.event !== r.event).every(ok);
     memo.set(r.event, v);
@@ -856,23 +849,15 @@ export const openRouter = (opts: { file?: string; note?: Note; retain?: (row: Ro
     return table;
   };
 
-  // Old journals may contain several unfinished rows for one pair. Preserve each
-  // old id as an alias, so delayed inputs never attach to a later task generation.
-  const batches = new Map<Key, string>();
+  // `commit(open|move)` appends that op before its follow-up merge op. A crash
+  // between the two leaves a current-format duplicate pair for this pass to finish.
   for (const row of allRows(table)) {
-    if (isLive(row) && row.receiver.kind === "wizard" && row.batch && !batches.has(row.receiver.to))
-      batches.set(row.receiver.to, row.batch);
-  }
-  for (const row of allRows(table)) {
-    if (!isLive(row)) continue;
-    const batch = row.receiver.kind === "wizard" ? row.batch ?? batches.get(row.receiver.to) ?? `batch:${row.event}` : undefined;
-    if (row.receiver.kind === "wizard" && batch) batches.set(row.receiver.to, batch);
-    const deadlineAt = unfinished(row) ? NO_DEADLINE : row.deadlineAt;
-    if (deadlineAt !== row.deadlineAt || batch !== row.batch)
-      commit({ op: "row", ...row, deadlineAt, ...(batch ? { batch } : {}) });
-    if (!unfinished(row)) continue;
-    const pair = taskOf(table, row.owner, row.receiver);
-    if (pair && pair.event !== row.event) commit({ op: "merge", event: row.event, into: pair.event, at: Date.now() });
+    const current = routeOf(table, row.event);
+    if (!current || !unfinished(current)) continue;
+    if (current.deadlineAt !== NO_DEADLINE) throw new Error(`unfinished route row ${current.event} has a deadline`);
+    const pair = taskOf(table, current.owner, current.receiver);
+    if (pair && pair.event !== current.event)
+      commit({ op: "merge", event: current.event, into: pair.event, at: Date.now() });
   }
 
   return {

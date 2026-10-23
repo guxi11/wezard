@@ -182,7 +182,7 @@ export interface ReceiptRoute {
  *  `act`: 缺省是一件活; ask = 只答一问; fyi = 知会, 不用回。
  *  `re`: 续问 (接着那一笔说)。
  *  `quiet`: 发话方不收回执 (fyi 一定是; task 带 receipt:false 也是)。 */
-export interface TurnTag { re?: boolean; legs?: number; deadline?: number; act?: "ask" | "fyi"; quiet?: boolean; asker?: Asker }
+export interface TurnTag { re?: boolean; legs?: number; act?: "ask" | "fyi"; quiet?: boolean; asker?: Asker }
 
 const askerAttrs = (asker?: Asker): Attrs => asker
   ? { "asker-user": asker.who, "asker-chat": asker.chat } : {};

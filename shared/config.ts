@@ -92,9 +92,7 @@ const Mirror = z.object({
   jobsFile: z.string().default("~/.wezard/jobs.json").describe("工单账本文件"),
   // 落盘是为了扛住 reload —— 被派活的 wizard 自己常以 reload 收尾, 纯内存的话它那
   // 一份回执就跟着旧进程没了。
-  receiptsFile: z.string().default("~/.wezard/receipts.json").describe("工作流存档 (`.nodes.json` / `.plans.json`) 的路径前缀; 旧回执登记文件已随 T10 退役"),
-  // 停放着的活 (tell_peer 的 after): 前置没落定、还没投出去的那些。与回执登记分开存 —— 槽按 from→to 一对一份, 停放件不能占槽。
-  holdsFile: z.string().default("~/.wezard/holds.json").describe("停放中的 tell_peer (after 依赖) 登记文件"),
+  receiptsFile: z.string().default("~/.wezard/receipts.json").describe("工作流存档 (`.nodes.json` / `.plans.json`) 的路径前缀"),
   pendingFile: z.string().default("~/.wezard/pending.json").describe("挂起事项表: 各 wizard 派出去、还没了结的事"),
   // 同理扛 reload: 落在「杀了旧 pane、还没贴回简报」之间, 纯内存的话新会话就空着
   // 醒来, 简报跟着旧进程没了。

@@ -34,8 +34,6 @@ export interface Tell {
   /** 这一轮服务的那一笔 (路由 event)。 */
   event?: string;
   legs?: number;
-  /** Legacy wire field; unfinished tasks use NO_DEADLINE. */
-  deadlineAt?: number;
   /** 守护进程因为不合工单验收打回过一次, 这是被打回的那段原文 —— 再交上来的照收, 不再打回。 */
   bounced?: string;
   /** 发话方那一轮的链头 (见 Asker): 回执带回去, 子活再派下去时继承。 */

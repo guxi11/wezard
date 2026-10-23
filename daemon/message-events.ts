@@ -162,7 +162,6 @@ export interface MessageAdapters {
   task?: (event: MessageEvent) => string | undefined;
   retain?: (event: MessageEvent) => boolean;
   resultBindings?: (event: MessageEvent, body: string) => MessageEvent["resultRoutes"];
-  receiptBatch?: (event: EventId) => string | undefined;
   valid: (event: MessageEvent) => boolean;
   accepted: (event: MessageEvent) => void;
   committed: (event: MessageEvent) => void;
@@ -199,13 +198,7 @@ export const rejectedAck = (e: unknown): boolean => !!e && typeof e === "object"
   && typeof (e as { errcode?: unknown }).errcode === "number" && (e as { errcode: number }).errcode !== 0
   && typeof (e as { errmsg?: unknown }).errmsg === "string" && !!(e as { headers?: unknown }).headers;
 
-/** Legacy inbox rows retain their original receipt identity while acquiring structured facts. */
-export const receiptFacts = (e: MessageEvent): ReceiptFact[] => e.payload.receipts ??
-  (e.payload.peer?.from.receipt ? [{ event: e.payload.peer.from.event ?? e.id,
-    version: e.payload.peer.from.event && e.id.startsWith(`rcpt:${e.payload.peer.from.event}:`)
-      ? e.id.slice(`rcpt:${e.payload.peer.from.event}:`.length).split("~")[0]! : e.id, status: e.payload.peer.from.status ?? "done", body: e.payload.text,
-    receiver: { kind: "wizard", to: e.target, ...(e.serves ? { event: e.serves } : {}) },
-    speaker: e.speaker, envelope: e.payload.peer.envelope }] : []);
+export const receiptFacts = (e: MessageEvent): ReceiptFact[] => e.payload.receipts ?? [];
 /** Receipt QUIET is a whole-message control word, never a suffix of a real answer. */
 export const receiptQuiet = (e: MessageEvent, body: string): boolean =>
   !!e.payload.peer?.from.receipt && !e.payload.human && !e.interjected && body.trim() === "QUIET";
@@ -251,39 +244,29 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     if (!e || e.id !== id || typeof e.fingerprint !== "string" || !e.target || typeof e.speaker !== "string" || typeof e.channel !== "string" || (e.serves !== undefined && typeof e.serves !== "string") || !e.payload || typeof e.payload.text !== "string" || ([e.payload.human, e.payload.peer, e.payload.handoff].filter(Boolean).length !== 1) || !Number.isFinite(e.at) || !Number.isFinite(e.attempts) || !Number.isFinite(e.deadline) || !["queued", "dispatching", "awaiting-result", "complete", "canceled", "uncertain"].includes(e.execution)) throw new Error(`invalid message event ${id}`);
     if (e.payload.receipts !== undefined && (!e.payload.peer?.from.receipt || !Array.isArray(e.payload.receipts)
         || !e.payload.receipts.every(receiptFactOk))) throw new Error(`invalid receipt facts ${id}`);
-    if (e.resultRoutes !== undefined && (!e.resultRoutes || typeof e.resultRoutes !== "object"
+    if (e.payload.peer?.from.receipt && !e.finalized && (!Array.isArray(e.payload.receipts) || !e.payload.receipts.length
+        || e.payload.receipts.some((f) => !receiptFactOk(f)))) throw new Error(`unsupported legacy receipt event ${id}; refusing to infer durable facts`);
+    if (!e.finalized && e.resultRoutes !== undefined && (!e.resultRoutes || typeof e.resultRoutes !== "object"
+        || Object.keys(e.resultRoutes).some((key) => key.startsWith("legacy:"))
         || !Object.values(e.resultRoutes).every((b) => !!b && typeof b.receiver === "string" && !!b.receiver
           && (b.event === null || typeof b.event === "string" && !!b.event)
-          && (b.inputs === undefined || Array.isArray(b.inputs) && b.inputs.every((id) => typeof id === "string" && !!id))))) throw new Error(`invalid result bindings ${id}`);
+          && Array.isArray(b.inputs) && b.inputs.every((id) => typeof id === "string" && !!id)))) throw new Error(`invalid result bindings ${id}`);
     if (e.inputIds !== undefined && (!Array.isArray(e.inputIds) || !e.inputIds.every((id) => typeof id === "string" && !!id))) throw new Error(`invalid input coverage ${id}`);
     if (e.payload.handoff && (typeof e.payload.handoff.pane !== "string" || !e.payload.handoff.pane || typeof e.payload.handoff.sessionId !== "string" || !e.payload.handoff.sessionId || !e.id.startsWith("handoff:"))) throw new Error(`invalid handoff event ${id}`);
     const clear = e.payload.handoff?.clear;
     if (e.payload.handoff && e.id.endsWith(":carry") && (!clear || clear.pane !== e.payload.handoff.pane || clear.nextSid !== e.payload.handoff.sessionId || !Number.isSafeInteger(clear.pid) || clear.pid <= 0 || !Number.isSafeInteger(clear.panePid) || !clear.panePid)) throw new Error(`invalid handoff clear evidence ${id}`);
   });
-  const durableRoutes = Object.fromEntries(Object.values(db.all())
-    .filter((e): e is MessageEvent => !isTomb(e) && (!!e.serves || e.id.startsWith("route:") || e.id.startsWith("rcpt:")) && e.deadline < NO_DEADLINE)
-    .map((e) => [e.id, { ...e, deadline: NO_DEADLINE }]));
-  if (Object.keys(durableRoutes).length) db.merge(durableRoutes);
-  const batchedReceipts = Object.fromEntries(Object.values(db.all()).flatMap((e) => {
-    if (isTomb(e) || !e.payload.peer?.from.receipt) return [];
-    const receipts = receiptFacts(e).map((f) => ({ ...f, batch: f.batch ?? io.receiptBatch?.(f.event) }));
-    return JSON.stringify(receipts) === JSON.stringify(e.payload.receipts) ? [] : [[e.id, { ...e, payload: { ...e.payload, receipts } }]];
-  }));
-  if (Object.keys(batchedReceipts).length) db.merge(batchedReceipts);
+  Object.values(db.all()).forEach((e) => {
+    if (isTomb(e)) return;
+    if (!e.finalized && (e.serves || e.id.startsWith("route:") || e.id.startsWith("rcpt:")) && e.deadline !== NO_DEADLINE)
+      throw new Error(`unsupported expiring route event ${e.id}; refusing to migrate legacy event state`);
+  });
   Object.entries(outbox.all()).forEach(([id, d]) => {
     if (d?.coverage !== undefined && !coverageOk(d.coverage)) throw new Error(`invalid final coverage ${id}`);
     if (!d || d.id !== id || !Array.isArray(d.parts) || d.parts.length !== d.chunks?.length || !d.chunks.every((c) => typeof c === "string") || !d.parts.every((p) => ["pending", "sending", "waiting-ack", "delivered", "uncertain", "failed"].includes(p.state)) || !d.channel) throw new Error(`invalid final delivery ${id}`);
+    if (!d.purpose && d.eventId === `quiet:${d.target}:${d.turn}` && d.parts.some((part) => part.state !== "delivered"))
+      throw new Error(`active quiet delivery ${id} has no durable purpose`);
   });
-  // Unknown legacy text cannot certify that its input facts were reported.
-  const migrated = Object.fromEntries(Object.values(outbox.all()).flatMap((d): Array<[string, FinalDelivery]> => {
-    // Quiet schedules have their own durable intent, without a message inbox row.
-    if (!d.purpose && d.eventId === `quiet:${d.target}:${d.turn}`) return [[d.id, { ...d, purpose: "task" as const }]];
-    if (d.coverage || d.purpose === "progress" || !d.eventId || (d.reportKind !== "done" && d.reportKind !== "need")) return [];
-    const e = db.get(d.eventId!);
-    const coverage = e && !isTomb(e) ? receiptCoverage(e, d.channel, d.reportKind === "need", d.body) : undefined;
-    return coverage ? [[d.id, { ...d, coverage }]] : [];
-  }));
-  if (Object.keys(migrated).length) outbox.merge(migrated);
   /** 调度只看活行; 墓碑只给 accept 判重 (与 `known`)。 */
   const live = (id: string): MessageEvent | undefined => { const x = db.get(id); return x && !isTomb(x) ? x : undefined; };
   const sourceOf = (id: string): EventAuthority | undefined => {
