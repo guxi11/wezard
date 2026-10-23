@@ -8,6 +8,7 @@ import { DAEMON_TOKEN_HEADER, readDaemonToken } from "../shared/daemon-token.js"
 import { EFFORTS } from "../shared/effort.js";
 import { TIERS } from "../shared/config.js";
 import { WorkflowPlanInputSchema } from "../shared/workflow-plan.js";
+import { present, recovery } from "./output.js";
 
 const DAEMON_BASE = process.env.WEZARD_DAEMON_BASE ?? "http://127.0.0.1:17890";
 
@@ -263,13 +264,18 @@ const daemonGet = async (path: string): Promise<DaemonReply> => {
 
 // Routes answer with either `reason` or `error`; `pick` narrows a payload that
 // is nested rather than spread at the top level (wedoc's `result`).
-const unwrap = (name: string, { j, status }: DaemonReply, pick: (j: Record<string, unknown>) => unknown = (x) => x) =>
-  j.ok ? ok(pick(j)) : fail(`${name} failed: ${(j.reason ?? j.error ?? `http ${status}`) as string}`);
+const unwrap = (name: string, { j, status }: DaemonReply, pick?: (j: Record<string, unknown>) => unknown, input?: Record<string, unknown>) =>
+  j.ok ? ok(present(name, pick ? pick(j) : j, input)) : fail(`${name} failed: ${(j.reason ?? j.error ?? `http ${status}`) as string}${Object.keys(recovery(j)).length ? `\n${JSON.stringify(recovery(j))}` : ""}`);
 
 // 读侧工具 (名册 / 对话 / 聊天记录) 的回执是守护进程排好的**文本**, 原样交出去:
 // 这些东西是给模型读的, 包一层 json 只是让它为字段名和转义的换行多付 token。
 const unwrapText = (name: string, r: DaemonReply) =>
   r.j.ok && typeof r.j.text === "string" ? { content: [{ type: "text" as const, text: r.j.text }] } : unwrap(name, r);
+
+const unwrapCandidates = (r: DaemonReply) =>
+  r.j.ok && typeof r.j.text === "string"
+    ? { content: [{ type: "text" as const, text: r.j.text.replace("; diagnostics 保留全量。", "。") }] }
+    : unwrap("route_candidates", r);
 
 // 地址语法只有一套, 每个吃地址的工具都把它原样重述一遍: 模型单看一个 schema
 // 时没有别的地方能学到它, 而猜出来的地址会安静地指向另一个 wizard 的终端。
@@ -328,7 +334,11 @@ server.registerTool(
   },
   async ({ name }) =>
     name === undefined
-      ? unwrap("name_chat", await daemonPost("/chats/list", {})) // read-only path: roster carries this chat's name
+      ? unwrap("name_chat", await daemonPost("/chats/list", {}), (j) => {
+          const chats = Array.isArray(j.chats) ? j.chats as Record<string, unknown>[] : [];
+          const current = chats.find((c) => c.self === true);
+          return current ? { name: current.name } : {};
+        })
       : unwrap("name_chat", await daemonPost("/chats/name", { name })),
 );
 
@@ -436,15 +446,15 @@ const TELL_SCHEMA = {
 };
 
 server.registerTool("workflow_nodes", {
-  description: "Query your persistent node/attempt history, receipt execution status and independent acceptance. digest binds verdict to result body.",
+  description: "Query your persistent node/attempt history, receipt execution status and independent acceptance. digest binds verdict to result body. The response keeps acceptance evidence and result content while omitting duplicated dispatch instructions.",
   inputSchema: { job: z.string().optional() },
 }, async (a) => unwrap("workflow_nodes", await daemonPost("/workflow/nodes", a)));
 registerTool("workflow_plan_create", {
-  description: "Start one immutable version-1 segment in your dedicated empty open job. At most five static nodes, all-accepted dependencies, one execution/validation at a time. Executors are spawned blank at their tier only when ready. The job/executors reject external tasks; only exact owner re can continue an existing attempt. Owner must use workflow_verdict for every result; NEED/error/unknown pause without replay. Job budget is inherited; no auto-retry or automatic acceptance. Repeating create returns existingRun to recover a lost response, without updating or restarting it.",
+  description: "Start one immutable version-1 segment in your dedicated empty open job. At most five static nodes, all-accepted dependencies, one execution/validation at a time. Executors are spawned blank at their tier only when ready. The job/executors reject external tasks; only exact owner re can continue an existing attempt. Owner must use workflow_verdict for every result; NEED/error/unknown pause without replay. Job budget is inherited; no auto-retry or automatic acceptance. Repeating create returns existingRun to recover a lost response, without updating or restarting it. The response omits node task text and internal dispatch instructions while preserving ids and acceptance evidence.",
   inputSchema: WorkflowPlanInputSchema,
 }, async (a) => unwrap("workflow_plan_create", await daemonPost("/workflow/plans/create", a)));
 registerTool("workflow_plan_status", {
-  description: "Inspect your fixed workflow segment, executor creation evidence and authoritative execution/acceptance. Unknown birth or delivery requires reconciliation; status never replays a task.",
+  description: "Inspect your fixed workflow segment, executor creation evidence and authoritative execution/acceptance. Unknown birth or delivery requires reconciliation; status never replays a task. The response preserves digests, file hashes and result bodies but omits node task text and internal dispatch instructions.",
   inputSchema: z.object({ run: z.string() }).strict(),
 }, async (a) => unwrap("workflow_plan_status", await daemonPost("/workflow/plans/status", a)));
 registerTool("workflow_plan_cancel", {
@@ -452,13 +462,13 @@ registerTool("workflow_plan_cancel", {
   inputSchema: z.object({ run: z.string(), reason: z.string().trim().min(1) }).strict(),
 }, async (a) => unwrap("workflow_plan_cancel", await daemonPost("/workflow/plans/cancel", a)));
 server.registerTool("workflow_verdict", {
-  description: "Owner validates a terminal done attempt by digest. accepted/rejected is semantic judgment, not RESULT format. All declared ARTIFACT paths require complete absolute files+sha256 evidence. Pure text may omit files. Accepted files gain readonly content-addressed snapshots; after passes snapshot paths and checks versions at physical paste/submit. sent reconciles uncertain dispatch and idempotently restores job/member/budget/ledger and receipt watching (unknown is already conservatively charged); stopped requires evidence execution cannot continue and permits retry. No automatic replay or process stop is implied.",
+  description: "Owner validates a terminal done attempt by digest. accepted/rejected is semantic judgment, not RESULT format. All declared ARTIFACT paths require complete absolute files+sha256 evidence. Pure text may omit files. Accepted files gain readonly content-addressed snapshots; after passes snapshot paths and checks versions at physical paste/submit. sent reconciles uncertain dispatch and idempotently restores job/member/budget/ledger and receipt watching (unknown is already conservatively charged); stopped requires evidence execution cannot continue and permits retry. No automatic replay or process stop is implied. The response omits repeated dispatch instructions while preserving digest and file evidence.",
   inputSchema: { attemptId: z.string(), as: z.enum(["accepted", "rejected", "sent", "stopped"]), digest: z.string().optional(), reason: z.string().min(1), files: z.array(z.object({ path: z.string(), sha256: z.string() })).optional() },
 }, async (a) => unwrap("workflow_verdict", await daemonPost("/workflow/verdict", a)));
 
 const TELL_DESC =
   "跟另一个 wizard 说话 —— 文本原样落进它的输入框, 它当成新的一轮接手 (派活、答它的问题、叫它继续都走这里)。目标不存在就先 spawn_wizard / clone_wizard。独立新活先按目标与难度 dispatch; re / now 仅用于当前任务的补充证据、纠正或答问, 不把无关小活追加给正在处理复杂任务的 lead, 也不要用 ask 包装需要另行检查的新任务。\n" +
-  "**说完就返回**: 对方用 `@.你的名字 RESULT:` 提交结果后, 结果持久化为回执；同批结果收齐再合并送到你这里, 你正忙时排队。等待回执不阻止你接收其他消息。\n" +
+  "返回实际队列状态、事件标识及异常信息，不重复固定回执提示。对方用 `@.你的名字 RESULT:` 提交结果后, 结果持久化为回执；同批结果收齐再合并送到你这里, 你正忙时排队。等待回执不阻止你接收其他消息。\n" +
   "默认私聊, 只记在双方 rolepage; 守护进程给 `text` 挂信封 (发话人、私聊/公开、终句收口约定)。拒绝对自己发送。\n" +
   "**派活方向 (守护进程拦, 返回 409 带改道说法)**: 带 `job` 的 task 只许开单者发; 同一张单的成员之间只许 `ask` / `fyi`, 不横向派 task; 上级单的开单者不越级给下层成员派活 (经它的 lead `re`); 目标正等你答复或位于你的 wizard 祖先链, 本身不构成 task/ask 禁派条件; 反问或新工作分别用 `kind:\"ask\"` / 默认 task 发起; 自己已在 ≥3 层派活链底部不再往下派 task; 借来的专家 (role expert) 只答 ask; 一个 wizard 同时只在一张开着的单里当未落定的执行者。`fyi` 永远放行。";
 
@@ -693,7 +703,7 @@ server.registerTool(
       "`when` 用人话原样写, 别翻译成 cron (「每个工作日晚上9:30」「每隔两个小时」「白天每小时」「20 分钟后」「明早 9 点」都认); 解析不出会报错 —— 把原话回给用户让他重说, 别自己猜。\n" +
       "**默认到点新起一个白板 wizard** (`<你>-task-xxxx`) 执行, 干完自动收掉; 只有用户明说「在 .foo 里继续」才传 `name` 投进那个已有会话 (它到点正忙就等它这一轮结束再投, 等满 30 分钟仍忙才另起白板执行; prompt 本身要求「建 wizard 去干」时也照新建办, 除非显式传 `fresh:false`)。所以 `prompt` 要写成零上下文也能执行的完整指令。\n" +
       "「有新东西才处理」写成任务文件里的 gate (没活这一轮就不放枪), 别让到点起的 wizard 自己看一眼没有就退出 —— 那是每轮空转一个 pane。\n" +
-      "存成功后**必须把回显的 `when` 和 `next` 念给用户确认**。任务落成可直接改的 `~/.wezard/tasks/<id>.task.mjs` (返回的 `file`): 组合触发条件、「有活才放枪」的 gate、暂停, 都 Read 那个文件 —— 写法在它的头注释里, 存盘即生效。",
+      "成功返回任务 id、实际时间、目标和任务文件位置，不回显 prompt 正文。任务文件可直接编辑以改触发条件、配置 gate 或暂停。存成功后必须把回显的 `when` 和 `next` 念给用户确认。",
     inputSchema: {
       when: z.string().describe("什么时候跑, 人话原样传: 「每个工作日晚上9:30」「每天早上9点」「白天每隔一个小时」「工作时间每半小时」「每30分钟」「20分钟后」「明早9点」。时间窗口 (白天 / 工作时间 / 8点到20点) 会被解析成筛子, 窗外的那些枪直接吞掉。"),
       prompt: z.string().describe("到点要说给那个 wizard 听的话。写成自洽的完整指令 (要做什么、在哪个目录/文件上、做完怎么汇报), 别依赖当前对话的上下文。里面可以留 `{{名字}}` 占位, 由任务文件里的 gate 填。"),
@@ -787,7 +797,7 @@ server.registerTool(
   {
     title: "Who am I",
     description:
-      "你自己是谁: 全局唯一的名字 (即地址, 别人用它找你)、home 聊天、工作区、职责、记忆、家谱 (谁生的你、你生了谁), 以及此刻的 contextTokens 与 handoffSuggested。用户问「你是谁」「你叫什么」「你在哪个目录」「你有几个分身」时先调它; 要做任何编排之前也先调它 —— 你得知道自己的工作区在哪、手里已经有哪些分身。handoffSuggested=true 表示上下文已过交接判断线 (200k): 手上这摊告一段落、或往后的活不再依赖前面的材料, 就 handoff。",
+      "返回当前动态状态: name、cwd / pendingCwd、model、cli、effort、contextTokens、handoffSuggested、clones 与 peers。用户问你在哪、上下文是否该交接或手上有哪些分身时调用。",
     inputSchema: {},
   },
   async () => unwrap("wizard_whoami", await daemonPost("/wizard/whoami", {})),
@@ -798,7 +808,7 @@ server.registerTool(
   {
     title: "Name yourself / declare your job",
     description:
-      "改名字、写职责。名字就是别人喊你的那个词 (`.name`), **全机唯一**, 与聊天名无关 (给聊天起名用 name_chat): 撞名时自动加 `-N` 后缀, 返回里的 `name` 是落定的那个, `renamed` 会告诉你发生了改写。职责是一句话的「我是干什么的」—— 别的 wizard 在名册里读到它, 据此决定该不该找你。用户说「你以后叫 X」「你负责 X」时调它;只传要改的那个字段。",
+      "修改自己的全局唯一 name、description 或 expertise。返回最终 name、被修改字段及可选 renamed。",
     inputSchema: {
       name: z.string().optional().describe("新名字, 1-32 位字母/数字/`_`/`-`, 全机唯一。不改就别传。"),
       description: z.string().optional().describe("一句话职责, 例如 '盯 wezard 主仓的重构与发版'。不改就别传。"),
@@ -810,7 +820,7 @@ server.registerTool(
       ...(name !== undefined ? { name } : {}),
       ...(description !== undefined ? { description } : {}),
       ...(expertise !== undefined ? { expertise } : {}),
-    })),
+    }), undefined, { name, description, expertise }),
 );
 
 server.registerTool(
@@ -843,7 +853,7 @@ server.registerTool(
   {
     title: "Who could take this task",
     description:
-      "一件活要不要转给**已有**的 wizard, 拿不准该给谁、或拿不准值不值时调它。守护进程列出职责 / 最近问话 / 文件线索、lead 与工单/回执占用、上下文连续性、忙闲、ctx 和缓存成本, 并说明自动复用为何受阻。公共 AGENTS.md/CLAUDE.md 等指引文件不算复用证据; 同工作区、同名文件或职责撞词也不证明是同一任务。候选按线索排序不等于推荐追加任务; 不要给正在处理复杂任务的 lead 塞独立核查。真实同验收目标续篇用 tell_peer 的 re; 独立新活按本次难度 dispatch, 可复用近期实际材料相关、空闲且无职责占用的非 lead, 证据不足再白板 spawn。",
+      "一件活要不要转给已有 wizard 时调它。只返回按 limit 截断的候选文本，不包含完整诊断或未展示候选。候选排序不等于推荐追加任务；独立新活按本次难度 dispatch，同验收目标续篇用 tell_peer 的 re。",
     inputSchema: {
       task: z.string().describe("这件活及验收目标, 原话或一句概括都行。文件名 / 模块名 / 函数名帮助找线索; 公共规则文件、同工作区和关键词重叠不证明是同一任务。"),
       cwd: z.string().optional().describe("这件活落在哪个工作区。省略 = 你自己的工作区。"),
@@ -853,7 +863,7 @@ server.registerTool(
     },
   },
   async ({ task, cwd, limit, tier, force }) =>
-    unwrap("route_candidates", await daemonPost("/wizard/route", { task, ...(tier ? { tier } : {}), ...(force !== undefined ? { force } : {}), ...(cwd ? { cwd } : {}), ...(limit ? { limit } : {}) })),
+    unwrapCandidates(await daemonPost("/wizard/route", { task, ...(tier ? { tier } : {}), ...(force !== undefined ? { force } : {}), ...(cwd ? { cwd } : {}), ...(limit ? { limit } : {}) })),
 );
 
 server.registerTool(
@@ -861,7 +871,7 @@ server.registerTool(
   {
     title: "Dispatch a task (default decision by the daemon)",
     description:
-      "派活一步到位: 给 task (正文) 或 taskFile+params (模板展开) 二者之一; name / description 可省略, 新建时自动取名并用任务文本补职责。守护进程查候选 (同 route_candidates) → 过成本门控 → 决定转给已有的 wizard 还是按档白板 spawn → 用 tell_peer 投出去 (默认公开: 气泡与它的回复进你这一轮的群, 回执照常回你), 返回 `decision` (existing / spawn)、`reason`、落到谁 (`name`)、件号 `turn`, spawn 的还有 `tier` / `model`。\n" +
+      "派活一步到位: 给 task 或 taskFile+params。返回实际决定、目标与派活标识、队列/停放状态及适用的 job、node、档位和异常警告；dryRun 只返回决定与简短理由。默认公开；带 job 的派活始终私聊。\n" +
       "先按验收目标分清独立新活和原任务续篇。独立新活另派不等于强制新生, 允许复用近期实际材料相关、空闲且无职责占用的非 lead; 按本次难度派, 不因同项目、公共 AGENTS.md/CLAUDE.md 或词面重叠塞给已有 lead。自动复用要求实质上下文证据、无 lead/任务占用、成本合适; 其余白板 spawn。难度看所需判断而非句长: 指明函数、接口、文件、按钮等具体对象且范围清楚的低风险 coding 默认 light; 其他常规任务默认 standard; 只有复杂方案判断、疑难升级或安全/并发/架构等高风险审查才显式 hard。\n" +
       "你不同意就**显式推翻**: `to` 用于人明确指定或已确认必需的上下文连续性, `spawn:true` 硬要新的, `force:true` 只越过缓存成本门控, 不放宽自动复用的相关性/lead/占用约束。同一验收目标的续篇用 tell_peer 的 re, 不能用 re/to 给复杂 lead 顺便追加独立小活。`lead:true` = 需要统筹多轮协作的复杂活: 白板起 lead 由它制定计划、安排执行并验收; 常规 coding 不默认增加 hard reviewer, 需要独立审查时按需选择 light / standard / hard, 仅高风险判断才用 hard。",
     inputSchema: {
@@ -946,7 +956,7 @@ const bear = (tool: string, inherit: boolean) => async (a: Offspring) => {
   // 见 offspringShape 的 taskFile 注释: 出生投递没有模板展开这一站。
   if (a.taskFile !== undefined || a.params !== undefined)
     return fail(`taskFile not supported on ${tool}; use dispatch`);
-  return unwrap(tool, await daemonPost("/wizard/clone", {
+  return unwrap(inherit ? "clone_wizard" : "spawn_wizard", await daemonPost("/wizard/clone", {
     inherit,
     description: a.description,
     ...(a.name ? { name: a.name } : {}),
@@ -976,7 +986,7 @@ server.registerTool(
     title: "Spawn a blank child wizard",
     description:
       "**从白板生**一个子 wizard —— 新的 tmux pane、自己的全局名字 (`.name`)、自己的职责, 归你管 (家谱里挂在你名下)。它**不继承你的任何上下文**, 只拿到身份。适合干一件与你手头无关的事, 或者要去别的目录 (`cwd`) / 别的聊天里干活。要一个开局就带着你读过的材料的, 用 clone_wizard。\n" +
-      "带上 `task` 可以在它就位的同时把第一件活私聊派下去, 省掉一次 tell_peer; 要它的回复进群, 就别带 task, 就位后用 `tell_peer({public:true})` 转给它。" +
+      "带上 `task` 可以在它就位的同时把第一件活私聊派下去, 省掉一次 tell_peer; 要它的回复进群, 就别带 task, 就位后用 `tell_peer({public:true})` 转给它。返回 name、cwd、继承状态、实际模型/档位、派活队列标识、job、detached 与警告。" +
       OFFSPRING_TAIL,
     inputSchema: {
       ...offspringShape,
@@ -995,7 +1005,7 @@ server.registerTool(
     description:
       "**克隆**一个 wizard 出分身 —— fork 它此刻的上下文: 分身开局就拥有它已经读过的一切 (规范、目录结构、刚啃完的那份文档), 不必重读; 被克隆的那个毫发无损。默认克隆你自己; `from` 点名就克隆别的 wizard (比如一个已经把某个模块啃透的同伴) —— 分身仍归你管 (占你的名额), 只是上下文来自它。分身留在被克隆者的工作区。\n" +
       "要白纸一张、或要去别的目录, 用 spawn_wizard。被克隆者正在干活时, 分身拿到的是它此刻为止的上下文 —— 想要它读完再分: 是你派的活就等它的回执, 否则先 `wait_peer` 等它停下 (或看 wizard_roster 的忙闲)。\n" +
-      "带上 `task` 可以在它就位的同时把第一件活私聊派下去 (分叉本来就由第一句话触发, 省一次往返)。" +
+      "带上 `task` 可以在它就位的同时把第一件活私聊派下去 (分叉本来就由第一句话触发, 省一次往返)。返回 name、cwd、继承状态、实际模型/档位、派活队列标识、job 与警告。" +
       OFFSPRING_TAIL,
     inputSchema: {
       ...offspringShape,
@@ -1014,7 +1024,7 @@ server.registerTool(
   {
     title: "Open a job for a fan-out",
     description:
-      "开一个**工单**: 你接下来要同时派出两个以上的分身干同一件事时, 先开它。返回一个 id, 把这个 id 传给 spawn_wizard / clone_wizard / tell_peer 的 `job` 参数, 它们就归到这个工单名下。\n" +
+      "开一个**工单**: 多个分身共同完成一件事时使用。返回 job id、parent (如有) 与成员上限。\n" +
       "开了工单之后有三件事不一样: ① 带这个 id 的派活一律私聊, 开工、派活、回执、收工都**不进群** —— 结构在 rolepage 的工单页里, 人在群里只看到你自己那一轮的最终回复。② list_jobs 能看到还开着哪些活。③ 默认不做格式验收；显式设置 `accept:result` 或 `artifact` 时，成员答复不符合格式要求， 守护进程以你的名义同件号打回一次, 那一份不投给你、不计数, 也不占 `maxTurns`; 再交上来的照收。\n" +
       "只派一个分身、或者只是推某个同伴一把, 不用开工单。",
     inputSchema: {
