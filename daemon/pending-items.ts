@@ -36,7 +36,6 @@ export interface Item {
   /** 这一笔的结论收给谁 (派活那一刻从路由行拷的快照): 群里那句人话 / 上游某一笔。 */
   receiver?: Receiver;
   asker?: Asker;
-  job?: string;
   at: number;
   /** 最近一次有动静 (派出 / 续问 / 回执) —— 「挂了很久没人提」从它算。 */
   touched: number;
@@ -75,16 +74,15 @@ const isFailure = (st?: ReceiptStatus): boolean => st === "timeout" || st === "s
 
 export interface Ledger {
   /** Idempotent tracked projection; recovery never reopens a settled leg. */
-  dispatch: (key: string, x: { event: string; turn?: string; owner: string; to: string; text: string; receiver?: Receiver; asker?: Asker; job?: string; at: number }) => void;
+  dispatch: (key: string, x: { event: string; turn?: string; owner: string; to: string; text: string; receiver?: Receiver; asker?: Asker; at: number }) => void;
   /** 一次新派活。同一对之前还开着的那件被顶掉 (回执登记也是一对一份, 旧那份不会再回来)。 */
-  open: (x: { event: string; turn?: string; owner: string; to: string; text: string; receiver?: Receiver; asker?: Asker; job?: string; at: number }) => void;
+  open: (x: { event: string; turn?: string; owner: string; to: string; text: string; receiver?: Receiver; asker?: Asker; at: number }) => void;
   /** 续问 (`re`) —— 同一件接着说: 清掉「等人」, 回到在飞; 已关掉的重新打开。`id` = event 或老件号。 */
   touch: (owner: string, id: string) => void;
   /** 回执落了一份。`bySender` = 发话方自己收掉 / 取走的, 它自己知道, 直接关。 */
   outcome: (owner: string, event: string, status: ReceiptStatus, body: string, bySender?: boolean) => void;
   /** 显式消项; 返回消掉的。 */
   drop: (owner: string, events: readonly string[], why: string) => Item[];
-  closeJob: (job: string) => void;
   openOf: (owner: string) => Item[];
   /** 改一行 (提醒标记 / 人已回话)。 */
   put: (x: Item) => void;
@@ -133,7 +131,6 @@ export const createLedger = (store: JsonMap<Item>, now: () => number = Date.now)
       hit.forEach((x) => close(x, why || "发话方消掉"));
       return hit;
     },
-    closeJob: (job) => all().filter((x) => !x.closed && x.job === job).forEach((x) => close(x, "工单收了")),
     openOf: (owner) => all().filter((x) => !x.closed && x.owner === owner).sort((a, b) => a.at - b.at),
     put: (x) => { store.set(x.event, x); },
   };
@@ -167,36 +164,13 @@ export const renderRow = (x: Item, live: LiveOf, n: Names, at: number): string =
     `- \`${x.event}\` → ${n.nameOf(x.to)} · ${stateOf(x, live, at)} ${ago(at - (x.waitHuman ?? x.at))}`,
     `「${x.topic}」`,
     forOf(x, n),
-    x.job ? `工单 ${x.job}` : "",
   ].filter(Boolean).join(" · ") + (x.ask ? `\n  它问: ${x.ask}` : "");
 
 const HOWTO = "答它 / 转达人的话 → `tell_peer({name, re: true})`; 没结论的改派或 re 追问; 不再要了 → `pending_items({drop:[<name>]})`";
 
-/** 等人验收的一行: 需求已交付、根单还开着, 等人说「好」或「不对」。 */
-export const renderAwaiting = (title: string, job: string, deliveredAt: number, at: number): string =>
-  `- 等验收 · ${title} (${job}) 交付于 ${at - deliveredAt < 60_000 ? "刚刚" : `${ago(at - deliveredAt)} 前`}`;
-
-/** lead 没交差的一行: 要管家重派或关单。 */
-export const renderStalled = (title: string, job: string, status: string): string =>
-  `- lead 没交差 (${status}) · ${title} (${job})`;
-
-const ACCEPT_HOWTO = "等验收的: 人认可 → `close_job(单号)` 归档; 人说不对 → `tell_peer({name: lead, re, job: 单号})` 返工 (同一张单); 人说不要了 → `close_job({job, as:\"cancel\"})`; 先放着 → `close_job({job, as:\"shelve\"})` (停提醒, 不关单)。对人别提单号。";
-const SHELVED_HOWTO = "搁置的: 人又提起 → `close_job({job, as:\"resume\"})` 恢复 (给 lead `re` 或带 `job` 派话也会自动恢复); 不要了 → `as:\"cancel\"`。";
-
-/** 搁置的一行: 需求根单被人说先放着, 账本留着、不再冒泡提醒。 */
-export const renderShelved = (title: string, job: string, heldAt: number, at: number): string =>
-  `- 搁置 · ${title} (${job}) 搁置于 ${at - heldAt < 60_000 ? "刚刚" : at - heldAt >= 24 * 3_600_000 ? `${Math.floor((at - heldAt) / (24 * 3_600_000))} 天前` : `${ago(at - heldAt)} 前`}`;
-const STALLED_HOWTO = "lead 没交差的: lead 还在 → `tell_peer({name: lead, re, job})` 叫它续; 否则 `close_job(单号)` 关掉, 需要的话重新 `dispatch({lead:true})` 开新单。";
-
-/** 读全表 (pending_items 的回包)。`awaiting` = 等验收的根单行 (见 renderAwaiting)。 */
-export const renderTable = (xs: readonly Item[], live: LiveOf, n: Names, at: number, awaiting: readonly string[] = [], stalled: readonly string[] = [], shelved: readonly string[] = []): string =>
-  xs.length || awaiting.length || stalled.length || shelved.length
-    ? [
-        ...(xs.length ? [`派出去还没了结的 ${xs.length} 件 (守护进程按回执算的):`, ...xs.map((x) => renderRow(x, live, n, at)), HOWTO] : []),
-        ...(awaiting.length ? [`等人验收的 ${awaiting.length} 件:`, ...awaiting, ACCEPT_HOWTO] : []),
-        ...(stalled.length ? [`卡住的需求单 ${stalled.length} 件:`, ...stalled, STALLED_HOWTO] : []),
-        ...(shelved.length ? [`搁置的 ${shelved.length} 件:`, ...shelved, SHELVED_HOWTO] : []),
-      ].join("\n")
+/** 读 receiver 欠账；plan 是否暂停/完成由 owner 自己管理。 */
+export const renderTable = (xs: readonly Item[], live: LiveOf, n: Names, at: number): string =>
+  xs.length ? [`派出去还没了结的 ${xs.length} 件 (由 receiver 回执计算):`, ...xs.map((x) => renderRow(x, live, n, at)), HOWTO].join("\n")
     : "没有挂着的事。";
 
 // ── 提醒 ────────────────────────────────────────────────────────────

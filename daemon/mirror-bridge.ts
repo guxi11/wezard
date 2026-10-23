@@ -53,12 +53,12 @@ import { renameWindow, runTmux, sparePoolFencedSids, spawnTmuxClaude } from "./s
 import { selectEffort, selectModel, type EffortSelectResult, type ModelScope, type ModelSelectResult } from "./model-select.js";
 import { parseEffort, type Effort } from "../shared/effort.js";
 import { hasRegistry, liveSessionPids, markTranscript, probeOf, readRegistry, registrySnapshot, sessionOfPid, sessionOnPane, submittedSince, submittedEventSince, watchRegistry, type LiveSession, type TranscriptMark } from "./wezard-session.js";
-import { waitForIdle, type IdleResult } from "./graph.js";
+import { waitForIdle, type IdleResult } from "./wait-idle.js";
 import { wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
 import { getDetail, knowsToolUse, recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnQuery, recordTurnInject, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, lastChannelOf, openTurnsOf, buildDetailUrl, buildChatUrl, roleUniq, markTurnTextFinal } from "./detail.js";
 import type { Asker } from "../shared/detail-store.js";
-import type { CtxCut, TurnFrom, TurnOrigin, TurnUsage } from "./detail.js";
+import type { CtxCut, TurnFrom, TurnUsage } from "./detail.js";
 import { errText } from "./last-response.js";
 import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, windowLabel, withTagHeader, withLinkedTagHeader, chatHead, headed, tagBadge, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey, sameBot } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
@@ -2570,11 +2570,9 @@ export interface MirrorBridge {
    *  the user sees the full PreToolUse → approval card → assistant mirror
    *  loop end-to-end. Skips the live-stream/replyStream machinery — the tail
    *  pushes assistant output via the standalone path. */
-  /** `fromChat`: 已无作用 —— 注入的轮一律不算 CLI 发起, 可见性只看 `channel`。
-   *  参数留着是因为调用方 (定时任务) 仍在传。 */
   /** `channel`: 这一轮的回复发去哪个公开频道 (base); "" = 私聊, 回复不进任何群,
    *  只落 turn 记录; 省略 = target 的 home。 */
-  injectText: (target: string, text: string, origin?: TurnOrigin, opts?: { fromChat?: boolean; from?: TurnFrom; channel?: string; envelope?: string; eventId?: string; guard?: DispatchGuard; requireIdle?: boolean; noRespawn?: boolean; handoff?: ClearAttempt }) => Promise<InjectResult>;
+  injectText: (target: string, text: string, opts?: { from?: TurnFrom; channel?: string; envelope?: string; eventId?: string; guard?: DispatchGuard; requireIdle?: boolean; noRespawn?: boolean; handoff?: ClearAttempt }) => Promise<InjectResult>;
   /** 原 pane 的原生清空事务; 已暴露的尝试只核验, 不重发。 */
   verifyClearContext: (target: string, clear: ClearAttempt) => Promise<boolean>;
   clearContext: (target: string, attempt: ClearAttempt | undefined, submitted: (attempt: ClearAttempt) => void, guard?: () => boolean) => Promise<{ ok: boolean; reason?: string }>;
@@ -2820,7 +2818,6 @@ interface Seal {
   from?: TurnFrom;
   channel?: string;
   speaker?: string;
-  origin?: TurnOrigin;
   /** 贴进去那一刻对方闲着 —— 这一行必定开新的一轮; 忙时贴进去的可能插进了正在跑的那一轮。 */
   fresh: boolean;
   /** 人从聊天里说的那一句: dispatch 预建的 turn 与气泡, 行一露面就接成活跃 turn。 */
@@ -2907,13 +2904,7 @@ interface AttachState {
    *  失败可重试的路径不清 —— 重投的下一条接着带。codex 不用: 它的宪章仍在
    *  developer_instructions 里, 再贴一份是重复。 */
   charterPending?: string;
-  /** 待记账的 graph 归因: injectText 盖章, 下一次 recordTurnStart
-   *  消费一次。带时间戳是因为注入未必真的开出一轮 (pane 死了 / 文本被吞), 陈旧的
-   *  印章若一直留着, 会把很久以后某条真人消息误标成 graph 派的。 */
-  pendingOrigin?: { origin: TurnOrigin; at: number };
-  /** 待记账的出处 (同伴派活 / 定时任务)。与 pendingOrigin 同一套一次性语义 ——
-   *  盖章、下一轮消费、超期作废。两个印章各走各的: graph 那一路两者都盖不上,
-   *  peer 那一路只有出处, 合成一个字段就得让读的人去猜哪几种组合合法。 */
+  /** Waits for the injected line to appear before attributing the turn to a peer. */
   pendingFrom?: { from: TurnFrom; at: number };
   /** 待记账的频道 (行露面时由 bindLine 从它的印章落下, 下一轮开 turn 时消费, 同一套一次性语义)。 */
   pendingChannel?: { channel: string; speaker?: string; at: number };
@@ -3908,21 +3899,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     log.info({ target, sessionId, cut }, "detail: context cut marked");
   };
 
-  // graph 归因同样一次性: 一次注入只解释它开出的那一轮。超过 ORIGIN_TTL_MS 还没被
-  // 认领 = 那次注入没能开出 turn, 印章作废 —— 宁可少标一轮, 也不能把人打的字冒认成
-  // graph 派的 (归因错了比没有更糟)。
-  const ORIGIN_TTL_MS = 5 * 60_000;
-  const consumeOrigin = (a: AttachState): TurnOrigin | undefined => {
-    const p = a.pendingOrigin;
-    a.pendingOrigin = undefined;
-    return p && Date.now() - p.at <= ORIGIN_TTL_MS ? p.origin : undefined;
-  };
-
+  const PENDING_FROM_TTL_MS = 5 * 60_000;
   /** 同上, 出处那一枚印章。 */
   const consumeFrom = (a: AttachState): TurnFrom | undefined => {
     const p = a.pendingFrom;
     a.pendingFrom = undefined;
-    return p && Date.now() - p.at <= ORIGIN_TTL_MS ? p.from : undefined;
+    return p && Date.now() - p.at <= PENDING_FROM_TTL_MS ? p.from : undefined;
   };
 
   /** 公开派活的那个同伴 —— 回复的头要标给它 (见 AttachState.replyTo)。 */
@@ -3962,7 +3944,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.pendingChannel = undefined;
     const seeded = a.channelSeeded;
     a.channelSeeded = true;
-    if (p && Date.now() - p.at <= ORIGIN_TTL_MS) {
+    if (p && Date.now() - p.at <= PENDING_FROM_TTL_MS) {
       a.channel = p.channel === baseOfKey(a.target) ? undefined : p.channel;
       a.speaker = p.speaker;
       a.replyTo = publicPeer(from);
@@ -4059,7 +4041,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.pendingFromCli = false;               // 人改从聊天里说话了, 之前那条 CLI 输入不再是出处
     // 人说的这一轮没有同伴出处: 别的行认领了、还没开出轮的印章被这一句接管, 一并作废。
     a.pendingFrom = undefined;
-    a.pendingOrigin = undefined;
     a.pendingBriefQuery = undefined;
     a.pendingChannel = { channel: s.channel ?? baseOfKey(a.target), speaker: s.speaker, at: Date.now() };
     consumeChannel(a, true, undefined);
@@ -4097,8 +4078,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.activeEventId = s.eventId;
     const now = Date.now();
     a.pendingFrom = s.from ? { from: s.from, at: now } : undefined;
-    a.pendingOrigin = s.origin ? { origin: s.origin, at: now } : undefined;
-    // 没写频道的注入 (graph 步骤 / 手动 inject) 等同在 home 里开口: 印章就是全部出处, 不沿用上一轮的。
+    // 没写频道的注入等同在 home 里开口: 印章就是全部出处, 不沿用上一轮的。
     a.pendingChannel = { channel: s.channel ?? baseOfKey(a.target), speaker: s.speaker, at: now };
     a.pendingBriefQuery = s.query;
     a.pendingBriefAt = ts;
@@ -4152,7 +4132,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!r) return false;
     a.channelSeeded = true;
     a.pendingFrom = undefined;
-    a.pendingOrigin = undefined;
     a.pendingChannel = undefined;
     a.channel = r.channel === undefined || r.channel === baseOfKey(a.target) ? undefined : r.channel;
     a.speaker = r.speaker;
@@ -4183,7 +4162,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.pendingBriefAt = undefined;
     if (!query && a.pendingFromCli !== true && resumeOpenTurn(a)) return;
     const turnId = newTurnId();
-    // 出处继承: 有真人 CLI 输入行开头 → CLI 轮; 否则 (收口后的补写、peer/graph 注入
+    // 出处继承: 有真人 CLI 输入行开头 → CLI 轮; 否则 (收口后的补写、peer 注入
     // 开出的轮) 沿用上一轮 —— 那些续写属于同一场对话, 不该改变可见性。
     const fromCli = a.pendingFromCli === true;
     a.pendingFromCli = false;
@@ -4191,7 +4170,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const fresh = consumeFrom(a);
     const opened = consumeChannel(a, fromCli, fresh);
     const from = fresh ?? a.convFrom;
-    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), initialModel: a.model || undefined, initialEffort: a.effort || undefined, cwd: a.runningCwd || undefined, userQuery: query || opened || undefined, origin: consumeOrigin(a), from, ...channelFields(a), ...(query && at ? { createdAt: at } : {}) });
+    recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), initialModel: a.model || undefined, initialEffort: a.effort || undefined, cwd: a.runningCwd || undefined, userQuery: query || opened || undefined, from, ...channelFields(a), ...(query && at ? { createdAt: at } : {}) });
     a.briefTurnId = turnId;
     if (a.activeEventId) deps.events?.bind(a.activeEventId, turnId);
     const event = a.activeEventId ? deps.events?.get(a.activeEventId) : undefined;
@@ -4707,10 +4686,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       if (!briefMode(a)) consumeChannel(a, true, undefined);
     }
     if (item.kind === "user_inject") { interject(a, item.said, item.ts, item.eventId); return; }
-    // 还有一轮等着懒建 (peer / graph 注入先记了 pendingBriefQuery) 就换掉它; 否则这句话
+    // 还有一轮等着懒建 (peer 注入先记了 pendingBriefQuery) 就换掉它; 否则这句话
     // 就是已开好的那一轮 (IM 侧说的, startBriefTurn 在注入前建好)。
     if (item.kind === "user_query") {
-      // 同伴 / 定时 / graph 注入的那一行: 问话就是印章里的原话 (不带信封)。
+      // 同伴 / 定时注入的那一行: 问话就是印章里的原话 (不带信封)。
       const sealed = bindLine(a, item.said, item.ts, item.eventId);
       if (sealed && !sealed.turn) return;
       if (a.pendingBriefQuery !== undefined || !a.briefTurnId) { a.pendingBriefQuery = item.body; a.pendingBriefAt = item.ts; }
@@ -5561,7 +5540,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       }
       const current = listJsonls(projectDir);
       // Exclude sids already bound to OTHER targets: when several panes in one
-      // cwd fork/spawn concurrently (a graph's #t3/#sp/base all resuming), each
+      // cwd fork/spawn concurrently, each
       // watcher sees ALL the new jsonls, not just its own pane's. Without this a
       // resume-fork watcher grabs a sibling's freshly-written transcript (newest
       // + has content) and two tags collapse onto one sessionId. The claimed set
@@ -5908,8 +5887,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // an already-spawned tagged pane on every base-cwd change.
     const chat = chatCwdFallback(target);
     const rec = !prev ? deps.store.get(target) : undefined;
-    // An explicit per-node cwd (graph spec) outranks every chat-scoped fallback:
-    // the point of declaring it is that this node lives in a different repo.
+    // An explicit caller cwd outranks every chat-scoped fallback.
     // When no base session exists (tagged-only chats), setPendingCwd writes to
     // the caller's own record — include it here so the switch isn't lost.
     const eff =
@@ -6448,7 +6426,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   // Busy comes from the native lifecycle or an interrupt hint. A dead/unbound pane is
   // reported idle, not busy: "nothing is running there" is the truthful answer
-  // and it keeps a graph step from blocking forever on a session that vanished.
+  // so a wait does not block forever on a session that vanished.
   const paneBusy = async (pane: string): Promise<boolean> =>
     !!pane && (await tmuxPaneAlive(pane)) && paneIsBusy(await capturePaneTail(pane, 12));
 
@@ -7589,7 +7567,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // 队列内单条失败已在 sendStandalone 里 warn 过, 这里吞掉, 不阻塞发卡。
       }
     },
-    injectText: async (target, text, origin, opts) => {
+    injectText: async (target, text, opts) => {
       // Lazy restore, same as dispatch: a peer session that hasn't been talked
       // to in this process lifetime (or any session after a reload) has an empty
       // in-memory slot but a perfectly good persisted binding. Without this, an
@@ -7669,7 +7647,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         a.pendingFromCli = false;
         a.turnFromChat = true;
         rememberInject(full);
-        pushSeal(a, { eventId: parseEnvelope(full)?.eventId, keys: sealKeys(full), at: Date.now(), query: text, from: opts?.from, channel: opts?.channel, origin, fresh: idleVerdict(target) === true });
+        pushSeal(a, { eventId: parseEnvelope(full)?.eventId, keys: sealKeys(full), at: Date.now(), query: text, from: opts?.from, channel: opts?.channel, fresh: idleVerdict(target) === true });
         a.muteUntilInject = false;
         a.justSpawned = false;
       };

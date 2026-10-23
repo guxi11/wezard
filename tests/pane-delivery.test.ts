@@ -127,14 +127,14 @@ const env = {
   idleVerdict: () => idle, isClearCommand: () => false, armSilentForkRebind() {}, inject,
 };
 const injectText = new Function(...Object.keys(env), peerCode)(...Object.values(env));
-for (let i = 0; i < 3; i++) retryable(await injectText("target", "receipt", undefined, { requireIdle: true }));
+for (let i = 0; i < 3; i++) retryable(await injectText("target", "receipt", { requireIdle: true }));
 assert.equal(notices, 0);
 assert.equal(seals.length, 0);
 assert.equal(attachment.muteUntilInject, true);
 assert.equal(attachment.pendingFromCli, true);
 idle = true;
 physical = async () => ({ ok: false, reason: "load failed" });
-retryable(await injectText("target", "receipt", undefined, { requireIdle: true }));
+retryable(await injectText("target", "receipt", { requireIdle: true }));
 assert.equal(seals.length, 0);
 assert.equal(attachment.muteUntilInject, true);
 physical = async (_p, _t, _i, _l, _f, _b, _j, _m, guard) => {
@@ -144,7 +144,7 @@ physical = async (_p, _t, _i, _l, _f, _b, _j, _m, guard) => {
   assert(guard("submit"));
   return { ok: true };
 };
-assert.equal((await injectText("target", "receipt", undefined, { requireIdle: true })).ok, true);
+assert.equal((await injectText("target", "receipt", { requireIdle: true })).ok, true);
 assert.equal(seals.length, 1);
 assert.equal(attachment.activePeerTurn, "old-task", "only transcript activation may replace the active peer turn");
 console.log("pane delivery: idle revalidation, attribution boundary, default interjection, retry evidence and timeout fencing passed");

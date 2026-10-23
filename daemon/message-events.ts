@@ -38,6 +38,9 @@ export interface MessageInput {
   deadline: number;
   payload: {
     text: string;
+    /** Work plan is reminder metadata; it never changes receiver routing. */
+    planId?: string;
+    planReminder?: { planId: string; revision: number; token: string };
     receipts?: ReceiptFact[];
     human?: MirrorDispatchArgs;
     /** daemon 内部交接输入, 没有路由任务或外部发话方。 */
@@ -46,15 +49,9 @@ export interface MessageInput {
       from: TurnFrom;
       envelope: string;
       tell?: Tell;
-      attemptId?: string;
       after?: string[];
       afterSeen?: Readonly<Record<string, HeldSeen>>;
-      job: string;
       kind: "task" | "ask" | "fyi";
-      role?: "exec" | "reviewer" | "expert";
-      free?: boolean;
-      held?: boolean;
-      spawned?: boolean;
       /** 上游 `re` 一份已交出去的件, 按 delegate 转给了叶子: 不是发话方自己的一件新活 (不进它的挂起账)。 */
       relayed?: boolean;
       /** `return:"transfer"`: 这一笔的 owner 已经改成了收件方, 不是发话方自己在等的一件。 */
@@ -514,7 +511,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
   /** 收件箱里的回执按接收 wizard 的待收批次合并; 不要求旧 receiver.event 关系存在。 */
   const isRcpt = (e: MessageEvent): boolean => e.id.startsWith("rcpt:") && !!e.payload.peer?.from.receipt;
   const isTask = (e: MessageEvent): boolean => e.id.startsWith("route:") && !!e.payload.peer?.tell
-    && !e.payload.peer.attemptId && !e.payload.peer.transferred && !!e.serves;
+    && !e.payload.peer.transferred && !!e.serves;
   /** 同一个 target 的待收回执并进当前批次 —— 扇出的结果是一轮, 不是一人一轮。被吸收的那些各自收口
    *  (`execution: complete`, 它们的 id 已终态, 重放不再注入); 结论由这一轮的终句统一交代。
    *  每项保留独立事实、状态与信封, 合并正文与被吸收行的终态在同一次落盘中提交。 */
@@ -529,7 +526,6 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
         && (isTask(e) ? (io.task?.(x) ?? x.serves) === (io.task?.(e) ?? e.serves) : true)
         && (!isRcpt(e) || receiptFacts(x).length > 0 && receiptFacts(x).every((f) => f.status === "done" && f.batch === batch))
         && x.channel === e.channel && x.execution === "queued" && x.exposure === "none" && !x.canceled && !x.deliveryHold
-        && (!isTask(e) || x.payload.peer?.job === e.payload.peer?.job)
         && (!isTask(e) || JSON.stringify(x.payload.peer?.after ?? []) === JSON.stringify(e.payload.peer?.after ?? []))
         && x.deadline > Date.now() && io.valid(x))
       .sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
@@ -588,6 +584,11 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
           && !r.uncertain && latest.exposure === "none" && !latest.canceled) {
         // A proven unexposed input is safe to retry after repair; an unlimited
         // task must not become permanently orphaned after five transport failures.
+        patch(id, { execution: "queued", exposure: "none", retryAt: backoff(latest.attempts), reason: r.reason });
+      } else if (latest.payload.planReminder && r.retryable && !r.uncertain
+          && latest.exposure === "none" && !latest.canceled) {
+        // Reminder tokens are recorded at enqueue; keep this same event durable
+        // across proven-unexposed retries, with backoff capped by backoff().
         patch(id, { execution: "queued", exposure: "none", retryAt: backoff(latest.attempts), reason: r.reason });
       } else if (r.gone && !r.uncertain && latest.exposure === "none" && !latest.canceled
           && (!latest.serves || receiptFacts(latest).length > 0 || latest.deadline !== NO_DEADLINE)) {

@@ -454,7 +454,7 @@ const TURN_CSS = `
   /* 一行到底不换行: 箭头 · 移交 · 对方 · 活号 · 标签 · 原文首行 (占剩下的宽, 省略号) · 展开钮。 */
   .handoff .ho-line{display:flex;align-items:center;gap:6px;padding:2px 6px 3px 24px;list-style:none;white-space:nowrap}
   .handoff .ho-line>*{flex:none}
-  .handoff .ho-line:is([data-hto],[data-hrole],[data-job],.plan-go){cursor:pointer}
+  .handoff .ho-line:is([data-hto],[data-hrole],.plan-go){cursor:pointer}
   .handoff .ho-line[data-hplan]:not(.plan-go){cursor:default}
   .handoff .ho-line[data-hplan]:not(.plan-go) .ho-chev{cursor:pointer}
   details.handoff>.ho-line{background:none;border:0;font:inherit;color:inherit;
@@ -499,15 +499,7 @@ const TURN_CSS = `
   .tg-cut .s{opacity:.6}
   .tg-cut.switch{color:#8c959f}
   .tg-cut.switch::before,.tg-cut.switch::after{border-top-color:#d0d7de}
-  /* ── graph 归因条 ── 与断点条同一视觉语法 (贯穿细线), 换成紫色: 断点讲"上下文",
-     归因讲"谁派的", 两者可以同时出现在一张卡片上, 必须一眼分得开。 */
-  .tg-graph{display:flex;align-items:center;gap:8px;font-size:11px;color:#6639ba;
-    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.3px}
-  .tg-graph::after{content:"";flex:1;border-top:1px dashed #8250df66}
-  .tg-graph code{background:#8250df14;border-radius:4px;padding:0 4px}
-  .tg-graph .s{color:#8250df;opacity:.85}
-  .tg-graph .f{color:#8c959f}
-  /* ── subagent 归属条 ── 绿色贯穿线 (断点=黄/graph=紫/子 agent=绿); 卡片整体
+  /* ── subagent 归属条 ── 绿色贯穿线 (断点=黄/子 agent=绿); 卡片整体
      缩进+左边框, 让时间轴上"父 turn 内嵌套的子 turn"一眼可辨。 */
   .tg-agent{display:flex;align-items:center;gap:8px;font-size:11px;color:#1a7f37;
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.3px}
@@ -644,8 +636,6 @@ export type Hint =
   | ({ k: "handoff" } & Handoff)
   /** 生了一个不带活的分身: 名字 + 职责。 */
   | { k: "born"; via: "clone" | "spawn"; name: string; text: string; state?: Handoff["state"]; reason?: string }
-  /** 开 / 收工单: 开的 text = plan, 收的 text = summary。 */
-  | { k: "job"; open: boolean; job: string; title: string; text: string; recycled?: number; state?: Handoff["state"]; reason?: string }
   | { k: "stop"; name: string; end: boolean; forgotten: boolean; turn?: string; state?: Handoff["state"]; reason?: string }
   /** 排了一个定时任务: when / next 取回包里渲染好的那两句, text = prompt。 */
   | { k: "task"; id: string; when: string; next: string; note: string; text: string; state?: Handoff["state"]; reason?: string };
@@ -700,8 +690,6 @@ export const hintOf = (use: ToolUse, result: ToolResult | undefined): Hint | und
       return str(a.task) ? handoffFrom(via, a, j, out)
         : { k: "born", via, ...out, name: stripSigil(str(j?.name) ?? str(a.name) ?? ""), text: str(a.description) ?? "" };
     }
-    case "open_job": return { k: "job", open: true, ...out, job: str(j?.job) ?? "", title: str(a.title) ?? "", text: str(a.plan) ?? "" };
-    case "close_job": return { k: "job", open: false, ...out, job: str(j?.job) ?? str(a.job) ?? "", title: "", text: str(a.summary) ?? "", ...(typeof j?.recycled === "number" ? { recycled: j.recycled } : {}) };
     case "stop_wizard": return { k: "stop", ...out, name: stripSigil(str(j?.name) ?? str(a.name) ?? str(a.tag) ?? ""), end: (str(j?.mode) ?? str(a.mode) ?? "end") === "end", forgotten: j?.forgotten === true, turn: str(a.turn) };
     case "schedule_task": return { k: "task", ...out, id: str(j?.id) ?? str(a.id) ?? "", when: str(j?.when) ?? str(a.when) ?? "", next: str(j?.next) ?? "", note: str(a.note) ?? "", text: str(a.prompt) ?? "" };
     default: return undefined;
@@ -824,9 +812,6 @@ const renderHandoff = (h: Handoff, key: string, deco?: HandoffDeco): string => {
 const PLAIN: HandoffStatus = { key: "plain", tip: "" };
 const RUN: HandoffStatus = { key: "run", tip: "调用中…" };
 const stOf = (state: Handoff["state"]): HandoffStatus => (state === undefined ? RUN : PLAIN);
-const jobAttrs = (id: string, deco?: HandoffDeco): string =>
-  deco && id ? ` data-job="${escHtml(id)}" title="打开工单 ${escHtml(id)}"` : "";
-
 const renderHint = (h: Hint, key: string, deco?: HandoffDeco): string => {
   if (h.k === "handoff") return renderHandoff(h, key, deco);
   const who = (name: string) => (deco ? deco.who(name) : plainWho(name));
@@ -837,14 +822,6 @@ const renderHint = (h: Hint, key: string, deco?: HandoffDeco): string => {
       const attrs = roleAt(h.name);
       return hoTrouble(h, glyph, verb, attrs, h.text) ??
         hoBox("", attrs, `${hoArrow(stOf(h.state), glyph)}${verb} ${who(h.name)}`, h.text);
-    }
-    case "job": {
-      const attrs = jobAttrs(h.job, deco);
-      const what = h.open ? "开工单" : "收工单";
-      const id = h.job ? `<span class="ho-turn">${escHtml(h.job)}</span>` : "";
-      const recycled = h.recycled ? hoTag("kind", `回收 ${h.recycled}`, `收掉了 ${h.recycled} 个为它生的分身`) : "";
-      return hoTrouble(h, "📋", what, attrs, h.text) ??
-        hoBox("", attrs, `${hoArrow(stOf(h.state), "📋")}${what}${id}${recycled}`, h.text, undefined, h.open ? h.title || firstLine(h.text) : firstLine(h.text));
     }
     case "stop": {
       const [glyph, what] = h.end ? ["⏹", "收掉"] : ["⏸", "打断"];
@@ -1073,16 +1050,6 @@ const renderCut = (r: TurnDetailRecord): string =>
       }</div>`
     : "";
 
-// 归因条: 这一轮不是人打的字。userQuery 长得和真人消息一模一样, 没有这一条就分不出
-// 「有人在跟 #fix 说话」和「graph 第 3 轮把 #review 的回复喂了过来」。
-const renderOrigin = (r: TurnDetailRecord): string => {
-  const o = r.origin;
-  if (!o) return "";
-  const from = o.fromTag ? ` <span class="f">← ${escHtml(`#${o.fromTag}`)}</span>` : "";
-  return `<div class="tg-graph"><span class="l">🕸 graph <code>${escHtml(o.runId)}</code></span>` +
-    `<span class="s">轮 ${o.round}/${o.rounds} · 步 ${o.step}/${o.steps}</span>${from}</div>`;
-};
-
 // subagent 归属条: 这一轮是 Task/Agent 工具派出的子 agent 跑的。与断点/归因条同一
 // 视觉语法, 用绿色 —— 三种横条各讲一件事 (上下文断点/谁派的/谁执行的), 必须一眼分得开。
 const renderAgent = (r: TurnDetailRecord): string => {
@@ -1199,7 +1166,7 @@ export const renderTurnGroup = (
   const head = standalone ? `<div class="tg-head">${meta}</div>` : "";
   // staleAt 只走 JSON, 绝不进 HTML —— 它跟着 updatedAt 变, 一旦计入 sig, SSE 的
   // "内容没变就不重发" 会彻底失效 (一个 turn 的 HTML 可以是几十 KB)。
-  const body = `<section class="turn-group${r.cut ? ` cut cut-${r.cut}` : ""}${r.origin ? " graph" : ""}${r.agent ? " subagent" : ""}" data-key="t:${escHtml(r.id)}">${renderCut(r)}${renderOrigin(r)}${renderAgent(r)}${head}<div class="bubbles">${inner}</div></section>`;
+  const body = `<section class="turn-group${r.cut ? ` cut cut-${r.cut}` : ""}${r.agent ? " subagent" : ""}" data-key="t:${escHtml(r.id)}">${renderCut(r)}${renderAgent(r)}${head}<div class="bubbles">${inner}</div></section>`;
   return {
     id: r.id, html: tagSig(body), meta, sig: hashStr(body + meta),
     createdAt: r.createdAt, updatedAt: r.updatedAt,

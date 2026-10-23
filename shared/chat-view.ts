@@ -10,7 +10,7 @@
 // exactly the same view from the records that were POSTed to it.
 import { baseOfKey, labelFor, tagOfKey } from "./session-label.js";
 import { stripReminders } from "./reminder.js";
-import type { DetailRecord, MarkDetailRecord, PostDetailRecord, TurnDetailRecord, TurnOrigin, TurnUsage } from "./detail-store.js";
+import type { DetailRecord, MarkDetailRecord, PostDetailRecord, TurnDetailRecord, TurnUsage } from "./detail-store.js";
 import { costOf, modelLabel, priceOf, type Price, type Tokens } from "./pricing.js";
 
 /** 账单的一行: 一个模型 (同一显示名、同一单价) 的 token 合计 × 单价 = 它的那份费用。
@@ -64,38 +64,7 @@ export interface TagSummary {
   runningUntil: number;
   /** One-line "what happened last", for the chat-list row. */
   preview: string;
-  /** Most recent graph attribution seen on this session — present iff some
-   *  turn of it was injected by a run (i.e. this tag is graph-driven). */
-  origin?: TurnOrigin;
   usage: AggUsage;
-}
-
-/** One graph run, reconstructed from the turns it stamped. Nothing here comes
- *  from graph.ts's in-memory run table — this view has to survive a reload and
- *  work identically on the standalone svr, which never sees a runner at all. */
-export interface GraphStepView {
-  step: number;
-  tag: string;
-  /** 该步最近一次被走到的时间, 用来定位"当前停在哪一步"。 */
-  ts: number;
-}
-
-export interface GraphSummary {
-  runId: string;
-  rounds: number;
-  steps: number;
-  /** Latest round/step observed = 走到哪了。 */
-  round: number;
-  step: number;
-  /** Step order recovered from the observed turns; 缺步 = 还没走到过。 */
-  pipeline: GraphStepView[];
-  startedAt: number;
-  lastTs: number;
-  running: boolean;
-  /** 同 TagSummary.runningUntil: 无新写入时到这个时刻自动算结束, 由客户端自行
-   *  熄灯。SSE 只在有写入时推送 —— run 一旦真的停下就再没有事件, 没有它页面上的
-   *  「⟳ 运行中」永远熄不掉。0 = 已结束。 */
-  runningUntil: number;
 }
 
 export interface ChatSummary {
@@ -103,8 +72,6 @@ export interface ChatSummary {
   /** Server clock when this snapshot was derived — the client ticks off it. */
   at: number;
   tags: TagSummary[];
-  /** Graph runs touching this chat, most recently active first. */
-  graphs: GraphSummary[];
   usage: AggUsage;
 }
 
@@ -284,44 +251,8 @@ export const summarizeTag = (target: string, turns: readonly TurnDetailRecord[],
     running: until > now,
     runningUntil: until > now ? until : 0,
     preview: last ? previewOf(last) : "",
-    origin: [...turns].reverse().find((r) => r.origin)?.origin,
     usage: aggregate(turns, now),
   };
-};
-
-// ── Graph runs ────────────────────────────────────────────────────────
-// 一个 run 的 pipeline 不存在任何一条记录里 —— 它散在这个 run 派出的每条 turn 的
-// origin 上 (各自带着 round/step/tag)。按 step 归并就把步骤序列还原了出来, 无需
-// 把整张 spec 逐轮冗余进 detail 存储。
-const summarizeRun = (turns: readonly TurnDetailRecord[], now: number): GraphSummary => {
-  const os = turns.map((r) => ({ o: r.origin!, r }));
-  const head = os[os.length - 1]!;
-  const until = turns.reduce((m, r) => Math.max(m, staleAt(r)), 0);
-  const byStep = os.reduce((m, { o, r }) => {
-    const cur = m.get(o.step);
-    return cur && cur.ts >= r.createdAt ? m : m.set(o.step, { step: o.step, tag: tagOfKey(r.target), ts: r.createdAt });
-  }, new Map<number, GraphStepView>());
-  return {
-    runId: head.o.runId,
-    rounds: head.o.rounds,
-    steps: head.o.steps,
-    round: head.o.round,
-    step: head.o.step,
-    pipeline: [...byStep.values()].sort((a, b) => a.step - b.step),
-    startedAt: os[0]!.r.createdAt,
-    lastTs: turns.reduce((m, r) => Math.max(m, r.updatedAt), 0),
-    running: until > now,
-    runningUntil: until > now ? until : 0,
-  };
-};
-
-/** Group this chat's graph-stamped turns by runId → one summary per run. */
-export const graphSummaries = (turns: readonly TurnDetailRecord[], now: number): GraphSummary[] => {
-  const byRun = turns
-    .filter((r) => r.origin)
-    .sort((a, b) => a.createdAt - b.createdAt)
-    .reduce((m, r) => m.set(r.origin!.runId, [...(m.get(r.origin!.runId) ?? []), r]), new Map<string, TurnDetailRecord[]>());
-  return [...byRun.values()].map((rs) => summarizeRun(rs, now)).sort((a, b) => b.lastTs - a.lastTs);
 };
 
 /** Group every turn of one chat by session key → the chat list. Most recently
@@ -335,5 +266,5 @@ export const chatSummary = (records: readonly DetailRecord[], base: string, now:
   const tags = [...byTarget.entries()]
     .map(([target, turns]) => summarizeTag(target, [...turns].sort((a, b) => a.createdAt - b.createdAt), now))
     .sort((a, b) => b.lastTs - a.lastTs);
-  return { base, at: now, tags, graphs: graphSummaries(mine, now), usage: aggregate(mine, now) };
+  return { base, at: now, tags, usage: aggregate(mine, now) };
 };

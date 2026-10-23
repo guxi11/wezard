@@ -5,10 +5,9 @@
 //   出   该 wizard 这一轮的回复: 复用 renderTurnGroup (文本 + 工具细节), 去掉问句 ——
 //        问句已经是上面那条入消息了; 本轮用量单独走 `meta`, 客户端写在名字那一行
 //   断点 视角 role 自己的 /clear /new
-import { renderCutMark, renderTurnGroup, splitReminders, escHtml, fmtTs, hashStr, tagSig, turnUsageChips, type Handoff, type HandoffDeco, type TurnFragment } from "./detail-render.js";
+import { renderCutMark, renderTurnGroup, splitReminders, escHtml, hashStr, tagSig, turnUsageChips, type Handoff, type HandoffDeco, type TurnFragment } from "./detail-render.js";
 import { isTurn, staleAt, turnDone } from "./chat-view.js";
 import type { DetailRecord, MarkDetailRecord, TurnDetailRecord } from "./detail-store.js";
-import { jobProgress, type MemberRole, type WorldFactJob } from "./world.js";
 import { channelOf, doneAt, injectTurnsOf, teammateOf, unwrapMates, type Directory, type Msg } from "./role-view.js";
 import { nameHead } from "./session-label.js";
 
@@ -32,7 +31,7 @@ export interface MsgFragment {
   sig: string;
   /** 见 chat-view.staleAt; 0 = 已结束。 */
   staleAt: number;
-  /** 这句话说完的时刻 (doneAt); 没说完 / 不是话 (断点、工单行) = 不给。上屏时客户端按它记已读:
+  /** 这句话说完的时刻 (doneAt); 没说完 / 不是话 (断点) = 不给。上屏时客户端按它记已读:
    *  正在吐字的那一版上屏不算读到终句。 */
   fin?: number;
 }
@@ -47,16 +46,10 @@ export interface MsgFragment {
 const mateChip = (mate: string | undefined): string =>
   mate === undefined ? "" : `<span class="mchip sys">agent team${mate ? ` · ${escHtml(mate)}` : ""}</span>`;
 
-/** 工单 badge: 只写工单号, 标题与进度由客户端按此刻的账填 (账会变, 片段的 sig 不该跟着变)。 */
-const jobChip = (r: TurnDetailRecord): string =>
-  r.from?.kind === "peer" && r.from.job ? `<button class="mchip job" data-job="${escHtml(r.from.job)}"></button>` : "";
-
 const inMeta = (r: TurnDetailRecord): string => {
   const bits = [
-    r.origin ? `<span class="mchip graph" title="graph ${escHtml(r.origin.runId)}">🕸 轮 ${r.origin.round}/${r.origin.rounds} · 步 ${r.origin.step}/${r.origin.steps}</span>` : "",
     r.from?.kind === "task" ? `<span class="mchip task">⏰ 定时 ${escHtml(r.from.taskId ?? "")}</span>` : "",
     mateChip(teammateOf(r.userQuery)),
-    jobChip(r),
   ].filter(Boolean);
   return bits.length ? `<div class="mmeta">${bits.join("")}</div>` : "";
 };
@@ -135,19 +128,18 @@ const receiptsByAnswer = (records: readonly DetailRecord[]): Map<string, TurnDet
   return m;
 };
 
-/** 回执 chip: 挂在答话方交回结论的那一轮上 —— 定论 + 工单里第几份; 找得到派活那句才可点,
+/** 回执 chip: 挂在答话方交回结论的那一轮上 —— 定论; 找得到派活那句才可点,
  *  点它跳过去 (跨会话也行)。 */
 const receiptChip = (r: TurnDetailRecord, records: readonly DetailRecord[], dir: Directory): string => {
   const rc = receiptsByAnswer(records).get(r.id), f = rc?.from;
   if (!rc || f?.kind !== "peer") return "";
   const st = f.status ?? "done";
-  const seq = f.job && f.total ? ` · ${escHtml(f.job)} 第 ${f.done ?? 0}/${f.total} 份` : "";
   const d = f.event ? dispatchOf(records, f.event) : undefined;
   const what = `.${dir.nameOf(r.target ?? "")} 把 ${f.event ? `${f.event} ` : ""}的结论交回给 .${dir.nameOf(rc.target ?? "")}`;
   const [tag, attrs] = f.event && d
     ? ["button", `${gotoAttrs(f.event, d)} title="${escHtml(`${what} · 点击跳到派活那句`)}"`]
     : ["span", ` title="${escHtml(`${what} · 派活那句已不在记录里`)}"`];
-  return `<${tag} class="mchip rcpt st-${escHtml(st)}"${attrs}>↩ 回执 · ${RCPT[st] ?? escHtml(st)}${seq}</${tag}>`;
+  return `<${tag} class="mchip rcpt st-${escHtml(st)}"${attrs}>↩ 回执 · ${RCPT[st] ?? escHtml(st)}</${tag}>`;
 };
 
 /** 这一行移交落成的那句。同一个活号续问多次就有多句 (每次 tell_peer 一句): 按原文认 ——
@@ -278,7 +270,7 @@ export const renderMsg = (m: Msg, records: readonly DetailRecord[], dir: Directo
   const acct = (t: TurnDetailRecord | undefined) => (t ? turnUsageChips(t, now) : "");
   const out = (g: TurnFragment) => ({
     html: g.html,
-    meta: receiptChip(r, records, dir) + jobChip(r) + (isPostTurn(r, records) ? acct(turnAt(records, r.target ?? "", r.createdAt)) : g.meta),
+    meta: receiptChip(r, records, dir) + (isPostTurn(r, records) ? acct(turnAt(records, r.target ?? "", r.createdAt)) : g.meta),
   });
   const { html, meta } = m.dir === "in"
     ? { html: renderIn(r), meta: acct(senderTurn(r, records)) }
@@ -299,53 +291,4 @@ export const renderMark = (mk: MarkDetailRecord, role: string, dir: Directory): 
     id: `m:${mk.id}`, turnId: mk.id, dir: "mark", ...base({ from: role, to: role, channel: "" }, dir),
     ts: mk.createdAt, html: f.html, meta: "", sig: f.sig, staleAt: 0,
   };
-};
-
-// 工单窗口的开工 / 收工两行: 不是哪一轮的消息, 是账本上的两个时刻。收工那行按成员列定论与交付物,
-// 工单不再进群, 这两行就是收工结论唯一的落点; 还开着时开工那行列成员此刻的进度。
-const OUTCOME: Readonly<Record<string, string>> = { ...RCPT, "": "在干" };
-// 老 daemon 的快照不记成员定论: 收了工却没有定论的, 不说它「在干」。
-/** 阶段的人话: deliver 在根单 = 等验收, 在子单 = 待收工。 */
-export const STAGE_LABEL = (j: { stage?: string; kind?: string; status?: string; parent?: string; end?: string }): string =>
-  j.status === "closed" || j.stage === "closed" ? (j.kind === "req" ? (j.end === "cancel" ? "取消" : "归档") : "收工")
-    : j.stage === "deliver" ? (j.kind === "req" ? "等验收" : "待收工")
-      : ({ plan: "规划", build: "实施", review: "评审", clarify: "澄清", stalled: "卡住", shelved: "搁置" } as Record<string, string>)[j.stage ?? ""] ?? "";
-const memberLine = (mm: WorldFactJob["members"][number], dir: Directory, closed: boolean): string =>
-  `<li><span class="jo st-${escHtml(mm.outcome ?? (closed ? "none" : "run"))}">${escHtml(mm.outcome ? OUTCOME[mm.outcome] ?? mm.outcome : closed ? "—" : OUTCOME[""]!)}</span>` +
-  (dir.isWizard(mm.target)
-    ? `<button class="go" data-r="${escHtml(mm.target)}">${escHtml(nameHead(dir.labelOf(mm.target), `.${dir.nameOf(mm.target)}`))}</button>`
-    : `<span>${escHtml(nameHead(dir.labelOf(mm.target), dir.nameOf(mm.target)))}</span>`) +
-  (mm.role && ROLE_BADGE[mm.role] ? `<span class="jrole r-${mm.role}">${ROLE_BADGE[mm.role]}</span>` : "") +
-  (mm.forkOf && dir.isWizard(mm.forkOf) ? `<span class="jfork" title="clone 自它: 材料来自它">材料来自 .${escHtml(dir.nameOf(mm.forkOf))}</span>` : "") +
-  (mm.task ? `<em title="${escHtml(mm.task.trim())}">${escHtml(mm.task.trim())}</em>` : "") +
-  (mm.artifacts ?? []).map((a) => `<div class="ja">↳ ${escHtml(a.path)}${a.note ? ` — ${escHtml(a.note)}` : ""}</div>`).join("") + "</li>";
-
-const ROLE_BADGE: Readonly<Partial<Record<MemberRole, string>>> = { lead: "lead", reviewer: "评审", expert: "专家" };
-/** 子单一行: 标题 + 阶段 + 进度, 点了进那张单 (data-job)。 */
-const childLine = (c: WorldFactJob): string =>
-  `<li><button class="go jc" data-job="${escHtml(c.id)}">📋 ${escHtml(c.title)}</button>` +
-  `<span class="jo st-run">${escHtml(STAGE_LABEL(c))}</span><span class="jn">${escHtml(c.id)} · ${c.status === "open" ? `${jobProgress(c).done}/${jobProgress(c).total}` : "收工"}</span></li>`;
-
-export const renderJobMarks = (j: WorldFactJob, dir: Directory, all: readonly WorldFactJob[] = []): MsgFragment[] => {
-  const kids = all.filter((x) => x.parent === j.id);
-  const kidsHtml = kids.length ? `<ul class="jmem jkids">${kids.map(childLine).join("")}</ul>` : "";
-  const owner = { from: j.owner, to: j.owner, channel: j.base };
-  const members = j.members.length ? `<ul class="jmem">${j.members.map((mm) => memberLine(mm, dir, j.status === "closed")).join("")}</ul>` : "";
-  const row = (phase: "open" | "close", ts: number, body: string): MsgFragment => {
-    const html = tagSig(`<div class="tg-job ${phase}" data-key="j:${escHtml(j.id)}:${phase}">${body}</div>`);
-    return { id: `j:${j.id}:${phase}`, turnId: j.id, dir: "mark", ...base(owner, dir), ts, html, meta: "", sig: hashStr(html), staleAt: 0 };
-  };
-  // 计划 / 结论是人写的 markdown, 换行要留着: 交给客户端同一个 markdown 渲染 (breaks:true)。
-  const md = (cls: string, text?: string) =>
-    text?.trim() ? `<div class="md-body ${cls}"></div><script type="text/plain" class="md-src">${escHtml(text.trim())}</script>` : "";
-  const head = (verb: string) =>
-    `<div class="jh">📋 <b>${escHtml(j.id)}</b> ${verb} · <span class="jt">${escHtml(j.title)}</span><span class="s">${escHtml(fmtTs(verb === "开工" ? j.openedAt : j.closedAt ?? 0))}</span></div>`;
-  // 根单: 需求原话 + 验收标准 (人写的, 换行留着)。
-  const brief = (j.origin?.text?.trim() ? md("jorigin", `需求: ${j.origin.text.trim()}`) : "") + (j.criteria?.trim() ? md("jcrit", `验收标准: ${j.criteria.trim()}`) : "");
-  return [
-    row("open", j.openedAt, head("开工") + brief + md("jplan", j.plan) + (j.status === "open" ? members + kidsHtml : "")),
-    ...(j.status === "closed" && j.closedAt
-      ? [row("close", j.closedAt, head("收工") + members + kidsHtml + md("jsum", j.summary))]
-      : []),
-  ];
 };

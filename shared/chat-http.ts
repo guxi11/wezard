@@ -9,7 +9,7 @@
 //   GET /api/msgs         → 一个会话窗口的消息片段 (服务端渲染的 HTML; 工具调用只有摘要)
 //   GET /api/tool         → 一次工具调用的展开正文 —— 片段的第二级, 展开时才取
 //   GET /api/role-events  → SSE: role 摘要变动 + 当前窗口的消息增量
-//   GET /api/world        → 关系视图: 全部 wizard、家谱、跨聊天往来、工单、日程
+//   GET /api/world        → 关系视图: wizard 家谱、跨聊天往来、plans、日程
 //   GET /api/search       → cmd+k: 从视角 role 搜 role 名字 / 会话名 / 消息正文
 //   GET /api/charter      → 一个 wizard 出生时被压进系统提示的宪章 (按节 + 体量 + 实测开局底座)
 //
@@ -25,12 +25,12 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { URL } from "node:url";
 import { baseOfKey, sameBot } from "./session-label.js";
 import { isMark, isPost, isTurn } from "./chat-view.js";
-import { buildWorld, EMPTY_FACTS, jobProgress, withData, type WorldFactJob, type WorldFacts } from "./world.js";
+import { buildWorld, EMPTY_FACTS, withData, type WorldFacts } from "./world.js";
 import {
-  allMessages, unreadIndex, ledgerOf, windowOf, spanFor, convKeyOf, chatKeysOf, isWizardDm, parseTalkKey, glanceOfTalk, convsOf, jobConvsOf, jobOfKey, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn, injectEchoesOf,
+  allMessages, unreadIndex, ledgerOf, windowOf, spanFor, convKeyOf, chatKeysOf, isWizardDm, parseTalkKey, glanceOfTalk, convsOf, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn, injectEchoesOf,
   roleInfo, roleStats, sessionsOf, talkArgs, talkOf, counterpartOf, windowStats, type Directory, type Heard, type Msg, type SessionSpan,
 } from "./role-view.js";
-import { dependentsOf, renderJobMarks, renderMark, renderMsg, type MsgFragment } from "./role-render.js";
+import { dependentsOf, renderMark, renderMsg, type MsgFragment } from "./role-render.js";
 import { searchRole } from "./role-search.js";
 import { charterBrief, charterView } from "./charter-view.js";
 import { renderToolBody } from "./detail-render.js";
@@ -57,7 +57,7 @@ export interface ChatRoutes {
   seen: SimpleHandler;
 }
 
-/** 注册表侧的事实 (wizard 身份 / 家谱 / 工单 / 日程) —— 只有 daemon 给得出。
+/** 注册表侧的事实 (wizard 身份 / 家谱 / plans / 日程) —— 只有 daemon 给得出。
  *  async 是因为活体状态要问 tmux; 独立 svr 用 daemon 推来的快照。
  *  实现方自己做节流: 这条路由会被前端定时轮询。 */
 export type WorldFactsProvider = () => Promise<WorldFacts> | WorldFacts;
@@ -66,30 +66,35 @@ const DEFAULT_LIMIT = 60;
 const FLUSH_MS = 300;
 const PING_MS = 25_000;
 const FACTS_MS = 10_000;
-/** rolepage 只看最近这么久: 更早的轮次、wizard 登记、家谱、工单一律不进视图。 */
+/** rolepage 只看最近这么久: 更早的轮次、wizard 登记与家谱一律不进视图。 */
 export const HORIZON_MS = 3 * 24 * 3600_000;
 /** 一批已读的上限 (字节): 页面一次攢的是秒级的那几条, 64KB 足够几百条。 */
 const SEEN_BODY_MAX = 64 * 1024;
 
-const TASK_LINE = 120;
-const firstLine = (s: string): string => (s.split("\n").find((l) => l.trim()) ?? "").trim().slice(0, TASK_LINE);
-
 const lastTsOf = (r: DetailRecord): number => (r as { updatedAt?: number }).updatedAt ?? r.createdAt;
+const publicPlan = <T extends WorldFacts["plans"][number]>({ reminder: _reminder, ...plan }: T) => plan;
 
 /** 记录侧的源头裁剪 —— 下游 (会话列表、窗口、关系图) 都只见得到这一份。 */
 const recentRecords = (records: readonly DetailRecord[], cutoff: number): DetailRecord[] =>
   records.filter((r) => lastTsOf(r) >= cutoff);
 
-/** 注册表侧的源头裁剪: 久未活动的 wizard 连同它挂着的家谱一起退场; 开着的工单与日程是往后看的, 留下。 */
+/** 注册表侧的源头裁剪: 久未活动的 wizard 连同它挂着的家谱一起退场; 活跃 plans 与日程保留。 */
 const recentFacts = (f: WorldFacts, records: readonly DetailRecord[], now: number): WorldFacts => {
   // 往来可能只落在对端的 transcript: 最近消息里出现的双方仍需保留登记身份,
   // 不能按自己的 transcript 时刻裁掉名字, 再把 wizard 的 target 当成人的称呼。
   const participants = new Set(allMessages(records, now).flatMap((m) => [m.from, m.to]));
   const cutoff = now - HORIZON_MS;
+  const byTarget = new Map(f.wizards.map((w) => [w.target, w] as const));
+  const retained = new Set(f.plans.filter((p) => p.state === "active" || p.state === "paused").map((p) => p.owner));
+  const pending = [...retained];
+  while (pending.length) {
+    const parent = byTarget.get(pending.pop()!)?.parent;
+    if (parent && !retained.has(parent)) { retained.add(parent); pending.push(parent); }
+  }
   return {
     ...f,
-    wizards: f.wizards.filter((w) => participants.has(w.target) || w.busy || Math.max(w.lastActivity, w.bornAt ?? 0) >= cutoff),
-    jobs: f.jobs.filter((j) => j.status === "open" || (j.closedAt ?? j.openedAt) >= cutoff),
+    wizards: f.wizards.filter((w) => retained.has(w.target) || participants.has(w.target) || w.busy || Math.max(w.lastActivity, w.bornAt ?? 0) >= cutoff),
+    plans: f.plans,
   };
 };
 
@@ -105,7 +110,7 @@ const botFacts = (f: WorldFacts, self: string): WorldFacts => {
   return {
     ...f,
     wizards: f.wizards.filter((w) => mine(w.target)),
-    jobs: f.jobs.filter((j) => mine(j.base) && mine(j.owner)).map((j) => ({ ...j, members: j.members.filter((m) => mine(m.target)) })),
+    plans: f.plans.filter((p) => mine(p.owner)),
     ...(f.inflight ? { inflight: f.inflight.filter((x) => mine(x.from) && mine(x.to)) } : {}),
     schedules: f.schedules.filter((x) => mine(x.owner || x.createdBy || x.target)),
     chatNames: keep(f.chatNames),
@@ -229,14 +234,12 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
     const span = spanOf(spans, sid);
     // 每一项的未读账按点开它时的那一窗切 (windowOf), 侧栏与关系图卡片 (/api/glance) 同一个 ledgerOf。
     const ledger = ledgerOf(unreadIndex(msgs), role, keepOf(since));
-    // 工单不按视角的 session 段裁 (同 viewOf 的 span): 成员各有各的 session。
-    const convs = [...convsOf(msgs, role, dir, now, { span, ledger }), ...jobConvsOf(msgs, role, dir, f.jobs)].sort((a, b) => b.lastTs - a.lastTs);
+    const convs = convsOf(msgs, role, dir, now, { span, ledger }).sort((a, b) => b.lastTs - a.lastTs);
     // effort: transcript 记的那档优先, 没有才用绑定里记下的 (dir.fact), 都没有就不显示。
     const stats = ((s) => s && { ...s, effort: s.effort || dir.fact(role)?.effort })(roleStats(records, role, now, span));
     const info = roleInfo(role, dir, f, stats, now);
-    // 日程页只画定时任务 (与 chat.js 的 renderPlan 同一口径) —— 没有就不给入口; 工单在主区的工单列表里。
+    // 日程页只画定时任务 (与 chat.js 的 renderPlan 同一口径)。
     const schedules = f.schedules.filter((x) => (x.owner || x.createdBy || x.target) === role);
-    const myJobs = new Set(f.jobs.filter((j) => j.owner === role || j.members.some((m) => m.target === role)).map((j) => j.id));
     const home = convs.find((c) => c.key === land.conv);
     return {
       at: now,
@@ -249,17 +252,14 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       // 不随视角的 session 段裁: 「它还在别的会话里」说的是它, 不是视角选的那段时间。
       chatKeys: chatKeysOf(msgs),
       // 链接来自哪个会话就默认开哪个 (见 landingOf); 否则最近活动的那个。
-      conv: home?.key ?? convs.find((c) => c.kind !== "job")?.key ?? convs[0]?.key ?? "",
+      conv: home?.key ?? convs[0]?.key ?? "",
       // 从群里点名字进来, 要看的是「我在这个群里和它说过什么」—— 默认只看与问话那一方的
       // 往来。票据不是一轮对话时不知道是谁问的, 退到最近说过话的那个人 (subs 已按往来、
       // 最近排好)。落在别的会话上就不猜。
       with: home?.subs.find((s) => s.count && (land.with ? s.role === land.with : s.role.startsWith("human:")))?.role ?? "",
       relations: hasRelations(msgs, role, info),
-      // 账上全部工单的摘要: 侧栏 / 关系图 / 消息上的 📋 指向的工单不一定有视角的份 (标记挂的是「这处往来里出现过」),
-      // 工单列表与 badge 按 id 从这一份取, 不再按视角重新筛。
-      jobIndex: Object.fromEntries(f.jobs.map((j) => [j.id, { id: j.id, title: j.title, owner: j.owner, base: j.base, status: j.status, closedAt: j.closedAt, openedAt: j.openedAt, ...(j.parent ? { parent: j.parent } : {}), ...(j.kind ? { kind: j.kind } : {}), ...(j.stage ? { stage: j.stage } : {}), ...jobProgress(j) }])),
-      // 在飞的活: 视角派出去 / 欠着的, 以及它的工单里每一份 (工单行标「卡住」); 卡在审批上的带上停在哪几个工具。
-      inflight: (f.inflight ?? []).filter((x) => x.from === role || x.to === role || myJobs.has(x.job)).map((x) => ({
+      plans: f.plans.filter((p) => p.owner === role).map(publicPlan),
+      inflight: (f.inflight ?? []).filter((x) => x.from === role || x.to === role).map((x) => ({
         ...x, ...(x.state === "blocked" && dir.fact(x.to)?.waiting?.length ? { waiting: dir.fact(x.to)!.waiting } : {}),
       })),
       schedules: schedules.length,
@@ -298,18 +298,14 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
   /** 一个窗口的全部片段, 时间序: 消息 + 视角 role 自己的断点。
    *  给的是**待渲染**的片段 —— 窗口通常只上屏最后几十条, 先按时间切片再渲染,
    *  没上屏的那几百轮就一个字都不用排。 */
-  const windowFrags = (records: readonly DetailRecord[], dir: Directory, v: View, now: number, jobs: readonly WorldFactJob[]): Array<{ id: string; ts: number; render: () => MsgFragment }> => {
+  const windowFrags = (records: readonly DetailRecord[], dir: Directory, v: View, now: number): Array<{ id: string; ts: number; render: () => MsgFragment }> => {
     // 与侧栏 / 关系图这一项的未读账同一个 windowOf: 上屏 (记成已读) 的正是那一项数着的。
     const msgs = windowOf(allMessages(records, now), v.role, v.conv, v.with || undefined, v.span);
     const lo = msgs[0]?.ts ?? Infinity;
-    const jid = jobOfKey(v.conv);
-    // 工单窗口横跨好几个成员的会话, 谁的断点都不属于它; 它自己的两行 (开工 / 收工) 取自账本。
-    const marks = jid || isWizardDm(v.role, v.conv, v.with || undefined, dir) ? [] : marksOf(records, markRole(v)).filter((mk) => mk.createdAt >= lo && inSpan(v.span)(mk.createdAt));
-    const job = jid ? jobs.find((j) => j.id === jid) : undefined;
+    const marks = isWizardDm(v.role, v.conv, v.with || undefined, dir) ? [] : marksOf(records, markRole(v)).filter((mk) => mk.createdAt >= lo && inSpan(v.span)(mk.createdAt));
     const frags = [
       ...msgs.map((m) => ({ id: m.id, ts: m.ts, render: () => renderMsg(m, records, dir, now) })),
       ...marks.map((mk) => ({ id: `m:${mk.id}`, ts: mk.createdAt, render: () => renderMark(mk, mk.target ?? v.role, dir) })),
-      ...(job ? renderJobMarks(job, dir, jobs).map((f) => ({ id: f.id, ts: f.ts, render: () => f })) : []),
     ].sort((a, b) => a.ts - b.ts);
     return frags;
   };
@@ -338,7 +334,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const dir = makeDirectory(records, f);
       const v = viewOf(records, dir, ticket, url);
       if (!v || !v.conv) { json(res, 200, { ok: true, at: Date.now(), total: 0, truncated: false, msgs: [] }); return; }
-      const all = windowFrags(records, dir, v, Date.now(), f.jobs);
+      const all = windowFrags(records, dir, v, Date.now());
       // 注意 Number(null) === 0 —— 缺省必须先判 null, 否则默认就成了"全量"。
       const raw = url.searchParams.get("limit");
       const n = raw === null ? Number.NaN : Number(raw);
@@ -416,10 +412,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       v ??= viewOf(records, makeDirectory(records, ff), ticket, url);
       if (!v) return;
       send("role", summary(records, ff, v.role, url.searchParams.get("session"), landingOf(ticket, v.role), v, sinceOf(url, Date.now())));
-      // 工单窗口的开工 / 收工两行取自账本, 账本变了不写 store —— 跟着名册的心跳推, 没变的由 sig 挡掉。
-      const jid = jobOfKey(v.conv);
-      const job = jid ? ff.jobs.find((j) => j.id === jid) : undefined;
-      if (job) renderJobMarks(job, makeDirectory(records, ff), ff.jobs).forEach(pushFrag);
+
     };
 
     /** 这一轮拆出的消息里, 落在当前窗口的那几条; `deep`: 连同读了它的账 / 结论的别的轮次 (见 dependentsOf)。 */
@@ -428,7 +421,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const r = store.get(id);
       if (!r || !mine((r as { target?: string }).target)) return;
       if (isMark(r)) {
-        if (!jobOfKey(v.conv) && !isWizardDm(v.role, v.conv, v.with || undefined, dir) && r.target === markRole(v) && inSpan(v.span)(r.createdAt)) pushFrag(renderMark(r, r.target ?? v.role, dir));
+        if (!isWizardDm(v.role, v.conv, v.with || undefined, dir) && r.target === markRole(v) && inSpan(v.span)(r.createdAt)) pushFrag(renderMark(r, r.target ?? v.role, dir));
         return;
       }
       if (isPost(r)) {
@@ -512,7 +505,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const body = JSON.stringify({
         ...w,
         chats: w.chats.map((c) => ({ ...c, token: tickets.get(c.base) })),
-        jobs: w.jobs.map((j) => ({ ...j, members: j.members.map((mm) => ({ ...mm, task: firstLine(mm.task) })) })),
+        plans: w.plans.map(publicPlan),
       });
       const etag = `"${createHash("sha1").update(body).digest("base64url")}"`;
       res.setHeader("etag", etag);

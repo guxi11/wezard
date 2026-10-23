@@ -69,7 +69,7 @@ export const tagOfKey = (target: string | undefined): string => {
 
 /** Drop the `#tag` suffix — collapses a tagged session key to the chat-scoped
  *  base principal (`user:xxx#foo` → `user:xxx`). Everything shared across a
- *  chat's sessions (cwd, peer discovery, graph runs) keys off this. */
+ *  chat's sessions (cwd, peer discovery, relationship graph) keys off this. */
 export const baseOfKey = (target: string): string => {
   const h = target.indexOf("#");
   return h >= 0 ? target.slice(0, h) : target;

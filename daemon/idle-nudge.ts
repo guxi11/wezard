@@ -24,8 +24,6 @@ export interface Obs {
   anchor: number;
   /** 对方闲着: 轮已结束、没停在审批上、没在交接。 */
   idle: boolean;
-  /** 不在工单里, 或工单还开着。 */
-  jobOpen: boolean;
 }
 
 export interface Watch {
@@ -38,7 +36,7 @@ export interface Watch {
 /** 锚是 now − ageMs 现算的, 两次读之间差几毫秒; 这么近的算同一个。 */
 const ANCHOR_SLACK_MS = 2000;
 
-const askable = (o: Obs): boolean => ["working", "needs-input", "errored"].includes(o.state) && o.jobOpen;
+const askable = (o: Obs): boolean => ["working", "needs-input", "errored"].includes(o.state);
 
 /** 一件过一次巡检: 下一刻的样子, 以及这一刻要不要问。纯函数。 */
 export const step = (w: Watch | undefined, o: Obs, now: number, p: Policy): { next: Watch; ask: boolean } => {
@@ -63,11 +61,10 @@ export const nudgeText = (fromName: string, turn: string, idleMs: number, n: num
 
 export interface NudgeDeps {
   /** 在飞的件 (index.ts 的 routeInFlight)。 */
-  inflight: () => readonly { from: string; to: string; turn: string; job: string; state: TurnState; ageMs: number; fromBlocked?: boolean }[];
+  inflight: () => readonly { from: string; to: string; turn: string; state: TurnState; ageMs: number; fromBlocked?: boolean }[];
   sweep?: () => Promise<void>;
   idleNow: (target: string) => Promise<boolean>;
   handingOff: (target: string) => boolean;
-  jobOpen: (job: string) => boolean;
   policy: () => Policy;
   /** 同件号代发话方续问; 返回是否注入成功。 */
   ask: (x: { from: string; to: string; turn: string; text: string }) => Promise<boolean>;
@@ -99,7 +96,7 @@ export const startIdleNudge = (deps: NudgeDeps): (() => void) => {
       const prev = mem.get(k) ?? (deps.store.get(k) ? { asks: deps.store.get(k)!.asks, anchor: now - x.ageMs } : undefined);
       const target = x.state === "working" ? x.to : x.from;
       const o: Obs = { state: x.state, anchor: now - x.ageMs,
-        idle: !(x.state !== "working" && x.fromBlocked) && await idle(target), jobOpen: !x.job || deps.jobOpen(x.job) };
+        idle: !(x.state !== "working" && x.fromBlocked) && await idle(target) };
       const { next, ask } = step(prev, o, now, p);
       mem.set(k, next);
       if (!ask) continue;

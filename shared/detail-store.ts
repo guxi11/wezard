@@ -84,42 +84,16 @@ export interface TurnUsage {
 //            这些路径上下文通常是延续的, 所以只中性地标"换过会话", 不宣称已清空。
 export type CtxCut = "clear" | "new" | "switch";
 
-// Graph 归因 —— 这一轮不是人打的字, 是 loop graph 某一轮的某一步注入的。
-// 必须落在 turn 记录里, 而不是只挂在 graph.ts 的内存 run 上: run 是 in-memory 的,
-// 一次 reload 就没了, 而 details 走 append-only JSONL —— 归因得跟着记录过夜, 否则
-// 重启后历史 turn 永远说不清自己是谁派的, 看着就是某个 tag 在自说自话。
-// pipeline 的全貌不存在这里: 同一 runId 的所有 turn 各自带着 (round, step, tag),
-// 合起来就能把步骤序列反推出来 (见 chat-view.graphSummaries), 不必逐轮冗余整张 spec。
-export interface TurnOrigin {
-  runId: string;
-  /** 1-based, 与 rounds 一起构成 "轮 3/5"。 */
-  round: number;
-  rounds: number;
-  /** 1-based step index within one round. */
-  step: number;
-  steps: number;
-  /** 上一步的 tag —— 它的回复正是本步 `{{last}}` 的内容; 整个 run 的第一步没有。 */
-  fromTag?: string;
-}
-
 // 出处 —— 这一轮是**谁开的口**。undefined = 人直接说的 (群里发言 / CLI 敲字)。
 //
-// 一个 wizard 的轮次早就不只来自人了: 同伴 send_peer 派活、工单 fan-out、定时
-// 任务到点放枪。这些边只存在于发生的那一刻 —— jobs.json 记的是「安排了谁」,
-// schedules 记的是「打算什么时候」, 都不是「真的发生过一次」。关系图画的正是
-// 后者, 所以它必须跟着 turn 记录一起过夜 (append-only JSONL), 和 origin 同理。
-//
-// 与 origin 并列而不是合并: graph 的 (runId, round, step) 是一条声明好的流水线
-// 上的坐标, peer 派活没有这套坐标, 硬塞进去每个字段都得是可选的, 读的人分不清
-// 哪种组合才合法。
+// 同伴 send_peer 派活、定时任务到点放枪。这些边只存在于发生的那一刻, 所以跟着
+// turn 记录一起过夜 (append-only JSONL), 供关系视图和回执回读。
 export interface TurnFrom {
   /** peer = 另一个 wizard 派的; task = 定时任务放的枪。 */
   kind: "peer" | "task";
   /** 派活那一方的 target key (kind=peer)。跨聊天时它的 base 与本轮不同 —— 这正是
    *  「wizards 跨 chats 关联起来了」这件事在数据里唯一的落点。 */
   from?: string;
-  /** 归在哪个工单名下 (open_job 的 id); 不走工单的派活没有。 */
-  job?: string;
   /** 定时任务 id (kind=task) —— 拿它回 config.schedules 里找规格。 */
   taskId?: string;
   /** kind=peer: 发话方选择在公开频道 (turn.channel) 里说 —— 气泡进群, 回复也进群。
@@ -136,9 +110,6 @@ export interface TurnFrom {
   event?: string;
   /** 回执: 定论 (见 ReceiptStatus)。 */
   status?: ReceiptStatus;
-  /** 回执: 工单里已落定几份 / 一共几份 —— 「第 i/n 份」。不走工单的没有。 */
-  done?: number;
-  total?: number;
   /** kind=peer: 这条派活链是谁开的头 (见 Asker) —— 派活时从发话方那一轮继承, 回执原样带回。
    *  回执那一轮在群里的终句就是答给他的。不知道 (定时任务开的头 / CLI 敲字 / 老记录) = 没有。 */
   asker?: Asker;
@@ -182,7 +153,6 @@ export interface TurnDetailRecord {
   cli?: CliBackendName; // 跑这一轮的 CLI 后端 (claude / codebuddy …), 详情页据此称呼它
   userQuery?: string;  // 触发本轮的用户输入原文 (mirror 侧 dispatch 的 text)
   cut?: CtxCut;        // 本轮之前的上下文断点; undefined = 与上一轮同一上下文
-  origin?: TurnOrigin; // 本轮由 graph 注入; undefined = 人 (或 peer) 直接发起
   from?: TurnFrom;     // 本轮由同伴 / 定时任务开口; undefined = 人直接说的
   // 频道 —— 这一轮的输入在哪儿说的、回复发到哪儿。名字全局可达以后, 人可以在
   // 任何群里 `.fix` 叫任何 wizard, 回复回到**发话的那个群**, 不一定是 fix 的 home。

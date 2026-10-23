@@ -3,8 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { contextFiles, contextMaterials } from "../daemon/peers.js";
-import { commonStems, decide, isSmallTask, rankCandidates, renderCandidates, routeDutiesOf, routeReceiptDutiesOf, tierFor, type RouteRow } from "../daemon/route.js";
-import type { JobRecord } from "../daemon/jobs.js";
+import { commonStems, decide, isSmallTask, rankCandidates, renderCandidates, routeReceiptDutiesOf, tierFor, type RouteRow } from "../daemon/route.js";
 import type { InFlight } from "../daemon/dispatch.js";
 
 const now = 1_000_000;
@@ -104,21 +103,11 @@ for (const patch of [
 assert.equal(decision("继续完善刚才 route.ts", [row()]).kind, "spawn", "裸同名文件不能替代路径");
 assert.equal(decision(followup, [row({ files: [`${cwd}/daemon/route.ts`, `/repo/b/daemon/route.ts`] })]).kind, "existing", "另一同名路径不覆盖准确命中");
 
-const job = (patch: Partial<JobRecord> = {}): JobRecord => ({
-  id: "J1", base: "other-chat", owner: "caller", title: "复杂任务", status: "open", openedAt: now,
-  members: [{ target: "worker", task: "架构评审", role: "exec", spawned: false, at: now }], ...patch,
-});
-assert.deepEqual(routeDutiesOf([job()], "worker"), ["J1 exec: 架构评审"]);
-assert.deepEqual(routeDutiesOf([job()], "caller"), ["J1 开单者: 复杂任务"]);
-assert.deepEqual(routeDutiesOf([job({ status: "closed" })], "worker"), []);
-assert.deepEqual(routeDutiesOf([job({ status: "closed" })], "caller"), []);
-for (const role of ["lead", "reviewer", "expert", "exec"] as const) {
-  assert.equal(routeDutiesOf([job({ members: [{ ...job().members[0]!, role }] })], "worker").length, 1);
-}
-assert.deepEqual(routeDutiesOf([job({ members: [{ ...job().members[0]!, outcome: "done" }] })], "worker"), []);
-assert.equal(routeDutiesOf([job({ members: [{ ...job().members[0]!, target: "caller", outcome: "done" }] })], "caller").length, 1, "落定成员若也是 owner, 开单占用仍在");
-assert.equal(routeDutiesOf([job(), job({ id: "J2", owner: "worker", members: [] })], "worker").length, 2);
-for (const patch of [ { lead: true }, { duties: routeDutiesOf([job()], "worker") }, { duties: routeDutiesOf([job({ owner: "worker" })], "worker") } ]) {
+const receiverDuty = routeReceiptDutiesOf([
+  { from: "caller", to: "worker", turn: "t1", state: "needs-input" as const },
+], "worker");
+assert.deepEqual(receiverDuty, ["t1 欠着 caller: needs-input"]);
+for (const patch of [ { lead: true }, { duties: receiverDuty } ]) {
   const rows = [row(patch)];
   assert.equal(decision(followup, rows).kind, "spawn");
   assert.equal(decision(followup, rows, true).kind, "spawn", "force 不绕占用保护");
@@ -146,11 +135,11 @@ assert.equal(sixth.row.name, "sixth");
 // 每个状态验证 incoming 占用；另用一个 outgoing 样本验证 child 归属与「在等」方向。
 const receipt = (state: InFlight["state"], outgoing = false): InFlight => ({
   from: outgoing ? "worker" : "caller", to: outgoing ? "child" : "worker",
-  turn: "t123456", job: "", state, ageMs: 1000,
+  turn: "t123456", state, ageMs: 1000,
 });
 for (const state of ["working", "blocked", "needs-input", "deferred", "errored", "queued"] as const) {
   const inflight = [receipt(state)];
-  const duties = routeDutiesOf([], "worker", inflight);
+  const duties = routeReceiptDutiesOf(inflight, "worker");
   assert.equal(duties.length, 1);
   assert.deepEqual(duties, routeReceiptDutiesOf(inflight, "worker"));
   assert.match(duties[0]!, /欠着 caller/);
@@ -161,14 +150,14 @@ for (const state of ["working", "blocked", "needs-input", "deferred", "errored",
   assert.deepEqual(routeReceiptDutiesOf(inflight, "unrelated"), []);
 }
 const outgoing = [receipt("working", true)];
-const outgoingDuties = routeDutiesOf([], "worker", outgoing);
+const outgoingDuties = routeReceiptDutiesOf(outgoing, "worker");
 assert.deepEqual(outgoingDuties, routeReceiptDutiesOf(outgoing, "worker"));
 assert.match(outgoingDuties[0]!, /在等 child/);
 assert.equal(decision(followup, [row({ busy: false, duties: outgoingDuties })], true).kind, "spawn");
 assert.deepEqual(routeReceiptDutiesOf(outgoing, "unrelated"), []);
 for (const state of ["done", "timeout", "silent", "dead", "canceled"] as const)
-  assert.deepEqual(routeDutiesOf([], "worker", [receipt(state)]), []);
-assert.equal(routeDutiesOf([job()], "worker", [receipt("needs-input"), receipt("deferred", true)]).length, 3);
+  assert.deepEqual(routeReceiptDutiesOf([receipt(state)], "worker"), []);
+assert.equal(routeReceiptDutiesOf([receipt("needs-input"), receipt("deferred", true)], "worker").length, 2);
 
 // 成本与任务档位都参与复用决策, force 不把弱连续性升级。
 const cold = row({ contextTokens: 100_000, lastActivity: now - ttlMs - 1 });

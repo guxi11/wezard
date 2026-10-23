@@ -53,7 +53,7 @@ const ctx = vm.createContext({
   m: {
     idleNow: async (target: string) => ready.has(target),
     untilIdle: async (target: string) => { await barriers.get(target)?.promise; return { idle: true }; },
-    injectText: async (target: string, prompt: string, _origin: unknown, opts: { requireIdle: boolean; guard: () => boolean }) => {
+    injectText: async (target: string, prompt: string, opts: { requireIdle: boolean; guard: () => boolean }) => {
       assert.equal(opts.requireIdle, true, "production named injection must recheck idle under the pane lock");
       assert(opts.guard());
       attempts.push(prompt);
@@ -115,7 +115,7 @@ removed.splice(0); states.clear();
 records.forEach((r) => { states.set(r.id, { createdAt: Date.now() - 2000 }); ready.add(r.target); });
 const releases = new Map<string, ReturnType<typeof deferred>>();
 let running = 0, maximum = 0;
-ctx.m.injectText = async (_target: string, prompt: string, _origin: unknown, o: { guard: () => boolean }) => {
+ctx.m.injectText = async (_target: string, prompt: string, o: { guard: () => boolean }) => {
   assert(o.guard());
   const barrier = deferred(); releases.set(prompt, barrier);
   maximum = Math.max(maximum, ++running);

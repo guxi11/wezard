@@ -1,7 +1,7 @@
 // 交接 (handoff): 一个 wizard 把工作压成简报, 换一个全新的上下文接着干 —— 同一个 target
 // 与名字。普通交接沿用 pane/CLI 并原生 /clear; 有 pending workspace 时启动新 CLI 进程。
 //
-// 身份、工单、日程、名册信箱都挂在 target / 名字上, 换会话碰不到它们; 会断的是那些
+// 身份、plans、日程、名册信箱都挂在 target / 名字上, 换会话碰不到它们; 会断的是那些
 // 隐含着「这个会话」的东西:
 //   - 回执的**答方**: 欠着别人的那一句, 换了会话旧 transcript 就读不到了 —— 义务得跟着
 //     简报转进新会话, 而不是把简报那一轮的回复错当成回执;
@@ -17,7 +17,7 @@
 import type { Logger } from "pino";
 import type { JsonMap } from "../shared/json-map-store.js";
 import { sleep, truncate } from "../shared/std.js";
-import { waitForIdle } from "./graph.js";
+import { waitForIdle } from "./wait-idle.js";
 import type { EventId } from "./router.js";
 
 // ── 闸 ──────────────────────────────────────────────────────────────

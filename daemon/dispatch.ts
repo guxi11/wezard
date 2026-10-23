@@ -24,25 +24,25 @@ export interface Tell {
   queued?: boolean;
   /** 一次 tracked dispatch 的稳定键 (续问沿用件、换这个键)。 */
   dispatchKey?: string;
-  jobDispatchKey?: string;
   from: string;
   to: string;
   channel: string;
-  job?: string;
+  /** Explicit reminder association for this event; continuations inherit from the original event. */
+  planId?: string;
   /** 发话时刻。注入**之前**取的那个 —— 晚于那一句落盘的话, 回执定位的下界就偏了。 */
   at?: number;
   /** 这一轮服务的那一笔 (路由 event)。 */
   event?: string;
   legs?: number;
-  /** 守护进程因为不合工单验收打回过一次, 这是被打回的那段原文 —— 再交上来的照收, 不再打回。 */
+  /** Historical bounced text may still be present in recovered receiver events. */
   bounced?: string;
   /** 发话方那一轮的链头 (见 Asker): 回执带回去, 子活再派下去时继承。 */
   asker?: Asker;
 }
 
-/** 一个 wizard 手上在飞的活 (名册 / peek / list_jobs 的那一行)。`turn` 那一栏是 event id
+/** 一个 wizard 手上在飞的活 (名册 / peek 的一行)。`turn` 那一栏是 event id
  *  —— 下游只当字符串展示 (§9.1)。 */
-export interface InFlight { from: string; to: string; turn: string; job: string; state: TurnState; ageMs: number; fromBlocked?: boolean }
+export interface InFlight { from: string; to: string; turn: string; state: TurnState; ageMs: number; fromBlocked?: boolean }
 
 // ── 回执去向 (§3.2 / §9.5) ──────────────────────────────────────────────
 // 只有四个词, 旧写法 (`chain:false` / `receipt:false` / `answer:"transfer"`) 自 T10 起下线 ——

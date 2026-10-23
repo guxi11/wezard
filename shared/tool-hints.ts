@@ -1,7 +1,7 @@
 // Read code-mode transcripts as data. Never evaluate the recorded JavaScript.
 import { parse } from "acorn";
 
-export const HINT_TOOL = /(?:^|__)(tell_peer|send_peer|dispatch|clone_wizard|spawn_wizard|open_job|close_job|stop_wizard|schedule_task)$/;
+export const HINT_TOOL = /(?:^|__)(tell_peer|send_peer|dispatch|clone_wizard|spawn_wizard|stop_wizard|schedule_task)$/;
 export type Facts = Record<string, unknown>;
 export const objectOf = (v: unknown): Facts | undefined =>
   v !== null && typeof v === "object" && !Array.isArray(v) ? v as Facts : undefined;
@@ -94,7 +94,6 @@ const matches = (c: HintCall, r: Facts): boolean => {
   if (tool === "dispatch") return r.decision === "spawn" || r.decision === "existing";
   if (tool === "tell_peer" || tool === "send_peer") return !r.decision && typeof r.turn === "string" && !r.dispatched;
   if (tool === "spawn_wizard" || tool === "clone_wizard") return !r.decision && typeof r.sessionId === "string";
-  if (tool === "open_job" || tool === "close_job") return typeof r.job === "string";
   if (tool === "stop_wizard") return typeof r.name === "string" && typeof r.mode === "string";
   return typeof r.id === "string" && (typeof r.when === "string" || typeof r.next === "string");
 };

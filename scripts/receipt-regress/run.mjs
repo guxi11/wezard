@@ -31,8 +31,8 @@
 //
 // 必须在一个 wizard 会话里跑 (要会话 id / TMUX_PANE 认出发起者; 只跑纯 unit 用例时不必)。它先生一个
 // mini 档根 `rr-root-<后缀>` (发起者的分身), 每条用例再由根生同档临时分身、直接 POST daemon 驱动
-// —— 不经 MCP, 所以不受「本会话的 MCP 进程是旧代码」影响。判定只读守护进程落的账 (routes.jsonl /
-// jobs.json) 和会话 transcript 里收到的信封, 不信分身自己说了什么。跑完 (含失败 / Ctrl-C) 把生的
+// —— 不经 MCP, 所以不受「本会话的 MCP 进程是旧代码」影响。判定只读守护进程落的账 (routes.jsonl)
+// 和会话 transcript 里收到的信封, 不信分身自己说了什么。跑完 (含失败 / Ctrl-C) 把生的
 // 分身全部收掉。
 //
 // 跑前看一眼 `GET /routes` 有没有 `deadlineAt` 已过的在飞行 (T6/T7 探针故意推后, 别动它们);
@@ -61,7 +61,7 @@ const initBackend = async () => {
 const DAEMON = process.env.WEZARD_DAEMON_BASE ?? "http://127.0.0.1:17890";
 // 写敏感路由 (/tasks/schedule 等) 要出示口令, 同 MCP / CLI (见 shared/daemon-token.ts)。
 const TOKEN = (() => { try { return readFileSync(join(homedir(), ".wezard", "daemon-token"), "utf8").trim(); } catch { return ""; } })();
-// routes.jsonl / jobs.json 在 ~/.wezard 下 (WEZARD_STATE_DIR 是 hook 的另一处目录, 不是它)。
+// routes.jsonl 在 ~/.wezard 下 (WEZARD_STATE_DIR 是 hook 的另一处目录, 不是它)。
 const STATE = process.env.RR_STATE_DIR ?? join(homedir(), ".wezard");
 const ME = {
   sessionId: process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID || process.env.CODEBUDDY_SESSION_ID || "",
@@ -90,7 +90,6 @@ const post = async (route, body, tries = 60) => {
   return r.json().catch(() => ({ ok: false, reason: `HTTP ${r.status}` }));
 };
 const readJson = (f) => { try { return JSON.parse(readFileSync(join(STATE, f), "utf8")); } catch { return {}; } };
-const jobOf = (id) => readJson("jobs.json")[id];
 
 /** `pred()` 为真就返回它的值; 超时返回 undefined。 */
 const until = async (pred, ms, every = 2000) => {
@@ -637,7 +636,7 @@ const cases = {
       P.renderHumanEnvelope("u1", "群", "chat:c1"),
       P.renderPeerEnvelope(".a", undefined, { asker, re: true, legs: 5, deadline: Date.now(), act: "fyi", quiet: true }),
       P.renderPeerEnvelope(".a", "群", { act: "ask" }),
-      P.renderReceiptEnvelope(".b", "群", { job: "j1", done: 2, total: 2 }, "need", "e1.2", { asker, audience: "u1", via: ".c", late: true, retellTo: "群", retold: true, up: true }),
+      P.renderReceiptEnvelope(".b", "群", "need", "e1.2", { asker, audience: "u1", via: ".c", late: true, retellTo: "群", retold: true, up: true }),
       P.renderTaskEnvelope("t1", { event: "e9" }),
       P.renderStewardHint(),
     ];
@@ -695,49 +694,6 @@ const cases = {
       pass,
       why: `四个词=${four.map((x) => x.op).join("/")} · 缺省=${dflt.op} · 坏值=${bad.ok ? "放行" : "400"}`
         + ` · 旧写法 (T10b 起不映射, 旧世界仍映射)=${legacyOps.map(([k, x]) => `${k}→${x.ok ? x.op : "400"}`).join(" ")}`,
-    };
-  } },
-
-  // 派活方向闸 (direction.ts): 纯单元, 链 / 深度由调用方算好传进来 (旧版从 receipts.ancestorsOf 取)。
-  "direction-gate": { direction: "dispatch", unit: true, default: true, summary: "job ownership, hierarchy, cycles", names: [], run: async () => {
-    const { checkDirection } = await import(new URL("../../dist/daemon/direction.js", import.meta.url).href);
-    const m = (target, role, outcome) => ({ target, task: "", spawned: false, at: 1, ...(role ? { role } : {}), ...(outcome ? { outcome } : {}) });
-    const job = (id, owner, members, parent) => ({ id, base: "c", owner, title: id, members, status: "open", openedAt: 1, ...(parent ? { parent } : {}) });
-    const jobs = [job("R", "boss", [m("lead", "lead")]), job("J", "lead", [m("a"), m("b"), m("x", "expert"), m("d", "exec", "done")], "R"), job("K", "lead", [m("c", "exec")], "R")];
-    const g = (o) => checkDirection({ self: "lead", target: "a", kind: "task", re: false, jobId: "", jobs, chain: [], nameOf: (t) => `.${t}`, ...o });
-    const table = {
-      "非 owner 带 job 的 task 拒": !!g({ self: "a", target: "b", jobId: "J" }),
-      "owner 带 job 的 task 放行": !g({ jobId: "J" }),
-      "成员横向 task 拒": !!g({ self: "a", target: "b" }),
-      "成员横向 re 续问放行 (ask 兄弟、兄弟 NEED 回来)": !g({ self: "a", target: "b", re: true }),
-      "非 owner 带 job 的 re 仍拒 (规则 1)": !!g({ self: "a", target: "b", jobId: "J", re: true }),
-      "越级只数未落定的 exec/lead: 已落定的成员 / 专家不拦": !g({ self: "boss", target: "d" }) && !g({ self: "boss", target: "x" }),
-      "成员横向 ask 放行": !g({ self: "a", target: "b", kind: "ask" }),
-      "成员横向 fyi 放行": !g({ self: "a", target: "b", kind: "fyi" }),
-      "防环: task 拒": !!g({ self: "a", target: "lead", chain: ["lead", "boss"] }),
-      "防环: ask 拒": !!g({ self: "a", target: "boss", kind: "ask", chain: ["lead", "boss"] }),
-      "防环: fyi 放行": !g({ self: "a", target: "lead", kind: "fyi", chain: ["lead", "boss"] }),
-      "链深 ≥3 task 拒 / ask 放行": !!g({ self: "x1", target: "z", chain: ["a", "b", "c"] }) && !g({ self: "x1", target: "z", kind: "ask", chain: ["a", "b", "c"] }),
-      "越级: 上级单 owner 直派下层成员拒": !!g({ self: "boss", target: "a" }),
-      "越级: re 也拒, 经 lead 派的放行": !!g({ self: "boss", target: "a", re: true }) && !g({ self: "lead", target: "a", re: true }),
-      "越级: 只读式 ask 放行": !g({ self: "boss", target: "a", kind: "ask" }),
-      "owner 派借来的专家 task 拒 / ask 放行": !!g({ target: "x" }) && !g({ target: "x", kind: "ask" }),
-      "已在别单当未落定 exec 的再带 job 领活拒": !!g({ target: "c", jobId: "J" }) && !g({ target: "c", jobId: "K" }),
-    };
-    const bad = Object.entries(table).filter(([, ok]) => !ok).map(([k]) => k);
-    return { pass: !bad.length, why: bad.length ? `没过: ${bad.join(" · ")}` : `${Object.keys(table).length} 条规则都对` };
-  } },
-
-  // 链深闸看**实际挂的那一帧**, 不看并集; 防环仍看并集 —— chain / depth 都由调用方算好。
-  "direction-depth-for": { direction: "dispatch", unit: true, default: true, summary: "active ancestry depth", names: [], run: async () => {
-    const { checkDirection } = await import(new URL("../../dist/daemon/direction.js", import.meta.url).href);
-    const chain = ["u", "v", "y", "z"]; // 两帧各 2 层, 并集 4
-    const depth = ["y", "z"];           // 本轮实际服务那一帧的链深 2
-    const g = (target, o = {}) => checkDirection({ self: "a", target, kind: "task", re: false, jobId: "", jobs: [], chain, depth, nameOf: (t) => `.${t}`, ...o });
-    const down = g("w"), loop = g("u"), deep = g("w", { depth: undefined });
-    return {
-      pass: !down && !!loop && !!deep,
-      why: `并集链=${chain.join(",")} 链深=${depth.join(",")} · 向下派=${down ? "拦" : "放行"} · 反派 u=${loop ? "拦" : "放行"} · 按并集算深度=${deep ? "拦" : "放行"}`,
     };
   } },
 
@@ -825,24 +781,6 @@ const cases = {
     return {
       pass: sb?.outcome?.status === "canceled" && !injected && gb.length === 1 && gb[0].attrs.status === "canceled",
       why: `B 行=${sb?.outcome?.status ?? "未落定"} 被注入过=${injected} 根收到 ${gb.map((r) => r.attrs.status).join(",") || "0 份"}`,
-    };
-  } },
-
-  // graph 的步骤与进度跟着发起那一轮的频道: 根这一轮是私聊 (发起者的 return:none 私聊 / 回执),
-  // 节点那一轮就不能进它的 home 群。
-  "graph-private": { direction: "runtime", summary: "graph turns preserve private-channel routing", names: ["rr-gn"], run: async () => {
-    const n = nonce();
-    const tag = real("rr-gn");
-    await spawn("rr-gn"); // Graph reuses this already-protected node.
-    const g = await post("/graph/run", { target: root.target, nodes: [{ tag, model: root.model }], steps: [{ to: tag, prompt: `这是回归测试, 不要调用任何工具, 直接回复一行: RESULT: [receipt-regress] graph-${n}` }], rounds: 1, idleTimeoutSec: 180 });
-    if (!g.ok) return { pass: false, why: `graph/run: ${g.reason}` };
-    kids.set("rr-gn", `${g.base}#${tag}`);
-    const run = await until(async () => { const r = await fetch(`${DAEMON}/graph/status?runId=${g.runId}`).then((x) => x.json()).catch(() => ({})); return r.run?.status !== "running" && r.run; }, 4 * 60_000);
-    await sleep(5000);
-    const pub = turnsOf(kids.get("rr-gn")).filter((t) => t.channel !== "").map((t) => t.channel);
-    return {
-      pass: run?.status === "done" && run.history?.some((h) => h.reply.includes(`graph-${n}`)) && !pub.length,
-      why: `graph=${run?.status ?? "没跑完"} · 进了群的轮 ${pub.join(",") || "无"}`,
     };
   } },
 
@@ -1208,35 +1146,6 @@ const cases = {
     };
   } },
 
-  // 工单 expect=2: 两份回执的信封依次写 1/2、2/2 (complete), 账本两名成员都落 done。
-  job: { direction: "runtime", summary: "job member outcomes and aggregate counts", names: ["rr-j1", "rr-j2"], run: async () => {
-    const n = nonce();
-    const o = await post("/jobs/open", { target: root.target, title: "[receipt-regress] 工单 expect 计数", expect: 2 });
-    if (!o.ok) return { pass: false, why: `open_job: ${o.reason}` };
-    await Promise.all(["rr-j1", "rr-j2"].map((x) => spawn(x, { job: o.job, task: `直接回复一行: RESULT: ${x}-${n}` })));
-    const done = await until(() => { const j = jobOf(o.job); return j?.members?.length === 2 && j.members.every((mm) => mm.outcome) && j; }, 4 * 60_000);
-    const got = await until(async () => { const xs = (await receiptsIn(root.target)).filter((r) => r.attrs.job === o.job); return xs.length >= 2 && xs; }, 60_000) ?? [];
-    await post("/jobs/close", { target: root.target, job: o.job, summary: "receipt-regress" });
-    const tallies = got.map((r) => `${r.attrs.done}/${r.attrs.total}${r.attrs.complete === "1" ? "✓" : ""}`).sort();
-    return {
-      pass: !!done && done.members.every((mm) => mm.outcome === "done") && tallies.join(",") === "1/2,2/2✓",
-      why: `成员=${done?.members.map((mm) => mm.outcome).join(",") ?? "未落定"} 信封=${tallies.join(",") || "无"}`,
-    };
-  } },
-
-  // 工单收工之后才到的回执: 信封说明工单已收, 不再催 close_job。
-  "job-late": { direction: "runtime", summary: "late result after job closure", names: ["rr-j3"], run: async () => {
-    const o = await post("/jobs/open", { target: root.target, title: "[receipt-regress] 收工后迟到的回执", expect: 1 });
-    if (!o.ok) return { pass: false, why: `open_job: ${o.reason}` };
-    await spawn("rr-j3", { job: o.job, task: `${SLEEP(20)}, 然后回复一行: RESULT: late` });
-    await post("/jobs/close", { target: root.target, job: o.job, summary: "receipt-regress" });
-    const got = await until(async () => (await receiptsIn(root.target, "rr-j3"))[0], 3 * 60_000);
-    return {
-      pass: !!got && !got.body.includes("全部到齐") && got.body.includes("已经收工"),
-      why: got ? `信封含「全部到齐」=${got.body.includes("全部到齐")} 含「已经收工」=${got.body.includes("已经收工")}` : "没收到回执",
-    };
-  } },
-
   // return:detach —— a 在答根那一轮里派的旁支活不挂住 a 给根的交代: 根先拿到 a 自己的结论, 且只一份。
   detach: { direction: "runtime", summary: "detached side work leaves owner's result independent", names: ["rr-e", "rr-d"], run: async () => {
     const n = nonce();
@@ -1251,24 +1160,6 @@ const cases = {
     return {
       pass: settled(s) && s.outcome.status === "done" && s.outcome.body.includes(`own-${n}`) && !!side && detached && got.length === 1,
       why: `行=${s?.outcome?.status ?? "未落定"} 是自己的结论=${!!s?.outcome?.body.includes(`own-${n}`)} 旁支 detach=${side ? detached : "未落定"} 根收到 ${got.length} 份`,
-    };
-  } },
-
-  // 工单验收 (B4 ⑦): 成员第一次交了没有 RESULT 的答复 → 守护进程同件打回一次, 那份不投给根;
-  // 第二次照收。根只收到一份, 内容是补了 RESULT 的那次。
-  accept: { direction: "runtime", summary: "job result acceptance retries incomplete finality", names: ["rr-v"], run: async () => {
-    const n = nonce();
-    const t0 = Date.now();
-    const o = await post("/jobs/open", { target: root.target, title: "[receipt-regress] 工单验收打回", expect: 1, accept: "result" });
-    if (!o.ok) return { pass: false, why: `open_job: ${o.reason}` };
-    await spawn("rr-v", { job: o.job, task: `这是回归测试, 不要调用任何工具。第一次只回复「好的」两个字, 不写 RESULT。之后若被要求补收口, 就回复一行: RESULT: accept-${n}` });
-    const s = await settledRow("rr-v", 4 * 60_000);
-    const got = await waitReceipts(root.target, "rr-v");
-    const bounced = await until(() => logLine(t0, (lo) => /不合工单验收/.test(lo.msg ?? "")), 60_000);
-    await post("/jobs/close", { target: root.target, job: o.job, summary: "receipt-regress" });
-    return {
-      pass: settled(s) && s.outcome.status === "done" && s.outcome.body.includes(`accept-${n}`) && got.length === 1 && !!bounced,
-      why: `行=${s?.outcome?.status ?? "未落定"} 含补交=${!!s?.outcome?.body.includes(`accept-${n}`)} 打回过=${!!bounced} 根收到 ${got.length} 份`,
     };
   } },
 

@@ -299,7 +299,7 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
   background: var(--card); border-bottom: 1px solid var(--line);
 }
 .chathead .back { display: none; border: 0; background: none; font-size: 22px; color: var(--mute); cursor: pointer; padding: 0 4px }
-/* 跳过来之后的返回 (工单页 / 移交行): 同一副无框箭头, 宽屏也露出。 */
+/* 跳过来之后的返回 (移交行): 同一副无框箭头, 宽屏也露出。 */
 .chathead .back.jb { display: block; flex: none; margin-right: -4px }
 .chathead .back.jb:hover { color: var(--accent) }
 /* 有跳转返回时窄屏只留它一个箭头: 先回跳转前; 没有它时 #tb-back 才是回会话列表。 */
@@ -390,7 +390,6 @@ span.av.go:hover { background: var(--av-hot); box-shadow: 0 0 0 3px var(--av-hot
 .mb .mq .q-imgs img { max-width: min(100%, 420px); max-height: 360px; width: auto; height: auto; object-fit: contain }
 .mchip { border-radius: 4px; padding: 0 5px; background: #f1f3f6; color: var(--mute) }
 .mchip.priv { color: var(--priv); background: #9a5b1014 }
-.mchip.graph { color: #6639ba; background: #8250df12 }
 .mchip.sys { color: #0a7d6b; background: #0a7d6b12 }
 /* 回执: 定论着色 —— 已交是常态不抢眼, 反问 / 报错要人看一眼, 没答案的几种灰红。 */
 .mchip.rcpt { border: 0; font: inherit; font-size: 11px; line-height: 16px; color: #1a7f37; background: #1a7f3712 }
@@ -549,7 +548,7 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .plan-in { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 20px 28px }
 .psec {
   max-width: 900px; margin: 0 auto 30px;
-  /* 通用 section 规则给了白底+边框却没有内边距 —— 不补这一层, 刻度条/日程行/工单
+  /* 通用 section 规则给了白底+边框却没有内边距 —— 不补这一层, 刻度条/日程行
      行就直接贴着卡片的边。底边留小一点: 末行自己还带 10px 的 margin。 */
   padding: 14px 18px 8px;
 }
@@ -591,7 +590,12 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .strip .pin.bad span { color: #cf222e }
 .strip .cap { font-size: 11px; color: #8c959f }
 
-/* wizard 徽标 —— 日程/工单里凡是提到一个 wizard 都用它, 同聊天的可点进线程。 */
+/* 微信通道状态徽标。 */
+.wxm { flex: none; margin-left: 4px; padding: 0 4px; border-radius: 4px; font-size: 10.5px; white-space: nowrap; color: #2f7d32; background: #2f7d3214 }
+.wxm.paused { color: #94741f; background: #bf870014 }
+.wxm.down { color: #c62828; background: #c6282814 }
+
+/* wizard 徽标 —— 日程里提到 wizard 时用它, 同聊天的可点进线程。 */
 .wchip {
   display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px;
   background: #f1f3f6; border: 1px solid #eaeef2; border-radius: 12px; padding: 1px 8px;
@@ -599,36 +603,6 @@ button.mchip.rcpt:hover { text-decoration: underline }
 }
 .wchip.go { cursor: pointer; border-color: #0969da33; color: #0550ae }
 .wchip.go:hover { background: #ddf4ff; border-color: #0969da }
-
-.jrow { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; padding: 12px 16px; margin-bottom: 10px }
-.jrow.open { border-color: #1a7f3755; box-shadow: 0 0 0 3px #1a7f370d }
-.jh { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap }
-.jid {
-  font-size: 10.5px; color: #57606a; background: #f1f3f6; border-radius: 4px;
-  padding: 0 6px; font-family: ui-monospace, Menlo, monospace;
-}
-.jt { font-size: 13px; font-weight: 600; min-width: 0 }
-.jst { font-size: 10.5px; color: #8c959f }
-.jrow.open .jst { color: #1a7f37; font-weight: 700 }
-.jts {
-  margin-left: auto; font-size: 10.5px; color: #8c959f;
-  font-family: ui-monospace, Menlo, monospace;
-}
-.jm { display: flex; flex-direction: column; gap: 5px; margin-top: 9px }
-.jmm { display: flex; align-items: center; gap: 6px; min-width: 0 }
-.jmm em {
-  font-style: normal; font-size: 11.5px; color: #656d76; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.jmm .tmp {
-  font-style: normal; font-size: 9.5px; color: #9a6700; background: #d4a72c22;
-  border-radius: 3px; padding: 0 4px;
-}
-.jmm.none { font-size: 11.5px; color: #b1bac4 }
-.jsum {
-  font-size: 12px; color: #1f2328; margin-top: 10px; padding-top: 10px;
-  border-top: 1px dashed #eaeef2; line-height: 1.5; white-space: pre-wrap;
-}
 
 @media (max-width: 760px) {
   .chathead .vb { padding: 3px 8px }
@@ -696,8 +670,6 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .tree li.clone { --lc: #8250df }
 .tree li.fork { --lc: #b39ddb }
 .tree li.peer { --lc: #0969da }
-.tree li.job { --lc: #bf8700 }
-.tree li.graph { --lc: #0a7d6b }
 /* 卡片 = 会话项; label 骑在它左上角, 紧挨箭头。 */
 .tci { position: relative; overflow: visible }
 .tci.me .t .nm { color: var(--accent) }
@@ -720,8 +692,6 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .ek.clone[data-cpoint]:hover { background: #8250df2e }
 .ek.fork { color: #8f7bb8; background: #8250df0a }
 .ek.peer { color: #4a74b0; background: #0969da10 }
-.ek.job { color: #94741f; background: #bf870014 }
-.ek.graph { color: #3d8577; background: #0a7d6b12 }
 .ek.cross { font-weight: 400; background: #fff; box-shadow: inset 0 0 0 1px var(--line) }
 
 /* ══ 宪章 · 按节 ═══════════════════════════════════════════════════ */
@@ -785,6 +755,13 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .tcard:hover { border-color: #b9c3d3 }
 .tcard.bad { border-color: #cf222e55; border-left: 3px solid #cf222e }
 .tcard.flash { animation: flash 1.2s ease-out }
+.plan-main { min-width: 0; flex: 1 }
+.plan-main h3 { display: flex; align-items: baseline; gap: 8px; margin: 0 0 4px; font-size: 13px }
+.plan-main .pid { color: var(--faint); font: 10.5px ui-monospace, Menlo, monospace }
+.plan-tasks { margin: 10px 0 0; padding-left: 22px; display: grid; gap: 8px }
+.plan-tasks li { padding-left: 3px }
+.plan-tasks small { display: block; color: var(--faint); margin-top: 3px }
+.plan-tasks p { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--mute); font-size: 11.5px }
 @keyframes flash { 0% { box-shadow: 0 0 0 4px #9a670055 } 100% { box-shadow: 0 0 0 4px #9a670000 } }
 .tc-time {
   flex: none; width: 92px; display: flex; flex-direction: column; gap: 1px;
@@ -831,10 +808,6 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .gt.go { color: #1a7f37; background: #dafbe1 }
 .gt.skip { color: #57606a; background: #eaeef2 }
 .gt.err { color: #fff; background: #cf222e }
-.jh .jst { border-radius: 4px; padding: 0 6px; background: #eaeef2 }
-.jrow.open .jh .jst { background: #dafbe1 }
-.jmm .wst { font-size: 9.5px }
-.jmm .tmp, .jmm .wchip { flex: none; white-space: nowrap }
 
 /* ── 搜索 (⌘K): 名片下、关系/日程入口上的搜索框 + 居中浮层 ──────────────
    入口与会话项同圆角, 无边框, 只靠浅灰底与侧栏白底区分; 悬停 / 键盘聚焦都只是底色再沉一档, 不描边。
@@ -930,63 +903,3 @@ button.mchip.rcpt:hover { text-decoration: underline }
 /* clone 徽标落到的那次 clone_wizard 调用: 调用框本身再闪一圈。 */
 .mrow .bubble.tool.hit { animation: hit 2.4s ease-out }
 @keyframes hit { 0%, 30% { box-shadow: 0 0 0 3px #2f55c955 } 100% { box-shadow: 0 0 0 3px #2f55c900 } }
-
-
-/* ══ 工单 (j:<id>) —— 工单页与工单列表都在主区; 侧栏 / 关系图只挂 📋 标记 ══════════════
-   进度徽标: 开着 = 已落定 / 一共 (琥珀), 收了 = 收工 (灰); 有人卡住另挂一枚紫色「N 卡住」。 */
-.jtag { flex: none; margin-left: 6px; font-size: 10.5px; line-height: 15px; padding: 0 5px; border-radius: 4px; color: var(--faint); background: #f1f3f6; font-weight: 500 }
-.jtag.open { color: #94741f; background: #bf870014 }
-.jstuck { flex: none; margin-left: 4px; font-size: 10.5px; line-height: 15px; padding: 0 5px; border-radius: 4px; color: #8250df; background: #fbefff; font-weight: 500 }
-.wxm { flex: none; margin-left: 4px; padding: 0 4px; border-radius: 4px; font-size: 10.5px; white-space: nowrap; color: #2f7d32; background: #2f7d3214 }
-.wxm.paused { color: #94741f; background: #bf870014 }
-.wxm.down { color: #c62828; background: #c6282814 }
-.jmk { flex: none; margin-left: 4px; padding: 0 3px; border-radius: 4px; font-size: 10.5px; opacity: .8; cursor: pointer }
-.jmk:hover { opacity: 1; background: #bf870022 }
-.jmk i { font-style: normal; margin-left: 1px; color: #94741f; font-size: 10px }
-.ek.jmk { margin-left: 0; opacity: 1; color: #94741f; background: #bf870014 }
-.ek.jmk:hover { background: #bf870033 }
-/* 消息上的工单 badge: 📋 标题 + 进度, 点了进工单页。 */
-.mchip.job { display: inline-flex; align-items: center; gap: 3px; max-width: 260px; border: 0; font: inherit; font-size: 11px; line-height: 16px; color: #94741f; background: #bf870014; cursor: pointer }
-.mchip.job:hover { background: #bf870030 }
-.mchip.job .jt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0 }
-.mchip.job .jtag { margin-left: 2px }
-/* 工单列表 (主区): 与侧栏会话项同一种行; 已收工的淡一档, 悬停回满。 */
-.jlist h2 { margin: 14px 4px 6px; font-size: 12px; font-weight: 500; color: var(--mute) }
-.jlist h2 span { margin-left: 6px; font-weight: 400; color: var(--faint) }
-.jlist .ci { width: 100% }
-.jclosed .ci { opacity: .55 }
-.jclosed .ci:hover { opacity: 1 }
-/* 工单页的开工 / 收工两行。 */
-.tg-job { margin: 6px auto; max-width: 560px; padding: 8px 12px; border-radius: 8px; border: 1px dashed #bf870066; background: #bf870008; font-size: 12px; color: var(--mute) }
-.tg-job .jh { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap }
-.tg-job .jh .jt { color: var(--ink); font-weight: 500 }
-.tg-job .jh .s { margin-left: auto; color: var(--faint); font-size: 11px }
-.tg-job .jmem { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 3px }
-.tg-job .jmem li { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap }
-/* 派给成员的那段活原样分行, 太长收在 4 行 (悬停看全文)。 */
-.tg-job .jmem em { flex-basis: 100%; padding-left: 40px; font-style: normal; color: var(--faint); white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden }
-.tg-job .jmem .go { border: 0; background: none; padding: 0; font: inherit; color: var(--accent); cursor: pointer }
-.tg-job .ja { flex-basis: 100%; padding-left: 40px; color: var(--faint); font-family: ui-monospace, monospace; font-size: 11px }
-.tg-job .jo { flex: none; font-size: 10.5px; padding: 0 5px; border-radius: 4px; color: #1a7f37; background: #1a7f3712 }
-.tg-job .jo.st-run { color: #94741f; background: #bf870014 }
-.tg-job .jo.st-none { color: var(--faint); background: #f1f3f6 }
-.tg-job .jo:is(.st-timeout, .st-silent, .st-dead, .st-canceled) { color: #cf222e; background: #cf222e10 }
-.tg-job .md-body { margin-top: 6px; color: var(--ink); overflow-wrap: anywhere }
-.tg-job .md-body.jplan { color: var(--mute) }
-/* 关系图: 正在看一张工单时只亮它的当事人与两端都是当事人的线。 */
-.tree.jsel .tci.jout { opacity: .3 }
-.tree.jsel .tci.jout:hover { opacity: 1 }
-.tree.jsel li.jdim { --lc: #d0d7de }
-
-
-.jstage { flex: none; margin-left: 6px; font-size: 10.5px; line-height: 15px; padding: 0 5px; border-radius: 4px; color: #0969da; background: #0969da12; font-weight: 500 }
-.jstage.wait { color: #94741f; background: #bf870022 }
-.jcrumb { font-weight: 400; color: var(--faint); margin-right: 2px }
-.jcrumb button { border: 0; background: none; padding: 0; font: inherit; color: var(--accent); cursor: pointer }
-.jcrumb i { font-style: normal; margin: 0 4px }
-.tg-job .jrole { flex: none; font-size: 10.5px; padding: 0 5px; border-radius: 4px; color: #8250df; background: #fbefff }
-.tg-job .jfork { font-size: 11px; color: var(--faint) }
-.tg-job .jkids { margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--line, #0001) }
-.tg-job .jkids .jn { font-size: 11px; color: var(--faint) }
-.tg-job .jorigin, .tg-job .jcrit { margin-top: 6px }
-.tg-job .jc { text-align: left }

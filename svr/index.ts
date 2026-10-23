@@ -8,7 +8,7 @@
 //   • GET  /detail?id=  从 store 取, 用 shared/detail-render 渲染 HTML
 // 加上 GET /healthz 便于反代/监控探活。
 //
-// 为什么要 POST /w: turn 记录里只有"谁跑了一轮", 身份 / 家谱 / 工单 / 日程全在
+// 为什么要 POST /w: turn 记录里只有"谁跑了一轮", 身份 / 家谱 / plans / 日程全在
 // daemon 那侧的注册表里。没有它, 远端浏览的关系图退化成「名册缺席」, 日程栏更是
 // 永远空的 —— 而那恰恰是最该被远程看一眼的东西。快照按**来源机器**分开存: 一个
 // svr 可能同时接着几台 daemon, 覆盖式写会让先推的那台凭空消失; 读的时候合并,
@@ -126,7 +126,7 @@ const isFactsPush = (v: unknown): v is FactsPush => {
   const r = v as Record<string, unknown>;
   const f = r.facts as Record<string, unknown> | undefined;
   if (typeof r.source !== "string" || !r.source || !f) return false;
-  return Array.isArray(f.wizards) && Array.isArray(f.jobs) && Array.isArray(f.schedules) && !!f.chatNames;
+  return Array.isArray(f.wizards) && Array.isArray(f.plans) && Array.isArray(f.schedules) && !!f.chatNames;
 };
 
 /** 几台 daemon 的快照合成一份世界。同一个 key 只可能由它所属的那台机器推出来,
@@ -136,7 +136,7 @@ const mergeFacts = (fresh: readonly FactsPush[]): WorldFacts => {
     [...xs.reduce((m, x) => m.set(key(x), x), new Map<string, T>()).values()];
   return {
     wizards: uniq(fresh.flatMap((p) => [...p.facts.wizards]), (w) => w.target),
-    jobs: uniq(fresh.flatMap((p) => [...p.facts.jobs]), (j) => j.id),
+    plans: uniq(fresh.flatMap((p) => [...p.facts.plans]), (plan) => plan.id),
     inflight: uniq(fresh.flatMap((p) => [...(p.facts.inflight ?? [])]), (x) => `${x.from}\0${x.to}\0${x.turn}`),
     schedules: uniq(fresh.flatMap((p) => [...p.facts.schedules]), (x) => x.id),
     chatNames: Object.assign({}, ...fresh.map((p) => p.facts.chatNames)) as Record<string, string>,

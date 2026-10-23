@@ -87,12 +87,10 @@ const Mirror = z.object({
   // 运行时状态 (会话生生死死), 所以落在 state 目录而不是 config.jsonc —— 与 chats 的
   // 名字表相反: 那是人手写的长期配置。
   wizardsFile: z.string().default("~/.wezard/wizards.json").describe("wizard 名册 (名字/职责/记忆/家谱) 文件"),
-  // 与 wizards 分开存: wizard 是长期身份, job 是一次性的活 —— 混在一张表里, 收工
-  // 清理会连身份一起抹掉。
-  jobsFile: z.string().default("~/.wezard/jobs.json").describe("工单账本文件"),
+  // 与 wizard 身份、receiver 消息账分开存储。
+  plansFile: z.string().default("~/.wezard/plans.jsonl").describe("wizard DAG 计划账本文件"),
   // 落盘是为了扛住 reload —— 被派活的 wizard 自己常以 reload 收尾, 纯内存的话它那
   // 一份回执就跟着旧进程没了。
-  receiptsFile: z.string().default("~/.wezard/receipts.json").describe("工作流存档 (`.nodes.json` / `.plans.json`) 的路径前缀"),
   pendingFile: z.string().default("~/.wezard/pending.json").describe("挂起事项表: 各 wizard 派出去、还没了结的事"),
   // 同理扛 reload: 落在「杀了旧 pane、还没贴回简报」之间, 纯内存的话新会话就空着
   // 醒来, 简报跟着旧进程没了。

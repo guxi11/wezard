@@ -20,7 +20,7 @@ import { baseOfKey, labelFor, stripSigil, tagOfKey } from "./session-label.js";
 import { isGhostTurn, isMark, isPost, isTurn, staleAt, summarizeTag, type TagSummary } from "./chat-view.js";
 import { stripReminders } from "./reminder.js";
 import type { Asker, DetailRecord, MarkDetailRecord, PostDetailRecord, TurnDetailRecord } from "./detail-store.js";
-import { jobProgress, type WorldFactJob, type WorldFacts, type WorldFactWeixin, type WorldFactWizard } from "./world.js";
+import type { WorldFacts, WorldFactWeixin, WorldFactWizard } from "./world.js";
 
 export type RoleKind = "wizard" | "human" | "task";
 
@@ -251,7 +251,7 @@ export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFact
 // key 相对于视角 role: `c:<base>` 公开频道, `p:<对端>` 私聊。
 // 有人在的频道一律是群聊 (与人的「单聊」也是: 人 + 住在里面的 wizard); 只有 wizard
 // 之间的才是私聊。
-export type ConvKind = "group" | "wizard" | "job";
+export type ConvKind = "group" | "wizard";
 
 export interface ConvSub {
   role: string;
@@ -269,8 +269,6 @@ export interface ConvSub {
   theirs?: Heard[];
   /** 它是 wizard 时才有。 */
   status?: RoleStatus;
-  /** 这一对往来里出现过的工单 (侧栏一行的 📋 标记)。 */
-  jobs?: string[];
 }
 
 export interface Conv {
@@ -293,12 +291,8 @@ export interface Conv {
   theirs?: Heard[];
   /** 群里的其他 role (只对公开频道)。 */
   subs: ConvSub[];
-  /** 这处往来里出现过的工单 (侧栏一行的 📋 标记); 没有 = 不给。 */
-  jobs?: string[];
   /** 微信通道群的状态标记 (见 wxMark); 企微群 / 私聊没有。 */
   wx?: WxMark;
-  /** 工单 (`j:<id>`) 的账: 开着没有、落定几份 / 一共几份。 */
-  job?: { id: string; owner: string; status: "open" | "closed"; done: number; total: number; parent?: string; kind?: "req"; stage?: string };
 }
 
 // ── 微信通道 ─────────────────────────────────────────────────────────
@@ -507,7 +501,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
         return {
           key, kind: "wizard", name: dir.nameOf(peer), label: dir.labelOf(peer), base: "", peer,
           status: dir.status(peer, now),
-          ...glanceOr(ms, speakerPrefix(dir, role, [peer])), count: ms.length, ...book(key, undefined, peer), subs: [], ...withJobs(ms),
+          ...glanceOr(ms, speakerPrefix(dir, role, [peer])), count: ms.length, ...book(key, undefined, peer), subs: [],
         };
       }
       const base = key.slice(2);
@@ -523,7 +517,7 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
           return {
             role: r, name: dir.nameOf(r), label: dir.labelOf(r), count: pair.length,
             ...glanceOfTalk(all, role, dir, role, [r], base), status: dir.status(r, now),
-            whole: { count: whole.length, ...glanceOfTalk(all, role, dir, r, [], base) }, ...withJobs(pair),
+            whole: { count: whole.length, ...glanceOfTalk(all, role, dir, r, [], base) },
             // 点它打开的窗: 成对 = 群里「我与它」(chat.js subRow), 与我无往来 = 它在群里的全部记录 (chat.js farKey)。
             ...book(pair.length ? key : `a:${r}||${base}`, pair.length ? r : undefined, r),
           };
@@ -541,38 +535,10 @@ export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now:
         label: "💬",
         ...((w) => (w ? { wx: wxMark(w, now) } : {}))(dir.weixin(base)),
         ...glanceOr(all, speakerPrefix(dir, role)), count: all.length,
-        heard: mergeHeard(own, ...subs.map((s) => s.heard.filter((h) => inGroup.has(h[3])))), subs, ...withJobs(all),
+        heard: mergeHeard(own, ...subs.map((s) => s.heard.filter((h) => inGroup.has(h[3])))), subs,
       };
     })
     .sort((a, b) => b.lastTs - a.lastTs);
-};
-
-// ── 工单 ─────────────────────────────────────────────────────────────
-// `j:<id>` 是一张工单的全部往来: 归在它名下的派活、各成员的答话、送回开单者的回执 —— 不分
-// 谁对谁, 也不按视角的 session 段裁 (成员各有各的 session)。开工 / 收工两行不是消息, 由
-// chat-http 按 facts 现画。
-export const jobOfKey = (key: string): string | undefined => (key.startsWith("j:") ? key.slice(2) : undefined);
-export const jobMessages = (msgs: readonly Msg[], id: string): Msg[] => msgs.filter((m) => m.turn.from?.job === id);
-/** 一组消息里出现过的工单号, 去重保序。 */
-export const jobsIn = (msgs: readonly Msg[]): string[] => [...new Set(msgs.map((m) => m.turn.from?.job ?? "").filter(Boolean))];
-const withJobs = (msgs: readonly Msg[]): { jobs?: string[] } => ((js) => (js.length ? { jobs: js } : {}))(jobsIn(msgs));
-
-/** 视角开的、或在里面的工单 —— 主区工单列表的一行, 数据与群 / 私聊同一套 (glance)。不进侧栏。 */
-export const jobConvsOf = (all_: readonly Msg[], role: string, dir: Directory, jobs: readonly WorldFactJob[]): Conv[] => {
-  const msgs = all_;
-  return jobs
-    .filter((j) => j.owner === role || j.members.some((mm) => mm.target === role))
-    .map((j): Conv => {
-      const ms = jobMessages(msgs, j.id);
-      const g = glanceOr(ms, speakerPrefix(dir, role));
-      return {
-        key: `j:${j.id}`, kind: "job", name: j.title, label: "📋", base: j.base,
-        preview: g.preview, lastTs: Math.max(g.lastTs, j.closedAt ?? j.openedAt),
-        // 工单里的每句话同时也在某个群 / 私聊里, 未读只记在那一处 —— 两边各记一份, 读了一边另一边还亮着。
-        count: ms.length, heard: [], subs: [],
-        job: { id: j.id, owner: j.owner, status: j.status, ...(j.parent ? { parent: j.parent } : {}), ...(j.kind ? { kind: j.kind } : {}), ...(j.stage ? { stage: j.stage } : {}), ...jobProgress(j) },
-      };
-    });
 };
 
 /** 每个 role 对应的全部叶子项 —— 群里的成对子项 (它与某个 role 在那个群里有往来, 与 convsOf 的子项
@@ -595,17 +561,15 @@ export const chatKeysOf = (all_: readonly Msg[]): Record<string, string[]> => {
 /** 一个会话窗口里的消息。`withRole` 只对公开频道有意义: 当前 role 与它在这个频道里的往来。
  *  整个公开频道 (不带 withRole) 是频道里所有人说的话, 不是某个 role 的往来 —— 唯一不走 talkOf 的。 */
 export const convMessages = (msgs: readonly Msg[], role: string, key: string, withRole?: string): Msg[] => {
-  const job = jobOfKey(key);
-  if (job) return jobMessages(msgs, job);
   const t = talkArgs(role, key, withRole);
   return t ? talkOf(msgs, t.who, t.peers, t.chat) : msgs.filter((m) => m.channel === key.slice(2));
 };
 
-/** 一个窗口受不受视角的 session 段裁: 「某人的全部对话」(a:) 与工单 (j:) 不裁 —— 那是视角自己的时间分段, 与那个人 / 工单无关。 */
+/** 一个窗口受不受视角的 session 段裁: 「某人的全部对话」(a:) 不裁 —— 那是视角自己的时间分段, 与那个人无关。 */
 export const spanFor = (key: string, span: SessionSpan | undefined): SessionSpan | undefined =>
-  key.startsWith("a:") || key.startsWith("j:") ? undefined : span;
+  key.startsWith("a:") ? undefined : span;
 
-/** 点开一项看到的消息 (断点与工单行另画) —— 详情区按它渲染, 这一项的未读账 (Ledger) 也按它切: 两边同一个函数,
+/** 点开一项看到的消息 (断点另画) —— 详情区按它渲染, 这一项的未读账 (Ledger) 也按它切: 两边同一个函数,
  *  「看得见」才不会两处各算一套。span = 视角选的 session 段, 裁不裁由 spanFor 定。 */
 export const windowOf = (msgs: readonly Msg[], role: string, key: string, withRole: string | undefined, span: SessionSpan | undefined): Msg[] =>
   ((sp) => convMessages(msgs, role, key, withRole).filter((m) => inSpan(sp)(m.ts)))(spanFor(key, span));

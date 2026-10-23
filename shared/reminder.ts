@@ -41,7 +41,6 @@ export const REMINDER_KINDS = {
     msg: "M",                                         // 注入事件 id: 提交见证 / 轮次↔事件绑定 / serves 反查
     event: "C",                                       // 路由行 id (仅回执 / 定时): `tell_peer({re})` 抄它
     receipt: "M", status: "M", audience: "M",          // 回执: mirror / chat-log / regress
-    job: "M", done: "M", total: "M", complete: "M",    // 工单进度: regress (齐没齐由守护进程数)
   },
   /** 退役中: 只在没有信封的注入上兜底 (见 withMsg)。 */
   "message-event": { event: "M" },
@@ -205,17 +204,12 @@ export const envelopeAttrs = {
   task: (taskId: string, event?: string): EnvelopeAttrs => ({ wezard: "envelope", kind: "task", from: taskId, ...(event ? { event } : {}) }),
   /** 回执也是「`from` 在对你说话」, 所以仍是 peer 信封 —— read_chat / rolepage 照旧
    *  把它归到那场对话里; 多一个 `receipt` 属性说明它是自动送回来的结论而不是新活。 */
-  receipt: (from: string, chat?: string, job?: { job: string; done: number; total: number }, status: ReceiptStatus = "done", event?: string, route?: ReceiptRoute, chatKey?: string): EnvelopeAttrs => ({
+  receipt: (from: string, chat?: string, status: ReceiptStatus = "done", event?: string, route?: ReceiptRoute, chatKey?: string): EnvelopeAttrs => ({
     ...envelopeAttrs.peer(from, chat, route?.asker, chatKey),
     ...(event ? { event } : {}),
     receipt: "1",
     status,
     ...(route?.audience ? { audience: route.audience } : {}),
-    // 工单的「齐了吗」由守护进程数出来写在属性上, 不让模型自己记: 异步回执是 N 个
-    // 独立的轮次陆续进来的, 靠模型在上下文里数到五是最容易出错的那种事。
-    ...(job && job.job
-      ? { job: job.job, done: String(job.done), total: String(job.total), complete: job.done >= job.total ? "1" : "0" }
-      : {}),
   }),
 };
 

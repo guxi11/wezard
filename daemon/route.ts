@@ -14,7 +14,6 @@
 //
 // 全是纯函数: 候选的原料 (文件集 / 最近的话 / ctx) 由调用方从 transcript 读好送进来。
 import { resolve, basename, dirname, isAbsolute } from "node:path";
-import type { JobRecord } from "./jobs.js";
 import type { InFlight } from "./dispatch.js";
 import { addr, agoOf, ctxOf, type WizardBrief } from "./wizard.js";
 import type { ContextMaterial } from "./peers.js";
@@ -24,7 +23,7 @@ import type { TierName } from "../shared/config.js";
 
 export interface RouteRow extends WizardBrief {
   busy: boolean;
-  /** 身份上的 lead 与所有开放工单占用, 不随 spinner 消失。 */
+  /** Lead evidence and unresolved receiver duties remain visible while idle. */
   lead?: boolean;
   duties?: readonly string[];
   alive: boolean;
@@ -94,23 +93,13 @@ const fileRefs = (text: string): string[] => text.match(/(?:\/|\.\/|\.\.\/)?[A-Z
 const UNSETTLED = new Set<InFlight["state"]>(["working", "blocked", "needs-input", "deferred", "errored", "queued"]);
 type RouteInFlight = Pick<InFlight, "from" | "to" | "turn" | "state">;
 
-/** 没开工单的任务也占用: 接入的欠着, 派出的在等; spinner 闲不代表已交差。 */
+/** Receiver rows remain visible as duties whether incoming or outgoing. */
 export const routeReceiptDutiesOf = (inflight: readonly RouteInFlight[], target: string): string[] => inflight
   .filter((x) => UNSETTLED.has(x.state))
   .flatMap((x) => [
     ...(x.to === target ? [`${x.turn} 欠着 ${x.from}: ${x.state}`] : []),
     ...(x.from === target ? [`${x.turn} 在等 ${x.to}: ${x.state}`] : []),
   ]);
-
-/** 只读全表占用: 自己开的、跨群的单同样占用; 落定成员可释放, owner 要等关单。 */
-export const routeDutiesOf = (jobs: readonly JobRecord[], target: string, inflight: readonly RouteInFlight[] = []): string[] => [
-  ...jobs.filter((j) => j.status === "open").flatMap((j) => [
-    ...(j.owner === target ? [`${j.id} 开单者: ${j.title}`] : []),
-    ...j.members.filter((m) => m.target === target && !m.outcome)
-      .map((m) => `${j.id} ${m.role ?? "exec"}: ${m.task || j.title}`),
-  ]),
-  ...routeReceiptDutiesOf(inflight, target),
-];
 
 const shared = (task: Set<string>, text: string): string[] => [...termsOf(withoutGuidance(text))].filter((t) => task.has(t));
 

@@ -32,18 +32,18 @@ import { renderDetailPage, renderNotFound } from "../shared/detail-render.js";
 import { createChatRoutes, chatRouteTable, CHAT_ROUTE_KEYS, type WorldFactsProvider } from "../shared/chat-http.js";
 import { EMPTY_FACTS } from "../shared/world.js";
 
-export type { ToolDetailRecord, ApprovalDetailRecord, TurnDetailRecord, MarkDetailRecord, TurnItem, TurnInject, TurnUsage, CtxCut, TurnOrigin, TurnFrom, TurnAgentMeta } from "../shared/detail-store.js";
+export type { ToolDetailRecord, ApprovalDetailRecord, TurnDetailRecord, MarkDetailRecord, TurnItem, TurnInject, TurnUsage, CtxCut, TurnFrom, TurnAgentMeta } from "../shared/detail-store.js";
 
 let store: DetailStore | null = null;
 let remoteBase = "";
 let remoteToken = "";
-// 关系视图的注册表侧数据源。路由在 boot 早期就注册好了, 而 wizard/job/schedule
+// 关系视图的注册表侧数据源。路由在 boot 早期就注册好了, 而 wizard/plan/schedule
 // 注册表要到 mirror 块才建得起来 —— 所以这里存的是 provider 而不是数据, 由那边
 // 装上 (同 bindWizardStore 的取舍)。装上之前关系图退化成只画观测边。
 let worldFacts: WorldFactsProvider | undefined;
 export const setWorldFactsProvider = (fn: WorldFactsProvider): void => { worldFacts = fn; startFactsForward(); };
 
-// 注册表侧的事实同样要过河。turn 记录是 POST /d 一条条推的, 但身份 / 家谱 / 工单 /
+// 注册表侧的事实同样要过河。turn 记录是 POST /d 一条条推的, 但身份 / 家谱 / plan /
 // 日程不是"发生的事", 而是"当下的状态" —— 没有增量可推, 只能整份快照定期覆盖。
 // 30s: 采一次要按 pane 问一遍 tmux (见 index.ts 的 WORLD_TTL 说明), 而一个开着的
 // 浏览器本来就 6s 问一次, 这个频率比它轻五倍, 却足够让远端的日程与名册是准的。

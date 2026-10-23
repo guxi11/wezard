@@ -1,19 +1,19 @@
-// 世界视图 —— 把「谁存在、谁是谁生的、谁在驱动谁、谁被排了什么」折成一张图。
+// 世界视图 —— 把「谁存在、谁是谁生的、谁在驱动谁、谁有哪些计划」折成一张图。
 //
 // chat-view 回答的是**一个聊天内部**的问题 (这个 chat 有哪些 `#tag`、某一路的
 // 线程长什么样)。但 wizard 早就不止活在一个聊天里了: 分身可以生在别的群、
-// send_peer 跨群寻址、一个工单的成员散在几个聊天、定时任务指向任意一个 target。
+// send_peer 跨群寻址、计划属于 wizard、定时任务指向任意一个 target。
 // 那些关系在 chat-view 里一条都画不出来 —— 它的第一步就是 `baseOfKey === base`。
 //
 // 本模块因此换一个折叠轴: 不按聊天切, 按**关系**切。
 //
 //   节点 = wizard (会话 + 身份), 按所属聊天聚簇
-//   边   = clone (家谱) / peer (派活) / graph (流水线一步); 定时是节点上的计数
+//   边   = clone (家谱) / peer (派活); 定时是节点上的计数
 //
 // 两类数据源, 边界明确:
-//   • 观测到的 (turn 记录): peer / graph 边与定时计数 —— 真发生过的往来。24h TTL,
+//   • 观测到的 (turn 记录): peer 边与定时计数 —— 真发生过的往来。24h TTL,
 //     标准 detail 存储, 所以独立 svr 收到 POST 之后画出来的图与本机一模一样。
-//   • 登记的 (wizard / job / schedule 注册表): 身份、家谱、工单、日程 —— 它们是
+//   • 登记的 (wizard / plan / schedule 注册表): 身份、家谱、计划、日程 —— 它们是
 //     「安排」, 不随 TTL 消失, 但只有 daemon 有。svr 拿不到就退化成只画观测边。
 //
 // 纯函数, 无 IO: 注册表侧的东西由调用方以 WorldFacts 喂进来。
@@ -23,6 +23,7 @@ import { stripReminders } from "./reminder.js";
 import type { CharterLineage, CharterRecord, DetailRecord, TurnDetailRecord, TurnItem } from "./detail-store.js";
 import { allMessages, injectTurnsOf, senderOf } from "./role-view.js";
 import type { TurnState } from "./turn-state.js";
+import type { PlanRecord } from "./plan.js";
 
 // ── 注册表侧 (daemon 独有) ────────────────────────────────────────────
 /** 一个 wizard 的登记信息 + 此刻的活体状态。daemon 从 wizard.json + tmux 取。 */
@@ -58,49 +59,6 @@ export interface WorldFactWizard {
   summary: string;
 }
 
-export interface WorldFactJob {
-  id: string;
-  base: string;
-  owner: string;
-  title: string;
-  status: "open" | "closed";
-  openedAt: number;
-  closedAt?: number;
-  summary?: string;
-  /** 开工时说好要几份 (见 jobs.JobRecord.expect)。 */
-  expect?: number;
-  /** 开工时的计划 (open_job 的 plan) —— 工单页开工那一行照原样分行显示。 */
-  plan?: string;
-  /** 上级工单 (金字塔: 工单树); 缺省 = 树根。 */
-  parent?: string;
-  /** `req` = 需求根单 (管家派 lead 时开)。 */
-  kind?: "req";
-  /** 验收标准。 */
-  criteria?: string;
-  /** 根单怎么收的 (只收了工的根单): 人认可 = accept, 取消 = cancel。 */
-  end?: "accept" | "cancel";
-  /** 需求原话与它来自哪个群 (只根单有)。 */
-  origin?: { text: string; chat: string };
-  /** 现算的阶段 (见 jobs.jobStage): daemon 算好推过来, 页面只管显示。 */
-  stage?: JobStage;
-  /** outcome: 这一份落定成什么 (见 jobs.MemberOutcome); 缺省 = 还在干。
-   *  role: 它在这张单里是什么 (缺省 exec); forkOf: clone 时材料来自谁 (target key)。 */
-  members: Array<{ target: string; task: string; spawned: boolean; outcome?: string; artifacts?: Array<{ path: string; note: string }>; role?: MemberRole; forkOf?: string }>;
-}
-
-/** 成员在一张工单里的角色: lead = 根单里被派来的需求 lead; exec 执行; reviewer 评审; expert 借来答问的专家。 */
-export type MemberRole = "lead" | "exec" | "reviewer" | "expert";
-/** 工单阶段 (现算, 不落盘): plan 规划 · build 实施 · review 评审 · clarify 澄清 (lead 在等人拍板) ·
- *  deliver 交付 (根单: lead 已交差, 等人验收; 子单: 成员都落定, 等 owner 收工) · stalled 卡住 (根单: lead 以 timeout/silent/dead/canceled 收场, 没交差) · shelved 搁置 (根单: 人说先放着, 账本保留、不冒泡) · closed 收工 / 归档。 */
-export type JobStage = "plan" | "build" | "review" | "clarify" | "deliver" | "stalled" | "shelved" | "closed";
-
-/** 一张工单的进度: 已落定几份 / 一共几份 (成员数与开工时说好的份数取大) —— 侧栏、关系图、工单页都读这一份。 */
-export interface JobProgress { done: number; total: number }
-export const jobProgress = (j: WorldFactJob): JobProgress => ({
-  done: j.members.filter((mm) => mm.outcome).length,
-  total: Math.max(j.members.length, j.expect ?? 0),
-});
-
 export interface WorldFactSchedule {
   id: string;
   target: string;
@@ -128,14 +86,14 @@ export interface WorldFactSchedule {
 }
 
 /** 一件在飞的活 (见 turn-state.ts): `from` 派给 `to`、还没落定。`at` = 派出的时刻, 多久了由读的一方现算。 */
-export interface WorldFactInFlight { from: string; to: string; turn: string; job: string; state: TurnState; at: number }
+export interface WorldFactInFlight { from: string; to: string; turn: string; state: TurnState; at: number }
 
 /** 一个微信通道的此刻: 掉没掉线、人最近何时开口、压着几条没发、这份 context_token 还能发几条、频控暂停到何时 (0 = 没停)。 */
 export interface WorldFactWeixin { base: string; state: "live" | "expired"; lastInAt: number; held: number; budget: number; pausedUntil: number }
 
 export interface WorldFacts {
   wizards: readonly WorldFactWizard[];
-  jobs: readonly WorldFactJob[];
+  plans: readonly PlanRecord[];
   /** 老 daemon 推来的快照没有。 */
   inflight?: readonly WorldFactInFlight[];
   schedules: readonly WorldFactSchedule[];
@@ -149,7 +107,7 @@ export interface WorldFacts {
   absent?: true;
 }
 
-export const EMPTY_FACTS: WorldFacts = { wizards: [], jobs: [], schedules: [], chatNames: {}, absent: true };
+export const EMPTY_FACTS: WorldFacts = { wizards: [], plans: [], schedules: [], chatNames: {}, absent: true };
 
 // ── 视图模型 ──────────────────────────────────────────────────────────
 export interface WorldNode {
@@ -198,7 +156,7 @@ export interface WorldNode {
 /** 家谱三种, 都画在「生它、归它管」或「上下文从它来」的那一位下:
  *  clone = 分身 (parent 生的, 开局 fork 了上下文); spawn = 新生 (parent 生的白板);
  *  fork = 分身的上下文来源 —— 只在克隆的是别人 (forkOf ≠ parent) 时另画这一条。 */
-export type WorldEdgeKind = "clone" | "spawn" | "fork" | "peer" | "graph";
+export type WorldEdgeKind = "clone" | "spawn" | "fork" | "peer";
 
 export interface WorldEdge {
   kind: WorldEdgeKind;
@@ -209,10 +167,6 @@ export interface WorldEdge {
   lastTs: number;
   /** 跨聊天的边 —— 画图时单独着重, 它才是"关联起来了"的证据。 */
   cross: boolean;
-  /** 经手的工单号 (peer 边)。 */
-  jobs?: string[];
-  /** graph run id (graph 边)。 */
-  runs?: string[];
   /** 每一次发生的时刻 (最近 EDGE_TS_MAX 次) —— 前端按选中 session 的时间范围重新计数。 */
   ts: number[];
   /** clone 边: 分身在 origin 会话里分叉的那一处 (clone 徽标点了落到这里)。 */
@@ -248,7 +202,7 @@ export interface WorldView {
   chats: WorldChat[];
   nodes: WorldNode[];
   edges: WorldEdge[];
-  jobs: Array<WorldFactJob & JobProgress>;
+  plans: PlanRecord[];
   schedules: WorldFactSchedule[];
   /** 注册表缺席 (svr 独立部署) —— 前端据此说明"只画观测到的往来"。 */
   degraded: boolean;
@@ -294,13 +248,10 @@ const bumpEdge = (
   from: string,
   to: string,
   ts: number,
-  tag?: { jobs?: string; runs?: string },
 ): Map<string, WorldEdge> => {
   if (!from || !to || from === to) return m;
   const k = edgeKey(kind, from, to);
   const cur = m.get(k);
-  const merge = (list: string[] | undefined, v: string | undefined): string[] | undefined =>
-    v ? [...new Set([...(list ?? []), v])] : list;
   return m.set(k, {
     kind,
     from,
@@ -309,8 +260,6 @@ const bumpEdge = (
     lastTs: Math.max(cur?.lastTs ?? 0, ts),
     // 人不住在哪个群里 —— 它说话的地方没有「跨」可言。
     cross: !isHuman(from) && baseOfKey(from) !== baseOfKey(to),
-    jobs: merge(cur?.jobs, tag?.jobs),
-    runs: merge(cur?.runs, tag?.runs),
     ts: [...(cur?.ts ?? []), ts].slice(-EDGE_TS_MAX),
   });
 };
@@ -470,8 +419,8 @@ export const buildWorld = (
   const known = new Set([...nodes, ...humans].map((n) => n.target));
   // 一条边的两端都必须是节点 —— 派活方可能已经被回收, 那条边就无处落脚, 画一个
   // 悬空端点只会让人以为漏了谁。
-  const link = (m: Map<string, WorldEdge>, kind: WorldEdgeKind, from: string, to: string, ts: number, tag?: Parameters<typeof bumpEdge>[5]): Map<string, WorldEdge> =>
-    known.has(from) && known.has(to) ? bumpEdge(m, kind, from, to, ts, tag) : m;
+  const link = (m: Map<string, WorldEdge>, kind: WorldEdgeKind, from: string, to: string, ts: number): Map<string, WorldEdge> =>
+    known.has(from) && known.has(to) ? bumpEdge(m, kind, from, to, ts) : m;
 
   // 观测边 —— 真的发生过的往来, 从 turn 记录里读。
   const observed = talks.reduce((m, r) => {
@@ -479,14 +428,10 @@ export const buildWorld = (
     const f = r.from;
     // 定时任务没有"派活的一方" —— 它是节点上的计数 (taskTurns), 不是一条边。
     const who = senderOf(r);
-    const m1 = f?.kind === "peer" && f.from ? link(m, "peer", f.from, to, r.createdAt, { jobs: f.job })
+    const m1 = f?.kind === "peer" && f.from ? link(m, "peer", f.from, to, r.createdAt)
       : isHuman(who) ? link(m, "peer", who, to, r.createdAt)
       : m;
-    // graph: 上一步的 tag 喂给这一步 —— 同聊天内解析成 target。
-    const prev = r.origin?.fromTag;
-    return prev !== undefined
-      ? link(m1, "graph", prev ? `${baseOfKey(to)}#${prev}` : baseOfKey(to), to, r.createdAt, { runs: r.origin!.runId })
-      : m1;
+    return m1;
   }, new Map<string, WorldEdge>());
 
   // 登记边 —— 家谱。观测不到 (分身可能一句话没说), 但它是最稳定的一种关系。
@@ -536,7 +481,7 @@ export const buildWorld = (
   const linked = new Set(edges.flatMap((e) => [e.from, e.to]));
   const pinned = new Set([
     ...linked,
-    ...facts.jobs.filter((j) => j.status === "open").flatMap((j) => [j.owner, ...j.members.map((mm) => mm.target)]),
+    ...facts.plans.filter((p) => p.state === "active" || p.state === "paused").map((p) => p.owner),
     ...facts.schedules.flatMap((x) => [x.target, x.owner].filter(Boolean)),
   ]);
   const mustShow = new Set([scope.self, ...(relsOf.get(scope.self) ?? [])]);
@@ -587,7 +532,7 @@ export const buildWorld = (
       .map((n) => ({ ...n, rels: [...(relsOf.get(n.target) ?? [])] })),
     // 两端都还在图上的边才画得出来。
     edges: edges.filter((e) => shown.has(e.from) && shown.has(e.to)),
-    jobs: [...facts.jobs].sort((a, b) => (b.closedAt ?? b.openedAt) - (a.closedAt ?? a.openedAt)).map((j) => ({ ...j, ...jobProgress(j) })),
+    plans: [...facts.plans].sort((a, b) => b.updatedAt - a.updatedAt),
     schedules: [...facts.schedules].sort((a, b) => a.nextAt - b.nextAt),
     degraded: !!facts.absent,
   };

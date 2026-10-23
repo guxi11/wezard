@@ -17,7 +17,7 @@ const t = (name: string, fn: () => void): void => {
 
 const MIN = 60_000;
 const P: Policy = { afterMs: 5 * MIN, max: 2 };
-const idle = (o: Partial<Obs> = {}): Obs => ({ state: "working", anchor: 0, idle: true, jobOpen: true, ...o });
+const idle = (o: Partial<Obs> = {}): Obs => ({ state: "working", anchor: 0, idle: true, ...o });
 /** 按分钟逐次巡检, 返回每一刻是否问了。 */
 const run = (obs: (min: number) => Obs, mins: number, p = P, w0?: Watch): boolean[] => {
   let w = w0;
@@ -37,7 +37,6 @@ t("锚的毫秒抖动不算变", () => assert.deepStrictEqual(asksAt(run((m) => 
 for (const state of ["needs-input", "deferred", "errored", "blocked", "done", "canceled"] as const) {
   t(`${state} 不问`, () => assert.deepStrictEqual(asksAt(run(() => idle({ state }), 20)), []));
 }
-t("工单收了不问", () => assert.deepStrictEqual(asksAt(run(() => idle({ jobOpen: false }), 20)), []));
 t("afterMs=0 = 关", () => assert.deepStrictEqual(asksAt(run(() => idle(), 20, { afterMs: 0, max: 3 })), []));
 t("reload 后带着已问次数: 闲置从头计、上限照算", () =>
   assert.deepStrictEqual(asksAt(run(() => idle(), 20, P, { asks: 1, anchor: 0 })), [5]));

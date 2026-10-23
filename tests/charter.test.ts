@@ -19,7 +19,7 @@ const charter = renderCharter(base);
 assert.match(charter, /worker/);
 assert.match(charter, /user:admin/);
 assert.match(charter, /\/workspace/);
-for (const tool of ["wizard_roster", "dispatch", "tell_peer", "open_job", "close_job", "handoff"]) {
+for (const tool of ["wizard_roster", "dispatch", "tell_peer", "handoff"]) {
   assert.ok(charter.includes(tool), `charter must advertise ${tool}`);
 }
 for (const marker of ["RESULT:", "NEED:", "ARTIFACT:"]) assert.ok(charter.includes(marker));

@@ -8,7 +8,7 @@
 //
 // Everything here is pure parsing over a transcript tail or a captured pane —
 // no tmux, no WeCom, no daemon state. The mirror bridge (which owns the live
-// attachments) and the graph runner (which drives them) both compose on top.
+// attachments and message routing both compose on top.
 import { resolve, isAbsolute, basename } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -463,8 +463,8 @@ const parseOpenTools = (jsonlPath: string, raw: string): { names: string[]; rows
 /** 交付收口行。
  *
  *  fan-out 之后 join 的载荷是「最后一条 assistant 文本」, 而一个分身的最后一句可能
- *  是"好的我开始了", 也可能是八百字散文 —— 两种都没法直接汇总。对法与 graph 的
- *  `until` 哨兵同源: 不改 CLI 的输出格式 (改不了), 只在派活的提示里要求收口成一行
+ *  是"好的我开始了", 也可能是八百字散文 —— 两种都没法直接汇总。只在派活提示里
+ *  要求收口成一行
  *  `RESULT: …`, 这里把它捞出来。取**最后一个**匹配 —— 中间复述过这个格式的那些
  *  不算数。捞不到返回 "", 调用方退回整段 lastText, 所以不遵守约定也只是退化。 */
 export const extractResult = (text: string, max = 800): string => {
@@ -473,7 +473,7 @@ export const extractResult = (text: string, max = 800): string => {
 };
 
 /** 一轮的收口: `RESULT:` 交差 / `NEED:` 反问发话方 / 都没有 —— 外加交付物清单。
- *  分 result 与 need 是回执计数的事: 反问不是定论, 不能把工单往前数一份。 */
+ *  分 result 与 need 是回执结算的事: 反问不是定论。 */
 export interface Closing { kind: "result" | "need" | "none"; text: string; artifacts: { path: string; note: string }[] }
 
 // NEED 只认全大写: "what I need: …" / 「需要: …」在普通答话里太常见, 误认一次就是
@@ -676,7 +676,7 @@ const answerOf = (
 // jsonl 只知道输入框里进过什么。read_chat 就靠把它读回来 (parseEnvelope) 在各个
 // 会话的 jsonl 之间拼出一个群 / 一段私聊的记录。事实写在开标签的属性上 (见
 // shared/reminder.ts), 正文只是给模型的规矩 —— 改措辞不影响解析; 老措辞在那边认。
-// 所以正文不再复述属性 (谁说的、在哪个群、件号、工单进度): 模型读得到开标签, 正文只写
+// 所以正文不再复述属性 (谁说的、在哪个群、件号): 模型读得到开标签, 正文只写
 // 属性推不出的表达语义与工具使用约定; 自动终句去向由 daemon 执行。
 export { parseEnvelope, type Envelope };
 
@@ -733,7 +733,6 @@ export const renderPeerEnvelope = (from: string, chat?: string, chatKey?: string
 export const renderReceiptEnvelope = (
   from: string,
   chat?: string,
-  job?: { job: string; done: number; total: number; closed?: boolean; req?: boolean },
   status: ReceiptStatus = "done",
   turn?: string,
   route?: ReceiptRoute & { pending?: number },
@@ -743,11 +742,11 @@ export const renderReceiptEnvelope = (
   const speaks = chat !== undefined || route?.up === true || (route?.late === true && !!route.retellTo);
   const bodyRule = status === "done"
     ? `这是回执，不是人说的话或新派的活；正文是对方这一轮的回复。${route?.late ? "" : "普通完成回执的正文默认就是结论；终句用自己的话交代做成了什么、没做成什么，无需 RESULT:。"}据此继续手头工作，不要仅为确认收到而回话。`
-    : status === "need" ? "这是反问回执，正文写明所需信息；这一份不计入工单，答复后会再送回执。"
-      : status === "error" ? "这是 CLI 错误回执，正文是报错信息，不是结论，也不计入工单；若续跑后答出结论，会再送回执。"
-        : status === "canceled" ? "这是已取消的失败回执，正文是守护进程说明和它最后说的一句；原任务已取消，工单按已落定计。"
-          : `这是失败回执 (${FAILED[status]})，本次按失败落定；后续仍可续问或补交。正文是守护进程说明和它最后说的一句，工单按已落定计。`;
-  return renderReminder(envelopeAttrs.receipt(from, chat, job, status, turn, route, chatKey), [
+    : status === "need" ? "这是反问回执，正文写明所需信息；答复后会再送回执。"
+      : status === "error" ? "这是 CLI 错误回执，正文是报错信息，不是结论；若续跑后答出结论，会再送回执。"
+        : status === "canceled" ? "这是已取消的失败回执，正文是守护进程说明和它最后说的一句；原任务已取消。"
+          : `这是失败回执 (${FAILED[status]})，本次按失败落定；后续仍可续问或补交。正文是守护进程说明和它最后说的一句。`;
+  return renderReminder(envelopeAttrs.receipt(from, chat, status, turn, route, chatKey), [
     bodyRule,
     speaks
       ? "有人等这份结论，不要只写 QUIET。"
@@ -767,24 +766,10 @@ export const renderReceiptEnvelope = (
       ? ["交给上游 wizard。"]
       : chat !== undefined
         ? [`投给群里的${route?.audience ? " `audience`" : "人"}。`]
-        : route?.pending && !(job && job.job)
+        : route?.pending
           ? [`还有 ${route.pending} 份没回: 先记下这一份, 等最后一份到了再汇总。`]
           : ["人看不见这段私聊。"]),
     ...(turn && status !== "canceled" ? [`若需追问或补充，用 tell_peer({name: '${from}', re: true}) 续同一笔。`] : []),
-    // 「齐了吗」是守护进程数的, 不让模型在上下文里自己数 —— 异步回执是 N 个独立
-    // 的轮次陆续进来的, 数错一个就会提前收口或者永远等。
-    ...(job && job.job && status !== "need" && !(job.req && status === "error")
-      ? job.closed
-        ? [`工单已经收工 (close_job 过了), 这一份是收工之后才到的: 不必再 close_job, 也不计入那次汇总${status === "done" && !route?.up ? " —— 这段结论还有用, 就自己补一句交代 (notify 给人 / 回给上游)" : ""}。`]
-        : job.req
-          // 需求根单: 不走「汇总 → close_job」—— 关单 = 归档, 要等人验收。
-          ? [status === "done"
-            ? `这是需求根单 \`${job.job}\` 的交付: lead 交差了。向人交代结果后**别 close_job**, 等人验收 —— 认可 → \`close_job({job: "${job.job}"})\` 归档; 说不对 → \`tell_peer({name: "${from}", re: true, job: "${job.job}"})\` 返工 (同一张单)。对人别提单号。`
-            : `这是需求根单 \`${job.job}\`, 但 lead 没交差 (${status}): 向人说明卡在哪。lead 还在 → \`tell_peer({name: "${from}", re: true, job: "${job.job}"})\` 叫它续; 否则 \`close_job({job: "${job.job}"})\` 关掉, 需要的话重新 \`dispatch({lead:true})\` 开新单。对人别提单号。`]
-        : job.done >= job.total
-          ? [`这是工单的**最后一份** (全部到齐): 现在可以汇总收口了 —— close_job(summary) 留档 (不发群); 给人的结论就是你这一轮的最后一条消息, 用你自己的话写${chat !== undefined ? " —— 它会进群" : ""}。`]
-          : [`工单**还差 ${job.total - job.done} 份**: 先把这一份记住 (或落到文件里), 不要现在汇总、也不要向人汇报进度; 等最后一份到了会明确告诉你「全部到齐」。`]
-      : []),
   ]);
 };
 
