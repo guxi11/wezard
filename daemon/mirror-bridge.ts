@@ -1528,12 +1528,14 @@ export const parseInputBox = (cap: string, styledLayout = cap): InputBox => {
   // Idle Codex hides the left hint after a paste but keeps a right-aligned
   // warnings footer. Its middle dot is not the status row's separator.
   const warnings = /^\s*⚠\s*\d+\s+warnings?\s*·\s*f2 to view\s*$/u.test(layout[footer] ?? "");
-  // --no-alt-screen 的 composer 没有背景 SGR; 原生 Context + cwd 行才是状态锚, warning 的 · 不能充当它。
-  const inlineStatus = /\bContext\s+\d+%\s+used\b/u.test(layout[footer] ?? "")
-    && /·\s+(?:\/|~\/)/u.test(layout[footer] ?? "");
+  // --no-alt-screen 的 composer 没有背景 SGR; warnings footer 在原生 status 下方,
+  // 所以先按底部 footer 定位 status, 再校验 Context + cwd。warning 自身的 · 不可信。
+  let status = inputHint || warnings ? footer - 1 : footer;
+  while (status >= 0 && !layout[status]!.trim()) status--;
+  const inlineStatus = status >= 0
+    && /\bContext\s+\d+%\s+used\b/u.test(layout[status] ?? "")
+    && /·\s+(?:\/|~\/)/u.test(layout[status] ?? "");
   if (inputHint || warnings || (layout[footer] ?? "").includes("·")) {
-    let status = inputHint || warnings ? footer - 1 : footer;
-    while (status >= 0 && !layout[status]!.trim()) status--;
     if (status >= 0 && footer - status <= BOX_FOOTER_ROWS && layout[status]!.includes("·") && status > 0 && !layout[status - 1]!.trim()) {
       let prompt = status - 2;
       // Only contiguous, indented continuation rows belong to this composer.
