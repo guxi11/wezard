@@ -123,5 +123,11 @@ export const present = (tool: string, raw: unknown, input?: Row): unknown => {
 
 export const recovery = (raw: Row): Row => {
   const internal = new Set(["ok", "reason", "error", "diagnostics", "hint", "receipt", "receipts", "target", "sessionId", "tmuxPane", "via", "body"]);
-  return Object.fromEntries(Object.entries(raw).filter(([key]) => !internal.has(key)));
+  const result = Object.fromEntries(Object.entries(raw).filter(([key]) => !internal.has(key)));
+  if (Array.isArray(raw.candidates)) {
+    result.candidates = raw.candidates.slice(0, 5);
+    result.candidateTotal = raw.candidates.length;
+    result.candidatesTruncated = raw.candidates.length > 5;
+  }
+  return result;
 };
