@@ -152,29 +152,18 @@ const Mirror = z.object({
 
 const Wrc = z.object({
   allowFrom: knob(z.array(z.string()).default([]).describe("允许驱动本机的聊天 / 用户 (principal)"), { gate: "card", apply: "hot" }),
-  // Still honored as a back-compat alias — resolveCliBackend picks it up when
-  // cliBackends.<name>.bin is unset. Kept so existing configs keep parsing.
-  claudeBin: knob(z.string().default("claude").describe("旧版单一 CLI 二进制路径 (兼容用, 优先用 cliBackends)"), { gate: "card" }),
   // NOT exclusive: the daemon mirrors sessions from every installed CLI
   // concurrently, resolving each attachment's binary + jsonl dialect from its own
   // transcript path (shared/cli-backends.ts bindCliBackends / backendForPath).
-  // When unset, resolveCliBackend infers from claudeBin basename (so legacy
-  // `claudeBin: "claude-internal"` configs still resolve correctly). The Wrc
-  // transform below pins the inferred name back into v.defaultCli.
-  defaultCli: z.enum(CLI_NAMES).optional().describe("所有新建 pane 使用哪个 CLI; 不设 = 按 claudeBin 推断"),
-  // Example: cliBackends: { codebuddy: { bin: "/usr/local/bin/codebuddy" } }
+  defaultCli: z.enum(CLI_NAMES).optional().describe("所有新建 pane 使用哪个 CLI; 不设 = claude"),
   cliBackends: knob(z
     .object({
-      claude: z.object({ bin: z.string().optional().describe("二进制路径") }).optional(),
-      "claude-internal": z.object({ bin: z.string().optional().describe("二进制路径") }).optional(),
       codex: z.object({
-        bin: z.string().optional().describe("二进制路径"),
         disableSandbox: z.boolean().default(false).describe("Codex 不使用沙箱: true = danger-full-access; false / 不设 = 不覆盖 Codex 原生沙箱配置; 不改变审批; reload 后仅对新启动/恢复/克隆的 pane 生效"),
       }).default({}),
-      codebuddy: z.object({ bin: z.string().optional().describe("二进制路径") }).optional(),
     })
     .default({})
-    .describe("各 CLI 后端的启动配置; 二进制缺省 = 内置默认"), { gate: "card" }),
+    .describe("各 CLI 后端的配置"), { gate: "card" }),
   cwd: z.string().default("~/.wezard/workspace").describe("新会话的默认工作区"),
   // 默认摘掉 wizard 用不上、每个会话首轮白占 ~18k token 的工具 (Artifact 11.3k · Workflow/SendFeedback/ScheduleWakeup 5.6k · claude.ai Docs/Drive 1.0k)。
   // 显式写了 extraArgs 的 config 整份覆盖它, 不合并 —— 要留某个工具就把整串抄过去删掉那一项。
@@ -200,22 +189,11 @@ const Wrc = z.object({
   // 气泡时, WeCom 会把 `@<显示名>` 塞进正文; 配上真名才能把它从 prompt 里剥干净。
   botNames: z.array(z.string()).default([]).describe("机器人在企微里的显示名 (可多个别名), 用于剥掉 @; 内置 wezard / weclaude 恒生效"),
 }).transform((v) => {
-  // Resolve the active backend once — honors defaultCli if set, otherwise
-  // infers from claudeBin basename (legacy back-compat). Pin the inferred
-  // name back into v.defaultCli so downstream readers see a concrete value
-  // and so logs / sync labels can report the effective backend.
+  // Pin the active backend so downstream readers see a concrete value.
   const backend = resolveCliBackend(v);
   if (!v.defaultCli) v.defaultCli = backend.name;
-  // Sync claudeBin to the resolved backend's bin so every daemon file that
-  // reads cfg.wrc.claudeBin (mirror-bridge, spawn-tmux, quota)
-  // spawns the correct binary — even when the user set only `defaultCli`
-  // without an explicit `claudeBin`. Without this, defaultCli:"codebuddy"
-  // + inherited claudeBin:"claude" would spawn the wrong CLI.
-  v.claudeBin = backend.bin;
-
   // Auto-derive projectsDir from the resolved backend when not explicitly
-  // set. Replaces the old claudeBin-basename derivation — same result for the
-  // standard cases (claude → ~/.claude/projects, claude-internal →
+  // set. The backend name determines its projects root (claude → ~/.claude/projects, claude-internal →
   // ~/.claude-internal/projects), plus now supports codebuddy →
   // ~/.codebuddy/projects. Explicit projectsDir still wins.
   if (!v.mirror.projectsDir) {
@@ -442,7 +420,7 @@ const liftLegacySchedules = (v: unknown): unknown => {
 };
 
 // gate 的分界线是「放权」: 谁能驱动本机 (allowFrom)、审批怎么判 (approval.*)、跑哪个
-// 二进制带什么参数 (claudeBin / cliBackends / extraArgs —— 一个 --dangerously-skip-permissions
+// 二进制带什么参数 (cliBackends / extraArgs —— 一个 --dangerously-skip-permissions
 // 就绕过了整个审批)、往哪写别的 settings (sync)、把什么暴露到哪 (监听地址 / 详情外送 /
 // 出站默认聊天) —— 这些要人点卡; 口令一律 hidden; 其余 wizard 直接改。
 export const ConfigSchema = z.preprocess(liftLegacySchedules, z.object({

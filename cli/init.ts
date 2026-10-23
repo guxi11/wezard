@@ -324,8 +324,6 @@ const main = async (): Promise<void> => {
     log(c.red("  ✗ 未选择任何 agent"));
     process.exit(1);
   }
-  const claudeBin = claudeBinFor(primary);
-
   // ── Step 1b: write configs ─────────────────────────────────────
   // svr 的 base/token 必须在 daemon 起来之前落盘 —— daemon 只在 boot 时读一次
   // detailRemoteBase/Token, 晚写等于第一轮链接全指向回环。
@@ -340,7 +338,7 @@ const main = async (): Promise<void> => {
   patchJsonc(CONFIG, [
     { path: ["bot", "websocketUrl"], value: "wss://openws.work.weixin.qq.com" },
     { path: ["defaultChat"], value: "" },
-    { path: ["wrc", "claudeBin"], value: claudeBin },
+    { path: ["wrc", "claudeBin"], value: undefined },
     { path: ["wrc", "defaultCli"], value: backendNameFor(primary) },
     { path: ["wrc", "cwd"], value: "~/.wezard/workspace" },
     { path: ["wrc", "allowFrom"], value: [] },

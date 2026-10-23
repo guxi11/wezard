@@ -96,7 +96,8 @@ const capture = async (pane: string, rows: number): Promise<string> => {
 export const captureQuota = async (cfg: Config, log: Logger): Promise<QuotaReport> => {
   const cwd = expandHome(cfg.wrc.cwd);
   const session = `${cfg.wrc.tmuxPrefix}-usage`; // isolated from the mirror session
-  const claudeBin = cfg.wrc.claudeBin;
+  const backend = resolveCliBackend(cfg.wrc);
+  const claudeBin = backend.bin;
 
   const probe = await runTmux(["-V"]);
   if (!probe.ok) throw new Error(`tmux not available: ${probe.stderr.trim() || probe.code}`);
@@ -128,7 +129,7 @@ export const captureQuota = async (cfg: Config, log: Logger): Promise<QuotaRepor
       const current = await runTmux(["capture-pane", "-t", pane, "-p"]);
       if (!current.ok) return undefined;
       const cap = current.ok ? current.stdout : "";
-      if (await answerWorkspaceTrust(pane, resolveCliBackend({ claudeBin }).name, cwd, log)) return undefined;
+      if (await answerWorkspaceTrust(pane, backend.name, cwd, log)) return undefined;
       if (startupConfirmation(cap)) return undefined;
       return /for shortcuts|auto mode on|Try "/i.test(cap) ? true : undefined;
     }, 30_000, 500);

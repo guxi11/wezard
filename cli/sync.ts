@@ -254,7 +254,7 @@ const main = async (): Promise<void> => {
     console.log(`[wezard-sync] ${action} ${t.kind} → ${t.settingsPath}`);
     if (dryRun) continue;
     if (t.kind === "codex") {
-      await syncCodexHooks(expandHome(t.settingsPath), cfg.wrc.cliBackends.codex?.bin ?? "codex", process.cwd(),
+      await syncCodexHooks(expandHome(t.settingsPath), "codex", process.cwd(),
         codexHookCommand(sourcePath, envVals.base, `${PLUGIN_ROOT}/dist/cli/codex-hook.js`), cfg.approval.hookTimeoutSec + 10, remove || !cfg.approval.enabled);
       if (remove) delete lock.targets[targetKey(t.settingsPath)];
       else lock.targets[targetKey(t.settingsPath)] = { wroteHooks: cfg.approval.enabled, wroteMcp: false, wroteEnv: [] };

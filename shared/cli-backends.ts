@@ -318,9 +318,7 @@ const makeCodebuddy = (bin: string): CliBackend => ({
   normalizeTranscriptLine: normalizeCodebuddy,
 });
 
-// Built-in defaults. `bin` is the default executable name; users override via
-// `wrc.cliBackends.<name>.bin` in config.jsonc (or the legacy `wrc.claudeBin`
-// for the claude / claude-internal backends — see resolveCliBackend).
+// Built-in defaults. Each backend name is also its executable resolved via PATH.
 export const CLI_BACKEND_DEFAULTS: Record<CliBackendName, CliBackend> = {
   claude: makeClaude("claude", "claude"),
   "claude-internal": makeClaude("claude-internal", "claude-internal"),
@@ -338,48 +336,13 @@ export const CLI_BACKEND_DEFAULTS: Record<CliBackendName, CliBackend> = {
 export interface CliBackendsConfig {
   /** Active backend. Defaults to "claude". */
   defaultCli?: CliBackendName;
-  /** Per-backend bin overrides. */
-  cliBackends?: Partial<Record<CliBackendName, { bin?: string }>>;
-  /** Legacy pre-v0.3 single-binary config — still honored for back-compat. */
-  claudeBin?: string;
 }
 
-// Infer the default backend name from a legacy `claudeBin` basename. Only
-// recognizes the two known forks; unknown bins fall back to "claude" (with
-// the custom bin still preserved via the override path below).
-const inferDefaultFromClaudeBin = (bin: string): CliBackendName => {
-  const base = bin.split("/").pop() ?? bin;
-  if (base === "claude-internal") return "claude-internal";
-  if (base === "codex") return "codex";
-  if (base === "codebuddy") return "codebuddy";
-  return "claude";
-};
-
-/**
- * Resolve the active backend, applying user overrides + legacy back-compat.
- *
- * Back-compat ladder (in priority order):
- *   1. Explicit `cliBackends.<name>.bin` override wins.
- *   2. `defaultCli` missing → infer from `claudeBin` basename (claude / claude-
- *      internal / codebuddy), else "claude".
- *   3. Legacy `claudeBin` set to a non-default value AND defaultCli points at
- *      the matching backend → carry `claudeBin` as the bin override. Preserves
- *      both `claudeBin: "/absolute/claude"` and `claudeBin: "claude-internal"`.
- */
+/** Resolve the active backend; its built-in executable name is searched on PATH. */
 export const resolveCliBackend = (cfg: CliBackendsConfig): CliBackend => {
-  const name: CliBackendName = cfg.defaultCli ?? inferDefaultFromClaudeBin(cfg.claudeBin ?? "claude");
+  const name: CliBackendName = cfg.defaultCli ?? "claude";
   const base = CLI_BACKEND_DEFAULTS[name];
   if (!base) throw new Error(`unknown CLI backend: ${name}`);
-  const explicit = cfg.cliBackends?.[name]?.bin;
-  if (explicit) return { ...base, bin: explicit };
-
-  // Legacy `claudeBin` carries a non-default value → treat as bin override for
-  // the backend it points at (matched by name, not by basename equality —
-  // `/usr/local/bin/claude-internal` should still map to claude-internal).
-  if (cfg.claudeBin && cfg.claudeBin !== "claude") {
-    const inferred = inferDefaultFromClaudeBin(cfg.claudeBin);
-    if (inferred === name) return { ...base, bin: cfg.claudeBin };
-  }
   return base;
 };
 
@@ -395,12 +358,6 @@ export const resolveCliBackend = (cfg: CliBackendsConfig): CliBackend => {
 //
 // `primaryBackend()` remains the tie-breaker for *write* paths — spawning a new
 // session has no path to derive from, so it uses `defaultCli`.
-
-const backendWithBin = (name: CliBackendName, cfg: CliBackendsConfig): CliBackend => {
-  const base = CLI_BACKEND_DEFAULTS[name];
-  const explicit = cfg.cliBackends?.[name]?.bin;
-  return explicit ? { ...base, bin: explicit } : base;
-};
 
 let _backends: readonly CliBackend[] = [CLI_BACKEND_DEFAULTS.claude];
 let _primary: CliBackend = CLI_BACKEND_DEFAULTS.claude;
@@ -434,7 +391,7 @@ export const bindCliBackends = (
 
   const secondaries = (Object.keys(CLI_BACKEND_DEFAULTS) as CliBackendName[])
     .filter((n) => n !== primary.name)
-    .map((n) => backendWithBin(n, cfg));
+    .map((n) => CLI_BACKEND_DEFAULTS[n]);
 
   _primary = primary;
   _backends = [primary, ...secondaries];

@@ -29,17 +29,11 @@
     // Allow which WeCom users / chats to drive CC. Empty = deny all.
     // "all" = allow everyone (use with care).
     "allowFrom": [],             // ["user:zhangsan", "chat:wcXXXX", "all"]
-    "claudeBin": "claude",
     // CLI backend selection. Four built-ins: "claude" / "claude-internal" /
-    // "codebuddy" / "codex". Empty/omitted → inferred from claudeBin basename (back-compat).
+    // "codebuddy" / "codex". Omitted → "claude".
     "defaultCli": "claude",
     // Codex uses ~/.codex/sessions (or $CODEX_HOME/sessions), with native resume/fork.
     // For Codex set extraArgs: []; PreToolUse approval cards are not supported.
-    // Per-backend binary overrides (when the executable isn't on $PATH under
-    // its canonical name). Missing entry → built-in default.
-    // "cliBackends": {
-    //   "codebuddy": { "bin": "/usr/local/bin/codebuddy" }
-    // },
     "cwd": "~",                  // default workdir for a new chat's first session
     // Appended to the spawned CLI command line. Default drops tools wizards never use that cost
     // ~18k tokens per session (Artifact 11.3k, Workflow/SendFeedback/ScheduleWakeup 5.6k, claude.ai Docs/Drive 1.0k);
