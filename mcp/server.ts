@@ -423,9 +423,8 @@ const TELL_SCHEMA = {
   kind: z
     .enum(["task", "ask", "fyi"])
     .optional()
-    .describe("对方该怎么接这句话 (与 `priority` 的何时投、`return` 的要不要回执正交): `task` (默认) 一件活, 干完在终句交代结论 (`RESULT:` 可选); `ask` 只答一个问题, 别为它开工; `fyi` 知会, 不用回 —— 自动不要回执、不进工单、不进群。"),
-  re: z.union([z.boolean(), z.string()]).optional().describe("`true` = 同一验收目标的续问/纠正/返工, 接着你派给 `name` 的那一笔说 —— 哪一笔守护进程按路由表定 (本轮读的那份回执 → 你在它手上唯一在飞的 → 最近一笔), 不用抄 id; 沿用它的工单与频道, 默认 now 插进原轮。那一笔被 transfer 过, `name` 写接手方 (回执的发话方)。省略时: 本轮是它的 NEED 回执就默认续 (答它的反问), `false` 推翻。你在它手上并发两笔才需写那一笔的 event id (400 会列出来)。能独立验收的新问题必须另派, 不能因同项目或对方读过文件就借 re 追加 (例如编辑器排障中顺带核查 AGENTS.md/CLAUDE.md)。没有在飞的可续 (已落定 / 没派过) 就按新活发出, 回包带 `reUnknown`。"),
-  deadline: z.number().optional().describe("最多等它多少秒 (60-43200, 默认 3600); 到点没答完你收到一份 timeout 回执。"),
+    .describe("对方该怎么接这句话 (与 `priority` 的何时投、`return` 的要不要回执正交): `task` (默认) 一件活, 同一发送者与接收者的未完成任务会合并补充, 完成时用 `@.派活方 RESULT:` 显式提交结果; `ask` 提一个问题, 可用于正常反问/追问, 收到回复后再继续; `fyi` 知会, 不用回 —— 自动不要回执、不进工单、不进群。"),
+  re: z.union([z.boolean(), z.string()]).optional().describe("兼容续问参数。重复派活会自动补充同一接收者的未完成任务, 不需要 `re`。`true` 仍可把内容追加到明确指定的原件; 有多个旧路由时以 event id 指明。"),
   force: z
     .boolean()
     .optional()
@@ -433,7 +432,7 @@ const TELL_SCHEMA = {
   after: z
     .array(z.string())
     .optional()
-    .describe("依赖: tracked node 前置只有显式 accepted 且产物版本一致才放行，未验收等待、rejected 阻止。无 node 的旧任务沿用 legacy done（仅有回执，非业务成功）。wizard 名字数组 (= 你派给它的那一笔: 在飞的优先, 否则最近落定的; 并发两笔才需写 event id), 都得是你自己派出去的件 (查不到 → 400)。全部满足各自放行条件 → 立即投; 有已失败的 (timeout / silent / dead / canceled) → 409; 否则**停放**: 不注入, 回包 `parked:true`, 前置全满足放行条件时守护进程以你的名义投出 (信封后附每件前置的 RESULT / ARTIFACT 原样), 任一前置失败这件不投、按 canceled 回执回给你 (正文说明哪件以什么收场)。只用于派新活 (task、不带 re); 回执去向不变, 停放期间仍挂住你给上游的交代; 带 `job` 时现在就记成员与预算; 目标手上若还有你另一件没落定的活 (且不是前置之一) → 409。`deadline` 从真正投出时起算。stop_wizard / close_job 取消覆盖停放件。"),
+    .describe("依赖: tracked node 前置只有显式 accepted 且产物版本一致才放行，未验收等待、rejected 阻止。无 node 的旧任务沿用 legacy done（仅有回执，非业务成功）。wizard 名字数组 (= 你派给它的那一笔: 在飞的优先, 否则最近落定的; 并发两笔才需写 event id), 都得是你自己派出去的件 (查不到 → 400)。全部满足各自放行条件 → 立即投; 有已失败的任务 → 409; 否则**停放**: 不注入, 回包 `parked:true`, 前置全满足放行条件时守护进程以你的名义投出 (信封后附每件前置的 RESULT / ARTIFACT 原样), 任一前置失败这件不投、按 canceled 回执回给你 (正文说明哪件以什么收场)。只用于派新活 (task、不带 re); 回执去向不变, 停放期间仍挂住你给上游的交代; 带 `job` 时现在就记成员与预算; 目标手上若还有你另一件没落定的活 (且不是前置之一) → 409。stop_wizard / close_job 取消覆盖停放件。"),
 };
 
 server.registerTool("workflow_nodes", {
@@ -459,11 +458,11 @@ server.registerTool("workflow_verdict", {
 
 const TELL_DESC =
   "跟另一个 wizard 说话 —— 文本原样落进它的输入框, 它当成新的一轮接手 (派活、答它的问题、叫它继续都走这里)。目标不存在就先 spawn_wizard / clone_wizard。独立新活先按目标与难度 dispatch; re / now 仅用于当前任务的补充证据、纠正或答问, 不把无关小活追加给正在处理复杂任务的 lead, 也不要用 ask 包装需要另行检查的新任务。\n" +
-  "**说完就返回**: 对方干完那一轮, 它的最后一条消息作为**新的一轮**自动送到你这里 (回执, 带信封说明是谁、哪场对话、工单还差几份); 你正忙时回执排队等你说完。\n" +
+  "**说完就返回**: 对方用 `@.你的名字 RESULT:` 提交结果后, 结果持久化为回执；同批结果收齐再合并送到你这里, 你正忙时排队。等待回执不阻止你接收其他消息。\n" +
   "默认私聊, 只记在双方 rolepage; 守护进程给 `text` 挂信封 (发话人、私聊/公开、终句收口约定)。拒绝对自己发送。\n" +
-  "**派活方向 (守护进程拦, 返回 409 带改道说法)**: 带 `job` 的 task 只许开单者发; 同一张单的成员之间只许 `ask` / `fyi`, 不横向派 task; 上级单的开单者不越级给下层成员派活 (经它的 lead `re`); 目标正等你答复 (在你的 k 链上) 时 task / ask 都不行, 以 `NEED:` 收口; 自己已在 ≥3 层派活链底部不再往下派 task; 借来的专家 (role expert) 只答 ask; 一个 wizard 同时只在一张开着的单里当未落定的执行者。`fyi` 永远放行。";
+  "**派活方向 (守护进程拦, 返回 409 带改道说法)**: 带 `job` 的 task 只许开单者发; 同一张单的成员之间只许 `ask` / `fyi`, 不横向派 task; 上级单的开单者不越级给下层成员派活 (经它的 lead `re`); 目标正等你答复或位于你的 wizard 祖先链, 本身不构成 task/ask 禁派条件; 反问或新工作分别用 `kind:\"ask\"` / 默认 task 发起; 自己已在 ≥3 层派活链底部不再往下派 task; 借来的专家 (role expert) 只答 ask; 一个 wizard 同时只在一张开着的单里当未落定的执行者。`fyi` 永远放行。";
 
-const tellBody = (a: { name: string; text?: string; taskFile?: string; params?: Record<string, string>; kind?: string; priority?: string; waitSec?: number; job?: string; role?: string; public?: boolean; re?: boolean | string; deadline?: number; force?: boolean; after?: string[]; node?: string; return?: string; for?: string }) => ({
+const tellBody = (a: { name: string; text?: string; taskFile?: string; params?: Record<string, string>; kind?: string; priority?: string; waitSec?: number; job?: string; role?: string; public?: boolean; re?: boolean | string; force?: boolean; after?: string[]; node?: string; return?: string; for?: string }) => ({
   name: a.name,
   ...(a.text !== undefined ? { text: a.text } : {}),
   ...(a.taskFile !== undefined ? { taskFile: a.taskFile } : {}),
@@ -478,7 +477,6 @@ const tellBody = (a: { name: string; text?: string; taskFile?: string; params?: 
   ...(a.role ? { role: a.role } : {}),
   ...(a.public ? { public: true } : {}),
   ...(a.re !== undefined ? { re: a.re } : {}),
-  ...(a.deadline ? { deadline: a.deadline } : {}),
   ...(a.after?.length ? { after: a.after } : {}),
   // 一律显式带上: 守护进程据「有没有这个键」认出老 MCP 进程 (见 /peers/tell 的冷门控)。
   force: a.force === true,
@@ -884,7 +882,6 @@ server.registerTool(
       lead: z.boolean().optional().describe("复杂活交给一个 lead 组队 (见描述)。**只有它开需求根单** (回包里的 `job`), 普通小活不开单; 根单在 lead 交付后仍开着, 等人验收: `lead:true` 的往来一律私聊 (`public` 不起作用)。人认可 → `close_job(job)` 归档, 人说不对 → `tell_peer({name, re, job})` 给 lead 返工, 不要了 / 先放着 → `close_job({job, as:\"cancel\"|\"shelve\"})`。对人别提单号。"),
       criteria: z.string().optional().describe("验收标准 (`lead:true` 时记进根单): 做成什么样算交付。你猜的就在回复里向人复述一句再派。"),
       public: z.boolean().optional().describe("默认 true (气泡与回复进群); false = 私聊, 只记 rolepage。"),
-      deadline: z.number().optional().describe("同 tell_peer 的 deadline (秒)。"),
       dryRun: z.boolean().optional().describe("只要默认决定与理由, 不执行。"),
     },
   },

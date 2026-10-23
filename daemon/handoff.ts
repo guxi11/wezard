@@ -145,20 +145,19 @@ export interface Handoffs {
 export const settlesCut = (receiver: "chat" | "wizard" | undefined, closing: "need" | "result" | undefined): boolean =>
   receiver === "chat" || (receiver === "wizard" && closing !== undefined);
 
-const quote = (s: string, max: number): string =>
-  truncate(s.trim(), max).split("\n").map((l) => `> ${l}`).join("\n");
+const quote = (s: string): string => s.trim().split("\n").map((l) => `> ${l}`).join("\n");
 
 /** 交接后续答那一笔的注入正文: 带上谁问的、原话、交接切断那一轮被扣下的收尾。新会话没有旧
  *  transcript, 只给事件号它只能去翻记录猜; 有了原话与收尾, 那一笔若其实已答完 (假欠账),
  *  它一句 RESULT 就能自己收掉。 */
-export const resumeText = (event: string, ctx: { asker?: string; ask?: string; closing?: string }): string =>
+export const resumeText = (event: string, ctx: { asker?: string; ask?: string; closing?: string; receiver?: string }): string =>
   [
-    `继续 ${event} —— 这是你交接前还没交代的那一笔: 现在就把它做完并收口 (RESULT 交差 / NEED 反问)。`,
+    `继续 ${event} —— 这是你还没交代的同一项任务。核对已有结果后续办，不要重复已完成或交付未知的操作。`,
     ctx.asker ? `问的是: ${ctx.asker}` : "",
-    ctx.ask?.trim() ? `原话:\n${quote(ctx.ask, 1500)}` : "",
-    ctx.closing?.trim() ? `你交接前那一轮的收尾 (被交接扣下, 没投出去):\n${quote(ctx.closing, 1500)}` : "",
+    ctx.ask?.trim() ? `原话:\n${quote(ctx.ask)}` : "",
+    ctx.closing?.trim() ? `已有结果与上次收尾:\n${quote(ctx.closing)}` : "",
     ctx.ask?.trim() || ctx.closing?.trim()
-      ? "就按上面这件事收口; 收尾其实已经答完了, 就以 `RESULT:` 把它交差。别为找这一笔去 read_chat / peek_peer 翻别的记录。"
+      ? `就按上面这件事收口；已做完就用 ${ctx.receiver ? `@.${ctx.receiver.replace(/^\./, "")} RESULT:` : "RESULT:"} 交差。需要补信息时用 tell_peer({kind:"ask"})。`
       : "",
   ].filter(Boolean).join("\n\n");
 

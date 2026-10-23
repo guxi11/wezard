@@ -34,7 +34,7 @@ export interface Tell {
   /** 这一轮服务的那一笔 (路由 event)。 */
   event?: string;
   legs?: number;
-  /** 到这一刻还没答完就投 timeout (见 router.deadlineOf)。 */
+  /** Legacy wire field; unfinished tasks use NO_DEADLINE. */
   deadlineAt?: number;
   /** 守护进程因为不合工单验收打回过一次, 这是被打回的那段原文 —— 再交上来的照收, 不再打回。 */
   bounced?: string;
@@ -44,7 +44,7 @@ export interface Tell {
 
 /** 一个 wizard 手上在飞的活 (名册 / peek / list_jobs 的那一行)。`turn` 那一栏是 event id
  *  —— 下游只当字符串展示 (§9.1)。 */
-export interface InFlight { from: string; to: string; turn: string; job: string; state: TurnState; ageMs: number }
+export interface InFlight { from: string; to: string; turn: string; job: string; state: TurnState; ageMs: number; fromBlocked?: boolean }
 
 // ── 回执去向 (§3.2 / §9.5) ──────────────────────────────────────────────
 // 只有四个词, 旧写法 (`chain:false` / `receipt:false` / `answer:"transfer"`) 自 T10 起下线 ——

@@ -1,3 +1,4 @@
+import { NO_DEADLINE } from "../shared/turn-state.js";
 import type { ClearAttempt } from "./handoff.js";
 import { createHash } from "node:crypto";
 import { loadJsonMap } from "../shared/json-map-store.js";
@@ -9,6 +10,7 @@ import type { TemplateRef } from "../shared/task-template.js";
 
 export interface ReceiptFact {
   event: EventId;
+  batch?: string;
   version: string;
   status: string;
   receiver: Receiver;
@@ -20,6 +22,8 @@ export interface ReceiptFact {
 
 export interface MessageInput {
   id: string;
+  /** Requirements represented in this carrier, including quoted recovery context. */
+  inputIds?: string[];
   identity?: string;
   originalAt?: number;
   target: string;
@@ -65,6 +69,7 @@ export interface MessageEvent extends MessageInput {
   at: number;
   execution: "queued" | "dispatching" | "awaiting-result" | "complete" | "canceled" | "uncertain";
   exposure: "none" | "possible" | "submitted" | "consumed";
+  consumedAt?: number;
   attempts: number;
   retryAt?: number;
   /** Durable receipt intent; only an explicit release resumes proven unexposed input. */
@@ -79,7 +84,7 @@ export interface MessageEvent extends MessageInput {
   turnClosedAt?: number;
   releasedAt?: number;
   releaseReason?: string;
-  releaseSource?: "manual" | "deadline";
+  releaseSource?: "manual" | "deadline" | "pane-missing";
   probeAttempts?: number;
   turn?: string;
   finalized?: boolean;
@@ -90,6 +95,9 @@ export interface MessageEvent extends MessageInput {
   interjected?: boolean;
   quiet?: true;
   result?: { body: string; revision: string; at: number };
+  failure?: { body: string; at: number };
+  /** Explicit RESULT sections are durably tied to their selected route before answer ops. */
+  resultRoutes?: Record<string, { receiver: string; event: EventId | null; inputs?: string[] }>;
   /** 进终态 (complete / canceled) 的时刻 —— 墓碑化的起点。老行没有, 按已知时刻估。 */
   endedAt?: number;
 }
@@ -113,10 +121,10 @@ const authorityOf = (e: MessageEvent): EventAuthority => ({ id: e.id, target: e.
 const entomb = (e: MessageEvent & { execution: Tombstone["execution"] }): Tombstone =>
   ({ id: e.id, fingerprint: e.fingerprint, execution: e.execution, endedAt: endedAt(e), tomb: true, authority: authorityOf(e) });
 /** 每次落盘前跑: 了结满一天的行裁成墓碑, 墓碑满七天删掉。 */
-export const gcEvents = (now: number) => (rows: Record<string, Row>): Record<string, Row> =>
+export const gcEvents = (now: number, retain: (e: MessageEvent) => boolean = () => false) => (rows: Record<string, Row>): Record<string, Row> =>
   Object.fromEntries(Object.entries(rows).flatMap(([id, x]): Array<[string, Row]> =>
     isTomb(x) ? (now - x.endedAt >= TOMB_TTL_MS ? [] : [[id, x]])
-    : settled(x) && terminal(x.execution) && now - endedAt(x) >= TOMB_AFTER_MS ? [[id, entomb({ ...x, execution: x.execution })]]
+    : !retain(x) && settled(x) && terminal(x.execution) && now - endedAt(x) >= TOMB_AFTER_MS ? [[id, entomb({ ...x, execution: x.execution })]]
     : [[id, x]]));
 export interface DeliveryInput {
   transfer?: { id: string; standalone: boolean };
@@ -149,6 +157,12 @@ export interface MessageAdapters {
   transcript: (target: string) => string | undefined;
   sessionId: (target: string) => string | undefined;
   ready: (event: MessageEvent) => Promise<boolean>;
+  /** A queued event that is intentionally waiting must not pin later normal-priority work. */
+  blocksQueue?: (event: MessageEvent) => boolean;
+  task?: (event: MessageEvent) => string | undefined;
+  retain?: (event: MessageEvent) => boolean;
+  resultBindings?: (event: MessageEvent, body: string) => MessageEvent["resultRoutes"];
+  receiptBatch?: (event: EventId) => string | undefined;
   valid: (event: MessageEvent) => boolean;
   accepted: (event: MessageEvent) => void;
   committed: (event: MessageEvent) => void;
@@ -211,6 +225,7 @@ export const receiptCoverage = (e: MessageEvent, channel = e.channel, question =
 };
 
 const receiptFactOk = (f: ReceiptFact): boolean => !!f && typeof f.event === "string" && !!f.event
+  && (f.batch === undefined || typeof f.batch === "string" && !!f.batch)
   && typeof f.version === "string" && !!f.version && typeof f.body === "string" && typeof f.envelope === "string"
   && typeof f.speaker === "string" && ["done", "need", "error", "timeout", "silent", "dead", "canceled"].includes(f.status)
   && !!f.receiver && (f.receiver.kind === "wizard" ? typeof f.receiver.to === "string"
@@ -221,7 +236,7 @@ const coverageOk = (c: NonNullable<DeliveryInput["coverage"]>): boolean => !!c &
   && Array.isArray(c.facts) && c.facts.every((f) => typeof f === "string");
 
 export const createMessageEvents = (file: string, io: MessageAdapters) => {
-  const db = loadJsonMap<Row>(file, (rows) => gcEvents(Date.now())(rows), { strict: true });
+  const db = loadJsonMap<Row>(file, (rows) => gcEvents(Date.now(), io.retain)(rows), { strict: true });
   const outbox = loadJsonMap<FinalDelivery>(`${file}.finals`, undefined, { strict: true });
   Object.entries(db.all()).forEach(([id, e]) => {
     if (e && isTomb(e)) {
@@ -236,10 +251,25 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     if (!e || e.id !== id || typeof e.fingerprint !== "string" || !e.target || typeof e.speaker !== "string" || typeof e.channel !== "string" || (e.serves !== undefined && typeof e.serves !== "string") || !e.payload || typeof e.payload.text !== "string" || ([e.payload.human, e.payload.peer, e.payload.handoff].filter(Boolean).length !== 1) || !Number.isFinite(e.at) || !Number.isFinite(e.attempts) || !Number.isFinite(e.deadline) || !["queued", "dispatching", "awaiting-result", "complete", "canceled", "uncertain"].includes(e.execution)) throw new Error(`invalid message event ${id}`);
     if (e.payload.receipts !== undefined && (!e.payload.peer?.from.receipt || !Array.isArray(e.payload.receipts)
         || !e.payload.receipts.every(receiptFactOk))) throw new Error(`invalid receipt facts ${id}`);
+    if (e.resultRoutes !== undefined && (!e.resultRoutes || typeof e.resultRoutes !== "object"
+        || !Object.values(e.resultRoutes).every((b) => !!b && typeof b.receiver === "string" && !!b.receiver
+          && (b.event === null || typeof b.event === "string" && !!b.event)
+          && (b.inputs === undefined || Array.isArray(b.inputs) && b.inputs.every((id) => typeof id === "string" && !!id))))) throw new Error(`invalid result bindings ${id}`);
+    if (e.inputIds !== undefined && (!Array.isArray(e.inputIds) || !e.inputIds.every((id) => typeof id === "string" && !!id))) throw new Error(`invalid input coverage ${id}`);
     if (e.payload.handoff && (typeof e.payload.handoff.pane !== "string" || !e.payload.handoff.pane || typeof e.payload.handoff.sessionId !== "string" || !e.payload.handoff.sessionId || !e.id.startsWith("handoff:"))) throw new Error(`invalid handoff event ${id}`);
     const clear = e.payload.handoff?.clear;
     if (e.payload.handoff && e.id.endsWith(":carry") && (!clear || clear.pane !== e.payload.handoff.pane || clear.nextSid !== e.payload.handoff.sessionId || !Number.isSafeInteger(clear.pid) || clear.pid <= 0 || !Number.isSafeInteger(clear.panePid) || !clear.panePid)) throw new Error(`invalid handoff clear evidence ${id}`);
   });
+  const durableRoutes = Object.fromEntries(Object.values(db.all())
+    .filter((e): e is MessageEvent => !isTomb(e) && (!!e.serves || e.id.startsWith("route:") || e.id.startsWith("rcpt:")) && e.deadline < NO_DEADLINE)
+    .map((e) => [e.id, { ...e, deadline: NO_DEADLINE }]));
+  if (Object.keys(durableRoutes).length) db.merge(durableRoutes);
+  const batchedReceipts = Object.fromEntries(Object.values(db.all()).flatMap((e) => {
+    if (isTomb(e) || !e.payload.peer?.from.receipt) return [];
+    const receipts = receiptFacts(e).map((f) => ({ ...f, batch: f.batch ?? io.receiptBatch?.(f.event) }));
+    return JSON.stringify(receipts) === JSON.stringify(e.payload.receipts) ? [] : [[e.id, { ...e, payload: { ...e.payload, receipts } }]];
+  }));
+  if (Object.keys(batchedReceipts).length) db.merge(batchedReceipts);
   Object.entries(outbox.all()).forEach(([id, d]) => {
     if (d?.coverage !== undefined && !coverageOk(d.coverage)) throw new Error(`invalid final coverage ${id}`);
     if (!d || d.id !== id || !Array.isArray(d.parts) || d.parts.length !== d.chunks?.length || !d.chunks.every((c) => typeof c === "string") || !d.parts.every((p) => ["pending", "sending", "waiting-ack", "delivered", "uncertain", "failed"].includes(p.state)) || !d.channel) throw new Error(`invalid final delivery ${id}`);
@@ -398,7 +428,10 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     const e = stored;
     if (e.execution === "queued") {
       try { io.accepted(e); }
-      catch (error) { patch(e.id, { execution: "uncertain", reason: `acceptance projection failed: ${why(error)}` }); throw error; }
+      catch (error) {
+        patch(e.id, { execution: "queued", retryAt: backoff(e.attempts), reason: `acceptance projection failed before exposure: ${why(error)}` });
+        io.error(error);
+      }
     } // Idempotent adapters restore accounting/receipt intent after a torn cross-store write.
     void pump();
     return { ok: true, queued: e.execution === "queued", eventId: e.id };
@@ -407,7 +440,9 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     const e = live(id);
     if (!e || e.canceled || e.execution === "canceled" || e.result?.revision === revision) return;
     const quiet = receiptQuiet(e, body);
-    patch(id, { finalized: quiet, quiet: quiet ? true : undefined, result: { body, revision, at: Date.now() }, execution: "complete", exposure: "consumed", ...(turn ? { turn } : {}) });
+    const resultRoutes = { ...io.resultBindings?.({ ...e, ...(turn ? { turn } : {}) }, body), ...e.resultRoutes };
+    patch(id, { finalized: quiet, quiet: quiet ? true : undefined, result: { body, revision, at: Date.now() },
+      resultRoutes, execution: "complete", exposure: "consumed", consumedAt: e.consumedAt ?? Date.now(), ...(turn ? { turn } : {}) });
     if (!quiet) io.final?.(live(id)!, { text: body });
   };
   const delivery = (input: DeliveryInput): string => {
@@ -476,6 +511,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     if (["complete", "canceled"].includes(current.execution)) return;
     if (current.exposure !== "consumed" || (evidence.closedAt && !current.turnClosedAt)) patch(e.id, {
       exposure: "consumed", interjected: evidence.interjected,
+      consumedAt: current.consumedAt ?? Date.now(),
       execution: current.canceled || (evidence.closedAt && !evidence.body) ? "uncertain" : "awaiting-result",
       reason: current.canceled ? current.reason : evidence.closedAt && !evidence.body
         ? "input turn closed without a final assistant answer; delivery remains uncertain and will not be retried" : undefined,
@@ -483,37 +519,51 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     });
     if (!current.canceled) io.committed(live(e.id)!);
     if (evidence.body !== undefined && evidence.error) {
-      // CLI 报错收尾: 那段报错不是定论 (§5), 交路由表落中途态 —— 事件本身不动, 它的执行态
-      // 自有 deadline / 续跑那条路管 (与改动前一致)。
+      patch(e.id, { execution: "uncertain", turnClosedAt: evidence.closedAt ?? Date.now(),
+        failure: { body: evidence.body, at: Date.now() }, finalized: false });
       io.final?.(live(e.id)!, { text: evidence.body, error: true });
+      patch(e.id, { finalized: true });
     } else if (evidence.body !== undefined && evidence.revision) {
       result(e.id, evidence.body, evidence.revision, evidence.turn);
       io.recovered(live(e.id)!);
     }
   };
-  /** 收件箱里的回执事件 (`rcpt:<event>:<rev>`): 只有它带路由归属 (serves), 也只有它该合并。 */
-  const isRcpt = (e: MessageEvent): boolean => e.id.startsWith("rcpt:") && !!e.payload.peer?.from.receipt && !!e.serves;
-  /** §9.3 Aggregator: 同一个 target、服务同一笔 (`serves` = `receiver.event`) 还排着队的其它回执,
-   *  并进这一次注入 —— 扇出的兄弟陆续回来时是一轮, 不是一人一轮。被吸收的那些各自收口
+  /** 收件箱里的回执按接收 wizard 的待收批次合并; 不要求旧 receiver.event 关系存在。 */
+  const isRcpt = (e: MessageEvent): boolean => e.id.startsWith("rcpt:") && !!e.payload.peer?.from.receipt;
+  const isTask = (e: MessageEvent): boolean => e.id.startsWith("route:") && !!e.payload.peer?.tell
+    && !e.payload.peer.attemptId && !e.payload.peer.transferred && !!e.serves;
+  /** 同一个 target 的待收回执并进当前批次 —— 扇出的结果是一轮, 不是一人一轮。被吸收的那些各自收口
    *  (`execution: complete`, 它们的 id 已终态, 重放不再注入); 结论由这一轮的终句统一交代。
    *  每项保留独立事实、状态与信封, 合并正文与被吸收行的终态在同一次落盘中提交。 */
   const absorb = (id: string): void => {
     const e = live(id);
-    if (!e || !isRcpt(e) || !io.valid(e)) return;
+    if (!e || (!isRcpt(e) && !isTask(e)) || !io.valid(e)) return;
+    const mergeClass = isRcpt(e) ? isRcpt : isTask;
+    const batch = isRcpt(e) ? receiptFacts(e)[0]?.batch : undefined;
+    if (isRcpt(e) && (receiptFacts(e).some((f) => f.status !== "done") || !batch)) return;
     const absorbed = liveRows()
-      .filter((x) => x.id !== e.id && isRcpt(x) && x.target === e.target && x.serves === e.serves
+      .filter((x) => x.id !== e.id && mergeClass(x) && x.target === e.target
+        && (isTask(e) ? (io.task?.(x) ?? x.serves) === (io.task?.(e) ?? e.serves) : true)
+        && (!isRcpt(e) || receiptFacts(x).length > 0 && receiptFacts(x).every((f) => f.status === "done" && f.batch === batch))
         && x.channel === e.channel && x.execution === "queued" && x.exposure === "none" && !x.canceled && !x.deliveryHold
+        && (!isTask(e) || x.payload.peer?.job === e.payload.peer?.job)
+        && (!isTask(e) || JSON.stringify(x.payload.peer?.after ?? []) === JSON.stringify(e.payload.peer?.after ?? []))
         && x.deadline > Date.now() && io.valid(x))
       .sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
     if (!absorbed.length) return;
     const rows = [e, ...absorbed];
     // Each item keeps its own status and envelope: a NEED must never inherit a sibling's done.
     const receipts = rows.flatMap(receiptFacts);
-    const payload = { ...e.payload, receipts, text: receipts.map((f) =>
-      `${f.envelope}\n（回执 event=${f.event} version=${f.version} status=${f.status} receiver=${JSON.stringify(f.receiver)}）\n${f.body}`).join("\n\n"),
-      peer: { ...e.payload.peer!, envelope: "以下是同一件活的多份回执。逐项读取各自的状态、来源与正文。" } };
+    const payload = isRcpt(e)
+      ? { ...e.payload, receipts, text: receipts.map((f) =>
+        `${f.envelope}\n（回执 event=${f.event} version=${f.version} status=${f.status} receiver=${JSON.stringify(f.receiver)}）\n${f.body}`).join("\n\n"),
+        peer: { ...e.payload.peer!, envelope: "以下是同一件活的多份回执。逐项读取各自的状态、来源与正文。" } }
+      : { ...e.payload, text: [...rows].sort((a, b) => a.at - b.at || a.id.localeCompare(b.id))
+        .map((x) => `${x.payload.peer?.envelope ?? ""}\n${x.payload.text}`).join("\n\n"),
+        peer: { ...e.payload.peer!, envelope: "以下是同一项任务的补充要求，请合并处理并统一回复。" } };
     // One atomic store write: a crash cannot expose a merged input and an unretired sibling.
-    db.merge({ [e.id]: { ...e, payload }, ...Object.fromEntries(absorbed.map((x) => [x.id,
+    const inputIds = isTask(e) ? [...new Set(rows.flatMap((x) => x.inputIds ?? [x.id]))].sort() : e.inputIds;
+    db.merge({ [e.id]: { ...e, payload, ...(inputIds ? { inputIds } : {}) }, ...Object.fromEntries(absorbed.map((x) => [x.id,
       { ...x, execution: "complete", exposure: "consumed", finalized: true, endedAt: Date.now(), reason: `merged into ${e.id}` }])) });
   };
   const inject = async (id: string, resource: string): Promise<void> => {
@@ -551,17 +601,24 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
       if (r.ok && !r.uncertain) {
         const committed = patch(id, { execution: latest.canceled ? "uncertain" : "awaiting-result", exposure: "submitted", transcript: latest.transcript ?? io.transcript(e.target) });
         if (!latest.canceled) io.committed(committed);
-      } else if (r.gone && !r.uncertain && latest.exposure === "none" && !latest.canceled) {
+      } else if (!!latest.serves && latest.deadline === NO_DEADLINE && !receiptFacts(latest).length
+          && !r.uncertain && latest.exposure === "none" && !latest.canceled) {
+        // A proven unexposed input is safe to retry after repair; an unlimited
+        // task must not become permanently orphaned after five transport failures.
+        patch(id, { execution: "queued", exposure: "none", retryAt: backoff(latest.attempts), reason: r.reason });
+      } else if (r.gone && !r.uncertain && latest.exposure === "none" && !latest.canceled
+          && (!latest.serves || receiptFacts(latest).length > 0 || latest.deadline !== NO_DEADLINE)) {
         // 收方真没了 (绑定按 store 也恢复不了): 退避重投只会空转到期限, 收成 canceled 交给路由层上浮。
         // Keep replay possible until the replacement inbox is durable.
         const gone = patch(id, { execution: "queued", retryAt: backoff(latest.attempts), reason: r.reason || "target gone" });
         io.gone?.(gone);
         patch(id, { execution: "canceled" });
-      } else if (!r.uncertain && latest.exposure === "none" && !latest.canceled && (!r.retryable || latest.attempts >= 5)) {
+      } else if (!r.uncertain && latest.exposure === "none" && !latest.canceled && (!r.retryable
+          || latest.attempts >= 5 && (!latest.serves || latest.deadline !== NO_DEADLINE))) {
         const reason = `${r.reason || "submission failed"}${r.retryable ? "; retry limit reached" : ""}`;
         if (receiptFacts(latest).length) holdReceipt(latest, "transport-exhausted", reason);
         else cancel((e) => e.id === id, reason);
-      } else if (r.retryable && !r.uncertain && !latest.canceled) {
+      } else if ((r.retryable || r.gone && !!latest.serves) && !r.uncertain && latest.exposure === "none" && !latest.canceled) {
         patch(id, { execution: "queued", exposure: "none", retryAt: backoff(latest.attempts), reason: r.reason });
       } else patch(id, { execution: "uncertain", reason: r.reason || "submission acknowledgement unknown" });
     } catch (e) {
@@ -584,15 +641,12 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
   const pinOf = (e: MessageEvent): MessageEvent | undefined => scan(() => {
     const rows = liveRows().sort((a, b) => a.at - b.at);
     const resource = resourceAt(e.target);
-    const older = new Set(rows.slice(0, rows.findIndex((x) => x.id === e.id)).map((x) => x.id));
     return rows.find((x) => x.id !== e.id
       && (x.execution === "dispatching"
         // A consumed, closed input cannot own the next turn. Keep its unknown
         // result for reconciliation without replaying it or pinning later inputs.
-        || (!direct(e) && ((x.execution === "uncertain" && !x.releasedAt
-          && !(x.exposure === "consumed" && x.turnClosedAt))
-          || (e.priority === "normal" && (x.execution === "awaiting-result"
-            || (x.execution === "queued" && !x.deliveryHold && (x.retryAt ?? 0) <= Date.now() && older.has(x.id)))))))
+        || (!direct(e) && io.blocksQueue?.(x) !== false && x.execution === "uncertain" && !x.releasedAt
+          && !(x.exposure === "consumed" && x.turnClosedAt)))
       && resourceOf(x) === resource);
   });
   /** 全局 4 路并发只限回执 / 派活: 人话之间、人话与别的 pane 都互不相干, 只认同 pane 物理互斥。 */
@@ -614,6 +668,8 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     const resource = resourceAt(e.target);
     const ahead = liveRows()
       .filter((x) => x.id !== e.id && x.at <= e.at && ["queued", "dispatching", "awaiting-result"].includes(x.execution) && !x.canceled
+        && (x.execution !== "awaiting-result" || !x.releasedAt)
+        && (x.execution === "dispatching" || io.blocksQueue?.(x) !== false)
         && resourceOf(x) === resource)
       .sort((a, b) => a.at - b.at);
     const pin = pinOf(e);
@@ -670,6 +726,18 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     void pump();
     return { ok: true, event: clone(next) };
   };
+  const releaseMissingPane = (target: string, sessionId: string | undefined, transcript: string | undefined, evidence: string): string[] => {
+    const rows = liveRows().filter((e) => e.target === target && ["awaiting-result", "uncertain"].includes(e.execution)
+      && e.exposure !== "none" && !e.releasedAt
+      && (!e.sessionId || e.sessionId === sessionId) && (!e.transcript || e.transcript === transcript));
+    const at = Date.now();
+    rows.forEach((e) => patch(e.id, { execution: "uncertain", releasedAt: at, releaseSource: "pane-missing",
+      releaseReason: `pane/session disappeared (${evidence}); old execution remains uncertain and will not be replayed`,
+      supersededBy: `pane-missing:${evidence}`,
+      reason: `${e.reason ? `${e.reason}; ` : ""}pane/session disappeared; queue slot released, old execution remains uncertain` }));
+    void pump();
+    return rows.map((e) => e.id);
+  };
   async function pump(): Promise<void> {
     if (stopped || pumping) return;
     pumping = true;
@@ -693,6 +761,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
       const fair = [...rows.slice(probeCursor), ...rows.slice(0, probeCursor)];
       fair.forEach((e) => {
         if (stopped) return;
+        if (e.execution === "queued" && io.blocksQueue?.(e) === false) return;
         // Expiration and permission withdrawal are ledger work; a busy or hung
         // probe on this pane must not prevent queued messages from expiring.
         if (e.execution === "queued" && e.deliveryHold) return;
@@ -733,6 +802,10 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
           io.error(error);
         };
         if (["awaiting-result", "uncertain"].includes(e.execution)) {
+          if (e.failure && !e.finalized) {
+            io.final?.(e, { text: e.failure.body, error: true });
+            patch(e.id, { finalized: true });
+          }
           if (e.execution === "uncertain" && (e.turnClosedAt || e.releasedAt)) return;
           if ((e.retryAt ?? 0) > Date.now()) return;
           const currentSession = ask("sessionId", e.target);
@@ -790,14 +863,37 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     void pump();
   };
   return {
-    accept, pump, resume, result, delivery, cancel, blocker, queue, release, claimReceipt,
+    accept, pump, resume, result, delivery, cancel, blocker, queue, release, releaseMissingPane, claimReceipt,
+    taskInputs: (task: string): MessageEvent[] => liveRows().filter((e) => (io.task?.(e) ?? e.serves) === task).map(clone),
+    consumedTaskInputs: (task: string, source: MessageEvent): string[] => {
+      const cutoff = source.turnClosedAt ?? source.result?.at ?? Date.now();
+      return [...new Set(liveRows().filter((e) => e.target === source.target && (io.task?.(e) ?? e.serves) === task
+        && !e.canceled && (e.id === source.id || e.exposure === "consumed"
+          && (e.consumedAt ?? e.result?.at ?? e.turnClosedAt ?? Infinity) <= cutoff
+          && !(e.execution === "complete" && !e.result)))
+        .flatMap((e) => e.inputIds ?? [e.id]))].sort();
+    },
+    coversTaskInputs: (task: string, source: MessageEvent, inputs: readonly string[]): boolean => {
+      const covered = new Set(inputs);
+      return liveRows().filter((e) => e.target === source.target && (io.task?.(e) ?? e.serves) === task
+        && !!e.payload.peer?.tell && !e.canceled).every((e) => covered.has(e.id));
+    },
     running: () => !stopped,
     bind: (id: string, turn: string) => { if (live(id)) patch(id, { turn }); },
+    bindResultRoute: (id: string, section: string, receiver: string, event: EventId | null, inputs?: string[]): void => {
+      const e = live(id);
+      if (!e) return;
+      const prior = e.resultRoutes?.[section];
+      if (prior && (prior.receiver !== receiver || prior.event !== event)) throw new Error(`RESULT section binding changed for ${id}/${section}`);
+      if (prior?.inputs && inputs && JSON.stringify(prior.inputs) !== JSON.stringify(inputs)) throw new Error(`RESULT coverage changed for ${id}/${section}`);
+      patch(id, { resultRoutes: { ...e.resultRoutes, [section]: { ...prior, receiver, event, ...(inputs ? { inputs } : {}) } } });
+    },
     finished: (id: string) => {
       const e = live(id);
       // Physical completion is not a task answer. Keep the missing outcome
       // visible while allowing the next input to use this pane.
       if (e && !e.canceled && !e.result) patch(id, { execution: "uncertain", exposure: "consumed",
+        consumedAt: e.consumedAt ?? Date.now(),
         turnClosedAt: e.turnClosedAt ?? Date.now(),
         reason: "input turn ended without a final assistant answer; automatic retry withheld" });
     },

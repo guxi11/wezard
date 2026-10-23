@@ -2763,6 +2763,7 @@ export interface MirrorBridge {
   /** 这个 wizard 此刻有没有一个能用的 pane。回执投递前要问一句: 已经收工的
    *  wizard 不该为了接一份结论被重新拉起来。 */
   paneLive: (target: string) => Promise<boolean>;
+  paneState: (target: string) => Promise<"live" | "missing" | "unknown">;
   /** Settles once the eager boot restore has re-attached every persisted binding —
    *  anything resumed across a reload (receipts) must not read targets before it. */
   restored: Promise<void>;
@@ -6554,6 +6555,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const a = byTarget.get(target);
     return a?.tmuxPane ? paneUsable(a.tmuxPane, a.jsonlPath) : false;
   };
+  const paneState = async (target: string): Promise<"live" | "missing" | "unknown"> => {
+    const binding = byTarget.get(target) ?? deps.store.get(target);
+    if (!binding?.tmuxPane || !binding.jsonlPath) return "missing";
+    const { state } = await probePane(binding.tmuxPane, expandHome(binding.jsonlPath));
+    return state === "session" ? "live" : state === "gone" || state === "shell" ? "missing" : "unknown";
+  };
 
   // ── 未收口气泡的引用判定 ────────────────────────────────────────────
   // tag 会话的 last stream 未收口时, 群里最新那条气泡是瞬态的: 详情链接 URL +
@@ -7442,6 +7449,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     lastReply: replySince,
     replyToPeer: replyToPeerSince,
     paneLive: paneLiveOf,
+    paneState,
     restored,
     isOpenBubbleQuote,
     status: () => {

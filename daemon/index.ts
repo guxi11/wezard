@@ -2,7 +2,7 @@ import { wxMarkdown } from "../shared/wx-text.js";
 // Daemon entry. Resident process — exits only on signal or fatal WS auth failure.
 import { existsSync, readFileSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
+import { createHash, timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
 import { loadOrCreateSvrToken } from "../shared/svr-token.js";
 import { DAEMON_TOKEN_FILE, DAEMON_TOKEN_HEADER } from "../shared/daemon-token.js";
 import { homedir } from "node:os";
@@ -97,7 +97,7 @@ import { createLedger, digest, pendingGc, renderDigest, renderTable, renderAwait
 import { checkDirection } from "./direction.js";
 import { loadJobStore, dutyLine, awaitingAccept, stalledRoots, shelvedRoots, nudgeDue, dayClamp, childrenOf as jobChildren, jobEpisode, rejectReason, ACCEPTS, JOB_MEMBER_MAX, JOB_DEPTH_MAX, depthOf, ancestorsOf as jobAncestors, treeOrder, jobStage, type Accept, type JobMark, type JobRecord, type MemberLive } from "./jobs.js";
 import type { MemberRole } from "../shared/world.js";
-import { cacheTouchMs, cacheTtlSec, clipMiddle, contextMaterials, firstStamp, parseClosing, stripClosingMark, stripForChat, lastContextTokens, lastExchange, lastModel, openingTurn, replyClosedBefore, talkTurns, turnsSince, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
+import { cacheTouchMs, cacheTtlSec, clipMiddle, contextMaterials, firstStamp, parseClosing, stripClosingMark, stripForChat, addressedResults, lastContextTokens, lastExchange, lastModel, openingTurn, replyClosedBefore, talkTurns, turnsSince, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { expandHome } from "../shared/paths.js";
 import { expandTask, TemplateError, type ExpandedTask, type TemplateRef } from "../shared/task-template.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
@@ -105,7 +105,7 @@ import { createWorkflowNodes, type FileVersion, type NodeAttempt } from "./workf
 import { loadWorkflowPlans, createWorkflowPlanRunner, type PlanPermit } from "./workflow-plans.js";
 import { registerWorkflowPlanRoutes } from "./workflow-plan-http.js";
 import { returnOpOf, type HeldSeen, type InFlight, type Prereq, type ReturnOp, type Tell } from "./dispatch.js";
-import { isTerminal, renderInFlight, turnState } from "../shared/turn-state.js";
+import { NO_DEADLINE, isTerminal, renderInFlight, turnState } from "../shared/turn-state.js";
 import { startIdleNudge } from "./idle-nudge.js";
 import { askerFromEnvelope, renderReminder, stripReminders, withMsg, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
 import { createHandoffs, cuttingTurn, handedOff, handingOff, resumeText, settlesCut, type Pending as PendingHandoff } from "./handoff.js";
@@ -146,7 +146,7 @@ const main = async (): Promise<void> => {
   // 定时调度器的 `inject` 真正实现, 赋值在 mirror-mode 的大块里 (要用到那里面的
   // wizards / m / notifyChat), 但 startScheduler 在那块外面接线 —— 见文件尾。
   // 记忆整理者的执行体, 同样只有 mirror 模式给得出 —— 赋值见 scheduledTaskInject 旁边。
-  /** T6: 失败合成的 sweeper (§4.2) —— 与 receipts 的 watcher 并跑, 投递只走路由表。 */
+  /** 统一 route 恢复与 held 前置清理巡检。 */
   let stopSweep = (): void => {};
   let stewardRun: ((prompt: string) => Promise<{ ok: boolean; reason?: string }>) | undefined;
   let stewardWiring: { refsOf?: RefsOf; onMerged?: (mds: readonly string[]) => void } = {};
@@ -179,7 +179,8 @@ const main = async (): Promise<void> => {
   configureRemoteForward(cfg.daemon.detailRemoteBase, cfg.daemon.detailRemoteToken);
   // 回执路由表 (docs/evolve/receipt-router.md): 一件活 = 一行 `<event, owner, receiver>`,
   // 表 = 对 append-only journal 的 fold。boot 时只 fold 一次; 写入点 (open/move) 从 T3 起接。
-  const router = openRouter({ note: (msg, extra) => log.child({ mod: "router" }).info(extra ?? {}, msg) });
+  let retainRoute: (row: Route) => boolean = () => true;
+  const router = openRouter({ retain: (row) => retainRoute(row), note: (msg, extra) => log.child({ mod: "router" }).info(extra ?? {}, msg) });
   /** 新根 event: 来源自己的一笔 (人的一句话 / 定时任务 / detach 派活) 新领一个 (§9.1)。 */
   const newRootEvent = (): EventId => `e${randomBytes(3).toString("hex")}`;
   // T10 §9.6: 旧回执状态文件一次性归档 —— 表上还压着在飞的活就这次不动 (等它们收口, 下次 boot
@@ -261,11 +262,12 @@ const main = async (): Promise<void> => {
   let peerEvents: Pick<MessageAdapters, "accepted" | "committed" | "canceled" | "valid" | "ready" | "inject" | "gone"> | undefined;
   /** T4: 路由表的投递层 —— 在 mirror 大块里接线 (要用到 jobs / 回执信封 / 事件泵), 这里先留个口。 */
   let deliverFinal: ((e: MessageEvent, verdict: FinalVerdict) => void) | undefined;
+  let bindResults: MessageAdapters["resultBindings"];
   let handoffAllowed: (target: string) => boolean = () => false;
   let handoffFinalSuppressed: (event: EventAuthority) => boolean = (e) => !!e.handoffCut && !e.handoffRestored;
   const ownsReplyEvent = (e: EventAuthority): boolean => {
     const row = e.serves ? router.get(e.serves) : undefined;
-    if (row && row.owner !== e.target) return false;
+    if (row && row.owner !== e.target && router.owedBy(e.target).length === 0) return false;
     const latest = e.serves ? events.latestTransfer(e.serves) : undefined;
     return !latest || latest.id === e.id || latest.at < e.at;
   };
@@ -292,6 +294,27 @@ const main = async (): Promise<void> => {
     // 这一句曾是要 idleNow 的, 也就是那个反复 5s 超时的探测源头: 一超时就退避, 把同一 target
     // 后面排着的每一笔 (含后到的人话) 一起钉住十几分钟。交接期间照旧等 —— 那几秒 pane 真是死的。
     ready: async (e) => e.payload.handoff ? handoffAllowed(e.target) && bridge.idleNow(e.target) : !handingOff(e.target) && (e.payload.peer ? !!(await peerEvents?.ready(e)) : true),
+    blocksQueue: (e) => {
+      const facts = receiptFacts(e);
+      return !(facts.length > 0 && facts.every((f) => f.status === "done")
+        && facts.some((f) => !!f.batch && !router.batchComplete(f.batch)));
+    },
+    task: (e) => e.serves ? router.get(e.serves)?.event ?? e.serves : undefined,
+    receiptBatch: (event) => router.get(event)?.batch,
+    retain: (e) => {
+      const required = (id: string): boolean => {
+        const row = router.get(id);
+        return !!row && (["held", "open", "need", "error"].includes(row.status)
+          || !!row.batch && !router.batchComplete(row.batch));
+      };
+      return !!e.serves && required(e.serves)
+        || receiptFacts(e).some((f) => {
+          const batch = f.batch ?? router.get(f.event)?.batch;
+          return !!batch && !router.batchComplete(batch);
+        })
+        || Object.values(e.resultRoutes ?? {}).some((b) => !!b.event && required(b.event));
+    },
+    resultBindings: (e, body) => bindResults?.(e, body),
     inject: async (e, boundary) => {
       if (e.payload.handoff) {
         const expected = e.payload.handoff;
@@ -376,6 +399,13 @@ const main = async (): Promise<void> => {
       serves: e.serves, after: e.payload.peer?.after, why, heldSec: Math.round(forMs / 1000) }, "message event held in queue"),
     error: (e) => log.error({ err: errText(e) }, "message event scheduler"),
   });
+  retainRoute = (row) => events.ids().some((id) => {
+    const e = events.get(id);
+    if (!e || ["complete", "canceled"].includes(e.execution)) return false;
+    return receiptFacts(e).some((f) => (router.get(f.event)?.event ?? f.event) === row.event)
+      || (e.payload.peer?.after ?? []).some((id) => (router.get(id)?.event ?? id) === row.event);
+  });
+
   const bridge = startMirror({ cfg, log: log.child({ mod: "mirror" }), client: ws.client, store: mirrorStore, events, sendFrozen: (channel, content, stream) => responseTracker.sendFrozen(channel.replace(/^(user|chat|group):/, ""), content, stream, events.running) });
   // 群里每个 `.name` 都挂它的 rolepage (见 session-label 的 TagLinker)。正文提及
   // 只认真有其人的 —— 随手写的 `.gitignore` 不该变成一个开在空栏上的链接。
@@ -438,7 +468,7 @@ const main = async (): Promise<void> => {
     // 人话开一条根行 (§3.1): owner = 被点名的那个 wizard, 定论 = 这句人话的答复气泡;
     // 这一轮服务的正是它, 于是它在群里再派活都挂在这条根下。
     const at = Date.now();
-    const deadlineAt = at + 12 * 3600_000;
+    const deadlineAt = NO_DEADLINE;
     const root = newRootEvent();
     router.commit(ops.open({ event: root, owner: a.principal, at, deadlineAt,
       receiver: { kind: "chat", channel: baseOfKey(a.channel!), message: id },
@@ -987,9 +1017,9 @@ const main = async (): Promise<void> => {
     /** 一笔活第几个来回 (§3.2): 同一行上已经注入过的续问数 + 1 —— 现算, 不落第二份数据。
      *  续问的注入事件 id 是 `route:<event>:r<legs>`, 所以从它自己就能数回来 (reload 也在盘上)。 */
     const legsOf = (event: EventId): number =>
-      events.ids().reduce((n, id) => {
-        const m = id.startsWith(`route:${event}:r`) ? Number(id.slice(`route:${event}:r`.length)) : NaN;
-        return Number.isInteger(m) && m > n ? m : n;
+      events.taskInputs(router.get(event)?.event ?? event).reduce((n, e) => {
+        const m = e.payload.peer?.tell?.legs ?? 1;
+        return Math.max(n, m);
       }, 1);
     /** 同一笔活上的一句续问 (idle-nudge 追问 / 工单打回): 不新开行, 注入事件 id
      *  `route:<event>:r<legs>` —— 它的终句照旧落到那一行上 (§9.4)。 */
@@ -1012,12 +1042,17 @@ const main = async (): Promise<void> => {
     const bounced = new Map<EventId, string>();
     /** 工单验收 (§9.6, 从 receipts 的 watcher 重建): 交的活不合规格 → 这一份不算交差。
      *  计划节点有自己的验收 (workflow), 不经这里。 */
-    const acceptanceOf = (row: Route, body: string): string | undefined => {
-      if (!row.job || bounced.has(row.event)) return undefined;
+    const acceptanceOf = (row: Route, body: string, explicit = false): string | undefined => {
+      if (bounced.has(row.event)) return undefined;
       // 计划节点有自己的验收 (workflow): 那份活由计划 runner 收口, 不走工单的工具级验收。
-      if (workflow.all().some((a) => a.job === row.job && a.to === row.owner)) return undefined;
-      const j = jobs.get(row.job);
-      return j?.status === "open" ? rejectReason(j.accept ?? "result", parseClosing(body)) : undefined;
+      const closing = parseClosing(body);
+      return router.aliases(row.event).flatMap((r) => {
+        if (!r.job || workflow.all().some((a) => a.job === r.job && a.to === row.owner)) return [];
+        const j = jobs.get(r.job);
+        const reason = j?.status === "open" ? rejectReason(j.accept ?? "result", explicit
+          ? { ...closing, kind: "result", text: body.replace(/^RESULT[ \t]*[:：][ \t]*/, "").trim() } : closing) : undefined;
+        return reason ? [reason] : [];
+      })[0];
     };
     /** 以工单 owner 的名义在同一笔上打回一次: 不新开行, 行留在 `open` 等它按约定再交一份。 */
     const rebound = (row: Route, why: string, eventId: string): void => {
@@ -1026,7 +1061,7 @@ const main = async (): Promise<void> => {
       acceptContinuation({
         from, to: row.owner, channel: "", event: row.event, legs: legsOf(row.event) + 1,
         deadlineAt: row.deadlineAt, ...(row.asker ? { asker: row.asker } : {}), ...(row.job ? { job: row.job } : {}),
-      }, `（守护进程代 ${displayName(from)} 打回一次: 这件活是工单里的一份, 你的回复${why}。请按约定收口：RESULT: <结论>；交付文件逐项 ARTIFACT: <路径> — 一句话；真缺信息用 NEED: <问题>。）`);
+      }, `（守护进程代 ${displayName(from)} 打回一次: 这件活是工单里的一份, 你的回复${why}。请按约定收口：RESULT: <结论>；交付文件逐项 ARTIFACT: <路径> — 一句话；需要对方补信息时用 tell_peer({kind:"ask"})。）`);
       log.info({ event: row.event, why }, "receipt: 不合工单验收, 打回一次");
     };
     const turnsLine = (xs: readonly InFlight[], target: string): string => renderInFlight(xs, target, displayName);
@@ -1118,29 +1153,50 @@ const main = async (): Promise<void> => {
      *  `serves` 指回那一行 (注入事件 id `route:<event>:resume`), 于是它的终句照旧落定、
      *  照旧投给 receiver —— 换会话丢掉的只是 transcript, 不是这笔账。
      *  id 按这一场交接的起点 (`at`) 区分: 同一场 reload 重放判重不重投, 换一场才配一条新的。 */
-    async function injectResume(t: string, event: EventId, at: number): Promise<{ ok: boolean; reason?: string }> {
+    async function injectResume(t: string, event: EventId, at: number, automaticGeneration?: string): Promise<{ ok: boolean; reason?: string }> {
       if (!handoffAllowed(t)) return { ok: false, reason: "workflow continuation withdrawn or executor reserved" };
       const row = router.get(event);
-      if (!row || row.owner !== t || row.status !== "open") return { ok: false, reason: "no open row to resume" };
+      if (!row || row.owner !== t || !["open", "need", "error"].includes(row.status)) return { ok: false, reason: "no unfinished row to resume" };
       const r = row.receiver;
       const waiting = r.kind === "wizard" ? r.to : baseOfKey(r.channel);   // 等着它交代的那一方 (信封挂在它名下)
       const channel = r.kind === "chat" ? r.channel : "";                  // 结论要落回群里时才带频道 (§9.4)
       const base = `route:${event}:resume`;
-      const id = `${base}:${at}`;
+      const id = automaticGeneration ? `${base}:auto:${automaticGeneration}` : `${base}:${at}`;
       // 那一笔的原话 = 服务它的最早一条注入 (不是续问 / 回执 / 交接内部事件); 收尾 = 交接扣下的那句终句。
-      const serving = events.ids().map((x) => events.get(x)).filter((x): x is MessageEvent => !!x && x.serves === event && x.target === t)
+      const serving = events.taskInputs(row.event).filter((x) => x.target === t)
         .sort((a, b) => (a.originalAt ?? a.at) - (b.originalAt ?? b.at));
-      const ask = serving.find((x) => !x.id.startsWith(base) && !x.id.startsWith("rcpt:") && !x.id.startsWith("handoff:"));
-      const closing = serving.filter((x) => x.handoffCut && !x.handoffRestored && x.result).at(-1)?.result?.body;
+      // An unexposed supplement still waiting on `after` belongs to its original
+      // queue entry. A recovery carrier must neither expose nor consume it early.
+      const context = serving.filter((x) => !x.canceled && !x.id.startsWith(base) && !x.id.startsWith("rcpt:") && !x.id.startsWith("handoff:")
+        && (x.exposure !== "none" || prereqsOf(x.speaker, x.payload.peer?.after ?? []).every((r) => r.state === "done")));
+      const ask = context.map((x) => x.payload.text.trim()).filter(Boolean).join("\n\n");
+      const relatedRows = [router.get(event), ...router.subtree(event)].filter((x): x is Route => !!x);
+      const related = new Set(relatedRows.map((x) => x.event));
+      const routeNotes = relatedRows.filter((x) => x.outcome?.status === "done"
+        && (x.event === event || (x.receiver.kind === "wizard" && x.receiver.to === t)))
+        .map((x) => `[已收结果 ${x.event}] ${x.outcome!.body.trim()}`);
+      const receiptNotes = events.status().events.flatMap((x) => receiptFacts(x)
+        .filter((f) => f.status === "done" && f.receiver.kind === "wizard" && f.receiver.to === t
+          && (related.has(f.event) || !!f.receiver.event && related.has(router.get(f.receiver.event)?.event ?? f.receiver.event)))
+        .map((f) => `[已收回执 ${f.event}] ${f.body.trim()}`));
+      const notes = context.filter((x) => x.result).map((x) => `[已收结果 ${x.id}] ${x.result!.body.trim()}`).filter(Boolean);
+      const closing = [
+        ...notes,
+        ...routeNotes,
+        ...receiptNotes,
+        ...serving.filter((x) => x.handoffCut && !x.handoffRestored && x.result).map((x) => x.result!.body.trim()),
+      ].filter(Boolean).filter((x, i, all) => all.indexOf(x) === i).join("\n\n");
       const head = row.asker ? `${row.asker.who}${row.asker.chat ? ` (在 ${chatNameOf(cfg, row.asker.chat) || row.asker.chat})` : ""}` : "";
       const asker = r.kind === "wizard" ? `${displayName(r.to)}${head ? ` · 链头 ${head}` : ""}` : head;
       try {
-        events.accept({
-          id, identity: JSON.stringify([t, event, "resume", at]),
+        if (!events.known(id)) events.accept({
+          id, identity: JSON.stringify([t, event, "resume", automaticGeneration ?? at]),
+          inputIds: [...new Set(context.filter((x) => !!x.payload.peer?.tell || !!x.payload.human).flatMap((x) => x.inputIds ?? [x.id]))].sort(),
           target: t, speaker: waiting, channel, serves: event,
           ...(row.asker ? { asker: row.asker } : {}),
-          priority: "normal", deadline: Date.now() + 12 * 3600_000,
-          payload: { text: resumeText(event, { asker, ask: ask ? stripReminders(ask.payload.text) : undefined, closing }), peer: {
+        priority: "normal", deadline: NO_DEADLINE,
+          payload: { text: resumeText(event, { asker, ask: ask ? stripReminders(ask) : undefined, closing,
+            ...(r.kind === "wizard" ? { receiver: displayName(r.to) } : {}) }), peer: {
             from: { kind: "peer", from: waiting, ...(row.asker ? { asker: row.asker } : {}) },
             // 不是一件新活 (没有件号、不收新回执): 它只是把那一笔重新指给 owner。
             job: "", kind: "task",
@@ -1194,11 +1250,14 @@ const main = async (): Promise<void> => {
     };
     /** 开一行 (owner = 领活的人)。子行挂在自己服务的那一笔下, 挂不上就是新根 —— 建行这一处
      *  只认这两条, 别的判定 (§3.4 transfer 前置、409) 都在入口先做完。 */
-    const openRow = (p: { event?: EventId; owner: string; receiver: Receiver; deadlineAt: number; job?: string; asker?: Asker; after?: readonly EventId[] }): EventId => {
+    const openRow = (p: { event?: EventId; owner: string; receiver: Receiver; deadlineAt: number; job?: string; batch?: string; asker?: Asker; after?: readonly EventId[] }): EventId => {
+      const pair = router.task(p.owner, p.receiver);
+      if (pair) return pair.event;
       const event = p.event ?? newRootEvent();
       router.commit(ops.open({
         event, owner: p.owner, receiver: p.receiver, deadlineAt: p.deadlineAt,
         ...(p.job ? { job: p.job } : {}), ...(p.asker ? { asker: p.asker } : {}),
+        ...(p.batch ? { batch: p.batch } : {}),
         ...(p.after?.length ? { after: [...p.after] } : {}),
       }));
       return event;
@@ -1208,15 +1267,22 @@ const main = async (): Promise<void> => {
      *  返回这一轮服务的 event (不开行 = "") —— 注入事件的 id 就是从它算出来的。 */
     const openDispatchRow = (p: { self: string; target: string; op: ReturnOp; deadlineAt: number; job?: string; asker?: Asker; after?: readonly EventId[]; serves?: EventId }): EventId => {
       if (p.op === "none") return "";
+      if (p.op !== "transfer") {
+        const pair = router.task(p.target, { kind: "wizard", to: p.self });
+        if (pair) return pair.event;
+      }
       // 计划节点 / 停放放行: 那一笔在 plan 发起 / 停放那一刻就定了; 其余看本轮服务谁。
       const f = p.serves ?? servesOfTurn(p.self);
       if (p.op === "transfer") return f ?? "";
       const parent = p.op === "self" ? f : undefined;
+      const activeBatch = router.awaitedBy(p.self).find((r) => r.batch && ["held", "open", "need", "error", "answered"].includes(r.status))?.batch;
+      const batch = activeBatch ?? `batch:${newRootEvent()}`;
       return openRow({
         ...(parent ? { event: `${parent}.${(router.get(parent)?.seq ?? 0) + 1}` } : {}),
         owner: p.target,
         receiver: parent ? { kind: "wizard", to: p.self, event: parent } : { kind: "wizard", to: p.self },
         deadlineAt: p.deadlineAt,
+        batch,
         ...(p.job ? { job: p.job } : {}), ...(p.asker ? { asker: p.asker } : {}), ...(p.after?.length ? { after: p.after } : {}),
       });
     };
@@ -1227,6 +1293,7 @@ const main = async (): Promise<void> => {
       const row = input.serves ? router.get(input.serves) : undefined;
       if (!row || row.owner !== input.speaker || row.status === "answered" || row.status === "handed")
         throw new Error("transfer ownership changed before acceptance");
+      const priorTarget = router.task(input.target, row.receiver);
       try {
         const accepted = events.accept(input);
         m.transferReply(events.get(input.id)!);
@@ -1235,7 +1302,9 @@ const main = async (): Promise<void> => {
         const accepted = events.get(input.id);
         if (!accepted || accepted.exposure === "none") {
           events.cancel((e) => e.id === input.id, "transfer acceptance failed before exposure");
-          if (router.get(row.event)?.owner === input.target) router.commit(ops.move({ event: row.event, owner: input.speaker }));
+          if (priorTarget && router.table()[row.event]?.mergedInto === priorTarget.event) {
+            router.commit({ op: "row", ...row });
+          } else if (router.get(row.event)?.owner === input.target) router.commit(ops.move({ event: row.event, owner: input.speaker }));
         }
         throw error;
       }
@@ -1312,14 +1381,14 @@ const main = async (): Promise<void> => {
       // 失败级联的 canceled、boot 的重投), 所以放这里而不是 commitRoute。收给群的根行不进账。
       const noticeOnly = (out.status === "need" || out.status === "error") && !!row.outcome;
       if (row.receiver.kind === "wizard" && !noticeOnly) {
-        ledger.outcome(row.receiver.to, event, out.status, parseClosing(out.body).text || out.body);
-        // 带 workflow 追踪的那件活: 执行态/正文/摘要跟着定论走 (计划节点据此推进) ——
-        // 这一份原来只挂在旧回执 watcher 的 onOutcome 上, T10b 随它一起在这里重建。
-        workflow.outcome(row.receiver.to, event, out.status, out.body);
+        for (const original of router.aliases(event)) {
+          if (original.receiver.kind !== "wizard") continue;
+          ledger.outcome(original.receiver.to, original.event, out.status, parseClosing(out.body).text || out.body);
+          workflow.outcome(original.receiver.to, original.event, out.status, out.body);
+          if (original.job && isTerminal(out.status))
+            jobs.settle(original.job, row.owner, out.status, parseClosing(out.body).artifacts, { turn: original.event });
+        }
         advancePlans();
-        // 追述更新最新结果, 首次落定计数由工单保持。
-        if (row.job && isTerminal(out.status))
-          jobs.settle(row.job, row.owner, out.status, parseClosing(out.body).artifacts, { turn: event });
       }
       postRoute(row, out, router.escalate(event, (k) => !!wizards.get(k)), `rcpt:${event}:${out.rev}`);
     };
@@ -1377,10 +1446,10 @@ const main = async (): Promise<void> => {
         id: inbox, identity: JSON.stringify([to, event, out.status, out.rev]),
         target: to, speaker: row.owner, channel, serves,
         ...(row.asker ? { asker: row.asker } : {}),
-        priority: "normal", deadline: Date.now() + 12 * 3600_000,
+        priority: "normal", deadline: NO_DEADLINE,
         // 行首 RESULT:/NEED: 只是判定记号, 语义已由信封的 status 携带 —— 投递时剥掉
         // (ARTIFACT 行保留: 路径对收方 wizard 有实际用途)。
-        payload: { text: clipMiddle(stripClosingMark(out.body)), receipts: [{ event, version: out.rev, status: out.status,
+        payload: { text: stripClosingMark(out.body), receipts: [{ event, version: out.rev, status: out.status, ...(row.batch ? { batch: row.batch } : {}),
           receiver, body: out.body, speaker: row.owner, envelope,
           source: row.reports?.[out.rev]?.source
             ?? (row.outcome?.rev === out.rev ? row.outcome.report?.source : row.notice?.rev === out.rev ? row.notice.report?.source : undefined) }], peer: {
@@ -1442,8 +1511,47 @@ const main = async (): Promise<void> => {
      *  answer 就只能靠 sweeper / 级联取消 / boot 重放合成, 谁答完都不会有回执。 */
     const cutSettles = (e: MessageEvent, verdict: FinalVerdict): boolean => {
       const row = e.serves ? router.get(e.serves) : undefined;
+      if (!verdict.error && addressedResults(verdict.text).length) return true;
       const closing = parseClosing(verdict.text).kind;
       return !verdict.error && settlesCut(row?.receiver.kind, closing === "none" ? undefined : closing);
+    };
+    const resultTask = (e: MessageEvent, receiver: string): Route | undefined => {
+      const served = e.serves ? router.get(e.serves) : undefined;
+      if (served?.owner === e.target && served.receiver.kind === "wizard" && served.receiver.to === receiver) return served;
+      const row = router.task(e.target, { kind: "wizard", to: receiver });
+      if (!row || row.at <= e.at) return row;
+      // A later task is visible to this old input only with same-turn consumption
+      // evidence. Merely having accepted a new dispatch cannot retarget an old final.
+      return events.taskInputs(row.event).some((input) => input.target === e.target && input.exposure === "consumed"
+        && !!e.turn && input.turn === e.turn && input.sessionId === e.sessionId) ? row : undefined;
+    };
+    bindResults = (e, body) => {
+      const sections = addressedResults(body);
+      if (sections.length) return Object.fromEntries(sections.map((section, i) => {
+        const peer = resolvePeer(e.target, section.name);
+        const row = peer.ok ? resultTask(e, peer.target) : undefined;
+        return [`${i}:${section.name}`, { receiver: peer.ok ? peer.target : section.name, event: row?.event ?? null,
+          inputs: row ? events.consumedTaskInputs(row.event, e) : [] }];
+      }));
+      const row = e.serves ? router.get(e.serves) : undefined;
+      return parseClosing(body).kind === "result" && row?.owner === e.target && row.receiver.kind === "wizard"
+        ? { [`legacy:${e.speaker}`]: { receiver: row.receiver.to, event: row.event, inputs: events.consumedTaskInputs(row.event, e) } } : {};
+    };
+    const resultCorrection = (e: MessageEvent, section: { name: string }, index: number, reason: string): void => {
+      const row = e.serves ? router.get(e.serves) : undefined;
+      if (!row || row.owner !== e.target) return;
+      const id = `feedback:${e.id}:${index}:${section.name}`;
+      const text = `你刚才的 RESULT 未交付：${reason}。请检查你当前欠着的任务，只对匹配的接收者提交 \`@.name RESULT: <结论>\`；需要反问时用 tell_peer({kind:"ask"})。`;
+      try {
+        events.accept({ id, identity: JSON.stringify([e.id, index, section.name, reason]), target: e.target,
+          speaker: e.speaker, channel: e.channel, serves: row.event, ...(row.asker ? { asker: row.asker } : {}),
+          priority: "normal", deadline: NO_DEADLINE,
+          payload: { text, peer: { from: { kind: "peer", from: e.speaker, event: row.event },
+            envelope: renderPeerEnvelope(displayName(e.speaker)), job: "", kind: "task" } },
+        });
+      } catch (error) {
+        log.warn({ event: e.id, target: e.target, receiver: section.name, err: errText(error) }, "addressed RESULT: correction feedback could not be queued");
+      }
     };
     deliverFinal = (e, verdict) => {
       // 自我交接切断的那一轮: 它的终句若就是那一笔的交代 (见 settlesCut), 摘掉切断标记照常落定 ——
@@ -1454,7 +1562,7 @@ const main = async (): Promise<void> => {
         events.restoreHandoffFinal(e.id);
         log.info({ event: e.id, target: e.target, serves: e.serves }, "handoff: 切断那一轮的终句即交代, 照常落定");
       }
-      if (handoffFinalSuppressed(e) || !ownsReplyEvent(e)) return;
+      if (handoffFinalSuppressed(e) || (!ownsReplyEvent(e) && !addressedResults(verdict.text).length)) return;
       // 同一轮的终句会递进来两次: result() 当场递一次, 泵见 complete 未 finalized 再补判一次
       // (message-events)。被打回那一轮的重放不是补交 —— 丢掉; 否则 bounced 已记着这一笔,
       // 第二次就把被打回的原文照收成 done (打回的续问还没注入, 定论先落了)。
@@ -1471,6 +1579,77 @@ const main = async (): Promise<void> => {
     };
     /** 一轮的终句落到它服务的那一行上 (定论 / 中途态), 验收不合规格就打回续问。 */
     const settleFinal = (e: MessageEvent, verdict: FinalVerdict): void => {
+      const sections = verdict.error ? [] : addressedResults(verdict.text);
+      if (sections.length) {
+        for (const [index, section] of sections.entries()) {
+          const sectionKey = `${index}:${section.name}`;
+          const binding = events.get(e.id)?.resultRoutes?.[sectionKey];
+          const peer = binding ? undefined : resolvePeer(e.target, section.name);
+          const receiverTarget = binding?.receiver ?? (peer?.ok ? peer.target : undefined);
+          if (!receiverTarget) {
+            log.warn({ target: e.target, receiver: section.name, event: e.id }, "addressed RESULT: unknown receiver");
+            resultCorrection(e, section, index, `收件人 ${section.name} 不存在`);
+            continue;
+          }
+          const selected = binding ? binding.event ? router.get(binding.event) : undefined
+            : resultTask(e, receiverTarget);
+          const row = selected && (!e.result || selected.at <= e.result.at) ? selected : undefined;
+          const inputs = binding?.inputs ?? (row ? events.consumedTaskInputs(row.event, e) : []);
+          if (!binding?.inputs) events.bindResultRoute(e.id, sectionKey, receiverTarget, row?.event ?? null, inputs);
+          if (!row) {
+            log.warn({ target: e.target, receiver: section.name, event: e.id }, "addressed RESULT: no matching receiver task");
+            resultCorrection(e, section, index, `${section.name} 不是这笔任务的收件人，或你当前没有欠它的未完成任务`);
+            continue;
+          }
+          if (!section.body || !events.coversTaskInputs(row.event, e, inputs)) {
+            resultCorrection(e, section, index, !section.body ? "RESULT 正文为空" : "同一任务还有本次结果未覆盖的补充；读完补充后重新提交结果");
+            continue;
+          }
+          const text = `RESULT: ${section.body}`;
+          const source = { input: e.id, ...(e.turn ? { turn: e.turn } : {}),
+            facts: [JSON.stringify([e.id, row.event, sectionKey, row.receiver])] };
+          const plans = router.onFinal(e.target, row.event, { text, source, result: true });
+          const answer = plans.find((op): op is Extract<Op, { op: "answer" }> => op.op === "answer" && op.outcome.status === "done");
+          const why = answer && row ? acceptanceOf(row, answer.outcome.body, true) : undefined;
+          if (why) { rebound(row, why, e.id); continue; }
+          plans.forEach(commitRoute);
+        }
+        return;
+      }
+      // Old clients may still send only RESULT. Keep that form when the current
+      // receiver batch has exactly one unambiguous outstanding item.
+      const servedRow = e.serves ? router.get(e.serves) : undefined;
+      if (parseClosing(verdict.text).kind === "result" && servedRow?.owner === e.target
+          && servedRow.receiver.kind === "wizard" && servedRow.receiver.to === e.speaker) {
+        const section = `legacy:${e.speaker}`;
+        const binding = events.get(e.id)?.resultRoutes?.[section];
+        const row = binding ? binding.event ? router.get(binding.event) : undefined : servedRow;
+        if (row) {
+          const inputs = binding?.inputs ?? events.consumedTaskInputs(row.event, e);
+          if (!binding?.inputs) events.bindResultRoute(e.id, section, e.speaker, row.event, inputs);
+          if (!events.coversTaskInputs(row.event, e, inputs)) {
+            resultCorrection(e, { name: e.speaker }, 0, "同一任务还有本次结果未覆盖的补充；读完补充后重新提交结果");
+            return;
+          }
+          const text = verdict.text;
+          const plans = router.onFinal(e.target, row.event, { text, source: reportSource(e) });
+          const answer = plans.find((op): op is Extract<Op, { op: "answer" }> => op.op === "answer" && op.outcome.status === "done");
+          const why = answer ? acceptanceOf(row, answer.outcome.body) : undefined;
+          if (why) { rebound(row, why, e.id); return; }
+          plans.forEach(commitRoute);
+        } else {
+          resultCorrection(e, { name: e.speaker }, 0, `没有匹配 ${e.speaker} 的未完成欠账`);
+        }
+        return;
+      }
+      if (!verdict.error && parseClosing(verdict.text).kind === "result" && e.serves) {
+        const task = router.get(e.serves)?.event ?? e.serves;
+        const key = `legacy:${e.speaker}`;
+        const binding = events.get(e.id)?.resultRoutes?.[key];
+        const inputs = binding?.inputs ?? events.consumedTaskInputs(task, e);
+        if (!binding?.inputs) events.bindResultRoute(e.id, key, e.speaker, task, inputs);
+        if (!events.coversTaskInputs(task, e, inputs)) return;
+      }
       const plans = router.onFinal(e.target, e.serves, { ...verdict, source: reportSource(e) });
       const answer = plans.flatMap((op) => (op.op === "answer" && op.outcome.status === "done" ? [op] : []))[0];
       const row = answer ? router.get(answer.event) : undefined;
@@ -1564,8 +1743,7 @@ const main = async (): Promise<void> => {
     const controlValid = (self: string, snapshot: ReturnType<typeof controlSnapshot>): boolean =>
       openingOfSelf(self)?.ms === snapshot.opening;
     /** 名册 / peek / list_jobs / rolepage 的「在等 / 欠着」: 从路由表现算 (§9.5 读侧), 只借 pane
-     *  的一次探针判「停在审批卡上」。收给群的那种根行不进这一份 —— 它与任何 wizard 之间没有
-     *  「谁欠谁」的边 (旧的 receipts.states() 里也从来没有它们); 定了论的 (answered / handed)
+     *  的一次探针判「停在审批卡上」。chat 根任务也在这份列表里, 以便 idle 巡检能恢复人类请求；定了论的 (answered / handed)
      *  同样不进: 这一份问的是「还在飞 / 还欠着」。`turn` 那一栏放的是 event id (§9.1),
      *  下游只当字符串展示。 */
     const routeInFlight = (): InFlight[] => {
@@ -1577,11 +1755,13 @@ const main = async (): Promise<void> => {
         return probed.get(t)!;
       };
       return router.rows().flatMap((r) =>
-        r.receiver.kind !== "wizard" || r.status === "handed" || r.status === "answered" ? []
+        r.status === "handed" || r.status === "answered" ? []
           : [{
-              from: r.receiver.to, to: r.owner, turn: r.event, job: r.job ?? "",
+              from: r.receiver.kind === "wizard" ? r.receiver.to : baseOfKey(r.receiver.channel),
+              to: r.owner, turn: r.event, job: r.job ?? "",
               state: turnState({ status: r.status, waiting: router.waiting(r.event).length > 0 },
                 { parked: r.status === "open" && parked(r.owner) }),
+              fromBlocked: r.receiver.kind === "wizard" && parked(r.receiver.to),
               ageMs: Date.now() - r.at,
             } as InFlight]);
     };
@@ -1609,25 +1789,6 @@ const main = async (): Promise<void> => {
       workflow.all().filter((a) => a.tell && ["running", "needs-input", "errored"].includes(a.execution))
         .forEach((a) => { try { recoverWorkflow(a); } catch (e) { log.error({ err: (e as Error).message, attemptId: a.id }, "workflow recovery accounting failed; watcher not restored"); } });
     });
-    // 闲置追问 (见 idle-nudge.ts): 对方持续闲着又没交回结论 → 代发话方在同一笔上问一句进展,
-    // 它的答复照常作为那一笔的定论回来 (续问不新开行)。
-    void m.restored.then(() => startIdleNudge({
-      inflight: () => routeInFlight(),
-      idleNow: m.idleNow,
-      handingOff,
-      jobOpen: (id) => jobs.get(id)?.status === "open",
-      policy: () => ({ afterMs: cfg.wrc.mirror.idleNudge.afterMin * 60_000, max: cfg.wrc.mirror.idleNudge.max }),
-      ask: async ({ from, to, turn, text }) => {
-        if (workflow.byTurn(from, turn) || !planStore.allowExternal(to, wizards.get(to)?.name)) return false;
-        const row = router.get(turn);
-        if (!row) return false;
-        return acceptContinuation({ from, to, channel: "", event: turn, deadlineAt: row.deadlineAt,
-          ...(row.asker ? { asker: row.asker } : {}), ...(row.job ? { job: row.job } : {}) }, text);
-      },
-      nameOf: displayName,
-      store: loadJsonMap<{ asks: number }>(join(cfg.daemon.stateDir, "idle-nudges.json")),
-      log: log.child({ mod: "idle-nudge" }),
-    }));
     /** 入参里的地址: 新字段 `name`, 老 MCP 进程 (正在跑的 wizard) 仍在传 `tag`。 */
     const addrOf = (b: { name?: unknown; tag?: unknown }): string => String(b.name ?? b.tag ?? "");
 
@@ -1756,7 +1917,7 @@ const main = async (): Promise<void> => {
       const belowTop = !!serves && !router.speaksToHuman(serves);
       const muted = dests.filter((d) => chatPolicyOf(cfg, d).topOnly && !(!tagOfKey(self) && baseOfKey(self) === d));
       return muted.length && belowTop
-        ? { ok: false, topOnly: true, reason: `${muted.map((d) => chatNameOf(cfg, d) || d).join(", ")} 开着顶层模式: 你这一轮是同伴派来的活, 不对人说话 —— 要说的写进终句 (\`RESULT:\` / \`NEED:\`), 由派你的那个代你向人交代` }
+        ? { ok: false, topOnly: true, reason: `${muted.map((d) => chatNameOf(cfg, d) || d).join(", ")} 开着顶层模式: 你这一轮是同伴派来的活, 不对人说话 —— 结果用 \`@.name RESULT:\`, 反问用 tell_peer({kind:"ask"}), 由派你的那个代你向人交代` }
         : undefined;
     };
     http.register("POST /notify", async (req, res) => {
@@ -1792,7 +1953,7 @@ const main = async (): Promise<void> => {
           return;
         }
         if (closing === "none" && (!row || !["open", "need", "error"].includes(row.status))) {
-          json(res, 409, { ok: false, reason: "这笔任务已收口或无在途任务，回执确认不公开；新结果用 RESULT:，新问题用 NEED:。" });
+          json(res, 409, { ok: false, reason: "这笔任务已收口或无在途任务，回执确认不公开；新结果用 @.name RESULT:，新问题用 tell_peer({kind:\"ask\"})。" });
           return;
         }
       }
@@ -2060,6 +2221,9 @@ const main = async (): Promise<void> => {
       valid: (e) => {
         const p = e.payload.peer!;
         const attempt = p.attemptId ? workflow.byTurn(e.speaker, p.from.event ?? "") : undefined;
+        const row = e.serves ? router.get(e.serves) : undefined;
+        if (p.tell && !p.transferred && row
+            && (row.owner !== e.target || !["held", "open", "need", "error"].includes(row.status))) return false;
         // 单已收但这一笔的行还 open = 收工前就派出去的活, 照投 (见 close_job)。
         return planStore.healthy() && !e.canceled && (!p.from.receipt || planContinuationAllowed(e.target))
           && (!p.transferred || !e.serves || events.latestTransfer(e.serves)?.id === e.id)
@@ -2092,7 +2256,11 @@ const main = async (): Promise<void> => {
         const p = e.payload.peer!;
         // 停放放行 (T3): 挂 `after` 的那一行先 held (前置没落定, 还没投给 owner), 注入成功这一刻
         // release —— 行状态是这一笔要不要投的唯一记号 (§9.5)。
-        if (p.after?.length && e.serves) router.commit(ops.release({ event: e.serves }));
+        if (e.serves) {
+          const row = router.get(e.serves);
+          if (row?.status === "held" && prereqsOf(e.speaker, row.after ?? []).every((r) => r.state === "done"))
+            router.commit(ops.release({ event: row.event }));
+        }
         if (p.attemptId) {
           const a = workflow.byTurn(e.speaker, p.from.event ?? "");
           if (a?.execution === "dispatch-unknown" && !a.canceled && !a.status && e.exposure === "consumed")
@@ -2111,8 +2279,15 @@ const main = async (): Promise<void> => {
         if (p.attemptId) workflow.dispatched(p.attemptId, false);
         if (p.from.receipt) rerouteGone(e);
       },
-      ready: async (e) => prereqsOf(e.speaker, e.payload.peer!.after ?? []).every((r) => r.state === "done")
-        && (e.priority === "now" || await m.idleNow(e.target) || !(await m.paneLive(e.target)) || (e.priority === "urgent" && !(await othersTurn(e.target, e.speaker)))),
+      ready: async (e) => {
+        const facts = receiptFacts(e);
+        const batches = [...new Set(facts.filter((f) => f.status === "done").map((f) => f.batch).filter((x): x is string => !!x))];
+        if (facts.length && facts.every((f) => f.status === "done") && batches.some((batch) => !router.batchComplete(batch))) return false;
+        const row = e.serves ? router.get(e.serves) : undefined;
+        if (row?.status === "held" && !prereqsOf(e.speaker, row.after ?? []).every((r) => r.state === "done")) return false;
+        return !m.parkedNow(e.target) && prereqsOf(e.speaker, e.payload.peer!.after ?? []).every((r) => r.state === "done")
+          && (e.priority === "now" || await m.idleNow(e.target) || !(await m.paneLive(e.target)) || (e.priority === "urgent" && !(await othersTurn(e.target, e.speaker))));
+      },
       inject: async (e, boundary) => {
         const p = e.payload.peer!;
         if (e.priority === "urgent" && !(await m.idleNow(e.target))) {
@@ -2125,7 +2300,7 @@ const main = async (): Promise<void> => {
         }
         if (p.attemptId && p.tell) workflow.intent(p.attemptId, p.tell);
         const raw = await m.injectText(e.target, e.payload.text, undefined, {
-          from: p.from, channel: e.channel, requireIdle: e.priority === "normal", noRespawn: e.id.startsWith("route:") && e.id.includes(":resume:"),
+          from: p.from, channel: e.channel, requireIdle: e.priority === "normal",
           envelope: withMsg(p.envelope + (p.after?.length ? afterNote(p.after, Object.fromEntries(p.after.flatMap((t) => { const x = seenOf(t); return x ? [[t, x] as const] : []; })), e.speaker) : ""), e.id),
           guard: (phase, identity) => peerEvents!.valid(e) && prereqsOf(e.speaker, p.after ?? []).every((r) => r.state === "done") && (!phase || ((!p.attemptId || workflow.boundary(p.attemptId)) && boundary(phase, identity))),
           eventId: e.id,
@@ -2151,45 +2326,97 @@ const main = async (): Promise<void> => {
     m.setEventFinalGate((e) => {
       if (handoffFinalSuppressed(e)) return false;
       if (e.quiet || e.canceled || e.interjected || !ownsReplyEvent(e)) return false;
-      return router.finalReleased(e.target, e.serves, (events.get(e.id) ?? e).result?.body ?? "", reportSource(events.get(e.id) ?? e));
+      const body = (events.get(e.id) ?? e).result?.body ?? "";
+      if (addressedResults(body).length) return false;
+      return router.finalReleased(e.target, e.serves, body, reportSource(events.get(e.id) ?? e));
     });
     // boot 的路由表侧恢复 (T8): held 重查前置、answered 重投一次; 二者幂等, 与 events.resume
     // 重放的注入/回执撞上无害。
     void m.restored.then(() => { events.resume(); settleHeld(); replayAnswered(); });
-    // ── 新路由表 (T6): 失败合成 (§4.2) ──────────────────────────────────────
-    // timeout / silent / dead 是 daemon 合成的定论, 与 done 走同一条投递通路 —— 模型只会
-    // 没声, 它不报失败。与 receipts 的 watcher 并行: 那边照旧算账 (T4 起不投递), 定论只由
-    // 这里投。held 的前置失败也在这里收口。
-    const SWEEP_MS = 15_000;
+    // 单飞巡检收口 held 前置失败，并恢复丢 pane 的 open route。
+    let sweeping = false;
+    const paneRecovery = loadJsonMap<{ generation: number; missingSince?: number; live: boolean; pane: string; sessionId: string; turn: number }>(
+      join(cfg.daemon.stateDir, "route-recovery.json"), undefined, { strict: true },
+    );
     const sweepOnce = async (): Promise<number> => {
-      if (!events.running()) return 0;
-      // 「停下没答几次」= 服务这一笔、已经 finished 却没有 result 的注入事件数 (§9.4): 收件箱
-      // 自己就是计数器, 不另落一份。一次 tick 扫一遍收件箱就够 (这一轮不会再产新事件)。
-      const fruitless = new Map<EventId, number>();
-      events.status().events.forEach((e) => {
-        if (!e.serves || e.result || e.canceled || e.payload.peer?.from.receipt
-            || !(e.execution === "complete" || e.execution === "uncertain" && e.exposure === "consumed" && e.turnClosedAt)) return;
-        fruitless.set(e.serves, (fruitless.get(e.serves) ?? 0) + 1);
-      });
-      // 前置刚被这一轮判失败时, 挂它的 held 行要下一轮才看得到 —— 多跑几轮直到不再出新 op。
+      if (!events.running() || sweeping) return 0;
+      sweeping = true;
+      try {
       let n = 0;
       for (let round = 0; round < 4; round++) {
-        const plans = await router.sweep({
-          paneLive: m.paneLive, lastWords: m.lastReply, nameOf: displayName, handingOff,
-          fruitless: (event) => fruitless.get(event) ?? 0,
-        });
+        const plans = router.sweepHeld({ now: Date.now(), nameOf: displayName, lastWords: m.lastReply });
         if (!plans.length) break;
         plans.forEach(commitRoute);
         n += plans.length;
       }
+      const now = Date.now();
+      const open = router.rows().filter((r) => ["open", "need", "error"].includes(r.status));
+      const openOwners = new Set(open.map((r) => r.owner));
+      for (const owner of openOwners) {
+        if (handingOff(owner) || m.parkedNow(owner)) continue;
+        const info = m.sessionInfo(owner);
+        const pane = info?.tmuxPane ?? "";
+        const sessionId = info?.sessionId ?? "";
+        const transcript = info?.jsonlPath;
+        const turn = transcript ? openingTurn(expandHome(transcript))?.ms ?? 0 : 0;
+        const state = await m.paneState(owner);
+        if (state === "unknown") continue;
+        const live = state === "live";
+        const prior = paneRecovery.get(owner);
+        if (live) {
+          if (!prior?.live || prior.pane !== pane || prior.sessionId !== sessionId || prior.turn !== turn)
+            paneRecovery.set(owner, { generation: prior?.generation ?? 0, live: true, pane, sessionId, turn });
+          continue;
+        }
+        const same = prior?.pane === pane && prior.sessionId === sessionId && prior.turn === turn;
+        const generation = prior ? (prior.live || !same ? prior.generation + 1 : prior.generation) : 1;
+        const missingSince = prior && !prior.live && same ? prior.missingSince ?? now : now;
+        if (!prior || prior.live || !same || prior.missingSince !== missingSince)
+          paneRecovery.set(owner, { generation, missingSince, live: false, pane, sessionId, turn });
+        if (now - missingSince < 5_000 || !handoffAllowed(owner)) continue;
+        const evidence = `${pane || "no-pane"}:${sessionId || "no-session"}:t${turn}:g${generation}`;
+        events.releaseMissingPane(owner, sessionId || undefined, transcript, evidence);
+        const generationKey = createHash("sha256").update(evidence).digest("hex").slice(0, 16);
+        for (const row of open.filter((x) => x.owner === owner)) {
+          const recoveryId = `route:${row.event}:resume:auto:${generationKey}`;
+          if (events.known(recoveryId)) continue;
+          void injectResume(owner, row.event, missingSince, generationKey).then((r) => {
+            if (!r.ok) log.warn({ owner, event: row.event, reason: r.reason }, "route recovery: resume injection failed");
+          }).catch((error) => log.warn({ owner, event: row.event, err: errText(error) }, "route recovery: resume injection failed"));
+        }
+      }
       return n;
+      } finally { sweeping = false; }
     };
     void m.restored.then(() => {
-      const t = setInterval(() => { void sweepOnce().catch((e) => log.warn({ err: errText(e) }, "failure sweep failed")); }, SWEEP_MS);
-      t.unref?.();
-      stopSweep = () => clearInterval(t);
-      // 起手先扫一遍: reload 前就已经超时的那些不该再等一个周期。
-      void sweepOnce().catch(() => 0);
+      stopSweep = startIdleNudge({
+        inflight: routeInFlight, idleNow: m.idleNow, handingOff,
+        jobOpen: (id) => jobs.get(id)?.status === "open",
+        policy: () => ({ afterMs: cfg.wrc.mirror.idleNudge.afterMin * 60_000, max: cfg.wrc.mirror.idleNudge.max }),
+        ask: async ({ from, to, turn, text }) => {
+          if (workflow.byTurn(from, turn) || !planStore.allowExternal(to, wizards.get(to)?.name)) return false;
+          const row = router.get(turn);
+          if (!row || !["open", "need", "error"].includes(row.status)) return false;
+          if (events.taskInputs(row.event).some((e) => e.target === to && !e.canceled
+              && ["queued", "dispatching"].includes(e.execution))) return false;
+          if (row.owner !== to) {
+            const parent = row.receiver.kind === "wizard" && row.receiver.event ? router.get(row.receiver.event) : undefined;
+            const serves = parent?.owner === to ? parent.event : undefined;
+            events.accept({ id: `idle-question:${row.event}:${randomUUID()}`, target: to, speaker: from,
+              channel: parent?.receiver.kind === "chat" ? parent.receiver.channel : "", serves,
+              priority: "normal", deadline: NO_DEADLINE, payload: { text, peer: {
+                from: { kind: "peer", from }, envelope: renderPeerEnvelope(displayName(from), undefined, undefined, { act: "fyi", quiet: true }),
+                job: "", kind: "fyi",
+              } } });
+            return true;
+          }
+          return (await injectResume(to, row.event, Date.now())).ok;
+        },
+        nameOf: displayName,
+        store: loadJsonMap<{ asks: number }>(join(cfg.daemon.stateDir, "idle-nudges.json")),
+        log: log.child({ mod: "idle-nudge" }),
+        sweep: async () => { await sweepOnce(); },
+      });
     });
     /** tell_peer 的本体: 以 `self` 的名义说一句 —— HTTP 路由与 dispatch 共用。`extra` = 挂在信封后面的
      *  一段 (只进对方输入框, 不进 `text`: 公开时 text 会成群气泡)。 */
@@ -2281,7 +2508,7 @@ const main = async (): Promise<void> => {
       const isOpen = (id?: string): string => (id && jobs.get(id)?.status === "open" ? id : "");
       const askedJob = ((body as { job?: string }).job ?? "").trim();
       const leadJob = jobs.all().find((j) => j.kind === "req" && j.status === "open" && j.owner === self && j.members.some((x) => x.target === target && x.role === "lead"))?.id ?? "";
-      const jobId = kind === "fyi" ? "" : askedJob || isOpen(reTarget?.job) || (open && router.waiting(open.event).length > 0 ? "" : isOpen(open?.job)) || (reUnknown ? isOpen(reRow?.job) || leadJob : "");
+      const jobId = kind === "fyi" ? "" : askedJob || isOpen(reTarget?.job) || isOpen(open?.job) || (reUnknown ? isOpen(reRow?.job) || leadJob : "");
       /** 答它的反问不算新的一件 (不花预算、不数成员)。 */
       const freed = open?.status === "need";
       const actorStillValid = (): boolean => {
@@ -2329,7 +2556,9 @@ const main = async (): Promise<void> => {
         if (gone.length) { return { status: 400, body: { ok: false, reason: `after 里的 ${gone.join(" ")} 在你派出去的件里查不到 —— 只能依赖你自己开出来的那一笔 (event id; 过期 / 不是你派的都查不到)` } }; }
         const failed = afters.flatMap((t, i) => { const p = prereqs[i]!; return p.state === "failed" ? [`${t} (${displayName(p.seen.to)}) 以 ${p.seen.status} 收场`] : []; });
         if (failed.length) { return { status: 409, body: { ok: false, reason: `前置 ${failed.join("; ")} —— 这件不投; 前置失败了就先处理它, 再重发` } }; }
-        if (open && !afters.includes(open.event)) { return { status: 409, body: { ok: false, reason: `你已有一件活 (${open.event}) 在 ${displayName(target)} 手上没落定, 同一对只有一个槽 —— 等它交差, 或把它也列进 after` } }; }
+        // Same owner/receiver is one durable task: later dispatches supplement its inbox.
+        if (open && !afters.includes(open.event) && !(plan.op !== "transfer" && plan.op !== "none" && open.owner === target && open.receiver.kind === "wizard" && open.receiver.to === self))
+          return { status: 409, body: { ok: false, reason: `你已有一件活 (${open.event}) 在 ${displayName(target)} 手上没落定, 同一对只有一个槽 —— 等它交差, 或把它也列进 after` } };
       }
       const transferNo = plan.op === "transfer" ? transferRefusal(self, plan.serves, target, { job: jobId, re: !!reTarget, node: !!node, after: afters.length > 0, frozen: !!planned }) : undefined;
       if (transferNo) return { status: 409, body: { ok: false, reason: transferNo } };
@@ -2390,23 +2619,42 @@ const main = async (): Promise<void> => {
         const refusal = actor.reuseCheck(target) || (!idle ? "candidate became busy" : "");
         if (refusal) return { status: 409, body: { ok: false, gated: "reuse", reason: refusal } };
       }
+      // 「忙」= 这一轮还没结束, 或停在审批上等人 —— 都不是能接新活的时候。
+      const wasBusy = !(await m.idleNow(target));
+      if (actor?.reuseCheck) {
+        const refusal = actor.reuseCheck(target) || (wasBusy ? "candidate became busy" : "");
+        if (refusal) { return { status: 409, body: { ok: false, gated: "reuse", reason: refusal } }; }
+      }
+      // urgent 只打断你自己派的那一轮 (或它自己的回执轮): 手上若是别的 wizard / 人 / 定时任务的活,
+      // 打断就误伤了那件 —— 降成 normal, 等它这一轮做完再投。
+      const others = asked === "urgent" && wasBusy ? await othersTurn(target, self) : undefined;
+      // Transfers need a separate input turn, including when the receiver becomes busy.
+      const policy = others || plan.op === "transfer" ? "normal" : asked;
+      if (!actorStillValid()) return { status: 409, body: { ok: false, reason: "caller changed before acceptance" } };
+      if (reTarget && (router.get(reTarget.event)?.owner !== target
+          || !["open", "need", "error"].includes(router.get(reTarget.event)?.status ?? "")))
+        return { status: 409, body: { ok: false, reason: "task settled or transferred while preparing continuation; retry against current task" } };
       // All caller-dependent facts are frozen here; workers never reread the caller's current turn.
       const at = Date.now();
       const deadlineAt = deadlineOf(at, (body as { deadline?: number }).deadline);
       const wantReceipt = plan.op !== "none";
       // 路由行 (§3.1): 续问不新开行 (沿用那一笔); 其余按 self / detach / transfer 开行或改 owner;
       // `after` 是欠账不是子行 —— 挂 after 的行先 held, 注入成功 (committed) 时才 release。
-      const newRow = !reTarget;
+      const mergeRow = !reTarget && plan.op !== "transfer" && plan.op !== "none"
+        ? router.awaitedBy(self).find((x) => x.owner === target && x.receiver.kind === "wizard" && x.receiver.to === self && ["open", "need", "error", "held"].includes(x.status))
+        : undefined;
+      const dispatchLegs = reTarget ? legs : mergeRow ? legsOf(mergeRow.event) + 1 : legs;
+      const newRow = !reTarget && !mergeRow;
       const serves = reTarget
         ? reTarget.event
-        : openDispatchRow({ self, target, op: plan.op, deadlineAt, job: jobId, asker,
+        : mergeRow?.event ?? openDispatchRow({ self, target, op: plan.op, deadlineAt, job: jobId, asker,
             ...(afters.length ? { after: afters } : {}), ...(plan.serves ? { serves: plan.serves } : {}) });
       /** 建完行才发现不该派 (计划许可 / 预算在等待期间变了): 把刚开的那一行收掉 —— 不然它一直
        *  挂在 owedBy 上, 名册里也永远「欠着」一件没人干的活。 */
       const dropRow = (): void => { if (newRow && serves && plan.op !== "transfer") router.commit(ops.gc({ event: serves })); };
       // 注入事件的 id 就是对那一笔的引用 (§9.3): 派活 = `route:<event>`, 续问 = `route:<event>:r<legs>`;
       // 不开行 (none) 时没有行可指, 退回一句一号的合成 id。
-      const eventId = serves ? plan.op === "transfer" ? `route:${serves}:transfer:${at}:${target}` : `route:${serves}${legs > 1 ? `:r${legs}` : ""}` : `p:${self}:${target}:${at}:${legs}`;
+      const eventId = serves ? plan.op === "transfer" ? `route:${serves}:transfer:${randomUUID()}` : `route:${serves}:input:${randomUUID()}` : `p:${self}:${target}:${randomUUID()}`;
       let attemptId: string | undefined;
       const beginNode = (queued: boolean): string | undefined => {
         if (!planAllowed() || (planned && !planned.alive())) throw new Error("plan dispatch canceled or job reserved");
@@ -2414,33 +2662,22 @@ const main = async (): Promise<void> => {
       };
       try { attemptId = beginNode(true); } catch (e) { dropRow(); return { status: 409, body: { ok: false, reason: (e as Error).message } }; }
       const canceledBeforeDispatch = (): boolean => !planAllowed() || (!!planned && !planned.alive()) || !!workflow.byTurn(self, planned ? planned.turn : serves)?.canceled || (!!jobId && jobs.get(jobId)?.status !== "open");
-      // 「忙」= 这一轮还没结束, 或停在审批上等人 —— 都不是能接新活的时候。
-      const wasBusy = !(await m.idleNow(target));
-      if (actor?.reuseCheck) {
-        const refusal = actor.reuseCheck(target, serves) || (wasBusy ? "candidate became busy" : "");
-        if (refusal) { dropRow(); return { status: 409, body: { ok: false, gated: "reuse", reason: refusal } }; }
-      }
-      // urgent 只打断你自己派的那一轮 (或它自己的回执轮): 手上若是别的 wizard / 人 / 定时任务的活,
-      // 打断就误伤了那件 —— 降成 normal, 等它这一轮做完再投。
-      const others = asked === "urgent" && wasBusy ? await othersTurn(target, self) : undefined;
-      // Transfers need a separate input turn, including when the receiver becomes busy.
-      const policy = others || plan.op === "transfer" ? "normal" : asked;
       if (canceledBeforeDispatch() || !actorStillValid()) { dropRow(); return { status: 409, body: { ok: false, reason: "caller authority or dispatch permit changed before acceptance" } }; }
       if (jobId) {
         const budget = checkJob(jobId, target, freed);
         if (!budget.ok) { dropRow(); return { status: budget.status, body: { ok: false, reason: budget.reason } }; }
       }
-      let tell: Tell = { from: self, to: target, channel, job: jobId, at, event: serves, legs, deadlineAt, asker, dispatchKey: eventId };
+      let tell: Tell = { from: self, to: target, channel, job: jobId, at, event: serves, legs: dispatchLegs, deadlineAt, asker, dispatchKey: eventId };
       if (attemptId) {
-        const leg = workflow.recordLeg(attemptId, { text, tell, continuation: legs > 1, at, kind: "task", role: roleParam((body as { role?: string }).role), free: freed }, false);
+        const leg = workflow.recordLeg(attemptId, { text, tell, continuation: dispatchLegs > 1, at, kind: "task", role: roleParam((body as { role?: string }).role), free: freed }, false);
         tell = { ...tell, dispatchKey: leg.key };
       }
       let accepted;
       try { accepted = acceptPeerDispatch({ id: eventId, target, speaker: self, channel, serves, asker, priority: policy, deadline: deadlineAt,
         payload: { text, peer: {
           from: { kind: "peer", from: self, event: serves, ...(jobId ? { job: jobId } : {}), ...(isPublic ? { public: true } : {}), ...(handedChat ? { transferred: true } : {}), ...(asker ? { asker } : {}) },
-          envelope: envelopeFor(self, channel, { asker, legs, ...(legs > 1 ? { re: true } : {}),
-            ...((body as { deadline?: number }).deadline !== undefined ? { deadline: deadlineAt } : {}), ...(kind !== "task" ? { act: kind } : {}), ...(wantReceipt ? {} : { quiet: true }) }) + extra,
+          envelope: envelopeFor(self, channel, { asker, legs: dispatchLegs, ...(dispatchLegs > 1 ? { re: true } : {}),
+            ...(kind !== "task" ? { act: kind } : {}), ...(wantReceipt ? {} : { quiet: true }) }) + extra,
           ...(wantReceipt ? { tell } : {}), job: jobId, kind, attemptId, after: afters,
           role: roleParam((body as { role?: string }).role), free: freed,
           ...(plan.op === "transfer" ? { transferred: true } : {}),
@@ -2448,8 +2685,9 @@ const main = async (): Promise<void> => {
         } } }, plan.op === "transfer"); } catch (error) { dropRow(); return { status: 409, body: { ok: false, eventId, reason: errText(error) } }; }
       // `re` 把那一笔从 need / error 拉回 open (§3.2 的 need→open / error→open): 行状态是「这份中途态
       // 已经报过了」的去重记号 —— 不拉回去, owner 下一轮交同一个中途态就被静默吞掉 (往返断在这里)。
-      if (reTarget && (reTarget.status === "need" || reTarget.status === "error"))
-        router.commit(ops.mark({ event: reTarget.event, status: "open" }));
+      const continued = reTarget ?? mergeRow;
+      if (continued && (continued.status === "need" || continued.status === "error"))
+        router.commit(ops.mark({ event: continued.event, status: "open" }));
       // `public` 回真实落地的哪一档 (顶层模式 / 工单 / fyi / transfer 都会把入口声明的 public 降级) ——
       // rolepage 的提示行照它判「公开 / 私聊」, 不能凭调用参数推。
       return { status: 200, body: { ...accepted, queued: true, ...(prereqs.some((p) => p.state === "pending") ? { parked: true, after: afters } : {}), event: serves, name: peerAddress(cfg, self, target), priority: policy, wasBusy, public: isPublic,
@@ -3389,7 +3627,7 @@ const main = async (): Promise<void> => {
     http.register("POST /dispatch", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { task?: string; taskFile?: string; params?: Record<string, string>; name?: string; description?: string; tier?: string; to?: string; force?: boolean; lead?: boolean; spawn?: boolean; public?: boolean; deadline?: number; dryRun?: boolean; criteria?: string; return?: string; for?: string };
+      const b = body as { task?: string; taskFile?: string; params?: Record<string, string>; name?: string; description?: string; tier?: string; to?: string; force?: boolean; lead?: boolean; spawn?: boolean; public?: boolean; dryRun?: boolean; criteria?: string; return?: string; for?: string };
       // 模板展开 (§6/§8) 必须发生在一切副作用之前 —— 选人、开根单、bearAs 全在后面:
       // 失败 400, 不留孤儿 wizard、不开路由行。taskFile 单独成立 (task 不必陪跑);
       // 选人/选档/description 用的摘要从展开文本 (或 params.header) 派生, 投递的是全文。
@@ -3462,8 +3700,6 @@ const main = async (): Promise<void> => {
         name, text, public: b.public !== false, force,
         ...(templateRef ? { templateRef } : {}),
         ...(plan.op !== "self" ? { return: plan.op } : {}),
-        // lead 的活远超默认的 1h: 不给 deadline 就按 12h (回执的上限)。
-        ...(b.deadline !== undefined ? { deadline: b.deadline } : lead ? { deadline: 43200 } : {}),
         ...(rootId ? { job: rootId } : {}),
       } as PeerBody, extra, undefined, dispatchOrigin);
       const shown = cands.map((e) => `.${e.row.address || e.row.name}${e.row.busy ? " 忙" : ""}`);
@@ -3771,7 +4007,7 @@ const main = async (): Promise<void> => {
           ? openDispatchRow({ self, target, op: plan.op, deadlineAt, job: jobId, ...(asker ? { asker } : {}), ...(plan.serves ? { serves: plan.serves } : {}) })
           : "";
         dispatchedEvent = serves;
-        const eventId = serves ? plan?.ok && plan.op === "transfer" ? `route:${serves}:transfer:${taskAt}:${target}` : `route:${serves}` : `p:${self}:${target}:${taskAt}:1`;
+        const eventId = serves ? plan?.ok && plan.op === "transfer" ? `route:${serves}:transfer:${randomUUID()}` : `route:${serves}:input:${randomUUID()}` : `p:${self}:${target}:${randomUUID()}`;
         const birthTell: Tell = { from: self, to: target, channel: handedChat, job: jobId, at: taskAt, event: serves, legs: 1, deadlineAt, asker, dispatchKey: eventId };
         try { acceptPeerDispatch({ id: eventId, target, speaker: self, channel: handedChat, serves, asker, priority: "normal", deadline: deadlineAt,
           payload: { text: task, peer: {

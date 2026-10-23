@@ -17,7 +17,7 @@ import { dirname } from "node:path";
 import { expandHome } from "../shared/paths.js";
 import { clipLine } from "../shared/std.js";
 import type { Asker } from "../shared/detail-store.js";
-import type { Terminal } from "../shared/turn-state.js";
+import { NO_DEADLINE, hasDeadline, type Terminal } from "../shared/turn-state.js";
 // 收口标记的语法只有一份 (peers.parseClosing)。router 只认标记不解释正文 (见 §5) ——
 // 但标记长什么样必须与回执 watcher 完全同源, 所以借它的解析而不是自己再写一遍正则。
 import { clipMiddle, parseClosing } from "./peers.js";
@@ -64,6 +64,8 @@ export interface Outcome {
 
 export interface Route {
   event: EventId;
+  /** Historical task ids remain replay addresses for the same unfinished pair. */
+  mergedInto?: EventId;
   owner: Key;
   receiver: Receiver;
   status: Status;
@@ -73,6 +75,8 @@ export interface Route {
   /** 父行的「下一个子行序号」; 子行 open 时由子行 id 顶起来, 不单独落 op。 */
   seq: number;
   job?: string;
+  /** 所属 receiver 收集批次; 让各成员回执在跨 reload 后仍能判定是否齐全。 */
+  batch?: string;
   /** 仅 held: 这几笔落定 (且都是 done) 才投给 owner (见 §4.2 「held 前置失败」)。 */
   after?: EventId[];
   outcome?: Outcome;
@@ -99,7 +103,7 @@ export const EMPTY: Table = {};
 /** 每条 op 都带 `at` (日志的审计时刻; 只有 open / row 会写进行里)。`row` = 压实快照行,
  *  fold 时等价于把该行整体置为这份状态。 */
 export type Op =
-  | { op: "open"; at: number; event: EventId; owner: Key; receiver: Receiver; deadlineAt: number; job?: string; asker?: Asker; after?: EventId[]; status?: "open" | "held" }
+  | { op: "open"; at: number; event: EventId; owner: Key; receiver: Receiver; deadlineAt: number; job?: string; batch?: string; asker?: Asker; after?: EventId[]; status?: "open" | "held" }
   | { op: "release"; at: number; event: EventId }
   | { op: "mark"; at: number; event: EventId; status: "open" | "need" | "error"; body?: string; rev?: string; report?: Report }
   | { op: "move"; at: number; event: EventId; owner: Key }
@@ -107,12 +111,43 @@ export type Op =
   | { op: "hand"; at: number; event: EventId; inbox: string }
   | { op: "drop"; at: number; event: EventId }
   | { op: "gc"; at: number; event: EventId }
+  | { op: "merge"; at: number; event: EventId; into: EventId }
   | ({ op: "row" } & Route);
 
 const WAITING: ReadonlySet<Status> = new Set<Status>(["held", "open", "need", "error", "answered"]);
 /** `handed` 是墓碑 = 只读的投递路标: 子行沿它往上走 chain / 升级, owner 的追述沿它的 receiver
  *  原路再投 (§4.3); 落定满 TOMBSTONE_TTL_MS 后在压实时回收 (§4.6)。 */
-const isLive = (r: Route): boolean => r.status !== "handed";
+const isLive = (r: Route): boolean => !r.mergedInto && r.status !== "handed";
+
+export const routeOf = (table: Table, event: EventId): Route | undefined => {
+  const seen = new Set<string>();
+  let row = table[event];
+  while (row?.mergedInto && !seen.has(row.event)) {
+    seen.add(row.event);
+    row = table[row.mergedInto];
+  }
+  return row?.mergedInto ? undefined : row;
+};
+const unfinished = (r: Route): boolean => !r.mergedInto && ["held", "open", "need", "error"].includes(r.status);
+const sameReceiver = (a: Receiver, b: Receiver): boolean => a.kind === "wizard" && b.kind === "wizard"
+  ? a.to === b.to : a.kind === "chat" && b.kind === "chat" && a.channel === b.channel && a.message === b.message;
+export const taskOf = (table: Table, owner: Key, receiver: Receiver): Route | undefined =>
+  allRows(table).find((r) => r.owner === owner && unfinished(r) && sameReceiver(r.receiver, receiver));
+
+const mergeRows = (table: Table, event: EventId, into: EventId, at: number): Table => {
+  const from = routeOf(table, event), to = routeOf(table, into);
+  if (!from || !to || from.event === to.event || !unfinished(from) || !unfinished(to)
+      || from.owner !== to.owner || !sameReceiver(from.receiver, to.receiver)) return table;
+  // Merging two generations must not turn the inferred parent edge into a cycle.
+  const receiver = [to.receiver, from.receiver].find((r) => r.kind !== "wizard" || !r.event
+    || !chain(table, r.event).some((parent) => parent.event === from.event || parent.event === to.event))
+    ?? (to.receiver.kind === "wizard" ? { kind: "wizard" as const, to: to.receiver.to } : to.receiver);
+  return { ...table,
+    [to.event]: { ...to, receiver, status: to.status === "held" && from.status !== "held" ? from.status : to.status,
+      reports: { ...from.reports, ...to.reports } },
+    [from.event]: { ...from, mergedInto: to.event, status: "handed", settledAt: at },
+  };
+};
 
 /** 子行 open 时把父行的序号顶到 max(现序号, 本行序号)。子行 id 就是父行 id + "." + 序号。 */
 const parentOfId = (table: Table, event: EventId): Route | undefined => {
@@ -128,23 +163,21 @@ const bumpParentSeq = (table: Table, child: EventId): Table => {
   return { ...table, [parent.event]: { ...parent, seq: n } };
 };
 
-/** 子行的期限不超过父行的剩余期限 (§4.2, gRPC deadline propagation): 父已经超时的活, 子再干也没人等。
- *  开行时夹一次 —— 父由 event id 的前缀认出, 于是每条开行路径都自动带上, 不落第二条 op。 */
-const clampDeadline = (table: Table, event: EventId, deadlineAt: number): number => {
-  const parent = parentOfId(table, event);
-  return parent ? Math.min(deadlineAt, parent.deadlineAt) : deadlineAt;
-};
-
 /** 唯一的状态机。纯: 同一个表 + 同一条 op → 同一个表; 恒等 (no-op) 的 op 原样返回。 */
 export const step = (table: Table, op: Op): Table => {
+  if (!["open", "row", "gc", "merge"].includes(op.op)) {
+    const row = routeOf(table, op.event);
+    if (row && row.event !== op.event) op = { ...op, event: row.event };
+  }
   switch (op.op) {
     case "open": {
       // 重放同一段日志不该分叉: 同一个 event 只认第一次插行。
       if (table[op.event]) return table;
       const row: Route = {
         event: op.event, owner: op.owner, receiver: op.receiver,
-        status: op.status ?? "open", at: op.at, deadlineAt: clampDeadline(table, op.event, op.deadlineAt), seq: 0,
+        status: op.status ?? "open", at: op.at, deadlineAt: op.deadlineAt, seq: 0,
         ...(op.job ? { job: op.job } : {}),
+        ...(op.batch ? { batch: op.batch } : {}),
         ...(op.asker ? { asker: op.asker } : {}),
         ...(op.after?.length ? { after: [...op.after] } : {}),
       };
@@ -171,8 +204,10 @@ export const step = (table: Table, op: Op): Table => {
     }
     case "move": {
       const r = table[op.event];
-      return r && r.owner !== op.owner ? { ...table, [op.event]: { ...r, owner: op.owner } } : table;
+      if (!r || r.owner === op.owner) return table;
+      return { ...table, [r.event]: { ...r, owner: op.owner } };
     }
+    case "merge": return mergeRows(table, op.event, op.into, op.at);
     case "answer": {
       const r = table[op.event];
       if (!r) return table;
@@ -222,10 +257,11 @@ export const makeOutcome = (status: Terminal, body: string, source?: ReportSourc
 
 export const ops = {
   /** 插行。带 `after` = held (前置未落定, 先不投给 owner), 否则 open。 */
-  open: (p: { event: EventId; owner: Key; receiver: Receiver; deadlineAt: number; at?: number; job?: string; asker?: Asker; after?: readonly EventId[] }): Op => ({
+  open: (p: { event: EventId; owner: Key; receiver: Receiver; deadlineAt: number; at?: number; job?: string; batch?: string; asker?: Asker; after?: readonly EventId[] }): Op => ({
     op: "open", at: p.at ?? Date.now(), event: p.event, owner: p.owner, receiver: p.receiver, deadlineAt: p.deadlineAt,
     status: p.after?.length ? "held" : "open",
     ...(p.job ? { job: p.job } : {}),
+    ...(p.batch ? { batch: p.batch } : {}),
     ...(p.asker ? { asker: p.asker } : {}),
     ...(p.after?.length ? { after: [...p.after] } : {}),
   }),
@@ -261,12 +297,21 @@ export const ops = {
 /** 行的稳定次序: 先按插入时刻, 再按 id —— 派生的列表 (waiting / chain / 名册) 都靠它定序。 */
 const byAt = (rows: readonly Route[]): Route[] =>
   [...rows].sort((a, b) => a.at - b.at || (a.event < b.event ? -1 : a.event > b.event ? 1 : 0));
-export const allRows = (table: Table): Route[] => byAt(Object.values(table));
-export const routesOf = (table: Table, owner: Key): Route[] => byAt(Object.values(table).filter((r) => r.owner === owner));
+export const allRows = (table: Table): Route[] => byAt(Object.values(table).filter((r) => !r.mergedInto));
+const batchCompleteOf = (table: Table, batch: string): boolean => {
+  // Old or transferred aliases still belong to their original collection batch.
+  const members = Object.values(table).filter((r) => r.batch === batch);
+  return members.length > 0 && members.every((r) => {
+    const current = routeOf(table, r.event);
+    return !!current && (current.status === "answered" || current.status === "handed");
+  });
+};
+export const routesOf = (table: Table, owner: Key): Route[] => allRows(table).filter((r) => r.owner === owner);
 
 /** receiver 指向 e 的行 (不论落定没有) —— 沿它往上走就是 chain / subtree 用的那条边。 */
 const childrenOf = (table: Table, event: EventId): Route[] =>
-  byAt(Object.values(table).filter((r) => r.receiver.kind === "wizard" && r.receiver.event === event));
+  allRows(table).filter((r) => r.receiver.kind === "wizard" && r.receiver.event
+    && routeOf(table, r.receiver.event)?.event === (routeOf(table, event)?.event ?? event));
 
 /** receiver 指向 e、还没落定的行 —— 扇出的兄弟 / 挂着的子行 / 停在等 re 的 need。 */
 export const waiting = (table: Table, event: EventId): Route[] => childrenOf(table, event).filter((r) => WAITING.has(r.status));
@@ -278,7 +323,7 @@ export const chain = (table: Table, event: EventId): Route[] => {
   let cur: EventId | undefined = event;
   while (cur && !seen.has(cur)) {
     seen.add(cur);
-    const row: Route | undefined = table[cur];
+    const row: Route | undefined = routeOf(table, cur);
     if (!row) break;
     out.push(row);
     cur = row.receiver.kind === "wizard" ? row.receiver.event : undefined;
@@ -303,7 +348,7 @@ export const subtree = (table: Table, event: EventId): Route[] => {
 };
 
 /** 这一笔的定论是给人 / 群看的 —— topOnly 收口、eventFinalGate 三套推断都退化成这一条。 */
-export const speaksToHuman = (table: Table, event: EventId): boolean => table[event]?.receiver.kind === "chat";
+export const speaksToHuman = (table: Table, event: EventId): boolean => routeOf(table, event)?.receiver.kind === "chat";
 
 /** W 欠着的行 (含 held 的), 未 handed 的才算欠。 */
 export const owedBy = (table: Table, owner: Key): Route[] => byAt(Object.values(table).filter((r) => r.owner === owner && isLive(r)));
@@ -316,7 +361,7 @@ export const awaitedBy = (table: Table, owner: Key): Route[] =>
  *  收件箱, 而收件箱里可能还排着队没投; `wait_peer` 按 event 取 outcome 从这里 (§9.5)。
  *  `awaitedBy` 是它的「还没了结」版: 一份定论一交付就出了 `awaitedBy`, 恰恰是这里要取的那份。 */
 export const settledTo = (table: Table, owner: Key): Route[] =>
-  byAt(Object.values(table).filter((r) => r.receiver.kind === "wizard" && r.receiver.to === owner
+  byAt(Object.values(table).filter((r) => !r.mergedInto && r.receiver.kind === "wizard" && r.receiver.to === owner
     && (r.outcome !== undefined || r.status === "need" || r.status === "error")));
 
 // ── 工具参数的引用解析: 模型只说「对谁」, 那一笔由表推断 ──────────────────
@@ -335,9 +380,10 @@ export type PairPick = { ok: true; row?: Route } | { ok: false; many: Route[] };
  *  最近一笔 (可能已落定, 也可能从没派过 = undefined)。 */
 export const pickPair = (table: Table, from: Key, to: Key, hint?: EventId): PairPick => {
   // hint 不看 receiver: 沿链升级投来的回执, 行上的 receiver 还是那个已不在的 wizard。
-  const hit = hint !== undefined && table[hint]?.owner === to ? table[hint] : undefined;
+  const hinted = hint ? routeOf(table, hint) : undefined;
+  const hit = hinted?.owner === to ? hinted : undefined;
   if (hit) return { ok: true, row: hit };
-  const rows = byAt(Object.values(table).filter((r) => r.receiver.kind === "wizard" && r.receiver.to === from && r.owner === to)).reverse();
+  const rows = allRows(table).filter((r) => r.receiver.kind === "wizard" && r.receiver.to === from && r.owner === to).reverse();
   const live = rows.filter((r) => PAIR_LIVE.has(r.status));
   return live.length > 1 ? { ok: false, many: live } : { ok: true, ...(live[0] ?? rows[0] ? { row: live[0] ?? rows[0] } : {}) };
 };
@@ -362,14 +408,14 @@ export interface Delivery {
  *  - 认不出更上一层 (父行已 gc) 或链上成环 → 无处可升, 照旧进原收方的收件箱 (结论不丢)。
  *  原样能投 = undefined (调用方照旧走行上的 receiver)。 */
 export const escalate = (table: Table, event: EventId, alive: (k: Key) => boolean): Delivery | undefined => {
-  const start = table[event];
+  const start = routeOf(table, event);
   if (!start || start.receiver.kind !== "wizard" || alive(start.receiver.to)) return undefined;
   const via: Key[] = [];
   const seen = new Set<EventId>([event]);
   let r: Receiver = start.receiver;
   while (r.kind === "wizard" && !alive(r.to)) {
     via.push(r.to);
-    const up: Route | undefined = r.event !== undefined ? table[r.event] : undefined;
+    const up: Route | undefined = r.event !== undefined ? routeOf(table, r.event) : undefined;
     if (!up || seen.has(up.event)) return undefined;
     seen.add(up.event);
     r = up.receiver;
@@ -382,7 +428,7 @@ export const escalate = (table: Table, event: EventId, alive: (k: Key) => boolea
  *  f 已回收 (gc) 就只进 rolepage。 */
 export const isOrphaned = (table: Table, serves: EventId): boolean => {
   if (!serves) return false;
-  const row = table[serves];
+  const row = routeOf(table, serves);
   return !row || row.status === "answered" || row.status === "handed";
 };
 
@@ -391,6 +437,7 @@ export const isOrphaned = (table: Table, serves: EventId): boolean => {
 /** owner 这一轮的终句 (注入事件的 result 正文)。 */
 export interface FinalVerdict {
   text: string;
+  result?: true;
   /** 这一轮以 CLI 报错收尾 —— 中途态: 报给 receiver 等它续跑 / re, 不改写定论 (§2.3)。 */
   error?: boolean;
   source?: ReportSource;
@@ -403,8 +450,10 @@ export type FinalKind = "need" | "result" | "progress" | "done" | "wait";
 export const finalKind = (table: Table, event: EventId | undefined, text: string): FinalKind => {
   if (/^WAIT[ \t]*[:：]/.test(text.trim())) return "wait";
   const kind = parseClosing(text).kind;
-  if (kind === "need") return "need";
   if (kind === "result") return "result";
+  if (kind === "need") return "need";
+  const row = event ? routeOf(table, event) : undefined;
+  if (row?.receiver.kind === "wizard") return "progress";
   return event !== undefined && waiting(table, event).length > 0 ? "progress" : "done";
 };
 
@@ -430,10 +479,10 @@ const reportedOutcome = (row: Route, verdict: FinalVerdict): Outcome => {
   return { ...makeOutcome("done", verdict.text), ...(report ? { rev: report.version, report } : {}) };
 };
 export const onFinal = (table: Table, owner: Key, serves: EventId | undefined, verdict: FinalVerdict): Op[] => {
-  const row = serves !== undefined && serves !== "" ? table[serves] : undefined;
+  const row = serves ? routeOf(table, serves) : undefined;
   if (!row || row.owner !== owner) return [];
   if (row.status === "held" || row.outcome?.status === "canceled") return [];
-  const kind = verdict.error ? "error" : finalKind(table, row.event, verdict.text);
+  const kind = verdict.error ? "error" : verdict.result ? "result" : finalKind(table, row.event, verdict.text);
   if (kind === "need" || kind === "error") {
     const report = reportOf(row, verdict, kind);
     const rev = report?.version ?? contentRev(verdict.text);
@@ -451,7 +500,7 @@ const SYNTH: ReadonlySet<Terminal> = new Set<Terminal>(["timeout", "silent", "de
 
 /** 已落定的行再收 owner 一轮终句 = 追述 (§4.3): 行的 receiver 边一直在, 追述沿它原路再投一次
  *  (新内容 = 新 rev, 同内容重放 = 无 op)。收不收由 owner 的标记定 (daemon 定路由, LLM 定语义):
- *  - 当前仍是合成失败 (timeout / silent / dead): 接受首次真实定论; 纠正之后遵循 done 规则;
+ *  - 当前仍是未确认的失败定论: 接受首次真实定论; 纠正之后遵循 done 规则;
  *  - 起初是 done: 只收显式 `RESULT:` —— 未标记的是收到回执后的随口一句, 只进 rolepage;
  *  - `canceled` 一律不收: 那一笔是被人 / 随工单收掉的, 子树整支 TERMINATE (§4.2)。 */
 const retellOps = (table: Table, row: Route, verdict: FinalVerdict): Op[] => {
@@ -461,7 +510,7 @@ const retellOps = (table: Table, row: Route, verdict: FinalVerdict): Op[] => {
   // 那轮的补交) 会各投一份回执, 收方被同一个结论糊两次 (2026-10-22 edf7056.1: 两份 rcpt 相隔 18s,
   // 第二份正落进它已经跑起来的输入框)。
   if (verdict.error || !o || o.status === "canceled" || verdict.text.trim() === o.body.trim()) return [];
-  const kind = finalKind(table, row.event, verdict.text);
+  const kind = verdict.result ? "result" : finalKind(table, row.event, verdict.text);
   const take = kind === "result" || (kind === "done" && SYNTH.has(o.status));
   const outcome = reportedOutcome(row, verdict);
   return take && !row.reports?.[outcome.rev] ? [ops.answer({ event: row.event, outcome, late: true })] : [];
@@ -471,25 +520,25 @@ const retellOps = (table: Table, row: Route, verdict: FinalVerdict): Op[] => {
  *  在飞 = 不再挂着未落定的子行; 已落定 = 只放追述 —— 表上的 outcome 就是这句 (onFinal 已收下),
  *  或这句带 `RESULT:`、owner 还是它、那一笔没被收掉 (onFinal 会收下, 与它谁先跑无关)。 */
 export const finalReleased = (table: Table, owner: Key, serves: EventId | undefined, body: string, source?: ReportSource): boolean => {
-  const row = serves ? table[serves] : undefined;
+  const row = serves ? routeOf(table, serves) : undefined;
   if (!row) return true;
   // 已 transfer 给别人的那一笔: 旧 owner 的终句不再算数 (§3.4, 同 onFinal) —— 交代与气泡都归接手方。
   if (row.owner !== owner || row.status === "held" || row.outcome?.status === "canceled") return false;
   // WAIT is progress even without a registered child; never claim the completion slot.
-  if (finalKind(table, serves, body) === "wait") return false;
+  const kind = finalKind(table, serves, body);
+  if (kind === "wait") return false;
   const notice = row.notice;
   if (notice && (notice.report ? !!source && notice.rev === reportOf(row, { text: body, source }, notice.status)?.version
       : notice.body === body)) return true;
-  if (row.status !== "answered" && row.status !== "handed") return waiting(table, row.event).length === 0;
+  if (row.status !== "answered" && row.status !== "handed") return row.receiver.kind === "wizard"
+    ? kind === "result" || kind === "need" : waiting(table, row.event).length === 0;
   const o = row.outcome;
   return !!o && o.status !== "canceled"
     && (o.report ? !!source && o.rev === reportOf(row, { text: body, source }, "done")?.version
       : o.rev === contentRev(body) || parseClosing(body).kind === "result");
 };
 
-// ── 失败合成 (§4.2): 和 done 走同一条 outbox ──────────────────────────────
-// 失败不是特例: timeout / silent / dead / canceled 都是一份定论 (`answer`), 走同一个
-// receiver、同一条投递通路。合成完全在 daemon 这边做 —— 模型不报失败, 它只会没声。
+// ── 期限常量与 held 前置取消 ─────────────────────────────────────────────
 
 /** 期限常量 (§9.6: 自 receipts 迁入): 对方最长允许干多久 / 期限的上下限。上限留在工单
  *  保留期内, 超时那份回执还得数得进账。 */
@@ -497,45 +546,22 @@ export const TARGET_WAIT_SEC = 3600;
 export const DEADLINE_MIN_SEC = 60;
 export const DEADLINE_MAX_SEC = 12 * 3600;
 /** `at` 发出、给了 `sec` 秒 (缺省 / 越界取默认或夹到边上) 的期限。 */
-export const deadlineOf = (at: number, sec?: number): number =>
-  at + 1000 * (sec === undefined || !Number.isFinite(sec) ? TARGET_WAIT_SEC : Math.min(Math.max(sec, DEADLINE_MIN_SEC), DEADLINE_MAX_SEC));
-/** pane 不在了, 隔这么久再看一眼才判 dead: 非交接的 pane 换新 (respawn) 也有几秒是死的。 */
-export const DEAD_GRACE_MS = 5000;
-/** 对方读进了我们这一句、停下了却没答 —— 连着这么多次就认定它不会答了 (§9.4)。 */
-export const MAX_FRUITLESS = 3;
-
-/** 失败回执的正文 (与 receipts 的 watcher 同一套文案): 守护进程的一句说明 + 对方最后一句
- *  (给发话方一点线索)。 */
-export const failureText = (p: { who: string; why: string; last?: string }): string =>
-  `（守护进程: ${p.who} 没有给出结论 —— ${p.why}。）${p.last ? `\n它最后说的: ${clipMiddle(p.last, 600)}` : ""}`;
-/** 三种合成失败的「理由」半句 (主语由 failureText 写)。 */
-export const failureWhy = (p: { status: "timeout" | "silent" | "dead"; minutes?: number; need?: boolean }): string =>
-  p.status === "timeout"
-    ? (p.need ? `它的反问 (NEED) 等了 ${p.minutes} 分钟没人答` : `等了 ${p.minutes} 分钟它还没答完`)
-    : p.status === "silent" ? `它停下了 ${MAX_FRUITLESS} 次, 都没答这一句` : "它的 pane 没了";
+export const deadlineOf = (_at: number, _sec?: number): number => NO_DEADLINE;
 /** 被收掉 / 打断 / 前置失败 的正文 (§4.2 canceled)。`reason` 是一整句 (含句号), 因为它
  *  有三种来路: 被谁收掉、随工单收了、等的前置以某结局收场。 */
 export const canceledText = (p: { who?: string; reason: string; last?: string }): string =>
   `（守护进程: ${p.who ? `${p.who} ` : ""}${p.reason}）${p.last ? `\n它最后说的: ${clipMiddle(p.last, 600)}` : ""}`;
 
-/** sweeper 的只读判据: 全是现算, 不落第二份数据 (不变量 4)。 */
-export interface SweepSignals {
+/** 检查 held 行前置是否已失败；只读计算 op，副作用由调用方提交。 */
+export interface HeldSweepSignals {
   now: number;
-  /** owner 的 pane 已经死了多久 (没死 / 不知道 = undefined) —— 宽限的记账在 `sweep`。 */
-  paneDeadForMs: (owner: Key) => number | undefined;
-  /** 这一笔的注入事件停下没答了几次 (§9.4): `serves === event` 且 finished 无 result 的轮数。 */
-  fruitless: (event: EventId) => number;
-  /** owner 正在交接: pane 新旧交替的那几秒是死的, 别判 dead (旧 watcher 的 handedOff 同义)。 */
-  handingOff?: (owner: Key) => boolean;
   /** owner 的称呼 / 它最后一句 —— 正文里的主语与线索。 */
   nameOf?: (owner: Key) => string;
   lastWords?: (owner: Key, since: number) => string | undefined;
 }
 
-/** 扫一遍在飞的行, 合成失败定论 (§4.2)。判定顺序即优先级: held 前置失败 → timeout → dead → silent
- *  —— 期限到了就是期限到了, 死没死都得报 timeout (旧 watcher 同序)。纯函数: 只产 op,
- *  落盘与投递在副作用层。 */
-export const sweepOps = (table: Table, p: SweepSignals): Op[] => {
+/** 只为等待失败前置的 held 行生成取消 op；open route 的恢复由统一巡检器处理。 */
+export const heldFailureOps = (table: Table, p: HeldSweepSignals): Op[] => {
   const who = (w: Key): string => p.nameOf?.(w) ?? w;
   const last = (w: Key, since: number): string | undefined => p.lastWords?.(w, since)?.trim() || undefined;
   const failed = (r: Route, body: string, status: Terminal): Op =>
@@ -543,21 +569,12 @@ export const sweepOps = (table: Table, p: SweepSignals): Op[] => {
   return allRows(table).flatMap((r): Op[] => {
     if (r.status === "held") {
       // 前置以非 done 收场: 这件没投, 也不投 —— 但发话方得知道, 附上前置的结局快照 (§4.2)。
-      const bad = (r.after ?? []).map((a) => [a, table[a]] as const).find(([, x]) => !!x?.outcome && x.outcome.status !== "done");
+      const bad = (r.after ?? []).map((a) => [a, routeOf(table, a)] as const).find(([, x]) => !!x?.outcome && x.outcome.status !== "done");
       if (!bad) return [];
       const [a, x] = bad;
       const snap = `${a} (${who(x!.owner)}) 以 ${x!.outcome!.status} 收场`;
       return [failed(r, canceledText({ who: who(r.owner), reason: `等的前置 ${snap}, 这件 (${r.event}) 没投。`, last: last(r.owner, r.at) }), "canceled")];
     }
-    if (r.status !== "open" && r.status !== "need" && r.status !== "error") return [];
-    if (r.deadlineAt <= p.now) {
-      const why = failureWhy({ status: "timeout", minutes: Math.round((p.now - r.at) / 60_000), need: r.status === "need" });
-      return [failed(r, failureText({ who: who(r.owner), why, last: last(r.owner, r.at) }), "timeout")];
-    }
-    if ((p.paneDeadForMs(r.owner) ?? 0) >= DEAD_GRACE_MS && !(p.handingOff?.(r.owner) ?? false))
-      return [failed(r, failureText({ who: who(r.owner), why: failureWhy({ status: "dead" }), last: last(r.owner, r.at) }), "dead")];
-    if (p.fruitless(r.event) >= MAX_FRUITLESS)
-      return [failed(r, failureText({ who: who(r.owner), why: failureWhy({ status: "silent" }), last: last(r.owner, r.at) }), "silent")];
     return [];
   });
 };
@@ -570,7 +587,7 @@ export const cancelOps = (table: Table, roots: readonly EventId[], p: { reason: 
   const seen = new Set<EventId>();
   const order: Route[] = [];
   roots.forEach((root) => {
-    [...subtree(table, root), table[root]].forEach((r) => {
+    [...subtree(table, root), routeOf(table, root)].forEach((r) => {
       if (r && !seen.has(r.event)) { seen.add(r.event); order.push(r); }
     });
   });
@@ -591,20 +608,26 @@ export const TOMBSTONE_TTL_MS = 7 * 24 * 3600_000;
 /** 能回收的行: 自己是满 TTL 的墓碑、没有 held 行的 `after` 等着它, 且整棵子树都能回收 ——
  *  子树闭合 (收一行必收它全部后代), 于是留下的行往上走 chain 永远走得通。没有 settledAt 的
  *  老行按 deadlineAt 起算 (合成 timeout 的时刻, 正常定论只会更早)。 */
-export const collectable = (table: Table, now: number): Set<EventId> => {
+export const collectable = (table: Table, now: number, retain?: (row: Route) => boolean): Set<EventId> => {
   const rows = Object.values(table);
-  const awaited = new Set(rows.flatMap((r) => (r.status === "held" ? r.after ?? [] : [])));
+  const incompleteBatches = new Set([...new Set(Object.values(table).flatMap((r) => r.batch ? [r.batch] : []))]
+    .filter((batch) => !batchCompleteOf(table, batch)));
+  const awaited = new Set(rows.flatMap((r) => (r.status === "held" ? r.after ?? [] : []))
+    .map((id) => routeOf(table, id)?.event ?? id));
   const kids = rows.reduce((m, r) => {
-    const up = r.receiver.kind === "wizard" ? r.receiver.event : undefined;
+    const parent = r.receiver.kind === "wizard" ? r.receiver.event : undefined;
+    const up = parent ? routeOf(table, parent)?.event ?? parent : undefined;
     return up === undefined ? m : m.set(up, [...(m.get(up) ?? []), r]);
   }, new Map<EventId, Route[]>());
   const memo = new Map<EventId, boolean>();
   const ok = (r: Route): boolean => {
+    if (retain?.(r) || r.batch && incompleteBatches.has(r.batch)) return false;
     const hit = memo.get(r.event);
     if (hit !== undefined) return hit;
     memo.set(r.event, false); // 环保护: 回到自己 = 不收
     const v = r.status === "handed" && now - Math.max(r.settledAt ?? r.deadlineAt, r.notice?.at ?? 0) >= TOMBSTONE_TTL_MS
-      && !awaited.has(r.event) && (kids.get(r.event) ?? []).every(ok);
+      && !awaited.has(r.event) && (r.mergedInto ? !!table[r.mergedInto] && ok(table[r.mergedInto]!) : true)
+      && (kids.get(r.event) ?? []).filter((child) => child.event !== r.event).every(ok);
     memo.set(r.event, v);
     return v;
   };
@@ -612,8 +635,8 @@ export const collectable = (table: Table, now: number): Set<EventId> => {
 };
 
 /** 表减去能回收的墓碑。 */
-export const collect = (table: Table, now: number): Table => {
-  const gone = collectable(table, now);
+export const collect = (table: Table, now: number, retain?: (row: Route) => boolean): Table => {
+  const gone = collectable(table, now, retain);
   return gone.size ? Object.fromEntries(Object.entries(table).filter(([e]) => !gone.has(e))) : table;
 };
 
@@ -633,6 +656,7 @@ const OP_FIELDS: Readonly<Record<Op["op"], readonly string[]>> = {
   hand: ["event", "inbox", "at"],
   drop: ["event", "at"],
   gc: ["event", "at"],
+  merge: ["event", "into", "at"],
   row: ["event", "owner", "receiver", "status", "at", "deadlineAt", "seq"],
 };
 const STATUSES: ReadonlySet<string> = new Set<Status>(["held", "open", "need", "error", "answered", "handed"]);
@@ -673,6 +697,9 @@ export const parseOp = (raw: string): Op | undefined => {
   if (!Object.prototype.hasOwnProperty.call(OP_FIELDS, op)) return undefined;
   if (!OP_FIELDS[op].every((f) => o[f] !== undefined)) return undefined;
   if (!nonEmpty(o.event) || !finite(o.at)) return undefined;
+  if (op === "merge" && !nonEmpty(o.into)) return undefined;
+  if (o.mergedInto !== undefined && !nonEmpty(o.mergedInto)) return undefined;
+  if (o.batch !== undefined && !nonEmpty(o.batch)) return undefined;
   if ("owner" in o && !nonEmpty(o.owner)) return undefined;
   if ("receiver" in o && !receiverOk(o.receiver)) return undefined;
   // status 按 op 分别核: mark 只落中途态, open 只开 open/held, row 快照必须给全。
@@ -727,7 +754,7 @@ const fmtReceiver = (r: Receiver): string =>
 export const renderRoute = (r: Route): string =>
   [
     r.event, r.status, `owner=${r.owner}`, `→ ${fmtReceiver(r.receiver)}`,
-    `at=${new Date(r.at).toISOString()}`, `dl=${new Date(r.deadlineAt).toISOString()}`,
+    `at=${new Date(r.at).toISOString()}`, `dl=${hasDeadline(r.deadlineAt) ? new Date(r.deadlineAt).toISOString() : "none"}`,
     r.seq ? `seq=${r.seq}` : "", r.job ? `job=${r.job}` : "",
     r.after?.length ? `after=${r.after.join(",")}` : "",
     r.outcome ? `${r.outcome.status}: ${clipLine(r.outcome.body, 80)}` : "",
@@ -747,19 +774,6 @@ export interface RouteDiagnostics {
 
 export type Note = (msg: string, extra?: Record<string, unknown>) => void;
 
-/** sweeper 的探针: 全是只读的, 由 daemon 注入 —— router 不认识 pane / transcript / 收件箱。 */
-export interface SweepDeps {
-  /** owner 的 pane 还在吗 (dead 判定)。一个 owner 每个 tick 只问一次 (它要 spawn tmux)。 */
-  paneLive: (owner: Key) => Promise<boolean>;
-  /** 这一笔的注入事件停下没答了几次 (§9.4) —— 由收件箱自己算, 不落第二份。 */
-  fruitless: (event: EventId) => number;
-  /** owner 正在交接 (pane 新旧交替的那几秒是死的)。 */
-  handingOff?: (owner: Key) => boolean;
-  nameOf?: (owner: Key) => string;
-  lastWords?: (owner: Key, since: number) => string | undefined;
-  now?: number;
-}
-
 export interface Router {
   readonly file: string;
   /** 当前 fold 结果 (只读快照)。 */
@@ -772,6 +786,9 @@ export interface Router {
   speaksToHuman: (event: EventId) => boolean;
   owedBy: (owner: Key) => Route[];
   awaitedBy: (owner: Key) => Route[];
+  task: (owner: Key, receiver: Receiver) => Route | undefined;
+  aliases: (event: EventId) => Route[];
+  batchComplete: (batch: string) => boolean;
   /** `awaitedBy` 的含墓碑版: 有回执等着 W 取的 (wait_peer)。 */
   settledTo: (owner: Key) => Route[];
   /** 投递前的升级判定 (§4.4): 收方已注销 → 沿链找第一个还活着的 receiver; 原样能投 = undefined。 */
@@ -784,9 +801,8 @@ export interface Router {
   finalKind: (serves: EventId | undefined, text: string) => FinalKind;
   /** owner 一轮结束时该落的 op (§3.2)。做完就交副作用层: 先落盘再投递 (§9.3)。 */
   onFinal: (owner: Key, serves: EventId | undefined, verdict: FinalVerdict) => Op[];
-  /** 扫一遍在飞的行, 合成失败定论 (§4.2): 探一次 pane 死活 (5s 宽限由这里记账),
-   *  其余判据现算。做完照旧交副作用层 —— 投递与 done 同一条路。 */
-  sweep: (deps: SweepDeps) => Promise<Op[]>;
+  /** 收口前置已失败的 held 路由。 */
+  sweepHeld: (signals: HeldSweepSignals) => Op[];
   /** 先落盘再改内存 —— 内存里有的, 盘上一定有 (不变量 1)。 */
   commit: (op: Op) => Table;
   /** 把 fold 结果重写成一组 row 快照行 (tmp + rename)。 */
@@ -795,19 +811,16 @@ export interface Router {
 }
 
 /** boot: 建表 (fold 一次), 之后每次 commit 先落盘。`note` = 日志回调 (省得 router 依赖 pino)。 */
-export const openRouter = (opts: { file?: string; note?: Note } = {}): Router => {
+export const openRouter = (opts: { file?: string; note?: Note; retain?: (row: Route) => boolean } = {}): Router => {
   const file = expandHome(opts.file ?? ROUTES_FILE);
   const note: Note = opts.note ?? ((): void => {});
   let table: Table = EMPTY;
   let opLines = 0;
   let sinceCompact = 0;
-  /** owner 的 pane 第一眼看到死掉的时刻 (§4.2 的 5s 宽限: 换新 / respawn 也有几秒是死的)。 */
-  const deadSince = new Map<Key, number>();
-
   // 墓碑回收挂在压实上: 本来就要整份重写, 少写几行不多一次 IO。
   const compact = (): void => {
-    const kept = collect(table, Date.now());
-    const live = allRows(kept);
+    const kept = collect(table, Date.now(), opts.retain);
+    const live = byAt(Object.values(kept));
     writeAtomic(file, live.map((r) => `${JSON.stringify({ op: "row", ...r })}\n`).join(""));
     const gced = allRows(table).length - live.length;
     table = kept;
@@ -833,45 +846,56 @@ export const openRouter = (opts: { file?: string; note?: Note } = {}): Router =>
     appendFileSync(file, `${JSON.stringify(op)}\n`);
     table = step(table, op);
     opLines += 1;
+    if (op.op === "open" || op.op === "move") {
+      const row = routeOf(table, op.event);
+      const pair = row && unfinished(row) ? allRows(table).find((r) => r.event !== row.event
+        && r.owner === row.owner && unfinished(r) && sameReceiver(r.receiver, row.receiver)) : undefined;
+      if (row && pair) commit({ op: "merge", event: row.event, into: pair.event, at: op.at });
+    }
     if (++sinceCompact > COMPACT_AT) compact();
     return table;
   };
+
+  // Old journals may contain several unfinished rows for one pair. Preserve each
+  // old id as an alias, so delayed inputs never attach to a later task generation.
+  const batches = new Map<Key, string>();
+  for (const row of allRows(table)) {
+    if (isLive(row) && row.receiver.kind === "wizard" && row.batch && !batches.has(row.receiver.to))
+      batches.set(row.receiver.to, row.batch);
+  }
+  for (const row of allRows(table)) {
+    if (!isLive(row)) continue;
+    const batch = row.receiver.kind === "wizard" ? row.batch ?? batches.get(row.receiver.to) ?? `batch:${row.event}` : undefined;
+    if (row.receiver.kind === "wizard" && batch) batches.set(row.receiver.to, batch);
+    const deadlineAt = unfinished(row) ? NO_DEADLINE : row.deadlineAt;
+    if (deadlineAt !== row.deadlineAt || batch !== row.batch)
+      commit({ op: "row", ...row, deadlineAt, ...(batch ? { batch } : {}) });
+    if (!unfinished(row)) continue;
+    const pair = taskOf(table, row.owner, row.receiver);
+    if (pair && pair.event !== row.event) commit({ op: "merge", event: row.event, into: pair.event, at: Date.now() });
+  }
 
   return {
     file,
     table: () => table,
     rows: () => allRows(table),
-    get: (event) => table[event],
+    get: (event) => routeOf(table, event),
     waiting: (event) => waiting(table, event),
     chain: (event) => chain(table, event),
     subtree: (event) => subtree(table, event),
     speaksToHuman: (event) => speaksToHuman(table, event),
     owedBy: (owner) => owedBy(table, owner),
     awaitedBy: (owner) => awaitedBy(table, owner),
+    task: (owner, receiver) => taskOf(table, owner, receiver),
+    aliases: (event) => byAt(Object.values(table).filter((r) => routeOf(table, r.event)?.event === (routeOf(table, event)?.event ?? event))),
+    batchComplete: (batch) => batchCompleteOf(table, batch),
     settledTo: (owner) => settledTo(table, owner),
     escalate: (event, alive) => escalate(table, event, alive),
     isOrphaned: (serves) => isOrphaned(table, serves),
     finalReleased: (owner, serves, body, source) => finalReleased(table, owner, serves, body, source),
     finalKind: (serves, text) => finalKind(table, serves, text),
     onFinal: (owner, serves, verdict) => onFinal(table, owner, serves, verdict),
-    sweep: async (deps) => {
-      const now = deps.now ?? Date.now();
-      const live = allRows(table).filter((r) => r.status === "open" || r.status === "need" || r.status === "error");
-      const owners = [...new Set(live.map((r) => r.owner))];
-      // 一个 owner 只探一次: paneLive 要 spawn tmux, 十几路 fan-out 别按行探。
-      for (const w of owners) {
-        if (await deps.paneLive(w)) deadSince.delete(w);
-        else if (!deadSince.has(w)) deadSince.set(w, now);
-      }
-      // 已经不在飞了, 别把它的死记账留着 (下次出生会白捡一个宽限)。
-      for (const w of [...deadSince.keys()]) if (!owners.includes(w)) deadSince.delete(w);
-      const since = (w: Key): number | undefined => { const t = deadSince.get(w); return t === undefined ? undefined : now - t; };
-      return sweepOps(table, {
-        now, paneDeadForMs: since, fruitless: deps.fruitless,
-        ...(deps.handingOff ? { handingOff: deps.handingOff } : {}),
-        ...(deps.nameOf ? { nameOf: deps.nameOf } : {}), ...(deps.lastWords ? { lastWords: deps.lastWords } : {}),
-      });
-    },
+    sweepHeld: (signals) => heldFailureOps(table, signals),
     commit,
     compact,
     diagnose: (owner) => {

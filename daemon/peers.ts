@@ -1,3 +1,4 @@
+import { hasDeadline } from "../shared/turn-state.js";
 // 同伴感知: 「这个聊天里还有谁在干活」的读侧。
 //
 // 一个企微聊天里住着一个默认 wizard 加任意多个 `#tag` wizard (inbound.ts 按 tag
@@ -478,20 +479,51 @@ export interface Closing { kind: "result" | "need" | "none"; text: string; artif
 
 // NEED 只认全大写: "what I need: …" / 「需要: …」在普通答话里太常见, 误认一次就是
 // 一份不计数的回执。
-const CLOSING_RE = /(?:^|[\s>*|-])(RESULT|Result|result|结论|NEED)\s*[:：]\s*/gm;
+const CLOSING_RE = /^[ \t]*(RESULT|Result|result|结论|NEED)[ \t]*[:：][ \t]*/gm;
 const ARTIFACT_RE = /^[ \t>*|-]*ARTIFACT[ \t]*[:：][ \t]*(\S+)(?:[ \t]+(?:—|--|-|:)[ \t]*(.*))?$/gm;
 
+/** Keep offsets stable while hiding fenced code, block quotes and inline code. */
+export const topLevelText = (text: string): string => {
+  let fence = "";
+  return text.split(/(?<=\n)/).map((line) => {
+    const opener = line.match(/^[ \t]{0,3}(`{3,}|~{3,})/);
+    if (fence) {
+      if (opener && opener[1]![0] === fence[0] && opener[1]!.length >= fence.length
+          && !line.slice(opener[0].length).trim()) fence = "";
+      return line.replace(/[^\n]/g, " ");
+    }
+    if (opener) {
+      fence = opener[1]!;
+      return line.replace(/[^\n]/g, " ");
+    }
+    if (/^[ \t]{0,3}>/.test(line) || /^(?: {0,3}\t| {4})/.test(line)) return line.replace(/[^\n]/g, " ");
+    return line.replace(/(`+)[^`]*?\1/g, (s) => s.replace(/./g, " "));
+  }).join("");
+};
+
+export const addressedResults = (text: string): Array<{ name: string; body: string }> => {
+  const marks = [...topLevelText(text).matchAll(/^[ \t]*@\.([A-Za-z0-9_-]+)[ \t]+RESULT[ \t]*[:：][ \t]*/gm)];
+  return marks.map((m, i) => ({ name: m[1]!, body: text.slice((m.index ?? 0) + m[0].length, marks[i + 1]?.index).trim() }));
+};
+
 export const parseClosing = (text: string, max = 800): Closing => {
-  const artifacts = [...text.matchAll(ARTIFACT_RE)]
-    .map((m) => ({ path: m[1]!.replace(/^`|`$/g, ""), note: (m[2] ?? "").trim() }))
+  const visible = topLevelText(text);
+  const visibleLines = visible.split(/\r?\n/);
+  const artifacts = text.split(/\r?\n/).flatMap((line, i) => {
+    if (!/^[ \t>*|-]*ARTIFACT[ \t]*[:：]/.test(visibleLines[i] ?? "")) return [];
+    return [...line.matchAll(ARTIFACT_RE)];
+  }).map((m) => ({ path: m[1]!.replace(/^`|`$/g, ""), note: (m[2] ?? "").trim() }))
     .filter((a) => !/^<.*>$/.test(a.path)); // 复述格式时的 `<路径>` 占位
   // 标记之后的**全部**内容, 而不是"那一行" —— 结论常常不止一行 (路径一行、说明
   // 一行)。约定是收口在最后, 所以标记之后剩下的就是结论。取最后一个匹配: 模型常
   // 先复述一遍格式要求再给答案。ARTIFACT 行不算结论正文。
-  const marks = [...text.matchAll(CLOSING_RE)];
+  const marks = [...visible.matchAll(CLOSING_RE)];
   // 最后一个有效标记决定收口；忽略 NEED: 无，但不能让较早的 RESULT 吞掉后续求助。
   const closing = marks.map((m, i) => {
-    const body = text.slice((m.index ?? 0) + m[0].length, marks[i + 1]?.index).replace(ARTIFACT_RE, "").trim();
+    const start = (m.index ?? 0) + m[0].length, end = marks[i + 1]?.index;
+    const shown = visible.slice(start, end).split(/\r?\n/);
+    const body = text.slice(start, end).split(/\r?\n/)
+      .filter((_line, n) => !/^[ \t>*|-]*ARTIFACT[ \t]*[:：]/.test(shown[n] ?? "")).join("\n").trim();
     return { kind: m[1] === "NEED" ? "need" as const : "result" as const, text: body };
   }).filter((c) => c.kind === "result" || (c.text && !/^(?:无|没有|none|n\/a|-+)[。.]?$/i.test(c.text))).at(-1);
   return closing ? { ...closing, text: clipMiddle(closing.text, max), artifacts } : { kind: "none", text: "", artifacts };
@@ -685,7 +717,7 @@ export const renderPeerEnvelope = (from: string, chat?: string, chatKey?: string
             ? ["发话方不收回执; 不要为确认收到而 tell_peer 或 notify。"]
             : [
                 "终句面向派活方; 自动回执无需另调工具, 不要重复 tell_peer 或为这轮私聊 notify。",
-                "对 wizard 直说: 不寒暄、不加对人的称呼、不复述它的话; 终句直接交代结论 (`RESULT: …` 可选) (交付物写进文件就回传路径); 要它补信息才能干下去, 就收口成 `NEED: <问题>` (这一份不算交差); 交付了文件, 每个加一行 `ARTIFACT: <路径> — 一句话`。",
+                "对 wizard 直说: 不寒暄、不加对人的称呼、不复述它的话; 交差时必须标明接收者 (`@.name RESULT: …`), 一条消息可分段回复多个接收者 (交付物写进文件就回传路径); 需要对方补信息或继续协作时, 用 tell_peer({kind:\"ask\"}) 发起反问/子任务; 交付了文件, 每个加一行 `ARTIFACT: <路径> — 一句话`。",
               ]),
         ]
       : [
@@ -693,11 +725,11 @@ export const renderPeerEnvelope = (from: string, chat?: string, chatKey?: string
         ]),
     ...(t?.re ? ["这是**续问**: 接着那件活说, 不是一件新活。"] : []),
     // 这句话要怎么接 —— 只有发话方知道, 不写出来对方一律当成一件活去干。
-    ...(t?.act === "ask" ? [`这是一个**提问**: 只答这一问, 几句话${t.quiet ? "" : "收口 (`RESULT:` 可选)"}, 别为它开新活; 你手上原来的活答完接着干。`] : []),
+    ...(t?.act === "ask" ? [`这是一个**提问**: 只答这一问, 几句话${t.quiet ? "" : "并明确收件人 (`@.name RESULT:`)"}; 需要反问或派生子任务时用 tell_peer({kind:"ask"|"task"})。`] : []),
     ...(t?.act === "fyi" ? ["这是一条**知会**: 不用回复、不用收口, 也别为它开新活 —— 与手头的活相关就顺手吸收, 无关就略过; 一句话收住这一轮即可。"] : []),
     // 来回多了就收口: 不在守护进程里拒绝 —— 拒了模型会换条通路接着乒乓。
     ...((t?.legs ?? 0) > 3 ? [`这件活已经来回 ${t!.legs! - 1} 次: 这一次请直接给结论, 拿不准的写清你的假设。`] : []),
-    ...(t?.deadline ? [`期限 ${hhmm(t.deadline)}: 到点还没答完, 发话方收到的是一份超时回执。`] : []),
+    ...(t?.deadline && hasDeadline(t.deadline) ? [`期限 ${hhmm(t.deadline)}: 到点还没答完, 发话方收到的是一份超时回执。`] : []),
   ]);
 
 const hhmm = (ms: number): string => new Date(ms).toTimeString().slice(0, 5);
@@ -730,7 +762,7 @@ export const renderReceiptEnvelope = (
     speaks
       ? "有人等这份结论，不要只写 QUIET。"
       : "无人等这份结论；只有没有新结果、风险或待答 NEED 时，终句才精确写 QUIET。",
-    "缺信息用 NEED: <要什么>，还在等依赖用 WAIT: <在等什么>；先答已有的 NEED。回执轮用 notify 正式报告须显式写 RESULT:（反问写 NEED:），未标记的 notify 只是进度。",
+    "需要对方补信息或协作时用 tell_peer({kind:\"ask\"})；还在等依赖用 WAIT: <在等什么>。回执轮用 notify 正式报告须显式写 RESULT:；未标记的 notify 只是进度。",
     ...(route?.via ? [`这是**沿链升级**的回执: ${route.via} 已不在，原由它收口的任务交由你处理。`] : []),
     ...(route?.retold ? ["这是它对这件活的**追述**: 之前已经交过一份 (定论或失败回执), 这一份是之后补的, 以这一份为准。"] : []),
     // 去向由路由行的 receiver 边算好 (§9.5): up = 终句落到上游那一笔上; chat 给了 = 落回那个群;

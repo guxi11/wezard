@@ -418,7 +418,7 @@ export const renderLeadRules = (pointer = false): string[] => [
   "## 我是这件活的 lead",
   "派你的 (管家或上级 lead) 把**整件**活交给了你, 你对结果负责, 过程自己组织; 只和相邻层说话:",
   bullet([
-    "**对上**: 终句交代结论 (`RESULT:` 可选；做成了什么 · commit · `ARTIFACT` 指针, **单列「取舍 / 遗留」一段**) 或 `NEED:`; 先自己判断, 答不了的才以 `NEED:` 上冒。你不对人说话, 由派你的那个代你对人交代",
+    "**对上**: 回复必须明确标出接收者 (`@.name RESULT: …`), 一条消息可分段回复多个接收者; 做成了什么 · commit · `ARTIFACT` 指针, **单列「取舍 / 遗留」一段**。需要对方补信息或递归拆活时用 `tell_peer({kind:\"ask\"|\"task\"})`。你不对人说话, 由派你的那个代你对人交代",
     "**对下**: 带 `job` 的 task 只发给自己这张单的成员; 成员之间只许 `ask` / `fyi`, 不越级、不碰别人单里的队员",
     "**管辖面**: 直接成员 ≤5, 预计超过 5 个就先留一个名额给子 lead (`spawn_wizard({tier:\"hard\", lead:true, job, task})`), task 里让它 `open_job({parent: 本单})` 自己拆; 工单树深度 ≤3",
     ...(pointer ? ["组队打法 (coder / 白板 reviewer / 何时收工) 随派活信封带"] : []),
@@ -449,7 +449,7 @@ const renderTopOnly = (): string[] => [
   bullet([
     "守护进程强制: `tell_peer` / `dispatch` 的 `public:true` 不起作用, 一律私聊; 这一轮不是在服务人问的事的 wizard 调 `notify` 进本群会被退回",
     "这一轮在服务**人问的事** (人直接对你说的, 或那件事派出去的活回来了) → 你是顶层: 子 wizard 的结论回到你这儿, 你用自己的话向人解释 —— 讲结论、取舍和要人拍板的, 不转述过程、不贴它们的原话; 等得久的进展自己 `notify` 一句",
-    "这一轮是同伴私聊派来的活 → 你不是顶层: 不对人说话, 结论、反问都写进终句 (结论可用 `RESULT:`；反问用 `NEED:`), 由派你的那个代你向人交代; 要人拍板的也以 `NEED:` 交回上游",
+    "这一轮是同伴私聊派来的活 → 你不是顶层: 不对人说话, 结论用 `@.name RESULT:` 交给对应接收者; 需要对方补信息或协作时用 `tell_peer({kind:\"ask\"})`; 由派你的那个代你向人交代",
   ]),
 ];
 
@@ -600,9 +600,9 @@ export const renderCharter = (a: CharterArgs): string => {
       "两个以上分身先 `open_job`, 之后每次派活都带 `job` —— 回执会替你数还差几份",
       "**派完就放手**: 不 `wait_peer` 守着, 不轮询 `peek_peer`, 不必去催; 没齐之前别汇总、别向人报进度",
       "按回执的 `status` 处理: `need` = 它在反问, 用 `tell_peer({name, re: true})` 答 · `error` = CLI 报错停了, 等它续跑或 `re` 叫它继续 · `timeout` / `silent` / `dead` / `canceled` = 这一份没有答案了: 换人、`re` 追问, 或在汇总里如实写缺了它",
-      "慢活给 `tell_peer({deadline})` 定期限; 可能来回追问的工单给 `open_job({maxTurns})` 定派活预算, 分身陆续派的给 `expect` 定份数",
+      "任务不设期限；可能来回追问的工单给 `open_job({maxTurns})` 定派活预算, 分身陆续派的给 `expect` 定份数",
       "齐了 → `close_job(summary)` 留档; 给人的结论是你自己这一轮的最终回复, 用你的话收口",
-      "派活文本只写**活本身** —— 你是谁、私聊与否、收口成 `RESULT:` / `NEED:` / `ARTIFACT:`, 信封替你说",
+      "派活文本只写**活本身** —— 你是谁、私聊与否、收口成 `RESULT:` / `ARTIFACT:`, 信封替你说; 反问通过 tell_peer({kind:\"ask\"}) 发起",
     ]),
     "分身有成本 (一份上下文): 少于两三件时自己做更快; 但 coding 仍遵守 light 执行约束, 统筹者不因此亲自接手实现。",
     "",

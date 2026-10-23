@@ -2,7 +2,7 @@
 //
 // 工单树里「谁能给谁派活」是结构, 不是礼貌: 只靠宪章说「别越级、别横向」, 模型一忙就忘。
 // 这里把能由守护进程拦的那几条拦下来; 拦的理由写清对的做法, 调用方 (模型) 读了就知道改道。
-// 只看 `kind === "task"` 的派活 (除了防环: ask 也拦); `fyi` 永远放行 —— 知会不占对方一轮。
+// 工单结构约束只作用于 task; ask 是反问/求助, 可沿递归方向投递。
 import { ancestorsOf, type JobRecord } from "./jobs.js";
 
 /** 发话方的 peer k 链 (它在答谁、谁又在答谁…, 不含人) 到这么长就不许再往下派 task:
@@ -35,9 +35,6 @@ const isActive = (j: JobRecord, t: string): boolean => j.members.some((m) => m.t
 export const checkDirection = (i: DirectionIn): string | undefined => {
   if (i.kind === "fyi") return undefined;
   const nm = i.nameOf;
-  // 4 防环: 它正在等你答, 你却反过来给它派活 / 提问 —— 两边互等。
-  // 只覆盖私聊 peer 轮: 公开轮 (人在群里开的) 的父 k 是 chat, 链上没有 wizard。
-  if (i.chain.includes(i.target)) return `${nm(i.target)} 正等着你这一轮的答复 (你在答它派的活, 或答的是它上游的上游) —— 反过来派活 / 提问会互相干等; 要问它就以 \`NEED:\` 收口, 它会带着答案来找你`;
   if (i.kind !== "task") return undefined;
   const open = i.jobs.filter((j) => j.status === "open");
   const byId = new Map(open.map((j) => [j.id, j] as const));
