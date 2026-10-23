@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+## [2.8.5] - 2026-10-22
+
+### Fixed
+- 原生 picker 代按原先按整屏文本逐字节比对: 框外实时进度行 (`running 3m ago`) 一变就判「操作已变更」而不代按, 人点通过只会静默失败并反复重推卡。现改为按调用本体比对 —— 解析完整时比工具名 + 参数, 不完整时比框内确认区正文; 计时行 / spinner / agent 输出 / 状态栏不参与指纹。认不出照旧不代按。
+
 ## [2.8.4] - 2026-10-22
 
 ### Fixed
@@ -1255,7 +1260,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.8.4...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.8.5...HEAD
+[2.8.5]: https://github.com/guxi11/wezard/compare/v2.8.4...v2.8.5
 [2.8.4]: https://github.com/guxi11/wezard/compare/v2.8.3...v2.8.4
 [2.8.3]: https://github.com/guxi11/wezard/compare/v2.8.2...v2.8.3
 [2.8.2]: https://github.com/guxi11/wezard/compare/v2.8.1...v2.8.2
