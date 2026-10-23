@@ -175,7 +175,7 @@ const HOLD_RELOG_MS = 5 * 60_000;
 const canonical = (x: unknown): unknown => Array.isArray(x) ? x.map(canonical)
   : x && typeof x === "object" ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, canonical(v)])) : x;
 const digest = (x: unknown): string => createHash("sha256").update(JSON.stringify(canonical(x))).digest("hex");
-export const messageId = (bot: string, chat: string, id: string): string => `h${digest([bot, chat, id])}`;
+export const messageId = (bot: string, chat: string, id: string): string => `h${digest([bot, chat, id]).slice(0, 16)}`;
 export const finalId = (event: string, channel: string, revision: string): string => `f${digest([event, channel, revision])}`;
 const clone = <T>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
 const backoff = (n: number): number => Date.now() + Math.min(60_000, 1000 * 2 ** Math.min(n, 6));
