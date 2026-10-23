@@ -249,7 +249,7 @@ const openWarmPane = (
   log: Logger,
 ): Promise<string | undefined> => warmSessionExclusive(async () => {
   const argv = (sessionless: boolean): string[] => [
-    ...(sessionless ? [] : ["-d", "-t", `${warm}:`]),
+    ...(sessionless ? [] : ["-d", "-t", `=${warm}:`]),
     "-n", name,
     ...(sessionless ? ["-x", String(DETACHED_COLS), "-y", String(DETACHED_ROWS)] : []),
     ...(flags.cwd ? ["-c", dir] : []),
@@ -257,7 +257,7 @@ const openWarmPane = (
     "-P", "-F", "#{pane_id}",
   ];
   const create = async (): Promise<ExecResult> => {
-    const has = await runTmux(["has-session", "-t", warm]);
+    const has = await runTmux(["has-session", "-t", `=${warm}`]);
     // 首次建 session 时它自带的那个 pane 就是第一片 —— 不再 new-window, 否则 session
     // 里永远多躺一条没人认领的空 shell。
     return has.code === 0
@@ -275,7 +275,7 @@ const openWarmPane = (
     return undefined;
   }
   // 没人 attach 的窗口取 session 的 default-size, tmux 自己的默认是 80x24。
-  await runTmux(["set-option", "-t", warm, "default-size", `${DETACHED_COLS}x${DETACHED_ROWS}`]);
+  await runTmux(["set-option", "-t", `=${warm}`, "default-size", `${DETACHED_COLS}x${DETACHED_ROWS}`]);
   return made.stdout.split("\n").map((s) => s.trim()).filter(Boolean)[0] || undefined;
 });
 
@@ -283,7 +283,7 @@ const openWarmPane = (
 const sweepWarmSession = async (warm: string, log: Logger): Promise<void> => {
   if (warmSwept) return;
   warmSwept = true;
-  const r = await runTmux(["list-panes", "-s", "-t", warm, "-F", "#{pane_id}"]);
+  const r = await runTmux(["list-panes", "-s", "-t", `=${warm}`, "-F", "#{pane_id}"]);
   // 超时 = 没问出结果, 残件还在: 复位让下一次补位重试 (session 不存在之类的其他失败
   // 算扫过 —— 没有 pane 就没什么可清的)。
   if (r.timedOut) { warmSwept = false; return; }
@@ -345,7 +345,7 @@ const claimWarmShell = async (cfg: Config, log: Logger, cwd: string, tmuxName: s
     return undefined;
   }
   // 尾冒号 = 只按 session 解析 (同 openPane 里 new-window 的理由)。搬家不改 pane id。
-  const moved = await runTmux(["move-window", "-d", "-s", window, "-t", `${tmuxName}:`]);
+  const moved = await runTmux(["move-window", "-d", "-s", window, "-t", `=${tmuxName}:`]);
   if (!moved.ok) {
     await runTmux(["kill-pane", "-t", entry.pane]);
     log.warn({ pane: entry.pane, cwd: key, stderr: moved.stderr.trim(), code: moved.code }, "warm shell: move-window failed, falling back to cold spawn");
@@ -563,16 +563,16 @@ const claimSpare = async (
   if (!tuiUp) return reject("no input box");
   // 主 session 可能刚被 reap 掉 (最后一个 pane 收掉时 tmux 连 session 一起销毁): 先把它
   // 建起来再把备用搬进来, 用完收掉占位窗口 —— 与冷路径 new-session 那一支同形。
-  const has = await runTmux(["has-session", "-t", want.tmuxName]);
+  const has = await runTmux(["has-session", "-t", `=${want.tmuxName}`]);
   let seedPane = "";
   if (has.code !== 0) {
     const seed = await runTmux(["new-session", "-d", "-s", want.tmuxName, "-n", want.winName, "-x", String(DETACHED_COLS), "-y", String(DETACHED_ROWS), "-P", "-F", "#{pane_id}"]);
     if (!seed.ok) return reject("main session creation failed", { stderr: seed.stderr.trim(), code: seed.code });
     seedPane = seed.stdout.trim();
-    await runTmux(["set-option", "-t", want.tmuxName, "default-size", `${DETACHED_COLS}x${DETACHED_ROWS}`]);
+    await runTmux(["set-option", "-t", `=${want.tmuxName}`, "default-size", `${DETACHED_COLS}x${DETACHED_ROWS}`]);
   }
   // 尾冒号 = 只按 session 解析 (同 openPane 里 new-window 的理由)。搬家不改 pane id。
-  const moved = await runTmux(["move-window", "-d", "-s", window, "-t", `${want.tmuxName}:`]);
+  const moved = await runTmux(["move-window", "-d", "-s", window, "-t", `=${want.tmuxName}:`]);
   if (seedPane) await runTmux(["kill-pane", "-t", seedPane]);
   if (!moved.ok) return reject("move-window failed", { stderr: moved.stderr.trim(), code: moved.code });
   await renameWindow(spare.pane, want.winName);
@@ -1093,16 +1093,17 @@ const spawnTmuxInner = async ({ cfg, log, resumeSessionId, sessionId: freshSessi
   // tmux < 2.9 has no default-size and keeps 80x24.
   const sizeArg = ["-x", String(DETACHED_COLS), "-y", String(DETACHED_ROWS)];
   const openPane = async (): Promise<{ pane: string; warm: boolean } | { reason: string }> => {
-    const has = await runTmux(["has-session", "-t", tmuxName]);
-    if (has.code === 0) await runTmux(["set-option", "-t", tmuxName, "default-size", `${DETACHED_COLS}x${DETACHED_ROWS}`]);
+    const has = await runTmux(["has-session", "-t", `=${tmuxName}`]);
+    if (has.code === 0) await runTmux(["set-option", "-t", `=${tmuxName}`, "default-size", `${DETACHED_COLS}x${DETACHED_ROWS}`]);
     // 主 session 已在 = 这是往现成的盘子里加窗口, 才可能领到暖 shell; 走 new-session 那支
     // 要先建 session, 搬迁窗口过去没有意义, 也领不了。
     const warmPane = has.code === 0 ? await claimWarmShell(cfg, log, cwd, tmuxName, winName) : undefined;
-    // `${tmuxName}:` (trailing colon) forces session-only resolution → next free
-    // window index. Bare `-t wezard` is ambiguous: if a *window* is also named
+    // `=` prevents wezard from matching wezard-warm when the main session is gone.
+    // The trailing colon selects the next free window index.
+    // Bare `-t wezard` is ambiguous: if a *window* is also named
     // `wezard`, tmux matches it and tries to reuse its index → "index N in use".
     const create = () => has.code === 0
-      ? runTmux(["new-window", "-d", "-t", `${tmuxName}:`, "-n", winName, ...cwdArg, ...paneEnv, "-P", "-F", "#{pane_id}"])
+      ? runTmux(["new-window", "-d", "-t", `=${tmuxName}:`, "-n", winName, ...cwdArg, ...paneEnv, "-P", "-F", "#{pane_id}"])
       : runTmux(["new-session", "-d", "-s", tmuxName, "-n", winName, ...sizeArg, ...cwdArg, ...paneEnv, "-P", "-F", "#{pane_id}"]);
     let pane = warmPane ?? "";
     if (!pane) {
@@ -1154,6 +1155,8 @@ const spawnTmuxInner = async ({ cfg, log, resumeSessionId, sessionId: freshSessi
         : (resume ? ["--resume", sessionId, ...(forkSession ? ["--fork-session"] : [])] : ["--session-id", sessionId])),
       ...(backend.name === "codex" ? [
         "--no-daemon",
+        // Keep the startup update picker out of this managed invocation only.
+        "-c", "check_for_update_on_startup=false",
         "-c", `mcp_servers.wezard.command=${JSON.stringify(process.execPath)}`,
         "-c", `mcp_servers.wezard.args=${JSON.stringify([fileURLToPath(new URL("../mcp/server.js", import.meta.url))])}`,
         "-c", `mcp_servers.wezard.env.WEZARD_DAEMON_BASE=${JSON.stringify(`http://127.0.0.1:${cfg.daemon.port}`)}`,
