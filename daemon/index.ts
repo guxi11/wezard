@@ -3601,7 +3601,7 @@ const main = async (): Promise<void> => {
       // 第一期不接 taskFile; MCP 层已拦, 这里兜直连 HTTP / 旧 MCP 进程: 显式 400,
       // 不让调用方以为模板生效了而实际投出去的是空正文。
       if ((body as { taskFile?: string }).taskFile !== undefined)
-        return { status: 400, body: { ok: false, reason: "taskFile not supported on spawn_wizard; use dispatch" } };
+        return { status: 400, body: { ok: false, reason: "taskFile not supported on spawn_wizard; use delegate" } };
       const b = body as { name?: string; tag?: string; description?: string; inherit?: boolean; from?: string; cwd?: string; chat?: string; cli?: CliBackendName; model?: string; effort?: string; tier?: string; task?: string; lead?: boolean; planId?: string };
       const asker = b.task?.trim() ? askerOf(self) : undefined;
       const requestedPlanId = (b.planId ?? "").trim();

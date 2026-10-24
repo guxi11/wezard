@@ -684,7 +684,7 @@ export const hintOf = (use: ToolUse, result: ToolResult | undefined): Hint | und
   const out = outcomeOf(result, j);
   switch (tool) {
     case "tell_peer": case "send_peer": return handoffFrom("tell", a, j, out);
-    case "dispatch": return a.dryRun ? undefined : handoffFrom("dispatch", a, j, out);
+    case "dispatch": case "delegate": return a.dryRun ? undefined : handoffFrom("dispatch", a, j, out);
     case "clone_wizard": case "spawn_wizard": {
       const via = tool === "clone_wizard" ? "clone" : "spawn";
       return str(a.task) ? handoffFrom(via, a, j, out)

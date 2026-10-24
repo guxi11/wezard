@@ -465,7 +465,7 @@ const TELL_SCHEMA = {
 };
 
 const TELL_DESC =
-  "跟另一个 wizard 说话 —— 文本原样落进它的输入框, 它当成新的一轮接手 (派活、答它的问题、叫它继续都走这里)。目标不存在就先 spawn_wizard / clone_wizard。独立新活先按目标与难度 dispatch; re / now 仅用于当前任务的补充证据、纠正或答问, 不把无关小活追加给正在处理复杂任务的 lead, 也不要用 ask 包装需要另行检查的新任务。\n" +
+  "跟另一个 wizard 说话 —— 文本原样落进它的输入框, 它当成新的一轮接手 (派活、答它的问题、叫它继续都走这里)。目标不存在就先 spawn_wizard / clone_wizard。独立新活先按目标与难度 delegate; re / now 仅用于当前任务的补充证据、纠正或答问, 不把无关小活追加给正在处理复杂任务的 lead, 也不要用 ask 包装需要另行检查的新任务。\n" +
   "返回实际队列状态、事件标识及异常信息，不重复固定回执提示。对方用 `@.你的名字 RESULT:` 提交结果后, 结果持久化为回执；同批结果收齐再合并送到你这里, 你正忙时排队。等待回执不阻止你接收其他消息。\n" +
   "默认私聊, 只记在双方 rolepage; 守护进程给 `text` 挂信封 (发话人、私聊/公开、终句收口约定)。拒绝对自己发送。\n" +
   "**协作方向**: wizard 的直属 parent 代表管理归属；横向沟通不改变家谱。反问用 `kind:\"ask\"`，知会用 `kind:\"fyi\"`，派新工作用默认 `task`。`fyi` 永远放行。";
@@ -738,7 +738,7 @@ server.registerTool(
     inputSchema: {
       name: z.string().optional().describe("新名字, 1-32 位字母/数字/`_`/`-`, 全机唯一。不改就别传。"),
       description: z.string().optional().describe("一句话职责, 例如 '盯 wezard 主仓的重构与发版'。不改就别传。"),
-      expertise: z.string().optional().describe("一句话专长: 熟哪块代码 / 领域, 例如 'rolepage 前端 (web/chat.js · role-view)'。名册与 dispatch 候选行都显示它, 任务与它重叠时可据此选择。传 '-' 清掉。"),
+      expertise: z.string().optional().describe("一句话专长: 熟哪块代码 / 领域, 例如 'rolepage 前端 (web/chat.js · role-view)'。名册与 delegate 候选行都显示它, 任务与它重叠时可据此选择。传 '-' 清掉。"),
     },
   },
   async ({ name, description, expertise }) =>
@@ -779,12 +779,12 @@ server.registerTool(
   {
     title: "Who could take this task",
     description:
-      "一件活要不要转给已有 wizard 时调它。只返回按 limit 截断的候选文本，不包含完整诊断或未展示候选。候选排序不等于推荐追加任务；独立新活按本次难度 dispatch，同验收目标续篇用 tell_peer 的 re。",
+      "一件活要不要转给已有 wizard 时调它。只返回按 limit 截断的候选文本，不包含完整诊断或未展示候选。候选排序不等于推荐追加任务；独立新活按本次难度 delegate，同验收目标续篇用 tell_peer 的 re。",
     inputSchema: {
       task: z.string().describe("这件活及验收目标, 原话或一句概括都行。文件名 / 模块名 / 函数名帮助找线索; 公共规则文件、同工作区和关键词重叠不证明是同一任务。"),
       cwd: z.string().optional().describe("这件活落在哪个工作区。省略 = 你自己的工作区。"),
-      tier: z.enum(TIERS).optional().describe("与 dispatch 相同的本次任务档位；省略按任务判断。"),
-      force: z.boolean().optional().describe("与 dispatch 相同，仅越过冷缓存成本门槛。"),
+      tier: z.enum(TIERS).optional().describe("与 delegate 相同的本次任务档位；省略按任务判断。"),
+      force: z.boolean().optional().describe("与 delegate 相同，仅越过冷缓存成本门槛。"),
       limit: z.number().optional().describe("最多列几个候选 (1-20, 默认 5)。"),
     },
   },
@@ -792,22 +792,19 @@ server.registerTool(
     unwrapCandidates(await daemonPost("/wizard/route", { task, ...(tier ? { tier } : {}), ...(force !== undefined ? { force } : {}), ...(cwd ? { cwd } : {}), ...(limit ? { limit } : {}) })),
 );
 
-server.registerTool(
-  "dispatch",
-  {
-    title: "Dispatch a task (default decision by the daemon)",
-    description:
+const DELEGATE_DESC =
       "派活一步到位: 给 task 或 taskFile+params。返回实际决定、目标、队列状态、event 与档位；dryRun 只返回决定与简短理由。lead 只在复杂任务使用。planId 只记录 event 与 plan 的关联，daemon 不会代替 owner 推进 DAG。\n" +
       "先按验收目标分清独立新活和原任务续篇。独立新活另派不等于强制新生, 允许复用近期实际材料相关、空闲且无职责占用的非 lead; 按本次难度派, 不因同项目、公共 AGENTS.md/CLAUDE.md 或词面重叠塞给已有 lead。自动复用要求实质上下文证据、无 lead/任务占用、成本合适; 其余白板 spawn。难度看所需判断而非句长: 指明函数、接口、文件、按钮等具体对象且范围清楚的低风险 coding 默认 light; 其他常规任务默认 standard; 只有复杂方案判断、疑难升级或安全/并发/架构等高风险审查才显式 hard。\n" +
-      "你不同意就**显式推翻**: `to` 用于人明确指定或已确认必需的上下文连续性, `spawn:true` 硬要新的, `force:true` 只越过缓存成本门控, 不放宽自动复用的相关性。复杂任务用 `lead:true`: lead 建 plan，按阶段创建执行者并验收；简单任务直接派活、不建 plan。",
-    inputSchema: {
+      "你不同意就**显式推翻**: `to` 用于人明确指定或已确认必需的上下文连续性, `spawn:true` 硬要新的, `force:true` 只越过缓存成本门控, 不放宽自动复用的相关性。复杂任务用 `lead:true`: lead 建 plan，按阶段创建执行者并验收；简单任务直接派活、不建 plan。";
+
+const DELEGATE_SCHEMA = {
       // task 与 taskFile 二选一 (§8): 不存在「task 作摘要」的用法 —— 旧 daemon 会把
       // task 当正文投出去, 摘要进 pane 就等于静默丢卡。选人/选档/description 由
       // daemon 用展开文本或 params.header 派生 (阶段 2)。
       task: z.string().optional().describe("这件活的正文, 与 `taskFile` 二选一。给了 `taskFile` 就别再给 task —— 守护进程用展开后的全文派生选人与默认 description。写清目标与交付, 带文件名 / 模块名帮助找上下文; 公共规则文件或同目录不构成复用理由。不要把独立核查改写成原 lead 的附加交付。"),
       taskFile: z.string().optional().describe("模板文件路径, **相对你的工作区**的相对路径 (绝对路径与 `~` 开头一律 400)。给了它, 投递正文由 daemon 用模板 + `params` 展开; 与 `task` 至少给一个。"),
       params: z.record(z.string()).optional().describe("`taskFile` 模板里 `{{name}}` 占位符的参数值 (全为字符串)。缺参数 / 多余参数都会被 400 拒绝。"),
-      return: z.enum(["self", "transfer", "detach", "none"]).optional().describe(RETURN_DOC + " dispatch 不能配 lead:true 用 transfer。"),
+      return: z.enum(["self", "transfer", "detach", "none"]).optional().describe(RETURN_DOC + " delegate 不能配 lead:true 用 transfer。"),
       for: z.string().optional().describe(FOR_DOC),
       name: z.string().optional().describe("可选的新 wizard 短名, 不是已有执行者的地址 (指定已有执行者用 to)。推荐省略或空白，新建时由 daemon 分配全机唯一中性英文名，职责另存; 复用时忽略。"),
       description: z.string().optional().describe("可选的新 wizard 职责, 一句话。省略或空白 = 取 task 摘要; 复用时忽略。"),
@@ -819,14 +816,20 @@ server.registerTool(
       planId: z.string().optional().describe("这次派活归属的 plan id。仅关联event供owner的闲时提醒判断，不会自动推进plan；补充同一event时沿用关联。"),
       public: z.boolean().optional().describe("默认 true (气泡与回复进群); false = 私聊, 只记 rolepage。"),
       dryRun: z.boolean().optional().describe("只要默认决定与理由, 不执行。"),
-    },
-  },
-  async (a) => {
-    if (a.task === undefined && a.taskFile === undefined)
-      return fail("dispatch: `task` 与 `taskFile` 至少给一个 (后者是相对你工作区的模板路径, 由 daemon 展开)");
-    return unwrap("dispatch", await daemonPost("/dispatch", a));
-  },
-);
+    };
+
+const runDelegate = async (tool: string, a: z.infer<z.ZodObject<typeof DELEGATE_SCHEMA>>) => {
+  if (a.task === undefined && a.taskFile === undefined)
+    return fail(`${tool}: ` + "`task` 与 `taskFile` 至少给一个 (后者是相对你工作区的模板路径, 由 daemon 展开)");
+  return unwrap(tool, await daemonPost("/dispatch", a));
+};
+
+server.registerTool("delegate", { title: "Delegate a task (default decision by the daemon)", description: DELEGATE_DESC, inputSchema: DELEGATE_SCHEMA }, (a) => runDelegate("delegate", a));
+server.registerTool("dispatch", {
+  title: "(deprecated) alias of delegate",
+  description: "旧名兼容别名，参数与返回行为同 `delegate`。新调用统一使用 `delegate`。",
+  inputSchema: Object.fromEntries(Object.entries(DELEGATE_SCHEMA).map(([k, v]) => [k, v.describe("")])) as typeof DELEGATE_SCHEMA,
+}, (a) => runDelegate("dispatch", a));
 
 // 换模型和 spawn 时挑模型是同一条路: 守护进程在目标 pane 里打开 `/model` 列表,
 // 读出这台 CLI 此刻真有的每一项, 挑最接近的, 方向键移过去选中。
@@ -860,7 +863,7 @@ const offspringShape = {
   // 出生投递 (bearAs 内直接 acceptPeerDispatch) 不经 tell 的模板展开入口 —— 第一期
   // 不接 taskFile。声明出来是为了显式报错: 没声明的字段会被 zod 静默剥掉, 调用方
   // 会以为模板生效了而实际投出去的是空/残正文。
-  taskFile: z.string().optional().describe("(第一期不支持, 传了报错) 模板正文请改用 dispatch 的 `taskFile`+`params`。"),
+  taskFile: z.string().optional().describe("(第一期不支持, 传了报错) 模板正文请改用 delegate 的 `taskFile`+`params`。"),
   params: z.record(z.string()).optional().describe("(第一期不支持, 传了报错) 同 `taskFile`。"),
   chat: z.string().optional().describe("把它生在另一个聊天里 (wizard_roster 里的 home 聊天名)。省略 = 你自己的聊天, 这是绝大多数情况。"),
   cli: z.enum(["claude", "claude-internal", "codebuddy", "codex"]).optional().describe("兼容旧参数; 新建 pane 统一使用配置的 wrc.defaultCli。"),
@@ -877,7 +880,7 @@ type Offspring = { lead?: boolean; description: string; name?: string; task?: st
 const bear = (tool: string, inherit: boolean) => async (a: Offspring) => {
   // 见 offspringShape 的 taskFile 注释: 出生投递没有模板展开这一站。
   if (a.taskFile !== undefined || a.params !== undefined)
-    return fail(`taskFile not supported on ${tool}; use dispatch`);
+    return fail(`taskFile not supported on ${tool}; use delegate`);
   return unwrap(inherit ? "clone_wizard" : "spawn_wizard", await daemonPost("/wizard/clone", {
     inherit,
     description: a.description,

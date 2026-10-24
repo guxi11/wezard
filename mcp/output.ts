@@ -33,7 +33,7 @@ const planBrief = (value: unknown): unknown => {
 export const present = (tool: string, raw: unknown, input?: Row): unknown => {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
   const row = raw as Row;
-  if (tool === "dispatch") {
+  if (tool === "dispatch" || tool === "delegate") {
     if (row.dryRun === true) return {
       ...pick(row, ["ok", "dryRun", "decision", "name", "tier"]),
       reason: dryRunReason(row),

@@ -2,7 +2,7 @@
 // 它一接到活就忘 —— 自己改一片代码, 全群排在它后面。所以在 PreToolUse 上由守护进程拦:
 // 改文件 / 开子代理一律拒; 读代码放行 (人 2026-10-20 定的口径: 只拦「写」这一面)。
 // 其余自己查 (状态命令、外部工具) 每轮限 budget 次。
-// 拒的理由写成改道说明 —— 模型读 deny reason 就知道下一步是 dispatch。
+// 拒的理由写成改道说明 —— 模型读 deny reason 就知道下一步是 delegate。
 
 /** 不占预算: 分派与协作本身 (wezard MCP)、不碰工作区的元工具, 以及读工作区 ——
  *  Read / Grep / Glob 与 cat / grep / git show 之类只读命令只看不改, 放它看。 */
@@ -79,15 +79,15 @@ const kindOf = (toolName: string, toolInput: unknown): Kind => {
   return shellReads(cmd) ? "free" : "look";
 };
 
-const DISPATCH = "`dispatch({task, name, description})` 交出去 (task 写人的原话加你知道的背景)";
+const DELEGATE = "`delegate({task, name, description})` 交出去 (task 写人的原话加你知道的背景)";
 const handsReason = (toolName: string): string =>
   toolName === "REPL"
-    ? `你是这个群的管家, 这段 REPL 在亲手干活 (写文件 / 开子代理) —— 管家一律不做, 用 ${DISPATCH}。这是守护进程拦的, 重试结果一样。`
+    ? `你是这个群的管家, 这段 REPL 在亲手干活 (写文件 / 开子代理) —— 管家一律不做, 用 ${DELEGATE}。这是守护进程拦的, 重试结果一样。`
     : toolName === "Bash"
-    ? `你是这个群的管家, 这条 Bash 在写文件 —— 改文件管家一律不做 (sed -i / 重定向 / tee 也算), 用 ${DISPATCH}。这是守护进程拦的, 重试结果一样。`
-    : `你是这个群的管家, ${toolName} 是亲手干活 —— 改文件、开子代理管家一律不做, 用 ${DISPATCH}。这是守护进程拦的, 重试结果一样。`;
+    ? `你是这个群的管家, 这条 Bash 在写文件 —— 改文件管家一律不做 (sed -i / 重定向 / tee 也算), 用 ${DELEGATE}。这是守护进程拦的, 重试结果一样。`
+    : `你是这个群的管家, ${toolName} 是亲手干活 —— 改文件、开子代理管家一律不做, 用 ${DELEGATE}。这是守护进程拦的, 重试结果一样。`;
 const budgetReason = (budget: number): string =>
-  `这一轮你已经自己跑了 ${budget} 次命令 —— 管家每轮只够看一两眼状态。还要接着查, 说明这是一件活: 用 ${DISPATCH}, 结论回来再向人交代。这是守护进程拦的, 别重试。`;
+  `这一轮你已经自己跑了 ${budget} 次命令 —— 管家每轮只够看一两眼状态。还要接着查, 说明这是一件活: 用 ${DELEGATE}, 结论回来再向人交代。这是守护进程拦的, 别重试。`;
 
 /** 一个管家会话本轮已查的次数; 轮次一换就归零。 */
 interface Tally { turn: string; used: number }

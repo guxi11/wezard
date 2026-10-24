@@ -25,7 +25,7 @@ export interface WizardRecord {
   name: string;
   /** 一句话职责 —— 别的 wizard 靠它决定该不该找你。 */
   description: string;
-  /** 一句话专长: 熟哪块代码 / 领域 (`wizard_identity({expertise})` 自己写)。lead 借人 (`role:"expert"`) 与 dispatch 选人都按它挑。 */
+  /** 一句话专长: 熟哪块代码 / 领域 (`wizard_identity({expertise})` 自己写)。lead 借人 (`role:"expert"`) 与 delegate 选人都按它挑。 */
   expertise?: string;
   /** 生它的 wizard 的 target。有值 = 它是个 clone。 */
   parent?: string;
@@ -442,7 +442,7 @@ const renderTopOnly = (): string[] => [
   "## 本群开着顶层模式",
   "人在这个群里只和**顶层 wizard** 打交道 —— 群管家, 以及人自己 `.name` 点名的那个。顶层 wizard 派出去之后, wizard 之间的一切往来都是私聊, 只在 rolepage。",
   bullet([
-    "守护进程强制: `tell_peer` / `dispatch` 的 `public:true` 不起作用, 一律私聊; 这一轮不是在服务人问的事的 wizard 调 `notify` 进本群会被退回",
+    "守护进程强制: `tell_peer` / `delegate` 的 `public:true` 不起作用, 一律私聊; 这一轮不是在服务人问的事的 wizard 调 `notify` 进本群会被退回",
     "这一轮在服务**人问的事** (人直接对你说的, 或那件事派出去的活回来了) → 你是顶层: 子 wizard 的结论回到你这儿, 你用自己的话向人解释 —— 讲结论、取舍和要人拍板的, 不转述过程、不贴它们的原话; 等得久的进展自己 `notify` 一句",
     "这一轮是同伴私聊派来的活 → 你不是顶层: 不对人说话, 结论用 `@.name RESULT:` 交给对应接收者; 需要对方补信息或协作时用 `tell_peer({kind:\"ask\"})`; 由派你的那个代你向人交代",
   ]),
@@ -477,11 +477,11 @@ const renderStewardRules = (a: CharterArgs): string[] => {
     bullet([
       "先判续篇还是新活: 只有服务于原任务同一验收目标的补充证据、纠正或返工才用 `tell_peer({name: 原来接活的那个, re})`。能独立验收、无需原任务结论或在途状态的新问题必须另派, 另派不等于强制新生: 有近期实际材料关联的空闲、无职责占用非 lead 可以复用; 同项目、同目录、刚联系过、读过公共规则文件都不算续篇, 不得把它改写成「同时核实 / 顺便检查 / 最终交付中补充」塞回原 lead",
       "保护复杂 lead 的注意力: 正在排查编辑器问题时, 新问「有没有 AGENTS.md、如何加载 CLAUDE.md」是独立核查 → 另派 light; 不用同一笔 re, 不用 priority:now / ask 把新工作插进去。真正依赖原排障证据的纠正仍交回原 lead",
-      `范围清楚、低风险的 coding → \`dispatch({tier:"light", task, description})\`; 机械一步用 mini。你负责写计划与验收标准并验收交付; task 写人的原话 + 你知道的背景。守护进程选人并${a.topOnly ? "私聊投出去" : "公开投出去 (`.你: .它` 进群, 它的回复也进群)"}, 结论作为回执回到你这儿`,
+      `范围清楚、低风险的 coding → \`delegate({tier:"light", task, description})\`; 机械一步用 mini。你负责写计划与验收标准并验收交付; task 写人的原话 + 你知道的背景。守护进程选人并${a.topOnly ? "私聊投出去" : "公开投出去 (`.你: .它` 进群, 它的回复也进群)"}, 结论作为回执回到你这儿`,
       "难度按本次所需判断选 tier, 不按句长或已有 wizard 的档位: 指明具体代码对象的普通低风险 coding 默认 light; 其他常规任务默认 standard; 只有复杂方案判断、疑难升级或安全/并发/架构等高风险审查才显式 `tier:\"hard\"`; 多轮统筹才 lead:true (lead 那档就是 hard)。常规 coding 不默认增加 hard reviewer, 需要独立审查时按需选择档位",
-      "简单问题可以让目标直接答人 → `dispatch({…, return:\"transfer\"})` 或 `tell_peer({…, return:\"transfer\"})` 显式移交本轮回答权与控制权；成功后停止派活与对人答复、静默收口。daemon 承接已有气泡，目标终句直接交付人；忙目标返回 409、你仍负责回答。不带 return 保持普通回执。移交不能带 lead/after/re，也不能已有子活; 想自己接它的 NEED 就别 transfer",
-      "复杂活 (多处改动、多轮、有先后或要共享材料) → `dispatch({…, lead:true})`; lead 建立 plan 并逐阶段推进，简单问题不建 plan。",
-      "dispatch 选的人默认照办, 只在看得出它错时推翻: 人明确指定执行者或你能说明必需的上下文连续性 → `to`; 同一任务续篇仍用同一笔 re (re: 那一笔的 event id); 只是字面沾边 → `spawn:true`; 真要依赖冷的大 ctx wizard → `to` + `force:true`; 档位不对 → `tier`; 想看证据 → `route_candidates`。to/force 不是给已有 lead 追加独立小活的捷径, 复用前要核对验收目标、所需判断和原上下文是否必需",
+      "简单问题可以让目标直接答人 → `delegate({…, return:\"transfer\"})` 或 `tell_peer({…, return:\"transfer\"})` 显式移交本轮回答权与控制权；成功后停止派活与对人答复、静默收口。daemon 承接已有气泡，目标终句直接交付人；忙目标返回 409、你仍负责回答。不带 return 保持普通回执。移交不能带 lead/after/re，也不能已有子活; 想自己接它的 NEED 就别 transfer",
+      "复杂活 (多处改动、多轮、有先后或要共享材料) → `delegate({…, lead:true})`; lead 建立 plan 并逐阶段推进，简单问题不建 plan。",
+      "delegate 选的人默认照办, 只在看得出它错时推翻: 人明确指定执行者或你能说明必需的上下文连续性 → `to`; 同一任务续篇仍用同一笔 re (re: 那一笔的 event id); 只是字面沾边 → `spawn:true`; 真要依赖冷的大 ctx wizard → `to` + `force:true`; 档位不对 → `tier`; 想看证据 → `route_candidates`。to/force 不是给已有 lead 追加独立小活的捷径, 复用前要核对验收目标、所需判断和原上下文是否必需",
       "lead 接手后你只和它私聊, 实施期间不插手、不越级; 复杂任务的进度由它维护 plan",
       "名册里职责空着的 wizard, 转活前先 `peek_peer` 并让它补一句职责 —— 那是你分派的依据",
     ]),
@@ -496,7 +496,7 @@ const renderStewardRules = (a: CharterArgs): string[] => {
     ]),
     "",
     bullet([
-      ...(a.stewardBudget < 0 ? [] : [`**守护进程替你守着**: 改文件 (含用 Bash 写: sed -i / 重定向 / tee) 与开子代理直接被拒; 读代码 (Read / Grep / Glob, cat / grep / git show 等) 放行不计数; 其余命令每轮超过 ${a.stewardBudget} 次也拒 —— 被拒就是该 \`dispatch\` 了, 别重试、别换工具绕`]),
+      ...(a.stewardBudget < 0 ? [] : [`**守护进程替你守着**: 改文件 (含用 Bash 写: sed -i / 重定向 / tee) 与开子代理直接被拒; 读代码 (Read / Grep / Glob, cat / grep / git show 等) 放行不计数; 其余命令每轮超过 ${a.stewardBudget} 次也拒 —— 被拒就是该 \`delegate\` 了, 别重试、别换工具绕`]),
       topOnlyLine(policyKeyOf(a.chat, a.principal), a.topOnly),
     ]),
   ];
@@ -566,7 +566,7 @@ export const renderCharter = (a: CharterArgs): string => {
     "## 我能做什么 (MCP `wezard`; 参数与边界看各工具描述)",
     bullet([
       "`wizard_roster` 找人: 谁在、在哪干、忙不忙 (带条件收窄, 别拉全表)",
-      "`dispatch` 派一件活: 守护进程替你选人 (已有的 / 按档白板 spawn) 并投出去, 回决定与理由 · `route_candidates` 只想看候选证据、自己判断时",
+      "`delegate` 派一件活: 守护进程替你选人 (已有的 / 按档白板 spawn) 并投出去, 回决定与理由 · `route_candidates` 只想看候选证据、自己判断时",
       "`peek_peer` 某个 wizard 在干嘛、卡在哪 · `read_chat` 群里 / 私聊里谁对谁说了什么",
       "`tell_peer` 驱动另一个 wizard (派活、答它、叫它继续), 它的结论自动回执给你 · 插话 / 答它的问 → `priority:\"now\"`, 真紧急 → `\"urgent\"`; 只问一句 → `kind:\"ask\"`, 只知会 → `\"fyi\"`",
       `\`notify\` 只是告诉**人**一件事, 不驱动谁${a.topOnly ? " (顶层模式: 只有顶层 wizard 能 notify 进本群)" : ""} · 要给人看的截图 / 图表 / 文件 → \`send_file\` (别只贴本地路径, 人打不开)`,
@@ -588,7 +588,7 @@ export const renderCharter = (a: CharterArgs): string => {
     "标签外另有发话人自己的话时, 才按「他的话 + 他贴来的资料」读。没有信封的就是人说的。",
     "",
     "## 怎么干活: 编排",
-    "**Coding 默认编排**: dispatch 对范围清楚、低风险且指明函数、接口、文件、按钮等具体对象的 coding 默认用 light; 直接 clone/spawn coding 执行者时显式传 `tier:\"light\"` (省略仍沿用 CLI 默认 / clone 来源档位)。light 执行者直接完成分配给自己的实现, 不递归派 coder。简单任务不建 plan；复杂任务由 lead 维护 plan，写清阶段与验收标准并逐步推进。只有复杂方案判断、疑难升级，或安全/并发/架构等高风险审查才使用 hard; 常规 coding 不默认增加 hard reviewer, 独立审查可按需选 light / standard / hard。",
+    "**Coding 默认编排**: delegate 对范围清楚、低风险且指明函数、接口、文件、按钮等具体对象的 coding 默认用 light; 直接 clone/spawn coding 执行者时显式传 `tier:\"light\"` (省略仍沿用 CLI 默认 / clone 来源档位)。light 执行者直接完成分配给自己的实现, 不递归派 coder。简单任务不建 plan；复杂任务由 lead 维护 plan，写清阶段与验收标准并逐步推进。只有复杂方案判断、疑难升级，或安全/并发/架构等高风险审查才使用 hard; 常规 coding 不默认增加 hard reviewer, 独立审查可按需选 light / standard / hard。",
     "**控制流在你手里** —— 没有别的调度器替你跑: 你自己分路、派活、收回执、汇总。一组「共享同一批材料」的任务:",
     bullet([
       "先在自己这里把**公共材料**读进上下文, 再 `clone_wizard({task})` 分出去 (材料已在某个同伴那里就 `from` 它), 每个只交代各自那份差异 —— 别让每个分身各读一遍",

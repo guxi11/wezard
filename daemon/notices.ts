@@ -211,8 +211,8 @@ export const rosterPart = (ns: readonly Notice[], cwd: string, snap?: () => read
     return {
       text: renderReminder({ wezard: "roster" }, [
         "Wizards in this chat now (as of this message; truth: wizard_roster). FYI only — don't reply.",
-        // 列义只随整表给 (每个窗口一次), 变动行不重复。dispatch 不点名时自己算冷热, 这几列只在点名 `to` / tell_peer 时要看。
-        "state: busy=mid-turn (a new task queues behind it) · parked=waiting on an approval click · idle=free · -=no live session (waking respawns it). cache cold = waking it rewrites its whole ctx (≈ctx/25k × a fresh spawn); only weigh this when you name `to` — dispatch already does.",
+        // 列义只随整表给 (每个窗口一次), 变动行不重复。delegate 不点名时自己算冷热, 这几列只在点名 `to` / tell_peer 时要看。
+        "state: busy=mid-turn (a new task queues behind it) · parked=waiting on an approval click · idle=free · -=no live session (waking respawns it). cache cold = waking it rewrites its whole ctx (≈ctx/25k × a fresh spawn); only weigh this when you name `to` — delegate already does.",
         ...renderSnapshot(table),
         ...groupRows(notes.map(([, n]) => n), cwd).map((r) => `- ${r}`),
       ]),

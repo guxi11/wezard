@@ -1719,7 +1719,7 @@
     // 生它、归它管的那一位下面挂的是 clone (带上下文) 或 spawn (白板) —— 与调用框下的提示行同一套字。
     // clone 徽标点了落到 origin 里的分叉处。
     clone: { mark: 'clone', tip: 'clone_wizard 生的分身: fork 了上下文, 开局带着那一刻读过的一切; 归生它的那位管 —— 点了看它在哪一处分叉' },
-    spawn: { mark: 'spawn', tip: 'spawn_wizard / dispatch 白板生的: 不继承上下文, 只是归生它的那位管 (不带 detached)' },
+    spawn: { mark: 'spawn', tip: 'spawn_wizard / delegate (dispatch 旧名兼容) 白板生的: 不继承上下文, 只是归生它的那位管 (不带 detached)' },
     fork: { mark: '⑂ 上下文', tip: '分身的上下文 fork 自它 —— 生它、归它管的是另一位' },
     peer: { mark: '💬', tip: 'send_peer 发起的对话' },
   };
