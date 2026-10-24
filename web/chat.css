@@ -756,12 +756,41 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .tcard.bad { border-color: #cf222e55; border-left: 3px solid #cf222e }
 .tcard.flash { animation: flash 1.2s ease-out }
 .plan-main { min-width: 0; flex: 1 }
-.plan-main h3 { display: flex; align-items: baseline; gap: 8px; margin: 0 0 4px; font-size: 13px }
+.plan-main h3 { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; min-width: 0; margin: 0 0 4px; font-size: 13px; overflow-wrap: anywhere; word-break: break-word }
+.plan-main > p { min-width: 0; overflow-wrap: anywhere; word-break: break-word; white-space: pre-wrap }
 .plan-main .pid { color: var(--faint); font: 10.5px ui-monospace, Menlo, monospace }
-.plan-tasks { margin: 10px 0 0; padding-left: 22px; display: grid; gap: 8px }
-.plan-tasks li { padding-left: 3px }
-.plan-tasks small { display: block; color: var(--faint); margin-top: 3px }
-.plan-tasks p { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--mute); font-size: 11.5px }
+.plan-counts, .plan-graph-note { margin-top: 8px; color: var(--mute); font-size: 12px; line-height: 1.5 }
+.plan-graph-note { color: var(--faint); font-size: 11px }
+.plan-state-active .plan-state-tag { color: #0969da; background: #ddf4ff; }
+.plan-state-paused .plan-state-tag { color: #8250df; background: #fbefff; }
+.plan-state-completed .plan-state-tag { color: #1a7f37; background: #dafbe1; }
+.plan-state-canceled .plan-state-tag { color: #cf222e; background: #ffebe9; }
+.plan-graph { max-width: 100%; margin-top: 8px; overflow: auto; overscroll-behavior-inline: contain; border: 1px solid var(--line); border-radius: 9px; background: #f8fafc }
+.plan-graph-inner { position: relative; width: max-content; min-width: 100%; padding: 12px; }
+.plan-edges { position: absolute; z-index: 0; inset: 0; overflow: visible; pointer-events: none; }
+.plan-edge { fill: none; stroke: #8c98a8; stroke-width: 1.6; }
+.plan-arrow-tip { fill: #8c98a8; }
+.plan-layers { position: relative; z-index: 1; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(210px, 260px); align-items: start; gap: 28px; width: max-content; }
+.plan-layer { display: grid; align-content: start; gap: 12px; min-width: 0; }
+.plan-node { min-width: 0; padding: 10px; border: 1px solid #d0d7de; border-left: 3px solid #8c98a8; border-radius: 8px; background: #fff; box-shadow: 0 1px 2px #1f23280d; overflow-wrap: anywhere; }
+.plan-node-head { display: flex; align-items: flex-start; gap: 7px; min-width: 0; }
+.plan-node-head > b { min-width: 0; flex: 1; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; font-size: 13px; line-height: 1.45; }
+.plan-node .task-tag { flex: none; white-space: nowrap; }
+.plan-node.task-pending { border-left-color: #8c959f; }
+.plan-node.task-in_progress { border-left-color: #0969da; background: #f6faff; }
+.plan-node.task-completed { border-left-color: #1a7f37; background: #f6fff8; }
+.plan-node.task-canceled { border-left-color: #cf222e; background: #fff8f8; }
+.plan-deps { display: block; margin-top: 7px; color: var(--faint); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.plan-node-desc, .plan-progress, .plan-result { margin: 7px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--mute); font-size: 12px; line-height: 1.5; }
+.plan-progress b, .plan-result b { display: block; color: var(--ink); font-size: 11px; }
+.plan-graph-empty { margin-top: 8px; }
+@media (max-width: 600px) {
+  .plan-graph-inner { padding: 10px; }
+  .plan-layers { grid-auto-columns: minmax(0, min(260px, calc(100vw - 122px))); gap: 24px; }
+  .plan-node { padding: 10px; }
+  .plan-node-head > b { font-size: 13px; }
+  .plan-node-desc, .plan-progress, .plan-result { font-size: 12px; }
+}
 @keyframes flash { 0% { box-shadow: 0 0 0 4px #9a670055 } 100% { box-shadow: 0 0 0 4px #9a670000 } }
 .tc-time {
   flex: none; width: 92px; display: flex; flex-direction: column; gap: 1px;

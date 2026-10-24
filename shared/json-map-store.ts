@@ -1,11 +1,10 @@
-// Keyed JSON file that writes through on every mutation — the shape four
-// daemon stores (sessions / mirror attachments / wizards / jobs) had each
-// re-derived.
+// Keyed JSON file that writes through on every mutation — shared by daemon
+// stores for mirror attachments, wizard identities and recovery ledgers.
 //
 // Tolerant at both ends on purpose: a corrupt file reads as empty and a failed
 // write is swallowed. Everything kept here is recovery state, so losing it
 // costs a re-attach — never a live session. Strict callers opt into atomic,
-// durable writes and reject corrupt data/write failures (jobs and tracked ledger).
+// durable writes and reject corrupt data/write failures.
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, openSync, fsyncSync, closeSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";

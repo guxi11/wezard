@@ -74,7 +74,6 @@ export interface Route {
   deadlineAt: number;
   /** 父行的「下一个子行序号」; 子行 open 时由子行 id 顶起来, 不单独落 op。 */
   seq: number;
-  job?: string;
   /** 所属 receiver 收集批次; 让各成员回执在跨 reload 后仍能判定是否齐全。 */
   batch?: string;
   /** 仅 held: 这几笔落定 (且都是 done) 才投给 owner (见 §4.2 「held 前置失败」)。 */
@@ -103,7 +102,7 @@ export const EMPTY: Table = {};
 /** 每条 op 都带 `at` (日志的审计时刻; 只有 open / row 会写进行里)。`row` = 压实快照行,
  *  fold 时等价于把该行整体置为这份状态。 */
 export type Op =
-  | { op: "open"; at: number; event: EventId; owner: Key; receiver: Receiver; deadlineAt: number; job?: string; batch?: string; asker?: Asker; after?: EventId[]; status?: "open" | "held" }
+  | { op: "open"; at: number; event: EventId; owner: Key; receiver: Receiver; deadlineAt: number; batch?: string; asker?: Asker; after?: EventId[]; status?: "open" | "held" }
   | { op: "release"; at: number; event: EventId }
   | { op: "mark"; at: number; event: EventId; status: "open" | "need" | "error"; body?: string; rev?: string; report?: Report }
   | { op: "move"; at: number; event: EventId; owner: Key }
@@ -176,7 +175,6 @@ export const step = (table: Table, op: Op): Table => {
       const row: Route = {
         event: op.event, owner: op.owner, receiver: op.receiver,
         status: op.status ?? "open", at: op.at, deadlineAt: op.deadlineAt, seq: 0,
-        ...(op.job ? { job: op.job } : {}),
         ...(op.batch ? { batch: op.batch } : {}),
         ...(op.asker ? { asker: op.asker } : {}),
         ...(op.after?.length ? { after: [...op.after] } : {}),
@@ -257,10 +255,9 @@ export const makeOutcome = (status: Terminal, body: string, source?: ReportSourc
 
 export const ops = {
   /** 插行。带 `after` = held (前置未落定, 先不投给 owner), 否则 open。 */
-  open: (p: { event: EventId; owner: Key; receiver: Receiver; deadlineAt: number; at?: number; job?: string; batch?: string; asker?: Asker; after?: readonly EventId[] }): Op => ({
+  open: (p: { event: EventId; owner: Key; receiver: Receiver; deadlineAt: number; at?: number; batch?: string; asker?: Asker; after?: readonly EventId[] }): Op => ({
     op: "open", at: p.at ?? Date.now(), event: p.event, owner: p.owner, receiver: p.receiver, deadlineAt: p.deadlineAt,
     status: p.after?.length ? "held" : "open",
-    ...(p.job ? { job: p.job } : {}),
     ...(p.batch ? { batch: p.batch } : {}),
     ...(p.asker ? { asker: p.asker } : {}),
     ...(p.after?.length ? { after: [...p.after] } : {}),
@@ -748,7 +745,7 @@ export const renderRoute = (r: Route): string =>
   [
     r.event, r.status, `owner=${r.owner}`, `→ ${fmtReceiver(r.receiver)}`,
     `at=${new Date(r.at).toISOString()}`, `dl=${hasDeadline(r.deadlineAt) ? new Date(r.deadlineAt).toISOString() : "none"}`,
-    r.seq ? `seq=${r.seq}` : "", r.job ? `job=${r.job}` : "",
+    r.seq ? `seq=${r.seq}` : "",
     r.after?.length ? `after=${r.after.join(",")}` : "",
     r.outcome ? `${r.outcome.status}: ${clipLine(r.outcome.body, 80)}` : "",
     r.late ? "late" : "",

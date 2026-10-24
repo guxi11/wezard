@@ -30,6 +30,7 @@
   // at / recvAt: 服务端快照时刻与本地收到时刻。所有"现在几点"的判断都换算到
   // 服务端时钟, 否则客户端时钟偏几分钟就会把运行中的会话判成已结束。
   var R = { at: 0, recvAt: 0, role: null, sessions: [], convs: [], relations: false, schedules: 0, plans: [], plan: null, charter: null, stats: null, winStats: null };
+  var PLAN_CACHE = Object.create(null);
   // frags: 当前窗口的原始片段 (id → 片段)。片段不带方向, 换视角时拿它就地重包左右。
   var S = { es: null, pinned: true, top: 0, gen: 0, frags: {} };
   // 关系/日程两栏共用的世界快照。treeFor = 已把谁滚进过视野。
@@ -858,8 +859,30 @@
   // 身份与出身 (谁的分身 / 子 wizard) 交给关系图 (侧栏标题右端的开关), 名片不写。
   // 日程: 下一枪几点, 定时出错时染红改写出错数; 没有排期就只写条数。
   var plansForRole = function () {
-    var source = W.loaded && W.role === ROLE ? W.plans : R.plans;
-    return (source || []).filter(function (p) { return p.owner === ROLE; });
+    return PLAN_CACHE[ROLE] || [];
+  };
+  var acceptPlans = function (role, plans) {
+    var merged = Object.create(null);
+    (PLAN_CACHE[role] || []).forEach(function (p) { merged[p.id] = p; });
+    (plans || []).filter(function (p) { return p.owner === role; }).forEach(function (p) {
+      var old = merged[p.id];
+      if (!old || p.revision >= old.revision) merged[p.id] = p;
+    });
+    return PLAN_CACHE[role] = Object.keys(merged).map(function (id) { return merged[id]; })
+      .sort(function (a, b) { return b.updatedAt - a.updatedAt; });
+  };
+  var replaceWorldPlans = function (worldPlans, role, accepted) {
+    return (worldPlans || []).filter(function (plan) { return plan.owner !== role; }).concat(accepted);
+  };
+  var acceptRolePlans = function (role, plans) {
+    var accepted = acceptPlans(role, plans);
+    if (role === ROLE) {
+      R.plans = accepted;
+      if (W.role === role) W.plans = replaceWorldPlans(W.plans, role, accepted);
+      renderRole();
+      if (VIEW === 'plan') renderPlan();
+    }
+    return accepted;
   };
   var planFact = function () {
     var p = R.plan || {};
@@ -1388,8 +1411,8 @@
     if (d.seenBase) BASE = d.seenBase; else if (!BASE) BASE = R.at;
     R.role = d.role; R.sessions = d.sessions || []; R.convs = d.convs || []; R.chatKeys = d.chatKeys;
     SESSION = d.session || '';
-    R.relations = !!d.relations; R.schedules = d.schedules || 0; R.plans = d.plans || []; R.plan = d.plan || null; R.inflight = d.inflight || [];
-    if (W.loaded && W.role === d.role.id) W.plans = R.plans;
+    R.relations = !!d.relations; R.schedules = d.schedules || 0; R.plans = acceptPlans(d.role.id, d.plans); R.plan = d.plan || null; R.inflight = d.inflight || [];
+    if (W.role === d.role.id) W.plans = replaceWorldPlans(W.plans, d.role.id, R.plans);
     R.charter = d.charter || null;
     R.stats = d.stats || null; R.winStats = d.winStats || null;
     ROLE = d.role.id;
@@ -1405,6 +1428,7 @@
   var paintRole = function () {
     reveal();
     renderRole(); renderUsage(); renderConvs(); renderHead();
+    if (VIEW === 'plan') renderPlan();
   };
 
   // 切回标签页时正在读的那项就算读过了。
@@ -2112,6 +2136,52 @@
     '</article>';
   };
 
+  var drawPlanEdges = function (innerGraph) {
+    if (!innerGraph) return;
+    var svg = innerGraph.querySelector('.plan-edges');
+    var nodes = innerGraph.querySelectorAll('.plan-node');
+    if (!svg) return;
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    var byId = Object.create(null), bounds = innerGraph.getBoundingClientRect();
+    Array.prototype.forEach.call(nodes, function (node) {
+      var box = node.getBoundingClientRect();
+      byId[node.getAttribute('data-task-id')] = {
+        left: box.left - bounds.left + innerGraph.scrollLeft,
+        right: box.right - bounds.left + innerGraph.scrollLeft,
+        y: (box.top + box.bottom) / 2 - bounds.top + innerGraph.scrollTop
+      };
+    });
+    var width = Math.max(innerGraph.scrollWidth, innerGraph.clientWidth);
+    var height = Math.max(innerGraph.scrollHeight, innerGraph.clientHeight);
+    svg.setAttribute('width', width); svg.setAttribute('height', height); svg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+    var markerId = 'plan-arrow-' + Array.prototype.indexOf.call(planEl.querySelectorAll('.plan-graph-inner'), innerGraph);
+    var defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    var marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+    marker.setAttribute('id', markerId); marker.setAttribute('viewBox', '0 0 8 8'); marker.setAttribute('refX', '7'); marker.setAttribute('refY', '4'); marker.setAttribute('markerWidth', '7'); marker.setAttribute('markerHeight', '7'); marker.setAttribute('orient', 'auto');
+    var tip = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    tip.setAttribute('d', 'M0 0L8 4L0 8Z'); tip.setAttribute('class', 'plan-arrow-tip'); marker.appendChild(tip); defs.appendChild(marker); svg.appendChild(defs);
+    Array.prototype.forEach.call(nodes, function (node) {
+      var target = byId[node.getAttribute('data-task-id')];
+      var dependencies = [];
+      try { dependencies = JSON.parse(node.getAttribute('data-depends-on') || '[]'); } catch (e) { }
+      dependencies.forEach(function (dependency) {
+        var source = byId[dependency];
+        if (!source || !target) return;
+        var x1 = source.right, x2 = target.left, bend = Math.max(24, (x2 - x1) * 0.45);
+        var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', 'M' + x1 + ' ' + source.y + ' C' + (x1 + bend) + ' ' + source.y + ' ' + (x2 - bend) + ' ' + target.y + ' ' + x2 + ' ' + target.y);
+        path.setAttribute('class', 'plan-edge'); path.setAttribute('marker-end', 'url(#' + markerId + ')'); svg.appendChild(path);
+      });
+    });
+  };
+  var planResizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(function (entries) {
+    entries.forEach(function (entry) { drawPlanEdges(entry.target.querySelector('.plan-graph-inner')); });
+  });
+  var redrawPlanEdges = function () {
+    planEl.querySelectorAll('.plan-graph-inner').forEach(drawPlanEdges);
+  };
+  window.addEventListener('resize', redrawPlanEdges);
+
   // 日程与只读 plans 跟着 wizard owner 走。
   var renderPlan = function () {
     var ss = (W.schedules || []).filter(function (x) { return (x.owner || x.createdBy || x.target) === ROLE; });
@@ -2129,17 +2199,53 @@
 
     var planCards = ps.length ? ps.map(function (p) {
       var state = { active: '进行中', paused: '已暂停', completed: '已完成', canceled: '已取消' }[p.state] || p.state;
-      var taskTitles = Object.fromEntries((p.tasks || []).map(function (task) { return [task.id, task.title]; }));
-      return '<article class="tcard"><div class="plan-main"><h3>' + esc(p.title) + '<span class="tag">' + esc(state) + ' · r' + esc(p.revision) + '</span></h3>' +
+      var tasks = p.tasks || [];
+      var taskTitles = Object.create(null);
+      tasks.forEach(function (task) { taskTitles[task.id] = task.title; });
+      var completed = tasks.filter(function (task) { return task.status === 'completed'; }).length;
+      var canceled = tasks.filter(function (task) { return task.status === 'canceled'; }).length;
+      var pending = tasks.filter(function (task) { return task.status === 'pending'; }).length;
+      var inProgress = tasks.filter(function (task) { return task.status === 'in_progress'; }).length;
+      var outgoing = Object.create(null), degree = Object.create(null), rank = Object.create(null);
+      tasks.forEach(function (task) { outgoing[task.id] = []; degree[task.id] = 0; rank[task.id] = 0; });
+      tasks.forEach(function (task) {
+        (task.dependsOn || []).forEach(function (id) {
+          if (!Object.prototype.hasOwnProperty.call(degree, id)) return;
+          outgoing[id].push(task.id); degree[task.id]++;
+        });
+      });
+      var ready = tasks.filter(function (task) { return degree[task.id] === 0; }).map(function (task) { return task.id; });
+      for (var qi = 0; qi < ready.length; qi++) {
+        var id = ready[qi];
+        outgoing[id].forEach(function (next) {
+          rank[next] = Math.max(rank[next], rank[id] + 1);
+          degree[next]--;
+          if (!degree[next]) ready.push(next);
+        });
+      }
+      var layers = [];
+      tasks.forEach(function (task) { (layers[rank[task.id]] || (layers[rank[task.id]] = [])).push(task); });
+      var graph = tasks.length ? '<div class="plan-graph" role="region" aria-label="' + esc(p.title) + ' 任务依赖图，可横向滚动">' +
+        '<div class="plan-graph-inner"><svg class="plan-edges" aria-hidden="true"></svg><div class="plan-layers">' +
+        layers.map(function (items) {
+          return '<div class="plan-layer">' + items.map(function (t) {
+            var status = { pending: '待处理', in_progress: '进行中', completed: '已完成', canceled: '已取消' }[t.status] || t.status;
+            var deps = (t.dependsOn || []).filter(function (dep) { return Object.prototype.hasOwnProperty.call(taskTitles, dep); });
+            return '<article class="plan-node task-' + esc(t.status) + '" data-task-id="' + esc(t.id) + '" data-depends-on="' + esc(JSON.stringify(deps)) + '">' +
+              '<div class="plan-node-head"><b>' + esc(t.title) + '</b><span class="tag task-tag">' + esc(status) + '</span></div>' +
+              (deps.length ? '<small class="plan-deps">依赖：' + esc(deps.map(function (dep) { return taskTitles[dep]; }).join('、')) + '</small>' : '') +
+              (t.description ? '<p class="plan-node-desc">' + esc(t.description) + '</p>' : '') +
+              (t.progress ? '<p class="plan-progress"><b>进度</b>' + esc(t.progress) + '</p>' : '') +
+              (t.result ? '<p class="plan-result"><b>结果</b>' + esc(t.result) + '</p>' : '') +
+            '</article>';
+          }).join('') + '</div>';
+        }).join('') + '</div></div></div>' : '<div class="pempty plan-graph-empty">任务图为空 · 完成 0 / 0 · 取消 0</div>';
+      return '<article class="tcard plan-state-' + esc(p.state) + '"><div class="plan-main"><h3>' + esc(p.title) + '<span class="tag plan-state-tag">' + esc(state) + ' · r' + esc(p.revision) + '</span></h3>' +
         '<div class="pid">' + esc(p.id) + '</div>' +
         (p.description ? '<p>' + esc(p.description) + '</p>' : '') +
         (p.state === 'paused' && p.reason ? '<p class="plan-reason">暂停原因：' + esc(p.reason) + '</p>' : '') +
-        '<ol class="plan-tasks">' + (p.tasks || []).map(function (t) {
-          var status = { pending: '待处理', in_progress: '进行中', completed: '已完成', canceled: '已取消' }[t.status] || t.status;
-          return '<li><b>' + esc(t.title) + '</b><span class="tag">' + esc(status) + '</span>' +
-            (t.dependsOn && t.dependsOn.length ? '<small>依赖: ' + esc(t.dependsOn.map(function (id) { return taskTitles[id] || id; }).join(', ')) + '</small>' : '') +
-            (t.progress ? '<p>' + esc(t.progress) + '</p>' : '') + (t.result ? '<p>' + esc(t.result) + '</p>' : '') + '</li>';
-        }).join('') + '</ol></div></article>';
+        '<div class="plan-counts">完成 ' + completed + ' / ' + tasks.length + ' · 取消 ' + canceled + ' · 进行中 ' + inProgress + ' · 待处理 ' + pending + '</div>' +
+        '<div class="plan-graph-note">箭头从前置任务指向依赖它的任务 · 左右滑动看全图</div>' + graph + '</div></article>';
     }).join('') : '<div class="pempty">' + esc(roleName(ROLE)) + ' 名下没有 plans</div>';
     var html = stats + '<section class="psec"><h3>Plans<span>' + ps.length + '</span></h3>' + planCards + '</section>' +
       '<section class="psec">' +
@@ -2151,9 +2257,14 @@
     if (planEl._html === html) return;
     planEl._html = html;
     planEl.innerHTML = html;
+    if (planResizeObserver) {
+      planResizeObserver.disconnect();
+      planEl.querySelectorAll('.plan-graph').forEach(function (graph) { planResizeObserver.observe(graph); });
+    }
     planEl.querySelectorAll('.wchip.go').forEach(function (c) {
       c.onclick = function () { openNode(c.getAttribute('data-t')); };
     });
+    redrawPlanEdges();
     planEl.querySelectorAll('.pprompt').forEach(function (d) {
       d.ontoggle = function () { PLAN_OPEN[d.getAttribute('data-id')] = d.open; planEl._html = ''; };
     });
@@ -2172,9 +2283,11 @@
   // 不经过 detail store。改成"看得见才轮询": 不在关系/日程栏、或者页面在后台, 就一次都不请求。
   var WORLD_MS = 6000;
   var worldTimer = null;
+  var worldRequest = 0;
   // 带上次的 ETag 问: 304 = 名册没变, 不重画 (卡片窗口的 glance 照样顺带刷新)。
   var loadWorld = function () {
     var asked = ROLE;
+    var request = ++worldRequest;
     var p = new URLSearchParams({ role: asked, id: TOKEN });
     var tag = W.role === asked ? W.etag : '';
     var etag = '';
@@ -2184,10 +2297,19 @@
       return r.json();
     }).then(function (d) {
       // 迟到的回包 (这期间已换了视角) 丢掉, 免得盖掉新视角的图; etag 与 role 成对记。
-      if (!d || !d.ok || asked !== ROLE) return;
+      if (!d || !d.ok || asked !== ROLE || request !== worldRequest) return;
       W.at = d.at; W.loaded = true; W.role = asked; W.etag = etag;
       W.nodes = d.nodes || []; W.edges = d.edges || []; W.chats = d.chats || [];
-      W.plans = d.plans || []; W.schedules = d.schedules || []; W.degraded = !!d.degraded;
+      var planInputs = (W.plans || []).concat(d.plans || []), byOwner = Object.create(null);
+      planInputs.forEach(function (plan) { (byOwner[plan.owner] || (byOwner[plan.owner] = [])).push(plan); });
+      var worldPlans = Object.create(null);
+      Object.keys(byOwner).forEach(function (owner) {
+        acceptPlans(owner, byOwner[owner]).forEach(function (plan) { worldPlans[plan.id] = plan; });
+      });
+      W.plans = Object.keys(worldPlans).map(function (id) { return worldPlans[id]; });
+      W.schedules = d.schedules || []; W.degraded = !!d.degraded;
+      if (!W.plans.some(function (plan) { return plan.owner === asked; })) W.plans = W.plans.concat(acceptPlans(asked, []));
+      if (asked === ROLE) acceptRolePlans(asked, W.plans.filter(function (plan) { return plan.owner === asked; }));
       renderWorld();
       loadGlance();
       if (VIEW === 'plan') renderPlan();
