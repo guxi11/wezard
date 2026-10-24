@@ -589,16 +589,7 @@ export const installInboundRouter = (
   const stripAt = (msg: BaseMessage, text: string): string => maybeStripMentions(botNames, msg, text);
 
   // Render /pwd output from the live attachment + persisted store (bridge.getCwd).
-  const renderPwd = (who: string): string => {
-    const { runningCwd, pendingCwd, defaultCwd } = bridge.getCwd(who);
-    const lines = [`[wezard] 📂 当前项目: \`${runningCwd}\``];
-    if (pendingCwd && pendingCwd !== runningCwd) {
-      lines.push(`下次切换: \`${pendingCwd}\``);
-    }
-    if (runningCwd !== defaultCwd) lines.push(`(默认: \`${defaultCwd}\`)`);
-    if (bridge.cwdUnconfirmed(who)) lines.push("⚠️ 这是默认兜底目录, 还没人确认过");
-    return lines.join("\n");
-  };
+  const renderPwd = (who: string): string => bridge.getCwd(who).runningCwd;
 
   // Auto-spawn / /new helper. Routes through bridge.newSession
   // which kills the old pane, spawns fresh in pendingCwd ?? runningCwd ??
