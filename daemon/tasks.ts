@@ -14,11 +14,10 @@
 import type { WSClient } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
-import { patchJsonc } from "../shared/config-writer.js";
 import { baseOfKey, withTagHeader } from "../shared/session-label.js";
 import { interpolate } from "../shared/std.js";
-import { describeTrigger, isDue, nextFire, triggerOfLegacyWhen } from "../shared/trigger.js";
-import { slugify, uniqueId, type TaskRecord, type TaskState } from "../shared/task-file.js";
+import { describeTrigger, isDue, nextFire } from "../shared/trigger.js";
+import { type TaskRecord, type TaskState } from "../shared/task-file.js";
 import type { TaskRegistry } from "./task-registry.js";
 import { runGate } from "./task-gate.js";
 import { createKeyedScheduler } from "../shared/keyed-scheduler.js";
@@ -77,41 +76,6 @@ export const renderTask = (
   ...(s.pending ? { pending: s.pending.phase } : {}),
   ...(error ? { loadError: error } : {}),
 });
-
-// ── 迁移 ──────────────────────────────────────────────────────────
-/** 1.5 之前定时住在 config.jsonc 的 `schedules` 数组里。就地抬成任务文件, 抬完清表
- *  —— 两处都留着会放两次枪。 */
-export const migrateLegacySchedules = (
-  cfg: Config,
-  sourcePath: string,
-  registry: TaskRegistry,
-  log: Logger,
-): number => {
-  if (!cfg.schedules.length) return 0;
-  const taken = registry.takenIds();
-  const moved = cfg.schedules.map((s) => {
-    const id = uniqueId(slugify(s.note || s.prompt.slice(0, 24), `task-${s.id}`), taken);
-    taken.add(id);
-    const r = registry.create({
-      id,
-      trigger: triggerOfLegacyWhen(s.when),
-      prompt: s.prompt,
-      target: s.target,
-      fresh: s.fresh,
-      quiet: false,
-      note: s.note,
-      createdBy: s.createdBy,
-    });
-    if ("error" in r) { log.warn({ old: s.id, err: r.error }, "schedule migration failed"); return 0; }
-    if (s.lastFired) registry.patchState(id, { lastFired: s.lastFired, createdAt: s.createdAt });
-    else registry.patchState(id, { createdAt: s.createdAt || Date.now() });
-    return 1;
-  }).reduce<number>((a, b) => a + b, 0);
-  cfg.schedules = [];
-  patchJsonc(sourcePath, [{ path: ["schedules"], value: [] }]);
-  log.info({ moved, dir: registry.dir }, "schedules migrated to task files");
-  return moved;
-};
 
 // ── 调度器 ────────────────────────────────────────────────────────
 // 每 20s 一 tick (足够密以捕获整分钟翻转); 去重、补跑窗口、间隔计时全部由

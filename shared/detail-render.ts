@@ -596,15 +596,15 @@ const toolBody = (use: ToolUse, result: ToolResult | undefined): string => {
   return `${primary}${inputSection}${resultJson}${resultRaw}`;
 };
 
-// ── 移交: tell_peer (旧名 send_peer) 把一件活交给了谁 ──
+// ── 移交: tell_peer 把一件活交给了谁 ──
 // 它不是一次普通的工具调用 —— 这一刻起活在对方手里, 结论会作为回执回来。所以在调用框下面
 // 另起一行系统提示, 事实全从这次调用自己的 input / result 读: 回包有就信回包 (落地的名字、
-// 实际的投递方式), 没回来 (运行中 / 失败) 才退回 input。dispatch 与带活的 clone / spawn
+// 实际的投递方式), 没回来 (运行中 / 失败) 才退回 input。delegate 与带活的 clone / spawn
 // 也是一次移交 (守护进程同样给活号、守回执), 只是动词不同。
 export interface Handoff {
-  /** 怎么交出去的: 直接 tell_peer / dispatch 选人 / 克隆一个分身带活 / 白板新生一个带活。 */
+  /** 怎么交出去的: 直接 tell_peer / delegate 选人 / 克隆一个分身带活 / 白板新生一个带活。 */
   via: "tell" | "dispatch" | "clone" | "spawn";
-  /** dispatch 的决定: 交给已有的 / 新生一个; 理由在 why。 */
+  /** delegate 的决定: 交给已有的 / 新生一个; 理由在 why。 */
   decision?: { kind: "existing" | "spawn"; why: string };
   /** 对方的名字, 不带点。 */
   name: string;
@@ -624,7 +624,7 @@ export interface Handoff {
   text: string;
   /** 带 `re` = 续问同一件活, 不是新活。 */
   re: boolean;
-  /** 守护进程会送回执 (fyi / receipt:false 不送)。 */
+  /** 成功响应有非空 event 且非 transfer 时, 当前存在 receiver task 并等待回执。 */
   receipt: boolean;
   /** undefined = 回包还没回来; lost = 回来的不是回包 (调用被挪去后台等), 交没交出去不知道。 */
   state?: "ok" | "failed" | "lost";
@@ -656,11 +656,12 @@ const outcomeOf = (result: ToolResult | undefined, j: Record<string, unknown> | 
 const handoffFrom = (via: Handoff["via"], a: Record<string, unknown>, j: Record<string, unknown> | undefined, out: Pick<Handoff, "state" | "reason">): Hint => {
   const kind = str(j?.kind) ?? str(a.kind);
   const dec = str(j?.decision);
+  const event = str(j?.event);
   return {
     k: "handoff", via, ...out,
     ...(dec === "existing" || dec === "spawn" ? { decision: { kind: dec, why: str(j?.reason) ?? "" } } : {}),
-    name: stripSigil(str(j?.name) ?? str(a.name) ?? str(a.to) ?? str(a.tag) ?? ""),
-    turn: str(j?.turn),
+    name: stripSigil(str(j?.name) ?? str(a.name) ?? str(a.to) ?? ""),
+    turn: event,
     public: typeof j?.public === "boolean" ? j.public : a.public === true || (via === "dispatch" && a.public !== false),
     // 交出的那一笔回包不带 `receipt` 而是带 `transfer` (一句交接口径); 还没回包就看 `return`。
     ...(str(a.return) === "transfer" || str(j?.transfer) ? { handed: true as const } : {}),
@@ -669,8 +670,8 @@ const handoffFrom = (via: Handoff["via"], a: Record<string, unknown>, j: Record<
     kind: kind === "ask" || kind === "fyi" ? kind : undefined,
     text: str(a.text) ?? str(a.task) ?? "",
     re: !!str(a.re),
-    // 分身的回包没有 receipt 字段: 活投进去了 (dispatched) 就守回执。
-    receipt: out.state === "ok" && (via === "clone" || via === "spawn" ? j?.dispatched === true : !!j?.receipt),
+    // 成功回包带当前 event 且不是 transfer, 表示确有 receiver task 要等回执。
+    receipt: out.state === "ok" && !!event && str(a.return) !== "transfer" && !j?.transfer,
   };
 };
 
@@ -683,14 +684,14 @@ export const hintOf = (use: ToolUse, result: ToolResult | undefined): Hint | und
   const j = replies.length === 1 ? replies[0] : undefined;
   const out = outcomeOf(result, j);
   switch (tool) {
-    case "tell_peer": case "send_peer": return handoffFrom("tell", a, j, out);
-    case "dispatch": case "delegate": return a.dryRun ? undefined : handoffFrom("dispatch", a, j, out);
+    case "tell_peer": return handoffFrom("tell", a, j, out);
+    case "delegate": return a.dryRun ? undefined : handoffFrom("dispatch", a, j, out);
     case "clone_wizard": case "spawn_wizard": {
       const via = tool === "clone_wizard" ? "clone" : "spawn";
       return str(a.task) ? handoffFrom(via, a, j, out)
         : { k: "born", via, ...out, name: stripSigil(str(j?.name) ?? str(a.name) ?? ""), text: str(a.description) ?? "" };
     }
-    case "stop_wizard": return { k: "stop", ...out, name: stripSigil(str(j?.name) ?? str(a.name) ?? str(a.tag) ?? ""), end: (str(j?.mode) ?? str(a.mode) ?? "end") === "end", forgotten: j?.forgotten === true, turn: str(a.turn) };
+    case "stop_wizard": return { k: "stop", ...out, name: stripSigil(str(j?.name) ?? str(a.name) ?? ""), end: (str(j?.mode) ?? str(a.mode) ?? "end") === "end", forgotten: j?.forgotten === true, turn: str(a.turn) };
     case "schedule_task": return { k: "task", ...out, id: str(j?.id) ?? str(a.id) ?? "", when: str(j?.when) ?? str(a.when) ?? "", next: str(j?.next) ?? "", note: str(a.note) ?? "", text: str(a.prompt) ?? "" };
     default: return undefined;
   }
@@ -702,7 +703,7 @@ export const hintsOf = (use: ToolUse, result: ToolResult | undefined): Hint[] =>
   const direct = hintOf(use, result);
   if (direct) return [direct];
   // CodeBuddy 的 deferred MCP 调用: transcript 记的是外壳 (toolName/params 在 input 里),
-  // 剥掉外壳按真身认一次 —— 否则这层壳下的 tell_peer / dispatch 永远没有提示行。
+  // 剥掉外壳按真身认一次 —— 否则这层壳下的 tell_peer / delegate 永远没有提示行。
   const wrap = objOf(use.toolInput);
   const inner = str(wrap.toolName);
   if (use.toolName === "DeferExecuteTool" && inner) {

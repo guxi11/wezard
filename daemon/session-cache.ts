@@ -118,12 +118,13 @@ export const initAutoWindowPersistence = (stateDir: string): void => {
     const data = JSON.parse(readFileSync(persistPath, "utf8")) as Partial<PersistShape>;
     const now = Date.now();
     for (const [chatKey, entry] of Object.entries(data.windows ?? {})) {
+      // Disk state must already use the current base-chat key; never transfer
+      // a tagged legacy grant to every session in the chat.
+      if (scopeOf(chatKey) !== chatKey) continue;
       if (!entry || typeof entry.until !== "number") continue;
       if (entry.until <= now) continue;
-      // 旧盘上可能是带 tag 的 key — 落地时一并塌到 base。
-      const k = scopeOf(chatKey);
-      autoApproveUntilByChat.set(k, Math.max(autoApproveUntilByChat.get(k) ?? 0, entry.until));
-      if (entry.meta) windowMetaByChat.set(k, entry.meta);
+      autoApproveUntilByChat.set(chatKey, Math.max(autoApproveUntilByChat.get(chatKey) ?? 0, entry.until));
+      if (entry.meta) windowMetaByChat.set(chatKey, entry.meta);
     }
     // 清掉过期项后落盘一次。
     persist();

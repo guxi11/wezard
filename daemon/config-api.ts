@@ -34,7 +34,7 @@ const putFrom = (obj: Obj, path: readonly string[], next: unknown): void => {
   else parent[key] = value;
 };
 
-// 默认值从 schema 解析一份空配置得来, 而不是读字段自己的 default: `models.tiers.light.model`
+// 默认值从 schema 解析一份空配置得来, 而不是读字段自己的 default: `models.backends.claude.tiers.light.model`
 // 的字段默认是 "", 真默认 "haiku" 写在上一层的 `.default({...})` 里。
 let defaults: Obj | undefined;
 const defaultsOf = (): Obj => (defaults ??= ConfigSchema.parse({ bot: { botId: "-", secret: "-" } }) as Obj);
@@ -188,7 +188,7 @@ const parseOp = (op: string | undefined): Op | undefined =>
 /** 算一次写入的全部后果而不落盘: 校验 (整份配置过 zod)、改前改后、jsonc diff、gate / apply。 */
 export const planSet = (cfg: Config, sourcePath: string, req: SetReq): Plan | Err => {
   const p = parsePath(req.path);
-  if (!p.length) return { ok: false, reason: "path 必填, 例如 'models.tiers.light.model'; 不知道有哪些就先 config_get()" };
+  if (!p.length) return { ok: false, reason: "path 必填, 例如 'models.backends.claude.tiers.light.model'; 不知道有哪些就先 config_get()" };
   const secrets = readSecrets();
   const r = resolve(ConfigSchema, p);
   if (!r) return { ok: false, reason: missing(p, secrets) };
@@ -248,50 +248,6 @@ export const patchedTop = (cfg: Config, pl: Plan): unknown => {
   return box[key];
 };
 
-// ── 旧 key 兼容 ─────────────────────────────────────────────────────────
-// 正在跑的 wizard 的 MCP 进程还是旧代码, 仍以 {key, value, action} 调 config_set。值按旧规则
-// 从字符串解析成类型, 然后走同一条路 (同样分级、同样发卡)。
-type LegacyType = "string" | "number" | "boolean" | "array";
-const LEGACY: Record<string, { path: string; type: LegacyType }> = {
-  allow_from:           { path: "wrc.allowFrom",                type: "array" },
-  approval_window:      { path: "approval.windowMinutes",       type: "number" },
-  approval_cache:       { path: "approval.sessionCacheMinutes", type: "number" },
-  danger_skip:          { path: "approval.danger.skip",         type: "boolean" },
-  danger_skip_all:      { path: "approval.danger.skipAll",      type: "boolean" },
-  danger_enabled:       { path: "approval.danger.enabled",      type: "boolean" },
-  approval_mode:        { path: "approval.mode",                type: "string" },
-  cwd:                  { path: "wrc.cwd",                      type: "string" },
-  default_chat:         { path: "defaultChat",                  type: "string" },
-  log_level:            { path: "daemon.logLevel",              type: "string" },
-  slash_ack_first_line: { path: "wrc.mirror.slashAckFirstLine", type: "boolean" },
-};
-
-const legacyValue = (raw: string, type: LegacyType): unknown => {
-  switch (type) {
-    case "number": { const n = Number(raw); return Number.isFinite(n) ? n : raw; }
-    case "boolean": return raw === "true" || raw === "1";
-    case "array": try { return JSON.parse(raw); } catch { return raw; }
-    default: return raw;
-  }
-};
-
-export const fromLegacy = (key: string, value: unknown, action: string | undefined): SetReq | Err => {
-  const spec = LEGACY[key];
-  if (!spec) return { ok: false, reason: `unknown key "${key}". valid: ${Object.keys(LEGACY).join(", ")}` };
-  const raw = String(value ?? "");
-  return action === "add" || action === "remove"
-    ? { path: spec.path, op: action, value: raw }
-    : { path: spec.path, op: "set", value: legacyValue(raw, spec.type) };
-};
-
-export const legacyGet = (cfg: Config, key: string | undefined): { ok: true; key: string; value: unknown } | Err => {
-  const spec = key ? LEGACY[key] : undefined;
-  return spec ? { ok: true, key: key!, value: getIn(cfg, parsePath(spec.path)) } : { ok: false, reason: `unknown key "${key}". valid: ${Object.keys(LEGACY).join(", ")}` };
-};
-
-// 保留旧导入路径; router、spawn 等消费者共享同一份解析。
-export { pickTier, type TierPick } from "../shared/model-tiers.js";
-
 // ── config_get 的依据: 各档的实际用量 ───────────────────────────────────
 // 口径是「按模型」: transcript 里只记了模型, 没记它是哪一档生的 —— 管家用的 sonnet 也会算进
 // standard。各档在用的 wizard 数取名册里出生时记下的 tier。
@@ -317,15 +273,17 @@ export const tierEvidence = (
   const backend = path[1] === "backends" ? path[2] : undefined;
   if (path[1] === "backends" && !backend) return [];
   if (backend && !resolve(ConfigSchema, ["models", "backends", backend])) return [];
-  const models = { ...cfg.models, tiers: path[1] === "tiers" ? cfg.models.tiers : tiersForBackend(cfg, backend as CliBackendName | undefined) };
-  const tierPath = backend ? ["models", ...path.slice(3)] : path;
-  const want = tierPath[1] === "tiers" && tierPath[2] ? [tierPath[2]] : tierPath[1] === "router" ? [models.router] : tierPath[1] === "tiers" || !tierPath[1] ? [...TIERS] : [];
+  const tiers = tiersForBackend(cfg, backend as CliBackendName | undefined);
+  const tierPath = backend ? path.slice(3) : path.slice(1);
+  const want = backend
+    ? tierPath[0] === "tiers" && tierPath[1] ? [tierPath[1]] : tierPath.length === 0 || tierPath[0] === "tiers" ? [...TIERS] : []
+    : tierPath.length === 0 ? [...TIERS] : tierPath[0] === "router" ? [cfg.models.router] : [];
   const rows = want.filter((n): n is TierName => (TIERS as readonly string[]).includes(n));
   if (!rows.length) return [];
   const u = usage();
   const line = (name: TierName): string => {
-    const spec = models.tiers[name];
-    const label = `${spec.model || "CLI 默认"}${spec.effort ? `·${spec.effort}` : ""}${name === models.router ? " · 管家档" : ""}`;
+    const spec = tiers[name];
+    const label = `${spec.model || "CLI 默认"}${spec.effort ? `·${spec.effort}` : ""}${name === cfg.models.router ? " · 管家档" : ""}`;
     if (!spec.model) return `${name} (${label}): 用的是 CLI 默认模型, 按模型统计不出来`;
     const w = sumFor(spec.model, u.week), d = sumFor(spec.model, u.today);
     return `${name} (${label}): 本周 ${fmt.tokens(w.tokens)} tok ${fmt.cost(w.cost)} · 今日 ${fmt.tokens(d.tokens)} tok ${fmt.cost(d.cost)} · 名册里记作这一档的 ${holders(name)} 个`;

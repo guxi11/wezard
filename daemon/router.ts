@@ -437,7 +437,7 @@ export interface FinalVerdict {
   result?: true;
   /** 这一轮以 CLI 报错收尾 —— 中途态: 报给 receiver 等它续跑 / re, 不改写定论 (§2.3)。 */
   error?: boolean;
-  source?: ReportSource;
+  source: ReportSource;
 }
 
 export type FinalKind = "need" | "result" | "progress" | "done" | "wait";
@@ -464,16 +464,15 @@ export const finalKind = (table: Table, event: EventId | undefined, text: string
 /** Execution inputs (including each re leg) version questions and results; receipt replies
  *  are versioned by their covered facts. Unknown question changes conservatively get a new version;
  *  completed results retain one identity across wording changes in the same execution. */
-const reportOf = (row: Route, verdict: FinalVerdict, kind: Report["kind"]): Report | undefined => {
+const reportOf = (row: Route, verdict: FinalVerdict, kind: Report["kind"]): Report => {
   const source = verdict.source;
-  if (!source) return undefined; // Legacy journal/adapters keep their existing identity.
   const origin = source.facts?.length ? [...new Set(source.facts)].sort() : [source.input];
   return { kind, source, version: contentRev(JSON.stringify([row.event, row.receiver, kind, origin,
     kind === "need" || kind === "error" ? contentRev(verdict.text.trim()) : undefined])) };
 };
 const reportedOutcome = (row: Route, verdict: FinalVerdict): Outcome => {
   const report = reportOf(row, verdict, "done");
-  return { ...makeOutcome("done", verdict.text), ...(report ? { rev: report.version, report } : {}) };
+  return { ...makeOutcome("done", verdict.text), rev: report.version, report };
 };
 export const onFinal = (table: Table, owner: Key, serves: EventId | undefined, verdict: FinalVerdict): Op[] => {
   const row = serves ? routeOf(table, serves) : undefined;
@@ -482,9 +481,9 @@ export const onFinal = (table: Table, owner: Key, serves: EventId | undefined, v
   const kind = verdict.error ? "error" : verdict.result ? "result" : finalKind(table, row.event, verdict.text);
   if (kind === "need" || kind === "error") {
     const report = reportOf(row, verdict, kind);
-    const rev = report?.version ?? contentRev(verdict.text);
+    const rev = report.version;
     if (row.reports?.[rev] || row.notice?.rev === rev) return [];
-    return [ops.mark({ event: row.event, status: kind, body: verdict.text, rev, ...(report ? { report } : {}) })];
+    return [ops.mark({ event: row.event, status: kind, body: verdict.text, rev, report })];
   }
   if (row.status === "answered" || row.status === "handed") return retellOps(table, row, verdict);
   if (kind === "progress" || kind === "wait") return [];
@@ -492,13 +491,9 @@ export const onFinal = (table: Table, owner: Key, serves: EventId | undefined, v
   return row.reports?.[outcome.rev] ? [] : [ops.answer({ event: row.event, outcome })];
 };
 
-/** daemon 合成的失败: 不是 owner 的定论, 所以它之后未标记的真答也算数。 */
-const SYNTH: ReadonlySet<Terminal> = new Set<Terminal>(["timeout", "silent", "dead"]);
-
 /** 已落定的行再收 owner 一轮终句 = 追述 (§4.3): 行的 receiver 边一直在, 追述沿它原路再投一次
  *  (新内容 = 新 rev, 同内容重放 = 无 op)。收不收由 owner 的标记定 (daemon 定路由, LLM 定语义):
- *  - 当前仍是未确认的失败定论: 接受首次真实定论; 纠正之后遵循 done 规则;
- *  - 起初是 done: 只收显式 `RESULT:` —— 未标记的是收到回执后的随口一句, 只进 rolepage;
+ *  - 只收显式 `RESULT:` —— 未标记的是收到回执后的随口一句, 只进 rolepage;
  *  - `canceled` 一律不收: 那一笔是被人 / 随工单收掉的, 子树整支 TERMINATE (§4.2)。 */
 const retellOps = (table: Table, row: Route, verdict: FinalVerdict): Op[] => {
   const o = row.outcome;
@@ -508,7 +503,7 @@ const retellOps = (table: Table, row: Route, verdict: FinalVerdict): Op[] => {
   // 第二份正落进它已经跑起来的输入框)。
   if (verdict.error || !o || o.status === "canceled" || verdict.text.trim() === o.body.trim()) return [];
   const kind = verdict.result ? "result" : finalKind(table, row.event, verdict.text);
-  const take = kind === "result" || (kind === "done" && SYNTH.has(o.status));
+  const take = kind === "result";
   const outcome = reportedOutcome(row, verdict);
   return take && !row.reports?.[outcome.rev] ? [ops.answer({ event: row.event, outcome, late: true })] : [];
 };
@@ -516,7 +511,7 @@ const retellOps = (table: Table, row: Route, verdict: FinalVerdict): Op[] => {
 /** 这一轮的终句该不该进群 (eventFinalGate, §9.5): 没有行 = 老事件照放; held = 还没轮到它;
  *  在飞 = 不再挂着未落定的子行; 已落定 = 只放追述 —— 表上的 outcome 就是这句 (onFinal 已收下),
  *  或这句带 `RESULT:`、owner 还是它、那一笔没被收掉 (onFinal 会收下, 与它谁先跑无关)。 */
-export const finalReleased = (table: Table, owner: Key, serves: EventId | undefined, body: string, source?: ReportSource): boolean => {
+export const finalReleased = (table: Table, owner: Key, serves: EventId | undefined, body: string, source: ReportSource): boolean => {
   const row = serves ? routeOf(table, serves) : undefined;
   if (!row) return true;
   // 已 transfer 给别人的那一笔: 旧 owner 的终句不再算数 (§3.4, 同 onFinal) —— 交代与气泡都归接手方。
@@ -525,14 +520,12 @@ export const finalReleased = (table: Table, owner: Key, serves: EventId | undefi
   const kind = finalKind(table, serves, body);
   if (kind === "wait") return false;
   const notice = row.notice;
-  if (notice && (notice.report ? !!source && notice.rev === reportOf(row, { text: body, source }, notice.status)?.version
-      : notice.body === body)) return true;
+  if (notice?.report && notice.rev === reportOf(row, { text: body, source }, notice.status).version) return true;
   if (row.status !== "answered" && row.status !== "handed") return row.receiver.kind === "wizard"
     ? kind === "result" || kind === "need" : waiting(table, row.event).length === 0;
   const o = row.outcome;
   return !!o && o.status !== "canceled"
-    && (o.report ? !!source && o.rev === reportOf(row, { text: body, source }, "done")?.version
-      : o.rev === contentRev(body) || parseClosing(body).kind === "result");
+    && !!o.report && o.rev === reportOf(row, { text: body, source }, "done").version;
 };
 
 // ── 期限常量与 held 前置取消 ─────────────────────────────────────────────
@@ -786,7 +779,7 @@ export interface Router {
   /** 孤儿判定 (§4.3): 结论要服务的那一笔已经收口 —— 结论照投, 标 `late`。 */
   isOrphaned: (serves: EventId) => boolean;
   /** 这一轮终句该不该进群 (eventFinalGate)。 */
-  finalReleased: (owner: Key, serves: EventId | undefined, body: string, source?: ReportSource) => boolean;
+  finalReleased: (owner: Key, serves: EventId | undefined, body: string, source: ReportSource) => boolean;
   /** 终句的语义 (need / result / progress / done) —— 诊断与影子对账要看的那一个词。 */
   finalKind: (serves: EventId | undefined, text: string) => FinalKind;
   /** owner 一轮结束时该落的 op (§3.2)。做完就交副作用层: 先落盘再投递 (§9.3)。 */

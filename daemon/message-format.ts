@@ -21,15 +21,14 @@ export const responseFormatPolicy = (cfg: Config, context: ResponseFormatContext
 };
 
 /** A footer is routing metadata only when it belongs to this daemon's rolepage. */
-export const footerTarget = (raw: string, root: string, recordTarget: (id: string) => string | undefined, known: (target: string) => boolean): string | undefined => {
+export const footerTarget = (raw: string, root: string, known: (target: string) => boolean): string | undefined => {
   try {
     const url = new URL(raw);
     const expected = new URL(root);
-    if (url.origin !== expected.origin || !["/role", "/chat"].some((path) => url.pathname === `${expected.pathname.replace(/\/$/, "")}${path}`)) return;
+    if (url.origin !== expected.origin || url.pathname !== `${expected.pathname.replace(/\/$/, "")}/role`) return;
     const id = url.searchParams.get("id");
     if (!id) return;
-    // Stream tickets predate explicit role=; their recorded turn is authoritative.
-    const target = url.searchParams.get("role") || recordTarget(id);
+    const target = url.searchParams.get("role");
     return target && known(target) ? target : undefined;
   } catch { return; }
 };

@@ -20,11 +20,7 @@ const MCP_ENTRY = `${PLUGIN_ROOT}/dist/mcp/server.js`;
 const HOOK_SCRIPT = `${PLUGIN_ROOT}/hooks/pre-tool-use.sh`;
 const LOCK_FILE = expandHome("~/.wezard/sync.lock.json");
 const MARKER = "wezard";
-// Pre-rename installs stamped `_managedBy: "weclaude"` (and, further back,
-// "wecom"). Strip on any of them so a `wezard migrate` / re-sync cleans the
-// old block instead of leaving a second hook + MCP entry behind.
-const MANAGED_BY = new Set([MARKER, "weclaude"]);
-const isOurs = (v: unknown): boolean => typeof v === "string" && MANAGED_BY.has(v);
+const isOurs = (v: unknown): boolean => v === MARKER;
 
 interface Lock {
   targets: Record<string, { wroteHooks: boolean; wroteMcp: boolean; wroteEnv: string[] }>;
@@ -55,10 +51,8 @@ const writeJson = (p: string, obj: unknown): void => {
 
 // ── Hook strip ───────────────────────────────────────────────────────
 // Hook registration is owned by the Claude Code plugin (`hooks/hooks.json`
-// + `${CLAUDE_PLUGIN_ROOT}`). `wezard init` runs `claude plugin install`
-// to wire it up. We keep stripHooks only to clean up legacy settings.json
-// entries from earlier installs — leaving both registered fires the hook
-// twice per tool call → duplicate approval cards.
+// + `${CLAUDE_PLUGIN_ROOT}`). Remove a current wezard direct hook before
+// syncing so it cannot fire alongside the plugin.
 interface HookEntry {
   matcher?: string;
   hooks: Array<{ type: string; command: string; timeout?: number; _managedBy?: string }>;
@@ -95,7 +89,7 @@ const upsertHook = (settings: Record<string, unknown>, timeoutSec: number): void
 // ── MCP upsert ────────────────────────────────────────────────────────
 const upsertMcp = (settings: Record<string, unknown>): void => {
   const m = ((settings.mcpServers as Record<string, unknown>) ??= {});
-  // drop entries from earlier install generations (`wecom` → `weclaude` → `wezard`).
+  // Replace the current wezard entry before writing its latest definition.
   stripMcp(settings);
   m.wezard = {
     command: "node",
@@ -106,7 +100,7 @@ const upsertMcp = (settings: Record<string, unknown>): void => {
 const stripMcp = (settings: Record<string, unknown>): void => {
   const m = settings.mcpServers as Record<string, unknown> | undefined;
   if (!m) return;
-  for (const k of ["wezard", "weclaude", "wecom"]) {
+  for (const k of ["wezard"]) {
     const cur = m[k] as Record<string, unknown> | undefined;
     if (isOurs(cur?._managedBy)) delete m[k];
   }
@@ -119,13 +113,6 @@ const ENV_KEYS = [
   "WEZARD_STATE_DIR",
   "WEZARD_HOOK_TIMEOUT",
 ];
-// Same keys under the pre-rename prefix — stripped on every sync so a migrated
-// settings.json doesn't keep pointing the old hook at the old state dir.
-// WEZARD_HOOK_FALLBACK is retired (daemon down now always allows) — strip leftovers.
-const LEGACY_ENV_KEYS = [
-  ...ENV_KEYS.map((k) => k.replace(/^WEZARD_/, "WECLAUDE_")),
-  "WECLAUDE_HOOK_FALLBACK", "WEZARD_HOOK_FALLBACK",
-];
 interface EnvVals {
   base: string;
   stateDir: string;
@@ -133,7 +120,6 @@ interface EnvVals {
 }
 const upsertEnv = (settings: Record<string, unknown>, v: EnvVals): string[] => {
   const env = ((settings.env as Record<string, unknown>) ??= {});
-  for (const k of LEGACY_ENV_KEYS) delete env[k];
   env.WEZARD_DAEMON_BASE = v.base;
   env.WEZARD_DAEMON_URL = `${v.base}/approve`;
   env.WEZARD_STATE_DIR = expandHome(v.stateDir);
@@ -144,7 +130,7 @@ const upsertEnv = (settings: Record<string, unknown>, v: EnvVals): string[] => {
 const stripEnv = (settings: Record<string, unknown>): void => {
   const env = settings.env as Record<string, unknown> | undefined;
   if (!env) return;
-  for (const k of [...ENV_KEYS, ...LEGACY_ENV_KEYS]) delete env[k];
+  for (const k of ENV_KEYS) delete env[k];
 };
 
 // ── Pre-flight: jq is required by hooks/pre-tool-use.sh ──────────────

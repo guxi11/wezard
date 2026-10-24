@@ -183,7 +183,7 @@ const Wrc = z.object({
     .describe("空白备用池: 冷启动好的 CLI 先养着, 新会话直接领"), { gate: "card" }),
   // 机器人显示名由建机器人的人自己取, 我们无法从消息里读到。群里 @ 它 / 引用它的
   // 气泡时, WeCom 会把 `@<显示名>` 塞进正文; 配上真名才能把它从 prompt 里剥干净。
-  botNames: z.array(z.string()).default([]).describe("机器人在企微里的显示名 (可多个别名), 用于剥掉 @; 内置 wezard / weclaude 恒生效"),
+  botNames: z.array(z.string()).default([]).describe("机器人在企微里的显示名 (可多个业务别名), 用于剥掉 @; 内置 wezard 恒生效"),
 }).transform((v) => {
   // Pin the active backend so downstream readers see a concrete value.
   const backend = resolveCliBackend(v);
@@ -263,15 +263,9 @@ const Approval = z.object({
   fullCommandPreludeChars: z.number().int().nonnegative().default(0).describe("长 Bash 命令发卡前先推全文的字数上限; 0 = 关闭"),
 });
 
-// sync.targets[].kind 的合法值。claude-internal / custom 等旧值自动 collapse
-// 为 "claude" (preprocess) — settingsPath 已经表达了具体 fork, kind 只表达家族。
-const SYNC_KIND_LEGACY_TO_CLAUDE = new Set(["claude-internal", "custom"]);
-const normalizeSyncKind = (v: unknown): unknown =>
-  typeof v === "string" && SYNC_KIND_LEGACY_TO_CLAUDE.has(v) ? "claude" : v;
-
 const SyncTarget = z.object({
   // 仅用于 sync 日志; 真正决定写入位置的是 settingsPath。
-  kind: z.preprocess(normalizeSyncKind, z.enum(["claude", "codebuddy", "codex"])).default("claude").describe("CLI 家族标签"),
+  kind: z.enum(["claude", "codebuddy", "codex"]).default("claude").describe("CLI 家族标签"),
   settingsPath: z.string().describe("要写入 MCP / hook 注册的 settings.json 路径"),
   scope: z.enum(["user", "project", "local"]).default("user").describe("settings 的作用域"),
 });
@@ -313,9 +307,7 @@ const Weixin = z.object({
 });
 
 // 按难度分档: 显式 model / effort 压过档位; CLI 统一由 wrc.defaultCli 决定。
-// 旧 cli 字段只用于识别不兼容的模型档位, 不再选择后端。
 const Tier = z.object({
-  cli: z.enum(CLI_NAMES).optional().describe("兼容旧配置字段; 新建 pane 统一使用 wrc.defaultCli"),
   model: z.string().default("").describe("当前后端的模型名或 ID; Claude 可用 haiku / sonnet / opus; 空 = CLI 默认"),
   effort: z.enum(EFFORTS).optional().describe("推理档位; 省略 = CLI 默认"),
 });
@@ -337,89 +329,32 @@ const CodexTiers = z.object({
 }).default({});
 const Models = z.object({
   router: z.enum(TIERS).default("standard").describe("群管家 (router) 创建时固定使用的档位; model / effort 按实际 backend 的档位表解析。首建、/new、交接、冷恢复均采用此档, 已在跑的会话不自动切换"),
-  tiers: ClaudeTiers.describe("兼容旧配置的 Claude 系档位; 后端专属配置优先"),
   backends: z.object({
-    claude: z.object({ tiers: ClaudeTiers }).optional(),
+    claude: z.object({ tiers: ClaudeTiers }).default({}),
     "claude-internal": z.object({ tiers: ClaudeTiers }).optional(),
     codebuddy: z.object({ tiers: ClaudeTiers }).optional(),
     codex: z.object({ tiers: CodexTiers }).default({}),
   }).default({}).describe("各 backend 独立的五档模型配置; 按 wrc.defaultCli 取值"),
-  // 保留旧字段供已有配置加载; 管家的唯一档位来源是 router。
-  steward: z.enum(TIERS).default("light").describe("兼容旧配置, 不再控制管家模型; 请使用 models.router"),
 });
-
-// 定时任务的**旧**存法 (1.5 之前)。现在一条任务是 ~/.wezard/tasks/<id>.task.mjs
-// 一份可注入代码的配置 (shared/task-file.ts) —— 触发条件可组合、放枪前可以先探一眼,
-// 这两件事都写不进 json。这里留着只为把老 config 里的记录抬过去:
-// daemon/tasks.ts 的 migrateLegacySchedules 抬完就把这个数组清空。
-const When = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("daily"),
-    days: z.array(z.number().int().min(0).max(6)).default([]), // 空 = 每天; 0 = 周日
-    hour: z.number().int().min(0).max(23),
-    minute: z.number().int().min(0).max(59),
-  }),
-  z.object({ kind: z.literal("every"), minutes: z.number().int().min(1) }),
-  z.object({ kind: z.literal("once"), at: z.number() }),
-]);
-
-const Schedule = z.object({
-  id: z.string(),
-  when: When,
-  /** 排给谁干 —— 一个 wizard 的 target key。fresh 时它只当模板: 出处聊天与
-   *  cwd/cli/model 从它身上继承, 活不在它那里跑。 */
-  target: z.string(),
-  prompt: z.string(),
-  /** 到点是新起一个白板 wizard 执行 (跑完回收), 还是注入 `target` 那个已有会话。
-   *  默认 false 是为了老记录: 1.4.x 写下的定时都是「注入已有会话」语义。新建的
-   *  定时由 /tasks/schedule 决定, 没点名 wizard 时写 true。 */
-  fresh: z.boolean().default(false),
-  createdBy: z.string().default(""),
-  createdAt: z.number().default(0),
-  /** 上次触发时刻 (epoch ms)。去重、重启不重放、间隔计时都以它为准。 */
-  lastFired: z.number().optional(),
-  /** 人写的备注, 只用于列表回显。 */
-  note: z.string().default(""),
-});
-
-// 1.4.x 之前这张表里还有「定时广播」(`kind:"broadcast"`, 更老的还没有 kind)。
-// topic 订阅废弃后它们没有收件人了 —— 认不出的记录整条丢掉而不是抛: 一条过期
-// 定时不该把 daemon 挡在启动之外, 那会让 launchd 陷进崩溃循环。
-const Schedules = z.preprocess(
-  (v) => (Array.isArray(v) ? v.filter((x) => Schedule.safeParse(x).success) : []),
-  z.array(Schedule),
-);
-
-export type ScheduleRecord = z.infer<typeof Schedule>;
 
 // 方向选 name→principal 而不是反过来: 名字是寻址用的 key, 这个方向天然保证唯一, 手写
-// 也更顺。有了名字, 跨 chat 的 peer 才能写成 `daily#fix` 这种稳定地址。见 daemon/chat-name.ts。
+// 也更顺。聊天目录用 name → principal 映射, 供跨 chat 寻址和开会话时解析。见 daemon/chat-name.ts。
 const Chats = z.record(z.string(), z.string().describe("base principal (`chat:wr…` / `user:…`)"));
 
 // 群聊级策略, 键是 base principal (确定的聊天 id) —— 聊天名会改, 拿它当键一改名策略就悄悄失效;
 // config_set 收名字, 落盘前换成它此刻指向的 principal。会进宪章 (系统提示): 已在跑的 wizard 要 handoff
 // 才换上新规矩 —— config_set 落盘时按宪章前后对比点名受影响的那些。
 export const ChatPolicy = z.object({
-  topOnly: z.boolean().optional().describe("顶层模式: 人只和顶层 wizard (群管家 / 人 `.name` 点名的) 对话; wizard 之间一律私聊 (tell_peer / delegate 的 public 失效; dispatch 是兼容旧名, 同样受限), 被派活的 wizard 不能 notify 进群, 过程只在 rolepage。**默认开** (省略即开), 只有显式 `false` 才让 wizard 之间的往来进群"),
-  stewardBudget: z.number().int().min(-1).default(4).describe("群管家的手闸: 每轮自己跑命令 / 外部工具的次数上限 (读文件类命令不计), 用完拒并叫它 delegate (dispatch 是兼容旧名); 改文件、开子代理一律拒, 读代码放行。-1 = 不设闸"),
-  steward: z.enum(TIERS).optional().describe("兼容旧配置, 不再覆盖管家档位; 统一使用 models.router"),
+  topOnly: z.boolean().optional().describe("顶层模式: 人只和顶层 wizard (群管家 / 人 `.name` 点名的) 对话; wizard 之间一律私聊 (tell_peer / delegate 的 public 失效), 被派活的 wizard 不能 notify 进群, 过程只在 rolepage。**默认开** (省略即开), 只有显式 `false` 才让 wizard 之间的往来进群"),
+  stewardBudget: z.number().int().min(-1).default(4).describe("群管家的手闸: 每轮自己跑命令 / 外部工具的次数上限 (读文件类命令不计), 用完拒并叫它 delegate; 改文件、开子代理一律拒, 读代码放行。-1 = 不设闸"),
 });
 export type ChatPolicy = z.infer<typeof ChatPolicy>;
-
-// 1.4.x 之前定时表住在 `topics.schedules` (同一张表里还混着 topic 广播)。订阅与
-// 广播删掉后它升到顶层, 老 config 就地抬一手 —— 否则已排好的任务会静默消失。
-const liftLegacySchedules = (v: unknown): unknown => {
-  if (!v || typeof v !== "object") return v;
-  const o = v as Record<string, unknown>;
-  const legacy = (o.topics as { schedules?: unknown } | undefined)?.schedules;
-  return legacy && !o.schedules ? { ...o, schedules: legacy } : v;
-};
 
 // gate 的分界线是「放权」: 谁能驱动本机 (allowFrom)、审批怎么判 (approval.*)、跑哪个
 // 二进制带什么参数 (cliBackends / extraArgs —— 一个 --dangerously-skip-permissions
 // 就绕过了整个审批)、往哪写别的 settings (sync)、把什么暴露到哪 (监听地址 / 详情外送 /
 // 出站默认聊天) —— 这些要人点卡; 口令一律 hidden; 其余 wizard 直接改。
-export const ConfigSchema = z.preprocess(liftLegacySchedules, z.object({
+export const ConfigSchema = z.object({
   bot: knob(Bot.describe("企微机器人凭据"), { gate: "hidden" }),
   bots: knob(z.array(BotEntry).default([]).describe("额外的企微机器人 (多机器人; 含 secret, 整个数组可放进 secrets.json —— 数组整体覆盖不逐项合并); 改完重启守护进程生效"), { gate: "hidden" }),
   defaultChat: knob(z.string().default("").describe("出站默认聊天 (没有更具体去向时推往这里)"), { gate: "card", apply: "hot" }),
@@ -428,12 +363,11 @@ export const ConfigSchema = z.preprocess(liftLegacySchedules, z.object({
   daemon: Daemon.default({}).describe("守护进程: 监听、日志、详情页"),
   wrc: Wrc.default({}).describe("远程驱动: 授权名单、CLI 后端、工作区、镜像"),
   approval: knob(Approval.default({}).describe("工具调用审批: 粒度、规则、危险名单、窗口"), { gate: "card", apply: "hot" }),
-  models: hot(Models.default({}).describe("按任务难度分档的模型 / effort, 以及各群管家用哪一档")),
+  models: hot(Models.default({}).describe("按任务难度分档的模型 / effort, 以及管家档位")),
   sync: knob(Sync.default({ targets: [] }).describe("把 MCP / hook 注册写进各 CLI 的 settings.json; 改完跑 `wezard sync` 才生效"), { gate: "card" }),
   weixin: Weixin.default({}).describe("微信 ClawBot 通道: 扫码绑定、收发节流"),
   svr: Svr.default({}).describe("独立详情中转服务 (wezard svr); svr 自己启动时读, 改完重启 svr 才生效"),
-  schedules: knob(Schedules, { gate: "hidden" }),
-}).superRefine(uniqueBots));
+}).superRefine(uniqueBots);
 
 export type Config = z.infer<typeof ConfigSchema>;
 
@@ -448,11 +382,10 @@ export const defaultChatOfBot = (cfg: Pick<Config, "defaultChat" | "bots">, bot:
   return own ? withBot(own, bot) : "";
 };
 
-/** 后端专属配置优先; Claude 系未配置时保留旧 tiers 的行为。 */
-export const tiersForBackend = (cfg: Pick<Config, "models" | "wrc">, backend: CliBackendName = resolveCliBackend(cfg.wrc).name): Config["models"]["tiers"] =>
+/** Claude 系 fork 共用 Claude 档位; 其他后端读取自己的默认或配置。 */
+export const tiersForBackend = (cfg: Pick<Config, "models" | "wrc">, backend: CliBackendName = resolveCliBackend(cfg.wrc).name): z.infer<typeof ClaudeTiers> | z.infer<typeof CodexTiers> =>
   cfg.models.backends[backend]?.tiers
-  ?? (backend === "claude-internal" ? cfg.models.backends.claude?.tiers : undefined)
-  ?? cfg.models.tiers;
+  ?? cfg.models.backends.claude.tiers;
 
 // ── Loader ──────────────────────────────────────────────────────────
 const DEFAULT_CONFIG_PATHS = [
@@ -504,7 +437,7 @@ export const loadConfig = (explicitPath?: string): LoadResult => {
     );
   }
   const base = (readJsoncIfExists(sourcePath) ?? {}) as Record<string, unknown>;
-  const parsed = parseWithSecrets(base, true);
+  const parsed = parseWithSecrets(base);
   if (!parsed.success) throw new Error(`wezard config invalid (${sourcePath}):\n${configIssues(parsed.error)}`);
   return { config: parsed.data, sourcePath: expandHome(sourcePath) };
 };
@@ -513,19 +446,12 @@ export const loadConfig = (explicitPath?: string): LoadResult => {
 export const readSecrets = (): Record<string, unknown> =>
   (readJsoncIfExists(SECRETS_PATH) ?? {}) as Record<string, unknown>;
 
-// The retired router object configured the steward. Do not reinterpret its model
-// as a router tier; tolerate it only when loading an existing installation.
-const parseWithSecrets = (base: Record<string, unknown>, legacyRouter = false) => {
+const parseWithSecrets = (base: Record<string, unknown>) => {
   const merged = deepMerge(base, readSecrets());
-  const models = merged.models as Record<string, unknown> | undefined;
-  const router = models?.router;
-  const input = legacyRouter && router && typeof router === "object" && !Array.isArray(router)
-    ? { ...merged, models: { ...models, router: undefined } } : merged;
-  return ConfigSchema.safeParse(input);
+  return ConfigSchema.safeParse(merged);
 };
 
-/** Validate proposed writes with secrets merged. Unlike startup, new writes must
- * use the router tier string, never the retired model/effort object. */
+/** Validate proposed writes with secrets merged. */
 export const parseConfigText = (text: string) =>
   parseWithSecrets((parseJsonc(text) ?? {}) as Record<string, unknown>);
 

@@ -39,12 +39,10 @@ export const loadAutoNames = (filePath: string): ((occupied?: (name: string) => 
   const db = loadJsonMap<number>(filePath, undefined, { strict: true });
   const next = db.get("next");
   const version = db.get("version");
-  if (Object.keys(db.all()).some((k) => k !== "next" && k !== "version") || (existed && next === undefined)
+  if (Object.keys(db.all()).some((k) => k !== "next" && k !== "version") || (existed && (next === undefined || version === undefined))
     || (next !== undefined && (!Number.isSafeInteger(next) || next < 0))
     || (version !== undefined && (version !== 2 || next === undefined || next >= SEQUENCE_END))) throw new Error("invalid wizard name sequence");
-  // Legacy ordinals count attempts, including failed births and earlier numbered
-  // generations. Preserve their phase, never infer progress from live identities.
-  if (version === undefined) db.merge({ version: 2, next: wrapOrdinal(next ?? 0) });
+  if (!existed) db.merge({ version: 2, next: 0 });
   return (occupied = () => false) => {
     let ordinal = db.get("next")!;
     const limit = COMBINATIONS + Math.max(0, FIRSTNAMES.length - ordinal);

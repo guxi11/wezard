@@ -34,8 +34,6 @@ export interface Tell {
   /** 这一轮服务的那一笔 (路由 event)。 */
   event?: string;
   legs?: number;
-  /** Historical bounced text may still be present in recovered receiver events. */
-  bounced?: string;
   /** 发话方那一轮的链头 (见 Asker): 回执带回去, 子活再派下去时继承。 */
   asker?: Asker;
 }

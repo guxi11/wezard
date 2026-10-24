@@ -9,9 +9,9 @@
 
 const TIPS: readonly string[] = [
   "`/help` 查看全部命令",
-  "`#tag` 前缀可在同一聊天并行跑多个会话，如 `#docs 帮我改 README`",
+  "`.name` 前缀可寻址 wizard，如 `.docs 帮我改 README`",
   "`/sessions` 列出所有 live 会话，`/sessions 🐼` 切过去",
-  "`/new codex` 换个 CLI 后端开会话（claude / claude-internal / codebuddy / codex）",
+  "`/new [模型] [首句]` 使用配置的默认 CLI 新建会话；新 pane 的后端由配置决定",
   "`/stop` 打断当前生成，`/n` 补一个回车",
   "`/usage` 看真实订阅额度 %，`/cost` 看 token 成本估算",
   "`/audit` 看本会话（含 subagent）的 token / 成本明细",

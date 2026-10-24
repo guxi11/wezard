@@ -96,7 +96,7 @@
     // 「📄 展开完整命令」按需在群里发全文。发送失败会自动缩到 600 重试一次。
     "cardQuoteMaxChars": 1200,
     // 长命令是否在发卡前**无条件**先推一条完整命令的文本消息。0 = 关闭(默认,
-    // 靠上面两条按需路径)。设正数恢复旧行为, 值为前置消息总字数上限。
+    // 靠上面两条按需路径)。设正数可启用, 值为前置消息总字数上限。
     "fullCommandPreludeChars": 0,
     "approvers": [],             // ["user:zhangsan"] empty → defaultChat
     "hookTimeoutSec": 43210,     // hook curl --max-time (12h + 10s)
@@ -129,15 +129,20 @@
 
   // ── 按难度分档的模型 ─────────────────────────────────────────────
   // spawn_wizard / clone_wizard 按 wrc.defaultCli 选后端档位; 显式 model / effort 优先。
-  // steward = 各群管家 (群的默认会话) 用哪一档, 按群覆盖写 chatPolicy.<chat>.steward。省略整段 = 下面这组默认值。
+  // 管家档位由 router 设置；各 CLI 的模型和 effort 在对应后端下配置。
   "models": {
-    "tiers": {
-      "light":    { "model": "sonnet", "effort": "medium" },
-      "standard": { "model": "sonnet", "effort": "medium" },
-      "hard":     { "model": "opus",   "effort": "high" }
-    },
+    "router": "standard",
     "backends": {
-      // 各后端可独立配置 tiers; Claude 系未配置时兼容上面的旧 tiers。
+      // 各后端独立配置五档模型与 effort。
+      "claude": {
+        "tiers": {
+          "mini":     { "model": "haiku", "effort": "low" },
+          "light":    { "model": "sonnet", "effort": "medium" },
+          "standard": { "model": "sonnet", "effort": "medium" },
+          "hard":     { "model": "opus", "effort": "high" },
+          "ultra":    { "model": "opus", "effort": "max" }
+        }
+      },
       // Codex 模型留空使用 CLI 默认, 也可逐档填写模型 ID。
       "codex": {
         "tiers": {
@@ -148,8 +153,7 @@
           "ultra":    { "model": "", "effort": "xhigh" }
         }
       }
-    },
-    "steward": "light"
+    }
   },
 
   // ── CLI hook / MCP sync ──────────────────────────────────────────

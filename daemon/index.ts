@@ -23,12 +23,13 @@ import { aibotSendMedia } from "./aibot-media.js";
 import { startNetWatch } from "./net-watch.js";
 import { startHttp, json, readBody, type Handler } from "./http.js";
 import { parsePath } from "../shared/config-meta.js";
-import { applyHot, cfgSeenBy, patchedTop, pinChatKeys, configGet, fromLegacy, legacyGet, pickTier, planSet, renderPlan, tierEvidence, type Plan, type SetReq, type TierUsage, type UsageTotals } from "./config-api.js";
+import { pickTier } from "../shared/model-tiers.js";
+import { applyHot, cfgSeenBy, patchedTop, pinChatKeys, configGet, planSet, renderPlan, tierEvidence, type Plan, type SetReq, type TierUsage, type UsageTotals } from "./config-api.js";
 import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } from "./usage.js";
 import { installInboundRouter } from "./inbound.js";
 import { loadMirrorStore } from "./mirror-store.js";
-import { cancelOps, eventRef, finalKind, isEventRef, makeOutcome, openRouter, ops, pickPair, type Delivery, type EventId, type FinalVerdict, type Op, type Receiver, type Route } from "./router.js";
-import { createMessageEvents, messageId, finalId, reportSource, receiptCoverage, receiptFacts, type EventAuthority, type MessageAdapters, type MessageEvent, type MessageInput } from "./message-events.js";
+import { cancelOps, eventRef, finalKind, isEventRef, makeOutcome, openRouter, ops, pickPair, type Delivery, type EventId, type Op, type Receiver, type Route } from "./router.js";
+import { createMessageEvents, messageId, finalId, reportSource, receiptCoverage, receiptFacts, type EventAuthority, type MessageAdapters, type MessageEvent, type MessageFinal, type MessageInput } from "./message-events.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { backendFor, bindStartupNotice, prewarmShell, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { bindCardChannel, installApprovalEventListener, makeApproveHandler, requestConfirm } from "./approval.js";
@@ -49,7 +50,6 @@ import { footerTarget, responseFormatPolicy } from "./message-format.js";
 import { scanClaudeSessions } from "./session-scan.js";
 import {
   startScheduler,
-  migrateLegacySchedules,
   promptWantsFreshWizard,
   renderTask,
   sinceOf,
@@ -62,7 +62,7 @@ import { describeTrigger, nextFire, parseTrigger, WHEN_HELP } from "../shared/tr
 import { isQuiet, slugify, uniqueId } from "../shared/task-file.js";
 import { baseOfKey, bindMultiBot, bindTagLinker, botOfKey, headed, ownHead, isInternalKey, keyOf, linkTags, normalizeTag, sameBot, speakerHead, tagHead, tagLink, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
 import { appendEpisode, clipForCharter, cwdOfMd, episodePath, inboxPath, mdsOf, proposedCwds, memoryPath, memoryRoot, proposeMemory, readMemory, type MemoryScope } from "./wizard-memory.js";
-import { retireStewardTask, startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
+import { startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
 import type { Asker, TurnFrom } from "../shared/detail-store.js";
 import { applyChatNames, chatBaseOf, chatNameOf, chatPolicyOf, clearChatName, listChatNames, normChatName, peerAddress, planChatNames, setChatName, stewardTierOf, type CharterChange, type CharterGuard } from "./chat-name.js";
 import {
@@ -131,6 +131,13 @@ const retiredOrchestrationField = (body: unknown): string | undefined => {
 const retiredFieldReason = (field: string): string => field === "detached"
   ? "unsupported field 'detached': collaborative wizards always belong to the caller's management tree"
   : `unsupported field '${field}': jobs/workflow/graph execution was removed`;
+
+const unsupportedPeerAddressField = (body: unknown): string | undefined => {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
+  if (Object.prototype.hasOwnProperty.call(body, "tag")) return "tag is unsupported; use name";
+  if (Object.prototype.hasOwnProperty.call(body, "tags")) return "tags is unsupported; use names";
+  return undefined;
+};
 
 // pino's file transport is async; without flush, log.fatal before process.exit
 // vanishes. Mirror anything fatal to stderr too so launchd's stderr.log captures it.
@@ -221,7 +228,7 @@ const main = async (): Promise<void> => {
     onBound: (acct, name) => makeOnBound({
       cfg, sourcePath, log: wxLog,
       hasSession: (t) => bridge.hasMirrorTarget(t),
-      newSession: (t, win) => bridge.newSession(t, win, undefined, { silent: true }),
+      newSession: (t, win) => bridge.newSession(t, win, { silent: true }),
     })(acct, name),
     notifyWecom: (p, md) => void ws.client
       .sendMessage(baseOfKey(p).replace(/^(user|chat|group):/, ""), { msgtype: "markdown", markdown: { content: md } })
@@ -239,19 +246,13 @@ const main = async (): Promise<void> => {
   const mirrorStore = loadMirrorStore(cfg.wrc.mirror.attachmentsFile);
   // 定时任务表 —— 每条任务是 ~/.wezard/tasks/<id>.task.mjs 一份可注入代码的配置
   // (见 shared/task-file.ts)。目录是热加载的: wizard 改完文件不用 reload 守护进程。
-  // 共享记忆的整理者改成了 daemon 内建定时器 (memory-steward.ts); 老版本写下的那条
-  // 定时任务要在任务表加载前停用, 否则两路并跑。
-  try {
-    const retired = retireStewardTask();
-    if (retired) log.info({ retired }, "memory steward task file retired");
-  } catch (e) { log.warn({ err: (e as Error).message }, "memory steward task not retired"); }
   const tasks = await openTaskRegistry(
     log.child({ mod: "tasks" }),
     (added, removed) => log.info({ added, removed }, "task files changed"),
   );
   let peerEvents: Pick<MessageAdapters, "accepted" | "committed" | "canceled" | "valid" | "ready" | "inject" | "gone"> | undefined;
   /** 路由表的投递层 —— 在 mirror 大块里接线 (要用到回执信封 / 事件泵), 这里先留个口。 */
-  let deliverFinal: ((e: MessageEvent, verdict: FinalVerdict) => void) | undefined;
+  let deliverFinal: ((e: MessageEvent, verdict: MessageFinal) => void) | undefined;
   let bindResults: MessageAdapters["resultBindings"];
   let handoffAllowed: (target: string) => boolean = () => false;
   let handoffFinalSuppressed: (event: EventAuthority) => boolean = (e) => !!e.handoffCut && !e.handoffRestored;
@@ -311,7 +312,7 @@ const main = async (): Promise<void> => {
       }
       if (e.payload.peer) return peerEvents!.inject(e, boundary);
       if (!bridge.hasMirrorTarget(e.target)) {
-        const spawned = await bridge.newSession(e.target, wizardStore()?.get(e.target)?.name || e.target, undefined, { silent: true });
+        const spawned = await bridge.newSession(e.target, wizardStore()?.get(e.target)?.name || e.target, { silent: true });
         if (!spawned.ok) return { ok: false, retryable: true, reason: spawned.reason };
       }
       let outcome: { ok: boolean; retryable?: boolean; uncertain?: boolean; reason?: string } | undefined;
@@ -398,7 +399,7 @@ const main = async (): Promise<void> => {
   bindTagLinker({
     targetOfUrl: (url) => footerTarget(url,
       new URL(".", buildChatUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, "")).href,
-      (id) => { const r = getDetail(id); return r && "target" in r ? r.target : undefined; }, known),
+      known),
     urlOf: (t) => chatUrlFor(cfg.daemon, t),
     resolve: (name, from) => {
       const t = wizardStore()?.byName(name)?.target;
@@ -663,7 +664,8 @@ const main = async (): Promise<void> => {
       try {
         const sessions = await scanClaudeSessions();
         const cur = m.status();
-        const currentSid = cur?.attached ? cur.sessionId : "";
+        const defaultTarget = cfg.defaultChat.trim();
+        const currentSid = cur.mirrors.find((mirror) => mirror.target === defaultTarget)?.sessionId ?? "";
         json(res, 200, {
           ok: true,
           current: currentSid,
@@ -702,86 +704,6 @@ const main = async (): Promise<void> => {
         ? { ok: true, sessionId: hit.sessionId, label: hit.label, target, cwd: hit.cwd, tmuxSession: hit.tmuxSession }
         : { ok: false, reason: att.reason });
     });
-    // POST /sessions/new { cwd, tag?, chat?, cli?, target?|sessionId?|tmuxPane? } —
-    // 在调用方自己的聊天里 (或者给了 `chat` 就在那个**起过名字**的聊天里) 让一个
-    // 全新的 wizard 在 `cwd` 下就位。它不继承任何上下文 —— 要继承的那种是 clone,
-    // 走 /wizard/clone。
-    //
-    // The caller is an agent living in some chat, so "new session" means what
-    // it means to the human typing `/new #tag` there: another `#tag` sibling of
-    // THIS chat. Two things this must not do, both of which the old
-    // `target ?? defaultChat` fallback did: (1) materialize the session in
-    // defaultChat, where the agent that asked for it can neither see nor reach
-    // it; (2) land untagged, which IS the chat's default session — attaching
-    // there evicts whoever is already mirrored to it, quite possibly the caller.
-    // 走 `m.newSession` (而不是 spawn+attach) 才能让这个 wizard 与人手敲出来的那种
-    // 完全一样: 聊天级的 cwd/CLI 继承、tag 当 tmux 窗口名、以及那条
-    // "created + 📂 当前项目" 气泡 —— 它在群里和详情页留下可见的出生记录。
-    //
-    // `chat` lifts that from "in my chat" to "in that chat", and it is why chat
-    // naming exists: a NAMED chat is the only kind an agent can point at, so
-    // 「我要的那个 wizard 在别的群、而且还不存在」从此不必再靠"找个人去那边敲
-    // /new"来解决。
-    // Unnamed chats stay unaddressable ON PURPOSE — spawning into a raw
-    // `chat:wr…` id nobody can read is how you strand a session in a group the
-    // caller has no business in.
-    http.register("POST /sessions/new", async (req, res) => {
-      const body = (await readBody(req)) as Partial<{ cwd: string; name: string; tag: string; chat: string; target: string; sessionId: string; tmuxPane: string; cli: CliBackendName; model: string }>;
-      const cwd = (body.cwd ?? "").toString().trim();
-      if (!cwd) {
-        json(res, 400, { ok: false, reason: "cwd required" });
-        return;
-      }
-      const self = resolveSelf(body);
-      if (!self) {
-        json(res, 400, { ok: false, reason: "cannot resolve caller chat (pass target/sessionId/tmuxPane)" });
-        return;
-      }
-      const wantChat = (body.chat ?? "").toString().trim();
-      const base = ((b) => (b && sameBot(self, b) ? b : ""))(wantChat ? chatBaseOf(cfg, wantChat) : baseOfKey(self));
-      if (!base) {
-        json(res, 404, {
-          ok: false,
-          reason: `unknown chat '${wantChat}' — only NAMED chats can be spawned into; have someone run \`/name ${normChatName(wantChat) || "<name>"}\` there first`,
-          candidates: chatNamesFor(self),
-        });
-        return;
-      }
-      const foreign = base !== baseOfKey(self);
-      if ((body as { planId?: unknown }).planId !== undefined) { json(res, 400, { ok: false, reason: "planId requires a receipted task; use spawn_wizard with task" }); return; }
-      const slotR = await claimSlot(base, String(body.name ?? body.tag ?? ""), (target) => {
-        const record = target ? wizards.get(target) : undefined;
-        return !record || record.parent === self;
-      });
-      if (!slotR.ok) { json(res, slotR.status, slotR.body); return; }
-      const { target, name } = slotR;
-      wizards.upsert(target, { parent: self, bornAt: Date.now() });
-      const model = (body.model ?? "").toString().trim();
-      log.child({ mod: "mirror", sub: "sessions-new", target }).info({ self, cwd, foreign, cli: body.cli, model }, "spawning peer session");
-      // silent: 新 wizard 就位不进群 (生命周期事件), 同群的 wizard 从名册增量里得知。
-      const r = await m.newSession(target, name, body.cli, { cwd, model, silent: true, guard: () => ownsSlot(slotR) })
-        .catch((e: unknown) => ({ ok: false as const, reason: `spawn threw: ${String(e)}` }));
-      if (!ownsSlot(slotR)) { json(res, 409, { ok: false, reason: "birth identity replaced during spawn" }); return; }
-      if (!r.ok) releaseSlot(slotR);
-      else finishSlot(slotR);
-      if (r.ok) postRoster(base, [target, self], { op: "born", name: `.${name}`, by: displayName(self), cwd: r.cwd }, subjectOf(wizards.get(target)));
-      json(res, r.ok ? 200 : 500, r.ok
-        ? {
-            ok: true,
-            sessionId: r.sessionId,
-            self,
-            target,
-            base,
-            name,
-            cwd: r.cwd,
-            ...(r.model ? { model: r.model } : {}),
-            ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}),
-            foreign,
-            // 调用方之后拿这个串 send_peer / peek_peer 驱动它。
-            address: peerAddress(cfg, self, target),
-          }
-        : { ok: false, reason: r.reason });
-    });
     // Frame-less inject — used by `wezard init` to fire a demo prompt right
     // after /mirror/spawn so first-time users see the full PreToolUse → card
     // → mirror loop without needing to type in WeCom.
@@ -818,27 +740,26 @@ const main = async (): Promise<void> => {
       // Same shape as inbound's /new: windowName = tag for tagged sessions,
       // principal for the default one. No explicit cwd — newSession reads the
       // pendingCwd just queued and clears it once applied.
-      const r = await m.newSession(target, tagOfKey(target) || target, undefined, { guard: () => true });
+      const r = await m.newSession(target, tagOfKey(target) || target, { guard: () => true });
       json(res, r.ok ? 200 : 500, r.ok
         ? { ok: true, target, sessionId: r.sessionId, cwd: r.cwd }
         : { ok: false, reason: r.reason, target, runningCwd: set.runningCwd, pendingCwd: set.pendingCwd });
     });
     // ── wizard ↔ wizard + 流水线 ───────────────────────────────────────
-    // 这组路由让一个 pane 里的 wizard 作用到它的**同伴**身上: 同一个聊天里别的
-    // `#tag` wizard。MCP 工具只看得见自己那个进程, 所以"#fix 在干嘛""把这句话注入
-    // #review"只有守护进程答得了 —— 它才持有全部 attachment。调用方靠上面的
-    // `resolveSelf` 说明自己是谁。
-    // 地址语义见 mirror-bridge.resolvePeerTag: "" = 本聊天的默认 wizard (它是正当的
-    // 协作对象 ——「回去跟主会话汇报」); 裸 `fix` 先找本聊天、再退回全机唯一的那个;
-    // `daily#fix` 直接指名聊天, 不要求任何唯一性。
+    // 这组路由让一个 pane 里的 wizard 作用到它的**同伴**身上。MCP 工具只看得见自己那个
+    // 进程, 所以「另一个 wizard 在干嘛」「把这句话注入给它」只有守护进程答得了 ——
+    // 它才持有全部 attachment。调用方靠上面的 `resolveSelf` 说明自己是谁。
+    // 地址语义见 mirror-bridge.resolvePeerTag: "" = 本聊天的默认 wizard; 其它只接受
+    // 全局 wizard 名或完整 canonical target key (含 `external_user:` principal 与 `#slot`),
+    // 不再解析聊天名加 slot 的 friendly 地址。
     // 多机器人隔离: 别的机器人名下的 wizard 由 resolvePeerTag 当作查无此名 (同形、candidates 只列
     // 同机器人的) —— 点名寻址 (peek / tell / wait / stop / clone from / handoff / set_model / pending /
     // schedule) 全过这一道。
     const resolvePeer = (
       self: string,
-      tag: string,
+      address: string,
     ): { ok: true; target: string; foreign: boolean } | { ok: false; status: number; reason: string; candidates?: string[] } => {
-      const r = m.resolvePeerTag(self, tag);
+      const r = m.resolvePeerTag(self, address);
       if (r.ok) return r;
       return { ok: false, status: 404, reason: r.reason, candidates: r.candidates };
     };
@@ -847,9 +768,9 @@ const main = async (): Promise<void> => {
     const chatNamesFor = (self: string): string[] => listChatNames(cfg).filter((c) => sameBot(self, c.base)).map((c) => c.name);
 
     // ── Chat naming ────────────────────────────────────────────────────
-    // A WeCom chat's identity is an unreadable `chat:wrkS…` id. Naming it is
-    // what makes cross-chat addressing (`daily#fix`) and cross-chat spawning
-    // (`new_claude_session({ chat: 'daily' })`) expressible at all.
+    // A WeCom chat's identity is a canonical principal such as `chat:wrkS…`.
+    // Naming it gives cross-chat tools a readable chat destination; `spawn_wizard`
+    // accepts that exact chat name in its `chat` field.
     http.register("POST /chats/list", async (req, res) => {
       const { self } = await readPeerBody(req);
       if (self) ensureChatNames(self);
@@ -865,7 +786,7 @@ const main = async (): Promise<void> => {
           sessions: c.targets.map((t) => ({
             target: t,
             tag: tagOfKey(t),
-            address: self ? peerAddress(cfg, self, t) : t,
+            address: peerAddress(cfg, t),
             name: settleName(wizards, chatNameOf(cfg, t), t),
             description: wizards.get(t)?.description ?? "",
             cwd: m.getCwd(t).runningCwd || m.getCwd(t).defaultCwd,
@@ -877,6 +798,8 @@ const main = async (): Promise<void> => {
     http.register("POST /chats/name", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller chat (pass target/sessionId/tmuxPane)" }); return; }
+      const addressError = unsupportedPeerAddressField(body);
+      if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
       const raw = ((body as { name?: string }).name ?? "").toString().trim();
       // "-" is the same erase gesture `/name -` uses in the chat — one verb,
       // one meaning, whether a human or an agent performs it.
@@ -902,21 +825,11 @@ const main = async (): Promise<void> => {
       json(res, 200, { ok: true, base: r.base, name: r.name, previous, ...(r.wizardRenamed ? { wizardRenamed: r.wizardRenamed } : {}), ...(await charterOf(note)) });
     });
 
-    interface PeerBody { target?: string; sessionId?: string; tmuxPane?: string; name?: string; tag?: string }
+    interface PeerBody { target?: string; sessionId?: string; tmuxPane?: string; name?: string }
     const readPeerBody = async (req: import("node:http").IncomingMessage): Promise<{ self: string; body: PeerBody }> => {
       const body = (await readBody(req)) as PeerBody;
       return { self: resolveSelf(body), body };
     };
-
-    // list_peers 已并进 wizard_roster ({chat}); 路由留着, 是因为正在跑的 wizard 的
-    // MCP 进程还是旧代码, 仍会打到这里。
-    http.register("POST /peers/list", async (req, res) => {
-      const { self } = await readPeerBody(req);
-      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session (pass target/sessionId/tmuxPane)" }); return; }
-      ensureChatNames(self);
-      const [peers, foreignPeers] = await Promise.all([m.peers(self), m.foreignPeers(self)]);
-      json(res, 200, { ok: true, self, base: baseOfKey(self), peers, foreignPeers });
-    });
 
     // Push a plain markdown bubble into a chat. `base` may carry a `#tag` — a
     // tagged key strips down to the same WeCom chatid as its base.
@@ -934,7 +847,7 @@ const main = async (): Promise<void> => {
         .catch((e: unknown) => log.warn({ chatId, err: errText(e) }, "chat notify failed"));
     };
     // wizard 在群里的称呼, 只用在**正文**里。气泡的头照旧交给 withTagHeader ——
-    // 那一段是路由信息 (`emoji.name:`), parseTagHeader 靠它反解, 群里引用一条气泡
+    // 那一段是路由信息 (`.name:` / 签名名 / role 链接头), parseTagHeader 靠它反解, 群里引用一条气泡
     // 就能直接跟那个 wizard 说话; 把它换成名字会把这条通路弄断。
     const displayName = (t: string): string => {
       const name = settleName(wizards, chatNameOf(cfg, t), t);
@@ -942,7 +855,7 @@ const main = async (): Promise<void> => {
     };
 
     // wizard 之间的往返默认是私聊, 不进群。只有发话方判断「该当着人说」的那一次
-    // (send_peer public:true) 在公开频道里成一条气泡, 头写成 `.a: .b`, 方向一眼可读。
+    // (tell_peer public:true) 在公开频道里成一条气泡, 头写成 `.a: .b`, 方向一眼可读。
     const RELAY_MAX = 1200;
     /** 一个 wizard 在群里的称呼: `.name`, 挂它的 rolepage。名字全局唯一, 不再
      *  因为落在哪个群而换写法 —— 引用这一段就能跟它说话 (parseTagHeader 认得)。 */
@@ -960,7 +873,7 @@ const main = async (): Promise<void> => {
       notifyChat(channel, `${head}\n\n${clipped}`);
     };
     /** 调用方这一轮所在的公开频道: 人从哪个群叫的它 / 公开 peer 轮的那个群;
-     *  私聊轮或无记录 → 它的 home 群。notify 与 public send_peer 默认发到这里。 */
+     *  私聊轮或无记录 → 它的 home 群。notify 与 public tell_peer 默认发到这里。 */
     const channelOf = (self: string): string => m.currentChannel(self) || baseOfKey(self);
     /** 同伴注入的信封: 公开轮写上那个群的 key 与名字 (key 归档, 名字显示), 私聊都不写 (见 peers.renderPeerEnvelope)。 */
     const envelopeFor = (from: string, channel: string, t?: TurnTag & { legs?: number }): string =>
@@ -1377,6 +1290,7 @@ const main = async (): Promise<void> => {
               ...(late ? { late: true } : {}),
               ...(retellTo ? { retellTo } : {}),
               ...(row.late ? { retold: true } : {}) },
+            channel || undefined,
           );
       events.accept({
         id: inbox, identity: JSON.stringify([to, event, out.status, out.rev]),
@@ -1441,7 +1355,7 @@ const main = async (): Promise<void> => {
     };
     /** 终句 → 路由 op (§9.4): 一轮结束时把这一笔推进 (定论 / 中途态), 投递在 commitRoute 里做。
      *  这是「轮终 evidence → onFinal」那条主触发链的落点: 谁答完都从 receiver 表产生回执。 */
-    const cutSettles = (e: MessageEvent, verdict: FinalVerdict): boolean => {
+    const cutSettles = (e: MessageEvent, verdict: MessageFinal): boolean => {
       const row = e.serves ? router.get(e.serves) : undefined;
       if (!verdict.error && addressedResults(verdict.text).length) return true;
       const closing = parseClosing(verdict.text).kind;
@@ -1506,7 +1420,7 @@ const main = async (): Promise<void> => {
       settleFinal(e, verdict);
     };
     /** 一轮的终句落到它服务的那一行上 (定论 / 中途态)。 */
-    const settleFinal = (e: MessageEvent, verdict: FinalVerdict): void => {
+    const settleFinal = (e: MessageEvent, verdict: MessageFinal): void => {
       const sections = verdict.error ? [] : addressedResults(verdict.text);
       if (sections.length) {
         for (const [index, section] of sections.entries()) {
@@ -1618,8 +1532,8 @@ const main = async (): Promise<void> => {
     });
     const currentAsk = (target: string): ((x: { from: string; event: string }) => boolean) => {
       const env = openingAsk(target);
-      if (!env) return () => false;
-      return (x) => (env.event ? x.event === env.event : displayName(x.from) === env.from);
+      if (!env?.event) return () => false;
+      return (x) => x.event === env.event;
     };
     /** 打断 `target` 会不会误伤别人的活: 它正忙, 且这一轮不是调用方派的 —— 别的 wizard 派的、
      *  人说的、定时任务放的 → 那一方的称呼。回执轮是它自己那件活的延续, 不算别人的。 */
@@ -1666,9 +1580,8 @@ const main = async (): Promise<void> => {
      *  定时任务、CLI 敲字、认不出 → undefined (如实不知道, 不猜)。 */
     const askerOf = (self: string): Asker | undefined => {
       const env = openingOfSelf(self)?.env;
-      const home = baseOfKey(self);
       if (!env) return m.currentAsker(self);
-      return askerFromEnvelope(env, (chat) => chat ? chatBaseOf(cfg, chat) : home);
+      return askerFromEnvelope(env);
     };
     // A private dispatch keeps its human origin even though its output channel is empty.
     bindCardChannel((key) => askerOf(key)?.chat || m.currentChannel(key));
@@ -1678,8 +1591,8 @@ const main = async (): Promise<void> => {
       .sendMessage(baseOfKey(askerOf(key)?.chat || m.currentChannel(key) || key).replace(/^(user|chat|group):/, ""), { msgtype: "markdown", markdown: { content: text } })
       .catch((e: unknown) => log.child({ mod: "spawn" }).warn({ to: key, err: errText(e) }, "startup notice push failed")));
     // 交接先续做: 它的闸要在回执续守之前立起来, 否则续守的 watcher 会读到换了一半的会话。
-    /** 入参里的地址: 新字段 `name`, 老 MCP 进程 (正在跑的 wizard) 仍在传 `tag`。 */
-    const addrOf = (b: { name?: unknown; tag?: unknown }): string => String(b.name ?? b.tag ?? "");
+    /** Address supplied by a current caller; reject removed fields at each HTTP boundary before lookup/defaulting. */
+    const addrOf = (value: object): string => String((value as { name?: unknown }).name ?? "");
 
     /** 给新 wizard 分配一个未使用的身份槽。已有身份一律先显式退役再复用。 */
     const namingClaims = new Set<string>();
@@ -1766,7 +1679,7 @@ const main = async (): Promise<void> => {
     };
 
     // ── 给人看的消息 ──────────────────────────────────────────────────
-    // send_peer 把话塞进另一个 agent 的输入框 (驱动它干活); 这条把话贴进一个聊天
+    // tell_peer 把话塞进另一个 agent 的输入框 (驱动它干活); 这条把话贴进一个聊天
     // 给**人**看。收件人就是地址 —— 聊天名或裸 principal, 没有「先订阅才收得到」
     // 这一步。头沿用 relay 那一套: 本群退化成寻常的 `emoji #tag`, 外群写成带聊天
     // 名的全称, 于是那边的人一眼看得出是谁、从哪个群说过来的。
@@ -1882,6 +1795,8 @@ const main = async (): Promise<void> => {
     http.register("POST /peers/peek", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      const addressError = unsupportedPeerAddressField(body);
+      if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
       const r = resolvePeer(self, addrOf(body));
       if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
       const { target, foreign } = r;
@@ -1899,7 +1814,7 @@ const main = async (): Promise<void> => {
           : "空闲";
       json(res, 200, {
         ok: true,
-        name: peerAddress(cfg, self, target),
+        name: peerAddress(cfg, target),
         busy: peek.busy ?? false,
         ...(waiting.length ? { waiting } : {}),
         text: [`${displayName(target)} · ${state}${foreign ? ` · 住在群 ${chatNameOf(cfg, target) || "(未命名)"}` : ""}`, ...(inflight ? [inflight] : []), peek.dialog ?? `(${peek.reason})`].join("\n"),
@@ -1998,7 +1913,6 @@ const main = async (): Promise<void> => {
 
     // 跟另一个 wizard 说一句话。`tell_peer` 是它现在的名字 —— 「说」而不是「发送并
     // 等待」: 调用方注入完就返回, 对方干完那一轮的结论由守护进程自动送回来 (receipts)。
-    // MCP 的 `send_peer` 工具仍作为公开别名注册，并调用当前 `/peers/tell` 路由。
     // 冷与否 = 缓存最近一次被碰 (最近一次真实请求的开始; 读不到退回 mtime) 距今多久 vs 它实际按多长 TTL 写的
     // (与 route_candidates 同一口径)。transcript 里没有分层写入记录时按 5min 兜底。
     const CACHE_TTL_FALLBACK_SEC = 300;
@@ -2298,7 +2212,7 @@ const main = async (): Promise<void> => {
               planReminder: { planId: plan.id, revision: plan.revision, token },
               peer: {
                 from: { kind: "task", taskId: `plan:${plan.id}` },
-                envelope: renderTaskEnvelope(`plan:${plan.id}`, serves ? { event: serves } : undefined),
+                envelope: renderTaskEnvelope(`plan:${plan.id}`, current.origin?.channel ?? "", serves ? { event: serves } : undefined),
                 kind: "task",
               },
             },
@@ -2332,6 +2246,8 @@ const main = async (): Promise<void> => {
      *  路径相对它解析, realpath 后必须仍在它子树内 (防 ../ 与软链逃出工作区)。 */
     const callerBaseOf = (self: string): string => m.getCwd(self).runningCwd || m.getCwd(self).defaultCwd || process.cwd();
     const tellPeerAsInner = async (self: string, body: PeerBody, extra = "", actor?: ActorOrigin): Promise<Reply> => {
+      const addressError = unsupportedPeerAddressField(body);
+      if (addressError) return { status: 400, body: { ok: false, reason: addressError } };
       const retiredField = retiredOrchestrationField(body);
       if (retiredField) return { status: 400, body: { ok: false, reason: retiredFieldReason(retiredField) } };
       const authority = actor?.authority ?? controlSnapshot(self);
@@ -2358,7 +2274,7 @@ const main = async (): Promise<void> => {
       // `re` 的值是那一笔的**路由 event** (§9.5): 欠它的是谁由表说了算 —— transfer 之后 owner 已经
       // 换人, 按旧件号找反而会投给交出去的那位。表上没有 / 已落定 = 这句按新活发。
       // `re` 只是「续不续」这一位; 续哪一笔由表推断 (pickPair: 本轮在读的那份回执 → 这一对唯一在飞的 →
-      // 最近一笔)。event id 照收: 老 MCP 进程、以及一对之间并发两笔时的兜底。省略 = 本轮是它的
+      // 最近一笔)。event id 用于一对之间并发多笔时明确指定。省略 = 本轮是它的
       // NEED 回执、又对它说话才默认续 —— 答它的反问; 显式 `re:false` 推翻。
       const rawRe = (body as { re?: unknown }).re;
       const reFlag = rawRe === true || rawRe === "true" ? true : rawRe === false || rawRe === "false" ? false : undefined;
@@ -2530,7 +2446,7 @@ const main = async (): Promise<void> => {
         router.commit(ops.mark({ event: continued.event, status: "open" }));
       // `public` 回真实落地的哪一档 (顶层模式 / 工单 / fyi / transfer 都会把入口声明的 public 降级) ——
       // rolepage 的提示行照它判「公开 / 私聊」, 不能凭调用参数推。
-      return { status: 200, body: { ...accepted, queued: true, ...(prereqs.some((p) => p.state === "pending") ? { parked: true, after: afters } : {}), event: serves, name: peerAddress(cfg, self, target), priority: policy, wasBusy, public: isPublic,
+      return { status: 200, body: { ...accepted, queued: true, ...(prereqs.some((p) => p.state === "pending") ? { parked: true, after: afters } : {}), event: serves, name: peerAddress(cfg, target), priority: policy, wasBusy, public: isPublic,
         ...(planId ? { planId } : {}),
         ...(wantReceipt && plan.op !== "transfer" ? { receipt: "已持久化排队；提交后观察那一笔的回执，结论自动返回" } : {}),
         ...(plan.op === "transfer" && serves ? { transfer: transferNote(serves, target) } : {}),
@@ -2573,8 +2489,10 @@ const main = async (): Promise<void> => {
     http.register("POST /peers/wait", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { name?: string; tag?: string; names?: string[]; tags?: string[]; need?: number; timeoutSec?: number };
-      const many = Array.isArray(b.names) && b.names.length > 0 ? b.names : b.tags;
+      const b = body as { name?: string; names?: string[]; need?: number; timeoutSec?: number };
+      const addressError = unsupportedPeerAddressField(body);
+      if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
+      const many = b.names;
       const asked = (Array.isArray(many) && many.length > 0 ? many : [addrOf(b)]).map((x) => String(x ?? ""));
       if (asked.length > 16) { json(res, 400, { ok: false, reason: "一次最多等 16 个 wizard" }); return; }
       // 全部先解析: 地址错了就整批拒绝, 而不是等了十分钟才发现有一个打错了。
@@ -2659,7 +2577,7 @@ const main = async (): Promise<void> => {
     };
 
     /** 交接自己: 简报由调用方给, 排在它这一轮说完之后 (见 handoff.ts)。/handoff 点名点到
-     *  自己与老路由 /wizard/handoff-self 共用。 */
+     *  自己与 /wizard/handoff-self 共用实现。 */
     const handoffSelf = (self: string, brief: string): { status: number; body: Record<string, unknown> } => {
       if (!handoffAllowed(self)) return { status: 409, body: { ok: false, reason: "handoff unavailable" } };
       if (brief.length < 40) return { status: 400, body: { ok: false, reason: "brief 太短 —— 要写到零上下文也能接手: 目标 / 已完成 / 当前状态 / 下一步 / 关键文件与坑" } };
@@ -2684,25 +2602,17 @@ const main = async (): Promise<void> => {
     http.register("POST /handoff", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const pane = ((body as { pane?: string }).pane ?? "").trim();
-      let target: string | undefined;
-      if (pane) {
-        target = m.targetForPane(pane);
-        // 别的机器人的 pane 与没绑定同形 —— pane 号是另一条绕过 resolvePeer 的寻址。
-        if (!target || !sameBot(self, target)) { json(res, 404, { ok: false, reason: `no mirror session bound to pane ${pane}` }); return; }
-      } else {
-        // 不点名不能落成「本聊天的默认 wizard」(resolvePeer 对 "" 的语义): 交接是把人家的
-        // 上下文清掉重开, 一个漏传的参数不该把群管家交接掉。不点名的交接只能是交接自己。
-        if (!addrOf(body).trim()) { json(res, 400, { ok: false, reason: "要点名 (name) —— 交接你自己走 /wizard/handoff-self (MCP: handoff 不传 name, 带 brief)" }); return; }
-        const r = resolvePeer(self, addrOf(body));
-        if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
-        target = r.target;
-      }
+      const addressError = unsupportedPeerAddressField(body);
+      if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
+      if (!addrOf(body).trim()) { json(res, 400, { ok: false, reason: "要点名 (name) —— 交接你自己走 /wizard/handoff-self (MCP: handoff 不传 name, 带 brief)" }); return; }
+      const resolved = resolvePeer(self, addrOf(body));
+      if (!resolved.ok) { json(res, resolved.status, { ok: false, reason: resolved.reason, candidates: resolved.candidates }); return; }
+      const target = resolved.target;
       // 点名点到自己: 不能走「让它写简报」那条 (往正在生成的输入框里打字, 等自己等成
       // 死锁), 改走交接自己 —— 简报得由调用方自己给。
       if (target === self) {
         const brief = ((body as { brief?: string }).brief ?? "").toString().trim();
-        if (!brief) { json(res, 400, { ok: false, reason: "这是交接你自己: 把简报写在 brief 里 (不传 name 即可; 旧会话的 handoff 没有 brief 参数, 用 wizard_handoff_self)" }); return; }
+        if (!brief) { json(res, 400, { ok: false, reason: "这是交接你自己: 把简报写在 brief 里 (不传 name 即可)" }); return; }
         const r = handoffSelf(self, brief);
         json(res, r.status, r.body);
         return;
@@ -2900,8 +2810,8 @@ const main = async (): Promise<void> => {
       return named;
     };
 
-    // 名字全局唯一 (见 wizard.ts): 先给没名字的聊天补名, 再按「默认会话先挑」把
-    // 每个已知 wizard 的名字落定 —— 老记录 (名字还跟着聊天走的那一代) 在这里一次迁完。
+    // 当前身份初始化与按需落定: 先给用到的未命名聊天补名, transcript 校准懒接管会话的
+    // bornAt, 再按默认会话优先的顺序落定已知 wizard 名称；后续空名记录仍由对应入口补齐。
     ensureChatNames(cfg.defaultChat || "");
     const reborn = backfillBorn(wizards, bornOf);
     if (reborn.length) log.child({ mod: "wizard" }).info({ n: reborn.length }, "bornAt backfilled from transcript heads");
@@ -3044,7 +2954,7 @@ const main = async (): Promise<void> => {
 
     const briefOf = (self: string, target: string): WizardBrief => ({
       name: settleName(wizards, chatNameOf(cfg, target), target),
-      address: peerAddress(cfg, self, target),
+      address: peerAddress(cfg, target),
       description: wizards.get(target)?.description ?? "",
       ...(wizards.get(target)?.expertise ? { expertise: wizards.get(target)!.expertise } : {}),
       cwd: m.getCwd(target).runningCwd,
@@ -3262,6 +3172,8 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/identity", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      const addressError = unsupportedPeerAddressField(body);
+      if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
       const b = body as { name?: string; description?: string; expertise?: string };
       const asked = normalizeTag((b.name ?? "").toString());
       const description = (b.description ?? "").toString().trim();
@@ -3372,7 +3284,7 @@ const main = async (): Promise<void> => {
         });
     };
     const autoRouteRowsOf = async (self: string, tier: TierName) => {
-      const pick = pickTier(cfg, tier, {}, false);
+      const pick = pickTier(cfg, tier, {});
       const budgetModel = (tier === "mini" || tier === "light") && pick.ok ? pick.model : undefined;
       return (await routeRowsOf(self, (r) => r.alive && !!tagOfKey(r.target)))
         .map((r) => ({ ...r, ...(budgetModel ? { budgetModel } : {}) }));
@@ -3405,6 +3317,9 @@ const main = async (): Promise<void> => {
     http.register("POST /dispatch", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      const addressError = unsupportedPeerAddressField(body);
+      if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
+      if (Object.prototype.hasOwnProperty.call(body, "cli")) { json(res, 400, { ok: false, reason: "cli is unsupported; dispatch uses the configured backend" }); return; }
       const retiredField = retiredOrchestrationField(body);
       if (retiredField) { json(res, 400, { ok: false, reason: retiredFieldReason(retiredField) }); return; }
       const b = body as { task?: string; taskFile?: string; params?: Record<string, string>; name?: string; description?: string; tier?: string; to?: string; force?: boolean; lead?: boolean; spawn?: boolean; public?: boolean; dryRun?: boolean; criteria?: string; return?: string; for?: string; planId?: string };
@@ -3598,11 +3513,15 @@ const main = async (): Promise<void> => {
       const authority = capturedAuthority ?? controlSnapshot(self);
       if (authority && !controlValid(self, authority)) return { status: 409, body: { ok: false, reason: "this turn no longer owns control; cannot spawn more work" } };
       // 出生投递 (下方 acceptPeerDispatch) 不经 tellPeerAsInner 的模板展开入口 ——
-      // 第一期不接 taskFile; MCP 层已拦, 这里兜直连 HTTP / 旧 MCP 进程: 显式 400,
+      // 第一期不接 taskFile; MCP 层已拦, 这里也拒绝直连 HTTP 请求: 显式 400,
       // 不让调用方以为模板生效了而实际投出去的是空正文。
       if ((body as { taskFile?: string }).taskFile !== undefined)
         return { status: 400, body: { ok: false, reason: "taskFile not supported on spawn_wizard; use delegate" } };
-      const b = body as { name?: string; tag?: string; description?: string; inherit?: boolean; from?: string; cwd?: string; chat?: string; cli?: CliBackendName; model?: string; effort?: string; tier?: string; task?: string; lead?: boolean; planId?: string };
+      const addressError = unsupportedPeerAddressField(body);
+      if (addressError) return { status: 400, body: { ok: false, reason: addressError } };
+      if (Object.prototype.hasOwnProperty.call(body, "cli"))
+        return { status: 400, body: { ok: false, reason: "cli is unsupported; spawn and clone use the configured backend" } };
+      const b = body as { name?: string; description?: string; inherit?: boolean; from?: string; cwd?: string; chat?: string; model?: string; effort?: string; tier?: string; task?: string; lead?: boolean; planId?: string };
       const asker = b.task?.trim() ? askerOf(self) : undefined;
       const requestedPlanId = (b.planId ?? "").trim();
       if (requestedPlanId && !b.task?.trim()) return { status: 400, body: { ok: false, reason: "planId requires a dispatched task" } };
@@ -3642,7 +3561,7 @@ const main = async (): Promise<void> => {
       const sourceInfo = m.sessionInfo(source);
       const forkBackend = inherit && sourceInfo && existsSync(sourceInfo.jsonlPath)
         && (!b.cwd?.trim() || expandHome(b.cwd.trim()) === sourceInfo.cwd) ? sourceInfo.cli : undefined;
-      const pick = pickTier(cfg, b.tier, { cli: b.cli, model: b.model, effort: askedEffort }, inherit, forkBackend);
+      const pick = pickTier(cfg, b.tier, { model: b.model, effort: askedEffort }, forkBackend);
       if (!pick.ok) return { status: 400, body: pick };
       const effort = pick.effort;
       // 别人的会话 fork 不出来就是失败, 不能像克隆自己那样悄悄退化成白板 —— 调用方
@@ -3660,7 +3579,7 @@ const main = async (): Promise<void> => {
           candidates: chatNamesFor(self),
         } };
       }
-      const askedName = String(b.name ?? b.tag ?? "");
+      const askedName = String(b.name ?? "");
       const slotR = await claimSlot(base, askedName, (target) => {
         const record = target ? wizards.get(target) : undefined;
         return !record || record.parent === self;
@@ -3749,7 +3668,7 @@ const main = async (): Promise<void> => {
           }, ...(requestedPlanId ? { planId: requestedPlanId } : {}) } }, !!plan?.ok && plan.op === "transfer"); }
         catch (error) { return { status: 409, body: { ok: false, target, name, dispatched: false, reason: errText(error) } }; }
       }
-      return { status: 200, body: { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, queued: dispatched, ...(dispatched ? { event: dispatchedEvent } : {}), ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(r.effort ? { effort: r.effort } : {}), ...(pick.tier ? { tier: pick.tier } : {}), via: pick.via, ...(pick.note ? { tierNote: pick.note } : {}) } };
+      return { status: 200, body: { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, queued: dispatched, ...(dispatched ? { event: dispatchedEvent } : {}), ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(r.effort ? { effort: r.effort } : {}), ...(pick.tier ? { tier: pick.tier } : {}), via: pick.via } };
     };
     http.register("POST /wizard/clone", async (req, res) => {
       const { self, body } = await readPeerBody(req);
@@ -3771,9 +3690,11 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/stop", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      const addressError = unsupportedPeerAddressField(body);
+      if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
       const authority = controlSnapshot(self);
       if (!controlValid(self, authority)) { json(res, 409, { ok: false, reason: "本轮回答权和控制权已移交或失效；不能打断或结束目标 wizard" }); return; }
-      const b = body as { name?: string; tag?: string; mode?: string; forget?: boolean; turn?: string; force?: boolean };
+      const b = body as { name?: string; mode?: string; forget?: boolean; turn?: string; force?: boolean };
       const r = resolvePeer(self, addrOf(b));
       // 有身份没会话 (冷记录 / 生到一半的僵尸): resolvePeer 够不着它, 但收它不需要
       // 会话 —— end 视为早已结束, forget 删掉记录、腾出名字。interrupt 无从谈起。
@@ -3870,6 +3791,8 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/model", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      const addressError = unsupportedPeerAddressField(body);
+      if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
       const b = body as { model?: string; scope?: string; effort?: string };
       const model = (b.model ?? "").toString().trim();
       const effort = parseEffort(b.effort);
@@ -3911,6 +3834,8 @@ const main = async (): Promise<void> => {
     http.register("POST /pending", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      const addressError = unsupportedPeerAddressField(body);
+      if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
       const b = body as { name?: string; drop?: unknown; why?: string };
       const who = (b.name ?? "").toString().trim();
       const r = who ? resolvePeer(self, who) : undefined;
@@ -3954,30 +3879,32 @@ const main = async (): Promise<void> => {
     http.register("POST /tasks/schedule", guarded(async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      const addressError = unsupportedPeerAddressField(body);
+      if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
       const b = body as { when?: string; prompt?: string; note?: string; fresh?: boolean; quiet?: boolean; id?: string };
       const prompt = (b.prompt ?? "").toString().trim();
       const whenText = (b.when ?? "").toString().trim();
       if (!prompt) { json(res, 400, { ok: false, reason: "prompt required" }); return; }
       const trigger = parseTrigger(whenText, new Date());
       if (!trigger) { json(res, 400, { ok: false, reason: WHEN_HELP(whenText) }); return; }
-      // tag 省略 = 排给调用者自己。这是最常见的用法: wizard 给自己定一个夜里跑的活。
+      // name 省略 = 排给调用者自己。这是最常见的用法: wizard 给自己定一个夜里跑的活。
       // 注入自身在**当下**是死锁 (往正在生成的输入框里打字), 但定时是未来的事,
-      // 那时这一轮早已收工, 所以这里不套 /peers/send 的自我保护。
-      const tag = addrOf(body).trim();
+      // 那时这一轮早已收工, 所以这里不套 peer-send 的自我保护。
+      const address = addrOf(body).trim();
       let target = self;
-      if (tag) {
-        const r = resolvePeer(self, tag);
+      if (address) {
+        const r = resolvePeer(self, address);
         if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
         target = r.target;
       }
       // owner = self; resolvePeer 已拦住别的机器人的名字, 这一道是给以后别的取 target 的路兜底。
-      if (!sameBot(self, target)) { json(res, 404, { ok: false, reason: `no wizard named '.${tag}' — wizard_roster lists every name` }); return; }
+      if (!sameBot(self, target)) { json(res, 404, { ok: false, reason: `no wizard named '.${address}' — wizard_roster lists every name` }); return; }
       // 到点是新建还是续用, 在**排班时**就定死。两条都指向新建:
       //   · 没点名 wizard —— 定时的 prompt 本就要求零上下文自洽, 没理由挑一个会话挤进去;
-      //   · prompt 自己就在说「建两个 wizard 去干 xxx」—— 这时 tag 只是「在谁的聊天/
+      //   · prompt 自己就在说「建两个 wizard 去干 xxx」—— 这时 name 只是「在谁的聊天/
       //     目录下办」, 不是「在它的上下文里续」。
-      // `fresh` 显式传入压过这两条推断 (要强行在 tag 那一轮里续就传 false)。
-      const fresh = typeof b.fresh === "boolean" ? b.fresh : !tag || promptWantsFreshWizard(prompt);
+      // `fresh` 显式传入压过这两条推断 (要强行在该 wizard 那一轮里续就传 false)。
+      const fresh = typeof b.fresh === "boolean" ? b.fresh : !address || promptWantsFreshWizard(prompt);
       const note = (b.note ?? "").toString();
       const id = uniqueId(slugify((b.id ?? "").toString() || note || prompt.slice(0, 24), "task"), tasks.takenIds());
       const created = tasks.create({ id, trigger, prompt, target, fresh, quiet: b.quiet === true, note, createdBy: self });
@@ -3986,8 +3913,8 @@ const main = async (): Promise<void> => {
       json(res, 200, {
         ok: true,
         ...renderTask(created, tasks.stateOf(id)),
-        address: peerAddress(cfg, self, target),
-        owner: peerAddress(cfg, self, self),
+        address: peerAddress(cfg, target),
+        owner: peerAddress(cfg, self),
       });
     }));
 
@@ -4001,8 +3928,8 @@ const main = async (): Promise<void> => {
         .filter((t) => sameBot(self, ownerOf(t)) && (!mineOnly || ownerOf(t) === self))
         .map((t) => ({
           ...renderTask(t, tasks.stateOf(t.id), now, errs[t.id]),
-          address: peerAddress(cfg, self, t.target || defaultChatFor(cfg, ownerOf(t))),
-          owner: peerAddress(cfg, self, ownerOf(t)),
+          address: peerAddress(cfg, t.target || defaultChatFor(cfg, ownerOf(t))),
+          owner: peerAddress(cfg, ownerOf(t)),
         }));
       // 加载失败的那些没有记录可回显, 但必须出现在列表里 —— 否则 wizard 改错了
       // 一个字, 那条定时就像凭空消失了。
@@ -4133,11 +4060,11 @@ const main = async (): Promise<void> => {
     /** 配置的调用方: 只认 sessionId / pane, 不回落 defaultChat (同 config_set 的 caller)。认不出 = "" (主机器人)。 */
     const configCaller = (b: { sessionId?: string; tmuxPane?: string }): string =>
       (b.sessionId?.trim() && m.targetForSession(b.sessionId.trim())) || (b.tmuxPane?.trim() && m.targetForPane(b.tmuxPane.trim())) || "";
-    // POST /config/get —— 新 MCP 带 `path` (可空) 拿渲染好的文本; 老 MCP 带 `key` 拿 {key, value}。
+    // POST /config/get —— `path` (可空) 拿渲染好的配置文本。
     http.register("POST /config/get", async (req, res) => {
-      const body = (await readBody(req)) as { key?: string; path?: string; sessionId?: string; tmuxPane?: string };
+      const body = (await readBody(req)) as { path?: string; sessionId?: string; tmuxPane?: string };
+      if (Object.prototype.hasOwnProperty.call(body, "key")) { json(res, 400, { ok: false, reason: "key is unsupported; use path" }); return; }
       const seen = cfgSeenBy(cfg, configCaller(body));
-      if (typeof body.key === "string") { const r = legacyGet(seen, body.key); json(res, r.ok ? 200 : 400, r); return; }
       // chatPolicy.<聊天名>… 换成它指向的 principal 再查 (同 config_set 的 pinChatKeys); 认不出的原样查。
       // 名字按调用方看得见的表解析: 别的机器人的聊天名认不出, principal 写法在 seen 里也查无此键。
       const p = parsePath(body.path);
@@ -4150,16 +4077,15 @@ const main = async (): Promise<void> => {
     // 自己推确认卡, 所以 danger.skipAll / ⏱窗口 都放不掉它。卡等 CONFIRM_INLINE_MS 还没人点
     // 就先回 pending (fetch 默认 5 分钟收不到头就断), 卡仍有效, 迟到的确认照常落盘并捎一句给调用方。
     http.register("POST /config/set", guarded(async (req, res) => {
-      const body = (await readBody(req)) as SetReq & { key?: string; action?: string; sessionId?: string; tmuxPane?: string; target?: string };
-      const legacy = typeof body.key === "string";
-      const asked = legacy ? fromLegacy(body.key!, body.value, body.action) : body;
-      if ("ok" in asked) { json(res, 400, asked); return; }
-      const ask = pinChatKeys(cfg, asked, configCaller(body));
+      const raw = await readBody(req);
+      if (Object.prototype.hasOwnProperty.call(raw, "key") || Object.prototype.hasOwnProperty.call(raw, "action")) {
+        json(res, 400, { ok: false, reason: "key/action are unsupported; use path/op" }); return;
+      }
+      const body = raw as SetReq & { sessionId?: string; tmuxPane?: string; target?: string };
+      const ask = pinChatKeys(cfg, body, configCaller(body));
       if ("ok" in ask) { json(res, 400, ask); return; }
       const reply = (pl: Plan, text: string, extra: Record<string, unknown> = {}): void =>
-        json(res, 200, legacy
-          ? { ok: true, key: body.key, before: pl.before, after: pl.after, ...extra }
-          : { ok: true, text, ...extra });
+        json(res, 200, { ok: true, text, ...extra });
       const pl = planSet(cfg, sourcePath, ask);
       if (!pl.ok) { json(res, 400, pl); return; }
       if (ask.dryRun || !pl.changed) { reply(pl, `${ask.dryRun ? "dryRun, 没写:\n" : ""}${renderPlan(pl)}`); return; }
@@ -4210,14 +4136,12 @@ const main = async (): Promise<void> => {
       const inline = await Promise.race([decided, sleep(CONFIRM_INLINE_MS).then(() => undefined)]);
       if (inline !== undefined) {
         const text = await settle(inline);
-        json(res, 200, legacy ? { ok: inline, key: body.key, before: pl.before, after: inline ? pl.after : pl.before, note: text } : { ok: true, text, confirmed: inline });
+        json(res, 200, { ok: true, text, confirmed: inline });
         return;
       }
       void decided.then(async (yes) => notices.post([self], `config_set 的确认卡有结果了: ${await settle(yes)}`))
         .catch((e: unknown) => log.warn({ err: errText(e) }, "config_set: 迟到的确认落盘失败"));
-      json(res, 200, legacy
-        ? { ok: false, reason: "确认卡已发到群里, 还没人点; 点了之后自动落盘" }
-        : { ok: true, pending: true, text: `确认卡已发到群里, 还没人点 (卡 ${CONFIRM_TIMEOUT_MS / 60_000} 分钟内有效)。点了之后守护进程自动落盘, 结果会捎在你下一条收到的消息上 —— 不用重发。\n${renderPlan(pl)}` });
+      json(res, 200, { ok: true, pending: true, text: `确认卡已发到群里, 还没人点 (卡 ${CONFIRM_TIMEOUT_MS / 60_000} 分钟内有效)。点了之后守护进程自动落盘, 结果会捎在你下一条收到的消息上 —— 不用重发。\n${renderPlan(pl)}` });
     }));
 
     http.register("GET /mirror/cwd", async (req, res) => {
@@ -4271,8 +4195,8 @@ const main = async (): Promise<void> => {
           if (quiet) quietRelays.set(turn, { target, at, base: baseOfKey(target) });
           openTaskRow(target, taskId, turn, quiet);
           const inj = await m.injectText(target, text, quiet
-            ? { guard, requireIdle: true, from: { kind: "task", taskId }, channel: "", envelope: renderTaskEnvelope(taskId, { event: turn }) }
-            : { guard, requireIdle: true, from: { kind: "task", taskId }, envelope: renderTaskEnvelope(taskId) });
+            ? { guard, requireIdle: true, from: { kind: "task", taskId }, channel: "", envelope: renderTaskEnvelope(taskId, "", { event: turn }) }
+            : { guard, requireIdle: true, from: { kind: "task", taskId }, channel: baseOfKey(target), envelope: renderTaskEnvelope(taskId, baseOfKey(target)) });
           if (inj.ok && quiet) void relayUnlessQuiet(target, at, turn, baseOfKey(target));
           return inj;
         },
@@ -4371,7 +4295,7 @@ const main = async (): Promise<void> => {
         bornAt: Date.now(),
       });
       const runnerName = slotR.name;
-      const spawned = await m.newSession(runner, runnerName, info?.cli, { cwd: info?.cwd, model: info?.model, silent: true, guard: allowed })
+      const spawned = await m.newSession(runner, runnerName, { cwd: info?.cwd, model: info?.model, silent: true, guard: allowed })
         .catch((e: unknown) => ({ ok: false as const, reason: `spawn threw: ${String(e)}` }));
       if (!spawned.ok) {
         releaseSlot(slotR);
@@ -4393,8 +4317,8 @@ const main = async (): Promise<void> => {
       if (quiet) quietRelays.set(turn, { target: runner, at, base });
       openTaskRow(runner, taskId, turn, quiet);
       const inj = await m.injectText(runner, text, quiet
-        ? { guard: allowed, from: { kind: "task", taskId }, channel: "", envelope: renderTaskEnvelope(taskId, { event: turn }) }
-        : { guard: allowed, from: { kind: "task", taskId }, envelope: renderTaskEnvelope(taskId) });
+        ? { guard: allowed, from: { kind: "task", taskId }, channel: "", envelope: renderTaskEnvelope(taskId, "", { event: turn }) }
+        : { guard: allowed, from: { kind: "task", taskId }, channel: baseOfKey(runner), envelope: renderTaskEnvelope(taskId, baseOfKey(runner)) });
       if (!inj.ok) { releaseSlot(slotR); return inj; }
       // 没有人会对这个一次性分身喊 stop_wizard, 只能自己等它闲下来再收。30min
       // 内没闲下来就放弃自动回收 (它大概率还在干一个长活), 留给人手动处理 ——
@@ -4451,9 +4375,9 @@ const main = async (): Promise<void> => {
           clearAutoWindow(target);
         }
       };
-      const spawned = await m.newSession(target, name, undefined, { cwd: memoryRoot(cfg.daemon.stateDir), silent: true });
+      const spawned = await m.newSession(target, name, { cwd: memoryRoot(cfg.daemon.stateDir), silent: true });
       if (!spawned.ok) return done({ ok: false, reason: `spawn: ${spawned.reason ?? "unknown"}` });
-      const inj = await m.injectText(target, prompt, { from: { kind: "task", taskId: STEWARD_ID }, channel: "", envelope: stewardEnvelope() });
+      const inj = await m.injectText(target, prompt, { from: { kind: "task", taskId: STEWARD_ID }, channel: "", envelope: stewardEnvelope("") });
       if (!inj.ok) return done(inj);
       // 超时也收: 没人会对它喊 stop_wizard; 认领留着, 孤儿回收会再派一轮。
       const idle = await waitForIdle(target, m.isBusy, STEWARD_RUN_MS, () => false);
@@ -4496,7 +4420,6 @@ const main = async (): Promise<void> => {
   }
 
   // 定时调度器 — 每 20s 检查任务表, 到点把 prompt 注入目标 wizard。
-  migrateLegacySchedules(cfg, sourcePath, tasks, log.child({ mod: "tasks" }));
   const scheduler = startScheduler({
     client: ws.client,
     registry: tasks,

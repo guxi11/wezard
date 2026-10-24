@@ -49,8 +49,8 @@ export const allNames = (text: string): string[] => [
   ...new Set([...text.matchAll(new RegExp(NAME_TOKEN, "gu"))].map((m) => m[2] ?? "").filter(Boolean)),
 ];
 
-/** `.fix` / `fix` / `#fix` (旧写法) → `fix`; 其余原样 trim。 */
-export const stripSigil = (raw: string | undefined): string => (raw ?? "").trim().replace(/^[.#@]+/, "");
+/** `@.fix` / `.fix` → `fix`; 其余原样 trim。 */
+export const stripSigil = (raw: string | undefined): string => (raw ?? "").trim().replace(/^[.@]+/, "");
 
 // ── Target keys ─────────────────────────────────────────────────────────
 // Daemon-internal target keys are `user:xxx[#k]` / `chat:xxx[#k]`: the chat a
@@ -129,63 +129,43 @@ export const uniqueTag = (want: string, taken: ReadonlySet<string>, n = 1): stri
   return taken.has(candidate) ? uniqueTag(want, taken, n + 1) : candidate;
 };
 
-// 出站气泡的头 (`.fix: …`) 是可被「引用」的路由信息: 群里要跟某个 wizard 说话,
-// 引用它的气泡比手打名字快得多。这里做反向解析。
-// 头有两种形态,都要认:裸 `.fix: …`,以及 rolepage 链接形态 `[.fix](https://…): …`。
-// 裸头不带 emoji 时必须跟冒号 —— 人自己行首打的 `.fix 干活` 不是 bot 的头。
-// 链接里的 URL 若留在 body 里,既污染比对又会被当成用户内容贴进 prompt。
-// 群默认 wizard 在自己群里说话不带头 (人本来就在跟它说): 引用它的气泡剥不出头,
-// 照普通引用走, 路由落回本群默认 wizard —— 正是它。
-// 旧气泡的写法仍被认: `#tag` 头 (改名前发出去的, 迁移时名字取自 tag, 照旧指得对人),
-// 带 emoji 头像的 `🦊.fix:` / `🦊 .fix …`, 以及 wizard 之间的 `🦊 .a → .b`、`🦊.a: @🐨.b`。
-// 公开频道里 wizard 之间说话的头是 `.a: .b`, 路由信息取发话方 (引用它 = 跟 a 说)。
-// 分片序号 (`2/5`) 与折叠气泡的 `← View chat details` 提示同理,一并算作头。
-const HEAD_EMOJI = [...ANIMALS, "🧙", "❔"];
-const EMO = `(?:${HEAD_EMOJI.join("|")})`;
-const NAME_PART = `(?:\\s*[.#](${NAME_CHARS}{1,32}))?(?:\\s*→\\s*[.#]${NAME_CHARS}{1,32})?`;
-const BARE_NAME = `[.#](${NAME_CHARS}{1,32})`;
-// 对方那一半: 新 `: [.b](url)`, 旧 `: @[🐨.b](url)` / `→ [🐨 .b](url)`。没有 → / @ 引着时
-// 只认链接或带 emoji 的形态 —— 冒号后正文开头随手写的 `.gitignore` 不是对象。
-const PEER_NAME = `(?:${EMO}\\s*)?[.#]${NAME_CHARS}{1,32}`;
-const PEER_LINK = `\\[@?${PEER_NAME}\\]\\([^)]*\\)`;
-const TO_PART = `(?:\\s*(?:(?:→|@)\\s*(?:${PEER_LINK}|${PEER_NAME})|${PEER_LINK}|${EMO}\\s*[.#]${NAME_CHARS}{1,32}))?`;
-// 署名形态的头 (非 default wizard): 名字包一层反引号 —— `\`.name\`:` / `[\`.name\`](url):`,
-// 与裸头一并认。
-const HEADER_RE = new RegExp(
-  `^(?:\\[\`?(?:${EMO}${NAME_PART}|${BARE_NAME})\`?\\]\\([^)]*\\)(?::)?|${EMO}${NAME_PART}(?::)?|\`?${BARE_NAME}\`?:)${TO_PART}` +
-    `(?:\\s+\\d+/\\d+)?(?:\\s*←\\s*View chat details)?(?![\\p{L}\\p{N}_-])\\s*`,
-  "u",
-);
-
+// Only a linked peer suffix is part of the current header; bare `.name` after
+// the colon can be ordinary prose.
+const HEADER_RE = /^(?:\[\x60?\.([\p{L}\p{N}_-]{1,32})\x60?\]\(([^)]*)\)|(\x60?\.[\p{L}\p{N}_-]{1,32}\x60?)):/u;
 /** 反解一条出站气泡的 `.name:` 头,返回名字与剥头后的正文。
  *  `fromBot=false` 表示这不是 wezard 发的 (或是不带头的群默认 wizard),body 原样返回。
  *  只切掉头那一段; 正文里 linkNames 挂上的 `[.fix](url)` 还原成裸 `.fix` —— 引用
  *  内容要跟 transcript 尾部比对, 也可能被贴进 prompt, URL 两头都是噪声。 */
 export const parseTagHeader = (text: string): { fromBot: boolean; tag: string; body: string } => {
   const t = text.trim();
-  const footer = /(?:^|\s)\[[✨✦]\]\(([^\n)]*)\)\s*$/.exec(t);
+  const footer = /(?:^|\s)\[✦\]\(([^\n)]*)\)\s*$/.exec(t);
   const target = footer && linker?.targetOfUrl?.(footer[1]!);
   if (target) {
     const clean = t.slice(0, footer!.index).trim();
     const header = rawTagHeader(clean);
-    const ownHeader = header && !header.url && resolveTagTarget(header.tag, target) === target;
-    return { fromBot: true, tag: displayName(target), body: unlinkTags((ownHeader ? header.body : clean).trim()) };
+    const ownHeader = header && (header.url ? linker?.targetOfUrl?.(header.url) === target : resolveTagTarget(header.tag, target) === target);
+    return { fromBot: true, tag: displayName(target), body: unlinkTags((ownHeader ? header!.body : clean).trim()) };
   }
   const m = HEADER_RE.exec(t);
   if (!m) return { fromBot: false, tag: "", body: t };
-  const url = /^\[[^\]]+\]\(([^)]*)\)/.exec(t)?.[1];
-  const sender = url && linker?.targetOfUrl?.(url);
-  const raw = sender && rawTagHeader(t);
-  if (sender && raw) return { fromBot: true, tag: displayName(sender), body: unlinkTags(raw.body.trim()) };
-  const tag = m.slice(1).find(Boolean) ?? "";
-  return { fromBot: true, tag: sender ? displayName(sender) : tag, body: unlinkTags(t.slice(m[0].length).trim()) };
+  const raw = rawTagHeader(t)!;
+  const sender = raw.url && linker?.targetOfUrl?.(raw.url);
+  return { fromBot: true, tag: sender ? displayName(sender) : raw.tag, body: unlinkTags(raw.body.trim()) };
 };
 
 /** Formatting needs the original body; quote parsing deliberately unlinks its names. */
 export const rawTagHeader = (text: string): { tag: string; header: string; body: string; url?: string } | undefined => {
   const t = text.trimStart();
-  const m = new RegExp(`^(?:\\[\`?(?:${EMO}\\s*)?[.#](${NAME_CHARS}{1,32})\`?\\]\\(([^)]*)\\):|\`?(?:${EMO}\\s*)?[.#](${NAME_CHARS}{1,32})\`?:)(?:[ \\t]+\\d+/\\d+)?\\s*`, "u").exec(t);
-  return m ? { tag: m[1] || m[3] || "", header: m[0], body: t.slice(m[0].length), ...(m[2] ? { url: m[2] } : {}) } : undefined;
+  const m = HEADER_RE.exec(t);
+  if (!m) return undefined;
+  const tag = m[1] ?? (m[3] ?? "").replace(/^\x60?\.|\x60?$/g, "");
+  let end = m[0].length;
+  const peer = /^[ \t]+\[\x60?\.[\p{L}\p{N}_-]{1,32}\x60?\]\(([^)]*)\)/u.exec(t.slice(end));
+  if (peer) end += peer[0].length;
+  const seq = /^[ \t]+\d+\/\d+/u.exec(t.slice(end));
+  if (seq) end += seq[0].length;
+  end += /^\s*/u.exec(t.slice(end))?.[0].length ?? 0;
+  return { tag, header: t.slice(0, end), body: t.slice(end), ...(m[2] ? { url: m[2] } : {}) };
 };
 
 /** 卡片标题前的 `.name ` 徽标; 群默认 wizard 在自己群里不报名 (同 withTagHeader)。 */
@@ -332,20 +312,7 @@ export const chatHead = (target: string | undefined, url: string | undefined, to
   return me ? speakerHead(me, to) : "";
 };
 
-/** 已经写好头的纯文本 (微信 outbox 里压着的老消息) 按现行规矩重写: 发往 `dest` 的若是 host 就剥掉整个头,
- *  否则只剥掉老写法的 emoji 头像与 `@`、箭头换成冒号。认不出头的原样返回。 */
-export const reheadFor = (text: string, dest: string): string => {
-  const t = text.trim();
-  const m = HEADER_RE.exec(t);
-  if (!m) return text;
-  const who = linker?.resolve(m.slice(1).find(Boolean) ?? "", dest);
-  const rest = t.slice(m[0].length);
-  if (who && isHost(who, dest)) return rest;
-  const head = m[0].trimEnd().replace(new RegExp(`${EMO}\\s*`, "gu"), "").replace(/@/g, "").replace(/\s*→\s*/g, ": ");
-  return head ? headed(head, rest) : rest;
-};
-
-/** `target` 自己往 `dest` 群说话的头, 链接取它自己的 rolepage (bindTagLinker)。 */
+/** `target` 自己往 `dest` 群说话的当前头; 链接取它自己的 rolepage。 */
 export const ownHead = (target: string, dest?: string): string => chatHead(target, linker?.urlOf(target), undefined, dest);
 
 /** 头挂上指定的 rolepage 链接 (mirror 用本轮 turn 的票据), 正文里的名字一并挂链。

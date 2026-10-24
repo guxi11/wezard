@@ -13,8 +13,8 @@
 (function () {
   var qs = new URLSearchParams(location.search);
   var TOKEN = qs.get('id') || '';
-  // 老链接只有 `target=` —— 服务端两个都认, 这里统一成 role。
-  var ROLE = qs.get('role') || qs.get('target') || '';
+  // role 可传全局名字、人类 role id 或 wizard target key。
+  var ROLE = qs.get('role') || '';
   var CONV = qs.get('conv') || '';
   var WITH = qs.get('with') || '';
   // '' = 未指定 (服务端按全部时间, 回包里认领成 'all'); 'all' = 全部时间; 其他 = 那一段的 sid。
@@ -22,8 +22,8 @@
   // 页面上两个独立的视角: ROLE 是页面视角 (名片、侧栏、标题、关系图中心), 只有点头像 / 名字及其装饰 (⇄ 等) 换它;
   // VIEWPOINT 是 chat detail 的视角 (谁算「自己」靠右、描述行以谁为准), 点卡片 / 会话项的其余地方与详情区里的行设它 ——
   // 关系图卡片 = 被点的那个 role, .far 子项 = 那个 role, 移交行 = 移交人 (派活那一方),
-  // 新生 / 被收的提示行 = 那个 wizard; 会话与成对的子项 = 页面视角自己。'' = 与页面视角相同。老链接的 `eye=` 照读。
-  var VIEWPOINT = qs.get('viewpoint') || qs.get('eye') || '';
+  // 新生 / 被收的提示行 = 那个 wizard; 会话与成对的子项 = 页面视角自己。'' = 与页面视角相同。
+  var VIEWPOINT = qs.get('viewpoint') || '';
   var viewpointOf = function () { return VIEWPOINT || ROLE; };
   var TICK_MS = 3000;
 
@@ -513,9 +513,6 @@
   var prefObj = function (key) { var v = pref(key, {}); return v && typeof v === 'object' ? v : {}; };
   var WORLD_KEY = 'wezard.role.world';
   if (!qs.has('side')) WORLD = pref(WORLD_KEY, false) === true;
-  // 早先也记过 ping 与日程卡片的展开 (只活在内存里了)、「往来 / 相关 / 全部」开关 (已去掉, 固定看全部 / 相关) —— 旧 key 顺手清掉。
-  try { ['wezard.role.pingOpen', 'wezard.role.planOpen', 'wezard.role.showAll', 'wezard.role.subScope'].forEach(function (k) { localStorage.removeItem(k); }); } catch (e) { }
-
   // 展开态按群各记各的 (键 = 群节点的会话键): 点开一个不收起别的, 轮询重画也不动它。
   // OPEN_AT = 已经替它自动展开过的那个 CONV —— 选中新会话时展开一次, 之后折不折由人说了算; null = 刚载入。
   // 默认只展开选中的那个群; 本地只记偏离默认的: 没选中却展开着的 = true, 选中却被收起的 = false
@@ -1709,7 +1706,7 @@
   $('#tb-back').onclick = function () { app.classList.remove('reading'); };
 
   // ══ 关系视图 ═══════════════════════════════════════════════════════
-  // 家谱 (clone / spawn) 与派活 (send_peer) 是同一种东西: 一条「谁把谁拉进这件事」的
+  // 家谱 (clone / spawn) 与派活 (tell_peer) 是同一种东西: 一条「谁把谁拉进这件事」的
   // 有向关系。一对 wizard 之间的全部关系合成一条边, 沿方向长成一棵树:
   //   · 每个节点只认一个主父亲 —— 家谱父亲优先, 否则派活次数最多的那位; 其余入边记成节点上的引用
   //   · 环 (互相沟通) 在建树时截断: 哪个根都走不到的环, 挑最近活跃的那个当根
@@ -1719,9 +1716,9 @@
     // 生它、归它管的那一位下面挂的是 clone (带上下文) 或 spawn (白板) —— 与调用框下的提示行同一套字。
     // clone 徽标点了落到 origin 里的分叉处。
     clone: { mark: 'clone', tip: 'clone_wizard 生的分身: fork 了上下文, 开局带着那一刻读过的一切; 归生它的那位管 —— 点了看它在哪一处分叉' },
-    spawn: { mark: 'spawn', tip: 'spawn_wizard / delegate (dispatch 旧名兼容) 白板生的: 不继承上下文, 只是归生它的那位管 (不带 detached)' },
+    spawn: { mark: 'spawn', tip: 'spawn_wizard / delegate 白板生的: 不继承上下文, 只是归生它的那位管 (不带 detached)' },
     fork: { mark: '⑂ 上下文', tip: '分身的上下文 fork 自它 —— 生它、归它管的是另一位' },
-    peer: { mark: '💬', tip: 'send_peer 发起的对话' },
+    peer: { mark: '💬', tip: 'tell_peer 发起的对话' },
   };
   var LINEAGE = { spawn: 1, clone: 1, fork: 1 };
 

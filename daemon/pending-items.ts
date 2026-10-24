@@ -25,8 +25,6 @@ import type { Receiver } from "./router.js";
 export interface Item {
   /** 路由表的 event id —— 这一笔的唯一定位 (§9.5: 主键从件号换成 event)。 */
   event: string;
-  /** 老的件号 (T10 前写下的行只有它; 新旧两种 id 都能拿来点这一行)。 */
-  turn?: string;
   dispatches?: string[];
   /** 派活的那方 (target key)。 */
   owner: string;
@@ -74,10 +72,10 @@ const isFailure = (st?: ReceiptStatus): boolean => st === "timeout" || st === "s
 
 export interface Ledger {
   /** Idempotent tracked projection; recovery never reopens a settled leg. */
-  dispatch: (key: string, x: { event: string; turn?: string; owner: string; to: string; text: string; receiver?: Receiver; asker?: Asker; at: number }) => void;
+  dispatch: (key: string, x: { event: string; owner: string; to: string; text: string; receiver?: Receiver; asker?: Asker; at: number }) => void;
   /** 一次新派活。同一对之前还开着的那件被顶掉 (回执登记也是一对一份, 旧那份不会再回来)。 */
-  open: (x: { event: string; turn?: string; owner: string; to: string; text: string; receiver?: Receiver; asker?: Asker; at: number }) => void;
-  /** 续问 (`re`) —— 同一件接着说: 清掉「等人」, 回到在飞; 已关掉的重新打开。`id` = event 或老件号。 */
+  open: (x: { event: string; owner: string; to: string; text: string; receiver?: Receiver; asker?: Asker; at: number }) => void;
+  /** 续问 (`re`) —— 由 event 定位同一件, 清掉「等人」并回到在飞; 已关掉的重新打开。 */
   touch: (owner: string, id: string) => void;
   /** 回执落了一份。`bySender` = 发话方自己收掉 / 取走的, 它自己知道, 直接关。 */
   outcome: (owner: string, event: string, status: ReceiptStatus, body: string, bySender?: boolean) => void;
@@ -89,12 +87,11 @@ export interface Ledger {
 }
 
 export const createLedger = (store: JsonMap<Item>, now: () => number = Date.now): Ledger => {
-  // 盘上还留着只写件号的老行 (T10 才归档这个文件): 读出来时把件号补成 event, 免得渲染成 undefined;
-  // 那一栏此后既认 event 也认件号, 老行照旧点得动。
-  const all = (): Item[] => Object.values(store.all()).map((x) => (x.event ? x : { ...x, event: x.turn ?? "" }));
+  // 当前投影只认带 event 的行; 老件号行没有当前可寻址的身份, 直接略过。
+  const all = (): Item[] => Object.values(store.all()).filter((x) => typeof x.event === "string" && x.event.length > 0);
   const close = (x: Item, why: string): void => { store.set(x.event, { ...x, closed: { at: now(), why } }); };
   const find = (owner: string, id: string): Item | undefined =>
-    all().find((x) => (x.event === id || x.turn === id) && x.owner === owner && !x.closed);
+    all().find((x) => x.event === id && x.owner === owner && !x.closed);
   return {
     dispatch: (key, { text, ...x }) => {
       const old = store.get(x.event);
@@ -109,7 +106,7 @@ export const createLedger = (store: JsonMap<Item>, now: () => number = Date.now)
     },
     touch: (owner, id) => {
       // 关掉了的也认: 对 done / drop / 失败的那件 re, 这一句又在飞了。
-      const x = all().find((y) => (y.event === id || y.turn === id) && y.owner === owner);
+      const x = all().find((y) => y.event === id && y.owner === owner);
       if (!x) return;
       const { status: _s, ask: _a, waitHuman: _w, heard: _h, told: _t, closed: _c, ...rest } = x;
       store.set(x.event, { ...rest, touched: now() });

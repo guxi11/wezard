@@ -1,7 +1,7 @@
 // Rolepage routes, shared verbatim by the daemon and the standalone svr —
 // both own a DetailStore, so both can serve the same view off it.
 //
-//   GET /role, /chat      → static SPA shell (shared/chat-render); /chat 是改名前的老链接
+//   GET /role             → static SPA shell (shared/chat-render)
 //   GET /chat/app.css     → 视图样式 (高亮主题 + detail 共用样式 + web/chat.css)
 //   GET /chat/app.js      → 视图脚本 (web/chat.js)
 //   GET /chat/vendor.js   → markdown-it + highlight.js (随包分发, 不走 CDN)
@@ -164,10 +164,9 @@ const landingOf = (ticket: Ticket, role: string): Landing => {
 
 const NOT_FOUND = "未找到该会话 (链接可能已过期)";
 
-/** `role=` (名字 / target / human:x) > 老链接的 `target=` > 票据自带的那个 wizard。 */
+/** `role=` (名字 / target key / human:x) > 票据自带的那个 wizard。 */
 const pickRole = (dir: Directory, ticket: Ticket, url: URL): string =>
   dir.resolve(url.searchParams.get("role") ?? "") ??
-  dir.resolve(url.searchParams.get("target") ?? "") ??
   ticket.selfTarget;
 
 // 没指定或 "all" = 不切, 全部时间; 否则只看那一段。
@@ -586,7 +585,6 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
 /** Path → handler map; the daemon registers each, svr dispatches through it. */
 export const chatRouteTable = (routes: ChatRoutes): Record<string, SimpleHandler> => ({
   "GET /role": routes.page,
-  "GET /chat": routes.page,
   "GET /chat/app.css": routes.styles,
   "GET /chat/app.js": routes.script,
   "GET /chat/vendor.js": routes.vendor,
@@ -603,6 +601,6 @@ export const chatRouteTable = (routes: ChatRoutes): Record<string, SimpleHandler
 
 /** Route keys, single-sourced so the daemon's registration can't drift. */
 export const CHAT_ROUTE_KEYS = [
-  "GET /role", "GET /chat", "GET /chat/app.css", "GET /chat/app.js", "GET /chat/vendor.js",
+  "GET /role", "GET /chat/app.css", "GET /chat/app.js", "GET /chat/vendor.js",
   "GET /api/role", "GET /api/msgs", "GET /api/tool", "GET /api/role-events", "GET /api/world", "GET /api/search", "GET /api/glance", "GET /api/charter", "POST /api/seen",
 ] as const;

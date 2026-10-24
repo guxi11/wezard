@@ -69,8 +69,8 @@ const record = (bareId: string, content: string): void => {
 };
 
 // ── 空消息门控 (最后一道防线) ─────────────────────────────────────────────
-// 任何通道都不下发"正文为空"的消息。空 = 剥掉可路由头 (`.name: …` /
-// `[🧙 #tag](url) 2/5 …`) 后没有任何可见内容 —— WeCom 把这种气泡渲染成一行
+// 任何通道都不下发"正文为空"的消息。空 = 剥掉当前可路由头 (`.name: …` / signed or linked `.name`, optionally `2/5`)
+// 后没有任何可见内容 —— WeCom 把这种气泡渲染成一行
 // 光秃秃的 tag, 正是 "#dev 标题在、正文是空的" 那类事故形态。挂在 tracker 的
 // 同一个 SDK 包装层: 单一缝, sendMessage / replyStream / replyStreamWithCard
 // 全覆盖, 上游新增调用点自动受保护, 不依赖每个 caller 自觉。
@@ -82,7 +82,7 @@ const record = (bareId: string, content: string): void => {
 const hasVisibleBody = (content: string): boolean => {
   const clean = withoutMessageFooter(content);
   const header = rawTagHeader(clean);
-  const footer = /\[[✨✦]\]\(([^\n)]*)\)\s*$/.exec(content)?.[1];
+  const footer = /\[✦\]\(([^\n)]*)\)\s*$/.exec(content)?.[1];
   const sender = footer && targetOfTagUrl(footer);
   const ownHeader = header && (!sender || (!header.url && resolveTagTarget(header.tag, sender) === sender));
   return (ownHeader ? header.body : clean).trim().length > 0;

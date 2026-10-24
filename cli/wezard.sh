@@ -26,8 +26,6 @@ usage() {
   cat <<'EOF'
 wezard <subcommand>
   init                 interactive onboarding (write config, install daemon, claim default chat, run demo)
-  migrate              upgrade an existing weclaude install (state + daemon + plugin + settings.json)
-                       flags: --dry-run --force --purge -y
   status               daemon health + connection state
   reconnect            reconnect WeCom without restarting sessions or pending approvals
   start                load resident daemon (launchd/systemd)
@@ -169,7 +167,6 @@ svc_unregister() {
 
 case "$cmd" in
   init)    exec_node dist/cli/init.js "$@" ;;
-  migrate) exec_node dist/cli/migrate.js "$@" ;;
   wx)      exec_node dist/cli/wx.js "$@" ;;
   status)
     if out=$(http_get /status 2>/dev/null); then
@@ -262,13 +259,9 @@ case "$cmd" in
       || { echo "[wezard] $NPM_WEZARD/cli/wezard.sh missing after install" >&2; exit 1; }
     # postinstall (run by npm above) refreshed the Claude plugin marketplace
     # copy — hook/MCP/commands in ~/.claude/plugins are already on the new tag.
-    if grep -q '__update-finish' "$NPM_WEZARD/cli/wezard.sh"; then
-      exec bash "$NPM_WEZARD/cli/wezard.sh" __update-finish "$GLOBAL_VER"
-    fi
-    # Fresh copy predates `update` (< 1.3.6) — drive its own sync + reload.
-    echo "[wezard] installed copy has no __update-finish — falling back to sync + reload"
-    bash "$NPM_WEZARD/cli/wezard.sh" sync || echo "[wezard] sync failed — run 'wezard sync' manually" >&2
-    exec bash "$NPM_WEZARD/cli/wezard.sh" reload
+    grep -qE '^[[:space:]]*__update-finish\)' "$NPM_WEZARD/cli/wezard.sh" \
+      || { echo "[wezard] installed copy missing __update-finish" >&2; exit 1; }
+    exec bash "$NPM_WEZARD/cli/wezard.sh" __update-finish "$GLOBAL_VER"
     ;;
   __update-finish)
     # Internal tail of `update` — always runs from the freshly installed npm

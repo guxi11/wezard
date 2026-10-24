@@ -26,7 +26,6 @@
     "wezard-daemon": "dist/daemon/index.js",
     "wezard-mcp": "dist/mcp/server.js",
     "wezard-init": "dist/cli/init.js",
-    "wezard-migrate": "dist/cli/migrate.js",
     "wezard-svr": "dist/svr/index.js"
   },
   "files": [
@@ -35,8 +34,6 @@
     "cli/wezard.sh",
     "dist/cli/init.js",
     "dist/cli/init.js.map",
-    "dist/cli/migrate.js",
-    "dist/cli/migrate.js.map",
     "dist/cli/sync.js",
     "dist/cli/sync.js.map",
     "dist/cli/audit.js",
@@ -77,7 +74,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && chmod +x dist/cli/init.js dist/cli/migrate.js dist/cli/audit.js dist/cli/wx.js dist/daemon/index.js dist/mcp/server.js dist/svr/index.js",
+    "build": "tsc -p tsconfig.json && chmod +x dist/cli/init.js dist/cli/audit.js dist/cli/wx.js dist/daemon/index.js dist/mcp/server.js dist/svr/index.js",
     "dev:daemon": "tsx daemon/index.ts",
     "dev:cli": "tsx cli/init.ts",
     "typecheck": "tsc --noEmit",

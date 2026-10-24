@@ -214,7 +214,7 @@ export const submittedSince = (marks: readonly TranscriptMark[], probe: string, 
       .some((s) => s !== undefined && !(s.at < since) && normalize(s.text).includes(probe)));
 
 /** A message event is submitted only when its own event marker lands in a user transcript row
- *  (the envelope's `msg`, or the older standalone message-event block). */
+ *  (the envelope's `msg`, or the current standalone message-event block for injections without an envelope). */
 export const submittedEventSince = (marks: readonly TranscriptMark[], eventId: string, since: number): boolean =>
   Boolean(eventId) && marks.some((m) =>
     readFrom(m.path, m.offset)

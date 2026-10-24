@@ -1,7 +1,7 @@
 // Read code-mode transcripts as data. Never evaluate the recorded JavaScript.
 import { parse } from "acorn";
 
-export const HINT_TOOL = /(?:^|__)(tell_peer|send_peer|dispatch|delegate|clone_wizard|spawn_wizard|stop_wizard|schedule_task)$/;
+export const HINT_TOOL = /(?:^|__)(tell_peer|delegate|clone_wizard|spawn_wizard|stop_wizard|schedule_task)$/;
 export type Facts = Record<string, unknown>;
 export const objectOf = (v: unknown): Facts | undefined =>
   v !== null && typeof v === "object" && !Array.isArray(v) ? v as Facts : undefined;
@@ -91,9 +91,10 @@ export const callsInExec = (source: string, accept: (name: string) => boolean = 
 const nameOf = (v: unknown): string => typeof v === "string" ? v.replace(/^\./, "") : "";
 const matches = (c: HintCall, r: Facts): boolean => {
   const tool = HINT_TOOL.exec(c.toolName)?.[1];
-  if (tool === "dispatch" || tool === "delegate") return r.decision === "spawn" || r.decision === "existing";
-  if (tool === "tell_peer" || tool === "send_peer") return !r.decision && typeof r.turn === "string" && !r.dispatched;
-  if (tool === "spawn_wizard" || tool === "clone_wizard") return !r.decision && typeof r.sessionId === "string";
+  if (tool === "delegate") return r.decision === "spawn" || r.decision === "existing";
+  if (tool === "tell_peer") return r.ok === true && !r.decision && typeof r.eventId === "string" && r.queued === true;
+  if (tool === "spawn_wizard" || tool === "clone_wizard")
+    return r.ok === true && !r.decision && typeof r.name === "string" && typeof r.cwd === "string" && typeof r.inherited === "boolean";
   if (tool === "stop_wizard") return typeof r.name === "string" && typeof r.mode === "string";
   return typeof r.id === "string" && (typeof r.when === "string" || typeof r.next === "string");
 };
@@ -105,11 +106,10 @@ export const execHintCalls = (source: string, output: string): (HintCall & { rep
   const replies = toolReplies(output).filter((r) => !r.dryRun);
   const candidates = calls.map((c) => {
     const compatible = replies.filter((r) => matches(c, r));
-    const requested = nameOf(c.toolInput.to ?? c.toolInput.name ?? c.toolInput.tag);
+    const requested = nameOf(c.toolInput.to ?? c.toolInput.name);
     const named = compatible.filter((r) => requested && requested === nameOf(r.name));
-    const tool = HINT_TOOL.exec(c.toolName)?.[1];
-    // dispatch may select someone other than the requested spawn name. A directed message cannot.
-    return named.length ? named : requested && (tool === "tell_peer" || tool === "send_peer") ? [] : compatible;
+    // delegate may select someone other than a requested spawn name. A directed tell cannot.
+    return named.length ? named : requested && HINT_TOOL.exec(c.toolName)?.[1] === "tell_peer" ? [] : compatible;
   });
   return calls.flatMap((c, i) => {
     const rs = candidates[i]!;

@@ -33,7 +33,7 @@ const planBrief = (value: unknown): unknown => {
 export const present = (tool: string, raw: unknown, input?: Row): unknown => {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
   const row = raw as Row;
-  if (tool === "dispatch" || tool === "delegate") {
+  if (tool === "delegate") {
     if (row.dryRun === true) return {
       ...pick(row, ["ok", "dryRun", "decision", "name", "tier"]),
       reason: dryRunReason(row),
@@ -45,7 +45,7 @@ export const present = (tool: string, raw: unknown, input?: Row): unknown => {
     if (typeof fallback === "string" && fallback) result.warnings = [...(Array.isArray(result.warnings) ? result.warnings : []), fallback];
     return result;
   }
-  if (tool === "tell_peer" || tool === "send_peer") return pick(row, ["ok", "name", "event", "eventId", "queued", "priority", "wasBusy", "planId", "public", "transfer", "after", "parked", "warnings", "warning", "gated", "reason", "urgentDowngraded", "reUnknown"]);
+  if (tool === "tell_peer") return pick(row, ["ok", "name", "event", "eventId", "queued", "priority", "wasBusy", "planId", "public", "transfer", "after", "parked", "warnings", "warning", "gated", "reason", "urgentDowngraded", "reUnknown"]);
   if (tool === "spawn_wizard" || tool === "clone_wizard") return pick(row, ["ok", "name", "cwd", "inherited", "model", "effort", "tier", "modelWarning", "tierNote", "dispatched", "queued", "event", "eventId", "planId", "warnings", "warning"]);
   if (tool === "wizard_identity") {
     const result: Row = { ...pick(row, ["ok", "name", "renamed"]) };

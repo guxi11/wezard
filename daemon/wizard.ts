@@ -37,7 +37,7 @@ export interface WizardRecord {
    *  归谁管 (预算、回收); forkOf 是上下文从哪来。克隆自己时两者是同一个, 不重复记。 */
   forkOf?: string;
   bornAt: number;
-  /** spawn / clone 时落地的档位 (models.tiers 的键)。只记出生那一刻: 之后 set_model 换了模型它不跟。 */
+  /** spawn / clone 时落地的档位 (models.backends.<backend>.tiers 的键)。只记出生那一刻: 之后 set_model 换了模型它不跟。 */
   tier?: string;
   /** 被派来领一件复杂活的 lead: 宪章多一节层级规矩 (renderLeadRules), 组队打法随派活信封带 (renderLeadPlaybook)。 */
   lead?: boolean;
@@ -191,7 +191,7 @@ export const evictStaleName = async (
   return rec;
 };
 
-/** 一次性迁移/补名: 默认会话先挑 (聊天名归它), 其余按出生先后。 */
+/** 当前启动/按需补名: 默认会话先挑 (聊天名归它), 其余按出生先后；重复执行按当前身份状态落定。 */
 export const settleAll = (
   store: WizardStore,
   targets: readonly string[],

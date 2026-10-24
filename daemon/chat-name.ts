@@ -2,11 +2,8 @@
 //
 // 一个 WeCom 聊天的身份是 `chat:wrkSxxxxx…` 这种不可读、不可手打的 id。wizard 早已
 // 不靠聊天寻址 —— 每个 wizard 有全局唯一的名字 (`.fix`, 见 wizard.ts); 聊天名要解决
-// 的是**指到一个群**: notify 发到哪、new_claude_session / spawn_wizard / clone_wizard 把 home 设在哪,
+// 的是**指到一个群**: notify 发到哪、spawn_wizard / clone_wizard 把 home 设在哪,
 // 以及一个群的默认 wizard 出生时取什么名字。
-//
-// 仍然认的老地址 (改名前的 wizard 正在用): `daily#fix` / `daily/fix` / `chat:wr…#fix`
-// —— parsePeerRef 拆开, chatBaseOf 取聊天那一截。
 //
 // 落盘走 config.jsonc (`chats`), 与定时表同一套 patchJsonc + in-place cfg 变更 ——
 // 名字是用户手写的长期配置, 不是运行时状态, 不该躺在 state 目录里。
@@ -36,6 +33,7 @@ export type CharterGuard = <T>(write: () => T, change: (r: T) => CharterChange |
  *  不能含 `#`、`/`、`:` 与空白 —— 那三个都是地址语法的一部分。 */
 const NAME_RE = /^[\p{L}\p{N}_-]{1,32}$/u;
 const PRINCIPAL_RE = /^(?:chat|user|group|external_user):/;
+const TARGET_KEY_RE = /^(?:chat|user|group|external_user):[^#/]+(?:#[^#/]+)?$/;
 
 /** 用户输入的名字: 去引号/空白, 剥掉习惯性前缀的 `@`、`#`、`.`。 */
 export const normChatName = (raw: string): string =>
@@ -53,21 +51,12 @@ export const chatNameOf = (cfg: Config, target: string): string => {
   return entries(cfg).find(([, p]) => p === base)?.[0] ?? "";
 };
 
-/** 任何一种寻址串 → base principal; 认不出返回 ""。
- *
- *  「聊天名」「裸 principal」「`daily#fix`」「`chat:wr…#fix`」全收 —— 后两种是
- *  wizard_roster 吐给模型的那个 `address`, 而模型手里往往只有它:
- *  它知道「那个 wizard 叫 exp、地址 org-archivist#exp」, 要往那个群里说句话时,
- *  唯一能写出来的就是这个串。此前 `name#tag` 被整条拒收 (只有全量 key 那一种因为
- *  前缀命中而侥幸可用), 于是同一个地址空间在 send_peer 那边通、在 notify 这边不通。
- *  会话那一截在这里是多余信息, 剥掉即可 —— 一个 tag 指不出第二个聊天。 */
+/** 当前聊天全名或 canonical principal/target key → base principal; friendly wizard 地址不解析。 */
 export const chatBaseOf = (cfg: Config, ref: string): string => {
-  const { chat, tag } = parsePeerRef(ref ?? "");
-  // 裸 tag (`fix`) 没有聊天那一截 —— parsePeerRef 把它放进 tag。它可能正是一个
-  // 聊天的名字, 所以两边都试一次。
-  const r = normChatName(chat || tag);
+  const r = normChatName(ref ?? "");
   if (!r) return "";
-  if (PRINCIPAL_RE.test(r)) return baseOfKey(r);
+  if (TARGET_KEY_RE.test(r)) return baseOfKey(r);
+  if (PRINCIPAL_RE.test(r) || /[#/]/.test(r)) return "";
   const f = fold(r);
   return entries(cfg).find(([n]) => fold(n) === f)?.[1] ?? "";
 };
@@ -78,7 +67,7 @@ export const chatBaseOf = (cfg: Config, ref: string): string => {
 // 漏掉的那个群里 wizard 之间就当着人派活、回复也进群 (pagesite 就是这样冒的泡)。
 // 默认不落盘, 已有的聊天不必迁移。
 export const chatPolicyOf = (cfg: Config, target: string): ChatPolicy & { topOnly: boolean } =>
-  ((p) => ({ ...p, topOnly: p.topOnly ?? true }))(ChatPolicy.parse(cfg.chatPolicy?.[baseOfKey(target)] ?? cfg.chatPolicy?.[chatNameOf(cfg, target)] ?? {}));
+  ((p) => ({ ...p, topOnly: p.topOnly ?? true }))(ChatPolicy.parse(cfg.chatPolicy?.[baseOfKey(target)] ?? {}));
 
 /** 群的默认会话就是 router; 统一取 models.router, 非管家不套档。
  *  内部 key (daemon 内建的记忆整理执行体, `wezard:internal#steward`) 同属管家型: 它带着 slot 名,
@@ -127,7 +116,7 @@ const retire = (cfg: Config, names: readonly string[]): void => {
 };
 
 /** 给 `target` 所在的聊天起名 (改名 = 覆盖, 一个聊天只留一个名字)。名字被别的
- *  聊天占着就拒绝 —— 重名会让 `daily#fix` 指向两个地方, 那正是要消灭的歧义。 */
+ *  聊天占着就拒绝 —— 聊天名必须唯一解析。 */
 export const setChatName = (
   cfg: Config,
   sourcePath: string,
@@ -236,26 +225,6 @@ export const clearChatName = (cfg: Config, sourcePath: string, target: string): 
   return cur;
 };
 
-// ── 地址 ──────────────────────────────────────────────────────────────
-export interface PeerRef {
-  /** 聊天名或裸 principal; "" = 调用方自己的聊天。 */
-  chat: string;
-  /** `#tag` 里的 tag; "" = 该聊天的默认会话。 */
-  tag: string;
-}
-
-/** `fix` / `#fix` / `daily#fix` / `daily/fix` / `daily#` / `chat:wr…#fix` → {chat, tag}。
- *  裸 principal (无分隔符) 也认成"那个聊天的默认会话"。 */
-export const parsePeerRef = (raw: string): PeerRef => {
-  const s = (raw ?? "").trim().replace(/^@+/, "");
-  const i = s.search(/[#/]/);
-  if (i < 0) return PRINCIPAL_RE.test(s) ? { chat: s, tag: "" } : { chat: "", tag: s };
-  const chat = s.slice(0, i);
-  const tag = s.slice(i + 1).trim().replace(/^[#/]+/, "");
-  return { chat, tag };
-};
-
-/** 一个 target key 的规范地址 —— 它的全局名字, 直接能喂回 send_peer / peek_peer。
- *  名字全局唯一, 所以与 `self` 在不在同一个聊天无关 (参数留着给老调用方)。 */
-export const peerAddress = (cfg: Config, _self: string, target: string): string =>
+/** 一个 target key 的地址 —— 它的全局名字, 可直接用于当前 wizard 寻址。 */
+export const peerAddress = (cfg: Config, target: string): string =>
   settleName(wizardStore(), chatNameOf(cfg, target), target);

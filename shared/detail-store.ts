@@ -463,7 +463,7 @@ export const createDetailStore = (opts: { stateDir: string; log?: Logger }): Det
       const r = store.get(id);
       if (!r || r.kind !== "turn") return;
       // 同一 message.id 的重复行只入账一次 (thinking / tool_use 拆行, 共享 usage)。
-      // 无 messageId 时保守累加 — 兼容早期 caller。
+      // 当前 transcript 可缺少 message.id; 没有去重键时按每条 usage 行累计。
       const seenIds = r.usageMsgIds ?? [];
       const dupe = delta.messageId ? seenIds.includes(delta.messageId) : false;
       const cur = r.usage;

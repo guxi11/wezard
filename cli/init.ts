@@ -338,7 +338,6 @@ const main = async (): Promise<void> => {
   patchJsonc(CONFIG, [
     { path: ["bot", "websocketUrl"], value: "wss://openws.work.weixin.qq.com" },
     { path: ["defaultChat"], value: "" },
-    { path: ["wrc", "claudeBin"], value: undefined },
     { path: ["wrc", "defaultCli"], value: backendNameFor(primary) },
     { path: ["wrc", "cwd"], value: "~/.wezard/workspace" },
     { path: ["wrc", "allowFrom"], value: [] },

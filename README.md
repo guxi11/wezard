@@ -25,7 +25,7 @@
 1. 🪞 **远程控制本机 Agent CLI** — 企业微信里发的消息原样落进 CLI 输入框；Agent 的回复、工具调用、思考过程实时同步回聊天。回到电脑前 `tmux attach -t wezard` 接着干，对话一字不少。支持 `claude` / `claude-internal` / `codebuddy` / `codex`。
 2. 🛎 **远程审批** — Agent 要跑 `Bash` / `Edit` 时审批卡直推 IM：`✅` 放行一次、`⏱` 一段时间内自动放行、`✅总是` 记成规则、`❌` 拒绝。危险操作（`rm` / 强推 / `DROP` / 敏感路径）每次都要单独确认；做完计划推计划卡（`✅同意` / `✏️继续改`），Agent 提的选择题变成投票卡。
 3. 🧙 **多 wizard** — 每个会话是一个有名字的 wizard，写作 `.name`，全局唯一，在任何群里都叫得到；有职责、有记忆，看得见彼此在干什么。克隆一个分身让它继承当前上下文，或者从白板新起一个；按活的难度挑档位（`mini` → `ultra`，从 haiku 到 opus·max）。
-4. 🎩 **管家分派** — 没点名的话落到聊天的默认 wizard：一两句能答完的它自己答，其余一步 `dispatch` 给对口的那个或新起一个；要 coder + reviewer 来回几轮的复杂活交给一个 lead 带队。管家有手闸，想自己埋头改代码会被拦下改去分派。
+4. 🎩 **管家分派** — 没点名的话落到聊天的默认 wizard：一两句能答完的它自己答，其余一步 `delegate` 给对口的那个或新起一个；要 coder + reviewer 来回几轮的复杂活交给一个 lead 带队。管家有手闸，想自己埋头改代码会被拦下改去分派。
 5. 📮 **派完就放手** — wizard 之间派活不必守着等：对方那一轮一结束，守护进程把它的结论作为新的一轮自动送回发话方；对方反问（`NEED:`）就接着答，闲着不交差会被追问一句，没了结的事由守护进程替管家记着。
 6. 🔝 **顶层模式** — 开了之后群里只有管家和你点名的那个说话，wizard 之间的往来全在私下，结论由顶层用自己的话讲给你。
 7. 🧠 **三层记忆** — 自己的、本群共享的、本工作区共享的。「这个仓库 reload 要先 build」这类约定写一次，之后每个新 wizard 开局就知道；共享的两层由守护进程定时起一个整理者去重合并。
@@ -135,9 +135,9 @@ wezard init
 
 **管家**
 
-每个聊天的默认 wizard 是这个群的**管家**，默认跑 `light` 档（`models.steward`，可按群在 `chatPolicy.<chat>.steward` 覆盖）。没点名的话都落到它这儿——一两句能答完的（问进度、谁在干什么、闲聊）自己答；要读很多代码、改文件、跑很久的活，哪怕它自己做得了也**派出去**：它一忙，这个群里没点名的话就都排在它后面。
+每个聊天的默认 wizard 是这个群的**管家**，档位由 `models.router` 指定（缺省 `standard`），模型与 effort 从当前后端的 `models.backends.<backend>.tiers` 取值。没点名的话都落到它这儿——一两句能答完的（问进度、谁在干什么、闲聊）自己答；要读很多代码、改文件、跑很久的活，哪怕它自己做得了也**派出去**：它一忙，这个群里没点名的话就都排在它后面。
 
-派活是一步 `dispatch`：守护进程先列候选——谁的职责、最近的话、读过的文件和这件活有交集，在不在同一个工作区，忙不忙，上下文多重、缓存冷没冷——再给一个默认决定：证据够强、不忙、接着用那段上下文划算的头一个候选就交给它，否则从白板新起一个，档位按活定（一句话小活 `light`、常规 `standard`、带队 `hard`）。管家照办，或显式推翻（点名、硬要新的、换档）。
+派活是一步 `delegate`：守护进程先列候选——谁的职责、最近的话、读过的文件和这件活有交集，在不在同一个工作区，忙不忙，上下文多重、缓存冷没冷——再给一个默认决定：证据够强、不忙、接着用那段上下文划算的头一个候选就交给它，否则从白板新起一个，档位按活定（一句话小活 `light`、常规 `standard`、带队 `hard`）。管家照办，或显式推翻（点名、硬要新的、换档）。
 
 **复杂的活交给 lead**：要拆成多阶段、需要 coder 与 reviewer 配合的任务，管家交给一个 lead。lead 维护自己的 plan，按当前阶段创建所需 wizard，验收回复后显式更新计划并继续推进。范围清楚、低风险的编码交给 `light`；独立 reviewer 从白板起步，按审查难度选档。计划暂停、恢复、完成或取消都由 owner 明确决定。
 
@@ -147,12 +147,12 @@ flowchart LR
     msg -- "没点名" --> butler(["管家"])
     butler -- "一两句的事" --> self["自己答"]
     butler -- "要组队的复杂活" --> lead["hard 档 lead"]
-    butler -- "其余 · dispatch" --> pick{"有对口、不忙、<br/>划算的 ?"}
+    butler -- "其余 · delegate" --> pick{"有对口、不忙、<br/>划算的 ?"}
     pick -- "有" --> exist["交给它"]
     pick -- "没有" --> fresh["白板新起一个"]
 ```
 
-**手闸**：管家常常说着分派、实际埋头自己干。守护进程在审批链最前面拦它——改文件、开子代理一律拒；读、搜、跑命令每轮最多 4 次（`chatPolicy.<群>.stewardBudget`），超了就拒并叫它 `dispatch`。放行窗口、`✅总是`、跳过所有审批都压不过这道闸。
+**手闸**：管家常常说着分派、实际埋头自己干。守护进程在审批链最前面拦它——改文件、开子代理一律拒；读、搜、跑命令每轮最多 4 次（`chatPolicy.<群>.stewardBudget`），超了就拒并叫它 `delegate`。放行窗口、`✅总是`、跳过所有审批都压不过这道闸。
 
 **转交默认是公开的，但顶层模式默认开着**：把某个群显式写成 `chatPolicy.<群>.topOnly = false` 之后，群里才会出现一条 `.管家 → .它` 的气泡、它的回复也直接发进这个群（管家只回一句「已转给 `.它`」）；默认（不写）顶层模式是开的，wizard 之间的往来一律私聊，群里只看到管家自己的结论。
 
@@ -185,7 +185,7 @@ flowchart LR
 
 - **记忆分三层**：自己的、本群共享的、本工作区共享的。「这个群习惯先出方案再动手」「这个仓库 reload 要先 build」不必每来一个新 wizard 再教一遍。共享的那两层是**提议**——守护进程每 30 分钟看一眼，有提议才起一个整理者去重、改写、合并（已经写在仓库 `CLAUDE.md` 里的不再收），所以不会立刻生效，也不会被几十个 wizard 越写越长；合并后在场读这份记忆的 wizard 下一条消息会收到一行「记忆已更新」。
 - **分身继承上下文**：分身开局就带着原 wizard 读过的全部材料，原 wizard 不受影响；也可以生一个白板的子 wizard，顺便换个工作区。分身还能再分身。
-- **模型按档挑**：生分身时给一个档位，由轻到重 `mini` / `light` / `standard` / `hard` / `ultra`（缺省 haiku·low / haiku·low / sonnet·medium / opus·high / opus·max，`models.tiers` 可改）；也可以直接点模型与 effort，`/new [cli] [model]` 同理。档位直接带进启动参数，死 pane 重生、交接重开都沿用。
+- **模型按档挑**：生分身时给一个档位，由轻到重 `mini` / `light` / `standard` / `hard` / `ultra`，在 `models.backends.<backend>.tiers` 配置；也可以直接点模型与 effort。新 pane 的 CLI 统一由 `wrc.defaultCli` 决定，档位记进绑定，死 pane 重生、交接重开按当前后端解析。
 - **派完就放手**：wizard 之间说一句就走，不守着等；结论按持久 route event 送给 receiver（发起者）。owner 是当前欠答的执行者；receiver 收到 `NEED:` 后用显式 `re` 继续同一件。对方持续闲置时守护进程可代问进展。路由不会因 deadline 到期或 pane 消失自动生成失败结论；注入与回执是否送达由持久事件和 transcript/session/ACK 证据恢复。对方正忙时默认等它这一轮结束再投，急事可以打断它或直接插话。
 - **群里只留结论**：wizard 之间派活、来回默认是私聊，不刷群；生分身、更新计划、交接这类过程也不进群。群里只出现回给你的那条回复、通知、定时任务的 ⏰，以及它们主动公开的讨论。过程想看去 [rolepage](#rolepage)。
 - **上下文过了 200k 自己交接**：手上这摊告一段落，它就把工作压成一份简报、原地换一个全新会话接着干，名字和职责都不变——交接不是压缩，大上下文每一轮都在付钱。交接那几秒里进来的话（人说的、同伴派的、回执、定时任务）一律等它重开完再送进去，一句不丢。
@@ -193,6 +193,9 @@ flowchart LR
 ---
 
 ## 任务编排
+
+当前工具与地址只使用现行名称：`delegate`、`tell_peer`、`handoff`，地址参数为 `name` / `names`。旧工具别名、`tag` / `tags` 参数、旧配置和定时格式自动迁移已移除。route 的 merge alias 和有限 `NO_DEADLINE` 仍是当前持久化语义，依据见[receiver 路由方案](docs/evolve/receipt-router.md#版本兼容与当前语义边界)。
+
 
 **Wezard Teams** 用 plan 保存复杂任务的 DAG、进度与结论。每个 wizard 可以同时维护多个 plan，每个 plan 只有一个 owner；owner 可以逐步添加任务、调整依赖、安排并行工作，并在验收后显式推进状态。
 
@@ -335,15 +338,7 @@ sequenceDiagram
 
 ## 多 CLI 后端
 
-`claude` / `claude-internal` / `codebuddy` 可以同时用：一个会话跑 `claude`，另一个跑 `codebuddy`，各自绑不同的聊天或 wizard。
-
-```
-/new                    沿用当前会话的 CLI 新开
-/new codebuddy          换到 codebuddy 新开
-.docs /new codebuddy    用 codebuddy 叫出一个叫 docs 的 wizard
-```
-
-会话一直留在它所属的 CLI 上，`/clear`、重启自愈都不会换。默认后端由配置项 `wrc.defaultCli` 决定（缺省 `claude`）。
+支持 `claude` / `claude-internal` / `codebuddy` / `codex`。daemon 可同时读取不同后端的现有会话；新 pane 的 CLI 统一由 `wrc.defaultCli` 决定（缺省 `claude`）。`/new [model] [第一句]` 可选择模型并开始新会话，不再接受单次 CLI 选择参数；原生 clone 仍按父会话实际后端处理 fork。
 
 ---
 
@@ -354,7 +349,7 @@ IM 里发 `/help` 可随时拉出完整命令表；每次 `/new`、`/clear` 之�
 ```
 /new · /clear · /stop · /n · /kill    会话控制（/kill 连 pane 一起收掉）
 /sessions [emoji|id]                  列出 / 切换 live 会话
-[.name] /new <cli> [model] [第一句]   切换 CLI 后端 / 挑模型 / 叫出新 wizard
+[.name] /new [model] [第一句]         按配置后端重开 / 挑模型 / 叫出新 wizard
 /reveal                               把终端的 tmux 窗口切到本会话
 /peers · /wizards                     本聊天的 wizard：名字、职责、忙闲、家谱
 /name [名字|-] · /chats               给本聊天起名 / 跨聊天目录
@@ -373,14 +368,11 @@ wezard send <chat> <text>  # 主动推消息
 wezard sync                # 重写 hook/MCP/env 进各 settings.json
 wezard wx [bind|list|unbind]  # 微信 ClawBot：终端扫码绑定 / 查看 / 解绑
 wezard reload              # 重启 daemon（改了配置后用）
-wezard migrate             # 一次性：从旧名 weclaude 迁移到 wezard
 wezard unsync              # 卸载 hook/MCP（保留 daemon）
 wezard uninstall           # 完整卸载（先于 npm uninstall）
 ```
 
 > ⬆️ **升级**：`npm i -g wezard@latest` 装新版二进制，再 `wezard sync && wezard reload` 刷新 hook/MCP 注入并重启 daemon（幂等，`~/.wezard/` 的 config/secrets 原样保留）。
->
-> `wezard migrate` 只用于从**旧包名 `weclaude`** 迁移（搬 `~/.weclaude` → `~/.wezard`、重装 daemon/插件），普通版本升级用不到。
 >
 > ⚠️ **卸载顺序**：先 `wezard uninstall` 再 `npm uninstall -g wezard`。否则 launchd/systemd 会一直尝试拉起已删除的二进制。`~/.wezard/` 下的 config/secrets 不会被清，二次安装可无缝复用。
 
@@ -428,7 +420,7 @@ npm run dev:daemon     # tsx 直跑 daemon，热迭代不用装
 ./cli/wezard.sh logs -f
 ```
 
-架构与模块职责见 [CLAUDE.md](CLAUDE.md)。提交前跑一遍 `npm run typecheck`；无测试套件，别伪造测试命令。
+架构与模块职责见 [CLAUDE.md](CLAUDE.md)。运行时改动需跑 `npm run typecheck` 与适用的 `tests/*.test.ts`；测试脚本逐个用 `npx tsx` 执行，没有 `npm test` 入口。
 
 ## License
 
@@ -443,14 +435,13 @@ npm run dev:daemon     # tsx 直跑 daemon，热迭代不用装
 {
   "wrc": {
     "defaultCli": "codex",
-    "cliBackends": { "codex": { "bin": "codex" } },
     "extraArgs": [],
     "mirror": { "projectsDir": "" }
   }
 }
 ```
 
-执行 `wezard reload` 后，企业微信 `/new` 使用配置的默认后端 Codex，即使该聊天之前绑定的是 Claude；`/new claude` 等显式参数可覆盖默认值。已有会话的恢复仍使用原后端。旧配置中的 Claude 模型档（opus / sonnet / haiku）不会作为 Codex 模型参数传入。`bin` 可以填写绝对路径，适合 launchd 的精简 PATH。
+执行 `wezard reload` 后，企业微信 `/new` 使用 `wrc.defaultCli` 配置的 Codex 后端，不接受单次 CLI 覆盖参数。各后端读取自己的 `models.backends.<backend>.tiers`，不再读取旧顶层模型档；CLI 使用规范命令名，由 daemon 的启动 PATH 查找，不再提供 `bin` 路径覆盖。
 
 Codex 会话从 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` 发现（支持 `CODEX_HOME`），按 `session_meta.cwd` 匹配工作目录。镜像支持用户消息、助手回复、工具调用与结果、公开的思考摘要；加密思考不展示。新会话的 UUID 由 Codex 分配，daemon 通过 Codex CLI 自带的临时 `app-server` 创建、恢复或克隆会话，并调用 `thread/name/set` 持久化日志，随后立即创建 tmux pane，运行 `codex resume <id>` 并绑定会话。无需初始化消息，不产生模型请求，也不需要额外 SDK 或常驻服务。已验证 Codex CLI 0.162.1，启动采用 `--no-daemon` 独立进程。模型使用 `--model`，推理强度和 wizard 身份使用 `-c` 配置覆盖。wezard 启动的 Codex 会话自动配置 wezard MCP server，无需写入全局 TOML。
 

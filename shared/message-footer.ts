@@ -7,7 +7,7 @@ export interface MessageFooterPolicy {
   url?: string;
 }
 
-const footerUrl = (content: string): string | undefined => /\[[✨✦]\]\(([^\n)]*)\)\s*$/.exec(content)?.[1];
+const footerUrl = (content: string): string | undefined => /\[✦\]\(([^\n)]*)\)\s*$/.exec(content)?.[1];
 
 const endsWithClosedFence = (content: string): boolean => {
   const lines = content.split("\n");
@@ -23,8 +23,8 @@ const endsWithClosedFence = (content: string): boolean => {
 };
 
 /** Only the daemon's trusted ticket resolver can classify a generated footer. */
-export const withoutMessageFooter = (content: string, _ownUrl?: string): string => {
-  const match = /(?:\n\s*)?\[[✨✦]\]\(([^\n)]*)\)\s*$/.exec(content);
+export const withoutMessageFooter = (content: string): string => {
+  const match = /(?:\n\s*)?\[✦\]\(([^\n)]*)\)\s*$/.exec(content);
   return match && targetOfTagUrl(match[1]!) ? withoutMessageFooter(content.slice(0, match.index).trimEnd()) : content;
 };
 

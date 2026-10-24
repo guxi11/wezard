@@ -25,37 +25,8 @@ const server = new McpServer(
   { capabilities: { tools: {} } },
 );
 
-// 地址参数改名 (`tag`/`tags` → `name`/`names`) 的兼容层。客户端的工具 schema 是会话
-// 开局时拿的, 进程却可能已经换成新代码 (插件重连就会重起它): 旧 schema 发来 `tag`,
-// zod 把不认识的字段静默剥掉, 地址落成 "" = 调用方聊天的默认 wizard —— 活派错了人
-// 而且不报错。所以凡是带 `name`/`names` 的工具都顺带收下老字段并折回来; 原本必填的
-// `name` 放宽成可选, 两个都没给时由这里报错, 不让它退化成空地址。
 type Shape = Record<string, z.ZodTypeAny>;
-const withLegacyAddress = (shape: Shape): Shape => {
-  const extra: Shape = {
-    ...("name" in shape ? { tag: z.string().optional().describe("旧名, 同 `name`。") } : {}),
-    ...("names" in shape ? { tags: z.array(z.string()).optional().describe("旧名, 同 `names`。") } : {}),
-  };
-  const name = shape.name;
-  return { ...shape, ...(name && !name.isOptional() ? { name: name.optional() } : {}), ...extra };
-};
-const foldLegacyAddress = (required: boolean) => (args: Record<string, unknown>): Record<string, unknown> => {
-  const { tag, tags, ...rest } = args;
-  const next = {
-    ...rest,
-    ...(rest.name === undefined && tag !== undefined ? { name: tag } : {}),
-    ...(rest.names === undefined && tags !== undefined ? { names: tags } : {}),
-  };
-  if (required && next.name === undefined) throw new Error("missing `name` (the wizard's global name, e.g. 'fix')");
-  return next;
-};
-const registerTool = server.registerTool.bind(server);
-server.registerTool = ((toolName: string, config: { inputSchema?: Shape }, cb: (args: Record<string, unknown>, extra: unknown) => unknown) => {
-  const shape = config.inputSchema;
-  if (!shape || !("name" in shape || "names" in shape)) return registerTool(toolName, config as never, cb as never);
-  const fold = foldLegacyAddress(!!shape.name && !shape.name.isOptional());
-  return registerTool(toolName, { ...config, inputSchema: withLegacyAddress(shape) } as never, ((args: Record<string, unknown>, extra: unknown) => cb(fold(args), extra)) as never);
-}) as typeof server.registerTool;
+const currentAddressSchema = <T extends Shape>(shape: T) => z.object(shape).strict();
 
 // 人侧 / 罕用的工具 (30 天零调用: 本机会话清单与改接、聊天目录) 不进默认
 // 工具面 —— 每个注册的工具都占模型的上下文, 而这些要么人在 IM 里有对应命令 (`/sessions`
@@ -275,7 +246,7 @@ server.registerTool("plan_get", {
 server.registerTool("plan_list", {
   title: "List plans",
   description: "列出自己的 plans；可按 wizard name 只读查询他人的 plans。",
-  inputSchema: { name: z.string().optional() },
+  inputSchema: currentAddressSchema({ name: z.string().optional() }),
 }, async (a) => unwrap("plan_list", await daemonPost("/plans/list", a)));
 server.registerTool("plan_update", {
   title: "Update a plan",
@@ -301,7 +272,7 @@ const unwrapCandidates = (r: DaemonReply) =>
 // 地址语法只有一套, 每个吃地址的工具都把它原样重述一遍: 模型单看一个 schema
 // 时没有别的地方能学到它, 而猜出来的地址会安静地指向另一个 wizard 的终端。
 const ADDRESS_DOC =
-  "wizard 的名字 —— 全机唯一, 它就是地址: `'fix'` 或 `'.fix'` 都行, 不分它住在哪个群。`''` = 你这个聊天的默认 wizard。永远别自己拼 key: wizard_roster / spawn_wizard / clone_wizard 返回的名字 (或 409 里的 `address`) 原样传回来。老的 `聊天名#tag` 写法仍然认, 但别再写。";
+  "wizard 的名字 —— 全机唯一, 它就是地址: `'fix'` 或 `'.fix'` 都行, 不分它住在哪个群。`''` = 你这个聊天的默认 wizard。永远别自己拼 key: wizard_roster / spawn_wizard / clone_wizard 返回的名字 (或 409 里的 `address`) 原样传回来。";
 
 // 生 wizard 的三个工具共用: 模型名是口语, 落地的是 `/model` 列表里最接近的那一项。
 const MODEL_DOC =
@@ -310,35 +281,9 @@ const MODEL_DOC =
 const EFFORT_DOC =
   "推理档位, 启动时就带上 (`--effort`), 之后它每次重启都沿用。判断密集的活给 high 以上, 跑腿的给 low。省略 = 该 CLI 默认 (克隆则跟被克隆者同档)。之后换用 set_model 的 `effort`。";
 
-// 造一个 wizard: 它的 home 默认是调用方自己的聊天 (所以走 `selfRef`); 给了 `chat`
-// 就落在另一个**起过名字**的聊天里。名字全局唯一, 与 home 无关。
-server.registerTool(
-  "new_claude_session",
-  {
-    title: "Spawn a blank new wizard",
-    description:
-      "旧工具名。新调用请用 spawn_wizard；它在指定目录创建白板 wizard，并仍由创建者管理。",
-    inputSchema: {
-      cwd: z.string().describe("工作区绝对路径, 不存在会创建。"),
-      name: z.string().optional().describe("它的名字, 全机唯一。推荐省略，由 daemon 分配中性英文名，职责另存。"),
-      chat: z.string().optional().describe("home 聊天名。省略 = 你的聊天。"),
-      cli: z.enum(["claude", "claude-internal", "codebuddy", "codex"]).optional().describe("兼容旧参数; 新建 pane 统一使用配置的 wrc.defaultCli。"),
-      model: z.string().optional().describe(MODEL_DOC),
-    },
-  },
-  async ({ cwd, name, chat, cli, model }) =>
-    unwrap("new_claude_session", await daemonPost("/sessions/new", {
-      cwd,
-      ...(name ? { name } : {}),
-      ...(chat ? { chat } : {}),
-      ...(cli ? { cli } : {}),
-      ...(model ? { model } : {}),
-    })),
-);
-
 // ── Chat naming ────────────────────────────────────────────────────────────
 // A WeCom chat's identity is an unreadable `chat:wrkS…` id. Wizards are addressed
-// by their own global names; a chat name is what notify / new_claude_session
+// by their own global names; a chat name is what notify / spawn_wizard
 // point at, and what a chat's default wizard is born named after.
 server.registerTool(
   "name_chat",
@@ -346,12 +291,12 @@ server.registerTool(
     title: "Name this WeCom chat",
     description:
       "给**这个聊天**起个短名字: notify 的收件人、spawn_wizard / clone_wizard 的 `chat` 从此能指到这里。没起过名字的聊天不会一直没名字 —— 第一次有人用到时守护进程按它的工作区自动补一个 (`~/develop/foo` → `foo`, 撞名加序号), 所以这个工具的用途是**起一个更好的名字**。这里的默认 wizard 出生时取聊天名; 它若还叫旧聊天名, 会跟着改 (wizard 的名字全局唯一, 撞名加后缀, 返回里的 `wizardRenamed` 就是它的新名字)。wizard 自己的名字用 wizard_identity 改, 与这里无关。用户说「给这个群起名叫 daily」「这个群叫什么」(不传 `name` 就是读) 「取消命名」(传 '-') 时调它。名字全机唯一、大小写不敏感。",
-    inputSchema: {
+    inputSchema: currentAddressSchema({
       name: z
         .string()
         .optional()
         .describe("The new name: 1-32 chars, letters/digits/'_'/'-' only (no spaces, '#', '/', ':'). Omit to read the current name without changing it. Pass '-' to remove the name."),
-    },
+    }),
   },
   async ({ name }) =>
     name === undefined
@@ -380,10 +325,10 @@ server.registerTool(
     title: "Read what another wizard has been saying",
     description:
       "**不打扰**地读另一个 wizard 的会话: 首行是它此刻的状态 (正在生成 / 空闲 / 停在哪个工具调用上等人点), 下面是它最近 N 个来回的正文 —— `▸` 是别人对它说的, `◂` 是它对这句最新说的一句 (跑完的是终句, 还在跑的是途中最近那句), 最后一条给得最全; 截掉的地方都标了 `…(+N)` / `…(略 N 字)…`。全部从它的 transcript 读: 只有说出来的话, 没有工具调用的过程, 回答「.fix 进展如何」「它卡在哪」, 或者判断要不要推它一把, 都读这里。这是**一个会话**的视角 (它从各处听到的都在里面); 要看**一个群**里谁对谁说了什么、或你和它的私聊往来, 用 read_chat。只读, 随便轮询。",
-    inputSchema: {
+    inputSchema: currentAddressSchema({
       name: z.string().describe(ADDRESS_DOC),
       turns: z.number().optional().describe("回最近多少个来回 (1-40, 默认 6); 一个来回 = 一句问话 + 它的回答。"),
-    },
+    }),
   },
   async ({ name, turns }) => unwrapText("peek_peer", await daemonPost("/peers/peek", { name, ...(turns ? { turns } : {}) })),
 );
@@ -422,8 +367,6 @@ server.registerTool(
 // ── 跟别的 wizard 说话 ──────────────────────────────────────────────────────
 // 一个工具, 一个语义: **说一句, 不等**。注入完就返回; 对方干完那一轮, 守护进程把它
 // 的结论作为新的一轮自动送回这里 (回执)。发话方的 pane 全程在自己手上。
-// `send_peer` 留着当别名 —— 正在跑的 wizard 的 MCP 进程是旧代码, 换个名字不能把
-// 它们的通路掐断。
 const RETURN_DOC =
   "这件活的回执去哪 (守护进程按 receiver 边投递, 你不递栈): `self` (默认) 结论先回你, 你据此再交代上一层 · `transfer` 尾调用: 把你此刻欠着的那一笔整件交给对方 (把那一笔 move 给它, 不再回到你), 你不再收回执、不再交代 —— 它的结论 (含 NEED / 失败) 直接落到你的上游 (回执信封的 `from` 是接手方); **想自己接 NEED 就别 transfer**; 不能与 re / after / fyi 并用, 那一笔下你还有没落定的子活时不行, 一笔只能交一次 · `detach` 旁支: 结论回你, 但不挂住你给上游的交代 · `none` 放出去不管, 没有回执 (`kind:\"fyi\"` 隐含它)。";
 const FOR_DOC =
@@ -453,7 +396,7 @@ const TELL_SCHEMA = {
     .enum(["task", "ask", "fyi"])
     .optional()
     .describe("对方该怎么接这句话 (与 `priority` 的何时投、`return` 的要不要回执正交): `task` (默认) 一件活, 同一发送者与接收者的未完成任务会合并补充; `ask` 提一个问题, 可用于正常反问/追问; `fyi` 知会, 不用回。"),
-  re: z.union([z.boolean(), z.string()]).optional().describe("兼容续问参数。重复派活会自动补充同一接收者的未完成任务, 不需要 `re`。`true` 仍可把内容追加到明确指定的原件; 有多个旧路由时以 event id 指明。"),
+  re: z.union([z.boolean(), z.string()]).optional().describe("续问参数。重复派活会自动补充同一接收者的未完成任务, 不需要 `re`。`true` 可把内容追加到明确指定的原件; 有多个相关路由时以 event id 指明。"),
   force: z
     .boolean()
     .optional()
@@ -484,33 +427,17 @@ const tellBody = (a: { name: string; text?: string; taskFile?: string; params?: 
   ...(a.public ? { public: true } : {}),
   ...(a.re !== undefined ? { re: a.re } : {}),
   ...(a.after?.length ? { after: a.after } : {}),
-  // 一律显式带上: 守护进程据「有没有这个键」认出老 MCP 进程 (见 /peers/tell 的冷门控)。
+  // 显式传布尔值, 让 daemon 只在调用方明确请求时越过冷缓存门控。
   force: a.force === true,
 });
 
 server.registerTool(
   "tell_peer",
-  { title: "Say something to another wizard (reply comes back by itself)", description: TELL_DESC, inputSchema: TELL_SCHEMA },
+  { title: "Say something to another wizard (reply comes back by itself)", description: TELL_DESC, inputSchema: currentAddressSchema(TELL_SCHEMA) },
   async (a) => {
     if (a.text === undefined && a.taskFile === undefined)
       return fail("tell_peer: `text` 与 `taskFile` 至少给一个 (后者是相对你工作区的模板路径, 由 daemon 展开)");
     return unwrap("tell_peer", await daemonPost("/peers/tell", tellBody(a)));
-  },
-);
-
-server.registerTool(
-  "send_peer",
-  {
-    title: "(deprecated) alias of tell_peer",
-    description:
-      "同 tell_peer (旧名, 只为不打断正在跑的旧会话而保留)。新调用一律用 tell_peer。",
-    // 参数与 tell_peer 一样收, 但不再背一份参数说明: 别名只为老调用不断, 不该再占一份上下文。
-    inputSchema: Object.fromEntries(Object.entries(TELL_SCHEMA).map(([k, v]) => [k, v.describe("")])) as typeof TELL_SCHEMA,
-  },
-  async (a) => {
-    if (a.text === undefined && a.taskFile === undefined)
-      return fail("send_peer: `text` 与 `taskFile` 至少给一个 (后者是相对你工作区的模板路径, 由 daemon 展开)");
-    return unwrap("send_peer", await daemonPost("/peers/tell", tellBody(a)));
   },
 );
 
@@ -522,13 +449,13 @@ server.registerTool(
       "把一段 markdown 贴进一个企微聊天**给人看**。和 tell_peer 分工明确: tell_peer 是把话塞进另一个 agent 的输入框 (驱动它干活), notify 是说给人听 —— 不会触发任何一轮对话。\n" +
       "`to` 省略 = 你这一轮所在的群 (人从哪个群叫的你就是哪个; 私聊轮则是你的 home 群); 要发到别的群就写聊天名 (wizard_roster 里的 home 聊天名), 一次可以写多个。气泡头自动写成 `emoji .你的名字` 并挂上你的 rolepage 链接, 那边的人一眼知道是谁。\n" +
       "什么时候用: 长活跑完了要通知另一个群的人; 一批分身收工后把汇总播给发起那个群; 定时任务 (schedule_task) 到点跑完把结论送到该看的人那里。",
-    inputSchema: {
+    inputSchema: currentAddressSchema({
       to: z
         .array(z.string())
         .optional()
         .describe("收件聊天: 聊天名 (`daily`) 或裸 principal (`chat:wr…` / `user:…`)。省略 = 你这一轮所在的群。认不出的整条拒绝并列出来, 不会部分送达。"),
       markdown: z.string().describe("正文, markdown。头 (是谁发的) 由守护进程自动加, 别自己写。"),
-    },
+    }),
   },
   async ({ to, markdown }) => unwrap("notify", await daemonPost("/notify", { ...(to ? { to } : {}), markdown })),
 );
@@ -555,13 +482,13 @@ server.registerTool(
 server.registerTool(
   "wait_peer",
   {
-    title: "(deprecated) block until another wizard stops working",
+    title: "Wait until another wizard stops working",
     description:
-      "**一般不需要它了**: `tell_peer` 之后对方的结论会自动作为新的一轮送到你这里 (回执), 你不必守着。保留它是因为有一件事只有它做得到 —— **在同一轮里拿到答案**: 下一步硬依赖对方的结果、把工作拆成两轮会丢上下文时, 用它阻塞等; 以及 `need:1` 那种「谁先完事就先处理谁」。代价是你这个 pane 在等的过程中什么也干不了。\n" +
+      "`tell_peer` 的结论通常会自动作为新的一轮送到你这里 (回执), 不必守着等。只有下一步硬依赖当前结果、拆成两轮会丢上下文, 或需要 `need:1` 谁先完成先处理时, 才用它阻塞等。代价是你这个 pane 在等待期间不能处理其他工作。\n" +
       "被它取走的那一份**不会再作为回执注入**一遍 (返回里 `delivered: true` = 回执已经抢先进过你的会话, 别重复处理)。\n" +
       "挂起, 直到点名的 wizard 停下来 (它的终端不再显示中断提示), 然后返回它最新的回复。超时先到则返回 `idle: false` 与原因: 它只是还在干, 你可以 peek 一眼再等。很便宜: 守护进程轮询的是 pane, 不烧 token。回的只算**你上次 tell_peer 之后**它说的: 它收口了 `RESULT: …` 就只回 `result` (`omitted` = 正文还有多少字没给, 要读用 peek_peer), 没收口才回 `lastText` (超长掐中间); `stale: true` = 它停下了却没有新回复 (卡在弹窗上, 或那句话没被接住) —— peek_peer 看一眼, 别把它当成答完了。\n" +
       "**真要等一批就用 `names` 一次等一组**, 别一个一个等: 它们本来在同时干活, 串行等的墙钟是所有人之和, 并行等只等最慢的那一个。等一组时 `results` 按你给的顺序逐个回, 只等一个则直接摊平在顶层。`need` 决定满几个就返回 (默认全部; `need:1` = 谁先完事就先处理谁, 剩下的还在跑, 再调一次接着等)。",
-    inputSchema: {
+    inputSchema: currentAddressSchema({
       name: z.string().optional().describe(`${ADDRESS_DOC} 等一组时改用 \`names\`。`),
       names: z
         .array(z.string())
@@ -572,7 +499,7 @@ server.registerTool(
         .optional()
         .describe("满几个就返回 (1 到地址个数, 默认全部)。`1` = 任意一个先完事就返回; 中间值 = 法定人数。满足后剩下的等待会被撤掉, 它们照常继续干活, 结果里 `idle:false`。"),
       timeoutSec: z.number().optional().describe("Max seconds to wait (10-7200, default 900)."),
-    },
+    }),
   },
   async ({ name, names, need, timeoutSec }) =>
     unwrap("wait_peer", await daemonPost("/peers/wait", {
@@ -583,7 +510,6 @@ server.registerTool(
 );
 
 // 交接只有一个动词: 不点名 = 交接你自己 (你写简报), 点名 = 替别人交接 (守护进程让它写)。
-// 两条路由不变 —— 已在跑的 wizard 的 MCP 进程还在调老名字 wizard_handoff_self。
 const handoffSelf = (tool: string, brief: string) =>
   daemonPost("/wizard/handoff-self", { brief }).then((r) => unwrap(tool, r));
 
@@ -595,21 +521,19 @@ server.registerTool(
       "把工作压成简报并在当前轮结束后交给新上下文。没有待切换工作区时，守护进程在原 pane 清空上下文并接回简报；存在 pendingCwd 时，会启动新的 CLI 进程，在待切换目录中接回简报。\n" +
       "**不传 `name` = 交接你自己**: 简报由你写在 `brief` 里, 守护进程等你这一轮说完、旧终句消费后再交接。调用 `set_workspace({cwd})` 后，先收尾当前任务，再调用自身 handoff 并在简报中写清剩余工作；不要要求用户手动发 `/new`，也不要声称旧进程已经切换 cwd。简报要写到零上下文的自己仅凭它就能接着干: 总目标 / 已完成与关键决策 / 当前状态 / 有序的下一步 / 关键文件与非显然的坑。\n" +
       "**传 `name` = 替那个 wizard 交接**: 守护进程让它自己写简报 (`focus` 指定要特别交代的点), 抓到后在原 pane 清空并贴回; 返回被带过去的那份简报。",
-    inputSchema: {
+    inputSchema: currentAddressSchema({
       name: z.string().optional().describe("替谁交接 —— wizard 的名字 ('fix' / '.fix')。省略 = 你自己。"),
       brief: z.string().optional().describe("交接你自己时必填: 简报全文, 自洽、具体、可执行。"),
       focus: z.string().optional().describe("替别人交接时可选: 简报里要特别交代的点。"),
       timeoutSec: z.number().optional().describe("替别人交接时等它写简报的上限秒数 (30-7200, 默认 600)。"),
-      pane: z.string().optional().describe("(旧参数) 按 tmux pane id 指定对方, 同 `name`。"),
-    },
+    }),
   },
-  async ({ name, brief, focus, timeoutSec, pane }) =>
-    !name && !pane
+  async ({ name, brief, focus, timeoutSec }) =>
+    !name
       ? brief?.trim()
         ? handoffSelf("handoff", brief)
         : fail("handoff: 交接你自己要写 `brief` (零上下文也能接手的简报); 替别人交接就传 `name`")
       : unwrap("handoff", await daemonPost("/handoff", {
-          ...(pane ? { pane } : {}),
           ...(name ? { name } : {}),
           ...(brief ? { brief } : {}),
           ...(focus ? { focus } : {}),
@@ -630,7 +554,7 @@ server.registerTool(
       "**默认到点新起一个白板 wizard** (`<你>-task-xxxx`) 执行, 干完自动收掉; 只有用户明说「在 .foo 里继续」才传 `name` 投进那个已有会话 (它到点正忙就等它这一轮结束再投, 等满 30 分钟仍忙才另起白板执行; prompt 本身要求「建 wizard 去干」时也照新建办, 除非显式传 `fresh:false`)。所以 `prompt` 要写成零上下文也能执行的完整指令。\n" +
       "「有新东西才处理」写成任务文件里的 gate (没活这一轮就不放枪), 别让到点起的 wizard 自己看一眼没有就退出 —— 那是每轮空转一个 pane。\n" +
       "成功返回任务 id、实际时间、目标和任务文件位置，不回显 prompt 正文。任务文件可直接编辑以改触发条件、配置 gate 或暂停。存成功后必须把回显的 `when` 和 `next` 念给用户确认。",
-    inputSchema: {
+    inputSchema: currentAddressSchema({
       when: z.string().describe("什么时候跑, 人话原样传: 「每个工作日晚上9:30」「每天早上9点」「白天每隔一个小时」「工作时间每半小时」「每30分钟」「20分钟后」「明早9点」。时间窗口 (白天 / 工作时间 / 8点到20点) 会被解析成筛子, 窗外的那些枪直接吞掉。"),
       prompt: z.string().describe("到点要说给那个 wizard 听的话。写成自洽的完整指令 (要做什么、在哪个目录/文件上、做完怎么汇报), 别依赖当前对话的上下文。里面可以留 `{{名字}}` 占位, 由任务文件里的 gate 填。"),
       name: z.string().optional().describe(`点名在**哪个已有 wizard**里跑 —— 只有用户要求「在它那儿继续」时才传。省略 = 到点新建一个白板 wizard 干完就收 (默认, 也是「定时新建 wizard 干 xxx」要的那个)。传了它还想要新建, 再加 \`fresh:true\`: 那时它只当模板, 新 wizard 继承它的聊天/目录/模型。${ADDRESS_DOC}`),
@@ -638,7 +562,7 @@ server.registerTool(
       fresh: z.boolean().optional().describe("覆盖默认: true = 每次到点新建白板 wizard 执行 (给了 name 时用来表达「在它的目录下新开一个干」), false = 注入 name 指向的已有会话。默认由 name 推断 (给了 name = false, 没给 = true)。"),
       id: z.string().optional().describe("任务 id, 同时也是文件名 (`~/.wezard/tasks/<id>.task.mjs`)。省略则从 note/prompt 生成。取个好认的短名 —— 之后你要改这条任务, 改的就是那个文件。"),
       note: z.string().optional().describe("给人看的一句话备注, 在 list_tasks 里回显。"),
-    },
+    }),
   },
   async ({ when, prompt, name, note, fresh, quiet, id }) =>
     unwrap("schedule_task", await daemonPost("/tasks/schedule", {
@@ -683,7 +607,7 @@ server.registerTool(
   {
     title: "Read wezard config",
     description:
-      "读 wezard 守护进程的配置, 一层一层展开: 不给 path 列各节一行说明; 给 path (点分, 如 'approval.danger' / 'models.tiers.light.model') 列这一层的子项 —— 类型、当前值、默认值、说明, 以及 ✋ (改动要人在卡片上确认) / ↻ (改完要 reload 才生效) 标记, * 标出与默认不同的项; 叶子给完整详情。`models` 下附带各档模型的实际用量做依据。想给人提配置建议时先读它, 再用 config_set 的 dryRun 拿 diff。机器人凭据与口令不可见。Keywords: 设置、配置、cfg、allowFrom、审批、窗口、danger、模型分档、tier。",
+      "读 wezard 守护进程的配置, 一层一层展开: 不给 path 列各节一行说明; 给 path (点分, 如 'approval.danger' / 'models.backends.<backend>.tiers.<tier>.model', 例如 'models.backends.claude.tiers.light.model') 列这一层的子项 —— 类型、当前值、默认值、说明, 以及 ✋ (改动要人在卡片上确认) / ↻ (改完要 reload 才生效) 标记, * 标出与默认不同的项; 叶子给完整详情。`models` 下附带各档模型的实际用量做依据。想给人提配置建议时先读它, 再用 config_set 的 dryRun 拿 diff。机器人凭据与口令不可见。Keywords: 设置、配置、cfg、allowFrom、审批、窗口、danger、模型分档、tier。",
     inputSchema: {
       path: z.string().optional().describe("点分路径, 省略 = 顶层各节。数组项用下标 ('sync.targets.0')。"),
     },
@@ -698,7 +622,7 @@ server.registerTool(
     description:
       "改一项 wezard 配置: 先过 schema 校验 (整份配置一起验, 不会写出让守护进程起不来的值), 再经 config-writer 写进 config.jsonc (注释保留)。`dryRun:true` 只返回改前→改后与 jsonc diff, 不写。权限按路径分级 (config_get 里的 ✋): 放权项 —— allowFrom、approval.*、CLI 二进制与启动参数、sync、监听 / 外送地址、defaultChat —— 守护进程会推一张确认卡给人, 点了才落盘 (几分钟没人点就先回 pending, 点了之后自动写, 结果捎在你下一条消息上, 别重发); 其余直接写。热生效的项写完即用, 其余回包会说要 reload。人让你「改个设置」时先 config_get 找到确切路径。",
     inputSchema: {
-      path: z.string().describe("点分路径, 如 'models.tiers.light.model'、'wrc.mirror.brief'。"),
+      path: z.string().describe("点分路径, 模型档位使用 'models.backends.<backend>.tiers.<tier>.model' (例如 'models.backends.claude.tiers.light.model')；其他如 'wrc.mirror.brief'。"),
       value: z.any().optional().describe("新值, 按该项类型给 JSON (true / 5 / \"opus\" / [\"a\"] / {...}); 写成字符串的也会按类型解析。op=unset 时省略。"),
       op: z.enum(["set", "add", "remove", "unset"]).optional().describe("set (默认) 整体替换; add / remove 往数组里加 / 删一项 (value 可以是单项或数组); unset 删掉这一项, 回到默认值。"),
       dryRun: z.boolean().optional().describe("true = 只看 diff 与校验结果, 不写、不发卡。"),
@@ -735,11 +659,11 @@ server.registerTool(
     title: "Name yourself / declare your job",
     description:
       "修改自己的全局唯一 name、description 或 expertise。返回最终 name、被修改字段及可选 renamed。",
-    inputSchema: {
+    inputSchema: currentAddressSchema({
       name: z.string().optional().describe("新名字, 1-32 位字母/数字/`_`/`-`, 全机唯一。不改就别传。"),
       description: z.string().optional().describe("一句话职责, 例如 '盯 wezard 主仓的重构与发版'。不改就别传。"),
       expertise: z.string().optional().describe("一句话专长: 熟哪块代码 / 领域, 例如 'rolepage 前端 (web/chat.js · role-view)'。名册与 delegate 候选行都显示它, 任务与它重叠时可据此选择。传 '-' 清掉。"),
-    },
+    }),
   },
   async ({ name, description, expertise }) =>
     unwrap("wizard_identity", await daemonPost("/wizard/identity", {
@@ -824,13 +748,7 @@ const runDelegate = async (tool: string, a: z.infer<z.ZodObject<typeof DELEGATE_
   return unwrap(tool, await daemonPost("/dispatch", a));
 };
 
-server.registerTool("delegate", { title: "Delegate a task (default decision by the daemon)", description: DELEGATE_DESC, inputSchema: DELEGATE_SCHEMA }, (a) => runDelegate("delegate", a));
-server.registerTool("dispatch", {
-  title: "(deprecated) alias of delegate",
-  description: "旧名兼容别名，参数与返回行为同 `delegate`。新调用统一使用 `delegate`。",
-  inputSchema: Object.fromEntries(Object.entries(DELEGATE_SCHEMA).map(([k, v]) => [k, v.describe("")])) as typeof DELEGATE_SCHEMA,
-}, (a) => runDelegate("dispatch", a));
-
+server.registerTool("delegate", { title: "Delegate a task (default decision by the daemon)", description: DELEGATE_DESC, inputSchema: currentAddressSchema(DELEGATE_SCHEMA) }, (a) => runDelegate("delegate", a));
 // 换模型和 spawn 时挑模型是同一条路: 守护进程在目标 pane 里打开 `/model` 列表,
 // 读出这台 CLI 此刻真有的每一项, 挑最接近的, 方向键移过去选中。
 server.registerTool(
@@ -839,7 +757,7 @@ server.registerTool(
     title: "Switch a wizard's model / effort",
     description:
       "给一个**已经在跑**的 wizard 换模型 (和/或推理档位 `effort`) —— 默认换你自己, `name` 点名就换那个 wizard。口语化写要什么 ('opus' / 'haiku' / 'sonnet 5' / '最新的 opus' / '默认'), 守护进程在它的 pane 里打开 `/model` 列表, 读出这台 CLI 此刻真有的每一项, 挑最接近的一项选中; 返回里的 `model` 是真正落地的那一项, `catalog` 是列表里的全部 —— 对不上时 (`ok:false`) 照着 `catalog` 重说一遍。默认只对这一个会话生效 (`scope:'session'`), 不改新开会话的默认模型; `scope:'default'` 则同时把它设成这台 CLI 此后**每个新会话**的默认模型 —— 那是全机的设置, 只在人明说「以后默认都用 X」时才用。返回里的 `scope` 是实际落在哪一档。它之后被重启也会回到这个模型上。正在干活的也能换 (从下一次请求起生效), 但换模型会让它的对话缓存整份重读一遍 —— 别来回切。用户说「换成 opus」「这个用 haiku 跑就行」「把 .fix 切到 sonnet」时调它; 你自己判断手上的活配不上/撑不起当前模型时也可以主动换。",
-    inputSchema: {
+    inputSchema: currentAddressSchema({
       model: z.string().optional().describe("要换到哪个模型, 口语化写: 'opus' / 'haiku' / 'sonnet 5' / 'opus 4.7' / '最新的 fable' / '默认'。只写家族名 = 那个家族最新的一个。只换 effort 时省略。"),
       effort: z.enum(EFFORTS).optional().describe("顺带 (或只) 换推理档位 —— 只对这个会话生效, 不改全机默认; 之后它重启也沿用。返回里的 `effort` 是落地的那一档。"),
       name: z.string().optional().describe("换谁的 —— wizard 的名字 ('fix' / '.fix')。省略 = 换你自己。"),
@@ -847,7 +765,7 @@ server.registerTool(
         .enum(["session", "default"])
         .optional()
         .describe("'session' (默认) = 只换这一个会话; 'default' = 换这个会话, 并设为此后所有新会话的默认模型 (改的是 CLI 的全局设置, 不指定模型的新 wizard 都会跟着变)。"),
-    },
+    }),
   },
   async ({ model, effort, name, scope }) =>
     unwrap("set_model", await daemonPost("/wizard/model", { ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...(name ? { name } : {}), ...(scope ? { scope } : {}) })),
@@ -866,8 +784,7 @@ const offspringShape = {
   taskFile: z.string().optional().describe("(第一期不支持, 传了报错) 模板正文请改用 delegate 的 `taskFile`+`params`。"),
   params: z.record(z.string()).optional().describe("(第一期不支持, 传了报错) 同 `taskFile`。"),
   chat: z.string().optional().describe("把它生在另一个聊天里 (wizard_roster 里的 home 聊天名)。省略 = 你自己的聊天, 这是绝大多数情况。"),
-  cli: z.enum(["claude", "claude-internal", "codebuddy", "codex"]).optional().describe("兼容旧参数; 新建 pane 统一使用配置的 wrc.defaultCli。"),
-  tier: z.enum(TIERS).optional().describe("按难度选档 (由轻到重), 按 wrc.defaultCli 取 `models.backends.<backend>.tiers` 的 model / effort; Claude 系兼容旧 models.tiers: mini = 机械一步, light = 有明确代码对象的范围清楚低风险 coding / 跑腿, standard = 其他常规任务, hard = 复杂方案判断、疑难升级或安全/并发/架构等高风险审查, ultra = 架构取舍、疑难排障、关键评审。coding 请显式指定 tier:light; 省略时保持 CLI 默认 (clone 继承来源档位); 显式 model / effort 优先; cli 不覆盖全局配置, 克隆换不了后端。返回里的 via 说明每项来自显式、档位还是继承。当前各档见宪章或 config_get({path:'models'})。"),
+  tier: z.enum(TIERS).optional().describe("按难度选档 (由轻到重), 按 wrc.defaultCli 取 `models.backends.<backend>.tiers` 的 model / effort; mini = 机械一步, light = 有明确代码对象的范围清楚低风险 coding / 跑腿, standard = 其他常规任务, hard = 复杂方案判断、疑难升级或安全/并发/架构等高风险审查, ultra = 架构取舍、疑难排障、关键评审。coding 请显式指定 tier:light; 省略时保持 CLI 默认 (clone 继承来源档位); 显式 model / effort 优先。返回里的 via 说明每项来自显式、档位还是继承。当前各档见宪章或 config_get({path:'models'})。"),
   model: z.string().optional().describe(MODEL_DOC),
   effort: z.enum(EFFORTS).optional().describe(EFFORT_DOC),
   planId: z.string().optional().describe("若task属于现有plan，指定plan id以关联派活event；plan仍由owner显式更新。"),
@@ -875,7 +792,7 @@ const offspringShape = {
   for: z.string().optional().describe("带了 task 时这件活为你欠着的哪一笔派的, 同 tell_peer 的 `for`。"),
 };
 
-type Offspring = { lead?: boolean; description: string; name?: string; task?: string; taskFile?: string; params?: Record<string, string>; from?: string; cwd?: string; chat?: string; cli?: string; model?: string; effort?: string; tier?: string; planId?: string; return?: string; for?: string };
+type Offspring = { lead?: boolean; description: string; name?: string; task?: string; taskFile?: string; params?: Record<string, string>; from?: string; cwd?: string; chat?: string; model?: string; effort?: string; tier?: string; planId?: string; return?: string; for?: string };
 
 const bear = (tool: string, inherit: boolean) => async (a: Offspring) => {
   // 见 offspringShape 的 taskFile 注释: 出生投递没有模板展开这一站。
@@ -890,7 +807,6 @@ const bear = (tool: string, inherit: boolean) => async (a: Offspring) => {
     ...(a.planId ? { planId: a.planId } : {}),
     ...(a.cwd ? { cwd: a.cwd } : {}),
     ...(a.chat ? { chat: a.chat } : {}),
-    ...(a.cli ? { cli: a.cli } : {}),
     ...(a.model ? { model: a.model } : {}),
     ...(a.effort ? { effort: a.effort } : {}),
     ...(a.tier ? { tier: a.tier } : {}),
@@ -911,11 +827,11 @@ server.registerTool(
       "**从白板生**一个子 wizard —— 新的 tmux pane、自己的全局名字 (`.name`)、自己的职责, 归你管 (家谱里挂在你名下)。它**不继承你的任何上下文**, 只拿到身份。适合干一件与你手头无关的事, 或者要去别的目录 (`cwd`) / 别的聊天里干活。要一个开局就带着你读过的材料的, 用 clone_wizard。\n" +
       "带上 `task` 可以在它就位的同时把第一件活私聊派下去, 省掉一次 tell_peer; 要它的回复进群, 就别带 task, 就位后用 `tell_peer({public:true})` 转给它。返回 name、cwd、继承状态、实际模型/档位、派活队列标识与警告。" +
       OFFSPRING_TAIL,
-    inputSchema: {
+    inputSchema: currentAddressSchema({
       ...offspringShape,
       cwd: z.string().optional().describe("它的工作区绝对路径。省略 = 跟你同一个目录。创建后仍归你管理。"),
       lead: z.boolean().optional().describe("true = 它负责统筹复杂任务；只创建当前阶段需要的 wizard，并由它显式维护 plan。配 `tier:\"hard\"`。"),
-    },
+    }),
   },
   bear("spawn_wizard", false),
 );
@@ -929,10 +845,10 @@ server.registerTool(
       "要白纸一张、或要去别的目录, 用 spawn_wizard。被克隆者正在干活时, 分身拿到的是它此刻为止的上下文 —— 想要它读完再分: 是你派的活就等它的回执, 否则先 `wait_peer` 等它停下 (或看 wizard_roster 的忙闲)。\n" +
       "带上 `task` 可以在它就位的同时把第一件活私聊派下去 (分叉本来就由第一句话触发, 省一次往返)。返回 name、cwd、继承状态、实际模型/档位、派活队列标识与警告。" +
       OFFSPRING_TAIL,
-    inputSchema: {
+    inputSchema: currentAddressSchema({
       ...offspringShape,
       from: z.string().optional().describe("克隆谁 —— wizard 的名字 ('fix' / '.fix')。省略 = 克隆你自己。它必须已经有会话 (说过话), 否则返回 409。"),
-    },
+    }),
   },
   bear("clone_wizard", true),
 );
@@ -944,11 +860,11 @@ server.registerTool(
     description:
       "挂起事项全表: 你派出去 (tell_peer / 带 task 的 spawn) 还没了结的每一件 —— 件号、对象、一句话题、为谁派的, 状态由守护进程按回执算。已回执的、同一对改派了的自动消掉; 没结论的留着, 直到你改派、`re` 追问, 或用 `drop` 显式消掉。\n" +
       "管家平时只会在注入尾巴上收到必要的一行增量, 快忘的时候 (交接 / 压缩后、隔了很多轮) 收到一次全表; 其余时候想看就调它。",
-    inputSchema: {
+    inputSchema: currentAddressSchema({
       drop: z.array(z.string()).optional().describe("要消掉的那几项: 写对方的名字 (= 你派给它、还开着的那项), 或表里每行开头的 event id: 不再需要、或已经另行处理了。"),
       why: z.string().optional().describe("消掉的理由, 一句话 (记进账本)。"),
       name: z.string().optional().describe("看别人的挂起事项 (只读)。省略 = 你自己的。"),
-    },
+    }),
   },
   async ({ drop, why, name }) =>
     unwrapText("pending_items", await daemonPost("/pending", { ...(drop?.length ? { drop } : {}), ...(why ? { why } : {}), ...(name ? { name } : {}) })),
@@ -960,13 +876,13 @@ server.registerTool(
     title: "Interrupt or end another wizard",
     description:
       "打断或强制结束一个 wizard。mode='interrupt' 只打断它当前这一轮 (等价于群里的 /stop); mode='end' 强制结束它 (等价于 /kill, 之后再找它是一个空白会话)。加 forget=true 连它的身份记录一起抹掉 (名字、职责、记忆)。",
-    inputSchema: {
+    inputSchema: currentAddressSchema({
       name: z.string().describe(ADDRESS_DOC),
       mode: z.enum(["end", "interrupt"]).optional().describe("'end' 强制结束 (默认); 'interrupt' 只打断当前这一轮。"),
       forget: z.boolean().optional().describe("仅对 end 有效: 连身份记录 (名字/职责/记忆) 一起删除。默认 false —— 身份留着, 下次它回来还是它。"),
       turn: z.string().optional().describe("仅对 interrupt, 通常不用给: 不带 turn / force 时就是撤回你派给它、还在飞的那一笔 (唯一时); 你在它手上并发两笔才写那一笔的 event id (400 会列出来)。只撤回**你自己派的**那一件:它正在做的就是这件才按 Esc; 还排着或它在做别人的活, 就只把这件记成取消, 不碰它手上那一轮。"),
       force: z.boolean().optional().describe("仅对 interrupt: 它此刻在做别的 wizard 派的活时, 不带 turn 的打断默认被拒 (会误伤那件); 确要打断加 true。"),
-    },
+    }),
   },
   async ({ name, mode, forget, turn, force }) =>
     unwrap("stop_wizard", await daemonPost("/wizard/stop", { name, ...(mode ? { mode } : {}), ...(forget ? { forget } : {}), ...(turn ? { turn } : {}), ...(force ? { force } : {}) })),
@@ -990,16 +906,6 @@ server.registerTool(
       ...(note ? { note } : {}),
       ...(forget ? { forget } : {}),
     })),
-);
-
-server.registerTool(
-  "wizard_handoff_self",
-  {
-    title: "(deprecated) alias of handoff for yourself",
-    description: "同 `handoff({brief})` 不传 name —— 交接你自己 (旧名, 只为不打断正在跑的旧会话而保留)。新调用一律用 handoff。",
-    inputSchema: { brief: z.string().describe("交接简报全文。") },
-  },
-  async ({ brief }) => handoffSelf("wizard_handoff_self", brief),
 );
 
 const transport = new StdioServerTransport();

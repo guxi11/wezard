@@ -63,7 +63,7 @@ import { errText } from "./last-response.js";
 import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, windowLabel, withTagHeader, withLinkedTagHeader, chatHead, headed, tagBadge, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey, sameBot } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { isWxFrame } from "../shared/wx-text.js";
-import { chatBaseOf, chatNameOf, listChatNames, parsePeerRef, peerAddress } from "./chat-name.js";
+import { chatNameOf, listChatNames, peerAddress } from "./chat-name.js";
 import { stripAnsi, paneIsBusy, codexTurnBusy, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, lastModel, lastUserTurn, talkRounds, openToolUses, turnClosed, renderDialog, stripForChat, parseClosing, type PeerInfo, type PeerReply } from "./peers.js";
 
 // PATH augmentation: launchd / systemd start the daemon
@@ -431,7 +431,7 @@ const renderTaskNotification = (block: string): string => {
 const cleanUserText = (wrapped: string): string => {
   // 多行注入落盘时被 CLI 包了一层 `<pasted_content>` (见 peers.unwrapPasted) —— 先剥,
   // 否则回显去重对不上, 我们自己注入的那一行会被认成「人在 CLI 里敲的」, 整轮回复
-  // 因此被 chatOriginOnly 挡在群外 (公开的 send_peer / 定时任务的多行提示全中)。
+  // 因此被 chatOriginOnly 挡在群外 (公开的 tell_peer / 定时任务的多行提示全中)。
   const raw = unwrapPasted(wrapped);
   const nameMatch = raw.match(SLASH_TAG_RE);
   const slashCmd = nameMatch?.[1]?.trim() ?? "";
@@ -744,7 +744,7 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
       const text = cleanUserText(c);
       if (!text) return []; // pure slash-command meta / stdout — drop
       // 自己注入的那一行不回显, 但要报个到: 它的印章 (谁说的、回复去哪) 在这一刻认领。
-      // 注入事件 id: 信封的 `msg` (老形状是信封外的 message-event 块) —— 认得出就是守护进程投的。
+      // 注入事件 id 从信封 `msg` 读取; 无信封输入由 carriesMsg 单独识别。
       const eventId = parseEnvelope(c)?.eventId;
       if (eventId || deps.isOwnInject(text)) return [{ kind: "user_query", eventId, body: unwrapPasted(c).trim(), said: text, ts: lineTs(line) }];
       const quoted = text.split("\n").map((l) => `> ${l}`).join("\n");
@@ -939,7 +939,7 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
 
 // Block-wise packing (shared/md-chunk): never cuts mid-line, and never cuts a
 // fenced block or table in a way that breaks rendering — see splitMarkdown.
-// Room reserved in every chunk for the `emoji \`#tag\` \`2/5\`` header line and
+// Room reserved in every chunk for the signed `.name` / `2/5` header line and
 // the chat-detail links linkTags hangs on it and on up to MAX_BODY_LINKS body
 // mentions — each `(url)` runs ~200-250 bytes. 头里最多两条: 自己的, 以及公开 peer 轮
 // 的 `→ .对方`。
@@ -2533,10 +2533,6 @@ export interface MirrorBridge {
   status: () => {
     attached: boolean;
     mirrors: Array<{ sessionId: string; jsonlPath: string; target: string }>;
-    /** Convenience fields mirroring the first attachment, for back-compat callers. */
-    sessionId?: string;
-    jsonlPath?: string;
-    target?: string;
   };
   /** True if `principal` (e.g. "chat:xxx" / "user:xxx") is currently a mirror target — used by inbound gating to implicitly authorize talkback. */
   hasMirrorTarget: (principal: string) => boolean;
@@ -2664,7 +2660,7 @@ export interface MirrorBridge {
   /** Detach + respawn a target's pane in `cfg.wrc.cwd` or its pendingCwd
    *  override. Used by /new to give the user a fresh claude in the bound
    *  project. Returns the new attachment result. */
-  newSession: (target: string, windowName?: string, cli?: CliBackendName, opts?: { model?: string; effort?: Effort; cwd?: string; silent?: boolean; systemPrompt?: string; guard?: () => boolean; preservePrevious?: boolean; sessionId?: string }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; model?: string; modelWarning?: string; effort?: Effort }>;
+  newSession: (target: string, windowName?: string, opts?: { model?: string; effort?: Effort; cwd?: string; silent?: boolean; systemPrompt?: string; guard?: () => boolean; preservePrevious?: boolean; sessionId?: string }) => Promise<{ ok: boolean; reason?: string; sessionId?: string; cwd?: string; model?: string; modelWarning?: string; effort?: Effort }>;
   /** Spawn `target` as a CLONE of `parent`: a fresh pane launched with
    *  `--resume <parent sid>`, which the CLI forks — the child starts holding
    *  everything the parent had read, the parent is untouched. `inherit: false`
@@ -2702,19 +2698,14 @@ export interface MirrorBridge {
   /** Sibling sessions of `target`'s chat (default + every `#tag`), each with
    *  liveness / busy / last-activity so an agent can see who else is working. */
   peers: (target: string) => Promise<PeerInfo[]>;
-  /** Sessions in OTHER chats that `target` can actually address — a globally
-   *  unique `#tag`, or any tag in a NAMED chat (reachable as `chatName#tag`).
-   *  The discovery surface for cross-chat handoffs; same shape as `peers`. */
+  /** Sessions in OTHER chats addressable by global wizard name or canonical target key. */
   foreignPeers: (target: string) => Promise<PeerInfo[]>;
   /** 每一个 wizard, 不分聊天、不问叫不叫得动 —— peers ∪ foreignPeers 再加上那些
    *  既没起名、tag 又不唯一因而**寻址不到**的会话。关系图要画的是这个世界的全貌,
    *  而"叫不动"是一种关系状态, 不是一条把它从图上抹掉的理由。 */
   worldPeers: (self: string) => Promise<PeerInfo[]>;
   /** Resolve a peer address to a target key. `""` → self's chat default;
-   *  `fix` → self's chat, else a GLOBALLY UNIQUE `#fix` elsewhere;
-   *  `daily#fix` / `chat:wr…#fix` → that exact chat's `#fix`, no uniqueness
-   *  requirement. Refuses (with the addresses that would have worked) rather
-   *  than guessing between ambiguous matches. */
+   *  otherwise accept a global wizard name or complete canonical target key. */
   resolvePeerTag: (
     self: string,
     ref: string,
@@ -2915,7 +2906,7 @@ interface AttachState {
    *  零星 item 属于同一场对话。 */
   channel?: string;
   speaker?: string;
-  /** 本轮是同伴公开派来的 (send_peer public:true) —— 那个同伴的 target。回复进群时头
+  /** 本轮是同伴公开派来的 (tell_peer public:true) —— 那个同伴的 target。回复进群时头
    *  写成 `.me → .它`, 否则群里看不出这段话是答给谁的。与 channel 同生同灭。 */
   replyTo?: string;
   /** 这场对话的出处 —— 与 channel 同生同灭。续写轮 (没有新的印章) 沿用它: 私聊里的
@@ -3913,9 +3904,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   /** reload 后 tail 从 EOF 接上: 正在跑的这一轮的开头那句已在身后, 它的印章随旧进程没了。
    *  那句话自己挂着信封 (谁说的、私聊还是哪个群) —— 读回来就是这一轮的出处。没挂信封 = undefined。 */
-  /** 这一轮挂在哪一笔上: 回执 (与老派活信封) 写在信封上; 新派活信封不带, 问注入事件的 `serves`。 */
-  const rowOf = (env: { event?: string; eventId?: string }): string | undefined =>
-    env.event ?? (env.eventId ? deps.events?.get(env.eventId)?.serves : undefined);
+  /** 回执 / 定时任务信封携带当前 event; 普通 peer 只从注入事件的 durable serves 归属任务。 */
+  const rowOf = (env: { kind: string; receipt?: boolean; event?: string; eventId?: string }): string | undefined =>
+    (env.receipt || env.kind === "task" ? env.event : undefined)
+      ?? (env.eventId ? deps.events?.get(env.eventId)?.serves : undefined);
   const openingOf = (a: AttachState): { channel: string; speaker?: string; from?: TurnFrom; query: string } | undefined => {
     const t = a.jsonlPath ? lastUserTurn(a.jsonlPath, a.openingOffset) : undefined;
     const env = t?.env;
@@ -3929,7 +3921,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       : env.kind === "task" ? { kind: "task", taskId: env.from.replace(/^定时 /, "") }
       : undefined;
     return {
-      channel: env.private ? "" : env.chatKey || (env.chat && chatBaseOf(cfg, env.chat)) || home,
+      channel: env.private ? "" : env.chatKey || home,
       speaker: env.kind === "human" ? `user:${env.from}` : undefined,
       from,
       query: t!.text,
@@ -5860,7 +5852,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const newSession = async (
     target: string,
     windowName?: string,
-    cli?: CliBackendName,
     opts?: {
       model?: string;
       /** Omitted = carry this wizard's recorded effort (a `/new` keeps it). */
@@ -6076,7 +6067,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const sameCwd = !args.cwd?.trim() || expandHome(args.cwd.trim()) === (p?.runningCwd ?? "");
     const canInherit = args.inherit !== false && !!p?.sessionId && !!p.jsonlPath && existsSync(p.jsonlPath) && sameCwd;
     if (!canInherit) {
-      const r = await newSession(args.target, args.windowName, args.cli, {
+      const r = await newSession(args.target, args.windowName, {
         model: args.model, effort: args.effort, cwd: args.cwd, systemPrompt: args.systemPrompt, silent: true, guard: args.guard ? () => args.guard!("paste") : undefined,
       });
       return { ...r, inherited: false };
@@ -6356,11 +6347,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return allTargets().filter((k) => baseOfKey(k) === base);
   };
 
-  // peer 寻址。地址就是 wizard 的**全局名字** (`.fix` / `fix`), 与它住在哪个聊天无关:
-  //   ""             本 chat 的默认 wizard —— 自身语义不变;
-  //   `fix` / `.fix` 名册里叫这个名字的 wizard, 全局唯一, 不分聊天;
-  //   `chat:wr…#k`   全量 key (调试 / 老调用方);
-  //   `daily#fix`    改名前的老写法 —— 名字取自 tag 迁移而来, 照旧认得。
+  // peer 寻址只接受全局 wizard 名字或完整 target key。
   const resolvePeerTag = (
     self: string,
     ref: string,
@@ -6371,22 +6358,16 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const all = allTargets().filter((k) => sameBot(self, k));
     const hit = (target: string) => ({ ok: true as const, target, foreign: baseOfKey(target) !== baseOfKey(self) });
     if (!raw) return hit(baseOfKey(self));
-    if (/^(user|chat|group):/.test(raw)) {
+    if (/^(user|chat|group|external_user):/.test(raw)) {
       return all.includes(raw) ? hit(raw) : { ok: false, reason: `no running session '${raw}'` };
     }
     const named = ((t) => (t && sameBot(self, t) ? t : undefined))(wizardStore()?.byName(raw)?.target);
     if (named && all.includes(named)) return hit(named);
-    if (named) return { ok: false, reason: `wizard '.${raw}' exists but its session is not running — respawn it (new_claude_session) or pick another` };
-    const { chat, tag } = parsePeerRef(raw);
-    if (chat) {
-      const base = chatBaseOf(cfg, chat);
-      const legacy = base ? keyOf(base, tag) : "";
-      if (legacy && all.includes(legacy)) return hit(legacy);
-    }
+    if (named) return { ok: false, reason: `wizard '.${raw}' exists but its session is not running — respawn it (spawn_wizard) or pick another` };
     return {
       ok: false,
       reason: `no wizard named '.${raw}' — wizard_roster lists every name`,
-      candidates: all.map((k) => peerAddress(cfg, self, k)),
+      candidates: all.map((k) => peerAddress(cfg, k)),
     };
   };
 
@@ -6584,7 +6565,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       target: t,
       tag,
       chat: chatNameOf(cfg, t),
-      address: peerAddress(cfg, self, t),
+      address: peerAddress(cfg, t),
       label: name ? labelFor(name) : "🧙",
       sessionId: a?.sessionId || rec?.sessionId || "",
       jsonlPath,
@@ -6652,7 +6633,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   ): Promise<{ ok: boolean; reason?: string; dialog?: string; busy?: boolean; waiting?: string[] }> => {
     const jsonl = jsonlOf(target);
     const busy = await isBusy(target);
-    if (!jsonl || !existsSync(jsonl)) return { ok: false, reason: "它还没有 transcript (没接过第一句话) —— send_peer 跟它说一句就有了", busy };
+    if (!jsonl || !existsSync(jsonl)) return { ok: false, reason: "它还没有 transcript (没接过第一句话) —— 用 tell_peer 跟它说一句就有了", busy };
     // `n` 数的是来回: 每个来回给问话和它最新的一句 (跑完的是终句, 还在跑的是途中
     // 最近说的那句) —— 途中的其余叙述不给, 那是过程不是结论。
     const rounds = talkRounds(jsonl, n).slice(-n);
@@ -7301,7 +7282,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           } else {
             let spawned: Awaited<ReturnType<typeof newSession>> | undefined;
             for (let retry = 0; retry < 3; retry++) {
-              spawned = await newSession(target, displayName(target) || target, undefined, {
+              spawned = await newSession(target, displayName(target) || target, {
                 cwd: pendingCwd, guard, preservePrevious: true, sessionId: spawnSid, handoffId: spawnSid,
               });
               if (spawned.ok || !guard()) break;
@@ -7438,12 +7419,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         jsonlPath: a.jsonlPath,
         target: a.target,
       }));
-      // Keep a single-attach view for back-compat; first entry wins when there's
-      // exactly one mirror, callers iterating `mirrors` get the full picture.
-      const first = list[0];
-      return first
-        ? { attached: true, mirrors: list, sessionId: first.sessionId, jsonlPath: first.jsonlPath, target: first.target }
-        : { attached: false, mirrors: [] };
+      return { attached: list.length > 0, mirrors: list };
     },
     resolveToolDetail,
     hasMirrorTarget: (principal) => {

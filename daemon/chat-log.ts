@@ -39,8 +39,7 @@ export interface ChatLogQuery {
   roleKey?: string;
   /** 只留这个群 (名字) 里公开说的; 不给 = 公开与私聊都算, 每行标出在哪说的。 */
   chat?: string;
-  /** 那个群的稳定 key —— 信封带了 key 的行按 key 比 (名字会被 rename 换主),
-   *  没带的 (旧 transcript) 回落按名, 不能因为没 key 就把整段历史漏掉。 */
+  /** 那个群的稳定 key —— 按 key 过滤公开信封; 缺 key 的旧信封无法归属到当前群。 */
   chatKey?: string;
   /** 只留与这个 role 的往来 —— 通常与 `role` 同给, 即两方之间。 */
   target?: string;
@@ -63,7 +62,7 @@ interface LogMsg {
   /** 公开轮所在聊天的名字。 */
   chat: string;
   /** 公开轮所在聊天的 key —— 信封带的, 或没挂信封时 (home 里的人话) 会话的 home key;
-   *  老信封没带 = 不确定 (回落按名)。 */
+   *  公开信封没带 key = 无法按稳定身份归属。 */
   chatKey?: string;
   /** 产生这条记录的会话 (target key) —— role 轴认它。 */
   sessionKey: string;
@@ -85,10 +84,9 @@ const audienceIn = (s: LogSession, env: Envelope, chat: string): string =>
 
 const same = (a: string, b: string): boolean => stripSigil(a).toLowerCase() === stripSigil(b).toLowerCase();
 
-/** 两层认一个聊天: 行和查询都有 key 按 key比 (名字会换主, key 不会 —— 同名的新群读不走
- *  旧群的记录); 哪一边没有 key 才回落按名 (旧 transcript 的信封不带 key, 按名才能读到)。 */
+/** 查询带稳定 key 时只认同 key 的公开行; 缺 key 的历史信封不能猜作同名聊天。无 key 查询才按显示名筛选。 */
 const chatHit = (m: LogMsg, q: ChatLogQuery): boolean =>
-  q.chatKey && m.chatKey ? m.chatKey === q.chatKey : same(m.chat, q.chat ?? "");
+  q.chatKey ? m.chatKey === q.chatKey : same(m.chat, q.chat ?? "");
 
 /** role / target 轴的两层: 会话主人那一侧, 解析出 key 时按 session key 认 (显示名对不上
  *  也算, 同名的别的会话也不算); 没 key 才按名。对方 (信封里的发话方 / home 里的人)
@@ -113,7 +111,7 @@ const messagesOf = (s: LogSession, q: ChatLogQuery, depth: number): { msgs: LogM
       const env = ask.env;
       const from = env?.from ?? s.homeHuman;
       // 没挂信封 = 人在 home 聊天里说的 → 频道就是 home, key 也拿 home 的 (稳)。
-      // 挂了信封但没有 chat-key = 老形状 → key 不确定, 匹配回落按名。
+      // 挂了公开信封但没有 chat-key = 无法归属到稳定聊天 key。
       const where = env?.private
         ? { private: true, chat: "" }
         : { private: false, chat: env?.chat || s.homeChat, ...(env?.chatKey ? { chatKey: env.chatKey } : !env && s.homeKey ? { chatKey: s.homeKey } : {}) };

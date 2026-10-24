@@ -673,7 +673,7 @@ const answerOf = (
 // ── wizard → wizard 的信封 ────────────────────────────────────────────
 // 同伴的话是原样落进输入框的, 而落进输入框的东西在模型眼里都是「用户说的」。没有
 // 信封, 收件方分不清这一轮是人说的还是 wizard 说的、回复给谁看、该不该回话 ——
-// 于是对着 wizard 寒暄、把过程 notify 进群、或者 send_peer 回去 (发话方正挂在
+// 于是对着 wizard 寒暄、把过程 notify 进群、或者 tell_peer 回去 (发话方正挂在
 // wait_peer 上, 这一回会给它多排一轮, 两边就此乒乓)。信封把这三件事写在每一轮
 // 自己身上: 宪章是出生时的快照, 正在跑的老 wizard 读不到新规矩, 这一段读得到。
 // 与 mention hint / 名册增量同一个 `<system-reminder>` 壳 —— mirror 的 meta 剥离器
@@ -699,8 +699,8 @@ export const renderStewardHint = (): string =>
   ]);
 
 /** 定时任务放的那一轮: 不标的话, 记录里它就成了「人说的」。 */
-export const renderTaskEnvelope = (taskId: string, quiet?: { event: string }): string =>
-  renderReminder(envelopeAttrs.task(taskId, quiet?.event), quiet
+export const renderTaskEnvelope = (taskId: string, channel: string, quiet?: { event: string }): string =>
+  renderReminder(envelopeAttrs.task(taskId, channel, quiet?.event), quiet
     ? ["定时任务到点放进来的, 不是人此刻说的, 而且**有事才说**: 这一轮私下跑, 没人在看。",
         "照常执行。看完**没有值得人知道的**, 最后一条消息就只写一行 `QUIET`, 什么也不会发出去; 有, 就把最后一条消息写给人看 —— 守护进程原样转进群。",
         "要派活给别的 wizard, 就在这一轮里用 `wait_peer` 把结果拿回来再收口 —— 回执要等这一轮结束才到, 那时已经没人替你转发。"]
@@ -1165,7 +1165,7 @@ export const paneIsBusy = (paneText: string): boolean =>
 // 成 issue 号), 而不是去叫它。
 //
 // 在边界上给这个 mention 加注, 就是把 `#b` 变成「wizard b」的那一步。加注只对
-// 已经能通过 send_peer/peek_peer 同一套查找解析出来的 tag 发生, 所以它永远不会
+// 已经能通过 tell_peer/peek_peer 同一套查找解析出来的 tag 发生, 所以它永远不会
 // 广告一个调不通的地址 —— 解析不出来的 `#123` / `#L45` 静静穿过去。
 export interface PeerMention {
   /** Name as written, without `.`. */
@@ -1217,9 +1217,7 @@ export interface PeerInfo {
   tag: string;
   /** Name of the chat this session lives in; "" when that chat is unnamed. */
   chat: string;
-  /** Exactly what to pass to peek_peer / send_peer / wait_peer to hit this
-   *  session from the caller's own: bare tag for a sibling, `chatName#tag`
-   *  across chats. */
+  /** The globally unique wizard name to pass to peer tools from any chat. */
   address: string;
   /** Stable animal emoji (same glyph the approval cards use). */
   label: string;

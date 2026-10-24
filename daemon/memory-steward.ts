@@ -12,10 +12,8 @@
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import type { Logger } from "pino";
-import { expandHome } from "../shared/paths.js";
 import { envelopeAttrs, renderReminder } from "../shared/reminder.js";
 import { INTERNAL_BASE, keyOf } from "../shared/session-label.js";
-import { TASKS_DIR, fileOfTaskId } from "../shared/task-file.js";
 
 export const STEWARD_ID = "memory-steward";
 /** 执行体的 key: 内部 base, 不进任何群的名册。每轮复用同一个 —— 同时只跑一轮。 */
@@ -78,8 +76,8 @@ export const stewardPrompt = (root: string, files: readonly string[], refsOf?: R
 ].join("\n");
 
 /** 私聊信封: 这一轮不属于任何群, 回复哪儿也不发。 */
-export const stewardEnvelope = (): string =>
-  renderReminder({ ...envelopeAttrs.task(STEWARD_ID), scope: "private" }, [
+export const stewardEnvelope = (channel: string): string =>
+  renderReminder(envelopeAttrs.task(STEWARD_ID, channel), [
     "这一轮是守护进程内建的共享记忆整理放进来的, 不属于任何群、没有人在等 —— 照常执行, 回复只留在 rolepage, 不要 notify / tell_peer 任何人。",
   ]);
 
@@ -104,16 +102,6 @@ const archive = (root: string) => (f: string): void => {
   mkdirSync(dirname(dest), { recursive: true });
   appendFileSync(dest, readFileSync(f));
   unlinkSync(f);
-};
-
-/** 老版本把整理者写成了一条定时任务。改名停用而不是删 —— 那份文件人可能改过;
- *  留着它就是两路并跑。返回停用后的路径, 没有就 undefined。 */
-export const retireStewardTask = (tasksDir: string = TASKS_DIR): string | undefined => {
-  const file = fileOfTaskId(expandHome(tasksDir), STEWARD_ID);
-  if (!existsSync(file)) return undefined;
-  const to = `${file}.retired`;
-  renameSync(file, to);
-  return to;
 };
 
 interface StewardDeps {

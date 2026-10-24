@@ -126,18 +126,6 @@ export const parseTrigger = (text: string, now: Date = new Date()): Trigger | un
   return undefined;
 };
 
-/** 1.5.x 之前的三选一 `when`。老 config 里的定时靠它升格, 否则静默消失。 */
-export const triggerOfLegacyWhen = (w: {
-  kind: string; days?: number[]; hour?: number; minute?: number; minutes?: number; at?: number;
-}): Trigger => {
-  if (w.kind === "every") return { clock: { kind: "every", minutes: w.minutes ?? 60 }, guards: [] };
-  if (w.kind === "once") return { clock: { kind: "once", at: w.at ?? 0 }, guards: [] };
-  return {
-    clock: { kind: "daily", times: [{ hour: w.hour ?? 9, minute: w.minute ?? 0 }] },
-    guards: w.days?.length ? [onDays(w.days)] : [],
-  };
-};
-
 /** 任务文件的 `when` 可以写成人话、helpers 表达式或直接一棵树 —— 都收敛到这里。 */
 export const toTrigger = (
   when: unknown,

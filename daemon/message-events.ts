@@ -5,7 +5,7 @@ import { loadJsonMap } from "../shared/json-map-store.js";
 import type { Asker, TurnFrom } from "../shared/detail-store.js";
 import type { MirrorDispatchArgs } from "./mirror-bridge.js";
 import type { Tell, HeldSeen } from "./dispatch.js";
-import type { EventId, FinalVerdict, Receiver, ReportSource, Report } from "./router.js";
+import type { EventId, Receiver, ReportSource, Report } from "./router.js";
 import type { TemplateRef } from "../shared/task-template.js";
 
 export interface ReceiptFact {
@@ -95,9 +95,11 @@ export interface MessageEvent extends MessageInput {
   failure?: { body: string; at: number };
   /** Explicit RESULT sections are durably tied to their selected route before answer ops. */
   resultRoutes?: Record<string, { receiver: string; event: EventId | null; inputs?: string[] }>;
-  /** 进终态 (complete / canceled) 的时刻 —— 墓碑化的起点。老行没有, 按已知时刻估。 */
+  /** 进终态 (complete / canceled) 的时刻 —— 墓碑化的起点。当前 writer 显式落盘；缺失时不估算。 */
   endedAt?: number;
 }
+/** Transcript-observed final before the router boundary adds durable report provenance. */
+export interface MessageFinal { text: string; error?: boolean }
 /** 终态行过了 TOMB_AFTER_MS 只剩判重要用的那几样: accept 认 id + fingerprint 判「同一条消息」,
  *  WS 重放 / 收件箱重入 (`rcpt:<event>:<rev>`) 撞上它就是已投过、不再注入; 丢了它就会再投一次。
  *  墓碑再过 TOMB_TTL_MS (自 endedAt 起) 才删 —— 重放窗口远小于它。 */
@@ -110,19 +112,22 @@ const isTomb = (x: Row): x is Tombstone => (x as Tombstone).tomb === true;
 const terminal = (x: MessageEvent["execution"]): x is Tombstone["execution"] => x === "complete" || x === "canceled";
 /** complete 要等 finalized (路由判定补完) 才算了结; canceled 本身就是了结。 */
 const settled = (e: MessageEvent): boolean => e.execution === "canceled" || (e.execution === "complete" && !!e.finalized);
-const endedAt = (e: MessageEvent): number => e.endedAt ?? Math.max(e.at, e.result?.at ?? 0, e.turnClosedAt ?? 0, e.releasedAt ?? 0);
+const endedAt = (e: MessageEvent): number | undefined =>
+  typeof e.endedAt === "number" && Number.isFinite(e.endedAt) ? e.endedAt : undefined;
 const authorityOf = (e: MessageEvent): EventAuthority => ({ id: e.id, target: e.target, serves: e.serves,
   at: e.at, execution: e.execution, canceled: e.canceled || e.execution === "canceled", interjected: e.interjected,
   handoffCut: e.handoffCut, handoffRestored: e.handoffRestored, receiptClaim: e.receiptClaim,
   ...(e.payload.human && e.exposure === "none" ? { unexposedHuman: true as const } : {}) });
-const entomb = (e: MessageEvent & { execution: Tombstone["execution"] }): Tombstone =>
-  ({ id: e.id, fingerprint: e.fingerprint, execution: e.execution, endedAt: endedAt(e), tomb: true, authority: authorityOf(e) });
+const entomb = (e: MessageEvent & { execution: Tombstone["execution"] }, at: number): Tombstone =>
+  ({ id: e.id, fingerprint: e.fingerprint, execution: e.execution, endedAt: at, tomb: true, authority: authorityOf(e) });
 /** 每次落盘前跑: 了结满一天的行裁成墓碑, 墓碑满七天删掉。 */
 export const gcEvents = (now: number, retain: (e: MessageEvent) => boolean = () => false) => (rows: Record<string, Row>): Record<string, Row> =>
-  Object.fromEntries(Object.entries(rows).flatMap(([id, x]): Array<[string, Row]> =>
-    isTomb(x) ? (now - x.endedAt >= TOMB_TTL_MS ? [] : [[id, x]])
-    : !retain(x) && settled(x) && terminal(x.execution) && now - endedAt(x) >= TOMB_AFTER_MS ? [[id, entomb({ ...x, execution: x.execution })]]
-    : [[id, x]]));
+  Object.fromEntries(Object.entries(rows).flatMap(([id, x]): Array<[string, Row]> => {
+    if (isTomb(x)) return now - x.endedAt >= TOMB_TTL_MS ? [] : [[id, x]];
+    const at = endedAt(x);
+    if (retain(x) || !settled(x) || !terminal(x.execution) || at === undefined || now - at < TOMB_AFTER_MS) return [[id, x]];
+    return [[id, entomb({ ...x, execution: x.execution }, at)]];
+  }));
 export interface DeliveryInput {
   transfer?: { id: string; standalone: boolean };
   coverage?: { context: string; facts: string[] };
@@ -171,7 +176,7 @@ export interface MessageAdapters {
   /** 这一轮有定论了 (result 落定 / 重放恢复 / 读到 CLI 报错收尾): 路由表据此落 mark / answer
    *  (§9.4)。与 `recovered` 并排 —— 后者管投递恢复, 它管路由判定。可选: 没有它的消费者
    *  (测试夹具 / 老装配) 照常跑, 只是不做路由判定。 */
-  final?: (event: MessageEvent, verdict: FinalVerdict) => void;
+  final?: (event: MessageEvent, verdict: MessageFinal) => void;
   format?: (delivery: DeliveryInput) => DeliveryInput;
   send: (delivery: FinalDelivery, part: number) => Promise<{ ack?: string; uncertain?: string; queued?: boolean; failed?: string }>;
   deliveryEvidence?: (delivery: FinalDelivery, part: number) => { ack?: string; state: "queued" | "delivered" | "uncertain" | "failed"; reason?: string } | undefined;

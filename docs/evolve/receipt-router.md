@@ -57,3 +57,21 @@ owner 的 plan 提醒只等待该 plan 关联的外派欠账：route 的 wizard 
 ## 旧设计的处置
 
 receiver stack、transcript watcher、按 `from→to` 的单槽 receipts continuation、自动 deadline/silent/dead 合成、旧 jobs/workflow/graph 执行器以及 T10 分步切换清单均已退役。对应旧文档只保留到本文的淘汰指针；其中通用研究结论不构成当前实现契约。当前实现仍需要 route merge aliases、batch 保留和有限 `NO_DEADLINE`，这些属于现行语义。
+
+## 版本兼容与当前语义边界
+
+旧版本的工具名、参数或存储形状不再由运行时适配：MCP 仅注册 `delegate`、`tell_peer`、`handoff` 等现行入口，地址使用 `name` / `names`；配置使用 `models.backends.<backend>.tiers` 与 `models.router`；定时任务直接读取 `.task.mjs`。旧提醒正文推断、旧地址和气泡头回退、pending-items 旧 turn 件号补 event、旧配置和定时格式自动迁移、旧安装及旧包升级回退均不属于现行协议。审批窗口只加载当前 base principal 磁盘键，不把旧 tagged 授权扩到整个聊天。公开人话、peer、回执、定时和 plan reminder 信封由当前 writer 写实际稳定 `chat-key`，私有输入明确写 private scope；读侧不再按旧显示名猜归属。
+
+| 保留项 | 当前写点和用途 | 与旧版本兼容的区别 |
+| --- | --- | --- |
+| route merge aliases / `mergedInto` | `commit(open/move)` 会为同一 unfinished pair 追加 merge；durable 输入及结果可能仍引用合并前 event | 当前版本两次 append 之间也会崩溃，删除 alias 会使在途输入失去任务归属 |
+| `NO_DEADLINE` | 当前 route 与 receipt event writer 均写入 `Number.MAX_SAFE_INTEGER`，`hasDeadline` 区分有限期限 | JSON 可持久化的无期限值；改成 0、null 或 Infinity 会改变判定或序列化结果 |
+| 可选 `batch` | 当前调用仍可创建不属于收集批次的输入；有 batch 才参与批次分组 | 不推断、不补写，缺省本身就是现行数据形状 |
+| outcome 内容指纹与可选 report | daemon 的前置失败取消可直接调用 `makeOutcome`，不依赖模型执行输入 | 当前合成取消也需要稳定去重键，不是把旧终句猜成新报告 |
+| 全局名字、内部 slot 与身份懒初始化 | 新身份先登记再 claim 名字，默认聊天释放名字后还会重新认领；稳定 target key 不随改名变化 | 内部 `#slot` 是身份键，不是接受旧 `tag` 参数或旧寻址写法 |
+| 无信封注入的 `message-event` 标记 | `withMsg` 当前仍为没有 envelope 的注入写该块，`carriesMsg` 验证提交证据 | 有属性 envelope 的旧外挂 event 回填已移除；当前无信封输入仍须可识别 |
+| 显式配置的业务别名 | `wrc.botNames` 指定实际机器人显示名；CLI 自己的模型别名由后端解析 | 名称是当前配置值，不把旧 MCP 工具名或旧配置字段翻译成新接口 |
+| 视图内部 `via: "dispatch"` / `Handoff.turn` | `handoffFrom` 将当前 `delegate` 调用分类为移交，把当前回包 `event` 放入视图字段 `turn` | 它们只供渲染和查当前 event，不注册旧工具、不读取旧回包 `turn` / `receipt` |
+| 外部协议与能力适配 | 支持的 CLI transcript/hook、tmux、操作系统服务、SDK 消息形状与浏览器能力由各适配器处理 | 适配外部依赖当前支持的协议和能力，不读取或升级旧 wezard 格式 |
+
+持久化的格式校验、撕裂尾行处理与 journal compaction 保持原有边界。GC 只使用当前 writer 明确记录的有限 `endedAt`，不再从创建、结果或释放时间推算结束时刻；缺失或无效结束时间的记录原样保留，因此可能长期占用存储。删除旧格式适配不会触发真实配置或业务数据迁移，也不自动清理用户旧文件。历史研究文档描述的是当时的设计，不能据此重新开放旧运行入口。
