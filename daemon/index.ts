@@ -284,11 +284,6 @@ const main = async (): Promise<void> => {
     // 这一句曾是要 idleNow 的, 也就是那个反复 5s 超时的探测源头: 一超时就退避, 把同一 target
     // 后面排着的每一笔 (含后到的人话) 一起钉住十几分钟。交接期间照旧等 —— 那几秒 pane 真是死的。
     ready: async (e) => e.payload.handoff ? handoffAllowed(e.target) && bridge.idleNow(e.target) : !handingOff(e.target) && (e.payload.peer ? !!(await peerEvents?.ready(e)) : true),
-    blocksQueue: (e) => {
-      const facts = receiptFacts(e);
-      return !(facts.length > 0 && facts.every((f) => f.status === "done")
-        && facts.some((f) => !!f.batch && !router.batchComplete(f.batch)));
-    },
     task: (e) => e.serves ? router.get(e.serves)?.event ?? e.serves : undefined,
     retain: (e) => {
       const required = (id: string): boolean => {
