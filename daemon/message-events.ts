@@ -5,7 +5,7 @@ import { loadJsonMap } from "../shared/json-map-store.js";
 import type { Asker, TurnFrom } from "../shared/detail-store.js";
 import type { MirrorDispatchArgs } from "./mirror-bridge.js";
 import type { Tell, HeldSeen } from "./dispatch.js";
-import type { EventId, Receiver, ReportSource, Report } from "./router.js";
+import type { EventId, Receiver, ReportSource, Report, Route } from "./router.js";
 import type { TemplateRef } from "../shared/task-template.js";
 
 export interface ReceiptFact {
@@ -34,6 +34,8 @@ export interface MessageInput {
    *  event (transfer 就是被 move 的那个); 回执 = `receiver.event`; 缺省 = 不服务任何一笔
    *  (人在 CLI 里直接敲的轮) —— 那一轮派活等同 detach。 */
   serves?: EventId;
+  /** Private RESULT correction keeps its original chat task context without serving or opening a route. */
+  feedbackRoute?: { event: EventId; receiver: string };
   priority: "normal" | "now" | "urgent";
   deadline: number;
   payload: {
@@ -103,7 +105,7 @@ export interface MessageFinal { text: string; error?: boolean }
 /** 终态行过了 TOMB_AFTER_MS 只剩判重要用的那几样: accept 认 id + fingerprint 判「同一条消息」,
  *  WS 重放 / 收件箱重入 (`rcpt:<event>:<rev>`) 撞上它就是已投过、不再注入; 丢了它就会再投一次。
  *  墓碑再过 TOMB_TTL_MS (自 endedAt 起) 才删 —— 重放窗口远小于它。 */
-export type EventAuthority = Pick<MessageEvent, "id" | "target" | "serves" | "at" | "execution" | "canceled" | "interjected" | "handoffCut" | "handoffRestored" | "receiptClaim"> & { unexposedHuman?: true };
+export type EventAuthority = Pick<MessageEvent, "id" | "target" | "serves" | "feedbackRoute" | "at" | "execution" | "canceled" | "interjected" | "handoffCut" | "handoffRestored" | "receiptClaim"> & { unexposedHuman?: true };
 export interface Tombstone { id: string; fingerprint: string; execution: "complete" | "canceled"; endedAt: number; tomb: true; authority?: EventAuthority }
 type Row = MessageEvent | Tombstone;
 const TOMB_AFTER_MS = 24 * 3600_000;
@@ -115,6 +117,7 @@ const settled = (e: MessageEvent): boolean => e.execution === "canceled" || (e.e
 const endedAt = (e: MessageEvent): number | undefined =>
   typeof e.endedAt === "number" && Number.isFinite(e.endedAt) ? e.endedAt : undefined;
 const authorityOf = (e: MessageEvent): EventAuthority => ({ id: e.id, target: e.target, serves: e.serves,
+  feedbackRoute: e.feedbackRoute,
   at: e.at, execution: e.execution, canceled: e.canceled || e.execution === "canceled", interjected: e.interjected,
   handoffCut: e.handoffCut, handoffRestored: e.handoffRestored, receiptClaim: e.receiptClaim,
   ...(e.payload.human && e.exposure === "none" ? { unexposedHuman: true as const } : {}) });
@@ -207,6 +210,178 @@ export const receiptQuiet = (e: MessageEvent, body: string): boolean =>
 export const reportSource = (e: MessageEvent): ReportSource => ({ input: e.id,
   ...(e.turn ? { turn: e.turn } : {}),
   ...(receiptFacts(e).length ? { facts: receiptFacts(e).map((f) => JSON.stringify([f.event, f.version, f.receiver])) } : {}) });
+export const taskInputCoverage = (rows: readonly MessageEvent[], task: string, source: MessageEvent,
+  taskOf: (event: MessageEvent) => string | undefined = (event) => event.serves): { inputs: string[]; complete: boolean } => {
+  const cutoff = source.turnClosedAt ?? source.result?.at ?? Date.now();
+  const relevant = rows.filter((e) => e.target === source.target && taskOf(e) === task && !e.canceled);
+  const inputs = [...new Set(relevant.filter((e) => e.id === source.id || e.exposure === "consumed"
+    && (e.consumedAt ?? e.result?.at ?? e.turnClosedAt ?? Infinity) <= cutoff
+    && !(e.execution === "complete" && !e.result))
+    .flatMap((e) => e.inputIds ?? [e.id]))].sort();
+  return { inputs, complete: coversTaskInputIds(relevant, inputs) };
+};
+export const coversTaskInputIds = (rows: readonly MessageEvent[], inputs: readonly string[]): boolean => {
+  const covered = new Set(inputs);
+  return rows.filter((e) => !!e.payload.peer?.tell && !e.canceled).every((e) => covered.has(e.id));
+};
+export const correctionTaskEvent = (binding: { event: string | null } | undefined, serves?: string): string | undefined =>
+  binding ? binding.event ?? undefined : serves;
+export const canSettleFinal = (event: MessageEvent): boolean => !event.id.startsWith("feedback:")
+  || !!event.serves || !!event.feedbackRoute;
+export const eventFinalPublication = (event: MessageEvent, owns: (event: EventAuthority) => boolean,
+  allowed: (event: EventAuthority) => boolean): { channel: string; target: string; turn: string } | undefined => {
+  if (!event.result || event.quiet || event.canceled || event.interjected || !owns(event) || !allowed(event)) return undefined;
+  const channel = event.channel || event.feedbackRoute?.receiver;
+  return channel ? { channel, target: event.target, turn: event.turn || event.id } : undefined;
+};
+export const publishEventFinal = (event: MessageEvent, owns: (event: EventAuthority) => boolean,
+  allowed: (event: EventAuthority) => boolean,
+  publish: (target: string, turn: string, channel: string, event: MessageEvent) => void): boolean => {
+  const destination = eventFinalPublication(event, owns, allowed);
+  if (!destination) return false;
+  publish(destination.target, destination.turn, destination.channel, event);
+  return true;
+};
+export const eventDeliveryAllowed = (source: EventAuthority | undefined, target: string, eventId: string | undefined,
+  purpose: DeliveryInput["purpose"], ownerAllowed: (event: EventAuthority) => boolean,
+  row: Route | undefined): boolean => {
+  if (!source) return !eventId || purpose === "task";
+  const cancellation = purpose === "cancellation" && source.canceled && source.unexposedHuman;
+  if (source.feedbackRoute && (!row || row.owner !== source.target || row.receiver.kind !== "chat")) return false;
+  return source.target === target && !source.interjected && ownerAllowed(source)
+    && (cancellation || !source.canceled && row?.outcome?.status !== "canceled" && row?.status !== "held")
+    && (purpose !== "progress" || !!row && ["open", "need", "error"].includes(row.status));
+};
+export const runEventFinalRecovery = (event: MessageEvent, owns: (event: MessageEvent) => boolean,
+  recover: (event: MessageEvent) => void): boolean => {
+  if (event.handoffCut || !event.result || event.quiet || event.interjected || event.canceled || !owns(event)) return false;
+  recover(event);
+  return true;
+};
+export const peerEventPrerequisitesReady = (event: MessageEvent, routeStatus: Route["status"] | undefined,
+  routePrerequisitesReady: boolean, inputPrerequisitesReady: boolean): boolean =>
+  !(event.serves && routeStatus === "held" && !routePrerequisitesReady) && inputPrerequisitesReady;
+export const resultCorrectionInputs = (source: MessageEvent, section: string, index: number, reason: string,
+  candidate: Route | undefined, displayName: (key: string) => string,
+  renderEnvelope: (name: string, fyi: boolean) => string): MessageInput[] => {
+  const row = candidate;
+  const active = row && ["held", "open", "need", "error"].includes(row.status);
+  const owned = active && row.status !== "held" && row.owner === source.target;
+  const task = !!owned && row.receiver.kind === "wizard";
+  const fyiBody = (): string => row && row.owner !== source.target
+    ? `执行者 ${displayName(source.target)} 的 RESULT 未被任务路由 ${row.event} 接受（${reason}）。来源事件 ${source.id}，当前 owner ${displayName(row.owner)}。这是私密知会，无需回复，也不要新建任务。`
+    : row && row.receiver.kind === "chat" && owned
+      ? `本轮 RESULT 未结清人类任务 ${row.event}（${reason}），当前仍 pending。来源事件 ${source.id}。这是绑定原任务的私密纠正；补充读完后，完成时对原任务显式提交 RESULT；普通确认不会结清，也不会新建任务或公开此结果。`
+      : `RESULT 未进入有效任务：${reason}。这是私密纠正知会，无需回复，也不要新建任务。`;
+  const chatFeedbackRoute = owned && row?.receiver.kind === "chat"
+    ? { event: row.event, receiver: row.receiver.channel } : undefined;
+  const make = (target: string, recipient: string, serves?: string, asker?: Asker, suffix = "", text?: string,
+    feedbackRoute?: { event: EventId; receiver: string }): MessageInput => ({
+    id: `feedback:${source.id}:${index}:${section}${suffix}`,
+    identity: JSON.stringify(["result-correction", source.id, index, section, target]), target, speaker: recipient, channel: "",
+    ...(serves ? { serves, ...(asker ? { asker } : {}) } : {}), ...(feedbackRoute ? { feedbackRoute } : {}),
+    priority: "normal", deadline: NO_DEADLINE,
+    payload: { text: text ?? (serves
+      ? `你的 RESULT 暂未交付：${reason}。请只对匹配收件人提交 \`@.name RESULT: <结论>\`；需要反问时使用 tell_peer({kind:"ask"})。`
+      : fyiBody()),
+      peer: { from: { kind: "peer", from: recipient, ...(serves ? { event: serves } : {}) },
+        envelope: renderEnvelope(displayName(recipient), !serves), kind: serves ? "task" : "fyi" } },
+  });
+  const executor = make(source.target, source.speaker, task ? row!.event : undefined, task ? row!.asker : undefined,
+    "", undefined, chatFeedbackRoute);
+  return row && row.owner !== source.target
+    ? [make(source.target, source.speaker, undefined, undefined, "", fyiBody()),
+      make(row.owner, source.target, undefined, undefined, `:owner:${row.owner}`, fyiBody())]
+    : [executor];
+};
+export interface AddressedResultSection { name: string; body: string }
+export const requiresExplicitResultAddress = (source: MessageEvent, row: Route | undefined, isResult: boolean): boolean =>
+  isResult && row?.receiver.kind === "wizard";
+export const settleUnaddressedResult = (source: MessageEvent, row: Route | undefined, isResult: boolean,
+  reject: (source: MessageEvent, row: Route, reason: string) => void): boolean => {
+  if (!requiresExplicitResultAddress(source, row, isResult) || !row || row.receiver.kind !== "wizard") return false;
+  const reason = row.owner !== source.target ? "任务已移交，旧执行者不能提交结果"
+    : row.status === "held" ? "任务前置尚未就绪"
+      : row.outcome?.status === "canceled" ? "任务已取消" : "回执必须显式写明收件人";
+  reject(source, row, reason);
+  return true;
+};
+export const servedChatResultPublicAllowed = (source: MessageEvent, row: Route | undefined, isResult: boolean,
+  covers: (task: string, source: MessageEvent, inputs: readonly string[]) => boolean): boolean => {
+  if (!isResult || row?.receiver.kind !== "chat") return true;
+  const binding = source.resultRoutes?.served;
+  return !!binding?.event && !!binding.inputs && covers(row.event, source, binding.inputs);
+};
+export const servedChatResultFinalAllowed = (source: MessageEvent, sourceRow: Route | undefined,
+  boundRow: Route | undefined, isResult: boolean,
+  covers: (task: string, source: MessageEvent, inputs: readonly string[]) => boolean): boolean => {
+  const binding = source.resultRoutes?.served;
+  if (isResult && binding?.event && (!boundRow || !sourceRow || boundRow.event !== sourceRow.event)) return false;
+  return servedChatResultPublicAllowed(source, boundRow ?? sourceRow, isResult, covers);
+};
+export const rejectUncoveredServedChatResult = (source: MessageEvent, row: Route | undefined, isResult: boolean,
+  inputs: readonly string[], covers: (task: string, source: MessageEvent, inputs: readonly string[]) => boolean,
+  reject: (source: MessageEvent, row: Route) => void): boolean => {
+  if (!isResult || row?.receiver.kind !== "chat" || covers(row.event, source, inputs)) return false;
+  reject(source, row);
+  return true;
+};
+export const settleServedChatResult = (source: MessageEvent, row: Route | undefined, isResult: boolean,
+  inputs: readonly string[], covers: (task: string, source: MessageEvent, inputs: readonly string[]) => boolean,
+  reject: (source: MessageEvent, row: Route, reason: string) => void,
+  settle: (source: MessageEvent, row: Route) => void): boolean => {
+  if (!isResult || row?.receiver.kind !== "chat") return false;
+  if (row.owner !== source.target || row.status === "held" || row.outcome?.status === "canceled") {
+    reject(source, row, row.owner !== source.target ? "任务已移交" : row.status === "held" ? "前置尚未就绪" : "任务已取消");
+    return true;
+  }
+  if (!covers(row.event, source, inputs)) {
+    reject(source, row, "同一任务还有本次结果未覆盖的补充；读完补充后重新提交结果");
+    return true;
+  }
+  settle(source, row);
+  return true;
+};
+export const settleAddressedResults = (source: MessageEvent, sections: readonly AddressedResultSection[], io: {
+  binding: (source: MessageEvent, key: string) => { receiver: string; event: EventId | null; inputs?: string[] } | undefined;
+  resolve: (name: string) => string | undefined;
+  select: (source: MessageEvent, receiver: string, binding: { receiver: string; event: EventId | null; inputs?: string[] } | undefined) => Route | undefined;
+  consumed: (task: string, source: MessageEvent) => string[];
+  bind: (source: MessageEvent, key: string, receiver: string, event: EventId | null, inputs: string[]) => void;
+  covers: (task: string, source: MessageEvent, inputs: readonly string[]) => boolean;
+  reject: (source: MessageEvent, section: AddressedResultSection, index: number, reason: string, row?: Route, key?: string) => void;
+  settle: (source: MessageEvent, section: AddressedResultSection, index: number, row: Route) => void;
+}): void => {
+  sections.forEach((section, index) => {
+    const key = `${index}:${section.name}`;
+    const binding = io.binding(source, key);
+    const receiver = binding?.receiver ?? io.resolve(section.name);
+    if (!receiver) {
+      if (!binding) io.bind(source, key, section.name, null, []);
+      io.reject(source, section, index, `收件人 ${section.name} 不存在`, undefined, key);
+      return;
+    }
+    const selected = io.select(source, receiver, binding);
+    const row = selected && (!source.result || selected.at <= source.result.at) ? selected : undefined;
+    const inputs = binding?.inputs ?? (row ? io.consumed(row.event, source) : []);
+    if (!binding?.inputs) io.bind(source, key, receiver, row?.event ?? null, inputs);
+    if (!row) { io.reject(source, section, index, `${section.name} 不是这笔任务的收件人，或你当前没有欠它的未完成任务`, undefined, key); return; }
+    if (row.owner !== source.target) {
+      io.reject(source, section, index, `任务路由 ${row.event} 已移交，当前不能由你结算`, row, key);
+      return;
+    }
+    if (row.outcome?.status === "canceled" || row.status === "held"
+        || !["open", "need", "error", "answered", "handed"].includes(row.status)) {
+      io.reject(source, section, index, row.status === "held" ? `任务路由 ${row.event} 的前置尚未就绪` : `任务路由 ${row.event} 已取消或不可结算`, row, key);
+      return;
+    }
+    if (!section.body || !io.covers(row.event, source, inputs)) {
+      io.reject(source, section, index, !section.body ? "RESULT 正文为空" : "同一任务还有本次结果未覆盖的补充；读完补充后重新提交结果", row, key);
+      return;
+    }
+    io.settle(source, section, index, row);
+  });
+};
 export const receiptCoverage = (e: MessageEvent, channel = e.channel, question = false, questionText?: string): DeliveryInput["coverage"] => {
   const refs = (facts: ReceiptFact[]): string[] => [...new Set(facts.map((f) => JSON.stringify([f.event, f.version, f.receiver])))].sort();
   const receipts = receiptFacts(e);
@@ -239,11 +414,12 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
       const a = e.authority;
       if (a !== undefined && (!a || a.id !== id || !a.target || typeof a.target !== "string" || !Number.isFinite(a.at)
           || a.execution !== e.execution || (e.execution === "canceled" && a.canceled !== true) || (a.serves !== undefined && typeof a.serves !== "string")
+          || (a.feedbackRoute !== undefined && (!a.feedbackRoute || typeof a.feedbackRoute.event !== "string" || !a.feedbackRoute.event || typeof a.feedbackRoute.receiver !== "string"))
           || [a.canceled, a.interjected, a.handoffCut, a.handoffRestored].some((v) => v !== undefined && typeof v !== "boolean")
           || (a.unexposedHuman !== undefined && a.unexposedHuman !== true))) throw new Error(`invalid event authority ${id}`);
       return;
     }
-    if (!e || e.id !== id || typeof e.fingerprint !== "string" || !e.target || typeof e.speaker !== "string" || typeof e.channel !== "string" || (e.serves !== undefined && typeof e.serves !== "string") || !e.payload || typeof e.payload.text !== "string" || ([e.payload.human, e.payload.peer, e.payload.handoff].filter(Boolean).length !== 1) || !Number.isFinite(e.at) || !Number.isFinite(e.attempts) || !Number.isFinite(e.deadline) || !["queued", "dispatching", "awaiting-result", "complete", "canceled", "uncertain"].includes(e.execution)) throw new Error(`invalid message event ${id}`);
+    if (!e || e.id !== id || typeof e.fingerprint !== "string" || !e.target || typeof e.speaker !== "string" || typeof e.channel !== "string" || (e.serves !== undefined && typeof e.serves !== "string") || (e.feedbackRoute !== undefined && (!e.feedbackRoute || typeof e.feedbackRoute.event !== "string" || !e.feedbackRoute.event || typeof e.feedbackRoute.receiver !== "string")) || !e.payload || typeof e.payload.text !== "string" || ([e.payload.human, e.payload.peer, e.payload.handoff].filter(Boolean).length !== 1) || !Number.isFinite(e.at) || !Number.isFinite(e.attempts) || !Number.isFinite(e.deadline) || !["queued", "dispatching", "awaiting-result", "complete", "canceled", "uncertain"].includes(e.execution)) throw new Error(`invalid message event ${id}`);
     if (e.payload.receipts !== undefined && (!e.payload.peer?.from.receipt || !Array.isArray(e.payload.receipts)
         || !e.payload.receipts.every(receiptFactOk))) throw new Error(`invalid receipt facts ${id}`);
     if (e.payload.peer?.from.receipt && !e.finalized && (!Array.isArray(e.payload.receipts) || !e.payload.receipts.length
@@ -541,10 +717,10 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     const payload = isRcpt(e)
       ? { ...e.payload, receipts, text: receipts.map((f) =>
         `${f.envelope}\n（回执 event=${f.event} version=${f.version} status=${f.status} receiver=${JSON.stringify(f.receiver)}）\n${f.body}`).join("\n\n"),
-        peer: { ...e.payload.peer!, envelope: `${e.payload.peer!.envelope}\n\n以下是同一件活的多份回执。逐项读取各自的状态、来源与正文。` } }
+        peer: { ...e.payload.peer!, envelope: `以下是同一件活的多份回执。逐项读取各自的状态、来源与正文。\n\n${e.payload.peer!.envelope}` } }
       : { ...e.payload, text: [...rows].sort((a, b) => a.at - b.at || a.id.localeCompare(b.id))
         .map((x) => `${x.payload.peer?.envelope ?? ""}\n${x.payload.text}`).join("\n\n"),
-        peer: { ...e.payload.peer!, envelope: `${e.payload.peer!.envelope}\n\n以下是同一项任务的补充要求，请合并处理并统一回复。` } };
+        peer: { ...e.payload.peer!, envelope: `以下是同一项任务的补充要求，请合并处理并统一回复。\n\n${e.payload.peer!.envelope}` } };
     // One atomic store write: a crash cannot expose a merged input and an unretired sibling.
     const inputIds = isTask(e) ? [...new Set(rows.flatMap((x) => x.inputIds ?? [x.id]))].sort() : e.inputIds;
     db.merge({ [e.id]: { ...e, payload, ...(inputIds ? { inputIds } : {}) }, ...Object.fromEntries(absorbed.map((x) => [x.id,
@@ -854,18 +1030,11 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
   return {
     accept, pump, resume, result, delivery, cancel, blocker, queue, release, releaseMissingPane, claimReceipt,
     taskInputs: (task: string): MessageEvent[] => liveRows().filter((e) => (io.task?.(e) ?? e.serves) === task).map(clone),
-    consumedTaskInputs: (task: string, source: MessageEvent): string[] => {
-      const cutoff = source.turnClosedAt ?? source.result?.at ?? Date.now();
-      return [...new Set(liveRows().filter((e) => e.target === source.target && (io.task?.(e) ?? e.serves) === task
-        && !e.canceled && (e.id === source.id || e.exposure === "consumed"
-          && (e.consumedAt ?? e.result?.at ?? e.turnClosedAt ?? Infinity) <= cutoff
-          && !(e.execution === "complete" && !e.result)))
-        .flatMap((e) => e.inputIds ?? [e.id]))].sort();
-    },
+    consumedTaskInputs: (task: string, source: MessageEvent): string[] => taskInputCoverage(liveRows(), task, source,
+      (event) => io.task?.(event) ?? event.serves).inputs,
     coversTaskInputs: (task: string, source: MessageEvent, inputs: readonly string[]): boolean => {
-      const covered = new Set(inputs);
-      return liveRows().filter((e) => e.target === source.target && (io.task?.(e) ?? e.serves) === task
-        && !!e.payload.peer?.tell && !e.canceled).every((e) => covered.has(e.id));
+      const relevant = liveRows().filter((e) => e.target === source.target && (io.task?.(e) ?? e.serves) === task && !e.canceled);
+      return coversTaskInputIds(relevant, inputs);
     },
     running: () => !stopped,
     bind: (id: string, turn: string) => { if (live(id)) patch(id, { turn }); },

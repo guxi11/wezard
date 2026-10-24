@@ -442,8 +442,8 @@ const renderTopOnly = (): string[] => [
   "## 本群开着顶层模式",
   "人在这个群里只和**顶层 wizard** 打交道 —— 群管家, 以及人自己 `.name` 点名的那个。顶层 wizard 派出去之后, wizard 之间的一切往来都是私聊, 只在 rolepage。",
   bullet([
-    "守护进程强制: `tell_peer` / `delegate` 的 `public:true` 不起作用, 一律私聊; 这一轮不是在服务人问的事的 wizard 调 `notify` 进本群会被退回",
-    "这一轮在服务**人问的事** (人直接对你说的, 或那件事派出去的活回来了) → 你是顶层: 子 wizard 的结论回到你这儿, 你用自己的话向人解释 —— 讲结论、取舍和要人拍板的, 不转述过程、不贴它们的原话; 等得久的进展自己 `notify` 一句",
+    "守护进程强制: `tell_peer` / `delegate` 的 `public:true` 不起作用, 一律私聊; 普通私聊 fyi 不授权对人通知; 这一轮不是在服务人问的事的 wizard 调 `notify` 进本群会被退回",
+    "这一轮在服务**人问的事** (人直接对你说的, 或那件事派出去的活回来了) → 你是顶层: 子 wizard 的结论回到你这儿, 你用自己的话向人解释 —— 讲结论、取舍和要人拍板的, 不转述过程、不贴它们的原话; 不轮询或提前汇总, 但长等待、阻塞可按已知实据用 `notify` 报进展。收到子 wizard 的完成 fyi 时, 立即向原群 `notify` 结论与仍 pending / 尚无正式回执的状态; fyi 本身不代表 ledger done",
     "这一轮是同伴私聊派来的活 → 你不是顶层: 不对人说话, 结论用 `@.name RESULT:` 交给对应接收者; 需要对方补信息或协作时用 `tell_peer({kind:\"ask\"})`; 由派你的那个代你向人交代",
   ]),
 ];
@@ -593,7 +593,7 @@ export const renderCharter = (a: CharterArgs): string => {
     bullet([
       "先在自己这里把**公共材料**读进上下文, 再 `clone_wizard({task})` 分出去 (材料已在某个同伴那里就 `from` 它), 每个只交代各自那份差异 —— 别让每个分身各读一遍",
       "复杂任务先 `plan_create`，只创建当前阶段需要的 wizard；owner 收到回复、思考并验收后显式更新 plan，再推进下一阶段",
-      "**派完就放手**: 不 `wait_peer` 守着, 不轮询 `peek_peer`, 不必去催; 没齐之前别汇总、别向人报进度",
+      "**派完就放手**: 不 `wait_peer` 守着、不轮询 `peek_peer`, 不提前合并或宣告完成; 长等待或阻塞可按已知实据 `notify` 进展。人任务的完成 fyi 到达时, 顶层 wizard 必须 `notify` 原群, 说明结论以及 ledger 仍 pending / 尚无正式回执; 不得把 fyi 当作 done",
       "按回执的 `status` 处理: `need` = 它在反问 (需要上级补信息时用 `NEED:` 明确列出问题), 用 `tell_peer({name, re: true})` 答 · `error` = CLI 报错停了, 等它续跑或 `re` 叫它继续 · `timeout` / `silent` / `dead` / `canceled` = 这一份没有答案了: 换人、`re` 追问, 或在汇总里如实写缺了它",
       "plan 是 DAG 状态记忆，不绑定 executor、不自动派活或验收；可并行节点由 owner 自己安排与验收",
       "所有任务完成或取消后，owner 显式完成 plan；结果由你自己这一轮向人收口",

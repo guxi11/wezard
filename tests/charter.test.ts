@@ -19,7 +19,7 @@ const charter = renderCharter(base);
 assert.match(charter, /worker/);
 assert.match(charter, /user:admin/);
 assert.match(charter, /\/workspace/);
-for (const tool of ["wizard_roster", "dispatch", "tell_peer", "handoff"]) {
+for (const tool of ["wizard_roster", "delegate", "tell_peer", "handoff"]) {
   assert.ok(charter.includes(tool), `charter must advertise ${tool}`);
 }
 for (const marker of ["RESULT:", "NEED:", "ARTIFACT:"]) assert.ok(charter.includes(marker));
@@ -34,6 +34,13 @@ for (const [stewardEnabled, topOnlyEnabled] of [[false, false], [false, true], [
   assert.equal(hasHeading(rendered, "## 我是这个群的管家 (L1)"), stewardEnabled && topOnlyEnabled);
   assert.equal(hasHeading(rendered, "## 本群开着顶层模式"), topOnlyEnabled);
 }
+const topOnly = renderCharter({ ...base, topOnly: true });
+const topOnlyChapter = chapter(topOnly, "## 本群开着顶层模式");
+for (const fragment of ["长等待、阻塞", "完成 fyi", "原群 `notify`", "仍 pending", "本身不代表 ledger done", "普通私聊 fyi 不授权对人通知"])
+  assert.ok(topOnlyChapter.includes(fragment), `top-only completion notice contract must include ${fragment}`);
+const orchestration = chapter(topOnly, "## 怎么干活: 编排");
+for (const fragment of ["不提前合并或宣告完成", "必须 `notify` 原群"])
+  assert.ok(orchestration.includes(fragment), `top-only orchestration contract must include ${fragment}`);
 const lead = renderCharter({ ...base, lead: true });
 assert.ok(!hasHeading(charter, "## 我是这件活的 lead"));
 assert.ok(hasHeading(lead, "## 我是这件活的 lead"));

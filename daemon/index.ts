@@ -29,7 +29,7 @@ import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } 
 import { installInboundRouter } from "./inbound.js";
 import { loadMirrorStore } from "./mirror-store.js";
 import { cancelOps, eventRef, finalKind, isEventRef, makeOutcome, openRouter, ops, pickPair, type Delivery, type EventId, type Op, type Receiver, type Route } from "./router.js";
-import { createMessageEvents, messageId, finalId, reportSource, receiptCoverage, receiptFacts, type EventAuthority, type MessageAdapters, type MessageEvent, type MessageFinal, type MessageInput } from "./message-events.js";
+import { createMessageEvents, messageId, finalId, reportSource, receiptCoverage, receiptFacts, correctionTaskEvent, canSettleFinal, eventDeliveryAllowed, peerEventPrerequisitesReady, resultCorrectionInputs, settleAddressedResults, settleUnaddressedResult, servedChatResultFinalAllowed, settleServedChatResult, type EventAuthority, type MessageAdapters, type MessageEvent, type MessageFinal, type MessageInput } from "./message-events.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { backendFor, bindStartupNotice, prewarmShell, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { bindCardChannel, installApprovalEventListener, makeApproveHandler, requestConfirm } from "./approval.js";
@@ -257,9 +257,10 @@ const main = async (): Promise<void> => {
   let handoffAllowed: (target: string) => boolean = () => false;
   let handoffFinalSuppressed: (event: EventAuthority) => boolean = (e) => !!e.handoffCut && !e.handoffRestored;
   const ownsReplyEvent = (e: EventAuthority): boolean => {
-    const row = e.serves ? router.get(e.serves) : undefined;
+    const serves = e.serves ?? e.feedbackRoute?.event;
+    const row = serves ? router.get(serves) : undefined;
     if (row && row.owner !== e.target && router.owedBy(e.target).length === 0) return false;
-    const latest = e.serves ? events.latestTransfer(e.serves) : undefined;
+    const latest = serves ? events.latestTransfer(serves) : undefined;
     return !latest || latest.id === e.id || latest.at < e.at;
   };
   const events = createMessageEvents(join(cfg.daemon.stateDir, "message-events.json"), {
@@ -285,7 +286,10 @@ const main = async (): Promise<void> => {
     // 这一句曾是要 idleNow 的, 也就是那个反复 5s 超时的探测源头: 一超时就退避, 把同一 target
     // 后面排着的每一笔 (含后到的人话) 一起钉住十几分钟。交接期间照旧等 —— 那几秒 pane 真是死的。
     ready: async (e) => e.payload.handoff ? handoffAllowed(e.target) && bridge.idleNow(e.target) : !handingOff(e.target) && (e.payload.peer ? !!(await peerEvents?.ready(e)) : true),
-    task: (e) => e.serves ? router.get(e.serves)?.event ?? e.serves : undefined,
+    task: (e) => {
+      const task = e.serves ?? e.feedbackRoute?.event;
+      return task ? router.get(task)?.event ?? task : undefined;
+    },
     retain: (e) => {
       const required = (id: string): boolean => {
         const row = router.get(id);
@@ -359,12 +363,10 @@ const main = async (): Promise<void> => {
       await bridge.settleFinalProgress(d.id);
       const allowed = (): boolean => {
         const source = d.eventId ? events.authorityOf(d.eventId) : undefined;
-        if (!source) return !d.eventId || d.purpose === "task";
-        const row = source.serves ? router.get(source.serves) : undefined;
-        const cancellation = d.purpose === "cancellation" && source.canceled && source.unexposedHuman;
-        return source.target === d.target && !source.interjected && !handoffFinalSuppressed(source) && ownsReplyEvent(source)
-          && (cancellation || !source.canceled && row?.outcome?.status !== "canceled" && row?.status !== "held")
-          && (d.purpose !== "progress" || !!row && ["open", "need", "error"].includes(row.status));
+        const route = source?.serves ?? source?.feedbackRoute?.event;
+        const row = route ? router.get(route) : undefined;
+        return eventDeliveryAllowed(source, d.target, d.eventId, d.purpose,
+          (event) => !handoffFinalSuppressed(event) && ownsReplyEvent(event), row);
       };
       if (!allowed()) return { failed: "delivery authority withdrawn before transport" };
       const chat = d.channel.replace(/^(user|chat|group):/, "");
@@ -1379,24 +1381,23 @@ const main = async (): Promise<void> => {
         return [`${i}:${section.name}`, { receiver: peer.ok ? peer.target : section.name, event: row?.event ?? null,
           inputs: row ? events.consumedTaskInputs(row.event, e) : [] }];
       }));
-      const row = e.serves ? router.get(e.serves) : undefined;
+      const task = e.serves ?? e.feedbackRoute?.event;
+      const row = task ? router.get(task) : undefined;
       return parseClosing(body).kind === "result" && row?.owner === e.target && row.receiver.kind === "chat"
-        ? { served: { receiver: e.speaker, event: row.event, inputs: events.consumedTaskInputs(row.event, e) } } : {};
+        ? { served: { receiver: e.feedbackRoute?.receiver ?? e.speaker, event: row.event, inputs: events.consumedTaskInputs(row.event, e) } } : {};
     };
-    const resultCorrection = (e: MessageEvent, section: { name: string }, index: number, reason: string): void => {
-      const row = e.serves ? router.get(e.serves) : undefined;
-      if (!row || row.owner !== e.target) return;
-      const id = `feedback:${e.id}:${index}:${section.name}`;
-      const text = `你刚才的 RESULT 未交付：${reason}。请检查你当前欠着的任务，只对匹配的接收者提交 \`@.name RESULT: <结论>\`；需要反问时用 tell_peer({kind:"ask"})。`;
-      try {
-        events.accept({ id, identity: JSON.stringify([e.id, index, section.name, reason]), target: e.target,
-          speaker: e.speaker, channel: e.channel, serves: row.event, ...(row.asker ? { asker: row.asker } : {}),
-          priority: "normal", deadline: NO_DEADLINE,
-          payload: { text, peer: { from: { kind: "peer", from: e.speaker, event: row.event },
-        envelope: renderPeerEnvelope(displayName(e.speaker)), kind: "task" } },
-        });
+    const resultCorrection = (e: MessageEvent, section: { name: string }, index: number, reason: string,
+      bindingKey?: string, allowServesFallback = true): void => {
+      const key = bindingKey ?? `${index}:${section.name}`;
+      const binding = events.get(e.id)?.resultRoutes?.[key];
+      const taskEvent = correctionTaskEvent(binding, allowServesFallback ? e.serves : undefined);
+      const row = taskEvent ? router.get(taskEvent) : undefined;
+      const identitySection = key === "served" ? "served" : section.name;
+      for (const feedback of resultCorrectionInputs(e, identitySection, index, reason, row, displayName,
+        (name, fyi) => renderPeerEnvelope(name, undefined, undefined, fyi ? { act: "fyi", quiet: true } : undefined))) try {
+        events.accept(feedback);
       } catch (error) {
-        log.warn({ event: e.id, target: e.target, receiver: section.name, err: errText(error) }, "addressed RESULT: correction feedback could not be queued");
+        log.warn({ event: e.id, target: feedback.target, receiver: section.name, err: errText(error) }, "addressed RESULT: correction feedback could not be queued");
       }
     };
     deliverFinal = (e, verdict) => {
@@ -1421,54 +1422,58 @@ const main = async (): Promise<void> => {
     };
     /** 一轮的终句落到它服务的那一行上 (定论 / 中途态)。 */
     const settleFinal = (e: MessageEvent, verdict: MessageFinal): void => {
+      if (!canSettleFinal(e)) return;
       const sections = verdict.error ? [] : addressedResults(verdict.text);
+      if (e.feedbackRoute && sections.length) {
+        resultCorrection(e, { name: "served" }, 0, "此私密纠正只续办绑定的人类任务；请对原任务提交未加收件人地址的 RESULT", "served", false);
+        return;
+      }
       if (sections.length) {
-        for (const [index, section] of sections.entries()) {
-          const sectionKey = `${index}:${section.name}`;
-          const binding = events.get(e.id)?.resultRoutes?.[sectionKey];
-          const peer = binding ? undefined : resolvePeer(e.target, section.name);
-          const receiverTarget = binding?.receiver ?? (peer?.ok ? peer.target : undefined);
-          if (!receiverTarget) {
-            log.warn({ target: e.target, receiver: section.name, event: e.id }, "addressed RESULT: unknown receiver");
-            resultCorrection(e, section, index, `收件人 ${section.name} 不存在`);
-            continue;
-          }
-          const selected = binding ? binding.event ? router.get(binding.event) : undefined
-            : resultTask(e, receiverTarget);
-          const row = selected && (!e.result || selected.at <= e.result.at) ? selected : undefined;
-          const inputs = binding?.inputs ?? (row ? events.consumedTaskInputs(row.event, e) : []);
-          if (!binding?.inputs) events.bindResultRoute(e.id, sectionKey, receiverTarget, row?.event ?? null, inputs);
-          if (!row) {
-            log.warn({ target: e.target, receiver: section.name, event: e.id }, "addressed RESULT: no matching receiver task");
-            resultCorrection(e, section, index, `${section.name} 不是这笔任务的收件人，或你当前没有欠它的未完成任务`);
-            continue;
-          }
-          if (!section.body || !events.coversTaskInputs(row.event, e, inputs)) {
-            resultCorrection(e, section, index, !section.body ? "RESULT 正文为空" : "同一任务还有本次结果未覆盖的补充；读完补充后重新提交结果");
-            continue;
-          }
-          const text = `RESULT: ${section.body}`;
-          const source = { input: e.id, ...(e.turn ? { turn: e.turn } : {}),
-            facts: [JSON.stringify([e.id, row.event, sectionKey, row.receiver])] };
-          const plans = router.onFinal(e.target, row.event, { text, source, result: true });
-          plans.forEach(commitRoute);
-        }
+        settleAddressedResults(e, sections, {
+          binding: (event, key) => events.get(event.id)?.resultRoutes?.[key],
+          resolve: (name) => { const peer = resolvePeer(e.target, name); return peer.ok ? peer.target : undefined; },
+          select: (event, receiver, binding) => binding ? binding.event ? router.get(binding.event) : undefined : resultTask(event, receiver),
+          consumed: (task, event) => events.consumedTaskInputs(task, event),
+          bind: (event, key, receiver, route, inputs) => events.bindResultRoute(event.id, key, receiver, route, inputs),
+          covers: (task, event, inputs) => events.coversTaskInputs(task, event, inputs),
+          reject: (event, section, index, reason, row, key) => {
+            if (!row && reason.includes("不存在")) log.warn({ target: e.target, receiver: section.name, event: e.id }, "addressed RESULT: unknown receiver");
+            else if (!row) log.warn({ target: e.target, receiver: section.name, event: e.id }, "addressed RESULT: no matching receiver task");
+            resultCorrection(event, section, index, reason, key, false);
+          },
+          settle: (event, section, index, row) => {
+            const key = `${index}:${section.name}`;
+            const source = { input: event.id, ...(event.turn ? { turn: event.turn } : {}),
+              facts: [JSON.stringify([event.id, row.event, key, row.receiver])] };
+            router.onFinal(event.target, row.event, { text: `RESULT: ${section.body}`, source, result: true }).forEach(commitRoute);
+          },
+        });
         return;
       }
-      const servedRow = e.serves ? router.get(e.serves) : undefined;
-      if (parseClosing(verdict.text).kind === "result" && servedRow?.owner === e.target
-          && servedRow.receiver.kind === "wizard") {
-        resultCorrection(e, { name: displayName(servedRow.receiver.to) }, 0, "回执必须显式写明收件人");
-        return;
-      }
-      if (!verdict.error && parseClosing(verdict.text).kind === "result" && e.serves) {
-        const task = servedRow?.event ?? e.serves;
+      if (e.feedbackRoute && (verdict.error || parseClosing(verdict.text).kind !== "result")) return;
+      const routeEvent = e.serves ?? e.feedbackRoute?.event;
+      const servedRow = routeEvent ? router.get(routeEvent) : undefined;
+      if (settleUnaddressedResult(e, servedRow, parseClosing(verdict.text).kind === "result",
+        (event, row, reason) => resultCorrection(event, { name: "served" }, 0, reason, "served"))) return;
+      if (!verdict.error && parseClosing(verdict.text).kind === "result" && routeEvent) {
+        const task = servedRow?.event ?? routeEvent;
         const binding = events.get(e.id)?.resultRoutes?.served;
+        const boundRow = binding?.event ? router.get(binding.event) : undefined;
+        if (binding && (!boundRow || !servedRow || boundRow.event !== servedRow.event)) {
+          resultCorrection(e, { name: "served" }, 0, "RESULT 未绑定到本轮原任务", "orphan:served", false);
+          return;
+        }
         const inputs = binding?.inputs ?? events.consumedTaskInputs(task, e);
-        if (!binding?.inputs) events.bindResultRoute(e.id, "served", servedRow?.receiver.kind === "wizard" ? servedRow.receiver.to : e.speaker, task, inputs);
-        if (!events.coversTaskInputs(task, e, inputs)) return;
+        if (!binding?.inputs) events.bindResultRoute(e.id, "served", e.feedbackRoute?.receiver
+          ?? (servedRow?.receiver.kind === "wizard" ? servedRow.receiver.to : e.speaker), task, inputs);
+        if (settleServedChatResult(e, servedRow, true, inputs,
+          (event, source, frozen) => events.coversTaskInputs(event, source, frozen),
+          (event, row, reason) => resultCorrection(event, { name: "served" }, 0, reason, "served"),
+          (event, row) => router.onFinal(event.target, row.event, { ...verdict, source: reportSource(event) }).forEach(commitRoute))) {
+          return;
+        }
       }
-      const plans = router.onFinal(e.target, e.serves, { ...verdict, source: reportSource(e) });
+      const plans = router.onFinal(e.target, routeEvent, { ...verdict, source: reportSource(e) });
       // Error evidence has no durable event result. Queue the chat reply before
       // mark:error suppresses replay, so a reload between the two cannot lose it.
       if (verdict.error && plans.some((op) => op.op === "mark" && op.status === "error")
@@ -2047,8 +2052,10 @@ const main = async (): Promise<void> => {
       ready: async (e) => {
         if (e.payload.planReminder && !(await readyPlanReminder(e))) return false;
         const row = e.serves ? router.get(e.serves) : undefined;
-        if (row?.status === "held" && !prereqsOf(e.speaker, row.after ?? []).every((r) => r.state === "done")) return false;
-        return !m.parkedNow(e.target) && prereqsOf(e.speaker, e.payload.peer!.after ?? []).every((r) => r.state === "done")
+        const routePrerequisitesReady = row?.status !== "held" || prereqsOf(e.speaker, row.after ?? []).every((r) => r.state === "done");
+        const inputPrerequisitesReady = prereqsOf(e.speaker, e.payload.peer!.after ?? []).every((r) => r.state === "done");
+        return peerEventPrerequisitesReady(e, row?.status, routePrerequisitesReady, inputPrerequisitesReady)
+          && !m.parkedNow(e.target)
           && (e.priority === "now" || await m.idleNow(e.target) || !(await m.paneLive(e.target)) || (e.priority === "urgent" && !(await othersTurn(e.target, e.speaker))));
       },
       inject: async (e, boundary) => {
@@ -2091,7 +2098,16 @@ const main = async (): Promise<void> => {
       if (e.quiet || e.canceled || e.interjected || !ownsReplyEvent(e)) return false;
       const body = (events.get(e.id) ?? e).result?.body ?? "";
       if (addressedResults(body).length) return false;
-      return router.finalReleased(e.target, e.serves, body, reportSource(events.get(e.id) ?? e));
+      const current = events.get(e.id) ?? e;
+      if (current.feedbackRoute && parseClosing(body).kind !== "result") return false;
+      const served = current.resultRoutes?.served;
+      const routeEvent = current.feedbackRoute?.event ?? current.serves;
+      const sourceRow = routeEvent ? router.get(routeEvent) : undefined;
+      const boundRow = served?.event ? router.get(served.event) : undefined;
+      if (!servedChatResultFinalAllowed(current, sourceRow, boundRow, parseClosing(body).kind === "result",
+        (task, source, inputs) => events.coversTaskInputs(task, source, inputs))) return false;
+      const servedRow = boundRow ?? sourceRow;
+      return router.finalReleased(e.target, servedRow?.event ?? routeEvent, body, reportSource(current));
     });
     // boot 的路由表侧恢复 (T8): held 重查前置、answered 重投一次; 二者幂等, 与 events.resume
     // 重放的注入/回执撞上无害。

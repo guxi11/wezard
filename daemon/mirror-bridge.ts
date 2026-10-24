@@ -1,5 +1,5 @@
 import type { ClearAttempt } from "./handoff.js";
-import { finalId, receiptCoverage, receiptQuiet, type MessageEvent, type MessageEvents, type DeliveryInput } from "./message-events.js";
+import { finalId, publishEventFinal, receiptCoverage, receiptQuiet, runEventFinalRecovery, type MessageEvent, type MessageEvents, type DeliveryInput } from "./message-events.js";
 import { parseEnvelope, renderTail } from "../shared/reminder.js";
 import { codexSessions, codexSessionForPane, recordCodexPaneSession } from "../shared/codex.js";
 import { codexHookLaunchArgs, codexHookCommand, inspectCodexHooks, trustCodexHookSet, type CodexHook } from "../shared/codex-hooks.js";
@@ -3800,32 +3800,37 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return claimed;
   };
   const recoverEventFinal = (event: MessageEvent, bubble?: BriefBubble): void => {
-    if ((deps.events?.get(event.id) ?? event).handoffCut || event.quiet || !event.result || event.interjected || event.canceled || !eventOwnerGate(event)) return;
-    // 事件泵的 evidence 探针 (observe → io.recovered) 与 brief 软收口赛跑: 两者同为
-    // ~1s 周期, 探针常先跑到, 而它调这里不带气泡 —— queueFinal 拿不到 stream, 终句
-    // 全部走 standalone, 气泡定格在最后一行 CoT 进度。没传气泡时按 target/turn 找回
-    // 活着的那只 (turn 已换人/气泡已收则不挂, 维持 standalone)。
-    bubble ??= claimReplyBubble(event);
-    bubble ??= (() => {
-      const a = byTarget.get(event.target);
-      return a && (!event.turn || a.briefTurnId === event.turn) && a.briefBubble && !a.briefBubble.done ? a.briefBubble : undefined;
-    })();
-    const turn = event.turn || event.id;
-    const record = getDetail(turn);
-    if (!record) recordTurnStart({ id: turn, eventId: event.id, target: event.target,
-      userQuery: event.payload.text, createdAt: event.originalAt ?? event.at, channel: event.channel,
-      speaker: event.payload.human ? event.speaker : undefined, from: event.payload.peer?.from });
-    // tail 已按软收口记过这句话 (final:false —— 它不带终句语义, doneAt 不认): 就地升级,
-    // 不追加同文第二条, 否则 rolepage 上草稿与终稿各画一颗气泡。没有同文的才补 —— 但也
-    // 只补「这轮还没有任何终句」的: 已有终句而 body 不同, 是续答链把子事件的终句写进了
-    // 同一段话只落一次 (子轮 / 父轮不各画一颗气泡)。
-    if (!(record?.kind === "turn" && markTurnTextFinal(turn, event.result.body)) &&
-        (record ? record.kind === "turn" && !record.items.some((x) => x.t === "text" && x.final) : true))
-      recordTurnItem(turn, { t: "text", final: true, body: event.result.body, ts: event.result.at });
-    recordTurnClose(turn);
-    if (!event.turn) deps.events?.bind(event.id, turn);
-    // 终句按事件自己的 `serves` 放行 (§9.4/§9.5): 收口与否由路由表判 (eventFinalGate)。
-    if (event.channel && eventFinalGate(event)) queueFinal(event.target, turn, event.channel, event.result.body, event.id, bubble);
+    const current = deps.events?.get(event.id) ?? event;
+    runEventFinalRecovery(current, eventOwnerGate, (current) => {
+      const result = current.result!;
+      // 事件泵的 evidence 探针 (observe → io.recovered) 与 brief 软收口赛跑: 两者同为
+      // ~1s 周期, 探针常先跑到, 而它调这里不带气泡 —— queueFinal 拿不到 stream, 终句
+      // 全部走 standalone, 气泡定格在最后一行 CoT 进度。没传气泡时按 target/turn 找回
+      // 活着的那只 (turn 已换人/气泡已收则不挂, 维持 standalone)。
+      bubble ??= claimReplyBubble(current);
+      bubble ??= (() => {
+        const a = byTarget.get(current.target);
+        return a && (!current.turn || a.briefTurnId === current.turn) && a.briefBubble && !a.briefBubble.done ? a.briefBubble : undefined;
+      })();
+      const turn = current.turn || current.id;
+      const record = getDetail(turn);
+      if (!record) recordTurnStart({ id: turn, eventId: current.id, target: current.target,
+        userQuery: current.payload.text, createdAt: current.originalAt ?? current.at, channel: current.channel,
+        speaker: current.payload.human ? current.speaker : undefined, from: current.payload.peer?.from });
+      // tail 已按软收口记过这句话 (final:false —— 它不带终句语义, doneAt 不认): 就地升级,
+      // 不追加同文第二条, 否则 rolepage 上草稿与终稿各画一颗气泡。没有同文的才补 —— 但也
+      // 只补「这轮还没有任何终句」的: 已有终句而 body 不同, 是续答链把子事件的终句写进了
+      // 同一段话只落一次 (子轮 / 父轮不各画一颗气泡)。
+      if (!(record?.kind === "turn" && markTurnTextFinal(turn, result.body)) &&
+          (record ? record.kind === "turn" && !record.items.some((x) => x.t === "text" && x.final) : true))
+        recordTurnItem(turn, { t: "text", final: true, body: result.body, ts: result.at });
+      recordTurnClose(turn);
+      if (!current.turn) deps.events?.bind(current.id, turn);
+      // 终句按事件自己的路由上下文放行 (§9.4/§9.5): 收口与否由路由表判 (eventFinalGate)。
+      publishEventFinal(current, (candidate) => eventOwnerGate(candidate as MessageEvent),
+        (candidate) => eventFinalGate(candidate as MessageEvent),
+        (target, finalTurn, channel, published) => queueFinal(target, finalTurn, channel, result.body, published.id, bubble));
+    });
   };
   const deliverTransferredFinal = (event: MessageEvent, body: string, status: DeliveryInput["reportKind"] = "error"): void => {
     if (!eventOwnerGate(event) || !event.channel) return;
