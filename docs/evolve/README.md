@@ -2,6 +2,7 @@
 
 > 牵头 `.evolve` · 2026-10-02 · 依据 `research/` 下 6 份调研 (每份的出处与证据都在原文里, 这里只留结论与取舍)
 > 路线图与批次进度见 [roadmap.md](roadmap.md)
+> 本页保留历史调研与处置建议。当前 Teams/owner plan 契约见[技术说明](../../技术说明.md#编排控制流留在发起方)，receiver 协议见 [receipt-router.md](receipt-router.md)。旧工单预算、自动回收、detached 与 graph runner 的设想已退役，不构成现行接口或兼容承诺。
 
 | 调研 | 作者 | 一句话 |
 |---|---|---|
@@ -14,10 +15,10 @@
 
 ## 1. 核心判断
 
-1. **wezard 已经有两个求值器, 分工要画死。** LLM 是最好的 `if` / 拆分 / 汇总; 守护进程擅长 LLM 做不了的: **跨时间等、数数、计时、熬过 reload**。任何新机制先问「它属于哪一边」—— 控制流不进 daemon (`jobs.ts` 头注释的取舍继续成立), daemon 不替模型判断。
+1. **wezard 已经有两个求值器, 分工要画死。** LLM 是最好的 `if` / 拆分 / 汇总; 守护进程擅长 LLM 做不了的: **跨时间等、数数、计时、熬过 reload**。任何新机制先问「它属于哪一边」—— 控制流不进 daemon（当前由 owner 显式维护 plan DAG）, daemon 不替模型判断。
 2. **原语核心已经事实存在**: 说 (`tell_peer`) / 看 (`peek_peer` `read_chat`) / 生 (`spawn` `clone`) / 等 (回执) 占 30 天 1133 次调用的 ~80%。演进不是造新语言, 而是**补齐这几个原语的语义缺口, 并把其余工具降为别名、镜头或人侧操作**。
 3. **派活结果需要可恢复的归属证据。** 当前 route journal 记录 owner、receiver 与结论；message-events 持久化输入身份、`serves`、`inputIds`、执行/暴露状态和最终发送意图。恢复依靠 event、transcript、pane/session 与 ACK 证据；无法证明是否投出的内容保留为 `uncertain`，不因超时或 pane 消失合成失败回执。具体行为见唯一权威方案 [receipt-router.md](receipt-router.md)。
-4. **一次 task 要有明确地址。** 对同一 owner+wizard receiver 同时只保留一件 unfinished task；显式 `@.name RESULT:` 支持一轮多接收者，按 event 和已消费输入 coverage 绑定。`kind` 表示消息意图并参与派活方向闸，route 是否创建及 receiver 由 `return` 决定：缺省 `self`，`none` 不建 route，`self` / `detach` 新建或补充 receiver task，`transfer` 沿已有 route 转移 owner。因此 `ask` / `fyi` 也会依 `return` 创建或复用 route。MCP `fyi` 文案承诺不收回执，但实现不会自动把 `return` 设为 `none`；需确保不建 route 时显式传 `return:"none"`。NEED、CLI error 是中间态。名册与工单展示状态由 route 行和 pane 探针派生，不另存一份状态。现行细节见唯一权威方案 [receipt-router.md](receipt-router.md)。
+4. **一次 task 要有明确地址。** 对同一 owner+wizard receiver 同时只保留一件 unfinished task；显式 `@.name RESULT:` 支持一轮多接收者，按 event 和已消费输入 coverage 绑定。`kind` 表示消息意图，route 是否创建及 receiver 由 `return` 决定：缺省 `self`，`none` 不建 route，`self` / `detach` 新建或补充 receiver task，`transfer` 沿已有 route 转移 owner。因此 `ask` / `fyi` 也会依 `return` 创建或复用 route。MCP `fyi` 文案承诺不收回执，但实现不会自动把 `return` 设为 `none`；需确保不建 route 时显式传 `return:"none"`。NEED、CLI error 是中间态。名册与 receiver 工作状态由 route 行和 pane 探针派生，不另存一份状态。现行细节见唯一权威方案 [receipt-router.md](receipt-router.md)。
 5. **上下文是预算, 不是仓库。** charter ~4.4k tok 里 1/3 是只会过期的出生名册, 另有 ~2.5k 与工具描述复述; 在 Claude Code 上工具描述是 deferred 的 (只有名字常驻), 所以**charter 是唯一保证在场的那份**。自描述分三层: L0 charter 一行「何时用」→ L1 工具描述讲参数与边界 → L2 文档按需读。
 6. **记忆的病在时机与检索, 不在体积。** 所有记忆只在出生时进 system prompt: 在跑的 wizard 看不到新规矩, `/clear` 后自己的 self 记忆也没了; 交接简报这类最好的情景摘要用完即删。先修通路 (notices 推送、跨 /clear、episode 归档), 再谈检索。
 7. **UI 的单位要从「消息」升到「一件事」。** 工单成为一等会话, 忙闲补上「卡在审批」, 一个「要我处理」的托盘 —— 人管一群 wizard 时只关心这两件事: 这件事到哪了、谁在等我。

@@ -1,19 +1,19 @@
 # Receiver task routing and durable recovery
 
-> 当前唯一权威设计，依据 `daemon/router.ts`、`daemon/message-events.ts`、`daemon/index.ts` 与 `shared/turn-state.ts`。实现基线：`1646fa6` 及其后续修正。本文描述当前行为，不是迁移步骤。
+> 当前唯一权威设计，依据 `daemon/router.ts`、`daemon/message-events.ts`、`daemon/index.ts` 与 `shared/turn-state.ts`。实现基线：`1646fa6` 及后续修正，含 `0374493` 的 Teams/plan 元数据接线。本文描述当前行为，不是迁移步骤。
 
 ## 责任边界
 
-- `router.ts` 是 receiver task 的账本：每个 event 有 owner、receiver、状态、job/batch 关联和结论；JSONL journal 以 op 追加，启动时 fold，压实时保留仍可被迟到输入引用的记录。
+- `router.ts` 是 receiver task 的账本：每个 event 有 owner、receiver、状态、可选 batch 关联和结论；JSONL journal 以 op 追加，启动时 fold，压实时保留仍可被迟到输入引用的记录。
 - `message-events.ts` 是输入与最终发送的耐久队列：保存输入身份、`serves`、`inputIds`、执行状态、暴露状态、结果绑定及最终投递 outbox。它不以 transcript 文本猜测路由归属。
-- `jobs.ts` 记录 fan-out 成员、预算和完成账目；它与 route ledger 通过 event/job 关联，不替代 route 状态。
+- `plans.ts` 独立保存 owner 显式维护的 DAG。逐输入的 `planId` 仅关联提醒，不替代 receiver task，不自动派活、验收或推进计划。
 - `turn-state.ts` 只在读取时将 route 行和 pane 状态映射为工作状态，不保存第二份真相。
 
 ## 任务与 receiver
 
 一个 route event 表示一件 task。owner 是当前执行并欠答的一方，receiver 是结论与追问的上游接收者。对于同一 owner 和 wizard receiver，最多保留一件 unfinished task。route 与 receipt fact 的 `batch` 都是可选字段；缺省时按原值读取，不推断或补写，无 batch 的 inbox 回执不参与批次合并。重复 `open` 或 owner `move` 后的重复任务会合并，`mergedInto` alias 让历史 event 仍解析到当前 task。`open/move` 与 merge 分两次 journal append；boot fold 后再次归并重复 unfinished rows，以修复两次写入之间崩溃的窗口。这是当前写入协议的恢复行为，不是旧版迁移。
 
-`kind` 表示消息意图并参与派活方向闸；route 创建及 receiver 由 `return` 决定。`return` 缺省为 `self`，`none` 不建 route，`self` / `detach` 新建或补充 receiver task，`transfer` 沿已有 route 转移 owner。当前 MCP `fyi` 文案承诺不收回执，但实现不会自动将它转换为 `return:"none"`；要确保不建 route，需显式指定 `return:"none"`。`NEED:` 和 CLI error 是中间状态，分别表现为 `need`、`error`，只有显式续问或最终结果才推进任务。owner 的移交由 `move` 改归属，不另造旧任务副本。
+`kind` 表示消息意图；route 创建及 receiver 由 `return` 决定。`return` 缺省为 `self`，`none` 不建 route，`self` / `detach` 新建或补充 receiver task，`transfer` 沿已有 route 转移 owner。当前 MCP `fyi` 文案承诺不收回执，但实现不会自动将它转换为 `return:"none"`；要确保不建 route，需显式指定 `return:"none"`。`NEED:` 和 CLI error 是中间状态，分别表现为 `need`、`error`，只有显式续问或最终结果才推进任务。owner 的移交由 `move` 改归属，不另造旧任务副本。
 
 wizard task 的终结结果必须用 `@.name RESULT:` 指明接收者；裸 `RESULT:` 会被明确反馈拒绝。一轮可以包含多个接收者。chat root 的裸 `RESULT:` 合法，按自身 `serves` 结案并保留 input coverage。daemon 在输入结果落库时生成 `resultRoutes`，把每段绑定到对应 event，并记录产生该结果的 `inputIds`。这些输入必须已由同一 session/turn 消费且被结果覆盖，才能提交 answer；新输入若在旧结果处理期间到达，不会被旧结果顺带结案。daemon 不根据 speaker 猜 wizard task 的接收者。
 
@@ -31,7 +31,15 @@ route 不使用自动失败期限。`NO_DEADLINE = Number.MAX_SAFE_INTEGER` 是�
 
 当前没有 route sweeper 按 deadline、pane 死亡宽限或无结果次数生成 `timeout`、`silent`、`dead`。错误、NEED、取消和结果均须由各自的事件/控制路径产生；不确定的 transport 或 session 状态保留为不确定，交由证据恢复。
 
-持久化格式不做旧版自动迁移。route 与 receipt fact 的 `batch` 均可选，启动不会因缺少它而拒绝；缺省时不推断、不补写，无 batch 的 inbox 回执不合批。boot 当前其他校验边界是：未 finalized 且带 route 身份（`serves`、`route:` 或 `rcpt:`）的 message event 必须使用 `NO_DEADLINE`；未 finalized 的 receipt event 必须有有效且非空的 receipt facts；若未 finalized event 存在 `resultRoutes`，每个绑定必须有效并含 `inputs` 数组；仍未送达的 quiet outbox event 必须有 purpose。outbox coverage 字段缺失本身不会触发整体启动拒绝。重复 unfinished route 由 boot merge 恢复，不作为旧格式拒绝。daemon 不会归档或改写旧 receipts/holds 状态文件。`receiptsFile` 配置仍是 workflow nodes/plans 文件的路径前缀，与已退役的 receipt 状态文件用途无关。
+持久化格式不做旧版自动迁移。route 与 receipt fact 的 `batch` 均可选，启动不会因缺少它而拒绝；缺省时不推断、不补写，无 batch 的 inbox 回执不合批。boot 当前其他校验边界是：未 finalized 且带 route 身份（`serves`、`route:` 或 `rcpt:`）的 message event 必须使用 `NO_DEADLINE`；未 finalized 的 receipt event 必须有有效且非空的 receipt facts；若未 finalized event 存在 `resultRoutes`，每个绑定必须有效并含 `inputs` 数组；仍未送达的 quiet outbox event 必须有 purpose。outbox coverage 字段缺失本身不会触发整体启动拒绝。重复 unfinished route 由 boot merge 恢复，不作为旧格式拒绝。daemon 不会归档或改写旧 receipts/holds 状态文件。旧 jobs/workflow/graph 执行入口及 `jobsFile`、`receiptsFile` 配置已移除，不迁移旧执行器状态。当前 owner plan 使用独立的 `wrc.mirror.plansFile` journal。
+
+## Plan 元数据与提醒
+
+初次外派 plan 相关工作时显式提供顶层 `planId`，daemon 将其保存在每个输入的 payload；续问可继承原输入唯一的关联。同一欠账涉及多个 plan 时，没有显式 planId 的普通后续消息照常投递而不猜关联。不同 planId 不改变 receiver 合并分组，每个被合并输入的 payload 与 inputIds 仍独立保留。
+
+owner 的 plan 提醒只等待该 plan 关联的外派欠账：route 的 wizard receiver 指向 plan owner，且逐输入携带相同 planId；其他人发给 owner 的来件不计入这份等待。origin 只记录创建时的回复上下文，不作为 plan 关联或欠账依据。暂停 plan 只停止计划提醒，不暂停 receiver 消息。
+
+内部提醒使用稳定的 plan/revision/token event，投递前重新校验版本、状态、欠账与 token。提醒标记入 journal 不增加 revision。明确未暴露、可重试且非 uncertain 的失败保留同一 queued event，backoff 封顶 60 秒；possible、submitted 或 uncertain 不盲目重投。其他 receiver 事件沿用原重试规则。
 
 ## 写入与状态转换
 
@@ -48,4 +56,4 @@ route 不使用自动失败期限。`NO_DEADLINE = Number.MAX_SAFE_INTEGER` 是�
 
 ## 旧设计的处置
 
-receiver stack、transcript watcher、按 `from→to` 的单槽 receipts continuation、自动 deadline/silent/dead 合成以及 T10 分步切换清单均已退役。对应旧文档只保留到本文的淘汰指针；其中通用研究结论不构成当前实现契约。当前实现仍需要 route merge aliases、batch 保留和有限 `NO_DEADLINE`，这些属于现行语义。
+receiver stack、transcript watcher、按 `from→to` 的单槽 receipts continuation、自动 deadline/silent/dead 合成、旧 jobs/workflow/graph 执行器以及 T10 分步切换清单均已退役。对应旧文档只保留到本文的淘汰指针；其中通用研究结论不构成当前实现契约。当前实现仍需要 route merge aliases、batch 保留和有限 `NO_DEADLINE`，这些属于现行语义。
