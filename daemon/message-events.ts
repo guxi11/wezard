@@ -541,10 +541,10 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     const payload = isRcpt(e)
       ? { ...e.payload, receipts, text: receipts.map((f) =>
         `${f.envelope}\n（回执 event=${f.event} version=${f.version} status=${f.status} receiver=${JSON.stringify(f.receiver)}）\n${f.body}`).join("\n\n"),
-        peer: { ...e.payload.peer!, envelope: "以下是同一件活的多份回执。逐项读取各自的状态、来源与正文。" } }
+        peer: { ...e.payload.peer!, envelope: `${e.payload.peer!.envelope}\n\n以下是同一件活的多份回执。逐项读取各自的状态、来源与正文。` } }
       : { ...e.payload, text: [...rows].sort((a, b) => a.at - b.at || a.id.localeCompare(b.id))
         .map((x) => `${x.payload.peer?.envelope ?? ""}\n${x.payload.text}`).join("\n\n"),
-        peer: { ...e.payload.peer!, envelope: "以下是同一项任务的补充要求，请合并处理并统一回复。" } };
+        peer: { ...e.payload.peer!, envelope: `${e.payload.peer!.envelope}\n\n以下是同一项任务的补充要求，请合并处理并统一回复。` } };
     // One atomic store write: a crash cannot expose a merged input and an unretired sibling.
     const inputIds = isTask(e) ? [...new Set(rows.flatMap((x) => x.inputIds ?? [x.id]))].sort() : e.inputIds;
     db.merge({ [e.id]: { ...e, payload, ...(inputIds ? { inputIds } : {}) }, ...Object.fromEntries(absorbed.map((x) => [x.id,
