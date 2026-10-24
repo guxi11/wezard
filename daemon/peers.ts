@@ -501,8 +501,15 @@ export const topLevelText = (text: string): string => {
 };
 
 export const addressedResults = (text: string): Array<{ name: string; body: string }> => {
-  const marks = [...topLevelText(text).matchAll(/^[ \t]*@\.([A-Za-z0-9_-]+)[ \t]+RESULT[ \t]*[:：][ \t]*/gm)];
-  return marks.map((m, i) => ({ name: m[1]!, body: text.slice((m.index ?? 0) + m[0].length, marks[i + 1]?.index).trim() }));
+  const marks = [...topLevelText(text).matchAll(/@\.([A-Za-z0-9_-]+)[ \t]+RESULT[ \t]*[:：][ \t]*/gm)];
+  return marks.map((m, i) => {
+    const next = marks[i + 1]?.index;
+    const start = m.index ?? 0;
+    const line = next === undefined ? -1 : text.lastIndexOf("\n", next - 1) + 1;
+    const currentLine = text.lastIndexOf("\n", start) + 1;
+    const end = line > currentLine ? line : next;
+    return { name: m[1]!, body: text.slice(start + m[0].length, end).trim() };
+  });
 };
 
 export const parseClosing = (text: string, max = 800): Closing => {
