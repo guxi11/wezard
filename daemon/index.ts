@@ -2137,9 +2137,6 @@ const main = async (): Promise<void> => {
       },
       ready: async (e) => {
         if (e.payload.planReminder && !(await readyPlanReminder(e))) return false;
-        const facts = receiptFacts(e);
-        const batches = [...new Set(facts.filter((f) => f.status === "done").map((f) => f.batch).filter((x): x is string => !!x))];
-        if (facts.length && facts.every((f) => f.status === "done") && batches.some((batch) => !router.batchComplete(batch))) return false;
         const row = e.serves ? router.get(e.serves) : undefined;
         if (row?.status === "held" && !prereqsOf(e.speaker, row.after ?? []).every((r) => r.state === "done")) return false;
         return !m.parkedNow(e.target) && prereqsOf(e.speaker, e.payload.peer!.after ?? []).every((r) => r.state === "done")
