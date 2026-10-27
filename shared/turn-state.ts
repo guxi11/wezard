@@ -9,9 +9,9 @@ import type { ReceiptStatus } from "./reminder.js";
 export const NO_DEADLINE = Number.MAX_SAFE_INTEGER;
 export const hasDeadline = (value: number): boolean => value < NO_DEADLINE;
 
-/** 落定了的那几种 (need / error 是中途的)。 */
-export type Terminal = Exclude<ReceiptStatus, "need" | "error">;
-export const isTerminal = (st: ReceiptStatus): st is Terminal => st !== "need" && st !== "error";
+/** 落定了的那几种 (need / error / progress 都是中途的)。 */
+export type Terminal = Exclude<ReceiptStatus, "need" | "error" | "progress">;
+export const isTerminal = (st: ReceiptStatus): st is Terminal => st !== "need" && st !== "error" && st !== "progress";
 export type TurnState = "working" | "blocked" | "needs-input" | "errored" | "deferred" | "queued" | Terminal;
 
 /** 路由行 (`daemon/router.ts` 的 Status) 到这一层词表的适配 (§9.5):

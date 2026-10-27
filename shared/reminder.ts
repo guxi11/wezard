@@ -184,8 +184,8 @@ const askerAttrs = (asker?: Asker): Attrs => asker
   ? { "asker-user": asker.who, "asker-chat": asker.chat } : {};
 
 /** 回执落成什么。done = 答了; need = 它收口成 `NEED:` 反问发话方, 不是定论; error = 那一轮以 CLI 报错 (API Error) 收尾, 不是定论;
- *  timeout / silent / dead = 没等到答案 (超时 / 停下几次都没答 / pane 没了); canceled = 被人 stop 掉了。 */
-export type ReceiptStatus = "done" | "need" | "error" | "timeout" | "silent" | "dead" | "canceled";
+ *  progress = 终句带 `PROGRESS:` 的中间进展, 行不落定; timeout / silent / dead = 没等到答案 (超时 / 停下几次都没答 / pane 没了); canceled = 被人 stop 掉了。 */
+export type ReceiptStatus = "done" | "need" | "error" | "progress" | "timeout" | "silent" | "dead" | "canceled";
 
 type EnvelopeAttrs = KindAttrs<"envelope">;
 export const envelopeAttrs = {

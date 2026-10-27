@@ -594,7 +594,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "先在自己这里把**公共材料**读进上下文, 再 `clone_wizard({task})` 分出去 (材料已在某个同伴那里就 `from` 它), 每个只交代各自那份差异 —— 别让每个分身各读一遍",
       "复杂任务先 `plan_create`，只创建当前阶段需要的 wizard；owner 收到回复、思考并验收后显式更新 plan，再推进下一阶段",
       "**派完就放手**: 不 `wait_peer` 守着、不轮询 `peek_peer`, 不提前合并或宣告完成; 长等待或阻塞可按已知实据 `notify` 进展。人任务的完成 fyi 到达时, 顶层 wizard 必须 `notify` 原群, 说明结论以及 ledger 仍 pending / 尚无正式回执; 不得把 fyi 当作 done",
-      "按回执的 `status` 处理: `need` = 它在反问 (需要上级补信息时用 `NEED:` 明确列出问题), 用 `tell_peer({name, re: true})` 答 · `error` = CLI 报错停了, 等它续跑或 `re` 叫它继续 · `timeout` / `silent` / `dead` / `canceled` = 这一份没有答案了: 换人、`re` 追问, 或在汇总里如实写缺了它",
+      "按回执的 `status` 处理: `need` = 它在反问 (需要上级补信息时用 `NEED:` 明确列出问题), 用 `tell_peer({name, re: true})` 答 · `error` = CLI 报错停了, 等它续跑或 `re` 叫它继续 · `progress` = 中间进展, 任务仍在飞 (长任务每阶段可用 `PROGRESS:` 报一行进展) · `timeout` / `silent` / `dead` / `canceled` = 这一份没有答案了: 换人、`re` 追问, 或在汇总里如实写缺了它",
       "plan 是 DAG 状态记忆，不绑定 executor、不自动派活或验收；可并行节点由 owner 自己安排与验收",
       "所有任务完成或取消后，owner 显式完成 plan；结果由你自己这一轮向人收口",
       "派活文本只写**活本身** —— 你是谁、私聊与否、收口成 `RESULT:` / `ARTIFACT:`, 信封替你说; 反问通过 tell_peer({kind:\"ask\"}) 发起",

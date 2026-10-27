@@ -50,7 +50,7 @@ export interface ReportSource {
 }
 export interface Report {
   version: string;
-  kind: Terminal | "need" | "error";
+  kind: Terminal | "need" | "error" | "progress";
   source: ReportSource;
 }
 
@@ -81,7 +81,7 @@ export interface Route {
   outcome?: Outcome;
   /** Accepted fact versions survive replay independently of the latest result. */
   reports?: Record<string, Report>;
-  notice?: { status: "need" | "error"; body: string; rev: string; at?: number; report?: Report };
+  notice?: { status: "need" | "error" | "progress"; body: string; rev: string; at?: number; report?: Report };
   /** 最近一次落定 (`answer`) 的时刻 —— 墓碑回收的起点 (§4.6); 追述会把它往后推。 */
   settledAt?: number;
   /** 第一次落定的结局, 只写一次: 追述换掉 outcome 之后, 还认得出这一行起初是 daemon 合成的失败 (§4.3)。 */
@@ -104,7 +104,7 @@ export const EMPTY: Table = {};
 export type Op =
   | { op: "open"; at: number; event: EventId; owner: Key; receiver: Receiver; deadlineAt: number; batch?: string; asker?: Asker; after?: EventId[]; status?: "open" | "held" }
   | { op: "release"; at: number; event: EventId }
-  | { op: "mark"; at: number; event: EventId; status: "open" | "need" | "error"; body?: string; rev?: string; report?: Report }
+  | { op: "mark"; at: number; event: EventId; status: "open" | "need" | "error" | "progress"; body?: string; rev?: string; report?: Report }
   | { op: "move"; at: number; event: EventId; owner: Key }
   | { op: "answer"; at: number; event: EventId; outcome: Outcome; late?: true }
   | { op: "hand"; at: number; event: EventId; inbox: string }
@@ -193,7 +193,8 @@ export const step = (table: Table, op: Op): Table => {
       if (settled && (op.status === "open" || op.body === undefined || !op.rev)) return table;
       if (op.rev && (r.notice?.rev === op.rev || r.reports?.[op.rev])) return table;
       if (!settled && r.status === op.status && !op.rev) return table;
-      return { ...table, [op.event]: { ...r, status: settled ? r.status : op.status,
+      // progress 是中间回执: 只记 notice/reports, 行状态一概不动 (在飞的还在飞, need 的还在等 re)。
+      return { ...table, [op.event]: { ...r, status: op.status === "progress" || settled ? r.status : op.status,
         ...(op.status === "open" ? { notice: undefined } : {}),
         ...(op.body !== undefined && op.rev && op.status !== "open"
           ? { notice: { status: op.status, body: op.body, rev: op.rev, at: op.at, ...(op.report ? { report: op.report } : {}) } } : {}),
@@ -266,7 +267,7 @@ export const ops = {
   release: (p: { event: EventId; at?: number }): Op => ({ op: "release", at: p.at ?? Date.now(), event: p.event }),
   /** 中途态。带 body = 这份正文同时要进 receiver 收件箱 (`rcpt:<event>:<rev>`, §9.3); `rev`
    *  不给就按正文算 (与 outcome 同一个指纹)。 */
-  mark: (p: { event: EventId; status: "open" | "need" | "error"; body?: string; rev?: string; report?: Report; at?: number }): Op => {
+  mark: (p: { event: EventId; status: "open" | "need" | "error" | "progress"; body?: string; rev?: string; report?: Report; at?: number }): Op => {
     const rev = p.rev ?? (p.body === undefined ? undefined : contentRev(p.body));
     return {
       op: "mark", at: p.at ?? Date.now(), event: p.event, status: p.status,
@@ -468,7 +469,7 @@ const reportOf = (row: Route, verdict: FinalVerdict, kind: Report["kind"]): Repo
   const source = verdict.source;
   const origin = source.facts?.length ? [...new Set(source.facts)].sort() : [source.input];
   return { kind, source, version: contentRev(JSON.stringify([row.event, row.receiver, kind, origin,
-    kind === "need" || kind === "error" ? contentRev(verdict.text.trim()) : undefined])) };
+    kind === "need" || kind === "error" || kind === "progress" ? contentRev(verdict.text.trim()) : undefined])) };
 };
 const reportedOutcome = (row: Route, verdict: FinalVerdict): Outcome => {
   const report = reportOf(row, verdict, "done");
@@ -486,6 +487,13 @@ export const onFinal = (table: Table, owner: Key, serves: EventId | undefined, v
     return [ops.mark({ event: row.event, status: kind, body: verdict.text, rev, report })];
   }
   if (row.status === "answered" || row.status === "handed") return retellOps(table, row, verdict);
+  // 显式 `PROGRESS:` = 中间回执, 与 NEED 同构 (§3.2): 行不落定、状态不动, 正文按 rev 判重
+  // 投给 receiver。未标记的终句仍走下面的零投递 —— 区别只在这一个标记。
+  if (!verdict.error && !verdict.result && parseClosing(verdict.text).kind === "progress") {
+    const report = reportOf(row, verdict, "progress");
+    if (row.reports?.[report.version] || row.notice?.rev === report.version) return [];
+    return [ops.mark({ event: row.event, status: "progress", body: verdict.text, rev: report.version, report })];
+  }
   if (kind === "progress" || kind === "wait") return [];
   const outcome = reportedOutcome(row, verdict);
   return row.reports?.[outcome.rev] ? [] : [ops.answer({ event: row.event, outcome })];
@@ -644,8 +652,8 @@ const OP_FIELDS: Readonly<Record<Op["op"], readonly string[]>> = {
 };
 const STATUSES: ReadonlySet<string> = new Set<Status>(["held", "open", "need", "error", "answered", "handed"]);
 const OPEN_STATUSES: ReadonlySet<string> = new Set(["open", "held"]);
-/** mark 只落中途态 (`handed` 是墓碑, 不给 mark)。 */
-const MARK_STATUSES: ReadonlySet<string> = new Set(["open", "need", "error"]);
+/** mark 只落中途态 (`handed` 是墓碑, 不给 mark); `progress` 是只记 notice/reports 的中间回执。 */
+const MARK_STATUSES: ReadonlySet<string> = new Set(["open", "need", "error", "progress"]);
 const OUTCOME_STATUSES: ReadonlySet<string> = new Set<string>(["done", "timeout", "silent", "dead", "canceled"]);
 
 const nonEmpty = (v: unknown): v is string => typeof v === "string" && v !== "";
@@ -659,7 +667,7 @@ const receiverOk = (v: unknown): boolean => {
 };
 const reportOk = (v: unknown): boolean => {
   const r = v as Report | undefined;
-  return !!r && nonEmpty(r.version) && ["done", "need", "error", "timeout", "silent", "dead", "canceled"].includes(r.kind) && !!r.source
+  return !!r && nonEmpty(r.version) && ["done", "need", "error", "progress", "timeout", "silent", "dead", "canceled"].includes(r.kind) && !!r.source
     && nonEmpty(r.source.input) && (r.source.turn === undefined || typeof r.source.turn === "string")
     && (r.source.facts === undefined || Array.isArray(r.source.facts) && r.source.facts.every(nonEmpty));
 };
@@ -698,7 +706,7 @@ export const parseOp = (raw: string): Op | undefined => {
       || !Object.entries(o.reports).every(([k, v]) => reportOk(v) && k === (v as Report).version))) return undefined;
   if (op === "row" && o.notice !== undefined) {
     const n = o.notice as Route["notice"];
-    if (!n || n.at !== undefined && !finite(n.at) || !["need", "error"].includes(n.status) || typeof n.body !== "string" || !nonEmpty(n.rev)
+    if (!n || n.at !== undefined && !finite(n.at) || !["need", "error", "progress"].includes(n.status) || typeof n.body !== "string" || !nonEmpty(n.rev)
         || n.report !== undefined && !reportOk(n.report)) return undefined;
   }
   if (op === "hand" && !nonEmpty(o.inbox)) return undefined;

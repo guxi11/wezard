@@ -1242,7 +1242,7 @@ const main = async (): Promise<void> => {
       const row = router.get(event);
       if (!row) return;
       // Receiver summaries are projected from the route table; do not keep a second task ledger here.
-      const noticeOnly = (out.status === "need" || out.status === "error") && !!row.outcome;
+      const noticeOnly = (out.status === "need" || out.status === "error" || out.status === "progress") && !!row.outcome;
       if (row.receiver.kind === "wizard" && !noticeOnly) {
         for (const original of router.aliases(event)) {
           if (original.receiver.kind !== "wizard") continue;
@@ -1353,7 +1353,7 @@ const main = async (): Promise<void> => {
       if (op.op === "mark") {
         const by = ledgerOwnerOf(op.event);
         if (by && op.status === "open") ledger.touch(by, op.event);
-        if ((op.status === "need" || op.status === "error") && op.body !== undefined && op.rev !== undefined)
+        if ((op.status === "need" || op.status === "error" || op.status === "progress") && op.body !== undefined && op.rev !== undefined)
           deliverRoute(op.event, { status: op.status, body: op.body, rev: op.rev });
         return;
       }
@@ -1365,7 +1365,7 @@ const main = async (): Promise<void> => {
       const row = e.serves ? router.get(e.serves) : undefined;
       if (!verdict.error && addressedResults(verdict.text).length) return true;
       const closing = parseClosing(verdict.text).kind;
-      return !verdict.error && settlesCut(row?.receiver.kind, closing === "none" ? undefined : closing);
+      return !verdict.error && settlesCut(row?.receiver.kind, closing === "result" || closing === "need" ? closing : undefined);
     };
     const resultTask = (e: MessageEvent, receiver: string): Route | undefined => {
       const served = e.serves ? router.get(e.serves) : undefined;
@@ -1732,7 +1732,7 @@ const main = async (): Promise<void> => {
       const activeId = openingOfSelf(self)?.env?.eventId;
       const active = activeId ? events.get(activeId) : undefined;
       const receipt = !!active?.payload.peer?.from.receipt;
-      const leading = receipt ? /^(RESULT|Result|result|结论|NEED)[ \t]*[:：]/.exec(content) : null;
+      const leading = receipt ? /^(RESULT|Result|result|结论|NEED|PROGRESS)[ \t]*[:：]/.exec(content) : null;
       const closing = receipt ? parseClosing(content).kind : "none";
       if (receipt && active) {
         const row = active.serves ? router.get(active.serves) : undefined;
@@ -1740,7 +1740,7 @@ const main = async (): Promise<void> => {
           json(res, 409, { ok: false, reason: "这笔任务已取消或归属已变更，回执报告不再公开。" });
           return;
         }
-        if (closing === "none" && (!row || !["open", "need", "error"].includes(row.status))) {
+        if ((closing === "none" || closing === "progress") && (!row || !["open", "need", "error"].includes(row.status))) {
           json(res, 409, { ok: false, reason: "这笔任务已收口或无在途任务，回执确认不公开；新结果用 @.name RESULT:，新问题用 tell_peer({kind:\"ask\"})。" });
           return;
         }
@@ -1750,7 +1750,7 @@ const main = async (): Promise<void> => {
       const deliveries: Array<{ channel: string; id: string; states?: string[]; claims?: Array<{ id: string; states: string[] }> }> = [];
       for (const dest of dests) {
         if (active?.payload.peer?.from.receipt) {
-          const purpose = closing === "none" ? "progress" : "report";
+          const purpose = closing === "result" || closing === "need" ? "report" : "progress";
           const reportKind = closing === "need" ? "need" : "done";
           const coverage = purpose === "report" ? receiptCoverage(active, dest, closing === "need", content) : undefined;
           const revision = finalId(active.id, dest, content);

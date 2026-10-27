@@ -397,7 +397,7 @@ export const receiptCoverage = (e: MessageEvent, channel = e.channel, question =
 const receiptFactOk = (f: ReceiptFact): boolean => !!f && typeof f.event === "string" && !!f.event
   && (f.batch === undefined || typeof f.batch === "string" && !!f.batch)
   && typeof f.version === "string" && !!f.version && typeof f.body === "string" && typeof f.envelope === "string"
-  && typeof f.speaker === "string" && ["done", "need", "error", "timeout", "silent", "dead", "canceled"].includes(f.status)
+  && typeof f.speaker === "string" && ["done", "need", "error", "progress", "timeout", "silent", "dead", "canceled"].includes(f.status)
   && !!f.receiver && (f.receiver.kind === "wizard" ? typeof f.receiver.to === "string"
     && (f.receiver.event === undefined || typeof f.receiver.event === "string")
     : f.receiver.kind === "chat" && typeof f.receiver.channel === "string" && typeof f.receiver.message === "string")

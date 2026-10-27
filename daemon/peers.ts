@@ -472,13 +472,13 @@ export const extractResult = (text: string, max = 800): string => {
   return c.kind === "result" ? c.text : "";
 };
 
-/** 一轮的收口: `RESULT:` 交差 / `NEED:` 反问发话方 / 都没有 —— 外加交付物清单。
- *  分 result 与 need 是回执结算的事: 反问不是定论。 */
-export interface Closing { kind: "result" | "need" | "none"; text: string; artifacts: { path: string; note: string }[] }
+/** 一轮的收口: `RESULT:` 交差 / `NEED:` 反问发话方 / `PROGRESS:` 中间进展 / 都没有 —— 外加交付物清单。
+ *  分 result 与 need 是回执结算的事: 反问不是定论; progress 是中间回执, 行不落定。 */
+export interface Closing { kind: "result" | "need" | "progress" | "none"; text: string; artifacts: { path: string; note: string }[] }
 
-// NEED 只认全大写: "what I need: …" / 「需要: …」在普通答话里太常见, 误认一次就是
+// NEED / PROGRESS 只认全大写: "what I need: …" / 「需要: …」在普通答话里太常见, 误认一次就是
 // 一份不计数的回执。
-const CLOSING_RE = /^[ \t]*(RESULT|Result|result|结论|NEED)[ \t]*[:：][ \t]*/gm;
+const CLOSING_RE = /^[ \t]*(RESULT|Result|result|结论|NEED|PROGRESS)[ \t]*[:：][ \t]*/gm;
 const ARTIFACT_RE = /^[ \t>*|-]*ARTIFACT[ \t]*[:：][ \t]*(\S+)(?:[ \t]+(?:—|--|-|:)[ \t]*(.*))?$/gm;
 
 /** Keep offsets stable while hiding fenced code, block quotes and inline code. */
@@ -530,7 +530,7 @@ export const parseClosing = (text: string, max = 800): Closing => {
     const shown = visible.slice(start, end).split(/\r?\n/);
     const body = text.slice(start, end).split(/\r?\n/)
       .filter((_line, n) => !/^[ \t>*|-]*ARTIFACT[ \t]*[:：]/.test(shown[n] ?? "")).join("\n").trim();
-    return { kind: m[1] === "NEED" ? "need" as const : "result" as const, text: body };
+    return { kind: m[1] === "NEED" ? "need" as const : m[1] === "PROGRESS" ? "progress" as const : "result" as const, text: body };
   }).filter((c) => c.kind === "result" || (c.text && !/^(?:无|没有|none|n\/a|-+)[。.]?$/i.test(c.text))).at(-1);
   return closing ? { ...closing, text: clipMiddle(closing.text, max), artifacts } : { kind: "none", text: "", artifacts };
 };
@@ -538,8 +538,8 @@ export const parseClosing = (text: string, max = 800): Closing => {
 // 行首收口标记只起定位/判定作用: 剥只发生在投递出口 (群气泡 / wizard 收件箱),
 // 判定 (parseClosing / finalKind / finalReleased) 一律读原文。NEED 的语义由路由行
 // 状态与信封 status 携带, 正文里再带一个 `NEED:` 前缀只会让人疑惑。
-const LEADING_MARK_RE = /^[ \t]*(?:RESULT|Result|result|结论|NEED)[ \t]*[:：][ \t]*/;
-/** 剥掉正文行首的 `RESULT:` / `NEED:` 收口标记 (含全角冒号)。 */
+const LEADING_MARK_RE = /^[ \t]*(?:RESULT|Result|result|结论|NEED|PROGRESS)[ \t]*[:：][ \t]*/;
+/** 剥掉正文行首的 `RESULT:` / `NEED:` / `PROGRESS:` 收口标记 (含全角冒号)。 */
 export const stripClosingMark = (text: string): string => text.replace(LEADING_MARK_RE, "");
 /** 群气泡版: 再剥掉 ARTIFACT 交付行 —— 本机路径对群里的读者没有用途 (要文件走 send_file)。 */
 export const stripForChat = (text: string): string =>
@@ -750,7 +750,8 @@ export const renderReceiptEnvelope = (
   const bodyRule = status === "done"
     ? `这是回执，不是人说的话或新派的活；正文是对方这一轮的回复。${route?.late ? "" : "普通完成回执的正文默认就是结论；终句用自己的话交代做成了什么、没做成什么，无需 RESULT:。"}据此继续手头工作，不要仅为确认收到而回话。`
     : status === "need" ? "这是反问回执，正文写明所需信息；答复后会再送回执。"
-      : status === "error" ? "这是 CLI 错误回执，正文是报错信息，不是结论；若续跑后答出结论，会再送回执。"
+      : status === "progress" ? "这是进展回执，正文是对方报的一行进展；任务还没落定，终句回执会在之后送到。"
+        : status === "error" ? "这是 CLI 错误回执，正文是报错信息，不是结论；若续跑后答出结论，会再送回执。"
         : status === "canceled" ? "这是已取消的失败回执，正文是守护进程说明和它最后说的一句；原任务已取消。"
           : `这是失败回执 (${FAILED[status]})，本次按失败落定；后续仍可续问或补交。正文是守护进程说明和它最后说的一句。`;
   return renderReminder(envelopeAttrs.receipt(from, chat, status, turn, route, chatKey), [
