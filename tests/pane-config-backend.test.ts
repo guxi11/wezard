@@ -12,8 +12,15 @@ try {
   assert.equal(backendFor(cfg).name, "codex");
   assert.equal(backendFor(cfg).bin, "codex");
   assert.equal("bin" in cfg.wrc.cliBackends.codex, false, "retired Codex bin config is ignored by the schema");
-  const recordedBackend = resolveCliBackend({ ...cfg.wrc, defaultCli: "claude" });
-  assert.equal(recordedBackend.name, "claude");
-  assert.equal(recordedBackend.bin, "claude");
+  // Resume and fork both retain the transcript's backend; fork changes the
+  // session operation, not backend resolution.
+  for (const forkSession of [false, true]) {
+    const request = { resumeSessionId: "recorded-claude-session", forkSession, cli: "claude" as const };
+    const recordedBackend = request.resumeSessionId && request.cli
+      ? resolveCliBackend({ ...cfg.wrc, defaultCli: request.cli })
+      : backendFor(cfg);
+    assert.equal(recordedBackend.name, "claude", forkSession ? "fork retains transcript backend" : "resume retains transcript backend");
+    assert.equal(recordedBackend.bin, "claude");
+  }
 } finally { bindCliBackends({}); }
 console.log("Pane backend follows configured default; Codex binary remains built in and recorded sessions resolve independently");
