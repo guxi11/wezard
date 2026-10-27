@@ -49,6 +49,12 @@ const uniqueBots = (c: { bot: { botId: string }; bots: BotEntry[] }, ctx: z.Refi
 const Daemon = z.object({
   host: knob(z.string().default("127.0.0.1").describe("守护进程 HTTP 监听地址"), { gate: "card" }),
   port: knob(z.number().int().min(1).max(65535).default(17890).describe("守护进程 HTTP 监听端口"), { gate: "card" }),
+  // 一个 worker 进程 (daemon) 服务全部 pane 时, 每 pane 一个 stdio 子进程就是多余的一份
+  // 注册表与一份口令读取; http 形态让 agent CLI 直连 daemon 的 /mcp, 身份走请求头。
+  mcpTransport: knob(
+    z.enum(["stdio", "http"]).default("stdio").describe("agent CLI 接 wezard MCP 的方式: stdio=每 pane 子进程, http=daemon 内 POST /mcp"),
+    { gate: "card" },
+  ),
   stateDir: z.string().default("~/.wezard/state").describe("守护进程状态目录"),
   logFile: z.string().default("~/.wezard/daemon.log").describe("守护进程日志文件"),
   logLevel: z.enum(LOG_LEVELS).default("info").describe("日志级别"),

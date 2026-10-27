@@ -1,12 +1,13 @@
 // `wezard sync` — write wezard's hooks / MCP / env into target settings.json files
 // (e.g. ~/.claude/settings.json so claude-internal wrappers pick them up).
 // Idempotent + reversible via per-target lock manifest in ~/.wezard/sync.lock.json.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseJsonc } from "jsonc-parser";
-import { loadConfig } from "../shared/config.js";
+import { loadConfig, type Config } from "../shared/config.js";
+import { DAEMON_TOKEN_FILE, DAEMON_TOKEN_HEADER, readDaemonToken } from "../shared/daemon-token.js";
 import { expandHome } from "../shared/paths.js";
 import { codexHookCommand } from "../shared/codex-hooks.js";
 import { syncCodexHooks } from "./codex-sync.js";
@@ -87,15 +88,42 @@ const upsertHook = (settings: Record<string, unknown>, timeoutSec: number): void
 };
 
 // ── MCP upsert ────────────────────────────────────────────────────────
-const upsertMcp = (settings: Record<string, unknown>): void => {
+// http 形态: 只有 CodeBuddy 认 (mcp.json 里的 `type: "http"`)。`${TMUX_PANE}` 这些是留给
+// CodeBuddy 自己展开的字面量, 不是这里的插值 —— 双引号字符串里 `$` 不特殊, 别改成反引号。
+// 口令是 0600 文件的现读值, 会落进 mcp.json: 所以写完要把那份 mcp.json 收成 0600。
+const httpMcpEntry = (cfg: Config): Record<string, unknown> | undefined => {
+  const token = readDaemonToken();
+  if (!token) {
+    // 没有口令就到不了 /mcp (它按口令挡人): 写个进不去的入口不如照旧给 stdio。
+    // eslint-disable-next-line no-console
+    console.warn(`[wezard-sync] WARN: daemon.mcpTransport=http 但读不到 ${DAEMON_TOKEN_FILE}, ` +
+      "先起一次守护进程生成它; 本次回落 stdio 形态。");
+    return undefined;
+  }
+  return {
+    type: "http",
+    url: `http://127.0.0.1:${cfg.daemon.port}/mcp`,
+    headers: {
+      [DAEMON_TOKEN_HEADER]: token,
+      "x-wezard-pane": "${TMUX_PANE}",
+      "x-wezard-session": "${CODEBUDDY_SESSION_ID:-}",
+    },
+    _managedBy: MARKER,
+  };
+};
+
+/** 返回是否写了 http 形态 —— 调用方据此给 mcp.json 收权限。 */
+const upsertMcp = (settings: Record<string, unknown>, kind: "claude" | "codebuddy", cfg: Config): boolean => {
   const m = ((settings.mcpServers as Record<string, unknown>) ??= {});
   // Replace the current wezard entry before writing its latest definition.
   stripMcp(settings);
-  m.wezard = {
+  const http = kind === "codebuddy" && cfg.daemon.mcpTransport === "http" ? httpMcpEntry(cfg) : undefined;
+  m.wezard = http ?? {
     command: "node",
     args: [MCP_ENTRY],
     _managedBy: MARKER,
   };
+  return Boolean(http);
 };
 const stripMcp = (settings: Record<string, unknown>): void => {
   const m = settings.mcpServers as Record<string, unknown> | undefined;
@@ -172,6 +200,7 @@ const syncOne = (
   opts: SyncOpts,
   lock: Lock,
   env: EnvVals,
+  cfg: Config,
 ): void => {
   const abs = expandHome(settingsPath);
   const settings = readJson(abs);
@@ -204,10 +233,12 @@ const syncOne = (
       stripMcp(settings);
       const mcpAbs = mcpJsonPath(settingsPath);
       const mcpJson = readJson(mcpAbs);
-      upsertMcp(mcpJson);
+      const wroteHttpMcp = upsertMcp(mcpJson, kind, cfg);
       writeJson(mcpAbs, mcpJson);
+      // http 形态里带着 daemon 口令的明文: 只给本用户读。
+      if (wroteHttpMcp) chmodSync(mcpAbs, 0o600);
     } else {
-      upsertMcp(settings);
+      upsertMcp(settings, kind, cfg);
     }
     lock.targets[targetKey(settingsPath)] = { wroteHooks, wroteMcp: true, wroteEnv };
   }
@@ -244,7 +275,7 @@ const main = async (): Promise<void> => {
         codexHookCommand(sourcePath, envVals.base, `${PLUGIN_ROOT}/dist/cli/codex-hook.js`), cfg.approval.hookTimeoutSec + 10, remove || !cfg.approval.enabled);
       if (remove) delete lock.targets[targetKey(t.settingsPath)];
       else lock.targets[targetKey(t.settingsPath)] = { wroteHooks: cfg.approval.enabled, wroteMcp: false, wroteEnv: [] };
-    } else syncOne(t.settingsPath, t.kind, { remove }, lock, envVals);
+    } else syncOne(t.settingsPath, t.kind, { remove }, lock, envVals, cfg);
   }
   if (!dryRun) writeLock(lock);
   // eslint-disable-next-line no-console
