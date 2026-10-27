@@ -50,7 +50,7 @@ try {
   assert.equal(tiersForBackend(cfg, "claude").standard.model, "opus 5.5");
   assert.equal(tiersForBackend(cfg, "claude-internal").hard.model, "internal");
   for (const tier of TIERS) {
-    const pick = pickTier(cfg, tier, {}, false);
+    const pick = pickTier(cfg, tier, {}, "codex");
     assert(pick.ok);
     assert.equal(pick.model, codex[tier].model);
     assert.equal(pick.effort, codex[tier].effort);

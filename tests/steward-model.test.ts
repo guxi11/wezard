@@ -9,7 +9,7 @@ const target = "user:test";
 for (const backend of ["claude", "claude-internal", "codebuddy", "codex"] as const) {
   for (const tier of TIERS) {
     const cfg = ConfigSchema.parse({ bot, wrc: { defaultCli: backend }, models: { router: tier } });
-    const spawn = pickTier(cfg, tier, {}, false);
+    const spawn = pickTier(cfg, tier, {}, backend);
     assert(spawn.ok);
     const expected = { model: spawn.model, effort: spawn.effort };
     assert.deepEqual(newStewardSpec(cfg, target, backend), expected);
@@ -30,8 +30,8 @@ for (const hard of [
   const cfg = ConfigSchema.parse({ bot, wrc: { defaultCli: "codex" }, models: {
     router: "hard", backends: { codex: { tiers: { hard } } },
   } });
-  assert.deepEqual(newStewardSpec(cfg, target, "codex"), { model: undefined, effort: undefined });
-  assert.deepEqual(resumedStewardSpec(cfg, target, "codex", {}), { model: undefined, effort: undefined });
+  assert.deepEqual(newStewardSpec(cfg, target, "codex"), { model: hard.model, effort: hard.effort });
+  assert.deepEqual(resumedStewardSpec(cfg, target, "codex", {}), { model: hard.model, effort: hard.effort });
 }
 const cfg = ConfigSchema.parse({ bot, models: { router: "standard", steward: "hard", backends: {
   codex: { tiers: { standard: { model: "gpt-6.1-sol", effort: "medium" } } },
