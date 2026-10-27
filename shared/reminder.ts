@@ -12,7 +12,7 @@
 // reminder **不是路由的真相来源**: 去向 / 放行闸 / 追述 / GC 只读 router 的 journal; 这里是
 // 给模型的快照, 与 mirror / chat-log 认出处的回读。会过期的派生量 (行状态、是否追述) 不写成属性。
 //
-// 退役不再写的: receipt-delivery (与信封 `msg` 重复), 派活信封的
+// 退役并忽略的: receipt-delivery (包括 event), 派活信封的
 // event / quiet / act / deadline, 回执的 serves / via / late, 名册 / 挂起事项的 mode,
 // mention 的 names, hint 的 role。
 
