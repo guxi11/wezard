@@ -245,7 +245,7 @@ export const parseEnvelope = (raw: string): Envelope | undefined => {
 };
 
 /** rolepage 折叠态的标签: 认得出种类就写种类 (信封带上发话方, 回执带上定论), codebuddy 自己的块写
- *  它的 `data-role`, 认不出的仍叫 reminder。`machine` = 当前无信封注入的 message-event 块。 */
+ *  它的 `data-role`, 认不出的仍叫 reminder。`machine` 标记机器事件块及其旧 transcript 形状。 */
 export const reminderLabel = (r: Reminder): { label: string; machine?: boolean } => {
   const w = r.attrs.wezard ?? "";
   if (w === "message-event" || w === "receipt-delivery") return { label: "msg", machine: true };

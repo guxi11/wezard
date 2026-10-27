@@ -39,7 +39,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createPaneGuards, GuardPrerequisiteError } from "./pane-guards.mjs";
 import { normalizeTask } from "../../dist/shared/task-file.js";
 import { bindCliBackends, backendForPath } from "../../dist/shared/cli-backends.js";
-// 信封 / 属性只用守护进程自己那一份解析器读 —— 契约只有一份 (反转义、LEGACY、`msg` 新旧两形都在里面)。
+// 信封 / 属性只用守护进程自己那一份解析器读 —— 仅当前开标签属性构成身份事实。
 import { parseEnvelope, parseReminders } from "../../dist/shared/reminder.js";
 
 let backendReady = false;
@@ -302,6 +302,11 @@ const routerCore = async () => {
   const chat = { kind: "chat", channel: "chat:G", message: "m1" };
   const wiz = (to, event) => (event ? { kind: "wizard", to, event } : { kind: "wizard", to });
   const open = (event, owner, receiver, at, extra = {}) => ops.open({ event, owner, receiver, at, deadlineAt: DL, ...extra });
+  const reportSource = (owner, serves) => ({ input: `fixture:${owner}:${serves}` });
+  const finalOf = (table, owner, serves, verdict) => R.onFinal(table, owner, serves, {
+    ...verdict, source: verdict.source ?? reportSource(owner, serves),
+  });
+  const released = (table, owner, serves, body, source = reportSource(owner, serves)) => R.finalReleased(table, owner, serves, body, source);
 
   // Progress and explicit finality are separate: dispatch chatter stays open, RESULT closes immediately.
   {
@@ -310,8 +315,8 @@ const routerCore = async () => {
     t = add(t, open("e1.1", "a", wiz("me", rootE), T0 + 1), open("e1.2", "b", wiz("me", rootE), T0 + 2), open("e1.3", "c", wiz("me", rootE), T0 + 3));
     ok(R.waiting(t, rootE).length === 3, "扇出三件 → waiting(e1)=3");
     ok(R.finalKind(t, rootE, "已派") === "progress", "子行未落定、无标记 → 终句算进展 (不落定)");
-    ok(R.onFinal(t, "me", rootE, { text: "已派" }).length === 0, "进展不产 op");
-    ok(R.onFinal(t, "me", rootE, { text: "RESULT: premature" }).length === 1, "显式 RESULT 不等子行, 立刻收口");
+    ok(finalOf(t, "me", rootE, { text: "已派" }).length === 0, "进展不产 op");
+    ok(finalOf(t, "me", rootE, { text: "RESULT: premature" }).length === 1, "显式 RESULT 不等子行, 立刻收口");
     t = add(t, ops.answer({ at: T0 + 4, event: rootE, outcome: R.makeOutcome("done", "RESULT: premature") }));
     ok(R.isOrphaned(t, rootE) === true, "根行已定论 → 之后交差的子行是孤儿 (标 late)");
     t = add(t,
@@ -340,7 +345,7 @@ const routerCore = async () => {
       ops.open({ event: "g2", owner: "W", receiver: wiz("y"), at: T0 + 1, deadlineAt: DL }),
       ops.open({ event: "g3", owner: "W", receiver: wiz("z"), at: T0 + 2, deadlineAt: DL }));
     ok(R.owedBy(t, "W").length === 3 && R.awaitedBy(t, "x").length === 1, "owner 与各 receiver 的欠账从同一事件表派生");
-    t = add(t, ...R.onFinal(t, "W", "g1", { text: "NEED: 口令?" }));
+    t = add(t, ...finalOf(t, "W", "g1", { text: "NEED: 口令?" }));
     ok(t.g1.status === "need" && R.owedBy(t, "W").length === 3, "其中一笔 NEED 不解除其他欠账");
     ok(R.settledTo(t, "x")[0]?.status === "need" && R.settledTo(t, "x")[0]?.notice?.body === "NEED: 口令?", "NEED 通知可由 settledTo(receiver) 查询");
     t = add(t, ops.answer({ at: T0 + 3, event: "g3", outcome: R.makeOutcome("done", "RESULT: z") }));
@@ -353,25 +358,25 @@ const routerCore = async () => {
     let t = add(EMPTY, open("l1", "A", chat, T0), open("l1.1", "B", wiz("A", "l1"), T0 + 1));
     t = add(t, ops.answer({ at: T0 + 2, event: "l1.1", outcome: R.makeOutcome("done", "RESULT: child") }));
     ok(R.waiting(t, "l1").length === 1
-      && R.onFinal(t, "A", "l1", { text: "父任务已处理" }).length === 0
-      && R.finalReleased(t, "A", "l1", "父任务已处理") === false,
+      && finalOf(t, "A", "l1", { text: "父任务已处理" }).length === 0
+      && released(t, "A", "l1", "父任务已处理") === false,
     "子行 answered 未 hand 仍阻塞父行的无标记终句");
     t = add(t, ops.hand({ at: T0 + 3, event: "l1.1", inbox: "rcpt:l1.1:child" }));
-    const parentDone = R.onFinal(t, "A", "l1", { text: "父任务已处理" });
+    const parentDone = finalOf(t, "A", "l1", { text: "父任务已处理" });
     ok(R.waiting(t, "l1").length === 0 && parentDone.length === 1 && parentDone[0].op === "answer"
-      && R.finalReleased(t, "A", "l1", "父任务已处理") === true,
+      && released(t, "A", "l1", "父任务已处理") === true,
     "子行 hand 后 waiting 清空, 父行无标记终句可落定并放行");
   }
 
   // Modern done reports deduplicate by execution input, while a new input can report a new result.
   {
     let t = add(EMPTY, open("src-done", "A", wiz("W"), T0));
-    const first = R.onFinal(t, "A", "src-done", { text: "RESULT: 原措辞", source: { input: "execution-1" } });
+    const first = finalOf(t, "A", "src-done", { text: "RESULT: 原措辞", source: { input: "execution-1" } });
     ok(first.length === 1 && first[0].op === "answer" && first[0].outcome.report?.source.input === "execution-1", "source done 首次执行产生带 report 的 answer");
     t = add(t, ...first, ops.hand({ at: T0 + 1, event: "src-done", inbox: "rcpt:src-done:first" }));
-    ok(R.onFinal(t, "A", "src-done", { text: "RESULT: 换一种说法", source: { input: "execution-1" } }).length === 0,
+    ok(finalOf(t, "A", "src-done", { text: "RESULT: 换一种说法", source: { input: "execution-1" } }).length === 0,
       "同一 execution input 的 done 重述换措辞仍去重");
-    const re = R.onFinal(t, "A", "src-done", { text: "RESULT: 新执行", source: { input: "execution-2" } });
+    const re = finalOf(t, "A", "src-done", { text: "RESULT: 新执行", source: { input: "execution-2" } });
     ok(re.length === 1 && re[0].late === true && re[0].outcome.report?.source.input === "execution-2",
       "新 execution input 可作为新 done 追述报告");
     t = add(t, ...re, ops.hand({ at: T0 + 2, event: "src-done", inbox: "rcpt:src-done:second" }));
@@ -380,7 +385,7 @@ const routerCore = async () => {
   // NEED report identity includes its execution input and question text independently.
   {
     let t = add(EMPTY, open("src-need", "A", wiz("W"), T0));
-    const ask = (input, text) => R.onFinal(t, "A", "src-need", { text, source: { input } });
+    const ask = (input, text) => finalOf(t, "A", "src-need", { text, source: { input } });
     const first = ask("need-exec-1", "NEED: 口令?");
     ok(first.length === 1 && first[0].op === "mark" && first[0].report?.source.input === "need-exec-1", "source NEED 首次问题产生带 report 的 mark");
     t = add(t, ...first);
@@ -394,15 +399,15 @@ const routerCore = async () => {
   // Receipt facts are set-like and take precedence over the input id; adding a fact creates a new report.
   {
     let t = add(EMPTY, open("src-facts", "A", wiz("W"), T0));
-    const first = R.onFinal(t, "A", "src-facts", {
+    const first = finalOf(t, "A", "src-facts", {
       text: "RESULT: facts 1", source: { input: "receipt-input-1", facts: ["fact-a", "fact-b", "fact-a"] },
     });
     ok(first.length === 1 && first[0].op === "answer", "facts receipt 首次产生 answer");
     t = add(t, ...first, ops.hand({ at: T0 + 1, event: "src-facts", inbox: "rcpt:src-facts:first" }));
-    ok(R.onFinal(t, "A", "src-facts", {
+    ok(finalOf(t, "A", "src-facts", {
       text: "RESULT: facts reordered", source: { input: "receipt-input-2", facts: ["fact-b", "fact-a"] },
     }).length === 0, "facts 忽略顺序与重复项并优先于 input 去重");
-    const more = R.onFinal(t, "A", "src-facts", {
+    const more = finalOf(t, "A", "src-facts", {
       text: "RESULT: new fact", source: { input: "receipt-input-2", facts: ["fact-a", "fact-b", "fact-c"] },
     });
     ok(more.length === 1 && more[0].late === true, "新增 receipt fact 可再次报告");
@@ -427,28 +432,31 @@ const routerCore = async () => {
     u = add(u,
       ops.answer({ at: T0 + 1, event: "h2", outcome: R.makeOutcome("timeout", "（守护进程: .A 没有给出结论 —— 等了 1 分钟它还没答完。）") }),
       ops.hand({ at: T0 + 2, event: "h2", inbox: "rcpt:h2:x" }));
-    const late = R.onFinal(u, "A", "h2", { text: "RESULT: real" });
+    const late = finalOf(u, "A", "h2", { text: "RESULT: real" });
     ok(late.length === 1 && late[0].late === true && late[0].outcome.status === "done", "失败交差后 owner 真答 → late 补投");
     const u2 = add(u, ...late, ops.hand({ at: T0 + 4, event: "h2", inbox: "rcpt:h2:y" }));
     ok(u2["h2"].settledAs === "timeout" && u2["h2"].settledAt === late[0].at, "追述推后 settledAt, settledAs 只认第一次");
-    ok(R.onFinal(u2, "A", "h2", { text: "又补一句" }).length === 0, "首次真实定论后, 未标记追述不再重开合成失败");
-    ok(R.onFinal(u2, "A", "h2", { text: "RESULT: real" }).length === 0, "同内容重放不再产 op");
+    ok(finalOf(u2, "A", "h2", { text: "又补一句" }).length === 0, "首次真实定论后, 未标记追述不再重开合成失败");
+    ok(finalOf(u2, "A", "h2", { text: "RESULT: real" }).length === 0, "同内容重放不再产 op");
     // canceled 不收迟答
     let c = add(EMPTY, open("h3", "A", wiz("W"), T0));
     c = add(c,
       ops.answer({ at: T0 + 1, event: "h3", outcome: R.makeOutcome("canceled", "（守护进程: 被收掉了, 这件活没有结论。）") }),
       ops.hand({ at: T0 + 2, event: "h3", inbox: "rcpt:h3:x" }));
-    ok(R.onFinal(c, "A", "h3", { text: "RESULT: real" }).length === 0, "被收掉的件收迟答 = 静默丢掉, 不收");
+    ok(finalOf(c, "A", "h3", { text: "RESULT: real" }).length === 0, "被收掉的件收迟答 = 静默丢掉, 不收");
     // 自己答过的 done 不再收第二遍
     let d = add(EMPTY, open("h4", "A", wiz("W"), T0));
-    d = add(d, ops.answer({ at: T0 + 1, event: "h4", outcome: R.makeOutcome("done", "RESULT: own") }), ops.hand({ at: T0 + 2, event: "h4", inbox: "rcpt:h4:x" }));
-    ok(R.onFinal(d, "A", "h4", { text: "收到" }).length === 0, "自己答过的 done: 未标记的不收");
-    const re4 = R.onFinal(d, "A", "h4", { text: "RESULT: again" });
+    const h4Source = { input: "h4-execution-1" };
+    d = add(d, ...finalOf(d, "A", "h4", { text: "RESULT: own", source: h4Source }), ops.hand({ at: T0 + 2, event: "h4", inbox: "rcpt:h4:x" }));
+    ok(finalOf(d, "A", "h4", { text: "收到" }).length === 0, "自己答过的 done: 未标记的不收");
+    const re4 = finalOf(d, "A", "h4", { text: "RESULT: again" });
     ok(re4.length === 1 && re4[0].late === true, "自己答过的 done: 显式 RESULT 作为追述收下");
-    ok(R.onFinal(d, "B", "h4", { text: "RESULT: again" }).length === 0, "追述只认 owner");
-    ok(R.finalReleased(d, "A", "h4", "收到") === false && R.finalReleased(d, "A", "h4", "RESULT: x") === true
-      && R.finalReleased(d, "A", "h4", "RESULT: own") === true, "已落定的那一笔: 终句只放追述 (或就是表上那份)");
-    ok(R.finalReleased(c, "A", "h3", "RESULT: x") === false, "被收掉的那一笔不放追述");
+    ok(finalOf(d, "B", "h4", { text: "RESULT: again" }).length === 0, "追述只认 owner");
+    ok(released(d, "A", "h4", "收到", h4Source) === false
+      && released(d, "A", "h4", "RESULT: 改写措辞", h4Source) === true
+      && released(d, "A", "h4", "RESULT: 另一执行", { input: "h4-execution-2" }) === false,
+    "已落定报告按 execution source 放行: 同执行可改措辞, 新 input 拒绝");
+    ok(released(c, "A", "h3", "RESULT: x") === false, "被收掉的那一笔不放追述");
     // 墓碑回收: 满 TTL + 子树闭合 + 无 held 等它
     const H = R.TOMBSTONE_TTL_MS;
     let g = add(EMPTY, open("g1", "A", chat, T0), open("g1.1", "B", wiz("A", "g1"), T0 + 1), open("g2", "C", wiz("W"), T0 + 2));
@@ -467,22 +475,22 @@ const routerCore = async () => {
   // NEED is a resumable intermediate state; error is also nonterminal.
   {
     let t = add(EMPTY, open("k1", "A", wiz("W", "k0"), T0));
-    const need = R.onFinal(t, "A", "k1", { text: "NEED: 口令?" });
+    const need = finalOf(t, "A", "k1", { text: "NEED: 口令?" });
     ok(need.length === 1 && need[0].status === "need", "NEED → mark need");
     t = add(t, ...need);
     ok(t["k1"].status === "need"
-      && R.onFinal(t, "A", "k1", { text: "NEED: 口令?" }).length === 0
-      && R.onFinal(t, "A", "k1", { text: "NEED: 还是口令?" }).length === 1,
+      && finalOf(t, "A", "k1", { text: "NEED: 口令?" }).length === 0
+      && finalOf(t, "A", "k1", { text: "NEED: 还是口令?" }).length === 1,
     "同一问题去重, 新问题即使仍是 NEED 也可再报");
     t = add(t, ops.mark({ at: T0 + 2, event: "k1", status: "open" })); // `re`
-    const fin = R.onFinal(t, "A", "k1", { text: "RESULT: 口令对" });
+    const fin = finalOf(t, "A", "k1", { text: "RESULT: 口令对" });
     ok(fin.length === 1 && fin[0].op === "answer", "re 拉回 open 后再答 → 定论");
     // CLI 报错 = 中途态, 同构
     let e = add(EMPTY, open("k2", "A", wiz("W"), T0));
-    const err = R.onFinal(e, "A", "k2", { text: "API Error", error: true });
+    const err = finalOf(e, "A", "k2", { text: "API Error", error: true });
     ok(err.length === 1 && err[0].status === "error" && !err[0].outcome, "error 是中途态 (不改写定论)");
     e = add(e, ...err);
-    ok(R.onFinal(e, "A", "k2", { text: "API Error", error: true }).length === 0, "同一 error 不重复报");
+    ok(finalOf(e, "A", "k2", { text: "API Error", error: true }).length === 0, "同一 error 不重复报");
   }
 
   // Ownership transfer keeps the original receiver edge and permits only the new owner to answer.
@@ -490,10 +498,10 @@ const routerCore = async () => {
     let t = add(EMPTY, open("p1", "A", chat, T0));
     t = add(t, ops.move({ at: T0 + 1, event: "p1", owner: "B" }), ops.move({ at: T0 + 2, event: "p1", owner: "C" }));
     ok(t["p1"].owner === "C" && t["p1"].receiver.kind === "chat", "transfer 只改 owner, receiver 边不动");
-    const nd = R.onFinal(t, "C", "p1", { text: "NEED: 口令?" });
+    const nd = finalOf(t, "C", "p1", { text: "NEED: 口令?" });
     ok(nd.length === 1 && nd[0].status === "need", "叶子 NEED 直接落原行 (直达发话方)");
-    ok(R.onFinal(t, "B", "p1", { text: "RESULT: 旧 owner" }).length === 0, "交出去的那位再答不算数");
-    ok(R.finalReleased(t, "B", "p1", "已移交") === false && R.finalReleased(t, "C", "p1", "答") === true, "在飞的那一笔: 交出方终句不进群, 接手方的放行");
+    ok(finalOf(t, "B", "p1", { text: "RESULT: 旧 owner" }).length === 0, "交出去的那位再答不算数");
+    ok(released(t, "B", "p1", "已移交") === false && released(t, "C", "p1", "答") === true, "在飞的那一笔: 交出方终句不进群, 接手方的放行");
   }
 
   // Stop cancels descendants before their parent.
@@ -533,7 +541,7 @@ const routerCore = async () => {
     // held 前置失败 → canceled 且说明哪件
     let h = add(EMPTY, open("u1", "A", wiz("W"), T0), ops.open({ event: "u2", owner: "B", receiver: chat, at: T0 + 1, deadlineAt: DL, after: ["u1"] }));
     ok(h["u2"].status === "held", "带 after 的行先 held (没投给 owner)");
-    ok(R.onFinal(h, "B", "u2", { text: "RESULT: 不该收" }).length === 0, "held 的行不收终句");
+    ok(finalOf(h, "B", "u2", { text: "RESULT: 不该收" }).length === 0, "held 的行不收终句");
     h = add(h, ops.answer({ at: T0 + 2, event: "u1", outcome: R.makeOutcome("canceled", "（守护进程: 前置 u1 被明确取消。）") }));
     const failed = R.heldFailureOps(h, { now: T0 + 3, nameOf: (w) => `.${w}` });
     ok(failed.length === 1 && failed[0].event === "u2" && failed[0].outcome.status === "canceled" && /u1/.test(failed[0].outcome.body), "前置 canceled → held 件 canceled 并说明哪件没投");
@@ -579,8 +587,8 @@ const cases = {
 
   "router-core": { direction: "receipt-core", unit: true, default: true, summary: "state transitions, isolation, failure, recovery", names: [], run: routerCore },
 
-  // reminder 的形状契约: 注册表 (只写登记过的属性) / 尾巴顺序 / `msg` 并进信封 / 老形状照认 / rolepage 标签。
-  "reminder-shape": { direction: "receipt-core", unit: true, default: true, summary: "envelope parsing and compatibility", names: [], run: async () => {
+  // reminder 的形状契约: 注册表 / 尾巴顺序 / 当前 `msg` / message-event 见证 / 普通 prose。
+  "reminder-shape": { direction: "receipt-core", unit: true, default: true, summary: "current envelope parsing and labels", names: [], run: async () => {
     const R = await import(new URL("../../dist/shared/reminder.js", import.meta.url).href);
     const P = await import(new URL("../../dist/daemon/peers.js", import.meta.url).href);
     const fails = [];
@@ -588,10 +596,10 @@ const cases = {
     const asker = { who: "user:u1", chat: "chat:c1" };
     const blocks = [
       P.renderHumanEnvelope("u1", "群", "chat:c1"),
-      P.renderPeerEnvelope(".a", undefined, { asker, re: true, legs: 5, deadline: Date.now(), act: "fyi", quiet: true }),
-      P.renderPeerEnvelope(".a", "群", { act: "ask" }),
+      P.renderPeerEnvelope(".a", undefined, undefined, { asker, re: true, legs: 5, deadline: Date.now(), act: "fyi", quiet: true }),
+      P.renderPeerEnvelope(".a", "群", undefined, { act: "ask" }),
       P.renderReceiptEnvelope(".b", "群", "need", "e1.2", { asker, audience: "u1", via: ".c", late: true, retellTo: "群", retold: true, up: true }),
-      P.renderTaskEnvelope("t1", { event: "e9" }),
+      P.renderTaskEnvelope("t1", "chat:T", { event: "e9" }),
       P.renderStewardHint(),
     ];
     blocks.flatMap(R.parseReminders).forEach((r) => check(R.unregisteredAttrs(r.attrs).length === 0, `未登记属性 ${R.unregisteredAttrs(r.attrs)} @${r.attrs.wezard}`));
@@ -615,24 +623,29 @@ const cases = {
     check(R.withMsg(R.withMsg(blocks[1], "x"), "y").match(/msg="/g)?.length === 1 && R.parseEnvelope(R.withMsg(R.withMsg(blocks[1], "x"), "y"))?.eventId === "y", "withMsg 幂等改写");
     const bare = R.withMsg("没信封", "p:a:b:1:1");
     check(R.carriesMsg(bare, "p:a:b:1:1") && bare.includes('wezard="message-event"'), "没信封: 兜底挂 message-event");
-    // 老形状 (投递时信封外挂块) 照认; LEGACY 措辞信封照认。
+    // 旧 message-event 只由 carriesMsg 读取; receipt-delivery 只读兼容旧 marker; legacy prose 不解析。
     const old = "x" + blocks[1] + R.renderReminder({ wezard: "message-event", event: "route:e7" }, []);
-    check(R.parseEnvelope(old)?.eventId === "route:e7" && R.carriesMsg(old, "route:e7"), "老形状 message-event");
+    check(!R.parseEnvelope(old)?.eventId && R.carriesMsg(old, "route:e7"), "无信封 message-event 只供 carriesMsg 读取");
     const oldRcpt = "x" + '\n<system-reminder wezard="envelope" kind="peer" from=".b" scope="private" event="e7" receipt="1" status="done">\n</system-reminder>\n<system-reminder wezard="receipt-delivery" event="rcpt:e7:r1">\n</system-reminder>';
-    check(R.parseEnvelope(oldRcpt)?.eventId === "rcpt:e7:r1", "老形状 receipt-delivery");
+    check(R.parseEnvelope(oldRcpt)?.eventId === "rcpt:e7:r1", "旧 receipt-delivery.event 作为 eventId fallback");
+    const oldRcptWithMsg = oldRcpt.replace('scope="private"', 'scope="private" msg="route:preferred"');
+    check(R.parseEnvelope(oldRcptWithMsg)?.eventId === "route:preferred", "current envelope.msg supplies eventId");
     const legacy = "x\n<system-reminder>\n这一轮是 wizard `.z` 发来的**私聊**\n</system-reminder>";
-    check(R.parseEnvelope(legacy)?.from === ".z", "LEGACY 措辞信封");
+    check(R.parseEnvelope(legacy) === undefined && R.reminderLabel(R.parseReminders(legacy)[0]).label === "reminder", "无 kind/from 属性的 LEGACY prose 只显示普通 reminder");
     // 正文里行中提及 `<system-reminder>` 字面量不得吞掉后面的真信封 (e3c34b4.1: 信封被吞 →
     // 轮次绑不回路由行 → RESULT 终句永不落定, sweeper 误判闲置)。
-    const mention = R.withMsg(`讨论 <system-reminder> 与 </system-reminder> 这两个 tag\n正文`, "route:e8") + R.renderTail(blocks[1]);
+    const tailed = R.renderTail(blocks[1], note("roster"));
+    const mention = R.withMsg(`讨论 <system-reminder> 与 </system-reminder> 这两个 tag\n正文` + tailed, "route:e8");
     check(R.parseEnvelope(mention)?.eventId === "route:e8" && R.parseEnvelope(mention)?.from === ".a", "行中字面量不吞信封");
     // rolepage 标签。
     const label = (t) => R.parseReminders(t).map((r) => R.reminderLabel(r).label).join("|");
     check(label(blocks[1]) === "envelope · .a", `标签 ${label(blocks[1])}`);
     check(label(blocks[3]) === "回执 · .b · need", `标签 ${label(blocks[3])}`);
-    check(label(note("roster") + foreign + legacy) === "roster|memory|envelope · .z", `标签 ${label(note("roster") + foreign + legacy)}`);
+    check(label(note("roster") + foreign + legacy) === "roster|memory|reminder", `标签 ${label(note("roster") + foreign + legacy)}`);
     check(R.reminderLabel(R.parseReminders(bare)[0]).machine === true, "message-event 标成机器块");
-    return { pass: fails.length === 0, why: fails.length ? fails.join("; ") : "注册表 / 尾巴顺序 / msg 并进信封 / 老形状 / 标签 全过" };
+    check(R.reminderLabel(R.parseReminders(oldRcpt)[1]).label === "msg"
+      && R.reminderLabel(R.parseReminders(oldRcpt)[1]).machine === true, "旧 receipt-delivery 保留 msg 机器块标签");
+    return { pass: fails.length === 0, why: fails.length ? fails.join("; ") : "注册表 / 尾巴顺序 / 当前 msg / carriesMsg / 标签 全过" };
   } },
 
   // 回执去向只有四个词。
