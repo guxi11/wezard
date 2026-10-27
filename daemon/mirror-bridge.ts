@@ -2370,7 +2370,10 @@ const inject = async (args: InjectArgs): Promise<InjectResult> => {
         if (phase && !exposed) { exposed = true; args.beforeInput?.(); }
         return true;
       };
-      return injectViaTmux(target, text, args.images ?? [], args.log, args.freshSpawn ?? false, backendForPath(args.jsonlPath), args.jsonlPath, args.bypassModalGuard ?? false, guard, args.eventId, args.sessionId, args.physicalGuard);
+      const physicalGuard: PhysicalInputGuard = async (phase) =>
+        (!args.requireIdle || phase !== "paste" || await args.requireIdle())
+        && (!args.physicalGuard || await args.physicalGuard(phase));
+      return injectViaTmux(target, text, args.images ?? [], args.log, args.freshSpawn ?? false, backendForPath(args.jsonlPath), args.jsonlPath, args.bypassModalGuard ?? false, guard, args.eventId, args.sessionId, physicalGuard);
     }, { guard: args.guard }));
   } catch (error) {
     return classify({ ok: false, reason: String(error) });

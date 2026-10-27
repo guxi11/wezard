@@ -15,7 +15,7 @@ const code = ts.transpileModule(source.slice(start, end) + "\nreturn inject;", {
 type Result = { ok: boolean; reason?: string; retryable?: boolean; uncertain?: boolean };
 type Guard = (phase?: "paste" | "submit") => boolean;
 type Args = { tmuxTarget: string; text: string; guard?: Guard; requireIdle?: () => boolean; prepareText?: () => string; beforeInput?: () => void };
-type Physical = (target: string, text: string, images: string[], log: unknown, fresh: boolean, backend: unknown, path: string, bypass: boolean, guard: Guard) => Promise<Result>;
+type Physical = (target: string, text: string, images: string[], log: unknown, fresh: boolean, backend: unknown, path: string, bypass: boolean, guard: Guard, eventId?: string, sessionId?: string, physicalGuard?: (phase: "paste" | "submit") => Promise<boolean>) => Promise<Result>;
 let physical: Physical = async () => ({ ok: true });
 const inject = new Function("withPaneInput", "injectViaTmux", "injectViaSpawn", "backendForPath", code)(
   (pane: string, fn: Parameters<typeof withPaneInput>[1], opts: { guard?: Guard }) => withPaneInput(pane, fn, { ...opts, timeoutMs: 100 }),
@@ -77,9 +77,9 @@ uncertain(await inject(args));
 
 // Permission/idle can change during readiness probes, before the first paste.
 idle = true;
-physical = async (_p, _t, _i, _l, _f, _b, _j, _m, guard) => {
+physical = async (_p, _t, _i, _l, _f, _b, _j, _m, guard, _eventId, _sessionId, physicalGuard) => {
   idle = false;
-  assert.equal(guard("paste"), false);
+  assert.equal(await physicalGuard!("paste"), false);
   return { ok: false, reason: "busy now" };
 };
 retryable(await inject({ ...args, requireIdle: () => idle }));
@@ -120,11 +120,13 @@ let notices = 0;
 idle = false;
 const env = {
   byTarget: new Map([["target", attachment]]), paneUsable: async () => true,
+  charterPrefixOf: () => "", renderTail: () => "", parseEnvelope: () => ({}),
+  listJsonls: () => [], dirname: () => ".", jsonlIsPostClearChild: () => false,
   // injectText 的注入前判定已换成三态 `probePane` (unknown 不再当 pane 死了去重生)。
   probePane: async () => ({ state: "session" }),
   cfg: {}, log: { child: () => ({}) }, noticeSuffixFor: () => { notices++; return " notice"; },
   rememberInject() {}, pushSeal: (_a: unknown, seal: unknown) => seals.push(seal), sealKeys: (s: string) => [s],
-  idleVerdict: () => idle, isClearCommand: () => false, armSilentForkRebind() {}, inject,
+  idleVerdict: () => idle, idleNow: async () => idle, isClearCommand: () => false, armSilentForkRebind() {}, inject,
 };
 const injectText = new Function(...Object.keys(env), peerCode)(...Object.values(env));
 for (let i = 0; i < 3; i++) retryable(await injectText("target", "receipt", { requireIdle: true }));

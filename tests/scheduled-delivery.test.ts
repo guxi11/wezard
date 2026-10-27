@@ -47,7 +47,7 @@ const registry = {
 const ctx = vm.createContext({
   deliverScheduled, tasks: registry, ownerOf: () => "user:owner", sameBot: () => true,
   planStore: { allowExternal: () => true }, wizards: { get: () => ({}) }, TASK_POSTPONE_MS: 10_000,
-  handedOff: async () => {}, newTurn: () => "turn", baseOfKey: (t: string) => t,
+  handedOff: async () => {}, newRootEvent: () => "turn", quietRelays: { set() {} }, openTaskRow() {}, baseOfKey: (t: string) => t,
   renderTaskEnvelope: () => "envelope", relayUnlessQuiet: async () => {},
   runTaskInRunner: async () => { assert.fail("must not fall back during controlled readiness waits"); },
   m: {
