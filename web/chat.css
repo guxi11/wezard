@@ -765,31 +765,99 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .plan-state-paused .plan-state-tag { color: #8250df; background: #fbefff; }
 .plan-state-completed .plan-state-tag { color: #1a7f37; background: #dafbe1; }
 .plan-state-canceled .plan-state-tag { color: #cf222e; background: #ffebe9; }
-.plan-graph { max-width: 100%; margin-top: 8px; overflow: auto; overscroll-behavior-inline: contain; border: 1px solid var(--line); border-radius: 9px; background: #f8fafc }
+/* DAG 自上而下: 根层在最上, 依赖逐层向下; 同层并排、宽随内容。
+   层间留出箭头走的竖向空隙 (row-gap), 节点多时在 .plan-graph 盒内滚动, 不撑破页面。 */
+.plan-graph { max-width: 100%; max-height: clamp(360px, 65vh, 860px); margin-top: 8px; overflow: auto; overscroll-behavior: contain; border: 1px solid #e7ebf1; border-radius: 10px; background: #fafbfc }
 .plan-graph-inner { position: relative; width: max-content; min-width: 100%; padding: 12px; }
 .plan-edges { position: absolute; z-index: 0; inset: 0; overflow: visible; pointer-events: none; }
-.plan-edge { fill: none; stroke: #8c98a8; stroke-width: 1.6; }
-.plan-arrow-tip { fill: #8c98a8; }
-.plan-layers { position: relative; z-index: 1; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(210px, 260px); align-items: start; gap: 28px; width: max-content; }
-.plan-layer { display: grid; align-content: start; gap: 12px; min-width: 0; }
-.plan-node { min-width: 0; padding: 10px; border: 1px solid #d0d7de; border-left: 3px solid #8c98a8; border-radius: 8px; background: #fff; box-shadow: 0 1px 2px #1f23280d; overflow-wrap: anywhere; }
-.plan-node-head { display: flex; align-items: flex-start; gap: 7px; min-width: 0; }
-.plan-node-head > b { min-width: 0; flex: 1; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; font-size: 13px; line-height: 1.45; }
-.plan-node .task-tag { flex: none; white-space: nowrap; }
-.plan-node.task-pending { border-left-color: #8c959f; }
-.plan-node.task-in_progress { border-left-color: #0969da; background: #f6faff; }
-.plan-node.task-completed { border-left-color: #1a7f37; background: #f6fff8; }
-.plan-node.task-canceled { border-left-color: #cf222e; background: #fff8f8; }
-.plan-deps { display: block; margin-top: 7px; color: var(--faint); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
-.plan-node-desc, .plan-progress, .plan-result { margin: 7px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--mute); font-size: 12px; line-height: 1.5; }
-.plan-progress b, .plan-result b { display: block; color: var(--ink); font-size: 11px; }
+/* 边线比卡边 (--line) 更浅一档、箭头小一号同色 —— 线退到背景层, 卡是主体。 */
+.plan-edge { fill: none; stroke: #dee3ea; stroke-width: 1.2; }
+.plan-arrow-tip { fill: #dee3ea; }
+.plan-layers { position: relative; z-index: 1; display: grid; grid-auto-flow: row; gap: 60px; width: max-content; min-width: 100%; }
+.plan-layer { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(184px, 240px); align-items: stretch; column-gap: 12px; justify-content: center; min-width: 0; }
+/* 节点一律同一套静态样式: 无 per-status 底色/边色 (状态只压在徽标上), 无高亮/选中/pulse。
+   flex 纵列 + min-height(按"meta+两行标题+footer"撑满, ~90px): 同层 stretch 等高之外,
+   跨层也保持统一高度; footer 靠 margin-top:auto 贴卡底, 卡内留白落在标题与注脚之间。 */
+.plan-node { display: flex; flex-direction: column; min-width: 0; min-height: 90px; padding: 7px 10px 5px; border: 1px solid var(--line); border-radius: 10px; background: #fff; cursor: pointer; }
+.plan-node:hover { border-color: #b9c3d3 }
+.plan-node:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px }
+/* 第一行 meta: 徽标 | 执行者 —— 同一文字高度轴, 间距 6px; model·ctx 已挪去卡底 footer。 */
+.pn-meta { display: flex; align-items: center; gap: 6px; min-width: 0; }
+/* 状态徽标 (基础形态, 详情浮层用): 字形分态 (○/◔/✓/✕), 配色沿用 rolepage 状态色。 */
+.task-badge { flex: none; white-space: nowrap; font-size: 10px; line-height: 1.6; padding: 0 6px; border-radius: 999px; }
+.task-badge.tb-pending { color: #57606a; background: #eff1f3; }
+.task-badge.tb-in_progress { color: #0969da; background: #ddf4ff; }
+.task-badge.tb-completed { color: #1a7f37; background: #dafbe1; }
+.task-badge.tb-canceled { color: #cf222e; background: #ffebe9; }
+/* 卡内状态: 去胶囊 —— 只剩字形+颜色+小字, 这一行的"实体"只剩执行者头像。
+   放在 tb-* 之后压掉它的底色 (同特异度, 后者胜)。 */
+.pn-meta .task-badge { height: auto; line-height: inherit; font-size: 10.5px; padding: 0; border-radius: 0; background: none; }
+/* 执行者: 复用 .wchip 的读法 (头像 emoji + .名字), 但卡内去实体 —— 无底无框,
+   名字 11px 中灰; 可点的 (go) 靠指针与 hover 下划线示意, 不再靠蓝字蓝框
+   (进行中的状态蓝与执行者蓝曾在此撞色)。owner 兜底淡一档 + owner 标;
+   名字认不出 → 纯文本, 同样 11px 中灰、降透明度, 形状语汇与 chip 一致。 */
+.pn-ex { display: inline-flex; align-items: center; gap: 4px; flex: 0 1 auto; min-width: 0; }
+/* 注: 头像 emoji 与名字是同一文本节点同一行盒 (Range 实测不可分离) —— 本就共基线;
+   3x 下可见的"抖"是 emoji 字形自身在基线上方的光学偏移 (字体度量), CSS 改不动,
+   除非给头像单独包元素 (需改共享的 wizChip, 影响所有 chip, 超出本轮)。 */
+.pn-ex .wchip { height: auto; max-width: 100%; padding: 0; font-size: 11px; gap: 4px; background: none; border-color: transparent; color: var(--mute); }
+.pn-ex .wchip.go { border-color: transparent; color: var(--mute); }
+.pn-ex .wchip.go:hover { background: none; border-color: transparent; color: var(--ink); text-decoration: underline; }
+.pn-ex.is-owner { opacity: .72 }
+.pn-ex-plain { font-size: 11px; color: var(--mute); opacity: .82; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ex-mark { font-style: normal; font-size: 11px; line-height: inherit; color: var(--mute); padding-left: 2px; flex: none }
+/* 卡底 footer: model · ctx 注脚 —— 无衬线 11px、--mute (比旧 --faint 深一档);
+   等宽只给 model id 那一小段, ctx 去图标只留数字 (tabular-nums), 分隔符收紧不留大片空隙;
+   仍单行省略。model 是实际模型 id, ctx 与用量条同口径。 */
+.pn-foot { margin-top: auto; padding-top: 3px; border-top: 1px solid #eef1f5;
+  font-size: 11px; line-height: 1.35; color: var(--mute); text-align: left;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 空 footer 也生成一个真实行盒 (NBSP): 与有文字的 footer 同高, 同层注脚线严格齐平 ——
+   min-height 做不到 (不含行盒, 差一条 line-height)。 */
+.pn-foot:empty::before { content: '\00a0'; }
+.pn-foot .pn-model { font-family: ui-monospace, Menlo, monospace; font-size: 10px; }
+.pn-foot .pn-ctx { font-variant-numeric: tabular-nums; }
+.pn-foot .pn-sep { font-style: normal; color: var(--faint); margin: 0 4px; }
+/* 第二行: 标题, 最多两行再省略 (全文在 title 悬停) —— 全卡视觉重心。
+   左对齐: 与 meta 行、footer 共用同一左轴, 多卡并排时整列左缘整齐 (居中会让三行各有一条轴)。 */
+.pn-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+  margin: 3px 0 0; min-width: 0; font-size: 12px; font-weight: 600; line-height: 17px; text-align: left; overflow-wrap: anywhere; }
+.pn-dot { font-style: normal; color: var(--faint); flex: none }
+
+/* ── 任务详情浮层 ── */
+.task-detail { display: none; }
+.task-detail.on { display: block; }
+.td-backdrop { position: fixed; inset: 0; z-index: 60; background: #1c243055; }
+.td-card { position: fixed; z-index: 61; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(560px, calc(100vw - 28px)); max-height: min(78vh, 720px); overflow-y: auto;
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px 12px; }
+.td-close { position: absolute; top: 8px; right: 8px; width: 26px; height: 26px; border: 0; border-radius: 7px;
+  background: transparent; color: var(--mute); font-size: 13px; line-height: 1; cursor: pointer; }
+.td-close:hover { background: var(--paper); color: var(--ink); }
+.td-card h4 { margin: 2px 30px 8px 0; font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
+.td-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.td-pause { font-size: 11px; color: #8250df; }
+.td-sec { margin-top: 10px; border-top: 1px solid #eef1f5; padding-top: 8px; }
+.td-sec h5 { margin: 0 0 5px; font-size: 11px; font-weight: 600; color: var(--mute); }
+.td-sec p { margin: 0; font-size: 12.5px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
+.td-sec ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 5px; }
+.td-sec li { display: flex; align-items: center; gap: 7px; min-width: 0; font-size: 12px; }
+.td-sec li > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.td-ex { display: flex; align-items: center; gap: 6px; }
+.td-ex-meta { margin-top: 5px; font-size: 11px; color: var(--faint); display: flex; align-items: baseline; gap: 6px; min-width: 0; flex-wrap: wrap; }
+.td-ex-meta .pn-model { font-family: ui-monospace, Menlo, monospace; }
+.td-ex-plain { font-size: 12px; color: var(--mute); }
+.td-foot { margin-top: 12px; padding-top: 8px; border-top: 1px solid #eef1f5; font-size: 11px; color: var(--faint); line-height: 1.6; }
 .plan-graph-empty { margin-top: 8px; }
 @media (max-width: 600px) {
+  .plan-graph { max-height: clamp(320px, 60vh, 720px); }
   .plan-graph-inner { padding: 10px; }
-  .plan-layers { grid-auto-columns: minmax(0, min(260px, calc(100vw - 122px))); gap: 24px; }
-  .plan-node { padding: 10px; }
-  .plan-node-head > b { font-size: 13px; }
-  .plan-node-desc, .plan-progress, .plan-result { font-size: 12px; }
+  .plan-layers { gap: 48px; }
+  .plan-layer { grid-auto-columns: minmax(0, min(240px, calc(100vw - 122px))); column-gap: 10px; }
+  .plan-node { padding: 7px 8px 6px; }
+  .pn-title { font-size: 11.5px; }
+  .td-card { top: auto; bottom: 0; left: 0; right: 0; transform: none;
+    width: auto; max-height: 82vh; border-radius: 14px 14px 0 0; border-bottom: 0; }
 }
 @keyframes flash { 0% { box-shadow: 0 0 0 4px #9a670055 } 100% { box-shadow: 0 0 0 4px #9a670000 } }
 .tc-time {

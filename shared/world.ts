@@ -18,7 +18,7 @@
 //
 // 纯函数, 无 IO: 注册表侧的东西由调用方以 WorldFacts 喂进来。
 import { baseOfKey, labelFor, stripSigil, tagOfKey } from "./session-label.js";
-import { isTurn, staleAt, isGhostTurn } from "./chat-view.js";
+import { ctxNow, isTurn, staleAt, isGhostTurn } from "./chat-view.js";
 import { stripReminders } from "./reminder.js";
 import type { CharterLineage, CharterRecord, DetailRecord, TurnDetailRecord, TurnItem } from "./detail-store.js";
 import { allMessages, injectTurnsOf, senderOf } from "./role-view.js";
@@ -121,6 +121,9 @@ export interface WorldNode {
   description: string;
   cwd: string;
   model: string;
+  /** 此刻的上下文占用量, 口径同用量条的 ctx (最近一次主会话调用送入的 input + 缓存);
+   *  0 = 没有带 usage 的轮次记录 (没跑过 / 老记录)。 */
+  ctx: number;
   cli: string;
   busy: boolean;
   alive: boolean;
@@ -380,6 +383,7 @@ export const buildWorld = (
       description: f?.description ?? "",
       cwd: f?.cwd || [...rs].reverse().find((r) => r.cwd)?.cwd || "",
       model: f?.model || [...rs].reverse().find((r) => r.model)?.model || "",
+      ctx: ctxNow(rs),
       cli: f?.cli || last?.cli || "",
       busy: f?.busy ?? false,
       alive: f?.alive ?? false,
@@ -411,7 +415,7 @@ export const buildWorld = (
     const last = rs.reduce((a, b) => (b.createdAt > a.createdAt ? b : a));
     return {
       target, base: "", tag: "", chat: "", name: target.slice("human:".length), label: "👤", description: "",
-      cwd: "", model: "", cli: "", busy: false, alive: false, known: false, self: target === scope.self, local: false,
+      cwd: "", model: "", ctx: 0, cli: "", busy: false, alive: false, known: false, self: target === scope.self, local: false,
       inherited: false, lastTs: last.createdAt, turns: rs.length, preview: stripMd(last.userQuery ?? "").slice(0, 100),
       runningUntil: 0, taskTurns: 0, peerTurns: 0,
     };

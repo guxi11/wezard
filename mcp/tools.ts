@@ -434,7 +434,7 @@ export const createWezardServer = (): McpServer => {
 
   server.registerTool("plan_create", {
     title: "Create a plan",
-    description: "为复杂任务创建自己的可变 DAG 计划。计划只记录状态，不自动派活或验收；可先创建空任务图，再逐步补全。",
+    description: "为复杂任务创建自己的可变 DAG 计划。计划只记录状态，不自动派活或验收；可先创建空任务图，再逐步补全。task.executor 可选，写执行者 wizard 的全局名字 (.name，带不带点都行)，由你自己指派 —— daemon 不自动填。",
     inputSchema: PlanInputSchema.shape,
   }, async (a) => unwrap("plan_create", await daemonPost("/plans/create", a as Record<string, unknown>)));
   server.registerTool("plan_get", {
@@ -449,7 +449,7 @@ export const createWezardServer = (): McpServer => {
   }, async (a) => unwrap("plan_list", await daemonPost("/plans/list", a)));
   server.registerTool("plan_update", {
     title: "Update a plan",
-    description: "以 revision 做 CAS 更新。tasks 是整份 DAG 替换；owner 显式推进、暂停、恢复、完成或取消计划。取消不等于完成。",
+    description: "以 revision 做 CAS 更新。tasks 是整份 DAG 替换；owner 显式推进、暂停、恢复、完成或取消计划。取消不等于完成。task.executor 可选，写执行者 wizard 的全局名字 (.name，带不带点都行) —— 不指派就不写，daemon 不自动填、不给旧记录补值；rolepage 上缺执行者的节点按 plan owner 展示。",
     inputSchema: { planId: z.string().trim().min(1), ...PlanUpdateSchema.innerType().shape },
   }, async (a) => unwrap("plan_update", await daemonPost("/plans/update", a as Record<string, unknown>)));
 

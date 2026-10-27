@@ -17,6 +17,10 @@ export const PlanTaskSchema = z.object({
   status: PlanTaskStatusSchema.default("pending"),
   progress: z.string().trim().max(20_000).optional(),
   result: z.string().trim().max(20_000).optional(),
+  /** 执行者: wizard 的全局名字 (.name, 带不带前导点都接受)。可选 —— 由 plan owner 在
+   *  plan_update 时自己写; daemon 不自动指派、不默认填充、不迁移旧 journal 行 (缺了就当没有)。
+   *  读侧 (rolepage) 按名字解到 wizard 节点, 解不出按 plan owner 展示。 */
+  executor: z.string().trim().min(1).max(120).optional().describe("执行者 wizard 的全局名字 (.name, 带不带前导点都行)。可选, 由 plan owner 自己写; 不指派就省略 —— daemon 不自动填。"),
 }).strict();
 
 const PlanFields = {

@@ -125,7 +125,7 @@ export const isGhostTurn = (r: TurnDetailRecord, now: number): boolean =>
 // 老记录没有 ctxLast: 退到这一轮的峰值 (多次调用的累计和不是任何一次的上下文)。
 const lastCtx = (u: TurnUsage): number => u.ctxLast ?? u.ctxPeak ?? u.input + u.cacheRead + u.cacheWrite;
 
-const ctxNow = (turns: readonly TurnDetailRecord[]): number => {
+export const ctxNow = (turns: readonly TurnDetailRecord[]): number => {
   const last = turns
     .filter((r) => !r.agent && r.usage)
     .reduce<TurnDetailRecord | undefined>((a, r) => (!a || r.createdAt >= a.createdAt ? r : a), undefined);
