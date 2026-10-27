@@ -4,6 +4,25 @@
 
 ## [Unreleased]
 
+## [2.8.6] - 2026-10-27
+
+### Added
+- 新增 owner 管理的 Teams DAG 计划及 rolepage 计划视图; 计划持久化、关联与空闲提醒由统一接口维护, 派活和任务推进由 owner 显式执行。
+
+### Changed
+- **BREAKING** 移除旧 jobs / workflow / graph 执行器、迁移入口及兼容配置; MCP 派活入口改为 `delegate`, 不再接受旧 `dispatch` / `send_peer` / `tag` 别名及旧编排字段。CLI 从 PATH 解析, 模型档位使用按后端配置, 不再读取旧全局 tier / bin 字段。
+- MCP 回包与回执提示精简, 保留真实错误、候选与恢复信息; idle-nudge 区分执行中与等待答复的任务, 支持冷却后重新提醒。
+
+### Fixed
+- 统一 receiver 任务路由与持久化恢复; 同一接收者的未完任务合并时保留输入与权威信封, 已完成回执不再等待批次内其他任务。
+- 收口按实际消费的输入与执行来源判定; 拒绝过早 RESULT 时投递纠正提示, 修复带前缀的定向 RESULT 及面向人的任务报告收口。
+- 物理 paste 前再次检查 pane 忙闲, 避免排队后状态变化导致插入正在运行的输入框; 修复定时投递适配与相关回归。
+- tmux session 精确寻址; Codex 启动抑制更新提示, 输入框识别兼容底部警告; `pwd` 只返回当前路径。
+- 信封只使用当前 `envelope.msg` / `message-event` 身份, 已退役 `receipt-delivery` 不再补入 eventId 或获得 machine 标签。
+
+### Security
+- 原生审批指纹仅接受可识别的确认框和完整调用上下文, 并绑定原始 pane 文本; 数字、空白或 heredoc 正文变化不再产生相同指纹。未知框拒绝自动代按; 包括噪声在内的屏幕变化也会拒绝复用旧批准。
+
 ## [2.8.5] - 2026-10-22
 
 ### Fixed
@@ -1260,7 +1279,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.8.5...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.8.6...HEAD
+[2.8.6]: https://github.com/guxi11/wezard/compare/v2.8.5...v2.8.6
 [2.8.5]: https://github.com/guxi11/wezard/compare/v2.8.4...v2.8.5
 [2.8.4]: https://github.com/guxi11/wezard/compare/v2.8.3...v2.8.4
 [2.8.3]: https://github.com/guxi11/wezard/compare/v2.8.2...v2.8.3
