@@ -200,6 +200,9 @@ export interface ConfirmContext {
   complete?: boolean;
   /** "Confirm · @tag" 头里的子代理名, 有则供卡片标注来源。 */
   agent?: string;
+  /** 确认区原文 (选项之上、头之下的可见正文)。
+   *  解析不出 toolName/params 时, 它就是人眼看到的那段操作 —— 危险名单靠它下钻。 */
+  body?: string;
 }
 
 const CONFIRM_HEADER = /^\s*Confirm\b(?:\s*[·:]\s*(@?\S+))?/u;
@@ -255,7 +258,7 @@ export const parseConfirmContext = (pane: string): ConfirmContext => {
     const rest = body.filter((l) => l && l !== toolName).join("\n").trim();
     input = rest ? { 参数: rest } : {};
   }
-  return { toolName, toolInput: input, agent, complete };
+  return { toolName, toolInput: input, agent, complete, body: text };
 };
 
 /** Highlight movement is harmless; any change to the displayed call is not. */

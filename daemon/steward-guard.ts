@@ -4,6 +4,8 @@
 // 其余自己查 (状态命令、外部工具) 每轮限 budget 次。
 // 拒的理由写成改道说明 —— 模型读 deny reason 就知道下一步是 delegate。
 
+import { BASH_CMD, unquote } from "./repl-script.js";
+
 /** 不占预算: 分派与协作本身 (wezard MCP)、不碰工作区的元工具, 以及读工作区 ——
  *  Read / Grep / Glob 与 cat / grep / git show 之类只读命令只看不改, 放它看。 */
 const FREE = new Set(["ToolSearch", "TodoWrite", "AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "Skill", "Read", "Grep", "Glob", "NotebookRead", "LSP"]);
@@ -39,12 +41,7 @@ type Kind = "free" | "hands" | "look";
 const REPL_META = new Set(["REPL.searchTools", "REPL.describeTool", "REPL.describeTools"]);
 /** 调用位: 名字前不能是 `.` 或标识符字符 —— rows.map( 不算工具调用。 */
 const CALL = /(?<![.\w$])([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\(/g;
-/** REPL 里 Bash 的 command 字面量; 变量拼的认不出 → 保守按 look 计。 */
-const BASH_CMD = /\bBash\s*\(\s*\{[^{}]*?command\s*:\s*(`(?:[^`\\]|\\.)*`|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/g;
-const unquote = (lit: string): string => {
-  if (lit[0] === '"') { try { return JSON.parse(lit); } catch { return lit.slice(1, -1); } }
-  return lit.slice(1, -1).replace(/\\(.)/gs, "$1");
-};
+/** REPL 里 Bash 的 command 字面量; 变量拼的认不出 → 保守按 look 计 (口径见 repl-script.ts)。 */
 /** 名字级判级; 不认识的调用不是工具, 返回 undefined 不参与判级。 */
 const nameKind = (name: string): Kind | undefined =>
   REPL_META.has(name) || FREE.has(name) || /wezard/i.test(name) ? "free"

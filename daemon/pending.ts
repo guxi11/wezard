@@ -23,6 +23,8 @@ export interface PendingMeta {
   danger?: string;
   /** 未命中 allowRules 的原因 — 卡片「审核」行的数据源, resolved 卡重渲染复用。 */
   denyReason?: DenyReason;
+  /** 必发卡但不是危险的理由 (屏面看不懂 / askRules) — 同样走「审核」行, resolved 卡复用。 */
+  singleNote?: string;
   /** 卡片标题上的会话名 (#tag / transcript 首条用户消息 / 短 id), 发卡时算好,
    *  resolved 卡重渲染直接复用 — 事件回调里没有 transcript_path 可现算。 */
   sessionName?: string;

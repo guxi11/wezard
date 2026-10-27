@@ -6,6 +6,7 @@
 //   · fallbackOnError=allow 时降级为 ask (超时/断线不静默放行危险操作)
 // 纯函数, 只做匹配; 所有副作用留在 approval.ts。
 import type { Config } from "../shared/config.js";
+import { replBashCommands } from "./repl-script.js";
 
 export interface DangerHit {
   /** 人类可读的规则名, 直接渲染到卡片上 — 用户要知道「哪一条」判定它危险。 */
@@ -131,11 +132,20 @@ const strings = (v: unknown, depth = 0, acc: string[] = []): string[] => {
 
 // command 类入参: Bash.command, 以及任何叫 command/script/cmd 的字段。
 const COMMAND_KEYS = new Set(["command", "cmd", "script", "shell"]);
+// 脚本类入参: CodeBuddy REPL (PTC) 把每个工具调用包进 `code` 里 —— 命令在脚本内部,
+// 顶层只有一段 JS。不下钻的话 `rm -rf` 藏在字符串里, 危险名单一条也命中不了。
+const SCRIPT_KEYS = new Set(["code"]);
 const commandsOf = (input: unknown): string[] => {
   if (!input || typeof input !== "object") return [];
-  return Object.entries(input as Record<string, unknown>)
-    .filter(([k, v]) => COMMAND_KEYS.has(k) && typeof v === "string")
-    .map(([, v]) => v as string);
+  return Object.entries(input as Record<string, unknown>).flatMap(([k, v]): string[] => {
+    if (typeof v !== "string") return [];
+    if (COMMAND_KEYS.has(k)) return [v];
+    if (!SCRIPT_KEYS.has(k)) return [];
+    // 脚本里认出的内层命令; 一条字面量都认不出 (变量拼的) 就拿整段脚本兜底 —— 宁可
+    // 多一张必发卡, 不可让一条 rm -rf 因为套了层 REPL 就静默放行。
+    const inner = replBashCommands(v);
+    return inner.length > 0 ? inner : [v];
+  });
 };
 
 // 路径类入参: 只看看起来像路径的字符串, 避免拿正文去撞路径规则。
@@ -200,6 +210,12 @@ export const dangerOf = (cfg: Config, toolName: string, toolInput: unknown): Dan
     )
   );
 };
+
+/** 屏面解不出结构时的危险判定 (pane 宽度截断 / 裸命令 / REPL 包裹): 把可见正文当一段
+ *  脚本再判一遍 —— 认得出内层命令就按命令判, 认不出就整段当命令。
+ *  「看得见的操作里有没有真危险」与「这次操作看不清」是两件事: 只有前者进「危险」行。 */
+export const dangerOfScript = (cfg: Config, text: string): DangerHit | undefined =>
+  text.trim() ? dangerOf(cfg, "REPL", { code: text }) : undefined;
 
 // 入参里任意深度的 key=value 对 (DeferExecuteTool 之类的包装可能把真实入参套一层)。
 const deepEntries = (v: unknown): [string, unknown][] =>

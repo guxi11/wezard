@@ -73,6 +73,10 @@ export interface WindowMeta {
   toolInput: unknown;
   cwd: string;
   transcriptTail: string;
+  /** 「取消窗口」卡按原样重建: 身份位 (`.name`) 与「危险 / 审核」行都要跟原卡一致。 */
+  danger?: string;
+  sessionName?: string;
+  singleNote?: string;
 }
 const windowMetaByChat = new Map<string, WindowMeta>();
 

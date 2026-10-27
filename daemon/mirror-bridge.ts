@@ -7056,7 +7056,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
             toolName: ctx.toolName,
             toolInput: ctx.toolInput,
             agent: ctx.agent,
-            danger: policy.forceSingle,
+            danger: policy.danger,
+            singleNote: policy.note,
             voteTimeoutMs: cfg.approval.longPollSec * 1000,
             // Human waiting is outside the lock; the eventual press obtains a new transaction.
             // 按掉的这一只框已经了结: 同一份调用下次再弹出 (比如命令重试) 必须重新发卡,

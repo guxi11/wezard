@@ -32,7 +32,7 @@ import type { NativeModalAnswer } from "./mirror-bridge.js";
 import { recordApproval, recordApprovalDecision, buildDetailUrl, getDetail, openTurnsOf, targetOfSession } from "./detail.js";
 import type { Handler } from "./http.js";
 import { json, readBody } from "./http.js";
-import { botOfKey, tagBadge, tagOfKey, withTagHeader, withBot } from "../shared/session-label.js";
+import { botOfKey, displayName, tagBadge, tagOfKey, withTagHeader, withBot } from "../shared/session-label.js";
 import { chatPolicyOf } from "./chat-name.js";
 import { makeStewardGuard } from "./steward-guard.js";
 import { sessionNameFor } from "./session-name.js";
@@ -86,7 +86,6 @@ interface CardArgs {
    *  on allow_window resolved cards. Auto-window is chat-scoped so the cancel
    *  key must carry chatKey, not sessionId. */
   chatKey?: string;
-  transcriptTail: string;
   windowMinutes: number;
   detailUrl?: string;  // 空则不渲染 jump_list
   /** 命中危险名单的规则名。非空 → 卡片去掉「全过」按钮, 必须单次确认。 */
@@ -95,10 +94,13 @@ interface CardArgs {
    *  按钮面必须与判决面一致 —— handler 侧 `!mustCard` 会把「⏱全过 / ✅总是」
    *  的效果全部丢掉, 卡上还画着它们就是给了两颗按不动的按钮。 */
   forceSingle?: boolean;
-  /** 会话名 (#tag / CC 会话名 / 首条用户消息 / 短 id) — 发卡时算好, resolved 卡复用。 */
+  /** 身份位: wizard 的 `.name` (算好再传, resolved 卡复用); 名册没落定时是会话名。 */
   sessionName?: string;
   /** 未命中 allowRules 的具体原因 — 渲染到「审核」行。 */
   denyReason?: DenyReason;
+  /** 必发卡但不是危险的理由 (屏面看不懂 / askRules) — 也走「审核」行。"危险" 只留给
+   *  危险名单真命中, 否则人会学会无视那一行。 */
+  singleNote?: string;
 }
 
 const TRUNC = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
@@ -120,17 +122,24 @@ const EDIT_SNIPPET_LEN = 160;
 const WRITE_PREVIEW_LINES = 4;
 const WRITE_PREVIEW_CHARS = 200;
 
-const SOURCE_ICON = "https://wwcdn.weixin.qq.com/node/wework/images/3d-claude-ai-logo.bce0ddae70.jpg";
+const SOURCE_MAX = 13;
 
-// Source 行 = 会话身份位: 放会话名 (谁在请求), 让 main_title 整块 13×2 字腾给
-// "想干什么"。危险卡只把这行文字变红 (desc_color: 2), 不换文案不加图标 ——
-// 红色本身就是信号。会话名缺失时回落品牌名, 不留空行。
-const buildSource = (danger?: string, sessionName?: string): TemplateCard["source"] =>
-  ({
-    icon_url: SOURCE_ICON,
-    desc: TRUNC(sessionName || "wezard", 13),
+// Source 行 = wizard 的身份位: 🧙 + `.name` (名册里的全局名), 让 main_title 整块
+// 13×2 字腾给"想干什么"。WeCom 的 icon_url 只吃图片 URL, 所以 emoji 写在 desc 里,
+// 不再挂一张 logo 图。危险卡只把这行文字变红 (desc_color: 2), 不换文案 —— 红色本身
+// 就是信号。名字缺失时回落品牌名, 不留空行。
+const buildSource = (danger?: string, who?: string): TemplateCard["source"] => {
+  const name = (who ?? "").trim().replace(/^[#.]/, "");
+  return {
+    desc: TRUNC(name ? `🧙 .${name}` : "🧙 wezard", SOURCE_MAX),
     desc_color: danger ? 2 : 0,
-  }) as TemplateCard["source"];
+  } as TemplateCard["source"];
+};
+
+/** 卡片身份位上写谁: wizard 的全局名 (名册里的名字, 也是它唯一的地址); 名册还没
+ *  落定才退回会话名 (#tag / CC 会话名 / transcript 首条 / 短 id) —— 那是临时口径。 */
+const cardName = (chatKey?: string, transcriptPath?: string, sessionId?: string): string =>
+  (chatKey ? displayName(chatKey) : "") || sessionNameFor(chatKey, transcriptPath, sessionId);
 
 interface Rendered {
   body: string;  // wrapped in quote_area as the parameters block
@@ -269,15 +278,15 @@ const detailJumpList = (url?: string): TemplateCard["jump_list"] | undefined =>
 // of how many times `/clear` rotates the underlying sessionId.
 const emojiFor = tagBadge;
 
-// ── v3 布局 (2026-07-31 两轮真机反馈后定稿) ──────────────────────────
-// 信息优先级: 谁在问(会话名) > 想干什么(desc) > 具体命令 > 上下文。
-//   source        品牌位; 危险卡文字变红 (仅变色, 不换文案)
-//   main_title    <会话名> · <工具> — 无锁/无 emoji, 纯文字
+// ── 布局 (v3 2026-07-31, source 行 2026-10-27 换成 🧙 + .name) ──────────
+// 信息优先级: 谁在问(wizard 名) > 想干什么(desc) > 具体命令 > 为什么问。
+//   source        🧙 .name; 危险卡文字变红 (仅变色, 不换文案)
+//   main_title    <工具/意图> · <目录>/ — 无锁/无 emoji, 纯文字
 //   quote_area    命令主体 — 无标题, 整块可点跳详情页 (PC); 3 行截断由
 //                 右上⋯展开与详情页兜底
-//   horizontal    上文 (最近用户消息); 危险卡多一行规则名
+//   horizontal    危险 (名单真命中) / 审核 (为什么这次没白名单放行)。
+//                 不带「上文」: 人正在干的事在 CLI 里看得见, 卡上只留判断依据。
 //   jump_list     「🔍 完整命令·详情」
-// 会话名: #tag (企微发起) > CC 会话名 (本地发起, sessions 注册表) > 首条消息。
 const HMETA_VAL_MAX = 26;
 
 // 一级标题 = Claude 自己写的意图 (tool_input.description), 回答"想干什么" ——
@@ -309,15 +318,15 @@ const shortTool = (toolName: string): string =>
 
 const metaRows = (a: CardArgs): TemplateCard["horizontal_content_list"] => {
   const rows: Array<{ keyname: string; value: string }> = [];
-  const tail = oneLine(a.transcriptTail).trim();
-  if (tail) rows.push({ keyname: "上文", value: TRUNC(tail, HMETA_VAL_MAX) });
-  // 为什么要人来点这一下 —— 优先级 危险 > 未白名单。danger 命中时命令很可能
-  // 本来就在白名单里, 再报"未放行"是误导。
+  // 为什么要人来点这一下 —— 优先级 危险 > 未白名单 > 必发卡说明。danger 命中时命令很
+  // 可能本来就在白名单里, 再报"未放行"是误导; 反过来「屏面看不懂」「askRules 命中」
+  // 都不是危险, 只进「审核」行 —— 「危险」行只写名单真命中的那类操作 (rm / DROP / 强推)。
   if (a.danger) {
     rows.push({ keyname: "危险", value: TRUNC(`命中「${a.danger}」`, HMETA_VAL_MAX) });
-  } else if (a.denyReason) {
-    const why = denyReasonText(a.denyReason);
-    if (why) rows.push({ keyname: "审核", value: TRUNC(why, HMETA_VAL_MAX) });
+  } else if (a.denyReason && denyReasonText(a.denyReason)) {
+    rows.push({ keyname: "审核", value: TRUNC(denyReasonText(a.denyReason)!, HMETA_VAL_MAX) });
+  } else if (a.singleNote) {
+    rows.push({ keyname: "审核", value: TRUNC(a.singleNote, HMETA_VAL_MAX) });
   }
   return rows.length > 0 ? (rows as TemplateCard["horizontal_content_list"]) : undefined;
 };
@@ -502,7 +511,6 @@ interface BatchMember {
   originalToolInput: unknown;
   toolInputStr: string;
   cwd: string;
-  transcriptTail: string;
 }
 interface ActiveBatch {
   batchId: string;
@@ -558,13 +566,11 @@ const renderBatchBody = (batch: ActiveBatch): string => {
   return TRUNC(lines.join("\n"), QUOTE_MAX);
 };
 
-// 批量卡的标题/中段与单卡同构 (会话名 + 工具×N / 成员列表进引用区)。
+// 批量卡的标题/中段与单卡同构 (身份位 + 工具×N / 成员列表进引用区)。
 const batchTitle = (batch: ActiveBatch): string =>
   `${batch.sessionName || batch.sessionId.slice(-8)} · ${shortTool(batch.toolName)} ×${batch.members.length}`;
-const batchBlocks = (batch: ActiveBatch, transcriptTail: string): Partial<TemplateCard> => {
+const batchBlocks = (batch: ActiveBatch): Partial<TemplateCard> => {
   const rows: Array<{ keyname: string; value: string }> = [];
-  const tail = oneLine(transcriptTail).trim();
-  if (tail) rows.push({ keyname: "上文", value: TRUNC(tail, HMETA_VAL_MAX) });
   if (batch.danger) rows.push({ keyname: "危险", value: TRUNC(`命中「${batch.danger}」`, HMETA_VAL_MAX) });
   return {
     quote_area: quoteArea(renderBatchBody(batch)),
@@ -572,11 +578,11 @@ const batchBlocks = (batch: ActiveBatch, transcriptTail: string): Partial<Templa
   };
 };
 
-const buildBatchCard = (batch: ActiveBatch, transcriptTail: string): TemplateCard => ({
+const buildBatchCard = (batch: ActiveBatch): TemplateCard => ({
   card_type: "button_interaction",
   source: buildSource(batch.danger, batch.sessionName),
   main_title: { title: batchTitle(batch) },
-  ...batchBlocks(batch, transcriptTail),
+  ...batchBlocks(batch),
   task_id: batch.batchId,
   button_list: [
     { text: "❌", style: 4, key: encodeBatchKey(batch.batchId, "deny") },
@@ -591,7 +597,6 @@ const buildBatchCard = (batch: ActiveBatch, transcriptTail: string): TemplateCar
 const buildBatchResolvedCard = (
   batch: ActiveBatch,
   decision: Decision,
-  transcriptTail: string,
 ): TemplateCard => {
   const button = decision === "allow_window"
     ? {
@@ -608,17 +613,17 @@ const buildBatchResolvedCard = (
     card_type: "button_interaction",
     source: buildSource(batch.danger, batch.sessionName),
     main_title: { title: batchTitle(batch) },
-    ...batchBlocks(batch, transcriptTail),
+    ...batchBlocks(batch),
     task_id: batch.batchId,
     button_list: [button],
   };
 };
 
-const buildBatchAlreadyResolvedCard = (batch: ActiveBatch, transcriptTail: string): TemplateCard => ({
+const buildBatchAlreadyResolvedCard = (batch: ActiveBatch): TemplateCard => ({
   card_type: "button_interaction",
   source: buildSource(batch.danger, batch.sessionName),
   main_title: { title: batchTitle(batch) },
-  ...batchBlocks(batch, transcriptTail),
+  ...batchBlocks(batch),
   task_id: batch.batchId,
   button_list: [{ text: "已经放行", style: 4, key: encodeBatchNoopKey(batch.batchId) }],
 });
@@ -734,11 +739,10 @@ export const buildAskqMarkdown = (q: AskqQuestion, prefix = ""): string => {
   return [head, "", ...opts].join("\n");
 };
 
-export const buildAskqCard = (reqId: string, q: AskqQuestion, transcriptTail: string, approver?: string): TemplateCard => {
-  const tail = oneLine(transcriptTail).trim();
+export const buildAskqCard = (reqId: string, q: AskqQuestion, approver?: string): TemplateCard => {
   return {
     card_type: "vote_interaction",
-    source: buildSource(undefined, tail),
+    source: buildSource(undefined, cardName(approver)),
     main_title: { title: TRUNC(`🤔 ${emojiFor(approver)}${q.header || "请选择"}`, ASKQ_TITLE_MAX) },
     task_id: reqId,
     checkbox: {
@@ -767,7 +771,6 @@ const buildAskqResolvedCard = (
   reqId: string,
   q: AskqQuestion,
   outcome: AskqOutcome,
-  transcriptTail: string,
   approver?: string,
 ): TemplateCard => {
   const summary = outcome.kind === "cli"
@@ -777,10 +780,9 @@ const buildAskqResolvedCard = (
       : outcome.kind === "empty"
         ? "⚠️ 未选择"
         : `✅ ${outcome.picked.map((i) => q.options[i]?.label ?? `#${i}`).join(", ")}`;
-  const tail = oneLine(transcriptTail).trim();
   return {
     card_type: "button_interaction",
-    source: buildSource(undefined, tail),
+    source: buildSource(undefined, cardName(approver)),
     main_title: { title: TRUNC(`🤔 ${emojiFor(approver)}${q.header || "已回答"}`, ASKQ_TITLE_MAX) },
     sub_title_text: TRUNC(q.question, ASKQ_SUB_MAX),
     task_id: reqId,
@@ -931,13 +933,12 @@ const buildPlanMarkdown = (plan: string): string => {
   return `**📋 计划待审批**\n\n${body}`;
 };
 
-const buildPlanCard = (reqId: string, _sessionId: string, cwd: string, transcriptTail: string, approver: string, hasPlan: boolean): TemplateCard => {
-  const tail = oneLine(transcriptTail).trim();
+const buildPlanCard = (reqId: string, cwd: string, approver: string, hasPlan: boolean): TemplateCard => {
   const tag = emojiFor(approver);
   const dir = dirName(cwd);
   return {
     card_type: "button_interaction",
-    source: buildSource(undefined, tail),
+    source: buildSource(undefined, cardName(approver)),
     main_title: { title: TRUNC(`📋 计划审批 · ${tag}${dir}/`, PLAN_TITLE_MAX + 12) },
     sub_title_text: hasPlan
       ? "审阅上方计划后选择:同意开始执行,或让 Agent 继续完善。"
@@ -954,15 +955,13 @@ const buildPlanResolvedCard = (
   reqId: string,
   action: PlanAction,
   cwd: string,
-  transcriptTail: string,
   approver?: string,
 ): TemplateCard => {
-  const tail = oneLine(transcriptTail).trim();
   const dir = dirName(cwd);
   const summary = action === "approve" ? "✅ 已同意 · 开始执行" : "✏️ 继续完善计划";
   return {
     card_type: "button_interaction",
-    source: buildSource(undefined, tail),
+    source: buildSource(undefined, cardName(approver)),
     main_title: { title: TRUNC(`📋 计划 · ${emojiFor(approver)}${dir}/`, PLAN_TITLE_MAX + 12) },
     task_id: reqId,
     button_list: [{ text: summary, style: 4, key: encodePlanNoopKey(reqId) }],
@@ -1025,7 +1024,7 @@ const handleExitPlanMode = async ({ cfg, log, client, body, getMirrorTarget, flu
     }
     await client.sendMessage(target, {
       msgtype: "template_card",
-      template_card: buildPlanCard(reqId, body.session_id, body.cwd ?? "", body.transcript_tail ?? "", approver, true),
+      template_card: buildPlanCard(reqId, body.cwd ?? "", approver, true),
     });
     log.info({ reqId, approver }, "plan card sent");
   } catch (e) {
@@ -1238,7 +1237,7 @@ export const runMirrorAskqFlow = async ({ cfg, log, client, sessionId, chatKey, 
       }
       await client.sendMessage(target, {
         msgtype: "template_card",
-        template_card: buildAskqCard(reqId, q, "", chatKey),
+        template_card: buildAskqCard(reqId, q, chatKey),
       });
       log.info({ reqId, chatKey, idx: i, total }, "mirror askq card sent");
     } catch (e) {
@@ -1400,7 +1399,7 @@ export const runMirrorPlanFlow = async ({ cfg, log, client, sessionId, chatKey, 
     }
     await client.sendMessage(target, {
       msgtype: "template_card",
-      template_card: buildPlanCard(reqId, sessionId, cwd, "", chatKey, Boolean(plan)),
+      template_card: buildPlanCard(reqId, cwd, chatKey, Boolean(plan)),
     });
     log.info({ reqId, chatKey }, "mirror plan card sent");
   } catch (e) {
@@ -1502,6 +1501,8 @@ interface MirrorPickerFlowArgs {
   agent?: string;
   /** 内层工具命中的危险名单规则名 — 卡片走单次确认形态 (无 ⏱/总是按钮)。 */
   danger?: string;
+  /** 必发卡但不是危险的理由 (屏面看不懂 / askRules) — 卡片「审核」行。 */
+  singleNote?: string;
   voteTimeoutMs: number;
   /** 代按 pane; 实现方 (mirror) 负责重读屏 + 校验仍是同一只框。 */
   press: (what: PickerPress) => Promise<{ ok: boolean; reason?: string; label?: string }>;
@@ -1509,7 +1510,7 @@ interface MirrorPickerFlowArgs {
 
 /** 返回「卡是否真的发出去了」— false (WS 断 / 发送失败) 时调用方应允许对同屏重试。 */
 export const runMirrorPickerFlow = async (
-  { log, client, cfg, sessionId, chatKey, cwd, jsonlPath, toolName, toolInput, agent, danger, voteTimeoutMs, press }: MirrorPickerFlowArgs,
+  { log, client, cfg, sessionId, chatKey, cwd, jsonlPath, toolName, toolInput, agent, danger, singleNote, voteTimeoutMs, press }: MirrorPickerFlowArgs,
 ): Promise<boolean> => {
   if (!canReach(client, chatKey)) return false;
   const target = targetChatId(chatKey);
@@ -1520,7 +1521,7 @@ export const runMirrorPickerFlow = async (
   };
 
   const tail = agent ? `子代理 ${agent} 的原生权限确认` : "CLI 原生权限确认";
-  const sessionName = sessionNameFor(chatKey, jsonlPath, sessionId);
+  const sessionName = cardName(chatKey, jsonlPath, sessionId);
   const { reqId, promise } = createPending({
     meta: {
       kind: "generic",
@@ -1532,7 +1533,8 @@ export const runMirrorPickerFlow = async (
       chatKey,
       transcriptTail: tail,
       danger,
-      forceSingle: Boolean(danger),
+      singleNote,
+      forceSingle: Boolean(danger || singleNote),
       sessionName,
     },
     timeoutMs: voteTimeoutMs,
@@ -1551,10 +1553,10 @@ export const runMirrorPickerFlow = async (
         sessionShort: sessionId.slice(-8),
         sessionId,
         chatKey,
-        transcriptTail: tail,
         windowMinutes: cfg.approval.windowMinutes,
         danger,
-        forceSingle: Boolean(danger),
+        singleNote,
+        forceSingle: Boolean(danger || singleNote),
         sessionName,
       }),
     });
@@ -1691,7 +1693,7 @@ const handleAskUserQuestion = async ({ cfg, log, client, body, getMirrorTarget, 
       }
       await client.sendMessage(target, {
         msgtype: "template_card",
-        template_card: buildAskqCard(reqId, q, body.transcript_tail ?? "", approver),
+        template_card: buildAskqCard(reqId, q, approver),
       });
       log.info({ reqId, approver, idx: i, total }, "askq card sent");
     } catch (e) {
@@ -2001,7 +2003,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     activeBatches.delete(batchKeyOf(batch.sessionId, batch.toolName, batch.chatId));
     const isMulti = batch.members.length > 1;
     const card: TemplateCard = isMulti
-      ? buildBatchCard(batch, batch.members[0]?.transcriptTail ?? "")
+      ? buildBatchCard(batch)
       : (() => {
           const m = batch.members[0]!;
           return buildCard({
@@ -2016,7 +2018,6 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
             // the emoji (only tagged sessions get it now). Also flows through
             // to the resolved card's cancel key path.
             chatKey: batch.approver,
-            transcriptTail: m.transcriptTail,
             windowMinutes: batch.windowMinutes,
             danger: batch.danger,
             forceSingle: batch.forceSingle,
@@ -2188,6 +2189,9 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // 必发卡 = 危险名单 或 askRules 命中。这两者的语义是「每次都要人单独看一眼」,
     // 所以压过放行/窗口/缓存。守卫不在其列 —— 见上面 settleGuard 的注释。
     const mustCard = nativePermission || Boolean(danger) || Boolean(askHit);
+    // 必发卡但不是危险的理由 — 卡片「审核」行 (askRules = 人自己要求每次问;
+    // 危险名单命中由 danger 自己走「危险」行, 不在这里重复)。
+    const singleNote = askHit ? `命中 askRules「${askHit}」` : undefined;
 
     // allowRules: matcher 拦下的工具里再挖细粒度豁免 (Bash 可按命令前缀区分)。
     // 交互卡工具 (AskUserQuestion 等) 在引擎内部硬保护, 规则写了也不放行。
@@ -2373,7 +2377,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     const longPollMs = cfg.approval.longPollSec * 1000;
     // 卡片标题上的会话身份 — 发卡前算一次, 存进 meta 供 resolved 卡复用
     // (#tag 直接取; 否则读 transcript 首条用户消息, 带缓存)。
-    const sessionName = sessionNameFor(approver, body.transcript_path, sessionId);
+    const sessionName = cardName(approver, body.transcript_path, sessionId);
     // Reload 续接: hook 带着上一轮的 req_id 回来, 复用同一个 id 重新挂起 ——
     // WeCom 上那张卡的按钮编的就是它, 于是旧卡的点击照样能 resolve 这次长轮询。
     const resumeId = (body.resume_req_id ?? "").trim();
@@ -2388,6 +2392,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
         chatKey: approver,
         transcriptTail,
         danger: danger?.rule,
+        singleNote,
         forceSingle: mustCard,
         sessionName,
         denyReason,
@@ -2410,7 +2415,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // 创建 batch + 计时器, 后续到达者只追加成员, 不发卡。flush 时依据成员数
     // 选择普通 buildCard 或 buildBatchCard。0 = 关闭聚合, 立即 flush。
     // 续接的请求不再进 batch: 卡已经在群里, 重发就是重复轰炸。
-    const member: BatchMember = { reqId, toolInput: display, originalToolInput: toolInput, toolInputStr, cwd, transcriptTail };
+    const member: BatchMember = { reqId, toolInput: display, originalToolInput: toolInput, toolInputStr, cwd };
     const bk = batchKeyOf(sessionId, toolName, chatId);
     // 必发卡请求既不 join 也不被 join — 一次这样的操作 = 一张卡 = 一次点击。
     // 合流会把它塞进带「⏱全过 / ✅总是」的批量卡, 一次点击就连它一起放行了。
@@ -2533,6 +2538,9 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
         toolInput: display,
         cwd,
         transcriptTail,
+        danger: danger?.rule,
+        sessionName,
+        singleNote,
       });
       // 同一个 chat 里其它 pending 卡 (可能来自并发同 turn, 也可能来自绑到
       // 同一个 chat 的别的 session) — 一并放行，免得用户逐个点。
@@ -2696,13 +2704,7 @@ export const installApprovalEventListener = (
           try {
             await client.updateTemplateCard(
               frame,
-              buildAskqResolvedCard(
-                cbTaskId || askq.reqId,
-                q,
-                outcome,
-                meta?.transcriptTail ?? "",
-                meta?.chatKey,
-              ),
+              buildAskqResolvedCard(cbTaskId || askq.reqId, q, outcome, meta?.chatKey),
             );
           } catch (e) {
             log.warn({ err: (e as Error).message, reqId: askq.reqId }, "askq updateTemplateCard failed");
@@ -2753,13 +2755,7 @@ export const installApprovalEventListener = (
         try {
           await client.updateTemplateCard(
             frame,
-            buildPlanResolvedCard(
-              cbTaskId || planClick.reqId,
-              planClick.action,
-              meta?.cwd ?? "",
-              meta?.transcriptTail ?? "",
-              meta?.chatKey,
-            ),
+            buildPlanResolvedCard(cbTaskId || planClick.reqId, planClick.action, meta?.cwd ?? "", meta?.chatKey),
           );
         } catch (e) {
           log.warn({ err: (e as Error).message, reqId: planClick.reqId }, "plan updateTemplateCard failed");
@@ -2796,10 +2792,9 @@ export const installApprovalEventListener = (
         log.info({ batchId: batch.batchId, decision: batchDec.decision, resolved, total: batch.members.length, allSwept }, "batch resolved");
         if (resolved > 0) onApproved?.(batch.sessionId);
         try {
-          const tail = batch.members[0]?.transcriptTail ?? "";
           const card = allSwept
-            ? buildBatchAlreadyResolvedCard(batch, tail)
-            : buildBatchResolvedCard(batch, batchDec.decision, tail);
+            ? buildBatchAlreadyResolvedCard(batch)
+            : buildBatchResolvedCard(batch, batchDec.decision);
           await client.updateTemplateCard(frame, card);
           log.info({ batchId: batch.batchId, decision: batchDec.decision, allSwept }, "batch card updated in place");
         } catch (e) {
@@ -2841,8 +2836,10 @@ export const installApprovalEventListener = (
               cwd: wmeta?.cwd ?? "",
               sessionShort: "?",
               chatKey: decoded.cancelChatKey,
-              transcriptTail: wmeta?.transcriptTail ?? "",
               windowMinutes: cfg.approval.windowMinutes,
+              danger: wmeta?.danger,
+              sessionName: wmeta?.sessionName,
+              singleNote: wmeta?.singleNote,
               detailUrl: cbTaskId ? detailUrlFor(cbTaskId, decoded.cancelChatKey) : undefined,
             }),
           );
@@ -2914,10 +2911,11 @@ export const installApprovalEventListener = (
               sessionShort,
               sessionId: meta?.sessionId ?? "",
               chatKey: meta?.chatKey ?? "",
-              transcriptTail: meta?.transcriptTail ?? "",
               windowMinutes: cfg.approval.windowMinutes,
+              danger: meta?.danger,
               sessionName: meta?.sessionName,
               denyReason: meta?.denyReason,
+              singleNote: meta?.singleNote,
               detailUrl: detailUrlFor(reqId, meta?.chatKey),
             })
           : buildResolvedCard({
@@ -2927,7 +2925,6 @@ export const installApprovalEventListener = (
               toolInputStr,
               cwd: meta?.cwd ?? "",
               sessionShort,
-              transcriptTail: meta?.transcriptTail ?? "",
               windowMinutes: cfg.approval.windowMinutes,
               decision: effectiveDecision,
               by,
@@ -2936,6 +2933,7 @@ export const installApprovalEventListener = (
               danger: meta?.danger,
               sessionName: meta?.sessionName,
               denyReason: meta?.denyReason,
+              singleNote: meta?.singleNote,
               detailUrl: detailUrlFor(reqId, meta?.chatKey),
             });
         await client.updateTemplateCard(frame, card);

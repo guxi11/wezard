@@ -104,5 +104,16 @@ t("docker exec halt", () => danger("docker exec -it c1 halt"));
 // 反面: 远程规则不该被「有 ssh 字样 + 文件名带危险词」钓出来。
 t("scp 传带 shutdown 的文件名", () => safe("scp graceful-shutdown.md host:/tmp/"));
 
+// ── REPL / PTC 包裹: 命令在脚本里 ─────────────────────────────────────
+// CodeBuddy 把每次工具调用包进 REPL 的 code 参数。只看顶层 key 会整条漏掉 ——
+// 2026-10-27 真机: 卡上写着「无法完整识别」, 而脚本里是 `rm -rf b64chunks`。
+const viaRepl = (code: string): string | undefined => dangerOf(CFG, "REPL", { code, description: "split chunks" })?.rule;
+t("REPL 反引号里的 rm -rf", () => assert.ok(viaRepl("const w = await Bash({ command: `cd /tmp && rm -rf b64chunks` });")));
+t("REPL 双引号里的强推", () => assert.ok(viaRepl('await Bash({ command: "git push --force origin main" })')));
+t("REPL 单引号里的 shutdown", () => assert.ok(viaRepl("await Bash({ command: 'shutdown -h now' })")));
+t("REPL 变量拼的命令 (无字面量, 整段兜底)", () => assert.ok(viaRepl("const cmd = 'rm -rf x';\nawait Bash({ command: cmd });")));
+t("REPL 里只是读", () => assert.equal(viaRepl("const r = await Bash({ command: `git status` });"), undefined));
+t("REPL 正文提到危险词但没调用", () => assert.equal(viaRepl("// 别在这里 rm -rf, 用清理脚本"), undefined));
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

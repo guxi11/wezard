@@ -29,6 +29,9 @@ assert.equal(pickerPolicy(config, "codebuddy", context, false).reason, "allow_ru
 config.approval.askRules = ["Bash(git status)"];
 assert.equal(pickerPolicy(config, "codebuddy", context, true).decision, "manual");
 assert.equal(pickerPolicy(config, "codebuddy", context, true).forceSingle, "Bash(git status)");
+// askRules = 人自己要求每次问, 不是危险: 走「审核」行, 「危险」行只留给名单真命中。
+assert.equal(pickerPolicy(config, "codebuddy", context, true).note, "命中 askRules「Bash(git status)」");
+assert.equal(pickerPolicy(config, "codebuddy", context, true).danger, undefined);
 config.approval.danger.skipAll = true;
 assert.equal(pickerPolicy(config, "codebuddy", context, true).decision, "allow");
 config.approval.denyRules = ["Bash(git status)"];
@@ -93,6 +96,28 @@ assert.equal(pickAutoAllowAnswer(parseModalOptions(realCodebuddyPicker))?.label,
 const realCtx = parseConfirmContext(realCodebuddyPicker);
 assert.equal(realCtx.complete, false);
 assert.equal(pickerPolicy(skip, "codebuddy", realCtx, false).decision, "allow");
+
+// 解不出结构 ≠ 看不出危险 (2026-10-27 真机): CodeBuddy 的权限框正文只有一段命令
+// (REPL 包裹的内层 Bash), toolName/params 都解不出。以前一律「无法完整识别」,
+// 于是 `cd /tmp && rm -rf b64chunks && …` 的危险行写的是看不懂 —— 现在照常判出 rm。
+const rmScreen = [
+  " Bash command",
+  "   cd /tmp && rm -rf b64chunks && mkdir b64chunks && base64 -i dag5-node.png | tr -d x",
+  " Hook PreToolUse: REPL requires confirmation:",
+  " > 1. Yes",
+  "   2. No",
+].join("\n");
+const rmCtx = parseConfirmContext(rmScreen);
+assert.equal(rmCtx.complete, false);
+const rmPolicy = pickerPolicy(cfg(), "codebuddy", rmCtx, true);
+assert.equal(rmPolicy.decision, "manual");
+assert.equal(rmPolicy.danger, "删除文件 rm");
+assert.equal(rmPolicy.note, undefined, "危险不该同时被写成审核说明");
+// 真认不出危险的时候才退回「无法完整识别」, 而且只走审核行。
+const vagueCtx = parseConfirmContext("Bash command\n   ls -la\nWould you like to proceed?\n > 1. Yes\n   2. No");
+const vaguePolicy = pickerPolicy(cfg(), "codebuddy", vagueCtx, true);
+assert.equal(vaguePolicy.danger, undefined);
+assert.equal(vaguePolicy.note, "无法完整识别此次操作，请逐次确认");
 for (const tool of ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "PermissionRequest"]) {
   assert.equal(pickerPolicy(skip, "codebuddy", parseConfirmContext(frame("unused", tool)), true).decision, "leave");
 }

@@ -528,7 +528,7 @@ const main = async (): Promise<void> => {
     const to = wxAdmins(cfg)[0];
     if (!to) throw new Error("没有审批人 (approval.approvers / defaultChat / allowFrom 里都没有 user:)");
     const { decided } = await requestConfirm({
-      client: ws.client, principal: to, who: "本机 `wezard wx bind`",
+      client: ws.client, principal: to, who: "wezard",
       title: "微信绑定待确认",
       body: `本机有进程 (终端或持 daemon 口令的 wizard) 要绑定一个新微信${name ? ` (群名「${name}」)` : ""}: 同意才会出二维码, 扫码的那个微信将能驱动本机。`,
       timeoutMs: 180_000,
