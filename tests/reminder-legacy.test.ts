@@ -21,6 +21,7 @@ assert.equal(carriesMsg(messageEvent, "route:old"), true, "message-event identit
 assert.deepEqual(reminderLabel(parseReminders(messageEvent)[0]!), { label: "msg", machine: true });
 assert.equal(parseEnvelope(`${envelope}${messageEvent}`)?.eventId, undefined, "message-event does not supply Envelope.eventId");
 assert.equal(parseEnvelope(`${currentEnvelope}${messageEvent}`)?.eventId, "route:current", "envelope.msg wins");
+assert.equal(parseEnvelope(`${oldTranscript}${messageEvent}`)?.eventId, "rcpt:e7:r1", "receipt-delivery fallback ignores message-event");
 
 const legacy = "<system-reminder>legacy prose from `.b`</system-reminder>";
 assert.equal(parseEnvelope(legacy), undefined, "prose does not supply envelope identity");
