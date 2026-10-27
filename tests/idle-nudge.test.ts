@@ -30,19 +30,22 @@ const run = (obs: (min: number) => Obs, mins: number, p = P, w0?: Watch): boolea
 const asksAt = (xs: boolean[]): number[] => xs.flatMap((a, i) => (a ? [i] : []));
 
 t("持续闲满阈值才问一次", () => assert.deepStrictEqual(asksAt(run(() => idle(), 7)), [5]));
-t("问后需再满一整段才再问, 且到上限停", () => assert.deepStrictEqual(asksAt(run(() => idle(), 30)), [5, 10]));
+t("问后需再满一整段才再问, 到上限冷却后新周期再问", () => assert.deepStrictEqual(asksAt(run(() => idle(), 30)), [5, 10, 20, 25]));
 t("中途忙一下就从头计", () => assert.deepStrictEqual(asksAt(run((m) => idle({ idle: m !== 3 }), 12)), [9]));
 t("锚变了 (续问 / 新一句) 从头计", () => assert.deepStrictEqual(asksAt(run((m) => idle({ anchor: m >= 4 ? 4 * MIN : 0 }), 12)), [9]));
 t("锚的毫秒抖动不算变", () => assert.deepStrictEqual(asksAt(run((m) => idle({ anchor: m % 2 ? 500 : 0 }), 6)), [5]));
-for (const state of ["needs-input", "deferred", "errored", "blocked", "done", "canceled"] as const) {
+t("needs-input 满 20m 后按周期追问", () => assert.deepStrictEqual(asksAt(run(() => idle({ state: "needs-input" }), 20)), [5, 10, 20]));
+t("errored 满 20m 后按周期追问", () => assert.deepStrictEqual(asksAt(run(() => idle({ state: "errored" }), 20)), [5, 10, 20]));
+for (const state of ["deferred", "blocked", "done", "canceled"] as const) {
   t(`${state} 不问`, () => assert.deepStrictEqual(asksAt(run(() => idle({ state }), 20)), []));
 }
 t("afterMs=0 = 关", () => assert.deepStrictEqual(asksAt(run(() => idle(), 20, { afterMs: 0, max: 3 })), []));
 t("reload 后带着已问次数: 闲置从头计、上限照算", () =>
-  assert.deepStrictEqual(asksAt(run(() => idle(), 20, P, { asks: 1, anchor: 0 })), [5]));
+  assert.deepStrictEqual(asksAt(run(() => idle(), 20, P, { asks: 1, anchor: 0 })), [5, 15, 20]));
 t("不可问的状态也保留已问次数", () => {
-  const r = step({ asks: 2, anchor: 0, idleSince: 0 }, idle({ state: "needs-input" }), MIN, P);
-  assert.deepStrictEqual(r.next, { asks: 2, anchor: 0 });
+  const r = step({ asks: 1, anchor: 0, idleSince: 0 }, idle({ state: "blocked" }), MIN, P);
+  assert.equal(r.next.asks, 1);
+  assert(!("idleSince" in r.next));
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

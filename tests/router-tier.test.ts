@@ -16,7 +16,7 @@ assert(!ConfigSchema.safeParse({ bot, models: { router: "unknown" } }).success);
 for (const backend of ["claude", "claude-internal", "codebuddy", "codex"] as const) {
   cfg.models.router = "standard";
   const actual = pickRouter(cfg, backend);
-  assert.deepEqual(actual, pickTier(cfg, "standard", {}, false, backend));
+  assert.deepEqual(actual, pickTier(cfg, "standard", {}, backend));
   assert(actual.ok);
   assert.equal(actual.cli, backend, "actual backend wins over defaultCli");
   assert.equal(actual.tier, "standard");
@@ -24,18 +24,23 @@ for (const backend of ["claude", "claude-internal", "codebuddy", "codex"] as con
 for (const tier of TIERS.filter((tier) => tier !== "standard")) {
   cfg.models.router = tier;
   const actual = pickRouter(cfg, "codex");
-  assert.deepEqual(actual, pickTier(cfg, tier, {}, false, "codex"));
+  assert.deepEqual(actual, pickTier(cfg, tier, {}, "codex"));
   assert(actual.ok);
   assert.equal(actual.cli, "codex");
   assert.equal(actual.tier, tier);
 }
 
-const custom = ConfigSchema.parse({ bot, models: { tiers: {
-  standard: { cli: "claude", model: "legacy", effort: "high" },
-}, backends: { codex: { tiers: { standard: { model: "first", effort: "medium" } } } } } });
-let pick = pickRouter(custom, "claude-internal");
+const custom = ConfigSchema.parse({ bot, models: { backends: {
+  claude: { tiers: { standard: { model: "legacy", effort: "high" } } },
+  codex: { tiers: { standard: { model: "first", effort: "medium" } } },
+} } });
+let pick = pickRouter(custom, "claude");
 assert(pick.ok);
-assert.equal(pick.model, "legacy", "same-family legacy fallback");
+assert.equal(pick.model, "legacy", "Claude backend uses its configured tier table");
+assert.equal(pick.effort, "high");
+pick = pickRouter(custom, "claude-internal");
+assert(pick.ok);
+assert.equal(pick.model, "legacy", "claude-internal shares the configured Claude tier table");
 assert.equal(pick.effort, "high");
 pick = pickRouter(custom, "codex");
 assert(pick.ok);
@@ -45,16 +50,17 @@ pick = pickRouter(custom, "codex");
 assert(pick.ok);
 assert.equal(pick.model, "next", "read the map at creation time, not cached");
 custom.models.router = "hard";
+custom.models.backends.claude.tiers.hard = { model: "claude-opus", effort: "max" };
+custom.models.backends.codex.tiers.hard = { model: "codex-model", effort: "high" };
 pick = pickRouter(custom, "codex");
 assert(pick.ok);
 assert.equal(pick.tier, "hard");
+assert.equal(pick.model, "codex-model");
 assert.equal(pick.effort, "high");
-assert.equal(pick.model, undefined, "empty tier model defers to CLI");
-custom.models.backends.codex.tiers.hard = { cli: "claude", model: "opus", effort: "max" };
-pick = pickRouter(custom, "codex");
+pick = pickRouter(custom, "claude");
 assert(pick.ok);
-assert.equal(pick.model, undefined);
-assert.equal(pick.effort, undefined, "incompatible tier falls back as a unit");
+assert.equal(pick.model, "claude-opus");
+assert.equal(pick.effort, "max", "Claude resolves its backend-local hard tier");
 pick = pickRouter(custom, "codex", { model: "invocation", effort: "low" });
 assert(pick.ok);
 assert.equal(pick.model, "invocation");
@@ -77,7 +83,8 @@ try {
   assert(JSON.stringify(shown).includes("群管家 (router)"));
   assert(!planSet(cfg, file, { path: "models.router", value: { model: "sonnet", effort: "low" } }).ok);
   writeFileSync(file, JSON.stringify({ bot, models: { router: { model: "sonnet", effort: "low" } } }));
-  assert.equal(loadConfig(file).config.models.router, "standard", "legacy router object must not prevent startup");
+  assert.throws(() => loadConfig(file), /models\.router/, "router accepts a tier name, not the legacy object shape");
+  writeFileSync(file, JSON.stringify({ bot, models: { router: "standard" } }));
   const migrate = planSet(loadConfig(file).config, file, { path: "models.router", value: "standard" });
   assert(migrate.ok);
   patchJsonc(file, [{ path: migrate.jsonPath, value: migrate.value }]);
