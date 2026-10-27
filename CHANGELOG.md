@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### Added
+- 新增 `/use cli|wecom`(聊天) 与 `wezard use cli|wecom`(shell): 把一次工具调用的裁决权在「企微审批卡」与「本地 CLI 原生权限框」之间切换。写 `~/.wezard/state/approval-mode` 一个文件, 不改 hook 注册, 对已在跑的会话立即生效; 无参显示当前状态。cli 模式下 hook 仍照常更新权限模式档案 (Shift+Tab / acceptEdits / plan / bypass 的原生切换不受影响), 切回 wecom 时子代理对齐父会话读的就是它。
+
+### Changed
+- hook 在 `use cli`、daemon 不可达或回包异常时改为不答复 (exit 0), 由本地 CLI 自己的权限流程接管 —— 原先 daemon 不可达会 auto-allow, 等于 pane 静默拿到任何权限而人以为审批还在。`wezard stop` / uninstall 摘掉服务后立即交还, 不再白等 60s 的重启续接预算。cli 模式下企微审批卡、AskUserQuestion 投票卡与原生 picker 代按一并停用。
+
 ## [2.8.6] - 2026-10-27
 
 ### Added

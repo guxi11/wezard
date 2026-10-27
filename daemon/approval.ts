@@ -24,6 +24,7 @@ import {
 } from "./session-cache.js";
 import { evaluateAllow, ruleMatchesAny, alwaysAllowRulesFor, splitSegments, NEVER_RULE_ALLOW, type DenyReason } from "../shared/allow-rules.js";
 import { redact } from "./redact.js";
+import { readHookMode } from "../shared/hook-mode.js";
 import { dangerOf, dangerEarlyExit, selfConfigWriteOf, type DangerHit } from "./danger.js";
 import { appendUnique } from "../shared/config-writer.js";
 import { claudeConfigWrite, type ClaudeConfigHit } from "../shared/claude-config-path.js";
@@ -2066,6 +2067,12 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
   return async (req, res) => {
     if (!cfg.approval.enabled) {
       json(res, 200, { decision: "ask", reason: "approval_disabled" } satisfies ApproveResp);
+      return;
+    }
+    // `wezard use cli`: 审批权已经交回本地 CLI, 这里再造一张卡就是「两处都能点」。
+    // 回 ask 让 hook / codex 的 PermissionRequest 都走 CLI 自己的权限流程。
+    if (readHookMode(cfg.daemon.stateDir) === "cli") {
+      json(res, 200, { decision: "ask", reason: "hook_mode_cli" } satisfies ApproveResp);
       return;
     }
 

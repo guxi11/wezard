@@ -22,6 +22,7 @@ import { botTagOf } from "./bot-mux.js";
 import { chatNameOf, clearChatName, listChatNames, setChatName, stewardTierOf, type CharterGuard } from "./chat-name.js";
 import { evictStaleName, reclaimChatName, wizardStore, type EvictDeps } from "./wizard.js";
 import { truncate } from "../shared/std.js";
+import { hookModePath, readHookMode, writeHookMode } from "../shared/hook-mode.js";
 
 /** 判定"引用内容是否已在目标会话上下文里"时回看的轮数 —— 引用的通常是最近几轮
  *  里的某条气泡,再往前用户多半是真想把老内容重新拎出来说事。 */
@@ -98,6 +99,15 @@ const renderIds = (msg: BaseMessage, allow: readonly string[]): string => {
 const isIdCommand = (text: string): boolean => text.trim() === "/id";
 const isPwdCommand = (text: string): boolean => text.trim() === "/pwd";
 const isCostCommand = (text: string): boolean => text.trim() === "/cost";
+// `/use [cli|wecom]` — 工具调用的裁决权在「本地 CLI 的权限框」和「企微审批卡」之间
+// 切换。文件是 shared/hook-mode.ts 那份, hook 每次调用现读, 所以切换即刻生效。
+const parseUseCommand = (text: string): "cli" | "wecom" | "show" | "invalid" | undefined => {
+  const m = /^\/use(?:\s+(\S+))?\s*$/iu.exec(text.trim());
+  if (!m) return undefined;
+  const arg = (m[1] ?? "").toLowerCase();
+  if (!arg || arg === "status") return "show";
+  return arg === "cli" || arg === "wecom" ? arg : "invalid";
+};
 // `/audit` or `/audit <name>`. A supplied name resolves only through the global wizard registry;
 // without one, the caller's own mirror binding is used.
 const parseAuditCommand = (text: string): { name: string } | undefined => {
@@ -221,6 +231,9 @@ const renderHelp = (): string =>
     "`/audit` 本会话 token/成本明细 (含 subagent) · `/audit <名字>` 指定 wizard",
     "`/cfgsync` 预演跨 CLI 项目配置同步 · `/cfgsync apply` 执行 (需授权)",
     "`/help` 本帮助",
+    "",
+    "▎审批",
+    "`/use cli` 审批交给你本地 CLI 的权限框 (企微卡停用) · `/use wecom` 交回企微 · `/use` 看当前",
     "",
     "▎引用 (quote)",
     "引用消息 + 新文字：被引用内容作为上下文前缀附在你的话前。",
@@ -748,6 +761,23 @@ export const installInboundRouter = (
           true,
         );
       } catch { /* ignore */ }
+      return { stop: true };
+    }
+    // Authorized `/use [cli|wecom]` — 审批 hook 的裁决权在企微卡片与本地 CLI 之间
+    // 切换。写一个状态文件, 不改 hook 注册, 对已在跑的会话即刻生效。
+    const use = parseUseCommand(text);
+    if (use) {
+      if (use === "invalid") {
+        await replyText(frame, msg, who, "用法: `/use cli` 交给本地 CLI · `/use wecom` 交回企微卡片 · `/use` 看当前");
+        return { stop: true };
+      }
+      if (use !== "show") writeHookMode(cfg.daemon.stateDir, use);
+      const now = readHookMode(cfg.daemon.stateDir);
+      const body = now === "cli"
+        ? "审批 hook: cli — 工具调用交给本地 CLI 自己的权限框\n· 企微审批卡、AskUserQuestion 投票卡、原生 picker 代按一并停用\n· Shift+Tab / 权限模式切换不受影响 (hook 不再答复)\n/use wecom 切回企微"
+        : "审批 hook: wecom — 审批卡发到企微\n/use cli 改为本地 CLI 自己弹框";
+      log.info({ who, mode: now }, "/use: approval hook mode");
+      await replyText(frame, msg, who, `${body}\n(${hookModePath(cfg.daemon.stateDir)})`);
       return { stop: true };
     }
     // Authorized `/wx …` — 微信 ClawBot 绑定管理 (weixin-cmd.ts; 只有审批人、绑定只在单聊)。

@@ -38,6 +38,7 @@ wezard <subcommand>
   svr [args...]        run standalone detail relay (deploy on a host chat + cli both reach)
   logs [-f]            tail daemon log
   config-path            show resolved config path
+  use [cli|wecom]        approval hook: 交给本地 CLI 自己弹框 / 交回企微审批卡 (无参 = 看当前)
   sync                   write hooks/MCP/env into sync.targets settings.json
   unsync                 remove our entries from sync.targets settings.json
   wx [bind|list|unbind]  WeChat ClawBot: scan-to-bind a WeChat user as a chat (terminal QR)
@@ -347,6 +348,12 @@ case "$cmd" in
     ;;
   mirror-status)
     http_get /mirror/status | jq . 2>/dev/null || http_get /mirror/status
+    ;;
+  use)
+    NODE_BIN="$(command -v node)"
+    SCRIPT="$REPO_ROOT/dist/cli/hook-mode.js"
+    [[ -f "$SCRIPT" ]] || { echo "build first: npm run build"; exit 1; }
+    exec "$NODE_BIN" "$SCRIPT" "$@"
     ;;
   sync)
     NODE_BIN="$(command -v node)"

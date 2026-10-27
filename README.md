@@ -356,6 +356,7 @@ IM 里发 `/help` 可随时拉出完整命令表；每次 `/new`、`/clear` 之�
 /wx · /wx bind|code|unbind            微信 ClawBot：状态 / 扫码绑定 / 解绑（审批人）
 /id · /pwd · /usage · /cost · /audit   信息查询（免授权）
 /cfgsync [apply]                      预演 / 执行跨 CLI 项目配置同步
+/use [cli|wecom]                     审批交给本地 CLI 弹框 / 交回企微卡片（无参 = 看当前）
 /help                                 全部命令
 ```
 
@@ -368,6 +369,7 @@ wezard send <chat> <text>  # 主动推消息
 wezard sync                # 重写 hook/MCP/env 进各 settings.json
 wezard wx [bind|list|unbind]  # 微信 ClawBot：终端扫码绑定 / 查看 / 解绑
 wezard reload              # 重启 daemon（改了配置后用）
+wezard use [cli|wecom]     # 审批交给本地 CLI 弹框 / 交回企微卡片（无参 = 看当前）
 wezard unsync              # 卸载 hook/MCP（保留 daemon）
 wezard uninstall           # 完整卸载（先于 npm uninstall）
 ```

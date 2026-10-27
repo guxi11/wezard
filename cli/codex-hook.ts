@@ -4,10 +4,13 @@ import { loadConfig } from "../shared/config.js";
 import { codexApprovalRequest, codexHookOutput, codexSelfCallBypass, type CodexApprovalInput, type CodexHookEvent, type ApprovalReply } from "../shared/codex-approval.js";
 import { sleep } from "../shared/std.js";
 import { recordCodexPaneSession } from "../shared/codex.js";
+import { readHookMode } from "../shared/hook-mode.js";
 
 const requestApproval = async (input: CodexApprovalInput): Promise<ApprovalReply> => {
   const { config: cfg } = loadConfig();
   if (!cfg.approval.enabled) return { decision: "ask", reason: "approval_disabled" };
+  // `wezard use cli`: 审批权在本地 CLI, 回 ask 让 codex 弹它自己的原生框。
+  if (readHookMode(cfg.daemon.stateDir) === "cli") return { decision: "ask", reason: "hook_mode_cli" };
   const base = process.env.WEZARD_DAEMON_BASE ?? `http://127.0.0.1:${cfg.daemon.port}`;
   // Loopback fetch does not use HTTP_PROXY; do not send hook inputs off-machine.
   const url = new URL("/approve", base);
@@ -77,7 +80,8 @@ const main = async (): Promise<void> => {
     const { config: cfg } = loadConfig();
     const reply = await requestApproval(input);
     // Disabled hooks should not block ordinary tools, nor approve escalations.
-    console.log(JSON.stringify(!cfg.approval.enabled ? {} : codexHookOutput(event, reply)));
+    const passthrough = !cfg.approval.enabled || readHookMode(cfg.daemon.stateDir) === "cli";
+    console.log(JSON.stringify(passthrough ? {} : codexHookOutput(event, reply)));
   } catch (e) {
     console.log(JSON.stringify(sessionStart ? { systemMessage: `wezard session registration failed: ${(e as Error).message}` } : codexHookOutput(event, { decision: "ask", reason: (e as Error).message })));
   }

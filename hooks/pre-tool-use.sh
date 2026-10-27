@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # wezard PreToolUse hook: forward to local daemon → long-poll → emit decision.
-# daemon 不可达 / 回包坏了 → allow (没有审批人可问, 别卡住工作流); 其它失败 → ask。
+# `wezard use cli` / daemon 不可达 / 回包坏了 → 不答复 (exit 0), 由本地 CLI 自己的
+# 权限流程接管; 只有「请求本身没读懂」才回 ask。
 set -uo pipefail
 
 # --noproxy '*' on every daemon curl below: the daemon is on 127.0.0.1, but an
@@ -36,12 +37,30 @@ emit() {
 }
 ask() { emit "ask" "${1:-bridge unreachable}"; }
 
-# daemon 出问题 (连不上 / 重启没回来 / 回包坏了) 一律放行: 审批人只活在 daemon
-# 里, 它不在时回 ask 只会弹出远端看不见的本地 picker, 把无人值守的 wizard 卡死。
-bridge_down() { emit "allow" "daemon down, auto-allow: $1"; }
+# 不答复 = 交还给 CLI: 没有 permissionDecision 时, CC/CodeBuddy 按自己的权限规则走
+# (允许规则命中就直接跑, 否则弹本地原生框等人点)。这是「审批回到 CLI 里人工处理」的
+# 唯一正确表达 —— 回 ask 会强制每个工具都弹框 (连 CLI 原本允许的也弹), 回 allow 则是
+# 静默全权。
+passthrough() { exit 0; }
+
+# daemon 出问题 (连不上 / 重启没回来 / 回包坏了): 不答复, 让本地 CLI 兜住。
+# 这里曾经是 emit allow —— 那是「没有审批人就把权限全放出去」, 与「审批权交给 CLI」
+# 正好相反: pane 里跑的东西会静默拿到任何权限, 而人还以为自己在被审批保护。
+bridge_down() { passthrough; }
 
 PAYLOAD=$(cat) || ask "stdin read failed"
-command -v jq >/dev/null 2>&1 || ask "jq not installed — approval cards disabled; run: apt-get install jq (or yum/apk/brew) then reload"
+
+# ── 运行时开关 (`wezard use cli`) ──────────────────────────────────────
+# 文件不存在 = wecom (默认)。放在 jq 检查之前: 读它只需要一个 cat。真正的退出在
+# 模式解析之后 (见下面「现在退出」), 这样权限模式档案不会停在切换前那一档。
+MODE_FILE="$STATE_DIR/approval-mode"
+MODE="${WEZARD_HOOK_MODE:-$(cat "$MODE_FILE" 2>/dev/null || true)}"
+
+# jq 缺失照样要能把审批还给 CLI —— 这道降级不该反过来变成「每个工具都弹框」。
+if ! command -v jq >/dev/null 2>&1; then
+  [[ "$MODE" == "cli" ]] && passthrough
+  ask "jq not installed — approval cards disabled; run: apt-get install jq (or yum/apk/brew) then reload"
+fi
 
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // empty')
 TOOL_NAME=$(printf '%s' "$PAYLOAD" | jq -r '.tool_name // empty')
@@ -140,6 +159,13 @@ elif [[ "$IS_SUBAGENT" == "0" ]]; then
   # 就把父会话的 bypass 档案覆盖了。IS_SUBAGENT 把转录布局也算进证据。
   record_mode "$EFFECTIVE_MODE"
 fi
+
+# ── 现在退出才是「审批回到 CLI」 ────────────────────────────────────────
+# 位置有讲究: 必须在模式解析 / 落档之后。cli 模式下人照样用 Shift+Tab 切
+# default / acceptEdits / plan / bypass, 档案要跟着更新 —— 切回 wecom 后子代理
+# 对齐父会话读的就是它。早退会让档案停在切换前那一档 (比如已经取消的 bypass),
+# 那才叫「开了 cli 反而影响模式判断」。
+[[ "$MODE" == "cli" ]] && passthrough
 
 # 权限模式短路: 只对用户主动选的"完全跳过"模式放掉, 其它一律走 daemon 发 IM
 # 卡, 让 wezard 远端用户能在 IM 上点决策。
@@ -288,6 +314,21 @@ wait_for_daemon() {
   return 1
 }
 
+# wezard 这个服务还在不在 (wezard stop / uninstall 会把 plist / unit 摘掉)。用来区分
+# 「daemon 正在重启 (job 还在, 值得等它回来)」和「daemon 被人停了 (等 60s 纯属白等,
+# 而且让人误以为审批还在)」。
+svc_registered() {
+  case "$(uname -s)" in
+    Darwin) launchctl print "gui/$(id -u)/com.wezard.daemon" >/dev/null 2>&1 ;;
+    Linux)
+      [[ "$(systemctl --user show -p LoadState --value wezard.service 2>/dev/null || true)" == "loaded" ]] && return 0
+      local pf="$HOME/.wezard/daemon.pid" pid
+      [[ -f "$pf" ]] && pid=$(cat "$pf" 2>/dev/null) && [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # 长轮询 + 重启续接。整个循环共享 HOOK_TIMEOUT 预算 (hooks.json 的 timeout 只比
 # 它多 10s), 所以每轮 --max-time 用的是剩余额度而不是重新计时。
 RESUME_ID=""
@@ -306,6 +347,8 @@ while :; do
     # 是安全的; 只是没有 req_id 可续, daemon 会发一张新卡, 旧卡沦为鬼卡。
     COLD_RETRIES=$((COLD_RETRIES + 1))
     (( COLD_RETRIES <= 2 )) || bridge_down "daemon unstable"
+    # 服务已经不在 (stop / uninstall): 等它回来是白等 60s, 立刻把审批还给本地 CLI。
+    svc_registered || passthrough
     wait_for_daemon || bridge_down "daemon curl failed"
     continue  # RESUME_ID 有就带着 (卡还活着), 没有就是重发一张新卡
   fi

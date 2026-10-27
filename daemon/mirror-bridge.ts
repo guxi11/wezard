@@ -62,6 +62,7 @@ import type { CtxCut, TurnFrom, TurnUsage } from "./detail.js";
 import { errText } from "./last-response.js";
 import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, windowLabel, withTagHeader, withLinkedTagHeader, chatHead, headed, tagBadge, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey, sameBot } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
+import { readHookMode } from "../shared/hook-mode.js";
 import { isWxFrame } from "../shared/wx-text.js";
 import { chatNameOf, listChatNames, peerAddress } from "./chat-name.js";
 import { stripAnsi, paneIsBusy, codexTurnBusy, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, lastModel, lastUserTurn, talkRounds, openToolUses, turnClosed, renderDialog, stripForChat, parseClosing, type PeerInfo, type PeerReply } from "./peers.js";
@@ -6951,7 +6952,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   //     对应选项; 本地先按掉则 moot 作废卡。代按/发卡都发 chat 回执留痕。
   // WEZARD_PICKER_SENTINEL=0 整体关闭。
   const pickerOne = async (a: AttachState, pane: string, sid: string, gen: number, signal: AbortSignal): Promise<void> => {
-    const guard = () => maintenanceValid(a, pane, sid, gen, signal) && (cliOf(a) === "codex" || cfg.approval.enabled)
+    // `wezard use cli` 同一票否决: 本地原生框是给人的, daemon 代按就等于审批没回退。
+    const guard = () => maintenanceValid(a, pane, sid, gen, signal)
+      && (cliOf(a) === "codex" || (cfg.approval.enabled && readHookMode(cfg.daemon.stateDir) === "wecom"))
       && process.env.WEZARD_PICKER_SENTINEL !== "0";
     if (!guard()) return;
     await withPaneInput(pane, async (live) => {
@@ -7053,7 +7056,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const pickerTick = (): void => {
     if (process.env.WEZARD_PICKER_SENTINEL === "0") return;
     for (const a of byTarget.values()) {
-      if (!a.tmuxPane || (cliOf(a) !== "codex" && !cfg.approval.enabled)) continue;
+      if (!a.tmuxPane || (cliOf(a) !== "codex" && (!cfg.approval.enabled || readHookMode(cfg.daemon.stateDir) === "cli"))) continue;
       const pane = a.tmuxPane, sid = a.sessionId, gen = a.injectGen ?? 0;
       void maintenance.schedule(`picker:${a.target}`, pane, (signal) => pickerOne(a, pane, sid, gen, signal))
         ?.catch((e: unknown) => {
