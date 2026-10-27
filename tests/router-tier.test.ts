@@ -34,6 +34,15 @@ const custom = ConfigSchema.parse({ bot, models: { backends: {
   claude: { tiers: { standard: { model: "legacy", effort: "high" } } },
   codex: { tiers: { standard: { model: "first", effort: "medium" } } },
 } } });
+const legacyGlobal = ConfigSchema.parse({ bot, models: {
+  tiers: { standard: { cli: "claude", model: "legacy-global", effort: "high" } },
+  backends: { codex: { tiers: { standard: { model: "codex-current", effort: "medium" } } } },
+} });
+assert.equal("tiers" in legacyGlobal.models, false, "retired global models.tiers is stripped by the schema");
+const legacyIgnored = pickRouter(legacyGlobal, "codex");
+assert(legacyIgnored.ok);
+assert.equal(legacyIgnored.cli, "codex");
+assert.equal(legacyIgnored.model, "codex-current", "retired global tiers do not override backend tiers");
 let pick = pickRouter(custom, "claude");
 assert(pick.ok);
 assert.equal(pick.model, "legacy", "Claude backend uses its configured tier table");
@@ -51,7 +60,11 @@ assert(pick.ok);
 assert.equal(pick.model, "next", "read the map at creation time, not cached");
 custom.models.router = "hard";
 custom.models.backends.claude.tiers.hard = { model: "claude-opus", effort: "max" };
-custom.models.backends.codex.tiers.hard = { model: "codex-model", effort: "high" };
+const hardWithCli = ConfigSchema.parse({ bot, models: { router: "hard", backends: {
+  codex: { tiers: { hard: { cli: "claude", model: "codex-model", effort: "high" } } },
+} } });
+assert.equal("cli" in hardWithCli.models.backends.codex.tiers.hard, false, "tier schema strips unsupported cli");
+custom.models.backends.codex.tiers.hard = hardWithCli.models.backends.codex.tiers.hard;
 pick = pickRouter(custom, "codex");
 assert(pick.ok);
 assert.equal(pick.tier, "hard");
