@@ -5,8 +5,8 @@ const envelope = '<system-reminder wezard="envelope" kind="peer" from=".b" scope
 const delivery = (event: string): string => `\n<system-reminder wezard="receipt-delivery" event="${event}">\n</system-reminder>`;
 const oldTranscript = `${envelope}${delivery("rcpt:e7:r1")}`;
 
-assert.equal(parseEnvelope(oldTranscript)?.eventId, undefined, "receipt-delivery does not supply envelope identity");
-assert.equal(parseEnvelope(`${envelope}${delivery("rcpt:earlier")}${delivery("rcpt:last")}`)?.eventId, undefined);
+assert.equal(parseEnvelope(oldTranscript)?.eventId, "rcpt:e7:r1", "legacy receipt-delivery event remains readable");
+assert.equal(parseEnvelope(`${envelope}${delivery("rcpt:earlier")}${delivery("rcpt:last")}`)?.eventId, "rcpt:last");
 const oldDelivery = parseReminders(oldTranscript).find((r) => r.attrs.wezard === "receipt-delivery");
 assert.equal(oldDelivery?.attrs.event, "rcpt:e7:r1", "unknown raw block remains visible to parseReminders");
 assert.deepEqual(reminderLabel(oldDelivery!), { label: "receipt-delivery" });
@@ -21,7 +21,7 @@ assert.equal(carriesMsg(messageEvent, "route:old"), true, "message-event identit
 assert.deepEqual(reminderLabel(parseReminders(messageEvent)[0]!), { label: "msg", machine: true });
 assert.equal(parseEnvelope(`${envelope}${messageEvent}`)?.eventId, undefined, "message-event does not supply Envelope.eventId");
 assert.equal(parseEnvelope(`${currentEnvelope}${messageEvent}`)?.eventId, "route:current", "envelope.msg wins");
-assert.equal(parseEnvelope(`${oldTranscript}${messageEvent}`)?.eventId, undefined, "message-event does not revive receipt-delivery identity");
+assert.equal(parseEnvelope(`${oldTranscript}${messageEvent}`)?.eventId, "rcpt:e7:r1", "message-event does not override legacy receipt-delivery identity");
 
 const legacy = "<system-reminder>legacy prose from `.b`</system-reminder>";
 assert.equal(parseEnvelope(legacy), undefined, "prose does not supply envelope identity");
