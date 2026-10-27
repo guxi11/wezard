@@ -1,20 +1,19 @@
 import assert from "node:assert/strict";
-import pino from "pino";
 import { ConfigSchema } from "../shared/config.js";
-import { bindCliBackends } from "../shared/cli-backends.js";
-import { backendFor, spawnTmuxClaude } from "../daemon/spawn-tmux.js";
+import { bindCliBackends, resolveCliBackend } from "../shared/cli-backends.js";
+import { backendFor } from "../daemon/spawn-tmux.js";
 
 // A stale process registry must not override the current configuration.
 bindCliBackends({ defaultCli: "claude" });
 try {
-  const cfg = ConfigSchema.parse({ bot: { botId: "test", secret: "test" }, wrc: { defaultCli: "codex" } });
+  const cfg = ConfigSchema.parse({ bot: { botId: "test", secret: "test" }, wrc: {
+    defaultCli: "codex", cliBackends: { codex: { bin: "/legacy/custom-codex" } },
+  } });
   assert.equal(backendFor(cfg).name, "codex");
   assert.equal(backendFor(cfg).bin, "codex");
-  // Reject before launching tmux or sending a foreign session ID to Codex.
-  for (const forkSession of [false, true]) {
-    const result = await spawnTmuxClaude({ cfg, log: pino({ level: "silent" }), cli: "claude", resumeSessionId: "old-claude-session", forkSession });
-    assert.equal(result.ok, false);
-    assert.match(result.reason!, /无法跨后端恢复或克隆/);
-  }
+  assert.equal("bin" in cfg.wrc.cliBackends.codex, false, "retired Codex bin config is ignored by the schema");
+  const recordedBackend = resolveCliBackend({ ...cfg.wrc, defaultCli: "claude" });
+  assert.equal(recordedBackend.name, "claude");
+  assert.equal(recordedBackend.bin, "claude");
 } finally { bindCliBackends({}); }
-console.log("Pane backend follows configuration and rejects foreign resume/fork");
+console.log("Pane backend follows configured default; Codex binary remains built in and recorded sessions resolve independently");
