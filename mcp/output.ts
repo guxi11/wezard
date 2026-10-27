@@ -38,7 +38,7 @@ export const present = (tool: string, raw: unknown, input?: Row): unknown => {
       ...pick(row, ["ok", "dryRun", "decision", "name", "tier"]),
       reason: dryRunReason(row),
     };
-    const result = pick(row, ["ok", "name", "event", "eventId", "queued", "parked", "after", "decision", "tier", "model", "effort", "planId", "public", "transfer", "warnings", "warning", "modelWarning", "tierNote", "urgentDowngraded", "reUnknown", "gated"]);
+    const result = pick(row, ["ok", "name", "event", "eventId", "queued", "parked", "after", "decision", "tier", "model", "effort", "planId", "public", "transfer", "warnings", "warning", "modelWarning", "urgentDowngraded", "reUnknown", "gated"]);
     const fallback = row.diagnostics && typeof row.diagnostics === "object"
       ? (row.diagnostics as Row).deliveryFallback
       : undefined;
@@ -46,7 +46,7 @@ export const present = (tool: string, raw: unknown, input?: Row): unknown => {
     return result;
   }
   if (tool === "tell_peer") return pick(row, ["ok", "name", "event", "eventId", "queued", "priority", "wasBusy", "planId", "public", "transfer", "after", "parked", "warnings", "warning", "gated", "reason", "urgentDowngraded", "reUnknown"]);
-  if (tool === "spawn_wizard" || tool === "clone_wizard") return pick(row, ["ok", "name", "cwd", "inherited", "model", "effort", "tier", "modelWarning", "tierNote", "dispatched", "queued", "event", "eventId", "planId", "warnings", "warning"]);
+  if (tool === "spawn_wizard" || tool === "clone_wizard") return pick(row, ["ok", "name", "cwd", "inherited", "model", "effort", "tier", "modelWarning", "dispatched", "queued", "event", "eventId", "planId", "warnings", "warning"]);
   if (tool === "wizard_identity") {
     const result: Row = { ...pick(row, ["ok", "name", "renamed"]) };
     if (input?.description !== undefined && String(input.description).trim()) result.description = row.description;
