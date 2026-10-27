@@ -22,6 +22,7 @@ import { planMedia, type MediaKind, type SendMedia } from "./media.js";
 import { aibotSendMedia } from "./aibot-media.js";
 import { startNetWatch } from "./net-watch.js";
 import { startHttp, json, readBody, type Handler } from "./http.js";
+import { registerMcpHttp } from "./mcp-http.js";
 import { parsePath } from "../shared/config-meta.js";
 import { pickTier } from "../shared/model-tiers.js";
 import { applyHot, cfgSeenBy, patchedTop, pinChatKeys, configGet, planSet, renderPlan, tierEvidence, type Plan, type SetReq, type TierUsage, type UsageTotals } from "./config-api.js";
@@ -510,6 +511,9 @@ const main = async (): Promise<void> => {
     const want = Buffer.from(daemonToken);
     return got.length === want.length && timingSafeEqual(got, want);
   };
+  // 进程内 MCP: 同一个工具面 (mcp/tools.ts) 挂到 loopback 上, 每个请求一个 server+transport,
+  // 身份从 x-wezard-pane / x-wezard-session 进 ALS —— 不读 env, daemon 只有一份 env。
+  registerMcpHttp(http, { tokenOk, log: log.child({ mod: "mcp-http" }) });
   const guarded = (h: Handler): Handler => async (req, res, url, ctx) => {
     if (tokenOk(req)) return h(req, res, url, ctx);
     json(res, 403, { ok: false, reason: `这条路由要出示 ${DAEMON_TOKEN_FILE} 里的口令 (header ${DAEMON_TOKEN_HEADER}); 正在跑的 wizard 若是旧版 MCP 进程, 重开会话即可` });

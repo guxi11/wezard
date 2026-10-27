@@ -1,5 +1,9 @@
 // Local control HTTP — talks to hooks, slash commands, MCP server.
-// Bound to 127.0.0.1; trust = "anyone with loopback access".
+// Bound to 127.0.0.1 by default (daemon.host). Loopback is not a permission boundary:
+// routes that write sensitive state — config, allowFrom claims, task files the daemon
+// will execute — and the MCP endpoint /mcp require the daemon token
+// (x-wezard-token, ~/.wezard/daemon-token, 0600). The rest is readable by anything
+// on the box that can reach the port.
 // Endpoints intentionally tiny & sync-friendly.
 import { existsSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
