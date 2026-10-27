@@ -710,7 +710,8 @@ export const hintsOf = (use: ToolUse, result: ToolResult | undefined): Hint[] =>
     const h = hintOf({ ...use, toolName: inner, toolInput: objectOf(wrap.params) ?? {} }, result);
     if (h) return [h];
   }
-  if (!/^(?:functions[._])?exec$/.test(use.toolName) || !result) return [];
+  // REPL = CodeBuddy PTC 模式的外壳 (一切工具调用包进它的 code 参数)。
+  if (!/^(?:functions[._])?(?:exec|REPL)$/.test(use.toolName) || !result) return [];
   const source = typeof use.toolInput === "string" ? use.toolInput : objOf(use.toolInput).code;
   if (typeof source !== "string") return [];
   return execHintCalls(source, result.body).flatMap((c) => {

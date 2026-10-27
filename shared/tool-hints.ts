@@ -19,6 +19,9 @@ export const toolReplies = (value: unknown, depth = 0): Facts[] => {
   if (Array.isArray(o.content)) return toolReplies(o.content, depth + 1);
   if ((o.type === "text" || o.type === "input_text") && typeof o.text === "string") return toolReplies(o.text, depth + 1);
   if (o.status === "fulfilled") return toolReplies(o.value, depth + 1);
+  // CodeBuddy REPL (PTC) 的回包壳: {result, stdout, stderr} —— 回执在 result 里 (JSON 字符串
+  // 或对象); 只有 stdout/stderr 的 (Bash 输出) 和 error 形态都不是回执, 不解。
+  if (o.result !== undefined && typeof o.stdout === "string" && typeof o.stderr === "string") return toolReplies(o.result, depth + 1);
   return [];
 };
 
@@ -53,7 +56,8 @@ export interface HintCall { toolName: string; toolInput: Facts }
 export const callsInExec = (source: string, accept: (name: string) => boolean = (name) => name.startsWith("mcp__wezard__") && HINT_TOOL.test(name)): HintCall[] => {
   if (source.length > 200_000) return [];
   try {
-    const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowAwaitOutsideFunction: true }) as Syntax;
+    // allowReturnOutsideFunction: REPL 的 code 是函数体, 顶层 return 是常态 —— 不放开整个解析直接失败。
+    const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true }) as Syntax;
     const bindings = new Map<string, unknown>();
     const calls: HintCall[] = [];
     const walk = (n: Syntax): void => {
@@ -73,10 +77,14 @@ export const callsInExec = (source: string, accept: (name: string) => boolean = 
           bindings.set(d.id.name, v !== null && typeof v === "object" ? UNKNOWN : v);
         }
       }
-      if (n.type === "CallExpression" && n.callee.type === "MemberExpression" && !n.callee.computed && n.callee.object.type === "Identifier" && n.callee.object.name === "tools") {
-        const name = n.callee.property.name;
+      if (n.type === "CallExpression" && n.callee.type === "MemberExpression" && !n.callee.computed && n.callee.object.type === "Identifier") {
+        // 两种调用形: Claude code-mode 的 tools.mcp__wezard__x(…) 与 CodeBuddy REPL (PTC) 的
+        // mcp_wezard.x(…) —— 后者归一成 mcp__wezard__x, accept / HINT_TOOL 只认一种拼写。
+        const prop = n.callee.property.name;
+        const name = n.callee.object.name === "tools" ? prop
+          : n.callee.object.name === "mcp_wezard" ? `mcp__wezard__${prop}` : undefined;
         const input = n.arguments.length === 0 ? {} : literal(n.arguments[0], bindings);
-        if (accept(name) && objectOf(input)) calls.push({ toolName: name, toolInput: input as Facts });
+        if (name !== undefined && accept(name) && objectOf(input)) calls.push({ toolName: name, toolInput: input as Facts });
       }
       for (const value of Object.values(n)) {
         if (Array.isArray(value)) value.forEach((x) => { if (x?.type) walk(x); });
