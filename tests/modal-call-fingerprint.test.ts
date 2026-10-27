@@ -177,5 +177,85 @@ t("命令行里的时间词不是计时行: sleep 5m 属于调用本身 → 指�
   );
 });
 
+// ── 真屏回归: CodeBuddy「高危操作逐次确认」框 (2026-10-27 线上现场, pane %2401) ──
+// 正文里没有 Confirm 头, 也没有 toolName/params —— complete 恒 false, 而这张卡正是
+// 哨兵为「无法完整识别」的框发的。它必须照样有指纹, 否则人点通过永远只换来
+// 「代按失败（操作或参数已变更）」, 哨兵还会每拍重发一张同样的卡。
+const highRiskPicker = (command: string, desc: string, progress: string): string => `
+∴ Thought
+● REPL · Run extraction with duplicate corpus
+  └ · 6s · 1 command (ctrl+o to expand)
+      ✓ Bash  ${command}  48.0s
+
+● REPL · Run extraction again, return raw
+  └ ...${progress} → Bash · cd /tmp/dup-demo && cp public/js/testDem…
+${RULE}
+ Bash command
+
+   ${command}
+   ${desc}
+
+${RULE}
+
+ Do you want to proceed(High risk operation detected - requires confirmation every time)?
+
+ > 1. Yes
+   2. Yes, and don't ask again for session (shift + tab)
+   3. No, and tell CodeBuddy what to do differently (escape)`;
+
+const CMD = 'rm -rf /tmp/dup-demo && cp -R /Users/zyy/develop/Tencent/mail_modules/packages/tools/ww.i18n-cli/test/wwmngxDemo /tmp/dup-demo';
+
+t("真屏高危框: 框外进度行/转录变化 → 指纹不变 (人点通过能真的按下去)", () => {
+  assert.ok(isModalPane(highRiskPicker(CMD, "run extract with duplicate corpus", "running 1m ago")).modal);
+  const a = modalCallFingerprint(highRiskPicker(CMD, "run extract with duplicate corpus", "running 1m ago"));
+  const b = modalCallFingerprint(highRiskPicker(CMD, "run extract with duplicate corpus", "running 3m ago"));
+  assert.ok(a !== undefined, "可识别的确认区 → 必须有指纹");
+  assert.equal(a, b);
+});
+
+t("真屏高危框: 命令差一个字节 / 描述不同 → 指纹变", () => {
+  const base = modalCallFingerprint(highRiskPicker(CMD, "run extract with duplicate corpus", "running 1m ago"));
+  assert.notEqual(modalCallFingerprint(highRiskPicker(CMD.replace("/tmp/dup-demo", "/tmp/dup-dem0"), "run extract with duplicate corpus", "running 1m ago")), base);
+  assert.notEqual(modalCallFingerprint(highRiskPicker(CMD, "run extraction with duplicate corpus", "running 1m ago")), base);
+});
+
+t("真屏高危框: 正文缩进/空白变化 → 指纹变 (不归一化)", () => {
+  const base = modalCallFingerprint(highRiskPicker(CMD, "run extract with duplicate corpus", "running 1m ago"));
+  const indented = highRiskPicker(CMD, "run extract with duplicate corpus", "running 1m ago").replace(`   ${CMD}`, `    ${CMD}`);
+  assert.notEqual(modalCallFingerprint(indented), base);
+});
+
+t("真屏高危框: heredoc 正文里的空行变化 → 指纹变", () => {
+  const heredoc = (body: string) => `${RULE}
+ Bash command
+
+   cat > /tmp/a.js <<'EOF'
+${body}
+   EOF
+   write demo file
+
+${RULE}
+
+ Do you want to proceed(High risk operation detected - requires confirmation every time)?
+
+ > 1. Yes
+   2. Yes, and don't ask again for session (shift + tab)
+   3. No, and tell CodeBuddy what to do differently (escape)`;
+  const one = modalCallFingerprint(heredoc("   a();\n   b();"));
+  const two = modalCallFingerprint(heredoc("   a();\n\n   b();"));
+  assert.ok(one !== undefined && two !== undefined);
+  assert.notEqual(one, two);
+});
+
+t("真屏高危框: 高亮初始落在放宽项也不影响指纹", () => {
+  const moved = highRiskPicker(CMD, "run extract with duplicate corpus", "running 1m ago")
+    .replace(" > 1. Yes", "   1. Yes")
+    .replace("   2. Yes, and don't ask again", " > 2. Yes, and don't ask again");
+  assert.equal(
+    modalCallFingerprint(moved),
+    modalCallFingerprint(highRiskPicker(CMD, "run extract with duplicate corpus", "running 1m ago")),
+  );
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

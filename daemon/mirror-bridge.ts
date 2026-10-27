@@ -1387,13 +1387,17 @@ const pressModalIndex = async (
   index: number,
   live: () => boolean = () => true,
 ): Promise<ModalPaneVerdict & { screen: string }> => {
-  const fingerprint = modalFingerprint(before.screen);
+  // 比的是「还是同一只框里的同一个调用」, 不是整屏原文: 屏上的进度行/计时/spinner
+  // 每拍都在变, 拿原文比会让每一次多拍等待都判成「换了框」而停手 —— 按数字键本来
+  // 就是在这同一只框里选的 (身份认不出时才退回整屏, 保持原来的保守口径)。
+  const identityOf = (screen: string): string => modalCallFingerprint(screen) ?? modalFingerprint(screen);
+  const fingerprint = identityOf(before.screen);
   const current = await detectModalPicker(pane);
-  if (!live() || !current.modal || modalFingerprint(current.screen) !== fingerprint) return current;
+  if (!live() || !current.modal || identityOf(current.screen) !== fingerprint) return current;
   await runTmux(["send-keys", "-t", pane, String(index)]);
   await sleep(MODAL_PRESS_SETTLE_MS);
   let after = await detectModalPicker(pane);
-  if (!after.modal || modalFingerprint(after.screen) !== fingerprint) return after;
+  if (!after.modal || identityOf(after.screen) !== fingerprint) return after;
   // 数字键没关掉框: 把高亮挪到目标项。guard 上限盖过任何确认框的选项数。
   for (let guard = 0; guard < 8; guard++) {
     if (!live()) return after;
@@ -1402,7 +1406,7 @@ const pressModalIndex = async (
     await runTmux(["send-keys", "-t", pane, cur < index ? "Down" : "Up"]);
     await sleep(MODAL_ARROW_SETTLE_MS);
     after = await detectModalPicker(pane);
-    if (!after.modal || modalFingerprint(after.screen) !== fingerprint) return after;
+    if (!after.modal || identityOf(after.screen) !== fingerprint) return after;
   }
   if (!live() || highlightedIndex(after.screen) !== index) return after; // 核不准, 绝不盲按
   await runTmux(["send-keys", "-t", pane, "Enter"]);
@@ -6985,8 +6989,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         return;
       }
       if (hasMirrorPicker(a.sessionId)) return; // 审批卡在途, 等点击 / moot
-      if (a.pickerSentinelFp === v.screen) return; // 同一屏已处理过, 等它变化
-      a.pickerSentinelFp = v.screen;
+      // 去重按「同一只框里的同一个调用」, 不按整屏原文: 框外的进度行每拍都在变,
+      // 拿原文比等于每拍都是新屏 —— 张注定失败或已回执的卡就会被无限重发。
+      const call = modalCallFingerprint(v.screen);
+      // 认不出调用的框 (只剩问句与选项) 用一个固定键去重: 它本来就没有可比对的内容,
+      // 每拍重来只会重复同一条日志 / 同一条告知。
+      const seen = call ?? "unknown-modal";
+      if (a.pickerSentinelFp === seen) return;
+      a.pickerSentinelFp = seen;
       const pick = pickAutoAllowAnswer(parseModalOptions(v.screen));
       if (!pick) {
         // tail 与上面「未判成 modal」分支同款: 远端 (devcloud) 选项文案变体排查靠它,
@@ -7002,18 +7012,20 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       await dispatchPickerPolicy(policy, {
         deny: async () => {
           if (!valid()) return;
-          const result = await pressNativePickerUnlocked(a, modalCallFingerprint(v.screen), "no", valid);
+          const result = await pressNativePickerUnlocked(a, call, "no", valid);
+          if (result.ok && valid()) a.pickerSentinelFp = undefined; // 已按掉: 同一调用再次弹出要重新发卡
           if (!valid()) return;
           log.info({ target: a.target, reason: policy.reason, result }, "picker sentinel: deny rule");
-          sendStandalone(a, `[mirror] 🚫 ${policy.reason}，${result.ok ? "已拒绝 CLI 确认" : "确认框已变更，请回 CLI 处理"}`);
+          sendStandalone(a, `[mirror] 🚫 ${policy.reason}，${result.ok ? "已拒绝 CLI 确认" : `代按失败（${result.reason ?? "未知"}），请回 CLI 处理`}`);
         },
         allow: async () => {
           if (!valid()) return;
           const after = await pressModalIndex(pane, v, pick.index, valid);
           if (!valid()) return;
           if (after.modal) {
-            // 没按掉: 指纹换成当前屏 — pane 静止就不再重试, 免得往一个不认识的框里刷数字键。
-            a.pickerSentinelFp = after.screen;
+            // 没按掉: 去重键换成「按完那只框」的调用身份 — pane 静止就不再重试, 免得往一个
+            // 不认识的框里刷数字键; 内容真的变了则按下一次的身份重新判一遍策略。
+            a.pickerSentinelFp = modalCallFingerprint(after.screen) ?? after.screen;
             log.warn({ target: a.target, title: after.title, pressed: pick.index }, "picker sentinel: modal still on pane after press");
             return;
           }
@@ -7023,6 +7035,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         },
         manual: () => {
           if (!valid()) return;
+          if (call === undefined) {
+            // 正文里没有任何随调用变化的行 → 人点了也无从核对是不是同一只框。发卡只会
+            // 让他反复点到一个注定失败的回执, 所以只告知一次 (去重键在 pickerSentinelFp)。
+            log.info({ target: a.target, title: v.title }, "picker sentinel: modal without call identity — not carded");
+            sendStandalone(a, `[mirror] 🔒 屏上的确认框认不出调用内容${v.title ? `（${v.title}）` : ""}，请在 CLI 中确认。`);
+            return;
+          }
           // 卡片路径: fire-and-forget — 长轮询在 flow 里, 哨兵循环不能被一张卡挂住;
           // 防重靠 hasMirrorPicker 槽位 (含代按窗口期, 见 flow 内 finally)。
           log.info({ target: a.target, toolName: ctx.toolName, agent: ctx.agent, reason: policy.reason }, "picker sentinel: forwarding native picker as approval card");
@@ -7040,7 +7059,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
             danger: policy.forceSingle,
             voteTimeoutMs: cfg.approval.longPollSec * 1000,
             // Human waiting is outside the lock; the eventual press obtains a new transaction.
-            press: (what) => pressNativePicker(a, modalCallFingerprint(v.screen), what, guard),
+            // 按掉的这一只框已经了结: 同一份调用下次再弹出 (比如命令重试) 必须重新发卡,
+            // 不能让「这张调用已经发过」的去重键把它静默掉。代按失败则保留去重键 ——
+            // 失败说明人已经被告知回 CLI 处理, 重发一张同样的卡只会让他再点一次。
+            press: async (what) => {
+              const res = await pressNativePicker(a, call, what, guard);
+              if (res.ok && guard()) a.pickerSentinelFp = undefined;
+              return res;
+            },
           }).then((sent) => {
             // 卡没发出去 (WS 断/发送失败): 清指纹, 让下一 tick 对同屏重试发卡,
             // 否则这只框会被指纹永久静默。
@@ -7085,11 +7111,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (pickerPolicy(cfg, cliOf(a), parseConfirmContext(v.screen), false).decision === "leave") {
       return { ok: false, reason: "独立原生或交互审批，请在 CLI 中处理" };
     }
-    // 按调用比对: 认不出就不按 (undefined 也不等), 换框绝不盲按。
+    // 按调用比对: 认不出就不按 (undefined 也不等), 换框绝不盲按。两种失败要分开说 ——
+    // 「认不出」是我们自己核对不了, 「已变更」是屏上的调用真的换了, 给人的处置不同。
     const call = modalCallFingerprint(v.screen);
-    if (call === undefined || call !== expectCall) {
-      return { ok: false, reason: "当前确认框的操作或参数已变更，不代按" };
-    }
+    if (call === undefined) return { ok: false, reason: "屏上的确认框认不出调用内容，无法核对还是不是同一件事" };
+    if (call !== expectCall) return { ok: false, reason: "当前确认框的操作或参数与卡片上那份不同" };
     if (what === "no") {
       await runTmux(["send-keys", "-t", a.tmuxPane, "Escape"]);
       await sleep(MODAL_PRESS_SETTLE_MS);

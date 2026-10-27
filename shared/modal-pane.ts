@@ -267,15 +267,77 @@ export const modalFingerprint = (pane: string): string =>
     }).join("\n");
 
 // ── 按调用取指纹 (代按前后校验「人批准的还是同一件事」) ────────────────
-// modalFingerprint 比的是整屏: 框外的实时进度行 ("running 3m ago")、状态栏、
-// spinner 在等人点击的窗口里持续变化, 满宽分隔线还会随 pane 宽度重排 —— 带进度
-// 行的 TUI 上代按会永久失败, 且每次"变化"都触发重发卡。代按要守的是「换框绝不
-// 盲按」只为独立 modal 证据下的完整结构化调用生成指纹，并绑定完整 pane 原文。
-// 未知结构一律拒绝代按；包括正文、标记、空白或框外噪声在内的任何屏幕变化，
-// 都会拒绝旧批准，避免把批准错用到已变化的画面。
+// 比的是**确认区**, 不是整屏。整屏里有框外的实时进度行 ("running 3m ago")、
+// spinner、状态栏, 还有随 pane 宽度重排的满宽分隔线 —— 它们在等人点击的窗口里
+// 每一拍都在变, 绑上去等于「永不代按」: 人点一次通过, 只能收到一句代按失败,
+// 再看哨兵把同一只框重新发一遍卡。代按要守的只有一件事: **换框绝不盲按**。
+// 两层, 都只由人眼看到的东西构成 (卡片上写什么, 这里就比什么):
+//   • complete:true → 结构化调用: agent + toolName + 参数 (键序稳定化 —— pane
+//     宽度重排后重新解析仍得同一份调用);
+//   • 否则 → 确认区原文: 从最后一组选项向上收到转录边界, 逐字保留 (不 trim:
+//     缩进、数字、heredoc 正文差一个字节就算换了调用), 分隔线本身不进指纹。
+// 两种形态都带上选项文案 —— 选项集一变, 按第 N 项的含义就变了。
+// 认不出 (没有编号选项, 或确认区只剩 "Bash command"/问句这类每次一样的行) →
+// undefined, 调用方一律不代按: 认不出就不按。
+
+const stableStringify = (v: unknown): string => {
+  if (v === null || typeof v !== "object") return JSON.stringify(v) ?? "null";
+  if (Array.isArray(v)) return `[${v.map(stableStringify).join(",")}]`;
+  const entries = Object.entries(v as Record<string, unknown>)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, val]) => `${JSON.stringify(k)}:${stableStringify(val)}`).join(",")}}`;
+};
+
+// 确认区的分隔线/框线: 比 BOX_RULE 多收 ╌┄┅┈┉ (Claude 编辑确认的虚线)。宽度随
+// pane 变, 所以只用来分区, 不进指纹。空行不算分隔线 —— heredoc 正文里的空行是调用
+// 的一部分, 去掉它俩就变成同一个指纹了。
+const REGION_RULE = /^[─━╌┄┅┈┉╭╮╰╯┌┐└┘├┤┬┴═║╔╗╚╝\s]*$/u;
+// 转录侧行首标记: 这些行只会因滚动/进度变化而变, 不属于确认区, 也是确认区上界。
+// └├ 是子调用/进度树的接续行 ("  └ ...running 1m ago → Bash · …" 带着计时词),
+// ╭╮╰╯ 是框体自身的顶/底边 —— 走到框边就该停, 框外一律不参与比对。
+const TRANSCRIPT_MARK = /^\s*[∴●✳✢✻✽⎿✓✗✘✔⚠⏺⏳⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏❯›└├╭╮╰╯]/u;
+// 纯计时/进度行 ("running 3m ago"、"(6m 22s · ↓ 14.6k tokens)"): 去掉计时词与
+// 数字/单位/标点后不剩任何实词 → 框外噪声。命令行 ("sleep 5m") 一定剩下实词,
+// 不会被误伤。
+const isTimerLine = (line: string): boolean => {
+  if (!/\d/.test(line)) return false;
+  const rest = line
+    .replace(/\b(?:ago|running|elapsed|tokens?|esc|to|interrupt|down|up|cultivating|brewing|thinking|working)\b/giu, "")
+    .replace(/[0-9\s.:·|()\[\]%↓↑kKbBmMsShH—–-]/gu, "");
+  return rest === "";
+};
+// 每次确认都长得一样的行: 不携带调用身份, 不能作为「认得出这个调用」的证据
+// (仍参与指纹内容本身)。
+const genericConfirmLine = (line: string): boolean =>
+  CONFIRM_QUESTION.test(line)
+  || /^\s*Confirm\b/u.test(line)
+  || /^Hook\b.*requires confirmation/iu.test(line)
+  || /^\s*(?:Bash|Shell)\s+command\s*$/iu.test(line);
 
 export const modalCallFingerprint = (pane: string): string | undefined => {
+  if (!isModalPane(pane).modal) return undefined;
+  const options = parseModalOptions(pane).map((o) => `${o.index}. ${o.label}`);
+  if (options.length === 0) return undefined;
   const ctx = parseConfirmContext(pane);
-  if (!ctx.complete || !isModalPane(pane).modal) return undefined;
-  return JSON.stringify([pane, ctx.agent ?? "", ctx.toolName, ctx.toolInput]);
+  if (ctx.complete) {
+    return JSON.stringify(["call", ctx.agent ?? "", ctx.toolName, stableStringify(ctx.toolInput), options]);
+  }
+  const lines = stripBoxBorders(pane ?? "").split("\n");
+  let firstOpt = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/^\s*(?:[❯>]\s*)?1\.\s+\S/u.test(lines[i]!)) { firstOpt = i; break; }
+  }
+  if (firstOpt < 0) return undefined;
+  const region: string[] = [];
+  for (let i = firstOpt - 1; i >= 0; i--) {
+    const line = lines[i]!;
+    // 转录/计时行是确认区的上界; 分隔线与空行只分区, 不进指纹 (CodeBuddy 的命令
+    // 小节与问句行之间就隔着一条 ────, 跨过去才是同一次调用)。
+    if (TRANSCRIPT_MARK.test(line) || isTimerLine(line)) break;
+    // 分隔线不参与比对 (宽度随 pane 变), 空行保留 —— 正文里的空行也是调用的一部分。
+    if (line.trim() !== "" && REGION_RULE.test(line)) continue;
+    region.unshift(line);
+  }
+  if (!region.some((l) => l.trim() !== "" && !genericConfirmLine(l))) return undefined;
+  return JSON.stringify(["view", ctx.agent ?? "", region, options]);
 };
