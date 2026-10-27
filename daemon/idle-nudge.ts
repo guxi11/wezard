@@ -45,7 +45,8 @@ export const step = (w: Watch | undefined, o: Obs, now: number, p: Policy): { ne
   if (!askable(o) || !o.idle) return { next: { asks: asks >= p.max ? 0 : asks, anchor: o.anchor }, ask: false };
   const since = sameAnchor && w.idleSince !== undefined ? w.idleSince : now;
   if (asks >= p.max) {
-    return { next: { asks, anchor: o.anchor, idleSince: since }, ask: false };
+    const reset = p.afterMs > 0 && now - since >= p.afterMs;
+    return { next: { asks: reset ? 0 : asks, anchor: o.anchor, idleSince: reset ? now : since }, ask: false };
   }
   const due = p.afterMs > 0 && asks < p.max && now - since >= p.afterMs;
   // 问过之后从头计: 再满一整段闲置才可能问下一次。
