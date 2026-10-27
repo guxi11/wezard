@@ -238,14 +238,17 @@ const envelopeOf = (r: Reminder): Envelope | undefined => envelopeOfAttrs(r.attr
  *  envelopes in the body must not override the actual inbound sender. */
 export const parseEnvelope = (raw: string): Envelope | undefined => {
   const reminders = parseReminders(raw);
-  return reminders.reduce<Envelope | undefined>((hit, r) => envelopeOf(r) ?? hit, undefined);
+  const envelope = reminders.reduce<Envelope | undefined>((hit, r) => envelopeOf(r) ?? hit, undefined);
+  if (!envelope || envelope.eventId) return envelope;
+  const eventId = reminders.filter((r) => r.attrs.wezard === "receipt-delivery").at(-1)?.attrs.event;
+  return eventId ? { ...envelope, eventId } : envelope;
 };
 
 /** rolepage 折叠态的标签: 认得出种类就写种类 (信封带上发话方, 回执带上定论), codebuddy 自己的块写
  *  它的 `data-role`, 认不出的仍叫 reminder。`machine` = 当前无信封注入的 message-event 块。 */
 export const reminderLabel = (r: Reminder): { label: string; machine?: boolean } => {
   const w = r.attrs.wezard ?? "";
-  if (w === "message-event") return { label: "msg", machine: true };
+  if (w === "message-event" || w === "receipt-delivery") return { label: "msg", machine: true };
   const env = envelopeOf(r);
   if (env) return { label: env.receipt ? `回执 · ${env.from} · ${env.status ?? "done"}` : `envelope · ${env.from}` };
   return { label: w || r.attrs["data-role"] || "reminder" };
