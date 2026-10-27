@@ -12,7 +12,7 @@
 // reminder **不是路由的真相来源**: 去向 / 放行闸 / 追述 / GC 只读 router 的 journal; 这里是
 // 给模型的快照, 与 mirror / chat-log 认出处的回读。会过期的派生量 (行状态、是否追述) 不写成属性。
 //
-// 退役不再写、只为老 transcript 照认的: receipt-delivery (与信封 `msg` 重复), 派活信封的
+// 退役不再写的: receipt-delivery (与信封 `msg` 重复), 派活信封的
 // event / quiet / act / deadline, 回执的 serves / via / late, 名册 / 挂起事项的 mode,
 // mention 的 names, hint 的 role。
 
@@ -238,10 +238,7 @@ const envelopeOf = (r: Reminder): Envelope | undefined => envelopeOfAttrs(r.attr
  *  envelopes in the body must not override the actual inbound sender. */
 export const parseEnvelope = (raw: string): Envelope | undefined => {
   const reminders = parseReminders(raw);
-  const envelope = reminders.reduce<Envelope | undefined>((hit, r) => envelopeOf(r) ?? hit, undefined);
-  if (!envelope || envelope.eventId) return envelope;
-  const eventId = reminders.filter((r) => r.attrs.wezard === "receipt-delivery").at(-1)?.attrs.event;
-  return eventId ? { ...envelope, eventId } : envelope;
+  return reminders.reduce<Envelope | undefined>((hit, r) => envelopeOf(r) ?? hit, undefined);
 };
 
 /** rolepage 折叠态的标签: 认得出种类就写种类 (信封带上发话方, 回执带上定论), codebuddy 自己的块写
