@@ -452,10 +452,11 @@ const routerCore = async () => {
     const re4 = finalOf(d, "A", "h4", { text: "RESULT: again" });
     ok(re4.length === 1 && re4[0].late === true, "自己答过的 done: 显式 RESULT 作为追述收下");
     ok(finalOf(d, "B", "h4", { text: "RESULT: again" }).length === 0, "追述只认 owner");
-    ok(released(d, "A", "h4", "收到", h4Source) === false
+    const unrelatedSource = { input: "h4-execution-unrelated" };
+    ok(released(d, "A", "h4", "收到", unrelatedSource) === false
       && released(d, "A", "h4", "RESULT: 改写措辞", h4Source) === true
       && released(d, "A", "h4", "RESULT: 另一执行", { input: "h4-execution-2" }) === false,
-    "已落定报告按 execution source 放行: 同执行可改措辞, 新 input 拒绝");
+    "已落定报告按 execution source 放行: 独立 input 拒绝, 同执行可改措辞, 新 input 拒绝");
     ok(released(c, "A", "h3", "RESULT: x") === false, "被收掉的那一笔不放追述");
     // 墓碑回收: 满 TTL + 子树闭合 + 无 held 等它
     const H = R.TOMBSTONE_TTL_MS;
