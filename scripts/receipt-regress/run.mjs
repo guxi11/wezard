@@ -623,18 +623,18 @@ const cases = {
     check(R.withMsg(R.withMsg(blocks[1], "x"), "y").match(/msg="/g)?.length === 1 && R.parseEnvelope(R.withMsg(R.withMsg(blocks[1], "x"), "y"))?.eventId === "y", "withMsg 幂等改写");
     const bare = R.withMsg("没信封", "p:a:b:1:1");
     check(R.carriesMsg(bare, "p:a:b:1:1") && bare.includes('wezard="message-event"'), "没信封: 兜底挂 message-event");
-    // 无信封 message-event 只由 carriesMsg 读取; 退役 receipt-delivery 不提供身份; legacy prose 不解析。
+    // 无信封 message-event 只由 carriesMsg 读取; receipt-delivery 只读补旧 eventId; legacy prose 不解析。
     const old = "x" + blocks[1] + R.renderReminder({ wezard: "message-event", event: "route:e7" }, []);
     check(!R.parseEnvelope(old)?.eventId && R.carriesMsg(old, "route:e7"), "无信封 message-event 只供 carriesMsg 读取");
     const oldRcpt = "x" + '\n<system-reminder wezard="envelope" kind="peer" from=".b" scope="private" event="e7" receipt="1" status="done">\n</system-reminder>\n<system-reminder wezard="receipt-delivery" event="rcpt:e7:r1">\n</system-reminder>';
-    check(R.parseEnvelope(oldRcpt)?.eventId === undefined, "receipt-delivery does not supply current envelope identity");
+    check(R.parseEnvelope(oldRcpt)?.eventId === "rcpt:e7:r1", "legacy receipt-delivery.event supplies eventId fallback");
     const rawDelivery = R.parseReminders(oldRcpt).find((r) => r.attrs.wezard === "receipt-delivery");
     check(!!rawDelivery && R.reminderLabel(rawDelivery).label === "receipt-delivery"
       && R.reminderLabel(rawDelivery).machine !== true, "legacy receipt-delivery keeps its raw label");
     const oldRcptWithMsg = oldRcpt.replace('scope="private"', 'scope="private" msg="route:preferred"');
     check(R.parseEnvelope(oldRcptWithMsg)?.eventId === "route:preferred", "current envelope.msg supplies the event id");
     const oldRcptWithMessageEvent = oldRcpt + R.renderReminder({ wezard: "message-event", event: "route:external" }, []);
-    check(R.parseEnvelope(oldRcptWithMessageEvent)?.eventId === undefined, "message-event does not supply Envelope.eventId");
+    check(R.parseEnvelope(oldRcptWithMessageEvent)?.eventId === "rcpt:e7:r1", "message-event does not replace receipt-delivery fallback");
     const legacy = "x\n<system-reminder>\n这一轮是 wizard `.z` 发来的**私聊**\n</system-reminder>";
     check(R.parseEnvelope(legacy) === undefined && R.reminderLabel(R.parseReminders(legacy)[0]).label === "reminder", "无 kind/from 属性的 LEGACY prose 只显示普通 reminder");
     // 正文里行中提及 `<system-reminder>` 字面量不得吞掉后面的真信封 (e3c34b4.1: 信封被吞 →
