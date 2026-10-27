@@ -320,6 +320,17 @@ const ClaudeTiers = z.object({
   hard: Tier.default({ model: "opus", effort: "high" }).describe("要判断: 设计、排障、审查"),
   ultra: Tier.default({ model: "opus", effort: "max" }).describe("最难: 架构取舍、疑难排障、关键评审"),
 }).default({});
+// 模型目录按部署而变的后端 (codebuddy 各家一套 id) 不能继承 Claude 的别名: 它不认
+// haiku / sonnet / opus, `--model sonnet` 会被原样回显、首轮 400 —— spawn 于是每次都要
+// 多一次空启动再走 `/model` 选择器, 同键的空白备用也必然建成即废。默认留空 = 用 CLI
+// 自己的默认; 要点名就按本环境的真实 id 写进 backends.codebuddy.tiers。
+const CodebuddyTiers = z.object({
+  mini: Tier.default({ model: "", effort: "low" }).describe("机械一步: 照单执行、不用判断"),
+  light: Tier.default({ model: "", effort: "medium" }).describe("跑腿: 查找、搬运、跑命令"),
+  standard: Tier.default({ model: "", effort: "medium" }).describe("常规实现"),
+  hard: Tier.default({ model: "", effort: "high" }).describe("要判断: 设计、排障、审查"),
+  ultra: Tier.default({ model: "", effort: "max" }).describe("最难: 架构取舍、疑难排障、关键评审"),
+}).default({});
 const CodexTiers = z.object({
   mini: Tier.default({ model: "", effort: "low" }).describe("机械一步"),
   light: Tier.default({ model: "", effort: "medium" }).describe("跑腿"),
@@ -332,7 +343,7 @@ const Models = z.object({
   backends: z.object({
     claude: z.object({ tiers: ClaudeTiers }).default({}),
     "claude-internal": z.object({ tiers: ClaudeTiers }).optional(),
-    codebuddy: z.object({ tiers: ClaudeTiers }).optional(),
+    codebuddy: z.object({ tiers: CodebuddyTiers }).default({}),
     codex: z.object({ tiers: CodexTiers }).default({}),
   }).default({}).describe("各 backend 独立的五档模型配置; 按 wrc.defaultCli 取值"),
 });
@@ -382,7 +393,7 @@ export const defaultChatOfBot = (cfg: Pick<Config, "defaultChat" | "bots">, bot:
   return own ? withBot(own, bot) : "";
 };
 
-/** Claude 系 fork 共用 Claude 档位; 其他后端读取自己的默认或配置。 */
+/** Claude 系 fork (claude-internal) 共用 Claude 档位; 其他后端各有自己的默认或配置。 */
 export const tiersForBackend = (cfg: Pick<Config, "models" | "wrc">, backend: CliBackendName = resolveCliBackend(cfg.wrc).name): z.infer<typeof ClaudeTiers> | z.infer<typeof CodexTiers> =>
   cfg.models.backends[backend]?.tiers
   ?? cfg.models.backends.claude.tiers;

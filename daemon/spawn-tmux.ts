@@ -1292,7 +1292,11 @@ export const spawnTmuxClaude = async (args: SpawnArgs): Promise<SpawnResult> => 
   // 一次全新会话成功 = 这个 (cwd, 后端, model, effort) 刚被证明能用, 顺手补一条备用:
   // 下一个同键会话直接领。resume / fork / 交接 / codex 都不补 —— 它们的启动形状不一样,
   // 备用帮不上; 领用之后也走这里补回 (它是 fresh 路径的一次成功)。
-  if (result.ok && !args.resumeSessionId && !args.forkSession && !args.handoffId) {
+  // 备用按 (cwd, 后端, model, effort) 建也按它领 —— 只有「这个 model 字符串顶上
+  // `--model` 就被认下」的那种 spawn 才值得补: 被拒过、或靠 `/model` 才落到别的 id 的,
+  // 拿原串去建必然在开机自检里判「CLI 不认识」然后白丢 (还占一个 pane)。modelWarning
+  // 正好是这两种情况的印记。
+  if (result.ok && !result.modelWarning && !args.resumeSessionId && !args.forkSession && !args.handoffId) {
     void ensureSpare(args.cfg, args.log, cwd, args.model, args.effort);
   }
   return result;
