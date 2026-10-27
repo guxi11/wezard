@@ -12,3 +12,4 @@ secrets.json
 docs/*
 !docs/evolve/
 .plugins-cache.json
+.playwright-cli/

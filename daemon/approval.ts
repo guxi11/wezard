@@ -1432,8 +1432,8 @@ export const runMirrorPlanFlow = async ({ cfg, log, client, sessionId, chatKey, 
     await note("⚠️ 已记录选择，但本地对话框按键注入失败，请回到 CLI 手动处理。");
     return;
   }
+  // 计划卡同款: 结论已在卡片终态, 不再发跟帖。
   log.info({ reqId, sessionId, approve }, "mirror plan resolved via send-keys");
-  await note(approve ? "✅ 已同意，退出 plan mode 开始执行…" : "✏️ 已选择继续完善计划。");
 };
 
 // ── mirror 驱动原生权限 picker 审批卡 (确认框完全不过 hook 的兜底) ────────
@@ -1587,13 +1587,15 @@ export const runMirrorPickerFlow = async (
     const d = raw as Decision;
     if (d === "deny") {
       const r = await press("no");
-      await note(r.ok
-        ? `🚫 已替你拒绝 CLI 权限确认（${toolName}）→ ${r.label ?? "Escape"}`
-        : `⚠️ 已记录拒绝，但代按失败（${r.reason ?? "未知"}），请回 CLI 处理。`);
+      // 代按成功不补发消息: 卡片已被 updateTemplateCard 收成「❌ 已拒绝」终态,
+      // 群里再贴一条纯属噪音。只有按失败才需要人回 CLI 接手。
+      if (!r.ok) await note(`⚠️ 已记录拒绝，但代按失败（${r.reason ?? "未知"}），请回 CLI 处理。`);
       return true;
     }
     if (d === "allow_window" && cfg.approval.windowMinutes > 0) {
-      setAutoWindow(chatKey, cfg.approval.windowMinutes * 60_000, { toolName, toolInput, cwd, transcriptTail: tail });
+      setAutoWindow(chatKey, cfg.approval.windowMinutes * 60_000, {
+        toolName, toolInput, cwd, transcriptTail: tail, danger, singleNote, sessionName,
+      });
       // 与 handler 的 allow_window 同款 sweep: 同 chat 其它 pending 卡一并放行。
       const swept = resolvePendingsByChat(chatKey, "allow_window", reqId);
       log.info({ chatKey, minutes: cfg.approval.windowMinutes, swept: swept.length }, "auto-window opened via picker card");
@@ -1608,9 +1610,8 @@ export const runMirrorPickerFlow = async (
     // 代按成功 → CLI 才真正派发工具 → hook 此刻才会上报同一调用; 预先记账让
     // handler 直接放行, 不再发第二张卡 (consumePickerAllow)。
     recordPickerAllow(sessionId, toolName);
-    await note(wantSession
-      ? `🔓 已代按「本会话不再询问」（${toolName}）→ ${r.label ?? ""}\n原生确认框不过 hook，「总是」规则帮不上它，已翻译成 CLI 的会话级免问。`
-      : `🔓 已代按 CLI 权限确认（${toolName}）→ ${r.label ?? "Yes"}${d === "allow_window" ? `，并开启 ${cfg.approval.windowMinutes} 分钟自动放行窗口` : ""}`);
+    // 代按成功同样不补发消息 —— 结果 (含「本会话通过」/「N 分钟会话内全过」)
+    // 已经落在卡片终态按钮上, 那是人真正会回头核对的地方。失败才发一条。
     log.info({ reqId, sessionId, decision: d, pressed: r.label }, "mirror picker resolved via send-keys");
     return true;
   } finally {
@@ -1952,8 +1953,9 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     if (!nm) return;
     const r = await nm.answer(sessionId, { waitMs: cfg.approval.claudeConfigModalWaitMs });
     if (r.status === "answered") {
-      log.info({ sessionId, path: hit.path, pressed: `${r.index}. ${r.label}` }, "claude-config modal answered");
-      await notify(approver, `🔓 已代按 CLI 原生确认框「${r.title ?? "确认"}」→ 选项 ${r.index}. ${r.label}（${hit.path}）`);
+      // 只在日志里留痕: 这张卡 (人点的那张) 已是「✅ 已通过」终态, 代按原生框是
+      // 它的完成动作, 不必再往群里贴一条。按不掉时下面的告警照发。
+      log.info({ sessionId, path: hit.path, pressed: `${r.index}. ${r.label}`, title: r.title }, "claude-config modal answered");
       return;
     }
     if (r.status === "no_modal") {

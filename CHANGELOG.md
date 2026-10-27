@@ -9,6 +9,7 @@
 
 ### Changed
 - hook 在 `use cli`、daemon 不可达或回包异常时改为不答复 (exit 0), 由本地 CLI 自己的权限流程接管 —— 原先 daemon 不可达会 auto-allow, 等于 pane 静默拿到任何权限而人以为审批还在。`wezard stop` / uninstall 摘掉服务后立即交还, 不再白等 60s 的重启续接预算。cli 模式下企微审批卡、AskUserQuestion 投票卡与原生 picker 代按一并停用。
+- 代按成功不再往群里补发消息: 原生权限 picker / 原生确认框 / 计划卡的结论已落在卡片终态按钮上 (「✅ 已通过」「本会话通过」「N 分钟会话内全过 · 点击取消」「❌ 已拒绝」), 跟帖的「🔓 已代按 …」只是噪音。代按失败、超时、需人回 CLI 接手的提示照发。
 
 ### Fixed
 - 模型档位不再把 Claude 别名灌给 codebuddy: 它不认 `haiku` / `sonnet` / `opus`, `--model sonnet` 只会被原样回显 (首轮 400), 于是每次新建会话都白起一次进程再走 `/model` 选择器 —— 开列表、读整份目录、逐格移光标, 十几秒起步, 同键的空白备用也建成即废。`models.backends.codebuddy.tiers` 现在有自己的一套默认 (模型留空 = 用 CLI 自己的默认), 要点名就按本环境的真实 id 配; 空白备用只在 `--model` 当场被认下时才补 (走到选择器才落定的 spawn 不再补, 那条备用按原串建必然被开机自检丢掉)。
