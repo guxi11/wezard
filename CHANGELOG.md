@@ -4,14 +4,24 @@
 
 ## [Unreleased]
 
+### Changed
+- 代按成功不再往群里补发消息: 原生权限 picker / 原生确认框 / 计划卡的结论已落在卡片终态按钮上 (「✅ 已通过」「本会话通过」「N 分钟会话内全过 · 点击取消」「❌ 已拒绝」), 跟帖的「🔓 已代按 …」只是噪音。代按失败、超时、需人回 CLI 接手的提示照发。
+
+## [2.8.7] - 2026-10-27
+
 ### Added
+- 回执新增 `PROGRESS:` 中间进展: 长任务的终句以 `PROGRESS:` 开头时按 `progress` 状态投给派活方, 任务行不落定、继续在飞; roster / peek / charter 同步认这个状态。
+- daemon 内置 `POST /mcp` (StreamableHTTP, 无状态、需 `x-wezard-token`), 按请求头 `x-wezard-pane` / `x-wezard-session` 认调用方; 新配置 `daemon.mcpTransport` (`stdio` | `http`, 默认 `stdio`): 设为 `http` 后 `wezard sync` 让 CodeBuddy 直连 daemon 的 `/mcp`, 不再每个 pane 起一个 MCP 子进程 (写入口令的 mcp.json 权限收紧为 0600; 口令文件缺失时保留 stdio 并告警)。Claude / Codex 仍走 stdio, 产物不变。
 - 新增 `/use cli|wecom`(聊天) 与 `wezard use cli|wecom`(shell): 把一次工具调用的裁决权在「企微审批卡」与「本地 CLI 原生权限框」之间切换。写 `~/.wezard/state/approval-mode` 一个文件, 不改 hook 注册, 对已在跑的会话立即生效; 无参显示当前状态。cli 模式下 hook 仍照常更新权限模式档案 (Shift+Tab / acceptEdits / plan / bypass 的原生切换不受影响), 切回 wecom 时子代理对齐父会话读的就是它。
 
 ### Changed
 - hook 在 `use cli`、daemon 不可达或回包异常时改为不答复 (exit 0), 由本地 CLI 自己的权限流程接管 —— 原先 daemon 不可达会 auto-allow, 等于 pane 静默拿到任何权限而人以为审批还在。`wezard stop` / uninstall 摘掉服务后立即交还, 不再白等 60s 的重启续接预算。cli 模式下企微审批卡、AskUserQuestion 投票卡与原生 picker 代按一并停用。
-- 代按成功不再往群里补发消息: 原生权限 picker / 原生确认框 / 计划卡的结论已落在卡片终态按钮上 (「✅ 已通过」「本会话通过」「N 分钟会话内全过 · 点击取消」「❌ 已拒绝」), 跟帖的「🔓 已代按 …」只是噪音。代按失败、超时、需人回 CLI 接手的提示照发。
+- 审批卡身份位改为 `🧙 .name` (名册全局名), askq / plan / 确认框卡同口径; 去掉「上文」行。「危险」行只写危险名单真命中 (rm / DROP / 强推…), 「无法完整识别」与 askRules 命中改走「审核」行。
+- rolepage 计划 DAG 改为自上而下分层布局, 卡片更紧凑, 显示任务执行者, 点击任务弹出详情浮层。
 
 ### Fixed
+- 审批卡危险识别覆盖 REPL / PTC 包裹的调用: 下钻 `code` 参数里的 Bash 命令字面量 (变量拼接时按整段脚本兜底); 屏面解不出结构时把确认区原文当脚本再判一遍, 真危险命令不再只显示「无法完整识别」。
+- rolepage 认出 codebuddy REPL 形态的 `tell_peer` / `delegate` 调用, 派活 hints 重新展示。
 - 模型档位不再把 Claude 别名灌给 codebuddy: 它不认 `haiku` / `sonnet` / `opus`, `--model sonnet` 只会被原样回显 (首轮 400), 于是每次新建会话都白起一次进程再走 `/model` 选择器 —— 开列表、读整份目录、逐格移光标, 十几秒起步, 同键的空白备用也建成即废。`models.backends.codebuddy.tiers` 现在有自己的一套默认 (模型留空 = 用 CLI 自己的默认), 要点名就按本环境的真实 id 配; 空白备用只在 `--model` 当场被认下时才补 (走到选择器才落定的 spawn 不再补, 那条备用按原串建必然被开机自检丢掉)。
 - 原生确认框的代按指纹回到「确认区」而不是整屏原文: 2.8.6 把指纹绑到整屏后, 框外的进度行 / spinner 每一拍都在变, 人点卡永远只收到「已记录同意，但代按失败（操作或参数已变更）」, 哨兵还会把同一只框反复发卡。现在解析完整时比工具名 + 参数, 否则比确认区原文 (逐字: 缩进、数字、空行、heredoc 正文差一个字节即算换了调用) + 选项文案; 分隔线、框外进度行、状态栏不参与。「换框绝不盲按」不变; 认不出调用内容的框不再发注定失败的卡, 只告知一次, 失败原因也区分「认不出这只框」与「框里的调用已变」。
 
@@ -1290,7 +1300,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.8.6...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.8.7...HEAD
+[2.8.7]: https://github.com/guxi11/wezard/compare/v2.8.6...v2.8.7
 [2.8.6]: https://github.com/guxi11/wezard/compare/v2.8.5...v2.8.6
 [2.8.5]: https://github.com/guxi11/wezard/compare/v2.8.4...v2.8.5
 [2.8.4]: https://github.com/guxi11/wezard/compare/v2.8.3...v2.8.4
