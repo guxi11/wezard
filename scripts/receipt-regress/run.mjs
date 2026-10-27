@@ -623,14 +623,14 @@ const cases = {
     check(R.withMsg(R.withMsg(blocks[1], "x"), "y").match(/msg="/g)?.length === 1 && R.parseEnvelope(R.withMsg(R.withMsg(blocks[1], "x"), "y"))?.eventId === "y", "withMsg 幂等改写");
     const bare = R.withMsg("没信封", "p:a:b:1:1");
     check(R.carriesMsg(bare, "p:a:b:1:1") && bare.includes('wezard="message-event"'), "没信封: 兜底挂 message-event");
-    // 无信封 message-event 只由 carriesMsg 读取; receipt-delivery 不构成 Envelope 身份; legacy prose 不解析。
+    // 无信封 message-event 只由 carriesMsg 读取; receipt-delivery 仅回读旧 eventId; legacy prose 不解析。
     const old = "x" + blocks[1] + R.renderReminder({ wezard: "message-event", event: "route:e7" }, []);
     check(!R.parseEnvelope(old)?.eventId && R.carriesMsg(old, "route:e7"), "无信封 message-event 只供 carriesMsg 读取");
     const oldRcpt = "x" + '\n<system-reminder wezard="envelope" kind="peer" from=".b" scope="private" event="e7" receipt="1" status="done">\n</system-reminder>\n<system-reminder wezard="receipt-delivery" event="rcpt:e7:r1">\n</system-reminder>';
-    check(R.parseEnvelope(oldRcpt)?.eventId === undefined, "retired receipt-delivery does not supply eventId");
+    check(R.parseEnvelope(oldRcpt)?.eventId === "rcpt:e7:r1", "legacy receipt-delivery.event supplies eventId");
     const rawDelivery = R.parseReminders(oldRcpt).find((r) => r.attrs.wezard === "receipt-delivery");
-    check(!!rawDelivery && R.reminderLabel(rawDelivery).label === "receipt-delivery"
-      && R.reminderLabel(rawDelivery).machine !== true, "unknown receipt-delivery remains a raw non-machine reminder");
+    check(!!rawDelivery && R.reminderLabel(rawDelivery).label === "msg"
+      && R.reminderLabel(rawDelivery).machine === true, "legacy receipt-delivery keeps the msg machine label");
     const oldRcptWithMsg = oldRcpt.replace('scope="private"', 'scope="private" msg="route:preferred"');
     check(R.parseEnvelope(oldRcptWithMsg)?.eventId === "route:preferred", "current envelope.msg supplies eventId");
     const legacy = "x\n<system-reminder>\n这一轮是 wizard `.z` 发来的**私聊**\n</system-reminder>";
