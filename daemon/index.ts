@@ -106,7 +106,7 @@ import { returnOpOf, type HeldSeen, type InFlight, type Prereq, type ReturnOp, t
 import { NO_DEADLINE, isTerminal, renderInFlight, turnState } from "../shared/turn-state.js";
 import { startIdleNudge } from "./idle-nudge.js";
 import { askerFromEnvelope, renderReminder, stripReminders, withMsg, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
-import { createHandoffs, cuttingTurn, handedOff, handingOff, resumeText, settlesCut, type Pending as PendingHandoff } from "./handoff.js";
+import { createHandoffs, cuttingTurn, handedOff, handingOff, handoffRound, resumeText, roundPending, settlesCut, type Pending as PendingHandoff } from "./handoff.js";
 import { coldGateOf, decide, rankCandidates, routeDiagnostics, renderCandidates, routeReceiptDutiesOf, tierFor, wakeCostOf, wakeNoteOf, type RouteRow } from "./route.js";
 import { parseWhen, renderChatLog, UNKNOWN_HUMAN, type LogSession } from "./chat-log.js";
 import { audienceOf } from "../shared/role-view.js";
@@ -956,6 +956,21 @@ const main = async (): Promise<void> => {
       // 先读在飞事务的明确旧事件集合, 覆盖 result 已写而事件 cut 尚未写的崩溃缝。
       return !!p && p.mode === "self" && !p.failure?.compensated && !!p.cut?.includes(e.id);
     };
+    /** 当前这一轮的开场事件 (transcript 里开最后那一轮的那句信封)。等交接的轮询一秒一次,
+     *  每次都重新解析整个 tail 太贵: 转录只追加, 没长过就没有新的一轮, 按 size+mtime 记住。 */
+    const openers = new Map<string, { size: number; mtime: number; id?: string }>();
+    const activeEventOf = (t: string): string | undefined => {
+      const path = m.sessionInfo(t)?.jsonlPath;
+      if (!path) return undefined;
+      const abs = expandHome(path);
+      let st: { size: number; mtimeMs: number };
+      try { st = statSync(abs); } catch { return undefined; }
+      const hit = openers.get(abs);
+      if (hit && hit.size === st.size && hit.mtime === st.mtimeMs) return hit.id;
+      const id = openingTurn(abs)?.env?.eventId;
+      openers.set(abs, { size: st.size, mtime: st.mtimeMs, id });
+      return id;
+    };
     const handoffs = createHandoffs({
       currentEvents: (t) => {
         const info = m.sessionInfo(t);
@@ -968,10 +983,13 @@ const main = async (): Promise<void> => {
       suppress: (ids) => ids.forEach((id) => events.suppressHandoffFinal(id)),
       isBusy: async (t) => {
         if (!(await m.idleNow(t))) return true;
-        // TUI 已 idle 不代表旧 final 已被事件泵消费; 先落旧轮结果, 再允许切断上下文。
-        const old = events.ids().map((id) => events.get(id)).filter((e): e is MessageEvent => !!e && e.target === t && !e.id.startsWith("handoff:") && e.exposure !== "none" && !e.finalized && !e.releasedAt && e.execution !== "canceled" && (!e.sessionId || e.sessionId === m.sessionInfo(t)?.sessionId));
-        await old.reduce(async (before, e) => { await before; await events.reconcile(e.id); }, Promise.resolve());
-        return old.some((e) => { const now = events.get(e.id); return now && !now.finalized && now.execution !== "canceled"; });
+        // TUI 已 idle 不代表这一轮的 final 已被事件泵消费; 先落它的结果, 再允许切断上下文。
+        // 等的只有**这一轮** (见 handoffRound): 台账里那些 execution:"uncertain" 的旧事件
+        // 永远不会落定, 等它们只会把交接空耗满 SELF_IDLE_MS; 跨轮的旧账由 cut/uncut 与
+        // resumeOwed 兜底。
+        const round = handoffRound(t, activeEventOf(t), events.ids().map((id) => events.get(id)).filter((e): e is MessageEvent => !!e));
+        await round.reduce(async (before, e) => { await before; await events.reconcile(e.id); }, Promise.resolve());
+        return roundPending(round.map((e) => events.get(e.id) ?? e));
       },
       sessionId: (t) => m.sessionInfo(t)?.sessionId ?? "",
       restart: (t, p, submitted) => clearForHandoff(t, p, submitted),

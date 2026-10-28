@@ -180,6 +180,38 @@ export interface Handoffs {
 export const settlesCut = (receiver: "chat" | "wizard" | undefined, closing: "need" | "result" | undefined): boolean =>
   receiver === "chat" || (receiver === "wizard" && closing !== undefined);
 
+/** 交接要等的那「一轮」: transcript 里开当前这一轮的那句信封所指的注入事件, 加上绑在同一个
+ *  turn 上的兄弟事件 —— 只有它们会被这次切断误伤。
+ *
+ *  为什么不能等整个台账 (2026-10-28 收窄): 一条 execution:"uncertain" 的旧事件永远不会落定
+ *  (`settled` 只认 complete+finalized / canceled), 它在等, 交接就空耗满 SELF_IDLE_MS 再 504。
+ *  8 次 idle 超时里的每一条 cut 都长这样: 卡住的事件比失败早 27min~10h 注入, 期间 pane 一直判闲。
+ *  跨轮卡住的旧账由 cut / uncut 与 resumeOwed 兜底, 不在这里等。
+ *
+ *  不参与: `handoff:*` 内部事件 (简报/续问)、还没贴进 pane 的 (exposure none —— 交接闸
+ *  handingOff 把 peer 注入 held 住, 本来也落不了定)、已经显式释放的 (releasedAt)。
+ *  `dispatching` 例外: 那不是历史, 是此刻还在往 pane 里写。 */
+export interface RoundEvent {
+  id: string;
+  target: string;
+  turn?: string;
+  exposure: string;
+  execution: string;
+  releasedAt?: number;
+}
+export const handoffRound = <T extends RoundEvent>(target: string, active: string | undefined, rows: readonly T[]): T[] => {
+  const opener = active ? rows.find((e) => e.id === active && e.target === target) : undefined;
+  // 开场那条还没贴进 pane / 已被释放 → 这一轮没有会被切掉的终句, 也就不等。
+  const live = opener && opener.exposure !== "none" && !opener.releasedAt ? opener : undefined;
+  const turn = live?.turn;
+  return rows.filter((e) => e.target === target && !e.id.startsWith("handoff:") && e.exposure !== "none" && !e.releasedAt
+    && (e.execution === "dispatching" || (!!live && (e.id === live.id || (!!turn && e.turn === turn)))));
+};
+
+/** 这一轮还没收口: 还有事件既没落定也没被撤。传进来的行应是 reconcile 之后的最新状态。 */
+export const roundPending = (round: readonly { execution: string; finalized?: boolean }[]): boolean =>
+  round.some((e) => e.execution !== "canceled" && !e.finalized);
+
 const quote = (s: string): string => s.trim().split("\n").map((l) => `> ${l}`).join("\n");
 
 /** 交接后续答那一笔的注入正文: 带上谁问的、原话、交接切断那一轮被扣下的收尾。新会话没有旧
