@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Changed
+- wezard 自家 MCP server 默认免审批: `approval.allowRules` 默认值加入 `mcp__wezard` (server 级), 且判定层 (`shared/allow-rules.ts`) 对 wezard server 的调用**内置短路** —— Claude 式 `mcp__wezard__*` 与 CodeBuddy 式 `mcp_wezard.*` 直连、以及 REPL `code` 里的内层 `mcp_wezard.x` 调用一律放行, 不依赖规则存在 (用户重写 `allowRules` 整份覆盖默认后依然生效); 「总是」不再为 wezard 内层生成规则; 空规则配置下纯 wezard REPL 也放行。只豁免 wezard 这一个 server (`mcp__wezard2__x` / `mcp_wezard_extra.y` 等撞名前缀不沾光, 其它 `mcp__x__*` 照走规则); deny / ask / 危险名单 / 自改配置守卫仍压过该豁免。
 - **danger 判据原则修订 (人 2026-10-28 拍板): 无法完整识别的操作不判 danger, danger 必须有看得见的理由。** 认不出 / 解析不完整 / 动态拼接 / eval / 未知工具参数 / 引号未闭合一律降回普通卡 (REPL 白名单侧的 `repl_opaque` 审核原因不变, 本来就是普通卡); 能明确解析出的危险 (整树丢弃、非临时区 rm、强推、数据卷删除…) 照拦, 判据只来自「看懂了的操作」:
   - rm 三档改判: 全临时区 → 放行 (不变); 有解析得出的非临时区目标 → danger, **理由带上目标路径** (卡片「危险」行显示 `命中「删除文件 rm → ~/y」`); 解析不出 (相对路径 / 变量 / 裸通配 / `..` 后不可知 / 引号未闭合) → **不判** (此前 fail-closed 判危险)。`..` 逃逸出临时区 (词法可得, 如 `/tmp/../etc`) 仍判。
   - REPL 兜底收窄到命令键: `code` 里只有紧前属性键为 `command`/`cmd`/`script`/`shell` 的字面量值才当命令 (键本身说明会被 shell 执行); 裸字面量 (变量赋值/拼接)、陌生键的值不再当命令 —— 认不准不立 danger (`DATA_KEYS` 数据键清单随之移除, 不再需要)。

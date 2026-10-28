@@ -29,6 +29,18 @@ export const NEVER_RULE_ALLOW = new Set(["AskUserQuestion", "ExitPlanMode", "Ent
 // danger 侧的宽匹配 (多一张卡) 是安全方向。
 import { replBashCallCount, replBashCommands, replToolNames } from "./repl-script.js";
 
+// wezard 自家 MCP server 的内置豁免。wizard 经 mcp wezard 发的都是对守护进程的回环
+// 指令 (tell_peer / read_chat / spawn_wizard …), 没有执行面 —— 每条都发审批卡是纯噪
+// 声 (实战: 「审核 mcp_wezard.delegate 未在白名单」)。默认 allowRules 会被用户一写
+// 整份覆盖, 光靠默认项会丢, 所以豁免内置在判定层短路, 不依赖任何规则。
+// 两种命名形态都认: Claude 式 mcp__wezard__tool 与 CodeBuddy 式 mcp_wezard.tool;
+// 但只豁免 wezard 这一个 server —— mcp__wezard2__x / mcp_wezard_extra.y 不沾光。
+// 层级与 allowRules 同层: deny / ask / 危险名单 / 自改配置守卫都排在它之上 (见
+// approval.ts 的判定顺序), 用户显式写的 deny/ask 对 wezard 工具照常优先。
+export const WEZARD_MCP_BUILTIN = "builtin:mcp__wezard";
+export const isWezardMcpTool = (name: string): boolean =>
+  name.startsWith("mcp__wezard__") || /^mcp_wezard\.[A-Za-z0-9_]/.test(name);
+
 const replCodeOf = (toolInput: unknown): unknown =>
   toolInput && typeof toolInput === "object"
     ? (toolInput as Record<string, unknown>).code
@@ -70,7 +82,8 @@ const replVerdict = (parsed: ParsedRule[], bashSpecs: Array<string | undefined>,
   for (const name of names) {
     if (name === "Bash") continue; // 由命令字面量逐段判
     if (NEVER_RULE_ALLOW.has(name)) return { allowed: false, reason: { kind: "never_allow", tool: name } };
-    const hit = replNameHit(parsed, name);
+    // wezard 自家 MCP 的内层调用走内置豁免, 不依赖规则 (同 evaluateAllow 顶层的直连短路)
+    const hit = isWezardMcpTool(name) ? WEZARD_MCP_BUILTIN : replNameHit(parsed, name);
     if (!hit) return { allowed: false, reason: { kind: "tool_not_listed", tool: name } };
     hits.push(hit);
   }
@@ -313,7 +326,23 @@ export const evaluateAllow = (
   if (NEVER_RULE_ALLOW.has(toolName)) {
     return { allowed: false, reason: { kind: "never_allow", tool: toolName } };
   }
-  if (rules.length === 0) return { allowed: false, reason: { kind: "no_rules" } };
+  // wezard 自家 MCP 工具内置放行 —— 在 no_rules 之前: 零规则配置下也生效 (这正是
+  // 内置短路的意义: 用户重写 allowRules 不会把它丢掉)
+  if (isWezardMcpTool(toolName)) {
+    return { allowed: true, hits: [WEZARD_MCP_BUILTIN] };
+  }
+  // 空规则 (用户没在用白名单模式) 时 REPL 仍要判一层: 内层全为 wezard 豁免调用
+  // 则放行 —— 内置短路不依赖默认规则存在; 其余内层照旧报 no_rules (不提示)。
+  if (rules.length === 0) {
+    if (toolName === "REPL") {
+      const code = replCodeOf(toolInput);
+      if (typeof code === "string") {
+        const v = replVerdict([], [], code);
+        if (v.allowed) return v;
+      }
+    }
+    return { allowed: false, reason: { kind: "no_rules" } };
+  }
 
   const parsed = rules.map(parseRule).filter((r): r is ParsedRule => r !== undefined);
   const bashSpecs = parsed.filter((r) => r.tool === "Bash").map((r) => r.spec);
@@ -507,6 +536,8 @@ export const alwaysAllowRulesFor = (
     }
     for (const name of names) {
       if (name === "Bash" || NEVER_RULE_ALLOW.has(name)) continue;
+      // wezard 内层已内置豁免, 不为它生成规则 (存了也是永不命中的死规则)
+      if (isWezardMcpTool(name)) continue;
       // 规则侧形态: MCP 内层写作 server.tool, 生成 Claude 式 mcp__server__tool
       const cands = replRuleNames(name);
       const canonical = cands[cands.length - 1] ?? name;

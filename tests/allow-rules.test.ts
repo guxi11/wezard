@@ -1,6 +1,6 @@
 // 单元测试: shared/allow-rules.ts + shared/claude-permissions.ts — 运行: npx tsx tests/allow-rules.test.ts
 import assert from "node:assert";
-import { alwaysAllowRulesFor, parseRule, ruleAllows, ruleMatchesAny, splitSegments } from "../shared/allow-rules.js";
+import { alwaysAllowRulesFor, parseRule, ruleAllows, ruleMatchesAny, splitSegments, WEZARD_MCP_BUILTIN } from "../shared/allow-rules.js";
 import { mapClaudePermissions } from "../shared/claude-permissions.js";
 
 let passed = 0;
@@ -331,6 +331,29 @@ t("导入: 非法/空/非数组输入安全兜底", () => {
   assert.deepEqual(m.allow, []);
   assert.deepEqual(m.ask, []);
   assert.deepEqual(m.deny, []);
+});
+
+// ── wezard MCP 内置豁免 (判定层短路, 不依赖规则) ───────────────────────
+t("wezard 工具直连内置豁免: 零规则/无关规则下都放行 (两种命名形态)", () => {
+  assert.equal(ruleAllows([], "mcp__wezard__tell_peer", {}), WEZARD_MCP_BUILTIN);
+  assert.equal(ruleAllows(["Read"], "mcp_wezard.delegate", {}), WEZARD_MCP_BUILTIN);
+});
+t("只豁免 wezard 这一个 server: 撞名前缀不沾光", () => {
+  assert.equal(ruleAllows(["Read"], "mcp__wezard2__x", {}), undefined);
+  assert.equal(ruleAllows(["Read"], "mcp__wezardfoo__x", {}), undefined);
+  assert.equal(ruleAllows(["Read"], "mcp_wezard_extra.y", {}), undefined);
+  assert.equal(ruleAllows(["Read"], "mcp_wezard2.y", {}), undefined);
+});
+t("其它 MCP server 仍走规则, 不受 wezard 豁免影响", () => {
+  assert.equal(ruleAllows(["mcp__wezard"], "mcp__jira__get_issue", {}), undefined);
+  assert.equal(ruleAllows(["mcp__jira"], "mcp__jira__get_issue", {}), "mcp__jira");
+});
+t("server 级规则在场时直连仍记内置豁免 (默认规则只是兜底可见性)", () => {
+  assert.equal(ruleAllows(["mcp__wezard"], "mcp__wezard__notify", {}), WEZARD_MCP_BUILTIN);
+});
+t("deny/ask 规则对 wezard 依然优先 (ruleMatchesAny 不吃内置豁免)", () => {
+  assert.equal(ruleMatchesAny(["mcp__wezard__tell_peer"], "mcp__wezard__tell_peer", {}), "mcp__wezard__tell_peer");
+  assert.equal(ruleMatchesAny(["mcp__wezard"], "mcp__wezard__notify", {}), "mcp__wezard");
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -246,8 +246,12 @@ const Approval = z.object({
   // 再挖细粒度豁免 (对 Bash 可按命令前缀区分, matcher 只认工具名做不到)。
   // 默认放行 ToolSearch: 它只是 deferred 工具的 schema 查询 (本身无执行能力,
   // 真正的执行走 DeferExecuteTool, hook 侧会下钻成内层工具再按内层工具判定),
-  // 每次查 schema 都发卡是纯噪声。config 里显式写了 allowRules 的整份覆盖, 不合并。
-  allowRules: z.array(z.string()).default(["ToolSearch"]).describe("Claude Code 风格的放行规则, 如 \"Bash(git log *)\""),
+  // 每次查 schema 都发卡是纯噪声。默认还放行 mcp__wezard (wezard 自家 MCP server
+  // 的全部工具 —— 协同指令没有执行面); 即使本默认被下面的整份覆盖丢掉,
+  // shared/allow-rules.ts 的判定层对 wezard server 仍内置短路 (mcp__wezard__* /
+  // mcp_wezard.*, 含 REPL 内层), deny/ask/危险名单照常压过它。
+  // config 里显式写了 allowRules 的整份覆盖, 不合并。
+  allowRules: z.array(z.string()).default(["ToolSearch", "mcp__wezard"]).describe("Claude Code 风格的放行规则, 如 \"Bash(git log *)\""),
   // Bash 复合命令任一段命中即拒。优先级最高: deny > ask > allow。
   denyRules: z.array(z.string()).default([]).describe("同语法的拒绝规则: 命中直接 deny"),
   // 用于给危险前缀 (如 "Bash(rm *)", "Bash(git push *)") 兜底 — 即使 ⏱ 窗口开着

@@ -6,7 +6,7 @@
 // 现在按内层调用判: 档位跟着内层操作走 (与 danger.ts 的内层命令判定同一原则)。
 // 两侧都要钉住: 内层全被规则覆盖的要放行 (降噪), 认不出/未覆盖的必须发卡 (安全)。
 import assert from "node:assert";
-import { alwaysAllowRulesFor, evaluateAllow, ruleMatchesAny } from "../shared/allow-rules.js";
+import { alwaysAllowRulesFor, evaluateAllow, ruleMatchesAny, WEZARD_MCP_BUILTIN } from "../shared/allow-rules.js";
 
 let passed = 0;
 let failed = 0;
@@ -127,6 +127,35 @@ t("总是: 生成的规则能放行原调用 (闭环)", () => {
 });
 t("总是: 内层交互卡工具不生成", () => {
   assert.deepEqual(alwaysAllowRulesFor("REPL", repl("await AskUserQuestion({ questions: [] })"), []), []);
+});
+
+
+// ── wezard MCP 内置豁免: REPL 内层 mcp_wezard.x 放行 ──────────────────
+t("内层全为 wezard MCP 调用 → 放行 (规则不含 wezard)", () => {
+  const v = verdict('return await mcp_wezard.notify({ markdown: "hi" });');
+  assert.equal(v.allowed, true);
+  assert.deepEqual(v.allowed ? v.hits : [], [WEZARD_MCP_BUILTIN]);
+});
+t("零规则下纯 wezard REPL 也放行 (内置短路不依赖默认规则)", () => {
+  assert.equal(evaluateAllow([], "REPL", repl('await mcp_wezard.delegate({ task: "x" });')).allowed, true);
+});
+t("wezard 内层 + 未列工具混合 → 拒, 理由落在未列工具", () => {
+  const v = verdict('await mcp_wezard.notify({ markdown: "x" }); await Write({ file_path: "y", content: "z" })');
+  assert.equal(v.allowed, false);
+  assert.equal(v.allowed === false && v.reason.kind, "tool_not_listed");
+  assert.equal(v.allowed === false && v.reason.tool, "Write");
+});
+t("wezard 内层 + 未覆盖 Bash 段 → segment_unmatched (Bash 不在豁免内)", () => {
+  const v = verdict('await mcp_wezard.notify({ markdown: "x" }); await Bash({ command: "git status" })');
+  assert.equal(v.allowed, false);
+  assert.equal(v.allowed === false && v.reason.kind, "segment_unmatched");
+});
+t("deny 下钻认得出 REPL 内层的 wezard 调用 (deny/ask 仍压过内置豁免)", () => {
+  assert.equal(ruleMatchesAny(["mcp__wezard__notify"], "REPL", repl('await mcp_wezard.notify({ markdown: "x" })')), "mcp__wezard__notify");
+});
+t("总是: 不为 wezard 内层生成规则 (已内置豁免, 存了是死规则)", () => {
+  const rules = alwaysAllowRulesFor("REPL", repl('await mcp_wezard.notify({ markdown: "x" }); await Read({ file_path: "x" })'), []);
+  assert.deepEqual(rules, ["Read"]);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
