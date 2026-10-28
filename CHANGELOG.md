@@ -5,6 +5,8 @@
 ## [Unreleased]
 
 ### Changed
+- **普通卡不再发: `approval.mode` 默认改为 `danger` (人 2026-10-28 拍板「用户只需要管理 danger」)。** 非 danger 的调用一律自动放行 —— hook 路径的自动放行按 ⏱ 窗口记账/续期 (`windowMinutes`, 默认 600 分钟 = 10h): 每次放行对会话所在 chat 续开一次窗口并回 `auto_window:<remain>s (danger-only)`, 窗口只做记账不参与门控; picker 哨兵对非 danger 原生框直接代按。不变: danger 仍是唯一发卡来源; `denyRules`/`askRules` 仍优先 (显式「必卡」的照卡); wezard 自家 MCP 工具免卡; 白名单命中仍免审。要逐条审显式设回 `all`。注意: `danger.enabled=false` 时 mode 仍自动退回 `all` (防隐蔽全放行) —— 关掉名单再 reload 会变全量发卡。
+- rm 临时区放宽「末段一次性目录名」: 目标路径**末段**叫 `tmp`、或以 `tmp-` / `tmp_` 开头 → 按临时区放行 (`~/tmp-modeck-test`、`/Users/zyy/tmp_build` 这类自建 scratch, 人 2026-10-28 原话样例 `rm -rf /Users/zyy/tmp-modeck-test && echo cleaned` 不再判 danger)。分隔符必需: `tmpdata`、`tmptest` 这类普通词不算, `~/develop`、`~/develop/tmpdata` 仍判。混合目标 (tmp-* + 真工作区) 仍判; `..` 逃逸、变量、裸 glob 照旧不判 (已改口径)。
 - wezard 自家 MCP server 默认免审批: `approval.allowRules` 默认值加入 `mcp__wezard` (server 级), 且判定层 (`shared/allow-rules.ts`) 对 wezard server 的调用**内置短路** —— Claude 式 `mcp__wezard__*` 与 CodeBuddy 式 `mcp_wezard.*` 直连、以及 REPL `code` 里的内层 `mcp_wezard.x` 调用一律放行, 不依赖规则存在 (用户重写 `allowRules` 整份覆盖默认后依然生效); 「总是」不再为 wezard 内层生成规则; 空规则配置下纯 wezard REPL 也放行。只豁免 wezard 这一个 server (`mcp__wezard2__x` / `mcp_wezard_extra.y` 等撞名前缀不沾光, 其它 `mcp__x__*` 照走规则); deny / ask / 危险名单 / 自改配置守卫仍压过该豁免。
 - **danger 判据原则修订 (人 2026-10-28 拍板): 无法完整识别的操作不判 danger, danger 必须有看得见的理由。** 认不出 / 解析不完整 / 动态拼接 / eval / 未知工具参数 / 引号未闭合一律降回普通卡 (REPL 白名单侧的 `repl_opaque` 审核原因不变, 本来就是普通卡); 能明确解析出的危险 (整树丢弃、非临时区 rm、强推、数据卷删除…) 照拦, 判据只来自「看懂了的操作」:
   - rm 三档改判: 全临时区 → 放行 (不变); 有解析得出的非临时区目标 → danger, **理由带上目标路径** (卡片「危险」行显示 `命中「删除文件 rm → ~/y」`); 解析不出 (相对路径 / 变量 / 裸通配 / `..` 后不可知 / 引号未闭合) → **不判** (此前 fail-closed 判危险)。`..` 逃逸出临时区 (词法可得, 如 `/tmp/../etc`) 仍判。

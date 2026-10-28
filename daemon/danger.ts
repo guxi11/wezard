@@ -108,6 +108,12 @@ const normPath = (p: string): string => {
 
 const TMPDIR_LIT = /^\$\{TMPDIR\}(?=\/|$)|^\$TMPDIR(?=\/|$)/;
 
+// 末段「一次性目录名」: 就叫 tmp, 或 tmp- / tmp_ 开头 (人 2026-10-28 放宽: 自己建
+// 的 ~/tmp-* scratch 也算临时区)。分隔符必需 —— tmpdata、tmptest 这类普通词不
+// 算, ~/develop/tmpdata 不会被误放。
+const FINAL_TMP_NAME = /^(?:tmp|tmp[-_].*)$/;
+const lastSegment = (p: string): string => p.slice(p.lastIndexOf("/") + 1);
+
 /** rm 目标 token 的归类: temp = 临时区内; outside = 区外; unknown = 解析不出。 */
 const classifyRmTarget = (tok: string): "temp" | "outside" | "unknown" => {
   const lit = TMPDIR_LIT.exec(tok);
@@ -117,12 +123,16 @@ const classifyRmTarget = (tok: string): "temp" | "outside" | "unknown" => {
   }
   // 其余任何未展开的变量 (含 $TMPDIRfoo 这种撞名前缀的别的变量) 都解析不出
   if (tok.includes("$")) return "unknown";
-  if (tok.startsWith("~")) return "outside";
+  if (tok.startsWith("~")) {
+    return FINAL_TMP_NAME.test(lastSegment(tok)) ? "temp" : "outside";
+  }
   if (tok.startsWith("/")) {
     const p = normPath(tok);
     if (p === "/tmp" || p === "/private/tmp") return "outside"; // 共享区根本身
     if (p.startsWith("/tmp/") || p.startsWith("/private/tmp/")) return "temp";
     if (/^\/(private\/)?var\/folders\/[^/]+\/[^/]+\/T(\/|$)/.test(p)) return "temp";
+    // 末段是一次性目录名 (~/tmp-modeck-test、/Users/zyy/tmp_build 这类自建 scratch)
+    if (FINAL_TMP_NAME.test(lastSegment(p))) return "temp";
     return "outside";
   }
   return "unknown"; // 相对路径 / 裸 glob / . / ..

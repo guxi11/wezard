@@ -227,7 +227,9 @@ const Approval = z.object({
   // 名单被关掉 (danger.enabled=false) 时 "danger" 自动退回 "all" —— 否则就成了「全
   // 放行」, 与 danger.skipAll 语义重合且更隐蔽。跳过所有审批不在 mode 里 —— 用
   // danger.skipAll, 与 danger.skip 成对。
-  mode: z.enum(["all", "danger"]).default("all").describe("审批粒度: all = 每个命中 matcher 的调用都发卡; danger = 只有命中危险名单的才发卡"),
+  // 默认 danger (2026-10-28 人拍板: 普通卡不再发, 审批只剩 danger 一层; deny/ask
+  // 仍优先, 非 danger 自动放行按 ⏱ 窗口记账)。要逐条审就显式设回 "all"。
+  mode: z.enum(["all", "danger"]).default("danger").describe("审批粒度: danger (默认) = 只有命中危险名单的才发卡, 其余自动放行 (按 windowMinutes 窗口记账); all = 每个命中 matcher 的调用都发卡"),
   matcher: z.string().default(".*").describe("哪些工具名进入审批 (正则)"),
   approvers: z.array(z.string()).default([]).describe("可以点审批卡的人; 空 = 不限"),
   // 必须严格大于 longPollSec, 否则 daemon 还在等点击时 hook 已经返回 ask。

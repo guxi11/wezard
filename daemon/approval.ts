@@ -2311,6 +2311,27 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // 早退照样能给 (settleGuard), 拿它挡早退等于把 danger 的开关废掉。
     const earlyExit = dangerEarlyExit(cfg, danger, nativePermission || Boolean(askHit) || Boolean(selfWrite));
     if (earlyExit) {
+      // danger-only 模式 (mode=danger, 默认) 的自动放行按 ⏱ 窗口记账/续期 (人
+      // 2026-10-28: 普通卡不再发, 非 danger 一律放行, 但要能看出是 10h 窗口放的,
+      // 不是永久无痕)。窗口只做记账不参与门控 —— danger_mode_skip 本身不看窗口状态。
+      if (earlyExit === "danger_mode_skip" && approver && cfg.approval.windowMinutes > 0) {
+        setAutoWindow(approver, cfg.approval.windowMinutes * 60_000, {
+          toolName,
+          toolInput,
+          cwd,
+          transcriptTail,
+          danger: danger?.rule,
+          singleNote,
+        });
+        const remainSec = Math.ceil(autoWindowRemainingMs(approver) / 1000);
+        log.info({ toolName, sessionId, chatKey: approver, remainSec }, "danger-only auto-window allow");
+        json(res, 200, {
+          decision: "allow",
+          reason: `auto_window:${remainSec}s (danger-only)`,
+        } satisfies ApproveResp);
+        settleGuard();
+        return;
+      }
       log.info({ toolName, sessionId, reason: earlyExit }, "danger switch early exit");
       json(res, 200, { decision: "allow", reason: earlyExit } satisfies ApproveResp);
       settleGuard();
@@ -2411,6 +2432,9 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
       toolInput: display,
       cwd,
       sessionId,
+      // 卡片身份随 detail 记录留 24h: 「展开完整命令」在 pending / 快照都过期后
+      // 仍凭它回到卡片所在的 chat, 而不是 defaultChat。
+      chatKey: approver,
       transcriptTail,
     });
 
@@ -2625,14 +2649,16 @@ export const installApprovalEventListener = (
       if (key.startsWith(FULLCMD_PREFIX)) {
         const reqId = key.slice(FULLCMD_PREFIX.length);
         const rec = getDetail(reqId);
-        // 回复目标: 待决时在 pending 里, 已决时 pending 已删 —— 回落到 resolved
-        // 暂存。两个都没有才用 defaultChat (`#tag` 会话会因此回到主会话, 不理想,
-        // 但那已经是记录过期的边缘情形)。
-        // 最后一档按点击帧是哪个机器人收的兑到它自己的默认聊天 (副机器人没配 = 不回), 不回落主机器人的
-        // 全局 defaultChat; 单机器人时 botTagOf 恒 "", 就是原来的 cfg.defaultChat。
+        // 回复目标 = 卡片自己的会话身份, 逐级回收: 待决时在 pending 里; 已决时
+        // pending 已删, 回落到 resolvePending 留下的 5min resolved 暂存; 再往后
+        // (含 daemon 重启) 由 24h 的 detail 记录兜着 —— recordApproval 落卡时就
+        // 把 chatKey 一起存了。全部 miss (记录过期的真鬼卡) 才按点击帧是哪个
+        // 机器人收的兑到它自己的默认聊天 (副机器人没配 = 不回), 不回落主机器人
+        // 的全局 defaultChat; 单机器人时 botTagOf 恒 "", 就是 cfg.defaultChat。
         const target =
           getPending(reqId)?.chatKey
           ?? getResolvedSnapshot(reqId)?.meta.chatKey
+          ?? (rec?.kind === "approval" ? rec.chatKey : undefined)
           ?? defaultChatOfBot(cfg, botTagOf(frame));
         if (!target) { log.info({ reqId, bot: botTagOf(frame) }, "full command: 记录已过期且该机器人没有默认聊天, 不回"); return; }
         const cmd = rec && rec.kind === "approval" ? commandOf(rec.toolName, rec.toolInput) : "";

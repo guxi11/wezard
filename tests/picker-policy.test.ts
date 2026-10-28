@@ -22,6 +22,25 @@ assert.deepEqual(context.toolInput, { command: "git status" });
 assert.equal(pickAutoAllowAnswer(parseModalOptions(frame("git status")))?.label, "Yes");
 
 const config = cfg();
+// 默认 mode 已是 danger (2026-10-28: 普通卡不再发); 这一块锁 all 语义的分层。
+config.approval.mode = "all";
+// 新默认断言: 不配 mode = danger-only (非 danger 不发卡)。
+assert.equal(cfg().approval.mode, "danger", "mode 默认应为 danger (普通卡不再发)");
+assert.equal(pickerPolicy(cfg(), "codebuddy", context, false).decision, "allow");
+assert.equal(pickerPolicy(cfg(), "codebuddy", context, false).reason, "danger_mode_skip");
+{
+  // 默认档下分层仍硬: deny 照拒、askRules 照卡、danger 照红卡 —— 人只管 danger。
+  const d = cfg();
+  d.approval.denyRules = ["Bash(git status)"];
+  assert.equal(pickerPolicy(d, "codebuddy", context, false).decision, "deny");
+  const a = cfg();
+  a.approval.askRules = ["Bash(git status)"];
+  assert.equal(pickerPolicy(a, "codebuddy", context, false).decision, "manual");
+  assert.equal(pickerPolicy(a, "codebuddy", context, false).forceSingle, "Bash(git status)");
+  const g = cfg();
+  assert.equal(pickerPolicy(g, "codebuddy", parseConfirmContext(frame("rm -rf ~/task")), false).decision, "manual");
+  assert.ok(pickerPolicy(g, "codebuddy", parseConfirmContext(frame("rm -rf ~/task")), false).danger);
+}
 assert.equal(pickerPolicy(config, "codebuddy", context, false).decision, "manual");
 assert.equal(pickerPolicy(config, "codebuddy", context, true).decision, "allow");
 config.approval.allowRules = ["Bash(git status)"];
@@ -151,7 +170,9 @@ for (const key of ["sandbox_permissions", "requested_permissions", "additional_p
 }
 await dispatchPickerPolicy(pickerPolicy(skip, "codebuddy", { ...context, toolName: "PermissionRequest" }, true), handlers);
 assert.deepEqual(effects, [], "native/unknown requests never dispatch cards or presses");
-await dispatchPickerPolicy(pickerPolicy(cfg(), "codebuddy", context, false), handlers);
+const allMode = cfg();
+allMode.approval.mode = "all"; // 默认已是 danger (非 danger 自动放行), 此处锁 all 语义
+await dispatchPickerPolicy(pickerPolicy(allMode, "codebuddy", context, false), handlers);
 assert.deepEqual(effects, ["generic picker card"]);
 await dispatchPickerPolicy(pickerPolicy(skip, "codebuddy", context, true), handlers);
 assert.deepEqual(effects, ["generic picker card", "press yes"]);

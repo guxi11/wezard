@@ -105,7 +105,7 @@ t("watch reboot", () => danger("watch reboot"));
 // ── 远程执行: 位置约束失效, 靠 ssh/exec 上下文兜住 ────────────────────
 t("ssh 裸 reboot", () => danger("ssh host reboot"));
 t("ssh 带参数 + 引号", () => danger('ssh -p 22 host "shutdown -r now"'));
-t("ssh 远程 rm", () => danger("ssh host rm -rf /data/tmp"));
+t("ssh 远程 rm", () => danger("ssh host rm -rf /data"));
 t("kubectl exec -- halt", () => danger("kubectl exec pod -- halt"));
 t("docker exec halt", () => danger("docker exec -it c1 halt"));
 // 反面: 远程规则不该被「有 ssh 字样 + 文件名带危险词」钓出来。
@@ -189,10 +189,18 @@ t("rm 解析不出 → 不判 (相对/变量/裸 glob/.. 后不可知/引号未�
 t("rm .. 逃逸出临时区 (解析可得) → 仍判", () =>
   assert.equal(ruleOf("rm -rf /tmp/../etc/passwd"), "删除文件 rm → /tmp/../etc/passwd"));
 t("rm /var/tmp (不进临时区清单) → 仍判", () => danger("rm -rf /var/tmp/x"));
-t("rm 子串不豁免: /tmp-foo、~/develop/tmpdata", () => {
-  danger("rm -rf /tmp-foo");
+t("rm 末段一次性目录名 (tmp / tmp-… / tmp_…) → 不判 (人 2026-10-28 放宽)", () => {
+  safe("rm -rf /Users/zyy/tmp-modeck-test && echo cleaned"); // 人的原话样例
+  safe("rm -rf ~/tmp-modeck-test");
+  safe("rm -rf ~/tmp");
+  safe("rm -rf /Users/zyy/tmp_build");
+});
+t("rm 末段普通名不豁免: ~/develop、~/develop/tmpdata (无分隔符不算 tmp 系)", () => {
+  danger("rm -rf ~/develop");
   danger("rm -rf ~/develop/tmpdata");
 });
+t("rm 混合 (tmp-* + 真工作区) → 仍判", () => danger("rm -rf ~/tmp-x ~/develop"));
+t("rm 末段名判据对 /tmp-foo 也放行 (原「子串不豁免」按新口径修订)", () => safe("rm -rf /tmp-foo"));
 
 // ── 工具语义分界 (2026-10-28 人第三条口径): 只有真会交给 shell 执行的才做 ──
 // 命令级判定。Edit/Write 的内容、Read 的路径是数据, 不是命令; 误报原先全部来自
