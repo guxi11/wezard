@@ -48,8 +48,7 @@ const REMOTE_CTX = String.raw`\b(?:ssh|(?:kubectl|docker)\s+exec)\b[\s\S]*\b`;
  *
  * 只用于纯单词触发的规则 —— `kubectl delete`、`dd if=` 这类自带结构约束的
  * 不需要, 它们的第二个 token 已经把误伤面挡住了。
- */
-const cmdWord = (label: string, words: string, flags = ""): Rule[] => [
+ */const cmdWord = (label: string, words: string, flags = ""): Rule[] => [
   // `\\?`: `\rm` 这种反斜杠转义 (绕开 alias 的惯用写法) 仍处于命令词位置。
   [label, new RegExp(`${CMD_HEAD}\\\\?(?:${words})\\b`, flags)],
   [`远程${label}`, new RegExp(`${REMOTE_CTX}(?:${words})\\b`, flags)],
@@ -108,11 +107,14 @@ const normPath = (p: string): string => {
 
 const TMPDIR_LIT = /^\$\{TMPDIR\}(?=\/|$)|^\$TMPDIR(?=\/|$)/;
 
-// 末段「一次性目录名」: 就叫 tmp, 或 tmp- / tmp_ 开头 (人 2026-10-28 放宽: 自己建
-// 的 ~/tmp-* scratch 也算临时区)。分隔符必需 —— tmpdata、tmptest 这类普通词不
-// 算, ~/develop/tmpdata 不会被误放。
-const FINAL_TMP_NAME = /^(?:tmp|tmp[-_].*)$/;
-const lastSegment = (p: string): string => p.slice(p.lastIndexOf("/") + 1);
+// 一次性目录名判据 (2026-10-28 第二次放宽): 路径里**任一段**以 tmp 开头即整条按
+// 临时区放行 —— 不限末段 (~/tmp-x/build 嵌套也算), 不要求分隔符 (tmpdata、tmpbuild
+// 也放)。人定的方向: 宁可误放一个叫 tmpxxx 的真实目录, 不拦自己建的一次性目录;
+// ~/develop/tmpdata 因此放行, 是接受的误放面。词法归一在前, /tmp/../etc 这类
+// 逃逸在归一后 tmp 段已消解, 仍判。
+const TMPISH_SEGMENT = /^tmp/i;
+const anyTmpSegment = (p: string): boolean =>
+  p.split("/").filter(Boolean).some((s) => TMPISH_SEGMENT.test(s));
 
 /** rm 目标 token 的归类: temp = 临时区内; outside = 区外; unknown = 解析不出。 */
 const classifyRmTarget = (tok: string): "temp" | "outside" | "unknown" => {
@@ -123,16 +125,11 @@ const classifyRmTarget = (tok: string): "temp" | "outside" | "unknown" => {
   }
   // 其余任何未展开的变量 (含 $TMPDIRfoo 这种撞名前缀的别的变量) 都解析不出
   if (tok.includes("$")) return "unknown";
-  if (tok.startsWith("~")) {
-    return FINAL_TMP_NAME.test(lastSegment(tok)) ? "temp" : "outside";
-  }
-  if (tok.startsWith("/")) {
+  if (tok.startsWith("~") || tok.startsWith("/")) {
     const p = normPath(tok);
     if (p === "/tmp" || p === "/private/tmp") return "outside"; // 共享区根本身
-    if (p.startsWith("/tmp/") || p.startsWith("/private/tmp/")) return "temp";
-    if (/^\/(private\/)?var\/folders\/[^/]+\/[^/]+\/T(\/|$)/.test(p)) return "temp";
-    // 末段是一次性目录名 (~/tmp-modeck-test、/Users/zyy/tmp_build 这类自建 scratch)
-    if (FINAL_TMP_NAME.test(lastSegment(p))) return "temp";
+    if (/^\/(private\/)?var\/folders\/[^/]+\/[^/]+\/T(\/|$)/.test(p)) return "temp"; // $TMPDIR 展开形态
+    if (anyTmpSegment(p)) return "temp"; // 任一段 tmp 开头的一次性目录
     return "outside";
   }
   return "unknown"; // 相对路径 / 裸 glob / . / ..
@@ -293,37 +290,30 @@ const commandsOf = (input: unknown): string[] => {
 const pathish = (s: string): boolean => s.length < 512 && /^[~$/.]|\//.test(s);
 
 /**
- * danger 模式下这次调用是否可以免卡直接放行。
- * 名单关掉时不生效 (退回全量审批) —— 「模式=danger + 名单=off」不该等于全放行。
+ * danger 模式下这次调用是否可以免卡直接放行 (mode=danger 是默认档: 普通卡
+ * 不再发, 见 config.ts 的 mode 枚举; "off" 档的放行不在这里 —— 它有专用分支,
+ * 连 askRules 都压过, 与旧 skipAll 语义一致)。
  */
 export const dangerModeSkips = (cfg: Config, hit: DangerHit | undefined): boolean =>
-  cfg.approval.mode === "danger" && cfg.approval.danger.enabled && !hit;
-
-/** danger.skip: 命中危险名单也免卡直接放行 (显式的「跳过 danger」)。 */
-export const dangerSkips = (cfg: Config, hit: DangerHit | undefined): boolean =>
-  !!hit && cfg.approval.danger.skip;
+  cfg.approval.mode === "danger" && !hit;
 
 /**
- * 上面两个开关合起来的早退判定。undefined = 不早退, 继续走审批链。
+ * 早退判定。undefined = 不早退, 继续走审批链。
  *
  * `forcedByOthers` = 这次调用**除 danger 之外**还有别的必发卡理由 (当前唯一来源是
- * askRules 命中, 或 `.claude/**` 写守卫生效)。danger 的两个开关只表达「我不在乎
- * 危险名单」, 不表达「我不在乎另外那两条」—— 所以有其它理由时一律不早退:
- *   • askRules: 用户显式配的强制审批, 被 danger 开关顺手关掉就成了假配置;
+ * askRules 命中, 或 `.claude/**` 写守卫生效)。danger 档只表达「非 danger 不发卡」,
+ * 不表达「我不在乎另外那两条」—— 所以有其它理由时一律不早退:
+ *   • askRules: 用户显式配的强制审批, 被 danger 档顺手关掉就成了假配置;
  *   • `.claude/**` 守卫: 更硬 —— 早退意味着 settleClaudeConfigModal 不会执行,
  *     CC 随后立起的原生确认框没人去按, pane 无限期卡死。守卫存在的全部意义
  *     就是消灭这个死锁。
- *
- * 注意不能拿「mustCard」当这个参数: danger 命中本身就会置位 mustCard, 那样
- * dangerSkips 永远不触发, 等于把上游这个特性废掉。
  */
 export const dangerEarlyExit = (
   cfg: Config,
   hit: DangerHit | undefined,
   forcedByOthers: boolean,
-): "danger_skip" | "danger_mode_skip" | undefined => {
+): "danger_mode_skip" | undefined => {
   if (forcedByOthers) return undefined;
-  if (dangerSkips(cfg, hit)) return "danger_skip";
   if (dangerModeSkips(cfg, hit)) return "danger_mode_skip";
   return undefined;
 };
@@ -331,8 +321,6 @@ export const dangerEarlyExit = (
 /** 判定一次工具调用是否落在危险名单里。undefined = 安全。 */
 export const dangerOf = (cfg: Config, toolName: string, toolInput: unknown): DangerHit | undefined => {
   const d = cfg.approval.danger;
-  if (!d.enabled) return undefined;
-
   const cmds = commandsOf(toolInput);
   const allow = compile(d.allowPatterns);
   // 白名单优先: 任一命令被豁免则整条调用豁免 (显式覆盖内置的宽规则)。

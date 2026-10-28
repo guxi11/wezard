@@ -42,7 +42,7 @@ assert.ok(codexSelfCallBypass({ tool_name: "Bash", tool_input: { command: "/opt/
 
 const log = pino({ level: "silent" });
 const cfg = ConfigSchema.parse({ bot: { botId: "test", secret: "test" }, defaultChat: "user:tester", approval: {
-  mode: "danger", danger: { skip: true, skipAll: true }, matcher: "Nothing", batchCoalesceMs: 0, longPollSec: 3,
+  mode: "skip_all", matcher: "Nothing", batchCoalesceMs: 0, longPollSec: 3,
 } });
 class Client extends EventEmitter {
   isConnected = true;

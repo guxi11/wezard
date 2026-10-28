@@ -208,13 +208,6 @@ const Wrc = z.object({
 // 不吃 session cache、不参与批量合流、卡上没有「全过」按钮、超时不静默放行。
 // patterns 都是 JS 正则源码串, 大小写不敏感; allowPatterns 优先级最高。
 const Danger = z.object({
-  enabled: z.boolean().default(true).describe("危险名单总开关"),
-  // 与 enabled=false 的区别: 名单仍会计算 (日志/redact 用得到), 只是不再拦。
-  skip: z.boolean().default(false).describe("命中危险名单也直接放行 (只豁免命中名单的调用)"),
-  // 压过危险名单 / askRules / ⏱窗口 / 会话缓存 —— 比 skip 更彻底 (skip 只豁免命中名单
-  // 的调用, 普通调用照审)。denyRules 与 EnterPlanMode 拦截仍生效 (拒绝不是审批);
-  // AskUserQuestion / ExitPlanMode 交互卡不受影响。
-  skipAll: z.boolean().default(false).describe("跳过所有审批: 命中 matcher 的调用一律静默放行"),
   builtin: z.boolean().default(true).describe("用内置危险名单; false = 只用下面的自定义规则"),
   commandPatterns: z.array(z.string()).default([]).describe("危险 Bash 命令正则 (大小写不敏感)"),
   toolPatterns: z.array(z.string()).default([]).describe("危险工具名正则"),
@@ -224,12 +217,12 @@ const Danger = z.object({
 
 const Approval = z.object({
   enabled: z.boolean().default(true).describe("审批总开关"),
-  // 名单被关掉 (danger.enabled=false) 时 "danger" 自动退回 "all" —— 否则就成了「全
-  // 放行」, 与 danger.skipAll 语义重合且更隐蔽。跳过所有审批不在 mode 里 —— 用
-  // danger.skipAll, 与 danger.skip 成对。
-  // 默认 danger (2026-10-28 人拍板: 普通卡不再发, 审批只剩 danger 一层; deny/ask
-  // 仍优先, 非 danger 自动放行按 ⏱ 窗口记账)。要逐条审就显式设回 "all"。
-  mode: z.enum(["all", "danger"]).default("danger").describe("审批粒度: danger (默认) = 只有命中危险名单的才发卡, 其余自动放行 (按 windowMinutes 窗口记账); all = 每个命中 matcher 的调用都发卡"),
+  // 一个枚举表达全部审批粒度 (2026-10-28 收敛: 原 danger.enabled/skip/skipAll 三个
+  // 布尔并入 mode, 迁移见 migrateApprovalMode —— 未显式写 mode 时 skip/skipAll=true
+  // 或 enabled=false 映射为 "skip_all", 其余落默认; 老 key 留在盘上不报错也不写回)。
+  // 注意与顶层 approval.enabled (总开关) 的区别: enabled=false 是整个审批子系统下线,
+  // hook 一律回 ask 交回本地 CLI 的权限流; skip_all 是 wezard 主动放行 (allow)。
+  mode: z.enum(["all", "danger", "skip_all"]).default("danger").describe("审批粒度: danger (默认) = 只有危险名单命中才发卡, 其余自动放行 (按 windowMinutes 窗口记账); all = 每个命中 matcher 的调用都发卡; skip_all = 一律放行不发权限卡 (denyRules 仍拒, AskUserQuestion/ExitPlanMode 交互卡与原生权限代按照常)"),
   matcher: z.string().default(".*").describe("哪些工具名进入审批 (正则)"),
   approvers: z.array(z.string()).default([]).describe("可以点审批卡的人; 空 = 不限"),
   // 必须严格大于 longPollSec, 否则 daemon 还在等点击时 hook 已经返回 ask。
@@ -452,6 +445,26 @@ export interface LoadResult {
   sourcePath: string;
 }
 
+/** 老 danger 开关 (enabled/skip/skipAll, 2026-10-28 收敛进 mode) → 新枚举的迁移。
+ *  仅当未显式写 approval.mode 时生效 (显式 mode 优先, 老 key 忽略); 老 key 留在
+ *  盘上: zod 忽略未知键不报错, 也不写回。skip/skipAll=true 或 enabled=false 都映射
+ *  "skip_all" —— 它们在只有 danger 才发卡的新模型下语义相同 (连危险卡也不发)。 */
+export const migrateApprovalMode = (raw: unknown): { mode?: "all" | "danger" | "skip_all"; note?: string } => {
+  if (!raw || typeof raw !== "object") return {};
+  const approval = (raw as Record<string, unknown>).approval;
+  if (!approval || typeof approval !== "object" || (approval as Record<string, unknown>).mode !== undefined) return {};
+  const danger = (approval as Record<string, unknown>).danger;
+  if (!danger || typeof danger !== "object") return {};
+  const d = danger as Record<string, unknown>;
+  if (d.skipAll === true || d.skip === true) {
+    return { mode: "skip_all", note: 'config: approval.danger.skip/skipAll=true 已按 2026-10-28 收敛映射为 mode:"skip_all" (连危险卡也放行; 建议改写为 mode 字段)' };
+  }
+  if (d.enabled === false) {
+    return { mode: "skip_all", note: 'config: approval.danger.enabled=false 已按 2026-10-28 收敛映射为 mode:"skip_all" (名单关闭即不再发卡; 建议改写为 mode 字段)' };
+  }
+  return {};
+};
+
 export const loadConfig = (explicitPath?: string): LoadResult => {
   const sourcePath = resolveConfigPath(explicitPath);
   if (!sourcePath) {
@@ -470,7 +483,13 @@ export const readSecrets = (): Record<string, unknown> =>
   (readJsoncIfExists(SECRETS_PATH) ?? {}) as Record<string, unknown>;
 
 const parseWithSecrets = (base: Record<string, unknown>) => {
-  const merged = deepMerge(base, readSecrets());
+  let merged = deepMerge(base, readSecrets());
+  // 老 danger 布尔 → mode 枚举 (仅在未显式写 mode 时), 说明进 stderr/daemon 日志。
+  const mig = migrateApprovalMode(merged);
+  if (mig.mode) {
+    merged = { ...merged, approval: { ...(merged.approval as object), mode: mig.mode } };
+    if (mig.note) console.warn(`[wezard] ${mig.note}`);
+  }
   return ConfigSchema.safeParse(merged);
 };
 

@@ -49,13 +49,13 @@ export const pickerPolicy = (
     return { decision: "leave", reason: "interactive approval outside picker authority" };
   }
   if (!ctx.complete) {
-    // skipAll 是「所有审批都不要问」的显式授权, 在 hook 路径上它盲放 (approval.ts 只看
+    // mode=skip_all 是「所有审批都不要问」的显式授权, 在 hook 路径上它盲放 (approval.ts 只看
     // !nativePermission), 不依赖入参匹配。真实 CodeBuddy 权限 picker (标题
     // "Hook PreToolUse: … requires confirmation:" / 裸 "Bash command" 正文) 解不出
-    // Confirm 头与 toolName/params, complete 恒 false —— skipAll 若被这道闸门挡住,
+    // Confirm 头与 toolName/params, complete 恒 false —— skip_all 若被这道闸门挡住,
     // 在哨兵上永远轮空, 调用卡死在原生选择框。代价: 屏面解不出入参时 denyRules 同样
-    // 匹配不上 —— 开 skipAll 的人已接受「不再逐条问」。
-    if (cfg.approval.danger.skipAll) return { decision: "allow", reason: "skipAll" };
+    // 匹配不上 —— 配 skip_all 的人已接受「不再逐条问」。
+    if (cfg.approval.mode === "skip_all") return { decision: "allow", reason: "skip_all" };
     // 结构解不出 ≠ 看不出危险: 正文里那段操作 (REPL 包裹的命令 / 被 pane 宽度截断的
     // params) 照样过一遍危险名单。判出 rm -rf 就打红走「危险」行 —— 看不懂的只是
     // 参数全貌, 不是这条命本身。
@@ -66,7 +66,7 @@ export const pickerPolicy = (
   }
   const deny = ruleMatchesAny(cfg.approval.denyRules, ctx.toolName, ctx.toolInput);
   if (deny) return { decision: "deny", reason: `deny_rule:${deny}` };
-  if (cfg.approval.danger.skipAll) return { decision: "allow", reason: "skipAll" };
+  if (cfg.approval.mode === "skip_all") return { decision: "allow", reason: "skip_all" };
   const ask = ruleMatchesAny(cfg.approval.askRules, ctx.toolName, ctx.toolInput);
   const self = selfConfigWriteOf(ctx.toolName, ctx.toolInput);
   const danger = self ?? dangerOf(cfg, ctx.toolName, ctx.toolInput);

@@ -2285,13 +2285,13 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
       return;
     }
 
-    // danger.skipAll: 跳过所有审批 —— 命中 matcher 的调用一律静默放行, 压过危险
-    // 名单 / askRules / ⏱窗口 / 会话缓存 (与 danger.skip 的区别: 那个只豁免命中
-    // 名单的调用, 普通调用照审)。denyRules / EnterPlanMode 拦截在前面已生效
-    // (拒绝不是审批); AskUserQuestion / ExitPlanMode 交互卡在上方分支已返回, 不受影响。
-    if (!nativePermission && cfg.approval.danger.skipAll) {
-      log.info({ toolName, sessionId }, "danger.skipAll auto allow");
-      json(res, 200, { decision: "allow", reason: "danger_skip_all" } satisfies ApproveResp);
+    // mode=skip_all: 跳过所有审批 —— 命中 matcher 的调用一律静默放行, 压过危险
+    // 名单 / askRules / ⏱窗口 / 会话缓存 (原 danger.skipAll, 2026-10-28 并入 mode)。
+    // denyRules / EnterPlanMode 拦截在前面已生效 (拒绝不是审批);
+    // AskUserQuestion / ExitPlanMode 交互卡在上方分支已返回, 不受影响。
+    if (!nativePermission && cfg.approval.mode === "skip_all") {
+      log.info({ toolName, sessionId }, "skip_all auto allow");
+      json(res, 200, { decision: "allow", reason: "skip_all" } satisfies ApproveResp);
       settleGuard();
       return;
     }

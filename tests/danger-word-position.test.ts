@@ -188,19 +188,25 @@ t("rm 解析不出 → 不判 (相对/变量/裸 glob/.. 后不可知/引号未�
 });
 t("rm .. 逃逸出临时区 (解析可得) → 仍判", () =>
   assert.equal(ruleOf("rm -rf /tmp/../etc/passwd"), "删除文件 rm → /tmp/../etc/passwd"));
-t("rm /var/tmp (不进临时区清单) → 仍判", () => danger("rm -rf /var/tmp/x"));
-t("rm 末段一次性目录名 (tmp / tmp-… / tmp_…) → 不判 (人 2026-10-28 放宽)", () => {
+t("rm 一次性目录判据 (2026-10-28 二次放宽: 任一段以 tmp 开头) → 不判", () => {
   safe("rm -rf /Users/zyy/tmp-modeck-test && echo cleaned"); // 人的原话样例
   safe("rm -rf ~/tmp-modeck-test");
   safe("rm -rf ~/tmp");
-  safe("rm -rf /Users/zyy/tmp_build");
+  safe("rm -rf ~/tmp-x/build");   // 嵌套: 任一段 tmp-ish 整条当临时区
+  safe("rm -rf ~/develop/tmpdata"); // 无分隔符也放 (人定的方向: 宁可误放 tmpxxx)
+  safe("rm -rf /Users/zyy/tmpbuild");
+  safe("rm -rf /var/tmp/x");      // 段名 tmp → 随放宽落进临时区 (原排除口径被覆盖)
 });
-t("rm 末段普通名不豁免: ~/develop、~/develop/tmpdata (无分隔符不算 tmp 系)", () => {
+t("rm 真工作区仍判: ~/develop、/Users/zyy/develop", () => {
   danger("rm -rf ~/develop");
-  danger("rm -rf ~/develop/tmpdata");
+  danger("rm -rf /Users/zyy/develop");
 });
-t("rm 混合 (tmp-* + 真工作区) → 仍判", () => danger("rm -rf ~/tmp-x ~/develop"));
-t("rm 末段名判据对 /tmp-foo 也放行 (原「子串不豁免」按新口径修订)", () => safe("rm -rf /tmp-foo"));
+t("rm 词法逃逸出 tmp 段仍判 (归一后 tmp 已消解)", () => {
+  danger("rm -rf ~/tmp/../develop");
+  danger("rm -rf /tmp/../etc/passwd");
+});
+t("rm 混合 (tmp-ish + 真工作区) → 仍判", () => danger("rm -rf ~/tmp-x ~/develop"));
+t("rm /tmp-foo 放行 (名字判据, 原「子串不豁免」口径已修订)", () => safe("rm -rf /tmp-foo"));
 
 // ── 工具语义分界 (2026-10-28 人第三条口径): 只有真会交给 shell 执行的才做 ──
 // 命令级判定。Edit/Write 的内容、Read 的路径是数据, 不是命令; 误报原先全部来自

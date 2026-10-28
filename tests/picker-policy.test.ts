@@ -51,7 +51,7 @@ assert.equal(pickerPolicy(config, "codebuddy", context, true).forceSingle, "Bash
 // askRules = 人自己要求每次问, 不是危险: 走「审核」行, 「危险」行只留给名单真命中。
 assert.equal(pickerPolicy(config, "codebuddy", context, true).note, "命中 askRules「Bash(git status)」");
 assert.equal(pickerPolicy(config, "codebuddy", context, true).danger, undefined);
-config.approval.danger.skipAll = true;
+config.approval.mode = "skip_all";
 assert.equal(pickerPolicy(config, "codebuddy", context, true).decision, "allow");
 config.approval.denyRules = ["Bash(git status)"];
 assert.equal(pickerPolicy(config, "codebuddy", context, true).decision, "deny");
@@ -68,8 +68,13 @@ assert.equal(pickerPolicy(mode, "claude", context, false).reason, "danger_mode_s
 const dangerous = parseConfirmContext(frame("rm -rf ~/task"));
 assert.equal(pickerPolicy(mode, "codebuddy", dangerous, true).decision, "manual");
 assert.ok(pickerPolicy(mode, "codebuddy", dangerous, true).forceSingle);
-mode.approval.danger.skip = true;
-assert.equal(pickerPolicy(mode, "codebuddy", dangerous, false).reason, "danger_skip");
+// 原 danger.skip=true 的语义 (跳过危险卡) 2026-10-28 收敛为 mode:"skip_all" —— 它
+// 压过危险名单与 askRules (承自旧 skipAll), 只想在 danger 档下微调已无此档。
+mode.approval.mode = "skip_all";
+assert.equal(pickerPolicy(mode, "codebuddy", dangerous, false).reason, "skip_all");
+mode.approval.askRules = ["Bash(rm *)"];
+assert.equal(pickerPolicy(mode, "codebuddy", dangerous, true).decision, "allow", "skip_all 压过 askRules");
+mode.approval.mode = "danger";
 mode.approval.askRules = ["Bash(rm *)"];
 assert.equal(pickerPolicy(mode, "codebuddy", dangerous, true).decision, "manual");
 const self = parseConfirmContext(frame("unused", "mcp__wezard__set_model").replace('{"command":"unused"}', '{"scope":"default"}'));
@@ -84,7 +89,7 @@ const unknown = [
   `Bash command\n git status\nWould you like to proceed?\n❯ 1. Yes\n 2. Yes, and don't ask again\n 3. No\nEsc to cancel`,
 ];
 const skip = cfg();
-skip.approval.danger.skipAll = true;
+skip.approval.mode = "skip_all";
 assert.equal(pickerPolicy(skip, "codebuddy", { ...context, toolInput: { command: "git status", sandbox_permissions: "require_escalated" } }, true).decision, "leave");
 for (const screen of unknown) {
   const ctx = parseConfirmContext(screen);
