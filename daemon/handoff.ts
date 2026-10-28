@@ -122,6 +122,41 @@ export interface HandoffDeps {
 
 export type HandoffResult = { ok: true; brief: string } | { ok: false; status: number; reason: string; brief?: string };
 
+/** 失败记录的无主兜底: 失败终态是「没有人会再来核查它」的终态 (resume 跳过 compensated), 所以
+ *  值守会话即便还活着, 过了这段时间也放掉 —— 否则一条含糊的失败就能把那个 wizard 永久锁死。 */
+export const FAILED_STALE_MS = 30 * 60_000;
+
+/** 下一次交接能不能开工 (begin 的准入, 纯函数)。
+ *
+ *  值守对象 = 这场交接还欠着核查的那个会话: 失败前绑定的那个 (p.sid), 以及重启已提交时就位的
+ *  那一个 (clear.sid / nextSid / spawnSid)。挡住重开的全部意义是「别在可能已经清了一半的会话上
+ *  再清一次」, 所以:
+ *   - 没有失败终态 (waiting/briefing/restarting/restarted/resuming) → 在飞, 一律不开;
+ *   - 失败终态还没 compensated → fail() 的补偿写盘没走完, reload 还会接着做, 一律不开;
+ *   - 已 compensated 的失败: 值守会话已不是当前绑定 (target 重建成别的会话, 或根本没有活会话)
+ *     → 它守的东西已经不存在, 放;
+ *   - 值守会话仍是当前绑定 → 只有当记录老于 FAILED_STALE_MS 才放 (证据不足时宁可多等)。 */
+export type Admission = { admit: true; release: string } | { admit: false; why: string };
+
+export const handoffAdmission = (p: Pending, now: number, liveSid: string): Admission => {
+  if (!p.failure) return { admit: false, why: `在飞: stage=${p.stage}` };
+  if (!p.failure.compensated) return { admit: false, why: `失败于 ${p.stage} 但补偿未落盘, reload 还要接着做` };
+  const failed = `失败于 ${p.stage} (${p.failure.status}: ${p.failure.reason})`;
+  const guarded = [...new Set([p.sid, p.clear?.sid, p.clear?.nextSid, p.clear?.spawnSid].filter((s): s is string => !!s))];
+  const age = now - p.at;
+  const stale = `${failed}; 记录已超时 ${Math.round(age / 60_000)}min, 没人会再核查它`;
+  if (!liveSid) {
+    // 没有活会话: 没提交过重启就没有破坏在飞 (新的交接本来也只能另起一个会话), 放; 提交过则可能
+    // 只是镜像还没把绑定恢复回来, 宁可等超时。
+    return age > FAILED_STALE_MS || !p.clear
+      ? { admit: true, release: `${failed}; 该 target 现在没有活会话` }
+      : { admit: false, why: `${failed}; 当前没有活会话, 但重启凭证还在 (可能是绑定尚未恢复)` };
+  }
+  if (!guarded.includes(liveSid)) return { admit: true, release: `${failed}; 值守会话 ${guarded.join("/") || "(未记)"} 已不是当前绑定 (${liveSid})` };
+  if (age > FAILED_STALE_MS) return { admit: true, release: `${stale} (值守会话 ${liveSid} 仍是当前绑定)` };
+  return { admit: false, why: `${failed}; 值守会话 ${liveSid} 仍是当前绑定` };
+};
+
 export interface Handoffs {
   /** 自我交接: 立刻返回, 等它这一轮说完再动手。 */
   self: (target: string, brief: string) => { ok: boolean; reason?: string };
@@ -311,22 +346,31 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
       .finally(() => { cutting.delete(p.target); release(); });
   };
 
-  const begin = (target: string, mode: Pending["mode"], extra: Partial<Pending>): Pending | undefined =>
-    (handingOff(target) || !!deps.store?.get(target))
-      ? undefined
-      : saved({ target, mode, at: Date.now(), sid: deps.sessionId(target), stage: "waiting", timeoutMs: SELF_IDLE_MS, channel: mode === "self" ? deps.channelOf(target) : "", ...extra });
+  /** 开工判断: 一条已经终止、值守对象也没了的失败记录不该把这里永久挡住 (见 handoffAdmission)。
+   *  释放一定留痕 —— 人被毫秒级拒绝时, 日志是唯一能回答「凭什么」的地方。 */
+  const begin = (target: string, mode: Pending["mode"], extra: Partial<Pending>): { p: Pending } | { blocked: string } => {
+    if (handingOff(target)) return { blocked: "正在交接中" };
+    const existing = deps.store?.get(target);
+    if (existing) {
+      const a = handoffAdmission(existing, Date.now(), deps.sessionId(target));
+      if (!a.admit) return { blocked: a.why };
+      deps.log.warn({ mod: "handoff", target, at: existing.at, stage: existing.stage, sid: existing.sid, nextSid: existing.clear?.nextSid, failure: existing.failure, why: a.release }, "handoff: 释放已失效的失败记录");
+      drop(existing);
+    }
+    return { p: saved({ target, mode, at: Date.now(), sid: deps.sessionId(target), stage: "waiting", timeoutMs: SELF_IDLE_MS, channel: mode === "self" ? deps.channelOf(target) : "", ...extra }) };
+  };
 
   return {
     self: (target, brief) => {
-      const p = begin(target, "self", { brief, cut: [...(deps.currentEvents?.(target) ?? [])] });
-      if (!p) return { ok: false, reason: "已有交接记录 (可能失败待核查), 不重复清空" };
-      void run(p);
+      const b = begin(target, "self", { brief, cut: [...(deps.currentEvents?.(target) ?? [])] });
+      if (!("p" in b)) return { ok: false, reason: `已有交接记录 (${b.blocked}), 不重复清空` };
+      void run(b.p);
       return { ok: true };
     },
     other: async (target, focus, timeoutMs, extra) => {
-      const p = begin(target, "other", { focus, timeoutMs, ...extra });
-      if (!p) return { ok: false, status: 409, reason: "已有交接记录 (可能失败待核查), 不重复清空" };
-      return run(p);
+      const b = begin(target, "other", { focus, timeoutMs, ...extra });
+      if (!("p" in b)) return { ok: false, status: 409, reason: `已有交接记录 (${b.blocked}), 不重复清空` };
+      return run(b.p);
     },
     resume: () => {
       const open = Object.values(deps.store?.all() ?? {}).filter((p) => !p.failure || !p.failure.compensated);
