@@ -78,6 +78,10 @@ export const resolvePending = (reqId: string, decision: Decision): boolean => {
   if (!p) return false;
   clearTimeout(p.timer);
   store.delete(reqId);
+  // 普通 resolve 也留一份 5min 快照: 卡片还挂在 WeCom 上 (已决卡的「📄 展开完整
+  // 命令」、sweep 鬼卡的重渲染都要回来读 meta), pending 一删这些就全断了 ——
+  // 之前只有 sweep / askq 路径显式 stash, 正常 ✅/❌ 之后的展开只能落到 defaultChat。
+  stashResolved(reqId, p.meta, decision);
   p.resolve(decision);
   return true;
 };
@@ -188,9 +192,7 @@ export const resolvePendingsByChat = (
     if (!p.meta.chatKey || baseOfKey(p.meta.chatKey) !== base) continue;
     hits.push({ reqId, meta: p.meta });
   }
-  hits.forEach(({ reqId, meta }) => {
-    stashResolved(reqId, meta, decision);
-    resolvePending(reqId, decision);
-  });
+  // stash 由 resolvePending 统一负责 (同 decision, 同 meta)。
+  hits.forEach(({ reqId }) => resolvePending(reqId, decision));
   return hits;
 };

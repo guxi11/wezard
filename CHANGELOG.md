@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- 审批卡「📄 展开完整命令」回到**卡片所在的聊天**, 不再一律落 defaultChat (默认单聊)。回送目标改为卡片自己的会话身份逐级回收: 待决 → pending 的 chatKey; 已决 (✅/❌ 点过, pending 已删) → `resolvePending` 现在统一留 5min resolved 快照 (此前只有 sweep / askq 路径 stash, 正常点完 ✅ 再展开就断了目标); 更晚 (含 daemon 重启后) → detail 记录随卡落 24h 的 `chatKey` (`ApprovalDetailRecord` 新字段, `recordApproval` 落卡时写入)。`#slot` 子会话展开回落该 key 的 base chat, 跨群接管的卡按 `cardChannel` 频道换算; 全 miss 的真鬼卡才兑该机器人的默认聊天。过期提示那条消息同链路同修。
+
 ### Changed
 - **普通卡不再发: `approval.mode` 默认改为 `danger` (人 2026-10-28 拍板「用户只需要管理 danger」)。** 非 danger 的调用一律自动放行 —— hook 路径的自动放行按 ⏱ 窗口记账/续期 (`windowMinutes`, 默认 600 分钟 = 10h): 每次放行对会话所在 chat 续开一次窗口并回 `auto_window:<remain>s (danger-only)`, 窗口只做记账不参与门控; picker 哨兵对非 danger 原生框直接代按。不变: danger 仍是唯一发卡来源; `denyRules`/`askRules` 仍优先 (显式「必卡」的照卡); wezard 自家 MCP 工具免卡; 白名单命中仍免审。要逐条审显式设回 `all`。注意: `danger.enabled=false` 时 mode 仍自动退回 `all` (防隐蔽全放行) —— 关掉名单再 reload 会变全量发卡。
 - rm 临时区放宽「末段一次性目录名」: 目标路径**末段**叫 `tmp`、或以 `tmp-` / `tmp_` 开头 → 按临时区放行 (`~/tmp-modeck-test`、`/Users/zyy/tmp_build` 这类自建 scratch, 人 2026-10-28 原话样例 `rm -rf /Users/zyy/tmp-modeck-test && echo cleaned` 不再判 danger)。分隔符必需: `tmpdata`、`tmptest` 这类普通词不算, `~/develop`、`~/develop/tmpdata` 仍判。混合目标 (tmp-* + 真工作区) 仍判; `..` 逃逸、变量、裸 glob 照旧不判 (已改口径)。

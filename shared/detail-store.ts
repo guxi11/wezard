@@ -40,6 +40,10 @@ export interface ApprovalDetailRecord {
   toolInput: unknown;
   cwd: string;
   sessionId: string;
+  /** 卡片发到的会话 key (approver / mirror target)。「📄 展开完整命令」的回送目标:
+   *  pending 只活到点击、resolved 暂存只有 5min, 而这条记录留 24h —— 点击发生得
+   *  再晚 (含 daemon 重启后), 展开也回到卡片所在的 chat 而不是 defaultChat。 */
+  chatKey?: string;
   transcriptTail: string;
   decision?: ApprovalDecision;
   decidedBy?: string;
