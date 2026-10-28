@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Changed
+- handoff self 改为「调用即受理」(人 2026-10-28: 「像正常调一个 MCP tool 就完了，daemon 自己去控制那个 pane 完成移交」): 简报合理就立刻返回 scheduled —— 不因 pane 忙、存在未落定事件或有旧失败记录而 409。daemon 自己排期: pane 忙就排队等这一轮收口 (无「超时即失败」, 6h 上限只把日志升到 warn、记录仍是「仍在队列」), 已有一场正在执行 (restarting/清空阶段) 就把新请求排队到它之后再自动执行一次 (返回 `queuedBehind: true`), 等待中的 self 被再次调用时新简报就地接替。残余失败记录不再参与 self 准入 (30 分钟窗口与「值守会话仍是当前绑定就拒」只保留给交接别人 —— 那是同步调用, 记录挡的是对半清会话的二次清空与对已坏路径的即刻重试)。不变量保留: 不在轮中间清空 (daemon 内部等, 不让调用方等)、失败保留旧 pane/旧会话现场 (preservePrevious)、简报首句 / charter / 欠账续答照旧、无端点核验的旧版 CLI 入口仍明确拒绝。可观测性: `GET /handoff/status` 列出每场交接的阶段 / 排队深度 / 在等什么 (排队 ≠ 欠账), 日志同口径 (`仍在队列` / `排队请求开工` / `就地接替`)。
+
 ### Fixed
 - danger 档下 picker 哨兵不再发「无法完整识别」普通卡: 屏面解不出结构 (`complete=false`: 裸 `Bash command` 正文 / 被 pane 宽度截断的 params) 的原生权限框, 此前危险名单未命中时一律转普通单次卡 (审核行「无法完整识别此次操作，请逐次确认」) —— 该分支从未调 `dangerEarlyExit`, 绕过了 danger 档「非 danger 自动放行」的早退 (真机 2026-10-28: `.WendyVance` pane 的 `rm -rf /tmp/evaltest2 && mkdir …` 目标全在临时区, 名单不立 danger, 却发了普通卡)。现在与 hook 路径同口径: 名单在**可见正文**上未命中 → danger 档放行代按 （回执默认只留日志, 见下条; 该调用随后若仍触发 hook, hook 侧 `danger_mode_skip` 自带 ⏱ 窗口记账); 可见正文判出危险照发红卡; `all` 档行为不变照发卡。已知代价 (与「认不出不判 danger」同源, 人拍板接受): 被 pane 截断的不可见尾部判不到。
 - PTC (REPL) 模式下的提问也发投票卡: codebuddy 把 `AskUserQuestion` 包在 REPL 脚本里时顶层工具名是 `REPL`, mirror 只认顶层就整张卡漏掉, 本地面板成了唯一出口 (人被迫回终端作答)。现在从脚本里读出 `AskUserQuestion({questions:…})` 的字面量入参 (不求值; questions 是变量 / 模板插值 / spread / 简写属性 → 读不出, 按原样不发卡) 驱动同一套投票卡 + 按键提交面板。提问那次调用的 result 落盘 (本地先答) 会作废挂着的卡, 按 callId 只认提问那一次 —— 脚本里排在提问之前的工具结果不会误杀。

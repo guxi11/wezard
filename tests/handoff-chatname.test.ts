@@ -77,27 +77,36 @@ assert.equal(resumeText("e1", {}), "继续 e1 —— 这是你还没交代的同
   assert.deepEqual(uncut, [["ev-peer"]], "交接失败只补投仍被扣下的那句");
 }
 
-// ── 失败记录的释放: 只放掉值守对象已经不在的那些 ─────────────────────
+// ── 失败记录的释放 (交接别人); self 调用即受理: 顶掉旧记录 / 排队, 不再被拒 ──
 {
   const store = new Map<string, Pending>();
   const logs: string[] = [];
-  let live = "new";
+  const mapStore = { get: (k: string) => store.get(k), set: (k: string, v: Pending) => void store.set(k, v), drop: (k: string) => void store.delete(k), all: () => Object.fromEntries(store) } as never;
   const failed = (extra: Partial<Pending> = {}): Pending => ({
     target: "w", mode: "self", at: Date.now(), sid: "old", stage: "restarting", brief: "b", timeoutMs: 1000,
     failure: { status: 502, reason: "codebuddy native /clear completion is not verified", compensated: true }, ...extra,
   });
   const clear = { pane: "p", pid: 1, panePid: 2, sid: "old", nextSid: "next", at: Date.now() };
   const now = Date.now();
-  const slot = (method: "self" | "other") => {
+  const mk = (mocks: {
+    isBusy?: () => boolean;
+    sessionId?: () => string;
+    restart?: (t: string, p: Pending, submitted: (a: NonNullable<Pending["clear"]>) => void) => Promise<{ ok: boolean; reason?: string }>;
+  }) => {
+    const injects: string[] = [];
     const h = createHandoffs({
-      isBusy: async () => false, sessionId: () => live, channelOf: () => "", lastText: () => "", summary: () => undefined,
-      restart: async () => ({ ok: true }), inject: async () => ({ ok: true }), owed: () => [], resume: async () => ({ ok: true }),
-      notify: () => {}, uncut: () => {}, currentEvents: () => [], suppress: () => {},
-      log: pino({ level: "warn" }, { write: (s: string) => void logs.push(s) }),
-      store: { get: (k: string) => store.get(k), set: (k: string, v: Pending) => void store.set(k, v), drop: (k: string) => void store.delete(k), all: () => Object.fromEntries(store) } as never,
+      isBusy: async () => mocks.isBusy?.() ?? false, sessionId: () => mocks.sessionId?.() ?? "new", channelOf: () => "",
+      lastText: () => "", summary: () => undefined,
+      restart: mocks.restart ?? (async (_t, _p, submitted) => { submitted({ pane: "p", pid: 1, panePid: 2, sid: "s1", nextSid: "n1", at: Date.now() }); return { ok: true }; }),
+      inject: async (_t, text) => { injects.push(text); return { ok: true }; },
+      owed: () => [], resume: async () => ({ ok: true }), notify: () => {}, uncut: () => {}, currentEvents: () => [], suppress: () => {},
+      log: pino({ level: "info" }, { write: (s: string) => void logs.push(s) }),
+      selfWait: { sliceMs: 200, rampMs: 0, confirm: 1 },
+      store: mapStore,
     });
-    return { h, method };
+    return { h, injects };
   };
+  const wait = async (pred: () => boolean, tries = 400) => { for (let i = 0; i < tries && !pred(); i++) await new Promise((r) => setTimeout(r, 50)); };
 
   // 在飞: restarting 但没有失败终态 → 一律拒
   assert.equal(handoffAdmission({ ...failed(), failure: undefined }, now, "old").admit, false);
@@ -120,24 +129,68 @@ assert.equal(resumeText("e1", {}), "继续 e1 —— 这是你还没交代的同
   // 超时兜底: 值守会话还在, 但没人会再核查这条记录 → 放
   assert.equal(handoffAdmission(failed({ at: now - FAILED_STALE_MS - 1 }), now, "old").admit, true);
 
-  // 集成: 值守会话仍在 → 下一次 self 仍被拒, 记录不动
-  const rec = failed({ sid: "old" });
-  store.set("w", rec);
-  live = "old";
-  const blocked = slot("self").h.self("w", "brief");
-  assert.equal(blocked.ok, false);
-  assert.match(String(blocked.reason), /已有交接记录/);
-  assert.match(String(blocked.reason), /仍是当前绑定/);
-  assert.equal(store.get("w"), rec, "被拒时记录原样");
+  // 集成 (交接别人): 值守会话已不是当前绑定 → 新交接开工, 失效记录释放留痕
+  {
+    store.set("w", failed({ sid: "old" }));
+    const before = store.get("w")!.at;
+    const admitted = await mk({ sessionId: () => "new" }).h.other("w", "", 1);
+    assert.equal(admitted.ok, false);
+    assert.match(String(admitted.reason), /一直没能闲下来/, "失效失败记录不再挡住新交接 (进了状态机, 而不是 409)");
+    assert.ok((store.get("w")?.at ?? 0) > before, "旧记录被释放, 新一场交接落盘");
+    assert.ok(logs.some((l) => l.includes("释放已失效的失败记录") && l.includes("值守会话 old 已不是当前绑定")), "释放留痕");
+  }
 
-  // 集成: pane/sid 已重建 → 下一次交接能开工 (新记录顶掉旧的, 并留痕)
-  live = "new";
-  const before = store.get("w")!.at;
-  const admitted = await slot("other").h.other("w", "", 1);
-  assert.equal(admitted.ok, false);
-  assert.match(String(admitted.reason), /一直没能闲下来/, "失效失败记录不再挡住新交接 (进了状态机, 而不是 409)");
-  assert.ok((store.get("w")?.at ?? 0) > before, "旧记录被释放, 新一场交接落盘");
-  assert.ok(logs.some((l) => l.includes("释放已失效的失败记录") && l.includes("值守会话 old 已不是当前绑定")), "释放留痕");
+  // 集成 (交接自己): 失败记录不再挡路 —— 调用即受理, 旧记录被顶掉, 新简报走完全程
+  {
+    store.clear(); logs.length = 0;
+    store.set("w", failed({ sid: "old" }));
+    const failedAt = store.get("w")!.at;
+    let busy = true;
+    const s = mk({ isBusy: () => busy, sessionId: () => "old" });
+    const accepted = s.h.self("w", "brief-2");
+    assert.equal(accepted.ok, true, "失败记录 + 值守会话仍是当前绑定也不再拒绝 self");
+    assert.ok((store.get("w")?.at ?? 0) > failedAt, "旧记录被新请求顶掉");
+    busy = false;
+    await wait(() => s.injects.some((t) => t.includes("brief-2")));
+    assert.ok(s.injects.some((t) => t.includes("brief-2")), "排队等轮终 → 重开 → 新简报贴回");
+  }
+
+  // 集成 (排队语义): 等待中被新简报就地接替; 执行中来的请求排队, 前一场了结后自动开工
+  {
+    store.clear(); logs.length = 0;
+    let restartHold!: () => void;
+    const held = new Promise<void>((r) => (restartHold = r));
+    let restarts = 0;
+    let busy = true;
+    const s = mk({
+      isBusy: () => busy, sessionId: () => "s1",
+      restart: async (_t, _p, submitted) => {
+        restarts += 1;
+        if (restarts === 1) await held;
+        submitted({ pane: "p", pid: 1, panePid: 2, sid: "s1", nextSid: `n${restarts}`, at: Date.now() });
+        return { ok: true };
+      },
+    });
+    assert.equal(s.h.self("w", "brief-1").ok, true);
+    const takeover = s.h.self("w", "brief-2");
+    assert.equal(takeover.ok, true);
+    assert.equal(takeover.queuedBehind, undefined, "等待中: 新简报就地接替, 不另起一场");
+    assert.equal(store.get("w")?.brief, "brief-2");
+    busy = false;
+    await wait(() => restarts >= 1);
+    assert.equal(restarts, 1, "第一场已动手 (restarting)");
+    const queued = s.h.self("w", "brief-3");
+    assert.equal(queued.ok, true);
+    assert.equal(queued.queuedBehind, true, "执行中不报错, 排队到它之后");
+    assert.equal(store.get("w")?.queued?.[0]?.brief, "brief-3");
+    restartHold();
+    await wait(() => s.injects.some((t) => t.includes("brief-3")));
+    assert.ok(s.injects.some((t) => t.includes("brief-2")), "第一场贴回 brief-2");
+    assert.ok(s.injects.some((t) => t.includes("brief-3")), "排队的 brief-3 在前一场了结后自动执行");
+    assert.ok(logs.some((l) => l.includes("排队请求开工")), "排队开工留痕");
+    await wait(() => !store.get("w"));
+    assert.equal(store.get("w"), undefined, "两场都了结后记录清干净");
+  }
 }
 
-console.log("handoff/chat-name: retired names never reused, cut finals that settle are kept, resume carries the ask, dead failed handoffs are released with a log line");
+console.log("handoff/chat-name: retired names never reused, cut finals that settle are kept, resume carries the ask; self handoff accepts-then-queues (takeover while waiting, queued behind executing), other keeps admission");

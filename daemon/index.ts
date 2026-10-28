@@ -2614,6 +2614,10 @@ const main = async (): Promise<void> => {
         : { ok: true, need, done, satisfied: done >= need, results });
     });
 
+    // 交接队列的可观测性: 每个目标当前那场交接在哪个阶段、后面排了几场、在等什么 ——
+    // 明确是排队 (已受理), 不是欠账。日志同口径 (handoff: 仍在队列 / 排队请求开工)。
+    http.register("GET /handoff/status", (_req, res) => json(res, 200, { ok: true, handoffs: handoffs.status() }));
+
     // handoff 只清空原 pane 的原生上下文; 不更新 CLI 进程、工作目录或出生时的宪章。
     const clearForHandoff = (target: string, p: PendingHandoff, submitted: (attempt: NonNullable<PendingHandoff["clear"]>) => void) => {
       if (!handoffAllowed(target)) return Promise.resolve({ ok: false, reason: "handoff unavailable" });
@@ -2626,8 +2630,10 @@ const main = async (): Promise<void> => {
     const inPlaceClearRefusal = (why?: string): string =>
       `原地 handoff 已拒绝 (上下文未清空, 也没留交接记录): ${why ?? "这个后端没有可核验的原生 /clear 完成信号"}。还能走: ① set_workspace 之后 handoff —— 带 pendingCwd 的交接收拾的是换工作区的路径, daemon 起新 CLI 进程接简报; ② 让人在 CLI 里发 /new 另起会话, 再在该会话里接着干。`;
 
-    /** 交接自己: 简报由调用方给, 排在它这一轮说完之后 (见 handoff.ts)。/handoff 点名点到
-     *  自己与 /wizard/handoff-self 共用实现。 */
+    /** 交接自己: 调用即受理 —— 简报由调用方给, daemon 排队等它这一轮说完后再动手; 已有一场在
+     *  执行就排队到它之后 (不拒绝), 残余失败记录不参与 self 准入 (见 handoff.ts)。/handoff 点名
+     *  点到自己与 /wizard/handoff-self 共用实现; 无端点核验的旧版 CLI 在这里明确拒绝 (能力缺失,
+     *  不假装受理)。 */
     const handoffSelf = async (self: string, brief: string): Promise<{ status: number; body: Record<string, unknown> }> => {
       if (!handoffAllowed(self)) return { status: 409, body: { ok: false, reason: "handoff unavailable" } };
       if (brief.length < 40) return { status: 400, body: { ok: false, reason: "brief 太短 —— 要写到零上下文也能接手: 目标 / 已完成 / 当前状态 / 下一步 / 关键文件与坑" } };
@@ -2647,6 +2653,7 @@ const main = async (): Promise<void> => {
             target: self,
             contextTokens: info?.contextTokens ?? 0,
             scheduled: true,
+            ...(r.queuedBehind ? { queuedBehind: true, message: "已有一场交接正在执行；这次已受理排队，daemon 会在它结束后自动再执行一次。" } : {}),
             ...(workspaceSwitch ? {
               pendingCwd: cwd.pendingCwd,
               workspaceStatus: "queued_not_applied",
