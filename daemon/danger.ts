@@ -6,7 +6,8 @@
 //   · fallbackOnError=allow 时降级为 ask (超时/断线不静默放行危险操作)
 // 纯函数, 只做匹配; 所有副作用留在 approval.ts。
 import type { Config } from "../shared/config.js";
-import { replBashCommands } from "../shared/repl-script.js";
+import { COMMAND_KEYS, replBashCommands, replFallbackCommands } from "../shared/repl-script.js";
+import { splitSegments } from "../shared/allow-rules.js";
 
 export interface DangerHit {
   /** 人类可读的规则名, 直接渲染到卡片上 — 用户要知道「哪一条」判定它危险。 */
@@ -56,10 +57,119 @@ const cmdWord = (label: string, words: string, flags = ""): Rule[] => [
 // 只挂在 checkout -- / restore 分支后面, 不约束 reset --hard / clean 两个整树分支。
 const GIT_WILDTREE = String.raw`(?=[^;&|\n]*[\s"'](?:\.\.?|:/|\*)(?=$|[\s"';&|]))`;
 
+// ── rm 临时区豁免 (2026-10-28 人的口径) ────────────────────────────────
+// 「rm 一次性目录里的东西」不判危险: 那里的文件本就是用后即焚的。只豁免 rm 的
+// **所有**目标都落在临时区的调用 —— 混合目标 (临时区 + 工作区/家目录) 不豁免;
+// 解析不出 (相对路径 / 变量 / 裸通配 / .. 逃逸 / 引号未闭合) 一律 fail-closed
+// 不豁免。判据是路径解析, 不是子串: /tmp-foo、~/develop/tmpdata 不是 /tmp 下面。
+// 临时区清单 (复核口径):
+//   /tmp、/private/tmp (macOS 同一目录) —— 共享区, 只豁免「严格在下面」的目标,
+//     删区根本身清掉的是全机所有用户的临时文件, 仍危险;
+//   $TMPDIR / ${TMPDIR} 字面前缀, 及其展开形态 /var/folders/<a>/<b>/T (含
+//     /private 前缀) —— 每用户一份, 根本身也豁免;
+//   不进清单: /var/tmp (跨重启保留, 不是一次性), ~/.cache (可再生成但不是
+//     scratch 契约), /dev/shm (Linux 全机共享, 影响面超出本人)。
+
+/** 引号感知 token 化 (剥包裹引号, 引号内不分词)。undefined = 引号未闭合。 */
+const tokenize = (s: string): string[] | undefined => {
+  const toks: string[] = [];
+  let cur = "";
+  let quote: '"' | "'" | undefined;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!;
+    if (quote === "'") { cur += ch; if (ch === "'") quote = undefined; continue; }
+    if (quote === '"') { cur += ch; if (ch === "\\") { cur += s[++i] ?? ""; continue; } if (ch === '"') quote = undefined; continue; }
+    if (ch === "\\") { cur += ch + (s[++i] ?? ""); continue; }
+    if (ch === "'" || ch === '"') { quote = ch; continue; }
+    if (/\s/.test(ch)) { if (cur) { toks.push(cur); cur = ""; } continue; }
+    cur += ch;
+  }
+  if (quote !== undefined) return undefined;
+  if (cur) toks.push(cur);
+  return toks;
+};
+
+/** 词法归一: 合并 //、消解 . / ..、去尾斜杠。跨出根的 .. 按停在根处理。 */
+const normPath = (p: string): string => {
+  const out: string[] = [];
+  for (const part of p.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") { out.pop(); continue; }
+    out.push(part);
+  }
+  return out.length ? "/" + out.join("/") : "/";
+};
+
+const TMPDIR_LIT = /^\$\{TMPDIR\}(?=\/|$)|^\$TMPDIR(?=\/|$)/;
+
+/** rm 目标 token 的归类: temp = 临时区内; outside = 区外; unknown = 解析不出。 */
+const classifyRmTarget = (tok: string): "temp" | "outside" | "unknown" => {
+  const lit = TMPDIR_LIT.exec(tok);
+  if (lit) {
+    const rest = tok.slice(lit[0].length);
+    return rest.includes("..") || rest.includes("$") ? "unknown" : "temp";
+  }
+  // 其余任何未展开的变量 (含 $TMPDIRfoo 这种撞名前缀的别的变量) 都解析不出
+  if (tok.includes("$")) return "unknown";
+  if (tok.startsWith("~")) return "outside";
+  if (tok.startsWith("/")) {
+    const p = normPath(tok);
+    if (p === "/tmp" || p === "/private/tmp") return "outside"; // 共享区根本身
+    if (p.startsWith("/tmp/") || p.startsWith("/private/tmp/")) return "temp";
+    if (/^\/(private\/)?var\/folders\/[^/]+\/[^/]+\/T(\/|$)/.test(p)) return "temp";
+    return "outside";
+  }
+  return "unknown"; // 相对路径 / 裸 glob / . / ..
+};
+
+/** 段内 rm 调用的目标是否全在临时区。none = 段里没有 rm; bad = 有但不可豁免。 */
+const segmentRmStatus = (toks: string[]): "none" | "temp" | "bad" => {
+  let status: "none" | "temp" | "bad" = "none";
+  let i = 0;
+  while (i < toks.length) {
+    const t = toks[i]!;
+    if (t !== "rm" && t !== "\\rm") { i++; continue; }
+    let j = i + 1;
+    let dashdash = false;
+    let targets = 0;
+    let allTemp = true;
+    while (j < toks.length) {
+      const a = toks[j]!;
+      // 重定向之后不再是 rm 的目标 (rm -rf /tmp/x >/dev/null 2>&1 是最常见的形态)
+      if (/^(?:\d*>&|>|>>|<|&>)/.test(a)) break;
+      if (!dashdash) {
+        if (a === "--") { dashdash = true; j++; continue; }
+        if (a.startsWith("-")) { j++; continue; }
+      }
+      targets++;
+      if (classifyRmTarget(a) !== "temp") allTemp = false;
+      j++;
+    }
+    status = targets > 0 && allTemp ? (status === "bad" ? "bad" : "temp") : "bad";
+    i = j;
+  }
+  return status;
+};
+
+/** 一条命令里所有 rm 的目标都落在临时区 → 豁免「删除文件 rm」。解析不出 → false。 */
+const rmAllTemp = (cmd: string): boolean => {
+  const segs = splitSegments(cmd);
+  if (segs === undefined) return false;
+  let anyTemp = false;
+  for (const seg of segs) {
+    const toks = tokenize(seg);
+    if (toks === undefined) return false;
+    const st = segmentRmStatus(toks);
+    if (st === "bad") return false;
+    if (st === "temp") anyTemp = true;
+  }
+  return anyTemp;
+};
+
 // ── 内置命令名单 (Bash / 任何带 command 的工具) ────────────────────────
 const CMD_RULES: readonly Rule[] = [
   ...cmdWord("删除文件 rm", "rm"),
-  ...cmdWord("删除目录 rmdir", "rmdir"),
+  // rmdir 2026-10-28 移出: 只能删空目录, 没有数据可丢 (mkdir 即恢复), 不够「不可逆」。
   ["批量删除 find -delete", /\bfind\b[\s\S]*(-delete|-exec\s+rm)\b/],
   // xargs 传参形态 (`xargs -I{} rm {}`) 里 rm 前面是 `}`, 命令词位置约束够不着,
   // 靠这条宽规则兜住 —— 有 xargs 前置, 同样不会误伤普通命令。
@@ -89,9 +199,16 @@ const CMD_RULES: readonly Rule[] = [
   ["git 丢弃改动", new RegExp(
     String.raw`\bgit\s+(?:reset\s+--hard|clean\b|checkout\s+[^;&|\n]*?--${GIT_WILDTREE}|restore\b${GIT_WILDTREE})`,
   )],
-  ["git 删分支", /\bgit\s+branch\s+-D\b|\bgit\s+push\b[\s\S]*--delete\b/],
+  // git 删分支 2026-10-28 拆分: 本地 branch -D 移出 —— 提交仍在 reflog 里
+  // (默认 90 天), git 里拿得回来; 远程 push --delete 保留 —— 动的是共享远端,
+  // 别人的克隆不一定有副本, 拿不回来。
+  ["git 删远程分支", /\bgit\s+push\b[\s\S]*--delete\b/],
   ["发布包", /\bnpm\s+(publish|unpublish)\b|\byarn\s+publish\b|\bpnpm\s+publish\b/],
-  ["容器删除", /\bdocker\s+(rm|rmi|system\s+prune|volume\s+rm|compose\s+down)\b/],
+  // 容器 2026-10-28 按「数据在哪」拆分: 容器/镜像/无 -v 的 compose down 是牲口
+  // (compose up / 重新 pull 即恢复) → 移出; volume 和 prune 动的是数据卷 ——
+  // 数据不在 git 也不在别处, 拿不回来 → 保留。附带补上 volume prune (整批卷,
+  // 比 volume rm 更狠, 原名单漏了)。
+  ["容器数据删除", /\bdocker\s+(volume\s+(rm|prune)|system\s+prune)\b|\bdocker\s+compose\s+down\s+[^\n;&|]*?(-v\b|--volumes\b)/],
   ["k8s 删除", /\bkubectl\s+delete\b/],
   ["基础设施销毁", /\bterraform\s+destroy\b/],
   ["云资源删除", /\baws\s+[\s\S]*\b(rm|rb|delete-|terminate-)|\bgcloud\s+[\s\S]*\bdelete\b/],
@@ -104,7 +221,9 @@ const CMD_RULES: readonly Rule[] = [
   ["Redis 清库", /\bredis(-cli)?\b[\s\S]*\bflush(all|db)\b/i],
   ["下载即执行", /\b(curl|wget)\b[\s\S]*\|\s*(sudo\s+)?(ba)?sh\b/],
   ["fork 炸弹", /:\(\)\s*\{.*\|.*&.*\}/],
-  ["清历史", /\bhistory\s+-c\b|\bdefaults\s+delete\b/],
+  // history -c 2026-10-28 移出: 丢的只是 shell 历史, 没有可恢复性问题的数据;
+  // defaults delete 保留 —— 删的是 macOS 系统偏好 (plist), 不在 git 里, 删了拿不回。
+  ["清系统偏好", /\bdefaults\s+delete\b/],
 ];
 
 // ── 内置工具名名单 (MCP / 内置工具, 按名字判定) ────────────────────────
@@ -146,8 +265,9 @@ const strings = (v: unknown, depth = 0, acc: string[] = []): string[] => {
   return acc;
 };
 
-// command 类入参: Bash.command, 以及任何叫 command/script/cmd 的字段。
-const COMMAND_KEYS = new Set(["command", "cmd", "script", "shell"]);
+// command 类入参: Bash.command, 以及任何叫 command/script/cmd 的字段 —— 值会被
+// shell 执行, 做命令级判定 (键表与 REPL 兜底共用一份, 见 shared/repl-script.ts)。
+// 其余顶层入参不扫命令: Edit/Write/Read 直连时本就不进命令判定。
 // 脚本类入参: CodeBuddy REPL (PTC) 把每个工具调用包进 `code` 里 —— 命令在脚本内部,
 // 顶层只有一段 JS。不下钻的话 `rm -rf` 藏在字符串里, 危险名单一条也命中不了。
 const SCRIPT_KEYS = new Set(["code"]);
@@ -157,10 +277,11 @@ const commandsOf = (input: unknown): string[] => {
     if (typeof v !== "string") return [];
     if (COMMAND_KEYS.has(k)) return [v];
     if (!SCRIPT_KEYS.has(k)) return [];
-    // 脚本里认出的内层命令; 一条字面量都认不出 (变量拼的) 就拿整段脚本兜底 —— 宁可
-    // 多一张必发卡, 不可让一条 rm -rf 因为套了层 REPL 就静默放行。
-    const inner = replBashCommands(v);
-    return inner.length > 0 ? inner : [v];
+    // 内层 Bash 命令字面量 + 兜底字面量 (命令键的值 / 裸赋值 / 陌生键的值 ——
+    // 数据键的值不是命令, 见 replFallbackCommands)。旧的「整段脚本兜底」会把
+    // Edit 的内容、Read 的路径当 shell 文本误判, 2026-10-28 按键语义拆掉;
+    // 变量拼的 'rm -rf x' (裸赋值) 仍被兜底抓住, 宁可多一张卡。
+    return [...replBashCommands(v), ...replFallbackCommands(v)];
   });
 };
 
@@ -219,7 +340,15 @@ export const dangerOf = (cfg: Config, toolName: string, toolInput: unknown): Dan
 
   return (
     firstHit(toolRules, toolName) ??
-    cmds.reduce<DangerHit | undefined>((acc, c) => acc ?? firstHit(cmdRules, c), undefined) ??
+    cmds.reduce<DangerHit | undefined>((acc, c) => {
+      if (acc) return acc;
+      // rm 全部目标都在临时区 → 只摘掉 rm 那两条规则, 其余规则照判 (sudo rm 还有
+      // 提权、xargs rm 目标不可知, 都不能被 rm 的豁免顺手放掉)。
+      const rules = rmAllTemp(c)
+        ? cmdRules.filter(([label]) => !/删除文件 rm$/.test(label))
+        : cmdRules;
+      return firstHit(rules, c);
+    }, undefined) ??
     strings(toolInput).filter(pathish).reduce<DangerHit | undefined>(
       (acc, s) => acc ?? firstHit(pathRules, s),
       undefined,
@@ -227,11 +356,13 @@ export const dangerOf = (cfg: Config, toolName: string, toolInput: unknown): Dan
   );
 };
 
-/** 屏面解不出结构时的危险判定 (pane 宽度截断 / 裸命令 / REPL 包裹): 把可见正文当一段
- *  脚本再判一遍 —— 认得出内层命令就按命令判, 认不出就整段当命令。
+/** 屏面解不出结构时的危险判定 (pane 宽度截断 / 裸命令 / REPL 包裹): 可见正文是
+ *  裸 shell 文本 (或 REPL 代码的展示), 不是 JS —— 直接整段按 Bash 命令判: 命令位
+ *  正则本就认得出文本里的字面量形命令 (2026-10-27 真机回归: `cd /tmp && rm -rf …`)。
+ *  REPL 的 JS 分层解析 (注释/数据键/命令键) 只用于 hook 路径的真实 code 入参。
  *  「看得见的操作里有没有真危险」与「这次操作看不清」是两件事: 只有前者进「危险」行。 */
 export const dangerOfScript = (cfg: Config, text: string): DangerHit | undefined =>
-  text.trim() ? dangerOf(cfg, "REPL", { code: text }) : undefined;
+  text.trim() ? dangerOf(cfg, "Bash", { command: text }) : undefined;
 
 // 入参里任意深度的 key=value 对 (DeferExecuteTool 之类的包装可能把真实入参套一层)。
 const deepEntries = (v: unknown): [string, unknown][] =>

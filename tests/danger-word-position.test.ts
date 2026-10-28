@@ -41,6 +41,14 @@ const CFG = {
 
 const ruleOf = (command: string): string | undefined => dangerOf(CFG, "Bash", { command })?.rule;
 
+// 直连 (非 REPL 包裹) 的工具入参形态。
+const safe2 = (tool: string, input: Record<string, unknown>): void =>
+  assert.equal(dangerOf(CFG, tool, input)?.rule, undefined, `不该命中, 实际命中「${dangerOf(CFG, tool, input)?.rule}」`);
+const danger2 = (tool: string, input: Record<string, unknown>): void =>
+  assert.ok(dangerOf(CFG, tool, input)?.rule, `应命中危险名单, 实际放行`);
+// REPL (PTC) 包裹形态: 命令在 code 脚本里。
+const viaRepl = (code: string): string | undefined => dangerOf(CFG, "REPL", { code, description: "split chunks" })?.rule;
+
 const safe = (command: string): void =>
   assert.equal(ruleOf(command), undefined, `不该命中, 实际命中「${ruleOf(command)}」`);
 
@@ -76,7 +84,6 @@ t("find -exec rm", () => danger("find . -name '*.log' -exec rm {} \\;"));
 t("xargs -I 传参 rm", () => danger("git ls-files | xargs -I{} rm {}"));
 t("for 循环体里 rm", () => danger("for f in *.tmp; do rm $f; done"));
 t("$() 里 rm", () => danger("echo $(rm -rf x)"));
-t("rmdir", () => danger("rmdir /tmp/empty"));
 t("truncate 清空文件", () => danger("truncate -s 0 app.log"));
 t("裸 shutdown", () => danger("shutdown -h now"));
 t("分号后 reboot", () => danger("make build; reboot"));
@@ -132,10 +139,71 @@ t("git checkout 换分支 (无 --) → 不算丢弃", () => safe("git checkout m
 t("git checkout -b 新分支 → 不算丢弃", () => safe("git checkout -b feat/x"));
 t("整树 token 在别的段里不连坐 (窗口止于 ;)", () => safe("git restore src; ls ."));
 
+// ── 危险名单第二批降档 (2026-10-28): 判据 = 丢了能不能从 git 或别处恢复 ──
+t("rmdir 只删空目录, mkdir 即恢复 → 降普通档", () => safe("rmdir /tmp/empty"));
+t("git rm → 索引/历史里拿得回来 (本就不在名单)", () => safe("git rm src/x.ts"));
+t("git mv → 纯改名, 本就不在名单", () => safe("git mv a.ts b.ts"));
+t("git stash drop → stash 提交仍在对象库里 (本就不在名单)", () => safe("git stash drop stash@{1}"));
+t("git branch -D → 提交仍在 reflog → 降普通档", () => safe("git branch -D feat/x"));
+t("git push --delete → 动共享远端, 别人未必有副本 → 仍 danger", () => danger("git push origin --delete feat/x"));
+t("docker rm / rmi → 容器镜像是牲口, 重建即恢复 → 降普通档", () => {
+  safe("docker rm c1");
+  safe("docker rmi img:latest");
+});
+t("docker compose down (无 -v) → compose up 即恢复 → 降普通档", () => safe("docker compose down"));
+t("docker volume rm → 数据卷不在 git 也不在别处 → 仍 danger", () => danger("docker volume rm db-data"));
+t("docker volume prune → 整批卷, 比单删更狠 → 补进 danger (原漏)", () => danger("docker volume prune"));
+t("docker system prune → 停止容器的可写层/卷一并清 → 仍 danger", () => danger("docker system prune -af"));
+t("docker compose down -v / --volumes → 连数据卷一起删 → 仍 danger", () => {
+  danger("docker compose down -v");
+  danger("docker compose down --volumes");
+});
+t("history -c → 只丢 shell 历史 → 降普通档", () => safe("history -c"));
+t("defaults delete → 删 macOS 系统偏好, 不在 git 里 → 仍 danger", () => danger("defaults delete com.apple.dock"));
+
+// ── 工具语义分界 (2026-10-28 人第三条口径): 只有真会交给 shell 执行的才做 ──
+// 命令级判定。Edit/Write 的内容、Read 的路径是数据, 不是命令; 误报原先全部来自
+// REPL 的「整段脚本兜底」—— 现在兜底按字面量前的属性键分类 (命令键/数据键/裸)。
+t("直连 Edit 写含 rm -rf 的文本 → 数据, 不判 danger", () =>
+  safe2("Edit", { file_path: "deploy.sh", new_string: "rm -rf build" }));
+t("直连 Read 文件名带 rm → 不判 danger", () =>
+  safe2("Read", { file_path: "/notes/rm-me.md" }));
+t("直连 Bash rm -rf → 仍判 danger", () =>
+  danger2("Bash", { command: "rm -rf build" }));
+t("REPL 包 Edit 写含 rm -rf 的内容 → 不判 (原先整段兜底误报)", () =>
+  assert.equal(viaRepl('await Edit({ file_path: "deploy.sh", new_string: "rm -rf build" })'), undefined));
+t("REPL 包 Read 文件名带 rm → 不判", () =>
+  assert.equal(viaRepl('const r = await Read({ file_path: "rm-me.md" }); return r;'), undefined));
+t("REPL 包 Write 脚本内容含 rm → 内容是数据, 不判 (执行另有 Bash 判)", () =>
+  assert.equal(viaRepl('await Write({ file_path: "x.sh", content: "rm -rf /tmp/build" })'), undefined));
+t("REPL 包 Grep/Agent 的检索词与提示语含 rm → 不判", () => {
+  assert.equal(viaRepl('await Grep({ pattern: "rm -rf", path: "daemon" })'), undefined);
+  assert.equal(viaRepl('await Agent({ prompt: "fix the rm -rf bug in danger.ts" })'), undefined);
+});
+t("REPL 陌生键的值仍兜底 (fail-closed: 不知道会不会被执行)", () =>
+  assert.ok(viaRepl('await mcp_x.run({ blob: "rm -rf x" })')));
+t("REPL 命令键 script 的值 (mcp run_script) 仍判", () =>
+  assert.ok(viaRepl('await mcp_x.run_script({ script: "rm -rf x" })')));
+t("REPL 混合: 内层 Bash grep + Edit 写 rm 内容 → 不判", () =>
+  assert.equal(viaRepl('await Bash({ command: "grep x y" }); await Edit({ new_string: "rm -rf build" })'), undefined));
+t("REPL 字面量内部再像键值对也不拆 (整体消费)", () =>
+  assert.equal(viaRepl('await Edit({ new_string: "cmd: rm -rf x" })'), undefined));
+t("REPL 注释里的 rm 不判 (注释层分离)", () => {
+  assert.equal(viaRepl("// don't run rm -rf here, use the cleanup script"), undefined);
+  assert.equal(viaRepl("/* 历史: 曾用 rm -rf 清目录 */\nreturn 1;"), undefined);
+});
+t("REPL 注释里的引号不吞后面的真命令 (don't 之后仍有 rm 裸赋值 → 判)", () =>
+  assert.ok(viaRepl("// don't do this\nconst cmd = 'rm -rf x';\nawait Bash({ command: cmd });")));
+t("REPL 正则字面量里的引号不吞后面的真命令", () =>
+  assert.ok(viaRepl("const q = /['\"]/.source;\nconst cmd = 'rm -rf x';\nawait Bash({ command: cmd });")));
+t("REPL 动态拼接的碎片仍兜底 (fail-closed)", () =>
+  assert.ok(viaRepl('const cmd = "rm -" + "rf /x"; await Bash({ command: cmd });')));
+t("REPL eval 字符串仍兜底", () =>
+  assert.ok(viaRepl('eval("rm -rf x")')));
+
 // ── REPL / PTC 包裹: 命令在脚本里 ─────────────────────────────────────
 // CodeBuddy 把每次工具调用包进 REPL 的 code 参数。只看顶层 key 会整条漏掉 ——
 // 2026-10-27 真机: 卡上写着「无法完整识别」, 而脚本里是 `rm -rf b64chunks`。
-const viaRepl = (code: string): string | undefined => dangerOf(CFG, "REPL", { code, description: "split chunks" })?.rule;
 t("REPL 反引号里的 rm -rf", () => assert.ok(viaRepl("const w = await Bash({ command: `cd /tmp && rm -rf b64chunks` });")));
 t("REPL 双引号里的强推", () => assert.ok(viaRepl('await Bash({ command: "git push --force origin main" })')));
 t("REPL 单引号里的 shutdown", () => assert.ok(viaRepl("await Bash({ command: 'shutdown -h now' })")));

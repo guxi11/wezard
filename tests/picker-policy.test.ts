@@ -44,7 +44,9 @@ assert.equal(pickerPolicy(config, "codebuddy", context, true).decision, "leave")
 const mode = cfg();
 mode.approval.mode = "danger";
 assert.equal(pickerPolicy(mode, "claude", context, false).reason, "danger_mode_skip");
-const dangerous = parseConfirmContext(frame("rm -rf /tmp/task"));
+// 危险样例用工作区相对路径: /tmp 下的 rm 会被临时区豁免放行 (2026-10-28 口径),
+// 不再是 danger 命中。
+const dangerous = parseConfirmContext(frame("rm -rf ./task"));
 assert.equal(pickerPolicy(mode, "codebuddy", dangerous, true).decision, "manual");
 assert.ok(pickerPolicy(mode, "codebuddy", dangerous, true).forceSingle);
 mode.approval.danger.skip = true;
