@@ -27,34 +27,20 @@ export const replBashCallCount = (code: string): number =>
  *  这类)。顶层工具入参和 REPL 兜底共用这一份语义。 */
 export const COMMAND_KEYS = new Set(["command", "cmd", "script", "shell"]);
 
-/** 数据键: 值是路径 / 文件正文 / 检索词 / 给人看的散文, 不是要执行的命令 ——
- *  Edit 的 new_string、Write 的 content、Read 的 file_path、Grep 的 pattern、
- *  Agent 的 prompt…… 内容里出现 "rm " 不等于删文件 (人 2026-10-28 口径: 只有
- *  真会交给 shell 执行的才做命令级判定)。没列到的键按 fail-closed 仍当命令扫:
- *  陌生工具的字符串参数不知道会不会被执行。 */
-export const DATA_KEYS = new Set([
-  "file_path", "notebook_path", "path", "cwd",
-  "content", "old_string", "new_string", "new_source", "cell_id", "cell_type", "edit_mode",
-  "pattern", "glob", "url", "query",
-  "prompt", "description", "summary", "subject", "text", "markdown", "note", "brief",
-  "caption", "title", "name", "activeForm",
-]);
-
 // 字面量紧前面的「属性键:」形态; 认不出键 = 裸字面量 (变量赋值 / 拼接 / 数组元素)。
 const KEY_BEFORE = /([A-Za-z_$][\w$]*)\s*:\s*$/;
 
 /** 逐字符扫描 REPL 脚本, 按层分离 (人 2026-10-28 口径: 严格校验 code, 分离可
- *  执行部分与注释/描述):
+ *  执行部分与注释/描述; **认不出的一律不当命令** —— 无法完整识别的操作不判
+ *  danger, danger 必须有看得见的理由):
  *   · 注释 (行/块) —— 整段跳过, 永不参与判定; 注释里的引号 (don't) 也不会再
  *     吞掉后面的真代码。
- *   · 字符串/模板字面量 —— 整体消费 (不钻内部), 按紧前的属性键分类: 命令键
- *     (command/cmd/script/shell) 的值、裸字面量 (变量赋值/拼接/裸参数)、陌生键
- *     的值 → 当命令兜底 (fail-closed: 动态拼接、eval、未知工具的参数都解析不出
- *     确定性); 已知数据键 (DATA_KEYS: 路径/正文/检索词/散文) 的值 → 数据, 不判。
- *   · 正则字面量 —— 按表达式位置识别并整体跳过 (里面的引号不是字符串边界)。
- *  返回「可能是命令」的字面量文本, 供危险名单兜底 —— 替代旧的「整段脚本当命令
- *  文本」: 那会把 Edit/Write 的内容、Read 的路径误判成删除动作; 而变量拼的
- *  'rm -rf x' (裸赋值) 仍在这里被抓到。 */
+ *   · 字符串/模板字面量 —— 整体消费 (不钻内部), 只认紧前属性键是**命令键**
+ *     (command/cmd/script/shell, 含 mcp run_script({script})) 的值 —— 键本身就
+ *     说明这个值会被 shell 执行。其余一律不当命令 (数据键的 file_path/content/
+ *     new_string/prompt、陌生键、变量赋值/拼接/裸参数): 认不准不立 danger ——
+ *     需要审的交给普通卡。
+ *   · 正则字面量 —— 按表达式位置识别并整体跳过 (里面的引号不是字符串边界)。 */
 export const replFallbackCommands = (code: string): string[] => {
   const out: string[] = [];
   const n = code.length;
@@ -87,10 +73,9 @@ export const replFallbackCommands = (code: string): string[] => {
       while (i < n && code[i] !== ch) { if (code[i] === "\\") i++; i++; }
       i++; // 收引号; 未闭合则吞到结尾, 该段整体按一个字面量处理 (代码已非法, 保守)
       const key = KEY_BEFORE.exec(code.slice(Math.max(0, start - 64), start))?.[1];
-      if (!(key && DATA_KEYS.has(key))) {
-        const text = unquote(code.slice(start, Math.min(i, n)));
-        if (text.trim()) out.push(text);
-      }
+      if (!key || !COMMAND_KEYS.has(key)) continue; // 数据键/陌生键/裸字面量: 认不准, 不当命令
+      const text = unquote(code.slice(start, Math.min(i, n)));
+      if (text.trim()) out.push(text);
       prev = ch;
       continue;
     }

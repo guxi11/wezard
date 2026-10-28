@@ -44,9 +44,9 @@ assert.equal(pickerPolicy(config, "codebuddy", context, true).decision, "leave")
 const mode = cfg();
 mode.approval.mode = "danger";
 assert.equal(pickerPolicy(mode, "claude", context, false).reason, "danger_mode_skip");
-// 危险样例用工作区相对路径: /tmp 下的 rm 会被临时区豁免放行 (2026-10-28 口径),
-// 不再是 danger 命中。
-const dangerous = parseConfirmContext(frame("rm -rf ./task"));
+// 危险样例用可解析的非临时区目标: /tmp 下的 rm 走临时区豁免、相对路径解析不出
+// 不判 (2026-10-28 口径), 都不再是 danger 命中。
+const dangerous = parseConfirmContext(frame("rm -rf ~/task"));
 assert.equal(pickerPolicy(mode, "codebuddy", dangerous, true).decision, "manual");
 assert.ok(pickerPolicy(mode, "codebuddy", dangerous, true).forceSingle);
 mode.approval.danger.skip = true;
@@ -99,9 +99,9 @@ const realCtx = parseConfirmContext(realCodebuddyPicker);
 assert.equal(realCtx.complete, false);
 assert.equal(pickerPolicy(skip, "codebuddy", realCtx, false).decision, "allow");
 
-// 解不出结构 ≠ 看不出危险 (2026-10-27 真机): CodeBuddy 的权限框正文只有一段命令
-// (REPL 包裹的内层 Bash), toolName/params 都解不出。以前一律「无法完整识别」,
-// 于是 `cd /tmp && rm -rf b64chunks && …` 的危险行写的是看不懂 —— 现在照常判出 rm。
+// 解不出结构时降为普通单次卡 (2026-10-28 口径: 无法完整识别不判 danger):
+// CodeBuddy 的权限框正文只有一段命令, toolName/params 都解不出; 正文里的 rm
+// 目标是相对路径 (解析不出) → 不立 danger, 走「审核」行的 UNREADABLE 说明。
 const rmScreen = [
   " Bash command",
   "   cd /tmp && rm -rf b64chunks && mkdir b64chunks && base64 -i dag5-node.png | tr -d x",
@@ -113,8 +113,8 @@ const rmCtx = parseConfirmContext(rmScreen);
 assert.equal(rmCtx.complete, false);
 const rmPolicy = pickerPolicy(cfg(), "codebuddy", rmCtx, true);
 assert.equal(rmPolicy.decision, "manual");
-assert.equal(rmPolicy.danger, "删除文件 rm");
-assert.equal(rmPolicy.note, undefined, "危险不该同时被写成审核说明");
+assert.equal(rmPolicy.danger, undefined, "解析不出不立 danger");
+assert.equal(rmPolicy.note, "无法完整识别此次操作，请逐次确认");
 // 真认不出危险的时候才退回「无法完整识别」, 而且只走审核行。
 const vagueCtx = parseConfirmContext("Bash command\n   ls -la\nWould you like to proceed?\n > 1. Yes\n   2. No");
 const vaguePolicy = pickerPolicy(cfg(), "codebuddy", vagueCtx, true);

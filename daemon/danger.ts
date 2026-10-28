@@ -4,6 +4,8 @@
 //   · 不参与批量合流 (永远独占一张卡, 不会被 ×N 聚合掉)
 //   · 卡上没有「全过」按钮, 只有 ✅ / ❌
 //   · fallbackOnError=allow 时降级为 ask (超时/断线不静默放行危险操作)
+// 判据必须来自「看懂了的操作」(人 2026-10-28): 认不出 / 解析不完整 / 动态拼接
+// 的一律不立 danger, 交回普通审批; 每次命中的理由要具体到命令与目标, 卡片可见。
 // 纯函数, 只做匹配; 所有副作用留在 approval.ts。
 import type { Config } from "../shared/config.js";
 import { COMMAND_KEYS, replBashCommands, replFallbackCommands } from "../shared/repl-script.js";
@@ -57,11 +59,15 @@ const cmdWord = (label: string, words: string, flags = ""): Rule[] => [
 // 只挂在 checkout -- / restore 分支后面, 不约束 reset --hard / clean 两个整树分支。
 const GIT_WILDTREE = String.raw`(?=[^;&|\n]*[\s"'](?:\.\.?|:/|\*)(?=$|[\s"';&|]))`;
 
-// ── rm 临时区豁免 (2026-10-28 人的口径) ────────────────────────────────
-// 「rm 一次性目录里的东西」不判危险: 那里的文件本就是用后即焚的。只豁免 rm 的
-// **所有**目标都落在临时区的调用 —— 混合目标 (临时区 + 工作区/家目录) 不豁免;
-// 解析不出 (相对路径 / 变量 / 裸通配 / .. 逃逸 / 引号未闭合) 一律 fail-closed
-// 不豁免。判据是路径解析, 不是子串: /tmp-foo、~/develop/tmpdata 不是 /tmp 下面。
+// ── rm 档位 (2026-10-28 人口径, 当日第二次修订) ────────────────────────
+// danger 只立「看懂了的非临时区目标」; 看不懂的不立 (无法完整识别不判 danger,
+// danger 必须有说得出口的理由 —— 具体到哪条命令、哪些目标路径):
+//   · 全部目标落临时区 → 不判 (一次性目录, 用后即焚);
+//   · 有解析得出的非临时区目标 (工作区/家目录/系统路径/共享区根本身) → danger,
+//     理由带上目标路径 (卡片「危险」行显示 命中「删除文件 rm → ~/y」);
+//   · 解析不出 (相对路径 / 变量 / 裸通配 / .. 逃逸 / 引号未闭合) → 不判 ——
+//     目标不明不是危险的理由, 需要审走普通卡。
+// 判据是路径解析, 不是子串: /tmp-foo、~/develop/tmpdata 不是 /tmp 下面。
 // 临时区清单 (复核口径):
 //   /tmp、/private/tmp (macOS 同一目录) —— 共享区, 只豁免「严格在下面」的目标,
 //     删区根本身清掉的是全机所有用户的临时文件, 仍危险;
@@ -122,48 +128,36 @@ const classifyRmTarget = (tok: string): "temp" | "outside" | "unknown" => {
   return "unknown"; // 相对路径 / 裸 glob / . / ..
 };
 
-/** 段内 rm 调用的目标是否全在临时区。none = 段里没有 rm; bad = 有但不可豁免。 */
-const segmentRmStatus = (toks: string[]): "none" | "temp" | "bad" => {
-  let status: "none" | "temp" | "bad" = "none";
-  let i = 0;
-  while (i < toks.length) {
-    const t = toks[i]!;
-    if (t !== "rm" && t !== "\\rm") { i++; continue; }
-    let j = i + 1;
-    let dashdash = false;
-    let targets = 0;
-    let allTemp = true;
-    while (j < toks.length) {
-      const a = toks[j]!;
-      // 重定向之后不再是 rm 的目标 (rm -rf /tmp/x >/dev/null 2>&1 是最常见的形态)
-      if (/^(?:\d*>&|>|>>|<|&>)/.test(a)) break;
-      if (!dashdash) {
-        if (a === "--") { dashdash = true; j++; continue; }
-        if (a.startsWith("-")) { j++; continue; }
-      }
-      targets++;
-      if (classifyRmTarget(a) !== "temp") allTemp = false;
-      j++;
-    }
-    status = targets > 0 && allTemp ? (status === "bad" ? "bad" : "temp") : "bad";
-    i = j;
-  }
-  return status;
-};
-
-/** 一条命令里所有 rm 的目标都落在临时区 → 豁免「删除文件 rm」。解析不出 → false。 */
-const rmAllTemp = (cmd: string): boolean => {
+/** rm 的「看懂了的非临时区目标」列表。空 = 全在临时区 / 目标解析不出 / 没有 rm
+ *  —— 都不立 danger。引号未闭合 (tokenize 失败) 同样返回空: 认不出不判。 */
+const rmOutsideTargets = (cmd: string): string[] => {
   const segs = splitSegments(cmd);
-  if (segs === undefined) return false;
-  let anyTemp = false;
+  if (segs === undefined) return [];
+  const out: string[] = [];
   for (const seg of segs) {
     const toks = tokenize(seg);
-    if (toks === undefined) return false;
-    const st = segmentRmStatus(toks);
-    if (st === "bad") return false;
-    if (st === "temp") anyTemp = true;
+    if (toks === undefined) return []; // 引号未闭合: 认不出, 不立 danger
+    let i = 0;
+    while (i < toks.length) {
+      const t = toks[i]!;
+      if (t !== "rm" && t !== "\\rm") { i++; continue; }
+      let j = i + 1;
+      let dashdash = false;
+      while (j < toks.length) {
+        const a = toks[j]!;
+        // 重定向之后不再是 rm 的目标 (rm -rf /tmp/x >/dev/null 2>&1 是最常见的形态)
+        if (/^(?:\d*>&|>|>>|<|&>)/.test(a)) break;
+        if (!dashdash) {
+          if (a === "--") { dashdash = true; j++; continue; }
+          if (a.startsWith("-")) { j++; continue; }
+        }
+        if (classifyRmTarget(a) === "outside") out.push(a);
+        j++;
+      }
+      i = j;
+    }
   }
-  return anyTemp;
+  return out;
 };
 
 // ── 内置命令名单 (Bash / 任何带 command 的工具) ────────────────────────
@@ -342,12 +336,18 @@ export const dangerOf = (cfg: Config, toolName: string, toolInput: unknown): Dan
     firstHit(toolRules, toolName) ??
     cmds.reduce<DangerHit | undefined>((acc, c) => {
       if (acc) return acc;
-      // rm 全部目标都在临时区 → 只摘掉 rm 那两条规则, 其余规则照判 (sudo rm 还有
-      // 提权、xargs rm 目标不可知, 都不能被 rm 的豁免顺手放掉)。
-      const rules = rmAllTemp(c)
+      // rm 只立「看懂了的非临时区目标」: 一个都解析不出 (全临时区 / 相对 / 变量 /
+      // 引号未闭合) → 摘掉 rm 那两条规则不立 danger (人 2026-10-28: 无法完整识别
+      // 不判 danger); 其余规则照判 (sudo rm 还有提权, xargs rm 有自己的规则)。
+      const outside = rmOutsideTargets(c);
+      const rules = outside.length === 0
         ? cmdRules.filter(([label]) => !/删除文件 rm$/.test(label))
         : cmdRules;
-      return firstHit(rules, c);
+      const hit = firstHit(rules, c);
+      // danger 必须有理由: rm 命中的理由带上具体目标路径, 卡片「危险」行可见。
+      return hit && /删除文件 rm$/.test(hit.rule)
+        ? { rule: `${hit.rule} → ${outside.join(" ")}` }
+        : hit;
     }, undefined) ??
     strings(toolInput).filter(pathish).reduce<DangerHit | undefined>(
       (acc, s) => acc ?? firstHit(pathRules, s),
