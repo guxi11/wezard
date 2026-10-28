@@ -5,7 +5,11 @@
 // 回退 all」的隐含规则一起删)。这里钉住: 默认档、迁移映射 (老 key → 新枚举)、
 // 显式 mode 优先、老 key 留盘不报错、非法值报错路径。
 import assert from "node:assert";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ConfigSchema, migrateApprovalMode } from "../shared/config.js";
+import { configGet } from "../daemon/config-api.js";
 
 let passed = 0;
 let failed = 0;
@@ -61,6 +65,37 @@ t("老 key 留在盘上不报错 (zod 忽略未知键)", () => {
   assert.ok(r.success);
   assert.equal(r.data.approval.mode, "danger"); // schema 本身不迁移, 迁移在 loadConfig
 });
+
+// ── config_get 里要能看见迁移成了什么 (硬约束) ────────────────────────
+const tmp = mkdtempSync(join(tmpdir(), "wezard-mode-mig-"));
+try {
+  const cfgPath = join(tmp, "config.jsonc");
+  writeFileSync(cfgPath, JSON.stringify({ bot: { botId: "t", secret: "t" }, approval: { danger: { skipAll: true } } }));
+  const cfg = ConfigSchema.parse({ bot: { botId: "t", secret: "t" }, approval: { mode: "skip_all" } });
+  t("config_get approval: 老 key 在盘 → 挂「迁移: …skip_all」一行", () => {
+    const text = configGet(cfg, cfgPath, "approval");
+    assert.ok(text.ok);
+    assert.ok(text.text.includes("迁移:"), "应有迁移说明行");
+    assert.ok(text.text.includes("skip_all"));
+  });
+  t("config_get approval.mode: 迁移行也挂在叶子层", () => {
+    const text = configGet(cfg, cfgPath, "approval.mode");
+    assert.ok(text.ok);
+    assert.ok(text.text.includes("迁移:"));
+  });
+  t("config_get 无关路径不挂迁移行; 老 key 清掉后自灭", () => {
+    const other = configGet(cfg, cfgPath, "approval.matcher");
+    assert.ok(other.ok);
+    assert.ok(!other.text.includes("迁移:"));
+    const clean = join(tmp, "clean.jsonc");
+    writeFileSync(clean, JSON.stringify({ bot: { botId: "t", secret: "t" }, approval: { mode: "skip_all" } }));
+    const cleanText = configGet(cfg, clean, "approval");
+    assert.ok(cleanText.ok);
+    assert.ok(!cleanText.text.includes("迁移:"), "老 key 清掉后不再提示");
+  });
+} finally {
+  rmSync(tmp, { recursive: true, force: true });
+}
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

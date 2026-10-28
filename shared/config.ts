@@ -478,6 +478,10 @@ export const loadConfig = (explicitPath?: string): LoadResult => {
   return { config: parsed.data, sourcePath: expandHome(sourcePath) };
 };
 
+/** config_get 用: 按当前配置文件重算老 key → mode 的迁移 (供渲染「迁移成了什么」)。 */
+export const approvalModeMigrationOf = (sourcePath: string): { mode?: "all" | "danger" | "skip_all"; note?: string } =>
+  migrateApprovalMode(readJsoncIfExists(sourcePath) ?? {});
+
 /** secrets.json 的原样内容 —— config_get / config_set 据此把来自它的路径一律藏起来。 */
 export const readSecrets = (): Record<string, unknown> =>
   (readJsoncIfExists(SECRETS_PATH) ?? {}) as Record<string, unknown>;

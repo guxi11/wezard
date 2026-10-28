@@ -3,7 +3,7 @@
 // from the schema itself (shared/config-meta.ts); this module only renders and plans.
 // The card for a `card`-gated write and the actual file write are the caller's (index.ts).
 import type { Config } from "../shared/config.js";
-import { ConfigSchema, TIERS, tiersForBackend, configIssues, parseConfigText, readSecrets, type TierName } from "../shared/config.js";
+import { ConfigSchema, TIERS, tiersForBackend, configIssues, parseConfigText, readSecrets, approvalModeMigrationOf, type TierName } from "../shared/config.js";
 import type { CliBackendName } from "../shared/cli-backends.js";
 import { previewPatch, readJsoncText } from "../shared/config-writer.js";
 import {
@@ -124,7 +124,15 @@ export const configGet = (
   if (!r) return { ok: false, reason: missing(p, secrets) };
   if (!visible(r, secrets)) return { ok: false, reason: `\`${p.join(".")}\` 不可读` };
   const extra = evidence(p);
-  const tail = [...(extra.length ? ["", "依据:", ...extra.map((l) => `  ${l}`)] : []), "", LEGEND];
+  // 老 danger 布尔 (2026-10-28 收敛进 mode) 的迁移说明: 查根 / approval / approval.mode
+  // 时挂一行 —— 硬约束是「config_get 里要能看见迁移成了什么」; 老 key 从盘上清掉后自灭。
+  const mig = approvalModeMigrationOf(sourcePath);
+  const migLines = mig.note && (p.length === 0
+    || (p.length === 1 && p[0] === "approval")
+    || (p.length === 2 && p[0] === "approval" && p[1] === "mode"))
+    ? [`迁移: ${mig.note.replace(/^config: /, "")}`]
+    : [];
+  const tail = [...(migLines.length ? ["", ...migLines] : []), ...(extra.length ? ["", "依据:", ...extra.map((l) => `  ${l}`)] : []), "", LEGEND];
   if (!isBranch(r.core)) {
     const body = r.core instanceof z.ZodRecord || r.core instanceof z.ZodArray
       ? [`${p.join(".")}  ${typeOf(r.core)}  ${flags(r)}  ${r.desc}`, ...entries(cfg, r), "", leaf(cfg, r).split("\n").slice(4).join("\n")]
