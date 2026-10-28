@@ -158,6 +158,16 @@ t("docker compose down -v / --volumes → 连数据卷一起删 → 仍 danger",
   danger("docker compose down -v");
   danger("docker compose down --volumes");
 });
+t("chmod/chown -R → 只动权限位, 改回去即复原 → 降普通档", () => {
+  safe("chmod -R 755 ~/develop");
+  safe("chmod -R u+w dist/");
+  safe("chown -R $USER:$USER ~/develop");
+  safe("chmod +x dist/cli/init.js"); // npm run build 自己就在干这个
+});
+t("chmod 777 → 全局可写, 保留 danger (与原「递归改权限」拆开)", () => {
+  danger("chmod 777 deploy.sh");
+  danger("chmod -R 777 /var/www"); // 同一分支里的 777, 不因 -R 移出而漏
+});
 t("history -c → 只丢 shell 历史 → 降普通档", () => safe("history -c"));
 t("defaults delete → 删 macOS 系统偏好, 不在 git 里 → 仍 danger", () => danger("defaults delete com.apple.dock"));
 

@@ -181,7 +181,11 @@ const CMD_RULES: readonly Rule[] = [
   ["重定向到设备", />\s*\/dev\/(?!null\b|stdout\b|stderr\b)/],
   ...cmdWord("提权 sudo", "sudo"),
   ["切换用户 su", /\bsu\s+-/],
-  ["递归改权限", /\bch(mod|own)\b[\s\S]*(-R|\b777\b)/],
+  // 递归改权限 2026-10-28 移出: chmod/chown -R 只动权限位, 文件内容一个字节没变,
+  // 重新 chmod 回去即可复原 —— 按「丢了能不能恢复」这条口径不够 danger。原规则把
+  // 777 写在同一分支里, 拆出来立成独立一条: 全局可写是「别人能改我的文件」的洞,
+  // 被改过的内容不留底 (git 只认得已提交的那版), 与递归改权限不是一件事。
+  ["全局可写 chmod 777", /\bch(mod|own)\b[\s\S]*\b777\b/],
   ["强制杀进程", /\bkill\s+-9\b/],
   ...cmdWord("强制杀进程", "killall|pkill"),
   ...cmdWord("关机/重启", "shutdown|reboot|halt|poweroff"),
