@@ -103,6 +103,10 @@
     "longPollSec": 43200,        // daemon long-poll (12h)
     "sessionCacheMinutes": 30,   // (session_id, tool, cmd_prefix_hash) → decision
     "windowMinutes": 5,          // 「⏱ N 分钟」按钮：开窗口期间所有请求自动 allow
+    // 原生权限框自动代按成功后要不要逐条贴进聊天。默认 "off"（只写 daemon 日志）——
+    // 代按一个本就不危险的确认是这套设置的默认姿态，逐条贴只是刷屏。
+    // "unseen" = 只报屏面没看全入参的代按；"all" = 每次成功代按都报。
+    "pressNotices": "off",
     "sensitiveArgRedact": true,  // mask password/token-like values before sending to IM
     "fallbackOnError": "ask",    // never "deny" — never break workflow
 

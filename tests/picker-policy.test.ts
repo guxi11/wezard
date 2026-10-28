@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { ConfigSchema } from "../shared/config.js";
 import { modalFingerprint, parseConfirmContext, parseModalOptions, pickAutoAllowAnswer, isModalPane } from "../shared/modal-pane.js";
-import { dispatchPickerPolicy, pickerPolicy } from "../daemon/picker-policy.js";
+import { dispatchPickerPolicy, pickerPolicy, pressNoticeOf } from "../daemon/picker-policy.js";
 
 const cfg = () => ConfigSchema.parse({ bot: { botId: "test", secret: "test" } });
 const frame = (command: string, tool = "Bash") => `
@@ -219,4 +219,17 @@ const denied = cfg();
 denied.approval.denyRules = ["Bash(git status)"];
 await dispatchPickerPolicy(pickerPolicy(denied, "codebuddy", context, true), handlers);
 assert.deepEqual(effects, ["generic picker card", "press yes", "press no"]);
+// 代按成功的聊天回执默认不发 (人 2026-10-28: 只有人需要知道的时候才下发) ——
+// CodeBuddy 原生权限框解不出 toolName/params, complete 恒 false, 曾经「只在没看全时
+// 下发」等于每按一次贴一条。现在只有显式开 approval.pressNotices 才下发。
+assert.equal(cfg().approval.pressNotices, "off", "代按回执默认只留日志");
+const unseenCtx = parseConfirmContext(realCodebuddyPicker); // complete=false 真屏
+assert.equal(unseenCtx.complete, false);
+assert.equal(pressNoticeOf("off", context, "danger_mode_skip"), false);
+assert.equal(pressNoticeOf("off", unseenCtx, "danger_mode_skip"), false);
+assert.equal(pressNoticeOf("unseen", unseenCtx, "danger_mode_skip"), true);
+assert.equal(pressNoticeOf("unseen", context, "danger_mode_skip"), false, "看全了入参就不报");
+assert.equal(pressNoticeOf("unseen", unseenCtx, "skip_all"), false, "skip_all 盲按在授权内");
+assert.equal(pressNoticeOf("all", context, "allow_rule"), true);
+assert.equal(pressNoticeOf("all", unseenCtx, "skip_all"), true, "all 是人显式要每一条");
 console.log("Picker policy and complete-context safety checks passed");

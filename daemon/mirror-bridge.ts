@@ -49,7 +49,7 @@ import { hasMirrorAskq, mootMirrorAskq, runMirrorAskqFlow, hasMirrorPlan, mootMi
 import { replAskqInput } from "../shared/repl-script.js";
 import { isAutoWindowActive } from "./session-cache.js";
 import { noticeSuffixFor } from "./notices.js";
-import { dispatchPickerPolicy, pickerPolicy } from "./picker-policy.js";
+import { dispatchPickerPolicy, pickerPolicy, pressNoticeOf } from "./picker-policy.js";
 import { renameWindow, runTmux, sparePoolFencedSids, spawnTmuxClaude } from "./spawn-tmux.js";
 import { selectEffort, selectModel, type EffortSelectResult, type ModelScope, type ModelSelectResult } from "./model-select.js";
 import { parseEffort, type Effort } from "../shared/effort.js";
@@ -7072,19 +7072,20 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
             return;
           }
           a.pickerSentinelFp = undefined;
-          // 只有人真能拿它做事才下发。danger 档 (danger_mode_skip = 危险名单没命中) /
+          // 默认只留日志, 不下发: danger 档 (danger_mode_skip = 危险名单没命中) /
           // skip_all / 自动窗口 / allow_rule 代按一个本就不危险的确认, 是这套设置的默认
-          // 姿态 —— 每按一次贴一条就是刷屏, 留日志 (含 toolName 与命令首行) 供事后 grep。
-          // 反过来, 参数没看全时的代按必须让人看见: 看不见的尾部判不到, 残余风险落在他身上。
+          // 姿态 —— 每按一次贴一条就是刷屏。日志带 toolName 与命令首行, 事后可 grep。
+          // 要下发只能由人显式开 approval.pressNotices ("unseen" = 只报入参没看全的,
+          // 看不见的尾部判不到, 残余风险在他; "all" = 每次), 不默认逐条。
           log.info({
             target: a.target, title: v.title, via: policy.reason,
             pressed: `${pick.index}. ${pick.label}`,
             toolName: ctx.toolName,
             call: ctx.complete ? undefined : clipLine(ctx.body ?? "", 200),
           }, "picker sentinel: native permission picker auto-allowed");
-          // skip_all 是「一律别问」的显式授权, 盲按也在授权内 — 同样只留日志。
-          if (!ctx.complete && policy.reason !== "skip_all") {
-            sendStandalone(a, `[mirror] 🔓 ${policy.reason} 代按了 CLI 原生权限确认（入参未看全，只按可见正文判档）${v.title ? `「${v.title}」` : ""} → ${pick.index}. ${pick.label}`);
+          if (pressNoticeOf(cfg.approval.pressNotices, ctx, policy.reason)) {
+            const unseen = ctx.complete ? "" : "（入参未看全，只按可见正文判档）";
+            sendStandalone(a, `[mirror] 🔓 ${policy.reason} 代按了 CLI 原生权限确认${unseen}${v.title ? `「${v.title}」` : ""} → ${pick.index}. ${pick.label}`);
           }
         },
         manual: () => {

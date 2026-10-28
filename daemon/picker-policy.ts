@@ -37,6 +37,19 @@ export const dispatchPickerPolicy = async (
   await handlers[policy.decision]();
 };
 
+/**
+ * 代按成功后要不要为此贴一条聊天消息。默认 "off" 不贴: 代按一个本就不危险的确认
+ * 是这套设置的默认姿态, 逐条贴只是刷屏 (日志里始终留 toolName 与命令首行)。
+ * "unseen" 只报屏面没看全入参的那类 (看不见的尾部判不到, 残余风险在人) ——
+ * 而 skip_all 是「一律别问」的显式授权, 盲按也在授权内, 不算漏看。
+ */
+export const pressNoticeOf = (
+  mode: Config["approval"]["pressNotices"],
+  ctx: Pick<ConfirmContext, "complete">,
+  reason: string,
+): boolean =>
+  mode === "all" || (mode === "unseen" && !ctx.complete && reason !== "skip_all");
+
 export const pickerPolicy = (
   cfg: Config,
   backend: CliBackendName | undefined,

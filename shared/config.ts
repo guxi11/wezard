@@ -230,6 +230,12 @@ const Approval = z.object({
   longPollSec: z.number().int().positive().default(43200).describe("审批卡等待点击的上限 (s)"),
   sessionCacheMinutes: z.number().int().nonnegative().default(30).describe("同一会话重复调用沿用上次决定的分钟数"),
   windowMinutes: z.number().int().nonnegative().default(600).describe("点「⏱ 窗口」后该会话自动放行的分钟数"),
+  // 原生权限框代按成功后要不要逐条贴进聊天。默认 "off": 代按一个本来就判为非危险的确认
+  // 是这套设置的默认姿态, 每按一次贴一条只是刷屏 (真危险走 manual 发红卡, 到不了代按)。
+  // "unseen" = 只报屏面没看全入参的那类 (看不见的尾部判不到, 残余风险在人);
+  // "all" = 每次成功代按都报。日志 ("picker sentinel: native permission picker
+  // auto-allowed") 三种取值下都写, 事后可 grep。
+  pressNotices: z.enum(["off", "unseen", "all"]).default("off").describe("原生权限框代按成功后的聊天通知: off (默认, 只留日志) / unseen (只报入参没看全的) / all (每次)"),
   sensitiveArgRedact: z.boolean().default(true).describe("发卡前脱敏参数里的敏感值"),
   fallbackOnError: z.enum(["ask", "allow", "deny"]).default("ask").describe("审批链路出错时 hook 的回答"),
   // 单次到达走单卡路径, 仅多了一次性的延迟。
