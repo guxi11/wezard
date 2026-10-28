@@ -90,15 +90,20 @@ const unknown = [
 ];
 const skip = cfg();
 skip.approval.mode = "skip_all";
+const allCfg = cfg();
+allCfg.approval.mode = "all";
 assert.equal(pickerPolicy(skip, "codebuddy", { ...context, toolInput: { command: "git status", sandbox_permissions: "require_escalated" } }, true).decision, "leave");
 for (const screen of unknown) {
   const ctx = parseConfirmContext(screen);
   assert.equal(ctx.complete, false, screen);
-  // 无 skipAll: 不完整上下文仍转审批卡逐次确认; 有 skipAll: 与 hook 路径同语义盲放
+  // 不完整上下文: danger 档早退放行 (2026-10-28 人口径: 认不出 ≠ 危险, danger 档
+  // 下不出普通卡); all 档转审批卡逐次确认; skipAll 与 hook 路径同语义盲放
   // (真实 CodeBuddy 权限 picker 的正文解不出 Confirm 头/toolName, 否则 skipAll 永远轮空)。
-  const plain = pickerPolicy(cfg(), "codebuddy", ctx, true);
-  assert.equal(plain.decision, "manual", screen);
-  assert.ok(plain.forceSingle, screen);
+  assert.equal(pickerPolicy(cfg(), "codebuddy", ctx, true).decision, "allow", screen);
+  assert.equal(pickerPolicy(cfg(), "codebuddy", ctx, true).reason, "danger_mode_skip", screen);
+  const carded = pickerPolicy(allCfg, "codebuddy", ctx, true);
+  assert.equal(carded.decision, "manual", screen);
+  assert.ok(carded.forceSingle, screen);
   assert.equal(pickerPolicy(skip, "codebuddy", ctx, true).decision, "allow", screen);
 }
 
@@ -123,9 +128,9 @@ const realCtx = parseConfirmContext(realCodebuddyPicker);
 assert.equal(realCtx.complete, false);
 assert.equal(pickerPolicy(skip, "codebuddy", realCtx, false).decision, "allow");
 
-// 解不出结构时降为普通单次卡 (2026-10-28 口径: 无法完整识别不判 danger):
-// CodeBuddy 的权限框正文只有一段命令, toolName/params 都解不出; 正文里的 rm
-// 目标是相对路径 (解析不出) → 不立 danger, 走「审核」行的 UNREADABLE 说明。
+// 解不出结构时 (2026-10-28 二次口径: 无法完整识别不判 danger, danger 档下也不出
+// 普通卡): CodeBuddy 的权限框正文只有一段命令, toolName/params 都解不出; 正文里的
+// rm 目标解析不出/全在临时区 → 不立 danger → danger 档放行, all 档才走「审核」行。
 const rmScreen = [
   " Bash command",
   "   cd /tmp && rm -rf b64chunks && mkdir b64chunks && base64 -i dag5-node.png | tr -d x",
@@ -136,14 +141,43 @@ const rmScreen = [
 const rmCtx = parseConfirmContext(rmScreen);
 assert.equal(rmCtx.complete, false);
 const rmPolicy = pickerPolicy(cfg(), "codebuddy", rmCtx, true);
-assert.equal(rmPolicy.decision, "manual");
-assert.equal(rmPolicy.danger, undefined, "解析不出不立 danger");
-assert.equal(rmPolicy.note, "无法完整识别此次操作，请逐次确认");
-// 真认不出危险的时候才退回「无法完整识别」, 而且只走审核行。
-const vagueCtx = parseConfirmContext("Bash command\n   ls -la\nWould you like to proceed?\n > 1. Yes\n   2. No");
-const vaguePolicy = pickerPolicy(cfg(), "codebuddy", vagueCtx, true);
+assert.equal(rmPolicy.decision, "allow", "danger 档下认不出且名单未命中 → 放行");
+assert.equal(rmPolicy.reason, "danger_mode_skip");
+const rmCard = pickerPolicy(allCfg, "codebuddy", rmCtx, true);
+assert.equal(rmCard.decision, "manual");
+assert.equal(rmCard.danger, undefined, "解析不出不立 danger");
+assert.equal(rmCard.note, "无法完整识别此次操作，请逐次确认");
+// 真机回归 (2026-10-28, .WendyVance 的 pane): danger 档下这张「无法完整识别」普通卡
+// 不该存在 —— rm 目标全在 /tmp 临时区, 名单不立 danger, 早退放行。
+const evalScreen = [
+  " Bash command",
+  "   rm -rf /tmp/evaltest2 && mkdir -p /tmp/evaltest2/.codebuddy/skills/test-manager",
+  " Hook PreToolUse: Bash requires confirmation:",
+  " > 1. Yes",
+  "   2. No",
+].join("\n");
+const evalCtx = parseConfirmContext(evalScreen);
+assert.equal(evalCtx.complete, false);
+const evalPolicy = pickerPolicy(cfg(), "codebuddy", evalCtx, true);
+assert.equal(evalPolicy.decision, "allow");
+assert.equal(evalPolicy.reason, "danger_mode_skip");
+// 认不出结构但可见正文里有看得懂的非临时区 rm → 照样打红走「危险」行, danger 档不放行。
+const outsideScreen = [
+  " Bash command",
+  "   rm -rf ~/task",
+  " Hook PreToolUse: Bash requires confirmation:",
+  " > 1. Yes",
+  "   2. No",
+].join("\n");
+const outsidePolicy = pickerPolicy(cfg(), "codebuddy", parseConfirmContext(outsideScreen), true);
+assert.equal(outsidePolicy.decision, "manual");
+assert.ok(outsidePolicy.danger, "可见正文里的非临时区 rm 仍立 danger");
+// 真认不出危险的时候才退回「无法完整识别」, 而且只在 all 档走审核行。
+const vagueCtx = parseConfirmContext("Bash command\n   ls -la\nWould you like to proceed?\n > 1. Yes\n  2. No");
+const vaguePolicy = pickerPolicy(allCfg, "codebuddy", vagueCtx, true);
 assert.equal(vaguePolicy.danger, undefined);
 assert.equal(vaguePolicy.note, "无法完整识别此次操作，请逐次确认");
+assert.equal(pickerPolicy(cfg(), "codebuddy", vagueCtx, true).decision, "allow");
 for (const tool of ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "PermissionRequest"]) {
   assert.equal(pickerPolicy(skip, "codebuddy", parseConfirmContext(frame("unused", tool)), true).decision, "leave");
 }

@@ -1,5 +1,6 @@
 // Screen-derived approvals have no native sandbox authority. Unknown arguments
-// cannot safely participate in command rules, danger exemptions or windows.
+// cannot safely participate in command rules or windows; danger exemptions they
+// share with the hook path (人 2026-10-28: danger 档下认不出也不出普通卡).
 import type { Config } from "../shared/config.js";
 import type { CliBackendName } from "../shared/cli-backends.js";
 import type { ConfirmContext } from "../shared/modal-pane.js";
@@ -13,11 +14,11 @@ export interface PickerPolicy {
   forceSingle?: string;
   /** 真危险名单命中 (rm / DROP / 强推 …): 卡片打红走「危险」行。 */
   danger?: string;
-  /** 必发卡但不是危险 (屏面看不懂 / askRules): 卡片「审核」行的说明。 */
+  /** 必发卡但不是危险 (mode=all 下屏面看不懂 / askRules): 卡片「审核」行的说明。 */
   note?: string;
 }
 
-/** 屏面解不出结构时的必发卡说明 —— 是「看不清」, 不是「危险」。 */
+/** 屏面解不出结构时的必发卡说明 (mode=all) —— 是「看不清」, 不是「危险」。 */
 const UNREADABLE = "无法完整识别此次操作，请逐次确认";
 
 const requestsNativePermission = (input: unknown): boolean =>
@@ -60,9 +61,15 @@ export const pickerPolicy = (
     // params) 照样过一遍危险名单。判出 rm -rf 就打红走「危险」行 —— 看不懂的只是
     // 参数全貌, 不是这条命本身。
     const hit = dangerOfScript(cfg, ctx.body ?? "");
-    return hit
-      ? { decision: "manual", reason: hit.rule, forceSingle: hit.rule, danger: hit.rule }
-      : { decision: "manual", reason: "unknown or interactive context", forceSingle: UNREADABLE, note: UNREADABLE };
+    if (hit) return { decision: "manual", reason: hit.rule, forceSingle: hit.rule, danger: hit.rule };
+    // danger 档早退 (人 2026-10-28: danger 档下不出普通卡, 「无法完整识别」也不例外):
+    // 认不出既不判 danger, 也不是「算出非 danger」的第三态 —— 名单在可见正文上没
+    // 命中就跟 hook 路径同一口径放行。代价: 被 pane 截断的不可见尾部判不到, 可见
+    // 部分的危险扫描仍照走。代按留 🔓 回执; 该调用若随后仍触发 hook, hook 侧
+    // danger_mode_skip 自带 auto-window 记账。
+    const early = dangerEarlyExit(cfg, hit, false);
+    if (early) return { decision: "allow", reason: early };
+    return { decision: "manual", reason: "unknown or interactive context", forceSingle: UNREADABLE, note: UNREADABLE };
   }
   const deny = ruleMatchesAny(cfg.approval.denyRules, ctx.toolName, ctx.toolInput);
   if (deny) return { decision: "deny", reason: `deny_rule:${deny}` };

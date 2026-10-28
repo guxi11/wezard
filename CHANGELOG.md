@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Fixed
+- danger 档下 picker 哨兵不再发「无法完整识别」普通卡: 屏面解不出结构 (`complete=false`: 裸 `Bash command` 正文 / 被 pane 宽度截断的 params) 的原生权限框, 此前危险名单未命中时一律转普通单次卡 (审核行「无法完整识别此次操作，请逐次确认」) —— 该分支从未调 `dangerEarlyExit`, 绕过了 danger 档「非 danger 自动放行」的早退 (真机 2026-10-28: `.WendyVance` pane 的 `rm -rf /tmp/evaltest2 && mkdir …` 目标全在临时区, 名单不立 danger, 却发了普通卡)。现在与 hook 路径同口径: 名单在**可见正文**上未命中 → danger 档放行代按 (留 🔓 回执; 该调用随后若仍触发 hook, hook 侧 `danger_mode_skip` 自带 ⏱ 窗口记账); 可见正文判出危险照发红卡; `all` 档行为不变照发卡。已知代价 (与「认不出不判 danger」同源, 人拍板接受): 被 pane 截断的不可见尾部判不到。
 - PTC (REPL) 模式下的提问也发投票卡: codebuddy 把 `AskUserQuestion` 包在 REPL 脚本里时顶层工具名是 `REPL`, mirror 只认顶层就整张卡漏掉, 本地面板成了唯一出口 (人被迫回终端作答)。现在从脚本里读出 `AskUserQuestion({questions:…})` 的字面量入参 (不求值; questions 是变量 / 模板插值 / spread / 简写属性 → 读不出, 按原样不发卡) 驱动同一套投票卡 + 按键提交面板。提问那次调用的 result 落盘 (本地先答) 会作废挂着的卡, 按 callId 只认提问那一次 —— 脚本里排在提问之前的工具结果不会误杀。
 - 审批卡「📄 展开完整命令」回到**卡片所在的聊天**, 不再一律落 defaultChat (默认单聊)。回送目标改为卡片自己的会话身份逐级回收: 待决 → pending 的 chatKey; 已决 (✅/❌ 点过, pending 已删) → `resolvePending` 现在统一留 5min resolved 快照 (此前只有 sweep / askq 路径 stash, 正常点完 ✅ 再展开就断了目标); 更晚 (含 daemon 重启后) → detail 记录随卡落 24h 的 `chatKey` (`ApprovalDetailRecord` 新字段, `recordApproval` 落卡时写入)。`#slot` 子会话展开回落该 key 的 base chat, 跨群接管的卡按 `cardChannel` 频道换算; 全 miss 的真鬼卡才兑该机器人的默认聊天。过期提示那条消息同链路同修。
 
