@@ -29,7 +29,7 @@ import type { Config } from "../shared/config.js";
 import { newStewardSpec, resumedStewardSpec } from "./steward-model.js";
 import { expandHome, sanitizeId } from "../shared/paths.js";
 import { augmentedPath } from "../shared/exec-path.js";
-import { sleep, truncateWithCount, mapLimit } from "../shared/std.js";
+import { sleep, truncateWithCount, mapLimit, clipLine } from "../shared/std.js";
 import { withImageClipboard, pasteVerifiedImage } from "./image-input.js";
 import { createKeyedScheduler } from "../shared/keyed-scheduler.js";
 import { withPaneInput } from "./pane-input.js";
@@ -7042,8 +7042,20 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
             return;
           }
           a.pickerSentinelFp = undefined;
-          log.info({ target: a.target, title: v.title, via: policy.reason, pressed: `${pick.index}. ${pick.label}` }, "picker sentinel: native permission picker auto-allowed");
-          sendStandalone(a, `[mirror] 🔓 ${policy.reason} 代按了 CLI 原生权限确认${v.title ? `「${v.title}」` : ""} → ${pick.index}. ${pick.label}`);
+          // 只有人真能拿它做事才下发。danger 档 (danger_mode_skip = 危险名单没命中) /
+          // skip_all / 自动窗口 / allow_rule 代按一个本就不危险的确认, 是这套设置的默认
+          // 姿态 —— 每按一次贴一条就是刷屏, 留日志 (含 toolName 与命令首行) 供事后 grep。
+          // 反过来, 参数没看全时的代按必须让人看见: 看不见的尾部判不到, 残余风险落在他身上。
+          log.info({
+            target: a.target, title: v.title, via: policy.reason,
+            pressed: `${pick.index}. ${pick.label}`,
+            toolName: ctx.toolName,
+            call: ctx.complete ? undefined : clipLine(ctx.body ?? "", 200),
+          }, "picker sentinel: native permission picker auto-allowed");
+          // skip_all 是「一律别问」的显式授权, 盲按也在授权内 — 同样只留日志。
+          if (!ctx.complete && policy.reason !== "skip_all") {
+            sendStandalone(a, `[mirror] 🔓 ${policy.reason} 代按了 CLI 原生权限确认（入参未看全，只按可见正文判档）${v.title ? `「${v.title}」` : ""} → ${pick.index}. ${pick.label}`);
+          }
         },
         manual: () => {
           if (!valid()) return;
