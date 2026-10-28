@@ -96,6 +96,68 @@ const prettyJsonHtml = (raw: string): string => {
   try { return highlightJson(JSON.stringify(JSON.parse(t), null, 2)); } catch { return ""; }
 };
 
+// ── 递归值视图 (input / output 的人读形态) ────────────────────────────────
+// 目的不是「把 JSON 打印出来」, 是让人一眼看清结构: object 一层一行, 数组下标当键,
+// 嵌套缩进; 字符串里的换行照换, 形如 JSON 的字符串先拆开再渲 (REPL 壳的 result 字段
+// 就是这种); 拆不开就按原文 —— 一个字都不丢。原文永远另有一份 raw。
+const VT_MAX_DEPTH = 12;
+const VT_MAX_ROWS = 300;
+const VT_MAX_PARSE = 200_000;
+
+/** 整段字符串是 JSON 容器时返回解析结果; 标量 / 解析失败 / 过大 → undefined。
+ *  只认容器: `42` / `"ok"` 拆成结构没有任何信息。 */
+const parseContainer = (raw: string): object | undefined => {
+  const t = raw.trim();
+  if (t.length > VT_MAX_PARSE || !/^[{[]/.test(t)) return undefined;
+  try {
+    const v: unknown = JSON.parse(t);
+    return v !== null && typeof v === "object" ? v as object : undefined;
+  } catch { return undefined; }
+};
+
+const VT_KEY = /^[A-Za-z_$][\w$.\-]*$/;
+const vtKey = (k: string): string => escHtml(VT_KEY.test(k) ? k : JSON.stringify(k));
+
+/** 一个值 (标量 / 嵌套容器) 的 HTML。容器自带 .vt-nest, 由外层 .vt-v 承载。 */
+const vtValue = (v: unknown, depth: number): string => {
+  if (v !== null && typeof v === "object") return `<div class="vt vt-nest">${vtContainer(v, depth + 1)}</div>`;
+  if (typeof v === "string") {
+    const parsed = parseContainer(v);
+    return parsed !== undefined
+      ? `<span class="vt-flag">json</span><div class="vt vt-nest">${vtContainer(parsed, depth + 1)}</div>`
+      : `<span class="vt-str">${escHtml(v)}</span>`;
+  }
+  if (v === null || v === undefined) return `<span class="jb">${v === null ? "null" : "undefined"}</span>`;
+  if (typeof v === "number") return `<span class="jn">${escHtml(String(v))}</span>`;
+  if (typeof v === "boolean") return `<span class="jb">${String(v)}</span>`;
+  return `<span class="jb">${escHtml(String(v))}</span>`;
+};
+
+/** 容器本体: 一行一个键 (数组用下标), 值可能是下一层容器。 */
+const vtContainer = (v: object, depth: number): string => {
+  if (depth > VT_MAX_DEPTH) return `<span class="vt-more">… 层级过深, 见 raw</span>`;
+  const isArr = Array.isArray(v);
+  const entries: [string, unknown][] = isArr
+    ? (v as unknown[]).map((x, i) => [String(i), x])
+    : Object.entries(v as Record<string, unknown>);
+  if (!entries.length) return `<span class="vt-empty">${isArr ? "[]" : "{}"}</span>`;
+  const rows = entries.slice(0, VT_MAX_ROWS)
+    .map(([k, x]) => `<div class="vt-row"><div class="vt-k">${vtKey(k)}</div><div class="vt-v">${vtValue(x, depth)}</div></div>`)
+    .join("");
+  const more = entries.length > VT_MAX_ROWS
+    ? `<div class="vt-more">… 共 ${entries.length} 项, 余下 ${entries.length - VT_MAX_ROWS} 项见 raw</div>`
+    : "";
+  return rows + more;
+};
+
+/** 一次调用的入参 / 结果 → 递归视图 (自带外层 .vt)。 */
+const valueView = (v: unknown): string => {
+  const body = v !== null && typeof v === "object"
+    ? vtContainer(v as object, 0)
+    : `<div class="vt-row"><div class="vt-v">${vtValue(v, 0)}</div></div>`;
+  return `<div class="vt">${body}</div>`;
+};
+
 export const SHARED_CSS = `
   *{box-sizing:border-box}
   html,body{margin:0;padding:0;background:#f6f8fa;color:#1f2328;
@@ -152,6 +214,22 @@ export const SHARED_CSS = `
   details summary::-webkit-details-marker{display:none}
   details summary::before{content:"▶ ";font-size:9px}
   details[open] summary::before{content:"▼ "}
+  /* 递归值视图 (input / output): 键列窄而灰, 值列吃满剩余宽度并自动换行 —— 长 URL / 长
+     路径不该把区块撑出一条横向滚动条。嵌套一层一条左边线, 缩进只加左侧, 不叠内边距。 */
+  .vt{padding:10px 12px;min-width:0;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;line-height:1.55}
+  .vt.vt-nest{padding:1px 0 1px 10px;margin:2px 0;border-left:1px solid #d0d7de}
+  .vt-row{display:grid;grid-template-columns:minmax(36px,max-content) minmax(0,1fr);
+    gap:4px 10px;align-items:baseline;min-width:0}
+  .vt-k{color:#656d76;max-width:38vw;white-space:pre-wrap;overflow-wrap:anywhere}
+  .vt-k::after{content:":";color:#afb8c1}
+  .vt-v{min-width:0;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;color:#1f2328}
+  .vt-str{white-space:pre-wrap;overflow-wrap:anywhere}
+  .vt-empty{color:#8c959f}
+  .vt-more{color:#8c959f;font-style:italic;padding:2px 0}
+  .vt-flag{display:inline-block;font-size:10px;line-height:14px;color:#8250df;
+    border:1px solid #8250df33;border-radius:3px;padding:0 4px;margin-right:6px;
+    letter-spacing:.3px;vertical-align:1px}
 `;
 
 interface DiffBlock { path: string; oldStr: string; newStr: string; label?: string }
@@ -518,8 +596,13 @@ const TURN_CSS = `
   .tg-mark.cut-switch::before,.tg-mark.cut-switch::after{border-top-color:#d0d7de}
 `;
 
+/** 递归可读视图 (input / output)。没有主区块时是这一块的主角, 默认摊开。 */
+const renderValueSection = (label: string, value: unknown, open: boolean): string =>
+  `<details${open ? " open" : ""}><summary>${label}</summary>${valueView(value)}</details>`;
+
+/** 原始入参 —— 结构化视图会重排, 这里留着调用时的原样。 */
 const renderJsonSection = (input: unknown): string =>
-  `<details><summary>input</summary><pre><code>${highlightJson(toJson(input))}</code></pre></details>`;
+  `<details><summary>input raw</summary><pre><code>${highlightJson(toJson(input))}</code></pre></details>`;
 
 // 结果行数 (末尾换行不计)。
 const countLines = (s: string): number => {
@@ -585,15 +668,19 @@ const toolBody = (use: ToolUse, result: ToolResult | undefined): string => {
   const readResultHtml = isRead && rawResult ? renderReadContent(rawResult, extractFilePath(use.toolInput)) : "";
   const diffResultHtml = rawResult && !isRead ? tryRenderUnifiedDiff(rawResult) : "";
   const primary = [bashHtml, diffHtml, readResultHtml, diffResultHtml].filter(Boolean).join("");
-  const inputSection = primary
-    ? renderJsonSection(use.toolInput)
-    : `<details open><summary>input</summary><pre><code>${highlightJson(toJson(use.toolInput))}</code></pre></details>`;
-  const jsonHtml = rawResult && !isRead && !diffResultHtml ? prettyJsonHtml(rawResult) : "";
-  const resultJson = jsonHtml ? `<details open><summary>result</summary><pre><code>${jsonHtml}</code></pre></details>` : "";
-  const resultRaw = rawResult
-    ? `<details><summary>result (raw)</summary><pre><code>${ansiToHtml(rawResult)}</code></pre></details>`
-    : `<details><summary>result</summary><pre style="color:#656d76;font-style:italic;margin:0;padding:12px"><code>(尚未捕获)</code></pre></details>`;
-  return `${primary}${inputSection}${resultJson}${resultRaw}`;
+  // input / output 各有两份: 人读的递归视图在前, 原文 (raw) 收在后面 —— 结构化会重排,
+  // 键序 / 大整数 / ANSI 只有原文里还准。
+  const inputSection = `${renderValueSection("input", use.toolInput, !primary)}
+${renderJsonSection(use.toolInput)}`;
+  // Read 的内容与 diff 结果已经由 primary 摊开了, 不再二次结构化。
+  const structured = rawResult && !isRead && !diffResultHtml ? parseContainer(rawResult) : undefined;
+  const outputSection = !rawResult
+    ? `<details${primary ? "" : " open"}><summary>output</summary><pre style="color:#656d76;font-style:italic;margin:0;padding:12px"><code>(尚未捕获)</code></pre></details>`
+    : structured !== undefined
+      ? `<details open><summary>output</summary>${valueView(structured)}</details>`
+        + `<details><summary>output raw</summary><pre><code>${ansiToHtml(rawResult)}</code></pre></details>`
+      : `<details${primary && (isRead || diffResultHtml) ? "" : " open"}><summary>output</summary><pre><code>${ansiToHtml(rawResult)}</code></pre></details>`;
+  return `${primary}${inputSection}${outputSection}`;
 };
 
 // ── 移交: tell_peer 把一件活交给了谁 ──

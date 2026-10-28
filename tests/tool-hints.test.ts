@@ -74,4 +74,14 @@ assert.deepEqual(execHintCalls(replSource, envelope), [{ toolName: "mcp__wezard_
 const replUse: Extract<TurnItem, { t: "tool_use" }> = { t: "tool_use", toolUseId: "rc", toolName: "REPL", toolInput: { code: replSource }, ts: 1 };
 assert.equal(hintsOf(replUse, { t: "tool_result", toolUseId: "rc", body: envelope, ts: 2 })[0]?.name, "router-check");
 assert.equal(hintsOf(replUse, undefined).length, 0);
+
+// console.log(回包) 而不 return: 壳里只有 stdout (没有 result, 也没有 Bash 的 exitCode)。
+// 逐行整行解析才认得出这次调用, 提示行才回来。
+const printed = JSON.stringify({ stdout: JSON.stringify(tellReply) + "\n", stderr: "" });
+assert.deepEqual(toolReplies(printed), [tellReply]);
+assert.equal(hintsOf(replUse, { t: "tool_result", toolUseId: "rc", body: printed, ts: 2 }).length, 1);
+// 只认整行: 行内夹着 JSON 的普通输出不是回执。
+assert.deepEqual(toolReplies(JSON.stringify({ stdout: "note " + JSON.stringify(tellReply), stderr: "" })), []);
+// Bash 自己的返回带 exitCode, 它的 stdout 是命令输出, 不是回包壳。
+assert.deepEqual(toolReplies(JSON.stringify({ stdout: JSON.stringify(tellReply) + "\n", stderr: "", exitCode: 0, signal: null })), []);
 console.log("Tool hint wrapping, pairing, rendering and receipt association checks passed");

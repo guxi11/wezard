@@ -22,6 +22,15 @@ export const toolReplies = (value: unknown, depth = 0): Facts[] => {
   // CodeBuddy REPL (PTC) 的回包壳: {result, stdout, stderr} —— 回执在 result 里 (JSON 字符串
   // 或对象); 只有 stdout/stderr 的 (Bash 输出) 和 error 形态都不是回执, 不解。
   if (o.result !== undefined && typeof o.stdout === "string" && typeof o.stderr === "string") return toolReplies(o.result, depth + 1);
+  // console.log(回包) 而不 return 时壳里只有 stdout, 没有 result (也没有 Bash 返回的 exitCode)。
+  // 逐行整行解析 —— 只认「整行就是一个 JSON」的打印, 不在一行文本里搜 JSON 片段。
+  if (o.result === undefined && o.exitCode === undefined && typeof o.stdout === "string")
+    return o.stdout.split("\n").flatMap((line) => {
+      const t = line.trim();
+      if (t.length === 0 || !/^[{[]/.test(t)) return [];
+      try { JSON.parse(t); } catch { return []; }
+      return toolReplies(t, depth + 1);
+    });
   return [];
 };
 
