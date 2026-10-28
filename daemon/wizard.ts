@@ -53,7 +53,7 @@ export interface WizardRecord {
 }
 
 export interface WizardStore {
-  /** Consume the next durable automatic name, skipping globally occupied strings. */
+  /** Consume the next automatic name (never reused), skipping globally occupied strings. */
   nextName: () => string;
   get: (target: string) => WizardRecord | undefined;
   /** 全局名字 → 记录 (大小写不敏感; `.fix` / `fix` 都认)。 */

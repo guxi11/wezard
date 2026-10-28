@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Changed
+- wizard 自动名改为严格字典序、永不复用: first 名 25 个 (首字母 A→Y)、last 名 26 个 (A→Z), 首字母即坐标 —— 一轮 650 个, 组内第 k 个 = 26×(first 首字母序) + (last 首字母序) + 1 (`AliceAdams` = #1、`YaraZane` = #650)。用完一轮就往后追加一位 `0`…`Z` (`AliceAdams0` = #651), 这一位用尽再追加一位 (`AliceAdams00` = #24051), 无限进位, 不再有「名字池耗尽」(`AutoNameExhausted` 移除)。游标只进不退: forget 掉的名字不回收, 新 wizard 的 `base#name` 槽位因此也不会落回旧 target; 采用前仍做冲突检测 (大小写不敏感), 已被占的跳过。已存在的 wizard 不改名; `wizards.json.names.json` 升到 version 3, 旧 version 2 的对角序游标作废、从头计数。
 - 代按成功不再往群里补发消息: 原生权限 picker / 原生确认框 / 计划卡的结论已落在卡片终态按钮上 (「✅ 已通过」「本会话通过」「N 分钟会话内全过 · 点击取消」「❌ 已拒绝」), 跟帖的「🔓 已代按 …」只是噪音。代按失败、超时、需人回 CLI 接手的提示照发。
 
 ## [2.8.7] - 2026-10-27

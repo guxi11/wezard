@@ -91,7 +91,6 @@ import {
   type WizardBrief,
   type WizardRecord,
 } from "./wizard.js";
-import { AutoNameExhausted } from "./wizard-names.js";
 import { activeRows, bindNoticeBox, createNoticeBox, createSeenRing, gcSeen, chatAudience, hears, noticeSuffixFor, type Notice, type Subject, type Part, type SeenRow, type TimedSnapRow, type Via } from "./notices.js";
 import { createLedger, digest, pendingGc, renderDigest, renderTable, ago as agoMs, HEARD_EVERY_MS, type Item as PendingItem } from "./pending-items.js";
 import { cacheTouchMs, cacheTtlSec, clipMiddle, contextMaterials, firstStamp, parseClosing, stripClosingMark, stripForChat, addressedResults, lastContextTokens, lastExchange, lastModel, openingTurn, talkTurns, turnsSince, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
@@ -1679,9 +1678,6 @@ const main = async (): Promise<void> => {
         // An identity rename may have claimed the address while stale eviction awaited IO.
         if (wizards.byName(candidate)) return { ok: false, status: 409, body: { ok: false, reason: "wizard name was claimed during spawn preparation" } };
         return allowed(target, candidate) ? reserve(target) : { ok: false, status: 409, body: { ok: false, reason: "wizard identity changed during slot claim" } };
-      } catch (e) {
-        if (e instanceof AutoNameExhausted) return { ok: false, status: 409, body: { ok: false, reason: e.message } };
-        throw e;
       } finally {
         if (asked) namingClaims.delete(claimKey);
       }
