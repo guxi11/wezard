@@ -22,6 +22,61 @@
 // 交互卡依赖拦截的工具永不可被规则放行 (放行会让企微远端失去问答/计划审批能力)。
 export const NEVER_RULE_ALLOW = new Set(["AskUserQuestion", "ExitPlanMode", "EnterPlanMode"]);
 
+// CodeBuddy REPL (PTC): 工具调用包在 code 脚本里, hook 只看得见 REPL 这一层。
+// 白名单对 REPL 下钻到内层调用 —— 与 danger.ts 的内层命令判定同一原则:
+// REPL 只是传输层, 档位跟着内层操作走。下钻只认 toolName === "REPL" + code 字符串:
+// 放行方向的过宽匹配是不安全的 (别的工具恰好有 code 入参会被误放行), 不像
+// danger 侧的宽匹配 (多一张卡) 是安全方向。
+import { replBashCallCount, replBashCommands, replToolNames } from "./repl-script.js";
+
+const replCodeOf = (toolInput: unknown): unknown =>
+  toolInput && typeof toolInput === "object"
+    ? (toolInput as Record<string, unknown>).code
+    : undefined;
+
+/** 内层工具名的规则侧候选: REPL 里 MCP 工具写作 mcp_<server>.<tool>
+ *  (mcp_lisct.add_elements), 规则侧是 Claude 式 mcp__<server>__<tool> —— 两种形态都认。 */
+const replRuleNames = (name: string): string[] =>
+  /^mcp_[A-Za-z0-9_]+\./.test(name)
+    ? [name, name.replace(/^mcp_([A-Za-z0-9_]+)\./, "mcp__$1__")]
+    : [name];
+
+/** 一个内层工具名是否被裸名规则覆盖 (Bash 除外 —— 它由命令字面量逐段判)。 */
+const replNameHit = (parsed: ParsedRule[], name: string): string | undefined => {
+  for (const r of parsed) {
+    if (r.spec !== undefined) continue;
+    for (const cand of replRuleNames(name)) {
+      if (r.tool === cand) return r.tool;
+      if (r.tool.startsWith("mcp__") && cand.startsWith(`${r.tool}__`)) return r.tool;
+    }
+  }
+  return undefined;
+};
+
+/** REPL 整条调用的放行判定: 每个内层调用都必须被规则覆盖, 一条不在线上就不放行。 */
+const replVerdict = (parsed: ParsedRule[], bashSpecs: Array<string | undefined>, code: string): AllowVerdict => {
+  const names = replToolNames(code);
+  const commands = replBashCommands(code);
+  // Bash 调用形状多于认出的命令字面量 = 有变量拼的命令 → 整条不可证明安全
+  if (replBashCallCount(code) > commands.length) return { allowed: false, reason: { kind: "repl_opaque" } };
+  // 一个调用都认不出 (纯计算) → 无凭据放行
+  if (names.length === 0 && commands.length === 0) return { allowed: false, reason: { kind: "repl_opaque" } };
+  const hits: string[] = [];
+  for (const cmd of commands) {
+    const v = bashCommandAllowed(bashSpecs, cmd);
+    if (!v.allowed) return v;
+    hits.push(...v.hits);
+  }
+  for (const name of names) {
+    if (name === "Bash") continue; // 由命令字面量逐段判
+    if (NEVER_RULE_ALLOW.has(name)) return { allowed: false, reason: { kind: "never_allow", tool: name } };
+    const hit = replNameHit(parsed, name);
+    if (!hit) return { allowed: false, reason: { kind: "tool_not_listed", tool: name } };
+    hits.push(hit);
+  }
+  return { allowed: true, hits };
+};
+
 interface ParsedRule {
   tool: string;
   spec?: string;
@@ -185,10 +240,12 @@ export type DenyReason =
   | { kind: "substitution" }
   /** 引号未闭合 / 孤立 & / 不可剥离的 heredoc / 空段 —— 分不出段就不敢放行。 */
   | { kind: "unparsable" }
-  /** 非 Bash 工具, 工具名不在白名单里。 */
+  /** 非 Bash 工具, 工具名不在白名单里 (REPL 下钻时 = 内层那个工具名)。 */
   | { kind: "tool_not_listed"; tool: string }
   /** 交互卡工具硬保护 (AskUserQuestion / ExitPlanMode / EnterPlanMode)。 */
   | { kind: "never_allow"; tool: string }
+  /** REPL 内层认不出: 命令是变量拼的 / 纯计算无可识别调用 —— 无法证明可放行。 */
+  | { kind: "repl_opaque" }
   /** 压根没配相关规则 —— 用户没在用白名单模式, 卡上不必提示。 */
   | { kind: "no_rules" };
 
@@ -259,6 +316,7 @@ export const evaluateAllow = (
   if (rules.length === 0) return { allowed: false, reason: { kind: "no_rules" } };
 
   const parsed = rules.map(parseRule).filter((r): r is ParsedRule => r !== undefined);
+  const bashSpecs = parsed.filter((r) => r.tool === "Bash").map((r) => r.spec);
 
   if (toolName === "Bash") {
     const cmd = toolInput && typeof toolInput === "object"
@@ -267,9 +325,22 @@ export const evaluateAllow = (
     if (typeof cmd !== "string" || !cmd.trim()) {
       return { allowed: false, reason: { kind: "unparsable" } };
     }
-    const bashSpecs = parsed.filter((r) => r.tool === "Bash").map((r) => r.spec);
     if (bashSpecs.length === 0) return { allowed: false, reason: { kind: "no_rules" } };
     return bashCommandAllowed(bashSpecs, cmd);
+  }
+
+  // REPL (CodeBuddy PTC): 按内层调用判。裸 "REPL" 规则 = 显式整工具放行
+  // (旧「总是」按钮生成的就是这条), 内层不再逐条判; 其余情况每条内层调用
+  // 都要过规则 —— 读类内层 (在白名单) 不再整条发卡, 写类内层照样问。
+  if (toolName === "REPL") {
+    const code = replCodeOf(toolInput);
+    if (typeof code === "string") {
+      if (parsed.some((r) => r.spec === undefined && r.tool === "REPL")) {
+        return { allowed: true, hits: ["REPL"] };
+      }
+      return replVerdict(parsed, bashSpecs, code);
+    }
+    // code 解不出 → 落到下面的名字判定 (REPL 未列 → tool_not_listed, 同现状)
   }
 
   for (const r of parsed) {
@@ -327,6 +398,33 @@ export const ruleMatchesAny = (
     return undefined;
   }
 
+  // REPL 下钻 (与 evaluateAllow 同口径): 内层任一调用命中即命中 —— 拒绝/追问要
+  // 抓到藏在 REPL 里的那条命令。认不出的内层 (变量拼的) 匹配不上 → undefined,
+  // 但白名单侧同样拒 (repl_opaque), 净效果仍是发卡, fail-closed。
+  if (toolName === "REPL") {
+    const code = replCodeOf(toolInput);
+    if (typeof code === "string") {
+      if (parsed.some((r) => r.spec === undefined && r.tool === "REPL")) return "REPL";
+      const bashRules = parsed.filter((r) => r.tool === "Bash");
+      for (const cmd of replBashCommands(code)) {
+        const base = stripQuotedHeredocs(cmd) ?? cmd;
+        const segments = (splitSegments(base) ?? base.split(RAW_SPLIT)).map((s) => s.trim()).filter(Boolean);
+        for (const seg of segments) {
+          for (const r of bashRules) {
+            if (r.spec === undefined) return "Bash";
+            if (bashSpecMatches(r.spec, seg)) return `Bash(${r.spec})`;
+          }
+        }
+      }
+      for (const name of replToolNames(code)) {
+        if (name === "Bash") continue; // 已由命令字面量逐段判
+        const hit = replNameHit(parsed, name);
+        if (hit) return hit;
+      }
+      return undefined;
+    }
+  }
+
   for (const r of parsed) {
     if (r.spec !== undefined) continue;
     if (r.tool === toolName) return r.tool;
@@ -343,6 +441,31 @@ const INTERPRETER_HEADS = new Set([
   "npx", "bunx", "uvx", "uv", "tsx",
 ]);
 
+/** 「总是」为一条 Bash 命令逐段生成前缀规则; undefined = 这条命令生成不出
+ *  可靠规则 (异形/动态构造), 调用方整体放弃。Bash 与 REPL 内层共用, 别各写一版。 */
+const alwaysBashRules = (
+  cmd: string,
+  existingBashSpecs: Array<string | undefined>,
+): string[] | undefined => {
+  const stripped = stripQuotedHeredocs(cmd);
+  if (stripped === undefined) return undefined; // 不可剥离的 heredoc, 放弃
+  if (HAS_SUBSTITUTION.test(stripped)) return undefined;
+  const segments = splitSegments(stripped);
+  if (segments === undefined) return undefined; // 引号未闭合/孤立 &, 不生成
+  const rules: string[] = [];
+  for (const rawSeg of segments) {
+    if (isPureAssignment(rawSeg)) continue; // 纯赋值段不执行命令, 无需为它生成规则
+    const seg = stripEnvPrefix(norm(rawSeg));
+    if (!seg) return undefined; // 空段异常, 整体放弃生成
+    // 已被现有规则覆盖的段不再生成 (避免 `Bash(cd service *)` 这类冗余堆积)
+    if (existingBashSpecs.some((s) => s === undefined || bashSpecMatches(s, seg))) continue;
+    const rule = ruleForSegment(seg);
+    if (!rule) return undefined; // 异形段首 / 解释器无子命令 —— 整体放弃生成
+    rules.push(rule);
+  }
+  return rules;
+};
+
 /**
  * 「✅ 总是」按钮的规则生成: 由本次调用推导要写入 allowRules 的规则。
  * - 非 Bash: 裸工具名 (mcp 工具即完整 mcp__server__tool);
@@ -352,6 +475,8 @@ const INTERPRETER_HEADS = new Set([
  *   解释器头部不允许退化为单命令规则 (防生成 `Bash(python3 *)` 级别的全放行);
  *   含 $()/反引号、不可剥离的 heredoc → 返回 [] (调用方保持一次性放行)。
  * - 交互卡工具永不生成规则。
+ * - REPL: 按内层调用生成 (内层 Bash 逐段 + 内层工具名), 不生成整工具放行的
+ *   "REPL" —— 那会连内层没见过的调用也一并放行。
  */
 export const alwaysAllowRulesFor = (
   toolName: string,
@@ -359,33 +484,50 @@ export const alwaysAllowRulesFor = (
   existingRules: string[] = [],
 ): string[] => {
   if (NEVER_RULE_ALLOW.has(toolName)) return [];
+
+  // REPL: 按内层调用生成 —— 每条内层 Bash 命令一段规则 + 每个内层工具名一条,
+  // 不再生成整工具放行的 "REPL" (那会连内层没见过的调用也一并放行)。认不出
+  // 内层 (变量拼的 / 无调用) 生成不出能证明覆盖的规则, 保持一次性放行。
+  if (toolName === "REPL") {
+    const code = replCodeOf(toolInput);
+    if (typeof code !== "string" || !code.trim()) return [toolName];
+    const names = replToolNames(code);
+    const commands = replBashCommands(code);
+    if (replBashCallCount(code) > commands.length) return [];
+    if (names.length === 0 && commands.length === 0) return [];
+    const existingParsed = existingRules
+      .map(parseRule)
+      .filter((r): r is ParsedRule => r !== undefined);
+    const existingBashSpecs = existingParsed.filter((r) => r.tool === "Bash").map((r) => r.spec);
+    const rules: string[] = [];
+    for (const cmd of commands) {
+      const per = alwaysBashRules(cmd, existingBashSpecs);
+      if (per === undefined) return [];
+      rules.push(...per);
+    }
+    for (const name of names) {
+      if (name === "Bash" || NEVER_RULE_ALLOW.has(name)) continue;
+      // 规则侧形态: MCP 内层写作 server.tool, 生成 Claude 式 mcp__server__tool
+      const cands = replRuleNames(name);
+      const canonical = cands[cands.length - 1] ?? name;
+      if (existingParsed.some((r) => r.spec === undefined
+        && (r.tool === canonical || (r.tool.startsWith("mcp__") && canonical.startsWith(`${r.tool}__`)))
+      )) continue;
+      rules.push(canonical);
+    }
+    return [...new Set(rules)];
+  }
+
   if (toolName !== "Bash") return [toolName];
 
   const raw = toolInput && typeof toolInput === "object"
     ? (toolInput as Record<string, unknown>).command
     : undefined;
   if (typeof raw !== "string" || !raw.trim()) return [];
-  const cmd = stripQuotedHeredocs(raw);
-  if (cmd === undefined) return [];
-  if (HAS_SUBSTITUTION.test(cmd)) return [];
-
   const existingBashSpecs = existingRules
     .map(parseRule)
     .filter((r): r is ParsedRule => r !== undefined && r.tool === "Bash")
     .map((r) => r.spec);
-
-  const segments = splitSegments(cmd);
-  if (segments === undefined) return []; // 引号未闭合/孤立 &, 不生成
-  const rules: string[] = [];
-  for (const rawSeg of segments) {
-    if (isPureAssignment(rawSeg)) continue; // 纯赋值段不执行命令, 无需为它生成规则
-    const seg = stripEnvPrefix(norm(rawSeg));
-    if (!seg) return []; // 空段异常, 整体放弃生成
-    // 已被现有规则覆盖的段不再生成 (避免 `Bash(cd service *)` 这类冗余堆积)
-    if (existingBashSpecs.some((s) => s === undefined || bashSpecMatches(s, seg))) continue;
-    const rule = ruleForSegment(seg);
-    if (!rule) return []; // 异形段首 / 解释器无子命令 —— 整体放弃生成
-    rules.push(rule);
-  }
-  return [...new Set(rules)];
+  const rules = alwaysBashRules(raw, existingBashSpecs);
+  return rules === undefined ? [] : [...new Set(rules)];
 };

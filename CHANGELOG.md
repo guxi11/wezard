@@ -5,6 +5,8 @@
 ## [Unreleased]
 
 ### Changed
+- 危险名单的「git 丢弃改动」按危害面拆分: 路径级 discard (`git restore <path>` / `git checkout -- <path>`, 含 `--staged`) 降为普通审批卡 —— 它只动所列路径的未提交改动, 是共享工作树里日常的「撤销自己刚改的文件」, ⏱窗口 / ✅总是 / 会话缓存 / 批量合流恢复可用; 整树形态 (`git reset --hard` / `git clean` / 匿名整树 pathspec `.` `..` `:/` `*` 的 checkout -- / restore, 含 `-s <rev> .` 带参形态) 仍必发红卡单审 —— 一次抹掉全组人的未提交 WIP。裸 `git checkout --` / `git restore` (无 pathspec) 是 no-op/报错, 不算整树。
+- REPL (CodeBuddy PTC) 的白名单下钻: `allowRules` / `denyRules` / `askRules` 现在按 REPL `code` 里的内层调用判定 —— 内层 Bash 命令逐段对 `Bash(...)` 规则、内层工具名对裸名规则 (REPL 的 `mcp_<server>.<tool>` 与规则侧 `mcp__<server>__<tool>` 互通)。内层全被覆盖的 REPL 调用不再整条发「REPL 未在白名单」卡; 未覆盖的按内层那条报原因 (未列的工具名 / 命令段与建议规则), 变量拼的命令与纯计算 → 新增 deny 原因 `repl_opaque` 仍发卡。裸 `"REPL"` 规则仍是显式整工具放行 (旧「总是」语义); 「总是」在 REPL 卡上改为按内层生成规则, 不再生成整工具放行的 `"REPL"`。`daemon/repl-script.ts` 移至 `shared/` (白名单侧与 danger 侧共用内层命令抽取)。
 - 详情 (工具正文) 的入参与结果各分两份, 人读的在前、原文在后: 新增递归视图 `input` —— object 一层一行、数组下标当键、嵌套缩进, 字符串里的换行照换, 形如 JSON 的字符串先拆开再渲染 (REPL 壳的 `result` 字段因此能直接读), 解析失败按原文; 原先那份 JSON 退为 `input raw`。结果同口径: `output` / `output raw`, Read 的文件内容与 diff 仍只摊开一次。
 - wizard 自动名改为严格字典序、永不复用: first 名 25 个 (首字母 A→Y)、last 名 26 个 (A→Z), 首字母即坐标 —— 一轮 650 个, 组内第 k 个 = 26×(first 首字母序) + (last 首字母序) + 1 (`AliceAdams` = #1、`YaraZane` = #650)。用完一轮就往后追加一位 `0`…`Z` (`AliceAdams0` = #651), 这一位用尽再追加一位 (`AliceAdams00` = #24051), 无限进位, 不再有「名字池耗尽」(`AutoNameExhausted` 移除)。游标只进不退: forget 掉的名字不回收, 新 wizard 的 `base#name` 槽位因此也不会落回旧 target; 采用前仍做冲突检测 (大小写不敏感), 已被占的跳过。已存在的 wizard 不改名; `wizards.json.names.json` 升到 version 3, 旧 version 2 的对角序游标作废、从头计数。
 - 代按成功不再往群里补发消息: 原生权限 picker / 原生确认框 / 计划卡的结论已落在卡片终态按钮上 (「✅ 已通过」「本会话通过」「N 分钟会话内全过 · 点击取消」「❌ 已拒绝」), 跟帖的「🔓 已代按 …」只是噪音。代按失败、超时、需人回 CLI 接手的提示照发。

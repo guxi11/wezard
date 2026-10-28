@@ -104,6 +104,34 @@ t("docker exec halt", () => danger("docker exec -it c1 halt"));
 // 反面: 远程规则不该被「有 ssh 字样 + 文件名带危险词」钓出来。
 t("scp 传带 shutdown 的文件名", () => safe("scp graceful-shutdown.md host:/tmp/"));
 
+// ── git 丢弃改动拆分 (2026-10-28): 整树形态留 danger, 路径级降普通档 ────
+// 危害面: 整树 (reset --hard / clean / 匿名整树 pathspec) 一次抹掉共享工作树里
+// 全组人的未提交 WIP → 必发单卡; 路径级 (restore/checkout -- 到具名路径) 只动
+// 所列路径的未提交改动, 是日常「撤销自己刚改的文件」→ 走普通 4 键卡 (⏱/总是)。
+t("git reset --hard (整树)", () => danger("git reset --hard"));
+t("git reset --hard HEAD~3 (整树)", () => danger("git reset --hard HEAD~3"));
+t("git clean -fd (删未跟踪)", () => danger("git clean -fd"));
+t("git checkout -- . (整树)", () => danger("git checkout -- ."));
+t("git checkout -- \".\" (整树, 引号)", () => danger('git checkout -- "."'));
+t("git checkout HEAD -- . (tree-ish 整树)", () => danger("git checkout HEAD -- ."));
+t("git restore . (整树)", () => danger("git restore ."));
+t("git restore .. (整树)", () => danger("git restore .."));
+t("git restore :/ (整树, 仓库根 magic)", () => danger("git restore :/"));
+t("git restore * (整树, 裸 glob)", () => danger("git restore *"));
+t("git restore -s HEAD~1 . (带参整树)", () => danger("git restore -s HEAD~1 ."));
+t("git restore --source=HEAD~1 . (带参整树)", () => danger("git restore --source=HEAD~1 ."));
+t("git checkout -- . && make (整树在复合命令里)", () => danger("git checkout -- . && make"));
+t("git restore x && git clean -fd (第二段的整树也抓)", () => danger("git restore x && git clean -fd"));
+t("git restore <具体路径> → 降普通档", () => safe("git restore src/index.ts"));
+t("git checkout -- <具体路径> → 降普通档", () => safe("git checkout -- src/index.ts"));
+t("git restore --staged <路径> (只动 index) → 降普通档", () => safe("git restore --staged x.ts"));
+t("git checkout -- .env (具名文件, 非 .) → 降普通档", () => safe("git checkout -- .env"));
+t("git checkout -- src/. (路径里的点) → 降普通档", () => safe("git checkout -- src/."));
+t("git restore :/README.md (从根定位的具名路径) → 降普通档", () => safe("git restore :/README.md"));
+t("git checkout 换分支 (无 --) → 不算丢弃", () => safe("git checkout main"));
+t("git checkout -b 新分支 → 不算丢弃", () => safe("git checkout -b feat/x"));
+t("整树 token 在别的段里不连坐 (窗口止于 ;)", () => safe("git restore src; ls ."));
+
 // ── REPL / PTC 包裹: 命令在脚本里 ─────────────────────────────────────
 // CodeBuddy 把每次工具调用包进 REPL 的 code 参数。只看顶层 key 会整条漏掉 ——
 // 2026-10-27 真机: 卡上写着「无法完整识别」, 而脚本里是 `rm -rf b64chunks`。
@@ -114,6 +142,8 @@ t("REPL 单引号里的 shutdown", () => assert.ok(viaRepl("await Bash({ command
 t("REPL 变量拼的命令 (无字面量, 整段兜底)", () => assert.ok(viaRepl("const cmd = 'rm -rf x';\nawait Bash({ command: cmd });")));
 t("REPL 里只是读", () => assert.equal(viaRepl("const r = await Bash({ command: `git status` });"), undefined));
 t("REPL 正文提到危险词但没调用", () => assert.equal(viaRepl("// 别在这里 rm -rf, 用清理脚本"), undefined));
+t("REPL 里的整树 restore 照样 danger", () => assert.ok(viaRepl("await Bash({ command: 'git restore .' })")));
+t("REPL 里的路径级 restore 降普通档", () => assert.equal(viaRepl("await Bash({ command: 'git restore src/x.ts' })"), undefined));
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

@@ -306,6 +306,7 @@ const denyReasonText = (d: DenyReason): string | undefined => {
     case "substitution": return "含 $() 动态构造，无法白名单";
     case "unparsable": return "引号未闭合或含后台符 &";
     case "tool_not_listed": return `${shortTool(d.tool)} 未在白名单`;
+    case "repl_opaque": return "内层调用无法识别（动态构造或纯计算）";
     case "never_allow": return "交互工具，永不免审";
     // 没配白名单规则 = 用户没在用这套机制, 每张卡都挂这行纯噪声。
     case "no_rules": return undefined;

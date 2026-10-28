@@ -6,7 +6,7 @@
 //   · fallbackOnError=allow 时降级为 ask (超时/断线不静默放行危险操作)
 // 纯函数, 只做匹配; 所有副作用留在 approval.ts。
 import type { Config } from "../shared/config.js";
-import { replBashCommands } from "./repl-script.js";
+import { replBashCommands } from "../shared/repl-script.js";
 
 export interface DangerHit {
   /** 人类可读的规则名, 直接渲染到卡片上 — 用户要知道「哪一条」判定它危险。 */
@@ -52,6 +52,10 @@ const cmdWord = (label: string, words: string, flags = ""): Rule[] => [
   [`远程${label}`, new RegExp(`${REMOTE_CTX}(?:${words})\\b`, flags)],
 ];
 
+// git 匿名整树 pathspec 的判定: "." ".." ":/" "*" (可带引号), 前后须有词界。
+// 只挂在 checkout -- / restore 分支后面, 不约束 reset --hard / clean 两个整树分支。
+const GIT_WILDTREE = String.raw`(?=[^;&|\n]*[\s"'](?:\.\.?|:/|\*)(?=$|[\s"';&|]))`;
+
 // ── 内置命令名单 (Bash / 任何带 command 的工具) ────────────────────────
 const CMD_RULES: readonly Rule[] = [
   ...cmdWord("删除文件 rm", "rm"),
@@ -72,7 +76,19 @@ const CMD_RULES: readonly Rule[] = [
   ...cmdWord("关机/重启", "shutdown|reboot|halt|poweroff"),
   ["服务停用", /\blaunchctl\s+(unload|bootout|remove)\b|\bsystemctl\s+(stop|disable|mask)\b/],
   ["git 强推", /\bgit\b[\s\S]*\bpush\b[\s\S]*(--force|-f\b)/],
-  ["git 丢弃改动", /\bgit\s+(reset\s+--hard|clean\b|checkout\s+--\s|restore\b)/],
+  // git 丢弃改动 —— 只留「整树」形态: reset --hard / clean, 以及匿名整树 pathspec
+  // ("." ".." ":/" "*", 可带引号) 的 checkout -- / restore。路径级 discard
+  // (git restore <path> / git checkout -- <path>) 2026-10-28 起降为普通审批:
+  // 它是共享工作树里最日常的「撤销自己刚改的那几个文件」, 每次红卡单审把流程
+  // 堵死; 危害面限定在「所列路径的未提交改动」, 普通卡 (⏱窗口 / ✅总是 / 缓存)
+  // 的摩擦刚好, 用户还能用 Bash(git restore *) 自己调档。整树形态一次抹掉全组
+  // 人的 WIP, 维持必发单卡。裸 git checkout -- / git restore (无 pathspec) 是
+  // no-op/报错 (实测 2.x), 不算整树; ":/<具体路径>" 按具名路径降档。token 的
+  // 前后界 (空格/引号/段分隔) 防止 src/. / .hidden / file.txt 被误判成整树 ".";
+  // 扫描窗口止于 ;&| 换行, 不跨进同一条复合命令里别的段。
+  ["git 丢弃改动", new RegExp(
+    String.raw`\bgit\s+(?:reset\s+--hard|clean\b|checkout\s+[^;&|\n]*?--${GIT_WILDTREE}|restore\b${GIT_WILDTREE})`,
+  )],
   ["git 删分支", /\bgit\s+branch\s+-D\b|\bgit\s+push\b[\s\S]*--delete\b/],
   ["发布包", /\bnpm\s+(publish|unpublish)\b|\byarn\s+publish\b|\bpnpm\s+publish\b/],
   ["容器删除", /\bdocker\s+(rm|rmi|system\s+prune|volume\s+rm|compose\s+down)\b/],

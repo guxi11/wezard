@@ -4,7 +4,7 @@
 // 其余自己查 (状态命令、外部工具) 每轮限 budget 次。
 // 拒的理由写成改道说明 —— 模型读 deny reason 就知道下一步是 delegate。
 
-import { BASH_CMD, unquote } from "./repl-script.js";
+import { BASH_CMD, unquote } from "../shared/repl-script.js";
 
 /** 不占预算: 分派与协作本身 (wezard MCP)、不碰工作区的元工具, 以及读工作区 ——
  *  Read / Grep / Glob 与 cat / grep / git show 之类只读命令只看不改, 放它看。 */
