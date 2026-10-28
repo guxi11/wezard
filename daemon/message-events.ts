@@ -1077,6 +1077,8 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     /** 这个 id 用过没有 (含墓碑): 自己配 id 的调用方 (续问序号 / 交接续答) 据此避开撞号。 */
     known: (id: string) => db.get(id) !== undefined,
     ids: () => Object.keys(db.all()),
+    /** 每条事件 (含墓碑期内的) 指着的 target / 发话方 —— 自动名查 target 是否仍被引用用。 */
+    targets: (): string[] => Object.values(db.all()).flatMap((x) => isTomb(x) ? (x.authority ? [x.authority.target] : []) : [x.target, x.speaker]),
     /** 只问执行态 (含墓碑): 判「这份投过没有」的调用方不必在乎它是不是已被裁掉。 */
     executionOf: (id: string) => db.get(id)?.execution,
     exposureOf: (id: string) => {

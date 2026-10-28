@@ -88,6 +88,8 @@ import {
   MEMORY_NUDGE_FLOOR,
   MEMORY_MAX,
   NOTE_MAX,
+  referencedTargets,
+  slotInUse,
   type WizardBrief,
   type WizardRecord,
 } from "./wizard.js";
@@ -1617,6 +1619,15 @@ const main = async (): Promise<void> => {
       wizards.drop(s.target);
     };
     const finishSlot = (s: BirthSlot): void => { if (ownsSlot(s)) wizards.upsert(s.target, { spawning: undefined }); };
+    /** 出生时的一次内存快照 (不读盘): 路由表、消息事件、定时任务、plan、名册与绑定里出现过的 target。
+     *  plan 库坏了时 forget 本就被拒, 剩下的只可能是已结束的 plan (只读展示), 不为它拦出生。 */
+    const targetsInUse = (base: string): Set<string> => referencedTargets({
+      routes: Object.values(router.table()),
+      events: events.targets(),
+      tasks: tasks.list(),
+      plans: plans.healthy() ? (() => { try { return plans.all(); } catch { return []; } })() : [],
+      live: [...wizards.all().map((w) => w.target), ...m.chatTargets(base)],
+    });
     const claimSlot = async (
       base: string,
       want: string,
@@ -1628,7 +1639,7 @@ const main = async (): Promise<void> => {
       if (asked && namingClaims.has(claimKey)) return { ok: false, status: 409, body: { ok: false, reason: "wizard name is being claimed" } };
       if (asked) namingClaims.add(claimKey);
       try {
-        const candidate = asked || (internalName ? pickName(internalName, wizards.all().map((w) => w.name)) : wizards.nextName());
+        const candidate = asked || (internalName ? pickName(internalName, wizards.all().map((w) => w.name)) : wizards.nextName(slotInUse(base, targetsInUse(base))));
         const reserve = (target: string): { ok: true } & BirthSlot => {
           // No await between uniqueness check and durable registration.
           const token = randomUUID();

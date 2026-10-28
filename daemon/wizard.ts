@@ -15,7 +15,7 @@
 import { randomUUID } from "node:crypto";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { loadAutoNames } from "./wizard-names.js";
-import { normalizeTag, stripSigil, tagOfKey, uniqueTag } from "../shared/session-label.js";
+import { keyOf, normalizeTag, stripSigil, tagOfKey, uniqueTag } from "../shared/session-label.js";
 
 export interface WizardRecord {
   /** 会话 key, 即身份本身: `chat:xxx` 或 `chat:xxx#tag`。 */
@@ -53,8 +53,8 @@ export interface WizardRecord {
 }
 
 export interface WizardStore {
-  /** Consume the next automatic name (never reused), skipping globally occupied strings. */
-  nextName: () => string;
+  /** Consume the next automatic name (never reused), skipping globally occupied strings and `inUse`. */
+  nextName: (inUse?: (name: string) => boolean) => string;
   get: (target: string) => WizardRecord | undefined;
   /** 全局名字 → 记录 (大小写不敏感; `.fix` / `fix` 都认)。 */
   byName: (name: string) => WizardRecord | undefined;
@@ -106,9 +106,9 @@ export const loadWizardStore = (filePath: string, bornOf: BornOf = () => undefin
   const namesExcept = (t: string): string[] => all().filter((w) => w.target !== t).map((w) => w.name);
   const rename = (t: string, want: string): string => upsert(t, { name: pickName(want, namesExcept(t)) }).name;
   return {
-    nextName: () => {
+    nextName: (inUse = () => false) => {
       const taken = new Set(all().map((w) => foldName(w.name)));
-      return nextAutoName((name) => taken.has(foldName(name)));
+      return nextAutoName((name) => taken.has(foldName(name)) || inUse(name));
     },
     get: db.get,
     byName: (n) => {
@@ -122,6 +122,26 @@ export const loadWizardStore = (filePath: string, bornOf: BornOf = () => undefin
     all,
   };
 };
+
+/** 还有人指着的 target。forget 删的是名册记录和绑定, 但路由行、消息事件 (含墓碑)、定时任务、
+ *  plan 都只认 target 字符串, 不知道人已经没了 —— 名册里查不到 ≠ 这个 target 没人用。 */
+export interface TargetRefSources {
+  routes: readonly { owner: string; receiver: { kind: string; to?: string } }[];
+  events: readonly string[];
+  tasks: readonly { target: string; createdBy: string; owner: string }[];
+  plans: readonly { owner: string }[];
+  /** 名册记录与镜像绑定的 target。 */
+  live: readonly string[];
+}
+export const referencedTargets = (s: TargetRefSources): Set<string> => new Set([
+  ...s.routes.flatMap((r) => [r.owner, r.receiver.kind === "wizard" ? r.receiver.to ?? "" : ""]),
+  ...s.events,
+  ...s.tasks.flatMap((t) => [t.target, t.createdBy, t.owner]),
+  ...s.plans.map((p) => p.owner),
+  ...s.live,
+].filter(Boolean));
+/** 自动名在 `base` 下落成 `base#name`: 那个 target 仍被引用就跳过这个名字 (跳过即消耗, 名字照样不复用)。 */
+export const slotInUse = (base: string, refs: ReadonlySet<string>) => (name: string): boolean => refs.has(keyOf(base, name));
 
 // 进程内唯一的注册表。daemon 启动时绑一次, 之后任何模块都读得到 —— IM 侧的
 // `/peers` 要把名字和职责印在每一行上, 为此给 installInboundRouter 再加一个参数

@@ -3,7 +3,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FIRSTNAMES, LASTNAMES, LAP, autoNameAt, autoOrdinalOf, fullNameAt, lapPosOf, loadAutoNames } from "../daemon/wizard-names.js";
-import { loadWizardStore } from "../daemon/wizard.js";
+import { loadWizardStore, referencedTargets, slotInUse } from "../daemon/wizard.js";
+import { openRouter, ops } from "../daemon/router.js";
 
 // ── 表: 每个首字母一个, first A→Y, last A→Z ─────────────────────────────
 const initials = (xs: readonly string[]): string => xs.map((x) => x[0]).join("");
@@ -91,7 +92,33 @@ try {
   store.upsert(`chat:a#${born}`, { name: born });
   store.drop(`chat:a#${born}`);
   assert.equal(store.nextName(), "Carol", "forget 过的名字不复用");
-  assert.equal(loadWizardStore(file).nextName(), "David");
+  const again = loadWizardStore(file);
+  assert.equal(again.nextName(), "David", "游标随注册表落盘");
+
+  // 名册没有、但路由表里还有行的 target: 候选名落到它上面就跳过 (跳过即消耗)
+  const router = openRouter({ file: join(dir, "routes.jsonl") });
+  router.commit(ops.open({ event: "e1", owner: "chat:a#Frank", receiver: { kind: "wizard", to: "chat:a#Grace" }, deadlineAt: Number.MAX_SAFE_INTEGER }));
+  router.commit(ops.open({ event: "e2", owner: "chat:a#AliceAdams", receiver: { kind: "chat", channel: "chat:a", message: "m1" }, deadlineAt: Number.MAX_SAFE_INTEGER }));
+  const none = { events: [], tasks: [], plans: [], live: [] };
+  const refs = referencedTargets({ ...none, routes: Object.values(router.table()) });
+  assert.deepEqual([...refs].sort(), ["chat:a#AliceAdams", "chat:a#Frank", "chat:a#Grace"]);
+  const inA = slotInUse("chat:a", refs);
+  assert.equal(again.nextName(inA), "Emma");
+  assert.equal(again.nextName(inA), "Henry", "Frank (owner) 与 Grace (receiver) 都被跳过");
+  assert.equal(again.nextName(slotInUse("chat:b", refs)), "Iris", "别的群的同名 target 不相干");
+  // 全名段同样按 base#name 判
+  writeFileSync(join(dir, "seq2.json"), JSON.stringify({ version: 4, next: 25 }));
+  assert.equal(loadAutoNames(join(dir, "seq2.json"))(inA), "BobBrown");
+
+  // 其它来源: 消息事件 (target / 发话方)、定时任务 (target / createdBy / owner)、plan owner、名册与绑定
+  const each = referencedTargets({
+    routes: [], events: ["chat:a#Jack", "chat:a#Kate"],
+    tasks: [{ target: "chat:a#Leo", createdBy: "chat:a#Maya", owner: "chat:a#Noah" }],
+    plans: [{ owner: "chat:a#Olive" }], live: ["chat:a#Paul"],
+  });
+  assert.deepEqual([...each].sort(), ["chat:a#Jack", "chat:a#Kate", "chat:a#Leo", "chat:a#Maya", "chat:a#Noah", "chat:a#Olive", "chat:a#Paul"]);
+  writeFileSync(join(dir, "seq3.json"), JSON.stringify({ version: 4, next: 9 }));
+  assert.equal(loadAutoNames(join(dir, "seq3.json"))(slotInUse("chat:a", each)), "Quinn");
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }
