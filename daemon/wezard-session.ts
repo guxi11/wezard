@@ -27,6 +27,9 @@ export interface LiveSession {
   /** `%N`; 进程不在 tmux 里时为 ""。 */
   pane: string;
   name: string;
+  /** codebuddy 的每进程 remote-control 端口 (`http://127.0.0.1:<port>`): 它自己说得出
+   *  「这个进程此刻在写哪份转录」(见 mirror-bridge 的 codebuddyLiveSid)。别的后端为 ""。 */
+  endpoint: string;
 }
 
 export const registryDirOf = (homeDir: string): string => join(expandHome(homeDir), "sessions");
@@ -66,6 +69,7 @@ const parseRow = (raw: string): LiveSession | undefined => {
       statusUpdatedAt: typeof r.statusUpdatedAt === "number" ? r.statusUpdatedAt : 0,
       pane: paneOf(r.tmux),
       name: typeof r.name === "string" ? r.name : "",
+      endpoint: typeof r.endpoint === "string" ? r.endpoint : typeof r.url === "string" ? r.url : "",
     };
   } catch {
     return undefined; // 半写状态的文件

@@ -1670,6 +1670,33 @@ const registeredPidUnder = (root: number, livePids: ReadonlySet<number>, kids: R
   return undefined;
 };
 
+/** codebuddy 交互进程的 remote-control 端口 (注册表 `sessions/<pid>.json` 里的 url)。
+ *  注册行没有 tmux/status, 但它带每个进程自己的 HTTP 服务地址 —— 端口按 pid 一份,
+ *  所以从端口问出来的答案能落到具体 pane 上。 */
+const codebuddyEndpointOf = (homeDir: string, pid: number): string | undefined => {
+  const row = sessionOfPid(homeDir, pid);
+  return row?.endpoint ? row.endpoint.replace(/\/+$/u, "") : undefined;
+};
+
+/** 这个 codebuddy 进程此刻在写哪份转录 —— 只有它自己说得准。
+ *  注册表的 sessionId 是进程启动时那一个, /clear 之后**不更新** (2026-10-28 实测 2.172.1:
+ *  连清两次仍报最初那个 id), 所以一切拿注册表比对会话的做法对 codebuddy 都是错的。
+ *  `GET /api/v1/sessions/live` (头 x-codebuddy-request 必须存在, 值随意) 才是每进程的真话:
+ *  /clear 提交后约 1.2s 翻成新 sid, 同时同目录多出一份 `<newSid>.jsonl`。
+ *  端点不答 / 这个版本没有这条路由 → undefined; 调用方据此拒绝清空, 绝不猜。 */
+const codebuddyLiveSid = async (endpoint: string): Promise<string | undefined> => {
+  try {
+    const res = await fetch(`${endpoint}/api/v1/sessions/live`, {
+      headers: { "x-codebuddy-request": "wezard" },
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!res.ok) return undefined;
+    const body = await res.json() as { data?: { sessionId?: unknown } };
+    const sid = body.data?.sessionId;
+    return typeof sid === "string" && sid ? sid : undefined;
+  } catch { return undefined; }
+};
+
 const panePidOf = async (paneId: string): Promise<number> => {
   const r = await runTmux(["display-message", "-p", "-t", paneId, "#{pane_pid}"]);
   return r.ok ? Number(r.stdout.trim()) || 0 : 0;
@@ -2581,6 +2608,9 @@ export interface MirrorBridge {
   /** 原 pane 的原生清空事务; 已暴露的尝试只核验, 不重发。 */
   verifyClearContext: (target: string, clear: ClearAttempt) => Promise<boolean>;
   clearContext: (target: string, attempt: ClearAttempt | undefined, submitted: (attempt: ClearAttempt) => void, guard?: () => boolean) => Promise<{ ok: boolean; reason?: string }>;
+  /** 原地清空这件事在这个后端做不做得到、核验得了核验不了。做不到就在入口拒绝 (409,
+   *  不落交接记录) —— 一次按下去却认不出结果的 /clear 只会留下一条假「restarting」墓碑。 */
+  nativeClearSupport: (target: string) => Promise<{ ok: boolean; reason?: string }>;
   /** 这个 wizard 当前这一轮的频道: 人从哪个群叫的它 / 公开 peer 轮的频道;
    *  私聊轮 ""; 还没有过轮次 → home base。 */
   currentChannel: (target: string) => string;
@@ -7218,7 +7248,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
     if (backend.name === "codex" && codexSessionForPane(clear.pane)?.sessionId !== clear.nextSid) return false;
     const ps = await psSnap();
-    if (backend.name === "codebuddy") return registeredPidUnder(clear.panePid, liveSessionPids(backend.homeDir), ps.kids) === clear.pid;
+    if (backend.name === "codebuddy") {
+      // 进程还是那个进程 + 它自己报的会话仍是清空后那个 —— 注册表的 sid 在 /clear 之后
+      // 永远停在进程启动时那一个, 不能拿它比对。
+      if (registeredPidUnder(clear.panePid, liveSessionPids(backend.homeDir), ps.kids) !== clear.pid) return false;
+      const endpoint = codebuddyEndpointOf(backend.homeDir, clear.pid);
+      return !!endpoint && await codebuddyLiveSid(endpoint) === clear.nextSid;
+    }
     const executable = backend.name === "codex" ? "codex" : basename(backend.bin);
     const pids = new Set([...ps.commands].filter(([, command]) => basename(command) === executable).map(([pid]) => pid));
     return registeredPidUnder(clear.panePid, pids, ps.kids) === clear.pid;
@@ -7234,6 +7270,29 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       return await statusId() === clear.nextSid && await verifyClearContext(target, clear) && allowed();
     }
     return true;
+  };
+
+  /** 原地 /clear 的准入: 只回答「这个后端清完之后我们认不认得出来」。claude/codex 一直
+   *  认得; codebuddy 的注册表在 /clear 之后不更新 sid, 只有它自己的控制端点能作证 ——
+   *  端点不在 (版本偏旧) 或它说的会话跟绑定对不上, 就不能清。 */
+  const nativeClearSupport: MirrorBridge["nativeClearSupport"] = async (target) => {
+    const a = byTarget.get(target);
+    const backend = a ? backendForPath(a.jsonlPath) : undefined;
+    // 其它后端沿用原判据 (清完认得出), 这里一个字都不改。
+    if (!backend || backend.name !== "codebuddy") return { ok: true };
+    // pane 还没起来 (睡着 / 还没 spawn): 没有进程可问, 也就没有结论可下 —— 交接自己会先把
+    // 它叫醒, 真正的判据在 clearContext 里 (那时端点已在)。
+    if (!a?.tmuxPane || !(await tmuxPaneAlive(a.tmuxPane))) return { ok: true };
+    const panePid = await panePidOf(a.tmuxPane);
+    const ps = await psSnap();
+    const pid = panePid ? registeredPidUnder(panePid, liveSessionPids(backend.homeDir), ps.kids) : undefined;
+    if (!pid) return { ok: false, reason: "认不出 pane 里的 codebuddy 进程" };
+    const endpoint = codebuddyEndpointOf(backend.homeDir, pid);
+    if (!endpoint) return { ok: false, reason: "这个 codebuddy 进程没有本地控制端点 — 无法核验 /clear 是否完成" };
+    const live = await codebuddyLiveSid(endpoint);
+    if (!live) return { ok: false, reason: "codebuddy 的本地端点没有报出当前会话 — 无法核验 /clear 是否完成" };
+    if (live !== a.sessionId) return { ok: false, reason: `pane 里跑的是会话 ${live}, 绑定的是 ${a.sessionId} — 原生切过会话, 拒绝凭错的现场清空` };
+    return { ok: true };
   };
 
   const clearContext: MirrorBridge["clearContext"] = async (target, attempt, submitted, guard = () => true) => {
@@ -7259,6 +7318,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         const panePid = await panePidOf(pane);
         if (!pid || !panePid || !(await tmuxPaneAlive(pane))) return { ok: false, reason: "original CLI process identity is unavailable" };
         const original = sessionOnPane(backend.homeDir, pane);
+        // codebuddy 的会话身份不在注册表 (它 /clear 之后不更新), 只在这个进程自己的控制端点上。
+        const cbEndpoint = backend.name === "codebuddy" ? codebuddyEndpointOf(backend.homeDir, pid) : undefined;
+        const cbLive = async (): Promise<string | undefined> => (cbEndpoint ? codebuddyLiveSid(cbEndpoint) : undefined);
         const queuedCwd = chatCwdFallback(target).pending || a.pendingCwd;
         const pendingCwd = queuedCwd || attempt?.workspaceCwd || "";
         const workspaceStillNeedsHandoff = pendingCwd && (expandHome(pendingCwd) !== expandHome(a.runningCwd) || (!!attempt && a.sessionId !== attempt.sid));
@@ -7372,13 +7434,20 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         }
         // Native /clear is separately restricted to backends with verified
         // completion; pending workspace switches use fresh-process evidence above.
-        if (!["claude", "codex"].includes(backend.name)) return { ok: false, reason: `${backend.name} native /clear completion is not verified; pane unchanged` };
+        if (!["claude", "codex", "codebuddy"].includes(backend.name)) return { ok: false, reason: `${backend.name} native /clear completion is not verified; pane unchanged` };
+        // 没有端点就没有 codebuddy 的完成核验 —— 一个按下去却认不出结果的 /clear 是纯破坏。
+        if (backend.name === "codebuddy" && !cbEndpoint) return { ok: false, reason: "codebuddy process endpoint unavailable; native /clear not verifiable; pane unchanged" };
         let transaction = attempt ?? { pane, pid, panePid, sid: a.sessionId, at: Date.now() };
         if (transaction.pane !== pane || transaction.pid !== pid || (transaction.panePid && transaction.panePid !== panePid)) return { ok: false, reason: "original pane/CLI process changed; refusing /clear" };
         const sameProcess = async (): Promise<boolean> => live() && valid() && await nativePid() === transaction.pid && await panePidOf(pane) === panePid;
-        const { command, emptyComposer, statusId } = nativeCommands(target, pane, codex, sameProcess, () => codex || (sessionOnPane(backend.homeDir, pane)?.sessionId === transaction.sid && sessionOnPane(backend.homeDir, pane)?.status === "idle"), guard);
+        // codebuddy 的「同一个会话」也由端点回答: 注册表认不出 pane, 读了也是 undefined。
+        const sameSession = async (): Promise<boolean> => codex
+          ? true
+          : backend.name === "codebuddy" ? await cbLive() === transaction.sid
+          : (sessionOnPane(backend.homeDir, pane)?.sessionId === transaction.sid && sessionOnPane(backend.homeDir, pane)?.status === "idle");
+        const { command, emptyComposer, statusId } = nativeCommands(target, pane, codex, sameProcess, sameSession, guard);
         if (!attempt) {
-          const actualSid = codex ? await statusId() : original?.sessionId;
+          const actualSid = codex ? await statusId() : backend.name === "codebuddy" ? await cbLive() : original?.sessionId;
           if (actualSid !== transaction.sid) return { ok: false, reason: "native pane session changed/unconfirmed before /clear; refusing to clear an unbound context" };
           // 凭证先于第一下 /clear 按键落盘; reload 只核验原生状态, 绝不再次清空。
           if (!(await command("/clear", () => submitted(transaction)))) return { ok: false, reason: "native /clear submission unconfirmed; no retry" };
@@ -7406,6 +7475,27 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           log.info({ target, pane, pid, panePid, oldSessionId: transaction.sid, sessionId: nextSid, jsonlPath: rollout.jsonlPath }, "handoff: Codex native clear/status/rename confirmed in original CLI process");
           return { ok: true };
         }
+        if (backend.name === "codebuddy") {
+          // 完成只有这个进程自己说得准: /clear 之后端点上的会话换成新的, 同目录同时多出
+          // 一份 <newSid>.jsonl (首条是人类行被 /clear 顶掉的那几条兄弟记录)。注册表在这
+          // 里一个字都不会变 —— 别拿它当判据。
+          for (const end = Date.now() + 20_000; Date.now() < end; await sleep(250)) {
+            if (!(await sameProcess())) return { ok: false, reason: "codebuddy CLI process changed during /clear" };
+            const nextSid = await cbLive();
+            if (!nextSid || nextSid === transaction.sid) continue;
+            const nextPath = join(dirname(a.jsonlPath), `${nextSid}.jsonl`);
+            // 绑定要 tail 的文件必须已经落盘; 还没写出来就接着等, 不先绑一个空壳。
+            if (!existsSync(nextPath)) continue;
+            if (sidsClaimedByOthers(target).has(nextSid)) return { ok: false, reason: "codebuddy native session belongs to another wizard" };
+            if (transaction.nextSid && transaction.nextSid !== nextSid) return { ok: false, reason: "codebuddy native session changed after clear confirmation" };
+            transaction = { ...transaction, nextSid };
+            submitted(transaction);
+            if (a.sessionId !== nextSid) migrateAttachment(a, nextSid, nextPath, 0, true);
+            log.info({ target, pane, pid, panePid, oldSessionId: transaction.sid, sessionId: nextSid, jsonlPath: nextPath }, "handoff: codebuddy native /clear confirmed by process endpoint");
+            return { ok: true };
+          }
+          return { ok: false, reason: "codebuddy native /clear completion unconfirmed; original pane preserved, brief retained, no retry" };
+        }
         for (const end = Date.now() + 20_000; Date.now() < end; await sleep(200)) {
           if (!(await sameProcess())) return { ok: false, reason: "CLI process changed during /clear" };
           const current = sessionOnPane(backend.homeDir, pane);
@@ -7426,6 +7516,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   return {
     attach,
     clearContext,
+    nativeClearSupport,
     verifyClearContext,
     chatTargets,
     peers,

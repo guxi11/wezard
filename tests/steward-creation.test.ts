@@ -17,7 +17,7 @@ const extract = (file: string, start: string, end: string, name: string) => {
 };
 const creation = extract("daemon/mirror-bridge.ts", "  const newSession = async (", "  // ── Clone", "newSession");
 const clear = extract("daemon/index.ts", "    const clearForHandoff = (target:", "    /** 交接自己", "clearForHandoff");
-const handoff = extract("daemon/index.ts", "    const handoffSelf = (self: string, brief: string):", "    http.register(\"POST /handoff\"", "handoffSelf");
+const handoff = extract("daemon/index.ts", "    const handoffSelf = async (self: string, brief: string):", "    http.register(\"POST /handoff\"", "handoffSelf");
 const cfg = ConfigSchema.parse({ bot: { botId: "test", secret: "test" }, wrc: { defaultCli: "codex" }, models: {
   router: "standard", steward: "light", backends: { codex: { tiers: {
     standard: { model: "gpt-6.1-sol", effort: "medium" }, light: { model: "gpt-6-luna", effort: "low" },
@@ -42,11 +42,12 @@ recorded = { jsonlPath: "/old.jsonl", model: "gpt-6-luna", effort: "high" };
 await newSession("user:test", "test", { model: "task-model", effort: "low" });
 const restartEnv = {
   handoffAllowed: () => true,
-  m: { sessionInfo: () => ({ ...recorded, cli: "codex", contextTokens: 123 }), getCwd: () => ({}) },
+  m: { sessionInfo: () => ({ ...recorded, cli: "codex", contextTokens: 123 }), getCwd: () => ({}), nativeClearSupport: async () => ({ ok: true }) },
+  inPlaceClearRefusal: (why?: string) => why ?? "",
   handoffs: { self: (target: string, brief: string) => ({ ok: target === "user:test" && brief.length >= 40 }) },
 };
 const handoffSelf = new Function(...Object.keys(restartEnv), handoff)(...Object.values(restartEnv));
-const handoffResult = handoffSelf("user:test", "A sufficiently detailed handoff brief for this session.");
+const handoffResult = await handoffSelf("user:test", "A sufficiently detailed handoff brief for this session.");
 assert.equal(handoffResult.status, 200, "self handoff routes through the production handoff coordinator");
 assert.equal(handoffResult.body.scheduled, true);
 let cleared: unknown[] | undefined;

@@ -2603,14 +2603,25 @@ const main = async (): Promise<void> => {
       return m.clearContext(target, p.clear, submitted, () => handoffAllowed(target));
     };
 
+    /** 原地交接被拒的统一说法: 为什么不行 + 还能走的路。拒绝发生在写任何交接记录之前 ——
+     *  一次按下去却认不出结果的 /clear, 只会换来一条假的 restarting 墓碑。 */
+    const inPlaceClearRefusal = (why?: string): string =>
+      `原地 handoff 已拒绝 (上下文未清空, 也没留交接记录): ${why ?? "这个后端没有可核验的原生 /clear 完成信号"}。还能走: ① set_workspace 之后 handoff —— 带 pendingCwd 的交接收拾的是换工作区的路径, daemon 起新 CLI 进程接简报; ② 让人在 CLI 里发 /new 另起会话, 再在该会话里接着干。`;
+
     /** 交接自己: 简报由调用方给, 排在它这一轮说完之后 (见 handoff.ts)。/handoff 点名点到
      *  自己与 /wizard/handoff-self 共用实现。 */
-    const handoffSelf = (self: string, brief: string): { status: number; body: Record<string, unknown> } => {
+    const handoffSelf = async (self: string, brief: string): Promise<{ status: number; body: Record<string, unknown> }> => {
       if (!handoffAllowed(self)) return { status: 409, body: { ok: false, reason: "handoff unavailable" } };
       if (brief.length < 40) return { status: 400, body: { ok: false, reason: "brief 太短 —— 要写到零上下文也能接手: 目标 / 已完成 / 当前状态 / 下一步 / 关键文件与坑" } };
       const info = m.sessionInfo(self);
       const cwd = m.getCwd(self);
       const workspaceSwitch = !!cwd.pendingCwd && cwd.pendingCwd !== cwd.runningCwd;
+      // 原地清空要先有可核验的完成信号才许按下去 —— 认不出来就不开工, 也别落一条交接
+      // 记录 (那种记录只会在后面长成一条假的 restarting 墓碑)。换工作区走新进程, 不受此限。
+      if (!workspaceSwitch) {
+        const support = await m.nativeClearSupport(self);
+        if (!support.ok) return { status: 409, body: { ok: false, reason: inPlaceClearRefusal(support.reason) } };
+      }
       const r = handoffs.self(self, brief);
       return r.ok
         ? { status: 200, body: {
@@ -2640,12 +2651,18 @@ const main = async (): Promise<void> => {
       if (target === self) {
         const brief = ((body as { brief?: string }).brief ?? "").toString().trim();
         if (!brief) { json(res, 400, { ok: false, reason: "这是交接你自己: 把简报写在 brief 里 (不传 name 即可)" }); return; }
-        const r = handoffSelf(self, brief);
+        const r = await handoffSelf(self, brief);
         json(res, r.status, r.body);
         return;
       }
       const focus = ((body as { focus?: string }).focus ?? "").toString().trim();
       const timeoutMs = Math.min(Math.max(Number((body as { timeoutSec?: number }).timeoutSec ?? 600) || 600, 30), 7200) * 1000;
+      // 与交接自己同一条准入: 原地清空要有可核验的完成信号, 没有就在写记录前拒绝。
+      const targetCwd = m.getCwd(target);
+      if (!(targetCwd.pendingCwd && targetCwd.pendingCwd !== targetCwd.runningCwd)) {
+        const support = await m.nativeClearSupport(target);
+        if (!support.ok) { json(res, 409, { ok: false, target, reason: inPlaceClearRefusal(support.reason) }); return; }
+      }
       const r = await handoffs.other(target, focus, timeoutMs);
       json(res, r.ok ? 200 : r.status, r.ok ? { ok: true, target, brief: r.brief } : { ok: false, target, reason: r.reason, ...(r.brief ? { brief: r.brief } : {}) });
     });
@@ -3852,7 +3869,7 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/handoff-self", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const r = handoffSelf(self, ((body as { brief?: string }).brief ?? "").toString().trim());
+      const r = await handoffSelf(self, ((body as { brief?: string }).brief ?? "").toString().trim());
       json(res, r.status, r.body);
     });
 
