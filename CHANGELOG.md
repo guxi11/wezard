@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [2.8.8] - 2026-10-28
+
 ### Changed
 - 危险名单 builtin 按「丢了能不能从 git 或别处恢复」逐条重审 (2026-10-28): 移出 —— rmdir (只能删空目录, 无数据可丢)、本地 `git branch -D` (提交仍在 reflog, 默认 90 天拿得回)、`docker rm`/`docker rmi` 与不带 -v 的 `docker compose down` (容器镜像是牲口, 重建即恢复)、`history -c` (只丢 shell 历史); 保留并收窄 —— `git push --delete` (动共享远端, 别人未必有副本)、`docker volume rm|prune`/`system prune`/`compose down -v|--volumes` (数据卷里的数据不在 git 也不在别处, 并补上原漏掉的 volume prune)、`defaults delete` (macOS 系统偏好, 删了拿不回)。`git rm`/`git mv`/`git stash drop` 本就不在名单 (索引/对象库里可恢复)。
 - rm 临时区豁免: rm 的**所有**目标都落在一次性目录 → 不判危险, 走普通卡/白名单 —— `/tmp`、`/private/tmp` 严格以下, `$TMPDIR`/`${TMPDIR}` 字面前缀及其展开形态 `/var/folders/<a>/<b>/T` (每用户一份, 根本身也豁免)。混合目标 (临时区 + 工作区/家目录)、解析不出 (相对路径 / 变量 / 裸通配 / `..` 逃逸 / 引号未闭合) 一律 fail-closed 仍判危险; 删共享区根本身 (`rm -rf /tmp`) 仍判 (清掉的是全机用户的临时文件); `/var/tmp` (跨重启保留)、`~/.cache` (非 scratch 契约)、`/dev/shm` (全机共享) 不算临时区。判据是路径词法解析 (引号感知 token 化 + 归一), 不是子串: `/tmp-foo`、`~/develop/tmpdata` 不豁免。
@@ -1310,7 +1312,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.8.7...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.8.8...HEAD
+[2.8.8]: https://github.com/guxi11/wezard/compare/v2.8.7...v2.8.8
 [2.8.7]: https://github.com/guxi11/wezard/compare/v2.8.6...v2.8.7
 [2.8.6]: https://github.com/guxi11/wezard/compare/v2.8.5...v2.8.6
 [2.8.5]: https://github.com/guxi11/wezard/compare/v2.8.4...v2.8.5
