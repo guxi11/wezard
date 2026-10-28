@@ -45,7 +45,8 @@ import {
 } from "../shared/cli-backends.js";
 import { isModalPane, isCodexHookReviewPane, isAskqSubmitPage, parseModalOptions, pickModalAnswer, pickAutoAllowAnswer, parseConfirmContext, modalFingerprint, modalCallFingerprint, looksLikePicker, type ModalPaneVerdict } from "../shared/modal-pane.js";
 import type { MirrorStore } from "./mirror-store.js";
-import { hasMirrorAskq, runMirrorAskqFlow, hasMirrorPlan, mootMirrorPlan, runMirrorPlanFlow, hasMirrorPicker, mootMirrorPicker, runMirrorPickerFlow, type PickerPress } from "./approval.js";
+import { hasMirrorAskq, mootMirrorAskq, runMirrorAskqFlow, hasMirrorPlan, mootMirrorPlan, runMirrorPlanFlow, hasMirrorPicker, mootMirrorPicker, runMirrorPickerFlow, type PickerPress } from "./approval.js";
+import { replAskqInput } from "../shared/repl-script.js";
 import { isAutoWindowActive } from "./session-cache.js";
 import { noticeSuffixFor } from "./notices.js";
 import { dispatchPickerPolicy, pickerPolicy } from "./picker-policy.js";
@@ -4740,6 +4741,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // (卡 pending 期间 model 阻塞在本地对话框, 不可能有其它 tool_result)。
     if (item.kind === "tool_result") {
       mootMirrorPlan(a.sessionId);
+      mootMirrorAskq(a.sessionId, item.toolUseId);
       // 前台 Agent/Task 的 result 落回主转录 = 子agent 会话结束、控制权返回主会话。
       // 任何结果 (含非 Agent/Task 工具) 都可能恰好顶着某 callId, 只删命中项即可。
       // 后台派发例外: 它的 result 是 300ms 就回的 spawn 句柄, 销账等于把 guard 关掉。
@@ -4811,8 +4813,16 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // 看到 function_call, 直接驱动 vote 卡让远端可答; 点选后注入一段触发文本
         // 提交本地面板, hook 到达时以 deny+reason 覆盖答案 (claude 路径改走 allow+updatedInput)。
         // claude 系 hook 即时触发, 不走此路 (否则双重发卡)。
+        // PTC (REPL) 模式下问句在脚本里, 顶层工具名是 REPL —— 只认顶层就漏整张卡,
+        // 本地面板成了唯一出口 (2026-10-28 实测: 人被迫回终端作答)。脚本里的入参只能
+        // 从字面量读, 读不出就按原样不发卡 (不猜)。
+        const askqInput = c.name === "AskUserQuestion"
+          ? c.input
+          : c.name === "REPL"
+            ? replAskqInput((c.input as { code?: unknown } | undefined)?.code)
+            : undefined;
         if (
-          c.name === "AskUserQuestion"
+          askqInput
           && backendForPath(a.jsonlPath).name === "codebuddy"
           && !hasMirrorAskq(a.sessionId)
         ) {
@@ -4822,7 +4832,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
             client,
             sessionId: a.sessionId,
             chatKey: a.target,
-            toolInput: c.input,
+            toolInput: askqInput,
+            // 提问那次调用的 id: result 落盘 (本地作答) 时据此 moot 掉挂着的卡。
+            callId: c.toolUseId,
             voteTimeoutMs: cfg.wrc.mirror.askqVoteTimeoutSec * 1000,
             drive: async (acts) => {
               // 面板只活在 TTY 里 — 无 pane 无法驱动 (spawn 注入会变成新 prompt)。

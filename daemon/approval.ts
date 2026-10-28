@@ -1103,7 +1103,7 @@ export const interpretAskqRaw = (raw: string, q: AskqQuestion): AskqAnswer => {
 // 本地面板; hook 随后到达时: 有 reason → deny 覆盖 (codebuddy 认不认 updatedInput 未核实, 不跟 claude 路径改), 无记录
 // → allow 让本地答案生效并作废挂着的 vote 卡 (resolvePending "moot")。
 // TTL 兜底: 注入失败/hook 不至时槽位不永久阻塞同 session 的下一次提问。
-interface MirrorAskqSlot { reqId?: string; reason?: string; at: number }
+interface MirrorAskqSlot { reqId?: string; reason?: string; at: number; /** 提问那次工具调用 (PTC 下是外层 REPL 的 callId) — result 落盘时按它 moot。 */ callId?: string }
 const mirrorAskqSlots = new Map<string, MirrorAskqSlot>();
 const MIRROR_ASKQ_SLOT_TTL_MS = 30 * 60_000;
 const freshSlot = (sessionId: string): MirrorAskqSlot | undefined => {
@@ -1116,6 +1116,16 @@ const freshSlot = (sessionId: string): MirrorAskqSlot | undefined => {
   return s;
 };
 export const hasMirrorAskq = (sessionId: string): boolean => freshSlot(sessionId) !== undefined;
+/** 提问的结果落盘 = 面板已经不在屏上 (本地作答 / 我们自己驱动完) → 作废挂着的卡。
+ *  只认提问那次调用的 callId: PTC 脚本里在提问之前落地的别的工具结果不是它。
+ *  原生路径没有这个信号 (hook 迟到时自己清槽), callId 为 undefined 时按任意 result 处理。 */
+export const mootMirrorAskq = (sessionId: string, callId?: string): void => {
+  const s = freshSlot(sessionId);
+  if (!s) return;
+  if (callId && s.callId && callId !== s.callId) return;
+  if (s.reqId) resolvePending(s.reqId, "moot" as never);
+  mirrorAskqSlots.delete(sessionId);
+};
 
 // ── 面板按键驱动 (codebuddy 本地面板的确定性提交协议) ──────────────────────
 // 逆向自 codebuddy TUI 的 AskUserQuestion 组件: 每题光标初始 0 (第一个选项),
@@ -1180,11 +1190,13 @@ interface MirrorAskqFlowArgs {
   chatKey: string;
   toolInput: unknown;
   voteTimeoutMs: number;
+  /** 提问那次工具调用的 id —— PTC 下是外层 REPL 的 callId, result 落盘时据此 moot。 */
+  callId?: string;
   /** 按 buildAskqDriveActions 的序列驱动本地面板 (send-keys / 贴文本)。 */
   drive: (acts: AskqDriveAction[]) => Promise<{ ok: boolean; reason?: string }>;
 }
 
-export const runMirrorAskqFlow = async ({ cfg, log, client, sessionId, chatKey, toolInput, voteTimeoutMs, drive }: MirrorAskqFlowArgs): Promise<void> => {
+export const runMirrorAskqFlow = async ({ cfg, log, client, sessionId, chatKey, toolInput, voteTimeoutMs, callId, drive }: MirrorAskqFlowArgs): Promise<void> => {
   const questions = parseAskqInput(toolInput);
   if (!questions || questions.length === 0) return;
   if (questions.some((q) => q.options.length === 0)) return;
@@ -1224,7 +1236,7 @@ export const runMirrorAskqFlow = async ({ cfg, log, client, sessionId, chatKey, 
       },
       timeoutMs: remainMs,
     });
-    mirrorAskqSlots.set(sessionId, { reqId, at: Date.now() });
+    mirrorAskqSlots.set(sessionId, { reqId, at: Date.now(), callId });
 
     const prefix = total > 1 ? `(${i + 1}/${total}) ` : "";
     try {

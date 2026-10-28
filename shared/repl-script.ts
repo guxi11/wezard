@@ -92,3 +92,92 @@ export const replFallbackCommands = (code: string): string[] => {
 const REPL_CALL_NAMES = /(?<![.\w])(?<!new\s)([A-Za-z_][A-Za-z0-9_.]*)\s*\(\s*\{/g;
 export const replToolNames = (code: string): string[] =>
   [...code.matchAll(REPL_CALL_NAMES)].map((m) => m[1] ?? "").filter(Boolean);
+
+// ── 内层 AskUserQuestion (codebuddy PTC / REPL) ─────────────────────────
+// PTC 模式下提问长这样: REPL({ code: "await AskUserQuestion({ questions: [...] })" })
+// —— 顶层工具名是 REPL, 转录里没有独立的 AskUserQuestion 记录。mirror 只认顶层
+// 工具名就整张投票卡漏掉, 本地面板成了唯一出口 (2026-10-28 实测: 人被迫回终端作答)。
+// 这里把脚本里那个对象字面量读出来喂给 parseAskqInput。
+// **不求值** —— 脚本是模型写的任意代码; 读不出 (questions 是变量、模板串带插值、
+// spread、简写属性) 就返回 undefined, 退回「不发卡」的旧行为, 不猜。
+
+type ReplLit = string | number | boolean | null | ReplLit[] | { [k: string]: ReplLit };
+
+const skipWs = (s: string, i: number): number => {
+  while (i < s.length && /\s/.test(s[i]!)) i++;
+  return i;
+};
+
+/** 字面量字符串: '…' / "…" / 反引号。模板里带插值就说不出值, 认不出。 */
+const readReplString = (s: string, i: number): { v: string; end: number } | undefined => {
+  const q = s[i];
+  if (q !== '"' && q !== "'" && q !== "`") return undefined;
+  let j = i + 1;
+  while (j < s.length && s[j] !== q) {
+    if (s[j] === "\\") { j += 2; continue; }
+    if (q === "`" && s[j] === "$" && s[j + 1] === "{") return undefined;
+    j++;
+  }
+  if (j >= s.length) return undefined;
+  return { v: unquote(s.slice(i, j + 1)), end: j + 1 };
+};
+
+const readReplValue = (s: string, i0: number): { v: ReplLit; end: number } | undefined => {
+  const i = skipWs(s, i0);
+  const ch = s[i];
+  if (ch === undefined) return undefined;
+  if (ch === "{") return readReplObject(s, i);
+  if (ch === "[") return readReplArray(s, i);
+  const str = readReplString(s, i);
+  if (str) return str;
+  const num = /^-?\d+(?:\.\d+)?/.exec(s.slice(i));
+  if (num) return { v: Number(num[0]), end: i + num[0].length };
+  const word = /^(true|false|null)\b/.exec(s.slice(i));
+  if (word) return { v: word[0] === "null" ? null : word[0] === "true", end: i + word[0].length };
+  return undefined; // 变量 / 常量 / 表达式: 读不出值
+};
+
+const readReplObject = (s: string, i: number): { v: { [k: string]: ReplLit }; end: number } | undefined => {
+  const out: { [k: string]: ReplLit } = {};
+  let j = skipWs(s, i + 1);
+  while (j < s.length) {
+    if (s[j] === "}") return { v: out, end: j + 1 };
+    if (s[j] === ",") { j = skipWs(s, j + 1); continue; }
+    const quoted = readReplString(s, j);
+    const bare = quoted ? undefined : /^[A-Za-z_$][\w$]*/.exec(s.slice(j));
+    const key = quoted ? quoted.v : bare?.[0];
+    if (key === undefined) return undefined; // spread / 计算键
+    j = skipWs(s, quoted ? quoted.end : j + key.length);
+    if (s[j] !== ":") return undefined; // 简写属性 / 方法
+    const val = readReplValue(s, j + 1);
+    if (!val) return undefined;
+    out[key] = val.v;
+    j = skipWs(s, val.end);
+  }
+  return undefined;
+};
+
+const readReplArray = (s: string, i: number): { v: ReplLit[]; end: number } | undefined => {
+  const out: ReplLit[] = [];
+  let j = skipWs(s, i + 1);
+  while (j < s.length) {
+    if (s[j] === "]") return { v: out, end: j + 1 };
+    if (s[j] === ",") { j = skipWs(s, j + 1); continue; }
+    const val = readReplValue(s, j);
+    if (!val) return undefined;
+    out.push(val.v);
+    j = skipWs(s, val.end);
+  }
+  return undefined;
+};
+
+/** 脚本里内层 AskUserQuestion 的入参 ({ questions: [...] }); 读不出返回 undefined。 */
+export const replAskqInput = (code: unknown): { questions: unknown } | undefined => {
+  if (typeof code !== "string") return undefined;
+  const head = /\bAskUserQuestion\s*\(\s*\{/.exec(code);
+  if (!head) return undefined;
+  const obj = readReplObject(code, head.index + head[0].length - 1);
+  const questions = obj?.v.questions;
+  if (!Array.isArray(questions)) return undefined;
+  return { questions };
+};
