@@ -1187,7 +1187,13 @@ const spawnTmuxInner = async ({ cfg, log, resumeSessionId, sessionId: freshSessi
     // PTY canonical input truncates long hook/TOML arguments at ~4 KiB.
     // Send only a short script invocation through the interactive shell.
     const script = backend.name === "codex" ? join(tmpdir(), `wezard-codex-${randomUUID()}.sh`) : undefined;
-    if (script) writeFileSync(script, `${fullCommand}\n`, { mode: 0o600, flag: "wx" });
+    if (script) {
+      try { writeFileSync(script, `${fullCommand}\n`, { mode: 0o600, flag: "wx" }); }
+      catch (e) {
+        await runTmux(["kill-pane", "-t", pane]).catch(() => undefined);
+        return { ok: false, reason: `could not prepare Codex launch script: ${(e as Error).message}` };
+      }
+    }
     const line = script ? `/bin/sh ${shQuote(script)}` : fullCommand;
     const sent = await runTmux(["send-keys", "-t", pane, line, "Enter"]);
     if (!sent.ok) {
@@ -1200,12 +1206,19 @@ const spawnTmuxInner = async ({ cfg, log, resumeSessionId, sessionId: freshSessi
     // claude does NOT create the transcript jsonl until it processes the first
     // user input, so we don't wait for the file — mirror tail tolerates a
     // missing jsonl and starts emitting once claude writes the first line.
-    let tui: TuiState;
-    try { tui = await waitForTuiReady(pane, line, backend, cwd, { chatKey: chatKey?.trim() || undefined, who: winName, tmuxSession: tmuxName ?? "" }, log); }
-    finally { if (script) try { unlinkSync(script); } catch { /* already removed */ } }
-    if (tui.exited) return { ok: true, pane, ready: false, failure: tui.exited };
-    const unknown = !!flagModel && tui.ready && modelNotRecognized(await capturePaneBottom(pane, "-"), flagModel);
-    return { ok: true, pane, ready: tui.ready, ...(unknown ? { failure: `CLI 不认识 --model ${flagModel} (欢迎框原样回显, 首轮会 400)` } : {}) };
+    let keepPane = false;
+    try {
+      const tui = await waitForTuiReady(pane, line, backend, cwd, { chatKey: chatKey?.trim() || undefined, who: winName, tmuxSession: tmuxName ?? "" }, log);
+      if (tui.exited) return { ok: true, pane, ready: false, failure: tui.exited };
+      const unknown = !!flagModel && tui.ready && modelNotRecognized(await capturePaneBottom(pane, "-"), flagModel);
+      keepPane = true;
+      return { ok: true, pane, ready: tui.ready, ...(unknown ? { failure: `CLI 不认识 --model ${flagModel} (欢迎框原样回显, 首轮会 400)` } : {}) };
+    } finally {
+      if (script) try { unlinkSync(script); } catch { /* already removed */ }
+      // A CLI that exited leaves the shell (and sometimes its window/session)
+      // behind. Any exception before a verified launch has the same ownership.
+      if (!keepPane) await runTmux(["kill-pane", "-t", pane]).catch(() => undefined);
+    }
   };
 
   // Whatever was asked goes straight in with `--model`. Only when the CLI
@@ -1228,6 +1241,7 @@ const spawnTmuxInner = async ({ cfg, log, resumeSessionId, sessionId: freshSessi
   charterArg(cfg, backend, sessionId, systemPrompt, log);
   const first: Launched = spare ? { ok: true, pane: spare.pane, ready: true } : await launch(flagModel);
   if (!first.ok) return { ok: false, reason: first.reason };
+  if (first.failure && !flagModel) return { ok: false, reason: first.failure };
   let landed = first;
   const launchFailure = flagModel ? first.failure : undefined;
   if (launchFailure) {
