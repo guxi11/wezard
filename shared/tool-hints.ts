@@ -38,6 +38,19 @@ export const toolReplies = (value: unknown, depth = 0): Facts[] => {
 // of evaluator libraries: only literal values / literal const bindings can become tool arguments.
 type Syntax = { type: string; [key: string]: any };
 const UNKNOWN = Symbol("not static");
+
+/** 静态成员链: `mcp.wezard.tell_peer` / `mcp["wezard"].tell_peer` / `tools.mcp__wezard__x`。
+ *  调用结果、下标变量这些算不出名字的段一律返回 undefined —— 认不出就不猜。 */
+const memberPath = (n: Syntax | undefined): string | undefined => {
+  if (!n) return undefined;
+  if (n.type === "Identifier") return n.name;
+  if (n.type !== "MemberExpression") return undefined;
+  const head = memberPath(n.object);
+  const key = n.computed
+    ? n.property.type === "Literal" && typeof n.property.value === "string" ? n.property.value : undefined
+    : n.property.type === "Identifier" ? n.property.name : undefined;
+  return head === undefined || key === undefined ? undefined : head + "." + key;
+};
 const literal = (n: Syntax | undefined, bindings: Map<string, unknown>): unknown => {
   if (!n) return UNKNOWN;
   if (n.type === "Literal") return n.regex || n.bigint ? UNKNOWN : n.value;
@@ -61,6 +74,17 @@ const literal = (n: Syntax | undefined, bindings: Map<string, unknown>): unknown
   return UNKNOWN;
 };
 
+/** 记进 transcript 的工具调用有好几种拼写, 归一成一种 (`accept` / HINT_TOOL 只认它):
+ *  Claude code-mode 的 `tools.mcp__wezard__x` / `tools.exec_command`, CodeBuddy 的
+ *  `mcp_wezard.x` 与 `mcp.wezard.x` (沙箱把命名空间和工具拆成两段)。 */
+const TOOL_SPELLINGS = ["mcp__wezard__", "mcp_wezard.", "mcp.wezard."] as const;
+const toolNameOf = (path: string): string | undefined => {
+  // tools.* 是 code-mode 的容器: 剩下那一段本身就是工具名。
+  if (path.startsWith("tools.")) return path.slice("tools.".length);
+  const spelling = TOOL_SPELLINGS.find((s) => path.startsWith(s));
+  return spelling === undefined ? undefined : "mcp__wezard__" + path.slice(spelling.length);
+};
+
 export interface HintCall { toolName: string; toolInput: Facts }
 export const callsInExec = (source: string, accept: (name: string) => boolean = (name) => name.startsWith("mcp__wezard__") && HINT_TOOL.test(name)): HintCall[] => {
   if (source.length > 200_000) return [];
@@ -68,30 +92,52 @@ export const callsInExec = (source: string, accept: (name: string) => boolean = 
     // allowReturnOutsideFunction: REPL 的 code 是函数体, 顶层 return 是常态 —— 不放开整个解析直接失败。
     const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true }) as Syntax;
     const bindings = new Map<string, unknown>();
+    // 名字 → 它绑的成员链 (`const ns = mcp.wezard` / `const {tell_peer: tp} = mcp.wezard`)：
+    // 只是换个写法, 不改变调用的身份, 和入参事实分开记。
+    const aliases = new Map<string, string>();
     const calls: HintCall[] = [];
+    const expand = (path: string): string => {
+      const [head, ...rest] = path.split(".");
+      const base = aliases.get(head!);
+      return base === undefined ? path : [base, ...rest].join(".");
+    };
     const walk = (n: Syntax): void => {
       // Definitions and conditional execution are not evidence that a tool ran.
       if (/Function|Class|IfStatement|ConditionalExpression|LogicalExpression|For|While|Switch|TryStatement/.test(n.type)) return;
       if (n.type === "BlockStatement") {
-        const outer = new Map(bindings);
+        const outer = new Map(bindings), outerAliases = new Map(aliases);
         n.body.forEach(walk);
         bindings.clear();
         outer.forEach((v, k) => bindings.set(k, v));
+        aliases.clear();
+        outerAliases.forEach((v, k) => aliases.set(k, v));
         return;
       }
       if (n.type === "VariableDeclaration" && n.kind === "const") {
-        for (const d of n.declarations) if (d.id.type === "Identifier") {
-          const v = literal(d.init, bindings);
-          // const objects can still be mutated; only primitive bindings are immutable facts.
-          bindings.set(d.id.name, v !== null && typeof v === "object" ? UNKNOWN : v);
+        for (const d of n.declarations) {
+          const binding = memberPath(d.init);
+          if (d.id.type === "Identifier") {
+            // 绑到工具 / 命名空间的名字不是入参事实, 单独记。
+            if (binding !== undefined) aliases.set(d.id.name, binding);
+            else {
+              const v = literal(d.init, bindings);
+              // const objects can still be mutated; only primitive bindings are immutable facts.
+              bindings.set(d.id.name, v !== null && typeof v === "object" ? UNKNOWN : v);
+            }
+          } else if (d.id.type === "ObjectPattern" && binding !== undefined) {
+            // const { tell_peer: tp } = mcp.wezard —— 同一个工具换个名字。
+            for (const p of d.id.properties) {
+              if (p.type !== "Property" || p.computed || p.kind !== "init" || p.value.type !== "Identifier") continue;
+              aliases.set(p.value.name, expand(binding + "." + String(p.key.name ?? p.key.value)));
+            }
+          }
         }
       }
-      if (n.type === "CallExpression" && n.callee.type === "MemberExpression" && !n.callee.computed && n.callee.object.type === "Identifier") {
-        // 两种调用形: Claude code-mode 的 tools.mcp__wezard__x(…) 与 CodeBuddy REPL (PTC) 的
-        // mcp_wezard.x(…) —— 后者归一成 mcp__wezard__x, accept / HINT_TOOL 只认一种拼写。
-        const prop = n.callee.property.name;
-        const name = n.callee.object.name === "tools" ? prop
-          : n.callee.object.name === "mcp_wezard" ? `mcp__wezard__${prop}` : undefined;
+      if (n.type === "CallExpression") {
+        // 被调用者先还原成静态成员链, 再归一成一种拼写: `mcp.wezard.tell_peer(…)` 这种两段
+        // 命名空间、`const tp = mcp.wezard.tell_peer; tp(…)` 这种先存名字再调, 都落在这一处。
+        const path = memberPath(n.callee);
+        const name = path === undefined ? undefined : toolNameOf(expand(path));
         const input = n.arguments.length === 0 ? {} : literal(n.arguments[0], bindings);
         if (name !== undefined && accept(name) && objectOf(input)) calls.push({ toolName: name, toolInput: input as Facts });
       }

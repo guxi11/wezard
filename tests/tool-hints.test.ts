@@ -84,4 +84,24 @@ assert.equal(hintsOf(replUse, { t: "tool_result", toolUseId: "rc", body: printed
 assert.deepEqual(toolReplies(JSON.stringify({ stdout: "note " + JSON.stringify(tellReply), stderr: "" })), []);
 // Bash 自己的返回带 exitCode, 它的 stdout 是命令输出, 不是回包壳。
 assert.deepEqual(toolReplies(JSON.stringify({ stdout: JSON.stringify(tellReply) + "\n", stderr: "", exitCode: 0, signal: null })), []);
+// 同一个调用还有别的静态写法: 沙箱把命名空间拆成两段 (`mcp.wezard.x`), 也有人先把工具或
+// 命名空间存进一个名字再调 (`const tp = mcp.wezard.tell_peer` / 解构)。认不出就等于 hint 丢了。
+const dotted = 'const r = await mcp.wezard.tell_peer({ name: ".router-check", text: "check model", return: "transfer" }); return r;';
+assert.deepEqual(callsInExec(dotted), [{ toolName: "mcp__wezard__tell_peer",
+  toolInput: { name: ".router-check", text: "check model", return: "transfer" } }]);
+assert.equal(callsInExec('const { tell_peer: tp } = mcp.wezard; await tp({ name: ".a", text: "x" });').length, 1);
+assert.equal(callsInExec('const { tell_peer } = mcp.wezard; await tell_peer({ name: ".a", text: "x" });')[0]?.toolName, "mcp__wezard__tell_peer");
+assert.equal(callsInExec('const tp = mcp.wezard.tell_peer; await tp({ name: ".a", text: "x" });').length, 1);
+assert.equal(callsInExec('const ns = mcp.wezard; await ns.tell_peer({ name: ".a", text: "x" });').length, 1);
+assert.equal(callsInExec('await mcp["wezard"].tell_peer?.({ name: ".a", text: "x" });').length, 1);
+// 换成别的成员链就不是 wezard 的调用, 不能跟着认。
+assert.equal(callsInExec('const tp = other.tool; await tp({ name: ".a", text: "x" });').length, 0);
+// 整件交出 (return:"transfer") 的标记也随入参一起来。
+const dottedUse: Extract<TurnItem, { t: "tool_use" }> = { t: "tool_use", toolUseId: "dot", toolName: "REPL", toolInput: { code: dotted }, ts: 1 };
+const transferred = hintsOf(dottedUse, { t: "tool_result", toolUseId: "dot", body: envelope, ts: 2 });
+assert.equal(transferred.length, 1);
+assert.equal(transferred[0]?.k === "handoff" && transferred[0].handed, true);
+assert.equal(transferred[0]?.k === "handoff" && transferred[0].receipt, false);
+// peers.ts 靠 tools.* 这一段读 exec 里的命令, 别把 code-mode 的容器形态弄丢。
+assert.equal(callsInExec('tools.exec_command({cmd:"ls"})', () => true)[0]?.toolName, "exec_command");
 console.log("Tool hint wrapping, pairing, rendering and receipt association checks passed");
