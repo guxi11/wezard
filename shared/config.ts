@@ -152,6 +152,15 @@ const Mirror = z.object({
   paneSweepSec: z.number().int().nonnegative().default(600).describe("pane 上限定时清扫间隔 (秒), 含孤儿 pane; 0 = 只在新建 wizard 时扫"),
 });
 
+const Channel = z.object({
+  judge: z.object({
+    enabled: z.boolean().default(true).describe("频道里未被 @ 的新帖 / 新回复先交给判官决定是否回应"),
+    tier: z.string().default("light").describe("判官使用的模型档位 (轻量优先)"),
+    maxPosts: z.number().int().min(2).max(20).default(8).describe("判官只读最近多少条帖子"),
+    timeoutMs: z.number().int().min(3000).max(60000).default(20000).describe("判官一次判断的超时 (ms); 超时按不回应处理"),
+  }).default({}),
+}).default({});
+
 const Wrc = z.object({
   allowFrom: knob(z.array(z.string()).default([]).describe("允许驱动本机的聊天 / 用户 (principal)"), { gate: "card", apply: "hot" }),
   // NOT exclusive: the daemon mirrors sessions from every installed CLI
@@ -190,6 +199,7 @@ const Wrc = z.object({
   // 机器人显示名由建机器人的人自己取, 我们无法从消息里读到。群里 @ 它 / 引用它的
   // 气泡时, WeCom 会把 `@<显示名>` 塞进正文; 配上真名才能把它从 prompt 里剥干净。
   botNames: z.array(z.string()).default([]).describe("机器人在企微里的显示名 (可多个业务别名), 用于剥掉 @; 内置 wezard 恒生效"),
+  channel: Channel.default({}).describe("频道 (灰度): 每条消息先由轻量判官决定是否回应"),
 }).transform((v) => {
   // Pin the active backend so downstream readers see a concrete value.
   const backend = resolveCliBackend(v);

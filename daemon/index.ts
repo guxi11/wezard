@@ -470,7 +470,7 @@ const main = async (): Promise<void> => {
   } }, sourcePath, (w, c) => guardCharter(w, c));
   // 频道（topic）是 SDK 之外的一层事件；接在 inbound 之后，让频道消息复用
   // 同一套 gate / route / mirror，同时把 topic 的出站换成帖子/评论。
-  installChannelBridge(ws.client, log.child({ mod: "channel" }));
+  installChannelBridge(ws.client, cfg, log.child({ mod: "channel" }), bridge);
   // approval click → finalize 当前 liveStream, 后续 tool/text 落到 standalone。
   // 规则 2: 用户点击授权那一刻就是"上一段对话"的边界, 截断 stream 让授权后的
   // 工作单独成块, 比让 stream 一直长到下一个 inbound / hardTimer 更清晰。
