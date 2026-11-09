@@ -28,6 +28,7 @@ import { pickTier } from "../shared/model-tiers.js";
 import { applyHot, cfgSeenBy, patchedTop, pinChatKeys, configGet, planSet, renderPlan, tierEvidence, type Plan, type SetReq, type TierUsage, type UsageTotals } from "./config-api.js";
 import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } from "./usage.js";
 import { installInboundRouter } from "./inbound.js";
+import { installChannelBridge } from "./channel.js";
 import { loadMirrorStore } from "./mirror-store.js";
 import { cancelOps, eventRef, finalKind, isEventRef, makeOutcome, openRouter, ops, pickPair, type Delivery, type EventId, type Op, type Receiver, type Route } from "./router.js";
 import { createMessageEvents, messageId, finalId, reportSource, receiptCoverage, receiptFacts, correctionTaskEvent, canSettleFinal, eventDeliveryAllowed, peerEventPrerequisitesReady, resultCorrectionInputs, settleAddressedResults, settleUnaddressedResult, servedChatResultFinalAllowed, settleServedChatResult, type EventAuthority, type MessageAdapters, type MessageEvent, type MessageFinal, type MessageInput } from "./message-events.js";
@@ -467,6 +468,9 @@ const main = async (): Promise<void> => {
       payload: { text: a.text, human: a } });
     void watchQueue(a, id, !bridge.hasMirrorTarget(a.principal));
   } }, sourcePath, (w, c) => guardCharter(w, c));
+  // 频道（topic）是 SDK 之外的一层事件；接在 inbound 之后，让频道消息复用
+  // 同一套 gate / route / mirror，同时把 topic 的出站换成帖子/评论。
+  installChannelBridge(ws.client, log.child({ mod: "channel" }));
   // approval click → finalize 当前 liveStream, 后续 tool/text 落到 standalone。
   // 规则 2: 用户点击授权那一刻就是"上一段对话"的边界, 截断 stream 让授权后的
   // 工作单独成块, 比让 stream 一直长到下一个 inbound / hardTimer 更清晰。
