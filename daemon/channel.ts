@@ -39,6 +39,9 @@ const lastAsker = new Map<string, string>();
 const seen = new Set<string>();
 /** 已经交给主 wizard 的 post / reply；判官与直接 @ 可能同时到，谁先到谁答。 */
 const dispatched = new Set<string>();
+/** post_id → 是否收到过 topic_at_bot。只有被 @ 过的帖子才能用 send_reply 评论；
+ *  未被 @ 的新帖只能 send_post 主动发（官方“回复被@的内容” vs “主动发内容”）。 */
+const replyOk = new Map<string, boolean>();
 /** 判官串行：同一判官一次只处理一条，避免 transcript 串轮。 */
 const judgeQueues = new Map<string, Promise<unknown>>();
 
@@ -230,7 +233,8 @@ export const installChannelTransport = (client: WSClient, log: Logger): void => 
       return Promise.resolve(emptyFrame());
     }
     const postId = lastPost.get(topicId);
-    return postId
+    // 只有被 @ 过的帖子才能评论；未被 @ 的新帖只能主动发一条新帖。
+    return postId && replyOk.get(postId) === true
       ? sendReply({ topicId, postId, asker: lastAsker.get(topicId) ?? "" }, content)
       : sendPost(topicId, content);
   };
@@ -242,7 +246,7 @@ export const installChannelTransport = (client: WSClient, log: Logger): void => 
     const ctx = byStream.get(streamId) ?? byStream.get(String(frame?.headers?.req_id ?? ""));
     if (!ctx) return origStream(frame, streamId, content, finish, ...rest);
     if (!finish) return Promise.resolve(emptyFrame());
-    return sendReply(ctx, content);
+    return replyOk.get(ctx.postId) === true ? sendReply(ctx, content) : sendPost(ctx.topicId, content);
   };
 };
 
@@ -253,10 +257,12 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
     return;
   }
 
-  const dispatch = (topicId: string, postId: string, msgid: string, fromUser: string, text: string, at: number): void => {
+  const dispatch = (topicId: string, postId: string, msgid: string, fromUser: string, text: string, at: number, allowReply: boolean): void => {
     if (dispatched.has(postId)) return;
     dispatched.add(postId);
     if (dispatched.size > 3000) dispatched.delete(dispatched.values().next().value!);
+    replyOk.set(postId, allowReply);
+    if (replyOk.size > 3000) replyOk.delete(replyOk.keys().next().value!);
     lastPost.set(topicId, postId);
     byStream.set(msgid, { topicId, postId, asker: fromUser });
     if (byStream.size > 3000) byStream.delete(byStream.keys().next().value!);
@@ -305,7 +311,7 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       return;
     }
     log.info({ topicId, postId, reason: verdict.reason }, "channel judge: yes");
-    dispatch(topicId, postId, msgid, fromUser, text, at);
+    dispatch(topicId, postId, msgid, fromUser, text, at, false);
   };
 
   const onTopic = async (frame: any): Promise<void> => {
@@ -333,7 +339,7 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       const reply = replyId ? await fetchReply(client, topicId, postId, replyId, log) : null;
       if (!post) log.warn({ topicId, postId }, "channel: post content not found");
       const text = cleanContent(reply?.content ?? post?.content) || "（在频道里 @ 了你，没有正文）";
-      dispatch(topicId, postId, msgid, asker, text, at);
+      dispatch(topicId, postId, msgid, asker, text, at, true);
       return;
     }
 
