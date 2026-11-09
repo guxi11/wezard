@@ -6,6 +6,7 @@
 // 频道里没有被 @ 的新帖子 / 新回复也会进来（topic_event / topic_reply_event）。
 // 这些不直接答，先交给每个 bot 的「判官」：判官是一个只读最近几条消息的轻量 wizard，
 // 只回 JSON {respond, reason}；respond 才把原帖交给主 wizard。
+import { join } from "node:path";
 import { generateReqId, type TextMessage, type WSClient, type WsFrame } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
@@ -15,12 +16,17 @@ import { sleep } from "../shared/std.js";
 import { wizardStore } from "./wizard.js";
 import { lastAssistantText, talkTurns } from "./peers.js";
 import type { MirrorBridge } from "./mirror-bridge.js";
+import { expandHome } from "../shared/paths.js";
+import { ChannelStore, type ChannelMsg } from "./channel-store.js";
+import { formatChannelContext, pickQuery, wantsHistory, withoutMsg } from "./channel-context.js";
 
 const TOPIC_EVENT = "aibot_topic_event_callback";
 const CMD_POST = "aibot_topic_send_post";
 const CMD_REPLY = "aibot_topic_send_reply";
 const CMD_GET_POSTS = "aibot_topic_get_post_list";
 const CMD_GET_REPLIES = "aibot_topic_get_reply_list";
+const CMD_SEARCH = "aibot_topic_search";
+const CMD_SEARCH_RESULT = "get_search_result";
 
 const JUDGE_JOB = "频道判官：只判断这条频道消息是否该由本机器人回应；只输出 JSON {\"respond\":true|false,\"reason\":\"…\"}；不回答用户，不调用工具。";
 const JUDGE_POLL_MS = 300;
@@ -80,6 +86,165 @@ const fetchRecent = async (client: WSClient, topicId: string, limit: number, log
   if (body?.errcode) log.warn({ errcode: body.errcode, errmsg: body.errmsg, topicId }, "channel get_recent failed");
   const list = body?.post_list ?? [];
   return Array.isArray(list) ? list.slice().reverse() : [];
+};
+
+/** 本地缓存 (每个 topic 一个 jsonl), 懒初始化: 配置里的 stateDir / 保留策略变了就换一份。 */
+let store: ChannelStore | undefined;
+let storeKey = "";
+/** 已经回填过的 topic —— 进程重启后重新算一次 (断线空窗期的事件本地没有)。 */
+const backfilled = new Set<string>();
+
+const ensureStore = (cfg: Config): ChannelStore | undefined => {
+  const h = cfg.wrc.channel.history;
+  if (!h.enabled) return undefined;
+  const key = `${cfg.daemon.stateDir}|${h.keepDays}|${h.maxMessages}`;
+  if (!store || storeKey !== key) {
+    store = new ChannelStore({
+      dir: join(expandHome(cfg.daemon.stateDir), "channels"),
+      keepDays: h.keepDays,
+      maxMessages: h.maxMessages,
+    });
+    storeKey = key;
+    backfilled.clear();
+  }
+  return store;
+};
+
+/** 频道回包的时间戳单位不统一 (秒 / 毫秒都见过)。 */
+const atOf = (t: unknown): number => {
+  const n = Number(t ?? 0);
+  if (!Number.isFinite(n) || n <= 0) return Date.now();
+  return n > 1e12 ? n : n * 1000;
+};
+
+const authorOf = (creator: any): string => {
+  const c = creator ?? {};
+  return Number(c.type) === 1 ? `bot:${String(c.aibotid ?? "?").slice(0, 10)}` : String(c.userid ?? "user");
+};
+
+const postMsg = (p: any): ChannelMsg | undefined => {
+  const id = String(p?.post_id ?? "");
+  const text = cleanContent(p?.content);
+  if (!id || !text) return undefined;
+  return { id, kind: "post", postId: id, at: atOf(p?.create_time), author: authorOf(p?.creator), text };
+};
+
+const replyMsg = (r: any, postId: string): ChannelMsg | undefined => {
+  const id = String(r?.reply_id ?? "");
+  const text = cleanContent(r?.content);
+  if (!id || !text) return undefined;
+  return { id, kind: "reply", postId: String(r?.post_id ?? postId), at: atOf(r?.create_time), author: authorOf(r?.creator), text };
+};
+
+/** 记一条进本地缓存: 判官上下文 / 主 wizard 上下文 / read_channel 共用这一份。 */
+const record = async (cfg: Config, topicId: string, msg: ChannelMsg | undefined): Promise<void> => {
+  if (!msg) return;
+  await ensureStore(cfg)?.append(topicId, msg);
+};
+
+/** 第一次见到的 topic 从官方补最近 N 条 —— reload / 断线空窗期的消息本地没有。 */
+const backfill = async (client: WSClient, cfg: Config, log: Logger, topicId: string): Promise<void> => {
+  const h = cfg.wrc.channel.history;
+  const s = ensureStore(cfg);
+  if (!s || !h.backfillOnBoot || backfilled.has(topicId)) return;
+  backfilled.add(topicId);
+  if ((await s.count(topicId)) >= h.mainPosts) return;
+  const posts = await fetchRecent(client, topicId, h.mainPosts, log);
+  for (const m of posts.map(postMsg).filter((x): x is ChannelMsg => !!x)) await s.append(topicId, m);
+  log.info({ topicId, n: posts.length }, "channel history backfilled");
+};
+
+/** 判官 / 上下文要看的最近帖子: 本地够用就不打接口。 */
+const recentPosts = async (client: WSClient, cfg: Config, log: Logger, topicId: string, limit: number): Promise<ChannelMsg[]> => {
+  const local = (await ensureStore(cfg)?.recentPosts(topicId, limit)) ?? [];
+  if (local.length >= Math.min(limit, 3)) return local;
+  const posts = await fetchRecent(client, topicId, limit, log);
+  return posts.map(postMsg).filter((m): m is ChannelMsg => !!m);
+};
+
+interface ChannelDeps { client: WSClient; cfg: Config; log: Logger }
+
+/** 官方搜索: 两步 (search 出 jobid → get_search_result 取摘要), 摘要只是 ID, 正文按 post 再取一次。 */
+const searchRemote = async (d: ChannelDeps, topicId: string, query: string, limit: number): Promise<ChannelMsg[]> => {
+  const body = await call(d.client, CMD_SEARCH, { keyword_list: [query], topic_id_list: [topicId], limit });
+  if (body?.errcode) {
+    d.log.debug({ errcode: body.errcode, errmsg: body.errmsg, topicId }, "channel search rejected");
+    return [];
+  }
+  const jobid = String(body?.jobid ?? "");
+  if (!jobid) return [];
+  const ids: string[] = [];
+  for (let i = 0; i < 5 && ids.length < limit; i += 1) {
+    const r = await call(d.client, CMD_SEARCH_RESULT, { jobid, topic_id: topicId, limit });
+    if (r?.errcode) break;
+    for (const x of r?.result_list ?? []) {
+      const id = String(x?.post_id ?? "");
+      if (id && !ids.includes(id)) ids.push(id);
+    }
+    if (!r?.has_more) break;
+    await sleep(300);
+  }
+  if (!ids.length) return [];
+  const b = await call(d.client, CMD_GET_POSTS, { topic_id: topicId, type: 0, post_id_list: ids.slice(0, Math.max(1, limit)) });
+  const posts: any[] = b?.post_list ?? [];
+  return posts.map(postMsg).filter((m): m is ChannelMsg => !!m);
+};
+
+/** 先本地 grep (便宜、立刻), 不够再走官方搜索 (语义索引只在服务端)。 */
+const searchChannel = async (d: ChannelDeps, topicId: string, query: string, limit: number): Promise<ChannelMsg[]> => {
+  if (!limit || !query) return [];
+  const local = (await ensureStore(d.cfg)?.search(topicId, query, limit)) ?? [];
+  if (local.length >= limit) return local;
+  const seen = new Set(local.map((m) => m.id));
+  const remote = (await searchRemote(d, topicId, query, limit)).filter((m) => !seen.has(m.id));
+  return [...local, ...remote].slice(0, limit);
+};
+
+/** 主 wizard 的上下文: 当前线程 + 最近 + (这句话有指代时才) 搜索命中。 */
+const contextFor = async (d: ChannelDeps, topicId: string, postId: string, triggerId: string | undefined, text: string, reason?: string): Promise<string> => {
+  const h = d.cfg.wrc.channel.history;
+  const s = ensureStore(d.cfg);
+  if (!s) return "";
+  const thread = withoutMsg(await s.thread(topicId, postId, h.mainReplies), triggerId);
+  const recent = withoutMsg(await s.recentPosts(topicId, h.mainPosts), triggerId);
+  const query = h.searchLimit > 0 && wantsHistory(text) ? pickQuery(text) : "";
+  const hits = query ? (await searchChannel(d, topicId, query, h.searchLimit)).filter((m) => m.id !== triggerId) : [];
+  return formatChannelContext({
+    topicId,
+    postId,
+    thread,
+    recent,
+    hits,
+    ...(query ? { query } : {}),
+    ...(reason ? { reason } : {}),
+    budget: h.contextChars,
+  });
+};
+
+const stamp = (ms: number): string => {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+};
+
+const renderLines = (list: ChannelMsg[]): string => list.map((m) => `[${stamp(m.at)}] ${m.author}: ${clip(m.text, 400)}`).join("\n");
+
+export interface ChannelReadReq { topic: string; query?: string; limit?: number; since?: number; until?: number }
+
+/** read_channel 的守护进程侧: 本地缓存优先, 搜不到 / 没缓存才问官方。 */
+export const readChannel = async (d: ChannelDeps, req: ChannelReadReq): Promise<{ ok: boolean; text: string }> => {
+  const topicId = req.topic.replace(/^chat:/, "").trim();
+  if (!topicId) return { ok: false, text: "给一个频道: `chat:<topic_id>` 或裸 topic_id" };
+  const limit = Math.min(Math.max(Number(req.limit ?? 20) || 20, 1), 100);
+  const query = (req.query ?? "").trim();
+  if (query) {
+    const hits = await searchChannel(d, topicId, query, limit);
+    return { ok: true, text: hits.length ? `频道 ${topicId} · 搜「${query}」· ${hits.length} 条\n${renderLines(hits)}` : `频道 ${topicId} 没搜到「${query}」` };
+  }
+  const local = (await ensureStore(d.cfg)?.slice(topicId, { ...(req.since !== undefined ? { since: req.since } : {}), ...(req.until !== undefined ? { until: req.until } : {}), limit })) ?? [];
+  const list = local.length
+    ? local
+    : (await fetchRecent(d.client, topicId, Math.min(limit, 20), d.log)).map(postMsg).filter((m): m is ChannelMsg => !!m);
+  return { ok: true, text: list.length ? `频道 ${topicId} · ${list.length} 条\n${renderLines(list)}` : `频道 ${topicId} 没有读到消息 (没见过这个频道, 或还没缓存)` };
 };
 
 const emptyFrame = (): WsFrame => ({ headers: { req_id: "" } } as WsFrame);
@@ -158,7 +323,7 @@ const askJudge = async (deps: JudgeDeps, target: string, prompt: string): Promis
 
 const botName = (cfg: Config): string => cfg.wrc.botNames.find(Boolean) ?? "wezard";
 
-const buildJudgePrompt = (cfg: Config, topicId: string, recent: any[], latest: string, latestAuthor: string): string => {
+const buildJudgePrompt = (cfg: Config, topicId: string, recent: ChannelMsg[], latest: string, latestAuthor: string, thread: ChannelMsg[] = []): string => {
   const base = `chat:${topicId}`;
   const me = botName(cfg);
   const job = wizardStore()?.get(base)?.description ?? "这个频道的助手";
@@ -166,15 +331,14 @@ const buildJudgePrompt = (cfg: Config, topicId: string, recent: any[], latest: s
     .filter((w) => baseOfKey(w.target) === base && w.target !== base && w.target !== judgeTarget(topicId))
     .map((w) => `${w.name || w.target}${w.description ? `（${w.description}）` : ""}`)
     .slice(0, 12);
-  const lines = recent.map((p, i) => {
-    const c = p?.creator ?? {};
-    const who = c.type === 1 ? `bot:${String(c.aibotid ?? "?").slice(0, 10)}` : String(c.userid ?? "user");
-    return `[${i + 1}] ${who}: ${clip(cleanContent(p?.content))}`;
-  });
+  const lines = recent.map((m, i) => `[${i + 1}] ${m.author}: ${clip(m.text)}`);
+  const threadLines = thread.map((m) => `  ${m.author}: ${clip(m.text, 200)}`);
   return [
     `你是 ${me} 的频道判官。只判断最新一条消息是否应该由 ${me} 回应。`,
     `你的职责：${job}`,
     others.length ? `频道里其他机器人：${others.join("、")}` : "",
+    threadLines.length ? "这条消息所在的线程（父帖 + 评论）：" : "",
+    ...threadLines,
     "最近的频道消息（旧→新）：",
     ...lines,
     `最新消息（${latestAuthor}）：${clip(latest, 600)}`,
@@ -291,7 +455,7 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
     });
   };
 
-  const judgeAndMaybe = async (topicId: string, postId: string, msgid: string, fromUser: string, text: string, at: number, selfBot: string): Promise<void> => {
+  const judgeAndMaybe = async (topicId: string, postId: string, msgid: string, fromUser: string, text: string, at: number, selfBot: string, triggerId: string): Promise<void> => {
     if (!cfg.wrc.channel.judge.enabled) {
       log.info({ topicId, postId }, "channel judge disabled");
       return;
@@ -317,8 +481,9 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       log.info({ topicId, postId }, "channel judge skipped: addressed to another bot");
       return;
     }
-    const recent = await fetchRecent(client, topicId, cfg.wrc.channel.judge.maxPosts, log);
-    const prompt = buildJudgePrompt(cfg, topicId, recent, text, fromUser);
+    const recent = await recentPosts(client, cfg, log, topicId, cfg.wrc.channel.judge.maxPosts);
+    const thread = withoutMsg((await ensureStore(cfg)?.thread(topicId, postId, 4)) ?? [], triggerId);
+    const prompt = buildJudgePrompt(cfg, topicId, recent, text, fromUser, thread);
     const target = judgeTarget(topicId);
     // 判官的出生也串行：两条消息同时到不能各 spawn 一个 judge（后者会杀掉前者）。
     const verdict = await serial(target, async () => {
@@ -330,7 +495,9 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       return;
     }
     log.info({ topicId, postId, reason: verdict.reason }, "channel judge: yes");
-    dispatch(topicId, postId, msgid, fromUser, text, at, false);
+    // 判官说 YES 才拼展开版上下文: 线程 + 最近 + (这句话有指代时) 搜索命中。
+    const ctx = await contextFor({ client, cfg, log }, topicId, postId, triggerId, text, verdict.reason);
+    dispatch(topicId, postId, msgid, fromUser, ctx ? `${ctx}\n——\n${text}` : text, at, false);
   };
 
   const onTopic = async (frame: any): Promise<void> => {
@@ -344,6 +511,8 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
     if (!topicId) return;
     topics.add(topicId);
     if (asker) lastAsker.set(topicId, asker);
+    // 第一次见到的频道从官方补最近 N 条 (reload / 断线空窗期的事件本地没有)。
+    void backfill(client, cfg, log, topicId).catch((e: Error) => log.warn({ err: e.message, topicId }, "channel backfill failed"));
     log.info({ topicId, type: ev.eventtype, postId: ev.topic_event?.post_id ?? ev.topic_reply_event?.post_id ?? ev.topic_at_bot?.post_id, asker }, "channel event");
 
     if (ev.eventtype === "topic_at_bot") {
@@ -358,8 +527,11 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       const post = await fetchPost(client, topicId, postId, log);
       const reply = replyId ? await fetchReply(client, topicId, postId, replyId, log) : null;
       if (!post) log.warn({ topicId, postId }, "channel: post content not found");
+      await record(cfg, topicId, postMsg(post));
+      if (reply) await record(cfg, topicId, replyMsg(reply, postId));
       const text = cleanContent(reply?.content ?? post?.content) || "（在频道里 @ 了你，没有正文）";
-      dispatch(topicId, postId, msgid, asker, text, at, true);
+      const ctx = await contextFor({ client, cfg, log }, topicId, postId, replyId || postId, text);
+      dispatch(topicId, postId, msgid, asker, ctx ? `${ctx}\n——\n${text}` : text, at, true);
       return;
     }
 
@@ -378,9 +550,10 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       seen.add(msgid);
       if (seen.size > 3000) seen.delete(seen.values().next().value!);
       const post = await fetchPost(client, topicId, postId, log);
+      await record(cfg, topicId, postMsg(post));
       const text = cleanContent(post?.content);
       if (!text) return;
-      void judgeAndMaybe(topicId, postId, msgid, asker, text, at, selfBot)
+      void judgeAndMaybe(topicId, postId, msgid, asker, text, at, selfBot, postId)
         .catch((e: Error) => log.warn({ err: e.message, topicId, postId }, "channel judge failed"));
       return;
     }
@@ -397,9 +570,10 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       seen.add(replyId);
       if (seen.size > 3000) seen.delete(seen.values().next().value!);
       const reply = await fetchReply(client, topicId, postId, replyId, log);
+      await record(cfg, topicId, replyMsg(reply, postId));
       const text = cleanContent(reply?.content);
       if (!text) return;
-      void judgeAndMaybe(topicId, postId, msgid, asker, text, at, selfBot)
+      void judgeAndMaybe(topicId, postId, msgid, asker, text, at, selfBot, replyId)
         .catch((e: Error) => log.warn({ err: e.message, topicId, postId }, "channel judge failed"));
       return;
     }

@@ -537,6 +537,30 @@ export const createWezardServer = (): McpServer => {
   );
 
   server.registerTool(
+    "read_channel",
+    {
+      title: "Read a WeCom channel's history",
+      description:
+        "翻一个**频道**（企微 topic，不是群聊）的聊天历史，或者按关键词搜。频道里派给你的活，消息头上有 `topic=<id>` —— 注入的上下文（当前线程 + 最近若干条 + 搜索命中）不够时用它自己往前翻。先读本地缓存（daemon 为每个频道存了一份，含 reload / 断线期回填的消息）；给了 `query` 且本地不够时才走官方搜索（`aibot_topic_search` 两步：先出 jobid 再取摘要，正文再按 post_id 取回）。返回一行一条：`[HH:MM] 作者: 正文`，作者是 userid 或 `bot:<aibotid 前十位>`。这是**频道**视角；群聊 / 私聊的往来用 read_chat，单个 wizard 的会话用 peek_peer。只读，随便查。",
+      inputSchema: {
+        topic: z.string().describe("频道 id：`chat:<topic_id>` 或裸 topic_id —— 频道消息上下文头的 `topic=` 就是它。"),
+        query: z.string().optional().describe("按关键词搜历史（先本地 grep，不够再走官方搜索）。不给 = 按时间翻最新若干条。"),
+        limit: z.number().optional().describe("最多回多少条（1-100，默认 20）。"),
+        since: z.string().optional().describe("从什么时候起：`2h` / `30m` / `3d`、`14:30`、`09-30 14:30` 或 ISO 时间。"),
+        until: z.string().optional().describe("到什么时候为止（不含），写法同 `since`。"),
+      },
+    },
+    async ({ topic, query, limit, since, until }) =>
+      unwrapText("read_channel", await daemonPost("/channel/read", {
+        topic,
+        ...(query ? { query } : {}),
+        ...(limit ? { limit } : {}),
+        ...(since ? { since } : {}),
+        ...(until ? { until } : {}),
+      })),
+  );
+
+  server.registerTool(
     "tell_peer",
     { title: "Say something to another wizard (reply comes back by itself)", description: TELL_DESC, inputSchema: currentAddressSchema(TELL_SCHEMA) },
     async (a) => {

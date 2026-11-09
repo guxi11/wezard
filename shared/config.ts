@@ -159,6 +159,19 @@ const Channel = z.object({
     maxPosts: z.number().int().min(2).max(20).default(8).describe("判官只读最近多少条帖子"),
     timeoutMs: z.number().int().min(3000).max(60000).default(20000).describe("判官一次判断的超时 (ms); 超时按不回应处理"),
   }).default({}),
+  // 频道历史的本地缓存 (daemon/channel-store.ts) 与「给 wizard 看多少」的口径
+  // (daemon/channel-context.ts)。官方接口仍是事实来源: 本地只做最近上下文与回填,
+  // 搜索走官方索引; 关掉 history 就退回「每条消息现打接口」。
+  history: z.object({
+    enabled: z.boolean().default(true).describe("把频道消息存一份本地缓存 (stateDir/channels/*.jsonl), 判官与主 wizard 的上下文优先读它"),
+    keepDays: z.number().int().min(1).max(3650).default(30).describe("本地缓存保留多少天"),
+    maxMessages: z.number().int().min(100).max(200000).default(5000).describe("单个频道本地最多留多少条"),
+    mainPosts: z.number().int().min(2).max(50).default(12).describe("主 wizard 上下文里带最近多少条帖子"),
+    mainReplies: z.number().int().min(0).max(50).default(6).describe("主 wizard 上下文里带当前线程最近多少条评论"),
+    contextChars: z.number().int().min(500).max(50000).default(6000).describe("一次注入的频道上下文预算 (字符), 超出时先丢搜索命中再丢最旧的帖子"),
+    searchLimit: z.number().int().min(0).max(10).default(3).describe("消息里有指代 / 错误码 / 路径时搜历史, 带前几条命中; 0 = 不搜"),
+    backfillOnBoot: z.boolean().default(true).describe("第一次见到一个频道时用 aibot_topic_get_post_list 回填最近 mainPosts 条 (补 reload / 断线空窗)"),
+  }).default({}),
 }).default({});
 
 const Wrc = z.object({

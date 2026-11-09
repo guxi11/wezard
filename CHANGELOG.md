@@ -4,7 +4,11 @@
 
 ## [Unreleased]
 
+### Added
+- 频道历史: daemon 为每个频道存一份本地缓存 (`stateDir/channels/<topic>.jsonl`, 按 post/reply id 覆盖去重, `keepDays` / `maxMessages` 有界), 第一次见到频道时用 `aibot_topic_get_post_list` 回填最近若干条 (`backfillOnBoot`), 补 reload / 断线空窗期丢的事件 (2026-11-09 实测重启到重新认证 15s 内的频道消息服务端不补发)。判官的「最近消息」与主 wizard 的上下文都先读本地, 本地不够才打接口。主 wizard 现在拿到的是预算版上下文: **当前线程 > 最近 N 条 > (消息里有指代 / 错误码 / 路径时才) 搜索命中**, 默认 6k 字符 (`wrc.channel.history`), 不再只有触发的那一条文本。新增 MCP `read_channel` + `POST /channel/read`: 按频道翻历史或搜关键词 —— 先本地 grep, 不够再走官方 `aibot_topic_search` 两步搜索并按 post_id 取回正文。频道注入的每条消息头部带 `topic=<id>`, wizard 可据此自己再查。
+
 ### Changed
+- 危险名单再移出两类 (人 2026-11-03「命中 git 丢弃/rm 不再判定 danger」): `rm` (含包装器 `timeout` / `nice` / `env` / `command` / `\rm`、ssh 远程、`xargs` 传参形态) 与 git 丢弃 (`reset --hard` / `clean` / `checkout --` / `restore`, 整树与路径级同一口径) 都不再立 danger, 走普通审批卡 (danger 档下即自动放行)。原先按临时区 / 路径词法给 rm 分档的整套结构 (`tokenize` / `normPath` / 临时区清单 / `rmOutsideTargets` / `GIT_WILDTREE`) 随判据一并删除, 不留半死代码; `批量删除 find -delete` 是独立的 find 扫树删除规则, 不属这两类, 保持原样。提权 (`sudo rm`) 仍按「提权 sudo」命中。
 - handoff self 改为「调用即受理」(人 2026-10-28: 「像正常调一个 MCP tool 就完了，daemon 自己去控制那个 pane 完成移交」): 简报合理就立刻返回 scheduled —— 不因 pane 忙、存在未落定事件或有旧失败记录而 409。daemon 自己排期: pane 忙就排队等这一轮收口 (无「超时即失败」, 6h 上限只把日志升到 warn、记录仍是「仍在队列」), 已有一场正在执行 (restarting/清空阶段) 就把新请求排队到它之后再自动执行一次 (返回 `queuedBehind: true`), 等待中的 self 被再次调用时新简报就地接替。残余失败记录不再参与 self 准入 (30 分钟窗口与「值守会话仍是当前绑定就拒」只保留给交接别人 —— 那是同步调用, 记录挡的是对半清会话的二次清空与对已坏路径的即刻重试)。不变量保留: 不在轮中间清空 (daemon 内部等, 不让调用方等)、失败保留旧 pane/旧会话现场 (preservePrevious)、简报首句 / charter / 欠账续答照旧、无端点核验的旧版 CLI 入口仍明确拒绝。可观测性: `GET /handoff/status` 列出每场交接的阶段 / 排队深度 / 在等什么 (排队 ≠ 欠账), 日志同口径 (`仍在队列` / `排队请求开工` / `就地接替`)。
 
 ### Fixed

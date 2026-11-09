@@ -28,7 +28,7 @@ import { pickTier } from "../shared/model-tiers.js";
 import { applyHot, cfgSeenBy, patchedTop, pinChatKeys, configGet, planSet, renderPlan, tierEvidence, type Plan, type SetReq, type TierUsage, type UsageTotals } from "./config-api.js";
 import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } from "./usage.js";
 import { installInboundRouter } from "./inbound.js";
-import { installChannelTransport, installChannelEvents } from "./channel.js";
+import { installChannelTransport, installChannelEvents, readChannel } from "./channel.js";
 import { loadMirrorStore } from "./mirror-store.js";
 import { cancelOps, eventRef, finalKind, isEventRef, makeOutcome, openRouter, ops, pickPair, type Delivery, type EventId, type Op, type Receiver, type Route } from "./router.js";
 import { createMessageEvents, messageId, finalId, reportSource, receiptCoverage, receiptFacts, correctionTaskEvent, canSettleFinal, eventDeliveryAllowed, peerEventPrerequisitesReady, resultCorrectionInputs, settleAddressedResults, settleUnaddressedResult, servedChatResultFinalAllowed, settleServedChatResult, type EventAuthority, type MessageAdapters, type MessageEvent, type MessageFinal, type MessageInput } from "./message-events.js";
@@ -1949,6 +1949,28 @@ const main = async (): Promise<void> => {
           ...(log_.later ? [`往后还有 ${log_.total - log_.shown} 条: since="${log_.later}"`] : []),
         ].join("\n"),
       });
+    });
+
+    // 频道历史 (read_channel): 注入的上下文不够时, wizard 自己按频道翻 / 搜。
+    http.register("POST /channel/read", async (req, res) => {
+      const raw = (await readBody(req)) as { topic?: string; query?: string; limit?: number; since?: string; until?: string };
+      const topic = String(raw.topic ?? "").trim();
+      if (!topic) { json(res, 400, { ok: false, reason: "给一个频道: `chat:<topic_id>` 或裸 topic_id (频道消息的上下文头里有 topic=)" }); return; }
+      const now = Date.now();
+      const since = raw.since ? parseWhen(String(raw.since), now) : undefined;
+      const until = raw.until ? parseWhen(String(raw.until), now) : undefined;
+      if ((raw.since && since === undefined) || (raw.until && until === undefined)) {
+        json(res, 400, { ok: false, reason: "时间认不出 —— 写 `2h` / `30m` / `3d` (多久以前)、`14:30` (今天)、`09-30 14:30` 或 ISO 时间" });
+        return;
+      }
+      const r = await readChannel({ client: ws.client, cfg, log }, {
+        topic,
+        ...(raw.query ? { query: String(raw.query) } : {}),
+        ...(raw.limit !== undefined ? { limit: Number(raw.limit) } : {}),
+        ...(since !== undefined ? { since } : {}),
+        ...(until !== undefined ? { until } : {}),
+      });
+      json(res, r.ok ? 200 : 400, r);
     });
 
     // 跟另一个 wizard 说一句话。`tell_peer` 是它现在的名字 —— 「说」而不是「发送并

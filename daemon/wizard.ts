@@ -587,7 +587,7 @@ export const renderCharter = (a: CharterArgs): string => {
     bullet([
       "`wizard_roster` 找人: 谁在、在哪干、忙不忙 (带条件收窄, 别拉全表)",
       "`delegate` 派一件活: 守护进程替你选人 (已有的 / 按档白板 spawn) 并投出去, 回决定与理由 · `route_candidates` 只想看候选证据、自己判断时",
-      "`peek_peer` 某个 wizard 在干嘛、卡在哪 · `read_chat` 群里 / 私聊里谁对谁说了什么",
+      "`peek_peer` 某个 wizard 在干嘛、卡在哪 · `read_chat` 群里 / 私聊里谁对谁说了什么 · `read_channel` 频道 (topic) 的历史 —— 频道派来的活消息头带 `topic=`, 注入的上下文不够时按需翻 / 搜",
       "`tell_peer` 驱动另一个 wizard (派活、答它、叫它继续), 它的结论自动回执给你 · 插话 / 答它的问 → `priority:\"now\"`, 真紧急 → `\"urgent\"`; 只问一句 → `kind:\"ask\"`, 只知会 → `\"fyi\"`",
       `\`notify\` 只是告诉**人**一件事, 不驱动谁${a.topOnly ? " (顶层模式: 只有顶层 wizard 能 notify 进本群)" : ""} · 要给人看的截图 / 图表 / 文件 → \`send_file\` (别只贴本地路径, 人打不开)`,
       `\`clone_wizard\` 分身要共享我 (或 \`from\` 某个同伴) 已读的材料; 指定 \`from\` 时也仍归你管理 · \`spawn_wizard\` 白板起步, 可去别的目录或聊天, 仍由你管理 —— ${tierLine(a.tiers)}`,
