@@ -292,12 +292,31 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
   };
 
   const judgeAndMaybe = async (topicId: string, postId: string, msgid: string, fromUser: string, text: string, at: number, selfBot: string): Promise<void> => {
-    if (!cfg.wrc.channel.judge.enabled) return;
-    if (dispatched.has(postId)) return;
+    if (!cfg.wrc.channel.judge.enabled) {
+      log.info({ topicId, postId }, "channel judge disabled");
+      return;
+    }
+    if (dispatched.has(postId)) {
+      log.info({ topicId, postId }, "channel judge skipped: already dispatched");
+      return;
+    }
     const post = await fetchPost(client, topicId, postId, log);
     const ms = mentions(post);
-    if (ms.some((m) => m.type === 1 && m.bot === selfBot)) return; // direct @ path handles it
-    if (ms.some((m) => m.type === 1 && m.bot && m.bot !== selfBot)) return; // addressed to another bot
+    // 不能因为“提到自己”就跳过：回复/引用机器人时 inline_mention 也可能带上自己，
+    // 但这时不一定有 topic_at_bot。交给判官，dispatched 会保证不会双答。
+    if (ms.some((m) => m.type === 1 && m.bot === selfBot)) {
+      log.info({ topicId, postId }, "channel judge: self-mention, wait for topic_at_bot");
+      // 先等一拍：真有 topic_at_bot 就让直接 @ 路径答（评论）；没有才走判官。
+      await sleep(1200);
+      if (dispatched.has(postId)) {
+        log.info({ topicId, postId }, "channel judge skipped: self-mention handled by topic_at_bot");
+        return;
+      }
+    }
+    if (ms.some((m) => m.type === 1 && m.bot && m.bot !== selfBot)) {
+      log.info({ topicId, postId }, "channel judge skipped: addressed to another bot");
+      return;
+    }
     const recent = await fetchRecent(client, topicId, cfg.wrc.channel.judge.maxPosts, log);
     const prompt = buildJudgePrompt(cfg, topicId, recent, text, fromUser);
     const target = judgeTarget(topicId);
@@ -325,6 +344,7 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
     if (!topicId) return;
     topics.add(topicId);
     if (asker) lastAsker.set(topicId, asker);
+    log.info({ topicId, type: ev.eventtype, postId: ev.topic_event?.post_id ?? ev.topic_reply_event?.post_id ?? ev.topic_at_bot?.post_id, asker }, "channel event");
 
     if (ev.eventtype === "topic_at_bot") {
       const postId = String(ev.topic_at_bot?.post_id ?? "");
@@ -347,8 +367,14 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       const postId = String(ev.topic_event?.post_id ?? "");
       const msgid = String(body.msgid ?? postId);
       if (!postId || !msgid) return;
-      if (seen.has(msgid) || dispatched.has(postId)) return;
-      if (!asker) return; // bot-authored post (from.aibotid) — don't loop
+      if (seen.has(msgid) || dispatched.has(postId)) {
+        log.info({ topicId, postId, msgid }, "channel topic_event skipped: seen/dispatched");
+        return;
+      }
+      if (!asker) {
+        log.info({ topicId, postId, msgid }, "channel topic_event skipped: bot-authored");
+        return;
+      }
       seen.add(msgid);
       if (seen.size > 3000) seen.delete(seen.values().next().value!);
       const post = await fetchPost(client, topicId, postId, log);
@@ -364,7 +390,10 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       const replyId = String(ev.topic_reply_event?.reply_id ?? "");
       const msgid = String(body.msgid ?? replyId);
       if (!postId || !replyId || !msgid) return;
-      if (seen.has(replyId) || dispatched.has(replyId) || !asker) return;
+      if (seen.has(replyId) || dispatched.has(replyId) || !asker) {
+        log.info({ topicId, postId, replyId, msgid, asker }, "channel topic_reply_event skipped");
+        return;
+      }
       seen.add(replyId);
       if (seen.size > 3000) seen.delete(seen.values().next().value!);
       const reply = await fetchReply(client, topicId, postId, replyId, log);
