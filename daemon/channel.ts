@@ -194,11 +194,20 @@ export const installChannelBridge = (client: WSClient, cfg: Config, log: Logger,
 
   const sendPost = (topicId: string, content: string): Promise<any> =>
     call(client, CMD_POST, { topic_id: topicId, content })
-      .then((body) => { const id = String(body?.post_id ?? ""); if (id) lastPost.set(topicId, id); return body; })
+      .then((body) => {
+        if (body?.errcode) log.warn({ errcode: body.errcode, errmsg: body.errmsg, topicId }, "channel post rejected");
+        else log.info({ topicId, len: content.length }, "channel post sent");
+        const id = String(body?.post_id ?? ""); if (id) lastPost.set(topicId, id); return body;
+      })
       .catch((e: Error) => { log.warn({ err: e.message, topicId }, "channel post failed"); return undefined; });
 
   const sendReply = (ctx: TopicCtx, content: string): Promise<any> =>
     call(client, CMD_REPLY, { topic_id: ctx.topicId, post_id: ctx.postId, content })
+      .then((body) => {
+        if (body?.errcode) log.warn({ errcode: body.errcode, errmsg: body.errmsg, topicId: ctx.topicId }, "channel reply rejected");
+        else log.info({ topicId: ctx.topicId, postId: ctx.postId, len: content.length }, "channel reply sent");
+        return body;
+      })
       .catch((e: Error) => { log.warn({ err: e.message, topicId: ctx.topicId }, "channel reply failed"); return undefined; });
 
   const dispatch = (topicId: string, postId: string, msgid: string, fromUser: string, text: string, at: number): void => {
@@ -334,32 +343,36 @@ export const installChannelBridge = (client: WSClient, cfg: Config, log: Logger,
   // ── 出站：topic 不走群 chatid，改成频道帖子 / 评论 ──
   const origSend = client.sendMessage.bind(client);
   (client as any).sendMessage = (chatid: string, body: any): Promise<any> => {
-    if (!topics.has(chatid)) return origSend(chatid, body);
+    // mirror 有时把 “chat:<topic>” 原样递进来；topic 集合里存的是裸 topic_id。
+    const bare = String(chatid).replace(/^(user|chat|group):/, "");
+    const topicId = topics.has(chatid) ? chatid : topics.has(bare) ? bare : "";
+    if (!topicId) return origSend(chatid, body);
     // 频道没有模板卡片按钮；审批卡改投问话人的私聊，点完结论仍回到频道。
     if (body?.msgtype === "template_card") {
-      const asker = lastAsker.get(chatid);
+      const asker = lastAsker.get(topicId);
       if (asker) {
-        log.info({ topicId: chatid, asker }, "channel: card routed to asker DM");
+        log.info({ topicId, asker }, "channel: card routed to asker DM");
         return origSend(asker, body);
       }
-      log.warn({ topicId: chatid }, "channel: template_card dropped (no asker)");
+      log.warn({ topicId }, "channel: template_card dropped (no asker)");
       return Promise.resolve(emptyFrame());
     }
     const content = body?.msgtype === "markdown" ? String(body.markdown?.content ?? "") : "";
     if (!content) {
-      log.warn({ topicId: chatid, msgtype: body?.msgtype }, "channel: unsupported outbound");
+      log.warn({ topicId, msgtype: body?.msgtype }, "channel: unsupported outbound");
       return Promise.resolve(emptyFrame());
     }
-    const postId = lastPost.get(chatid);
+    const postId = lastPost.get(topicId);
     return postId
-      ? sendReply({ topicId: chatid, postId, asker: lastAsker.get(chatid) ?? "" }, content)
-      : sendPost(chatid, content);
+      ? sendReply({ topicId, postId, asker: lastAsker.get(topicId) ?? "" }, content)
+      : sendPost(topicId, content);
   };
 
   // replyStream 的气泡只对群聊有意义；频道里把最终帧落成一条评论，中间帧丢掉。
   const origStream = client.replyStream.bind(client);
   (client as any).replyStream = (frame: any, streamId: string, content: string, finish = false, ...rest: any[]): Promise<any> => {
-    const ctx = byStream.get(streamId);
+    // 事件流里的 streamId 可能是 route eventId，而 fake frame 的 req_id 才是频道 msgid —— 两边都认。
+    const ctx = byStream.get(streamId) ?? byStream.get(String(frame?.headers?.req_id ?? ""));
     if (!ctx) return origStream(frame, streamId, content, finish, ...rest);
     if (!finish) return Promise.resolve(emptyFrame());
     return sendReply(ctx, content);
