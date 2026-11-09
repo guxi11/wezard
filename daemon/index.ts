@@ -28,7 +28,7 @@ import { pickTier } from "../shared/model-tiers.js";
 import { applyHot, cfgSeenBy, patchedTop, pinChatKeys, configGet, planSet, renderPlan, tierEvidence, type Plan, type SetReq, type TierUsage, type UsageTotals } from "./config-api.js";
 import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } from "./usage.js";
 import { installInboundRouter } from "./inbound.js";
-import { installChannelBridge } from "./channel.js";
+import { installChannelTransport, installChannelEvents } from "./channel.js";
 import { loadMirrorStore } from "./mirror-store.js";
 import { cancelOps, eventRef, finalKind, isEventRef, makeOutcome, openRouter, ops, pickPair, type Delivery, type EventId, type Op, type Receiver, type Route } from "./router.js";
 import { createMessageEvents, messageId, finalId, reportSource, receiptCoverage, receiptFacts, correctionTaskEvent, canSettleFinal, eventDeliveryAllowed, peerEventPrerequisitesReady, resultCorrectionInputs, settleAddressedResults, settleUnaddressedResult, servedChatResultFinalAllowed, settleServedChatResult, type EventAuthority, type MessageAdapters, type MessageEvent, type MessageFinal, type MessageInput } from "./message-events.js";
@@ -204,6 +204,9 @@ const main = async (): Promise<void> => {
   // 一个或多个企微机器人 (bot + bots): 对下面所有模块只露主机器人那个 client, 分流在 bot-mux 里。
   // 必须先于 weixin-port / response-tracker 建好 —— 它们包在 mux 外层。
   const ws = startMux(cfg, log);
+  // 频道出站补丁必须先于 response-tracker：tracker 会把当时的 sendMessage /
+  // replyStream 抓成 orig*，晚装就绕过了频道分支（终句会走成群消息）。
+  installChannelTransport(ws.client, log.child({ mod: "channel" }));
   // 切网 (换 WiFi / VPN 起停) 后原地重建 WS, 等价于自动做了一次 reload 的
   // 联通性部分 — 但保留全部内存态 (pending 长轮询、镜像绑定),
   // 也不依赖 launchd/systemd 的 respawn 策略 (nohup fallback 没有 supervisor)。
@@ -468,9 +471,8 @@ const main = async (): Promise<void> => {
       payload: { text: a.text, human: a } });
     void watchQueue(a, id, !bridge.hasMirrorTarget(a.principal));
   } }, sourcePath, (w, c) => guardCharter(w, c));
-  // 频道（topic）是 SDK 之外的一层事件；接在 inbound 之后，让频道消息复用
-  // 同一套 gate / route / mirror，同时把 topic 的出站换成帖子/评论。
-  installChannelBridge(ws.client, cfg, log.child({ mod: "channel" }), bridge);
+  // 频道（topic）事件层：接在 inbound 之后，让频道消息复用同一套 gate / route / mirror。
+  installChannelEvents(ws.client, cfg, log.child({ mod: "channel" }), bridge);
   // approval click → finalize 当前 liveStream, 后续 tool/text 落到 standalone。
   // 规则 2: 用户点击授权那一刻就是"上一段对话"的边界, 截断 stream 让授权后的
   // 工作单独成块, 比让 stream 一直长到下一个 inbound / hardTimer 更清晰。

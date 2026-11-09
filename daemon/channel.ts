@@ -185,13 +185,10 @@ const buildJudgePrompt = (cfg: Config, topicId: string, recent: any[], latest: s
   ].filter(Boolean).join("\n");
 };
 
-export const installChannelBridge = (client: WSClient, cfg: Config, log: Logger, bridge: MirrorBridge): void => {
-  const wsm = (client as any).wsManager;
-  if (!wsm || typeof wsm.handleFrame !== "function") {
-    log.warn("channel: wsManager.handleFrame unavailable; topic events will be ignored");
-    return;
-  }
-
+// 出站传输补丁必须早于 installResponseTracker 安装：tracker 会把当时的
+// client.sendMessage / replyStream 抓成 orig*，晚装就绕过了频道分支。
+export const installChannelTransport = (client: WSClient, log: Logger): void => {
+  log.info("channel transport installed");
   const sendPost = (topicId: string, content: string): Promise<any> =>
     call(client, CMD_POST, { topic_id: topicId, content })
       .then((body) => {
@@ -209,6 +206,52 @@ export const installChannelBridge = (client: WSClient, cfg: Config, log: Logger,
         return body;
       })
       .catch((e: Error) => { log.warn({ err: e.message, topicId: ctx.topicId }, "channel reply failed"); return undefined; });
+
+  // ── 出站：topic 不走群 chatid，改成频道帖子 / 评论 ──
+  const origSend = client.sendMessage.bind(client);
+  (client as any).sendMessage = (chatid: string, body: any): Promise<any> => {
+    // mirror 有时把 “chat:<topic>” 原样递进来；topic 集合里存的是裸 topic_id。
+    const bare = String(chatid).replace(/^(user|chat|group):/, "");
+    const topicId = topics.has(chatid) ? chatid : topics.has(bare) ? bare : "";
+    if (!topicId) return origSend(chatid, body);
+    // 频道没有模板卡片按钮；审批卡改投问话人的私聊，点完结论仍回到频道。
+    if (body?.msgtype === "template_card") {
+      const asker = lastAsker.get(topicId);
+      if (asker) {
+        log.info({ topicId, asker }, "channel: card routed to asker DM");
+        return origSend(asker, body);
+      }
+      log.warn({ topicId }, "channel: template_card dropped (no asker)");
+      return Promise.resolve(emptyFrame());
+    }
+    const content = body?.msgtype === "markdown" ? String(body.markdown?.content ?? "") : "";
+    if (!content) {
+      log.warn({ topicId, msgtype: body?.msgtype }, "channel: unsupported outbound");
+      return Promise.resolve(emptyFrame());
+    }
+    const postId = lastPost.get(topicId);
+    return postId
+      ? sendReply({ topicId, postId, asker: lastAsker.get(topicId) ?? "" }, content)
+      : sendPost(topicId, content);
+  };
+
+  // replyStream 的气泡只对群聊有意义；频道里把最终帧落成一条评论，中间帧丢掉。
+  const origStream = client.replyStream.bind(client);
+  (client as any).replyStream = (frame: any, streamId: string, content: string, finish = false, ...rest: any[]): Promise<any> => {
+    // 事件流里的 streamId 可能是 route eventId，而 fake frame 的 req_id 才是频道 msgid —— 两边都认。
+    const ctx = byStream.get(streamId) ?? byStream.get(String(frame?.headers?.req_id ?? ""));
+    if (!ctx) return origStream(frame, streamId, content, finish, ...rest);
+    if (!finish) return Promise.resolve(emptyFrame());
+    return sendReply(ctx, content);
+  };
+};
+
+export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger, bridge: MirrorBridge): void => {
+  const wsm = (client as any).wsManager;
+  if (!wsm || typeof wsm.handleFrame !== "function") {
+    log.warn("channel: wsManager.handleFrame unavailable; topic events will be ignored");
+    return;
+  }
 
   const dispatch = (topicId: string, postId: string, msgid: string, fromUser: string, text: string, at: number): void => {
     if (dispatched.has(postId)) return;
@@ -339,42 +382,10 @@ export const installChannelBridge = (client: WSClient, cfg: Config, log: Logger,
     }
     prev(frame);
   };
+};
 
-  // ── 出站：topic 不走群 chatid，改成频道帖子 / 评论 ──
-  const origSend = client.sendMessage.bind(client);
-  (client as any).sendMessage = (chatid: string, body: any): Promise<any> => {
-    // mirror 有时把 “chat:<topic>” 原样递进来；topic 集合里存的是裸 topic_id。
-    const bare = String(chatid).replace(/^(user|chat|group):/, "");
-    const topicId = topics.has(chatid) ? chatid : topics.has(bare) ? bare : "";
-    if (!topicId) return origSend(chatid, body);
-    // 频道没有模板卡片按钮；审批卡改投问话人的私聊，点完结论仍回到频道。
-    if (body?.msgtype === "template_card") {
-      const asker = lastAsker.get(topicId);
-      if (asker) {
-        log.info({ topicId, asker }, "channel: card routed to asker DM");
-        return origSend(asker, body);
-      }
-      log.warn({ topicId }, "channel: template_card dropped (no asker)");
-      return Promise.resolve(emptyFrame());
-    }
-    const content = body?.msgtype === "markdown" ? String(body.markdown?.content ?? "") : "";
-    if (!content) {
-      log.warn({ topicId, msgtype: body?.msgtype }, "channel: unsupported outbound");
-      return Promise.resolve(emptyFrame());
-    }
-    const postId = lastPost.get(topicId);
-    return postId
-      ? sendReply({ topicId, postId, asker: lastAsker.get(topicId) ?? "" }, content)
-      : sendPost(topicId, content);
-  };
-
-  // replyStream 的气泡只对群聊有意义；频道里把最终帧落成一条评论，中间帧丢掉。
-  const origStream = client.replyStream.bind(client);
-  (client as any).replyStream = (frame: any, streamId: string, content: string, finish = false, ...rest: any[]): Promise<any> => {
-    // 事件流里的 streamId 可能是 route eventId，而 fake frame 的 req_id 才是频道 msgid —— 两边都认。
-    const ctx = byStream.get(streamId) ?? byStream.get(String(frame?.headers?.req_id ?? ""));
-    if (!ctx) return origStream(frame, streamId, content, finish, ...rest);
-    if (!finish) return Promise.resolve(emptyFrame());
-    return sendReply(ctx, content);
-  };
+// 兼容入口：新代码应分别早装 transport、晚装 events。
+export const installChannelBridge = (client: WSClient, cfg: Config, log: Logger, bridge: MirrorBridge): void => {
+  installChannelTransport(client, log);
+  installChannelEvents(client, cfg, log, bridge);
 };
