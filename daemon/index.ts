@@ -2864,6 +2864,11 @@ const main = async (): Promise<void> => {
     const subjectOf = (w: WizardRecord | undefined): Subject => (w
       ? { parent: w.parent, description: w.description }
       : {});
+    /** 名字是地址, 而宪章是出生那一刻的快照: 改名 / 聊天补名之后, 还活着的会话
+     *  嘴里仍念旧名 (最坏是「(未命名)」)。这里把新宪章挂到它下一次注入上 —— 与
+     *  /clear、压缩后重挂同一个机制, 不额外发气泡。 */
+    const recharter = (targets: readonly string[]): void =>
+      targets.forEach((t) => { if (m.sessionInfo(t)?.sessionId) m.armCharter(t); });
 
     /** 一个聊天的工作区: 它名下各会话跑在哪个目录, 取最多的那个。聊天与工作区是
      *  一对多, 但绝大多数聊天只围着一个项目转。 */
@@ -2903,6 +2908,7 @@ const main = async (): Promise<void> => {
         // 群里不发气泡 (一次补名会命中十几个群, 那是刷屏), 但住在里面的 wizard
         // 得知道自己的地址变了 —— 它的 charter 里写的还是「(未命名)」。
         postRoster(base, [], { op: "chat", name });
+        recharter(m.chatTargets(base));
       }
       return named;
     };
@@ -3165,7 +3171,19 @@ const main = async (): Promise<void> => {
       wizards.all().forEach((w) => {
         const sid = m.sessionInfo(w.target)?.sessionId;
         const file = sid ? join(dir, `${sid}.md`) : "";
-        try { if (file && existsSync(file)) backfillCharter(w.target, readFileSync(file, "utf8"), statSync(file).mtimeMs); } catch { /* 补不上就等它重生 */ }
+        try {
+          if (!file || !existsSync(file)) return;
+          const text = readFileSync(file, "utf8");
+          backfillCharter(w.target, text, statSync(file).mtimeMs);
+          // 宪章是出生快照: 出生时聊天还没名字的会话, 一辈子自报「(未命名)」。
+          // 补过名 / 改过名的, 这里把新宪章挂到它下一次注入上。
+          const want = w.name || "(未命名)";
+          const had = /名字: \*\*`\.([^`]*)`\*\*/.exec(text)?.[1] ?? "";
+          if (had && had !== want) {
+            log.child({ mod: "wizard" }).info({ target: w.target, was: had, now: want }, "charter re-armed after identity change");
+            m.armCharter(w.target);
+          }
+        } catch { /* 补不上就等它重生 */ }
       });
     }, 15_000).unref();
 
@@ -3287,6 +3305,8 @@ const main = async (): Promise<void> => {
       if (asked || description) postRoster(baseOfKey(self), [self], before && before !== name
         ? { op: "renamed", name: `.${name}`, was: `.${before}`, ...(description ? { job: description } : {}) }
         : { op: "job", name: `.${name}`, job: description }, subjectOf(wizards.get(self)));
+      // 同上: 同群的知道新名字还不够, 它自己的宪章也写着旧名。
+      if (asked && name !== before) recharter([self]);
       json(res, 200, {
         ok: true,
         ...me,
