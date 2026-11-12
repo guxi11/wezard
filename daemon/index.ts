@@ -4370,7 +4370,12 @@ const main = async (): Promise<void> => {
     const quietRelays = loadJsonMap<{ target: string; at: number; base: string; reason?: string }>(
       join(cfg.daemon.stateDir, "quiet-relays.json"), undefined, { strict: true },
     );
-    void m.restored.then(() => Object.entries(quietRelays.all()).forEach(([turn, r]) => void relayUnlessQuiet(r.target, r.at, turn, r.base)));
+    // 只重放"还可能在等"的那几条: 已经判过等满没收口的 (reason 在) 与窗口早过去的, 重放只会
+    // 再烧一轮等待、再报一条 warn —— 2026-10-13 一次 receipt-regress 留下的 350 条死记录,
+    // 让每次 boot 都重刷 350 行同一条 warn, 而且它们永远不会再收口。
+    void m.restored.then(() => Object.entries(quietRelays.all())
+      .filter(([, r]) => !r.reason && Date.now() < r.at + TASK_QUIET_WAIT_MS)
+      .forEach(([turn, r]) => void relayUnlessQuiet(r.target, r.at, turn, r.base)));
     /** 到点起一个白板 wizard 执行这一枪, 跑完自动收掉。 */
     const runTaskInRunner = async (target: string, text: string, taskId: string, quiet: boolean, busy: boolean, guard: () => boolean): Promise<ScheduledResult> => {
       if (!guard()) return { ok: false, reason: "scheduled runner withdrawn" };
