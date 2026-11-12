@@ -644,7 +644,7 @@ export const createWezardServer = (): McpServer => {
       title: "Hand work over to a fresh context (yourself or another wizard)",
       description:
         "把工作压成简报并在当前轮结束后交给新上下文。没有待切换工作区时，守护进程在原 pane 清空上下文并接回简报；存在 pendingCwd 时，会启动新的 CLI 进程，在待切换目录中接回简报。\n" +
-        "**不传 `name` = 交接你自己**: 简报由你写在 `brief` 里, 守护进程等你这一轮说完、旧终句消费后再交接。调用 `set_workspace({cwd})` 后，先收尾当前任务，再调用自身 handoff 并在简报中写清剩余工作；不要要求用户手动发 `/new`，也不要声称旧进程已经切换 cwd。简报要写到零上下文的自己仅凭它就能接着干: 总目标 / 已完成与关键决策 / 当前状态 / 有序的下一步 / 关键文件与非显然的坑。\n" +
+        "**不传 `name` = 交接你自己**: 简报由你写在 `brief` 里, 守护进程给这一轮一个短收尾窗口, 到点即打断并交接 (欠着的回执会在新会话里逐笔续答, 不会丢)。调用 `set_workspace({cwd})` 后，先收尾当前任务，再调用自身 handoff 并在简报中写清剩余工作；不要要求用户手动发 `/new`，也不要声称旧进程已经切换 cwd。简报要写到零上下文的自己仅凭它就能接着干: 总目标 / 已完成与关键决策 / 当前状态 / 有序的下一步 / 关键文件与非显然的坑。\n" +
         "**传 `name` = 替那个 wizard 交接**: 守护进程让它自己写简报 (`focus` 指定要特别交代的点), 抓到后在原 pane 清空并贴回; 返回被带过去的那份简报。",
       inputSchema: currentAddressSchema({
         name: z.string().optional().describe("替谁交接 —— wizard 的名字 ('fix' / '.fix')。省略 = 你自己。"),

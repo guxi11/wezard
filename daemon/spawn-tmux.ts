@@ -1180,27 +1180,40 @@ const spawnTmuxInner = async ({ cfg, log, resumeSessionId, sessionId: freshSessi
   // One pane, one CLI process, verified up. `failure` = the CLI couldn't take
   // `flagModel`: it quit, or came up not knowing it.
   const launch = async (flagModel: string | undefined, retry = false): Promise<Launched> => {
-    const opened = await openPane();
-    if ("reason" in opened) return { ok: false, reason: opened.reason };
-    const { pane } = opened;
-    const fullCommand = commandFor(flagModel, retry, pane);
-    // PTY canonical input truncates long hook/TOML arguments at ~4 KiB.
-    // Send only a short script invocation through the interactive shell.
-    const script = backend.name === "codex" ? join(tmpdir(), `wezard-codex-${randomUUID()}.sh`) : undefined;
-    if (script) {
-      try { writeFileSync(script, `${fullCommand}\n`, { mode: 0o600, flag: "wx" }); }
-      catch (e) {
-        await runTmux(["kill-pane", "-t", pane]).catch(() => undefined);
-        return { ok: false, reason: `could not prepare Codex launch script: ${(e as Error).message}` };
+    let pane = "";
+    let line = "";
+    let script: string | undefined;
+    for (let attempt = 0; ; attempt++) {
+      const opened = await openPane();
+      if ("reason" in opened) return { ok: false, reason: opened.reason };
+      pane = opened.pane;
+      const fullCommand = commandFor(flagModel, retry, pane);
+      // PTY canonical input truncates long hook/TOML arguments at ~4 KiB.
+      // Send only a short script invocation through the interactive shell.
+      script = backend.name === "codex" ? join(tmpdir(), `wezard-codex-${randomUUID()}.sh`) : undefined;
+      if (script) {
+        try { writeFileSync(script, `${fullCommand}\n`, { mode: 0o600, flag: "wx" }); }
+        catch (e) {
+          await runTmux(["kill-pane", "-t", pane]).catch(() => undefined);
+          return { ok: false, reason: `could not prepare Codex launch script: ${(e as Error).message}` };
+        }
       }
-    }
-    const line = script ? `/bin/sh ${shQuote(script)}` : fullCommand;
-    const sent = await runTmux(["send-keys", "-t", pane, line, "Enter"]);
-    if (!sent.ok) {
+      // 赋给外层 line, 不在循环内 const 重声明: 遮蔽会让 break 后的
+      // waitForTuiReady 拿到 "" (重发启动行那一手就废了)。
+      line = script ? `/bin/sh ${shQuote(script)}` : fullCommand;
+      const sent = await runTmux(["send-keys", "-t", pane, line, "Enter"]);
+      if (sent.ok) break;
       if (script) try { unlinkSync(script); } catch { /* already removed */ }
       // Kill only this window/pane, never the shared session.
       await runTmux(["kill-pane", "-t", pane]);
-      return { ok: false, reason: `tmux send-keys failed: ${sent.stderr.trim() || sent.code}` };
+      // A timed-out send-keys means the tmux server wedged (2026-11-12: /new died
+      // outright on `tmux timeout after 10000ms`). The line may still land on this
+      // pane late, so never resend to it — the abandoned pane is left for the orphan
+      // sweep and the retry gets a whole fresh one.
+      if (!sent.timedOut || attempt >= 2)
+        return { ok: false, reason: `tmux send-keys failed: ${sent.stderr.trim() || sent.code}` };
+      log.warn({ pane, attempt: attempt + 1, stderr: sent.stderr.trim() }, "spawn-tmux: launch line send timed out (server wedged), retrying on a fresh pane");
+      await sleep(500 * (attempt + 1));
     }
     // Actively verify the TUI reached interactive state before returning.
     // claude does NOT create the transcript jsonl until it processes the first

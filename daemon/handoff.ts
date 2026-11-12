@@ -16,7 +16,9 @@
 // 每一步落盘, boot 时从断点接着做。
 //
 // 自我交接是「调用即受理」(2026-10-28 重构): 请求合理 (简报能生成) 就立刻返回, daemon 自己
-// 排期 —— pane 忙就排队等它这一轮说完 (无超时失败), 已有一场正在执行就排队到它之后再做一次,
+// 排期 —— pane 忙就先给这一轮一个短窗自然收口, 到点 Esc 打断直接交接 (2026-11-12: 回执本就
+// 跨交接有效 —— 欠账由路由表兜着、终句由 cut 扣着、闸内的注入等在新会话, 没必要等轮终),
+// 已有一场正在执行就排队到它之后再做一次,
 // 残余的失败记录不参与 self 的准入。人拿到的永远是「已受理」, 不是「这次交接在等什么/为什么
 // 失败」。交接别人仍走同步等待 + 失败记录准入 (调用方在场, 记录挡的是对半清会话的二次清空)。
 import type { Logger } from "pino";
@@ -125,8 +127,14 @@ export interface HandoffDeps {
   uncut: (target: string, events: readonly string[]) => void;
   log: Logger;
   store?: JsonMap<Pending>;
-  /** self 排队等待的节拍 (测试注入用): 每片等多久 / idle 判定的 ramp 与 confirm 次数。 */
-  selfWait?: { sliceMs?: number; rampMs?: number; confirm?: number };
+  /** self 等待的节拍 (测试注入用): 自然收口窗/打断后静置窗 / grace 每片等多久 / idle 判定的 ramp 与 confirm。 */
+  selfWait?: { sliceMs?: number; rampMs?: number; confirm?: number; graceMs?: number; settleMs?: number };
+  /** Esc 打断 target 在飞的那一轮 (与 stop_wizard 的那一下同源, 无 teardown)。没有它就退回
+   *  旧的排队语义 (等这一轮自然收口), 不打断。 */
+  interrupt?: (target: string) => Promise<{ ok: boolean; reason?: string }>;
+  /** 只看 pane 本身闲没闲 (不含「这一轮的事件账落没落定」)。打断之后用: 被切断的轮不会再有
+   *  终句, 事件账永远 pending, 带 isBusy 的等待会永远等下去。 */
+  paneIdle?: (target: string) => Promise<boolean>;
   /** 简报贴回成功后把它留档 (情景记忆): 新会话第一条消息之外, 简报原本无处可寻。 */
   archive?: (e: { target: string; mode: Pending["mode"]; at: number; sid: string; nextSid: string; brief: string }) => void;
 }
@@ -182,8 +190,9 @@ export const handoffAdmission = (p: Pending, now: number, liveSid: string): Admi
 };
 
 export interface Handoffs {
-  /** 自我交接: 调用即受理 —— 立刻返回 scheduled, daemon 排队等它这一轮说完再动手; 已有一场
-   *  在执行时排队到它之后 (queuedBehind)。不因 pane 忙、未落定事件或旧失败记录而拒绝。 */
+  /** 自我交接: 调用即受理 —— 立刻返回 scheduled, daemon 给在飞这一轮一个短窗收口, 到点 Esc
+   *  打断直接交接 (欠账/回执跨交接有效, 由路由表 + resumeOwed 兜着); 已有一场在执行时排队到
+   *  它之后 (queuedBehind)。不因 pane 忙、未落定事件或旧失败记录而拒绝。 */
   self: (target: string, brief: string) => { ok: boolean; reason?: string; queuedBehind?: boolean };
   /** 交接别人: 等到简报贴回新会话才返回。`extra.announce` = 重开时发「📂 当前项目」气泡。 */
   other: (target: string, focus: string, timeoutMs: number, extra?: { announce?: boolean }) => Promise<HandoffResult>;
@@ -260,6 +269,13 @@ const SELF_IDLE_MS = 10 * 60_000;
 // 「仍在队列」—— 排队等待不产生失败记录 (失败会反过来锁住后续, 正是这次重构拆掉的旧病)。
 const SELF_WAIT_SLICE_MS = 10 * 60_000;
 const SELF_QUEUE_CAP_MS = 6 * 60 * 60_000;
+// self 的「不再等」节拍 (2026-11-12): 在飞这一轮先给一个短窗自然收口 (常见: 调完 handoff
+// 收个尾, 几秒就完); 窗口用尽还忙就 Esc 打断直接交接。欠着的每笔不因打断失效 —— 路由表
+// 记的欠账在新会话由 resumeOwed 逐笔续答, 切断那一轮的终句由 cut/uncut 扣着, 交接闸内的
+// 注入也都在新会话里等。Esc 之后只等 pane 静置 (被切断的轮没有终句, 事件账不会落定)。
+const SELF_GRACE_MS = 45 * 1000;
+const SELF_GRACE_SLICE_MS = 10 * 1000;
+const SELF_SETTLE_MS = 60 * 1000;
 
 const briefPrompt = (focus?: string): string =>
   [
@@ -297,6 +313,9 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
   const nextAt = (p?: Pending): number => Math.max(Date.now(), (p?.at ?? 0) + 1);
   const selfSliceMs = deps.selfWait?.sliceMs ?? SELF_WAIT_SLICE_MS;
   const selfIdleOpts: IdleOpts = { rampMs: deps.selfWait?.rampMs, confirm: deps.selfWait?.confirm };
+  // grace 探测不带 ramp: 这里的「忙」含事件账 (roundPending), 没有「输入还没开始处理」的
+  // 误判窗 —— 检闲要快, 一个本来就闲的交接不能白等 ramp 那 20s。
+  const graceIdleOpts: IdleOpts = { rampMs: 0, confirm: deps.selfWait?.confirm ?? 2 };
   /** 已受理的排队请求开工: 前一场已了结 (或已失败 —— self 不被失败记录挡) 时, 顶掉旧记录开一场新的。
    *  `evenWhileResuming`: 简报已贴回、还在续答欠账的那场也照样接 (剩下的欠账由新一场的续答兜着)。 */
   const drainQueued = (target: string, evenWhileResuming = false): void => {
@@ -385,16 +404,47 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
           if (!r.ok) return fail(p, 502, `summary inject failed: ${r.reason}`);
           return step(saved({ ...p, stage: "briefing" }));
         }
-        // 自我交接是排队等: 唯一等的是它正在说的这一轮 (不在轮中间清空), daemon 内部等,
-        // 调用方早已拿到受理。没有「超时即失败」—— SELF_QUEUE_CAP_MS 只把日志升到 warn,
-        // 记录始终是「仍在队列」, 不产生会反过来锁住后续的失败记录。
+        // 自我交接: 先给在飞这一轮一个短窗自然收口 (常见: 它调完 handoff 收个尾, 几秒就完);
+        // 窗口用尽还忙就 Esc 打断直接交接, 不再排它身后。打断不亏欠任何一笔: 它欠着的每笔由
+        // 路由表兜着 (新会话里 resumeOwed 逐笔续答), 切断那一轮的终句由 cut/uncut 扣着, 闸内的
+        // 注入也都等在新会话。等待期间来了新简报: 就地接替, 不另起一场。
+        const graceMs = deps.selfWait?.graceMs ?? SELF_GRACE_MS;
+        const graceSlice = Math.max(1, deps.selfWait?.sliceMs ?? SELF_GRACE_SLICE_MS);
+        const adopt = (): Pending | undefined => {
+          const fresh = deps.store?.get(p.target);
+          return fresh && fresh.at !== p.at && fresh.mode === "self" && fresh.stage === "waiting" ? fresh : undefined;
+        };
+        for (let waited = 0; waited < graceMs; ) {
+          let w: IdleResult;
+          try { w = await idle(p, Math.min(graceSlice, graceMs - waited), graceIdleOpts); }
+          catch (e) { deps.log.warn({ mod: "handoff", target: p.target, err: (e as Error).message }, "handoff: 排队探测失败, 继续等"); await sleep(5000); continue; }
+          const fresh = adopt();
+          if (fresh) { p = fresh; waited = 0; continue; }
+          if (w.idle) return step({ ...p, stage: "restarting" });
+          waited += graceSlice;
+          deps.log.info({ mod: "handoff", target: p.target, waitedMs: waited, graceMs }, "handoff: 收口窗口内仍在忙");
+        }
+        // 窗口用尽: 打断在飞这一轮, 只看 pane 静没静下来 —— 被切断的轮不会再有终句,
+        // 事件账永远 pending, 不能再拿 isBusy 等 (那会等成死队)。
+        const fresh = adopt();
+        if (fresh) p = fresh;
+        if (deps.interrupt) {
+          const esc = await deps.interrupt(p.target);
+          deps.log.info({ mod: "handoff", target: p.target, ok: esc.ok, reason: esc.reason }, "handoff: 收口窗口用尽, 打断在飞这一轮直接交接");
+          const settle = await waitForIdle(p.target, deps.paneIdle ?? deps.isBusy, deps.selfWait?.settleMs ?? SELF_SETTLE_MS, () => false, { rampMs: 0, confirm: 2 });
+          const latest = adopt();
+          if (latest) p = latest;
+          if (settle.idle) return step({ ...p, stage: "restarting" });
+          deps.log.warn({ mod: "handoff", target: p.target, reason: settle.reason }, "handoff: 打断后仍未静下来, 退回排队等待");
+        }
+        // 没有 interrupt 能力 / Esc 没能让它静下来: 维持旧的排队语义兜底 (等这一轮自然收口,
+        // 无超时失败; SELF_QUEUE_CAP_MS 只把日志升到 warn, 不产生失败记录)。
         for (let waited = 0; ; ) {
           let w: IdleResult;
           try { w = await idle(p, selfSliceMs, selfIdleOpts); }
           catch (e) { deps.log.warn({ mod: "handoff", target: p.target, err: (e as Error).message }, "handoff: 排队探测失败, 继续等"); await sleep(5000); continue; }
-          const fresh = deps.store?.get(p.target);
-          // 等待中来了新简报: 就地接替 (换简报/代数/轮次), 同一场继续等, 不另起一场。
-          if (fresh && fresh.at !== p.at && fresh.mode === "self" && fresh.stage === "waiting") { p = fresh; waited = 0; continue; }
+          const fresh = adopt();
+          if (fresh) { p = fresh; waited = 0; continue; }
           if (w.idle) return step({ ...p, stage: "restarting" });
           waited += selfSliceMs;
           deps.log[waited >= SELF_QUEUE_CAP_MS ? "warn" : "info"]({ mod: "handoff", target: p.target, waitedMs: waited }, "handoff: 仍在队列 (等当前这一轮收口; 是排队, 不是欠账)");
@@ -527,7 +577,7 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
       waitingFor: p.failure
         ? `失败 (${p.failure.status}: ${p.failure.reason}); 不阻断后续 self 交接`
         : p.stage === "waiting"
-          ? p.mode === "self" ? "排队等当前这一轮收口 (无超时失败; 是排队, 不是欠账)" : "等目标闲下来 (交接别人; 同步等待)"
+          ? p.mode === "self" ? "收口窗口内等当前这一轮, 到点打断直接交接" : "等目标闲下来 (交接别人; 同步等待)"
           : p.stage === "briefing" ? "等它写完简报"
           : p.stage === "restarting" ? "正在清空 / 重开会话"
           : p.stage === "restarted" ? "简报贴回中"

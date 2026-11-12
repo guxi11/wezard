@@ -998,6 +998,10 @@ const main = async (): Promise<void> => {
         return roundPending(round.map((e) => events.get(e.id) ?? e));
       },
       sessionId: (t) => m.sessionInfo(t)?.sessionId ?? "",
+      // 收口窗口用尽后打断在飞那一轮 (Esc, 无 teardown): 打断不产生欠账 —— 路由表 +
+      // resumeOwed 在新会话逐笔续答, 机制上回执本就跨交接有效。
+      interrupt: (t) => m.interruptPane(t),
+      paneIdle: (t) => m.idleNow(t),
       restart: (t, p, submitted) => clearForHandoff(t, p, submitted),
       // 简报是新会话的开场白, 但它不挂任何信封 (服务不着哪一笔) —— 交接前欠着的那几笔由
       // 「继续 <event>」逐笔续答 (见 resume), 别把简报那一轮的回复当成回执。
@@ -2685,7 +2689,7 @@ const main = async (): Promise<void> => {
             ...(workspaceSwitch ? {
               pendingCwd: cwd.pendingCwd,
               workspaceStatus: "queued_not_applied",
-              message: `handoff 已排队；当前任务收尾后，daemon 将启动新 CLI 并在 ${cwd.pendingCwd} 中继续简报。旧进程不会原地切换目录。`,
+              message: `handoff 已受理；daemon 给当前任务一个短收尾窗口后即启动新 CLI 并在 ${cwd.pendingCwd} 中继续简报 (必要时会打断当前轮)。旧进程不会原地切换目录。`,
             } : {}),
           } }
         : { status: 409, body: { ok: false, reason: r.reason } };

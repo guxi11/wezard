@@ -2188,7 +2188,7 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
     else await sleep(Math.max(0, POST_PASTE_SETTLE_FALLBACK_MS - (Date.now() - pastedAt)));
   }
 
-  const sendEnter = async (): Promise<{ ok: boolean; reason?: string }> => {
+  const sendEnter = async (): Promise<{ ok: boolean; reason?: string; transport?: boolean }> => {
     // A picker can open after the pre-paste gate, especially during a delayed
     // render. Check again before every Enter; askq text entry keeps its bypass.
     if (process.env.WEZARD_MODAL_GUARD !== "0" && !bypassModalGuard) {
@@ -2209,7 +2209,13 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
       log.info({ target, eventId, pasteToEnterMs: enterAt - pastedAt, pasteSeen, boxTrusted, freshSpawn }, "mirror inject: first Enter");
     }
     const e = await runTmux(["send-keys", "-t", target, "Enter"]);
-    return e.ok ? { ok: true } : { ok: false, reason: `tmux send-keys failed: ${e.stderr.slice(-200)}` };
+    if (e.ok) return { ok: true };
+    // tmux 卡住 (timeout) 时这记回车可能已被服务端收下、只是迟到落地 —— 与「提交未证实」
+    // 同路处理 (证人/框核验决定补不补), 不能立刻判不确定把整条注入打成 ✗ (2026-11-12:
+    // wedged server 一口气打死了 /new 和一批注入)。其他失败 (pane 没了等) 维持立即返回。
+    return e.timedOut
+      ? { ok: false, transport: true, reason: `tmux send-keys timed out: ${e.stderr.slice(-200)}` }
+      : { ok: false, reason: `tmux send-keys failed: ${e.stderr.slice(-200)}` };
   };
   const cleared = async (): Promise<boolean> => {
     const box = await readInputBox(target);
@@ -2271,7 +2277,14 @@ const injectViaTmuxText = async (target: string, text: string, log: Logger, fres
       log.warn({ target, tailFp, attempt: i + 1 }, "mirror inject: 回车后输入框未清空, 再补一次");
     }
     const e = await sendEnter();
-    if (!e.ok) return e;
+    if (!e.ok) {
+      if (!e.transport) return e;
+      // Enter 超时 (tmux wedged): 可能迟到落地。迟到窗口内只认证据; 没证据就继续循环 ——
+      // 下一轮先核实框里仍是同一段文本再补回车 (与未证实提交同一条防重复约束)。
+      log.warn({ target, tailFp, attempt: i + 1, reason: e.reason }, "mirror inject: Enter 超时, 先等迟到证据再决定补不补");
+      if (await lateEvidence(LATE_LAND_MS)) return { ok: true };
+      continue;
+    }
     if (await waitForSubmit(CLEARED_TIMEOUT_MS)) return { ok: true };
     if (requireEventEvidence && await cleared()) {
       if (await lateEvidence(LATE_LAND_MS)) return { ok: true };
