@@ -20,11 +20,18 @@ export interface JsonMap<T> {
   all: () => Record<string, T>;
 }
 
+export interface JsonMapOptions {
+  strict?: boolean;
+  /** 落盘后整串超过这么多字节就调 onLarge —— 整文件重写的库长到几十兆时, 调用方要能看见。 */
+  warnBytes?: number;
+  onLarge?: (bytes: number) => void;
+}
+
 /** `gc` runs just before each write, letting a store expire its own rows. */
 export const loadJsonMap = <T>(
   filePath: string,
   gc?: (map: Record<string, T>) => Record<string, T>,
-  opts: { strict?: boolean } = {},
+  opts: JsonMapOptions = {},
 ): JsonMap<T> => {
   const abs = expandHome(filePath);
   let map: Record<string, T> = {};
@@ -35,13 +42,17 @@ export const loadJsonMap = <T>(
   }
   if (opts.strict && (!map || typeof map !== "object" || Array.isArray(map))) throw new Error("invalid keyed JSON store");
   let failed = false;
+  const noteSize = (text: string): void => {
+    if (opts.onLarge && opts.warnBytes !== undefined && text.length > opts.warnBytes) opts.onLarge(text.length);
+  };
   const persist = (next: Record<string, T>): void => {
     if (gc) next = gc(next);
+    const text = JSON.stringify(next, null, 2);
     if (opts.strict) {
       if (failed) throw new Error("strict store write previously failed; reload required");
       try {
         const tmp = `${abs}.${randomUUID()}.tmp`;
-        writeFileSync(tmp, JSON.stringify(next, null, 2), { mode: 0o600 });
+        writeFileSync(tmp, text, { mode: 0o600 });
         const fd = openSync(tmp, "r");
         try { fsyncSync(fd); } finally { closeSync(fd); }
         renameSync(tmp, abs);
@@ -49,16 +60,23 @@ export const loadJsonMap = <T>(
         try { fsyncSync(dir); } finally { closeSync(dir); }
         map = next;
       } catch (e) { failed = true; throw e; }
+      noteSize(text);
       return;
     }
     map = next;
-    try { writeFileSync(abs, JSON.stringify(map, null, 2), "utf8"); } catch { /* 存档丢了也不该拖垮会话 */ }
+    try { writeFileSync(abs, text, "utf8"); } catch { return; /* 存档丢了也不该拖垮会话 */ }
+    noteSize(text);
   };
+  /** 同一个值重写一遍没有任何意义, 而每次重写都是整文件 fsync + rename。 */
+  const same = (a: T | undefined, b: T): boolean => JSON.stringify(a) === JSON.stringify(b);
   return {
     get: (k) => map[k],
-    set: (k, v) => { persist({ ...map, [k]: v }); return v; },
-    drop: (k) => { const { [k]: _gone, ...rest } = map; persist(rest); },
-    merge: (rows) => { persist({ ...map, ...rows }); },
+    set: (k, v) => { if (!(k in map) || !same(map[k], v)) persist({ ...map, [k]: v }); return v; },
+    drop: (k) => { if (!(k in map)) return; const { [k]: _gone, ...rest } = map; persist(rest); },
+    merge: (rows) => {
+      const changed = Object.entries(rows).filter(([k, v]) => !(k in map) || !same(map[k], v));
+      if (changed.length) persist({ ...map, ...Object.fromEntries(changed) });
+    },
     all: () => ({ ...map }),
   };
 };

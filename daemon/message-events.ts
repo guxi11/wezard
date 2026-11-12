@@ -83,7 +83,7 @@ export interface MessageEvent extends MessageInput {
   turnClosedAt?: number;
   releasedAt?: number;
   releaseReason?: string;
-  releaseSource?: "manual" | "deadline" | "pane-missing";
+  releaseSource?: "manual" | "deadline" | "pane-missing" | "probe-exhausted";
   probeAttempts?: number;
   turn?: string;
   finalized?: boolean;
@@ -131,6 +131,10 @@ export const gcEvents = (now: number, retain: (e: MessageEvent) => boolean = () 
     if (retain(x) || !settled(x) || !terminal(x.execution) || at === undefined || now - at < TOMB_AFTER_MS) return [[id, x]];
     return [[id, entomb({ ...x, execution: x.execution }, at)]];
   }));
+/** 重投造出来的「续办载体」(追问续答 / 闲置追问): 它们只承载一次追问, 了结后没有对账价值 ——
+ *  留着就是每次落盘都重写几十兆 (2026-11 事故: 12058 个已了结载体常驻 ~94MB)。 */
+export const isRecoveryCarrier = (e: MessageEvent): boolean =>
+  (!!e.serves && e.id.startsWith(`route:${e.serves}:resume`)) || e.id.startsWith("idle-question:");
 export interface DeliveryInput {
   transfer?: { id: string; standalone: boolean };
   coverage?: { context: string; facts: string[] };
@@ -186,8 +190,12 @@ export interface MessageAdapters {
   /** 回执 / 派活排着却被扣着超过 HOLD_LOG_MS (ready=false / injectable=false / 退避 / 探测位被占):
    *  报一次带原因的日志 —— 扣得没声是这条路最难查的样子。原因变了或扣满 HOLD_RELOG_MS 再报。 */
   held?: (event: MessageEvent, why: string, forMs: number) => void;
+  /** 事件库整串超过 warnBytes 时回调 (异常膨胀), bytes = 落盘串长, liveCount = 活行数。 */
+  storeLarge?: (bytes: number, liveCount: number) => void;
   error: (error: unknown) => void;
 }
+/** 同一件的事件探针连续失败这么多次就收手: 退避重试只是把同一句失败原因再写一遍。 */
+export const PROBE_LIMIT = 30;
 const HOLD_LOG_MS = 30_000;
 const HOLD_RELOG_MS = 5 * 60_000;
 const canonical = (x: unknown): unknown => Array.isArray(x) ? x.map(canonical)
@@ -437,7 +445,9 @@ const coverageOk = (c: NonNullable<DeliveryInput["coverage"]>): boolean => !!c &
   && Array.isArray(c.facts) && c.facts.every((f) => typeof f === "string");
 
 export const createMessageEvents = (file: string, io: MessageAdapters) => {
-  const db = loadJsonMap<Row>(file, (rows) => gcEvents(Date.now(), io.retain)(rows), { strict: true });
+  const db = loadJsonMap<Row>(file, (rows) => gcEvents(Date.now(), io.retain)(rows), {
+    strict: true, warnBytes: 32 * 1024 * 1024, onLarge: (bytes) => io.storeLarge?.(bytes, liveRows().length),
+  });
   const outbox = loadJsonMap<FinalDelivery>(`${file}.finals`, undefined, { strict: true });
   Object.entries(db.all()).forEach(([id, e]) => {
     if (e && isTomb(e)) {
@@ -998,7 +1008,23 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
           const current = live(e.id);
           if (!stopped && current && !["complete", "canceled"].includes(current.execution)) {
             const probeAttempts = (current.probeAttempts ?? 0) + 1;
-            patch(e.id, { probeAttempts, retryAt: backoff(probeAttempts), reason: appendReason(current.reason, why(error)) });
+            // 探针连续失败到上限 = 这只 pane 已经问不出话: 再退避重试只是把同一条失败原因
+            // 再写一遍 (库里最长的 reason 就是这么长出来的), 该收成终态了。
+            if (probeAttempts >= PROBE_LIMIT) {
+              if (current.execution === "queued" && current.exposure === "none") {
+                if (receiptFacts(current).length) holdReceipt(current, "transport-exhausted", `undeliverable: pane probe failed ${probeAttempts}×`);
+                else cancel((x) => x.id === e.id, `undeliverable: pane probe failed ${probeAttempts} times; automatic retry stopped`);
+              } else if (["awaiting-result", "uncertain"].includes(current.execution)) {
+                patch(e.id, { probeAttempts, retryAt: undefined, execution: "uncertain",
+                  releasedAt: current.releasedAt ?? Date.now(), releaseSource: "probe-exhausted",
+                  releaseReason: `pane probe failed ${probeAttempts} times; automatic retry stopped`,
+                  reason: appendReason(current.reason, `undeliverable: pane probe failed ${probeAttempts}×; automatic retry stopped`) });
+              } else {
+                patch(e.id, { probeAttempts, reason: appendReason(current.reason, why(error)) });
+              }
+            } else {
+              patch(e.id, { probeAttempts, retryAt: backoff(probeAttempts), reason: appendReason(current.reason, why(error)) });
+            }
           }
           io.error(error);
         };
@@ -1016,6 +1042,8 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
           if (replaced && !e.supersededBy) patch(e.id, { supersededBy: currentSession ?? (currentTranscript ? `transcript:${currentTranscript}` : "replacement-session-unavailable"),
             reason: appendReason(e.reason, "session replaced; old execution remains uncertain pending transcript reconciliation") });
           void observe(e).then(() => {
+            // 探测成功就把失败计数清零: 只写一次, 不是每秒一次。
+            if (live(e.id)?.probeAttempts) patch(e.id, { probeAttempts: 0 });
             if (!stopped && e.deadline <= Date.now() && live(e.id)!.execution === "awaiting-result")
               patch(e.id, { execution: "uncertain", reason: "deadline exceeded; result/physical completion not confirmed" });
           }).catch(failed);
@@ -1041,6 +1069,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
         if (!injectable(e)) { hold(e, `injectable=false: ${queue(e.id)?.holds.join("; ") || "无效 / 过期"}`); return; }
         void bounded(e.id, () => io.ready(e)).then((ready) => {
           const current = live(e.id)!;
+          if (current.probeAttempts) patch(e.id, { probeAttempts: 0 });
           if (ready && injectable(current)) void inject(e.id, io.resource(current.target));
           else if (current.execution === "queued") hold(current, ready ? "injectable=false (ready 之后)" : "ready=false (前置未落定 / owner 未判闲)");
         }).catch(failed);

@@ -31,7 +31,7 @@ import { installInboundRouter } from "./inbound.js";
 import { installChannelTransport, installChannelEvents, readChannel } from "./channel.js";
 import { loadMirrorStore } from "./mirror-store.js";
 import { cancelOps, eventRef, finalKind, isEventRef, makeOutcome, openRouter, ops, pickPair, type Delivery, type EventId, type Op, type Receiver, type Route } from "./router.js";
-import { createMessageEvents, messageId, finalId, reportSource, receiptCoverage, receiptFacts, correctionTaskEvent, canSettleFinal, eventDeliveryAllowed, peerEventPrerequisitesReady, resultCorrectionInputs, settleAddressedResults, settleUnaddressedResult, servedChatResultFinalAllowed, settleServedChatResult, type EventAuthority, type MessageAdapters, type MessageEvent, type MessageFinal, type MessageInput } from "./message-events.js";
+import { isRecoveryCarrier, createMessageEvents, messageId, finalId, reportSource, receiptCoverage, receiptFacts, correctionTaskEvent, canSettleFinal, eventDeliveryAllowed, peerEventPrerequisitesReady, resultCorrectionInputs, settleAddressedResults, settleUnaddressedResult, servedChatResultFinalAllowed, settleServedChatResult, type EventAuthority, type MessageAdapters, type MessageEvent, type MessageFinal, type MessageInput } from "./message-events.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { backendFor, bindStartupNotice, prewarmShell, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { bindCardChannel, installApprovalEventListener, makeApproveHandler, requestConfirm } from "./approval.js";
@@ -269,7 +269,15 @@ const main = async (): Promise<void> => {
     const latest = serves ? events.latestTransfer(serves) : undefined;
     return !latest || latest.id === e.id || latest.at < e.at;
   };
+  /** 事件库异常膨胀的告警闸: 10 分钟只报一次, 落盘是每秒都在发生的事。 */
+  let storeLargeNotedAt = 0;
   const events = createMessageEvents(join(cfg.daemon.stateDir, "message-events.json"), {
+    storeLarge: (bytes, liveCount) => {
+      const now = Date.now();
+      if (now - storeLargeNotedAt < 10 * 60_000) return;
+      storeLargeNotedAt = now;
+      log.warn({ mod: "message-events", mb: Math.round(bytes / 1048576), live: liveCount }, "message-events 存储超过 32MB");
+    },
     resource: (target) => bridge.sessionInfo(target)?.tmuxPane || target,
     transcript: (target) => bridge.inputSessionInfo(target)?.jsonlPath ?? bridge.sessionInfo(target)?.jsonlPath,
     sessionId: (target) => bridge.inputSessionInfo(target)?.sessionId,
@@ -297,6 +305,8 @@ const main = async (): Promise<void> => {
       return task ? router.get(task)?.event ?? task : undefined;
     },
     retain: (e) => {
+      // 续办载体不是任务输入: 它的 route 还没收口也一样没有对账价值 (事故里 12058 个已了结载体常驻 ~94MB)。
+      if (isRecoveryCarrier(e)) return false;
       const required = (id: string): boolean => {
         const row = router.get(id);
         return !!row && (["held", "open", "need", "error"].includes(row.status)
@@ -2251,7 +2261,7 @@ const main = async (): Promise<void> => {
           return (await injectResume(to, row.event, Date.now())).ok;
         },
         nameOf: displayName,
-        store: loadJsonMap<{ asks: number }>(join(cfg.daemon.stateDir, "idle-nudges.json")),
+        store: loadJsonMap<{ asks: number; cycles?: number }>(join(cfg.daemon.stateDir, "idle-nudges.json")),
         log: log.child({ mod: "idle-nudge" }),
         sweep: async () => { await sweepOnce(); },
       });
