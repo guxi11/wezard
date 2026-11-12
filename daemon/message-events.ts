@@ -197,7 +197,38 @@ export const messageId = (bot: string, chat: string, id: string): string => `h${
 export const finalId = (event: string, channel: string, revision: string): string => `f${digest([event, channel, revision])}`;
 const clone = <T>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
 const backoff = (n: number): number => Date.now() + Math.min(60_000, 1000 * 2 ** Math.min(n, 6));
-const why = (e: unknown): string => e instanceof Error ? e.message : typeof e === "object" ? JSON.stringify(e) : String(e);
+/** 一条原因最多留这么多字。整库是整文件重写的, 无限拼接会把 message-events.json 撑到百兆。 */
+export const REASON_MAX = 1000;
+const REASON_ADD_MAX = 500;
+const REASON_WHY_MAX = 500;
+const clip = (s: string, max: number): string => s.length <= max ? s : `${s.slice(0, Math.max(0, max - 1))}…`;
+/** 超长时保留开头 300 + 末尾 (max − 340): 首条原因与最新一条都还在, 中间折叠成省略标记。 */
+const fold = (s: string, max: number): string => {
+  if (s.length <= max) return s;
+  const head = Math.min(300, max);
+  let omitted = s.length - max;
+  for (;;) {
+    const marker = ` …[略 ${omitted} 字]… `;
+    const tail = Math.max(0, max - head - marker.length);
+    const next = s.length - head - tail;
+    if (next === omitted) return s.slice(0, head) + marker + s.slice(s.length - tail);
+    omitted = next;
+  }
+};
+/** 追加一条投递/探测失败原因: 同一条重复折叠成 (×N), 结果封顶 REASON_MAX。 */
+export const appendReason = (prev: string | undefined, add: string, max = REASON_MAX): string => {
+  const one = clip(add, REASON_ADD_MAX);
+  if (!prev) return fold(one, max);
+  const n = /\(×([0-9]+)\)$/.exec(prev);
+  const repeats = n ? Number(n[1]) : undefined;
+  const base = repeats === undefined ? prev : prev.slice(0, prev.length - ` (×${repeats})`.length);
+  const merged = base === one ? `${one} (×${(repeats ?? 1) + 1})`
+    : base.endsWith(one) ? `${base} (×2)`
+    : `${prev}; ${one}`;
+  return fold(merged, max);
+};
+/** 异常 → 一行原因 (封顶 500 字): 模板句被重复拼进来时, 原文本身也可能很长。 */
+export const why = (e: unknown): string => clip(e instanceof Error ? e.message : typeof e === "object" ? JSON.stringify(e) : String(e), REASON_WHY_MAX);
 // A negative transport ACK proves non-delivery; a timeout or disconnected socket does not.
 export const rejectedAck = (e: unknown): boolean => !!e && typeof e === "object"
   && typeof (e as { errcode?: unknown }).errcode === "number" && (e as { errcode: number }).errcode !== 0
@@ -467,8 +498,10 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
   const probeTargets = new Map<string, symbol>();
   /** 排队的回执 / 派活从哪一刻起被扣、此刻为什么、上次报到哪 (只在内存: 日志与 status 用)。 */
   const holding = new Map<string, { since: number; why: string; told?: { why: string; at: number } }>();
-  const hold = (e: MessageEvent, why: string): void => {
+  const hold = (e: MessageEvent, cause: string): void => {
     const now = Date.now();
+    // 扣留原因只进内存与日志, 但它是 status 的一行: 超长的 held 链一样要封顶。
+    const why = clip(cause, 300);
     const h = { since: now, ...holding.get(e.id), why };
     const due = now - h.since >= HOLD_LOG_MS && (!h.told || h.told.why !== why || now - h.told.at >= HOLD_RELOG_MS);
     holding.set(e.id, due ? { ...h, told: { why, at: now } } : h);
@@ -536,9 +569,12 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     const best = whole.find((d) => d.parts.every((p) => p.state !== "failed")) ?? whole[0];
     return best ? [best] : rows;
   };
+  const HOLD_ADVICE = "; receipt retained; POST /message-events/release with id and reason after reconciliation";
   const holdReceipt = (e: MessageEvent, cause: NonNullable<MessageEvent["deliveryHold"]>, reason: string): void => {
+    // 扣留原因可能被反复重写: 先摘掉上一次的处置尾注, 只留原因本身再折叠, 免得尾注无限叠长。
+    const prev = e.reason?.endsWith(HOLD_ADVICE) ? e.reason.slice(0, -HOLD_ADVICE.length) : e.reason;
     patch(e.id, { execution: e.exposure === "none" ? "queued" : "uncertain", deliveryHold: cause,
-      reason: `${reason}; receipt retained; POST /message-events/release with id and reason after reconciliation`, retryAt: undefined });
+      reason: `${appendReason(prev, reason)}${HOLD_ADVICE}`, retryAt: undefined });
   };
   const cancel = (select: (e: MessageEvent) => boolean, reason = "canceled by owner"): number => {
     const rows = liveRows().filter((e) => !["complete", "canceled"].includes(e.execution) && select(e));
@@ -755,7 +791,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
       if (latest.exposure === "consumed") { if (!latest.canceled) io.committed(latest); return; }
       if (latest.deliveryHold) {
         if (r.ok || r.uncertain || latest.exposure !== "none") patch(id, { execution: "uncertain",
-          exposure: r.ok ? "submitted" : latest.exposure, reason: `${latest.reason}; late transport outcome requires reconciliation` });
+          exposure: r.ok ? "submitted" : latest.exposure, reason: appendReason(latest.reason, "late transport outcome requires reconciliation") });
         return;
       }
       if (r.ok && !r.uncertain) {
@@ -899,7 +935,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
     rows.forEach((e) => patch(e.id, { execution: "uncertain", releasedAt: at, releaseSource: "pane-missing",
       releaseReason: `pane/session disappeared (${evidence}); old execution remains uncertain and will not be replayed`,
       supersededBy: `pane-missing:${evidence}`,
-      reason: `${e.reason ? `${e.reason}; ` : ""}pane/session disappeared; queue slot released, old execution remains uncertain` }));
+      reason: appendReason(e.reason, "pane/session disappeared; queue slot released, old execution remains uncertain") }));
     void pump();
     return rows.map((e) => e.id);
   };
@@ -940,7 +976,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
           patch(e.id, { execution: "uncertain", releasedAt: Date.now(),
             releaseSource: "deadline",
             releaseReason: "event deadline elapsed; uncertainty retained and automatic retry withheld",
-            reason: `${e.reason ? `${e.reason}; ` : ""}event deadline elapsed; queue released with uncertain delivery` });
+            reason: appendReason(e.reason, "event deadline elapsed; queue released with uncertain delivery") });
           return;
         }
         // 人话的 ready 不碰 pane (只看交接闸), 不必占探测位: 否则同 pane 上一条 awaiting-result
@@ -962,7 +998,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
           const current = live(e.id);
           if (!stopped && current && !["complete", "canceled"].includes(current.execution)) {
             const probeAttempts = (current.probeAttempts ?? 0) + 1;
-            patch(e.id, { probeAttempts, retryAt: backoff(probeAttempts), reason: `${current.reason ? `${current.reason}; ` : ""}${why(error)}` });
+            patch(e.id, { probeAttempts, retryAt: backoff(probeAttempts), reason: appendReason(current.reason, why(error)) });
           }
           io.error(error);
         };
@@ -978,7 +1014,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
           const replaced = e.exposure !== "none" && (e.sessionId
             ? e.sessionId !== currentSession : !!e.transcript && e.transcript !== currentTranscript);
           if (replaced && !e.supersededBy) patch(e.id, { supersededBy: currentSession ?? (currentTranscript ? `transcript:${currentTranscript}` : "replacement-session-unavailable"),
-            reason: `${e.reason ? `${e.reason}; ` : ""}session replaced; old execution remains uncertain pending transcript reconciliation` });
+            reason: appendReason(e.reason, "session replaced; old execution remains uncertain pending transcript reconciliation") });
           void observe(e).then(() => {
             if (!stopped && e.deadline <= Date.now() && live(e.id)!.execution === "awaiting-result")
               patch(e.id, { execution: "uncertain", reason: "deadline exceeded; result/physical completion not confirmed" });
@@ -1055,7 +1091,7 @@ export const createMessageEvents = (file: string, io: MessageAdapters) => {
         turnClosedAt: e.turnClosedAt ?? Date.now(),
         reason: "input turn ended without a final assistant answer; automatic retry withheld" });
     },
-    released: (id: string) => { const e = live(id); if (e?.canceled) patch(id, { execution: "canceled", reason: `${e.reason ?? "canceled"}; pane idle confirmed` }); },
+    released: (id: string) => { const e = live(id); if (e?.canceled) patch(id, { execution: "canceled", reason: appendReason(e.reason ?? "canceled", "pane idle confirmed") }); },
     stopped: (target: string, reason: string) => liveRows().filter((e) => e.target === target && e.canceled).forEach((e) => patch(e.id, { execution: "canceled", reason })),
     submission: async (id: string): Promise<EventTransport> => {
       for (;;) {
