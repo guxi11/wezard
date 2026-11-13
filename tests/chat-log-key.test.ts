@@ -18,7 +18,8 @@ assert.equal(peerEnv.chatKey, "chat:wrNEW");
 assert.equal(peerEnv.private, false);
 assert.equal(parseEnvelope(renderPeerEnvelope(".a", "modeck"))?.chatKey, undefined, "没给 key 不凭空造一个 (老形状)");
 assert.equal(parseEnvelope(renderPeerEnvelope(".a"))?.chat, "", "私聊不带频道");
-const rcptEnv = parseEnvelope(renderReceiptEnvelope(".b", "modeck", { job: "j", done: 1, total: 2 }, "done", "e1", undefined, "chat:wrNEW"))!;
+// renderReceiptEnvelope 现签名: (from, chat, status, turn, route, chatKey)。
+const rcptEnv = parseEnvelope(renderReceiptEnvelope(".b", "modeck", "done", "e1", undefined, "chat:wrNEW"))!;
 assert.equal(rcptEnv.receipt, true);
 assert.equal(rcptEnv.chatKey, "chat:wrNEW");
 const tail = renderTail(renderReminder({ wezard: "hint" }, ["旁注"]), peer);
@@ -70,13 +71,18 @@ const has = (text: string, mark: string): boolean => text.includes(mark);
 const newView = read({ chat: "modeck", chatKey: NEW });
 assert.ok(has(newView, "new-peer") && has(newView, "new-human"), "新群自己的轮都在");
 assert.ok(!has(newView, "old-human"), "旧群无信封的人话按 home key 隔离, 不再串进同名新群");
-assert.ok(has(newView, "old-peer") && has(newView, "old-legacy"), "无 key 的旧轮回落按名 (LEGACY 不全漏)");
+// chatHit 的口径: 查询带 key 只认同 key 的公开行 —— 无 key 的历史信封不猜作同名聊天
+// (chat-log.ts 注释明说), 它们在无 key 查询 / 旧群自己的 key 查询里仍读得出来。
+assert.ok(!has(newView, "old-peer") && !has(newView, "old-legacy"), "无 key 的旧轮不猜作同名新群 (key 严格匹配)");
 assert.ok(!has(newView, "old-private"), "私聊不进群轴");
 
 // 查旧群 (key=OLD): 旧 transcript 完整读得出来 —— 这就是「旧 transcript 仍能读出来」的证据;
 // 同名的新群轮进不来 (key 不同压过同名): 修掉的正是这一半。
 const oldView = read({ chat: "modeck", chatKey: OLD });
-assert.ok(has(oldView, "old-peer") && has(oldView, "old-human") && has(oldView, "old-legacy"), "旧群三种形状都读得出来");
+// home 人话 (无信封 → home key) 与 LEGACY 措辞 (解析不出信封 → home key) 都读得出来;
+// 带 peer 信封但无 chat-key 的旧轮不进 key 视图 (只猜 key 会串群), 在下面的按名查询里读。
+assert.ok(has(oldView, "old-human") && has(oldView, "old-legacy"), "旧群 home/legacy 形状都读得出来");
+assert.ok(!has(oldView, "old-peer"), "无 key 的旧 peer 轮不进 key 视图, 由按名查询兜底");
 assert.ok(!has(oldView, "new-peer") && !has(oldView, "new-human"), "同名但 key 不同的新群轮不再归给旧群");
 
 // 只按名 (没有 key 的调用方): 行为与从前一致。

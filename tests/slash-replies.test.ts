@@ -76,12 +76,16 @@ const run = async (command: string): Promise<string> => {
   assert.equal(replies.length, before + 1, `${command} has one result`);
   return replies.at(-1)!;
 };
-assert.equal(await run("/pwd"), "[wezard] 📂 当前项目: `/repo/current`\n下次切换: `/repo/next`\n(默认: `/repo/default`)");
+// /pwd 现在只回 runningCwd 一行 (老版带「📂 当前项目」多行回执)。
+assert.equal(await run("/pwd"), "/repo/current");
 unconfirmed = true;
-assert.match(await run("/pwd"), /⚠️ 这是默认兜底目录, 还没人确认过$/);
-assert.equal(await run("/new codex gpt-6.1-sol"), "[wezard] /new failed: spawn denied");
-assert.equal(spawned[0]![2], "codex");
-assert.equal(spawned[0]![3].model, "gpt-6.1-sol");
+// cwdUnconfirmed 的⚠️提示已随 set_workspace 问句下线 (v3 设计 §2), /pwd 保持一行路径。
+assert.equal(await run("/pwd"), "/repo/current");
+// newSession(who, name, {silent, model}): CLI 后端由全局 defaultCli 决定, 不再是位置参数;
+// 认不出的 token (如旧写法的 "codex") 一律当正文, 模型槽只吃别名/slug。
+assert.equal(await run("/new gpt-6.1-sol"), "[wezard] /new failed: spawn denied");
+assert.equal(spawned[0]![2].model, "gpt-6.1-sol");
+assert.equal(spawned[0]![2].silent, false);
 assert.equal(await run("/name"), "[wezard] 本聊天还没起名。");
 for (const command of ["/peers", "/chats"]) {
   const text = await run(command);
