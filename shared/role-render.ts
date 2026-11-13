@@ -9,7 +9,7 @@ import { renderCutMark, renderTurnGroup, splitReminders, escHtml, hashStr, tagSi
 import { isTurn, staleAt, turnDone } from "./chat-view.js";
 import type { DetailRecord, MarkDetailRecord, TurnDetailRecord } from "./detail-store.js";
 import { channelOf, doneAt, injectTurnsOf, teammateOf, unwrapMates, type Directory, type Msg } from "./role-view.js";
-import { nameHead, WIZARD_MARK } from "./session-label.js";
+import { nameHead } from "./session-label.js";
 
 export interface MsgFragment {
   /** `<turnId>:in` / `<turnId>:out` / `m:<markId>`。 */
@@ -135,7 +135,7 @@ const receiptChip = (r: TurnDetailRecord, records: readonly DetailRecord[], dir:
   if (!rc || f?.kind !== "peer") return "";
   const st = f.status ?? "done";
   const d = f.event ? dispatchOf(records, f.event) : undefined;
-  const what = `.${dir.nameOf(r.target ?? "")} 把 ${f.event ? `${f.event} ` : ""}的结论交回给 .${dir.nameOf(rc.target ?? "")}`;
+  const what = `${dir.nameOf(r.target ?? "")} 把 ${f.event ? `${f.event} ` : ""}的结论交回给 ${dir.nameOf(rc.target ?? "")}`;
   const [tag, attrs] = f.event && d
     ? ["button", `${gotoAttrs(f.event, d)} title="${escHtml(`${what} · 点击跳到派活那句`)}"`]
     : ["span", ` title="${escHtml(`${what} · 派活那句已不在记录里`)}"`];
@@ -180,17 +180,17 @@ const handoffDeco = (r: TurnDetailRecord, records: readonly DetailRecord[], dir:
   return {
     who: (name) => {
       const id = dir.resolve(name);
-      // 名字 span 走 CSS ::before 画记号 (与 chat.js 的 .nm 同一套), 文本保持裸名。
+      // rolepage 是系统面 (设计稿 §1.5): 只写裸名 —— 不画点也不画记号 (CSS ::before 方案已删)。
       return id
         ? `<span class="ho-who">${nameHead(`<span class="av">${escHtml(dir.labelOf(id))}</span>`, `<span class="nm wizard">${escHtml(dir.nameOf(id))}</span>`)}</span>`
-        : `<span class="ho-nm">${WIZARD_MARK} ${escHtml(name)}</span>`;
+        : `<span class="ho-nm">${escHtml(name)}</span>`;
     },
     pub: pubOf,
-    role: (name) => ((id) => (id ? ` data-hrole="${escHtml(id)}" title="${escHtml(`以 ${WIZARD_MARK} ${dir.nameOf(id)} 为 viewpoint 看它的往来`)}"` : ""))(dir.resolve(name)),
+    role: (name) => ((id) => (id ? ` data-hrole="${escHtml(id)}" title="${escHtml(`以 ${dir.nameOf(id)} 为 viewpoint 看它的往来`)}"` : ""))(dir.resolve(name)),
     plan: () => (r.target ? ` data-hplan="${escHtml(r.target)}"` : ""),
     attrs: (h) => {
       const id = dir.resolve(h.name);
-      return id ? `${pairAttrs(r, id, h, landed(h), pubOf(h) ?? h.public)} title="${escHtml(`打开 ${WIZARD_MARK} ${dir.nameOf(r.target ?? "")} 与 ${WIZARD_MARK} ${dir.nameOf(id)} 的往来, 定位到这一句`)}"` : "";
+      return id ? `${pairAttrs(r, id, h, landed(h), pubOf(h) ?? h.public)} title="${escHtml(`打开 ${dir.nameOf(r.target ?? "")} 与 ${dir.nameOf(id)} 的往来, 定位到这一句`)}"` : "";
     },
     status: (h0) => {
       const h = { ...h0, turn: turnOf(h0) };

@@ -52,7 +52,7 @@ export interface WizardRecord {
   role?: string;
   /** 身份种类; 缺省按 target 推 (`defaultKindOf`)。 */
   kind?: WizardKind;
-  /** 全局唯一的名字, 即它的地址 `🧙‍♂️ name`。"" 只出现在还没被 claim 过的老记录上 ——
+  /** 全局唯一的名字, 即它的地址 (人点名写 `.name`, 人面气泡头显示 `🧙‍♂️ name`; 系统面与参数层是裸名)。"" 只出现在还没被 claim 过的老记录上 ——
    *  第一次被任何地方问到名字时按「默认会话取聊天名, 分身取 slot id」补上并去重。 */
   name: string;
   /** 一句话职责 —— 别的 wizard 靠它决定该不该找你。 */
@@ -381,7 +381,7 @@ export const ancestorsOf = (all: readonly WizardRecord[], target: string): strin
 const bullet = (xs: readonly string[]): string => xs.map((x) => `- ${x}`).join("\n");
 
 export interface WizardBrief {
-  /** 全局唯一的名字 —— 同时就是地址 (显示为 `🧙‍♂️ name`)。 */
+  /** 全局唯一的名字 —— 同时就是地址 (tell_peer 的 name 入参; wizard 之间与 rolepage 显示就是它, 人面气泡头带 🧙‍♂️)。 */
   name: string;
   /** 别人叫得到它的字符串 (tell_peer 的 `name` 入参), 即名字本身。 */
   address: string;
@@ -427,7 +427,8 @@ export interface CharterArgs {
   topOnly: boolean;
 }
 
-export const addr = (b: WizardBrief): string => `${WIZARD_MARK} ${b.address || b.name || "?"}`;
+// 系统面 (设计稿 §1.5) 的称呼: 裸名 —— roster/charter 里不画记号; 记号只在人面 (企微气泡头/审批卡)。
+export const addr = (b: WizardBrief): string => b.address || b.name || "?";
 
 const nameLine = (b: WizardBrief): string =>
   `\`${addr(b)}\`${b.description ? ` · ${b.description}` : ""}${b.cwd ? ` · ${b.cwd}` : ""}`;
@@ -682,7 +683,7 @@ export const renderLeadRules = (pointer = false): string[] => [
   "## 我是这件活的 lead",
   "派你的 (管家或上级 lead) 把**整件**活交给了你, 你对结果负责并维护自己的计划。直属 parent 是管理归属；横向沟通不改变家谱:",
   bullet([
-    "**对上**: 回复必须明确标出接收者 (`@🧙‍♂️ name RESULT: …`), 一条消息可分段回复多个接收者; 做成了什么 · commit · `ARTIFACT` 指针, **单列「取舍 / 遗留」一段**。需要对方补信息或递归拆活时用 `tell_peer({kind:\"ask\"|\"task\"})`。你不对人说话, 由派你的那个代你对人交代",
+    "**对上**: 回复必须明确标出接收者 (`@name RESULT: …`), 一条消息可分段回复多个接收者; 做成了什么 · commit · `ARTIFACT` 指针, **单列「取舍 / 遗留」一段**。需要对方补信息或递归拆活时用 `tell_peer({kind:\"ask\"|\"task\"})`。你不对人说话, 由派你的那个代你对人交代",
     "**对下**: 只管理自己直属创建的 wizard；其他节点由其 parent 管理。需要横向协作时直接沟通，之后回到主流程向自己的上级交付",
     ...(pointer ? ["组队打法 (coder / 白板 reviewer / 何时收工) 随派活信封带"] : []),
   ]),
@@ -709,11 +710,11 @@ export const renderLead = (): string[] => [...renderLeadRules(), ...renderLeadPl
  *  这一节讲的是谁该替谁开口。 */
 const renderTopOnly = (): string[] => [
   "## 本群开着顶层模式",
-  "人在这个群里只和**顶层 wizard** 打交道 —— 群管家, 以及人自己 `🧙‍♂️ name` 点名的那个。顶层 wizard 派出去之后, wizard 之间的一切往来都是私聊, 只在 rolepage。",
+  "人在这个群里只和**顶层 wizard** 打交道 —— 群管家, 以及人自己 `.name` 点名的那个。顶层 wizard 派出去之后, wizard 之间的一切往来都是私聊, 只在 rolepage。",
   bullet([
     "守护进程强制: `tell_peer` / `delegate` 的 `public:true` 不起作用, 一律私聊; 普通私聊 fyi 不授权对人通知; 这一轮不是在服务人问的事的 wizard 调 `notify` 进本群会被退回",
     "这一轮在服务**人问的事** (人直接对你说的, 或那件事派出去的活回来了) → 你是顶层: 子 wizard 的结论回到你这儿, 你用自己的话向人解释 —— 讲结论、取舍和要人拍板的, 不转述过程、不贴它们的原话; 不轮询或提前汇总, 但长等待、阻塞可按已知实据用 `notify` 报进展。收到子 wizard 的完成 fyi 时, 立即向原群 `notify` 结论与仍 pending / 尚无正式回执的状态; fyi 本身不代表 ledger done",
-    "这一轮是同伴私聊派来的活 → 你不是顶层: 不对人说话, 结论用 `@🧙‍♂️ name RESULT:` 交给对应接收者; 需要对方补信息或协作时用 `tell_peer({kind:\"ask\"})`; 由派你的那个代你向人交代",
+    "这一轮是同伴私聊派来的活 → 你不是顶层: 不对人说话, 结论用 `@name RESULT:` 交给对应接收者; 需要对方补信息或协作时用 `tell_peer({kind:\"ask\"})`; 由派你的那个代你向人交代",
   ]),
 ];
 
@@ -760,8 +761,8 @@ const renderStewardRules = (a: CharterArgs): string[] => {
       "lead 的 RESULT → 向人交代结论, 带上「取舍 / 遗留」",
       "lead 的计划与交付由 lead 负责维护；你收到结果后向人交代结论，有问题就把具体反馈交回 lead",
       a.topOnly
-        ? "**人只看得见你**: 转交那一轮回一句 `已转给 🧙‍♂️ 它` 加它在办什么; 回执那一轮就是给人的交代 —— 用自己的话讲结论、你据此做的决定、要人拍板的, 不贴原话、不复述过程"
-        : "**人看得见群里的消息**: 转交那一轮只回 `已转给 🧙‍♂️ 它`; 回执那一轮只说人还不知道的 (新决定、要人拍板的), 群里说过的不转述, 没有就一句话收住; lead 的活是私聊, 结论你自己讲",
+        ? "**人只看得见你**: 转交那一轮回一句 `已转给 .它` 加它在办什么; 回执那一轮就是给人的交代 —— 用自己的话讲结论、你据此做的决定、要人拍板的, 不贴原话、不复述过程"
+        : "**人看得见群里的消息**: 转交那一轮只回 `已转给 .它`; 回执那一轮只说人还不知道的 (新决定、要人拍板的), 群里说过的不转述, 没有就一句话收住; lead 的活是私聊, 结论你自己讲",
     ]),
     "",
     bullet([
@@ -783,7 +784,7 @@ export const renderCharter = (a: CharterArgs): string => {
     "",
     "## 我是谁",
     bullet([
-      `名字: **\`${WIZARD_MARK} ${me || "(未命名)"}\`** —— 全机唯一, 就是你的地址`,
+      `名字: **\`${me || "(未命名)"}\`** —— 全机唯一, 就是你的地址 (人点你写作 \`.name\`; 你给人的回复头自动带 \`${WIZARD_MARK} 名字：\`)`,
       `home 群: ${a.chat ? `**${a.chat}** ` : ""}\`${a.principal}\``,
       `工作区: \`${a.self.cwd || "(未设置)"}\``,
       `职责: ${a.self.description || "(未写 —— 用 `wizard_identity` 补一句, 别人靠它决定该不该找你)"}`,

@@ -29,8 +29,10 @@ export const labelFor = (sessionId: string): string => {
 };
 
 // ── wizard name lexicon ────────────────────────────────────────────────
-// A wizard is addressed by its GLOBAL name, written `🧙‍♂️ name` (v3 起; 旧表示
-// `.name` 在读入侧长期并存 —— 存量 transcript / 引用气泡全带着它)。One rule for
+// 面 × 表示 (设计稿 §1.5 矩阵): 人面 (企微气泡头/审批卡) 写 `🧙‍♂️ name`; 系统面
+// (roster/read_chat/charter/notices/rolepage) 只写裸 name; 人点名单写作 `.name`。
+// 读入侧长期双态 —— `.name` 与 `🧙‍♂️ name` 都认, 存量 transcript / 引用气泡全带着旧表示。
+// One rule for
 // what counts as a name token, shared by everything that reads them out of
 // prose: the inbound router (FIRST match = who gets the message) and mention
 // annotation (the REST). Two readers of the same text must not disagree on
@@ -69,9 +71,10 @@ export const stripSigil = (raw: string | undefined): string =>
 // Daemon-internal target keys are `user:xxx[#k]` / `chat:xxx[#k]`: the chat a
 // wizard was BORN in (its home) plus an internal slot id. The slot id is NOT
 // the wizard's name — the name is global, lives in the wizard registry, and
-// is what every human/wizard-facing surface shows (`.name`). A rename never
-// rekeys a session. Every bubble carries `.name` (the chat's default wizard
-// at home excepted, see isHost); the emoji avatar is rolepage-only.
+// is what every surface shows: 人面气泡头带 `🧙‍♂️ name`, 系统面与参数层是裸名,
+// 人点名写 `.name` (双态解析)。A rename never
+// rekeys a session. Every WeCom bubble carries the `🧙‍♂️ name：` head; the emoji
+// avatar is rolepage-only.
 
 /** `#tag` suffix of a target key, "" when untagged. */
 export const tagOfKey = (target: string | undefined): string => {
@@ -226,7 +229,9 @@ export const resolveTagTarget = (name: string, from: string): string | undefined
 export const tagUrlOf = (target: string): string | undefined => linker?.urlOf(target);
 export const targetOfTagUrl = (url: string): string | undefined => linker?.targetOfUrl?.(url);
 
-/** target 的对外名字: 名册里的全局名, 名册没绑定时退回 slot id。 */
+/** target 的对外名字: 名册里的全局名, 名册没绑定时退回 slot id。
+ *  系统面 (roster/read_chat/charter/notices/rolepage) 的称呼一律从这里取 —— 裸名,
+ *  不带任何记号; 记号只在人面原子 (tagHead 一族) 里出现, 调用方不许自己拼。 */
 export const displayName = (target: string | undefined): string =>
   target ? linker?.nameOf(target) || tagOfKey(target) : "";
 
@@ -283,10 +288,13 @@ export const unlinkTags = (text: string): string => text.replace(LINKED_RE, "$1"
 
 // ── 发言头 ─────────────────────────────────────────────────────────────
 // 谁说的、说给谁, 群气泡 (markdown 链接)、read_chat (纯文本)、rolepage (HTML) 写成同一个结构:
-// `🧙‍♂️ a：` / `🧙‍♂️ a： 🧙‍♂️ b` —— 发话方后跟冒号, 对象紧跟其后 (名字前的 🧙‍♂️ 已是 wizard
-// 的记号, 不再加 @; 旧 `.a:` 形态在读入侧并存)。人名 (无记号) 同一结构。
-// 下面三个原子就是这份结构的全部; 各处只决定两边的名字各自怎么画 (裸名 / 链接 / 按钮)。它们原样送进
+// 企微群气泡 (人面) 是 `🧙‍♂️ a：` / `🧙‍♂️ a： 🧙‍♂️ b` —— 发话方后跟冒号, 对象紧跟其后
+// (名字前的 🧙‍♂️ 是 wizard 记号, 不再加 @; 旧 `.a:` 形态在读入侧并存)。人名 (无记号) 同一结构。
+// read_chat 与 rolepage 把同一结构里的名字画成裸名 (§1.5) —— 差异只在两边名字怎么画,
+// 结构本身不变。下面三个原子就是这份结构的全部; 它们原样送进
 // 浏览器 (SPEAKER_KIT, 由 chat-render 拼进 /chat/app.js), 所以只许是不引用模块里任何别的东西的纯函数。
+// **两种输出**: 以下 tagHead → withTagHeader 一族只给人面 (企微气泡头/审批卡) 用, 一律带记号;
+// 系统面一律 displayName / stripSigil 的裸名 —— 调用方不许自己拼记号。
 /** 头像 + 名字, 中间不留空格。 */
 export const nameHead = (label: string, name: string): string => `${label}${name}`;
 /** 发话方 + 冒号 (全角, 与 `🧙‍♂️ name：` 一致; 反解 HEADER_RE 认半/全角)。 */
@@ -296,7 +304,8 @@ export const speakerHead = (me: string, to?: string): string => (to ? `${said(me
 /** 送进浏览器的那几个原子: 名字 → 源码。 */
 export const SPEAKER_KIT: Readonly<Record<string, (...a: never[]) => string>> = { nameHead, said, speakerHead };
 
-/** 头的裸形态 `🧙‍♂️ name`; 名字都拿不到时为空 (不写头)。 */
+/** 头的裸形态 `🧙‍♂️ name` —— **人面专用** (企微气泡头/审批卡徽标), 系统面用
+ *  displayName / stripSigil 的裸名 (§1.5 矩阵); 名字都拿不到时为空 (不写头)。 */
 export const tagHead = (target: string | undefined): string => {
   const name = displayName(target);
   return name ? `${WIZARD_MARK} ${name}` : "";

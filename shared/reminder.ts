@@ -17,6 +17,7 @@
 // mention 的 names, hint 的 role。
 
 import type { Asker } from "./detail-store.js";
+import { stripSigil } from "./session-label.js";
 
 export type Attrs = Readonly<Record<string, string>>;
 export interface Reminder {
@@ -246,6 +247,7 @@ export const reminderLabel = (r: Reminder): { label: string; machine?: boolean }
   const w = r.attrs.wezard ?? "";
   if (w === "message-event") return { label: "msg", machine: true };
   const env = envelopeOf(r);
-  if (env) return { label: env.receipt ? `回执 · ${env.from} · ${env.status ?? "done"}` : `envelope · ${env.from}` };
+  // rolepage 是系统面 (§1.5): 折叠 tag 里只写裸名 —— 协议值 `from=".x"` 的点在这里剥掉。
+  if (env) return { label: env.receipt ? `回执 · ${stripSigil(env.from)} · ${env.status ?? "done"}` : `envelope · ${stripSigil(env.from)}` };
   return { label: w || r.attrs["data-role"] || "reminder" };
 };

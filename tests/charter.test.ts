@@ -51,9 +51,11 @@ assert.ok(hasHeading(lead, "## 我是这件活的 lead"));
 assert.ok(!hasHeading(lead, "## 我是这个群的管家 (L1)"));
 assert.ok(!hasHeading(lead, "## 本群开着顶层模式"));
 const renamed = renderCharter({ ...base, self: { ...base.self, address: "renamed" } });
-// v3: 名字行的表示是 `🧙‍♂️ name` (addr 带 wizard 记号), 不再是 `.name`。
-assert.ok(renamed.includes("**`🧙‍♂️ renamed`**"));
-assert.ok(!renamed.includes("**`🧙‍♂️ worker`**"));
+// v3 面 × 表示 (设计稿 §1.5): charter 是系统面 —— 名字行是裸 name, 无点无记号;
+// 人点名的写法 (`.name`) 与人面气泡头 (🧙‍♂️) 在名字行里只作说明文字出现。
+assert.ok(renamed.includes("**`renamed`**"));
 assert.ok(!renamed.includes("**`.renamed`**"));
+assert.ok(!renamed.includes("🧙‍♂️ renamed"));
+assert.ok(renamed.includes("人点你写作 `.name`"));
 
 console.log("Charter structure and conditional guidance passed");

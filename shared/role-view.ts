@@ -16,7 +16,7 @@
 // 认不出是谁的发话方 / 听话方都归它; agent team 队友的话以 `<teammate-message>` 写进 transcript 的 user 行, 长得和人在
 // 终端里打的字一样, 但不是人说的 —— 归给系统, 同样不能切成视角。人不用 `user:<id>`: 那正是
 // 「与这个人的单聊」里默认 wizard 的 target, 两者字面相同, 同一条消息会变成自己对自己说。
-import { baseOfKey, labelFor, stripSigil, tagOfKey, WIZARD_MARK } from "./session-label.js";
+import { baseOfKey, labelFor, stripSigil, tagOfKey } from "./session-label.js";
 import { isGhostTurn, isMark, isPost, isTurn, staleAt, summarizeTag, type TagSummary } from "./chat-view.js";
 import { stripReminders } from "./reminder.js";
 import type { Asker, DetailRecord, MarkDetailRecord, PostDetailRecord, TurnDetailRecord } from "./detail-store.js";
@@ -357,12 +357,13 @@ const glance = (ms: readonly Msg[], who: (m: Msg) => string = () => ""): Glance 
 const glanceOr = (ms: readonly Msg[], who?: (m: Msg) => string): Glance =>
   glance(ms, who) ?? { preview: "", lastTs: ms[ms.length - 1]?.ts ?? 0 };
 
-/** 一行预览前的说话人: 这一项的对端不是恰好一个 (不限 / 多个) 时才写「.x: 」, 视角自己说的不写。
+/** 一行预览前的说话人: 这一项的对端不是恰好一个 (不限 / 多个) 时才写「x： 」, 视角自己说的不写。
+ *  rolepage 是系统面 (设计稿 §1.5) —— 说话人一律裸名, 不带点也不带记号。
  *  peers 就是打开这一项时 talkOf 的入参 (整个公开频道 = 不限) —— 会话项、子项、关系图卡片都从这里拿。 */
 const speakerPrefix = (dir: Directory, viewer: string, peers?: readonly string[]): ((m: Msg) => string) | undefined =>
   peers?.length === 1
     ? undefined
-    : (m) => (m.from === viewer ? "" : `${dir.isWizard(m.from) ? WIZARD_MARK + " " : ""}${dir.nameOf(m.from)}： `);
+    : (m) => (m.from === viewer ? "" : `${dir.nameOf(m.from)}： `);
 
 /** 一个 talkOf 窗口在列表里的那一行: 最近一句 (按上面的规则带说话人) 与时刻。 */
 export const glanceOfTalk = (msgs: readonly Msg[], viewer: string, dir: Directory, who: string, peers: readonly string[], chat?: string): Glance => {

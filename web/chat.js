@@ -147,8 +147,8 @@
     var k = names[id] || {}, n = nodeOf(id);
     return k.label || (n && n.label) || ({ human: '👤', task: '⏰', system: '🧙‍♂️' })[kindOf(id)] || '🧙';
   };
-  // wizard 的地址记号 🧙‍♂️ (v3 起代替 `.name` 的点) —— 人与定时任务没有地址, 不画。
-  var nameOf = function (id) { return (kindOf(id) === 'wizard' ? '\u{1F9D9}\u200D\u2642\uFE0F ' : '') + roleName(id); };
+  // rolepage 是系统面 (设计稿 §1.5): 名字一律裸名 —— 不画点也不画记号, 记号只在企微气泡头。
+  var nameOf = function (id) { return roleName(id); };
   var canSwitch = function (id) { return !!id && kindOf(id) !== 'task' && kindOf(id) !== 'system'; };
   // 头像与名字就是进入那个 role 视角的入口 —— 侧栏项、会话头、消息行同一种读法。
   // 是 <span> 不是 <button>: 侧栏里它嵌在整行那颗按钮里。

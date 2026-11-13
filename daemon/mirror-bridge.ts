@@ -63,7 +63,7 @@ import { getDetail, knowsToolUse, recordTool, recordToolResult, recordMark, reco
 import type { Asker } from "../shared/detail-store.js";
 import type { CtxCut, TurnFrom, TurnUsage } from "./detail.js";
 import { errText } from "./last-response.js";
-import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, windowLabel, withTagHeader, withLinkedTagHeader, chatHead, headed, tagBadge, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey, sameBot, WIZARD_MARK } from "../shared/session-label.js";
+import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, windowLabel, withTagHeader, withLinkedTagHeader, chatHead, headed, tagBadge, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey, sameBot } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { readHookMode } from "../shared/hook-mode.js";
 import { isWxFrame } from "../shared/wx-text.js";
@@ -6432,10 +6432,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // A 群的化身, 不串 B 群的); 身份在本聊天没有化身时回落锚点化身 (旧世界的跨群寻址)。
     const named = ((t) => (t && sameBot(self, t) ? t : undefined))(manifestationOf(wizardStore(), raw, baseOfKey(self)));
     if (named && all.includes(named)) return hit(named);
-    if (named) return { ok: false, reason: `wizard '${WIZARD_MARK} ${raw}' exists but its session is not running — respawn it (spawn_wizard) or pick another` };
+    if (named) return { ok: false, reason: `wizard '${raw}' exists but its session is not running — respawn it (spawn_wizard) or pick another` };
     return {
       ok: false,
-      reason: `no wizard named '${WIZARD_MARK} ${raw}' — wizard_roster lists every name`,
+      reason: `no wizard named '${raw}' — wizard_roster lists every name`,
       candidates: all.map((k) => peerAddress(cfg, k)),
     };
   };

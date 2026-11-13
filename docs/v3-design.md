@@ -26,7 +26,7 @@
 
 ### 1.2 改成什么
 
-- **渲染** (给人看): `tagHead` → `🧙‍♂️ name` (去掉点号); 气泡头 `🧙‍♂️ name：` (全角冒号, 与人的原话一致); 公开 peer 轮 `🧙‍♂️ me： 🧙‍♂️ you`; 审批卡徽标、roster、charter、read_chat、rolepage、help 文案全部跟进。**参数层不变**: `tell_peer({name:"fix"})` 仍收裸名, 只有显示层带 🧙‍♂️ (`mcp/tools.ts` name 参数描述补一句)。
+- **渲染** (给人看): `tagHead` → `🧙‍♂️ name` (去掉点号); 气泡头 `🧙‍♂️ name：` (全角冒号, 与人的原话一致); 公开 peer 轮 `🧙‍♂️ me： 🧙‍♂️ you`; 审批卡徽标、help 文案跟进。**参数层不变**: `tell_peer({name:"fix"})` 仍收裸名 (`mcp/tools.ts` name 参数描述补一句)。**〔2026-11-13 人口径修正〕** roster / charter / read_chat / rolepage 等 wizard 之间与 rolepage 的面**不**带记号, 只写裸 name —— 表示范围以 §1.5 矩阵为准, 不按本条字面铺开。
 - **反解** (机器读回): `HEADER_RE` 扩为**双态** —— 新形态 `🧙‍♂️ name：` / `[🧙‍♂️ name](url)：` 与旧形态 `.name:` / `[.name](url):` **长期并存**。`parseTagHeader` / `rawTagHeader` 双态剥离。🧙‍♂️ 是 ZWJ 序列 (U+1F9D9 U+200D U+2642 U+FE0F, 4 code points / 12 UTF-8 字节), 正则按 codepoint 序列字面量写, 不许 `.` 通配。
 - **管家报名**: 废除 isHost 的「头不写」豁免 —— 管家在自己群里回复同样带 `🧙‍♂️ name：` (人的原话明确要求)。isHost 保留给 voiceOf (替谁说话) 的语义判定, 只是不再压掉头的渲染。微信通道 (`isWxChat`, 链接降文字) 的降级逻辑照旧。
 - **quote 直接回答语义**: 「直接回答某个 wizard」= quote 它的气泡 (反解出的 `tag` 即投递目标), 这在「引用即路由」上已存在; 变化在**默认路由** —— 不带 quote、不带行首点名的裸消息, 不再落「本聊天默认 wizard」, 改落「本聊天当前管家」(§3/§5)。行首 `.name` / `🧙‍♂️ name` 点名保留为与 quote 等价的显式寻址 (待人拍板 ①)。
@@ -49,6 +49,25 @@
 - 企微 markdown 链接文本里的 emoji (`[🧙‍♂️ fix](url)`) 需实测渲染; 微信通道降文字路径同步实测。
 - `parseEnvelope` / `withMsg` / `REMINDER_KINDS` / `TAIL_ORDER` **零改动** —— 表示层与信封层的分界就是本节的设计约束: **文本前缀只承担两件事** (quote 携带的路由信息、行首显式寻址), 其余一切机器判定 (轮次归属、回执、去向、提交见证) 仍只认 envelope 属性。
 - 无数据迁移; 一版切表示 + 双态解析即完成。
+
+### 1.5 面 × 表示矩阵 (2026-11-13 人口径修正 —— 记号只属于人面)
+
+P1 曾把 🧙‍♂️ 记号铺到全部显示面; 人随后拍板修正: wizard 名字的表示按**场合**分开, 不再一律带前缀。**唯一**保留记号的显示面是 wizard 对人的企微气泡头 (表明身份); rolepage 与 wizard 之间的一切只出现裸 name; 人点名单写作 `.name`。判断不再散落各渲染点 —— 全按下表执行, 之后所有阶段 (P2+) 照此表走:
+
+| 面 | 场景 | 表示 | 落点 (渲染/解析函数) |
+|---|---|---|---|
+| 人面 · 企微气泡头 | wizard→人回复 (含公开 peer 轮 `🧙‍♂️ me： 🧙‍♂️ 它`) | `🧙‍♂️ name：` —— 唯一带记号的显示面 | session-label `tagHead/linkedTagHead/chatHead/ownHead/withLinkedTagHeader/withTagHeader` + `shared/message-footer.ts withMessageFooter` (mirror-bridge 全部 replyStream 推点) |
+| 人面 · 审批卡 | 卡片标题徽标 | `🧙‍♂️ name `(假设 ①) | session-label `tagBadge` (approval.ts) |
+| 人面 · help 文案 | 教人怎么点名 | 人**写作 `.name`**; 头显示 `🧙‍♂️ name：` | inbound `renderHelp` |
+| 人面 · 正文提及 | wizard 给人的回复里提同伴 | 写 `.name`(假设 ③) —— 人可照样点回去, linkTags 双态挂链 | MENTION_RE / `linkTags` |
+| 解析 · 双态 | 行首寻址 / 引用气泡 / 提及往返 / 工具参数 | `.name` 与 `🧙‍♂️ name` 长期并存; `stripSigil` 单一收口剥成裸名 | NAME_TOKEN/`nameTokenRe`、HEADER_RE/`parseTagHeader`/`rawTagHeader`、MENTION_RE/LINKED_RE、`stripSigil` |
+| 解析 · 回执署名 | @接收者 RESULT | **新写法裸 `@name RESULT:`**; `@.name` / `@🧙‍♂️ name` 存量照认 (三态) | peers `addressedResults`; prose 出处在 renderPeerEnvelope / renderLeadRules / renderTopOnly / 409 文案 |
+| 系统面 · wizard 之间 | roster / charter / notices / mention 提醒 / 409 与 gate 提示 / MCP 工具描述 | 裸 name | wizard `addr/nameLine/renderRoster/renderCharter`; index postRoster 调用与 409/coldGate 文案; peers `peerMentionPart`; mirror-bridge 409; mcp/tools 描述 |
+| 系统面 · read_chat | 聊天流纯文本 | 裸 name (信封协议值仍带点, 显示层剥) | chat-log `speakerHead(stripSigil(…))` |
+| 系统面 · rolepage | 头像名 / 聊天流 / 详情 / 标题 (web 前端 + role-view/role-render) | 裸 name, 无点无记号; CSS `::before` 画记号方案删除 | role-view `speakerPrefix`; role-render titles/handoffDeco; reminder `reminderLabel` (折叠 tag 剥点); web/chat.js `nameOf`; web/chat.css |
+| 协议 | envelope 属性 (`from=".x"`) / seen 键 (`m:.x`) / target key | **零改动** —— 协议值保持点的形态, 与显示层无关 (P1 即如此, 修正不动它) | shared/reminder.ts (REMINDER_KINDS / parseEnvelope 不碰) |
+
+假设 (人未明说, 按用途归类的判断, 验收时可纠): ① 审批卡徽标按「人面身份公告」保留记号, 与气泡头同理; ② 公开 peer 轮头里 me/它 都带记号 (同一个人面气泡, 且 rawTagHeader 的 peer 后缀解析要求该形态); ③ wizard 在**给人**的正文里提同伴写 `.name` —— 人与 wizard 两端用同一套点名写法。人点名解析侧保持双态 (`🧙‍♂️ name` 与旧 `.name` 都认), 存量 transcript 读不坏。
 
 ---
 

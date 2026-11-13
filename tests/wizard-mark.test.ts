@@ -1,13 +1,20 @@
-// v3 P1: wizard 表示 🧙‍♂️ name 的双态 (新头 / 旧 .name 头) 断言。
+// v3 P1: wizard 表示 🧙‍♂️ name 的双态 (新头 / 旧 .name 头) 断言; §1.5 修正后另覆盖:
+// 记号只留在人面 (气泡头/审批卡), 系统面 (roster/read_chat/rolepage/charter) 只出现裸名。
 // 覆盖: 渲染原子、气泡头反解 (旧/新/混排)、行首寻址、正文提及、剥记号 (工具参数收口)、
-// addressedResults 的 @name RESULT、md-chunk 不切 ZWJ 序列、envelope 解析不受表示影响。
+// addressedResults 三态 (@name / @.name / @🧙‍♂️ name)、md-chunk 不切 ZWJ 序列、envelope 解析不受表示影响。
 import assert from "node:assert/strict";
 import {
   WIZARD_MARK, MAGE_SRC, nameTokenRe, allNames, stripSigil, said, speakerHead,
   tagHead, chatHead, tagBadge, parseTagHeader, rawTagHeader, withLinkedTagHeader,
   linkTags, unlinkTags, bindTagLinker, isHost, keyOf,
 } from "../shared/session-label.js";
-import { addressedResults } from "../daemon/peers.js";
+import { addressedResults, renderPeerEnvelope } from "../daemon/peers.js";
+import { addr, renderRoster, type WizardBrief, type RosterRow } from "../daemon/wizard.js";
+import { renderChatLog, type LogSession } from "../daemon/chat-log.js";
+import { glanceOfTalk, type Directory, type Msg } from "../shared/role-view.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parseEnvelope, renderReminder, envelopeAttrs } from "../shared/reminder.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
 
@@ -87,7 +94,8 @@ assert.equal(stripSigil(".fix"), "fix");
 assert.equal(stripSigil("@.fix"), "fix");
 assert.equal(stripSigil("\u{1F9D9}fix"), "fix");
 
-// ── @name RESULT 双态 (addressedResults) ────────────────────────────
+// ── @name RESULT 三态 (addressedResults; §1.5: wizard 之间新写法是裸名) ─
+assert.deepEqual(addressedResults("@fix RESULT: done it"), [{ name: "fix", body: "done it" }]);
 assert.deepEqual(addressedResults("@" + WIZARD_MARK + " fix RESULT: done it"), [{ name: "fix", body: "done it" }]);
 assert.deepEqual(addressedResults("@.fix RESULT: done it"), [{ name: "fix", body: "done it" }]);
 
@@ -112,4 +120,51 @@ assert.deepEqual(addressedResults("@.fix RESULT: done it"), [{ name: "fix", body
   assert.equal(parsed?.from, WIZARD_MARK + " fix");
   assert.equal(parsed?.private, false);
 }
+// ── 系统面 (§1.5): 同一身份在 roster / read_chat / rolepage / charter 只出现裸名 ──
+{
+  // roster: addr 裸名, renderRoster 行里无点无记号
+  assert.equal(addr({ name: "fix", address: "fix" } as WizardBrief), "fix");
+  const row = { name: "fix", address: "fix", description: "d", cwd: "/w", target: "user:admin#fix", chat: "home", solo: false, busy: false, alive: true, self: false, lastActivity: Date.now(), summary: "", clones: [] } as unknown as RosterRow;
+  const roster = renderRoster([row], Date.now(), "/w");
+  assert.ok(roster.includes("`fix`"), roster);
+  assert.ok(!roster.includes(".fix") && !roster.includes(WIZARD_MARK), roster);
+
+  // read_chat: 信封协议值 from=".fix" 带点, 输出剥成裸名; 会话主人一侧也裸
+  const tmp = mkdtempSync(join(tmpdir(), "wizface-"));
+  const at = Date.now() - 3600_000;
+  const script = join(tmp, "a.jsonl");
+  const rows: object[] = [
+    { type: "user", timestamp: new Date(at).toISOString(), message: { role: "user", content: "问一句" + renderPeerEnvelope(".fix") } },
+    { type: "assistant", timestamp: new Date(at + 1000).toISOString(), message: { role: "assistant", content: "答一句" } },
+  ];
+  writeFileSync(script, rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  const s: LogSession = { name: "docs", key: "user:admin#docs", jsonlPath: script, homeChat: "home", homeKey: "chat:wrX", homeHuman: "张三", since: 0 };
+  const log = renderChatLog([s], { limit: 10, per: 200 }, Date.now()).text;
+  assert.ok(log.includes("fix：") && log.includes("docs"), log);
+  assert.ok(!log.includes(".fix") && !log.includes(WIZARD_MARK), log);
+
+  // rolepage: 会话列表预览的说话人前缀一律裸名 (wizard 与人同形)
+  const dir: Directory = {
+    nameOf: (id) => (id === "u:fix" ? "fix" : id === "u:zhang" ? "张三" : id),
+    labelOf: () => "🦊",
+    resolve: () => undefined,
+    fact: () => undefined,
+    chatName: () => "",
+    weixin: () => undefined,
+    isWizard: (id) => id === "u:fix",
+    status: () => undefined,
+    wizards: () => ["u:fix"],
+  };
+  const turn = { kind: "turn", id: "t1", items: [{ t: "text", body: "看看", ts: at }] } as unknown as Msg["turn"];
+  const mk = (from: string): Msg => ({ id: "t1:out", turn, dir: "out", from, to: "u:me", channel: "chat:wrX", ts: at });
+  const wizardGlance = glanceOfTalk([mk("u:fix")], "u:me", dir, "u:me", []);
+  assert.ok(wizardGlance.preview.startsWith("fix： "), wizardGlance.preview);
+  const humanGlance = glanceOfTalk([mk("u:zhang")], "u:me", dir, "u:me", []);
+  assert.ok(humanGlance.preview.startsWith("张三： "), humanGlance.preview);
+  assert.ok(!wizardGlance.preview.includes(WIZARD_MARK), wizardGlance.preview);
+
+  // 人面不变式: wizard 对人的气泡头仍带记号 (唯一保留记号的显示面)
+  assert.equal(said(tagHead(fix)), WIZARD_MARK + " fix：");
+}
+
 console.log("wizard-mark dual-form tests passed");
