@@ -6,6 +6,8 @@
 // 频道里没有被 @ 的新帖子 / 新回复也会进来（topic_event / topic_reply_event）。
 // 这些不直接答，先交给每个 bot 的「判官」：判官是一个只读最近几条消息的轻量 wizard，
 // 只回 JSON {respond, reason}；respond 才把原帖交给主 wizard。
+// P7-S3: strict 频道 (chatPolicy/首见判定) 里判官多一职 —— 无人点名的人话是否开义务、
+// 落给谁 (respond 即开义务, rewrite 句首点名即落人); 出站终句不再包装成评论 (sendPost)。
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { generateReqId, type TextMessage, type WSClient, type WsFrame } from "@wecom/aibot-node-sdk";
@@ -18,6 +20,7 @@ import { baseOfKey, keyOf, sameBot } from "../shared/session-label.js";
 import { sleep } from "../shared/std.js";
 import { identityOf, wizardStore } from "./wizard.js";
 import { knownChatsOf } from "./chat-seen.js";
+import { chatPolicyOf } from "./chat-name.js";
 import { stewardIdentityOf } from "./steward.js";
 import { expandHome } from "../shared/paths.js";
 import { ChannelStore, type ChannelMsg } from "./channel-store.js";
@@ -442,6 +445,10 @@ export interface JudgePrompt {
   latestAuthor: string;
   /** 最近活跃的其他机器人 (bot:<id> → 条数, 自己已剔除; §6 邻居感知)。 */
   bots?: Array<{ id: string; n: number }>;
+  /** P7-S3: strict 频道 —— 判官兼管「无人点名的人话是否开义务、落给谁」。 */
+  strict?: boolean;
+  /** strict 频道的成员名单 (裸名, 显示给判官选落给人)。 */
+  members?: string[];
 }
 
 /** 每条历史都带 id + 时刻: 判官只做判定不改身份, 但它引用的那一句必须能被
@@ -483,6 +490,11 @@ export const buildJudgePrompt = (cfg: Config, i: JudgePrompt): string => {
     ...i.recent.map((m, k) => judgeLine(m, `[${k + 1}] `)),
     `最新消息（${i.latestAuthor}）：${clip(i.latest, 600)}`,
     "",
+    ...(i.strict ? [
+      "本频道是严格模式 (strict): 无人点名的每条人话默认开一条义务 —— respond 就等于「开义务」, respond=false 则这条不开 (闲聊 / 别人的事)。",
+      ...(i.members?.length ? ["频道成员 (义务只能落给成员): " + i.members.join("、") + "。"] : []),
+      "落给谁: 最新消息明显是找某个成员的, 就在 rewrite 的**句首**写它的点名 (.名字 空格开头, 名字用上面名单里的); 归属拿不准或找的是频道整体 → 不点名, 交给主 agent (默认接待)。",
+      ""] : []),
     "规则：",
     "- 最新消息 @ 了别的机器人、明显属于别人的职责、或只是闲聊 → respond=false",
     "- 最新消息在向本频道求助、需要你回答 → respond=true",
@@ -503,7 +515,28 @@ export const buildJudgePrompt = (cfg: Config, i: JudgePrompt): string => {
 
 // 出站传输补丁必须早于 installResponseTracker 安装：tracker 会把当时的
 // client.sendMessage / replyStream 抓成 orig*，晚装就绕过了频道分支。
-export const installChannelTransport = (client: WSClient, log: Logger): void => {
+/** 这个频道是否 strict (chatPolicyOf 同一判定: 显式 > 首见 strict > 存量 implicit)。 */
+const strictTopicOf = (cfg: Config | undefined, topicId: string): boolean =>
+  !!cfg && chatPolicyOf(cfg, "chat:" + topicId).speech === "strict";
+
+/** base principal 是否是一个已登记的频道 (chat:<topic_id>)。 */
+export const isTopicChat = (base: string): boolean =>
+  base.startsWith("chat:") && topics.has(base.slice("chat:".length));
+
+/** 工具面 (P7-S3: chat_say / chat_reply 的频道分支): 按 replyOk 选评论/新帖。
+ *  msgid (频道消息信封上的 msg) 能定位到具体帖子时用它, 否则用该频道最近一条帖子;
+ *  帖子没被 @ 过 (replyOk=false) 只能主动发新帖 (官方语义)。 */
+export const sendTopicContent = async (client: WSClient, log: Logger, topicId: string, content: string, msgid?: string): Promise<"reply" | "post"> => {
+  const ctx = msgid ? byStream.get(msgid) : undefined;
+  const postId = ctx?.postId ?? lastPost.get(topicId);
+  const asReply = !!postId && replyOk.get(postId) === true;
+  const body = await call(client, asReply ? CMD_REPLY : CMD_POST,
+    asReply ? { topic_id: topicId, post_id: postId, content } : { topic_id: topicId, content });
+  if (body?.errcode) log.warn({ errcode: body.errcode, errmsg: body.errmsg, topicId, postId }, "channel tool send rejected");
+  else log.info({ topicId, via: asReply ? "reply" : "post", len: content.length }, "channel tool sent");
+  return asReply ? "reply" : "post";
+};
+export const installChannelTransport = (client: WSClient, log: Logger, cfg?: Config): void => {
   log.info("channel transport installed");
   const sendPost = (topicId: string, content: string): Promise<any> =>
     call(client, CMD_POST, { topic_id: topicId, content })
@@ -545,6 +578,8 @@ export const installChannelTransport = (client: WSClient, log: Logger): void => 
       log.warn({ topicId, msgtype: body?.msgtype }, "channel: unsupported outbound");
       return Promise.resolve(emptyFrame());
     }
+    // P7-S3: strict 频道终句不包装成评论 —— 自动出站一律新帖 (评论留给工具面的 replyOk 选择)。
+    if (strictTopicOf(cfg, topicId)) return sendPost(topicId, content);
     const postId = lastPost.get(topicId);
     // 只有被 @ 过的帖子才能评论；未被 @ 的新帖只能主动发一条新帖。
     return postId && replyOk.get(postId) === true
@@ -559,11 +594,18 @@ export const installChannelTransport = (client: WSClient, log: Logger): void => 
     const ctx = byStream.get(streamId) ?? byStream.get(String(frame?.headers?.req_id ?? ""));
     if (!ctx) return origStream(frame, streamId, content, finish, ...rest);
     if (!finish) return Promise.resolve(emptyFrame());
+    // P7-S3: strict 频道终句不包装成评论 (验收数字②: 终句评论 0 条)。
+    if (strictTopicOf(cfg, ctx.topicId)) return sendPost(ctx.topicId, content);
     return replyOk.get(ctx.postId) === true ? sendReply(ctx, content) : sendPost(ctx.topicId, content);
   };
 };
 
-export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger): void => {
+export interface ChannelFacts {
+  /** P7-S3: strict 频道判官要看的成员名单 (裸名); 不给 = 空名单 (判定照常)。 */
+  memberNamesOf?: (base: string) => string[];
+}
+
+export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger, facts?: ChannelFacts): void => {
   const wsm = (client as any).wsManager;
   if (!wsm || typeof wsm.handleFrame !== "function") {
     log.warn("channel: wsManager.handleFrame unavailable; topic events will be ignored");
@@ -632,6 +674,8 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger)
     }
     const recent = await recentPosts(client, cfg, log, topicId, cfg.wrc.channel.judge.maxPosts);
     const thread = withoutMsg((await ensureStore(cfg)?.thread(topicId, postId, 4)) ?? [], triggerId);
+    // P7-S3: strict 频道判官兼管义务 (respond=开, rewrite 句首点名=落人)。
+    const strict = strictTopicOf(cfg, topicId);
     const prompt = buildJudgePrompt(cfg, {
       topicId, postId, triggerId, msgid,
       recent: withoutMsg(recent, triggerId),
@@ -639,6 +683,7 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger)
       latest: text,
       latestAuthor: fromUser,
       bots: botAuthors([...recent, ...thread], selfBot),
+      ...(strict ? { strict: true, members: facts?.memberNamesOf?.("chat:" + topicId) ?? [] } : {}),
     });
     // 一次 -p 进程也串行：同一 topic 两条消息同时到不该各起一个, 判词会互相盖。
     const verdict = await serial(`judge:${topicId}`, () => askJudge({ cfg, log }, prompt));
@@ -760,6 +805,6 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger)
 
 // 兼容入口：新代码应分别早装 transport、晚装 events。
 export const installChannelBridge = (client: WSClient, cfg: Config, log: Logger): void => {
-  installChannelTransport(client, log);
+  installChannelTransport(client, log, cfg);
   installChannelEvents(client, cfg, log);
 };

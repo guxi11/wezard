@@ -34,9 +34,11 @@ import type { ChannelMsg } from "../daemon/channel-store.js";
 
 const ROOT = mkdtempSync(join(tmpdir(), "channel-steward-"));
 const log = pino({ level: "silent" });
+// P7-S3: onTopic 会把 chat:<topic> 登记进 known-chats 册 —— stateDir 必须隔离, 别写真机 state。
 const cfgOf = (channelSteward: Record<string, string> = {}, chatSteward: Record<string, string> = {}) =>
   ConfigSchema.parse({
     bot: { botId: "test", secret: "test" },
+    daemon: { stateDir: join(ROOT, "state") },
     wrc: { allowFrom: ["user:tester"], channel: { history: { enabled: false }, steward: channelSteward } },
     defaultChat: "user:home",
     ...(Object.keys(chatSteward).length

@@ -28,7 +28,7 @@ import { pickTier } from "../shared/model-tiers.js";
 import { applyHot, cfgSeenBy, patchedTop, pinChatKeys, configGet, planSet, renderPlan, tierEvidence, type Plan, type SetReq, type TierUsage, type UsageTotals } from "./config-api.js";
 import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } from "./usage.js";
 import { installInboundRouter } from "./inbound.js";
-import { installChannelTransport, installChannelEvents, readChannel } from "./channel.js";
+import { installChannelTransport, installChannelEvents, readChannel, isTopicChat, sendTopicContent } from "./channel.js";
 import { loadMirrorStore } from "./mirror-store.js";
 import { cancelOps, contentRev, eventRef, finalKind, isEventRef, makeOutcome, openRouter, ops, pickPair, type Delivery, type EventId, type Op, type Receiver, type Route } from "./router.js";
 import { isRecoveryCarrier, createMessageEvents, messageId, finalId, reportSource, receiptCoverage, receiptFacts, correctionTaskEvent, canSettleFinal, eventDeliveryAllowed, peerEventPrerequisitesReady, resultCorrectionInputs, settleAddressedResults, settleUnaddressedResult, servedChatResultFinalAllowed, settleServedChatResult, type EventAuthority, type MessageAdapters, type MessageEvent, type MessageFinal, type MessageInput } from "./message-events.js";
@@ -221,7 +221,7 @@ const main = async (): Promise<void> => {
   const ws = startMux(cfg, log);
   // 频道出站补丁必须先于 response-tracker：tracker 会把当时的 sendMessage /
   // replyStream 抓成 orig*，晚装就绕过了频道分支（终句会走成群消息）。
-  installChannelTransport(ws.client, log.child({ mod: "channel" }));
+  installChannelTransport(ws.client, log.child({ mod: "channel" }), cfg);
   // 切网 (换 WiFi / VPN 起停) 后原地重建 WS, 等价于自动做了一次 reload 的
   // 联通性部分 — 但保留全部内存态 (pending 长轮询、镜像绑定),
   // 也不依赖 launchd/systemd 的 respawn 策略 (nohup fallback 没有 supervisor)。
@@ -540,7 +540,13 @@ const main = async (): Promise<void> => {
   // P7-S3 /strict: 预演/执行由 mirror 大块里的 strictSwitchOf 实现, 这里只转交。
   async (who, cmd) => (await strictSwitchOf?.(who, cmd)) ?? "[wezard] /strict 未接 (需要 P7-S3 的 daemon)");
   // 频道（topic）事件层：接在 inbound 之后，让频道消息复用同一套 gate / route / mirror。
-  installChannelEvents(ws.client, cfg, log.child({ mod: "channel" }));
+  // P7-S3: strict 频道判官要看成员名单 (members 在前面已开, 名字经 wizardStore 解析 ——
+  // wizardStore() 是运行时绑定, 事件到达时早已 bind)。
+  installChannelEvents(ws.client, cfg, log.child({ mod: "channel" }), {
+    memberNamesOf: (base) => members.ofChat(base)
+      .map(({ identity }) => wizardStore()?.get(identity)?.name || identity)
+      .filter(Boolean),
+  });
   // approval click → finalize 当前 liveStream, 后续 tool/text 落到 standalone。
   // 规则 2: 用户点击授权那一刻就是"上一段对话"的边界, 截断 stream 让授权后的
   // 工作单独成块, 比让 stream 一直长到下一个 inbound / hardTimer 更清晰。
@@ -936,6 +942,14 @@ const main = async (): Promise<void> => {
     const relayLabel = (t: string): string => ((h) => (h ? tagLink(t, h) : ""))(tagHead(t));
     /** 以 `self` 的名义往 `dest` 群发一条: 头独占一行; 头怎么写 (群默认 wizard 报不报名) 归 ownHead。 */
     const postAs = (self: string, dest: string, text: string): void => notifyChat(dest, headed(ownHead(self, dest), text, "\n\n"));
+    /** P7-S3: 同 postAs, 但去到的是频道 (chat:<topic_id>) —— 按 replyOk 选评论/新帖
+     *  (chat_say / chat_reply 的频道分支); msgid (义务信封上的 msg) 能定位到具体帖子。 */
+    const postAsTopic = (self: string, dest: string, text: string, msgid?: string): void => {
+      const topicId = dest.replace(/^chat:/, "");
+      void sendTopicContent(ws.client, log.child({ mod: "channel" }), topicId,
+        linkTags(dest, headed(ownHead(self, dest), text, "\n\n")), msgid)
+        .catch((e: unknown) => log.warn({ topicId, err: errText(e) }, "channel tool send failed"));
+    };
     /** 公开的 wizard 间对话: 落在 `channel` 这个群。 */
     const relayPeer = (from: string, to: string, body: string, channel: string): void => {
       const text = body.trim();
@@ -2067,7 +2081,9 @@ const main = async (): Promise<void> => {
       }
       const gate = strictSayGate(self, base, b.re);
       if (gate) { json(res, gate.status, gate.body); return; }
-      postAs(self, base, text);
+      // P7-S3: 频道 (chat:<topic_id>) 走 replyOk 选评论/新帖, 不经群消息通道。
+      if (isTopicChat(base)) postAsTopic(self, base, text);
+      else postAs(self, base, text);
       json(res, 200, { ok: true, chat: chatNameOf(cfg, base) || base, sent: text.length });
     });
     // chat_reply 的幂等键 (chat_reply:<re>:<contentRev>): 有界集合, 重启即空 —— 行已在
@@ -2101,11 +2117,18 @@ const main = async (): Promise<void> => {
       if (chatReplySeen.size > 512) chatReplySeen.delete(chatReplySeen.values().next().value!);
       let delivered: string;
       if ((b.text ?? "").trim()) {
+        // P7-S3: 频道 (chat:<topic_id>) 的占位气泡从未立过 (频道丢中间帧), 直接走
+        // replyOk 分支评论在义务锚定的那帖上 (row.receiver.message = 频道消息 msgid)。
+        if (isTopicChat(base)) {
+          postAsTopic(self, base, b.text!, row.receiver.kind === "chat" ? row.receiver.message : undefined);
+          delivered = "channel";
+        } else {
         // 先占位后交付: 流窗口内覆盖占位气泡; 窗口过了退回群消息 (被批准的出站口子)。
         const covered = await m.finishPlaceholder(self, ref, b.text!);
         if (!covered) postAs(self, base, b.text!);
-        router.commit(ops.answer({ event: row.event, outcome: makeOutcome("done", b.text!) }));
         delivered = covered ? "placeholder" : "message";
+        }
+        router.commit(ops.answer({ event: row.event, outcome: makeOutcome("done", b.text!) }));
       } else {
         router.commit(ops.answer({ event: row.event, outcome: makeOutcome("passed", "（无需答复）") }));
         delivered = "passed";
