@@ -32,8 +32,10 @@ import type { NativeModalAnswer } from "./mirror-bridge.js";
 import { recordApproval, recordApprovalDecision, buildDetailUrl, getDetail, openTurnsOf, targetOfSession } from "./detail.js";
 import type { Handler } from "./http.js";
 import { json, readBody } from "./http.js";
-import { botOfKey, displayName, tagBadge, tagOfKey, withTagHeader, withBot } from "../shared/session-label.js";
+import { botOfKey, displayName, tagBadge, withTagHeader, withBot } from "../shared/session-label.js";
 import { chatPolicyOf } from "./chat-name.js";
+import { isStewardTarget } from "./steward.js";
+import { wizardStore } from "./wizard.js";
 import { makeStewardGuard } from "./steward-guard.js";
 import { sessionNameFor } from "./session-name.js";
 import { reachable } from "./reach.js";
@@ -2125,8 +2127,10 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
 
     // 群管家的手闸 (见 steward-guard.ts): 排在所有审批之前 —— 拦的不是危险, 是越位,
     // 放行窗口 / allowRules / skipAll 都不该替它开门。
+    // v3 §3: 判定从「untagged 默认会话」升为「该聊天绑定的管家化身」(config chatPolicy.steward
+    // 指定优先, 没绑 = 现存默认会话) —— 指定的化身即使是 tagged 也 arm, 换绑后旧默认会话不再 arm。
     const owner = getMirrorTarget?.(sessionId);
-    if (owner && !tagOfKey(owner) && chatPolicyOf(cfg, owner).topOnly) {
+    if (owner && isStewardTarget(cfg, wizardStore(), owner) && chatPolicyOf(cfg, owner).topOnly) {
       const reason = stewardGuard({
         sessionId,
         turn: openTurnsOf(owner, sessionId)[0]?.id ?? "",

@@ -67,6 +67,7 @@ import { appendEpisode, clipForCharter, cwdOfMd, episodePath, inboxPath, mdsOf, 
 import { startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
 import type { Asker, TurnFrom } from "../shared/detail-store.js";
 import { applyChatNames, chatBaseOf, chatNameOf, chatPolicyOf, clearChatName, listChatNames, normChatName, peerAddress, planChatNames, setChatName, stewardTierOf, type CharterChange, type CharterGuard } from "./chat-name.js";
+import { isStewardTarget, markGlobalSteward } from "./steward.js";
 import {
   bindWizardStore,
   loadWizardStore,
@@ -2742,6 +2743,10 @@ const main = async (): Promise<void> => {
     const ident = migrateIdentities(wizards, cfg.wrc.mirror.wizardsFile);
     if (ident.migrated) log.child({ mod: "wizard" }).info({ migrated: ident.migrated, backup: ident.backup }, "v3 identity migration applied");
     else if (ident.skipped) log.child({ mod: "wizard" }).warn({ reason: ident.skipped }, "v3 identity migration skipped");
+    // v3 §3: 全局管家身份落位 —— home (defaultChat) 的默认会话就是它的锚点化身。
+    // 新聊天 (还没有任何会话) 的裸消息由它接待 (inbound stewardRoute); 未认领的新装机不造幽灵记录。
+    const gs = markGlobalSteward(wizards, cfg.defaultChat);
+    if (gs.marked) log.child({ mod: "wizard" }).info({ target: gs.target }, "global steward anchored at home default session");
     const planApiStore: PlanStore = {
       all: () => plans.all(),
       get: (id) => plans.get(id),
@@ -3127,7 +3132,7 @@ const main = async (): Promise<void> => {
           const cwd = o.cwd || m.getCwd(target).runningCwd || m.getCwd(target).defaultCwd;
           return cwd ? sharedMemory("workspace", cwd, botOfKey(target)) : "";
         })(),
-        steward: !tagOfKey(target),
+        steward: isStewardTarget(cfg, wizards, target),
         stewardBudget: chatPolicyOf(cfg, target).stewardBudget,
         lead: !!wizards.get(target)?.lead,
         topOnly: chatPolicyOf(cfg, target).topOnly,

@@ -414,7 +414,8 @@ export interface CharterArgs {
   chatMemory: string;
   /** 本工作区记忆 (memory/workspaces/<cwd>.md 全文); "" = 没有。 */
   workspaceMemory: string;
-  /** 聊天的默认会话 = 这个群的管家: 没点名的话都落到它这儿, 由它分派。 */
+  /** 这个 target 是所在聊天的管家化身 (v3 §3: config chatPolicy.steward 绑定优先, 没绑 = 现存默认会话):
+   *  没点名的话都落到它这儿, 由它分派。 */
   steward: boolean;
   /** 管家手闸的每轮查看预算 (`chatPolicy.<chat>.stewardBudget`); -1 = 不设闸。 */
   stewardBudget: number;

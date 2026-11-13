@@ -21,6 +21,7 @@ import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe,
 import { botTagOf } from "./bot-mux.js";
 import { chatNameOf, clearChatName, listChatNames, setChatName, stewardTierOf, type CharterGuard } from "./chat-name.js";
 import { evictStaleName, manifestationOf, reclaimChatName, wizardStore, type EvictDeps } from "./wizard.js";
+import { stewardRoute as resolveSteward } from "./steward.js";
 import { truncate } from "../shared/std.js";
 import { hookModePath, readHookMode, writeHookMode } from "../shared/hook-mode.js";
 
@@ -591,8 +592,8 @@ export const installInboundRouter = (
   // `.docs` → window `docs`, not the principal slug).
   // On success there is NO reply: newSession already pushed the single
   // "created + cwd" bubble. Only failures produce user-facing text.
-  const spawnSession = async (who: string, silent?: boolean, model?: string): Promise<{ err?: string }> => {
-    const r = await bridge.newSession(who, displayName(who) || tagOf(who) || who, { silent, model });
+  const spawnSession = async (who: string, silent?: boolean, model?: string, cwd?: string): Promise<{ err?: string }> => {
+    const r = await bridge.newSession(who, displayName(who) || tagOf(who) || who, { silent, model, ...(cwd ? { cwd } : {}) });
     return r.ok ? {} : { err: `[wezard] /new failed: ${r.reason ?? "unknown"}` };
   };
 
@@ -629,16 +630,17 @@ export const installInboundRouter = (
         if (gone) log.info({ target: gone.target, name: gone.name }, "stale name evicted by /new");
       }
       reclaimChatName(wizardStore(), chat, who);
-      return spawnSession(who, false, model);
+      // 管家接待刚注册的新化身 (/new 或裸消息首条) 落在身份的工作区, 不落兜底目录。
+      return spawnSession(who, false, model, freshSteward.get(who) || undefined);
     });
 
   // 隐式建会话(新 `.name` 的第一条消息):轮到自己时若前一条已经把会话建好,直接
   // 复用,不再 respawn —— 否则先到的消息会被注入进一个刚被杀掉的 pane。
-  const ensureSession = (who: string, asked: string): Promise<{ err?: string }> =>
+  const ensureSession = (who: string, asked: string, cwd?: string): Promise<{ err?: string }> =>
     serializeSpawn(who, async () => {
       if (bridge.hasMirrorTarget(who)) return {};
       claimAsked(who, asked);
-      return spawnSession(who, true);
+      return spawnSession(who, true, undefined, cwd);
     });
 
   // Prefix user-visible daemon replies with `<emoji> .name`, so a chat hosting
@@ -972,8 +974,11 @@ export const installInboundRouter = (
     // sender is already in allowFrom, we treat that authorization as license
     // to auto-spawn: this inbound becomes both the binding signal and the
     // first prompt — attach, then fall through to dispatch.
-    if (text.trimStart().startsWith("/") && !bridge.hasMirrorTarget(who)) {
-      const { err } = await ensureSession(who, asked);
+    // v3 §3: 管家接待的新化身与 slash 命令同权 —— 裸消息也是该聊天的第一条消息,
+    // 直接在身份的工作区里起 pane, 不再回「还没有会话 — 发 /new」。其余 named slot
+    // 照旧 (点一个名字 ≠ 创建它, 创建走 spawn 的 409-clash 路径)。
+    if (!bridge.hasMirrorTarget(who) && (text.trimStart().startsWith("/") || freshSteward.has(who))) {
+      const { err } = await ensureSession(who, asked, freshSteward.get(who) || undefined);
       if (err) {
         await replyText(frame, msg, who, err);
         return { stop: true };
@@ -1035,7 +1040,19 @@ export const installInboundRouter = (
   };
 
   // 名字 → 它指向谁。哪个 `.x` 是路由不在这里定: parseTag 只认消息开头那一个。
-  const resolve: Resolve = (base, name) => resolveName(base, name);
+  // 裸消息 (name = "") 走管家接待 (§3): 绑定的管家身份在本群的化身; 解析要新开化身时先落记录
+  // (名字/身份/种类来自身份锚点), 会话由 gate 的 ensureSession 在身份的工作区里起。
+  const freshSteward = new Map<string, string>(); // target → 新化身的工作区 (identity workspace)
+  const stewardReception = (base: string): string => {
+    const r = resolveSteward(cfg, wizardStore(), base, (t) => ((c) => c.runningCwd || c.defaultCwd)(bridge.getCwd(t)));
+    if (r.fresh && !freshSteward.has(r.target)) {
+      wizardStore()?.upsert(r.target, { identity: r.fresh.identity, name: r.fresh.name, ...(r.fresh.kind ? { kind: r.fresh.kind } : {}) });
+      freshSteward.set(r.target, r.fresh.workspace ?? "");
+      log.info({ base, target: r.target, identity: r.fresh.identity }, "steward reception: new manifestation registered");
+    }
+    return r.target;
+  };
+  const resolve: Resolve = (base, name) => (name ? resolveName(base, name) : stewardReception(base));
   const route = (msg: BaseMessage, raw: string): { text: string; tag: string; promoted: boolean; who: string } => {
     const c = composeInbound(msg, raw, quoteInContext, stripAt, resolve);
     return { ...c, who: resolve(chatPrincipal(msg), c.tag) };
