@@ -8051,7 +8051,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // paneOf (not byTarget.get) so a cold binding surviving only in the
       // persisted store can still be revealed after a daemon reload.
       const pane = paneOf(target);
-      if (!pane) return { ok: false, reason: "no tmux pane bound for target" };
+      if (!pane) {
+        log.warn({ target, attached: byTarget.has(target), stored: !!deps.store.get(target) }, "mirror /reveal — no pane bound for target");
+        return { ok: false, reason: "no tmux pane bound for target" };
+      }
       if (!(await tmuxPaneAlive(pane))) return { ok: false, reason: "tmux pane no longer alive — the session needs /new or a respawn" };
       // Only clients already attached to the pane's OWN session are candidates:
       // switching a client that sits on an unrelated session would yank the

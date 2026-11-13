@@ -970,6 +970,12 @@ export const renderToolBody = (r: TurnDetailRecord, toolUseId: string): string |
 const oneLineCompact = (input: unknown, max = 100): string => {
   if (input && typeof input === "object") {
     const o = input as Record<string, unknown>;
+    // REPL 一次调用的入参只有 description / code: 先摆给人读的那句 (这次调用在干嘛),
+    // 再摆代码本身 —— 两段各占一半预算, 谁短余量就落在对方身上, 最后整体再截一次。
+    if (typeof o.code === "string" && o.code.trim() !== "") {
+      const desc = typeof o.description === "string" ? clipLine(o.description, Math.round(max / 2)) : "";
+      return clipLine([desc, clipLine(o.code, max)].filter(Boolean).join(" · "), max + Math.round(max / 2));
+    }
     const pick = o.command ?? o.file_path ?? o.path ?? o.pattern ?? o.url ?? o.query ?? o.prompt;
     if (typeof pick === "string") return clipLine(pick, max);
   }

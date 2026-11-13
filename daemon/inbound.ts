@@ -1065,7 +1065,11 @@ export const installInboundRouter = (
     const msg = frame.body;
     if (!msg) return;
     const { text, tag, promoted, who } = route(msg, stripAt(msg, msg.text?.content ?? ""));
-    log.info({ msgid: msg.msgid, len: text.length, tag, hasQuote: !!msg.quote, promoted }, "rx text");
+    const known = bridge.hasMirrorTarget(who);
+    log.info({ msgid: msg.msgid, len: text.length, tag, hasQuote: !!msg.quote, promoted, chat: chatPrincipal(msg), who, known }, "rx text");
+    // 落到一个没有任何会话的聊天时, 把原始回调也记一笔: 频道 / 群 / 单聊的 chatid
+    // 形状不同, 认错了就会像 /reveal 那样 "no tmux pane bound"。
+    if (!known) log.info({ body: msg }, "rx text — unknown chat (raw)");
     const { stop } = await gate(frame, msg, text, who, tag);
     if (stop) return;
     await send(frame, msg, who, text);
