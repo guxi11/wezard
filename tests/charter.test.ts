@@ -3,7 +3,7 @@ import { renderCharter, type CharterArgs } from "../daemon/wizard.js";
 
 const base: CharterArgs = {
   self: { name: "worker", address: "worker", description: "test role", cwd: "/workspace" },
-  chat: "team", principal: "user:admin", inherited: false, cwdUnconfirmed: false,
+  chat: "team", principal: "user:admin", inherited: false,
   siblings: [], memory: [], chatMemory: "", workspaceMemory: "", steward: false,
   stewardBudget: 4, lead: false, tiers: [], topOnly: false,
 };
@@ -19,6 +19,10 @@ const charter = renderCharter(base);
 assert.match(charter, /worker/);
 assert.match(charter, /user:admin/);
 assert.match(charter, /\/workspace/);
+// v3 §2 切片二: 「开工前先问工作区」问句随 set_workspace 语义退役, 宪章不再出现旧流程话术。
+for (const stale of ["开工前先问", "默认兜底目录", "keep:true"]) {
+  assert.ok(!charter.includes(stale), `charter must not mention retired workspace-question flow: ${stale}`);
+}
 for (const tool of ["wizard_roster", "delegate", "tell_peer", "handoff"]) {
   assert.ok(charter.includes(tool), `charter must advertise ${tool}`);
 }

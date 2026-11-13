@@ -17,7 +17,7 @@ import { copyFileSync, existsSync, statSync } from "node:fs";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { expandHome } from "../shared/paths.js";
 import { loadAutoNames } from "./wizard-names.js";
-import { keyOf, normalizeTag, stripSigil, tagOfKey, uniqueTag, WIZARD_MARK } from "../shared/session-label.js";
+import { baseOfKey, keyOf, normalizeTag, stripSigil, tagOfKey, uniqueTag, WIZARD_MARK } from "../shared/session-label.js";
 
 /** 身份的种类 (v3): 全局管家 / 群管家 / 学徒 / 工人。归组与金字塔 (§3/§4/§7) 用, 切片一先落字段与缺省值。 */
 export type WizardKind = "global-steward" | "steward" | "apprentice" | "worker";
@@ -28,6 +28,18 @@ const defaultKindOf = (target: string): WizardKind => (tagOfKey(target) ? "worke
 /** 记录所属的身份 id。老盘上还没迁移的记录没有这个字段 —— 一律按自己的 target 回落,
  *  所以「未迁移」和「已迁移 (1:1)」在这条读取路径上不可区分, 迁移幂等因此有据可依。 */
 export const identityOf = (w: { target: string; identity?: string }): string => w.identity || w.target;
+
+/** 名字 → 身份 → **base 聊天里的那个化身** (§2 切片二的化身解析):
+ *  身份在 base 有化身 → 那个化身的 target (A 群点名只落 A 化身, 不串 B);
+ *  没有化身 → 回落锚点化身 (target === identity 那条) —— 即旧世界的跨群点名行为,
+ *  上下文共享而非新开 pane, 不自动新建。查无此名 → undefined。
+ *  1:1 世界 (迁移后每身份恰一条记录) 它恒等于 `byName(name).target`, 行为零变化。 */
+export const manifestationOf = (store: WizardStore | undefined, name: string, base: string): string | undefined => {
+  const rec = store?.byName(name);
+  if (!store || !rec) return undefined;
+  const id = identityOf(rec);
+  return store.all().find((w) => identityOf(w) === id && baseOfKey(w.target) === base)?.target ?? rec.target;
+};
 
 export interface WizardRecord {
   /** 会话 key: `chat:xxx` 或 `chat:xxx#tag`。v3 起它是「身份在该聊天的化身」的坐标,
@@ -396,8 +408,6 @@ export interface CharterArgs {
   inherited: boolean;
   /** 上下文 fork 自谁 —— 缺省 = parent 本人。 */
   forkOf?: WizardBrief;
-  /** 工作区还是没人选过的默认兜底目录 —— 开工前该先问人一句要去哪个项目。 */
-  cwdUnconfirmed: boolean;
   siblings: readonly WizardBrief[];
   memory: readonly string[];
   /** 本群记忆 (memory/chats/<base>.md 全文); "" = 没有。 */
@@ -653,18 +663,6 @@ export const renderCharter = (a: CharterArgs): string => {
     ]),
     "",
   ];
-  // 新聊天的第一个 wizard 落在默认兜底目录里 —— 那不是人选的, 只是还没人说过。与其
-  // 让它在错的目录里把活干完, 不如开工前先问一句: 一句话的代价, 换掉一次重来。
-  if (a.cwdUnconfirmed) {
-    parts.push(
-      "> ⚠️ 上面这个工作区是**没人选过的默认兜底目录**, 不是人指定的。",
-      "> 所以**开工前先问一句**: 要在哪个项目目录下干活?",
-      "> 给了路径 → `set_workspace({cwd})` 排入切换; 当前任务收尾后调用自身 `handoff({brief})`, daemon 会在新 CLI 进程的新目录中继续简报。旧进程不会原地切目录, 不要让人手动发 `/new`。",
-      "> 说就用这个 / 不用换 → `set_workspace({keep:true})` 记一笔, 此后谁都不会再问。",
-      "> 只问这一次 —— 他不答就照这个目录干, 别反复追问。",
-      "",
-    );
-  }
   if (a.memory.length > 0) {
     parts.push("## 我的记忆", bullet(a.memory as string[]), "");
   }

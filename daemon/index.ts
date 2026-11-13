@@ -742,23 +742,16 @@ const main = async (): Promise<void> => {
     });
     // 工作目录属于 CLI 进程; 活会话先记录 pending, 由调用方收尾后 self-handoff 应用。
     http.register("POST /mirror/workspace", async (req, res) => {
-      const body = (await readBody(req)) as Partial<{ target: string; sessionId: string; tmuxPane: string; cwd: string; keep: boolean }>;
+      const body = (await readBody(req)) as Partial<{ target: string; sessionId: string; tmuxPane: string; cwd: string }>;
       const cwd = (body.cwd ?? "").toString();
       const target = resolveSelf(body);
       if (!target) { json(res, 400, { ok: false, reason: "target required (or pass sessionId of an attached chat)" }); return; }
-      // keep = 人回答了「不用换, 就用现在这个」。只落一笔确认, 不碰 pane —— 把
-      // 「保持现状」也走成 setPendingCwd + newSession 的话, 代价是白杀一个会话。
-      if (body.keep === true) {
-        const c = m.confirmCwd(target);
-        json(res, c.ok ? 200 : 400, c.ok ? { ok: true, target, cwd: c.cwd, confirmed: true } : { ok: false, reason: c.reason, target });
-        return;
-      }
-      if (!cwd) { json(res, 400, { ok: false, reason: "cwd required (or keep:true to confirm the current one)" }); return; }
+      if (!cwd) { json(res, 400, { ok: false, reason: "cwd required" }); return; }
       const set = m.setPendingCwd(target, cwd);
       if (!set.ok) { json(res, 400, { ...set, target }); return; }
       if ((await liveOf([target])).length) {
-        json(res, 200, { ok: true, target, runningCwd: set.runningCwd, pendingCwd: set.pendingCwd, handoffRequired: true,
-          message: "工作区切换已排入 pendingCwd。当前任务收尾并整理简报后，调用方须对自己执行 handoff；daemon 将在新 CLI 进程中应用该目录并继续简报。当前进程尚未切换。" });
+        json(res, 200, { ok: true, target, runningCwd: set.runningCwd, pendingCwd: set.pendingCwd,
+          message: "工作区已记录 (pendingCwd)。此后该身份新开的会话/化身都在这个目录启动 (/new 或下一次 respawn 生效); 当前会话不迁移、不需要 handoff, 想立即换目录由人自己决定何时重开。" });
         return;
       }
       // Same shape as inbound's /new: windowName = tag for tagged sessions,
@@ -2671,7 +2664,7 @@ const main = async (): Promise<void> => {
     /** 原地交接被拒的统一说法: 为什么不行 + 还能走的路。拒绝发生在写任何交接记录之前 ——
      *  一次按下去却认不出结果的 /clear, 只会换来一条假的 restarting 墓碑。 */
     const inPlaceClearRefusal = (why?: string): string =>
-      `原地 handoff 已拒绝 (上下文未清空, 也没留交接记录): ${why ?? "这个后端没有可核验的原生 /clear 完成信号"}。还能走: ① set_workspace 之后 handoff —— 带 pendingCwd 的交接收拾的是换工作区的路径, daemon 起新 CLI 进程接简报; ② 让人在 CLI 里发 /new 另起会话, 再在该会话里接着干。`;
+      `原地 handoff 已拒绝 (上下文未清空, 也没留交接记录): ${why ?? "这个后端没有可核验的原地 /clear 完成信号"}。还能走: ① 想换目录的话 set_workspace({cwd}) 先记下 (此后新会话生效), 再 handoff —— daemon 在新 CLI 进程的新目录接简报; ② 让人在 CLI 里发 /new 另起会话, 再在该会话里接着干。`;
 
     /** 交接自己: 调用即受理 —— 简报由调用方给, daemon 排队等它这一轮说完后再动手; 已有一场在
      *  执行就排队到它之后 (不拒绝), 残余失败记录不参与 self 准入 (见 handoff.ts)。/handoff 点名
@@ -3118,7 +3111,6 @@ const main = async (): Promise<void> => {
         parent: o.parent ? briefOf(target, o.parent) : undefined,
         inherited: !!o.inherited,
         forkOf: o.forkOf ? briefOf(target, o.forkOf) : undefined,
-        cwdUnconfirmed: m.cwdUnconfirmed(target, o.cwd),
         // 最近动过的排前面: 名册只点名前几个, 截掉的该是早就停了的那些。
         // 没有 transcript 的冷记录按 bornAt 算, 刚生下还没开口的照样在。
         siblings: m.chatTargets(baseOfKey(target))

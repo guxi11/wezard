@@ -57,7 +57,7 @@ import { selectEffort, selectModel, type EffortSelectResult, type ModelScope, ty
 import { parseEffort, type Effort } from "../shared/effort.js";
 import { hasRegistry, liveSessionPids, markTranscript, probeOf, readRegistry, registrySnapshot, sessionOfPid, sessionOnPane, submittedSince, submittedEventSince, watchRegistry, type LiveSession, type TranscriptMark } from "./wezard-session.js";
 import { waitForIdle, type IdleResult } from "./wait-idle.js";
-import { wizardStore } from "./wizard.js";
+import { manifestationOf, wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
 import { getDetail, knowsToolUse, recordTool, recordToolResult, recordMark, recordTurnStart, recordTurnQuery, recordTurnInject, recordTurnItem, recordTurnUsage, recordTurnClose, recordCloseOpenTurns, lastChannelOf, openTurnsOf, buildDetailUrl, buildChatUrl, roleUniq, markTurnTextFinal } from "./detail.js";
 import type { Asker } from "../shared/detail-store.js";
@@ -2734,11 +2734,6 @@ export interface MirrorBridge {
    *  store; `clearPendingCwd` is called by the bridge after a /new spawn lands. */
   getCwd: (target: string) => { runningCwd: string; pendingCwd: string; defaultCwd: string };
   setPendingCwd: (target: string, cwd: string) => { ok: boolean; reason?: string; runningCwd: string; pendingCwd: string };
-  /** 「人确认过这个工作区」的读写两面。`cwdUnconfirmed` 为真 = 这个聊天还蹲在默认
-   *  兜底目录里且没人认领过它, 宪章据此让新 wizard 开工前先问一句; `confirmCwd` 是
-   *  人回答「不用换」时的落盘。 */
-  cwdUnconfirmed: (target: string, cwd?: string) => boolean;
-  confirmCwd: (target: string) => { ok: boolean; reason?: string; cwd: string };
   /** Detach + respawn a target's pane in `cfg.wrc.cwd` or its pendingCwd
    *  override. Used by /new to give the user a fresh claude in the bound
    *  project. Returns the new attachment result. */
@@ -5192,7 +5187,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       model: a.model || undefined,
       effort: a.effort || undefined,
       pendingCwd: a.pendingCwd || undefined,
-      cwdConfirmed: prevRec?.cwdConfirmed,
     });
     // 这个 pane 现在归 wezard 管 (spawn / reload 恢复 / switch 认下的人自己开的终端):
     // 打上归属标记, 它的 hook 才走 IM 审批。spawn 出来的进程本身带 WEZARD_MANAGED,
@@ -6076,7 +6070,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           cwd: baseA.runningCwd || undefined,
           model: baseA.model || undefined,
           effort: baseA.effort || undefined,
-          cwdConfirmed: deps.store.get(base)?.cwdConfirmed,
           pendingCwd: undefined,
         });
       } else {
@@ -6332,7 +6325,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         tmuxSession: baseA.tmuxSession || undefined,
         tmuxPane: baseA.tmuxPane || undefined,
         cwd: baseA.runningCwd || undefined,
-        cwdConfirmed: deps.store.get(base)?.cwdConfirmed,
         pendingCwd: baseA.pendingCwd || undefined,
       });
       log.info({ target, base, runningCwd: callerRunning, pendingCwd: expanded }, "setPendingCwd (chat-scoped, live base)");
@@ -6356,7 +6348,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         tmuxSession: callerA.tmuxSession || undefined,
         tmuxPane: callerA.tmuxPane || undefined,
         cwd: callerA.runningCwd || undefined,
-        cwdConfirmed: deps.store.get(target)?.cwdConfirmed,
         pendingCwd: callerA.pendingCwd || undefined,
       });
       log.info({ target, runningCwd: callerA.runningCwd, pendingCwd: callerA.pendingCwd }, "setPendingCwd (fallback: no base, wrote to caller)");
@@ -6369,32 +6360,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       return { ok: true, runningCwd: callerRec.cwd?.trim() || expandedDefaultCwd, pendingCwd: expanded };
     }
     return { ok: false, reason: "no mirror binding for target — send a message in the WeCom chat first", runningCwd: "", pendingCwd: "" };
-  };
-
-  // 「人说了就用这个目录」。一个新聊天的第一个 wizard 落在默认兜底目录里 —— 那不是
-  // 选择, 只是没人说过。所以默认按「还要换」办 (charter 让它开工前先问一句), 直到人
-  // 明说不用换。**只有这一个写入点**: 换去别的目录本身就是选择, 不必记一笔, 那时
-  // runningCwd 已经不等于默认目录, cwdUnconfirmed 自然为假。
-  // 寻址与 pendingCwd 同规 —— 写在 base 上 (聊天级), 没有 base 记录 (只有 tagged
-  // 会话的聊天) 就退回调用方自己的那条。
-  const confirmCwd = (target: string): { ok: boolean; reason?: string; cwd: string } => {
-    const base = baseOfKey(target);
-    const key = deps.store.get(base) ? base : deps.store.get(target) ? target : "";
-    const rec = key ? deps.store.get(key) : undefined;
-    if (!rec) return { ok: false, reason: "no mirror binding for target — send a message in the WeCom chat first", cwd: "" };
-    deps.store.set(key, { ...rec, cwdConfirmed: true });
-    const cwd = getCwd(target).runningCwd;
-    log.info({ target, key, cwd }, "cwd confirmed by user");
-    return { ok: true, cwd };
-  };
-
-  /** 该不该问人「要在哪个项目下干活」: 还蹲在默认兜底目录里, 而且人没说过就用它。 */
-  const cwdUnconfirmed = (target: string, cwd?: string): boolean => {
-    const base = baseOfKey(target);
-    if (deps.store.get(base)?.cwdConfirmed || deps.store.get(target)?.cwdConfirmed) return false;
-    // `cwd` 是调用方已经知道的「即将生效的目录」(spawn 前的宪章渲染)。没给就问现状。
-    const eff = cwd?.trim() ? expandHome(cwd.trim()) : getCwd(target).runningCwd;
-    return eff === expandedDefaultCwd;
   };
 
   // ── Peer graph (sibling sessions of one chat) ────────────────────────
@@ -6463,7 +6428,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (/^(user|chat|group|external_user):/.test(raw)) {
       return all.includes(raw) ? hit(raw) : { ok: false, reason: `no running session '${raw}'` };
     }
-    const named = ((t) => (t && sameBot(self, t) ? t : undefined))(wizardStore()?.byName(raw)?.target);
+    // 名字属于身份 (§2): 优先落「身份在调用方本聊天的化身」(A 群里的 tell_peer 点名只找
+    // A 群的化身, 不串 B 群的); 身份在本聊天没有化身时回落锚点化身 (旧世界的跨群寻址)。
+    const named = ((t) => (t && sameBot(self, t) ? t : undefined))(manifestationOf(wizardStore(), raw, baseOfKey(self)));
     if (named && all.includes(named)) return hit(named);
     if (named) return { ok: false, reason: `wizard '${WIZARD_MARK} ${raw}' exists but its session is not running — respawn it (spawn_wizard) or pick another` };
     return {
@@ -8118,8 +8085,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     },
     getCwd,
     setPendingCwd,
-    cwdUnconfirmed,
-    confirmCwd,
     newSession,
     cloneSession,
     sessionInfo,

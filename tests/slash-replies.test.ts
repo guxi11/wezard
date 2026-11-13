@@ -51,7 +51,6 @@ for (const slashAckFirstLine of [false, true]) {
 const handlers = new Map<string, (...args: any[]) => Promise<void>>();
 const replies: string[] = [];
 const spawned: any[][] = [];
-let unconfirmed = false;
 const cfg = ConfigSchema.parse({ bot: { botId: "test", secret: "test" }, wrc: { allowFrom: ["user:tester"] } });
 const client = {
   on: (event: string, handler: any) => handlers.set(event, handler),
@@ -61,7 +60,6 @@ const bridge = {
   hasMirrorTarget: () => true,
   status: () => ({ mirrors: [] }),
   getCwd: () => ({ runningCwd: "/repo/current", pendingCwd: "/repo/next", defaultCwd: "/repo/default" }),
-  cwdUnconfirmed: () => unconfirmed,
   newSession: async (...args: any[]) => { spawned.push(args); return { ok: false, reason: "spawn denied" }; },
   chatRoster: () => [{ base: "user:tester", name: "team", self: true, targets: ["user:tester#worker"] }],
   peers: async () => [{ target: "user:tester#worker", cwd: "/repo/current", cli: "codex", label: "🧙", paneAlive: true, busy: false, self: true, summary: "done" }],
@@ -77,9 +75,6 @@ const run = async (command: string): Promise<string> => {
   return replies.at(-1)!;
 };
 // /pwd 现在只回 runningCwd 一行 (老版带「📂 当前项目」多行回执)。
-assert.equal(await run("/pwd"), "/repo/current");
-unconfirmed = true;
-// cwdUnconfirmed 的⚠️提示已随 set_workspace 问句下线 (v3 设计 §2), /pwd 保持一行路径。
 assert.equal(await run("/pwd"), "/repo/current");
 // newSession(who, name, {silent, model}): CLI 后端由全局 defaultCli 决定, 不再是位置参数;
 // 认不出的 token (如旧写法的 "codex") 一律当正文, 模型槽只吃别名/slug。

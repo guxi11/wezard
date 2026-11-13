@@ -282,20 +282,16 @@ export const createWezardServer = (): McpServer => {
   const registerRare: typeof server.registerTool =
     process.env.WEZARD_MCP_EXTRA === "1" ? server.registerTool.bind(server) : ((() => undefined) as never);
 
-  // A live CLI keeps its cwd until its current task is handed off to a fresh process.
+  // v3 §2: 工作区是身份属性 —— set_workspace 只记录 (pendingCwd), 此后新开的会话/化身
+  // 在该目录启动; 不再驱动 handoff, 也不再有 keep 问句那一支。
   server.registerTool(
     "set_workspace",
     {
-      title: "Switch workspace directory",
+      title: "Set workspace directory for this identity",
       description:
-        "设置这个 wizard 的工作区 (绝对路径或 ~ 开头)。活 CLI 进程不能原地切换 cwd：请求会排入 pendingCwd。调用后先完成当前任务并整理可续接的简报，再调用自身 handoff (handoff({brief}))；daemon 会在新 CLI 进程中应用新目录并继续简报。不要让用户手动发 /new，也不要声称当前进程已切目录。没有活 pane 时可直接在新目录启动。\n"
-        + "**`keep:true` 是另一支**: 人回答「不用换, 就用现在这个目录」时调它 —— 不重开会话, 只把「这个工作区是人认过的」记下来, 此后新会话的开局不再问这件事。一个新聊天的第一个 wizard 落在默认兜底目录里, 开局会被要求先问一句要去哪个项目; 人给路径就走 `cwd`, 人说不用换就走 `keep`。",
+        "设置这个 wizard 身份的工作区 (绝对路径或 ~ 开头), **此后新开的会话/化身都在这个目录启动** (由人决定何时重开; 没有活 pane 时立即在新目录起一个)。活 CLI 进程不原地切 cwd, 当前会话不受影响、不需要 handoff; 要换目录就等下一次 /new 或 respawn。",
       inputSchema: {
-        cwd: z.string().optional().describe("Absolute project path, e.g. /Users/foo/projects/bar. ~ is expanded. 与 `keep` 二选一。"),
-        keep: z
-          .boolean()
-          .optional()
-          .describe("人回答了「不用换, 就用现在这个目录」时传 `true` (不要传 cwd)。只记一笔确认 —— 不重开会话、不动上下文, 此后再没人问这件事。"),
+        cwd: z.string().describe("Absolute project path, e.g. /Users/foo/projects/bar. ~ is expanded."),
         target: z
           .string()
           .optional()
@@ -304,13 +300,11 @@ export const createWezardServer = (): McpServer => {
           ),
       },
     },
-    async ({ cwd, keep, target }) => {
-      if (!cwd && !keep) return fail("set_workspace 要么给 cwd (换到那个目录), 要么给 keep:true (确认沿用当前目录)");
+    async ({ cwd, target }) => {
       const { sessionId, tmuxPane } = selfRef();
       const normalizedTarget = normalizeTarget(target);
       const { j } = await daemonPost("/mirror/workspace", {
-        ...(cwd ? { cwd } : {}),
-        ...(keep ? { keep: true } : {}),
+        cwd,
         ...(normalizedTarget ? { target: normalizedTarget } : {}),
         ...(sessionId ? { sessionId } : {}),
         ...(tmuxPane ? { tmuxPane } : {}),
@@ -319,25 +313,14 @@ export const createWezardServer = (): McpServer => {
         ok: false,
         tool: "set_workspace",
         reason: j.reason ?? "unknown",
-        ...(j.pendingCwd ? {
-          pendingCwd: j.pendingCwd,
-          workspaceStatus: "queued_not_applied",
-          nextStep: "新 CLI 未能启动，工作区尚未应用；pendingCwd 仍保留。确认启动条件恢复后重试 set_workspace，之后在活会话中收尾当前任务并调用自身 handoff({brief})。",
-        } : {}),
+        ...(j.pendingCwd ? { pendingCwd: j.pendingCwd } : {}),
       }));
       return ok({
         ok: true,
         target: j.target,
         sessionId: j.sessionId,
         cwd: j.cwd,
-        ...(j.pendingCwd ? { pendingCwd: j.pendingCwd } : {}),
-        ...(j.handoffRequired ? {
-          handoffRequired: true,
-          workspaceStatus: "queued_not_applied",
-          nextStep: "当前任务完成后，整理剩余工作的简报并调用 handoff({brief}) 自己交接。daemon 会在新 CLI 进程中应用待切换目录并继续简报；当前进程尚未切目录，不要让用户手动发 /new。",
-        } : {}),
-        ...(j.scheduled ? { scheduled: true } : {}),
-        ...(j.confirmed ? { confirmed: true } : {}),
+        ...(j.pendingCwd ? { pendingCwd: j.pendingCwd, appliedTo: "future-sessions" } : {}),
       });
     },
   );
@@ -644,7 +627,7 @@ export const createWezardServer = (): McpServer => {
       title: "Hand work over to a fresh context (yourself or another wizard)",
       description:
         "把工作压成简报并在当前轮结束后交给新上下文。没有待切换工作区时，守护进程在原 pane 清空上下文并接回简报；存在 pendingCwd 时，会启动新的 CLI 进程，在待切换目录中接回简报。\n" +
-        "**不传 `name` = 交接你自己**: 简报由你写在 `brief` 里, 守护进程给这一轮一个短收尾窗口, 到点即打断并交接 (欠着的回执会在新会话里逐笔续答, 不会丢)。调用 `set_workspace({cwd})` 后，先收尾当前任务，再调用自身 handoff 并在简报中写清剩余工作；不要要求用户手动发 `/new`，也不要声称旧进程已经切换 cwd。简报要写到零上下文的自己仅凭它就能接着干: 总目标 / 已完成与关键决策 / 当前状态 / 有序的下一步 / 关键文件与非显然的坑。\n" +
+        "**不传 `name` = 交接你自己**: 简报由你写在 `brief` 里, 守护进程给这一轮一个短收尾窗口, 到点即打断并交接 (欠着的回执会在新会话里逐笔续答, 不会丢)。交接是纯上下文管理 —— 想同时换目录就先 `set_workspace({cwd})` 记下 (此后新会话生效), handoff 会顺手在新目录接回简报。简报要写到零上下文的自己仅凭它就能接着干: 总目标 / 已完成与关键决策 / 当前状态 / 有序的下一步 / 关键文件与非显然的坑。\n" +
         "**传 `name` = 替那个 wizard 交接**: 守护进程让它自己写简报 (`focus` 指定要特别交代的点), 抓到后在原 pane 清空并贴回; 返回被带过去的那份简报。",
       inputSchema: currentAddressSchema({
         name: z.string().optional().describe("替谁交接 —— wizard 的名字 ('fix' / '.fix')。省略 = 你自己。"),

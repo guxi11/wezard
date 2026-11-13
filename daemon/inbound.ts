@@ -20,7 +20,7 @@ import { captureQuota, renderQuotaReport } from "./quota.js";
 import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe, allNames, unlinkTags, uniqueTag, displayName, tagLink, withBot, sameBot, stripSigil } from "../shared/session-label.js";
 import { botTagOf } from "./bot-mux.js";
 import { chatNameOf, clearChatName, listChatNames, setChatName, stewardTierOf, type CharterGuard } from "./chat-name.js";
-import { evictStaleName, reclaimChatName, wizardStore, type EvictDeps } from "./wizard.js";
+import { evictStaleName, manifestationOf, reclaimChatName, wizardStore, type EvictDeps } from "./wizard.js";
 import { truncate } from "../shared/std.js";
 import { hookModePath, readHookMode, writeHookMode } from "../shared/hook-mode.js";
 
@@ -54,14 +54,16 @@ const parseTag = (text: string): { tag: string; cleaned: string } => {
 
 const tagOf = tagOfKey;
 
-/** 名字 → 投递目标。名册 (全局) > 在本聊天新开一个 slot。
+/** 名字 → 投递目标。名册 (全局, 按身份解析到本聊天的化身) > 在本聊天新开一个 slot。
  *  新 wizard 的名字由 spawn 时 settleName 按 slot 落定。
  *  名册里那个名字归别的机器人 → 当作不认识 (落到「本聊天新开」; 名字全局唯一, settleName 会挂 `-N`)。
  *  引用气泡的 srcTag 也走这里, 同一把尺子。 */
-const resolveName = (base: string, name: string): string => {
+export const resolveName = (base: string, name: string): string => {
   if (!name) return base;
   const rec = wizardStore()?.byName(name);
-  if (rec && sameBot(base, rec.target)) return rec.target;
+  // 名字属于身份 (§2): 投递落「身份在本聊天的化身」—— 有就用本群的 (跨群会话隔离),
+  //  没有回落锚点化身 (= 旧世界的跨群点名, 共享锚点上下文), 不自动新建。
+  if (rec && sameBot(base, rec.target)) return manifestationOf(wizardStore(), name, base) ?? rec.target;
   const slot = name;
   // 这个 slot 已被一个改了名的 (冷) wizard 占着 → 挪到 `slot-N`, 别唤醒别人。
   const taken = new Set((wizardStore()?.all() ?? []).filter((w) => baseOfKey(w.target) === base).map((w) => tagOfKey(w.target)));

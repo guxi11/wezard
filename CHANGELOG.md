@@ -6,6 +6,7 @@
 
 ### Added
 - v3 身份系统地基 (切片一): `WizardRecord` 新增 `identity` / `role` / `kind` 字段 (`kind`: global-steward / steward / apprentice / worker, 缺省按 target 推 —— untagged 默认会话 = steward, 分身 = worker)。boot 幂等迁移 (`migrateIdentities`, 先于 backfillBorn/settleAll 执行): 存量每条记录 1:1 生成身份 (`identity = 自己的 target`, 稳定不变, 旧账 owner 字符串零改写), 第一次写盘前备份原文件到 `wizards.json.pre-v3-identities.bak` (已存在不覆盖, 永远是最原始的 v2 名册); 备份写不出来或表里有畸形记录 → 一条不写、原文件原样、下次开机再试。名字唯一性从 wizard 级升到**身份级**: 同身份的化身共用名字 (`claim` 直接领身份的名字、`rename` 一处改全身份同步), `byName` 回到身份锚点 (target === identity 那条, 恒定可复现), 撞**别的身份**才挂 `-N`; `evictStaleName` 的新鲜度按身份全部化身取最热的一个。target 字符串形状与 envelope 协议零改动。
+- v3 身份系统 (切片二) — 化身解析与 set_workspace 问句退役: 名字寻址统一走 manifestationOf (daemon/wizard.ts) —— 名字 → 身份 → 当前聊天的化身 (A 群点名只落 A 群的化身, 跨群会话不串), 身份在本聊天没有化身时回落锚点化身 (= 旧世界的跨群点名行为, 不自动新建), 1:1 世界恒等于 byName().target 行为零变化。接入两条寻址路径: inbound.resolveName (行首点名 / quote 路由) 与 mirror-bridge.resolvePeerTag (tell_peer / delegate 等点名的 base 聊天上下文)。charter 的「⚠️ 工作区是没人选过的默认兜底目录, 开工前先问一句」问句与 set_workspace({keep:true}) 那一支整体退役 (cwdUnconfirmed/confirmCwd/cwdConfirmed 一并删除); set_workspace({cwd}) 语义变为「改这个身份的工作区, 此后新开的会话/化身在该目录启动 (pendingCwd, /new 或 respawn 生效)」—— 活会话不迁移、不再指示 handoff, handoff 保留为纯上下文管理 (顺带应用已排的 pendingCwd)。
 
 ## [2.9.0] - 2026-11-13
 
