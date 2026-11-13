@@ -4,16 +4,28 @@ import ts from "typescript";
 import pino from "pino";
 import { ConfigSchema } from "../shared/config.js";
 import { installInboundRouter } from "../daemon/inbound.js";
+import { bindTagLinker, createdAck } from "../shared/session-label.js";
 
-// 严格群的 /new 确认 (`[wezard] created`) 是 daemon 的系统行, 不是模型发言 ——
-// 它必须绕过严格群出站门直达聊天; implicit 群则保持现状 (确认由 mirror 的
-// pushProjectInfo 发裸 `created`, daemon 这边不能多发一条)。
+// 严格群的 /new 确认 (`[wezard] <name> created`) 是 daemon 的系统行, 不是模型发言 ——
+// 它必须绕过严格群出站门直达聊天; implicit 群由 mirror 的 pushProjectInfo 发
+// `<name> created` (同一份 createdAck), daemon 这边不能多发一条。
+// name = 该会话的 wizard 名 (displayName, 与气泡头同源), 不是 pane 名 / chat 名。
 // 驱动的是真的 inbound 路由闭包, 只把 client / bridge 换成记录器。
 
-const strictReply = "[wezard] created";
+// 名册没在测试里绑 —— 这里是它的对外面: displayName(target) 取的就是这个 nameOf。
+// 只有 /new 那几组要名字: 名字一旦落定, 所有 replyText 都会带 `🧙 Nova：` 头,
+// 其余组的断言写的是裸文案。所以名册按组切换 (空 = 与未绑定时同形)。
+let NAMES: Record<string, string> = { "chat:room": "Nova", "chat:other": "Patch", "user:tester": "Solo" };
+bindTagLinker({ urlOf: () => undefined, resolve: () => undefined, nameOf: (t) => NAMES[t] ?? "" });
+
+const strictReply = createdAck("Nova", true);
 // mirror-bridge 的 sendStandalone 白名单: 这个前缀就是「系统提示」的判据。
+assert.equal(strictReply, "[wezard] Nova created");
 assert.match(strictReply, /^\[(mirror|wezard)\]/, "系统行必须带 [wezard]/[mirror] 前缀");
-assert.doesNotMatch("created", /^\[(mirror|wezard)\]/, "裸 created 不是系统行 (会被严格群出站门拦下)");
+assert.equal(createdAck("Nova", false), "Nova created", "implicit 群: 裸文案带身份名");
+assert.doesNotMatch(createdAck("Nova", false), /^\[(mirror|wezard)\]/, "裸 created 不是系统行 (会被严格群出站门拦下)");
+assert.equal(createdAck("", false), "created", "拿不到名字时退回旧文案");
+assert.equal(createdAck("", true), "[wezard] created");
 
 type Spawn = (target: string, windowName?: string, opts?: { silent?: boolean; model?: string }) => Promise<{ ok: boolean; reason?: string; sessionId?: string }>;
 
@@ -52,13 +64,28 @@ const session = (policy: Record<string, unknown>, spawn: Spawn = async () => ({ 
   return { send, replies, spawned };
 };
 
-// 1) 严格群: 恰好一条 `[wezard] created` 外发, 且是正常 spawn。
+// 1) 严格群: 恰好一条 `[wezard] <name> created` 外发, 且是正常 spawn。
 {
   const s = session({ "chat:room": { speech: "strict" } });
   await s.send("group", "room", "/new");
   assert.equal(s.spawned.length, 1, "严格群 /new 仍 spawn");
   assert.equal(s.spawned[0]!.opts.silent, false, "/new 不是 silent spawn");
   assert.deepEqual(s.replies, [strictReply], "严格群 /new 恰好一条系统行确认");
+}
+
+// 1b) 两条对照: 不同身份的会话各拿自己的名字 (同一个 daemon, 两个严格群)。
+{
+  const s = session({ "chat:room": { speech: "strict" }, "chat:other": { speech: "strict" } });
+  await s.send("group", "room", "/new");
+  await s.send("group", "other", "/new");
+  assert.deepEqual(s.replies, ["[wezard] Nova created", "[wezard] Patch created"], "确认文案跟着身份名走");
+}
+
+// 1c) implicit 群的 created 由 mirror 拼 (同一份 createdAck), 调用点钉住。
+{
+  const mirrorSrc = readFileSync("daemon/mirror-bridge.ts", "utf8");
+  assert.match(mirrorSrc, /pushProjectInfo\(target, createdAck\(displayName\(target\), false\)\)/,
+    "implicit 群的 created 用身份名拼, 不带系统前缀");
 }
 
 // 2) implicit 单聊: daemon 不多发 —— 确认仍由 mirror 的 pushProjectInfo 负责。
@@ -75,6 +102,8 @@ const session = (policy: Record<string, unknown>, spawn: Spawn = async () => ({ 
   await s.send("group", "room", "/new");
   assert.deepEqual(s.replies, [], "显式 implicit 群 /new 不新增外发");
 }
+
+NAMES = {};
 
 // 4) 严格群 spawn 失败: 仍只回失败那一行 —— 系统行不抢在失败前面。
 {

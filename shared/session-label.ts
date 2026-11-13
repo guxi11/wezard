@@ -235,6 +235,12 @@ export const targetOfTagUrl = (url: string): string | undefined => linker?.targe
 export const displayName = (target: string | undefined): string =>
   target ? linker?.nameOf(target) || tagOfKey(target) : "";
 
+/** 会话边界确认文案: `<身份名> created` (身份名 = 该会话的 wizard 名, 与气泡头同源)。
+ *  严格群的出站门只放行 `[wezard]`/`[mirror]` 系统行, 所以 strict 态带前缀 —— 前缀
+ *  既是给人看的来源记号, 也是「这不是模型发言」的判据。名字缺省时退回旧的裸文案。 */
+export const createdAck = (name: string, strict: boolean): string =>
+  `${strict ? "[wezard] " : ""}${name.trim() ? `${name.trim()} ` : ""}created`;
+
 /** 会话 key 的形态 (`user:xxx#slot` / `chat:wr…` / 内部 `wezard:internal`) —— 它永远不是名字。 */
 export const isSessionKey = (s: string): boolean => /^(?:user|chat|group|wezard):/.test(s.trim());
 
