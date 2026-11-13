@@ -28,12 +28,15 @@ for (const slashAckFirstLine of [false, true]) {
   const sent: string[] = [];
   const attached = {};
   const cfg = { wrc: { mirror: { slashAckFirstLine } } };
-  const push = new Function("cfg", "byTarget", "sendStandalone", "stripPrincipalPrefix", "client", "withTagHeader", "log",
+  // P7-S2: pushProjectInfo 里多了严格群出站门 (strictBase(baseOfKey(target))) —— 抽出来的
+  // 闭包不再自含, 这两个 helper 由测试注入 (与 stripPrincipalPrefix 同一待遇)。
+  const push = new Function("cfg", "byTarget", "sendStandalone", "stripPrincipalPrefix", "client", "withTagHeader", "log", "baseOfKey", "strictBase",
     transpile(`${newReply}\nreturn pushProjectInfo;`))(
       cfg, new Map([["user:tester", attached]]), (_a: unknown, text: string) => sent.push(text),
       (key: string) => key.replace(/^user:/, ""),
       { sendMessage: async (_id: string, body: any) => sent.push(body.markdown.content) },
       (_key: string, text: string) => text, pino({ level: "silent" }),
+      (key: string) => key.split("#")[0]!, () => false,
     );
   push("user:tester", "created");
   push("user:missing", "created");

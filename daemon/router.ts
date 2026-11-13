@@ -475,9 +475,12 @@ const reportedOutcome = (row: Route, verdict: FinalVerdict): Outcome => {
   const report = reportOf(row, verdict, "done");
   return { ...makeOutcome("done", verdict.text), rev: report.version, report };
 };
-export const onFinal = (table: Table, owner: Key, serves: EventId | undefined, verdict: FinalVerdict): Op[] => {
+export const onFinal = (table: Table, owner: Key, serves: EventId | undefined, verdict: FinalVerdict, strict = false): Op[] => {
   const row = serves ? routeOf(table, serves) : undefined;
   if (!row || row.owner !== owner) return [];
+  // P7-S2 严格群: chat 接收行 (人话根义务) 的终句零 op —— 正文只进详情页, 关账走
+  // chat_reply (answer+hand)。拨回 implicit 后 strict=false, 未结义务照旧由下一句终句落定。
+  if (strict && row.receiver.kind === "chat") return [];
   if (row.status === "held" || row.outcome?.status === "canceled") return [];
   const kind = verdict.error ? "error" : verdict.result ? "result" : finalKind(table, row.event, verdict.text);
   if (kind === "need" || kind === "error") {
@@ -519,9 +522,11 @@ const retellOps = (table: Table, row: Route, verdict: FinalVerdict): Op[] => {
 /** 这一轮的终句该不该进群 (eventFinalGate, §9.5): 没有行 = 老事件照放; held = 还没轮到它;
  *  在飞 = 不再挂着未落定的子行; 已落定 = 只放追述 —— 表上的 outcome 就是这句 (onFinal 已收下),
  *  或这句带 `RESULT:`、owner 还是它、那一笔没被收掉 (onFinal 会收下, 与它谁先跑无关)。 */
-export const finalReleased = (table: Table, owner: Key, serves: EventId | undefined, body: string, source: ReportSource): boolean => {
+export const finalReleased = (table: Table, owner: Key, serves: EventId | undefined, body: string, source: ReportSource, strict = false): boolean => {
   const row = serves ? routeOf(table, serves) : undefined;
   if (!row) return true;
+  // P7-S2 严格群: chat 接收行的终句不进群 (占位保持, 交付走 chat_reply 的口子)。
+  if (strict && row.receiver.kind === "chat") return false;
   // 已 transfer 给别人的那一笔: 旧 owner 的终句不再算数 (§3.4, 同 onFinal) —— 交代与气泡都归接手方。
   if (row.owner !== owner || row.status === "held" || row.outcome?.status === "canceled") return false;
   // WAIT is progress even without a registered child; never claim the completion slot.
@@ -787,11 +792,12 @@ export interface Router {
   /** 孤儿判定 (§4.3): 结论要服务的那一笔已经收口 —— 结论照投, 标 `late`。 */
   isOrphaned: (serves: EventId) => boolean;
   /** 这一轮终句该不该进群 (eventFinalGate)。 */
-  finalReleased: (owner: Key, serves: EventId | undefined, body: string, source: ReportSource) => boolean;
+  finalReleased: (owner: Key, serves: EventId | undefined, body: string, source: ReportSource, strict?: boolean) => boolean;
   /** 终句的语义 (need / result / progress / done) —— 诊断与影子对账要看的那一个词。 */
   finalKind: (serves: EventId | undefined, text: string) => FinalKind;
-  /** owner 一轮结束时该落的 op (§3.2)。做完就交副作用层: 先落盘再投递 (§9.3)。 */
-  onFinal: (owner: Key, serves: EventId | undefined, verdict: FinalVerdict) => Op[];
+  /** owner 一轮结束时该落的 op (§3.2)。做完就交副作用层: 先落盘再投递 (§9.3)。
+   *  strict = 严格群的 chat 接收行零 op (P7-S2)。 */
+  onFinal: (owner: Key, serves: EventId | undefined, verdict: FinalVerdict, strict?: boolean) => Op[];
   /** 收口前置已失败的 held 路由。 */
   sweepHeld: (signals: HeldSweepSignals) => Op[];
   /** 先落盘再改内存 —— 内存里有的, 盘上一定有 (不变量 1)。 */
@@ -875,9 +881,9 @@ export const openRouter = (opts: { file?: string; note?: Note; retain?: (row: Ro
     settledTo: (owner) => settledTo(table, owner),
     escalate: (event, alive) => escalate(table, event, alive),
     isOrphaned: (serves) => isOrphaned(table, serves),
-    finalReleased: (owner, serves, body, source) => finalReleased(table, owner, serves, body, source),
+    finalReleased: (owner, serves, body, source, strict) => finalReleased(table, owner, serves, body, source, strict),
     finalKind: (serves, text) => finalKind(table, serves, text),
-    onFinal: (owner, serves, verdict) => onFinal(table, owner, serves, verdict),
+    onFinal: (owner, serves, verdict, strict) => onFinal(table, owner, serves, verdict, strict),
     sweepHeld: (signals) => heldFailureOps(table, signals),
     commit,
     compact,

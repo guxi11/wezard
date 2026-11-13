@@ -1478,9 +1478,12 @@ const main = async (): Promise<void> => {
       }
       settleFinal(e, verdict);
     };
-    /** 一轮的终句落到它服务的那一行上 (定论 / 中途态)。 */
+    /** 一轮的终句落到它服务的那一行上 (定论 / 中途态)。
+     *  P7-S2: 公开轮落在严格群 (chatPolicy.speech=strict) 时, chat 接收行的终句零 op ——
+     *  义务留给 chat_reply 关账; 私聊轮与 implicit 群照旧。 */
     const settleFinal = (e: MessageEvent, verdict: MessageFinal): void => {
       if (!canSettleFinal(e)) return;
+      const strictFinal = !!e.channel && chatPolicyOf(cfg, e.channel).speech === "strict";
       const sections = verdict.error ? [] : addressedResults(verdict.text);
       if (e.feedbackRoute && sections.length) {
         resultCorrection(e, { name: "served" }, 0, "此私密纠正只续办绑定的人类任务；请对原任务提交未加收件人地址的 RESULT", "served", false);
@@ -1503,7 +1506,7 @@ const main = async (): Promise<void> => {
             const key = `${index}:${section.name}`;
             const source = { input: event.id, ...(event.turn ? { turn: event.turn } : {}),
               facts: [JSON.stringify([event.id, row.event, key, row.receiver])] };
-            router.onFinal(event.target, row.event, { text: `RESULT: ${section.body}`, source, result: true }).forEach(commitRoute);
+            router.onFinal(event.target, row.event, { text: `RESULT: ${section.body}`, source, result: true }, strictFinal).forEach(commitRoute);
           },
         });
         return;
@@ -1527,11 +1530,11 @@ const main = async (): Promise<void> => {
         if (settleServedChatResult(e, servedRow, true, inputs,
           (event, source, frozen) => events.coversTaskInputs(event, source, frozen),
           (event, row, reason) => resultCorrection(event, { name: "served" }, 0, reason, "served"),
-          (event, row) => router.onFinal(event.target, row.event, { ...verdict, source: reportSource(event) }).forEach(commitRoute))) {
+          (event, row) => router.onFinal(event.target, row.event, { ...verdict, source: reportSource(event) }, strictFinal).forEach(commitRoute))) {
           return;
         }
       }
-      const plans = router.onFinal(e.target, routeEvent, { ...verdict, source: reportSource(e) });
+      const plans = router.onFinal(e.target, routeEvent, { ...verdict, source: reportSource(e) }, strictFinal);
       // Error evidence has no durable event result. Queue the chat reply before
       // mark:error suppresses replay, so a reload between the two cannot lose it.
       if (verdict.error && plans.some((op) => op.op === "mark" && op.status === "error")
@@ -2231,6 +2234,8 @@ const main = async (): Promise<void> => {
     });
     m.setEventFinalGate((e) => {
       if (handoffFinalSuppressed(e)) return false;
+      // P7-S2 严格群: chat 接收行的终句不进群 (占位保持, 交付走 chat_reply 的口子)。
+      if (e.channel && chatPolicyOf(cfg, e.channel).speech === "strict") return false;
       if (e.quiet || e.canceled || e.interjected || !ownsReplyEvent(e)) return false;
       const body = (events.get(e.id) ?? e).result?.body ?? "";
       if (addressedResults(body).length) return false;
@@ -2243,7 +2248,8 @@ const main = async (): Promise<void> => {
       if (!servedChatResultFinalAllowed(current, sourceRow, boundRow, parseClosing(body).kind === "result",
         (task, source, inputs) => events.coversTaskInputs(task, source, inputs))) return false;
       const servedRow = boundRow ?? sourceRow;
-      return router.finalReleased(e.target, servedRow?.event ?? routeEvent, body, reportSource(current));
+      return router.finalReleased(e.target, servedRow?.event ?? routeEvent, body, reportSource(current),
+        !!e.channel && chatPolicyOf(cfg, e.channel).speech === "strict");
     });
     // boot 的路由表侧恢复 (T8): held 重查前置、answered 重投一次; 二者幂等, 与 events.resume
     // 重放的注入/回执撞上无害。
