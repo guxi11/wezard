@@ -171,13 +171,14 @@ P1 曾把 🧙‍♂️ 记号铺到全部显示面; 人随后拍板修正: wiza
 
 ### 6.2 改成什么
 
-- **频道 = 该 bot 的一个「群」**, 完整套用 §2/§3: 全局管家接待新频道 → 指定 channel 管家 (`chatPolicy.<topic-chat>.steward`), 该身份在此频道的化身按群隔离。
-- **感知其他机器人**: 判官 prompt 的 others 段 (buildJudgePrompt 现在只列同 bot wizard) 扩展为含 `bot:` 作者; channel 管家的 charter / 注入上下文附「本频道最近活跃的机器人」(从 ChannelStore 聚合)。`read_channel` 已能读全文。
+- **频道 = 该 bot 的一个「群」**, 完整套用 §2/§3: 全局管家接待新频道 → 指定 channel 管家, 该身份在此频道的化身按群隔离。频道管家绑定写**专用表** `wrc.channel.steward` (键 = 裸 topic_id → 身份名, hot) —— 与 `chatPolicy.<chat>.steward` (群聊/单聊) 是两张互不覆盖的表, 频道解析先查自己的表; 两边都写时频道表赢。接待解析顺序: 频道表 > 频道现存默认会话 (untagged, 存量零变化) > 全局管家; 判官放行后的消息走同一条解析 (伪装群帧的裸消息路由)。
+- **感知其他机器人**: 判官 prompt 的 others 段 (buildJudgePrompt 现在只列同 bot wizard) 扩展为含 `bot:` 作者聚合 (自身剔除, 带条数); 主 wizard 的注入上下文附「本频道最近活跃的机器人」行 (同一份聚合); 判官职责行取频道管家身份 (绑定 > 默认会话 > 全局管家) 的描述。`read_channel` 已能读全文。
+- **跨 bot 出声面 (安全边界)**: 只有 `send_post` / `send_reply` 会跨 bot 出去 —— 即频道管家化身对频道事件的最终回复帧与主动 markdown。审批卡 (template_card) 永远改投问话人私聊; 非 markdown 出站丢弃; wizard 间私聊 (tell_peer/delegate)、群聊回复、notices、详情页全都不经频道通道 (传输补丁只对已登记 topic 生效, 其余 chatid 原样走群通道)。判官 prompt 只含频道公开历史 + 同 bot 名册, 不含任何私聊内容。
 - **沟通**: 出站 post/reply 即与他 bot 通信 (机制已通); 跨 bot 身份映射 = `bot:<aibotid>` 稳定 id + 消息头 `🧙‍♂️ name：` 自称名 (§1 的新表示在频道里成为跨 bot 事实上的自我介绍协议) —— 不做主动发现协议 (待人拍板 ②)。
 - **判官演进**: 仍做第一道「该不该本 bot 答」; 放行后不再进「默认会话」而是进 channel 管家化身 (组团内再分派)。
 - 审批卡投私聊 (lastAsker)、replyOk、频道历史缓存/回填全部照旧。
 
-### 6.3 落点: `daemon/channel.ts` (dispatch 目标 = 管家化身; judge prompt others 段)、`daemon/channel-context.ts` (上下文附 bot 作者聚合)、§3 的绑定表。破坏性: 频道路由目标从「频道默认会话」变为「频道管家化身」—— 存量频道 boot 迁移同 §3.3。迁移: 判官/缓存/出站零迁移。
+### 6.3 落点: `shared/config.ts` (wrc.channel.steward 表)、`daemon/steward.ts` (appointedChannelSteward 接进 stewardIdentityOf/stewardRoute/isStewardTarget)、`daemon/channel.ts` (判官职责行/bot 聚合/registerTopic)、`daemon/channel-context.ts` (机器人活跃行)。破坏性: 频道路由目标从「频道默认会话」变为「频道管家化身」—— 绑定了才有变化, 未绑定的存量频道零变化 (untagged 记录即绑定事实之源, 现读)。迁移: 判官/缓存/出站/存量频道零迁移; 新频道由全局管家接待 (不再 auto-spawn untagged 默认会话, 与 §3.3 同一行为变化)。测试不真打跨 bot 网络: 合成事件 + 假 author (tests/channel-steward.test.ts); 真跑双 bot 频道 = 活体验收项。
 
 ---
 

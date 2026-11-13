@@ -16,11 +16,20 @@ import { identityOf, type WizardKind, type WizardStore } from "./wizard.js";
 export const appointedSteward = (cfg: Config, base: string): string =>
   ((cfg.chatPolicy?.[base] as { steward?: string } | undefined)?.steward ?? "").trim();
 
+/** 频道管家表 (wrc.channel.steward, 键 = 裸 topic_id; §6): 与 chatPolicy 是两张互不覆盖的表,
+ *  频道 (chat:<topic_id>) 先查自己的 —— 频道绑定不落 chatPolicy, 群聊绑定也不落频道表。
+ *  解析不出 base 里的 topic_id (非 chat: 形状) 时恒空。 */
+export const appointedChannelSteward = (cfg: Config, base: string): string => {
+  const topicId = base.startsWith("chat:") ? base.slice("chat:".length) : "";
+  if (!topicId) return "";
+  return ((cfg.wrc.channel.steward ?? {})[topicId] ?? "").trim();
+};
+
 /** 该聊天此刻的管家身份 id: config 显式绑定 > 该聊天现存的默认会话 (untagged 记录, 旧行为)。
  *  绑定了但名字解析不到 / 属于别的机器人 → 当作没绑 (回落默认会话): 绑定错由 config 校验报,
  *  接待与手闸不该跟着一个悬空名字一起失效。没有管家 → undefined。 */
 export const stewardIdentityOf = (cfg: Config, store: WizardStore | undefined, base: string): string | undefined => {
-  const name = appointedSteward(cfg, base);
+  const name = appointedChannelSteward(cfg, base) || appointedSteward(cfg, base);
   if (name) {
     const rec = store?.byName(name);
     if (rec && sameBot(base, rec.target)) return identityOf(rec);
@@ -79,7 +88,7 @@ export const stewardRoute = (
       fresh: { identity, name: anchor.name, ...(anchor.kind ? { kind: anchor.kind } : {}), ...(workspace ? { workspace } : {}) },
     };
   };
-  const bound = appointedSteward(cfg, base);
+  const bound = appointedChannelSteward(cfg, base) || appointedSteward(cfg, base);
   if (bound) {
     const rec = store.byName(bound);
     if (rec && sameBot(base, rec.target)) return open(identityOf(rec));

@@ -23,6 +23,8 @@ export interface ChannelContextInput {
   replyId?: string;
   /** 入站帧 id —— 主 agent 靠它指回原始消息 (read_channel / 回复引用)。 */
   msgid?: string;
+  /** 本频道最近活跃的其他机器人 (§6 邻居感知): bot:<id> → 条数, 自动机器人已剔除。 */
+  bots?: Array<{ id: string; n: number }>;
   budget: number;
 }
 
@@ -54,6 +56,13 @@ export const formatChannelContext = (i: ChannelContextInput): string => {
   const out: string[] = [head];
   const tail = (i.reason ? 220 : 0) + (i.intent ? 260 : 0);
   let left = Math.max(300, i.budget - head.length - tail);
+  // 邻居感知 (§6): 频道是跨 bot 的总线, 主 wizard 要一眼看到谁也在场 ——
+  // 身份只认 bot:<id>, 消息头里的自称名要从历史行里读。
+  if (i.bots?.length) {
+    const line = `本频道最近活跃的机器人: ${i.bots.map((b) => `${b.id} (${b.n})`).join("、")}`;
+    out.push(line);
+    left -= line.length + 1;
+  }
   for (const s of sections) {
     if (left <= s.title.length) continue;
     out.push(s.title);

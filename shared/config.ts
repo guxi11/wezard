@@ -174,6 +174,10 @@ const Channel = z.object({
     searchLimit: z.number().int().min(0).max(10).default(3).describe("消息里有指代 / 错误码 / 路径时搜历史, 带前几条命中; 0 = 不搜"),
     backfillOnBoot: z.boolean().default(true).describe("第一次见到一个频道时用 aibot_topic_get_post_list 回填最近 mainPosts 条 (补 reload / 断线空窗)"),
   }).default({}),
+  // v3 §6 频道管家 (与群聊的 chatPolicy.<chat>.steward 是两张互不覆盖的表):
+  // 频道也是「组团里的一个群」, 接待解析 = 本表 > 频道现存的默认会话 > 全局管家,
+  // 判官放行后的消息走同一条解析。键是裸 topic_id (频道缓存/事件都用它, 不带 chat: 前缀)。
+  steward: hot(z.record(z.string(), z.string()).default({}).describe("频道管家表: 裸 topic_id → wizard 身份名 (参数写裸名)。频道专用的绑定键, 不写 chatPolicy (那是群聊/单聊的); 绑定后该频道裸消息路由到这个身份在频道的化身 (没有就自动开一个, 目录 = 身份的工作区), 管家手闸跟随绑定。缺省 = 频道现存默认会话; 新频道由全局管家接待。热生效")),
 }).default({});
 
 const Wrc = z.object({
@@ -394,7 +398,7 @@ const Chats = z.record(z.string(), z.string().describe("base principal (`chat:wr
 export const ChatPolicy = z.object({
   topOnly: z.boolean().optional().describe("顶层模式: 人只和顶层 wizard (群管家 / 人 `.name` 点名的) 对话; wizard 之间一律私聊 (tell_peer / delegate 的 public 失效), 被派活的 wizard 不能 notify 进群, 过程只在 rolepage。**默认开** (省略即开), 只有显式 `false` 才让 wizard 之间的往来进群"),
   stewardBudget: z.number().int().min(-1).default(4).describe("群管家的手闸: 每轮自己跑命令 / 外部工具的次数上限 (读文件类命令不计), 用完拒并叫它 delegate; 改文件、开子代理一律拒, 读代码放行。-1 = 不设闸"),
-  steward: z.string().optional().describe("这个聊天的管家: wizard 身份名 (参数写裸名)。绑定后该群裸消息路由到这个身份在本群的化身 (没有化身就自动开一个, 目录 = 身份的工作区), 管家手闸跟随绑定。缺省 = 该聊天现存的默认会话; 还没有任何会话的新聊天由全局管家接待。换管家 = config_set 这一项, 热生效"),
+  steward: z.string().optional().describe("这个聊天的管家: wizard 身份名 (参数写裸名)。绑定后该群裸消息路由到这个身份在本群的化身 (没有化身就自动开一个, 目录 = 身份的工作区), 管家手闸跟随绑定。缺省 = 该聊天现存的默认会话; 还没有任何会话的新聊天由全局管家接待。换管家 = config_set 这一项, 热生效。群聊/单聊专用 —— 频道 (topic) 的管家写 wrc.channel.steward"),
 });
 export type ChatPolicy = z.infer<typeof ChatPolicy>;
 

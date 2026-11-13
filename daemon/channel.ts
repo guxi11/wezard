@@ -14,9 +14,10 @@ import type { Config } from "../shared/config.js";
 import { pickTier } from "../shared/model-tiers.js";
 import { resolveCliBackend } from "../shared/cli-backends.js";
 import { augmentedPath } from "../shared/exec-path.js";
-import { baseOfKey, keyOf } from "../shared/session-label.js";
+import { baseOfKey, keyOf, sameBot } from "../shared/session-label.js";
 import { sleep } from "../shared/std.js";
-import { wizardStore } from "./wizard.js";
+import { identityOf, wizardStore } from "./wizard.js";
+import { stewardIdentityOf } from "./steward.js";
 import { expandHome } from "../shared/paths.js";
 import { ChannelStore, type ChannelMsg } from "./channel-store.js";
 import { formatChannelContext, pickQuery, wantsHistory, withoutMsg } from "./channel-context.js";
@@ -34,6 +35,8 @@ interface TopicCtx { topicId: string; postId: string; asker: string }
 
 /** 已知 topic_id。sendMessage 用它区分「频道」和普通群 chatid。 */
 const topics = new Set<string>();
+/** 把 topic_id 登记为已知频道 (onTopic 里自动做; 导出给测试 / 显式注册面用)。 */
+export const registerTopic = (topicId: string): void => { topics.add(topicId); };
 /** 入站事件 msgid → 它所属的帖子；replyStream 用 streamId 找回来。 */
 const byStream = new Map<string, TopicCtx>();
 /** topic 上最近一条帖子，主动消息尽量挂成它的评论。 */
@@ -135,6 +138,22 @@ const replyMsg = (r: any, postId: string): ChannelMsg | undefined => {
   return { id, kind: "reply", postId: String(r?.post_id ?? postId), at: atOf(r?.create_time), author: authorOf(r?.creator), text };
 };
 
+/** 最近消息里活跃的其他机器人 (§6 邻居感知): bot:<id> → 条数, 自己 (selfBot) 已剔除。
+ *  判官 prompt 的 others 段与主 wizard 的注入上下文共用这一份聚合。 */
+export const botAuthors = (msgs: Array<ChannelMsg | undefined>, selfBot = ""): Array<{ id: string; n: number }> => {
+  const self = selfBot ? `bot:${selfBot.slice(0, 10)}` : "";
+  const n = new Map<string, number>();
+  for (const m of msgs) {
+    const a = m?.author ?? "";
+    if (!a.startsWith("bot:") || a === self || a === "bot:?") continue;
+    n.set(a, (n.get(a) ?? 0) + 1);
+  }
+  return [...n.entries()]
+    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+    .slice(0, 8)
+    .map(([id, count]) => ({ id, n: count }));
+};
+
 /** 记一条进本地缓存: 判官上下文 / 主 wizard 上下文 / read_channel 共用这一份。 */
 const record = async (cfg: Config, topicId: string, msg: ChannelMsg | undefined): Promise<void> => {
   if (!msg) return;
@@ -208,7 +227,7 @@ const contextFor = async (
   postId: string,
   triggerId: string | undefined,
   text: string,
-  extra: { reason?: string; intent?: string; msgid?: string } = {},
+  extra: { reason?: string; intent?: string; msgid?: string; selfBot?: string } = {},
 ): Promise<string> => {
   const h = d.cfg.wrc.channel.history;
   // 触发这条上下文的回复 id 与线程根不同 (评论) 时一并带上: 目标 agent 要能指回
@@ -221,11 +240,14 @@ const contextFor = async (
   const recent = withoutMsg(await s.recentPosts(topicId, h.mainPosts), triggerId);
   const query = h.searchLimit > 0 && wantsHistory(text) ? pickQuery(text) : "";
   const hits = query ? (await searchChannel(d, topicId, query, h.searchLimit)).filter((m) => m.id !== triggerId) : [];
+  // 邻居感知: 从同一批历史里聚合其他机器人 (自己剔除), 让主 wizard 知道谁也在场。
+  const bots = botAuthors([...thread, ...recent, ...hits], extra.selfBot ?? "");
   return formatChannelContext({
     ...id,
     thread,
     recent,
     hits,
+    ...(bots.length ? { bots } : {}),
     ...(query ? { query } : {}),
     ...(extra.reason ? { reason: extra.reason } : {}),
     ...(extra.intent ? { intent: extra.intent } : {}),
@@ -417,6 +439,8 @@ export interface JudgePrompt {
   thread: ChannelMsg[];
   latest: string;
   latestAuthor: string;
+  /** 最近活跃的其他机器人 (bot:<id> → 条数, 自己已剔除; §6 邻居感知)。 */
+  bots?: Array<{ id: string; n: number }>;
 }
 
 /** 每条历史都带 id + 时刻: 判官只做判定不改身份, 但它引用的那一句必须能被
@@ -427,8 +451,21 @@ const judgeLine = (m: ChannelMsg, mark = "  "): string =>
 export const buildJudgePrompt = (cfg: Config, i: JudgePrompt): string => {
   const base = `chat:${i.topicId}`;
   const me = botName(cfg);
-  const job = wizardStore()?.get(base)?.description ?? "这个频道的助手";
-  const others = (wizardStore()?.all() ?? [])
+  // 职责取频道管家身份的描述 (绑定 > 频道默认会话; §6 频道也是「组团里的一个群」),
+  // 没绑也没会话的新频道回落全局管家, 再没有就退通用文案。
+  const store = wizardStore();
+  const stewardId = stewardIdentityOf(cfg, store, base);
+  const stewardRecs = stewardId ? (store?.all() ?? []).filter((w) => identityOf(w) === stewardId) : [];
+  // 新频道 (无绑定无默认会话): 接待它的是全局管家 (§6), 职责行回落到它的描述。
+  const globalRec = stewardId ? undefined : (store?.all() ?? [])
+    .filter((w) => w.kind === "global-steward" && sameBot(base, w.target))
+    .sort((a, b) => Number(a.target !== identityOf(a)) - Number(b.target !== identityOf(b)) || a.bornAt - b.bornAt)[0];
+  const job = stewardRecs.find((w) => w.target === stewardId)?.description
+    ?? stewardRecs[0]?.description
+    ?? store?.get(base)?.description
+    ?? globalRec?.description
+    ?? "这个频道的助手";
+  const others = (store?.all() ?? [])
     .filter((w) => baseOfKey(w.target) === base && w.target !== base && w.target !== keyOf(base, "judge"))
     .map((w) => `${w.name || w.target}${w.description ? `（${w.description}）` : ""}`)
     .slice(0, 12);
@@ -438,6 +475,7 @@ export const buildJudgePrompt = (cfg: Config, i: JudgePrompt): string => {
     `定位：topic=${i.topicId} · thread post=${i.postId}${isReply ? ` · 本次消息 reply=${i.triggerId}` : ""} · msgid=${i.msgid}`,
     `你的职责：${job}`,
     others.length ? `频道里其他机器人：${others.join("、")}` : "",
+    i.bots?.length ? `频道里最近活跃的其他机器人：${i.bots.map((b) => `${b.id}（${b.n} 条）`).join("、")} —— 跨 bot 身份只认 bot:<id>，它们帖子里的 🧙‍♂️ name： 是自称名` : "",
     i.thread.length ? "这条消息所在的线程（父帖 + 评论，都带 id）：" : "",
     ...i.thread.map((m) => judgeLine(m, "  ")),
     i.recent.length ? "最近的频道消息（旧→新）：" : "",
@@ -599,6 +637,7 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger)
       thread,
       latest: text,
       latestAuthor: fromUser,
+      bots: botAuthors([...recent, ...thread], selfBot),
     });
     // 一次 -p 进程也串行：同一 topic 两条消息同时到不该各起一个, 判词会互相盖。
     const verdict = await serial(`judge:${topicId}`, () => askJudge({ cfg, log }, prompt));
@@ -617,6 +656,7 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger)
     const ctx = await contextFor({ client, cfg, log }, topicId, postId, triggerId, text, {
       reason: verdict.reason,
       msgid,
+      selfBot,
       ...(verdict.intent ? { intent: verdict.intent } : {}),
     });
     dispatch(topicId, postId, msgid, fromUser, `${ctx}\n——\n${bodyFor(text, verdict)}`, at, false);
@@ -631,7 +671,7 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger)
     const selfBot = String(body.aibotid ?? "");
     const at = Number(body.create_time ?? 0) * 1000 || Date.now();
     if (!topicId) return;
-    topics.add(topicId);
+    registerTopic(topicId);
     if (asker) lastAsker.set(topicId, asker);
     // 第一次见到的频道从官方补最近 N 条 (reload / 断线空窗期的事件本地没有)。
     void backfill(client, cfg, log, topicId).catch((e: Error) => log.warn({ err: e.message, topicId }, "channel backfill failed"));
@@ -652,7 +692,7 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger)
       await record(cfg, topicId, postMsg(post));
       if (reply) await record(cfg, topicId, replyMsg(reply, postId));
       const text = cleanContent(reply?.content ?? post?.content) || "（在频道里 @ 了你，没有正文）";
-      const ctx = await contextFor({ client, cfg, log }, topicId, postId, replyId || postId, text, { msgid });
+      const ctx = await contextFor({ client, cfg, log }, topicId, postId, replyId || postId, text, { msgid, selfBot });
       dispatch(topicId, postId, msgid, asker, `${ctx}\n——\n${text}`, at, true);
       return;
     }
