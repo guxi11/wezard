@@ -156,6 +156,7 @@ export interface TurnDetailRecord {
   cwd?: string;        // 本轮运行时该 pane 的实际工作目录 (可能与 cfg.wrc.cwd 不同)
   cli?: CliBackendName; // 跑这一轮的 CLI 后端 (claude / codebuddy …), 详情页据此称呼它
   userQuery?: string;  // 触发本轮的用户输入原文 (mirror 侧 dispatch 的 text)
+  rawQuery?: string;   // P7-S3c ②: 信封/提醒尾部之前的原文 (dispatch 的 rawText = 账本 human 行的 text); strict 群的 rolepage 入消息按它渲染, 老记录没有 → 回落 userQuery
   cut?: CtxCut;        // 本轮之前的上下文断点; undefined = 与上一轮同一上下文
   from?: TurnFrom;     // 本轮由同伴 / 定时任务开口; undefined = 人直接说的
   // 频道 —— 这一轮的输入在哪儿说的、回复发到哪儿。名字全局可达以后, 人可以在

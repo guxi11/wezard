@@ -1134,7 +1134,7 @@ export const installInboundRouter = (
     try { noteHuman?.(channel, { at: Date.now(), id: msg.msgid, author: msg.from.userid, text }); } catch { /* 记录失败不挡消息 */ }
     try {
       // 回复回到发话的这个群 —— `who` 可能住在别的聊天 (名字全局可达)。
-      await bridge.dispatch({ eventId: slash ? undefined : messageId(botTagOf(msg), channel, msg.msgid), identity: JSON.stringify(msg), originalAt: msg.create_time ? (msg.create_time < 1e12 ? msg.create_time * 1000 : msg.create_time) : Date.now(), principal: who, text: text + renderTail(envelope, steward, notice), images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}` });
+      await bridge.dispatch({ eventId: slash ? undefined : messageId(botTagOf(msg), channel, msg.msgid), identity: JSON.stringify(msg), originalAt: msg.create_time ? (msg.create_time < 1e12 ? msg.create_time * 1000 : msg.create_time) : Date.now(), principal: who, text: text + renderTail(envelope, steward, notice), rawText: text, images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}` });
     } catch (e) {
       log.error({ err: (e as Error).message }, "bridge dispatch failed");
       try { await client.replyStream(frame, msg.msgid, withTagHeader(who, `[wezard] error: ${(e as Error).message}`), true); } catch { /* ignore */ }

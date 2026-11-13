@@ -2558,6 +2558,9 @@ export interface MirrorDispatchArgs {
   channel?: string;
   /** 发话人 `user:<userid>`。 */
   speaker?: string;
+  /** P7-S3c ②: 信封/提醒尾部之前的原文 —— 与账本 human 行同一文本; strict 群的
+   *  rolepage 入消息按它渲染 (口径与出气泡同源: 账本)。 */
+  rawText?: string;
 }
 
 export interface AttachArgs {
@@ -2887,6 +2890,8 @@ interface Seal {
   at: number;
   /** 这一轮的问话 (不带信封的原话)。 */
   query: string;
+  /** P7-S3c ②: 信封/提醒尾部之前的原文 (账本 human 行的 text) —— 激活排队印章建轮时带上。 */
+  rawQuery?: string;
   from?: TurnFrom;
   channel?: string;
   speaker?: string;
@@ -3919,7 +3924,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const record = getDetail(turn);
       if (!record) recordTurnStart({ id: turn, eventId: current.id, target: current.target,
         userQuery: current.payload.text, createdAt: current.originalAt ?? current.at, channel: current.channel,
-        speaker: current.payload.human ? current.speaker : undefined, from: current.payload.peer?.from });
+        speaker: current.payload.human ? current.speaker : undefined, from: current.payload.peer?.from,
+        ...(current.payload.human?.rawText?.trim() ? { rawQuery: current.payload.human.rawText } : {}) });
       // tail 已按软收口记过这句话 (final:false —— 它不带终句语义, doneAt 不认): 就地升级,
       // 不追加同文第二条, 否则 rolepage 上草稿与终稿各画一颗气泡。没有同文的才补 —— 但也
       // 只补「这轮还没有任何终句」的: 已有终句而 body 不同, 是续答链把子事件的终句写进了
@@ -3939,7 +3945,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!eventOwnerGate(event) || !event.channel) return;
     const turn = event.turn || event.id;
     if (!getDetail(turn)) recordTurnStart({ id: turn, eventId: event.id, target: event.target,
-      userQuery: event.payload.text, createdAt: event.at, channel: event.channel, from: event.payload.peer?.from });
+      userQuery: event.payload.text, createdAt: event.at, channel: event.channel, from: event.payload.peer?.from,
+      ...(event.payload.human?.rawText?.trim() ? { rawQuery: event.payload.human.rawText } : {}) });
     queueFinal(event.target, turn, event.channel, body, event.id, claimReplyBubble(event), status);
   };
   // 收口一条 loading 气泡: finish=true 写入最终内容, 只生效一次。发送失败退回 standalone。
@@ -4156,7 +4163,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.pendingBriefQuery = undefined;
     a.pendingChannel = { channel: s.channel ?? baseOfKey(a.target), speaker: s.speaker, at: Date.now() };
     consumeChannel(a, true, undefined);
-    recordTurnStart({ id: q.turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), initialModel: a.model || undefined, initialEffort: a.effort || undefined, cwd: a.runningCwd || undefined, userQuery: s.query.trim() || undefined, createdAt: (s.eventId ? deps.events?.get(s.eventId)?.originalAt : undefined) ?? at, ...channelFields(a) });
+    recordTurnStart({ id: q.turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), initialModel: a.model || undefined, initialEffort: a.effort || undefined, cwd: a.runningCwd || undefined, userQuery: s.query.trim() || undefined, createdAt: (s.eventId ? deps.events?.get(s.eventId)?.originalAt : undefined) ?? at, ...channelFields(a), ...(s.rawQuery?.trim() ? { rawQuery: s.rawQuery } : {}) });
     openBriefTurn(a, q);
   };
   /** 一句插话记进它插进的那一轮: 出处、频道、发话人都取它自己的印章 (没写频道 = 在 home 里开口)。 */
@@ -4210,13 +4217,13 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 微信帧不挂: 没有 stream 窗口要赶, 气泡等终句来了再一次发出 (见 openStream 同一条)。
     if (eventId) rememberReplyBubble(eventId, bubble);
     armBriefBubble(a, bubble, turnId, channel);
-    const seal: Seal = { eventId, keys: sealKeys(userQuery), at: Date.now(), query: userQuery, channel, speaker, fresh: true, turn: q };
+    const seal: Seal = { eventId, keys: sealKeys(userQuery), at: Date.now(), query: userQuery, channel, speaker, fresh: true, turn: q, ...(() => { const rt = eventId ? deps.events?.get(eventId)?.payload.human?.rawText ?? "" : ""; return rt.trim() ? { rawQuery: rt } : {}; })() };
     // 对方闲着 → 这一句就是下一轮, 当场接上。正忙 (在跑别人的回执 / 派活 / 上一句) 就先排着:
     // 那一轮的回复不能流进这一句的气泡, 等它在 transcript 里露面再接 (bindLine)。turn 记录
     // 先建好, ack 里的链接点得开。斜杠命令的行未必露面, 当场接。
     const queued = !isSlash && idleVerdict(a.target) === false;
     pushSeal(a, seal);
-    if (queued) recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), initialModel: a.model || undefined, initialEffort: a.effort || undefined, cwd: a.runningCwd || undefined, userQuery: userQuery.trim() || undefined, eventId, createdAt: eventId ? deps.events?.get(eventId)?.originalAt : undefined, channel: channel ?? baseOfKey(a.target), speaker });
+    if (queued) recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), initialModel: a.model || undefined, initialEffort: a.effort || undefined, cwd: a.runningCwd || undefined, userQuery: userQuery.trim() || undefined, eventId, createdAt: eventId ? deps.events?.get(eventId)?.originalAt : undefined, channel: channel ?? baseOfKey(a.target), speaker, ...(() => { const rt = eventId ? deps.events?.get(eventId)?.payload.human?.rawText ?? "" : ""; return rt.trim() ? { rawQuery: rt } : {}; })() });
     else activateDispatch(a, seal);
     // Durable normal inputs arrive only after the preceding full turn; expired bubbles use the final outbox standalone path.
     // ack 即详情链接。URL 的三个入参 (turnId / target / host) 在收消息这一刻全部已知 ——

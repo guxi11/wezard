@@ -210,8 +210,10 @@ const handoffDeco = (r: TurnDetailRecord, records: readonly DetailRecord[], dir:
 const pturnAttr = (r: TurnDetailRecord): string =>
   r.from?.kind === "peer" && r.from.event && !r.from.receipt ? ` data-pturn="${escHtml(r.from.event)}"` : "";
 
-const renderIn = (r: TurnDetailRecord): string => {
-  const q = splitReminders(unwrapMates(r.userQuery ?? ""));
+const renderIn = (r: TurnDetailRecord, raw?: string): string => {
+  // P7-S3c ②: strict 群的入消息正文用账本原文 (rawQuery = 信封/提醒尾部之前的文本);
+  // 没有 rawQuery 的老记录回落 userQuery (splitReminders 剥尾, 与旧行为一致)。
+  const q = splitReminders(unwrapMates(raw?.trim() ? raw! : r.userQuery ?? ""));
   return tagSig(`<section class="bubble mq" data-key="${escHtml(r.id)}:in"${pturnAttr(r)}>${inMeta(r)}` +
     `<div class="md-body"></div><script type="text/plain" class="md-src">${escHtml(q.body)}</script>${q.html}</section>`);
 };
@@ -274,7 +276,7 @@ export const renderMsg = (m: Msg, records: readonly DetailRecord[], dir: Directo
     meta: receiptChip(r, records, dir) + (isPostTurn(r, records) ? acct(turnAt(records, r.target ?? "", r.createdAt)) : g.meta),
   });
   const { html, meta } = m.dir === "in"
-    ? { html: renderIn(r), meta: acct(senderTurn(r, records)) }
+    ? { html: renderIn(r, m.channel && dir.strictChats.has(m.channel) ? r.rawQuery : undefined), meta: acct(senderTurn(r, records)) }
     : out(((deco) => renderTurnGroup(r, now, childrenOf(records, r.id, now, deco), false, deco))(handoffDeco(r, records, dir, now)));
   const live = m.dir === "out" && !turnDone(r, now);
   const fin = doneAt(m);

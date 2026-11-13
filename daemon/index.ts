@@ -288,18 +288,22 @@ const main = async (): Promise<void> => {
   const responseTracker = installResponseTracker(ws.client, log.child({ mod: "chat-gate" }), (c) => wx.owns(c),
     (context) => responseFormatPolicy(cfg, context, (target) => chatUrlFor(cfg.daemon, target)),
     (noteLine) => {
+      // P7-S3c ①: wizard/system 出站行的账本 id 用独立命名空间 `<id>#w` —— 流 id 可能与
+      // 人话 msgid 撞车 (replyStream 的 streamId 就是入站 msgid), 撞上时重投的人话会把
+      // 交付行整行洗掉 (record 按 id 覆盖)。后缀隔开两个命名空间; 历史行不回填改写。
+      const lineId = noteLine.id ? noteLine.id + "#w" : "";
       try {
-        chatRecords.record(noteLine.chat, { ...noteLine, at: Date.now() });
+        chatRecords.record(noteLine.chat, { ...noteLine, id: lineId, at: Date.now() });
         knownChatsOf(cfg).record(noteLine.chat);
       } catch { /* 记录失败不影响出站 */ }
       // P7-S3b: strict 群里 wizard 真正发出去的每一句, 同时落一条 post 记录 ——
       // rolepage 群窗的出气泡 = 实发内容 (与账本同一文本), 而不是镜像 pane 的终句。
-      // post id = 流/终句 id: 占位(系统行, kind!=wizard 不进这里)与交付共用同一流时
-      // upsert 成一条; sendMessage 推送 (id 空) 每次一条, 各自发各的。
+      // post id 与账本行 id 同键 (`<id>#w`): 占位→交付同一流 upsert 成一条, backfill
+      // 也按同一 id 幂等; sendMessage 推送 (id 空) 每次一条, 各自发各的。
       try {
         if (noteLine.kind === "wizard" && noteLine.text.trim() && strictSpeechOf?.(noteLine.chat)) {
           const who = wizardStore()?.byName(noteLine.author);
-          if (who) recordPost({ target: who.target, channel: noteLine.chat, body: noteLine.text, ...(noteLine.id ? { id: noteLine.id } : {}) });
+          if (who) recordPost({ target: who.target, channel: noteLine.chat, body: noteLine.text, ...(lineId ? { id: lineId } : {}) });
         }
       } catch { /* 记录失败不影响出站 */ }
     });
