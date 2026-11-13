@@ -171,12 +171,13 @@ const pickRole = (dir: Directory, ticket: Ticket, url: URL): string =>
 
 // 没指定或 "all" = 不切, 全部时间; 否则只看那一段。
 const ALL_SESSIONS = "all";
+/** 一个 sid 在 sessionsOf 里只有一行 (被隔开的段已并进 runs), 所以 find 就是全部区间。 */
 const spanOf = (spans: readonly SessionSpan[], sid: string | null): SessionSpan | undefined =>
   !sid || sid === ALL_SESSIONS ? undefined
   : spans.find((s) => s.sessionId === sid);
 
-// Infinity 过不了 JSON。
-const wireSpan = (s: SessionSpan) => ({ ...s, end: Number.isFinite(s.end) ? s.end : 0 });
+// Infinity 过不了 JSON。runs 是服务端的时间窗 (inSpan 用), 前端只认 start/end/turns。
+const wireSpan = (s: SessionSpan) => { const { runs: _runs, ...rest } = s; return { ...rest, end: Number.isFinite(s.end) ? s.end : 0 }; };
 
 interface View {
   role: string;

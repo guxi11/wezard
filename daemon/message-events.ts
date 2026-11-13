@@ -46,7 +46,9 @@ export interface MessageInput {
     receipts?: ReceiptFact[];
     human?: MirrorDispatchArgs;
     /** daemon 内部交接输入, 没有路由任务或外部发话方。 */
-    handoff?: { pane: string; sessionId: string; clear?: ClearAttempt };
+    /** speaker/from: 简报那一轮接着谁的那场对话 (与 channel 同源, 见 handoff.Seal) —— 新会话的
+     *  第一轮据此记回同一个发话方, 否则 rolepage 会把它单列成「wezard」自言自语。 */
+    handoff?: { pane: string; sessionId: string; clear?: ClearAttempt; speaker?: string; from?: TurnFrom };
     peer?: {
       from: TurnFrom;
       envelope: string;

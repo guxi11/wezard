@@ -1,6 +1,7 @@
 import type { ClearAttempt } from "./handoff.js";
 import { finalId, publishEventFinal, receiptCoverage, receiptQuiet, runEventFinalRecovery, type MessageEvent, type MessageEvents, type DeliveryInput } from "./message-events.js";
 import { parseEnvelope, renderTail } from "../shared/reminder.js";
+import { charterPreamble, charterToRearm } from "../shared/charter-rearm.js";
 import { codexSessions, codexSessionForPane, recordCodexPaneSession } from "../shared/codex.js";
 import { codexHookLaunchArgs, codexHookCommand, inspectCodexHooks, trustCodexHookSet, type CodexHook } from "../shared/codex-hooks.js";
 import { fileURLToPath } from "node:url";
@@ -2650,7 +2651,7 @@ export interface MirrorBridge {
    *  pushes assistant output via the standalone path. */
   /** `channel`: 这一轮的回复发去哪个公开频道 (base); "" = 私聊, 回复不进任何群,
    *  只落 turn 记录; 省略 = target 的 home。 */
-  injectText: (target: string, text: string, opts?: { from?: TurnFrom; channel?: string; envelope?: string; eventId?: string; guard?: DispatchGuard; requireIdle?: boolean; noRespawn?: boolean; handoff?: ClearAttempt }) => Promise<InjectResult>;
+  injectText: (target: string, text: string, opts?: { from?: TurnFrom; speaker?: string; channel?: string; envelope?: string; eventId?: string; guard?: DispatchGuard; requireIdle?: boolean; noRespawn?: boolean; handoff?: ClearAttempt }) => Promise<InjectResult>;
   /** 原 pane 的原生清空事务; 已暴露的尝试只核验, 不重发。 */
   verifyClearContext: (target: string, clear: ClearAttempt) => Promise<boolean>;
   clearContext: (target: string, attempt: ClearAttempt | undefined, submitted: (attempt: ClearAttempt) => void, guard?: () => boolean) => Promise<{ ok: boolean; reason?: string }>;
@@ -2971,9 +2972,11 @@ interface AttachState {
    *  (冷启动实测 +1.4s), 宪章改由这个 pane 的**首条注入**顶在最前面带进去
    *  (`<system-reminder wezard="charter">…</system-reminder>`, 见 charterPreamble)。
    *  挂上它的时机 = 一切「pane 里住进了一个还没读过宪章的会话」的时刻: newSession、
-   *  死 pane 重生、/clear 与压缩后的重挂 (armCharter)。注入确认 ok 后由注入方清除;
-   *  失败可重试的路径不清 —— 重投的下一条接着带。codex 不用: 它的宪章仍在
-   *  developer_instructions 里, 再贴一份是重复。 */
+   *  死 pane 重生、/clear 与压缩后的重挂 (armCharter), 以及 reload 后按 transcript
+   *  判据重建绑定 (attach → shared/charter-rearm.ts)。注入确认 ok 后由注入方清除;
+   *  失败可重试的路径不清 —— 重投的下一条接着带。它同时落盘 (MirrorRecord.charterOwed,
+   *  见 setCharterPending), 否则这个状态活不过一次 daemon reload。codex 不用: 它的
+   *  宪章仍在 developer_instructions 里, 再贴一份是重复。 */
   charterPending?: string;
   /** Waits for the injected line to appear before attributing the turn to a peer. */
   pendingFrom?: { from: TurnFrom; at: number };
@@ -5127,6 +5130,21 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const resolveTarget = (override?: string): string =>
     sanitizeId(override?.trim() || cfg.wrc.mirror.pushChat.trim() || cfg.defaultChat.trim());
 
+  // 身份提供者。newSession / 重生 / clone / attach 全都从这里取「这个 target 是谁」, 于是
+  // 无论是群里手打的 /new、pane 死了的自愈重生, 还是编排生出来的分身, 新进程一
+  // 睁眼就知道自己是谁 —— 而不是只有走 wizard 路由那一条路才有身份。
+  // 由 index.ts 在启动时装上 (注册表活在那边); 没装 = 退回无身份行为, 全链路无回归。
+  // 声明在 attach 之前: 重启后按 pinned sessionId 直接 attach 的路径在 startMirror 的
+  // 同步段里就会走到它 (const 有 TDZ, 放到后面整段初始化会直接抛)。
+  let charterOf: ((target: string, ctx?: { cwd?: string; cli?: CliBackendName }) => string) | undefined;
+  const setCharterProvider = (fn: (target: string, ctx?: { cwd?: string; cli?: CliBackendName }) => string): void => { charterOf = fn; };
+  // `cwd` = 这个 pane 正要启动的目录。attach 在 spawn 之后才发生, 所以此刻 getCwd
+  // 给的还是上一个 pane 的目录 —— 换目录重开时照它渲染, 新 wizard 会以为自己还在
+  // 旧工作区里。
+  const charterFor = (target: string, ctx?: { cwd?: string; cli?: CliBackendName }): string | undefined => {
+    try { return charterOf?.(target, ctx); } catch { return undefined; }
+  };
+
   // Detach an attachment: finalize any live stream, stop the tail, drop from indexes.
   const detach = (a: AttachState, reason: string): void => {
     if (a.migrationWatcher) { a.migrationWatcher.cancel(); a.migrationWatcher = undefined; }
@@ -5232,7 +5250,23 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     startSubagentsFor(a);
     bySessionId.set(sessionId, a);
     byTarget.set(target, a);
+    const cliName = backendForPath(jsonlPath).name;
     const prevRec = deps.store.get(target);
+    // 宪章只在内存里 (charterPending), reload 之后就没了 —— 而所有建绑定的路径
+    // (newSession / restoreFromStore / pinned / clone / 外部认领) 都汇聚在这里, 所以
+    // 在这里统一按「落盘标记 + 转录里有没有 user 行」补一次。codex 的宪章在
+    // developer_instructions 里, 判据对它恒 false。
+    // 同一个会话在内存里还挂着就沿用它的 pending (重挂路径); 记录换过会话时那份落盘标记
+    // 是上一个会话的账, 不认。
+    const owedCharter =
+      Boolean(prevBySid?.charterPending?.trim()) ||
+      (prevRec?.sessionId === sessionId && Boolean(prevRec.charterOwed));
+    a.charterPending = charterToRearm({
+      cli: cliName,
+      owed: owedCharter,
+      jsonlPath,
+      render: () => charterFor(target, { cwd: a.runningCwd, cli: cliName }),
+    });
     deps.store.set(target, {
       sessionId,
       jsonlPath,
@@ -5242,6 +5276,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       model: a.model || undefined,
       effort: a.effort || undefined,
       pendingCwd: a.pendingCwd || undefined,
+      cwdConfirmed: prevRec?.cwdConfirmed,
+      charterOwed: a.charterPending ? true : undefined,
     });
     // 这个 pane 现在归 wezard 管 (spawn / reload 恢复 / switch 认下的人自己开的终端):
     // 打上归属标记, 它的 hook 才走 IM 审批。spawn 出来的进程本身带 WEZARD_MANAGED,
@@ -5644,6 +5680,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       model: a.model || undefined,
       effort: a.effort || undefined,
       pendingCwd: a.pendingCwd || undefined,
+      // /clear 刚挂上的那份 (contextCut → armCharter) 跟到新会话的记录上; fork/drift
+      // 上下文是延续的, pending 为空, 也就不欠。
+      charterOwed: a.charterPending ? true : undefined,
     });
     log.info({ target: a.target, oldSessionId, newSessionId, oldJsonlPath, newJsonlPath, startOffset }, "mirror migrated session");
   };
@@ -5953,12 +5992,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // /new path: kill the old pane (so we don't leak orphan tmux windows) and
   // spawn a fresh claude in pendingCwd ?? runningCwd ?? default. Returns the
   // new sessionId/cwd so callers can render the user-facing reply.
-  // 身份提供者。newSession / 重生 / clone 全都从这里取「这个 target 是谁」, 于是
-  // 无论是群里手打的 /new、pane 死了的自愈重生, 还是编排生出来的分身, 新进程一
-  // 睁眼就知道自己是谁 —— 而不是只有走 wizard 路由那一条路才有身份。
-  // 由 index.ts 在启动时装上 (注册表活在那边); 没装 = 退回无身份行为, 全链路无回归。
-  let charterOf: ((target: string, ctx?: { cwd?: string; cli?: CliBackendName }) => string) | undefined;
-  const setCharterProvider = (fn: (target: string, ctx?: { cwd?: string; cli?: CliBackendName }) => string): void => { charterOf = fn; };
   // 新 pane 落地后的钩子 —— pane 上限在这里数 (由 index.ts 装上; 没装 = 不数)。
   let afterSpawn: () => void = () => {};
   const onSpawn = (fn: () => void): void => { afterSpawn = fn; };
@@ -5968,24 +6001,26 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     log.info({ target, cut }, "context cut");
     try { afterCut(target, cut); } catch (e) { log.warn({ target, cut, err: (e as Error).message }, "onContextCut hook threw"); }
   };
-  // `cwd` = 这个 pane 正要启动的目录。attach 在 spawn 之后才发生, 所以此刻 getCwd
-  // 给的还是上一个 pane 的目录 —— 换目录重开时照它渲染, 新 wizard 会以为自己还在
-  // 旧工作区里。
-  const charterFor = (target: string, ctx?: { cwd?: string; cli?: CliBackendName }): string | undefined => {
-    try { return charterOf?.(target, ctx); } catch { return undefined; }
-  };
-
-  /** 宪章 → 首条注入顶在最前的 reminder 块。认/剥/折叠全靠它是合法 reminder 块
-   *  (kind "charter", shared/reminder.ts): cleanUserText 剥它 → 回显去重与印章
-   *  认到的仍是纯正文; peers.stripMeta 剥它 → talkTurns / read_chat 的问话干净;
-   *  rolepage 把它折叠成 `<charter>` 标签。正文里出现闭合标签字面量会截断这些
-   *  剥离 (懒惰匹配到第一个闭合就停), 顺手转义掉。 */
-  const charterPreamble = (charter: string): string =>
-    `<system-reminder wezard="charter">\n${charter.trim().replace(/<\/(system-reminder|pasted_content)/g, "<\\/$1")}\n</system-reminder>\n`;
   /** 这一条注入该带的前置宪章: 挂了 charterPending 且不是斜杠命令才有 —— preamble
    *  会把命令顶得不再是命令, 宪章留到下一条非命令消息。 */
   const charterPrefixOf = (a: AttachState, text: string): string =>
     a.charterPending?.trim() && !text.trimStart().startsWith("/") ? charterPreamble(a.charterPending) : "";
+  /** 宪章 pending 的内存态写同步到绑定记录: reload 之后内存没了, 磁盘上的
+   *  `charterOwed` 是 attach 重新武装它的唯一凭据。记录已被别的会话接管时不写 ——
+   *  那是别人的账。 */
+  const persistCharterOwed = (a: AttachState, owed: boolean): void => {
+    const rec = deps.store.get(a.target);
+    if (!rec || rec.sessionId !== a.sessionId) return;
+    if (Boolean(rec.charterOwed) === owed) return;
+    deps.store.set(a.target, { ...rec, charterOwed: owed || undefined });
+  };
+  /** 挂/清这个 pane 的宪章 (内存 + 落盘): 除 attach 自己那次 (它紧接着整份重写记录,
+   *  一并带上 charterOwed) 之外, 所有 `charterPending = …` 都走它 —— 否则 reload
+   *  恢复出来的绑定分不清「欠着」与「已送达」。 */
+  const setCharterPending = (a: AttachState, charter?: string): void => {
+    a.charterPending = charter?.trim() || undefined;
+    persistCharterOwed(a, Boolean(a.charterPending));
+  };
   /** 把宪章挂到 target 的首条注入上 (见 AttachState.charterPending)。给了 `charter`
    *  就用它, 没给现渲染。codex 免: developer_instructions 已带, 不必重复。 */
   const armCharter = (target: string, charter?: string): boolean => {
@@ -5993,7 +6028,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!a) return false;
     const cli = backendForPath(a.jsonlPath).name;
     const text = (charter ?? charterFor(target, { cwd: a.runningCwd, cli }) ?? "").trim();
-    a.charterPending = cli === "codex" || !text ? undefined : text;
+    setCharterPending(a, cli === "codex" ? undefined : text);
     return true;
   };
 
@@ -6108,7 +6143,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       spawned.justSpawned = true;
       spawned.muteUntilInject = true;
       // 全新的会话 = 一份它还没读过的宪章; codex 的已在 developer_instructions。
-      spawned.charterPending = effCli === "codex" || !charter?.trim() ? undefined : charter;
+      setCharterPending(spawned, effCli === "codex" ? undefined : charter);
       // 只有换过 pane 才是断点 —— 首次建会话时 prev 为空, 那不是"不连续", 是开局。
       if (prev) markCut(target, spawned.sessionId, "new");
     }
@@ -6127,6 +6162,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           cwd: baseA.runningCwd || undefined,
           model: baseA.model || undefined,
           effort: baseA.effort || undefined,
+          cwdConfirmed: deps.store.get(base)?.cwdConfirmed,
+          charterOwed: deps.store.get(base)?.charterOwed,
           pendingCwd: undefined,
         });
       } else {
@@ -6382,6 +6419,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         tmuxSession: baseA.tmuxSession || undefined,
         tmuxPane: baseA.tmuxPane || undefined,
         cwd: baseA.runningCwd || undefined,
+        cwdConfirmed: deps.store.get(base)?.cwdConfirmed,
+        charterOwed: deps.store.get(base)?.charterOwed,
         pendingCwd: baseA.pendingCwd || undefined,
       });
       log.info({ target, base, runningCwd: callerRunning, pendingCwd: expanded }, "setPendingCwd (chat-scoped, live base)");
@@ -6405,6 +6444,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         tmuxSession: callerA.tmuxSession || undefined,
         tmuxPane: callerA.tmuxPane || undefined,
         cwd: callerA.runningCwd || undefined,
+        cwdConfirmed: deps.store.get(target)?.cwdConfirmed,
+        charterOwed: deps.store.get(target)?.charterOwed,
         pendingCwd: callerA.pendingCwd || undefined,
       });
       log.info({ target, runningCwd: callerA.runningCwd, pendingCwd: callerA.pendingCwd }, "setPendingCwd (fallback: no base, wrote to caller)");
@@ -7835,7 +7876,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         startMigrationWatcher(a, resumeBaseline, forkOf(a.jsonlPath));
         // 重生出的 pane 里是同一份会话, 但宪章要重挂: --resume 读的是 CLI 自己的
         // 系统提示, 我们的宪章只跟着消息走。下面的注入 (本函数尾部) 会带上它。
-        a.charterPending = respawnCli === "codex" || !charter?.trim() ? undefined : charter;
+        setCharterPending(a, respawnCli === "codex" ? undefined : charter);
         fresh = true;
       }
       if (!permitted()) return denied;
@@ -7851,7 +7892,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         a.pendingFromCli = false;
         a.turnFromChat = true;
         rememberInject(full);
-        pushSeal(a, { eventId: parseEnvelope(full)?.eventId, keys: sealKeys(full), at: Date.now(), query: text, from: opts?.from, channel: opts?.channel, fresh: idleVerdict(target) === true });
+        pushSeal(a, { eventId: parseEnvelope(full)?.eventId, keys: sealKeys(full), at: Date.now(), query: text, from: opts?.from, speaker: opts?.speaker, channel: opts?.channel, fresh: idleVerdict(target) === true });
         a.muteUntilInject = false;
         a.justSpawned = false;
       };
@@ -7871,7 +7912,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       });
       if (pinRejected) return { ...r, ok: false, retryable: false, reason: "handoff process/session or continuation authority changed at physical input; carry withheld" };
       // 带进去的宪章随这一条落定; 失败可重试 (r.ok=false) 的不清 —— 重投的下一条接着带。
-      if (r.ok) a.charterPending = undefined;
+      if (r.ok) setCharterPending(a, undefined);
       if (r.ok && a.tmuxPane && permitted()) {
         if (preClearBaseline) {
           a.clearRebind = { baseline: preClearBaseline };
@@ -8388,7 +8429,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
             log.info({ target: a.target, sessionId: sid, newPane: a.tmuxPane, newSession: a.tmuxSession }, "mirror: tmux respawned");
             // 重挂宪章 (同 injectText 的 respawn-init): --resume 只带回对话内容,
             // 我们的宪章跟着消息走。本条注入 (下面) 会带上它。
-            a.charterPending = respawnCli === "codex" || !charter?.trim() ? undefined : charter;
+            setCharterPending(a, respawnCli === "codex" ? undefined : charter);
             // Re-bind onto the resume fork once it appears (EOF offset: the fork
             // already holds the full prior transcript — replaying from 0 would
             // re-dump it). If --resume happens to keep the same jsonl, no new
@@ -8462,7 +8503,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // 宪章已随这一条进了 pane; 失败可重试的 (消息事件层会重投) 不清 —— 重投接着带。
         // /clear 例外: 它自己不带 preamble, 而 tail 认出会话轮换 → contextCut → armCharter
         // 可能先于这里的返回发生, 清了就会把刚挂上的下一份宪章抹掉。
-        if (r.ok && !armMigration) a.charterPending = undefined;
+        if (r.ok && !armMigration) setCharterPending(a, undefined);
         onSubmitted?.(r);
         if (!r.ok) {
           // retryable = 一个字都没进输入框, 消息事件层会稍后重投 —— 不是失败, 别报 ✗

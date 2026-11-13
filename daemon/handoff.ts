@@ -26,6 +26,7 @@ import type { JsonMap } from "../shared/json-map-store.js";
 import { sleep, truncate } from "../shared/std.js";
 import { waitForIdle, type IdleOpts, type IdleResult } from "./wait-idle.js";
 import type { EventId } from "./router.js";
+import type { TurnFrom } from "../shared/detail-store.js";
 
 // ── 闸 ──────────────────────────────────────────────────────────────
 // 进程级的单例: 人话的入口 (inbound) 在 mirror 块之前就装好了, 拿不到这里的实例。
@@ -69,6 +70,26 @@ export interface ClearAttempt {
   workspaceCwd?: string;
 }
 
+/** 交接那一轮该接着谁的对话: 频道 + 出处。交接前的最后一句答的是谁, 重开后的续写就
+ *  还是答给谁 —— 简报那一段不是系统自言自语, 少了 from/speaker 它会在 rolepage 上另立一栏
+ *  (见 role-view.senderOf)。频道与出处同源取 (detail.lastChannelOf), 不许一个有一个没有。 */
+export interface Seal {
+  /** "" = 私聊。 */
+  channel: string;
+  /** 那一轮是人问的: userid (user:x)。 */
+  speaker?: string;
+  /** 那一轮是同伴/定时任务派来的: 只留 kind/from/public —— receipt/status/event/turn 是**那一次投递**
+   *  的身份, 简报这一句不服务任何一笔, 继承过来会让它长得像回执。 */
+  from?: TurnFrom;
+}
+
+/** 把被切断那一轮的印章收成简报那一轮要用的: 只留「这一场对话是谁的」。 */
+export const carrySealOf = (p: Pending): Seal => ({
+  channel: p.channel ?? "",
+  ...(p.speaker ? { speaker: p.speaker } : {}),
+  ...(p.from ? { from: { kind: p.from.kind, ...(p.from.from ? { from: p.from.from } : {}), ...(p.from.public ? { public: true } : {}) } } : {}),
+});
+
 export interface Pending {
   target: string;
   /** self = 简报由它自己写在入参里; other = 守护进程让它写。 */
@@ -88,6 +109,10 @@ export interface Pending {
   /** 自我交接那一刻它这一轮的频道 ("" = 私聊): 重开后「接着干」那一轮还在答同一件 ask,
    *  终句回同一处。交接别人时它是闲着的, 没有在答的 ask —— "". */
   channel?: string;
+  /** channel 的同源出处: 交接这一轮是谁问的 (人 = speaker, 同伴/定时 = from)。与 channel 一起取、
+   *  一起落盘, 重开后的第一轮据此记回同一场对话。 */
+  speaker?: string;
+  from?: TurnFrom;
   /** 重开时往家里群发「📂 当前项目」气泡 —— 换工作区 (set_workspace) 给人的回执;
    *  普通交接是生命周期事件, 静默。 */
   announce?: boolean;
@@ -109,11 +134,11 @@ export interface HandoffDeps {
   sessionId: (target: string) => string;
   /** 原生清空, 或在有 pending workspace 时启动新 CLI; 重启动作凭证须先落盘。 */
   restart: (target: string, p: Pending, submitted: (attempt: ClearAttempt) => void) => Promise<{ ok: boolean; reason?: string }>;
-  /** 往会话里贴一段话; 这一轮的频道是 `channel` ("" = 私聊)。简报那一句不挂任何信封 ——
-   *  它不服务任何一笔, 回执不会误落到它上面。 */
-  inject: (target: string, text: string, channel: string, id: string, timeoutMs: number, clear?: ClearAttempt) => Promise<{ ok: boolean; reason?: string }>;
+  /** 往会话里贴一段话; 这一轮的频道与出处就是 `seal` ("" = 私聊)。简报那一句不挂路由信封 ——
+   *  它不服务任何一笔, 回执不会误落到它上面; 它带的那个信封只证明「这一轮是谁的续写」。 */
+  inject: (target: string, text: string, seal: Seal, id: string, timeoutMs: number, clear?: ClearAttempt) => Promise<{ ok: boolean; reason?: string }>;
   /** 它此刻这一轮的频道 ("" = 私聊)。 */
-  channelOf: (target: string) => string;
+  sealOf: (target: string) => Seal;
   lastText: (target: string) => string;
   summary: (id: string) => string | undefined;
   /** 交接前它欠着、还没交代的那几笔 (路由表 `owedBy(W)` 里 status 仍 open 的, 见 §9.5)。 */
@@ -330,7 +355,7 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
     deps.log.info({ mod: "handoff", target, behind: rec.at }, "handoff: 排队请求开工 (前一场已了结)");
     drop(rec);
     void run({ target, mode: "self", at: nextAt(rec), sid: deps.sessionId(target), stage: "waiting", timeoutMs: SELF_IDLE_MS,
-      channel: deps.channelOf(target), brief: head.brief, cut, ...(rest.length ? { queued: rest } : {}) });
+      ...deps.sealOf(target), brief: head.brief, cut, ...(rest.length ? { queued: rest } : {}) });
   };
   const fail = (p: Pending, status: number, reason: string): HandoffResult => {
     const cut = withCut(p).cut ?? [];
@@ -400,7 +425,7 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
           const w = await idle(p, p.timeoutMs);
           if (!w.idle) return fail(p, 504, `一直没能闲下来 (${w.reason}), 上下文没动`);
           // 守护进程请它写简报, 不是谁在群里问的: 私聊。
-          const r = await deps.inject(p.target, briefPrompt(p.focus), "", `handoff:${p.target}:${p.at}:summary`, p.timeoutMs);
+          const r = await deps.inject(p.target, briefPrompt(p.focus), { channel: "" }, `handoff:${p.target}:${p.at}:summary`, p.timeoutMs);
           if (!r.ok) return fail(p, 502, `summary inject failed: ${r.reason}`);
           return step(saved({ ...p, stage: "briefing" }));
         }
@@ -468,7 +493,7 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
       case "restarted": {
         if (!p.clear?.nextSid || !p.clear.panePid) return fail(p, 409, "handoff has no complete original-pane clear evidence; refusing carry replay");
         // 同一场交接始终用同一事件 id; reload 从收件事件恢复, 不凭忙闲猜测后重贴。
-        const r = await deps.inject(p.target, carryOf(p), p.channel ?? "", `handoff:${p.target}:${p.at}:carry`, p.timeoutMs, p.clear);
+        const r = await deps.inject(p.target, carryOf(p), carrySealOf(p), `handoff:${p.target}:${p.at}:carry`, p.timeoutMs, p.clear);
         deps.log.info({ mod: "handoff", target: p.target, ok: r.ok, reason: r.reason }, "handoff: 简报已贴回");
         if (!r.ok) return fail(p, 502, `handoff carry inject failed: ${r.reason}`);
         try {
@@ -523,7 +548,7 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
       }
       drop(existing);
     }
-    return { p: saved({ target, mode, at: nextAt(existing), sid: deps.sessionId(target), stage: "waiting", timeoutMs: SELF_IDLE_MS, channel: mode === "self" ? deps.channelOf(target) : "", ...extra }) };
+    return { p: saved({ target, mode, at: nextAt(existing), sid: deps.sessionId(target), stage: "waiting", timeoutMs: SELF_IDLE_MS, ...(mode === "self" ? deps.sealOf(target) : { channel: "" }), ...extra }) };
   };
 
   return {
@@ -534,7 +559,7 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
         if (existing?.mode === "self" && existing.stage === "waiting") {
           const cut = [...new Set([...(existing.cut ?? []), ...(cuts.get(target) ?? []), ...(deps.currentEvents?.(target) ?? [])])];
           cuts.set(target, cut);
-          save({ ...existing, at: nextAt(existing), sid: deps.sessionId(target), channel: deps.channelOf(target), brief, cut });
+          save({ ...existing, at: nextAt(existing), sid: deps.sessionId(target), ...deps.sealOf(target), brief, cut });
           deps.log.info({ mod: "handoff", target }, "handoff: 等待中的交接被新简报就地接替");
           return { ok: true };
         }

@@ -61,7 +61,7 @@ assert.equal(resumeText("e1", {}), "继续 e1 —— 这是你还没交代的同
   const store = new Map<string, Pending>();
   const uncut: string[][] = [];
   const h = createHandoffs({
-    isBusy: async () => false, sessionId: () => "s1", channelOf: () => "", lastText: () => "", summary: () => undefined,
+    isBusy: async () => false, sessionId: () => "s1", sealOf: () => ({ channel: "" }), lastText: () => "", summary: () => undefined,
     restart: async () => ({ ok: false, reason: "boom" }), inject: async () => ({ ok: true }),
     owed: () => [], resume: async () => ({ ok: true }), notify: () => {}, uncut: (_t, ids) => void uncut.push([...ids]),
     currentEvents: () => [], suppress: () => {},
@@ -95,7 +95,7 @@ assert.equal(resumeText("e1", {}), "继续 e1 —— 这是你还没交代的同
   }) => {
     const injects: string[] = [];
     const h = createHandoffs({
-      isBusy: async () => mocks.isBusy?.() ?? false, sessionId: () => mocks.sessionId?.() ?? "new", channelOf: () => "",
+      isBusy: async () => mocks.isBusy?.() ?? false, sessionId: () => mocks.sessionId?.() ?? "new", sealOf: () => ({ channel: "" }),
       lastText: () => "", summary: () => undefined,
       restart: mocks.restart ?? (async (_t, _p, submitted) => { submitted({ pane: "p", pid: 1, panePid: 2, sid: "s1", nextSid: "n1", at: Date.now() }); return { ok: true }; }),
       inject: async (_t, text) => { injects.push(text); return { ok: true }; },

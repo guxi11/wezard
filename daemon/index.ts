@@ -35,7 +35,7 @@ import { isRecoveryCarrier, createMessageEvents, messageId, finalId, reportSourc
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { backendFor, bindStartupNotice, prewarmShell, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { bindCardChannel, installApprovalEventListener, makeApproveHandler, requestConfirm } from "./approval.js";
-import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, buildChatUrl, getDetail, setWorldFactsProvider, currentHumanQueryOf, recordPost, recordCharter, backfillCharter } from "./detail.js";
+import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, buildChatUrl, getDetail, setWorldFactsProvider, currentHumanQueryOf, recordPost, recordCharter, backfillCharter, lastChannelOf } from "./detail.js";
 import { EMPTY_FACTS, type WorldFacts, type WorldFactWizard } from "../shared/world.js";
 import { clearAutoWindow, initAutoWindowPersistence, setAutoWindow } from "./session-cache.js";
 import { makeMessageHandler } from "./outbound.js";
@@ -120,7 +120,7 @@ import { registerPlanRoutes } from "./plan-http.js";
 import { returnOpOf, type HeldSeen, type InFlight, type Prereq, type ReturnOp, type Tell } from "./dispatch.js";
 import { NO_DEADLINE, isTerminal, renderInFlight, turnState } from "../shared/turn-state.js";
 import { startIdleNudge, startObligationWatch, type ObligationRow, type ObligationWatch } from "./idle-nudge.js";
-import { askerFromEnvelope, parseReminders, renderReminder, stripReminders, withMsg, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
+import { askerFromEnvelope, parseReminders, renderReminder, stripReminders, withMsg, type NoteAttrs, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
 import { createHandoffs, cuttingTurn, handedOff, handingOff, handoffRound, resumeText, roundPending, settlesCut, type Pending as PendingHandoff } from "./handoff.js";
 import { coldGateOf, decide, rankCandidates, routeDiagnostics, renderCandidates, routeReceiptDutiesOf, tierFor, wakeCostOf, wakeNoteOf, type RouteRow } from "./route.js";
 import { parseWhen, renderChatLog, UNKNOWN_HUMAN, type LogSession } from "./chat-log.js";
@@ -138,6 +138,19 @@ const waitForQuorum = async (targets: readonly string[], isBusy: (target: string
     return result;
   }));
   return results.map((result) => result.reason === "stopped" ? { idle: false, reason: "仍在干活 (法定人数已满, 不再等它)" } : result);
+};
+
+/** 交接简报那一轮的信封: 它是被切断那一轮的续写, 出处照那一轮写。reload 后 openingOf 就是从这里
+ *  读回出处 (from / speaker) 与频道 (scope + chat-key) —— 缺了它续写会被认成「自己跟自己说」,
+ *  或者把群里的交接复述成私聊 (→ rolepage 另立一栏)。老记录没有印章时退回旧行为: 自己 + private。 */
+const handoffEnvelopeAttrs = (h: { from?: TurnFrom; speaker?: string }, channel: string, eventId: string, self: string): NoteAttrs => {
+  const scope = channel ? "public" : "private";
+  const chat = channel ? { "chat-key": channel } : {};
+  const f = h.from;
+  if (f?.kind === "peer") return { wezard: "envelope", kind: "peer", from: wizardStore()?.get(f.from ?? "")?.name || f.from || "", scope, ...chat, msg: eventId };
+  if (f?.kind === "task") return { wezard: "envelope", kind: "task", from: f.taskId ?? "", scope, ...chat, msg: eventId };
+  if (h.speaker) return { wezard: "envelope", kind: "human", from: h.speaker.replace(/^user:/, ""), scope, ...chat, msg: eventId };
+  return { wezard: "envelope", kind: "peer", from: self, scope, ...chat, msg: eventId };
 };
 
 const retiredOrchestrationField = (body: unknown): string | undefined => {
@@ -361,8 +374,12 @@ const main = async (): Promise<void> => {
         const expected = e.payload.handoff;
         const same = (): boolean => { const info = bridge.sessionInfo(e.target); return info?.tmuxPane === expected.pane && info?.sessionId === expected.sessionId; };
         if (!same()) return { ok: false, reason: "handoff original pane/session changed; refusing brief injection" };
+        // 简报那一轮是被切断那一轮的续写: 出处 (from/speaker) 与频道一起写进这一轮, 否则新会话的
+        // 第一轮在 rolepage 上会另立一栏 (见 role-view.senderOf), reload 恢复时还会认成自说自话。
         return bridge.injectText(e.target, e.payload.text, {
-          channel: e.channel, eventId: e.id, envelope: renderReminder({ wezard: "envelope", kind: "peer", from: wizardStore()?.get(e.target)?.name || e.target, scope: "private", msg: e.id }, []), requireIdle: true, noRespawn: true, handoff: expected.clear,
+          channel: e.channel, eventId: e.id, envelope: renderReminder(handoffEnvelopeAttrs(expected, e.channel, e.id, wizardStore()?.get(e.target)?.name || e.target), []), requireIdle: true, noRespawn: true, handoff: expected.clear,
+          ...(expected.from ? { from: expected.from } : {}),
+          ...(expected.speaker ? { speaker: expected.speaker } : {}),
           guard: (phase, identity) => handoffAllowed(e.target) && same() && (!identity?.sessionId || identity.sessionId === expected.sessionId) && boundary(phase, identity),
         });
       }
@@ -1081,14 +1098,14 @@ const main = async (): Promise<void> => {
       restart: (t, p, submitted) => clearForHandoff(t, p, submitted),
       // 简报是新会话的开场白, 但它不挂任何信封 (服务不着哪一笔) —— 交接前欠着的那几笔由
       // 「继续 <event>」逐笔续答 (见 resume), 别把简报那一轮的回复当成回执。
-      inject: async (t, text, channel, id, timeoutMs, clear) => {
+      inject: async (t, text, seal, id, timeoutMs, clear) => {
         if (clear && !(await m.verifyClearContext(t, clear))) return { ok: false, reason: "original cleared CLI process/session changed before carry" };
         // 事件先落盘; 同一 id 重入只恢复状态, 不重贴。内部事件没有 serves, 不替任何欠账收口。
         if (!events.known(id)) {
           const info = clear ? { tmuxPane: clear.pane, sessionId: clear.nextSid } : m.sessionInfo(t);
           if (!info?.tmuxPane || !info.sessionId) return { ok: false, reason: "original handoff pane/session binding is unavailable" };
-          events.accept({ id, identity: JSON.stringify({ pane: info.tmuxPane, sid: info.sessionId }), target: t, speaker: t, channel, priority: "now", deadline: Date.now() + timeoutMs,
-            payload: { text, handoff: { pane: info.tmuxPane, sessionId: info.sessionId, ...(clear ? { clear } : {}) } } });
+          events.accept({ id, identity: JSON.stringify({ pane: info.tmuxPane, sid: info.sessionId }), target: t, speaker: t, channel: seal.channel, priority: "now", deadline: Date.now() + timeoutMs,
+            payload: { text, handoff: { pane: info.tmuxPane, sessionId: info.sessionId, ...(seal.speaker ? { speaker: seal.speaker } : {}), ...(seal.from ? { from: seal.from } : {}), ...(clear ? { clear } : {}) } } });
         }
         for (const end = Date.now() + timeoutMs; Date.now() < end; await sleep(200)) {
           const e = await events.reconcile(id);
@@ -1098,7 +1115,9 @@ const main = async (): Promise<void> => {
         events.cancel((e) => e.id === id && e.exposure === "none", "handoff stopped before confirmed delivery");
         return { ok: false, reason: "handoff event consumption not confirmed; durable event retained" };
       },
-      channelOf: m.currentChannel,
+      // 交接的印章: 频道与出处一起取。频道先看 turn store (lastChannelOf 连 speaker/from 一起给,
+      // 且 reload 之后还在), 没有记录才退回内存里的当前频道。
+      sealOf: (t) => { const l = lastChannelOf(t); return l ? { channel: l.channel ?? "", ...(l.speaker ? { speaker: l.speaker } : {}), ...(l.from ? { from: l.from } : {}) } : { channel: m.currentChannel(t) }; },
       lastText: m.lastText,
       summary: (id) => { const e = events.get(id); return e?.execution === "complete" && e.exposure === "consumed" && typeof e.result?.body === "string" ? e.result.body : undefined; },
       // 欠账不落盘在交接里: 路由表按 target 记着它欠谁、欠哪几笔, 换会话不影响 (T8)。

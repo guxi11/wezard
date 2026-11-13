@@ -631,31 +631,51 @@ export const counterpartOf = (viewer: string, t: TalkArgs | undefined): string |
 // 群里别人说的话也一并留着, 那是那段 session 听到的上下文。
 export interface SessionSpan {
   sessionId: string;
+  /** 这一段的外沿 (只用于显示/排序); 真正的时间窗是 runs —— 同一 sid 可能被别的轮隔开。 */
   start: number;
   end: number;
   turns: number;
   lastTs: number;
+  /** 同一 sid 的若干时间窗 (至少一段)。只有被隔开时才给: 只一段时就是 [start, end)。 */
+  runs?: ReadonlyArray<{ start: number; end: number }>;
 }
 
 export const sessionsOf = (records: readonly DetailRecord[], role: string, now: number): SessionSpan[] => {
   const turns = records.filter(isTurn).filter((r) => r.target === role && !r.agent && !isGhostTurn(r, now))
     .sort((a, b) => a.createdAt - b.createdAt);
-  const groups = turns.reduce<Array<{ sessionId: string; rs: TurnDetailRecord[] }>>((acc, r) => {
+  // 先按**连续**切段 (每段的时间窗 = [本段首轮, 下一段首轮)), 再按 sid 归并 —— 一条 sessionId
+  // 缺失的轮 (旧记录 / 还没回来) 夹在中间, 不能把同一场 session 劈成两段两行: 那样下拉里选它
+  // 只会看到被隔开前的那一小段, 后面的历史像丢了。
+  const runs = turns.reduce<Array<{ sessionId: string; rs: TurnDetailRecord[] }>>((acc, r) => {
     const sid = r.sessionId ?? "";
     const cur = acc[acc.length - 1];
     return cur && cur.sessionId === sid ? [...acc.slice(0, -1), { sessionId: sid, rs: [...cur.rs, r] }] : [...acc, { sessionId: sid, rs: [r] }];
   }, []);
-  return groups.map((g, i) => ({
+  const windows = runs.map((g, i) => ({
     sessionId: g.sessionId,
-    start: g.rs[0]!.createdAt,
-    end: groups[i + 1]?.rs[0]?.createdAt ?? Infinity,
+    rs: g.rs,
+    run: { start: g.rs[0]!.createdAt, end: runs[i + 1]?.rs[0]?.createdAt ?? Infinity },
+  }));
+  const bySid = windows.reduce<Map<string, { rs: TurnDetailRecord[]; runs: Array<{ start: number; end: number }> }>>(
+    (m, w) => {
+      const cur = m.get(w.sessionId);
+      m.set(w.sessionId, cur ? { rs: [...cur.rs, ...w.rs], runs: [...cur.runs, w.run] } : { rs: w.rs, runs: [w.run] });
+      return m;
+    },
+    new Map(),
+  );
+  return [...bySid].map(([sessionId, g]) => ({
+    sessionId,
+    start: g.runs[0]!.start,
+    end: g.runs[g.runs.length - 1]!.end,
     turns: g.rs.length,
     lastTs: g.rs.reduce((m, r) => Math.max(m, r.updatedAt), 0),
+    ...(g.runs.length > 1 ? { runs: g.runs } : {}),
   }));
 };
 
 export const inSpan = (span: SessionSpan | undefined) => (ts: number): boolean =>
-  !span || (ts >= span.start && ts < span.end);
+  !span || (span.runs ?? [span]).some((r) => ts >= r.start && ts < r.end);
 
 /** 视角 role 自己的上下文断点 (/clear /new) —— 画在它参与的每个会话窗口里。 */
 export const marksOf = (records: readonly DetailRecord[], role: string): MarkDetailRecord[] =>

@@ -7,18 +7,28 @@
 // 覆盖 (daemon/spawn-tmux.ts), 不用这里的产物。
 //
 // 不加 `--strict-mcp-config`: 那会把用户自己配的 lisct / tapd 等一起挡掉。
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DAEMON_TOKEN_FILE, DAEMON_TOKEN_HEADER, readDaemonToken } from "./daemon-token.js";
 import { writeIfChanged } from "./session-hooks.js";
 
 export interface SessionMcpSpec {
-  /** stdio 形态: claude / claude-internal / codebuddy 共用。 */
+  /** stdio 形态: 每个 pane 一个 `node dist/mcp/server.js` 子进程。所有后端都认。 */
   stdioFile: string;
-  /** http 形态: 只有 codebuddy 认 `type:"http"`; 配了 http 传输时才写。 */
+  /** http 形态: 直连 daemon 的 `POST /mcp`; 配了 http 传输且后端认 `type:"http"` 时用它。 */
   httpFile?: string;
 }
+
+/** 认 `--mcp-config` 里 `type:"http"` 的后端。本机实测 2026-11-13: claude 2.1.84 /
+ *  claude-internal 2.1.154 / codebuddy 2.181 三个都连得上, 且都把 headers 里的
+ *  `${TMUX_PANE}` 按进程环境展开。codex 不走 `--mcp-config` (spawn-tmux 的 `-c` 覆盖),
+ *  不在名单里 —— 名单之外一律回落 stdio, 否则把默认值改成 http 就等于给那个后端
+ *  悄悄摘掉整套协作工具。 */
+const HTTP_MCP_BACKENDS = new Set(["claude", "claude-internal", "codebuddy"]);
+
+/** 该后端能否直连 daemon 的 /mcp (spawn 时决定用哪份产物)。 */
+export const supportsHttpMcp = (backendName: string): boolean => HTTP_MCP_BACKENDS.has(backendName);
 
 /** dist/shared → dist/mcp/server.js (dev tsx: shared/ → dist/mcp/server.js)。 */
 const mcpEntry = (): string => {
@@ -64,10 +74,19 @@ export const prepareSessionMcp = (
     return { stdioFile };
   }
   const httpFile = join(stateDir, "session-mcp-http.json");
-  writeIfChanged(httpFile, httpConfig(opts.port, token));
+  try {
+    writeIfChanged(httpFile, httpConfig(opts.port, token));
+    // 这份文件里是口令原文: 权限收紧到只有自己可读。
+    chmodSync(httpFile, 0o600);
+  } catch (e) {
+    // 写不出来只回落 stdio: pane 少几个进程好过少一整套工具面。
+    // eslint-disable-next-line no-console
+    console.warn(`[wezard] WARN: 写 ${httpFile} 失败 (${(e as Error).message}), 本次回落 stdio 形态。`);
+    return { stdioFile };
+  }
   return { stdioFile, httpFile };
 };
 
 /** 后端对应的注入参数; codex 不用 (它走 spawn-tmux 里的 `-c` 覆盖)。 */
 export const sessionMcpArgs = (backendName: string, spec: SessionMcpSpec): string[] =>
-  ["--mcp-config", backendName === "codebuddy" && spec.httpFile ? spec.httpFile : spec.stdioFile];
+  ["--mcp-config", spec.httpFile && supportsHttpMcp(backendName) ? spec.httpFile : spec.stdioFile];
