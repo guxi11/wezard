@@ -28,6 +28,10 @@ export interface MirrorAttachment {
    *  once the spawn lands. Decoupling from `cwd` means a /pwd before /new
    *  can show "current X, will switch to Y on /new". */
   pendingCwd?: string;
+  /** 这个会话有一份还没送达的宪章 (`AttachState.charterPending`): 挂上时落 true,
+   *  注入确认 ok 后清掉。daemon 重启后内存里的 pending 没了, attach 凭它 +
+   *  transcript 判据重新武装 —— 见 shared/charter-rearm.ts。 */
+  charterOwed?: boolean;
   /** 人确认过「就用这个目录」。只有一个写入点: 人明说了不用换 (`set_workspace({keep:true})`)。
    *  换去别的目录不必记 —— 那时 runningCwd 已经不是默认兜底目录, 「该不该问」自然为假。
    *  聊天级, 与 cwd/pendingCwd 一样挂在 base principal 上。 */
