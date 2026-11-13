@@ -147,3 +147,116 @@ export const startIdleNudge = (deps: NudgeDeps): (() => void) => {
   run();
   return () => clearInterval(timer);
 };
+
+// ── P7-S2 义务观测 (严格群的 chat 接收行) ──────────────────────────────
+// 严格群里义务不随终句自动关账 (chat_reply 才关), 逾期要有人看:
+//   本轮 idle 且义务未关 → 提醒恰好 1 次; 再 idle 仍未关 → overdue 上报恰好 1 次
+//   (成员违约私聊告知管家, 管家违约发群系统行 —— 上报的路由在 index.ts 的接线里)。
+//   注入 10 分钟没提交 (uncertain / 排队卡死) 只提示不判超时; **不按墙钟判逾期,
+//   不伪造 timeout** —— 行保持原状态, 时间只是观察窗, 状态机里没有「到点自动落定」
+//   这一步 (判据⑥: 假时钟快进 24h 无事件时状态迁移 0)。
+
+export interface ObligationObs {
+  /** 注入已提交给 owner (它确实收到了)。 */
+  delivered: boolean;
+  /** owner 此刻闲着 (轮已结束、没在交接)。 */
+  idle: boolean;
+  /** 距开行多久。 */
+  ageMs: number;
+}
+export interface ObligationWatch {
+  /** 已提醒过的时刻。 */
+  remindedAt?: number;
+  /** 已上报 overdue。 */
+  overdue?: true;
+  overdueAt?: number;
+}
+
+/** 一条义务过一次巡检: 纯。 */
+export const stepObligation = (
+  w: ObligationWatch | undefined,
+  o: ObligationObs,
+  now: number,
+  stalledAfterMs = 10 * 60_000,
+): { next: ObligationWatch; remind: boolean; escalate: boolean; stalled: boolean } => {
+  const base: ObligationWatch = w ?? {};
+  // 没提交的不判违约 —— 卡在注入里的义务提醒 owner 没有意义, 只提示。
+  if (!o.delivered) return { next: base, remind: false, escalate: false, stalled: o.ageMs > stalledAfterMs };
+  if (!o.idle) return { next: base, remind: false, escalate: false, stalled: false };
+  if (!base.remindedAt) return { next: { ...base, remindedAt: now }, remind: true, escalate: false, stalled: false };
+  if (!base.overdue) return { next: { remindedAt: base.remindedAt, overdue: true, overdueAt: now }, remind: false, escalate: true, stalled: false };
+  // 已上报过: 不再有动作 —— 提醒/上报各恰好 1 次 (判据⑥)。
+  return { next: base, remind: false, escalate: false, stalled: false };
+};
+
+export interface ObligationRow {
+  /** 路由行 id。 */
+  event: string;
+  /** 义务的 owner (wizard target)。 */
+  owner: string;
+  /** 严格群的 base principal。 */
+  channel: string;
+  /** chatlog/提醒里带的 msg (chat_reply 的 re)。 */
+  message: string;
+  ageMs: number;
+}
+
+export interface ObligationDeps {
+  /** 在看的义务行 (未落定的 chat 接收行; 严格群由调用方过滤)。 */
+  rows: () => readonly ObligationRow[];
+  /** 该行的注入是否已提交给 owner。 */
+  delivered: (row: ObligationRow) => boolean;
+  idleNow: (target: string) => Promise<boolean>;
+  handingOff: (target: string) => boolean;
+  /** 提醒 owner (注入它的 pane); 返回是否投出去。 */
+  remind: (row: ObligationRow) => Promise<boolean>;
+  /** 上报违约 (管家或私聊告知, 由调用方定)。 */
+  escalate: (row: ObligationRow) => Promise<void>;
+  /** 已问次数/轮次的落盘处 (键 = 行 id)。 */
+  store: { get: (k: string) => ObligationWatch | undefined; set: (k: string, v: ObligationWatch) => unknown;
+    drop: (k: string) => void; all: () => Record<string, ObligationWatch> };
+  log: { info: (o: object, msg: string) => void; warn: (o: object, msg: string) => void };
+}
+
+export const startObligationWatch = (deps: ObligationDeps): (() => void) => {
+  const stalledNoted = new Set<string>();
+  let busy = false;
+  const tick = async (): Promise<void> => {
+    const now = Date.now();
+    const rows = deps.rows();
+    const live = new Set(rows.map((r) => r.event));
+    // 落定 / 被顶掉的义务不再看: 内存与盘上的都清。
+    Object.keys(deps.store.all()).filter((k) => !live.has(k)).forEach((k) => deps.store.drop(k));
+    for (const row of rows) {
+      const idle = !deps.handingOff(row.owner) && await deps.idleNow(row.owner);
+      const o: ObligationObs = { delivered: deps.delivered(row), idle, ageMs: row.ageMs };
+      const { next, remind, escalate, stalled } = stepObligation(deps.store.get(row.event), o, now);
+      const prev = deps.store.get(row.event);
+      if (!prev || JSON.stringify(prev) !== JSON.stringify(next)) deps.store.set(row.event, next);
+      if (stalled && !stalledNoted.has(row.event)) {
+        stalledNoted.add(row.event);
+        deps.log.warn({ mod: "obligation-watch", event: row.event, owner: row.owner, ageMin: Math.round(row.ageMs / 60_000) },
+          "obligation-watch: 注入 10 分钟未提交 — 只提示, 不判超时");
+      }
+      if (!stalled) stalledNoted.delete(row.event);
+      if (remind) {
+        const ok = await deps.remind(row).catch(() => false);
+        deps.log[ok ? "info" : "warn"]({ mod: "obligation-watch", event: row.event, owner: row.owner }, ok ? "obligation-watch: 违约提醒 (1/1)" : "obligation-watch: 提醒没投出去");
+      }
+      if (escalate) {
+        await deps.escalate(row).catch((e) => deps.log.warn({ mod: "obligation-watch", err: (e as Error).message }, "obligation-watch: 上报失败"));
+        deps.log.warn({ mod: "obligation-watch", event: row.event, owner: row.owner }, "obligation-watch: 义务逾期, 已上报 (1/1)");
+      }
+    }
+  };
+  const run = (): void => {
+    if (busy) return;
+    busy = true;
+    void tick()
+      .catch((e: unknown) => deps.log.warn({ err: (e as Error).message }, "obligation-watch: 巡检出错"))
+      .finally(() => { busy = false; });
+  };
+  const timer = setInterval(run, 30_000);
+  timer.unref?.();
+  return () => clearInterval(timer);
+};
