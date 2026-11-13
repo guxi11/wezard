@@ -93,6 +93,20 @@ export interface WorldFactInFlight { from: string; to: string; turn: string; sta
 /** 一个微信通道的此刻: 掉没掉线、人最近何时开口、压着几条没发、这份 context_token 还能发几条、频控暂停到何时 (0 = 没停)。 */
 export interface WorldFactWeixin { base: string; state: "live" | "expired"; lastInAt: number; held: number; budget: number; pausedUntil: number }
 
+/** P7-S3 严格群治理面板 (rolepage): 一个 strict 聊天的成员/游标/欠账快照。 */
+export interface WorldFactGovernance {
+  /** base principal。 */
+  chat: string;
+  members: ReadonlyArray<{
+    name: string;
+    mode: string;
+    /** 已消费到的聊天记录 seq。 */
+    cursor: number;
+    owed: number;
+    passed: number;
+    overdue: number;
+  }>;
+}
 export interface WorldFacts {
   wizards: readonly WorldFactWizard[];
   plans: readonly PlanRecord[];
@@ -105,6 +119,8 @@ export interface WorldFacts {
   humanNames?: Readonly<Record<string, string>>;
   /** 微信 ClawBot 通道的账号状态, 每个绑定的微信用户一个群 (`chat:wx_…`)。老 daemon 推来的快照没有。 */
   weixin?: readonly WorldFactWeixin[];
+  /** P7-S3 严格群的治理面板 (members.json + 路由行 + 义务观测); 老 daemon 快照没有。 */
+  governance?: readonly WorldFactGovernance[];
   /** 这份不是注册表给的, 是「没拿到」的占位 —— 显式信号: 空名册 ≠ 注册表不可达。 */
   absent?: true;
 }

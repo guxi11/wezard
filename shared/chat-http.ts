@@ -257,6 +257,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       // 最近排好)。落在别的会话上就不猜。
       with: home?.subs.find((s) => s.count && (land.with ? s.role === land.with : s.role.startsWith("human:")))?.role ?? "",
       relations: hasRelations(msgs, role, info),
+      // P7-S3 严格群治理面板 (成员/游标/欠账): 不随视角裁 —— 面板属于聊天, 不属于 role。
+      ...(f.governance?.length ? { governance: f.governance } : {}),
       plans: f.plans.filter((p) => p.owner === role).map(publicPlan),
       inflight: (f.inflight ?? []).filter((x) => x.from === role || x.to === role).map((x) => ({
         ...x, ...(x.state === "blocked" && dir.fact(x.to)?.waiting?.length ? { waiting: dir.fact(x.to)!.waiting } : {}),

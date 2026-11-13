@@ -79,6 +79,7 @@ export const renderChatPage = (): string =>
       <div class="ch-who" id="ch-who"></div>
       <div class="ch-acts" id="ch-acts"></div>
     </header>
+    <div class="govbar" id="govbar" hidden></div>
     <div class="thread" id="thread"><div class="thread-in" id="thread-in"></div></div>
     <div class="pane" id="pane-world" hidden>
       <div class="wtools" id="wtools"></div>

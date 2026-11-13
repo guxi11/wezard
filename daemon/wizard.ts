@@ -617,6 +617,14 @@ const fit = (lines: readonly string[], maxLines: number, maxChars: number): [str
   return [kept, lines.length - kept.length];
 };
 
+export interface L0Members {
+  /** 成员名 (裸名)。 */
+  name: string;
+  /** owner / speaker / mention。 */
+  mode: string;
+  /** 本群未结义务数。 */
+  owed: number;
+}
 export interface L0Args {
   /** 调用方所在聊天的 base。 */
   base: string;
@@ -630,12 +638,25 @@ export interface L0Args {
   missHint?: string;
   /** 降级说明 (ctx 超线时调用方给; 给了就附这一行, 层不在这里换)。 */
   degraded?: string;
+  /** P7-S3 严格群: 在场 = 本群成员 + 欠账数 (给了就替换「最近活动」那一段)。 */
+  members?: readonly L0Members[];
 }
 
 /** L0 在场 (默认层): 自己 + 本群管家 + 学徒 (钉住, 截断也不丢) + 本聊天 ROSTER_L0_ACTIVE_MS
  *  内动过的化身 (按最近排, 填满剩余行), 每个一行 (不带职责/最近子行), 尾行全机普查 +
  *  至多一条提示 (降级 > miss > 截断), 总行数 ≤ ROSTER_L0_MAX_LINES。 */
 export const rosterL0 = (rows: readonly RosterRow[], a: L0Args): string => {
+  // P7-S3 严格群: 在场 = 本群成员 + 欠账数 (owner → speaker → mention, 同档欠账多的在前),
+  // 尾行仍是全机普查; 行数 ≤ ROSTER_L0_MAX_LINES, 成员行数 = members.json 的行数 (验收数字④)。
+  if (a.members) {
+    const order = { owner: 0, speaker: 1, mention: 2 } as Record<string, number>;
+    const sorted = [...a.members].sort((x, y) => (order[x.mode] ?? 3) - (order[y.mode] ?? 3) || y.owed - x.owed || x.name.localeCompare(y.name));
+    const lines = sorted.map((m) => `.${m.name} (${m.mode})${m.owed ? ` — 欠 ${m.owed}` : ""}`);
+    // 成员行 + 普查 + 至多一条截断提示 ≤ ROSTER_L0_MAX_LINES。
+    const [kept, dropped] = fit(lines, ROSTER_L0_MAX_LINES - 2, ROSTER_L0_CHARS - censusLine(a.census).length - 60);
+    const hint = dropped > 0 ? `成员 ${sorted.length} 个, 列出 ${kept.length} — /chat/members 看全量` : undefined;
+    return [...kept, censusLine(a.census), ...(hint ? [hint] : [])].join("\n");
+  }
   const pinned = rows
     .filter((r) => r.self || r.target === a.stewardTarget || r.kind === "apprentice")
     .slice()

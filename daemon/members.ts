@@ -32,6 +32,8 @@ export interface Members {
   advance: (chat: string, identity: string, cursor: number) => void;
   rowOf: (chat: string, identity: string) => MemberRow | undefined;
   ofChat: (chat: string) => Array<{ identity: string; row: MemberRow }>;
+  /** 有成员表的全部聊天键 (P7-S3 rolepage/roster 面板用)。 */
+  chats: () => string[];
   /** 身份退役: 从所有聊天里摘掉 (P7-S2, 返回摘掉的聊天键)。 */
   leaveEverywhere: (identity: string) => string[];
 }
@@ -61,6 +63,7 @@ export const openMembers = (file: string): Members => {
     ofChat: (chat) => Object.entries(db.all())
       .filter(([k]) => k.startsWith(`${chat}|`))
       .map(([k, row]) => ({ identity: k.slice(chat.length + 1), row })),
+    chats: () => [...new Set(Object.keys(db.all()).map((k) => k.split("|")[0] ?? "").filter(Boolean))],
     leaveEverywhere: (identity) => {
       const suffix = `|${identity}`;
       const chats = Object.keys(db.all()).filter((k) => k.endsWith(suffix)).map((k) => k.slice(0, -suffix.length));

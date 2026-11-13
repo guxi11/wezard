@@ -555,7 +555,8 @@ export const createWezardServer = (): McpServer => {
       description:
         "像人翻聊天记录那样读往来, 一行一句: `[时刻] .谁: .谁 说了什么` (wizard 名字前带 `.`, 人只写名字)。三级收窄, 每一级都可以不给: `role` (谁的视角 —— 只留它说的或听的) → `chat` (哪个群 —— 只留那个群里公开说的) → `target` (和谁 —— 只留与它的往来)。什么都不给 = 你这一轮所在的群: 人说的、各个 wizard 答的、wizard 之间公开说的都在里面。只给 `target` = 你和它的全部往来 (含 tell_peer 默认走的私聊, 群里看不见的那部分); `role` + `target` = 那两方之间; 只给 `role` = 它在所有群与私聊里的往来; 再加 `chat` 就限定在那个群里。没给 `chat` 时每行会标出这句是在哪个聊天 / 私聊里说的。一条消息一行起头, 正文的续行缩进; 还没等到回答的问话行尾标 `(还没有回复)`。\n" +
         "按时间和条数读: 默认回最新的 `limit` 条; `until` = 只看那之前的 (往回翻页), `since` = 从那时起 (只给 `since` 就从它往后数 `limit` 条)。回执末尾给出翻页用的时刻, 原样传回即可; 往回已经没有了会明说到头。\n" +
-        "只有正文: 每个来回取问话和终句, 工具调用的过程不在里面, 记录是从各个 wizard 当前会话的 transcript 现拼的: 一个 wizard `/clear` 或交接之前说的不在里面, 除点名的 role / target 外只并最近一周动过的会话。用户说「群里刚才聊了什么」「.fix 之前怎么答的」「我上次让 .docs 干了什么」, 或者你被叫进一个已经聊了一阵的群、需要来龙去脉时调它。要读**某一个 wizard** 会话里的原始对话用 peek_peer。",
+        "只有正文: 每个来回取问话和终句, 工具调用的过程不在里面, 记录是从各个 wizard 当前会话的 transcript 现拼的: 一个 wizard `/clear` 或交接之前说的不在里面, 除点名的 role / target 外只并最近一周动过的会话。用户说「群里刚才聊了什么」「.fix 之前怎么答的」「我上次让 .docs 干了什么」, 或者你被叫进一个已经聊了一阵的群、需要来龙去脉时调它。要读**某一个 wizard** 会话里的原始对话用 peek_peer。\n" +
+        "严格群 (speech=strict) 的 read_chat 读的是群账本 (chat-records, 实际发出内容, 行号 = 账本 seq): 与成员游标同一份账, 人话/系统行/wizard 交付都在, 不受 wizard 换会话影响。",
       inputSchema: {
         role: z.string().optional().describe("谁的视角: wizard 的名字 ('fix' / '.fix') 或人的 userid。省略 = 不限 (给了 `target` 时默认是你自己)。"),
         chat: z.string().optional().describe("哪个群: 聊天名 (wizard_roster 里的 home 聊天名) 或裸 principal。省略 = 不限群 (公开与私聊都算); 三个都省略 = 你这一轮所在的群。"),

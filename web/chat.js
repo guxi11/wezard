@@ -1117,7 +1117,24 @@
   };
   // 一对一的标题: 与关系图卡片窗口 (convOf 的 a:) 同一种写法。
   var pairTitle = function (peer) { return nameOf(ROLE) + ' 与 ' + nameOf(peer) + ' 的对话'; };
+  // P7-S3 严格群治理面板: 成员 / 游标 / 欠账 (owed · passed · overdue), 只在群窗口本身 (c:<chat>) 显示。
+  var renderGov = function () {
+    var bar = $('#govbar');
+    if (!bar) return;
+    var gov = (R.governance || []).filter(function (g) { return CONV === 'c:' + g.chat; })[0];
+    if (!gov || VIEW !== 'msgs' || !gov.members.length) { bar.hidden = true; bar.innerHTML = ''; return; }
+    var modeName = { owner: '管家', speaker: '发言', mention: '点名' };
+    bar.innerHTML = '<span class="gt">严格模式 · 成员 ' + gov.members.length + '</span>' + gov.members.map(function (m) {
+      var bits = ['游标 ' + m.cursor];
+      if (m.owed) bits.push('欠 ' + m.owed);
+      if (m.passed) bits.push('passed ' + m.passed);
+      if (m.overdue) bits.push('overdue ' + m.overdue);
+      return '<span class="gm' + (m.overdue ? ' late' : '') + '"><b>🧙 ' + esc(m.name) + '</b> ' + esc(modeName[m.mode] || m.mode) + ' · ' + esc(bits.join(' · ')) + '</span>';
+    }).join('');
+    bar.hidden = false;
+  };
   var renderHead = function () {
+    renderGov();
     var who = $('#ch-who'), acts = $('#ch-acts');
     if (VIEW !== 'msgs') {
       who.innerHTML = VIEW === 'charter'
@@ -1409,6 +1426,7 @@
     R.role = d.role; R.sessions = d.sessions || []; R.convs = d.convs || []; R.chatKeys = d.chatKeys;
     SESSION = d.session || '';
     R.relations = !!d.relations; R.schedules = d.schedules || 0; R.plans = acceptPlans(d.role.id, d.plans); R.plan = d.plan || null; R.inflight = d.inflight || [];
+    R.governance = d.governance || [];
     if (W.role === d.role.id) W.plans = replaceWorldPlans(W.plans, d.role.id, R.plans);
     R.charter = d.charter || null;
     R.stats = d.stats || null; R.winStats = d.winStats || null;

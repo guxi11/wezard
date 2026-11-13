@@ -998,3 +998,17 @@ button.mchip.rcpt:hover { text-decoration: underline }
 /* clone 徽标落到的那次 clone_wizard 调用: 调用框本身再闪一圈。 */
 .mrow .bubble.tool.hit { animation: hit 2.4s ease-out }
 @keyframes hit { 0%, 30% { box-shadow: 0 0 0 3px #2f55c955 } 100% { box-shadow: 0 0 0 3px #2f55c900 } }
+
+/* ── P7-S3 严格群治理面板 (govbar): 成员 / 游标 / 欠账, 钉在聊天头下面 ── */
+.govbar {
+  flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px;
+  padding: 6px 14px; border-bottom: 1px solid var(--line); background: #f6f8fb;
+  font-size: 11.5px; color: var(--mute);
+}
+.govbar .gt { font-weight: 600; color: var(--ink); }
+.govbar .gm { display: inline-flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.govbar .gm b { font-weight: 600; color: var(--ink); }
+.govbar .gm.late b { color: #c0392b; }
+.govbar .gm.late { color: #c0392b; }
+@media (max-width: 760px) { .govbar { gap: 4px 10px; padding: 5px 10px; } }
+

@@ -124,6 +124,7 @@ import { askerFromEnvelope, parseReminders, renderReminder, stripReminders, with
 import { createHandoffs, cuttingTurn, handedOff, handingOff, handoffRound, resumeText, roundPending, settlesCut, type Pending as PendingHandoff } from "./handoff.js";
 import { coldGateOf, decide, rankCandidates, routeDiagnostics, renderCandidates, routeReceiptDutiesOf, tierFor, wakeCostOf, wakeNoteOf, type RouteRow } from "./route.js";
 import { parseWhen, renderChatLog, UNKNOWN_HUMAN, type LogSession } from "./chat-log.js";
+import { renderChatRecords } from "../shared/chat-record.js";
 import { audienceOf } from "../shared/role-view.js";
 import { waitForIdle, type IdleResult } from "./wait-idle.js";
 import { reminderEventId, reminderToken, startPlanReminders, type PlanReminderCandidate } from "./plan-reminders.js";
@@ -1996,6 +1997,8 @@ const main = async (): Promise<void> => {
     // 判据② (非成员 403 / mention 无有效 re 409) 的测试面。这里只做接线: 成员方式 →
     // 义务校验 → 判定 → 记账。通过即记账 (发不发出去了也记 — 保守防刷)。
     const sayMeter = openSayMeter();
+    // P7-S2 义务观测的落盘处 (S3 起 rolepage 治理面板也读它: overdue 计数)。
+    const obligationWatches = loadJsonMap<ObligationWatch>(join(cfg.daemon.stateDir, "obligations.json"));
     /** P7-S2 join 接面 (spawn/delegate 的 join 参数 / steward 换绑): 入群 = 成员表 join
      *  (升级式) + 一行成员变动系统行; 只在 strict 群有意义, 别的群静默忽略。 */
     const joinMember = (by: string, base: string, target: string, mode: "owner" | "speaker" | "mention"): string => {
@@ -2314,6 +2317,30 @@ const main = async (): Promise<void> => {
             ...all.filter((t) => !pinned.has(t.target) && now - t.mtime < LOG_RECENT_MS).sort((x, y) => y.mtime - x.mtime).slice(0, LOG_SESSIONS),
           ];
       const chat = base ? chatNameOf(cfg, base) : undefined;
+      // P7-S3: 严格群改读账本 (实际发出内容) —— 与 chatlog 批同一份 chat-records,
+      // golden 验收两侧同一个 renderChatRecords; 私聊与 implicit 群照旧 transcript。
+      if (base && strictSpeechOf?.(base)) {
+        const view = renderChatRecords(chatRecords.lines(base), {
+          since, until, limit, per,
+          names: [role?.name, target?.name].filter((x): x is string => !!x),
+        });
+        const strictScope = [
+          chat !== undefined ? `群 ${chat || base} (strict 账本)` : `群 ${base} (strict 账本)`,
+          role && target ? `${role.name} ⇄ ${target.name}` : role ? `${role.name} 的往来` : "",
+        ].filter(Boolean).join(" · ");
+        json(res, 200, {
+          ok: true,
+          shown: view.shown,
+          total: view.total,
+          text: [
+            `${strictScope} · ${view.shown} 条`,
+            view.text || "(没有读到对话)",
+            ...(view.earlier ? [`更早的: until="${view.earlier}"`] : view.later || !view.shown ? [] : ["(往回已经到头)"]),
+            ...(view.later ? [`往后还有 ${view.total - view.shown} 条: since="${view.later}"`] : []),
+          ].join("\n"),
+        });
+        return;
+      }
       const log_ = renderChatLog(
         sessions.map(logSession),
         { role: role?.name, chat, target: target?.name, since, until, limit, per,
@@ -2676,7 +2703,7 @@ const main = async (): Promise<void> => {
           }
           await m.injectText(steward.target, note, { channel: "" });
         },
-        store: loadJsonMap<ObligationWatch>(join(cfg.daemon.stateDir, "obligations.json")),
+        store: obligationWatches,
         log: log.child({ mod: "obligation-watch" }),
       });
       stopPlanReminders = startPlanReminders({
@@ -3484,6 +3511,27 @@ const main = async (): Promise<void> => {
           base: `chat:${a.chatId}`, state: a.state, lastInAt: a.lastInAt ?? 0, held: a.outbox.length,
           budget: a.ctx ? Math.max(0, cfg.weixin.sendCap - a.ctx.used) : 0, pausedUntil: a.pausedUntil ?? 0,
         })),
+        // P7-S3 严格群治理面板: members.json × 路由行 × 义务观测 (owed/passed/overdue)。
+        governance: members.chats()
+          .filter((base) => strictSpeechOf?.(base))
+          .map((base) => {
+            const rows = router.rows().filter((r) => r.receiver.kind === "chat" && r.receiver.channel === base);
+            const watched = obligationWatches.all();
+            return {
+              chat: base,
+              members: members.ofChat(base).map(({ identity, row }) => {
+                const mine = rows.filter((r) => identityOfTarget?.(r.owner) === identity);
+                return {
+                  name: wizards.all().find((w) => identityOfRec(w) === identity)?.name || identity,
+                  mode: row.mode,
+                  cursor: row.cursor,
+                  owed: mine.filter((r) => ["held", "open", "need", "error"].includes(r.status)).length,
+                  passed: mine.filter((r) => r.outcome?.status === "passed").length,
+                  overdue: mine.filter((r) => ["held", "open", "need", "error"].includes(r.status) && watched[r.event]?.overdue).length,
+                };
+              }),
+            };
+          }),
       };
     };
     // 一次采集失败 (某个 pane 的 tmux 抖了一下) 不等于注册表没了: 退回上一份好的,
@@ -3814,7 +3862,16 @@ const main = async (): Promise<void> => {
         ? `ctx ${Math.round((info?.contextTokens ?? 0) / 1000)}k 已到交接线 (${Math.round(handoffAt(model) / 1000)}k) — 只列在场; query/chat 收窄或 peek_peer 单查`
         : undefined;
       if (layer === "L0") {
-        const text = rosterL0(hit.map(enrich), { base: selfBase, stewardTarget, now, home: homedir(), census, ...(missHint ? { missHint } : {}), ...(degradedLine ? { degraded: degradedLine } : {}) });
+        // P7-S3 严格群: 在场 = 本群成员 + 欠账数 (成员表 + 未结 chat 行按 owner 身份归账)。
+        const strictMembers = strictSpeechOf?.(selfBase)
+          ? members.ofChat(selfBase).map(({ identity, row }) => ({
+              name: wizards.all().find((w) => identityOfRec(w) === identity)?.name || identity,
+              mode: row.mode,
+              owed: router.rows().filter((r) => r.receiver.kind === "chat" && r.receiver.channel === selfBase
+                && ["held", "open", "need", "error"].includes(r.status) && identityOfTarget?.(r.owner) === identity).length,
+            }))
+          : undefined;
+        const text = rosterL0(hit.map(enrich), { base: selfBase, stewardTarget, now, home: homedir(), census, ...(strictMembers ? { members: strictMembers } : {}), ...(missHint ? { missHint } : {}), ...(degradedLine ? { degraded: degradedLine } : {}) });
         json(res, 200, { ok: true, layer, total: all.length, matched: hit.length, text });
         return;
       }
