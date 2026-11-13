@@ -659,7 +659,8 @@ const STATUSES: ReadonlySet<string> = new Set<Status>(["held", "open", "need", "
 const OPEN_STATUSES: ReadonlySet<string> = new Set(["open", "held"]);
 /** mark 只落中途态 (`handed` 是墓碑, 不给 mark); `progress` 是只记 notice/reports 的中间回执。 */
 const MARK_STATUSES: ReadonlySet<string> = new Set(["open", "need", "error", "progress"]);
-const OUTCOME_STATUSES: ReadonlySet<string> = new Set<string>(["done", "timeout", "silent", "dead", "canceled"]);
+// passed = P7-S2 的「无需答复」了结 (chat_reply 不带 text) —— 也是合法定论, 重放要认。
+const OUTCOME_STATUSES: ReadonlySet<string> = new Set<string>(["done", "passed", "timeout", "silent", "dead", "canceled"]);
 
 const nonEmpty = (v: unknown): v is string => typeof v === "string" && v !== "";
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);

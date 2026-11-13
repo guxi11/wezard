@@ -143,7 +143,7 @@ assert.equal(isTerminal("passed"), true, "passed 是终态");
   assert.equal(chatPolicyOf(strict, "chat:wrB").speech, "implicit", "别的群不受影响");
 }
 
-// ── 7. chat_* 工具: 隐藏注册 (WEZARD_MCP_EXTRA 才上工具面, 判据④) ──
+// ── 7. chat_* 工具: S2 起常规注册 (S1 曾判据④「隐藏注册」随四工具升级而反转, 逐条说明见回执) ──
 const toolNames = async (): Promise<string[]> => {
   const { createWezardServer } = await import("../mcp/tools.js");
   const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
@@ -155,17 +155,10 @@ const toolNames = async (): Promise<string[]> => {
   return (await client.listTools()).tools.map((x) => x.name);
 };
 {
+  // S2: 四工具从 registerRare 升常规 —— 不带任何 env 也必须在工具面 (implicit 群由 handler 409 挡)。
   const base = await toolNames();
   for (const n of ["chat_members", "chat_say", "chat_reply", "chat_ask"]) {
-    assert.ok(!base.includes(n), `不带 WEZARD_MCP_EXTRA 时 ${n} 不在工具面`);
-  }
-}
-{
-  process.env.WEZARD_MCP_EXTRA = "1";
-  const extra = await toolNames();
-  delete process.env.WEZARD_MCP_EXTRA;
-  for (const n of ["chat_members", "chat_say", "chat_reply", "chat_ask"]) {
-    assert.ok(extra.includes(n), `WEZARD_MCP_EXTRA=1 时 ${n} 在工具面`);
+    assert.ok(base.includes(n), `常规注册后 ${n} 在工具面 (S2 升级)`);
   }
 }
 
