@@ -186,7 +186,7 @@ export const resolvePendingsByChat = (
     if (reqId === excludeReqId) continue;
     if (p.meta.kind !== "approval") continue;
     // 必发卡不在 sweep 覆盖范围: 用户点的是「N 分钟全过」, 那是对常规操作的
-    // 授权, 不能顺手把一条 rm -rf / 一条 askRules 命中 / 一次 `.claude/**` 写
+    // 授权, 不能顺手把一条强推 一条 askRules 命中 / 一次 `.claude/**` 写
     // 也放行了 —— 那三类的全部意义就是"每次都要单独看一眼"。
     if (p.meta.forceSingle) continue;
     if (!p.meta.chatKey || baseOfKey(p.meta.chatKey) !== base) continue;

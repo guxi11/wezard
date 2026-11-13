@@ -71,7 +71,7 @@ export const pickerPolicy = (
     // 匹配不上 —— 配 skip_all 的人已接受「不再逐条问」。
     if (cfg.approval.mode === "skip_all") return { decision: "allow", reason: "skip_all" };
     // 结构解不出 ≠ 看不出危险: 正文里那段操作 (REPL 包裹的命令 / 被 pane 宽度截断的
-    // params) 照样过一遍危险名单。判出 rm -rf 就打红走「危险」行 —— 看不懂的只是
+    // params) 照样过一遍危险名单。判出强推/提权就打红走「危险」行 —— 看不懂的只是
     // 参数全貌, 不是这条命本身。
     const hit = dangerOfScript(cfg, ctx.body ?? "");
     if (hit) return { decision: "manual", reason: hit.rule, forceSingle: hit.rule, danger: hit.rule };

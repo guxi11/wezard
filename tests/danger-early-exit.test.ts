@@ -25,7 +25,7 @@ const t = (name: string, fn: () => void): void => {
 const cfgOf = (o: { mode?: "all" | "danger" | "skip_all" }): Config =>
   ({ approval: { mode: o.mode ?? "danger" } }) as unknown as Config;
 
-const HIT: DangerHit = { rule: "删除文件 rm" };
+const HIT: DangerHit = { rule: "git 强推" };
 
 // ── danger 档 (默认): 名单之外的放行 ─────────────────────────────────
 t("mode=danger + 未命中 → danger_mode_skip", () => {

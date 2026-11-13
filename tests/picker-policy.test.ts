@@ -38,8 +38,8 @@ assert.equal(pickerPolicy(cfg(), "codebuddy", context, false).reason, "danger_mo
   assert.equal(pickerPolicy(a, "codebuddy", context, false).decision, "manual");
   assert.equal(pickerPolicy(a, "codebuddy", context, false).forceSingle, "Bash(git status)");
   const g = cfg();
-  assert.equal(pickerPolicy(g, "codebuddy", parseConfirmContext(frame("rm -rf ~/task")), false).decision, "manual");
-  assert.ok(pickerPolicy(g, "codebuddy", parseConfirmContext(frame("rm -rf ~/task")), false).danger);
+  assert.equal(pickerPolicy(g, "codebuddy", parseConfirmContext(frame("git push --force origin main")), false).decision, "manual");
+  assert.ok(pickerPolicy(g, "codebuddy", parseConfirmContext(frame("git push --force origin main")), false).danger);
 }
 assert.equal(pickerPolicy(config, "codebuddy", context, false).decision, "manual");
 assert.equal(pickerPolicy(config, "codebuddy", context, true).decision, "allow");
@@ -63,19 +63,18 @@ assert.equal(pickerPolicy(config, "codebuddy", context, true).decision, "leave")
 const mode = cfg();
 mode.approval.mode = "danger";
 assert.equal(pickerPolicy(mode, "claude", context, false).reason, "danger_mode_skip");
-// 危险样例用可解析的非临时区目标: /tmp 下的 rm 走临时区豁免、相对路径解析不出
-// 不判 (2026-10-28 口径), 都不再是 danger 命中。
-const dangerous = parseConfirmContext(frame("rm -rf ~/task"));
+// 危险样例用强推 (rm / git 丢弃 2026-11-03 起整类移出名单, 不再是 danger 命中)。
+const dangerous = parseConfirmContext(frame("git push --force origin main"));
 assert.equal(pickerPolicy(mode, "codebuddy", dangerous, true).decision, "manual");
 assert.ok(pickerPolicy(mode, "codebuddy", dangerous, true).forceSingle);
 // 原 danger.skip=true 的语义 (跳过危险卡) 2026-10-28 收敛为 mode:"skip_all" —— 它
 // 压过危险名单与 askRules (承自旧 skipAll), 只想在 danger 档下微调已无此档。
 mode.approval.mode = "skip_all";
 assert.equal(pickerPolicy(mode, "codebuddy", dangerous, false).reason, "skip_all");
-mode.approval.askRules = ["Bash(rm *)"];
+mode.approval.askRules = ["Bash(git push *)"];
 assert.equal(pickerPolicy(mode, "codebuddy", dangerous, true).decision, "allow", "skip_all 压过 askRules");
 mode.approval.mode = "danger";
-mode.approval.askRules = ["Bash(rm *)"];
+mode.approval.askRules = ["Bash(git push *)"];
 assert.equal(pickerPolicy(mode, "codebuddy", dangerous, true).decision, "manual");
 const self = parseConfirmContext(frame("unused", "mcp__wezard__set_model").replace('{"command":"unused"}', '{"scope":"default"}'));
 assert.equal(self.complete, true);
@@ -161,17 +160,28 @@ assert.equal(evalCtx.complete, false);
 const evalPolicy = pickerPolicy(cfg(), "codebuddy", evalCtx, true);
 assert.equal(evalPolicy.decision, "allow");
 assert.equal(evalPolicy.reason, "danger_mode_skip");
-// 认不出结构但可见正文里有看得懂的非临时区 rm → 照样打红走「危险」行, danger 档不放行。
+// 认不出结构但可见正文里有看得懂的危险命令 → 照样打红走「危险」行, danger 档不放行。
 const outsideScreen = [
   " Bash command",
-  "   rm -rf ~/task",
+  "   git push --force origin main",
   " Hook PreToolUse: Bash requires confirmation:",
   " > 1. Yes",
   "   2. No",
 ].join("\n");
 const outsidePolicy = pickerPolicy(cfg(), "codebuddy", parseConfirmContext(outsideScreen), true);
 assert.equal(outsidePolicy.decision, "manual");
-assert.ok(outsidePolicy.danger, "可见正文里的非临时区 rm 仍立 danger");
+assert.ok(outsidePolicy.danger, "可见正文里的强推仍立 danger");
+// rm / git 丢弃整类移出名单 (2026-11-03): 可见正文里的非临时区 rm 现在也放行。
+const rmScreen2 = [
+  " Bash command",
+  "   rm -rf ~/task",
+  " Hook PreToolUse: Bash requires confirmation:",
+  " > 1. Yes",
+  "   2. No",
+].join("\n");
+const rmPolicy2 = pickerPolicy(cfg(), "codebuddy", parseConfirmContext(rmScreen2), true);
+assert.equal(rmPolicy2.decision, "allow");
+assert.equal(rmPolicy2.danger, undefined);
 // 真认不出危险的时候才退回「无法完整识别」, 而且只在 all 档走审核行。
 const vagueCtx = parseConfirmContext("Bash command\n   ls -la\nWould you like to proceed?\n > 1. Yes\n  2. No");
 const vaguePolicy = pickerPolicy(allCfg, "codebuddy", vagueCtx, true);

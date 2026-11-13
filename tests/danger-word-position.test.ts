@@ -75,15 +75,11 @@ t("分支名带 flushdb", () => safe("git checkout feat/flushdb-guard"));
 t("分支名带 pkill", () => safe("git checkout feat/pkill-worker"));
 
 // ── 漏报侧: 真正的危险命令一条都不能放过 ──────────────────────────────
-t("行首 rm -rf 非临时区", () => danger("rm -rf /var/log/app"));
-t("&& 后 rm 非临时区", () => danger("cd /tmp && rm -rf ~/develop/build"));
-t("分号后 rm 非临时区", () => danger("cd /tmp; rm -rf /var/lib/x"));
-t("sudo rm", () => danger("sudo rm -rf /var/log/app"));
-t("管道后 rm 无目标 (解析不出 → 不判)", () => safe("ls | rm"));
+t("sudo rm (提权本身仍 danger)", () => danger("sudo rm -rf /var/log/app"));
+t("find -delete (find 扫树删, 非 rm 类)", () => danger("find . -name '*.log' -delete"));
 t("find -exec rm", () => danger("find . -name '*.log' -exec rm {} \\;"));
-t("xargs -I 传参 rm", () => danger("git ls-files | xargs -I{} rm {}"));
-t("for 循环体里 rm 相对目标 (解析不出 → 不判)", () => safe("for f in *.tmp; do rm $f; done"));
-t("$() 里 rm 相对目标 (解析不出 → 不判)", () => safe("echo $(rm -rf x)"));
+t("xargs rm (随 rm 类一起移出) → 不判", () => safe("git ls-files | xargs -I{} rm {}"));
+t("管道后 rm 无目标 → 不判", () => safe("ls | rm"));
 t("truncate 清空文件", () => danger("truncate -s 0 app.log"));
 t("裸 shutdown", () => danger("shutdown -h now"));
 t("分号后 reboot", () => danger("make build; reboot"));
@@ -95,49 +91,57 @@ t("kill -9", () => danger("kill -9 12345"));
 t("redis flushall", () => danger("redis-cli -h h flushall"));
 t("su -", () => danger("su - root"));
 // 包装器形态 (#19 合并后的漏报): 包装器之后仍是命令词位置。
-t("反斜杠转义 rm", () => danger("\\rm -rf ~/x"));
-t("command 包装 rm", () => danger("command rm -rf ~/x"));
-t("timeout 包装 rm", () => danger("timeout 5 rm -rf ~/x"));
-t("nice 包装 rm", () => danger("nice rm -rf ~/x"));
-t("env 赋值后 rm", () => danger("env FOO=1 rm -rf ~/x"));
+t("反斜杠转义 reboot", () => danger("\\reboot"));
+t("command 包装 shutdown", () => danger("command shutdown -h now"));
+t("timeout 包装 reboot", () => danger("timeout 5 reboot"));
+t("nice 包装 reboot", () => danger("nice reboot"));
+t("env 赋值后 reboot", () => danger("env FOO=1 reboot"));
 t("watch reboot", () => danger("watch reboot"));
 
 // ── 远程执行: 位置约束失效, 靠 ssh/exec 上下文兜住 ────────────────────
 t("ssh 裸 reboot", () => danger("ssh host reboot"));
 t("ssh 带参数 + 引号", () => danger('ssh -p 22 host "shutdown -r now"'));
-t("ssh 远程 rm", () => danger("ssh host rm -rf /data"));
+t("ssh 远程 rm (rm 类已移出 → 不判)", () => safe("ssh host rm -rf /data"));
 t("kubectl exec -- halt", () => danger("kubectl exec pod -- halt"));
 t("docker exec halt", () => danger("docker exec -it c1 halt"));
 // 反面: 远程规则不该被「有 ssh 字样 + 文件名带危险词」钓出来。
 t("scp 传带 shutdown 的文件名", () => safe("scp graceful-shutdown.md host:/tmp/"));
 
-// ── git 丢弃改动拆分 (2026-10-28): 整树形态留 danger, 路径级降普通档 ────
-// 危害面: 整树 (reset --hard / clean / 匿名整树 pathspec) 一次抹掉共享工作树里
-// 全组人的未提交 WIP → 必发单卡; 路径级 (restore/checkout -- 到具名路径) 只动
-// 所列路径的未提交改动, 是日常「撤销自己刚改的文件」→ 走普通 4 键卡 (⏱/总是)。
-t("git reset --hard (整树)", () => danger("git reset --hard"));
-t("git reset --hard HEAD~3 (整树)", () => danger("git reset --hard HEAD~3"));
-t("git clean -fd (删未跟踪)", () => danger("git clean -fd"));
-t("git checkout -- . (整树)", () => danger("git checkout -- ."));
-t("git checkout -- \".\" (整树, 引号)", () => danger('git checkout -- "."'));
-t("git checkout HEAD -- . (tree-ish 整树)", () => danger("git checkout HEAD -- ."));
-t("git restore . (整树)", () => danger("git restore ."));
-t("git restore .. (整树)", () => danger("git restore .."));
-t("git restore :/ (整树, 仓库根 magic)", () => danger("git restore :/"));
-t("git restore * (整树, 裸 glob)", () => danger("git restore *"));
-t("git restore -s HEAD~1 . (带参整树)", () => danger("git restore -s HEAD~1 ."));
-t("git restore --source=HEAD~1 . (带参整树)", () => danger("git restore --source=HEAD~1 ."));
-t("git checkout -- . && make (整树在复合命令里)", () => danger("git checkout -- . && make"));
-t("git restore x && git clean -fd (第二段的整树也抓)", () => danger("git restore x && git clean -fd"));
-t("git restore <具体路径> → 降普通档", () => safe("git restore src/index.ts"));
-t("git checkout -- <具体路径> → 降普通档", () => safe("git checkout -- src/index.ts"));
-t("git restore --staged <路径> (只动 index) → 降普通档", () => safe("git restore --staged x.ts"));
-t("git checkout -- .env (具名文件, 非 .) → 降普通档", () => safe("git checkout -- .env"));
-t("git checkout -- src/. (路径里的点) → 降普通档", () => safe("git checkout -- src/."));
-t("git restore :/README.md (从根定位的具名路径) → 降普通档", () => safe("git restore :/README.md"));
-t("git checkout 换分支 (无 --) → 不算丢弃", () => safe("git checkout main"));
+// ── git 丢弃改动整体移出名单 (2026-11-03 人口径「不要再判 danger」) ──────
+// 整树 (reset --hard / clean / 匿名整树 pathspec 的 checkout -- / restore) 与
+// 路径级 (具名路径) 同一口径: 都不再立 danger, 走普通审批卡; 按 pathspec 形状
+// 分档的 GIT_WILDTREE 随判据一起删除。
+t("git reset --hard (整树) → 不判", () => safe("git reset --hard"));
+t("git reset --hard HEAD~3 → 不判", () => safe("git reset --hard HEAD~3"));
+t("git clean -fd → 不判", () => safe("git clean -fd"));
+t("git checkout -- . / \".\" / HEAD -- . → 不判", () => {
+  safe("git checkout -- .");
+  safe('git checkout -- "."');
+  safe("git checkout HEAD -- .");
+});
+t("git restore . / .. / :/ / * → 不判", () => {
+  safe("git restore .");
+  safe("git restore ..");
+  safe("git restore :/");
+  safe("git restore *");
+});
+t("git restore -s HEAD~1 . / --source=HEAD~1 . → 不判", () => {
+  safe("git restore -s HEAD~1 .");
+  safe("git restore --source=HEAD~1 .");
+});
+t("git checkout -- . && make / restore x && clean -fd → 不判", () => {
+  safe("git checkout -- . && make");
+  safe("git restore x && git clean -fd");
+});
+t("git restore <路径> / --staged / checkout -- .env → 不判", () => {
+  safe("git restore src/index.ts");
+  safe("git checkout -- src/index.ts");
+  safe("git restore --staged x.ts");
+  safe("git checkout -- .env");
+});
+t("git checkout 换分支 → 不算丢弃", () => safe("git checkout main"));
 t("git checkout -b 新分支 → 不算丢弃", () => safe("git checkout -b feat/x"));
-t("整树 token 在别的段里不连坐 (窗口止于 ;)", () => safe("git restore src; ls ."));
+t("git push --delete 动共享远端 → 仍 danger", () => danger("git push origin --delete feat/x"));
 
 // ── 危险名单第二批降档 (2026-10-28): 判据 = 丢了能不能从 git 或别处恢复 ──
 t("rmdir 只删空目录, mkdir 即恢复 → 降普通档", () => safe("rmdir /tmp/empty"));
@@ -171,52 +175,33 @@ t("chmod 777 → 全局可写, 保留 danger (与原「递归改权限」拆开)
 t("history -c → 只丢 shell 历史 → 降普通档", () => safe("history -c"));
 t("defaults delete → 删 macOS 系统偏好, 不在 git 里 → 仍 danger", () => danger("defaults delete com.apple.dock"));
 
-// ── rm 三档 (2026-10-28 第二次修订): 全临时区放行 / 非临时区 danger+理由 / ──
-// 解析不出不判 —— danger 只立「看懂了的非临时区目标」, 理由具体到目标路径。
-t("rm 全临时区 → 不判", () => {
+// ── rm 整体移出名单 (2026-11-03 人口径「不要再判 danger」) ──────────────
+// 临时区 / 非临时区 / 解析不出 的三档分类随判据一并删除 (tokenize / normPath /
+// 临时区清单 / rmOutsideTargets): rm 在任何目标上都不再立 danger, 走普通审批卡。
+t("rm 非临时区不再判 (原「删除文件 rm」)", () => {
+  safe("rm -rf /var/log/app");
+  safe("rm -rf ~/develop");
+  safe("rm -rf /Users/zyy/develop");
+  safe("rm -rf /tmp");          // 共享区根本身: 原口径里也判, 现在不判
+  safe("rm -rf /tmp/x ~/develop/y");
+});
+t("rm 任何形态都不再判 (临时区/相对/变量/glob/引号未闭合/词法逃逸)", () => {
   safe("rm -f /tmp/foo");
   safe("rm -rf /private/tmp/x");
   safe("rm -rf $TMPDIR/x");
-  safe("rm -rf /var/folders/ab/cd123/T/x");
-  safe("rm -rf /tmp/x >/dev/null 2>&1");
-  safe("rm -rf /tmp/x && rm -rf /tmp/y");
-});
-t("rm 非临时区 → danger, 理由带目标路径", () => {
-  assert.equal(ruleOf("rm -rf /var/log/app"), "删除文件 rm → /var/log/app");
-  assert.equal(ruleOf("rm -rf /tmp/x ~/develop/y"), "删除文件 rm → ~/develop/y");
-  assert.equal(ruleOf("rm -rf /tmp"), "删除文件 rm → /tmp"); // 共享区根本身
-});
-t("rm 混合 (临时区+非临时区) → danger", () => danger("rm -rf /tmp/x ~/develop/y"));
-t("rm 解析不出 → 不判 (相对/变量/裸 glob/.. 后不可知/引号未闭合)", () => {
   safe("rm -rf build");
-  safe("rm -rf node_modules");
   safe("rm -rf *");
   safe("rm -rf $x");
-  safe("rm -rf /tmp/$x");
-  safe("rm -rf $TMPDIR/..");
   safe('rm -rf "unclosed ~/x');
+  safe("rm -rf /tmp/../etc/passwd");
+  safe("rm -rf /Users/zyy/tmp-modeck-test && echo cleaned");
 });
-t("rm .. 逃逸出临时区 (解析可得) → 仍判", () =>
-  assert.equal(ruleOf("rm -rf /tmp/../etc/passwd"), "删除文件 rm → /tmp/../etc/passwd"));
-t("rm 一次性目录判据 (2026-10-28 二次放宽: 任一段以 tmp 开头) → 不判", () => {
-  safe("rm -rf /Users/zyy/tmp-modeck-test && echo cleaned"); // 人的原话样例
-  safe("rm -rf ~/tmp-modeck-test");
-  safe("rm -rf ~/tmp");
-  safe("rm -rf ~/tmp-x/build");   // 嵌套: 任一段 tmp-ish 整条当临时区
-  safe("rm -rf ~/develop/tmpdata"); // 无分隔符也放 (人定的方向: 宁可误放 tmpxxx)
-  safe("rm -rf /Users/zyy/tmpbuild");
-  safe("rm -rf /var/tmp/x");      // 段名 tmp → 随放宽落进临时区 (原排除口径被覆盖)
+t("rm 的包装器形态也不判 (只有提权仍单独算)", () => {
+  safe("timeout 5 rm -rf ~/x");
+  safe("env FOO=1 rm -rf ~/x");
+  safe("\\rm -rf ~/x");
+  danger("sudo rm -rf ~/x"); // 命中「提权 sudo」, 与 rm 无关
 });
-t("rm 真工作区仍判: ~/develop、/Users/zyy/develop", () => {
-  danger("rm -rf ~/develop");
-  danger("rm -rf /Users/zyy/develop");
-});
-t("rm 词法逃逸出 tmp 段仍判 (归一后 tmp 已消解)", () => {
-  danger("rm -rf ~/tmp/../develop");
-  danger("rm -rf /tmp/../etc/passwd");
-});
-t("rm 混合 (tmp-ish + 真工作区) → 仍判", () => danger("rm -rf ~/tmp-x ~/develop"));
-t("rm /tmp-foo 放行 (名字判据, 原「子串不豁免」口径已修订)", () => safe("rm -rf /tmp-foo"));
 
 // ── 工具语义分界 (2026-10-28 人第三条口径): 只有真会交给 shell 执行的才做 ──
 // 命令级判定。Edit/Write 的内容、Read 的路径是数据, 不是命令; 误报原先全部来自
@@ -227,10 +212,8 @@ t("直连 Read 文件名带 rm → 不判 danger", () =>
   safe2("Read", { file_path: "/notes/rm-me.md" }));
 t("直连 Bash rm -rf 相对目标 (解析不出 → 不判, 走普通卡)", () =>
   safe2("Bash", { command: "rm -rf build" }));
-t("直连 Bash rm -rf 非临时区 → 仍判, 理由带目标", () => {
-  const rule = dangerOf(CFG, "Bash", { command: "rm -rf ~/develop/build" })?.rule;
-  assert.ok(rule?.startsWith("删除文件 rm → "), `理由应带目标路径: ${rule}`);
-});
+t("直连 Bash rm -rf 非临时区也不再判", () =>
+  safe2("Bash", { command: "rm -rf ~/develop/build" }));
 t("REPL 包 Edit 写含 rm -rf 的内容 → 不判 (原先整段兜底误报)", () =>
   assert.equal(viaRepl('await Edit({ file_path: "deploy.sh", new_string: "rm -rf build" })'), undefined));
 t("REPL 包 Read 文件名带 rm → 不判", () =>
@@ -243,8 +226,8 @@ t("REPL 包 Grep/Agent 的检索词与提示语含 rm → 不判", () => {
 });
 t("REPL 陌生键的值不立 danger (认不准不判, 需要审走普通卡)", () =>
   assert.equal(viaRepl('await mcp_x.run({ blob: "rm -rf x" })'), undefined));
-t("REPL 命令键 script 的值 (mcp run_script) 仍判, 理由带目标", () =>
-  assert.ok(viaRepl('await mcp_x.run_script({ script: "rm -rf ~/x" })')));
+t("REPL 命令键 script 的值 (mcp run_script) 仍判", () =>
+  assert.ok(viaRepl('await mcp_x.run_script({ script: "git push --force origin main" })')));
 t("REPL 混合: 内层 Bash grep + Edit 写 rm 内容 → 不判", () =>
   assert.equal(viaRepl('await Bash({ command: "grep x y" }); await Edit({ new_string: "rm -rf build" })'), undefined));
 t("REPL 字面量内部再像键值对也不拆 (整体消费)", () =>
@@ -265,15 +248,19 @@ t("REPL eval 字符串不立 danger (认不准)", () =>
 // ── REPL / PTC 包裹: 命令在脚本里 ─────────────────────────────────────
 // CodeBuddy 把每次工具调用包进 REPL 的 code 参数。只看顶层 key 会整条漏掉 ——
 // 2026-10-27 真机: 卡上写着「无法完整识别」, 而脚本里是 `rm -rf b64chunks`。
-t("REPL 反引号里的 rm (临时区+相对 → 解析不出不判)", () => assert.equal(viaRepl("const w = await Bash({ command: `cd /tmp && rm -rf b64chunks` });"), undefined));
-t("REPL 反引号里的 rm 非临时区 → 仍判", () => assert.ok(viaRepl("const w = await Bash({ command: `rm -rf ~/develop/x` });")));
+t("REPL 反引号里的 rm (两类目标都不再判)", () => {
+  assert.equal(viaRepl("const w = await Bash({ command: `cd /tmp && rm -rf b64chunks` });"), undefined);
+  assert.equal(viaRepl("const w = await Bash({ command: `rm -rf ~/develop/x` });"), undefined);
+});
 t("REPL 双引号里的强推", () => assert.ok(viaRepl('await Bash({ command: "git push --force origin main" })')));
 t("REPL 单引号里的 shutdown", () => assert.ok(viaRepl("await Bash({ command: 'shutdown -h now' })")));
 t("REPL 变量拼的命令 (无字面量, 认不准 → 不判, 走普通卡)", () => assert.equal(viaRepl("const cmd = 'rm -rf x';\nawait Bash({ command: cmd });"), undefined));
 t("REPL 里只是读", () => assert.equal(viaRepl("const r = await Bash({ command: `git status` });"), undefined));
 t("REPL 正文提到危险词但没调用", () => assert.equal(viaRepl("// 别在这里 rm -rf, 用清理脚本"), undefined));
-t("REPL 里的整树 restore 照样 danger", () => assert.ok(viaRepl("await Bash({ command: 'git restore .' })")));
-t("REPL 里的路径级 restore 降普通档", () => assert.equal(viaRepl("await Bash({ command: 'git restore src/x.ts' })"), undefined));
+t("REPL 里的整树 / 路径级 restore 都不判", () => {
+  assert.equal(viaRepl("await Bash({ command: 'git restore .' })"), undefined);
+  assert.equal(viaRepl("await Bash({ command: 'git restore src/x.ts' })"), undefined);
+});
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
