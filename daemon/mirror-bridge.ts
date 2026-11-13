@@ -8574,7 +8574,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // and surface a standalone "cleared" so the user gets explicit
         // feedback (the skip-stream path otherwise leaves WeCom silent).
         if (armMigration) {
-          sendStandalone(a, "cleared");
+          // 严格群: 这条确认也是 daemon 的系统回执, 不是模型发言 —— 前缀让它落进
+          // sendStandalone 的 [wezard]/[mirror] 白名单 (否则出站门一起吞掉)。
+          sendStandalone(a, strictChat(a) ? "[wezard] cleared" : "cleared");
           a.clearRebind = { baseline: preClearBaseline! };
           startMigrationWatcher(a, preClearBaseline!, jsonlIsPostClearChild, 0, true);
         }

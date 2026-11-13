@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import ts from "typescript";
 import pino from "pino";
 import { ConfigSchema } from "../shared/config.js";
 import { installInboundRouter } from "../daemon/inbound.js";
@@ -82,4 +84,43 @@ const session = (policy: Record<string, unknown>, spawn: Spawn = async () => ({ 
   assert.match(s.replies[0]!, /^\[wezard\] \/new failed: spawn denied$/);
 }
 
-console.log("Strict /new ack: [wezard] created bypasses the strict outbound gate; implicit keeps its single mirror-side created");
+// 5) 严格群里「不过门」的那批命令回执 (replyText → 直发 replyStream) 照常到人。
+for (const [command, pattern] of [["/pwd", /^\/repo\/current$/], ["/help", /\/new/], ["/id", /^\[wezard\]|user:tester/]] as const) {
+  const s = session({ "chat:room": { speech: "strict" } });
+  await s.send("group", "room", command);
+  assert.equal(s.replies.length, 1, `${command} 在严格群恰有一条回执`);
+  assert.match(s.replies[0]!, pattern as RegExp, `${command} 的回执内容不变`);
+}
+
+// 6) /clear 的边界确认: strict 带 [wezard] 前缀, implicit 保持裸 "cleared"。
+//    /clear 的确认在 mirror 的 dispatch 闭包里 (无 live stream), 抽出来直接跑。
+{
+  const mirror = readFileSync("daemon/mirror-bridge.ts", "utf8");
+  const begin = "        if (armMigration) {";
+  const end = "        // Don't await the stream's lifetime";
+  const start = mirror.indexOf(begin);
+  const stop = mirror.indexOf(end, start);
+  assert(start >= 0 && stop > start, "missing /clear ack closure");
+  const body = ts.transpileModule(mirror.slice(start, stop), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
+  }).outputText;
+  const clearAck = (strict: boolean): string[] => {
+    const sent: string[] = [];
+    const a: any = {};
+    new Function("armMigration", "sendStandalone", "a", "preClearBaseline", "jsonlIsPostClearChild", "startMigrationWatcher", "strictChat",
+      body)(
+      true, (_a: unknown, text: string) => sent.push(text), a, "baseline", () => true, () => undefined, () => strict,
+    );
+    assert.deepEqual(a.clearRebind, { baseline: "baseline" }, "迁移 watcher 照旧武装");
+    return sent;
+  };
+  assert.deepEqual(clearAck(true), ["[wezard] cleared"], "严格群 /clear 确认带系统前缀");
+  assert.deepEqual(clearAck(false), ["cleared"], "implicit 群 /clear 文案零变化");
+}
+
+// 7) [mirror] 系统行本来就是白名单成员 (注入超时 / 代按 / 投递失败)。
+for (const line of ["[mirror] ✗ 注入超时 120s — tmux 无响应, 本轮已放弃。", "[mirror] 🚫 已拒绝 CLI 确认", "[mirror] ⚠️ 消息已发送,但目标会话似乎正忙或未响应"]) {
+  assert.match(line, /^\[(mirror|wezard)\]/, `${line.slice(0, 14)}… 走系统行白名单`);
+}
+
+console.log("Strict system receipts: [wezard] created / [wezard] cleared bypass the strict outbound gate; implicit wording unchanged; ungated command replies still reach strict chats");

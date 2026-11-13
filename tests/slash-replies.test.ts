@@ -22,7 +22,7 @@ const closure = (source: string, begin: string, end: string): string => {
 };
 const newReply = closure(mirror, "  const pushProjectInfo =", "  // Cwd is CHAT-SCOPED");
 const clearReply = closure(mirror,
-  "        if (armMigration) {\n          sendStandalone",
+  "        if (armMigration) {",
   "        // Don't await the stream's lifetime");
 for (const slashAckFirstLine of [false, true]) {
   const sent: string[] = [];
@@ -44,8 +44,9 @@ for (const slashAckFirstLine of [false, true]) {
   assert.deepEqual(sent, ["created", "created"], "/new sends one result and no tip-only message");
   let watched = 0;
   const a: any = {};
-  new Function("cfg", "armMigration", "sendStandalone", "a", "preClearBaseline", "startMigrationWatcher", "jsonlIsPostClearChild",
-    transpile(clearReply))(cfg, true, (_a: unknown, text: string) => sent.push(text), a, "baseline", () => watched++, () => true);
+  // strictChat 由测试注入: /clear 的确认在严格群带 [wezard] 前缀 (见 strict-new-ack.test)。
+  new Function("cfg", "armMigration", "sendStandalone", "a", "preClearBaseline", "startMigrationWatcher", "jsonlIsPostClearChild", "strictChat",
+    transpile(clearReply))(cfg, true, (_a: unknown, text: string) => sent.push(text), a, "baseline", () => watched++, () => true, () => false);
   assert.equal(sent.at(-1), "cleared");
   assert.deepEqual(a.clearRebind, { baseline: "baseline" });
   assert.equal(watched, 1, "/clear still arms its migration watcher");
