@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-11-13
+
 ### Added
 - 频道历史: daemon 为每个频道存一份本地缓存 (`stateDir/channels/<topic>.jsonl`, 按 post/reply id 覆盖去重, `keepDays` / `maxMessages` 有界), 第一次见到频道时用 `aibot_topic_get_post_list` 回填最近若干条 (`backfillOnBoot`), 补 reload / 断线空窗期丢的事件 (2026-11-09 实测重启到重新认证 15s 内的频道消息服务端不补发)。判官的「最近消息」与主 wizard 的上下文都先读本地, 本地不够才打接口。主 wizard 现在拿到的是预算版上下文: **当前线程 > 最近 N 条 > (消息里有指代 / 错误码 / 路径时才) 搜索命中**, 默认 6k 字符 (`wrc.channel.history`), 不再只有触发的那一条文本。新增 MCP `read_channel` + `POST /channel/read`: 按频道翻历史或搜关键词 —— 先本地 grep, 不够再走官方 `aibot_topic_search` 两步搜索并按 post_id 取回正文。频道注入的每条消息头部带 `topic=<id>`, wizard 可据此自己再查。
 
@@ -1342,7 +1344,8 @@
 ### Fixed
 - `chat`: 修复移动端滚动 — `.main` 加 `min-height:0`,叠加 overscroll + safe-area。
 
-[Unreleased]: https://github.com/guxi11/wezard/compare/v2.8.8...HEAD
+[Unreleased]: https://github.com/guxi11/wezard/compare/v2.9.0...HEAD
+[2.9.0]: https://github.com/guxi11/wezard/compare/v2.8.8...v2.9.0
 [2.8.8]: https://github.com/guxi11/wezard/compare/v2.8.7...v2.8.8
 [2.8.7]: https://github.com/guxi11/wezard/compare/v2.8.6...v2.8.7
 [2.8.6]: https://github.com/guxi11/wezard/compare/v2.8.5...v2.8.6
