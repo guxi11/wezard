@@ -5959,6 +5959,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const pushProjectInfo = (target: string, header?: string): void => {
     if (!header) return;
     // P7-S2 严格群: 会话边界回执 (项目行) 不发 —— 出站只有占位与被批准的口子。
+    // 但「会话已重开」本身是 daemon 的确认, 不是模型发言: 严格群那条由 inbound 的
+    // /new 分支补发 (replySystem, 带 `[wezard]` 前缀走直发口子), 这里保持静音避免双发。
     if (strictBase(baseOfKey(target))) return;
     const md = header;
     const a = byTarget.get(target);

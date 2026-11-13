@@ -1,0 +1,85 @@
+import assert from "node:assert/strict";
+import pino from "pino";
+import { ConfigSchema } from "../shared/config.js";
+import { installInboundRouter } from "../daemon/inbound.js";
+
+// 严格群的 /new 确认 (`[wezard] created`) 是 daemon 的系统行, 不是模型发言 ——
+// 它必须绕过严格群出站门直达聊天; implicit 群则保持现状 (确认由 mirror 的
+// pushProjectInfo 发裸 `created`, daemon 这边不能多发一条)。
+// 驱动的是真的 inbound 路由闭包, 只把 client / bridge 换成记录器。
+
+const strictReply = "[wezard] created";
+// mirror-bridge 的 sendStandalone 白名单: 这个前缀就是「系统提示」的判据。
+assert.match(strictReply, /^\[(mirror|wezard)\]/, "系统行必须带 [wezard]/[mirror] 前缀");
+assert.doesNotMatch("created", /^\[(mirror|wezard)\]/, "裸 created 不是系统行 (会被严格群出站门拦下)");
+
+type Spawn = (target: string, windowName?: string, opts?: { silent?: boolean; model?: string }) => Promise<{ ok: boolean; reason?: string; sessionId?: string }>;
+
+const session = (policy: Record<string, unknown>, spawn: Spawn = async () => ({ ok: true, sessionId: "sid" })) => {
+  const handlers = new Map<string, (...args: any[]) => Promise<void>>();
+  const replies: string[] = [];
+  const spawned: Array<{ target: string; opts: { silent?: boolean; model?: string } }> = [];
+  const cfg = ConfigSchema.parse({
+    bot: { botId: "test", secret: "test" },
+    wrc: { allowFrom: ["user:tester"] },
+    ...(Object.keys(policy).length ? { chatPolicy: policy } : {}),
+  });
+  const client = {
+    on: (event: string, handler: any) => handlers.set(event, handler),
+    replyStream: async (_frame: unknown, _id: string, text: string) => { replies.push(text); },
+    sendMessage: async () => ({ errcode: 0 }),
+  };
+  const bridge = {
+    hasMirrorTarget: () => true,
+    status: () => ({ mirrors: [] }),
+    getCwd: () => ({ runningCwd: "/repo/current", pendingCwd: "", defaultCwd: "/repo/default" }),
+    newSession: async (target: string, _windowName?: string, opts?: { silent?: boolean; model?: string }) => {
+      spawned.push({ target, opts: opts ?? {} });
+      return spawn(target, _windowName, opts);
+    },
+    chatRoster: () => [],
+    peers: async () => [],
+    dispatch: async () => undefined,
+  };
+  installInboundRouter(client as any, cfg, pino({ level: "silent" }), bridge as any, "/private/tmp/unused-strict-new-ack.jsonc", (() => {}) as any);
+  const send = async (chatType: "single" | "group", chatId: string | undefined, text: string): Promise<void> => {
+    await handlers.get("message.text")!({ headers: { req_id: text }, body: {
+      msgid: text, chattype: chatType, chatid: chatId, from: { userid: "tester" }, msgtype: "text", text: { content: text },
+    } });
+  };
+  return { send, replies, spawned };
+};
+
+// 1) 严格群: 恰好一条 `[wezard] created` 外发, 且是正常 spawn。
+{
+  const s = session({ "chat:room": { speech: "strict" } });
+  await s.send("group", "room", "/new");
+  assert.equal(s.spawned.length, 1, "严格群 /new 仍 spawn");
+  assert.equal(s.spawned[0]!.opts.silent, false, "/new 不是 silent spawn");
+  assert.deepEqual(s.replies, [strictReply], "严格群 /new 恰好一条系统行确认");
+}
+
+// 2) implicit 单聊: daemon 不多发 —— 确认仍由 mirror 的 pushProjectInfo 负责。
+{
+  const s = session({});
+  await s.send("single", undefined, "/new");
+  assert.equal(s.spawned.length, 1);
+  assert.deepEqual(s.replies, [], "implicit 群 /new 不新增外发 (保持裸 created 的现状)");
+}
+
+// 3) 显式 implicit 的群 (拨回口径) 同 2。
+{
+  const s = session({ "chat:room": { speech: "implicit" } });
+  await s.send("group", "room", "/new");
+  assert.deepEqual(s.replies, [], "显式 implicit 群 /new 不新增外发");
+}
+
+// 4) 严格群 spawn 失败: 仍只回失败那一行 —— 系统行不抢在失败前面。
+{
+  const s = session({ "chat:room": { speech: "strict" } }, async () => ({ ok: false, reason: "spawn denied" }));
+  await s.send("group", "room", "/new");
+  assert.equal(s.replies.length, 1);
+  assert.match(s.replies[0]!, /^\[wezard\] \/new failed: spawn denied$/);
+}
+
+console.log("Strict /new ack: [wezard] created bypasses the strict outbound gate; implicit keeps its single mirror-side created");

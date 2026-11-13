@@ -19,7 +19,7 @@ import { syncProjectConfig, renderSyncReport } from "./cfg-sync.js";
 import { captureQuota, renderQuotaReport } from "./quota.js";
 import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe, allNames, unlinkTags, uniqueTag, displayName, tagLink, withBot, sameBot, stripSigil } from "../shared/session-label.js";
 import { botTagOf } from "./bot-mux.js";
-import { chatNameOf, clearChatName, listChatNames, setChatName, stewardTierOf, type CharterGuard } from "./chat-name.js";
+import { chatNameOf, chatPolicyOf, clearChatName, listChatNames, setChatName, stewardTierOf, type CharterGuard } from "./chat-name.js";
 import { evictStaleName, manifestationOf, reclaimChatName, wizardStore, type EvictDeps } from "./wizard.js";
 import { stewardRoute as resolveSteward } from "./steward.js";
 import { isApprentice } from "./apprentice.js";
@@ -663,6 +663,16 @@ export const installInboundRouter = (
     try { await client.replyStream(frame, msg.msgid, withTagPrefix(who, text), true); } catch { /* ignore */ }
   };
 
+  // daemon 自己的系统行 (会话边界确认 / 失败回执): 不署名头, 以 `[wezard]` 起头。
+  // 那个前缀不是装饰 —— 严格群的出站门 (mirror-bridge 的 sendStandalone) 只放行
+  // `[wezard]`/`[mirror]` 系统提示, 所以这条既是给人看的来源记号, 也是「这不是
+  // 模型发言」的判据。直发 replyStream, 与 /help /pwd 同一条不经门的口子。
+  const replySystem = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, text: string): Promise<void> => {
+    try { await client.replyStream(frame, msg.msgid, text, true); } catch { /* ignore */ }
+  };
+  /** 严格群 (chatPolicy.<chat>.speech = strict): 模型发言不出站, 出站门放行系统行。 */
+  const isStrictChat = (who: string): boolean => chatPolicyOf(cfg, baseOfKey(who)).speech === "strict";
+
   // Common gating: claim bootstrap + allowFrom check. Returns true if the
   // caller should stop (claim consumed or message rejected).
   const gate = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, text: string, who: string, asked = ""): Promise<{ stop: boolean }> => {
@@ -842,6 +852,11 @@ export const installInboundRouter = (
         await replyText(frame, msg, who, err);
         return { stop: true };
       }
+      // 严格群的会话边界确认: mirror 侧那条 (pushProjectInfo) 在严格群是静音 —— 它走的是
+      // 模型发言的 standalone 路, 被出站门连系统行以外的内容一起挡住。但「已重开会话」是
+      // daemon 自己的确认, 不是模型发言, 漏了它人只会以为 /new 坏了。这里补一条带
+      // `[wezard]` 的系统行 (implicit 群仍由 mirror 发, 不重复)。
+      if (isStrictChat(who)) await replySystem(frame, msg, "[wezard] created");
       // 带正文的 `/new`: 这段就是新会话的第一句。走和「隐式建会话后 fall through」
       // 完全相同的 dispatch 路径 —— freshSpawn 的冷时序、peer 提示都在那里。
       if (nu.prompt) await send(frame, msg, who, nu.prompt);
