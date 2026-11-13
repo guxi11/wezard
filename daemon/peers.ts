@@ -777,6 +777,7 @@ export const renderReceiptEnvelope = (
       : status === "progress" ? "这是进展回执，正文是对方报的一行进展；任务还没落定，终句回执会在之后送到。"
         : status === "error" ? "这是 CLI 错误回执，正文是报错信息，不是结论；若续跑后答出结论，会再送回执。"
         : status === "canceled" ? "这是已取消的失败回执，正文是守护进程说明和它最后说的一句；原任务已取消。"
+          : status === "passed" ? "这是已了结回执 (无需答复): 这笔义务不再等, 正文是守护进程的说明。"
           : `这是失败回执 (${FAILED[status]})，本次按失败落定；后续仍可续问或补交。正文是守护进程说明和它最后说的一句。`;
   return renderReminder(envelopeAttrs.receipt(from, chat, status, turn, route, chatKey), [
     bodyRule,
@@ -810,6 +811,7 @@ const FAILED: Record<Exclude<Terminal, "done">, string> = {
   silent: "它停下了几次, 都没有答这一句",
   dead: "它的 pane 没了 (被收掉或崩了)",
   canceled: "它这件活被人收掉 / 打断了",
+  passed: "这笔义务已按『无需答复』了结",
 };
 
 /** Prompt-token size of the session's most recent turn: input + both cache

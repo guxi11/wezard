@@ -48,6 +48,8 @@ import {
 } from "./claim.js";
 import { makeWedocBridge } from "./wedoc.js";
 import { errText, installResponseTracker } from "./last-response.js";
+import { ChatRecords } from "./chat-records.js";
+import { openMembers } from "./members.js";
 import { footerTarget, responseFormatPolicy } from "./message-format.js";
 import { scanClaudeSessions } from "./session-scan.js";
 import {
@@ -253,8 +255,18 @@ const main = async (): Promise<void> => {
   // last-response tracker enables inbound's `quote` dedup of bot self-replies,
   // and its chat-gate drops header-only pushes (empty messages) daemon-wide.
   // 微信出站不走企微长连接, 不必等它连上。
+  // P7-S1 聊天账本: 每聊天一份 append-only jsonl (记录侧自管 seq/保留上限, 写失败只记日志)。
+  // 出站记录挂在 tracker 的同一个 SDK 包装层 —— 只观察, 不改 payload; 人话记录在 inbound
+  // dispatch 前落一行 (见 installInboundRouter 的 noteHuman)。implicit 群零行为变化。
+  const chatRecords = new ChatRecords(
+    { dir: join(expandHome(cfg.daemon.stateDir), "chats"), keepDays: 30, maxLines: 2000 },
+    log.child({ mod: "chat-records" }),
+  );
+  // P7-S1 成员表: 键 `${chat}|${identity}` —— chat × 身份, 零 pane 维度 (约束刀 A③)。
+  const members = openMembers(join(expandHome(cfg.daemon.stateDir), "members.json"));
   const responseTracker = installResponseTracker(ws.client, log.child({ mod: "chat-gate" }), (c) => wx.owns(c),
-    (context) => responseFormatPolicy(cfg, context, (target) => chatUrlFor(cfg.daemon, target)));
+    (context) => responseFormatPolicy(cfg, context, (target) => chatUrlFor(cfg.daemon, target)),
+    (noteLine) => { try { chatRecords.record(noteLine.chat, { ...noteLine, at: Date.now() }); } catch { /* 记录失败不影响出站 */ } });
   const mirrorStore = loadMirrorStore(cfg.wrc.mirror.attachmentsFile);
   // 定时任务表 —— 每条任务是 ~/.wezard/tasks/<id>.task.mjs 一份可注入代码的配置
   // (见 shared/task-file.ts)。目录是热加载的: wizard 改完文件不用 reload 守护进程。
@@ -486,7 +498,10 @@ const main = async (): Promise<void> => {
       asker: { who: a.speaker!, chat: a.channel! }, priority: "normal", deadline: deadlineAt,
       payload: { text: a.text, human: a } });
     void watchQueue(a, id, !bridge.hasMirrorTarget(a.principal));
-  } }, sourcePath, (w, c) => guardCharter(w, c));
+  } }, sourcePath, (w, c) => guardCharter(w, c), (chat, line) => {
+    // P7-S1: dispatch 前写一行 human; 记录侧同步内存记账、后台落盘 (不 await)。
+    try { chatRecords.record(chat, { ...line, kind: "human" }); } catch { /* 记录失败不挡消息 */ }
+  });
   // 频道（topic）事件层：接在 inbound 之后，让频道消息复用同一套 gate / route / mirror。
   installChannelEvents(ws.client, cfg, log.child({ mod: "channel" }));
   // approval click → finalize 当前 liveStream, 后续 tool/text 落到 standalone。
@@ -1821,6 +1836,56 @@ const main = async (): Promise<void> => {
     });
 
     // ── 给人看的文件 / 图片 ────────────────────────────────────────────
+    // ── P7-S1 群聊严格治理工具 (chat_*): registerRare 隐藏注册, 非 strict 群一律 409 ──
+    // S1 只落词汇与门: implicit 群 (全部存量群) 的行为零变化。strict 群的完整语义
+    // (义务校验 / 占位 / 关账) 随 S2 落地; S1 里 strict 群可读成员表。
+    const identityNameOf = (identity: string): string => wizards.get(identity)?.name || identity;
+    http.register("POST /chat/members", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      const b = body as { chat?: string };
+      const base = (b.chat ?? "").trim() ? chatBaseOf(cfg, (b.chat ?? "").trim()) : channelOf(self);
+      if (!base) { json(res, 400, { ok: false, reason: `认不出这个聊天: ${b.chat}` }); return; }
+      if (chatPolicyOf(cfg, base).speech !== "strict") {
+        json(res, 409, { ok: false, speech: "implicit", reason: `${chatNameOf(cfg, base) || base} 未开严格模式 (speech=implicit): 成员制与发言工具只在 strict 群生效; 现行行为不变` });
+        return;
+      }
+      const rows = members.ofChat(base).map(({ identity, row }) => ({ identity: identityNameOf(identity), mode: row.mode, since: row.since, cursor: row.cursor }));
+      json(res, 200, { ok: true, chat: chatNameOf(cfg, base) || base, members: rows, note: "S1: 成员表已就绪, join 接面随 S2 落地" });
+    });
+    http.register("POST /chat/say", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      const b = body as { chat?: string };
+      const base = (b.chat ?? "").trim() ? chatBaseOf(cfg, (b.chat ?? "").trim()) : channelOf(self);
+      if (!base) { json(res, 400, { ok: false, reason: `认不出这个聊天: ${b.chat}` }); return; }
+      if (chatPolicyOf(cfg, base).speech !== "strict") {
+        json(res, 409, { ok: false, speech: "implicit", reason: `${chatNameOf(cfg, base) || base} 未开严格模式 (speech=implicit): 出站不受发言权约束, 直接回复 / notify 即可` });
+        return;
+      }
+      json(res, 409, { ok: false, reason: "strict 群的出站门与义务账随 P7-S2 落地; S1 只做记录与成员表" });
+    });
+    http.register("POST /chat/reply", async (req, res) => {
+      const { self } = await readPeerBody(req);
+      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      const base = channelOf(self);
+      if (chatPolicyOf(cfg, base).speech !== "strict") {
+        json(res, 409, { ok: false, speech: "implicit", reason: `${chatNameOf(cfg, base) || base} 未开严格模式 (speech=implicit): 回执按现行口径 (行首 .name RESULT: / 自动回执) 走` });
+        return;
+      }
+      json(res, 409, { ok: false, reason: "strict 群的义务关账 (chat_reply) 随 P7-S2 落地; S1 只做记录与成员表" });
+    });
+    http.register("POST /chat/ask", async (req, res) => {
+      const { self } = await readPeerBody(req);
+      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      const base = channelOf(self);
+      if (chatPolicyOf(cfg, base).speech !== "strict") {
+        json(res, 409, { ok: false, speech: "implicit", reason: `${chatNameOf(cfg, base) || base} 未开严格模式 (speech=implicit): 直接 tell_peer / delegate 即可` });
+        return;
+      }
+      json(res, 409, { ok: false, reason: "strict 群的义务开行 (chat_ask) 随 P7-S2 落地; S1 只做记录与成员表" });
+    });
+
     // notify 的媒体版: 去向、认名字、顶层模式闸都与它同一套; 投递交给 sendMedia (通道无关,
     // 按 principal 分到 aibot / 微信)。caption 先成一条带头的气泡, 让群里知道是谁发的。
     http.register("POST /send_file", async (req, res) => {

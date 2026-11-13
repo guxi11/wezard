@@ -47,6 +47,10 @@ export const REMINDER_KINDS = {
   lead: {},
   after: {},
   mention: {},
+  /** 群聊严格治理 (P7-S2) 的上下文补发: 游标之后的聊天记录批。
+   *  chat/from/to/owes 都是机器读回: chat = 聊天稳定键, from/to = 批的 seq 区间,
+   *  owes = 该成员未结的义务数。S1 只登记词汇, 尚无渲染方。 */
+  chatlog: { chat: "M", from: "M", to: "M", owes: "M" },
   roster: {},
   pending: {},
   /** 宪章 preamble: 只随一个 pane 的**首条注入**打头 (mirror-bridge charterPending),
@@ -62,7 +66,7 @@ export type NoteAttrs = { [K in Kind]: KindAttrs<K> }[Kind];
 
 /** 尾巴上的固定顺序: 信封打头 (parseEnvelope 取最后一个信封, 而尾巴只有一个), 旁注按
  *  「这一轮怎么接 → 附件 → 环境」排。表外的 (codebuddy 自己的块、老种类) 排最后, 相对顺序不变。 */
-export const TAIL_ORDER: readonly string[] = ["envelope", "message-event", "hint", "lead", "after", "mention", "roster", "pending"];
+export const TAIL_ORDER: readonly string[] = ["envelope", "message-event", "hint", "lead", "after", "mention", "chatlog", "roster", "pending"];
 
 // 开标签容许属性: 我们自己的, 以及 codebuddy 的 `data-role="command-caveat"`。
 // 开标签锚定行首 (渲染方永远 `\n` 起头, 见 renderReminder): 正文里行中提及的
@@ -185,8 +189,9 @@ const askerAttrs = (asker?: Asker): Attrs => asker
   ? { "asker-user": asker.who, "asker-chat": asker.chat } : {};
 
 /** 回执落成什么。done = 答了; need = 它收口成 `NEED:` 反问发话方, 不是定论; error = 那一轮以 CLI 报错 (API Error) 收尾, 不是定论;
- *  progress = 终句带 `PROGRESS:` 的中间进展, 行不落定; timeout / silent / dead = 没等到答案 (超时 / 停下几次都没答 / pane 没了); canceled = 被人 stop 掉了。 */
-export type ReceiptStatus = "done" | "need" | "error" | "progress" | "timeout" | "silent" | "dead" | "canceled";
+ *  progress = 终句带 `PROGRESS:` 的中间进展, 行不落定; timeout / silent / dead = 没等到答案 (超时 / 停下几次都没答 / pane 没了); canceled = 被人 stop 掉了;
+ *  passed = 这笔义务按「无需答复」了结 (chat_reply 不带正文 / 人在别处已收到), 定论但不投正文 (P7-S2 起用)。 */
+export type ReceiptStatus = "done" | "need" | "error" | "progress" | "timeout" | "silent" | "dead" | "canceled" | "passed";
 
 type EnvelopeAttrs = KindAttrs<"envelope">;
 export const envelopeAttrs = {
@@ -246,6 +251,7 @@ export const parseEnvelope = (raw: string): Envelope | undefined => {
 export const reminderLabel = (r: Reminder): { label: string; machine?: boolean } => {
   const w = r.attrs.wezard ?? "";
   if (w === "message-event") return { label: "msg", machine: true };
+  if (w === "chatlog") return { label: "聊天记录", machine: true };
   const env = envelopeOf(r);
   // rolepage 是系统面 (§1.5): 折叠 tag 里只写裸名 —— 协议值 `from=".x"` 的点在这里剥掉。
   if (env) return { label: env.receipt ? `回执 · ${stripSigil(env.from)} · ${env.status ?? "done"}` : `envelope · ${stripSigil(env.from)}` };

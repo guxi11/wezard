@@ -463,6 +463,62 @@ export const createWezardServer = (): McpServer => {
         : unwrap("name_chat", await daemonPost("/chats/name", { name })),
   );
 
+
+  // ── P7-S1 群聊严格治理 (chat_*): 罕用预置 —— 只在 strict 群有用, 全部存量群是 implicit,
+  //  Handler 一律 409 指路; WEZARD_MCP_EXTRA=1 才出现在工具面 (判据④: 不带时列表 diff 为空)。──
+  registerRare(
+    "chat_members",
+    {
+      title: "List members of a strict chat",
+      description:
+        "(P7 · 罕用/预置) 列出严格模式群 (chatPolicy.speech=strict) 的成员与在场方式 (owner/speaker/mention) 与记录游标。implicit 群 (全部存量群) 一律 409 —— 成员制只在 strict 群生效。",
+      inputSchema: {
+        chat: z.string().optional().describe("聊天名或 principal; 缺省 = 当前轮所在的聊天"),
+      },
+    },
+    async ({ chat }) => unwrap("chat_members", await daemonPost("/chat/members", { ...(chat ? { chat } : {}) })),
+  );
+  registerRare(
+    "chat_say",
+    {
+      title: "Speak into a strict chat",
+      description:
+        "(P7 · 罕用/预置) 在严格模式群里主动发言 (每轮 ≤3、每群每分钟 ≤10 —— S2 起生效)。implicit 群 409: 出站不受发言权约束, 直接回复 / notify 即可。",
+      inputSchema: {
+        chat: z.string().optional().describe("聊天名或 principal; 缺省 = 当前轮所在的聊天"),
+        text: z.string().describe("要说的话 (markdown)"),
+      },
+    },
+    async ({ chat, text }) => unwrap("chat_say", await daemonPost("/chat/say", { ...(chat ? { chat } : {}), text })),
+  );
+  registerRare(
+    "chat_reply",
+    {
+      title: "Reply to an obligation in a strict chat",
+      description:
+        "(P7 · 罕用/预置) 答一条指向自己的义务 (chatlog 信封 owes>0 时): 带 text 先占位后交付, 不带 text 把这笔义务记为 passed (无需答复)。implicit 群 409: 回执按现行口径 (行首 .name RESULT: / 自动回执) 走。",
+      inputSchema: {
+        re: z.string().describe("要答的那条义务的消息 id (chatlog 信封 / 提醒里带的 msg)"),
+        text: z.string().optional().describe("答复正文; 缺省 = 记 passed (无需答复)"),
+      },
+    },
+    async ({ re, text }) => unwrap("chat_reply", await daemonPost("/chat/reply", { re, ...(text !== undefined ? { text } : {}) })),
+  );
+  registerRare(
+    "chat_ask",
+    {
+      title: "Ask a member in a strict chat",
+      description:
+        "(P7 · 罕用/预置) 在严格模式群里向某个成员开一条义务 (对方用 chat_reply 答)。implicit 群 409: 直接 tell_peer / delegate 即可。",
+      inputSchema: {
+        chat: z.string().optional().describe("聊天名或 principal; 缺省 = 当前轮所在的聊天"),
+        name: z.string().describe("要问的成员 (裸名)"),
+        text: z.string().describe("要问的话"),
+      },
+    },
+    async ({ chat, name, text }) => unwrap("chat_ask", await daemonPost("/chat/ask", { ...(chat ? { chat } : {}), name, text })),
+  );
+
   registerRare(
     "list_chats",
     {

@@ -408,6 +408,7 @@ const Chats = z.record(z.string(), z.string().describe("base principal (`chat:wr
 export const ChatPolicy = z.object({
   topOnly: z.boolean().optional().describe("顶层模式: 人只和顶层 wizard (群管家 / 人 `.name` 点名的) 对话; wizard 之间一律私聊 (tell_peer / delegate 的 public 失效), 被派活的 wizard 不能 notify 进群, 过程只在 rolepage。**默认开** (省略即开), 只有显式 `false` 才让 wizard 之间的往来进群"),
   stewardBudget: z.number().int().min(-1).default(4).describe("群管家的手闸: 每轮自己跑命令 / 外部工具的次数上限 (读文件类命令不计), 用完拒并叫它 delegate; 改文件、开子代理一律拒, 读代码放行。-1 = 不设闸"),
+  speech: z.enum(["implicit", "strict"]).optional().describe("发言模式: implicit (缺省) = 现行行为, 只记录不动行为; strict (P7-S2 起) = 出站走 chat_reply/chat_say 工具, 人只见占位与详情, CoT/流式/standalone 关。存量群默认 implicit, 切 strict 是 S1-S3 落地后的独立动作"),
   steward: z.string().optional().describe("这个聊天的管家: wizard 身份名 (参数写裸名)。绑定后该群裸消息路由到这个身份在本群的化身 (没有化身就自动开一个, 目录 = 身份的工作区), 管家手闸跟随绑定。缺省 = 该聊天现存的默认会话; 还没有任何会话的新聊天由全局管家接待。换管家 = config_set 这一项, 热生效。群聊/单聊专用 —— 频道 (topic) 的管家写 wrc.channel.steward"),
 });
 export type ChatPolicy = z.infer<typeof ChatPolicy>;

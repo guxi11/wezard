@@ -15,7 +15,8 @@
 // reloads); in dev just avoid reloading mid-conversation when testing.
 import type { WSClient, WsFrame, BaseMessage, WsFrameHeaders } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
-import { rawTagHeader, resolveTagTarget, targetOfTagUrl, withBot, botOfKey } from "../shared/session-label.js";
+import { rawTagHeader, parseTagHeader, resolveTagTarget, targetOfTagUrl, withBot, botOfKey } from "../shared/session-label.js";
+import { chatPrincipalOf } from "./chat-records.js";
 import { PRIMARY_BOT } from "../shared/config.js";
 import { botTagOf, pinFrameBot } from "./bot-mux.js";
 import { connFor } from "./reach.js";
@@ -93,10 +94,39 @@ const hasVisibleBody = (content: string): boolean => {
 // in the tracker. Mutates the client in place; call once at daemon startup.
 // `ownTransport(chatid)`: 这个 chat 的出站不走企微长连接 (微信) —— 不必等 WS 连上。
 // 通道分流层装在这里面 (内层), 所以 gate / record 照样覆盖它。
-export const installResponseTracker = (client: WSClient, log?: Logger, ownTransport: (chatid: string) => boolean = () => false, policy?: ResponseFormatPolicy) => {
+export interface OutboundNote {
+  /** 稳定聊天键 (base principal)。 */
+  chat: string;
+  /** 流 id / 终句合成 id; 空串 = 由记录侧分配。 */
+  id: string;
+  kind: "wizard" | "system";
+  /** wizard = 裸名; system = "wezard" / ""。 */
+  author: string;
+  text: string;
+}
+
+/** 出站记录器 (P7-S1): 只观察 —— 挂在同一个 SDK 包装层, 不改任何出站 payload (判据①)。 */
+export type OutboundRecorder = (note: OutboundNote) => void;
+
+export const installResponseTracker = (client: WSClient, log?: Logger, ownTransport: (chatid: string) => boolean = () => false, policy?: ResponseFormatPolicy, note?: OutboundRecorder) => {
   const origReplyStream = client.replyStream.bind(client);
   const origReplyStreamWithCard = client.replyStreamWithCard.bind(client);
   const origSendMessage = client.sendMessage.bind(client);
+
+  // P7-S1 出站记录: 终句/推送落一行到聊天账本。只读 content, 不动它。
+  // 作者反解: 头认得出 = wizard 裸名; 剥头后 [wezard]/[mirror] 前缀与认不出头的 = 系统。
+  const SYS_PREFIX = /^\[(wezard|mirror)\]/;
+  const classify = (content: string): { kind: "wizard" | "system"; author: string; text: string } => {
+    const t = content.trim();
+    const h = parseTagHeader(t);
+    const body = (h.fromBot ? h.body : t).trim();
+    if (SYS_PREFIX.test(body)) return { kind: "system", author: "wezard", text: body };
+    return h.fromBot && h.tag ? { kind: "wizard", author: h.tag, text: body } : { kind: "system", author: "", text: body };
+  };
+  const emit = (chatid: string, id: string, line: { kind: "wizard" | "system"; author: string; text: string }): void => {
+    if (!note || !chatid) return;
+    note({ chat: chatPrincipalOf(chatid), id, ...line });
+  };
 
   const gate = (channel: string, content: string): boolean => {
     if (hasVisibleBody(content)) return true;
@@ -111,7 +141,9 @@ export const installResponseTracker = (client: WSClient, log?: Logger, ownTransp
       return undefined as unknown as WsFrame;
     }
     const r = await origReplyStream(frame, streamId, content, finish, msgItem, feedback);
-    if (finish) record(bareFromFrame(frame as WsFrame<BaseMessage>), content);
+    const chatKey = bareFromFrame(frame as WsFrame<BaseMessage>);
+    if (finish) record(chatKey, content);
+    if (finish) emit(chatKey, streamId, classify(content));
     return r;
   };
 
@@ -122,7 +154,12 @@ export const installResponseTracker = (client: WSClient, log?: Logger, ownTransp
       return undefined as unknown as WsFrame;
     }
     const r = await origReplyStreamWithCard(frame, streamId, content, finish, options);
-    if (finish) record(bareFromFrame(frame as WsFrame<BaseMessage>), content);
+    const chatKey = bareFromFrame(frame as WsFrame<BaseMessage>);
+    if (finish) record(chatKey, content);
+    // 附卡终句: 卡片才是载荷 —— 记成卡片类系统行 (sliceBatch 剔除的那类); 无卡照常反解作者。
+    if (finish) emit(chatKey, streamId, options?.templateCard
+      ? { kind: "system", author: "wezard", text: `[卡片] ${options.templateCard.card_type ?? ""}` }
+      : classify(content));
     return r;
   };
 
@@ -149,8 +186,13 @@ export const installResponseTracker = (client: WSClient, log?: Logger, ownTransp
       if (!gate("sendMessage", content)) return undefined as unknown as WsFrame;
       const r = await origSendMessage(chatid, { ...body, markdown: { ...body.markdown, content } });
       record(chatid, content);
+      emit(chatid, "", classify(content));
       return r;
     }
+    // P7-S1: 卡片与媒体出站也各记一行系统行 —— 账本完整 (卡片行带 [卡片] 标记, 供 sliceBatch 剔除)。
+    emit(chatid, "", body.msgtype === "template_card"
+      ? { kind: "system", author: "wezard", text: `[卡片] ${(body as { template_card?: { card_type?: string } }).template_card?.card_type ?? ""}` }
+      : { kind: "system", author: "", text: `[媒体] ${body.msgtype}` });
     return origSendMessage(chatid, body);
   };
   return {
@@ -166,6 +208,7 @@ export const installResponseTracker = (client: WSClient, log?: Logger, ownTransp
       const ack = stream ? await origReplyStream(stream.frame, stream.id, content, true)
         : await origSendMessage(chatid, { msgtype: "markdown", markdown: { content } });
       record(chatid, content);
+      emit(chatid, stream?.id ?? "", classify(content));
       return ack;
     },
   };

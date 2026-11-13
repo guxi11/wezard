@@ -576,6 +576,8 @@ export const installInboundRouter = (
   bridge: MirrorBridge,
   sourcePath: string,
   guardCharter: CharterGuard,
+  /** P7-S1 人话记录: dispatch 前同步写一行 (记录侧自己异步落盘, 这里不 await)。 */
+  noteHuman?: (chat: string, line: { at: number; id: string; author: string; text: string }) => void,
 ): void => {
   const inboxDir = expandHome(cfg.wrc.mirror.inboxDir);
   // 已知的机器人名只随配置变; 下面所有入站路径共用这一个剥离器。
@@ -1087,6 +1089,8 @@ export const installInboundRouter = (
     // 同一条边界上再挂: 点名提示, 以及这个 wizard 不在场时群里发生的成员变动 (见 notices.ts,
     // 近几次注入里给过的不再重复)。
     const notice = noticeSuffixFor(who, text, { human: { channel } }, hint);
+    // P7-S1 只记录不动行为: 人话 dispatch 前落一行 human (同步内存记账, 落盘在后台)。
+    try { noteHuman?.(channel, { at: Date.now(), id: msg.msgid, author: msg.from.userid, text }); } catch { /* 记录失败不挡消息 */ }
     try {
       // 回复回到发话的这个群 —— `who` 可能住在别的聊天 (名字全局可达)。
       await bridge.dispatch({ eventId: slash ? undefined : messageId(botTagOf(msg), channel, msg.msgid), identity: JSON.stringify(msg), originalAt: msg.create_time ? (msg.create_time < 1e12 ? msg.create_time * 1000 : msg.create_time) : Date.now(), principal: who, text: text + renderTail(envelope, steward, notice), images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}` });
