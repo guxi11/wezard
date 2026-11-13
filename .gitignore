@@ -11,5 +11,6 @@ secrets.json
 .npmrc
 docs/*
 !docs/evolve/
+!docs/v3-design.md
 .plugins-cache.json
 .playwright-cli/
