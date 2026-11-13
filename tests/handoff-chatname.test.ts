@@ -5,7 +5,11 @@ import { join } from "node:path";
 import pino from "pino";
 import { ConfigSchema } from "../shared/config.js";
 import { clearChatName, nextAutoName, planChatNames, retiredChatNames, setChatName } from "../daemon/chat-name.js";
-import { createHandoffs, FAILED_STALE_MS, handoffAdmission, resumeText, settlesCut, type Pending } from "../daemon/handoff.js";
+import { createHandoffs, FAILED_STALE_MS, handoffAdmission, resumeText, SELF_GRACE_MS, SELF_SETTLE_MS, settlesCut, type Pending } from "../daemon/handoff.js";
+
+// 2026-11-13 人拍板: 收尾窗口不要了 —— 默认不等, 调用即 Esc; settle 只取证明静置的最小量。
+assert.equal(SELF_GRACE_MS, 0, "self handoff 默认无收尾窗口 (要短窗的部署配 selfWait.graceMs>0)");
+assert.equal(SELF_SETTLE_MS, 10_000, "Esc 后只等能证明静置的最小量; 量不出来走排队兜底");
 
 // ── chat 自动名: 墓碑 + 只递增 ────────────────────────────────────────
 const dir = mkdtempSync(join(tmpdir(), "chatname-"));

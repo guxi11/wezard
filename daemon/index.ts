@@ -1949,6 +1949,23 @@ const main = async (): Promise<void> => {
     };
 
     strictSpeechOf = (base: string): boolean => !!base && chatPolicyOf(cfg, base).speech === "strict";
+    // P7-S3b backfill: 账本是 strict 群实发内容的事实来源, post 记录是 rolepage 的视图缓存
+    // —— boot 时把账本里 (视界内) 有 id 的 wizard 行补成 post (幂等: 同 id 已在就不写)。
+    // 覆盖两类缺口: hook 上线前的历史交付、以及任何「记了账没落成 post」的边角。
+    // 空 id 的行 (sendMessage 推送) 不回填 —— 无从去重, 且 hook 上线后本来就会当场落 post。
+    const backfillChatPosts = (): void => {
+      for (const row of knownChatsOf(cfg).rows()) {
+        if (!strictSpeechOf(row.chat)) continue;
+        for (const line of chatRecords.lines(row.chat)) {
+          if (line.kind !== "wizard" || !line.id || !line.text.trim()) continue;
+          if (line.at < Date.now() - 3 * 24 * 3600_000) continue; // rolepage 视界外没人看
+          if (getDetail(line.id)?.kind === "post") continue;
+          const who = wizardStore()?.byName(line.author);
+          if (who) recordPost({ target: who.target, channel: row.chat, body: line.text, id: line.id, createdAt: line.at });
+        }
+      }
+    };
+    try { backfillChatPosts(); } catch { /* backfill 失败不挡 boot; 下次 boot 再补 */ }
 
     // P7-S3 /strict: 存量群切换 strict —— 预演 (受影响 wizard 清单) / apply (写 chatPolicy + 宪章守卫)。
     // 判定与渲染在 daemon/strict-switch.ts (纯函数); 这里只供事实: 名字、名册、管家、成员表。
@@ -3178,7 +3195,7 @@ const main = async (): Promise<void> => {
             ...(workspaceSwitch ? {
               pendingCwd: cwd.pendingCwd,
               workspaceStatus: "queued_not_applied",
-              message: `handoff 已受理；daemon 给当前任务一个短收尾窗口后即启动新 CLI 并在 ${cwd.pendingCwd} 中继续简报 (必要时会打断当前轮)。旧进程不会原地切换目录。`,
+              message: `handoff 已受理；daemon 立即打断当前轮并启动新 CLI 在 ${cwd.pendingCwd} 中继续简报。旧进程不会原地切换目录。`,
             } : {}),
           } }
         : { status: 409, body: { ok: false, reason: r.reason } };

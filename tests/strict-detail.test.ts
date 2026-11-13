@@ -64,9 +64,11 @@ initDetailPersistence(tmp, undefined as never);
 recordPost({ target: "chat:wrS#fix", channel: STRICT, body: "…", id: "stream-9" });
 recordPost({ target: "chat:wrS#fix", channel: STRICT, body: "最终交付的那句", id: "stream-9" });
 recordPost({ target: "chat:wrS#fix", channel: STRICT, body: "另一条" });
+recordPost({ target: "chat:wrS#fix", channel: STRICT, body: "带历史时刻", id: "stream-7", createdAt: 12345 }); // backfill 用账本行时刻
 const { getDetail } = await import("../daemon/detail.js");
 assert.equal(getDetail("stream-9")?.kind, "post");
 assert.ok((getDetail("stream-9") as { body?: string }).body?.includes("最终交付"), "同 id upsert: 留最终那句");
+assert.equal((getDetail("stream-7") as { createdAt?: number }).createdAt, 12345, "backfill 的 post 用账本行时刻 (排序不失真)");
 
 rmSync(tmp, { recursive: true, force: true });
 console.log("strict-detail: 出气泡=实发内容(逐字) / 沉默轮零气泡 / implicit 回归 / 老数据兼容 / post 按 id 去重");

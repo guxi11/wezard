@@ -31,6 +31,7 @@
 - 新起尚未开口的会话跨 daemon reload / 绑定重建后, 首条消息不再丢宪章: 宪章只在内存里 (下一个 pane 的首条注入带进去的那份 pending), 会话新起后闲着遇到 reload, 恢复出来的绑定就没有它了, wizard 从此无身份开工 —— 生产实测 117 次备用领用里 2 例如此 (中间各有 1 / 5 次 reload), 另 1 例是 /kill 后绑定被别的路径重建。现在挂宪章时同时落盘标记 (`MirrorRecord.charterOwed`), 注入确认后清掉; 绑定建立 (`attach`, 覆盖 newSession / restore / pinned / clone / 外部认领) 时按「落盘标记 + transcript 里有没有带宪章块的 user 行」重新武装 —— 已送达的按转录硬证据不再补发, 2.9.0 之前在 system prompt 里的老会话不受影响, codex 仍走 developer_instructions。
 
 ### Changed
+- handoff(self) 默认不再等收尾窗口 (2026-11-13 人拍板: 「set_workspace 之后 handoff 预期就是立刻完成」): `selfWait.graceMs` 默认 45s → 0, 调用即受理、立即 Esc 打断在飞这一轮直接交接 (要短窗自然收口的部署仍可配 `graceMs > 0`); Esc 后只等 pane 真正静置 —— `selfWait.settleMs` 默认 60s → 10s (探测 2.5s × 连续 2 次的最小证明量), 量不出来不硬切、维持既有排队兜底。欠账 / 终句 / 闸内注入跨交接有效的机制不变 (欠账路由表兜着、终句 cut/uncut 扣着)。set_workspace 排队交接的受理文案同步改为「立即打断当前轮」。
 - **wezard MCP 默认改走 daemon 内置的 `POST /mcp` (http 传输)**: `daemon.mcpTransport` 缺省从 `stdio` 改为 `http`, 新 spawn 的 pane 不再各起一个 `node dist/mcp/server.js` 子进程 —— 本机实测 42 个 pane 的 42 个 MCP 子进程合计约 1.0GB RSS, 改后为 0 个; 单次工具调用延迟与 stdio 持平 (实测 8ms)。按后端回落: 只有认 `--mcp-config` 里 `type:"http"` 的 claude / claude-internal / codebuddy 走 http (本机 2.1.84 / 2.1.154 / 2.181 实测均连得上, 且都把 headers 里的 `${TMUX_PANE}` 按进程环境展开, 身份照旧由 `x-wezard-pane` 认); codex (走 `-c` 覆盖) 与任何名单外后端自动回落 stdio, 显式 `mcpTransport:"stdio"` 一律回落 stdio。另两条回落: 读不到 `~/.wezard/daemon-token` 或写不出 `session-mcp-http.json` 时本次 spawn 用 stdio 并告警; 该文件里有口令原文, 现在写完固定 `chmod 600`。**已在跑的 pane 不受影响** (启动行改不了, 仍是 stdio 子进程), `/new` 或 respawn 之后才切换。
 ## [2.9.0] - 2026-11-13
 

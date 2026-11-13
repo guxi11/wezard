@@ -16,8 +16,9 @@
 // 每一步落盘, boot 时从断点接着做。
 //
 // 自我交接是「调用即受理」(2026-10-28 重构): 请求合理 (简报能生成) 就立刻返回, daemon 自己
-// 排期 —— pane 忙就先给这一轮一个短窗自然收口, 到点 Esc 打断直接交接 (2026-11-12: 回执本就
-// 跨交接有效 —— 欠账由路由表兜着、终句由 cut 扣着、闸内的注入等在新会话, 没必要等轮终),
+// 排期 —— 默认不等收尾窗口, 调用即 Esc 打断直接交接 (2026-11-13 人拍板: set_workspace 后的
+// handoff 预期立刻完成; 2026-11-12 已论证回执本就跨交接有效 —— 欠账由路由表兜着、终句由
+// cut 扣着、闸内的注入等在新会话, 没必要等轮终; 要短窗自然收口的部署可配 graceMs>0),
 // 已有一场正在执行就排队到它之后再做一次,
 // 残余的失败记录不参与 self 的准入。人拿到的永远是「已受理」, 不是「这次交接在等什么/为什么
 // 失败」。交接别人仍走同步等待 + 失败记录准入 (调用方在场, 记录挡的是对半清会话的二次清空)。
@@ -215,8 +216,8 @@ export const handoffAdmission = (p: Pending, now: number, liveSid: string): Admi
 };
 
 export interface Handoffs {
-  /** 自我交接: 调用即受理 —— 立刻返回 scheduled, daemon 给在飞这一轮一个短窗收口, 到点 Esc
-   *  打断直接交接 (欠账/回执跨交接有效, 由路由表 + resumeOwed 兜着); 已有一场在执行时排队到
+  /** 自我交接: 调用即受理 —— 立刻返回 scheduled, daemon 立即 Esc 打断在飞这一轮直接交接
+   *  (默认无收尾窗口, 可配 graceMs; 欠账/回执跨交接有效, 由路由表 + resumeOwed 兜着); 已有一场在执行时排队到
    *  它之后 (queuedBehind)。不因 pane 忙、未落定事件或旧失败记录而拒绝。 */
   self: (target: string, brief: string) => { ok: boolean; reason?: string; queuedBehind?: boolean };
   /** 交接别人: 等到简报贴回新会话才返回。`extra.announce` = 重开时发「📂 当前项目」气泡。 */
@@ -294,13 +295,15 @@ const SELF_IDLE_MS = 10 * 60_000;
 // 「仍在队列」—— 排队等待不产生失败记录 (失败会反过来锁住后续, 正是这次重构拆掉的旧病)。
 const SELF_WAIT_SLICE_MS = 10 * 60_000;
 const SELF_QUEUE_CAP_MS = 6 * 60 * 60_000;
-// self 的「不再等」节拍 (2026-11-12): 在飞这一轮先给一个短窗自然收口 (常见: 调完 handoff
-// 收个尾, 几秒就完); 窗口用尽还忙就 Esc 打断直接交接。欠着的每笔不因打断失效 —— 路由表
-// 记的欠账在新会话由 resumeOwed 逐笔续答, 切断那一轮的终句由 cut/uncut 扣着, 交接闸内的
-// 注入也都在新会话里等。Esc 之后只等 pane 静置 (被切断的轮没有终句, 事件账不会落定)。
-const SELF_GRACE_MS = 45 * 1000;
+// self 的「不再等」节拍: 2026-11-12 先给 45s 短窗再 Esc; 2026-11-13 人拍板收尾窗口不要了 ——
+// 默认 graceMs=0, 调用即 Esc 打断直接交接 (要短窗自然收口的部署配 selfWait.graceMs>0,
+// sliceMs 是那窗口内的探测节拍)。欠着的每笔不因打断失效 —— 路由表记的欠账在新会话由
+// resumeOwed 逐笔续答, 切断那一轮的终句由 cut/uncut 扣着, 交接闸内的注入也都在新会话里等。
+// Esc 之后只等 pane 静置 (被切断的轮没有终句, 事件账不会落定) —— settle 只取「能证明静下来」
+// 的最小量 (探测 2.5s × 连续 2 次 ≈ 5s, 10s 含余量); 量不出来不硬切, 走下面的排队兜底。
+export const SELF_GRACE_MS = 0;
 const SELF_GRACE_SLICE_MS = 10 * 1000;
-const SELF_SETTLE_MS = 60 * 1000;
+export const SELF_SETTLE_MS = 10 * 1000;
 
 const briefPrompt = (focus?: string): string =>
   [
@@ -429,8 +432,8 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
           if (!r.ok) return fail(p, 502, `summary inject failed: ${r.reason}`);
           return step(saved({ ...p, stage: "briefing" }));
         }
-        // 自我交接: 先给在飞这一轮一个短窗自然收口 (常见: 它调完 handoff 收个尾, 几秒就完);
-        // 窗口用尽还忙就 Esc 打断直接交接, 不再排它身后。打断不亏欠任何一笔: 它欠着的每笔由
+        // 自我交接: 默认不等收尾窗口 (graceMs=0), 调用即 Esc 打断直接交接, 不排它身后;
+        // 配了 graceMs>0 的部署先给短窗自然收口, 窗口用尽同样 Esc。打断不亏欠任何一笔: 它欠着的每笔由
         // 路由表兜着 (新会话里 resumeOwed 逐笔续答), 切断那一轮的终句由 cut/uncut 扣着, 闸内的
         // 注入也都等在新会话。等待期间来了新简报: 就地接替, 不另起一场。
         const graceMs = deps.selfWait?.graceMs ?? SELF_GRACE_MS;
@@ -449,13 +452,13 @@ export const createHandoffs = (deps: HandoffDeps): Handoffs => {
           waited += graceSlice;
           deps.log.info({ mod: "handoff", target: p.target, waitedMs: waited, graceMs }, "handoff: 收口窗口内仍在忙");
         }
-        // 窗口用尽: 打断在飞这一轮, 只看 pane 静没静下来 —— 被切断的轮不会再有终句,
-        // 事件账永远 pending, 不能再拿 isBusy 等 (那会等成死队)。
+        // 打断在飞这一轮 (默认无窗口, 或窗口用尽): 只看 pane 静没静下来 —— 被切断的轮不会再
+        // 有终句, 事件账永远 pending, 不能再拿 isBusy 等 (那会等成死队)。
         const fresh = adopt();
         if (fresh) p = fresh;
         if (deps.interrupt) {
           const esc = await deps.interrupt(p.target);
-          deps.log.info({ mod: "handoff", target: p.target, ok: esc.ok, reason: esc.reason }, "handoff: 收口窗口用尽, 打断在飞这一轮直接交接");
+          deps.log.info({ mod: "handoff", target: p.target, ok: esc.ok, reason: esc.reason }, "handoff: Esc 打断在飞这一轮直接交接");
           const settle = await waitForIdle(p.target, deps.paneIdle ?? deps.isBusy, deps.selfWait?.settleMs ?? SELF_SETTLE_MS, () => false, { rampMs: 0, confirm: 2 });
           const latest = adopt();
           if (latest) p = latest;
