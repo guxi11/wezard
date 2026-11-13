@@ -67,7 +67,7 @@ import { appendEpisode, clipForCharter, cwdOfMd, episodePath, inboxPath, mdsOf, 
 import { startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
 import type { Asker, TurnFrom } from "../shared/detail-store.js";
 import { applyChatNames, chatBaseOf, chatNameOf, chatPolicyOf, clearChatName, listChatNames, normChatName, peerAddress, planChatNames, setChatName, stewardTierOf, type CharterChange, type CharterGuard } from "./chat-name.js";
-import { isStewardTarget, markGlobalSteward } from "./steward.js";
+import { isStewardTarget, markGlobalSteward, stewardRoute } from "./steward.js";
 import {
   bindWizardStore,
   loadWizardStore,
@@ -85,7 +85,10 @@ import {
   renderLead,
   renderLeadPlaybook,
   ROSTER_FRESH_MS,
-  renderRoster,
+  rosterL0,
+  rosterL1,
+  rosterL2,
+  rosterCensus,
   handoffAt,
   memoryNudgeAt,
   MEMORY_NUDGE_FLOOR,
@@ -3213,6 +3216,9 @@ const main = async (): Promise<void> => {
 
     // 家谱只列与观察者同机器人的 (跨机器人的分身生不出来, 这是给老数据 / 手改注册表兜的底)。
     const kinOf = (self: string, all: readonly WizardRecord[], target: string) => ({
+      // v3: 身份/种类随行 —— roster 金字塔的普查按 identity 去重, L0 永远收学徒。
+      identity: wizards.get(target)?.identity || target,
+      kind: wizards.get(target)?.kind,
       parent: ((p) => (p && sameBot(self, p) ? briefOf(self, p) : undefined))(wizards.get(target)?.parent),
       ancestors: ancestorsOf(all, target).filter((t) => sameBot(self, t)).map((t) => briefOf(self, t)),
       clones: childrenOf(all, target).filter((w) => sameBot(self, w.target)).map((w) => briefOf(self, w.target)),
@@ -3349,39 +3355,52 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/roster", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { query?: string; chat?: string; cwd?: string; alive?: boolean; limit?: number };
+      const b = body as { query?: string; chat?: string; cwd?: string; alive?: boolean; limit?: number; scope?: "chat" | "all" };
       ensureChatNames(self);
       const all = await rosterOf(self);
       const hit = all.filter(rosterFilters(b));
-      // 自己在最前, 然后活着的, 然后最近动过的 —— 截断时留下的正是最可能有用的。
-      const ranked = hit.slice().sort((x, y) =>
-        Number(y.self) - Number(x.self) || Number(y.alive) - Number(x.alive) || (y.lastActivity ?? 0) - (x.lastActivity ?? 0));
-      const limit = Math.min(Math.max(Number(b.limit ?? 40) || 40, 1), 300);
+      // ── v3 §4 金字塔: L0 在场 (默认) / L1 本群 (chat) / L2 组团 (scope:"all"); ctx 超线强制降级 L0。
+      const info = m.sessionInfo(self);
+      const model = info?.jsonlPath ? lastModel(info.jsonlPath) : info?.model ?? "";
+      const degraded = (info?.contextTokens ?? 0) >= handoffAt(model);
+      const selfBase = baseOfKey(self);
+      const stewardTarget = stewardRoute(cfg, wizards, selfBase, (t) => ((c) => c.runningCwd || c.defaultCwd)(m.getCwd(t))).target;
       // 「最近」与模型都从 transcript 读, 而且只为列出来的这一页读: 摘要用不指代任何人
       // 的箭头 (读名册的是另一个 wizard), 模型取它真正跑的那个 —— 绑定里的 model 只在
       // 有人显式选过时才有。
       const inflight = routeInFlight();
-      const shown = ranked.slice(0, limit).map((r) => ({
+      const enrich = (r: (typeof all)[number]) => ({
         ...r,
         turns: turnsLine(inflight, r.target),
         duty: inflight.filter((x) => x.to === r.target).map((x) => `${x.turn} ${x.state}`).join(" · "),
         model: r.model || (r.jsonlPath ? lastModel(r.jsonlPath) : ""),
         summary: r.jsonlPath ? lastExchange(r.jsonlPath, 80) : "",
         contextTokens: r.jsonlPath ? lastContextTokens(r.jsonlPath) : 0,
-      }));
-      json(res, 200, {
-        ok: true,
-        total: all.length,
-        matched: hit.length,
-        shown: shown.length,
-        text: [
-          `名册 · 列出 ${shown.length}/${hit.length} 个 (全机 ${all.length} 个) · 忙 = 正在生成, 闲 = 活着没在跑, 冷 = 没有 pane (发消息会唤醒) · ctx = 当前上下文用量`,
-          renderRoster(shown, Date.now(), homedir()),
-          ...(hit.length > shown.length
-            ? [`还有 ${hit.length - shown.length} 个没列出来 —— 用 query (名字/职责) / cwd (工作区) / chat 收窄, 或者调大 limit`]
-            : []),
-        ].join("\n"),
       });
+      const census = rosterCensus(all);
+      const now = Date.now();
+      const layer: "L0" | "L1" | "L2" = degraded ? "L0" : b.scope === "all" ? "L2" : b.chat ? "L1" : "L0";
+      // miss 提示: 按名字问了一个、本群在场名单里没有 —— 全机找得到就给升级提示。
+      const missHint = b.query && layer === "L0" && !hit.some((r) => r.self || baseOfKey(r.target) === selfBase)
+        ? `「${b.query}」不在本群在场名单 — 全机命中 ${hit.length} 个: wizard_roster({query}) 看全机命中, {scope:"all"} 看分群概览`
+        : undefined;
+      const degradedLine = degraded
+        ? `ctx ${Math.round((info?.contextTokens ?? 0) / 1000)}k 已到交接线 (${Math.round(handoffAt(model) / 1000)}k) — 只列在场; query/chat 收窄或 peek_peer 单查`
+        : undefined;
+      if (layer === "L0") {
+        const text = rosterL0(hit.map(enrich), { base: selfBase, stewardTarget, now, home: homedir(), census, ...(missHint ? { missHint } : {}), ...(degradedLine ? { degraded: degradedLine } : {}) });
+        json(res, 200, { ok: true, layer, total: all.length, matched: hit.length, text });
+        return;
+      }
+      if (layer === "L1") {
+        // chat 过滤已把 hit 收到那一个聊天; 取命中行的 base (无命中退回自己)。
+        const base = hit[0] ? baseOfKey(hit[0].target) : selfBase;
+        const text = rosterL1(hit.map(enrich), { base, now, home: homedir() });
+        json(res, 200, { ok: true, layer, total: all.length, matched: hit.length, text });
+        return;
+      }
+      const text = rosterL2(hit.map(enrich), { base: selfBase, now });
+      json(res, 200, { ok: true, layer, total: all.length, matched: hit.length, text });
     });
 
     // 管家分派前的候选表: 事实在这里算 (交集、读过的文件、ctx), 权衡留给管家。

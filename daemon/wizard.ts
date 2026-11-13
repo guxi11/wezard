@@ -432,9 +432,9 @@ export const addr = (b: WizardBrief): string => `${WIZARD_MARK} ${b.address || b
 const nameLine = (b: WizardBrief): string =>
   `\`${addr(b)}\`${b.description ? ` · ${b.description}` : ""}${b.cwd ? ` · ${b.cwd}` : ""}`;
 
-/** 出生名册最多点名几个。名册是出生快照, 只会越来越旧 (真相在 wizard_roster),
- *  而宪章每一轮都在上下文里 —— 只值得给「找谁干什么」用得上的那几个占位置。 */
-const ROSTER_MAX = 15;
+/** 出生名册最多点名几个 (v3 §4: L0 快照化, 15 → 8 —— 宪章是常驻系统提示, 名册只给
+ *  「找谁干什么」用得上的那几个占位置; 更大的世界交给 wizard_roster 金字塔)。 */
+const ROSTER_MAX = 8;
 
 /** 出生名册只收这么久之内动过的同群 wizard: 更早停下的多半是收了工没回收的临时分身,
  *  点名它们只是让新来的去找一个不会再接活的人。要找它们仍是 wizard_roster。 */
@@ -457,6 +457,12 @@ const rosterLines = (self: WizardBrief, sibs: readonly WizardBrief[]): string[] 
 // 住哪、在哪干、多久没动、家谱), 有职责 / 最近的话才各加一行。字段名、内部 key、
 // 每一行重复一遍的家谱对象 —— 这些在 json 里占掉大半篇幅, 却没有一个是找人要用的。
 export interface RosterRow extends WizardBrief {
+  /** 会话 key (`chat:xxx#tag`)。名册行按它定位, L0/L1 的「本聊天」按 baseOfKey(target) 判。 */
+  target: string;
+  /** 记录的身份 id (v3): 金字塔 L0 的汇总按它去重 (同身份多化身算一个身份)。 */
+  identity?: string;
+  /** 身份种类; L0 的「在场」永远包含学徒。 */
+  kind?: WizardKind;
   /** home 聊天的名字; "" = 没起名。 */
   chat: string;
   /** home 是与一个人的单聊, 不是群。 */
@@ -542,6 +548,134 @@ const rosterEntry = (r: RosterRow, now: number, home: string): string[] => {
 /** `home` = 用户主目录, 路径里的它缩成 `~`。 */
 export const renderRoster = (rows: readonly RosterRow[], now: number, home = ""): string =>
   rows.flatMap((r) => rosterEntry(r, now, home)).join("\n");
+
+// ── v3 §4: roster 金字塔 ──────────────────────────────────────────────
+// 预算的度量依据 (2026-11-13 现场实测, 1154 记录): roster 行均宽 55-59 字符, 按中文为主
+// 的行 ~1 token ≈ 1.8 字符折算 (0.55 token/字符)。全机平铺 = 97,211 字符 ≈ 53k token,
+// 这就是平铺不可用的实证。各层预算都留了 ~15% 余量。
+
+/** L0 在场: 成员行上限 (不含汇总/提示行)。 */
+export const ROSTER_L0_ROWS = 10;
+/** L0 总行数硬顶 (成员 + 截断提示 + 汇总 + 至多一条提示/降级行)。 */
+export const ROSTER_L0_MAX_LINES = 12;
+/** L0 「活跃」判据: 本聊天最后动过在这么多之内。 */
+export const ROSTER_L0_ACTIVE_MS = 48 * 60 * 60 * 1000;
+/** L0 字符预算 (≈440 token): 超线就减行, 不折行。 */
+export const ROSTER_L0_CHARS = 800;
+/** L1 本群: 总行数上限 (含职责/最近等子行)。 */
+export const ROSTER_L1_MAX_LINES = 40;
+/** L1 字符预算 (≈1,430 token)。 */
+export const ROSTER_L1_CHARS = 2600;
+/** L2 组团: 聊天行上限。 */
+export const ROSTER_L2_MAX_LINES = 60;
+/** L2 字符预算 (≈2,300 token)。 */
+export const ROSTER_L2_CHARS = 4200;
+/** L2 每个聊天行列出的名字数上限 (其余计 +n)。 */
+export const ROSTER_L2_NAMES = 5;
+
+export interface RosterCensus {
+  /** 全机身份数 (按 identity 去重)。 */
+  identities: number;
+  /** 全机聊天数。 */
+  chats: number;
+  busy: number;
+  idle: number;
+  cold: number;
+}
+export const rosterCensus = (rows: readonly RosterRow[]): RosterCensus => ({
+  identities: new Set(rows.map((r) => r.identity ?? r.target)).size,
+  chats: new Set(rows.map((r) => baseOfKey(r.target))).size,
+  busy: rows.filter((r) => r.busy).length,
+  idle: rows.filter((r) => !r.busy && r.alive).length,
+  cold: rows.filter((r) => !r.alive).length,
+});
+
+const censusLine = (c: RosterCensus): string =>
+  "全机 " + c.identities + " 身份 · " + c.chats + " 群 · 忙 " + c.busy + " 闲 " + c.idle + " 冷 " + c.cold;
+
+/** 行数守卫: 从尾行往前删到 ≤ maxLines 且总字符 ≤ maxChars, 返回 [保留行, 删掉行数]。 */
+const fit = (lines: readonly string[], maxLines: number, maxChars: number): [string[], number] => {
+  const kept = [...lines];
+  while (kept.length && (kept.length > maxLines || kept.join("\n").length > maxChars)) kept.pop();
+  return [kept, lines.length - kept.length];
+};
+
+export interface L0Args {
+  /** 调用方所在聊天的 base。 */
+  base: string;
+  /** 该聊天此刻的管家化身 target (§3); undefined = 没有管家。 */
+  stewardTarget?: string;
+  now: number;
+  home?: string;
+  /** 全机普查 (调用方拿全量 rows 算好的, 见 rosterCensus)。 */
+  census: RosterCensus;
+  /** L0 没找见的名字提示 (调用方判了 miss 才给)。 */
+  missHint?: string;
+  /** 降级说明 (ctx 超线时调用方给; 给了就附这一行, 层不在这里换)。 */
+  degraded?: string;
+}
+
+/** L0 在场 (默认层): 自己 + 本群管家 + 学徒 (钉住, 截断也不丢) + 本聊天 ROSTER_L0_ACTIVE_MS
+ *  内动过的化身 (按最近排, 填满剩余行), 每个一行 (不带职责/最近子行), 尾行全机普查 +
+ *  至多一条提示 (降级 > miss > 截断), 总行数 ≤ ROSTER_L0_MAX_LINES。 */
+export const rosterL0 = (rows: readonly RosterRow[], a: L0Args): string => {
+  const pinned = rows
+    .filter((r) => r.self || r.target === a.stewardTarget || r.kind === "apprentice")
+    .slice()
+    .sort((x, y) => Number(y.self) - Number(x.self)
+      || Number(y.target === a.stewardTarget) - Number(x.target === a.stewardTarget));
+  const active = rows
+    .filter((r) => !pinned.includes(r) && baseOfKey(r.target) === a.base
+      && a.now - r.lastActivity <= ROSTER_L0_ACTIVE_MS)
+    .slice()
+    .sort((x, y) => (y.lastActivity ?? 0) - (x.lastActivity ?? 0));
+  // 钉住的先占行, 活跃的填剩余; 字符预算不够再从活跃尾部减。
+  let members = [...pinned, ...active.slice(0, Math.max(ROSTER_L0_ROWS - pinned.length, 0))]
+    .map((r) => rosterEntry(r, a.now, a.home ?? "")[0] ?? "");
+  const budget = ROSTER_L0_CHARS - censusLine(a.census).length - 60;
+  while (members.length > pinned.length && members.join("\n").length > budget) members.pop();
+  const dropped = active.length - Math.max(members.length - pinned.length, 0);
+  const hint = a.degraded ?? a.missHint
+    ?? (dropped > 0 ? dropped + " 个更早的没列 — wizard_roster({chat}) 看本群全量" : undefined);
+  return [...members, censusLine(a.census), ...(hint ? [hint] : [])].join("\n");
+};
+
+/** L1 本群: 该聊天全部化身 (含冷), 完整条目 (职责/最近/家谱), 总行数 ≤ ROSTER_L1_MAX_LINES。 */
+export const rosterL1 = (rows: readonly RosterRow[], a: { base: string; now: number; home?: string }): string => {
+  const kin = rows
+    .filter((r) => baseOfKey(r.target) === a.base)
+    .slice()
+    .sort((x, y) => Number(y.self) - Number(x.self) || (y.lastActivity ?? 0) - (x.lastActivity ?? 0));
+  const lines = kin.flatMap((r) => rosterEntry(r, a.now, a.home ?? ""));
+  const [kept, dropped] = fit(lines, ROSTER_L1_MAX_LINES, ROSTER_L1_CHARS);
+  return [
+    ...kept,
+    ...(dropped ? ["… 本群共 " + kin.length + " 个, 超出行数/预算未列全 — query 收窄"] : []),
+  ].join("\n");
+};
+
+/** L2 组团: 每个聊天一行 (名字串, 无 summary/turns/职责), 自己的聊天最前, 其余按最近活动排。
+ *  行数 ≤ ROSTER_L2_MAX_LINES。 */
+export const rosterL2 = (rows: readonly RosterRow[], a: { base: string; now: number }): string => {
+  const byChat = new Map<string, RosterRow[]>();
+  for (const r of rows) {
+    const b = baseOfKey(r.target);
+    byChat.set(b, [...(byChat.get(b) ?? []), r]);
+  }
+  const chatLine = (b: string, kin: readonly RosterRow[]): string => {
+    const named = kin.slice().sort((x, y) => (y.lastActivity ?? 0) - (x.lastActivity ?? 0));
+    const shown = named.slice(0, ROSTER_L2_NAMES).map((r) => r.address || r.name);
+    const rest = named.length - shown.length;
+    const label = kin[0]?.chat || b;
+    return label + " (" + named.length + (kin.some((r) => r.busy) ? "·忙" : "") + "): " + shown.join(" ") + (rest > 0 ? " +" + rest : "");
+  };
+  const chats = [...byChat.entries()]
+    .map(([b, kin]) => [b, kin, Math.max(...kin.map((r) => r.lastActivity ?? 0))] as const)
+    .sort((x, y) => Number(y[0] === a.base) - Number(x[0] === a.base) || y[2] - x[2]);
+  const lines = chats.map(([b, kin]) => chatLine(b, kin));
+  const [kept, dropped] = fit(lines, ROSTER_L2_MAX_LINES, ROSTER_L2_CHARS);
+  return [...kept, ...(dropped ? ["… 共 " + chats.length + " 群, 列出 " + kept.length + " — chat 收窄后看该群"] : [])].join("\n");
+};
 
 /** lead 在协作树里的位置。 */
 export const renderLeadRules = (pointer = false): string[] => [

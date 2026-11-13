@@ -784,25 +784,27 @@ export const createWezardServer = (): McpServer => {
   server.registerTool(
     "wizard_roster",
     {
-      title: "Every wizard and clone",
+      title: "Roster pyramid: 在场 → 本群 → 全机",
       description:
-        "这个世界上所有的 wizard 与 clone, 一个一行: 名字 (全局唯一, 即地址)、忙闲 (忙 = 正在生成 / 闲 = 活着没在跑 / 冷 = 没有 pane, 发消息会唤醒)、**home 聊天** (群 / 单聊)、**工作区**、模型 (还没应答过的没有这一项)、多久没动、家谱 (父 / 分身); 写了职责的多一行职责, 活着的多一行「最近」—— 它最近一个来回 (`▸` 问 `◂` 答, 各截到 80 字, 截了带 `…`)。跨聊天的也在里面。这是你感知同伴的唯一入口 —— 用户说「还有谁在跑」「这个群里有谁」「谁在弄那个项目」「让懂 X 的那个来看看」时先调它, 拿到目标的名字再 tell_peer / peek_peer; 要往某个群里对人说话则把那个群名交给 notify。\n" +
-        "**这是一张索引, 不是一份名单**: 整台机器上可能有几百个会话, 所以默认只回最相关的一页 (自己 → 活着的 → 最近动过的), 并告诉你 `total` / `matched` 有多少。找人就带上条件: `query` 匹配名字/职责/地址, `cwd` 匹配工作区路径 (「谁在这个目录里干活」), `chat` 限定某个聊天, `alive:true` 只看还活着的。「同群有谁」就是 `chat` 写你自己的群名。别不带条件硬拉全表。",
+        "名册是金字塔, 默认只给 **L0 在场** (≤12 行): 你 + 本群管家 + 本聊天 48h 内动过的化身, 各一行, 尾行全机普查 (N 身份 · M 群 · 忙/闲/冷)。\n" +
+        "**升级靠显式参数**: `chat` (聊天名) = **L1 本群** 该聊天全部化身含冷的, 带职责/最近/家谱 (≤40 行); `scope:\"all\"` = **L2 组团** 每个聊天一行名字概览 (≤60 行); 单个 wizard 的详情用 `peek_peer`。\n" +
+        "**自动降级**: 你的 ctx 到交接线时只回 L0 并注明 —— 那时候也别拉大表。\n" +
+        "`query` 匹配名字/职责/地址, `cwd` 反查工作区, `alive:true` 只看活着的; 这些过滤器对每一层都生效。问了一个名字、它不在本群在场名单里时, L0 尾行会提示升级参数。这是你感知同伴的唯一入口 —— 拿到名字再 tell_peer / peek_peer。",
       inputSchema: {
         query: z.string().optional().describe("在名字 / 职责 / target 里做子串匹配 (不分大小写)。「让懂 X 的那个来看看」就把 X 写在这里。"),
-        chat: z.string().optional().describe("只看某个聊天里的 wizard: 聊天名, 或者聊天 principal 的一段 (无名聊天用它)。"),
+        chat: z.string().optional().describe("升级到 L1: 只看某个聊天的全部化身 (含冷)。聊天名, 或聊天 principal 的一段。「同群有谁」就写你自己的群名。"),
         cwd: z.string().optional().describe("只看工作区路径包含这一段的 wizard —— 「谁在 /path 下干活」的反查。"),
         alive: z.boolean().optional().describe("true = 只看 pane 还活着的。默认全给 (冷会话发消息就会被唤醒)。"),
-        limit: z.number().optional().describe("最多回多少条 (1-300, 默认 40)。"),
+        scope: z.enum(["all"]).optional().describe("升级到 L2: 全机分群概览, 每个聊天一行 (名字串, ≤60 行)。"),
       },
     },
-    async ({ query, chat, cwd, alive, limit }) =>
+    async ({ query, chat, cwd, alive, scope }) =>
       unwrapText("wizard_roster", await daemonPost("/wizard/roster", {
         ...(query ? { query } : {}),
         ...(chat ? { chat } : {}),
         ...(cwd ? { cwd } : {}),
         ...(alive ? { alive } : {}),
-        ...(limit ? { limit } : {}),
+        ...(scope ? { scope } : {}),
       })),
   );
 
