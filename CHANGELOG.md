@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Fixed
+- 交接之后的对话不再从 rolepage 上消失: self 交接的交接简报那一轮只带了频道、没带出处 (`from` / `speaker`), 新会话第一轮因此被归到「系统 wezard」那一栏, 交接前的那场对话从交接点断更 (现场 2026-11-13 实测: 交接后 70 分钟的续写全在 `p:system:`, 人读的那栏停在交接前)。现在交接发起时把被切断那一轮的频道与出处一起落盘 (`handoff.Seal` ← `detail.lastChannelOf`), 注入时透传给新会话第一轮, 简报的信封也按真实发话人与频道写 —— reload 恢复时不会再把这一轮认成自说自话、或把群里的交接复述成私聊。
 - 新起尚未开口的会话跨 daemon reload / 绑定重建后, 首条消息不再丢宪章: 宪章只在内存里 (下一个 pane 的首条注入带进去的那份 pending), 会话新起后闲着遇到 reload, 恢复出来的绑定就没有它了, wizard 从此无身份开工 —— 生产实测 117 次备用领用里 2 例如此 (中间各有 1 / 5 次 reload), 另 1 例是 /kill 后绑定被别的路径重建。现在挂宪章时同时落盘标记 (`MirrorRecord.charterOwed`), 注入确认后清掉; 绑定建立 (`attach`, 覆盖 newSession / restore / pinned / clone / 外部认领) 时按「落盘标记 + transcript 里有没有带宪章块的 user 行」重新武装 —— 已送达的按转录硬证据不再补发, 2.9.0 之前在 system prompt 里的老会话不受影响, codex 仍走 developer_instructions。
 
 ### Changed

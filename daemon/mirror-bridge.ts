@@ -2647,7 +2647,7 @@ export interface MirrorBridge {
    *  pushes assistant output via the standalone path. */
   /** `channel`: 这一轮的回复发去哪个公开频道 (base); "" = 私聊, 回复不进任何群,
    *  只落 turn 记录; 省略 = target 的 home。 */
-  injectText: (target: string, text: string, opts?: { from?: TurnFrom; channel?: string; envelope?: string; eventId?: string; guard?: DispatchGuard; requireIdle?: boolean; noRespawn?: boolean; handoff?: ClearAttempt }) => Promise<InjectResult>;
+  injectText: (target: string, text: string, opts?: { from?: TurnFrom; speaker?: string; channel?: string; envelope?: string; eventId?: string; guard?: DispatchGuard; requireIdle?: boolean; noRespawn?: boolean; handoff?: ClearAttempt }) => Promise<InjectResult>;
   /** 原 pane 的原生清空事务; 已暴露的尝试只核验, 不重发。 */
   verifyClearContext: (target: string, clear: ClearAttempt) => Promise<boolean>;
   clearContext: (target: string, attempt: ClearAttempt | undefined, submitted: (attempt: ClearAttempt) => void, guard?: () => boolean) => Promise<{ ok: boolean; reason?: string }>;
@@ -7863,7 +7863,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         a.pendingFromCli = false;
         a.turnFromChat = true;
         rememberInject(full);
-        pushSeal(a, { eventId: parseEnvelope(full)?.eventId, keys: sealKeys(full), at: Date.now(), query: text, from: opts?.from, channel: opts?.channel, fresh: idleVerdict(target) === true });
+        pushSeal(a, { eventId: parseEnvelope(full)?.eventId, keys: sealKeys(full), at: Date.now(), query: text, from: opts?.from, speaker: opts?.speaker, channel: opts?.channel, fresh: idleVerdict(target) === true });
         a.muteUntilInject = false;
         a.justSpawned = false;
       };
