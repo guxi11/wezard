@@ -6,7 +6,7 @@ import { createHash, timingSafeEqual, randomBytes, randomUUID } from "node:crypt
 import { loadOrCreateSvrToken } from "../shared/svr-token.js";
 import { DAEMON_TOKEN_FILE, DAEMON_TOKEN_HEADER } from "../shared/daemon-token.js";
 import { homedir } from "node:os";
-import { TIERS, defaultChatFor, tiersForBackend, loadConfig, type TierName } from "../shared/config.js";
+import { ChatPolicy, TIERS, defaultChatFor, tiersForBackend, loadConfig, type TierName } from "../shared/config.js";
 import { makeLogger } from "../shared/log.js";
 import { clipLine, sleep, truncate } from "../shared/std.js";
 import { patchJsonc } from "../shared/config-writer.js";
@@ -50,6 +50,7 @@ import { makeWedocBridge } from "./wedoc.js";
 import { errText, installResponseTracker } from "./last-response.js";
 import { ChatRecords } from "./chat-records.js";
 import { knownChatsOf } from "./chat-seen.js";
+import { planStrictSwitch, renderSwitchReport, type SwitchFacts } from "./strict-switch.js";
 import { CHAT_BATCH_BUDGET, sliceBatch } from "../shared/chat-record.js";
 import { openSayMeter, sayVerdict } from "./strict-gate.js";
 import { openMembers } from "./members.js";
@@ -289,6 +290,8 @@ const main = async (): Promise<void> => {
   let chatlogReminderOf: ((base: string, target: string) => string) | undefined;
   /** P7-S2 /owed: 本聊天的义务账渲染 (赋值在 mirror 大块里)。 */
   let owedOfBase: ((base: string) => string) | undefined;
+  /** P7-S3 /strict: 存量群切换 strict 的预演/执行 (赋值在 mirror 大块里, 要用 wizards / members / guardCharter)。 */
+  let strictSwitchOf: ((who: string, cmd: import("./strict-switch.js").StrictCommand) => Promise<string>) | undefined;
   /** 路由表的投递层 —— 在 mirror 大块里接线 (要用到回执信封 / 事件泵), 这里先留个口。 */
   let deliverFinal: ((e: MessageEvent, verdict: MessageFinal) => void) | undefined;
   let bindResults: MessageAdapters["resultBindings"];
@@ -533,7 +536,9 @@ const main = async (): Promise<void> => {
     // P7-S1: dispatch 前写一行 human; 记录侧同步内存记账、后台落盘 (不 await)。
     // P7-S3: 人话是「首见」的登记点 —— noteHuman 先于 dispatch, 新群首条即按 strict 判 (验收数字 ①)。
     try { chatRecords.record(chat, { ...line, kind: "human" }); knownChatsOf(cfg).record(chat); } catch { /* 记录失败不挡消息 */ }
-  }, (base) => owedOfBase?.(base) ?? "[wezard] 本群未开严格模式 (speech=implicit) — 没有义务账; 回执按现行口径走。");
+  }, (base) => owedOfBase?.(base) ?? "[wezard] 本群未开严格模式 (speech=implicit) — 没有义务账; 回执按现行口径走。",
+  // P7-S3 /strict: 预演/执行由 mirror 大块里的 strictSwitchOf 实现, 这里只转交。
+  async (who, cmd) => (await strictSwitchOf?.(who, cmd)) ?? "[wezard] /strict 未接 (需要 P7-S3 的 daemon)");
   // 频道（topic）事件层：接在 inbound 之后，让频道消息复用同一套 gate / route / mirror。
   installChannelEvents(ws.client, cfg, log.child({ mod: "channel" }));
   // approval click → finalize 当前 liveStream, 后续 tool/text 落到 standalone。
@@ -1894,6 +1899,38 @@ const main = async (): Promise<void> => {
     };
 
     strictSpeechOf = (base: string): boolean => !!base && chatPolicyOf(cfg, base).speech === "strict";
+
+    // P7-S3 /strict: 存量群切换 strict —— 预演 (受影响 wizard 清单) / apply (写 chatPolicy + 宪章守卫)。
+    // 判定与渲染在 daemon/strict-switch.ts (纯函数); 这里只供事实: 名字、名册、管家、成员表。
+    strictSwitchOf = (who, cmd) => {
+      const facts: SwitchFacts = {
+        chatLabel: (base) => chatNameOf(cfg, base) || base,
+        wizardsOf: (base) => wizards.all().filter((w) => baseOfKey(w.target) === base).map((w) => w.name || w.target),
+        stewardOf: (base) => appointedSteward(cfg, base),
+        memberCount: (base) => members.ofChat(base).length,
+      };
+      const plan = planStrictSwitch(cfg, { refs: cmd.refs, all: cmd.all, selfBase: baseOfKey(who) }, (ref) => chatBaseOf(cfg, ref), facts);
+      if (!cmd.apply) return Promise.resolve(renderSwitchReport(plan, "dry"));
+      const targets = plan.rows.filter((r) => !r.private && r.from === "implicit").map((r) => r.base);
+      if (!targets.length) return Promise.resolve(renderSwitchReport(plan, "apply"));
+      // 写配置 + 宪章守卫: chatPolicy 进宪章, 受影响 wizard 自动挂交接提醒 (announceCharterImpact)。
+      const { note } = guardCharter(() => {
+        patchJsonc(sourcePath, targets.map((base) => ({ path: ["chatPolicy", base, "speech"], value: "strict" as const })));
+        const nextPolicy = { ...cfg.chatPolicy };
+        for (const base of targets) nextPolicy[base] = ChatPolicy.parse({ ...nextPolicy[base], speech: "strict" });
+        cfg.chatPolicy = nextPolicy;
+        return targets;
+      }, (t) => t.length ? { what: "`/strict` 把 " + t.map((b) => chatNameOf(cfg, b) || b).join("、") + " 切到 strict", byHuman: true } : undefined);
+      // 每个切换的群记一行系统行, 成员的 chatlog 批能看到模式变了。
+      for (const base of targets) {
+        try {
+          chatRecords.record(base, { at: Date.now(), id: "strict:" + base + ":" + Date.now(), author: "wezard", kind: "system",
+            text: "[wezard] 本群已切换 strict (chatPolicy.speech=strict): 出站走 chat_reply / chat_say, 人只见占位与详情" });
+        } catch { /* 记录失败不挡 */ }
+      }
+      return note.then((n) => renderSwitchReport(plan, "apply") + (n.trim() ? "\n" + n.trim() : ""));
+    };
+
       identityOfTarget = (t: string): string | undefined => {
       const rec = wizards.get(t);
       return rec ? identityOfRec(rec) : undefined;
