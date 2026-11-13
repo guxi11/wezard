@@ -171,6 +171,8 @@ const parseNameCommand = (text: string): { arg: string } | undefined => {
 };
 // `/chats` — 跨聊天目录: 谁有名字、谁没有、各自跑着哪些会话。
 const isChatsCommand = (text: string): boolean => /^\/chats?$/i.test(text.trim());
+// /owed — 本聊天 (严格群) 的义务账: 谁欠着哪条、多久了。P7-S2; 渲染由 daemon 注入。
+const isOwedCommand = (text: string): boolean => /^\/owed$/i.test(text.trim());
 const isUsageCommand = (text: string): boolean => text.trim() === "/usage";
 const isStopCommand = (text: string): boolean => /^(?:\/stop|stop)$/i.test(text.trim());
 const isKillCommand = (text: string): boolean => text.trim() === "/kill";
@@ -222,6 +224,7 @@ const renderHelp = (): string =>
     "",
     "▎协作",
     "`/peers`(或 `/wizards`) 列出本聊天的 wizard:名字、职责、忙闲、谁是谁的分身",
+    "`/owed` 严格群的义务账: 谁欠着哪条、多久了 (未开严格模式的群没有)",
     "同一聊天里的 wizard 互相看得见也驱动得动,直接说人话:",
     "「看下 `.fix` 的进展,推动它直到结束」— AI 会读它最近的对话、派活、收它的回执直到跑完。",
     "「让 `.fix` 和 `.review` 互相迭代到 review 说 LGTM」— AI 会把它们串成一条循环流水线。",
@@ -578,6 +581,8 @@ export const installInboundRouter = (
   guardCharter: CharterGuard,
   /** P7-S1 人话记录: dispatch 前同步写一行 (记录侧自己异步落盘, 这里不 await)。 */
   noteHuman?: (chat: string, line: { at: number; id: string; author: string; text: string }) => void,
+  /** P7-S2 /owed: 本聊天的义务账渲染 (严格群); 不给 = 回「本群未开严格模式」。 */
+  owedOf?: (base: string) => string,
 ): void => {
   const inboxDir = expandHome(cfg.wrc.mirror.inboxDir);
   // 已知的机器人名只随配置变; 下面所有入站路径共用这一个剥离器。
@@ -944,6 +949,14 @@ export const installInboundRouter = (
       } catch (e) {
         body = `[wezard] /peers failed: ${(e as Error).message}`;
       }
+      await replyText(frame, msg, who, body);
+      return { stop: true };
+    }
+    // /owed — 本聊天的义务账 (P7-S2 严格群)。Read-only。
+    if (isOwedCommand(text)) {
+      const body = owedOf
+        ? owedOf(baseOfKey(who))
+        : "[wezard] 本群未开严格模式 (speech=implicit) — 没有义务账; 回执按现行口径走。";
       await replyText(frame, msg, who, body);
       return { stop: true };
     }

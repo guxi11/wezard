@@ -211,6 +211,7 @@ const DELEGATE_SCHEMA = {
       planId: z.string().optional().describe("这次派活归属的 plan id。仅关联event供owner的闲时提醒判断，不会自动推进plan；补充同一event时沿用关联。"),
       public: z.boolean().optional().describe("默认 true (气泡与回复进群); false = 私聊, 只记 rolepage。"),
       dryRun: z.boolean().optional().describe("只要默认决定与理由, 不执行。"),
+  join: z.object({ chat: z.string().describe("聊天名或 principal"), mode: z.enum(["speaker", "mention"]).optional() }).optional().describe("把它带进一个严格模式群当成员 (chat = 聊天名或 principal; mode 缺省 mention, speaker = 可主动开口)。只在 strict 群生效, 别的群忽略。"),
     };
 
 const runDelegate = async (tool: string, a: z.infer<z.ZodObject<typeof DELEGATE_SCHEMA>>) => {
@@ -238,9 +239,10 @@ const offspringShape = {
   planId: z.string().optional().describe("若task属于现有plan，指定plan id以关联派活event；plan仍由owner显式更新。"),
   return: z.enum(["self", "transfer", "detach", "none"]).optional().describe("带了 task 时这件活的回执去哪, 同 tell_peer 的 `return`: `transfer` = 把这一轮欠着的那一笔 (人问的那一轮也算) 整件交给新生的它, 它的终句直接交付人, 你静默收口。"),
   for: z.string().optional().describe("带了 task 时这件活为你欠着的哪一笔派的, 同 tell_peer 的 `for`。"),
+  join: z.object({ chat: z.string().describe("聊天名或 principal"), mode: z.enum(["speaker", "mention"]).optional() }).optional().describe("把它带进一个严格模式群当成员 (chat = 聊天名或 principal; mode 缺省 mention, speaker = 可主动开口)。只在 strict 群生效, 别的群忽略。"),
 };
 
-type Offspring = { lead?: boolean; description: string; name?: string; task?: string; taskFile?: string; params?: Record<string, string>; from?: string; cwd?: string; chat?: string; model?: string; effort?: string; tier?: string; planId?: string; return?: string; for?: string };
+type Offspring = { lead?: boolean; description: string; name?: string; task?: string; taskFile?: string; params?: Record<string, string>; from?: string; cwd?: string; chat?: string; model?: string; effort?: string; tier?: string; planId?: string; return?: string; for?: string; join?: { chat: string; mode?: "speaker" | "mention" } };
 
 const bear = (tool: string, inherit: boolean) => async (a: Offspring) => {
   // 见 offspringShape 的 taskFile 注释: 出生投递没有模板展开这一站。
@@ -255,6 +257,7 @@ const bear = (tool: string, inherit: boolean) => async (a: Offspring) => {
     ...(a.planId ? { planId: a.planId } : {}),
     ...(a.cwd ? { cwd: a.cwd } : {}),
     ...(a.chat ? { chat: a.chat } : {}),
+    ...(a.join ? { join: a.join } : {}),
     ...(a.model ? { model: a.model } : {}),
     ...(a.effort ? { effort: a.effort } : {}),
     ...(a.tier ? { tier: a.tier } : {}),

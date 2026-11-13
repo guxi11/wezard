@@ -2136,7 +2136,9 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // v3 §3: 判定从「untagged 默认会话」升为「该聊天绑定的管家化身」(config chatPolicy.steward
     // 指定优先, 没绑 = 现存默认会话) —— 指定的化身即使是 tagged 也 arm, 换绑后旧默认会话不再 arm。
     const owner = getMirrorTarget?.(sessionId);
-    if (owner && isStewardTarget(cfg, wizardStore(), owner) && chatPolicyOf(cfg, owner).topOnly) {
+    // P7-S2: 手闸条件 = 顶层模式或严格模式 (speech=strict) 任一开。
+    if (owner && isStewardTarget(cfg, wizardStore(), owner)
+      && (chatPolicyOf(cfg, owner).topOnly || chatPolicyOf(cfg, owner).speech === "strict")) {
       const reason = stewardGuard({
         sessionId,
         turn: openTurnsOf(owner, sessionId)[0]?.id ?? "",

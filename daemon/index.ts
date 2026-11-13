@@ -71,7 +71,7 @@ import { appendEpisode, clipForCharter, cwdOfMd, episodePath, inboxPath, mdsOf, 
 import { startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
 import type { Asker, TurnFrom } from "../shared/detail-store.js";
 import { applyChatNames, chatBaseOf, chatNameOf, chatPolicyOf, clearChatName, listChatNames, normChatName, peerAddress, planChatNames, setChatName, stewardTierOf, type CharterChange, type CharterGuard } from "./chat-name.js";
-import { isStewardTarget, markGlobalSteward, stewardRoute } from "./steward.js";
+import { appointedSteward, isStewardTarget, markGlobalSteward, stewardRoute } from "./steward.js";
 import { apprenticeOf, ensureApprentice, ensurePatrolTask, handoffLineOf, isApprentice } from "./apprentice.js";
 import {
   bindWizardStore,
@@ -117,7 +117,7 @@ import type { PlanStore } from "./plans.js";
 import { registerPlanRoutes } from "./plan-http.js";
 import { returnOpOf, type HeldSeen, type InFlight, type Prereq, type ReturnOp, type Tell } from "./dispatch.js";
 import { NO_DEADLINE, isTerminal, renderInFlight, turnState } from "../shared/turn-state.js";
-import { startIdleNudge } from "./idle-nudge.js";
+import { startIdleNudge, startObligationWatch, type ObligationRow, type ObligationWatch } from "./idle-nudge.js";
 import { askerFromEnvelope, parseReminders, renderReminder, stripReminders, withMsg, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
 import { createHandoffs, cuttingTurn, handedOff, handingOff, handoffRound, resumeText, roundPending, settlesCut, type Pending as PendingHandoff } from "./handoff.js";
 import { coldGateOf, decide, rankCandidates, routeDiagnostics, renderCandidates, routeReceiptDutiesOf, tierFor, wakeCostOf, wakeNoteOf, type RouteRow } from "./route.js";
@@ -178,6 +178,7 @@ const main = async (): Promise<void> => {
   /** 统一 route 恢复与 held 前置清理巡检。 */
   let stopSweep = (): void => {};
   let stopPlanReminders = (): void => {};
+  let stopObligations = (): void => {};
   let stewardRun: ((prompt: string) => Promise<{ ok: boolean; reason?: string }>) | undefined;
   let stewardWiring: { refsOf?: RefsOf; onMerged?: (mds: readonly string[]) => void } = {};
   let scheduledTaskInject:
@@ -285,6 +286,8 @@ const main = async (): Promise<void> => {
   let strictSpeechOf: ((base: string) => boolean) | undefined;
   let identityOfTarget: ((t: string) => string | undefined) | undefined;
   let chatlogReminderOf: ((base: string, target: string) => string) | undefined;
+  /** P7-S2 /owed: 本聊天的义务账渲染 (赋值在 mirror 大块里)。 */
+  let owedOfBase: ((base: string) => string) | undefined;
   /** 路由表的投递层 —— 在 mirror 大块里接线 (要用到回执信封 / 事件泵), 这里先留个口。 */
   let deliverFinal: ((e: MessageEvent, verdict: MessageFinal) => void) | undefined;
   let bindResults: MessageAdapters["resultBindings"];
@@ -525,10 +528,10 @@ const main = async (): Promise<void> => {
       asker: { who: a.speaker!, chat: a.channel! }, priority: "normal", deadline: deadlineAt,
       payload: { text: a.text + chatlogTail, human: a } });
     void watchQueue(a, id, !bridge.hasMirrorTarget(a.principal));
-  } }, sourcePath, (w, c) => guardCharter(w, c), (chat, line) => {
+  }   }, sourcePath, (w, c) => guardCharter(w, c), (chat, line) => {
     // P7-S1: dispatch 前写一行 human; 记录侧同步内存记账、后台落盘 (不 await)。
     try { chatRecords.record(chat, { ...line, kind: "human" }); } catch { /* 记录失败不挡消息 */ }
-  });
+  }, (base) => owedOfBase?.(base) ?? "[wezard] 本群未开严格模式 (speech=implicit) — 没有义务账; 回执按现行口径走。");
   // 频道（topic）事件层：接在 inbound 之后，让频道消息复用同一套 gate / route / mirror。
   installChannelEvents(ws.client, cfg, log.child({ mod: "channel" }));
   // approval click → finalize 当前 liveStream, 后续 tool/text 落到 standalone。
@@ -1873,7 +1876,22 @@ const main = async (): Promise<void> => {
 
     // ── 给人看的文件 / 图片 ────────────────────────────────────────────
       // ── P7-S2 严格群: 义务 / 成员 / 批量的公共件 (dispatch wrapper 与 /chat/* handler 共用) ──
-      strictSpeechOf = (base: string): boolean => !!base && chatPolicyOf(cfg, base).speech === "strict";
+      /** P7-S2 /owed: 本聊天的义务账渲染 (严格群; 未开 = 提示)。 */
+    owedOfBase = (base: string): string => {
+      if (!strictSpeechOf?.(base))
+        return "[wezard] 本群未开严格模式 (speech=implicit) — 没有义务账; 回执按现行口径走。";
+      const UNFINISHED = ["held", "open", "need", "error"];
+      const owed = router.rows().filter((r) => r.receiver.kind === "chat" && r.receiver.channel === base && UNFINISHED.includes(r.status));
+      if (!owed.length) return "[wezard] 本群没有未结的义务。";
+      const line = (r: Route): string => {
+        const msg = r.receiver.kind === "chat" ? (events.get(r.receiver.message)?.id ?? r.receiver.message) : r.event;
+        const age = Math.max(1, Math.round((Date.now() - r.at) / 60_000));
+        return "- " + displayName(r.owner) + " 欠 " + (r.event.startsWith("e") ? "人话" : "成员问") + " (re: " + msg + ", " + age + " 分钟前)";
+      };
+      return ["[wezard] 本群未结的义务 " + owed.length + " 条:", ...owed.map(line)].join("\n");
+    };
+
+    strictSpeechOf = (base: string): boolean => !!base && chatPolicyOf(cfg, base).speech === "strict";
       identityOfTarget = (t: string): string | undefined => {
       const rec = wizards.get(t);
       return rec ? identityOfRec(rec) : undefined;
@@ -1893,7 +1911,8 @@ const main = async (): Promise<void> => {
           [batch.render, "上面是 " + (chatNameOf(cfg, base) || base) + " 游标之后的话; 答指向你的义务用 chat_reply({re: 这条消息信封上的 msg}), 主动发言用 chat_say。"])
         : "";
     };
-      advanceChatlog = (e) => {
+      /** P7-S2 /owed: 本聊天的义务账渲染 (严格群; 未开 = 提示)。 */
+  advanceChatlog = (e) => {
       if (!e.channel || !strictSpeechOf(e.channel)) return;
       const chatlog = parseReminders(String(e.payload.text ?? "")).find((r) => r.attrs.wezard === "chatlog");
       const to = Number(chatlog?.attrs.to);
@@ -1924,6 +1943,54 @@ const main = async (): Promise<void> => {
     // 判据② (非成员 403 / mention 无有效 re 409) 的测试面。这里只做接线: 成员方式 →
     // 义务校验 → 判定 → 记账。通过即记账 (发不发出去了也记 — 保守防刷)。
     const sayMeter = openSayMeter();
+    /** P7-S2 join 接面 (spawn/delegate 的 join 参数 / steward 换绑): 入群 = 成员表 join
+     *  (升级式) + 一行成员变动系统行; 只在 strict 群有意义, 别的群静默忽略。 */
+    const joinMember = (by: string, base: string, target: string, mode: "owner" | "speaker" | "mention"): string => {
+      if (!base || !strictSpeechOf(base)) return "";
+      const rec = wizards.get(target);
+      const identity = rec ? identityOfRec(rec) : identityOfTarget?.(target);
+      if (!identity) return "";
+      const fresh = !members.isMember(base, identity);
+      members.join(base, identity, mode, by);
+      const who = displayName(target);
+      if (fresh) {
+        try {
+          chatRecords.record(base, { at: Date.now(), id: "join:" + identity + ":" + Date.now(), author: "wezard", kind: "system",
+            text: who + " 入群 (" + mode + ", 由 " + (by.startsWith("human:") ? "人" : displayName(by)) + " 带入)" });
+        } catch { /* 记录失败不挡 */ }
+      }
+      return who;
+    };
+    /** P7-S2 steward 换绑 (config_set chatPolicy.<chat>.steward): 成员表原子交换 ——
+     *  旧管家卸任 (owner 行才离群, speaker/mention 保留), 新管家 join owner ——
+     *  换绑的两件事合并成一行系统行 (notifyChat 的 [wezard] 前缀自动进聊天账本)。 */
+    const swapStewardMembership = (base: string, prevName: string): void => {
+      if (!strictSpeechOf(base)) return;
+      const nextName = appointedSteward(cfg, base);
+      if (nextName === prevName) return;
+      const parts: string[] = [];
+      const prev = prevName ? wizards.byName(prevName) : undefined;
+      if (prev) {
+        const pid = identityOfRec(prev);
+        const row = members.rowOf(base, pid);
+        if (row) {
+          if (row.mode === "owner") { members.leave(base, pid); parts.push(displayName(prev.target) + " 卸任管家, 离群"); }
+          else parts.push(displayName(prev.target) + " 卸任管家 (仍是成员)");
+        }
+      }
+      const next = nextName ? wizards.byName(nextName) : undefined;
+      if (next) {
+        joinMember("config:steward", base, next.target, "owner");
+        parts.push(displayName(next.target) + " 接任管家 (owner)");
+      }
+      if (parts.length) notifyChat(base, "[wezard] 管家换绑: " + parts.join("; "));
+    };
+    /** P7-S2 身份退役自动离群: 名册抹掉一个身份时, 把它从所有严格群成员表里摘掉。 */
+    const leaveAllChats = (target: string): void => {
+      const rec = wizards.get(target);
+      const identity = rec ? identityOfRec(rec) : target;
+      members.leaveEverywhere(identity);
+    };
     const strictSayGate = (self: string, base: string, re?: string): { status: number; body: Record<string, unknown> } | undefined => {
       const identity = identityOfTarget?.(self);
       const mode = identity ? members.modeOf(base, identity) : undefined;
@@ -2513,6 +2580,42 @@ const main = async (): Promise<void> => {
         store: loadJsonMap<{ asks: number; cycles?: number }>(join(cfg.daemon.stateDir, "idle-nudges.json")),
         log: log.child({ mod: "idle-nudge" }),
         sweep: async () => { await sweepOnce(); },
+      });
+      // P7-S2 义务观测: 严格群未结的 chat 接收行 —— idle 且未关提醒恰好 1 次, 再逾期上报恰好 1 次
+      // (管家违约发群系统行, 成员违约私聊告知管家)。不按墙钟判逾期、不伪造 timeout。
+      stopObligations = startObligationWatch({
+        rows: (): ObligationRow[] => router.rows()
+          .filter((r) => r.receiver.kind === "chat" && r.receiver.channel && ["held", "open", "need", "error"].includes(r.status)
+            && !!strictSpeechOf && strictSpeechOf(r.receiver.channel))
+          .map((r) => ({ event: r.event, owner: r.owner, channel: (r.receiver as { channel: string }).channel,
+            message: (r.receiver as { message: string }).message, ageMs: Date.now() - r.at })),
+        delivered: (row) => events.taskInputs(row.event).some((e) => e.exposure === "consumed"),
+        idleNow: m.idleNow,
+        handingOff,
+        remind: async (row) => {
+          const re = events.get(row.message)?.id ?? row.message;
+          const text = "（守护进程: " + (chatNameOf(cfg, row.channel) || row.channel) + " 里指向你的义务还没回 — 用 chat_reply({re: \"" + re + "\", text}) 交付; 无需答复就不带 text 记 passed。这是唯一一次提醒, 再不回会上报。）";
+          const r = await m.injectText(row.owner, text, { channel: row.channel });
+          return r.ok;
+        },
+        escalate: async (row) => {
+          const re = events.get(row.message)?.id ?? row.message;
+          const who = displayName(row.owner);
+          if (isStewardTarget(cfg, wizards, row.owner)) {
+            // 管家违约: 发群系统行 (notifyChat 自动进聊天账本)。
+            notifyChat(row.channel, "[wezard] ⚠️ 管家 " + who + " 的义务 (" + row.event + ", re: " + re + ") 逾期未回 — 已提醒过一次。");
+            return;
+          }
+          const steward = stewardRoute(cfg, wizards, row.channel);
+          const note = "（守护进程: " + (chatNameOf(cfg, row.channel) || row.channel) + " 里 " + who + " 的义务 (" + row.event + ", re: " + re + ") 逾期未回 — 已提醒过一次, 请你跟进 (stop_wizard 或转派)。）";
+          if (steward.target === row.channel && !wizards.get(steward.target)) {
+            notifyChat(row.channel, "[wezard] ⚠️ " + who + " 的义务 (" + row.event + ") 逾期未回 — 已提醒过一次。");
+            return;
+          }
+          await m.injectText(steward.target, note, { channel: "" });
+        },
+        store: loadJsonMap<ObligationWatch>(join(cfg.daemon.stateDir, "obligations.json")),
+        log: log.child({ mod: "obligation-watch" }),
       });
       stopPlanReminders = startPlanReminders({
         store: plans,
@@ -3396,6 +3499,7 @@ const main = async (): Promise<void> => {
         stewardBudget: chatPolicyOf(cfg, target).stewardBudget,
         lead: !!wizards.get(target)?.lead,
         topOnly: chatPolicyOf(cfg, target).topOnly,
+        speech: chatPolicyOf(cfg, target).speech,
       });
     /** 开局宪章。出生时的兄弟只是快照 —— 名册随时可查, 写进系统提示的那份只为了
      *  让它一睁眼就知道自己不是一个人在跑。 */
@@ -3732,7 +3836,7 @@ const main = async (): Promise<void> => {
       if (Object.prototype.hasOwnProperty.call(body, "cli")) { json(res, 400, { ok: false, reason: "cli is unsupported; dispatch uses the configured backend" }); return; }
       const retiredField = retiredOrchestrationField(body);
       if (retiredField) { json(res, 400, { ok: false, reason: retiredFieldReason(retiredField) }); return; }
-      const b = body as { task?: string; taskFile?: string; params?: Record<string, string>; name?: string; description?: string; tier?: string; to?: string; force?: boolean; lead?: boolean; spawn?: boolean; public?: boolean; dryRun?: boolean; criteria?: string; return?: string; for?: string; planId?: string };
+      const b = body as { task?: string; taskFile?: string; params?: Record<string, string>; name?: string; description?: string; tier?: string; to?: string; force?: boolean; lead?: boolean; spawn?: boolean; public?: boolean; dryRun?: boolean; criteria?: string; return?: string; for?: string; planId?: string; join?: { chat?: string; mode?: string } };
       // 模板展开 (§6/§8) 必须发生在一切副作用之前 —— 选人、开根单、bearAs 全在后面:
       // 失败 400, 不留孤儿 wizard、不开路由行。taskFile 单独成立 (task 不必陪跑);
       // 选人/选档/description 用的摘要从展开文本 (或 params.header) 派生, 投递的是全文。
@@ -3852,6 +3956,12 @@ const main = async (): Promise<void> => {
       if (!controlValid(self, dispatchOrigin.authority)) { json(res, 409, { ok: false, decision: "spawn", reason: "dispatch source turn changed during spawn; task remains with original source turn" }); return; }
       // 宪章里只有层级规矩, 打法随信封带 (宪章每轮都在上下文里, 打法只这一件活用得上)。
       const t = await tell(String(born.body.name), text, lead ? renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : "");
+      // P7-S2 join 参数: 白板新生落地后把它带进指定严格群 (对已有执行者也一样 — joinMember 升级式)。
+      if (b.join?.chat && t.status === 200) {
+        const base = chatBaseOf(cfg, b.join.chat);
+        const target = base ? resolvePeer(self, String(born.body.name)) : undefined;
+        if (target?.ok) joinMember(self, base, target.target, b.join.mode === "speaker" ? "speaker" : "mention");
+      }
       json(res, t.status, {
         ...t.body,
         decision: "spawn",
@@ -4084,6 +4194,14 @@ const main = async (): Promise<void> => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       const r = await bearAs(self, body);
+      // P7-S2 join 参数: 出生成功后把它带进指定严格群 (joinMember 只在 strict 群生效)。
+      const join = (body as { join?: { chat?: string; mode?: string } }).join;
+      if (r.status === 200 && join?.chat) {
+        const born = (r.body as { name?: string }).name;
+        const base = chatBaseOf(cfg, join.chat);
+        const target = born ? resolvePeer(self, String(born)) : undefined;
+        if (base && target?.ok) joinMember(self, base, target.target, join.mode === "speaker" ? "speaker" : "mention");
+      }
       json(res, r.status, r.body);
     });
 
@@ -4094,6 +4212,7 @@ const main = async (): Promise<void> => {
     const forgetWizard = (target: string): boolean => {
       if (isApprentice(wizards, target)) return false;
       if (planRetirementBlock(target)) return false;
+      leaveAllChats(target); // P7-S2: 身份退役自动离群
       wizards.drop(target);
       return true;
     };
@@ -4519,6 +4638,9 @@ const main = async (): Promise<void> => {
       // 人发起 = 调用方这一轮的链头是人 (人在群里 / 单聊里叫它改的)。
       const byHuman = !!caller && !!askerOf(caller)?.who.startsWith("user:");
       const commit = async (): Promise<(Plan & { charter: string }) | { ok: false; reason: string }> => {
+        // P7-S2: chatPolicy.<chat>.steward 换绑 → 成员表原子交换 (prev 在写盘前取)。
+        const stewardBase = pl.path[0] === "chatPolicy" && pl.path[2] === "steward" && pl.path.length === 3 ? String(pl.path[1]) : "";
+        const prevSteward = stewardBase ? appointedSteward(cfg, stewardBase) : "";
         const { r: now, note } = guardCharter(() => {
           const now = planSet(cfg, sourcePath, ask);
           if (!now.ok) return now;
@@ -4526,6 +4648,7 @@ const main = async (): Promise<void> => {
           applyHot(cfg, now);
           return now;
         }, (now) => now.ok ? { what: `\`config_set ${now.path.join(".")}\``, self: caller, byHuman, reload: now.apply === "reload", after: charterUnder(now) } : undefined);
+        if (now.ok && stewardBase) swapStewardMembership(stewardBase, prevSteward);
         return now.ok ? { ...now, charter: await note } : now;
       };
       const done = (now: Plan & { charter: string }): string =>
@@ -4796,6 +4919,7 @@ const main = async (): Promise<void> => {
             log.warn({ target, reason: after.reason }, "memory steward identity retained after pane cleanup because retirement check changed");
             return r;
           }
+          leaveAllChats(target); // P7-S2: 身份退役自动离群
           wizards.drop(target);
           return r;
         } finally {
@@ -4917,6 +5041,7 @@ const main = async (): Promise<void> => {
     events.drain();
     stopSweep();
     stopPlanReminders();
+    stopObligations();
     scheduler.stop();
     steward?.stop();
     tasks.stop();

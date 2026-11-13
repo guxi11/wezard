@@ -439,6 +439,8 @@ export interface CharterArgs {
   tiers: readonly string[];
   /** home 聊天开着顶层模式 (`chatPolicy.<chat>.topOnly`)。 */
   topOnly: boolean;
+  /** home 聊天的发言模式 (chatPolicy.<chat>.speech): strict 群的宪章用 renderStrictChat 替顶层模式那一节。 */
+  speech: "implicit" | "strict";
 }
 
 // 系统面 (设计稿 §1.5) 的称呼: 裸名 —— roster/charter 里不画记号; 记号只在人面 (企微气泡头/审批卡)。
@@ -733,6 +735,21 @@ const renderTopOnly = (): string[] => [
 ];
 
 /** config_set 路径里写哪个键: 聊天名好认, 但路径按 `.` 切段 —— 名字里带点就退回 principal。 */
+/** 严格模式 (chatPolicy.<chat>.speech = strict, P7-S2) 的规矩 —— 替换顶层模式那一节:
+ *  出站全走工具口子, 义务不随终句自动关账。 */
+const renderStrictChat = (): string[] => [
+  "## 本群开着严格模式",
+  "人在这个群里只看见**成员的正式发言**与系统提示; 你的回复不自动进群 —— 每条人话开一条义务, 由被点名的成员用工具交付。",
+  bullet([
+    "**答指向你的义务** (chatlog 块 owes>0 / 提醒点名) 用 chat_reply({re, text}) —— re 是那条消息信封上的 msg; 无需答复就不带 text 记 passed",
+    "**主动发言** 用 chat_say (每轮 ≤3、每群每分钟 ≤10; 非成员 403); **问某个成员** 用 chat_ask (它用 chat_reply 答); notify / send_file 也走这套额度",
+    "消息尾巴的「聊天记录」块 = 游标之后的群内上下文 (触发行全文); 游标只在你的注入 committed 后推进",
+    "审批 / 提问卡、[wezard] / [mirror] 系统提示不受出站门限制",
+    "义务不随终句自动关账: idle 后仍未关会被提醒一次, 再不回上报 (管家违约发群系统行); 拨回 implicit 后下一句终句照旧关账",
+    "人查欠账: /owed",
+  ]),
+];
+
 const policyKeyOf = (name: string, base: string): string => (name && !name.includes(".") ? name : base);
 
 /** 管家的顶层模式开关 (开没开都给一行): 默认开着, 所以这一行的用处是**关法** —— 人问起、或想让某个群照旧
@@ -822,7 +839,7 @@ export const renderCharter = (a: CharterArgs): string => {
   if (a.workspaceMemory) {
     parts.push("## 本工作区记忆", a.workspaceMemory, "");
   }
-  if (a.steward && a.topOnly) parts.push(...renderStewardRules(a), "");
+  if (a.steward && (a.topOnly || a.speech === "strict")) parts.push(...renderStewardRules(a), "");
   if (a.self.kind === "apprentice") parts.push(...renderApprenticeRules(), "");
   if (a.lead) parts.push(...renderLeadRules(true), "");
   if (a.siblings.length > 0) {
@@ -874,7 +891,8 @@ export const renderCharter = (a: CharterArgs): string => {
     ]),
     "分身有成本 (一份上下文): 少于两三件时自己做更快; 但 coding 仍遵守 light 执行约束, 统筹者不因此亲自接手实现。",
     "",
-    ...(a.topOnly ? [...renderTopOnly(), ""] : []),
+    ...(a.speech === "strict" ? [...renderStrictChat(), ""]
+      : a.topOnly ? [...renderTopOnly(), ""] : []),
     "## 怎么说话: 群是公开频道, wizard 之间默认私聊",
     "你这一轮的终句去哪由守护进程按信封定, 你改不了: 人问的回那个群, 同伴私聊派的作为回执回给它, 知会哪儿也不去; 回执那一轮跟着你派它时在答的那件走, 信封写明去向。",
     bullet([

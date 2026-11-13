@@ -5,7 +5,7 @@ const base: CharterArgs = {
   self: { name: "worker", address: "worker", description: "test role", cwd: "/workspace" },
   chat: "team", principal: "user:admin", inherited: false,
   siblings: [], memory: [], chatMemory: "", workspaceMemory: "", steward: false,
-  stewardBudget: 4, lead: false, tiers: [], topOnly: false,
+  stewardBudget: 4, lead: false, tiers: [], topOnly: false, speech: "implicit",
 };
 
 const hasHeading = (text: string, heading: string) => text.split("\n").includes(heading);
@@ -45,6 +45,17 @@ for (const fragment of ["长等待、阻塞", "完成 fyi", "原群 `notify`", "
 const orchestration = chapter(topOnly, "## 怎么干活: 编排");
 for (const fragment of ["不提前合并或宣告完成", "必须 `notify` 原群"])
   assert.ok(orchestration.includes(fragment), `top-only orchestration contract must include ${fragment}`);
+// P7-S2 严格模式宪章: speech=strict 时 renderStrictChat 替换顶层模式那一节。
+const strict = renderCharter({ ...base, topOnly: true, speech: "strict" });
+assert.ok(hasHeading(strict, "## 本群开着严格模式"), "strict 群带严格模式节");
+assert.ok(!hasHeading(strict, "## 本群开着顶层模式"), "strict 群不带顶层模式节 (被替换)");
+for (const fragment of ["chat_reply", "chat_say", "chat_ask", "义务不随终句自动关账", "/owed", "每轮 ≤3"])
+  assert.ok(strict.includes(fragment), `strict charter must include ${fragment}`);
+assert.equal(hasHeading(renderCharter({ ...base, steward: true, speech: "strict", topOnly: false }), "## 我是这个群的管家 (L1)"),
+  true, "手闸条件 topOnly || strict: strict 群的管家也带管家章");
+assert.equal(hasHeading(renderCharter({ ...base, speech: "implicit", topOnly: true }), "## 本群开着顶层模式"),
+  true, "implicit 群照旧顶层模式节");
+
 const lead = renderCharter({ ...base, lead: true });
 assert.ok(!hasHeading(charter, "## 我是这件活的 lead"));
 assert.ok(hasHeading(lead, "## 我是这件活的 lead"));

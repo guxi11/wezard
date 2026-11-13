@@ -32,6 +32,8 @@ export interface Members {
   advance: (chat: string, identity: string, cursor: number) => void;
   rowOf: (chat: string, identity: string) => MemberRow | undefined;
   ofChat: (chat: string) => Array<{ identity: string; row: MemberRow }>;
+  /** 身份退役: 从所有聊天里摘掉 (P7-S2, 返回摘掉的聊天键)。 */
+  leaveEverywhere: (identity: string) => string[];
 }
 
 const keyOf = (chat: string, identity: string): string => `${chat}|${identity}`;
@@ -59,5 +61,11 @@ export const openMembers = (file: string): Members => {
     ofChat: (chat) => Object.entries(db.all())
       .filter(([k]) => k.startsWith(`${chat}|`))
       .map(([k, row]) => ({ identity: k.slice(chat.length + 1), row })),
+    leaveEverywhere: (identity) => {
+      const suffix = `|${identity}`;
+      const chats = Object.keys(db.all()).filter((k) => k.endsWith(suffix)).map((k) => k.slice(0, -suffix.length));
+      chats.forEach((chat) => db.drop(`${chat}|${identity}`));
+      return chats;
+    },
   };
 };
