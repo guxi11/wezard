@@ -3,7 +3,7 @@
 // 目标: 全机 mcp.json / settings 里不再有 wezard, 改为 spawn 时 `--mcp-config`。
 // 这里钉住四件事: (1) 产物里的入口是真实存在的 dist/mcp/server.js (指向不存在的
 // 路径 = pane 静默少掉整套协作工具); (2) 重复调用不重写 (每次 spawn 都会调);
-// (3) 后端 → 参数映射 (codebuddy 在 http 传输下换用 http 那份);
+// (3) 后端 → 参数映射 (认 type:"http" 的后端在 http 传输下换用 http 那份, 名单外回落 stdio);
 // (4) http 形态带口令头, 且没口令时回落 stdio 而不是写个进不去的入口。
 import assert from "node:assert";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
@@ -34,6 +34,15 @@ try {
   assert.deepEqual(sessionMcpArgs("claude", spec), ["--mcp-config", spec.stdioFile]);
   assert.deepEqual(sessionMcpArgs("claude-internal", spec), ["--mcp-config", spec.stdioFile]);
   assert.deepEqual(sessionMcpArgs("codebuddy", spec), ["--mcp-config", spec.stdioFile]);
+
+  // http 形态 (缺省): 认 type:"http" 的三个后端换用 http 那份, 名单外的一律回落 stdio ——
+  // 缺省值改成 http 之后, 认不出的后端不该因此静默丢掉整套协作工具。
+  const http = { stdioFile: spec.stdioFile, httpFile: join(dir, "session-mcp-http.json") };
+  for (const b of ["claude", "claude-internal", "codebuddy"]) {
+    assert.deepEqual(sessionMcpArgs(b, http), ["--mcp-config", http.httpFile], `${b} 应走 http`);
+  }
+  assert.deepEqual(sessionMcpArgs("codex", http), ["--mcp-config", http.stdioFile], "codex 回落 stdio");
+  assert.deepEqual(sessionMcpArgs("some-future-cli", http), ["--mcp-config", http.stdioFile], "名单外回落 stdio");
 
   console.log("session-mcp.test: ok");
 } finally {

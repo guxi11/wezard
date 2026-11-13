@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **wezard MCP 默认改走 daemon 内置的 `POST /mcp` (http 传输)**: `daemon.mcpTransport` 缺省从 `stdio` 改为 `http`, 新 spawn 的 pane 不再各起一个 `node dist/mcp/server.js` 子进程 —— 本机实测 42 个 pane 的 42 个 MCP 子进程合计约 1.0GB RSS, 改后为 0 个; 单次工具调用延迟与 stdio 持平 (实测 8ms)。按后端回落: 只有认 `--mcp-config` 里 `type:"http"` 的 claude / claude-internal / codebuddy 走 http (本机 2.1.84 / 2.1.154 / 2.181 实测均连得上, 且都把 headers 里的 `${TMUX_PANE}` 按进程环境展开, 身份照旧由 `x-wezard-pane` 认); codex (走 `-c` 覆盖) 与任何名单外后端自动回落 stdio, 显式 `mcpTransport:"stdio"` 一律回落 stdio。另两条回落: 读不到 `~/.wezard/daemon-token` 或写不出 `session-mcp-http.json` 时本次 spawn 用 stdio 并告警; 该文件里有口令原文, 现在写完固定 `chmod 600`。**已在跑的 pane 不受影响** (启动行改不了, 仍是 stdio 子进程), `/new` 或 respawn 之后才切换。
+
 ## [2.9.0] - 2026-11-13
 
 ### Added
