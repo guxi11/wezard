@@ -62,7 +62,7 @@ import { openTaskRegistry } from "./task-registry.js";
 import { deliverScheduled, type ScheduledDispatchOptions, type ScheduledResult } from "./scheduled-delivery.js";
 import { describeTrigger, nextFire, parseTrigger, WHEN_HELP } from "../shared/trigger.js";
 import { isQuiet, slugify, uniqueId } from "../shared/task-file.js";
-import { baseOfKey, bindMultiBot, bindTagLinker, botOfKey, headed, ownHead, isInternalKey, keyOf, linkTags, normalizeTag, sameBot, speakerHead, tagHead, tagLink, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
+import { baseOfKey, bindMultiBot, bindTagLinker, botOfKey, headed, ownHead, isInternalKey, keyOf, linkTags, normalizeTag, sameBot, speakerHead, stripSigil, tagHead, tagLink, tagOfKey, uniqueTag, withTagHeader, WIZARD_MARK } from "../shared/session-label.js";
 import { appendEpisode, clipForCharter, cwdOfMd, episodePath, inboxPath, mdsOf, proposedCwds, memoryPath, memoryRoot, proposeMemory, readMemory, type MemoryScope } from "./wizard-memory.js";
 import { startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
 import type { Asker, TurnFrom } from "../shared/detail-store.js";
@@ -1750,7 +1750,7 @@ const main = async (): Promise<void> => {
       const belowTop = !!serves && !router.speaksToHuman(serves);
       const muted = dests.filter((d) => chatPolicyOf(cfg, d).topOnly && !(!tagOfKey(self) && baseOfKey(self) === d));
       return muted.length && belowTop
-        ? { ok: false, topOnly: true, reason: `${muted.map((d) => chatNameOf(cfg, d) || d).join(", ")} 开着顶层模式: 你这一轮是同伴派来的活, 不对人说话 —— 结果用 \`@.name RESULT:\`, 反问用 tell_peer({kind:"ask"}), 由派你的那个代你向人交代` }
+        ? { ok: false, topOnly: true, reason: `${muted.map((d) => chatNameOf(cfg, d) || d).join(", ")} 开着顶层模式: 你这一轮是同伴派来的活, 不对人说话 —— 结果用 \`@🧙‍♂️ name RESULT:\`, 反问用 tell_peer({kind:"ask"}), 由派你的那个代你向人交代` }
         : undefined;
     };
     http.register("POST /notify", async (req, res) => {
@@ -1786,7 +1786,7 @@ const main = async (): Promise<void> => {
           return;
         }
         if ((closing === "none" || closing === "progress") && (!row || !["open", "need", "error"].includes(row.status))) {
-          json(res, 409, { ok: false, reason: "这笔任务已收口或无在途任务，回执确认不公开；新结果用 @.name RESULT:，新问题用 tell_peer({kind:\"ask\"})。" });
+          json(res, 409, { ok: false, reason: "这笔任务已收口或无在途任务，回执确认不公开；新结果用 @🧙‍♂️ name RESULT:，新问题用 tell_peer({kind:\"ask\"})。" });
           return;
         }
       }
@@ -2453,7 +2453,7 @@ const main = async (): Promise<void> => {
       const force = (body as { force?: boolean }).force;
       if (kind === "task" && !re && asked !== "now" && force !== true) {
         const gi = m.sessionInfo(target);
-        const gate = gi ? coldGateOf(`.${displayName(target).replace(/^\./, "")}`, gi.contextTokens, touchOf(gi.jsonlPath), Date.now(), ttlOf(gi.jsonlPath)) : "";
+        const gate = gi ? coldGateOf(`${WIZARD_MARK} ${stripSigil(displayName(target))}`, gi.contextTokens, touchOf(gi.jsonlPath), Date.now(), ttlOf(gi.jsonlPath)) : "";
         if (gate) {
           return { status: 409, body: { ok: false, gated: "cold", reason: gate } };
         }
@@ -2768,7 +2768,7 @@ const main = async (): Promise<void> => {
     registerPlanRoutes(http, {
       store: planApiStore,
       read: readPlanBody,
-      resolveOwner: (name) => wizards.byName(name.replace(/^\./, ""))?.target,
+      resolveOwner: (name) => wizards.byName(stripSigil(name))?.target,
       origin: (self) => {
         const opening = openingOfSelf(self);
         const openedEvent = opening?.env?.eventId ? events.get(opening.env.eventId) : undefined;
@@ -3192,7 +3192,7 @@ const main = async (): Promise<void> => {
           // 宪章是出生快照: 出生时聊天还没名字的会话, 一辈子自报「(未命名)」。
           // 补过名 / 改过名的, 这里把新宪章挂到它下一次注入上。
           const want = w.name || "(未命名)";
-          const had = /名字: \*\*`\.([^`]*)`\*\*/.exec(text)?.[1] ?? "";
+          const had = /名字: \*\*`(?:🧙‍♂️ )?([^`]*)`\*\*/.exec(text)?.[1] ?? "";
           if (had && had !== want) {
             log.child({ mod: "wizard" }).info({ target: w.target, was: had, now: want }, "charter re-armed after identity change");
             m.armCharter(w.target);
@@ -3317,8 +3317,8 @@ const main = async (): Promise<void> => {
       // 职责是别人决定"该不该找你"的依据, 改了就得让同群的知道 —— 否则他们照着
       // 出生快照里那句旧的 (或者空的) 职责派活。
       if (asked || description) postRoster(baseOfKey(self), [self], before && before !== name
-        ? { op: "renamed", name: `.${name}`, was: `.${before}`, ...(description ? { job: description } : {}) }
-        : { op: "job", name: `.${name}`, job: description }, subjectOf(wizards.get(self)));
+        ? { op: "renamed", name: `${WIZARD_MARK} ${name}`, was: `${WIZARD_MARK} ${before}`, ...(description ? { job: description } : {}) }
+        : { op: "job", name: `${WIZARD_MARK} ${name}`, job: description }, subjectOf(wizards.get(self)));
       // 同上: 同群的知道新名字还不够, 它自己的宪章也写着旧名。
       if (asked && name !== before) recharter([self]);
       json(res, 200, {
@@ -3768,7 +3768,7 @@ const main = async (): Promise<void> => {
       // 出生不再发群气泡 (人要看的是结论, 不是谁生了谁 —— 过程在 rolepage 里);
       // 同群的 wizard 仍要知道群里多了一个成员。工单里的临时工连这条也省掉。
       postRoster(base, [target, self], {
-        op: "born", name: `.${name}`, by: displayName(self), clone: true,
+        op: "born", name: `${WIZARD_MARK} ${name}`, by: `${WIZARD_MARK} ${displayName(self)}`, clone: true,
         ...(r.inherited ? { ctx: forkOf ? displayName(forkOf) : displayName(self) } : {}),
         ...(kid.description ? { job: kid.description } : {}), cwd: r.cwd,
       }, subjectOf(wizards.get(target)));
@@ -3911,7 +3911,7 @@ const main = async (): Promise<void> => {
       const forgotten = end && b.forget ? forgetWizard(target) : false;
       if (end && b.forget && !forgotten) { const blocked = planRetirementBlock(target); json(res, blocked?.status ?? 409, { ok: false, target, reason: blocked?.reason ?? "wizard retirement is blocked" }); return; }
       // 打断只是停了它这一轮, 它还在; 只有结束才是名册变了。
-      if (end) postRoster(baseOfKey(target), [target, self], { op: "ended", name: victim.name ? `.${victim.name}` : target, by: displayName(self), ...(b.forget ? { why: "forgotten" } : {}) }, subjectOf(victimRec));
+      if (end) postRoster(baseOfKey(target), [target, self], { op: "ended", name: victim.name ? `${WIZARD_MARK} ${victim.name}` : target, by: `${WIZARD_MARK} ${displayName(self)}`, ...(b.forget ? { why: "forgotten" } : {}) }, subjectOf(victimRec));
       json(res, 200, { ok: true, target, name: victim.name, mode: end ? "end" : "interrupt", forgotten: !!forgotten, ...(canceled ? { canceled } : {}) });
       } finally { if (end) retiringWizardTargets.delete(target); }
     });

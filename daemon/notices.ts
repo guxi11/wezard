@@ -26,7 +26,7 @@ import { renderReminder } from "../shared/reminder.js";
 import { clipLine } from "../shared/std.js";
 import type { JsonMap } from "../shared/json-map-store.js";
 
-/** 一次名册变动。`name` / `by` 是给模型看的称呼 (`.x`)。 */
+/** 一次名册变动。`name` / `by` 是给模型看的称呼 (`🧙‍♂️ x`, v3 起代替 `.x`)。 */
 export type Notice =
   | { op: "born"; name: string; by: string; clone?: boolean; ctx?: string; job?: string; cwd?: string }
   | { op: "ended"; name: string; by?: string; why?: string }

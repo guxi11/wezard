@@ -147,8 +147,8 @@
     var k = names[id] || {}, n = nodeOf(id);
     return k.label || (n && n.label) || ({ human: '👤', task: '⏰', system: '🧙‍♂️' })[kindOf(id)] || '🧙';
   };
-  // `.name` 的点由 CSS 画 —— 人与定时任务没有地址, 不画点。
-  var nameOf = function (id) { return (kindOf(id) === 'wizard' ? '.' : '') + roleName(id); };
+  // wizard 的地址记号 🧙‍♂️ (v3 起代替 `.name` 的点) —— 人与定时任务没有地址, 不画。
+  var nameOf = function (id) { return (kindOf(id) === 'wizard' ? '\u{1F9D9}\u200D\u2642\uFE0F ' : '') + roleName(id); };
   var canSwitch = function (id) { return !!id && kindOf(id) !== 'task' && kindOf(id) !== 'system'; };
   // 头像与名字就是进入那个 role 视角的入口 —— 侧栏项、会话头、消息行同一种读法。
   // 是 <span> 不是 <button>: 侧栏里它嵌在整行那颗按钮里。
@@ -1227,7 +1227,7 @@
     var toIn = dst
       ? '<span class="to-in" role="button" tabindex="0" data-hfrom="' + esc(m.from) + '" data-hto="' + esc(m.to) + '" data-hch="' + esc(m.channel || '') +
         '" data-gid="' + esc(m.id) + '" data-gts="' + m.ts + '" title="' + esc('发给 ' + nameOf(m.to) + ' —— 看这段往来') + '">' +
-        WZ.nameHead('<span class="av">' + esc(roleLabel(m.to)) + '</span>', '<span class="nm ' + kindOf(m.to) + '">' + esc(nameOf(m.to)) + '</span>') + '</span>'
+        WZ.nameHead('<span class="av">' + esc(roleLabel(m.to)) + '</span>', '<span class="nm ' + kindOf(m.to) + '">' + esc(roleName(m.to)) + '</span>') + '</span>'
       : '';
     var withTo = function (html) {
       if (!toIn) return html;

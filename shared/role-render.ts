@@ -9,7 +9,7 @@ import { renderCutMark, renderTurnGroup, splitReminders, escHtml, hashStr, tagSi
 import { isTurn, staleAt, turnDone } from "./chat-view.js";
 import type { DetailRecord, MarkDetailRecord, TurnDetailRecord } from "./detail-store.js";
 import { channelOf, doneAt, injectTurnsOf, teammateOf, unwrapMates, type Directory, type Msg } from "./role-view.js";
-import { nameHead } from "./session-label.js";
+import { nameHead, WIZARD_MARK } from "./session-label.js";
 
 export interface MsgFragment {
   /** `<turnId>:in` / `<turnId>:out` / `m:<markId>`。 */
@@ -180,16 +180,17 @@ const handoffDeco = (r: TurnDetailRecord, records: readonly DetailRecord[], dir:
   return {
     who: (name) => {
       const id = dir.resolve(name);
+      // 名字 span 走 CSS ::before 画记号 (与 chat.js 的 .nm 同一套), 文本保持裸名。
       return id
         ? `<span class="ho-who">${nameHead(`<span class="av">${escHtml(dir.labelOf(id))}</span>`, `<span class="nm wizard">${escHtml(dir.nameOf(id))}</span>`)}</span>`
-        : `<span class="ho-nm">.${escHtml(name)}</span>`;
+        : `<span class="ho-nm">${WIZARD_MARK} ${escHtml(name)}</span>`;
     },
     pub: pubOf,
-    role: (name) => ((id) => (id ? ` data-hrole="${escHtml(id)}" title="${escHtml(`以 .${dir.nameOf(id)} 为 viewpoint 看它的往来`)}"` : ""))(dir.resolve(name)),
+    role: (name) => ((id) => (id ? ` data-hrole="${escHtml(id)}" title="${escHtml(`以 ${WIZARD_MARK} ${dir.nameOf(id)} 为 viewpoint 看它的往来`)}"` : ""))(dir.resolve(name)),
     plan: () => (r.target ? ` data-hplan="${escHtml(r.target)}"` : ""),
     attrs: (h) => {
       const id = dir.resolve(h.name);
-      return id ? `${pairAttrs(r, id, h, landed(h), pubOf(h) ?? h.public)} title="${escHtml(`打开 .${dir.nameOf(r.target ?? "")} 与 .${dir.nameOf(id)} 的往来, 定位到这一句`)}"` : "";
+      return id ? `${pairAttrs(r, id, h, landed(h), pubOf(h) ?? h.public)} title="${escHtml(`打开 ${WIZARD_MARK} ${dir.nameOf(r.target ?? "")} 与 ${WIZARD_MARK} ${dir.nameOf(id)} 的往来, 定位到这一句`)}"` : "";
     },
     status: (h0) => {
       const h = { ...h0, turn: turnOf(h0) };

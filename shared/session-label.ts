@@ -28,17 +28,27 @@ export const labelFor = (sessionId: string): string => {
   return ANIMALS[hash(sessionId) % ANIMALS.length] ?? "❔";
 };
 
-// ── `.name` lexicon ─────────────────────────────────────────────────────
-// A wizard is addressed by its GLOBAL name, written `.name` — in a chat, in a
-// peer message, in a bubble header. One rule for what counts as a name token,
-// shared by everything that reads them out of prose: the inbound router (FIRST
-// match = who gets the message) and mention annotation (the REST). Two readers
-// of the same text must not disagree on where the tokens are.
+// ── wizard name lexicon ────────────────────────────────────────────────
+// A wizard is addressed by its GLOBAL name, written `🧙‍♂️ name` (v3 起; 旧表示
+// `.name` 在读入侧长期并存 —— 存量 transcript / 引用气泡全带着它)。One rule for
+// what counts as a name token, shared by everything that reads them out of
+// prose: the inbound router (FIRST match = who gets the message) and mention
+// annotation (the REST). Two readers of the same text must not disagree on
+// where the tokens are.
 // Must be space-delimited or edge-of-string so paths / extensions like
 // `a.ts` / `./foo` survive. 右边界除空白/行尾外,零宽与 word-joiner 等不可见格式
-// 字符也算分隔 —— 输入法/复制常在名字后夹一个 U+2060 之类。
+// 字符也算分隔 —— 输入法/复制常在名字后夹一个 U+2060 之类; 冒号 (半/全角) 也算
+// —— 人手打的 `🧙‍♂️ fix：干活` 与气泡头同形, 要能路由。
 const NAME_CHARS = "[\\p{L}\\p{N}_-]";
-const NAME_TOKEN = `(^|\\s)\\.(${NAME_CHARS}{1,32})(?=[\\s\\u200B-\\u200D\\u2060\\uFEFF]|$)`;
+/** 表示记号 🧙‍♂️ = 🧙 U+1F9D9 + ZWJ U+200D + ♂ U+2642 + VS16 U+FE0F (4 code points /
+ *  12 UTF-8 bytes)。渲染永远写全序列; 匹配放宽到「🧙 单体或全序列」—— 输入法/复制
+ *  常丢 ZWJ 段或 VS16, 丢一半也是它。 */
+export const WIZARD_MARK = "\u{1F9D9}\u200D\u2642\uFE0F";
+/** WIZARD_MARK 的正则源 (匹配用, 序列尾部可缺)。用**代理对**转义而非 `\u{1F9D9}`:
+ *  花括号转义要求正则带 `u` 旗标, 而仓里不少正则不带 (如 addressedResults 的 /gm) ——
+ *  代理对写法在 u / 非 u 两种模式下都认, 谁拼进谁都行。 */
+export const MAGE_SRC = "\\uD83E\\uDDD9(?:\\u200D\\u2642\\uFE0F?)?";
+const NAME_TOKEN = `(^|\\s)(?:\\.|${MAGE_SRC}[ \\t]?)(${NAME_CHARS}{1,32})(?=[\\s\\u200B-\\u200D\\u2060\\uFEFF:\uff1a]|$)`;
 
 /** Fresh non-global matcher — capture 2 is the name. Own instance per caller so
  *  nobody inherits another's `lastIndex`. */
@@ -49,8 +59,11 @@ export const allNames = (text: string): string[] => [
   ...new Set([...text.matchAll(new RegExp(NAME_TOKEN, "gu"))].map((m) => m[2] ?? "").filter(Boolean)),
 ];
 
-/** `@.fix` / `.fix` → `fix`; 其余原样 trim。 */
-export const stripSigil = (raw: string | undefined): string => (raw ?? "").trim().replace(/^[.@]+/, "");
+const MAGE_LEAD = new RegExp(`^${MAGE_SRC}[ \\t]?`, "u");
+/** `@.fix` / `.fix` / `@🧙‍♂️ fix` / `🧙‍♂️ fix` → `fix`; 其余原样 trim。
+ *  工具参数 (tell_peer / delegate 的 name/to) 传进带记号的写法在这里剥成裸名 —— 单一收口。 */
+export const stripSigil = (raw: string | undefined): string =>
+  (raw ?? "").trim().replace(/^[.@]+/u, "").replace(MAGE_LEAD, "");
 
 // ── Target keys ─────────────────────────────────────────────────────────
 // Daemon-internal target keys are `user:xxx[#k]` / `chat:xxx[#k]`: the chat a
@@ -129,9 +142,14 @@ export const uniqueTag = (want: string, taken: ReadonlySet<string>, n = 1): stri
   return taken.has(candidate) ? uniqueTag(want, taken, n + 1) : candidate;
 };
 
-// Only a linked peer suffix is part of the current header; bare `.name` after
-// the colon can be ordinary prose.
-const HEADER_RE = /^(?:\[\x60?\.([\p{L}\p{N}_-]{1,32})\x60?\]\(([^)]*)\)|(\x60?\.[\p{L}\p{N}_-]{1,32}\x60?)):/u;
+// Only a linked peer suffix is part of the current header; bare names after
+// the colon can be ordinary prose. 双态: 新头 `🧙‍♂️ name：` 与旧头 `.name:` 长期
+// 并存 —— 存量气泡 (transcript / 引用) 全是旧头, 剥不掉就路由不到、去重不了。
+// 冒号认半/全角 (渲染写全角, 与人话里的 `🧙‍♂️ name：` 一致)。
+const HEADER_RE = new RegExp(
+  `^(?:\\[\\x60?(?:\\.|${MAGE_SRC})[ \\t]?(${NAME_CHARS}{1,32})\\x60?\\]\\(([^)]*)\\)|(?:\\x60?(?:\\.|${MAGE_SRC})[ \\t]?)(${NAME_CHARS}{1,32})\\x60?)[:\\uff1a]`,
+  "u",
+);
 /** 反解一条出站气泡的 `.name:` 头,返回名字与剥头后的正文。
  *  `fromBot=false` 表示这不是 wezard 发的 (或是不带头的群默认 wizard),body 原样返回。
  *  只切掉头那一段; 正文里 linkNames 挂上的 `[.fix](url)` 还原成裸 `.fix` —— 引用
@@ -158,9 +176,9 @@ export const rawTagHeader = (text: string): { tag: string; header: string; body:
   const t = text.trimStart();
   const m = HEADER_RE.exec(t);
   if (!m) return undefined;
-  const tag = m[1] ?? (m[3] ?? "").replace(/^\x60?\.|\x60?$/g, "");
+  const tag = m[1] ?? m[3] ?? "";
   let end = m[0].length;
-  const peer = /^[ \t]+\[\x60?\.[\p{L}\p{N}_-]{1,32}\x60?\]\(([^)]*)\)/u.exec(t.slice(end));
+  const peer = new RegExp(`^[ \\t]+\\[\\x60?(?:\\.|${MAGE_SRC})[ \\t]?${NAME_CHARS}{1,32}\\x60?\\]\\(([^)]*)\\)`, "u").exec(t.slice(end));
   if (peer) end += peer[0].length;
   const seq = /^[ \t]+\d+\/\d+/u.exec(t.slice(end));
   if (seq) end += seq[0].length;
@@ -168,9 +186,10 @@ export const rawTagHeader = (text: string): { tag: string; header: string; body:
   return { tag, header: t.slice(0, end), body: t.slice(end), ...(m[2] ? { url: m[2] } : {}) };
 };
 
-/** 卡片标题前的 `.name ` 徽标; 群默认 wizard 在自己群里不报名 (同 withTagHeader)。 */
+/** 卡片标题前的 `🧙‍♂️ name ` 徽标; v3 起群默认 wizard (管家) 也一样带 —— 人在群里的
+ *  每条 bot 回复都看得出是谁说的, isHost 的免头豁免废除。 */
 export const tagBadge = (target: string | undefined): string => {
-  const head = isHost(target) ? "" : tagHead(target);
+  const head = tagHead(target);
   return head ? `${head} ` : "";
 };
 
@@ -226,12 +245,13 @@ export const windowLabel = (target: string, want?: string): string => {
 // 正文里最多挂几个链接: 一条 URL 两百来字节, 分片预算 (mirror 的 TAG_HEADER_BUDGET)
 // 按「头 + 这么多个」留的余量。同一个名字只挂第一次出现。
 export const MAX_BODY_LINKS = 2;
-// 右边界比路由用的 NAME_TOKEN 宽: 正文里 `.fix。` `.fix,` 也是提及; 后接 `]` 说明它已在
+// 右边界比路由用的 NAME_TOKEN 宽: 正文里 `🧙‍♂️ fix。` `.fix,` 也是提及; 后接 `]` 说明它已在
 // 某个链接文本里, 不再套一层。左边界必须是空白/行首 —— `a.ts` 不是提及。
-const MENTION_RE = /(^|\s)(\.([\p{L}\p{N}_-]{1,32}))(?![\p{L}\p{N}_\].-])/gu;
+// 双态: `.fix` 与 `🧙‍♂️ fix` 都算提及 (v3 表示与旧表示并存)。
+const MENTION_RE = new RegExp(`(^|\\s)((?:\\.|${MAGE_SRC}[ \\t]?)(${NAME_CHARS}{1,32}))(?![\\p{L}\\p{N}_\\].-])`, "gu");
 // 代码里的 `.x` 是字面量, 不是提及: 栅栏块与行内代码原样放过 (split 的捕获组落在奇数位)。
 const CODE_RE = /(```[\s\S]*?(?:```|$)|`[^`\n]*`)/;
-const LINKED_RE = /\[([.#][\p{L}\p{N}_-]{1,32})\]\([^)\s]*\)/gu;
+const LINKED_RE = new RegExp(`\\[((?:[.#]|${MAGE_SRC}[ \\t]?)${NAME_CHARS}{1,32})\\]\\([^)\\s]*\\)`, "gu");
 
 /** `text` 挂上 `target` 的 rolepage; 拿不到票据原样返回。 */
 export const tagLink = (target: string, text: string): string => {
@@ -263,26 +283,26 @@ export const unlinkTags = (text: string): string => text.replace(LINKED_RE, "$1"
 
 // ── 发言头 ─────────────────────────────────────────────────────────────
 // 谁说的、说给谁, 群气泡 (markdown 链接)、read_chat (纯文本)、rolepage (HTML) 写成同一个结构:
-// `.a:` / `.a: .b` —— 发话方后跟冒号, 对象紧跟其后 (名字前的 `.` 已是 wizard 的记号, 不再加 @)。
-// emoji 只是 rolepage 的头像: 群里与 read_chat 只写名字, rolepage 用 nameHead 把头像贴上去。
+// `🧙‍♂️ a：` / `🧙‍♂️ a： 🧙‍♂️ b` —— 发话方后跟冒号, 对象紧跟其后 (名字前的 🧙‍♂️ 已是 wizard
+// 的记号, 不再加 @; 旧 `.a:` 形态在读入侧并存)。人名 (无记号) 同一结构。
 // 下面三个原子就是这份结构的全部; 各处只决定两边的名字各自怎么画 (裸名 / 链接 / 按钮)。它们原样送进
 // 浏览器 (SPEAKER_KIT, 由 chat-render 拼进 /chat/app.js), 所以只许是不引用模块里任何别的东西的纯函数。
 /** 头像 + 名字, 中间不留空格。 */
 export const nameHead = (label: string, name: string): string => `${label}${name}`;
-/** 发话方 + 冒号。 */
-export const said = (me: string): string => `${me}:`;
+/** 发话方 + 冒号 (全角, 与 `🧙‍♂️ name：` 一致; 反解 HEADER_RE 认半/全角)。 */
+export const said = (me: string): string => `${me}：`;
 /** 一条发言的头: 发话方后跟冒号; 对着谁说 (`to`) 时再接对方。 */
 export const speakerHead = (me: string, to?: string): string => (to ? `${said(me)} ${to}` : said(me));
 /** 送进浏览器的那几个原子: 名字 → 源码。 */
 export const SPEAKER_KIT: Readonly<Record<string, (...a: never[]) => string>> = { nameHead, said, speakerHead };
 
-/** 头的裸形态 `.name`; 名字都拿不到时为空 (不写头)。 */
+/** 头的裸形态 `🧙‍♂️ name`; 名字都拿不到时为空 (不写头)。 */
 export const tagHead = (target: string | undefined): string => {
   const name = displayName(target);
-  return name ? `.${name}` : "";
+  return name ? `${WIZARD_MARK} ${name}` : "";
 };
 
-/** 头的链接形态 `[.name](url)` —— 点它就进那个 wizard 的 rolepage。
+/** 头的链接形态 `[🧙‍♂️ name](url)` —— 点它就进那个 wizard 的 rolepage。
  *  HEADER_RE 认得这一形态, parseTagHeader 照样剥得掉。 */
 export const linkedTagHead = (target: string | undefined, url: string): string =>
   ((h) => (h ? `[${h}](${url})` : ""))(tagHead(target));
@@ -290,8 +310,9 @@ export const linkedTagHead = (target: string | undefined, url: string): string =
 /** 微信 ClawBot 的群聊 (`chat:wx_…`): 文本里不挂链接, 默认开顶层模式。 */
 export const isWxChat = (key: string): boolean => key.startsWith("chat:wx_");
 
-/** 群的默认 wizard 在自己群里 (`dest` 缺省 = 它的 home): 人本来就在跟它说话, 不必报名。
- *  替它说话的 (定时任务执行体, voiceOf) 算它本人; slot 分身、被人从别的群点名过来的都不是 host, 照旧带头以示区分。 */
+/** 群的默认 wizard 在自己群里 (`dest` 缺省 = 它的 home); 替它说话的 (定时任务执行体,
+ *  voiceOf) 算它本人; slot 分身、被人从别的群点名过来的都不是 host。
+ *  v3 起不再豁免报名 (管家也带 `🧙‍♂️ name：` 头), 只决定署名样式 (裸名 / 反引号)。 */
 export const isHost = (target: string | undefined, dest = target): boolean =>
   ((t) => !!t && !!dest && !tagOfKey(t) && !isInternalKey(t) && baseOfKey(dest) === baseOfKey(t))(
     target && (linker?.voiceOf?.(target) || target));
@@ -300,13 +321,11 @@ export const isHost = (target: string | undefined, dest = target): boolean =>
 export const headed = (head: string, body: string, sep = headSep(body)): string => (head ? `${head}${sep}${body}` : body);
 
 /** 发话方在 `dest` 群里的头; `to` = 说给谁 (公开 wizard 间), 有对象时谁都得报名。
- *  host 不报名, 但企微里它的名字链接是进 rolepage 的入口: 有链接就留 `[.name](url):`, 只是不写裸名字;
- *  微信那头链接本就降成文字 (wxMarkdown), 留下的只会是一句重复的自报身份, 整个头都不写。
+ *  v3 起群默认 wizard (管家) 在自己群里也报名 —— 人在群里的每条 bot 回复都看得出是谁说的,
+ *  isHost 只剩署名样式的判定; 微信那头链接降成文字 (wxMarkdown), 头照写 (裸 `🧙‍♂️ name：`)。
  *  署名: 非 default wizard (isHost 为假 —— slot 会话 / 从别群点名过来的) 名字包一层反引号,
- *  `\`.name\`` / `[\`.name\`](url)`, 与 default wizard 的裸头区分; HEADER_RE / rawTagHeader 两种形态都认。 */
+ *  `` `🧙‍♂️ name` `` / ``[`🧙‍♂️ name`](url)``, 与 default wizard 的裸头区分; HEADER_RE / rawTagHeader 两种形态都认。 */
 export const chatHead = (target: string | undefined, url: string | undefined, to?: string, dest?: string): string => {
-  const host = !to && isHost(target, dest);
-  if (host && (!url || isWxChat(baseOfKey(dest || target!)))) return "";
   const head = ((h) => (h && !isHost(target, dest) ? `\`${h}\`` : h))(tagHead(target));
   const me = url ? ((h) => (h ? `[${h}](${url})` : ""))(head) : head;
   return me ? speakerHead(me, to) : "";
@@ -317,9 +336,9 @@ export const ownHead = (target: string, dest?: string): string => chatHead(targe
 
 /** 头挂上指定的 rolepage 链接 (mirror 用本轮 turn 的票据), 正文里的名字一并挂链。
  *  url 为空时退回裸头 —— 头那一段是路由信息, 少了链接只是少一层可点, 不能因此不写。
- *  群默认 wizard 在自己群 (`dest`, 缺省 = home) 里不写头 (isHost)。
- *  `to` = 这段话是答给哪个 wizard 的 (公开 peer 轮): 头写成 `.me: .它`, 与它问话
- *  那条气泡的 `.它: .me` 对称。
+ *  v3 起群默认 wizard (管家) 在自己群 (`dest`, 缺省 = home) 里也写头。
+ *  `to` = 这段话是答给哪个 wizard 的 (公开 peer 轮): 头写成 `🧙‍♂️ me： 🧙‍♂️ 它`, 与它问话
+ *  那条气泡的 `🧙‍♂️ 它： 🧙‍♂️ me` 对称。
  *  `seq` ("2/5") marks one piece of a split push — it rides in the same header
  *  line so every chunk of a long reply is attributable on its own. */
 export const withLinkedTagHeader = (

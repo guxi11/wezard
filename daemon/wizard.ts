@@ -15,12 +15,12 @@
 import { randomUUID } from "node:crypto";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { loadAutoNames } from "./wizard-names.js";
-import { keyOf, normalizeTag, stripSigil, tagOfKey, uniqueTag } from "../shared/session-label.js";
+import { keyOf, normalizeTag, stripSigil, tagOfKey, uniqueTag, WIZARD_MARK } from "../shared/session-label.js";
 
 export interface WizardRecord {
   /** 会话 key, 即身份本身: `chat:xxx` 或 `chat:xxx#tag`。 */
   target: string;
-  /** 全局唯一的名字, 即它的地址 `.name`。"" 只出现在还没被 claim 过的老记录上 ——
+  /** 全局唯一的名字, 即它的地址 `🧙‍♂️ name`。"" 只出现在还没被 claim 过的老记录上 ——
    *  第一次被任何地方问到名字时按「默认会话取聊天名, 分身取 slot id」补上并去重。 */
   name: string;
   /** 一句话职责 —— 别的 wizard 靠它决定该不该找你。 */
@@ -265,7 +265,7 @@ export const ancestorsOf = (all: readonly WizardRecord[], target: string): strin
 const bullet = (xs: readonly string[]): string => xs.map((x) => `- ${x}`).join("\n");
 
 export interface WizardBrief {
-  /** 全局唯一的名字 —— 同时就是地址 (`.name`)。 */
+  /** 全局唯一的名字 —— 同时就是地址 (显示为 `🧙‍♂️ name`)。 */
   name: string;
   /** 别人叫得到它的字符串 (tell_peer 的 `name` 入参), 即名字本身。 */
   address: string;
@@ -312,7 +312,7 @@ export interface CharterArgs {
   topOnly: boolean;
 }
 
-export const addr = (b: WizardBrief): string => `.${b.address || b.name || "?"}`;
+export const addr = (b: WizardBrief): string => `${WIZARD_MARK} ${b.address || b.name || "?"}`;
 
 const nameLine = (b: WizardBrief): string =>
   `\`${addr(b)}\`${b.description ? ` · ${b.description}` : ""}${b.cwd ? ` · ${b.cwd}` : ""}`;
@@ -433,7 +433,7 @@ export const renderLeadRules = (pointer = false): string[] => [
   "## 我是这件活的 lead",
   "派你的 (管家或上级 lead) 把**整件**活交给了你, 你对结果负责并维护自己的计划。直属 parent 是管理归属；横向沟通不改变家谱:",
   bullet([
-    "**对上**: 回复必须明确标出接收者 (`@.name RESULT: …`), 一条消息可分段回复多个接收者; 做成了什么 · commit · `ARTIFACT` 指针, **单列「取舍 / 遗留」一段**。需要对方补信息或递归拆活时用 `tell_peer({kind:\"ask\"|\"task\"})`。你不对人说话, 由派你的那个代你对人交代",
+    "**对上**: 回复必须明确标出接收者 (`@🧙‍♂️ name RESULT: …`), 一条消息可分段回复多个接收者; 做成了什么 · commit · `ARTIFACT` 指针, **单列「取舍 / 遗留」一段**。需要对方补信息或递归拆活时用 `tell_peer({kind:\"ask\"|\"task\"})`。你不对人说话, 由派你的那个代你对人交代",
     "**对下**: 只管理自己直属创建的 wizard；其他节点由其 parent 管理。需要横向协作时直接沟通，之后回到主流程向自己的上级交付",
     ...(pointer ? ["组队打法 (coder / 白板 reviewer / 何时收工) 随派活信封带"] : []),
   ]),
@@ -460,11 +460,11 @@ export const renderLead = (): string[] => [...renderLeadRules(), ...renderLeadPl
  *  这一节讲的是谁该替谁开口。 */
 const renderTopOnly = (): string[] => [
   "## 本群开着顶层模式",
-  "人在这个群里只和**顶层 wizard** 打交道 —— 群管家, 以及人自己 `.name` 点名的那个。顶层 wizard 派出去之后, wizard 之间的一切往来都是私聊, 只在 rolepage。",
+  "人在这个群里只和**顶层 wizard** 打交道 —— 群管家, 以及人自己 `🧙‍♂️ name` 点名的那个。顶层 wizard 派出去之后, wizard 之间的一切往来都是私聊, 只在 rolepage。",
   bullet([
     "守护进程强制: `tell_peer` / `delegate` 的 `public:true` 不起作用, 一律私聊; 普通私聊 fyi 不授权对人通知; 这一轮不是在服务人问的事的 wizard 调 `notify` 进本群会被退回",
     "这一轮在服务**人问的事** (人直接对你说的, 或那件事派出去的活回来了) → 你是顶层: 子 wizard 的结论回到你这儿, 你用自己的话向人解释 —— 讲结论、取舍和要人拍板的, 不转述过程、不贴它们的原话; 不轮询或提前汇总, 但长等待、阻塞可按已知实据用 `notify` 报进展。收到子 wizard 的完成 fyi 时, 立即向原群 `notify` 结论与仍 pending / 尚无正式回执的状态; fyi 本身不代表 ledger done",
-    "这一轮是同伴私聊派来的活 → 你不是顶层: 不对人说话, 结论用 `@.name RESULT:` 交给对应接收者; 需要对方补信息或协作时用 `tell_peer({kind:\"ask\"})`; 由派你的那个代你向人交代",
+    "这一轮是同伴私聊派来的活 → 你不是顶层: 不对人说话, 结论用 `@🧙‍♂️ name RESULT:` 交给对应接收者; 需要对方补信息或协作时用 `tell_peer({kind:\"ask\"})`; 由派你的那个代你向人交代",
   ]),
 ];
 
@@ -497,7 +497,7 @@ const renderStewardRules = (a: CharterArgs): string[] => {
     bullet([
       "先判续篇还是新活: 只有服务于原任务同一验收目标的补充证据、纠正或返工才用 `tell_peer({name: 原来接活的那个, re})`。能独立验收、无需原任务结论或在途状态的新问题必须另派, 另派不等于强制新生: 有近期实际材料关联的空闲、无职责占用非 lead 可以复用; 同项目、同目录、刚联系过、读过公共规则文件都不算续篇, 不得把它改写成「同时核实 / 顺便检查 / 最终交付中补充」塞回原 lead",
       "保护复杂 lead 的注意力: 正在排查编辑器问题时, 新问「有没有 AGENTS.md、如何加载 CLAUDE.md」是独立核查 → 另派 light; 不用同一笔 re, 不用 priority:now / ask 把新工作插进去。真正依赖原排障证据的纠正仍交回原 lead",
-      `范围清楚、低风险的 coding → \`delegate({tier:"light", task, description})\`; 机械一步用 mini。你负责写计划与验收标准并验收交付; task 写人的原话 + 你知道的背景。守护进程选人并${a.topOnly ? "私聊投出去" : "公开投出去 (`.你: .它` 进群, 它的回复也进群)"}, 结论作为回执回到你这儿`,
+      `范围清楚、低风险的 coding → \`delegate({tier:"light", task, description})\`; 机械一步用 mini。你负责写计划与验收标准并验收交付; task 写人的原话 + 你知道的背景。守护进程选人并${a.topOnly ? "私聊投出去" : "公开投出去 (\`🧙‍♂️ 你： 🧙‍♂️ 它\` 进群, 它的回复也进群)"}, 结论作为回执回到你这儿`,
       "难度按本次所需判断选 tier, 不按句长或已有 wizard 的档位: 指明具体代码对象的普通低风险 coding 默认 light; 其他常规任务默认 standard; 只有复杂方案判断、疑难升级或安全/并发/架构等高风险审查才显式 `tier:\"hard\"`; 多轮统筹才 lead:true (lead 那档就是 hard)。常规 coding 不默认增加 hard reviewer, 需要独立审查时按需选择档位",
       "简单问题可以让目标直接答人 → `delegate({…, return:\"transfer\"})` 或 `tell_peer({…, return:\"transfer\"})` 显式移交本轮回答权与控制权；成功后停止派活与对人答复、静默收口。daemon 承接已有气泡，目标终句直接交付人；忙目标返回 409、你仍负责回答。不带 return 保持普通回执。移交不能带 lead/after/re，也不能已有子活; 想自己接它的 NEED 就别 transfer",
       "复杂活 (多处改动、多轮、有先后或要共享材料) → `delegate({…, lead:true})`; lead 建立 plan 并逐阶段推进，简单问题不建 plan。",
@@ -511,8 +511,8 @@ const renderStewardRules = (a: CharterArgs): string[] => {
       "lead 的 RESULT → 向人交代结论, 带上「取舍 / 遗留」",
       "lead 的计划与交付由 lead 负责维护；你收到结果后向人交代结论，有问题就把具体反馈交回 lead",
       a.topOnly
-        ? "**人只看得见你**: 转交那一轮回一句 `已转给 .它` 加它在办什么; 回执那一轮就是给人的交代 —— 用自己的话讲结论、你据此做的决定、要人拍板的, 不贴原话、不复述过程"
-        : "**人看得见群里的消息**: 转交那一轮只回 `已转给 .它`; 回执那一轮只说人还不知道的 (新决定、要人拍板的), 群里说过的不转述, 没有就一句话收住; lead 的活是私聊, 结论你自己讲",
+        ? "**人只看得见你**: 转交那一轮回一句 `已转给 🧙‍♂️ 它` 加它在办什么; 回执那一轮就是给人的交代 —— 用自己的话讲结论、你据此做的决定、要人拍板的, 不贴原话、不复述过程"
+        : "**人看得见群里的消息**: 转交那一轮只回 `已转给 🧙‍♂️ 它`; 回执那一轮只说人还不知道的 (新决定、要人拍板的), 群里说过的不转述, 没有就一句话收住; lead 的活是私聊, 结论你自己讲",
     ]),
     "",
     bullet([
@@ -534,7 +534,7 @@ export const renderCharter = (a: CharterArgs): string => {
     "",
     "## 我是谁",
     bullet([
-      `名字: **\`.${me || "(未命名)"}\`** —— 全机唯一, 就是你的地址`,
+      `名字: **\`${WIZARD_MARK} ${me || "(未命名)"}\`** —— 全机唯一, 就是你的地址`,
       `home 群: ${a.chat ? `**${a.chat}** ` : ""}\`${a.principal}\``,
       `工作区: \`${a.self.cwd || "(未设置)"}\``,
       `职责: ${a.self.description || "(未写 —— 用 `wizard_identity` 补一句, 别人靠它决定该不该找你)"}`,

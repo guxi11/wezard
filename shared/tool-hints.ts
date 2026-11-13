@@ -1,5 +1,6 @@
 // Read code-mode transcripts as data. Never evaluate the recorded JavaScript.
 import { parse } from "acorn";
+import { stripSigil } from "./session-label.js";
 
 export const HINT_TOOL = /(?:^|__)(tell_peer|delegate|clone_wizard|spawn_wizard|stop_wizard|schedule_task)$/;
 export type Facts = Record<string, unknown>;
@@ -151,7 +152,7 @@ export const callsInExec = (source: string, accept: (name: string) => boolean = 
   } catch { return []; }
 };
 
-const nameOf = (v: unknown): string => typeof v === "string" ? v.replace(/^\./, "") : "";
+const nameOf = (v: unknown): string => typeof v === "string" ? stripSigil(v) : "";
 const matches = (c: HintCall, r: Facts): boolean => {
   const tool = HINT_TOOL.exec(c.toolName)?.[1];
   if (tool === "delegate") return r.decision === "spawn" || r.decision === "existing";

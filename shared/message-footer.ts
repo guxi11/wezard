@@ -1,4 +1,4 @@
-import { headed, rawTagHeader, resolveTagTarget, tagHead, tagUrlOf, targetOfTagUrl } from "./session-label.js";
+import { headed, rawTagHeader, resolveTagTarget, said, tagHead, tagUrlOf, targetOfTagUrl } from "./session-label.js";
 
 export interface MessageFooterPolicy {
   principal: string;
@@ -47,8 +47,9 @@ export const withMessageFooter = (content: string, policy?: MessageFooterPolicy)
   const payload = emptyHeader && !emptyHeader.body.trim() && emptySender === sender ? "" : body;
   const seq = header?.header.match(/\b\d+\/\d+\b/)?.[0];
   // 这一层是所有出站气泡 (stream / standalone / frozen final) 的最后一道改写: 上游 chatHead 写的头在这里被剥掉重写,
-  // 所以非 default wizard 的 code 样式署名只能在这里定 —— 名字不挂链接, rolepage 入口归尾部 ✦。
-  const head = [sender === policy.defaultTarget ? "" : `\`${tagHead(sender)}\`:`, seq].filter(Boolean).join(" ");
+  // 所以署名样式只能在这里定 —— 名字不挂链接, rolepage 入口归尾部 ✦。v3 起群默认 wizard
+  // (管家) 也署名: 裸 `🧙‍♂️ name：` (不带反引号), 非 default wizard 仍包反引号以示区分。
+  const head = [sender === policy.defaultTarget ? said(tagHead(sender)) : `\`${tagHead(sender)}\`：`, seq].filter(Boolean).join(" ");
   const message = headed(head, payload).trimEnd();
   return `${message}${endsWithClosedFence(payload) ? "\n\n" : " "}[✦](${url})`;
 };

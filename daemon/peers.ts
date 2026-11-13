@@ -18,6 +18,7 @@ import { backendForPath, TURN_METRICS, type CliBackendName, type NormalizedTrans
 import { clipLine, truncate, truncateWithCount } from "../shared/std.js";
 import { tildePath, type Part } from "./notices.js";
 import { envelopeAttrs, parseEnvelope, renderReminder, type Envelope, type ReceiptRoute, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
+import { MAGE_SRC, WIZARD_MARK as MAGE } from "../shared/session-label.js";
 import type { Terminal } from "../shared/turn-state.js";
 
 /** Strip ANSI SGR/CSI + OSC so captured pane text is safe to embed / match on. */
@@ -501,7 +502,8 @@ export const topLevelText = (text: string): string => {
 };
 
 export const addressedResults = (text: string): Array<{ name: string; body: string }> => {
-  const marks = [...topLevelText(text).matchAll(/@\.([A-Za-z0-9_-]+)[ \t]+RESULT[ \t]*[:：][ \t]*/gm)];
+  // 双态: `@🧙‍♂️ name RESULT:` (v3) 与 `@.name RESULT:` (存量/在途轮次) 并存。
+  const marks = [...topLevelText(text).matchAll(new RegExp(`@(?:\\.|${MAGE_SRC}[ \\t]?)([A-Za-z0-9_-]+)[ \\t]+RESULT[ \\t]*[:：][ \\t]*`, "gm"))];
   return marks.map((m, i) => {
     const next = marks[i + 1]?.index;
     const start = m.index ?? 0;
@@ -717,7 +719,7 @@ export const renderPeerEnvelope = (from: string, chat?: string, chatKey?: string
             ? ["发话方不收回执; 不要为确认收到而 tell_peer 或 notify。"]
             : [
                 "终句面向派活方; 自动回执无需另调工具, 不要重复 tell_peer 或为这轮私聊 notify。",
-                "对 wizard 直说: 不寒暄、不加对人的称呼、不复述它的话; 交差时必须标明接收者 (`@.name RESULT: …`), 一条消息可分段回复多个接收者 (交付物写进文件就回传路径); 需要对方补信息或继续协作时, 用 tell_peer({kind:\"ask\"}) 发起反问/子任务; 交付了文件, 每个加一行 `ARTIFACT: <路径> — 一句话`。",
+                "对 wizard 直说: 不寒暄、不加对人的称呼、不复述它的话; 交差时必须标明接收者 (`@🧙‍♂️ name RESULT: …`), 一条消息可分段回复多个接收者 (交付物写进文件就回传路径); 需要对方补信息或继续协作时, 用 tell_peer({kind:\"ask\"}) 发起反问/子任务; 交付了文件, 每个加一行 `ARTIFACT: <路径> — 一句话`。", 
               ]),
         ]
       : [
@@ -725,7 +727,7 @@ export const renderPeerEnvelope = (from: string, chat?: string, chatKey?: string
         ]),
     ...(t?.re ? ["这是**续问**: 接着那件活说, 不是一件新活。"] : []),
     // 这句话要怎么接 —— 只有发话方知道, 不写出来对方一律当成一件活去干。
-    ...(t?.act === "ask" ? [`这是一个**提问**: 只答这一问, 几句话${t.quiet ? "" : "并明确收件人 (`@.name RESULT:`)"}; 需要反问或派生子任务时用 tell_peer({kind:"ask"|"task"})。`] : []),
+    ...(t?.act === "ask" ? [`这是一个**提问**: 只答这一问, 几句话${t.quiet ? "" : "并明确收件人 (`@🧙‍♂️ name RESULT:`)"}; 需要反问或派生子任务时用 tell_peer({kind:"ask"|"task"})。`] : []),
     ...(t?.act === "fyi" ? ["这是一条**知会**: 不用回复、不用收口, 也别为它开新活 —— 与手头的活相关就顺手吸收, 无关就略过; 一句话收住这一轮即可。"] : []),
     // 来回多了就收口: 不在守护进程里拒绝 —— 拒了模型会换条通路接着乒乓。
     ...((t?.legs ?? 0) > 3 ? [`这件活已经来回 ${t!.legs! - 1} 次: 这一次请直接给结论, 拿不准的写清你的假设。`] : []),
@@ -1195,14 +1197,14 @@ export const peerMentionPart = (mentions: readonly PeerMention[], cwd = ""): Par
   const known = mentions.filter((m) => seen(`m:.${m.tag}`));
   const rule = !seen("rule:mention");
   const row = (m: PeerMention): string =>
-    `- .${m.tag}${m.job ? ` job="${clipLine(m.job, 80).replace(/"/g, "'")}"` : ""}${m.foreign ? ` chat=${m.chat || "(other)"}` : ""}${m.cwd && m.cwd !== cwd ? ` cwd=${tildePath(m.cwd)}` : ""}`;
+    `- ${MAGE}${m.tag}${m.job ? ` job="${clipLine(m.job, 80).replace(/"/g, "'")}"` : ""}${m.foreign ? ` chat=${m.chat || "(other)"}` : ""}${m.cwd && m.cwd !== cwd ? ` cwd=${tildePath(m.cwd)}` : ""}`;
   return {
     text: renderReminder({ wezard: "mention" }, [
       ...(rule
-        ? ["`.name` tokens above are live wizards, not literal text. To involve / check / relay to one: tell_peer · peek_peer · wait_peer(name) — never answer for it; wizard_roster for all. A passing mention needs no tool."]
+        ? ["`🧙‍♂️ name` tokens above are live wizards, not literal text. To involve / check / relay to one: tell_peer · peek_peer · wait_peer(name) — never answer for it; wizard_roster for all. A passing mention needs no tool."]
         : []),
       ...fresh.map(row),
-      ...(known.length ? [`${known.map((m) => `.${m.tag}`).join(" ")}: wizards (described earlier)`] : []),
+      ...(known.length ? [`${known.map((m) => `${MAGE}${m.tag}`).join(" ")}: wizards (described earlier)`] : []),
     ]),
     keys: [...(rule ? ["rule:mention"] : []), ...fresh.map((m) => `m:.${m.tag}`)],
   };

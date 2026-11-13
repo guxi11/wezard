@@ -105,7 +105,7 @@ const unwrapCandidates = (r: DaemonReply) =>
 // 地址语法只有一套, 每个吃地址的工具都把它原样重述一遍: 模型单看一个 schema
 // 时没有别的地方能学到它, 而猜出来的地址会安静地指向另一个 wizard 的终端。
 const ADDRESS_DOC =
-  "wizard 的名字 —— 全机唯一, 它就是地址: `'fix'` 或 `'.fix'` 都行, 不分它住在哪个群。`''` = 你这个聊天的默认 wizard。永远别自己拼 key: wizard_roster / spawn_wizard / clone_wizard 返回的名字 (或 409 里的 `address`) 原样传回来。";
+  "wizard 的名字 —— 全机唯一, 它就是地址: 写裸名 `'fix'` 即可 (显示层是 `🧙‍♂️ fix`, 带 `'.fix'` / `'🧙‍♂️ fix'` 前缀也认), 不分它住在哪个群。`''` = 你这个聊天的默认 wizard。永远别自己拼 key: wizard_roster / spawn_wizard / clone_wizard 返回的名字 (或 409 里的 `address`) 原样传回来。";
 
 // 生 wizard 的三个工具共用: 模型名是口语, 落地的是 `/model` 列表里最接近的那一项。
 const MODEL_DOC =
@@ -576,7 +576,7 @@ export const createWezardServer = (): McpServer => {
       title: "Post a message into a chat for people to read",
       description:
         "把一段 markdown 贴进一个企微聊天**给人看**。和 tell_peer 分工明确: tell_peer 是把话塞进另一个 agent 的输入框 (驱动它干活), notify 是说给人听 —— 不会触发任何一轮对话。\n" +
-        "`to` 省略 = 你这一轮所在的群 (人从哪个群叫的你就是哪个; 私聊轮则是你的 home 群); 要发到别的群就写聊天名 (wizard_roster 里的 home 聊天名), 一次可以写多个。气泡头自动写成 `emoji .你的名字` 并挂上你的 rolepage 链接, 那边的人一眼知道是谁。\n" +
+        "`to` 省略 = 你这一轮所在的群 (人从哪个群叫的你就是哪个; 私聊轮则是你的 home 群); 要发到别的群就写聊天名 (wizard_roster 里的 home 聊天名), 一次可以写多个。气泡头自动写成 `🧙‍♂️ 你的名字` 并挂上你的 rolepage 链接, 那边的人一眼知道是谁。\n" +
         "什么时候用: 长活跑完了要通知另一个群的人; 一批分身收工后把汇总播给发起那个群; 定时任务 (schedule_task) 到点跑完把结论送到该看的人那里。",
       inputSchema: currentAddressSchema({
         to: z
@@ -869,7 +869,7 @@ export const createWezardServer = (): McpServer => {
     {
       title: "Spawn a blank child wizard",
       description:
-        "**从白板生**一个子 wizard —— 新的 tmux pane、自己的全局名字 (`.name`)、自己的职责, 归你管 (家谱里挂在你名下)。它**不继承你的任何上下文**, 只拿到身份。适合干一件与你手头无关的事, 或者要去别的目录 (`cwd`) / 别的聊天里干活。要一个开局就带着你读过的材料的, 用 clone_wizard。\n" +
+        "**从白板生**一个子 wizard —— 新的 tmux pane、自己的全局名字 (`🧙‍♂️ name`)、自己的职责, 归你管 (家谱里挂在你名下)。它**不继承你的任何上下文**, 只拿到身份。适合干一件与你手头无关的事, 或者要去别的目录 (`cwd`) / 别的聊天里干活。要一个开局就带着你读过的材料的, 用 clone_wizard。\n" +
         "带上 `task` 可以在它就位的同时把第一件活私聊派下去, 省掉一次 tell_peer; 要它的回复进群, 就别带 task, 就位后用 `tell_peer({public:true})` 转给它。返回 name、cwd、继承状态、实际模型/档位、派活队列标识与警告。" +
         OFFSPRING_TAIL,
       inputSchema: currentAddressSchema({

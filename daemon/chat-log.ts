@@ -10,7 +10,7 @@
 //
 // 选哪些消息是三级收窄, 与 rolepage 同一条轴: role (谁的视角) → chat (哪个群) →
 // target (和谁的往来), 每一级都可以不给; 再按时间窗与条数裁。
-import { speakerHead, stripSigil } from "../shared/session-label.js";
+import { speakerHead, stripSigil, WIZARD_MARK } from "../shared/session-label.js";
 import { truncateWithCount } from "../shared/std.js";
 import type { Envelope } from "../shared/reminder.js";
 import { talkRounds } from "./peers.js";
@@ -187,13 +187,18 @@ export const renderChatLog = (
   const forward = q.since !== undefined && q.until === undefined;
   const shown = forward ? hits.slice(0, q.limit) : hits.slice(-q.limit);
   const where = (m: LogMsg): string => (q.chat !== undefined ? "" : m.private ? " · 私聊" : ` · ${m.chat}`);
+  // 显示层 wizard 记号: 信封里 wizard 的 `from` 带点前缀 (`.x`, 协议值不动), 会话主人一侧
+  // (own) 永远是 wizard —— 两处都画 🧙‍♂️; 人与定时任务原样。
+  const master = (m: LogMsg): string => (m.own === "from" ? m.from : m.to);
+  const show = (m: LogMsg, n: string): string =>
+    n.startsWith(".") ? `${WIZARD_MARK} ${n.slice(1)}` : n === master(m) ? `${WIZARD_MARK} ${n}` : n;
   const cut = hits.length > shown.length;
   // 往回还有没有: 读到的里面有被 limit 切掉的, 或者有会话没读到头。到头了就不给
   // 游标 —— 否则读的人得多翻一页空的才知道。
   const more = cut || deep;
   return {
     text: shown
-      .map((m) => `[${stamp(m.ts, now)}${where(m)}] ${speakerHead(m.from, m.to)} ${body(m.text, q.per)}${m.pending ? "  (还没有回复)" : ""}`)
+      .map((m) => `[${stamp(m.ts, now)}${where(m)}] ${speakerHead(show(m, m.from), show(m, m.to))} ${body(m.text, q.per)}${m.pending ? "  (还没有回复)" : ""}`)
       .join("\n"),
     shown: shown.length,
     total: hits.length,

@@ -17,7 +17,7 @@ import { computeUsage, renderUsageReport } from "./usage.js";
 import { computeAuditReport } from "./audit.js";
 import { syncProjectConfig, renderSyncReport } from "./cfg-sync.js";
 import { captureQuota, renderQuotaReport } from "./quota.js";
-import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe, allNames, unlinkTags, uniqueTag, displayName, tagLink, withBot, sameBot } from "../shared/session-label.js";
+import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe, allNames, unlinkTags, uniqueTag, displayName, tagLink, withBot, sameBot, stripSigil } from "../shared/session-label.js";
 import { botTagOf } from "./bot-mux.js";
 import { chatNameOf, clearChatName, listChatNames, setChatName, stewardTierOf, type CharterGuard } from "./chat-name.js";
 import { evictStaleName, reclaimChatName, wizardStore, type EvictDeps } from "./wizard.js";
@@ -35,7 +35,7 @@ const QUOTE_TAIL_TURNS = 12;
 const chatPrincipal = (msg: BaseMessage): string =>
   withBot(msg.chattype === "group" && msg.chatid ? `chat:${msg.chatid}` : `user:${msg.from.userid}`, botTagOf(msg));
 
-// 寻址靠 wizard 的**全局名字** `.name` —— 它可能住在任何一个聊天里。
+// 寻址靠 wizard 的**全局名字** `🧙‍♂️ name` (旧写法 `.name` 同样认) —— 它可能住在任何一个聊天里。
 // Must be space-delimited or edge-of-string so paths / extensions like `a.ts`
 // survive. 一条消息只认**一个**路由名字, 且**只做前缀匹配**: 清洗之后 (链接标记
 // 还原成裸 `.name`、@ 已由 stripAt 剥掉、去掉开头的空白与不可见字符) 落在**消息
@@ -112,7 +112,7 @@ const parseUseCommand = (text: string): "cli" | "wecom" | "show" | "invalid" | u
 // without one, the caller's own mirror binding is used.
 const parseAuditCommand = (text: string): { name: string } | undefined => {
   const m = /^\/audit(?:\s+(.+))?$/u.exec(text.trim());
-  return m ? { name: (m[1] ?? "").trim().replace(/^\./, "") } : undefined;
+  return m ? { name: stripSigil(m[1] ?? "") } : undefined;
 };
 
 interface MirrorRef { sessionId: string; jsonlPath: string; target: string; }
@@ -198,17 +198,17 @@ const renderHelp = (): string =>
     "位置参数可叠:`.docs /new opus 先读一遍 README` = 名字 + 模型 + 首句；新 pane 后端由配置决定。",
     "",
     "▎wizard",
-    "每个 wizard 有一个**全局唯一**的名字,写作 `.name`;聊天的默认 wizard 名字就是聊天名。",
-    "消息里带 `.name`(如 `.docs 帮我改 README`)就是找那一个 —— 它可以住在任何一个聊天里,",
-    "回复会回到你说话的这个群;不带 = 本聊天默认那个。开头写一个还不存在的 `.x` = 在这里叫出一个新的 x。",
-    "它们的回复以 `emoji .name` 打头。`/clear .x`、`/pwd .x`、`/stop .x` 同理按名字走。",
+    "每个 wizard 有一个**全局唯一**的名字,写作 `🧙‍♂️ name`;聊天的默认 wizard 名字就是聊天名。",
+    "消息里带 `🧙‍♂️ name`(如 `🧙‍♂️ docs 帮我改 README`)就是找那一个 —— 它可以住在任何一个聊天里,",
+    "回复会回到你说话的这个群;不带 = 本聊天默认那个。开头写一个还不存在的名字 = 在这里叫出一个新的 x。",
+    "它们的回复以 `🧙‍♂️ name` 打头。`/clear 🧙‍♂️ x`、`/pwd 🧙‍♂️ x`、`/stop 🧙‍♂️ x` 同理按名字走 (`.x` 旧写法仍认)。", 
     "wizard 知道自己是谁、在哪个目录、还有谁在,也能给自己改名、写职责、记长期记忆、上下文满了自己交接重开。",
     "wizard 之间默认**私聊**,只有需要你知道的才发进群。",
     "",
     "▎分身(clone)",
     "对 AI 说「分个身去干 X」「开三个分身分头处理」即可。分身默认**继承它此刻的上下文** ——",
     "先把公共材料读进来、再分身,材料只读一遍却进了 N 份上下文;要白纸一张就说明白。",
-    "分身有自己的 `.name`、自己的终端,也能再生分身。活干完对 AI 说「收掉它们」。",
+    "分身有自己的 `🧙‍♂️ name`、自己的终端,也能再生分身。活干完对 AI 说「收掉它们」。", 
     "",
     "▎跨聊天",
     "`/name <名字>` 给本聊天起名 · `/name` 查看 · `/name -` 取消",
@@ -453,11 +453,11 @@ const isLastResponseQuote = (target: string, quoted: string): boolean =>
 
 // ── 引用即路由 ─────────────────────────────────────────────────────────
 // 群里要跟 `.fix` 说话,手打名字太慢 —— 直接引用它的气泡即可。每条出站气泡都
-// 带 `emoji .name` 头 (withTagHeader),所以引用文本自带路由信息;用户自己发的
+// 带 `🧙‍♂️ name：` 头 (withTagHeader; 旧气泡是 `.name:`, 双态都认),所以引用文本自带路由信息;用户自己发的
 // 行首 `.fix 干活` 同样算数(限行首,否则正文里随手写的 .gitignore 会误判)。
 // `body` 是剥掉头/tag 后的净引用内容,用于跟目标 context 比对。
 // `tag`   = 路由目标(引用继承的投递 tag)。
-// `srcTag` = 引用气泡真正出自哪个会话 —— 仅 bot 气泡可知(反解 `emoji .name` 头)。
+// `srcTag` = 引用气泡真正出自哪个会话 —— 仅 bot 气泡可知(反解 `🧙‍♂️ name：` / `.name:` 头)。
 //            去重要比对的是「内容在不在源会话」,而非路由目标: 带着引用新建 /
 //            改投到别的 tag 时,目标会话是空的,只有源会话里才有那段原文。
 //            `srcTag===undefined` 表示源未知(用户自己打的引用),回退到按目标查。

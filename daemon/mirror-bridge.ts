@@ -63,7 +63,7 @@ import { getDetail, knowsToolUse, recordTool, recordToolResult, recordMark, reco
 import type { Asker } from "../shared/detail-store.js";
 import type { CtxCut, TurnFrom, TurnUsage } from "./detail.js";
 import { errText } from "./last-response.js";
-import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, windowLabel, withTagHeader, withLinkedTagHeader, chatHead, headed, tagBadge, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey, sameBot } from "../shared/session-label.js";
+import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, windowLabel, withTagHeader, withLinkedTagHeader, chatHead, headed, tagBadge, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey, sameBot, WIZARD_MARK } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { readHookMode } from "../shared/hook-mode.js";
 import { isWxFrame } from "../shared/wx-text.js";
@@ -943,11 +943,12 @@ const renderLine = (raw: string, deps: TailDeps): RenderItem[] => {
 
 // Block-wise packing (shared/md-chunk): never cuts mid-line, and never cuts a
 // fenced block or table in a way that breaks rendering — see splitMarkdown.
-// Room reserved in every chunk for the signed `.name` / `2/5` header line and
+// Room reserved in every chunk for the signed `🧙‍♂️ name` / `2/5` header line and
 // the chat-detail links linkTags hangs on it and on up to MAX_BODY_LINKS body
 // mentions — each `(url)` runs ~200-250 bytes. 头里最多两条: 自己的, 以及公开 peer 轮
-// 的 `→ .对方`。
-const TAG_HEADER_BUDGET = 256 * (2 + MAX_BODY_LINKS);
+// 的 `→ 🧙‍♂️ 对方`。v3 起头从 `.name` 换成 `🧙‍♂️ name` (每条约 +13 字节, ZWJ 序列 12
+// 字节 + 空格), 预算加 64 字帖余量; md-chunk 按行块切, 不会把序列切成两半。
+const TAG_HEADER_BUDGET = 256 * (2 + MAX_BODY_LINKS) + 64;
 
 interface TailHandle {
   stop: () => void;
@@ -2988,7 +2989,7 @@ interface AttachState {
   channel?: string;
   speaker?: string;
   /** 本轮是同伴公开派来的 (tell_peer public:true) —— 那个同伴的 target。回复进群时头
-   *  写成 `.me → .它`, 否则群里看不出这段话是答给谁的。与 channel 同生同灭。 */
+   *  写成 `🧙‍♂️ me： 🧙‍♂️ 它`, 否则群里看不出这段话是答给谁的。与 channel 同生同灭。 */
   replyTo?: string;
   /** 这场对话的出处 —— 与 channel 同生同灭。续写轮 (没有新的印章) 沿用它: 私聊里的
    *  续写没有 from, rolepage 就认不出对面是谁, 整段往来掉出那段私聊。 */
@@ -6464,10 +6465,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
     const named = ((t) => (t && sameBot(self, t) ? t : undefined))(wizardStore()?.byName(raw)?.target);
     if (named && all.includes(named)) return hit(named);
-    if (named) return { ok: false, reason: `wizard '.${raw}' exists but its session is not running — respawn it (spawn_wizard) or pick another` };
+    if (named) return { ok: false, reason: `wizard '${WIZARD_MARK} ${raw}' exists but its session is not running — respawn it (spawn_wizard) or pick another` };
     return {
       ok: false,
-      reason: `no wizard named '.${raw}' — wizard_roster lists every name`,
+      reason: `no wizard named '${WIZARD_MARK} ${raw}' — wizard_roster lists every name`,
       candidates: all.map((k) => peerAddress(cfg, k)),
     };
   };

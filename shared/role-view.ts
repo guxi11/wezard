@@ -16,7 +16,7 @@
 // 认不出是谁的发话方 / 听话方都归它; agent team 队友的话以 `<teammate-message>` 写进 transcript 的 user 行, 长得和人在
 // 终端里打的字一样, 但不是人说的 —— 归给系统, 同样不能切成视角。人不用 `user:<id>`: 那正是
 // 「与这个人的单聊」里默认 wizard 的 target, 两者字面相同, 同一条消息会变成自己对自己说。
-import { baseOfKey, labelFor, stripSigil, tagOfKey } from "./session-label.js";
+import { baseOfKey, labelFor, stripSigil, tagOfKey, WIZARD_MARK } from "./session-label.js";
 import { isGhostTurn, isMark, isPost, isTurn, staleAt, summarizeTag, type TagSummary } from "./chat-view.js";
 import { stripReminders } from "./reminder.js";
 import type { Asker, DetailRecord, MarkDetailRecord, PostDetailRecord, TurnDetailRecord } from "./detail-store.js";
@@ -362,7 +362,7 @@ const glanceOr = (ms: readonly Msg[], who?: (m: Msg) => string): Glance =>
 const speakerPrefix = (dir: Directory, viewer: string, peers?: readonly string[]): ((m: Msg) => string) | undefined =>
   peers?.length === 1
     ? undefined
-    : (m) => (m.from === viewer ? "" : `${dir.isWizard(m.from) ? "." : ""}${dir.nameOf(m.from)}: `);
+    : (m) => (m.from === viewer ? "" : `${dir.isWizard(m.from) ? WIZARD_MARK + " " : ""}${dir.nameOf(m.from)}： `);
 
 /** 一个 talkOf 窗口在列表里的那一行: 最近一句 (按上面的规则带说话人) 与时刻。 */
 export const glanceOfTalk = (msgs: readonly Msg[], viewer: string, dir: Directory, who: string, peers: readonly string[], chat?: string): Glance => {

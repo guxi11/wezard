@@ -47,7 +47,9 @@ assert.ok(hasHeading(lead, "## 我是这件活的 lead"));
 assert.ok(!hasHeading(lead, "## 我是这个群的管家 (L1)"));
 assert.ok(!hasHeading(lead, "## 本群开着顶层模式"));
 const renamed = renderCharter({ ...base, self: { ...base.self, address: "renamed" } });
-assert.ok(renamed.includes("**`.renamed`**"));
-assert.ok(!renamed.includes("**`.worker`**"));
+// v3: 名字行的表示是 `🧙‍♂️ name` (addr 带 wizard 记号), 不再是 `.name`。
+assert.ok(renamed.includes("**`🧙‍♂️ renamed`**"));
+assert.ok(!renamed.includes("**`🧙‍♂️ worker`**"));
+assert.ok(!renamed.includes("**`.renamed`**"));
 
 console.log("Charter structure and conditional guidance passed");

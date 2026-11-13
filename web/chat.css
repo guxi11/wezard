@@ -42,9 +42,9 @@ button { font: inherit; color: inherit }
 .app { display: flex; flex: 1; min-height: 0 }
 @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .3 } }
 
-/* 名字 = 地址。点是地址的一部分, 也是这一页唯一的颜色记号。 */
+/* 名字 = 地址。🧙‍♂️ 记号是地址的一部分 (v3 起代替 `.name` 的点), 也是这一页唯一的颜色记号。 */
 .nm { font-weight: 600 }
-.nm::before { content: "."; color: var(--accent); font-weight: 700 }
+.nm::before { content: "🧙‍♂️ "; color: var(--accent); font-weight: 700 }
 .nm.human::before, .nm.task::before, .nm.system::before, .nm.chat::before { content: none }
 .nm.chat, .ch-who .sub .up { color: var(--chat) }
 .nm.human { color: var(--human) }
