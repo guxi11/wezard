@@ -3348,6 +3348,8 @@ const main = async (): Promise<void> => {
         const waiting = waitingOf.get(p.target);
         return {
           target: p.target,
+          // P7 ⑦: rolepage 同身份多化身聚成一页。
+          ...(w ? { identity: identityOfRec(w) } : {}),
           name: settleName(wizards, chatNameOf(cfg, p.target), p.target),
           description: w?.description ?? "",
           chat: chatNameOf(cfg, p.target) || p.chat,
@@ -3372,6 +3374,7 @@ const main = async (): Promise<void> => {
         .filter((w) => !seen.has(w.target))
         .map((w) => ({
           target: w.target,
+          identity: identityOfRec(w),
           name: settleName(wizards, chatNameOf(cfg, w.target), w.target),
           description: w.description,
           chat: chatNameOf(cfg, w.target),

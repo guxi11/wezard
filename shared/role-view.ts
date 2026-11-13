@@ -168,9 +168,13 @@ export const messageOfPost = (p: PostDetailRecord): Msg => ({
   ts: p.createdAt,
 });
 
-export const allMessages = (records: readonly DetailRecord[], now: number): Msg[] => {
+/** P7 ⑦ 身份聚合: 同身份的多化身在 rolepage 聚成一页 —— 消息双方都收敛到该身份的
+ *  规范 target (canon, 见 makeDirectory)。缺省恒等: 老 daemon 快照没有 identity 时
+ *  各化身各一页, 与旧行为一比一。 */
+export const allMessages = (records: readonly DetailRecord[], now: number, canon: (id: string) => string = (x) => x): Msg[] => {
   const echoes = injectEchoesOf(records);
   return [...convTurns(records, now).flatMap((r) => messagesOfTurn(r, echoes)), ...records.filter(isPost).map(messageOfPost)]
+    .map((m) => (canon(m.from) === m.from && canon(m.to) === m.to ? m : { ...m, from: canon(m.from), to: canon(m.to) }))
     .sort((a, b) => a.ts - b.ts);
 };
 
@@ -201,6 +205,8 @@ export interface Directory {
   status: (id: string, now: number) => RoleStatus | undefined;
   /** 认得的全部 wizard。 */
   wizards: () => string[];
+  /** 身份规范 target (P7 ⑦): 同身份多化身收敛到同一页; 无 identity 的事实恒等。 */
+  canon: (id: string) => string;
 }
 
 const fold = (s: string): string => stripSigil(s).toLowerCase();
@@ -218,11 +224,27 @@ export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFact
   };
   const labelOf = (id: string): string =>
     id.startsWith("task:") ? "⏰" : id === SYSTEM ? "🧙‍♂️" : wizards.has(id) ? labelFor(nameOf(id)) : "👤";
-  const byName = new Map([...wizards].map((t) => [fold(nameOf(t)), t] as const));
+  // P7 ⑦: 每个身份选一个规范 target (锚点 target === identity 优先, 否则字典序最小 ——
+  // 恒定可复现), 同身份的化身全部收敛到它; 没有 identity 的事实恒等 (老快照兼容)。
+  const identityFact = new Map(facts.wizards.filter((w) => w.identity).map((w) => [w.target, w.identity!] as const));
+  const byIdentity = new Map<string, string[]>();
+  for (const t of wizards) {
+    const id = identityFact.get(t);
+    if (!id) continue;
+    byIdentity.set(id, [...(byIdentity.get(id) ?? []), t]);
+  }
+  const canonical = new Map<string, string>();
+  for (const [id, ts] of byIdentity) {
+    const rep = ts.includes(id) ? id : [...ts].sort()[0]!;
+    ts.forEach((t) => canonical.set(t, rep));
+  }
+  const canon = (t: string): string => canonical.get(t) ?? t;
+  const manifestationsOf = (id: string): string[] => [...wizards].filter((t) => canon(t) === id);
+  const byName = new Map([...wizards].map((t) => [fold(nameOf(t)), canon(t)] as const));
   const resolve = (ref: string): string | undefined => {
     const r = (ref ?? "").trim();
     if (!r) return undefined;
-    if (wizards.has(r)) return r;
+    if (wizards.has(r)) return canon(r);
     const named = byName.get(fold(r));
     if (named) return named;
     // 老链接里的 `human:` (从前「未知」的那个人) 就是现在的系统 wezard。
@@ -234,17 +256,21 @@ export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFact
   let until: Map<string, number> | undefined;
   const untilOf = (id: string): number =>
     (until ??= records.filter(isTurn).reduce(
-      (m, r) => (r.target ? m.set(r.target, Math.max(m.get(r.target) ?? 0, staleAt(r))) : m),
+      (m, r) => (r.target ? m.set(canon(r.target), Math.max(m.get(canon(r.target)) ?? 0, staleAt(r))) : m),
       new Map<string, number>(),
     )).get(id) ?? 0;
   const status = (id: string, now: number): RoleStatus | undefined => {
     if (!wizards.has(id)) return undefined;
-    const f = facts_.get(id);
-    const t = untilOf(id);
-    return { alive: f?.alive ?? false, busy: f?.busy ?? false, runningUntil: t > now ? t : 0, ...(f?.waiting?.length ? { waiting: f.waiting } : {}) };
+    // 身份聚合: 任一化身活着就算活着; waiting 并集; runningUntil 取最大。
+    const fs = manifestationsOf(id).map((t) => facts_.get(t)).filter((f): f is WorldFactWizard => !!f);
+    const f = facts_.get(id) ?? fs[0];
+    const t = Math.max(0, ...manifestationsOf(id).map((x) => untilOf(x)));
+    const waiting = [...new Set(fs.flatMap((x) => x.waiting ?? []))];
+    return { alive: fs.some((x) => x.alive) || !!f?.alive, busy: fs.some((x) => x.busy) || !!f?.busy,
+      runningUntil: t > now ? t : 0, ...(waiting.length ? { waiting } : {}) };
   };
   const wx = new Map((facts.weixin ?? []).map((w) => [w.base, w] as const));
-  return { nameOf, labelOf, resolve, fact: (id) => facts_.get(id), chatName, weixin: (base) => wx.get(base), isWizard: (id) => wizards.has(id), status, wizards: () => [...wizards] };
+  return { nameOf, labelOf, resolve, fact: (id) => facts_.get(id) ?? manifestationsOf(id).map((t) => facts_.get(t)).find(Boolean), chatName, weixin: (base) => wx.get(base), isWizard: (id) => wizards.has(id), status, wizards: () => [...wizards], canon };
 };
 
 // ── 会话 ─────────────────────────────────────────────────────────────

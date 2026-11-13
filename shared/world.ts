@@ -29,6 +29,8 @@ import type { PlanRecord } from "./plan.js";
 /** 一个 wizard 的登记信息 + 此刻的活体状态。daemon 从 wizard.json + tmux 取。 */
 export interface WorldFactWizard {
   target: string;
+  /** 身份 id (P7 ⑦): 同身份多化身在 rolepage 聚成一页; 老 daemon 的快照没有 → 各化身各一页。 */
+  identity?: string;
   /** withData 补的占位: 已停且无记录, 只为挂住还在的后代。 */
   ghost?: boolean;
   name: string;

@@ -228,7 +228,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
   const summary = (records: readonly DetailRecord[], f: WorldFacts, role: string, sid: string | null, land: Landing, win: Pick<View, "conv" | "with" | "span"> | undefined, since: number) => {
     const now = Date.now();
     const dir = makeDirectory(records, f);
-    const msgs = allMessages(records, now);
+    const msgs = allMessages(records, now, dir.canon);
     const spans = sessionsOf(records, role, now);
     const span = spanOf(spans, sid);
     // 每一项的未读账按点开它时的那一窗切 (windowOf), 侧栏与关系图卡片 (/api/glance) 同一个 ledgerOf。
@@ -299,7 +299,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
    *  没上屏的那几百轮就一个字都不用排。 */
   const windowFrags = (records: readonly DetailRecord[], dir: Directory, v: View, now: number): Array<{ id: string; ts: number; render: () => MsgFragment }> => {
     // 与侧栏 / 关系图这一项的未读账同一个 windowOf: 上屏 (记成已读) 的正是那一项数着的。
-    const msgs = windowOf(allMessages(records, now), v.role, v.conv, v.with || undefined, v.span);
+    const msgs = windowOf(allMessages(records, now, dir.canon), v.role, v.conv, v.with || undefined, v.span);
     const lo = msgs[0]?.ts ?? Infinity;
     const marks = isWizardDm(v.role, v.conv, v.with || undefined, dir) ? [] : marksOf(records, markRole(v)).filter((mk) => mk.createdAt >= lo && inSpan(v.span)(mk.createdAt));
     const frags = [
@@ -524,7 +524,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const dir = makeDirectory(records, f);
       const now = Date.now();
       const r = pickRole(dir, ticket, url);
-      json(res, 200, { ok: true, q: url.searchParams.get("q") ?? "", ...searchRole(allMessages(records, now), r, dir, url.searchParams.get("q") ?? "", now) });
+      json(res, 200, { ok: true, q: url.searchParams.get("q") ?? "", ...searchRole(allMessages(records, now, dir.canon), r, dir, url.searchParams.get("q") ?? "", now) });
     });
   };
 
@@ -538,7 +538,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const dir = makeDirectory(records, f);
       const now = Date.now();
       const viewer = pickRole(dir, ticket, url);
-      const msgs = allMessages(records, now);
+      const msgs = allMessages(records, now, dir.canon);
       const ledger = ledgerOf(unreadIndex(msgs), viewer, keepOf(sinceOf(url, 0)));
       const keys = (url.searchParams.get("keys") ?? "").split("\n").filter(Boolean);
       const out = Object.fromEntries(keys.flatMap((k) => {
