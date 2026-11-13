@@ -1965,7 +1965,7 @@ const main = async (): Promise<void> => {
         }
       }
     };
-    try { backfillChatPosts(); } catch { /* backfill 失败不挡 boot; 下次 boot 再补 */ }
+    // 调用点在 wizardStore 绑定之后 (见下) —— 这里 byName 还没得用。
 
     // P7-S3 /strict: 存量群切换 strict —— 预演 (受影响 wizard 清单) / apply (写 chatPolicy + 宪章守卫)。
     // 判定与渲染在 daemon/strict-switch.ts (纯函数); 这里只供事实: 名字、名册、管家、成员表。
@@ -3239,6 +3239,8 @@ const main = async (): Promise<void> => {
     // mirror-bridge。
     const bornOf = (t: string): number | undefined => firstStamp(m.sessionInfo(t)?.jsonlPath ?? "");
     const wizards = bindWizardStore(loadWizardStore(cfg.wrc.mirror.wizardsFile, bornOf));
+    // P7-S3b backfill: 名册绑好后再跑 (byName 要用) —— 账本→post 幂等补齐。
+    try { backfillChatPosts(); } catch { /* backfill 失败不挡 boot; 下次 boot 再补 */ }
     // v3 身份迁移必须先于任何别的写盘 (backfillBorn/settleAll 都会 upsert, 会把老记录
     // 顺手迁成「没备份」的形态)。幂等: 已迁完的 boot 这里是一次空跑。
     const ident = migrateIdentities(wizards, cfg.wrc.mirror.wizardsFile);
