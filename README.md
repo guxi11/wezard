@@ -366,15 +366,15 @@ IM 里发 `/help` 可随时拉出完整命令表；每次 `/new`、`/clear` 之�
 wezard status              # 看 daemon + WS 健康
 wezard logs -f             # 实时日志
 wezard send <chat> <text>  # 主动推消息
-wezard sync                # 重写 hook/MCP/env 进各 settings.json
+wezard sync                # 清掉旧版本写进全机的 hook/MCP/env（现在都按会话注入）
 wezard wx [bind|list|unbind]  # 微信 ClawBot：终端扫码绑定 / 查看 / 解绑
 wezard reload              # 重启 daemon（改了配置后用）
 wezard use [cli|wecom]     # 审批交给本地 CLI 弹框 / 交回企微卡片（无参 = 看当前）
-wezard unsync              # 卸载 hook/MCP（保留 daemon）
+wezard unsync              # 同 sync 的清理，机器上不留 wezard 注册（保留 daemon）
 wezard uninstall           # 完整卸载（先于 npm uninstall）
 ```
 
-> ⬆️ **升级**：`npm i -g wezard@latest` 装新版二进制，再 `wezard sync && wezard reload` 刷新 hook/MCP 注入并重启 daemon（幂等，`~/.wezard/` 的 config/secrets 原样保留）。
+> ⬆️ **升级**：`npm i -g wezard@latest` 装新版二进制，再 `wezard sync && wezard reload` 清掉旧版本的全机注册并重启 daemon（幂等，`~/.wezard/` 的 config/secrets 原样保留）。升级前就在跑的会话要 respawn 才会带上按会话注入的 hook 与 MCP。
 >
 > ⚠️ **卸载顺序**：先 `wezard uninstall` 再 `npm uninstall -g wezard`。否则 launchd/systemd 会一直尝试拉起已删除的二进制。`~/.wezard/` 下的 config/secrets 不会被清，二次安装可无缝复用。
 
@@ -383,7 +383,7 @@ wezard uninstall           # 完整卸载（先于 npm uninstall）
 ## 常见问题
 
 **Q: hook 不触发？**
-`cat ~/.claude/settings.json | jq .hooks.PreToolUse`，没东西就跑 `wezard sync` 重写。
+审批 hook 与 wezard MCP 都是按会话注入的：看那个 CLI 进程的启动行有没有 `--settings …/session-hooks.json` / `--mcp-config …/session-mcp.json`（`ps -o command= -p <pid>`）。没有就是升级前起的老 pane，`/new` 或重开即可；全机 settings 里本来就不该有 wezard。
 
 **Q: 卡片点了没反应？**
 企业微信卡片就地刷新只有 5 秒窗口，超时不刷新是正常的，决策本身仍然生效。

@@ -50,7 +50,9 @@ import { replAskqInput } from "../shared/repl-script.js";
 import { isAutoWindowActive } from "./session-cache.js";
 import { noticeSuffixFor } from "./notices.js";
 import { dispatchPickerPolicy, pickerPolicy, pressNoticeOf } from "./picker-policy.js";
-import { renameWindow, runTmux, sparePoolFencedSids, spawnTmuxClaude } from "./spawn-tmux.js";
+import { markManagedPane, renameWindow, runTmux, sparePoolFencedSids, spawnTmuxClaude } from "./spawn-tmux.js";
+import { prepareSessionHooks, sessionHookArgs } from "../shared/session-hooks.js";
+import { prepareSessionSkills, sessionSkillArgs } from "../shared/session-skills.js";
 import { selectEffort, selectModel, type EffortSelectResult, type ModelScope, type ModelSelectResult } from "./model-select.js";
 import { parseEffort, type Effort } from "../shared/effort.js";
 import { hasRegistry, liveSessionPids, markTranscript, probeOf, readRegistry, registrySnapshot, sessionOfPid, sessionOnPane, submittedSince, submittedEventSince, watchRegistry, type LiveSession, type TranscriptMark } from "./wezard-session.js";
@@ -2336,11 +2338,30 @@ const injectViaSpawn = async (args: InjectArgs): Promise<InjectResult> => {
   const finalText = withImageRefs(text, images);
   const eventMark = args.eventId && !text.trimStart().startsWith("/") ? markTranscript(jsonlPath) : undefined;
   const eventSince = Date.now() - 1000;
+  // 没有活 pane 的会话按会话注入 hook (不再靠全机注册): 这里的工具调用同样要出卡。
+  const hookArgs = (() => {
+    if (backend.name === "codex") return [];
+    try { return sessionHookArgs(backend.name, prepareSessionHooks(expandHome(cfg.daemon.stateDir), cfg.approval.hookTimeoutSec)); }
+    catch (e) { log.warn({ err: (e as Error).message }, "mirror inject: session hook injection failed — falls back to the CLI's own permission flow"); return []; }
+  })();
+  // 没有活 pane 的一次性注入也是 wezard 的会话: skill 同样按会话挂上, 不留全局痕迹。
+  const skillArgs = (() => {
+    if (backend.name === "codex") return [];
+    try {
+      const spec = prepareSessionSkills(expandHome(cfg.daemon.stateDir));
+      return spec ? sessionSkillArgs(backend.name, spec) : [];
+    } catch (e) {
+      log.warn({ err: (e as Error).message }, "mirror inject: session skill injection failed");
+      return [];
+    }
+  })();
   const cliArgs = backend.name === "codex" ? ["exec", "resume", "--json", ...codexArgs,
     ...cfg.wrc.extraArgs.filter((arg) => !arg.startsWith("--disallowedTools")),
     ...images.flatMap((path) => ["--image", path]), sessionId, text] : [
     "-p",
     finalText,
+    ...hookArgs,
+    ...skillArgs,
     "--resume",
     sessionId,
     "--output-format",
@@ -2353,7 +2374,15 @@ const injectViaSpawn = async (args: InjectArgs): Promise<InjectResult> => {
   return new Promise((resolve) => {
     const proc = spawn(bin, cliArgs, {
       cwd,
-      env: { ...process.env, PATH: augmentedPath(process.env.PATH) },
+      // headless 这条也是 wezard 发起的会话: 带上归属标记, 它的工具调用才走 IM
+      // 审批 (缺了它 hook 会当成别人的会话交回本地 CLI —— 而这里根本没有 TTY 可点)。
+      env: {
+        ...process.env, PATH: augmentedPath(process.env.PATH), WEZARD_MANAGED: "1",
+        WEZARD_DAEMON_BASE: `http://${cfg.daemon.host}:${cfg.daemon.port}`,
+        WEZARD_DAEMON_URL: `http://${cfg.daemon.host}:${cfg.daemon.port}/approve`,
+        WEZARD_STATE_DIR: expandHome(cfg.daemon.stateDir),
+        WEZARD_HOOK_TIMEOUT: String(cfg.approval.hookTimeoutSec),
+      },
       stdio: ["ignore", "ignore", "pipe"],
     });
     let stderrTail = "";
@@ -5164,6 +5193,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       pendingCwd: a.pendingCwd || undefined,
       cwdConfirmed: prevRec?.cwdConfirmed,
     });
+    // 这个 pane 现在归 wezard 管 (spawn / reload 恢复 / switch 认下的人自己开的终端):
+    // 打上归属标记, 它的 hook 才走 IM 审批。spawn 出来的进程本身带 WEZARD_MANAGED,
+    // 这一下是给「升级前就在跑的 pane」和「switch 绑进来的外部会话」补的。
+    void markManagedPane(a.tmuxPane);
     log.info({ sessionId, jsonlPath, target, tmuxSession: a.tmuxSession, runningCwd: a.runningCwd, pendingCwd: a.pendingCwd, mirrors: bySessionId.size }, "mirror attached");
     return { ok: true, sessionId, jsonlPath, target };
   };

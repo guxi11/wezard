@@ -44,6 +44,9 @@ import { hasRegistry, sessionOnPane } from "./wezard-session.js";
 import { codebuddyTrustPrompt, startupConfirmation, workspaceTrustPrompt, workspaceTrustConfig } from "../shared/workspace-trust.js";
 import { isModalPane } from "../shared/modal-pane.js";
 import { unknownStartupNotice } from "../shared/startup-notice.js";
+import { prepareSessionHooks, sessionHookArgs, type SessionHookSpec } from "../shared/session-hooks.js";
+import { prepareSessionMcp, sessionMcpArgs, type SessionMcpSpec } from "../shared/session-mcp.js";
+import { prepareSessionSkills, sessionSkillArgs, type SessionSkillSpec } from "../shared/session-skills.js";
 
 
 // New sessions follow configuration; resumed transcripts retain their backend.
@@ -188,6 +191,65 @@ const SHELL_CMD_RE = /^-?(zsh|bash|sh|fish|dash|ksh)$/;
 // 与 spawn 里的 paneEnv 同源 (rc 的 oh-my-zsh 更新询问会吃掉启动行); 暖 pane 建在
 // tmux ≥3.0 上, 所以直接走 `-e`。
 const ANTI_UPDATE_ENV = ["-e", "DISABLE_AUTO_UPDATE=true", "-e", "DISABLE_UPDATE_PROMPT=true"];
+
+// ── 归属标记 ─────────────────────────────────────────────────────────────
+// PreToolUse hook 是全机注册的 (CodeBuddy settings.json / Claude 插件 / Codex
+// hooks.json), 每个人自己开的 CLI 会话也会触发它。只有 wezard spawn 出来的 CLI
+// 进程带这个变量, hook 据此把别的会话原样交回 CLI 的权限流程 —— 子进程 (子代理 /
+// 工具 exec 出来的命令) 自然继承, 所以它只加在启动行上, 不加在 pane 的 shell env。
+const MANAGED_ENV = "WEZARD_MANAGED=1";
+
+/** 启动行的环境前缀: 归属标记 + hook / wezard MCP 需要的 daemon 地址。这几项原来由
+ *  `wezard sync` 写进全机 settings.json 的 env —— 那会让每个人自己开的 CLI 也带着
+ *  wezard 的变量; 现在只出现在 wezard 自己 spawn 的进程里。 */
+const launchEnv = (cfg: Config): string[] => [
+  MANAGED_ENV,
+  `WEZARD_DAEMON_BASE=${shQuote(`http://${cfg.daemon.host}:${cfg.daemon.port}`)}`,
+  `WEZARD_DAEMON_URL=${shQuote(`http://${cfg.daemon.host}:${cfg.daemon.port}/approve`)}`,
+  `WEZARD_STATE_DIR=${shQuote(expandHome(cfg.daemon.stateDir))}`,
+  `WEZARD_HOOK_TIMEOUT=${cfg.approval.hookTimeoutSec}`,
+];
+
+/** 按会话注入审批 hook。写不出来只记日志、照常 spawn: 没有 hook 的 pane 会退回
+ *  CLI 自己的权限流程 (看得见、要人点), 不是静默放权, 比整个 spawn 失败轻。 */
+const sessionHooksFor = (cfg: Config, log: Logger): SessionHookSpec | undefined => {
+  try { return prepareSessionHooks(expandHome(cfg.daemon.stateDir), cfg.approval.hookTimeoutSec); }
+  catch (e) {
+    log.warn({ err: (e as Error).message }, "spawn-tmux: session hook injection failed — pane falls back to the CLI's own permission flow");
+    return undefined;
+  }
+};
+
+/** 按会话注入 wezard MCP (`--mcp-config`): 全机 mcp.json / settings 里已经不再有它,
+ *  人自己开的会话因此既看不见也不多起一个 node 进程。写不出来只记日志 —— pane 少了
+ *  工具面但还能用 CLI 本来的东西。 */
+const sessionMcpFor = (cfg: Config, log: Logger): SessionMcpSpec | undefined => {
+  try {
+    return prepareSessionMcp(expandHome(cfg.daemon.stateDir), {
+      port: cfg.daemon.port, transport: cfg.daemon.mcpTransport,
+    });
+  } catch (e) {
+    log.warn({ err: (e as Error).message }, "spawn-tmux: session MCP injection failed — pane starts without wezard tools");
+    return undefined;
+  }
+};
+
+/** 按会话注入 skill (`--plugin-dir`): 企微文档那套只该出现在 wezard 的 pane 里,
+ *  所以内容放在 <stateDir>/skills, 插件壳软链过去; 全机 skills 目录一个字节都不写。
+ *  写不出来只记日志 —— pane 少一批工具知识, 别的照常。 */
+const sessionSkillsFor = (cfg: Config, log: Logger): SessionSkillSpec | undefined => {
+  try { return prepareSessionSkills(expandHome(cfg.daemon.stateDir)); }
+  catch (e) {
+    log.warn({ err: (e as Error).message }, "spawn-tmux: session skill injection failed — pane starts without wezard skills");
+    return undefined;
+  }
+};
+
+/** 升级兼容: 升级前已在跑的 pane 改不了 env, 给它的 pane 打一个标记, 让 hook 的
+ *  兜底仍认它是我们的 (tmux < 2.6 没有 pane option: 静默失败, 新 pane 靠 env)。 */
+export const markManagedPane = async (pane: string): Promise<void> => {
+  if (pane) await runTmux(["set-option", "-p", "-t", pane, "@wezard_managed", "1"]);
+};
 
 interface WarmShell {
   pane: string;
@@ -466,12 +528,19 @@ const buildSpare = async (
     const pane = await openWarmPane(warm, dir, "spare", { cwd: supportsC, env: supportsE }, log);
     if (!pane) { poolRemove(sessionId); return; }
     // 与 commandFor 同形的启动行: 不带宪章、不带 resume, 只把这一档的环境定下来。
+    const hooks = sessionHooksFor(cfg, log);
+    const mcp = sessionMcpFor(cfg, log);
+    const skills = sessionSkillsFor(cfg, log);
     const envPrefix = [
+      ...launchEnv(cfg),
       ...(supportsE ? [] : ["DISABLE_AUTO_UPDATE=true", "DISABLE_UPDATE_PROMPT=true"]),
       "DISABLE_AUTOUPDATER=1",
     ];
     const argv = [
       "--session-id", sessionId,
+      ...(hooks ? sessionHookArgs(spec.backend.name, hooks) : []),
+      ...(mcp ? sessionMcpArgs(spec.backend.name, mcp) : []),
+      ...(skills ? sessionSkillArgs(spec.backend.name, skills) : []),
       ...(spec.model && spec.backend.modelFlag ? [spec.backend.modelFlag, spec.model] : []),
       ...(spec.effort && spec.backend.effortFlag ? [spec.backend.effortFlag, spec.effort] : []),
       ...cfg.wrc.extraArgs,
@@ -1139,7 +1208,11 @@ const spawnTmuxInner = async ({ cfg, log, resumeSessionId, sessionId: freshSessi
   // 该交互会吞掉首条 paste-buffer 注入，导致仅落字符不进入 claude 输入框。
   // On old tmux the pane never got the two anti-update-prompt vars via `-e`, so
   // fold them into the command line as inline exports (`KEY=VAL cmd`).
+  const sessionHooks = sessionHooksFor(cfg, log);
+  const sessionMcp = sessionMcpFor(cfg, log);
+  const sessionSkills = sessionSkillsFor(cfg, log);
   const envPrefix = [
+    ...launchEnv(cfg),
     ...(supportsE ? [] : ["DISABLE_AUTO_UPDATE=true", "DISABLE_UPDATE_PROMPT=true"]),
     "DISABLE_AUTOUPDATER=1",
   ];
@@ -1164,6 +1237,9 @@ const spawnTmuxInner = async ({ cfg, log, resumeSessionId, sessionId: freshSessi
         "-c", `mcp_servers.wezard.env.CODEX_THREAD_ID=${JSON.stringify(sessionId)}`,
       ] : []),
       ...codexApprovalArgs,
+      ...(sessionHooks && backend.name !== "codex" ? sessionHookArgs(backend.name, sessionHooks) : []),
+      ...(sessionMcp && backend.name !== "codex" ? sessionMcpArgs(backend.name, sessionMcp) : []),
+      ...(sessionSkills && backend.name !== "codex" ? sessionSkillArgs(backend.name, sessionSkills) : []),
       ...(backend.name === "codex" && effort ? ["-c", `model_reasoning_effort=${JSON.stringify(effort)}`] : []),
       ...(backend.name === "codex" && systemPrompt ? ["-c", `developer_instructions=${JSON.stringify(systemPrompt)}`] : []),
       ...(flagModel ? [backend.modelFlag!, flagModel] : []),

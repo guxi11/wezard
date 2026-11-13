@@ -52,13 +52,27 @@ const requestApproval = async (input: CodexApprovalInput): Promise<ApprovalReply
   return { decision: "ask", reason: "approval timeout" };
 };
 
+/** 读干 stdin: 上游还在写 payload 时就退出, 会让它写管道 EPIPE。 */
+const drainStdin = async (): Promise<string> => {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks).toString("utf8");
+};
+
 const main = async (): Promise<void> => {
+  // 归属闸门: 同 hooks/pre-tool-use.sh —— 这套 handler 是全机注册的 (sync 写进
+  // ~/.codex/hooks.json), 人自己开的 codex 会话也会触发。只有 wezard spawn 的
+  // 进程带 WEZARD_MANAGED=1。没有标记 = 回 {} (不给裁决), 交回 codex 自己的
+  // 权限流程; 回 allow / ask 都会改变别人会话的行为。
+  if (process.env.WEZARD_MANAGED !== "1") {
+    try { await drainStdin(); } catch { /* payload gone */ }
+    console.log("{}");
+    return;
+  }
   let event: CodexHookEvent = "PreToolUse";
   let sessionStart = false;
   try {
-    const chunks: Buffer[] = [];
-    for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
-    const input = JSON.parse(Buffer.concat(chunks).toString("utf8")) as CodexApprovalInput;
+    const input = JSON.parse(await drainStdin()) as CodexApprovalInput;
     if (input.hook_event_name === "SessionStart") {
       sessionStart = true;
       const { config: cfg } = loadConfig();

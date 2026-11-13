@@ -58,7 +58,6 @@
     "web/highlight.min.js",
     "web/hljs-github.min.css",
     "hooks/pre-tool-use.sh",
-    "hooks/hooks.json",
     "scripts/install.sh",
     "scripts/uninstall.sh",
     "scripts/postinstall.sh",

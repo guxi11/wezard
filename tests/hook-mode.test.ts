@@ -9,6 +9,8 @@ import { hookModePath, readHookMode, writeHookMode } from "../shared/hook-mode.j
 //  - 开关文件 / 环境变量 = cli  → hook exit 0 且 stdout 为空 (不给 CLI 任何 decision)
 //  - daemon 不可达                  → 同上 (交还本地 CLI), 不是以前的 auto-allow
 //  - daemon 正常                     → 还原先那张卡的裁决
+//  - 没有归属标记 (人自己开的会话)   → 同上, 且一个请求都不发给 daemon
+//    (hook 在全机注册, 只有 wezard spawn 的进程带 WEZARD_MANAGED=1)
 const root = mkdtempSync(join(tmpdir(), "wezard-hook-mode-"));
 const stateDir = join(root, "state");
 const script = join(process.cwd(), "hooks", "pre-tool-use.sh");
@@ -17,7 +19,9 @@ const payload = JSON.stringify({ session_id: "s1", tool_name: "Bash", tool_input
 const run = (env: Record<string, string>, body: string = payload) => spawnSync("bash", [script], {
   input: body,
   encoding: "utf8",
-  env: { ...process.env, WEZARD_STATE_DIR: stateDir, WEZARD_RESUME_WAIT: "2", ...env },
+  // WEZARD_MANAGED=1: 这些用例测的是「wezard 自己的会话」这条路径; TMUX_PANE 清空,
+  // 让归属闸门不去查当前 shell 所在 pane 的 pane option。
+  env: { ...process.env, WEZARD_MANAGED: "1", TMUX_PANE: "", WEZARD_STATE_DIR: stateDir, WEZARD_RESUME_WAIT: "2", ...env },
   timeout: 30_000,
 });
 
@@ -62,15 +66,38 @@ try {
   // 事件循环, 同进程的 http server 永远回不了包 (只会看着 hook 超时)。
   const fake = spawn(process.execPath, ["-e", [
     'const http = require("node:http");',
-    'const s = http.createServer((req, res) => { req.resume(); req.on("end", () => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ decision: "allow", reason: "test" })); }); });',
-    's.listen(0, "127.0.0.1", () => console.log(s.address().port));',
+    'let n = 0;',
+    'const s = http.createServer((req, res) => { n++; console.log("REQ " + n); req.resume(); req.on("end", () => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ decision: "allow", reason: "test" })); }); });',
+    's.listen(0, "127.0.0.1", () => console.log("PORT " + s.address().port));',
   ].join("\n")], { stdio: ["ignore", "pipe", "inherit"] });
   try {
-    const port = await new Promise<string>((ok) => fake.stdout!.once("data", (d) => ok(String(d).trim())));
-    const up = run({ WEZARD_DAEMON_URL: `http://127.0.0.1:${port}/approve` });
+    let fakeOut = "";
+    const port = await new Promise<string>((ok) => fake.stdout!.on("data", (d) => {
+      fakeOut += String(d);
+      const m = /PORT (\d+)/.exec(fakeOut);
+      if (m) ok(m[1]!);
+    }));
+    const url = `http://127.0.0.1:${port}/approve`;
+    const up = run({ WEZARD_DAEMON_URL: url });
     assert.equal(up.status, 0, up.stderr);
     assert.match(up.stdout, /"permissionDecision":"allow"/);
     assert.match(up.stdout, /wezard: test/);
+
+    // 没有归属标记 = 人自己开的会话: 同一台「会回 allow」的假 daemon 在听, 但
+    // hook 必须一个请求都不发、零输出 (回了 allow 就等于替别人的会话放权)。
+    const foreign = run({ WEZARD_DAEMON_URL: url, WEZARD_MANAGED: "" });
+    assert.equal(foreign.status, 0, foreign.stderr);
+    assert.equal(foreign.stdout.trim(), "", `unmanaged session must stay silent, got: ${foreign.stdout}`);
+    // 子进程的 stdout 是异步到的: 给它一拍再数。
+    const hits = async (n: number): Promise<boolean> => {
+      for (let i = 0; i < 60; i++) {
+        if ((fakeOut.match(/REQ /g) ?? []).length >= n) return true;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      return false;
+    };
+    assert.ok(await hits(1), "managed session must reach the daemon");
+    assert.equal((fakeOut.match(/REQ /g) ?? []).length, 1, "unmanaged session must not reach the daemon");
   } finally { fake.kill(); }
 
   console.log("hook-mode.test: ok");

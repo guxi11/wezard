@@ -56,6 +56,24 @@ PAYLOAD=$(cat) || ask "stdin read failed"
 MODE_FILE="$STATE_DIR/approval-mode"
 MODE="${WEZARD_HOOK_MODE:-$(cat "$MODE_FILE" 2>/dev/null || true)}"
 
+# ── 归属闸门: 只接管 wezard 自己创建的会话 ───────────────────────────────
+# 现在 hook 是**按会话注入**的 (spawn 时 --settings / --plugin-dir), 正常不会跑到
+# 别人的终端里。这道闸门是兜底: 升级前装过的全机注册 (CodeBuddy settings.json /
+# 老插件 / Codex hooks.json) 还在时, 人自己开的 CLI 会话也会进来。只有 wezard
+# spawn 出来的 CLI 进程带 WEZARD_MANAGED=1 (启动行 / injectViaSpawn 的 env), 它的
+# 子进程 —— 子代理、工具 exec 出来的命令 —— 都继承。没有标记 = 不是我们的活: 零
+# 输出 exit 0, 交回 CLI 自己的权限流程 (与 approval-mode=cli 同构; 回 allow 是静默
+# 放权, 回 ask 是强制每个工具弹原生框, 两者都改变了别人会话的行为)。
+# 兜底: 升级前已经在跑的 pane 改不了自己的 env, daemon 启动时会给它打一个
+# pane option; 这里只多一次本地 tmux 查询, 仍然不碰 jq / daemon。
+is_managed_session() {
+  [[ "${WEZARD_MANAGED:-}" == "1" ]] && return 0
+  [[ -n "${TMUX_PANE:-}" ]] || return 1
+  command -v tmux >/dev/null 2>&1 || return 1
+  [[ "$(tmux show-options -pqv -t "$TMUX_PANE" @wezard_managed 2>/dev/null || true)" == "1" ]]
+}
+is_managed_session || passthrough
+
 # jq 缺失照样要能把审批还给 CLI —— 这道降级不该反过来变成「每个工具都弹框」。
 if ! command -v jq >/dev/null 2>&1; then
   [[ "$MODE" == "cli" ]] && passthrough

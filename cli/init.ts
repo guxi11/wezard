@@ -47,7 +47,8 @@ const step = (n: number, title: string): void =>
   log(`\n${c.cyan(`[${n}/3]`)} ${c.bold(title)}`);
 
 // ── Agent kind → settings.json path ──────────────────────────────────
-// sync.targets 可多选: 每个 agent 一个 target, 全部注入 hook/MCP/env。
+// sync.targets 可多选: 每个 agent 一个 target (只用来清老版本的全局注册; hook / MCP
+// 现在由 daemon 在 spawn 时按会话注入, 见 shared/session-hooks.ts / session-mcp.ts)。
 // wrc.defaultCli 是单值, 由第一个选中项决定 —— 它只决定「新会话默认用哪个 CLI 起」。
 // daemon 会同时 tail 所有已安装 CLI 的 projectsDir (backend 由 transcript 路径反推),
 // 所以 claude 和 codebuddy 的会话可以并存、各自镜像到不同的 WeCom 会话。
@@ -116,7 +117,7 @@ const ensureBuild = (): void => {
 };
 
 const runSync = (): void => {
-  log(c.dim("  syncing hooks/MCP/env into agent config files..."));
+  log(c.dim("  clearing legacy hook/MCP/env from agent config files..."));
   const r = spawnSync(process.execPath, [`${REPO}/dist/cli/sync.js`], { stdio: "inherit" });
   if (r.status !== 0) throw new Error("sync failed");
 };
@@ -173,12 +174,14 @@ const warnIfLanBlocked = async (base: string, ip: string): Promise<void> => {
 };
 
 // Register the local repo as a Claude Code marketplace and install the
-// `wezard` plugin from it. This is what wires up `hooks/hooks.json` (so
-// `${CLAUDE_PLUGIN_ROOT}` resolves) + `commands/*.md` + the MCP server
-// declared in `.claude-plugin/plugin.json`. Idempotent: marketplace add
-// re-uses the existing entry, install upgrades in place.
+// `wezard` plugin from it: `commands/*.md` + the MCP server declared in
+// `.claude-plugin/plugin.json`. 审批 hook **不再**由插件全局注册 —— 它由
+// spawn 按会话注入 (shared/session-hooks.ts), 否则每个人自己开的 CLI 会话也会
+// 每次工具调用都跑一遍 wezard 的脚本。Idempotent: marketplace add re-uses the
+// existing entry, install upgrades in place (老安装里的 hooks/hooks.json 会随
+// 插件目录一起失效/被覆盖).
 //
-// 失败即 throw — 没装上 hook 等于整套授权链路废掉,继续往下跑只会让用户看到
+// 失败即 throw — 没装上 MCP 等于整套工具链路废掉,继续往下跑只会让用户看到
 // 假的"✅ 引导完成",再被 auto mode 拦截一脸懵。
 // status 为 null 的两种真实原因: spawn 失败 (error, 多为 ENOENT —— bin 是
 // alias/函数或不在继承的 PATH 里) 或进程被信号杀死。两者都不是「退出码」,
@@ -372,8 +375,8 @@ const main = async (): Promise<void> => {
 
   ensureBuild();
   if (enableHook) runSync();
-  // marketplace 插件只存在于 claude 家族; codebuddy 的 hook 由 sync 直接
-  // 写进 ~/.codebuddy/settings.json (插件未发布到其市场), 装插件必然失败。
+  // marketplace 插件只存在于 claude 家族 (只提供 commands/*, 不再带 hook 或 MCP);
+  // codebuddy 没有插件市场, 装插件必然失败。
   if (enableHook) {
     const pluginBins = [...new Set(agentKinds.filter((k) => k !== "codebuddy" && k !== "codex").map(claudeBinFor))];
     for (const bin of pluginBins) installPlugin(bin);

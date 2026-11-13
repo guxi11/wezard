@@ -1,13 +1,12 @@
 // `wezard sync` — write wezard's hooks / MCP / env into target settings.json files
 // (e.g. ~/.claude/settings.json so claude-internal wrappers pick them up).
 // Idempotent + reversible via per-target lock manifest in ~/.wezard/sync.lock.json.
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseJsonc } from "jsonc-parser";
 import { loadConfig, type Config } from "../shared/config.js";
-import { DAEMON_TOKEN_FILE, DAEMON_TOKEN_HEADER, readDaemonToken } from "../shared/daemon-token.js";
 import { expandHome } from "../shared/paths.js";
 import { codexHookCommand } from "../shared/codex-hooks.js";
 import { syncCodexHooks } from "./codex-sync.js";
@@ -17,8 +16,6 @@ import { syncCodexHooks } from "./codex-sync.js";
 const here = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = pathResolve(here, "..", "..");
 
-const MCP_ENTRY = `${PLUGIN_ROOT}/dist/mcp/server.js`;
-const HOOK_SCRIPT = `${PLUGIN_ROOT}/hooks/pre-tool-use.sh`;
 const LOCK_FILE = expandHome("~/.wezard/sync.lock.json");
 const MARKER = "wezard";
 const isOurs = (v: unknown): boolean => v === MARKER;
@@ -51,9 +48,10 @@ const writeJson = (p: string, obj: unknown): void => {
 };
 
 // ── Hook strip ───────────────────────────────────────────────────────
-// Hook registration is owned by the Claude Code plugin (`hooks/hooks.json`
-// + `${CLAUDE_PLUGIN_ROOT}`). Remove a current wezard direct hook before
-// syncing so it cannot fire alongside the plugin.
+// 审批 hook 已经改成**按会话注入** (spawn 时 `--settings` / `--plugin-dir`,
+// 见 shared/session-hooks.ts): 全机注册会让人自己开的 CLI 会话也每次工具调用
+// 多起一个脚本进程, 即使它只是 passthrough。sync 从今只负责 MCP, 顺手把老版本
+// 写下的 hook / env 清掉 —— `sync --remove` 之后机器上不留 wezard 的 hook 痕迹。
 interface HookEntry {
   matcher?: string;
   hooks: Array<{ type: string; command: string; timeout?: number; _managedBy?: string }>;
@@ -68,63 +66,11 @@ const stripHooks = (settings: Record<string, unknown>): void => {
   if ((hooks.PreToolUse as HookEntry[]).length === 0) delete hooks.PreToolUse;
 };
 
-// CodeBuddy 不走 Claude Code 的 plugin marketplace (wezard 插件不会装上),
-// settings.json 是唯一注册点; Claude 家族由 plugin 的 hooks/hooks.json 提供,
-// 不在此写入 (否则双重触发 → 重复卡片)。
-const upsertHook = (settings: Record<string, unknown>, timeoutSec: number): void => {
-  const hooks = ((settings.hooks as Record<string, unknown>) ??= {});
-  const list = ((hooks.PreToolUse as HookEntry[]) ??= []);
-  list.push({
-    matcher: ".*",
-    hooks: [{
-      type: "command",
-      command: HOOK_SCRIPT,
-      // 严格大于 daemon 的 longPollSec (= envVals.hookTimeoutSec) + 一点余量,
-      // 与 hooks.json 的 timeout 语义对齐 — 否则 curl 先死, 用户点击写进死 socket。
-      timeout: timeoutSec + 10,
-    }],
-    _managedBy: MARKER,
-  });
-};
-
-// ── MCP upsert ────────────────────────────────────────────────────────
-// http 形态: 只有 CodeBuddy 认 (mcp.json 里的 `type: "http"`)。`${TMUX_PANE}` 这些是留给
-// CodeBuddy 自己展开的字面量, 不是这里的插值 —— 双引号字符串里 `$` 不特殊, 别改成反引号。
-// 口令是 0600 文件的现读值, 会落进 mcp.json: 所以写完要把那份 mcp.json 收成 0600。
-const httpMcpEntry = (cfg: Config): Record<string, unknown> | undefined => {
-  const token = readDaemonToken();
-  if (!token) {
-    // 没有口令就到不了 /mcp (它按口令挡人): 写个进不去的入口不如照旧给 stdio。
-    // eslint-disable-next-line no-console
-    console.warn(`[wezard-sync] WARN: daemon.mcpTransport=http 但读不到 ${DAEMON_TOKEN_FILE}, ` +
-      "先起一次守护进程生成它; 本次回落 stdio 形态。");
-    return undefined;
-  }
-  return {
-    type: "http",
-    url: `http://127.0.0.1:${cfg.daemon.port}/mcp`,
-    headers: {
-      [DAEMON_TOKEN_HEADER]: token,
-      "x-wezard-pane": "${TMUX_PANE}",
-      "x-wezard-session": "${CODEBUDDY_SESSION_ID:-}",
-    },
-    _managedBy: MARKER,
-  };
-};
-
-/** 返回是否写了 http 形态 —— 调用方据此给 mcp.json 收权限。 */
-const upsertMcp = (settings: Record<string, unknown>, kind: "claude" | "codebuddy", cfg: Config): boolean => {
-  const m = ((settings.mcpServers as Record<string, unknown>) ??= {});
-  // Replace the current wezard entry before writing its latest definition.
-  stripMcp(settings);
-  const http = kind === "codebuddy" && cfg.daemon.mcpTransport === "http" ? httpMcpEntry(cfg) : undefined;
-  m.wezard = http ?? {
-    command: "node",
-    args: [MCP_ENTRY],
-    _managedBy: MARKER,
-  };
-  return Boolean(http);
-};
+// ── MCP strip ─────────────────────────────────────────────────────────
+// MCP 也已经改成**按会话注入** (spawn 的启动行带 `--mcp-config <file>`, 见
+// shared/session-mcp.ts): 全机 mcpServers 里留一份, 人自己开的每个 CLI 会话都会多起
+// 一个 `node dist/mcp/server.js` (实测 initialize 约 119ms) 而根本用不到它。
+// sync 只负责把老版本写下的那份清掉。
 const stripMcp = (settings: Record<string, unknown>): void => {
   const m = settings.mcpServers as Record<string, unknown> | undefined;
   if (!m) return;
@@ -132,33 +78,27 @@ const stripMcp = (settings: Record<string, unknown>): void => {
     const cur = m[k] as Record<string, unknown> | undefined;
     if (isOurs(cur?._managedBy)) delete m[k];
   }
+  // 只剩空壳也删掉 —— 手里那份 settings.json 不该有一个空的 mcpServers 提醒人这里曾经有东西。
+  if (Object.keys(m).length === 0) delete settings.mcpServers;
 };
 
 // ── Env upsert ────────────────────────────────────────────────────────
-const ENV_KEYS = [
+// 只删不写: 这些变量现在由 spawn 的启动行带给 wezard 自己的 pane (daemon 地址、
+// state 目录、hook 预算); 留在全机 settings 里等于给每个人的会话都塞 wezard 的 env。
+// WEZARD_HOOK_FALLBACK 是更早版本的遗留键, 一并清掉。
+const ENV_STRIP_KEYS = [
   "WEZARD_DAEMON_BASE",
   "WEZARD_DAEMON_URL",
   "WEZARD_STATE_DIR",
   "WEZARD_HOOK_TIMEOUT",
+  "WEZARD_HOOK_FALLBACK",
 ];
-interface EnvVals {
-  base: string;
-  stateDir: string;
-  hookTimeoutSec: number;
-}
-const upsertEnv = (settings: Record<string, unknown>, v: EnvVals): string[] => {
-  const env = ((settings.env as Record<string, unknown>) ??= {});
-  env.WEZARD_DAEMON_BASE = v.base;
-  env.WEZARD_DAEMON_URL = `${v.base}/approve`;
-  env.WEZARD_STATE_DIR = expandHome(v.stateDir);
-  // curl --max-time: 严格大于 longPollSec, 否则长挂的卡在用户点击前就断线。
-  env.WEZARD_HOOK_TIMEOUT = String(v.hookTimeoutSec);
-  return ENV_KEYS;
-};
 const stripEnv = (settings: Record<string, unknown>): void => {
   const env = settings.env as Record<string, unknown> | undefined;
   if (!env) return;
-  for (const k of ENV_KEYS) delete env[k];
+  for (const k of ENV_STRIP_KEYS) delete env[k];
+  // 只剩空壳也删掉: 目标是「不留任何 wezard 的痕迹」, "env": {} 也算。
+  if (Object.keys(env).length === 0) delete settings.env;
 };
 
 // ── Pre-flight: jq is required by hooks/pre-tool-use.sh ──────────────
@@ -199,50 +139,24 @@ const syncOne = (
   kind: "claude" | "codebuddy",
   opts: SyncOpts,
   lock: Lock,
-  env: EnvVals,
-  cfg: Config,
 ): void => {
   const abs = expandHome(settingsPath);
   const settings = readJson(abs);
-
-  // Always strip first — keeps re-runs idempotent and clears any legacy
-  // hook entries from earlier installs that wrote into settings.json directly.
   stripHooks(settings);
-
-  if (opts.remove) {
-    stripEnv(settings);
-    if (kind === "codebuddy") {
-      // MCP lives in mcp.json for CodeBuddy; strip from both locations.
-      stripMcp(settings);
-      const mcpAbs = mcpJsonPath(settingsPath);
+  stripEnv(settings);
+  stripMcp(settings);
+  if (kind === "codebuddy") {
+    // CodeBuddy 的 MCP 落在 ~/.codebuddy/mcp.json (settings.json 是更早的位置), 两处都清。
+    const mcpAbs = mcpJsonPath(settingsPath);
+    if (existsSync(mcpAbs)) {
       const mcpJson = readJson(mcpAbs);
       stripMcp(mcpJson);
       writeJson(mcpAbs, mcpJson);
-    } else {
-      stripMcp(settings);
     }
-    delete lock.targets[targetKey(settingsPath)];
-  } else {
-    const wroteEnv = upsertEnv(settings, env);
-    let wroteHooks = false;
-    if (kind === "codebuddy") {
-      // CodeBuddy: hook → settings.json, MCP → mcp.json
-      upsertHook(settings, env.hookTimeoutSec);
-      wroteHooks = true;
-      // Strip any stale MCP from settings.json (migrated to mcp.json)
-      stripMcp(settings);
-      const mcpAbs = mcpJsonPath(settingsPath);
-      const mcpJson = readJson(mcpAbs);
-      const wroteHttpMcp = upsertMcp(mcpJson, kind, cfg);
-      writeJson(mcpAbs, mcpJson);
-      // http 形态里带着 daemon 口令的明文: 只给本用户读。
-      if (wroteHttpMcp) chmodSync(mcpAbs, 0o600);
-    } else {
-      upsertMcp(settings, kind, cfg);
-    }
-    lock.targets[targetKey(settingsPath)] = { wroteHooks, wroteMcp: true, wroteEnv };
   }
   writeJson(abs, settings);
+  if (opts.remove) delete lock.targets[targetKey(settingsPath)];
+  else lock.targets[targetKey(settingsPath)] = { wroteHooks: false, wroteMcp: false, wroteEnv: [] };
 };
 
 const main = async (): Promise<void> => {
@@ -258,11 +172,7 @@ const main = async (): Promise<void> => {
     console.error("no sync.targets in config — nothing to do.");
     process.exit(0);
   }
-  const envVals: EnvVals = {
-    base: `http://${cfg.daemon.host}:${cfg.daemon.port}`,
-    stateDir: cfg.daemon.stateDir,
-    hookTimeoutSec: cfg.approval.hookTimeoutSec,
-  };
+  const base = `http://${cfg.daemon.host}:${cfg.daemon.port}`;
 
   const lock = readLock();
   for (const t of targets) {
@@ -272,10 +182,10 @@ const main = async (): Promise<void> => {
     if (dryRun) continue;
     if (t.kind === "codex") {
       await syncCodexHooks(expandHome(t.settingsPath), "codex", process.cwd(),
-        codexHookCommand(sourcePath, envVals.base, `${PLUGIN_ROOT}/dist/cli/codex-hook.js`), cfg.approval.hookTimeoutSec + 10, remove || !cfg.approval.enabled);
+        codexHookCommand(sourcePath, base, `${PLUGIN_ROOT}/dist/cli/codex-hook.js`), cfg.approval.hookTimeoutSec + 10, remove || !cfg.approval.enabled);
       if (remove) delete lock.targets[targetKey(t.settingsPath)];
       else lock.targets[targetKey(t.settingsPath)] = { wroteHooks: cfg.approval.enabled, wroteMcp: false, wroteEnv: [] };
-    } else syncOne(t.settingsPath, t.kind, { remove }, lock, envVals, cfg);
+    } else syncOne(t.settingsPath, t.kind, { remove }, lock);
   }
   if (!dryRun) writeLock(lock);
   // eslint-disable-next-line no-console
