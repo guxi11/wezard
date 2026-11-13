@@ -482,7 +482,7 @@ const main = async (): Promise<void> => {
     void watchQueue(a, id, !bridge.hasMirrorTarget(a.principal));
   } }, sourcePath, (w, c) => guardCharter(w, c));
   // 频道（topic）事件层：接在 inbound 之后，让频道消息复用同一套 gate / route / mirror。
-  installChannelEvents(ws.client, cfg, log.child({ mod: "channel" }), bridge);
+  installChannelEvents(ws.client, cfg, log.child({ mod: "channel" }));
   // approval click → finalize 当前 liveStream, 后续 tool/text 落到 standalone。
   // 规则 2: 用户点击授权那一刻就是"上一段对话"的边界, 截断 stream 让授权后的
   // 工作单独成块, 比让 stream 一直长到下一个 inbound / hardTimer 更清晰。

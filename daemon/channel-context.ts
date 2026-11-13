@@ -17,6 +17,12 @@ export interface ChannelContextInput {
   query?: string;
   /** 判官的一句话理由。 */
   reason?: string;
+  /** 判官的意图识别: 这条消息想干什么。 */
+  intent?: string;
+  /** 触发消息本身是评论时的 reply_id; 缺省 = 这次触发的就是帖子本身。 */
+  replyId?: string;
+  /** 入站帧 id —— 主 agent 靠它指回原始消息 (read_channel / 回复引用)。 */
+  msgid?: string;
   budget: number;
 }
 
@@ -44,9 +50,10 @@ export const formatChannelContext = (i: ChannelContextInput): string => {
     i.hits?.length ? { title: `搜索命中${i.query ? ` (${clip(i.query, 40)})` : ""}:`, lines: i.hits.map((m) => "  " + oneLine(m)) } : undefined,
   ].filter((s): s is { title: string; lines: string[] } => !!s);
 
-  const head = `[频道上下文] topic=${i.topicId}${i.postId ? ` post=${i.postId}` : ""}`;
+  const head = `[频道上下文] topic=${i.topicId}${i.postId ? ` post=${i.postId}` : ""}${i.replyId ? ` reply=${i.replyId}` : ""}${i.msgid ? ` msgid=${i.msgid}` : ""}`;
   const out: string[] = [head];
-  let left = Math.max(300, i.budget - head.length - (i.reason ? 220 : 0));
+  const tail = (i.reason ? 220 : 0) + (i.intent ? 260 : 0);
+  let left = Math.max(300, i.budget - head.length - tail);
   for (const s of sections) {
     if (left <= s.title.length) continue;
     out.push(s.title);
@@ -61,6 +68,7 @@ export const formatChannelContext = (i: ChannelContextInput): string => {
     if (shown < s.lines.length) out.push(`  …(另 ${s.lines.length - shown} 条没放下)`);
   }
   if (i.reason) out.push(`[判官] ${clip(i.reason, 200)}`);
+  if (i.intent) out.push(`[判官] 意图: ${clip(i.intent, 200)}`);
   return out.join("\n");
 };
 

@@ -115,6 +115,13 @@ export interface CliBackend {
    *  knob alone (the model still goes through the `/model` picker). */
   modelFlag?: string;
   effortFlag?: string;
+  /** One-shot non-interactive invocation (`-p`): prompt in, final text out.
+   *  A judge-style call has no pane, no session and no tools, so the flags pin
+   *  all three — the run must not land in projects/ (a transcript there would be
+   *  picked up as a mirrorable session) and must not park on an approval card.
+   *  Undefined = this CLI has no such mode; callers fall back instead of
+   *  guessing flags. */
+  oneShotArgs?: (prompt: string, o: { model?: string; effort?: string }) => string[];
   /** Encode an absolute cwd path into the on-disk project dir segment. */
   encodeProjectDir: (absCwd: string) => string;
   /** Map a raw parsed jsonl line into the Claude Code TranscriptLine shape
@@ -141,6 +148,19 @@ const encodeCodebuddy = (absCwd: string): string =>
 let _encodeProjectDir: (absCwd: string) => string = encodeClaude;
 export const encodeProjectDir = (absCwd: string): string => _encodeProjectDir(absCwd);
 
+// `-p` + text output is the shape claude / claude-internal / codebuddy all
+// share (verified against the three installed binaries). `--tools ""` is their
+// common "no built-in tools" spelling; `--no-session-persistence` keeps a
+// throwaway judgement out of resume history.
+const printArgs = (prompt: string, o: { model?: string; effort?: string }): string[] => [
+  "-p", prompt,
+  "--output-format", "text",
+  "--tools", "",
+  "--no-session-persistence",
+  ...(o.model ? ["--model", o.model] : []),
+  ...(o.effort ? ["--effort", o.effort] : []),
+];
+
 const makeClaude = (name: CliBackendName, bin: string): CliBackend => {
   const homeDir = name === "claude-internal" ? "~/.claude-internal" : "~/.claude";
   return {
@@ -154,6 +174,7 @@ const makeClaude = (name: CliBackendName, bin: string): CliBackend => {
     systemPromptFlag: "--append-system-prompt",
     modelFlag: "--model",
     effortFlag: "--effort",
+    oneShotArgs: printArgs,
     encodeProjectDir: encodeClaude,
     // Claude Code jsonl is already in the TranscriptLine shape — identity pass.
     normalizeTranscriptLine: (raw) => raw as NormalizedTranscriptLine,
@@ -314,6 +335,7 @@ const makeCodebuddy = (bin: string): CliBackend => ({
   systemPromptFlag: "--append-system-prompt",
   modelFlag: "--model",
   effortFlag: "--effort",
+  oneShotArgs: printArgs,
   encodeProjectDir: encodeCodebuddy,
   normalizeTranscriptLine: normalizeCodebuddy,
 });

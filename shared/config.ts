@@ -155,7 +155,9 @@ const Mirror = z.object({
 const Channel = z.object({
   judge: z.object({
     enabled: z.boolean().default(true).describe("频道里未被 @ 的新帖 / 新回复先交给判官决定是否回应"),
-    tier: z.string().default("light").describe("判官使用的模型档位 (轻量优先)"),
+    // 判官只是「一次性的 JSON 判定」，不写代码不排障: 最简档就够, 也最便宜。
+    // 要真实 model id 时按 models.backends.<backend>.tiers.mini 取。
+    tier: z.string().default("mini").describe("判官使用的模型档位 (一次性 JSON 判定, 最简档足够)"),
     maxPosts: z.number().int().min(2).max(20).default(8).describe("判官只读最近多少条帖子"),
     timeoutMs: z.number().int().min(3000).max(60000).default(20000).describe("判官一次判断的超时 (ms); 超时按不回应处理"),
   }).default({}),
