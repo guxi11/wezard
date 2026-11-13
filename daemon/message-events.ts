@@ -321,7 +321,7 @@ export const resultCorrectionInputs = (source: MessageEvent, section: string, in
     ...(serves ? { serves, ...(asker ? { asker } : {}) } : {}), ...(feedbackRoute ? { feedbackRoute } : {}),
     priority: "normal", deadline: NO_DEADLINE,
     payload: { text: text ?? (serves
-      ? `你的 RESULT 暂未交付：${reason}。请只对匹配收件人提交 \`@.name RESULT: <结论>\`；需要反问时使用 tell_peer({kind:"ask"})。`
+      ? `你的 RESULT 暂未交付：${reason}。请用行首 \`.name RESULT: <结论>\` 指定收件人 (@name 存量照认)；需要反问时使用 tell_peer({kind:"ask"})。`
       : fyiBody()),
       peer: { from: { kind: "peer", from: recipient, ...(serves ? { event: serves } : {}) },
         envelope: renderEnvelope(displayName(recipient), !serves), kind: serves ? "task" : "fyi" } },
@@ -334,14 +334,17 @@ export const resultCorrectionInputs = (source: MessageEvent, section: string, in
     : [executor];
 };
 export interface AddressedResultSection { name: string; body: string }
-export const requiresExplicitResultAddress = (source: MessageEvent, row: Route | undefined, isResult: boolean): boolean =>
-  isResult && row?.receiver.kind === "wizard";
+// 关键字优先 (2026-11-13 人口径 B): 裸 `RESULT:` 也是回执, 按原归属落它服务的那一笔 ——
+// 不再要求显式写收件人 (@name 存量照认; 收件人解析见 peers.addressedResults 四态)。
+// 行本身不可结算 (已移交 / 前置未就绪 / 已取消) 才发纠正; 可结算的返回 false 交给通用
+// onFinal 路径 (owner / transfer / 状态守卫都在那里)。
 export const settleUnaddressedResult = (source: MessageEvent, row: Route | undefined, isResult: boolean,
   reject: (source: MessageEvent, row: Route, reason: string) => void): boolean => {
-  if (!requiresExplicitResultAddress(source, row, isResult) || !row || row.receiver.kind !== "wizard") return false;
+  if (!isResult || !row || row.receiver.kind !== "wizard") return false;
+  const settled = row.owner === source.target && row.status !== "held" && row.outcome?.status !== "canceled";
+  if (settled) return false;
   const reason = row.owner !== source.target ? "任务已移交，旧执行者不能提交结果"
-    : row.status === "held" ? "任务前置尚未就绪"
-      : row.outcome?.status === "canceled" ? "任务已取消" : "回执必须显式写明收件人";
+    : row.status === "held" ? "任务前置尚未就绪" : "任务已取消";
   reject(source, row, reason);
   return true;
 };

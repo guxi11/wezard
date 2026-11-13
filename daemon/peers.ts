@@ -501,19 +501,40 @@ export const topLevelText = (text: string): string => {
   }).join("");
 };
 
+// 回执署名四态 (2026-11-13 人口径 B): 新写法 = 行首 `.name RESULT:` (与人的点名写法同形,
+// wizard 之间不带记号); 存量三态 `@name` / `@.name` / `@🧙‍♂️ name` 长期照认。
+// @ 形态名字后必须紧跟 RESULT (不误伤普通提及); 点形态锚行首 (列表标记之后), 免得
+// 正文里的小数/版本号 ("2.9.0 RESULT:") 被当成收件人。
+const AT_RESULT_RE = new RegExp(`@(?:\\.|${MAGE_SRC}[ \\t]?)?([A-Za-z0-9_-]+)[ \\t]+RESULT[ \\t]*[:：][ \\t]*`, "gm");
+const DOT_RESULT_RE = new RegExp(`^[ \\t>*-]*\\.([A-Za-z0-9_-]+)[ \\t]+RESULT[ \\t]*[:：][ \\t]*`, "gm");
+
 export const addressedResults = (text: string): Array<{ name: string; body: string }> => {
-  // 三态 (设计稿 §1.5): 新写法是裸 `@name RESULT:` (wizard 之间不带记号); `@🧙‍♂️ name` 与
-  // `@.name` 是存量/在途轮次的形态, 长期照认。裸 @ 不会误伤普通提及 —— 名字后必须紧跟 RESULT。
-  const marks = [...topLevelText(text).matchAll(new RegExp(`@(?:\\.|${MAGE_SRC}[ \\t]?)?([A-Za-z0-9_-]+)[ \\t]+RESULT[ \\t]*[:：][ \\t]*`, "gm"))];
+  const marks = [
+    ...topLevelText(text).matchAll(AT_RESULT_RE),
+    ...topLevelText(text).matchAll(DOT_RESULT_RE),
+  ].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
   return marks.map((m, i) => {
     const next = marks[i + 1]?.index;
     const start = m.index ?? 0;
-    const line = next === undefined ? -1 : text.lastIndexOf("\n", next - 1) + 1;
-    const currentLine = text.lastIndexOf("\n", start) + 1;
+    const line = next === undefined ? -1 : text.lastIndexOf("\\n", next - 1) + 1;
+    const currentLine = text.lastIndexOf("\\n", start) + 1;
     const end = line > currentLine ? line : next;
     return { name: m[1]!, body: text.slice(start + m[0].length, end).trim() };
   });
 };
+
+/** 这句话是不是回执 —— **关键字优先** (口径 B): 带收口关键字 (`RESULT:` / `NEED:` /
+ *  `PROGRESS:` / `ARTIFACT:`) 就是回执, 不以有没有 @ 为前提。判定 (未归属轮的收口放行)
+ *  读它; 收件人解析才看 addressedResults 的四态。
+ *  两层: 行首锚定的收口 (parseClosing) 与 ARTIFACT 行是强信号; 句中的关键字 (如
+ *  `@bob 那件如何? RESULT: …` —— @ 后的名字没紧跟 RESULT, 四态不认) 是弱信号, 只用于
+ *  判定放行, 不用于抽取 —— 最终结算仍走 parseClosing 的严格形态, 误放不会误结。 */
+const RECEIPT_KEYWORD_RE = /(?:RESULT|NEED|PROGRESS|ARTIFACT)[ \t]*[:：]/;
+export const receiptKeyword = (text: string): boolean => {
+  const c = parseClosing(text);
+  return c.kind !== "none" || c.artifacts.length > 0 || RECEIPT_KEYWORD_RE.test(topLevelText(text));
+};
+
 
 export const parseClosing = (text: string, max = 800): Closing => {
   const visible = topLevelText(text);
@@ -720,7 +741,7 @@ export const renderPeerEnvelope = (from: string, chat?: string, chatKey?: string
             ? ["发话方不收回执; 不要为确认收到而 tell_peer 或 notify。"]
             : [
                 "终句面向派活方; 自动回执无需另调工具, 不要重复 tell_peer 或为这轮私聊 notify。",
-                "对 wizard 直说: 不寒暄、不加对人的称呼、不复述它的话; 交差时必须标明接收者 (`@name RESULT: …`), 一条消息可分段回复多个接收者 (交付物写进文件就回传路径); 需要对方补信息或继续协作时, 用 tell_peer({kind:\"ask\"}) 发起反问/子任务; 交付了文件, 每个加一行 `ARTIFACT: <路径> — 一句话`。", 
+                "对 wizard 直说: 不寒暄、不加对人的称呼、不复述它的话; 交差时用行首 `.name RESULT: …` 标明接收者 (`@name` / `@.name` 存量照认), 一条消息可分段回复多个接收者 (交付物写进文件就回传路径); 需要对方补信息或继续协作时, 用 tell_peer({kind:\"ask\"}) 发起反问/子任务; 交付了文件, 每个加一行 `ARTIFACT: <路径> — 一句话`。",
               ]),
         ]
       : [
@@ -728,7 +749,7 @@ export const renderPeerEnvelope = (from: string, chat?: string, chatKey?: string
         ]),
     ...(t?.re ? ["这是**续问**: 接着那件活说, 不是一件新活。"] : []),
     // 这句话要怎么接 —— 只有发话方知道, 不写出来对方一律当成一件活去干。
-    ...(t?.act === "ask" ? [`这是一个**提问**: 只答这一问, 几句话${t.quiet ? "" : "并明确收件人 (`@name RESULT:`)"}; 需要反问或派生子任务时用 tell_peer({kind:"ask"|"task"})。`] : []),
+    ...(t?.act === "ask" ? [`这是一个**提问**: 只答这一问, 几句话${t.quiet ? "" : "并明确收件人 (行首 `.name RESULT:`)"}; 需要反问或派生子任务时用 tell_peer({kind:"ask"|"task"})。`] : []),
     ...(t?.act === "fyi" ? ["这是一条**知会**: 不用回复、不用收口, 也别为它开新活 —— 与手头的活相关就顺手吸收, 无关就略过; 一句话收住这一轮即可。"] : []),
     // 来回多了就收口: 不在守护进程里拒绝 —— 拒了模型会换条通路接着乒乓。
     ...((t?.legs ?? 0) > 3 ? [`这件活已经来回 ${t!.legs! - 1} 次: 这一次请直接给结论, 拿不准的写清你的假设。`] : []),

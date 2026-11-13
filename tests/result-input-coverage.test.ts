@@ -102,11 +102,18 @@ const ownerTail = renderTail(withMsg(realTransferFeedback[1]!.payload.peer!.enve
 assert.equal(parseEnvelope(ownerTail)?.eventId, realTransferFeedback[1]!.id);
 assert.match(ownerTail, /发话方不收回执/);
 assert.match(realTransferFeedback[1]!.payload.text, /任务路由 route:task.*来源事件 event:correction.*当前 owner owner-now/);
+// 口径 B (2026-11-13): 关键字优先 —— 裸 RESULT 不再要求显式收件人, 可结算的行交给通用路径;
+// 旧断言 (不写收件人就拒) 随之反转: owned open 行不再发纠正, 不可结算 (已移交) 的照旧拒。
 let unaddressedCorrection = false;
 assert.equal(settleUnaddressedResult(correctionSource, routeRow("worker", "open"), true,
-  (_source, _row) => { unaddressedCorrection = true; }), true,
-"a task-attached correction cannot settle an unaddressed final");
-assert.equal(unaddressedCorrection, true, "the production unaddressed-result gate emits corrective feedback");
+  (_source, _row) => { unaddressedCorrection = true; }), false,
+"keyword-first: an owned open row settles a bare RESULT via the generic path");
+assert.equal(unaddressedCorrection, false, "no corrective feedback for a settleable unaddressed result");
+let movedCorrection = false;
+assert.equal(settleUnaddressedResult(correctionSource, routeRow("owner-now", "open"), true,
+  (_source, _row) => { movedCorrection = true; }), true,
+"a transferred row still rejects the old executor bare RESULT");
+assert.equal(movedCorrection, true);
 
 const dir = mkdtempSync(join(tmpdir(), "wezard-result-binding-"));
 try {

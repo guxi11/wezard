@@ -8,7 +8,7 @@ import {
   tagHead, chatHead, tagBadge, parseTagHeader, rawTagHeader, withLinkedTagHeader,
   linkTags, unlinkTags, bindTagLinker, isHost, keyOf,
 } from "../shared/session-label.js";
-import { addressedResults, renderPeerEnvelope } from "../daemon/peers.js";
+import { addressedResults, receiptKeyword, renderPeerEnvelope } from "../daemon/peers.js";
 import { addr, renderRoster, type WizardBrief, type RosterRow } from "../daemon/wizard.js";
 import { renderChatLog, type LogSession } from "../daemon/chat-log.js";
 import { glanceOfTalk, type Directory, type Msg } from "../shared/role-view.js";
@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseEnvelope, renderReminder, envelopeAttrs } from "../shared/reminder.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
+import { finalKind, openRouter, ops } from "../daemon/router.js";
 
 // ── 词法常量 ────────────────────────────────────────────────────────
 assert.equal(WIZARD_MARK, "\u{1F9D9}\u200D\u2642\uFE0F");
@@ -94,10 +95,16 @@ assert.equal(stripSigil(".fix"), "fix");
 assert.equal(stripSigil("@.fix"), "fix");
 assert.equal(stripSigil("\u{1F9D9}fix"), "fix");
 
-// ── @name RESULT 三态 (addressedResults; §1.5: wizard 之间新写法是裸名) ─
+// ── 回执署名四态 (addressedResults; 口径 B 2026-11-13): 新写法 = 行首 `.name RESULT:`,
+//  存量三态 `@name` / `@.name` / `@🧙‍♂️ name` 长期照认 ──────────────────────
 assert.deepEqual(addressedResults("@fix RESULT: done it"), [{ name: "fix", body: "done it" }]);
 assert.deepEqual(addressedResults("@" + WIZARD_MARK + " fix RESULT: done it"), [{ name: "fix", body: "done it" }]);
 assert.deepEqual(addressedResults("@.fix RESULT: done it"), [{ name: "fix", body: "done it" }]);
+assert.deepEqual(addressedResults(".fix RESULT: done it"), [{ name: "fix", body: "done it" }], "行首 .name RESULT: 新写法");
+assert.deepEqual(addressedResults("- .fix RESULT: done it"), [{ name: "fix", body: "done it" }], "列表标记后的点形态");
+assert.deepEqual(addressedResults(".fix RESULT: 一段\n.bob RESULT: 二段"), [{ name: "fix", body: "一段" }, { name: "bob", body: "二段" }], "一段内多个 .name RESULT: 分段投递");
+assert.deepEqual(addressedResults("版本 2.9.0 RESULT: 不是收件人"), [], "行中的小数不当作点名 (点形态锚行首)");
+assert.deepEqual(addressedResults("@bob 中间有话 RESULT: 说不通"), [], "@ 形态名字后必须紧跟 RESULT");
 
 // ── md-chunk: 永不切开 ZWJ 序列 (按行块切, 行内原子) ──────────────────
 {
@@ -167,4 +174,24 @@ assert.deepEqual(addressedResults("@.fix RESULT: done it"), [{ name: "fix", body
   assert.equal(said(tagHead(fix)), WIZARD_MARK + " fix：");
 }
 
+
+// ── 关键字优先 (receiptKeyword; 口径 B): 带收口关键字即回执, 不以 @ 为前提 ──
+assert.equal(receiptKeyword("RESULT: 纯标记无前缀"), true, "纯 RESULT 无前缀算回执");
+assert.equal(receiptKeyword("NEED: 反问"), true);
+assert.equal(receiptKeyword("PROGRESS: 进展"), true);
+assert.equal(receiptKeyword("ARTIFACT: /tmp/f — 一句话"), true);
+assert.equal(receiptKeyword("@bob 你看这句, 顺带 RESULT: 也在"), true, "@别的名字又含 RESULT 时按回执处理");
+assert.equal(receiptKeyword("一句普通答话"), false);
+assert.equal(receiptKeyword("what I need: 小写不算"), false);
+
+// ── 纯 RESULT 无前缀按原归属 (口径 B): 裸 RESULT 落它服务的那一行, 无需收件人 ──
+{
+  const dir = mkdtempSync(join(tmpdir(), "rcpt-bare-"));
+  const router = openRouter({ file: join(dir, "routes.jsonl") });
+  router.commit(ops.open({ event: "route:bare", owner: "chat:A#w", receiver: { kind: "wizard", to: "chat:B#lead" }, deadlineAt: Number.MAX_SAFE_INTEGER }));
+  assert.equal(finalKind(router.table(), "route:bare", "RESULT: 结论内容"), "result");
+  const plans = router.onFinal("chat:A#w", "route:bare", { text: "RESULT: 结论内容", source: { input: "e1" } });
+  assert.equal(plans[0]?.op, "answer");
+  assert.equal(plans[0] && "outcome" in plans[0] ? plans[0].outcome?.status : undefined, "done");
+}
 console.log("wizard-mark dual-form tests passed");

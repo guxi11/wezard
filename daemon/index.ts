@@ -102,7 +102,7 @@ import {
 } from "./wizard.js";
 import { activeRows, bindNoticeBox, createNoticeBox, createSeenRing, gcSeen, chatAudience, hears, noticeSuffixFor, type Notice, type Subject, type Part, type SeenRow, type TimedSnapRow, type Via } from "./notices.js";
 import { createLedger, digest, pendingGc, renderDigest, renderTable, ago as agoMs, HEARD_EVERY_MS, type Item as PendingItem } from "./pending-items.js";
-import { cacheTouchMs, cacheTtlSec, clipMiddle, contextMaterials, firstStamp, parseClosing, stripClosingMark, stripForChat, addressedResults, lastContextTokens, lastExchange, lastModel, openingTurn, talkTurns, turnsSince, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
+import { cacheTouchMs, cacheTtlSec, clipMiddle, contextMaterials, firstStamp, parseClosing, receiptKeyword, stripClosingMark, stripForChat, addressedResults, lastContextTokens, lastExchange, lastModel, openingTurn, talkTurns, turnsSince, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { expandHome } from "../shared/paths.js";
 import { expandTask, TemplateError, type ExpandedTask, type TemplateRef } from "../shared/task-template.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
@@ -1451,7 +1451,8 @@ const main = async (): Promise<void> => {
         events.restoreHandoffFinal(e.id);
         log.info({ event: e.id, target: e.target, serves: e.serves }, "handoff: 切断那一轮的终句即交代, 照常落定");
       }
-      if (handoffFinalSuppressed(e) || (!ownsReplyEvent(e) && !addressedResults(verdict.text).length)) return;
+      if (handoffFinalSuppressed(e) || (!ownsReplyEvent(e) && !addressedResults(verdict.text).length
+        && !receiptKeyword(verdict.text))) return;
       // 自我交接切断的那一轮 (终句不算交代的): 收尾那句不是欠着的那几笔的答案 —— 行留 open, 交给新会话的「继续 <event>」。
       // 扣下记在这场交接上: 交接没做成 (新会话没起来), 它就是那几笔仅有的交代, 由 uncut 补投。
       if (cuttingTurn(e.target) && !keep) {
@@ -1749,7 +1750,7 @@ const main = async (): Promise<void> => {
       const belowTop = !!serves && !router.speaksToHuman(serves);
       const muted = dests.filter((d) => chatPolicyOf(cfg, d).topOnly && !(!tagOfKey(self) && baseOfKey(self) === d));
       return muted.length && belowTop
-        ? { ok: false, topOnly: true, reason: `${muted.map((d) => chatNameOf(cfg, d) || d).join(", ")} 开着顶层模式: 你这一轮是同伴派来的活, 不对人说话 —— 结果用 \`@name RESULT:\`, 反问用 tell_peer({kind:"ask"}), 由派你的那个代你向人交代` }
+        ? { ok: false, topOnly: true, reason: `${muted.map((d) => chatNameOf(cfg, d) || d).join(", ")} 开着顶层模式: 你这一轮是同伴派来的活, 不对人说话 —— 结果用行首 \`.name RESULT:\`, 反问用 tell_peer({kind:"ask"}), 由派你的那个代你向人交代` }
         : undefined;
     };
     http.register("POST /notify", async (req, res) => {
@@ -1785,7 +1786,7 @@ const main = async (): Promise<void> => {
           return;
         }
         if ((closing === "none" || closing === "progress") && (!row || !["open", "need", "error"].includes(row.status))) {
-          json(res, 409, { ok: false, reason: "这笔任务已收口或无在途任务，回执确认不公开；新结果用 @name RESULT:，新问题用 tell_peer({kind:\"ask\"})。" });
+          json(res, 409, { ok: false, reason: "这笔任务已收口或无在途任务，回执确认不公开；新结果用行首 .name RESULT:，新问题用 tell_peer({kind:\"ask\"})。" });
           return;
         }
       }
