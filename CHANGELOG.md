@@ -22,6 +22,7 @@
 - v3 P7-S3 频道 strict: strict 频道自动出站 (流式终帧 + sendMessage 退路/notify) 一律 send_post — 终句不再包装成评论; implicit 频道行为不变。工具面 sendTopicContent (导出): chat_say / chat_reply 遇 chat:<topic> 按 replyOk 选 send_reply/send_post, msgid (义务信封的 msg) 锚定具体帖子。判官保留, strict 频道多一职: respond=开义务 (respond=false 不开), rewrite 句首 .name 点名=落给谁 (走现行路由+成员机制, 判官 JSON 契约未变)。
 - v3 P7-S3 读侧: 严格群 read_chat 改读 chat-records 账本 (实际发出内容, 行号=seq, 与成员游标同一份账; renderChatRecords 支持作者过滤/时间窗/limit/per/翻页), 私聊与 implicit 群照旧 transcript。roster L0 严格群在场 = 本群成员+欠账数 (owner→speaker→mention), 总行数 ≤12。rolepage 治理面板: WorldFacts.governance (成员表 × 路由行 × 义务观测) → 群窗口顶部 govbar (成员/游标/欠/passed/overdue)。
 - v3 P7-S3 退役候选清单 (只登记不删): docs/evolve/v3-p7-retirement-candidates.md — deferred 出站 / standalone 兜底 / CoT 进度行 / eventFinalGate·finalReleased 推断四条的位置锚点、被 strict 什么取代、退役前置条件与风险注记。
+- v3 P7-S3b rolepage 群窗改账本口径: strict 群的 turn 出气泡被压掉 (模型终句从未进群, 不该在群里回放) —— 实发内容由出站 tracker 的 hook 落 post 记录 (body 与账本行同一文本, 流 id 去重: 占位→交付同一流只留最终那句), chat_reply 的 passed 落一条「（passed — 无需答复，未发言）」标记 post (沉默与「没这轮」可分辨); WorldFacts 加 strictChats (daemon 推送, svr mergeFacts 合并 —— 顺带修了 mergeFacts 重拼时丢掉 governance/humanNames/weixin 的旧洞, 公网 svr 的治理面板因此才真正可见); implicit 群与私聊零变化, 老数据 (无 post 的历史轮) 仍显示入消息。
 
 ### Fixed
 - 严格群里 `/new` / `/clear` 不再一言不发: 会话边界确认 (mirror 的 `pushProjectInfo` / 那句 `cleared`) 走的是模型发言的 standalone 路, 被严格群出站门一起拦下, 人以为命令坏了。现在 `/new` 由 inbound 分支补一条 `[wezard] created` (直发 `replyStream`, 不经 standalone 门; `[wezard]` 前缀同时是「系统提示」的判据), `/clear` 在严格群发 `[wezard] cleared`; implicit 群两条文案零变化 (`created` / `cleared`, 不双发)。

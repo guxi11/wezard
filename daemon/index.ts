@@ -287,7 +287,22 @@ const main = async (): Promise<void> => {
   const members = openMembers(join(expandHome(cfg.daemon.stateDir), "members.json"));
   const responseTracker = installResponseTracker(ws.client, log.child({ mod: "chat-gate" }), (c) => wx.owns(c),
     (context) => responseFormatPolicy(cfg, context, (target) => chatUrlFor(cfg.daemon, target)),
-    (noteLine) => { try { chatRecords.record(noteLine.chat, { ...noteLine, at: Date.now() }); knownChatsOf(cfg).record(noteLine.chat); } catch { /* 记录失败不影响出站 */ } });
+    (noteLine) => {
+      try {
+        chatRecords.record(noteLine.chat, { ...noteLine, at: Date.now() });
+        knownChatsOf(cfg).record(noteLine.chat);
+      } catch { /* 记录失败不影响出站 */ }
+      // P7-S3b: strict 群里 wizard 真正发出去的每一句, 同时落一条 post 记录 ——
+      // rolepage 群窗的出气泡 = 实发内容 (与账本同一文本), 而不是镜像 pane 的终句。
+      // post id = 流/终句 id: 占位(系统行, kind!=wizard 不进这里)与交付共用同一流时
+      // upsert 成一条; sendMessage 推送 (id 空) 每次一条, 各自发各的。
+      try {
+        if (noteLine.kind === "wizard" && noteLine.text.trim() && strictSpeechOf?.(noteLine.chat)) {
+          const who = wizardStore()?.byName(noteLine.author);
+          if (who) recordPost({ target: who.target, channel: noteLine.chat, body: noteLine.text, ...(noteLine.id ? { id: noteLine.id } : {}) });
+        }
+      } catch { /* 记录失败不影响出站 */ }
+    });
   const mirrorStore = loadMirrorStore(cfg.wrc.mirror.attachmentsFile);
   // 定时任务表 —— 每条任务是 ~/.wezard/tasks/<id>.task.mjs 一份可注入代码的配置
   // (见 shared/task-file.ts)。目录是热加载的: wizard 改完文件不用 reload 守护进程。
@@ -1901,7 +1916,8 @@ const main = async (): Promise<void> => {
           deliveries.push({ channel: dest, id, states: claims.length ? claims.flatMap((c) => c.states) : events.deliveryStatus(id),
             ...(claims.length > 1 ? { claims } : {}) });
         } else postAs(self, dest, content);
-        recordPost({ target: self, channel: dest, body: content, ...(asker ? { asker } : {}) });
+        // P7-S3b: strict 群的 post 记录由出站 tracker 的 hook 落 (带流 id 去重), 这里只管 implicit。
+        if (!strictSpeechOf?.(dest)) recordPost({ target: self, channel: dest, body: content, ...(asker ? { asker } : {}) });
       }
       // 微信群聊: 人超过 ctxTtlSec 没说话时微信会静默丢弃, 消息只能压着等他下次开口 —— 如实告诉调用方, 别回「已发送」。
       const wxId = (d: string): string => baseOfKey(d).replace(/^chat:/, "");
@@ -2153,6 +2169,8 @@ const main = async (): Promise<void> => {
         router.commit(ops.answer({ event: row.event, outcome: makeOutcome("done", b.text!) }));
       } else {
         router.commit(ops.answer({ event: row.event, outcome: makeOutcome("passed", "（无需答复）") }));
+        // P7-S3b: 沉默也要可分辨 —— passed 落一条定长标记 post (detail 里区分「没说话」与「没这轮」)。
+        recordPost({ target: self, channel: base, body: "（passed — 无需答复，未发言）" });
         delivered = "passed";
       }
       router.commit(ops.hand({ event: row.event, inbox: idem }));
@@ -2239,7 +2257,8 @@ const main = async (): Promise<void> => {
       const r = await sendMedia(dest, { path, kind: plan.kind, ...(b.title ? { title: b.title } : {}), ...(b.description ? { description: b.description } : {}) });
       if (!r.ok) { json(res, 502, r); return; }
       const asker = askerOf(self);
-      recordPost({ target: self, channel: dest, body: [caption, `📎 ${r.name} (${r.kind}) · ${path}`].filter(Boolean).join("\n\n"), ...(asker ? { asker } : {}) });
+      // P7-S3b: strict 群由 hook 落 post (caption 走 sendMessage 也会进账本); 这里只管 implicit。
+      if (!strictSpeechOf?.(dest)) recordPost({ target: self, channel: dest, body: [caption, `📎 ${r.name} (${r.kind}) · ${path}`].filter(Boolean).join("\n\n"), ...(asker ? { asker } : {}) });
       json(res, 200, { ok: true, sent: chatNameOf(cfg, dest) || dest, kind: r.kind, name: r.name, bytes: r.bytes });
     });
 
@@ -3530,6 +3549,8 @@ const main = async (): Promise<void> => {
           base: `chat:${a.chatId}`, state: a.state, lastInAt: a.lastInAt ?? 0, held: a.outbox.length,
           budget: a.ctx ? Math.max(0, cfg.weixin.sendCap - a.ctx.used) : 0, pausedUntil: a.pausedUntil ?? 0,
         })),
+        // P7-S3b 生效 strict 的聊天全集 (rolepage 群窗按账本口径渲染的开关)。
+        strictChats: knownChatsOf(cfg).rows().map((r) => r.chat).filter((base) => chatPolicyOf(cfg, base).speech === "strict"),
         // P7-S3 严格群治理面板: members.json × 路由行 × 义务观测 (owed/passed/overdue)。
         governance: members.chats()
           .filter((base) => strictSpeechOf?.(base))

@@ -140,6 +140,12 @@ const mergeFacts = (fresh: readonly FactsPush[]): WorldFacts => {
     inflight: uniq(fresh.flatMap((p) => [...(p.facts.inflight ?? [])]), (x) => `${x.from}\0${x.to}\0${x.turn}`),
     schedules: uniq(fresh.flatMap((p) => [...p.facts.schedules]), (x) => x.id),
     chatNames: Object.assign({}, ...fresh.map((p) => p.facts.chatNames)) as Record<string, string>,
+    // P7-S3/S3b: 人名 / 微信 / 治理面板 / strict 群集合 —— 之前 mergeFacts 重拼时被整个丢掉,
+    // 公网 svr 上这些面一直是空的; 按 key 去重合并 (同一台机器的重推收敛掉)。
+    ...(fresh.some((p) => p.facts.humanNames) ? { humanNames: Object.assign({}, ...fresh.map((p) => p.facts.humanNames ?? {})) } : {}),
+    ...(fresh.some((p) => p.facts.weixin?.length) ? { weixin: uniq(fresh.flatMap((p) => [...(p.facts.weixin ?? [])]), (x) => x.base) } : {}),
+    ...(fresh.some((p) => p.facts.governance?.length) ? { governance: uniq(fresh.flatMap((p) => [...(p.facts.governance ?? [])]), (x) => x.chat) } : {}),
+    ...(fresh.some((p) => p.facts.strictChats?.length) ? { strictChats: [...new Set(fresh.flatMap((p) => [...(p.facts.strictChats ?? [])]))] } : {}),
   };
 };
 

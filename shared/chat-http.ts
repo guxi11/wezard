@@ -116,6 +116,7 @@ const botFacts = (f: WorldFacts, self: string): WorldFacts => {
     chatNames: keep(f.chatNames),
     ...(f.humanNames ? { humanNames: keep(f.humanNames) } : {}),
     ...(f.weixin ? { weixin: f.weixin.filter((x) => mine(x.base)) } : {}),
+    ...(f.strictChats ? { strictChats: f.strictChats.filter((c) => mine(c)) } : {}),
   };
 };
 const viewerOf = (t: Ticket): string => t.selfTarget;
@@ -229,7 +230,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
   const summary = (records: readonly DetailRecord[], f: WorldFacts, role: string, sid: string | null, land: Landing, win: Pick<View, "conv" | "with" | "span"> | undefined, since: number) => {
     const now = Date.now();
     const dir = makeDirectory(records, f);
-    const msgs = allMessages(records, now, dir.canon);
+    // P7-S3b: strict 群的 turn 出气泡被压掉 (群窗画账本口径的实发内容, 见 messagesOfTurn)。
+    const msgs = allMessages(records, now, dir.canon, dir.strictChats);
     const spans = sessionsOf(records, role, now);
     const span = spanOf(spans, sid);
     // 每一项的未读账按点开它时的那一窗切 (windowOf), 侧栏与关系图卡片 (/api/glance) 同一个 ledgerOf。
@@ -302,7 +304,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
    *  没上屏的那几百轮就一个字都不用排。 */
   const windowFrags = (records: readonly DetailRecord[], dir: Directory, v: View, now: number): Array<{ id: string; ts: number; render: () => MsgFragment }> => {
     // 与侧栏 / 关系图这一项的未读账同一个 windowOf: 上屏 (记成已读) 的正是那一项数着的。
-    const msgs = windowOf(allMessages(records, now, dir.canon), v.role, v.conv, v.with || undefined, v.span);
+    const msgs = windowOf(allMessages(records, now, dir.canon, dir.strictChats), v.role, v.conv, v.with || undefined, v.span);
     const lo = msgs[0]?.ts ?? Infinity;
     const marks = isWizardDm(v.role, v.conv, v.with || undefined, dir) ? [] : marksOf(records, markRole(v)).filter((mk) => mk.createdAt >= lo && inSpan(v.span)(mk.createdAt));
     const frags = [
@@ -435,7 +437,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       // 子 agent 的一轮渲染在父轮的出消息里 —— 推父轮。
       const top = r.agent?.parentTurnId ? store.get(r.agent.parentTurnId) : r;
       if (!top || !isTurn(top) || !top.target) return;
-      windowOf(messagesOfTurn(top, injectEchoesOf(records)), v.role, v.conv, v.with || undefined, v.span).forEach((m) => pushFrag(renderMsg(m, records, dir, now)));
+      windowOf(messagesOfTurn(top, injectEchoesOf(records), dir.strictChats), v.role, v.conv, v.with || undefined, v.span).forEach((m) => pushFrag(renderMsg(m, records, dir, now)));
       if (deep) dependentsOf(top, records).forEach((d) => pushTurn(d, records, dir, now, false));
     };
 
@@ -527,7 +529,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const dir = makeDirectory(records, f);
       const now = Date.now();
       const r = pickRole(dir, ticket, url);
-      json(res, 200, { ok: true, q: url.searchParams.get("q") ?? "", ...searchRole(allMessages(records, now, dir.canon), r, dir, url.searchParams.get("q") ?? "", now) });
+      json(res, 200, { ok: true, q: url.searchParams.get("q") ?? "", ...searchRole(allMessages(records, now, dir.canon, dir.strictChats), r, dir, url.searchParams.get("q") ?? "", now) });
     });
   };
 
@@ -541,7 +543,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const dir = makeDirectory(records, f);
       const now = Date.now();
       const viewer = pickRole(dir, ticket, url);
-      const msgs = allMessages(records, now, dir.canon);
+      const msgs = allMessages(records, now, dir.canon, dir.strictChats);
       const ledger = ledgerOf(unreadIndex(msgs), viewer, keepOf(sinceOf(url, 0)));
       const keys = (url.searchParams.get("keys") ?? "").split("\n").filter(Boolean);
       const out = Object.fromEntries(keys.flatMap((k) => {

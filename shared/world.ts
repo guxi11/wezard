@@ -121,6 +121,9 @@ export interface WorldFacts {
   weixin?: readonly WorldFactWeixin[];
   /** P7-S3 严格群的治理面板 (members.json + 路由行 + 义务观测); 老 daemon 快照没有。 */
   governance?: readonly WorldFactGovernance[];
+  /** P7-S3b 生效 strict 的聊天 (base principal) —— rolepage 群窗按账本口径渲染 (turn
+   *  出气泡压掉, 实发内容走 post 记录); 老 daemon 快照没有 = 一切照旧。 */
+  strictChats?: readonly string[];
   /** 这份不是注册表给的, 是「没拿到」的占位 —— 显式信号: 空名册 ≠ 注册表不可达。 */
   absent?: true;
 }

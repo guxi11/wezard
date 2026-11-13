@@ -134,7 +134,7 @@ export const injectTurnsOf = (r: TurnDetailRecord): TurnDetailRecord[] =>
     ...(x.from ? { from: x.from } : {}), ...(x.speaker ? { speaker: x.speaker } : {}),
   }));
 
-export const messagesOfTurn = (r: TurnDetailRecord, echoes?: EchoIndex): Msg[] => {
+export const messagesOfTurn = (r: TurnDetailRecord, echoes?: EchoIndex, strictChats?: ReadonlySet<string>): Msg[] => {
   const w = r.target!;
   const who = senderOf(r);
   const channel = channelOf(r);
@@ -144,7 +144,10 @@ export const messagesOfTurn = (r: TurnDetailRecord, echoes?: EchoIndex): Msg[] =
   const inMsg: Msg[] = r.userQuery?.trim() && !receipt && !echoes?.splitIns.has(r.id)
     ? [{ id: `${r.id}:in`, turn: r, dir: "in", from: who, to: w, channel, ts: r.createdAt }]
     : [];
-  const outMsg: Msg[] = r.items.length > 0 || !r.closed
+  // P7-S3b: strict 群的 turn 出气泡被压掉 —— 群窗只画实际发进群的内容 (post 记录,
+  //  由出站 tracker 落账); 模型终句从未进群, 不该在群里回放。
+  const suppressed = !!channel && !!strictChats?.has(channel);
+  const outMsg: Msg[] = !suppressed && (r.items.length > 0 || !r.closed)
     ? [{ id: `${r.id}:out`, turn: r, dir: "out", from: w, to, channel, ts: Math.max(r.createdAt + 1, Number.isFinite(firstOut) ? firstOut : r.createdAt + 1) }]
     : [];
   const injected: Msg[] = injectTurnsOf(r)
@@ -171,9 +174,9 @@ export const messageOfPost = (p: PostDetailRecord): Msg => ({
 /** P7 ⑦ 身份聚合: 同身份的多化身在 rolepage 聚成一页 —— 消息双方都收敛到该身份的
  *  规范 target (canon, 见 makeDirectory)。缺省恒等: 老 daemon 快照没有 identity 时
  *  各化身各一页, 与旧行为一比一。 */
-export const allMessages = (records: readonly DetailRecord[], now: number, canon: (id: string) => string = (x) => x): Msg[] => {
+export const allMessages = (records: readonly DetailRecord[], now: number, canon: (id: string) => string = (x) => x, strictChats?: ReadonlySet<string>): Msg[] => {
   const echoes = injectEchoesOf(records);
-  return [...convTurns(records, now).flatMap((r) => messagesOfTurn(r, echoes)), ...records.filter(isPost).map(messageOfPost)]
+  return [...convTurns(records, now).flatMap((r) => messagesOfTurn(r, echoes, strictChats)), ...records.filter(isPost).map(messageOfPost)]
     .map((m) => (canon(m.from) === m.from && canon(m.to) === m.to ? m : { ...m, from: canon(m.from), to: canon(m.to) }))
     .sort((a, b) => a.ts - b.ts);
 };
@@ -194,6 +197,9 @@ export interface RoleStatus {
 export interface Directory {
   nameOf: (id: string) => string;
   labelOf: (id: string) => string;
+  /** 生效 strict 的聊天 base 集合 (P7-S3b): 这些群里的 turn 出气泡被压掉 —— 群窗只画
+   *  实际发进群的内容 (post 记录 / 账本行)。老 facts 没给 = 空集, 一切照旧。 */
+  strictChats: ReadonlySet<string>;
   /** `.fix` / `fix` / target / `user:x` → role id; undefined = 不认识。 */
   resolve: (ref: string) => string | undefined;
   fact: (id: string) => WorldFactWizard | undefined;
@@ -213,6 +219,7 @@ const fold = (s: string): string => stripSigil(s).toLowerCase();
 
 export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFacts): Directory => {
   const facts_ = new Map(facts.wizards.map((w) => [w.target, w] as const));
+  const strictChats = new Set(facts.strictChats ?? []);
   const turnTargets = new Set(records.filter(isTurn).map((r) => r.target).filter((t): t is string => !!t));
   const wizards = new Set([...facts_.keys(), ...turnTargets]);
   const chatName = (base: string): string => facts.chatNames[base] ?? "";
@@ -270,7 +277,7 @@ export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFact
       runningUntil: t > now ? t : 0, ...(waiting.length ? { waiting } : {}) };
   };
   const wx = new Map((facts.weixin ?? []).map((w) => [w.base, w] as const));
-  return { nameOf, labelOf, resolve, fact: (id) => facts_.get(id) ?? manifestationsOf(id).map((t) => facts_.get(t)).find(Boolean), chatName, weixin: (base) => wx.get(base), isWizard: (id) => wizards.has(id), status, wizards: () => [...wizards], canon };
+  return { nameOf, labelOf, strictChats, resolve, fact: (id) => facts_.get(id) ?? manifestationsOf(id).map((t) => facts_.get(t)).find(Boolean), chatName, weixin: (base) => wx.get(base), isWizard: (id) => wizards.has(id), status, wizards: () => [...wizards], canon };
 };
 
 // ── 会话 ─────────────────────────────────────────────────────────────

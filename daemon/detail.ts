@@ -159,9 +159,12 @@ export const recordMark = (rec: Omit<MarkDetailRecord, "kind" | "createdAt"> & {
 };
 
 // notify 贴进群的那段话: rolepage 把它画成发话 wizard 在那个群里的一条出消息。
-export const recordPost = (rec: Omit<PostDetailRecord, "kind" | "id" | "createdAt">): void => {
+// P7-S3b: id 可指定 —— 出站 tracker 的 hook 拿流 id 当 post id, 占位→交付同一流
+// 两次落账时 upsert 成一条 (detail 只画最终交付的那句)。
+export const recordPost = (rec: Omit<PostDetailRecord, "kind" | "id" | "createdAt"> & { id?: string }): void => {
   if (!store) return;
-  const full: PostDetailRecord = { kind: "post", id: `p${Date.now().toString(36)}${randomBytes(3).toString("hex")}`, createdAt: Date.now(), ...rec };
+  const { id, ...rest } = rec;
+  const full: PostDetailRecord = { kind: "post", ...rest, id: id ?? `p${Date.now().toString(36)}${randomBytes(3).toString("hex")}`, createdAt: Date.now() };
   store.put(full);
   forwardToRemote(full);
 };
