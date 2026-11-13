@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import ts from "typescript";
 import pino from "pino";
 import { ConfigSchema } from "../shared/config.js";
+import { chatPolicyOf } from "../daemon/chat-name.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { parseTagHeader } from "../shared/session-label.js";
 import { finalId } from "../daemon/message-events.js";
@@ -35,8 +38,11 @@ const streamBlock = closure("  const flushStream =", "  const openStream");
 const projectBlock = closure("  const pushProjectInfo =", "  // Cwd is CHAT-SCOPED");
 
 const STRICT_CHAT = "chat:wrStrict";
+// P7-S3: strictBase 不再内联直读 cfg.chatPolicy, 走 chatPolicyOf (含 chat-seen 缺省判定)
+// —— stateDir 必须隔离, 否则会扫真机的 known-chats.json。
 const cfgOf = (speech: string) => ConfigSchema.parse({
   bot: { botId: "t", secret: "t" },
+  daemon: { stateDir: mkdtempSync(join(tmpdir(), "strict-outbound-")) },
   chatPolicy: { [STRICT_CHAT]: { speech } },
   wrc: { mirror: { brief: true } },
 });
@@ -75,9 +81,9 @@ const build = (speech: "strict" | "implicit") => {
   const eventProgressGate = () => false;
   const eventOwnerGate = () => true;
   const isPrivate = (a: { channel?: string }) => a.channel === "";
-  const mkStrict = new Function("cfg", "baseOfKey", "isPrivate", "eventOwned",
+  const mkStrict = new Function("cfg", "baseOfKey", "isPrivate", "eventOwned", "chatPolicyOf",
     transpile(strictBlock + "\nreturn { strictBase, strictOf, strictChat, turnSilent };"))(
-    cfg, baseOfKey, isPrivate, eventOwned) as {
+    cfg, baseOfKey, isPrivate, eventOwned, chatPolicyOf) as {
     strictBase: (b: string) => boolean; strictOf: (c: string | undefined, t: string) => boolean;
     strictChat: (a: { channel?: string; target: string; activeEventId?: string }) => boolean;
     turnSilent: (a: { channel?: string; target: string; activeEventId?: string; turnFromChat?: boolean }) => boolean;

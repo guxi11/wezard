@@ -17,6 +17,7 @@ import { augmentedPath } from "../shared/exec-path.js";
 import { baseOfKey, keyOf, sameBot } from "../shared/session-label.js";
 import { sleep } from "../shared/std.js";
 import { identityOf, wizardStore } from "./wizard.js";
+import { knownChatsOf } from "./chat-seen.js";
 import { stewardIdentityOf } from "./steward.js";
 import { expandHome } from "../shared/paths.js";
 import { ChannelStore, type ChannelMsg } from "./channel-store.js";
@@ -672,6 +673,8 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger)
     const at = Number(body.create_time ?? 0) * 1000 || Date.now();
     if (!topicId) return;
     registerTopic(topicId);
+    // P7-S3: 频道也是聊天 (chat:<topic_id>) —— 首见登记, S3 后新开的频道默认 strict。
+    try { knownChatsOf(cfg).record("chat:" + topicId); } catch { /* 登记失败不挡频道事件 */ }
     if (asker) lastAsker.set(topicId, asker);
     // 第一次见到的频道从官方补最近 N 条 (reload / 断线空窗期的事件本地没有)。
     void backfill(client, cfg, log, topicId).catch((e: Error) => log.warn({ err: e.message, topicId }, "channel backfill failed"));

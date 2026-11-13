@@ -13,7 +13,8 @@ import { REMINDER_KINDS, TAIL_ORDER, parseEnvelope, parseReminders, renderRemind
 import { renderReceiptEnvelope } from "../daemon/peers.js";
 import { isTerminal } from "../shared/turn-state.js";
 import { chatPolicyOf } from "../daemon/chat-name.js";
-import { ConfigSchema } from "../shared/config.js";
+import { resetKnownChatsCache } from "../daemon/chat-seen.js";
+import { ConfigSchema, type Config } from "../shared/config.js";
 
 const line = (seq: number, over: Partial<ChatLine> = {}): ChatLine => ({
   chat: "chat:wrA", seq, at: 1000 + seq, id: `m${seq}`, author: "alice", kind: "human", text: `line-${seq}`, ...over,
@@ -134,13 +135,17 @@ assert.equal(isTerminal("passed"), true, "passed 是终态");
   assert.ok(rcpt.includes("已了结回执"), "passed 回执有自己的措辞, 不落进失败回执");
 }
 
-// ── 6. ChatPolicy.speech: 缺省 implicit, chatPolicyOf 透出 ──
+// ── 6. ChatPolicy.speech: 缺省走 chat-seen 判定 (S3 后首见 strict), chatPolicyOf 透出 ──
+// P7-S3: speech 缺省不再是常量 implicit —— 隔离 stateDir 测 (默认 stateDir 会碰真机 state)。
 {
-  const cfg = ConfigSchema.parse({ bot: { botId: "t", secret: "t" } });
-  assert.equal(chatPolicyOf(cfg, "chat:wrA").speech, "implicit", "缺省 implicit");
-  const strict = ConfigSchema.parse({ bot: { botId: "t", secret: "t" }, chatPolicy: { "chat:wrA": { speech: "strict" } } });
+  const tmpCfg = (extra: Record<string, unknown> = {}): Config =>
+    ConfigSchema.parse({ bot: { botId: "t", secret: "t" }, daemon: { stateDir: mkdtempSync(join(tmpdir(), "chat-record-")) }, ...extra });
+  const cfg = tmpCfg();
+  assert.equal(chatPolicyOf(cfg, "chat:wrA").speech, "implicit", "未在册 (没发生过往来) → implicit");
+  const strict = tmpCfg({ chatPolicy: { "chat:wrA": { speech: "strict" } } });
   assert.equal(chatPolicyOf(strict, "chat:wrA").speech, "strict");
   assert.equal(chatPolicyOf(strict, "chat:wrB").speech, "implicit", "别的群不受影响");
+  resetKnownChatsCache();
 }
 
 // ── 7. chat_* 工具: S2 起常规注册 (S1 曾判据④「隐藏注册」随四工具升级而反转, 逐条说明见回执) ──

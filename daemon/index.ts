@@ -49,6 +49,7 @@ import {
 import { makeWedocBridge } from "./wedoc.js";
 import { errText, installResponseTracker } from "./last-response.js";
 import { ChatRecords } from "./chat-records.js";
+import { knownChatsOf } from "./chat-seen.js";
 import { CHAT_BATCH_BUDGET, sliceBatch } from "../shared/chat-record.js";
 import { openSayMeter, sayVerdict } from "./strict-gate.js";
 import { openMembers } from "./members.js";
@@ -271,7 +272,7 @@ const main = async (): Promise<void> => {
   const members = openMembers(join(expandHome(cfg.daemon.stateDir), "members.json"));
   const responseTracker = installResponseTracker(ws.client, log.child({ mod: "chat-gate" }), (c) => wx.owns(c),
     (context) => responseFormatPolicy(cfg, context, (target) => chatUrlFor(cfg.daemon, target)),
-    (noteLine) => { try { chatRecords.record(noteLine.chat, { ...noteLine, at: Date.now() }); } catch { /* 记录失败不影响出站 */ } });
+    (noteLine) => { try { chatRecords.record(noteLine.chat, { ...noteLine, at: Date.now() }); knownChatsOf(cfg).record(noteLine.chat); } catch { /* 记录失败不影响出站 */ } });
   const mirrorStore = loadMirrorStore(cfg.wrc.mirror.attachmentsFile);
   // 定时任务表 —— 每条任务是 ~/.wezard/tasks/<id>.task.mjs 一份可注入代码的配置
   // (见 shared/task-file.ts)。目录是热加载的: wizard 改完文件不用 reload 守护进程。
@@ -530,7 +531,8 @@ const main = async (): Promise<void> => {
     void watchQueue(a, id, !bridge.hasMirrorTarget(a.principal));
   }   }, sourcePath, (w, c) => guardCharter(w, c), (chat, line) => {
     // P7-S1: dispatch 前写一行 human; 记录侧同步内存记账、后台落盘 (不 await)。
-    try { chatRecords.record(chat, { ...line, kind: "human" }); } catch { /* 记录失败不挡消息 */ }
+    // P7-S3: 人话是「首见」的登记点 —— noteHuman 先于 dispatch, 新群首条即按 strict 判 (验收数字 ①)。
+    try { chatRecords.record(chat, { ...line, kind: "human" }); knownChatsOf(cfg).record(chat); } catch { /* 记录失败不挡消息 */ }
   }, (base) => owedOfBase?.(base) ?? "[wezard] 本群未开严格模式 (speech=implicit) — 没有义务账; 回执按现行口径走。");
   // 频道（topic）事件层：接在 inbound 之后，让频道消息复用同一套 gate / route / mirror。
   installChannelEvents(ws.client, cfg, log.child({ mod: "channel" }));

@@ -67,7 +67,7 @@ import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, windowLa
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { readHookMode } from "../shared/hook-mode.js";
 import { isWxFrame } from "../shared/wx-text.js";
-import { chatNameOf, listChatNames, peerAddress } from "./chat-name.js";
+import { chatNameOf, chatPolicyOf, listChatNames, peerAddress } from "./chat-name.js";
 import { stripAnsi, paneIsBusy, codexTurnBusy, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, lastModel, lastUserTurn, talkRounds, openToolUses, turnClosed, renderDialog, stripForChat, parseClosing, type PeerInfo, type PeerReply } from "./peers.js";
 
 // PATH augmentation: launchd / systemd start the daemon
@@ -3864,12 +3864,12 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // `[mirror]` 系统提示 —— 它们都不走这道门。
   // 只在 brief 下生效: 抑制的前提是详情页兜得住内容, 而 turn store 只有 brief 在写。
   // 私聊轮 (wizard 之间, 非 public) 同理: 它的回复属于那场私聊, 只进双方的 rolepage。
-  // ── P7-S2 严格群出站门 (chatPolicy.<chat>.speech = strict) ──────────────
+  // ── P7-S2 严格群出站门 (chatPolicy.<chat>.speech = strict; S3 起缺省=首见 strict) ──
   // 模型的一切「发言」不进严格群: 人只见占位 (ack 的「链接 …」) 与详情页, 正文走
   // chat_reply (finishPlaceholder / notifyChat 退路) 与 chat_say 两条被批准的口子。
-  // 私聊 (channel === "") 与 implicit 群照旧。判据直读 config 的 chatPolicy
-  // (与 chat-name.chatPolicyOf 同一语义 —— speech 缺省即 implicit, 无需 zod 补默认)。
-  const strictBase = (base: string): boolean => cfg.chatPolicy?.[base]?.speech === "strict";
+  // 私聊 (channel === "") 与 implicit 群照旧。P7-S3 起不再内联直读 config ——
+  // 与 chat-name.chatPolicyOf 走同一判定 (显式 chatPolicy > 首见 strict > 存量 implicit)。
+  const strictBase = (base: string): boolean => chatPolicyOf(cfg, base).speech === "strict";
   const strictOf = (channel: string | undefined, target: string): boolean =>
     channel !== "" && strictBase(channel ?? baseOfKey(target));
   const strictChat = (a: AttachState): boolean => strictOf(a.channel, a.target);

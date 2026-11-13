@@ -11,6 +11,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ChatPolicy, type Config, type TierName } from "../shared/config.js";
 import { patchJsonc } from "../shared/config-writer.js";
+import { speechDefaultOf } from "./chat-seen.js";
 import { expandHome } from "../shared/paths.js";
 import { baseOfKey, isInternalKey, tagOfKey } from "../shared/session-label.js";
 import { settleName, wizardStore } from "./wizard.js";
@@ -66,8 +67,10 @@ export const chatBaseOf = (cfg: Config, ref: string): string => {
 // 此前默认只覆盖 wezard 与微信 ClawBot 群聊, 其余群靠管家问人一句才开 —— 每新起一个群都要人再点一次头,
 // 漏掉的那个群里 wizard 之间就当着人派活、回复也进群 (pagesite 就是这样冒的泡)。
 // 默认不落盘, 已有的聊天不必迁移。
+// speech 没写 (P7-S3 起) = chat-seen 的缺省判定: S3 后首见的群聊 strict, 存量/单聊 implicit
+// (known-chats.json 的 boot 快照; 显式 chatPolicy 永远优先)。
 export const chatPolicyOf = (cfg: Config, target: string): ChatPolicy & { topOnly: boolean; speech: "implicit" | "strict" } =>
-  ((p) => ({ ...p, topOnly: p.topOnly ?? true, speech: p.speech ?? "implicit" }))(ChatPolicy.parse(cfg.chatPolicy?.[baseOfKey(target)] ?? {}));
+  ((p) => ({ ...p, topOnly: p.topOnly ?? true, speech: p.speech ?? speechDefaultOf(cfg, baseOfKey(target)) }))(ChatPolicy.parse(cfg.chatPolicy?.[baseOfKey(target)] ?? {}));
 
 /** 群的默认会话就是 router; 统一取 models.router, 非管家不套档。
  *  内部 key (daemon 内建的记忆整理执行体, `wezard:internal#steward`) 同属管家型: 它带着 slot 名,
