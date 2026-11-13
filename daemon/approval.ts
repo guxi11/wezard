@@ -30,6 +30,12 @@ import { appendUnique } from "../shared/config-writer.js";
 import { claudeConfigWrite, type ClaudeConfigHit } from "../shared/claude-config-path.js";
 import type { NativeModalAnswer } from "./mirror-bridge.js";
 import { recordApproval, recordApprovalDecision, buildDetailUrl, getDetail, openTurnsOf, targetOfSession } from "./detail.js";
+import { isApprentice } from "./apprentice.js";
+
+/** 学徒 (v3 §7) 的会话级豁免一律不生效 (⏱ 窗口 / skipAll): 卡永远到人。按「这个会话
+ *  最近一轮记在哪个 target 名下」(targetOfSession) 判定 —— 与 bot 归属判定同源。 */
+const apprenticeSession = (sessionId: string): boolean =>
+  isApprentice(wizardStore(), targetOfSession(sessionId) ?? "");
 import type { Handler } from "./http.js";
 import { json, readBody } from "./http.js";
 import { botOfKey, displayName, tagBadge, withTagHeader, withBot } from "../shared/session-label.js";
@@ -1607,7 +1613,7 @@ export const runMirrorPickerFlow = async (
       if (!r.ok) await note(`⚠️ 已记录拒绝，但代按失败（${r.reason ?? "未知"}），请回 CLI 处理。`);
       return true;
     }
-    if (d === "allow_window" && cfg.approval.windowMinutes > 0) {
+    if (d === "allow_window" && cfg.approval.windowMinutes > 0 && !apprenticeSession(sessionId)) {
       setAutoWindow(chatKey, cfg.approval.windowMinutes * 60_000, {
         toolName, toolInput, cwd, transcriptTail: tail, danger, singleNote, sessionName,
       });
@@ -2305,7 +2311,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // 名单 / askRules / ⏱窗口 / 会话缓存 (原 danger.skipAll, 2026-10-28 并入 mode)。
     // denyRules / EnterPlanMode 拦截在前面已生效 (拒绝不是审批);
     // AskUserQuestion / ExitPlanMode 交互卡在上方分支已返回, 不受影响。
-    if (!nativePermission && cfg.approval.mode === "skip_all") {
+    if (!nativePermission && cfg.approval.mode === "skip_all" && !apprenticeSession(sessionId)) {
       log.info({ toolName, sessionId }, "skip_all auto allow");
       json(res, 200, { decision: "allow", reason: "skip_all" } satisfies ApproveResp);
       settleGuard();
@@ -2356,7 +2362,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
 
     // Auto-approve window: while active for THIS chat, requests short-circuit to allow.
     // mustCard (危险名单 / askRules) 的请求不吃窗口 — 即使开着 ⏱ 也逐条确认。
-    if (!mustCard && approver && isAutoWindowActive(approver)) {
+    if (!mustCard && approver && !apprenticeSession(sessionId) && isAutoWindowActive(approver)) {
       const remainSec = Math.ceil(autoWindowRemainingMs(approver) / 1000);
       log.info({ toolName, sessionId, chatKey: approver, remainSec }, "auto-window allow");
       json(res, 200, {
@@ -2575,7 +2581,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
       }
     }
 
-    if (!mustCard && decision === "allow_window" && cfg.approval.windowMinutes > 0) {
+    if (!mustCard && decision === "allow_window" && cfg.approval.windowMinutes > 0 && !apprenticeSession(sessionId)) {
       setAutoWindow(approver, cfg.approval.windowMinutes * 60_000, {
         toolName,
         toolInput: display,

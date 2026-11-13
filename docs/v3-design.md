@@ -194,7 +194,10 @@ P1 曾把 🧙‍♂️ 记号铺到全部显示面; 人随后拍板修正: wiza
 ### 7.2 改成什么
 
 - **身份**: `kind:"apprentice"`, 每 bot 实例全局唯一 (boot 保证存在, 名字人定, 缺省「学徒」); workspace 人指定 (缺省 `~`); home = 与 owner 的单聊 (`user:<owner>`), 不属于任何群/组团, 但可被人授权进群发言。
-- **连续且唯一的会话**: 唯一 manifestation —— `/new` 对学徒禁用 (CLI 侧拦不住就 daemon 拦: 学徒的 /new 改为「整理记忆 + 原会话继续」); pane 死亡 → respawn 同身份 (memory 保留, transcript --resume 接续); `drop`/`evictStaleName`/`stop_wizard` 逻辑退役对 `kind:"apprentice"` 一律拒绝。
+- **连续且唯一的会话**: 唯一 manifestation —— `/new` 对学徒禁用 (CLI 侧拦不住就 daemon 拦: 学徒的 /new 改为「整理记忆 + 原会话继续」); pane 死亡 → respawn 同身份 (memory 保留, transcript --resume 接续, dispatch 的既有复活路径); `drop`/`forgetWizard`/`evictStaleName`/`stop_wizard(end)` 对 `kind:"apprentice"` 一律拒绝 (interrupt 照常)。
+- **一个连续会话挂多个群 (不是每群一个化身)**: 任何群点名学徒都经 P2 锚点回落落它的唯一会话, 不自动新建化身; 每条注入的信封带 `chat=` 属性 (renderHumanEnvelope) 标明来自哪个群, 回复按发话群回去 (dispatch.channel) —— 输入源永远分得清哪个群。这层是「群聊严格治理」(成员制按 (群, 身份) 落账) 的前置。
+- **出站接缝 (为「群聊严格治理」预留)**: 「这一句话怎么进群」收在 `daemon/outbound.ts` 的 `deliverToChat(client, chatKey, content)` 一个函数里 —— 现在 wezard send / MCP 推送 / 定时任务预告都走它; 将来切显式工具出站 (chat_say / chat_reply / chat_pass) 只改这一处。
+- **自主巡检最小化**: config `wrc.apprentice.patrol` 是权威 (boot 装配, 幂等) —— 触发 = 固定 id 的 quiet 定时任务 (默认关, 开启时间隔下限 30 分钟); 上限 = 每轮 maxItems 条 (写进指令); 产物默认只进学徒自己的会话与 rolepage, 要发群必须显式动作 (notify / send_file); 没事就 QUIET 一行收尾, 不许无界自转。
 - **与 handoff / context cut 的相处**: handoff 保留为学徒的**上下文管理工具** (简报压缩), 但: ① 学徒的 charter 写死「交接前先 wizard_remember」; ② 学徒的提醒线提前 (`handoffAt` 打五折), 鼓励小步交接而非撑满; ③ context cut 时 armCharter 重注入 (已有机制) + 附「你是学徒, 连续身份」句。
 - **输入源与主动做事的触发面**: ① 人私聊 bot 点名学徒 (待人拍板 ③: 私聊默认接待是全局管家还是学徒 —— 推荐全局管家, 学徒被点名才上); ② scheduler: `schedule_task` 以学徒为 target, `promptWantsFreshWizard` 对学徒 target 强制 false、TaskRecord.fresh 拒绝; ③ 管家/全局管家/人 `tell_peer` 派活; ④ 自主巡检: 学徒可给自己 schedule_task (定时汇总/巡检/备忘)。
 - **与组团/群管家的权限关系**: 学徒**代表人** → 读面全量 (roster/read_chat 与全局管家同级), 不受 steward 手刹 (它不是管家); 写面照常走审批卡, **卡永远到人** —— 学徒会话禁用 auto-allow window 与 skipAll 豁免 (approval.ts 会话豁免记录处按 kind 拦); 群管家可横向派活给学徒, 学徒进群发言带 `🧙‍♂️ 学徒：` 头。

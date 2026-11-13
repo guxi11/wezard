@@ -219,6 +219,16 @@ const Wrc = z.object({
   // 气泡时, WeCom 会把 `@<显示名>` 塞进正文; 配上真名才能把它从 prompt 里剥干净。
   botNames: z.array(z.string()).default([]).describe("机器人在企微里的显示名 (可多个业务别名), 用于剥掉 @; 内置 wezard 恒生效"),
   channel: Channel.default({}).describe("频道 (灰度): 每条消息先由轻量判官决定是否回应"),
+  // v3 §7 学徒: 每 bot 实例唯一、代表人、连续唯一会话 (不是每群一个化身)。
+  apprentice: z.object({
+    name: z.string().min(1).default("学徒").describe("学徒的名字 (人定; 点名 / 派活 / 定时都用它)。"),
+    workspace: z.string().default("~").describe("学徒的工作区; 它唯一的会话起在这里"),
+    patrol: z.object({
+      enabled: z.boolean().default(false).describe("学徒自主巡检: 到点向学徒会话注入一条有界巡检指令 (quiet, 不进群)"),
+      everyMin: z.number().int().min(30).max(1440).default(240).describe("巡检间隔 (分钟); 30 为下限, 不许无界自转"),
+      maxItems: z.number().int().min(1).max(20).default(5).describe("每轮巡检最多整理几条发现"),
+    }).default({}),
+  }).default({}),
 }).transform((v) => {
   // Pin the active backend so downstream readers see a concrete value.
   const backend = resolveCliBackend(v);

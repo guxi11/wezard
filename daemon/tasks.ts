@@ -14,19 +14,15 @@
 import type { WSClient } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
 import type { Config } from "../shared/config.js";
-import { baseOfKey, withTagHeader } from "../shared/session-label.js";
+import { baseOfKey } from "../shared/session-label.js";
 import { interpolate } from "../shared/std.js";
 import { describeTrigger, isDue, nextFire } from "../shared/trigger.js";
 import { type TaskRecord, type TaskState } from "../shared/task-file.js";
 import type { TaskRegistry } from "./task-registry.js";
 import { runGate } from "./task-gate.js";
 import { createKeyedScheduler } from "../shared/keyed-scheduler.js";
+import { deliverToChat } from "./outbound.js";
 import type { ScheduledDispatchOptions, ScheduledResult } from "./scheduled-delivery.js";
-
-const stripPrefix = (s: string): string => {
-  const i = s.indexOf(":");
-  return i >= 0 ? s.slice(i + 1) : s;
-};
 
 // 一条定时的 prompt 本身就在说「建一个 wizard 去干这件事」时, 它要的显然不是
 // 在某个已有会话里续 —— 哪怕排班时点了 tag, 那个 tag 也只是「在谁的聊天/目录下
@@ -104,10 +100,8 @@ interface SchedulerDeps {
 }
 
 const announce = async (client: WSClient, target: string, markdown: string): Promise<void> => {
-  await client.sendMessage(stripPrefix(baseOfKey(target)), {
-    msgtype: "markdown",
-    markdown: { content: withTagHeader(target, markdown) },
-  });
+  // 进群出站走唯一接缝 (v3 §7): 将来切工具出站只改 deliverToChat 一处。
+  await deliverToChat(client, baseOfKey(target), markdown);
 };
 
 export const startScheduler = ({ client, registry, log, inject, cwdOf, fallbackTarget, ready }: SchedulerDeps): { stop: () => void; tick: () => void } => {

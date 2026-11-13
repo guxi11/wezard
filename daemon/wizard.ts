@@ -19,6 +19,16 @@ import { expandHome } from "../shared/paths.js";
 import { loadAutoNames } from "./wizard-names.js";
 import { baseOfKey, keyOf, normalizeTag, stripSigil, tagOfKey, uniqueTag, WIZARD_MARK } from "../shared/session-label.js";
 
+/** 宪章学徒章 (§7; renderCharter 在 self.kind === "apprentice" 时追加)。 */
+const renderApprenticeRules = (): string[] => [
+  "## 你是学徒 (连续身份)",
+  "- 每 bot 实例唯一, 代表人: 不可被退役 / 顶名; `/new` 对你无效, pane 死了会带着记忆同身份重生 —— 你的价值在连续, 不在新鲜。",
+  "- 一个连续会话服务多个群: 每条注入的信封都带 `chat=` 属性标明来自哪个群, 回复自动回那个群; 分不清出处时先看信封, 别猜。",
+  "- `handoff` 只作上下文工具 (压简报), 会话与身份不变; **交接前先把值得跨会话留下的用 `wizard_remember` 记下**。",
+  "- 你的审批卡永远到人: 会话级豁免 (⏱ 窗口 / skipAll) 对你禁用 —— 你代表人动手, 人必须看得见。",
+  "- 巡检 / 自主整理的产物默认只进你自己的会话与 rolepage; 要发群必须显式动作 (`notify` / `send_file`), 巡检指令里给了每轮上限, 超过就分轮。",
+];
+
 /** 身份的种类 (v3): 全局管家 / 群管家 / 学徒 / 工人。归组与金字塔 (§3/§4/§7) 用, 切片一先落字段与缺省值。 */
 export type WizardKind = "global-steward" | "steward" | "apprentice" | "worker";
 export const WIZARD_KINDS: readonly WizardKind[] = ["global-steward", "steward", "apprentice", "worker"];
@@ -313,6 +323,8 @@ export const evictStaleName = async (
 ): Promise<WizardRecord | undefined> => {
   const rec = store?.byName(want);
   if (!store || !rec) return undefined;
+  // 学徒 (§7): 名字跟着连续身份走, 永远不算 stale —— 冷多久都不顶、不收。
+  if (rec.kind === "apprentice") return undefined;
   const kin = store.all().filter((w) => identityOf(w) === identityOf(rec));
   if (kin.some((w) => keep.includes(w.target))) return undefined;
   if (kin.some((w) => now - Math.max(deps.lastActivity(w.target), w.bornAt) <= NAME_STALE_MS)) return undefined;
@@ -389,6 +401,8 @@ export interface WizardBrief {
   /** 专长 (WizardRecord.expertise); 缺省 = 没写。 */
   expertise?: string;
   cwd: string;
+  /** 身份种类 (§7): 学徒的宪章带学徒章; 缺省 = 普通。 */
+  kind?: WizardKind;
 }
 
 // 档位行: 各档由轻到重排开, 常用的三档挂一个词说用途; 两头的 mini / ultra 靠位置自明。
@@ -809,6 +823,7 @@ export const renderCharter = (a: CharterArgs): string => {
     parts.push("## 本工作区记忆", a.workspaceMemory, "");
   }
   if (a.steward && a.topOnly) parts.push(...renderStewardRules(a), "");
+  if (a.self.kind === "apprentice") parts.push(...renderApprenticeRules(), "");
   if (a.lead) parts.push(...renderLeadRules(true), "");
   if (a.siblings.length > 0) {
     parts.push(

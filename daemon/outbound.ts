@@ -22,6 +22,28 @@ interface MsgReq {
   markdown?: string;
 }
 
+/** 「这一句话怎么进群」的唯一出口 (v3 §7 出站接缝): 给定会话 target (可带 #tag) 与
+ *  正文, 加上气泡头交给人。现在走企微 markdown 直发; 将来「群聊严格治理」切显式工具
+ *  出站 (chat_say / chat_reply) 时, 只改这一处 —— 所有进群路径 (wezard send / MCP 推送 /
+ *  定时任务预告 / 学徒入群) 都必须经过这里, 不许各自直呼 client.sendMessage。 */
+export const deliverToChat = async (
+  client: WSClient,
+  chatKey: string,
+  content: string,
+  log?: Logger,
+): Promise<boolean> => {
+  try {
+    await client.sendMessage(stripPrefix(chatKey), {
+      msgtype: "markdown",
+      markdown: { content: withTagHeader(chatKey, content) },
+    });
+    return true;
+  } catch (e) {
+    log?.error({ err: (e as Error).message, chatKey }, "deliverToChat failed");
+    return false;
+  }
+};
+
 export const makeMessageHandler = (client: WSClient, log: Logger): Handler => {
   return async (req, res) => {
     const body = (await readBody(req)) as Partial<MsgReq>;
@@ -35,19 +57,12 @@ export const makeMessageHandler = (client: WSClient, log: Logger): Handler => {
       json(res, 503, { ok: false, error: "ws_disconnected" });
       return;
     }
-    try {
-      // Callers pass the daemon-internal target key verbatim (`user:xxx#foo`) —
-      // keep the `#tag` visual on the content before stripping it off the id,
-      // so CLI/MCP pushes match mirror bubbles from the same session.
-      await client.sendMessage(stripPrefix(chat), {
-        msgtype: "markdown",
-        markdown: { content: withTagHeader(chat, content) },
-      });
+    // 进群出站走唯一接缝 deliverToChat (§7); 接缝内部负责 #tag 头与 chatid 剥前缀。
+    if (await deliverToChat(client, chat, content, log)) {
       log.info({ chat, len: content.length }, "tx markdown");
       json(res, 200, { ok: true });
-    } catch (e) {
-      log.error({ err: (e as Error).message }, "send failed");
-      json(res, 502, { ok: false, error: (e as Error).message });
+    } else {
+      json(res, 502, { ok: false, error: "send failed" });
     }
   };
 };

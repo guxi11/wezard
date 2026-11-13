@@ -22,6 +22,7 @@ import { botTagOf } from "./bot-mux.js";
 import { chatNameOf, clearChatName, listChatNames, setChatName, stewardTierOf, type CharterGuard } from "./chat-name.js";
 import { evictStaleName, manifestationOf, reclaimChatName, wizardStore, type EvictDeps } from "./wizard.js";
 import { stewardRoute as resolveSteward } from "./steward.js";
+import { isApprentice } from "./apprentice.js";
 import { truncate } from "../shared/std.js";
 import { hookModePath, readHookMode, writeHookMode } from "../shared/hook-mode.js";
 
@@ -818,6 +819,13 @@ export const installInboundRouter = (
     // picks which wizard (re)spawns; the name is also the tmux window name.
     const nu = parseNewCommand(text);
     if (nu) {
+      // 学徒 (§7) 是连续身份、唯一会话: /new 不换会话, 改为「整理记忆 + 原会话继续」。
+      if (isApprentice(wizardStore(), who)) {
+        const { err } = await ensureSession(who, asked, cfg.wrc.apprentice.workspace);
+        if (err) { await replyText(frame, msg, who, err); return { stop: true }; }
+        await send(frame, msg, who, "[系统] /new 已拦: 学徒是连续身份、唯一会话, 不换会话。请整理记忆 (值得跨会话留下的用 wizard_remember 记下) 后在原会话继续; 上下文紧张用 handoff 压简报, 会话与身份不变。");
+        return { stop: true };
+      }
       const { err } = await autoSpawnAndAttach(who, asked, nu.model);
       if (err) {
         await replyText(frame, msg, who, err);
@@ -849,6 +857,11 @@ export const installInboundRouter = (
     // and drop the binding (no `--resume` resurrection). Routed by `.name` like
     // /stop, so `/kill #docs` only takes down that sibling.
     if (isKillCommand(text)) {
+      // 学徒 (§7) 不可退役: /kill 会去掉绑定且不复活, 对学徒是身份谋杀。
+      if (isApprentice(wizardStore(), who)) {
+        await replyText(frame, msg, who, "学徒是连续身份, 不可 /kill —— pane 死了会带着记忆同身份重生; 要停它这一轮用 /stop。");
+        return { stop: true };
+      }
       const r = await bridge.killPane(who);
       await replyText(frame, msg, who, r.ok ? "🗑️ 会话已结束，pane 已移除" : `[wezard] /kill failed: ${r.reason ?? "unknown"}`);
       return { stop: true };
@@ -977,8 +990,11 @@ export const installInboundRouter = (
     // v3 §3: 管家接待的新化身与 slash 命令同权 —— 裸消息也是该聊天的第一条消息,
     // 直接在身份的工作区里起 pane, 不再回「还没有会话 — 发 /new」。其余 named slot
     // 照旧 (点一个名字 ≠ 创建它, 创建走 spawn 的 409-clash 路径)。
-    if (!bridge.hasMirrorTarget(who) && (text.trimStart().startsWith("/") || freshSteward.has(who))) {
-      const { err } = await ensureSession(who, asked, freshSteward.get(who) || undefined);
+    // 学徒的首触同样在这里起 pane (工作区 = wrc.apprentice.workspace) —— 之后 pane 死亡由
+    // dispatch 的 --resume 自动同身份重生 (§7), 不再走这条。
+    const apprenticeHere = isApprentice(wizardStore(), who);
+    if (!bridge.hasMirrorTarget(who) && (text.trimStart().startsWith("/") || freshSteward.has(who) || apprenticeHere)) {
+      const { err } = await ensureSession(who, asked, freshSteward.get(who) || (apprenticeHere ? cfg.wrc.apprentice.workspace : undefined));
       if (err) {
         await replyText(frame, msg, who, err);
         return { stop: true };

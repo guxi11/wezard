@@ -68,6 +68,7 @@ import { startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARG
 import type { Asker, TurnFrom } from "../shared/detail-store.js";
 import { applyChatNames, chatBaseOf, chatNameOf, chatPolicyOf, clearChatName, listChatNames, normChatName, peerAddress, planChatNames, setChatName, stewardTierOf, type CharterChange, type CharterGuard } from "./chat-name.js";
 import { isStewardTarget, markGlobalSteward, stewardRoute } from "./steward.js";
+import { apprenticeOf, ensureApprentice, ensurePatrolTask, handoffLineOf, isApprentice } from "./apprentice.js";
 import {
   bindWizardStore,
   loadWizardStore,
@@ -2750,6 +2751,11 @@ const main = async (): Promise<void> => {
     // 新聊天 (还没有任何会话) 的裸消息由它接待 (inbound stewardRoute); 未认领的新装机不造幽灵记录。
     const gs = markGlobalSteward(wizards, cfg.defaultChat);
     if (gs.marked) log.child({ mod: "wizard" }).info({ target: gs.target }, "global steward anchored at home default session");
+    // v3 §7: 学徒落位 —— home 是单聊时保证唯一记录存在 (住在 home 的一个 slot, 不占默认会话);
+    // 幂等, 已有就不动 (人改过名字/职责以名册为准)。home 未认领不造幽灵。
+    const ap = ensureApprentice(wizards, cfg.defaultChat, cfg.wrc.apprentice.name);
+    if (ap.created) log.child({ mod: "wizard" }).info({ target: ap.target }, "apprentice anchored at home DM slot");
+    else if (ap.skipped) log.child({ mod: "wizard" }).info({ reason: ap.skipped }, "apprentice not anchored (home not a DM yet)");
     const planApiStore: PlanStore = {
       all: () => plans.all(),
       get: (id) => plans.get(id),
@@ -2810,7 +2816,7 @@ const main = async (): Promise<void> => {
     const handoffNudged = new Set<string>();
     const handoffNudge = (t: string): string[] => {
       const i = m.sessionInfo(t);
-      if (!i?.sessionId || handoffNudged.has(i.sessionId) || i.contextTokens < handoffAt(lastModel(i.jsonlPath) || i.model)) return [];
+      if (!i?.sessionId || handoffNudged.has(i.sessionId) || i.contextTokens < handoffLineOf(wizards, t, lastModel(i.jsonlPath) || i.model)) return [];
       handoffNudged.add(i.sessionId);
       return [`你的上下文已到 ${Math.round(i.contextTokens / 1000)}k: 该判断要不要 \`handoff\` 了 —— 手上这摊活告一段落、或往后的活不再依赖前面的大段材料, 就交接 (值得跨会话留下的先 \`wizard_remember\`); 还在一件离不开它们的活中间, 做完这一段再交`];
     };
@@ -3081,6 +3087,7 @@ const main = async (): Promise<void> => {
       address: peerAddress(cfg, target),
       description: wizards.get(target)?.description ?? "",
       ...(wizards.get(target)?.expertise ? { expertise: wizards.get(target)!.expertise } : {}),
+      ...(wizards.get(target)?.kind && wizards.get(target)!.kind !== "worker" ? { kind: wizards.get(target)!.kind } : {}),
       cwd: m.getCwd(target).runningCwd,
     });
 
@@ -3246,7 +3253,7 @@ const main = async (): Promise<void> => {
         model: info?.model ?? "",
         ...(info?.effort ? { effort: info.effort } : {}),
         contextTokens: info?.contextTokens ?? 0,
-        handoffSuggested: !!info && info.contextTokens > handoffAt(lastModel(info.jsonlPath) || info.model),
+        handoffSuggested: !!info && info.contextTokens > handoffLineOf(wizards, self, lastModel(info.jsonlPath) || info.model),
       };
     };
 
@@ -3833,8 +3840,9 @@ const main = async (): Promise<void> => {
     // 收掉一个 wizard。interrupt = 打断它这一轮 (Esc); end = 结束它并回收 pane。
     // 自己终结自己是合法的 (分身干完活自我了结), 代价是这次工具调用不会返回 ——
     // 回执只在 rolepage (生命周期事件不进群); 同群的 wizard 从名册增量里得知。
-    /** 抹掉一个已经没有未结束计划的 wizard 身份。 */
+    /** 抹掉一个已经没有未结束计划的 wizard 身份。学徒 (§7) 永不可抹 —— 连续身份。 */
     const forgetWizard = (target: string): boolean => {
+      if (isApprentice(wizards, target)) return false;
       if (planRetirementBlock(target)) return false;
       wizards.drop(target);
       return true;
@@ -3853,6 +3861,10 @@ const main = async (): Promise<void> => {
       // 会话 —— end 视为早已结束, forget 删掉记录、腾出名字。interrupt 无从谈起。
       const found = r.ok || r.candidates?.length ? undefined : ((w) => (w && sameBot(self, w.target) ? w : undefined))(wizards.byName(addrOf(b)));
       const cold = found && !m.chatTargets(baseOfKey(found.target)).includes(found.target) ? found : undefined;
+      if (cold && found?.kind === "apprentice") {
+        json(res, 409, { ok: false, target: found.target, reason: "学徒是连续身份 (代表人, 每 bot 实例唯一), 不可结束或退役" });
+        return;
+      }
       if (cold && (b.mode ?? "end") === "end") {
         if (retiringWizardTargets.has(cold.target)) { json(res, 409, { ok: false, reason: "wizard retirement is already in progress" }); return; }
         retiringWizardTargets.add(cold.target);
@@ -3871,6 +3883,11 @@ const main = async (): Promise<void> => {
       if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
       const { target } = r;
       const end = (b.mode ?? "end") === "end";
+      // 学徒 (§7) 是连续身份: 不可结束/退役 (pane 死亡会自动同身份重生); 打断它这一轮 (interrupt) 照常。
+      if (end && isApprentice(wizards, target)) {
+        json(res, 409, { ok: false, target, reason: "学徒是连续身份 (代表人, 每 bot 实例唯一), 不可结束或退役; 要停它这一轮用 mode:'interrupt'" });
+        return;
+      }
       if (end && retiringWizardTargets.has(target)) { json(res, 409, { ok: false, reason: "wizard retirement is already in progress" }); return; }
       if (end) retiringWizardTargets.add(target);
       try {
@@ -4057,7 +4074,10 @@ const main = async (): Promise<void> => {
       //   · prompt 自己就在说「建两个 wizard 去干 xxx」—— 这时 name 只是「在谁的聊天/
       //     目录下办」, 不是「在它的上下文里续」。
       // `fresh` 显式传入压过这两条推断 (要强行在该 wizard 那一轮里续就传 false)。
-      const fresh = typeof b.fresh === "boolean" ? b.fresh : !address || promptWantsFreshWizard(prompt);
+      // 学徒 (§7) 是连续唯一会话: 定时到点永远注入它自己的会话, fresh 一律拒 (显式 true 也不行)。
+      const fresh = isApprentice(wizards, target)
+        ? false
+        : typeof b.fresh === "boolean" ? b.fresh : !address || promptWantsFreshWizard(prompt);
       const note = (b.note ?? "").toString();
       const id = uniqueId(slugify((b.id ?? "").toString() || note || prompt.slice(0, 24), "task"), tasks.takenIds());
       const created = tasks.create({ id, trigger, prompt, target, fresh, quiet: b.quiet === true, note, createdBy: self });
@@ -4576,6 +4596,11 @@ const main = async (): Promise<void> => {
       })().catch((e: unknown) => log.warn({ err: (e as Error).message }, "memory steward: notice fan-out failed")),
     };
   }
+
+  // v3 §7 学徒自主巡检: boot 时按 config 装配 (config 是权威; 幂等)。
+  const apTarget = apprenticeOf(wizardStore())?.target ?? "";
+  const patrol = ensurePatrolTask(tasks, cfg, apTarget);
+  if (patrol.active) log.child({ mod: "apprentice" }).info({ everyMin: cfg.wrc.apprentice.patrol.everyMin, recreated: patrol.recreated }, "apprentice patrol scheduled");
 
   // 定时调度器 — 每 20s 检查任务表, 到点把 prompt 注入目标 wizard。
   const scheduler = startScheduler({
