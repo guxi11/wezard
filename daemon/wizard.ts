@@ -13,13 +13,33 @@
 // 本模块只有两类东西: 一个写盘的注册表 (唯一副作用), 和一堆把记录渲染成文字的
 // 纯函数。真正的动作 (spawn / inject / kill) 全在 mirror-bridge, 这里一个都不做。
 import { randomUUID } from "node:crypto";
+import { copyFileSync, existsSync, statSync } from "node:fs";
 import { loadJsonMap } from "../shared/json-map-store.js";
+import { expandHome } from "../shared/paths.js";
 import { loadAutoNames } from "./wizard-names.js";
 import { keyOf, normalizeTag, stripSigil, tagOfKey, uniqueTag, WIZARD_MARK } from "../shared/session-label.js";
 
+/** 身份的种类 (v3): 全局管家 / 群管家 / 学徒 / 工人。归组与金字塔 (§3/§4/§7) 用, 切片一先落字段与缺省值。 */
+export type WizardKind = "global-steward" | "steward" | "apprentice" | "worker";
+export const WIZARD_KINDS: readonly WizardKind[] = ["global-steward", "steward", "apprentice", "worker"];
+/** 缺省种类: 聊天的默认会话 (untagged target) 是那个群的管家, 其余都是工人。 */
+const defaultKindOf = (target: string): WizardKind => (tagOfKey(target) ? "worker" : "steward");
+
+/** 记录所属的身份 id。老盘上还没迁移的记录没有这个字段 —— 一律按自己的 target 回落,
+ *  所以「未迁移」和「已迁移 (1:1)」在这条读取路径上不可区分, 迁移幂等因此有据可依。 */
+export const identityOf = (w: { target: string; identity?: string }): string => w.identity || w.target;
+
 export interface WizardRecord {
-  /** 会话 key, 即身份本身: `chat:xxx` 或 `chat:xxx#tag`。 */
+  /** 会话 key: `chat:xxx` 或 `chat:xxx#tag`。v3 起它是「身份在该聊天的化身」的坐标,
+   *  不再是身份本身 —— 身份看 `identity`; 路由/回执/账本仍只认这个字符串。 */
   target: string;
+  /** 身份 id: 同一身份的多条 wizard 记录 (每群一条化身) 共享它。存量记录 1:1 迁移
+   *  (identity = 自己的 target, 稳定不变); 新记录缺省开自己的身份。 */
+  identity?: string;
+  /** 人给的职责名 —— 身份的归组键之一 (身份的归组键 = role + workspace)。缺省 = 没写。 */
+  role?: string;
+  /** 身份种类; 缺省按 target 推 (`defaultKindOf`)。 */
+  kind?: WizardKind;
   /** 全局唯一的名字, 即它的地址 `🧙‍♂️ name`。"" 只出现在还没被 claim 过的老记录上 ——
    *  第一次被任何地方问到名字时按「默认会话取聊天名, 分身取 slot id」补上并去重。 */
   name: string;
@@ -56,11 +76,13 @@ export interface WizardStore {
   /** Consume the next automatic name (never reused), skipping globally occupied strings and `inUse`. */
   nextName: (inUse?: (name: string) => boolean) => string;
   get: (target: string) => WizardRecord | undefined;
-  /** 全局名字 → 记录 (大小写不敏感; `.fix` / `fix` 都认)。 */
+  /** 名字 → 身份的锚点记录 (大小写不敏感; `fix` / `🧙‍♂️ fix` 都认)。名字是身份的地址:
+   *  同身份的多个化身折叠到锚点 (target === identity 那条), 不与碰到的顺序相关。 */
   byName: (name: string) => WizardRecord | undefined;
-  /** 确保 target 有一个全局唯一的名字并返回它; 已有则原样返回, 不改。 */
+  /** 确保 target 有一个身份级唯一的名字并返回它; 已有则原样返回, 不改;
+   *  同身份别的化身已有名字时直接领那个名字 (化身共用身份的名字)。 */
   claim: (target: string, want: string) => string;
-  /** 改名: 撞名就挂 `-N` 后缀, 返回最终落定的名字。 */
+  /** 改名 (身份级): 撞**别的身份**的名才挂 `-N`; 同身份的全部化身一起改。返回落定的名字。 */
   rename: (target: string, want: string) => string;
   upsert: (target: string, patch: Partial<Omit<WizardRecord, "target">>) => WizardRecord;
   drop: (target: string) => void;
@@ -70,7 +92,7 @@ export interface WizardStore {
 export const MEMORY_MAX = 60;
 export const NOTE_MAX = 600;
 
-const blank = (target: string, bornAt: number): WizardRecord => ({ target, name: "", description: "", bornAt, memory: [] });
+const blank = (target: string, bornAt: number): WizardRecord => ({ target, identity: target, kind: defaultKindOf(target), name: "", description: "", bornAt, memory: [] });
 
 /** target → 它会话 transcript 的第一条记录时刻; 没有会话 → undefined。 */
 export type BornOf = (target: string) => number | undefined;
@@ -98,29 +120,104 @@ export const loadWizardStore = (filePath: string, bornOf: BornOf = () => undefin
   // 几毫秒就又落下一条没会话、没家谱的空壳, 名册里找得到名字却找不到人。
   const dropped = new Set<string>();
   const all = (): WizardRecord[] => Object.values(db.all());
+  // 这个 target 当前所属的身份: 有记录看记录, 没记录它自己就是一个新身份。
+  const identityKey = (t: string): string => db.get(t)?.identity || t;
   const upsert = (t: string, patch: Partial<Omit<WizardRecord, "target">>): WizardRecord => {
     dropped.delete(t);
-    const next: WizardRecord = { ...(db.get(t) ?? blank(t, bornOf(t) ?? Date.now())), ...patch, target: t };
+    const base = db.get(t) ?? blank(t, bornOf(t) ?? Date.now());
+    const next: WizardRecord = { ...base, ...patch, target: t };
+    // 身份字段的兜底归一: 老盘上没迁移过的记录无论从哪条路写盘, 落下去的都是已迁移形态
+    // (与 migrateIdentities 同一组值 —— 两条路径殊途同归, 这是幂等的另一半)。
+    next.identity = next.identity || t;
+    next.kind = next.kind || defaultKindOf(t);
     return db.set(t, { ...next, memory: next.memory.slice(-MEMORY_MAX).map((m) => m.slice(0, NOTE_MAX)) });
   };
-  const namesExcept = (t: string): string[] => all().filter((w) => w.target !== t).map((w) => w.name);
-  const rename = (t: string, want: string): string => upsert(t, { name: pickName(want, namesExcept(t)) }).name;
+  // 撞名检查排除的是**整个身份**: 同身份的化身共用名字, 不与自己撞。
+  const namesExcept = (t: string): string[] => all().filter((w) => identityOf(w) !== identityKey(t)).map((w) => w.name);
+  const rename = (t: string, want: string): string => {
+    const id = identityKey(t);
+    const name = pickName(want, namesExcept(t));
+    upsert(t, { name });
+    // 名字是身份的地址: 改名同步同身份的全部化身, 否则「名字→身份」的寻址会裂开。
+    all().filter((w) => w.target !== t && identityOf(w) === id).forEach((w) => upsert(w.target, { name }));
+    return name;
+  };
   return {
     nextName: (inUse = () => false) => {
       const taken = new Set(all().map((w) => foldName(w.name)));
       return nextAutoName((name) => taken.has(foldName(name)) || inUse(name));
     },
     get: db.get,
+    // 名字 → 身份 → 那个身份的锚点记录 (target === identity 的那条; 1:1 迁移后每身份恰有一条)。
+    // 命中多个化身时挑锚点而非碰到的第一条 —— 调用方拿到的 target 恒定可复现; 挑「当前聊天的化身」
+    // 是 resolveName (§2 切片二) 的事, 这里只保证名字回到一个稳定的身份入口。
     byName: (n) => {
       const k = foldName(n);
-      return k ? all().find((w) => foldName(w.name) === k) : undefined;
+      const hits = k ? all().filter((w) => foldName(w.name) === k) : [];
+      if (!hits.length) return undefined;
+      const id = [...new Set(hits.map(identityOf))].sort()[0]!;
+      const kin = hits.filter((w) => identityOf(w) === id).slice().sort((a, b) => (a.target < b.target ? -1 : a.target > b.target ? 1 : 0));
+      return kin.find((w) => w.target === id) ?? kin[0];
     },
-    claim: (t, want) => db.get(t)?.name || (dropped.has(t) ? normalizeTag(want) || want : rename(t, want)),
+    claim: (t, want) => {
+      const have = db.get(t)?.name;
+      if (have) return have;
+      if (dropped.has(t)) return normalizeTag(want) || want;
+      // 同身份已有名字: 化身直接领身份的名字, 不查重也不挂 -N (名字属于身份, 不属于化身)。
+      const sib = all().find((w) => w.target !== t && identityOf(w) === identityKey(t) && w.name);
+      return sib?.name ?? rename(t, want);
+    },
     rename,
     upsert,
     drop: (t) => { dropped.add(t); db.drop(t); },
     all,
   };
+};
+
+// ── v3 身份迁移 (boot 幂等) ────────────────────────────────────────────
+
+/** 迁移前备份的后缀: `<wizardsFile>.pre-v3-identities.bak`, 只在第一次写盘前复制一次
+ *  (已存在不覆盖) —— 它永远是最原始的 v2 名册, 回滚就把它拷回去。 */
+export const MIGRATION_BACKUP_SUFFIX = ".pre-v3-identities.bak";
+
+export interface IdentityMigration {
+  /** 本次补上 identity/kind 的记录数; 0 = 没有可迁的 (已迁完 / 空表)。 */
+  migrated: number;
+  /** 本次创建的备份路径; 没写盘就没有。 */
+  backup?: string;
+  /** 没迁成的原因 (备份失败 / 表里有畸形记录); 原文件一个字节没动。 */
+  skipped?: string;
+}
+
+/** 存量名册 1:1 生成身份 (§2.4): 每条记录 `identity = 自己的 target` (稳定不变, 旧账的
+ *  owner 字符串因此一个都不用改写), `kind` 按 target 推 (untagged 默认会话 = steward,
+ *  其余 = worker), `role` 留空。名字占用从 wizard 级升到身份级, 但 1:1 迁移不产生新名字
+ *  (一名一记录 → 一名一身份), byName/claim 行为不变。
+ *
+ *  幂等: 判据是 `identity`/`kind` 字段缺省 —— 已迁移的记录不再动, 同一份数据跑两遍结果
+ *  一致; 中途崩了的半迁状态重跑收敛到同一结果 (逐字段补缺, 与 upsert 的归一是同一组值)。
+ *
+ *  失败安全: 先备份后写盘, 备份失败就不迁 (记录靠 `identityOf` 的 target 回落照常工作,
+ *  下次开机再试); 表里有畸形记录 (target 非法) 时一条都不写, 原 wizards.json 原样。 */
+export const migrateIdentities = (store: WizardStore, filePath: string): IdentityMigration => {
+  const rows = store.all();
+  const bad = rows.find((w) => typeof w.target !== "string" || w.target === "");
+  if (bad) return { migrated: 0, skipped: `invalid wizard record (target=${String((bad as { target?: unknown }).target)})` };
+  const patch = rows
+    .filter((w) => !w.identity || !w.kind)
+    .map((w) => ({ target: w.target, identity: w.identity || w.target, kind: w.kind || defaultKindOf(w.target) }));
+  if (!patch.length) return { migrated: 0 };
+  const abs = expandHome(filePath);
+  const backup = abs + MIGRATION_BACKUP_SUFFIX;
+  try {
+    // 只有「备份已是一个文件」才算迁过、跳过复制 —— 备份路径被目录之类的东西占着时,
+    // copyFileSync 会失败, 走下面的 skipped (不迁, 原文件不动)。
+    if (!(existsSync(backup) && statSync(backup).isFile())) copyFileSync(abs, backup);
+  } catch (e) {
+    return { migrated: 0, skipped: `backup failed: ${(e as Error).message}` };
+  }
+  patch.forEach((p) => store.upsert(p.target, { identity: p.identity, kind: p.kind }));
+  return { migrated: patch.length, backup };
 };
 
 /** 还有人指着的 target。forget 删的是名册记录和绑定, 但路由行、消息事件 (含墓碑)、定时任务、
@@ -187,12 +284,14 @@ export interface EvictDeps {
   retire: (target: string) => Promise<{ ok: boolean }>;
 }
 
-/** 创建同名 wizard 前腾名字: `want` 被别人占着、且那人静默超过 NAME_STALE_MS →
- *  顶掉它, 返回被顶掉的记录; 没人占、还新鲜、或在 `keep` 里 (自己 / fork 源) →
- *  不动, 返回 undefined。没有会话的冷记录按 bornAt 算 —— 刚落身份、还没 spawn 完的
- *  wizard 因此顶不掉。
- *  分身 (slot) 整个收掉: pane、绑定、记录。聊天的默认会话只让出名字 —— 它是那个群
- *  的入口, 不能替人关掉; 下次被问到名字时照旧补一个。 */
+/** 创建同名 wizard 前腾名字: `want` 被**一个身份**占着、且它全部化身都静默超过
+ *  NAME_STALE_MS → 顶掉, 返回被顶掉的记录 (byName 的锚点); 没人占、任一化身还新鲜、
+ *  或任一化身在 `keep` 里 (自己 / fork 源) → 不动, 返回 undefined。没有会话的冷记录按
+ *  bornAt 算 —— 刚落身份、还没 spawn 完的 wizard 因此顶不掉。
+ *  名字占在身份上, 所以新鲜度按身份的全部化身取最热的一个 —— 锚点冷了但另一个群里
+ *  的化身还在干活, 名字就不算 stale。
+ *  分身 (slot 化身) 整个收掉: pane、绑定、记录。身份里的默认会话 (untagged) 只让出
+ *  名字 —— 它是那个群的入口, 不能替人关掉; 下次被问到名字时照旧补一个。 */
 export const evictStaleName = async (
   store: WizardStore | undefined,
   want: string,
@@ -201,13 +300,18 @@ export const evictStaleName = async (
   now = Date.now(),
 ): Promise<WizardRecord | undefined> => {
   const rec = store?.byName(want);
-  if (!store || !rec || keep.includes(rec.target)) return undefined;
-  if (now - Math.max(deps.lastActivity(rec.target), rec.bornAt) <= NAME_STALE_MS) return undefined;
-  if (!tagOfKey(rec.target)) { store.upsert(rec.target, { name: "" }); return rec; }
-  if (!(await deps.retire(rec.target)).ok) return undefined;
-  const current = store.get(rec.target);
-  if (!current || current.birthToken !== rec.birthToken) return undefined;
-  store.drop(rec.target);
+  if (!store || !rec) return undefined;
+  const kin = store.all().filter((w) => identityOf(w) === identityOf(rec));
+  if (kin.some((w) => keep.includes(w.target))) return undefined;
+  if (kin.some((w) => now - Math.max(deps.lastActivity(w.target), w.bornAt) <= NAME_STALE_MS)) return undefined;
+  for (const w of kin) {
+    if (!tagOfKey(w.target)) continue;
+    if (!(await deps.retire(w.target)).ok) return undefined;
+    const current = store.get(w.target);
+    if (!current || current.birthToken !== w.birthToken) return undefined;
+    store.drop(w.target);
+  }
+  kin.filter((w) => !tagOfKey(w.target)).forEach((w) => store.upsert(w.target, { name: "" }));
   return rec;
 };
 

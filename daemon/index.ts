@@ -70,6 +70,7 @@ import { applyChatNames, chatBaseOf, chatNameOf, chatPolicyOf, clearChatName, li
 import {
   bindWizardStore,
   loadWizardStore,
+  migrateIdentities,
   pickName,
   wizardStore,
   settleName,
@@ -2743,6 +2744,11 @@ const main = async (): Promise<void> => {
     // mirror-bridge。
     const bornOf = (t: string): number | undefined => firstStamp(m.sessionInfo(t)?.jsonlPath ?? "");
     const wizards = bindWizardStore(loadWizardStore(cfg.wrc.mirror.wizardsFile, bornOf));
+    // v3 身份迁移必须先于任何别的写盘 (backfillBorn/settleAll 都会 upsert, 会把老记录
+    // 顺手迁成「没备份」的形态)。幂等: 已迁完的 boot 这里是一次空跑。
+    const ident = migrateIdentities(wizards, cfg.wrc.mirror.wizardsFile);
+    if (ident.migrated) log.child({ mod: "wizard" }).info({ migrated: ident.migrated, backup: ident.backup }, "v3 identity migration applied");
+    else if (ident.skipped) log.child({ mod: "wizard" }).warn({ reason: ident.skipped }, "v3 identity migration skipped");
     const planApiStore: PlanStore = {
       all: () => plans.all(),
       get: (id) => plans.get(id),
