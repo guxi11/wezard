@@ -235,12 +235,6 @@ export const targetOfTagUrl = (url: string): string | undefined => linker?.targe
 export const displayName = (target: string | undefined): string =>
   target ? linker?.nameOf(target) || tagOfKey(target) : "";
 
-/** 会话边界确认文案: `<身份名> created` (身份名 = 该会话的 wizard 名, 与气泡头同源)。
- *  严格群的出站门只放行 `[wezard]`/`[mirror]` 系统行, 所以 strict 态带前缀 —— 前缀
- *  既是给人看的来源记号, 也是「这不是模型发言」的判据。名字缺省时退回旧的裸文案。 */
-export const createdAck = (name: string, strict: boolean): string =>
-  `${strict ? "[wezard] " : ""}${name.trim() ? `${name.trim()} ` : ""}created`;
-
 /** 会话 key 的形态 (`user:xxx#slot` / `chat:wr…` / 内部 `wezard:internal`) —— 它永远不是名字。 */
 export const isSessionKey = (s: string): boolean => /^(?:user|chat|group|wezard):/.test(s.trim());
 
@@ -316,6 +310,14 @@ export const tagHead = (target: string | undefined): string => {
   const name = displayName(target);
   return name ? `${WIZARD_MARK} ${name}` : "";
 };
+
+/** 会话边界确认文案: `🧙 <身份名> created`。记号与名字都从 tagHead 取 —— 与气泡头
+ *  同一个渲染原子 (WIZARD_MARK 全序列, 不手写 emoji 字面量, 免得 ZWJ/VS16 与头不一致)。
+ *  严格群的出站门只放行 `[wezard]`/`[mirror]` 系统行, 所以 strict 态带前缀 —— 前缀
+ *  既是给人看的来源记号, 也是「这不是模型发言」的判据。名字拿不到时只剩 `🧙 created`。
+ *  注意它**不是气泡头**: 末尾是 ` created` 而非全角冒号, HEADER_RE 不会命中 (见 tests)。 */
+export const createdAck = (target: string | undefined, strict: boolean): string =>
+  `${strict ? "[wezard] " : ""}${tagHead(target) || WIZARD_MARK} created`;
 
 /** 头的链接形态 `[🧙‍♂️ name](url)` —— 点它就进那个 wizard 的 rolepage。
  *  HEADER_RE 认得这一形态, parseTagHeader 照样剥得掉。 */

@@ -4,7 +4,7 @@ import ts from "typescript";
 import pino from "pino";
 import { ConfigSchema } from "../shared/config.js";
 import { installInboundRouter } from "../daemon/inbound.js";
-import { bindTagLinker, createdAck } from "../shared/session-label.js";
+import { bindTagLinker, createdAck, parseTagHeader, WIZARD_MARK } from "../shared/session-label.js";
 
 // 严格群的 /new 确认 (`[wezard] <name> created`) 是 daemon 的系统行, 不是模型发言 ——
 // 它必须绕过严格群出站门直达聊天; implicit 群由 mirror 的 pushProjectInfo 发
@@ -18,14 +18,23 @@ import { bindTagLinker, createdAck } from "../shared/session-label.js";
 let NAMES: Record<string, string> = { "chat:room": "Nova", "chat:other": "Patch", "user:tester": "Solo" };
 bindTagLinker({ urlOf: () => undefined, resolve: () => undefined, nameOf: (t) => NAMES[t] ?? "" });
 
-const strictReply = createdAck("Nova", true);
+const strictReply = createdAck("chat:room", true);
 // mirror-bridge 的 sendStandalone 白名单: 这个前缀就是「系统提示」的判据。
-assert.equal(strictReply, "[wezard] Nova created");
+assert.equal(strictReply, `[wezard] ${WIZARD_MARK} Nova created`);
 assert.match(strictReply, /^\[(mirror|wezard)\]/, "系统行必须带 [wezard]/[mirror] 前缀");
-assert.equal(createdAck("Nova", false), "Nova created", "implicit 群: 裸文案带身份名");
-assert.doesNotMatch(createdAck("Nova", false), /^\[(mirror|wezard)\]/, "裸 created 不是系统行 (会被严格群出站门拦下)");
-assert.equal(createdAck("", false), "created", "拿不到名字时退回旧文案");
-assert.equal(createdAck("", true), "[wezard] created");
+assert.equal(createdAck("chat:room", false), `${WIZARD_MARK} Nova created`, "implicit 群: 带身份名与记号");
+assert.doesNotMatch(createdAck("chat:room", false), /^\[(mirror|wezard)\]/, "implicit 的 created 不是系统行 (会被严格群出站门拦下)");
+// 名字拿不到也要有记号 —— 不出现空白身份。
+assert.equal(createdAck(undefined, false), `${WIZARD_MARK} created`);
+assert.equal(createdAck(undefined, true), `[wezard] ${WIZARD_MARK} created`);
+// 记号必须与气泡头同一个原子: tagHead 的头就是 `WIZARD_MARK name`, 这里用它做前缀原子。
+assert.ok(createdAck("chat:room", false).startsWith(`${WIZARD_MARK} Nova `), "created 的记号/名字与气泡头同源");
+// 它不是气泡头: 没有全角冒号, parseTagHeader 不该把它当 bot 发言剥掉。
+for (const line of [strictReply, createdAck("chat:room", false)]) {
+  const parsed = parseTagHeader(line);
+  assert.equal(parsed.fromBot, false, `${line} 不是带头的 bot 气泡`);
+  assert.equal(parsed.body, line, "正文原样保留 (记号不被当身份前缀吃掉)");
+}
 
 type Spawn = (target: string, windowName?: string, opts?: { silent?: boolean; model?: string }) => Promise<{ ok: boolean; reason?: string; sessionId?: string }>;
 
@@ -78,14 +87,14 @@ const session = (policy: Record<string, unknown>, spawn: Spawn = async () => ({ 
   const s = session({ "chat:room": { speech: "strict" }, "chat:other": { speech: "strict" } });
   await s.send("group", "room", "/new");
   await s.send("group", "other", "/new");
-  assert.deepEqual(s.replies, ["[wezard] Nova created", "[wezard] Patch created"], "确认文案跟着身份名走");
+  assert.deepEqual(s.replies, [`[wezard] ${WIZARD_MARK} Nova created`, `[wezard] ${WIZARD_MARK} Patch created`], "确认文案跟着身份名走");
 }
 
 // 1c) implicit 群的 created 由 mirror 拼 (同一份 createdAck), 调用点钉住。
 {
   const mirrorSrc = readFileSync("daemon/mirror-bridge.ts", "utf8");
-  assert.match(mirrorSrc, /pushProjectInfo\(target, createdAck\(displayName\(target\), false\)\)/,
-    "implicit 群的 created 用身份名拼, 不带系统前缀");
+  assert.match(mirrorSrc, /pushProjectInfo\(target, createdAck\(target, false\)\)/,
+    "implicit 群的 created 从 target 取身份名与记号 (createdAck → tagHead), 不带系统前缀");
 }
 
 // 2) implicit 单聊: daemon 不多发 —— 确认仍由 mirror 的 pushProjectInfo 负责。

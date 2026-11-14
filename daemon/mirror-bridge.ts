@@ -6180,7 +6180,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         if (baseRec?.pendingCwd) deps.store.set(base, { ...baseRec, pendingCwd: undefined });
       }
     }
-    if (!opts?.silent) pushProjectInfo(target, createdAck(displayName(target), false));
+    if (!opts?.silent) pushProjectInfo(target, createdAck(target, false));
     afterSpawn();
     return { ok: true, sessionId: r.sessionId, cwd: r.cwd, model: r.model, modelWarning: r.modelWarning, effort: r.effort };
   };

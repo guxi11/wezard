@@ -856,7 +856,7 @@ export const installInboundRouter = (
       // 模型发言的 standalone 路, 被出站门连系统行以外的内容一起挡住。但「已重开会话」是
       // daemon 自己的确认, 不是模型发言, 漏了它人只会以为 /new 坏了。这里补一条带
       // `[wezard]` 的系统行 (implicit 群仍由 mirror 发, 不重复)。
-      if (isStrictChat(who)) await replySystem(frame, msg, createdAck(displayName(who), true));
+      if (isStrictChat(who)) await replySystem(frame, msg, createdAck(who, true));
       // 带正文的 `/new`: 这段就是新会话的第一句。走和「隐式建会话后 fall through」
       // 完全相同的 dispatch 路径 —— freshSpawn 的冷时序、peer 提示都在那里。
       if (nu.prompt) await send(frame, msg, who, nu.prompt);
