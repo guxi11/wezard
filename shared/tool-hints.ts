@@ -2,7 +2,7 @@
 import { parse } from "acorn";
 import { stripSigil } from "./session-label.js";
 
-export const HINT_TOOL = /(?:^|__)(tell_peer|delegate|clone_wizard|spawn_wizard|stop_wizard|schedule_task)$/;
+export const HINT_TOOL = /(?:^|__)(tell_peer|delegate|clone_wizard|spawn_wizard|stop_wizard|schedule_task|chat_reply)$/;
 export type Facts = Record<string, unknown>;
 export const objectOf = (v: unknown): Facts | undefined =>
   v !== null && typeof v === "object" && !Array.isArray(v) ? v as Facts : undefined;
@@ -160,6 +160,7 @@ const matches = (c: HintCall, r: Facts): boolean => {
   if (tool === "spawn_wizard" || tool === "clone_wizard")
     return r.ok === true && !r.decision && typeof r.name === "string" && typeof r.cwd === "string" && typeof r.inherited === "boolean";
   if (tool === "stop_wizard") return typeof r.name === "string" && typeof r.mode === "string";
+  if (tool === "chat_reply") return r.ok === true && typeof r.delivered === "string";
   return typeof r.id === "string" && (typeof r.when === "string" || typeof r.next === "string");
 };
 

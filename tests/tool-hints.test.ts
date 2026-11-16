@@ -102,6 +102,17 @@ const transferred = hintsOf(dottedUse, { t: "tool_result", toolUseId: "dot", bod
 assert.equal(transferred.length, 1);
 assert.equal(transferred[0]?.k === "handoff" && transferred[0].handed, true);
 assert.equal(transferred[0]?.k === "handoff" && transferred[0].receipt, false);
+// chat_reply: 直调与 REPL 外壳都出一行「回复」提示, 交付方式取回包 delivered; 不带 text = passed。
+const replyUse: Extract<TurnItem, { t: "tool_use" }> = { t: "tool_use", toolUseId: "cr", toolName: "mcp__wezard__chat_reply", toolInput: { re: "h1", text: "看过了, 是配置问题" }, ts: 1 };
+const replyRes = { t: "tool_result" as const, toolUseId: "cr", body: JSON.stringify({ ok: true, delivered: "placeholder", event: "e1", chat: "sanitizer" }), ts: 2 };
+const rh = hintsOf(replyUse, replyRes);
+assert.deepEqual(rh.map((h) => h.k === "reply" && [h.re, h.chat, h.delivered, h.state, h.text]), [["h1", "sanitizer", "placeholder", "ok", "看过了, 是配置问题"]]);
+const replyRepl: Extract<TurnItem, { t: "tool_use" }> = { t: "tool_use", toolUseId: "cr2", toolName: "REPL", toolInput: { code: 'return await mcp.wezard.chat_reply({ re: "h2" })' }, ts: 1 };
+const passedRes = { t: "tool_result" as const, toolUseId: "cr2", body: JSON.stringify({ result: JSON.stringify({ ok: true, delivered: "passed", event: "e2", chat: "sanitizer" }), stdout: "", stderr: "" }), ts: 2 };
+const ph = hintsOf(replyRepl, passedRes);
+assert.equal(ph.length === 1 && ph[0]!.k === "reply" && ph[0]!.delivered, "passed");
+const replyHtml = renderTurnGroup({ kind: "turn", id: "tr", createdAt: 0, updatedAt: 3, closed: true, items: [replyUse, replyRes] } as TurnDetailRecord).html;
+assert.ok(replyHtml.includes('class="handoff') && replyHtml.includes("覆盖占位") && replyHtml.includes("sanitizer"), "chat_reply 在工具框里有专属提示行");
 // peers.ts 靠 tools.* 这一段读 exec 里的命令, 别把 code-mode 的容器形态弄丢。
 assert.equal(callsInExec('tools.exec_command({cmd:"ls"})', () => true)[0]?.toolName, "exec_command");
 console.log("Tool hint wrapping, pairing, rendering and receipt association checks passed");

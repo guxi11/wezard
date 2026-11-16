@@ -725,7 +725,9 @@ export type Hint =
   | { k: "born"; via: "clone" | "spawn"; name: string; text: string; state?: Handoff["state"]; reason?: string }
   | { k: "stop"; name: string; end: boolean; forgotten: boolean; turn?: string; state?: Handoff["state"]; reason?: string }
   /** 排了一个定时任务: when / next 取回包里渲染好的那两句, text = prompt。 */
-  | { k: "task"; id: string; when: string; next: string; note: string; text: string; state?: Handoff["state"]; reason?: string };
+  | { k: "task"; id: string; when: string; next: string; note: string; text: string; state?: Handoff["state"]; reason?: string }
+  /** strict 群答一笔义务 (chat_reply): re = 那条人话的 msg, text 空 = passed; delivered 取回包 (placeholder / message / channel / passed)。 */
+  | { k: "reply"; re: string; chat: string; text: string; delivered?: string; state?: Handoff["state"]; reason?: string };
 
 const objOf = (v: unknown): Record<string, unknown> => objectOf(v) ?? {};
 const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
@@ -779,6 +781,7 @@ export const hintOf = (use: ToolUse, result: ToolResult | undefined): Hint | und
         : { k: "born", via, ...out, name: stripSigil(str(j?.name) ?? str(a.name) ?? ""), text: str(a.description) ?? "" };
     }
     case "stop_wizard": return { k: "stop", ...out, name: stripSigil(str(j?.name) ?? str(a.name) ?? ""), end: (str(j?.mode) ?? str(a.mode) ?? "end") === "end", forgotten: j?.forgotten === true, turn: str(a.turn) };
+    case "chat_reply": return { k: "reply", ...out, re: str(a.re) ?? "", chat: str(j?.chat) ?? "", text: str(a.text) ?? "", delivered: str(j?.delivered) };
     case "schedule_task": return { k: "task", ...out, id: str(j?.id) ?? str(a.id) ?? "", when: str(j?.when) ?? str(a.when) ?? "", next: str(j?.next) ?? "", note: str(a.note) ?? "", text: str(a.prompt) ?? "" };
     default: return undefined;
   }
@@ -898,6 +901,14 @@ const renderHandoff = (h: Handoff, key: string, deco?: HandoffDeco): string => {
   return hoBox("", attrs, `${hoArrow(st, glyph)}${verb} ${who}${turn}${tags}${lost}${acct ? `<span class="ho-acct">${acct}</span>` : ""}`, h.text, pub ? `${key}:ho` : undefined, undefined, to);
 };
 
+/** chat_reply 实际怎么交付的 (回包 delivered): [样式, 标签, 说明]。 */
+const REPLY_TAG: Readonly<Record<string, [string, string, string]>> = {
+  placeholder: ["pub", "覆盖占位", "在流窗口内覆盖了群里的占位气泡"],
+  message: ["pub", "群消息", "占位窗口已过, 作为一条新消息发进群"],
+  channel: ["pub", "频道评论", "评论在义务锚定的那条频道消息上"],
+  passed: ["kind", "passed", "无需答复, 记为 passed, 群里不发言"],
+};
+
 const PLAIN: HandoffStatus = { key: "plain", tip: "" };
 const RUN: HandoffStatus = { key: "run", tip: "调用中…" };
 const stOf = (state: Handoff["state"]): HandoffStatus => (state === undefined ? RUN : PLAIN);
@@ -918,6 +929,13 @@ const renderHint = (h: Hint, key: string, deco?: HandoffDeco): string => {
       const tags = (h.turn ? `<span class="ho-turn">${escHtml(h.turn)}</span>` : "") + (h.forgotten ? hoTag("kind", "抹掉记录", "身份记录一并删了, 名字腾出来") : "");
       return hoTrouble(h, glyph, `${what} .${h.name}`, attrs, "") ??
         hoBox("", attrs, `${hoArrow(stOf(h.state), glyph)}${what} ${who(h.name)}${tags}`, "");
+    }
+    case "reply": {
+      const re = h.re ? `<span class="ho-turn">${escHtml(h.re)}</span>` : "";
+      const chat = h.chat ? ` <span class="ho-nm">${escHtml(h.chat)}</span>` : "";
+      const tag = REPLY_TAG[h.delivered ?? (h.text ? "" : "passed")];
+      return hoTrouble(h, "↩", "回复", "", h.text) ??
+        hoBox("", "", `${hoArrow(stOf(h.state), "↩")}${h.text ? "回复" : "不答"}${chat}${re}${tag ? hoTag(tag[0], tag[1], tag[2]) : ""}`, h.text);
     }
     case "task": {
       const attrs = deco ? deco.plan() : "";
