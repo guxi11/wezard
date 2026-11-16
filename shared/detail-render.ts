@@ -1104,7 +1104,7 @@ const turnParts = (r: TurnDetailRecord, keyPrefix = "", now = Date.now(), lazy =
   // 退一步: 一轮结束后, 最后一个动作之后的话就是终句。
   const lastAct = paired.reduce((n, p, i) => (p.kind === "solo" && p.item.t === "text" ? n : i), -1);
   const isSay = (p: (typeof paired)[number], i: number): boolean =>
-    p.kind === "solo" && p.item.t === "text" && !p.item.aside && (p.item.final === true || (done && i > lastAct));
+    p.kind === "solo" && p.item.t === "text" && !p.item.aside && (p.item.final === true || p.item.posted === true || (done && i > lastAct));
   const body = (p: (typeof paired)[number], key: string, i: number): string => {
     if (p.kind === "pair") return renderToolBubble(p.use, p.result, key, done, lazy ? r.id : undefined, deco);
     const it = p.item;

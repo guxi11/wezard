@@ -159,15 +159,18 @@ export const strictPostsOf = (records: readonly DetailRecord[], strictChats: Rea
   return ix;
 };
 
-/** strict 群一轮的出消息 = 工具 / 途中的话照旧进过程框, 气泡换成实发内容: CLI 原话标 aside
- *  (留在框里, 不当气泡); 与实发同文的那句并进实发 (final 跟过去, 收口判定不变)。 */
+/** strict 群一轮的出消息 = 一个过程框聚合这一轮全部工具调用与 CLI 原话 (标 aside, 不当气泡),
+ *  其下是实发进群的气泡 —— 实发排在这一轮最后 (时刻抬到不早于框里最后一项), 不按落账时刻
+ *  插进工具中间; 与实发同文的那句并进实发 (final 跟过去, 收口判定不变)。 */
 export const deliveredTurn = (r: TurnDetailRecord, posts: readonly PostDetailRecord[]): TurnDetailRecord => {
   const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
   const texts = r.items.filter((it): it is Extract<typeof it, { t: "text" }> => it.t === "text");
   const same = (p: PostDetailRecord) => texts.filter((it) => squash(it.body) === squash(p.body));
   const merged = new Set(posts.flatMap(same));
-  const said = posts.map((p) => ({ t: "text" as const, body: p.body, ts: p.createdAt, ...(same(p).some((it) => it.final) ? { final: true } : {}) }));
   const rest = r.items.flatMap((it): TurnDetailRecord["items"] => (it.t !== "text" ? [it] : merged.has(it) ? [] : [{ ...it, aside: true }]));
+  const last = rest.reduce((m, it) => Math.max(m, it.ts), -Infinity);
+  const said = posts.map((p) => ({ t: "text" as const, body: p.body, ts: Math.max(p.createdAt, last), posted: true, ...(same(p).some((it) => it.final) ? { final: true } : {}) }));
+  // 排序稳定: 时刻相同时框里的项 (rest) 仍在实发之前。
   return { ...r, items: [...rest, ...said].sort((a, b) => a.ts - b.ts) };
 };
 

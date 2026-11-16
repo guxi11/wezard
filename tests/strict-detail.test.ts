@@ -66,7 +66,18 @@ assert.equal((html.match(/class="say"/g) ?? []).length, 1, "只有一颗气泡")
 const sayAt = html.indexOf('class="say"');
 assert.ok(html.slice(sayAt).includes(LEDGER_TEXT), "气泡正文 = 实发文本");
 assert.ok(html.includes("2 次工具调用"), "两次工具调用都进过程框");
-assert.ok(/bubble note aside[^>]*>[\s\S]*CLI 终句/.test(html), "CLI 原话留在过程框 (aside), 不丢");
+assert.equal((html.match(/class="steps[ "]/g) ?? []).length, 1, "只有一个过程框: 工具调用与 CLI 原话聚在一起");
+const boxAt = html.indexOf('class="steps');
+assert.ok(boxAt < sayAt, "实发气泡在过程框之下, 是这一轮的最后一条");
+assert.ok(/bubble note aside[^>]*>[\s\S]*CLI 终句/.test(html.slice(boxAt, sayAt)), "CLI 原话 (aside) 在过程框里, 不丢");
+// 还在跑的轮: 实发一落账就是气泡 (posted), 不等收口; 仍排在最后
+const running = { ...tooled, id: "t7", closed: false, updatedAt: 13_600, items: tooled.items.map((i) => ({ ...i, ...(i.t === "text" ? { final: false } : {}) })) } as TurnDetailRecord;
+const runPost: DetailRecord = { ...post, id: "p7#w" } as DetailRecord;
+const runAll = [running, runPost];
+const m7 = messagesOfTurn(running, undefined, strictPostsOf(runAll, strictChats)).find((m) => m.dir === "out")!;
+assert.equal(m7.turn.items.at(-1)?.t === "text" && (m7.turn.items.at(-1) as { posted?: boolean }).posted, true, "实发排在最后");
+const html7 = renderMsg(m7, runAll, makeDirectory(runAll, facts), 13_700).html;
+assert.ok(html7.indexOf('class="say"') > html7.indexOf('class="steps'), "进行中: 实发气泡在过程框之下");
 assert.equal(out5[0]!.turn.items.filter((i) => i.t === "text" && i.final).length, 1, "收口判定 (final) 不变");
 
 // ── 3. 实发与 CLI 终句同文: 并成一颗气泡, 不重复 ──
