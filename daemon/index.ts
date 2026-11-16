@@ -52,7 +52,7 @@ import { ChatRecords } from "./chat-records.js";
 import { knownChatsOf } from "./chat-seen.js";
 import { planStrictSwitch, renderSwitchReport, type SwitchFacts } from "./strict-switch.js";
 import { CHAT_BATCH_BUDGET, sliceBatch } from "../shared/chat-record.js";
-import { openSayMeter, sayVerdict } from "./strict-gate.js";
+import { openSayMeter, sayVerdict, topOnlyVerdict } from "./strict-gate.js";
 import { openMembers } from "./members.js";
 import { footerTarget, responseFormatPolicy } from "./message-format.js";
 import { scanClaudeSessions } from "./session-scan.js";
@@ -1869,7 +1869,7 @@ const main = async (): Promise<void> => {
     const topOnlyMuted = (self: string, dests: readonly string[]): Record<string, unknown> | undefined => {
       const serves = servesOfTurn(self);
       const belowTop = !!serves && !router.speaksToHuman(serves);
-      const muted = dests.filter((d) => chatPolicyOf(cfg, d).topOnly && !(!tagOfKey(self) && baseOfKey(self) === d));
+      const muted = dests.filter((d) => topOnlyVerdict({ belowTop, topOnly: !!chatPolicyOf(cfg, d).topOnly, exempt: !tagOfKey(self) && baseOfKey(self) === d }));
       return muted.length && belowTop
         ? { ok: false, topOnly: true, reason: `${muted.map((d) => chatNameOf(cfg, d) || d).join(", ")} 开着顶层模式: 你这一轮是同伴派来的活, 不对人说话 —— 结果写成行首的「收件人 + RESULT:」, 反问用 tell_peer({kind:"ask"}), 由派你的那个代你向人交代` }
         : undefined;
@@ -2151,6 +2151,10 @@ const main = async (): Promise<void> => {
         json(res, 409, { ok: false, speech: "implicit", reason: (chatNameOf(cfg, base) || base) + " 未开严格模式 (speech=implicit): 出站不受发言权约束, 直接回复 / notify 即可" });
         return;
       }
+      // topOnly 门与 notify / send_file 同一道 (判定核 topOnlyVerdict): 下层轮 (这一轮
+      // 服务同伴的活) 不得在顶层模式群对人说话 —— 顶层豁免 (管家 / 人直说的轮) 照旧。
+      const muted = topOnlyMuted(self, [base]);
+      if (muted) { json(res, 409, muted); return; }
       const gate = strictSayGate(self, base, b.re);
       if (gate) { json(res, gate.status, gate.body); return; }
       // P7-S3: 频道 (chat:<topic_id>) 走 replyOk 选评论/新帖, 不经群消息通道。

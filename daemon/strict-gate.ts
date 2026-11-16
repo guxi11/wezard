@@ -21,6 +21,20 @@ export interface SayFacts {
 
 export type SayVerdict = { status: 403 | 409; reason: string } | undefined;
 
+// topOnly 门 (chat_say 与 notify / send_file 共用同一道): 下层轮 —— 这一轮服务于同伴的活
+// (有 serves 行且不直接对人收口) —— 不得在顶层模式群对人说话。判定核只收布尔事实,
+// 路由行 / 管家豁免 (该群默认会话) 的接线在 daemon/index.ts 的 topOnlyMuted。
+export interface TopOnlyFacts {
+  /** 本轮是下层轮: 服务同伴 (有 serves 行且 speaksToHuman=false)。人直说 / CLI 直敲 / 定时任务 = false。 */
+  belowTop: boolean;
+  /** 目的群开着顶层模式 (chatPolicy.<chat>.topOnly)。 */
+  topOnly: boolean;
+  /** 调用方豁免: 是该群的默认会话 (untagged 且 base 相同) —— 管家在自己群里。 */
+  exempt: boolean;
+}
+
+export const topOnlyVerdict = (f: TopOnlyFacts): boolean => f.topOnly && f.belowTop && !f.exempt;
+
 export const sayVerdict = (f: SayFacts): SayVerdict => {
   if (!f.mode) return { status: 403, reason: "非成员 — 严格群里只有成员能开口; 让人点名你入群, 或由成员用 chat_ask 向你开义务" };
   if (f.mode === "mention" && !f.hasValidRe && !f.delivery)

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { sayVerdict, openSayMeter } from "../daemon/strict-gate.js";
+import { sayVerdict, openSayMeter, topOnlyVerdict } from "../daemon/strict-gate.js";
 import { ChatRecords } from "../daemon/chat-records.js";
 import { openMembers } from "../daemon/members.js";
 import { sliceBatch, renderBatch, CHAT_BATCH_BUDGET } from "../shared/chat-record.js";
@@ -31,6 +31,32 @@ assert.equal(sayVerdict({ mode: undefined, hasValidRe: false, turnUsed: 0, windo
 assert.equal(sayVerdict({ mode: "mention", hasValidRe: false, turnUsed: 3, windowCount: 0, delivery: true })?.status, 409, "文件也吃每轮额度");
 assert.equal(sayVerdict({ mode: "mention", hasValidRe: false, turnUsed: 0, windowCount: 10, delivery: true })?.status, 409, "文件也吃每分钟额度");
 assert.equal(sayVerdict({ mode: "mention", hasValidRe: false, turnUsed: 0, windowCount: 0 })?.status, 409, "delivery=false 的 mention 仍按发言拦");
+
+// ── topOnly 门 (chat_say 与 notify / send_file 同一道核): 下层轮 (服务同伴的活) 不得在顶层模式群说话 ──
+assert.equal(topOnlyVerdict({ belowTop: true, topOnly: true, exempt: false }), true, "下层轮在 topOnly 群 chat_say 被拦");
+assert.equal(topOnlyVerdict({ belowTop: true, topOnly: true, exempt: true }), false, "管家豁免: 该群默认会话照发");
+assert.equal(topOnlyVerdict({ belowTop: false, topOnly: true, exempt: false }), false, "人直说 / 人点名的轮 (非下层) 通过");
+assert.equal(topOnlyVerdict({ belowTop: true, topOnly: false, exempt: false }), false, "非 topOnly 群不受影响");
+// handler 接线 (源码切片, 宅内闭包抽取模式): chat_say 的 topOnly 门在 implicit 指路之后、
+// strictSayGate 之前 —— implicit 群照旧收 implicit 409; notify 与 chat_say 调同一个 topOnlyMuted。
+{
+  const src = readFileSync("daemon/index.ts", "utf8");
+  const handler = (open: string, close: string): string => {
+    const a = src.indexOf(open);
+    const b = src.indexOf(close, a);
+    assert.ok(a >= 0 && b > a, "handler 切片定位: " + open);
+    return src.slice(a, b);
+  };
+  const say = handler('http.register("POST /chat/say"', 'http.register("POST /chat/reply"');
+  const pImplicit = say.indexOf("未开严格模式");
+  const pTop = say.indexOf("topOnlyMuted");
+  const pGate = say.indexOf("strictSayGate");
+  assert.ok(pImplicit > 0 && pTop > pImplicit && pGate > pTop, "chat_say: implicit 指路在前, topOnly 门在 strictSayGate 前 (implicit 群行为不变)");
+  const notify = handler('http.register("POST /notify"', 'http.register("POST /send_file"');
+  assert.ok(notify.includes("topOnlyMuted"), "notify 与 chat_say 同一道 topOnly 门");
+  const reply = handler('http.register("POST /chat/reply"', 'http.register("POST /chat/ask"');
+  assert.ok(!reply.includes("topOnlyMuted"), "chat_reply 不走 topOnly 门 (义务交付语义不动)");
+}
 
 // 记账: 轮次额度随事件归零, 窗口按群滚动
 {
