@@ -2712,8 +2712,27 @@ const main = async (): Promise<void> => {
       } finally { sweeping = false; }
     };
     void m.restored.then(() => {
+      // 严格群的 chat 义务, owner 已经交过终句 = 它答了, 只是 strict 只认 chat_reply 交付 (终句既不
+      // 进群也不关账)。再按「还没有交回结论」追问它, 每问一次只多一句谁也看不到的终句 (会话若在
+      // strict 上线前启动, 工具表里根本没有 chat_reply —— 试过、报 not found、然后放弃)。关账与上报
+      // 归 obligation-watch; 这里只把这类行从追问名单里摘掉, 并留一条 warn 便于事后定位。
+      const answeredStrictObligation = (turn: string): boolean => {
+        const row = router.get(turn);
+        return !!row && row.receiver.kind === "chat" && !!row.receiver.channel
+          && strictSpeechOf(row.receiver.channel)
+          && events.taskInputs(row.event).some((e) => !!e.result);
+      };
+      const nudgedOut = new Set<string>();
+      const nudgeInflight = (): InFlight[] => routeInFlight().filter((x) => {
+        if (!answeredStrictObligation(x.turn)) { nudgedOut.delete(x.turn); return true; }
+        if (!nudgedOut.has(x.turn)) {
+          nudgedOut.add(x.turn);
+          log.warn({ mod: "idle-nudge", turn: x.turn, to: x.to }, "idle-nudge: 严格群义务已答但没交付 (终句不进群, 只认 chat_reply) — 不再追问, 交 obligation-watch");
+        }
+        return false;
+      });
       stopSweep = startIdleNudge({
-        inflight: routeInFlight, idleNow: m.idleNow, handingOff,
+        inflight: nudgeInflight, idleNow: m.idleNow, handingOff,
         policy: () => ({ afterMs: cfg.wrc.mirror.idleNudge.afterMin * 60_000, max: cfg.wrc.mirror.idleNudge.max }),
         ask: async ({ from, to, turn, text }) => {
           const row = router.get(turn);
@@ -2759,8 +2778,16 @@ const main = async (): Promise<void> => {
           const re = events.get(row.message)?.id ?? row.message;
           const who = displayName(row.owner);
           if (isStewardTarget(cfg, wizards, row.owner)) {
-            // 管家违约: 发群系统行 (notifyChat 自动进聊天账本)。
-            notifyChat(row.channel, "[wezard] ⚠️ 管家 " + who + " 的义务 (" + row.event + ", re: " + re + ") 逾期未回 — 已提醒过一次。");
+            // 管家违约: 发群系统行 (notifyChat 自动进聊天账本)。它已经交过终句的, 不是「没回」是
+            // 「答了没交付」—— strict 群只认 chat_reply, 而这种会话往往是 strict 上线前启动的
+            // (工具表里没有 chat_reply), 光说「逾期未回」人只会以为它在拖。附上它最后说的 + 出路。
+            const answered = events.taskInputs(row.event).some((e) => !!e.result);
+            const last = answered ? m.lastReply(row.owner, Date.now() - row.ageMs).trim() : "";
+            notifyChat(row.channel, "[wezard] ⚠️ 管家 " + who + " 的义务 (" + row.event + ", re: " + re + ") "
+              + (answered
+                ? "已答但**没有交付进群** — 本群是 strict, 答复只走 chat_reply。若它的会话是 strict 上线前启动的, 工具表里没有 chat_reply; 在群里发 /new (或让它 handoff) 重开会话后重问。" +
+                  (last ? "\n\n它最后说的: " + clipLine(last, 300) : "")
+                : "逾期未回 — 已提醒过一次。"));
             return;
           }
           const steward = stewardRoute(cfg, wizards, row.channel);
