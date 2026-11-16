@@ -544,7 +544,9 @@ export const addressedResults = (text: string): Array<{ name: string; body: stri
 const RECEIPT_KEYWORD_RE = /(?:RESULT|NEED|PROGRESS|ARTIFACT)[ \t]*[:：]/;
 export const receiptKeyword = (text: string): boolean => {
   const c = parseClosing(text);
-  return c.kind !== "none" || c.artifacts.length > 0 || RECEIPT_KEYWORD_RE.test(topLevelText(text));
+  // 弱信号与强信号看同一份文本: 行首 inline-code 包装已被 unquoteMarkLine 剥掉, 被整行当
+  // 代码抹掉的关键字 (配对反引号) 才不会漏过「这是不是回执」的判定。
+  return c.kind !== "none" || c.artifacts.length > 0 || RECEIPT_KEYWORD_RE.test(topLevelText(unquoteMarkLine(text)));
 };
 
 
