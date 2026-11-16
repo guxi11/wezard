@@ -439,34 +439,6 @@ export const createWezardServer = (): McpServer => {
     inputSchema: { planId: z.string().trim().min(1), ...PlanUpdateSchema.innerType().shape },
   }, async (a) => unwrap("plan_update", await daemonPost("/plans/update", a as Record<string, unknown>)));
 
-  // ── Chat naming ────────────────────────────────────────────────────────────
-  // A WeCom chat's identity is an unreadable `chat:wrkS…` id. Wizards are addressed
-  // by their own global names; a chat name is what notify / spawn_wizard
-  // point at, and what a chat's default wizard is born named after.
-  server.registerTool(
-    "name_chat",
-    {
-      title: "Name this WeCom chat",
-      description:
-        "给**这个聊天**起个短名字: notify 的收件人、spawn_wizard / clone_wizard 的 `chat` 从此能指到这里。没起过名字的聊天不会一直没名字 —— 第一次有人用到时守护进程按它的工作区自动补一个 (`~/develop/foo` → `foo`, 撞名加序号), 所以这个工具的用途是**起一个更好的名字**。这里的默认 wizard 出生时取聊天名; 它若还叫旧聊天名, 会跟着改 (wizard 的名字全局唯一, 撞名加后缀, 返回里的 `wizardRenamed` 就是它的新名字)。wizard 自己的名字用 wizard_identity 改, 与这里无关。用户说「给这个群起名叫 daily」「这个群叫什么」(不传 `name` 就是读) 「取消命名」(传 '-') 时调它。名字全机唯一、大小写不敏感。",
-      inputSchema: currentAddressSchema({
-        name: z
-          .string()
-          .optional()
-          .describe("The new name: 1-32 chars, letters/digits/'_'/'-' only (no spaces, '#', '/', ':'). Omit to read the current name without changing it. Pass '-' to remove the name."),
-      }),
-    },
-    async ({ name }) =>
-      name === undefined
-        ? unwrap("name_chat", await daemonPost("/chats/list", {}), (j) => {
-            const chats = Array.isArray(j.chats) ? j.chats as Record<string, unknown>[] : [];
-            const current = chats.find((c) => c.self === true);
-            return current ? { name: current.name } : {};
-          })
-        : unwrap("name_chat", await daemonPost("/chats/name", { name })),
-  );
-
-
   // ── P7-S2 群聊严格治理 (chat_*): 常规注册 —— implicit 群 handler 一律 409 指路,
   //  strict 群的成员制 / 义务账 / 出站门都靠这四个工具。──
   server.registerTool(

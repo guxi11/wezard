@@ -422,7 +422,7 @@ export const ConfigSchema = z.object({
   bot: knob(Bot.describe("企微机器人凭据"), { gate: "hidden" }),
   bots: knob(z.array(BotEntry).default([]).describe("额外的企微机器人 (多机器人; 含 secret, 整个数组可放进 secrets.json —— 数组整体覆盖不逐项合并); 改完重启守护进程生效"), { gate: "hidden" }),
   defaultChat: knob(z.string().default("").describe("出站默认聊天 (没有更具体去向时推往这里)"), { gate: "card", apply: "hot" }),
-  chats: hot(Chats.default({}).describe("聊天命名表: 名字 → base principal")),
+  chats: hot(Chats.default({}).describe("聊天名 (已冻结, 2026-11-16 起不再写入): 名字 → base principal, 仅作存量显示标签; 新聊天一律用 principal 标识, 聊天命名路径 (/name / name_chat / 自动补名) 已下线")),
   chatPolicy: hot(z.record(z.string(), ChatPolicy).default({ wezard: { topOnly: true, stewardBudget: 4 } }).describe("群聊级策略: base principal (`chat:wr…` / `user:…`) → 开关; topOnly 默认开, 显式 false 才关；config_set 写聊天名会换成它的 principal 落盘; 进宪章 —— 落盘时受影响且活着的 wizard 会被自动交接 (重开时宪章重渲染)")),
   daemon: Daemon.default({}).describe("守护进程: 监听、日志、详情页"),
   wrc: Wrc.default({}).describe("远程驱动: 授权名单、CLI 后端、工作区、镜像"),

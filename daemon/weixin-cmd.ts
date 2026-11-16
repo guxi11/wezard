@@ -13,10 +13,10 @@ import type { Config } from "../shared/config.js";
 import { appendUnique, patchJsonc } from "../shared/config-writer.js";
 import { baseOfKey } from "../shared/session-label.js";
 import { shortNameOf } from "../shared/wx-text.js";
-import { applyChatNames, chatNameOf, listChatNames, normChatName, uniqueChatName } from "./chat-name.js";
+import { chatNameOf, normChatName } from "./chat-name.js";
 import { json, readBody, type Handler } from "./http.js";
 import { planMedia, kindOf, type SendMedia, type MediaKind } from "./media.js";
-import { settleName, wizardStore } from "./wizard.js";
+import { wizardStore } from "./wizard.js";
 import { WX_MEDIA_MAX, type BindView, type Weixin, type WxAccount, type WxMediaKind } from "./weixin.js";
 
 // ── 命令解析 (纯) ────────────────────────────────────────────────────
@@ -84,28 +84,24 @@ export interface BoundDeps {
   newSession: (target: string, windowName: string) => Promise<{ ok: boolean; reason?: string }>;
 }
 
-/** 起群名 (只填空)、进 allowFrom、生默认 wizard —— 与企微群聊首条消息走的是同一套。 */
+/** 绑定落定: 进 allowFrom、生默认 wizard —— 与企微群聊首条消息同一套。聊天不再命名
+ *  (2026-11-16): 微信群也一样用 chat id 标识; 默认 wizard (该群的管家) 的**名字**按
+ *  微信短名落一个 —— 只填空 (身份已有名字不动), 窗口名/点名靠它。返回给绑定卡的是 chat id。 */
 export const makeOnBound = ({ cfg, sourcePath, log, hasSession, newSession }: BoundDeps) =>
   async (acct: WxAccount, wantName: string): Promise<string> => {
     const base = `chat:${acct.chatId}`;
-    const have = chatNameOf(cfg, base);
-    const name = have || (() => {
-      const want = normChatName(wantName).replace(/[^\p{L}\p{N}_-]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 32) || shortNameOf(acct.userId);
-      const taken = new Set(listChatNames(cfg).map((c) => c.name.toLowerCase()));
-      const picked = uniqueChatName(want, taken);
-      applyChatNames(cfg, sourcePath, { [base]: picked });
-      return picked;
-    })();
     if (!cfg.wrc.allowFrom.includes(base)) {
       cfg.wrc.allowFrom.push(base);
       try { appendUnique(sourcePath, ["wrc", "allowFrom"], base); } catch (e) { log.error({ err: (e as Error).message }, "weixin allowFrom write failed"); }
     }
     if (!hasSession(base)) {
-      const wiz = settleName(wizardStore(), name, base);
-      const r = await newSession(base, wiz || name);
+      const store = wizardStore();
+      const want = normChatName(wantName).replace(/[^\p{L}\p{N}_-]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 32) || shortNameOf(acct.userId);
+      const wiz = store?.get(base)?.name || (store && want ? store.claim(base, want) : "") || want;
+      const r = await newSession(base, wiz || base);
       if (!r.ok) log.warn({ base, reason: r.reason }, "weixin default wizard spawn failed (首条消息时会再开)");
     }
-    return name;
+    return base;
   };
 
 /** 解绑时撤销授权 (群名与 wizard 留着 —— 历史还在 rolepage 上)。 */

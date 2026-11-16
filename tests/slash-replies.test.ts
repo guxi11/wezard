@@ -85,7 +85,8 @@ assert.equal(await run("/pwd"), "/repo/current");
 assert.equal(await run("/new gpt-6.1-sol"), "[wezard] /new failed: spawn denied");
 assert.equal(spawned[0]![2].model, "gpt-6.1-sol");
 assert.equal(spawned[0]![2].silent, false);
-assert.equal(await run("/name"), "[wezard] 本聊天还没起名。");
+// /name 新语义 (2026-11-16): 只给绑定的管家命名; 无绑定 → 提示先引导。
+assert.equal(await run("/name"), "[wezard] 本群未绑定管家 — /name 命名的是管家。新群先走引导 (设 workspace + 绑管家); 换管家走 config 的 chatPolicy.steward。");
 for (const command of ["/peers", "/chats"]) {
   const text = await run(command);
   assert.match(text, /worker|done|会话/);

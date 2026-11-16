@@ -82,7 +82,8 @@ export const stewardRoute = (
     const anchor = anchorOf(store, identity);
     if (!anchor?.name) return { target: base };
     const taken = new Set(store.all().filter((w) => baseOfKey(w.target) === base).map((w) => tagOfKey(w.target)).filter(Boolean));
-    const workspace = cwdOf?.(anchor.target) || undefined;
+    // 身份级 workspace (新群引导落的) 优先; 没写才从锚点会话的 live cwd 推。
+    const workspace = anchor.workspace || cwdOf?.(anchor.target) || undefined;
     return {
       target: keyOf(base, uniqueTag(anchor.name, taken)),
       fresh: { identity, name: anchor.name, ...(anchor.kind ? { kind: anchor.kind } : {}), ...(workspace ? { workspace } : {}) },

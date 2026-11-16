@@ -83,6 +83,9 @@ export interface WizardRecord {
   tier?: string;
   /** 被派来领一件复杂活的 lead: 宪章多一节层级规矩 (renderLeadRules), 组队打法随派活信封带 (renderLeadPlaybook)。 */
   lead?: boolean;
+  /** 身份的工作区 (身份级, 只在锚点记录上有意义; 2026-11-16 拍板 A): 该身份在任何群
+   *  的新化身都从这里起。没写 = 照旧从锚点会话的 live cwd 推。新群引导新建管家时落。 */
+  workspace?: string;
   /** 正在 spawn 它的那个 daemon 进程的代号 (BOOT_ID) —— 身份先于会话落盘, 生成功了才清掉。
    *  留着别的代号 = 生到一半那个进程就没了 (reload / 崩溃), 记录成了僵尸。不用 pid: 重启后会复用。 */
   spawning?: string;
@@ -273,6 +276,18 @@ export const wizardStore = (): WizardStore | undefined => bound;
 /** 一个 target 的默认名: 默认会话取聊天名, 分身取 slot id。去重交给 claim。 */
 export const defaultNameOf = (chatName: string, target: string): string => tagOfKey(target) || chatName;
 
+/** 身份的工作区: 锚点记录 (target === identity 优先, 否则最老化身) 的 workspace 字段。
+ *  新群引导新建管家时写; 没写返回 "" —— 调用方照旧从锚点会话的 live cwd 推。 */
+export const identityWorkspaceOf = (store: WizardStore | undefined, target: string): string => {
+  const rec = store?.get(target);
+  if (!store || !rec) return "";
+  const id = identityOf(rec);
+  const anchor = store.all()
+    .filter((w) => identityOf(w) === id)
+    .sort((a, b) => Number(a.target !== id) - Number(b.target !== id) || a.bornAt - b.bornAt)[0];
+  return anchor?.workspace ?? "";
+};
+
 /** 名字: 名册里落定的 > 默认名。只读推导, 不写盘 —— 需要落定用 store.claim。 */
 export const wizardName = (rec: WizardRecord | undefined, chatName: string, target: string): string =>
   (rec?.name ?? "").trim() || defaultNameOf(chatName, target);
@@ -284,15 +299,6 @@ export const settleName = (store: WizardStore | undefined, chatName: string, tar
   if (have) return have;
   const want = defaultNameOf(chatName, target);
   return store && want ? store.claim(target, want) : want;
-};
-
-/** 默认会话重开 (`/new`) 时名字回到聊天名: 旧名是上一段会话的, 新会话按聊天重新出生。
- *  slot 或聊天无名时不动; 撞名照旧挂 `-N`。返回落定的名字。 */
-export const reclaimChatName = (store: WizardStore | undefined, chatName: string, target: string): string => {
-  const have = settleName(store, chatName, target);
-  return store && chatName && !tagOfKey(target) && have.toLowerCase() !== chatName.toLowerCase()
-    ? store.rename(target, chatName)
-    : have;
 };
 
 /** 名字的保质期: 占着名字的 wizard 静默超过这么久, 新生的同名 wizard 直接顶掉它,
@@ -892,7 +898,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "`handoff` 交接自己: 无待切工作区时清空当前上下文; 有 `pendingCwd` 时启动新 CLI 并应用该目录 (时机见「自我管理」; 点名则替别人) · `set_workspace` 排入工作区切换, 当前任务收尾后须 handoff 自己 · `set_model` 换模型 / effort",
       "`schedule_task` / `list_tasks` / `cancel_task` 到点自动执行的活",
       "`config_get` 逐层看 wezard 配置 (说明、默认、谁能改、何时生效) · `config_set` 改它 (先 `dryRun` 看 diff; 放权项会推卡等人点)",
-      "`wait_peer` 仅当这一轮非拿到答案不可 (平时等回执), 或要等一个不是你派活的 wizard 停下 · `name_chat` 给聊天起名",
+      "`wait_peer` 仅当这一轮非拿到答案不可 (平时等回执), 或要等一个不是你派活的 wizard 停下",
     ]),
     "",
     "## 话是怎么到你这儿的",

@@ -54,7 +54,6 @@ export const present = (tool: string, raw: unknown, input?: Row): unknown => {
       result.expertise = String(input.expertise).trim() === "-" ? "" : row.expertise;
     return result;
   }
-  if (tool === "name_chat") return pick(row, ["ok", "name", "previous", "wizardRenamed"]);
   if (tool === "wizard_whoami") return {
     ...pick(row, ["ok", "name", "cwd", "pendingCwd", "model", "cli", "effort", "contextTokens", "handoffSuggested", "peers"]),
     ...(row.clones === undefined ? {} : { clones: wizardBriefs(row.clones) }),

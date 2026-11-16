@@ -1,50 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import pino from "pino";
-import { ConfigSchema } from "../shared/config.js";
-import { clearChatName, nextAutoName, planChatNames, retiredChatNames, setChatName } from "../daemon/chat-name.js";
 import { createHandoffs, FAILED_STALE_MS, handoffAdmission, resumeText, SELF_GRACE_MS, SELF_SETTLE_MS, settlesCut, type Pending } from "../daemon/handoff.js";
 
 // 2026-11-13 人拍板: 收尾窗口不要了 —— 默认不等, 调用即 Esc; settle 只取证明静置的最小量。
+// (聊天命名那半边已删: 2026-11-16 聊天名整体下线, 见 tests/onboarding.test.ts)
 assert.equal(SELF_GRACE_MS, 0, "self handoff 默认无收尾窗口 (要短窗的部署配 selfWait.graceMs>0)");
 assert.equal(SELF_SETTLE_MS, 10_000, "Esc 后只等能证明静置的最小量; 量不出来走排队兜底");
-
-// ── chat 自动名: 墓碑 + 只递增 ────────────────────────────────────────
-const dir = mkdtempSync(join(tmpdir(), "chatname-"));
-try {
-  const src = join(dir, "config.jsonc");
-  writeFileSync(src, "{}\n");
-  const cfg = ConfigSchema.parse({ bot: { botId: "b", secret: "s" }, daemon: { stateDir: join(dir, "state") },
-    chats: { "cc-wecom-2": "chat:a", "cc-wecom-9": "chat:b", wezard: "user:x" } });
-
-  // 空号 (3..8) 不回填, 取最大序号 +1
-  assert.equal(nextAutoName("cc-wecom", new Set(["cc-wecom-2", "cc-wecom-9"])), "cc-wecom-10");
-  assert.equal(nextAutoName("lisct", new Set()), "lisct");
-  assert.equal(nextAutoName("lisct", new Set(["lisct"])), "lisct-2");
-  assert.equal(nextAutoName("Lisct", new Set(["lisct-4"])), "Lisct-5");
-  assert.equal(nextAutoName("x".repeat(32), new Set(["x".repeat(32)])).length, 32);
-
-  // 首个自动名: 当前 chats 已占到 -9 → -10; 批内递增
-  const plan = planChatNames(cfg, [{ base: "chat:n1", cwd: "/r/cc-wecom" }, { base: "chat:n2", cwd: "/r/cc-wecom" }]);
-  assert.deepEqual(plan, { "chat:n1": "cc-wecom-10", "chat:n2": "cc-wecom-11" });
-
-  // 人 rename 释放的名字不回流: cc-wecom-9 被改名, 新聊天仍拿 -10 而不是 -9
-  assert.ok(setChatName(cfg, src, "chat:b", "modeck").ok);
-  assert.ok(retiredChatNames(cfg).has("cc-wecom-9"), "rename 释放的旧名进墓碑");
-  assert.equal(planChatNames(cfg, [{ base: "chat:n3", cwd: "/r/cc-wecom" }])["chat:n3"], "cc-wecom-10");
-
-  // 墓碑跨进程 (读盘): 清掉全部 cc-wecom-* 之后仍不回落
-  clearChatName(cfg, src, "chat:a");
-  assert.equal(Object.keys(cfg.chats).some((n) => n.startsWith("cc-wecom")), false);
-  assert.equal(planChatNames(cfg, [{ base: "chat:n4", cwd: "/r/cc-wecom" }])["chat:n4"], "cc-wecom-10");
-  assert.deepEqual(JSON.parse(readFileSync(join(dir, "state", "chat-names-retired.json"), "utf8")), ["cc-wecom-2", "cc-wecom-9", "modeck", "wezard"]);
-
-  // 手动命名不受墓碑限制 (只针对自动名)
-  assert.ok(setChatName(cfg, src, "chat:c", "cc-wecom-9").ok);
-} finally { rmSync(dir, { recursive: true, force: true }); }
-
 // ── handoff: 切断那一轮的终句算不算交代 ───────────────────────────────
 assert.equal(settlesCut("chat", undefined), true, "回群里的: 收尾照常落定");
 assert.equal(settlesCut("wizard", undefined), false, "回 wizard 的未标记收尾: 可能是抢答, 扣下");

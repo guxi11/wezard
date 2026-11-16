@@ -72,7 +72,7 @@ import { baseOfKey, bindMultiBot, bindTagLinker, botOfKey, headed, ownHead, isIn
 import { appendEpisode, clipForCharter, cwdOfMd, episodePath, inboxPath, mdsOf, proposedCwds, memoryPath, memoryRoot, proposeMemory, readMemory, type MemoryScope } from "./wizard-memory.js";
 import { startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
 import type { Asker, TurnFrom } from "../shared/detail-store.js";
-import { applyChatNames, chatBaseOf, chatNameOf, chatPolicyOf, clearChatName, listChatNames, normChatName, peerAddress, planChatNames, setChatName, stewardTierOf, type CharterChange, type CharterGuard } from "./chat-name.js";
+import { chatBaseOf, chatNameOf, chatPolicyOf, listChatNames, peerAddress, stewardTierOf, type CharterChange, type CharterGuard } from "./chat-name.js";
 import { appointedSteward, isStewardTarget, markGlobalSteward, stewardRoute } from "./steward.js";
 import { apprenticeOf, ensureApprentice, ensurePatrolTask, handoffLineOf, isApprentice } from "./apprentice.js";
 import {
@@ -886,11 +886,10 @@ const main = async (): Promise<void> => {
 
     // ── Chat naming ────────────────────────────────────────────────────
     // A WeCom chat's identity is a canonical principal such as `chat:wrkS…`.
-    // Naming it gives cross-chat tools a readable chat destination; `spawn_wizard`
-    // accepts that exact chat name in its `chat` field.
+    // 聊天命名已下线 (2026-11-16): 一律用 principal 标识; chats{} 里的存量名仅作显示标签,
+    // 跨聊天参数直接收 principal (存量名仍能解析回来)。
     http.register("POST /chats/list", async (req, res) => {
       const { self } = await readPeerBody(req);
-      if (self) ensureChatNames(self);
       const roster = self ? m.chatRoster(self).filter((c) => sameBot(self, c.base)) : listChatNames(cfg).map((c) => ({ ...c, self: false, targets: [] }));
       json(res, 200, {
         ok: true,
@@ -910,36 +909,6 @@ const main = async (): Promise<void> => {
           })),
         })),
       });
-    });
-
-    http.register("POST /chats/name", async (req, res) => {
-      const { self, body } = await readPeerBody(req);
-      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller chat (pass target/sessionId/tmuxPane)" }); return; }
-      const addressError = unsupportedPeerAddressField(body);
-      if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
-      const raw = ((body as { name?: string }).name ?? "").toString().trim();
-      // "-" is the same erase gesture `/name -` uses in the chat — one verb,
-      // one meaning, whether a human or an agent performs it.
-      // 聊天名进宪章: 过宪章守卫, 受影响的 wizard 被提醒 handoff, 调用方自己受影响的那段话放在 `charter`。
-      const byHuman = !!askerOf(self)?.who.startsWith("user:");
-      const charterOf = async (note: Promise<string>): Promise<{ charter?: string }> => ((t) => (t ? { charter: t } : {}))((await note).trim());
-      if (raw === "-") {
-        const { r: gone, note } = guardCharter(() => clearChatName(cfg, sourcePath, self), (g) => g ? { what: `\`name_chat\` 取消了聊天名 \`${g}\``, self, byHuman } : undefined);
-        json(res, 200, { ok: true, base: baseOfKey(self), name: "", previous: gone, ...(await charterOf(note)) });
-        return;
-      }
-      const previous = chatNameOf(cfg, self);
-      const home = baseOfKey(self);
-      const { r, note } = guardCharter(() => {
-        const r = setChatName(cfg, sourcePath, self, raw);
-        if (!r.ok) return r;
-        // 默认 wizard 的名字取自聊天名; 它还叫旧聊天名 (没被单独改过) 就跟着改。
-        const cur = wizards.get(home)?.name ?? "";
-        return { ...r, wizardRenamed: previous && cur.toLowerCase() === previous.toLowerCase() ? wizards.rename(home, r.name) : undefined };
-      }, (r) => r.ok && r.name !== previous ? { what: `\`name_chat\` 把聊天${previous ? ` \`${previous}\`` : ""}改名为 \`${r.name}\``, self, byHuman } : undefined);
-      if (!r.ok) { json(res, 409, { ok: false, reason: r.reason }); return; }
-      if (r.wizardRenamed) void m.retitlePane(home);
-      json(res, 200, { ok: true, base: r.base, name: r.name, previous, ...(r.wizardRenamed ? { wizardRenamed: r.wizardRenamed } : {}), ...(await charterOf(note)) });
     });
 
     interface PeerBody { target?: string; sessionId?: string; tmuxPane?: string; name?: string }
@@ -1880,9 +1849,6 @@ const main = async (): Promise<void> => {
       const b = body as { to?: string[]; markdown?: string };
       const content = (b.markdown ?? "").trim();
       if (!content) { json(res, 400, { ok: false, reason: "markdown required" }); return; }
-      // 收件人写的就是名字 —— 补名必须发生在解析之前, 否则一个刚被别处命名的聊天
-      // 在这里仍然认不出来。
-      ensureChatNames(self);
       // 认不出的名字原样报回去, 绝不静默跳过 ——「发了但没人收到」是这类工具最难查
       // 的故障; 有一个收件人错了整条就不发, 部分送达比不送达更难对账。
       const refs = (b.to ?? []).map((r) => (r ?? "").trim()).filter(Boolean);
@@ -2277,7 +2243,6 @@ const main = async (): Promise<void> => {
       const b = body as { path?: string; kind?: MediaKind; to?: string; caption?: string; title?: string; description?: string };
       const path = expandHome((b.path ?? "").trim());
       if (!path) { json(res, 400, { ok: false, reason: "path required" }); return; }
-      ensureChatNames(self);
       const ref = (b.to ?? "").trim();
       const dest = ref ? chatBaseOf(cfg, ref) : channelOf(self);
       if (!dest || !sameBot(self, dest)) { json(res, 400, { ok: false, reason: `认不出聊天: ${ref} (wizard_roster 每行有 home 聊天名, 人侧 /chats; 没起名的聊天寻址不到)` }); return; }
@@ -2372,7 +2337,6 @@ const main = async (): Promise<void> => {
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       // 线上字段是 `with`: 请求体里的 `target` 已经是「调用方是谁」的覆盖 (resolveSelf)。
       const b = body as { role?: string; chat?: string; with?: string; since?: string; until?: string; limit?: number; per?: number };
-      ensureChatNames(self);
       const now = Date.now();
       const [roleRef, chatRef, targetRef, sinceRef, untilRef] = [b.role, b.chat, b.with, b.since, b.until].map((x) => (x ?? "").toString().trim());
       // 什么都没给 = 调用方这一轮所在的群; 只给 target = 调用方与它的往来。
@@ -3482,42 +3446,8 @@ const main = async (): Promise<void> => {
       return Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
     };
 
-    /** 拦在每一个「把名字交给模型」的入口前: 没名字的聊天按它的工作区补一个。
-     *
-     *  名字就是地址。一个没名字的聊天在别的聊天眼里只有 `chat:wr4-87DwAA…` 这串
-     *  key —— 能寻址, 但模型抄错一个字符就找不到, 人更读不出那是哪个群。等人想起来
-     *  去 `/name` 是等不到的 (实测 16 个聊天只有 3 个有名字), 而每个聊天本来就带着
-     *  一个可读的标识: 它在干哪个项目。所以在这里补, 而不是在某个 spawn 路径上补 ——
-     *  聊天是先于 wizard 存在的, 只有"要用到名字"这个时刻才是它必须有名字的时刻。
-     *  只填空, 从不覆盖人起过的名字; 推不出名字 (工作区为空) 的原样留着。 */
-    const ensureChatNames = (self: string): Record<string, string> => {
-      const blank = m.chatRoster(self).filter((c) => !c.name);
-      if (blank.length === 0) return {};
-      // 会话多的先排 —— 同一个目录下的几个聊天要靠序号区分 (`lisct` / `lisct-2`),
-      // 而裸名字该归那个真正在干这个项目的群; 按 chatRoster 的字典序分配的话,
-      // 70 个会话的主力群会拿到 `lisct-7`, 一个只有一条冷记录的空群反倒占了裸名。
-      const plan = planChatNames(
-        cfg,
-        blank
-          .slice()
-          .sort((x, y) => y.targets.length - x.targets.length)
-          .map((c) => ({ base: c.base, cwd: chatCwd(c.targets) })),
-      );
-      if (!Object.keys(plan).length) return {};
-      const { r: named } = guardCharter(() => applyChatNames(cfg, sourcePath, plan), (n) => Object.keys(n).length ? { what: `自动补的聊天名 (${Object.values(n).map((x) => `\`${x}\``).join(" ")})` } : undefined);
-      for (const [base, name] of Object.entries(named)) {
-        log.info({ base, name }, "chat: auto-named from workspace");
-        // 群里不发气泡 (一次补名会命中十几个群, 那是刷屏), 但住在里面的 wizard
-        // 得知道自己的地址变了 —— 它的 charter 里写的还是「(未命名)」。
-        postRoster(base, [], { op: "chat", name });
-        recharter(m.chatTargets(base));
-      }
-      return named;
-    };
-
-    // 当前身份初始化与按需落定: 先给用到的未命名聊天补名, transcript 校准懒接管会话的
-    // bornAt, 再按默认会话优先的顺序落定已知 wizard 名称；后续空名记录仍由对应入口补齐。
-    ensureChatNames(cfg.defaultChat || "");
+    // 当前身份初始化与按需落定: transcript 校准懒接管会话的 bornAt, 再按默认会话
+    // 优先的顺序落定已知 wizard 名称; 后续空名记录仍由对应入口补齐。
     const reborn = backfillBorn(wizards, bornOf);
     if (reborn.length) log.child({ mod: "wizard" }).info({ n: reborn.length }, "bornAt backfilled from transcript heads");
     settleAll(
@@ -3783,10 +3713,6 @@ const main = async (): Promise<void> => {
     // 所有 spawn 路径 (群里手打 /new、pane 自愈重生、编排出来的分身) 都从这里
     // 取身份, 于是「是谁」不再取决于是哪段代码把它生出来的。
     m.setCharterProvider((target, ctx) => {
-      // 这里是最要紧的那道拦截: 宪章把「所在聊天」写进系统提示, 而系统提示是随进程
-      // 终身的 —— 一个在聊天还没名字时出生的 wizard, 会一辈子以为自己住在一个
-      // 「(未命名)」的地方。所以补名要发生在渲染之前, 不能等它以后自己去查。
-      ensureChatNames(target);
       // 信箱里装的是相对上一份宪章的变化; 新宪章一渲染就都过期了 (名册、记忆都已在里面)。
       notices.drain(target);
       notices.forget(target);
@@ -3814,13 +3740,6 @@ const main = async (): Promise<void> => {
           }
         } catch { /* 补不上就等它重生 */ }
       });
-    }, 15_000).unref();
-
-    // 开机也补一次: IM 侧的 `/peers`、`/help` 直接读名字, 不经过任何 MCP 路由。
-    // 延后是因为附着表要先从盘上恢复完, 否则这一刻还看不见那些聊天; 补不全也无妨,
-    // 上面每一道拦截都会再补。
-    setTimeout(() => {
-      try { ensureChatNames(cfg.defaultChat ?? ""); } catch (e) { log.warn({ err: (e as Error).message }, "boot auto-name failed"); }
     }, 15_000).unref();
 
     // 家谱只列与观察者同机器人的 (跨机器人的分身生不出来, 这是给老数据 / 手改注册表兜的底)。
@@ -3910,7 +3829,6 @@ const main = async (): Promise<void> => {
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       // 身份已经写在系统提示里了, whoami 回答的是"此刻"的部分: 上下文用了多少、
       // 分身还剩几个、工作区有没有被换掉。
-      ensureChatNames(self);
       json(res, 200, { ok: true, ...identityOf(self, self), peers: (await m.peers(self)).filter((p) => !p.self).length });
     });
 
@@ -3965,7 +3883,6 @@ const main = async (): Promise<void> => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       const b = body as { query?: string; chat?: string; cwd?: string; alive?: boolean; limit?: number; scope?: "chat" | "all" };
-      ensureChatNames(self);
       const all = await rosterOf(self);
       const hit = all.filter(rosterFilters(b));
       // ── v3 §4 金字塔: L0 在场 (默认) / L1 本群 (chat) / L2 组团 (scope:"all"); ctx 超线强制降级 L0。
@@ -4027,7 +3944,6 @@ const main = async (): Promise<void> => {
      *  `keep` 在读 transcript **之前**收窄: 每行要扫几 MB 尾巴, 全机几百个绑定读一遍是秒级 ——
      *  调用方只要活着的那几个时, 别替死掉的 pane 付这笔。 */
     const routeRowsOf = async (self: string, keep: (r: { alive: boolean; target: string }) => boolean = () => true): Promise<(RouteRow & { target: string })[]> => {
-      ensureChatNames(self);
       const roster = await rosterOf(self);
       const inflight = routeInFlight();
       const queued = events.status().events.filter((e) => e.execution === "queued" || e.execution === "dispatching");
@@ -4837,7 +4753,7 @@ const main = async (): Promise<void> => {
         ...(mine ? [`**你自己也在其中** (变了的段: ${mine.sections.join(" / ")})`] : []),
       ].join("\n");
     };
-    // 所有会动宪章的写入 (config_set、人 `/name`、name_chat、自动补名) 共用这一个守卫: 写前写后各渲染一遍
+    // 所有会动宪章的写入 (config_set、人 `/name`、新群引导的管家绑定) 共用这一个守卫: 写前写后各渲染一遍
     // 挂在 pane 上的 wizard 的宪章, 变了的、pane 还活着的挂提醒 (见 announceCharterImpact)。
     // 快照到写完之间不能有 await —— 别人的写入插进来, 前后就对不上了。已经写了: 比对失败只少一句提醒, 不能让调用方以为没写而重发。
     guardCharter = (write, change) => {
