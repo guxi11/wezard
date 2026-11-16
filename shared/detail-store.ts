@@ -53,7 +53,8 @@ export interface ApprovalDetailRecord {
 // Brief 模式聚合: 一个 turn 内所有中间事件的时间线快照。turnId = mirror-bridge
 // 侧生成的 turnId (t<base36-time><rand6>);同一 turn 多次 append 覆盖前值 (put 语义)。
 export type TurnItem =
-  | { t: "text"; body: string; ts: number; final?: boolean }
+  // aside: 只由 rolepage 视图 (role-view.deliveredTurn) 临时打上, 不落盘 —— strict 群里没进群的 CLI 原话, 留在过程框, 不当气泡。
+  | { t: "text"; body: string; ts: number; final?: boolean; aside?: boolean }
   | { t: "tool_use"; toolUseId: string; toolName: string; toolInput: unknown; ts: number }
   | { t: "tool_result"; toolUseId: string; body: string; ts: number }
   | { t: "approval"; approvalId: string; toolName: string; decision?: ApprovalDecision; ts: number };

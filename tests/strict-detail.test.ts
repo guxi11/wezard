@@ -1,11 +1,12 @@
-// v3 P7-S3b: rolepage 群窗的账本口径 —— strict 群的 turn 出气泡被压掉, 实发内容走 post 记录。
-// 断言: ① 同一轮 strict 群的出气泡文本 === chat-records 对应行的文本 (逐字, 同一字符串)
-//      ② passed / 沉默轮不出现模型终句 ③ implicit 群不受影响 ④ 老数据 (无 post 的历史轮) 仍显示。
+// v3 P7-S3b: rolepage 群窗的账本口径 —— strict 群一轮的出消息照旧 (工具调用进过程框),
+// 只有气泡换成实发 (post 记录并进它那一轮); 没有实发的轮退回 CLI 终句, 与非 strict 同口径。
+// 断言: ① 气泡文本 === 实发文本 (逐字), CLI 原话留在过程框 (aside) ② 工具调用不丢
+//      ③ 归不进任何轮的 post 仍独立成条 ④ implicit 群不受影响 ⑤ post 按 id 去重。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { allMessages, makeDirectory, messageOfPost, messagesOfTurn } from "../shared/role-view.js";
+import { allMessages, makeDirectory, messageOfPost, messagesOfTurn, strictPostsOf } from "../shared/role-view.js";
 import { EMPTY_FACTS, type WorldFacts } from "../shared/world.js";
 import type { DetailRecord, TurnDetailRecord } from "../shared/detail-store.js";
 import { recordPost, initDetailPersistence } from "../daemon/detail.js";
@@ -32,27 +33,52 @@ const dir = makeDirectory(records, facts);
 assert.ok(dir.strictChats.has(STRICT), "Directory 带上 strictChats");
 assert.ok(!dir.strictChats.has(PLAIN));
 
-// ── 1. messagesOfTurn: strict 群的出气泡压掉, 入消息保留; implicit / 私聊照旧 ──
+// ── 1. messagesOfTurn: strict 群没有实发的轮 = 非 strict 口径 (出消息在, 终句当气泡) ──
 const strictChats = dir.strictChats;
-assert.equal(messagesOfTurn(records[0] as TurnDetailRecord, undefined, strictChats).some((m) => m.dir === "out"), false, "strict 群: 模型终句的出气泡不出现");
-assert.equal(messagesOfTurn(records[0] as TurnDetailRecord, undefined, strictChats).some((m) => m.dir === "in"), true, "strict 群: 问话入消息保留 (轮发生了, 区分「没这轮」)");
-assert.equal(messagesOfTurn(records[1] as TurnDetailRecord, undefined, strictChats).some((m) => m.dir === "out"), true, "implicit 群: 出气泡照旧");
-assert.equal(messagesOfTurn(records[2] as TurnDetailRecord, undefined, strictChats).some((m) => m.dir === "out"), true, "私聊: 出气泡照旧 (strict 只压群)");
-assert.equal(messagesOfTurn(records[0] as TurnDetailRecord).some((m) => m.dir === "out"), true, "不传 strict 集 = 老 daemon 行为 (回归兼容)");
+const ix0 = strictPostsOf(records, strictChats);
+assert.equal(messagesOfTurn(records[0] as TurnDetailRecord, undefined, ix0).some((m) => m.dir === "out"), true, "strict 群无实发: 出消息照旧 (不再整段压掉)");
+assert.equal(messagesOfTurn(records[0] as TurnDetailRecord, undefined, ix0).some((m) => m.dir === "in"), true, "strict 群: 问话入消息保留");
+assert.equal(messagesOfTurn(records[1] as TurnDetailRecord, undefined, ix0).some((m) => m.dir === "out"), true, "implicit 群: 出气泡照旧");
+assert.equal(messagesOfTurn(records[2] as TurnDetailRecord, undefined, ix0).some((m) => m.dir === "out"), true, "私聊: 出气泡照旧");
 
-// ── 2. 实发内容 = post 记录, 文本与账本行逐字一致 ──
+// ── 2. 有实发的 strict 轮: 一条出消息, 工具调用进过程框, 气泡 = 实发逐字, CLI 原话 aside ──
 const LEDGER_TEXT = "看过了, 是配置问题"; // 同一字符串既进账本 (ChatLine.text) 又进 post (body)
-const post: DetailRecord = { kind: "post", id: "msg-stream-1", createdAt: 2500, target: "chat:wrS#fix", channel: STRICT, body: LEDGER_TEXT };
-const msgs = allMessages([...records, post], 3000, dir.canon, strictChats);
-const outInStrict = msgs.filter((m) => m.channel === STRICT && m.dir === "out");
-assert.equal(outInStrict.length, 1, "strict 群的出气泡只有 post 那一条 (t1 被压掉)");
-assert.equal(outInStrict[0]!.turn.items[0]!.body ?? "", LEDGER_TEXT, "出气泡文本 === 账本行文本 (逐字: 同一字符串)");
-// 同一轮 chat_pass (t4): 无 post → 群里零出气泡, 模型终句 (其实 t4 没有) 也不出现
-assert.equal(msgs.filter((m) => m.channel === STRICT && m.dir === "out" && m.turn.id === "t4").length, 0, "沉默轮零出气泡");
+const tooled = turn({ id: "t5", target: "chat:wrS#fix", channel: STRICT, createdAt: 10_000, updatedAt: 14_000, items: [
+  { t: "tool_use", toolUseId: "u1", toolName: "Read", toolInput: { file_path: "/x.ts" }, ts: 11_000 },
+  { t: "tool_result", toolUseId: "u1", body: "file body", ts: 11_500 },
+  { t: "tool_use", toolUseId: "u2", toolName: "mcp__wezard__chat_reply", toolInput: { re: "h1", text: LEDGER_TEXT }, ts: 12_000 },
+  { t: "tool_result", toolUseId: "u2", body: "{\"ok\":true}", ts: 13_000 },
+  { t: "text", body: "已用 chat_reply 回了 (CLI 终句)", ts: 13_500, final: true },
+] });
+const post: DetailRecord = { kind: "post", id: "msg-stream-1#w", createdAt: 12_500, target: "chat:wrS#fix", channel: STRICT, body: LEDGER_TEXT };
+const stray: DetailRecord = { kind: "post", id: "stray#w", createdAt: 500_000, target: "chat:wrS#fix", channel: STRICT, body: "很久以后落账的一句" };
+const all = [...records, tooled, post, stray];
+const ix = strictPostsOf(all, strictChats);
+assert.equal(ix.hostOf.get("msg-stream-1#w"), "t5", "实发归到当时正跑着、在该群答话的那一轮");
+assert.equal(ix.hostOf.has("stray#w"), false, "轮次收口很久之后才落账的 post 不归轮");
+const msgs = allMessages(all, 600_000, dir.canon, strictChats);
+const out5 = msgs.filter((m) => m.turn.id === "t5" && m.dir === "out");
+assert.equal(out5.length, 1, "t5 一条出消息");
+assert.equal(msgs.some((m) => m.id === "msg-stream-1#w:out"), false, "并进轮次的 post 不再独立成条");
+assert.equal(msgs.filter((m) => m.id === "stray#w:out").length, 1, "归不进轮的 post 仍独立成条");
+const html = renderMsg(out5[0]!, all, makeDirectory(all, facts), 600_000).html;
+assert.equal((html.match(/class="say"/g) ?? []).length, 1, "只有一颗气泡");
+const sayAt = html.indexOf('class="say"');
+assert.ok(html.slice(sayAt).includes(LEDGER_TEXT), "气泡正文 = 实发文本");
+assert.ok(html.includes("2 次工具调用"), "两次工具调用都进过程框");
+assert.ok(/bubble note aside[^>]*>[\s\S]*CLI 终句/.test(html), "CLI 原话留在过程框 (aside), 不丢");
+assert.equal(out5[0]!.turn.items.filter((i) => i.t === "text" && i.final).length, 1, "收口判定 (final) 不变");
 
-// ── 3. messageOfPost: post 的合成 turn 只含实发正文 ──
-const pm = messageOfPost(post as Extract<typeof post, { kind: "post" }>);
-assert.equal(pm.turn.items.filter((i) => i.t === "text").map((i: any) => i.body).join(""), LEDGER_TEXT);
+// ── 3. 实发与 CLI 终句同文: 并成一颗气泡, 不重复 ──
+const echoTurn = turn({ id: "t6", target: "chat:wrS#fix", channel: STRICT, createdAt: 20_000, updatedAt: 21_000,
+  items: [{ t: "text", body: LEDGER_TEXT, ts: 20_900, final: true }] });
+const echoPost: DetailRecord = { kind: "post", id: "p6#w", createdAt: 20_950, target: "chat:wrS#fix", channel: STRICT, body: LEDGER_TEXT };
+const m6 = messagesOfTurn(echoTurn, undefined, strictPostsOf([echoTurn, echoPost], strictChats)).find((m) => m.dir === "out")!;
+assert.deepEqual(m6.turn.items.map((i) => [i.t, (i as { aside?: boolean }).aside ?? false, (i as { final?: boolean }).final ?? false]), [["text", false, true]], "同文并进实发, final 跟过去");
+
+// ── 3b. messageOfPost: post 的合成 turn 只含实发正文 ──
+const pm = messageOfPost(stray as Extract<typeof stray, { kind: "post" }>);
+assert.equal(pm.turn.items.filter((i) => i.t === "text").map((i: any) => i.body).join(""), "很久以后落账的一句");
 assert.equal(pm.channel, STRICT);
 
 // ── 4. implicit 群不受影响 (回归): 无 strict 集 / 空集时行为一致 ──
@@ -115,4 +141,4 @@ import { renderMsg } from "../shared/role-render.js";
   assert.equal(mdOf(renderMsg(in3, recs, dir2, 5000)), RAW, "implicit 群照旧走 userQuery+splitReminders (不受 rawQuery 影响)");
 }
 rmSync(tmp, { recursive: true, force: true });
-console.log("strict-detail: 出气泡=实发内容(逐字) / 沉默轮零气泡 / implicit 回归 / 老数据兼容 / post 按 id 去重 / #w 命名空间 / in-msg=账本原文");
+console.log("strict-detail: 气泡=实发内容(逐字) / 工具调用进过程框 / CLI 原话 aside / implicit 回归 / 老数据兼容 / post 按 id 去重 / #w 命名空间 / in-msg=账本原文");

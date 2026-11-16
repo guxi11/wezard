@@ -27,7 +27,7 @@ import { baseOfKey, sameBot } from "./session-label.js";
 import { isMark, isPost, isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, withData, type WorldFacts } from "./world.js";
 import {
-  allMessages, unreadIndex, ledgerOf, windowOf, spanFor, convKeyOf, chatKeysOf, isWizardDm, parseTalkKey, glanceOfTalk, convsOf, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn, injectEchoesOf,
+  allMessages, unreadIndex, ledgerOf, windowOf, spanFor, convKeyOf, chatKeysOf, isWizardDm, parseTalkKey, glanceOfTalk, convsOf, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn, injectEchoesOf, strictPostsOf,
   roleInfo, roleStats, sessionsOf, talkArgs, talkOf, counterpartOf, windowStats, type Directory, type Heard, type Msg, type SessionSpan,
 } from "./role-view.js";
 import { dependentsOf, renderMark, renderMsg, type MsgFragment } from "./role-render.js";
@@ -230,7 +230,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
   const summary = (records: readonly DetailRecord[], f: WorldFacts, role: string, sid: string | null, land: Landing, win: Pick<View, "conv" | "with" | "span"> | undefined, since: number) => {
     const now = Date.now();
     const dir = makeDirectory(records, f);
-    // P7-S3b: strict 群的 turn 出气泡被压掉 (群窗画账本口径的实发内容, 见 messagesOfTurn)。
+    // P7-S3b: strict 群一轮的气泡换成实发内容 (post 并进它的那一轮, 见 deliveredTurn)。
     const msgs = allMessages(records, now, dir.canon, dir.strictChats);
     const spans = sessionsOf(records, role, now);
     const span = spanOf(spans, sid);
@@ -429,6 +429,9 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
         return;
       }
       if (isPost(r)) {
+        // strict 群的实发并在它那一轮的出消息里 —— 推那一轮。
+        const host = strictPostsOf(records, dir.strictChats).hostOf.get(r.id);
+        if (host) return pushTurn(host, records, dir, now, deep);
         const m = messageOfPost(r);
         if (windowOf([m], v.role, v.conv, v.with || undefined, v.span).length) pushFrag(renderMsg(m, records, dir, now));
         return;
@@ -437,7 +440,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       // 子 agent 的一轮渲染在父轮的出消息里 —— 推父轮。
       const top = r.agent?.parentTurnId ? store.get(r.agent.parentTurnId) : r;
       if (!top || !isTurn(top) || !top.target) return;
-      windowOf(messagesOfTurn(top, injectEchoesOf(records), dir.strictChats), v.role, v.conv, v.with || undefined, v.span).forEach((m) => pushFrag(renderMsg(m, records, dir, now)));
+      windowOf(messagesOfTurn(top, injectEchoesOf(records), strictPostsOf(records, dir.strictChats)), v.role, v.conv, v.with || undefined, v.span).forEach((m) => pushFrag(renderMsg(m, records, dir, now)));
       if (deep) dependentsOf(top, records).forEach((d) => pushTurn(d, records, dir, now, false));
     };
 

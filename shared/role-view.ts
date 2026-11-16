@@ -134,7 +134,46 @@ export const injectTurnsOf = (r: TurnDetailRecord): TurnDetailRecord[] =>
     ...(x.from ? { from: x.from } : {}), ...(x.speaker ? { speaker: x.speaker } : {}),
   }));
 
-export const messagesOfTurn = (r: TurnDetailRecord, echoes?: EchoIndex, strictChats?: ReadonlySet<string>): Msg[] => {
+/** strict 群的实发 (post 记录) 归到发话 wizard 当时正跑着、且就在那个群里答话的那一轮:
+ *  hostOf = post id → 轮次 id, byTurn = 轮次 id → 它的实发 (按时刻)。别的群 / 私聊轮里
+ *  贴进来的、或轮次收口很久之后才落账的 post 不归任何轮, 仍是独立的一条出消息。 */
+export interface StrictIndex { hostOf: Map<string, string>; byTurn: Map<string, PostDetailRecord[]> }
+const POST_SLACK_MS = 30_000;
+const STRICT_IX = new WeakMap<readonly DetailRecord[], WeakMap<ReadonlySet<string>, StrictIndex>>();
+export const strictPostsOf = (records: readonly DetailRecord[], strictChats: ReadonlySet<string>): StrictIndex => {
+  const hit = STRICT_IX.get(records)?.get(strictChats);
+  if (hit) return hit;
+  const byTarget = new Map<string, TurnDetailRecord[]>();
+  for (const t of records.filter(isTurn)) if (t.target && !t.agent) byTarget.set(t.target, [...(byTarget.get(t.target) ?? []), t]);
+  const hostOf = new Map<string, string>();
+  const byTurn = new Map<string, PostDetailRecord[]>();
+  for (const p of records.filter(isPost).filter((p) => strictChats.has(p.channel)).sort((a, b) => a.createdAt - b.createdAt)) {
+    const host = (byTarget.get(p.target) ?? []).reduce<TurnDetailRecord | undefined>(
+      (best, t) => (t.createdAt <= p.createdAt && (!best || t.createdAt > best.createdAt) ? t : best), undefined);
+    if (!host || channelOf(host) !== p.channel || (host.closed && p.createdAt > host.updatedAt + POST_SLACK_MS)) continue;
+    hostOf.set(p.id, host.id);
+    byTurn.set(host.id, [...(byTurn.get(host.id) ?? []), p]);
+  }
+  const ix = { hostOf, byTurn };
+  STRICT_IX.set(records, (STRICT_IX.get(records) ?? new WeakMap()).set(strictChats, ix));
+  return ix;
+};
+
+/** strict 群一轮的出消息 = 工具 / 途中的话照旧进过程框, 气泡换成实发内容: CLI 原话标 aside
+ *  (留在框里, 不当气泡); 与实发同文的那句并进实发 (final 跟过去, 收口判定不变)。 */
+export const deliveredTurn = (r: TurnDetailRecord, posts: readonly PostDetailRecord[]): TurnDetailRecord => {
+  const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
+  const texts = r.items.filter((it): it is Extract<typeof it, { t: "text" }> => it.t === "text");
+  const same = (p: PostDetailRecord) => texts.filter((it) => squash(it.body) === squash(p.body));
+  const merged = new Set(posts.flatMap(same));
+  const said = posts.map((p) => ({ t: "text" as const, body: p.body, ts: p.createdAt, ...(same(p).some((it) => it.final) ? { final: true } : {}) }));
+  const rest = r.items.flatMap((it): TurnDetailRecord["items"] => (it.t !== "text" ? [it] : merged.has(it) ? [] : [{ ...it, aside: true }]));
+  return { ...r, items: [...rest, ...said].sort((a, b) => a.ts - b.ts) };
+};
+
+export const messagesOfTurn = (r0: TurnDetailRecord, echoes?: EchoIndex, strict?: StrictIndex): Msg[] => {
+  const posts = strict?.byTurn.get(r0.id);
+  const r = posts ? deliveredTurn(r0, posts) : r0;
   const w = r.target!;
   const who = senderOf(r);
   const channel = channelOf(r);
@@ -144,10 +183,9 @@ export const messagesOfTurn = (r: TurnDetailRecord, echoes?: EchoIndex, strictCh
   const inMsg: Msg[] = r.userQuery?.trim() && !receipt && !echoes?.splitIns.has(r.id)
     ? [{ id: `${r.id}:in`, turn: r, dir: "in", from: who, to: w, channel, ts: r.createdAt }]
     : [];
-  // P7-S3b: strict 群的 turn 出气泡被压掉 —— 群窗只画实际发进群的内容 (post 记录,
-  //  由出站 tracker 落账); 模型终句从未进群, 不该在群里回放。
-  const suppressed = !!channel && !!strictChats?.has(channel);
-  const outMsg: Msg[] = !suppressed && (r.items.length > 0 || !r.closed)
+  // strict 群的出消息不压: 工具调用照样进过程框, 只有气泡换成实发 (见 deliveredTurn);
+  //  这一轮没有实发 (老会话没 chat_reply) 就退回 CLI 终句, 与非 strict 同口径。
+  const outMsg: Msg[] = r.items.length > 0 || !r.closed
     ? [{ id: `${r.id}:out`, turn: r, dir: "out", from: w, to, channel, ts: Math.max(r.createdAt + 1, Number.isFinite(firstOut) ? firstOut : r.createdAt + 1) }]
     : [];
   const injected: Msg[] = injectTurnsOf(r)
@@ -176,7 +214,8 @@ export const messageOfPost = (p: PostDetailRecord): Msg => ({
  *  各化身各一页, 与旧行为一比一。 */
 export const allMessages = (records: readonly DetailRecord[], now: number, canon: (id: string) => string = (x) => x, strictChats?: ReadonlySet<string>): Msg[] => {
   const echoes = injectEchoesOf(records);
-  return [...convTurns(records, now).flatMap((r) => messagesOfTurn(r, echoes, strictChats)), ...records.filter(isPost).map(messageOfPost)]
+  const strict = strictChats ? strictPostsOf(records, strictChats) : undefined;
+  return [...convTurns(records, now).flatMap((r) => messagesOfTurn(r, echoes, strict)), ...records.filter(isPost).filter((p) => !strict?.hostOf.has(p.id)).map(messageOfPost)]
     .map((m) => (canon(m.from) === m.from && canon(m.to) === m.to ? m : { ...m, from: canon(m.from), to: canon(m.to) }))
     .sort((a, b) => a.ts - b.ts);
 };
@@ -197,8 +236,8 @@ export interface RoleStatus {
 export interface Directory {
   nameOf: (id: string) => string;
   labelOf: (id: string) => string;
-  /** 生效 strict 的聊天 base 集合 (P7-S3b): 这些群里的 turn 出气泡被压掉 —— 群窗只画
-   *  实际发进群的内容 (post 记录 / 账本行)。老 facts 没给 = 空集, 一切照旧。 */
+  /** 生效 strict 的聊天 base 集合 (P7-S3b): 这些群里一轮的气泡换成实际发进群的内容
+   *  (post 记录, 见 deliveredTurn), 工具调用照旧。老 facts 没给 = 空集, 一切照旧。 */
   strictChats: ReadonlySet<string>;
   /** `.fix` / `fix` / target / `user:x` → role id; undefined = 不认识。 */
   resolve: (ref: string) => string | undefined;
@@ -373,7 +412,7 @@ const stripMd = (s: string): string => s.replace(/[`*_~|#>]/g, "").replace(/\s+/
  *  不剥的话预览全是 `<system-reminder …>`, 人一句正文都看不见。 */
 const saidOf = (m: Msg): { body: string; ts: number } => {
   if (m.dir === "in") return { body: stripMd(unwrapMates(stripReminders(m.turn.userQuery ?? ""))).slice(0, 80), ts: m.ts };
-  const t = [...m.turn.items].reverse().find((it): it is Extract<typeof it, { t: "text" }> => it.t === "text");
+  const t = [...m.turn.items].reverse().find((it): it is Extract<typeof it, { t: "text" }> => it.t === "text" && !it.aside);
   return { body: stripMd(t?.body ?? "").slice(0, 80), ts: t?.ts ?? m.ts };
 };
 

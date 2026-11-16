@@ -1008,7 +1008,9 @@ const renderSay = (item: TextItem, key: string, cap?: string, lead = ""): string
 
 /** 途中的话: 和它带出来的工具调用同属一次应答, 留在过程框里。 */
 const renderNote = (item: TextItem, key: string): string =>
-  `<div class="bubble note" data-key="${key}">${mdBody(item.body)}</div>`;
+  item.aside
+    ? `<div class="bubble note aside" data-key="${key}" title="CLI 终句 · 未进群">${mdBody(item.body)}</div>`
+    : `<div class="bubble note" data-key="${key}">${mdBody(item.body)}</div>`;
 
 // 本轮的账: 模型 / 上下文 / 耗时。
 const usageChips = (r: TurnDetailRecord, done: boolean, ageMs: number): string => {
@@ -1102,7 +1104,7 @@ const turnParts = (r: TurnDetailRecord, keyPrefix = "", now = Date.now(), lazy =
   // 退一步: 一轮结束后, 最后一个动作之后的话就是终句。
   const lastAct = paired.reduce((n, p, i) => (p.kind === "solo" && p.item.t === "text" ? n : i), -1);
   const isSay = (p: (typeof paired)[number], i: number): boolean =>
-    p.kind === "solo" && p.item.t === "text" && (p.item.final === true || (done && i > lastAct));
+    p.kind === "solo" && p.item.t === "text" && !p.item.aside && (p.item.final === true || (done && i > lastAct));
   const body = (p: (typeof paired)[number], key: string, i: number): string => {
     if (p.kind === "pair") return renderToolBubble(p.use, p.result, key, done, lazy ? r.id : undefined, deco);
     const it = p.item;
