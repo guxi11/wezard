@@ -1624,6 +1624,15 @@ const main = async (): Promise<void> => {
           return;
         }
       }
+      // fail-loud: 终句自认是回执 (带 RESULT/NEED/PROGRESS/ARTIFACT 关键字), 却没有任何一种收口
+      // 形态能在行首认出来 —— 这一轮不产生任何路由 op, 那一行就留在 open 上, 只有 idle-nudge
+      // 反复追问。静默退化成 progress 现场查不出来 (2026-11-16 e23ee2f.1: 模型把契约示例的
+      // inline-code 反引号一起抄下来, 16 分钟问 3 次都没落定), 所以这里必须留下证据。
+      if (!verdict.error && servedRow && ["open", "need", "error"].includes(servedRow.status)
+          && parseClosing(verdict.text).kind === "none" && !addressedResults(verdict.text).length
+          && receiptKeyword(verdict.text))
+        log.warn({ event: e.id, target: e.target, serves: routeEvent, head: clipLine(verdict.text, 160) },
+          "终句带收口关键字但认不出收口形态 (行首 RESULT:/NEED:/PROGRESS: 或 `.name RESULT:`) — 这一行不落定");
       const plans = router.onFinal(e.target, routeEvent, { ...verdict, source: reportSource(e) }, strictFinal);
       // Error evidence has no durable event result. Queue the chat reply before
       // mark:error suppresses replay, so a reload between the two cannot lose it.

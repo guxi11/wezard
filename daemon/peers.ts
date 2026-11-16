@@ -501,6 +501,16 @@ export const topLevelText = (text: string): string => {
   }).join("");
 };
 
+/** 契约示例写成 inline code (``.name RESULT: …``), 模型照抄时会把首尾反引号一起带下来 —— 收口
+ *  判定锚行首, 多一个反引号整句就退化成 progress (行始终不落定, 只有 idle-nudge 反复追问);
+ *  配对的收尾又会让 topLevelText 把整行当代码抹掉。开引号与同行配对收尾都换成空格: 长度不变,
+ *  判定与切片用同一份文本 (切片取 norm, 收尾就随 trim 一起消失)。只认单个反引号 —— ``` / ~~~ 围栏
+ *  原样交给 topLevelText 处理, 代码块里的同名标记不算收口。 */
+const unquoteMarkLine = (text: string): string => text.split("\n").map((line) =>
+  /^[ \t]*`[^`]/.test(line)
+    ? line.replace(/^([ \t]*)`/, "$1 ").replace(/`([ \t]*)$/, (_m, tail: string) => ` ${tail}`)
+    : line).join("\n");
+
 // 回执署名四态 (2026-11-13 人口径 B): 新写法 = 行首 `.name RESULT:` (与人的点名写法同形,
 // wizard 之间不带记号); 存量三态 `@name` / `@.name` / `@🧙‍♂️ name` 长期照认。
 // @ 形态名字后必须紧跟 RESULT (不误伤普通提及); 点形态锚行首 (列表标记之后), 免得
@@ -509,9 +519,11 @@ const AT_RESULT_RE = new RegExp(`@(?:\\.|${MAGE_SRC}[ \\t]?)?([A-Za-z0-9_-]+)[ \
 const DOT_RESULT_RE = new RegExp(`^[ \\t>*-]*\\.([A-Za-z0-9_-]+)[ \\t]+RESULT[ \\t]*[:：][ \\t]*`, "gm");
 
 export const addressedResults = (text: string): Array<{ name: string; body: string }> => {
+  const norm = unquoteMarkLine(text);
+  const visible = topLevelText(norm);
   const marks = [
-    ...topLevelText(text).matchAll(AT_RESULT_RE),
-    ...topLevelText(text).matchAll(DOT_RESULT_RE),
+    ...visible.matchAll(AT_RESULT_RE),
+    ...visible.matchAll(DOT_RESULT_RE),
   ].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
   return marks.map((m, i) => {
     const next = marks[i + 1]?.index;
@@ -519,7 +531,7 @@ export const addressedResults = (text: string): Array<{ name: string; body: stri
     const line = next === undefined ? -1 : text.lastIndexOf("\\n", next - 1) + 1;
     const currentLine = text.lastIndexOf("\\n", start) + 1;
     const end = line > currentLine ? line : next;
-    return { name: m[1]!, body: text.slice(start + m[0].length, end).trim() };
+    return { name: m[1]!, body: norm.slice(start + m[0].length, end).trim() };
   });
 };
 
@@ -537,7 +549,9 @@ export const receiptKeyword = (text: string): boolean => {
 
 
 export const parseClosing = (text: string, max = 800): Closing => {
-  const visible = topLevelText(text);
+  // 与 addressedResults 同一份归一化: 行首那个 inline-code 开引号不算收口形态的一部分。
+  const norm = unquoteMarkLine(text);
+  const visible = topLevelText(norm);
   const visibleLines = visible.split(/\r?\n/);
   const artifacts = text.split(/\r?\n/).flatMap((line, i) => {
     if (!/^[ \t>*|-]*ARTIFACT[ \t]*[:：]/.test(visibleLines[i] ?? "")) return [];
@@ -552,7 +566,7 @@ export const parseClosing = (text: string, max = 800): Closing => {
   const closing = marks.map((m, i) => {
     const start = (m.index ?? 0) + m[0].length, end = marks[i + 1]?.index;
     const shown = visible.slice(start, end).split(/\r?\n/);
-    const body = text.slice(start, end).split(/\r?\n/)
+    const body = norm.slice(start, end).split(/\r?\n/)
       .filter((_line, n) => !/^[ \t>*|-]*ARTIFACT[ \t]*[:：]/.test(shown[n] ?? "")).join("\n").trim();
     return { kind: m[1] === "NEED" ? "need" as const : m[1] === "PROGRESS" ? "progress" as const : "result" as const, text: body };
   }).filter((c) => c.kind === "result" || (c.text && !/^(?:无|没有|none|n\/a|-+)[。.]?$/i.test(c.text))).at(-1);

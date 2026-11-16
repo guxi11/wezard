@@ -8,7 +8,7 @@ import {
   tagHead, chatHead, tagBadge, parseTagHeader, rawTagHeader, withLinkedTagHeader,
   linkTags, unlinkTags, bindTagLinker, isHost, keyOf,
 } from "../shared/session-label.js";
-import { addressedResults, receiptKeyword, renderPeerEnvelope } from "../daemon/peers.js";
+import { addressedResults, parseClosing, receiptKeyword, renderPeerEnvelope } from "../daemon/peers.js";
 import { addr, renderRoster, type WizardBrief, type RosterRow } from "../daemon/wizard.js";
 import { renderChatLog, type LogSession } from "../daemon/chat-log.js";
 import { glanceOfTalk, type Directory, type Msg } from "../shared/role-view.js";
@@ -105,6 +105,12 @@ assert.deepEqual(addressedResults("- .fix RESULT: done it"), [{ name: "fix", bod
 assert.deepEqual(addressedResults(".fix RESULT: 一段\n.bob RESULT: 二段"), [{ name: "fix", body: "一段" }, { name: "bob", body: "二段" }], "一段内多个 .name RESULT: 分段投递");
 assert.deepEqual(addressedResults("版本 2.9.0 RESULT: 不是收件人"), [], "行中的小数不当作点名 (点形态锚行首)");
 assert.deepEqual(addressedResults("@bob 中间有话 RESULT: 说不通"), [], "@ 形态名字后必须紧跟 RESULT");
+// 约定里这行是 inline code (``.name RESULT: …``), 模型照抄时会把首尾反引号一起带下来。判定锚行首,
+// 多一个反引号整句就退化成 progress —— 那一行永远不落定, 只剩 idle-nudge 反复追问 (2026-11-16 e23ee2f.1)。
+assert.deepEqual(addressedResults("`.sanitizer RESULT: 无 WIP`"), [{ name: "sanitizer", body: "无 WIP" }], "行首 inline-code 开引号");
+assert.deepEqual(addressedResults("`.sanitizer RESULT: 无 WIP"), [{ name: "sanitizer", body: "无 WIP" }], "只抄了开引号");
+assert.deepEqual(parseClosing("`RESULT: 完成`"), { kind: "result", text: "完成", artifacts: [] }, "收口标记连同反引号一起抄");
+assert.equal(parseClosing("```\nRESULT: 代码块里的例子\n```").kind, "none", "围栏里的同名标记不算收口");
 
 // ── md-chunk: 永不切开 ZWJ 序列 (按行块切, 行内原子) ──────────────────
 {
