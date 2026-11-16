@@ -18,6 +18,10 @@ assert.equal(unrecognizedReceipt(weak, row({ status: "error" })), true);
 assert.equal(unrecognizedReceipt(weak, row({ status: "answered" })), false, "已落定的行不再兜底");
 assert.equal(unrecognizedReceipt("普通一句话, 没提收口", row()), false, "没有弱信号不动");
 assert.equal(unrecognizedReceipt("RESULT: 有形态", row()), false, "认得出形态走正常路径");
+// 只有 NEED / PROGRESS 的句中关键字 = 中途态, 不许拿它给行收终态。
+assert.equal(unrecognizedReceipt("还在跑, 见 PROGRESS: 第二阶段", row()), false, "句中 PROGRESS 不兜底");
+assert.equal(unrecognizedReceipt("卡住了, 见 NEED: 要个密码", row()), false, "句中 NEED 不兜底");
+assert.equal(unrecognizedReceipt("交付物见 ARTIFACT: /tmp/x.md", row()), true, "ARTIFACT 是完成类信号");
 assert.equal(unrecognizedReceipt(weak, undefined), false, "没有服务的行就无处落定");
 
 // 兜底确实把行按终态落定: 一条 answer op, 状态 done。

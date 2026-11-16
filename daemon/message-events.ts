@@ -6,7 +6,7 @@ import type { Asker, TurnFrom } from "../shared/detail-store.js";
 import type { MirrorDispatchArgs } from "./mirror-bridge.js";
 import type { Tell, HeldSeen } from "./dispatch.js";
 import type { EventId, Receiver, ReportSource, Report, Route } from "./router.js";
-import { addressedResults, parseClosing, receiptKeyword } from "./peers.js";
+import { addressedResults, completionKeyword, parseClosing } from "./peers.js";
 import type { TemplateRef } from "../shared/task-template.js";
 
 export interface ReceiptFact {
@@ -274,7 +274,7 @@ export const correctionTaskEvent = (binding: { event: string | null } | undefine
  *  只管「账本是否了结」—— 正文去哪儿仍由 eventFinalGate / strict 出站门判, 与此无关。 */
 export const unrecognizedReceipt = (text: string, row: Route | undefined): boolean =>
   !!row && ["open", "need", "error"].includes(row.status)
-  && parseClosing(text).kind === "none" && addressedResults(text).length === 0 && receiptKeyword(text);
+  && parseClosing(text).kind === "none" && addressedResults(text).length === 0 && completionKeyword(text);
 export const canSettleFinal = (event: MessageEvent): boolean => !event.id.startsWith("feedback:")
   || !!event.serves || !!event.feedbackRoute;
 export const eventFinalPublication = (event: MessageEvent, owns: (event: EventAuthority) => boolean,

@@ -552,6 +552,14 @@ export const addressedResults = (text: string): Array<{ name: string; body: stri
  *  `@bob 那件如何? RESULT: …` —— @ 后的名字没紧跟 RESULT, 四态不认) 是弱信号, 只用于
  *  判定放行, 不用于抽取 —— 最终结算仍走 parseClosing 的严格形态, 误放不会误结。 */
 const RECEIPT_KEYWORD_RE = /(?:RESULT|NEED|PROGRESS|ARTIFACT)[ \t]*[:：]/;
+/** 完成类关键字 (RESULT / ARTIFACT): 弱信号里唯一能证明「它认为这件事完了」的那一类。
+ *  NEED / PROGRESS 即使只有关键字也是中途态 —— 不许拿它给路由行收终态。 */
+const COMPLETION_KEYWORD_RE = /(?:RESULT|ARTIFACT)[ \t]*[:：]/;
+export const completionKeyword = (text: string): boolean => {
+  const c = parseClosing(text);
+  return c.kind === "result" || c.artifacts.length > 0
+    || COMPLETION_KEYWORD_RE.test(topLevelText(unquoteMarkLine(text)));
+};
 export const receiptKeyword = (text: string): boolean => {
   const c = parseClosing(text);
   // 弱信号与强信号看同一份文本: 行首 inline-code 包装已被 unquoteMarkLine 剥掉, 被整行当
