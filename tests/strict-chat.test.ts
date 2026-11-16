@@ -25,6 +25,12 @@ assert.equal(sayVerdict({ mode: "speaker", hasValidRe: false, turnUsed: 0, windo
 assert.equal(sayVerdict({ mode: "owner", hasValidRe: false, turnUsed: 0, windowCount: 0 }), undefined, "owner 放行");
 assert.equal(sayVerdict({ mode: "speaker", hasValidRe: false, turnUsed: 3, windowCount: 0 })?.status, 409, "每轮第 4 条 409");
 assert.equal(sayVerdict({ mode: "speaker", hasValidRe: false, turnUsed: 0, windowCount: 10 })?.status, 409, "每群每分钟第 11 条 409");
+// send_file: 文件是交付物 —— mention 不挂义务也发货, 但非成员与额度照判。
+assert.equal(sayVerdict({ mode: "mention", hasValidRe: false, turnUsed: 0, windowCount: 0, delivery: true }), undefined, "mention 成员发文件放行");
+assert.equal(sayVerdict({ mode: undefined, hasValidRe: false, turnUsed: 0, windowCount: 0, delivery: true })?.status, 403, "非成员发文件照样 403");
+assert.equal(sayVerdict({ mode: "mention", hasValidRe: false, turnUsed: 3, windowCount: 0, delivery: true })?.status, 409, "文件也吃每轮额度");
+assert.equal(sayVerdict({ mode: "mention", hasValidRe: false, turnUsed: 0, windowCount: 10, delivery: true })?.status, 409, "文件也吃每分钟额度");
+assert.equal(sayVerdict({ mode: "mention", hasValidRe: false, turnUsed: 0, windowCount: 0 })?.status, 409, "delivery=false 的 mention 仍按发言拦");
 
 // 记账: 轮次额度随事件归零, 窗口按群滚动
 {

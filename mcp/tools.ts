@@ -639,7 +639,8 @@ export const createWezardServer = (): McpServer => {
       title: "Send a local file / image into a chat for people to see",
       description:
         "把本机一个文件作为**图片 / 文件 / 语音 / 视频消息**发进聊天给人看 (notify 的媒体版: 去向、聊天名、顶层模式的规矩都与 notify 相同)。截图、生成的图表、导出的报表、日志包要交给人时用它 —— 别只在回复里写一个本地路径, 人那边打不开。\n" +
-        "`kind` 省略按扩展名定: png/jpg/jpeg/gif → image, mp4 → video, amr → voice, 其余 → file。企微上限: 图片 ≤10MB、视频 mp4 ≤10MB、语音只收 amr ≤2MB、文件 ≤20MB; 超了直接报错并告诉你怎么改 (例如大图改 `kind:\"file\"`)。",
+        "`kind` 省略按扩展名定: png/jpg/jpeg/gif → image, mp4 → video, amr → voice, 其余 → file。企微上限: 图片 ≤10MB、视频 mp4 ≤10MB、语音只收 amr ≤2MB、文件 ≤20MB; 超了直接报错并告诉你怎么改 (例如大图改 `kind:\"file\"`)。\n" +
+        "严格群里成员发文件不受「只能答义务」限制 (文件是交付物), 但仍占每轮 3 条 / 每分钟 10 条的额度。",
       inputSchema: {
         path: z.string().describe("本机绝对路径 (`~` 可用)"),
         kind: z.enum(["image", "file", "voice", "video"]).optional().describe("省略 = 按扩展名推断"),

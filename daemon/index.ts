@@ -2103,12 +2103,12 @@ const main = async (): Promise<void> => {
       const identity = rec ? identityOfRec(rec) : target;
       members.leaveEverywhere(identity);
     };
-    const strictSayGate = (self: string, base: string, re?: string): { status: number; body: Record<string, unknown> } | undefined => {
+    const strictSayGate = (self: string, base: string, re?: string, opts?: { delivery?: boolean }): { status: number; body: Record<string, unknown> } | undefined => {
       const identity = identityOfTarget?.(self);
       const mode = identity ? members.modeOf(base, identity) : undefined;
       const cur = openingOfSelf(self)?.env?.eventId ?? "";
       const facts = sayMeter.check(self, cur, base);
-      const verdict = sayVerdict({ mode, hasValidRe: !!validObligationOf(self, base, re), ...facts });
+      const verdict = sayVerdict({ mode, hasValidRe: !!validObligationOf(self, base, re), ...(opts?.delivery ? { delivery: true } : {}), ...facts });
       if (verdict) return { status: verdict.status, body: { ok: false, ...(verdict.status === 403 ? { chat: chatNameOf(cfg, base) || base } : {}), reason: verdict.reason } };
       sayMeter.charge(self, cur, base);
       return undefined;
@@ -2266,9 +2266,10 @@ const main = async (): Promise<void> => {
       if (!dest || !sameBot(self, dest)) { json(res, 400, { ok: false, reason: `认不出聊天: ${ref} (wizard_roster 每行有 home 聊天名, 人侧 /chats; 没起名的聊天寻址不到)` }); return; }
       const muted = topOnlyMuted(self, [dest]);
       if (muted) { json(res, 409, muted); return; }
-      // P7-S2 严格群: send_file 按 chat_say 规则 (caption 与媒体共占一次额度)。
+      // P7-S2 严格群: send_file 按 chat_say 规则, 但 delivery 豁免 mention 的 re 要求 ——
+      // 文件是交付物, 「只能答义务」不该把交付物一起封死; caption 与媒体仍共占一次额度。
       if (strictSpeechOf(dest)) {
-        const gate = strictSayGate(self, dest);
+        const gate = strictSayGate(self, dest, undefined, { delivery: true });
         if (gate) { json(res, gate.status, gate.body); return; }
       }
       const plan = media.plan(dest, { path, ...(b.kind ? { kind: b.kind } : {}) });
@@ -2278,8 +2279,16 @@ const main = async (): Promise<void> => {
       const r = await sendMedia(dest, { path, kind: plan.kind, ...(b.title ? { title: b.title } : {}), ...(b.description ? { description: b.description } : {}) });
       if (!r.ok) { json(res, 502, r); return; }
       const asker = askerOf(self);
-      // P7-S3b: strict 群由 hook 落 post (caption 走 sendMessage 也会进账本); 这里只管 implicit。
-      if (!strictSpeechOf?.(dest)) recordPost({ target: self, channel: dest, body: [caption, `📎 ${r.name} (${r.kind}) · ${path}`].filter(Boolean).join("\n\n"), ...(asker ? { asker } : {}) });
+      const fileLine = [caption, `📎 ${r.name} (${r.kind}) · ${path}`].filter(Boolean).join("\n\n");
+      // P7-S3b: strict 群里出站正文由 hook 落账, 媒体气泡本身没有正文 —— 交付物那一行自己记
+      // (账本 id 与 post id 同键, 走 `#w` 命名空间, 与人话 msgid 隔开)。
+      if (strictSpeechOf?.(dest)) {
+        const lineId = "file:" + randomBytes(6).toString("hex") + "#w";
+        try {
+          chatRecords.record(dest, { at: Date.now(), id: lineId, author: wizards.get(self)?.name ?? "", kind: "wizard", text: fileLine });
+        } catch { /* 记录失败不挡 */ }
+        recordPost({ target: self, channel: dest, body: fileLine, id: lineId, ...(asker ? { asker } : {}) });
+      } else recordPost({ target: self, channel: dest, body: fileLine, ...(asker ? { asker } : {}) });
       json(res, 200, { ok: true, sent: chatNameOf(cfg, dest) || dest, kind: r.kind, name: r.name, bytes: r.bytes });
     });
 

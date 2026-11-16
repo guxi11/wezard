@@ -3,12 +3,16 @@ import type { MemberMode } from "./members.js";
 // P7-S2 严格群发言闸的判定核 (纯函数): chat_say / notify / send_file 共用同一道门。
 // 判定与记账分离 —— 这里只判「这一次让不让过」, 轮次/窗口的记账在调用方 (daemon/index.ts),
 // 判据② (非成员 403 = 100%、mention 无有效 re 的 409 = 100%) 直接对着这张表测。
+// 唯一的例外是 send_file 的 delivery: 文件是交付物不是闲聊, mention 成员不挂义务也发货,
+// 但非成员与额度两条照旧 (否则「只能答义务」会把交付物一起封死)。
 
 export interface SayFacts {
   /** 在场方式; undefined = 非成员 (403)。 */
   mode?: MemberMode;
   /** mention 模式时: 是否挂着指向自己、未结的义务 (re 有效)。 */
   hasValidRe: boolean;
+  /** send_file: 交付文件 (只豁免 mention 的 re 要求, 成员资格与额度照判)。 */
+  delivery?: boolean;
   /** 本轮 (同一注入事件) 已用额度。 */
   turnUsed: number;
   /** 本群滚动 60s 窗口内已用额度。 */
@@ -19,7 +23,7 @@ export type SayVerdict = { status: 403 | 409; reason: string } | undefined;
 
 export const sayVerdict = (f: SayFacts): SayVerdict => {
   if (!f.mode) return { status: 403, reason: "非成员 — 严格群里只有成员能开口; 让人点名你入群, 或由成员用 chat_ask 向你开义务" };
-  if (f.mode === "mention" && !f.hasValidRe)
+  if (f.mode === "mention" && !f.hasValidRe && !f.delivery)
     return { status: 409, reason: "mention 成员只能答指向自己的义务 — 用 chat_reply({re, text}) 交付, 或 chat_say 带有效的 re" };
   if (f.turnUsed >= 3) return { status: 409, reason: "本轮发言额度 (3) 已用完 — 把要说的合并成一条再发" };
   if (f.windowCount >= 10) return { status: 409, reason: "这个群这一分钟的发言额度 (10) 已用完 — 稍后再发" };
