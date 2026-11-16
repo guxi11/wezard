@@ -51,6 +51,11 @@ assert.ok(hasHeading(strict, "## 本群开着严格模式"), "strict 群带严�
 assert.ok(!hasHeading(strict, "## 本群开着顶层模式"), "strict 群不带顶层模式节 (被替换)");
 for (const fragment of ["chat_reply", "chat_say", "chat_ask", "义务不随终句自动关账", "/owed", "每轮 ≤3"])
   assert.ok(strict.includes(fragment), `strict charter must include ${fragment}`);
+// strict 群出站礼仪: 一次到位 / 不轮换试探通道 / 话讲最少 —— 只进 strict 节, 不许污染 implicit 群。
+for (const fragment of ["发东西一次到位", "不许轮换试探通道", "话讲最少"])
+  assert.ok(strict.includes(fragment), `strict charter must include ${fragment}`);
+for (const fragment of ["发东西一次到位", "不许轮换试探通道", "话讲最少"])
+  assert.ok(!charter.includes(fragment), `implicit charter must not mention ${fragment}`);
 assert.equal(hasHeading(renderCharter({ ...base, steward: true, speech: "strict", topOnly: false }), "## 我是这个群的管家 (L1)"),
   true, "手闸条件 topOnly || strict: strict 群的管家也带管家章");
 assert.equal(hasHeading(renderCharter({ ...base, speech: "implicit", topOnly: true }), "## 本群开着顶层模式"),
