@@ -2602,7 +2602,7 @@ export type NativeModalAnswer =
   | { status: "still_modal"; title?: string; index: number; label: string };
 
 export interface MirrorBridge {
-  formatFinal: (target: string, turn: string, channel: string, body: string) => string[];
+  formatFinal: (target: string, turn: string, body: string) => string[];
   recoverEventFinal: (event: MessageEvent) => void;
   deliverTransferredFinal: (event: MessageEvent, body: string, status?: DeliveryInput["reportKind"]) => void;
   transferReply: (event: MessageEvent) => void;
@@ -3329,7 +3329,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     bubble.pending = (bubble.pending ?? Promise.resolve()).catch(() => undefined).then(async () => {
       if (bubble.done || bubble.owner !== event.id || !eventOwnerGate(event)) return;
       await client.replyStream(bubble.frame, bubble.streamId,
-        withLinkedTagHeader(event.target, "…", chatTurnUrl(event.target, event.turn || origin?.turn), undefined, undefined, event.channel), false);
+        withLinkedTagHeader(event.target, "…", chatTurnUrl(event.target, event.turn || origin?.turn)), false);
     }).catch((e) => { log.debug({ event: event.id, err: errText(e) }, "transfer reply refresh failed"); });
   };
   const armBriefBubble = (a: AttachState, b: BriefBubble, turnId: string, channel?: string): void => {
@@ -3340,7 +3340,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const live = a.briefBubble === b && !a.briefConcluded;
       // P7-S2 严格群: 收口不添字 —— 占位长什么样就怎么收 (详情链接仍在, 不写「仍在处理中」)。
       const rest = strictChat(a) ? "…" : live ? STILL_WORKING : "";
-      void finishBubble(a, b, briefLine(a, turnId, rest, channel), true);
+      void finishBubble(a, b, briefLine(a, turnId, rest), true);
     }, Math.max(0, (b.expires ?? Date.now()) - Date.now()));
   };
   const newTurnId = (): string => `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
@@ -3369,7 +3369,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     try {
       await (s.pending = (s.pending ?? Promise.resolve()).catch(() => undefined).then(async () => {
         if (s.closed || s.dead || !eventOwned(s.eventId)) return;
-        await client.replyStream(s.frame, s.streamId, withLinkedTagHeader(s.target, content || "…", chatTurnUrl(s.target, s.turnId), undefined, undefined, s.dest), false);
+        await client.replyStream(s.frame, s.streamId, withLinkedTagHeader(s.target, content || "…", chatTurnUrl(s.target, s.turnId)), false);
       }));
       log.debug({ turnId: s.turnId, len: content.length }, "stream flush ok");
     } catch (e) {
@@ -3461,7 +3461,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // `[mirror]` / `[wezard]` 系统提示不是答给谁的话, 不标方向。
   const withLinkedTag = (a: AttachState, content: string, seq?: string, turnId?: string): string =>
     withLinkedTagHeader(a.target, content, chatTurnUrl(a.target, turnId ?? a.briefTurnId), seq,
-      /^\[(mirror|wezard)\]/.test(content.trim()) ? undefined : a.replyTo, a.channel || undefined);
+      /^\[(mirror|wezard)\]/.test(content.trim()) ? undefined : a.replyTo);
 
   // 空正文一票否决 (近源拦截): 剥掉可能存在的路由头 (`.name:` / `[.name](url):`)
   // 后没有可见内容就不发。中央 chat-gate (last-response 的 SDK 包装) 是最后一道
@@ -3862,8 +3862,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 是凭据 (不可枚举), 只是页面从"一个 turn"扩成"这个 chat 的全部会话"。
   // wizard 名字作为 ww_uniq 传下去, 让同一个 wizard 的所有 turn 详情都复用一个 WeCom 窗口。
   // 头怎么写归 chatHead (默认 wizard 在 home 群: 企微只留名字链接, 微信不写头); 头与正文都空时留 `…`, 不发空气泡。
-  const briefLine = (a: AttachState, turnId: string, rest: string, dest = a.channel): string =>
-    headed(chatHead(a.target, chatTurnUrl(a.target, turnId), undefined, dest || undefined), rest) || "…";
+  const briefLine = (a: AttachState, turnId: string, rest: string): string =>
+    headed(chatHead(a.target, chatTurnUrl(a.target, turnId)), rest) || "…";
 
   // ── 出处门 (chatOriginOnly) ───────────────────────────────────────────
   // 人在 CLI 里手敲的一轮, 镜像只发生在两处: 他眼前的终端, 和 chat 详情页 (turn
@@ -3883,9 +3883,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const strictChat = (a: AttachState): boolean => strictOf(a.channel, a.target);
   const turnSilent = (a: AttachState): boolean =>
     !eventOwned(a.activeEventId) || isPrivate(a) || strictChat(a) || (cfg.wrc.mirror.brief && cfg.wrc.mirror.chatOriginOnly && a.turnFromChat === false);
-  const formatFinal = (target: string, turn: string, channel: string, body: string): string[] => {
+  const formatFinal = (target: string, turn: string, body: string): string[] => {
     const pieces = splitMarkdown(body, Math.max(200, cfg.wrc.mirror.chunkBytes - TAG_HEADER_BUDGET));
-    return pieces.map((text, n) => withLinkedTagHeader(target, text, chatTurnUrl(target, turn), pieces.length > 1 ? `${n + 1}/${pieces.length}` : undefined, undefined, channel));
+    return pieces.map((text, n) => withLinkedTagHeader(target, text, chatTurnUrl(target, turn), pieces.length > 1 ? `${n + 1}/${pieces.length}` : undefined));
   };
   const finalProgress = new Map<string, Promise<unknown>>();
   const settleFinalProgress = async (id: string): Promise<void> => {
@@ -3898,7 +3898,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!deps.events || !channel || !text.trim()) return undefined;
     const revision = finalId(eventId || turn, channel, text);
     const id = finalId(eventId || turn, channel, revision);
-    const chunks = formatFinal(target, turn, channel, text);
+    const chunks = formatFinal(target, turn, text);
     if (bubble?.pending) finalProgress.set(id, bubble.pending);
     const claimed = deps.events.delivery({ id, eventId, target, turn, channel, body: text, revision, chunks, reportKind,
       ...(eventId && deps.events.get(eventId) ? { coverage: receiptCoverage(deps.events.get(eventId)!, channel, parseClosing(body).kind === "need", body) } : {}),
@@ -4231,7 +4231,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 也不必猜后端: codebuddy 那种几十秒后才落盘的轮, 入口从第一秒就在。
     // 尾随 `…` 表示"正文还没到", 正文到位时整条内容被 `链接 正文` 覆盖。
     try {
-      await (bubble.pending = client.replyStream(frame, streamId, briefLine(a, turnId, "…", channel), false));
+      await (bubble.pending = client.replyStream(frame, streamId, briefLine(a, turnId, "…"), false));
     } catch (e) {
       log.warn({ sessionId: a.sessionId, turnId, err: (e as Error).message }, "brief: turn ack failed");
     }
@@ -4376,7 +4376,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const b = a.briefBubble;
       if (b?.pending) finalProgress.set(id, b.pending);
       if (text && channel) deps.events!.delivery({ id, eventId: event.id, target: event.target, turn: turnId,
-        channel, body: text, revision: id, purpose: "progress", chunks: formatFinal(event.target, turnId, channel, text),
+        channel, body: text, revision: id, purpose: "progress", chunks: formatFinal(event.target, turnId, text),
         ...(b && !b.done ? { stream: { frame: b.frame, id: b.streamId, expires: b.expires ?? Date.now() } } : {}) });
       if (b) { b.done = true; clearTimeout(b.hardTimer); }
     }

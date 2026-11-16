@@ -190,7 +190,7 @@ export const rawTagHeader = (text: string): { tag: string; header: string; body:
 };
 
 /** 卡片标题前的 `🧙‍♂️ name ` 徽标; v3 起群默认 wizard (管家) 也一样带 —— 人在群里的
- *  每条 bot 回复都看得出是谁说的, isHost 的免头豁免废除。 */
+ *  每条 bot 回复都看得出是谁说的 (旧的「管家不报名」豁免已废除)。 */
 export const tagBadge = (target: string | undefined): string => {
   const head = tagHead(target);
   return head ? `${head} ` : "";
@@ -327,33 +327,25 @@ export const linkedTagHead = (target: string | undefined, url: string): string =
 /** 微信 ClawBot 的群聊 (`chat:wx_…`): 文本里不挂链接, 默认开顶层模式。 */
 export const isWxChat = (key: string): boolean => key.startsWith("chat:wx_");
 
-/** 群的默认 wizard 在自己群里 (`dest` 缺省 = 它的 home); 替它说话的 (定时任务执行体,
- *  voiceOf) 算它本人; slot 分身、被人从别的群点名过来的都不是 host。
- *  v3 起不再豁免报名 (管家也带 `🧙‍♂️ name：` 头), 只决定署名样式 (裸名 / 反引号)。 */
-export const isHost = (target: string | undefined, dest = target): boolean =>
-  ((t) => !!t && !!dest && !tagOfKey(t) && !isInternalKey(t) && baseOfKey(dest) === baseOfKey(t))(
-    target && (linker?.voiceOf?.(target) || target));
 
 /** 一条群气泡: 头 + 正文, 头为空就只有正文。 */
 export const headed = (head: string, body: string, sep = headSep(body)): string => (head ? `${head}${sep}${body}` : body);
 
-/** 发话方在 `dest` 群里的头; `to` = 说给谁 (公开 wizard 间), 有对象时谁都得报名。
- *  v3 起群默认 wizard (管家) 在自己群里也报名 —— 人在群里的每条 bot 回复都看得出是谁说的,
- *  isHost 只剩署名样式的判定; 微信那头链接降成文字 (wxMarkdown), 头照写 (裸 `🧙‍♂️ name：`)。
- *  署名: 非 default wizard (isHost 为假 —— slot 会话 / 从别群点名过来的) 名字包一层反引号,
- *  `` `🧙‍♂️ name` `` / ``[`🧙‍♂️ name`](url)``, 与 default wizard 的裸头区分; HEADER_RE / rawTagHeader 两种形态都认。 */
-export const chatHead = (target: string | undefined, url: string | undefined, to?: string, dest?: string): string => {
-  const head = ((h) => (h && !isHost(target, dest) ? `\`${h}\`` : h))(tagHead(target));
-  const me = url ? ((h) => (h ? `[${h}](${url})` : ""))(head) : head;
-  return me ? speakerHead(me, to) : "";
+/** 发话方在群里的头; `to` = 说给谁 (公开 wizard 间), 有对象时谁都得报名。
+ *  v3 起群默认 wizard (管家) 在自己群里也报名 —— 人在群里的每条 bot 回复都看得出是谁说的。
+ *  署名样式不再区分 default / 非 default (2026-11-16 人口径: 名字外面不再包反引号 ——
+ *  企微把反引号渲染成代码样式, 与名字链接打架), 一律裸 `🧙‍♂️ name：` / `[🧙‍♂️ name](url)：`。
+ *  微信那头链接降成文字 (wxMarkdown), 头照写 (裸 `🧙‍♂️ name：`)。 */
+export const chatHead = (target: string | undefined, url: string | undefined, to?: string): string => {
+  const head = url ? linkedTagHead(target, url) : tagHead(target);
+  return head ? speakerHead(head, to) : "";
 };
 
-/** `target` 自己往 `dest` 群说话的当前头; 链接取它自己的 rolepage。 */
-export const ownHead = (target: string, dest?: string): string => chatHead(target, linker?.urlOf(target), undefined, dest);
+/** `target` 自己说话的当前头; 链接取它自己的 rolepage。 */
+export const ownHead = (target: string): string => chatHead(target, linker?.urlOf(target));
 
 /** 头挂上指定的 rolepage 链接 (mirror 用本轮 turn 的票据), 正文里的名字一并挂链。
  *  url 为空时退回裸头 —— 头那一段是路由信息, 少了链接只是少一层可点, 不能因此不写。
- *  v3 起群默认 wizard (管家) 在自己群 (`dest`, 缺省 = home) 里也写头。
  *  `to` = 这段话是答给哪个 wizard 的 (公开 peer 轮): 头写成 `🧙‍♂️ me： 🧙‍♂️ 它`, 与它问话
  *  那条气泡的 `🧙‍♂️ 它： 🧙‍♂️ me` 对称。
  *  `seq` ("2/5") marks one piece of a split push — it rides in the same header
@@ -364,12 +356,11 @@ export const withLinkedTagHeader = (
   url: string | undefined,
   seq?: string,
   to?: string,
-  dest?: string,
 ): string => {
-  const head = [chatHead(target, url, ((h) => (h ? tagLink(to!, h) : undefined))(tagHead(to)), dest), seq ?? ""].filter(Boolean).join(" ");
+  const head = [chatHead(target, url, ((h) => (h ? tagLink(to!, h) : undefined))(tagHead(to))), seq ?? ""].filter(Boolean).join(" ");
   return headed(head, linkTags(target, content));
 };
 
 /** 给气泡加 `.name:` 头, 链接取该 wizard 自己的 rolepage (bindTagLinker)。 */
-export const withTagHeader = (target: string | undefined, content: string, seq?: string, dest?: string): string =>
-  withLinkedTagHeader(target, content, target ? linker?.urlOf(target) : undefined, seq, undefined, dest);
+export const withTagHeader = (target: string | undefined, content: string, seq?: string): string =>
+  withLinkedTagHeader(target, content, target ? linker?.urlOf(target) : undefined, seq);

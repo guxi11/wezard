@@ -17,7 +17,7 @@ export const responsePrincipal = (cfg: Config, context: ResponseFormatContext): 
 export const responseFormatPolicy = (cfg: Config, context: ResponseFormatContext, urlOf: (target: string) => string | undefined) => {
   const target = responsePrincipal(cfg, context);
   if (!target || isWxChat(target)) return undefined;
-  return { defaultTarget: target, url: urlOf(target), principal: target };
+  return { url: urlOf(target), principal: target };
 };
 
 /** A footer is routing metadata only when it belongs to this daemon's rolepage. */

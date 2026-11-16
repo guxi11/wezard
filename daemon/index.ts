@@ -360,7 +360,7 @@ const main = async (): Promise<void> => {
         events.result(e.id, body, finalId(e.id, e.channel, body));
         // A canceled, unexposed input has a terminal response owned by its original channel.
         events.delivery({ id: finalId(e.id, e.channel, body), eventId: e.id, target: e.target, turn: e.turn || e.id,
-          channel: e.channel, revision: finalId(e.id, e.channel, body), body, purpose: "cancellation", reportKind: "canceled", chunks: bridge.formatFinal(e.target, e.turn || e.id, e.channel, body) });
+          channel: e.channel, revision: finalId(e.id, e.channel, body), body, purpose: "cancellation", reportKind: "canceled", chunks: bridge.formatFinal(e.target, e.turn || e.id, body) });
       }
     },
     // 人话 (非 peer) 不再问「pane 闲不闲」: 忙就贴进去, 顺序交给 backend CLI 自己的输入队列
@@ -978,13 +978,13 @@ const main = async (): Promise<void> => {
      *  因为落在哪个群而换写法 —— 引用这一段就能跟它说话 (parseTagHeader 认得)。 */
     const relayLabel = (t: string): string => ((h) => (h ? tagLink(t, h) : ""))(tagHead(t));
     /** 以 `self` 的名义往 `dest` 群发一条: 头独占一行; 头怎么写 (群默认 wizard 报不报名) 归 ownHead。 */
-    const postAs = (self: string, dest: string, text: string): void => notifyChat(dest, headed(ownHead(self, dest), text, "\n\n"));
+    const postAs = (self: string, dest: string, text: string): void => notifyChat(dest, headed(ownHead(self), text, "\n\n"));
     /** P7-S3: 同 postAs, 但去到的是频道 (chat:<topic_id>) —— 按 replyOk 选评论/新帖
      *  (chat_say / chat_reply 的频道分支); msgid (义务信封上的 msg) 能定位到具体帖子。 */
     const postAsTopic = (self: string, dest: string, text: string, msgid?: string): void => {
       const topicId = dest.replace(/^chat:/, "");
       void sendTopicContent(ws.client, log.child({ mod: "channel" }), topicId,
-        linkTags(dest, headed(ownHead(self, dest), text, "\n\n")), msgid)
+        linkTags(dest, headed(ownHead(self), text, "\n\n")), msgid)
         .catch((e: unknown) => log.warn({ topicId, err: errText(e) }, "channel tool send failed"));
     };
     /** 公开的 wizard 间对话: 落在 `channel` 这个群。 */
@@ -1928,7 +1928,7 @@ const main = async (): Promise<void> => {
           const revision = finalId(active.id, dest, content);
           const id = events.delivery({ id: finalId(active.id, dest, revision), eventId: active.id, target: self,
             turn: active.turn ?? active.id, channel: dest, revision, body: shown, purpose, reportKind,
-            chunks: m.formatFinal(self, active.turn ?? active.id, dest, shown), ...(coverage ? { coverage } : {}) });
+            chunks: m.formatFinal(self, active.turn ?? active.id, shown), ...(coverage ? { coverage } : {}) });
           const claims = events.deliveryClaims(coverage);
           deliveries.push({ channel: dest, id, states: claims.length ? claims.flatMap((c) => c.states) : events.deliveryStatus(id),
             ...(claims.length > 1 ? { claims } : {}) });
@@ -5023,7 +5023,7 @@ const main = async (): Promise<void> => {
             const eventId = `quiet:${t}:${turn}`;
             const revision = finalId(eventId, base, text);
             events.delivery({ id: finalId(eventId, base, revision), eventId, target: t, turn, channel: base,
-              revision, body: text, purpose: "task", chunks: m.formatFinal(t, turn, base, text) });
+              revision, body: text, purpose: "task", chunks: m.formatFinal(t, turn, text) });
           }
           log.info({ target: t, quiet: isQuiet(reply), len: reply.length }, "quiet task: 一轮结束");
           quietRelays.drop(turn);

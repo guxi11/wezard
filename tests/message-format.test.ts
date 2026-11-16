@@ -18,20 +18,18 @@ assert.equal(responseFormatPolicy(cfg, { chatid: "" }, urlOf), undefined);
 for (const topOnly of [true, false]) for (const destination of [a, b]) {
   cfg.chatPolicy[destination] = { topOnly, stewardBudget: 4 };
   const policy = responseFormatPolicy(cfg, { chatid: destination.split(":")[1]! }, urlOf)!;
-  assert.equal(policy.defaultTarget, destination);
   for (const sender of known) {
     const input = `[.${names[sender]}](${urlOf(sender)}): answer`;
-    // v3: 管家 (目的地默认) 也署名 —— 裸 `🧙‍♂️ name：`; 其余仍包反引号。
-    const expected = sender === destination
-      ? `🧙‍♂️ ${names[sender]}： answer [✦](${urlOf(sender)})`
-      : `\`🧙‍♂️ ${names[sender]}\`： answer [✦](${urlOf(sender)})`;
+    // 署名一律裸 `🧙‍♂️ name：` (名字外不包反引号), default / 非 default 同形。
+    const expected = `🧙‍♂️ ${names[sender]}： answer [✦](${urlOf(sender)})`;
     assert.equal(withMessageFooter(input, policy), expected, `${topOnly}/${destination}/${sender}`);
     assert.equal(withMessageFooter(expected, policy), expected);
     assert.equal(parseTagHeader(expected).tag, names[sender]);
   }
   const migrated = withMessageFooter(".worker: answer", policy);
-  assert.equal(migrated, `\`🧙‍♂️ renamed-worker\`： answer [✦](${urlOf(worker)})`, "answer-transfer receiver worker keeps its own signed head");
-  assert.equal(withMessageFooter(`\`🧙‍♂️ renamed-worker\`： answer [✦](${urlOf(worker)})`, policy), migrated);
+  assert.equal(migrated, `🧙‍♂️ renamed-worker： answer [✦](${urlOf(worker)})`, "answer-transfer receiver worker keeps its own signed head");
+  assert.equal(withMessageFooter(`🧙‍♂️ renamed-worker： answer [✦](${urlOf(worker)})`, policy), migrated);
+  assert.equal(withMessageFooter(`\`🧙‍♂️ renamed-worker\`： answer [✦](${urlOf(worker)})`, policy), migrated, "old backtick head still parses");
 }
 assert.deepEqual(parseTagHeader(`[.old](${urlOf(worker)}): answer`), { fromBot: true, tag: "renamed-worker", body: "answer" });
 // ✨ (老版 footer 记号) 与无 role 参数的链接都不再承载身份。

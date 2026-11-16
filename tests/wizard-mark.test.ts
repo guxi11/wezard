@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import {
   WIZARD_MARK, MAGE_SRC, nameTokenRe, allNames, stripSigil, said, speakerHead,
   tagHead, chatHead, tagBadge, parseTagHeader, rawTagHeader, withLinkedTagHeader,
-  linkTags, unlinkTags, bindTagLinker, isHost, keyOf,
+  linkTags, unlinkTags, bindTagLinker, keyOf,
 } from "../shared/session-label.js";
 import { addressedResults, parseClosing, receiptKeyword, renderPeerEnvelope } from "../daemon/peers.js";
 import { addr, renderRoster, type WizardBrief, type RosterRow } from "../daemon/wizard.js";
@@ -35,14 +35,13 @@ bindTagLinker({ urlOf, nameOf: (t) => names[t] || "", resolve: (n) => n === "fix
 assert.equal(tagHead(fix), WIZARD_MARK + " fix");
 assert.equal(said(tagHead(fix)), WIZARD_MARK + " fix：");
 assert.equal(speakerHead("X", "Y"), "X： Y");
-// 卡片徽标: 管家 (群默认) 也带 —— isHost 不再豁免
+// 卡片徽标: 管家 (群默认) 也带 (旧的「管家不报名」豁免已废除)
 assert.equal(tagBadge(a), WIZARD_MARK + " admin ");
 assert.equal(tagBadge(fix), WIZARD_MARK + " fix ");
-// chatHead: host 在自己群照写头 (裸, 不包反引号); slot 包反引号; 公开 peer 轮带 to
+// chatHead: 署名一律裸 (名字外不包反引号, 2026-11-16 人口径); 公开 peer 轮带 to
 assert.equal(chatHead(a, urlOf(a)), "[" + WIZARD_MARK + " admin](" + urlOf(a) + ")：");
-assert.equal(chatHead(fix, urlOf(fix)), "[" + BT + WIZARD_MARK + " fix" + BT + "](" + urlOf(fix) + ")：");
-assert.equal(chatHead(fix, urlOf(fix), tagHead(a)), "[" + BT + WIZARD_MARK + " fix" + BT + "](" + urlOf(fix) + ")：" + " " + WIZARD_MARK + " admin");
-assert.equal(isHost(a), true);
+assert.equal(chatHead(fix, urlOf(fix)), "[" + WIZARD_MARK + " fix](" + urlOf(fix) + ")：");
+assert.equal(chatHead(fix, urlOf(fix), tagHead(a)), "[" + WIZARD_MARK + " fix](" + urlOf(fix) + ")：" + " " + WIZARD_MARK + " admin");
 
 // ── 气泡头反解: 旧形态 (存量 transcript / 引用) ────────────────────────
 assert.deepEqual(parseTagHeader(".fix: body"), { fromBot: true, tag: "fix", body: "body" });

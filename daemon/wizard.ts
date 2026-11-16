@@ -71,7 +71,7 @@ export interface WizardRecord {
   expertise?: string;
   /** 生它的 wizard 的 target。有值 = 它是个 clone。 */
   parent?: string;
-  /** 它在群里替谁说话 —— 定时任务执行体写日程主人: 主人是群默认 wizard 时, 执行体的话按主人的规矩不报名 (isHost)。 */
+  /** 它在群里替谁说话 —— 定时任务执行体写日程主人: 署名与归属按主人算, 不按执行体的临时身份。 */
   voiceOf?: string;
   /** fork 自哪个 sessionId ("" / 缺省 = 开局是空白会话, 没继承上下文)。 */
   clonedFrom?: string;

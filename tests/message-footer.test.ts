@@ -18,9 +18,9 @@ const policy = responseFormatPolicy(cfg, { chatid: "admin" }, urlOf)!;
 const head = (t: string) => `[.${nameOf(t)}](${urlOf(t)}): `;
 const footer = ` [✦](${urlOf(home)})`;
 const bodyLink = `[.worker](${urlOf(worker)})`;
-// v3: default wizard (管家) 也署名 —— 裸 `🧙‍♂️ name：`; 非 default wizard 仍 code 样式 (反引号); 链接统一落尾部 ✦。
+// 署名一律裸 `🧙‍♂️ name：` (名字外不包反引号, 2026-11-16 人口径: 反引号在企微渲染成代码样式); 链接统一落尾部 ✦。
 const bare = (t: string, body: string) => `🧙‍♂️ ${nameOf(t)}： ${body} [✦](${urlOf(t)})`;
-const signed = (t: string, body: string) => `\`🧙‍♂️ ${nameOf(t)}\`： ${body} [✦](${urlOf(t)})`;
+const signed = bare;
 assert.equal(withMessageFooter(`${head(home)}hello \n\t`, policy), bare(home, "hello"));
 assert.equal(withMessageFooter(`${head(worker)}hello`, policy), signed(worker, "hello"));
 assert.equal(withMessageFooter(signed(worker, "hello"), policy), signed(worker, "hello"), "signed header is idempotent");

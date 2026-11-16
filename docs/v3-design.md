@@ -28,7 +28,7 @@
 
 - **渲染** (给人看): `tagHead` → `🧙‍♂️ name` (去掉点号); 气泡头 `🧙‍♂️ name：` (全角冒号, 与人的原话一致); 公开 peer 轮 `🧙‍♂️ me： 🧙‍♂️ you`; 审批卡徽标、help 文案跟进。**参数层不变**: `tell_peer({name:"fix"})` 仍收裸名 (`mcp/tools.ts` name 参数描述补一句)。**〔2026-11-13 人口径修正〕** roster / charter / read_chat / rolepage 等 wizard 之间与 rolepage 的面**不**带记号, 只写裸 name —— 表示范围以 §1.5 矩阵为准, 不按本条字面铺开。
 - **反解** (机器读回): `HEADER_RE` 扩为**双态** —— 新形态 `🧙‍♂️ name：` / `[🧙‍♂️ name](url)：` 与旧形态 `.name:` / `[.name](url):` **长期并存**。`parseTagHeader` / `rawTagHeader` 双态剥离。🧙‍♂️ 是 ZWJ 序列 (U+1F9D9 U+200D U+2642 U+FE0F, 4 code points / 12 UTF-8 字节), 正则按 codepoint 序列字面量写, 不许 `.` 通配。
-- **管家报名**: 废除 isHost 的「头不写」豁免 —— 管家在自己群里回复同样带 `🧙‍♂️ name：` (人的原话明确要求)。isHost 保留给 voiceOf (替谁说话) 的语义判定, 只是不再压掉头的渲染。微信通道 (`isWxChat`, 链接降文字) 的降级逻辑照旧。
+- **管家报名**: 废除 isHost 的「头不写」豁免 —— 管家在自己群里回复同样带 `🧙‍♂️ name：` (人的原话明确要求)。~~isHost 保留给 voiceOf (替谁说话) 的语义判定~~ 〔2026-11-16 人口径: 非 default 的名字也不再包反引号, 署名不再区分 default / 非 default, isHost 已随该判定一起删除〕。微信通道 (`isWxChat`, 链接降文字) 的降级逻辑照旧。
 - **quote 直接回答语义**: 「直接回答某个 wizard」= quote 它的气泡 (反解出的 `tag` 即投递目标), 这在「引用即路由」上已存在; 变化在**默认路由** —— 不带 quote、不带行首点名的裸消息, 不再落「本聊天默认 wizard」, 改落「本聊天当前管家」(§3/§5)。行首 `.name` / `🧙‍♂️ name` 点名保留为与 quote 等价的显式寻址 (待人拍板 ①)。
 - **md-chunk / 预算**: 头变长 ~12 字节; `TAG_HEADER_BUDGET` (mirror-bridge.ts:946, 按「头 + 正文 2 个链接」留的余量) 复核放宽 ~24 字节。md-chunk 按行块切、从不切行中, ZWJ 序列不会被切开 —— 加一条单测钉死。
 
