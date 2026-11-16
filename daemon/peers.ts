@@ -501,15 +501,25 @@ export const topLevelText = (text: string): string => {
   }).join("");
 };
 
-/** 契约示例写成 inline code (``.name RESULT: …``), 模型照抄时会把首尾反引号一起带下来 —— 收口
- *  判定锚行首, 多一个反引号整句就退化成 progress (行始终不落定, 只有 idle-nudge 反复追问);
- *  配对的收尾又会让 topLevelText 把整行当代码抹掉。开引号与同行配对收尾都换成空格: 长度不变,
- *  判定与切片用同一份文本 (切片取 norm, 收尾就随 trim 一起消失)。只认单个反引号 —— ``` / ~~~ 围栏
- *  原样交给 topLevelText 处理, 代码块里的同名标记不算收口。 */
-const unquoteMarkLine = (text: string): string => text.split("\n").map((line) =>
-  /^[ \t]*`[^`]/.test(line)
-    ? line.replace(/^([ \t]*)`/, "$1 ").replace(/`([ \t]*)$/, (_m, tail: string) => ` ${tail}`)
-    : line).join("\n");
+/** 行首装饰: 模型把约定抄成 markdown —— inline code 的反引号 (成对或只剩开头)、引号、加粗/斜体、
+ *  列表符、引用符, 都会让锚行首的收口判定整句落空 (那一行永远不落定, 只剩 idle-nudge 反复追问);
+ *  成对的收尾还会让 topLevelText 把整行当代码抹掉。开头的装饰串与同行配对的收尾都换成空格:
+ *  长度不变, 判定与切片用同一份文本 (切片取 norm, 收尾就随 trim 一起消失)。
+ *  围栏 (``` / ~~~) 原样交给 topLevelText —— 代码块里的同名标记不算收口, 也不许在这里被翻成围栏。
+ *  只剥行首, 正文中段出现的关键字照旧不算收口。 */
+const LEAD_DECOR_RE = /^[ \t>*+\-_`'"「『]+/;
+const TRAIL_DECOR_RE = /[ \t*_`'"」』]+$/;
+const FENCE_RE = /^[ \t]{0,3}(?:`{3,}|~{3,})/;
+const unquoteMarkLine = (text: string): string => text.split("\n").map((line) => {
+  const lead = LEAD_DECOR_RE.exec(line);
+  if (!lead || !/[^\s]/.test(lead[0]) || FENCE_RE.test(line)) return line;   // 纯缩进 / 围栏不动
+  const rest = line.slice(lead[0].length);
+  if (FENCE_RE.test(rest)) return line;                                       // 别把 > ``` 翻成围栏
+  const trail = TRAIL_DECOR_RE.exec(rest);
+  // 装饰串**整段去掉**而不是换成空格: 补回空格会把标记顶到第 4 列, topLevelText 又把它当缩进代码块抹掉。
+  // 归一化后的文本只给判定/切片自己用 (visible 与 norm 同源), 不必与原串等长。
+  return trail ? rest.slice(0, trail.index) : rest;
+}).join("\n");
 
 // 回执署名四态 (2026-11-13 人口径 B): 新写法 = 行首 `.name RESULT:` (与人的点名写法同形,
 // wizard 之间不带记号); 存量三态 `@name` / `@.name` / `@🧙‍♂️ name` 长期照认。
@@ -757,7 +767,7 @@ export const renderPeerEnvelope = (from: string, chat?: string, chatKey?: string
             ? ["发话方不收回执; 不要为确认收到而 tell_peer 或 notify。"]
             : [
                 "终句面向派活方; 自动回执无需另调工具, 不要重复 tell_peer 或为这轮私聊 notify。",
-                "对 wizard 直说: 不寒暄、不加对人的称呼、不复述它的话; 交差时用行首 `.name RESULT: …` 标明接收者 (`@name` / `@.name` 存量照认), 一条消息可分段回复多个接收者 (交付物写进文件就回传路径); 需要对方补信息或继续协作时, 用 tell_peer({kind:\"ask\"}) 发起反问/子任务; 交付了文件, 每个加一行 `ARTIFACT: <路径> — 一句话`。",
+                "对 wizard 直说: 不寒暄、不加对人的称呼、不复述它的话; 交差时在行首直接写收件人 + 结论 (点号名字 + 空格 + RESULT: 结论), 行首不要加反引号/引号/加粗 (@name / @.name 存量照认), 一条消息可分段回复多个接收者 (交付物写进文件就回传路径); 需要对方补信息或继续协作时, 用 tell_peer({kind:\"ask\"}) 发起反问/子任务; 交付了文件, 每个加一行 ARTIFACT: <路径> — 一句话。",
               ]),
         ]
       : [
@@ -765,7 +775,7 @@ export const renderPeerEnvelope = (from: string, chat?: string, chatKey?: string
         ]),
     ...(t?.re ? ["这是**续问**: 接着那件活说, 不是一件新活。"] : []),
     // 这句话要怎么接 —— 只有发话方知道, 不写出来对方一律当成一件活去干。
-    ...(t?.act === "ask" ? [`这是一个**提问**: 只答这一问, 几句话${t.quiet ? "" : "并明确收件人 (行首 `.name RESULT:`)"}; 需要反问或派生子任务时用 tell_peer({kind:"ask"|"task"})。`] : []),
+    ...(t?.act === "ask" ? [`这是一个**提问**: 只答这一问, 几句话${t.quiet ? "" : "并明确收件人 (行首直接写收件人 + RESULT:, 不加装饰)"}; 需要反问或派生子任务时用 tell_peer({kind:"ask"|"task"})。`] : []),
     ...(t?.act === "fyi" ? ["这是一条**知会**: 不用回复、不用收口, 也别为它开新活 —— 与手头的活相关就顺手吸收, 无关就略过; 一句话收住这一轮即可。"] : []),
     // 来回多了就收口: 不在守护进程里拒绝 —— 拒了模型会换条通路接着乒乓。
     ...((t?.legs ?? 0) > 3 ? [`这件活已经来回 ${t!.legs! - 1} 次: 这一次请直接给结论, 拿不准的写清你的假设。`] : []),
@@ -808,8 +818,8 @@ export const renderReceiptEnvelope = (
     ...(route?.late
       ? [route.retellTo
         ? chat !== undefined
-          ? `这一笔的上一环已经收口, 结论**迟到了**: 终句带 \`RESULT:\` 才作为追述进群 ${route.retellTo} (用你自己的话交代); 不带就只进 rolepage。`
-          : `这一笔的上一环已经收口, 结论**迟到了**: 终句带 \`RESULT:\` 才作为追述沿原路投给 ${route.retellTo}; 不带就只进 rolepage。`
+          ? `这一笔的上一环已经收口, 结论**迟到了**: 终句带 RESULT: 才作为追述进群 ${route.retellTo} (用你自己的话交代); 不带就只进 rolepage。`
+          : `这一笔的上一环已经收口, 结论**迟到了**: 终句带 RESULT: 才作为追述沿原路投给 ${route.retellTo}; 不带就只进 rolepage。`
         : "这一笔的上一环已经收口 (被收掉或已回收), 结论**迟到了**: 你这一轮的终句只进 rolepage, 要人知道就明说。"]
       : route?.up
       ? ["交给上游 wizard。"]

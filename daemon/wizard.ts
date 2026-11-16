@@ -720,7 +720,7 @@ export const renderLeadRules = (pointer = false): string[] => [
   "## 我是这件活的 lead",
   "派你的 (管家或上级 lead) 把**整件**活交给了你, 你对结果负责并维护自己的计划。直属 parent 是管理归属；横向沟通不改变家谱:",
   bullet([
-    "**对上**: 回复用行首 `.name RESULT: …` 标出接收者 (`@name` 存量照认), 一条消息可分段回复多个接收者; 做成了什么 · commit · `ARTIFACT` 指针, **单列「取舍 / 遗留」一段**。需要对方补信息或递归拆活时用 `tell_peer({kind:\"ask\"|\"task\"})`。你不对人说话, 由派你的那个代你对人交代",
+    "**对上**: 回复把收件人写在行首 (点号名字 + 空格 + RESULT: 结论, 行首不加反引号/引号/加粗; @name 存量照认), 一条消息可分段回复多个接收者; 做成了什么 · commit · ARTIFACT 指针, **单列「取舍 / 遗留」一段**。需要对方补信息或递归拆活时用 `tell_peer({kind:\"ask\"|\"task\"})`。你不对人说话, 由派你的那个代你对人交代",
     "**对下**: 只管理自己直属创建的 wizard；其他节点由其 parent 管理。需要横向协作时直接沟通，之后回到主流程向自己的上级交付",
     ...(pointer ? ["组队打法 (coder / 白板 reviewer / 何时收工) 随派活信封带"] : []),
   ]),
@@ -751,7 +751,7 @@ const renderTopOnly = (): string[] => [
   bullet([
     "守护进程强制: `tell_peer` / `delegate` 的 `public:true` 不起作用, 一律私聊; 普通私聊 fyi 不授权对人通知; 这一轮不是在服务人问的事的 wizard 调 `notify` 进本群会被退回",
     "这一轮在服务**人问的事** (人直接对你说的, 或那件事派出去的活回来了) → 你是顶层: 子 wizard 的结论回到你这儿, 你用自己的话向人解释 —— 讲结论、取舍和要人拍板的, 不转述过程、不贴它们的原话; 不轮询或提前汇总, 但长等待、阻塞可按已知实据用 `notify` 报进展。收到子 wizard 的完成 fyi 时, 立即向原群 `notify` 结论与仍 pending / 尚无正式回执的状态; fyi 本身不代表 ledger done",
-    "这一轮是同伴私聊派来的活 → 你不是顶层: 不对人说话, 结论用行首 `.name RESULT:` 交给对应接收者 (`@name` 存量照认); 需要对方补信息或协作时用 `tell_peer({kind:\"ask\"})`; 由派你的那个代你向人交代",
+    "这一轮是同伴私聊派来的活 → 你不是顶层: 不对人说话, 结论用行首的「收件人 + RESULT:」交给对应接收者 (@name 存量照认); 需要对方补信息或协作时用 `tell_peer({kind:\"ask\"})`; 由派你的那个代你向人交代",
   ]),
 ];
 
@@ -905,10 +905,10 @@ export const renderCharter = (a: CharterArgs): string => {
       "先在自己这里把**公共材料**读进上下文, 再 `clone_wizard({task})` 分出去 (材料已在某个同伴那里就 `from` 它), 每个只交代各自那份差异 —— 别让每个分身各读一遍",
       "复杂任务先 `plan_create`，只创建当前阶段需要的 wizard；owner 收到回复、思考并验收后显式更新 plan，再推进下一阶段",
       "**派完就放手**: 不 `wait_peer` 守着、不轮询 `peek_peer`, 不提前合并或宣告完成; 长等待或阻塞可按已知实据 `notify` 进展。人任务的完成 fyi 到达时, 顶层 wizard 必须 `notify` 原群, 说明结论以及 ledger 仍 pending / 尚无正式回执; 不得把 fyi 当作 done",
-      "按回执的 `status` 处理: `need` = 它在反问 (需要上级补信息时用 `NEED:` 明确列出问题), 用 `tell_peer({name, re: true})` 答 · `error` = CLI 报错停了, 等它续跑或 `re` 叫它继续 · `progress` = 中间进展, 任务仍在飞 (长任务每阶段可用 `PROGRESS:` 报一行进展) · `timeout` / `silent` / `dead` / `canceled` = 这一份没有答案了: 换人、`re` 追问, 或在汇总里如实写缺了它",
+      "按回执的 `status` 处理: `need` = 它在反问 (需要上级补信息时在行首写 NEED: 明确列出问题), 用 `tell_peer({name, re: true})` 答 · `error` = CLI 报错停了, 等它续跑或 `re` 叫它继续 · `progress` = 中间进展, 任务仍在飞 (长任务每阶段可用 `PROGRESS:` 报一行进展) · `timeout` / `silent` / `dead` / `canceled` = 这一份没有答案了: 换人、`re` 追问, 或在汇总里如实写缺了它",
       "plan 是 DAG 状态记忆，不绑定 executor、不自动派活或验收；可并行节点由 owner 自己安排与验收",
       "所有任务完成或取消后，owner 显式完成 plan；结果由你自己这一轮向人收口",
-      "派活文本只写**活本身** —— 你是谁、私聊与否、收口成 `RESULT:` / `ARTIFACT:`, 信封替你说; 反问通过 tell_peer({kind:\"ask\"}) 发起",
+      "派活文本只写**活本身** —— 你是谁、私聊与否、收口成 RESULT: / ARTIFACT:, 信封替你说; 反问通过 tell_peer({kind:\"ask\"}) 发起",
     ]),
     "分身有成本 (一份上下文): 少于两三件时自己做更快; 但 coding 仍遵守 light 执行约束, 统筹者不因此亲自接手实现。",
     "",

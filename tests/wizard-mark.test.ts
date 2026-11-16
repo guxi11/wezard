@@ -111,6 +111,25 @@ assert.deepEqual(addressedResults("`.sanitizer RESULT: 无 WIP`"), [{ name: "san
 assert.deepEqual(addressedResults("`.sanitizer RESULT: 无 WIP"), [{ name: "sanitizer", body: "无 WIP" }], "只抄了开引号");
 assert.deepEqual(parseClosing("`RESULT: 完成`"), { kind: "result", text: "完成", artifacts: [] }, "收口标记连同反引号一起抄");
 assert.equal(parseClosing("```\nRESULT: 代码块里的例子\n```").kind, "none", "围栏里的同名标记不算收口");
+// 行首装饰矩阵: 模型把约定抄成 markdown 的各种包装都不许让收口整句落空; 「锚行首」这一条不变。
+for (const [text, label] of [
+  ["`RESULT: 完成", "只开引号"],
+  ["`RESULT: 完成`", "成对反引号"],
+  ["'RESULT: 完成'", "单引号"],
+  ["\"RESULT: 完成\"", "双引号"],
+  ["「RESULT: 完成」", "直角引号"],
+  ["**RESULT: 完成**", "加粗"],
+  ["__RESULT: 完成__", "加粗 (下划线)"],
+  ["*RESULT: 完成*", "斜体"],
+  ["- RESULT: 完成", "列表符 -"],
+  ["* RESULT: 完成", "列表符 *"],
+  ["+ RESULT: 完成", "列表符 +"],
+  ["> RESULT: 完成", "引用符"],
+  ["RESULT：完成", "全角冒号"],
+] as const) assert.deepEqual(parseClosing(text), { kind: "result", text: "完成", artifacts: [] }, label);
+assert.deepEqual(addressedResults("> `**.fix RESULT: 完成**`"), [{ name: "fix", body: "完成" }], "几种装饰叠在一起也认");
+assert.equal(parseClosing("说明里提到 RESULT: 不算").kind, "none", "行中出现不算");
+assert.equal(parseClosing("  缩进的正文 RESULT: 不算").kind, "none", "缩进的正文里出现也不算");
 
 // ── md-chunk: 永不切开 ZWJ 序列 (按行块切, 行内原子) ──────────────────
 {

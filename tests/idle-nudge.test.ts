@@ -89,6 +89,27 @@ t("锚变重置冷却轮次", () => {
   assert.equal(r.next.asks, 0);
 });
 
+t("追问用满仍未收口: 每轮上报恰好一次", () => {
+  let w: Watch | undefined;
+  const asked: number[] = [];
+  const escalated: number[] = [];
+  for (let i = 0; i <= 60; i++) {
+    const r = step(w, idle(), i * MIN, P);
+    w = r.next;
+    if (r.ask) asked.push(i);
+    if (r.escalate) escalated.push(i);
+  }
+  assert.deepStrictEqual(asked, [5, 10, 20, 25, 40, 45], "追问节奏不变");
+  assert.deepStrictEqual(escalated, [11, 26, 46], "每一轮追问用满后恰好上报一次 (用尽时不再报)");
+  assert.ok(escalated.length <= MAX_CYCLES, "上报次数由 MAX_CYCLES 兜住");
+});
+
+t("不闲 / 未开追问时不上报", () => {
+  assert.equal(step({ asks: 2, anchor: 0, idleSince: 0 }, idle({ idle: false }), 11 * MIN, P).escalate, false);
+  assert.equal(step({ asks: 2, anchor: 0, idleSince: 0 }, idle(), 11 * MIN, { afterMs: 5 * MIN, max: 0 }).escalate, false);
+  assert.equal(step({ asks: 2, anchor: 0, idleSince: 0 }, idle({ state: "blocked" }), 11 * MIN, P).escalate, false);
+});
+
 t("reload 后带着冷却轮次: 冷却按 2^cycles 放大后再重开", () => {
   assert.deepStrictEqual(asksAt(run(() => idle(), 45, P, { asks: 2, cycles: 2, anchor: 0 })), [25, 30]);
 });

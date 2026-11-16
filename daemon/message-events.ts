@@ -6,6 +6,7 @@ import type { Asker, TurnFrom } from "../shared/detail-store.js";
 import type { MirrorDispatchArgs } from "./mirror-bridge.js";
 import type { Tell, HeldSeen } from "./dispatch.js";
 import type { EventId, Receiver, ReportSource, Report, Route } from "./router.js";
+import { addressedResults, parseClosing, receiptKeyword } from "./peers.js";
 import type { TemplateRef } from "../shared/task-template.js";
 
 export interface ReceiptFact {
@@ -267,6 +268,13 @@ export const coversTaskInputIds = (rows: readonly MessageEvent[], inputs: readon
 };
 export const correctionTaskEvent = (binding: { event: string | null } | undefined, serves?: string): string | undefined =>
   binding ? binding.event ?? undefined : serves;
+/** 弱信号 (收口关键字) 说这是回执, 却没有任何收口形态认得出 (行首装饰 / 没写收件人), 而它服务的
+ *  那一行还挂着 —— 账本必须按终态落定, 不许无声 stall: 否则行永远 open, 只剩 idle-nudge 反复追问
+ *  (2026-11-16 e23ee2f.1: 模型把契约示例的 inline-code 反引号一起抄下来, 16 分钟问 3 次都没落定)。
+ *  只管「账本是否了结」—— 正文去哪儿仍由 eventFinalGate / strict 出站门判, 与此无关。 */
+export const unrecognizedReceipt = (text: string, row: Route | undefined): boolean =>
+  !!row && ["open", "need", "error"].includes(row.status)
+  && parseClosing(text).kind === "none" && addressedResults(text).length === 0 && receiptKeyword(text);
 export const canSettleFinal = (event: MessageEvent): boolean => !event.id.startsWith("feedback:")
   || !!event.serves || !!event.feedbackRoute;
 export const eventFinalPublication = (event: MessageEvent, owns: (event: EventAuthority) => boolean,
@@ -323,7 +331,7 @@ export const resultCorrectionInputs = (source: MessageEvent, section: string, in
     ...(serves ? { serves, ...(asker ? { asker } : {}) } : {}), ...(feedbackRoute ? { feedbackRoute } : {}),
     priority: "normal", deadline: NO_DEADLINE,
     payload: { text: text ?? (serves
-      ? `你的 RESULT 暂未交付：${reason}。请用行首 \`.name RESULT: <结论>\` 指定收件人 (@name 存量照认)；需要反问时使用 tell_peer({kind:"ask"})。`
+      ? `你的 RESULT 暂未交付：${reason}。请把收件人和结论写在行首 (点号名字 + 空格 + RESULT: <结论>, 不加反引号/引号/加粗) (@name 存量照认)；需要反问时使用 tell_peer({kind:"ask"})。`
       : fyiBody()),
       peer: { from: { kind: "peer", from: recipient, ...(serves ? { event: serves } : {}) },
         envelope: renderEnvelope(displayName(recipient), !serves), kind: serves ? "task" : "fyi" } },

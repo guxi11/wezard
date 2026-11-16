@@ -35,6 +35,8 @@ export interface Watch {
   anchor: number;
   /** 这一段持续闲置从什么时候起; 没在闲 = undefined。 */
   idleSince?: number;
+  /** 已经为第几轮追问报过「问到上限还没收口」(每轮恰好一次)。 */
+  escalatedCycle?: number;
 }
 
 /** 锚是 now − ageMs 现算的, 两次读之间差几毫秒; 这么近的算同一个。 */
@@ -46,36 +48,44 @@ const MAX_COOLDOWN_MS = 24 * 3600_000;
 const askable = (o: Obs): boolean => ["working", "needs-input", "errored"].includes(o.state);
 const cooldownOf = (p: Policy, cycles: number): number => Math.min(p.afterMs * 2 ** cycles, MAX_COOLDOWN_MS);
 
-/** 一件过一次巡检: 下一刻的样子, 以及这一刻要不要问。纯函数。 */
-export const step = (w: Watch | undefined, o: Obs, now: number, p: Policy): { next: Watch; ask: boolean } => {
+/** 一件过一次巡检: 下一刻的样子, 以及这一刻要不要问 / 要不要上报。纯函数。
+ *  escalate = 这一轮追问已经问到上限而这件事还挂着 —— 必须有一条人来看得见的上报 (不许无限
+ *  静默重投); 每一轮追问恰好报一次 (按 cycles 区分), 总次数仍由 MAX_CYCLES 兜住。 */
+export const step = (w: Watch | undefined, o: Obs, now: number, p: Policy): { next: Watch; ask: boolean; escalate: boolean } => {
   const sameAnchor = !!w && Math.abs(w.anchor - o.anchor) < ANCHOR_SLACK_MS;
   // 真有新动静 = 从头计: 已问次数与冷却轮次都不该赖在上一段上。
   const asks = sameAnchor ? w.asks : 0;
   const cycles = sameAnchor ? w.cycles ?? 0 : 0;
+  const escalatedCycle = sameAnchor ? w!.escalatedCycle : undefined;
+  const keep = escalatedCycle !== undefined ? { escalatedCycle } : {};
   // 忙 / 不可问不再把用满的次数清零: 追问自己引起的那一轮忙曾经借此绕过冷却,
   // 变成每忙一次就重开一组的永动追问源。
-  if (!askable(o) || !o.idle) return { next: { asks, cycles, anchor: o.anchor }, ask: false };
+  if (!askable(o) || !o.idle) return { next: { asks, cycles, anchor: o.anchor, ...keep }, ask: false, escalate: false };
   const since = sameAnchor && w.idleSince !== undefined ? w.idleSince : now;
   if (asks >= p.max) {
+    // 这一轮的追问用完了、行还挂着: 报到人那里 (每轮恰好一次)。
+    const escalate = p.max > 0 && p.afterMs > 0 && escalatedCycle !== cycles;
+    const mark = escalate ? { escalatedCycle: cycles } : keep;
     if (cycles >= MAX_CYCLES || p.max <= 0 || p.afterMs <= 0 || now - since < cooldownOf(p, cycles))
-      return { next: { asks, cycles, anchor: o.anchor, idleSince: since }, ask: false };
+      return { next: { asks, cycles, anchor: o.anchor, idleSince: since, ...mark }, ask: false, escalate };
     const nextCycles = cycles + 1;
     // 最后一轮冷却走完就是用尽: 次数留在上限, 此后只有锚变能重新开始。
     return nextCycles >= MAX_CYCLES
-      ? { next: { asks, cycles: nextCycles, anchor: o.anchor, idleSince: since }, ask: false }
-      : { next: { asks: 0, cycles: nextCycles, anchor: o.anchor, idleSince: now }, ask: false };
+      ? { next: { asks, cycles: nextCycles, anchor: o.anchor, idleSince: since, ...mark }, ask: false, escalate }
+      : { next: { asks: 0, cycles: nextCycles, anchor: o.anchor, idleSince: now, ...mark }, ask: false, escalate };
   }
   const due = p.afterMs > 0 && asks < p.max && now - since >= p.afterMs;
   // 问过之后从头计: 再满一整段闲置才可能问下一次。
-  return due ? { next: { asks: asks + 1, cycles, anchor: o.anchor, idleSince: now }, ask: true }
-    : { next: { asks, cycles, anchor: o.anchor, idleSince: since }, ask: false };
+  return due
+    ? { next: { asks: asks + 1, cycles, anchor: o.anchor, idleSince: now, ...keep }, ask: true, escalate: false }
+    : { next: { asks, cycles, anchor: o.anchor, idleSince: since, ...keep }, ask: false, escalate: false };
 };
 
 /** 追问那一句 (进对方输入框, 以发话方的名义、件号沿用)。 */
 export const nudgeText = (fromName: string, turn: string, idleMs: number, n: number, max: number, state: TurnState = "working"): string =>
   state === "needs-input" || state === "errored"
     ? `（守护进程代 ${fromName} 提醒${max > 1 ? ` (${n}/${max})` : ""}: 任务 (${turn}) 正等你回应${state === "errored" ? "（执行方遇到错误）" : "（执行方有反问）"}。请用 tell_peer({name:"${fromName}", re:true}) 回答或续办；需要新信息时用 kind:"ask"。）`
-    : `（守护进程代 ${fromName} 追问${max > 1 ? ` (${n}/${max})` : ""}: 这件活 (${turn}) 你已经闲了 ${Math.max(1, Math.round(idleMs / 60_000))} 分钟, 还没有交回结论。进展如何? 卡在哪? 做完了就按约定收口 \`RESULT: <结论>\`; 还在等什么 (后台任务 / 别人) 就说清楚在等什么、大概多久。）`;
+    : `（守护进程代 ${fromName} 追问${max > 1 ? ` (${n}/${max})` : ""}: 这件活 (${turn}) 你已经闲了 ${Math.max(1, Math.round(idleMs / 60_000))} 分钟, 还没有交回结论。进展如何? 卡在哪? 做完了就在行首直接写 RESULT: <结论> (行首不加反引号/引号/加粗); 还在等什么 (后台任务 / 别人) 就说清楚在等什么、大概多久。）`;
 
 export interface NudgeDeps {
   /** 在飞的件 (index.ts 的 routeInFlight)。 */
@@ -87,9 +97,12 @@ export interface NudgeDeps {
   /** 同件号代发话方续问; 返回是否注入成功。 */
   ask: (x: { from: string; to: string; turn: string; text: string }) => Promise<boolean>;
   nameOf: (target: string) => string;
-  /** 已问次数与冷却轮次的落盘处。 */
-  store: { get: (k: string) => { asks: number; cycles?: number } | undefined; set: (k: string, v: { asks: number; cycles?: number }) => unknown;
-    drop: (k: string) => void; all: () => Record<string, { asks: number; cycles?: number }> };
+  /** 追问用满仍未收口: 上报给人看 (群系统行 / 管家)。同一件事每轮追问至多一次。 */
+  escalate?: (x: { from: string; to: string; turn: string; asks: number; cycles: number }) => unknown;
+  /** 已问次数、冷却轮次与已上报轮次的落盘处。 */
+  store: { get: (k: string) => { asks: number; cycles?: number; escalatedCycle?: number } | undefined;
+    set: (k: string, v: { asks: number; cycles?: number; escalatedCycle?: number }) => unknown;
+    drop: (k: string) => void; all: () => Record<string, { asks: number; cycles?: number; escalatedCycle?: number }> };
   log: { info: (o: object, msg: string) => void; warn: (o: object, msg: string) => void };
 }
 
@@ -114,16 +127,26 @@ export const startIdleNudge = (deps: NudgeDeps): (() => void) => {
     for (const x of xs) {
       const k = keyOf(x);
       const saved = deps.store.get(k);
-      const prev = mem.get(k) ?? (saved ? { asks: saved.asks, cycles: saved.cycles, anchor: now - x.ageMs } : undefined);
+      const prev = mem.get(k) ?? (saved ? { asks: saved.asks, cycles: saved.cycles, escalatedCycle: saved.escalatedCycle,
+        anchor: now - x.ageMs } : undefined);
       const target = x.state === "working" ? x.to : x.from;
       const o: Obs = { state: x.state, anchor: now - x.ageMs,
         idle: !(x.state !== "working" && x.fromBlocked) && await idle(target) };
       const wasExhausted = (prev?.cycles ?? 0) >= MAX_CYCLES;
-      const { next, ask } = step(prev, o, now, p);
+      const { next, ask, escalate } = step(prev, o, now, p);
       mem.set(k, next);
-      // 次数与轮次都要扛 reload; 冷却轮次的推进不伴随追问, 也得落盘。
-      if (!saved || saved.asks !== next.asks || (saved.cycles ?? 0) !== (next.cycles ?? 0))
-        deps.store.set(k, next.cycles ? { asks: next.asks, cycles: next.cycles } : { asks: next.asks });
+      // 次数、轮次与已上报轮次都要扛 reload; 冷却轮次与上报的推进都不伴随追问, 也得落盘。
+      if (!saved || saved.asks !== next.asks || (saved.cycles ?? 0) !== (next.cycles ?? 0)
+          || (saved.escalatedCycle ?? -1) !== (next.escalatedCycle ?? -1))
+        deps.store.set(k, { asks: next.asks, ...(next.cycles ? { cycles: next.cycles } : {}),
+          ...(next.escalatedCycle !== undefined ? { escalatedCycle: next.escalatedCycle } : {}) });
+      if (escalate) {
+        // 这一轮的追问用完了还挂着: 留一条能被人看见的上报 (行本身不伪造终态)。
+        deps.log.warn({ mod: "idle-nudge", from: deps.nameOf(x.from), to: deps.nameOf(x.to), turn: x.turn,
+          asks: next.asks, cycles: next.cycles ?? 0 }, "idle-nudge: 追问用满仍未收口, 上报");
+        await Promise.resolve(deps.escalate?.({ from: x.from, to: x.to, turn: x.turn,
+          asks: next.asks, cycles: next.cycles ?? 0 })).catch(() => undefined);
+      }
       if (!wasExhausted && (next.cycles ?? 0) >= MAX_CYCLES)
         deps.log.warn({ mod: "idle-nudge", from: deps.nameOf(x.from), to: deps.nameOf(x.to), turn: x.turn, cycles: next.cycles },
           "idle-nudge: 追问用尽, 不再追问");

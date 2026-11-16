@@ -31,7 +31,7 @@ import { installInboundRouter } from "./inbound.js";
 import { installChannelTransport, installChannelEvents, readChannel, isTopicChat, sendTopicContent } from "./channel.js";
 import { loadMirrorStore } from "./mirror-store.js";
 import { cancelOps, contentRev, eventRef, finalKind, isEventRef, makeOutcome, openRouter, ops, pickPair, type Delivery, type EventId, type Op, type Receiver, type Route } from "./router.js";
-import { isRecoveryCarrier, createMessageEvents, messageId, finalId, reportSource, receiptCoverage, receiptFacts, correctionTaskEvent, canSettleFinal, eventDeliveryAllowed, peerEventPrerequisitesReady, resultCorrectionInputs, settleAddressedResults, settleUnaddressedResult, servedChatResultFinalAllowed, settleServedChatResult, type EventAuthority, type MessageAdapters, type MessageEvent, type MessageFinal, type MessageInput } from "./message-events.js";
+import { isRecoveryCarrier, createMessageEvents, messageId, finalId, reportSource, receiptCoverage, receiptFacts, correctionTaskEvent, canSettleFinal, unrecognizedReceipt, eventDeliveryAllowed, peerEventPrerequisitesReady, resultCorrectionInputs, settleAddressedResults, settleUnaddressedResult, servedChatResultFinalAllowed, settleServedChatResult, type EventAuthority, type MessageAdapters, type MessageEvent, type MessageFinal, type MessageInput } from "./message-events.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { backendFor, bindStartupNotice, prewarmShell, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { bindCardChannel, installApprovalEventListener, makeApproveHandler, requestConfirm } from "./approval.js";
@@ -1624,15 +1624,19 @@ const main = async (): Promise<void> => {
           return;
         }
       }
-      // fail-loud: 终句自认是回执 (带 RESULT/NEED/PROGRESS/ARTIFACT 关键字), 却没有任何一种收口
-      // 形态能在行首认出来 —— 这一轮不产生任何路由 op, 那一行就留在 open 上, 只有 idle-nudge
-      // 反复追问。静默退化成 progress 现场查不出来 (2026-11-16 e23ee2f.1: 模型把契约示例的
-      // inline-code 反引号一起抄下来, 16 分钟问 3 次都没落定), 所以这里必须留下证据。
-      if (!verdict.error && servedRow && ["open", "need", "error"].includes(servedRow.status)
-          && parseClosing(verdict.text).kind === "none" && !addressedResults(verdict.text).length
-          && receiptKeyword(verdict.text))
+      // 弱信号说这是回执 (带 RESULT/NEED/PROGRESS/ARTIFACT 关键字), 却没有任何收口形态认得出,
+      // 而它服务的那一行还挂着 —— 账本照终态落定, 不因正文排版把人卡死。**账本了结与正文去向
+      // 彻底解耦**: 这一支只写 answer op, 进群与否仍由 finalReleased / eventFinalGate / strict
+      // 出站门判 (那三层一个字没动), 所以放宽解析不会把不该发的文本刷进 strict 群。
+      // 不这么兜底就是无声 stall: 行留在 open 上, 只剩 idle-nudge 反复追问 (2026-11-16
+      // e23ee2f.1: 模型把契约示例的 inline-code 反引号一起抄下来, 16 分钟问 3 次都没落定)。
+      if (!verdict.error && unrecognizedReceipt(verdict.text, servedRow)) {
         log.warn({ event: e.id, target: e.target, serves: routeEvent, head: clipLine(verdict.text, 160) },
-          "终句带收口关键字但认不出收口形态 (行首 RESULT:/NEED:/PROGRESS: 或 `.name RESULT:`) — 这一行不落定");
+          "终句带收口关键字但认不出收口形态 — 按终态结算该行 (正文去向不变)");
+        router.onFinal(e.target, routeEvent, { ...verdict, result: true, source: reportSource(e) }, strictFinal)
+          .forEach(commitRoute);
+        return;
+      }
       const plans = router.onFinal(e.target, routeEvent, { ...verdict, source: reportSource(e) }, strictFinal);
       // Error evidence has no durable event result. Queue the chat reply before
       // mark:error suppresses replay, so a reload between the two cannot lose it.
@@ -1867,7 +1871,7 @@ const main = async (): Promise<void> => {
       const belowTop = !!serves && !router.speaksToHuman(serves);
       const muted = dests.filter((d) => chatPolicyOf(cfg, d).topOnly && !(!tagOfKey(self) && baseOfKey(self) === d));
       return muted.length && belowTop
-        ? { ok: false, topOnly: true, reason: `${muted.map((d) => chatNameOf(cfg, d) || d).join(", ")} 开着顶层模式: 你这一轮是同伴派来的活, 不对人说话 —— 结果用行首 \`.name RESULT:\`, 反问用 tell_peer({kind:"ask"}), 由派你的那个代你向人交代` }
+        ? { ok: false, topOnly: true, reason: `${muted.map((d) => chatNameOf(cfg, d) || d).join(", ")} 开着顶层模式: 你这一轮是同伴派来的活, 不对人说话 —— 结果写成行首的「收件人 + RESULT:」, 反问用 tell_peer({kind:"ask"}), 由派你的那个代你向人交代` }
         : undefined;
     };
     http.register("POST /notify", async (req, res) => {
@@ -2762,7 +2766,26 @@ const main = async (): Promise<void> => {
           return (await injectResume(to, row.event, Date.now())).ok;
         },
         nameOf: displayName,
-        store: loadJsonMap<{ asks: number; cycles?: number }>(join(cfg.daemon.stateDir, "idle-nudges.json")),
+        /** 追问用满还挂着 = 一处人该看见的异常。与 obligation-watch 的逾期上报同一口径:
+         *  发一条群系统行; 已交终句却没落定的不是「没回」而是「答了没落定」, 附上它最后说的与出路。 */
+        escalate: async ({ turn, asks }) => {
+          const row = router.get(turn);
+          if (!row) return;
+          const channel = row.asker?.chat?.startsWith("chat:") ? row.asker.chat : baseOfKey(row.owner);
+          if (!channel.startsWith("chat:")) {
+            log.warn({ turn, owner: row.owner }, "idle-nudge: 追问用满但这一行没有群来源, 无处分报");
+            return;
+          }
+          const who = displayName(row.owner);
+          const answered = events.taskInputs(row.event).some((e) => !!e.result);
+          const last = answered ? m.lastReply(row.owner, Date.now() - row.at).trim() : "";
+          notifyChat(channel, "[wezard] ⚠️ " + who + " 的这件活 (" + row.event + ") 追问 " + asks + " 次仍未收口 — "
+            + (answered
+              ? "它已经交过终句但没落定 (收口形态认不出 / 没写收件人): 让它重发一次行首收口, 或用 stop_wizard 收掉。"
+              : "对方一直没回: 可以 stop_wizard 收掉, 或转派给别人。")
+            + (last ? "\n\n它最后说的: " + clipLine(last, 300) : ""));
+        },
+        store: loadJsonMap<{ asks: number; cycles?: number; escalatedCycle?: number }>(join(cfg.daemon.stateDir, "idle-nudges.json")),
         log: log.child({ mod: "idle-nudge" }),
         sweep: async () => { await sweepOnce(); },
       });
