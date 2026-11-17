@@ -8,7 +8,7 @@
 import { renderCutMark, renderTurnGroup, splitReminders, escHtml, hashStr, tagSig, turnUsageChips, type Handoff, type HandoffDeco, type TurnFragment } from "./detail-render.js";
 import { isTurn, staleAt, turnDone } from "./chat-view.js";
 import type { DetailRecord, MarkDetailRecord, TurnDetailRecord } from "./detail-store.js";
-import { channelOf, doneAt, injectTurnsOf, teammateOf, unwrapMates, type Directory, type Msg } from "./role-view.js";
+import { channelOf, doneAt, humanOf, injectTurnsOf, teammateOf, unwrapMates, type Directory, type Msg } from "./role-view.js";
 import { nameHead } from "./session-label.js";
 
 export interface MsgFragment {
@@ -188,6 +188,12 @@ const handoffDeco = (r: TurnDetailRecord, records: readonly DetailRecord[], dir:
     pub: pubOf,
     role: (name) => ((id) => (id ? ` data-hrole="${escHtml(id)}" title="${escHtml(`以 ${dir.nameOf(id)} 为 viewpoint 看它的往来`)}"` : ""))(dir.resolve(name)),
     plan: () => (r.target ? ` data-hplan="${escHtml(r.target)}"` : ""),
+    chat: (c) => {
+      const base = c || channelOf(r);
+      if (!/^(?:chat|user):/.test(base)) return base;
+      // 没起名的群: 就是这一轮所在的那个群时说「本群」, 否则才是「未命名群」(base 原文进不了界面)。
+      return dir.chatName(base) || (base.startsWith("user:") ? dir.nameOf(humanOf(base)) : base === channelOf(r) ? "本群" : "未命名群");
+    },
     attrs: (h) => {
       const id = dir.resolve(h.name);
       return id ? `${pairAttrs(r, id, h, landed(h), pubOf(h) ?? h.public)} title="${escHtml(`打开 ${dir.nameOf(r.target ?? "")} 与 ${dir.nameOf(id)} 的往来, 定位到这一句`)}"` : "";

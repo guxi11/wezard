@@ -20,7 +20,7 @@ import type {
 import { truncate, clipLine } from "./std.js";
 import { parseReminders, reminderLabel, stripReminders, type Reminder } from "./reminder.js";
 import { stripSigil } from "./session-label.js";
-import { HINT_TOOL, objectOf, toolReplies, execHintCalls } from "./tool-hints.js";
+import { HINT_TOOL, objectOf, toolReplies, execHintCalls, callsInExec } from "./tool-hints.js";
 
 const escHtml = (s: string): string =>
   s.replace(/[&<>"']/g, (c) =>
@@ -726,8 +726,9 @@ export type Hint =
   | { k: "stop"; name: string; end: boolean; forgotten: boolean; turn?: string; state?: Handoff["state"]; reason?: string }
   /** 排了一个定时任务: when / next 取回包里渲染好的那两句, text = prompt。 */
   | { k: "task"; id: string; when: string; next: string; note: string; text: string; state?: Handoff["state"]; reason?: string }
-  /** strict 群答一笔义务 (chat_reply): re = 那条人话的 msg, text 空 = passed; delivered 取回包 (placeholder / message / channel / passed)。 */
-  | { k: "reply"; re: string; chat: string; text: string; delivered?: string; state?: Handoff["state"]; reason?: string };
+  /** 发进聊天给人看的一句 / 一个文件 (chat_reply / chat_say / notify / send_file): 发到哪 (chats: 回包里的
+   *  群名或 base; 空 = 调用方所在的群) 与发了什么。re = 答的那条人话的 msg; delivered = chat_reply 回包的交付方式。 */
+  | { k: "post"; via: "reply" | "say" | "notify" | "file"; chats: string[]; text: string; re?: string; delivered?: string; held?: string[]; file?: string; state?: Handoff["state"]; reason?: string };
 
 const objOf = (v: unknown): Record<string, unknown> => objectOf(v) ?? {};
 const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
@@ -781,7 +782,19 @@ export const hintOf = (use: ToolUse, result: ToolResult | undefined): Hint | und
         : { k: "born", via, ...out, name: stripSigil(str(j?.name) ?? str(a.name) ?? ""), text: str(a.description) ?? "" };
     }
     case "stop_wizard": return { k: "stop", ...out, name: stripSigil(str(j?.name) ?? str(a.name) ?? ""), end: (str(j?.mode) ?? str(a.mode) ?? "end") === "end", forgotten: j?.forgotten === true, turn: str(a.turn) };
-    case "chat_reply": return { k: "reply", ...out, re: str(a.re) ?? "", chat: str(j?.chat) ?? "", text: str(a.text) ?? "", delivered: str(j?.delivered) };
+    case "chat_reply": return { k: "post", via: "reply", ...out, chats: [str(j?.chat)].filter((c): c is string => !!c), text: str(a.text) ?? "", re: str(a.re), delivered: str(j?.delivered) };
+    case "chat_say": return { k: "post", via: "say", ...out, chats: [str(j?.chat) ?? str(a.chat)].filter((c): c is string => !!c), text: str(a.text) ?? "", re: str(a.re) };
+    case "notify": {
+      const names = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && !!x) : []);
+      const held = names(j?.held);
+      return { k: "post", via: "notify", ...out, chats: j ? [...names(j.sent), ...held] : names(a.to), text: str(a.markdown) ?? "", ...(held.length ? { held } : {}) };
+    }
+    case "send_file": {
+      const path = str(a.path) ?? "";
+      const name = str(j?.name) ?? path.split("/").pop() ?? "";
+      const kind = str(j?.kind) ?? str(a.kind) ?? "file";
+      return { k: "post", via: "file", ...out, chats: [str(j?.sent) ?? str(a.to)].filter((c): c is string => !!c), text: str(a.caption) ?? "", file: kind === "file" ? name : name + " · " + kind };
+    }
     case "schedule_task": return { k: "task", ...out, id: str(j?.id) ?? str(a.id) ?? "", when: str(j?.when) ?? str(a.when) ?? "", next: str(j?.next) ?? "", note: str(a.note) ?? "", text: str(a.prompt) ?? "" };
     default: return undefined;
   }
@@ -810,6 +823,15 @@ export const hintsOf = (use: ToolUse, result: ToolResult | undefined): Hint[] =>
   });
 };
 
+/** 外壳里调的 wezard 工具 (去掉 mcp__wezard__ 前缀); 不是外壳 = []。 */
+const wrappedCalls = (use: ToolUse): string[] => {
+  const wrap = objOf(use.toolInput);
+  if (use.toolName === "DeferExecuteTool") return [str(wrap.toolName)].filter((n): n is string => !!n).map((n) => n.replace(/^mcp__wezard__/, ""));
+  if (!/^(?:functions[._])?(?:exec|REPL)$/.test(use.toolName)) return [];
+  const source = typeof use.toolInput === "string" ? use.toolInput : wrap.code;
+  return typeof source === "string" ? callsInExec(source).map((c) => c.toolName.replace(/^mcp__wezard__/, "")) : [];
+};
+
 /** 箭头的颜色: 这件活此刻的回执状态。 */
 export interface HandoffStatus { key: "run" | "done" | "need" | "error" | "fail" | "plain"; tip: string }
 
@@ -828,6 +850,8 @@ export interface HandoffDeco {
   role: (name: string) => string;
   /** 发话方, 整行点了开它的日程 —— 只有它就是页面视角时才可点, 由客户端判 (片段不随视角)。 */
   plan: () => string;
+  /** 发进聊天那一行的去处: 回包里的群名或 base → 人认得的群名; "" = 调用方这一轮所在的群。 */
+  chat?: (chat: string) => string;
 }
 
 // 排队 / 插话 / 打断只在投的那一刻对方正忙时才真发生 —— 只标真发生的那一种, 闲着 (或回包没说) 就不标。
@@ -901,12 +925,34 @@ const renderHandoff = (h: Handoff, key: string, deco?: HandoffDeco): string => {
   return hoBox("", attrs, `${hoArrow(st, glyph)}${verb} ${who}${turn}${tags}${lost}${acct ? `<span class="ho-acct">${acct}</span>` : ""}`, h.text, pub ? `${key}:ho` : undefined, undefined, to);
 };
 
-/** chat_reply 实际怎么交付的 (回包 delivered): [样式, 标签, 说明]。 */
-const REPLY_TAG: Readonly<Record<string, [string, string, string]>> = {
-  placeholder: ["pub", "覆盖占位", "在流窗口内覆盖了群里的占位气泡"],
-  message: ["pub", "群消息", "占位窗口已过, 作为一条新消息发进群"],
-  channel: ["pub", "频道评论", "评论在义务锚定的那条频道消息上"],
-  passed: ["kind", "passed", "无需答复, 记为 passed, 群里不发言"],
+/** 发进聊天的那一行: 「图标 动词 → 群名」+ 发了什么 (首行跟在行内, 全文收在 chevron 下)。
+ *  群名由 deco 翻 (回包给的可能是 base); 交付细节 (覆盖占位 / 新消息) 是内部口径, 只进悬停说明。 */
+const POST_VIA: Readonly<Record<Extract<Hint, { k: "post" }>["via"], [string, string]>> = {
+  reply: ["↩", "回复"],
+  say: ["💬", "发言"],
+  notify: ["📣", "通知"],
+  file: ["📎", "发文件"],
+};
+const DELIVERED_TIP: Readonly<Record<string, string>> = {
+  placeholder: "已发进群 (替换了群里那条「处理中」的气泡)",
+  message: "已发进群 (作为一条新消息)",
+  channel: "评论在频道里那条消息下",
+  passed: "判定无需答复, 群里没有发言",
+};
+const chatLabel = (c: string): string => (/^(?:chat|user):/.test(c) ? "未命名群" : c);
+const renderPost = (h: Extract<Hint, { k: "post" }>, deco?: HandoffDeco): string => {
+  const [glyph, verb0] = POST_VIA[h.via];
+  const passed = h.via === "reply" && (h.delivered === "passed" || (!h.text && h.state !== "failed"));
+  const verb = passed ? "不答" : verb0;
+  const names = (h.chats.length ? h.chats : [""]).map((c) => (deco?.chat ? deco.chat(c) : chatLabel(c))).filter(Boolean);
+  const to = names.length ? " → " + names.map((n) => `<span class="ho-nm">${escHtml(n)}</span>`).join("、") : "";
+  const file = h.file ? `<span class="ho-turn">${escHtml(h.file)}</span>` : "";
+  const tags = (passed ? hoTag("kind", "未发言", DELIVERED_TIP.passed!) : "") + (h.delivered === "channel" ? hoTag("pub", "频道评论", DELIVERED_TIP.channel!) : "") +
+    (h.held?.length ? hoTag("pri", "待送达", h.held.join("、") + " 那头久未开口, 消息压着等对方下次说话时送达") : "");
+  const tip = [h.delivered ? DELIVERED_TIP[h.delivered] : "", h.re ? "答的是消息 " + h.re : ""].filter(Boolean).join(" · ");
+  const attrs = tip ? ` title="${escHtml(tip)}"` : "";
+  return hoTrouble(h, glyph, verb0 + (names.length ? " → " + names.join("、") : ""), "", h.text) ??
+    hoBox(" post", attrs, `${hoArrow(stOf(h.state), glyph)}${verb}${to}${file}${tags}`, h.text);
 };
 
 const PLAIN: HandoffStatus = { key: "plain", tip: "" };
@@ -930,13 +976,7 @@ const renderHint = (h: Hint, key: string, deco?: HandoffDeco): string => {
       return hoTrouble(h, glyph, `${what} .${h.name}`, attrs, "") ??
         hoBox("", attrs, `${hoArrow(stOf(h.state), glyph)}${what} ${who(h.name)}${tags}`, "");
     }
-    case "reply": {
-      const re = h.re ? `<span class="ho-turn">${escHtml(h.re)}</span>` : "";
-      const chat = h.chat ? ` <span class="ho-nm">${escHtml(h.chat)}</span>` : "";
-      const tag = REPLY_TAG[h.delivered ?? (h.text ? "" : "passed")];
-      return hoTrouble(h, "↩", "回复", "", h.text) ??
-        hoBox("", "", `${hoArrow(stOf(h.state), "↩")}${h.text ? "回复" : "不答"}${chat}${re}${tag ? hoTag(tag[0], tag[1], tag[2]) : ""}`, h.text);
-    }
+    case "post": return renderPost(h, deco);
     case "task": {
       const attrs = deco ? deco.plan() : "";
       const id = h.id ? `<span class="ho-turn">${escHtml(h.id)}</span>` : "";
@@ -960,9 +1000,17 @@ const renderToolBubble = (
   const rawResult = result?.body ?? "";
   const hints = hintsOf(use, result);
   // 头部一行: ⏺ 工具名(参数) — 参数取命令/路径等主字段, 与 Claude CLI 同款。
-  const arg = oneLineCompact(use.toolInput, 72);
+  // 外壳 (REPL / DeferExecuteTool) 里认出了 wezard 调用: 摆这次调用的说明 + 里面调了哪些工具, 不摆源码 ——
+  // 这些调用各自的提示行已经把「交给谁 / 发到哪、说了什么」讲清楚了。
+  const inner = hints.length ? wrappedCalls(use) : [];
+  const arg = inner.length
+    ? clipLine([str(objOf(use.toolInput).description) ?? "", [...new Set(inner)].join(", ")].filter(Boolean).join(" · "), 108)
+    : oneLineCompact(use.toolInput, 72);
   const dur = result ? `<span class="tool-dur">${escHtml(fmtDuration(result.ts - use.ts))}</span>` : "";
-  const preview = toolResultPreview(use, extractDiffBlocks(use.toolName, use.toolInput), rawResult, Boolean(result), done);
+  // 提示行都调成了: 它们就是结果的摘要, 不再摆一行转义过几层的回包 JSON (原文仍在展开后的 output 里)。
+  const preview = hints.length && hints.every((h) => h.state === "ok")
+    ? ""
+    : toolResultPreview(use, extractDiffBlocks(use.toolName, use.toolInput), rawResult, Boolean(result), done);
   const body = lazyTurn === undefined
     ? `<div class="tool-body">${toolBody(use, result)}</div>`
     : `<div class="tool-body" data-lazy-turn="${escHtml(lazyTurn)}" data-lazy-use="${escHtml(use.toolUseId)}"></div>`;
@@ -973,7 +1021,7 @@ const renderToolBubble = (
       <summary class="tool-summary"><span class="tool-dot">⏺</span><span class="tool-name">${escHtml(use.toolName)}</span>${arg ? `<span class="tool-arg">(${escHtml(arg)})</span>` : ""}${dur}${clock(use.ts)}</summary>
       ${body}
     </details>
-    <div class="tool-result-line">${preview}</div>${hints.map((hint, i) => renderHint(hint, i ? `${key}:hint${i}` : key, deco)).join("")}
+    ${preview ? `<div class="tool-result-line">${preview}</div>` : ""}${hints.map((hint, i) => renderHint(hint, i ? `${key}:hint${i}` : key, deco)).join("")}
   </section>`;
 };
 

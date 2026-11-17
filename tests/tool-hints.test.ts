@@ -102,17 +102,41 @@ const transferred = hintsOf(dottedUse, { t: "tool_result", toolUseId: "dot", bod
 assert.equal(transferred.length, 1);
 assert.equal(transferred[0]?.k === "handoff" && transferred[0].handed, true);
 assert.equal(transferred[0]?.k === "handoff" && transferred[0].receipt, false);
-// chat_reply: 直调与 REPL 外壳都出一行「回复」提示, 交付方式取回包 delivered; 不带 text = passed。
+// 出站工具 (chat_reply / chat_say / notify / send_file): 直调与 REPL 外壳都出一行「发到哪、发了什么」,
+// 标题不摆源码, 调成了就不再摆回包 JSON; 交付细节 (覆盖占位) 只进悬停说明, 不上界面。
 const replyUse: Extract<TurnItem, { t: "tool_use" }> = { t: "tool_use", toolUseId: "cr", toolName: "mcp__wezard__chat_reply", toolInput: { re: "h1", text: "看过了, 是配置问题" }, ts: 1 };
 const replyRes = { t: "tool_result" as const, toolUseId: "cr", body: JSON.stringify({ ok: true, delivered: "placeholder", event: "e1", chat: "sanitizer" }), ts: 2 };
 const rh = hintsOf(replyUse, replyRes);
-assert.deepEqual(rh.map((h) => h.k === "reply" && [h.re, h.chat, h.delivered, h.state, h.text]), [["h1", "sanitizer", "placeholder", "ok", "看过了, 是配置问题"]]);
-const replyRepl: Extract<TurnItem, { t: "tool_use" }> = { t: "tool_use", toolUseId: "cr2", toolName: "REPL", toolInput: { code: 'return await mcp.wezard.chat_reply({ re: "h2" })' }, ts: 1 };
-const passedRes = { t: "tool_result" as const, toolUseId: "cr2", body: JSON.stringify({ result: JSON.stringify({ ok: true, delivered: "passed", event: "e2", chat: "sanitizer" }), stdout: "", stderr: "" }), ts: 2 };
-const ph = hintsOf(replyRepl, passedRes);
-assert.equal(ph.length === 1 && ph[0]!.k === "reply" && ph[0]!.delivered, "passed");
-const replyHtml = renderTurnGroup({ kind: "turn", id: "tr", createdAt: 0, updatedAt: 3, closed: true, items: [replyUse, replyRes] } as TurnDetailRecord).html;
-assert.ok(replyHtml.includes('class="handoff') && replyHtml.includes("覆盖占位") && replyHtml.includes("sanitizer"), "chat_reply 在工具框里有专属提示行");
+assert.deepEqual(rh.map((h) => h.k === "post" && [h.via, h.chats, h.delivered, h.state, h.text, h.re]), [["reply", ["sanitizer"], "placeholder", "ok", "看过了, 是配置问题", "h1"]]);
+// 真实形态 (2026-11-17 study 答 hi): REPL 里 const r = await mcp.wezard.chat_reply(...); return JSON.stringify(r) —— 回包被包了三层
+const code = 'const r = await mcp.wezard.chat_reply({ re: "hf00", text: "在，我是这个群的管家 study。" });\nreturn JSON.stringify(r);';
+const replRepl: Extract<TurnItem, { t: "tool_use" }> = { t: "tool_use", toolUseId: "cr2", toolName: "REPL", toolInput: { code, description: "回复 hi" }, ts: 1 };
+const realRes = { t: "tool_result" as const, toolUseId: "cr2", body: JSON.stringify({ result: JSON.stringify(JSON.stringify({ ok: true, delivered: "placeholder", event: "edf2f44", chat: "chat:wrX" })), stdout: "", stderr: "" }), ts: 2 };
+const ph = hintsOf(replRepl, realRes);
+assert.equal(ph.length === 1 && ph[0]!.k === "post" && ph[0]!.via, "reply", "REPL 外壳里的 chat_reply 认得出");
+const turnOfCalls = (items: TurnItem[]) => renderTurnGroup({ kind: "turn", id: "tr", createdAt: 0, updatedAt: 3, closed: true, items } as TurnDetailRecord).html;
+const replyHtml = turnOfCalls([replRepl, realRes]);
+const summary = replyHtml.match(/<summary class="tool-summary">([\s\S]*?)<\/summary>/)?.[1] ?? "";
+assert.ok(summary.includes("回复 hi · chat_reply") && !summary.includes("const r") && !summary.includes("await"), "标题 = 说明 + 调了哪个工具, 不摆源码: " + summary);
+assert.ok(!replyHtml.includes('class="tool-result-line"'), "调成了不再摆回包 JSON 预览行");
+assert.ok(replyHtml.includes("回复") && replyHtml.includes("未命名群") && !replyHtml.includes(">chat:wrX<"), "去处翻成群名, 不摆 base");
+assert.ok(!/>覆盖占位</.test(replyHtml) && replyHtml.includes("替换了群里那条「处理中」的气泡"), "交付细节只进悬停说明");
+assert.ok(replyHtml.includes("在，我是这个群的管家 study。"), "发了什么在行内");
+// chat_reply 不带 text = 不答 (passed)
+const passUse: Extract<TurnItem, { t: "tool_use" }> = { t: "tool_use", toolUseId: "cp", toolName: "mcp__wezard__chat_reply", toolInput: { re: "h3" }, ts: 1 };
+const passHtml = turnOfCalls([passUse, { t: "tool_result", toolUseId: "cp", body: JSON.stringify({ ok: true, delivered: "passed", event: "e3", chat: "wezard" }), ts: 2 }]);
+assert.ok(passHtml.includes("不答") && passHtml.includes("未发言"));
+// chat_say / notify / send_file
+const sayH = hintsOf({ t: "tool_use", toolUseId: "cs", toolName: "mcp__wezard__chat_say", toolInput: { text: "我先去看日志" }, ts: 1 }, { t: "tool_result", toolUseId: "cs", body: JSON.stringify({ ok: true, chat: "sanitizer", sent: 6 }), ts: 2 });
+assert.deepEqual(sayH.map((h) => h.k === "post" && [h.via, h.chats, h.text]), [["say", ["sanitizer"], "我先去看日志"]]);
+const ntH = hintsOf({ t: "tool_use", toolUseId: "nt", toolName: "mcp__wezard__notify", toolInput: { markdown: "**进展**: 已定位" }, ts: 1 }, { t: "tool_result", toolUseId: "nt", body: JSON.stringify({ ok: true, sent: ["wezard"], held: ["微信群"] }), ts: 2 });
+assert.deepEqual(ntH.map((h) => h.k === "post" && [h.via, h.chats, h.held]), [["notify", ["wezard", "微信群"], ["微信群"]]]);
+const fileCode = 'await mcp.wezard.send_file({ path: "/tmp/a/shot.png", kind: "image" })';
+const fH = hintsOf({ t: "tool_use", toolUseId: "sf", toolName: "REPL", toolInput: { code: fileCode }, ts: 1 }, { t: "tool_result", toolUseId: "sf", body: JSON.stringify({ result: JSON.stringify({ ok: true, sent: "wezard", kind: "image", name: "shot.png", bytes: 10 }), stdout: "", stderr: "" }), ts: 2 });
+assert.deepEqual(fH.map((h) => h.k === "post" && [h.via, h.chats, h.file]), [["file", ["wezard"], "shot.png · image"]]);
+// 失败的调用: 照旧保留结果预览, 提示行写没成
+const failHtml = turnOfCalls([replyUse, { t: "tool_result", toolUseId: "cr", body: "chat_reply failed: 认不出这条义务", ts: 2 }]);
+assert.ok(failHtml.includes('class="tool-result-line"') && failHtml.includes("没成"));
 // peers.ts 靠 tools.* 这一段读 exec 里的命令, 别把 code-mode 的容器形态弄丢。
 assert.equal(callsInExec('tools.exec_command({cmd:"ls"})', () => true)[0]?.toolName, "exec_command");
 console.log("Tool hint wrapping, pairing, rendering and receipt association checks passed");
