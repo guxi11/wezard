@@ -122,7 +122,8 @@ import type { PlanStore } from "./plans.js";
 import { registerPlanRoutes } from "./plan-http.js";
 import { returnOpOf, type HeldSeen, type InFlight, type Prereq, type ReturnOp, type Tell } from "./dispatch.js";
 import { NO_DEADLINE, isTerminal, renderInFlight, turnState } from "../shared/turn-state.js";
-import { startIdleNudge, startObligationWatch, type ObligationRow, type ObligationWatch } from "./idle-nudge.js";
+import { startIdleNudge, startObligationWatch, strictDeliveryNudge, strictDeliveryReport,
+  type NudgeTarget, type ObligationRow, type ObligationWatch } from "./idle-nudge.js";
 import { askerFromEnvelope, parseReminders, renderReminder, stripReminders, withMsg, type NoteAttrs, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
 import { createHandoffs, cuttingTurn, handedOff, handingOff, handoffRound, resumeText, roundPending, settlesCut, type Pending as PendingHandoff } from "./handoff.js";
 import { coldGateOf, decide, rankCandidates, routeDiagnostics, renderCandidates, routeReceiptDutiesOf, tierFor, wakeCostOf, wakeNoteOf, type RouteRow } from "./route.js";
@@ -1176,7 +1177,9 @@ const main = async (): Promise<void> => {
      *  `serves` 指回那一行 (注入事件 id `route:<event>:resume`), 于是它的终句照旧落定、
      *  照旧投给 receiver —— 换会话丢掉的只是 transcript, 不是这笔账。
      *  id 按这一场交接的起点 (`at`) 区分: 同一场 reload 重放判重不重投, 换一场才配一条新的。 */
-    async function injectResume(t: string, event: EventId, at: number, automaticGeneration?: string): Promise<{ ok: boolean; reason?: string }> {
+    /** 把那一笔重新指给 owner。`textOverride` = 这一句自己说清楚该干什么 (strict 群「答了没出站」的补发
+     *  指引): 此时 resumeText 的「还在办、没交代」是错题, 整句换掉而不是往后追加。 */
+    async function injectResume(t: string, event: EventId, at: number, automaticGeneration?: string, textOverride?: string): Promise<{ ok: boolean; reason?: string }> {
       const row = router.get(event);
       if (!row || row.owner !== t || !["open", "need", "error"].includes(row.status)) return { ok: false, reason: "no unfinished row to resume" };
       const r = row.receiver;
@@ -1217,7 +1220,7 @@ const main = async (): Promise<void> => {
           target: t, speaker: waiting, channel, serves: event,
           ...(row.asker ? { asker: row.asker } : {}),
         priority: "normal", deadline: NO_DEADLINE,
-          payload: { text: resumeText(event, { asker, ask: ask ? stripReminders(ask) : undefined, closing,
+          payload: { text: textOverride ?? resumeText(event, { asker, ask: ask ? stripReminders(ask) : undefined, closing,
             ...(r.kind === "wizard" ? { receiver: displayName(r.to) } : {}) }), peer: {
             from: { kind: "peer", from: waiting, ...(row.asker ? { asker: row.asker } : {}) },
             // 不是一件新活 (没有件号、不收新回执): 它只是把那一笔重新指给 owner。
@@ -2731,23 +2734,28 @@ const main = async (): Promise<void> => {
     };
     void m.restored.then(() => {
       // 严格群的 chat 义务, owner 已经交过终句 = 它答了, 只是 strict 只认 chat_reply 交付 (终句既不
-      // 进群也不关账)。再按「还没有交回结论」追问它, 每问一次只多一句谁也看不到的终句 (会话若在
-      // strict 上线前启动, 工具表里根本没有 chat_reply —— 试过、报 not found、然后放弃)。关账与上报
-      // 归 obligation-watch; 这里只把这类行从追问名单里摘掉, 并留一条 warn 便于事后定位。
-      const answeredStrictObligation = (turn: string): boolean => {
+      // 进群也不关账)。通用追问 (「进展如何 / 还没交回结论」) 对它是错题 —— 它以为自己答完了, 再问
+      // 只会多一句谁也看不到的终句。所以这一类的追问换成补发指引: 「你那份结论没有进群, 用
+      // chat_reply 发出去」, 上限 1 次、不开冷却轮次 (cycles:1) —— 它已经答过, 问不出新东西就上报。
+      // obligation-watch 只看从没答过的义务, 同一件事不提醒两遍。
+      const answeredStrict = (turn: string): boolean => {
         const row = router.get(turn);
         return !!row && row.receiver.kind === "chat" && !!row.receiver.channel
-          && strictSpeechOf(row.receiver.channel)
+          && !!strictSpeechOf && strictSpeechOf(row.receiver.channel)
           && events.taskInputs(row.event).some((e) => !!e.result);
       };
-      const nudgedOut = new Set<string>();
-      const nudgeInflight = (): InFlight[] => routeInFlight().filter((x) => {
-        if (!answeredStrictObligation(x.turn)) { nudgedOut.delete(x.turn); return true; }
-        if (!nudgedOut.has(x.turn)) {
-          nudgedOut.add(x.turn);
-          log.warn({ mod: "idle-nudge", turn: x.turn, to: x.to }, "idle-nudge: 严格群义务已答但没交付 (终句不进群, 只认 chat_reply) — 不再追问, 交 obligation-watch");
-        }
-        return false;
+      /** 这一笔该补发却还没补的, 追问话术换成「用 chat_reply 补发」(见 strictDeliveryNudge)。 */
+      const answerNudge = (x: InFlight): NudgeTarget["nudge"] => {
+        if (!answeredStrict(x.turn)) return undefined;
+        const row = router.get(x.turn);
+        const channel = row?.receiver.kind === "chat" ? row.receiver.channel : "";
+        const re = row?.receiver.kind === "chat" ? events.get(row.receiver.message)?.id ?? row.receiver.message : "";
+        return { policy: { afterMs: cfg.wrc.mirror.idleNudge.afterMin * 60_000, max: 1, cycles: 1 },
+          text: strictDeliveryNudge({ chat: chatNameOf(cfg, channel) || channel, re }) };
+      };
+      const nudgeInflight = (): NudgeTarget[] => routeInFlight().map((x) => {
+        const nudge = answerNudge(x);
+        return nudge ? { ...x, nudge } : x;
       });
       stopSweep = startIdleNudge({
         inflight: nudgeInflight, idleNow: m.idleNow, handingOff,
@@ -2768,7 +2776,8 @@ const main = async (): Promise<void> => {
               } } });
             return true;
           }
-          return (await injectResume(to, row.event, Date.now())).ok;
+          // 已答未出站的那一类: 注入正文换成补发指引本身 (resumeText 的「继续办、还没交代」是错题)。
+          return (await injectResume(to, row.event, Date.now(), undefined, answeredStrict(turn) ? text : undefined)).ok;
         },
         nameOf: displayName,
         /** 追问用满还挂着 = 一处人该看见的异常。与 obligation-watch 的逾期上报同一口径:
@@ -2784,6 +2793,15 @@ const main = async (): Promise<void> => {
           const who = displayName(row.owner);
           const answered = events.taskInputs(row.event).some((e) => !!e.result);
           const last = answered ? m.lastReply(row.owner, Date.now() - row.at).trim() : "";
+          // strict 群「答了没出站」: 补发指引只问一次, 问完还没动就留一条带摘录的日志 + 一条群系统行
+          // (人要看得出这是「答了没发」而不是卡死), 然后闭嘴 —— 行不落定, 交给义务账 / 人处置。
+          if (answeredStrict(turn)) {
+            const re = row.receiver.kind === "chat" ? events.get(row.receiver.message)?.id ?? row.receiver.message : "";
+            log.warn({ mod: "idle-nudge", turn, event: row.event, owner: row.owner, re, asks, last: clipLine(last, 200) },
+              "idle-nudge: 严格群已答但没出站 — 补发指引追问无果, 停止追问 (行仍 open, 交义务账)");
+            notifyChat(channel, strictDeliveryReport({ who, event: row.event, re, asks, last }));
+            return;
+          }
           notifyChat(channel, "[wezard] ⚠️ " + who + " 的这件活 (" + row.event + ") 追问 " + asks + " 次仍未收口 — "
             + (answered
               ? "它已经交过终句但没落定 (收口形态认不出 / 没写收件人): 让它重发一次行首收口, 或用 stop_wizard 收掉。"
@@ -2796,10 +2814,12 @@ const main = async (): Promise<void> => {
       });
       // P7-S2 义务观测: 严格群未结的 chat 接收行 —— idle 且未关提醒恰好 1 次, 再逾期上报恰好 1 次
       // (管家违约发群系统行, 成员违约私聊告知管家)。不按墙钟判逾期、不伪造 timeout。
+      // 已经交过终句、只是没出站的行**不在**这里: 那句提醒 (「义务还没回」) 对它同样是错题, 补发指引
+      // 归上面的 idle-nudge (追问话术与上限都在那儿), 同一件事不提醒两遍。
       stopObligations = startObligationWatch({
         rows: (): ObligationRow[] => router.rows()
           .filter((r) => r.receiver.kind === "chat" && r.receiver.channel && ["held", "open", "need", "error"].includes(r.status)
-            && !!strictSpeechOf && strictSpeechOf(r.receiver.channel))
+            && !!strictSpeechOf && strictSpeechOf(r.receiver.channel) && !answeredStrict(r.event))
           .map((r) => ({ event: r.event, owner: r.owner, channel: (r.receiver as { channel: string }).channel,
             message: (r.receiver as { message: string }).message, ageMs: Date.now() - r.at })),
         delivered: (row) => events.taskInputs(row.event).some((e) => e.exposure === "consumed"),

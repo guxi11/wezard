@@ -4357,7 +4357,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       a.lastConcludedAt = Date.now();
       clearCot(a);
       recordCloseOpenTurns({ target: a.target, sessionId: a.sessionId, exceptIds: [turnId] });
-      log.info({ sessionId: a.sessionId, turnId, len: body.length }, "brief: strict conclusion (no outbound, obligation open)");
+      // 出站门判定「答了但没交付」: 结论只进 turn store 与事件库, 群里一个字没有。补发指引由
+      // idle-nudge 下发 (问一次, 话术见 strictDeliveryNudge); 这里留一条带摘录的 warn —— 人问
+      // 「是不是卡死」时有据可查。
+      log.warn({ sessionId: a.sessionId, turnId, event: a.activeEventId, len: body.length, last: clipLine(body, 200) },
+        "brief: strict conclusion (no outbound, obligation open) — 补发指引 (chat_reply) 由 idle-nudge 下发");
       return;
     }
     if (!a.activeEventId && isDuplicateConclusion(a, body)) {

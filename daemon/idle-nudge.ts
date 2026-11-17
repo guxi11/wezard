@@ -11,6 +11,7 @@
 // 宁可晚问, 不会早问。
 //
 // 一条卡住 16 天的 route 曾被追问 3171 次, 每次都是一个新的续办载体 —— 追问本身要有尽。
+import { clipLine } from "../shared/std.js";
 import type { TurnState } from "../shared/turn-state.js";
 
 export interface Policy {
@@ -18,6 +19,9 @@ export interface Policy {
   afterMs: number;
   /** 同一件最多问几次。 */
   max: number;
+  /** 冷却轮次上限 (缺省 MAX_CYCLES): 一组问满、冷却完再重开一轮就 +1。1 = 问满这一组就闭嘴,
+   *  不开新一轮 —— strict 群「答了没出站」用它 (它已经答过, 再问只是往池子里堆载体)。 */
+  cycles?: number;
 }
 
 /** 一件此刻的样子。`anchor` = 回执锚 (发话 / 续问 / 续回的时刻): 变了就是有了新的一句, 重新计。 */
@@ -49,6 +53,7 @@ const askable = (o: Obs): boolean => ["working", "needs-input", "errored"].inclu
 const cooldownOf = (p: Policy, cycles: number): number => Math.min(p.afterMs * 2 ** cycles, MAX_COOLDOWN_MS);
 
 /** 一件过一次巡检: 下一刻的样子, 以及这一刻要不要问 / 要不要上报。纯函数。
+ *  p.cycles 是本口径的冷却轮次上限 (缺省 MAX_CYCLES)。
  *  escalate = 这一轮追问已经问到上限而这件事还挂着 —— 必须有一条人来看得见的上报 (不许无限
  *  静默重投); 每一轮追问恰好报一次 (按 cycles 区分), 总次数仍由 MAX_CYCLES 兜住。 */
 export const step = (w: Watch | undefined, o: Obs, now: number, p: Policy): { next: Watch; ask: boolean; escalate: boolean } => {
@@ -62,17 +67,17 @@ export const step = (w: Watch | undefined, o: Obs, now: number, p: Policy): { ne
   // 变成每忙一次就重开一组的永动追问源。
   if (!askable(o) || !o.idle) return { next: { asks, cycles, anchor: o.anchor, ...keep }, ask: false, escalate: false };
   const since = sameAnchor && w.idleSince !== undefined ? w.idleSince : now;
+  const maxCycles = Math.max(1, p.cycles ?? MAX_CYCLES);
   if (asks >= p.max) {
-    // 这一轮的追问用完了、行还挂着: 报到人那里 (每轮恰好一次)。
-    const escalate = p.max > 0 && p.afterMs > 0 && escalatedCycle !== cycles;
-    const mark = escalate ? { escalatedCycle: cycles } : keep;
-    if (cycles >= MAX_CYCLES || p.max <= 0 || p.afterMs <= 0 || now - since < cooldownOf(p, cycles))
-      return { next: { asks, cycles, anchor: o.anchor, idleSince: since, ...mark }, ask: false, escalate };
-    const nextCycles = cycles + 1;
-    // 最后一轮冷却走完就是用尽: 次数留在上限, 此后只有锚变能重新开始。
-    return nextCycles >= MAX_CYCLES
-      ? { next: { asks, cycles: nextCycles, anchor: o.anchor, idleSince: since, ...mark }, ask: false, escalate }
-      : { next: { asks: 0, cycles: nextCycles, anchor: o.anchor, idleSince: now, ...mark }, ask: false, escalate };
+    // 冷却走完还能再开一轮吗。开不了 = 这一组用尽了: 没有下一组, 也就没得再上报。
+    const canReopen = p.max > 0 && p.afterMs > 0 && cycles + 1 < maxCycles && now - since >= cooldownOf(p, cycles);
+    if (!canReopen) {
+      // 这一轮的追问用完了、行还挂着: 报到人那里 (每轮恰好一次; 用尽的最后一轮不报)。
+      const escalate = p.max > 0 && p.afterMs > 0 && escalatedCycle !== cycles;
+      return { next: { asks, cycles, anchor: o.anchor, idleSince: since, ...(escalate ? { escalatedCycle: cycles } : keep) },
+        ask: false, escalate };
+    }
+    return { next: { asks: 0, cycles: cycles + 1, anchor: o.anchor, idleSince: now, ...keep }, ask: false, escalate: false };
   }
   const due = p.afterMs > 0 && asks < p.max && now - since >= p.afterMs;
   // 问过之后从头计: 再满一整段闲置才可能问下一次。
@@ -87,9 +92,27 @@ export const nudgeText = (fromName: string, turn: string, idleMs: number, n: num
     ? `（守护进程代 ${fromName} 提醒${max > 1 ? ` (${n}/${max})` : ""}: 任务 (${turn}) 正等你回应${state === "errored" ? "（执行方遇到错误）" : "（执行方有反问）"}。请用 tell_peer({name:"${fromName}", re:true}) 回答或续办；需要新信息时用 kind:"ask"。）`
     : `（守护进程代 ${fromName} 追问${max > 1 ? ` (${n}/${max})` : ""}: 这件活 (${turn}) 你已经闲了 ${Math.max(1, Math.round(idleMs / 60_000))} 分钟, 还没有交回结论。进展如何? 卡在哪? 做完了就在行首直接写 RESULT: <结论> (行首不加反引号/引号/加粗); 还在等什么 (后台任务 / 别人) 就说清楚在等什么、大概多久。）`;
 
+/** strict 群「答了但没出站」的追问那一句 —— 它答过了, 通用追问「进展如何 / 还没交回结论」是错题
+ *  (它以为自己答完了); 要说的是「你那份结论没有进群, 用 chat_reply 发出去」。
+ *  re = 那条义务消息的信封 msg (chat_reply 的 re)。 */
+export const strictDeliveryNudge = (x: { chat: string; re: string }): string =>
+  `（守护进程: ${x.chat} 是严格模式, 你这一轮已经写出了结论, 但它**没有进群** —— 严格群的终句不进出站门, 只有 chat_reply 算交付。请用 chat_reply({re: "${x.re}", text: <你刚才那份结论>}) 把它发出去; 确实不该发就不带 text 记 passed。这件活只追问这一次, 再不回会上报。）`;
+
+/** 追问之后仍无出站: 发进群的那一行 (人要看得出「答了没发」, 不是卡死)。 */
+export const strictDeliveryReport = (x: { who: string; event: string; re: string; asks: number; last?: string }): string =>
+  `[wezard] ⚠️ ${x.who} 已经答了, 但结论没有发进群 — 本群是严格模式, 答复只走 chat_reply。已追问 ${x.asks} 次 (让它用 chat_reply 补发) 仍无出站; 行 ${x.event} 还开着 (义务账): 可以让它重发, 或用 stop_wizard 收掉。`
+  + (x.last ? `\n\n它最后说的: ${clipLine(x.last, 300)}` : "");
+
+/** 一件在飞活的追问口径 (缺省用全局 idleNudge 配置)。 */
+export interface NudgeTarget {
+  from: string; to: string; turn: string; state: TurnState; ageMs: number; fromBlocked?: boolean;
+  /** 这一件专用的上限 / 冷却轮次与话术 —— strict 群「答了没出站」只问 1 次 (cycles:1)。 */
+  nudge?: { policy: Policy; text: string };
+}
+
 export interface NudgeDeps {
   /** 在飞的件 (index.ts 的 routeInFlight)。 */
-  inflight: () => readonly { from: string; to: string; turn: string; state: TurnState; ageMs: number; fromBlocked?: boolean }[];
+  inflight: () => readonly NudgeTarget[];
   sweep?: () => Promise<void>;
   idleNow: (target: string) => Promise<boolean>;
   handingOff: (target: string) => boolean;
@@ -108,14 +131,14 @@ export interface NudgeDeps {
 
 const TICK_MS = 30_000;
 
-export const startIdleNudge = (deps: NudgeDeps): (() => void) => {
+/** 一次巡检 (定时器与单测共用): 扫一遍在飞的件, 该问的问、该报的报。 */
+export const createIdleNudgeTick = (deps: NudgeDeps): (() => Promise<void>) => {
   const SEP = String.fromCharCode(0);
   const keyOf = (x: { from: string; to: string; turn: string }): string => `${x.from}${SEP}${x.to}${SEP}${x.turn}`;
   const mem = new Map<string, Watch>();
-  let busy = false;
-  const tick = async (): Promise<void> => {
+  return async (): Promise<void> => {
     const now = Date.now();
-    const p = deps.policy();
+    const base = deps.policy();
     const xs = deps.inflight().filter((x) => x.turn);
     const live = new Set(xs.map(keyOf));
     // 落定 / 被顶掉的件不再看: 内存与盘上的都清。
@@ -132,7 +155,10 @@ export const startIdleNudge = (deps: NudgeDeps): (() => void) => {
       const target = x.state === "working" ? x.to : x.from;
       const o: Obs = { state: x.state, anchor: now - x.ageMs,
         idle: !(x.state !== "working" && x.fromBlocked) && await idle(target) };
-      const wasExhausted = (prev?.cycles ?? 0) >= MAX_CYCLES;
+      // 这一件自己的口径 (缺省全局配置): strict 群「答了没出站」问一次就闭嘴。
+      const p = x.nudge?.policy ?? base;
+      const cap = Math.max(1, p.cycles ?? MAX_CYCLES);
+      const wasExhausted = (prev?.cycles ?? 0) >= cap;
       const { next, ask, escalate } = step(prev, o, now, p);
       mem.set(k, next);
       // 次数、轮次与已上报轮次都要扛 reload; 冷却轮次与上报的推进都不伴随追问, 也得落盘。
@@ -147,17 +173,23 @@ export const startIdleNudge = (deps: NudgeDeps): (() => void) => {
         await Promise.resolve(deps.escalate?.({ from: x.from, to: x.to, turn: x.turn,
           asks: next.asks, cycles: next.cycles ?? 0 })).catch(() => undefined);
       }
-      if (!wasExhausted && (next.cycles ?? 0) >= MAX_CYCLES)
+      if (!wasExhausted && (next.cycles ?? 0) >= cap)
         deps.log.warn({ mod: "idle-nudge", from: deps.nameOf(x.from), to: deps.nameOf(x.to), turn: x.turn, cycles: next.cycles },
           "idle-nudge: 追问用尽, 不再追问");
       if (!ask) continue;
       const idleMs = now - (prev?.idleSince ?? now);
       const from = x.state === "working" ? x.from : x.to;
       const to = x.state === "working" ? x.to : x.from;
-      const ok = await deps.ask({ from, to, turn: x.turn, text: nudgeText(deps.nameOf(from), x.turn, idleMs, next.asks, p.max, x.state) }).catch(() => false);
+      const text = x.nudge?.text ?? nudgeText(deps.nameOf(from), x.turn, idleMs, next.asks, p.max, x.state);
+      const ok = await deps.ask({ from, to, turn: x.turn, text }).catch(() => false);
       deps.log[ok ? "info" : "warn"]({ mod: "idle-nudge", from: deps.nameOf(from), to: deps.nameOf(to), turn: x.turn, n: next.asks, idleMin: Math.round(idleMs / 60_000) }, ok ? "idle-nudge: 追问进展" : "idle-nudge: 追问没投出去");
     }
   };
+};
+
+export const startIdleNudge = (deps: NudgeDeps): (() => void) => {
+  const tick = createIdleNudgeTick(deps);
+  let busy = false;
   const run = (): void => {
     if (busy) return;
     busy = true;

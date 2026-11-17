@@ -9,6 +9,7 @@ import { chatPolicyOf } from "../daemon/chat-name.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { parseTagHeader } from "../shared/session-label.js";
 import { finalId } from "../daemon/message-events.js";
+import { clipLine } from "../shared/std.js";
 
 // P7-S2 判据①⑨ (出站门夹具, 宅内既定的闭包抽取模式 —— 同 pane-delivery / slash-replies):
 // 从 mirror-bridge 抽出真实的生产闭包 (strict 判定 / CoT / standalone / 终句收口 /
@@ -121,12 +122,12 @@ const build = (speech: "strict" | "implicit") => {
   const finalProgress = new Map<string, Promise<unknown>>();
   const concludeBriefTurn = new Function("strictChat", "isDuplicateConclusion", "deps", "finalId", "log", "clearCot",
     "recordCloseOpenTurns", "eventFinalGate", "eventProgressGate", "turnSilent", "recoverEventFinal", "queueFinal",
-    "baseOfKey", "stripForChat", "finalProgress", "formatFinal",
+    "baseOfKey", "stripForChat", "finalProgress", "formatFinal", "clipLine",
     transpile(concludeBlock + "\nreturn concludeBriefTurn;"))(
     mkStrict.strictChat, () => false, deps, finalId, log, clearCot,
     () => { recordCloseOpenTurnsCalls++; }, eventFinalGate, eventProgressGate, mkStrict.turnSilent,
     () => { recoverEventFinalCalls++; }, () => { queueFinalCalls++; return "f1"; },
-    baseOfKey, (t: string) => t, finalProgress, (_t: string, _tu: string, _c: string, b: string) => [b]) as never;
+    baseOfKey, (t: string) => t, finalProgress, (_t: string, _tu: string, _c: string, b: string) => [b], clipLine) as never;
   const streamFns = new Function("strictOf", "eventOwned", "client", "withLinkedTag", "log", "clearTimeout", "setTimeout", "STILL_WORKING",
     "closeSubagentTurns", "detailCardFor", "turnRegistry", "evictTurns", "byTarget", "FLUSH_MS",
     transpile(streamBlock + "\nreturn { flushStream, finalizeStream };"))(
