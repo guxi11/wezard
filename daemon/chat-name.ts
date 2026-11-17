@@ -10,6 +10,7 @@
 // 存量名解析回 principal —— 兼容旧参数, 仅此而已)。表里的键原样留在 config.jsonc。
 import { ChatPolicy, type Config, type TierName } from "../shared/config.js";
 import { speechDefaultOf } from "./chat-seen.js";
+import { isOnboardingActive } from "./onboarding.js";
 import { baseOfKey, isInternalKey, tagOfKey } from "../shared/session-label.js";
 import { settleName, wizardStore } from "./wizard.js";
 
@@ -58,7 +59,13 @@ export const chatBaseOf = (cfg: Config, ref: string): string => {
 // speech 没写 (P7-S3 起) = chat-seen 的缺省判定: S3 后首见的群聊 strict, 存量/单聊 implicit
 // (known-chats.json 的 boot 快照; 显式 chatPolicy 永远优先)。
 export const chatPolicyOf = (cfg: Config, target: string): ChatPolicy & { topOnly: boolean; speech: "implicit" | "strict" } =>
-  ((p) => ({ ...p, topOnly: p.topOnly ?? true, speech: p.speech ?? speechDefaultOf(cfg, baseOfKey(target)) }))(ChatPolicy.parse(cfg.chatPolicy?.[baseOfKey(target)] ?? {}));
+  ((p) => {
+    const base = baseOfKey(target);
+    // 引导在途 (含告别窗口) 一律 implicit —— 出站 tracker 第一句就会把新群登记成首见
+    // strict, 不豁免对话式引导就只剩占位。显式 chatPolicy 也不豁免它: 绑定落盘前这
+    // 个群还谈不上治理; 收尾 (closeOnboarding) 后恢复正常判定链。
+    return { ...p, topOnly: p.topOnly ?? true, speech: isOnboardingActive(base) ? "implicit" : p.speech ?? speechDefaultOf(cfg, base) };
+  })(ChatPolicy.parse(cfg.chatPolicy?.[baseOfKey(target)] ?? {}));
 
 /** 群的默认会话就是 router; 统一取 models.router, 非管家不套档。
  *  内部 key (daemon 内建的记忆整理执行体, `wezard:internal#steward`) 同属管家型: 它带着 slot 名,

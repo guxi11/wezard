@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfigSchema } from "../shared/config.js";
-import { bindSteward, loadOnboardingStore, needsOnboarding, stewardNameInput, validateWorkspace, WIZARD_NAME_RE } from "../daemon/onboarding.js";
+import { chatPolicyOf } from "../daemon/chat-name.js";
+import { bindSteward, closeOnboarding, GUIDE_DESC, guideTargetOf, isGuideManifestation, isOnboardingActive, loadOnboardingStore, needsOnboarding, stewardNameInput, validateWorkspace, WIZARD_NAME_RE } from "../daemon/onboarding.js";
 import { loadWizardStore } from "../daemon/wizard.js";
 
 // 测试目录用 $HOME 下的真实目录 (macOS /tmp 的 symlink 语义坑, 见工作区记忆)。
@@ -80,6 +81,27 @@ try {
   bindSteward(cfg, src, "chat:wrKEEP", "zoo");
   assert.equal(cfg.chatPolicy["chat:wrKEEP"]?.topOnly, false, "内存里的既有策略字段保留");
   assert.equal(JSON.parse(readFileSync(src, "utf8")).chatPolicy["chat:wrKEEP"].steward, "zoo");
+
+  // ── 引导会话形态 (人 2026-11-17 改口径) ───────────────────────────
+  assert.equal(guideTargetOf("chat:wrNEW"), "chat:wrNEW#guide", "引导化身是 tagged slot, 不占 untagged 管家锚点");
+  const g1 = loadWizardStore(join(dir, "wizards4.json"));
+  assert.equal(isGuideManifestation(g1.upsert("chat:wrNEW#guide", { identity: "chat:wrNEW#guide", kind: "worker", description: GUIDE_DESC, name: "guide" })), true);
+  assert.equal(isGuideManifestation(g1.upsert("chat:wrNEW#other", { description: GUIDE_DESC, name: "x" })), false, "slot 不是 guide 不认");
+  assert.equal(isGuideManifestation(g1.upsert("chat:wrX#guide", { name: "y" })), false, "没有职责标记不认 (人手开的同名 slot 不误杀)");
+
+  // 在途豁免 (chatPolicyOf): 引导会话要在群里说话, 出站 tracker 却会把新群登记成首见
+  // strict —— 在途 (含告别窗口) 一律 implicit, 显式 strict 也不豁免; close 后恢复判定链。
+  const obx = loadOnboardingStore(cfg);
+  obx.begin("chat:wrEXEMPT");
+  assert.equal(isOnboardingActive("chat:wrEXEMPT"), true);
+  cfg.chatPolicy = { "chat:wrEXEMPT": { speech: "strict" } };
+  assert.equal(chatPolicyOf(cfg, "chat:wrEXEMPT").speech, "implicit", "在途群按 implicit 出站 (引导要能说话)");
+  obx.finish("chat:wrEXEMPT");
+  assert.equal(isOnboardingActive("chat:wrEXEMPT"), true, "finish 只清状态机, 告别窗口仍豁免");
+  closeOnboarding("chat:wrEXEMPT");
+  assert.equal(isOnboardingActive("chat:wrEXEMPT"), false);
+  assert.equal(chatPolicyOf(cfg, "chat:wrEXEMPT").speech, "strict", "收尾后显式 strict 恢复");
+  delete cfg.chatPolicy;
 
   // ── identityWorkspaceOf (wizard.ts): 锚点 workspace 跨化身可见 ─────
   const store = loadWizardStore(join(dir, "wizards3.json"));
