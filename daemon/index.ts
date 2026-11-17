@@ -3671,6 +3671,12 @@ const main = async (): Promise<void> => {
       const path = memoryPath(cfg.daemon.stateDir, scope, key, bot);
       return clipForCharter(readMemory(path), path);
     };
+    /** 工作区记忆的键: 身份的工作区 (锚点 workspace) 优先, 没写才退回会话所在目录。记忆只与
+     *  workspace 绑定 (人 2026-11-17): 同一身份在哪个群、哪个 pane 起, 读写的都是同一份。 */
+    const memoryCwdOf = (t: string, cwd = ""): string => {
+      const c = m.getCwd(t);
+      return identityWorkspaceOf(wizards, t) || cwd || c.runningCwd || c.defaultCwd;
+    };
 
     /** transcript 最后写入的时刻; 没有会话 / 读不到 = 0。 */
     const lastTouched = (t: string): number => {
@@ -3712,7 +3718,7 @@ const main = async (): Promise<void> => {
         tiers: forDiff ? [] : TIERS.map((n) => { const s = tiersForBackend(cfg, o.cli ?? m.sessionInfo(target)?.cli)[n]; return `${n}=${s.model || "默认"}${s.effort ? `·${s.effort}` : ""}`; }),
         chatMemory: sharedMemory("chat", baseOfKey(target)),
         workspaceMemory: (() => {
-          const cwd = o.cwd || m.getCwd(target).runningCwd || m.getCwd(target).defaultCwd;
+          const cwd = memoryCwdOf(target, o.cwd);
           return cwd ? sharedMemory("workspace", cwd, botOfKey(target)) : "";
         })(),
         steward: isStewardTarget(cfg, wizards, target),
@@ -4203,7 +4209,7 @@ const main = async (): Promise<void> => {
       const forget = (b.forget ?? "").toString().trim();
       const scope = (b.scope ?? "self").toString();
       if (scope === "chat" || scope === "workspace") {
-        const key = scope === "chat" ? baseOfKey(self) : (m.getCwd(self).runningCwd || m.getCwd(self).defaultCwd);
+        const key = scope === "chat" ? baseOfKey(self) : memoryCwdOf(self);
         if (!key) { json(res, 400, { ok: false, reason: "这个 wizard 没有工作区, 记不了 workspace 记忆" }); return; }
         if (!note && !forget) { json(res, 400, { ok: false, reason: "note 和 forget 至少给一个" }); return; }
         // 工作区记忆按机器人分份 (见 wizard-memory.fileOf); chat 的 key 本身就带机器人。
@@ -5164,13 +5170,12 @@ const main = async (): Promise<void> => {
     const stateDir = cfg.daemon.stateDir;
     // 全量绑定 (含冷的), 与 settleAll 同一份 —— 不依赖身份记录在不在。
     const boundTargets = (): string[] => m.chatRoster("").flatMap((c) => c.targets).filter((t) => !isInternalKey(t));
-    const cwdOfTarget = (t: string): string => { const c = m.getCwd(t); return c.runningCwd || c.defaultCwd; };
     // 人和各家 CLI 自己读的那几份项目说明 + 各 backend 的 auto-memory 索引。
     const PROJECT_DOCS = ["CLAUDE.md", "CODEBUDDY.md", "AGENTS.md", join(".claude", "CLAUDE.md")];
     stewardWiring = {
       refsOf: (md) => {
         // cwd 候选: 提议里带的 (提议者可能早收工了) + 在场绑定的; 再正向算出 md 比对。
-        const cwds = [...new Set([...proposedCwds(stateDir), ...boundTargets().map(cwdOfTarget)].filter(Boolean))];
+        const cwds = [...new Set([...proposedCwds(stateDir), ...boundTargets().map((t) => memoryCwdOf(t))].filter(Boolean))];
         const cwd = cwdOfMd(stateDir, md, cwds, ["", ...cfg.bots.map((b) => b.id)]);
         if (!cwd) return [];
         return [...PROJECT_DOCS.map((f) => join(cwd, f)), ...projectDirsFor(cwd).map((d) => join(d.dir, "memory", "MEMORY.md"))].filter((f) => existsSync(f));
@@ -5185,7 +5190,7 @@ const main = async (): Promise<void> => {
           const pane = m.sessionInfo(t)?.tmuxPane;
           if (!pane || !live.has(pane)) continue;
           const where = (scope: MemoryScope): string => (scope === "workspace" ? "本工作区" : baseOfKey(t).startsWith("user:") ? "本单聊" : "本群");
-          for (const h of mdsOf(stateDir, baseOfKey(t), cwdOfTarget(t)).filter((x) => changed.has(x.md))) {
+          for (const h of mdsOf(stateDir, baseOfKey(t), memoryCwdOf(t)).filter((x) => changed.has(x.md))) {
             notices.post([t], `${where(h.scope)}记忆已更新, 全文见 \`${h.md}\``);
           }
         }

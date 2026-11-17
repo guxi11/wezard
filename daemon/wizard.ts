@@ -43,6 +43,8 @@ export const identityOf = (w: { target: string; identity?: string }): string => 
  *  身份在 base 有化身 → 那个化身的 target (A 群点名只落 A 化身, 不串 B);
  *  没有化身 → 回落锚点化身 (target === identity 那条) —— 即旧世界的跨群点名行为,
  *  上下文共享而非新开 pane, 不自动新建。查无此名 → undefined。
+ *  **按群隔离会话只属于管家** (人 2026-11-17): 只有管家接待 (inbound stewardReception) 会给
+ *  身份在新群开化身; worker 从任何群被点名都落它唯一那条会话 (锚点), 这里从不新建化身。
  *  1:1 世界 (迁移后每身份恰一条记录) 它恒等于 `byName(name).target`, 行为零变化。 */
 export const manifestationOf = (store: WizardStore | undefined, name: string, base: string): string | undefined => {
   const rec = store?.byName(name);

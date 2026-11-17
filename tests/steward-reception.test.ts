@@ -80,6 +80,18 @@ assert.equal(spawned.length, 1, "已附着的化身不重复 spawn");
 assert.equal(dispatched.length, 2);
 assert.equal(dispatched[1]!.principal, target);
 
+// ── worker 跨群点名: 沿用它唯一那条会话, 不在本群新开化身 / pane ────────────
+// 按群隔离会话只属于管家 (人 2026-11-17); worker 从别的聊天被点名落锚点。
+store.upsert("user:home#helper", { identity: "user:home#helper", name: "helper", kind: "worker", bornAt: 3 });
+attached.add("user:home#helper");
+await send(".helper 跨群来问一句");
+assert.equal(dispatched.at(-1)!.principal, "user:home#helper", "worker 跨群点名 → 它自己的那条会话");
+assert.equal(spawned.length, 1, "worker 跨群点名不触发 spawn");
+assert.equal(store.all().filter((w) => w.identity === "user:home#helper").length, 1, "不在本群落新化身记录");
+// 对照: 管家在新群点名开的是本群化身 (上面 user:tester#gsw), 不是 user:home 那条。
+await send(".gsw 管家在吗");
+assert.equal(dispatched.at(-1)!.principal, target, "点名全局管家 → 本群化身 (按群隔离)");
+
 // ── 存量聊天 (untagged 记录在): 裸消息仍落 base, 零 spawn ────────────────
 store.upsert("user:oldchat", { identity: "user:oldchat", name: "old", bornAt: 2 });
 attached = new Set(["user:oldchat"]);

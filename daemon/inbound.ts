@@ -69,8 +69,9 @@ const tagOf = tagOfKey;
 export const resolveName = (base: string, name: string): string => {
   if (!name) return base;
   const rec = wizardStore()?.byName(name);
-  // 名字属于身份 (§2): 投递落「身份在本聊天的化身」—— 有就用本群的 (跨群会话隔离),
-  //  没有回落锚点化身 (= 旧世界的跨群点名, 共享锚点上下文), 不自动新建。
+  // 名字属于身份 (§2): 投递落「身份在本聊天的化身」—— 有就用本群的, 没有回落锚点化身
+  //  (共享锚点上下文), 不自动新建。按群隔离会话是管家专用 (resolve → stewardReception);
+  //  worker 跨群点名沿用同一会话, 不每群新开 pane (人 2026-11-17, 测试 steward-reception 钉住)。
   if (rec && sameBot(base, rec.target)) return manifestationOf(wizardStore(), name, base) ?? rec.target;
   const slot = name;
   // 这个 slot 已被一个改了名的 (冷) wizard 占着 → 挪到 `slot-N`, 别唤醒别人。
@@ -1165,7 +1166,8 @@ export const installInboundRouter = (
     return r.target;
   };
   // 点名: 已绑定的群里点本群管家 → 仍走接待 (落本群化身, 没有就新开), 不回落锚点 ——
-  // 否则点名会与别的群共享那条会话, 而它明确是指「本群的管家」。
+  // 否则点名会与别的群共享那条会话, 而它明确是指「本群的管家」。这是「按群隔离会话」
+  // 的唯一入口: 其余点名 (worker、别群的管家) 都走 resolveName, 跨群共享同一会话。
   const resolve: Resolve = (base, name) => {
     if (!name) return stewardReception(base);
     const rec = wizardStore()?.byName(name);
