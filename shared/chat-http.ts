@@ -430,7 +430,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       }
       if (isPost(r)) {
         // strict 群的实发并在它那一轮的出消息里 —— 推那一轮。
-        const host = strictPostsOf(records, dir.strictChats).hostOf.get(r.id);
+        const host = strictPostsOf(records, dir.strictChats, dir.canon).hostOf.get(r.id);
         if (host) return pushTurn(host, records, dir, now, deep);
         const m = messageOfPost(r);
         if (windowOf([m], v.role, v.conv, v.with || undefined, v.span).length) pushFrag(renderMsg(m, records, dir, now));
@@ -440,7 +440,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       // 子 agent 的一轮渲染在父轮的出消息里 —— 推父轮。
       const top = r.agent?.parentTurnId ? store.get(r.agent.parentTurnId) : r;
       if (!top || !isTurn(top) || !top.target) return;
-      windowOf(messagesOfTurn(top, injectEchoesOf(records), strictPostsOf(records, dir.strictChats)), v.role, v.conv, v.with || undefined, v.span).forEach((m) => pushFrag(renderMsg(m, records, dir, now)));
+      windowOf(messagesOfTurn(top, injectEchoesOf(records), strictPostsOf(records, dir.strictChats, dir.canon)), v.role, v.conv, v.with || undefined, v.span).forEach((m) => pushFrag(renderMsg(m, records, dir, now)));
       if (deep) dependentsOf(top, records).forEach((d) => pushTurn(d, records, dir, now, false));
     };
 

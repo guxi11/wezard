@@ -1251,7 +1251,9 @@
       // 只挂进这条消息自己的正文: 移交体也是 .md-body, 但它发给被移交的那个 wizard, 服务端已挂好它自己的 .to-in。
       var t = document.createElement('template');
       t.innerHTML = html;
-      var body = [].find.call(t.content.querySelectorAll('.q-body, .md-body'), function (b) { return !b.closest('.handoff'); });
+      // 先挂终句气泡 (strict 群一轮的过程框里还有没进群的 CLI 原话, 它不是说给谁的那句), 没有才退回第一段正文。
+      var bodies = [].filter.call(t.content.querySelectorAll('.q-body, .md-body'), function (b) { return !b.closest('.handoff'); });
+      var body = bodies.find(function (b) { return b.closest('.say'); }) || bodies[0];
       if (!body) return '<div class="to-row">' + toIn + '</div>' + html;
       body.insertAdjacentHTML('afterbegin', toIn);
       return t.innerHTML;

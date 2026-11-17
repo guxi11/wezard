@@ -87,6 +87,19 @@ const echoPost: DetailRecord = { kind: "post", id: "p6#w", createdAt: 20_950, ta
 const m6 = messagesOfTurn(echoTurn, undefined, strictPostsOf([echoTurn, echoPost], strictChats)).find((m) => m.dir === "out")!;
 assert.deepEqual(m6.turn.items.map((i) => [i.t, (i as { aside?: boolean }).aside ?? false, (i as { final?: boolean }).final ?? false]), [["text", false, true]], "同文并进实发, final 跟过去");
 
+// ── 3a. 实发记在身份锚点上、轮次记在本群化身上 (2026-11-17 study 答 hi): 按 canon 认同一个人 ──
+const anchorPost: DetailRecord = { kind: "post", id: "pa#w", createdAt: 30_500, target: "chat:wrAnchor", channel: STRICT, body: "在，我是这个群的管家" };
+const manifTurn = turn({ id: "t8", target: STRICT, channel: STRICT, createdAt: 30_000, updatedAt: 31_000,
+  items: [{ t: "text", body: "已回复。", ts: 30_900, final: true }] });
+const canon = (id: string) => (id === STRICT ? "chat:wrAnchor" : id);
+const ix8 = strictPostsOf([manifTurn, anchorPost], strictChats, canon);
+assert.equal(ix8.hostOf.get("pa#w"), "t8", "身份锚点的 post 并进本群化身的那一轮");
+assert.equal(strictPostsOf([manifTurn, { ...anchorPost }], strictChats).hostOf.size, 0, "不给 canon 就认不出 (对照)");
+// 群里那条带「🧙‍♂️ name：」署名, rolepage 气泡里剥掉 (消息行已写着是谁)
+const signed = { ...anchorPost, id: "ps#w", body: "\uD83E\uDDD9\u200D\u2642\uFE0F study： 在，我是这个群的管家" } as DetailRecord;
+const m8 = messagesOfTurn(manifTurn, undefined, strictPostsOf([manifTurn, signed], strictChats, canon)).find((m) => m.dir === "out")!;
+assert.equal((m8.turn.items.at(-1) as { body: string }).body, "在，我是这个群的管家");
+
 // ── 3b. messageOfPost: post 的合成 turn 只含实发正文 ──
 const pm = messageOfPost(stray as Extract<typeof stray, { kind: "post" }>);
 assert.equal(pm.turn.items.filter((i) => i.t === "text").map((i: any) => i.body).join(""), "很久以后落账的一句");

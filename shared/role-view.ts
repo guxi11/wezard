@@ -16,7 +16,7 @@
 // 认不出是谁的发话方 / 听话方都归它; agent team 队友的话以 `<teammate-message>` 写进 transcript 的 user 行, 长得和人在
 // 终端里打的字一样, 但不是人说的 —— 归给系统, 同样不能切成视角。人不用 `user:<id>`: 那正是
 // 「与这个人的单聊」里默认 wizard 的 target, 两者字面相同, 同一条消息会变成自己对自己说。
-import { baseOfKey, labelFor, stripSigil, tagOfKey } from "./session-label.js";
+import { baseOfKey, labelFor, rawTagHeader, stripSigil, tagOfKey } from "./session-label.js";
 import { isGhostTurn, isMark, isPost, isTurn, staleAt, summarizeTag, type TagSummary } from "./chat-view.js";
 import { stripReminders } from "./reminder.js";
 import type { Asker, DetailRecord, MarkDetailRecord, PostDetailRecord, TurnDetailRecord } from "./detail-store.js";
@@ -140,15 +140,16 @@ export const injectTurnsOf = (r: TurnDetailRecord): TurnDetailRecord[] =>
 export interface StrictIndex { hostOf: Map<string, string>; byTurn: Map<string, PostDetailRecord[]> }
 const POST_SLACK_MS = 30_000;
 const STRICT_IX = new WeakMap<readonly DetailRecord[], WeakMap<ReadonlySet<string>, StrictIndex>>();
-export const strictPostsOf = (records: readonly DetailRecord[], strictChats: ReadonlySet<string>): StrictIndex => {
+/** canon: 同身份的化身收敛到一个 target (见 makeDirectory) —— post 记在身份锚点上, 轮次记在本群的化身上。 */
+export const strictPostsOf = (records: readonly DetailRecord[], strictChats: ReadonlySet<string>, canon: (id: string) => string = (x) => x): StrictIndex => {
   const hit = STRICT_IX.get(records)?.get(strictChats);
   if (hit) return hit;
   const byTarget = new Map<string, TurnDetailRecord[]>();
-  for (const t of records.filter(isTurn)) if (t.target && !t.agent) byTarget.set(t.target, [...(byTarget.get(t.target) ?? []), t]);
+  for (const t of records.filter(isTurn)) if (t.target && !t.agent) byTarget.set(canon(t.target), [...(byTarget.get(canon(t.target)) ?? []), t]);
   const hostOf = new Map<string, string>();
   const byTurn = new Map<string, PostDetailRecord[]>();
   for (const p of records.filter(isPost).filter((p) => strictChats.has(p.channel)).sort((a, b) => a.createdAt - b.createdAt)) {
-    const host = (byTarget.get(p.target) ?? []).reduce<TurnDetailRecord | undefined>(
+    const host = (byTarget.get(canon(p.target)) ?? []).reduce<TurnDetailRecord | undefined>(
       (best, t) => (t.createdAt <= p.createdAt && (!best || t.createdAt > best.createdAt) ? t : best), undefined);
     if (!host || channelOf(host) !== p.channel || (host.closed && p.createdAt > host.updatedAt + POST_SLACK_MS)) continue;
     hostOf.set(p.id, host.id);
@@ -159,17 +160,20 @@ export const strictPostsOf = (records: readonly DetailRecord[], strictChats: Rea
   return ix;
 };
 
+/** 实发的正文: 群里那条消息头上的「🧙‍♂️ name：」署名剥掉 —— rolepage 的消息行已经写着是谁说的。 */
+export const postBody = (p: PostDetailRecord): string => rawTagHeader(p.body)?.body ?? p.body;
+
 /** strict 群一轮的出消息 = 一个过程框聚合这一轮全部工具调用与 CLI 原话 (标 aside, 不当气泡),
  *  其下是实发进群的气泡 —— 实发排在这一轮最后 (时刻抬到不早于框里最后一项), 不按落账时刻
  *  插进工具中间; 与实发同文的那句并进实发 (final 跟过去, 收口判定不变)。 */
 export const deliveredTurn = (r: TurnDetailRecord, posts: readonly PostDetailRecord[]): TurnDetailRecord => {
   const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
   const texts = r.items.filter((it): it is Extract<typeof it, { t: "text" }> => it.t === "text");
-  const same = (p: PostDetailRecord) => texts.filter((it) => squash(it.body) === squash(p.body));
+  const same = (p: PostDetailRecord) => texts.filter((it) => squash(it.body) === squash(postBody(p)));
   const merged = new Set(posts.flatMap(same));
   const rest = r.items.flatMap((it): TurnDetailRecord["items"] => (it.t !== "text" ? [it] : merged.has(it) ? [] : [{ ...it, aside: true }]));
   const last = rest.reduce((m, it) => Math.max(m, it.ts), -Infinity);
-  const said = posts.map((p) => ({ t: "text" as const, body: p.body, ts: Math.max(p.createdAt, last), posted: true, ...(same(p).some((it) => it.final) ? { final: true } : {}) }));
+  const said = posts.map((p) => ({ t: "text" as const, body: postBody(p), ts: Math.max(p.createdAt, last), posted: true, ...(same(p).some((it) => it.final) ? { final: true } : {}) }));
   // 排序稳定: 时刻相同时框里的项 (rest) 仍在实发之前。
   return { ...r, items: [...rest, ...said].sort((a, b) => a.ts - b.ts) };
 };
@@ -203,7 +207,7 @@ export const messageOfPost = (p: PostDetailRecord): Msg => ({
   id: `${p.id}:out`,
   turn: {
     kind: "turn", id: p.id, createdAt: p.createdAt, updatedAt: p.createdAt, closed: true,
-    target: p.target, channel: p.channel, items: [{ t: "text", body: p.body, ts: p.createdAt, final: true }],
+    target: p.target, channel: p.channel, items: [{ t: "text", body: postBody(p), ts: p.createdAt, final: true }],
   },
   dir: "out",
   from: p.target,
@@ -217,7 +221,7 @@ export const messageOfPost = (p: PostDetailRecord): Msg => ({
  *  各化身各一页, 与旧行为一比一。 */
 export const allMessages = (records: readonly DetailRecord[], now: number, canon: (id: string) => string = (x) => x, strictChats?: ReadonlySet<string>): Msg[] => {
   const echoes = injectEchoesOf(records);
-  const strict = strictChats ? strictPostsOf(records, strictChats) : undefined;
+  const strict = strictChats ? strictPostsOf(records, strictChats, canon) : undefined;
   return [...convTurns(records, now).flatMap((r) => messagesOfTurn(r, echoes, strict)), ...records.filter(isPost).filter((p) => !strict?.hostOf.has(p.id)).map(messageOfPost)]
     .map((m) => (canon(m.from) === m.from && canon(m.to) === m.to ? m : { ...m, from: canon(m.from), to: canon(m.to) }))
     .sort((a, b) => a.ts - b.ts);
