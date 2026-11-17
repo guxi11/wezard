@@ -83,7 +83,7 @@ export interface WizardRecord {
   tier?: string;
   /** 被派来领一件复杂活的 lead: 宪章多一节层级规矩 (renderLeadRules), 组队打法随派活信封带 (renderLeadPlaybook)。 */
   lead?: boolean;
-  /** 身份的工作区 (身份级, 只在锚点记录上有意义; 2026-11-16 拍板 A): 该身份在任何群
+  /** 身份的工作区 (身份级, 只在锚点记录上有意义; 2026-11-17 人拍板: <role, workspace> 唯一确定身份): 该身份在任何群
    *  的新化身都从这里起。没写 = 照旧从锚点会话的 live cwd 推。新群引导新建管家时落。 */
   workspace?: string;
   /** 正在 spawn 它的那个 daemon 进程的代号 (BOOT_ID) —— 身份先于会话落盘, 生成功了才清掉。
@@ -110,6 +110,9 @@ export interface WizardStore {
   /** 改名 (身份级): 撞**别的身份**的名才挂 `-N`; 同身份的全部化身一起改。返回落定的名字。 */
   rename: (target: string, want: string) => string;
   upsert: (target: string, patch: Partial<Omit<WizardRecord, "target">>) => WizardRecord;
+  /** 身份级写: 对 identityKey(target) 相同的**全部**化身逐条 upsert 同一个 patch, 返回 target 那条
+   *  (target 不存在时照常 upsert 它 —— 就是给这个身份落一条新化身)。 */
+  upsertIdentity: (target: string, patch: Partial<Pick<WizardRecord, IdentityField>>) => WizardRecord;
   drop: (target: string) => void;
   all: () => WizardRecord[];
 }
@@ -167,6 +170,13 @@ export const loadWizardStore = (filePath: string, bornOf: BornOf = () => undefin
     all().filter((w) => w.target !== t && identityOf(w) === id).forEach((w) => upsert(w.target, { name }));
     return name;
   };
+  // 身份级字段的同步写 (与 rename 同步名字同一手法): 自己那条 + 同身份的其余化身。
+  const upsertIdentity = (t: string, patch: Partial<Pick<WizardRecord, IdentityField>>): WizardRecord => {
+    const id = identityKey(t);
+    const me = upsert(t, patch);
+    all().filter((w) => w.target !== t && identityOf(w) === id).forEach((w) => upsert(w.target, patch));
+    return me;
+  };
   return {
     nextName: (inUse = () => false) => {
       const taken = new Set(all().map((w) => foldName(w.name)));
@@ -194,6 +204,7 @@ export const loadWizardStore = (filePath: string, bornOf: BornOf = () => undefin
     },
     rename,
     upsert,
+    upsertIdentity,
     drop: (t) => { dropped.add(t); db.drop(t); },
     all,
   };
@@ -245,6 +256,44 @@ export const migrateIdentities = (store: WizardStore, filePath: string): Identit
   return { migrated: patch.length, backup };
 };
 
+/** 同身份的化身收敛 (boot 幂等): 每群一条化身之后, 身份级字段可能在不同群里各写一份 ——
+ *  这里把 >1 条记录的组收敛成「锚点的记忆 + 其余按 bornAt 依次并入 (去重保序)」, 并给空着
+ *  description / expertise 的化身补锚点的值 (锚点也空就用组里第一个非空)。只写真的变了的记录,
+ *  返回改了几条 —— 第二次跑恒为 0。
+ *
+ *  记忆并集超过 MEMORY_MAX 时整组跳过 (不截断): 悄悄丢掉别人的记忆比不合并更糟, 留给人收。 */
+export const reconcileKin = (store: WizardStore): number => {
+  const groups = new Map<string, WizardRecord[]>();
+  for (const w of store.all()) {
+    const id = identityOf(w);
+    const kin = groups.get(id);
+    if (kin) kin.push(w); else groups.set(id, [w]);
+  }
+  let changed = 0;
+  for (const [id, kin] of groups) {
+    if (kin.length < 2) continue;
+    const anchor = anchorOf(store, id);
+    if (!anchor) continue;
+    const rest = kin.filter((w) => w.target !== anchor.target).sort((a, b) => a.bornAt - b.bornAt);
+    const merged = [...new Set([...anchor.memory, ...rest.flatMap((w) => w.memory)].filter(Boolean))];
+    if (merged.length > MEMORY_MAX) continue;
+    const pick = (f: "description" | "expertise"): string =>
+      (anchor[f] ?? "").trim() || kin.map((w) => (w[f] ?? "").trim()).find(Boolean) || "";
+    const wantMemory = merged.join("\u0000");
+    for (const w of kin) {
+      // 逐条算差量 (description/expertise 只补空的: 各群各自写的那句不互相覆盖)。
+      const patch: Partial<Pick<WizardRecord, IdentityField>> = {};
+      if (w.memory.join("\u0000") !== wantMemory) patch.memory = merged;
+      for (const f of ["description", "expertise"] as const) {
+        const v = pick(f);
+        if (v && !(w[f] ?? "").trim()) patch[f] = v;
+      }
+      if (Object.keys(patch).length) { store.upsert(w.target, patch); changed += 1; }
+    }
+  }
+  return changed;
+};
+
 /** 还有人指着的 target。forget 删的是名册记录和绑定, 但路由行、消息事件 (含墓碑)、定时任务、
  *  plan 都只认 target 字符串, 不知道人已经没了 —— 名册里查不到 ≠ 这个 target 没人用。 */
 export interface TargetRefSources {
@@ -276,16 +325,31 @@ export const wizardStore = (): WizardStore | undefined => bound;
 /** 一个 target 的默认名: 默认会话取聊天名, 分身取 slot id。去重交给 claim。 */
 export const defaultNameOf = (chatName: string, target: string): string => tagOfKey(target) || chatName;
 
-/** 身份的工作区: 锚点记录 (target === identity 优先, 否则最老化身) 的 workspace 字段。
+/** 身份的锚点记录 (target === identity 优先, 否则最老的一条) —— 新化身的名字 / 种类 /
+ *  工作区 / 身份级字段都取它。同身份没有记录 → undefined。 */
+export const anchorOf = (store: WizardStore, identity: string): WizardRecord | undefined =>
+  store.all()
+    .filter((w) => identityOf(w) === identity)
+    .sort((a, b) => Number(a.target !== identity) - Number(b.target !== identity) || a.bornAt - b.bornAt)[0];
+
+/** 身份级的字段: 同身份的全部化身共用一份 (写一处即同步到全部)。名字与家谱不在此列 ——
+ *  名字本身就是身份的地址, 由 rename 单独同步; parent / forkOf 是每次出生的私有事实。 */
+export const IDENTITY_FIELDS = ["description", "expertise", "memory", "role"] as const;
+export type IdentityField = (typeof IDENTITY_FIELDS)[number];
+
+/** 一条记录上的身份级字段 (缺省的字段不带, 免得 upsert 把它写成 undefined)。 */
+export const identityFieldsOf = (rec: WizardRecord | undefined): Partial<Pick<WizardRecord, IdentityField>> => {
+  const out: Record<string, unknown> = {};
+  if (rec) for (const f of IDENTITY_FIELDS) if (rec[f] !== undefined) out[f] = rec[f];
+  return out as Partial<Pick<WizardRecord, IdentityField>>;
+};
+
+/** 身份的工作区: 锚点记录的 workspace 字段。
  *  新群引导新建管家时写; 没写返回 "" —— 调用方照旧从锚点会话的 live cwd 推。 */
 export const identityWorkspaceOf = (store: WizardStore | undefined, target: string): string => {
   const rec = store?.get(target);
   if (!store || !rec) return "";
-  const id = identityOf(rec);
-  const anchor = store.all()
-    .filter((w) => identityOf(w) === id)
-    .sort((a, b) => Number(a.target !== id) - Number(b.target !== id) || a.bornAt - b.bornAt)[0];
-  return anchor?.workspace ?? "";
+  return anchorOf(store, identityOf(rec))?.workspace ?? "";
 };
 
 /** 名字: 名册里落定的 > 默认名。只读推导, 不写盘 —— 需要落定用 store.claim。 */

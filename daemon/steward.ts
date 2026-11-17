@@ -10,6 +10,7 @@
 // 事实之源, 每次现读 (stewardIdentityOf 的回落分支) —— 快照反而会在 respawn / forget 之后漂移。
 import type { Config } from "../shared/config.js";
 import { baseOfKey, keyOf, sameBot, tagOfKey, uniqueTag } from "../shared/session-label.js";
+import { channelOf } from "./channel-posts.js";
 import { identityOf, type WizardKind, type WizardStore } from "./wizard.js";
 
 /** config 里显式绑定的管家身份名 (chatPolicy.<base>.steward); "" = 没绑。 */
@@ -17,10 +18,11 @@ export const appointedSteward = (cfg: Config, base: string): string =>
   ((cfg.chatPolicy?.[base] as { steward?: string } | undefined)?.steward ?? "").trim();
 
 /** 频道管家表 (wrc.channel.steward, 键 = 裸 topic_id; §6): 与 chatPolicy 是两张互不覆盖的表,
- *  频道 (chat:<topic_id>) 先查自己的 —— 频道绑定不落 chatPolicy, 群聊绑定也不落频道表。
- *  解析不出 base 里的 topic_id (非 chat: 形状) 时恒空。 */
+ *  频道先查自己的 —— 频道绑定不落 chatPolicy, 群聊绑定也不落频道表。人 2026-11-17 拍板: 管家的
+ *  绑定粒度是**频道**, 频道里每个帖子 (原生帧的 chat:opk… base) 经 channel-posts 映射到频道键,
+ *  复用同一个绑定; 桥接帧的 base chat:<topic_id> 直接就是频道键。认不出频道时恒空。 */
 export const appointedChannelSteward = (cfg: Config, base: string): string => {
-  const topicId = base.startsWith("chat:") ? base.slice("chat:".length) : "";
+  const topicId = channelOf(cfg, base);
   if (!topicId) return "";
   return ((cfg.wrc.channel.steward ?? {})[topicId] ?? "").trim();
 };

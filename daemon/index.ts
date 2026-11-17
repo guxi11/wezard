@@ -73,13 +73,15 @@ import { appendEpisode, clipForCharter, cwdOfMd, episodePath, inboxPath, mdsOf, 
 import { startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
 import type { Asker, TurnFrom } from "../shared/detail-store.js";
 import { chatBaseOf, chatNameOf, chatPolicyOf, listChatNames, peerAddress, stewardTierOf, type CharterChange, type CharterGuard } from "./chat-name.js";
-import { appointedSteward, isStewardTarget, markGlobalSteward, stewardRoute } from "./steward.js";
+import { appointedSteward, isStewardTarget, markGlobalSteward, STEWARD_KINDS, stewardRoute, stewardsAt } from "./steward.js";
 import { apprenticeOf, ensureApprentice, ensurePatrolTask, handoffLineOf, isApprentice } from "./apprentice.js";
 import {
+  anchorOf,
   bindWizardStore,
   loadWizardStore,
   migrateIdentities,
   pickName,
+  reconcileKin,
   wizardStore,
   settleName,
   settleAll,
@@ -852,8 +854,23 @@ const main = async (): Promise<void> => {
       const caller = resolveSelf({ sessionId: body.sessionId, tmuxPane: body.tmuxPane });
       if (refuseGuide(res, caller, "set_workspace") || refuseGuide(res, target, "set_workspace", false)) return;
       if (!cwd) { json(res, 400, { ok: false, reason: "cwd required" }); return; }
+      // <role, workspace> 唯一确定身份: 同一个目录上不该有两个管家 —— 要共用就把本群绑给它,
+      // 而不是让第二个管家也搬进去 (两份记忆、两个 pane, 人还以为是同一个)。
+      const store = wizardStore();
+      const rec = store?.get(target);
+      const id = rec ? identityOfRec(rec) : "";
+      const anchor = id && store ? anchorOf(store, id) : undefined;
+      if (anchor && anchor.kind && STEWARD_KINDS.includes(anchor.kind)) {
+        const taken = stewardsAt(store, baseOfKey(target), cwd, (t) => m.sessionInfo(t)?.cwd ?? "").filter((h) => identityOfRec(h) !== id);
+        if (taken.length) {
+          json(res, 409, { ok: false, target, reason: "目录 " + cwd + " 已有管家 ." + taken[0]!.name + " (<role, workspace> 唯一确定身份) — 要共用就把本群绑给它" });
+          return;
+        }
+      }
       const set = m.setPendingCwd(target, cwd);
       if (!set.ok) { json(res, 400, { ...set, target }); return; }
+      // 管家的工作区是身份级的: 记在锚点上, 该身份在别的新化身也从这里起。
+      if (anchor && store && set.pendingCwd) store.upsert(anchor.target, { workspace: set.pendingCwd });
       if ((await liveOf([target])).length) {
         json(res, 200, { ok: true, target, runningCwd: set.runningCwd, pendingCwd: set.pendingCwd,
           message: "工作区已记录 (pendingCwd)。此后该身份新开的会话/化身都在这个目录启动 (/new 或下一次 respawn 生效); 当前会话不迁移、不需要 handoff, 想立即换目录由人自己决定何时重开。" });
@@ -3308,6 +3325,9 @@ const main = async (): Promise<void> => {
     const ident = migrateIdentities(wizards, cfg.wrc.mirror.wizardsFile);
     if (ident.migrated) log.child({ mod: "wizard" }).info({ migrated: ident.migrated, backup: ident.backup }, "v3 identity migration applied");
     else if (ident.skipped) log.child({ mod: "wizard" }).warn({ reason: ident.skipped }, "v3 identity migration skipped");
+    // 同身份的化身前一轮可能各写了一份身份级字段 (职责 / 记忆): 开机收敛一次, 幂等。
+    const reconciled = reconcileKin(wizards);
+    if (reconciled > 0) log.child({ mod: "wizard" }).info({ reconciled }, "identity kin reconciled");
     // v3 §3: 全局管家身份落位 —— home (defaultChat) 的默认会话就是它的锚点化身。
     // 新聊天 (还没有任何会话) 的裸消息由它接待 (inbound stewardRoute); 未认领的新装机不造幽灵记录。
     const gs = markGlobalSteward(wizards, cfg.defaultChat);
@@ -3871,9 +3891,9 @@ const main = async (): Promise<void> => {
       if ((b.name ?? "").toString().trim() && !asked) { json(res, 400, { ok: false, reason: "名字只能是 1-32 位字母/数字/`_`/`-`" }); return; }
       const before = settleName(wizards, chatNameOf(cfg, self), self);
       const name = asked ? wizards.rename(self, asked) : before;
-      if (description) wizards.upsert(self, { description });
+      if (description) wizards.upsertIdentity(self, { description });
       // 专长: 传 "-" 清掉; 它不进名册变动通知 (只在名册 / 候选行里读)。
-      if (expertise) wizards.upsert(self, { expertise: expertise === "-" ? undefined : expertise });
+      if (expertise) wizards.upsertIdentity(self, { expertise: expertise === "-" ? undefined : expertise });
       const me = identityOf(self, self);
       // 职责是别人决定"该不该找你"的依据, 改了就得让同群的知道 —— 否则他们照着
       // 出生快照里那句旧的 (或者空的) 职责派活。
@@ -4215,7 +4235,7 @@ const main = async (): Promise<void> => {
       const want = n ? [...next.filter((x) => x !== n), n] : next;
       // 满额时注册表从最旧的挤掉 —— 挤掉的、截短的都要明说, 不让它以为全记住了。
       const dropped = want.slice(0, Math.max(0, want.length - MEMORY_MAX));
-      const { memory } = wizards.upsert(self, { memory: want });
+      const { memory } = wizards.upsertIdentity(self, { memory: want });
       json(res, 200, {
         ok: true, scope: "self", count: memory.length, added: !!note, forgotten: cur.length - next.length,
         ...(dropped.length ? { dropped, hint: `self 记忆满 ${MEMORY_MAX} 条, 最旧的 ${dropped.length} 条被挤掉了 (见 dropped); 还要的话 forget 掉不重要的再记回来, 或合并成一条` } : {}),

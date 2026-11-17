@@ -24,6 +24,8 @@ import { identityWorkspaceOf, manifestationOf, settleName, wizardStore } from ".
 import { autoOrdinalOf } from "./wizard-names.js";
 import { stewardIdentityOf, stewardRoute as resolveSteward } from "./steward.js";
 import { noteNativeChannelFrame } from "./channel.js";
+import { awaitChannelOfPost, channelOf, channelOfPost, postsOfChannel } from "./channel-posts.js";
+import { bindChannelSteward, settleChannelSteward } from "./onboarding.js";
 import { applyOnboarding, bindSteward, classifyOnboardingInput, GUIDE_DESC, guideOf, guideTargetOf, judgeOnboarding, loadOnboardingStore, needsOnboarding, renderGuideOpening, renderGuideRetry, renderOnboardingDone, WIZARD_NAME_RE } from "./onboarding.js";
 import { isApprentice } from "./apprentice.js";
 import { truncate } from "../shared/std.js";
@@ -967,6 +969,9 @@ export const installInboundRouter = (
           Object.entries(cfg.chatPolicy ?? {})
             .filter(([, p]) => !!cur && (p?.steward ?? "").trim().toLowerCase() === cur.toLowerCase())
             .forEach(([b]) => bindSteward(cfg, sourcePath, b, name));
+          Object.entries(cfg.wrc.channel.steward ?? {})
+            .filter(([, s]) => !!cur && s.trim().toLowerCase() === cur.toLowerCase())
+            .forEach(([t]) => bindChannelSteward(cfg, sourcePath, t, name));
           return name;
         };
         const { r: name } = guardCharter(() => rebind(store!.rename(identity, want)), (n) => ({ what: "人 `/name` 把本群管家" + (cur ? " `" + cur + "`" : "") + "改名为 `" + n + "`", byHuman: true }));
@@ -1170,6 +1175,8 @@ export const installInboundRouter = (
   // —— 不再留告别窗口与定时器 (reload 丢定时器 = 群里残留一个「等指令」的会话)。兜底:
   // 绑定已在 (人手改 config、上个进程死在半路) 而引导化身还挂着, 下一条群消息进门时收尸。
   const onboarding = loadOnboardingStore(cfg);
+  /** 频道原生帧等 topic_at_bot 配对的上限 (实测事件先到 0.3–0.8s; 只有没配过的帖子会等)。 */
+  const CHANNEL_PAIR_WAIT_MS = 2000;
   const reapGuide = async (base: string, why: string): Promise<void> => {
     const guide = guideOf(wizardStore(), base);
     if (!guide) return;
@@ -1177,11 +1184,33 @@ export const installInboundRouter = (
     wizardStore()?.drop(guide);
     log.info({ base, guide, why, killed: r.ok, reason: r.reason }, "onboarding: guide reaped");
   };
+  // 频道 (人 2026-11-17 拍板: 整个频道一个管家, 每个帖子复用): 原生帧的 base 是帖子群, 先等它与
+  // 同句 topic_at_bot 配上对拿到频道键 (原生帧可能先到), 再把散落的帖子级绑定收口成频道一条。
+  const sourceOf = (msg: BaseMessage): string => (msg as { compat_info?: { source?: string } }).compat_info?.source ?? "";
+  const settleChannelPost = async (base: string): Promise<void> => {
+    const topicId = channelOfPost(cfg, base) || await awaitChannelOfPost(cfg, base, CHANNEL_PAIR_WAIT_MS);
+    if (!topicId) { log.info({ base }, "channel post: 未配上频道 (没有同句 topic_at_bot), 按普通群判"); return; }
+    const { r } = guardCharter(() => settleChannelSteward(cfg, wizardStore(), sourcePath, base),
+      (s) => (s ? { what: "频道 " + s.topicId + " 的管家收口为 " + s.name + " (清掉帖子级绑定 " + s.cleared.join(", ") + ")", byHuman: false } : undefined));
+    if (r) log.info({ base, ...r }, "channel post: steward settled at channel level");
+  };
+  // 频道级绑定落定: 同频道其余帖子的在途引导一并收掉 —— 它们从此复用这个管家。
+  const reapChannelSiblings = async (base: string): Promise<void> => {
+    const topicId = channelOf(cfg, base);
+    if (!topicId) return;
+    for (const b of postsOfChannel(cfg, topicId).filter((p) => p !== base)) {
+      onboarding.finish(b);
+      await reapGuide(b, "channel bound");
+    }
+  };
   const guideGate = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, raw: string): Promise<boolean> => {
     if (!isGroup(msg)) return false;
     const base = chatPrincipal(msg);
+    if (sourceOf(msg) === "channel") await settleChannelPost(base);
     const store = wizardStore();
     if (!needsOnboarding(cfg, store, base)) {
+      // 绑定已在 (含同频道别的帖子绑的): 在途引导状态 (出站豁免) 与引导化身一并收掉。
+      onboarding.finish(base);
       if (guideOf(store, base)) await reapGuide(base, "already bound");
       return false;
     }
@@ -1230,6 +1259,7 @@ export const installInboundRouter = (
     log.info({ base, ...bound }, "onboarding: steward bound");
     await replySystem(frame, msg, renderOnboardingDone(bound));
     await reapGuide(base, "bound");
+    await reapChannelSiblings(base);
     return true;
   };
   const send = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, who: string, text: string, images: string[] = []): Promise<void> => {

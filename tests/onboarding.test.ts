@@ -137,6 +137,41 @@ try {
   assert.equal(judgeOnboarding(store, C, { kind: "workspace", path: join(dir, "nope") }).kind, "retry", "不存在的目录 = 重问, 不落盘");
   delete cfg.chatPolicy;
 
+  // ── 目录入口上已有管家: <role, workspace> 唯一确定身份, 绑它而不是再造一个 ──
+  const kin = loadWizardStore(join(dir, "wizards-kin.json"));
+  const wsOrg = join(dir, "org");
+  mkdirSync(wsOrg);
+  kin.upsert("chat:wrORG", { kind: "steward", name: "orgsteward", workspace: wsOrg });
+  assert.deepEqual(judgeOnboarding(kin, "chat:wrN2", classifyOnboardingInput(wsOrg)),
+    { kind: "bind-existing", name: "orgsteward", target: "chat:wrORG" }, "目录上已有的管家 = 绑它 (每群一条化身, 身份复用)");
+  kin.upsert("chat:wrORG2", { kind: "steward", name: "orgsteward2", workspace: wsOrg });
+  const ambiguous = judgeOnboarding(kin, "chat:wrN2", classifyOnboardingInput(wsOrg));
+  assert.equal(ambiguous.kind, "retry", "同一目录两个管家 = 反问, 不猜");
+  if (ambiguous.kind === "retry") {
+    assert.match(ambiguous.reason, /orgsteward/, "反问里列名字");
+    assert.match(ambiguous.reason, /orgsteward2/);
+  }
+  // 推断层: 没写 workspace 的管家, 按它现在的活目录认。
+  const wsLive = join(dir, "live");
+  mkdirSync(wsLive);
+  const cwdOf = (t: string): string => (t === "chat:wrLIVE" || t === "chat:wrGLOBAL" ? wsLive : "");
+  kin.upsert("chat:wrLIVE", { kind: "steward", name: "livesteward" });
+  assert.deepEqual(judgeOnboarding(kin, "chat:wrN3", classifyOnboardingInput(wsLive), cwdOf),
+    { kind: "bind-existing", name: "livesteward", target: "chat:wrLIVE" }, "没写 workspace 时按活目录推断");
+  kin.upsert("chat:wrGLOBAL", { kind: "global-steward", name: "globalone" });
+  assert.deepEqual(judgeOnboarding(kin, "chat:wrN4", classifyOnboardingInput(wsLive), cwdOf),
+    { kind: "bind-existing", name: "globalone", target: "chat:wrGLOBAL" }, "推断层里全局管家优先");
+  const wsWork = join(dir, "work");
+  mkdirSync(wsWork);
+  kin.upsert("chat:wrW", { kind: "worker", name: "worker1", workspace: wsWork });
+  assert.deepEqual(judgeOnboarding(kin, "chat:wrN5", classifyOnboardingInput(wsWork), (t) => (t === "chat:wrW" ? wsWork : "")),
+    { kind: "bind-new", workspace: wsWork }, "只有管家 (steward / global-steward) 算这个目录的管家");
+  const wsOther = join(dir, "otherbot");
+  mkdirSync(wsOther);
+  kin.upsert("chat:wrOB~otherbot", { kind: "steward", name: "otherbotsteward", workspace: wsOther });
+  assert.deepEqual(judgeOnboarding(kin, "chat:wrN6", classifyOnboardingInput(wsOther), (t) => (t.endsWith("~otherbot") ? wsOther : "")),
+    { kind: "bind-new", workspace: wsOther }, "别的机器人的管家不算 (各自一套名册)");
+
   // ── 引导会话形态: slot、双证、不误杀人手开的 .guide ─────────────────
   const g = loadWizardStore(join(dir, "wizards4.json"));
   assert.equal(guideTargetOf(g, "chat:wrG"), "chat:wrG#guide", "引导化身是 tagged slot, 不占 untagged 管家锚点");

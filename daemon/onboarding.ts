@@ -17,6 +17,7 @@ import { expandHome } from "../shared/paths.js";
 import { baseOfKey, keyOf, sameBot, stripSigil, tagOfKey, uniqueTag } from "../shared/session-label.js";
 import { appointedChannelSteward, appointedSteward } from "./steward.js";
 import type { WizardRecord, WizardStore } from "./wizard.js";
+import { channelOf, postsOfChannel } from "./channel-posts.js";
 
 export type OnboardingStep = "workspace";
 
@@ -28,7 +29,8 @@ export interface OnboardingState {
  *  (存量群 / 已引导群走老路 —— 绑定一落盘本判定即转 false, 不需要完成标记)。
  *  单聊 (user:*) 不引导: 人私聊的默认接待 = 全局管家 (v3 §3)。频道会走到这里: 桥接帧的 base 是
  *  chat:<topic_id>, 企微原生帧 (compat_info.source=channel) 的 base 是**每个帖子自己的** chat:opk…
- *  —— 后者按帖子分键, 每个新帖各进一次引导 (2026-11-17 实测)。频道管家表按 topic_id 照查。 */
+ *  —— 后者经 channel-posts 配上频道后按频道键查绑定: 同频道任一帖子绑过, 其余帖子不再引导
+ *  (人 2026-11-17 拍板: 整个频道一个管家); 配不上频道的帖子按普通群判。 */
 export const needsOnboarding = (cfg: Config, store: WizardStore | undefined, base: string): boolean =>
   !!cfg.defaultChat
   && base.startsWith("chat:")
@@ -200,8 +202,36 @@ export const judgeOnboarding = (store: WizardStore | undefined, base: string, in
   return { kind: "retry", reason: input.names.length ? "没认出目录, 名册里也没有叫 " + input.names.slice(0, 3).join(" / ") + " 的管家" : "没认出目录或管家名字" };
 };
 
-/** 把管家绑定写进 config (热): chatPolicy.<base>.steward。宪章守卫由调用方包。 */
+/** 把频道管家写进 config (热): wrc.channel.steward.<topic_id>, 顺手删掉 clear 里各帖子的
+ *  chatPolicy.<帖子>.steward —— 同频道只留一个管家 (人 2026-11-17)。宪章守卫由调用方包。 */
+export const bindChannelSteward = (cfg: Config, sourcePath: string, topicId: string, name: string, clear: string[] = []): void => {
+  cfg.wrc.channel.steward = { ...(cfg.wrc.channel.steward ?? {}), [topicId]: name };
+  const dropSteward = (p: ChatPolicy): ChatPolicy => Object.fromEntries(Object.entries(p).filter(([k]) => k !== "steward")) as ChatPolicy;
+  cfg.chatPolicy = Object.fromEntries(Object.entries(cfg.chatPolicy ?? {}).map(([b, p]) => [b, clear.includes(b) ? dropSteward(p) : p]));
+  patchJsonc(sourcePath, [{ path: ["wrc", "channel", "steward", topicId], value: name }]);
+  // 删项逐条: 文件里没有这一项 (只在内存 / secrets 里) 时 jsonc 删除会抛, 不能连累上面那条绑定。
+  for (const b of clear) {
+    try { patchJsonc(sourcePath, [{ path: ["chatPolicy", b, "steward"], value: undefined }]); } catch { /* 文件里本就没有 */ }
+  }
+};
+
+/** 频道级收口: base 认得出频道时, 散落在各帖子的 chatPolicy.<帖子>.steward 并成频道表一条 ——
+ *  频道已绑就只清帖子级残留; 没绑就把帖子级里最早出生的那个身份升格。什么都不用做 = undefined。 */
+export const settleChannelSteward = (cfg: Config, store: WizardStore | undefined, sourcePath: string, base: string): { topicId: string; name: string; cleared: string[] } | undefined => {
+  const topicId = channelOf(cfg, base);
+  if (!topicId) return undefined;
+  const local = [...new Set([base, ...postsOfChannel(cfg, topicId)])].filter((b) => appointedSteward(cfg, b));
+  if (!local.length) return undefined;
+  const bornOf = (b: string): number => store?.byName(appointedSteward(cfg, b))?.bornAt ?? Number.MAX_SAFE_INTEGER;
+  const name = appointedChannelSteward(cfg, base) || appointedSteward(cfg, local.slice().sort((a, b) => bornOf(a) - bornOf(b))[0]!);
+  bindChannelSteward(cfg, sourcePath, topicId, name, local);
+  return { topicId, name, cleared: local };
+};
+
+/** 把管家绑定写进 config (热): chatPolicy.<base>.steward; 频道帖子 / 频道本身改落频道表。宪章守卫由调用方包。 */
 export const bindSteward = (cfg: Config, sourcePath: string, base: string, name: string): void => {
+  const topicId = channelOf(cfg, base);
+  if (topicId) return bindChannelSteward(cfg, sourcePath, topicId, name, appointedSteward(cfg, base) ? [base] : []);
   const policy = cfg.chatPolicy ?? {};
   const cur = policy[base] ?? ChatPolicy.parse({});
   cfg.chatPolicy = { ...policy, [base]: { ...cur, steward: name } };

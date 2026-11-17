@@ -22,6 +22,7 @@ import { identityOf, wizardStore } from "./wizard.js";
 import { knownChatsOf } from "./chat-seen.js";
 import { chatPolicyOf } from "./chat-name.js";
 import { stewardIdentityOf } from "./steward.js";
+import { learnChannelPost } from "./channel-posts.js";
 import { expandHome } from "../shared/paths.js";
 import { ChannelStore, type ChannelMsg } from "./channel-store.js";
 import { formatChannelContext, pickQuery, wantsHistory, withoutMsg } from "./channel-context.js";
@@ -771,6 +772,8 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       const native = await awaitNative(asker, recvAt - NATIVE_SKEW_MS, facts?.nativeWaitMs ?? NATIVE_WAIT_MS);
       if (native) {
         // 原生帧已把这句话投给帖子会话; 桥只记账: 标 dispatched (判官别再接), 帖子照存本地缓存。
+        // 配上的这一对就是「帖子 → 频道」的唯一判据 (原生帧里没有频道标识), 落盘给管家绑定按频道判。
+        if (learnChannelPost(cfg, native, topicId)) log.info({ topicId, post: native }, "channel post learned");
         dispatched.add(postId);
         if (dispatched.size > 3000) dispatched.delete(dispatched.values().next().value!);
         log.info({ topicId, postId, msgid, nativeChat: native }, "channel at_bot: carried by native frame, bridge skip");
