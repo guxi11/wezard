@@ -104,6 +104,7 @@ import {
   referencedTargets,
   slotInUse,
   identityOf as identityOfRec,
+  identityWorkspaceOf,
   manifestationOf,
   type WizardBrief,
   type WizardRecord,
@@ -482,7 +483,7 @@ const main = async (): Promise<void> => {
       || (e.payload.peer?.after ?? []).some((id) => (router.get(id)?.event ?? id) === row.event);
   });
 
-  const bridge = startMirror({ cfg, log: log.child({ mod: "mirror" }), client: ws.client, store: mirrorStore, events, sendFrozen: (channel, content, stream) => responseTracker.sendFrozen(channel.replace(/^(user|chat|group):/, ""), content, stream, events.running) });
+  const bridge = startMirror({ cfg, log: log.child({ mod: "mirror" }), client: ws.client, store: mirrorStore, events, identityWorkspace: (t) => identityWorkspaceOf(wizardStore(), t), sendFrozen: (channel, content, stream) => responseTracker.sendFrozen(channel.replace(/^(user|chat|group):/, ""), content, stream, events.running) });
   // 群里每个 `.name` 都挂它的 rolepage (见 session-label 的 TagLinker)。正文提及
   // 只认真有其人的 —— 随手写的 `.gitignore` 不该变成一个开在空栏上的链接。
   const known = (t: string): boolean => bridge.chatTargets(t).includes(t);

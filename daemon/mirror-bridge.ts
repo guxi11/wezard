@@ -2535,6 +2535,9 @@ export interface MirrorDeps {
   client: WSClient;
   store: MirrorStore;
   events?: MessageEvents;
+  /** 身份级工作区 (新群引导给管家落的 workspace; "" = 没记)。newSession 在这个 target 还没有
+   *  任何会话 / 绑定记录时用它, 压过聊天兜底与 cfg.wrc.cwd —— 哪条入口起的首个会话都一样。 */
+  identityWorkspace?: (target: string) => string;
   sendFrozen?: (channel: string, content: string, stream?: { frame: WsFrameHeaders; id: string }) => Promise<unknown>;
 }
 
@@ -6084,6 +6087,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       (prev?.pendingCwd?.trim()) ||
       (prev?.runningCwd?.trim()) ||
       (rec?.cwd?.trim()) ||
+      // 身份有工作区 (引导建的管家、它在别的群的化身) 而这个 target 还没起过会话: 落在身份的
+      // 工作区, 不落聊天兜底 / 全局默认。排在 running 之后: 已在跑的会话 (含 set_workspace
+      // 换过目录的) 重开仍跟自己的 cwd 走。
+      (deps.identityWorkspace?.(target)?.trim() ? expandHome(deps.identityWorkspace(target).trim()) : "") ||
       chat.running ||
       expandedDefaultCwd;
     // Fresh panes always use the configured backend, regardless of old bindings

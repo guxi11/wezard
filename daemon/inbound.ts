@@ -401,6 +401,10 @@ const stripName = (text: string, name: string): string =>
 // DMs can't @ a bot — any "@" the user types is content (e.g. "@src/foo.ts"),
 // so name detection is group-only. 配置里写死的名字 (`wrc.botNames`) 则任何
 // 场景都剥: 单聊里手打 "@wezard /usage" 同样不该漏进 prompt。
+/** 下面各有 message.<type> 监听的 msgtype —— 与 SDK handleMessageCallback 的 switch 对齐。 */
+const ROUTED_MSGTYPES = new Set<string>(["text", "image", "mixed", "voice", "file", "video"]);
+/** 不是人发的一句话, 不回「暂不支持」(stream 是流式刷新回调, event 正常走事件通道)。 */
+const NO_REPLY_MSGTYPES = new Set<string>(["stream", "event"]);
 const isGroup = (msg: BaseMessage): boolean => msg.chattype === "group" && !!msg.chatid;
 const BUILTIN_BOT_NAMES = ["wezard"] as const;
 
@@ -1250,6 +1254,19 @@ export const installInboundRouter = (
       try { await client.replyStream(frame, msg.msgid, withTagHeader(who, `[wezard] error: ${(e as Error).message}`), true); } catch { /* ignore */ }
     }
   };
+
+  // 入站最外层: SDK 对每条消息回调先 emit "message" 再按 msgtype 分发 —— 在这里落一行, 「人说了
+  // 没反应」才分得清是帧没到 daemon (企微没推), 还是到了被后面的门吃掉 (guideGate 的日志在拿到
+  // text 之后才落, 证明不了「没到」)。SDK 不认的 msgtype 只 logger.debug 一句就丢, daemon 是 info
+  // 级永远看不见: 这里落 warn 带原帧, 并明确回一句 —— 人的话不能静默消失。
+  client.on("message", (frame: WsFrame<BaseMessage>) => {
+    const msg = frame.body;
+    if (!msg) return;
+    log.info({ msgid: msg.msgid, msgtype: msg.msgtype, chattype: msg.chattype, chat: chatPrincipal(msg), from: msg.from?.userid, hasQuote: !!msg.quote }, "rx frame");
+    if (ROUTED_MSGTYPES.has(msg.msgtype) || NO_REPLY_MSGTYPES.has(msg.msgtype)) return;
+    log.warn({ body: msg }, "rx frame — unhandled msgtype, not routed to any wizard");
+    void replySystem(frame, msg, "[wezard] 收到一条暂不支持的消息 (类型 " + msg.msgtype + "), 没有转给任何 wizard — 请改发文字。");
+  });
 
   client.on("message.text", async (frame: WsFrame<TextMessage>) => {
     const msg = frame.body;
