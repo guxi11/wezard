@@ -1184,6 +1184,9 @@ export const installInboundRouter = (
     const allow = [...cfg.wrc.allowFrom, ...(cfg.bots.find((b) => b.id === botTagOf(msg))?.allowFrom ?? [])];
     if (!isAllowed(allow, authPrincipals(msg))) return false;
     const text = raw.trim();
+    // 引导期每条消息落一行: 「人说了但没反应」时要先分清是没进 daemon 还是判定没走通 —— 这条
+    // 路径原本一个日志都没有, 空正文那条回复也只走 replySystem (不落日志)。
+    log.info({ base, len: text.length, guide: guideOf(store, base) }, "onboarding: guideGate");
     if (!text) { await replySystem(frame, msg, "[wezard] 本群还在初始化引导中 — 请发文字: 管家的工作目录 (绝对路径), 或已有管家的名字。"); return true; }
     // 点名 .x / 🧙 x 的消息不拦: 人在明确找某个 wizard (或叫一个新的), 与本群初始化无关。
     if (parseTag(text).tag) return false;
