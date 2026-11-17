@@ -23,6 +23,7 @@ import { chatNameOf, chatPolicyOf, listChatNames, stewardTierOf, type CharterGua
 import { identityWorkspaceOf, manifestationOf, settleName, wizardStore } from "./wizard.js";
 import { autoOrdinalOf } from "./wizard-names.js";
 import { stewardIdentityOf, stewardRoute as resolveSteward } from "./steward.js";
+import { noteNativeChannelFrame } from "./channel.js";
 import { applyOnboarding, bindSteward, classifyOnboardingInput, GUIDE_DESC, guideOf, guideTargetOf, judgeOnboarding, loadOnboardingStore, needsOnboarding, renderGuideOpening, renderGuideRetry, renderOnboardingDone, WIZARD_NAME_RE } from "./onboarding.js";
 import { isApprentice } from "./apprentice.js";
 import { truncate } from "../shared/std.js";
@@ -1262,7 +1263,10 @@ export const installInboundRouter = (
   client.on("message", (frame: WsFrame<BaseMessage>) => {
     const msg = frame.body;
     if (!msg) return;
-    log.info({ msgid: msg.msgid, msgtype: msg.msgtype, chattype: msg.chattype, chat: chatPrincipal(msg), from: msg.from?.userid, hasQuote: !!msg.quote }, "rx frame");
+    const source = (msg as { compat_info?: { source?: string } }).compat_info?.source;
+    log.info({ msgid: msg.msgid, msgtype: msg.msgtype, chattype: msg.chattype, chat: chatPrincipal(msg), from: msg.from?.userid, hasQuote: !!msg.quote, ...(source ? { source } : {}) }, "rx frame");
+    // 频道里 @ 机器人的原生帧 (chatid = 帖子群): 记一笔, 同一句的 topic_at_bot 桥接就不再重投 (channel.ts)。
+    if (source === "channel") noteNativeChannelFrame(msg.from?.userid ?? "", chatPrincipal(msg));
     if (ROUTED_MSGTYPES.has(msg.msgtype) || NO_REPLY_MSGTYPES.has(msg.msgtype)) return;
     log.warn({ body: msg }, "rx frame — unhandled msgtype, not routed to any wizard");
     void replySystem(frame, msg, "[wezard] 收到一条暂不支持的消息 (类型 " + msg.msgtype + "), 没有转给任何 wizard — 请改发文字。");

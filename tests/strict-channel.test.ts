@@ -69,7 +69,7 @@ const atBotFrame = (topicId: string, postId: string, msgid: string) => ({
 
 const client = mkClient();
 installChannelTransport(client, log, cfgStrict);
-installChannelEvents(client, cfgStrict, log);
+installChannelEvents(client, cfgStrict, log, { nativeWaitMs: 0 }); // 无原生帧: 测桥兜底投递
 // @ 事件登记 replyOk (strict 频道 topicS: post pS 被 @ 过 → 可以评论)。
 (client as any).wsManager.handleFrame(atBotFrame("topicS", "pS", "mS"));
 await new Promise((r) => setTimeout(r, 50));
@@ -102,7 +102,7 @@ assert.ok(calls.some((c) => c.via === "cmd" && c.cmd === "aibot_topic_send_post"
 // 注意 replyOk / byStream 是模块级共享: 换一个 implicit 的 cfg, 同一 topicS/pS。
 const client2 = mkClient();
 installChannelTransport(client2, log, cfgImplicit);
-installChannelEvents(client2, cfgImplicit, log);
+installChannelEvents(client2, cfgImplicit, log, { nativeWaitMs: 0 });
 (client2 as any).wsManager.handleFrame(atBotFrame("topicS", "pS", "mI"));
 await new Promise((r) => setTimeout(r, 50));
 calls.length = 0;

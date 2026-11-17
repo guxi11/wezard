@@ -26,8 +26,9 @@ export interface OnboardingState {
 
 /** 引导是否该接管这个群: 机器已认领 + 群 principal + 没绑管家 + 没有 untagged 默认会话
  *  (存量群 / 已引导群走老路 —— 绑定一落盘本判定即转 false, 不需要完成标记)。
- *  单聊 (user:*) 不引导: 人私聊的默认接待 = 全局管家 (v3 §3)。频道 (chat:<topic_id>)
- *  不走 message.text 入站, 到不了这里的调用方; 频道管家表照查一道以防万一。 */
+ *  单聊 (user:*) 不引导: 人私聊的默认接待 = 全局管家 (v3 §3)。频道会走到这里: 桥接帧的 base 是
+ *  chat:<topic_id>, 企微原生帧 (compat_info.source=channel) 的 base 是**每个帖子自己的** chat:opk…
+ *  —— 后者按帖子分键, 每个新帖各进一次引导 (2026-11-17 实测)。频道管家表按 topic_id 照查。 */
 export const needsOnboarding = (cfg: Config, store: WizardStore | undefined, base: string): boolean =>
   !!cfg.defaultChat
   && base.startsWith("chat:")

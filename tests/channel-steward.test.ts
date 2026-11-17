@@ -142,7 +142,7 @@ const emitted: unknown[] = [];
 const client = mkClient();
 // transport 必须早于 events 装 (tracker 抓 orig 的顺序), 与 daemon 一致。
 installChannelTransport(client, log);
-installChannelEvents(client, cfgOf(), log);
+installChannelEvents(client, cfgOf(), log, { nativeWaitMs: 0 }); // 无原生帧: 测桥兜底投递
 
 // D1 纯传输面: 只有 markdown 正文会跨 bot 出去。
 registerTopic("topicD");

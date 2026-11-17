@@ -56,6 +56,38 @@ const dispatched = new Set<string>();
 const replyOk = new Map<string, boolean>();
 /** 判官串行：同一 topic 一次只跑一个判断，一次 -p 进程更不该并发抢占。 */
 const judgeQueues = new Map<string, Promise<unknown>>();
+/** 企微原生入站已带上的频道 @ (aibot_msg_callback, compat_info.source=channel): asker → 到达记录。
+ *  企微现在把频道里 @ 机器人的话**两路**同时推: 原生帧 (chatid = 该帖子自己的 opk… 群 id) 与
+ *  topic_at_bot 事件 (topic_id = 频道)。两路都投 = 同一句话由两个 wizard 各答一遍 —— 2026-11-17
+ *  test1 频道实录: 帖子会话绑了管家, chat:<topic_id> 的默认会话也在答, 还经 lastPost 答进了别的帖子。
+ *  原生帧由 inbound 记一笔, topic_at_bot 等一拍认领 (一帧只抵一个事件); 等不到 (企微没推原生帧)
+ *  才由桥自己投 —— 兜底不丢话。 */
+const nativeFrames = new Map<string, Array<{ at: number; chat: string }>>();
+const NATIVE_WAIT_MS = 3000;
+/** 原生帧可能比事件先到: 认领窗口往前放这么多。 */
+const NATIVE_SKEW_MS = 2000;
+/** inbound 收到原生频道帧时调: 记下发话人与帖子 chatid。 */
+export const noteNativeChannelFrame = (asker: string, chat: string, at = Date.now()): void => {
+  if (!asker) return;
+  const fresh = (nativeFrames.get(asker) ?? []).filter((n) => at - n.at < NATIVE_WAIT_MS + NATIVE_SKEW_MS);
+  nativeFrames.set(asker, [...fresh, { at, chat }]);
+};
+/** 认领一条 since 之后到达的原生帧 (认领即消耗); 没有 = ""。 */
+const takeNative = (asker: string, since: number): string => {
+  const list = nativeFrames.get(asker) ?? [];
+  const i = list.findIndex((n) => n.at >= since);
+  if (i < 0) return "";
+  nativeFrames.set(asker, list.filter((_, j) => j !== i));
+  return list[i]!.chat;
+};
+/** 最多等 waitMs 看原生帧到没到。 */
+const awaitNative = async (asker: string, since: number, waitMs: number): Promise<string> => {
+  for (let left = waitMs; ; left -= 100) {
+    const hit = takeNative(asker, since);
+    if (hit || left <= 0) return hit;
+    await sleep(100);
+  }
+};
 
 const MENTION_RE = /\$\{inline_mention(?::[^}]*)?\}/g;
 const FILE_RE = /\$\{inline_file(?::[^}]*)?\}/g;
@@ -603,6 +635,8 @@ export const installChannelTransport = (client: WSClient, log: Logger, cfg?: Con
 export interface ChannelFacts {
   /** P7-S3: strict 频道判官要看的成员名单 (裸名); 不给 = 空名单 (判定照常)。 */
   memberNamesOf?: (base: string) => string[];
+  /** topic_at_bot 等原生帧认领的时长 (ms); 缺省 3000, 测试注入短值。 */
+  nativeWaitMs?: number;
 }
 
 export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger, facts?: ChannelFacts): void => {
@@ -716,6 +750,7 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
     const asker = String(from.userid ?? "");
     const selfBot = String(body.aibotid ?? "");
     const at = Number(body.create_time ?? 0) * 1000 || Date.now();
+    const recvAt = Date.now();
     if (!topicId) return;
     registerTopic(topicId);
     // P7-S3: 频道也是聊天 (chat:<topic_id>) —— 首见登记, S3 后新开的频道默认 strict。
@@ -733,6 +768,16 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       if (seen.has(msgid)) return;
       seen.add(msgid);
       if (seen.size > 3000) seen.delete(seen.values().next().value!);
+      const native = await awaitNative(asker, recvAt - NATIVE_SKEW_MS, facts?.nativeWaitMs ?? NATIVE_WAIT_MS);
+      if (native) {
+        // 原生帧已把这句话投给帖子会话; 桥只记账: 标 dispatched (判官别再接), 帖子照存本地缓存。
+        dispatched.add(postId);
+        if (dispatched.size > 3000) dispatched.delete(dispatched.values().next().value!);
+        log.info({ topicId, postId, msgid, nativeChat: native }, "channel at_bot: carried by native frame, bridge skip");
+        await record(cfg, topicId, postMsg(await fetchPost(client, topicId, postId, log)));
+        if (replyId) await record(cfg, topicId, replyMsg(await fetchReply(client, topicId, postId, replyId, log), postId));
+        return;
+      }
       if (dispatched.has(postId)) return;
       const post = await fetchPost(client, topicId, postId, log);
       const reply = replyId ? await fetchReply(client, topicId, postId, replyId, log) : null;
