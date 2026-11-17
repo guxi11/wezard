@@ -43,6 +43,7 @@ import { chatPolicyOf } from "./chat-name.js";
 import { isStewardTarget } from "./steward.js";
 import { wizardStore } from "./wizard.js";
 import { makeStewardGuard } from "./steward-guard.js";
+import { guideRefusal } from "./onboarding.js";
 import { sessionNameFor } from "./session-name.js";
 import { reachable } from "./reach.js";
 
@@ -2136,6 +2137,15 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
     // v3 §3: 判定从「untagged 默认会话」升为「该聊天绑定的管家化身」(config chatPolicy.steward
     // 指定优先, 没绑 = 现存默认会话) —— 指定的化身即使是 tagged 也 arm, 换绑后旧默认会话不再 arm。
     const owner = getMirrorTarget?.(sessionId);
+    // 新群引导化身没有工具面 (onboarding.ts guideRefusal): 内置工具与 wezard MCP 一律在这里拒,
+    // 排在手闸与一切放行之前 —— 它只把 daemon 的指令转成人话, handoff / set_workspace 自己
+    // 正是 2026-11-17 teststrict 的事故形态。
+    const guideDeny = owner ? guideRefusal(wizardStore()?.get(owner), toolName) : "";
+    if (guideDeny) {
+      log.info({ toolName, sessionId, owner }, "onboarding guide tool reject");
+      json(res, 200, { decision: "deny", reason: guideDeny } satisfies ApproveResp);
+      return;
+    }
     // P7-S2: 手闸条件 = 顶层模式或严格模式 (speech=strict) 任一开。
     if (owner && isStewardTarget(cfg, wizardStore(), owner)
       && (chatPolicyOf(cfg, owner).topOnly || chatPolicyOf(cfg, owner).speech === "strict")) {

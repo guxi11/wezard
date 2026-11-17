@@ -127,6 +127,7 @@ import { parseWhen, renderChatLog, UNKNOWN_HUMAN, type LogSession } from "./chat
 import { renderChatRecords } from "../shared/chat-record.js";
 import { audienceOf } from "../shared/role-view.js";
 import { waitForIdle, type IdleResult } from "./wait-idle.js";
+import { guideRefusal, isGuideManifestation } from "./onboarding.js";
 import { reminderEventId, reminderToken, startPlanReminders, type PlanReminderCandidate } from "./plan-reminders.js";
 
 const waitForQuorum = async (targets: readonly string[], isBusy: (target: string) => Promise<boolean>, timeoutMs: number, need: number): Promise<IdleResult[]> => {
@@ -816,6 +817,7 @@ const main = async (): Promise<void> => {
         json(res, 400, { ok: false, reason: "target required (and cfg.defaultChat empty)" });
         return;
       }
+      if (refuseGuide(res, target, "switch_session", false)) return;
       const sessions = await scanClaudeSessions();
       // 已绑在别的机器人聊天上的会话与不存在同形。
       const hit = sessions.find((s) => s.sessionId === sessionId && ((t) => !t || sameBot(target, t))(m.targetForSession(s.sessionId)));
@@ -846,6 +848,8 @@ const main = async (): Promise<void> => {
       const cwd = (body.cwd ?? "").toString();
       const target = resolveSelf(body);
       if (!target) { json(res, 400, { ok: false, reason: "target required (or pass sessionId of an attached chat)" }); return; }
+      const caller = resolveSelf({ sessionId: body.sessionId, tmuxPane: body.tmuxPane });
+      if (refuseGuide(res, caller, "set_workspace") || refuseGuide(res, target, "set_workspace", false)) return;
       if (!cwd) { json(res, 400, { ok: false, reason: "cwd required" }); return; }
       const set = m.setPendingCwd(target, cwd);
       if (!set.ok) { json(res, 400, { ...set, target }); return; }
@@ -931,6 +935,21 @@ const main = async (): Promise<void> => {
       void ws.client
         .sendMessage(chatId, { msgtype: "markdown", markdown: { content: linkTags(base, markdown) } })
         .catch((e: unknown) => log.warn({ chatId, err: errText(e) }, "chat notify failed"));
+    };
+    // 新群引导化身没有工具面 (onboarding.ts guideRefusal)。审批层已全拒, 但审批关掉或
+    // wezard use cli 时 hook 不问 daemon —— 改运行形态 / 另起会话 / 驱动别人的路由在这里再兜
+    // 一道。撞上即按引导异常收尸: 拒掉这次调用, 杀 pane + drop 记录, 群里不留一个「等指令」
+    // 的会话; 引导状态机不动, 人下一句话会重起一个干净的引导化身接着引导。别人冲着引导化身来的
+    // (替它 handoff / 给它设工作区) 只拒不收 (reap=false): 越权的不是它。
+    const refuseGuide = (res: import("node:http").ServerResponse, target: string, action: string, reap = true): boolean => {
+      const reason = guideRefusal(wizardStore()?.get(target), action);
+      if (!reason) return false;
+      json(res, 403, { ok: false, reason });
+      log.warn({ target, action, reap }, "onboarding: guide tool surface refused");
+      if (!reap) return true;
+      void m.killPane(target).then(() => wizardStore()?.drop(target));
+      notifyChat(baseOfKey(target), "[wezard] 引导会话越权调用了 " + action + ", 已收掉; 请再发一次上一条, 引导会重新接上。");
+      return true;
     };
     // wizard 在群里的称呼, 只用在**正文**里。气泡的头照旧交给 withTagHeader ——
     // 那一段是路由信息 (`.name:` / 签名名 / role 链接头), parseTagHeader 靠它反解, 群里引用一条气泡
@@ -3092,6 +3111,7 @@ const main = async (): Promise<void> => {
     const tellPeer: Handler = async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      if (refuseGuide(res, self, "tell_peer")) return;
       const r = await tellPeerAs(self, body);
       json(res, r.status, r.body);
     };
@@ -3249,6 +3269,7 @@ const main = async (): Promise<void> => {
       const resolved = resolvePeer(self, addrOf(body));
       if (!resolved.ok) { json(res, resolved.status, { ok: false, reason: resolved.reason, candidates: resolved.candidates }); return; }
       const target = resolved.target;
+      if (refuseGuide(res, self, "handoff") || refuseGuide(res, target, "handoff", false)) return;
       // 点名点到自己: 不能走「让它写简报」那条 (往正在生成的输入框里打字, 等自己等成
       // 死锁), 改走交接自己 —— 简报得由调用方自己给。
       if (target === self) {
@@ -3716,6 +3737,9 @@ const main = async (): Promise<void> => {
       // 信箱里装的是相对上一份宪章的变化; 新宪章一渲染就都过期了 (名册、记忆都已在里面)。
       notices.drain(target);
       notices.forget(target);
+      // 引导化身不发宪章: 宪章教的是 wizard 的整套工具与编排, 引导者一句也用不上 —— 带着它,
+      // 「设置工作区为 …」就被读成自己的 set_workspace + handoff (2026-11-17 teststrict)。
+      if (isGuideManifestation(wizardStore()?.get(target))) return "";
       return charterFor(target, { ...charterOptsOf(target, ctx?.cwd), cli: ctx?.cli });
     });
 
@@ -4004,6 +4028,7 @@ const main = async (): Promise<void> => {
     http.register("POST /dispatch", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      if (refuseGuide(res, self, "delegate")) return;
       const addressError = unsupportedPeerAddressField(body);
       if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
       if (Object.prototype.hasOwnProperty.call(body, "cli")) { json(res, 400, { ok: false, reason: "cli is unsupported; dispatch uses the configured backend" }); return; }
@@ -4366,6 +4391,7 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/clone", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      if (refuseGuide(res, self, (body as { inherit?: boolean }).inherit ? "clone_wizard" : "spawn_wizard")) return;
       const r = await bearAs(self, body);
       // P7-S2 join 参数: 出生成功后把它带进指定严格群 (joinMember 只在 strict 群生效)。
       const join = (body as { join?: { chat?: string; mode?: string } }).join;
@@ -4503,6 +4529,7 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/model", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      if (refuseGuide(res, self, "set_model")) return;
       const addressError = unsupportedPeerAddressField(body);
       if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
       const b = body as { model?: string; scope?: string; effort?: string };
@@ -4537,6 +4564,7 @@ const main = async (): Promise<void> => {
     http.register("POST /wizard/handoff-self", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
+      if (refuseGuide(res, self, "handoff")) return;
       const r = await handoffSelf(self, ((body as { brief?: string }).brief ?? "").toString().trim());
       json(res, r.status, r.body);
     });

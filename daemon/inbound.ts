@@ -21,8 +21,9 @@ import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe,
 import { botTagOf } from "./bot-mux.js";
 import { chatNameOf, chatPolicyOf, listChatNames, stewardTierOf, type CharterGuard } from "./chat-name.js";
 import { identityWorkspaceOf, manifestationOf, settleName, wizardStore } from "./wizard.js";
+import { autoOrdinalOf } from "./wizard-names.js";
 import { stewardIdentityOf, stewardRoute as resolveSteward } from "./steward.js";
-import { bindSteward, closeOnboarding, GUIDE_DESC, guideTargetOf, isGuideManifestation, loadOnboardingStore, needsOnboarding, renderGuideOpening, renderGuideStewardDone, renderGuideStewardRetry, renderGuideWorkspaceOk, renderGuideWorkspaceRetry, stewardNameInput, validateWorkspace, WIZARD_NAME_RE } from "./onboarding.js";
+import { applyOnboarding, bindSteward, classifyOnboardingInput, GUIDE_DESC, guideOf, guideTargetOf, judgeOnboarding, loadOnboardingStore, needsOnboarding, renderGuideOpening, renderGuideRetry, renderOnboardingDone, WIZARD_NAME_RE } from "./onboarding.js";
 import { isApprentice } from "./apprentice.js";
 import { truncate } from "../shared/std.js";
 import { parseStrictCommand, type StrictCommand } from "./strict-switch.js";
@@ -955,12 +956,22 @@ export const installInboundRouter = (
       if (!identity) { await replyText(frame, msg, who, noSteward); return { stop: true }; }
       const cur = (store?.get(identity)?.name ?? "").trim();
       const renameSteward = (): string => {
-        const { r: name } = guardCharter(() => store!.rename(identity, want), (n) => ({ what: "人 `/name` 把本群管家" + (cur ? " `" + cur + "`" : "") + "改名为 `" + n + "`", byHuman: true }));
+        // 改名同时改写指向旧名的管家绑定 (chatPolicy.<chat>.steward 存的是名字): 不改的话绑定悬空,
+        // 旧名日后被别的身份领走就会把本群裸消息劫过去。同一管家可管多群, 逐群改。
+        const rebind = (name: string): string => {
+          Object.entries(cfg.chatPolicy ?? {})
+            .filter(([, p]) => !!cur && (p?.steward ?? "").trim().toLowerCase() === cur.toLowerCase())
+            .forEach(([b]) => bindSteward(cfg, sourcePath, b, name));
+          return name;
+        };
+        const { r: name } = guardCharter(() => rebind(store!.rename(identity, want)), (n) => ({ what: "人 `/name` 把本群管家" + (cur ? " `" + cur + "`" : "") + "改名为 `" + n + "`", byHuman: true }));
         const mani = manifestationOf(store, want, base);
         if (mani) void bridge.retitlePane(mani);
         return name;
       };
-      if (!cur) {
+      // 新群引导在本群锚点新建的管家领的是自动中性名 (wizard-names 序列): 视同未命名, 名字后置给
+      // /name, 第一次起名直接生效。只认本群自己的锚点身份 —— 绑来的已有管家改名照旧二次确认。
+      if (!cur || (identity === base && autoOrdinalOf(cur) !== undefined)) {
         const name = renameSteward();
         await replyText(frame, msg, who, "[wezard] ✅ 本群管家命名为 `." + name + "`");
       } else if (cur.toLowerCase() === want.toLowerCase()) {
@@ -1146,101 +1157,71 @@ export const installInboundRouter = (
   };
 
   // ── 新群引导 (onboarding.ts) ──────────────────────────────────────
-  // 人 2026-11-17 改口径: 引导要一个**真实的引导会话** (对话式比系统行友好)。daemon
-  // 仍是状态机主人 —— 判定/校验/落盘/强制全在这里 (模型跳不了步、落不了错盘、乱扯
-  // 不推进); 引导化身 (base#guide, 不占 untagged —— 那是管家锚点的保留位) 只负责把
-  // daemon 的指令转成人话回群。引导在途的群按 implicit 出站 (chatPolicyOf 豁免):
-  // 出站 tracker 第一句就会把新群登记成首见 strict, 不豁免引导第二轮起就只见占位。
-  // 完成即收尾: 告别注入后 60s 收 pane + drop 记录; reload 丢定时器的兜底 = 下一
-  // 条群消息进门时按记录标记 (GUIDE_DESC) 收尸。
+  // 人 2026-11-17 改口径: 引导要一个**真实的引导会话** (对话式比系统行友好), 且「工作区
+  // 设置以后就等同于绑定了管家, 就该退出引导」。daemon 是状态机主人 —— 判定/校验/落盘/
+  // 强制全在这里 (模型跳不了步、落不了错盘); 引导化身 (base#guide, 不占 untagged —— 那是
+  // 管家锚点的保留位) 只把 daemon 的指令转成人话回群, 没有工具面 (见 guideRefusal)。
+  // 绑定即收: 目录 / 已有管家名一落定, 完成确认走 daemon 系统行, 引导化身当场 kill + drop
+  // —— 不再留告别窗口与定时器 (reload 丢定时器 = 群里残留一个「等指令」的会话)。兜底:
+  // 绑定已在 (人手改 config、上个进程死在半路) 而引导化身还挂着, 下一条群消息进门时收尸。
   const onboarding = loadOnboardingStore(cfg);
-  const pendingGuides = new Map<string, ReturnType<typeof setTimeout>>();
-  const reapGuide = (base: string): void => {
-    if (pendingGuides.has(base)) return;
-    const guide = guideTargetOf(base);
-    pendingGuides.set(base, setTimeout(() => {
-      pendingGuides.delete(base);
-      closeOnboarding(base);
-      void bridge.killPane(guide).then(() => wizardStore()?.drop(guide));
-    }, 60_000).unref());
+  const reapGuide = async (base: string, why: string): Promise<void> => {
+    const guide = guideOf(wizardStore(), base);
+    if (!guide) return;
+    const r = await bridge.killPane(guide);
+    wizardStore()?.drop(guide);
+    log.info({ base, guide, why, killed: r.ok, reason: r.reason }, "onboarding: guide reaped");
   };
   const guideGate = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, raw: string): Promise<boolean> => {
     if (!isGroup(msg)) return false;
     const base = chatPrincipal(msg);
     const store = wizardStore();
-    const guide = guideTargetOf(base);
     if (!needsOnboarding(cfg, store, base)) {
-      // 收尸: 绑定已落盘 (或人自己 config 绑了管家) 而引导化身还挂着 —— 现在收掉。
-      if (isGuideManifestation(store?.get(guide))) reapGuide(base);
+      if (guideOf(store, base)) await reapGuide(base, "already bound");
       return false;
     }
     // 与 gate 同一把 allowFrom 尺子: 陌生人交给老路 (gate 回未授权), 引导不搭理。
     const allow = [...cfg.wrc.allowFrom, ...(cfg.bots.find((b) => b.id === botTagOf(msg))?.allowFrom ?? [])];
     if (!isAllowed(allow, authPrincipals(msg))) return false;
     const text = raw.trim();
-    if (!text) { await replySystem(frame, msg, "[wezard] 本群还在初始化引导中 — 请发文字走完引导 (工作区 + 管家)。"); return true; }
-    // 点名 `.x` / `🧙 x` 的消息不拦: 人在明确找某个 wizard (或叫一个新的), 与本群初始化无关。
+    if (!text) { await replySystem(frame, msg, "[wezard] 本群还在初始化引导中 — 请发文字: 管家的工作目录 (绝对路径), 或已有管家的名字。"); return true; }
+    // 点名 .x / 🧙 x 的消息不拦: 人在明确找某个 wizard (或叫一个新的), 与本群初始化无关。
     if (parseTag(text).tag) return false;
     // 免授权的发现面 (/id /help) 引导期照样给 —— 直接答, 不走 route (那会顺手注册管家化身)。
     if (isIdCommand(text)) { await replySystem(frame, msg, renderIds(msg, allow)); return true; }
     if (isHelpCommand(text)) { await replySystem(frame, msg, renderHelp()); return true; }
-    if (text.startsWith("/")) {
-      await replySystem(frame, msg, "[wezard] 本群还没完成初始化 — 先走完引导, 命令引导完成后可用。当前步: " + (onboarding.get(base)?.step === "steward" ? "绑定管家" : "设置工作区") + "。");
+    const input = classifyOnboardingInput(text);
+    if (input.kind === "command") {
+      await replySystem(frame, msg, "[wezard] 本群还没完成初始化 — 先回复管家的工作目录 (绝对路径) 或已有管家的名字, 命令引导完成后可用。");
       return true;
     }
     // 起/续引导会话, 然后把「daemon 指令 + 人的原话」注入, 由引导化身转成人话回群。
-    // send 一条龙 (信封/人话记录/dispatch, 终句回本群); 引导化身自己的工作区 = 全局
-    // 默认 (cfg.wrc.cwd) —— 要绑的 workspace 是管家的, 不是引导者的, 不能等绑完才起。
-    // pane 已在 (reload 续接 / 上一轮还在) 就只注入; 记录带 GUIDE_DESC 供收尸识别。
+    // 引导化身自己的工作区 = 全局默认 (cfg.wrc.cwd) —— 要绑的 workspace 是管家的。
+    // pane 已在 (reload 续接 / 上一轮还在) 就只注入; 记录带 GUIDE_DESC 供收尸与工具面收窄识别。
     const inject = async (instruction: string): Promise<void> => {
+      const guide = guideTargetOf(store, base);
       if (!bridge.hasMirrorTarget(guide)) {
         store?.upsert(guide, { identity: guide, kind: "worker", description: GUIDE_DESC, workspace: expandHome(cfg.wrc.cwd) });
         const { err } = await ensureSession(guide, "guide", expandHome(cfg.wrc.cwd));
         if (err) { await replySystem(frame, msg, "[wezard] 引导会话起不来: " + err + " — 稍后再发一句试试。"); return; }
         log.info({ base, guide }, "onboarding: guide session spawned");
       }
-      await send(frame, msg, guide, instruction + (text ? "\n\n人刚才说: " + text : ""));
+      await send(frame, msg, guide, instruction + "\n\n人刚才说: " + text);
     };
-    // 首触: 没有在途状态 → 开场 (引导化身起会话 + 请人给 workspace); 之后按步推进。
-    if (!onboarding.get(base)) {
-      onboarding.begin(base);
-      await inject(renderGuideOpening());
+    // 首触且不是一步到位的回答 → 开场 (引导化身起会话 + 请人给目录或已有管家名)。
+    const first = !onboarding.get(base);
+    onboarding.begin(base);
+    const verdict = judgeOnboarding(store, base, input);
+    if (verdict.kind === "retry") {
+      await inject(first ? renderGuideOpening() : renderGuideRetry(verdict.reason));
       return true;
     }
-    const step = onboarding.get(base)!.step;
-    if (step === "workspace") {
-      const v = validateWorkspace(text);
-      if (!v.ok) { await inject(renderGuideWorkspaceRetry(v.reason)); return true; }
-      onboarding.setWorkspace(base, v.abs);
-      log.info({ base, workspace: v.abs }, "onboarding: workspace set");
-      await inject(renderGuideWorkspaceOk(v.abs));
-      return true;
-    }
-    // step === steward: 名字 = 绑已有管家, 或在本群落一个新管家锚点。
-    const want = stewardNameInput(text);
-    if (!WIZARD_NAME_RE.test(want)) { await inject(renderGuideStewardRetry("名字不合法, 要 1-32 位字母/数字/_/-")); return true; }
-    const hit = store?.byName(want);
-    if (hit && !sameBot(base, hit.target)) { await inject(renderGuideStewardRetry(want + " 不归本机这个 bot 认识")); return true; }
-    const askedWs = onboarding.get(base)?.workspace ?? "";
-    if (hit) {
-      // 绑已有管家: 身份自带工作区 (身份级, 跨群共享 —— 拍板 A), 第 ① 步收的路径不适用。
-      guardCharter(() => bindSteward(cfg, sourcePath, base, hit.name), () => ({ what: "新群引导把 `" + hit.name + "` 绑为 " + base + " 的管家", byHuman: true }));
-      onboarding.finish(base);
-      const cwd = bridge.getCwd(hit.target);
-      const ws = identityWorkspaceOf(store, hit.target) || cwd.runningCwd || cwd.defaultCwd;
-      log.info({ base, name: hit.name }, "onboarding: existing steward bound");
-      await inject(renderGuideStewardDone(hit.name, ws || "(身份未记录工作区)", ws && askedWs && ws !== askedWs ? "它是已有管家, 工作区跟着身份走 (" + ws + "), 人先前给的 " + askedWs + " 不适用。" : ""));
-      reapGuide(base);
-      return true;
-    }
-    // 新建管家: 锚点 = 本群 untagged 记录 (identity = base), workspace 落在锚点上 (身份级)。
-    store!.upsert(base, { kind: "steward", workspace: askedWs });
-    const name = store!.claim(base, want);
-    guardCharter(() => bindSteward(cfg, sourcePath, base, name), () => ({ what: "新群引导新建管家 `" + name + "` (工作区 " + askedWs + ") 并绑到 " + base, byHuman: true }));
-    onboarding.finish(base);
-    log.info({ base, name, workspace: askedWs }, "onboarding: steward created & bound");
-    await inject(renderGuideStewardDone(name, askedWs));
-    reapGuide(base);
+    const bound = applyOnboarding(store!, onboarding, base, verdict,
+      (name) => guardCharter(() => bindSteward(cfg, sourcePath, base, name), () => ({ what: verdict.kind === "bind-new" ? "新群引导新建管家 " + name + " (工作区 " + verdict.workspace + ") 并绑到 " + base : "新群引导把 " + name + " 绑为 " + base + " 的管家", byHuman: true })),
+      (t) => identityWorkspaceOf(store, t) || ((c) => c.runningCwd || c.defaultCwd)(bridge.getCwd(t)));
+    log.info({ base, ...bound }, "onboarding: steward bound");
+    await replySystem(frame, msg, renderOnboardingDone(bound));
+    await reapGuide(base, "bound");
     return true;
   };
   const send = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, who: string, text: string, images: string[] = []): Promise<void> => {

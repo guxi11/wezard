@@ -61,9 +61,9 @@ export const chatBaseOf = (cfg: Config, ref: string): string => {
 export const chatPolicyOf = (cfg: Config, target: string): ChatPolicy & { topOnly: boolean; speech: "implicit" | "strict" } =>
   ((p) => {
     const base = baseOfKey(target);
-    // 引导在途 (含告别窗口) 一律 implicit —— 出站 tracker 第一句就会把新群登记成首见
-    // strict, 不豁免对话式引导就只剩占位。显式 chatPolicy 也不豁免它: 绑定落盘前这
-    // 个群还谈不上治理; 收尾 (closeOnboarding) 后恢复正常判定链。
+    // 引导在途一律 implicit —— 出站 tracker 第一句就会把新群登记成首见 strict, 不豁免
+    // 对话式引导就只剩占位。显式 chatPolicy 也不豁免它: 绑定落盘前这个群还谈不上治理;
+    // 绑定即收 (onboarding.finish) 后恢复正常判定链。
     return { ...p, topOnly: p.topOnly ?? true, speech: isOnboardingActive(base) ? "implicit" : p.speech ?? speechDefaultOf(cfg, base) };
   })(ChatPolicy.parse(cfg.chatPolicy?.[baseOfKey(target)] ?? {}));
 

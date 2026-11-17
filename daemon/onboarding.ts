@@ -1,28 +1,27 @@
-// 新群引导 (人 2026-11-16 拍板 + 2026-11-17 改口径): bot 被拉进新群后由一个**真实
-// 的引导会话** (base#guide 化身) 在群里对话式引导, 依次落两件事: ① 管家的 workspace
-// ② 绑定管家。两件都落齐, 引导告别后收尾, 之后的裸消息按既有 stewardRoute 落到
-// 绑定的管家化身。引导是强制的: 不设跳过、不设超时 (人原话「保证引导流程, 直到
-// 绑定了一个 workspace 和管家」)。daemon 仍是状态机主人: 判定/校验/落盘/强制全在
-// 这里与 guideGate, 引导化身只负责表达。
-//
-// workspace 是**身份级**的 (拍板 A): 绑已有管家时它自带工作区, 第 ① 步收的路径不
-// 适用 —— 应答里明说; 新建管家时写进锚点记录的 workspace 字段, 该身份在任何群的
-// 化身都从它起 (wizard.ts 的 identityWorkspaceOf)。
+// 新群引导 (人 2026-11-16 拍板 + 2026-11-17 两次改口径): bot 被拉进新群后由一个**真实
+// 的引导会话** (base#guide 化身) 在群里对话式引导, 只落一件事 —— 管家的 workspace。
+// 人 2026-11-17 第二次改口径: 「工作区设置以后, 其实就等同于绑定了一个 wizard 管家,
+// 就应该退出引导了」: 一给合法目录, daemon 就在本群 untagged 锚点新建管家 (kind
+// steward + workspace, 自动中性名) 并写 chatPolicy.<base>.steward, 状态机一步终结、
+// 系统行确认、引导化身当场收掉; 名字后置给 /name。另一条入口是「已有管家的名字」
+// (拍板 A: workspace 身份级, 跨群共用一个管家只能按名字绑, 给同一个目录会新建一个
+// 身份) —— 两条入口按形状区分: 目录以 / 或 ~ 起头, 名字不含 /。
+// 引导是强制的: 不设跳过、不设超时。daemon 是状态机主人: 判定/校验/落盘/强制全在
+// 这里与 guideGate, 引导化身只负责表达 —— 它没有工具面 (宪章不发、审批层全拒、改
+// 运行形态的路由按引导异常收尸, 见 guideRefusal), 绝不会 handoff / set_workspace 自己。
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ChatPolicy, type Config } from "../shared/config.js";
 import { patchJsonc } from "../shared/config-writer.js";
 import { expandHome } from "../shared/paths.js";
-import { keyOf, stripSigil, tagOfKey } from "../shared/session-label.js";
+import { baseOfKey, keyOf, sameBot, stripSigil, tagOfKey, uniqueTag } from "../shared/session-label.js";
 import { appointedChannelSteward, appointedSteward } from "./steward.js";
 import type { WizardRecord, WizardStore } from "./wizard.js";
 
-export type OnboardingStep = "workspace" | "steward";
+export type OnboardingStep = "workspace";
 
 export interface OnboardingState {
   step: OnboardingStep;
-  /** 人确认过的工作区 (step 为 steward 时必有)。 */
-  workspace?: string;
 }
 
 /** 引导是否该接管这个群: 机器已认领 + 群 principal + 没绑管家 + 没有 untagged 默认会话
@@ -39,30 +38,47 @@ export const needsOnboarding = (cfg: Config, store: WizardStore | undefined, bas
 /** 与 wizard 名字同一套字符集 (wizard 地址语法: 不能含 # / : 与空白)。 */
 export const WIZARD_NAME_RE = /^[\p{L}\p{N}_-]{1,32}$/u;
 
-// ── 引导会话 (人 2026-11-17 改口径: 要一个真实的对话式引导会话) ────────
-// 引导化身是 `base#guide` 这个 tagged slot —— 绝不占 untagged 记录: 那是「该群管家
-// 锚点」的保留位 (新建管家时引导会写它), 引导者占了它, 绑定后就会被当成管家复用。
-// daemon 仍是状态机主人 (判定/校验/落盘/强制), 引导化身只把 daemon 的指令转成人话。
+// ── 引导会话 ──────────────────────────────────────────────────────────
+// 引导化身是 base#guide 这个 tagged slot —— 绝不占 untagged 记录: 那是「该群管家
+// 锚点」的保留位 (新建管家时引导会写它)。slot 被人手开的同名 wizard 占着时退到
+// guide-2 …, 不借用人家的会话; 认它只认「职责标记 + guide 系 slot」双证。
 
-/** 引导化身记录的职责标记 —— 收尸判定认它 (reload 丢了收尾定时器时的兜底)。 */
+/** 引导化身记录的职责标记 —— 收尸与工具面收窄都认它。 */
 export const GUIDE_DESC = "新群引导";
-/** 一个群的引导化身 target: 恒为 `base#guide` (名字可能因撞名落成 guide-2, slot 不变)。 */
-export const guideTargetOf = (base: string): string => keyOf(base, "guide");
-/** 这条记录是不是该群的引导化身 (职责标记 + guide slot 双证)。 */
+const GUIDE_SLOT = "guide";
+const GUIDE_SLOT_RE = /^guide(?:-\d+)?$/;
+/** 这条记录是不是引导化身 (职责标记 + guide 系 slot 双证)。人手开的 .guide 没有标记, 不认。 */
 export const isGuideManifestation = (rec: WizardRecord | undefined): boolean =>
-  !!rec && rec.description === GUIDE_DESC && tagOfKey(rec.target) === "guide";
+  !!rec && rec.description === GUIDE_DESC && GUIDE_SLOT_RE.test(tagOfKey(rec.target));
+/** 这个群现有的引导化身 target ("" = 没有)。 */
+export const guideOf = (store: WizardStore | undefined, base: string): string =>
+  store?.all().find((r) => baseOfKey(r.target) === base && isGuideManifestation(r))?.target ?? "";
+/** 这个群的引导化身该落在哪: 已有就是它; 否则 base#guide, 被别的记录占着就挂 -N。 */
+export const guideTargetOf = (store: WizardStore | undefined, base: string): string => {
+  const have = guideOf(store, base);
+  if (have) return have;
+  const taken = new Set((store?.all() ?? []).filter((r) => baseOfKey(r.target) === base).map((r) => tagOfKey(r.target)).filter(Boolean));
+  return keyOf(base, uniqueTag(GUIDE_SLOT, taken));
+};
+
+/** 引导化身调了某个工具 / 路由时的拒绝理由 ("" = 不是引导化身, 不管)。引导化身没有工具面:
+ *  它只把 daemon 的指令转成人话, 一切动作 (尤其 handoff / set_workspace / spawn / delegate
+ *  这类改自己运行形态或另起会话的) 都是越权 —— 2026-11-17 teststrict 实录: 引导化身把
+ *  「设置工作区为 …」当成自己的事, set_workspace + handoff self 后留在群里「等指令」。 */
+export const guideRefusal = (rec: WizardRecord | undefined, action: string): string =>
+  isGuideManifestation(rec)
+    ? "引导会话没有工具面 (" + action + " 被拒): 只用一两句话把 daemon 的指令转述给人, 目录 / 绑定由 daemon 处理, 不要调用任何工具或命令。"
+    : "";
 
 // ── 在途登记 (chatPolicyOf 的 strict 豁免凭据) ────────────────────────
 // 出站 tracker 第一句就会把新群登记成首见 strict —— 不豁免的话, 对话式引导第二轮
 // 起模型发言就被人只见占位。所以「在途」的群一律按 implicit 出站, 显式 chatPolicy
-// 也不豁免它: 绑定落盘之前这个群还谈不上治理。窗口覆盖到告别之后 (收尾 reap 时才
-// close), 让最后一句告别能出站; 收尾后第一条人话按正常首见登记, 管家的回复从此走
-// 严格门的 chat_reply 流程。只在本进程内有效 (mirror-bridge 与 inbound 同进程)。
+// 也不豁免它: 绑定落盘之前这个群还谈不上治理。绑定即关窗 (finish): 完成确认是 daemon
+// 的系统行, 不再等引导化身告别, 管家的回复从此走严格门的 chat_reply 流程。只在本进程
+// 内有效 (mirror-bridge 与 inbound 同进程)。
 const activeBases = new Set<string>();
-/** 这个群是否在引导途中 (含告别窗口)。 */
+/** 这个群是否在引导途中。 */
 export const isOnboardingActive = (base: string): boolean => activeBases.has(base);
-/** 收尾时关掉豁免窗口 (reap 引导化身的那一格调用)。 */
-export const closeOnboarding = (base: string): void => { activeBases.delete(base); };
 
 // ── 在途状态 ──────────────────────────────────────────────────────────
 // <stateDir>/onboarding.json 只记**还没走完**的群; 走完的凭据是 config 里的绑定,
@@ -75,9 +91,7 @@ const readStates = (cfg: Config): Record<string, OnboardingState> => {
     const out: Record<string, OnboardingState> = {};
     if (raw && typeof raw === "object" && !Array.isArray(raw)) {
       for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-        if (v && typeof v === "object" && (((v as OnboardingState).step === "workspace") || ((v as OnboardingState).step === "steward"))) {
-          out[k] = v as OnboardingState;
-        }
+        if (v && typeof v === "object" && (v as OnboardingState).step === "workspace") out[k] = { step: "workspace" };
       }
     }
     return out;
@@ -89,16 +103,13 @@ export interface OnboardingStore {
   get(base: string): OnboardingState | undefined;
   /** 进入 (或继续) 引导, 返回当前步。 */
   begin(base: string): OnboardingStep;
-  /** workspace 落定 → 进入管家步。 */
-  setWorkspace(base: string, cwd: string): OnboardingStep;
-  /** 绑定落盘后清掉在途状态。 */
+  /** 绑定落盘后清掉在途状态并关掉出站豁免。 */
   finish(base: string): void;
 }
 
 export const loadOnboardingStore = (cfg: Config): OnboardingStore => {
   const db = readStates(cfg);
-  // 在途播种: reload 后 (可能还有在途告别窗口之外的) 断点群继续豁免; finish 只清
-  // 状态 (状态机已完), 豁免窗口要等收尾 (closeOnboarding) —— 见上。
+  // 在途播种: reload 后断点群继续豁免。
   for (const b of Object.keys(db)) activeBases.add(b);
   const save = (): void => {
     try {
@@ -109,8 +120,7 @@ export const loadOnboardingStore = (cfg: Config): OnboardingStore => {
   return {
     get: (b) => db[b],
     begin: (b) => { db[b] = db[b] ?? { step: "workspace" }; activeBases.add(b); save(); return db[b]!.step; },
-    setWorkspace: (b, cwd) => { db[b] = { step: "steward", workspace: cwd }; activeBases.add(b); save(); return "steward"; },
-    finish: (b) => { if (db[b]) { delete db[b]; save(); } },
+    finish: (b) => { activeBases.delete(b); if (db[b]) { delete db[b]; save(); } },
   };
 };
 
@@ -126,14 +136,68 @@ export const validateWorkspace = (raw: string): { ok: true; abs: string } | { ok
   return { ok: true, abs: p };
 };
 
-/** 管家步的输入 → 名字候选: 剥 .x / 记号 / 引号, 截掉粘连的 @mention (名字不含 @),
- *  只取第一个空白分隔 token。空 = 没给出名字。 */
-export const stewardNameInput = (raw: string): string => {
-  const head = stripSigil(raw).replace(/["']/g, "").split("@")[0] ?? "";
-  return head.trim().split(/\s+/)[0] ?? "";
+// 路径片段: / 或 ~ 起头, 到空白或中文标点为止; 前一个字符必须是行首或非 ASCII 可见字符
+// (「设置工作区为/Users/x」认, 「https://a/b」「a/b」不认)。
+const PATH_RUN_RE = /[~/][^\s"'“”‘’，。；、！？（）《》]*/gu;
+const PATH_TAIL_RE = /[.,;:!?)\]]+$/;
+
+/** 人话里的目录候选: 第一个合格的路径片段 ("" = 没有)。~ 后只能跟 / 或结束。 */
+export const workspaceInput = (raw: string): string => {
+  const text = (raw ?? "").trim();
+  for (const m of text.matchAll(PATH_RUN_RE)) {
+    const prev = m.index ? text[m.index - 1]! : "";
+    if (prev && /[\x21-\x7e]/.test(prev)) continue;
+    const run = m[0].replace(PATH_TAIL_RE, "");
+    if (run.startsWith("~") && run.length > 1 && run[1] !== "/") continue;
+    if (run) return run;
+  }
+  return "";
 };
 
-// ── 写入 ──────────────────────────────────────────────────────────────
+/** 绑已有管家的名字候选 (按出现先后去重): 空白切出的 token (剥 .x / 记号 / 引号, 截掉粘连的
+ *  @mention) 加上嵌在中文里的 ASCII 名字串 (「绑定fix」里的 fix)。只是候选, 要名册命中才算。 */
+export const stewardNameCandidates = (raw: string): string[] => {
+  const tokens = (raw ?? "").split(/\s+/).map((t) => (stripSigil(t).replace(/["'“”‘’]/g, "").split("@")[0] ?? "").trim());
+  const ascii = tokens.flatMap((t) => t.match(/[A-Za-z0-9_-]+/g) ?? []);
+  return [...new Set([...tokens, ...ascii].filter((t) => WIZARD_NAME_RE.test(t)))];
+};
+
+export type OnboardingInput =
+  | { kind: "workspace"; path: string }
+  | { kind: "command" }
+  | { kind: "names"; names: string[] };
+
+/** 引导期的一句人话归哪类: 目录 / 斜杠命令 / 名字候选。行首 / 的既可能是命令也可能是绝对
+ *  路径 —— 首 token 是存在的目录或带第二段 (/Users/x) 就按路径, 否则 (/new /strict) 是命令。 */
+export const classifyOnboardingInput = (raw: string): OnboardingInput => {
+  const text = (raw ?? "").trim();
+  const path = workspaceInput(text);
+  if (text.startsWith("/")) {
+    const head = text.split(/\s+/)[0] ?? "";
+    const pathish = /^\/[^/\s]+\//.test(head) || validateWorkspace(head).ok;
+    if (!pathish) return { kind: "command" };
+  }
+  return path ? { kind: "workspace", path } : { kind: "names", names: stewardNameCandidates(text) };
+};
+
+// ── 判定 + 写入 ───────────────────────────────────────────────────────
+
+export type OnboardingVerdict =
+  | { kind: "retry"; reason: string }
+  | { kind: "bind-new"; workspace: string }
+  | { kind: "bind-existing"; name: string; target: string };
+
+/** 一句非命令人话 → 该做什么 (纯判定, 不写盘)。名字只认本 bot 名册里的已有身份,
+ *  且排除引导化身本身。 */
+export const judgeOnboarding = (store: WizardStore | undefined, base: string, input: Exclude<OnboardingInput, { kind: "command" }>): OnboardingVerdict => {
+  if (input.kind === "workspace") {
+    const v = validateWorkspace(input.path);
+    return v.ok ? { kind: "bind-new", workspace: v.abs } : { kind: "retry", reason: "目录不行: " + v.reason };
+  }
+  const hit = input.names.map((n) => store?.byName(n)).find((r) => r && sameBot(base, r.target) && !isGuideManifestation(r));
+  if (hit) return { kind: "bind-existing", name: hit.name, target: hit.target };
+  return { kind: "retry", reason: input.names.length ? "没认出目录, 名册里也没有叫 " + input.names.slice(0, 3).join(" / ") + " 的管家" : "没认出目录或管家名字" };
+};
 
 /** 把管家绑定写进 config (热): chatPolicy.<base>.steward。宪章守卫由调用方包。 */
 export const bindSteward = (cfg: Config, sourcePath: string, base: string, name: string): void => {
@@ -143,22 +207,37 @@ export const bindSteward = (cfg: Config, sourcePath: string, base: string, name:
   patchJsonc(sourcePath, [{ path: ["chatPolicy", base, "steward"], value: name }]);
 };
 
-// ── 话术 (daemon → 引导化身的注入指令; 纯函数) ───────────────────────
-// 每条指令自包含 (reload 换了引导化身也能接上), 并约定: 引导者只转述引导、每次一两
-// 句话、不闲聊 —— 表达层约束 (机制层: 状态机/落盘/强制全在 daemon, 模型跳不了步)。
-// 指令里不写点号名字示例 (如 `.fix`), 免得被 peerMentions 当成点名标注。
+export interface OnboardingBound { name: string; workspace: string; fresh: boolean }
+
+/** 落定一个绑定 verdict: 新建 = 本群 untagged 锚点落 kind:steward + workspace (身份级) 并领一个
+ *  自动中性名; 已有 = 只绑名字 (工作区跟身份走)。bind 写 chatPolicy (调用方包宪章守卫), 最后
+ *  finish 关掉状态机与出站豁免 —— 返回之后 needsOnboarding 恒为 false。 */
+export const applyOnboarding = (
+  store: WizardStore,
+  onboarding: OnboardingStore,
+  base: string,
+  verdict: Exclude<OnboardingVerdict, { kind: "retry" }>,
+  bind: (name: string) => void,
+  workspaceOf: (target: string) => string,
+): OnboardingBound => {
+  const done = (b: OnboardingBound): OnboardingBound => { bind(b.name); onboarding.finish(base); return b; };
+  if (verdict.kind === "bind-existing") return done({ name: verdict.name, workspace: workspaceOf(verdict.target), fresh: false });
+  store.upsert(base, { kind: "steward", workspace: verdict.workspace });
+  return done({ name: store.claim(base, store.nextName()), workspace: verdict.workspace, fresh: true });
+};
+
+// ── 话术 ──────────────────────────────────────────────────────────────
+// 引导化身的注入指令 (自包含: reload 换了引导化身也能接上) 与完成确认 (daemon 系统行,
+// 以 [wezard] 起头 —— 严格群出站门放行系统行)。指令里不写点号名字示例, 免得被
+// peerMentions 当成点名标注。
 
 export const renderGuideOpening = (): string =>
-  "你是这个新群的引导者 (wezard 被拉进新群后的初始化流程)。只做引导、不闲聊、不回答与引导无关的问题, 每次一两句话。需要人定两件事, 先是第一件: 请友好开场, 并请人回复管家要工作的目录 (绝对路径, 可 ~ 开头)。";
+  "你是这个新群的引导者 (wezard 被拉进新群后的初始化流程)。你没有任何工具, 也不需要: 只说话, 不调用工具或命令, 不闲聊、不回答与引导无关的问题, 每次一两句话。请友好开场, 并请人回复本群管家要工作的目录 (绝对路径, 可 ~ 开头) —— 给了目录就会在那里新建本群管家, 引导随即结束; 想让本群共用一个已有管家, 也可以直接回复它的名字。";
 
-export const renderGuideWorkspaceOk = (workspace: string): string =>
-  "workspace 已定: " + workspace + "。请请人进行第二件事 —— 绑定管家: 回复一个已有管家的名字 (例: fix), 或一个新名字 (将在这个目录新建管家)。一两句话讲完。";
+export const renderGuideRetry = (reason: string): string =>
+  "人刚才的回复没能完成绑定 (" + reason + ")。你没有工具, 不要尝试任何操作; 用一句话请人回复一个存在的目录 (绝对路径, 可 ~ 开头), 或一个已有管家的名字。";
 
-export const renderGuideWorkspaceRetry = (reason: string): string =>
-  "人刚给的目录不行 (" + reason + ")。请请人重发一个存在的目录 (绝对路径, 可 ~ 开头)。一句话即可。";
-
-export const renderGuideStewardRetry = (reason: string): string =>
-  "这个绑定不行 (" + reason + ")。请请人回复一个已有管家的名字 (例: fix), 或一个新名字 (1-32 位字母/数字/_/-)。一句话即可。";
-
-export const renderGuideStewardDone = (name: string, workspace: string, note = ""): string =>
-  "引导完成: 管家 " + name + " 已就位 (工作区 " + workspace + "), 绑定已生效。" + (note ? note + " " : "") + "请用一两句话祝贺并告别, 告诉人以后直接在群里说话就是找这位管家; 说完即可, 不必再说别的。";
+export const renderOnboardingDone = (b: OnboardingBound): string =>
+  b.fresh
+    ? "[wezard] ✅ 引导完成: 本群管家 ." + b.name + " 已就位 (工作区 " + b.workspace + ")。之后直接在群里说话就是找它; 想起名发 /name <名字>。"
+    : "[wezard] ✅ 引导完成: 本群管家绑定为已有的 ." + b.name + " (工作区跟身份走: " + (b.workspace || "身份未记录工作区") + ")。之后直接在群里说话就是找它。";
