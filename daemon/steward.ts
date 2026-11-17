@@ -5,13 +5,16 @@
 //   stewardRoute       裸消息该投给谁 (接待解析; 需要新开化身时给出描述子, 由调用方落盘/起 pane)
 //   isStewardTarget    一个 target 是否该聊天的管家化身 —— 手闸 (approval) 与宪章 steward 章的判定面
 //   markGlobalSteward  boot 落位: home (defaultChat) 的默认会话标记为全局管家身份的锚点
+//   stewardsAt         某个目录上已有的管家身份 (<role, workspace> 唯一确定身份): 引导 / set_workspace 查重
 //
 // 「boot 时把存量聊天的 untagged wizard 写进运行时绑定」不另做快照: untagged 记录本身就是
 // 事实之源, 每次现读 (stewardIdentityOf 的回落分支) —— 快照反而会在 respawn / forget 之后漂移。
+import { resolve } from "node:path";
 import type { Config } from "../shared/config.js";
+import { expandHome } from "../shared/paths.js";
 import { baseOfKey, keyOf, sameBot, tagOfKey, uniqueTag } from "../shared/session-label.js";
+import { anchorOf, identityOf, type WizardKind, type WizardRecord, type WizardStore } from "./wizard.js";
 import { channelOf } from "./channel-posts.js";
-import { identityOf, type WizardKind, type WizardStore } from "./wizard.js";
 
 /** config 里显式绑定的管家身份名 (chatPolicy.<base>.steward); "" = 没绑。 */
 export const appointedSteward = (cfg: Config, base: string): string =>
@@ -40,6 +43,38 @@ export const stewardIdentityOf = (cfg: Config, store: WizardStore | undefined, b
   return own ? identityOf(own) : undefined;
 };
 
+/** 管家的种类: 只有它们算「这个目录的管家」(<role, workspace> 的唯一性只管这两种角色)。 */
+export const STEWARD_KINDS: readonly WizardKind[] = ["global-steward", "steward"];
+
+/** 规范路径: 展开 ~、resolve、去掉末尾 "/" (根 "/" 保留)。空串 → ""。 */
+const normPath = (p: string): string => {
+  const s = (p ?? "").trim();
+  if (!s) return "";
+  const r = resolve(expandHome(s));
+  return r.length > 1 && r.endsWith("/") ? r.replace(/\/+$/, "") || "/" : r;
+};
+
+/** 某个目录上已有的管家身份 (每身份一条锚点记录, 按 target 字典序稳定)。
+ *  判据分两层: 显式 (锚点的 workspace 就是这个目录) 优先, 其次是「没写 workspace 的锚点,
+ *  它活会话的 cwd 就是这个目录」(cwdOf 返回 "" 视为不知道, 不匹配); 推断层里全局管家优先 ——
+ *  兜底目录上堆着很多存量群的默认会话, 新群给这个目录指的是全局管家。取第一个非空的层。 */
+export const stewardsAt = (
+  store: WizardStore | undefined,
+  base: string,
+  workspace: string,
+  cwdOf: (target: string) => string = () => "",
+): WizardRecord[] => {
+  if (!store) return [];
+  const want = normPath(workspace);
+  const anchors = [...new Set(store.all().map((w) => identityOf(w)))]
+    .map((id) => anchorOf(store, id))
+    .filter((a): a is WizardRecord => !!a && !!a.name && !!a.kind && STEWARD_KINDS.includes(a.kind) && sameBot(base, a.target))
+    .sort((a, b) => (a.target < b.target ? -1 : a.target > b.target ? 1 : 0));
+  const explicit = anchors.filter((a) => normPath(a.workspace ?? "") === want);
+  const inferred = anchors.filter((a) => !(a.workspace ?? "").trim() && !!normPath(cwdOf(a.target)) && normPath(cwdOf(a.target)) === want);
+  return [explicit, inferred.filter((a) => a.kind === "global-steward"), inferred].find((t) => t.length) ?? [];
+};
+
 /** 该身份在一个聊天里的化身记录: untagged 优先 (绑定恰好指向旧默认会话的身份时仍是它),
  *  其余按出生先后 —— 结果与记录顺序无关, 恒定可复现。 */
 const manifestationIn = (store: WizardStore, identity: string, base: string) =>
@@ -47,13 +82,6 @@ const manifestationIn = (store: WizardStore, identity: string, base: string) =>
     .filter((w) => identityOf(w) === identity && baseOfKey(w.target) === base)
     .slice()
     .sort((a, b) => Number(!!tagOfKey(a.target)) - Number(!!tagOfKey(b.target)) || a.bornAt - b.bornAt || (a.target < b.target ? -1 : 1))[0];
-
-/** 身份的锚点记录 (target === identity 优先, 否则最老的一条) —— 新化身的名字 / 种类 / 工作区都取它。 */
-const anchorOf = (store: WizardStore, identity: string) =>
-  store.all()
-    .filter((w) => identityOf(w) === identity)
-    .slice()
-    .sort((a, b) => Number(a.target !== identity) - Number(b.target !== identity) || a.bornAt - b.bornAt)[0];
 
 export interface StewardRoute {
   /** 裸消息的投递目标。 */

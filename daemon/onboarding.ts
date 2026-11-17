@@ -3,9 +3,9 @@
 // 人 2026-11-17 第二次改口径: 「工作区设置以后, 其实就等同于绑定了一个 wizard 管家,
 // 就应该退出引导了」: 一给合法目录, daemon 就在本群 untagged 锚点新建管家 (kind
 // steward + workspace, 自动中性名) 并写 chatPolicy.<base>.steward, 状态机一步终结、
-// 系统行确认、引导化身当场收掉; 名字后置给 /name。另一条入口是「已有管家的名字」
-// (拍板 A: workspace 身份级, 跨群共用一个管家只能按名字绑, 给同一个目录会新建一个
-// 身份) —— 两条入口按形状区分: 目录以 / 或 ~ 起头, 名字不含 /。
+// 系统行确认、引导化身当场收掉; 名字后置给 /name。人 2026-11-17 拍板 <role, workspace>
+// 唯一确定身份 —— 给的目录上已有本 bot 的管家身份就绑它 (每群一条隔离化身, 职责/记忆随
+// 身份复用), 没有才新建; 名字入口照旧。两条入口按形状区分: 目录以 / 或 ~ 起头, 名字不含 /。
 // 引导是强制的: 不设跳过、不设超时。daemon 是状态机主人: 判定/校验/落盘/强制全在
 // 这里与 guideGate, 引导化身只负责表达 —— 它没有工具面 (宪章不发、审批层全拒、改
 // 运行形态的路由按引导异常收尸, 见 guideRefusal), 绝不会 handoff / set_workspace 自己。
@@ -15,7 +15,7 @@ import { ChatPolicy, type Config } from "../shared/config.js";
 import { patchJsonc } from "../shared/config-writer.js";
 import { expandHome } from "../shared/paths.js";
 import { baseOfKey, keyOf, sameBot, stripSigil, tagOfKey, uniqueTag } from "../shared/session-label.js";
-import { appointedChannelSteward, appointedSteward } from "./steward.js";
+import { appointedChannelSteward, appointedSteward, stewardsAt } from "./steward.js";
 import type { WizardRecord, WizardStore } from "./wizard.js";
 import { channelOf, postsOfChannel } from "./channel-posts.js";
 
@@ -191,11 +191,16 @@ export type OnboardingVerdict =
   | { kind: "bind-existing"; name: string; target: string };
 
 /** 一句非命令人话 → 该做什么 (纯判定, 不写盘)。名字只认本 bot 名册里的已有身份,
- *  且排除引导化身本身。 */
-export const judgeOnboarding = (store: WizardStore | undefined, base: string, input: Exclude<OnboardingInput, { kind: "command" }>): OnboardingVerdict => {
+ *  且排除引导化身本身。目录上已有管家身份 (<role, workspace> 唯一) 就绑它, 没有才新建 ——
+ *  cwdOf 给「没写 workspace 的管家」判它现在的活目录。 */
+export const judgeOnboarding = (store: WizardStore | undefined, base: string, input: Exclude<OnboardingInput, { kind: "command" }>, cwdOf: (target: string) => string = () => ""): OnboardingVerdict => {
   if (input.kind === "workspace") {
     const v = validateWorkspace(input.path);
-    return v.ok ? { kind: "bind-new", workspace: v.abs } : { kind: "retry", reason: "目录不行: " + v.reason };
+    if (!v.ok) return { kind: "retry", reason: "目录不行: " + v.reason };
+    const hits = stewardsAt(store, base, v.abs, cwdOf);
+    if (hits.length === 1) return { kind: "bind-existing", name: hits[0]!.name, target: hits[0]!.target };
+    if (hits.length > 1) return { kind: "retry", reason: "目录 " + v.abs + " 上已有多个管家: " + hits.slice(0, 5).map((h) => h.name).join(" / ") + " — 回复其中一个的名字" };
+    return { kind: "bind-new", workspace: v.abs };
   }
   const hit = input.names.map((n) => store?.byName(n)).find((r) => r && sameBot(base, r.target) && !isGuideManifestation(r));
   if (hit) return { kind: "bind-existing", name: hit.name, target: hit.target };
@@ -263,7 +268,7 @@ export const applyOnboarding = (
 // peerMentions 当成点名标注。
 
 export const renderGuideOpening = (): string =>
-  "你是这个新群的引导者 (wezard 被拉进新群后的初始化流程)。你没有任何工具, 也不需要: 只说话, 不调用工具或命令, 不闲聊、不回答与引导无关的问题, 每次一两句话。请友好开场, 并请人回复本群管家要工作的目录 (绝对路径, 可 ~ 开头) —— 给了目录就会在那里新建本群管家, 引导随即结束; 想让本群共用一个已有管家, 也可以直接回复它的名字。";
+  "你是这个新群的引导者 (wezard 被拉进新群后的初始化流程)。你没有任何工具, 也不需要: 只说话, 不调用工具或命令, 不闲聊、不回答与引导无关的问题, 每次一两句话。请友好开场, 并请人回复本群管家要工作的目录 (绝对路径, 可 ~ 开头) —— 给了目录: 该目录已有管家就直接共用它, 没有就在那里新建本群管家, 引导随即结束; 想让本群共用一个已有管家, 也可以直接回复它的名字。";
 
 export const renderGuideRetry = (reason: string): string =>
   "人刚才的回复没能完成绑定 (" + reason + ")。你没有工具, 不要尝试任何操作; 用一句话请人回复一个存在的目录 (绝对路径, 可 ~ 开头), 或一个已有管家的名字。";

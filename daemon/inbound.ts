@@ -20,7 +20,7 @@ import { captureQuota, renderQuotaReport } from "./quota.js";
 import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe, allNames, unlinkTags, uniqueTag, displayName, createdAck, tagLink, withBot, sameBot, stripSigil } from "../shared/session-label.js";
 import { botTagOf } from "./bot-mux.js";
 import { chatNameOf, chatPolicyOf, listChatNames, stewardTierOf, type CharterGuard } from "./chat-name.js";
-import { identityWorkspaceOf, manifestationOf, settleName, wizardStore } from "./wizard.js";
+import { anchorOf, identityFieldsOf, identityOf, identityWorkspaceOf, manifestationOf, settleName, wizardStore } from "./wizard.js";
 import { autoOrdinalOf } from "./wizard-names.js";
 import { stewardIdentityOf, stewardRoute as resolveSteward } from "./steward.js";
 import { noteNativeChannelFrame } from "./channel.js";
@@ -1154,13 +1154,24 @@ export const installInboundRouter = (
   const stewardReception = (base: string): string => {
     const r = resolveSteward(cfg, wizardStore(), base, (t) => ((c) => c.runningCwd || c.defaultCwd)(bridge.getCwd(t)));
     if (r.fresh && !freshSteward.has(r.target)) {
-      wizardStore()?.upsert(r.target, { identity: r.fresh.identity, name: r.fresh.name, ...(r.fresh.kind ? { kind: r.fresh.kind } : {}) });
+      // 身份级字段 (职责 / 专长 / 记忆 / 角色) 从锚点带过来: 新化身是同一个身份在不同群的
+      // 又一条记录, 不是一张白纸。
+      const store = wizardStore();
+      const inherited = identityFieldsOf(store ? anchorOf(store, r.fresh.identity) : undefined);
+      store?.upsert(r.target, { ...inherited, identity: r.fresh.identity, name: r.fresh.name, ...(r.fresh.kind ? { kind: r.fresh.kind } : {}) });
       freshSteward.set(r.target, r.fresh.workspace ?? "");
       log.info({ base, target: r.target, identity: r.fresh.identity }, "steward reception: new manifestation registered");
     }
     return r.target;
   };
-  const resolve: Resolve = (base, name) => (name ? resolveName(base, name) : stewardReception(base));
+  // 点名: 已绑定的群里点本群管家 → 仍走接待 (落本群化身, 没有就新开), 不回落锚点 ——
+  // 否则点名会与别的群共享那条会话, 而它明确是指「本群的管家」。
+  const resolve: Resolve = (base, name) => {
+    if (!name) return stewardReception(base);
+    const rec = wizardStore()?.byName(name);
+    if (rec && sameBot(base, rec.target) && identityOf(rec) === stewardIdentityOf(cfg, wizardStore(), base)) return stewardReception(base);
+    return resolveName(base, name);
+  };
   const route = (msg: BaseMessage, raw: string): { text: string; tag: string; promoted: boolean; who: string } => {
     const c = composeInbound(msg, raw, quoteInContext, stripAt, resolve);
     return { ...c, who: resolve(chatPrincipal(msg), c.tag) };
@@ -1248,7 +1259,7 @@ export const installInboundRouter = (
     // 首触且不是一步到位的回答 → 开场 (引导化身起会话 + 请人给目录或已有管家名)。
     const first = !onboarding.get(base);
     onboarding.begin(base);
-    const verdict = judgeOnboarding(store, base, input);
+    const verdict = judgeOnboarding(store, base, input, (t) => bridge.sessionInfo(t)?.cwd ?? "");
     if (verdict.kind === "retry") {
       await inject(first ? renderGuideOpening() : renderGuideRetry(verdict.reason));
       return true;
