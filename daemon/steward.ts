@@ -9,10 +9,9 @@
 //
 // 「boot 时把存量聊天的 untagged wizard 写进运行时绑定」不另做快照: untagged 记录本身就是
 // 事实之源, 每次现读 (stewardIdentityOf 的回落分支) —— 快照反而会在 respawn / forget 之后漂移。
-import { resolve } from "node:path";
 import type { Config } from "../shared/config.js";
-import { expandHome } from "../shared/paths.js";
 import { baseOfKey, keyOf, sameBot, tagOfKey, uniqueTag } from "../shared/session-label.js";
+import { normPath } from "./classes.js";
 import { anchorOf, identityOf, type WizardKind, type WizardRecord, type WizardStore } from "./wizard.js";
 import { channelOf } from "./channel-posts.js";
 
@@ -45,14 +44,6 @@ export const stewardIdentityOf = (cfg: Config, store: WizardStore | undefined, b
 
 /** 管家的种类: 只有它们算「这个目录的管家」(<role, workspace> 的唯一性只管这两种角色)。 */
 export const STEWARD_KINDS: readonly WizardKind[] = ["global-steward", "steward"];
-
-/** 规范路径: 展开 ~、resolve、去掉末尾 "/" (根 "/" 保留)。空串 → ""。 */
-const normPath = (p: string): string => {
-  const s = (p ?? "").trim();
-  if (!s) return "";
-  const r = resolve(expandHome(s));
-  return r.length > 1 && r.endsWith("/") ? r.replace(/\/+$/, "") || "/" : r;
-};
 
 /** 某个目录上已有的管家身份 (每身份一条锚点记录, 按 target 字典序稳定)。
  *  判据分两层: 显式 (锚点的 workspace 就是这个目录) 优先, 其次是「没写 workspace 的锚点,

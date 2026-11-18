@@ -17,7 +17,8 @@ import { copyFileSync, existsSync, statSync } from "node:fs";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { expandHome } from "../shared/paths.js";
 import { loadAutoNames } from "./wizard-names.js";
-import { baseOfKey, keyOf, normalizeTag, stripSigil, tagOfKey, uniqueTag, WIZARD_MARK } from "../shared/session-label.js";
+import { baseOfKey, keyOf, normalizeTag, stripSigil, tagOfKey, WIZARD_MARK } from "../shared/session-label.js";
+import { CLASS_NAME_MAX, inClassSpace, instanceName, validClassName, type ClassRecord, type ClassStore } from "./classes.js";
 
 /** 宪章学徒章 (§7; renderCharter 在 self.kind === "apprentice" 时追加)。 */
 const renderApprenticeRules = (): string[] => [
@@ -97,6 +98,9 @@ export interface WizardRecord {
   spawnReused?: boolean;
   /** 自己写下的长期记忆, 每次 spawn 重新注入上下文。 */
   memory: string[];
+  /** 类实例的序号 (1 起); 有它 = 这条记录的 identity 是一个类的 id, 名字恒为 `<类名>-<序号>`。
+   *  缺省 = 自由 wizard (临时 worker / 学徒 / 未迁移的旧记录), 名字照旧走 pickName 的 -N 退避。 */
+  ordinal?: number;
 }
 
 export interface WizardStore {
@@ -117,6 +121,8 @@ export interface WizardStore {
   upsertIdentity: (target: string, patch: Partial<Pick<WizardRecord, IdentityField>>) => WizardRecord;
   drop: (target: string) => void;
   all: () => WizardRecord[];
+  /** 绑定的类表 (loadWizardStore 的第三个参数)。缺省 = 没有类, 一切走旧行为。 */
+  classes?: ClassStore;
 }
 
 export const MEMORY_MAX = 60;
@@ -127,22 +133,49 @@ const blank = (target: string, bornAt: number): WizardRecord => ({ target, ident
 /** target → 它会话 transcript 的第一条记录时刻; 没有会话 → undefined。 */
 export type BornOf = (target: string) => number | undefined;
 
-const foldName = (n: string): string => stripSigil(n).toLowerCase();
+/** 名字的折叠 (大小写 / 记号不敏感) —— 名字唯一性与「类名 ↔ 实例名」都按这一把尺子。 */
+export const foldName = (n: string): string => stripSigil(n).toLowerCase();
 
-/** `want` 规整成合法名字, 再避开 `others` 已占的 (大小写不敏感)。空 → "wizard"。 */
-export const pickName = (want: string, others: readonly string[]): string => {
+/** `want` 规整成合法名字, 再避开 `others` 已占的 (大小写不敏感)。空 → "wizard"。
+ *  `reserved` = 类名字空间 (类名 + `<类名>-<数字>`): 那可是实例的地址, 自由名撞上去
+ *  会让一个实例永远解析不回它的类, 所以撞了就继续往后取 `-N`。 */
+export const pickName = (want: string, others: readonly string[], reserved: readonly string[] = []): string => {
   const taken = new Set(others.map(foldName).filter(Boolean));
   const base = normalizeTag(want) || "wizard";
-  const n = uniqueTag(base.toLowerCase(), taken);
-  // uniqueTag 在折叠后的空间里找空位; 结果按原大小写回填前缀, 只追加 `-N`。
-  return n === base.toLowerCase() ? base : `${base.slice(0, 29)}${n.slice(Math.min(base.length, 29))}`;
+  const clash = (c: string): boolean => taken.has(foldName(c)) || inClassSpace(c, reserved);
+  if (!clash(base)) return base;
+  // base 自己不是类名时, 整条 `<base>-N` 序列都在类名字空间之外, 照旧拿 -N 退避。
+  if (!inClassSpace(base, reserved)) {
+    for (let n = 2; ; n += 1) {
+      const c = `${base.slice(0, 29)}-${n}`;
+      if (!clash(c)) return c;
+    }
+  }
+  // base 就是一个类名: `<base>-N` 全是那个类的实例地址, 退到 `-wN` (不形如实例名, 不会
+  // 被 parseInstanceName 认成 `<类>-<序号>`)。
+  for (let n = 2; ; n += 1) {
+    const c = `${base.slice(0, 28)}-w${n}`;
+    if (!clash(c)) return c;
+  }
 };
+
+/** 一个类的全部实例, 按序号 (同号按 target) 稳定排序 —— 与记录在盘上的顺序无关。 */
+const instancesOfRows = (rows: readonly WizardRecord[], classId: string): WizardRecord[] =>
+  rows
+    .filter((w) => identityOf(w) === classId && w.ordinal !== undefined)
+    .sort((a, b) => (a.ordinal! - b.ordinal!) || (a.target < b.target ? -1 : a.target > b.target ? 1 : 0));
+
+/** 一个类的全部实例 (序号升序)。类 id 就是实例们的 identity。 */
+export const instancesOf = (store: WizardStore | undefined, classId: string): WizardRecord[] =>
+  store ? instancesOfRows(store.all(), classId) : [];
 
 /** 写穿式单文件存储, 与 mirror-store 同款 —— 这是运行时状态, 不是用户手写配置,
  *  所以躺在 stateDir 而不是 config.jsonc。 */
 // 新记录的 bornAt: 已有会话 (开机迁移 / 懒认领一个老 session) 取 transcript 首条 ——
 // 「写进注册表的时刻」不是出生; 真新生的还没有 transcript, 才退回此刻。
-export const loadWizardStore = (filePath: string, bornOf: BornOf = () => undefined): WizardStore => {
+// `classes` = 类表 (daemon/classes.ts)。不传 = 完全旧行为: 名字照旧在 wizard 级去重,
+// 记录上没有 ordinal, byName 也不会把类名解析成实例 —— 接线 (boot) 是下一阶段的事。
+export const loadWizardStore = (filePath: string, bornOf: BornOf = () => undefined, classes?: ClassStore): WizardStore => {
   const db = loadJsonMap<WizardRecord>(filePath, undefined, { strict: true });
   const nextAutoName = loadAutoNames(`${filePath}.names.json`);
   // drop 过的 target: claim 只推名字、不落盘, 直到有人明确 upsert (重新 spawn) 它。
@@ -152,6 +185,15 @@ export const loadWizardStore = (filePath: string, bornOf: BornOf = () => undefin
   const all = (): WizardRecord[] => Object.values(db.all());
   // 这个 target 当前所属的身份: 有记录看记录, 没记录它自己就是一个新身份。
   const identityKey = (t: string): string => db.get(t)?.identity || t;
+  // 类名字空间: 类名与 `<类名>-<数字>` 都是实例的地址, 自由名必须绕开 (pickName/nextName 共用)。
+  const classNames = (): string[] => (classes ? classes.all().map((c) => c.name) : []);
+  /** 这条记录是不是类实例 (有 ordinal)。没有 classes 时恒 false —— 旧行为一点不动。 */
+  const instanceOf = (t: string): { class: ClassRecord; ordinal: number } | undefined => {
+    const rec = db.get(t);
+    if (!classes || rec?.ordinal === undefined) return undefined;
+    const cls = classes.get(identityKey(t));
+    return cls ? { class: cls, ordinal: rec.ordinal } : undefined;
+  };
   const upsert = (t: string, patch: Partial<Omit<WizardRecord, "target">>): WizardRecord => {
     dropped.delete(t);
     const base = db.get(t) ?? blank(t, bornOf(t) ?? Date.now());
@@ -166,7 +208,23 @@ export const loadWizardStore = (filePath: string, bornOf: BornOf = () => undefin
   const namesExcept = (t: string): string[] => all().filter((w) => identityOf(w) !== identityKey(t)).map((w) => w.name);
   const rename = (t: string, want: string): string => {
     const id = identityKey(t);
-    const name = pickName(want, namesExcept(t));
+    const inst = instanceOf(t);
+    if (inst) {
+      // 类实例: 改的是**类**的名字, 不是这条记录的名字 —— 实例名恒为 `<类名>-<序号>`。
+      // 类名不能以 -数字 结尾, 所以撞名没有 -N 的退避可言: 合法就说清错在哪, 让调用方报给人。
+      const next = (want ?? "").trim();
+      if (!validClassName(next)) throw new Error(`invalid class name: ${next || "(empty)"} (≤${CLASS_NAME_MAX} 字符, 不以 -数字 结尾)`);
+      if (classes!.all().some((c) => c.id !== id && foldName(c.name) === foldName(next))) {
+        throw new Error(`class name taken: ${next}`);
+      }
+      // 类名与某个自由 wizard 同名也会让「名字→谁」二义 (记录名精确匹配优先), 一样拒。
+      if (namesExcept(t).some((n) => foldName(n) === foldName(next))) throw new Error(`class name taken: ${next}`);
+      classes!.rename(id, next);
+      all().filter((w) => identityOf(w) === id && w.ordinal !== undefined)
+        .forEach((w) => upsert(w.target, { name: instanceName(next, w.ordinal!) }));
+      return instanceName(next, inst.ordinal);
+    }
+    const name = pickName(want, namesExcept(t), classNames());
     upsert(t, { name });
     // 名字是身份的地址: 改名同步同身份的全部化身, 否则「名字→身份」的寻址会裂开。
     all().filter((w) => w.target !== t && identityOf(w) === id).forEach((w) => upsert(w.target, { name }));
@@ -177,12 +235,26 @@ export const loadWizardStore = (filePath: string, bornOf: BornOf = () => undefin
     const id = identityKey(t);
     const me = upsert(t, patch);
     all().filter((w) => w.target !== t && identityOf(w) === id).forEach((w) => upsert(w.target, patch));
+    // 类实例: 身份字段是类的字段 (人物的设定住类表), wizard 记录只是它的化身 —— 两边同写,
+    // 否则下一次 spawn 从类重建宪章时又拿着旧设定。
+    const cls = classes?.get(id);
+    if (cls) {
+      const cp = {
+        ...(patch.description !== undefined ? { description: patch.description } : {}),
+        ...(patch.expertise !== undefined ? { expertise: patch.expertise } : {}),
+        ...(patch.memory !== undefined ? { memory: patch.memory } : {}),
+        ...(patch.role !== undefined ? { role: patch.role } : {}),
+      };
+      if (Object.keys(cp).length) classes!.upsert(id, cp);
+    }
     return me;
   };
   return {
+    ...(classes ? { classes } : {}),
     nextName: (inUse = () => false) => {
       const taken = new Set(all().map((w) => foldName(w.name)));
-      return nextAutoName((name) => taken.has(foldName(name)) || inUse(name));
+      const reserved = classNames();
+      return nextAutoName((name) => taken.has(foldName(name)) || inClassSpace(name, reserved) || inUse(name));
     },
     get: db.get,
     // 名字 → 身份 → 那个身份的锚点记录 (target === identity 的那条; 1:1 迁移后每身份恰有一条)。
@@ -191,7 +263,13 @@ export const loadWizardStore = (filePath: string, bornOf: BornOf = () => undefin
     byName: (n) => {
       const k = foldName(n);
       const hits = k ? all().filter((w) => foldName(w.name) === k) : [];
-      if (!hits.length) return undefined;
+      if (!hits.length) {
+        // 没命中任何记录名: 类名是它锚点实例的地址 (target === 类 id 那条; 没有就序号最小)。
+        const cls = classes?.byName(n);
+        if (!cls) return undefined;
+        const kin = instancesOfRows(all(), cls.id);
+        return kin.find((w) => w.target === cls.id) ?? kin[0];
+      }
       const id = [...new Set(hits.map(identityOf))].sort()[0]!;
       const kin = hits.filter((w) => identityOf(w) === id).slice().sort((a, b) => (a.target < b.target ? -1 : a.target > b.target ? 1 : 0));
       return kin.find((w) => w.target === id) ?? kin[0];
@@ -200,6 +278,14 @@ export const loadWizardStore = (filePath: string, bornOf: BornOf = () => undefin
       const have = db.get(t)?.name;
       if (have) return have;
       if (dropped.has(t)) return normalizeTag(want) || want;
+      // 类实例的名字由序号决定, 不从 want 推、也不参与 -N 退避 —— 名字里带序号才认得回类。
+      // (空名只出现在半个迁移 / 手改过盘上; 补一次就收敛, 之后这里永远走上面的 have。)
+      const inst = instanceOf(t);
+      if (inst) {
+        const name = instanceName(inst.class.name, inst.ordinal);
+        upsert(t, { name, ordinal: inst.ordinal });
+        return name;
+      }
       // 同身份已有名字: 化身直接领身份的名字, 不查重也不挂 -N (名字属于身份, 不属于化身)。
       const sib = all().find((w) => w.target !== t && identityOf(w) === identityKey(t) && w.name);
       return sib?.name ?? rename(t, want);
@@ -351,7 +437,11 @@ export const identityFieldsOf = (rec: WizardRecord | undefined): Partial<Pick<Wi
 export const identityWorkspaceOf = (store: WizardStore | undefined, target: string): string => {
   const rec = store?.get(target);
   if (!store || !rec) return "";
-  return anchorOf(store, identityOf(rec))?.workspace ?? "";
+  const id = identityOf(rec);
+  // 有类: 工作区是**类**的字段 (人物的 <role, workspace>), 实例各自不再写一份。
+  const cls = store.classes?.get(id);
+  if (cls) return cls.workspace;
+  return anchorOf(store, id)?.workspace ?? "";
 };
 
 /** 名字: 名册里落定的 > 默认名。只读推导, 不写盘 —— 需要落定用 store.claim。 */
