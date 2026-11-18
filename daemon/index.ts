@@ -125,7 +125,7 @@ import type { PlanStore } from "./plans.js";
 import { registerPlanRoutes } from "./plan-http.js";
 import { returnOpOf, type HeldSeen, type InFlight, type Prereq, type ReturnOp, type Tell } from "./dispatch.js";
 import { NO_DEADLINE, isTerminal, renderInFlight, turnState } from "../shared/turn-state.js";
-import { startIdleNudge, startObligationWatch, strictDeliveryNudge, strictDeliveryStewardNote, strictDeliveryHumanLine,
+import { startIdleNudge, startObligationWatch, strictDeliveryNudge, strictDeliveryStewardNote, strictDeliveryHumanLine, strictUndeliveredNotice,
   type NudgeTarget, type ObligationRow, type ObligationWatch } from "./idle-nudge.js";
 import { askerFromEnvelope, parseReminders, renderReminder, stripReminders, withMsg, type NoteAttrs, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
 import { createHandoffs, cuttingTurn, handedOff, handingOff, handoffRound, resumeText, roundPending, settlesCut, type Pending as PendingHandoff } from "./handoff.js";
@@ -1588,6 +1588,29 @@ const main = async (): Promise<void> => {
       }
       settleFinal(e, verdict);
     };
+    /** strict 群 chat 义务「终句没交付」的当轮提醒账 (每行一次, 落盘扛 reload):
+     *  行还在 (未落定) = 那句终句既没销账也没出站 —— 立即注入一次交付指引。行落定 / 被顶掉
+     *  的记录顺手清掉。 */
+    const strictFinalNotices = loadJsonMap<{ at: number }>(join(cfg.daemon.stateDir, "strict-delivery-notices.json"));
+    const noteStrictUndelivered = (e: MessageEvent): void => {
+      const chatRow = (event: string): { owner: string; channel: string; message: string; status: string } | undefined => {
+        const r = router.get(event);
+        if (!r) return undefined;
+        const { receiver } = r;
+        return receiver.kind === "chat" ? { owner: r.owner, channel: receiver.channel, message: receiver.message, status: r.status } : undefined;
+      };
+      const live = (event: string): boolean => !!chatRow(event) && ["held", "open", "need", "error"].includes(chatRow(event)!.status);
+      Object.keys(strictFinalNotices.all()).filter((k) => !live(k)).forEach((k) => strictFinalNotices.drop(k));
+      if (!e.serves || !live(e.serves) || strictFinalNotices.get(e.serves)) return;
+      const row = chatRow(e.serves)!;
+      if (strictSpeechOf?.(row.channel) !== true) return;
+      strictFinalNotices.set(e.serves, { at: Date.now() });
+      const re = events.get(row.message)?.id ?? row.message;
+      const chat = chatNameOf(cfg, row.channel) || row.channel;
+      void m.injectText(row.owner, strictUndeliveredNotice({ chat, re }), { channel: row.channel })
+        .then((r) => { if (!r.ok) log.warn({ mod: "strict-final", event: e.serves, owner: row.owner, reason: r.reason }, "strict-final: 终句未交付的即时提醒没投出去"); })
+        .catch(() => undefined);
+    };
     /** 一轮的终句落到它服务的那一行上 (定论 / 中途态)。
      *  P7-S2: 公开轮落在严格群 (chatPolicy.speech=strict) 时, chat 接收行的终句零 op ——
      *  义务留给 chat_reply 关账; 私聊轮与 implicit 群照旧。 */
@@ -1664,6 +1687,10 @@ const main = async (): Promise<void> => {
           && e.serves && router.get(e.serves)?.receiver.kind === "chat" && e.payload.peer?.transferred)
         m.deliverTransferredFinal(e, verdict.text);
       plans.forEach(commitRoute);
+      // P7 终句可见失败: strict 群 chat 义务上的 prose 终句哪儿都没去 (无收口形态、无出站),
+      // 当轮立即告诉该 wizard 一次 —— 不然它以为答完了, 人看到的是彻底静默 (2026-11-18
+      // aiconfig 群实录: resultRoutes:{} 却 complete/finalized, 谁都没收到)。
+      if (!verdict.error) noteStrictUndelivered(e);
     };
     // ── 新路由表 (T6): 失败级联 ─────────────────────────────────────────────
     /** `target` 欠着的行里这一轮该被收掉的根 (§4.2): 不给 `only` = 全部 (end);
@@ -2192,8 +2219,11 @@ const main = async (): Promise<void> => {
       const text = (b.text ?? "").trim();
       if (!text && !mineRow) { json(res, 400, { ok: false, reason: "text required — passed 只能记在自己未结的义务上 (re 用那条消息信封上的 msg)" }); return; }
       // topOnly 门与 chat_say / notify / send_file 同一道: 放宽后 chat_reply 也能自由发言,
-      // 替同伴干活的那一轮不能借它绕过顶层模式对人说话。
-      const muted = topOnlyMuted(self, [base]);
+      // 替同伴干活的那一轮不能借它绕过顶层模式对人说话。例外 = 这条 re 正对着自己名下未结的
+      // chat 义务 (mineRow ⇒ 目的地就是那一行收件的群): 那一行本身是对人的出口 (人点名 / 管家
+      // transfer 交来的), 它的销账又只走这一条路 —— 拦了它, belowTop 轮 + chat 义务就是一笔
+      // 永远销不掉的死账 (2026-11-18 aiconfig 群实录)。chat_say (无 re) 与别人名下的义务不豁免。
+      const muted = mineRow ? undefined : topOnlyMuted(self, [base]);
       if (muted) { json(res, 409, muted); return; }
       const gate = strictSayGate(self, base);
       if (gate) { json(res, gate.status, gate.body); return; }

@@ -4,7 +4,7 @@
 // `brief: strict conclusion (no outbound, obligation open)` 后静默丢弃, 人看到彻底静默。
 // 这里钉 daemon 侧的补发追问: 真的下发、话术是「用 chat_reply 补发」、上限 1 次、补了就收账。
 import assert from "node:assert";
-import { createIdleNudgeTick, step, strictDeliveryNudge, strictDeliveryStewardNote, strictDeliveryHumanLine,
+import { createIdleNudgeTick, step, strictDeliveryNudge, strictDeliveryStewardNote, strictDeliveryHumanLine, strictUndeliveredNotice,
   type NudgeDeps, type NudgeTarget, type Policy, type Watch } from "../daemon/idle-nudge.js";
 
 let passed = 0;
@@ -54,6 +54,14 @@ await t("人话行只说坏了什么、人怎么办 — 不出现工具名与运
     assert.ok(!s.includes(tool), "人话行不出现 wizard 词汇: " + tool);
 });
 
+await t("终句当轮即时提醒: 说的是「那句终句没发进群」, 带补发指引", () => {
+  const s = strictUndeliveredNotice({ chat: "aiconfig", re: "m1" });
+  assert.ok(s.includes("没有发进 aiconfig"), "点破终句哪儿都没去 (不是进展追问)");
+  assert.ok(s.includes('re: "m1"'));
+  assert.ok(s.includes("chat_reply"), "给可执行的补发路径");
+  assert.ok(s.includes("只提醒这一次"), "有界");
+  assert.ok(!s.includes("进展如何"), "不是通用追问话术");
+});
 
 // ─── 有界 (纯状态机): 16 天里只问 1 次、上报 1 次
 await t("cycles:1 —— 问满这一组就闭嘴, 不重开一轮", () => {

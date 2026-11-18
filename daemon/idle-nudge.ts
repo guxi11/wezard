@@ -109,6 +109,13 @@ export const strictDeliveryStewardNote = (x: { chat: string; who: string; event:
 export const strictDeliveryHumanLine = (x: { who: string; asks: number }): string =>
   `[wezard] ⚠️ ${x.who} 已经答了, 但答复发不进本群, 本群也没有管家能替它转告 (已提醒 ${x.asks} 次无果)。这条提问没有送达 —— 可以在本群重新问一次, 或点名别的成员回答。`;
 
+/** strict 群 chat 义务上的终句**当轮立即**提醒 (不等闲置阈值): 这句答复哪儿都没去 ——
+ *  终句不进出站门, 也没有任何收口形态被认出, resultRoutes 是空的, wizard 却以为答完了
+ *  (2026-11-18 aiconfig 群实录)。与闲置追问 (strictDeliveryNudge) 分工: 这里是终句落地那一刻
+ *  的即时可见失败, 那个是之后的兜底。每行只提醒一次 (接线侧落盘)。 */
+export const strictUndeliveredNotice = (x: { chat: string; re: string }): string =>
+  `（守护进程: 你刚写完的那句终句没有发进 ${x.chat} — 本群是严格模式, 终句不进出站门、也认不出收件人, 谁都没收到。那份结论若就是答复, 用 chat_reply({re: "${x.re}", text: <那份结论>}) 交付; 无需答复就不带 text 记 passed。只提醒这一次, 后续仍不交付会转告管家跟进。）`;
+
 /** 一件在飞活的追问口径 (缺省用全局 idleNudge 配置)。 */
 export interface NudgeTarget {
   from: string; to: string; turn: string; state: TurnState; ageMs: number; fromBlocked?: boolean;
