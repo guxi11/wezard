@@ -21,13 +21,12 @@ import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe,
 import { botTagOf } from "./bot-mux.js";
 import { chatNameOf, chatPolicyOf, listChatNames, stewardTierOf, type CharterGuard } from "./chat-name.js";
 import { anchorOf, identityFieldsOf, identityOf, identityWorkspaceOf, manifestationOf, openInstance, settleName, wizardStore } from "./wizard.js";
-import { autoOrdinalOf } from "./wizard-names.js";
 import { stewardIdentityOf, stewardRoute as resolveSteward, type StewardRoute } from "./steward.js";
 import { parseInstanceName } from "./classes.js";
 import { noteNativeChannelFrame } from "./channel.js";
 import { awaitChannelOfPost, channelOf, channelOfPost, postsOfChannel } from "./channel-posts.js";
-import { bindChannelSteward, settleChannelSteward } from "./onboarding.js";
-import { applyOnboarding, bindSteward, classifyOnboardingInput, GUIDE_DESC, guideOf, guideTargetOf, judgeOnboarding, loadOnboardingStore, needsOnboarding, renderGuideOpening, renderGuideRetry, renderOnboardingDone, WIZARD_NAME_RE } from "./onboarding.js";
+import { settleChannelSteward } from "./onboarding.js";
+import { applyOnboarding, bindSteward, classifyOnboardingInput, GUIDE_DESC, guideOf, guideTargetOf, judgeOnboarding, loadOnboardingStore, needsOnboarding, renderGuideOpening, renderGuideRetry, renderOnboardingDone } from "./onboarding.js";
 import { isApprentice } from "./apprentice.js";
 import { truncate } from "../shared/std.js";
 import { parseStrictCommand, type StrictCommand } from "./strict-switch.js";
@@ -170,20 +169,6 @@ const parseCfgSyncCommand = (text: string): { apply: boolean } | undefined => {
   const m = CFGSYNC_RE.exec(text.trim());
   return m ? { apply: Boolean(m[1]) } : undefined;
 };
-// `/name` — 给本群**管家**起名/改名 (2026-11-16 拍板: 聊天不命名, 名字只剩管家身份名)。
-// 读: `/name` · 写: `/name <名字>` · 已有名字的二次确认: `/name <名字> ok`。
-// 参数里 WeCom 的 @mention 有两种形态: 粘在前一个 token 上 (`teststrict@wezard` —— SDK
-// 不保证 mention 前有空白, MENTION_RE 剥不掉) 或独立 token。名字字符集不含 @, 所以
-// 参数一律截到 @ 为止, 独立的 @token 整个丢弃。
-const NAME_RE_CMD = /^\/name(?:\s+([\s\S]+))?$/i;
-/** /name 二次确认的窗口: 待确认项只活这么久。 */
-const NAME_CONFIRM_MS = 5 * 60_000;
-export const parseNameCommand = (text: string): { arg: string; confirm: boolean } | undefined => {
-  const m = NAME_RE_CMD.exec(text.trim());
-  if (!m) return undefined;
-  const toks = (m[1] ?? "").trim().split(/\s+/).filter((t) => t && !t.startsWith("@"));
-  return { arg: (toks[0] ?? "").split("@")[0] ?? "", confirm: toks.slice(1).some((t) => /^(?:ok|yes|确认)$/i.test(t)) };
-};
 // `/chats` — 跨聊天目录: 谁有名字、谁没有、各自跑着哪些会话。
 const isChatsCommand = (text: string): boolean => /^\/chats?$/i.test(text.trim());
 // /owed — 本聊天 (严格群) 的义务账: 谁欠着哪条、多久了。P7-S2; 渲染由 daemon 注入。
@@ -219,7 +204,7 @@ const renderHelp = (): string =>
     "位置参数可叠:`.docs /new opus 先读一遍 README` = 名字 + 模型 + 首句；新 pane 后端由配置决定。",
     "",
     "▎wizard",
-    "每个 wizard 有一个**全局唯一**的名字;你点名写作 `.name`;群管家的名字用 `/name` 起 (新群由引导落定)。",
+    "每个 wizard 有一个**全局唯一**的名字;你点名写作 `.name`。类名是一个人的设定 (`X`), 实例地址是 `X-1`、`X-2`… (新群由引导落定)。",
     "消息里带 `.name`(如 `.docs 帮我改 README`)就是找那一个 —— 它可以住在任何一个聊天里,",
     "回复会回到你说话的这个群;不带 = 本聊天默认那个。开头写一个还不存在的 `.x` = 在这里叫出一个新的 x。",
     "它们的回复以 `🧙‍♂️ name` 打头。`/clear .x`、`/pwd .x`、`/stop .x` 同理按名字走 (`🧙‍♂️ x` 写法同样认)。", 
@@ -232,8 +217,8 @@ const renderHelp = (): string =>
     "分身有自己的名字、自己的终端,也能再生分身。活干完对 AI 说「收掉它们」。", 
     "",
     "▎命名",
-    "`/name <名字>` 给本群**管家**起名/改名 · `/name` 查看 · 聊天不再命名, 一律用 chat id",
-    "管家已有名字时改名要二次确认: 先 `/name <新名字>`, 再 `/name <新名字> ok` (5 分钟内)",
+    "名字由 wizard 自己起 (`wizard_identity`); 改别人用 `wizard_identity({to})` —— 直属 lead 或管家实例可改",
+    "类改名会同步它的全部实例 (`X-1..X-N`) 与指向它的管家绑定; 实例名 (形如 `X-3`) 不能当类名",
     "`/chats` 列出所有已知聊天及其 wizard",
     "名字 1-32 位字母/数字/`_`/`-`,全机唯一,跟着管家身份走 (同一管家进多个群共用一个名字)。",
     "对 AI 说「让 .fix 看一眼」「在 daily 里开个 .ingest 跑这个目录」即可。",
@@ -644,7 +629,7 @@ export const installInboundRouter = (
   // 新开的 slot 先按人写的名字落名: slot 只是内部 id, 被一个改过名的冷 wizard 占着
   // 时会挪成 `foo-N` —— 名字不该跟着它退避。已有名字的 wizard 不受影响 (claim 不改)。
   // 聊天名已冻结为显示标签 (2026-11-16): 名字不再跟着聊天名走 —— 名册有就用名册的,
-  // 没有留给 /name 与新群引导去起。
+  // 没有留给新群引导 / wizard_identity 去起。
   const claimAsked = (who: string, asked: string): void => {
     if (asked) wizardStore()?.claim(who, asked);
   };
@@ -935,74 +920,6 @@ export const installInboundRouter = (
       await replyText(frame, msg, who, body);
       return { stop: true };
     }
-    // /name — 只给本群**绑定的管家**命名 (身份级; 人 2026-11-16 拍板: 聊天不命名,
-    // 名字只剩管家身份名一种)。未绑定 → 提示先走引导; 已有名字 → `/name <新名字> ok`
-    // 二次确认才覆盖; 同身份的全部化身一起改 (store.rename)。
-    const nc = parseNameCommand(text);
-    if (nc) {
-      const base = baseOfKey(who);
-      const store = wizardStore();
-      const identity = stewardIdentityOf(cfg, store, base);
-      const noSteward = "[wezard] 本群未绑定管家 — /name 命名的是管家。新群先走引导 (设 workspace + 绑管家); 换管家走 config 的 chatPolicy.steward。";
-      if (!nc.arg) {
-        if (!identity) { await replyText(frame, msg, who, noSteward); return { stop: true }; }
-        const rec = store?.get(identity);
-        const ws = identityWorkspaceOf(store, identity);
-        await replyText(frame, msg, who, rec?.name
-          ? "[wezard] 本群管家 `." + rec.name + "`" + (ws ? " (工作区 " + ws + ")" : "") + " · 改名: `/name <新名字>`"
-          : "[wezard] 本群管家还没起名 · 起名: `/name <新名字>`");
-        return { stop: true };
-      }
-      if (nc.arg === "-") {
-        await replyText(frame, msg, who, "[wezard] 聊天命名已下线: 聊天一律用 chat id 标识 (config 里的存量名仅作显示)。/name 只给管家命名。");
-        return { stop: true };
-      }
-      const want = stripSigil(nc.arg);
-      if (!WIZARD_NAME_RE.test(want)) {
-        await replyText(frame, msg, who, "[wezard] /name failed: invalid name '" + nc.arg + "' — 1-32 chars, letters/digits/_/- only (no space, #, /, :)");
-        return { stop: true };
-      }
-      if (!identity) { await replyText(frame, msg, who, noSteward); return { stop: true }; }
-      const cur = (store?.get(identity)?.name ?? "").trim();
-      const renameSteward = (): string => {
-        // 改名同时改写指向旧名的管家绑定 (chatPolicy.<chat>.steward 存的是名字): 不改的话绑定悬空,
-        // 旧名日后被别的身份领走就会把本群裸消息劫过去。同一管家可管多群, 逐群改。
-        const rebind = (name: string): string => {
-          Object.entries(cfg.chatPolicy ?? {})
-            .filter(([, p]) => !!cur && (p?.steward ?? "").trim().toLowerCase() === cur.toLowerCase())
-            .forEach(([b]) => bindSteward(cfg, sourcePath, b, name));
-          Object.entries(cfg.wrc.channel.steward ?? {})
-            .filter(([, s]) => !!cur && s.trim().toLowerCase() === cur.toLowerCase())
-            .forEach(([t]) => bindChannelSteward(cfg, sourcePath, t, name));
-          return name;
-        };
-        const { r: name } = guardCharter(() => rebind(store!.rename(identity, want)), (n) => ({ what: "人 `/name` 把本群管家" + (cur ? " `" + cur + "`" : "") + "改名为 `" + n + "`", byHuman: true }));
-        const mani = manifestationOf(store, want, base);
-        if (mani) void bridge.retitlePane(mani);
-        return name;
-      };
-      // 新群引导在本群锚点新建的管家领的是自动中性名 (wizard-names 序列): 视同未命名, 名字后置给
-      // /name, 第一次起名直接生效。只认本群自己的锚点身份 —— 绑来的已有管家改名照旧二次确认。
-      if (!cur || (identity === base && autoOrdinalOf(cur) !== undefined)) {
-        const name = renameSteward();
-        await replyText(frame, msg, who, "[wezard] ✅ 本群管家命名为 `." + name + "`");
-      } else if (cur.toLowerCase() === want.toLowerCase()) {
-        await replyText(frame, msg, who, "[wezard] 管家名字已是 `." + cur + "`, 不用改。");
-      } else if (!nc.confirm) {
-        pendingRename.set(base, { want, at: Date.now() });
-        await replyText(frame, msg, who, "[wezard] 管家已有名字 `." + cur + "`。确认改成 `." + want + "`? 5 分钟内发 `/name " + want + " ok`");
-      } else {
-        const p = pendingRename.get(base);
-        if (!p || p.want.toLowerCase() !== want.toLowerCase() || Date.now() - p.at > NAME_CONFIRM_MS) {
-          await replyText(frame, msg, who, "[wezard] 没有这条待确认的改名 (或已过期)。先发 `/name " + want + "`, 再发 `/name " + want + " ok`。");
-        } else {
-          pendingRename.delete(base);
-          const name = renameSteward();
-          await replyText(frame, msg, who, "[wezard] ✅ 本群管家更名为 `." + name + "` (原 `." + cur + "`) — 同一身份的全部化身一起改。");
-        }
-      }
-      return { stop: true };
-    }
     // /chats — 跨聊天目录:谁有名字、各自跑着哪些会话。Read-only。
     if (isChatsCommand(text)) {
       await replyText(frame, msg, who, renderChats(bridge.chatRoster(who).filter((c) => sameBot(who, c.base))));
@@ -1151,8 +1068,6 @@ export const installInboundRouter = (
   // 裸消息 (name = "") 走管家接待 (§3): 绑定的管家身份在本群的化身; 解析要新开化身时先落记录
   // (名字/身份/种类来自身份锚点), 会话由 gate 的 ensureSession 在身份的工作区里起。
   const freshSteward = new Map<string, string>(); // target → 新化身的工作区 (identity workspace)
-  // /name 二次确认的待确认项 (base → 想改成什么 + 发起时刻); 只活在内存, reload 即清。
-  const pendingRename = new Map<string, { want: string; at: number }>();
   /** 在 base 新开一条身份化身 —— 管家接待与「点类名」走同一条路 (人 2026-11-18):
    *  身份有类 → 领一个序号 (allocOrdinal, 永不复用), 名字 `<类名>-<N>`, target 用实例名
    *  (uniqueTag 防撞), 记录带 identity=类 id / ordinal, 并继承类的字段;

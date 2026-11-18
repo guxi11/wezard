@@ -236,9 +236,16 @@ export interface ClassMergeSpec {
 export const NO_MERGES: ClassMergeSpec = { merges: [], exclude: [] };
 
 /** 读合并清单。文件坏了 / 不存在 → 空表 (迁移退化成纯单组模式, 不炸 boot)。 */
-export const loadClassMerges = (filePath: string): ClassMergeSpec => {
+export const loadClassMerges = (filePath: string, fallbackPath?: string): ClassMergeSpec => {
+  // 两个位置都认: stateDir/class-merges.json (规范) → wizards.json 同级的 class-merges.json
+  // (人手直接放在 ~/.wezard 下的那种写法)。都没有 = 没有合并。
+  const read = (p: string): Partial<ClassMergeSpec> | null => {
+    try { return JSON.parse(readFileSync(expandHome(p), "utf8")) as Partial<ClassMergeSpec> | null; } catch { return null; }
+  };
+  const file = existsSync(expandHome(filePath)) ? filePath : fallbackPath && existsSync(expandHome(fallbackPath)) ? fallbackPath : undefined;
+  if (!file) return NO_MERGES;
   try {
-    const raw = JSON.parse(readFileSync(expandHome(filePath), "utf8")) as Partial<ClassMergeSpec> | null;
+    const raw = read(file);
     if (!raw || typeof raw !== "object") return NO_MERGES;
     const merges = Array.isArray(raw.merges)
       ? raw.merges.filter((m): m is ClassMerge =>

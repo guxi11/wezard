@@ -48,7 +48,7 @@ export const present = (tool: string, raw: unknown, input?: Row): unknown => {
   if (tool === "tell_peer") return pick(row, ["ok", "name", "event", "eventId", "queued", "priority", "wasBusy", "planId", "public", "transfer", "after", "parked", "warnings", "warning", "gated", "reason", "urgentDowngraded", "reUnknown"]);
   if (tool === "spawn_wizard" || tool === "clone_wizard") return pick(row, ["ok", "name", "cwd", "inherited", "model", "effort", "tier", "modelWarning", "dispatched", "queued", "event", "eventId", "planId", "warnings", "warning"]);
   if (tool === "wizard_identity") {
-    const result: Row = { ...pick(row, ["ok", "name", "renamed"]) };
+    const result: Row = { ...pick(row, ["ok", "name", "renamed", "class", "note"]) };
     if (input?.description !== undefined && String(input.description).trim()) result.description = row.description;
     if (input?.expertise !== undefined && String(input.expertise).trim())
       result.expertise = String(input.expertise).trim() === "-" ? "" : row.expertise;

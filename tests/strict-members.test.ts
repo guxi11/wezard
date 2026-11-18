@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openMembers } from "../daemon/members.js";
 
-// P7-S2 成员表原语 (⑥ 的可测面): join 升级式、leaveEverywhere 全群摘除。
+// P7-S2 成员表原语 (⑥ 的可测面): join 升级式、leaveEverywhere 摘实例、键迁移 (identity → target)。
 const tmp = mkdtempSync(join(tmpdir(), "strict-members-"));
 const members = openMembers(join(tmp, "members.json"));
 const chat = "chat:wrS", other = "chat:wrO";
@@ -27,7 +27,7 @@ assert.equal(members.rowOf(chat, idA)!.cursor, 7);
 members.advance(chat, idA, 9);
 assert.equal(members.rowOf(chat, idA)!.cursor, 9);
 
-// leaveEverywhere: 身份退役从所有群摘掉
+// leaveEverywhere: 实例退役从所有群摘掉
 members.join(other, idA, "mention", "human:u1");
 members.join(chat, idB, "speaker", "human:u1");
 const left = members.leaveEverywhere(idA);
@@ -37,7 +37,7 @@ assert.equal(members.isMember(other, idA), false);
 assert.equal(members.isMember(chat, idB), true, "别的身份不受影响");
 
 // ofChat 列表
-assert.deepEqual(members.ofChat(chat).map((x) => x.identity), [idB]);
+assert.deepEqual(members.ofChat(chat).map((x) => x.target), [idB]);
 
 rmSync(tmp, { recursive: true, force: true });
 console.log("strict-members: join 升级式 / 游标只进 / leaveEverywhere 全群摘除");

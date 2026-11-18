@@ -799,15 +799,17 @@ export const createWezardServer = (): McpServer => {
     {
       title: "Name yourself / declare your job",
       description:
-        "修改自己的全局唯一 name、description 或 expertise。返回最终 name、被修改字段及可选 renamed。",
+        "修改 name、description 或 expertise。不给 to = 改自己; 给 to (实例名, 带不带点都认) = 改那个 wizard —— 只有它的直属 parent 或管家实例能改。目标是类实例时 name 是**新类名** (该类的全部实例同步成 新类名-N, 序号不变; 形如 X-3 的名字直接拒)。返回落定名; 类改名附类名与实例清单。",
       inputSchema: currentAddressSchema({
-        name: z.string().optional().describe("新名字, 1-32 位字母/数字/`_`/`-`, 全机唯一。不改就别传。"),
+        to: z.string().optional().describe("要改谁: wizard 的地址 (实例名 / 类名, 例如 `wezard-2` 或 `.wezard-2`)。不传 = 改自己。"),
+        name: z.string().optional().describe("新名字, 1-32 位字母/数字/`_`/`-`, 全机唯一。类实例 = 新类名 (不以 -数字 结尾)。不改就别传。"),
         description: z.string().optional().describe("一句话职责, 例如 '盯 wezard 主仓的重构与发版'。不改就别传。"),
         expertise: z.string().optional().describe("一句话专长: 熟哪块代码 / 领域, 例如 'rolepage 前端 (web/chat.js · role-view)'。名册与 delegate 候选行都显示它, 任务与它重叠时可据此选择。传 '-' 清掉。"),
       }),
     },
-    async ({ name, description, expertise }) =>
+    async ({ to, name, description, expertise }) =>
       unwrap("wizard_identity", await daemonPost("/wizard/identity", {
+        ...(to !== undefined ? { to } : {}),
         ...(name !== undefined ? { name } : {}),
         ...(description !== undefined ? { description } : {}),
         ...(expertise !== undefined ? { expertise } : {}),

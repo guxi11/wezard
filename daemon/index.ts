@@ -1,7 +1,7 @@
 import { wxMarkdown } from "../shared/wx-text.js";
 // Daemon entry. Resident process — exits only on signal or fatal WS auth failure.
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createHash, timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
 import { loadOrCreateSvrToken } from "../shared/svr-token.js";
 import { DAEMON_TOKEN_FILE, DAEMON_TOKEN_HEADER } from "../shared/daemon-token.js";
@@ -54,7 +54,7 @@ import { planStrictSwitch, renderSwitchReport, type SwitchFacts } from "./strict
 import { CHAT_BATCH_BUDGET, sliceBatch } from "../shared/chat-record.js";
 import { openSayMeter, sayVerdict, topOnlyVerdict } from "./strict-gate.js";
 import { openMembers } from "./members.js";
-import { loadClassMerges, loadClassStore, migrateClasses } from "./classes.js";
+import { CLASS_NAME_MAX, loadClassMerges, loadClassStore, migrateClasses, parseInstanceName, planClasses, validClassName } from "./classes.js";
 import { footerTarget, responseFormatPolicy } from "./message-format.js";
 import { scanClaudeSessions } from "./session-scan.js";
 import {
@@ -109,6 +109,8 @@ import {
   identityOf as identityOfRec,
   identityWorkspaceOf,
   manifestationOf,
+  identityEditRefusal,
+  instancesOf,
   type WizardBrief,
   type WizardRecord,
 } from "./wizard.js";
@@ -132,7 +134,7 @@ import { parseWhen, renderChatLog, UNKNOWN_HUMAN, type LogSession } from "./chat
 import { renderChatRecords } from "../shared/chat-record.js";
 import { audienceOf } from "../shared/role-view.js";
 import { waitForIdle, type IdleResult } from "./wait-idle.js";
-import { guideRefusal, isGuideManifestation, rewriteStewardBindings } from "./onboarding.js";
+import { bindChannelSteward, bindSteward, guideRefusal, isGuideManifestation, rewriteStewardBindings } from "./onboarding.js";
 import { reminderEventId, reminderToken, startPlanReminders, type PlanReminderCandidate } from "./plan-reminders.js";
 
 const waitForQuorum = async (targets: readonly string[], isBusy: (target: string) => Promise<boolean>, timeoutMs: number, need: number): Promise<IdleResult[]> => {
@@ -557,15 +559,14 @@ const main = async (): Promise<void> => {
     const humanBase = baseOfKey(a.channel!);
     let chatlogTail = "";
     if (strictSpeechOf?.(humanBase)) {
-      const identity = identityOfTarget?.(a.principal);
-      if (identity && !members.isMember(humanBase, identity)) {
-        members.join(humanBase, identity, "mention", String(a.speaker ?? "human"));
+      if (identityOfTarget?.(a.principal) && !members.isMember(humanBase, a.principal)) {
+        members.join(humanBase, a.principal, "mention", String(a.speaker ?? "human"));
         try {
-          chatRecords.record(humanBase, { at: Date.now(), id: "join:" + identity + ":" + at, author: "wezard", kind: "system",
+          chatRecords.record(humanBase, { at: Date.now(), id: "join:" + a.principal + ":" + at, author: "wezard", kind: "system",
             text: (wizardStore()?.get(a.principal)?.name || a.principal) + " 入群 (人点名带入, mention)" });
         } catch { /* 记录失败不挡消息 */ }
       }
-      chatlogTail = identity && chatlogReminderOf ? chatlogReminderOf(humanBase, a.principal) : "";
+      chatlogTail = chatlogReminderOf ? chatlogReminderOf(humanBase, a.principal) : "";
     }
     const root = newRootEvent();
     router.commit(ops.open({ event: root, owner: a.principal, at, deadlineAt,
@@ -587,7 +588,7 @@ const main = async (): Promise<void> => {
   // wizardStore() 是运行时绑定, 事件到达时早已 bind)。
   installChannelEvents(ws.client, cfg, log.child({ mod: "channel" }), {
     memberNamesOf: (base) => members.ofChat(base)
-      .map(({ identity }) => wizardStore()?.get(identity)?.name || identity)
+      .map(({ target }) => wizardStore()?.get(target)?.name || target)
       .filter(Boolean),
   });
   // approval click → finalize 当前 liveStream, 后续 tool/text 落到 standalone。
@@ -2038,10 +2039,9 @@ const main = async (): Promise<void> => {
         && ["held", "open", "need", "error"].includes(r.status)).length;
     /** 游标之后的一批聊天记录 → chatlog reminder (触发消息全文; 没有新行 = "")。 */
       chatlogReminderOf = (base: string, target: string): string => {
-      const identity = identityOfTarget(target);
-      if (!identity) return "";
+      if (!wizards.get(target)) return "";
       const self = wizards.get(target)?.name ?? "";
-      const batch = sliceBatch(chatRecords.lines(base), members.rowOf(base, identity)?.cursor ?? -1, CHAT_BATCH_BUDGET, self);
+      const batch = sliceBatch(chatRecords.lines(base), members.rowOf(base, target)?.cursor ?? -1, CHAT_BATCH_BUDGET, self);
       return batch
         ? renderReminder({ wezard: "chatlog", chat: base, from: String(batch.from), to: String(batch.to), owes: String(owedInChat(target, base)) },
           [batch.render, "上面是 " + (chatNameOf(cfg, base) || base) + " 游标之后的话; 结论交付用 chat_reply({re: 这条消息信封上的 msg}), 发言 / ack / 进展用 chat_say (不销账)。"])
@@ -2053,8 +2053,7 @@ const main = async (): Promise<void> => {
       const chatlog = parseReminders(String(e.payload.text ?? "")).find((r) => r.attrs.wezard === "chatlog");
       const to = Number(chatlog?.attrs.to);
       if (!chatlog || !Number.isFinite(to)) return;
-      const identity = identityOfTarget(e.target);
-      if (identity) members.advance(e.channel, identity, to);
+      if (e.target) members.advance(e.channel, e.target, to);
     };
 
 
@@ -2080,15 +2079,13 @@ const main = async (): Promise<void> => {
      *  (升级式) + 一行成员变动系统行; 只在 strict 群有意义, 别的群静默忽略。 */
     const joinMember = (by: string, base: string, target: string, mode: "owner" | "speaker" | "mention"): string => {
       if (!base || !strictSpeechOf(base)) return "";
-      const rec = wizards.get(target);
-      const identity = rec ? identityOfRec(rec) : identityOfTarget?.(target);
-      if (!identity) return "";
-      const fresh = !members.isMember(base, identity);
-      members.join(base, identity, mode, by);
+      if (!wizards.get(target) && !identityOfTarget?.(target)) return "";
+      const fresh = !members.isMember(base, target);
+      members.join(base, target, mode, by);
       const who = displayName(target);
       if (fresh) {
         try {
-          chatRecords.record(base, { at: Date.now(), id: "join:" + identity + ":" + Date.now(), author: "wezard", kind: "system",
+          chatRecords.record(base, { at: Date.now(), id: "join:" + target + ":" + Date.now(), author: "wezard", kind: "system",
             text: who + " 入群 (" + mode + ", 由 " + (by.startsWith("human:") ? "人" : displayName(by)) + " 带入)" });
         } catch { /* 记录失败不挡 */ }
       }
@@ -2104,10 +2101,9 @@ const main = async (): Promise<void> => {
       const parts: string[] = [];
       const prev = prevName ? wizards.byName(prevName) : undefined;
       if (prev) {
-        const pid = identityOfRec(prev);
-        const row = members.rowOf(base, pid);
+        const row = members.rowOf(base, prev.target);
         if (row) {
-          if (row.mode === "owner") { members.leave(base, pid); parts.push(displayName(prev.target) + " 卸任管家, 离群"); }
+          if (row.mode === "owner") { members.leave(base, prev.target); parts.push(displayName(prev.target) + " 卸任管家, 离群"); }
           else parts.push(displayName(prev.target) + " 卸任管家 (仍是成员)");
         }
       }
@@ -2120,13 +2116,11 @@ const main = async (): Promise<void> => {
     };
     /** P7-S2 身份退役自动离群: 名册抹掉一个身份时, 把它从所有严格群成员表里摘掉。 */
     const leaveAllChats = (target: string): void => {
-      const rec = wizards.get(target);
-      const identity = rec ? identityOfRec(rec) : target;
-      members.leaveEverywhere(identity);
+      // 只摘**这一条实例** (人 2026-11-18): 同一个人的另一个群的化身还是成员。
+      members.leaveEverywhere(target);
     };
     const strictSayGate = (self: string, base: string): { status: number; body: Record<string, unknown> } | undefined => {
-      const identity = identityOfTarget?.(self);
-      const mode = identity ? members.modeOf(base, identity) : undefined;
+      const mode = identityOfTarget?.(self) ? members.modeOf(base, self) : undefined;
       const cur = openingOfSelf(self)?.env?.eventId ?? "";
       const facts = sayMeter.check(self, cur, base);
       const verdict = sayVerdict({ mode, ...facts });
@@ -2144,7 +2138,7 @@ const main = async (): Promise<void> => {
         json(res, 409, { ok: false, speech: "implicit", reason: (chatNameOf(cfg, base) || base) + " 未开严格模式 (speech=implicit): 成员制与发言工具只在 strict 群生效; 现行行为不变" });
         return;
       }
-      const rows = members.ofChat(base).map(({ identity, row }) => ({ identity: identityNameOf(identity), mode: row.mode, since: row.since, cursor: row.cursor }));
+      const rows = members.ofChat(base).map(({ target, row }) => ({ name: identityNameOf(target), target, mode: row.mode, since: row.since, cursor: row.cursor }));
       json(res, 200, { ok: true, chat: chatNameOf(cfg, base) || base, members: rows, note: "mode: owner=管家 / speaker·mention=成员 (发言权相同, mode 只记录入群方式); cursor=已读到的聊天记录 seq" });
     });
     http.register("POST /chat/say", async (req, res) => {
@@ -2249,8 +2243,7 @@ const main = async (): Promise<void> => {
         return;
       }
       // 问的人必须是成员 (开义务是成员的权力)。
-      const askerIdentity = identityOfTarget?.(self);
-      if (!askerIdentity || !members.isMember(base, askerIdentity)) {
+      if (!identityOfTarget?.(self) || !members.isMember(base, self)) {
         json(res, 403, { ok: false, reason: "你不是 " + (chatNameOf(cfg, base) || base) + " 的成员, 不能在群里开义务" });
         return;
       }
@@ -2258,14 +2251,13 @@ const main = async (): Promise<void> => {
       const named = wizards.byName(name);
       if (!named) { json(res, 400, { ok: false, reason: "认不出 " + name + " — wizard_roster 查名字" }); return; }
       const target = manifestationOf(wizards, name, base) ?? named.target;
-      const targetIdentity = identityOfTarget?.(target);
-      if (!targetIdentity || !members.isMember(base, targetIdentity)) {
+      if (!identityOfTarget?.(target) || !members.isMember(base, target)) {
         json(res, 409, { ok: false, reason: name + " 还不是 " + (chatNameOf(cfg, base) || base) + " 的成员 — 先让人行首点名它入群, 或 spawn / delegate 带 join" });
         return;
       }
       // 问话先记账 (wizard 行), 再开子行义务 (chat_ask 各开各的行, 不并人人话根行)。
       const at = Date.now();
-      const askId = "ask:" + targetIdentity + ":" + at;
+      const askId = "ask:" + target + ":" + at;
       try { chatRecords.record(base, { at, id: askId, author: wizards.get(self)?.name ?? "", kind: "wizard", text }); } catch { /* 记录失败不挡 */ }
       const parent = servesOfTurn(self);
       const parentRow = parent ? router.get(parent) : undefined;
@@ -3366,17 +3358,28 @@ const main = async (): Promise<void> => {
     const reconciled = reconcileKin(wizards);
     if (reconciled > 0) log.child({ mod: "wizard" }).info({ reconciled }, "identity kin reconciled");
     // 类 / 实例 (人 2026-11-18): 管家身份 → 一条类 + 一串有序号的实例 (名字 <类名>-N)。
-    // 合并清单 (stateDir/class-merges.json, 人写) 把同目录上的几个旧身份并成一个类。幂等:
-    // 已建的类整组跳过。迁移会改名字, 所以旧名 → 类名的映射当场落到管家绑定上 —— 迁移后
-    // 绑定存的都是类名。冲突逐条 warn 并覆盖写 analysis/classes-migration.txt 给人看。
+    // 合并清单 (stateDir/class-merges.json 或 wizards.json 同级, 人写) 把同目录上的几个旧
+    // 身份并成一个类。幂等: 已建的类整组跳过。迁移会改名字, 所以旧名 → 类名的映射当场落到
+    // 管家绑定上 —— 迁移后绑定存的都是类名。冲突逐条 warn 并覆盖写 analysis/classes-migration.txt。
+    //
+    // **闸门 (人 2026-11-18)**: 只有 stateDir/classes.apply 存在时才真迁 (类 + 成员表改键 +
+    // 绑定改写一起放行)。没有它 = 只跑计划、写报告、日志一行 'class migration gated' ——
+    // dist 里带着迁移代码而别人随时可能 reload 的那段时间, 不许悄悄改真数据。
     const classLog = log.child({ mod: "class" });
-    const cmig = migrateClasses(
-      wizards,
-      classes,
-      cfg.wrc.mirror.wizardsFile,
-      (t) => { const c = m.getCwd(t); return c.runningCwd || c.defaultCwd; },
-      loadClassMerges(join(expandHome(cfg.daemon.stateDir), "class-merges.json")),
+    const classApply = existsSync(join(expandHome(cfg.daemon.stateDir), "classes.apply"));
+    const mergeSpec = loadClassMerges(
+      join(expandHome(cfg.daemon.stateDir), "class-merges.json"),
+      join(dirname(expandHome(cfg.wrc.mirror.wizardsFile)), "class-merges.json"),
     );
+    const classCwdOf = (t: string): string => { const c = m.getCwd(t); return c.runningCwd || c.defaultCwd; };
+    const cmig = classApply
+      ? migrateClasses(wizards, classes, cfg.wrc.mirror.wizardsFile, classCwdOf, mergeSpec)
+      : {
+        migrated: 0,
+        aliases: [] as Array<{ from: string; to: string }>,
+        conflicts: planClasses(wizards.all(), classes.all(), classCwdOf, mergeSpec).conflicts,
+      };
+    if (!classApply) classLog.info({ gated: true, applyFile: join(expandHome(cfg.daemon.stateDir), "classes.apply") }, "class migration gated");
     if (cmig.migrated) classLog.info({ migrated: cmig.migrated, classes: classes.all().length, backup: cmig.backup }, "class/instance migration applied");
     if (cmig.skipped) classLog.warn({ reason: cmig.skipped }, "class/instance migration skipped");
     cmig.conflicts.forEach((c) => classLog.warn({ conflict: c }, "class migration conflict"));
@@ -3385,8 +3388,18 @@ const main = async (): Promise<void> => {
       mkdirSync(reportDir, { recursive: true });
       writeFileSync(join(reportDir, "classes-migration.txt"), cmig.conflicts.length ? cmig.conflicts.join("\n") + "\n" : "");
     } catch (e) { classLog.warn({ err: (e as Error).message }, "class migration report not written"); }
-    const rebound = rewriteStewardBindings(cfg, sourcePath, cmig.aliases);
-    if (rebound) classLog.info({ rebound }, "steward bindings rewritten to class names");
+    if (classApply) {
+      const rebound = rewriteStewardBindings(cfg, sourcePath, cmig.aliases);
+      if (rebound) classLog.info({ rebound }, "steward bindings rewritten to class names");
+      // 成员表改键 (人 2026-11-18): (chat, identity) → (chat, target)。键里的 identity 在这个
+      // chat 有实例就换成那条 target, 否则保持; 幂等 (第二次 0 写)。必须跑在类迁移之后 ——
+      // 实例 target 是迁移才落定的。
+      const kmig = members.migrateKeys((chat, key) => {
+        if (wizards.get(key) && baseOfKey(key) === chat) return key;
+        return wizards.all().find((w) => identityOfRec(w) === key && baseOfKey(w.target) === chat)?.target;
+      });
+      if (kmig) classLog.info({ migrated: kmig }, "member keys migrated to instance targets");
+    }
     // v3 §3: 全局管家身份落位 —— home (defaultChat) 的默认会话就是它的锚点化身。
     // 新聊天 (还没有任何会话) 的裸消息由它接待 (inbound stewardRoute); 未认领的新装机不造幽灵记录。
     const gs = markGlobalSteward(wizards, cfg.defaultChat);
@@ -3685,10 +3698,10 @@ const main = async (): Promise<void> => {
             const watched = obligationWatches.all();
             return {
               chat: base,
-              members: members.ofChat(base).map(({ identity, row }) => {
-                const mine = rows.filter((r) => identityOfTarget?.(r.owner) === identity);
+              members: members.ofChat(base).map(({ target, row }) => {
+                const mine = rows.filter((r) => r.owner === target);
                 return {
-                  name: wizards.all().find((w) => identityOfRec(w) === identity)?.name || identity,
+                  name: wizards.get(target)?.name || target,
                   mode: row.mode,
                   cursor: row.cursor,
                   owed: mine.filter((r) => ["held", "open", "need", "error"].includes(r.status)).length,
@@ -3947,35 +3960,105 @@ const main = async (): Promise<void> => {
       json(res, 200, { ok: true, ...identityOf(self, self), peers: (await m.peers(self)).filter((p) => !p.self).length });
     });
 
-    // 改名字 / 写职责。名字全局唯一、与聊天名脱钩 (默认会话只是出生时取了聊天名):
-    // 撞名自动挂 `-N`, 返回里的 `name` 才是落定的那个。
+    // 改名字 / 写职责。名字全局唯一、与聊天名脱钩 (默认会话只是出生时取了聊天名)。
+    // `to` = 改**别人** (实例名 / 类名, 带不带点都认): 权限 = 同 bot 且 (调用方是它的直属
+    // parent, 或调用方本身就是管家实例); 学徒不可被别人改。目标是类实例时 name 是
+    // **新类名**: 全部实例同步成 <新类名>-<原序号> (序号不动), 名字形如 X-3 直接 400 ——
+    // 那会造出两层实例名。/name 已下线 (人 2026-11-18), 这是唯一的改名入口。
     http.register("POST /wizard/identity", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       const addressError = unsupportedPeerAddressField(body);
       if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
-      const b = body as { name?: string; description?: string; expertise?: string };
+      const b = body as { name?: string; description?: string; expertise?: string; to?: string };
+      const peerName = stripSigil((b.to ?? "").toString());
+      const target = peerName ? wizards.byName(peerName)?.target : self;
+      if (!target) { json(res, 404, { ok: false, reason: `不知道 .${peerName} 是谁` }); return; }
+      if (target !== self) {
+        const victim = wizards.get(target);
+        const caller = wizards.get(self);
+        const callerSteward = !!caller && caller.ordinal !== undefined
+          && wizards.classes?.get(identityOfRec(caller))?.role === "steward";
+        const refusal = identityEditRefusal(victim, {
+          sameBot: sameBot(self, target),
+          editorIsParent: victim?.parent === self,
+          editorIsStewardInstance: callerSteward,
+        });
+        if (refusal) { json(res, 403, { ok: false, reason: refusal, name: victim?.name ?? "" }); return; }
+      }
       const asked = normalizeTag((b.name ?? "").toString());
       const description = (b.description ?? "").toString().trim();
       const expertise = (b.expertise ?? "").toString().trim();
       if ((b.name ?? "").toString().trim() && !asked) { json(res, 400, { ok: false, reason: "名字只能是 1-32 位字母/数字/`_`/`-`" }); return; }
-      const before = settleName(wizards, chatNameOf(cfg, self), self);
-      const name = asked ? wizards.rename(self, asked) : before;
-      if (description) wizards.upsertIdentity(self, { description });
+      const before = settleName(wizards, chatNameOf(cfg, target), target);
+      const rec = wizards.get(target);
+      const cls = rec ? wizards.classes?.get(identityOfRec(rec)) : undefined;
+      const isInstance = !!cls && rec?.ordinal !== undefined;
+      if (asked && isInstance) {
+        if (parseInstanceName(asked)) { json(res, 400, { ok: false, reason: `"${asked}" 长得像实例名 (<类名>-<数字>): 类名不能以 -数字 结尾` }); return; }
+        if (!validClassName(asked)) { json(res, 400, { ok: false, reason: `"${asked}" 不是合法类名 (1-${CLASS_NAME_MAX} 位名字字符, 不以 -数字 结尾)` }); return; }
+      }
+      // 受影响的实例 (类: 全部; 自由 wizard: 只有它自己) —— 改名后 pane 标题 / 名册 / 宪章都得跟。
+      const touched = isInstance && cls ? instancesOf(wizards, cls.id) : (rec ? [rec] : []);
+      const was = new Map(touched.map((w) => [w.target, w.name] as const));
+      // 名字换了, 指向旧名的管家绑定跟着换 —— 不改的话绑定悬空, 旧名日后被领走会把裸消息劫过去。
+      const rebind = (prev: string, next: string): void => {
+        if (!prev || prev.toLowerCase() === next.toLowerCase()) return;
+        Object.entries(cfg.chatPolicy ?? {})
+          .filter(([, p]) => (p?.steward ?? "").trim().toLowerCase() === prev.toLowerCase())
+          .forEach(([chat]) => bindSteward(cfg, sourcePath, chat, next));
+        Object.entries(cfg.wrc.channel.steward ?? {})
+          .filter(([, s]) => s.trim().toLowerCase() === prev.toLowerCase())
+          .forEach(([topic]) => bindChannelSteward(cfg, sourcePath, topic, next));
+      };
+      let name = before;
+      if (asked) {
+        try {
+          const { r } = guardCharter(() => {
+            const next = wizards.rename(target, asked);
+            rebind(before, next);
+            return next;
+          }, (next) => ({
+            what: target === self
+              ? (before ? `把自己 ${before} 改名为 ${next}` : `给自己起名为 ${next}`)
+              : `把 ${displayName(target)} 改名为 ${next} (由 ${displayName(self)} 发起)`,
+            byHuman: target !== self,
+          }));
+          name = r;
+        } catch (e) {
+          json(res, 400, { ok: false, reason: (e as Error).message });
+          return;
+        }
+      }
+      if (description) wizards.upsertIdentity(target, { description });
       // 专长: 传 "-" 清掉; 它不进名册变动通知 (只在名册 / 候选行里读)。
-      if (expertise) wizards.upsertIdentity(self, { expertise: expertise === "-" ? undefined : expertise });
-      const me = identityOf(self, self);
+      if (expertise) wizards.upsertIdentity(target, { expertise: expertise === "-" ? undefined : expertise });
+      const me = identityOf(self, target);
       // 职责是别人决定"该不该找你"的依据, 改了就得让同群的知道 —— 否则他们照着
-      // 出生快照里那句旧的 (或者空的) 职责派活。
-      if (asked || description) postRoster(baseOfKey(self), [self], before && before !== name
-        ? { op: "renamed", name, was: before, ...(description ? { job: description } : {}) }
-        : { op: "job", name, job: description }, subjectOf(wizards.get(self)));
+      // 出生快照里那句旧的 (或者空的) 职责派活。类改名则每个实例在自己的群里各报一次。
+      const after = isInstance && cls ? instancesOf(wizards, cls.id) : (wizards.get(target) ? [wizards.get(target)!] : []);
+      after.forEach((w) => {
+        const prev = was.get(w.target) ?? "";
+        if (asked || description) {
+          postRoster(baseOfKey(w.target), [w.target], prev && prev !== w.name
+            ? { op: "renamed", name: w.name, was: prev, ...(description ? { job: description } : {}) }
+            : { op: "job", name: w.name, job: description }, subjectOf(wizards.get(w.target)));
+        }
+        if (asked) void m.retitlePane(w.target);
+      });
       // 同上: 同群的知道新名字还不够, 它自己的宪章也写着旧名。
-      if (asked && name !== before) recharter([self]);
+      if (asked && name !== before) recharter(after.map((w) => w.target));
+      const instances = isInstance && cls ? after : [];
       json(res, 200, {
         ok: true,
         ...me,
         ...(asked && name.toLowerCase() !== asked.toLowerCase() ? { renamed: `'.${asked}' 已被占用, 落定为 '.${name}'` } : {}),
+        ...(isInstance && cls
+          ? {
+            class: { was: cls.name, name, instances: instances.map((w) => w.name) },
+            note: `类 ${cls.name} → ${name}, ${instances.length} 个实例: ${instances.map((w) => w.name).join(", ")}`,
+          }
+          : {}),
       });
     });
 
@@ -4031,11 +4114,11 @@ const main = async (): Promise<void> => {
       if (layer === "L0") {
         // P7-S3 严格群: 在场 = 本群成员 + 欠账数 (成员表 + 未结 chat 行按 owner 身份归账)。
         const strictMembers = strictSpeechOf?.(selfBase)
-          ? members.ofChat(selfBase).map(({ identity, row }) => ({
-              name: wizards.all().find((w) => identityOfRec(w) === identity)?.name || identity,
+          ? members.ofChat(selfBase).map(({ target, row }) => ({
+              name: wizards.get(target)?.name || target,
               mode: row.mode,
               owed: router.rows().filter((r) => r.receiver.kind === "chat" && r.receiver.channel === selfBase
-                && ["held", "open", "need", "error"].includes(r.status) && identityOfTarget?.(r.owner) === identity).length,
+                && ["held", "open", "need", "error"].includes(r.status) && r.owner === target).length,
             }))
           : undefined;
         const text = rosterL0(hit.map(enrich), { base: selfBase, stewardTarget, now, home: homedir(), census, ...(strictMembers ? { members: strictMembers } : {}), ...(missHint ? { missHint } : {}), ...(degradedLine ? { degraded: degradedLine } : {}) });
