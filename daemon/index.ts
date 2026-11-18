@@ -125,7 +125,7 @@ import type { PlanStore } from "./plans.js";
 import { registerPlanRoutes } from "./plan-http.js";
 import { returnOpOf, type HeldSeen, type InFlight, type Prereq, type ReturnOp, type Tell } from "./dispatch.js";
 import { NO_DEADLINE, isTerminal, renderInFlight, turnState } from "../shared/turn-state.js";
-import { startIdleNudge, startObligationWatch, strictDeliveryNudge, strictDeliveryReport,
+import { startIdleNudge, startObligationWatch, strictDeliveryNudge, strictDeliveryStewardNote, strictDeliveryHumanLine,
   type NudgeTarget, type ObligationRow, type ObligationWatch } from "./idle-nudge.js";
 import { askerFromEnvelope, parseReminders, renderReminder, stripReminders, withMsg, type NoteAttrs, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
 import { createHandoffs, cuttingTurn, handedOff, handingOff, handoffRound, resumeText, roundPending, settlesCut, type Pending as PendingHandoff } from "./handoff.js";
@@ -2806,13 +2806,21 @@ const main = async (): Promise<void> => {
           const who = displayName(row.owner);
           const answered = events.taskInputs(row.event).some((e) => !!e.result);
           const last = answered ? m.lastReply(row.owner, Date.now() - row.at).trim() : "";
-          // strict 群「答了没出站」: 补发指引只问一次, 问完还没动就留一条带摘录的日志 + 一条群系统行
-          // (人要看得出这是「答了没发」而不是卡死), 然后闭嘴 —— 行不落定, 交给义务账 / 人处置。
+          // strict 群「答了没出站」: 补发指引只问一次, 问完还没动 — 运维动作 (补发 / 转述 / 收掉)
+          // 是 wizard 的活, 直投本群管家跟进 (2026-11-18 aiconfig 群实录: 把「让它用 chat_reply 补发」
+          // 摊给被人打回); 群里只在没有管家可托付 (或管家自己就是欠账方) 时才留一行**给人看的**
+          // 系统行 —— 说清是什么坏了、人要不要管, 不出现工具名与运维步骤。行不落定。
           if (answeredStrict(turn)) {
             const re = row.receiver.kind === "chat" ? events.get(row.receiver.message)?.id ?? row.receiver.message : "";
             log.warn({ mod: "idle-nudge", turn, event: row.event, owner: row.owner, re, asks, last: clipLine(last, 200) },
-              "idle-nudge: 严格群已答但没出站 — 补发指引追问无果, 停止追问 (行仍 open, 交义务账)");
-            notifyChat(channel, strictDeliveryReport({ who, event: row.event, re, asks, last }));
+              "idle-nudge: 严格群已答但没出站 — 补发指引追问无果, 停止追问 (行仍 open, 转告管家跟进)");
+            const steward = stewardRoute(cfg, wizards, channel);
+            const note = strictDeliveryStewardNote({ chat: chatNameOf(cfg, channel) || channel, who, event: row.event, re, asks, last });
+            if (steward.target !== channel && steward.target !== row.owner && (wizards.get(steward.target) || m.sessionInfo(steward.target))) {
+              await m.injectText(steward.target, note, { channel: "" }).catch(() => undefined);
+              return;
+            }
+            notifyChat(channel, strictDeliveryHumanLine({ who, asks }));
             return;
           }
           notifyChat(channel, "[wezard] ⚠️ " + who + " 的这件活 (" + row.event + ") 追问 " + asks + " 次仍未收口 — "
@@ -2848,16 +2856,10 @@ const main = async (): Promise<void> => {
           const re = events.get(row.message)?.id ?? row.message;
           const who = displayName(row.owner);
           if (isStewardTarget(cfg, wizards, row.owner)) {
-            // 管家违约: 发群系统行 (notifyChat 自动进聊天账本)。它已经交过终句的, 不是「没回」是
-            // 「答了没交付」—— strict 群只认 chat_reply, 而这种会话往往是 strict 上线前启动的
-            // (工具表里没有 chat_reply), 光说「逾期未回」人只会以为它在拖。附上它最后说的 + 出路。
-            const answered = events.taskInputs(row.event).some((e) => !!e.result);
-            const last = answered ? m.lastReply(row.owner, Date.now() - row.ageMs).trim() : "";
-            notifyChat(row.channel, "[wezard] ⚠️ 管家 " + who + " 的义务 (" + row.event + ", re: " + re + ") "
-              + (answered
-                ? "已答但**没有交付进群** — 本群是 strict, 答复只走 chat_reply。若它的会话是 strict 上线前启动的, 工具表里没有 chat_reply; 在群里发 /new (或让它 handoff) 重开会话后重问。" +
-                  (last ? "\n\n它最后说的: " + clipLine(last, 300) : "")
-                : "逾期未回 — 已提醒过一次。"));
+            // 管家违约: 发群系统行 (notifyChat 自动进聊天账本) — 给人看的一句话, 不带工具名/运维步骤
+            // (运维由 daemon/管家消化)。「已答未交付」的行不进这份 watch (rows 过滤 answeredStrict),
+            // 那一类归 idle-nudge 的补发指引 + 管家直投。
+            notifyChat(row.channel, "[wezard] ⚠️ 管家 " + who + " 有一笔指向本群的义务 (" + row.event + ") 逾期未回 — 已提醒过一次。");
             return;
           }
           const steward = stewardRoute(cfg, wizards, row.channel);

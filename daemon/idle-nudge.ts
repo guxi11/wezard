@@ -98,10 +98,16 @@ export const nudgeText = (fromName: string, turn: string, idleMs: number, n: num
 export const strictDeliveryNudge = (x: { chat: string; re: string }): string =>
   `（守护进程: ${x.chat} 是严格模式, 你这一轮已经写出了结论, 但这笔义务**还没用 chat_reply 交付** (仍开着 —— 严格群里发过话不等于交付, 终句也不进出站门)。请用 chat_reply({re: "${x.re}", text: <你刚才那份结论>}) 把它正式交付; 确实不该发就不带 text 记 passed。这件活只追问这一次, 再不回会上报。）`;
 
-/** 追问之后仍无交付: 发进群的那一行 (人要看得出「答了没交付」, 不是卡死)。 */
-export const strictDeliveryReport = (x: { who: string; event: string; re: string; asks: number; last?: string }): string =>
-  `[wezard] ⚠️ ${x.who} 已经答了, 但这笔义务还没用 chat_reply 交付 (仍开着) — 本群是严格模式, 销账只走 chat_reply 的显式答复。已追问 ${x.asks} 次仍无交付; 行 ${x.event} 还开着 (义务账): 可以让它用 chat_reply 补发, 或用 stop_wizard 收掉。`
-  + (x.last ? `\n\n它最后说的: ${clipLine(x.last, 300)}` : "");
+/** 追问之后仍无交付: 告诉**本群管家**的那一段 (直投它的输入框 —— 运维动作是 wizard 的事, 人只看结论;
+ * 2026-11-18 aiconfig 群实录: 这段话发进群被人打回「daemon 可以直接给哪个 wizard 说」)。 */
+export const strictDeliveryStewardNote = (x: { chat: string; who: string; event: string; re: string; asks: number; last?: string }): string =>
+  `（守护进程: ${x.chat} 里 ${x.who} 已经答了, 但这笔义务还没用 chat_reply 交付 (行 ${x.event}, re: ${x.re}, 已追问 ${x.asks} 次无果, daemon 不再追问)。请你跟进: 让它用 chat_reply({re: "${x.re}", text: <结论>}) 补发; 它交付不了 (非成员 / 会话已死) 就由你转述结论, 或 stop_wizard 收掉后重派。`
+  + (x.last ? `它最后说的: ${clipLine(x.last, 300)}` : "") + `）`;
+
+/** 追问之后仍无交付、又没有管家可托付: 发进群给人看的那一行 —— 只说是什么坏了、要不要人管,
+ *  不出现工具名/运维动作 (那是 wizard 的语言)。 */
+export const strictDeliveryHumanLine = (x: { who: string; asks: number }): string =>
+  `[wezard] ⚠️ ${x.who} 已经答了, 但答复发不进本群, 本群也没有管家能替它转告 (已提醒 ${x.asks} 次无果)。这条提问没有送达 —— 可以在本群重新问一次, 或点名别的成员回答。`;
 
 /** 一件在飞活的追问口径 (缺省用全局 idleNudge 配置)。 */
 export interface NudgeTarget {

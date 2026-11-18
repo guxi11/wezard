@@ -4,7 +4,7 @@
 // `brief: strict conclusion (no outbound, obligation open)` 后静默丢弃, 人看到彻底静默。
 // 这里钉 daemon 侧的补发追问: 真的下发、话术是「用 chat_reply 补发」、上限 1 次、补了就收账。
 import assert from "node:assert";
-import { createIdleNudgeTick, step, strictDeliveryNudge, strictDeliveryReport,
+import { createIdleNudgeTick, step, strictDeliveryNudge, strictDeliveryStewardNote, strictDeliveryHumanLine,
   type NudgeDeps, type NudgeTarget, type Policy, type Watch } from "../daemon/idle-nudge.js";
 
 let passed = 0;
@@ -34,15 +34,26 @@ await t("补发追问说清楚结论没交付销账、要 chat_reply 发出去",
   assert.ok(!s.includes("进展如何"), "通用追问话术是错题");
 });
 
-await t("上报带行号、出路与最后一句摘要 (截 300)", () => {
-  const s = strictDeliveryReport({ who: "w", event: "e172afa", re: "m1", asks: 1, last: "L".repeat(400) });
+// ─── 上报分流 (2026-11-18 aiconfig 群实录改版): 运维动作给管家, 人只看「坏了什么」
+await t("管家段直投 wizard: 带行号 / re / 补发出路 / 最后一句摘要 (截 300)", () => {
+  const s = strictDeliveryStewardNote({ chat: "aiconfig", who: "w", event: "e172afa", re: "m1", asks: 1, last: "L".repeat(400) });
+  assert.ok(s.includes("aiconfig"));
   assert.ok(s.includes("e172afa"));
-  assert.ok(s.includes("chat_reply"));
-  assert.ok(s.includes("义务账"));
-  assert.ok(s.includes("还没用 chat_reply 交付"), "口径与追问一致: 未交付销账, 不是没发言");
+  assert.ok(s.includes('re: "m1"'));
+  assert.ok(s.includes("chat_reply"), "给管家的可以是运维语言");
+  assert.ok(s.includes("转述"), "交付不了时给管家的是转述/收掉出路, 不是死等");
   assert.ok(s.includes("L".repeat(300)));
   assert.ok(!s.includes("L".repeat(301)), "摘要截到 300");
 });
+
+await t("人话行只说坏了什么、人怎么办 — 不出现工具名与运维步骤", () => {
+  const s = strictDeliveryHumanLine({ who: "w", asks: 1 });
+  assert.ok(s.includes("没有送达"), "说清这条提问没人收到");
+  assert.ok(s.includes("重新问"), "给的是人能做的动作");
+  for (const tool of ["chat_reply", "chat_say", "stop_wizard", "re:", "义务账", "成员表"])
+    assert.ok(!s.includes(tool), "人话行不出现 wizard 词汇: " + tool);
+});
+
 
 // ─── 有界 (纯状态机): 16 天里只问 1 次、上报 1 次
 await t("cycles:1 —— 问满这一组就闭嘴, 不重开一轮", () => {
