@@ -51,6 +51,10 @@ assert.ok(hasHeading(strict, "## 本群开着严格模式"), "strict 群带严�
 assert.ok(!hasHeading(strict, "## 本群开着顶层模式"), "strict 群不带顶层模式节 (被替换)");
 for (const fragment of ["chat_reply", "chat_say", "chat_ask", "义务不随终句自动关账", "/owed", "每轮 ≤3"])
   assert.ok(strict.includes(fragment), `strict charter must include ${fragment}`);
+// 2026-11-18 放宽 (入群即发言权): 新话术必须进 strict 节, 旧的「只能答义务」措辞必须退场。
+for (const fragment of ["成员即发言权", "派活 ack / 进展用 chat_say", "交付并销账", "不销账"])
+  assert.ok(strict.includes(fragment), `strict charter must include ${fragment}`);
+assert.ok(!strict.includes("只能答指向自己的义务"), "strict charter must not mention retired mention-only speech rule");
 // strict 群出站礼仪: 一次到位 / 不轮换试探通道 / 话讲最少 —— 只进 strict 节, 不许污染 implicit 群。
 for (const fragment of ["发东西一次到位", "不许轮换试探通道", "话讲最少"])
   assert.ok(strict.includes(fragment), `strict charter must include ${fragment}`);

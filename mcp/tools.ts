@@ -211,7 +211,7 @@ const DELEGATE_SCHEMA = {
       planId: z.string().optional().describe("这次派活归属的 plan id。仅关联event供owner的闲时提醒判断，不会自动推进plan；补充同一event时沿用关联。"),
       public: z.boolean().optional().describe("默认 true (气泡与回复进群); false = 私聊, 只记 rolepage。"),
       dryRun: z.boolean().optional().describe("只要默认决定与理由, 不执行。"),
-  join: z.object({ chat: z.string().describe("聊天名或 principal"), mode: z.enum(["speaker", "mention"]).optional() }).optional().describe("把它带进一个严格模式群当成员 (chat = 聊天名或 principal; mode 缺省 mention, speaker = 可主动开口)。只在 strict 群生效, 别的群忽略。"),
+  join: z.object({ chat: z.string().describe("聊天名或 principal"), mode: z.enum(["speaker", "mention"]).optional() }).optional().describe("把它带进一个严格模式群当成员 (chat = 聊天名或 principal; mode 只记录入群方式: 缺省 mention = 人点名带入, speaker = 成员带入 —— 发言权相同)。只在 strict 群生效, 别的群忽略。"),
     };
 
 const runDelegate = async (tool: string, a: z.infer<z.ZodObject<typeof DELEGATE_SCHEMA>>) => {
@@ -239,7 +239,7 @@ const offspringShape = {
   planId: z.string().optional().describe("若task属于现有plan，指定plan id以关联派活event；plan仍由owner显式更新。"),
   return: z.enum(["self", "transfer", "detach", "none"]).optional().describe("带了 task 时这件活的回执去哪, 同 tell_peer 的 `return`: `transfer` = 把这一轮欠着的那一笔 (人问的那一轮也算) 整件交给新生的它, 它的终句直接交付人, 你静默收口。"),
   for: z.string().optional().describe("带了 task 时这件活为你欠着的哪一笔派的, 同 tell_peer 的 `for`。"),
-  join: z.object({ chat: z.string().describe("聊天名或 principal"), mode: z.enum(["speaker", "mention"]).optional() }).optional().describe("把它带进一个严格模式群当成员 (chat = 聊天名或 principal; mode 缺省 mention, speaker = 可主动开口)。只在 strict 群生效, 别的群忽略。"),
+  join: z.object({ chat: z.string().describe("聊天名或 principal"), mode: z.enum(["speaker", "mention"]).optional() }).optional().describe("把它带进一个严格模式群当成员 (chat = 聊天名或 principal; mode 只记录入群方式: 缺省 mention = 人点名带入, speaker = 成员带入 —— 发言权相同)。只在 strict 群生效, 别的群忽略。"),
 };
 
 type Offspring = { lead?: boolean; description: string; name?: string; task?: string; taskFile?: string; params?: Record<string, string>; from?: string; cwd?: string; chat?: string; model?: string; effort?: string; tier?: string; planId?: string; return?: string; for?: string; join?: { chat: string; mode?: "speaker" | "mention" } };
@@ -446,7 +446,7 @@ export const createWezardServer = (): McpServer => {
     {
       title: "List members of a strict chat",
       description:
-        "列出严格模式群 (chatPolicy.speech=strict) 的成员与在场方式 (owner=管家 / speaker=可主动开口 / mention=只能答指向自己的义务) 与各自已读到的聊天记录游标。implicit 群一律 409 —— 成员制只在 strict 群生效。人侧对应命令 /owed。",
+        "列出严格模式群 (chatPolicy.speech=strict) 的成员与在场方式 (owner=管家 / speaker·mention=成员, 发言权相同 —— mode 只记录入群方式) 与各自已读到的聊天记录游标。implicit 群一律 409 —— 成员制只在 strict 群生效。人侧对应命令 /owed。",
       inputSchema: {
         chat: z.string().optional().describe("聊天名或 principal; 缺省 = 当前轮所在的聊天"),
       },
@@ -458,24 +458,23 @@ export const createWezardServer = (): McpServer => {
     {
       title: "Speak into a strict chat",
       description:
-        "在严格模式群里主动发言: 每轮 ≤3 条、每群每分钟 ≤10 (与 notify / send_file 共用额度); 非成员 403; mention 成员必须带指向自己义务的有效 re, 否则 409。implicit 群 409: 出站不受发言权约束, 直接回复 / notify 即可。",
+        "在严格模式群里发言: 成员即可 (不挂义务、不限一条人话一条出站), 每轮 ≤3 条、每群每分钟 ≤10 (与 chat_reply / notify / send_file 共用额度); 非成员 403。派活 ack / 中间进展用它 —— 出站不销义务的账, 结论交付才用 chat_reply。implicit 群 409: 出站不受发言权约束, 直接回复 / notify 即可。",
       inputSchema: {
         chat: z.string().optional().describe("聊天名或 principal; 缺省 = 当前轮所在的聊天"),
         text: z.string().describe("要说的话 (markdown)"),
-        re: z.string().optional().describe("mention 成员必填: 要挂靠的那条义务的消息 id (chatlog 信封 / 提醒里带的 msg)"),
       },
     },
-    async ({ chat, text, re }) => unwrap("chat_say", await daemonPost("/chat/say", { ...(chat ? { chat } : {}), text, ...(re ? { re } : {}) })),
+    async ({ chat, text }) => unwrap("chat_say", await daemonPost("/chat/say", { ...(chat ? { chat } : {}), text })),
   );
   server.registerTool(
     "chat_reply",
     {
       title: "Reply to an obligation in a strict chat",
       description:
-        "答一条指向自己的义务 (chatlog 信封 owes>0 / 违约提醒点名时): 带 text 在流窗口内覆盖占位气泡交付 (窗口过了走群消息), 不带 text 把这笔义务记为 passed (无需答复)。幂等键 chat_reply:<re>:<contentRev>, 同 re 二次 409 不重复发送。implicit 群 409: 回执按现行口径 (行首 .name RESULT: / 自动回执) 走。",
+        "答一条义务 / 回一条群消息: re 是那条消息的 id (chatlog 信封 / 提醒里带的 msg)。带 text = 显式答复: 流窗口内覆盖占位气泡交付 (窗口过了走群消息) 并把这笔义务销账; 不带 text = 记 passed (无需答复, 只能记在自己未结的义务上)。义务已结或欠在别人手上时照样能回 —— 只发言, 不销账 (ack / 进展请改用 chat_say, 不销账)。同一条义务可多次回复; 幂等键 chat_reply:<re>:<contentRev>, 同 re 同文重试不重复发送。implicit 群 409: 回执按现行口径 (行首 .name RESULT: / 自动回执) 走。",
       inputSchema: {
-        re: z.string().describe("要答的那条义务的消息 id (chatlog 信封 / 提醒里带的 msg)"),
-        text: z.string().optional().describe("答复正文; 缺省 = 记 passed (无需答复)"),
+        re: z.string().describe("要答的那条消息的 id (chatlog 信封 / 提醒里带的 msg)"),
+        text: z.string().optional().describe("答复正文; 缺省 = 记 passed (仅自己未结的义务)"),
       },
     },
     async ({ re, text }) => unwrap("chat_reply", await daemonPost("/chat/reply", { re, ...(text !== undefined ? { text } : {}) })),
@@ -612,7 +611,7 @@ export const createWezardServer = (): McpServer => {
       description:
         "把本机一个文件作为**图片 / 文件 / 语音 / 视频消息**发进聊天给人看 (notify 的媒体版: 去向、聊天名、顶层模式的规矩都与 notify 相同)。截图、生成的图表、导出的报表、日志包要交给人时用它 —— 别只在回复里写一个本地路径, 人那边打不开。\n" +
         "`kind` 省略按扩展名定: png/jpg/jpeg/gif → image, mp4 → video, amr → voice, 其余 → file。企微上限: 图片 ≤10MB、视频 mp4 ≤10MB、语音只收 amr ≤2MB、文件 ≤20MB; 超了直接报错并告诉你怎么改 (例如大图改 `kind:\"file\"`)。\n" +
-        "严格群里成员发文件不受「只能答义务」限制 (文件是交付物), 但仍占每轮 3 条 / 每分钟 10 条的额度。",
+        "严格群里成员即可发文件 (文件是交付物; 出站不再要求挂义务), 但仍占每轮 3 条 / 每分钟 10 条的额度。",
       inputSchema: {
         path: z.string().describe("本机绝对路径 (`~` 可用)"),
         kind: z.enum(["image", "file", "voice", "video"]).optional().describe("省略 = 按扩展名推断"),
