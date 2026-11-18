@@ -92,15 +92,15 @@ export const nudgeText = (fromName: string, turn: string, idleMs: number, n: num
     ? `（守护进程代 ${fromName} 提醒${max > 1 ? ` (${n}/${max})` : ""}: 任务 (${turn}) 正等你回应${state === "errored" ? "（执行方遇到错误）" : "（执行方有反问）"}。请用 tell_peer({name:"${fromName}", re:true}) 回答或续办；需要新信息时用 kind:"ask"。）`
     : `（守护进程代 ${fromName} 追问${max > 1 ? ` (${n}/${max})` : ""}: 这件活 (${turn}) 你已经闲了 ${Math.max(1, Math.round(idleMs / 60_000))} 分钟, 还没有交回结论。进展如何? 卡在哪? 做完了就在行首直接写 RESULT: <结论> (行首不加反引号/引号/加粗); 还在等什么 (后台任务 / 别人) 就说清楚在等什么、大概多久。）`;
 
-/** strict 群「答了但没出站」的追问那一句 —— 它答过了, 通用追问「进展如何 / 还没交回结论」是错题
- *  (它以为自己答完了); 要说的是「你那份结论没有进群, 用 chat_reply 发出去」。
- *  re = 那条义务消息的信封 msg (chat_reply 的 re)。 */
+/** strict 群「答了但没交付」的追问那一句 —— 它答过了, 通用追问「进展如何 / 还没交回结论」是错题
+ *  (它以为自己答完了); 要说的是「这笔义务还没用 chat_reply 交付销账」(2026-11-18 放宽后
+ *  chat_say 也能发言, 但只有 chat_reply 销账 —— 发过话不等于交付)。re = 那条义务消息的信封 msg。 */
 export const strictDeliveryNudge = (x: { chat: string; re: string }): string =>
-  `（守护进程: ${x.chat} 是严格模式, 你这一轮已经写出了结论, 但它**没有进群** —— 严格群的终句不进出站门, 只有 chat_reply 算交付。请用 chat_reply({re: "${x.re}", text: <你刚才那份结论>}) 把它发出去; 确实不该发就不带 text 记 passed。这件活只追问这一次, 再不回会上报。）`;
+  `（守护进程: ${x.chat} 是严格模式, 你这一轮已经写出了结论, 但这笔义务**还没用 chat_reply 交付** (仍开着 —— 严格群里发过话不等于交付, 终句也不进出站门)。请用 chat_reply({re: "${x.re}", text: <你刚才那份结论>}) 把它正式交付; 确实不该发就不带 text 记 passed。这件活只追问这一次, 再不回会上报。）`;
 
-/** 追问之后仍无出站: 发进群的那一行 (人要看得出「答了没发」, 不是卡死)。 */
+/** 追问之后仍无交付: 发进群的那一行 (人要看得出「答了没交付」, 不是卡死)。 */
 export const strictDeliveryReport = (x: { who: string; event: string; re: string; asks: number; last?: string }): string =>
-  `[wezard] ⚠️ ${x.who} 已经答了, 但结论没有发进群 — 本群是严格模式, 答复只走 chat_reply。已追问 ${x.asks} 次 (让它用 chat_reply 补发) 仍无出站; 行 ${x.event} 还开着 (义务账): 可以让它重发, 或用 stop_wizard 收掉。`
+  `[wezard] ⚠️ ${x.who} 已经答了, 但这笔义务还没用 chat_reply 交付 (仍开着) — 本群是严格模式, 销账只走 chat_reply 的显式答复。已追问 ${x.asks} 次仍无交付; 行 ${x.event} 还开着 (义务账): 可以让它用 chat_reply 补发, 或用 stop_wizard 收掉。`
   + (x.last ? `\n\n它最后说的: ${clipLine(x.last, 300)}` : "");
 
 /** 一件在飞活的追问口径 (缺省用全局 idleNudge 配置)。 */

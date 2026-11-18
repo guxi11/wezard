@@ -9,28 +9,22 @@ import { sliceBatch, renderBatch, CHAT_BATCH_BUDGET } from "../shared/chat-recor
 import { parseReminders } from "../shared/reminder.js";
 import { openRouter, ops, makeOutcome } from "../daemon/router.js";
 
-// P7-S2 义务与批量 (判据②③④⑤的纯函数面):
-//   ② 非成员 chat_say 403 = 100%; mention 无有效 re 409 = 100%
-//   ③ 每条人话恰好 1 条义务; 同 re 二次 (行已 answer+hand) 不再是有效义务
+// P7-S2 义务与批量 (判据②③④⑤的纯函数面; ② 于 2026-11-18 随「入群即发言权」放宽改写):
+//   ② 非成员 403 = 100%; 成员 (owner/speaker/mention 同权) 不挂义务即可发言; 额度 409 照判
+//   ③ 每条人话恰好 1 条义务; 销账只走 chat_reply 的显式答复 (answer+hand), 出站 (chat_say/notify/send_file) 不销账
 //   ④ 20 条消息 3 次激活, 每个 seq 恰好出现在 1 个 chatlog; uncertain 游标不动, committed 后无重复
 //   ⑤ 每批 ≤6KB 且触发消息 100% 全文
 
-// ── ② 判定矩阵 ──
-const nonMember = Array.from({ length: 10 }, (_, i) => sayVerdict({ mode: undefined, hasValidRe: false, turnUsed: i, windowCount: i }));
-assert.ok(nonMember.every((v) => v?.status === 403), "非成员 chat_say 403 = 100% (10/10)");
-const mentionNoRe = Array.from({ length: 10 }, (_, i) => sayVerdict({ mode: "mention", hasValidRe: false, turnUsed: i, windowCount: i }));
-assert.ok(mentionNoRe.every((v) => v?.status === 409 && v.reason.includes("mention")), "mention 无有效 re 409 = 100% (10/10)");
-assert.equal(sayVerdict({ mode: "mention", hasValidRe: true, turnUsed: 0, windowCount: 0 }), undefined, "mention + 有效 re 放行");
-assert.equal(sayVerdict({ mode: "speaker", hasValidRe: false, turnUsed: 0, windowCount: 0 }), undefined, "speaker 主动发言放行");
-assert.equal(sayVerdict({ mode: "owner", hasValidRe: false, turnUsed: 0, windowCount: 0 }), undefined, "owner 放行");
-assert.equal(sayVerdict({ mode: "speaker", hasValidRe: false, turnUsed: 3, windowCount: 0 })?.status, 409, "每轮第 4 条 409");
-assert.equal(sayVerdict({ mode: "speaker", hasValidRe: false, turnUsed: 0, windowCount: 10 })?.status, 409, "每群每分钟第 11 条 409");
-// send_file: 文件是交付物 —— mention 不挂义务也发货, 但非成员与额度照判。
-assert.equal(sayVerdict({ mode: "mention", hasValidRe: false, turnUsed: 0, windowCount: 0, delivery: true }), undefined, "mention 成员发文件放行");
-assert.equal(sayVerdict({ mode: undefined, hasValidRe: false, turnUsed: 0, windowCount: 0, delivery: true })?.status, 403, "非成员发文件照样 403");
-assert.equal(sayVerdict({ mode: "mention", hasValidRe: false, turnUsed: 3, windowCount: 0, delivery: true })?.status, 409, "文件也吃每轮额度");
-assert.equal(sayVerdict({ mode: "mention", hasValidRe: false, turnUsed: 0, windowCount: 10, delivery: true })?.status, 409, "文件也吃每分钟额度");
-assert.equal(sayVerdict({ mode: "mention", hasValidRe: false, turnUsed: 0, windowCount: 0 })?.status, 409, "delivery=false 的 mention 仍按发言拦");
+// ── ② 判定矩阵 (人拍板「入群即发言权」: 义务不再是出站前置, 只拦非成员与额度) ──
+const nonMember = Array.from({ length: 10 }, (_, i) => sayVerdict({ mode: undefined, turnUsed: i, windowCount: i }));
+assert.ok(nonMember.every((v) => v?.status === 403), "非成员 403 = 100% (10/10)");
+for (const mode of ["owner", "speaker", "mention"] as const) {
+  assert.equal(sayVerdict({ mode, turnUsed: 0, windowCount: 0 }), undefined, mode + " 成员不挂义务即可发言 (与 speaker/owner 同权)");
+  assert.equal(sayVerdict({ mode, turnUsed: 3, windowCount: 0 })?.status, 409, mode + " 每轮第 4 条 409");
+  assert.equal(sayVerdict({ mode, turnUsed: 0, windowCount: 10 })?.status, 409, mode + " 每群每分钟第 11 条 409");
+}
+// send_file 的 delivery 豁免随 re 要求一起退役: 文件与 chat_say 同一道门 (成员 + 额度), 无特殊分支。
+assert.equal(sayVerdict({ mode: "mention", turnUsed: 0, windowCount: 0 }), undefined, "mention 成员发文件照走成员门 (无需豁免)");
 
 // ── topOnly 门 (chat_say 与 notify / send_file 同一道核): 下层轮 (服务同伴的活) 不得在顶层模式群说话 ──
 assert.equal(topOnlyVerdict({ belowTop: true, topOnly: true, exempt: false }), true, "下层轮在 topOnly 群 chat_say 被拦");
@@ -52,25 +46,39 @@ assert.equal(topOnlyVerdict({ belowTop: true, topOnly: false, exempt: false }), 
   const pTop = say.indexOf("topOnlyMuted");
   const pGate = say.indexOf("strictSayGate");
   assert.ok(pImplicit > 0 && pTop > pImplicit && pGate > pTop, "chat_say: implicit 指路在前, topOnly 门在 strictSayGate 前 (implicit 群行为不变)");
-  const notify = handler('http.register("POST /notify"', 'http.register("POST /send_file"');
+  // notify 的切片止于它自己的 handler 结尾 (后面紧跟 chat_* 一族, 不能扫进去)。
+  const notify = handler('http.register("POST /notify"', '// ── 给人看的文件');
   assert.ok(notify.includes("topOnlyMuted"), "notify 与 chat_say 同一道 topOnly 门");
+  const sendfile = handler('http.register("POST /send_file"', 'http.register("POST /peers/peek"');
+  // 放宽后 chat_reply 也能自由发言 (已结/别人的义务照发) —— 必须补上 topOnly 门,
+  // 否则替同伴干活的那一轮能借 chat_reply 绕过顶层模式对人说话。
   const reply = handler('http.register("POST /chat/reply"', 'http.register("POST /chat/ask"');
-  assert.ok(!reply.includes("topOnlyMuted"), "chat_reply 不走 topOnly 门 (义务交付语义不动)");
+  const rTop = reply.indexOf("topOnlyMuted");
+  const rGate = reply.indexOf("strictSayGate");
+  assert.ok(rTop > 0 && rGate > rTop, "chat_reply 也走 topOnly 门, 且在 strictSayGate 前");
+  // 出站不销账 (验收): chat_say / notify / send_file 的 handler 不碰义务账;
+  // 销账 (answer+hand) 只在 chat_reply 的显式答复分支; 已结/非己义务只发言。
+  for (const [name, slice] of [["chat_say", say], ["notify", notify], ["send_file", sendfile]] as const) {
+    assert.ok(!slice.includes("ops.answer") && !slice.includes("ops.hand"), name + " 出站不销义务的账");
+  }
+  assert.ok(reply.includes("ops.answer") && reply.includes("ops.hand"), "只有 chat_reply 的显式答复销账");
+  assert.ok(reply.includes("不销账"), "chat_reply 对已结 / 欠在别人手上的义务只发言不销账");
 }
 
-// 记账: 轮次额度随事件归零, 窗口按群滚动
+// 记账: 轮次额度随事件归零, 窗口按群滚动; 同一条义务下连发 ack + 结论 + 进展 (验收)。
 {
   const meter = openSayMeter();
-  for (let i = 0; i < 3; i++) {
+  // mention 成员在同一轮 (同一注入事件) 里连发三条: 派活 ack (chat_say) → 结论 (chat_reply) → 进展 (chat_say)。
+  for (const [i, what] of ["ack", "结论", "进展"].entries()) {
     const f = meter.check("w1", "ev1", "chat:wrA", 1_000_000 + i);
-    assert.equal(sayVerdict({ mode: "speaker", hasValidRe: false, ...f }), undefined, "第 " + (i + 1) + " 条放行");
+    assert.equal(sayVerdict({ mode: "mention", ...f }), undefined, "同一条义务下第 " + (i + 1) + " 条 (" + what + ") 放行");
     meter.charge("w1", "ev1", "chat:wrA", 1_000_000 + i);
   }
-  assert.equal(sayVerdict({ mode: "speaker", hasValidRe: false, ...meter.check("w1", "ev1", "chat:wrA", 1_000_010) })?.status, 409, "同轮第 4 条撞轮次额度");
+  assert.equal(sayVerdict({ mode: "speaker", ...meter.check("w1", "ev1", "chat:wrA", 1_000_010) })?.status, 409, "同轮第 4 条撞轮次额度");
   for (let i = 0; i < 7; i++) meter.charge("w1", "ev2", "chat:wrA", 1_000_020 + i);
-  assert.equal(sayVerdict({ mode: "speaker", hasValidRe: false, ...meter.check("w1", "ev2", "chat:wrA", 1_000_030) })?.status, 409, "同群第 11 条撞窗口额度");
-  assert.equal(sayVerdict({ mode: "speaker", hasValidRe: false, ...meter.check("w2", "ev1", "chat:wrB", 1_000_030) }), undefined, "别的群 / 别人不受影响");
-  assert.equal(sayVerdict({ mode: "speaker", hasValidRe: false, ...meter.check("w1", "ev3", "chat:wrA", 1_000_030 + 61_000) }), undefined, "时间走到窗口外恢复");
+  assert.equal(sayVerdict({ mode: "speaker", ...meter.check("w1", "ev2", "chat:wrA", 1_000_030) })?.status, 409, "同群第 11 条撞窗口额度");
+  assert.equal(sayVerdict({ mode: "speaker", ...meter.check("w2", "ev1", "chat:wrB", 1_000_030) }), undefined, "别的群 / 别人不受影响");
+  assert.equal(sayVerdict({ mode: "speaker", ...meter.check("w1", "ev3", "chat:wrA", 1_000_030 + 61_000) }), undefined, "时间走到窗口外恢复");
 }
 
 // ── ③④⑤ 义务与批量: 真 ChatRecords + members + 游标 ──
@@ -151,7 +159,8 @@ router.commit(ops.hand({ event: "eRoot0", inbox: "chat_reply:m0:rev1" }));
 assert.equal(owed(), 4, "交付一条, 欠账少一条");
 const row0 = router.get("eRoot0")!;
 assert.equal(row0.status, "handed");
-assert.ok(!UNFINISHED.includes(row0.status), "同 re 二次: 行已 handed, 义务校验不过 (409 语义)");
+// 2026-11-18 起 同 re 二次不再 409: handler 对已结义务只发言不销账 (账面保持 handed, 不回 open)。
+assert.ok(!UNFINISHED.includes(row0.status), "同 re 二次: 行已 handed, 账面不再回 open");
 // passed 关账
 router.commit(ops.answer({ event: "eRoot1", outcome: makeOutcome("passed", "（无需答复）") }));
 router.commit(ops.hand({ event: "eRoot1", inbox: "chat_reply:m1:passed" }));

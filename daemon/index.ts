@@ -1900,7 +1900,7 @@ const main = async (): Promise<void> => {
       const dests = [...new Set(refs.length ? refs.map((r) => chatBaseOf(cfg, r)) : [channelOf(self)])];
       const muted = topOnlyMuted(self, dests);
       if (muted) { json(res, 409, muted); return; }
-      // P7-S2 严格群: notify 按 chat_say 规则 (成员 + 限额; mention 必须挂指向自己的义务)。
+      // P7-S2 严格群: notify 与 chat_say 同一道门 (成员 + 限额; 出站不要求挂义务)。
       for (const dest of dests) {
         if (!strictSpeechOf?.(dest)) continue;
         const gate = strictSayGate(self, dest);
@@ -2037,7 +2037,7 @@ const main = async (): Promise<void> => {
       const batch = sliceBatch(chatRecords.lines(base), members.rowOf(base, identity)?.cursor ?? -1, CHAT_BATCH_BUDGET, self);
       return batch
         ? renderReminder({ wezard: "chatlog", chat: base, from: String(batch.from), to: String(batch.to), owes: String(owedInChat(target, base)) },
-          [batch.render, "上面是 " + (chatNameOf(cfg, base) || base) + " 游标之后的话; 答指向你的义务用 chat_reply({re: 这条消息信封上的 msg}), 主动发言用 chat_say。"])
+          [batch.render, "上面是 " + (chatNameOf(cfg, base) || base) + " 游标之后的话; 结论交付用 chat_reply({re: 这条消息信封上的 msg}), 发言 / ack / 进展用 chat_say (不销账)。"])
         : "";
     };
       /** P7-S2 /owed: 本聊天的义务账渲染 (严格群; 未开 = 提示)。 */
@@ -2052,9 +2052,10 @@ const main = async (): Promise<void> => {
 
 
     // ── P7-S2 群聊严格治理工具 (chat_*): strict 群的成员制 / 出站门 / 义务账 ──
-    // implicit 群一律 409 指路 (全部存量群零变化); strict 群: 成员才能开口
-    // (mention 只能答指向自己的义务), chat_reply 关账 (占位覆盖 / passed),
-    // chat_ask 开子行义务; notify / send_file 共用同一道门 (strictSayGate)。
+    // implicit 群一律 409 指路 (全部存量群零变化); strict 群 (2026-11-18 放宽: 入群即
+    // 发言权): 成员 (owner/speaker/mention) 即可 chat_say / chat_reply / notify / send_file,
+    // 同一条人话允许多条出站, 出站不销义务的账; chat_reply 带 text 才是显式答复 (交付 +
+    // 销账, 占位覆盖 / passed), chat_ask 开子行义务; 四个口子共用同一道门 (strictSayGate)。
     const identityNameOf = (identity: string): string => wizards.get(identity)?.name || identity;
     /** re (chatlog 信封 / 提醒带的 msg = 注入事件 id) → 它服务的路由行; 也认裸路由 event id。 */
     const obligationByMsg = (re: string): Route | undefined => {
@@ -2062,15 +2063,9 @@ const main = async (): Promise<void> => {
       const ev = events.get(ref);
       return (ev?.serves ? router.get(ev.serves) : undefined) ?? router.get(ref);
     };
-    const validObligationOf = (self: string, base: string, re?: string): Route | undefined => {
-      if (!re) return undefined;
-      const row = obligationByMsg(re);
-      return row && row.receiver.kind === "chat" && row.receiver.channel === base
-        && row.owner === self && ["held", "open", "need", "error"].includes(row.status) ? row : undefined;
-    };
     // 限额账 (每轮 ≤3 / 每群每分钟 ≤10) 与判定核都在 daemon/strict-gate.ts —— 那是
-    // 判据② (非成员 403 / mention 无有效 re 409) 的测试面。这里只做接线: 成员方式 →
-    // 义务校验 → 判定 → 记账。通过即记账 (发不发出去了也记 — 保守防刷)。
+    // 判据② (非成员 403 / 额度 409) 的测试面。这里只做接线: 成员方式 → 判定 → 记账。
+    // 通过即记账 (发不发出去了也记 — 保守防刷)。
     const sayMeter = openSayMeter();
     // P7-S2 义务观测的落盘处 (S3 起 rolepage 治理面板也读它: overdue 计数)。
     const obligationWatches = loadJsonMap<ObligationWatch>(join(cfg.daemon.stateDir, "obligations.json"));
@@ -2122,12 +2117,12 @@ const main = async (): Promise<void> => {
       const identity = rec ? identityOfRec(rec) : target;
       members.leaveEverywhere(identity);
     };
-    const strictSayGate = (self: string, base: string, re?: string, opts?: { delivery?: boolean }): { status: number; body: Record<string, unknown> } | undefined => {
+    const strictSayGate = (self: string, base: string): { status: number; body: Record<string, unknown> } | undefined => {
       const identity = identityOfTarget?.(self);
       const mode = identity ? members.modeOf(base, identity) : undefined;
       const cur = openingOfSelf(self)?.env?.eventId ?? "";
       const facts = sayMeter.check(self, cur, base);
-      const verdict = sayVerdict({ mode, hasValidRe: !!validObligationOf(self, base, re), ...(opts?.delivery ? { delivery: true } : {}), ...facts });
+      const verdict = sayVerdict({ mode, ...facts });
       if (verdict) return { status: verdict.status, body: { ok: false, ...(verdict.status === 403 ? { chat: chatNameOf(cfg, base) || base } : {}), reason: verdict.reason } };
       sayMeter.charge(self, cur, base);
       return undefined;
@@ -2143,12 +2138,12 @@ const main = async (): Promise<void> => {
         return;
       }
       const rows = members.ofChat(base).map(({ identity, row }) => ({ identity: identityNameOf(identity), mode: row.mode, since: row.since, cursor: row.cursor }));
-      json(res, 200, { ok: true, chat: chatNameOf(cfg, base) || base, members: rows, note: "mode: owner=管家 / speaker=可主动开口 / mention=只能答指向自己的义务; cursor=已读到的聊天记录 seq" });
+      json(res, 200, { ok: true, chat: chatNameOf(cfg, base) || base, members: rows, note: "mode: owner=管家 / speaker·mention=成员 (发言权相同, mode 只记录入群方式); cursor=已读到的聊天记录 seq" });
     });
     http.register("POST /chat/say", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { chat?: string; text?: string; re?: string };
+      const b = body as { chat?: string; text?: string };
       const text = (b.text ?? "").trim();
       if (!text) { json(res, 400, { ok: false, reason: "text required" }); return; }
       const base = (b.chat ?? "").trim() ? chatBaseOf(cfg, (b.chat ?? "").trim()) : channelOf(self);
@@ -2161,14 +2156,14 @@ const main = async (): Promise<void> => {
       // 服务同伴的活) 不得在顶层模式群对人说话 —— 顶层豁免 (管家 / 人直说的轮) 照旧。
       const muted = topOnlyMuted(self, [base]);
       if (muted) { json(res, 409, muted); return; }
-      const gate = strictSayGate(self, base, b.re);
+      const gate = strictSayGate(self, base);
       if (gate) { json(res, gate.status, gate.body); return; }
       // P7-S3: 频道 (chat:<topic_id>) 走 replyOk 选评论/新帖, 不经群消息通道。
       if (isTopicChat(base)) postAsTopic(self, base, text);
       else postAs(self, base, text);
       json(res, 200, { ok: true, chat: chatNameOf(cfg, base) || base, sent: text.length });
     });
-    // chat_reply 的幂等键 (chat_reply:<re>:<contentRev>): 有界集合, 重启即空 —— 行已在
+    // chat_reply 的幂等键 (chat_reply:<re>:<contentRev>): 有界集合, 重启即空 —— 销账行已在
     // 第一次交付时落定 (answer+hand), 这层是「同 re 同文重试」不重复发送的双保险。
     const chatReplySeen = new Set<string>();
     http.register("POST /chat/reply", async (req, res) => {
@@ -2176,49 +2171,62 @@ const main = async (): Promise<void> => {
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       const b = body as { re?: string; text?: string };
       const ref = (b.re ?? "").trim();
-      if (!ref) { json(res, 400, { ok: false, reason: "re required: 要答的那条义务的消息 id (chatlog 信封 / 提醒里带的 msg)" }); return; }
+      if (!ref) { json(res, 400, { ok: false, reason: "re required: 要答的那条消息的 id (chatlog 信封 / 提醒里带的 msg)" }); return; }
       const row = obligationByMsg(ref);
-      const base = row?.receiver.kind === "chat" ? row.receiver.channel : channelOf(self);
+      // re 是锚不是门票 (2026-11-18 入群即发言权): 目的地 = 义务行 > 消息事件 > 当前聊天;
+      // 义务已结 / 欠在别人手上 / 根本不是义务, 都照样能回 —— 只发言, 不销账。
+      const ev = events.get(eventRef(ref));
+      const base = row?.receiver.kind === "chat" ? row.receiver.channel : ev?.channel || channelOf(self);
       if (!base || !strictSpeechOf(base)) {
         json(res, 409, { ok: false, speech: "implicit", reason: (chatNameOf(cfg, base) || base || "当前聊天") + " 未开严格模式 (speech=implicit): 回执按现行口径 (行首 .name RESULT: / 自动回执) 走" });
         return;
       }
-      if (!row || row.receiver.kind !== "chat" || !["held", "open", "need", "error"].includes(row.status)) {
-        json(res, 409, { ok: false, reason: "认不出这条义务 (不存在 / 已结) — 每条人话恰好一条义务, chatlog 信封或违约提醒里带的 msg 才是它的 id" });
-        return;
-      }
-      if (row.owner !== self) {
-        json(res, 409, { ok: false, reason: "这条义务欠在 " + displayName(row.owner) + " 手上 — 只有义务的 owner 能 chat_reply" });
-        return;
-      }
-      // 幂等: 同 re 二次 409, 不重复发送。
+      const UNFINISHED = ["held", "open", "need", "error"];
+      const open = row && row.receiver.kind === "chat" && UNFINISHED.includes(row.status) ? row : undefined;
+      const mineRow = open && open.owner === self ? open : undefined;
+      const text = (b.text ?? "").trim();
+      if (!text && !mineRow) { json(res, 400, { ok: false, reason: "text required — passed 只能记在自己未结的义务上 (re 用那条消息信封上的 msg)" }); return; }
+      // topOnly 门与 chat_say / notify / send_file 同一道: 放宽后 chat_reply 也能自由发言,
+      // 替同伴干活的那一轮不能借它绕过顶层模式对人说话。
+      const muted = topOnlyMuted(self, [base]);
+      if (muted) { json(res, 409, muted); return; }
+      const gate = strictSayGate(self, base);
+      if (gate) { json(res, gate.status, gate.body); return; }
+      // 幂等: 同 re 同文重试不重复发送 (不同文的多次回复各算各的)。
       const rev = contentRev((b.text ?? "") + (b.text === undefined ? ":passed" : ""));
       const idem = "chat_reply:" + ref + ":" + rev;
-      if (chatReplySeen.has(idem)) { json(res, 409, { ok: false, reason: "这条义务已交付过同文回复 (幂等键命中), 不重复发送" }); return; }
+      if (chatReplySeen.has(idem)) { json(res, 409, { ok: false, reason: "这条消息已发过同文回复 (幂等键命中), 不重复发送" }); return; }
       chatReplySeen.add(idem);
       if (chatReplySeen.size > 512) chatReplySeen.delete(chatReplySeen.values().next().value!);
-      let delivered: string;
-      if ((b.text ?? "").trim()) {
-        // P7-S3: 频道 (chat:<topic_id>) 的占位气泡从未立过 (频道丢中间帧), 直接走
-        // replyOk 分支评论在义务锚定的那帖上 (row.receiver.message = 频道消息 msgid)。
-        if (isTopicChat(base)) {
-          postAsTopic(self, base, b.text!, row.receiver.kind === "chat" ? row.receiver.message : undefined);
-          delivered = "channel";
-        } else {
-        // 先占位后交付: 流窗口内覆盖占位气泡; 窗口过了退回群消息 (被批准的出站口子)。
+      /** 交付正文: 频道 (占位气泡从未立过, 频道丢中间帧) 走 replyOk 评论在锚定的那帖上;
+       *  群聊先占位后交付 (流窗口内覆盖占位气泡, 过窗退回群消息)。 */
+      const deliver = async (msg?: string): Promise<string> => {
+        if (isTopicChat(base)) { postAsTopic(self, base, b.text!, msg); return "channel"; }
         const covered = await m.finishPlaceholder(self, ref, b.text!);
         if (!covered) postAs(self, base, b.text!);
-        delivered = covered ? "placeholder" : "message";
-        }
-        router.commit(ops.answer({ event: row.event, outcome: makeOutcome("done", b.text!) }));
-      } else {
-        router.commit(ops.answer({ event: row.event, outcome: makeOutcome("passed", "（无需答复）") }));
+        return covered ? "placeholder" : "message";
+      };
+      if (mineRow && text) {
+        // 显式答复: 交付 + 销账 —— 出站工具里只有这一条路销义务的账 (chat_say / notify /
+        // send_file 只是发言); 同一条义务此前发过的 ack / 进展都没动过它。
+        const delivered = await deliver(mineRow.receiver.kind === "chat" ? mineRow.receiver.message : undefined);
+        router.commit(ops.answer({ event: mineRow.event, outcome: makeOutcome("done", b.text!) }));
+        router.commit(ops.hand({ event: mineRow.event, inbox: idem }));
+        json(res, 200, { ok: true, delivered, event: mineRow.event, chat: chatNameOf(cfg, base) || base });
+        return;
+      }
+      if (mineRow) {
+        router.commit(ops.answer({ event: mineRow.event, outcome: makeOutcome("passed", "（无需答复）") }));
         // P7-S3b: 沉默也要可分辨 —— passed 落一条定长标记 post (detail 里区分「没说话」与「没这轮」)。
         recordPost({ target: self, channel: base, body: "（passed — 无需答复，未发言）" });
-        delivered = "passed";
+        router.commit(ops.hand({ event: mineRow.event, inbox: idem }));
+        json(res, 200, { ok: true, delivered: "passed", event: mineRow.event, chat: chatNameOf(cfg, base) || base });
+        return;
       }
-      router.commit(ops.hand({ event: row.event, inbox: idem }));
-      json(res, 200, { ok: true, delivered, event: row.event, chat: chatNameOf(cfg, base) || base });
+      // 已结 / 别人的义务 / 非义务消息: 入群即发言权, 照发; 这一条不销账。
+      const delivered = await deliver(open?.receiver.kind === "chat" ? open.receiver.message : undefined);
+      json(res, 200, { ok: true, delivered, chat: chatNameOf(cfg, base) || base,
+        note: open ? "这条义务欠在 " + displayName(open.owner) + " 手上 — 你这条只发言, 不代它销账 (它自己用 chat_reply 交付)" : "义务已结 / 不是义务 — 只发言, 不销账" });
     });
     http.register("POST /chat/ask", async (req, res) => {
       const { self, body } = await readPeerBody(req);
@@ -2288,10 +2296,10 @@ const main = async (): Promise<void> => {
       if (!dest || !sameBot(self, dest)) { json(res, 400, { ok: false, reason: `认不出聊天: ${ref} (wizard_roster 每行有 home 聊天名, 人侧 /chats; 没起名的聊天寻址不到)` }); return; }
       const muted = topOnlyMuted(self, [dest]);
       if (muted) { json(res, 409, muted); return; }
-      // P7-S2 严格群: send_file 按 chat_say 规则, 但 delivery 豁免 mention 的 re 要求 ——
-      // 文件是交付物, 「只能答义务」不该把交付物一起封死; caption 与媒体仍共占一次额度。
+      // P7-S2 严格群: send_file 与 chat_say 同一道门 (成员即可, 出站不再要求挂义务) ——
+      // 文件是交付物; caption 与媒体仍共占一次额度。
       if (strictSpeechOf(dest)) {
-        const gate = strictSayGate(self, dest, undefined, { delivery: true });
+        const gate = strictSayGate(self, dest);
         if (gate) { json(res, gate.status, gate.body); return; }
       }
       const plan = media.plan(dest, { path, ...(b.kind ? { kind: b.kind } : {}) });

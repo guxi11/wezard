@@ -1,18 +1,15 @@
 import type { MemberMode } from "./members.js";
 
-// P7-S2 严格群发言闸的判定核 (纯函数): chat_say / notify / send_file 共用同一道门。
-// 判定与记账分离 —— 这里只判「这一次让不让过」, 轮次/窗口的记账在调用方 (daemon/index.ts),
-// 判据② (非成员 403 = 100%、mention 无有效 re 的 409 = 100%) 直接对着这张表测。
-// 唯一的例外是 send_file 的 delivery: 文件是交付物不是闲聊, mention 成员不挂义务也发货,
-// 但非成员与额度两条照旧 (否则「只能答义务」会把交付物一起封死)。
+// 严格群发言闸的判定核 (纯函数): chat_say / chat_reply / notify / send_file 共用同一道门。
+// 判定与记账分离 —— 这里只判「这一次让不让过」, 轮次/窗口的记账在调用方 (daemon/index.ts)。
+// 语义 (2026-11-18 放宽, 人拍板「入群即发言权」): 成员 (owner/speaker/mention 任一在场方式)
+// 在群里发言不再需要挂某条义务的回包 —— 同一条人话允许多条出站 (派活 ack、进展、结论都合法),
+// 出站也不再把义务销账 (只有 chat_reply 的显式答复销账, 接线在 daemon/index.ts)。
+// 仍拦的只有两件事: 非成员 403 = 100%、频控额度 (每轮 3 / 每群每分钟 10)。
 
 export interface SayFacts {
-  /** 在场方式; undefined = 非成员 (403)。 */
+  /** 在场方式; undefined = 非成员 (403)。owner/speaker/mention 发言权相同 —— mode 只记录入群方式。 */
   mode?: MemberMode;
-  /** mention 模式时: 是否挂着指向自己、未结的义务 (re 有效)。 */
-  hasValidRe: boolean;
-  /** send_file: 交付文件 (只豁免 mention 的 re 要求, 成员资格与额度照判)。 */
-  delivery?: boolean;
   /** 本轮 (同一注入事件) 已用额度。 */
   turnUsed: number;
   /** 本群滚动 60s 窗口内已用额度。 */
@@ -21,7 +18,7 @@ export interface SayFacts {
 
 export type SayVerdict = { status: 403 | 409; reason: string } | undefined;
 
-// topOnly 门 (chat_say 与 notify / send_file 共用同一道): 下层轮 —— 这一轮服务于同伴的活
+// topOnly 门 (chat_say 与 notify / send_file / chat_reply 共用同一道): 下层轮 —— 这一轮服务于同伴的活
 // (有 serves 行且不直接对人收口) —— 不得在顶层模式群对人说话。判定核只收布尔事实,
 // 路由行 / 管家豁免 (该群默认会话) 的接线在 daemon/index.ts 的 topOnlyMuted。
 export interface TopOnlyFacts {
@@ -37,8 +34,6 @@ export const topOnlyVerdict = (f: TopOnlyFacts): boolean => f.topOnly && f.below
 
 export const sayVerdict = (f: SayFacts): SayVerdict => {
   if (!f.mode) return { status: 403, reason: "非成员 — 严格群里只有成员能开口; 让人点名你入群, 或由成员用 chat_ask 向你开义务" };
-  if (f.mode === "mention" && !f.hasValidRe && !f.delivery)
-    return { status: 409, reason: "mention 成员只能答指向自己的义务 — 用 chat_reply({re, text}) 交付, 或 chat_say 带有效的 re" };
   if (f.turnUsed >= 3) return { status: 409, reason: "本轮发言额度 (3) 已用完 — 把要说的合并成一条再发" };
   if (f.windowCount >= 10) return { status: 409, reason: "这个群这一分钟的发言额度 (10) 已用完 — 稍后再发" };
   return undefined;

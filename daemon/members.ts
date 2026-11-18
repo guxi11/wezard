@@ -9,8 +9,9 @@
 // (join 的接面 —— delegate/spawn 的 join 参数、点名入群 —— 随 S2 落)。
 import { loadJsonMap } from "../shared/json-map-store.js";
 
-/** 在场方式: owner = 本群的管家绑定; speaker = 可主动开口 (chat_say); mention = 只能
- *  chat_reply 答指向自己的义务 (人拍板: 成员默认不入群, 入群默认 mention)。 */
+/** 在场方式: owner = 本群的管家绑定; speaker / mention = 普通成员 —— 发言权相同
+ *  (2026-11-18 人拍板「入群即发言权」), mode 只记录入群方式 (speaker = 成员带入,
+ *  mention = 人点名带入), 出站门不再按它区分。 */
 export type MemberMode = "owner" | "speaker" | "mention";
 
 export interface MemberRow {

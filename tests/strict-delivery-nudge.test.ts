@@ -26,9 +26,9 @@ const MIN = 60_000;
 const STRICT: Policy = { afterMs: 5 * MIN, max: 1, cycles: 1 };
 
 // ─── 话术: 说的是「结论没进群、用 chat_reply 补发」, 不是「进展如何」
-await t("补发追问说清楚结论没出站、要 chat_reply 发出去", () => {
+await t("补发追问说清楚结论没交付销账、要 chat_reply 发出去", () => {
   const s = strictDeliveryNudge({ chat: "sanitizer", re: "e4622be.1" });
-  assert.ok(s.includes("没有进群"));
+  assert.ok(s.includes("还没用 chat_reply 交付"), "说的是「未交付」不是「没发言」(2026-11-18 放宽后 chat_say 也算发言)");
   assert.ok(s.includes("chat_reply"));
   assert.ok(s.includes('re: "e4622be.1"'), "带上义务的 re");
   assert.ok(!s.includes("进展如何"), "通用追问话术是错题");
@@ -39,6 +39,7 @@ await t("上报带行号、出路与最后一句摘要 (截 300)", () => {
   assert.ok(s.includes("e172afa"));
   assert.ok(s.includes("chat_reply"));
   assert.ok(s.includes("义务账"));
+  assert.ok(s.includes("还没用 chat_reply 交付"), "口径与追问一致: 未交付销账, 不是没发言");
   assert.ok(s.includes("L".repeat(300)));
   assert.ok(!s.includes("L".repeat(301)), "摘要截到 300");
 });
