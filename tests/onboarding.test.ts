@@ -6,7 +6,7 @@ import pino from "pino";
 import { ConfigSchema } from "../shared/config.js";
 import { chatPolicyOf } from "../daemon/chat-name.js";
 import { makeApproveHandler } from "../daemon/approval.js";
-import { applyOnboarding, bindSteward, classifyOnboardingInput, GUIDE_DESC, guideOf, guideRefusal, guideTargetOf, isGuideManifestation, isOnboardingActive, judgeOnboarding, loadOnboardingStore, needsOnboarding, renderOnboardingDone, stewardNameCandidates, validateWorkspace, WIZARD_NAME_RE, workspaceInput, type OnboardingInput, type OnboardingVerdict } from "../daemon/onboarding.js";
+import { applyOnboarding, bindSteward, classifyOnboardingInput, GUIDE_DESC, relativePathInput, guideOf, guideRefusal, guideTargetOf, isGuideManifestation, isOnboardingActive, judgeOnboarding, loadOnboardingStore, needsOnboarding, renderOnboardingDone, stewardNameCandidates, validateWorkspace, WIZARD_NAME_RE, workspaceInput, type OnboardingInput, type OnboardingVerdict } from "../daemon/onboarding.js";
 import { bindWizardStore, identityWorkspaceOf, loadWizardStore } from "../daemon/wizard.js";
 import { autoOrdinalOf } from "../daemon/wizard-names.js";
 import { stewardRoute } from "../daemon/steward.js";
@@ -61,6 +61,14 @@ try {
   assert.deepEqual(classifyOnboardingInput("/new"), { kind: "command" }, "单段且不存在 = 命令");
   assert.deepEqual(classifyOnboardingInput("/strict apply"), { kind: "command" });
   assert.deepEqual(classifyOnboardingInput("fix"), { kind: "names", names: ["fix"] });
+
+  // 相对路径: 只说明「人在指目录」, 交给校验报要绝对路径 —— 不能退回名字分支 (11-18 实录:
+  // 「绑定workspace 到 aiservice/agent-team」把句子里的 workspace 当成身份名绑走了)。
+  assert.equal(relativePathInput("绑定workspace 到 aiservice/agent-team"), "aiservice/agent-team");
+  assert.equal(relativePathInput("看 https://a.com/b"), "", "URL 不认");
+  assert.equal(relativePathInput("/Users/x/proj"), "", "绝对路径归 workspaceInput");
+  assert.deepEqual(classifyOnboardingInput("绑定workspace 到 aiservice/agent-team"), { kind: "workspace", path: "aiservice/agent-team" }, "相对路径按目录交上去, 不落名字分支");
+  assert.equal(classifyOnboardingInput("看 https://a.com/b 吧").kind, "names", "URL 不当目录");
 
   // ── stewardNameCandidates: @mention 粘连与记号 ─────────────────────
   assert.deepEqual(stewardNameCandidates(".fix"), ["fix"]);
@@ -134,6 +142,9 @@ try {
   assert.equal(store.get(C), undefined, "绑已有不在本群新建锚点");
   assert.equal(obn.get(C), undefined);
   assert.equal(judgeOnboarding(store, C, { kind: "names", names: ["nobody"] }).kind, "retry", "名册里没有 = 重问");
+  store.upsert("user:owner#workspace", { kind: "worker", name: "workspace" });
+  assert.equal(judgeOnboarding(store, C, classifyOnboardingInput("绑定workspace 到 aiservice/agent-team") as Answer).kind, "retry",
+    "相对路径 = 重问要绝对路径, 不拿同一句里的英文词去绑同名身份");
   assert.equal(judgeOnboarding(store, C, { kind: "workspace", path: join(dir, "nope") }).kind, "retry", "不存在的目录 = 重问, 不落盘");
   delete cfg.chatPolicy;
 

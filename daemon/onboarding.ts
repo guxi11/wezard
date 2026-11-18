@@ -158,6 +158,20 @@ export const workspaceInput = (raw: string): string => {
   return "";
 };
 
+// 相对路径片段 (「aiservice/agent-team」): 含 / 且不以 / ~ 起头; URL 与斜杠命令不认。
+// 它在引导期只说明一件事 —— 人在指目录。交给 validateWorkspace 报「要绝对路径」, 绝不当名字
+// 候选: 「绑定 workspace 到 aiservice/agent-team」里的 workspace 是句中的英文词, 落进名字
+// 分支会静默绑走一个同名却住在别的目录的身份 (2026-11-18 实录: 指定的目录被无视)。
+const REL_PATH_RE = /(?:^|[\s，。；、！？（）《》“”‘’"'])((?![/~])[A-Za-z0-9._-]+\/[A-Za-z0-9._/-]+)/u;
+
+/** 人话里的相对路径片段 ("" = 没有)。 */
+export const relativePathInput = (raw: string): string => {
+  const m = REL_PATH_RE.exec((raw ?? "").trim());
+  if (!m) return "";
+  const run = m[1]!.replace(PATH_TAIL_RE, "");
+  return run.includes("://") ? "" : run;
+};
+
 /** 绑已有管家的名字候选 (按出现先后去重): 空白切出的 token (剥 .x / 记号 / 引号, 截掉粘连的
  *  @mention) 加上嵌在中文里的 ASCII 名字串 (「绑定fix」里的 fix)。只是候选, 要名册命中才算。 */
 export const stewardNameCandidates = (raw: string): string[] => {
@@ -181,7 +195,11 @@ export const classifyOnboardingInput = (raw: string): OnboardingInput => {
     const pathish = /^\/[^/\s]+\//.test(head) || validateWorkspace(head).ok;
     if (!pathish) return { kind: "command" };
   }
-  return path ? { kind: "workspace", path } : { kind: "names", names: stewardNameCandidates(text) };
+  if (path) return { kind: "workspace", path };
+  // 相对路径也是「人在说目录」: 按目录交上去由校验报「要绝对路径」, 不能退回名字分支 ——
+  // 否则同一句里的英文词会当成 wizard 名绑走 (见 REL_PATH_RE)。
+  const rel = relativePathInput(text);
+  return rel ? { kind: "workspace", path: rel } : { kind: "names", names: stewardNameCandidates(text) };
 };
 
 // ── 判定 + 写入 ───────────────────────────────────────────────────────
@@ -309,5 +327,5 @@ export const renderGuideRetry = (reason: string): string =>
 
 export const renderOnboardingDone = (b: OnboardingBound): string =>
   b.fresh
-    ? "[wezard] ✅ 引导完成: 本群管家 ." + b.name + " 已就位 (工作区 " + b.workspace + ")。之后直接在群里说话就是找它; 想起名发 /name <名字>。"
+    ? "[wezard] ✅ 引导完成: 本群管家 ." + b.name + " 已就位 (工作区 " + b.workspace + ")。之后直接在群里说话就是找它; 想改名 / 改职责对它说一声即可。"
     : "[wezard] ✅ 引导完成: 本群管家绑定为已有的 ." + b.name + " (工作区跟身份走: " + (b.workspace || "身份未记录工作区") + ")。之后直接在群里说话就是找它。";
