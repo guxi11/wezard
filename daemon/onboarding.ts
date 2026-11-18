@@ -243,6 +243,30 @@ export const bindSteward = (cfg: Config, sourcePath: string, base: string, name:
   patchJsonc(sourcePath, [{ path: ["chatPolicy", base, "steward"], value: name }]);
 };
 
+/** 迁移后管家绑定一律存**类名** (人 2026-11-18): 把 chatPolicy.<b>.steward 与
+ *  wrc.channel.steward.<t> 里等于某个旧名 (aliases 的 from) 的值改写成类名。
+ *  幂等: 类名不在 from 表里, 第二次跑不再命中。返回改了几处。 */
+export const rewriteStewardBindings = (
+  cfg: Config,
+  sourcePath: string,
+  aliases: ReadonlyArray<{ from: string; to: string }>,
+): number => {
+  if (!aliases.length) return 0;
+  const map = new Map(aliases.map((a) => [a.from.trim().toLowerCase(), a.to]));
+  let n = 0;
+  for (const [b, p] of Object.entries(cfg.chatPolicy ?? {})) {
+    const cur = (p?.steward ?? "").trim();
+    const to = cur ? map.get(cur.toLowerCase()) : undefined;
+    if (to) { bindSteward(cfg, sourcePath, b, to); n += 1; }
+  }
+  for (const [t, s] of Object.entries(cfg.wrc.channel.steward ?? {})) {
+    const cur = (s ?? "").trim();
+    const to = cur ? map.get(cur.toLowerCase()) : undefined;
+    if (to) { bindChannelSteward(cfg, sourcePath, t, to); n += 1; }
+  }
+  return n;
+};
+
 export interface OnboardingBound { name: string; workspace: string; fresh: boolean }
 
 /** 落定一个绑定 verdict: 新建 = 本群 untagged 锚点落 kind:steward + workspace (身份级) 并领一个

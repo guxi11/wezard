@@ -9,7 +9,7 @@
 //
 // 与 wizard.ts 互相 import (wizard 的 rename/claim/byName 要看类): 两边顶层都只有函数定义,
 // 运行期调用都发生在模块求值之后, ESM 的循环依赖在这里是安全的。
-import { copyFileSync, existsSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { expandHome } from "../shared/paths.js";
@@ -195,6 +195,8 @@ export interface ClassRename {
   from: string;
   to: string;
   ordinal: number;
+  /** 合并时要把记录的 identity 改成类的 id; 单组迁移不带 (identity 本来就是它)。 */
+  identity?: string;
 }
 
 export interface ClassPlan {
@@ -204,7 +206,51 @@ export interface ClassPlan {
   renames: ClassRename[];
   /** 跳过的组 (整组不写) 与需要人确认的提示; 每行自带 `skip:` / `note:` 前缀。 */
   conflicts: string[];
+  /** 旧名 → 类名 (每组锚点的旧名): 迁移后管家绑定一律存类名, 调用方据此改写 config。 */
+  aliases: Array<{ from: string; to: string }>;
 }
+
+// ── 人拍的合并 / 排除清单 (<stateDir>/class-merges.json) ─────────────────
+// <role, workspace> 唯一会说「同目录上两个人 = 一个人」, 但存量名册里那一串旧身份
+// (cc-wecom-4…18、serviceaiteam、auto) 是按旧规则 -N 退出来的, 名字不像实例、也合并
+// 不了 —— 人直接给一张表: 哪些身份并进哪个类 (新名字), 哪些组保持旧形态不动。
+// 文件不存在 = 没有合并, 纯旧行为。
+
+export interface ClassMerge {
+  /** 合并后类的 id (= 锚点 target 字符串, 账本地址不动)。 */
+  into: string;
+  /** 合并后的类名。 */
+  name: string;
+  /** 编号第 1 的那个 target (缺省 = into)。 */
+  first?: string;
+  /** 并进来的 identity 列表 (含 into 自己, 也容忍列表里出现过期 id)。 */
+  members: string[];
+}
+
+export interface ClassMergeSpec {
+  merges: ClassMerge[];
+  /** 保持旧形态、也不报冲突的 identity。 */
+  exclude: string[];
+}
+
+export const NO_MERGES: ClassMergeSpec = { merges: [], exclude: [] };
+
+/** 读合并清单。文件坏了 / 不存在 → 空表 (迁移退化成纯单组模式, 不炸 boot)。 */
+export const loadClassMerges = (filePath: string): ClassMergeSpec => {
+  try {
+    const raw = JSON.parse(readFileSync(expandHome(filePath), "utf8")) as Partial<ClassMergeSpec> | null;
+    if (!raw || typeof raw !== "object") return NO_MERGES;
+    const merges = Array.isArray(raw.merges)
+      ? raw.merges.filter((m): m is ClassMerge =>
+        !!m && typeof m.into === "string" && !!m.into.trim()
+        && typeof m.name === "string" && !!m.name.trim()
+        && Array.isArray(m.members) && m.members.every((x) => typeof x === "string"))
+        .map((m) => ({ ...m, members: [...new Set([...m.members, m.into])] }))
+      : [];
+    const exclude = Array.isArray(raw.exclude) ? raw.exclude.filter((x): x is string => typeof x === "string") : [];
+    return { merges, exclude };
+  } catch { return NO_MERGES; }
+};
 
 const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
@@ -237,6 +283,7 @@ export const planClasses = (
   records: readonly WizardRecord[],
   existingClasses: readonly ClassRecord[],
   cwdOf: (target: string) => string = () => "",
+  merges: ClassMergeSpec = NO_MERGES,
 ): ClassPlan => {
   const conflicts: string[] = [];
   const groups = new Map<string, WizardRecord[]>();
@@ -246,29 +293,33 @@ export const planClasses = (
     if (kin) kin.push(w); else groups.set(id, [w]);
   }
   const known = new Set(existingClasses.map((c) => c.id));
+  const excluded = new Set(merges.exclude);
+  const consumed = new Set<string>();
   const pending: ClassRecord[] = [];
   const renames: ClassRename[] = [];
-  for (const [id, kin] of [...groups].sort(([a], [b]) => cmp(a, b))) {
-    if (known.has(id)) continue;
-    const anchor = anchorIn(kin, id)!;
-    if (!isStewardish(anchor)) continue;
-    const name = (anchor.name ?? "").trim();
-    const label = `${id} (${name || "<无名>"})`;
-    const why = classProblem(name, id, [...existingClasses, ...pending]);
-    if (why) { conflicts.push(`skip: ${label} — ${why}`); continue; }
+  const aliasMap = new Map<string, string>();
+  /** 把一组 (合并时是多组) 记录规划成一个类 + 一串有序号实例。 */
+  const planGroup = (ids: readonly string[], classId: string, name: string, first?: string, bot = botOfKey(classId)): void => {
+    const kin = ids.flatMap((id) => groups.get(id) ?? []);
+    if (!kin.length) return;
+    const label = `${classId} (${name || "<无名>"})`;
+    const why = classProblem(name, classId, [...existingClasses, ...pending]);
+    if (why) { conflicts.push(`skip: ${label} — ${why}`); return; }
+    const firstKey = first ?? classId;
+    const anchor = kin.find((w) => w.target === firstKey) ?? anchorIn(groups.get(classId) ?? kin, classId)!;
     const workspace = normPath(anchor.workspace) || normPath(cwdOf(anchor.target));
-    const bot = botOfKey(id);
     const twin = workspace
       ? [...existingClasses, ...pending].find((c) => c.bot === bot && c.role === "steward" && c.workspace === workspace)
       : undefined;
     if (twin) {
       conflicts.push(`skip: ${label} — 与 ${twin.id} 同占 ${bot || "主"}/${workspace}, 两边的旧形态都保留, 待人确认是否合并`);
-      continue;
+      return;
     }
     if (!workspace) conflicts.push(`note: ${label} — 推不出 workspace, 类先以 "" 落库, 待人补`);
-    const instances = kin.slice().sort(byBirth);
+    // 编号: first 的 target 是 -1, 其余按出生先后 (同刻按 target)。合并进来的各组一视同仁。
+    const instances = kin.slice().sort((a, b) => Number(a.target !== firstKey) - Number(b.target !== firstKey) || byBirth(a, b));
     pending.push({
-      id,
+      id: classId,
       bot,
       name,
       role: "steward",
@@ -282,16 +333,46 @@ export const planClasses = (
     instances.forEach((w, i) => {
       const ordinal = i + 1;
       const to = instanceName(name, ordinal);
-      if (w.name !== to || w.ordinal !== ordinal) renames.push({ target: w.target, from: w.name, to, ordinal });
+      const identity = identityOf(w) === classId ? undefined : classId;
+      if (w.name !== to || w.ordinal !== ordinal || identity) {
+        renames.push({ target: w.target, from: w.name, to, ordinal, ...(identity ? { identity } : {}) });
+      }
     });
+    // 绑定里存的是**名字**: 每个被收进来的组的锚点旧名都指向这个类名。
+    for (const id of ids) {
+      const old = anchorIn(groups.get(id) ?? [], id)?.name?.trim();
+      if (old && foldName(old) !== foldName(name)) aliasMap.set(foldName(old), name);
+    }
+    ids.forEach((id) => consumed.add(id));
+  };
+
+  // ① 人拍的合并: 多组并成一个类 (exclude 的组保持旧形态, 不报冲突)。
+  for (const m of merges.merges) {
+    if (known.has(m.into)) continue; // 已迁过 → 整条跳过 (幂等)
+    const ids = [...new Set([...m.members, m.into])].filter((id) => groups.has(id) && !known.has(id) && !excluded.has(id));
+    if (ids.length) planGroup(ids, m.into, m.name.trim(), m.first);
   }
-  return { classes: pending.sort((a, b) => cmp(a.id, b.id)), renames, conflicts };
+  // ② 其余管家组: 一组一个类 (名字取锚点名)。
+  for (const [id, kin] of [...groups].sort(([a], [b]) => cmp(a, b))) {
+    if (known.has(id) || excluded.has(id) || consumed.has(id)) continue;
+    const anchor = anchorIn(kin, id)!;
+    if (!isStewardish(anchor)) continue;
+    planGroup([id], id, (anchor.name ?? "").trim());
+  }
+  return {
+    classes: pending.sort((a, b) => cmp(a.id, b.id)),
+    renames,
+    conflicts,
+    aliases: [...aliasMap].map(([from, to]) => ({ from, to })),
+  };
 };
 
 export interface ClassMigration {
   /** 本次落名的实例数 (0 = 没有可迁的 / 已迁完)。 */
   migrated: number;
   conflicts: string[];
+  /** 旧名 → 类名: 调用方据此把管家绑定改写成类名 (迁移后绑定存的都是类名)。 */
+  aliases: Array<{ from: string; to: string }>;
   /** 本次创建的备份路径; 没写盘就没有。 */
   backup?: string;
   /** 没迁成的原因 (备份失败); 原文件一个字节没动。 */
@@ -305,19 +386,24 @@ export const migrateClasses = (
   classes: ClassStore,
   filePath: string,
   cwdOf: (target: string) => string = () => "",
+  merges: ClassMergeSpec = NO_MERGES,
 ): ClassMigration => {
-  const plan = planClasses(store.all(), classes.all(), cwdOf);
+  const plan = planClasses(store.all(), classes.all(), cwdOf, merges);
   if (!plan.classes.length && !plan.renames.length) {
-    return { migrated: 0, conflicts: plan.conflicts };
+    return { migrated: 0, conflicts: plan.conflicts, aliases: plan.aliases };
   }
   const abs = expandHome(filePath);
   const backup = abs + CLASS_BACKUP_SUFFIX;
   try {
     if (!(existsSync(backup) && statSync(backup).isFile())) copyFileSync(abs, backup);
   } catch (e) {
-    return { migrated: 0, conflicts: plan.conflicts, skipped: `backup failed: ${(e as Error).message}` };
+    return { migrated: 0, conflicts: plan.conflicts, aliases: [], skipped: `backup failed: ${(e as Error).message}` };
   }
   plan.classes.forEach((c) => classes.create(c));
-  plan.renames.forEach((r) => store.upsert(r.target, { name: r.to, ordinal: r.ordinal }));
-  return { migrated: plan.renames.length, conflicts: plan.conflicts, backup };
+  plan.renames.forEach((r) => store.upsert(r.target, {
+    name: r.to,
+    ordinal: r.ordinal,
+    ...(r.identity ? { identity: r.identity } : {}),
+  }));
+  return { migrated: plan.renames.length, conflicts: plan.conflicts, aliases: plan.aliases, backup };
 };

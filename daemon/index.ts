@@ -1,6 +1,6 @@
 import { wxMarkdown } from "../shared/wx-text.js";
 // Daemon entry. Resident process — exits only on signal or fatal WS auth failure.
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash, timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
 import { loadOrCreateSvrToken } from "../shared/svr-token.js";
@@ -54,6 +54,7 @@ import { planStrictSwitch, renderSwitchReport, type SwitchFacts } from "./strict
 import { CHAT_BATCH_BUDGET, sliceBatch } from "../shared/chat-record.js";
 import { openSayMeter, sayVerdict, topOnlyVerdict } from "./strict-gate.js";
 import { openMembers } from "./members.js";
+import { loadClassMerges, loadClassStore, migrateClasses } from "./classes.js";
 import { footerTarget, responseFormatPolicy } from "./message-format.js";
 import { scanClaudeSessions } from "./session-scan.js";
 import {
@@ -131,7 +132,7 @@ import { parseWhen, renderChatLog, UNKNOWN_HUMAN, type LogSession } from "./chat
 import { renderChatRecords } from "../shared/chat-record.js";
 import { audienceOf } from "../shared/role-view.js";
 import { waitForIdle, type IdleResult } from "./wait-idle.js";
-import { guideRefusal, isGuideManifestation } from "./onboarding.js";
+import { guideRefusal, isGuideManifestation, rewriteStewardBindings } from "./onboarding.js";
 import { reminderEventId, reminderToken, startPlanReminders, type PlanReminderCandidate } from "./plan-reminders.js";
 
 const waitForQuorum = async (targets: readonly string[], isBusy: (target: string) => Promise<boolean>, timeoutMs: number, need: number): Promise<IdleResult[]> => {
@@ -3345,7 +3346,9 @@ const main = async (): Promise<void> => {
     // 这里只做三件事: 读身份、改身份、按身份生/收分身。tmux 一概不碰, 动作全在
     // mirror-bridge。
     const bornOf = (t: string): number | undefined => firstStamp(m.sessionInfo(t)?.jsonlPath ?? "");
-    const wizards = bindWizardStore(loadWizardStore(cfg.wrc.mirror.wizardsFile, bornOf));
+    // 类表 (人 2026-11-18): <bot, role, workspace> 唯一的人物设定; wizard 记录是它的实例。
+    const classes = loadClassStore(join(expandHome(cfg.daemon.stateDir), "classes.json"));
+    const wizards = bindWizardStore(loadWizardStore(cfg.wrc.mirror.wizardsFile, bornOf, classes));
     // P7-S3b backfill: 名册绑好后再跑 (byName 要用) —— 账本→post 幂等补齐。
     try { backfillChatPosts(); } catch { /* backfill 失败不挡 boot; 下次 boot 再补 */ }
     // v3 身份迁移必须先于任何别的写盘 (backfillBorn/settleAll 都会 upsert, 会把老记录
@@ -3356,6 +3359,28 @@ const main = async (): Promise<void> => {
     // 同身份的化身前一轮可能各写了一份身份级字段 (职责 / 记忆): 开机收敛一次, 幂等。
     const reconciled = reconcileKin(wizards);
     if (reconciled > 0) log.child({ mod: "wizard" }).info({ reconciled }, "identity kin reconciled");
+    // 类 / 实例 (人 2026-11-18): 管家身份 → 一条类 + 一串有序号的实例 (名字 <类名>-N)。
+    // 合并清单 (stateDir/class-merges.json, 人写) 把同目录上的几个旧身份并成一个类。幂等:
+    // 已建的类整组跳过。迁移会改名字, 所以旧名 → 类名的映射当场落到管家绑定上 —— 迁移后
+    // 绑定存的都是类名。冲突逐条 warn 并覆盖写 analysis/classes-migration.txt 给人看。
+    const classLog = log.child({ mod: "class" });
+    const cmig = migrateClasses(
+      wizards,
+      classes,
+      cfg.wrc.mirror.wizardsFile,
+      (t) => { const c = m.getCwd(t); return c.runningCwd || c.defaultCwd; },
+      loadClassMerges(join(expandHome(cfg.daemon.stateDir), "class-merges.json")),
+    );
+    if (cmig.migrated) classLog.info({ migrated: cmig.migrated, classes: classes.all().length, backup: cmig.backup }, "class/instance migration applied");
+    if (cmig.skipped) classLog.warn({ reason: cmig.skipped }, "class/instance migration skipped");
+    cmig.conflicts.forEach((c) => classLog.warn({ conflict: c }, "class migration conflict"));
+    try {
+      const reportDir = join(expandHome(cfg.daemon.stateDir), "analysis");
+      mkdirSync(reportDir, { recursive: true });
+      writeFileSync(join(reportDir, "classes-migration.txt"), cmig.conflicts.length ? cmig.conflicts.join("\n") + "\n" : "");
+    } catch (e) { classLog.warn({ err: (e as Error).message }, "class migration report not written"); }
+    const rebound = rewriteStewardBindings(cfg, sourcePath, cmig.aliases);
+    if (rebound) classLog.info({ rebound }, "steward bindings rewritten to class names");
     // v3 §3: 全局管家身份落位 —— home (defaultChat) 的默认会话就是它的锚点化身。
     // 新聊天 (还没有任何会话) 的裸消息由它接待 (inbound stewardRoute); 未认领的新装机不造幽灵记录。
     const gs = markGlobalSteward(wizards, cfg.defaultChat);
