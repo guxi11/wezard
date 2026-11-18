@@ -63,6 +63,26 @@ assert.equal(topOnlyVerdict({ belowTop: true, topOnly: false, exempt: false }), 
   }
   assert.ok(reply.includes("ops.answer") && reply.includes("ops.hand"), "只有 chat_reply 的显式答复销账");
   assert.ok(reply.includes("不销账"), "chat_reply 对已结 / 欠在别人手上的义务只发言不销账");
+  // ── 2026-11-18 aiconfig 群死账改版: 非成员不背义务 / topOnly 不拦自己名下的 chat 义务 ──
+  // ① chat_reply 的 topOnly 豁免: re 正对自己名下未结的 chat 义务 (mineRow) 时放行 —— 那一行
+  //    本身是对人的出口, 拦了它 belowTop 轮 + chat 义务 = 永远销不掉的死账。
+  assert.ok(reply.includes("mineRow ? undefined : topOnlyMuted"), "chat_reply: 自己名下未结的 chat 义务豁免 topOnly 门");
+  // ② transfer 不把 strict 群 chat 义务交给非成员 (创建侧校验; e1f7ab8 move 给 .GraceVance 的死路)。
+  const refusal = handler("const transferRefusal = ", "const transferNote = ");
+  assert.ok(refusal.includes("members.isMember(row.receiver.channel, target)"), "transfer: strict 群 chat 义务只交成员");
+  // ③ 人点名入群不挑 identity (无类存量 wizard 也入群), 出站门只按成员表判 —— 消灭「义务在、
+  //    发言权无」的口径分裂; identityOfTarget 整个从成员判定里退役。
+  assert.ok(!src.includes("identityOfTarget"), "成员判定不再引用 identityOfTarget");
+  const gate = handler("const strictSayGate = ", "http.register(\"POST /chat/members\"");
+  assert.ok(gate.includes("members.modeOf(base, self)"), "出站门: 成员表是唯一判据");
+  const naming = handler("const humanBase = baseOfKey(a.channel!)", "const root = newRootEvent()");
+  assert.ok(naming.includes("wizardStore()?.get(a.principal)"), "人点名: 注册表里的 wizard 即入群 (不要求类)");
+  assert.ok(naming.includes('members.join(humanBase, a.principal, "mention"'), "点名入群照旧落 mention");
+  // ④ 成员表补齐 (boot) 与 spawn 落账: 「home 群在、成员表无」不能再出现。
+  assert.ok(src.includes("join-repair:"), "boot 把 homed 注册 wizard 补进 strict 群成员表 (留痕可查)");
+  assert.ok(src.includes("system:repair"), "补录的 by 标记");
+  const spawnJoins = src.split('joinMember(self, base, target.target, "mention")').length - 1;
+  assert.equal(spawnJoins, 2, "spawn / clone 落地 strict 群 home 即 join mention (两处)");
 }
 
 // 记账: 轮次额度随事件归零, 窗口按群滚动; 同一条义务下连发 ack + 结论 + 进展 (验收)。

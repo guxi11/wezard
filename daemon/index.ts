@@ -331,7 +331,6 @@ const main = async (): Promise<void> => {
   let advanceChatlog: ((e: MessageEvent) => void) | undefined;
   /** P7-S2 严格群公共件 (赋值在 mirror 大块里 —— /chat handler 那一层, 要用 wizards / members / router / chatRecords)。 */
   let strictSpeechOf: ((base: string) => boolean) | undefined;
-  let identityOfTarget: ((t: string) => string | undefined) | undefined;
   let chatlogReminderOf: ((base: string, target: string) => string) | undefined;
   /** P7-S2 /owed: 本聊天的义务账渲染 (赋值在 mirror 大块里)。 */
   let owedOfBase: ((base: string) => string) | undefined;
@@ -563,7 +562,9 @@ const main = async (): Promise<void> => {
     const humanBase = baseOfKey(a.channel!);
     let chatlogTail = "";
     if (strictSpeechOf?.(humanBase)) {
-      if (identityOfTarget?.(a.principal) && !members.isMember(humanBase, a.principal)) {
+      // 成员判定只认注册表 + 成员表 (不再要求 identity): 无类的存量 wizard 被人点名一样入群 ——
+      // 否则义务照样落在它头上、它却永远 403 非成员 (2026-11-18 aiconfig 群 .GraceVance 死账)。
+      if (wizardStore()?.get(a.principal) && !members.isMember(humanBase, a.principal)) {
         members.join(humanBase, a.principal, "mention", String(a.speaker ?? "human"));
         try {
           chatRecords.record(humanBase, { at: Date.now(), id: "join:" + a.principal + ":" + at, author: "wezard", kind: "system",
@@ -2033,10 +2034,6 @@ const main = async (): Promise<void> => {
       return note.then((n) => renderSwitchReport(plan, "apply") + (n.trim() ? "\n" + n.trim() : ""));
     };
 
-      identityOfTarget = (t: string): string | undefined => {
-      const rec = wizards.get(t);
-      return rec ? identityOfRec(rec) : undefined;
-    };
     /** target 在这个群欠着的义务数 (chat 接收行, 未落定)。 */
     const owedInChat = (target: string, base: string): number =>
       router.owedBy(target).filter((r) => r.receiver.kind === "chat" && r.receiver.channel === base
@@ -2083,7 +2080,7 @@ const main = async (): Promise<void> => {
      *  (升级式) + 一行成员变动系统行; 只在 strict 群有意义, 别的群静默忽略。 */
     const joinMember = (by: string, base: string, target: string, mode: "owner" | "speaker" | "mention"): string => {
       if (!base || !strictSpeechOf(base)) return "";
-      if (!wizards.get(target) && !identityOfTarget?.(target)) return "";
+      if (!wizards.get(target)) return "";
       const fresh = !members.isMember(base, target);
       members.join(base, target, mode, by);
       const who = displayName(target);
@@ -2126,7 +2123,8 @@ const main = async (): Promise<void> => {
       members.leaveEverywhere(target);
     };
     const strictSayGate = (self: string, base: string): { status: number; body: Record<string, unknown> } | undefined => {
-      const mode = identityOfTarget?.(self) ? members.modeOf(base, self) : undefined;
+      // 成员表是唯一判据 (identity 不再是前提): 点名入群已不挑类, 发言权跟着成员行走。
+      const mode = members.modeOf(base, self);
       const cur = openingOfSelf(self)?.env?.eventId ?? "";
       const facts = sayMeter.check(self, cur, base);
       const verdict = sayVerdict({ mode, ...facts });
@@ -2249,7 +2247,7 @@ const main = async (): Promise<void> => {
         return;
       }
       // 问的人必须是成员 (开义务是成员的权力)。
-      if (!identityOfTarget?.(self) || !members.isMember(base, self)) {
+      if (!members.isMember(base, self)) {
         json(res, 403, { ok: false, reason: "你不是 " + (chatNameOf(cfg, base) || base) + " 的成员, 不能在群里开义务" });
         return;
       }
@@ -2257,7 +2255,7 @@ const main = async (): Promise<void> => {
       const named = wizards.byName(name);
       if (!named) { json(res, 400, { ok: false, reason: "认不出 " + name + " — wizard_roster 查名字" }); return; }
       const target = manifestationOf(wizards, name, base) ?? named.target;
-      if (!identityOfTarget?.(target) || !members.isMember(base, target)) {
+      if (!members.isMember(base, target)) {
         json(res, 409, { ok: false, reason: name + " 还不是 " + (chatNameOf(cfg, base) || base) + " 的成员 — 先让人行首点名它入群, 或 spawn / delegate 带 join" });
         return;
       }
@@ -2926,6 +2924,12 @@ const main = async (): Promise<void> => {
       if (!row) return "没有可交出的那一笔";
       if (row.owner !== self) return "这一笔已经不在你手上了 —— 一笔只能交出一次";
       if (row.status === "answered" || row.status === "handed") return `这一笔 (${row.event}) 已不在等你交代, 没有可交出的`;
+      // strict 群的 chat 义务交出对象必须是本群成员: chat_reply 销账以成员资格为前提,
+      // 交给非成员 = 一笔永远销不掉的死账 (2026-11-18 aiconfig 群实录: e1f7ab8 move 给
+      // 非成员 .GraceVance, 它怎么调都是 403, 只剩追问+上报空转)。
+      if (target && row.receiver.kind === "chat" && row.receiver.channel
+          && strictSpeechOf?.(row.receiver.channel) && !members.isMember(row.receiver.channel, target))
+        return `这一笔是 ${chatNameOf(cfg, row.receiver.channel) || row.receiver.channel} 的 chat 义务, 只能交给本群成员 — ${displayName(target)} 不在成员表里 (让人点名它入群 / spawn 带 join 后再交, 或改派成员)`;
       if (router.waiting(row.event).some((r) => r.receiver.kind === "wizard" && r.receiver.to === self))
         return "你在这一笔之下还有没落定的子活: 再交出去就说不清谁来交代 —— 等它们回来自己收口, 或别 transfer";
       if (target && router.awaitedBy(self).some((r) => r.owner === target))
@@ -3407,6 +3411,25 @@ const main = async (): Promise<void> => {
         return wizards.all().find((w) => identityOfRec(w) === key && baseOfKey(w.target) === chat)?.target;
       });
       if (kmig) classLog.info({ migrated: kmig }, "member keys migrated to instance targets");
+    }
+    // P7-S2 成员表补齐 (人 2026-11-18 晚口径: 「home 群在、成员表无」不能再出现): spawn 只在
+    // 带 join 时落账, 存量 homed wizard 从没进过表, 而义务照样能落到它们头上 (人点名 / chat_ask /
+    // transfer) —— 出站却一律 403 非成员, 只剩死账+追问空转 (aiconfig 群实录: 名册 6 个,
+    // chat_members 只有管家 1 个)。boot 把注册表里 home 是 strict 群的 wizard 补进成员表
+    // (mention, 幂等); 成员表从此 ⊇ 名册的 home 面, 两个口径一致。游标 -1 → 首批聊天记录
+    // 全量重放 (有界), 是补录的已知代价。
+    for (const base of Object.keys(cfg.chatPolicy ?? {}).filter((b) => chatPolicyOf(cfg, b).speech === "strict")) {
+      const missing = wizards.all().filter((w) => baseOfKey(w.target) === base && !isInternalKey(w.target)
+        && !members.isMember(base, w.target));
+      if (!missing.length) continue;
+      missing.forEach((w) => members.join(base, w.target, "mention", "system:repair"));
+      const names = missing.map((w) => displayName(w.target)).join("、");
+      try {
+        chatRecords.record(base, { at: Date.now(), id: "join-repair:" + base + ":" + Date.now(), author: "wezard", kind: "system",
+          text: "[wezard] 成员表补齐: " + names + " 入群 (mention, home 群补录)" });
+      } catch { /* 记录失败不挡 */ }
+      classLog.info({ chat: base, joined: missing.length }, "member table repaired from homed wizards");
+      notifyChat(base, "[wezard] 成员表补齐: " + names + " 已按 home 群补录为本群成员 (mention)。");
     }
     // v3 §3: 全局管家身份落位 —— home (defaultChat) 的默认会话就是它的锚点化身。
     // 新聊天 (还没有任何会话) 的裸消息由它接待 (inbound stewardRoute); 未认领的新装机不造幽灵记录。
@@ -4355,6 +4378,15 @@ const main = async (): Promise<void> => {
         const target = base ? resolvePeer(self, String(born.body.name)) : undefined;
         if (target?.ok) joinMember(self, base, target.target, b.join.mode === "speaker" ? "speaker" : "mention");
       }
+      // 没点名 join、但新生的 home 本身是 strict 群 → 也落账 (人 2026-11-18 晚口径:
+      // home 群在、成员表无 = 死账温床, spawn 是成员资格的强制落账点)。
+      if (!b.join?.chat && t.status === 200) {
+        const target = resolvePeer(self, String(born.body.name));
+        if (target?.ok) {
+          const base = baseOfKey(target.target);
+          if (strictSpeechOf?.(base) && !isInternalKey(target.target)) joinMember(self, base, target.target, "mention");
+        }
+      }
       json(res, t.status, {
         ...t.body,
         decision: "spawn",
@@ -4595,6 +4627,15 @@ const main = async (): Promise<void> => {
         const base = chatBaseOf(cfg, join.chat);
         const target = born ? resolvePeer(self, String(born)) : undefined;
         if (base && target?.ok) joinMember(self, base, target.target, join.mode === "speaker" ? "speaker" : "mention");
+      }
+      // 同 spawn: 没点名 join、但出生的 home 是 strict 群 → 也落账。
+      if (r.status === 200 && !join?.chat) {
+        const born = (r.body as { name?: string }).name;
+        const target = born ? resolvePeer(self, String(born)) : undefined;
+        if (target?.ok) {
+          const base = baseOfKey(target.target);
+          if (strictSpeechOf?.(base) && !isInternalKey(target.target)) joinMember(self, base, target.target, "mention");
+        }
       }
       json(res, r.status, r.body);
     });
