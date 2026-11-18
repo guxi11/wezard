@@ -2743,6 +2743,10 @@ export interface MirrorBridge {
    *  truthfully. `setPendingCwd` writes the user-requested next cwd into the
    *  store; `clearPendingCwd` is called by the bridge after a /new spawn lands. */
   getCwd: (target: string) => { runningCwd: string; pendingCwd: string; defaultCwd: string };
+  /** 同 getCwd 的链路, 但**不回落默认目录**: 无附着 / 无记录 / 聊天级也没有 running → ""。
+   *  迁移、盘点这类「推不出就是推不出」的调用方用它 —— 兜底目录被当成事实时, 一堆没附着
+   *  过的身份会全被算成同一个 workspace。pendingCwd / defaultCwd 与 getCwd 同义。 */
+  knownCwd: (target: string) => { runningCwd: string; pendingCwd: string; defaultCwd: string };
   setPendingCwd: (target: string, cwd: string) => { ok: boolean; reason?: string; runningCwd: string; pendingCwd: string };
   /** Detach + respawn a target's pane in `cfg.wrc.cwd` or its pendingCwd
    *  override. Used by /new to give the user a fresh claude in the bound
@@ -6415,6 +6419,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return { runningCwd: chat.running || expandedDefaultCwd, pendingCwd: pending, defaultCwd: expandedDefaultCwd };
   };
 
+  /** getCwd 的事实部分 (不掺默认目录): 附着的看 pane, 其次记录, 再其次聊天级 base 的 running。 */
+  const knownCwd = (target: string): { runningCwd: string; pendingCwd: string; defaultCwd: string } => {
+    const chat = chatCwdFallback(target);
+    const a = byTarget.get(target);
+    const running = a ? (a.runningCwd ?? "").trim() : (deps.store.get(target)?.cwd ?? "").trim() || chat.running;
+    return { runningCwd: running, pendingCwd: chat.pending, defaultCwd: expandedDefaultCwd };
+  };
+
   // Write `pendingCwd` to the BASE principal so the switch applies chat-wide —
   // the next /new or self-handoff in any tagged/untagged session picks it up. `set_workspace`
   // from a tagged session still writes to the shared slot, not the tagged
@@ -8202,6 +8214,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       return { status: "answered", title: v.title, index: pick.index, label: pick.label };
     },
     getCwd,
+    knownCwd,
     setPendingCwd,
     newSession,
     cloneSession,

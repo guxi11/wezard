@@ -3377,7 +3377,9 @@ const main = async (): Promise<void> => {
       join(expandHome(cfg.daemon.stateDir), "class-merges.json"),
       join(dirname(expandHome(cfg.wrc.mirror.wizardsFile)), "class-merges.json"),
     );
-    const classCwdOf = (t: string): string => { const c = m.getCwd(t); return c.runningCwd || c.defaultCwd; };
+    // 推不出 workspace 就是 "" (note + 类 workspace 留空), **不回落兜底目录** —— 那 5 个
+    // 没附着过的管家曾经全被算成 cc-wecom, 跟 wezard 撞 workspace 顶掉合并。
+    const classCwdOf = (t: string): string => m.knownCwd(t).runningCwd;
     const gatedPlan = classApply ? undefined : planClasses(wizards.all(), classes.all(), classCwdOf, mergeSpec);
     const cmig: ClassMigration = classApply
       ? migrateClasses(wizards, classes, cfg.wrc.mirror.wizardsFile, classCwdOf, mergeSpec)
