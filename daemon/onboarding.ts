@@ -14,7 +14,8 @@ import { dirname, join } from "node:path";
 import { ChatPolicy, type Config } from "../shared/config.js";
 import { patchJsonc } from "../shared/config-writer.js";
 import { expandHome } from "../shared/paths.js";
-import { baseOfKey, keyOf, sameBot, stripSigil, tagOfKey, uniqueTag } from "../shared/session-label.js";
+import { baseOfKey, botOfKey, keyOf, sameBot, stripSigil, tagOfKey, uniqueTag } from "../shared/session-label.js";
+import { instanceName } from "./classes.js";
 import { appointedChannelSteward, appointedSteward, stewardsAt } from "./steward.js";
 import type { WizardRecord, WizardStore } from "./wizard.js";
 import { channelOf, postsOfChannel } from "./channel-posts.js";
@@ -282,6 +283,15 @@ export const applyOnboarding = (
 ): OnboardingBound => {
   const done = (b: OnboardingBound): OnboardingBound => { bind(b.name); onboarding.finish(base); return b; };
   if (verdict.kind === "bind-existing") return done({ name: verdict.name, workspace: workspaceOf(verdict.target), fresh: false });
+  // 类世界 (人 2026-11-18): 新建管家 = 建一个类 (id = 本群锚点 target, 名 = 自动中性名)
+  // + 它的第 1 个实例 (记录名 `类名-1`); 绑定写**类名** —— 人点类名就落本群这个实例。
+  const classes = store.classes;
+  const auto = store.nextName();
+  if (classes) {
+    classes.create({ id: base, bot: botOfKey(base), name: auto, role: "steward", workspace: verdict.workspace });
+    store.upsert(base, { kind: "steward", workspace: verdict.workspace, identity: base, ordinal: 1, name: instanceName(auto, 1) });
+    return done({ name: auto, workspace: verdict.workspace, fresh: true });
+  }
   store.upsert(base, { kind: "steward", workspace: verdict.workspace });
   return done({ name: store.claim(base, store.nextName()), workspace: verdict.workspace, fresh: true });
 };

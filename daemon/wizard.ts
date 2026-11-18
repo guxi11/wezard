@@ -17,8 +17,8 @@ import { copyFileSync, existsSync, statSync } from "node:fs";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { expandHome } from "../shared/paths.js";
 import { loadAutoNames } from "./wizard-names.js";
-import { baseOfKey, keyOf, normalizeTag, stripSigil, tagOfKey, WIZARD_MARK } from "../shared/session-label.js";
-import { CLASS_NAME_MAX, inClassSpace, instanceName, validClassName, type ClassRecord, type ClassStore } from "./classes.js";
+import { baseOfKey, keyOf, normalizeTag, stripSigil, tagOfKey, uniqueTag, WIZARD_MARK } from "../shared/session-label.js";
+import { CLASS_NAME_MAX, inClassSpace, instanceName, parseInstanceName, validClassName, type ClassRecord, type ClassStore } from "./classes.js";
 
 /** 宪章学徒章 (§7; renderCharter 在 self.kind === "apprentice" 时追加)。 */
 const renderApprenticeRules = (): string[] => [
@@ -50,6 +50,9 @@ export const identityOf = (w: { target: string; identity?: string }): string => 
 export const manifestationOf = (store: WizardStore | undefined, name: string, base: string): string | undefined => {
   const rec = store?.byName(name);
   if (!store || !rec) return undefined;
+  // 实例名 (`<类名>-<数字>`) 是**精确地址** (人 2026-11-18): 点 .x-3 就是那一条 ——
+  // 哪怕它在别的群, 也不按「本群化身优先」重定向 (回复仍回到说话的那个群, 由 dispatch 定)。
+  if (rec.ordinal !== undefined && parseInstanceName(name)) return rec.target;
   const id = identityOf(rec);
   return store.all().find((w) => identityOf(w) === id && baseOfKey(w.target) === base)?.target ?? rec.target;
 };
@@ -168,6 +171,36 @@ const instancesOfRows = (rows: readonly WizardRecord[], classId: string): Wizard
 /** 一个类的全部实例 (序号升序)。类 id 就是实例们的 identity。 */
 export const instancesOf = (store: WizardStore | undefined, classId: string): WizardRecord[] =>
   store ? instancesOfRows(store.all(), classId) : [];
+
+/** 在 base 为类 `classId` **新开一个实例** (人 2026-11-18): 领一个序号 (allocOrdinal,
+ *  永不复用), 名字 `<类名>-<序号>`, target 用实例名 (uniqueTag 防撞), 记录带
+ *  identity=类 id / ordinal, 并继承类的字段 (职责 / 专长 / 记忆 / role / 工作区)。
+ *  本群已有该类的实例 → 直接返回那一条 (同一轮问两次 / 并发都不多领号)。
+ *  没有类 → undefined (调用方走旧的身份化身路径)。 */
+export const openInstance = (
+  store: WizardStore,
+  base: string,
+  classId: string,
+  kind: WizardKind = "steward",
+): string | undefined => {
+  const cls = store.classes?.get(classId);
+  if (!cls) return undefined;
+  const hit = store.all().find((w) => identityOf(w) === classId && baseOfKey(w.target) === base);
+  if (hit) return hit.target;
+  const ordinal = store.classes!.allocOrdinal(classId);
+  const name = instanceName(cls.name, ordinal);
+  const taken = new Set(store.all().filter((w) => baseOfKey(w.target) === base).map((w) => tagOfKey(w.target)).filter(Boolean));
+  const target = keyOf(base, uniqueTag(name, taken));
+  store.upsert(target, {
+    ...identityFieldsOf(anchorOf(store, classId)),
+    identity: classId,
+    ordinal,
+    name,
+    kind,
+    workspace: cls.workspace,
+  });
+  return target;
+};
 
 /** 写穿式单文件存储, 与 mirror-store 同款 —— 这是运行时状态, 不是用户手写配置,
  *  所以躺在 stateDir 而不是 config.jsonc。 */
@@ -576,6 +609,8 @@ const tierLine = (tiers: readonly string[]): string =>
 
 export interface CharterArgs {
   self: WizardBrief;
+  /** 类实例: 它属于哪个类 (名字 / role / workspace) —— 宪章写明「`X-N`, 类 `X` 的实例」。 */
+  classOf?: { name: string; role: string; workspace: string };
   /** home 聊天的人类可读名; "" = 这个聊天还没起名。 */
   chat: string;
   principal: string;
@@ -1006,6 +1041,9 @@ export const renderCharter = (a: CharterArgs): string => {
     "## 我是谁",
     bullet([
       `名字: **\`${me || "(未命名)"}\`** —— 全机唯一, 就是你的地址 (人点你写作 \`.name\`; 你给人的回复头自动带 \`${WIZARD_MARK} 名字：\`)`,
+      ...(a.classOf
+        ? [`类: **\`${a.classOf.name}\`** 的实例 (role ${a.classOf.role}${a.classOf.workspace ? `, workspace \`${a.classOf.workspace}\`` : ""}) —— 职责 / 专长 / 记忆 / 工作区属于这个类, 你的地址不变: \`/new\`、交接、\`/clear\` 只换会话`]
+        : []),
       `home 群: ${a.chat ? `**${a.chat}** ` : ""}\`${a.principal}\``,
       `工作区: \`${a.self.cwd || "(未设置)"}\``,
       `职责: ${a.self.description || "(未写 —— 用 `wizard_identity` 补一句, 别人靠它决定该不该找你)"}`,

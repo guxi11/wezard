@@ -10,8 +10,8 @@
 // 「boot 时把存量聊天的 untagged wizard 写进运行时绑定」不另做快照: untagged 记录本身就是
 // 事实之源, 每次现读 (stewardIdentityOf 的回落分支) —— 快照反而会在 respawn / forget 之后漂移。
 import type { Config } from "../shared/config.js";
-import { baseOfKey, keyOf, sameBot, tagOfKey, uniqueTag } from "../shared/session-label.js";
-import { normPath } from "./classes.js";
+import { baseOfKey, botOfKey, keyOf, sameBot, tagOfKey, uniqueTag } from "../shared/session-label.js";
+import { instanceName, normPath } from "./classes.js";
 import { anchorOf, identityOf, type WizardKind, type WizardRecord, type WizardStore } from "./wizard.js";
 import { channelOf } from "./channel-posts.js";
 
@@ -57,6 +57,11 @@ export const stewardsAt = (
 ): WizardRecord[] => {
   if (!store) return [];
   const want = normPath(workspace);
+  // 类世界先问类表: <bot, role, workspace> 唯一的那条类记录就是判据 (人 2026-11-18)。
+  // 命中就回它的锚点实例 —— 调用方要的是「这个目录上的管家是谁」。
+  const cls = want ? store.classes?.byKey(botOfKey(base), "steward", want) : undefined;
+  const listed = cls ? anchorOf(store, cls.id) : undefined;
+  if (listed) return [listed];
   const anchors = [...new Set(store.all().map((w) => identityOf(w)))]
     .map((id) => anchorOf(store, id))
     .filter((a): a is WizardRecord => !!a && !!a.name && !!a.kind && STEWARD_KINDS.includes(a.kind) && sameBot(base, a.target))
@@ -78,8 +83,11 @@ export interface StewardRoute {
   /** 裸消息的投递目标。 */
   target: string;
   /** 解析认定要在 base 新开一个管家化身 (记录还没落): 调用方须 upsert 记录并起 pane,
-   *  目录用 workspace (身份锚点的工作区)。undefined = 无需新开。 */
-  fresh?: { identity: string; name: string; kind?: WizardKind; workspace?: string };
+   *  目录用 workspace (身份锚点的工作区)。undefined = 无需新开。
+   *  `classId` 非空 = 这个身份是一个类: 调用方要先 `allocOrdinal` 领序号, 名字取
+   *  `<类名>-<序号>` 并按它落 target —— 本函数是纯的, 不分配序号 (target 只是按下一个
+   *  序号猜的那个, 调用方必须用自己算出的 final target)。 */
+  fresh?: { identity: string; name: string; kind?: WizardKind; workspace?: string; classId?: string };
 }
 
 /** 裸消息 (无点名、无引用) 的接待解析 (§3):
@@ -103,11 +111,20 @@ export const stewardRoute = (
     const anchor = anchorOf(store, identity);
     if (!anchor?.name) return { target: base };
     const taken = new Set(store.all().filter((w) => baseOfKey(w.target) === base).map((w) => tagOfKey(w.target)).filter(Boolean));
-    // 身份级 workspace (新群引导落的) 优先; 没写才从锚点会话的 live cwd 推。
-    const workspace = anchor.workspace || cwdOf?.(anchor.target) || undefined;
+    const cls = store.classes?.get(identity);
+    // 身份级 workspace (新群引导落的 / 类行) 优先; 没写才从锚点会话的 live cwd 推。
+    const workspace = (cls ? cls.workspace : anchor.workspace) || cwdOf?.(anchor.target) || undefined;
+    // 类实例的名字是 <类名>-<下一个序号>; 序号由调用方领 (纯函数不分配)。
+    const name = cls ? cls.name : anchor.name;
+    const tag = cls ? instanceName(cls.name, cls.nextOrdinal) : anchor.name;
     return {
-      target: keyOf(base, uniqueTag(anchor.name, taken)),
-      fresh: { identity, name: anchor.name, ...(anchor.kind ? { kind: anchor.kind } : {}), ...(workspace ? { workspace } : {}) },
+      target: keyOf(base, uniqueTag(tag, taken)),
+      fresh: {
+        identity, name,
+        ...(anchor.kind ? { kind: anchor.kind } : {}),
+        ...(workspace ? { workspace } : {}),
+        ...(cls ? { classId: cls.id } : {}),
+      },
     };
   };
   const bound = appointedChannelSteward(cfg, base) || appointedSteward(cfg, base);

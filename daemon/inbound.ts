@@ -20,9 +20,10 @@ import { captureQuota, renderQuotaReport } from "./quota.js";
 import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe, allNames, unlinkTags, uniqueTag, displayName, createdAck, tagLink, withBot, sameBot, stripSigil } from "../shared/session-label.js";
 import { botTagOf } from "./bot-mux.js";
 import { chatNameOf, chatPolicyOf, listChatNames, stewardTierOf, type CharterGuard } from "./chat-name.js";
-import { anchorOf, identityFieldsOf, identityOf, identityWorkspaceOf, manifestationOf, settleName, wizardStore } from "./wizard.js";
+import { anchorOf, identityFieldsOf, identityOf, identityWorkspaceOf, manifestationOf, openInstance, settleName, wizardStore } from "./wizard.js";
 import { autoOrdinalOf } from "./wizard-names.js";
-import { stewardIdentityOf, stewardRoute as resolveSteward } from "./steward.js";
+import { stewardIdentityOf, stewardRoute as resolveSteward, type StewardRoute } from "./steward.js";
+import { parseInstanceName } from "./classes.js";
 import { noteNativeChannelFrame } from "./channel.js";
 import { awaitChannelOfPost, channelOf, channelOfPost, postsOfChannel } from "./channel-posts.js";
 import { bindChannelSteward, settleChannelSteward } from "./onboarding.js";
@@ -1152,17 +1153,34 @@ export const installInboundRouter = (
   const freshSteward = new Map<string, string>(); // target → 新化身的工作区 (identity workspace)
   // /name 二次确认的待确认项 (base → 想改成什么 + 发起时刻); 只活在内存, reload 即清。
   const pendingRename = new Map<string, { want: string; at: number }>();
+  /** 在 base 新开一条身份化身 —— 管家接待与「点类名」走同一条路 (人 2026-11-18):
+   *  身份有类 → 领一个序号 (allocOrdinal, 永不复用), 名字 `<类名>-<N>`, target 用实例名
+   *  (uniqueTag 防撞), 记录带 identity=类 id / ordinal, 并继承类的字段;
+   *  没有类 → 旧行为 (锚点的名字 + 身份级字段)。返回落定的 target。 */
+  const openManifestation = (base: string, fresh: NonNullable<StewardRoute["fresh"]>, wantTarget: string): string => {
+    const store = wizardStore();
+    if (!store) return wantTarget;
+    const cls = fresh.classId ? store.classes?.get(fresh.classId) : undefined;
+    if (cls) {
+      // 领号 / 落名 / 继承类字段都在 wizard.openInstance 里 (同一把尺子给「点类名」复用)。
+      const target = openInstance(store, base, cls.id, fresh.kind ?? "steward");
+      if (target) {
+        freshSteward.set(target, cls.workspace);
+        log.info({ base, target, classId: cls.id }, "class: new instance registered");
+        return target;
+      }
+    }
+    // 身份级字段 (职责 / 专长 / 记忆 / 角色) 从锚点带过来: 新化身是同一个身份在不同群的
+    // 又一条记录, 不是一张白纸。
+    const inherited = identityFieldsOf(anchorOf(store, fresh.identity));
+    store.upsert(wantTarget, { ...inherited, identity: fresh.identity, name: fresh.name, ...(fresh.kind ? { kind: fresh.kind } : {}) });
+    freshSteward.set(wantTarget, fresh.workspace ?? "");
+    log.info({ base, target: wantTarget, identity: fresh.identity }, "steward reception: new manifestation registered");
+    return wantTarget;
+  };
   const stewardReception = (base: string): string => {
     const r = resolveSteward(cfg, wizardStore(), base, (t) => ((c) => c.runningCwd || c.defaultCwd)(bridge.getCwd(t)));
-    if (r.fresh && !freshSteward.has(r.target)) {
-      // 身份级字段 (职责 / 专长 / 记忆 / 角色) 从锚点带过来: 新化身是同一个身份在不同群的
-      // 又一条记录, 不是一张白纸。
-      const store = wizardStore();
-      const inherited = identityFieldsOf(store ? anchorOf(store, r.fresh.identity) : undefined);
-      store?.upsert(r.target, { ...inherited, identity: r.fresh.identity, name: r.fresh.name, ...(r.fresh.kind ? { kind: r.fresh.kind } : {}) });
-      freshSteward.set(r.target, r.fresh.workspace ?? "");
-      log.info({ base, target: r.target, identity: r.fresh.identity }, "steward reception: new manifestation registered");
-    }
+    if (r.fresh && !freshSteward.has(r.target)) return openManifestation(base, r.fresh, r.target);
     return r.target;
   };
   // 点名: 已绑定的群里点本群管家 → 仍走接待 (落本群化身, 没有就新开), 不回落锚点 ——
@@ -1170,8 +1188,24 @@ export const installInboundRouter = (
   // 的唯一入口: 其余点名 (worker、别群的管家) 都走 resolveName, 跨群共享同一会话。
   const resolve: Resolve = (base, name) => {
     if (!name) return stewardReception(base);
-    const rec = wizardStore()?.byName(name);
-    if (rec && sameBot(base, rec.target) && identityOf(rec) === stewardIdentityOf(cfg, wizardStore(), base)) return stewardReception(base);
+    const store = wizardStore();
+    const rec = store?.byName(name);
+    if (store && rec && sameBot(base, rec.target)) {
+      const id = identityOf(rec);
+      // 实例名 (`<类名>-<N>`) 是精确地址: 那一条就是那一条 (跨群也直接投它, 回复回本群)。
+      if (rec.ordinal !== undefined && parseInstanceName(name)) return rec.target;
+      if (id === stewardIdentityOf(cfg, store, base)) return stewardReception(base);
+      // 类名: 本群有该类的实例就用它; 没有就在本群新建一个 (与管家接待同一路径)。
+      const cls = store.classes?.get(id);
+      if (cls) {
+        const hit = store.all().find((w) => identityOf(w) === id && baseOfKey(w.target) === base);
+        if (hit) return hit.target;
+        const kind = anchorOf(store, id)?.kind;
+        return openManifestation(base, {
+          identity: id, name: cls.name, classId: cls.id, workspace: cls.workspace, ...(kind ? { kind } : {}),
+        }, keyOf(base, cls.name));
+      }
+    }
     return resolveName(base, name);
   };
   const route = (msg: BaseMessage, raw: string): { text: string; tag: string; promoted: boolean; who: string } => {

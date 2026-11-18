@@ -872,7 +872,11 @@ const main = async (): Promise<void> => {
       const set = m.setPendingCwd(target, cwd);
       if (!set.ok) { json(res, 400, { ...set, target }); return; }
       // 管家的工作区是身份级的: 记在锚点上, 该身份在别的新化身也从这里起。
-      if (anchor && store && set.pendingCwd) store.upsert(anchor.target, { workspace: set.pendingCwd });
+      // 类实例的真相在类行 (identityWorkspaceOf 读它), 两处同写 —— 旧读者仍看锚点。
+      if (anchor && store && set.pendingCwd) {
+        store.upsert(anchor.target, { workspace: set.pendingCwd });
+        if (id && store.classes?.get(id)) store.classes.upsert(id, { workspace: set.pendingCwd });
+      }
       if ((await liveOf([target])).length) {
         json(res, 200, { ok: true, target, runningCwd: set.runningCwd, pendingCwd: set.pendingCwd,
           message: "工作区已记录 (pendingCwd)。此后该身份新开的会话/化身都在这个目录启动 (/new 或下一次 respawn 生效); 当前会话不迁移、不需要 handoff, 想立即换目录由人自己决定何时重开。" });
@@ -1812,7 +1816,9 @@ const main = async (): Promise<void> => {
         const reserve = (target: string): { ok: true } & BirthSlot => {
           // No await between uniqueness check and durable registration.
           const token = randomUUID();
-          wizards.upsert(target, { name: candidate, spawning: BOOT_ID, birthToken: token });
+          // 新生的记录一律是**自由 wizard** (临时 worker / 分身): 明确清掉从复用的冷记录上
+          // 可能带过来的类归属 —— 克隆一个管家出来是独立的人, 不是那个类的实例。
+          wizards.upsert(target, { name: candidate, spawning: BOOT_ID, birthToken: token, identity: target, ordinal: undefined });
           return { ok: true, target, name: candidate, token };
         };
         const clash = asked ? wizards.byName(asked) : undefined;
@@ -3775,6 +3781,11 @@ const main = async (): Promise<void> => {
           return cwd ? sharedMemory("workspace", cwd, botOfKey(target)) : "";
         })(),
         steward: isStewardTarget(cfg, wizards, target),
+        ...((() => {
+          const rec = wizards.get(target);
+          const cls = rec ? wizards.classes?.get(identityOfRec(rec)) : undefined;
+          return cls ? { classOf: { name: cls.name, role: cls.role, workspace: cls.workspace } } : {};
+        })()),
         stewardBudget: chatPolicyOf(cfg, target).stewardBudget,
         lead: !!wizards.get(target)?.lead,
         topOnly: chatPolicyOf(cfg, target).topOnly,
