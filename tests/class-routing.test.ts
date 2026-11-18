@@ -174,18 +174,21 @@ try {
   {
     const d = dirOf("merge-classed");
     const f = join(d, "wizards.json");
+    // M2 已单独成类且 workspace 与 M1 **不同** —— 别让 twin 同 workspace 碰巧挡住 M1,
+    // 这样才真的验到「合并失败后成员不会被 ② 拆成独立类」(否则碎片化会被掩盖)。
     writeFileSync(f, rows([
       rec("chat:M1", { name: "g1", workspace: "/tmp/m1", bornAt: 1 }),
-      rec("chat:M2", { name: "g2", workspace: "/tmp/m1", bornAt: 2 }),
+      rec("chat:M2", { name: "g2", workspace: "/tmp/m2", bornAt: 2 }),
     ]));
     const cs = loadClassStore(join(d, "classes.json"));
-    cs.create({ id: "chat:M2", bot: "", name: "g2", role: "steward", workspace: "/tmp/m1", nextOrdinal: 2 });
+    cs.create({ id: "chat:M2", bot: "", name: "g2", role: "steward", workspace: "/tmp/m2", nextOrdinal: 2 });
     const st = loadWizardStore(f, () => undefined, cs);
     const pl = planClasses(st.all(), cs.all(), () => "", {
       merges: [{ into: "chat:M1", name: "gg", first: "chat:M1", members: ["chat:M1", "chat:M2"] }],
       exclude: [],
     });
-    assert.equal(pl.classes.length, 0, "有成员已经是类 → 整组不并");
+    assert.equal(pl.classes.length, 0, "有成员已经是类 → 整组不并, 且成员不被 ② 拆成独立类");
+    assert.deepEqual(pl.renames, [], "被顶掉的合并成员不动名字 / 不落 ordinal");
     assert.ok(pl.conflicts.some((c) => c.includes("已是类 g2")), "报告里说清是哪个成员已类化");
   }
 

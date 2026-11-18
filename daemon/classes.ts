@@ -391,7 +391,9 @@ export const planClasses = (
   }
   // ② 其余管家组: 一组一个类 (名字取锚点名); 已存在的类只补漏 (半迁移 / 新化身)。
   for (const [id, kin] of [...groups].sort(([a], [b]) => cmp(a, b))) {
-    if (excluded.has(id) || consumed.has(id)) continue;
+    // skipped = 整组被跳过的身份 (合并被顶掉 / 撞名 / 同 workspace): 保持旧形态, 绝不再
+    // 被这里拆成独立类 —— 否则合并失败会留下 serviceaiteam-1 / auto-1 这种碎片。
+    if (excluded.has(id) || consumed.has(id) || skipped.has(id)) continue;
     if (known.has(id)) { heal([id], existingClasses.find((c) => c.id === id)!); continue; }
     const anchor = anchorIn(kin, id)!;
     if (!isStewardish(anchor)) continue;
