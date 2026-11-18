@@ -3626,6 +3626,10 @@ const main = async (): Promise<void> => {
           busy: p.busy,
           alive: p.paneAlive,
           ...(waiting ? { waiting } : {}),
+          // 群成员列表 (rolepage): 类实例的序号 + 是不是本群管家, 判定都在 daemon 侧做
+          // (cfg + 注册表只有这里有), svr 拿快照照画。
+          ...(w?.ordinal !== undefined ? { ordinal: w.ordinal } : {}),
+          steward: isStewardTarget(cfg, wizards, p.target),
           parent: w?.parent,
           clonedFrom: w?.clonedFrom,
           forkOf: w?.forkOf,
@@ -3646,6 +3650,8 @@ const main = async (): Promise<void> => {
           chat: chatNameOf(cfg, w.target),
           cwd: "", model: "", cli: "",
           busy: false, alive: false,
+          ...(w.ordinal !== undefined ? { ordinal: w.ordinal } : {}),
+          steward: isStewardTarget(cfg, wizards, w.target),
           parent: w.parent,
           clonedFrom: w.clonedFrom,
           forkOf: w.forkOf,
@@ -3690,6 +3696,10 @@ const main = async (): Promise<void> => {
         })),
         // P7-S3b 生效 strict 的聊天全集 (rolepage 群窗按账本口径渲染的开关)。
         strictChats: knownChatsOf(cfg).rows().map((r) => r.chat).filter((base) => chatPolicyOf(cfg, base).speech === "strict"),
+        // 群成员列表 (rolepage): 严格群成员表的全量投影 + 类表 —— 名册之外的两份事实。
+        memberRows: members.chats().flatMap((chat) =>
+          members.ofChat(chat).map(({ target, row }) => ({ chat, target, mode: row.mode, since: row.since, by: row.by }))),
+        classes: classes.all().map((c) => ({ id: c.id, name: c.name, role: c.role, workspace: c.workspace })),
         // P7-S3 严格群治理面板: members.json × 路由行 × 义务观测 (owed/passed/overdue)。
         governance: members.chats()
           .filter((base) => strictSpeechOf?.(base))

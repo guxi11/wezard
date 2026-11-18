@@ -31,6 +31,7 @@ import {
   roleInfo, roleStats, sessionsOf, talkArgs, talkOf, counterpartOf, windowStats, type Directory, type Heard, type Msg, type SessionSpan,
 } from "./role-view.js";
 import { dependentsOf, renderMark, renderMsg, type MsgFragment } from "./role-render.js";
+import { groupMembers, isGroupChat } from "./group-members.js";
 import { searchRole } from "./role-search.js";
 import { charterBrief, charterView } from "./charter-view.js";
 import { renderToolBody } from "./detail-render.js";
@@ -117,6 +118,8 @@ const botFacts = (f: WorldFacts, self: string): WorldFacts => {
     ...(f.humanNames ? { humanNames: keep(f.humanNames) } : {}),
     ...(f.weixin ? { weixin: f.weixin.filter((x) => mine(x.base)) } : {}),
     ...(f.strictChats ? { strictChats: f.strictChats.filter((c) => mine(c)) } : {}),
+    ...(f.memberRows ? { memberRows: f.memberRows.filter((x) => mine(x.chat) && mine(x.target)) } : {}),
+    ...(f.classes ? { classes: f.classes.filter((c) => mine(c.id)) } : {}),
   };
 };
 const viewerOf = (t: Ticket): string => t.selfTarget;
@@ -243,6 +246,19 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
     // 日程页只画定时任务 (与 chat.js 的 renderPlan 同一口径)。
     const schedules = f.schedules.filter((x) => (x.owner || x.createdBy || x.target) === role);
     const home = convs.find((c) => c.key === land.conv);
+    // 群成员 (实例): 打开一个群聊时, 这个群里有哪些 wizard 实例。按聊天给全表 (前端按
+    // CONV 取), 因为换窗口不会再取一次摘要; 单聊 / 私聊的 base 不在里面 (isGroupChat)。
+    const chatMembers = [...new Set([
+      ...convs.filter((c) => c.kind === "group").map((c) => c.base),
+      ...f.wizards.map((w) => baseOfKey(w.target)),
+      ...(f.memberRows ?? []).map((r) => r.chat),
+    ])]
+      .filter(isGroupChat)
+      .map((chat) => ({
+        chat,
+        members: groupMembers(chat, f.wizards, f.memberRows ?? [], f.classes ?? [], (t) => dir.status(dir.canon(t), now)),
+      }))
+      .filter((x) => x.members.length);
     return {
       at: now,
       // 落盘的已读记录的基线: 页面的未读基线以它为准, 刷新、另开标签页都是同一条。
@@ -262,6 +278,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       relations: hasRelations(msgs, role, info),
       // P7-S3 严格群治理面板 (成员/游标/欠账): 不随视角裁 —— 面板属于聊天, 不属于 role。
       ...(f.governance?.length ? { governance: f.governance } : {}),
+      // 群成员 (实例) 列表: 同样属于聊天; 空表 = 这个群没有实例 (前端就不画这一栏)。
+      ...(chatMembers.length ? { chatMembers } : {}),
       plans: f.plans.filter((p) => p.owner === role).map(publicPlan),
       inflight: (f.inflight ?? []).filter((x) => x.from === role || x.to === role).map((x) => ({
         ...x, ...(x.state === "blocked" && dir.fact(x.to)?.waiting?.length ? { waiting: dir.fact(x.to)!.waiting } : {}),

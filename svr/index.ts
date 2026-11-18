@@ -146,6 +146,9 @@ const mergeFacts = (fresh: readonly FactsPush[]): WorldFacts => {
     ...(fresh.some((p) => p.facts.weixin?.length) ? { weixin: uniq(fresh.flatMap((p) => [...(p.facts.weixin ?? [])]), (x) => x.base) } : {}),
     ...(fresh.some((p) => p.facts.governance?.length) ? { governance: uniq(fresh.flatMap((p) => [...(p.facts.governance ?? [])]), (x) => x.chat) } : {}),
     ...(fresh.some((p) => p.facts.strictChats?.length) ? { strictChats: [...new Set(fresh.flatMap((p) => [...(p.facts.strictChats ?? [])]))] } : {}),
+    // 群成员列表 (rolepage): 成员表行与类表同样是快照的一部分, 不合并就等于远端没有这一栏。
+    ...(fresh.some((p) => p.facts.memberRows?.length) ? { memberRows: uniq(fresh.flatMap((p) => [...(p.facts.memberRows ?? [])]), (x) => `${x.chat}\0${x.target}`) } : {}),
+    ...(fresh.some((p) => p.facts.classes?.length) ? { classes: uniq(fresh.flatMap((p) => [...(p.facts.classes ?? [])]), (c) => c.id) } : {}),
   };
 };
 

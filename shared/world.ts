@@ -55,11 +55,24 @@ export interface WorldFactWizard {
   /** 被克隆的那个 wizard —— 只在它不是 parent 时才有 (parent 克隆了别人)。 */
   forkOf?: string;
   bornAt?: number;
+  /** 类实例的序号 (daemon/wizard.ts WizardRecord.ordinal): 有它 = 名字是 `<类名>-<序号>`。
+   *  老 daemon 快照没有 → rolepage 不标类。 */
+  ordinal?: number;
+  /** 它是所在聊天此刻的管家实例 (daemon/steward.ts isStewardTarget)。老 daemon 快照没有。 */
+  steward?: boolean;
   /** transcript mtime, 0 = 从没写过。 */
   lastActivity: number;
   /** 最近在聊什么的一行。 */
   summary: string;
 }
+
+/** 严格群成员表 (daemon/members.ts) 的一行, 键 (chat, target): 一个实例以什么方式在这个
+ *  聊天里在场。行里的 target 可能属于别的群 —— 那是「加入」进来的实例。 */
+export interface WorldFactMemberRow { chat: string; target: string; mode: string; since: number; by: string }
+
+/** 类表 (daemon/classes.ts) 的一行: <bot, role, workspace> 唯一的人物设定。
+ *  实例名是 `<name>-<ordinal>`; rolepage 只用 name 标「所属类」。老 daemon 快照没有。 */
+export interface WorldFactClass { id: string; name: string; role: string; workspace: string }
 
 export interface WorldFactSchedule {
   id: string;
@@ -124,6 +137,11 @@ export interface WorldFacts {
   /** P7-S3b 生效 strict 的聊天 (base principal) —— rolepage 群窗按账本口径渲染 (turn
    *  出气泡压掉, 实发内容走 post 记录); 老 daemon 快照没有 = 一切照旧。 */
   strictChats?: readonly string[];
+  /** 严格群成员表的全量投影 (所有聊天) —— rolepage 的群成员列表按 chat 取它。
+   *  老 daemon 快照没有 = 只剩名册推出来的本群实例。 */
+  memberRows?: readonly WorldFactMemberRow[];
+  /** 类表 —— 群成员列表用它标出实例所属的类。老 daemon 快照没有 = 只画名字。 */
+  classes?: readonly WorldFactClass[];
   /** 这份不是注册表给的, 是「没拿到」的占位 —— 显式信号: 空名册 ≠ 注册表不可达。 */
   absent?: true;
 }

@@ -1133,7 +1133,36 @@
     }).join('');
     bar.hidden = false;
   };
+  // 群成员 (实例) 列表: 打开一个群聊窗口时, 这个群里有哪些 wizard 实例 (服务端 groupMembers
+  // 组好: 本群实例 + 从别的群加入的, 管家在前)。单聊 / 私聊没有这一栏 —— 服务端不给群 base,
+  // 这里也只认 kind === 'group' 且 base 是 chat: 频道。名字点进那个实例的 role 页 (同 existing 跳转)。
+  // 默认展开; 收起来的选择记在本地 —— 成员多的群不该把人挤到消息下面去。
+  var MEMB_OPEN = pref('memb', true) !== false;
+  var MODE_NAME = { owner: '管家', speaker: '发言', mention: '点名' };
+  var membChip = function (m) {
+    var extra = (m.className ? '<i class="mc" title="' + esc('类 ' + m.className) + '">类 ' + esc(m.className) + '</i>' : '') +
+      (m.steward ? '<i class="mst" title="本群管家">管家</i>' : '') +
+      (m.mode && !(m.steward && m.mode === 'owner') ? '<i class="mm">' + esc(MODE_NAME[m.mode] || m.mode) + '</i>' : '') +
+      (m.foreign ? '<i class="mf" title="从别的群加入">跨群</i>' : '');
+    return '<span class="gm">' + nm(m.target, m.name, canSwitch(m.target), extra) + stTag(m.status, true) + '</span>';
+  };
+  var renderMemb = function () {
+    var bar = $('#membar');
+    if (!bar) return;
+    var c = VIEW === 'msgs' ? convOf(CONV) : null;
+    var base = c && c.kind === 'group' ? c.base : '';
+    var hit = base && (R.chatMembers || []).filter(function (x) { return x.chat === base; })[0];
+    var ms = hit ? hit.members : [];
+    if (!ms.length) { bar.hidden = true; bar.innerHTML = ''; return; }
+    ms.forEach(function (m) { learn(m.target, m.name, m.label, true); });
+    bar.innerHTML = '<button type="button" class="mtog" id="mb-tog" title="' + esc(MEMB_OPEN ? '收起群成员' : '展开群成员') + '">群成员 ' + ms.length + '</button>' +
+      (MEMB_OPEN ? '<span class="mbl">' + ms.map(membChip).join('') + '</span>' : '');
+    bar.hidden = false;
+    bindGo(bar);
+    $('#mb-tog').onclick = function () { MEMB_OPEN = !MEMB_OPEN; setPref('memb', MEMB_OPEN); renderMemb(); };
+  };
   var renderHead = function () {
+    renderMemb();
     renderGov();
     var who = $('#ch-who'), acts = $('#ch-acts');
     if (VIEW !== 'msgs') {
@@ -1429,6 +1458,7 @@
     SESSION = d.session || '';
     R.relations = !!d.relations; R.schedules = d.schedules || 0; R.plans = acceptPlans(d.role.id, d.plans); R.plan = d.plan || null; R.inflight = d.inflight || [];
     R.governance = d.governance || [];
+    R.chatMembers = d.chatMembers || [];
     if (W.role === d.role.id) W.plans = replaceWorldPlans(W.plans, d.role.id, R.plans);
     R.charter = d.charter || null;
     R.stats = d.stats || null; R.winStats = d.winStats || null;
