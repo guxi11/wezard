@@ -10,6 +10,7 @@ import {
   loadClassStore,
   migrateClasses,
   planClasses,
+  renderClassReport,
 } from "../daemon/classes.js";
 import {
   identityEditRefusal,
@@ -168,6 +169,121 @@ try {
   assert.equal(members.migrateKeys(resolveKey), 0, "第二次 0 写");
   const raw = JSON.parse(readFileSync(mfile, "utf8")) as Record<string, unknown>;
   assert.ok("chat:R|chat:R#m-2" in raw && !("chat:R|chat:G1" in raw));
+
+  // ── 8. 合并成员已经单独成类: 报 conflict, 不静默剔除 ──────────────────
+  {
+    const d = dirOf("merge-classed");
+    const f = join(d, "wizards.json");
+    writeFileSync(f, rows([
+      rec("chat:M1", { name: "g1", workspace: "/tmp/m1", bornAt: 1 }),
+      rec("chat:M2", { name: "g2", workspace: "/tmp/m1", bornAt: 2 }),
+    ]));
+    const cs = loadClassStore(join(d, "classes.json"));
+    cs.create({ id: "chat:M2", bot: "", name: "g2", role: "steward", workspace: "/tmp/m1", nextOrdinal: 2 });
+    const st = loadWizardStore(f, () => undefined, cs);
+    const pl = planClasses(st.all(), cs.all(), () => "", {
+      merges: [{ into: "chat:M1", name: "gg", first: "chat:M1", members: ["chat:M1", "chat:M2"] }],
+      exclude: [],
+    });
+    assert.equal(pl.classes.length, 0, "有成员已经是类 → 整组不并");
+    assert.ok(pl.conflicts.some((c) => c.includes("已是类 g2")), "报告里说清是哪个成员已类化");
+  }
+
+  // ── 9. 自由名落进类名字空间: 自动让位成 类名-wN (不需要人先改) ────────
+  {
+    const d = dirOf("free-space");
+    const f = join(d, "wizards.json");
+    writeFileSync(f, rows([
+      rec("chat:C1", { name: "kappa", workspace: "/tmp/k", bornAt: 1 }),
+      rec("chat:C1#two", { identity: "chat:C1", name: "kappa", bornAt: 2 }),
+      { target: "user:W9#wezard", identity: "user:W9#wezard", kind: "worker", name: "kappa-2", description: "", bornAt: 3, memory: [] },
+    ]));
+    const cs = loadClassStore(join(d, "classes.json"));
+    const st = loadWizardStore(f, () => undefined, cs);
+    const pl = planClasses(st.all(), [], () => "");
+    assert.deepEqual(pl.renames.filter((r) => r.target === "user:W9#wezard").map((r) => r.to), ["kappa-w2"], "-N 形状让位成 -wN (保留序号)");
+    assert.equal(migrateClasses(st, cs, f).migrated, 3, "两条实例 + 一条让位");
+    assert.equal(st.get("user:W9#wezard")!.name, "kappa-w2");
+    assert.equal(st.get("chat:C1#two")!.name, "kappa-2", "实例照常拿到 2 号, 不被让位挤掉");
+    assert.equal(migrateClasses(loadWizardStore(f, () => undefined, cs), cs, f).migrated, 0, "第二次 0 写");
+  }
+
+  // ── 10. 半迁移自愈: 类在、化身没 ordinal → 再跑补齐并推游标 ──────────
+  {
+    const d = dirOf("heal");
+    const f = join(d, "wizards.json");
+    writeFileSync(f, rows([
+      rec("chat:H1", { name: "heal", workspace: "/tmp/h", bornAt: 1 }),
+      rec("chat:H2#x", { identity: "chat:H1", name: "heal", bornAt: 2 }),
+    ]));
+    const cs = loadClassStore(join(d, "classes.json"));
+    cs.create({ id: "chat:H1", bot: "", name: "heal", role: "steward", workspace: "/tmp/h", nextOrdinal: 2 });
+    const st = loadWizardStore(f, () => undefined, cs);
+    st.upsert("chat:H1", { name: "heal-1", ordinal: 1 }); // 模拟 create 成功、renames 中途崩
+    const m = migrateClasses(st, cs, f);
+    assert.equal(m.migrated, 1, "只补缺的那条");
+    assert.equal(st.get("chat:H2#x")!.name, "heal-2");
+    assert.equal(st.get("chat:H2#x")!.ordinal, 2);
+    assert.equal(cs.get("chat:H1")!.nextOrdinal, 3, "游标推到 max+1, 下一个新实例不会撞号");
+    assert.equal(migrateClasses(loadWizardStore(f, () => undefined, cs), cs, f).migrated, 0);
+  }
+
+  // ── 11. 类改名: 实例变 <新类名>-N, 绑定改写的是类名 (不是实例名), 幂等 ──
+  {
+    const d = dirOf("rebind");
+    const wf = join(d, "wizards.json");
+    writeFileSync(wf, rows([rec("chat:R1", { name: "alpha-1", ordinal: 1, bornAt: 1 })]));
+    const cs = loadClassStore(join(d, "classes.json"));
+    cs.create({ id: "chat:R1", bot: "", name: "alpha", role: "steward", workspace: "/tmp/r", nextOrdinal: 3 });
+    const st = loadWizardStore(wf, () => undefined, cs);
+    assert.equal(st.rename("chat:R1", "beta"), "beta-1", "返回的是实例名");
+    assert.equal(cs.get("chat:R1")!.name, "beta", "类行是新类名");
+    const cfgFile = join(d, "config.jsonc");
+    writeFileSync(cfgFile, "{}\n");
+    const cfg = {
+      daemon: { stateDir: d },
+      chatPolicy: { "chat:R1": { steward: "alpha" } },
+      wrc: { channel: { steward: { topicR: "ALPHA" } as Record<string, string> } },
+    } as never;
+    // 与 wizard_identity 的善后同一实现: 传的是**类名** alpha → beta (不是 alpha-1)。
+    assert.equal(rewriteStewardBindings(cfg as never, cfgFile, [{ from: "alpha", to: "beta" }]), 2);
+    const c = cfg as unknown as { chatPolicy: Record<string, { steward: string }>; wrc: { channel: { steward: Record<string, string> } } };
+    assert.equal(c.chatPolicy["chat:R1"]!.steward, "beta", "绑定写类名, 不是实例名 beta-1");
+    assert.equal(c.wrc.channel.steward.topicR, "beta");
+    assert.equal(rewriteStewardBindings(cfg as never, cfgFile, [{ from: "alpha", to: "beta" }]), 0, "幂等");
+  }
+
+  // ── 12. 成员表旧键回落: 闸门没开 (还没 apply) 时 strict 读路径照常 ──────
+  {
+    const f = join(ROOT, "members-legacy.json");
+    writeFileSync(f, JSON.stringify({ "chat:L|chat:L#id": { mode: "owner", since: 1, by: "human:u", cursor: 5 } }));
+    const legacy = openMembers(f, (t) => (t === "chat:L#m-2" ? "chat:L#id" : undefined));
+    assert.equal(legacy.isMember("chat:L", "chat:L#m-2"), true, "按 identity 旧键回落命中");
+    assert.equal(legacy.modeOf("chat:L", "chat:L#m-2"), "owner");
+    legacy.advance("chat:L", "chat:L#m-2", 9);
+    const raw1 = JSON.parse(readFileSync(f, "utf8")) as Record<string, { cursor: number }>;
+    assert.equal(raw1["chat:L|chat:L#id"]!.cursor, 9, "游标落在旧行上, 不丢");
+    legacy.join("chat:L", "chat:L#m-2", "owner", "config:steward");
+    const raw2 = JSON.parse(readFileSync(f, "utf8")) as Record<string, unknown>;
+    assert.ok(raw2["chat:L|chat:L#m-2"] && !raw2["chat:L|chat:L#id"], "join 把旧键并进 target 键");
+  }
+
+  // ── 13. 报告不只写 conflicts: 将建类清单 + 全部改名都要在 ─────────────
+  {
+    const d = dirOf("report");
+    const f = join(d, "wizards.json");
+    writeFileSync(f, rows([
+      rec("chat:RP", { name: "rep", workspace: "/tmp/rep", bornAt: 1 }),
+      rec("chat:RP#b", { identity: "chat:RP", bornAt: 2 }),
+    ]));
+    const st = loadWizardStore(f);
+    const plan = planClasses(st.all(), [], () => "");
+    const text = renderClassReport(plan, { applied: false, records: 2, at: 0 });
+    assert.ok(text.includes("(gated)"), "闸门态写明");
+    assert.ok(text.includes("## classes") && text.includes("chat:RP | rep | steward | /tmp/rep | 2 | 3"), "将建的类带实例数/游标");
+    assert.ok(text.includes("## renames") && text.includes("chat:RP | rep -> rep-1 | 1"), "每条改名都列");
+    assert.ok(text.includes("## conflicts") && text.includes("(none)"), "没有冲突也明说");
+  }
 } finally {
   rmSync(ROOT, { recursive: true, force: true });
 }

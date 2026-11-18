@@ -154,6 +154,17 @@ export const pickName = (want: string, others: readonly string[], reserved: read
       if (!clash(c)) return c;
     }
   }
+  // base 本身是实例形状 (`<类名>-<N>`) 且那个类存在: 保留它的序号, 退成 `<类名>-w<N>`
+  // (人 2026-11-18 口径: 存量 `wezard-2` → `wezard-w2`)。
+  const inst = parseInstanceName(base);
+  const clsOfBase = inst && reserved.find((c) => foldName(c) === foldName(inst.className));
+  if (inst && clsOfBase) {
+    const head = inst.className.slice(0, 27);
+    for (let n = Math.max(2, inst.ordinal); ; n += 1) {
+      const c = `${head}-w${n}`;
+      if (!clash(c)) return c;
+    }
+  }
   // base 就是一个类名: `<base>-N` 全是那个类的实例地址, 退到 `-wN` (不形如实例名, 不会
   // 被 parseInstanceName 认成 `<类>-<序号>`)。
   for (let n = 2; ; n += 1) {
@@ -267,8 +278,15 @@ export const loadWizardStore = (filePath: string, bornOf: BornOf = () => undefin
       // 类名与某个自由 wizard 同名也会让「名字→谁」二义 (记录名精确匹配优先), 一样拒。
       if (namesExcept(t).some((n) => foldName(n) === foldName(next))) throw new Error(`class name taken: ${next}`);
       classes!.rename(id, next);
-      all().filter((w) => identityOf(w) === id && w.ordinal !== undefined)
-        .forEach((w) => upsert(w.target, { name: instanceName(next, w.ordinal!) }));
+      const insts = all().filter((w) => identityOf(w) === id && w.ordinal !== undefined);
+      // 新类名的实例地址可能正压在存量自由 wizard 的名字上 (它叫 X-2): 让它照同一口径退成
+      // X-w2 —— 否则两条记录同名, 旧 worker 从此被影子化、byName 只能回一条。
+      const wanted = new Set(insts.map((w) => foldName(instanceName(next, w.ordinal!))));
+      const reserved = [...classNames(), next];
+      all()
+        .filter((w) => w.ordinal === undefined && identityOf(w) !== id && wanted.has(foldName(w.name)))
+        .forEach((w) => upsert(w.target, { name: pickName(w.name, namesExcept(w.target), reserved) }));
+      insts.forEach((w) => upsert(w.target, { name: instanceName(next, w.ordinal!) }));
       return instanceName(next, inst.ordinal);
     }
     const name = pickName(want, namesExcept(t), classNames());

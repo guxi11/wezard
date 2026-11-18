@@ -48,9 +48,21 @@ export interface Members {
 
 const keyOf = (chat: string, target: string): string => `${chat}|${target}`;
 
-export const openMembers = (file: string): Members => {
+/** `legacyOf` = target → 它的身份 id: 盘上还留着旧键 (`chat|identity`) 而这一版读路径按
+ *  target 查时的回落 (人 2026-11-18)。迁移闸门没开 (classes.apply 不存在) 的那段时间,
+ *  旧键的行必须照常可读 —— 否则 tagged 成员被 403、chatlog 游标归 -1 全量重放。apply 之后
+ *  键都成了 target, 回落自然不再命中。 */
+export const openMembers = (file: string, legacyOf?: (target: string) => string | undefined): Members => {
   const db = loadJsonMap<MemberRow>(file);
-  const rowOf = (chat: string, target: string): MemberRow | undefined => db.get(keyOf(chat, target));
+  const legacyKey = (chat: string, target: string): string | undefined => {
+    const id = legacyOf?.(target);
+    return id && id !== target ? keyOf(chat, id) : undefined;
+  };
+  /** 这一次读写该落哪个键: 已是 target 键就用它, 只有旧键就沿用旧键 (游标才不会丢)。 */
+  const keyFor = (chat: string, target: string): string =>
+    db.get(keyOf(chat, target)) ? keyOf(chat, target) : legacyKey(chat, target) ?? keyOf(chat, target);
+  const rowOf = (chat: string, target: string): MemberRow | undefined =>
+    db.get(keyOf(chat, target)) ?? (() => { const k = legacyKey(chat, target); return k ? db.get(k) : undefined; })();
   return {
     // 重复 join = 升级在场方式 (mention → speaker) 并刷新 by; since 保留最早的。
     join: (chat, target, mode, by) => {
@@ -58,14 +70,20 @@ export const openMembers = (file: string): Members => {
       const next: MemberRow = prev
         ? { ...prev, mode, by: by || prev.by }
         : { mode, since: Date.now(), by, cursor: -1 };
+      const stale = legacyKey(chat, target);
+      if (stale) db.drop(stale); // 旧键并进 target 键, 不留两行
       return db.set(keyOf(chat, target), next);
     },
-    leave: (chat, target) => db.drop(keyOf(chat, target)),
+    leave: (chat, target) => {
+      db.drop(keyOf(chat, target));
+      const stale = legacyKey(chat, target);
+      if (stale) db.drop(stale);
+    },
     isMember: (chat, target) => rowOf(chat, target) !== undefined,
     modeOf: (chat, target) => rowOf(chat, target)?.mode,
     advance: (chat, target, cursor) => {
       const prev = rowOf(chat, target);
-      if (prev && cursor > prev.cursor) db.set(keyOf(chat, target), { ...prev, cursor });
+      if (prev && cursor > prev.cursor) db.set(keyFor(chat, target), { ...prev, cursor });
     },
     rowOf,
     ofChat: (chat) => Object.entries(db.all())

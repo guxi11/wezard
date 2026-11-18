@@ -54,7 +54,7 @@ import { planStrictSwitch, renderSwitchReport, type SwitchFacts } from "./strict
 import { CHAT_BATCH_BUDGET, sliceBatch } from "../shared/chat-record.js";
 import { openSayMeter, sayVerdict, topOnlyVerdict } from "./strict-gate.js";
 import { openMembers } from "./members.js";
-import { CLASS_NAME_MAX, loadClassMerges, loadClassStore, migrateClasses, parseInstanceName, planClasses, validClassName } from "./classes.js";
+import { CLASS_NAME_MAX, loadClassMerges, loadClassStore, migrateClasses, parseInstanceName, planClasses, renderClassReport, validClassName, type ClassMigration } from "./classes.js";
 import { footerTarget, responseFormatPolicy } from "./message-format.js";
 import { scanClaudeSessions } from "./session-scan.js";
 import {
@@ -292,7 +292,11 @@ const main = async (): Promise<void> => {
     log.child({ mod: "chat-records" }),
   );
   // P7-S1 成员表: 键 `${chat}|${identity}` —— chat × 身份, 零 pane 维度 (约束刀 A③)。
-  const members = openMembers(join(expandHome(cfg.daemon.stateDir), "members.json"));
+  // 旧键回落: 迁移闸门没开时盘上还是 (chat, identity), 读路径必须照常命中 (见 members.ts)。
+  const members = openMembers(
+    join(expandHome(cfg.daemon.stateDir), "members.json"),
+    (t) => { const rec = wizardStore()?.get(t); return rec ? identityOfRec(rec) : undefined; },
+  );
   const responseTracker = installResponseTracker(ws.client, log.child({ mod: "chat-gate" }), (c) => wx.owns(c),
     (context) => responseFormatPolicy(cfg, context, (target) => chatUrlFor(cfg.daemon, target)),
     (noteLine) => {
@@ -2099,18 +2103,20 @@ const main = async (): Promise<void> => {
       const nextName = appointedSteward(cfg, base);
       if (nextName === prevName) return;
       const parts: string[] = [];
-      const prev = prevName ? wizards.byName(prevName) : undefined;
-      if (prev) {
-        const row = members.rowOf(base, prev.target);
+      // 成员表按 **target** 记账: 换绑要落在本群那条实例 (类名 → 本群的 X-N), 不是锚点 ——
+      // 锚点住在别的群, join 它等于没给本群开成员, 新管家第一句话就 403。
+      const prevT = prevName ? (manifestationOf(wizards, prevName, base) ?? wizards.byName(prevName)?.target) : undefined;
+      if (prevT) {
+        const row = members.rowOf(base, prevT);
         if (row) {
-          if (row.mode === "owner") { members.leave(base, prev.target); parts.push(displayName(prev.target) + " 卸任管家, 离群"); }
-          else parts.push(displayName(prev.target) + " 卸任管家 (仍是成员)");
+          if (row.mode === "owner") { members.leave(base, prevT); parts.push(displayName(prevT) + " 卸任管家, 离群"); }
+          else parts.push(displayName(prevT) + " 卸任管家 (仍是成员)");
         }
       }
-      const next = nextName ? wizards.byName(nextName) : undefined;
-      if (next) {
-        joinMember("config:steward", base, next.target, "owner");
-        parts.push(displayName(next.target) + " 接任管家 (owner)");
+      const nextT = nextName ? (manifestationOf(wizards, nextName, base) ?? wizards.byName(nextName)?.target) : undefined;
+      if (nextT) {
+        joinMember("config:steward", base, nextT, "owner");
+        parts.push(displayName(nextT) + " 接任管家 (owner)");
       }
       if (parts.length) notifyChat(base, "[wezard] 管家换绑: " + parts.join("; "));
     };
@@ -3372,21 +3378,19 @@ const main = async (): Promise<void> => {
       join(dirname(expandHome(cfg.wrc.mirror.wizardsFile)), "class-merges.json"),
     );
     const classCwdOf = (t: string): string => { const c = m.getCwd(t); return c.runningCwd || c.defaultCwd; };
-    const cmig = classApply
+    const gatedPlan = classApply ? undefined : planClasses(wizards.all(), classes.all(), classCwdOf, mergeSpec);
+    const cmig: ClassMigration = classApply
       ? migrateClasses(wizards, classes, cfg.wrc.mirror.wizardsFile, classCwdOf, mergeSpec)
-      : {
-        migrated: 0,
-        aliases: [] as Array<{ from: string; to: string }>,
-        conflicts: planClasses(wizards.all(), classes.all(), classCwdOf, mergeSpec).conflicts,
-      };
+      : { migrated: 0, aliases: [], plan: gatedPlan!, conflicts: gatedPlan!.conflicts };
     if (!classApply) classLog.info({ gated: true, applyFile: join(expandHome(cfg.daemon.stateDir), "classes.apply") }, "class migration gated");
     if (cmig.migrated) classLog.info({ migrated: cmig.migrated, classes: classes.all().length, backup: cmig.backup }, "class/instance migration applied");
     if (cmig.skipped) classLog.warn({ reason: cmig.skipped }, "class/instance migration skipped");
     cmig.conflicts.forEach((c) => classLog.warn({ conflict: c }, "class migration conflict"));
+    // 报告要能一眼看出「这次会建什么、改哪些名字」—— 只写 conflicts 的话, 跑歪了也看不出来。
     try {
       const reportDir = join(expandHome(cfg.daemon.stateDir), "analysis");
       mkdirSync(reportDir, { recursive: true });
-      writeFileSync(join(reportDir, "classes-migration.txt"), cmig.conflicts.length ? cmig.conflicts.join("\n") + "\n" : "");
+      writeFileSync(join(reportDir, "classes-migration.txt"), renderClassReport(cmig.plan, { applied: classApply, records: wizards.all().length }));
     } catch (e) { classLog.warn({ err: (e as Error).message }, "class migration report not written"); }
     if (classApply) {
       const rebound = rewriteStewardBindings(cfg, sourcePath, cmig.aliases);
@@ -4012,21 +4016,22 @@ const main = async (): Promise<void> => {
       const touched = isInstance && cls ? instancesOf(wizards, cls.id) : (rec ? [rec] : []);
       const was = new Map(touched.map((w) => [w.target, w.name] as const));
       // 名字换了, 指向旧名的管家绑定跟着换 —— 不改的话绑定悬空, 旧名日后被领走会把裸消息劫过去。
+      // 与 boot 迁移的绑定改写**同一个实现** (rewriteStewardBindings: chatPolicy + 频道表, 按名
+      // 大小写不敏感匹配), 类改名与自由改名共用一条路径。
       const rebind = (prev: string, next: string): void => {
         if (!prev || prev.toLowerCase() === next.toLowerCase()) return;
-        Object.entries(cfg.chatPolicy ?? {})
-          .filter(([, p]) => (p?.steward ?? "").trim().toLowerCase() === prev.toLowerCase())
-          .forEach(([chat]) => bindSteward(cfg, sourcePath, chat, next));
-        Object.entries(cfg.wrc.channel.steward ?? {})
-          .filter(([, s]) => s.trim().toLowerCase() === prev.toLowerCase())
-          .forEach(([topic]) => bindChannelSteward(cfg, sourcePath, topic, next));
+        rewriteStewardBindings(cfg, sourcePath, [{ from: prev, to: next }]);
       };
       let name = before;
       if (asked) {
         try {
           const { r } = guardCharter(() => {
             const next = wizards.rename(target, asked);
-            rebind(before, next);
+            // 绑定里存的是**类名**: 类实例的 before 是实例名 (X-1), 拿它去比对 chatPolicy 的
+            // steward (X) 永不命中 —— 旧类名会悬空, 日后被新 wizard 领走就劫走裸消息。
+            const fromBinding = isInstance && cls ? cls.name : before;
+            const toBinding = isInstance && cls ? (wizards.classes?.get(cls.id)?.name ?? next) : next;
+            rebind(fromBinding, toBinding);
             return next;
           }, (next) => ({
             what: target === self
@@ -4059,14 +4064,16 @@ const main = async (): Promise<void> => {
       // 同上: 同群的知道新名字还不够, 它自己的宪章也写着旧名。
       if (asked && name !== before) recharter(after.map((w) => w.target));
       const instances = isInstance && cls ? after : [];
+      // 类名 (不是实例名 X-N): 响应与 note 都按绑定/寻址用的那个名字说话。
+      const className = isInstance && cls ? (wizards.classes?.get(cls.id)?.name ?? cls.name) : "";
       json(res, 200, {
         ok: true,
         ...me,
         ...(asked && name.toLowerCase() !== asked.toLowerCase() ? { renamed: `'.${asked}' 已被占用, 落定为 '.${name}'` } : {}),
         ...(isInstance && cls
           ? {
-            class: { was: cls.name, name, instances: instances.map((w) => w.name) },
-            note: `类 ${cls.name} → ${name}, ${instances.length} 个实例: ${instances.map((w) => w.name).join(", ")}`,
+            class: { was: cls.name, name: className, instances: instances.map((w) => w.name) },
+            note: `类 ${cls.name} → ${className}, ${instances.length} 个实例: ${instances.map((w) => w.name).join(", ")}`,
           }
           : {}),
       });

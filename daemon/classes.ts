@@ -14,7 +14,7 @@ import { resolve } from "node:path";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { expandHome } from "../shared/paths.js";
 import { botOfKey, tagOfKey } from "../shared/session-label.js";
-import { foldName, identityOf, MEMORY_MAX, type WizardRecord, type WizardStore } from "./wizard.js";
+import { foldName, identityOf, MEMORY_MAX, pickName, type WizardRecord, type WizardStore } from "./wizard.js";
 
 /** 迁移前备份的后缀: `<wizardsFile>.pre-classes.bak`, 只在第一次写盘前复制一次。 */
 export const CLASS_BACKUP_SUFFIX = ".pre-classes.bak";
@@ -194,7 +194,8 @@ export interface ClassRename {
   target: string;
   from: string;
   to: string;
-  ordinal: number;
+  /** 实例的序号; 缺省 = 这条改名不是落号 (自由 wizard 让出类名字空间的 -wN)。 */
+  ordinal?: number;
   /** 合并时要把记录的 identity 改成类的 id; 单组迁移不带 (identity 本来就是它)。 */
   identity?: string;
 }
@@ -208,6 +209,8 @@ export interface ClassPlan {
   conflicts: string[];
   /** 旧名 → 类名 (每组锚点的旧名): 迁移后管家绑定一律存类名, 调用方据此改写 config。 */
   aliases: Array<{ from: string; to: string }>;
+  /** 每个类这次涉及的实例数 (报告用; 与 renames 不是一回事 —— 名字已经对了的不在 renames 里)。 */
+  instanceCounts: Record<string, number>;
 }
 
 // ── 人拍的合并 / 排除清单 (<stateDir>/class-merges.json) ─────────────────
@@ -302,16 +305,39 @@ export const planClasses = (
   const known = new Set(existingClasses.map((c) => c.id));
   const excluded = new Set(merges.exclude);
   const consumed = new Set<string>();
+  // 整组跳过的身份: 它们保持旧形态, 名字也不参与「自由名让位」(人让它们留着看)。
+  const skipped = new Set<string>();
   const pending: ClassRecord[] = [];
   const renames: ClassRename[] = [];
+  const instanceCounts: Record<string, number> = {};
   const aliasMap = new Map<string, string>();
+  const push = (w: WizardRecord, to: string, ordinal: number | undefined, classId: string | undefined): void => {
+    const identity = classId && identityOf(w) !== classId ? classId : undefined;
+    if (w.name === to && (ordinal === undefined || w.ordinal === ordinal) && !identity) return;
+    renames.push({ target: w.target, from: w.name, to, ...(ordinal !== undefined ? { ordinal } : {}), ...(identity ? { identity } : {}) });
+  };
+  /** 已存在的类补齐 (半迁移自愈): 缺 ordinal / 名字不对的 kin 重新落号落名; 已有的号不重排。
+   *  原先对 known 类整组跳过 —— create 之后 renames 中途崩掉, 那条 kin 永远没有 ordinal,
+   *  而 claim() 会让它领锚点实例名, 两条记录同时叫 X-1。 */
+  const heal = (ids: readonly string[], cls: ClassRecord): void => {
+    const kin = ids.flatMap((id) => groups.get(id) ?? []).sort(byBirth);
+    const used = kin.map((w) => w.ordinal).filter((n): n is number => typeof n === "number");
+    let next = Math.max(cls.nextOrdinal, ...used.map((n) => n + 1));
+    instanceCounts[cls.id] = Math.max(instanceCounts[cls.id] ?? 0, kin.length);
+    kin.forEach((w) => {
+      const ordinal = w.ordinal ?? next;
+      if (w.ordinal === undefined) next = ordinal + 1;
+      push(w, instanceName(cls.name, ordinal), ordinal, cls.id);
+    });
+    ids.forEach((id) => consumed.add(id));
+  };
   /** 把一组 (合并时是多组) 记录规划成一个类 + 一串有序号实例。 */
   const planGroup = (ids: readonly string[], classId: string, name: string, first?: string, bot = botOfKey(classId)): void => {
     const kin = ids.flatMap((id) => groups.get(id) ?? []);
     if (!kin.length) return;
     const label = `${classId} (${name || "<无名>"})`;
     const why = classProblem(name, classId, [...existingClasses, ...pending]);
-    if (why) { conflicts.push(`skip: ${label} — ${why}`); return; }
+    if (why) { conflicts.push(`skip: ${label} — ${why}`); ids.forEach((id) => skipped.add(id)); return; }
     const firstKey = first ?? classId;
     const anchor = kin.find((w) => w.target === firstKey) ?? anchorIn(groups.get(classId) ?? kin, classId)!;
     const workspace = normPath(anchor.workspace) || normPath(cwdOf(anchor.target));
@@ -320,6 +346,7 @@ export const planClasses = (
       : undefined;
     if (twin) {
       conflicts.push(`skip: ${label} — 与 ${twin.id} 同占 ${bot || "主"}/${workspace}, 两边的旧形态都保留, 待人确认是否合并`);
+      ids.forEach((id) => skipped.add(id));
       return;
     }
     if (!workspace) conflicts.push(`note: ${label} — 推不出 workspace, 类先以 "" 落库, 待人补`);
@@ -337,14 +364,8 @@ export const planClasses = (
       nextOrdinal: instances.length + 1,
       createdAt: Math.min(...instances.map((w) => w.bornAt)),
     });
-    instances.forEach((w, i) => {
-      const ordinal = i + 1;
-      const to = instanceName(name, ordinal);
-      const identity = identityOf(w) === classId ? undefined : classId;
-      if (w.name !== to || w.ordinal !== ordinal || identity) {
-        renames.push({ target: w.target, from: w.name, to, ordinal, ...(identity ? { identity } : {}) });
-      }
-    });
+    instanceCounts[classId] = instances.length;
+    instances.forEach((w, i) => push(w, instanceName(name, i + 1), i + 1, classId));
     // 绑定里存的是**名字**: 每个被收进来的组的锚点旧名都指向这个类名。
     for (const id of ids) {
       const old = anchorIn(groups.get(id) ?? [], id)?.name?.trim();
@@ -354,30 +375,92 @@ export const planClasses = (
   };
 
   // ① 人拍的合并: 多组并成一个类 (exclude 的组保持旧形态, 不报冲突)。
+  //    成员已经单独成类 (上一轮无合并清单跑过) → 明确报 conflict, 不静默剔除那一组:
+  //    静默会让人以为合过了, 实际上少一个人、两处 workspace 还各占一份。
   for (const m of merges.merges) {
     if (known.has(m.into)) continue; // 已迁过 → 整条跳过 (幂等)
-    const ids = [...new Set([...m.members, m.into])].filter((id) => groups.has(id) && !known.has(id) && !excluded.has(id));
+    const members = [...new Set([...m.members, m.into])];
+    const classed = members.filter((id) => known.has(id));
+    if (classed.length) {
+      conflicts.push(`skip: merge ${m.into} → ${m.name} — 成员 ${classed.map((id) => `${id} 已是类 ${existingClasses.find((c) => c.id === id)?.name ?? ""}`).join(", ")}, 待人确认 (先撤掉那个类再合并)`);
+      members.forEach((id) => skipped.add(id));
+      continue;
+    }
+    const ids = members.filter((id) => groups.has(id) && !excluded.has(id));
     if (ids.length) planGroup(ids, m.into, m.name.trim(), m.first);
   }
-  // ② 其余管家组: 一组一个类 (名字取锚点名)。
+  // ② 其余管家组: 一组一个类 (名字取锚点名); 已存在的类只补漏 (半迁移 / 新化身)。
   for (const [id, kin] of [...groups].sort(([a], [b]) => cmp(a, b))) {
-    if (known.has(id) || excluded.has(id) || consumed.has(id)) continue;
+    if (excluded.has(id) || consumed.has(id)) continue;
+    if (known.has(id)) { heal([id], existingClasses.find((c) => c.id === id)!); continue; }
     const anchor = anchorIn(kin, id)!;
     if (!isStewardish(anchor)) continue;
     planGroup([id], id, (anchor.name ?? "").trim());
+  }
+  // ③ 自由名落进类名字空间 (等于类名, 或 <类名>-<数字>): 存量 worker 让位, 改成 <类名>-w<N>。
+  //    人 2026-11-18 口径: 自动改、计入 renames 并写进报告, 不需要人先动手 (真机例子:
+  //    一个 worker 叫 wezard-2, wezard 合并后 cc-wecom-5 也要叫 wezard-2 → 重名 + 影子化)。
+  const classesAll = [...existingClasses, ...pending];
+  const classNames = classesAll.map((c) => c.name);
+  const targeted = new Set(renames.map((r) => r.target));
+  const foreign = records
+    .filter((w) => w.ordinal === undefined && !targeted.has(w.target)
+      && !known.has(identityOf(w)) && !skipped.has(identityOf(w)) && !excluded.has(identityOf(w))
+      && !classesAll.some((c) => c.id === identityOf(w)))
+    .sort((a, b) => cmp(a.target, b.target));
+  if (foreign.length && classNames.length) {
+    const taken = records.map((w) => w.name).filter(Boolean);
+    foreign.forEach((w) => {
+      const n = (w.name ?? "").trim();
+      if (!n || !inClassSpace(n, classNames)) return;
+      const to = pickName(n, taken, classNames);
+      if (!to || to === n) return;
+      taken.push(to);
+      renames.push({ target: w.target, from: w.name, to });
+    });
   }
   return {
     classes: pending.sort((a, b) => cmp(a.id, b.id)),
     renames,
     conflicts,
     aliases: [...aliasMap].map(([from, to]) => ({ from, to })),
+    instanceCounts,
   };
 };
+
+/** analysis/classes-migration.txt: 闸门没开时人靠它判断「这次会建什么、改哪些名字」——
+ *  只写 conflicts 的话, 跑歪了 (比如合并被顶掉) 在文件里看不出来。 */
+export const renderClassReport = (
+  plan: ClassPlan,
+  o: { applied: boolean; records: number; at?: number },
+): string => [
+  "# class migration (" + (o.applied ? "applied" : "gated") + ") " + new Date(o.at ?? Date.now()).toISOString(),
+  "records=" + o.records + " classes=" + plan.classes.length + " renames=" + plan.renames.length + " conflicts=" + plan.conflicts.length,
+  "",
+  "## classes (id | name | role | workspace | instances | next)",
+  ...plan.classes.map((c) => [
+    c.id, "|", c.name, "|", c.role, "|", c.workspace || "(空)", "|",
+    String(plan.instanceCounts[c.id] ?? 0), "|", String(c.nextOrdinal),
+  ].join(" ")),
+  "",
+  "## renames (target | from -> to | ordinal | identity)",
+  ...plan.renames.map((r) => r.target + " | " + (r.from || "(无名)") + " -> " + r.to
+    + " | " + (r.ordinal !== undefined ? String(r.ordinal) : "") + (r.identity ? " | " + r.identity : "")),
+  "",
+  "## aliases (bindings)",
+  ...(plan.aliases.length ? plan.aliases.map((a) => a.from + " -> " + a.to) : ["(none)"]),
+  "",
+  "## conflicts",
+  ...(plan.conflicts.length ? plan.conflicts : ["(none)"]),
+  "",
+].join("\n");
 
 export interface ClassMigration {
   /** 本次落名的实例数 (0 = 没有可迁的 / 已迁完)。 */
   migrated: number;
   conflicts: string[];
+  /** 本次的计划 (闸门没开时只有它有意义): 报告要列出将建的类与全部改名。 */
+  plan: ClassPlan;
   /** 旧名 → 类名: 调用方据此把管家绑定改写成类名 (迁移后绑定存的都是类名)。 */
   aliases: Array<{ from: string; to: string }>;
   /** 本次创建的备份路径; 没写盘就没有。 */
@@ -397,20 +480,31 @@ export const migrateClasses = (
 ): ClassMigration => {
   const plan = planClasses(store.all(), classes.all(), cwdOf, merges);
   if (!plan.classes.length && !plan.renames.length) {
-    return { migrated: 0, conflicts: plan.conflicts, aliases: plan.aliases };
+    return { migrated: 0, conflicts: plan.conflicts, aliases: plan.aliases, plan };
   }
   const abs = expandHome(filePath);
   const backup = abs + CLASS_BACKUP_SUFFIX;
   try {
     if (!(existsSync(backup) && statSync(backup).isFile())) copyFileSync(abs, backup);
   } catch (e) {
-    return { migrated: 0, conflicts: plan.conflicts, aliases: [], skipped: `backup failed: ${(e as Error).message}` };
+    return { migrated: 0, conflicts: plan.conflicts, aliases: [], plan, skipped: "backup failed: " + (e as Error).message };
   }
   plan.classes.forEach((c) => classes.create(c));
   plan.renames.forEach((r) => store.upsert(r.target, {
     name: r.to,
-    ordinal: r.ordinal,
+    ...(r.ordinal !== undefined ? { ordinal: r.ordinal } : {}),
     ...(r.identity ? { identity: r.identity } : {}),
   }));
-  return { migrated: plan.renames.length, conflicts: plan.conflicts, aliases: plan.aliases, backup };
+  // 半迁移自愈落出来的号要把类的游标推上去 (否则下一个新实例还会领同一个号)。
+  const nextOf = new Map<string, number>();
+  plan.renames.forEach((r) => {
+    if (r.ordinal === undefined) return;
+    const rec = store.get(r.target);
+    if (!rec) return;
+    const id = identityOf(rec);
+    const cls = classes.get(id);
+    if (cls) nextOf.set(id, Math.max(nextOf.get(id) ?? 0, r.ordinal + 1));
+  });
+  nextOf.forEach((n, id) => { const c = classes.get(id); if (c && c.nextOrdinal < n) classes.upsert(id, { nextOrdinal: n }); });
+  return { migrated: plan.renames.length, conflicts: plan.conflicts, aliases: plan.aliases, plan, backup };
 };
