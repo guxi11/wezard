@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, realpathSync, symlinkSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { startupConfirmation, workspaceTrustConfig, workspaceTrustPrompt, codebuddyTrustPrompt } from "../shared/workspace-trust.js";
+import { startupConfirmation, startupDialog, workspaceTrustConfig, workspaceTrustPrompt, codebuddyTrustPrompt } from "../shared/workspace-trust.js";
 
 const cwd = "/private/tmp/authorized-workspace";
 // Isolated Claude trust picker; the verified post-confirmation screen reports v2.1.296 (default is No).
@@ -120,4 +120,23 @@ try {
   assert.equal(workspaceTrustPrompt(claude.replace(cwd, physical), "claude", alias, realpathSync)?.choice, 1);
   assert.equal(workspaceTrustPrompt(claude.replace(cwd, root), "claude", alias, realpathSync), undefined);
 } finally { rmSync(root, { recursive: true, force: true }); }
+// 启动框 vs 粘贴文本: 转录里的引用行 "> 1. …" 会让 startupConfirmation 命中数字选项一臂,
+// 但那是输入框内容, 不是等人点/等人的框 —— 通知与就绪判定都不该认 (2026-11-19 误报)。
+const pasted = [
+  "● REPL · 读 respawn 附近 store.set(7914)",
+  "> 就按上面这件事收口; 已做完就用 @wezard-15 RESULT: 交差。",
+  "> 1. 账本目录统一由 stateDir 派生",
+  "> 2. 第 8 步加 O2 闸",
+  "───────────────────────────────────────",
+  "> ",
+  "───────────────────────────────────────",
+  "glm-5.3-ioa high · ← for agents · ? for shortcuts",
+].join("\n");
+assert.equal(startupConfirmation(pasted), true, "引用行确实会命中宽松判据");
+assert.equal(startupDialog(pasted), false, "粘贴的编号引用行不是框");
+// 真框: 选择光标 + footer (Claude 系 picker) 与 CodeBuddy 的整圈框线 + 选项行都算。
+assert.equal(startupDialog(`Do you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel`), true);
+assert.equal(startupDialog(`│ Do you want to proceed? │\n│❯ 1. Yes\n  2. No│`), true);
+assert.equal(startupDialog("Just a normal TUI screen\n> done"), false);
+
 console.log("Workspace trust parsing, directory scope, navigation targets and config preservation checks passed");

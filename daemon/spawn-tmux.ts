@@ -41,7 +41,7 @@ import { activateBackend, resolveCliBackend, type CliBackend, type CliBackendNam
 import { selectModel } from "./model-select.js";
 import type { Effort } from "../shared/effort.js";
 import { hasRegistry, sessionOnPane } from "./wezard-session.js";
-import { codebuddyTrustPrompt, startupConfirmation, workspaceTrustPrompt, workspaceTrustConfig } from "../shared/workspace-trust.js";
+import { codebuddyTrustPrompt, startupConfirmation, startupDialog, workspaceTrustPrompt, workspaceTrustConfig } from "../shared/workspace-trust.js";
 import { isModalPane } from "../shared/modal-pane.js";
 import { unknownStartupNotice } from "../shared/startup-notice.js";
 import { prepareSessionHooks, sessionHookArgs, type SessionHookSpec } from "../shared/session-hooks.js";
@@ -890,7 +890,7 @@ const waitForTuiReady = async (
     if (exited) return { ready: false, exited };
     if (await answerWorkspaceTrust(pane, backend.name, cwd, log, cap)) continue;
     if (await answerCodebuddyTrust(pane, cwd, log, cap)) continue;
-    if (startupConfirmation(cap)) {
+    if (startupDialog(cap)) {
       notifyUnknownFrame(cap);
       continue;
     }
@@ -914,7 +914,7 @@ const waitForTuiReady = async (
   const last = captured.ok ? captured.stdout : "";
   const exited = cliExit(last);
   if (exited) return { ready: false, exited };
-  if (!startupConfirmation(last) && sawSession && TUI_READY_RE.test(last)) return { ready: true };
+  if (!startupDialog(last) && sawSession && TUI_READY_RE.test(last)) return { ready: true };
   log.warn({ pane, registry, sawSession }, "spawn-tmux: TUI ready timeout, proceeding anyway");
   return { ready: false };
 };

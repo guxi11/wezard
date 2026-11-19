@@ -1,6 +1,7 @@
 import { basename, dirname, isAbsolute, normalize } from "node:path";
 import type { CliBackendName } from "./cli-backends.js";
 import { previewPatch } from "./config-writer.js";
+import { isModalPane } from "./modal-pane.js";
 
 const linesOf = (screen: string): string[] => screen.split("\n").map((line) =>
   line.replace(/\x1b\[[0-9;?]*[A-Za-z]/gu, "").replace(/^\s*[│┃]/u, "").replace(/[│┃]\s*$/u, "").trim());
@@ -33,6 +34,15 @@ export interface WorkspaceTrustPrompt {
 /** 「另需授权」的语义一概不让目录信任的代按沾边 (workspaceTrustPrompt 与
  *  codebuddyTrustPrompt 共用): repo 根授权 / 预开权限 / 沙箱豁免都要人自己点。 */
 const EXTRA_GRANT_RE = /(?:Trusting will apply to the repository root|This folder (?:pre-approves|adds|runs commands)|without these permissions|full access|bypass permissions|dangerously|sandbox approval|Would you like to proceed\?|Do you want to proceed\?)/iu;
+
+/** 屏上真有一只等人点的框 —— 通知与就绪判定都用它, 而不是 startupConfirmation 单用。
+ *
+ *  贴进 pane 的文本在转录里渲染成 "> 1. …" 的引用行, 会命中 startupConfirmation 的数字
+ *  选项一臂 (2026-11-19 会话重生时屏上明明是刚贴进去的任务文本, 却连发两条「需要本地手动
+ *  确认」, 人: 这是正常的, 没有卡点; 就绪判定还被压满 15s 窗口)。框有自己的光标字形
+ *  (❯ / ›) 或保守的模态形状 (选项行 + footer / 权限三件套), 引用行只有 ">"。 */
+export const startupDialog = (screen: string): boolean =>
+  startupConfirmation(screen) && (isModalPane(screen).modal || /[❯›]/u.test(screen));
 
 /** Startup questions must never receive an unscoped retry Enter. */
 export const startupConfirmation = (screen: string): boolean =>
