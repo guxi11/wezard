@@ -20,7 +20,7 @@
 | 8 | 起 daemon + svr | `launchctl kickstart gui/$UID/com.wezard.daemon`; 前端资源有变, svr 也要 `launchctl kickstart -k gui/$UID/com.wezard.svr` | daemon.log 无 crash-loop; uid 回填条数 = 实例数; 每个绑定 pane 都标成待 /new | 从这一步起逆序回退: 8 → 7 → 6 → … |
 | 9 | 旧会话换新工具面 | 不用手动做: daemon 启动时把每个绑定 pane 标为待 /new, 下次唤醒先 /new 再注入, 新会话由 armCharter 拿到新宪章。session-mcp*.json / session-hooks.json 指向的入口不变 (http /mcp 加 hook 路径), 由 daemon writeIfChanged 重写, 不用手改; 真正要换的是会话里缓存的 tools/list, 由 /new 解决 | 抽 1 个群发话: 首轮宪章里没有 tell_peer, 工具列表里有 room_* | 回到 7 后, 旧代码下的下一次 /new 拿回旧工具面 |
 
-| 10 | 切换后清理 (稳定 7 天、未回退之后) | `rm ~/wezard-backups/pre-room-*.tgz`; 冻结的旧源 (routes.jsonl 3.9M、state/members.json、state/chats/、message-events.json*) 打成一个 tgz 放 ~/wezard-backups/ 后删原文件; `git branch -d room-model room-mig room-tools room-ui`, 删对应 worktree | `df -h ~` 余量回升; `git tag -l pre-room` 仍在 | tgz 删除不可逆, 所以要等满 7 天; 仍保留 tag pre-room 与 state/archive/ 里的旧宪章 |
+| 10 | 切换后清理 (稳定 7 天、未回退之后) | ① `rm ~/wezard-backups/pre-room-*.tgz` (只删第 1 步的切换前快照); ② 冻结的旧源 (~/.wezard/routes.jsonl 3.9M、state/members.json、state/chats/、state/message-events.json*、state/obligations.json、state/idle-nudges.json、state/strict-delivery-notices.json) **原样 mv 到 `~/.wezard/state/archive/pre-room-sources-<ts>/`, 不删、不压缩**: 同卷 rename, 不额外占盘, 逐字节不变; ③ `git branch -d room-model room-mig room-tools room-ui`, 删对应 worktree | `ls state/archive/pre-room-sources-<ts>/` 文件数 = 移动前; `df -h ~`; `git tag -l pre-room` 仍在 | ① 不可逆, 这就是要等满 7 天的原因; ② `mv state/archive/pre-room-sources-<ts>/* 原位` (回退到旧 daemon 前必须先做这一步); ③ 分支可从 tag 与 v3 历史重建 |
 
 ## 第 7 步: 代码怎么接
 
@@ -53,6 +53,7 @@
 ## 磁盘与保留期
 
 - **备份**: tar 放 `~/wezard-backups/`, 不在 repo 里, 也不在 ~/.wezard 里; 第 10 步删除。
+- **旧源 (路由 / 成员 / chat-records / message-events)**: 第 10 步只移进 archive/, 不删。它们是旧模型下唯一的线上历史, 删不删至少等半年后另议。
 - **room 账本保留期**: 消息历史**永久保留**, 不按时间回收、不压缩、不删。
   - 设计稿里的 7 天回收说的是 routes (路由账), room 模型里已经不存在这类东西。
   - dm / adhoc room 在成员都已结束后也不删, 只是不再增长。
