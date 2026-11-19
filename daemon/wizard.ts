@@ -247,7 +247,7 @@ export const loadWizardStore = (filePath: string, bornOf: BornOf = () => undefin
   // 整个重写, 弄脏 class / identity 迁移的「原样字节」备份 (fix-task §8.1)。uidOf 是确定性的,
   // 迁移脚本与 daemon 永远算出同一个值, 推迟落盘不改变语义。仍须是 load 后第一件事:
   // 之后 settleAll 改 bornAt 的话, 存量 uid 就由错误的 (target, bornAt) 决定了。
-  for (const rec of Object.values(db.all())) if (!isUid(rec.uid)) rec.uid = uidOf(rec);
+  for (const rec of Object.values(db.all())) if (!isUid(rec.uid) && rec.target) rec.uid = uidOf(rec); // 畸形记录 (缺 target) 原样留着, 由 migrateIdentities 检出跳过
   const nextAutoName = loadAutoNames(`${filePath}.names.json`);
   // drop 过的 target: claim 只推名字、不落盘, 直到有人明确 upsert (重新 spawn) 它。
   // 收工播报、rolepage、回执日志这些只读路径都会问一句名字 —— 不拦的话 forget 之后

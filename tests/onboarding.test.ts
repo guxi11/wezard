@@ -230,14 +230,17 @@ try {
   const human = await decide("s-human", "Read", { file_path: "/x" });
   assert.equal(human.decision, "allow", "人手开的 .guide 照常 (matcher 外放行), 不吃引导拒绝");
 
-  // ── 在途豁免 (chatPolicyOf) ───────────────────────────────────────
+  // ── 在途豁免 → room 口径 (fix-task §8.2) ──────────────────────────
+  // 出站门已废: 引导说话不再需要 speech 豁免, 在途与否同一读数; 盘上残留的旧键在
+  // chatPolicyOf 读侧剥掉, 永不生效 (残留键只在 boot warn 里出现)。
   const obx = loadOnboardingStore(cfg);
   obx.begin("chat:wrEXEMPT");
+  assert.equal(isOnboardingActive("chat:wrEXEMPT"), true, "在途状态本身照记");
   cfg.chatPolicy = { "chat:wrEXEMPT": { speech: "strict" } };
-  assert.equal(chatPolicyOf(cfg, "chat:wrEXEMPT").speech, "implicit", "在途群按 implicit 出站 (引导要能说话)");
+  assert.equal(chatPolicyOf(cfg, "chat:wrEXEMPT").speech, undefined, "room 口径: 残留 speech 键读侧剥掉 (在途)");
   obx.finish("chat:wrEXEMPT");
   assert.equal(isOnboardingActive("chat:wrEXEMPT"), false, "绑定即关窗");
-  assert.equal(chatPolicyOf(cfg, "chat:wrEXEMPT").speech, "strict", "收尾后显式 strict 恢复");
+  assert.equal(chatPolicyOf(cfg, "chat:wrEXEMPT").speech, undefined, "收尾后同样剥掉, 旧键永不生效");
   delete cfg.chatPolicy;
 } finally { rmSync(dir, { recursive: true, force: true }); }
 console.log("onboarding.test.ts ok");

@@ -6,10 +6,10 @@ import { ConfigSchema } from "../shared/config.js";
 import { installInboundRouter } from "../daemon/inbound.js";
 import { bindTagLinker, createdAck, parseTagHeader, WIZARD_MARK } from "../shared/session-label.js";
 
-// 严格群的 /new 确认 (`[wezard] <name> created`) 是 daemon 的系统行, 不是模型发言 ——
-// 它必须绕过严格群出站门直达聊天; implicit 群由 mirror 的 pushProjectInfo 发
-// `<name> created` (同一份 createdAck), daemon 这边不能多发一条。
-// name = 该会话的 wizard 名 (displayName, 与气泡头同源), 不是 pane 名 / chat 名。
+// room 口径 (fix-task §8.3): /new 的会话边界确认只有一种形态 —— mirror 的
+// pushProjectInfo 发 createdAck (裸 `🧙 <name> created`, 不带 [wezard] 前缀),
+// 不论什么群; daemon (inbound) 不再补发任何确认 (出站门已废, 「严格群被静音要补
+// 一条」的前提不存在了)。name = 该会话的 wizard 名 (displayName, 与气泡头同源)。
 // 驱动的是真的 inbound 路由闭包, 只把 client / bridge 换成记录器。
 
 // 名册没在测试里绑 —— 这里是它的对外面: displayName(target) 取的就是这个 nameOf。
@@ -18,22 +18,18 @@ import { bindTagLinker, createdAck, parseTagHeader, WIZARD_MARK } from "../share
 let NAMES: Record<string, string> = { "chat:room": "Nova", "chat:other": "Patch", "user:tester": "Solo" };
 bindTagLinker({ urlOf: () => undefined, resolve: () => undefined, nameOf: (t) => NAMES[t] ?? "" });
 
-const strictReply = createdAck("chat:room", true);
-// mirror-bridge 的 sendStandalone 白名单: 这个前缀就是「系统提示」的判据。
-assert.equal(strictReply, `[wezard] ${WIZARD_MARK} Nova created`);
-assert.match(strictReply, /^\[(mirror|wezard)\]/, "系统行必须带 [wezard]/[mirror] 前缀");
-assert.equal(createdAck("chat:room", false), `${WIZARD_MARK} Nova created`, "implicit 群: 带身份名与记号");
-assert.doesNotMatch(createdAck("chat:room", false), /^\[(mirror|wezard)\]/, "implicit 的 created 不是系统行 (会被严格群出站门拦下)");
+const ack = createdAck("chat:room");
+assert.equal(ack, `${WIZARD_MARK} Nova created`, "room 口径: 唯一形态, 带身份名与记号");
+assert.doesNotMatch(ack, /^\[(mirror|wezard)\]/, "created 不带系统前缀 (前缀写法只留给 daemon 系统行那一处)");
 // 名字拿不到也要有记号 —— 不出现空白身份。
-assert.equal(createdAck(undefined, false), `${WIZARD_MARK} created`);
-assert.equal(createdAck(undefined, true), `[wezard] ${WIZARD_MARK} created`);
+assert.equal(createdAck(undefined), `${WIZARD_MARK} created`);
 // 记号必须与气泡头同一个原子: tagHead 的头就是 `WIZARD_MARK name`, 这里用它做前缀原子。
-assert.ok(createdAck("chat:room", false).startsWith(`${WIZARD_MARK} Nova `), "created 的记号/名字与气泡头同源");
+assert.ok(ack.startsWith(`${WIZARD_MARK} Nova `), "created 的记号/名字与气泡头同源");
 // 它不是气泡头: 没有全角冒号, parseTagHeader 不该把它当 bot 发言剥掉。
-for (const line of [strictReply, createdAck("chat:room", false)]) {
-  const parsed = parseTagHeader(line);
-  assert.equal(parsed.fromBot, false, `${line} 不是带头的 bot 气泡`);
-  assert.equal(parsed.body, line, "正文原样保留 (记号不被当身份前缀吃掉)");
+{
+  const parsed = parseTagHeader(ack);
+  assert.equal(parsed.fromBot, false, "不是带头的 bot 气泡");
+  assert.equal(parsed.body, ack, "正文原样保留 (记号不被当身份前缀吃掉)");
 }
 
 type Spawn = (target: string, windowName?: string, opts?: { silent?: boolean; model?: string }) => Promise<{ ok: boolean; reason?: string; sessionId?: string }>;
@@ -73,39 +69,41 @@ const session = (policy: Record<string, unknown>, spawn: Spawn = async () => ({ 
   return { send, replies, spawned };
 };
 
-// 1) 严格群: 恰好一条 `[wezard] <name> created` 外发, 且是正常 spawn。
+// 1) /new: daemon 零外发 —— 确认只有 mirror 的 pushProjectInfo 那一条 (裸 created),
+//    残留 speech 旧键的群行为也一样 (读侧已剥, 不再有严格群分支)。
 {
   const s = session({ "chat:room": { speech: "strict" } });
   await s.send("group", "room", "/new");
-  assert.equal(s.spawned.length, 1, "严格群 /new 仍 spawn");
+  assert.equal(s.spawned.length, 1, "/new 仍 spawn");
   assert.equal(s.spawned[0]!.opts.silent, false, "/new 不是 silent spawn");
-  assert.deepEqual(s.replies, [strictReply], "严格群 /new 恰好一条系统行确认");
+  assert.deepEqual(s.replies, [], "room 口径: daemon 不补发任何确认 (mirror 那条是唯一形态)");
 }
 
-// 1b) 两条对照: 不同身份的会话各拿自己的名字 (同一个 daemon, 两个严格群)。
+// 1b) 两条对照: 不同身份的会话各自 spawn, daemon 同样零外发。
 {
   const s = session({ "chat:room": { speech: "strict" }, "chat:other": { speech: "strict" } });
   await s.send("group", "room", "/new");
   await s.send("group", "other", "/new");
-  assert.deepEqual(s.replies, [`[wezard] ${WIZARD_MARK} Nova created`, `[wezard] ${WIZARD_MARK} Patch created`], "确认文案跟着身份名走");
+  assert.equal(s.spawned.length, 2, "各自 spawn");
+  assert.deepEqual(s.replies, [], "两个群都是零外发");
 }
 
-// 1c) implicit 群的 created 由 mirror 拼 (同一份 createdAck), 调用点钉住。
+// 1c) created 由 mirror 拼 (同一份 createdAck), 调用点钉住。
 {
   const mirrorSrc = readFileSync("daemon/mirror-bridge.ts", "utf8");
-  assert.match(mirrorSrc, /pushProjectInfo\(target, createdAck\(target, false\)\)/,
-    "implicit 群的 created 从 target 取身份名与记号 (createdAck → tagHead), 不带系统前缀");
+  assert.match(mirrorSrc, /pushProjectInfo\(target, createdAck\(target\)\)/,
+    "created 从 target 取身份名与记号 (createdAck → tagHead), 不带系统前缀, 全群唯一形态");
 }
 
-// 2) implicit 单聊: daemon 不多发 —— 确认仍由 mirror 的 pushProjectInfo 负责。
+// 2) 单聊: daemon 不多发 —— 确认仍由 mirror 的 pushProjectInfo 负责。
 {
   const s = session({});
   await s.send("single", undefined, "/new");
   assert.equal(s.spawned.length, 1);
-  assert.deepEqual(s.replies, [], "implicit 群 /new 不新增外发 (保持裸 created 的现状)");
+  assert.deepEqual(s.replies, [], "/new 不新增外发 (裸 created 由 mirror 发)");
 }
 
-// 3) 显式 implicit 的群 (拨回口径) 同 2。
+// 3) 显式 implicit 的群同 2 (room 口径下所有群同读数)。
 {
   const s = session({ "chat:room": { speech: "implicit" } });
   await s.send("group", "room", "/new");
@@ -114,7 +112,7 @@ const session = (policy: Record<string, unknown>, spawn: Spawn = async () => ({ 
 
 NAMES = {};
 
-// 4) 严格群 spawn 失败: 仍只回失败那一行 —— 系统行不抢在失败前面。
+// 4) spawn 失败: 仍只回失败那一行 —— 确认不抢在失败前面。
 {
   const s = session({ "chat:room": { speech: "strict" } }, async () => ({ ok: false, reason: "spawn denied" }));
   await s.send("group", "room", "/new");
@@ -122,15 +120,15 @@ NAMES = {};
   assert.match(s.replies[0]!, /^\[wezard\] \/new failed: spawn denied$/);
 }
 
-// 5) 严格群里「不过门」的那批命令回执 (replyText → 直发 replyStream) 照常到人。
+// 5) 「不过门」的那批命令回执 (replyText → 直发 replyStream) 照常到人。
 for (const [command, pattern] of [["/pwd", /^\/repo\/current$/], ["/help", /\/new/], ["/id", /^\[wezard\]|user:tester/]] as const) {
   const s = session({ "chat:room": { speech: "strict" } });
   await s.send("group", "room", command);
-  assert.equal(s.replies.length, 1, `${command} 在严格群恰有一条回执`);
+  assert.equal(s.replies.length, 1, `${command} 恰有一条回执`);
   assert.match(s.replies[0]!, pattern as RegExp, `${command} 的回执内容不变`);
 }
 
-// 6) /clear 的边界确认: strict 带 [wezard] 前缀, implicit 保持裸 "cleared"。
+// 6) /clear 的边界确认: room 口径统一裸 "cleared" (不再分群加 [wezard] 前缀)。
 //    /clear 的确认在 mirror 的 dispatch 闭包里 (无 live stream), 抽出来直接跑。
 {
   const mirror = readFileSync("daemon/mirror-bridge.ts", "utf8");
@@ -142,18 +140,17 @@ for (const [command, pattern] of [["/pwd", /^\/repo\/current$/], ["/help", /\/ne
   const body = ts.transpileModule(mirror.slice(start, stop), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
   }).outputText;
-  const clearAck = (strict: boolean): string[] => {
+  const clearAck = (): string[] => {
     const sent: string[] = [];
     const a: any = {};
-    new Function("armMigration", "sendStandalone", "a", "preClearBaseline", "jsonlIsPostClearChild", "startMigrationWatcher", "strictChat",
+    new Function("armMigration", "sendStandalone", "a", "preClearBaseline", "jsonlIsPostClearChild", "startMigrationWatcher",
       body)(
-      true, (_a: unknown, text: string) => sent.push(text), a, "baseline", () => true, () => undefined, () => strict,
+      true, (_a: unknown, text: string) => sent.push(text), a, "baseline", () => true, () => undefined,
     );
     assert.deepEqual(a.clearRebind, { baseline: "baseline" }, "迁移 watcher 照旧武装");
     return sent;
   };
-  assert.deepEqual(clearAck(true), ["[wezard] cleared"], "严格群 /clear 确认带系统前缀");
-  assert.deepEqual(clearAck(false), ["cleared"], "implicit 群 /clear 文案零变化");
+  assert.deepEqual(clearAck(), ["cleared"], "/clear 确认裸文案, 全群同一形态");
 }
 
 // 7) [mirror] 系统行本来就是白名单成员 (注入超时 / 代按 / 投递失败)。
@@ -161,4 +158,4 @@ for (const line of ["[mirror] ✗ 注入超时 120s — tmux 无响应, 本轮�
   assert.match(line, /^\[(mirror|wezard)\]/, `${line.slice(0, 14)}… 走系统行白名单`);
 }
 
-console.log("Strict system receipts: [wezard] created / [wezard] cleared bypass the strict outbound gate; implicit wording unchanged; ungated command replies still reach strict chats");
+console.log("room 口径会话边界回执: created/cleared 各只剩裸文案一种形态, daemon /new 零补发; 不过门的命令回执照常");
