@@ -44,7 +44,8 @@ import {
   type NormalizedTranscriptLine,
 } from "../shared/cli-backends.js";
 import { isModalPane, isCodexHookReviewPane, isAskqSubmitPage, parseModalOptions, pickModalAnswer, pickAutoAllowAnswer, parseConfirmContext, modalFingerprint, modalCallFingerprint, looksLikePicker, type ModalPaneVerdict } from "../shared/modal-pane.js";
-import { paneIdentityMatches, type MirrorStore } from "./mirror-store.js";
+import { loadJsonMap } from "../shared/json-map-store.js";
+import { paneIdentityMatches, paneReclaimMatches, type MirrorAttachment, type MirrorStore } from "./mirror-store.js";
 import { hasMirrorAskq, mootMirrorAskq, runMirrorAskqFlow, hasMirrorPlan, mootMirrorPlan, runMirrorPlanFlow, hasMirrorPicker, mootMirrorPicker, runMirrorPickerFlow, type PickerPress } from "./approval.js";
 import { replAskqInput } from "../shared/repl-script.js";
 import { isAutoWindowActive } from "./session-cache.js";
@@ -55,7 +56,7 @@ import { prepareSessionHooks, sessionHookArgs } from "../shared/session-hooks.js
 import { prepareSessionSkills, sessionSkillArgs } from "../shared/session-skills.js";
 import { selectEffort, selectModel, type EffortSelectResult, type ModelScope, type ModelSelectResult } from "./model-select.js";
 import { parseEffort, type Effort } from "../shared/effort.js";
-import { hasRegistry, liveSessionPids, markTranscript, probeOf, readRegistry, registrySnapshot, sessionOfPid, sessionOnPane, submittedSince, submittedEventSince, watchRegistry, type LiveSession, type TranscriptMark } from "./wezard-session.js";
+import { hasRegistry, liveSessionPids, markTranscript, probeOf, readRegistry, registrySnapshot, sessionBySid, sessionOfPid, sessionOnPane, submittedSince, submittedEventSince, watchRegistry, type LiveSession, type TranscriptMark } from "./wezard-session.js";
 import { waitForIdle, type IdleResult } from "./wait-idle.js";
 import { manifestationOf, wizardStore } from "./wizard.js";
 import { startSubagentWatch, type SubagentItem, type SubagentWatchHandle } from "./subagent-tail.js";
@@ -2488,6 +2489,10 @@ const INJECT_JOB_TIMEOUT_MS = 90_000;
 /** 没有绑定的 pane 静默多久才算孤儿。刚 spawn、还没 attach 的 pane (并发 fan-out 时
  *  别人的 sweep 会撞见它) 在这段时间里一直有输出, 远大于一次 spawn → attach 的耗时。 */
 const ORPHAN_GRACE_MS = 10 * 60_000;
+/** pane 上限回收里「最近有人说过话」的口径: transcript 一天内动过的 target 只 detach
+ *  不 kill —— pane 和 CLI 留着 (绑定也没动), 下一条消息 / 下次 reload 按 %N 或窗口名+pid
+ *  直接认回; 为省内存把活会话整个换代码, 代价是 --resume fork 一代新 jsonl。 */
+const RECENT_TALK_MS = 24 * 3600_000;
 /** ps 的 `etime` ([[dd-]hh:]mm:ss) → 秒; 认不出 = NaN。 */
 const etimeSec = (s: string): number => {
   const m = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/.exec(s);
@@ -4955,6 +4960,30 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       ? buildDetailUrl(cfg.daemon.detailPublicBase, cfg.daemon.host, cfg.daemon.port, id, principal ? stripPrincipalPrefix(principal) : undefined)
       : "";
 
+  // 绑定补存窗口名 + pid (2026-11-19): restore 凭窗口名/shell pid 核对 pane id 有没有被
+  // tmux 重新发号指到别人身上, %N 失效时再凭它们 (+注册表 sid / CLI pid) 把原 pane 认回来。
+  // respawn / 重挂路径不经 attach, 各自的 store.set 会整条覆盖记录 —— 不补就丢认回凭据。
+  // fire-and-forget: 结果回来时绑定已换人就丢弃; 三样都齐且 pane 没换就不重查 (boot 批量
+  // 恢复靠 restore 预写快照, 不逐个 ps)。
+  const refreshPaneIdentity = (target: string, pane: string, jsonlPath: string): void => {
+    if (!pane) return;
+    void paneIdentityOf(pane).then(async (id) => {
+      if (!id) return;
+      const cur = deps.store.get(target);
+      if (!cur || (cur.tmuxPane ?? "") !== pane) return;
+      if (cur.tmuxWindow === id.window && cur.tmuxPid === id.pid && cur.cliPid) return;
+      let cliPid: number | undefined;
+      try {
+        const backend = backendForPath(jsonlPath);
+        const { kids } = await psSnap();
+        cliPid = registeredPidUnder(Number(id.pid), liveSessionPids(backend.homeDir), kids);
+      } catch { /* ps 失败 = 认不出 CLI pid, 不写 */ }
+      const nowRec = deps.store.get(target);
+      if (!nowRec || (nowRec.tmuxPane ?? "") !== pane) return;
+      deps.store.set(target, { ...nowRec, tmuxWindow: id.window, tmuxPid: id.pid, ...(cliPid ? { cliPid } : {}) });
+    }).catch(() => undefined);
+  };
+
   const attach = ({ sessionId, jsonlPath, target: targetOverride, tmuxPane, tmuxSession, cwd, model, effort, pendingCwd }: AttachArgs): AttachResult => {
     const target = resolveTarget(targetOverride);
     if (!target) return { ok: false, reason: "no target chat (set wrc.mirror.pushChat or defaultChat, or pass target)" };
@@ -5048,16 +5077,19 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       jsonlPath,
       render: () => charterFor(target, { cwd: a.runningCwd, cli: cliName }),
     });
-    // 同一块 pane 上重绑 (re-attach / 换 sid) 沿用已存的身份; 换了 pane 就先清空, 由下面
-    // 的异步补查填新值 —— 绝不把上一块 pane 的窗口名/pid 记到新 pane 头上。
+    // 同一块 pane 上重绑 (re-attach / 换 sid) 沿用已存的身份; 新 pane 为空 (死 pane 保留
+    // 绑定 / spawn-mode) 也沿用 —— 那是认回原 pane 的凭据, 别在重挂时丢掉; 真换了 pane
+    // 才清空, 由 refreshPaneIdentity 填新值, 绝不把上一块 pane 的窗口名/pid 记到新 pane 头上。
     const samePane = (prevRec?.tmuxPane ?? "") === (a.tmuxPane ?? "");
+    const carryIdentity = samePane || !(a.tmuxPane ?? "").trim();
     deps.store.set(target, {
       sessionId,
       jsonlPath,
       tmuxSession: a.tmuxSession || undefined,
       tmuxPane: a.tmuxPane || undefined,
-      ...(samePane && prevRec?.tmuxWindow ? { tmuxWindow: prevRec.tmuxWindow } : {}),
-      ...(samePane && prevRec?.tmuxPid ? { tmuxPid: prevRec.tmuxPid } : {}),
+      ...(carryIdentity && prevRec?.tmuxWindow ? { tmuxWindow: prevRec.tmuxWindow } : {}),
+      ...(carryIdentity && prevRec?.tmuxPid ? { tmuxPid: prevRec.tmuxPid } : {}),
+      ...(carryIdentity && prevRec?.cliPid ? { cliPid: prevRec.cliPid } : {}),
       cwd: a.runningCwd || undefined,
       model: a.model || undefined,
       effort: a.effort || undefined,
@@ -5065,14 +5097,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       cwdConfirmed: prevRec?.cwdConfirmed,
       charterOwed: a.charterPending ? true : undefined,
     });
-    // 绑定补存窗口名 + pid (2026-11-19): restore 凭这两个字段核对 pane id 有没有被 tmux
-    // 重新发号指到别人身上。attach 是同步的, 这里补一次异步查询; 结果回来时绑定已换人就丢弃。
-    if (a.tmuxPane) void paneIdentityOf(a.tmuxPane).then((id) => {
-      if (!id) return;
-      const cur = deps.store.get(target);
-      if (!cur || cur.sessionId !== sessionId || (cur.tmuxPane ?? "") !== a.tmuxPane) return;
-      deps.store.set(target, { ...cur, tmuxWindow: id.window, tmuxPid: id.pid });
-    }).catch(() => undefined);
+    // 绑定补存窗口名 + pid (2026-11-19): attach 是同步的, 异步补查一次 (见 refreshPaneIdentity)。
+    if (a.tmuxPane) refreshPaneIdentity(target, a.tmuxPane, jsonlPath);
     // 这个 pane 现在归 wezard 管 (spawn / reload 恢复 / switch 认下的人自己开的终端):
     // 打上归属标记, 它的 hook 才走 IM 审批。spawn 出来的进程本身带 WEZARD_MANAGED,
     // 这一下是给「升级前就在跑的 pane」和「switch 绑进来的外部会话」补的。
@@ -5127,6 +5153,62 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return s;
   };
 
+  // %N 失效 (server 重启重编号 / 陈年记录) 后, 把原来那块 pane 认回来 —— 认得回就不
+  // respawn, 会话不用靠 --resume fork 换代。判据按强度排: ① 注册表里本绑定 sid 的活进程
+  // 登记在哪个 pane (sid 是唯一键, 最强); ②③ 窗口名 + shell pid 等值 / CLI pid 在候选
+  // pane 的进程树里 (paneReclaimMatches 钉死: 窗口名单独永远不认)。全部认不出返回 ""。
+  const paneByIdentity = async (rec: MirrorAttachment, jsonlPath: string): Promise<string> => {
+    const backend = backendForPath(jsonlPath);
+    if (backend.name !== "codex") {
+      const row = sessionBySid(backend.homeDir, rec.sessionId);
+      if (row?.pane && (await probePane(row.pane, jsonlPath)).state === "session") return row.pane;
+    }
+    const win = (rec.tmuxWindow ?? "").trim();
+    const pid = (rec.tmuxPid ?? "").trim();
+    if (!win && !pid && !rec.cliPid) return "";
+    const snap = await runTmux(["list-panes", "-a", "-F", "#{pane_id}\t#{window_name}\t#{pane_pid}"]);
+    if (!snap.ok) return "";
+    const ps = await psSnap();
+    const treeHas = (root: number, want: number): boolean => {
+      const seen = new Set<number>();
+      const stack = [root];
+      while (stack.length) {
+        const p = stack.pop() ?? 0;
+        if (p === want) return true;
+        if (seen.has(p)) continue;
+        seen.add(p);
+        for (const k of ps.kids.get(p) ?? []) stack.push(k);
+      }
+      return false;
+    };
+    for (const line of snap.stdout.split("\n")) {
+      if (!line.trim()) continue;
+      const [pane = "", window = "", panePid = ""] = line.trim().split("\t");
+      if (!pane.startsWith("%")) continue;
+      if (paneReclaimMatches(rec, { window, pid: panePid }, treeHas)
+        && (await probePane(pane, jsonlPath)).state === "session") return pane;
+    }
+    return "";
+  };
+
+  // 会话丢失的人可见提示 (去重): 同一 (target, sid) 只发一次 —— restore 每次都会重进丢失
+  // 分支, 不去重就是每条消息一条告警。boot 批量恢复不发 (没人看着, WS 也未必就绪), 只在
+  // 懒恢复 (下一条消息进来) 时发, 正好落在 --resume 报错旁边, 告诉人怎么办。
+  const lostNoticeFile = (cfg.wrc.mirror.attachmentsFile || "").trim()
+    ? join(dirname(expandHome(cfg.wrc.mirror.attachmentsFile)), "mirror-lost-notices.json") : "";
+  const lostNotices = lostNoticeFile ? loadJsonMap<number>(lostNoticeFile) : undefined;
+  if (lostNotices) {
+    const cutoff = Date.now() - 30 * 24 * 3600_000;
+    for (const [k, at] of Object.entries(lostNotices.all())) if (!at || at < cutoff) lostNotices.drop(k);
+  }
+  const notifySessionLost = (a: AttachState): void => {
+    if (!lostNotices) return;
+    const key = `${a.target}|${a.sessionId}`;
+    if (lostNotices.get(key)) return;
+    lostNotices.set(key, Date.now());
+    sendStandalone(a, "[mirror] ⚠ 这场会话的记录已丢失 (pane 与 transcript 都不在了)。绑定原样保留: 下一条消息的 --resume 会报错, 需要发 /new 重开会话。");
+  };
+
   // `panes` = boot 快照; 给了就不再为每个 principal 单独问 tmux。lazy 调用方
   // 不传, 维持原来的逐个探活。
   const restoreFromStore = async (principal: string, panes?: PaneSnapshot, permitted?: () => boolean): Promise<AttachState | undefined> => {
@@ -5155,8 +5237,33 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (aliveById && !identityOk)
       log.warn({ principal, pane: storedPane, boundWindow: rec.tmuxWindow, boundPid: rec.tmuxPid },
         "mirror restore: pane id 指向的已不是原来那块 pane (窗口名/pid 对不上), 按死 pane 处理");
-    const livePane = aliveById && identityOk ? storedPane : await codexPaneForTranscript(jsonlAbs);
+    let livePane = aliveById && identityOk ? storedPane : "";
+    if (!livePane) {
+      // %N 认不到: 先按注册表 sid / 窗口名+pid 把原 pane 认回来 (免 respawn 换代),
+      // 认不回再走原来的 codex 兜底。
+      const reAdopted = await paneByIdentity(rec, jsonlAbs);
+      if (permitted && !permitted()) return undefined;
+      if (reAdopted) {
+        log.info({ principal, sessionId: rec.sessionId, pane: reAdopted, window: rec.tmuxWindow, boundPid: rec.tmuxPid },
+          "mirror restore: pane id 失效, 按注册表/窗口名+pid 认回原 pane (免 respawn 换代)");
+        rec.tmuxPane = reAdopted;
+        deps.store.set(principal, rec);
+        livePane = reAdopted;
+      }
+    }
+    if (!livePane) livePane = await codexPaneForTranscript(jsonlAbs);
     if (permitted && !permitted()) return undefined;
+    // boot 快照里有窗口名/pid 而记录里还没有 (升级前的老记录): 先预写, attach 的沿用规则
+    // 就能把它们带进新记录, refreshPaneIdentity 也不会为每个绑定各跑一次 ps。
+    if (livePane && panes) {
+      const meta = panes.get(livePane);
+      if (meta && (!rec.tmuxWindow || !rec.tmuxPid)) {
+        rec.tmuxWindow = meta.window;
+        rec.tmuxPid = meta.pid;
+        deps.store.set(principal, rec);
+      }
+    }
+    let lostBinding = false;
     if (!existsSync(jsonlAbs)) {
       // First: the SAME-sid transcript may have merely relocated to a sibling
       // project dir (Claude Code EnterWorktree/ExitWorktree moved it while the
@@ -5179,14 +5286,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // shared cwd collapse onto the same newest jsonl.
         log.info({ principal, sessionId: rec.sessionId, pane: livePane }, "mirror restore: live pane, transcript not written yet — keeping spawn-mode binding");
       } else {
-        // Pane dead AND transcript gone: 旧行为是"heal"到项目目录里最新、没人绑的 jsonl 上。
-        // 那条路认不出那是谁的会话 —— 常常是别人的 sid (人自己开的 / 巡逻里的兄弟会话),
-        // 于是这一群的镜像接到别人头上 (2026-11-19 现场)。现在 fail-closed: 直接丢绑定,
-        // 下次派活按正常流程重生 (resume 失败 → 新会话), 丢的最坏是一条过期记录, 比串线便宜。
+        // Pane dead AND transcript gone: 旧行为是"heal"到项目目录里最新、没人绑的 jsonl 上
+        // (常常是别人的 sid, 2026-11-19 现场: 一秒内 5 条 heal 把镜像接到别人头上), 后来
+        // 改成的「悄悄丢绑定」也只是把静默串线换成静默新开。现在 fail-visible: 绑定原样
+        // 保留 (sessionId 一个字不动), 下一条消息走 --resume 由 CLI 报错 (人可见), 聊天里
+        // 再补一条去重过的 [mirror] 提示 —— 换不换会话只由人 /new 说了算。
         log.warn({ principal, sessionId: rec.sessionId, jsonlPath: rec.jsonlPath },
-          "mirror restore: pane gone and transcript missing — dropping binding (no sid heal)");
-        deps.store.drop(principal);
-        return undefined;
+          "mirror restore: pane gone and transcript missing — keeping binding, resume will fail visibly (no sid heal)");
+        lostBinding = true;
       }
     }
 
@@ -5241,6 +5348,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     }
     const restored = byTarget.get(principal);
     log.info({ principal, sessionId: rec.sessionId, livePane: livePane || "(spawn-mode)" }, "mirror restored from store");
+    // 只在懒恢复 (下一条消息进来, panes 未传) 时发丢失提示: boot 批量恢复没人看着。
+    if (lostBinding && restored && !panes) notifySessionLost(restored);
     return restored;
   };
 
@@ -5464,15 +5573,17 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     });
     // 会话轮换 = 新 <sid>/subagents/ 目录; 旧 run 的 turn 一并收口。
     startSubagentsFor(a);
-    // pane 没换 (轮换只换会话): 窗口名/pid 照旧带着, restore 的核对才不会失去凭据。
+    // pane 没换 (轮换只换会话): 窗口名/pid/cliPid 照旧带着, restore 的核对才不会失去凭据。
     const prevAtt = deps.store.get(a.target);
+    const rotKeep = prevAtt?.tmuxPane === (a.tmuxPane || undefined);
     deps.store.set(a.target, {
       sessionId: newSessionId,
       jsonlPath: newJsonlPath,
       tmuxSession: a.tmuxSession || undefined,
       tmuxPane: a.tmuxPane || undefined,
-      ...(prevAtt?.tmuxPane === (a.tmuxPane || undefined) && prevAtt?.tmuxWindow ? { tmuxWindow: prevAtt.tmuxWindow } : {}),
-      ...(prevAtt?.tmuxPane === (a.tmuxPane || undefined) && prevAtt?.tmuxPid ? { tmuxPid: prevAtt.tmuxPid } : {}),
+      ...(rotKeep && prevAtt?.tmuxWindow ? { tmuxWindow: prevAtt.tmuxWindow } : {}),
+      ...(rotKeep && prevAtt?.tmuxPid ? { tmuxPid: prevAtt.tmuxPid } : {}),
+      ...(rotKeep && prevAtt?.cliPid ? { cliPid: prevAtt.cliPid } : {}),
       cwd: a.runningCwd || undefined,
       model: a.model || undefined,
       effort: a.effort || undefined,
@@ -7686,6 +7797,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // relaunched past, and must not cost the same extra launch next time.
         if (r.model !== undefined) a.model = r.model;
         deps.store.set(target, { sessionId: sid, jsonlPath: a.jsonlPath, tmuxSession: a.tmuxSession, tmuxPane: a.tmuxPane, cwd: a.runningCwd || undefined, model: a.model || undefined, effort: a.effort || undefined, pendingCwd: a.pendingCwd || undefined });
+        refreshPaneIdentity(target, a.tmuxPane, a.jsonlPath);
         startMigrationWatcher(a, resumeBaseline, forkOf(a.jsonlPath));
         // 重生出的 pane 里是同一份会话, 但宪章要重挂: --resume 读的是 CLI 自己的
         // 系统提示, 我们的宪章只跟着消息走。下面的注入 (本函数尾部) 会带上它。
@@ -7853,6 +7965,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // 全盲。普通 pane (人自己开的 shell / ssh / 编辑器, 会话已退回 shell 的) 树里
       // 没有注册表 pid, 一律跳过 —— 认不出就不动。
       const regPids = new Set(activeBackends().flatMap((b) => [...liveSessionPids(b.homeDir)]));
+      // store 里还指着它的绑定 (detach-only 回收 / 死 pane 保留的绑定): 这些 pane 不是孤儿,
+      // 孤儿清扫不许收 —— 否则「只 detach 不 kill」的保护马上被自己拆掉。
+      const storeBoundPanes = new Set(Object.values(deps.store.all()).map((r) => (r.tmuxPane ?? "").trim()).filter(Boolean));
       const ps = await psSnap();
       // 沿进程树找注册表 pid; 找到返回那个 pid (它的 etimes 供宽限判), 找不到返回 0。
       const hostedBy = (pid: number): number => {
@@ -7869,7 +7984,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       };
       for (const [pane = "", , session, pid] of rows) {
         // 绑定现查而非用开头的快照: 前面几轮 putDown 的 await 期间别人可能刚 attach 上。
-        if (session !== cfg.wrc.tmuxPrefix || spawningPanes.has(pane) || allTargets().some((t) => paneOf(t) === pane)) continue;
+        if (session !== cfg.wrc.tmuxPrefix || spawningPanes.has(pane) || storeBoundPanes.has(pane) || allTargets().some((t) => paneOf(t) === pane)) continue;
         const cliPid = hostedBy(Number(pid) || 0);
         if (!cliPid) continue;
         // 宽限按 CLI 进程年龄, 不按 window_activity: TUI 重绘会让它永远「刚动过」。
@@ -7894,6 +8009,14 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         const sessionId = a?.sessionId || deps.store.get(target)?.sessionId || "";
         const veto = skip?.(target, sessionId);
         if (veto) { skipped[target] = veto; continue; }
+        // 最近有人说过话: 只 detach 不 kill (pane/CLI/绑定全留着, 下次按 %N 或窗口名+pid
+        // 认回), 不占回收名额 —— 宁可暂时超上限, 不把活会话换代码。
+        if (now - mtime < RECENT_TALK_MS) {
+          if (a) detach(a, "pane cap (recent)");
+          skipped[target] = `recent (<${Math.round(RECENT_TALK_MS / 3.6e6)}h): detached only, pane kept`;
+          log.info({ target, sessionId, idleHours: Math.round((now - mtime) / 3.6e6), max }, "mirror pane cap — recent target detached only (pane kept)");
+          continue;
+        }
         const pane = paneOf(target);
         const why = await putDown(pane);
         if (why) { skipped[target] = why; continue; }
@@ -8227,6 +8350,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
               effort: a.effort || undefined,
               pendingCwd: a.pendingCwd || undefined,
             });
+            refreshPaneIdentity(a.target, a.tmuxPane, a.jsonlPath);
             log.info({ target: a.target, sessionId: sid, newPane: a.tmuxPane, newSession: a.tmuxSession }, "mirror: tmux respawned");
             // 重挂宪章 (同 injectText 的 respawn-init): --resume 只带回对话内容,
             // 我们的宪章跟着消息走。本条注入 (下面) 会带上它。

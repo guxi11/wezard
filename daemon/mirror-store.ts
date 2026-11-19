@@ -17,6 +17,10 @@ export interface MirrorAttachment {
    *  原来那块 pane 吗」; 对不上就按死 pane 处理, 绝不按名字去猜别人的 pane。 */
   tmuxWindow?: string;
   tmuxPid?: string;
+  /** 绑定时那块 pane 里注册表登记的 CLI 子进程 pid (2026-11-19): codebuddy 的注册表
+   *  没有 tmux 字段, 认回只能靠进程树 —— shell pid 等值之外的补充判据。respawn 后
+   *  由 refreshPaneIdentity 重捕。 */
+  cliPid?: number;
   /** Project cwd the live pane was last spawned in. Empty/undefined → fall
    *  back to cfg.wrc.cwd. Updated on every spawn/respawn so /pwd reflects
    *  reality, not an outdated user request. */
@@ -54,6 +58,23 @@ export const paneIdentityMatches = (
   if (!rec.tmuxWindow && !rec.tmuxPid) return true;
   if (!meta) return false;
   return (!rec.tmuxWindow || meta.window === rec.tmuxWindow) && (!rec.tmuxPid || meta.pid === rec.tmuxPid);
+};
+
+/** 认回判据 (纯, 2026-11-19): %N 失效后一个候选 pane 能否按「窗口名 + pid」认回。
+ *  ① 注册表 sid 是最强判据, 但要读盘, 在调用方的 I/O 层做; 这里管 ②③:
+ *  ② 存过 shell pid 且与候选 pane_pid 等值; ③ 存过 CLI pid 且它还在候选 pane 的
+ *  进程树里 (treeHas 由调用方带 ps 快照进来)。存过窗口名就必须对上 —— 窗口名/ pid
+ *  单独一样对上都不够猜 (绝不按名字串门), 两样都没有的老记录不认回。 */
+export const paneReclaimMatches = (
+  rec: Pick<MirrorAttachment, "tmuxWindow" | "tmuxPid" | "cliPid">,
+  cand: { window: string; pid: string },
+  treeHas: (rootPid: number, pid: number) => boolean,
+): boolean => {
+  const win = (rec.tmuxWindow ?? "").trim();
+  if (win && cand.window !== win) return false;
+  if (!win && !rec.tmuxPid && !rec.cliPid) return false;
+  if (rec.tmuxPid && cand.pid === rec.tmuxPid) return true;
+  return Boolean(rec.cliPid && treeHas(Number(cand.pid), rec.cliPid));
 };
 
 export const loadMirrorStore = (filePath: string): MirrorStore => loadJsonMap<MirrorAttachment>(filePath);
