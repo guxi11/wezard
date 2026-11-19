@@ -1,0 +1,93 @@
+# room 切换前修复单 (room-fix)
+
+> **本文件是这件活的唯一事实来源。** 会话重开 / /clear / handoff 后从这里复原; 任何插话与本文件冲突, 以本文件为准。要求有增补, 派活方直接改这个文件并提交, 只发一句「重读 docs/room/fix-task.md」。
+> 派活方: .LeoAdams。执行者: 见 plan d3ab1b5e 的 fix 任务。
+
+## 0. 边界
+
+- 工作区 `/Users/zyy/develop/Guxi11/cc-wecom-room-fix` (分支 room-fix, 起点 room-model @ 56d9418)。
+- 不起 / 不 reload 线上 daemon, 不碰 ~/.wezard 下任何文件, 不 push, 不动别的 worktree。
+- 只改 daemon/ shared/ scripts/room-cutover/ 与下面点名的 tests (room-watchdog / class-migration / onboarding / strict-new-ack / 新增测试与 tests/fixtures/)。tests/ 下其它文件另一个执行者在改, 不碰。
+- 测试跑法: `ONLY="tests/a.test.ts tests/b.test.ts" /tmp/room-run-tests.sh /Users/zyy/develop/Guxi11/cc-wecom-room-fix /tmp/<out>` (HOME 指 /tmp/room-test-home); 全量去掉 ONLY。
+- 提交前 `git diff --cached --name-only` 核对只含上面范围内的文件。可以分多笔提交, 鼓励每完成一条就提交一笔。
+- 先读: docs/room/verify-fd4715b.md (含末尾「复核更正」)、docs/room/contract.md §4a、docs/room/cutover.md 的 7b 与「第 9 步附: 30 分钟观察清单」。
+
+## 1. 看门狗 tmux 解析
+
+daemon/index.ts ≈1755 的 `split("\\n")` 是字面反斜杠 + n, 多 pane 时全员误判「pane 消失」。把解析抽成 room-watchdog.ts 导出的纯函数 (如 `parsePaneIds(stdout)`), index.ts 用它。顺手核 index.ts 另两处 list-panes (≈3240 / ≈3569) 有没有同样问题。
+
+**测试数据用真机原始输出 (C)**: 本机跑 daemon 实际用的 `tmux list-panes -a -F '#{pane_id}'` (改了 format 就跑改后的; 只读命令, 允许跑), 字节原样存 `tests/fixtures/tmux-list-panes-*.txt` (含末尾换行)。另加「字段里含分隔符」用例: 单字段 format → 末尾空行 / CRLF / 前后空白; 多字段 format → pane 标题里含分隔符, 断言 pane id 仍解对。提交说明写 fixture 的来源命令与抓取时间。不许用手写数组当解析输入。
+
+## 2. 看门狗安全闸
+
+- **(B) 首轮只建基线**: daemon boot 后第一次**成功**扫描只记各持有者 lastEvent = now 与 pane 快照, 不取消、不补判闲、不 warn; 汇总行标 `baseline: true`。写进 room-watchdog.ts 顶部规格注释。
+- **(A) 取消两次确认**: 第一次判 pane 不存在只记「疑似」(Map target → 首次疑似时刻 + pane id), 不写账本、不唤醒; 下一次扫描 (距首次疑似 ≥ intervalSec) 仍不存在, 才写 canceled + 唤醒提问者 + instance-ended。其间 pane 回来 / 有新事件 (touch) / pane id 变化 → 清疑似。
+- **(D) 防静默失效**: tmux 调用失败或返回空表 → 本轮整体跳过, failStreak++; 成功一轮清零。failStreak 到 3 打**一条** warn `{mod:"room-watchdog", failStreak, lastError}`「看门狗连续 3 轮拿不到 pane 列表, 已停摆」, 之后继续失败不再打; 恢复成功那轮打一条 recovered `{failedRounds}`。首轮失败也计数 (基线等第一次成功扫描才建立)。
+- **冷 wizard**: 只有「绑定里有 pane id 且该 id 不在列表里」才算实例结束; 没有 pane 绑定的冷 wizard 不算。先查清 hub 的 paste / injectText 对冷 wizard 是重生还是失败, 按事实处理 (重生则交给 hub; 失败则只计数进汇总行 cold), 结论写进提交说明。
+- instance-ended 正文里的计数按 room 分别算 (现在跨 room 累加)。
+
+## 3. 看门狗日志形状 (观察项 O4)
+
+每次扫描至多一行 info 汇总:
+`{mod:"room-watchdog", baseline, holders, stale, suspect, idleFixed, ended, busy, cold, failStreak, lastScanAt, busyList:[{name, uid, busyForMs, openDuties}]}`
+全零时降为 debug。去掉逐 wizard 的 warn; 「结束」事件可以保留一行 warn (罕见且是状态变化)。
+
+## 4. /status
+
+加 `openDuties` (daemon 内存里全部 room 的 openDuties 总数) 与 `watchdog: { failStreak, lastScanAt }`。现有 `pending` 是审批卡数, 不动。
+
+## 5. 投递日志 (观察项 O3)
+
+- room 镜像进企微成功: info `room: mirrored` {room, msg, lagMs = now − 行 at}。
+- hub 注入成功: info `room: delivered` {room, msg, target, lagMs}。hub 的 paste 端口现在只拿 (target, text), 需要时扩签名带上行信息。
+
+## 6. scripts/room-cutover/observe.mjs (只读)
+
+- `log --since <ISO>`: pino 日志按 level 计数 + warn 按 msg 聚合, 与 since 前 24h 对比列出新出现的 warn 文案。
+- `duties`: 读 ~/.wezard/rooms/ 用 dist/shared/room.js 的 fold 重放, 输出未结 duty 数。
+- `lag <msgId>`: 从 daemon.log 取 mirrored / delivered 两行, 打 lagMs。
+- `watchdog --since <ISO>`: 每次扫描行数最大值 / 总行数 / 各计数和 / failStreak 最大值。
+- 日志路径与 rooms 目录可用参数覆盖; 用 /tmp 夹具测一遍 (不读线上文件)。
+
+## 7. 切换 /new 标记 (index.ts ≈1306-1326)
+
+删掉无用的 origPaste 两行; injectText 因 pane 忙失败的目标不得丢 —— 保留待 /new, 等它闲 (可挂 onTurnEnd) 再做, 全部成功后才删标记。核清 `m.chatRoster("")` 是否真返回全部绑定 pane, 不是就换成正确来源。
+
+## 8. 验证报告 II 的 3 个真红
+
+1. class-migration: uid 回填让 `.pre-classes.bak` 不再是原样字节 —— **修代码** (迁移前先拿原文件字节做备份, 或回填延迟到首次显式写盘), 不许改断言。
+2. onboarding + 3. strict-new-ack: 删掉残留的 `.speech` 读点 (inbound.ts isStrictChat ≈660、channel.ts strictTopicOf ≈553 及调用点), 行为按 room 口径统一 (系统行前缀写法一处定), 对应测试按新语义改写断言。
+- 改完把 `speech` 整词加进三条 grep 的第二条复跑, 贴输出。
+
+## 9. 单测清单 (每条要能在修之前红)
+
+| # | 用例 |
+|---|---|
+| ① | 一次疑似不取消, 第二次 (≥ intervalSec) 才取消 |
+| ② | 两次之间 pane 回来 → 不取消 |
+| ③ | boot 首轮零动作 (连 onIdle 都不调), 汇总行 baseline:true |
+| ④ | 真机 fixture 解析出的 pane 数 = 文件非空行数 |
+| ⑤ | 含分隔符用例 |
+| ⑥ | 连续 5 次失败只出 1 条停摆 warn; 第 6 次成功出 1 条 recovered 且 failStreak 归零 |
+| ⑦ | 失败 2 次后成功, 零 warn |
+| ⑧ | 3 个忙 wizard 一次扫描只出 1 行日志 |
+| ⑨ | tmux 失败零结束; 冷 wizard 零结束 |
+| ⑩ | class-migration / onboarding / strict-new-ack 绿 |
+
+## 10. 验收与交付
+
+- tsc + build 绿; tests/room-*.test.ts 全绿 + ⑩ 三个绿。
+- 提交说明贴: 各单测名、fixture 来源命令与时间、冷 wizard 结论、`speech` grep 复跑输出。
+- 回执贴单测里捕获的**首轮扫描日志原文** (O4「首轮结束计数 = 0」要靠 B 保证)。
+- 终句: `.LeoAdams RESULT: <一行>` + 提交 hash 列表。
+
+## 进度 (执行者自己维护, 每完成一条打勾并提交)
+
+- [ ] 1 解析 + fixture
+- [ ] 2 安全闸 (A/B/D/冷/计数)
+- [ ] 3 日志形状
+- [ ] 4 /status
+- [ ] 5 投递日志
+- [ ] 6 observe.mjs
+- [ ] 7 /new 标记
+- [ ] 8 三个真红 + speech grep
