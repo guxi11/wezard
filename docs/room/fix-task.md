@@ -97,12 +97,12 @@ C 节删 strict-gate 时 `openSayMeter` 没移植, room 出站当前无额度。
 
 ## 进度 (执行者自己维护, 每完成一条打勾并提交)
 
-- [ ] 1 解析 + fixture
-- [ ] 2 安全闸 (A/B/D/冷/计数)
-- [ ] 3 日志形状
-- [ ] 4 /status
-- [ ] 5 投递日志
-- [ ] 6 observe.mjs
-- [ ] 7 /new 标记
-- [ ] 8 三个真红 + speech grep (+ wizard-identity-migration 同根因)
-- [ ] 8a 出站额度
+- [x] 1 解析 + fixture (65e92e6: parsePaneIds + 三处接线; fixture 2026-11-19 19:00:49 +0800, 48 pane)
+- [x] 2 安全闸 (A/B/D/冷/计数) (65e92e6: 冷 wizard = hub 重生, 只计数)
+- [x] 3 日志形状 (65e92e6: 单行汇总 + busyList, 全零降 debug)
+- [x] 4 /status (65e92e6: statusBody + roomStatus holder)
+- [x] 5 投递日志 (65e92e6: msgId 字段避 pino msg 撞名)
+- [x] 6 observe.mjs (9261433)
+- [x] 7 /new 标记 (65e92e6: 忙不丢/轮终重试/noRespawn 不风暴; chatRoster("") 核清=全部绑定)
+- [ ] 8 三个真红 + speech grep (+ wizard-identity-migration 同根因) (代码 accd38c; 测试改写在 merge room-model 后)
+- [x] 8a 出站额度 (65e92e6: room-quota + hub 闸, msgId/test 见 room-quota.test.ts)
