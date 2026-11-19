@@ -104,5 +104,5 @@ C 节删 strict-gate 时 `openSayMeter` 没移植, room 出站当前无额度。
 - [x] 5 投递日志 (65e92e6: msgId 字段避 pino msg 撞名)
 - [x] 6 observe.mjs (9261433)
 - [x] 7 /new 标记 (65e92e6: 忙不丢/轮终重试/noRespawn 不风暴; chatRoster("") 核清=全部绑定)
-- [ ] 8 三个真红 + speech grep (+ wizard-identity-migration 同根因) (代码 accd38c; 测试改写在 merge room-model 后)
+- [x] 8 三个真红 + speech grep (+ wizard-identity-migration 同根因) (代码 accd38c, 测试改写 8fa03f2; speech 整词 grep 零命中见 accd38c 提交说明)
 - [x] 8a 出站额度 (65e92e6: room-quota + hub 闸, msgId/test 见 room-quota.test.ts)
