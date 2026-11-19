@@ -19,8 +19,6 @@ import { augmentedPath } from "../shared/exec-path.js";
 import { baseOfKey, keyOf, sameBot } from "../shared/session-label.js";
 import { sleep } from "../shared/std.js";
 import { identityOf, wizardStore } from "./wizard.js";
-import { knownChatsOf } from "./chat-seen.js";
-import { chatPolicyOf } from "./chat-name.js";
 import { stewardIdentityOf } from "./steward.js";
 import { learnChannelPost } from "./channel-posts.js";
 import { expandHome } from "../shared/paths.js";
@@ -548,10 +546,6 @@ export const buildJudgePrompt = (cfg: Config, i: JudgePrompt): string => {
 
 // 出站传输补丁必须早于 installResponseTracker 安装：tracker 会把当时的
 // client.sendMessage / replyStream 抓成 orig*，晚装就绕过了频道分支。
-/** 这个频道是否 strict (chatPolicyOf 同一判定: 显式 > 首见 strict > 存量 implicit)。 */
-const strictTopicOf = (cfg: Config | undefined, topicId: string): boolean =>
-  !!cfg && chatPolicyOf(cfg, "chat:" + topicId).speech === "strict";
-
 /** base principal 是否是一个已登记的频道 (chat:<topic_id>)。 */
 export const isTopicChat = (base: string): boolean =>
   base.startsWith("chat:") && topics.has(base.slice("chat:".length));
@@ -611,8 +605,8 @@ export const installChannelTransport = (client: WSClient, log: Logger, cfg?: Con
       log.warn({ topicId, msgtype: body?.msgtype }, "channel: unsupported outbound");
       return Promise.resolve(emptyFrame());
     }
-    // P7-S3: strict 频道终句不包装成评论 —— 自动出站一律新帖 (评论留给工具面的 replyOk 选择)。
-    if (strictTopicOf(cfg, topicId)) return sendPost(topicId, content);
+    // room 口径 (fix-task §8.2): strict 频道分支已删, 自动出站统一走 replyOk 选择
+    // (被 @ 过的帖子评论, 否则新帖; 评论的主动权留给工具面)。
     const postId = lastPost.get(topicId);
     // 只有被 @ 过的帖子才能评论；未被 @ 的新帖只能主动发一条新帖。
     return postId && replyOk.get(postId) === true
@@ -627,8 +621,6 @@ export const installChannelTransport = (client: WSClient, log: Logger, cfg?: Con
     const ctx = byStream.get(streamId) ?? byStream.get(String(frame?.headers?.req_id ?? ""));
     if (!ctx) return origStream(frame, streamId, content, finish, ...rest);
     if (!finish) return Promise.resolve(emptyFrame());
-    // P7-S3: strict 频道终句不包装成评论 (验收数字②: 终句评论 0 条)。
-    if (strictTopicOf(cfg, ctx.topicId)) return sendPost(ctx.topicId, content);
     return replyOk.get(ctx.postId) === true ? sendReply(ctx, content) : sendPost(ctx.topicId, content);
   };
 };
@@ -709,8 +701,6 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
     }
     const recent = await recentPosts(client, cfg, log, topicId, cfg.wrc.channel.judge.maxPosts);
     const thread = withoutMsg((await ensureStore(cfg)?.thread(topicId, postId, 4)) ?? [], triggerId);
-    // P7-S3: strict 频道判官兼管义务 (respond=开, rewrite 句首点名=落人)。
-    const strict = strictTopicOf(cfg, topicId);
     const prompt = buildJudgePrompt(cfg, {
       topicId, postId, triggerId, msgid,
       recent: withoutMsg(recent, triggerId),
@@ -718,7 +708,6 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
       latest: text,
       latestAuthor: fromUser,
       bots: botAuthors([...recent, ...thread], selfBot),
-      ...(strict ? { strict: true, members: facts?.memberNamesOf?.("chat:" + topicId) ?? [] } : {}),
     });
     // 一次 -p 进程也串行：同一 topic 两条消息同时到不该各起一个, 判词会互相盖。
     const verdict = await serial(`judge:${topicId}`, () => askJudge({ cfg, log }, prompt));
@@ -754,8 +743,6 @@ export const installChannelEvents = (client: WSClient, cfg: Config, log: Logger,
     const recvAt = Date.now();
     if (!topicId) return;
     registerTopic(topicId);
-    // P7-S3: 频道也是聊天 (chat:<topic_id>) —— 首见登记, S3 后新开的频道默认 strict。
-    try { knownChatsOf(cfg).record("chat:" + topicId); } catch { /* 登记失败不挡频道事件 */ }
     if (asker) lastAsker.set(topicId, asker);
     // 第一次见到的频道从官方补最近 N 条 (reload / 断线空窗期的事件本地没有)。
     void backfill(client, cfg, log, topicId).catch((e: Error) => log.warn({ err: e.message, topicId }, "channel backfill failed"));

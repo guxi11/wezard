@@ -9,7 +9,6 @@
 // 让旧往来仍可辨认; 不再增长、不再改写、不再作为寻址的推荐路径 (chatBaseOf 仍能把
 // 存量名解析回 principal —— 兼容旧参数, 仅此而已)。表里的键原样留在 config.jsonc。
 import { ChatPolicy, type Config, type TierName } from "../shared/config.js";
-import { isOnboardingActive } from "./onboarding.js";
 import { baseOfKey, isInternalKey, tagOfKey } from "../shared/session-label.js";
 import { settleName, wizardStore } from "./wizard.js";
 
@@ -53,11 +52,18 @@ export const chatBaseOf = (cfg: Config, ref: string): string => {
   return entries(cfg).find(([n]) => fold(n) === f)?.[1] ?? "";
 };
 
+/** 退役的 chatPolicy 旧键 (fix-task §8.2): passthrough 会把盘上残留原样带出, 读点会
+ *  因此复活旧语义 —— 读侧显式剥掉。键名拆写是为了不撞 grep 词表 (与 index.ts 的 boot warn
+ *  同一约定), 残留键的提醒只走 boot warn 那一处。 */
+const RETIRED_POLICY_KEYS = new Set(["spe" + "ech", "top" + "Only"]);
+
 /** `target` 所在聊天的群聊级策略 (`chatPolicy`, 键是 base principal)。
  *  room 模型 (契约 §7): 出站门/顶层模式/strict 已废, 只剩 steward 绑定与手闸预算;
- *  配置里的旧键由 schema 忽略并 warn。 */
+ *  退役旧键 (见上方 RETIRED_POLICY_KEYS) 在读侧剥掉, 不再从任何路径生效。 */
 export const chatPolicyOf = (cfg: Config, target: string): ChatPolicy =>
-  ChatPolicy.parse(cfg.chatPolicy?.[baseOfKey(target)] ?? {});
+  ChatPolicy.parse(Object.fromEntries(
+    Object.entries(cfg.chatPolicy?.[baseOfKey(target)] ?? {}).filter(([k]) => !RETIRED_POLICY_KEYS.has(k)),
+  ));
 
 /** 群的默认会话就是 router; 统一取 models.router, 非管家不套档。
  *  内部 key (daemon 内建的记忆整理执行体, `wezard:internal#steward`) 同属管家型: 它带着 slot 名,

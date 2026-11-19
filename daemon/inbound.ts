@@ -656,9 +656,6 @@ export const installInboundRouter = (
   const replySystem = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, text: string): Promise<void> => {
     try { await client.replyStream(frame, msg.msgid, text, true); } catch { /* ignore */ }
   };
-  /** 严格群 (chatPolicy.<chat>.speech = strict): 模型发言不出站, 出站门放行系统行。 */
-  const isStrictChat = (who: string): boolean => chatPolicyOf(cfg, baseOfKey(who)).speech === "strict";
-
   // Common gating: claim bootstrap + allowFrom check. Returns true if the
   // caller should stop (claim consumed or message rejected).
   const gate = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, text: string, who: string, asked = ""): Promise<{ stop: boolean }> => {
@@ -838,11 +835,9 @@ export const installInboundRouter = (
         await replyText(frame, msg, who, err);
         return { stop: true };
       }
-      // 严格群的会话边界确认: mirror 侧那条 (pushProjectInfo) 在严格群是静音 —— 它走的是
-      // 模型发言的 standalone 路, 被出站门连系统行以外的内容一起挡住。但「已重开会话」是
-      // daemon 自己的确认, 不是模型发言, 漏了它人只会以为 /new 坏了。这里补一条带
-      // `[wezard]` 的系统行 (implicit 群仍由 mirror 发, 不重复)。
-      if (isStrictChat(who)) await replySystem(frame, msg, createdAck(who, true));
+      // room 口径 (fix-task §8.3): /new 的会话边界确认只有一种形态, 由 mirror 的
+      // pushProjectInfo 发 (createdAck, 不带系统前缀); daemon 这里不再补发 —— 出站门
+      // 已废, 老的「严格群被静音要补一条」的前提不存在了。
       // 带正文的 `/new`: 这段就是新会话的第一句。走和「隐式建会话后 fall through」
       // 完全相同的 dispatch 路径 —— freshSpawn 的冷时序、peer 提示都在那里。
       if (nu.prompt) await send(frame, msg, who, nu.prompt);

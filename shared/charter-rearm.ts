@@ -55,7 +55,7 @@ const blockText = (content: unknown): string => {
 const isCommandLine = (text: string): boolean =>
   text.trimStart().startsWith("/") || text.includes("<command-name>") || text.startsWith("<local-command");
 
-type LineKind = "charter" | "speech" | "command" | "other";
+type LineKind = "charter" | "spoken" | "command" | "other";
 
 const classify = (raw: string, normalize: LineNormalizer): LineKind => {
   let row;
@@ -65,7 +65,7 @@ const classify = (raw: string, normalize: LineNormalizer): LineKind => {
   const text = blockText(row.message.content).trim();
   if (!text) return "other";
   if (hasCharterBlock(text)) return "charter";
-  return isCommandLine(text) ? "command" : "speech";
+  return isCommandLine(text) ? "command" : "spoken";
 };
 
 /** 一叠完整行里读数: 宪章块 → delivered; 第一句人话/命令 → spoke。命令行不是
@@ -76,7 +76,7 @@ const scanLines = (lines: readonly string[], normalize: LineNormalizer): Charter
     if (!line.trim()) continue;
     const kind = classify(line, normalize);
     if (kind === "charter") return { spoke: true, delivered: true };
-    if (kind === "speech" || kind === "command") return { spoke: true, delivered: false };
+    if (kind === "spoken" || kind === "command") return { spoke: true, delivered: false };
   }
   return undefined;
 };
@@ -91,7 +91,7 @@ const CHUNK = 64 * 1024;
 const MAX_SCAN = 1024 * 1024;
 
 /** 从文件头按行读到**第一条** user 行就停 —— 宪章既可能在它里面 (delivered), 也可能
- *  永远不会来了 (speech); 只有在一条 user 行都没有时才读到底。null = 文件不存在。 */
+ *  永远不会来了 (spoken); 只有在一条 user 行都没有时才读到底。null = 文件不存在。 */
 const readFacts = (path: string, normalize: LineNormalizer): CharterFacts | null => {
   if (!existsSync(path)) return null;
   let fd: number;

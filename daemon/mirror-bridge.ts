@@ -5933,7 +5933,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         if (baseRec?.pendingCwd) deps.store.set(base, { ...baseRec, pendingCwd: undefined });
       }
     }
-    if (!opts?.silent) pushProjectInfo(target, createdAck(target, false));
+    if (!opts?.silent) pushProjectInfo(target, createdAck(target));
     afterSpawn();
     return { ok: true, sessionId: r.sessionId, cwd: r.cwd, model: r.model, modelWarning: r.modelWarning, effort: r.effort };
   };
@@ -8319,8 +8319,8 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // and surface a standalone "cleared" so the user gets explicit
         // feedback (the skip-stream path otherwise leaves WeCom silent).
         if (armMigration) {
-          // 严格群: 这条确认也是 daemon 的系统回执, 不是模型发言 —— 前缀让它落进
-          // sendStandalone 的 [wezard]/[mirror] 白名单 (否则出站门一起吞掉)。
+          // room 口径: 出站门已废, 确认就是一条普通 standalone (裸 "cleared"),
+          // 不再加 [wezard] 前缀 —— 系统行前缀的写法只留 daemon 系统行那一处。
           sendStandalone(a, "cleared");
           a.clearRebind = { baseline: preClearBaseline! };
           startMigrationWatcher(a, preClearBaseline!, jsonlIsPostClearChild, 0, true);

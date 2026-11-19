@@ -242,9 +242,12 @@ export const openInstance = (
 // 记录上没有 ordinal, byName 也不会把类名解析成实例 —— 接线 (boot) 是下一阶段的事。
 export const loadWizardStore = (filePath: string, bornOf: BornOf = () => undefined, classes?: ClassStore): WizardStore => {
   const db = loadJsonMap<WizardRecord>(filePath, undefined, { strict: true });
-  // uid 回填必须是 load 后的第一件事: 之后的 bornAt 回填 (settleAll) 会改 bornAt, 而存量 uid
-  // 由 load 那一刻的 (target, bornAt) 决定 —— 迁移脚本读同一份文件算出同一个值。
-  for (const rec of Object.values(db.all())) if (!isUid(rec.uid)) db.set(rec.target, { ...rec, uid: uidOf(rec) });
+  // uid 回填 (契约 §1): 只补内存对象 —— db.all() 返回的 value 是活引用, 就地写 uid 不触发
+  // 写穿。盘上的 uid 等第一次真实写盘 (upsert) 才落: load 一进来就 db.set 会把 wizards.json
+  // 整个重写, 弄脏 class / identity 迁移的「原样字节」备份 (fix-task §8.1)。uidOf 是确定性的,
+  // 迁移脚本与 daemon 永远算出同一个值, 推迟落盘不改变语义。仍须是 load 后第一件事:
+  // 之后 settleAll 改 bornAt 的话, 存量 uid 就由错误的 (target, bornAt) 决定了。
+  for (const rec of Object.values(db.all())) if (!isUid(rec.uid)) rec.uid = uidOf(rec);
   const nextAutoName = loadAutoNames(`${filePath}.names.json`);
   // drop 过的 target: claim 只推名字、不落盘, 直到有人明确 upsert (重新 spawn) 它。
   // 收工播报、rolepage、回执日志这些只读路径都会问一句名字 —— 不拦的话 forget 之后
