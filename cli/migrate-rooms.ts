@@ -160,6 +160,9 @@ const flagValue = (argv: readonly string[], name: string): string | undefined =>
 };
 
 export const main = (argv: readonly string[] = process.argv.slice(2)): void => {
+  // 只认 --dry-run / --home <dir>; 其余参数 (含 --help) 一律拒, 免得误敲一个参数就真写账本。
+  const bad = argv.filter((a, i) => a !== "--dry-run" && a !== "--home" && argv[i - 1] !== "--home");
+  if (bad.length) throw new Error("不认识的参数 " + bad.join(" ") + " —— 用法: migrate-rooms [--dry-run] [--home <dir>] (不带 --dry-run 会真写 ~/.wezard/rooms)");
   const home = expandHome(flagValue(argv, "--home") ?? "~/.wezard");
   const dryRun = argv.includes("--dry-run");
   const out = runMigrate({ home, dryRun });
