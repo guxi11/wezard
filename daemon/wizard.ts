@@ -12,7 +12,8 @@
 //
 // 本模块只有两类东西: 一个写盘的注册表 (唯一副作用), 和一堆把记录渲染成文字的
 // 纯函数。真正的动作 (spawn / inject / kill) 全在 mirror-bridge, 这里一个都不做。
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
+import { isUid, mintUid, uidOf } from "../shared/room.js";
 import { copyFileSync, existsSync, statSync } from "node:fs";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { expandHome } from "../shared/paths.js";
@@ -58,6 +59,10 @@ export const manifestationOf = (store: WizardStore | undefined, name: string, ba
 };
 
 export interface WizardRecord {
+  /** 实例的稳定身份 id (`w` + 12 hex, 不含名字): room 账本里一切 wizard 引用都用它 (契约 §1)。
+   *  新记录随机铸; 存量按 uidOf(target, bornAt) 在 load 时现算一次并落盘, 之后只读 —— 改名 / 交接 /
+   *  /new / bornAt 回填都不动它。 */
+  uid?: string;
   /** 会话 key: `chat:xxx` 或 `chat:xxx#tag`。v3 起它是「身份在该聊天的化身」的坐标,
    *  不再是身份本身 —— 身份看 `identity`; 路由/回执/账本仍只认这个字符串。 */
   target: string;
@@ -110,6 +115,8 @@ export interface WizardStore {
   /** Consume the next automatic name (never reused), skipping globally occupied strings and `inUse`. */
   nextName: (inUse?: (name: string) => boolean) => string;
   get: (target: string) => WizardRecord | undefined;
+  /** uid → 记录 (room 账本里的 wizard 引用 → 现在的 target / 名字)。 */
+  byUid: (uid: string) => WizardRecord | undefined;
   /** 名字 → 身份的锚点记录 (大小写不敏感; `fix` / `🧙‍♂️ fix` 都认)。名字是身份的地址:
    *  同身份的多个化身折叠到锚点 (target === identity 那条), 不与碰到的顺序相关。 */
   byName: (name: string) => WizardRecord | undefined;
@@ -235,6 +242,9 @@ export const openInstance = (
 // 记录上没有 ordinal, byName 也不会把类名解析成实例 —— 接线 (boot) 是下一阶段的事。
 export const loadWizardStore = (filePath: string, bornOf: BornOf = () => undefined, classes?: ClassStore): WizardStore => {
   const db = loadJsonMap<WizardRecord>(filePath, undefined, { strict: true });
+  // uid 回填必须是 load 后的第一件事: 之后的 bornAt 回填 (settleAll) 会改 bornAt, 而存量 uid
+  // 由 load 那一刻的 (target, bornAt) 决定 —— 迁移脚本读同一份文件算出同一个值。
+  for (const rec of Object.values(db.all())) if (!isUid(rec.uid)) db.set(rec.target, { ...rec, uid: uidOf(rec) });
   const nextAutoName = loadAutoNames(`${filePath}.names.json`);
   // drop 过的 target: claim 只推名字、不落盘, 直到有人明确 upsert (重新 spawn) 它。
   // 收工播报、rolepage、回执日志这些只读路径都会问一句名字 —— 不拦的话 forget 之后
@@ -254,8 +264,11 @@ export const loadWizardStore = (filePath: string, bornOf: BornOf = () => undefin
   };
   const upsert = (t: string, patch: Partial<Omit<WizardRecord, "target">>): WizardRecord => {
     dropped.delete(t);
-    const base = db.get(t) ?? blank(t, bornOf(t) ?? Date.now());
+    const prev = db.get(t);
+    const base = prev ?? blank(t, bornOf(t) ?? Date.now());
     const next: WizardRecord = { ...base, ...patch, target: t };
+    // uid 只读: 已有的永远保留; 新实例随机铸 (同 target 被 drop 后重生 = 新实例, 新 uid)。
+    next.uid = isUid(prev?.uid) ? prev.uid : prev ? uidOf(prev) : mintUid(randomBytes(6).toString("hex"));
     // 身份字段的兜底归一: 老盘上没迁移过的记录无论从哪条路写盘, 落下去的都是已迁移形态
     // (与 migrateIdentities 同一组值 —— 两条路径殊途同归, 这是幂等的另一半)。
     next.identity = next.identity || t;
@@ -322,6 +335,7 @@ export const loadWizardStore = (filePath: string, bornOf: BornOf = () => undefin
       return nextAutoName((name) => taken.has(foldName(name)) || inClassSpace(name, reserved) || inUse(name));
     },
     get: db.get,
+    byUid: (uid) => (isUid(uid) ? Object.values(db.all()).find((w) => w.uid === uid) : undefined),
     // 名字 → 身份 → 那个身份的锚点记录 (target === identity 的那条; 1:1 迁移后每身份恰有一条)。
     // 命中多个化身时挑锚点而非碰到的第一条 —— 调用方拿到的 target 恒定可复现; 挑「当前聊天的化身」
     // 是 resolveName (§2 切片二) 的事, 这里只保证名字回到一个稳定的身份入口。
