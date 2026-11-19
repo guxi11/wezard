@@ -14,9 +14,7 @@ import {
   referencedTargets,
   type WizardStore,
 } from "../daemon/wizard.js";
-import { allRows, foldJournal, ops } from "../daemon/router.js";
-import { gcEvents } from "../daemon/message-events.js";
-import { NO_DEADLINE } from "../shared/turn-state.js";
+import { foldLegacyRoutes } from "../shared/legacy-routes.js";
 
 const ROOT = mkdtempSync(join(tmpdir(), "wiz-ident-"));
 const scratch = (name: string): string => { const d = join(ROOT, name); mkdirSync(d, { recursive: true }); return d; };
@@ -205,12 +203,12 @@ const bytes = (f: string): string => readFileSync(f, "utf8");
   migrateIdentities(store, file);
 
   // 旧 routes.jsonl 的行: owner/receiver 都是 v2 的 target 字符串 (含真实 deadline 的老形态)。
+  // 日志已冻结 (room 模型), 唯一读侧是迁移用的只读折叠。
   const journal = [
-    ops.open({ event: "eaa1122334", owner: "chat:wrGROUPA#fix", receiver: { kind: "chat", channel: "chat:wrGROUPB", message: "m1" }, deadlineAt: 9999999999999, at: 1 }),
-    ops.open({ event: "eaa1122335", owner: "chat:wrGROUPB", receiver: { kind: "wizard", to: "chat:wrGROUPA#fix" }, deadlineAt: NO_DEADLINE, at: 2 }),
+    { op: "open", event: "eaa1122334", owner: "chat:wrGROUPA#fix", receiver: { kind: "chat", channel: "chat:wrGROUPB", message: "m1" }, deadlineAt: 9999999999999, at: 1 },
+    { op: "open", event: "eaa1122335", owner: "chat:wrGROUPB", receiver: { kind: "wizard", to: "chat:wrGROUPA#fix" }, deadlineAt: 9999999999999, at: 2 },
   ].map((op) => JSON.stringify(op)).join("\n");
-  const { table } = foldJournal(journal);
-  const rows = allRows(table);
+  const rows = foldLegacyRoutes(journal);
   assert.equal(rows.length, 2);
   for (const r of rows) {
     const w = store.get(r.owner);
@@ -218,20 +216,15 @@ const bytes = (f: string): string => readFileSync(f, "utf8");
     // 迁移后的读取兼容: 旧账的 owner 字符串本身就是身份 id (1:1), 归并不需要改写任何一行。
     assert.equal(identityOf(w), r.owner);
   }
-  // 旧 message-events 行照常过 boot 的 gc 读取路径, 不炸。
-  const events = gcEvents(1800000000000)({
-    "habc0000000000001": {
-      id: "habc0000000000001", target: "chat:wrGROUPB#regress", speaker: "human", channel: "chat:wrGROUPB",
-      priority: "normal", deadline: NO_DEADLINE, payload: { text: "跑一下回归" },
-      fingerprint: "f1", at: 1700000100000, execution: "complete", exposure: "consumed", attempts: 1, endedAt: 1700000200000,
-    },
-  });
-  assert.equal(Object.keys(events).length, 1);
+  // message-events.json 已冻结, 运行时没有读侧; 这里只留「旧行里的 target 仍能在迁移后的
+  // 名册里解析」这一条 (真正的导入在 shared/room-migrate.ts, 见 tests/room-migrate.test.ts)。
+  const legacyEventTarget = "chat:wrGROUPB#regress";
+  assert.ok(store.get(legacyEventTarget), "旧 message-events 行的 target 在迁移后的名册里仍解析");
 
   // 对账入口 (referencedTargets) 拿到的旧 target 全部落进已迁移名册。
   const refs = referencedTargets({
     routes: rows.map((r) => ({ owner: r.owner, receiver: r.receiver })),
-    events: ["chat:wrGROUPB#regress"],
+    events: [legacyEventTarget],
     tasks: [],
     plans: [],
     live: store.all().map((w) => w.target),
