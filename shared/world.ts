@@ -1,34 +1,29 @@
-// 世界视图 —— 把「谁存在、谁是谁生的、谁在驱动谁、谁有哪些计划」折成一张图。
+// 世界视图 —— 把「谁存在、谁是谁生的、谁在哪些 room 里、谁有哪些计划」折成一张图。
 //
-// chat-view 回答的是**一个聊天内部**的问题 (这个 chat 有哪些 `#tag`、某一路的
-// 线程长什么样)。但 wizard 早就不止活在一个聊天里了: 分身可以生在别的群、
-// send_peer 跨群寻址、计划属于 wizard、定时任务指向任意一个 target。
-// 那些关系在 chat-view 里一条都画不出来 —— 它的第一步就是 `baseOfKey === base`。
-//
-// 本模块因此换一个折叠轴: 不按聊天切, 按**关系**切。
-//
-//   节点 = wizard (会话 + 身份), 按所属聊天聚簇
-//   边   = clone (家谱) / peer (派活); 定时是节点上的计数
+// room 模型之后, 图的骨架换了: **room 节点 ↔ 参与者节点** (二部图)。谁和谁说过话不再从
+// transcript 里推断 (那是 role-view 老消息重建的活), 而是 room 账本里一行 join 就写明了的
+// 事实。家谱 (谁生的谁) 仍是注册表给的另一层, 前端当可切换的图层画。
 //
 // 两类数据源, 边界明确:
-//   • 观测到的 (turn 记录): peer 边与定时计数 —— 真发生过的往来。24h TTL,
-//     标准 detail 存储, 所以独立 svr 收到 POST 之后画出来的图与本机一模一样。
-//   • 登记的 (wizard / plan / schedule 注册表): 身份、家谱、计划、日程 —— 它们是
-//     「安排」, 不随 TTL 消失, 但只有 daemon 有。svr 拿不到就退化成只画观测边。
+//   • room 账本 (daemon 现扫, 独立 svr 用快照): 每个 room 的成员 / host / 最后一句 / 未决数。
+//   • 登记与轮次 (wizard / plan / schedule 注册表 + turn 记录): 身份、家谱、计划、日程、用量。
 //
 // 纯函数, 无 IO: 注册表侧的东西由调用方以 WorldFacts 喂进来。
 import { baseOfKey, labelFor, stripSigil, tagOfKey } from "./session-label.js";
 import { ctxNow, isTurn, staleAt, isGhostTurn } from "./chat-view.js";
 import { stripReminders } from "./reminder.js";
 import type { CharterLineage, CharterRecord, DetailRecord, TurnDetailRecord, TurnItem } from "./detail-store.js";
-import { allMessages, injectTurnsOf, senderOf } from "./role-view.js";
 import type { TurnState } from "./turn-state.js";
 import type { PlanRecord } from "./plan.js";
+import type { RoomFact } from "./room-view.js";
 
 // ── 注册表侧 (daemon 独有) ────────────────────────────────────────────
 /** 一个 wizard 的登记信息 + 此刻的活体状态。daemon 从 wizard.json + tmux 取。 */
 export interface WorldFactWizard {
   target: string;
+  /** 实例的稳定身份 id (shared/room.ts uidOf): room 账本里一切引用都用它, 改名不变。
+   *  老 daemon 的快照没有 —— 那时 room 也还不存在。 */
+  uid?: string;
   /** 身份 id (P7 ⑦): 同身份多化身在 rolepage 聚成一页; 老 daemon 的快照没有 → 各化身各一页。 */
   identity?: string;
   /** withData 补的占位: 已停且无记录, 只为挂住还在的后代。 */
@@ -45,18 +40,16 @@ export interface WorldFactWizard {
   busy: boolean;
   /** tmux pane 还在 —— false = 冷的, 要说话得先把它拉起来。 */
   alive: boolean;
-  /** 停在哪些工具调用上等人点 (daemon 发出的审批卡 / 提问卡, 即还挂着的 pending) 的工具名; 缺省 = 没在等。 */
+  /** 停在哪些工具调用上等人点 (审批卡 / 提问卡) 的工具名; 缺省 = 没在等。 */
   waiting?: string[];
   /** 谁生的它 —— 分身与子 wizard 都有; 两者靠 clonedFrom 区分。 */
   parent?: string;
-  /** fork 自父亲的哪个 sessionId; 有值 = 分身 (从那个 session 节点 clone, 开局带着
-   *  父亲的上下文), 空 = 子 wizard (父亲 spawn 的白板)。 */
+  /** fork 自父亲的哪个 sessionId; 有值 = 分身 (开局带着父亲的上下文), 空 = 父亲 spawn 的白板。 */
   clonedFrom?: string;
   /** 被克隆的那个 wizard —— 只在它不是 parent 时才有 (parent 克隆了别人)。 */
   forkOf?: string;
   bornAt?: number;
-  /** 类实例的序号 (daemon/wizard.ts WizardRecord.ordinal): 有它 = 名字是 `<类名>-<序号>`。
-   *  老 daemon 快照没有 → rolepage 不标类。 */
+  /** 类实例的序号 (daemon/wizard.ts WizardRecord.ordinal); 有它 = 名字是 <类名>-<序号>。 */
   ordinal?: number;
   /** 它是所在聊天此刻的管家实例 (daemon/steward.ts isStewardTarget)。老 daemon 快照没有。 */
   steward?: boolean;
@@ -66,12 +59,8 @@ export interface WorldFactWizard {
   summary: string;
 }
 
-/** 严格群成员表 (daemon/members.ts) 的一行, 键 (chat, target): 一个实例以什么方式在这个
- *  聊天里在场。行里的 target 可能属于别的群 —— 那是「加入」进来的实例。 */
-export interface WorldFactMemberRow { chat: string; target: string; mode: string; since: number; by: string }
-
 /** 类表 (daemon/classes.ts) 的一行: <bot, role, workspace> 唯一的人物设定。
- *  实例名是 `<name>-<ordinal>`; rolepage 只用 name 标「所属类」。老 daemon 快照没有。 */
+ *  实例名是 <name>-<ordinal>; rolepage 只用 name 标「所属类」。老 daemon 快照没有。 */
 export interface WorldFactClass { id: string; name: string; role: string; workspace: string }
 
 export interface WorldFactSchedule {
@@ -85,8 +74,7 @@ export interface WorldFactSchedule {
   prompt: string;
   note: string;
   createdBy: string;
-  /** 这条日程归谁 —— 排班那个 wizard 的 target。rolepage 的「日程」按它过滤:
-   *  日程跟着 wizard 走, 不跟着它执行时落在哪个聊天走。老 svr 推来的快照可能没有。 */
+  /** 这条日程归谁 —— 排班那个 wizard 的 target。rolepage 的「日程」按它过滤。 */
   owner: string;
   /** 每次新起白板 wizard 去跑 (跑完回收); false = 注入 target 那个已有会话。 */
   fresh?: boolean;
@@ -100,26 +88,12 @@ export interface WorldFactSchedule {
   file?: string;
 }
 
-/** 一件在飞的活 (见 turn-state.ts): `from` 派给 `to`、还没落定。`at` = 派出的时刻, 多久了由读的一方现算。 */
+/** 一件在飞的活 (见 turn-state.ts): from 派给 to、还没落定。at = 派出的时刻。 */
 export interface WorldFactInFlight { from: string; to: string; turn: string; state: TurnState; at: number }
 
 /** 一个微信通道的此刻: 掉没掉线、人最近何时开口、压着几条没发、这份 context_token 还能发几条、频控暂停到何时 (0 = 没停)。 */
 export interface WorldFactWeixin { base: string; state: "live" | "expired"; lastInAt: number; held: number; budget: number; pausedUntil: number }
 
-/** P7-S3 严格群治理面板 (rolepage): 一个 strict 聊天的成员/游标/欠账快照。 */
-export interface WorldFactGovernance {
-  /** base principal。 */
-  chat: string;
-  members: ReadonlyArray<{
-    name: string;
-    mode: string;
-    /** 已消费到的聊天记录 seq。 */
-    cursor: number;
-    owed: number;
-    passed: number;
-    overdue: number;
-  }>;
-}
 export interface WorldFacts {
   wizards: readonly WorldFactWizard[];
   plans: readonly PlanRecord[];
@@ -128,20 +102,17 @@ export interface WorldFacts {
   schedules: readonly WorldFactSchedule[];
   /** base → 聊天名; 没起名的不在表里。 */
   chatNames: Readonly<Record<string, string>>;
-  /** human id (`human:x`) → 显示名; 不在表里的显示裸 id。老 daemon 推来的快照没有。 */
+  /** human id (human:x) → 显示名; 不在表里的显示裸 id。老 daemon 推来的快照没有。 */
   humanNames?: Readonly<Record<string, string>>;
-  /** 微信 ClawBot 通道的账号状态, 每个绑定的微信用户一个群 (`chat:wx_…`)。老 daemon 推来的快照没有。 */
+  /** 微信 ClawBot 通道的账号状态, 每个绑定的微信用户一个群 (chat:wx_…)。 */
   weixin?: readonly WorldFactWeixin[];
-  /** P7-S3 严格群的治理面板 (members.json + 路由行 + 义务观测); 老 daemon 快照没有。 */
-  governance?: readonly WorldFactGovernance[];
-  /** P7-S3b 生效 strict 的聊天 (base principal) —— rolepage 群窗按账本口径渲染 (turn
-   *  出气泡压掉, 实发内容走 post 记录); 老 daemon 快照没有 = 一切照旧。 */
-  strictChats?: readonly string[];
-  /** 严格群成员表的全量投影 (所有聊天) —— rolepage 的群成员列表按 chat 取它。
-   *  老 daemon 快照没有 = 只剩名册推出来的本群实例。 */
-  memberRows?: readonly WorldFactMemberRow[];
   /** 类表 —— 群成员列表用它标出实例所属的类。老 daemon 快照没有 = 只画名字。 */
   classes?: readonly WorldFactClass[];
+  /** room 账本的快照 (daemon 现扫, svr 随快照带): 关系图与 room 视图的唯一来源。
+   *  老 daemon 没有 = 只有轮次视图, 图退化成家谱。 */
+  rooms?: readonly RoomFact[];
+  /** 名字表: who.id → 显示名 (wizard 是 uid, 人是 userid)。room 成员只有 id, 名字走这里。 */
+  names?: Readonly<Record<string, string>>;
   /** 这份不是注册表给的, 是「没拿到」的占位 —— 显式信号: 空名册 ≠ 注册表不可达。 */
   absent?: true;
 }
@@ -150,31 +121,35 @@ export const EMPTY_FACTS: WorldFacts = { wizards: [], plans: [], schedules: [], 
 
 // ── 视图模型 ──────────────────────────────────────────────────────────
 export interface WorldNode {
+  /** wizard = target key; 人 = human:<userid>; 只在 room 里出现过、注册表没有的 wizard = uid:<uid>。 */
   target: string;
+  /** 节点种类 —— 二部图的另一侧只连 room, 人 / wizard 的装饰不同。 */
+  kind: "wizard" | "human";
+  /** wizard 的实例 uid (room 成员引用它); 人没有。 */
+  uid?: string;
   base: string;
   tag: string;
   chat: string;
-  /** 全局名字 (`.name` 去掉点): 登记的名字 > slot id > 聊天名 > target。 */
+  /** 全局名字 (不带点): 登记的名字 > slot id > 聊天名 > target。 */
   name: string;
   label: string;
   description: string;
   cwd: string;
   model: string;
-  /** 此刻的上下文占用量, 口径同用量条的 ctx (最近一次主会话调用送入的 input + 缓存);
-   *  0 = 没有带 usage 的轮次记录 (没跑过 / 老记录)。 */
+  /** 此刻的上下文占用量, 口径同用量条的 ctx。0 = 没有带 usage 的轮次记录。 */
   ctx: number;
   cli: string;
   busy: boolean;
   alive: boolean;
   /** 同 WorldFactWizard.waiting。 */
   waiting?: string[];
-  /** 注册表里有登记 —— false = 只在 turn 记录里出现过的会话 (svr 视角下的全部)。 */
+  /** 注册表里有登记 —— false = 只在 room / 轮次里出现过的会话。 */
   known: boolean;
-  /** 占位: 已停且无记录的 wizard, 只为把还在的后代挂回它名下 (灰色)。 */
+  /** 占位: 已停且无记录, 只为把还在的后代挂回它名下 (灰色)。 */
   ghost?: boolean;
   /** 这是打开本页那条链接所属的会话。 */
   self: boolean;
-  /** 与 self 同一个聊天 (卡片布局里本群那张卡片的锚点)。 */
+  /** 与 self 同一个聊天 (本群在图上高亮)。 */
   local: boolean;
   parent?: string;
   inherited: boolean;
@@ -184,88 +159,54 @@ export interface WorldNode {
   turns: number;
   /** 一行近况: 最近一轮的正文 > 注册表 summary。 */
   preview: string;
-  /** 无新写入时到这个时刻自动算结束; 0 = 已停。客户端自己熄灯 (同 TagSummary)。 */
+  /** 无新写入时到这个时刻自动算结束; 0 = 已停。 */
   runningUntil: number;
-  /** 被定时任务叫醒过几轮 —— 定时没有"派活的一方", 所以它是节点上的计数而不是边。 */
+  /** 被定时任务叫醒过几轮。 */
   taskTurns: number;
-  /** 被同伴派活开出的轮数 (含跨聊天)。 */
+  /** 被同伴派活开出的轮数 (room 模型里这是账本上的事实, 图改用 room 成员线)。 */
   peerTurns: number;
-  /** 与它有关系 (任一种边) 的全部 role —— 在节点按卡片上限裁剪之前算, 所以连到没下发节点的关系也在。
-   *  关系图卡片名字旁的「+N」由前端拿它减去图上已连的。 */
+  /** 与它有关系 (同 room 或家谱) 的全部节点 id。 */
   rels?: string[];
 }
 
 /** 家谱三种, 都画在「生它、归它管」或「上下文从它来」的那一位下:
  *  clone = 分身 (parent 生的, 开局 fork 了上下文); spawn = 新生 (parent 生的白板);
- *  fork = 分身的上下文来源 —— 只在克隆的是别人 (forkOf ≠ parent) 时另画这一条。 */
-export type WorldEdgeKind = "clone" | "spawn" | "fork" | "peer";
+ *  fork = 分身的上下文来源 —— 只在克隆的是别人 (forkOf ≠ parent) 时另画这一条。
+ *  room 归属不在这里 —— 二部图的边由 room 成员直接画, 不需要再序列化一份。 */
+export type WorldEdgeKind = "clone" | "spawn" | "fork";
 
 export interface WorldEdge {
   kind: WorldEdgeKind;
   from: string;
   to: string;
-  /** 观测到多少次 (家谱恒为 1 —— 不是流量)。 */
+  /** 家谱恒为 1 —— 不是流量。 */
   count: number;
   lastTs: number;
-  /** 跨聊天的边 —— 画图时单独着重, 它才是"关联起来了"的证据。 */
-  cross: boolean;
-  /** 每一次发生的时刻 (最近 EDGE_TS_MAX 次) —— 前端按选中 session 的时间范围重新计数。 */
-  ts: number[];
-  /** clone 边: 分身在 origin 会话里分叉的那一处 (clone 徽标点了落到这里)。 */
+  /** clone 边: 分身在 origin 会话里分叉的那一处。 */
   point?: ClonePoint;
 }
 
-/** origin = 被克隆的那一方 (parent, 克隆的是别人时是 forkOf)。`id` = rolepage 的消息 id;
- *  `use` = origin 调 clone_wizard 的那次 tool_use —— 认不出调用、落到出生前那一句时没有。
- *  origin 在记录里一轮都没有 = 只有 origin 与 ts, 前端开它的往来不定位。 */
+/** origin = 被克隆的那一方 (parent, 克隆的是别人时是 forkOf)。id = rolepage 的消息 id;
+ *  use = origin 调 clone_wizard 的那次 tool_use —— 认不出调用、落到出生前那一句时没有。 */
 export interface ClonePoint { origin: string; id?: string; use?: string; ts: number }
-
-const EDGE_TS_MAX = 200;
-
-export interface WorldChat {
-  base: string;
-  name: string;
-  self: boolean;
-  /** 那个聊天既有的票据 (`/role?id=`)。由路由层从 store 里取; 取不到 = 这个群还
-   *  没有任何记录。rolepage 下任一票据都能看任一 role, 它只是一个落点更近的链接。 */
-  token?: string;
-  /** 本聊天的 wizard target, 已按家谱序 (父在前, 分身紧随其后并带缩进深度)。 */
-  members: Array<{ target: string; depth: number }>;
-  /** 被相关性筛掉的成员数 —— 页面上写成「另有 N 个已停的会话」, 免得看图的人
-   *  以为这个群就这么几个人。 */
-  hidden: number;
-}
 
 export interface WorldView {
   at: number;
   /** 打开本页的那个聊天。 */
   base: string;
   self: string;
-  chats: WorldChat[];
+  /** room 账本快照 (最近的在前)。 */
+  rooms: RoomFact[];
+  /** uid → target: 前端拿它把 room 成员 id 对到节点上。 */
+  uidTargets: Record<string, string>;
   nodes: WorldNode[];
+  /** 家谱图层 (可切换)。 */
   edges: WorldEdge[];
   plans: PlanRecord[];
   schedules: WorldFactSchedule[];
-  /** 注册表缺席 (svr 独立部署) —— 前端据此说明"只画观测到的往来"。 */
+  /** 注册表缺席 (svr 独立部署) —— 前端据此说明「只画观测到的往来」。 */
   degraded: boolean;
 }
-
-// ── 相关性 ────────────────────────────────────────────────────────────
-// 一台跑了几个月的机器上, "所有绑过的会话"是几百个 —— 它们绝大多数是几周前
-// 干完一件事就再没动过的 `#tag`。把它们全画出来不是"完整", 是把图变成一堵墙:
-// 真正在协作的那十几个 wizard 淹没在里面, 而那恰恰是这张图存在的理由。
-//
-// 所以画的是**当下的协作网络**, 判据四条, 满足其一即入选:
-//   1. 在当前聊天里 —— 这一页的主题就是它, 不筛
-//   2. 是某条边的端点 —— 关系是图的主语, 有关系就必须在场 (哪怕它已经凉了)
-//   3. 还活着 / 正在跑 —— 此刻能叫得动的人
-//   4. 最近动过 —— 刚停下的那些, 人还记得
-// 其余的按聊天计数收进 `hidden`, 不是删掉, 是折起来。
-const RECENT_MS = 6 * 3600_000;
-/** 每个聊天最多画这么多 —— 相关性之上再加一道闸: 当前聊天本身就可能有几十个
- *  `#tag`, 全列出来同样读不动。按最近活动截断, 余下的进 `hidden`。 */
-const PER_CHAT_MAX = 14;
-const SELF_CHAT_MAX = 24;
 
 // ── 折叠 ──────────────────────────────────────────────────────────────
 const liveTurns = (records: readonly DetailRecord[], now: number): TurnDetailRecord[] =>
@@ -279,61 +220,31 @@ const previewOf = (r: TurnDetailRecord): string => {
   return stripMd(texts[texts.length - 1]?.body ?? stripReminders(r.userQuery ?? "")).slice(0, 100);
 };
 
-const isHuman = (id: string): boolean => id.startsWith("human:") && id !== "human:";
-
 /** 一条边的身份 —— 同一对端点同一种类只留一条, count 累加。 */
-const edgeKey = (kind: string, from: string, to: string): string => `${kind}\u0000${from}\u0000${to}`;
+const edgeKey = (kind: string, from: string, to: string): string => kind + "\u0000" + from + "\u0000" + to;
 
-const bumpEdge = (
-  m: Map<string, WorldEdge>,
-  kind: WorldEdgeKind,
-  from: string,
-  to: string,
-  ts: number,
-): Map<string, WorldEdge> => {
+const bumpEdge = (m: Map<string, WorldEdge>, kind: WorldEdgeKind, from: string, to: string, ts: number): Map<string, WorldEdge> => {
   if (!from || !to || from === to) return m;
   const k = edgeKey(kind, from, to);
   const cur = m.get(k);
-  return m.set(k, {
-    kind,
-    from,
-    to,
-    count: (cur?.count ?? 0) + 1,
-    lastTs: Math.max(cur?.lastTs ?? 0, ts),
-    // 人不住在哪个群里 —— 它说话的地方没有「跨」可言。
-    cross: !isHuman(from) && baseOfKey(from) !== baseOfKey(to),
-    ts: [...(cur?.ts ?? []), ts].slice(-EDGE_TS_MAX),
-  });
+  return m.set(k, { kind, from, to, count: (cur?.count ?? 0) + 1, lastTs: Math.max(cur?.lastTs ?? 0, ts) });
 };
 
-/** 家谱序: 先根后分身, depth = 到根的距离。环路 (记录可手改) 在 seen 处截断。 */
-const lineageOrder = (targets: readonly string[], parentOf: (t: string) => string | undefined): Array<{ target: string; depth: number }> => {
-  const inSet = new Set(targets);
-  const kids = targets.reduce((m, t) => {
-    const p = parentOf(t);
-    return p && inSet.has(p) ? m.set(p, [...(m.get(p) ?? []), t]) : m;
-  }, new Map<string, string[]>());
-  const roots = targets.filter((t) => { const p = parentOf(t); return !p || !inSet.has(p); });
-  const walk = (t: string, depth: number, seen: ReadonlySet<string>): Array<{ target: string; depth: number }> =>
-    seen.has(t)
-      ? []
-      : [{ target: t, depth }, ...(kids.get(t) ?? []).flatMap((k) => walk(k, depth + 1, new Set([...seen, t])))];
-  const ordered = roots.flatMap((r) => walk(r, 0, new Set()));
-  // 环里的节点一个根都走不到 —— 补在后面, 宁可扁平也不能让它整段消失。
-  const seen = new Set(ordered.map((o) => o.target));
-  return [...ordered, ...targets.filter((t) => !seen.has(t)).map((target) => ({ target, depth: 0 }))];
-};
-
-/** 注册表侧按消息数据裁剪: 没有 transcript (lastActivity = 0, daemon 取自 jsonl 的 mtime; 冷记录也是 0)、
- *  轮次记录里也没有它 (没跑过、也没派出过一句) 的 wizard 不进世界 —— 画出来只是一张空卡和几条说不出内容的边。
- *  只看轮次不够: 轮次库有 24h / 1000 条的保留上限, 挤掉了的活跃 wizard 会被误判成没数据; transcript 不受它限。
+/** 注册表侧按消息数据裁剪: 没有 transcript (lastActivity = 0)、轮次记录里也没有它、
+ *  又不在任何 room 里的 wizard 不进世界 —— 画出来只是一张空卡。
  *  活着的照留: 刚 spawn 还没开口的分身就是这样。
  *  挂在被裁者名下的后代改认最近一个留下的祖先 (clone 的上下文来源同理), 家谱不断。 */
-export const withData = (facts: WorldFacts, records: readonly DetailRecord[], now: number): WorldFacts => {
-  const spoke = new Set(allMessages(records, now).flatMap((m) => [m.from, m.to]));
-  const keep = (w: WorldFactWizard): boolean => w.alive || w.busy || w.lastActivity > 0 || spoke.has(w.target);
+export const withData = (facts: WorldFacts, records: readonly DetailRecord[], _now: number): WorldFacts => {
+  const uidOfTarget = new Map(facts.wizards.filter((w) => w.uid).map((w) => [w.target, w.uid!] as const));
+  const inRoom = new Set((facts.rooms ?? []).flatMap((r) => r.members.flatMap((m) => {
+    if (m.who.kind !== "wizard") return [];
+    const t = [...uidOfTarget].find(([, u]) => u === m.who.id)?.[0];
+    return t ? [t] : [];
+  })));
+  const spoke = new Set(records.filter(isTurn).map((r) => (r as { target?: string }).target).filter((t): t is string => !!t));
+  const keep = (w: WorldFactWizard): boolean => w.alive || w.busy || w.lastActivity > 0 || spoke.has(w.target) || inRoom.has(w.target);
   const byTarget = new Map(facts.wizards.map((w) => [w.target, w] as const));
-  // 被裁者若还有留下的后代, 不把后代改挂祖父, 而是留一个占位 (ghost) 代表它 —— 家谱里那一层真实存在过。
+  // 被裁者若还有留下的后代, 不把后代改挂祖父, 而是留一个占位 (ghost) 代表它。
   const needed = (t: string | undefined, seen: ReadonlySet<string> = new Set()): string[] => {
     const w = t ? byTarget.get(t) : undefined;
     return !t || !w || seen.has(t) ? [] : keep(w) ? [] : [t, ...needed(w.parent, new Set([...seen, t])), ...needed(w.forkOf, new Set([...seen, t]))];
@@ -370,11 +281,10 @@ const clonedName = (r: TurnDetailRecord, u: ToolUseItem): string => {
   const a = (u.toolInput && typeof u.toolInput === "object" ? u.toolInput : {}) as Record<string, unknown>;
   return stripSigil(String(j?.name ?? a.name ?? ""));
 };
-const msgIdOf = (r: TurnDetailRecord): string => `${r.id}:${r.items.length || !r.closed ? "out" : "in"}`;
+const msgIdOf = (r: TurnDetailRecord): string => r.id + ":" + (r.items.length || !r.closed ? "out" : "in");
 
-/** 分身在 origin 会话 (`rs`, 按时刻升序) 里分叉的那一处: origin 自己调 clone_wizard 生的 (`byCall`),
- *  就是那次调用 —— 按名字认, 认不出名字取离出生最近的那次; 否则 (克隆的是别人 / 没找到调用)
- *  落到出生前最近的那一句, 分叉正发生在它之后。 */
+/** 分身在 origin 会话 (rs, 按时刻升序) 里分叉的那一处: origin 自己调 clone_wizard 生的 (byCall),
+ *  就是那次调用 —— 按名字认, 认不出名字取离出生最近的那次; 否则落到出生前最近的那一句。 */
 export const clonePointOf = (rs: readonly TurnDetailRecord[], origin: string, name: string, bornAt: number, byCall: boolean): ClonePoint => {
   const calls = byCall
     ? rs.flatMap((r) => r.items.filter((it): it is ToolUseItem => it.t === "tool_use" && CLONE_TOOL.test(it.toolName)).map((u) => ({ r, u })))
@@ -382,10 +292,18 @@ export const clonePointOf = (rs: readonly TurnDetailRecord[], origin: string, na
   const near = (ts: number): number => Math.abs(ts - bornAt);
   const call = calls.find((c) => clonedName(c.r, c.u) === name) ??
     calls.filter((c) => near(c.u.ts) < 5 * 60_000).sort((a, b) => near(a.u.ts) - near(b.u.ts))[0];
-  if (call) return { origin, id: `${call.r.id}:out`, use: call.u.toolUseId, ts: call.u.ts };
+  if (call) return { origin, id: call.r.id + ":out", use: call.u.toolUseId, ts: call.u.ts };
   const before = rs.filter((r) => r.createdAt <= bornAt).at(-1) ?? rs[0];
   return before ? { origin, id: msgIdOf(before), ts: before.createdAt } : { origin, ts: bornAt };
 };
+
+const humanNode = (target: string, facts: WorldFacts, scope: { base: string; self: string }, lastTs: number): WorldNode => ({
+  target, kind: "human", base: "", tag: "", chat: "", label: "👤",
+  name: facts.names?.[target.slice("human:".length)] ?? facts.humanNames?.[target] ?? target.slice("human:".length),
+  description: "", cwd: "", model: "", ctx: 0, cli: "", busy: false, alive: false, known: false,
+  self: target === scope.self, local: false, inherited: false, lastTs, turns: 0, preview: "",
+  runningUntil: 0, taskTurns: 0, peerTurns: 0,
+});
 
 export const buildWorld = (
   records: readonly DetailRecord[],
@@ -396,11 +314,13 @@ export const buildWorld = (
   const turns = liveTurns(records, now);
   const byTarget = turns.reduce((m, r) => m.set(r.target!, [...(m.get(r.target!) ?? []), r]), new Map<string, TurnDetailRecord[]>());
   const factOf = new Map(facts.wizards.map((w) => [w.target, w] as const));
+  const rooms = facts.rooms ?? [];
+  const uidTarget = new Map(facts.wizards.filter((w) => w.uid).map((w) => [w.uid!, w.target] as const));
+  const roomWizardUids = new Set(rooms.flatMap((r) => r.members.filter((m) => m.who.kind === "wizard").map((m) => m.who.id)));
+  const roomHumanIds = new Set(rooms.flatMap((r) => r.members.filter((m) => m.who.kind === "human").map((m) => m.who.id)));
 
-  // 节点集 = 登记过的 ∪ 跑过轮次的。两边都要: 一个刚 spawn 还没开口的分身只在
-  // 注册表里, 一条 24h 内跑过但注册表已被清掉的会话只在 turn 记录里。
-  const targets = [...new Set([...factOf.keys(), ...byTarget.keys()])];
-
+  // wizard 节点 = 登记过的 ∪ 跑过轮次的 ∪ 在 room 里出现过的 (只有 uid 的就造一个 uid:<uid> 节点)。
+  const targets = [...new Set([...factOf.keys(), ...byTarget.keys(), ...[...roomWizardUids].map((u) => uidTarget.get(u)).filter((t): t is string => !!t)])];
   const nodes: WorldNode[] = targets.map((target) => {
     const f = factOf.get(target);
     const rs = (byTarget.get(target) ?? []).sort((a, b) => a.createdAt - b.createdAt);
@@ -410,15 +330,11 @@ export const buildWorld = (
     const base = baseOfKey(target);
     const chat = f?.chat ?? facts.chatNames[base] ?? "";
     const until = rs.reduce((mx, r) => Math.max(mx, staleAt(r)), 0);
-    // 名字全局唯一, 与聊天无关 —— 名册里的就是它; 名册缺席 (svr) 才按 slot / 聊天名推。
     const name = (f?.name ?? "").trim() || tag || chat || target;
     return {
-      target,
-      base,
-      tag,
-      chat,
-      name,
-      label: labelFor(name),
+      target, kind: "wizard",
+      ...(f?.uid ? { uid: f.uid } : {}),
+      base, tag, chat, name, label: labelFor(name),
       description: f?.description ?? "",
       cwd: f?.cwd || [...rs].reverse().find((r) => r.cwd)?.cwd || "",
       model: f?.model || [...rs].reverse().find((r) => r.model)?.model || "",
@@ -442,55 +358,33 @@ export const buildWorld = (
       peerTurns: rs.filter((r) => r.from?.kind === "peer").length,
     };
   });
-
-  // 人也是对话方: 开过一轮的那个人 (认得出是谁的) 是一个节点, 它 → 那个 wizard 是一条对话边。
-  // 不进 chats —— 人不住在哪个聊天里; 只跟着它连着的 wizard 一起下发。
-  const talks = turns.flatMap((r) => [r, ...injectTurnsOf(r)]);
-  const byHuman = talks.reduce((m, r) => {
-    const who = senderOf(r);
-    return isHuman(who) ? m.set(who, [...(m.get(who) ?? []), r]) : m;
-  }, new Map<string, TurnDetailRecord[]>());
-  const humans: WorldNode[] = [...byHuman].map(([target, rs]) => {
-    const last = rs.reduce((a, b) => (b.createdAt > a.createdAt ? b : a));
-    return {
-      target, base: "", tag: "", chat: "", name: target.slice("human:".length), label: "👤", description: "",
-      cwd: "", model: "", ctx: 0, cli: "", busy: false, alive: false, known: false, self: target === scope.self, local: false,
-      inherited: false, lastTs: last.createdAt, turns: rs.length, preview: stripMd(last.userQuery ?? "").slice(0, 100),
-      runningUntil: 0, taskTurns: 0, peerTurns: 0,
-    };
-  });
-  const known = new Set([...nodes, ...humans].map((n) => n.target));
-  // 一条边的两端都必须是节点 —— 派活方可能已经被回收, 那条边就无处落脚, 画一个
-  // 悬空端点只会让人以为漏了谁。
+  // 只在 room 里出现过、注册表已经没有的 wizard: 仍要有一个节点, 否则 room 的成员线悬空。
+  const knownUids = new Set(nodes.map((n) => n.uid).filter(Boolean));
+  const orphanWizards: WorldNode[] = [...roomWizardUids].filter((u) => !knownUids.has(u)).map((u) => ({
+    target: "uid:" + u, kind: "wizard", uid: u, base: "", tag: "", chat: "",
+    name: facts.names?.[u] ?? u, label: labelFor(facts.names?.[u] ?? u), description: "",
+    cwd: "", model: "", ctx: 0, cli: "", busy: false, alive: false, known: false, self: false, local: false,
+    inherited: false, lastTs: rooms.reduce((mx, r) => (r.members.some((m) => m.who.kind === "wizard" && m.who.id === u) ? Math.max(mx, r.last?.at ?? 0) : mx), 0),
+    turns: 0, preview: "", runningUntil: 0, taskTurns: 0, peerTurns: 0,
+  }));
+  const humans: WorldNode[] = [...roomHumanIds].map((id) => humanNode("human:" + id, facts, scope, rooms.reduce((mx, r) => (r.members.some((m) => m.who.kind === "human" && m.who.id === id) ? Math.max(mx, r.last?.at ?? 0) : mx), 0)));
+  const all = [...nodes, ...orphanWizards, ...humans];
+  const known = new Set(all.map((n) => n.target));
+  // 一条边的两端都必须是节点 —— 派活方可能已经被回收, 那条边就无处落脚。
   const link = (m: Map<string, WorldEdge>, kind: WorldEdgeKind, from: string, to: string, ts: number): Map<string, WorldEdge> =>
     known.has(from) && known.has(to) ? bumpEdge(m, kind, from, to, ts) : m;
 
-  // 观测边 —— 真的发生过的往来, 从 turn 记录里读。
-  const observed = talks.reduce((m, r) => {
-    const to = r.target!;
-    const f = r.from;
-    // 定时任务没有"派活的一方" —— 它是节点上的计数 (taskTurns), 不是一条边。
-    const who = senderOf(r);
-    const m1 = f?.kind === "peer" && f.from ? link(m, "peer", f.from, to, r.createdAt)
-      : isHuman(who) ? link(m, "peer", who, to, r.createdAt)
-      : m;
-    return m1;
-  }, new Map<string, WorldEdge>());
-
   // 登记边 —— 家谱。观测不到 (分身可能一句话没说), 但它是最稳定的一种关系。
-  // parent → 它: 分身 (clone) 或新生 (spawn), 看它开局有没有 fork 上下文; 克隆的是别人时,
-  // 上下文的来源另记一条 fork 边 —— 生它、归它管的仍是 parent, 不能因此把它画成 parent 的白板。
   const registered = facts.wizards.reduce(
     (m, w) => {
       if (!w.parent) return m;
       const m1 = link(m, w.clonedFrom ? "clone" : "spawn", w.parent, w.target, w.bornAt ?? 0);
       return w.clonedFrom && w.forkOf ? link(m1, "fork", w.forkOf, w.target, w.bornAt ?? 0) : m1;
     },
-    observed,
+    new Map<string, WorldEdge>(),
   );
-  // 注册表里已经没有的 (stop_wizard forget、工单回收、回归脚本收尾都会删记录), 家谱只剩
-  // 它的宪章 —— 宪章不进 TTL, 记着出生那一刻谁生的它; 不读回来它就只剩一条「对话」边、像个外人。
-  const byName = new Map(nodes.map((n) => [n.name, n.target] as const));
+  // 注册表里已经没有的, 家谱只剩它的宪章 —— 宪章不进 TTL, 记着出生那一刻谁生的它。
+  const byName = new Map(all.map((n) => [n.name, n.target] as const));
   const lineageEdge = (m: Map<string, WorldEdge>, kind: WorldEdgeKind, from: string | undefined, to: string, ts: number): Map<string, WorldEdge> =>
     from ? link(m, kind, from, to, ts) : m;
   const chartered = records.filter((r): r is CharterRecord => r.kind === "charter" && !factOf.has(r.target))
@@ -500,81 +394,56 @@ export const buildWorld = (
     return l.kind === "clone" ? lineageEdge(m1, "fork", l.forkOf, c.target, c.createdAt) : m1;
   }, registered);
 
-  // clone 边带上分叉处: 注册表与宪章各记着谁被克隆、何时出生。
   const clones = new Map<string, { origin: string; parent: string; bornAt: number }>([
     ...facts.wizards.filter((w) => w.parent && w.clonedFrom).map((w) => [w.target, { origin: w.forkOf ?? w.parent!, parent: w.parent!, bornAt: w.bornAt ?? 0 }] as const),
     ...chartered.filter(({ l }) => l.kind === "clone").map(({ c, l }) => [c.target, { origin: l.forkOf ?? l.parent, parent: l.parent, bornAt: c.createdAt }] as const),
   ]);
-  const nameOf = new Map(nodes.map((n) => [n.target, n.name] as const));
+  const nameOf = new Map(all.map((n) => [n.target, n.name] as const));
   const withPoint = (e: WorldEdge): WorldEdge => {
     const k = e.kind === "clone" ? clones.get(e.to) : undefined;
     if (!k) return e;
     const rs = [...(byTarget.get(k.origin) ?? [])].sort((a, b) => a.createdAt - b.createdAt);
     return { ...e, point: clonePointOf(rs, k.origin, nameOf.get(e.to) ?? "", k.bornAt, k.origin === k.parent) };
   };
-
   const edges = [...withLineage.values()].map(withPoint).sort((a, b) => b.lastTs - a.lastTs);
-  const relsOf = edges.reduce((m, e) => {
-    const add = (a: string, b: string) => m.set(a, (m.get(a) ?? new Set<string>()).add(b));
+
+  // 关系 = 同处一个 room 的成员 + 家谱两端 (图上要能顺着它走)。
+  const nodeOfMember = (w: { kind: string; id: string }): string | undefined =>
+    w.kind === "wizard" ? uidTarget.get(w.id) ?? "uid:" + w.id : w.kind === "human" ? "human:" + w.id : undefined;
+  const rels = edges.reduce((m, e) => {
+    const add = (a: string, b: string): void => { m.set(a, (m.get(a) ?? new Set<string>()).add(b)); };
     add(e.from, e.to); add(e.to, e.from);
     return m;
   }, new Map<string, Set<string>>());
+  for (const r of rooms) {
+    const ids = r.members.map((m) => nodeOfMember(m.who)).filter((x): x is string => !!x && known.has(x));
+    for (const a of ids) for (const b of ids) if (a !== b) (rels.get(a) ?? rels.set(a, new Set()).get(a)!).add(b);
+  }
 
-  // 有关系的一律留下 —— 边的端点被筛掉, 那条边就没地方落脚了。
+  // 相关: 在 room 里 / 有关系的一端 / 还活着 / 最近动过 / 自己。其余不出图 (room 本身仍在)。
+  const RECENT_MS = 6 * 3600_000;
+  const inAnyRoom = new Set(rooms.flatMap((r) => r.members.map((m) => nodeOfMember(m.who)).filter((x): x is string => !!x)));
   const linked = new Set(edges.flatMap((e) => [e.from, e.to]));
   const pinned = new Set([
     ...linked,
     ...facts.plans.filter((p) => p.state === "active" || p.state === "paused").map((p) => p.owner),
     ...facts.schedules.flatMap((x) => [x.target, x.owner].filter(Boolean)),
   ]);
-  const mustShow = new Set([scope.self, ...(relsOf.get(scope.self) ?? [])]);
   const relevant = (n: WorldNode): boolean =>
-    n.local || n.self || pinned.has(n.target) || n.busy || n.alive || now - n.lastTs < RECENT_MS;
+    n.self || n.kind === "human" || inAnyRoom.has(n.target) || pinned.has(n.target) || n.busy || n.alive || now - n.lastTs < RECENT_MS;
+  const shown = all.filter(relevant);
+  const shownIds = new Set(shown.map((n) => n.target));
 
-  const parentOf = (t: string): string | undefined => factOf.get(t)?.parent;
-  const byTs = (a: WorldNode, b: WorldNode): number => b.lastTs - a.lastTs;
-  const bases = [...new Set(nodes.map((n) => n.base))];
-  const chats: WorldChat[] = bases
-    .map((base) => {
-      const mine = nodes.filter((n) => n.base === base);
-      const self = base === scope.base;
-      // 视角的直接关系不受截断 —— 「相关」档要把它们全画出来, 截掉了它们就只剩卡片上的 +N。
-      const must = mine.filter((n) => mustShow.has(n.target));
-      const rest = mine.filter((n) => !mustShow.has(n.target) && relevant(n)).sort(byTs).slice(0, self ? SELF_CHAT_MAX : PER_CHAT_MAX);
-      const kept = [...must, ...rest].sort(byTs);
-      return {
-        base,
-        name: facts.chatNames[base] ?? mine[0]?.chat ?? "",
-        self,
-        members: lineageOrder(kept.map((n) => n.target), parentOf),
-        hidden: mine.length - kept.length,
-      };
-    })
-    // 一个成员都留不下的聊天整张卡片都不画 —— 一张只写着「另有 12 个已停」的空卡
-    // 除了占位什么也没说。
-    .filter((c) => c.members.length > 0)
-    // 自己的聊天永远第一; 其余按最近活动。
-    .sort((a, b) => {
-      if (a.self !== b.self) return a.self ? -1 : 1;
-      const ts = (c: WorldChat): number => Math.max(0, ...c.members.map((mm) => nodes.find((n) => n.target === mm.target)?.lastTs ?? 0));
-      return ts(b) - ts(a);
-    });
-
-  // 节点表跟着卡片走 —— 画不出来的节点下发了也只是流量 (这条路由是被轮询的)。
-  const onCards = new Set(chats.flatMap((c) => c.members.map((mm) => mm.target)));
-  const shown = new Set([
-    ...onCards,
-    ...humans.filter((h) => edges.some((e) => e.from === h.target && onCards.has(e.to))).map((h) => h.target),
-  ]);
   return {
     at: now,
     base: scope.base,
     self: scope.self,
-    chats,
-    nodes: [...nodes, ...humans].filter((n) => shown.has(n.target)).sort(byTs)
-      .map((n) => ({ ...n, rels: [...(relsOf.get(n.target) ?? [])] })),
+    rooms: [...rooms].sort((a, b) => (b.last?.at ?? 0) - (a.last?.at ?? 0)),
+    uidTargets: Object.fromEntries(uidTarget),
+    nodes: shown.sort((a, b) => b.lastTs - a.lastTs)
+      .map((n) => ({ ...n, rels: [...(rels.get(n.target) ?? [])].filter((x) => shownIds.has(x)) })),
     // 两端都还在图上的边才画得出来。
-    edges: edges.filter((e) => shown.has(e.from) && shown.has(e.to)),
+    edges: edges.filter((e) => shownIds.has(e.from) && shownIds.has(e.to)),
     plans: [...facts.plans].sort((a, b) => b.updatedAt - a.updatedAt),
     schedules: [...facts.schedules].sort((a, b) => a.nextAt - b.nextAt),
     degraded: !!facts.absent,

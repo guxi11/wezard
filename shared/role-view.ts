@@ -1,231 +1,23 @@
-// Rolepage 的视图模型 —— 从**一个 role 的视角**重新折叠 turn 记录。纯函数, 无 IO。
+// Rolepage 的名录与会话分段 —— 纯函数, 无 IO。
 //
-// chat-view 折的是「一个聊天里有哪些会话」; 名字全局唯一以后这个轴不对了: wizard
-// 不属于某个聊天, 它在好几个群里被人叫、跟好几个同伴私聊。人想看的是它的 IM ——
-// 它参与了哪些群聊与单聊、在每一处说了什么、听到了什么。
+// room 模型之后, 消息不再从 turn 记录重建: 一条消息是 room 账本上的一行, 出处 / 完成 /
+// 发言权都写在行上 (见 shared/room-view.ts)。本文件只剩两件与 turn 记录有关的事:
+//   • 会话分段 (sessionsOf / marksOf): 同一个 wizard 的 /clear /new 轮换, 切换视角时按时间
+//     窗过滤;
+//   • 名录 (makeDirectory / roleInfo / roleStats): 名字解析、活体状态、身份聚合与用量账。
 //
-// 一轮 turn 在这里拆成两条消息:
-//   入  发话方 → 该 wizard     userQuery
-//   出  该 wizard → 发话方     本轮的回复 (文本 + 工具细节)
-// 发话方: 同伴 (from.kind=peer) / 定时任务 (task) / 人 (speaker; 认不出是谁就归
-// 系统 wezard —— 不另立一个「未知」role)。消息落在哪个会话由 channel 决定 —— 公开频道 (群 / 与人的单聊) 按 base
-// 归并, 私聊按对端 wizard 归并。
-//
-// role id: wizard 就是它的 target key; 人是 `human:<userid>`;
-// 定时任务是 `task:<id>` —— 它只发不收, 不能切成视角。系统是 `system:` (名为 wezard):
-// 认不出是谁的发话方 / 听话方都归它; agent team 队友的话以 `<teammate-message>` 写进 transcript 的 user 行, 长得和人在
-// 终端里打的字一样, 但不是人说的 —— 归给系统, 同样不能切成视角。人不用 `user:<id>`: 那正是
-// 「与这个人的单聊」里默认 wizard 的 target, 两者字面相同, 同一条消息会变成自己对自己说。
-import { baseOfKey, labelFor, rawTagHeader, stripSigil, tagOfKey } from "./session-label.js";
-import { isGhostTurn, isMark, isPost, isTurn, staleAt, summarizeTag, type TagSummary } from "./chat-view.js";
-import { stripReminders } from "./reminder.js";
-import type { Asker, DetailRecord, MarkDetailRecord, PostDetailRecord, TurnDetailRecord } from "./detail-store.js";
+// role id: wizard 就是它的 target key; 人是 human:<userid>; 定时任务是 task:<id>。
+import { baseOfKey, labelFor, stripSigil, tagOfKey } from "./session-label.js";
+import { isGhostTurn, isMark, isTurn, staleAt, summarizeTag, type TagSummary } from "./chat-view.js";
+import type { DetailRecord, MarkDetailRecord, TurnDetailRecord } from "./detail-store.js";
 import type { WorldFacts, WorldFactWeixin, WorldFactWizard } from "./world.js";
 
 export type RoleKind = "wizard" | "human" | "task";
 
-export interface Msg {
-  /** `<turnId>:in` / `<turnId>:out`。 */
-  id: string;
-  turn: TurnDetailRecord;
-  dir: "in" | "out";
-  from: string;
-  to: string;
-  /** 公开频道的 base; "" = wizard 之间的私聊。 */
-  channel: string;
-  ts: number;
-}
-
-// ── 频道与发话方 ─────────────────────────────────────────────────────
-/** 见 TurnDetailRecord.channel: 老记录按 from 推 —— peer 私聊, 其余在 home。 */
-export const channelOf = (r: TurnDetailRecord): string =>
-  r.channel !== undefined
-    ? r.channel
-    : r.from?.kind === "peer" && !r.from.public
-      ? ""
-      : baseOfKey(r.target ?? "");
+export const SYSTEM = "system:";
 
 /** `user:<id>` (speaker / 单聊 base) → 人的 role id。 */
-export const humanOf = (principal: string): string => `human:${principal.replace(/^user:/, "").replace(/#.*$/, "")}`;
-
-export const SYSTEM = "system:";
-const MATE_RE = /^\s*<teammate-message\b([^>]*)>/;
-/** 这句是不是 agent team 队友递进来的; 是就给出它的 teammate_id ("" = 没标)。 */
-export const teammateOf = (q: string | undefined): string | undefined => {
-  const attrs = q?.match(MATE_RE)?.[1];
-  return attrs === undefined ? undefined : attrs.match(/\bteammate_id="([^"]*)"/)?.[1] ?? "";
-};
-/** 去掉 `<teammate-message …>` 包装, 只留它说的话。 */
-export const unwrapMates = (q: string): string =>
-  q.replace(/<teammate-message\b[^>]*>\s*/g, "").replace(/\s*<\/teammate-message>/g, "");
-
-export const senderOf = (r: TurnDetailRecord): string => {
-  if (r.from?.kind === "peer") return r.from.from || SYSTEM;
-  if (r.from?.kind === "task") return `task:${r.from.taskId || "?"}`;
-  // 先于 speaker: 队友的话落进来时, 频道上挂着的可能还是上一句人话的 speaker。
-  const mate = teammateOf(r.userQuery);
-  if (mate !== undefined) return SYSTEM;
-  if (r.speaker) return humanOf(r.speaker);
-  const ch = channelOf(r);
-  // 与人的单聊里发话的只可能是那个人。
-  return ch.startsWith("user:") ? humanOf(ch) : SYSTEM;
-};
-
-/** 顶层会话里的轮次: 去空壳、去子 agent (它内联在父轮里)。 */
-const convTurns = (records: readonly DetailRecord[], now: number): TurnDetailRecord[] =>
-  records.filter(isTurn).filter((r) => !!r.target && !r.agent && !isGhostTurn(r, now));
-
-/** 一个公开频道里听话的那一方: 与人的单聊是那个人; 群里是这条链的链头 (守护进程写 turn /
- *  post 时顺着派活链记下的, 见 Asker) —— 只在他正是在这个群里开的口时才算; 认不出就是
- *  系统 wezard, 不拿群里别的开口的人去猜: 一个 wizard 可能同时在答好几个人。 */
-export const audienceOf = (channel: string, asker: Asker | undefined): string =>
-  channel.startsWith("user:") ? humanOf(channel) : asker?.chat === channel ? humanOf(asker.who) : SYSTEM;
-
-/** 回执轮: 守护进程把同伴那一轮的终句原样转进发话方的会话。 */
-const isReceipt = (r: TurnDetailRecord): boolean => r.from?.kind === "peer" && r.from.receipt === true;
-
-/** 重影判定, 按 records 快照记一次:
- *  injects  忙时插队的一句有时被记了两次: 先在跑着的那轮里记成插话 (queued_command 露面),
- *           随后同一句话又真开了一轮 (打断后重新露面) —— 插话那条是重影, 不画。按 (主人,
- *           规范正文) 认: 同一 target 真开过一轮、问话与这句同文 (含互相包含, 落盘版可能
- *           多处 CLI 插进去的东西)。
- *  splitIns 同一次投递 (同一 message-event) 在 reload / 重挂后被切成几段轮次记录, 开头那句
- *           在每段上重印了一遍 —— 入消息只留最早那段的 (eventId 是投递身份, 人故意重发
- *           同文是两件事两件号, 不会误伤)。 */
-export interface EchoIndex { injects: Map<string, string[]>; splitIns: Set<string> }
-const ECHOES = new WeakMap<readonly DetailRecord[], EchoIndex>();
-export const injectEchoesOf = (records: readonly DetailRecord[]): EchoIndex => {
-  const hit = ECHOES.get(records);
-  if (hit) return hit;
-  const norm = (s: string | undefined): string => (s ?? "").replace(/\s+/g, " ").trim();
-  const injects = new Map<string, string[]>();
-  const byEvent = new Map<string, TurnDetailRecord[]>();
-  for (const t of records.filter(isTurn)) {
-    if (t.id.includes("~")) continue;
-    if (t.userQuery?.trim())
-      injects.set(t.target ?? "", [...(injects.get(t.target ?? "") ?? []), norm(t.userQuery)]);
-    if (t.eventId)
-      byEvent.set(`${t.sessionId}\0${t.eventId}`, [...(byEvent.get(`${t.sessionId}\0${t.eventId}`) ?? []), t]);
-  }
-  const splitIns = new Set<string>();
-  for (const group of byEvent.values())
-    if (group.length > 1)
-      for (const t of group.slice().sort((a, b) => a.createdAt - b.createdAt).slice(1)) splitIns.add(t.id);
-  const v = { injects, splitIns };
-  ECHOES.set(records, v);
-  return v;
-};
-const isEcho = (echoes: EchoIndex, t: TurnDetailRecord): boolean => {
-  const body = (t.userQuery ?? "").replace(/\s+/g, " ").trim();
-  return body.length >= 8 && (echoes.injects.get(t.target ?? "") ?? []).some((q) => q.includes(body) || (q.length >= 8 && body.includes(q)));
-};
-
-/** 一轮 → 入/出两条消息。没问话的 (/clear 之后的续跑) 只有出; 还没产出也没在跑
- *  的只有入。
- *  回执轮例外: 入那一句就是同伴自己那一轮的出 (同一段话, 已在同伴的出消息里), 再画
- *  一遍就是重复, 所以没有入; 它的出是在频道里对那里的人说的 —— 公开频道答给人, 只有
- *  私聊回执 ("" 频道, 回复不进任何群) 才仍是对那个同伴。 */
-/** 一轮里的插话 → 各自一个只有问话的轮次外形 (id `<轮>~<序号>`): 出处、频道、发话人都是它自己的,
- *  不随被插的那一轮。它没有自己的回复 —— 回复在被插的那一轮的出消息里。 */
-export const injectTurnsOf = (r: TurnDetailRecord): TurnDetailRecord[] =>
-  (r.injects ?? []).map((x, i) => ({
-    kind: "turn", id: `${r.id}~${i}`, createdAt: x.ts, updatedAt: x.ts, closed: true, items: [],
-    target: r.target, sessionId: r.sessionId, userQuery: x.body, channel: x.channel,
-    ...(x.from ? { from: x.from } : {}), ...(x.speaker ? { speaker: x.speaker } : {}),
-  }));
-
-/** strict 群的实发 (post 记录) 归到发话 wizard 当时正跑着、且就在那个群里答话的那一轮:
- *  hostOf = post id → 轮次 id, byTurn = 轮次 id → 它的实发 (按时刻)。别的群 / 私聊轮里
- *  贴进来的、或轮次收口很久之后才落账的 post 不归任何轮, 仍是独立的一条出消息。 */
-export interface StrictIndex { hostOf: Map<string, string>; byTurn: Map<string, PostDetailRecord[]> }
-const POST_SLACK_MS = 30_000;
-const STRICT_IX = new WeakMap<readonly DetailRecord[], WeakMap<ReadonlySet<string>, StrictIndex>>();
-/** canon: 同身份的化身收敛到一个 target (见 makeDirectory) —— post 记在身份锚点上, 轮次记在本群的化身上。 */
-export const strictPostsOf = (records: readonly DetailRecord[], strictChats: ReadonlySet<string>, canon: (id: string) => string = (x) => x): StrictIndex => {
-  const hit = STRICT_IX.get(records)?.get(strictChats);
-  if (hit) return hit;
-  const byTarget = new Map<string, TurnDetailRecord[]>();
-  for (const t of records.filter(isTurn)) if (t.target && !t.agent) byTarget.set(canon(t.target), [...(byTarget.get(canon(t.target)) ?? []), t]);
-  const hostOf = new Map<string, string>();
-  const byTurn = new Map<string, PostDetailRecord[]>();
-  for (const p of records.filter(isPost).filter((p) => strictChats.has(p.channel)).sort((a, b) => a.createdAt - b.createdAt)) {
-    const host = (byTarget.get(canon(p.target)) ?? []).reduce<TurnDetailRecord | undefined>(
-      (best, t) => (t.createdAt <= p.createdAt && (!best || t.createdAt > best.createdAt) ? t : best), undefined);
-    if (!host || channelOf(host) !== p.channel || (host.closed && p.createdAt > host.updatedAt + POST_SLACK_MS)) continue;
-    hostOf.set(p.id, host.id);
-    byTurn.set(host.id, [...(byTurn.get(host.id) ?? []), p]);
-  }
-  const ix = { hostOf, byTurn };
-  STRICT_IX.set(records, (STRICT_IX.get(records) ?? new WeakMap()).set(strictChats, ix));
-  return ix;
-};
-
-/** 实发的正文: 群里那条消息头上的「🧙‍♂️ name：」署名剥掉 —— rolepage 的消息行已经写着是谁说的。 */
-export const postBody = (p: PostDetailRecord): string => rawTagHeader(p.body)?.body ?? p.body;
-
-/** strict 群一轮的出消息 = 一个过程框聚合这一轮全部工具调用与 CLI 原话 (标 aside, 不当气泡),
- *  其下是实发进群的气泡 —— 实发排在这一轮最后 (时刻抬到不早于框里最后一项), 不按落账时刻
- *  插进工具中间; 与实发同文的那句并进实发 (final 跟过去, 收口判定不变)。 */
-export const deliveredTurn = (r: TurnDetailRecord, posts: readonly PostDetailRecord[]): TurnDetailRecord => {
-  const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
-  const texts = r.items.filter((it): it is Extract<typeof it, { t: "text" }> => it.t === "text");
-  const same = (p: PostDetailRecord) => texts.filter((it) => squash(it.body) === squash(postBody(p)));
-  const merged = new Set(posts.flatMap(same));
-  const rest = r.items.flatMap((it): TurnDetailRecord["items"] => (it.t !== "text" ? [it] : merged.has(it) ? [] : [{ ...it, aside: true }]));
-  const last = rest.reduce((m, it) => Math.max(m, it.ts), -Infinity);
-  const said = posts.map((p) => ({ t: "text" as const, body: postBody(p), ts: Math.max(p.createdAt, last), posted: true, ...(same(p).some((it) => it.final) ? { final: true } : {}) }));
-  // 排序稳定: 时刻相同时框里的项 (rest) 仍在实发之前。
-  return { ...r, items: [...rest, ...said].sort((a, b) => a.ts - b.ts) };
-};
-
-export const messagesOfTurn = (r0: TurnDetailRecord, echoes?: EchoIndex, strict?: StrictIndex): Msg[] => {
-  const posts = strict?.byTurn.get(r0.id);
-  const r = posts ? deliveredTurn(r0, posts) : r0;
-  const w = r.target!;
-  const who = senderOf(r);
-  const channel = channelOf(r);
-  const receipt = isReceipt(r);
-  const to = receipt && channel ? audienceOf(channel, r.from?.asker) : who;
-  const firstOut = r.items.reduce((m, it) => Math.min(m, it.ts), Infinity);
-  const inMsg: Msg[] = r.userQuery?.trim() && !receipt && !echoes?.splitIns.has(r.id)
-    ? [{ id: `${r.id}:in`, turn: r, dir: "in", from: who, to: w, channel, ts: r.createdAt }]
-    : [];
-  // strict 群的出消息不压: 工具调用照样进过程框, 只有气泡换成实发 (见 deliveredTurn);
-  //  这一轮没有实发 (老会话没 chat_reply) 就退回 CLI 终句, 与非 strict 同口径。
-  const outMsg: Msg[] = r.items.length > 0 || !r.closed
-    ? [{ id: `${r.id}:out`, turn: r, dir: "out", from: w, to, channel, ts: Math.max(r.createdAt + 1, Number.isFinite(firstOut) ? firstOut : r.createdAt + 1) }]
-    : [];
-  const injected: Msg[] = injectTurnsOf(r)
-    .filter((t) => !echoes || !isEcho(echoes, t))
-    .map((t) => ({ id: `${t.id}:in`, turn: t, dir: "in", from: senderOf(t), to: w, channel: t.channel ?? "", ts: t.createdAt }));
-  return [...inMsg, ...outMsg, ...injected];
-};
-
-/** notify 贴进群的一段话 → 发话 wizard 在那个频道里的一条出消息, 对着那里的人说。
- *  装进一个已收口、只有一段终句的轮次外形, 渲染与未读水位都照出消息的老规矩走。 */
-export const messageOfPost = (p: PostDetailRecord): Msg => ({
-  id: `${p.id}:out`,
-  turn: {
-    kind: "turn", id: p.id, createdAt: p.createdAt, updatedAt: p.createdAt, closed: true,
-    target: p.target, channel: p.channel, items: [{ t: "text", body: postBody(p), ts: p.createdAt, final: true }],
-  },
-  dir: "out",
-  from: p.target,
-  to: audienceOf(p.channel, p.asker),
-  channel: p.channel,
-  ts: p.createdAt,
-});
-
-/** P7 ⑦ 身份聚合: 同身份的多化身在 rolepage 聚成一页 —— 消息双方都收敛到该身份的
- *  规范 target (canon, 见 makeDirectory)。缺省恒等: 老 daemon 快照没有 identity 时
- *  各化身各一页, 与旧行为一比一。 */
-export const allMessages = (records: readonly DetailRecord[], now: number, canon: (id: string) => string = (x) => x, strictChats?: ReadonlySet<string>): Msg[] => {
-  const echoes = injectEchoesOf(records);
-  const strict = strictChats ? strictPostsOf(records, strictChats, canon) : undefined;
-  return [...convTurns(records, now).flatMap((r) => messagesOfTurn(r, echoes, strict)), ...records.filter(isPost).filter((p) => !strict?.hostOf.has(p.id)).map(messageOfPost)]
-    .map((m) => (canon(m.from) === m.from && canon(m.to) === m.to ? m : { ...m, from: canon(m.from), to: canon(m.to) }))
-    .sort((a, b) => a.ts - b.ts);
-};
+export const humanOf = (principal: string): string => "human:" + principal.replace(/^user:/, "").replace(/#.*$/, "");
 
 // ── 名录 ─────────────────────────────────────────────────────────────
 /** 一个 wizard 此刻的活体状态。「执行中」由客户端判: busy || 现在 < runningUntil ——
@@ -236,21 +28,18 @@ export interface RoleStatus {
   busy: boolean;
   /** 同 TagSummary.runningUntil: 无新写入时到这个时刻自动算结束, 0 = 已停。 */
   runningUntil: number;
-  /** 停在哪些工具调用上等人点; 缺省 = 没在等。优先于「执行中」—— 审批长轮询期间 pane 可能还在转圈。 */
+  /** 停在哪些工具调用上等人点; 缺省 = 没在等。优先于「执行中」。 */
   waiting?: string[];
 }
 
 export interface Directory {
   nameOf: (id: string) => string;
   labelOf: (id: string) => string;
-  /** 生效 strict 的聊天 base 集合 (P7-S3b): 这些群里一轮的气泡换成实际发进群的内容
-   *  (post 记录, 见 deliveredTurn), 工具调用照旧。老 facts 没给 = 空集, 一切照旧。 */
-  strictChats: ReadonlySet<string>;
-  /** `.fix` / `fix` / target / `user:x` → role id; undefined = 不认识。 */
+  /** .fix / fix / target / user:x → role id; undefined = 不认识。 */
   resolve: (ref: string) => string | undefined;
   fact: (id: string) => WorldFactWizard | undefined;
   chatName: (base: string) => string;
-  /** 微信通道群 (`chat:wx_…`) 的账号状态; 不是微信群 / 老 daemon 没给 = undefined。 */
+  /** 微信通道群 (chat:wx_…) 的账号状态; 不是微信群 / 老 daemon 没给 = undefined。 */
   weixin: (base: string) => WorldFactWeixin | undefined;
   isWizard: (id: string) => boolean;
   /** undefined = 不是 wizard (人 / 定时 / 系统没有「执行中」)。 */
@@ -265,20 +54,19 @@ const fold = (s: string): string => stripSigil(s).toLowerCase();
 
 export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFacts): Directory => {
   const facts_ = new Map(facts.wizards.map((w) => [w.target, w] as const));
-  const strictChats = new Set(facts.strictChats ?? []);
   const turnTargets = new Set(records.filter(isTurn).map((r) => r.target).filter((t): t is string => !!t));
   const wizards = new Set([...facts_.keys(), ...turnTargets]);
   const chatName = (base: string): string => facts.chatNames[base] ?? "";
   const nameOf = (id: string): string => {
-    if (id.startsWith("task:")) return `定时 ${id.slice(5)}`;
+    if (id.startsWith("task:")) return "定时 " + id.slice(5);
     if (id === SYSTEM) return "wezard";
     if (wizards.has(id)) return (facts_.get(id)?.name ?? "").trim() || tagOfKey(id) || chatName(baseOfKey(id)) || id;
     return id.startsWith("human:") ? facts.humanNames?.[id] || id.slice(6) : id;
   };
   const labelOf = (id: string): string =>
     id.startsWith("task:") ? "⏰" : id === SYSTEM ? "🧙‍♂️" : wizards.has(id) ? labelFor(nameOf(id)) : "👤";
-  // P7 ⑦: 每个身份选一个规范 target (锚点 target === identity 优先, 否则字典序最小 ——
-  // 恒定可复现), 同身份的化身全部收敛到它; 没有 identity 的事实恒等 (老快照兼容)。
+  // P7 ⑦: 每个身份选一个规范 target (锚点 target === identity 优先, 否则字典序最小),
+  // 同身份的化身全部收敛到它; 没有 identity 的事实恒等 (老快照兼容)。
   const identityFact = new Map(facts.wizards.filter((w) => w.identity).map((w) => [w.target, w.identity!] as const));
   const byIdentity = new Map<string, string[]>();
   for (const t of wizards) {
@@ -300,12 +88,11 @@ export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFact
     if (wizards.has(r)) return canon(r);
     const named = byName.get(fold(r));
     if (named) return named;
-    // 老链接里的 `human:` (从前「未知」的那个人) 就是现在的系统 wezard。
     if (r === "human:") return SYSTEM;
     if (/^human:[^#]+$/.test(r)) return r;
     return /^user:[^#]+$/.test(r) ? humanOf(r) : undefined;
   };
-  // 只有摘要要状态, 而 makeDirectory 每次 flush 都会建 —— 用到才扫一遍。
+  // 只有摘要要状态, 而 makeDirectory 每次都会建 —— 用到才扫一遍。
   let until: Map<string, number> | undefined;
   const untilOf = (id: string): number =>
     (until ??= records.filter(isTurn).reduce(
@@ -314,7 +101,6 @@ export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFact
     )).get(id) ?? 0;
   const status = (id: string, now: number): RoleStatus | undefined => {
     if (!wizards.has(id)) return undefined;
-    // 身份聚合: 任一化身活着就算活着; waiting 并集; runningUntil 取最大。
     const fs = manifestationsOf(id).map((t) => facts_.get(t)).filter((f): f is WorldFactWizard => !!f);
     const f = facts_.get(id) ?? fs[0];
     const t = Math.max(0, ...manifestationsOf(id).map((x) => untilOf(x)));
@@ -323,365 +109,30 @@ export const makeDirectory = (records: readonly DetailRecord[], facts: WorldFact
       runningUntil: t > now ? t : 0, ...(waiting.length ? { waiting } : {}) };
   };
   const wx = new Map((facts.weixin ?? []).map((w) => [w.base, w] as const));
-  return { nameOf, labelOf, strictChats, resolve, fact: (id) => facts_.get(id) ?? manifestationsOf(id).map((t) => facts_.get(t)).find(Boolean), chatName, weixin: (base) => wx.get(base), isWizard: (id) => wizards.has(id), status, wizards: () => [...wizards], canon };
+  return { nameOf, labelOf, resolve, fact: (id) => facts_.get(id) ?? manifestationsOf(id).map((t) => facts_.get(t)).find(Boolean), chatName, weixin: (base) => wx.get(base), isWizard: (id) => wizards.has(id), status, wizards: () => [...wizards], canon };
 };
-
-// ── 会话 ─────────────────────────────────────────────────────────────
-// key 相对于视角 role: `c:<base>` 公开频道, `p:<对端>` 私聊。
-// 有人在的频道一律是群聊 (与人的「单聊」也是: 人 + 住在里面的 wizard); 只有 wizard
-// 之间的才是私聊。
-export type ConvKind = "group" | "wizard";
-
-export interface ConvSub {
-  role: string;
-  name: string;
-  label: string;
-  /** 它与当前 role 在这个频道里的往来条数 (与点进去看到的窗口同一份)。 */
-  count: number;
-  lastTs: number;
-  /** 这一对往来的最后一句。 */
-  preview: string;
-  /** 它在这个频道里的全部记录 (不按成对过滤) —— 侧栏「chat 内全部」下与我无往来的那几项用它。 */
-  whole: Glance & { count: number };
-  /** 这一项的未读账 (见 Ledger): 成对的按「我与它」那一窗切, 与我无往来的按它在群里的全部记录切 —— 都是点开它看到的那一份。 */
-  heard: Heard[];
-  theirs?: Heard[];
-  /** 它是 wizard 时才有。 */
-  status?: RoleStatus;
-}
-
-export interface Conv {
-  key: string;
-  kind: ConvKind;
-  name: string;
-  label: string;
-  /** 公开频道的 base; 私聊为 ""。 */
-  base: string;
-  /** 私聊的对端。 */
-  peer?: string;
-  /** 私聊对端的状态 (群没有)。 */
-  status?: RoleStatus;
-  lastTs: number;
-  preview: string;
-  count: number;
-  /** 点开这里看得见的未读 (见 Ledger), 最近的在后; 群还并上它各子项的 —— 收起时群这一行替子项们说。 */
-  heard: Heard[];
-  /** 私聊对端在这里看不见的未读 (名字旁); 群没有主人, 不给。 */
-  theirs?: Heard[];
-  /** 群里的其他 role (只对公开频道)。 */
-  subs: ConvSub[];
-  /** 微信通道群的状态标记 (见 wxMark); 企微群 / 私聊没有。 */
-  wx?: WxMark;
-}
 
 // ── 微信通道 ─────────────────────────────────────────────────────────
 /** 群行 / 群详情头部名字旁的小标记: 怎么判、写什么只在这里, 页面照抄 text / tip。 */
 export interface WxMark { state: "live" | "paused" | "down"; text: string; tip: string }
 const agoText = (ms: number): string =>
-  ms < 60_000 ? "刚刚" : ms < 3600_000 ? `${Math.floor(ms / 60_000)} 分钟前` : ms < 86400_000 ? `${Math.floor(ms / 3600_000)} 小时前` : `${Math.floor(ms / 86400_000)} 天前`;
+  ms < 60_000 ? "刚刚" : ms < 3600_000 ? Math.floor(ms / 60_000) + " 分钟前" : ms < 86400_000 ? Math.floor(ms / 3600_000) + " 小时前" : Math.floor(ms / 86400_000) + " 天前";
 export const wxMark = (w: WorldFactWeixin, now: number): WxMark => {
   const state = w.state === "expired" ? "down" : w.pausedUntil > now ? "paused" : "live";
   const head = { live: "🟢 微信", paused: "⏸️ 微信频控", down: "🔴 微信掉线" }[state];
   const tip = [
     state === "down" ? "微信通道掉线 —— 在企微单聊发 /wx bind 重新扫码" : "微信通道在线",
-    `对方最近开口: ${w.lastInAt ? agoText(now - w.lastInAt) : "从没有"}`,
-    ...(state === "down" ? [] : [`这一轮还能发 ${w.budget} 条 (对方每说一句补一份额度)`]),
-    ...(w.held ? [`压着 ${w.held} 条没发出, ${state === "down" ? "重新绑定后" : "对方再说一句就"}取回`] : []),
-    ...(state === "paused" ? [`频控暂停出站, 还剩 ${Math.ceil((w.pausedUntil - now) / 60_000)} 分钟`] : []),
+    "对方最近开口: " + (w.lastInAt ? agoText(now - w.lastInAt) : "从没有"),
+    ...(state === "down" ? [] : ["这一轮还能发 " + w.budget + " 条 (对方每说一句补一份额度)"]),
+    ...(w.held ? ["压着 " + w.held + " 条没发出, " + (state === "down" ? "重新绑定后" : "对方再说一句就") + "取回"] : []),
+    ...(state === "paused" ? ["频控暂停出站, 还剩 " + Math.ceil((w.pausedUntil - now) / 60_000) + " 分钟"] : []),
   ].join("\n");
-  return { state, text: head + (w.held ? ` · 📬 压着 ${w.held}` : ""), tip };
-};
-
-const involves = (m: Msg, role: string): boolean => m.from === role || m.to === role;
-const other = (m: Msg, role: string): string => (m.from === role ? m.to : m.from);
-export const convKeyOf = (m: Msg, role: string): string => (m.channel ? `c:${m.channel}` : `p:${other(m, role)}`);
-
-/** 「某 role 与某些对端的往来」—— 侧栏会话项 / 子项、会话窗口、关系图卡片的窗口都是它。
- *  peers 空 = 不限对端 (role 参与的全部); chat 给了就只在那个频道 ("" = 私聊), 不给 = 不限。
- *  时间序不变。 */
-export const talkOf = (msgs: readonly Msg[], role: string, peers: readonly string[] = [], chat?: string): Msg[] => {
-  const pick = new Set(peers);
-  return msgs.filter((m) => (chat === undefined || m.channel === chat) && (pick.size ? involves(m, role) && pick.has(other(m, role)) : involves(m, role)));
-};
-
-/** `a:<x>` = x 参与的全部对话; `a:<x>|<p1>,<p2>` = x 与这几个对端之间的 —— 不分会话, 按时间排开。
- *  再带一段 `|<base>` 就只在那个频道里 (`a:<x>||<base>` = x 在那个群里的全部记录, 对端不限)。 */
-export const parseTalkKey = (key: string): { who: string; peers: string[]; chat?: string } | undefined => {
-  if (!key.startsWith("a:")) return undefined;
-  const [who = "", rest, chat] = key.slice(2).split("|");
-  return { who, peers: rest ? rest.split(",").filter(Boolean) : [], ...(chat ? { chat } : {}) };
-};
-
-const stripMd = (s: string): string => s.replace(/[`*_~|#>]/g, "").replace(/\s+/g, " ").trim();
-/** 一条消息里最后那句话与它说出的时刻: 入 = 问话 (轮次开始); 出 = 最后一段 text ——
- *  工具调用之间的独白也算, 时刻取那段 text 自己的, 而不是这一轮开口的时刻。
- *  入消息的预览先剥 reminder 块再截: 问话行开头可能顶着宪章 preamble / 信封,
- *  不剥的话预览全是 `<system-reminder …>`, 人一句正文都看不见。 */
-const saidOf = (m: Msg): { body: string; ts: number } => {
-  if (m.dir === "in") return { body: stripMd(unwrapMates(stripReminders(m.turn.userQuery ?? ""))).slice(0, 80), ts: m.ts };
-  const t = [...m.turn.items].reverse().find((it): it is Extract<typeof it, { t: "text" }> => it.t === "text" && !it.aside);
-  return { body: stripMd(t?.body ?? "").slice(0, 80), ts: t?.ts ?? m.ts };
-};
-
-export interface Glance { preview: string; lastTs: number }
-/** 会话列表一行的预览与时间 —— 取自同一句话: 所有有正文的消息里**最晚说出**的那句
- *  (按 text 自己的时刻比, 不按消息排序: 一轮长跑的独白可能晚于之后才进来的问话)。
- *  只有工具调用、或还在跑没吐字的那一轮没有可预览的话, 越过它落在上一句真话上;
- *  一句话都没有才退回最后一条消息的时刻。`who` 给出正文前的发话人前缀 (群聊用)。 */
-const glance = (ms: readonly Msg[], who: (m: Msg) => string = () => ""): Glance | undefined =>
-  ms.reduce<Glance | undefined>((best, m) => {
-    const s = saidOf(m);
-    return s.body && s.ts >= (best?.lastTs ?? -Infinity) ? { preview: who(m) + s.body, lastTs: s.ts } : best;
-  }, undefined);
-const glanceOr = (ms: readonly Msg[], who?: (m: Msg) => string): Glance =>
-  glance(ms, who) ?? { preview: "", lastTs: ms[ms.length - 1]?.ts ?? 0 };
-
-/** 一行预览前的说话人: 这一项的对端不是恰好一个 (不限 / 多个) 时才写「x： 」, 视角自己说的不写。
- *  rolepage 是系统面 (设计稿 §1.5) —— 说话人一律裸名, 不带点也不带记号。
- *  peers 就是打开这一项时 talkOf 的入参 (整个公开频道 = 不限) —— 会话项、子项、关系图卡片都从这里拿。 */
-const speakerPrefix = (dir: Directory, viewer: string, peers?: readonly string[]): ((m: Msg) => string) | undefined =>
-  peers?.length === 1
-    ? undefined
-    : (m) => (m.from === viewer ? "" : `${dir.nameOf(m.from)}： `);
-
-/** 一个 talkOf 窗口在列表里的那一行: 最近一句 (按上面的规则带说话人) 与时刻。 */
-export const glanceOfTalk = (msgs: readonly Msg[], viewer: string, dir: Directory, who: string, peers: readonly string[], chat?: string): Glance => {
-  const ms = talkOf(msgs, who, peers, chat);
-  return glanceOr(ms, speakerPrefix(dir, viewer, peers));
-};
-
-const SUB_MAX = 40;
-
-/** 一句未读 `[说完的时刻, 发话方, 收信方, 消息 id]` (见 UnreadIndex / Ledger)。
- *  已读只有一份: 客户端按 id 记「这句话说完的样子在详情里上过屏」, 换视角、换视图都不重记。 */
-export type Heard = [number, string, string, string];
-const HEARD_MAX = 100;
-
-/** 一条消息说完的时刻, 没说完就是 undefined。人 / 同伴 / 定时的问话一发出就是完整的;
- *  wizard 的回复要等终句 —— 说不清 final 的后端 (软收口) 以轮次关闭为准。
- *  只看 dir=out 会把人漏光: 人在群里说的话永远只是入消息。与视角无关 —— 详情片段也带它 (见 MsgFragment.fin)。 */
-export const doneAt = (m: Msg): number | undefined => {
-  if (m.dir === "in") return m.ts;
-  const t = [...m.turn.items].reverse().find((it): it is Extract<typeof it, { t: "text" }> =>
-    it.t === "text" && (it.final === true || (it.final === undefined && !!m.turn.closed)));
-  return t?.ts;
-};
-
-/** 开口之后才进来的话才可能没读过: 回过话 = 读到了那里。回话要有正文 ——
- *  只开了轮次、还在调工具没吐字的那条出消息不算开口 (saidOf 会退回轮次开始的时刻, 那会把
- *  同时进来的问话误当成已读)。 */
-const spokeBy = (role: string) => (ms: readonly Msg[]): number =>
-  ms.filter((m) => m.from === role).reduce((t, m) => {
-    const said = m.dir === "in" ? m.ts : m.turn.items.filter((it) => it.t === "text").reduce((a, it) => Math.max(a, it.ts ?? 0), 0);
-    return Math.max(t, said);
-  }, 0);
-
-/** 按频道分好的消息, 按数组对象记: 同一份消息只分一遍。 */
-const CHANNELS = new WeakMap<readonly Msg[], Map<string, Msg[]>>();
-const channelsOf = (all: readonly Msg[]) => (ch: string): Msg[] => {
-  const idx = CHANNELS.get(all) ?? ((v) => (CHANNELS.set(all, v), v))(new Map<string, Msg[]>());
-  return idx.get(ch) ?? ((v) => (idx.set(ch, v), v))(all.filter((m) => m.channel === ch));
-};
-
-const memo = <T>(f: (k: string) => T): ((k: string) => T) => {
-  const m = new Map<string, T>();
-  return (k) => (m.has(k) ? m.get(k)! : ((v) => (m.set(k, v), v))(f(k)));
-};
-
-/** 未读的判定 —— 侧栏会话项 / 子项、关系图卡片的红点与名字旁的他人未读都从这一份派生。一句话算 role 的未读:
- *  别人说完的; 它听得到 —— 私聊里说给它的, 或它开过口的群里的 (没开过口的群不在它的会话列表里, 切过去也看不到);
- *  且晚于它在那一处最后开口的 (回过话 = 读到了那里)。「那一处」: 私聊 / 群里说给它的 = 它与发话方的往来, 群里其余的 =
- *  整个群 —— 在群里说过话不等于读过别的线程。水位看全部消息, 不看窗口: 同一句话对同一个 role, 在哪一项里问都是同一个答案。 */
-export interface UnreadIndex {
-  /** 这句是不是 role 的未读。 */
-  of: (role: string) => (m: Msg) => boolean;
-  /** role 自己的全部未读 —— 切到它的视角会看到的那一份。 */
-  all: (role: string) => Msg[];
-}
-
-export const unreadIndex = (all_: readonly Msg[]): UnreadIndex => {
-  const all = all_;
-  const inChannel = channelsOf(all);
-  // 谁在哪个群里开过口、私聊里说给谁的 —— 一遍建好, 每个 role 只看它听得到的那几处。
-  const speakers = all.reduce((idx, m) => (m.channel ? idx.set(m.channel, (idx.get(m.channel) ?? new Set<string>()).add(m.from)) : idx), new Map<string, Set<string>>());
-  const dmTo = all.reduce((idx, m) => {
-    if (!m.channel) (idx.get(m.to) ?? idx.set(m.to, []).get(m.to)!).push(m);
-    return idx;
-  }, new Map<string, Msg[]>());
-  // 说完的时刻要倒着翻一轮的条目, 每个 role 都问一遍 —— 按消息记一次。
-  const fins = new Map<Msg, number | undefined>();
-  const finOf = (m: Msg): number | undefined => (fins.has(m) ? fins.get(m) : ((v) => (fins.set(m, v), v))(doneAt(m)));
-  const of = memo((role: string) => {
-    const said = spokeBy(role);
-    // `<频道>\0<发话方>` = 它与发话方在那一处的往来; 只有频道 = 整个群。
-    const mark = memo((k: string): number => {
-      const [ch = "", from] = k.split("\0");
-      return said(from === undefined ? inChannel(ch) : talkOf(inChannel(ch), role, [from]));
-    });
-    return (m: Msg): boolean => {
-      if (m.from === role || (m.channel ? !speakers.get(m.channel)?.has(role) : m.to !== role)) return false;
-      const ts = finOf(m);
-      return ts !== undefined && ts > mark(m.to === role || !m.channel ? `${m.channel}\0${m.from}` : m.channel);
-    };
-  });
-  const allOf = memo((role: string): Msg[] =>
-    [...(dmTo.get(role) ?? []), ...[...speakers].filter(([, who]) => who.has(role)).flatMap(([ch]) => inChannel(ch))].filter(of(role)));
-  return { of, all: allOf };
-};
-
-/** 一项 (侧栏会话项 / 子项、关系图卡片) 的未读账, 按点开它看到的消息 (windowOf —— 与详情区渲染同一个函数) 切成不相交的两份:
- *  heard  = 这里看得见的未读 (红点): 页面视角的, 加上这一项主人的 —— 点开就读到, 只记在这里;
- *  theirs = 主人在这里看不见的未读 (名字旁): 切到它的视角才看得到。点开这一项读到的不会在这里。
- *  主人缺省 / 就是视角 (群项、视角自己那张卡片) 就没有名字旁。 */
-export interface Ledger { heard: Heard[]; theirs?: Heard[] }
-
-/** keep: 服务端已知不算的 (基线前说完的、记过已读的) 先筛掉, 再按说完的时刻留最近 HEARD_MAX 句。 */
-export const ledgerOf = (ix: UnreadIndex, viewer: string, keep: (h: Heard) => boolean = () => true) => {
-  const mine = ix.of(viewer);
-  const heardOf = (ms: readonly Msg[]): Heard[] =>
-    ms.map((m): Heard => [doneAt(m) ?? 0, m.from, m.to, m.id]).filter(keep).sort((a, b) => a[0] - b[0]).slice(-HEARD_MAX);
-  return (win: readonly Msg[], owner?: string): Ledger => {
-    if (!owner || owner === viewer) return { heard: heardOf(win.filter(mine)) };
-    const theirs = ix.of(owner);
-    const here = new Set(win.map((m) => m.id));
-    return { heard: heardOf(win.filter((m) => mine(m) || theirs(m))), theirs: heardOf(ix.all(owner).filter((m) => !here.has(m.id))) };
-  };
-};
-
-/** 一个 role 的会话项键: 它开过口的群 + 有往来的私聊。mine = talkOf(msgs, role)。 */
-const convKeysOf = (mine: readonly Msg[], role: string): string[] =>
-  [...new Set(mine.filter((m) => !m.channel || m.from === role).map((m) => convKeyOf(m, role)))];
-
-const party = (r: string): boolean => !!r && !r.startsWith("task:") && r !== SYSTEM;
-
-/** 同一句只留一份 (按 id), 时间序。 */
-const mergeHeard = (...hss: ReadonlyArray<readonly Heard[]>): Heard[] =>
-  [...new Map(hss.flat().map((h) => [h[3], h] as const)).values()].sort((a, b) => a[0] - b[0]).slice(-HEARD_MAX);
-
-export interface ConvsOpts {
-  /** 视角选的 session 段: 列哪些项、条数与预览只看这一段; 未读账按点开时的窗口 (windowOf) 切, 裁不裁由 spanFor 定。 */
-  span?: SessionSpan;
-  /** 未读账 (ledgerOf); 不给 = 不算 (搜索只要名字与预览)。 */
-  ledger?: (win: readonly Msg[], owner?: string) => Ledger;
-}
-
-/** 一个 role 参与的全部会话, 最近活动在前。群聊只列它**自己开过口**的 —— 住在里面
- *  (home) 或只是被人叫过一声却没答话的, 都不算参与; 私聊则有往来就在列。 */
-export const convsOf = (all_: readonly Msg[], role: string, dir: Directory, now: number, opts: ConvsOpts = {}): Conv[] => {
-  const msgs = all_.filter((m) => inSpan(opts.span)(m.ts));
-  const mine = talkOf(msgs, role);
-  // 每一项的账都拿点开它时的那一窗来切 —— 详情区取消息的同一个 windowOf。
-  const book = (key: string, withRole: string | undefined, owner: string | undefined): Ledger =>
-    opts.ledger ? opts.ledger(windowOf(all_, role, key, withRole, opts.span), owner) : { heard: [] };
-  return convKeysOf(mine, role)
-    .map((key): Conv => {
-      if (key.startsWith("p:")) {
-        const peer = key.slice(2);
-        const ms = talkOf(mine, role, [peer], "");
-        return {
-          key, kind: "wizard", name: dir.nameOf(peer), label: dir.labelOf(peer), base: "", peer,
-          status: dir.status(peer, now),
-          ...glanceOr(ms, speakerPrefix(dir, role, [peer])), count: ms.length, ...book(key, undefined, peer), subs: [],
-        };
-      }
-      const base = key.slice(2);
-      const all = channelsOf(msgs)(base);
-      const others = [...new Set(all.flatMap((m) => [m.from, m.to]))].filter((r) => r !== role && party(r));
-      // 子项成对: 群里与视角有往来的每个 role 一项, 内容是「我与它」在这个群里的对话 (与点进去的窗口同一份 talkOf)。
-      // 没往来的 count 为 0, 默认不列; 「chat 内全部」下用 whole (它在群里的全部记录) 列出来。
-      // 两份 glance 都走 glanceOfTalk —— 关系图卡片 (/api/glance) 的同一个实现。
-      const subs = others
-        .map((r): ConvSub => {
-          const pair = talkOf(all, role, [r]);
-          const whole = talkOf(all, r);
-          return {
-            role: r, name: dir.nameOf(r), label: dir.labelOf(r), count: pair.length,
-            ...glanceOfTalk(all, role, dir, role, [r], base), status: dir.status(r, now),
-            whole: { count: whole.length, ...glanceOfTalk(all, role, dir, r, [], base) },
-            // 点它打开的窗: 成对 = 群里「我与它」(chat.js subRow), 与我无往来 = 它在群里的全部记录 (chat.js farKey)。
-            ...book(pair.length ? key : `a:${r}||${base}`, pair.length ? r : undefined, r),
-          };
-        })
-        // 成对的排前 (默认只列它们), 其余按它们自己的记录排 —— 截断时先丢与我无往来的。
-        .sort((a, b) => Number(b.count > 0) - Number(a.count > 0) || (a.count ? b.lastTs - a.lastTs : b.whole.lastTs - a.whole.lastTs))
-        .slice(0, SUB_MAX);
-      // 群这一行的红点并上子项的: 子项看得见的也都在群窗里, 收起时群替它们说 —— 子项的数不会大过群。
-      // 与我无往来的子项不按 session 段裁, 落在段外的那几句不在群窗里, 不并。
-      const inGroup = new Set(all.map((m) => m.id));
-      const own = book(key, undefined, undefined).heard;
-      return {
-        key, kind: "group", base,
-        name: dir.chatName(base) || (base.startsWith("user:") ? dir.nameOf(humanOf(base)) : base.replace(/^chat:/, "").slice(0, 10)),
-        label: "💬",
-        ...((w) => (w ? { wx: wxMark(w, now) } : {}))(dir.weixin(base)),
-        ...glanceOr(all, speakerPrefix(dir, role)), count: all.length,
-        heard: mergeHeard(own, ...subs.map((s) => s.heard.filter((h) => inGroup.has(h[3])))), subs,
-      };
-    })
-    .sort((a, b) => b.lastTs - a.lastTs);
-};
-
-/** 每个 role 对应的全部叶子项 —— 群里的成对子项 (它与某个 role 在那个群里有往来, 与 convsOf 的子项
- *  同一口径) 与私聊项 (有往来就算)。侧栏名字旁的「+N」= 这份减去那一项自己。
- *  key 取绝对的 (`c:<base>|<a>|<b>` / `p:<a>|<b>`, 两端排序), 与视角无关。定时与系统不是聊天的一方。 */
-export const chatKeysOf = (all_: readonly Msg[]): Record<string, string[]> => {
-  const party = (r: string): boolean => !!r && !r.startsWith("task:") && r !== SYSTEM;
-  const index = all_.reduce((idx, m) => {
-    const add = (r: string, k: string) => idx.set(r, (idx.get(r) ?? new Set<string>()).add(k));
-    if (party(m.from) && party(m.to)) {
-      const pair = [m.from, m.to].sort().join("|");
-      const k = m.channel ? `c:${m.channel}|${pair}` : `p:${pair}`;
-      add(m.from, k); add(m.to, k);
-    }
-    return idx;
-  }, new Map<string, Set<string>>());
-  return Object.fromEntries([...index].map(([r, ks]) => [r, [...ks]] as const));
-};
-
-/** 一个会话窗口里的消息。`withRole` 只对公开频道有意义: 当前 role 与它在这个频道里的往来。
- *  整个公开频道 (不带 withRole) 是频道里所有人说的话, 不是某个 role 的往来 —— 唯一不走 talkOf 的。 */
-export const convMessages = (msgs: readonly Msg[], role: string, key: string, withRole?: string): Msg[] => {
-  const t = talkArgs(role, key, withRole);
-  return t ? talkOf(msgs, t.who, t.peers, t.chat) : msgs.filter((m) => m.channel === key.slice(2));
-};
-
-/** 一个窗口受不受视角的 session 段裁: 「某人的全部对话」(a:) 不裁 —— 那是视角自己的时间分段, 与那个人无关。 */
-export const spanFor = (key: string, span: SessionSpan | undefined): SessionSpan | undefined =>
-  key.startsWith("a:") ? undefined : span;
-
-/** 点开一项看到的消息 (断点另画) —— 详情区按它渲染, 这一项的未读账 (Ledger) 也按它切: 两边同一个函数,
- *  「看得见」才不会两处各算一套。span = 视角选的 session 段, 裁不裁由 spanFor 定。 */
-export const windowOf = (msgs: readonly Msg[], role: string, key: string, withRole: string | undefined, span: SessionSpan | undefined): Msg[] =>
-  ((sp) => convMessages(msgs, role, key, withRole).filter((m) => inSpan(sp)(m.ts)))(spanFor(key, span));
-
-export interface TalkArgs { who: string; peers: string[]; chat?: string }
-/** 一个窗口交给 talkOf 的入参; 整个公开频道不是谁的往来, 没有。群里选中一个子项 (withRole)
- *  看的是视角与它在这个群里的往来。 */
-export const talkArgs = (role: string, key: string, withRole?: string): TalkArgs | undefined => {
-  const t = parseTalkKey(key);
-  if (t) return t;
-  if (key.startsWith("p:")) return { who: role, peers: [key.slice(2)], chat: "" };
-  return withRole ? { who: role, peers: [withRole], chat: key.slice(2) } : undefined;
-};
-
-/** 纯 wizard↔wizard 的私聊窗口 (两端都是 wizard、没限定到某个群): 里面不画断点 ——
- *  /new 的是 wizard 自己的上下文 (handoff 重开也记一条), 不是这场对话的边界, 署名还会落到人头上。 */
-export const isWizardDm = (role: string, key: string, withRole: string | undefined, dir: Pick<Directory, "isWizard">): boolean => {
-  const t = talkArgs(role, key, withRole);
-  return !!t && !t.chat && t.peers.length > 0 && [t.who, ...t.peers].every(dir.isWizard);
-};
-
-/** 窗口是视角与恰好另一个 role 之间的往来时, 那个 role; 否则 (群 / 多个对端 / 不含视角) 没有。 */
-export const counterpartOf = (viewer: string, t: TalkArgs | undefined): string | undefined => {
-  if (t?.peers.length !== 1) return undefined;
-  const [p] = t.peers;
-  return t.who === viewer ? p : p === viewer ? t.who : undefined;
+  return { state, text: head + (w.held ? " · 📬 压着 " + w.held : ""), tip };
 };
 
 // ── session ───────────────────────────────────────────────────────────
 // 同一个名字下的多个 session (/clear /new 轮换, handoff 重开): 按 sessionId 分段,
-// 每段的时间窗 = [首轮, 下一段首轮)。切换 session 就是按时间窗过滤 —— 同一时段里
-// 群里别人说的话也一并留着, 那是那段 session 听到的上下文。
+// 每段的时间窗 = [首轮, 下一段首轮)。切换 session 就是按时间窗过滤。
 export interface SessionSpan {
   sessionId: string;
   /** 这一段的外沿 (只用于显示/排序); 真正的时间窗是 runs —— 同一 sid 可能被别的轮隔开。 */
@@ -689,16 +140,15 @@ export interface SessionSpan {
   end: number;
   turns: number;
   lastTs: number;
-  /** 同一 sid 的若干时间窗 (至少一段)。只有被隔开时才给: 只一段时就是 [start, end)。 */
+  /** 同一 sid 的若干时间窗 (至少一段)。只有被隔开时才给。 */
   runs?: ReadonlyArray<{ start: number; end: number }>;
 }
 
 export const sessionsOf = (records: readonly DetailRecord[], role: string, now: number): SessionSpan[] => {
   const turns = records.filter(isTurn).filter((r) => r.target === role && !r.agent && !isGhostTurn(r, now))
     .sort((a, b) => a.createdAt - b.createdAt);
-  // 先按**连续**切段 (每段的时间窗 = [本段首轮, 下一段首轮)), 再按 sid 归并 —— 一条 sessionId
-  // 缺失的轮 (旧记录 / 还没回来) 夹在中间, 不能把同一场 session 劈成两段两行: 那样下拉里选它
-  // 只会看到被隔开前的那一小段, 后面的历史像丢了。
+  // 先按连续切段 (每段的时间窗 = [本段首轮, 下一段首轮)), 再按 sid 归并 —— 一条 sessionId
+  // 缺失的轮夹在中间, 不能把同一场 session 劈成两段两行。
   const runs = turns.reduce<Array<{ sessionId: string; rs: TurnDetailRecord[] }>>((acc, r) => {
     const sid = r.sessionId ?? "";
     const cur = acc[acc.length - 1];
@@ -730,7 +180,7 @@ export const sessionsOf = (records: readonly DetailRecord[], role: string, now: 
 export const inSpan = (span: SessionSpan | undefined) => (ts: number): boolean =>
   !span || (span.runs ?? [span]).some((r) => ts >= r.start && ts < r.end);
 
-/** 视角 role 自己的上下文断点 (/clear /new) —— 画在它参与的每个会话窗口里。 */
+/** 视角 role 自己的上下文断点 (/clear /new)。 */
 export const marksOf = (records: readonly DetailRecord[], role: string): MarkDetailRecord[] =>
   records.filter(isMark).filter((m) => m.target === role);
 
@@ -787,18 +237,3 @@ export const roleStats = (records: readonly DetailRecord[], role: string, now: n
     .sort((a, b) => a.createdAt - b.createdAt);
   return turns.length ? summarizeTag(role, turns, now) : undefined;
 };
-
-/** 一个会话窗口的账: 窗口里那几轮, 连同它们派出的子 agent (那也是这段往来的花销)。
- *  人自己不跑轮次, 没有 roleStats —— 它看的是「我与这个 wizard 在这个群里」花了多少。 */
-export const windowStats = (records: readonly DetailRecord[], msgs: readonly Msg[], target: string, now: number): TagSummary | undefined => {
-  const ids = new Set(msgs.map((m) => m.turn.id));
-  const turns = records.filter(isTurn)
-    .filter((r) => ids.has(r.id) || ids.has(r.agent?.parentTurnId ?? ""))
-    .sort((a, b) => a.createdAt - b.createdAt);
-  return turns.length ? summarizeTag(target, turns, now) : undefined;
-};
-
-/** 与别的 role 有没有关系 (家谱 / 私聊 / 派活) —— 决定顶栏要不要出「关系图」入口。 */
-export const hasRelations = (msgs: readonly Msg[], role: string, info: RoleInfo): boolean =>
-  !!info.parent || info.clones.length > 0 || info.spawns.length > 0 ||
-  talkOf(msgs, role).some((m) => m.turn.from?.kind === "peer");
