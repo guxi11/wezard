@@ -169,7 +169,7 @@ tar -xzf "$C/pre-room.tgz" -C "$C/.wezard" && say "C rb 2-5: 从 $C/pre-room.tgz
 say "C ROLLBACK 结束"
 kill -0 "$DPID_C" 2>/dev/null && fail "C 回退后 daemon 还活着"
 [ -d "$C/.wezard/state/rooms.rejected-$TS_C" ] || fail "C 新账本没进 rejected 目录"
-[ -f "$C/.wezard/state/wizards.json" ] || fail "C 备份没还原 wizards.json"
+[ -f "$C/.wezard/wizards.json" ] || fail "C 备份没还原 wizards.json"
 say "C 完成: 闸红后三步回退都执行 (daemon 停 / 账本 rejected / 备份还原)"
 
 say "演练达标: 目录对 → O2 绿 (mem == 重放 == $diskA); 目录错 → O2 红 (mem $memB != 重放 $diskB); 红后回退链 8/6/2 全执行"
