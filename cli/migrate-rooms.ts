@@ -1,6 +1,10 @@
 #!/usr/bin/env node
-// 迁移入口 (契约 §6): 只读源, 写 <home>/rooms/*.jsonl 与 rooms/_archive/ —— 原文件一个字不改。
+// 迁移入口 (契约 §6): 只读源, 写 <stateDir>/rooms/*.jsonl 与 rooms/_archive/ —— 原文件一个字不改。
 //   node dist/cli/migrate-rooms.js [--dry-run] [--home <dir>]       缺省 home = ~/.wezard
+//
+// 账本目录与 daemon 同一处推导 (shared/room.ts roomsDirOf + loadConfig().daemon.stateDir);
+// --home 只挪旧源 (wizards.json / routes.jsonl / state/...), 不挪账本 —— 2026-11-19 切换
+// 失败就是迁移写 <home>/rooms 而 daemon 读 <stateDir>/rooms, 新 daemon 起来账本为空。
 //
 // 幂等: 第二次跑写 0 行 (依据见 shared/room-migrate.ts 顶部两条)。--dry-run 只出报表, 一个文件不碰
 // (连 rooms/ 目录都不建 —— 空目录也算写)。
@@ -12,7 +16,7 @@ import type { ChatLine } from "../shared/chat-record.js";
 import { loadConfig } from "../shared/config.js";
 import { unsettledRoutes } from "../shared/legacy-routes.js";
 import { expandHome } from "../shared/paths.js";
-import type { RoomOp } from "../shared/room.js";
+import { roomsDirOf, type RoomOp } from "../shared/room.js";
 import {
   migrateRooms, renderReport,
   type ChatSnap, type MemberSnap, type MigratePlan, type StoredEvent, type TurnSnap, type WizardSnap,
@@ -103,8 +107,11 @@ const configSteward = (): ((chat: string) => string | undefined) => {
 };
 
 export interface MigrateOptions {
-  /** wezard 的 home (缺省 ~/.wezard): wizards.json / routes.jsonl / state/ / rooms/ 都在这下面。 */
+  /** wezard 的 home (缺省 ~/.wezard): 旧源 (wizards.json / routes.jsonl / state/…) 的根。 */
   home: string;
+  /** 账本基目录: 迁移写 <stateDir>/rooms。缺省 = loadConfig().daemon.stateDir —— daemon 读哪儿迁移就写哪儿,
+   *  两边是同一个 roomsDirOf 推导 (tests/room-ledger-dir.test.ts 钉住)。测试注入指向自己的临时目录。 */
+  stateDir?: string;
   dryRun?: boolean;
   now?: number;
   /** 测试注入; 缺省从 loadConfig() 的 chatPolicy 读绑定管家。 */
@@ -117,13 +124,15 @@ export interface MigrateOutcome {
   written: number;
   /** uncertain 事件归档文件 (没写也在)。 */
   archivePath: string;
+  /** 实际写入的账本目录 (= daemon 读取目录); 第 8 步 O2 闸拿它重放盘上账本。 */
+  roomsDir: string;
 }
 
 /** 读源 → 算 plan → 写盘。写盘走 daemon/rooms.ts 的 store (append + fsync)。 */
 export const runMigrate = (o: MigrateOptions): MigrateOutcome => {
   const home = expandHome(o.home);
   const state = join(home, "state");
-  const roomsDir = join(home, "rooms");
+  const roomsDir = roomsDirOf(o.stateDir ?? loadConfig().config.daemon.stateDir);
   const plan = migrateRooms({
     now: o.now ?? Date.now(),
     wizards: readWizards(join(home, "wizards.json")),
@@ -151,7 +160,7 @@ export const runMigrate = (o: MigrateOptions): MigrateOutcome => {
       writeFileSync(archivePath, JSON.stringify(plan.archive, null, 2) + "\n");
     }
   }
-  return { plan, written, archivePath };
+  return { plan, written, archivePath, roomsDir };
 };
 
 const flagValue = (argv: readonly string[], name: string): string | undefined => {
@@ -162,14 +171,14 @@ const flagValue = (argv: readonly string[], name: string): string | undefined =>
 export const main = (argv: readonly string[] = process.argv.slice(2)): void => {
   // 只认 --dry-run / --home <dir>; 其余参数 (含 --help) 一律拒, 免得误敲一个参数就真写账本。
   const bad = argv.filter((a, i) => a !== "--dry-run" && a !== "--home" && argv[i - 1] !== "--home");
-  if (bad.length) throw new Error("不认识的参数 " + bad.join(" ") + " —— 用法: migrate-rooms [--dry-run] [--home <dir>] (不带 --dry-run 会真写 ~/.wezard/rooms)");
+  if (bad.length) throw new Error("不认识的参数 " + bad.join(" ") + " —— 用法: migrate-rooms [--dry-run] [--home <dir>] (不带 --dry-run 会真写配置 stateDir 下的 rooms)");
   const home = expandHome(flagValue(argv, "--home") ?? "~/.wezard");
   const dryRun = argv.includes("--dry-run");
   const out = runMigrate({ home, dryRun });
   console.log(renderReport(out.plan.report));
   console.log(dryRun
-    ? "(dry-run: 未写任何文件)"
-    : "写入 " + out.written + " 行 → " + join(home, "rooms"));
+    ? "(dry-run: 未写任何文件; 真跑会写 → " + out.roomsDir + ")"
+    : "写入 " + out.written + " 行 → " + out.roomsDir);
 };
 
 const entry = process.argv[1];

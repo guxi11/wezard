@@ -51,7 +51,7 @@ import { stewardRoute as resolveSteward } from "./steward.js";
 import { createRoomWatchdog, parsePaneIds } from "./room-watchdog.js";
 import { createRoomHub, type RoomHub } from "./room-hub.js";
 import {
-  DAEMON, adhocRoomId, dmPeers, dmRoomId, holderOf, isUid, leaveOps, openDuties, renderMsgLine, roomHost, sameWho, whoKey,
+  DAEMON, adhocRoomId, dmPeers, dmRoomId, holderOf, isUid, leaveOps, openDuties, renderMsgLine, roomHost, roomsDirOf, sameWho, whoKey,
   type MsgRow, type ReplyStatus, type RoomOp, type RoomState, type Verdict, type Who,
 } from "../shared/room.js";
 import { CHAT_BATCH_BUDGET, sliceBatch } from "../shared/chat-record.js";
@@ -1198,7 +1198,7 @@ const main = async (): Promise<void> => {
     // room 是唯一的沟通对象: 人话 (inbound) 与 wizard 工具都 append 进同一份账本
     // (daemon/room-hub.ts), 唤醒按 seen 游标重算, 镜像按 §3a 一条规则。旧的路由 /
     // 事件表这一步还并行活着 (B/C 节再拆), 这里只把新面接上。
-    const roomsDir = join(expandHome(cfg.daemon.stateDir), "rooms");
+    const roomsDir = roomsDirOf(cfg.daemon.stateDir);
     const roomStore = openRoomStore(roomsDir);
     /** 损坏的 room 文件 (RoomBroken) 不挡 boot, 也不参与任何判定 —— 只记一行。 */
     const roomState = (id: string): RoomState | undefined => {

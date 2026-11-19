@@ -8,6 +8,8 @@
 // 覆盖检查 / 去重 / 唤醒 / 预算)、host 求值、镜像规则、uid 与 room id 的派生。落盘在
 // daemon/rooms.ts, 接线在 daemon/room-hub.ts。
 import { createHash } from "node:crypto";
+import { join } from "node:path";
+import { expandHome } from "./paths.js";
 
 // ── 身份 ───────────────────────────────────────────────────────────────
 
@@ -41,6 +43,13 @@ export const mintUid = (randomHex: string): string => {
   if (!isUid(uid)) throw new Error("mintUid: need ≥12 hex chars");
   return uid;
 };
+
+// ── 账本目录 ────────────────────────────────────────────────────────────
+
+/** room 账本目录 = <stateDir>/rooms, 唯一推导。daemon 读、迁移写、observe 重放都必须
+ *  从这里取 —— 2026-11-19 切换失败就是迁移自己拼了 <home>/rooms 而 daemon 读 <stateDir>/rooms,
+ *  新 daemon 起来账本为空 (内存 1 / 账本重放 17)。谁都不许再本地 join 一个 rooms 出来。 */
+export const roomsDirOf = (stateDir: string): string => join(expandHome(stateDir), "rooms");
 
 // ── room id ────────────────────────────────────────────────────────────
 

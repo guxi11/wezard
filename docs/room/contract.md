@@ -18,7 +18,7 @@
   - 改名 / 交接 / /new / 换 slot 都不动 uid。
 - 账本里一切 wizard 引用 (Who.id、dm room id、closes 里的 holder、wake) 都用 uid; target / 名字只在投递 pane 和渲染那一刻由 registry 现查。
 - kind 由 id 前缀 + 传输推出: `wecom-group | wecom-dm | topic-post | wx | dm | adhoc`。
-- 落盘: `~/.wezard/rooms/<encodeURIComponent(id)>.jsonl`, 一 room 一文件; `rooms/registry.json` 只是缓存, 可由各文件重建。
+- 落盘: `~/.wezard/state/rooms/<encodeURIComponent(id)>.jsonl` (目录 = roomsDirOf(daemon.stateDir), 配置可改; 迁移 / observe / daemon 同一处推导), 一 room 一文件; `rooms/registry.json` 只是缓存, 可由各文件重建。
 - **消息 id** = `<roomHash8>.<seq>` (如 `a1b2c3d4.41`): 全机唯一, 自带 room (re 一个 id 就知道 room, chat_reply 不必给 room)。
 
 ## 2. 账本行 schema (rooms/<id>.jsonl, append-only, fsync)

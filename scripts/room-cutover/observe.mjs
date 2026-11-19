@@ -49,11 +49,22 @@ if (cmd === "log") {
   const fresh = warnEntries.filter(([m]) => !warnBefore.has(m));
   console.log(fresh.length ? "新出现的 warn 文案 " + fresh.length + " 条 (切换前 24h 没出现过):" : "没有新出现的 warn 文案");
 } else if (cmd === "duties") {
-  const dir = opt("--rooms", join(homedir(), ".wezard", "rooms"));
   const distRoom = opt("--dist", join(import.meta.dirname, "..", "..", "dist", "shared", "room.js"));
-  if (!existsSync(dir)) die("rooms 目录不存在: " + dir);
   if (!existsSync(distRoom)) die("dist/shared/room.js 不存在 (先 npm run build): " + distRoom);
-  const { emptyRoom, applyOp, openDuties } = await import(distRoom);
+  const { emptyRoom, applyOp, openDuties, roomsDirOf } = await import(distRoom);
+  // 缺省目录与 daemon 同一处推导 (stateDir 来自配置) —— 不再硬编码 ~/.wezard/rooms;
+  // 给了 --rooms 就完全不碰配置 (配置坏了也能对着指定目录重放)。
+  const dir = opt("--rooms") ?? await (async () => {
+    const distConfig = join(import.meta.dirname, "..", "..", "dist", "shared", "config.js");
+    if (!existsSync(distConfig)) die("dist/shared/config.js 不存在 (先 npm run build), 或用 --rooms 显式指定: " + distConfig);
+    try {
+      const stateDir = (await import(distConfig)).loadConfig().config.daemon.stateDir;
+      return roomsDirOf(stateDir);
+    } catch (e) {
+      die("默认 rooms 目录从配置推导失败 (" + e.message + "); 可用 --rooms 显式指定");
+    }
+  })();
+  if (!existsSync(dir)) die("rooms 目录不存在: " + dir);
   let total = 0, rooms = 0;
   for (const file of readdirSync(dir).filter((x) => x.endsWith(".jsonl")).sort()) {
     const id = decodeURIComponent(file.slice(0, -6));

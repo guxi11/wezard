@@ -37,8 +37,9 @@ const snapshot = (home: string): string[] =>
     return f + "|" + statSync(p).mtimeMs + "|" + readFileSync(p, "utf8");
   });
 
+// 账本在 <stateDir>/rooms (与 daemon 同一推导); 夹具把 stateDir 设成 <home>/state。
 const readOps = (home: string, room: string): Array<Record<string, any>> => {
-  const p = join(home, "rooms", encodeURIComponent(room) + ".jsonl");
+  const p = join(home, "state", "rooms", encodeURIComponent(room) + ".jsonl");
   return readFileSync(p, "utf8").split("\n").filter((l) => l.trim() !== "").map((l) => JSON.parse(l) as Record<string, any>);
 };
 
@@ -97,7 +98,7 @@ build(home);
 const before = snapshot(home);
 const stewardOf = (chat: string): string | undefined => (chat === WR_A ? "Alice" : undefined);
 
-const out = runMigrate({ home, now: NOW, stewardOf });
+const out = runMigrate({ home, stateDir: join(home, "state"), now: NOW, stewardOf });
 const rpt = out.plan.report;
 
 const uidA = uidOf({ target: WR_A, bornAt: 1000 });
@@ -169,7 +170,7 @@ assert.equal(queued.text, "排队的一句");
 assert.equal(queued.author.id, "u9");
 assert.equal(dmMsgs[1]!.text, "去干这个");
 assert.deepEqual([dmMsgs[1]!.author.id, dmMsgs[1]!.to[0].id], [uidA, uidBobA]);
-const archived = JSON.parse(readFileSync(join(home, "rooms", "_archive", "message-events-uncertain.json"), "utf8")) as Array<{ id: string }>;
+const archived = JSON.parse(readFileSync(join(home, "state", "rooms", "_archive", "message-events-uncertain.json"), "utf8")) as Array<{ id: string }>;
 assert.deepEqual(archived.map((e) => e.id), ["x1"]);
 
 // ⑧ 报表。
@@ -183,13 +184,13 @@ assert.equal(rpt.writes, out.written);
 assert.ok(out.written > 0);
 
 // ⑨ 二次跑: 0 行, 账本一字不动, 源也一字不动。
-const roomsBefore = new Map([WR_A, dm].map((r) => [r, readFileSync(join(home, "rooms", encodeURIComponent(r) + ".jsonl"), "utf8")]));
-const again = runMigrate({ home, now: NOW + 1000, stewardOf });
+const roomsBefore = new Map([WR_A, dm].map((r) => [r, readFileSync(join(home, "state", "rooms", encodeURIComponent(r) + ".jsonl"), "utf8")]));
+const again = runMigrate({ home, stateDir: join(home, "state"), now: NOW + 1000, stewardOf });
 assert.equal(again.written, 0, "二次跑写 0 行");
 assert.deepEqual(again.plan.rooms, [], "没有任何 room 需要追加");
 assert.ok(again.plan.report.duplicate > 0, "跳过的是已有确定键");
 for (const [r, text] of roomsBefore) {
-  assert.equal(readFileSync(join(home, "rooms", encodeURIComponent(r) + ".jsonl"), "utf8"), text, "账本不变: " + r);
+  assert.equal(readFileSync(join(home, "state", "rooms", encodeURIComponent(r) + ".jsonl"), "utf8"), text, "账本不变: " + r);
 }
 assert.deepEqual(snapshot(home), before, "源文件内容与 mtime 一字不动");
 
@@ -197,10 +198,10 @@ assert.deepEqual(snapshot(home), before, "源文件内容与 mtime 一字不动"
 const dryHome = mkdtempSync(join(tmpdir(), "room-mig-dry-"));
 build(dryHome);
 const dryBefore = snapshot(dryHome);
-const dry = runMigrate({ home: dryHome, now: NOW, dryRun: true, stewardOf });
+const dry = runMigrate({ home: dryHome, stateDir: join(dryHome, "state"), now: NOW, dryRun: true, stewardOf });
 assert.ok(dry.plan.report.writes > 0, "dry-run 照样算出要写多少");
 assert.equal(dry.written, 0);
-assert.equal(existsSync(join(dryHome, "rooms")), false, "dry-run 不建目录、不写文件");
+assert.equal(existsSync(join(dryHome, "state", "rooms")), false, "dry-run 不建目录、不写文件");
 assert.deepEqual(snapshot(dryHome), dryBefore, "dry-run 也不碰源");
 
 console.log("room-migrate: all assertions passed");

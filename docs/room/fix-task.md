@@ -44,7 +44,7 @@ daemon/index.ts ≈1755 的 `split("\\n")` 是字面反斜杠 + n, 多 pane 时�
 ## 6. scripts/room-cutover/observe.mjs (只读)
 
 - `log --since <ISO>`: pino 日志按 level 计数 + warn 按 msg 聚合, 与 since 前 24h 对比列出新出现的 warn 文案。
-- `duties`: 读 ~/.wezard/rooms/ 用 dist/shared/room.js 的 fold 重放, 输出未结 duty 数。
+- `duties`: 读 ~/.wezard/state/rooms/ (缺省目录从配置 stateDir 派生, 与 daemon 同一处推导) 用 dist/shared/room.js 的 fold 重放, 输出未结 duty 数。
 - `lag <msgId>`: 从 daemon.log 取 mirrored / delivered 两行, 打 lagMs。
 - `watchdog --since <ISO>`: 每次扫描行数最大值 / 总行数 / 各计数和 / failStreak 最大值。
 - 日志路径与 rooms 目录可用参数覆盖; 用 /tmp 夹具测一遍 (不读线上文件)。
