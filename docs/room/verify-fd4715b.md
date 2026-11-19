@@ -154,7 +154,7 @@ $ git grep -nE "receipts\.json|obligations\.json|idle-nudges\.json|strict-delive
 | chat-record §6 | `chatPolicyOf(...).speech` 缺省 implicit / 显式 strict | `speech` 移出 schema (contract §7) |
 | chat-record 附 | `chatPrincipalOf("wrABC")` → `chat:wrABC` 的键规范 | 不再是导出 (搬进 `daemon/last-response.ts` 内部) |
 | strict-chat | `sayVerdict / openSayMeter / topOnlyVerdict` 判定矩阵 | `daemon/strict-gate.js` 已删 |
-| strict-chat | 额度 (同轮第 4 条 / 同群第 11 条 409) | 随 strict-gate 退役; room 的同类保护是回合预算 (wake budget), 另在 room-duty / room-interrupt |
+| strict-chat | 额度 (同轮第 4 条 / 同群第 11 条 409) | **复核撤销 (LeoAdams)**: 不是「对象不存在」—— design.md:147 / :212 明定额度保留并「openSayMeter 改为全量生效」, 是 C 节漏移植的行为。转入下方行为缺口, 代码由修复单 §9 补, 断言恢复为 room 口径 |
 | strict-chat | 源码切片: `strictSayGate / topOnlyMuted / ops.answer / ops.hand / members.isMember / identityOfTarget / join-repair / spawnJoins` | 这些 handler 与模块已删 |
 | strict-chat | `ChatRecords + members` 的 3 次激活夹具 / chatlog 属性解析 | 两个模块已删; 批行为改写见 C |
 | strict-chat | `openRouter` 的义务账 (每条人话一条行 / answer+hand / 重放 handed) | `daemon/router.js` 已删 |
@@ -194,4 +194,9 @@ $ git grep -nE "receipts\.json|obligations\.json|idle-nudges\.json|strict-delive
 | 文件 | 断言 | 新代码里缺的是什么 |
 |---|---|---|
 | tests/wizard-identity-migration.test.ts:49,66 | 「备份必须是原文件的原样字节」(migrateIdentities 的 `.pre-identities.bak` == 迁移前 wizards.json) | 与 ①-II-1 同一根因: `loadWizardStore` 里的 uid 回填 (daemon/wizard.ts, 12e7ef4 引入) 在 load 时就写穿 `db.set()`, 于是「load → 备份」之间文件已被改写, 备份不再是原样字节。**修在 wizard.ts 的延迟回填 (或迁移前先读原文件字节) 可同时让 class-migration 与本文件转绿**; 测试侧没有可改写的等价断言 (这正是回退要拿的那份保险)。 |
+| tests/strict-chat.test.ts (额度) | 每轮 ≤3 条、每 room 每分钟 ≤10 条, 超出 409 | design.md §147/§212 要求全量生效; C 节删 strict-gate 时 openSayMeter 未移植, room 出站 (room_say / ask / reply / notify / file) 当前无额度。由修复单 §9 补代码与测试 |
 
+### 删除记录复核 (LeoAdams, 2026-11-19)
+- A/B/C 抽查: 被删对象均已不在 daemon/shared/mcp (git grep 零命中, 含 progress-receipt 那行说的 parseClosing / stripClosingMark / isTerminal —— 实际已无源码引用, 判删成立)。
+- 撤销 1 条: strict-chat 额度 (见 B 表该行与行为缺口), 依据 design.md:147/:212。
+- strict-default / strict-switch 整删: 同意 (判定函数与 /strict 命令对象都已不在, G 表同判)。
