@@ -114,81 +114,37 @@ const MODEL_DOC =
 const EFFORT_DOC =
   "推理档位, 启动时就带上 (`--effort`), 之后它每次重启都沿用。判断密集的活给 high 以上, 跑腿的给 low。省略 = 该 CLI 默认 (克隆则跟被克隆者同档)。之后换用 set_model 的 `effort`。";
 
-// ── 跟别的 wizard 说话 ──────────────────────────────────────────────────────
-// 一个工具, 一个语义: **说一句, 不等**。注入完就返回; 对方干完那一轮, 守护进程把它
-// 的结论作为新的一轮自动送回这里 (回执)。发话方的 pane 全程在自己手上。
-const RETURN_DOC =
-  "这件活的回执去哪 (守护进程按 receiver 边投递, 你不递栈): `self` (默认) 结论先回你, 你据此再交代上一层 · `transfer` 尾调用: 把你此刻欠着的那一笔整件交给对方 (把那一笔 move 给它, 不再回到你), 你不再收回执、不再交代 —— 它的结论 (含 NEED / 失败) 直接落到你的上游 (回执信封的 `from` 是接手方); **想自己接 NEED 就别 transfer**; 不能与 re / after / fyi 并用, 那一笔下你还有没落定的子活时不行, 一笔只能交一次 · `detach` 旁支: 结论回你, 但不挂住你给上游的交代 · `none` 放出去不管, 没有回执 (`kind:\"fyi\"` 隐含它)。";
+// ── room: 唯一的沟通对象 ────────────────────────────────────────────────────
+// 一个 room 一份账本 (shared/room.ts), 人和 wizard 走同一个 append 口子。这些工具只负责
+// 把参数变成一次 HTTP 调用 —— 发言权、status 写入权、覆盖检查、唤醒预算都在 daemon 侧。
+// 三条不会变的事实: 完成只认 chat_reply 的 status; 终句没有任何路由语义 (只进 turn store
+// 与 rolepage); 被唤醒的 duty 只能用 chat_reply 交代。
+const ROOM_DOC =
+  "room: 绑定了企微传输的群 / 单聊 / topic 帖写 base principal 原样 (`chat:…` / `user:…`) 或聊天名; " +
+  "`dm:…` 是你和某个 wizard 的两人 room, `adhoc:…` 是 room_open 开的临时 room。缺省 = 唤醒你这一轮的那条消息所在的 room; " +
+  "本轮由多个 room 一起唤醒时必须显式给 (否则 400)。绑定 room 里每条消息都真的进企微, dm / adhoc 只在 rolepage。";
+
+const TO_DOC =
+  "点名的 wizard (裸名, 带 `.` 也认)。只认本 room 的成员 —— chat_say 的 `to` 只是指出对谁说, 不唤醒、不开 duty; chat_ask 的每个 `to` 各开一条 duty。";
+
+const INTERRUPT_DOC =
+  "true = 先 Esc 打断对方当前这一轮再投本条 (不拆 pane)。限权: 只有对方的直属 parent、本 room 的 host、或人能用, 其余 403; 计入本 room 的回合预算 (10 分钟 20 次), 超了 409。被打断那一轮的 duty 不关 —— 它下次被唤醒时按游标重投, 只是那一轮白付。";
 
 const FOR_DOC =
-  "这件活为你欠着的**哪一笔**派的, 写**派活方的名字** (`.x`) 或群名。默认 = 本轮开头那一笔, 通常不用给; 本轮不服务你欠着的那一笔时才给。同一方欠着两笔才需要 event id (400 会列出来)。挂错会压住别人的交代, 所以对不上 → 400 并列出你欠着的那几笔。";
+  "这件活为你欠着的**哪一笔**派的: 写提问方的名字, 或那条消息的 id。只作血缘记录, 不参与关账 (完成只认 status); 缺省 = 本轮唤醒你的那一条, 通常不用给。";
 
-const TELL_SCHEMA = {
-  name: z.string().describe(ADDRESS_DOC),
-  text: z.string().optional().describe("Message to inject. Plain prompt text; slash commands like '/clear' also work. 与 `taskFile` 至少给一个; 两者都给时以 `text` 为准, `taskFile` 被忽略。"),
-  // 长协议正文走「模板 + daemon 展开」: 调用方只出路径与参数, 免去逐字手抄
-  // (手抄既贵又无完整性校验, 抄丢一节对方会带着缺规则静默作答)。
-  taskFile: z.string().optional().describe("模板文件路径, **相对你的工作区**的相对路径 (绝对路径与 `~` 开头一律 400)。daemon 读模板、用 `params` 插值出**注入的全文**; 与 `text` 至少给一个, 长正文别逐字抄进 `text`。"),
-  params: z.record(z.string()).optional().describe("`taskFile` 模板里 `{{name}}` 占位符的参数值 (全为字符串)。缺参数 / 多余参数都会被 400 拒绝。"),
-  priority: z
-    .enum(["normal", "urgent", "now"])
-    .optional()
-    .describe(
-      "对方**正忙**时怎么投 (它闲着三者一样, 立刻投)。`normal` (默认) 等它这一轮结束再投 —— 派新活用它, 否则你和别人的两段话会挤进同一个输入框被当成一轮读掉; 等的是你这次调用 (最多 `waitSec`)。`urgent` 先打断它这一轮 (同 stop_wizard 的 interrupt) 再投 —— 只给真紧急的改道, 它手上那一轮作废; 那一轮若是别的 wizard 派的活, 不打断, 降成 normal (回包 `urgentDowngraded`)。`now` 不等不打断, 落进它的输入框并进当前这一轮 —— 插话、补一句、答它的问。带 `re` 续问时默认 `now`。返回里 `wasBusy` / `interrupted` / `waitedMs` 说明实际怎么投的。",
-    ),
-  waitSec: z.number().optional().describe("`normal` 等它闲下来最多等多少秒 (10-3600, 默认 600)。等不到就返回失败, 不会强行投。"),
-  planId: z.string().optional().describe("这次派活归属的 plan id。仅关联 event 供 owner 的闲时提醒判断，不会自动推进 plan。补充同一 event 时沿用原关联。"),
-  public: z
-    .boolean()
-    .optional()
-    .describe("true = 在公开频道 (你这一轮所在的群) 里说: 群里出 `.你: .它` 气泡, 它的回复也进群 (同时照样回执给你)。默认 false = 私聊, 只记在 rolepage。需要人知道 / 该当着人讨论才用 true。"),
-  return: z.enum(["self", "transfer", "detach", "none"]).optional().describe(RETURN_DOC),
-  for: z.string().optional().describe(FOR_DOC),
-  kind: z
-    .enum(["task", "ask", "fyi"])
-    .optional()
-    .describe("对方该怎么接这句话 (与 `priority` 的何时投、`return` 的要不要回执正交): `task` (默认) 一件活, 同一发送者与接收者的未完成任务会合并补充; `ask` 提一个问题, 可用于正常反问/追问; `fyi` 知会, 不用回。"),
-  re: z.union([z.boolean(), z.string()]).optional().describe("续问参数。重复派活会自动补充同一接收者的未完成任务, 不需要 `re`。`true` 可把内容追加到明确指定的原件; 有多个相关路由时以 event id 指明。"),
-  force: z
-    .boolean()
-    .optional()
-    .describe("派新活给一个缓存已冷、ctx ≥100k 的 wizard 时, 守护进程先退回一行代价说明不投递 (唤醒 ≈ 白板 spawn 的几倍)。确认这件活真依赖它那段上下文, 才带 `force:true` 重发; 否则白板 spawn。续问 (`re`)、`now`、`ask` / `fyi` 不受此限。"),
-  after: z
-    .array(z.string())
-    .optional()
-    .describe("receiver 欠账依赖: wizard 名字数组 (= 你派给它的那一笔: 在飞的优先, 否则最近落定的; 并发两笔才需写 event id), 都得是你自己派出去的件 (查不到 → 400)。全部回执为 done 就立即投; 有失败前置 → 409; 还有未落定前置就持久停放, 前置都 done 后由 daemon 投递并把前置结论附在信封上。只用于新 task、不带 re；独立于 plans DAG。"),
-};
+const STATUS_DOC =
+  "done = 做完了 · passed = 无需答复 · canceled = 不做了 (这三者关账) · need = 反问, 等提问方补信息 · progress = 中间进展 (后两者不关账)。";
 
-const TELL_DESC =
-  "跟另一个 wizard 说话 —— 文本原样落进它的输入框, 它当成新的一轮接手 (派活、答它的问题、叫它继续都走这里)。目标不存在就先 spawn_wizard / clone_wizard。独立新活先按目标与难度 delegate; re / now 仅用于当前任务的补充证据、纠正或答问, 不把无关小活追加给正在处理复杂任务的 lead, 也不要用 ask 包装需要另行检查的新任务。\n" +
-  "返回实际队列状态、事件标识及异常信息，不重复固定回执提示。对方用行首的 @.你的名字 RESULT: 提交结果后, 结果持久化为回执；同批结果收齐再合并送到你这里, 你正忙时排队。等待回执不阻止你接收其他消息。对方长任务每阶段可用 PROGRESS: 报一行进展 (任务不因此落定)。\n" +
-  "默认私聊, 只记在双方 rolepage; 守护进程给 `text` 挂信封 (发话人、私聊/公开、终句收口约定)。拒绝对自己发送。\n" +
-  "**协作方向**: wizard 的直属 parent 代表管理归属；横向沟通不改变家谱。反问用 `kind:\"ask\"`，知会用 `kind:\"fyi\"`，派新工作用默认 `task`。`fyi` 永远放行。";
-
-const tellBody = (a: { name: string; text?: string; taskFile?: string; params?: Record<string, string>; kind?: string; priority?: string; waitSec?: number; planId?: string; public?: boolean; re?: boolean | string; force?: boolean; after?: string[]; return?: string; for?: string }) => ({
-  name: a.name,
-  ...(a.text !== undefined ? { text: a.text } : {}),
-  ...(a.taskFile !== undefined ? { taskFile: a.taskFile } : {}),
-  ...(a.params !== undefined ? { params: a.params } : {}),
-  ...(a.return ? { return: a.return } : {}),
-  ...(a.for ? { for: a.for } : {}),
-  ...(a.kind ? { kind: a.kind } : {}),
-  ...(a.priority ? { priority: a.priority } : {}),
-  ...(a.waitSec ? { waitSec: a.waitSec } : {}),
-  ...(a.planId ? { planId: a.planId } : {}),
-  ...(a.public ? { public: true } : {}),
-  ...(a.re !== undefined ? { re: a.re } : {}),
-  ...(a.after?.length ? { after: a.after } : {}),
-  // 显式传布尔值, 让 daemon 只在调用方明确请求时越过冷缓存门控。
-  force: a.force === true,
-});
+const ASK_KIND_DOC =
+  "`ask` (默认) 一个问题, `task` 一件活 —— 两者都开 duty, 区别只写在行上给读的人看。";
 
 // 交接只有一个动词: 不点名 = 交接你自己 (你写简报), 点名 = 替别人交接 (守护进程让它写)。
 const handoffSelf = (tool: string, brief: string) =>
   daemonPost("/wizard/handoff-self", { brief }).then((r) => unwrap(tool, r));
 
 const DELEGATE_DESC =
-      "派活一步到位: 给 task 或 taskFile+params。返回实际决定、目标、队列状态、event 与档位；dryRun 只返回决定与简短理由。lead 只在复杂任务使用。planId 只记录 event 与 plan 的关联，daemon 不会代替 owner 推进 DAG。\n" +
+      "派活一步到位: 给 task 或 taskFile+params。产出是一条 chat_ask —— 选中的 wizard 收到一条 duty, 只能用 chat_reply 交代, 没有别的回执通道; 返回实际决定、目标、room 与档位, dryRun 只返回决定与简短理由。lead 只在复杂任务使用。planId 只记录 event 与 plan 的关联，daemon 不会代替 owner 推进 DAG。\n" +
       "先按验收目标分清独立新活和原任务续篇。独立新活另派不等于强制新生, 允许复用近期实际材料相关、空闲且无职责占用的非 lead; 按本次难度派, 不因同项目、公共 AGENTS.md/CLAUDE.md 或词面重叠塞给已有 lead。自动复用要求实质上下文证据、无 lead/任务占用、成本合适; 其余白板 spawn。难度看所需判断而非句长: 指明函数、接口、文件、按钮等具体对象且范围清楚的低风险 coding 默认 light; 其他常规任务默认 standard; 只有复杂方案判断、疑难升级或安全/并发/架构等高风险审查才显式 hard。\n" +
       "你不同意就**显式推翻**: `to` 用于人明确指定或已确认必需的上下文连续性, `spawn:true` 硬要新的, `force:true` 只越过缓存成本门控, 不放宽自动复用的相关性。复杂任务用 `lead:true`: lead 建 plan，按阶段创建执行者并验收；简单任务直接派活、不建 plan。";
 
@@ -199,19 +155,17 @@ const DELEGATE_SCHEMA = {
       task: z.string().optional().describe("这件活的正文, 与 `taskFile` 二选一。给了 `taskFile` 就别再给 task —— 守护进程用展开后的全文派生选人与默认 description。写清目标与交付, 带文件名 / 模块名帮助找上下文; 公共规则文件或同目录不构成复用理由。不要把独立核查改写成原 lead 的附加交付。"),
       taskFile: z.string().optional().describe("模板文件路径, **相对你的工作区**的相对路径 (绝对路径与 `~` 开头一律 400)。给了它, 投递正文由 daemon 用模板 + `params` 展开; 与 `task` 至少给一个。"),
       params: z.record(z.string()).optional().describe("`taskFile` 模板里 `{{name}}` 占位符的参数值 (全为字符串)。缺参数 / 多余参数都会被 400 拒绝。"),
-      return: z.enum(["self", "transfer", "detach", "none"]).optional().describe(RETURN_DOC + " delegate 不能配 lead:true 用 transfer。"),
       for: z.string().optional().describe(FOR_DOC),
       name: z.string().optional().describe("可选的新 wizard 短名, 不是已有执行者的地址 (指定已有执行者用 to)。推荐省略或空白，新建时由 daemon 分配全机唯一中性英文名，职责另存; 复用时忽略。"),
       description: z.string().optional().describe("可选的新 wizard 职责, 一句话。省略或空白 = 取 task 摘要; 复用时忽略。"),
       tier: z.enum(TIERS).optional().describe("本次任务难度及 spawn 档位 (mini / light / standard / hard / ultra)。明确代码对象且范围清楚的低风险 coding 默认 light; 其他常规任务默认 standard; lead 默认 hard。只有复杂方案判断、疑难升级或安全/并发/架构等高风险审查才 hard / ultra。显式 tier 覆盖默认, 按所需判断而非句长选。复用已有 wizard 不会切换它的模型。"),
-      to: z.string().optional().describe("显式选定已有 wizard (名字), 绕过自动选人。仅在人明确指定执行者或必需上下文已确认时使用; 不能仅因同项目或已有 lead 在场。原任务续篇用 tell_peer re。"),
+      to: z.string().optional().describe("显式选定已有 wizard (名字), 绕过自动选人。仅在人明确指定执行者或必需上下文已确认时使用; 不能仅因同项目或已有 lead 在场。原任务续篇用 chat_ask 指回原活。"),
       spawn: z.boolean().optional().describe("推翻默认: 不看候选, 一定白板 spawn。"),
       force: z.boolean().optional().describe("越过冷门控: 缓存冷且 ctx ≥100k 的候选默认不转; 确认这件活真依赖它那段上下文才给 true。"),
-      lead: z.boolean().optional().describe("复杂任务由 lead 统筹并逐阶段维护 plan；简单任务不要建 plan。复杂协作默认私聊，结果由你向用户交付。"),
+      lead: z.boolean().optional().describe("复杂任务由 lead 统筹并逐阶段维护 plan；简单任务不要建 plan。产出是一条 chat_ask —— 结果由你在它交代后自己收口。"),
       planId: z.string().optional().describe("这次派活归属的 plan id。仅关联event供owner的闲时提醒判断，不会自动推进plan；补充同一event时沿用关联。"),
-      public: z.boolean().optional().describe("默认 true (气泡与回复进群); false = 私聊, 只记 rolepage。"),
+      room: z.string().optional().describe(ROOM_DOC + " 给了就把这条 chat_ask 落在这个 room (选中的子 wizard 以 spawn 免审入群)。"),
       dryRun: z.boolean().optional().describe("只要默认决定与理由, 不执行。"),
-  join: z.object({ chat: z.string().describe("聊天名或 principal"), mode: z.enum(["speaker", "mention"]).optional() }).optional().describe("把它带进一个严格模式群当成员 (chat = 聊天名或 principal; mode 只记录入群方式: 缺省 mention = 人点名带入, speaker = 成员带入 —— 发言权相同)。只在 strict 群生效, 别的群忽略。"),
     };
 
 const runDelegate = async (tool: string, a: z.infer<z.ZodObject<typeof DELEGATE_SCHEMA>>) => {
@@ -226,7 +180,7 @@ const runDelegate = async (tool: string, a: z.infer<z.ZodObject<typeof DELEGATE_
 const offspringShape = {
   description: z.string().describe("它负责什么, 一句话。它会写进它的系统提示, 也会出现在名册里让别人看到。"),
   name: z.string().optional().describe("它的名字 (如 'docs'、'fix', 带不带 '.' 都行)。全机唯一。推荐省略，由 daemon 分配中性英文名，职责另存。"),
-  task: z.string().optional().describe("就位后立刻派下去的第一件活 (私聊)。省略则它就位待命。"),
+  task: z.string().optional().describe("就位后立刻开一条 duty 派下去 (等同一次 chat_ask)。省略则它就位待命。"),
   // 出生投递 (bearAs 内直接 acceptPeerDispatch) 不经 tell 的模板展开入口 —— 第一期
   // 不接 taskFile。声明出来是为了显式报错: 没声明的字段会被 zod 静默剥掉, 调用方
   // 会以为模板生效了而实际投出去的是空/残正文。
@@ -237,12 +191,11 @@ const offspringShape = {
   model: z.string().optional().describe(MODEL_DOC),
   effort: z.enum(EFFORTS).optional().describe(EFFORT_DOC),
   planId: z.string().optional().describe("若task属于现有plan，指定plan id以关联派活event；plan仍由owner显式更新。"),
-  return: z.enum(["self", "transfer", "detach", "none"]).optional().describe("带了 task 时这件活的回执去哪, 同 tell_peer 的 `return`: `transfer` = 把这一轮欠着的那一笔 (人问的那一轮也算) 整件交给新生的它, 它的终句直接交付人, 你静默收口。"),
-  for: z.string().optional().describe("带了 task 时这件活为你欠着的哪一笔派的, 同 tell_peer 的 `for`。"),
-  join: z.object({ chat: z.string().describe("聊天名或 principal"), mode: z.enum(["speaker", "mention"]).optional() }).optional().describe("把它带进一个严格模式群当成员 (chat = 聊天名或 principal; mode 只记录入群方式: 缺省 mention = 人点名带入, speaker = 成员带入 —— 发言权相同)。只在 strict 群生效, 别的群忽略。"),
+  for: z.string().optional().describe(FOR_DOC),
+  room: z.string().optional().describe(ROOM_DOC + " 给了就让它在那个 room 里入座 (via spawn, 免审) 并把这件活落在那儿; 省略 = 你的 room。"),
 };
 
-type Offspring = { lead?: boolean; description: string; name?: string; task?: string; taskFile?: string; params?: Record<string, string>; from?: string; cwd?: string; chat?: string; model?: string; effort?: string; tier?: string; planId?: string; return?: string; for?: string; join?: { chat: string; mode?: "speaker" | "mention" } };
+type Offspring = { lead?: boolean; description: string; name?: string; task?: string; taskFile?: string; params?: Record<string, string>; from?: string; cwd?: string; chat?: string; room?: string; model?: string; effort?: string; tier?: string; planId?: string; for?: string };
 
 const bear = (tool: string, inherit: boolean) => async (a: Offspring) => {
   // 见 offspringShape 的 taskFile 注释: 出生投递没有模板展开这一站。
@@ -257,11 +210,10 @@ const bear = (tool: string, inherit: boolean) => async (a: Offspring) => {
     ...(a.planId ? { planId: a.planId } : {}),
     ...(a.cwd ? { cwd: a.cwd } : {}),
     ...(a.chat ? { chat: a.chat } : {}),
-    ...(a.join ? { join: a.join } : {}),
+    ...(a.room ? { room: a.room } : {}),
     ...(a.model ? { model: a.model } : {}),
     ...(a.effort ? { effort: a.effort } : {}),
     ...(a.tier ? { tier: a.tier } : {}),
-    ...(a.return ? { return: a.return } : {}),
     ...(a.for ? { for: a.for } : {}),
     ...(a.lead ? { lead: true } : {}),
   }));
@@ -281,7 +233,7 @@ export const createWezardServer = (): McpServer => {
 
   // 人侧 / 罕用的工具 (30 天零调用: 本机会话清单与改接、聊天目录) 不进默认
   // 工具面 —— 每个注册的工具都占模型的上下文, 而这些要么人在 IM 里有对应命令 (`/sessions`
-  // `/chats`), 要么由 tell_peer + 回执覆盖。路由都还在; `WEZARD_MCP_EXTRA=1` 把它们挂回来。
+  // `/chats`), 要么由 chat_ask / room_read 覆盖。路由都还在; `WEZARD_MCP_EXTRA=1` 把它们挂回来。
   const registerRare: typeof server.registerTool =
     process.env.WEZARD_MCP_EXTRA === "1" ? server.registerTool.bind(server) : ((() => undefined) as never);
 
@@ -439,59 +391,209 @@ export const createWezardServer = (): McpServer => {
     inputSchema: { planId: z.string().trim().min(1), ...PlanUpdateSchema.innerType().shape },
   }, async (a) => unwrap("plan_update", await daemonPost("/plans/update", a as Record<string, unknown>)));
 
-  // ── P7-S2 群聊严格治理 (chat_*): 常规注册 —— implicit 群 handler 一律 409 指路,
-  //  strict 群的成员制 / 义务账 / 出站门都靠这四个工具。──
-  server.registerTool(
-    "chat_members",
-    {
-      title: "List members of a strict chat",
-      description:
-        "列出严格模式群 (chatPolicy.speech=strict) 的成员与在场方式 (owner=管家 / speaker·mention=成员, 发言权相同 —— mode 只记录入群方式) 与各自已读到的聊天记录游标。implicit 群一律 409 —— 成员制只在 strict 群生效。人侧对应命令 /owed。",
-      inputSchema: {
-        chat: z.string().optional().describe("聊天名或 principal; 缺省 = 当前轮所在的聊天"),
-      },
-    },
-    async ({ chat }) => unwrap("chat_members", await daemonPost("/chat/members", { ...(chat ? { chat } : {}) })),
-  );
+  // ── chat_* / room_*: room 是唯一的沟通对象 ────────────────────────────────
+  // 这九个工具就是全部出站与全部可见性管理 —— 没有「回执」通道, 也没有终句兜底:
+  // 要谁收到什么, 就写成一行; 要关一笔账, 就给 chat_reply 的 status。
   server.registerTool(
     "chat_say",
     {
-      title: "Speak into a strict chat",
+      title: "Say something in a room",
       description:
-        "在严格模式群里发言: 成员即可 (不挂义务、不限一条人话一条出站), 每轮 ≤3 条、每群每分钟 ≤10 (与 chat_reply / notify / send_file 共用额度); 非成员 403。派活 ack / 中间进展用它 —— 出站不销义务的账, 结论交付才用 chat_reply。implicit 群 409: 出站不受发言权约束, 直接回复 / notify 即可。",
-      inputSchema: {
-        chat: z.string().optional().describe("聊天名或 principal; 缺省 = 当前轮所在的聊天"),
+        "在一个 room 里说一句 (不开 duty、不关账)。绑定 room 里这一行就真的进企微; dm / adhoc 只在 rolepage。派活 ack / 中间进展 / 只是想让别人看见一句话, 都用它。`to` 只指出对谁说, 不唤醒、不开 duty —— 要对方交代就用 chat_ask。",
+      inputSchema: currentAddressSchema({
+        room: z.string().optional().describe(ROOM_DOC),
         text: z.string().describe("要说的话 (markdown)"),
-      },
+        to: z.array(z.string()).optional().describe(TO_DOC),
+        interrupt: z.boolean().optional().describe(INTERRUPT_DOC),
+      }),
     },
-    async ({ chat, text }) => unwrap("chat_say", await daemonPost("/chat/say", { ...(chat ? { chat } : {}), text })),
-  );
-  server.registerTool(
-    "chat_reply",
-    {
-      title: "Reply to an obligation in a strict chat",
-      description:
-        "答一条义务 / 回一条群消息: re 是那条消息的 id (chatlog 信封 / 提醒里带的 msg)。带 text = 显式答复: 流窗口内覆盖占位气泡交付 (窗口过了走群消息) 并把这笔义务销账; 不带 text = 记 passed (无需答复, 只能记在自己未结的义务上)。义务已结或欠在别人手上时照样能回 —— 只发言, 不销账 (ack / 进展请改用 chat_say, 不销账)。同一条义务可多次回复; 幂等键 chat_reply:<re>:<contentRev>, 同 re 同文重试不重复发送。implicit 群 409: 回执按现行口径 (行首 .name RESULT: / 自动回执) 走。",
-      inputSchema: {
-        re: z.string().describe("要答的那条消息的 id (chatlog 信封 / 提醒里带的 msg)"),
-        text: z.string().optional().describe("答复正文; 缺省 = 记 passed (仅自己未结的义务)"),
-      },
-    },
-    async ({ re, text }) => unwrap("chat_reply", await daemonPost("/chat/reply", { re, ...(text !== undefined ? { text } : {}) })),
+    async ({ room, text, to, interrupt }) =>
+      unwrap("chat_say", await daemonPost("/room/say", {
+        ...(room ? { room } : {}),
+        text,
+        ...(to?.length ? { to } : {}),
+        ...(interrupt ? { interrupt: true } : {}),
+      })),
   );
   server.registerTool(
     "chat_ask",
     {
-      title: "Ask a member in a strict chat",
+      title: "Ask a wizard in a room (opens a duty)",
       description:
-        "在严格模式群里向某个成员开一条义务 (对方用 chat_reply 答): 你必须是该群成员, 对方也必须是 (否则 409 指路); 问话连同它游标之后的聊天记录批一起注入。implicit 群 409: 直接 tell_peer / delegate 即可。",
-      inputSchema: {
-        chat: z.string().optional().describe("聊天名或 principal; 缺省 = 当前轮所在的聊天"),
-        name: z.string().describe("要问的成员 (裸名)"),
-        text: z.string().describe("要问的话"),
-      },
+        "向 room 里的一个或多个 wizard 开一条 duty —— 派活、提问、催一件没交代的事都走它。对方只能用 chat_reply 交代 (done / passed / canceled 才关账)。缺省 room 的落点: `to` 全是本 room 成员 → 本 room; 单个 `to` 不是成员 → 自动落你和它的 dm room; 多个 `to` 里有非成员 → 400, 先 room_open。回包的 `id` 就是这一行的消息 id, 之后可以用 room_read 查、用 chat_reply 答。",
+      inputSchema: currentAddressSchema({
+        room: z.string().optional().describe(ROOM_DOC),
+        to: z.union([z.string(), z.array(z.string())]).describe(TO_DOC),
+        text: z.string().describe("这件活 / 这一问的正文。写清目标、交付与验收; 对方看不到你这一轮的上下文。"),
+        kind: z.enum(["ask", "task"]).optional().describe(ASK_KIND_DOC),
+        after: z.array(z.string()).describe("前置: 这些消息 id 的 duty 全部 done 之前不唤醒它 (跨 room 也行)。省略 = 无前置。").optional(),
+        for: z.string().optional().describe(FOR_DOC),
+        planId: z.string().optional().describe("这件活归属的 plan id, 只做关联记录 —— daemon 不替你推进 DAG。"),
+        interrupt: z.boolean().optional().describe(INTERRUPT_DOC),
+      }),
     },
-    async ({ chat, name, text }) => unwrap("chat_ask", await daemonPost("/chat/ask", { ...(chat ? { chat } : {}), name, text })),
+    async ({ room, to, text, kind, after, for: lineage, planId, interrupt }) =>
+      unwrap("chat_ask", await daemonPost("/room/ask", {
+        ...(room ? { room } : {}),
+        to: Array.isArray(to) ? to : [to],
+        text,
+        ...(kind ? { kind } : {}),
+        ...(after?.length ? { after } : {}),
+        ...(lineage ? { for: lineage } : {}),
+        ...(planId ? { planId } : {}),
+        ...(interrupt ? { interrupt: true } : {}),
+      })),
+  );
+  server.registerTool(
+    "chat_reply",
+    {
+      title: "Close (or field) a duty — the only completion signal",
+      description:
+        "答一条或多条 duty。room 由 `re` 定 —— 消息 id 全机唯一, 自带 room, 不用给。status: " + STATUS_DOC +
+        " 只有该 duty 的处理人 (或人) 能写 status, `re` 数组里任一条不归你 → 整行 403。不带 status 且你是处理人 = 有正文记 done、没正文记 passed; 不是处理人 = 普通线程回复 (不关账)。追问用 need, 长活中间报一句用 progress。",
+      inputSchema: currentAddressSchema({
+        re: z.union([z.string(), z.array(z.string())]).describe("要答的那些消息 id (信封 / 注入的未读行头部的 `[<id>]`)。"),
+        text: z.string().optional().describe("答复正文; 不给 (且你是处理人) = passed。"),
+        status: z.enum(["done", "need", "progress", "passed", "canceled"]).optional().describe(STATUS_DOC),
+      }),
+    },
+    async ({ re, text, status }) =>
+      unwrap("chat_reply", await daemonPost("/room/reply", {
+        re: Array.isArray(re) ? re : [re],
+        ...(text !== undefined ? { text } : {}),
+        ...(status ? { status } : {}),
+      })),
+  );
+
+  // ── room 管理面 ──────────────────────────────────────────────────────────
+  server.registerTool(
+    "room_open",
+    {
+      title: "Open an adhoc room",
+      description:
+        "开一个 `adhoc:…` 临时 room 并把 `with` 里的人拉进来 (你按 ord=1 入座, 是这个 room 的 host)。多步的活默认开一个跟进 room 把事情关在里面 —— 只有需要人和执行者直接对话时, 才把人拉进主 room。room 没有绑定传输, 消息只在 rolepage 可见。",
+      inputSchema: currentAddressSchema({
+        with: z.array(z.string()).describe("拉进来的 wizard 名 (裸名)。"),
+        title: z.string().optional().describe("这个 room 干什么用, 一句话。"),
+      }),
+    },
+    async ({ with: members, title }) =>
+      unwrap("room_open", await daemonPost("/room/open", { with: members, ...(title ? { title } : {}) })),
+  );
+  server.registerTool(
+    "room_invite",
+    {
+      title: "Invite someone into a room",
+      description:
+        "把 `who` 拉进 room: host / 人 / 拉自己直属的子 wizard 时立即入群 (via invite / spawn); 其余成员的邀请转成一条 join-req, 等 host 批。",
+      inputSchema: currentAddressSchema({
+        room: z.string().describe(ROOM_DOC),
+        who: z.string().describe("要拉进来的 wizard 名 (裸名)。"),
+      }),
+    },
+    async ({ room, who }) => unwrap("room_invite", await daemonPost("/room/invite", { room, who })),
+  );
+  server.registerTool(
+    "room_join",
+    {
+      title: "Ask to join a room",
+      description:
+        "申请加入一个你还不是成员的 room: 写一条 join-req 并唤醒 host。批准之前你在那个 room 里的话落不成行。`reason` 是给 host 看的理由, 一句话。",
+      inputSchema: currentAddressSchema({
+        room: z.string().describe(ROOM_DOC),
+        reason: z.string().describe("为什么需要进来, 一句话。"),
+      }),
+    },
+    async ({ room, reason }) => unwrap("room_join", await daemonPost("/room/join", { room, reason })),
+  );
+  server.registerTool(
+    "room_approve",
+    {
+      title: "Approve or reject a join request",
+      description:
+        "host / 人批一条 join-req: `accept:false` 拒绝。`re` 是那条 join-req 的消息 id。",
+      inputSchema: currentAddressSchema({
+        re: z.string().describe("join-req 的消息 id。"),
+        accept: z.boolean().describe("true = 放进来, false = 拒绝。"),
+      }),
+    },
+    async ({ re, accept }) => unwrap("room_approve", await daemonPost("/room/approve", { re, accept })),
+  );
+  server.registerTool(
+    "room_leave",
+    {
+      title: "Leave a room (or remove someone)",
+      description:
+        "退出 room, 缺省是自己; host / 人可以用 `who` 移出别人。你手上这个 room 未结的 duty 由守护进程写成 canceled 并唤醒提问者 —— 走之前能交代的先 chat_reply 交代。",
+      inputSchema: currentAddressSchema({
+        room: z.string().describe(ROOM_DOC),
+        who: z.string().optional().describe("移出谁 (wizard 名)。省略 = 自己退出。"),
+      }),
+    },
+    async ({ room, who }) => unwrap("room_leave", await daemonPost("/room/leave", { room, ...(who ? { who } : {}) })),
+  );
+  server.registerTool(
+    "room_members",
+    {
+      title: "Who is in this room",
+      description:
+        "列本 room 的成员 (加入序、host、各自未结 duty 数) 与已读游标。纯文本。缺省 = 唤醒你这一轮的 room。",
+      inputSchema: currentAddressSchema({ room: z.string().optional().describe(ROOM_DOC) }),
+    },
+    async ({ room }) => unwrapText("room_members", await daemonPost("/room/members", { ...(room ? { room } : {}) })),
+  );
+  server.registerTool(
+    "room_transfer",
+    {
+      title: "Hand a duty over to another wizard",
+      description:
+        "把一条 duty 转给另一个 wizard (账本上写一行 move, 关账权随之过去)。`to` 不是成员时按 room_invite 的规则先入群。转出去之后这件事不再归你, 你也不需要再 chat_reply 它。",
+      inputSchema: currentAddressSchema({
+        re: z.string().describe("要转的那条 duty 的消息 id。"),
+        to: z.string().describe("转给谁 (wizard 名, 裸名)。"),
+      }),
+    },
+    async ({ re, to }) => unwrap("room_transfer", await daemonPost("/room/transfer", { re, to })),
+  );
+  server.registerTool(
+    "room_read",
+    {
+      title: "Read a room's ledger",
+      description:
+        "读 room 账本, 纯文本, 一行一条 (行首 `[<id>]` 就是可以拿去 chat_reply 的 id)。默认只给游标之后你还没读过的那些; `all:true` 给全量。按时间 / 条数翻: `from` 从某条 id 之后, `since` / `until` 按时刻, `limit` 条数, `per` 单条字数上限。想读某个 wizard 会话里的原始对话用 peek_peer; 频道 (topic) 的历史用 read_channel。",
+      inputSchema: currentAddressSchema({
+        room: z.string().optional().describe(ROOM_DOC),
+        from: z.string().optional().describe("从这条消息 id 之后开始 (不含它)。"),
+        since: z.string().optional().describe("从什么时候起: `2h` / `30m` / `3d`、`14:30`、`09-30 14:30` 或 ISO 时间。"),
+        until: z.string().optional().describe("到什么时候为止 (不含), 写法同 `since`。往回翻页就把回执里给的时刻传进来。"),
+        limit: z.number().optional().describe("最多回多少条 (1-200)。"),
+        all: z.boolean().optional().describe("true = 不看游标, 给全量 (受 limit / 时间窗约束)。"),
+        per: z.number().optional().describe("单条正文最多多少字 (40-4000, 默认 500); 超出的标成 `…(+N)`。"),
+      }),
+    },
+    async ({ room, from, since, until, limit, all, per }) =>
+      unwrapText("room_read", await daemonPost("/room/read", {
+        ...(room ? { room } : {}),
+        ...(from ? { from } : {}),
+        ...(since ? { since } : {}),
+        ...(until ? { until } : {}),
+        ...(limit ? { limit } : {}),
+        ...(all ? { all } : {}),
+        ...(per ? { per } : {}),
+      })),
+  );
+  server.registerTool(
+    "room_watch",
+    {
+      title: "Subscribe to a room",
+      description:
+        "订阅一个 room: 之后人新说一句、或有 duty 被关账时也唤醒你 (默认关)。每次唤醒都真的花你一轮, 所以不需要实时跟就看一眼 room_read —— 别顺手订阅。",
+      inputSchema: currentAddressSchema({
+        room: z.string().describe(ROOM_DOC),
+        on: z.boolean().describe("true = 订阅, false = 退订。"),
+      }),
+    },
+    async ({ room, on }) => unwrap("room_watch", await daemonPost("/room/watch", { room, on })),
   );
 
   registerRare(
@@ -510,7 +612,7 @@ export const createWezardServer = (): McpServer => {
     {
       title: "Read what another wizard has been saying",
       description:
-        "**不打扰**地读另一个 wizard 的会话: 首行是它此刻的状态 (正在生成 / 空闲 / 停在哪个工具调用上等人点), 下面是它最近 N 个来回的正文 —— `▸` 是别人对它说的, `◂` 是它对这句最新说的一句 (跑完的是终句, 还在跑的是途中最近那句), 最后一条给得最全; 截掉的地方都标了 `…(+N)` / `…(略 N 字)…`。全部从它的 transcript 读: 只有说出来的话, 没有工具调用的过程, 回答「.fix 进展如何」「它卡在哪」, 或者判断要不要推它一把, 都读这里。这是**一个会话**的视角 (它从各处听到的都在里面); 要看**一个群**里谁对谁说了什么、或你和它的私聊往来, 用 read_chat。只读, 随便轮询。",
+        "**不打扰**地读另一个 wizard 的会话: 首行是它此刻的状态 (正在生成 / 空闲 / 停在哪个工具调用上等人点), 下面是它最近 N 个来回的正文 —— `▸` 是别人对它说的, `◂` 是它对这句最新说的一句 (跑完的是终句, 还在跑的是途中最近那句), 最后一条给得最全; 截掉的地方都标了 `…(+N)` / `…(略 N 字)…`。全部从它的 transcript 读: 只有说出来的话, 没有工具调用的过程, 回答「.fix 进展如何」「它卡在哪」, 或者判断要不要推它一把, 都读这里。这是**一个会话**的视角 (它从各处听到的都在里面); 要看**一个 room** 里谁对谁说了什么, 用 room_read。只读, 随便轮询。",
       inputSchema: currentAddressSchema({
         name: z.string().describe(ADDRESS_DOC),
         turns: z.number().optional().describe("回最近多少个来回 (1-40, 默认 6); 一个来回 = 一句问话 + 它的回答。"),
@@ -520,43 +622,11 @@ export const createWezardServer = (): McpServer => {
   );
 
   server.registerTool(
-    "read_chat",
-    {
-      title: "Read chat history like a person would",
-      description:
-        "像人翻聊天记录那样读往来, 一行一句: `[时刻] .谁: .谁 说了什么` (wizard 名字前带 `.`, 人只写名字)。三级收窄, 每一级都可以不给: `role` (谁的视角 —— 只留它说的或听的) → `chat` (哪个群 —— 只留那个群里公开说的) → `target` (和谁 —— 只留与它的往来)。什么都不给 = 你这一轮所在的群: 人说的、各个 wizard 答的、wizard 之间公开说的都在里面。只给 `target` = 你和它的全部往来 (含 tell_peer 默认走的私聊, 群里看不见的那部分); `role` + `target` = 那两方之间; 只给 `role` = 它在所有群与私聊里的往来; 再加 `chat` 就限定在那个群里。没给 `chat` 时每行会标出这句是在哪个聊天 / 私聊里说的。一条消息一行起头, 正文的续行缩进; 还没等到回答的问话行尾标 `(还没有回复)`。\n" +
-        "按时间和条数读: 默认回最新的 `limit` 条; `until` = 只看那之前的 (往回翻页), `since` = 从那时起 (只给 `since` 就从它往后数 `limit` 条)。回执末尾给出翻页用的时刻, 原样传回即可; 往回已经没有了会明说到头。\n" +
-        "只有正文: 每个来回取问话和终句, 工具调用的过程不在里面, 记录是从各个 wizard 当前会话的 transcript 现拼的: 一个 wizard `/clear` 或交接之前说的不在里面, 除点名的 role / target 外只并最近一周动过的会话。用户说「群里刚才聊了什么」「.fix 之前怎么答的」「我上次让 .docs 干了什么」, 或者你被叫进一个已经聊了一阵的群、需要来龙去脉时调它。要读**某一个 wizard** 会话里的原始对话用 peek_peer。\n" +
-        "严格群 (speech=strict) 的 read_chat 读的是群账本 (chat-records, 实际发出内容, 行号 = 账本 seq): 与成员游标同一份账, 人话/系统行/wizard 交付都在, 不受 wizard 换会话影响。",
-      inputSchema: {
-        role: z.string().optional().describe("谁的视角: wizard 的名字 ('fix' / '.fix') 或人的 userid。省略 = 不限 (给了 `target` 时默认是你自己)。"),
-        chat: z.string().optional().describe("哪个群: 聊天名 (wizard_roster 里的 home 聊天名) 或裸 principal。省略 = 不限群 (公开与私聊都算); 三个都省略 = 你这一轮所在的群。"),
-        target: z.string().optional().describe("和谁的往来: wizard 的名字或人的 userid。"),
-        since: z.string().optional().describe("从什么时候起: `2h` / `30m` / `3d` (多久以前)、`14:30` (今天)、`09-30 14:30`、或 ISO 时间。"),
-        until: z.string().optional().describe("到什么时候为止 (不含), 写法同 `since`。往回翻页就把回执里的「更早的」时刻传进来。"),
-        limit: z.number().optional().describe("最多回多少条 (1-200, 默认 30)。"),
-        per: z.number().optional().describe("单条正文最多多少字 (40-4000, 默认 500); 超出的部分标成 `…(+N)`。"),
-      },
-    },
-    async ({ role, chat, target, since, until, limit, per }) =>
-      unwrapText("read_chat", await daemonPost("/chats/read", {
-        ...(role ? { role } : {}),
-        ...(chat ? { chat } : {}),
-        // `target` 在守护进程的请求体里是「调用方是谁」的覆盖 (resolveSelf), 不能占用。
-        ...(target ? { with: target } : {}),
-        ...(since ? { since } : {}),
-        ...(until ? { until } : {}),
-        ...(limit ? { limit } : {}),
-        ...(per ? { per } : {}),
-      })),
-  );
-
-  server.registerTool(
     "read_channel",
     {
       title: "Read a WeCom channel's history",
       description:
-        "翻一个**频道**（企微 topic，不是群聊）的聊天历史，或者按关键词搜。频道里派给你的活，消息头上有 `topic=<id>` —— 注入的上下文（当前线程 + 最近若干条 + 搜索命中）不够时用它自己往前翻。先读本地缓存（daemon 为每个频道存了一份，含 reload / 断线期回填的消息）；给了 `query` 且本地不够时才走官方搜索（`aibot_topic_search` 两步：先出 jobid 再取摘要，正文再按 post_id 取回）。返回一行一条：`[HH:MM] 作者: 正文`，作者是 userid 或 `bot:<aibotid 前十位>`。这是**频道**视角；群聊 / 私聊的往来用 read_chat，单个 wizard 的会话用 peek_peer。只读，随便查。",
+        "翻一个**频道**（企微 topic，不是群聊）的聊天历史，或者按关键词搜。频道里派给你的活，消息头上有 `topic=<id>` —— 注入的上下文（当前线程 + 最近若干条 + 搜索命中）不够时用它自己往前翻。先读本地缓存（daemon 为每个频道存了一份，含 reload / 断线期回填的消息）；给了 `query` 且本地不够时才走官方搜索（`aibot_topic_search` 两步：先出 jobid 再取摘要，正文再按 post_id 取回）。返回一行一条：`[HH:MM] 作者: 正文`，作者是 userid 或 `bot:<aibotid 前十位>`。这是**频道**视角；群聊 / 私聊 / dm 的账本用 room_read，单个 wizard 的会话用 peek_peer。只读，随便查。",
       inputSchema: {
         topic: z.string().describe("频道 id：`chat:<topic_id>` 或裸 topic_id —— 频道消息上下文头的 `topic=` 就是它。"),
         query: z.string().optional().describe("按关键词搜历史（先本地 grep，不够再走官方搜索）。不给 = 按时间翻最新若干条。"),
@@ -576,52 +646,55 @@ export const createWezardServer = (): McpServer => {
   );
 
   server.registerTool(
-    "tell_peer",
-    { title: "Say something to another wizard (reply comes back by itself)", description: TELL_DESC, inputSchema: currentAddressSchema(TELL_SCHEMA) },
-    async (a) => {
-      if (a.text === undefined && a.taskFile === undefined)
-        return fail("tell_peer: `text` 与 `taskFile` 至少给一个 (后者是相对你工作区的模板路径, 由 daemon 展开)");
-      return unwrap("tell_peer", await daemonPost("/peers/tell", tellBody(a)));
-    },
-  );
-
-  server.registerTool(
     "notify",
     {
-      title: "Post a message into a chat for people to read",
+      title: "Post a message into a room for people to read",
       description:
-        "把一段 markdown 贴进一个企微聊天**给人看**。和 tell_peer 分工明确: tell_peer 是把话塞进另一个 agent 的输入框 (驱动它干活), notify 是说给人听 —— 不会触发任何一轮对话。\n" +
-        "`to` 省略 = 你这一轮所在的群 (人从哪个群叫的你就是哪个; 私聊轮则是你的 home 群); 要发到别的群就写聊天名 (wizard_roster 里的 home 聊天名), 一次可以写多个。气泡头自动写成 `🧙‍♂️ 你的名字` 并挂上你的 rolepage 链接, 那边的人一眼知道是谁。\n" +
-        "什么时候用: 长活跑完了要通知另一个群的人; 一批分身收工后把汇总播给发起那个群; 定时任务 (schedule_task) 到点跑完把结论送到该看的人那里。",
+        "把一段 markdown 发进一个或多个 room **给人看**: 不唤醒任何 wizard、不点名、不开 duty。绑定 room 里它作为一条消息进企微 (气泡头自动署你的名字), dm / adhoc 只在 rolepage。和 chat_say 的区别只在落点: notify 发去别的 room, chat_say 说在你此刻所在的 room。长活跑完通知另一个群、批量分身收工后把汇总播给发起方、定时任务把结论送到该看的人那里, 都用它。\n" +
+        "给谁看是 room 的事 —— 说话的对象是 room, 不再是某个收件人。",
       inputSchema: currentAddressSchema({
-        to: z
-          .array(z.string())
+        room: z
+          .union([z.string(), z.array(z.string())])
           .optional()
-          .describe("收件聊天: 聊天名 (`daily`) 或裸 principal (`chat:wr…` / `user:…`)。省略 = 你这一轮所在的群。认不出的整条拒绝并列出来, 不会部分送达。"),
+          .describe(ROOM_DOC + " 可以给一组; 认不出的整条拒绝并列出来, 不会部分送达。省略 = 唤醒你这一轮的 room。"),
         markdown: z.string().describe("正文, markdown。头 (是谁发的) 由守护进程自动加, 别自己写。"),
       }),
     },
-    async ({ to, markdown }) => unwrap("notify", await daemonPost("/notify", { ...(to ? { to } : {}), markdown })),
+    async ({ room, markdown }) =>
+      unwrap("notify", await daemonPost("/room/notify", {
+        ...(room === undefined ? {} : { room: Array.isArray(room) ? room : [room] }),
+        markdown,
+      })),
   );
 
   server.registerTool(
     "send_file",
     {
-      title: "Send a local file / image into a chat for people to see",
+      title: "Send a local file / image into a room",
       description:
-        "把本机一个文件作为**图片 / 文件 / 语音 / 视频消息**发进聊天给人看 (notify 的媒体版: 去向、聊天名、顶层模式的规矩都与 notify 相同)。截图、生成的图表、导出的报表、日志包要交给人时用它 —— 别只在回复里写一个本地路径, 人那边打不开。\n" +
-        "`kind` 省略按扩展名定: png/jpg/jpeg/gif → image, mp4 → video, amr → voice, 其余 → file。企微上限: 图片 ≤10MB、视频 mp4 ≤10MB、语音只收 amr ≤2MB、文件 ≤20MB; 超了直接报错并告诉你怎么改 (例如大图改 `kind:\"file\"`)。\n" +
-        "严格群里成员即可发文件 (文件是交付物; 出站不再要求挂义务), 但仍占每轮 3 条 / 每分钟 10 条的额度。",
-      inputSchema: {
+        "把本机一个文件作为**图片 / 文件 / 语音 / 视频消息**发进 room —— notify 的媒体版, 同样不唤醒谁、不开 duty。截图、图表、导出报表、日志包要给人时用它, 别只在回复里写一个本地路径 (人那边打不开)。\n" +
+        "`kind` 省略按扩展名定: png/jpg/jpeg/gif → image, mp4 → video, amr → voice, 其余 → file。企微上限: 图片 ≤10MB、视频 mp4 ≤10MB、语音只收 amr ≤2MB、文件 ≤20MB; 超了直接报错并告诉你怎么改 (大图改 `kind:\"file\"`)。\n" +
+        "`re` 只把这行挂到那条消息的线程上 —— 它不关任何 duty, 要交代就另调 chat_reply。",
+      inputSchema: currentAddressSchema({
+        room: z.string().optional().describe(ROOM_DOC),
         path: z.string().describe("本机绝对路径 (`~` 可用)"),
         kind: z.enum(["image", "file", "voice", "video"]).optional().describe("省略 = 按扩展名推断"),
-        to: z.string().optional().describe("收件聊天名或裸 principal; 省略 = 你这一轮所在的群 (私聊轮则是你的 home 群)"),
         caption: z.string().optional().describe("附一句说明: 先以一条带你名字的 markdown 气泡发出, 再发文件"),
         title: z.string().optional().describe("仅视频: 标题"),
         description: z.string().optional().describe("仅视频: 描述"),
-      },
+        re: z.string().optional().describe("挂到哪条消息的线程上 (消息 id)。"),
+      }),
     },
-    async (a) => unwrap("send_file", await daemonPost("/send_file", a)),
+    async ({ room, path, kind, caption, title, description, re }) =>
+      unwrap("send_file", await daemonPost("/room/file", {
+        ...(room ? { room } : {}),
+        path,
+        ...(kind ? { kind } : {}),
+        ...(caption ? { caption } : {}),
+        ...(title ? { title } : {}),
+        ...(description ? { description } : {}),
+        ...(re ? { re } : {}),
+      })),
   );
 
   server.registerTool(
@@ -629,20 +702,17 @@ export const createWezardServer = (): McpServer => {
     {
       title: "Wait until another wizard stops working",
       description:
-        "`tell_peer` 的结论通常会自动作为新的一轮送到你这里 (回执), 不必守着等。只有下一步硬依赖当前结果、拆成两轮会丢上下文, 或需要 `need:1` 谁先完成先处理时, 才用它阻塞等。代价是你这个 pane 在等待期间不能处理其他工作。\n" +
-        "被它取走的那一份**不会再作为回执注入**一遍 (返回里 `delivered: true` = 回执已经抢先进过你的会话, 别重复处理)。\n" +
-        "挂起, 直到点名的 wizard 停下来 (它的终端不再显示中断提示), 然后返回它最新的回复。超时先到则返回 `idle: false` 与原因: 它只是还在干, 你可以 peek 一眼再等。很便宜: 守护进程轮询的是 pane, 不烧 token。回的只算**你上次 tell_peer 之后**它说的: 它收口了 RESULT: … 就只回 result (`omitted` = 正文还有多少字没给, 要读用 peek_peer), 没收口才回 `lastText` (超长掐中间); `stale: true` = 它停下了却没有新回复 (卡在弹窗上, 或那句话没被接住) —— peek_peer 看一眼, 别把它当成答完了。\n" +
-        "**真要等一批就用 `names` 一次等一组**, 别一个一个等: 它们本来在同时干活, 串行等的墙钟是所有人之和, 并行等只等最慢的那一个。等一组时 `results` 按你给的顺序逐个回, 只等一个则直接摊平在顶层。`need` 决定满几个就返回 (默认全部; `need:1` = 谁先完事就先处理谁, 剩下的还在跑, 再调一次接着等)。",
+        "阻塞等一个 (或一组) wizard 闲下来。它**只是等待**: 没有回执语义, 也不会把谁的结论送回来。绝大多数时候不必用它 —— 派活走 chat_ask, 对方交代时那条 chat_reply 会唤醒你; 只有下一步硬依赖「它此刻停下来了」这个状态 (例如要克隆它当前的上下文) 才用。等待期间你这个 pane 干不了别的; 守护进程轮询的是 pane, 不烧 token。超时返回 `idle:false` 与原因 (它只是还在干, peek_peer 看一眼再决定)。等一组时别一个一个等, 串行等的墙钟是所有人之和, `need` 决定满几个就返回 (默认全部)。",
       inputSchema: currentAddressSchema({
-        name: z.string().optional().describe(`${ADDRESS_DOC} 等一组时改用 \`names\`。`),
+        name: z.string().optional().describe(ADDRESS_DOC + " 等一组时改用 `names`。"),
         names: z
           .array(z.string())
           .optional()
-          .describe("一次等多个 wizard 的名字 (最多 16 个), 每个的写法同 `name`。fan-out 之后的 join 用它 —— 五个分身并行等只花最慢那一个的时间。"),
+          .describe("一次等多个 wizard 的名字 (最多 16 个), 每个的写法同 `name`。"),
         need: z
           .number()
           .optional()
-          .describe("满几个就返回 (1 到地址个数, 默认全部)。`1` = 任意一个先完事就返回; 中间值 = 法定人数。满足后剩下的等待会被撤掉, 它们照常继续干活, 结果里 `idle:false`。"),
+          .describe("满几个就返回 (1 到地址个数, 默认全部)。满足后剩下的等待会被撤掉, 它们照常继续干活。"),
         timeoutSec: z.number().optional().describe("Max seconds to wait (10-7200, default 900)."),
       }),
     },
@@ -824,7 +894,7 @@ export const createWezardServer = (): McpServer => {
         "名册是金字塔, 默认只给 **L0 在场** (≤12 行): 你 + 本群管家 + 本聊天 48h 内动过的化身, 各一行, 尾行全机普查 (N 身份 · M 群 · 忙/闲/冷)。\n" +
         "**升级靠显式参数**: `chat` (聊天名) = **L1 本群** 该聊天全部化身含冷的, 带职责/最近/家谱 (≤40 行); `scope:\"all\"` = **L2 组团** 每个聊天一行名字概览 (≤60 行); 单个 wizard 的详情用 `peek_peer`。\n" +
         "**自动降级**: 你的 ctx 到交接线时只回 L0 并注明 —— 那时候也别拉大表。\n" +
-        "`query` 匹配名字/职责/地址, `cwd` 反查工作区, `alive:true` 只看活着的; 这些过滤器对每一层都生效。问了一个名字、它不在本群在场名单里时, L0 尾行会提示升级参数。这是你感知同伴的唯一入口 —— 拿到名字再 tell_peer / peek_peer。",
+        "`query` 匹配名字/职责/地址, `cwd` 反查工作区, `alive:true` 只看活着的; 这些过滤器对每一层都生效。问了一个名字、它不在本群在场名单里时, L0 尾行会提示升级参数。这是你感知同伴的唯一入口 —— 拿到名字再 chat_ask / peek_peer。",
       inputSchema: {
         query: z.string().optional().describe("在名字 / 职责 / target 里做子串匹配 (不分大小写)。「让懂 X 的那个来看看」就把 X 写在这里。"),
         chat: z.string().optional().describe("升级到 L1: 只看某个聊天的全部化身 (含冷)。聊天名, 或聊天 principal 的一段。「同群有谁」就写你自己的群名。"),
@@ -848,7 +918,7 @@ export const createWezardServer = (): McpServer => {
     {
       title: "Who could take this task",
       description:
-        "一件活要不要转给已有 wizard 时调它。只返回按 limit 截断的候选文本，不包含完整诊断或未展示候选。候选排序不等于推荐追加任务；独立新活按本次难度 delegate，同验收目标续篇用 tell_peer 的 re。",
+        "一件活要不要转给已有 wizard 时调它。只返回按 limit 截断的候选文本，不包含完整诊断或未展示候选。候选排序不等于推荐追加任务；独立新活按本次难度 delegate，同一验收目标的续篇用 chat_ask 的 \`for\\` 指回原活。",
       inputSchema: {
         task: z.string().describe("这件活及验收目标, 原话或一句概括都行。文件名 / 模块名 / 函数名帮助找线索; 公共规则文件、同工作区和关键词重叠不证明是同一任务。"),
         cwd: z.string().optional().describe("这件活落在哪个工作区。省略 = 你自己的工作区。"),
@@ -890,7 +960,7 @@ export const createWezardServer = (): McpServer => {
       title: "Spawn a blank child wizard",
       description:
         "**从白板生**一个子 wizard —— 新的 tmux pane、自己的全局名字 (裸名)、自己的职责, 归你管 (家谱里挂在你名下)。它**不继承你的任何上下文**, 只拿到身份。适合干一件与你手头无关的事, 或者要去别的目录 (`cwd`) / 别的聊天里干活。要一个开局就带着你读过的材料的, 用 clone_wizard。\n" +
-        "带上 `task` 可以在它就位的同时把第一件活私聊派下去, 省掉一次 tell_peer; 要它的回复进群, 就别带 task, 就位后用 `tell_peer({public:true})` 转给它。返回 name、cwd、继承状态、实际模型/档位、派活队列标识与警告。" +
+        "带上 `task` 就是在它就位的同时开一条 duty (等同一次 chat_ask), 省一次往返; 不带它就位待命, 之后用 chat_ask 找它。返回 name、cwd、继承状态、实际模型/档位与警告。" +
         OFFSPRING_TAIL,
       inputSchema: currentAddressSchema({
         ...offspringShape,
@@ -907,8 +977,8 @@ export const createWezardServer = (): McpServer => {
       title: "Clone a wizard, context and all",
       description:
         "**克隆**一个 wizard 出分身 —— fork 它此刻的上下文: 分身开局就拥有它已经读过的一切 (规范、目录结构、刚啃完的那份文档), 不必重读; 被克隆的那个毫发无损。默认克隆你自己; `from` 点名就克隆别的 wizard (比如一个已经把某个模块啃透的同伴) —— 分身仍归你管 (占你的名额), 只是上下文来自它。分身留在被克隆者的工作区。\n" +
-        "要白纸一张、或要去别的目录, 用 spawn_wizard。被克隆者正在干活时, 分身拿到的是它此刻为止的上下文 —— 想要它读完再分: 是你派的活就等它的回执, 否则先 `wait_peer` 等它停下 (或看 wizard_roster 的忙闲)。\n" +
-        "带上 `task` 可以在它就位的同时把第一件活私聊派下去 (分叉本来就由第一句话触发, 省一次往返)。返回 name、cwd、继承状态、实际模型/档位、派活队列标识与警告。" +
+        "要白纸一张、或要去别的目录, 用 spawn_wizard。被克隆者正在干活时, 分身拿到的是它此刻为止的上下文 —— 想要它读完再分: 是你派的活就等它那条 chat_reply, 否则先 `wait_peer` 等它停下 (或看 wizard_roster 的忙闲)。\n" +
+        "带上 `task` 就是在它就位的同时开一条 duty (分叉本来就由第一句话触发, 省一次往返)。返回 name、cwd、继承状态、实际模型/档位与警告。" +
         OFFSPRING_TAIL,
       inputSchema: currentAddressSchema({
         ...offspringShape,
@@ -923,7 +993,7 @@ export const createWezardServer = (): McpServer => {
     {
       title: "What I dispatched and is still open",
       description:
-        "挂起事项全表: 你派出去 (tell_peer / 带 task 的 spawn) 还没了结的每一件 —— 件号、对象、一句话题、为谁派的, 状态由守护进程按回执算。已回执的、同一对改派了的自动消掉; 没结论的留着, 直到你改派、`re` 追问, 或用 `drop` 显式消掉。\n" +
+        "挂起事项全表: 你派出去 (chat_ask / delegate / 带 task 的 spawn) 还没了结的每一件 —— 件号、对象、一句话题、为谁派的; 关账只认对方那条 chat_reply 的 status。已交代的、同一对改派了的自动消掉; 没结论的留着, 直到你改派、chat_ask 追问, 或用 `drop` 显式消掉。\n" +
         "管家平时只会在注入尾巴上收到必要的一行增量, 快忘的时候 (交接 / 压缩后、隔了很多轮) 收到一次全表; 其余时候想看就调它。",
       inputSchema: currentAddressSchema({
         drop: z.array(z.string()).optional().describe("要消掉的那几项: 写对方的名字 (= 你派给它、还开着的那项), 或表里每行开头的 event id: 不再需要、或已经另行处理了。"),

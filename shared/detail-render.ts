@@ -545,7 +545,7 @@ const TURN_CSS = `
   .handoff .ho-chev:hover{color:#1f2328;background:#0000000d}
   .handoff .ho-chev svg{width:10px;height:10px}
   .handoff[open] .ho-chev{transform:rotate(90deg)}
-  /* 展开 = 交过去的那段原文 (tell_peer 的 text), 按 markdown 分行。 */
+  /* 展开 = 交过去的那段原文 (chat_ask 的 text), 按 markdown 分行。 */
   .handoff .ho-text{margin:0 6px 4px 24px;padding:4px 10px;border-left:2px solid #8250df40;color:#1f2328}
   .handoff .ho-text .md-body{font-size:12.5px}
   .handoff.pub>.say{margin:2px 6px 6px 24px}
@@ -689,7 +689,7 @@ ${renderJsonSection(use.toolInput)}`;
 // 实际的投递方式), 没回来 (运行中 / 失败) 才退回 input。delegate 与带活的 clone / spawn
 // 也是一次移交 (守护进程同样给活号、守回执), 只是动词不同。
 export interface Handoff {
-  /** 怎么交出去的: 直接 tell_peer / delegate 选人 / 克隆一个分身带活 / 白板新生一个带活。 */
+  /** 怎么交出去的: 直接 chat_ask / delegate 选人 / 克隆一个分身带活 / 白板新生一个带活。 */
   via: "tell" | "dispatch" | "clone" | "spawn";
   /** delegate 的决定: 交给已有的 / 新生一个; 理由在 why。 */
   decision?: { kind: "existing" | "spawn"; why: string };
@@ -707,7 +707,7 @@ export interface Handoff {
   /** 投的那一刻对方在忙 —— priority 只在这时才真起作用。undefined = 回包没说。 */
   busy?: boolean;
   kind?: "ask" | "fyi";
-  /** 交过去的那段原文 (tell_peer 的 text / dispatch 与分身的 task)。 */
+  /** 交过去的那段原文 (chat_ask 的 text / dispatch 与分身的 task)。 */
   text: string;
   /** 带 `re` = 续问同一件活, 不是新活。 */
   re: boolean;
@@ -774,7 +774,7 @@ export const hintOf = (use: ToolUse, result: ToolResult | undefined): Hint | und
   const j = replies.length === 1 ? replies[0] : undefined;
   const out = outcomeOf(result, j);
   switch (tool) {
-    case "tell_peer": return handoffFrom("tell", a, j, out);
+    case "chat_ask": return handoffFrom("tell", { ...a, name: str(a.name) ?? (Array.isArray(a.to) ? a.to[0] : a.to) }, j, out);
     case "delegate": return a.dryRun ? undefined : handoffFrom("dispatch", a, j, out);
     case "clone_wizard": case "spawn_wizard": {
       const via = tool === "clone_wizard" ? "clone" : "spawn";
@@ -806,7 +806,7 @@ export const hintsOf = (use: ToolUse, result: ToolResult | undefined): Hint[] =>
   const direct = hintOf(use, result);
   if (direct) return [direct];
   // CodeBuddy 的 deferred MCP 调用: transcript 记的是外壳 (toolName/params 在 input 里),
-  // 剥掉外壳按真身认一次 —— 否则这层壳下的 tell_peer / delegate 永远没有提示行。
+  // 剥掉外壳按真身认一次 —— 否则这层壳下的 chat_ask / delegate 永远没有提示行。
   const wrap = objOf(use.toolInput);
   const inner = str(wrap.toolName);
   if (use.toolName === "DeferExecuteTool" && inner) {

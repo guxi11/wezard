@@ -2,7 +2,7 @@
 import { parse } from "acorn";
 import { stripSigil } from "./session-label.js";
 
-export const HINT_TOOL = /(?:^|__)(tell_peer|delegate|clone_wizard|spawn_wizard|stop_wizard|schedule_task|chat_reply|chat_say|notify|send_file)$/;
+export const HINT_TOOL = /(?:^|__)(delegate|clone_wizard|spawn_wizard|stop_wizard|schedule_task|chat_ask|chat_reply|chat_say|notify|send_file)$/;
 export type Facts = Record<string, unknown>;
 export const objectOf = (v: unknown): Facts | undefined =>
   v !== null && typeof v === "object" && !Array.isArray(v) ? v as Facts : undefined;
@@ -156,12 +156,12 @@ const nameOf = (v: unknown): string => typeof v === "string" ? stripSigil(v) : "
 const matches = (c: HintCall, r: Facts): boolean => {
   const tool = HINT_TOOL.exec(c.toolName)?.[1];
   if (tool === "delegate") return r.decision === "spawn" || r.decision === "existing";
-  if (tool === "tell_peer") return r.ok === true && !r.decision && typeof r.eventId === "string" && r.queued === true;
   if (tool === "spawn_wizard" || tool === "clone_wizard")
     return r.ok === true && !r.decision && typeof r.name === "string" && typeof r.cwd === "string" && typeof r.inherited === "boolean";
   if (tool === "stop_wizard") return typeof r.name === "string" && typeof r.mode === "string";
-  if (tool === "chat_reply") return r.ok === true && typeof r.delivered === "string";
-  if (tool === "chat_say") return r.ok === true && typeof r.chat === "string" && typeof r.sent === "number";
+  // room 口子: 成功回包一定带 room 与新行的 id (delivered / chat / sent 是旧口径, 过渡期照认)。
+  if (tool === "chat_reply" || tool === "chat_say" || tool === "chat_ask")
+    return r.ok === true && (typeof r.room === "string" || typeof r.id === "string" || typeof r.delivered === "string" || typeof r.chat === "string");
   if (tool === "notify") return r.ok === true && Array.isArray(r.sent);
   if (tool === "send_file") return r.ok === true && typeof r.sent === "string" && typeof r.bytes === "number";
   return typeof r.id === "string" && (typeof r.when === "string" || typeof r.next === "string");
@@ -177,7 +177,7 @@ export const execHintCalls = (source: string, output: string): (HintCall & { rep
     const requested = nameOf(c.toolInput.to ?? c.toolInput.name);
     const named = compatible.filter((r) => requested && requested === nameOf(r.name));
     // delegate may select someone other than a requested spawn name. A directed tell cannot.
-    return named.length ? named : requested && HINT_TOOL.exec(c.toolName)?.[1] === "tell_peer" ? [] : compatible;
+    return named.length ? named : requested && HINT_TOOL.exec(c.toolName)?.[1] === "chat_ask" ? [] : compatible;
   });
   return calls.flatMap((c, i) => {
     const rs = candidates[i]!;

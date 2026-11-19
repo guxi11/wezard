@@ -19,60 +19,48 @@ const charter = renderCharter(base);
 assert.match(charter, /worker/);
 assert.match(charter, /user:admin/);
 assert.match(charter, /\/workspace/);
-// v3 §2 切片二: 「开工前先问工作区」问句随 set_workspace 语义退役, 宪章不再出现旧流程话术。
 for (const stale of ["开工前先问", "默认兜底目录", "keep:true"]) {
   assert.ok(!charter.includes(stale), `charter must not mention retired workspace-question flow: ${stale}`);
 }
-for (const tool of ["wizard_roster", "delegate", "tell_peer", "handoff"]) {
+for (const retired of ["tell_peer", "read_chat", "chat_members", "顶层模式", "严格模式", "RESULT:", "public:true"]) {
+  assert.ok(!charter.includes(retired), `charter must not mention retired routing: ${retired}`);
+}
+for (const tool of ["wizard_roster", "delegate", "chat_ask", "chat_reply", "chat_say", "room_open", "room_read", "room_watch", "handoff"]) {
   assert.ok(charter.includes(tool), `charter must advertise ${tool}`);
 }
-for (const marker of ["RESULT:", "NEED:", "ARTIFACT:"]) assert.ok(charter.includes(marker));
+assert.ok(charter.includes("ARTIFACT:"), "charter must mention ARTIFACT:");
 
 const codingChapter = chapter(charter, "## 怎么干活: 编排");
 assert.ok(codingChapter.includes("**Coding 默认编排**"));
 for (const fragment of ["范围清楚、低风险", "默认用 light", 'tier:"light"', "不递归派 coder"])
   assert.ok(codingChapter.includes(fragment), `coding light-default contract must include ${fragment}`);
+for (const fragment of ["多步的活默认开一个跟进 room", "只有需要人和执行者直接对话", "不提前合并或宣告完成", "不 `wait_peer` 守着"])
+  assert.ok(codingChapter.includes(fragment), `orchestration contract must include ${fragment}`);
 
-for (const [stewardEnabled, topOnlyEnabled] of [[false, false], [false, true], [true, false], [true, true]]) {
-  const rendered = renderCharter({ ...base, steward: stewardEnabled, topOnly: topOnlyEnabled });
-  assert.equal(hasHeading(rendered, "## 我是这个群的管家 (L1)"), stewardEnabled && topOnlyEnabled);
-  assert.equal(hasHeading(rendered, "## 本群开着顶层模式"), topOnlyEnabled);
+const roomChapter = chapter(charter, "## room 是唯一的沟通对象");
+for (const fragment of ["终句没有任何路由语义", "完成只认 chat_reply 的 status", "被唤醒就要交代", "绑定 room 里每条消息都进企微", "不需要实时就别订阅"])
+  assert.ok(roomChapter.includes(fragment), `room contract must include ${fragment}`);
+
+for (const steward of [false, true]) {
+  const rendered = renderCharter({ ...base, steward, topOnly: true, speech: "strict" });
+  assert.equal(hasHeading(rendered, "## 我是这个 room 的 host (L1)"), steward);
+  assert.ok(!hasHeading(rendered, "## 本群开着顶层模式"), "顶层模式节退役");
+  assert.ok(!hasHeading(rendered, "## 本群开着严格模式"), "严格模式节退役");
 }
-const topOnly = renderCharter({ ...base, topOnly: true });
-const topOnlyChapter = chapter(topOnly, "## 本群开着顶层模式");
-for (const fragment of ["长等待、阻塞", "完成 fyi", "原群 `notify`", "仍 pending", "本身不代表 ledger done", "普通私聊 fyi 不授权对人通知"])
-  assert.ok(topOnlyChapter.includes(fragment), `top-only completion notice contract must include ${fragment}`);
-const orchestration = chapter(topOnly, "## 怎么干活: 编排");
-for (const fragment of ["不提前合并或宣告完成", "必须 `notify` 原群"])
-  assert.ok(orchestration.includes(fragment), `top-only orchestration contract must include ${fragment}`);
-// P7-S2 严格模式宪章: speech=strict 时 renderStrictChat 替换顶层模式那一节。
-const strict = renderCharter({ ...base, topOnly: true, speech: "strict" });
-assert.ok(hasHeading(strict, "## 本群开着严格模式"), "strict 群带严格模式节");
-assert.ok(!hasHeading(strict, "## 本群开着顶层模式"), "strict 群不带顶层模式节 (被替换)");
-for (const fragment of ["chat_reply", "chat_say", "chat_ask", "义务不随终句自动关账", "/owed", "每轮 ≤3"])
-  assert.ok(strict.includes(fragment), `strict charter must include ${fragment}`);
-// 2026-11-18 放宽 (入群即发言权): 新话术必须进 strict 节, 旧的「只能答义务」措辞必须退场。
-for (const fragment of ["成员即发言权", "派活 ack / 进展用 chat_say", "交付并销账", "不销账"])
-  assert.ok(strict.includes(fragment), `strict charter must include ${fragment}`);
-assert.ok(!strict.includes("只能答指向自己的义务"), "strict charter must not mention retired mention-only speech rule");
-// strict 群出站礼仪: 一次到位 / 不轮换试探通道 / 话讲最少 —— 只进 strict 节, 不许污染 implicit 群。
-for (const fragment of ["发东西一次到位", "不许轮换试探通道", "话讲最少"])
-  assert.ok(strict.includes(fragment), `strict charter must include ${fragment}`);
-for (const fragment of ["发东西一次到位", "不许轮换试探通道", "话讲最少"])
-  assert.ok(!charter.includes(fragment), `implicit charter must not mention ${fragment}`);
-assert.equal(hasHeading(renderCharter({ ...base, steward: true, speech: "strict", topOnly: false }), "## 我是这个群的管家 (L1)"),
-  true, "手闸条件 topOnly || strict: strict 群的管家也带管家章");
-assert.equal(hasHeading(renderCharter({ ...base, speech: "implicit", topOnly: true }), "## 本群开着顶层模式"),
-  true, "implicit 群照旧顶层模式节");
+const stewardChapter = chapter(renderCharter({ ...base, steward: true }), "## 我是这个 room 的 host (L1)");
+for (const fragment of ["分派、收回执、向人交代", "chat_ask", "chat_reply", "多步的活默认开一个跟进 room", "delegate"])
+  assert.ok(stewardChapter.includes(fragment), `host contract must include ${fragment}`);
 
 const lead = renderCharter({ ...base, lead: true });
 assert.ok(!hasHeading(charter, "## 我是这件活的 lead"));
 assert.ok(hasHeading(lead, "## 我是这件活的 lead"));
-assert.ok(!hasHeading(lead, "## 我是这个群的管家 (L1)"));
-assert.ok(!hasHeading(lead, "## 本群开着顶层模式"));
+assert.ok(!hasHeading(lead, "## 我是这个 room 的 host (L1)"));
+const leadChapter = chapter(lead, "## 我是这件活的 lead");
+for (const fragment of ["chat_reply", "chat_ask", "status"])
+  assert.ok(leadChapter.includes(fragment), `lead contract must include ${fragment}`);
+assert.ok(!lead.includes("RESULT:"), "lead 不再用行首 RESULT: 收口");
+
 const renamed = renderCharter({ ...base, self: { ...base.self, address: "renamed" } });
-// v3 面 × 表示 (设计稿 §1.5): charter 是系统面 —— 名字行是裸 name, 无点无记号;
-// 人点名的写法 (`.name`) 与人面气泡头 (🧙‍♂️) 在名字行里只作说明文字出现。
 assert.ok(renamed.includes("**`renamed`**"));
 assert.ok(!renamed.includes("**`.renamed`**"));
 assert.ok(!renamed.includes("🧙‍♂️ renamed"));

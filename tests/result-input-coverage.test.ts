@@ -100,7 +100,7 @@ const realTransferFeedback = resultCorrectionInputs(correctionSource, "lead", 0,
     fyi ? { act: "fyi", quiet: true } : undefined));
 const ownerTail = renderTail(withMsg(realTransferFeedback[1]!.payload.peer!.envelope, realTransferFeedback[1]!.id));
 assert.equal(parseEnvelope(ownerTail)?.eventId, realTransferFeedback[1]!.id);
-assert.match(ownerTail, /发话方不收回执/);
+assert.match(ownerTail, /发话方不等回话/);
 assert.match(realTransferFeedback[1]!.payload.text, /任务路由 route:task.*来源事件 event:correction.*当前 owner owner-now/);
 // 口径 B (2026-11-13): 关键字优先 —— 裸 RESULT 不再要求显式收件人, 可结算的行交给通用路径;
 // 旧断言 (不写收件人就拒) 随之反转: owned open 行不再发纠正, 不可结算 (已移交) 的照旧拒。
@@ -406,7 +406,7 @@ try {
     "chat correction directs completion to the original route with an explicit RESULT");
   const correctionTail = renderTail(withMsg(correction.payload.peer!.envelope, correction.id));
   assert.equal(parseEnvelope(correctionTail)?.eventId, correction.id);
-  assert.match(correctionTail, /发话方不收回执/);
+  assert.match(correctionTail, /发话方不等回话/);
   assert.equal(servedChatResultPublicAllowed(sourceEvent, chatRouter.get("route:human"), true, covers), false,
     "the production event final gate suppresses the same uncovered chat RESULT");
   const aliasBound = { ...sourceEvent, resultRoutes: { served: { ...sourceEvent.resultRoutes!.served!, event: "route:merged-alias" } } };
@@ -550,7 +550,7 @@ const chatRecovery = async (): Promise<void> => {
     await waitConsumed(feedbackId);
     const feedbackInjection = captured.get(feedbackId)!;
     assert.equal(feedbackInjection.parsed?.eventId, feedbackId, "real FYI envelope survives renderTail and withMsg");
-    assert.match(feedbackInjection.payload, /发话方不收回执/);
+    assert.match(feedbackInjection.payload, /发话方不等回话/);
     assert.match(feedback.payload.text, /对原任务显式提交 RESULT/);
     events.result(feedbackId, "收到，我继续处理", "confirmation");
     await waitFinalized(feedbackId);

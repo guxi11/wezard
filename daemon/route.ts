@@ -471,7 +471,7 @@ const renderOne = (e: Evidence, c: Ctx): string[] => {
     ...(r.duties?.length ? [`  占用: ${r.duties.join(" · ")}`] : []),
     `  材料关联: ${e.continuity ? e.matched.map((m) => `${m.kind} ${m.path} · ${m.source} · ${agoOf(m.at, now)}`).join("; ") : "未证实"}`,
     ...e.materialIssues.map((x) => `  证据范围: ${x}`),
-    `  自动复用: ${vetoOf(e, now, c.ttlMs, c.small, c.force) || "可选; 真实续篇优先 tell_peer re"}`,
+    `  自动复用: ${vetoOf(e, now, c.ttlMs, c.small, c.force) || "可选; 真实续篇优先 chat_ask 的 for"}`,
     ...(r.files.length ? [`  上下文: 读过 ${r.files.length} 个文件 (${spread(r.cwd, r.files)})`] : []),
     ...costLines(e, c),
     ...(r.summary ? [`  最近: ${r.summary}`] : []),
@@ -509,7 +509,7 @@ const vetoesOf = (e: Evidence, now: number, ttlMs: number, small: boolean, force
   return [
     ...(small && r.budgetModel && r.model?.trim().toLowerCase() !== r.budgetModel.trim().toLowerCase()
       ? [`轻任务模型不符 (当前 ${r.model || "未知"}, 本次 ${r.budgetModel}); 按本次档位白板执行`] : []),
-    ...(r.lead ? ["lead 身份, 独立任务不自动复用 (续篇用 tell_peer re)"] : []),
+    ...(r.lead ? ["lead 身份, 独立任务不自动复用 (续篇用 chat_ask 的 for)"] : []),
     ...(r.duties?.length ? [`任务占用 (${r.duties.join(" · ")})`] : []),
     ...(!r.alive ? ["不在线"] : []), ...(r.busy ? ["正忙"] : []),
     ...(!(ctx > 0 && Number.isFinite(ctx)) ? ["ctx 未知, 不能按免费上下文复用"] : []),
