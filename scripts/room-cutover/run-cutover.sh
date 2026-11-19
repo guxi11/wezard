@@ -103,4 +103,4 @@ up=0; for i in $(seq 1 60); do curl -s --noproxy '*' -m 2 http://127.0.0.1:17890
 p1=$(launchctl list | awk '/com.wezard.daemon/{print $1}'); sleep 20; p2=$(launchctl list | awk '/com.wezard.daemon/{print $1}')
 [ "$p1" = "$p2" ] && [ "$p1" != "-" ] || rollback "8 daemon 20s 内重启过 ($p1→$p2), crash-loop"
 say "step 8 | OK | daemon pid $p2 稳定 20s, T0=$T0; status: $(curl -s --noproxy '*' http://127.0.0.1:17890/status | head -c 300)"
-say "=== 0-8 完成。T0=$T0。下一步 9: observe.mjs 取 O1-O4 (T0+5min / T0+30min)"
+say "=== 0-8 完成。T0=${T0}。下一步 9: observe.mjs 取 O1-O4 (T0+5min / T0+30min)"
