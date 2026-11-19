@@ -136,9 +136,9 @@ import { startIdleNudge, startObligationWatch, strictDeliveryNudge, strictDelive
 import { askerFromEnvelope, parseReminders, renderReminder, stripReminders, withMsg, type NoteAttrs, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
 import { createHandoffs, cuttingTurn, handedOff, handingOff, handoffRound, resumeText, roundPending, settlesCut, type Pending as PendingHandoff } from "./handoff.js";
 import { coldGateOf, decide, rankCandidates, routeDiagnostics, renderCandidates, routeReceiptDutiesOf, tierFor, wakeCostOf, wakeNoteOf, type RouteRow } from "./route.js";
-import { parseWhen, renderChatLog, UNKNOWN_HUMAN, type LogSession } from "./chat-log.js";
 import { renderChatRecords } from "../shared/chat-record.js";
-import { audienceOf } from "../shared/role-view.js";
+import { parseWhen, renderRoomRead } from "../shared/room-view.js";
+import { roomFacts, nameTable } from "./room-facts.js";
 import { waitForIdle, type IdleResult } from "./wait-idle.js";
 import { bindChannelSteward, bindSteward, guideRefusal, isGuideManifestation, rewriteStewardBindings } from "./onboarding.js";
 import { reminderEventId, reminderToken, startPlanReminders, type PlanReminderCandidate } from "./plan-reminders.js";
@@ -1033,8 +1033,9 @@ const main = async (): Promise<void> => {
     /** 回执那一轮在群里的终句答给谁 (userid) —— 与 rolepage 同一个判定, 写进信封给模型与
      *  read_chat; 认不出 = ""。 */
     const audienceName = (channel: string, asker: Asker | undefined): string => {
-      const id = audienceOf(channel, asker);
-      return id.startsWith("human:") ? id.slice("human:".length) : "";
+      // role-view 的 audienceOf 已随 room-ui 退役 (C 节删信封); 只保回执信封要的那个 userid。
+      if (channel.startsWith("user:")) return channel.slice(5);
+      return asker?.chat === channel && asker.who.startsWith("user:") ? asker.who.slice(5) : "";
     };
     // 挂起事项表 (见 pending-items.ts): 派活时记一行, 回执落定时由下面的 onOutcome 记账。
     const ledger = createLedger(loadJsonMap<PendingItem>(cfg.wrc.mirror.pendingFile, pendingGc, { strict: true }));
@@ -2390,115 +2391,53 @@ const main = async (): Promise<void> => {
       });
     });
 
-    // ── 聊天记录 ────────────────────────────────────────────────────────
-    // peek_peer 读的是**一个会话**听到和说过的一切; 这条读的是**往来**: 三级收窄
-    // role (谁的视角) → chat (哪个群) → target (和谁), 再按时间窗与条数裁 —— 与
-    // rolepage 同一条轴。全部从各会话的 transcript 现算 (见 chat-log.ts), 不经 turn
-    // store。名字全局可达, 一句话可能落在任何一个会话的 transcript 里 (A 对 B 说的
-    // 在 B 那份), 所以候选是全体; 按 mtime 只留最近动过的那一批 (一次 stat, 不
-    // spawn), 点了名的 role / target 与调用方自己无条件入选。
-    const LOG_RECENT_MS = 7 * 24 * 3600_000;
-    const LOG_SESSIONS = 40;
-    const logSession = (t: { target: string; jsonlPath: string }): LogSession => {
-      const home = baseOfKey(t.target);
-      const rec = wizards.get(t.target);
-      return {
-        name: displayName(t.target),
-        key: t.target,
-        jsonlPath: t.jsonlPath,
-        homeChat: chatNameOf(cfg, home),
-        homeKey: home,
-        homeHuman: home.startsWith("user:") ? home.slice(5) : UNKNOWN_HUMAN,
-        since: rec?.clonedFrom ? rec.bornAt : 0,
-      };
-    };
-    /** role / target 的写法: wizard 的名字解析成它的称呼; 解析不出的原样当作人的
-     *  userid (或 `定时 <id>`) —— 记录里人就是按这个字面出现的。 */
-    const logRole = (self: string, ref: string): { name: string; target?: string } => {
-      const r = resolvePeer(self, ref);
-      return r.ok ? { name: displayName(r.target), target: r.target } : { name: ref };
-    };
-
+    // ── 聊天记录 (read_chat) ─────────────────────────────────────────────
+    // room 模型: 往来的唯一事实是 room 账本。这里读账本 (renderRoomRead), 不再从
+    // transcript 现算 (chat-log.ts 已随 room-ui 退役)。chat = 绑定 room; with/role =
+    // 只看那个人说的; 缺省 = 调用方所在全部 room 的 W-1 视图。
     http.register("POST /chats/read", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      // 线上字段是 `with`: 请求体里的 `target` 已经是「调用方是谁」的覆盖 (resolveSelf)。
-      const b = body as { role?: string; chat?: string; with?: string; since?: string; until?: string; limit?: number; per?: number };
+      const me = roomSelfOf(self);
+      if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
+      const b = body as { role?: string; chat?: string; with?: string; since?: string; until?: string; limit?: number; per?: number; all?: boolean };
       const now = Date.now();
-      const [roleRef, chatRef, targetRef, sinceRef, untilRef] = [b.role, b.chat, b.with, b.since, b.until].map((x) => (x ?? "").toString().trim());
-      // 什么都没给 = 调用方这一轮所在的群; 只给 target = 调用方与它的往来。
-      const base = chatRef ? chatBaseOf(cfg, chatRef) : roleRef || targetRef ? "" : channelOf(self);
-      // 别的机器人的聊天与认不出同形 (不说它在)。
-      if (chatRef && (!base || !sameBot(self, base))) { json(res, 404, { ok: false, reason: `认不出聊天 '${chatRef}' (wizard_roster 每行有 home 聊天名, 人侧 /chats)` }); return; }
-      const role = roleRef ? logRole(self, roleRef) : targetRef ? { name: displayName(self), target: self } : undefined;
-      const target = targetRef ? logRole(self, targetRef) : undefined;
+      const [chatRef, withRef, roleRef, sinceRef, untilRef] = [b.chat, b.with, b.role, b.since, b.until].map((x) => (x ?? "").toString().trim());
       const since = sinceRef ? parseWhen(sinceRef, now) : undefined;
       const until = untilRef ? parseWhen(untilRef, now) : undefined;
       if ((sinceRef && since === undefined) || (untilRef && until === undefined)) {
         json(res, 400, { ok: false, reason: "时间认不出 —— 写 `2h` / `30m` / `3d` (多久以前)、`14:30` (今天)、`09-30 14:30` 或 ISO 时间" });
         return;
       }
-      const limit = Math.min(Math.max(Number(b.limit ?? 30) || 30, 1), 200);
-      const per = Math.min(Math.max(Number(b.per ?? 500) || 500, 40), 4000);
-      const pinned = new Set([self, role?.target, target?.target]);
-      // 只读与调用方同机器人的会话 —— 别的机器人那边的往来连条数都不该露出来。
-      const all = m.transcripts().filter((t) => sameBot(self, t.target));
-      // 两方之间的话只可能落在这两方里的 wizard 自己的 transcript 里 (人没有 transcript)
-      // —— 不必去翻别的会话, 「往回还有没有」也因此答得准。
-      const between = [role?.target, target?.target].filter((t): t is string => !!t);
-      const sessions = role && target && between.length
-        ? all.filter((t) => between.includes(t.target))
-        : [
-            ...all.filter((t) => pinned.has(t.target)),
-            ...all.filter((t) => !pinned.has(t.target) && now - t.mtime < LOG_RECENT_MS).sort((x, y) => y.mtime - x.mtime).slice(0, LOG_SESSIONS),
-          ];
-      const chat = base ? chatNameOf(cfg, base) : undefined;
-      // P7-S3: 严格群改读账本 (实际发出内容) —— 与 chatlog 批同一份 chat-records,
-      // golden 验收两侧同一个 renderChatRecords; 私聊与 implicit 群照旧 transcript。
-      if (base && strictSpeechOf?.(base)) {
-        const view = renderChatRecords(chatRecords.lines(base), {
-          since, until, limit, per,
-          names: [role?.name, target?.name].filter((x): x is string => !!x),
-        });
-        const strictScope = [
-          chat !== undefined ? `群 ${chat || base} (strict 账本)` : `群 ${base} (strict 账本)`,
-          role && target ? `${role.name} ⇄ ${target.name}` : role ? `${role.name} 的往来` : "",
-        ].filter(Boolean).join(" · ");
-        json(res, 200, {
-          ok: true,
-          shown: view.shown,
-          total: view.total,
-          text: [
-            `${strictScope} · ${view.shown} 条`,
-            view.text || "(没有读到对话)",
-            ...(view.earlier ? [`更早的: until="${view.earlier}"`] : view.later || !view.shown ? [] : ["(往回已经到头)"]),
-            ...(view.later ? [`往后还有 ${view.total - view.shown} 条: since="${view.later}"`] : []),
-          ].join("\n"),
-        });
-        return;
-      }
-      const log_ = renderChatLog(
-        sessions.map(logSession),
-        { role: role?.name, chat, target: target?.name, since, until, limit, per,
-          // 无参视图 (channelOf) 与点名聊天都拿着 base key 进来 —— 匹配按 key, 名字只做显示。
-          ...(base ? { chatKey: base } : {}),
-          ...(role?.target ? { roleKey: role.target } : {}),
-          ...(target?.target ? { targetKey: target.target } : {}) },
-        now,
-      );
+      const fromRef = withRef || roleRef;
+      const from = fromRef ? whoRefOf(fromRef) : undefined;
+      if (fromRef && !from) { json(res, 400, { ok: false, reason: "认不出这个地址: " + fromRef }); return; }
+      const room = chatRef ? roomResolve(chatRef).room : undefined;
+      if (chatRef && !room) { json(res, 404, { ok: false, reason: `认不出聊天 '${chatRef}' (wizard_roster 每行有 home 聊天名)` }); return; }
+      const states = (room ? [roomState(room)!] : roomStore.ids().map((id) => roomState(id)!).filter((s) => s?.members.has(whoKey(me)))).filter(Boolean);
+      if (room && !states.length) { json(res, 404, { ok: false, reason: "没有这个 room 的账本: " + room }); return; }
+      const names = { nameOf: roomNameOf, roomLabel };
+      const view = renderRoomRead(states, me, {
+        ...(room ? { room } : {}),
+        ...(from ? { from: fromRef } : {}),
+        ...(since !== undefined ? { since } : {}),
+        ...(until !== undefined ? { until } : {}),
+        ...(b.limit !== undefined ? { limit: Number(b.limit) } : {}),
+        ...(b.per !== undefined ? { per: Number(b.per) } : {}),
+        ...(b.all === true ? { all: true } : {}),
+      }, names, now);
       const scope = [
-        chat !== undefined ? `${base.startsWith("user:") ? "单聊" : "群"} ${chat || base}` : "",
-        role && target ? `${role.name} ⇄ ${target.name}` : role ? `${role.name} 的往来` : "",
+        room ? (room.startsWith("user:") ? "单聊 " : "群 ") + (roomLabel(room) || room) : "你所在的全部 room",
+        from ? roomNameOf(from) + " 说的" : "",
       ].filter(Boolean).join(" · ");
       json(res, 200, {
         ok: true,
-        shown: log_.shown,
-        total: log_.total,
+        shown: view.shown,
+        total: view.total,
         text: [
-          `${scope} · ${log_.shown} 条`,
-          log_.text || "(没有读到对话)",
-          ...(log_.earlier ? [`更早的: until="${log_.earlier}"`] : log_.later || !log_.shown ? [] : ["(往回已经到头)"]),
-          ...(log_.later ? [`往后还有 ${log_.total - log_.shown} 条: since="${log_.later}"`] : []),
+          `${scope} · ${view.shown} 条`,
+          view.text || "(没有读到对话)",
+          ...(view.earlier ? [`更早的: until="${view.earlier}"`] : []),
         ].join("\n"),
       });
     });
@@ -3583,31 +3522,6 @@ const main = async (): Promise<void> => {
         ...(v.duplicate ? { duplicate: true } : {}) });
       else json(res, v.status, { ok: false, reason: v.reason });
     };
-    /** room_read 的正文 (A 节本地最小版; B 节合入 room-ui 后换 shared/room-view 的 renderRoomRead)。 */
-    const roomReadText = (viewer: Who, q: { room?: string; from?: string; since?: number | string; until?: number | string; limit?: number; all?: boolean; per?: number }): { text: string; shown: number; total: number } => {
-      const names = { nameOf: roomNameOf, roomLabel };
-      const since = typeof q.since === "number" ? q.since : q.since ? Date.parse(q.since) : undefined;
-      const until = typeof q.until === "number" ? q.until : q.until ? Date.parse(q.until) : undefined;
-      const limit = q.limit ?? 50;
-      const per = q.per ?? 500;
-      const states = (q.room ? [roomState(q.room)!] : roomStore.ids().map((id) => roomState(id)!).filter((s) => s.members.has(whoKey(viewer)))).filter(Boolean);
-      if (q.room && !states.length) return { text: "没有这个 room: " + q.room, shown: 0, total: 0 };
-      const from = q.from ? whoRefOf(q.from) : undefined;
-      const one = !!q.room && states.length === 1;
-      const rows = states
-        .flatMap((s) => (q.room || q.all ? s.msgs : s.msgs.filter((mm) => sameWho(mm.author, viewer)
-          || (mm.to ?? []).some((t) => sameWho(t, viewer))
-          || (mm.re ?? []).some((id) => { const src = s.byId.get(id); return !!src && sameWho(src.author, viewer); }))))
-        .filter((mm) => (!from || sameWho(mm.author, from))
-          && (since === undefined || Number.isNaN(since) || mm.at >= since)
-          && (until === undefined || Number.isNaN(until) || mm.at < until))
-        .sort((a, b) => a.at - b.at);
-      const page = limit > 0 ? rows.slice(-limit) : rows;
-      return {
-        text: page.map((mm) => (one ? "" : "[" + roomLabel(mm.room) + "] ") + renderMsgLine(mm, names, per)).join("\n") || "(没有匹配的消息)",
-        shown: page.length, total: rows.length,
-      };
-    };
     const READ_ROOM_FAIL = (res: import("node:http").ServerResponse, self: string): boolean => {
       if (self) return false;
       json(res, 400, { ok: false, reason: "cannot resolve caller session" });
@@ -3851,10 +3765,28 @@ const main = async (): Promise<void> => {
       const me = roomSelfOf(self);
       if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
       const b = body as { room?: string; from?: string; since?: number | string; until?: number | string; limit?: number; all?: boolean; per?: number };
+      const now = Date.now();
       const r = b.room ? roomResolve(b.room) : { room: undefined as string | undefined };
       if (r.error) { json(res, 400, { ok: false, reason: r.error }); return; }
-      const out = roomReadText(me, { ...b, room: r.room });
-      json(res, 200, { ok: true, text: out.text, shown: out.shown, total: out.total });
+      if (b.room && !r.room) { json(res, 400, { ok: false, reason: "认不出这个 room: " + b.room }); return; }
+      const since = b.since === undefined ? undefined : typeof b.since === "number" ? b.since : parseWhen(b.since, now);
+      const until = b.until === undefined ? undefined : typeof b.until === "number" ? b.until : parseWhen(b.until, now);
+      if ((typeof b.since === "string" && b.since.trim() && since === undefined) || (typeof b.until === "string" && b.until.trim() && until === undefined)) {
+        json(res, 400, { ok: false, reason: "时间认不出 —— 写 2h / 30m / 3d、14:30 (今天)、09-30 14:30 或 ISO 时间" });
+        return;
+      }
+      const states = (r.room ? [roomState(r.room)!] : roomStore.ids().map((id) => roomState(id)!).filter((s) => s?.members.has(whoKey(me)))).filter(Boolean);
+      if (r.room && !states.length) { json(res, 404, { ok: false, reason: "没有这个 room 的账本: " + r.room }); return; }
+      const view = renderRoomRead(states, me, {
+        ...(r.room ? { room: r.room } : {}),
+        ...((b.from ?? "").toString().trim() ? { from: (b.from ?? "").toString().trim() } : {}),
+        ...(since !== undefined ? { since } : {}),
+        ...(until !== undefined ? { until } : {}),
+        ...(b.limit !== undefined ? { limit: Number(b.limit) } : {}),
+        ...(b.per !== undefined ? { per: Number(b.per) } : {}),
+        ...(b.all === true ? { all: true } : {}),
+      }, { nameOf: roomNameOf, roomLabel }, now);
+      json(res, 200, { ok: true, text: view.text, shown: view.shown, total: view.total, ...(view.earlier ? { earlier: view.earlier } : {}) });
     });
     http.register("POST /room/watch", async (req, res) => {
       const { self, body } = await readPeerBody(req);
@@ -4195,6 +4127,8 @@ const main = async (): Promise<void> => {
           target: p.target,
           // P7 ⑦: rolepage 同身份多化身聚成一页。
           ...(w ? { identity: identityOfRec(w) } : {}),
+          // room 账本里一切 wizard 引用都用 uid (room-ui): 随快照带给 svr / 前端。
+          ...(w?.uid ? { uid: w.uid } : {}),
           name: settleName(wizards, chatNameOf(cfg, p.target), p.target),
           description: w?.description ?? "",
           chat: chatNameOf(cfg, p.target) || p.chat,
@@ -4273,33 +4207,14 @@ const main = async (): Promise<void> => {
           base: `chat:${a.chatId}`, state: a.state, lastInAt: a.lastInAt ?? 0, held: a.outbox.length,
           budget: a.ctx ? Math.max(0, cfg.weixin.sendCap - a.ctx.used) : 0, pausedUntil: a.pausedUntil ?? 0,
         })),
-        // P7-S3b 生效 strict 的聊天全集 (rolepage 群窗按账本口径渲染的开关)。
-        strictChats: knownChatsOf(cfg).rows().map((r) => r.chat).filter((base) => chatPolicyOf(cfg, base).speech === "strict"),
-        // 群成员列表 (rolepage): 严格群成员表的全量投影 + 类表 —— 名册之外的两份事实。
-        memberRows: members.chats().flatMap((chat) =>
-          members.ofChat(chat).map(({ target, row }) => ({ chat, target, mode: row.mode, since: row.since, by: row.by }))),
+        // room 账本快照 + 名字表: rolepage 关系图 / room 视图的唯一来源 (room-ui)。
+        // 坏账本跳过并留日志 —— 一个坏文件不该让整张图消失。
+        rooms: roomFacts(roomStore, wizards.all(), {
+          chatName: (base) => chatNameOf(cfg, base),
+          onBroken: (room, err) => log.warn({ mod: "room", room, err: errText(err) }, "room-facts: 坏账本跳过"),
+        }),
+        names: nameTable(wizards.all()),
         classes: classes.all().map((c) => ({ id: c.id, name: c.name, role: c.role, workspace: c.workspace })),
-        // P7-S3 严格群治理面板: members.json × 路由行 × 义务观测 (owed/passed/overdue)。
-        governance: members.chats()
-          .filter((base) => strictSpeechOf?.(base))
-          .map((base) => {
-            const rows = router.rows().filter((r) => r.receiver.kind === "chat" && r.receiver.channel === base);
-            const watched = obligationWatches.all();
-            return {
-              chat: base,
-              members: members.ofChat(base).map(({ target, row }) => {
-                const mine = rows.filter((r) => r.owner === target);
-                return {
-                  name: wizards.get(target)?.name || target,
-                  mode: row.mode,
-                  cursor: row.cursor,
-                  owed: mine.filter((r) => ["held", "open", "need", "error"].includes(r.status)).length,
-                  passed: mine.filter((r) => r.outcome?.status === "passed").length,
-                  overdue: mine.filter((r) => ["held", "open", "need", "error"].includes(r.status) && watched[r.event]?.overdue).length,
-                };
-              }),
-            };
-          }),
       };
     };
     // 一次采集失败 (某个 pane 的 tmux 抖了一下) 不等于注册表没了: 退回上一份好的,
