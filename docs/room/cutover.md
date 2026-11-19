@@ -64,6 +64,7 @@
 - 第 4 步 (记忆文本) 非阻断: 规则未命中只记一行、切后手改 (记忆文件会被 wizard 运行时压缩重写, 规则可能漂)。
 - 第 7 步前自动核对: 停机期间线上工作树没被任何人写过 (`git status` + 自第 0 步起 `find -newer`, 排除 node_modules/.git/dist)。
 - 演练 (2026-11-19 19:44-19:47, PATH 桩 launchctl/curl + HOME 指向 ~/.wezard 的副本 + 临时 worktree 当线上): 成功路径 0-8 全 OK; 第 8 步注入 healthz 失败 → 回退链 8/7b/7/6/2-5/0 全部执行, config 逐字节还原、charters 200 份回位、rooms/ 移为 rejected、线上回 cf3e0b3。
+- O2 真演练 (2026-11-19 23:01, `scripts/room-cutover/rehearse-o2.sh`, 临时 HOME + 临时端口起**真 daemon**, 真跑第 6-8 步, 全程不碰真实 ~/.wezard; 日志 `docs/room/rehearse-o2-20261119.txt`): A 目录对 → O2 绿 (内存未结 duty 2 == 账本重放 2); B 目录错 (账本挪回 `<home>/rooms`, 复刻 11-19 事故落点) → O2 红 (内存 0 != 重放 2), 两个数都报; C 闸红 → 按 rollback() 逆序动作真做回退链 8/6/2 (停新 daemon / 新账本移 rejected / pre-room 备份还原) 全部执行。演练本身要在独立 tmux server (`tmux -L`) 里跑 —— 主 server 上的未知 session 会被生产 daemon 的孤儿清扫连进程树一起杀掉。
 - **切换后两件事**: ① 7b 标记会让所有绑定 pane (含执行者与派活方) 闲下来后被 /new —— 执行者把第 9 步状态写在同一份日志里, 新会话从日志复原; ② 旧会话缓存的工具面里没有 room_*, 而 tell_peer 已删、终句零语义 —— 切后的进度一律写日志 + notify 进群, 不依赖终句回执。
 
 ## 第 7 步: 代码怎么接

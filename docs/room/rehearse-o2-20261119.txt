@@ -1,0 +1,21 @@
+[23:01:10] O2 演练: room=/Users/zyy/develop/Guxi11/cc-wecom-room, 临时 HOME=/tmp/o2-rehearse-XopZEd, 端口 27931/27932, 不碰真实 ~/.wezard
+[23:01:10] A 迁移: 写入 12 行 → /tmp/o2-rehearse-XopZEd/home-a/.wezard/state/rooms
+[23:01:10] A 目录核对: 写入目录 == daemon 读取目录 == /tmp/o2-rehearse-XopZEd/home-a/.wezard/state/rooms, <home>/rooms 不存在
+[23:01:11] A daemon 起来 (pid 16619, 端口 27931), 跑 o2-gate
+[23:01:11] A o2-gate: O2 GREEN: 内存未结 duty 2 == 账本重放 2 (重放自 /tmp/o2-rehearse-XopZEd/home-a/.wezard/state/rooms)
+[23:01:12] A 完成: O2 绿, 内存 == 账本重放 == 2
+[23:01:12] B 已复刻目录错: 账本在 /tmp/o2-rehearse-XopZEd/home-b/.wezard/rooms, daemon 读 /tmp/o2-rehearse-XopZEd/home-b/.wezard/state/rooms (空)
+[23:01:13] B daemon 起来 (pid 18804, 端口 27932), 跑 o2-gate
+[23:01:16] B o2-gate: O2 RED: 内存未结 duty 0 != 账本重放 2 (重放自 /tmp/o2-rehearse-XopZEd/home-b/.wezard/rooms)
+[23:01:17] B 完成: O2 红, 内存 0 != 账本重放 2 (与 A 的绿互为镜像)
+[23:01:18] C 已复刻目录错: 账本在 /tmp/o2-rehearse-XopZEd/home-c/.wezard/rooms, daemon 读 /tmp/o2-rehearse-XopZEd/home-c/.wezard/state/rooms (空)
+[23:01:22] C o2-gate: O2 RED: 内存未结 duty 0 != 账本重放 2 (重放自 /tmp/o2-rehearse-XopZEd/home-c/.wezard/rooms)
+[23:01:22] C ROLLBACK 开始 (原因: 8 O2 闸红: O2 RED: 内存未结 duty 0 != 账本重放 2 (重放自 /tmp/o2-rehearse-XopZEd/home-c/.wezard/rooms)); 已完成: 0 1 2 3 4 5 6 7 8
+[23:01:23] C rb 8: 新 daemon 已停 (pid 22383)
+[23:01:23] C rb 6: state/rooms/ → state/rooms.rejected-20261119-230118
+[23:01:23] C rb 2-5: 从 /tmp/o2-rehearse-XopZEd/home-c/pre-room.tgz 还原 state wizards.json config.jsonc
+[23:01:23] C ROLLBACK 结束
+[23:01:23] C 完成: 闸红后三步回退都执行 (daemon 停 / 账本 rejected / 备份还原)
+[23:01:23] 演练达标: 目录对 → O2 绿 (mem == 重放 == 2); 目录错 → O2 红 (mem 0 != 重放 2); 红后回退链 8/6/2 全执行
+[23:01:23] 现场保留在 /tmp/o2-rehearse-XopZEd (daemon 日志在 /tmp/o2-rehearse-XopZEd/home-*/daemon.log)
+final-exit:0
