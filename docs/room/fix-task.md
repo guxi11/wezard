@@ -84,6 +84,12 @@ C 节删 strict-gate 时 `openSayMeter` 没移植, room 出站当前无额度。
 **验证口径 (2026-11-19 人拍板, 优先于下面各条)**: 不跑全量 —— 不要再排 97 个的回归; 全量计数直接引用 room-model 已有那次 (913bda2: 97 例 · PASS 78 · FAIL 18 · SKIP 1)。但**你新增或修改的每个测试文件各跑一次该文件** (`ONLY="tests/x.test.ts" /tmp/room-run-tests.sh ...`), 交付时逐文件贴 rc —— 至少: room-quota (8a)、class-migration 与 wizard-identity-migration (8.1, 后者先 `git merge room-model` 拿到改过 import 的版本再跑)、room-watchdog、onboarding、strict-new-ack。tsc + build 照跑。
 交付三样: ① 全量计数 (引用上面那次) ② 新增/修改文件的单测 rc 表 ③ 本文件末尾的勾选进度。
 
+**收口口径 (2026-11-19 上级钉死)**:
+1. **合并方向**: 跑测试前先把 room-model 拿进来 —— 先提交你自己的改动, 再在 room-fix 上 `git merge room-model` (room-model 已含 9c727f3 那批测试改写)。是 merge 进来, 不许用 fix 的版本覆盖 room-model 的测试文件; 有冲突就解冲突并在提交说明里写怎么解的。不先合并就跑, 等于在旧 import 上验。
+2. **红数必须是 14, 而且正好是基线那 14 个** (docs/room/test-baseline.md 表里的名字, codex-approval 已转绿不算)。上一次全量 (913bda2) 的 18 红 = 基线 14 + class-migration / onboarding / strict-new-ack + wizard-identity-migration; 这 4 个加上新增的 room-quota, **逐个贴 rc=0**。
+3. **不许混出第 15 个红**: 不跑全量, 但要跑「受影响面」—— 用 `git diff --name-only room-model...HEAD -- daemon shared mcp` 列出你改过的源文件, 再 `git grep -l` 出 tests/ 里 import 这些模块 (或对它们做源码切片) 的测试, 用 ONLY 跑这一批, 贴清单与每个的 rc。其中出现基线 14 之外的红 = 修复引入的新问题, 必须修掉, 不许算作基线。
+4. 在执行者自己的 worktree 里提交也只用 `git add <具体路径>`, 不用 -a、不用 `.`。
+
 - tsc + build 绿; tests/room-*.test.ts 全绿 + ⑩ 三个绿。
 - 提交说明贴: 各单测名、fixture 来源命令与时间、冷 wizard 结论、`speech` grep 复跑输出。
 - 回执贴单测里捕获的**首轮扫描日志原文** (O4「首轮结束计数 = 0」要靠 B 保证)。
