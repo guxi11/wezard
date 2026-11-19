@@ -16,12 +16,12 @@ const RULES = [
     to: "- aiconfig 群里 GraceVance 不是成员: 要在该群发言须由 host 或人 room_invite 拉它入群。" },
   { file: "memory/workspaces/-Users-zyy-develop-Tencent-aiservice-daily-eng-case-triage.md", line: "- 终句正文别写 `@name RESULT:`",
     to: "- 终句不进群、不关账; 交付结论走 chat_reply({re, text, status}), 正文里写不写 @name 都没有路由副作用。" },
-  { file: "memory/workspaces/-Users-zyy-develop-Guxi11-cc-wecom.md", line: "严格治理(P7):",
-    to: "sparePool.maxTotal 配 4/源码 2。" },
-  { file: "memory/workspaces/-Users-zyy-develop-Guxi11-cc-wecom.md", line: "strict 义务链(2026-11-18",
-    to: "room 模型(2026-11-19 切换): 沟通只剩 room 账本 (~/.wezard/rooms/*.jsonl); 完成的唯一信号=duty 处理人的 chat_reply status (done/passed/canceled), 终句零语义; 成员即发言权, 唤醒额度每 room 10 分钟 20 次; 未交代的 duty 当轮提醒一次, 再闲升级一条 system 行进 room 并镜像进群。" },
-  { file: "memory/workspaces/-Users-zyy-develop-Guxi11-cc-wecom.md", line: "strict 出站不挂义务(2026-11-18",
-    to: "出站一次到位: 结论一条 chat_reply 讲完, 带文件同轮 send_file 不重复正文; 不轮换通道试探; 打断别人只用 interrupt:true (限直属 parent / host / 人)。" },
+  // 2026-11-19 19:15 该文件被压缩重写, 规则按新文本重定 (旧三条前缀已不存在)。
+  { file: "memory/workspaces/-Users-zyy-develop-Guxi11-cc-wecom.md", line: "strict: 存量群 implicit",
+    to: "room 模型(2026-11-19 切换): 沟通只剩 room 账本 (~/.wezard/rooms/*.jsonl); 完成的唯一信号=duty 处理人的 chat_reply status (done/passed/canceled), 终句零语义; 成员即发言权, 出站额度每轮≤3/每 room 每分钟≤10 (系统行与人话不计), 唤醒预算每 room 10 分钟 20 次; 未交代的 duty 当轮提醒一次, 再闲升级一条 system 行进 room 并镜像进群; 结论一条 chat_reply 讲完, 带文件同轮 send_file 不重复正文; 打断只用 interrupt:true (限直属 parent / host / 人); sparePool.maxTotal 配 4/源码 2。" },
+  { file: "memory/workspaces/-Users-zyy-develop-Guxi11-cc-wecom.md", sub: "room 重构(人 11-19 裁决, 未上线)",
+    to: "room 重构(人 11-19 裁决, 11-19 已切换上线)" },
+  { file: "memory/workspaces/-Users-zyy-develop-Guxi11-cc-wecom.md", line: "回执: receipts.json 全 superseded", to: null },
   { file: "tasks/review-summary-nightly-2.task.mjs", sub: "卡住超过 5 分钟就 tell_peer 推动它继续",
     to: "卡住超过 5 分钟就在你们共在的 room 里 chat_say 点它继续" },
 ];
