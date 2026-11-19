@@ -113,3 +113,90 @@ $ git grep -nE "receipts\.json|obligations\.json|idle-nudges\.json|strict-delive
 - 附 1「pending_items 工具面悬空 → 404」**不成立**: `POST /pending` 在 daemon/index.ts 按 room open duty 重写过 (约 3056 行), 1900 行那句注释说的是旧台账退役。工具可用。
 - 附 3 (rooms-cutover-new.flag 没人创建) **成立**, 已进切换清单 7b; 另查出该段在 pane 忙时 /new 失败也会删标记, 归入修复单。
 - 复核额外查出 (报告未覆盖, 归入修复单): 看门狗 `listPanes` 把 tmux 输出按字面 `"\\n"` (反斜杠 + n) 切分 —— 多 pane 时永远匹配不上, 所有 stale 持有者都会被判「pane 消失」并取消 duty; tmux 调用失败返回空表同样会全员误判; activity 初值为 0, 重启后首轮扫描所有持有者都算 stale。单测用假 listPanes 直接给数组, 覆盖不到解析。
+
+## 删除记录 (AliceOwen, 2026-11-19, room 旧语义红 20 个文件 · 工作区 cc-wecom-room-tests · 分支 room-tests)
+
+范围: ①-I 列的 20 个文件, 只改 tests/。基线 14 红与 codex-approval 未动。全量 (`/tmp/full2.out`,
+构建后跑): **97 例, PASS 78 · FAIL 18 · SKIP 1**。18 红 = 基线 14 + 另一执行者那 3 个
+(class-migration / onboarding / strict-new-ack) + 1 个行为缺口 (见末节)。
+
+### A. 整文件删除 (13 个文件 · 16 条记录)
+
+| 文件 | 原断言 (测试名 / assert 文案) | 为什么判为「对象已不存在」 |
+|---|---|---|
+| progress-receipt | `onFinal/step/ops/foldJournal/parseOp/Table` 的 progress mark、rev 判重、journal 往返、finalReleased | `daemon/router.js` 已删 (cutmap C: router.ts onFinal / finalKind / finalReleased / retellOps) |
+| progress-receipt | `renderReceiptEnvelope` + `parseEnvelope(...).receipt/status/event` 的 progress 回执 | 回执信封随 receipts 退役 (cutmap C: `renderReceiptEnvelope`、信封 RESULT 认领) |
+| progress-receipt | `parseClosing/stripClosingMark/isTerminal` 的回执-终句标记语义 | 三个 helper 本身是活代码, 但这一组测的是「终句标记 vs 回执」这套已退役语义 |
+| receipt-unrecognized | `unrecognizedReceipt` 弱信号兜底矩阵 (open/need/error→true, answered→false) | `daemon/message-events.js` 已删 (unrecognizedReceipt 是其导出) |
+| receipt-unrecognized | `finalReleased(..., strict)` strict/implicit 分流 | strict-gate / speech 已退役 (contract §7) |
+| result-input-coverage | `taskInputCoverage / coversTaskInputIds / createMessageEvents / publishEventFinal / runEventFinalRecovery / settleAddressedResults / servedChatResult* / resultCorrectionInputs / correctionTaskEvent` 全部 | `daemon/message-events.js` 已删 |
+| router-core-source | `FinalVerdict.source` 保留 / receipt-facts 顺序无关去重 / 新 fact 产生新 report | `daemon/router.js` 已删 |
+| strict-final | `openRouter` 落盘重放 / `onFinal(strict)` chat 行零 op / `finalReleased(strict)` / `openR.onFinal` 实例 API | `daemon/router.js` 已删; strict 参数随 speech 退役 |
+| merged-envelope | `createMessageEvents` 载体合并 (inputIds / receiptFacts) / `exposure: submitted→consumed` / `reconcile` 证据消费 | `daemon/message-events.js` 已删 |
+| message-events-recovery | `PROBE_LIMIT / isRecoveryCarrier / gcEvents` 墓碑 / `deliveryHold: transport-exhausted` / 探针失败收 canceled | `daemon/message-events.js` 已删 |
+| message-reason-cap | `REASON_MAX / appendReason / why` 的重投原因封顶 | `daemon/message-events.js` 已删 (纯字符串工具随模块) |
+| idle-nudge | `step / Policy / Watch / MAX_CYCLES / createIdleNudgeTick` 的追问状态机 (阈值、上限、冷却翻倍、reload 续计) | `daemon/idle-nudge.js` 已删 |
+| strict-delivery-nudge | `strictDeliveryNudge / strictDeliveryStewardNote / strictDeliveryHumanLine / strictUndeliveredNotice / createIdleNudgeTick` 的话术与巡检 | `daemon/idle-nudge.js` 已删 |
+| strict-obligation | `stepObligation / ObligationWatch` 的 remind / escalate / stalled 状态机 | `daemon/idle-nudge.js` 已删 |
+| strict-switch | `parseStrictCommand / planStrictSwitch / renderSwitchReport` (/strict 命令面) | `daemon/strict-switch.js` 已删; /strict 命令退役 (inbound 分支已删) |
+| strict-default | `speechDefaultOf / knownChatsOf(...).isLegacy / chatPolicyOf(...).speech` 的新群默认 strict | `speechDefaultOf` 已删, `speech` 移出 schema (contract §7); design G 表也判「删除」 |
+
+### B. 文件内删除的断言 (6 个文件)
+
+| 文件 | 原断言 | 为什么判为「对象已不存在」 |
+|---|---|---|
+| wizard-identity-migration | `foldJournal / allRows` 的 routes 重放 | `daemon/router.js` 已删 — 改成 `shared/legacy-routes.foldLegacyRoutes` 读同一份日志, 断言保住 (见 C) |
+| wizard-identity-migration | `gcEvents(...)` 旧 message-events 行过 boot gc | `daemon/message-events.js` 已删 — 行为改写见 C |
+| class-routing §7 | `openMembers(...).migrateKeys/ofChat/modeOf/isMember` 的成员表键迁移 | `daemon/members.js` 已删; 成员关系只在 room 的 join/leave 行 |
+| class-routing §12 | `openMembers(f, resolveKey)` 的旧 identity 键回落 / 游标落在旧行 | 同上 (`daemon/members.js`) |
+| chat-record §2 | `ChatRecords` 的 seq 单调 / 每聊天 jsonl / 重启续 seq / 写失败不挡内存 / 空 id 不去重 | `daemon/chat-records.js` 已删 |
+| chat-record §3 | `openMembers` 的 join 升级 / 游标 / 盘上键 `chat|identity` | `daemon/members.js` 已删 |
+| chat-record §6 | `chatPolicyOf(...).speech` 缺省 implicit / 显式 strict | `speech` 移出 schema (contract §7) |
+| chat-record 附 | `chatPrincipalOf("wrABC")` → `chat:wrABC` 的键规范 | 不再是导出 (搬进 `daemon/last-response.ts` 内部) |
+| strict-chat | `sayVerdict / openSayMeter / topOnlyVerdict` 判定矩阵 | `daemon/strict-gate.js` 已删 |
+| strict-chat | 额度 (同轮第 4 条 / 同群第 11 条 409) | **复核撤销 (LeoAdams)**: 不是「对象不存在」—— design.md:147 / :212 明定额度保留并「openSayMeter 改为全量生效」, 是 C 节漏移植的行为。转入下方行为缺口, 代码由修复单 §9 补, 断言恢复为 room 口径 |
+| strict-chat | 源码切片: `strictSayGate / topOnlyMuted / ops.answer / ops.hand / members.isMember / identityOfTarget / join-repair / spawnJoins` | 这些 handler 与模块已删 |
+| strict-chat | `ChatRecords + members` 的 3 次激活夹具 / chatlog 属性解析 | 两个模块已删; 批行为改写见 C |
+| strict-chat | `openRouter` 的义务账 (每条人话一条行 / answer+hand / 重放 handed) | `daemon/router.js` 已删 |
+| strict-outbound | `P7-S2 严格群出站门` 闭包 (`strictBase/strictOf/strictChat/turnSilent`) 与 implicit 对照组 | speech 出站门已从 mirror-bridge 删除 (门不存在) |
+| strict-outbound | strict 群 CoT / 流式帧 / standalone 出站为零 + p95 占位 | 同上: 门没了, 「strict 群」这个分类也没了 |
+| strict-members | `openMembers` 的 join / advance / leaveEverywhere / ofChat 原断言 | `daemon/members.js` 已删 — 四条行为全部改写到 room 账本 (见 C), 文件保留 |
+
+### C. 行为断言改写 (D1: 行为一律不许删)
+
+| 文件 | 原断言 | 改写到哪 (文件:测试名) |
+|---|---|---|
+| progress-receipt | PROGRESS 中途态不关账 / 不唤醒; done 关账; 同文重放去重 | tests/room-duty.test.ts: 「status 写入权: 只有 holder…」+「去重: 同作者同文同 re 10 分钟内」 |
+| receipt-unrecognized | 挂着未结的活必须兜底结算 (缺省 status); 已结的 re 再答只发言 | tests/room-duty.test.ts: 「status 写入权…」 |
+| result-input-coverage | 结果必须覆盖提问者的补充; 有未读补充不许结算 | tests/room-duty.test.ts: 「覆盖检查: 提问者补充了 holder 没读到的 → 409 先读」 |
+| router-core-source | 同内容重放不重复结算; 内容变了才算新结论 | tests/room-duty.test.ts: 「去重」 |
+| strict-final | 终句对群里那行没有结算语义, 交付只走 chat_reply | tests/strict-outbound.test.ts: 「50 轮终句零出站 / 收口记录照常」+ tests/room-duty.test.ts reply 关账 |
+| merged-envelope | 多条待唤醒消息合并成一次注入; 没证据不算已读 | tests/room-hub.test.ts: 「F-1 话术与收账 / 一次唤醒的合并投递」+「不确定投递 → 不推游标」 |
+| message-events-recovery | 投不出去的唤醒不丢, 不推游标, 下轮重投 | tests/room-hub.test.ts: 「不确定投递 → 不推游标, 重投标「可能已读过」」 |
+| idle-nudge / strict-obligation | 追问有界 (当轮一次 + 升级一次); 交代后停止 | tests/room-hub.test.ts: 「F-1」原块 (升级只写一次) + 新增块 (提醒恰好一次 / 交代后不再提醒、不写系统行) |
+| strict-delivery-nudge | 提醒点名要交代的 msg, 话术给 chat_reply 出路, passed 可记; 补了就收账 | tests/room-hub.test.ts: 「F-1 话术与收账」新增块 |
+| chat-record §1 | chatlog 批: 游标之后 / 触发全文 / 非触发裁剪 / 预算上限 | tests/chat-record.test.ts §1 (改写成 `unreadFor` + `renderMsgLine`) |
+| chat-record §2 | 账本 seq 单调 / 重开状态一致 | tests/room-hub.test.ts 末块「重开 store (模拟 reload): 账本状态一致」 |
+| chat-record §3 / class-routing §7 §12 | join 升级式 / 游标只进 / 离开 / 资格按 room 隔离 | tests/strict-members.test.ts (整文件改写) + tests/room-leave-cancel.test.ts |
+| strict-chat | 非成员 403 / 成员同权 (含文件) / 人话一条 duty / reply 四态关账 / 二次不重开 | tests/strict-chat.test.ts (整文件改写) |
+| strict-outbound | 终句零出站 + 收口记录照常 | tests/strict-outbound.test.ts (整文件改写: 抽 `concludeBriefTurn` 闭包跑 50 轮) |
+| wizard-identity-migration | 旧 routes 行重放仍解析 / 旧 message-events 行仍可读 | tests/wizard-identity-migration.test.ts (`foldLegacyRoutes`; message-events 的导入见 tests/room-migrate.test.ts) |
+
+与 design.md G 表的出入 (D1 优先):
+- G 表写 strict-default / strict-switch **删除** —— 遵循: 两者的判定与命令对象都没了, 没有可改写的行为。
+- G 表写 chat-record / strict-chat / strict-members / merged-envelope / progress-receipt 系「删除或并入」——
+  按 D1 保留行为面: chat-record / strict-chat / strict-members 在原文件内改写成 room 口径,
+  merged-envelope / progress-receipt 系并入既有 room-* 测试 (见 C)。
+- G 表把 idle-nudge 系并入 room-duty —— 实际落在 tests/room-hub.test.ts F-1 (提醒/升级是轮界行为, 属 hub)。
+
+### 行为缺口 (改写后的断言过不了, 保留为红, 请另派)
+
+| 文件 | 断言 | 新代码里缺的是什么 |
+|---|---|---|
+| tests/wizard-identity-migration.test.ts:49,66 | 「备份必须是原文件的原样字节」(migrateIdentities 的 `.pre-identities.bak` == 迁移前 wizards.json) | 与 ①-II-1 同一根因: `loadWizardStore` 里的 uid 回填 (daemon/wizard.ts, 12e7ef4 引入) 在 load 时就写穿 `db.set()`, 于是「load → 备份」之间文件已被改写, 备份不再是原样字节。**修在 wizard.ts 的延迟回填 (或迁移前先读原文件字节) 可同时让 class-migration 与本文件转绿**; 测试侧没有可改写的等价断言 (这正是回退要拿的那份保险)。 |
+| tests/strict-chat.test.ts (额度) | 每轮 ≤3 条、每 room 每分钟 ≤10 条, 超出 409 | design.md §147/§212 要求全量生效; C 节删 strict-gate 时 openSayMeter 未移植, room 出站 (room_say / ask / reply / notify / file) 当前无额度。由修复单 §9 补代码与测试 |
+
+### 删除记录复核 (LeoAdams, 2026-11-19)
+- A/B/C 抽查: 被删对象均已不在 daemon/shared/mcp (git grep 零命中, 含 progress-receipt 那行说的 parseClosing / stripClosingMark / isTerminal —— 实际已无源码引用, 判删成立)。
+- 撤销 1 条: strict-chat 额度 (见 B 表该行与行为缺口), 依据 design.md:147/:212。
+- strict-default / strict-switch 整删: 同意 (判定函数与 /strict 命令对象都已不在, G 表同判)。

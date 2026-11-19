@@ -20,7 +20,6 @@ import {
 } from "../daemon/wizard.js";
 import { stewardRoute } from "../daemon/steward.js";
 import { rewriteStewardBindings } from "../daemon/onboarding.js";
-import { openMembers } from "../daemon/members.js";
 
 const ROOT = mkdtempSync(join(tmpdir(), "class-routing-"));
 const dirOf = (name: string): string => { const d = join(ROOT, name); mkdirSync(d, { recursive: true }); return d; };
@@ -148,27 +147,9 @@ try {
   assert.equal(bc.wrc.channel.steward.topic1, "m");
   assert.equal(rewriteStewardBindings(bindCfg as never, cfgFile, aliases), 0, "改过之后 0 写");
 
-  // ── 7. 成员表键 (chat, identity) → (chat, target) ───────────────────
-  const mfile = join(ROOT, "members.json");
-  writeFileSync(mfile, JSON.stringify({
-    "chat:R|chat:G1": { mode: "owner", since: 1, by: "human:u", cursor: 3 },        // 旧: identity 键
-    "chat:R|chat:R#keep": { mode: "mention", since: 2, by: "human:u", cursor: -1 }, // 新: target 键
-    "chat:Q|chat:G1": { mode: "speaker", since: 3, by: "chat:R#m-2", cursor: 1 },   // 另一个群, 同一身份
-  }, null, 2));
-  const members = openMembers(mfile);
-  const resolveKey = (chat: string, key: string): string | undefined => {
-    if (key === "chat:R#keep") return key; // 已经是本 chat 的实例 target
-    if (key === "chat:G1" && chat === "chat:R") return "chat:R#m-2";
-    if (key === "chat:G1" && chat === "chat:Q") return "chat:Q#m-7";
-    return undefined;
-  };
-  assert.equal(members.migrateKeys(resolveKey), 2, "两个群的 identity 键各换成自己的实例");
-  assert.deepEqual(members.ofChat("chat:R").map((x) => x.target).sort(), ["chat:R#keep", "chat:R#m-2"]);
-  assert.equal(members.modeOf("chat:R", "chat:R#m-2"), "owner", "行内容原样保留");
-  assert.equal(members.isMember("chat:R", "chat:G1"), false, "旧 identity 键不再存在");
-  assert.equal(members.migrateKeys(resolveKey), 0, "第二次 0 写");
-  const raw = JSON.parse(readFileSync(mfile, "utf8")) as Record<string, unknown>;
-  assert.ok("chat:R|chat:R#m-2" in raw && !("chat:R|chat:G1" in raw));
+  // ── 7. 成员表 (chat, identity) 键 —— 旧 members.json 已退役 ─────────────
+  // 成员关系现在只存在于 room 账本 (join / leave 行); 旧键不再被任何路径读取,
+  // 原断言 («identity 键各换成自己的实例» / 幂等 / 行内容保留) 随之删除, 见删除记录。
 
   // ── 8. 合并成员已经单独成类: 报 conflict, 不静默剔除 ──────────────────
   {
@@ -254,21 +235,6 @@ try {
     assert.equal(c.chatPolicy["chat:R1"]!.steward, "beta", "绑定写类名, 不是实例名 beta-1");
     assert.equal(c.wrc.channel.steward.topicR, "beta");
     assert.equal(rewriteStewardBindings(cfg as never, cfgFile, [{ from: "alpha", to: "beta" }]), 0, "幂等");
-  }
-
-  // ── 12. 成员表旧键回落: 闸门没开 (还没 apply) 时 strict 读路径照常 ──────
-  {
-    const f = join(ROOT, "members-legacy.json");
-    writeFileSync(f, JSON.stringify({ "chat:L|chat:L#id": { mode: "owner", since: 1, by: "human:u", cursor: 5 } }));
-    const legacy = openMembers(f, (t) => (t === "chat:L#m-2" ? "chat:L#id" : undefined));
-    assert.equal(legacy.isMember("chat:L", "chat:L#m-2"), true, "按 identity 旧键回落命中");
-    assert.equal(legacy.modeOf("chat:L", "chat:L#m-2"), "owner");
-    legacy.advance("chat:L", "chat:L#m-2", 9);
-    const raw1 = JSON.parse(readFileSync(f, "utf8")) as Record<string, { cursor: number }>;
-    assert.equal(raw1["chat:L|chat:L#id"]!.cursor, 9, "游标落在旧行上, 不丢");
-    legacy.join("chat:L", "chat:L#m-2", "owner", "config:steward");
-    const raw2 = JSON.parse(readFileSync(f, "utf8")) as Record<string, unknown>;
-    assert.ok(raw2["chat:L|chat:L#m-2"] && !raw2["chat:L|chat:L#id"], "join 把旧键并进 target 键");
   }
 
   // ── 13. 报告不只写 conflicts: 将建类清单 + 全部改名都要在 ─────────────

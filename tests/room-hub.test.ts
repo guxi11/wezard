@@ -99,6 +99,38 @@ const settle = () => hub.pump();
   await hub.onIdle(B);
   assert.equal(store.get(room)!.msgs.filter((m) => m.sys === "undelivered").length, sys.length, "升级只写一次");
 }
+// F-1 话术与收账 / 一次唤醒的合并投递
+// (原 idle-nudge / strict-delivery-nudge / strict-obligation 的有界追问 + merged-envelope 的合并注入)
+{
+  const room2 = "chat:wrH";
+  store.ensure(room2, { at: 1, kind: "wecom-group", by: DAEMON });
+  hub.write(room2, [{ op: "join", at: 1, room: room2, who: { kind: "wizard", id: A }, ord: 1, via: "founder", by: DAEMON }]);
+  // 人连发两句 (都没点名) → 合并成一次注入, 两句都在, 一条 paste
+  const h1 = hub.append(room2, { author: human, kind: "say", origin: "inbound", text: "第一句" });
+  const h2 = hub.append(room2, { author: human, kind: "say", origin: "inbound", text: "第二句" });
+  const n0 = pasted.length;
+  await settle();
+  assert.equal(pasted.length, n0 + 1, "两句未读合并成一条注入");
+  assert.match(pasted.at(-1)!.text, /第一句/);
+  assert.match(pasted.at(-1)!.text, /第二句/);
+  assert.ok(h1.ok && h2.ok);
+  // 当轮提醒: 点名要交代的 msg + chat_reply 出路 + 不用答记 passed
+  const reminded = pasted.length;
+  await hub.onIdle(A);
+  assert.equal(pasted.length, reminded + 1, "闲下来提醒恰好一次");
+  const note = pasted.at(-1)!.text;
+  assert.ok(note.includes(h1.row.id) && note.includes(h2.row.id), "提醒点名欠着的 msg id: " + note);
+  assert.match(note, /chat_reply/);
+  assert.match(note, /passed/);
+  // 交代了就收账: 再闲不提醒、也不给提问者写系统行
+  hub.append(room2, { author: { kind: "wizard", id: A }, kind: "reply", origin: "tool", re: [h1.row.id], text: "一" });
+  hub.append(room2, { author: { kind: "wizard", id: A }, kind: "reply", origin: "tool", re: [h2.row.id], text: "二" });
+  await settle();
+  const n1 = pasted.length;
+  await hub.onIdle(A);
+  assert.equal(pasted.length, n1, "交代后不再提醒");
+  assert.equal(store.get(room2)!.msgs.filter((m) => m.sys === "undelivered").length, 0, "也不写 undelivered 系统行");
+}
 // 重开 store (模拟 reload): 账本状态一致
 {
   const again = openRoomStore(dir);

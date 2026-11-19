@@ -157,6 +157,9 @@ export const hostOf = (members: readonly { who: Who; ord: number }[]): string | 
 - 轮终事件驱动: mirror tail 的 turn_end → hub.onIdle, 正常路径零轮询。
 - 全局看门狗一个 (rooms.watchdog.intervalSec 缺省 60 / staleMin 缺省 5): 每次一条 `tmux list-panes -a`, 只看「有未结 duty 且 staleMin 内无任何事件」的 wizard。
   - pane 活且闲 → 视为漏了 turn_end, onIdle 一次并补投。
+  - **首轮只建基线**: daemon boot 后第一次扫描只记 lastEvent 与 pane 快照, 不取消、不补判闲。重启窗口不得被当成「很久没事件」。
+  - **取消是破坏性操作, 两次扫描确认**: 第一次判 pane 不存在只记「疑似」, 下一次扫描 (间隔 ≥ intervalSec) 仍不存在才执行下面的结束处理; 其间 pane 回来 / 有新事件 / pane id 变化即清疑似。tmux 调用失败或返回空表 → 本轮整体跳过, 但**计连续失败数**: 到 3 轮打一条停摆 warn (只打一次), 恢复时打一条 recovered; failStreak 与 lastScanAt 进汇总行与 /status.watchdog —— 跳过不能变成静默失效。
+  - **解析输入以真机为准**: pane 列表解析的单测 fixture 是真机抓下的原始输出 (tests/fixtures/), 外加含分隔符用例; 不用手写数组 (2026-11-19 `split("\\\\n")` 误杀 bug 的根因就是自造输入)。
   - **pane 不存在 → 按实例结束**: leaveOps 写 canceled 唤醒提问者, 并在它所在每个 room 落一行 `sys:"instance-ended"` 系统消息 (成员都看得见, 绑定 room 镜像)。**不自动重生**。理由: 自动重生会带着不确定的模型档位与上下文把别人的活接回去, 失败一次还要再兜第二层; 「实例结束了」是账本里说得清、人看得懂的事实。
   - **pane 忙 → 只 warn 不纠偏** (带 busyForMs + openDuties)。理由: 卡死与长活在外部不可分, 猜错就是打断正在干的活; 卡死由人 stop_wizard。
 - pane cap 清扫误杀导致的 pane 消失属于 spawn 侧问题, 单独开活, 不进看门狗。
