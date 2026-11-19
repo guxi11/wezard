@@ -80,8 +80,10 @@ wait_healthz() { # $1 = port
   for i in $(seq 1 60); do curl -s --noproxy '*' -m 2 "http://127.0.0.1:$1/healthz" >/dev/null && { up=1; break; }; sleep 1; done
   [ "$up" = 1 ]
 }
-# o2-gate 输出行里「(」之前的数字 = [内存, 账本重放]。
-o2_nums() { echo "$1" | cut -d'(' -f1 | grep -oE '[0-9]+'; }
+# o2-gate 输出按位置取数 —— 别用裸 grep -oE '[0-9]+': 行首 "O2 RED/GREEN" 里的 2
+# 会被当第一个数字吃进去 (2026-11-19 演练实测: B 段 memB 应为 0 却拿到 2)。
+o2_mem() { echo "$1" | sed -n 's/.*duty \([0-9][0-9]*\).*/\1/p'; }
+o2_disk() { echo "$1" | sed -n 's/.*重放 \([0-9][0-9]*\).*/\1/p'; }
 mig_rooms() { echo "$1" | sed -n 's/^写入 [0-9]* 行 → //p'; }
 setup_case() { # $1 = home  $2 = port
   mkdir -p "$1/.wezard"
@@ -108,7 +110,7 @@ o2A=$(env HOME="$A" "$ROOM/scripts/room-cutover/o2-gate.sh" "http://127.0.0.1:$P
 rcA=$?
 say "A o2-gate: $o2A"
 [ "$rcA" = 0 ] || fail "A (目录对) O2 闸应绿却红了: $o2A"
-diskA=$(o2_nums "$o2A" | sed -n 2p)
+diskA=$(o2_disk "$o2A")
 [ -n "$diskA" ] && [ "$diskA" -ge 1 ] || fail "A 账本重放数应 >=1 (夹具有一件未结), 拿到: $diskA"
 stop_daemon "$DPID_A" "$A"
 say "A 完成: O2 绿, 内存 == 账本重放 == $diskA"
@@ -130,8 +132,8 @@ o2B=$(env HOME="$B" "$ROOM/scripts/room-cutover/o2-gate.sh" "http://127.0.0.1:$P
 rcB=$?
 say "B o2-gate: $o2B"
 [ "$rcB" != 0 ] || fail "B (目录错) O2 闸应红却绿了: $o2B"
-memB=$(o2_nums "$o2B" | sed -n 1p)
-diskB=$(o2_nums "$o2B" | sed -n 2p)
+memB=$(o2_mem "$o2B")
+diskB=$(o2_disk "$o2B")
 [ "${memB:-x}" = 0 ] || fail "B 内存数应为 0 (daemon 起来账本为空), 拿到: $memB"
 [ "${diskB:-x}" = "$diskA" ] || fail "B 账本重放数应等于夹件数 $diskA, 拿到: $diskB"
 stop_daemon "$DPID_B" "$B"
