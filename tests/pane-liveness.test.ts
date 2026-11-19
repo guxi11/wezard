@@ -68,6 +68,14 @@ await t("空 pane id = gone, 不起子进程", async () => {
   assert.equal(await probe(""), "gone");
 });
 
+await t("退 0 但输出为空 = gone (tmux 3.6a 对死 pane 的答法)", async () => {
+  // 2026-11-19 实测 tmux 3.6a: display-message -p -t %3525 对一个已经不在的 pane
+  // 退 0、输出空串。旧 tmux 在这里报 "can't find pane" 退 1。判成 unknown 的话,
+  // 升级后 tmux server 一重启, 所有绑定都指向死 pane, 消息永远「探活无定论」卡住。
+  const probe = withRunTmux(async () => result({ ok: true, code: 0, stdout: "\n" }));
+  assert.equal(await probe("%7"), "gone");
+});
+
 await t("回答的不是同一个 pane id = unknown (不敢当它死了)", async () => {
   const probe = withRunTmux(async () => result({ ok: true, code: 0, stdout: "%8\n" }));
   assert.equal(await probe("%7"), "unknown");

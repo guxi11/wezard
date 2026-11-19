@@ -1653,7 +1653,14 @@ const paneLiveness = async (paneId: string): Promise<PaneLiveness> => {
   if (!paneId) return "gone";
   const r = await runTmux(["display-message", "-p", "-t", paneId, "#{pane_id}"]);
   if (r.timedOut || r.code === null) return "unknown";
-  if (r.code === 0) return r.stdout.trim() === paneId ? "alive" : "unknown";
+  if (r.code === 0) {
+    const out = r.stdout.trim();
+    if (out === paneId) return "alive";
+    // tmux 3.6a 实测 (2026-11-19): 解析不到的目标仍退 0, 只把格式串展开成空, 而旧版报
+    // "can't find pane" 退 1。活着的 pane 上 #{pane_id} 永远有值 —— 空回答 = 没这个
+    // pane, 回了别的 id 才是「问不出定论」。判成 unknown 会让死 pane 永远不重生。
+    return out ? "unknown" : "gone";
+  }
   return "gone"; // "can't find pane: %N" / "no server running" —— 两条都等于它没了
 };
 
