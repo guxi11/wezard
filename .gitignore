@@ -11,6 +11,7 @@ secrets.json
 .npmrc
 docs/*
 !docs/evolve/
+!docs/room/
 !docs/v3-design.md
 !docs/v3-p3-steward-table.md
 !docs/probe-steward.mjs
