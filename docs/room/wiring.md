@@ -53,4 +53,12 @@
 
 ## D. 测试
 - 先跑全量, 剔除 13 个基线红 (见 OliveDavis 回执); 因旧语义而红的测试, 按设计稿 G 节表改写或删除
-- 必须绿: room-duty / room-leave-cancel / room-interrupt / room-hub / room-migrate / room-view / room-view-api / charter / tool-hints
+- 必须绿: room-duty / room-leave-cancel / room-interrupt / room-hub / room-migrate / room-view / room-view-api / charter / tool-hints / room-watchdog
+
+### D1. 旧语义红的处理原则 (2026-11-19 上级定, 写死)
+
+- **删, 只有一种情况**: 测的**对象已经不存在** —— 断言对象是 router / message-events / strict-gate / strict-switch / members / chat-records / idle-nudge / receipts / obligations / pending-items / dispatch 这些已删模块的**导出本身** (函数签名、内部数据结构、它们的状态文件格式)。
+- **测的是行为, 一律改写成新语义, 不许删**: 回执投递、终句提醒、休眠唤醒、镜像进企微、host 求值、成员加减、交接、路由到谁 —— 这些行为在 room 模型里都还在 (换成 duty / reply / wake / mirror / members), 改写成断言新路径的同一行为。「改起来麻烦」「旧夹具难迁」不构成删除理由。一个文件里既有对象断言又有行为断言, 只删对象部分, 行为部分改写。
+- **design.md G 表是参考, 本原则优先**: G 表写「删除」而文件里有行为断言的, 按本原则改写, 并在删除记录里注明与 G 表的出入。
+- **每条删除留一行** (写进 docs/room/verify-<commit>.md 的「删除记录」节): `文件 | 原断言 (测试名或 assert 文案) | 为什么判为「对象已不存在」(指出被删的导出 / 文件)`。没有这一行的删除视为回归。
+- **基线红不由执行者自己判**: 输入是验证报告 (verify-fd4715b.md) 给出的分类 —— 基线红 14 个不动, 只处理报告列出的旧语义红与真断言不一致。

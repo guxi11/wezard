@@ -19,10 +19,25 @@
 | 6 | 账本迁移 | `node dist/cli/migrate-rooms.js --dry-run` → 看报表 → 去掉 --dry-run 跑 | 报表计数对得上源 (未结路由 5、uncertain 103 归档、queued 3); 再跑一次写 0 行 | `mv ~/.wezard/rooms ~/.wezard/rooms.rejected-<ts>`。源文件迁移时一个字不改, 旧 daemon 也不读 rooms/ |
 | 7 | 代码切到 room-model (细节见下节「第 7 步」) | 线上工作树 `cc-wecom` 在 v3 上: 先确认工作树干净 → `git tag pre-room cf3e0b3` → `git merge --ff-only room-model` → `npm run build` | `git status --porcelain` 前后都为空; `git log -1` = room-model 头; build 绿 | `git reset --keep pre-room && npm run build` |
 | 7a | **config 解析 dry-run 复跑** (新 dist 已就位, 起 daemon 前最后一道) | 同 2a, 但第一个参数指线上 dist: `WEZARD_CONFIG=$T/c.jsonc node scripts/room-cutover/config-check.mjs ~/develop/Guxi11/cc-wecom/dist` (副本取自此刻的 ~/.wezard/config.jsonc) | exit 0 | 失败不起 daemon: 先退 7 (`git reset --keep pre-room && npm run build`), 再查 |
+| 7b | **放 /new 标记** | `touch ~/.wezard/state/rooms-cutover-new.flag` (契约 §7: boot 见到它才把每个绑定 pane 标为待 /new; 不放 = 老会话带着旧工具面继续跑) | `ls ~/.wezard/state/rooms-cutover-new.flag` 存在; 第 8 步后 daemon.log 有「切换标记在, 首次唤醒前先 /new」一行, 且全部 pane 处理完后标记被删 | `rm` 该文件 |
 | 8 | 起 daemon + svr | `launchctl kickstart gui/$UID/com.wezard.daemon`; 前端资源有变, svr 也要 `launchctl kickstart -k gui/$UID/com.wezard.svr` | daemon.log 无 crash-loop; uid 回填条数 = 实例数; 每个绑定 pane 都标成待 /new | 从这一步起逆序回退: 8 → 7 → 6 → … |
 | 9 | 旧会话换新工具面 | 不用手动做: daemon 启动时把每个绑定 pane 标为待 /new, 下次唤醒先 /new 再注入, 新会话由 armCharter 拿到新宪章。session-mcp*.json / session-hooks.json 指向的入口不变 (http /mcp 加 hook 路径), 由 daemon writeIfChanged 重写, 不用手改; 真正要换的是会话里缓存的 tools/list, 由 /new 解决 | 抽 1 个群发话: 首轮宪章里没有 tell_peer, 工具列表里有 room_*; 看门狗: 给一个正忙的测试 wizard 派一条 chat_ask 后 `tmux kill-pane` 掉它的 pane, staleMin (缺省 5 分钟) + 一个扫描周期内该 duty 出现 daemon 写的 canceled reply 并唤醒提问者 | 回到 7 后, 旧代码下的下一次 /new 拿回旧工具面 |
 
 | 10 | 切换后清理 (稳定 7 天、未回退之后) | ① `rm ~/wezard-backups/pre-room-*.tgz` (只删第 1 步的切换前快照); ② 冻结的旧源 (~/.wezard/routes.jsonl 3.9M、state/members.json、state/chats/、state/message-events.json*、state/obligations.json、state/idle-nudges.json、state/strict-delivery-notices.json) **原样 mv 到 `~/.wezard/state/archive/pre-room-sources-<ts>/`, 不删、不压缩**: 同卷 rename, 不额外占盘, 逐字节不变; ③ `git branch -d room-model room-mig room-tools room-ui`, 删对应 worktree | `ls state/archive/pre-room-sources-<ts>/` 文件数 = 移动前; `df -h ~`; `git tag -l pre-room` 仍在 | ① 不可逆, 这就是要等满 7 天的原因; ② `mv state/archive/pre-room-sources-<ts>/* 原位` (回退到旧 daemon 前必须先做这一步); ③ 分支可从 tag 与 v3 历史重建 |
+
+## 第 9 步附: 切换后 30 分钟观察清单 (上级切完按此要数)
+
+计时起点 = 第 8 步 kickstart 的时刻 T0 (记下来)。以下四条都要给出**数字 + 取数命令原样输出**, 任何一条不达标即进入回退判断 (8 → 7 → …)。
+
+| # | 指标 | 达标 | 取数方式 |
+|---|---|---|---|
+| O1 | daemon.log 错误与重复告警 | T0 后 `level>=50` (ERROR/FATAL) 行数 = 0; 进程无重启 (`launchctl list` PID 30 分钟内不变); 不出现**新的**重复 warn 模式 —— 同一 msg 文案 30 分钟内 > 10 次、且切换前 24h 没出现过的, 记为新模式 | `scripts/room-cutover/observe.mjs log --since T0`: 按 level 计数 + 按 msg 文案聚合 warn 计数, 与切换前 24h 同窗口对比, 输出「新出现的 warn 文案 + 次数」 |
+| O2 | 未结 duty 账实一致 | daemon 内存里的未结 duty 数 = 盘上 ~/.wezard/rooms/ 账本重放出的未结 duty 数, **差值 0**; 在 T0+5min 与 T0+30min 各取一次 | `GET /status` 的 `openDuties` (修复单新增字段; 注意 `/status` 现有的 `pending` 是**审批卡**数, 不是 duty, 不能拿来比) 对 `observe.mjs duties` (只读重放账本, 用 shared/room.js 的 fold + openDuties) |
+| O3 | 发话到唤醒的延迟 | 挑 1 个绑定 room, 人发一句点名一个闲着的 wizard: ① 账本行 `at` → 企微镜像成功 < 10s; ② 账本行 `at` → 被唤醒者注入成功 (开始干活) < 10s。连测 3 次取最大值 | daemon.log 里按该行 msg id 取两条 info: `room: mirrored` 与 `room: delivered` (修复单新增, 都带 `room/msg/lagMs`); `observe.mjs lag <msg id>` 直接打出两个 lagMs |
+| O4 | 看门狗日志形状 | 每次扫描**至多一行** (`mod:room-watchdog` 汇总行: 持有者 / stale / 补判闲 / 结束 / 忙 计数, 忙的明细折进同一行); 30 分钟内 watchdog 行数 ≤ 30 (60s 间隔); 不出现逐 wizard 刷屏; T0 后首轮扫描「结束」计数 = 0 (除非人确实杀了 pane) | `observe.mjs watchdog --since T0`: 按扫描时间戳分组, 输出每次扫描的行数最大值、总行数、各计数之和 |
+
+- O2、O3、O4 依赖修复单 (看门狗修复 + /status.openDuties + 两条投递日志 + observe.mjs) 合入 room-model; 没合入之前这四条量不出来, 不许切换。
+- 第 9 步原有的 kill-pane 验收在 O1–O4 都达标之后再做 (它会故意制造一次「结束」计数)。
 
 ## 配置: 未知键与校验 (2026-11-19 实测)
 

@@ -107,3 +107,9 @@ $ git grep -nE "receipts\.json|obligations\.json|idle-nudges\.json|strict-delive
 1. **`pending_items` 工具面悬空**: `mcp/tools.ts:965` 仍注册该工具 (POST `/pending`), 而 `daemon/index.ts:1900` 写着「pending_items 已退役 (wiring C)」并且路由已删; `daemon/wizard.ts:1089` 的宪章仍在教 wizard 用它。现状是「模型照着宪章调用 → 404」。
 2. **/help 仍在教已退役的命令**: `daemon/inbound.ts:224` 列着 `/owed`、`:225` 列着 `/strict [apply]` (两者的处理分支都随 strict-switch 删除), `:229` 还留着「工单的派活与回执不进群」这句旧口径, 另 `:171` 一行 /owed 的注释。属于 QuinnFord 那份旧引用清单的同类, 记在这里备查。
 3. **契约 §7「每个绑定 pane 标为待 /new」依赖一个没人创建的一次性标记** `state/rooms-cutover-new.flag` (`daemon/index.ts:1307-1326`), 而 cutover.md 第 9 步写「不用手动做」。切换时若没人 touch 这个文件, 老会话不会被 /new, 会拿着旧工具面继续跑。
+## 复核更正 (LeoAdams, 2026-11-19, 对照 room-model 源码)
+
+- ② 附注 2「契约 §7 旧键 warn 没有落地」**不成立**: warn 在 daemon/index.ts main() 开头 (loadConfig 之后), 键名拆写成 `"top" + "Only"` / `"spe" + "ech"` 以避开 grep, 所以搜不到字面量。
+- 附 1「pending_items 工具面悬空 → 404」**不成立**: `POST /pending` 在 daemon/index.ts 按 room open duty 重写过 (约 3056 行), 1900 行那句注释说的是旧台账退役。工具可用。
+- 附 3 (rooms-cutover-new.flag 没人创建) **成立**, 已进切换清单 7b; 另查出该段在 pane 忙时 /new 失败也会删标记, 归入修复单。
+- 复核额外查出 (报告未覆盖, 归入修复单): 看门狗 `listPanes` 把 tmux 输出按字面 `"\\n"` (反斜杠 + n) 切分 —— 多 pane 时永远匹配不上, 所有 stale 持有者都会被判「pane 消失」并取消 duty; tmux 调用失败返回空表同样会全员误判; activity 初值为 0, 重启后首轮扫描所有持有者都算 stale。单测用假 listPanes 直接给数组, 覆盖不到解析。
