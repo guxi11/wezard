@@ -731,7 +731,7 @@ const answerOf = (
 // ── wizard → wizard 的信封 ────────────────────────────────────────────
 // 同伴的话是原样落进输入框的, 而落进输入框的东西在模型眼里都是「用户说的」。没有
 // 信封, 收件方分不清这一轮是人说的还是 wizard 说的、回复给谁看、该不该回话 ——
-// 于是对着 wizard 寒暄、把过程 notify 进群、或者 tell_peer 回去 (发话方正挂在
+// 于是对着 wizard 寒暄、把过程 notify 进群、或者又回一句 (发话方那头会再多一轮)。
 // wait_peer 上, 这一回会给它多排一轮, 两边就此乒乓)。信封把这三件事写在每一轮
 // 自己身上: 宪章是出生时的快照, 正在跑的老 wizard 读不到新规矩, 这一段读得到。
 // 与 mention hint / 名册增量同一个 `<system-reminder>` 壳 —— mirror 的 meta 剥离器
@@ -770,20 +770,20 @@ export const renderPeerEnvelope = (from: string, chat?: string, chatKey?: string
   renderReminder(envelopeAttrs.peer(from, chat, t?.asker, chatKey), [
     ...(chat === undefined
       ? [
-          "这是 wizard 私聊, 不是人说的。",
+          "这是 dm room 里的一条消息 (非绑定, 只有你们两边看得见), 不是人此刻说的。",
           ...(t?.quiet || t?.act === "fyi"
-            ? ["发话方不收回执; 不要为确认收到而 tell_peer 或 notify。"]
+            ? ["发话方不等回话; 不用为确认收到而另发一条。"]
             : [
-                "终句面向派活方; 自动回执无需另调工具, 不要重复 tell_peer 或为这轮私聊 notify。",
-                "对 wizard 直说: 不寒暄、不加对人的称呼、不复述它的话; 交差时在行首直接写收件人 + 结论 (点号名字 + 空格 + RESULT: 结论), 行首不要加反引号/引号/加粗 (@name / @.name 存量照认), 一条消息可分段回复多个接收者 (交付物写进文件就回传路径); 需要对方补信息或继续协作时, 用 tell_peer({kind:\"ask\"}) 发起反问/子任务; 交付了文件, 每个加一行 ARTIFACT: <路径> — 一句话。",
+                "终句不送给任何人 —— 要交代就用 chat_reply({re: 信封上的 msg, text: 结论, status: \"done\"}), 不要为确认收到另发一条消息。",
+                "对 wizard 直说: 不寒暄、不加对人的称呼、不复述它的话; 结论 / commit / 文件路径一句话讲清, 取舍与遗留单列一段; 需要对方补信息就往回 chat_reply({status: \"need\"}), 要另派一件新活就开一条 chat_ask。交付了文件就在同一轮 send_file。",
               ]),
         ]
       : [
-          `面向群里的人表达${t?.quiet || t?.act === "fyi" ? "。发话方不收回执" : "; 自动回执无需另调工具"}, 不要重复 tell_peer 同一段结论。`,
+          `这条消息在绑定 room 里, 你的话也必须写回这个 room (chat_reply / chat_say) —— 终句只进 rolepage, 谁也不会收到${t?.quiet || t?.act === "fyi" ? "。发话方也不等回话" : ""}; 不要重复同一段结论。`,
         ]),
     ...(t?.re ? ["这是**续问**: 接着那件活说, 不是一件新活。"] : []),
     // 这句话要怎么接 —— 只有发话方知道, 不写出来对方一律当成一件活去干。
-    ...(t?.act === "ask" ? [`这是一个**提问**: 只答这一问, 几句话${t.quiet ? "" : "并明确收件人 (行首直接写收件人 + RESULT:, 不加装饰)"}; 需要反问或派生子任务时用 tell_peer({kind:"ask"|"task"})。`] : []),
+    ...(t?.act === "ask" ? [`这是一个**提问**: 只答这一问, 几句话, 放进 chat_reply({re, text}) 就把它关账。需要反问就 status: \"need\", 要派生新任务另开一条 chat_ask。`] : []),
     ...(t?.act === "fyi" ? ["这是一条**知会**: 不用回复、不用收口, 也别为它开新活 —— 与手头的活相关就顺手吸收, 无关就略过; 一句话收住这一轮即可。"] : []),
     // 来回多了就收口: 不在守护进程里拒绝 —— 拒了模型会换条通路接着乒乓。
     ...((t?.legs ?? 0) > 3 ? [`这件活已经来回 ${t!.legs! - 1} 次: 这一次请直接给结论, 拿不准的写清你的假设。`] : []),
@@ -818,7 +818,7 @@ export const renderReceiptEnvelope = (
     speaks
       ? "有人等这份结论，不要只写 QUIET。"
       : "无人等这份结论；只有没有新结果、风险或待答 NEED 时，终句才精确写 QUIET。",
-    "需要对方补信息或协作时用 tell_peer({kind:\"ask\"})；还在等依赖用 WAIT: <在等什么>。回执轮用 notify 正式报告须显式写 RESULT:；未标记的 notify 只是进度。",
+    "需要对方补信息或协作时用 chat_reply({status: \"need\"}) 或另开一条 chat_ask；还在等依赖用 WAIT: <在等什么>。这一轮的结论用 chat_reply({re, text, status: \"done\"}) 交出去。",
     ...(route?.via ? [`这是**沿链升级**的回执: ${route.via} 已不在，原由它收口的任务交由你处理。`] : []),
     ...(route?.retold ? ["这是它对这件活的**追述**: 之前已经交过一份 (定论或失败回执), 这一份是之后补的, 以这一份为准。"] : []),
     // 去向由路由行的 receiver 边算好 (§9.5): up = 终句落到上游那一笔上; chat 给了 = 落回那个群;
@@ -836,7 +836,7 @@ export const renderReceiptEnvelope = (
         : route?.pending
           ? [`还有 ${route.pending} 份没回: 先记下这一份, 等最后一份到了再汇总。`]
           : ["人看不见这段私聊。"]),
-    ...(turn && status !== "canceled" ? [`若需追问或补充，用 tell_peer({name: '${from}', re: true}) 续同一笔。`] : []),
+    ...(turn && status !== "canceled" ? [`若需追问或补充，用 chat_ask({to: '${from}', for: <原消息 id>}) 续同一笔。`] : []),
   ]);
 };
 
@@ -1226,7 +1226,7 @@ export const paneIsBusy = (paneText: string): boolean =>
 // 成 issue 号), 而不是去叫它。
 //
 // 在边界上给这个 mention 加注, 就是把 `#b` 变成「wizard b」的那一步。加注只对
-// 已经能通过 tell_peer/peek_peer 同一套查找解析出来的 tag 发生, 所以它永远不会
+// 已经能通过名字查找解析出来的 tag 发生, 所以它永远不会
 // 广告一个调不通的地址 —— 解析不出来的 `#123` / `#L45` 静静穿过去。
 export interface PeerMention {
   /** Name as written, without `.`. */
@@ -1260,7 +1260,7 @@ export const peerMentionPart = (mentions: readonly PeerMention[], cwd = ""): Par
   return {
     text: renderReminder({ wezard: "mention" }, [
       ...(rule
-        ? ["名字 tokens above are live wizards, not literal text. To involve / check / relay to one: tell_peer · peek_peer · wait_peer(name) — never answer for it; wizard_roster for all. A passing mention needs no tool."]
+        ? ["名字 tokens above are live wizards, not literal text. To involve / check / relay to one: chat_ask · peek_peer · wait_peer(name) — never answer for it; wizard_roster for all. A passing mention needs no tool."]
         : []),
       ...fresh.map(row),
       ...(known.length ? [`${known.map((m) => m.tag).join(" ")}: wizards (described earlier)`] : []),

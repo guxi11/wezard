@@ -160,10 +160,13 @@ const toolNames = async (): Promise<string[]> => {
   return (await client.listTools()).tools.map((x) => x.name);
 };
 {
-  // S2: 四工具从 registerRare 升常规 —— 不带任何 env 也必须在工具面 (implicit 群由 handler 409 挡)。
+  // room 模型: 沟通面是 chat_* + room_*, 旧的 chat_members / read_chat / tell_peer 全部退场。
   const base = await toolNames();
-  for (const n of ["chat_members", "chat_say", "chat_reply", "chat_ask"]) {
-    assert.ok(base.includes(n), `常规注册后 ${n} 在工具面 (S2 升级)`);
+  for (const n of ["chat_say", "chat_ask", "chat_reply", "room_open", "room_read", "room_members", "room_watch"]) {
+    assert.ok(base.includes(n), `room 口子 ${n} 在工具面`);
+  }
+  for (const gone of ["chat_members", "read_chat", "tell_peer"]) {
+    assert.ok(!base.includes(gone), `${gone} 已退役`);
   }
 }
 

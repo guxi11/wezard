@@ -163,7 +163,7 @@ export const renderRow = (x: Item, live: LiveOf, n: Names, at: number): string =
     forOf(x, n),
   ].filter(Boolean).join(" · ") + (x.ask ? `\n  它问: ${x.ask}` : "");
 
-const HOWTO = "答它 / 转达人的话 → `tell_peer({name, re: true})`; 没结论的改派或 re 追问; 不再要了 → `pending_items({drop:[<name>]})`";
+const HOWTO = "答它 / 转达人的话 → `chat_reply` 交代; 没结论的另开一条 `chat_ask` 追问; 不再要了 → `pending_items({drop:[<name>]})`";
 
 /** 读 receiver 欠账；plan 是否暂停/完成由 owner 自己管理。 */
 export const renderTable = (xs: readonly Item[], live: LiveOf, n: Names, at: number): string =>
@@ -259,7 +259,7 @@ export const digest = (d: DigestIn): DigestOut => {
 };
 
 /** 增量那几行 (need / heard? / slow) 怎么接 —— 窗口里没给过才挂 (`rule`)。 */
-const RULE = "Pending (daemon-tracked). need: the human must answer → relay via tell_peer({name, re}). heard?: their line may be that answer → relay, else ignore. slow: no receipt yet, peek_peer if stuck. FYI — don't reply; pending_items = full list.";
+const RULE = "Pending (daemon-tracked). need: the human must answer → relay with chat_reply. heard?: their line may be that answer → relay, else ignore. slow: nothing closed yet, peek_peer if stuck. FYI — don't reply; pending_items = full list.";
 
 /** 增量那几行 / 全表 → 挂在注入尾巴上的那段。 */
 export const renderDigest = (o: DigestOut, table: string, rule = true): string =>

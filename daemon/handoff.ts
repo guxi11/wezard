@@ -286,7 +286,7 @@ export const resumeText = (event: string, ctx: { asker?: string; ask?: string; c
     ctx.ask?.trim() ? `原话:\n${quote(ctx.ask)}` : "",
     ctx.closing?.trim() ? `已有结果与上次收尾:\n${quote(ctx.closing)}` : "",
     ctx.ask?.trim() || ctx.closing?.trim()
-      ? `就按上面这件事收口；已做完就用 ${ctx.receiver ? `@${ctx.receiver.replace(/^\./, "")} RESULT:` : "RESULT:"} 交差。需要补信息时用 tell_peer({kind:"ask"})。`
+      ? `就按上面这件事收口；已做完就用 chat_reply({re, text: <结论>, status: "done"}) 交代。需要补信息时 status: "need", 要另派就开一条 chat_ask。`
       : "",
   ].filter(Boolean).join("\n\n");
 

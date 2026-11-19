@@ -78,7 +78,7 @@ export const stewardPrompt = (root: string, files: readonly string[], refsOf?: R
 /** 私聊信封: 这一轮不属于任何群, 回复哪儿也不发。 */
 export const stewardEnvelope = (channel: string): string =>
   renderReminder(envelopeAttrs.task(STEWARD_ID, channel), [
-    "这一轮是守护进程内建的共享记忆整理放进来的, 不属于任何群、没有人在等 —— 照常执行, 回复只留在 rolepage, 不要 notify / tell_peer 任何人。",
+    "这一轮是守护进程内建的共享记忆整理放进来的, 不属于任何 room、没有人在等 —— 照常执行, 回复只留在 rolepage, 不要 notify 或给任何 wizard 开 duty。",
   ]);
 
 // ── 边界 IO ────────────────────────────────────────────────────────

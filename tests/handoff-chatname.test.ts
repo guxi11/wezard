@@ -18,7 +18,7 @@ assert.match(text, /^继续 e4515c1/);
 assert.match(text, /问的是: user:T1 \(在 bias\)/);
 assert.match(text, /原话:\n> set workspace to \/x/);
 assert.match(text, /> 已排入切换\n> 下一轮生效/);
-assert.match(text, /RESULT:/);
+assert.match(text, /chat_reply/);
 assert.equal(resumeText("e1", {}), "继续 e1 —— 这是你还没交代的同一项任务。核对已有结果后续办，不要重复已完成或交付未知的操作。");
 
 // keep: 被摘掉的终句不进失败补投 (uncut), 其余照旧

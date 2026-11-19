@@ -28,7 +28,7 @@ const STRICT: Policy = { afterMs: 5 * MIN, max: 1, cycles: 1 };
 // ─── 话术: 说的是「结论没进群、用 chat_reply 补发」, 不是「进展如何」
 await t("补发追问说清楚结论没交付销账、要 chat_reply 发出去", () => {
   const s = strictDeliveryNudge({ chat: "sanitizer", re: "e4622be.1" });
-  assert.ok(s.includes("还没用 chat_reply 交付"), "说的是「未交付」不是「没发言」(2026-11-18 放宽后 chat_say 也算发言)");
+  assert.ok(s.includes("还没用 chat_reply 交代"), "说的是「没交代」不是「没发言」(说别的话不等于交代)");
   assert.ok(s.includes("chat_reply"));
   assert.ok(s.includes('re: "e4622be.1"'), "带上义务的 re");
   assert.ok(!s.includes("进展如何"), "通用追问话术是错题");
@@ -56,7 +56,7 @@ await t("人话行只说坏了什么、人怎么办 — 不出现工具名与运
 
 await t("终句当轮即时提醒: 说的是「那句终句没发进群」, 带补发指引", () => {
   const s = strictUndeliveredNotice({ chat: "aiconfig", re: "m1" });
-  assert.ok(s.includes("没有发进 aiconfig"), "点破终句哪儿都没去 (不是进展追问)");
+  assert.ok(s.includes("没有进 aiconfig"), "点破终句哪儿都没去 (不是进展追问)");
   assert.ok(s.includes('re: "m1"'));
   assert.ok(s.includes("chat_reply"), "给可执行的补发路径");
   assert.ok(s.includes("只提醒这一次"), "有界");

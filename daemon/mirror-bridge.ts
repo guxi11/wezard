@@ -6832,7 +6832,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   ): Promise<{ ok: boolean; reason?: string; dialog?: string; busy?: boolean; waiting?: string[] }> => {
     const jsonl = jsonlOf(target);
     const busy = await isBusy(target);
-    if (!jsonl || !existsSync(jsonl)) return { ok: false, reason: "它还没有 transcript (没接过第一句话) —— 用 tell_peer 跟它说一句就有了", busy };
+    if (!jsonl || !existsSync(jsonl)) return { ok: false, reason: "它还没有 transcript (没接过第一句话) —— 在它的 room 里 chat_ask 一句就有了", busy };
     // `n` 数的是来回: 每个来回给问话和它最新的一句 (跑完的是终句, 还在跑的是途中
     // 最近说的那句) —— 途中的其余叙述不给, 那是过程不是结论。
     const rounds = talkRounds(jsonl, n).slice(-n);

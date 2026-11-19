@@ -331,7 +331,7 @@ export const resultCorrectionInputs = (source: MessageEvent, section: string, in
     ...(serves ? { serves, ...(asker ? { asker } : {}) } : {}), ...(feedbackRoute ? { feedbackRoute } : {}),
     priority: "normal", deadline: NO_DEADLINE,
     payload: { text: text ?? (serves
-      ? `你的 RESULT 暂未交付：${reason}。请把收件人和结论写在行首 (点号名字 + 空格 + RESULT: <结论>, 不加反引号/引号/加粗) (@name 存量照认)；需要反问时使用 tell_peer({kind:"ask"})。`
+      ? `你的结论还没交代：${reason}。请用 chat_reply({re, text: <结论>, status: "done"}) 把它写进 room; 要反问就把 status 写成 "need"。终句只进 rolepage, 谁也不会收到。`
       : fyiBody()),
       peer: { from: { kind: "peer", from: recipient, ...(serves ? { event: serves } : {}) },
         envelope: renderEnvelope(displayName(recipient), !serves), kind: serves ? "task" : "fyi" } },

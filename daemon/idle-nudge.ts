@@ -89,14 +89,14 @@ export const step = (w: Watch | undefined, o: Obs, now: number, p: Policy): { ne
 /** 追问那一句 (进对方输入框, 以发话方的名义、件号沿用)。 */
 export const nudgeText = (fromName: string, turn: string, idleMs: number, n: number, max: number, state: TurnState = "working"): string =>
   state === "needs-input" || state === "errored"
-    ? `（守护进程代 ${fromName} 提醒${max > 1 ? ` (${n}/${max})` : ""}: 任务 (${turn}) 正等你回应${state === "errored" ? "（执行方遇到错误）" : "（执行方有反问）"}。请用 tell_peer({name:"${fromName}", re:true}) 回答或续办；需要新信息时用 kind:"ask"。）`
-    : `（守护进程代 ${fromName} 追问${max > 1 ? ` (${n}/${max})` : ""}: 这件活 (${turn}) 你已经闲了 ${Math.max(1, Math.round(idleMs / 60_000))} 分钟, 还没有交回结论。进展如何? 卡在哪? 做完了就在行首直接写 RESULT: <结论> (行首不加反引号/引号/加粗); 还在等什么 (后台任务 / 别人) 就说清楚在等什么、大概多久。）`;
+    ? `（守护进程代 ${fromName} 提醒${max > 1 ? ` (${n}/${max})` : ""}: 任务 (${turn}) 正等你回应${state === "errored" ? "（执行方遇到错误）" : "（执行方有反问）"}。请用 chat_reply({re: "${turn}", status: "need"}) 把问题或所需的信息说回来。）`
+    : `（守护进程代 ${fromName} 追问${max > 1 ? ` (${n}/${max})` : ""}: 这件活 (${turn}) 你已经闲了 ${Math.max(1, Math.round(idleMs / 60_000))} 分钟, 还没有交代。进展如何? 卡在哪? 做完了就用 chat_reply({re: "${turn}", status: "done", text: <结论>}) 交代; 还在等什么 (后台任务 / 别人) 就用 status: "progress" 说清在等什么、大概多久 —— 终句只进 rolepage, 谁也不会收到。）`;
 
 /** strict 群「答了但没交付」的追问那一句 —— 它答过了, 通用追问「进展如何 / 还没交回结论」是错题
  *  (它以为自己答完了); 要说的是「这笔义务还没用 chat_reply 交付销账」(2026-11-18 放宽后
  *  chat_say 也能发言, 但只有 chat_reply 销账 —— 发过话不等于交付)。re = 那条义务消息的信封 msg。 */
 export const strictDeliveryNudge = (x: { chat: string; re: string }): string =>
-  `（守护进程: ${x.chat} 是严格模式, 你这一轮已经写出了结论, 但这笔义务**还没用 chat_reply 交付** (仍开着 —— 严格群里发过话不等于交付, 终句也不进出站门)。请用 chat_reply({re: "${x.re}", text: <你刚才那份结论>}) 把它正式交付; 确实不该发就不带 text 记 passed。这件活只追问这一次, 再不回会上报。）`;
+  `（守护进程: ${x.chat} 里那笔账**还没用 chat_reply 交代** (仍开着 —— 说别的话不等于交代, 终句也只进 rolepage)。请用 chat_reply({re: "${x.re}", text: <你刚才那份结论>, status: "done"}) 把它交代掉; 确实不该答就不带 text (记 passed)。这件活只追问这一次, 再不回会给提问者写系统行。）`;
 
 /** 追问之后仍无交付: 告诉**本群管家**的那一段 (直投它的输入框 —— 运维动作是 wizard 的事, 人只看结论;
  * 2026-11-18 aiconfig 群实录: 这段话发进群被人打回「daemon 可以直接给哪个 wizard 说」)。 */
@@ -114,7 +114,7 @@ export const strictDeliveryHumanLine = (x: { who: string; asks: number }): strin
  *  (2026-11-18 aiconfig 群实录)。与闲置追问 (strictDeliveryNudge) 分工: 这里是终句落地那一刻
  *  的即时可见失败, 那个是之后的兜底。每行只提醒一次 (接线侧落盘)。 */
 export const strictUndeliveredNotice = (x: { chat: string; re: string }): string =>
-  `（守护进程: 你刚写完的那句终句没有发进 ${x.chat} — 本群是严格模式, 终句不进出站门、也认不出收件人, 谁都没收到。那份结论若就是答复, 用 chat_reply({re: "${x.re}", text: <那份结论>}) 交付; 无需答复就不带 text 记 passed。只提醒这一次, 后续仍不交付会转告管家跟进。）`;
+  `（守护进程: 你刚写完的那句终句没有进 ${x.chat} — 终句没有任何路由语义, 谁也不会收到。那份结论若就是答复, 用 chat_reply({re: "${x.re}", text: <那份结论>, status: "done"}) 交代; 无需答复就不带 text (记 passed)。只提醒这一次, 后续仍不交代会转告本 room 的 host 跟进。）`;
 
 /** 一件在飞活的追问口径 (缺省用全局 idleNudge 配置)。 */
 export interface NudgeTarget {
