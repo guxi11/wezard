@@ -1,7 +1,7 @@
 import { wxMarkdown } from "../shared/wx-text.js";
 // Daemon entry. Resident process — exits only on signal or fatal WS auth failure.
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { createHash, timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
 import { loadOrCreateSvrToken } from "../shared/svr-token.js";
 import { DAEMON_TOKEN_FILE, DAEMON_TOKEN_HEADER } from "../shared/daemon-token.js";
@@ -18,7 +18,7 @@ import { startWeixin } from "./weixin.js";
 import { installWeixinPort } from "./weixin-port.js";
 import { bindWxCommands, makeOnBound, makeWxCommands, routeSendMedia, wecomBindSink, weixinSendMedia, wxAdmins, wxRoutes } from "./weixin-cmd.js";
 import { bindChatReach } from "./reach.js";
-import { planMedia, type MediaKind, type SendMedia } from "./media.js";
+import { kindOf, planMedia, type MediaKind, type SendMedia } from "./media.js";
 import { aibotSendMedia } from "./aibot-media.js";
 import { startNetWatch } from "./net-watch.js";
 import { startHttp, json, readBody, type Handler } from "./http.js";
@@ -49,6 +49,12 @@ import {
 import { makeWedocBridge } from "./wedoc.js";
 import { errText, installResponseTracker } from "./last-response.js";
 import { ChatRecords } from "./chat-records.js";
+import { openRoomStore } from "./rooms.js";
+import { createRoomHub } from "./room-hub.js";
+import {
+  DAEMON, adhocRoomId, dmPeers, dmRoomId, holderOf, isUid, leaveOps, openDuties, renderMsgLine, roomHost, sameWho, whoKey,
+  type MsgRow, type ReplyStatus, type RoomOp, type RoomState, type Verdict, type Who,
+} from "../shared/room.js";
 import { knownChatsOf } from "./chat-seen.js";
 import { planStrictSwitch, renderSwitchReport, type SwitchFacts } from "./strict-switch.js";
 import { CHAT_BATCH_BUDGET, sliceBatch } from "../shared/chat-record.js";
@@ -3399,6 +3405,518 @@ const main = async (): Promise<void> => {
     // 同身份的化身前一轮可能各写了一份身份级字段 (职责 / 记忆): 开机收敛一次, 幂等。
     const reconciled = reconcileKin(wizards);
     if (reconciled > 0) log.child({ mod: "wizard" }).info({ reconciled }, "identity kin reconciled");
+    // ── room 账本 (docs/room/wiring.md A): hub 实例化 + /room/* HTTP ──────
+    // room 是唯一的沟通对象: 人话 (inbound) 与 wizard 工具都 append 进同一份账本
+    // (daemon/room-hub.ts), 唤醒按 seen 游标重算, 镜像按 §3a 一条规则。旧的路由 /
+    // 事件表这一步还并行活着 (B/C 节再拆), 这里只把新面接上。
+    const roomsDir = join(expandHome(cfg.daemon.stateDir), "rooms");
+    const roomStore = openRoomStore(roomsDir);
+    /** 损坏的 room 文件 (RoomBroken) 不挡 boot, 也不参与任何判定 —— 只记一行。 */
+    const roomState = (id: string): RoomState | undefined => {
+      try { return roomStore.get(id); } catch (e) { log.warn({ mod: "room", room: id, err: errText(e) }, "room: 账本损坏, 跳过"); return undefined; }
+    };
+    /** 占位气泡的 frame 表 (cutmap A-4): 企微 msgid → {frame, expires}。
+     *  人话行 append 时写 (B 节接 inbound), 第一条 re 它的 reply 用它把占位收口 ——
+     *  bridge 的 replyBubbles 只认自己 dispatch 过的 event id, room 的人话行不再走
+     *  dispatch, frame 只能由 daemon 自己记。TTL = bubble.expires, 落盘扛 reload。 */
+    interface BubbleFrame { frame: Record<string, unknown>; expires: number }
+    const bubbleFrames = loadJsonMap<BubbleFrame>(join(expandHome(cfg.daemon.stateDir), "bubble-frames.json"), (rows) => {
+      const now = Date.now();
+      return Object.fromEntries(Object.entries(rows).filter(([, v]) => !!v && typeof v === "object" && (v as BubbleFrame).expires > now));
+    }, { strict: true });
+    const rememberBubbleFrame = (msgid: string, frame: unknown, expires: number): void => {
+      if (!msgid?.trim() || !frame) return;
+      try { bubbleFrames.set(msgid, { frame: frame as Record<string, unknown>, expires }); } catch { /* 记录失败不挡消息 */ }
+    };
+    /** 覆盖一条占位气泡: 表里有 frame (未过期) 就直接收口; 再退化试 bridge 的
+     *  finishPlaceholder (legacy 路径注册过的); 都没有 → false, 调用方退回普通发送。 */
+    const coverBubble = async (msgid: string, md: string): Promise<boolean> => {
+      const hit = bubbleFrames.get(msgid);
+      if (hit && hit.expires > Date.now()) {
+        try { await ws.client.replyStream(hit.frame as Parameters<typeof ws.client.replyStream>[0], msgid, md, true); return true; }
+        catch (e) { log.warn({ mod: "room", msgid, err: errText(e) }, "room: 占位气泡覆盖失败, 退回普通发送"); }
+      }
+      return false;
+    };
+    // ── hub ports ────────────────────────────────────────────────────────
+    /** uid → 现在的 target / 名字 / 直属 parent (投递与渲染那一刻现查, 改名跟着走)。 */
+    const roomWizardOf = (uid: string): { target: string; name: string; parentUid?: string } | undefined => {
+      const rec = wizards.byUid(uid);
+      if (!rec) return undefined;
+      const parent = rec.parent ? wizards.get(rec.parent) : undefined;
+      return {
+        target: rec.target,
+        name: settleName(wizards, chatNameOf(cfg, rec.target), rec.target) || rec.target,
+        ...(parent?.uid ? { parentUid: parent.uid } : {}),
+      };
+    };
+    const roomNameOf = (w: Who): string =>
+      w.kind === "wizard" ? "." + (roomWizardOf(w.id)?.name ?? w.id)
+        : w.kind === "human" ? w.id
+        : "wezard";
+    const roomLabel = (room: string): string => {
+      if (room.startsWith("dm:")) {
+        const pair = dmPeers(room);
+        return pair ? pair.map((u) => roomWizardOf(u)?.name ?? u).join(" ↔ ") : room;
+      }
+      if (room.startsWith("adhoc:")) {
+        const s = roomState(room);
+        return s?.title || [...(s?.members.values() ?? [])].slice(0, 3).map((x) => roomNameOf(x.who)).join(", ") || room;
+      }
+      return chatNameOf(cfg, room) || room;
+    };
+    /** 绑定 room 的镜像出站 (§3a): 覆盖占位 > 媒体 > topic 评论 > wx > 群消息。 */
+    const roomMirror = async (row: MsgRow, cover?: MsgRow): Promise<void> => {
+      const chat = row.room;
+      const chatId = chat.replace(/^(user|chat|group):/, "");
+      const authorTarget = row.author.kind === "wizard" ? roomWizardOf(row.author.id)?.target : undefined;
+      const body = row.text.trim() || (row.files?.length ? "📎 " + row.files.map((f) => f.name).join(", ") : "");
+      if (cover?.ext && body) {
+        if (await coverBubble(cover.ext, body)) return;
+      }
+      if (row.files?.length) {
+        for (const f of row.files) {
+          const r = await sendMedia(chat, { path: f.path, kind: f.kind, name: f.name, ...(row.text.trim() ? { description: row.text } : {}) });
+          if (!r.ok) log.warn({ mod: "room", room: chat, file: f.path, reason: r.reason }, "room: 镜像媒体发送失败 (只影响传输, 不回滚)");
+        }
+        if (!body) return;
+      }
+      const md = authorTarget ? headed(ownHead(authorTarget), body, "\n\n") : "[wezard] " + body;
+      if (wx.owns(chatId)) {
+        const r = wx.sendFinal(chatId, wxMarkdown(md), row.id);
+        if (r.state === "failed") log.warn({ mod: "room", room: chat, reason: r.reason }, "room: wx 镜像失败");
+        return;
+      }
+      if (isTopicChat(chat)) {
+        if (authorTarget) postAsTopic(authorTarget, chat, body);
+        else void sendTopicContent(ws.client, log.child({ mod: "room" }), chat.replace(/^chat:/, ""), linkTags(chat, md))
+          .catch((e) => log.warn({ mod: "room", room: chat, err: errText(e) }, "room: topic 镜像失败"));
+        return;
+      }
+      if (authorTarget) postAs(authorTarget, chat, body);
+      else notifyChat(chat, md);
+    };
+    const roomLog = log.child({ mod: "room" });
+    const hub = createRoomHub({
+      store: roomStore, log: roomLog,
+      wizardOf: roomWizardOf, nameOf: roomNameOf, roomLabel,
+      mirror: roomMirror,
+      idle: (target) => m.idleNow(target),
+      interrupt: async (target) => {
+        const r = await m.interruptPane(target);
+        if (!r.ok) roomLog.warn({ target, reason: r.reason }, "room: Esc 打断失败 (照常投递本条)");
+      },
+      paste: async (target, text) => {
+        const r = await m.injectText(target, text, { requireIdle: true });
+        return r.ok ? "ok" : r.uncertain ? "uncertain" : "failed";
+      },
+    });
+    // 投递失败 / 目标正忙的行没有推游标: 泵自身无定时器, 定期重踢直到贴进去。
+    const roomKickTimer = setInterval(() => void hub.kick(), 30_000);
+    roomKickTimer.unref?.();
+    // ── /room/* 的公共件 ─────────────────────────────────────────────────
+    const roomSelfOf = (target: string): Who | undefined => {
+      const uid = wizards.get(target)?.uid;
+      return uid ? { kind: "wizard", id: uid } : undefined;
+    };
+    /** room 参数: room id 原样, 或聊天名 (chatBaseOf)。 */
+    const roomResolve = (ref: string | undefined): { room?: string; error?: string } => {
+      const raw = (ref ?? "").trim();
+      if (!raw) return {};
+      if (roomState(raw)) return { room: raw };
+      const base = chatBaseOf(cfg, raw);
+      if (base && base !== raw && roomState(base)) return { room: base };
+      return { error: "认不出这个 room: " + raw };
+    };
+    /** 名字 (带不带 .) / uid / human:<id> → Who。 */
+    const whoRefOf = (ref: string): Who | undefined => {
+      const raw = stripSigil((ref ?? "").trim());
+      if (!raw) return undefined;
+      if (raw.startsWith("human:")) return { kind: "human", id: raw.slice(6) };
+      const rec = wizards.byName(raw);
+      if (rec?.uid) return { kind: "wizard", id: rec.uid };
+      if (isUid(raw) && wizards.byUid(raw)) return { kind: "wizard", id: raw };
+      return undefined;
+    };
+    const whosOf = (refs: readonly unknown[]): { who?: Who[]; error?: string } => {
+      const list = (Array.isArray(refs) ? refs : [refs]).map((x) => String(x)).filter((x) => x.trim());
+      const out: Who[] = [];
+      for (const ref of list) {
+        const w = whoRefOf(ref);
+        if (!w) return { error: "认不出这个地址: " + ref };
+        out.push(w);
+      }
+      return { who: out };
+    };
+    const ensureDmRoom = (a: string, b: string): string => {
+      const id = dmRoomId(a, b);
+      if (!roomState(id)) {
+        const at = Date.now();
+        hub.write(id, [
+          { op: "open", at, room: id, kind: "dm", by: { kind: "wizard", id: a } },
+          { op: "join", at, room: id, who: { kind: "wizard", id: a }, ord: 1, via: "founder", by: { kind: "wizard", id: a } },
+          { op: "join", at, room: id, who: { kind: "wizard", id: b }, ord: 2, via: "invite", by: { kind: "wizard", id: a } },
+        ]);
+      }
+      return id;
+    };
+    /** 缺省 room + to 落点 (brief D-1): to 全在缺省 room → 它; 单个非成员 → dm; 多个有非成员 → 400。 */
+    const roomTargetOf = (me: Who, to: Who[] | undefined, ref: string | undefined): { room?: string; error?: string; status?: number; reason?: string } => {
+      if (ref?.trim()) return roomResolve(ref);
+      const d = hub.defaultRoom(me.id);
+      if (to?.length) {
+        if (d.room) {
+          const s = roomState(d.room);
+          if (s && to.every((t) => s.members.has(whoKey(t)))) return { room: d.room };
+        }
+        if (to.length === 1 && to[0]!.kind === "wizard") return { room: ensureDmRoom(me.id, to[0]!.id) };
+        return { status: 400, reason: "多个 to 里有缺省 room 之外的人 — 先 room_open / room_invite, 或显式给 room" };
+      }
+      if (d.room) return { room: d.room };
+      return { status: 400, reason: d.many.length > 1
+        ? "本轮被多个 room 一起唤醒 (" + d.many.map(roomLabel).join(", ") + ") — 显式给 room"
+        : "没有缺省 room (本轮没有被唤醒) — 显式给 room" };
+    };
+    const roomReply = (res: import("node:http").ServerResponse, v: Verdict): void => {
+      if (v.ok) json(res, 200, { ok: true, room: v.row.room, id: v.row.id, seq: v.row.seq, woke: v.row.wake,
+        ...(v.row.closes?.length ? { closes: v.row.closes } : {}), ...(v.degraded.length ? { degraded: v.degraded } : {}),
+        ...(v.duplicate ? { duplicate: true } : {}) });
+      else json(res, v.status, { ok: false, reason: v.reason });
+    };
+    /** room_read 的正文 (A 节本地最小版; B 节合入 room-ui 后换 shared/room-view 的 renderRoomRead)。 */
+    const roomReadText = (viewer: Who, q: { room?: string; from?: string; since?: number | string; until?: number | string; limit?: number; all?: boolean; per?: number }): { text: string; shown: number; total: number } => {
+      const names = { nameOf: roomNameOf, roomLabel };
+      const since = typeof q.since === "number" ? q.since : q.since ? Date.parse(q.since) : undefined;
+      const until = typeof q.until === "number" ? q.until : q.until ? Date.parse(q.until) : undefined;
+      const limit = q.limit ?? 50;
+      const per = q.per ?? 500;
+      const states = (q.room ? [roomState(q.room)!] : roomStore.ids().map((id) => roomState(id)!).filter((s) => s.members.has(whoKey(viewer)))).filter(Boolean);
+      if (q.room && !states.length) return { text: "没有这个 room: " + q.room, shown: 0, total: 0 };
+      const from = q.from ? whoRefOf(q.from) : undefined;
+      const one = !!q.room && states.length === 1;
+      const rows = states
+        .flatMap((s) => (q.room || q.all ? s.msgs : s.msgs.filter((mm) => sameWho(mm.author, viewer)
+          || (mm.to ?? []).some((t) => sameWho(t, viewer))
+          || (mm.re ?? []).some((id) => { const src = s.byId.get(id); return !!src && sameWho(src.author, viewer); }))))
+        .filter((mm) => (!from || sameWho(mm.author, from))
+          && (since === undefined || Number.isNaN(since) || mm.at >= since)
+          && (until === undefined || Number.isNaN(until) || mm.at < until))
+        .sort((a, b) => a.at - b.at);
+      const page = limit > 0 ? rows.slice(-limit) : rows;
+      return {
+        text: page.map((mm) => (one ? "" : "[" + roomLabel(mm.room) + "] ") + renderMsgLine(mm, names, per)).join("\n") || "(没有匹配的消息)",
+        shown: page.length, total: rows.length,
+      };
+    };
+    const READ_ROOM_FAIL = (res: import("node:http").ServerResponse, self: string): boolean => {
+      if (self) return false;
+      json(res, 400, { ok: false, reason: "cannot resolve caller session" });
+      return true;
+    };
+    // ── /room/*: 发言与交付 ───────────────────────────────────────────────
+    http.register("POST /room/say", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (READ_ROOM_FAIL(res, self)) return;
+      const me = roomSelfOf(self);
+      if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
+      const b = body as { room?: string; text?: string; to?: string[]; interrupt?: boolean };
+      const text = (b.text ?? "").toString();
+      if (!text.trim()) { json(res, 400, { ok: false, reason: "text required" }); return; }
+      const to = b.to ? whosOf(b.to) : undefined;
+      if (to?.error) { json(res, 400, { ok: false, reason: to.error }); return; }
+      const target = roomTargetOf(me, to?.who, b.room);
+      if (target.error || !target.room) { json(res, target.status ?? 400, { ok: false, reason: target.error ?? target.reason }); return; }
+      roomReply(res, hub.append(target.room, { author: me, kind: "say", text, origin: "tool",
+        ...(to?.who?.length ? { to: to.who } : {}), ...(b.interrupt ? { interrupt: true } : {}) }));
+    });
+    http.register("POST /room/ask", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (READ_ROOM_FAIL(res, self)) return;
+      const me = roomSelfOf(self);
+      if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
+      const b = body as { room?: string; to?: string[]; text?: string; kind?: string; after?: string[]; for?: string; planId?: string; interrupt?: boolean };
+      const text = (b.text ?? "").toString();
+      if (!text.trim()) { json(res, 400, { ok: false, reason: "text required" }); return; }
+      const to = whosOf(b.to ?? []);
+      if (to.error) { json(res, 400, { ok: false, reason: to.error }); return; }
+      if (!to.who?.length) { json(res, 400, { ok: false, reason: "to required: 至少点名一个 wizard" }); return; }
+      const target = roomTargetOf(me, to.who, b.room);
+      if (target.error || !target.room) { json(res, target.status ?? 400, { ok: false, reason: target.error ?? target.reason }); return; }
+      const after = (Array.isArray(b.after) ? b.after : [b.after]).map(String).filter((x) => x.trim());
+      roomReply(res, hub.append(target.room, { author: me, kind: b.kind === "task" ? "task" : "ask", text, origin: "tool", to: to.who,
+        ...(after.length ? { after } : {}), ...((b.for ?? "").toString().trim() ? { for: (b.for ?? "").toString().trim() } : {}),
+        ...((b.planId ?? "").toString().trim() ? { planId: (b.planId ?? "").toString().trim() } : {}),
+        ...(b.interrupt ? { interrupt: true } : {}) }));
+    });
+    http.register("POST /room/reply", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (READ_ROOM_FAIL(res, self)) return;
+      const me = roomSelfOf(self);
+      if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
+      const b = body as { re?: string[] | string; text?: string; status?: string };
+      const re = (Array.isArray(b.re) ? b.re : [b.re]).map(String).filter((x) => x.trim());
+      if (!re.length) { json(res, 400, { ok: false, reason: "re required: 要答的那条 (或那几条) 消息 id" }); return; }
+      const rooms = [...new Set(re.map((id) => roomStore.roomOfMsg(id)))];
+      if (rooms.some((x) => !x)) { json(res, 400, { ok: false, reason: "认不出的消息 id: " + re.filter((id) => !roomStore.roomOfMsg(id)).join(", ") }); return; }
+      if (rooms.length > 1) { json(res, 400, { ok: false, reason: "re 跨了多个 room (" + rooms.join(", ") + ") — 分开答" }); return; }
+      const status = (b.status ?? "").toString().trim() as ReplyStatus | "";
+      if (status && !["done", "need", "progress", "passed", "canceled", "error"].includes(status)) {
+        json(res, 400, { ok: false, reason: "status 只认 done / need / progress / passed / canceled (error 只有 daemon 能写)" });
+        return;
+      }
+      roomReply(res, hub.append(rooms[0]!, { author: me, kind: "reply", text: (b.text ?? "").toString(), re, origin: "tool",
+        ...(status ? { status: status as ReplyStatus, statusGiven: true } : {}) }));
+    });
+    http.register("POST /room/notify", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (READ_ROOM_FAIL(res, self)) return;
+      const me = roomSelfOf(self);
+      if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
+      const b = body as { room?: string[] | string; markdown?: string };
+      const markdown = (b.markdown ?? "").toString();
+      if (!markdown.trim()) { json(res, 400, { ok: false, reason: "markdown required" }); return; }
+      const refs = (Array.isArray(b.room) ? b.room : [b.room]).map(String).filter((x) => x.trim());
+      const rooms: string[] = [];
+      for (const ref of refs) {
+        const r = roomResolve(ref);
+        if (r.error || !r.room) { json(res, 400, { ok: false, reason: r.error ?? "room required" }); return; }
+        rooms.push(r.room);
+      }
+      if (!rooms.length) {
+        const d = hub.defaultRoom(me.id);
+        if (!d.room) { json(res, 400, { ok: false, reason: d.many.length > 1 ? "本轮被多个 room 唤醒 — 显式给 room" : "没有缺省 room — 显式给 room" }); return; }
+        rooms.push(d.room);
+      }
+      const out: Array<Record<string, unknown>> = [];
+      for (const room of rooms) {
+        const v = hub.append(room, { author: me, kind: "say", text: markdown, origin: "tool" });
+        if (!v.ok) { json(res, v.status, { ok: false, reason: v.reason, room }); return; }
+        out.push({ room, id: v.row.id, ...(v.duplicate ? { duplicate: true } : {}) });
+      }
+      json(res, 200, { ok: true, rooms: out });
+    });
+    http.register("POST /room/file", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (READ_ROOM_FAIL(res, self)) return;
+      const me = roomSelfOf(self);
+      if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
+      const b = body as { room?: string; path?: string; kind?: string; caption?: string; title?: string; description?: string; re?: string[] | string };
+      const path = (b.path ?? "").toString().trim();
+      if (!path) { json(res, 400, { ok: false, reason: "path required" }); return; }
+      if (!statSync(path, { throwIfNoEntry: false })?.isFile()) { json(res, 400, { ok: false, reason: "文件不存在或不是普通文件: " + path }); return; }
+      const kind = ((b.kind ?? "").toString().trim() || kindOf(path)) as "image" | "file" | "voice" | "video";
+      if (!["image", "file", "voice", "video"].includes(kind)) { json(res, 400, { ok: false, reason: "kind 只认 image / file / voice / video" }); return; }
+      const target = roomTargetOf(me, undefined, b.room);
+      if (target.error || !target.room) { json(res, target.status ?? 400, { ok: false, reason: target.error ?? target.reason }); return; }
+      const re = (Array.isArray(b.re) ? b.re : [b.re]).map(String).filter((x) => x.trim());
+      const text = [b.title, b.caption, b.description].map((x) => (x ?? "").toString().trim()).filter(Boolean).join(" — ");
+      roomReply(res, hub.append(target.room, { author: me, kind: "file", text, origin: "tool",
+        files: [{ path, kind, name: basename(path) }], ...(re.length ? { re } : {}) }));
+    });
+    // ── /room/*: 管理面 ─────────────────────────────────────────────────
+    http.register("POST /room/open", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (READ_ROOM_FAIL(res, self)) return;
+      const me = roomSelfOf(self);
+      if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
+      const b = body as { with?: string[]; title?: string };
+      const inv = whosOf(b.with ?? []);
+      if (inv.error) { json(res, 400, { ok: false, reason: inv.error }); return; }
+      let id = adhocRoomId(randomBytes(4).toString("hex"));
+      while (roomState(id)) id = adhocRoomId(randomBytes(4).toString("hex"));
+      const at = Date.now();
+      const title = (b.title ?? "").toString().trim();
+      hub.write(id, [
+        { op: "open", at, room: id, kind: "adhoc", ...(title ? { title } : {}), by: me },
+        { op: "join", at, room: id, who: me, ord: 1, via: "founder", by: me },
+        ...inv.who!.map((w, i) => ({ op: "join" as const, at, room: id, who: w, ord: i + 2, via: "invite" as const, by: me })),
+      ]);
+      json(res, 200, { ok: true, room: id, id, members: [me, ...inv.who!].map(roomNameOf) });
+    });
+    http.register("POST /room/invite", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (READ_ROOM_FAIL(res, self)) return;
+      const me = roomSelfOf(self);
+      if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
+      const b = body as { room?: string; who?: string };
+      const r = roomResolve(b.room);
+      if (r.error || !r.room) { json(res, 400, { ok: false, reason: r.error ?? "room required" }); return; }
+      const s = roomState(r.room)!;
+      const target = whoRefOf((b.who ?? "").toString());
+      if (!target) { json(res, 400, { ok: false, reason: "认不出这个地址: " + (b.who ?? "") }); return; }
+      if (!s.members.has(whoKey(me))) { json(res, 403, { ok: false, reason: "你不是 " + roomLabel(r.room) + " 的成员, 邀请不了别人" }); return; }
+      if (s.members.has(whoKey(target))) { json(res, 409, { ok: false, reason: roomNameOf(target) + " 已是成员" }); return; }
+      const host = roomHost(s);
+      const direct = sameWho(host, me) || (target.kind === "wizard" && roomWizardOf(target.id)?.parentUid === me.id);
+      if (direct) {
+        hub.write(r.room, [{ op: "join", at: Date.now(), room: r.room, who: target, ord: s.nextOrd, via: "invite", by: me }]);
+        json(res, 200, { ok: true, room: r.room, joined: roomNameOf(target) });
+        return;
+      }
+      // 其余成员的邀请转成 join-req, 等 host 批 (room_approve)。
+      roomReply(res, hub.append(r.room, { author: target, kind: "join-req", text: "受邀加入 (由 " + roomNameOf(me) + " 邀请)", origin: "tool" }));
+    });
+    http.register("POST /room/join", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (READ_ROOM_FAIL(res, self)) return;
+      const me = roomSelfOf(self);
+      if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
+      const b = body as { room?: string; reason?: string };
+      const r = roomResolve(b.room);
+      if (r.error || !r.room) { json(res, 400, { ok: false, reason: r.error ?? "room required" }); return; }
+      roomReply(res, hub.append(r.room, { author: me, kind: "join-req", text: (b.reason ?? "").toString().trim() || "申请加入", origin: "tool" }));
+    });
+    http.register("POST /room/approve", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (READ_ROOM_FAIL(res, self)) return;
+      const me = roomSelfOf(self);
+      if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
+      const b = body as { re?: string; accept?: boolean };
+      const re = (b.re ?? "").toString().trim();
+      const roomId = re ? roomStore.roomOfMsg(re) : undefined;
+      const s = roomId ? roomState(roomId) : undefined;
+      const row = s?.byId.get(re);
+      if (!roomId || !s || !row || row.kind !== "join-req") { json(res, 400, { ok: false, reason: "re 要指向一条 join-req 消息 id" }); return; }
+      if (!sameWho(roomHost(s), me)) { json(res, 403, { ok: false, reason: "只有本 room 的 host 能批" }); return; }
+      const accept = b.accept !== false;
+      if (accept) hub.write(roomId, [{ op: "join", at: Date.now(), room: roomId, who: row.author, ord: s.nextOrd, via: "approve", by: me }]);
+      // 批 / 驳都以 host 的 reply 落定那条 join-req duty, 申请人被唤醒看到结果。
+      roomReply(res, hub.append(roomId, { author: me, kind: "reply", re: [re],
+        text: accept ? "已批准入群, 欢迎 " + roomNameOf(row.author) : "未批准入群", status: "done", statusGiven: true, origin: "tool" }));
+    });
+    http.register("POST /room/leave", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (READ_ROOM_FAIL(res, self)) return;
+      const me = roomSelfOf(self);
+      if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
+      const b = body as { room?: string; who?: string; why?: string };
+      const r = roomResolve(b.room);
+      if (r.error || !r.room) { json(res, 400, { ok: false, reason: r.error ?? "room required" }); return; }
+      const s = roomState(r.room)!;
+      const who = (b.who ?? "").toString().trim() ? whoRefOf((b.who ?? "").toString()) : me;
+      if (!who) { json(res, 400, { ok: false, reason: "认不出这个地址: " + b.who }); return; }
+      if (!sameWho(who, me) && !sameWho(roomHost(s), me)) { json(res, 403, { ok: false, reason: "只有 host 能移出别人" }); return; }
+      if (!s.members.has(whoKey(who))) { json(res, 409, { ok: false, reason: roomNameOf(who) + " 不是这个 room 的成员" }); return; }
+      hub.write(r.room, leaveOps(s, who, me, Date.now(), (b.why ?? "").toString().trim() || undefined));
+      json(res, 200, { ok: true, room: r.room, left: roomNameOf(who) });
+    });
+    http.register("POST /room/members", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (READ_ROOM_FAIL(res, self)) return;
+      const me = roomSelfOf(self);
+      if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
+      const b = body as { room?: string };
+      const target = roomTargetOf(me, undefined, b.room);
+      if (target.error || !target.room) { json(res, target.status ?? 400, { ok: false, reason: target.error ?? target.reason }); return; }
+      const s = roomState(target.room)!;
+      const host = roomHost(s);
+      const lines = [...s.members.values()].sort((a, b2) => a.ord - b2.ord)
+        .map((mm) => "· " + roomNameOf(mm.who) + (sameWho(host, mm.who) ? " (host)" : "") + " — via " + mm.via + ", " + new Date(mm.since).toLocaleString("zh-CN", { hour12: false }));
+      json(res, 200, { ok: true, text: [roomLabel(s.id) + " (" + s.id + ") — 成员 " + lines.length + ", 未决 duty " + openDuties(s).length, ...lines].join("\n") });
+    });
+    http.register("POST /room/transfer", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (READ_ROOM_FAIL(res, self)) return;
+      const me = roomSelfOf(self);
+      if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
+      const b = body as { re?: string; to?: string };
+      const re = (b.re ?? "").toString().trim();
+      const roomId = re ? roomStore.roomOfMsg(re) : undefined;
+      const s = roomId ? roomState(roomId) : undefined;
+      if (!roomId || !s || !s.byId.has(re)) { json(res, 400, { ok: false, reason: "认不出的消息 id: " + re }); return; }
+      const to = whoRefOf((b.to ?? "").toString());
+      if (!to) { json(res, 400, { ok: false, reason: "认不出这个地址: " + (b.to ?? "") }); return; }
+      if (!s.members.has(whoKey(me))) { json(res, 403, { ok: false, reason: "你不是这个 room 的成员" }); return; }
+      const ds = openDuties(s).filter((d) => d.msg === re);
+      if (!ds.length) { json(res, 409, { ok: false, reason: "这笔没有未决的 duty (从未开出 / 已全部关闭)" }); return; }
+      if (!s.members.has(whoKey(to))) {
+        const host = roomHost(s);
+        if (!(sameWho(host, me) || (to.kind === "wizard" && roomWizardOf(to.id)?.parentUid === me.id))) {
+          json(res, 400, { ok: false, reason: "接手方不是成员: 只有 host / 它的直属 parent 能把它带进来, 其余先 room_invite" });
+          return;
+        }
+        hub.write(roomId, [{ op: "join", at: Date.now(), room: roomId, who: to, ord: s.nextOrd, via: "transfer", by: me }]);
+      }
+      const at = Date.now();
+      const moves: RoomOp[] = ds.filter((d) => d.slot !== whoKey(to))
+        .map((d) => ({ op: "move" as const, at, room: roomId, duty: re, from: holderOf(s, d)!, to, by: me }));
+      if (moves.length) hub.write(roomId, moves);
+      // move 本身不唤醒: 一句 say 把接手方叫起来, 它按游标读到的就是这笔。
+      roomReply(res, hub.append(roomId, { author: me, kind: "say", to: [to],
+        text: "「" + clipLine(s.byId.get(re)!.text, 80) + "」已移交给你 (room_transfer), 用 chat_reply({re, text, status}) 交代", origin: "tool" }));
+    });
+    http.register("POST /room/read", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (READ_ROOM_FAIL(res, self)) return;
+      const me = roomSelfOf(self);
+      if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
+      const b = body as { room?: string; from?: string; since?: number | string; until?: number | string; limit?: number; all?: boolean; per?: number };
+      const r = b.room ? roomResolve(b.room) : { room: undefined as string | undefined };
+      if (r.error) { json(res, 400, { ok: false, reason: r.error }); return; }
+      const out = roomReadText(me, { ...b, room: r.room });
+      json(res, 200, { ok: true, text: out.text, shown: out.shown, total: out.total });
+    });
+    http.register("POST /room/watch", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (READ_ROOM_FAIL(res, self)) return;
+      const me = roomSelfOf(self);
+      if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
+      const b = body as { room?: string; on?: boolean };
+      const r = roomResolve(b.room);
+      if (r.error || !r.room) { json(res, 400, { ok: false, reason: r.error ?? "room required" }); return; }
+      const s = roomState(r.room)!;
+      if (!s.members.has(whoKey(me))) { json(res, 403, { ok: false, reason: "你不是 " + roomLabel(r.room) + " 的成员" }); return; }
+      hub.write(r.room, [{ op: "watch", at: Date.now(), room: r.room, who: me, on: b.on !== false }]);
+      json(res, 200, { ok: true, room: r.room, on: b.on !== false });
+    });
+    // ── 出生 / 退役的 room 落账 ──────────────────────────────────────────
+    /** spawn / clone / delegate 的 room? 参数: 落地的 wizard 以 via:"spawn" 免审入群 (契约 §3)。 */
+    const joinRoomSpawn = (self: string, roomRef: unknown, bornName: string): void => {
+      const ref = String(roomRef ?? "").trim();
+      if (!ref || !bornName) return;
+      try {
+        const r = roomResolve(ref);
+        const s = r.room ? roomState(r.room) : undefined;
+        const me = roomSelfOf(self);
+        const target = resolvePeer(self, bornName);
+        const rec = target?.ok ? wizards.get(target.target) : undefined;
+        if (!s || !me || !rec?.uid) { roomLog.warn({ room: ref, born: bornName }, "room?: 入群没落 (room 认不出 / 名字解析不到)"); return; }
+        const who: Who = { kind: "wizard", id: rec.uid };
+        if (s.members.has(whoKey(who))) return;
+        hub.write(s.id, [{ op: "join", at: Date.now(), room: s.id, who, ord: s.nextOrd, via: "spawn", by: me }]);
+      } catch (e) {
+        roomLog.warn({ room: ref, born: bornName, err: errText(e) }, "room?: 出生入群失败");
+      }
+    };
+    /** 实例退役: 从所有 room 退出, 手上的 duty 由 daemon 写 canceled (契约 §4)。 */
+    const leaveRooms = (target: string, why: string): void => {
+      const rec = wizards.get(target);
+      if (!rec?.uid) return;
+      const who: Who = { kind: "wizard", id: rec.uid };
+      const at = Date.now();
+      for (const room of roomStore.ids()) {
+        const s = roomState(room);
+        if (!s?.members.has(whoKey(who))) continue;
+        try { hub.write(room, leaveOps(s, who, DAEMON, at, why)); }
+        catch (e) { roomLog.warn({ room, target, err: errText(e) }, "room: 退役离群失败"); }
+      }
+    };
+    // rooms/ 磁盘护栏 (cutover「磁盘与保留期」): boot 与每天一次; 超 1G warn + 一条系统行给人。
+    const roomsGuard = (): void => {
+      try {
+        let bytes = 0;
+        for (const f of readdirSync(roomsDir)) { try { bytes += statSync(join(roomsDir, f)).size; } catch { /* 文件刚被删 */ } }
+        roomLog.info({ mb: Math.round(bytes / 1048576), rooms: roomStore.ids().length }, "rooms/ 总大小");
+        if (bytes > 1_000_000_000) {
+          roomLog.warn({ gb: (bytes / 1e9).toFixed(2) }, "rooms/ 超过 1G");
+          if (cfg.defaultChat.trim()) notifyChat(cfg.defaultChat, "[wezard] room 账本目录已超过 1G (" + (bytes / 1e9).toFixed(2) + "G) — 保留策略见 docs/room/cutover.md「磁盘与保留期」");
+        }
+      } catch { /* 目录还没有 = 0 字节 */ }
+    };
+    roomsGuard();
+    const roomsGuardTimer = setInterval(roomsGuard, 24 * 3600_000);
+    roomsGuardTimer.unref?.();
+
     // 类 / 实例 (人 2026-11-18): 管家身份 → 一条类 + 一串有序号的实例 (名字 <类名>-N)。
     // 合并清单 (stateDir/class-merges.json 或 wizards.json 同级, 人写) 把同目录上的几个旧
     // 身份并成一个类。幂等: 已建的类整组跳过。迁移会改名字, 所以旧名 → 类名的映射当场落到
@@ -4384,6 +4902,8 @@ const main = async (): Promise<void> => {
         // 已是 lead 的宪章里已有层级规矩, 只带打法。投成了才记 lead, 它下次重生宪章里就有。
         const t = await tell(name, text, lead ? renderReminder({ wezard: "lead" }, wizards.get(r.target)?.lead ? renderLeadPlaybook() : renderLead()) : "");
         if (lead && t.status === 200) wizards.upsert(r.target, { lead: true });
+        // room? 参数 (契约 §3): 点名的执行者入座指定 room (via spawn, 免审)。
+        if (t.status === 200) joinRoomSpawn(self, (b as { room?: string }).room, name);
         // 自动选中的被冷门控 (decide 用名册的活动时刻, 门控用 transcript 的, 口径差一点) 或方向闸 (它归别人管 / 是借来的专家) 退回: 改走 spawn; 点名的不改。
         if (!(!to && (t.body.gated === "cold" || t.body.gated === "direction" || t.body.gated === "reuse"))) {
           json(res, t.status, { ...t.body, diagnostics, decision: "existing", ...dispatchReason(t.status === 200, t.body.reason, d.why), ...(shown.length ? { candidates: shown } : {}) });
@@ -4417,6 +4937,8 @@ const main = async (): Promise<void> => {
           if (strictSpeechOf?.(base) && !isInternalKey(target.target)) joinMember(self, base, target.target, "mention");
         }
       }
+      // room? 参数: 白板新生落地即入座 (via spawn, 免审)。
+      if (t.status === 200) joinRoomSpawn(self, (b as { room?: string }).room, String(born.body.name ?? ""));
       json(res, t.status, {
         ...t.body,
         decision: "spawn",
@@ -4667,6 +5189,8 @@ const main = async (): Promise<void> => {
           if (strictSpeechOf?.(base) && !isInternalKey(target.target)) joinMember(self, base, target.target, "mention");
         }
       }
+      // room? 参数 (契约 §3): 出生落地即入座 (via spawn, 免审)。
+      if (r.status === 200) joinRoomSpawn(self, (body as { room?: string }).room, String((r.body as { name?: string }).name ?? ""));
       json(res, r.status, r.body);
     });
 
@@ -4677,6 +5201,7 @@ const main = async (): Promise<void> => {
     const forgetWizard = (target: string): boolean => {
       if (isApprentice(wizards, target)) return false;
       if (planRetirementBlock(target)) return false;
+      leaveRooms(target, "实例结束"); // room: 名下未决 duty 落 canceled, 唤醒提问者
       leaveAllChats(target); // P7-S2: 身份退役自动离群
       wizards.drop(target);
       return true;
