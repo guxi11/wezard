@@ -167,8 +167,6 @@ const parseCfgSyncCommand = (text: string): { apply: boolean } | undefined => {
   const m = CFGSYNC_RE.exec(text.trim());
   return m ? { apply: Boolean(m[1]) } : undefined;
 };
-// `/chats` — 跨聊天目录: 谁有名字、谁没有、各自跑着哪些会话。
-// /owed — 本聊天 (严格群) 的义务账: 谁欠着哪条、多久了。P7-S2; 渲染由 daemon 注入。
 const isUsageCommand = (text: string): boolean => text.trim() === "/usage";
 const isStopCommand = (text: string): boolean => /^(?:\/stop|stop)$/i.test(text.trim());
 const isKillCommand = (text: string): boolean => text.trim() === "/kill";
@@ -215,14 +213,11 @@ const renderHelp = (): string =>
     "▎命名",
     "名字由 wizard 自己起 (`wizard_identity`); 改别人用 `wizard_identity({to})` —— 直属 lead 或管家实例可改",
     "类改名会同步它的全部实例 (`X-1..X-N`) 与指向它的管家绑定; 实例名 (形如 `X-3`) 不能当类名",
-    "`/chats` 列出所有已知聊天及其 wizard",
     "名字 1-32 位字母/数字/`_`/`-`,全机唯一,跟着管家身份走 (同一管家进多个群共用一个名字)。",
     "对 AI 说「让 .fix 看一眼」「在 daily 里开个 .ingest 跑这个目录」即可。",
     "",
     "▎协作",
     "`/peers`(或 `/wizards`) 列出本聊天的 wizard:名字、职责、忙闲、谁是谁的分身",
-    "`/owed` 严格群的义务账: 谁欠着哪条、多久了 (未开严格模式的群没有)",
-    "`/strict [apply] [聊天…|--all]` 存量群切严格模式: 先预演受影响 wizard 清单, 加 apply 才执行",
     "同一聊天里的 wizard 互相看得见也驱动得动,直接说人话:",
     "「看下 `.fix` 的进展,推动它直到结束」— AI 会读它最近的对话、派活、收它的回执直到跑完。",
     "「让 `.fix` 和 `.review` 互相迭代到 review 说 LGTM」— AI 会把它们串成一条循环流水线。",
