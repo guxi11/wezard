@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FIRSTNAMES, LASTNAMES, LAP, autoNameAt, autoOrdinalOf, fullNameAt, lapPosOf, loadAutoNames } from "../daemon/wizard-names.js";
 import { loadWizardStore, referencedTargets, slotInUse } from "../daemon/wizard.js";
-import { openRouter, ops } from "../daemon/router.js";
 
 // ── 表: 每个首字母一个, first A→Y, last A→Z ─────────────────────────────
 const initials = (xs: readonly string[]): string => xs.map((x) => x[0]).join("");
@@ -95,12 +94,15 @@ try {
   const again = loadWizardStore(file);
   assert.equal(again.nextName(), "David", "游标随注册表落盘");
 
-  // 名册没有、但路由表里还有行的 target: 候选名落到它上面就跳过 (跳过即消耗)
-  const router = openRouter({ file: join(dir, "routes.jsonl") });
-  router.commit(ops.open({ event: "e1", owner: "chat:a#Frank", receiver: { kind: "wizard", to: "chat:a#Grace" }, deadlineAt: Number.MAX_SAFE_INTEGER }));
-  router.commit(ops.open({ event: "e2", owner: "chat:a#AliceAdams", receiver: { kind: "chat", channel: "chat:a", message: "m1" }, deadlineAt: Number.MAX_SAFE_INTEGER }));
-  const none = { events: [], tasks: [], plans: [], live: [] };
-  const refs = referencedTargets({ ...none, routes: Object.values(router.table()) });
+  // 名册没有、但旧 routes 日志里还有行的 target: 候选名落到它上面就跳过 (跳过即消耗)。
+  // 路由日志已冻结 (room 模型), 这里只需它那两列 (owner / wizard receiver)。
+  const refs = referencedTargets({
+    events: [], tasks: [], plans: [], live: [],
+    routes: [
+      { owner: "chat:a#Frank", receiver: { kind: "wizard", to: "chat:a#Grace" } },
+      { owner: "chat:a#AliceAdams", receiver: { kind: "chat" } },
+    ],
+  });
   assert.deepEqual([...refs].sort(), ["chat:a#AliceAdams", "chat:a#Frank", "chat:a#Grace"]);
   const inA = slotInUse("chat:a", refs);
   assert.equal(again.nextName(inA), "Emma");
