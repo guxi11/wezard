@@ -29,7 +29,7 @@ import {
   type TurnUsage,
 } from "../shared/detail-store.js";
 import { renderDetailPage, renderNotFound } from "../shared/detail-render.js";
-import { createChatRoutes, chatRouteTable, CHAT_ROUTE_KEYS, type WorldFactsProvider } from "../shared/chat-http.js";
+import { createChatRoutes, chatRouteTable, CHAT_ROUTE_KEYS, type RoomReader, type WorldFactsProvider } from "../shared/chat-http.js";
 import { EMPTY_FACTS } from "../shared/world.js";
 
 export type { ToolDetailRecord, ApprovalDetailRecord, TurnDetailRecord, MarkDetailRecord, TurnItem, TurnInject, TurnUsage, CtxCut, TurnFrom, TurnAgentMeta } from "../shared/detail-store.js";
@@ -42,6 +42,10 @@ let remoteToken = "";
 // 装上 (同 bindWizardStore 的取舍)。装上之前关系图退化成只画观测边。
 let worldFacts: WorldFactsProvider | undefined;
 export const setWorldFactsProvider = (fn: WorldFactsProvider): void => { worldFacts = fn; startFactsForward(); };
+// room 账本读者 (room 历史路由的第 4 参, room-ui): chatHandlers 在 boot 早期被调用,
+// 与 worldFacts 同一模式 —— 先挂闭包, room store 在 mirror 块里才 set。
+let roomReader: RoomReader | undefined;
+export const setRoomReader = (r: RoomReader): void => { roomReader = r; };
 
 // 注册表侧的事实同样要过河。turn 记录是 POST /d 一条条推的, 但身份 / 家谱 / plan /
 // 日程不是"发生的事", 而是"当下的状态" —— 没有增量可推, 只能整份快照定期覆盖。
@@ -391,7 +395,7 @@ export const roleUniq = (target: string): string => wizardStore()?.get(target)?.
 export const chatHandlers = (): Record<string, Handler> => {
   // provider 以闭包间接引用 —— chatHandlers 在 boot 早期就被调用, 那时 mirror 块
   // 还没装上 provider; 直接把 worldFacts 传进去会把 undefined 钉死。
-  const routes = store ? chatRouteTable(createChatRoutes(store, () => (worldFacts ? worldFacts() : EMPTY_FACTS))) : {};
+  const routes = store ? chatRouteTable(createChatRoutes(store, () => (worldFacts ? worldFacts() : EMPTY_FACTS), undefined, roomReader)) : {};
   const unavailable: Handler = (_req, res) => {
     res.statusCode = 503;
     res.end("detail store not ready");

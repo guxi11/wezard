@@ -2146,9 +2146,8 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
       json(res, 200, { decision: "deny", reason: guideDeny } satisfies ApproveResp);
       return;
     }
-    // P7-S2: 手闸条件 = 顶层模式或严格模式 (speech=strict) 任一开。
-    if (owner && isStewardTarget(cfg, wizardStore(), owner)
-      && (chatPolicyOf(cfg, owner).topOnly || chatPolicyOf(cfg, owner).speech === "strict")) {
+    // 管家手闸只看 role (wiring B: topOnly / speech 已废, 契约 §7 改由 role 触发)。
+    if (owner && isStewardTarget(cfg, wizardStore(), owner)) {
       const reason = stewardGuard({
         sessionId,
         turn: openTurnsOf(owner, sessionId)[0]?.id ?? "",

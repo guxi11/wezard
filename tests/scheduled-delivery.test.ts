@@ -3,98 +3,48 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
 import { deliverScheduled, type ScheduledDispatchOptions } from "../daemon/scheduled-delivery.js";
-import { startScheduler } from "../daemon/tasks.js";
-import type { TaskRegistry } from "../daemon/task-registry.js";
-import type { TaskRecord, TaskState } from "../shared/task-file.js";
-import type { WSClient } from "@wecom/aibot-node-sdk";
-import type { Logger } from "pino";
 
-const deferred = () => {
-  let resolve!: () => void;
-  const promise = new Promise<void>((r) => { resolve = r; });
-  return { promise, resolve };
-};
-const flush = () => new Promise<void>((r) => setImmediate(r));
-const until = async (ready: () => boolean) => {
-  for (let i = 0; i < 100 && !ready(); i++) await flush();
-  assert(ready(), "event did not arrive");
-};
-
-// Execute the production index adapter, not a stub that returns an early ok.
+// 生产适配器 (daemon/index.ts 的 scheduledTaskInject) 按文本切出来跑。room 模型下它只剩
+// 两条路 (cutmap G-1): fresh 起白板 runner, 其余落一条 trigger 行 —— 等待 / 重试 / 预算
+// 都归 hub 泵, 适配器不再持有队列事实。
 const source = readFileSync(new URL("../daemon/index.ts", import.meta.url), "utf8");
 const start = source.indexOf("    scheduledTaskInject = async (target, text, opts) => {");
-const end = source.indexOf("    /** 安静任务那一轮的终句:", start);
-assert(start >= 0 && end > start);
+const end = source.indexOf("    /** 到点起一个白板 wizard 执行这一枪, 跑完自动收掉。 */", start);
+assert(start >= 0 && end > start, "adapter source markers moved");
 const code = ts.transpileModule("let scheduledTaskInject;\n" + source.slice(start, end) + "\nglobalThis.inject=scheduledTaskInject;", {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
 }).outputText;
-const records: TaskRecord[] = [...Array.from({ length: 4 }, (_, n) => [`busy-${n}`, `user:busy-${n}`]), ["same", "user:busy-0"], ["fast", "user:fast"]]
-  .map(([id, target]) => ({ id: id!, target: target!, file: "", trigger: { clock: { kind: "once", at: Date.now() - 1000 }, guards: [] },
-    when: "once", prompt: id!, note: "", fresh: false, enabled: true, quiet: true, hasGate: false,
-    gateTimeoutSec: 5, createdBy: "test", owner: "test" }));
-const states = new Map(records.map((r) => [r.id, { createdAt: Date.now() - 2000 } as TaskState]));
-const removed: string[] = [], delivered: string[] = [], attempts: string[] = [];
-const barriers = new Map(records.slice(0, 4).map((r) => [r.target, deferred()]));
-const ready = new Set(["user:fast"]);
-let race = true;
-const registry = {
-  get: (id: string) => records.find((r) => r.id === id),
-  list: () => records.filter((r) => !removed.includes(r.id)),
-  stateOf: (id: string) => states.get(id)!,
-  patchState: (id: string, patch: Partial<TaskState>) => states.set(id, { ...states.get(id), ...patch }),
-  remove: (id: string) => { removed.push(id); },
-} as unknown as TaskRegistry;
+
+const fired: Array<{ target: string; text: string; ext: string }> = [];
+const ran: Array<{ target: string; text: string; taskId: string; quiet: boolean }> = [];
+let sameBotValue = true;
 const ctx = vm.createContext({
-  deliverScheduled, tasks: registry, ownerOf: () => "user:owner", sameBot: () => true,
-  planStore: { allowExternal: () => true }, wizards: { get: () => ({}) }, TASK_POSTPONE_MS: 10_000,
-  handedOff: async () => {}, newRootEvent: () => "turn", quietRelays: { set() {} }, openTaskRow() {}, baseOfKey: (t: string) => t,
-  renderTaskEnvelope: () => "envelope", relayUnlessQuiet: async () => {},
-  runTaskInRunner: async () => { assert.fail("must not fall back during controlled readiness waits"); },
-  m: {
-    idleNow: async (target: string) => ready.has(target),
-    untilIdle: async (target: string) => { await barriers.get(target)?.promise; return { idle: true }; },
-    injectText: async (target: string, prompt: string, opts: { requireIdle: boolean; guard: () => boolean }) => {
-      assert.equal(opts.requireIdle, true, "production named injection must recheck idle under the pane lock");
-      assert(opts.guard());
-      attempts.push(prompt);
-      if (target === "user:busy-0" && race) {
-        race = false;
-        return { ok: false, retryable: true, reason: "busy won under lock" };
-      }
-      if (!ready.has(target)) return { ok: false, retryable: true };
-      delivered.push(prompt);
-      return { ok: true };
-    },
-  },
+  tasks: { get: () => ({ owner: "user:owner" }) },
+  ownerOf: () => "user:owner",
+  sameBot: () => sameBotValue,
+  fireTaskTrigger: (target: string, text: string, ext: string) => { fired.push({ target, text, ext }); },
+  runTaskInRunner: async (target: string, text: string, taskId: string, quiet: boolean) => { ran.push({ target, text, taskId, quiet }); return { ok: true }; },
 });
 vm.runInContext(code, ctx);
-const scheduler = startScheduler({
-  client: { sendMessage: async () => ({}) } as unknown as WSClient, registry,
-  log: { info() {}, warn() {}, error() {} } as unknown as Logger,
-  inject: ctx.inject, fallbackTarget: () => "user:owner",
-});
-try {
-  scheduler.tick();
-  await until(() => delivered.includes("fast"));
-  assert.equal(delivered.length, 1, "four busy target consumers must not occupy the four injection workers");
-  scheduler.tick();
-  assert.equal(removed.includes("busy-0"), false, "waiting firing stays in flight");
-  ready.add("user:busy-0"); barriers.get("user:busy-0")!.resolve();
-  // The first physical attempt is unsent. Task dedup must persist across retry.
-  await until(() => attempts.includes("busy-0"));
-  scheduler.tick();
-  for (let i = 0; i < 100 && !delivered.includes("same"); i++) await new Promise((r) => setTimeout(r, 10));
-  assert.deepEqual(delivered.filter((s) => ["busy-0", "same"].includes(s)), ["busy-0", "same"]);
-  assert.equal(attempts.filter((s) => s === "busy-0").length, 2, "retry exactly the confirmed-unsent attempt");
-  scheduler.stop();
-  barriers.forEach((b, target) => { ready.add(target); b.resolve(); });
-  await flush(); await flush();
-  assert.equal(delivered.some((s) => ["busy-1", "busy-2", "busy-3"].includes(s)), false);
-  assert.equal(states.get("busy-1")?.lastFired, undefined, "stopped definitely-unsent firing restores its clock");
-} finally { scheduler.stop(); barriers.forEach((b) => b.resolve()); }
+type Inject = (target: string, text: string, opts: Record<string, unknown>) => Promise<{ ok: boolean; reason?: string }>;
+const inject = ctx.inject as Inject;
 
-const c = new AbortController();
-const options: ScheduledDispatchOptions = { taskId: "unknown", fresh: false, quiet: true, signal: c.signal,
+// 已有会话的一枪: 一条 trigger 行, 立即 ok。
+assert.equal((await inject("user:owner", "hello", { taskId: "t1", fresh: false, quiet: false })).ok, true);
+assert.deepEqual(fired, [{ target: "user:owner", text: "hello", ext: "t1" }]);
+assert.deepEqual(ran, [], "non-fresh must not spawn a runner");
+// fresh: 交给 runner, quiet 原样带过去。
+assert.equal((await inject("user:owner", "hello2", { taskId: "t2", fresh: true, quiet: true })).ok, true);
+assert.deepEqual(ran, [{ target: "user:owner", text: "hello2", taskId: "t2", quiet: true }]);
+// 跨 bot 拒绝, 不落 trigger 也不起 runner。
+sameBotValue = false;
+const before = fired.length + ran.length;
+const cross = await inject("user:other", "x", { taskId: "t3", fresh: false });
+assert.equal(cross.ok, false);
+assert.equal(fired.length + ran.length, before);
+
+// deliverScheduled 本体 (模块级): uncertain 不回退也不重试。
+const options: ScheduledDispatchOptions = { taskId: "unknown", fresh: false, quiet: true, signal: new AbortController().signal,
   guard: () => true, submit: (f) => f() };
 let unknownAttempts = 0;
 const unknown = await deliverScheduled(options, {
@@ -104,32 +54,4 @@ const unknown = await deliverScheduled(options, {
 });
 assert.equal(unknown.uncertain, true);
 assert.equal(unknownAttempts, 1);
-
-// Also exercise the production adapter's submit callback through startScheduler:
-// completing one transaction refills a worker without waiting for the batch.
-records.splice(0, records.length, ...Array.from({ length: 8 }, (_, n) => ({
-  ...records[0]!, id: `bounded-${n}`, prompt: `bounded-${n}`, target: `user:bounded-${n}`,
-  trigger: { clock: { kind: "once" as const, at: Date.now() - 1000 }, guards: [] },
-})));
-removed.splice(0); states.clear();
-records.forEach((r) => { states.set(r.id, { createdAt: Date.now() - 2000 }); ready.add(r.target); });
-const releases = new Map<string, ReturnType<typeof deferred>>();
-let running = 0, maximum = 0;
-ctx.m.injectText = async (_target: string, prompt: string, o: { guard: () => boolean }) => {
-  assert(o.guard());
-  const barrier = deferred(); releases.set(prompt, barrier);
-  maximum = Math.max(maximum, ++running);
-  try { await barrier.promise; return { ok: true }; } finally { running--; }
-};
-const bounded = startScheduler({ client: { sendMessage: async () => ({}) } as unknown as WSClient, registry,
-  log: { info() {}, warn() {}, error() {} } as unknown as Logger, inject: ctx.inject, fallbackTarget: () => "user:owner" });
-bounded.tick();
-await until(() => releases.size === 4);
-assert.equal(maximum, 4);
-releases.get("bounded-0")!.resolve();
-await until(() => releases.size === 5);
-assert.equal(maximum, 4);
-bounded.stop(); releases.forEach((r) => r.resolve());
-await flush(); await flush();
-assert.equal(releases.size, 5, "stop must not begin queued physical transactions");
-console.log("production scheduled delivery: busy consumers, target FIFO, unsent retry, cancellation and uncertain fence passed");
+console.log("scheduled delivery: trigger/runner adapter + uncertain fence passed");

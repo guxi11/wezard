@@ -35,7 +35,7 @@ import { isRecoveryCarrier, createMessageEvents, messageId, finalId, reportSourc
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { backendFor, bindStartupNotice, prewarmShell, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { bindCardChannel, installApprovalEventListener, makeApproveHandler, requestConfirm } from "./approval.js";
-import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, buildChatUrl, getDetail, setWorldFactsProvider, currentHumanQueryOf, recordPost, recordCharter, backfillCharter, lastChannelOf } from "./detail.js";
+import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, buildChatUrl, getDetail, setRoomReader, setWorldFactsProvider, currentHumanQueryOf, recordPost, recordCharter, backfillCharter, lastChannelOf } from "./detail.js";
 import { EMPTY_FACTS, type WorldFacts, type WorldFactWizard } from "../shared/world.js";
 import { clearAutoWindow, initAutoWindowPersistence, setAutoWindow } from "./session-cache.js";
 import { makeMessageHandler } from "./outbound.js";
@@ -50,7 +50,8 @@ import { makeWedocBridge } from "./wedoc.js";
 import { errText, installResponseTracker } from "./last-response.js";
 import { ChatRecords } from "./chat-records.js";
 import { openRoomStore } from "./rooms.js";
-import { createRoomHub } from "./room-hub.js";
+import { stewardRoute as resolveSteward } from "./steward.js";
+import { createRoomHub, type RoomHub } from "./room-hub.js";
 import {
   DAEMON, adhocRoomId, dmPeers, dmRoomId, holderOf, isUid, leaveOps, openDuties, renderMsgLine, roomHost, sameWho, whoKey,
   type MsgRow, type ReplyStatus, type RoomOp, type RoomState, type Verdict, type Who,
@@ -337,6 +338,11 @@ const main = async (): Promise<void> => {
   let advanceChatlog: ((e: MessageEvent) => void) | undefined;
   /** P7-S2 严格群公共件 (赋值在 mirror 大块里 —— /chat handler 那一层, 要用 wizards / members / router / chatRecords)。 */
   let strictSpeechOf: ((base: string) => boolean) | undefined;
+  // room 接线 (wiring A/B): mirror 块里建好后回填 —— 入站包装在更外层, 只能这样拿到。
+  let roomHub: RoomHub | undefined;
+  let roomStateOf: ((id: string) => RoomState | undefined) | undefined;
+  let rememberBubble: ((msgid: string, frame: unknown, expires: number) => void) | undefined;
+  let ensureRoom: ((room: string, routed: string) => string) | undefined;
   let chatlogReminderOf: ((base: string, target: string) => string) | undefined;
   /** P7-S2 /owed: 本聊天的义务账渲染 (赋值在 mirror 大块里)。 */
   let owedOfBase: ((base: string) => string) | undefined;
@@ -521,72 +527,48 @@ const main = async (): Promise<void> => {
   let guardCharter: CharterGuard = (write) => ({ r: write(), note: Promise.resolve("") });
   const who = (t: string): string => `.${wizardStore()?.get(t)?.name || t}`;
   const ago = (at: number): string => { const s = Math.max(0, Math.round((Date.now() - at) / 1000)); return s < 60 ? `${s}s` : `${Math.round(s / 60)}m`; };
-  const rowLabel = (x: MessageEvent): string => `${x.payload.human ? "人话" : x.id.startsWith("rcpt:") ? `回执 ← ${x.speaker}` : `派活 ← ${x.speaker}`}`
-    + `「${clipLine(x.payload.text, 24)}」${({ queued: "排队", dispatching: "正在贴", "awaiting-result": "在跑" } as Record<string, string>)[x.execution] ?? x.execution} ${ago(x.at)}`;
-  /** 会话还没起好时气泡里那三个点 —— 不是提示文案, 就是 loading。 */
-  const LOADING = "…";
-  /** 人话的排队实况; "" = 这一刻没什么可说的 (气泡归 mirror 的 ack 或上一句实况)。 */
-  const queueNote = (q: NonNullable<ReturnType<typeof events.queue>>, target: string, cold: boolean): string => {
-    // 起会话那一段只留 loading, 不再写「正在拉起 … 的会话」: 那句话带着 `.x:` 头, 而此刻冷目标
-    // 还没进名册的 known —— 头里的半截链接改写落空 (withMessageFooter 找不到 sender 就原样放行),
-    // `[`.x`](url):` 进群被企微渲染成一个空链接; 它还会抢先 mirror 的 ack 进气泡、紧接着被顶掉,
-    // 白闪一下。loading 才是这一段该有的内容。
-    if (q.execution === "dispatching") return cold ? LOADING : "";
-    if (q.execution !== "queued") return "";
-    const holds = [handingOff(target) ? `${who(target)} 正在交接，交接完贴进新会话` : "", ...q.holds].filter(Boolean);
-    // 前面既没有别的件、也没有否决项 ⇒ 没什么可报的, 别拿一句「排队中（前面 0 件）」去顶掉气泡。
-    if (!q.ahead.length && !holds.length) return "";
-    return [`排队中（同 pane 前面 ${q.ahead.length} 件）`,
-      ...holds.map((h) => `- ${h}`),
-      ...q.ahead.slice(0, 5).map((x, i) => `${i + 1}. ${rowLabel(x)}`),
-      ...(q.ahead.length > 5 ? [`… 另 ${q.ahead.length - 5} 件`] : [])].join("\n");
-  };
-  /** 1.5s 内贴进去了就不出声 (mirror 会开它自己的气泡); 还在队里就把实况写进这条气泡, 每 3s
-   *  刷一次, 直到它离队。企微流式气泡活不过 6 分钟, 刷到 5 分钟为止。
-   *  loading 是纯文案, 不带头 —— 冷目标此刻还挂不出链接 (见 queueNote)。 */
-  const watchQueue = async (a: { frame: Parameters<typeof ws.client.replyStream>[0]; streamId: string; principal: string }, id: string, cold: boolean, last = "", until = Date.now() + 300_000, wait = 1500): Promise<void> => {
-    await sleep(wait);
-    const q = events.queue(id);
-    if (!q || Date.now() > until) return;
-    const note = queueNote(q, a.principal, cold);
-    if (note && note !== last) await ws.client.replyStream(a.frame, a.streamId, note === LOADING ? note : withTagHeader(a.principal, note), false).catch(() => undefined);
-    // queued / dispatching 之外没有「排队实况」可言 —— 收工, 气泡从此归 mirror。
-    if (!["queued", "dispatching"].includes(q.execution)) return;
-    return watchQueue(a, id, cold, note || last, until, 3000);
-  };
   installInboundRouter(ws.client, cfg, log, { ...bridge, dispatch: async (a) => {
+    // slash 是会话控制 (/new /model ...), 不落账本, 照旧直接进 pane。
     if (a.text.trimStart().startsWith("/")) { await handedOff(a.principal); await bridge.dispatch(a); return; }
-    const id = a.eventId ?? messageId(botOfKey(a.principal), a.channel!, a.streamId);
-    // 人话开一条根行 (§3.1): owner = 被点名的那个 wizard, 定论 = 这句人话的答复气泡;
-    // 这一轮服务的正是它, 于是它在群里再派活都挂在这条根下。
-    const at = Date.now();
-    const deadlineAt = NO_DEADLINE;
-    // P7-S2 严格群 (义务与批量): 被点名者非成员 = 直接入群 (默认 mention, 人拍板:
-    // 成员默认不入群、入群默认 mention) + 一行成员变动系统行; 注入正文尾部拼一批聊天
-    // 记录 (chatlog 信封, 触发消息全文), 成员游标只在 committed 后推进 (advanceChatlog,
-    // uncertain 不推进 —— committed 的证据链已核对 transcript 里读得回这枚信封)。
-    const humanBase = baseOfKey(a.channel!);
-    let chatlogTail = "";
-    if (strictSpeechOf?.(humanBase)) {
-      // 成员判定只认注册表 + 成员表 (不再要求 identity): 无类的存量 wizard 被人点名一样入群 ——
-      // 否则义务照样落在它头上、它却永远 403 非成员 (2026-11-18 aiconfig 群 .GraceVance 死账)。
-      if (wizardStore()?.get(a.principal) && !members.isMember(humanBase, a.principal)) {
-        members.join(humanBase, a.principal, "mention", String(a.speaker ?? "human"));
-        try {
-          chatRecords.record(humanBase, { at: Date.now(), id: "join:" + a.principal + ":" + at, author: "wezard", kind: "system",
-            text: (wizardStore()?.get(a.principal)?.name || a.principal) + " 入群 (人点名带入, mention)" });
-        } catch { /* 记录失败不挡消息 */ }
+    // 人话进 room 账本 (wiring B): 绑定 room = 本聊天的 base principal, 原样作 room id (契约 §1)。
+    // room 块还没装上 (启动竞态) 或落行被拒 → 退回老路径, 人话不能丢。
+    const room = ensureRoom ? ensureRoom(baseOfKey(a.channel!), a.principal) : baseOfKey(a.channel!);
+    const author: Who = { kind: "human", id: String(a.speaker ?? "").replace(/^user:/, "") };
+    const routed = wizardStore()?.get(a.principal);
+    // 点名 (.name 路由到别的 wizard): 先拉进 room (via mention), duty 开给它;
+    // 管家接待轮 (routed 就是 host) 不点名 → duty 按 §2 落 host。
+    let to: Who[] | undefined;
+    if (routed?.uid && roomStateOf) {
+      const w: Who = { kind: "wizard", id: routed.uid };
+      let st = roomStateOf(room);
+      if (st && !st.members.has(whoKey(w))) {
+        roomHub?.write(room, [{ op: "join", at: Date.now(), room, who: w, ord: st.nextOrd, via: "mention", by: author }]);
+        st = roomStateOf(room);
       }
-      chatlogTail = chatlogReminderOf ? chatlogReminderOf(humanBase, a.principal) : "";
+      if (st && !sameWho(roomHost(st), w)) to = [w];
     }
-    const root = newRootEvent();
-    router.commit(ops.open({ event: root, owner: a.principal, at, deadlineAt,
-      receiver: { kind: "chat", channel: baseOfKey(a.channel!), message: id },
-      asker: { who: a.speaker!, chat: a.channel! } }));
-    events.accept({ id, identity: a.identity, originalAt: a.originalAt, target: a.principal, speaker: a.speaker!, channel: a.channel!, serves: root,
-      asker: { who: a.speaker!, chat: a.channel! }, priority: "normal", deadline: deadlineAt,
-      payload: { text: a.text + chatlogTail, human: a } });
-    void watchQueue(a, id, !bridge.hasMirrorTarget(a.principal));
+    // 图片以 @path 文本随行 (codebuddy 的唯一通道), 账本行同时记 files。
+    const text = a.text + (a.images?.length ? "\n" + a.images.map((p) => "@" + p).join(" ") : "");
+    const streamId = String(a.streamId ?? "");
+    const expires = Date.now() + 6 * 60_000;
+    // 占位气泡: frame 记表 (reload 后也能收口), 先挂 loading; 第一条 re 它的 reply 覆盖 (§3a)。
+    rememberBubble?.(streamId, a.frame, expires);
+    if (a.frame && streamId) void ws.client.replyStream(a.frame, streamId, withTagHeader(a.principal, "…"), false).catch(() => undefined);
+    const v = roomHub?.append(room, { author, kind: "say", text, origin: "inbound", ext: streamId,
+      bubble: { stream: streamId, expires },
+      ...(a.images?.length ? { files: a.images.map((p) => ({ path: p, kind: kindOf(p), name: basename(p) })) } : {}),
+      ...(to?.length ? { to } : {}) });
+    if (!v || !v.ok) {
+      if (v) log.warn({ mod: "room", room, reason: v.reason }, "room: 人话落行被拒, 退回直接投递");
+      await bridge.dispatch(a);
+      return;
+    }
+    // 冷目标 (会话还没起): pump 贴不进没有绑定的 pane, 先起一个; pump 30s 重 kick 会接上。
+    if (!bridge.hasMirrorTarget(a.principal)) {
+      const store = wizardStore();
+      if (store) void bridge.newSession(a.principal, settleName(store, chatNameOf(cfg, a.principal), a.principal) || a.principal, { silent: true })
+        .catch(() => undefined);
+    }
   }   }, sourcePath, (w, c) => guardCharter(w, c), (chat, line) => {
     // P7-S1: dispatch 前写一行 human; 记录侧同步内存记账、后台落盘 (不 await)。
     // P7-S3: 人话是「首见」的登记点 —— noteHuman 先于 dispatch, 新群首条即按 strict 判 (验收数字 ①)。
@@ -1143,24 +1125,20 @@ const main = async (): Promise<void> => {
       // 简报是新会话的开场白, 但它不挂任何信封 (服务不着哪一笔) —— 交接前欠着的那几笔由
       // 「继续 <event>」逐笔续答 (见 resume), 别把简报那一轮的回复当成回执。
       inject: async (t, text, seal, id, timeoutMs, clear) => {
+        // 交接不进 room 账本 (wiring B / cutmap G-3): 简报轮是会话层动作, 直接贴进目标会话。
         if (clear && !(await m.verifyClearContext(t, clear))) return { ok: false, reason: "original cleared CLI process/session changed before carry" };
-        // 事件先落盘; 同一 id 重入只恢复状态, 不重贴。内部事件没有 serves, 不替任何欠账收口。
-        if (!events.known(id)) {
-          const info = clear ? { tmuxPane: clear.pane, sessionId: clear.nextSid } : m.sessionInfo(t);
-          if (!info?.tmuxPane || !info.sessionId) return { ok: false, reason: "original handoff pane/session binding is unavailable" };
-          events.accept({ id, identity: JSON.stringify({ pane: info.tmuxPane, sid: info.sessionId }), target: t, speaker: t, channel: seal.channel, priority: "now", deadline: Date.now() + timeoutMs,
-            payload: { text, handoff: { pane: info.tmuxPane, sessionId: info.sessionId, ...(seal.speaker ? { speaker: seal.speaker } : {}), ...(seal.from ? { from: seal.from } : {}), ...(clear ? { clear } : {}) } } });
-        }
-        for (const end = Date.now() + timeoutMs; Date.now() < end; await sleep(200)) {
-          const e = await events.reconcile(id);
-          if (e?.execution === "complete" || (!id.endsWith(":summary") && e?.exposure === "consumed")) return { ok: true };
-          if (e?.execution === "uncertain" || e?.execution === "canceled") return { ok: false, reason: e.reason ?? "handoff event delivery is uncertain; not resubmitting" };
-        }
-        events.cancel((e) => e.id === id && e.exposure === "none", "handoff stopped before confirmed delivery");
-        return { ok: false, reason: "handoff event consumption not confirmed; durable event retained" };
+        const info = clear ? { tmuxPane: clear.pane, sessionId: clear.nextSid } : m.sessionInfo(t);
+        if (!info?.tmuxPane || !info.sessionId) return { ok: false, reason: "original handoff pane/session binding is unavailable" };
+        const deadline = Date.now() + timeoutMs;
+        const r = await m.injectText(t, text, {
+          channel: seal.channel, eventId: id, requireIdle: true, noRespawn: true,
+          ...(clear ? { handoff: clear } : {}),
+          ...(seal.speaker ? { speaker: seal.speaker } : {}),
+          ...(seal.from ? { from: seal.from } : {}),
+          guard: () => Date.now() < deadline,
+        });
+        return r.ok ? { ok: true } : { ok: false, reason: r.reason ?? "handoff carry inject failed" };
       },
-      // 交接的印章: 频道与出处一起取。频道先看 turn store (lastChannelOf 连 speaker/from 一起给,
-      // 且 reload 之后还在), 没有记录才退回内存里的当前频道。
       sealOf: (t) => { const l = lastChannelOf(t); return l ? { channel: l.channel ?? "", ...(l.speaker ? { speaker: l.speaker } : {}), ...(l.from ? { from: l.from } : {}) } : { channel: m.currentChannel(t) }; },
       lastText: m.lastText,
       summary: (id) => { const e = events.get(id); return e?.execution === "complete" && e.exposure === "consumed" && typeof e.result?.body === "string" ? e.result.body : undefined; },
@@ -1807,7 +1785,7 @@ const main = async (): Promise<void> => {
       return askerFromEnvelope(env);
     };
     // A private dispatch keeps its human origin even though its output channel is empty.
-    bindCardChannel((key) => askerOf(key)?.chat || m.currentChannel(key));
+    bindCardChannel((key) => cardRoomOf(key) || askerOf(key)?.chat || m.currentChannel(key));
     // spawn 读屏撞上认不出的启动确认框 → 通知该 wizard 此刻的频道 (与审批卡同源的
     // 频道换算, 不硬编 home 群)。只告知不等点击; 发送失败只记日志, spawn 侧频控去重。
     bindStartupNotice((key, text) => void ws.client
@@ -2850,8 +2828,8 @@ const main = async (): Promise<void> => {
         store: plans,
         eventIds: planEventIds,
         hasOutstandingDebt: planHasOutstandingDebt,
-        hasPendingReminder: (owner) => events.status().events.some((event) => event.target === owner && !!event.payload.planReminder
-          && (event.execution === "queued" || event.execution === "dispatching" || event.execution === "uncertain")),
+        // 提醒不再走事件表 (wiring B): 去重只靠 plans.reminded 的 token。
+        hasPendingReminder: () => false,
         idle: m.idleNow,
         handingOff,
         log: log.child({ mod: "plan-reminders" }),
@@ -2861,30 +2839,8 @@ const main = async (): Promise<void> => {
           if (!current || current.owner !== plan.owner || current.state !== "active" || current.revision !== plan.revision
             || reminderToken(current.id, current.revision, planEventIds(current.id)) !== token
             || planHasOutstandingDebt(current.id, current.owner) || handingOff(current.owner) || !(await m.idleNow(current.owner))) return;
-          const originRow = current.origin?.event ? router.get(current.origin.event) : undefined;
-          const serves = originRow?.owner === current.owner && ["held", "open", "need", "error"].includes(originRow.status)
-            ? originRow.event : undefined;
-          if (!events.known(eventId)) events.accept({
-            id: eventId,
-            identity: JSON.stringify([plan.id, plan.revision, token]),
-            target: plan.owner,
-            speaker: plan.owner,
-            channel: current.origin?.channel ?? "",
-            ...(current.origin?.asker ? { asker: current.origin.asker } : {}),
-            ...(serves ? { serves } : {}),
-            priority: "normal",
-            deadline: NO_DEADLINE,
-            payload: {
-              text: `你的 plan「${plan.title}」仍处于 active 状态（revision ${plan.revision}）。请检查 DAG 进度，并在需要时显式更新、暂停或完成 plan。`,
-              planId: plan.id,
-              planReminder: { planId: plan.id, revision: plan.revision, token },
-              peer: {
-                from: { kind: "task", taskId: `plan:${plan.id}` },
-                envelope: renderTaskEnvelope(`plan:${plan.id}`, current.origin?.channel ?? "", serves ? { event: serves } : undefined),
-                kind: "task",
-              },
-            },
-          });
+          // 提醒 = 一条 trigger 行 (cutmap G-2): 不镜像, 只唤醒 owner; 去重靠 plans.reminded 的 token。
+          fireTaskTrigger(plan.owner, `你的 plan「${plan.title}」仍处于 active 状态（revision ${plan.revision}）。请检查 DAG 进度，并在需要时显式更新、暂停或完成 plan。`, eventId);
           plans.reminded(plan.id, plan.revision, token, eventId);
         },
       });
@@ -3848,6 +3804,64 @@ const main = async (): Promise<void> => {
     roomsGuard();
     const roomsGuardTimer = setInterval(roomsGuard, 24 * 3600_000);
     roomsGuardTimer.unref?.();
+    // ── B: 接入 (人话 / trigger / 轮界 / 卡片) ────────────────────────────
+    /** 绑定 room 不存在时开出来 (契约 §4): 本聊天的管家作 founder; 解析不出管家
+     *  (引导未落 / 人点名的第一条) 由被路由到的那个顶上。返回 room id。 */
+    const ensureBoundRoom = (room: string, routed: string): string => {
+      if (roomState(room)) return room;
+      const at = Date.now();
+      const kind = room.startsWith("user:") ? "wecom-dm" : room.startsWith("chat:wx") ? "wx" : "wecom-group";
+      const ops: RoomOp[] = [{ op: "open", at, room, kind, by: DAEMON }];
+      let founder: string | undefined;
+      try {
+        const st = resolveSteward(cfg, wizardStore(), room, (t) => ((c) => c.runningCwd || c.defaultCwd)(m.getCwd(t)));
+        if (!st.fresh) founder = wizards.get(st.target)?.uid;
+      } catch { /* 引导没完成的聊天: routed 顶上 */ }
+      founder ??= wizards.get(routed)?.uid;
+      if (founder) ops.push({ op: "join", at, room, who: { kind: "wizard", id: founder }, ord: 1, via: "founder", by: DAEMON });
+      hub.write(room, ops);
+      return room;
+    };
+    /** 定时任务 / plan 提醒的一枪 (cutmap G-1/G-2): kind:"trigger" 行 —— 不镜像, 只唤醒 owner。 */
+    const fireTaskTrigger = (target: string, text: string, ext: string): void => {
+      const rec = wizards.get(target);
+      if (!rec?.uid) { roomLog.warn({ target, ext }, "trigger: 目标不在名册上, 这一枪没放"); return; }
+      const who: Who = { kind: "wizard", id: rec.uid };
+      const room = ensureBoundRoom(baseOfKey(target), target);
+      const s = roomState(room);
+      if (s && !s.members.has(whoKey(who))) hub.write(room, [{ op: "join", at: Date.now(), room, who, ord: s.nextOrd, via: "inbound", by: DAEMON }]);
+      const v = hub.append(room, { author: DAEMON, kind: "trigger", text, to: [who], origin: "daemon", ext });
+      if (!v.ok) roomLog.warn({ room, ext, reason: v.reason }, "trigger: 落行被拒");
+    };
+    /** mirror 轮终 → hub.onIdle (F-1 提醒的轮界): mirror 没有 onIdle 回调, 用轮询识别
+     *  busy→idle 的跳变; 10s 粒度足够提醒时机, 不去挤 5s 的 worldfacts 探测窗口。 */
+    const idleWas = new Map<string, boolean>();
+    const roomIdleSweep = async (): Promise<void> => {
+      for (const rec of wizards.all()) {
+        if (!rec.uid) continue;
+        try {
+          const busy = await m.isBusy(rec.target);
+          const was = idleWas.get(rec.target);
+          idleWas.set(rec.target, busy);
+          if (was === true && !busy) void hub.onIdle(rec.uid);
+        } catch { /* 探不到就不改状态 */ }
+      }
+    };
+    const roomIdleTimer = setInterval(() => void roomIdleSweep(), 10_000);
+    roomIdleTimer.unref?.();
+    /** 审批/提问卡发到哪个聊天: 本轮唤醒它的绑定 room; 没被唤醒过 → 旧口径兜底 (C 节删)。 */
+    const cardRoomOf = (target: string): string | undefined => {
+      const uid = wizards.get(target)?.uid;
+      const d = uid ? hub.defaultRoom(uid) : undefined;
+      return d?.room && hub.isBoundRoom(d.room) ? d.room : undefined;
+    };
+    // rolepage 的 room 历史路由 (room-ui 的第 4 个接线点): 坏账本按「没有这个 room」处理。
+    setRoomReader({ ids: roomStore.ids, get: (id) => roomState(id) });
+    // 回填外层引用 (入站包装在 mirror 块之外)。
+    roomHub = hub;
+    roomStateOf = roomState;
+    rememberBubble = rememberBubbleFrame;
+    ensureRoom = ensureBoundRoom;
 
     // 类 / 实例 (人 2026-11-18): 管家身份 → 一条类 + 一串有序号的实例 (名字 <类名>-N)。
     // 合并清单 (stateDir/class-merges.json 或 wizards.json 同级, 人写) 把同目录上的几个旧
@@ -5621,85 +5635,21 @@ const main = async (): Promise<void> => {
     // 还要连触发时间点一起被它那一轮拖走。所以到点起一个白板 wizard 单独执行,
     // 跑完自动收掉。只有排班时点名了某个 wizard (fresh=false) 且它此刻闲着,
     // 才把这句话直接投进它那一轮 —— 「在已有会话里继续」是要求出来的, 不是默认。
-    /** 定时任务开一轮: 它要替这个 target 在群里说话 (非 quiet) → 开一条根行; 私下跑的不开 (§3.1)。
-     *  这一枪的注入没有消息事件, 所以件号→行的桥要自己记 (servesOfTurn 的兜底)。 */
-    const openTaskRow = (target: string, taskId: string, event: string, quiet: boolean): void => {
-      if (quiet) return;
-      openRow({ event, owner: target, deadlineAt: NO_DEADLINE,
-        receiver: { kind: "chat", channel: baseOfKey(target), message: `task:${taskId}:${event}` } });
-    };
     scheduledTaskInject = async (target, text, opts) => {
       const { taskId, fresh, quiet } = opts;
       const owner = ((r) => (r ? ownerOf(r) : target))(tasks.get(taskId));
       if (!sameBot(owner, target)) return { ok: false, reason: `日程 ${taskId} 的目标与排班者归不同的企微机器人, 不跨机器人放枪` };
-      const allowed = () => opts.guard();
-      return deliverScheduled({ ...opts, guard: () => opts.guard() && (fresh || allowed()) }, {
-        postponeMs: TASK_POSTPONE_MS,
-        handedOff: () => handedOff(target),
-        idleNow: () => m.idleNow(target),
-        untilIdle: (timeoutMs, aborted) => m.untilIdle(target, timeoutMs, { aborted }),
-        named: async (live) => {
-          const guard = () => live() && allowed();
-          if (!guard()) return { ok: false, reason: "scheduled target permission withdrawn" };
-          const at = Date.now();
-          const turn = newRootEvent();
-          // Confirm idle inside the physical pane transaction; a race is unsent
-          // and returns to the target consumer, without releasing task dedup.
-          if (quiet) quietRelays.set(turn, { target, at, base: baseOfKey(target) });
-          openTaskRow(target, taskId, turn, quiet);
-          const inj = await m.injectText(target, text, quiet
-            ? { guard, requireIdle: true, from: { kind: "task", taskId }, channel: "", envelope: renderTaskEnvelope(taskId, "", { event: turn }) }
-            : { guard, requireIdle: true, from: { kind: "task", taskId }, channel: baseOfKey(target), envelope: renderTaskEnvelope(taskId, baseOfKey(target)) });
-          if (inj.ok && quiet) void relayUnlessQuiet(target, at, turn, baseOfKey(target));
-          return inj;
-        },
-        runner: (busy, live) => !fresh && !allowed()
-          ? Promise.resolve({ ok: false, reason: "scheduled target permission withdrawn" })
-          : runTaskInRunner(target, text, taskId, quiet, busy, live),
-      });
-    };
-    /** 安静任务那一轮的终句: 它私下跑, 镜像不推; 等它这一轮跑完, 终句不是 `QUIET` 就替它
-     *  发进群 (头写它的名字, 人知道是谁说的)。按信封件号定位答句 (同回执): 按时刻取会把紧随
-     *  其后的私聊 / 人话那一轮的答案当成它的, 把私下内容发进群。 */
-    const relayUnlessQuiet = async (t: string, at: number, turn: string, base: string): Promise<void> => {
-      quietRelays.set(turn, { target: t, at, base });
-      const end = at + TASK_QUIET_WAIT_MS;
-      // 先等它动起来: 刚注入时注册表还报 idle。
-      await sleep(5000);
-      let firstObservation = true;
-      while (firstObservation || Date.now() < end) {
-        firstObservation = false;
-        if (Date.now() < end) await m.untilIdle(t, end - Date.now());
-        const reply = (m.replyToPeer(t, "", at, turn)?.text ?? "").trim();
-        if (reply && (await m.idleNow(t))) {
-          const text = stripForChat(reply); // 进群的转发不带收口标记 / ARTIFACT 行
-          if (text && !isQuiet(reply)) {
-            const eventId = `quiet:${t}:${turn}`;
-            const revision = finalId(eventId, base, text);
-            events.delivery({ id: finalId(eventId, base, revision), eventId, target: t, turn, channel: base,
-              revision, body: text, purpose: "task", chunks: m.formatFinal(t, turn, text) });
-          }
-          log.info({ target: t, quiet: isQuiet(reply), len: reply.length }, "quiet task: 一轮结束");
-          quietRelays.drop(turn);
-          return;
-        }
-        await sleep(5000);
+      // 已有会话的一枪 = 一条 trigger 行 (cutmap G-1): 不镜像, 只唤醒 owner;
+      // 唤醒一律等它本轮结束 (泵自己等), 不再顺延 / quiet 旁路转发 —— 它的结论只经
+      // chat_reply / chat_say 进 room, 终句零语义 (契约 §5)。
+      if (!fresh) {
+        fireTaskTrigger(target, text, taskId);
+        return { ok: true };
       }
-      log.warn({ target: t }, "quiet task: 等满仍没收口, 不转发");
-      quietRelays.set(turn, { target: t, at, base, reason: "deadline passed; final not observed, retained for reconciliation" });
+      return runTaskInRunner(target, text, taskId, quiet === true, opts.guard);
     };
-    // 落盘: 这个仓库里 reload 是常态, 守在内存里的那一轮一 reload 就既不转发也不说 QUIET 了。
-    const quietRelays = loadJsonMap<{ target: string; at: number; base: string; reason?: string }>(
-      join(cfg.daemon.stateDir, "quiet-relays.json"), undefined, { strict: true },
-    );
-    // 只重放"还可能在等"的那几条: 已经判过等满没收口的 (reason 在) 与窗口早过去的, 重放只会
-    // 再烧一轮等待、再报一条 warn —— 2026-10-13 一次 receipt-regress 留下的 350 条死记录,
-    // 让每次 boot 都重刷 350 行同一条 warn, 而且它们永远不会再收口。
-    void m.restored.then(() => Object.entries(quietRelays.all())
-      .filter(([, r]) => !r.reason && Date.now() < r.at + TASK_QUIET_WAIT_MS)
-      .forEach(([turn, r]) => void relayUnlessQuiet(r.target, r.at, turn, r.base)));
     /** 到点起一个白板 wizard 执行这一枪, 跑完自动收掉。 */
-    const runTaskInRunner = async (target: string, text: string, taskId: string, quiet: boolean, busy: boolean, guard: () => boolean): Promise<ScheduledResult> => {
+    const runTaskInRunner = async (target: string, text: string, taskId: string, quiet: boolean, guard: () => boolean): Promise<ScheduledResult> => {
       if (!guard()) return { ok: false, reason: "scheduled runner withdrawn" };
 
       // 执行体挂在日程的主人名下: 名字 `<主人>-task-xxxx`, parent = 主人 —— 它的
@@ -5745,9 +5695,8 @@ const main = async (): Promise<void> => {
       };
       if (!allowed()) { releaseSlot(slotR); return { ok: false, reason: "scheduled runner identity changed" }; }
       const info = m.sessionInfo(target);
-      const why = busy ? ` (起因: ${displayName(target)} 当时正忙)` : "";
       wizards.upsert(runner, {
-        description: `定时任务 ${taskId} 的一次性执行体${why}`,
+        description: `定时任务 ${taskId} 的一次性执行体`,
         parent: owner,
         voiceOf: owner,
         bornAt: Date.now(),
@@ -5766,24 +5715,14 @@ const main = async (): Promise<void> => {
         return { ok: false, reason: "scheduled runner withdrawn after spawn" };
       }
       if (!quiet) {
-        notifyChat(base, withTagHeader(target, busy
-          ? `⏰ 定时任务到点时正忙, 已起白板 wizard .${runnerName} 单独执行, 完成后自动收掉`
-          : `⏰ 定时任务已起白板 wizard .${runnerName} 执行, 完成后自动收掉`));
+        notifyChat(base, withTagHeader(target, `⏰ 定时任务已起白板 wizard .${runnerName} 单独执行, 完成后自动收掉`));
       }
-      const at = Date.now();
-      const turn = newRootEvent();
-      if (quiet) quietRelays.set(turn, { target: runner, at, base });
-      openTaskRow(runner, taskId, turn, quiet);
-      const inj = await m.injectText(runner, text, quiet
-        ? { guard: allowed, from: { kind: "task", taskId }, channel: "", envelope: renderTaskEnvelope(taskId, "", { event: turn }) }
-        : { guard: allowed, from: { kind: "task", taskId }, channel: baseOfKey(runner), envelope: renderTaskEnvelope(taskId, baseOfKey(runner)) });
-      if (!inj.ok) { releaseSlot(slotR); return inj; }
+      // 这一枪 = runner 名下的一条 trigger 行 (cutmap G-1): pump 把它贴进刚起的白板会话。
+      fireTaskTrigger(runner, text, taskId);
       // 没有人会对这个一次性分身喊 stop_wizard, 只能自己等它闲下来再收。30min
       // 内没闲下来就放弃自动回收 (它大概率还在干一个长活), 留给人手动处理 ——
       // 比杀掉一个还在跑的 pane 安全。
       void (async () => {
-        // 安静任务先把终句取走 (收掉 pane 之后就读不到了)。
-        if (quiet) await relayUnlessQuiet(runner, at, turn, base);
         const idle = await waitForIdle(runner, m.isBusy, 30 * 60_000, () => false);
         if (!idle.idle) {
           log.warn({ runner, reason: idle.reason }, "task runner: 30min 未闲下来, 放弃自动回收");
@@ -5792,7 +5731,7 @@ const main = async (): Promise<void> => {
         if (!spawned.sessionId) return;
         await reclaimRunner(spawned.sessionId);
       })();
-      return inj;
+      return { ok: true };
     };
 
     // 记忆整理者的一轮: 在内部 key 上起白板 wizard, 私聊注入, 闲下来就收 —— 全程不碰
