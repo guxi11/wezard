@@ -14,6 +14,7 @@ ROOM=${1:-$(cd "$(dirname "$0")/../.." && pwd)}
 [ -f "$ROOM/dist/cli/migrate-rooms.js" ] || { echo "先 npm run build: $ROOM/dist/cli/migrate-rooms.js 不存在"; exit 1; }
 PORT_A=${PORT_A:-27931}
 PORT_B=${PORT_B:-27932}
+PORT_C=${PORT_C:-27933}
 T=$(mktemp -d /tmp/o2-rehearse-XXXXXX)
 say() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$T/rehearse.log"; }
 fail() { say "演练失败: $*"; say "现场保留在 $T"; exit 1; }
@@ -54,16 +55,21 @@ FIXEOF
 }
 
 # 起 daemon (env 隔离: 去 WEZARD_CONFIG/TMUX, HOME/TMUX_TMPDIR 指进本例), 回 PID。
+# 起 daemon 并把 pid 写进 $DPID —— 不用 $(start_daemon): 命令替换会另起子 shell,
+# 后台子进程挂在那个子 shell 下, 停 daemon 时容易打到错误 pid (2026-11-19 演练实测:
+# B 段一开就整条脚本被 TERM, 现场只有 A 段日志)。
 start_daemon() { # $1 = home  $2 = port
   env -u WEZARD_CONFIG -u TMUX HOME="$1" TMUX_TMPDIR="$1/tmux" \
     node "$ROOM/dist/daemon/index.js" >>"$1/daemon-stdout.log" 2>&1 &
-  echo $!
+  DPID=$!
 }
 stop_daemon() { # $1 = pid  $2 = home
   kill -TERM "$1" 2>/dev/null
   for i in $(seq 1 15); do kill -0 "$1" 2>/dev/null || break; sleep 1; done
   kill -KILL "$1" 2>/dev/null || true
-  env HOME="$2" TMUX_TMPDIR="$2/tmux" tmux kill-server 2>/dev/null || true
+  # 只杀本用例的 tmux server: $TMUX 若继承自调用方会压过 TMUX_TMPDIR, 直接 kill-server
+  # 会把跑演练的那个 tmux (本脚本的父会话) 一起杀掉 —— 必须 -u TMUX。
+  env -u TMUX -u TMUX_PANE HOME="$2" TMUX_TMPDIR="$2/tmux" tmux kill-server 2>/dev/null || true
 }
 wait_healthz() { # $1 = port
   up=0
@@ -91,7 +97,7 @@ MIG_ROOMS_A=$(mig_rooms "$migA")
 [ "$(cd "$MIG_ROOMS_A" && pwd)" = "$(cd "$A/.wezard/state/rooms" && pwd)" ] || fail "A 迁移目录不在 stateDir 下: $MIG_ROOMS_A"
 [ ! -e "$A/.wezard/rooms" ] || fail "A 不该有 <home>/rooms (旧 bug 落点): $A/.wezard/rooms"
 say "A 目录核对: 写入目录 == daemon 读取目录 == $MIG_ROOMS_A, <home>/rooms 不存在"
-DPID_A=$(start_daemon "$A" "$PORT_A")
+start_daemon "$A" "$PORT_A"; DPID_A=$DPID
 wait_healthz "$PORT_A" || fail "A daemon 60s 内 healthz 不通 (看 $A/daemon-stdout.log)"
 say "A daemon 起来 (pid $DPID_A, 端口 $PORT_A), 跑 o2-gate"
 o2A=$(env HOME="$A" "$ROOM/scripts/room-cutover/o2-gate.sh" "http://127.0.0.1:$PORT_A/status" "$MIG_ROOMS_A" 2>>"$T/rehearse.log")
@@ -113,7 +119,7 @@ MIG_ROOMS_B=$(mig_rooms "$migB")
 # 「迁移报告的写入目录」也按老代码口径记成 <home>/rooms。
 mv "$MIG_ROOMS_B" "$B/.wezard/rooms" || fail "B 挪账本失败"
 say "B 已复刻目录错: 账本在 $B/.wezard/rooms, daemon 读 $B/.wezard/state/rooms (空)"
-DPID_B=$(start_daemon "$B" "$PORT_B")
+start_daemon "$B" "$PORT_B"; DPID_B=$DPID
 wait_healthz "$PORT_B" || fail "B daemon 60s 内 healthz 不通 (看 $B/daemon-stdout.log)"
 say "B daemon 起来 (pid $DPID_B, 端口 $PORT_B), 跑 o2-gate"
 o2B=$(env HOME="$B" "$ROOM/scripts/room-cutover/o2-gate.sh" "http://127.0.0.1:$PORT_B/status" "$B/.wezard/rooms" 2>>"$T/rehearse.log")
@@ -127,5 +133,38 @@ diskB=$(o2_nums "$o2B" | sed -n 2p)
 stop_daemon "$DPID_B" "$B"
 say "B 完成: O2 红, 内存 $memB != 账本重放 $diskB (与 A 的绿互为镜像)"
 
-say "演练达标: 目录对 → O2 绿 (mem == 重放 == $diskA); 目录错 → O2 红 (mem $memB != 重放 $diskB), 两个数都报了"
+# ── C 反例 2: 闸红 → 按 run-cutover rollback() 的逆序动作回退 ──────────────
+# run-cutover.sh 的 rollback 直接调 launchctl (真实机器), 演练不碰 launchctl;
+# 这里在临时 HOME 上把 rollback() 的 8 → 6 → 2 三个动作真做一遍, 验证
+# 「闸红 → 停新 daemon → 新账本挪进 rejected → 从 pre-room 备份还原」这条链可用。
+C=$T/home-c
+setup_case "$C" "$PORT_C"
+tar -czf "$C/pre-room.tgz" -C "$C/.wezard" state wizards.json config.jsonc || fail "C 备份失败"
+migC=$(env -u WEZARD_CONFIG HOME="$C" node "$ROOM/dist/cli/migrate-rooms.js" 2>&1) || fail "C 迁移失败: $migC"
+MIG_ROOMS_C=$(mig_rooms "$migC")
+[ -n "$MIG_ROOMS_C" ] || fail "C 迁移输出没有写入目录: $migC"
+TS_C=$(date +%Y%m%d-%H%M%S)
+mv "$MIG_ROOMS_C" "$C/.wezard/rooms" || fail "C 挪账本失败"
+say "C 已复刻目录错: 账本在 $C/.wezard/rooms, daemon 读 $C/.wezard/state/rooms (空)"
+start_daemon "$C" "$PORT_C"; DPID_C=$DPID
+wait_healthz "$PORT_C" || fail "C daemon 60s 内 healthz 不通 (看 $C/daemon-stdout.log)"
+o2C=$(env HOME="$C" "$ROOM/scripts/room-cutover/o2-gate.sh" "http://127.0.0.1:$PORT_C/status" "$C/.wezard/rooms" 2>>"$T/rehearse.log")
+rcC=$?
+say "C o2-gate: $o2C"
+[ "$rcC" != 0 ] || fail "C (目录错) O2 闸应红却绿了: $o2C"
+# —— rollback() 逆序 (8 → 6 → 2), 动作与 run-cutover.sh 同名分支一致 ——
+say "C ROLLBACK 开始 (原因: 8 O2 闸红: $o2C); 已完成: 0 1 2 3 4 5 6 7 8"
+kill -TERM "$DPID_C" 2>/dev/null; for i in $(seq 1 15); do kill -0 "$DPID_C" 2>/dev/null || break; sleep 1; done
+kill -0 "$DPID_C" 2>/dev/null && kill -KILL "$DPID_C" 2>/dev/null
+say "C rb 8: 新 daemon 已停 (pid $DPID_C)"
+[ -d "$C/.wezard/state/rooms" ] && mv "$C/.wezard/state/rooms" "$C/.wezard/state/rooms.rejected-$TS_C"
+say "C rb 6: state/rooms/ → state/rooms.rejected-$TS_C"
+tar -xzf "$C/pre-room.tgz" -C "$C/.wezard" && say "C rb 2-5: 从 $C/pre-room.tgz 还原 state wizards.json config.jsonc" || fail "C tar 还原失败"
+say "C ROLLBACK 结束"
+kill -0 "$DPID_C" 2>/dev/null && fail "C 回退后 daemon 还活着"
+[ -d "$C/.wezard/state/rooms.rejected-$TS_C" ] || fail "C 新账本没进 rejected 目录"
+[ -f "$C/.wezard/state/wizards.json" ] || fail "C 备份没还原 wizards.json"
+say "C 完成: 闸红后三步回退都执行 (daemon 停 / 账本 rejected / 备份还原)"
+
+say "演练达标: 目录对 → O2 绿 (mem == 重放 == $diskA); 目录错 → O2 红 (mem $memB != 重放 $diskB); 红后回退链 8/6/2 全执行"
 say "现场保留在 $T (daemon 日志在 $T/home-*/daemon.log)"
