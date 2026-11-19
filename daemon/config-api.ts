@@ -39,7 +39,7 @@ const putFrom = (obj: Obj, path: readonly string[], next: unknown): void => {
 let defaults: Obj | undefined;
 const defaultsOf = (): Obj => (defaults ??= ConfigSchema.parse({ bot: { botId: "-", secret: "-" } }) as Obj);
 
-/** `path` 处的默认值。记录里的项 (`chatPolicy.<chat>.topOnly`) 不在空配置里: 取记录值类型对 `{}` 的解析 ——
+/** `path` 处的默认值。记录里的项 (如 `chatPolicy.<chat>.stewardBudget`) 不在空配置里: 取记录值类型对 `{}` 的解析 ——
  *  没写过的聊天读到的正是它 (chatPolicyOf 就这么读)。 */
 const defaultAt = (path: readonly string[]): unknown => {
   const hit = getIn(defaultsOf(), path);

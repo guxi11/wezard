@@ -680,10 +680,6 @@ export interface CharterArgs {
   lead: boolean;
   /** 各档此刻落到什么, 如 `light=haiku·low`; 出生时的快照, 真相在 config_get({path:"models"})。 */
   tiers: readonly string[];
-  /** 退役 (room 模型): 顶层模式没有了, 宪章不再渲染它; 字段留着只为调用方过渡, 由 lead 删。 */
-  topOnly: boolean;
-  /** 退役 (room 模型): strict / implicit 没有了 —— 绑定 room 里每条消息都进企微, 没有出站门。字段同上, 由 lead 删。 */
-  speech: "implicit" | "strict";
 }
 
 // 系统面 (设计稿 §1.5) 的称呼: 裸名 —— roster/charter 里不画记号; 记号只在人面 (企微气泡头/审批卡)。

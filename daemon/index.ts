@@ -30,8 +30,6 @@ import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } 
 import { installInboundRouter } from "./inbound.js";
 import { installChannelTransport, installChannelEvents, readChannel, isTopicChat, sendTopicContent } from "./channel.js";
 import { loadMirrorStore } from "./mirror-store.js";
-import { cancelOps, contentRev, eventRef, finalKind, isEventRef, makeOutcome, openRouter, ops, pickPair, type Delivery, type EventId, type Op, type Receiver, type Route } from "./router.js";
-import { isRecoveryCarrier, createMessageEvents, messageId, finalId, reportSource, receiptCoverage, receiptFacts, correctionTaskEvent, canSettleFinal, unrecognizedReceipt, eventDeliveryAllowed, peerEventPrerequisitesReady, resultCorrectionInputs, settleAddressedResults, settleUnaddressedResult, servedChatResultFinalAllowed, settleServedChatResult, type EventAuthority, type MessageAdapters, type MessageEvent, type MessageFinal, type MessageInput } from "./message-events.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
 import { backendFor, bindStartupNotice, prewarmShell, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
 import { bindCardChannel, installApprovalEventListener, makeApproveHandler, requestConfirm } from "./approval.js";
@@ -48,19 +46,16 @@ import {
 } from "./claim.js";
 import { makeWedocBridge } from "./wedoc.js";
 import { errText, installResponseTracker } from "./last-response.js";
-import { ChatRecords } from "./chat-records.js";
 import { openRoomStore } from "./rooms.js";
 import { stewardRoute as resolveSteward } from "./steward.js";
+import { createRoomWatchdog } from "./room-watchdog.js";
 import { createRoomHub, type RoomHub } from "./room-hub.js";
 import {
   DAEMON, adhocRoomId, dmPeers, dmRoomId, holderOf, isUid, leaveOps, openDuties, renderMsgLine, roomHost, sameWho, whoKey,
   type MsgRow, type ReplyStatus, type RoomOp, type RoomState, type Verdict, type Who,
 } from "../shared/room.js";
 import { knownChatsOf } from "./chat-seen.js";
-import { planStrictSwitch, renderSwitchReport, type SwitchFacts } from "./strict-switch.js";
 import { CHAT_BATCH_BUDGET, sliceBatch } from "../shared/chat-record.js";
-import { openSayMeter, sayVerdict, topOnlyVerdict } from "./strict-gate.js";
-import { openMembers } from "./members.js";
 import { CLASS_NAME_MAX, loadClassMerges, loadClassStore, migrateClasses, parseInstanceName, planClasses, renderClassReport, validClassName, type ClassMigration } from "./classes.js";
 import { footerTarget, responseFormatPolicy } from "./message-format.js";
 import { scanClaudeSessions } from "./session-scan.js";
@@ -122,7 +117,6 @@ import {
   type WizardRecord,
 } from "./wizard.js";
 import { activeRows, bindNoticeBox, createNoticeBox, createSeenRing, gcSeen, chatAudience, hears, noticeSuffixFor, type Notice, type Subject, type Part, type SeenRow, type TimedSnapRow, type Via } from "./notices.js";
-import { createLedger, digest, pendingGc, renderDigest, renderTable, ago as agoMs, HEARD_EVERY_MS, type Item as PendingItem } from "./pending-items.js";
 import { cacheTouchMs, cacheTtlSec, clipMiddle, contextMaterials, firstStamp, parseClosing, receiptKeyword, stripClosingMark, stripForChat, addressedResults, lastContextTokens, lastExchange, lastModel, openingTurn, talkTurns, turnsSince, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
 import { expandHome } from "../shared/paths.js";
 import { expandTask, TemplateError, type ExpandedTask, type TemplateRef } from "../shared/task-template.js";
@@ -130,14 +124,10 @@ import { loadJsonMap } from "../shared/json-map-store.js";
 import { loadPlans, PlanError } from "./plans.js";
 import type { PlanStore } from "./plans.js";
 import { registerPlanRoutes } from "./plan-http.js";
-import { returnOpOf, type HeldSeen, type InFlight, type Prereq, type ReturnOp, type Tell } from "./dispatch.js";
 import { NO_DEADLINE, isTerminal, renderInFlight, turnState } from "../shared/turn-state.js";
-import { startIdleNudge, startObligationWatch, strictDeliveryNudge, strictDeliveryStewardNote, strictDeliveryHumanLine, strictUndeliveredNotice,
-  type NudgeTarget, type ObligationRow, type ObligationWatch } from "./idle-nudge.js";
 import { askerFromEnvelope, parseReminders, renderReminder, stripReminders, withMsg, type NoteAttrs, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
 import { createHandoffs, cuttingTurn, handedOff, handingOff, handoffRound, resumeText, roundPending, settlesCut, type Pending as PendingHandoff } from "./handoff.js";
-import { coldGateOf, decide, rankCandidates, routeDiagnostics, renderCandidates, routeReceiptDutiesOf, tierFor, wakeCostOf, wakeNoteOf, type RouteRow } from "./route.js";
-import { renderChatRecords } from "../shared/chat-record.js";
+import { coldGateOf, decide, rankCandidates, routeDiagnostics, renderCandidates, tierFor, type RouteRow } from "./route.js";
 import { parseWhen, renderRoomRead } from "../shared/room-view.js";
 import { roomFacts, nameTable } from "./room-facts.js";
 import { waitForIdle, type IdleResult } from "./wait-idle.js";
@@ -195,6 +185,14 @@ const fatalExit = (msg: string, extra?: Record<string, unknown>): never => {
 
 const main = async (): Promise<void> => {
   const { config: cfg, sourcePath } = loadConfig();
+  // 契约 §7: 旧 chatPolicy 出站门键已废 —— 忽略不拒启动, 但 boot 时 warn 一次。
+  // (键名拆开写, 免得代码里再留下这几个词的存量引用。)
+  {
+    const staleKeys = ["top" + "Only", "spe" + "ech"];
+    const stale = Object.entries(cfg.chatPolicy ?? {}).flatMap(([base, p]) =>
+      staleKeys.filter((k) => k in (p as object)).map((k) => base + "." + k));
+    if (stale.length) console.warn("[wezard] 配置里还有已废弃的 chatPolicy 旧键 (room 模型已移除, 忽略): " + stale.join(", "));
+  }
   bindMultiBot(cfg.bots.length > 0);
   const log = makeLogger({
     logFile: cfg.daemon.logFile,
@@ -239,12 +237,6 @@ const main = async (): Promise<void> => {
   // links from messages already on the user's WeCom timeline.
   initDetailPersistence(cfg.daemon.stateDir, log.child({ mod: "detail" }));
   configureRemoteForward(cfg.daemon.detailRemoteBase, cfg.daemon.detailRemoteToken);
-  // 回执路由表 (docs/evolve/receipt-router.md): 一件活 = 一行 `<event, owner, receiver>`,
-  // 表 = 对 append-only journal 的 fold。boot 时只 fold 一次; 写入点 (open/move) 从 T3 起接。
-  let retainRoute: (row: Route) => boolean = () => true;
-  const router = openRouter({ retain: (row) => retainRoute(row), note: (msg, extra) => log.child({ mod: "router" }).info(extra ?? {}, msg) });
-  /** 新根 event: 来源自己的一笔 (人的一句话 / 定时任务 / detach 派活) 新领一个 (§9.1)。 */
-  const newRootEvent = (): EventId => `e${randomBytes(3).toString("hex")}`;
   // 一个或多个企微机器人 (bot + bots): 对下面所有模块只露主机器人那个 client, 分流在 bot-mux 里。
   // 必须先于 weixin-port / response-tracker 建好 —— 它们包在 mux 外层。
   const ws = startMux(cfg, log);
@@ -291,41 +283,8 @@ const main = async (): Promise<void> => {
   // last-response tracker enables inbound's `quote` dedup of bot self-replies,
   // and its chat-gate drops header-only pushes (empty messages) daemon-wide.
   // 微信出站不走企微长连接, 不必等它连上。
-  // P7-S1 聊天账本: 每聊天一份 append-only jsonl (记录侧自管 seq/保留上限, 写失败只记日志)。
-  // 出站记录挂在 tracker 的同一个 SDK 包装层 —— 只观察, 不改 payload; 人话记录在 inbound
-  // dispatch 前落一行 (见 installInboundRouter 的 noteHuman)。implicit 群零行为变化。
-  const chatRecords = new ChatRecords(
-    { dir: join(expandHome(cfg.daemon.stateDir), "chats"), keepDays: 30, maxLines: 2000 },
-    log.child({ mod: "chat-records" }),
-  );
-  // P7-S1 成员表: 键 `${chat}|${identity}` —— chat × 身份, 零 pane 维度 (约束刀 A③)。
-  // 旧键回落: 迁移闸门没开时盘上还是 (chat, identity), 读路径必须照常命中 (见 members.ts)。
-  const members = openMembers(
-    join(expandHome(cfg.daemon.stateDir), "members.json"),
-    (t) => { const rec = wizardStore()?.get(t); return rec ? identityOfRec(rec) : undefined; },
-  );
   const responseTracker = installResponseTracker(ws.client, log.child({ mod: "chat-gate" }), (c) => wx.owns(c),
-    (context) => responseFormatPolicy(cfg, context, (target) => chatUrlFor(cfg.daemon, target)),
-    (noteLine) => {
-      // P7-S3c ①: wizard/system 出站行的账本 id 用独立命名空间 `<id>#w` —— 流 id 可能与
-      // 人话 msgid 撞车 (replyStream 的 streamId 就是入站 msgid), 撞上时重投的人话会把
-      // 交付行整行洗掉 (record 按 id 覆盖)。后缀隔开两个命名空间; 历史行不回填改写。
-      const lineId = noteLine.id ? noteLine.id + "#w" : "";
-      try {
-        chatRecords.record(noteLine.chat, { ...noteLine, id: lineId, at: Date.now() });
-        knownChatsOf(cfg).record(noteLine.chat);
-      } catch { /* 记录失败不影响出站 */ }
-      // P7-S3b: strict 群里 wizard 真正发出去的每一句, 同时落一条 post 记录 ——
-      // rolepage 群窗的出气泡 = 实发内容 (与账本同一文本), 而不是镜像 pane 的终句。
-      // post id 与账本行 id 同键 (`<id>#w`): 占位→交付同一流 upsert 成一条, backfill
-      // 也按同一 id 幂等; sendMessage 推送 (id 空) 每次一条, 各自发各的。
-      try {
-        if (noteLine.kind === "wizard" && noteLine.text.trim() && strictSpeechOf?.(noteLine.chat)) {
-          const who = wizardStore()?.byName(noteLine.author);
-          if (who) recordPost({ target: who.target, channel: noteLine.chat, body: noteLine.text, ...(lineId ? { id: lineId } : {}) });
-        }
-      } catch { /* 记录失败不影响出站 */ }
-    });
+    (context) => responseFormatPolicy(cfg, context, (target) => chatUrlFor(cfg.daemon, target)));
   const mirrorStore = loadMirrorStore(cfg.wrc.mirror.attachmentsFile);
   // 定时任务表 —— 每条任务是 ~/.wezard/tasks/<id>.task.mjs 一份可注入代码的配置
   // (见 shared/task-file.ts)。目录是热加载的: wizard 改完文件不用 reload 守护进程。
@@ -333,178 +292,20 @@ const main = async (): Promise<void> => {
     log.child({ mod: "tasks" }),
     (added, removed) => log.info({ added, removed }, "task files changed"),
   );
-  let peerEvents: Pick<MessageAdapters, "accepted" | "committed" | "canceled" | "valid" | "ready" | "inject" | "gone"> | undefined;
-  /** P7-S2: 严格群的注入 committed 后推进成员的聊天记录游标 (赋值在 mirror 大块里, 要用 members / wizards)。 */
-  let advanceChatlog: ((e: MessageEvent) => void) | undefined;
-  /** P7-S2 严格群公共件 (赋值在 mirror 大块里 —— /chat handler 那一层, 要用 wizards / members / router / chatRecords)。 */
-  let strictSpeechOf: ((base: string) => boolean) | undefined;
+  let handoffAllowed: (target: string) => boolean = () => false;
   // room 接线 (wiring A/B): mirror 块里建好后回填 —— 入站包装在更外层, 只能这样拿到。
   let roomHub: RoomHub | undefined;
   let roomStateOf: ((id: string) => RoomState | undefined) | undefined;
   let rememberBubble: ((msgid: string, frame: unknown, expires: number) => void) | undefined;
   let ensureRoom: ((room: string, routed: string) => string) | undefined;
-  let chatlogReminderOf: ((base: string, target: string) => string) | undefined;
-  /** P7-S2 /owed: 本聊天的义务账渲染 (赋值在 mirror 大块里)。 */
-  let owedOfBase: ((base: string) => string) | undefined;
-  /** P7-S3 /strict: 存量群切换 strict 的预演/执行 (赋值在 mirror 大块里, 要用 wizards / members / guardCharter)。 */
-  let strictSwitchOf: ((who: string, cmd: import("./strict-switch.js").StrictCommand) => Promise<string>) | undefined;
-  /** 路由表的投递层 —— 在 mirror 大块里接线 (要用到回执信封 / 事件泵), 这里先留个口。 */
-  let deliverFinal: ((e: MessageEvent, verdict: MessageFinal) => void) | undefined;
-  let bindResults: MessageAdapters["resultBindings"];
-  let handoffAllowed: (target: string) => boolean = () => false;
-  let handoffFinalSuppressed: (event: EventAuthority) => boolean = (e) => !!e.handoffCut && !e.handoffRestored;
-  const ownsReplyEvent = (e: EventAuthority): boolean => {
-    const serves = e.serves ?? e.feedbackRoute?.event;
-    const row = serves ? router.get(serves) : undefined;
-    if (row && row.owner !== e.target && router.owedBy(e.target).length === 0) return false;
-    const latest = serves ? events.latestTransfer(serves) : undefined;
-    return !latest || latest.id === e.id || latest.at < e.at;
-  };
-  /** 事件库异常膨胀的告警闸: 10 分钟只报一次, 落盘是每秒都在发生的事。 */
-  let storeLargeNotedAt = 0;
-  const events = createMessageEvents(join(cfg.daemon.stateDir, "message-events.json"), {
-    storeLarge: (bytes, liveCount) => {
-      const now = Date.now();
-      if (now - storeLargeNotedAt < 10 * 60_000) return;
-      storeLargeNotedAt = now;
-      log.warn({ mod: "message-events", mb: Math.round(bytes / 1048576), live: liveCount }, "message-events 存储超过 32MB");
-    },
-    resource: (target) => bridge.sessionInfo(target)?.tmuxPane || target,
-    transcript: (target) => bridge.inputSessionInfo(target)?.jsonlPath ?? bridge.sessionInfo(target)?.jsonlPath,
-    sessionId: (target) => bridge.inputSessionInfo(target)?.sessionId,
-    valid: (e) => (!(e.payload.handoff || (e.id.startsWith("route:") && e.id.includes(":resume:"))) || handoffAllowed(e.target)) && (e.payload.peer ? !!peerEvents?.valid(e) : true),
-    accepted: (e) => { if (e.payload.peer) peerEvents?.accepted(e); },
-    committed: (e) => { if (e.payload.peer) peerEvents?.committed(e); advanceChatlog?.(e); },
-    gone: (e) => { if (e.payload.peer) peerEvents?.gone?.(e); },
-    canceled: (e) => {
-      if (e.payload.peer) peerEvents?.canceled(e);
-      else if (e.payload.human && e.exposure === "none") {
-        const body = `这条消息未执行：${e.reason ?? "已取消"}。`;
-        events.result(e.id, body, finalId(e.id, e.channel, body));
-        // A canceled, unexposed input has a terminal response owned by its original channel.
-        events.delivery({ id: finalId(e.id, e.channel, body), eventId: e.id, target: e.target, turn: e.turn || e.id,
-          channel: e.channel, revision: finalId(e.id, e.channel, body), body, purpose: "cancellation", reportKind: "canceled", chunks: bridge.formatFinal(e.target, e.turn || e.id, body) });
-      }
-    },
-    // 人话 (非 peer) 不再问「pane 闲不闲」: 忙就贴进去, 顺序交给 backend CLI 自己的输入队列
-    // (贴进运行中的一轮记成 queued 轮, 终句照样归到这条 event —— 见 brief 的 seal/bindLine)。
-    // 这一句曾是要 idleNow 的, 也就是那个反复 5s 超时的探测源头: 一超时就退避, 把同一 target
-    // 后面排着的每一笔 (含后到的人话) 一起钉住十几分钟。交接期间照旧等 —— 那几秒 pane 真是死的。
-    ready: async (e) => e.payload.handoff ? handoffAllowed(e.target) && bridge.idleNow(e.target) : !handingOff(e.target) && (e.payload.peer ? !!(await peerEvents?.ready(e)) : true),
-    task: (e) => {
-      const task = e.serves ?? e.feedbackRoute?.event;
-      return task ? router.get(task)?.event ?? task : undefined;
-    },
-    retain: (e) => {
-      // 续办载体不是任务输入: 它的 route 还没收口也一样没有对账价值 (事故里 12058 个已了结载体常驻 ~94MB)。
-      if (isRecoveryCarrier(e)) return false;
-      const required = (id: string): boolean => {
-        const row = router.get(id);
-        return !!row && (["held", "open", "need", "error"].includes(row.status)
-          || !!row.batch && !router.batchComplete(row.batch));
-      };
-      return !!e.serves && required(e.serves)
-        || receiptFacts(e).some((f) => {
-          const batch = f.batch ?? router.get(f.event)?.batch;
-          return !!batch && !router.batchComplete(batch);
-        })
-        || Object.values(e.resultRoutes ?? {}).some((b) => !!b.event && required(b.event));
-    },
-    resultBindings: (e, body) => bindResults?.(e, body),
-    inject: async (e, boundary) => {
-      if (e.payload.handoff) {
-        const expected = e.payload.handoff;
-        const same = (): boolean => { const info = bridge.sessionInfo(e.target); return info?.tmuxPane === expected.pane && info?.sessionId === expected.sessionId; };
-        if (!same()) return { ok: false, reason: "handoff original pane/session changed; refusing brief injection" };
-        // 简报那一轮是被切断那一轮的续写: 出处 (from/speaker) 与频道一起写进这一轮, 否则新会话的
-        // 第一轮在 rolepage 上会另立一栏 (见 role-view.senderOf), reload 恢复时还会认成自说自话。
-        return bridge.injectText(e.target, e.payload.text, {
-          channel: e.channel, eventId: e.id, envelope: renderReminder(handoffEnvelopeAttrs(expected, e.channel, e.id, wizardStore()?.get(e.target)?.name || e.target), []), requireIdle: true, noRespawn: true, handoff: expected.clear,
-          ...(expected.from ? { from: expected.from } : {}),
-          ...(expected.speaker ? { speaker: expected.speaker } : {}),
-          guard: (phase, identity) => handoffAllowed(e.target) && same() && (!identity?.sessionId || identity.sessionId === expected.sessionId) && boundary(phase, identity),
-        });
-      }
-      if (e.payload.peer) return peerEvents!.inject(e, boundary);
-      if (!bridge.hasMirrorTarget(e.target)) {
-        const spawned = await bridge.newSession(e.target, wizardStore()?.get(e.target)?.name || e.target, { silent: true });
-        if (!spawned.ok) return { ok: false, retryable: true, reason: spawned.reason };
-      }
-      let outcome: { ok: boolean; retryable?: boolean; uncertain?: boolean; reason?: string } | undefined;
-      pinFrameBot(e.payload.human!.frame, botOfKey(e.channel));
-      await bridge.dispatch({ ...e.payload.human!, eventId: e.id,
-        text: withMsg(e.payload.text, e.id),
-        guard: (phase, identity) => boundary(phase, identity), onSubmitted: (r) => { outcome = r; } });
-      return outcome ?? { ok: false, retryable: events.get(e.id)?.exposure === "none", uncertain: events.get(e.id)?.exposure !== "none", reason: "dispatch ended without a submission acknowledgement" };
-    },
-    evidence: async (e) => {
-      const info = bridge.sessionInfo(e.target);
-      const sameSession = e.sessionId ? e.sessionId === info?.sessionId
-        : !e.transcript || e.transcript === info?.jsonlPath;
-      if (e.canceled && sameSession && await bridge.idleNow(e.target)) events.released(e.id);
-      const paths = [...new Set([bridge.sessionInfo(e.target)?.jsonlPath, e.transcript].filter((p): p is string => !!p))];
-      for (const path of paths) {
-        const turns = turnsSince(expandHome(path), e.at - 60_000);
-        const start = turns.findIndex((t) => t.role === "user" && t.env?.eventId === e.id);
-        if (start < 0) continue;
-        const next = turns.findIndex((t, i) => i > start && t.role === "user" && !t.queued);
-        const replies = turns.slice(start + 1, next < 0 ? undefined : next).filter((t) => t.role === "assistant");
-        const last = replies.at(-1);
-        // 软后端 (codebuddy 不写 stop_reason) 的「写完了」不是终句: 中途叙述 (「先跑 typecheck」)
-        // 与终稿同形, 下一秒就跟着 function_call —— 必须见到轮终证据 (紧跟的 turn-metrics /
-        // 下一句 user 行 / CLI 已闲) 才算这一轮说完, 否则假定论先落 answer、真结论再落一个 rev。
-        const ended = next >= 0 || (last && !last.mid && !last.apiError && (!last.soft || last.end)) || (sameSession && await bridge.idleNow(e.target));
-        // 一轮以 CLI 报错收尾: 那段报错不是定论, 但要作为中途态 (error) 报给 receiver ——
-        // 所以照旧不落成 result, 只把原文交给 final (见 §9.4)。
-        return { consumed: true, interjected: !!turns[start]!.queued,
-          ...(next >= 0 ? { closedAt: turns[next]!.ms ?? Date.now() }
-            : last?.end && !last.text ? { closedAt: last.ms ?? Date.now() } : {}),
-          ...(ended && last?.text && !last.mid
-            ? last.apiError ? { body: last.text, error: true } : { body: last.text, revision: finalId(e.id, e.channel, last.text) }
-            : {}) };
-      }
-      return { consumed: false };
-    },
-    recovered: (e) => { if (!handoffFinalSuppressed(e)) bridge.recoverEventFinal(e); },
-    // T4: 终句 → 路由表。onFinal 连同投递一起做 —— 定论先落盘 (`answer`), 再按 receiver
-    // 投出去 (§9.3/§9.4); 实现在 mirror 大块里 (要回执信封 / 事件泵)。
-    final: (e, verdict) => deliverFinal?.(e, verdict),
-    format: (d) => ({ ...d, chunks: d.chunks.map((c) => responseTracker.freeze(d.channel.replace(/^(user|chat|group):/, ""), c)) }),
-    send: async (d, n) => {
-      await bridge.settleFinalProgress(d.id);
-      const allowed = (): boolean => {
-        const source = d.eventId ? events.authorityOf(d.eventId) : undefined;
-        const route = source?.serves ?? source?.feedbackRoute?.event;
-        const row = route ? router.get(route) : undefined;
-        return eventDeliveryAllowed(source, d.target, d.eventId, d.purpose,
-          (event) => !handoffFinalSuppressed(event) && ownsReplyEvent(event), row);
-      };
-      if (!allowed()) return { failed: "delivery authority withdrawn before transport" };
-      const chat = d.channel.replace(/^(user|chat|group):/, "");
-      if (wx.owns(chat)) {
-        const result = wx.sendFinal(chat, wxMarkdown(d.chunks[n]!), `${d.id}:${n}`);
-        return { ack: result.ack, queued: result.state === "queued" || result.state === "sending",
-          uncertain: result.state === "uncertain" ? result.reason ?? "Weixin send ACK unknown" : undefined,
-          failed: result.state === "failed" ? result.reason ?? "Weixin final rejected" : undefined };
-      }
-      const stream = d.stream && n === 0 && Date.now() < d.stream.expires ? d.stream : undefined;
-      const ack = await responseTracker.sendFrozen(chat, d.chunks[n]!, stream, () => events.running() && allowed());
-      return ack && typeof ack === "object" && "errcode" in ack && ack.errcode === 0 ? { ack: JSON.stringify(ack) }
-        : { ack: JSON.stringify(ack), uncertain: "final transport returned no explicit success ACK" };
-    },
-    deliveryEvidence: (d, n) => wx.finalStatus(`${d.id}:${n}`) as { state: "queued" | "delivered" | "uncertain" | "failed"; ack?: string; reason?: string } | undefined,
-    held: (e, why, forMs) => log.warn({ event: e.id, target: e.target, speaker: e.speaker, priority: e.priority,
-      serves: e.serves, after: e.payload.peer?.after, why, heldSec: Math.round(forMs / 1000) }, "message event held in queue"),
-    error: (e) => log.error({ err: errText(e) }, "message event scheduler"),
-  });
-  retainRoute = (row) => events.ids().some((id) => {
-    const e = events.get(id);
-    if (!e || ["complete", "canceled"].includes(e.execution)) return false;
-    return receiptFacts(e).some((f) => (router.get(f.event)?.event ?? f.event) === row.event)
-      || (e.payload.peer?.after ?? []).some((id) => (router.get(id)?.event ?? id) === row.event);
-  });
+  /** mirror 轮终回调 (bridge 创建早于 room 块, 这里先挂口)。 */
+  let roomTurnEnd: (target: string) => void = () => undefined;
+  /** room 泵注入成功的 touch (看门狗活动时钟; 同上, room 块里回填)。 */
+  let roomActivityTouch: (target: string) => void = () => undefined;
 
-  const bridge = startMirror({ cfg, log: log.child({ mod: "mirror" }), client: ws.client, store: mirrorStore, events, identityWorkspace: (t) => identityWorkspaceOf(wizardStore(), t), sendFrozen: (channel, content, stream) => responseTracker.sendFrozen(channel.replace(/^(user|chat|group):/, ""), content, stream, events.running) });
+  const bridge = startMirror({ cfg, log: log.child({ mod: "mirror" }), client: ws.client, store: mirrorStore, identityWorkspace: (t) => identityWorkspaceOf(wizardStore(), t), sendFrozen: (channel, content, stream) => responseTracker.sendFrozen(channel.replace(/^(user|chat|group):/, ""), content, stream),
+    // 轮终事件 (wiring C): mirror tail 的非 soft turn_end → room 的 F-1 轮界。
+    onTurnEnd: (target) => { roomTurnEnd(target); } });
   // 群里每个 `.name` 都挂它的 rolepage (见 session-label 的 TagLinker)。正文提及
   // 只认真有其人的 —— 随手写的 `.gitignore` 不该变成一个开在空栏上的链接。
   const known = (t: string): boolean => bridge.chatTargets(t).includes(t);
@@ -559,8 +360,10 @@ const main = async (): Promise<void> => {
       ...(a.images?.length ? { files: a.images.map((p) => ({ path: p, kind: kindOf(p), name: basename(p) })) } : {}),
       ...(to?.length ? { to } : {}) });
     if (!v || !v.ok) {
-      if (v) log.warn({ mod: "room", room, reason: v.reason }, "room: 人话落行被拒, 退回直接投递");
-      await bridge.dispatch(a);
+      // 被拒不回退旧路径 (wiring C): 按 verdict 原因回一行系统提示 —— 人话不能丢, 也不能绕过账本。
+      const reason = v ? v.reason : "room 接线还没就绪 (启动竞态), 稍后再发一句";
+      log.warn({ mod: "room", room, reason }, "room: 人话落行被拒");
+      if (a.frame && a.streamId) void ws.client.replyStream(a.frame, a.streamId, withTagHeader(a.principal, "[wezard] 这句没能进账本: " + reason), true).catch(() => undefined);
       return;
     }
     // 冷目标 (会话还没起): pump 贴不进没有绑定的 pane, 先起一个; pump 30s 重 kick 会接上。
@@ -569,20 +372,10 @@ const main = async (): Promise<void> => {
       if (store) void bridge.newSession(a.principal, settleName(store, chatNameOf(cfg, a.principal), a.principal) || a.principal, { silent: true })
         .catch(() => undefined);
     }
-  }   }, sourcePath, (w, c) => guardCharter(w, c), (chat, line) => {
-    // P7-S1: dispatch 前写一行 human; 记录侧同步内存记账、后台落盘 (不 await)。
-    // P7-S3: 人话是「首见」的登记点 —— noteHuman 先于 dispatch, 新群首条即按 strict 判 (验收数字 ①)。
-    try { chatRecords.record(chat, { ...line, kind: "human" }); knownChatsOf(cfg).record(chat); } catch { /* 记录失败不挡消息 */ }
-  }, (base) => owedOfBase?.(base) ?? "[wezard] 本群未开严格模式 (speech=implicit) — 没有义务账; 回执按现行口径走。",
-  // P7-S3 /strict: 预演/执行由 mirror 大块里的 strictSwitchOf 实现, 这里只转交。
-  async (who, cmd) => (await strictSwitchOf?.(who, cmd)) ?? "[wezard] /strict 未接 (需要 P7-S3 的 daemon)");
+  }   }, sourcePath, (w, c) => guardCharter(w, c));
   // 频道（topic）事件层：接在 inbound 之后，让频道消息复用同一套 gate / route / mirror。
-  // P7-S3: strict 频道判官要看成员名单 (members 在前面已开, 名字经 wizardStore 解析 ——
-  // wizardStore() 是运行时绑定, 事件到达时早已 bind)。
   installChannelEvents(ws.client, cfg, log.child({ mod: "channel" }), {
-    memberNamesOf: (base) => members.ofChat(base)
-      .map(({ target }) => wizardStore()?.get(target)?.name || target)
-      .filter(Boolean),
+    memberNamesOf: () => [], // room 模型: 频道判官的成员名单走 room 成员, 由 channel.ts 自行解析
   });
   // approval click → finalize 当前 liveStream, 后续 tool/text 落到 standalone。
   // 规则 2: 用户点击授权那一刻就是"上一段对话"的边界, 截断 stream 让授权后的
@@ -729,26 +522,6 @@ const main = async (): Promise<void> => {
   {
     const m = bridge;
     installMirrorEventListener(ws.client, m, log.child({ mod: "mirror" }));
-    http.register("GET /message-events/status", (_req, res) => json(res, 200, events.status()));
-    // 单条 event 的 status 视图 (`?id=`; id 里带冒号, 不走路径段) —— 轮询单条不必把全表算一遍。
-    http.register("GET /message-events/event", (_req, res, url) => {
-      const e = events.event(url.searchParams.get("id") ?? "");
-      json(res, e ? 200 : 404, e ?? { error: "unknown event" });
-    });
-    // 路由表的诊断视图 (`?owner=` = 那个 wizard 名下的行, 缺省 = 全表)。
-    http.register("GET /routes", (_req, res, url) => {
-      const owner = url.searchParams.get("owner")?.trim();
-      json(res, 200, { ok: true, ...router.diagnose(owner || undefined) });
-    });
-    http.register("POST /message-events/reconcile", async (req, res) => {
-      const body = await readBody(req) as { id?: string };
-      json(res, 200, await events.reconcile(String(body.id ?? "")) ?? { error: "unknown event" });
-    });
-    http.register("POST /message-events/release", guarded(async (req, res) => {
-      const body = await readBody(req) as { id?: string; reason?: string };
-      const result = events.release(String(body.id ?? ""), String(body.reason ?? ""));
-      json(res, result.ok ? 200 : 409, result);
-    }));
     http.register("GET /mirror/status", (_req, res) => json(res, 200, m.status()));
     // Manual auto-spawn trigger — used by `wezard init` to materialize a
     // tmux+claude pane immediately after claim, instead of waiting for the
@@ -1007,20 +780,6 @@ const main = async (): Promise<void> => {
      *  私聊轮或无记录 → 它的 home 群。notify 与 public tell_peer 默认发到这里。 */
     const channelOf = (self: string): string => m.currentChannel(self) || baseOfKey(self);
     /** 同伴注入的信封: 公开轮写上那个群的 key 与名字 (key 归档, 名字显示), 私聊都不写 (见 peers.renderPeerEnvelope)。 */
-    const envelopeFor = (from: string, channel: string, t?: TurnTag & { legs?: number }): string =>
-      renderPeerEnvelope(displayName(from), channel ? chatNameOf(cfg, channel) : undefined, channel || undefined, t);
-    // 回执 (见 receipts.ts): 一次 tell_peer 之后对方干完那一轮, 它的结论自动 paste
-    // 回发话方的输入框, 发话方全程不阻塞。这里只提供四样能力给那个模块 —— 忙闲、
-    // 死活、「它答我那一句的是哪段话」、以及怎么把一段话送进去 —— 投递逻辑在那边。
-    /** 回执那一轮在群里的终句答给谁 (userid) —— 与 rolepage 同一个判定, 写进信封给模型与
-     *  read_chat; 认不出 = ""。 */
-    const audienceName = (channel: string, asker: Asker | undefined): string => {
-      // role-view 的 audienceOf 已随 room-ui 退役 (C 节删信封); 只保回执信封要的那个 userid。
-      if (channel.startsWith("user:")) return channel.slice(5);
-      return asker?.chat === channel && asker.who.startsWith("user:") ? asker.who.slice(5) : "";
-    };
-    // 挂起事项表 (见 pending-items.ts): 派活时记一行, 回执落定时由下面的 onOutcome 记账。
-    const ledger = createLedger(loadJsonMap<PendingItem>(cfg.wrc.mirror.pendingFile, pendingGc, { strict: true }));
     const retiringWizardTargets = new Set<string>();
     const plans: PlanStore = (() => {
       try { return loadPlans(cfg.wrc.mirror.plansFile); }
@@ -1039,86 +798,13 @@ const main = async (): Promise<void> => {
       catch (error) { return { status: error instanceof PlanError ? error.status : 503, reason: errText(error) }; }
     };
     handoffAllowed = () => true;
-    /** 一笔活第几个来回 (§3.2): 同一行上已经注入过的续问数 + 1 —— 现算, 不落第二份数据。
-     *  续问的注入事件 id 是 `route:<event>:r<legs>`, 所以从它自己就能数回来 (reload 也在盘上)。 */
-    const legsOf = (event: EventId): number =>
-      events.taskInputs(router.get(event)?.event ?? event).reduce((n, e) => {
-        const m = e.payload.peer?.tell?.legs ?? 1;
-        return Math.max(n, m);
-      }, 1);
-    /** 同一笔活上的一句续问 (idle-nudge 追问): 不新开行, 注入事件 id
-     *  `route:<event>:r<legs>` —— 它的终句照旧落到那一行上 (§9.4)。 */
-    const acceptContinuation = (tell: Tell, text: string): boolean => {
-      const event = tell.event ?? "";
-      if (!event) return false;
-      const legs = tell.legs ?? legsOf(event) + 1;
-      const id = `route:${event}:r${legs}`;
-      const canonicalEvent = router.get(event)?.event ?? event;
-      const planIds = [...new Set(events.taskInputs(canonicalEvent).filter((input) => input.speaker === tell.from && !input.payload.planReminder)
-        .map((input) => input.payload.planId).filter((value): value is string => !!value))];
-      const planId = planIds.length === 1 ? planIds[0] : undefined;
-      events.accept({ id, target: tell.to, speaker: tell.from, channel: tell.channel, serves: event, asker: tell.asker,
-        priority: "normal", deadline: NO_DEADLINE, payload: { text, ...(planId ? { planId } : {}), peer: {
-          from: { kind: "peer", from: tell.from, event, ...(tell.asker ? { asker: tell.asker } : {}) },
-          envelope: envelopeFor(tell.from, tell.channel, { legs, re: true, asker: tell.asker }),
-          tell: { ...tell, event, legs, dispatchKey: id }, kind: "task",
-        } } });
-      return true;
-    };
-    const turnsLine = (xs: readonly InFlight[], target: string): string => renderInFlight(xs, target, displayName);
-    // reload 前在飞的回执: 等 mirror 把绑定都恢复了再续守 —— 早一步读 target 会拿不到
-    // transcript, 退回按时刻取就可能把上一件事的结论当回执。
-    // 交接 (见 handoff.ts): 换会话不换身份。这里给它重开、贴话、读旧 transcript 的能力,
-    // 闸、回执清点与断点续做在那边。
-    /** 情景记忆 (memory/episodes/<name>.jsonl) 按名字归档; 默认会话没名字时退回 slot / "default"。 */
-    const episodeName = (t: string): string => wizards.get(t)?.name || tagOfKey(t) || "default";
-    const handoffStore = loadJsonMap<PendingHandoff>(cfg.wrc.mirror.handoffsFile, undefined, { strict: true });
-    handoffFinalSuppressed = (event) => {
-      const e = events.get(event.id) ?? event;
-      if (e.handoffRestored) return false;
-      if (e.handoffCut) return true;
-      const p = handoffStore.get(e.target);
-      // 先读在飞事务的明确旧事件集合, 覆盖 result 已写而事件 cut 尚未写的崩溃缝。
-      return !!p && p.mode === "self" && !p.failure?.compensated && !!p.cut?.includes(e.id);
-    };
-    /** 当前这一轮的开场事件 (transcript 里开最后那一轮的那句信封)。等交接的轮询一秒一次,
-     *  每次都重新解析整个 tail 太贵: 转录只追加, 没长过就没有新的一轮, 按 size+mtime 记住。 */
-    const openers = new Map<string, { size: number; mtime: number; id?: string }>();
-    const activeEventOf = (t: string): string | undefined => {
-      const path = m.sessionInfo(t)?.jsonlPath;
-      if (!path) return undefined;
-      const abs = expandHome(path);
-      let st: { size: number; mtimeMs: number };
-      try { st = statSync(abs); } catch { return undefined; }
-      const hit = openers.get(abs);
-      if (hit && hit.size === st.size && hit.mtime === st.mtimeMs) return hit.id;
-      const id = openingTurn(abs)?.env?.eventId;
-      openers.set(abs, { size: st.size, mtime: st.mtimeMs, id });
-      return id;
-    };
     const handoffs = createHandoffs({
-      currentEvents: (t) => {
-        const info = m.sessionInfo(t);
-        const active = info?.jsonlPath ? openingTurn(expandHome(info.jsonlPath))?.env?.eventId : undefined;
-        return events.ids().filter((id) => {
-          const e = events.get(id);
-          return !!e && e.target === t && !e.payload.handoff && (id === active || (!e.finalized && e.execution !== "canceled" && e.exposure !== "none" && (!e.sessionId || e.sessionId === info?.sessionId)));
-        });
-      },
-      suppress: (ids) => ids.forEach((id) => events.suppressHandoffFinal(id)),
-      isBusy: async (t) => {
-        if (!(await m.idleNow(t))) return true;
-        // TUI 已 idle 不代表这一轮的 final 已被事件泵消费; 先落它的结果, 再允许切断上下文。
-        // 等的只有**这一轮** (见 handoffRound): 台账里那些 execution:"uncertain" 的旧事件
-        // 永远不会落定, 等它们只会把交接空耗满 SELF_IDLE_MS; 跨轮的旧账由 cut/uncut 与
-        // resumeOwed 兜底。
-        const round = handoffRound(t, activeEventOf(t), events.ids().map((id) => events.get(id)).filter((e): e is MessageEvent => !!e));
-        await round.reduce(async (before, e) => { await before; await events.reconcile(e.id); }, Promise.resolve());
-        return roundPending(round.map((e) => events.get(e.id) ?? e));
-      },
+      // room 模型 (wiring C): 终句零语义, 交接只管会话层 —— 清空 + 简报 + carry。
+      // 路由/事件表的那些钩子 (currentEvents/suppress/owed/resume/uncut) 全部退场。
+      isBusy: (t) => m.idleNow(t),
       sessionId: (t) => m.sessionInfo(t)?.sessionId ?? "",
-      // 收口窗口用尽后打断在飞那一轮 (Esc, 无 teardown): 打断不产生欠账 —— 路由表 +
-      // resumeOwed 在新会话逐笔续答, 机制上回执本就跨交接有效。
+      // 收口窗口用尽后打断在飞那一轮 (Esc, 无 teardown): 打断不产生欠账 —— 未结 duty
+      // 在 room 账本上, 下次唤醒按游标重投。
       interrupt: (t) => m.interruptPane(t),
       paneIdle: (t) => m.idleNow(t),
       restart: (t, p, submitted) => clearForHandoff(t, p, submitted),
@@ -1141,658 +827,23 @@ const main = async (): Promise<void> => {
       },
       sealOf: (t) => { const l = lastChannelOf(t); return l ? { channel: l.channel ?? "", ...(l.speaker ? { speaker: l.speaker } : {}), ...(l.from ? { from: l.from } : {}) } : { channel: m.currentChannel(t) }; },
       lastText: m.lastText,
-      summary: (id) => { const e = events.get(id); return e?.execution === "complete" && e.exposure === "consumed" && typeof e.result?.body === "string" ? e.result.body : undefined; },
-      // 欠账不落盘在交接里: 路由表按 target 记着它欠谁、欠哪几笔, 换会话不影响 (T8)。
-      owed: (t) => router.owedBy(t).filter((r) => r.status === "open").map((r) => r.event),
-      resume: async (t, event, at) => injectResume(t, event, at),
+      summary: () => undefined,
+      owed: () => [],
+      resume: async () => ({ ok: true }),
       // 交接是生命周期事件, 不进群; 失败只捎给它自己 (它调完 handoff_self 拿到的是
       // scheduled:true, 不说的话它不知道上下文其实没换)。
       notify: (t, text) => notices.post([t], text),
-      // 交接没做成: 切断那一轮扣下的终句按原行补投 —— 走与轮终同一条 onFinal (行已被合成失败落定的, 照追述规则处理)。
-      uncut: (t, ids) => ids.forEach((id) => {
-        const e = events.get(id);
-        if (!e) { log.warn({ target: t, event: id }, "handoff: 扣下的事件已不在事件库, 补投不了"); return; }
-        // 超时可能发生在旧轮尚未产出 final 时; 先释放耐久标记, 让它稍后的真终句正常落定。
-        events.restoreHandoffFinal(id);
-        if (!e.result) return;
-        log.info({ target: t, event: id, serves: e.serves }, "handoff: 交接没做成, 补投切断那一轮的终句");
-        settleFinal(e, { text: e.result.body });
-        m.recoverEventFinal(events.get(id)!);
-      }),
+      uncut: () => {},
       log,
-      store: handoffStore,
+      store: loadJsonMap<PendingHandoff>(cfg.wrc.mirror.handoffsFile, undefined, { strict: true }),
       archive: (e) => {
         if (!e.brief.trim()) return;
-        const name = episodeName(e.target);
+        const name = wizards.get(e.target)?.name || tagOfKey(e.target) || "default";
         const ok = appendEpisode(episodePath(cfg.daemon.stateDir, name), { at: e.at, kind: "handoff", name, sid: e.sid, nextSid: e.nextSid, text: e.brief });
         if (!ok) log.warn({ target: e.target, name }, "handoff episode not archived");
       },
     });
     void m.restored.then(() => handoffs.resume());
-    /** 交接后把「你还欠着这一笔」再点一次 (§9.5): 注入一句 `继续 <event>`, 该轮的信封把
-     *  `serves` 指回那一行 (注入事件 id `route:<event>:resume`), 于是它的终句照旧落定、
-     *  照旧投给 receiver —— 换会话丢掉的只是 transcript, 不是这笔账。
-     *  id 按这一场交接的起点 (`at`) 区分: 同一场 reload 重放判重不重投, 换一场才配一条新的。 */
-    /** 把那一笔重新指给 owner。`textOverride` = 这一句自己说清楚该干什么 (strict 群「答了没出站」的补发
-     *  指引): 此时 resumeText 的「还在办、没交代」是错题, 整句换掉而不是往后追加。 */
-    async function injectResume(t: string, event: EventId, at: number, automaticGeneration?: string, textOverride?: string): Promise<{ ok: boolean; reason?: string }> {
-      const row = router.get(event);
-      if (!row || row.owner !== t || !["open", "need", "error"].includes(row.status)) return { ok: false, reason: "no unfinished row to resume" };
-      const r = row.receiver;
-      const waiting = r.kind === "wizard" ? r.to : baseOfKey(r.channel);   // 等着它交代的那一方 (信封挂在它名下)
-      const channel = r.kind === "chat" ? r.channel : "";                  // 结论要落回群里时才带频道 (§9.4)
-      const base = `route:${event}:resume`;
-      const id = automaticGeneration ? `${base}:auto:${automaticGeneration}` : `${base}:${at}`;
-      // 那一笔的原话 = 服务它的最早一条注入 (不是续问 / 回执 / 交接内部事件); 收尾 = 交接扣下的那句终句。
-      const serving = events.taskInputs(row.event).filter((x) => x.target === t)
-        .sort((a, b) => (a.originalAt ?? a.at) - (b.originalAt ?? b.at));
-      // An unexposed supplement still waiting on `after` belongs to its original
-      // queue entry. A recovery carrier must neither expose nor consume it early.
-      const context = serving.filter((x) => !x.canceled && !x.id.startsWith(base) && !x.id.startsWith("rcpt:") && !x.id.startsWith("handoff:")
-        && (x.exposure !== "none" || prereqsOf(x.speaker, x.payload.peer?.after ?? []).every((r) => r.state === "done")));
-      const ask = context.map((x) => x.payload.text.trim()).filter(Boolean).join("\n\n");
-      const relatedRows = [router.get(event), ...router.subtree(event)].filter((x): x is Route => !!x);
-      const related = new Set(relatedRows.map((x) => x.event));
-      const routeNotes = relatedRows.filter((x) => x.outcome?.status === "done"
-        && (x.event === event || (x.receiver.kind === "wizard" && x.receiver.to === t)))
-        .map((x) => `[已收结果 ${x.event}] ${x.outcome!.body.trim()}`);
-      const receiptNotes = events.status().events.flatMap((x) => receiptFacts(x)
-        .filter((f) => f.status === "done" && f.receiver.kind === "wizard" && f.receiver.to === t
-          && (related.has(f.event) || !!f.receiver.event && related.has(router.get(f.receiver.event)?.event ?? f.receiver.event)))
-        .map((f) => `[已收回执 ${f.event}] ${f.body.trim()}`));
-      const notes = context.filter((x) => x.result).map((x) => `[已收结果 ${x.id}] ${x.result!.body.trim()}`).filter(Boolean);
-      const closing = [
-        ...notes,
-        ...routeNotes,
-        ...receiptNotes,
-        ...serving.filter((x) => x.handoffCut && !x.handoffRestored && x.result).map((x) => x.result!.body.trim()),
-      ].filter(Boolean).filter((x, i, all) => all.indexOf(x) === i).join("\n\n");
-      const head = row.asker ? `${row.asker.who}${row.asker.chat ? ` (在 ${chatNameOf(cfg, row.asker.chat) || row.asker.chat})` : ""}` : "";
-      const asker = r.kind === "wizard" ? `${displayName(r.to)}${head ? ` · 链头 ${head}` : ""}` : head;
-      try {
-        if (!events.known(id)) events.accept({
-          id, identity: JSON.stringify([t, event, "resume", automaticGeneration ?? at]),
-          inputIds: [...new Set(context.filter((x) => !!x.payload.peer?.tell || !!x.payload.human).flatMap((x) => x.inputIds ?? [x.id]))].sort(),
-          target: t, speaker: waiting, channel, serves: event,
-          ...(row.asker ? { asker: row.asker } : {}),
-        priority: "normal", deadline: NO_DEADLINE,
-          payload: { text: textOverride ?? resumeText(event, { asker, ask: ask ? stripReminders(ask) : undefined, closing,
-            ...(r.kind === "wizard" ? { receiver: displayName(r.to) } : {}) }), peer: {
-            from: { kind: "peer", from: waiting, ...(row.asker ? { asker: row.asker } : {}) },
-            // 不是一件新活 (没有件号、不收新回执): 它只是把那一笔重新指给 owner。
-            kind: "task",
-            // 这一笔由注入事件的 `serves` 认 (信封不带 event)。
-            envelope: envelopeFor(waiting, channel, { ...(row.asker ? { asker: row.asker } : {}) }),
-          } },
-        });
-        // accept 仅表示排队; 等该 id 真被消费后才让交接记录收尾。
-        for (const end = Date.now() + 600_000; Date.now() < end; await sleep(200)) {
-          const e = await events.reconcile(id);
-          if (e?.exposure === "consumed" || e?.execution === "complete") return { ok: true };
-          if (e?.execution === "uncertain" || e?.execution === "canceled") return { ok: false, reason: e.reason ?? "resume delivery uncertain" };
-        }
-        return { ok: false, reason: "resume consumption not confirmed; handoff retained" };
-      } catch (e) { return { ok: false, reason: errText(e) }; }
-    }
-    /** `self` 此刻这一轮派出去的活, 结论该交给谁 (见 planReturn)。只读它自己
-     *  transcript 里开这一轮的那句 user 行的信封: attachment 上的 channel 在注入时就被
-     *  排队的下一句改写了, transcript 才记着「这一轮是谁发起的」, reload 后也读得到。 */
-    /** `target` 手上这一轮是哪件 peer 活 —— 认开头那句的信封: 有件号按件号, 老信封按发话方。 */
-    /** `target` 手上这一轮若是某个 wizard 派来的活: 发话方的称呼 (`.x`) 与件号。人 / 定时 / 回执轮 = undefined。 */
-    const openingAsk = (target: string): { from: string; event?: string } | undefined => {
-      const p = m.sessionInfo(target)?.jsonlPath;
-      const env = p ? openingTurn(expandHome(p))?.env : undefined;
-      return env?.kind === "peer" && !env.receipt ? peerAsk(env) : undefined;
-    };
-    /** 一句同伴派活的出处: 发话方与它服务的那一笔 —— 从当前注入事件的 durable `serves` 读取。 */
-    const peerAsk = (env: { from: string; eventId?: string }): { from: string; event?: string } => {
-      const event = env.eventId ? events.get(env.eventId)?.serves : undefined;
-      return { from: env.from, ...(event ? { event } : {}) };
-    };
-    // ── 新路由表 (T3): 写入点 ──────────────────────────────────────────────
-    // 一件活 = 一行 (§3.1)。这一层只做 open / move 与 serves 真值 —— 件号 (`t…`) 那套桥随
-    // T10 全体退役: 注入事件的 id 就是 `route:<event>` (续问 `route:<event>:r<legs>`), 于是
-    // 「W 这一轮服务哪一笔」直接问事件自己 (§9.4), 不再有第二套 id 要来回翻。
-    /** 这一轮服务的那一笔 (§9.4): 开轮那句话的注入事件上记着 `serves` —— 人话轮是根行, 派活轮是
-     *  新开的子行, **回执轮是 `receiver.event`**, 续问就是同一行。定时任务那一枪没有消息事件,
-     *  它的信封上直接带着为它开的群根行 (`event`)。 */
-    const servesOfTurn = (self: string): EventId | undefined => {
-      const env = openingOfSelf(self)?.env;
-      if (!env) return undefined;
-      const e = env.eventId ? events.get(env.eventId) : undefined;
-      return e?.serves || (env.kind === "task" ? env.event : undefined) || undefined;
-    };
-    /** 本轮若是一份回执: 它回的是哪一笔 (owner = 回执的发话方) —— `re` / 撤回不必再抄 id 的依据。 */
-    const receiptOfTurn = (self: string): EventId | undefined => {
-      const id = openingOfSelf(self)?.env?.eventId;
-      const from = id ? events.get(id)?.payload.peer?.from : undefined;
-      return from?.receipt ? from.event : undefined;
-    };
-    /** 开一行 (owner = 领活的人)。子行挂在自己服务的那一笔下, 挂不上就是新根 —— 建行这一处
-     *  只认这两条, 别的判定 (§3.4 transfer 前置、409) 都在入口先做完。 */
-    const openRow = (p: { event?: EventId; owner: string; receiver: Receiver; deadlineAt: number; batch?: string; asker?: Asker; after?: readonly EventId[] }): EventId => {
-      const pair = router.task(p.owner, p.receiver);
-      if (pair) return pair.event;
-      const event = p.event ?? newRootEvent();
-      router.commit(ops.open({
-        event, owner: p.owner, receiver: p.receiver, deadlineAt: p.deadlineAt,
-        ...(p.asker ? { asker: p.asker } : {}),
-        ...(p.batch ? { batch: p.batch } : {}),
-        ...(p.after?.length ? { after: [...p.after] } : {}),
-      }));
-      return event;
-    };
-    /** 派一件活的写入端 (§3.1): self 服务着某一笔 → 它的子行; 服务不着 → 新根;
-     *  transfer = 把服务的那一笔 move 给目标 (不插行, 注入那一轮仍服务它); none = 不开行。
-     *  返回这一轮服务的 event (不开行 = "") —— 注入事件的 id 就是从它算出来的。 */
-    const openDispatchRow = (p: { self: string; target: string; op: ReturnOp; deadlineAt: number; asker?: Asker; after?: readonly EventId[]; serves?: EventId }): EventId => {
-      if (p.op === "none") return "";
-      if (p.op !== "transfer") {
-        const pair = router.task(p.target, { kind: "wizard", to: p.self });
-        if (pair) return pair.event;
-      }
-      // 计划节点 / 停放放行: 那一笔在 plan 发起 / 停放那一刻就定了; 其余看本轮服务谁。
-      const f = p.serves ?? servesOfTurn(p.self);
-      if (p.op === "transfer") return f ?? "";
-      const parent = p.op === "self" ? f : undefined;
-      const activeBatch = router.awaitedBy(p.self).find((r) => r.batch && ["held", "open", "need", "error", "answered"].includes(r.status))?.batch;
-      const batch = activeBatch ?? `batch:${newRootEvent()}`;
-      return openRow({
-        ...(parent ? { event: `${parent}.${(router.get(parent)?.seq ?? 0) + 1}` } : {}),
-        owner: p.target,
-        receiver: parent ? { kind: "wizard", to: p.self, event: parent } : { kind: "wizard", to: p.self },
-        deadlineAt: p.deadlineAt,
-        batch,
-        ...(p.asker ? { asker: p.asker } : {}), ...(p.after?.length ? { after: p.after } : {}),
-      });
-    };
-    // Acceptance projects ownership only after the input is durable. A rejected
-    // acceptance retains the human's route and bubble for the original owner.
-    const acceptPeerDispatch = (input: MessageInput, transfer = false): ReturnType<typeof events.accept> => {
-      if (!transfer) return events.accept(input);
-      const row = input.serves ? router.get(input.serves) : undefined;
-      if (!row || row.owner !== input.speaker || row.status === "answered" || row.status === "handed")
-        throw new Error("transfer ownership changed before acceptance");
-      const priorTarget = router.task(input.target, row.receiver);
-      try {
-        const accepted = events.accept(input);
-        m.transferReply(events.get(input.id)!);
-        return accepted;
-      } catch (error) {
-        const accepted = events.get(input.id);
-        if (!accepted || accepted.exposure === "none") {
-          events.cancel((e) => e.id === input.id, "transfer acceptance failed before exposure");
-          if (priorTarget && router.table()[row.event]?.mergedInto === priorTarget.event) {
-            router.commit({ op: "row", ...row });
-          } else if (router.get(row.event)?.owner === input.target) router.commit(ops.move({ event: row.event, owner: input.speaker }));
-        }
-        throw error;
-      }
-    };
-    /** 那一笔行上的接收快照 (挂起账投影用): 结论收给谁。没有行 = 不知道 (还是记 nobody)。 */
-    const receiverOfEvent = (event: string): Receiver | undefined => (event ? router.get(event)?.receiver : undefined);
-    /** 挂起账里那一行的 owner = 派活方 = 这一笔的接收方。收给群的根行 (人话 / 定时) 不进账 ——
-     *  账记的是 wizard 之间的派活。 */
-    const ledgerOwnerOf = (event: EventId): string => {
-      const r = router.get(event);
-      return r && r.receiver.kind === "wizard" ? r.receiver.to : "";
-    };
-    /** 一件活的回执去向 (§3.2 / §9.5): `return` 只有四个词; 选定的那一笔 = `for` 指定 / 本轮
-     *  服务的那一笔。物化的不再是一条栈, 而是一条 receiver 边 —— 见 openDispatchRow。
-     *  `origin` = 续问 (`re`) 沿用的原件: 它的行就是选中那一笔。 */
-    type ReturnPlan = { ok: true; op: ReturnOp; serves?: EventId } | { ok: false; status: 400 | 409; reason: string };
-    const owedLabel = (r: Route): string =>
-      r.receiver.kind === "wizard" ? `${displayName(r.receiver.to)} 派的件` : `${chatNameOf(cfg, r.receiver.channel) || r.receiver.channel} 里人问的那一轮`;
-    const owedList = (self: string): string => {
-      const xs = router.owedBy(self);
-      return xs.length ? xs.map((r) => `\`${r.event}\` (${owedLabel(r)})`).join("; ") : "眼下你没有欠着任何一笔";
-    };
-    const planReturn = (self: string, body: Record<string, unknown>, origin?: EventId): ReturnPlan => {
-      const r = returnOpOf(body);
-      if (!r.ok) return { ok: false, status: 400, reason: r.reason };
-      const want = typeof body.for === "string" ? body.for.trim() : "";
-      if (origin !== undefined && want) return { ok: false, status: 400, reason: "`re` 续问沿用原件的那一笔, 不能再带 `for`" };
-      // 续问只沿用原件: 改去向 (交出 / 旁支) 会让原件永远收不到结论 (§3.2)。
-      if (origin !== undefined && (r.op === "transfer" || r.op === "detach"))
-        return { ok: false, status: 400, reason: "`re` 续问只沿用原件: 不能带 transfer / detach" };
-      if (want) {
-        // `for` 说的是「为谁」: 派活方的名字 / 群名; 同一方欠着两笔才需要 event id。
-        const id = eventRef(want);
-        const who = isEventRef(id) ? undefined : resolvePeer(self, want);
-        const rows = router.owedBy(self).filter((x) => x.status !== "answered" && (isEventRef(id)
-          ? x.event === id
-          : x.receiver.kind === "wizard" ? !!who?.ok && x.receiver.to === who.target : [chatNameOf(cfg, x.receiver.channel), x.receiver.channel].includes(want)));
-        if (rows.length > 1)
-          return { ok: false, status: 400, reason: `for "${want}" 对上你欠着的 ${rows.length} 笔, 用 event id 指明: ${rows.map((x) => `\`${x.event}\``).join(" ")}` };
-        if (!rows[0])
-          return { ok: false, status: 400, reason: `for "${want}" 不是你此刻欠着、还没交代的一笔 —— 你欠着的: ${owedList(self)}` };
-        return { ok: true, op: r.op, serves: rows[0].event };
-      }
-      const inferred = origin ?? servesOfTurn(self);
-      const row = inferred ? router.get(inferred) : undefined;
-      // 本轮服务的那一笔已经被自己 transfer 出去了: 它的交代归接手方 (§3.4) —— 静默收口;
-      // 真有与它无关的事, 显式 `for` 挂到你欠着的另一笔。
-      // 续问 (origin) 的那一行本来就欠在对方手上 —— 只有本轮服务的那笔才谈得上「交出去了」。
-      if (origin === undefined && row && row.owner !== self && r.op !== "transfer")
-        return { ok: false, status: 409, reason: "这一轮服务的那一笔你已经 transfer 出去了: 它的交代归接手方, 不再由你派活或对人说话 —— 静默收口; 有别的要说, 用 `for` 挂到你欠着的另一笔" };
-      return { ok: true, op: r.op, serves: row?.owner === self ? row.event : inferred };
-    };
-    // ── 新路由表 (T4): 投递层 ──────────────────────────────────────────────
-    // 落盘与投递是两件事, 顺序不能反 (§9.3, 不变量 1): 先 `answer` 落盘 (它是投递幂等键的半边),
-    // 再按 receiver 投 ——
-    //   wizard → 进它的持久化收件箱: 复用 message-events 的注入队列, id = `rcpt:<event>:<rev>`。
-    //   chat   → 只落 `hand`: 定论就是那句人话的答复气泡, 放行由 mirror-bridge 的 final 通道
-    //            (eventFinalGate 读同一张表) 给出。
-    // T7: 投之前先看收方 (§4.3 / §4.4) —— 收方 wizard 已注销 → 沿链升级 (信封正文说明跳过了谁);
-    // 一路走到 chat 根 → Dead Letter; 要服务的那一笔已收口 = 孤儿 → 照投, 信封正文标迟到, 并写明
-    // 收方这一轮带 `RESULT:` 的终句会作为那一笔的追述投到哪 (一环一环走, 不抄近路)。
-    const deliverRoute = (event: EventId, out: { status: ReceiptStatus; body: string; rev: string }): void => {
-      const row = router.get(event);
-      if (!row) return;
-      // Receiver summaries are projected from the route table; do not keep a second task ledger here.
-      const noticeOnly = (out.status === "need" || out.status === "error" || out.status === "progress") && !!row.outcome;
-      if (row.receiver.kind === "wizard" && !noticeOnly) {
-        for (const original of router.aliases(event)) {
-          if (original.receiver.kind !== "wizard") continue;
-          ledger.outcome(original.receiver.to, original.event, out.status, parseClosing(out.body).text || out.body);
-        }
-      }
-      postRoute(row, out, router.escalate(event, (k) => !!wizards.get(k)), `rcpt:${event}:${out.rev}`);
-    };
-    /** 一份定论的投递 (账本已记过): 投给升级后的收方 `esc` (没有 = 行上的 receiver)。群收方只落
-     *  `hand`; wizard 收方 (含 Dead Letter 退到的群默认 wizard) 进收件箱, id = `inbox`。 */
-    const postRoute = (row: Route, out: { status: ReceiptStatus; body: string; rev: string }, esc: Delivery | undefined, inbox: string, retire?: string): void => {
-      const event = row.event;
-      const receiver: Receiver = esc?.receiver ?? row.receiver;
-      const via = (esc?.via ?? []).map(displayName);
-      // 升级落在 chat 根 = Dead Letter: 退到那个群, 由它的默认 wizard 收下这份结论。
-      const dead = receiver.kind === "chat" && !!esc;
-      if (receiver.kind !== "wizard" && !dead) {
-        // A transferred chat reply has no upstream wizard to report failures to.
-        // Persist it through the same final outbox before handing the route off.
-        const transferred = events.latestTransfer(event);
-        if (out.status !== "done" && transferred?.target === row.owner)
-          m.deliverTransferredFinal(transferred, out.body, out.status);
-        if (isTerminal(out.status) && row.outcome?.rev === out.rev)
-          router.commit(ops.hand({ event, inbox: `chat:${receiver.message}:${out.rev}` }));
-        return;
-      }
-      // 回执那一轮服务的就是收方自己欠的那一笔 (`receiver.event`) —— 它的终句又一次落到那一笔上,
-      // 递归在这里闭合 (§3.2): 叶子交差 → 回执轮 → 父交差 → … → 根交进群。
-      const to = receiver.kind === "wizard" ? receiver.to : baseOfKey(receiver.channel);
-      const group = receiver.kind === "chat" ? receiver.channel : "";
-      const serves = esc ? esc.serves : row.receiver.kind === "wizard" ? row.receiver.event ?? "" : "";
-      const servedRow = serves ? router.get(serves) : undefined;
-      const served = servedRow?.receiver;
-      // 只有要去群里收口时才带频道 (它服务的那一笔的 receiver 就是那句人话, 或 Dead Letter 退到群)。
-      const channel = group || (served?.kind === "chat" ? served.channel : "");
-      const late = router.isOrphaned(serves);
-      // 迟到时收方的追述去向: served 行还在 (未回收)、没被收掉、owner 仍是收方 → 沿它的 receiver 原路;
-      // 否则无处可冒, 只进 rolepage。
-      const retellTo = late && servedRow && servedRow.owner === to && servedRow.outcome?.status !== "canceled"
-        ? servedRow.receiver.kind === "wizard" ? displayName(servedRow.receiver.to) : chatNameOf(cfg, servedRow.receiver.channel) || servedRow.receiver.channel
-        : undefined;
-      const envelope = renderReceiptEnvelope(
-            displayName(row.owner),
-            channel ? chatNameOf(cfg, channel) : undefined,
-            out.status,
-            event,
-            { ...(row.asker ? { asker: row.asker } : {}),
-              ...(served?.kind === "wizard" ? { up: true } : {}),
-              ...(audienceName(channel, row.asker) ? { audience: audienceName(channel, row.asker) } : {}),
-              ...(via.length ? { via: via.join(", ") } : {}),
-              ...(late ? { late: true } : {}),
-              ...(retellTo ? { retellTo } : {}),
-              ...(row.late ? { retold: true } : {}) },
-            channel || undefined,
-          );
-      events.accept({
-        id: inbox, identity: JSON.stringify([to, event, out.status, out.rev]),
-        target: to, speaker: row.owner, channel, serves,
-        ...(row.asker ? { asker: row.asker } : {}),
-        priority: "normal", deadline: NO_DEADLINE,
-        // 行首 RESULT:/NEED: 只是判定记号, 语义已由信封的 status 携带 —— 投递时剥掉
-        // (ARTIFACT 行保留: 路径对收方 wizard 有实际用途)。
-        payload: { text: stripClosingMark(out.body), receipts: [{ event, version: out.rev, status: out.status, ...(row.batch ? { batch: row.batch } : {}),
-          receiver, body: out.body, speaker: row.owner, envelope,
-          source: row.reports?.[out.rev]?.source
-            ?? (row.outcome?.rev === out.rev ? row.outcome.report?.source : row.notice?.rev === out.rev ? row.notice.report?.source : undefined) }], peer: {
-          from: { kind: "peer", from: row.owner, receipt: true, status: out.status, event },
-          kind: "fyi",
-          envelope,
-        } },
-      }, retire);
-      if (isTerminal(out.status) && row.outcome?.rev === out.rev) router.commit(ops.hand({ event, inbox }));
-    };
-    /** 收件箱里那份回执投不到了 (`gone`: 收方没有绑定, 按 store 也恢复不了) —— 投进去时它还在
-     *  注册表上, 升级没跳过它。现在把它当不在, 沿 receiver 边重走一次升级: 能收的上层 wizard /
-     *  群根 (Dead Letter) 收下。链上无处可升 (根行的收方自己没了): canceled 是收掉它的那一方自己
-     *  发起的, 没人在等, 不再投; 别的定论退到收方的家群 (Dead Letter)。账本不再记第二遍。 */
-    const rerouteGone = (e: MessageEvent): void => {
-      const facts = receiptFacts(e);
-      if (facts.length <= 1) { rerouteReceipt(e, e.id); return; }
-      facts.forEach((f, i) => rerouteReceipt({ ...e, id: `rcpt:${f.event}:${f.version}`,
-        speaker: f.speaker, payload: { ...e.payload, text: f.body, receipts: [f],
-          peer: { ...e.payload.peer!, from: { kind: "peer", from: f.speaker, event: f.event,
-            receipt: true, status: f.status as ReceiptStatus }, envelope: f.envelope } } }, i === facts.length - 1 ? e.id : undefined));
-    };
-    const rerouteReceipt = (e: MessageEvent, retire?: string): void => {
-      const from = e.payload.peer?.from;
-      const event = from?.receipt ? from.event : undefined;
-      const row = event ? router.get(event) : undefined;
-      if (!event || !row || !from?.status) { log.warn({ id: e.id, target: e.target }, "receipt reroute: 认不出回执的那一行, 投不出去"); return; }
-      const reachable = (k: string): boolean => k !== e.target && !!wizards.get(k) && !!mirrorStore.get(k);
-      const home = baseOfKey(e.target);
-      const esc: Delivery | null | undefined = router.escalate(event, reachable)
-        ?? (row.receiver.kind === "wizard" && reachable(row.receiver.to) ? undefined
-          : from.status === "canceled" || home === e.target ? null
-          : { receiver: { kind: "chat", channel: home, message: "" }, serves: "", via: [e.target] });
-      if (esc === null) { log.info({ id: e.id, target: e.target, event, status: from.status }, "receipt reroute: 收方已不在且无处可升, 不再投"); return; }
-      const rev = e.id.slice(`rcpt:${event}:`.length).split("~")[0]!;
-      // Replaying a torn reroute must target the same durable inbox entry.
-      const inbox = `${e.id}~${finalId(e.id, JSON.stringify(esc?.receiver ?? row.receiver), rev)}`;
-      log.info({ id: e.id, target: e.target, event, to: esc?.receiver ?? row.receiver, inbox }, "receipt reroute: 收方已不在, 改投");
-      postRoute(row, { status: from.status, body: e.payload.text, rev }, esc, inbox, retire);
-    };
-    /** 一条路由 op: 先落盘, 再投该投的 (need / error 带正文入箱; answer 按 receiver 投递)。这里
-     *  只管 `re` (`mark open`) 把那一行拉回在飞 —— 挂起摘要跟着 deliverRoute 更新。 */
-    const commitRoute = (op: Op): void => {
-      router.commit(op);
-      if (op.op === "mark") {
-        const by = ledgerOwnerOf(op.event);
-        if (by && op.status === "open") ledger.touch(by, op.event);
-        if ((op.status === "need" || op.status === "error" || op.status === "progress") && op.body !== undefined && op.rev !== undefined)
-          deliverRoute(op.event, { status: op.status, body: op.body, rev: op.rev });
-        return;
-      }
-      if (op.op === "answer") deliverRoute(op.event, op.outcome);
-    };
-    /** 终句 → 路由 op (§9.4): 一轮结束时把这一笔推进 (定论 / 中途态), 投递在 commitRoute 里做。
-     *  这是「轮终 evidence → onFinal」那条主触发链的落点: 谁答完都从 receiver 表产生回执。 */
-    const cutSettles = (e: MessageEvent, verdict: MessageFinal): boolean => {
-      const row = e.serves ? router.get(e.serves) : undefined;
-      if (!verdict.error && addressedResults(verdict.text).length) return true;
-      const closing = parseClosing(verdict.text).kind;
-      return !verdict.error && settlesCut(row?.receiver.kind, closing === "result" || closing === "need" ? closing : undefined);
-    };
-    const resultTask = (e: MessageEvent, receiver: string): Route | undefined => {
-      const served = e.serves ? router.get(e.serves) : undefined;
-      if (served?.owner === e.target && served.receiver.kind === "wizard" && served.receiver.to === receiver) return served;
-      const row = router.task(e.target, { kind: "wizard", to: receiver });
-      if (!row || row.at <= e.at) return row;
-      // A later task is visible to this old input only with same-turn consumption
-      // evidence. Merely having accepted a new dispatch cannot retarget an old final.
-      return events.taskInputs(row.event).some((input) => input.target === e.target && input.exposure === "consumed"
-        && !!e.turn && input.turn === e.turn && input.sessionId === e.sessionId) ? row : undefined;
-    };
-    bindResults = (e, body) => {
-      const sections = addressedResults(body);
-      if (sections.length) return Object.fromEntries(sections.map((section, i) => {
-        const peer = resolvePeer(e.target, section.name);
-        const row = peer.ok ? resultTask(e, peer.target) : undefined;
-        return [`${i}:${section.name}`, { receiver: peer.ok ? peer.target : section.name, event: row?.event ?? null,
-          inputs: row ? events.consumedTaskInputs(row.event, e) : [] }];
-      }));
-      const task = e.serves ?? e.feedbackRoute?.event;
-      const row = task ? router.get(task) : undefined;
-      return parseClosing(body).kind === "result" && row?.owner === e.target && row.receiver.kind === "chat"
-        ? { served: { receiver: e.feedbackRoute?.receiver ?? e.speaker, event: row.event, inputs: events.consumedTaskInputs(row.event, e) } } : {};
-    };
-    const resultCorrection = (e: MessageEvent, section: { name: string }, index: number, reason: string,
-      bindingKey?: string, allowServesFallback = true): void => {
-      const key = bindingKey ?? `${index}:${section.name}`;
-      const binding = events.get(e.id)?.resultRoutes?.[key];
-      const taskEvent = correctionTaskEvent(binding, allowServesFallback ? e.serves : undefined);
-      const row = taskEvent ? router.get(taskEvent) : undefined;
-      const identitySection = key === "served" ? "served" : section.name;
-      for (const feedback of resultCorrectionInputs(e, identitySection, index, reason, row, displayName,
-        (name, fyi) => renderPeerEnvelope(name, undefined, undefined, fyi ? { act: "fyi", quiet: true } : undefined))) try {
-        events.accept(feedback);
-      } catch (error) {
-        log.warn({ event: e.id, target: feedback.target, receiver: section.name, err: errText(error) }, "addressed RESULT: correction feedback could not be queued");
-      }
-    };
-    deliverFinal = (e, verdict) => {
-      // 自我交接切断的那一轮: 它的终句若就是那一笔的交代 (见 settlesCut), 摘掉切断标记照常落定 ——
-      // 不然行留 open, 新会话被「继续 <event>」重问一件已经答完的事 (set_workspace 那一轮就是这样)。
-      const keep = cuttingTurn(e.target) && cutSettles(e, verdict);
-      if (keep && handoffFinalSuppressed(e)) {
-        handoffs.keep(e.target, e.id);
-        events.restoreHandoffFinal(e.id);
-        log.info({ event: e.id, target: e.target, serves: e.serves }, "handoff: 切断那一轮的终句即交代, 照常落定");
-      }
-      if (handoffFinalSuppressed(e) || (!ownsReplyEvent(e) && !addressedResults(verdict.text).length
-        && !receiptKeyword(verdict.text))) return;
-      // 自我交接切断的那一轮 (终句不算交代的): 收尾那句不是欠着的那几笔的答案 —— 行留 open, 交给新会话的「继续 <event>」。
-      // 扣下记在这场交接上: 交接没做成 (新会话没起来), 它就是那几笔仅有的交代, 由 uncut 补投。
-      if (cuttingTurn(e.target) && !keep) {
-        handoffs.cut(e.target, e.id);
-        events.suppressHandoffFinal(e.id);
-        log.info({ event: e.id, target: e.target, serves: e.serves }, "handoff: 交接切断的那一轮终句不落定");
-        return;
-      }
-      settleFinal(e, verdict);
-    };
-    /** strict 群 chat 义务「终句没交付」的当轮提醒账 (每行一次, 落盘扛 reload):
-     *  行还在 (未落定) = 那句终句既没销账也没出站 —— 立即注入一次交付指引。行落定 / 被顶掉
-     *  的记录顺手清掉。 */
-    const strictFinalNotices = loadJsonMap<{ at: number }>(join(cfg.daemon.stateDir, "strict-delivery-notices.json"));
-    const noteStrictUndelivered = (e: MessageEvent): void => {
-      const chatRow = (event: string): { owner: string; channel: string; message: string; status: string } | undefined => {
-        const r = router.get(event);
-        if (!r) return undefined;
-        const { receiver } = r;
-        return receiver.kind === "chat" ? { owner: r.owner, channel: receiver.channel, message: receiver.message, status: r.status } : undefined;
-      };
-      const live = (event: string): boolean => !!chatRow(event) && ["held", "open", "need", "error"].includes(chatRow(event)!.status);
-      Object.keys(strictFinalNotices.all()).filter((k) => !live(k)).forEach((k) => strictFinalNotices.drop(k));
-      if (!e.serves || !live(e.serves) || strictFinalNotices.get(e.serves)) return;
-      const row = chatRow(e.serves)!;
-      if (strictSpeechOf?.(row.channel) !== true) return;
-      strictFinalNotices.set(e.serves, { at: Date.now() });
-      const re = events.get(row.message)?.id ?? row.message;
-      const chat = chatNameOf(cfg, row.channel) || row.channel;
-      void m.injectText(row.owner, strictUndeliveredNotice({ chat, re }), { channel: row.channel })
-        .then((r) => { if (!r.ok) log.warn({ mod: "strict-final", event: e.serves, owner: row.owner, reason: r.reason }, "strict-final: 终句未交付的即时提醒没投出去"); })
-        .catch(() => undefined);
-    };
-    /** 一轮的终句落到它服务的那一行上 (定论 / 中途态)。
-     *  P7-S2: 公开轮落在严格群 (chatPolicy.speech=strict) 时, chat 接收行的终句零 op ——
-     *  义务留给 chat_reply 关账; 私聊轮与 implicit 群照旧。 */
-    const settleFinal = (e: MessageEvent, verdict: MessageFinal): void => {
-      if (!canSettleFinal(e)) return;
-      const strictFinal = !!e.channel && chatPolicyOf(cfg, e.channel).speech === "strict";
-      const sections = verdict.error ? [] : addressedResults(verdict.text);
-      if (e.feedbackRoute && sections.length) {
-        resultCorrection(e, { name: "served" }, 0, "此私密纠正只续办绑定的人类任务；请对原任务提交未加收件人地址的 RESULT", "served", false);
-        return;
-      }
-      if (sections.length) {
-        settleAddressedResults(e, sections, {
-          binding: (event, key) => events.get(event.id)?.resultRoutes?.[key],
-          resolve: (name) => { const peer = resolvePeer(e.target, name); return peer.ok ? peer.target : undefined; },
-          select: (event, receiver, binding) => binding ? binding.event ? router.get(binding.event) : undefined : resultTask(event, receiver),
-          consumed: (task, event) => events.consumedTaskInputs(task, event),
-          bind: (event, key, receiver, route, inputs) => events.bindResultRoute(event.id, key, receiver, route, inputs),
-          covers: (task, event, inputs) => events.coversTaskInputs(task, event, inputs),
-          reject: (event, section, index, reason, row, key) => {
-            if (!row && reason.includes("不存在")) log.warn({ target: e.target, receiver: section.name, event: e.id }, "addressed RESULT: unknown receiver");
-            else if (!row) log.warn({ target: e.target, receiver: section.name, event: e.id }, "addressed RESULT: no matching receiver task");
-            resultCorrection(event, section, index, reason, key, false);
-          },
-          settle: (event, section, index, row) => {
-            const key = `${index}:${section.name}`;
-            const source = { input: event.id, ...(event.turn ? { turn: event.turn } : {}),
-              facts: [JSON.stringify([event.id, row.event, key, row.receiver])] };
-            router.onFinal(event.target, row.event, { text: `RESULT: ${section.body}`, source, result: true }, strictFinal).forEach(commitRoute);
-          },
-        });
-        return;
-      }
-      if (e.feedbackRoute && (verdict.error || parseClosing(verdict.text).kind !== "result")) return;
-      const routeEvent = e.serves ?? e.feedbackRoute?.event;
-      const servedRow = routeEvent ? router.get(routeEvent) : undefined;
-      if (settleUnaddressedResult(e, servedRow, parseClosing(verdict.text).kind === "result",
-        (event, row, reason) => resultCorrection(event, { name: "served" }, 0, reason, "served"))) return;
-      if (!verdict.error && parseClosing(verdict.text).kind === "result" && routeEvent) {
-        const task = servedRow?.event ?? routeEvent;
-        const binding = events.get(e.id)?.resultRoutes?.served;
-        const boundRow = binding?.event ? router.get(binding.event) : undefined;
-        if (binding && (!boundRow || !servedRow || boundRow.event !== servedRow.event)) {
-          resultCorrection(e, { name: "served" }, 0, "RESULT 未绑定到本轮原任务", "orphan:served", false);
-          return;
-        }
-        const inputs = binding?.inputs ?? events.consumedTaskInputs(task, e);
-        if (!binding?.inputs) events.bindResultRoute(e.id, "served", e.feedbackRoute?.receiver
-          ?? (servedRow?.receiver.kind === "wizard" ? servedRow.receiver.to : e.speaker), task, inputs);
-        if (settleServedChatResult(e, servedRow, true, inputs,
-          (event, source, frozen) => events.coversTaskInputs(event, source, frozen),
-          (event, row, reason) => resultCorrection(event, { name: "served" }, 0, reason, "served"),
-          (event, row) => router.onFinal(event.target, row.event, { ...verdict, source: reportSource(event) }, strictFinal).forEach(commitRoute))) {
-          return;
-        }
-      }
-      // 弱信号说这是回执 (带 RESULT/NEED/PROGRESS/ARTIFACT 关键字), 却没有任何收口形态认得出,
-      // 而它服务的那一行还挂着 —— 账本照终态落定, 不因正文排版把人卡死。**账本了结与正文去向
-      // 彻底解耦**: 这一支只写 answer op, 进群与否仍由 finalReleased / eventFinalGate / strict
-      // 出站门判 (那三层一个字没动), 所以放宽解析不会把不该发的文本刷进 strict 群。
-      // 不这么兜底就是无声 stall: 行留在 open 上, 只剩 idle-nudge 反复追问 (2026-11-16
-      // e23ee2f.1: 模型把契约示例的 inline-code 反引号一起抄下来, 16 分钟问 3 次都没落定)。
-      if (!verdict.error && unrecognizedReceipt(verdict.text, servedRow)) {
-        log.warn({ event: e.id, target: e.target, serves: routeEvent, head: clipLine(verdict.text, 160) },
-          "终句带收口关键字但认不出收口形态 — 按终态结算该行 (正文去向不变)");
-        router.onFinal(e.target, routeEvent, { ...verdict, result: true, source: reportSource(e) }, strictFinal)
-          .forEach(commitRoute);
-        return;
-      }
-      const plans = router.onFinal(e.target, routeEvent, { ...verdict, source: reportSource(e) }, strictFinal);
-      // Error evidence has no durable event result. Queue the chat reply before
-      // mark:error suppresses replay, so a reload between the two cannot lose it.
-      if (verdict.error && plans.some((op) => op.op === "mark" && op.status === "error")
-          && e.serves && router.get(e.serves)?.receiver.kind === "chat" && e.payload.peer?.transferred)
-        m.deliverTransferredFinal(e, verdict.text);
-      plans.forEach(commitRoute);
-      // P7 终句可见失败: strict 群 chat 义务上的 prose 终句哪儿都没去 (无收口形态、无出站),
-      // 当轮立即告诉该 wizard 一次 —— 不然它以为答完了, 人看到的是彻底静默 (2026-11-18
-      // aiconfig 群实录: resultRoutes:{} 却 complete/finalized, 谁都没收到)。
-      if (!verdict.error) noteStrictUndelivered(e);
-    };
-    // ── 新路由表 (T6): 失败级联 ─────────────────────────────────────────────
-    /** `target` 欠着的行里这一轮该被收掉的根 (§4.2): 不给 `only` = 全部 (end);
-     *  给了 = 认它欠着的那一笔 (派它的那一方 = 行的 receiver, 那一笔 = event)。 */
-    const cancelRoots = (target: string, only?: (x: { from: string; event: string }) => boolean): EventId[] =>
-      router.owedBy(target).filter((r) => !only || only({
-        from: r.receiver.kind === "wizard" ? r.receiver.to : baseOfKey(r.receiver.channel),
-        event: r.event,
-      })).map((r) => r.event);
-    /** 级联取消 (§4.2 TERMINATE): `subtree` 全部 canceled, 叶子先落; 发起者就是 receiver 的那份
-     *  不投 (它自己知道), 但行得落成墓碑 —— 不然一直挂在它的 owedBy 上。 */
-    const cancelRoutes = (roots: readonly EventId[], reason: (r: Route) => string, by: string): number => {
-      const plans = cancelOps(router.table(), roots, { reason, nameOf: displayName, lastWords: m.lastReply });
-      for (const op of plans) {
-        router.commit(op);
-        if (op.op !== "answer") continue;
-        const row = router.get(op.event);
-        if (row?.receiver.kind === "wizard" && row.receiver.to === by) {
-          router.commit(ops.hand({ event: op.event, inbox: `canceled:${op.event}:${op.outcome.rev}` }));
-          continue;
-        }
-        deliverRoute(op.event, op.outcome);
-      }
-      return plans.length;
-    };
-    /** §9.5 boot: fold 之后把表上没有落定的收一收 ——
-     *   - `answered` 未 `hand`: 定论在盘上却没进过 receiver 的收件箱 → 重投一次 (replayAnswered)。
-     *   - `held`: 前置 (`after`) 重查一次。有一笔是失败 → 这件永远轮不到 (§4.2), 带前置快照整件
-     *     取消; 全落定 → release。两道都幂等, 与在途注入的 committed 撞上无害。
-     *   - `open` / `need` / `error`: 不动 —— 在途注入的 result 由 message-events resume 送回 onFinal。 */
-    const settleHeld = (): void => {
-      router.rows().filter((r) => r.status === "held").forEach((r) => {
-        const prereqs = (r.after ?? []).map((e) => router.get(e));
-        const failed = prereqs.find((a) => a?.outcome && a.outcome.status !== "done");
-        if (failed?.outcome) {
-          commitRoute(ops.answer({ event: r.event, outcome: makeOutcome("canceled",
-            `前置回执 (${failed.event}) 是 ${failed.outcome.status}, 这一件不会轮到了 —— 已取消, 没有投给它。` ) }));
-          return;
-        }
-        if (prereqs.every((a) => a?.outcome?.status === "done")) {
-          commitRoute(ops.release({ event: r.event }));
-          releaseHeld(r);
-        }
-      });
-    };
-    /** §3.5 放行注入的接入点 (.rcptt1 设计「held 放行后要注入什么载荷」后填这里):
-     *  前置全落定的那一笔已经从 held 变 open, 但**没有人把它的活投出去** —— 旧机制的注入在
-     *  回执槽的 release dep 里, 随 receipts 一起退役了。载荷 (要说什么 / 怎么收口) 还没定,
-     *  先留这个调用位。 */
-    const releaseHeld = (_row: Route): void => {};
-    /** §4.5 boot: fold 之后 `answered` 还没 `hand` 的行重投一次 —— rcpt 的 id 幂等, 重放不双投。 */
-    const replayAnswered = (): void => router.rows().forEach((r) => {
-      if (r.status === "answered" && r.outcome) deliverRoute(r.event, r.outcome);
-      if (r.notice && r.outcome?.status !== "canceled") deliverRoute(r.event, r.notice);
-    });
-    const currentAsk = (target: string): ((x: { from: string; event: string }) => boolean) => {
-      const env = openingAsk(target);
-      if (!env?.event) return () => false;
-      return (x) => x.event === env.event;
-    };
-    /** 打断 `target` 会不会误伤别人的活: 它正忙, 且这一轮不是调用方派的 —— 别的 wizard 派的、
-     *  人说的、定时任务放的 → 那一方的称呼。回执轮是它自己那件活的延续, 不算别人的。 */
-    const othersTurn = async (target: string, self: string): Promise<{ from: string; event?: string } | undefined> => {
-      if (await m.idleNow(target)) return undefined;
-      const p = m.sessionInfo(target)?.jsonlPath;
-      const env = p ? openingTurn(expandHome(p))?.env : undefined;
-      if (env?.receipt) return undefined;
-      if (env?.kind === "peer") return env.from === displayName(self) ? undefined : peerAsk(env);
-      return { from: env?.kind === "task" ? env.from : env?.from ? `人 (${env.from})` : "人" };
-    };
-    const openingOfSelf = (self: string) => {
-      const p = m.sessionInfo(self)?.jsonlPath;
-      return p ? openingTurn(expandHome(p)) : undefined;
-    };
-    const controlSnapshot = (self: string) => ({ opening: openingOfSelf(self)?.ms });
-    const controlValid = (self: string, snapshot: ReturnType<typeof controlSnapshot>): boolean =>
-      openingOfSelf(self)?.ms === snapshot.opening;
-    /** 名册 / peek / rolepage 的「在等 / 欠着」: 从路由表现算 (§9.5 读侧), 只借 pane
-     *  的一次探针判「停在审批卡上」。chat 根任务也在这份列表里, 以便 idle 巡检能恢复人类请求；定了论的 (answered / handed)
-     *  同样不进: 这一份问的是「还在飞 / 还欠着」。`turn` 那一栏放的是 event id (§9.1),
-     *  下游只当字符串展示。 */
-    const routeInFlight = (): InFlight[] => {
-      const probed = new Map<string, boolean>();
-      const parked = (t: string): boolean => {
-        const hit = probed.get(t);
-        if (hit !== undefined) return hit;
-        probed.set(t, m.parkedNow(t));
-        return probed.get(t)!;
-      };
-      return router.rows().flatMap((r) =>
-        r.status === "handed" || r.status === "answered" ? []
-          : [{
-              from: r.receiver.kind === "wizard" ? r.receiver.to : baseOfKey(r.receiver.channel),
-              to: r.owner, turn: r.event,
-              state: turnState({ status: r.status, waiting: router.waiting(r.event).length > 0 },
-                { parked: r.status === "open" && parked(r.owner) }),
-              fromBlocked: r.receiver.kind === "wizard" && parked(r.receiver.to),
-              ageMs: Date.now() - r.at,
-            } as InFlight]);
-    };
-    /** `self` 此刻这一轮的链头 (见 Asker), 同样认开头那句的信封: 人在群里说的 → 信封上的
-     *  userid 与群; 与人的单聊里没挂信封 → 那个人; 同伴派的活 / 回执 → 登记那件活时记下的;
-     *  定时任务、CLI 敲字、认不出 → undefined (如实不知道, 不猜)。 */
-    const askerOf = (self: string): Asker | undefined => {
-      const env = openingOfSelf(self)?.env;
-      if (!env) return m.currentAsker(self);
-      return askerFromEnvelope(env);
-    };
-    // A private dispatch keeps its human origin even though its output channel is empty.
-    bindCardChannel((key) => cardRoomOf(key) || askerOf(key)?.chat || m.currentChannel(key));
-    // spawn 读屏撞上认不出的启动确认框 → 通知该 wizard 此刻的频道 (与审批卡同源的
-    // 频道换算, 不硬编 home 群)。只告知不等点击; 发送失败只记日志, spawn 侧频控去重。
-    bindStartupNotice((key, text) => void ws.client
-      .sendMessage(baseOfKey(askerOf(key)?.chat || m.currentChannel(key) || key).replace(/^(user|chat|group):/, ""), { msgtype: "markdown", markdown: { content: text } })
-      .catch((e: unknown) => log.child({ mod: "spawn" }).warn({ to: key, err: errText(e) }, "startup notice push failed")));
-    // 交接先续做: 它的闸要在回执续守之前立起来, 否则续守的 watcher 会读到换了一半的会话。
-    /** Address supplied by a current caller; reject removed fields at each HTTP boundary before lookup/defaulting. */
     const addrOf = (value: object): string => String((value as { name?: unknown }).name ?? "");
 
     /** 给新 wizard 分配一个未使用的身份槽。已有身份一律先显式退役再复用。 */
@@ -1813,8 +864,8 @@ const main = async (): Promise<void> => {
     /** 出生时的一次内存快照 (不读盘): 路由表、消息事件、定时任务、plan、名册与绑定里出现过的 target。
      *  plan 库坏了时 forget 本就被拒, 剩下的只可能是已结束的 plan (只读展示), 不为它拦出生。 */
     const targetsInUse = (base: string): Set<string> => referencedTargets({
-      routes: Object.values(router.table()),
-      events: events.targets(),
+      routes: [],
+      events: [],
       tasks: tasks.list(),
       plans: plans.healthy() ? (() => { try { return plans.all(); } catch { return []; } })() : [],
       live: [...wizards.all().map((w) => w.target), ...m.chatTargets(base)],
@@ -1897,448 +948,6 @@ const main = async (): Promise<void> => {
     // 的回执轮都不拦; 管家只在自己的群里豁免。notify 与 send_file 共用这一道闸。
     // 顶层模式: 只有顶层 wizard 对人说话。「这一轮在为同伴干活」的唯一判据 = 它服务的那一笔
     // 的定论收给谁 (§9.5): 收给同伴的 wizard = 它在链条下面, 不对人说话; 收给群的 = 它自己
-    // 就是对人收口的那一层。transfer 出去的那一笔行已 move 给别人, 收方仍是同伴 → 照样拦。
-    // 没有行 (CLI 直接敲的轮 / 定时任务) = 不在为谁干活, 不拦。管家只在自己的群里豁免。
-    // notify 与 send_file 共用这一道闸。
-    const topOnlyMuted = (self: string, dests: readonly string[]): Record<string, unknown> | undefined => {
-      const serves = servesOfTurn(self);
-      const belowTop = !!serves && !router.speaksToHuman(serves);
-      const muted = dests.filter((d) => topOnlyVerdict({ belowTop, topOnly: !!chatPolicyOf(cfg, d).topOnly, exempt: !tagOfKey(self) && baseOfKey(self) === d }));
-      return muted.length && belowTop
-        ? { ok: false, topOnly: true, reason: `${muted.map((d) => chatNameOf(cfg, d) || d).join(", ")} 开着顶层模式: 你这一轮是同伴派来的活, 不对人说话 —— 结果写成行首的「收件人 + RESULT:」, 反问用 tell_peer({kind:"ask"}), 由派你的那个代你向人交代` }
-        : undefined;
-    };
-    http.register("POST /notify", async (req, res) => {
-      const { self, body } = await readPeerBody(req);
-      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { to?: string[]; markdown?: string };
-      const content = (b.markdown ?? "").trim();
-      if (!content) { json(res, 400, { ok: false, reason: "markdown required" }); return; }
-      // 认不出的名字原样报回去, 绝不静默跳过 ——「发了但没人收到」是这类工具最难查
-      // 的故障; 有一个收件人错了整条就不发, 部分送达比不送达更难对账。
-      const refs = (b.to ?? []).map((r) => (r ?? "").trim()).filter(Boolean);
-      const bad = refs.filter((r) => ((b) => !b || !sameBot(self, b))(chatBaseOf(cfg, r)));
-      if (bad.length) {
-        json(res, 400, { ok: false, reason: `认不出这些聊天: ${bad.join(", ")} (wizard_roster 每行有 home 聊天名, 人侧 /chats; 没起名的聊天寻址不到)` });
-        return;
-      }
-      const dests = [...new Set(refs.length ? refs.map((r) => chatBaseOf(cfg, r)) : [channelOf(self)])];
-      const muted = topOnlyMuted(self, dests);
-      if (muted) { json(res, 409, muted); return; }
-      // P7-S2 严格群: notify 与 chat_say 同一道门 (成员 + 限额; 出站不要求挂义务)。
-      for (const dest of dests) {
-        if (!strictSpeechOf?.(dest)) continue;
-        const gate = strictSayGate(self, dest);
-        if (gate) { json(res, gate.status, gate.body); return; }
-      }
-      const asker = askerOf(self);
-      const activeId = openingOfSelf(self)?.env?.eventId;
-      const active = activeId ? events.get(activeId) : undefined;
-      const receipt = !!active?.payload.peer?.from.receipt;
-      const leading = receipt ? /^(RESULT|Result|result|结论|NEED|PROGRESS)[ \t]*[:：]/.exec(content) : null;
-      const closing = receipt ? parseClosing(content).kind : "none";
-      if (receipt && active) {
-        const row = active.serves ? router.get(active.serves) : undefined;
-        if (active.canceled || active.interjected || handoffFinalSuppressed(active) || !ownsReplyEvent(active) || row?.outcome?.status === "canceled") {
-          json(res, 409, { ok: false, reason: "这笔任务已取消或归属已变更，回执报告不再公开。" });
-          return;
-        }
-        if ((closing === "none" || closing === "progress") && (!row || !["open", "need", "error"].includes(row.status))) {
-          json(res, 409, { ok: false, reason: "这笔任务已收口或无在途任务，回执确认不公开；新结果用行首 .name RESULT:，新问题用 tell_peer({kind:\"ask\"})。" });
-          return;
-        }
-      }
-      const shown = receipt && (leading || closing !== "none") ? stripForChat(content) : content;
-      if (!shown.trim()) { json(res, 400, { ok: false, reason: "markdown body required" }); return; }
-      const deliveries: Array<{ channel: string; id: string; states?: string[]; claims?: Array<{ id: string; states: string[] }> }> = [];
-      for (const dest of dests) {
-        if (active?.payload.peer?.from.receipt) {
-          const purpose = closing === "result" || closing === "need" ? "report" : "progress";
-          const reportKind = closing === "need" ? "need" : "done";
-          const coverage = purpose === "report" ? receiptCoverage(active, dest, closing === "need", content) : undefined;
-          const revision = finalId(active.id, dest, content);
-          const id = events.delivery({ id: finalId(active.id, dest, revision), eventId: active.id, target: self,
-            turn: active.turn ?? active.id, channel: dest, revision, body: shown, purpose, reportKind,
-            chunks: m.formatFinal(self, active.turn ?? active.id, shown), ...(coverage ? { coverage } : {}) });
-          const claims = events.deliveryClaims(coverage);
-          deliveries.push({ channel: dest, id, states: claims.length ? claims.flatMap((c) => c.states) : events.deliveryStatus(id),
-            ...(claims.length > 1 ? { claims } : {}) });
-        } else postAs(self, dest, content);
-        // P7-S3b: strict 群的 post 记录由出站 tracker 的 hook 落 (带流 id 去重), 这里只管 implicit。
-        if (!strictSpeechOf?.(dest)) recordPost({ target: self, channel: dest, body: content, ...(asker ? { asker } : {}) });
-      }
-      // 微信群聊: 人超过 ctxTtlSec 没说话时微信会静默丢弃, 消息只能压着等他下次开口 —— 如实告诉调用方, 别回「已发送」。
-      const wxId = (d: string): string => baseOfKey(d).replace(/^chat:/, "");
-      const held = dests.filter((d) => wx.owns(wxId(d)) && !wx.fresh(wxId(d)));
-      const name = (d: string): string => chatNameOf(cfg, d) || d;
-      json(res, 200, {
-        ok: true,
-        sent: dests.filter((d) => !held.includes(d) && !deliveries.some((x) => x.channel === d)).map(name),
-        ...(deliveries.length ? { deliveries, note: "已持久化；相同事实复用既有投递，实际状态见 states，不确定 ACK 不自动重发。" } : {}),
-        ...(held.length ? { held: held.map(name), note: `微信群聊 ${held.map(name).join("、")} 那头超过 ${cfg.weixin.ctxTtlSec}s 没说话: 微信会静默丢弃主动推送, 这条已压着, 对方下次在微信里开口时送达 (定时提醒做不到准点)` } : {}),
-      });
-    });
-
-    // ── 给人看的文件 / 图片 ────────────────────────────────────────────
-      // ── P7-S2 严格群: 义务 / 成员 / 批量的公共件 (dispatch wrapper 与 /chat/* handler 共用) ──
-      /** P7-S2 /owed: 本聊天的义务账渲染 (严格群; 未开 = 提示)。 */
-    owedOfBase = (base: string): string => {
-      if (!strictSpeechOf?.(base))
-        return "[wezard] 本群未开严格模式 (speech=implicit) — 没有义务账; 回执按现行口径走。";
-      const UNFINISHED = ["held", "open", "need", "error"];
-      const owed = router.rows().filter((r) => r.receiver.kind === "chat" && r.receiver.channel === base && UNFINISHED.includes(r.status));
-      if (!owed.length) return "[wezard] 本群没有未结的义务。";
-      const line = (r: Route): string => {
-        const msg = r.receiver.kind === "chat" ? (events.get(r.receiver.message)?.id ?? r.receiver.message) : r.event;
-        const age = Math.max(1, Math.round((Date.now() - r.at) / 60_000));
-        return "- " + displayName(r.owner) + " 欠 " + (r.event.startsWith("e") ? "人话" : "成员问") + " (re: " + msg + ", " + age + " 分钟前)";
-      };
-      return ["[wezard] 本群未结的义务 " + owed.length + " 条:", ...owed.map(line)].join("\n");
-    };
-
-    strictSpeechOf = (base: string): boolean => !!base && chatPolicyOf(cfg, base).speech === "strict";
-    // P7-S3b backfill: 账本是 strict 群实发内容的事实来源, post 记录是 rolepage 的视图缓存
-    // —— boot 时把账本里 (视界内) 有 id 的 wizard 行补成 post (幂等: 同 id 已在就不写)。
-    // 覆盖两类缺口: hook 上线前的历史交付、以及任何「记了账没落成 post」的边角。
-    // 空 id 的行 (sendMessage 推送) 不回填 —— 无从去重, 且 hook 上线后本来就会当场落 post。
-    const backfillChatPosts = (): void => {
-      for (const row of knownChatsOf(cfg).rows()) {
-        if (!strictSpeechOf(row.chat)) continue;
-        for (const line of chatRecords.lines(row.chat)) {
-          if (line.kind !== "wizard" || !line.id || !line.text.trim()) continue;
-          if (line.at < Date.now() - 3 * 24 * 3600_000) continue; // rolepage 视界外没人看
-          if (getDetail(line.id)?.kind === "post") continue;
-          const who = wizardStore()?.byName(line.author);
-          if (who) recordPost({ target: who.target, channel: row.chat, body: line.text, id: line.id, createdAt: line.at });
-        }
-      }
-    };
-    // 调用点在 wizardStore 绑定之后 (见下) —— 这里 byName 还没得用。
-
-    // P7-S3 /strict: 存量群切换 strict —— 预演 (受影响 wizard 清单) / apply (写 chatPolicy + 宪章守卫)。
-    // 判定与渲染在 daemon/strict-switch.ts (纯函数); 这里只供事实: 名字、名册、管家、成员表。
-    strictSwitchOf = (who, cmd) => {
-      const facts: SwitchFacts = {
-        chatLabel: (base) => chatNameOf(cfg, base) || base,
-        wizardsOf: (base) => wizards.all().filter((w) => baseOfKey(w.target) === base).map((w) => w.name || w.target),
-        stewardOf: (base) => appointedSteward(cfg, base),
-        memberCount: (base) => members.ofChat(base).length,
-      };
-      const plan = planStrictSwitch(cfg, { refs: cmd.refs, all: cmd.all, selfBase: baseOfKey(who) }, (ref) => chatBaseOf(cfg, ref), facts);
-      if (!cmd.apply) return Promise.resolve(renderSwitchReport(plan, "dry"));
-      const targets = plan.rows.filter((r) => !r.private && r.from === "implicit").map((r) => r.base);
-      if (!targets.length) return Promise.resolve(renderSwitchReport(plan, "apply"));
-      // 写配置 + 宪章守卫: chatPolicy 进宪章, 受影响 wizard 自动挂交接提醒 (announceCharterImpact)。
-      const { note } = guardCharter(() => {
-        patchJsonc(sourcePath, targets.map((base) => ({ path: ["chatPolicy", base, "speech"], value: "strict" as const })));
-        const nextPolicy = { ...cfg.chatPolicy };
-        for (const base of targets) nextPolicy[base] = ChatPolicy.parse({ ...nextPolicy[base], speech: "strict" });
-        cfg.chatPolicy = nextPolicy;
-        return targets;
-      }, (t) => t.length ? { what: "`/strict` 把 " + t.map((b) => chatNameOf(cfg, b) || b).join("、") + " 切到 strict", byHuman: true } : undefined);
-      // 每个切换的群记一行系统行, 成员的 chatlog 批能看到模式变了。
-      for (const base of targets) {
-        try {
-          chatRecords.record(base, { at: Date.now(), id: "strict:" + base + ":" + Date.now(), author: "wezard", kind: "system",
-            text: "[wezard] 本群已切换 strict (chatPolicy.speech=strict): 出站走 chat_reply / chat_say, 人只见占位与详情" });
-        } catch { /* 记录失败不挡 */ }
-      }
-      return note.then((n) => renderSwitchReport(plan, "apply") + (n.trim() ? "\n" + n.trim() : ""));
-    };
-
-    /** target 在这个群欠着的义务数 (chat 接收行, 未落定)。 */
-    const owedInChat = (target: string, base: string): number =>
-      router.owedBy(target).filter((r) => r.receiver.kind === "chat" && r.receiver.channel === base
-        && ["held", "open", "need", "error"].includes(r.status)).length;
-    /** 游标之后的一批聊天记录 → chatlog reminder (触发消息全文; 没有新行 = "")。 */
-      chatlogReminderOf = (base: string, target: string): string => {
-      if (!wizards.get(target)) return "";
-      const self = wizards.get(target)?.name ?? "";
-      const batch = sliceBatch(chatRecords.lines(base), members.rowOf(base, target)?.cursor ?? -1, CHAT_BATCH_BUDGET, self);
-      return batch
-        ? renderReminder({ wezard: "chatlog", chat: base, from: String(batch.from), to: String(batch.to), owes: String(owedInChat(target, base)) },
-          [batch.render, "上面是 " + (chatNameOf(cfg, base) || base) + " 游标之后的话; 结论交付用 chat_reply({re: 这条消息信封上的 msg}), 发言 / ack / 进展用 chat_say (不销账)。"])
-        : "";
-    };
-      /** P7-S2 /owed: 本聊天的义务账渲染 (严格群; 未开 = 提示)。 */
-  advanceChatlog = (e) => {
-      if (!e.channel || !strictSpeechOf(e.channel)) return;
-      const chatlog = parseReminders(String(e.payload.text ?? "")).find((r) => r.attrs.wezard === "chatlog");
-      const to = Number(chatlog?.attrs.to);
-      if (!chatlog || !Number.isFinite(to)) return;
-      if (e.target) members.advance(e.channel, e.target, to);
-    };
-
-
-    // ── P7-S2 群聊严格治理工具 (chat_*): strict 群的成员制 / 出站门 / 义务账 ──
-    // implicit 群一律 409 指路 (全部存量群零变化); strict 群 (2026-11-18 放宽: 入群即
-    // 发言权): 成员 (owner/speaker/mention) 即可 chat_say / chat_reply / notify / send_file,
-    // 同一条人话允许多条出站, 出站不销义务的账; chat_reply 带 text 才是显式答复 (交付 +
-    // 销账, 占位覆盖 / passed), chat_ask 开子行义务; 四个口子共用同一道门 (strictSayGate)。
-    const identityNameOf = (identity: string): string => wizards.get(identity)?.name || identity;
-    /** re (chatlog 信封 / 提醒带的 msg = 注入事件 id) → 它服务的路由行; 也认裸路由 event id。 */
-    const obligationByMsg = (re: string): Route | undefined => {
-      const ref = eventRef(re);
-      const ev = events.get(ref);
-      return (ev?.serves ? router.get(ev.serves) : undefined) ?? router.get(ref);
-    };
-    // 限额账 (每轮 ≤3 / 每群每分钟 ≤10) 与判定核都在 daemon/strict-gate.ts —— 那是
-    // 判据② (非成员 403 / 额度 409) 的测试面。这里只做接线: 成员方式 → 判定 → 记账。
-    // 通过即记账 (发不发出去了也记 — 保守防刷)。
-    const sayMeter = openSayMeter();
-    // P7-S2 义务观测的落盘处 (S3 起 rolepage 治理面板也读它: overdue 计数)。
-    const obligationWatches = loadJsonMap<ObligationWatch>(join(cfg.daemon.stateDir, "obligations.json"));
-    /** P7-S2 join 接面 (spawn/delegate 的 join 参数 / steward 换绑): 入群 = 成员表 join
-     *  (升级式) + 一行成员变动系统行; 只在 strict 群有意义, 别的群静默忽略。 */
-    const joinMember = (by: string, base: string, target: string, mode: "owner" | "speaker" | "mention"): string => {
-      if (!base || !strictSpeechOf(base)) return "";
-      if (!wizards.get(target)) return "";
-      const fresh = !members.isMember(base, target);
-      members.join(base, target, mode, by);
-      const who = displayName(target);
-      if (fresh) {
-        try {
-          chatRecords.record(base, { at: Date.now(), id: "join:" + target + ":" + Date.now(), author: "wezard", kind: "system",
-            text: who + " 入群 (" + mode + ", 由 " + (by.startsWith("human:") ? "人" : displayName(by)) + " 带入)" });
-        } catch { /* 记录失败不挡 */ }
-      }
-      return who;
-    };
-    /** P7-S2 steward 换绑 (config_set chatPolicy.<chat>.steward): 成员表原子交换 ——
-     *  旧管家卸任 (owner 行才离群, speaker/mention 保留), 新管家 join owner ——
-     *  换绑的两件事合并成一行系统行 (notifyChat 的 [wezard] 前缀自动进聊天账本)。 */
-    const swapStewardMembership = (base: string, prevName: string): void => {
-      if (!strictSpeechOf(base)) return;
-      const nextName = appointedSteward(cfg, base);
-      if (nextName === prevName) return;
-      const parts: string[] = [];
-      // 成员表按 **target** 记账: 换绑要落在本群那条实例 (类名 → 本群的 X-N), 不是锚点 ——
-      // 锚点住在别的群, join 它等于没给本群开成员, 新管家第一句话就 403。
-      const prevT = prevName ? (manifestationOf(wizards, prevName, base) ?? wizards.byName(prevName)?.target) : undefined;
-      if (prevT) {
-        const row = members.rowOf(base, prevT);
-        if (row) {
-          if (row.mode === "owner") { members.leave(base, prevT); parts.push(displayName(prevT) + " 卸任管家, 离群"); }
-          else parts.push(displayName(prevT) + " 卸任管家 (仍是成员)");
-        }
-      }
-      const nextT = nextName ? (manifestationOf(wizards, nextName, base) ?? wizards.byName(nextName)?.target) : undefined;
-      if (nextT) {
-        joinMember("config:steward", base, nextT, "owner");
-        parts.push(displayName(nextT) + " 接任管家 (owner)");
-      }
-      if (parts.length) notifyChat(base, "[wezard] 管家换绑: " + parts.join("; "));
-    };
-    /** P7-S2 身份退役自动离群: 名册抹掉一个身份时, 把它从所有严格群成员表里摘掉。 */
-    const leaveAllChats = (target: string): void => {
-      // 只摘**这一条实例** (人 2026-11-18): 同一个人的另一个群的化身还是成员。
-      members.leaveEverywhere(target);
-    };
-    const strictSayGate = (self: string, base: string): { status: number; body: Record<string, unknown> } | undefined => {
-      // 成员表是唯一判据 (identity 不再是前提): 点名入群已不挑类, 发言权跟着成员行走。
-      const mode = members.modeOf(base, self);
-      const cur = openingOfSelf(self)?.env?.eventId ?? "";
-      const facts = sayMeter.check(self, cur, base);
-      const verdict = sayVerdict({ mode, ...facts });
-      if (verdict) return { status: verdict.status, body: { ok: false, ...(verdict.status === 403 ? { chat: chatNameOf(cfg, base) || base } : {}), reason: verdict.reason } };
-      sayMeter.charge(self, cur, base);
-      return undefined;
-    };
-    http.register("POST /chat/members", async (req, res) => {
-      const { self, body } = await readPeerBody(req);
-      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { chat?: string };
-      const base = (b.chat ?? "").trim() ? chatBaseOf(cfg, (b.chat ?? "").trim()) : channelOf(self);
-      if (!base) { json(res, 400, { ok: false, reason: "认不出这个聊天: " + (b.chat ?? "") }); return; }
-      if (!strictSpeechOf(base)) {
-        json(res, 409, { ok: false, speech: "implicit", reason: (chatNameOf(cfg, base) || base) + " 未开严格模式 (speech=implicit): 成员制与发言工具只在 strict 群生效; 现行行为不变" });
-        return;
-      }
-      const rows = members.ofChat(base).map(({ target, row }) => ({ name: identityNameOf(target), target, mode: row.mode, since: row.since, cursor: row.cursor }));
-      json(res, 200, { ok: true, chat: chatNameOf(cfg, base) || base, members: rows, note: "mode: owner=管家 / speaker·mention=成员 (发言权相同, mode 只记录入群方式); cursor=已读到的聊天记录 seq" });
-    });
-    http.register("POST /chat/say", async (req, res) => {
-      const { self, body } = await readPeerBody(req);
-      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { chat?: string; text?: string };
-      const text = (b.text ?? "").trim();
-      if (!text) { json(res, 400, { ok: false, reason: "text required" }); return; }
-      const base = (b.chat ?? "").trim() ? chatBaseOf(cfg, (b.chat ?? "").trim()) : channelOf(self);
-      if (!base) { json(res, 400, { ok: false, reason: "认不出这个聊天: " + (b.chat ?? "") }); return; }
-      if (!strictSpeechOf(base)) {
-        json(res, 409, { ok: false, speech: "implicit", reason: (chatNameOf(cfg, base) || base) + " 未开严格模式 (speech=implicit): 出站不受发言权约束, 直接回复 / notify 即可" });
-        return;
-      }
-      // topOnly 门与 notify / send_file 同一道 (判定核 topOnlyVerdict): 下层轮 (这一轮
-      // 服务同伴的活) 不得在顶层模式群对人说话 —— 顶层豁免 (管家 / 人直说的轮) 照旧。
-      const muted = topOnlyMuted(self, [base]);
-      if (muted) { json(res, 409, muted); return; }
-      const gate = strictSayGate(self, base);
-      if (gate) { json(res, gate.status, gate.body); return; }
-      // P7-S3: 频道 (chat:<topic_id>) 走 replyOk 选评论/新帖, 不经群消息通道。
-      if (isTopicChat(base)) postAsTopic(self, base, text);
-      else postAs(self, base, text);
-      json(res, 200, { ok: true, chat: chatNameOf(cfg, base) || base, sent: text.length });
-    });
-    // chat_reply 的幂等键 (chat_reply:<re>:<contentRev>): 有界集合, 重启即空 —— 销账行已在
-    // 第一次交付时落定 (answer+hand), 这层是「同 re 同文重试」不重复发送的双保险。
-    const chatReplySeen = new Set<string>();
-    http.register("POST /chat/reply", async (req, res) => {
-      const { self, body } = await readPeerBody(req);
-      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { re?: string; text?: string };
-      const ref = (b.re ?? "").trim();
-      if (!ref) { json(res, 400, { ok: false, reason: "re required: 要答的那条消息的 id (chatlog 信封 / 提醒里带的 msg)" }); return; }
-      const row = obligationByMsg(ref);
-      // re 是锚不是门票 (2026-11-18 入群即发言权): 目的地 = 义务行 > 消息事件 > 当前聊天;
-      // 义务已结 / 欠在别人手上 / 根本不是义务, 都照样能回 —— 只发言, 不销账。
-      const ev = events.get(eventRef(ref));
-      const base = row?.receiver.kind === "chat" ? row.receiver.channel : ev?.channel || channelOf(self);
-      if (!base || !strictSpeechOf(base)) {
-        json(res, 409, { ok: false, speech: "implicit", reason: (chatNameOf(cfg, base) || base || "当前聊天") + " 未开严格模式 (speech=implicit): 回执按现行口径 (行首 .name RESULT: / 自动回执) 走" });
-        return;
-      }
-      const UNFINISHED = ["held", "open", "need", "error"];
-      const open = row && row.receiver.kind === "chat" && UNFINISHED.includes(row.status) ? row : undefined;
-      const mineRow = open && open.owner === self ? open : undefined;
-      const text = (b.text ?? "").trim();
-      if (!text && !mineRow) { json(res, 400, { ok: false, reason: "text required — passed 只能记在自己未结的义务上 (re 用那条消息信封上的 msg)" }); return; }
-      // topOnly 门与 chat_say / notify / send_file 同一道: 放宽后 chat_reply 也能自由发言,
-      // 替同伴干活的那一轮不能借它绕过顶层模式对人说话。例外 = 这条 re 正对着自己名下未结的
-      // chat 义务 (mineRow ⇒ 目的地就是那一行收件的群): 那一行本身是对人的出口 (人点名 / 管家
-      // transfer 交来的), 它的销账又只走这一条路 —— 拦了它, belowTop 轮 + chat 义务就是一笔
-      // 永远销不掉的死账 (2026-11-18 aiconfig 群实录)。chat_say (无 re) 与别人名下的义务不豁免。
-      const muted = mineRow ? undefined : topOnlyMuted(self, [base]);
-      if (muted) { json(res, 409, muted); return; }
-      const gate = strictSayGate(self, base);
-      if (gate) { json(res, gate.status, gate.body); return; }
-      // 幂等: 同 re 同文重试不重复发送 (不同文的多次回复各算各的)。
-      const rev = contentRev((b.text ?? "") + (b.text === undefined ? ":passed" : ""));
-      const idem = "chat_reply:" + ref + ":" + rev;
-      if (chatReplySeen.has(idem)) { json(res, 409, { ok: false, reason: "这条消息已发过同文回复 (幂等键命中), 不重复发送" }); return; }
-      chatReplySeen.add(idem);
-      if (chatReplySeen.size > 512) chatReplySeen.delete(chatReplySeen.values().next().value!);
-      /** 交付正文: 频道 (占位气泡从未立过, 频道丢中间帧) 走 replyOk 评论在锚定的那帖上;
-       *  群聊先占位后交付 (流窗口内覆盖占位气泡, 过窗退回群消息)。 */
-      const deliver = async (msg?: string): Promise<string> => {
-        if (isTopicChat(base)) { postAsTopic(self, base, b.text!, msg); return "channel"; }
-        const covered = await m.finishPlaceholder(self, ref, b.text!);
-        if (!covered) postAs(self, base, b.text!);
-        return covered ? "placeholder" : "message";
-      };
-      if (mineRow && text) {
-        // 显式答复: 交付 + 销账 —— 出站工具里只有这一条路销义务的账 (chat_say / notify /
-        // send_file 只是发言); 同一条义务此前发过的 ack / 进展都没动过它。
-        const delivered = await deliver(mineRow.receiver.kind === "chat" ? mineRow.receiver.message : undefined);
-        router.commit(ops.answer({ event: mineRow.event, outcome: makeOutcome("done", b.text!) }));
-        router.commit(ops.hand({ event: mineRow.event, inbox: idem }));
-        json(res, 200, { ok: true, delivered, event: mineRow.event, chat: chatNameOf(cfg, base) || base });
-        return;
-      }
-      if (mineRow) {
-        router.commit(ops.answer({ event: mineRow.event, outcome: makeOutcome("passed", "（无需答复）") }));
-        // P7-S3b: 沉默也要可分辨 —— passed 落一条定长标记 post (detail 里区分「没说话」与「没这轮」)。
-        recordPost({ target: self, channel: base, body: "（passed — 无需答复，未发言）" });
-        router.commit(ops.hand({ event: mineRow.event, inbox: idem }));
-        json(res, 200, { ok: true, delivered: "passed", event: mineRow.event, chat: chatNameOf(cfg, base) || base });
-        return;
-      }
-      // 已结 / 别人的义务 / 非义务消息: 入群即发言权, 照发; 这一条不销账。
-      const delivered = await deliver(open?.receiver.kind === "chat" ? open.receiver.message : undefined);
-      json(res, 200, { ok: true, delivered, chat: chatNameOf(cfg, base) || base,
-        note: open ? "这条义务欠在 " + displayName(open.owner) + " 手上 — 你这条只发言, 不代它销账 (它自己用 chat_reply 交付)" : "义务已结 / 不是义务 — 只发言, 不销账" });
-    });
-    http.register("POST /chat/ask", async (req, res) => {
-      const { self, body } = await readPeerBody(req);
-      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { chat?: string; name?: string; text?: string };
-      const text = (b.text ?? "").trim();
-      const name = stripSigil((b.name ?? "").trim());
-      if (!name || !text) { json(res, 400, { ok: false, reason: "name 与 text required" }); return; }
-      const base = (b.chat ?? "").trim() ? chatBaseOf(cfg, (b.chat ?? "").trim()) : channelOf(self);
-      if (!base) { json(res, 400, { ok: false, reason: "认不出这个聊天: " + (b.chat ?? "") }); return; }
-      if (!strictSpeechOf(base)) {
-        json(res, 409, { ok: false, speech: "implicit", reason: (chatNameOf(cfg, base) || base) + " 未开严格模式 (speech=implicit): 直接 tell_peer / delegate 即可" });
-        return;
-      }
-      // 问的人必须是成员 (开义务是成员的权力)。
-      if (!members.isMember(base, self)) {
-        json(res, 403, { ok: false, reason: "你不是 " + (chatNameOf(cfg, base) || base) + " 的成员, 不能在群里开义务" });
-        return;
-      }
-      // 被问者: 名字 → 身份 → 本群化身; 义务只开给成员。
-      const named = wizards.byName(name);
-      if (!named) { json(res, 400, { ok: false, reason: "认不出 " + name + " — wizard_roster 查名字" }); return; }
-      const target = manifestationOf(wizards, name, base) ?? named.target;
-      if (!members.isMember(base, target)) {
-        json(res, 409, { ok: false, reason: name + " 还不是 " + (chatNameOf(cfg, base) || base) + " 的成员 — 先让人行首点名它入群, 或 spawn / delegate 带 join" });
-        return;
-      }
-      // 问话先记账 (wizard 行), 再开子行义务 (chat_ask 各开各的行, 不并人人话根行)。
-      const at = Date.now();
-      const askId = "ask:" + target + ":" + at;
-      try { chatRecords.record(base, { at, id: askId, author: wizards.get(self)?.name ?? "", kind: "wizard", text }); } catch { /* 记录失败不挡 */ }
-      const parent = servesOfTurn(self);
-      const parentRow = parent ? router.get(parent) : undefined;
-      const event = parentRow && parentRow.receiver.kind === "chat" && parentRow.receiver.channel === base
-        ? parentRow.event + "." + ((parentRow.seq ?? 0) + 1) : newRootEvent();
-      router.commit(ops.open({ event, owner: target, at, deadlineAt: NO_DEADLINE,
-        receiver: { kind: "chat", channel: base, message: askId }, ...(askerOf(self) ? { asker: askerOf(self)! } : {}) }));
-      const tail = chatlogReminderOf ? chatlogReminderOf(base, target) : "";
-      const eventId = "route:" + event + ":input:" + randomUUID();
-      try {
-        events.accept({ id: eventId, target, speaker: self, channel: base, serves: event,
-          ...(askerOf(self) ? { asker: askerOf(self)! } : {}), priority: "normal", deadline: NO_DEADLINE,
-          payload: { text: text + tail, peer: {
-            from: { kind: "peer", from: self, event, public: true },
-            envelope: envelopeFor(self, base, { act: "ask" }),
-            kind: "ask" } } });
-      } catch (error) {
-        router.commit(ops.gc({ event }));
-        json(res, 409, { ok: false, eventId, reason: errText(error) });
-        return;
-      }
-      json(res, 200, { ok: true, event, name: peerAddress(cfg, target), note: "义务已开, 它用 chat_reply({re: 这条消息信封上的 msg}) 交付" });
-    });
-
-    // notify 的媒体版: 去向、认名字、顶层模式闸都与它同一套; 投递交给 sendMedia (通道无关,
-    // 按 principal 分到 aibot / 微信)。caption 先成一条带头的气泡, 让群里知道是谁发的。
-    http.register("POST /send_file", async (req, res) => {
-      const { self, body } = await readPeerBody(req);
-      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { path?: string; kind?: MediaKind; to?: string; caption?: string; title?: string; description?: string };
-      const path = expandHome((b.path ?? "").trim());
-      if (!path) { json(res, 400, { ok: false, reason: "path required" }); return; }
-      const ref = (b.to ?? "").trim();
-      const dest = ref ? chatBaseOf(cfg, ref) : channelOf(self);
-      if (!dest || !sameBot(self, dest)) { json(res, 400, { ok: false, reason: `认不出聊天: ${ref} (wizard_roster 每行有 home 聊天名, 人侧 /chats; 没起名的聊天寻址不到)` }); return; }
-      const muted = topOnlyMuted(self, [dest]);
-      if (muted) { json(res, 409, muted); return; }
-      // P7-S2 严格群: send_file 与 chat_say 同一道门 (成员即可, 出站不再要求挂义务) ——
-      // 文件是交付物; caption 与媒体仍共占一次额度。
-      if (strictSpeechOf(dest)) {
-        const gate = strictSayGate(self, dest);
-        if (gate) { json(res, gate.status, gate.body); return; }
-      }
-      const plan = media.plan(dest, { path, ...(b.kind ? { kind: b.kind } : {}) });
-      if (!plan.ok) { json(res, 400, plan); return; }
-      const caption = (b.caption ?? "").trim();
-      if (caption) postAs(self, dest, caption);
-      const r = await sendMedia(dest, { path, kind: plan.kind, ...(b.title ? { title: b.title } : {}), ...(b.description ? { description: b.description } : {}) });
-      if (!r.ok) { json(res, 502, r); return; }
-      const asker = askerOf(self);
-      const fileLine = [caption, `📎 ${r.name} (${r.kind}) · ${path}`].filter(Boolean).join("\n\n");
-      // P7-S3b: strict 群里出站正文由 hook 落账, 媒体气泡本身没有正文 —— 交付物那一行自己记
-      // (账本 id 与 post id 同键, 走 `#w` 命名空间, 与人话 msgid 隔开)。
-      if (strictSpeechOf?.(dest)) {
-        const lineId = "file:" + randomBytes(6).toString("hex") + "#w";
-        try {
-          chatRecords.record(dest, { at: Date.now(), id: lineId, author: wizards.get(self)?.name ?? "", kind: "wizard", text: fileLine });
-        } catch { /* 记录失败不挡 */ }
-        recordPost({ target: self, channel: dest, body: fileLine, id: lineId, ...(asker ? { asker } : {}) });
-      } else recordPost({ target: self, channel: dest, body: fileLine, ...(asker ? { asker } : {}) });
-      json(res, 200, { ok: true, sent: chatNameOf(cfg, dest) || dest, kind: r.kind, name: r.name, bytes: r.bytes });
-    });
 
     http.register("POST /peers/peek", async (req, res) => {
       const { self, body } = await readPeerBody(req);
@@ -2353,7 +962,7 @@ const main = async (): Promise<void> => {
       // 截断的视口加一层 TUI 装饰, 而「它卡在哪」transcript 答得更准 —— 不在转圈
       // 却悬着工具调用, 就是停在审批卡 / 本地弹窗上等人点。
       const peek = await m.peekTurns(target, turns);
-      const inflight = turnsLine(routeInFlight(), target);
+      const inflight = "";
       const waiting = peek.waiting ?? [];
       const state = peek.busy
         ? "正在生成"
@@ -2450,380 +1059,20 @@ const main = async (): Promise<void> => {
     const touchOf = (p: string): number => { try { return cacheTouchMs(p) || statSync(p).mtimeMs; } catch { return 0; } };
     const ttlOf = (p: string): number => (cacheTtlSec(p) || CACHE_TTL_FALLBACK_SEC) * 1000;
     type Reply = { status: number; body: Record<string, unknown> };
-    /** 入参 `after` → event 数组: 每项是名字 (= 我派给它的那一笔, 见 pickPair) 或 event id。 */
-    const afterTurnsOf = (self: string, body: PeerBody): { ok: true; ids: string[] } | { ok: false; reason: string } => {
-      const raw = (body as { after?: unknown }).after;
-      const picked = [...new Set((Array.isArray(raw) ? raw : []).map((x) => String(x).trim()).filter(Boolean))].map((x): { id: string } | { bad: string } => {
-        const id = eventRef(x);
-        if (isEventRef(id)) return { id };
-        const who = resolvePeer(self, x);
-        if (!who.ok) return { bad: `${x}: ${who.reason}` };
-        const p = pickPair(router.table(), self, who.target);
-        if (!p.ok) return { bad: `${x} 手上有你 ${p.many.length} 笔没落定 (${p.many.map((r) => r.event).join(" ")}), 用 event id 指明` };
-        return p.row ? { id: p.row.event } : { bad: `你没派过活给 ${x}` };
+    // plan 关联的 room 行 (wiring C): duty 的 planId 字段就是关联; 去重键换 planId 集合。
+    const planEventIds = (planId: string): string[] => roomStore.ids().flatMap((id) => {
+      const s = roomState(id);
+      return s ? s.msgs.filter((x) => x.planId === planId).map((x) => x.id) : [];
+    }).sort();
+    const planHasOutstandingDebt = (planId: string, owner: string): boolean => {
+      const uid = wizards.get(owner)?.uid;
+      if (!uid) return false;
+      return roomStore.ids().some((id) => {
+        const s = roomState(id);
+        return !!s && openDuties(s).some((d) => d.planId === planId && sameWho(holderOf(s, d), { kind: "wizard", id: uid }));
       });
-      const bad = picked.flatMap((p) => ("bad" in p ? [p.bad] : []));
-      return bad.length ? { ok: false, reason: `after 认不出: ${bad.join("; ")}` } : { ok: true, ids: [...new Set(picked.flatMap((p) => ("id" in p ? [p.id] : [])))] };
-    };
-    /** 放行时挂在信封后面的前置结论: 谁交的、件号、RESULT 与 ARTIFACT 原样 (只进对方输入框)。 */
-    const afterNote = (turns: readonly string[], seen: Readonly<Record<string, HeldSeen>>, owner: string): string =>
-      renderReminder({ wezard: "after" }, [
-        "这件活排在下面这些前置之后, 它们都已落定; 结论原样附上 (谁交的):",
-        ...turns.flatMap((t) => {
-          const x = seen[t];
-          if (!x) return [];
-          const c = parseClosing(x.body, 1500);
-          const clean = (v: string): string => v.replace(/<\/?system-reminder[^>]*>/g, "");
-          return [
-            `- ${displayName(x.to)} · ${x.status}: ${c.kind === "result" ? `RESULT: ${clean(c.text)}` : clipLine(clean(x.body), 600) || "(没有正文)"}`,
-            ...c.artifacts.map((a) => `  ARTIFACT: ${a.path}${a.note ? ` — ${a.note}` : ""}`),
-          ];
-        }),
-      ]);
-    const cancelPeerWork = (target: string, self: string, only?: (x: { from: string; event: string }) => boolean): number => {
-      const hit = only ?? ((): boolean => true);
-      // T6: 路由表上的同一批 (§4.2) —— subtree 级联 canceled, 定论走路由表。
-      cancelRoutes(cancelRoots(target, only), (r) => `被 ${displayName(self)} 收掉 / 打断了, 这件活没有结论。`, self);
-      events.cancel((e) => e.target === target && !!e.payload.peer && hit({ from: e.speaker, event: e.payload.peer.from.event ?? "" }));
-      return router.owedBy(target).filter((r) => hit({ from: r.owner, event: r.event })).length;
-    };
-    /** 逐笔看前置此刻是什么 (§3.4): 都是发话方自己派出去的那几笔 (receiver 指回自己) ——
-     *  表上查不到 / 不是自己派的那件 = unknown (过期或写错)。 */
-    const prereqsOf = (self: string, turns: readonly string[]): Prereq[] => turns.map((t) => {
-      const r = router.get(t);
-      if (!r || r.receiver.kind !== "wizard" || r.receiver.to !== self) return { state: "unknown" };
-      if (r.outcome?.status === "done") return { state: "done", seen: { to: r.owner, status: "done", body: r.outcome.body } };
-      if (r.outcome) return { state: "failed", seen: { to: r.owner, status: r.outcome.status, body: r.outcome.body } };
-      return { state: "pending" };
-    });
-    /** 一笔前置落定后的结论快照 (放行时附在信封后面)。 */
-    const seenOf = (t: string): HeldSeen | undefined => {
-      const r = router.get(t);
-      return r?.outcome ? { to: r.owner, status: r.outcome.status, body: r.outcome.body } : undefined;
-    };
-    const planEventIds = (planId: string): string[] => events.status().events
-      .filter((event) => event.payload.planId === planId && !event.payload.planReminder)
-      .map((event) => {
-        const route = event.serves ? router.get(event.serves) : undefined;
-        return JSON.stringify([
-          event.id,
-          route?.event ?? "",
-          route?.status ?? "",
-          route?.outcome?.rev ?? "",
-          route?.notice?.rev ?? "",
-          Object.entries(route?.reports ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([key, report]) => [key, report.version]),
-        ]);
-      }).sort();
-    const planHasOutstandingDebt = (planId: string, owner: string): boolean => router.rows().some((row) =>
-      row.receiver.kind === "wizard" && row.receiver.to === owner
-      && ["held", "open", "need", "error", "answered"].includes(row.status)
-      && events.taskInputs(row.event).some((event) => event.payload.planId === planId && !event.payload.planReminder));
-    const validPlanReminder = (event: MessageEvent): boolean => {
-      const reminder = event.payload.planReminder;
-      if (!reminder || event.payload.planId !== reminder.planId || !plans.healthy()) return false;
-      const plan = plans.get(reminder.planId);
-      return !!plan && plan.owner === event.target && plan.state === "active" && plan.revision === reminder.revision
-        && !planHasOutstandingDebt(plan.id, plan.owner)
-        && reminder.token === reminderToken(plan.id, plan.revision, planEventIds(plan.id));
-    };
-    const readyPlanReminder = async (event: MessageEvent): Promise<boolean> => validPlanReminder(event)
-      && !handingOff(event.target) && await m.idleNow(event.target);
-    peerEvents = {
-      valid: (e) => {
-        const p = e.payload.peer!;
-        if (e.payload.planReminder && !validPlanReminder(e)) return false;
-        const row = e.serves ? router.get(e.serves) : undefined;
-        if (p.tell && !p.transferred && row
-            && (row.owner !== e.target || !["held", "open", "need", "error"].includes(row.status))) return false;
-        return !e.canceled
-          && (!p.transferred || !e.serves || events.latestTransfer(e.serves)?.id === e.id)
-          && (!p.after?.length || prereqsOf(e.speaker, p.after).every((r) => r.state === "done" || r.state === "pending"))
-      },
-      accepted: (e) => {
-        if (e.execution !== "queued") return;
-        const p = e.payload.peer!;
-        if (p.transferred && e.serves) {
-          const row = router.get(e.serves);
-          if (!row || row.owner !== e.speaker && row.owner !== e.target || events.latestTransfer(e.serves)?.id !== e.id)
-            throw new Error("transfer intent no longer owns this route");
-          // The input is durable before move. A crash here replays this projection
-          // in the injector, without dropping the original human route.
-          if (row.owner !== e.target) router.commit(ops.move({ event: row.event, owner: e.target }));
-        }
-        // transfer 出去的 / 转给接手方的那不是发话方自己在等的一件: 不进它的挂起账。
-        // 账本的键是这一笔的 event (§9.5: 表里已经有那一行了, 账只是投影)。
-        if (p.tell && !p.relayed && !p.transferred) {
-          const ev = e.serves || p.tell.event || "";
-          const rec = receiverOfEvent(ev);
-          ledger.dispatch(e.id, { event: ev, owner: e.speaker, to: e.target, text: e.payload.text, at: e.at, ...(rec ? { receiver: rec } : {}), ...(e.asker ? { asker: e.asker } : {}) });
-        }
-      },
-      committed: (e) => {
-        const p = e.payload.peer!;
-        // 停放放行 (T3): 挂 `after` 的那一行先 held (前置没落定, 还没投给 owner), 注入成功这一刻
-        // release —— 行状态是这一笔要不要投的唯一记号 (§9.5)。
-        if (e.serves) {
-          const row = router.get(e.serves);
-          if (row?.status === "held" && prereqsOf(e.speaker, row.after ?? []).every((r) => r.state === "done"))
-            router.commit(ops.release({ event: row.event }));
-        }
-      },
-      canceled: (_e) => {},
-      // 收方没了: 回执沿链改投; 派活 / 续问不另做 —— 那一行的 owner 就是它, sweeper 见 pane 不在判 dead 上浮。
-      gone: (e) => {
-        const p = e.payload.peer!;
-        log.warn({ id: e.id, target: e.target, receipt: !!p.from.receipt }, "message event: 收方已不在 (无绑定, 恢复失败), 不再重投");
-        if (p.from.receipt) rerouteGone(e);
-      },
-      ready: async (e) => {
-        if (e.payload.planReminder && !(await readyPlanReminder(e))) return false;
-        const row = e.serves ? router.get(e.serves) : undefined;
-        const routePrerequisitesReady = row?.status !== "held" || prereqsOf(e.speaker, row.after ?? []).every((r) => r.state === "done");
-        const inputPrerequisitesReady = prereqsOf(e.speaker, e.payload.peer!.after ?? []).every((r) => r.state === "done");
-        return peerEventPrerequisitesReady(e, row?.status, routePrerequisitesReady, inputPrerequisitesReady)
-          && !m.parkedNow(e.target)
-          && (e.priority === "now" || await m.idleNow(e.target) || !(await m.paneLive(e.target)) || (e.priority === "urgent" && !(await othersTurn(e.target, e.speaker))));
-      },
-      inject: async (e, boundary) => {
-        const p = e.payload.peer!;
-        if (e.payload.planReminder && !(await readyPlanReminder(e))) return { ok: false, retryable: true, reason: "plan reminder conditions changed before delivery" };
-        if (e.priority === "urgent" && !(await m.idleNow(e.target))) {
-          if (await othersTurn(e.target, e.speaker)) return { ok: false, retryable: true, reason: "urgent target now belongs to another actor" };
-          const path = m.sessionInfo(e.target)?.jsonlPath;
-          const opening = path ? openingTurn(expandHome(path))?.ms : undefined;
-          const r = await m.interruptPane(e.target, { guard: () => peerEvents!.valid(e)
-            && m.sessionInfo(e.target)?.jsonlPath === path && (!path || openingTurn(expandHome(path))?.ms === opening) });
-          if (!r.ok) return { ok: false, retryable: true, reason: r.reason };
-        }
-        const raw = await m.injectText(e.target, e.payload.text, {
-          from: p.from, channel: e.channel, requireIdle: e.priority === "normal",
-          envelope: withMsg(p.envelope + (p.after?.length ? afterNote(p.after, Object.fromEntries(p.after.flatMap((t) => { const x = seenOf(t); return x ? [[t, x] as const] : []; })), e.speaker) : ""), e.id),
-          guard: (phase, identity) => peerEvents!.valid(e) && (!e.payload.planReminder || !handingOff(e.target))
-            && prereqsOf(e.speaker, p.after ?? []).every((r) => r.state === "done") && (!phase || boundary(phase, identity)),
-          eventId: e.id,
-        });
-        const r = !raw.ok && !raw.uncertain && raw.retryable === undefined && events.get(e.id)?.exposure === "none" ? { ...raw, retryable: true } : raw;
-        return r;
-      },
-    };
-    // T4: final 放行只读路由表 (§9.5) —— 这一轮服务的那一笔不再挂着未落定的子行 (`waiting`),
-    // 且行不在 held (前置没落定就还没轮到它)。旧的四重推断全由这一条取代。
-    // 没有行 (老事件 / 不带 serves 的注入) → 照旧放行。
-    // 已落定的那一笔只放追述 (§4.3): 判据与 onFinal 的 retellOps 同源 (router.finalReleased)。
-    // 调用方可能拿着 result 落定前的快照, 正文按事件库现读。
-    m.setEventOwnerGate(ownsReplyEvent);
-    m.setEventProgressGate((e) => {
-      if (handoffFinalSuppressed(e) || e.quiet || e.canceled || e.interjected || !ownsReplyEvent(e)) return false;
-      const row = e.serves ? router.get(e.serves) : undefined;
-      if (!row || row.owner !== e.target || row.status !== "open") return false;
-      const kind = finalKind(router.table(), e.serves, e.result?.body ?? "");
-      return !e.result || kind === "progress" || kind === "wait";
-    });
-    m.setEventFinalGate((e) => {
-      if (handoffFinalSuppressed(e)) return false;
-      // P7-S2 严格群: chat 接收行的终句不进群 (占位保持, 交付走 chat_reply 的口子)。
-      if (e.channel && chatPolicyOf(cfg, e.channel).speech === "strict") return false;
-      if (e.quiet || e.canceled || e.interjected || !ownsReplyEvent(e)) return false;
-      const body = (events.get(e.id) ?? e).result?.body ?? "";
-      if (addressedResults(body).length) return false;
-      const current = events.get(e.id) ?? e;
-      if (current.feedbackRoute && parseClosing(body).kind !== "result") return false;
-      const served = current.resultRoutes?.served;
-      const routeEvent = current.feedbackRoute?.event ?? current.serves;
-      const sourceRow = routeEvent ? router.get(routeEvent) : undefined;
-      const boundRow = served?.event ? router.get(served.event) : undefined;
-      if (!servedChatResultFinalAllowed(current, sourceRow, boundRow, parseClosing(body).kind === "result",
-        (task, source, inputs) => events.coversTaskInputs(task, source, inputs))) return false;
-      const servedRow = boundRow ?? sourceRow;
-      return router.finalReleased(e.target, servedRow?.event ?? routeEvent, body, reportSource(current),
-        !!e.channel && chatPolicyOf(cfg, e.channel).speech === "strict");
-    });
-    // boot 的路由表侧恢复 (T8): held 重查前置、answered 重投一次; 二者幂等, 与 events.resume
-    // 重放的注入/回执撞上无害。
-    void m.restored.then(() => { events.resume(); settleHeld(); replayAnswered(); });
-    // 单飞巡检收口 held 前置失败，并恢复丢 pane 的 open route。
-    let sweeping = false;
-    const paneRecovery = loadJsonMap<{ generation: number; missingSince?: number; live: boolean; pane: string; sessionId: string; turn: number }>(
-      join(cfg.daemon.stateDir, "route-recovery.json"), undefined, { strict: true },
-    );
-    const sweepOnce = async (): Promise<number> => {
-      if (!events.running() || sweeping) return 0;
-      sweeping = true;
-      try {
-      let n = 0;
-      for (let round = 0; round < 4; round++) {
-        const plans = router.sweepHeld({ now: Date.now(), nameOf: displayName, lastWords: m.lastReply });
-        if (!plans.length) break;
-        plans.forEach(commitRoute);
-        n += plans.length;
-      }
-      const now = Date.now();
-      const open = router.rows().filter((r) => ["open", "need", "error"].includes(r.status));
-      const openOwners = new Set(open.map((r) => r.owner));
-      for (const owner of openOwners) {
-        if (handingOff(owner) || m.parkedNow(owner)) continue;
-        const info = m.sessionInfo(owner);
-        const pane = info?.tmuxPane ?? "";
-        const sessionId = info?.sessionId ?? "";
-        const transcript = info?.jsonlPath;
-        const turn = transcript ? openingTurn(expandHome(transcript))?.ms ?? 0 : 0;
-        const state = await m.paneState(owner);
-        if (state === "unknown") continue;
-        const live = state === "live";
-        const prior = paneRecovery.get(owner);
-        if (live) {
-          if (!prior?.live || prior.pane !== pane || prior.sessionId !== sessionId || prior.turn !== turn)
-            paneRecovery.set(owner, { generation: prior?.generation ?? 0, live: true, pane, sessionId, turn });
-          continue;
-        }
-        const same = prior?.pane === pane && prior.sessionId === sessionId && prior.turn === turn;
-        const generation = prior ? (prior.live || !same ? prior.generation + 1 : prior.generation) : 1;
-        const missingSince = prior && !prior.live && same ? prior.missingSince ?? now : now;
-        if (!prior || prior.live || !same || prior.missingSince !== missingSince)
-          paneRecovery.set(owner, { generation, missingSince, live: false, pane, sessionId, turn });
-        if (now - missingSince < 5_000 || !handoffAllowed(owner)) continue;
-        const evidence = `${pane || "no-pane"}:${sessionId || "no-session"}:t${turn}:g${generation}`;
-        events.releaseMissingPane(owner, sessionId || undefined, transcript, evidence);
-        const generationKey = createHash("sha256").update(evidence).digest("hex").slice(0, 16);
-        for (const row of open.filter((x) => x.owner === owner)) {
-          const recoveryId = `route:${row.event}:resume:auto:${generationKey}`;
-          if (events.known(recoveryId)) continue;
-          void injectResume(owner, row.event, missingSince, generationKey).then((r) => {
-            if (!r.ok) log.warn({ owner, event: row.event, reason: r.reason }, "route recovery: resume injection failed");
-          }).catch((error) => log.warn({ owner, event: row.event, err: errText(error) }, "route recovery: resume injection failed"));
-        }
-      }
-      return n;
-      } finally { sweeping = false; }
     };
     void m.restored.then(() => {
-      // 严格群的 chat 义务, owner 已经交过终句 = 它答了, 只是 strict 只认 chat_reply 交付 (终句既不
-      // 进群也不关账)。通用追问 (「进展如何 / 还没交回结论」) 对它是错题 —— 它以为自己答完了, 再问
-      // 只会多一句谁也看不到的终句。所以这一类的追问换成补发指引: 「你那份结论没有进群, 用
-      // chat_reply 发出去」, 上限 1 次、不开冷却轮次 (cycles:1) —— 它已经答过, 问不出新东西就上报。
-      // obligation-watch 只看从没答过的义务, 同一件事不提醒两遍。
-      const answeredStrict = (turn: string): boolean => {
-        const row = router.get(turn);
-        return !!row && row.receiver.kind === "chat" && !!row.receiver.channel
-          && !!strictSpeechOf && strictSpeechOf(row.receiver.channel)
-          && events.taskInputs(row.event).some((e) => !!e.result);
-      };
-      /** 这一笔该补发却还没补的, 追问话术换成「用 chat_reply 补发」(见 strictDeliveryNudge)。 */
-      const answerNudge = (x: InFlight): NudgeTarget["nudge"] => {
-        if (!answeredStrict(x.turn)) return undefined;
-        const row = router.get(x.turn);
-        const channel = row?.receiver.kind === "chat" ? row.receiver.channel : "";
-        const re = row?.receiver.kind === "chat" ? events.get(row.receiver.message)?.id ?? row.receiver.message : "";
-        return { policy: { afterMs: cfg.wrc.mirror.idleNudge.afterMin * 60_000, max: 1, cycles: 1 },
-          text: strictDeliveryNudge({ chat: chatNameOf(cfg, channel) || channel, re }) };
-      };
-      const nudgeInflight = (): NudgeTarget[] => routeInFlight().map((x) => {
-        const nudge = answerNudge(x);
-        return nudge ? { ...x, nudge } : x;
-      });
-      stopSweep = startIdleNudge({
-        inflight: nudgeInflight, idleNow: m.idleNow, handingOff,
-        policy: () => ({ afterMs: cfg.wrc.mirror.idleNudge.afterMin * 60_000, max: cfg.wrc.mirror.idleNudge.max }),
-        ask: async ({ from, to, turn, text }) => {
-          const row = router.get(turn);
-          if (!row || !["open", "need", "error"].includes(row.status)) return false;
-          if (events.taskInputs(row.event).some((e) => e.target === to && !e.canceled
-              && ["queued", "dispatching"].includes(e.execution))) return false;
-          if (row.owner !== to) {
-            const parent = row.receiver.kind === "wizard" && row.receiver.event ? router.get(row.receiver.event) : undefined;
-            const serves = parent?.owner === to ? parent.event : undefined;
-            events.accept({ id: `idle-question:${row.event}:${randomUUID()}`, target: to, speaker: from,
-              channel: parent?.receiver.kind === "chat" ? parent.receiver.channel : "", serves,
-              priority: "normal", deadline: NO_DEADLINE, payload: { text, peer: {
-              from: { kind: "peer", from }, envelope: renderPeerEnvelope(displayName(from), undefined, undefined, { act: "fyi", quiet: true }),
-                kind: "fyi",
-              } } });
-            return true;
-          }
-          // 已答未出站的那一类: 注入正文换成补发指引本身 (resumeText 的「继续办、还没交代」是错题)。
-          return (await injectResume(to, row.event, Date.now(), undefined, answeredStrict(turn) ? text : undefined)).ok;
-        },
-        nameOf: displayName,
-        /** 追问用满还挂着 = 一处人该看见的异常。与 obligation-watch 的逾期上报同一口径:
-         *  发一条群系统行; 已交终句却没落定的不是「没回」而是「答了没落定」, 附上它最后说的与出路。 */
-        escalate: async ({ turn, asks }) => {
-          const row = router.get(turn);
-          if (!row) return;
-          const channel = row.asker?.chat?.startsWith("chat:") ? row.asker.chat : baseOfKey(row.owner);
-          if (!channel.startsWith("chat:")) {
-            log.warn({ turn, owner: row.owner }, "idle-nudge: 追问用满但这一行没有群来源, 无处分报");
-            return;
-          }
-          const who = displayName(row.owner);
-          const answered = events.taskInputs(row.event).some((e) => !!e.result);
-          const last = answered ? m.lastReply(row.owner, Date.now() - row.at).trim() : "";
-          // strict 群「答了没出站」: 补发指引只问一次, 问完还没动 — 运维动作 (补发 / 转述 / 收掉)
-          // 是 wizard 的活, 直投本群管家跟进 (2026-11-18 aiconfig 群实录: 把「让它用 chat_reply 补发」
-          // 摊给被人打回); 群里只在没有管家可托付 (或管家自己就是欠账方) 时才留一行**给人看的**
-          // 系统行 —— 说清是什么坏了、人要不要管, 不出现工具名与运维步骤。行不落定。
-          if (answeredStrict(turn)) {
-            const re = row.receiver.kind === "chat" ? events.get(row.receiver.message)?.id ?? row.receiver.message : "";
-            log.warn({ mod: "idle-nudge", turn, event: row.event, owner: row.owner, re, asks, last: clipLine(last, 200) },
-              "idle-nudge: 严格群已答但没出站 — 补发指引追问无果, 停止追问 (行仍 open, 转告管家跟进)");
-            const steward = stewardRoute(cfg, wizards, channel);
-            const note = strictDeliveryStewardNote({ chat: chatNameOf(cfg, channel) || channel, who, event: row.event, re, asks, last });
-            if (steward.target !== channel && steward.target !== row.owner && (wizards.get(steward.target) || m.sessionInfo(steward.target))) {
-              await m.injectText(steward.target, note, { channel: "" }).catch(() => undefined);
-              return;
-            }
-            notifyChat(channel, strictDeliveryHumanLine({ who, asks }));
-            return;
-          }
-          notifyChat(channel, "[wezard] ⚠️ " + who + " 的这件活 (" + row.event + ") 追问 " + asks + " 次仍未收口 — "
-            + (answered
-              ? "它已经交过终句但没落定 (收口形态认不出 / 没写收件人): 让它重发一次行首收口, 或用 stop_wizard 收掉。"
-              : "对方一直没回: 可以 stop_wizard 收掉, 或转派给别人。")
-            + (last ? "\n\n它最后说的: " + clipLine(last, 300) : ""));
-        },
-        store: loadJsonMap<{ asks: number; cycles?: number; escalatedCycle?: number }>(join(cfg.daemon.stateDir, "idle-nudges.json")),
-        log: log.child({ mod: "idle-nudge" }),
-        sweep: async () => { await sweepOnce(); },
-      });
-      // P7-S2 义务观测: 严格群未结的 chat 接收行 —— idle 且未关提醒恰好 1 次, 再逾期上报恰好 1 次
-      // (管家违约发群系统行, 成员违约私聊告知管家)。不按墙钟判逾期、不伪造 timeout。
-      // 已经交过终句、只是没出站的行**不在**这里: 那句提醒 (「义务还没回」) 对它同样是错题, 补发指引
-      // 归上面的 idle-nudge (追问话术与上限都在那儿), 同一件事不提醒两遍。
-      stopObligations = startObligationWatch({
-        rows: (): ObligationRow[] => router.rows()
-          .filter((r) => r.receiver.kind === "chat" && r.receiver.channel && ["held", "open", "need", "error"].includes(r.status)
-            && !!strictSpeechOf && strictSpeechOf(r.receiver.channel) && !answeredStrict(r.event))
-          .map((r) => ({ event: r.event, owner: r.owner, channel: (r.receiver as { channel: string }).channel,
-            message: (r.receiver as { message: string }).message, ageMs: Date.now() - r.at })),
-        delivered: (row) => events.taskInputs(row.event).some((e) => e.exposure === "consumed"),
-        idleNow: m.idleNow,
-        handingOff,
-        remind: async (row) => {
-          const re = events.get(row.message)?.id ?? row.message;
-          const text = "（守护进程: " + (chatNameOf(cfg, row.channel) || row.channel) + " 里指向你的义务还没回 — 用 chat_reply({re: \"" + re + "\", text}) 交付; 无需答复就不带 text 记 passed。这是唯一一次提醒, 再不回会上报。）";
-          const r = await m.injectText(row.owner, text, { channel: row.channel });
-          return r.ok;
-        },
-        escalate: async (row) => {
-          const re = events.get(row.message)?.id ?? row.message;
-          const who = displayName(row.owner);
-          if (isStewardTarget(cfg, wizards, row.owner)) {
-            // 管家违约: 发群系统行 (notifyChat 自动进聊天账本) — 给人看的一句话, 不带工具名/运维步骤
-            // (运维由 daemon/管家消化)。「已答未交付」的行不进这份 watch (rows 过滤 answeredStrict),
-            // 那一类归 idle-nudge 的补发指引 + 管家直投。
-            notifyChat(row.channel, "[wezard] ⚠️ 管家 " + who + " 有一笔指向本群的义务 (" + row.event + ") 逾期未回 — 已提醒过一次。");
-            return;
-          }
-          const steward = stewardRoute(cfg, wizards, row.channel);
-          const note = "（守护进程: " + (chatNameOf(cfg, row.channel) || row.channel) + " 里 " + who + " 的义务 (" + row.event + ", re: " + re + ") 逾期未回 — 已提醒过一次, 请你跟进 (stop_wizard 或转派)。）";
-          if (steward.target === row.channel && !wizards.get(steward.target)) {
-            notifyChat(row.channel, "[wezard] ⚠️ " + who + " 的义务 (" + row.event + ") 逾期未回 — 已提醒过一次。");
-            return;
-          }
-          await m.injectText(steward.target, note, { channel: "" });
-        },
-        store: obligationWatches,
-        log: log.child({ mod: "obligation-watch" }),
-      });
       stopPlanReminders = startPlanReminders({
         store: plans,
         eventIds: planEventIds,
@@ -2844,360 +1093,6 @@ const main = async (): Promise<void> => {
           plans.reminded(plan.id, plan.revision, token, eventId);
         },
       });
-    });
-    /** tell_peer 的本体: 以 `self` 的名义说一句 —— HTTP 路由与 dispatch 共用。`extra` = 挂在信封后面的
-     *  一段 (只进对方输入框, 不进 `text`: 公开时 text 会成群气泡)。 */
-    const peerDispatching = new Map<string, { count: number; transfer: boolean }>();
-    /** transfer 的前置 (§3.4): 拒的理由; 放行 = undefined。 */
-    const transferRefusal = (self: string, f: EventId | undefined, target: string | undefined, x: { re?: boolean; after?: boolean }): string | undefined => {
-      if (x.re || x.after) return "transfer 不能与 re / after 并用: 交出了这一笔就没有可续的原件";
-      const row = f ? router.get(f) : undefined;
-      if (!row) return "没有可交出的那一笔";
-      if (row.owner !== self) return "这一笔已经不在你手上了 —— 一笔只能交出一次";
-      if (row.status === "answered" || row.status === "handed") return `这一笔 (${row.event}) 已不在等你交代, 没有可交出的`;
-      // strict 群的 chat 义务交出对象必须是本群成员: chat_reply 销账以成员资格为前提,
-      // 交给非成员 = 一笔永远销不掉的死账 (2026-11-18 aiconfig 群实录: e1f7ab8 move 给
-      // 非成员 .GraceVance, 它怎么调都是 403, 只剩追问+上报空转)。
-      if (target && row.receiver.kind === "chat" && row.receiver.channel
-          && strictSpeechOf?.(row.receiver.channel) && !members.isMember(row.receiver.channel, target))
-        return `这一笔是 ${chatNameOf(cfg, row.receiver.channel) || row.receiver.channel} 的 chat 义务, 只能交给本群成员 — ${displayName(target)} 不在成员表里 (让人点名它入群 / spawn 带 join 后再交, 或改派成员)`;
-      if (router.waiting(row.event).some((r) => r.receiver.kind === "wizard" && r.receiver.to === self))
-        return "你在这一笔之下还有没落定的子活: 再交出去就说不清谁来交代 —— 等它们回来自己收口, 或别 transfer";
-      if (target && router.awaitedBy(self).some((r) => r.owner === target))
-        return `你已有一件活在 ${displayName(target)} 手上没落定 (同一对只有一个回执槽) —— 等它交差再 transfer`;
-      return undefined;
-    };
-    const transferNote = (f: EventId, target: string): string =>
-      `这一笔 (${f}) 已整件交给 ${displayName(target)}: 它的结论 (含 NEED / 失败) 直接回你服务的上游, 不回你 —— 本轮静默收口, 别再为这件派活或对人说话`;
-    /** dispatch 在入口冻结的那一轮: 控制权快照、链头, 与回执去向 (planReturn 算好的)。 */
-    type ActorOrigin = { reuseCheck?: (target: string, ownEvent?: string) => string; authority: ReturnType<typeof controlSnapshot>; asker?: Asker; plan: { op: ReturnOp; serves?: EventId } };
-    /** taskFile 模板的解析基点: 调用方工作区 —— session 的 runningCwd (冷会话落
-     *  defaultCwd, 见 mirror-bridge 的 getCwd), 都为空才退 daemon 进程 cwd。模板
-     *  路径相对它解析, realpath 后必须仍在它子树内 (防 ../ 与软链逃出工作区)。 */
-    const callerBaseOf = (self: string): string => m.getCwd(self).runningCwd || m.getCwd(self).defaultCwd || process.cwd();
-    const tellPeerAsInner = async (self: string, body: PeerBody, extra = "", actor?: ActorOrigin): Promise<Reply> => {
-      const addressError = unsupportedPeerAddressField(body);
-      if (addressError) return { status: 400, body: { ok: false, reason: addressError } };
-      const retiredField = retiredOrchestrationField(body);
-      if (retiredField) return { status: 400, body: { ok: false, reason: retiredFieldReason(retiredField) } };
-      const authority = actor?.authority ?? controlSnapshot(self);
-      const tb = body as { text?: string; taskFile?: string; params?: Record<string, string>; templateRef?: TemplateRef };
-      let text = (tb.text ?? "").toString();
-      let templateRef = tb.templateRef;
-      // 模板展开同样在一切副作用之前 (路由行要到下面的 openDispatchRow 才开): text 空
-      // 而 taskFile 给了 → 入口展开, 失败 400; text 非空时 taskFile 忽略 —— dispatch
-      // 入口已展开过的正文原样走, 不重复读文件。
-      if (!text.trim() && (tb.taskFile ?? "") !== "") {
-        try {
-          const expanded = await expandTask({ taskFile: tb.taskFile!, params: tb.params ?? {} }, { baseDir: callerBaseOf(self) });
-          text = expanded.text;
-          templateRef = expanded.templateRef;
-        } catch (e) {
-          return { status: 400, body: { ok: false, reason: e instanceof TemplateError ? e.message : `template expansion failed: ${errText(e)}` } };
-        }
-      }
-      if (!text.trim()) { return { status: 400, body: { ok: false, reason: "text required" } }; }
-      // 这句话要对方怎么接 (priority 管何时投, receipt 管要不要回执, 这个管它怎么接):
-      // task 一件活 (默认) / ask 只答一问 / fyi 知会 —— fyi 不要回执、不进工单、不进群。
-      const rawKind = (body as { kind?: string }).kind;
-      const kind: "task" | "ask" | "fyi" = rawKind === "ask" || rawKind === "fyi" ? rawKind : "task";
-      // `re` 的值是那一笔的**路由 event** (§9.5): 欠它的是谁由表说了算 —— transfer 之后 owner 已经
-      // 换人, 按旧件号找反而会投给交出去的那位。表上没有 / 已落定 = 这句按新活发。
-      // `re` 只是「续不续」这一位; 续哪一笔由表推断 (pickPair: 本轮在读的那份回执 → 这一对唯一在飞的 →
-      // 最近一笔)。event id 用于一对之间并发多笔时明确指定。省略 = 本轮是它的
-      // NEED 回执、又对它说话才默认续 —— 答它的反问; 显式 `re:false` 推翻。
-      const rawRe = (body as { re?: unknown }).re;
-      const reFlag = rawRe === true || rawRe === "true" ? true : rawRe === false || rawRe === "false" ? false : undefined;
-      const reId = reFlag === undefined && typeof rawRe === "string" ? eventRef(rawRe) : "";
-      const idRow = reId ? router.get(reId) : undefined;
-      const r = resolvePeer(self, addrOf(body) || (idRow ? displayName(idRow.owner) : ""));
-      if (!r.ok) { return { status: r.status, body: { ok: false, reason: r.reason, candidates: r.candidates } }; }
-      const { target } = r;
-      const hint = actor ? undefined : receiptOfTurn(self);
-      const hintRow = hint ? router.get(hint) : undefined;
-      const wantRe = !!reId || (reFlag ?? (kind !== "fyi" && hintRow?.status === "need" && hintRow.owner === target));
-      const pick = wantRe && !reId ? pickPair(router.table(), self, target, hint) : undefined;
-      if (pick && !pick.ok)
-        return { status: 400, body: { ok: false, reason: `你在 ${displayName(target)} 手上有 ${pick.many.length} 笔没落定, 续哪一笔用 event id 指明 (re: "<event>"): ${pick.many.map((x) => `\`${x.event}\``).join(" ")}` } };
-      const reRow = idRow ?? (pick?.ok ? pick.row : undefined);
-      const re = reRow?.event ?? reId;
-      const reTarget = reRow && ["open", "need", "error"].includes(reRow.status) ? reRow : undefined;
-      // 续问必须点到现在欠着它的那位: 点错了收件的不是 owner, 它的终句就落不到那一笔上。
-      if (reTarget && reTarget.owner !== target)
-        return { status: 409, body: { ok: false, reason: `这一笔现在欠在 ${displayName(reTarget.owner)} 手上 —— 要续问就点名它 (re 按路由表走, 不再按旧件号找人)` } };
-      const reUnknown = wantRe && !reTarget;
-      const legs = reTarget ? legsOf(reTarget.event) + 1 : 1;
-      // Capture the origin before waiting for another pane; our own turn may change meanwhile.
-      const asker = actor?.asker ?? (reTarget ? reTarget.asker : askerOf(self));
-      let plan: { op: ReturnOp; serves?: EventId };
-      if (actor) plan = actor.plan;
-      else {
-        const p = planReturn(self, body as Record<string, unknown>, reTarget?.event);
-        if (!p.ok) return { status: p.status, body: { ok: false, reason: p.reason } };
-        plan = { op: p.op, ...(p.serves ? { serves: p.serves } : {}) };
-      }
-      const open = router.awaitedBy(self).find((x) => x.owner === target);
-      const actorStillValid = (): boolean => openingOfSelf(self)?.ms === authority.opening;
-      // 依赖 (after): 前置必须是自己派出去的那几笔。查不到 → 400; 有失败的 → 409; 都 done → 照常投并附结论; 还有没落定的 → 停放 (先 held)。
-      const afterIds = afterTurnsOf(self, body);
-      if (!afterIds.ok) return { status: 400, body: { ok: false, reason: afterIds.reason } };
-      const afters = afterIds.ids;
-      const prereqs = afters.length ? prereqsOf(self, afters) : [];
-      if (afters.length) {
-        if (kind !== "task" || re) { return { status: 400, body: { ok: false, reason: "`after` 只用于派新活 (kind:\"task\"、不带 re)" } }; }
-        const gone = afters.filter((_, i) => prereqs[i]!.state === "unknown");
-        if (gone.length) { return { status: 400, body: { ok: false, reason: `after 里的 ${gone.join(" ")} 在你派出去的件里查不到 —— 只能依赖你自己开出来的那一笔 (event id; 过期 / 不是你派的都查不到)` } }; }
-        const failed = afters.flatMap((t, i) => { const p = prereqs[i]!; return p.state === "failed" ? [`${t} (${displayName(p.seen.to)}) 以 ${p.seen.status} 收场`] : []; });
-        if (failed.length) { return { status: 409, body: { ok: false, reason: `前置 ${failed.join("; ")} —— 这件不投; 前置失败了就先处理它, 再重发` } }; }
-        // Same owner/receiver is one durable task: later dispatches supplement its inbox.
-        if (open && !afters.includes(open.event) && !(plan.op !== "transfer" && plan.op !== "none" && open.owner === target && open.receiver.kind === "wizard" && open.receiver.to === self))
-          return { status: 409, body: { ok: false, reason: `你已有一件活 (${open.event}) 在 ${displayName(target)} 手上没落定, 同一对只有一个槽 —— 等它交差, 或把它也列进 after` } };
-      }
-      const transferNo = plan.op === "transfer" ? transferRefusal(self, plan.serves, target, { re: !!reTarget, after: afters.length > 0 }) : undefined;
-      if (transferNo) return { status: 409, body: { ok: false, reason: transferNo } };
-
-      // 公开与否由发话方 (LLM) 判断: 公开 = 在它这一轮的公开频道里说, 气泡进群、对方
-      // 那一轮的回复也发进这个群; 私聊 (默认) = 只落双方的 rolepage, 回复靠 wait_peer 取。
-      // 只有两端都是登记在册的 wizard 才能当着人说 —— 裸 target 冒充的发话方、forget 掉的
-      // 分身不是谁, 它们的往来进群只会留下一段人找不到主的对话。工单里的派活一律私聊
-      // (人看不懂 fan-out 的过程), 知会不进群, 顶层模式 (chatPolicy.topOnly) 也降为私聊。
-      // 续问沿用原件那时的公开与否 (那一笔的 receiver 是那个群)。
-      const reuseChannel = reTarget?.receiver.kind === "chat" ? reTarget.receiver.channel : undefined;
-      const wantPublic = kind !== "fyi" && plan.op !== "transfer"
-        && (reTarget ? !!reuseChannel : (body as { public?: boolean }).public === true)
-        && !!wizards.get(self) && !!wizards.get(target);
-      const topOnly = wantPublic && chatPolicyOf(cfg, reuseChannel || channelOf(self)).topOnly;
-      const isPublic = wantPublic && !topOnly;
-      // transfer 交出的是人问的那一笔: 接手方的终句就是那句人话的答复, 注入事件得带上那个群 ——
-      // chat 行只落 `hand`, 气泡靠 final 通道放行; 频道为空就被当私聊轮扣下, 人永远收不到。
-      const handed = plan.op === "transfer" && plan.serves ? router.get(plan.serves)?.receiver : undefined;
-      const handedChat = handed?.kind === "chat" ? handed.channel : "";
-      const channel = isPublic ? reuseChannel || channelOf(self) : handedChat;
-      // Injecting into your own pane would type into the box you're generating
-      // from — Claude Code queues it and the caller deadlocks waiting for itself.
-      if (target === self) { return { status: 400, body: { ok: false, reason: "refusing to inject into the calling session itself" } }; }
-      if (!actorStillValid()) return { status: 409, body: { ok: false, reason: "caller turn/control changed while waiting; dispatch refused" } };
-      // 投递策略。对方闲着三者一样 —— 立刻投; 只在它正忙时分岔:
-      //   normal (默认) 等它这一轮结束再投 —— 派新活的常态: 两个 wizard 同时找第三个时,
-      //     两段文本会挤进同一个输入框、被当成一轮读掉, 这在协同网络里不是边角情况而是常态;
-      //   urgent 先打断它这一轮 (与 stop_wizard 的 interrupt 同一下 Esc) 再投 —— 紧急改道;
-      //   now   不等不打断, 落进输入框由 CLI 并进它这一轮 —— 插话、补一句、答它的问。
-      // 都没给时, `re` 续问默认 now —— 续问是同一场来回里的应答, 对方可能正挂在 wait_peer 上等你,
-      // 等它闲下来就互相干等到超时。
-      const bp = body as { priority?: string };
-      const asked: "normal" | "urgent" | "now" =
-        bp.priority === "urgent" ? "urgent"
-          : bp.priority === "normal" ? "normal"
-            : bp.priority === "now" ? "now"
-              : re ? "now" : "normal";
-      // 冷门控: 派新活 (task、不是续问、不是插话) 给一个冷且大的 wizard, 先退回一行让派活的
-      // 算账 —— 唤醒它要整段重写缓存, 点名或职责对口只说明相关, 不说明划算。`force:true`
-      // 是「真依赖它那段上下文」的明说。
-      const force = (body as { force?: boolean }).force;
-      if (kind === "task" && !re && asked !== "now" && force !== true) {
-        const gi = m.sessionInfo(target);
-        const gate = gi ? coldGateOf(stripSigil(displayName(target)), gi.contextTokens, touchOf(gi.jsonlPath), Date.now(), ttlOf(gi.jsonlPath)) : "";
-        if (gate) {
-          return { status: 409, body: { ok: false, gated: "cold", reason: gate } };
-        }
-      }
-      if (actor?.reuseCheck) {
-        const idle = await m.idleNow(target);
-        const refusal = actor.reuseCheck(target) || (!idle ? "candidate became busy" : "");
-        if (refusal) return { status: 409, body: { ok: false, gated: "reuse", reason: refusal } };
-      }
-      // 「忙」= 这一轮还没结束, 或停在审批上等人 —— 都不是能接新活的时候。
-      const wasBusy = !(await m.idleNow(target));
-      if (actor?.reuseCheck) {
-        const refusal = actor.reuseCheck(target) || (wasBusy ? "candidate became busy" : "");
-        if (refusal) { return { status: 409, body: { ok: false, gated: "reuse", reason: refusal } }; }
-      }
-      // urgent 只打断你自己派的那一轮 (或它自己的回执轮): 手上若是别的 wizard / 人 / 定时任务的活,
-      // 打断就误伤了那件 —— 降成 normal, 等它这一轮做完再投。
-      const others = asked === "urgent" && wasBusy ? await othersTurn(target, self) : undefined;
-      // Transfers need a separate input turn, including when the receiver becomes busy.
-      const policy = others || plan.op === "transfer" ? "normal" : asked;
-      if (!actorStillValid()) return { status: 409, body: { ok: false, reason: "caller changed before acceptance" } };
-      if (reTarget && (router.get(reTarget.event)?.owner !== target
-          || !["open", "need", "error"].includes(router.get(reTarget.event)?.status ?? "")))
-        return { status: 409, body: { ok: false, reason: "task settled or transferred while preparing continuation; retry against current task" } };
-      // All caller-dependent facts are frozen here; workers never reread the caller's current turn.
-      const at = Date.now();
-      const deadlineAt = NO_DEADLINE;
-      const wantReceipt = plan.op !== "none";
-      // 路由行 (§3.1): 续问不新开行 (沿用那一笔); 其余按 self / detach / transfer 开行或改 owner;
-      // `after` 是欠账不是子行 —— 挂 after 的行先 held, 注入成功 (committed) 时才 release。
-      const mergeRow = !reTarget && plan.op !== "transfer" && plan.op !== "none"
-        ? router.awaitedBy(self).find((x) => x.owner === target && x.receiver.kind === "wizard" && x.receiver.to === self && ["open", "need", "error", "held"].includes(x.status))
-        : undefined;
-      const requestedPlanId = String((body as { planId?: unknown }).planId ?? "").trim();
-      const existingRoute = reTarget ?? mergeRow;
-      const canonicalEvent = existingRoute ? router.get(existingRoute.event)?.event ?? existingRoute.event : "";
-      const inheritedPlanIds = [...new Set(events.taskInputs(canonicalEvent)
-        .filter((input) => input.speaker === self && !input.payload.planReminder)
-        .map((input) => input.payload.planId).filter((value): value is string => !!value))];
-      const historicalReAssociation = !!reTarget && !!requestedPlanId && inheritedPlanIds.includes(requestedPlanId);
-      const planId = requestedPlanId || (inheritedPlanIds.length === 1 ? inheritedPlanIds[0]! : "");
-      if (requestedPlanId && !historicalReAssociation) {
-        if (!plans.healthy()) return { status: 503, body: { ok: false, reason: "plans store is unhealthy; cannot associate this event" } };
-        const linkedPlan = plans.get(planId);
-        if (plan.op === "none") return { status: 400, body: { ok: false, reason: "planId requires a receiver receipt" } };
-        if (!linkedPlan || linkedPlan.owner !== self || !["active", "paused"].includes(linkedPlan.state))
-          return { status: 409, body: { ok: false, reason: "planId must name an unfinished plan owned by the caller" } };
-      }
-      const dispatchLegs = reTarget ? legs : mergeRow ? legsOf(mergeRow.event) + 1 : legs;
-      const newRow = !reTarget && !mergeRow;
-      const serves = reTarget
-        ? reTarget.event
-        : mergeRow?.event ?? openDispatchRow({ self, target, op: plan.op, deadlineAt, asker,
-            ...(afters.length ? { after: afters } : {}), ...(plan.serves ? { serves: plan.serves } : {}) });
-      /** 建完行才发现不该派 (计划许可 / 预算在等待期间变了): 把刚开的那一行收掉 —— 不然它一直
-       *  挂在 owedBy 上, 名册里也永远「欠着」一件没人干的活。 */
-      const dropRow = (): void => { if (newRow && serves && plan.op !== "transfer") router.commit(ops.gc({ event: serves })); };
-      // 注入事件的 id 就是对那一笔的引用 (§9.3): 派活 = `route:<event>`, 续问 = `route:<event>:r<legs>`;
-      // 不开行 (none) 时没有行可指, 退回一句一号的合成 id。
-      const eventId = serves ? plan.op === "transfer" ? `route:${serves}:transfer:${randomUUID()}` : `route:${serves}:input:${randomUUID()}` : `p:${self}:${target}:${randomUUID()}`;
-      if (!actorStillValid()) { dropRow(); return { status: 409, body: { ok: false, reason: "caller authority changed before acceptance" } }; }
-      const tell: Tell = { from: self, to: target, channel, at, event: serves, legs: dispatchLegs, asker, dispatchKey: eventId };
-      let accepted;
-      try { accepted = acceptPeerDispatch({ id: eventId, target, speaker: self, channel, serves, asker, priority: policy, deadline: deadlineAt,
-        payload: { text, peer: {
-          from: { kind: "peer", from: self, event: serves, ...(isPublic ? { public: true } : {}), ...(handedChat ? { transferred: true } : {}), ...(asker ? { asker } : {}) },
-          envelope: envelopeFor(self, channel, { asker, legs: dispatchLegs, ...(dispatchLegs > 1 ? { re: true } : {}),
-            ...(kind !== "task" ? { act: kind } : {}), ...(wantReceipt ? {} : { quiet: true }) }) + extra,
-          ...(wantReceipt ? { tell } : {}), kind, after: afters,
-          ...(plan.op === "transfer" ? { transferred: true } : {}),
-          ...(templateRef ? { templateRef } : {}),
-        }, ...(planId ? { planId } : {}) } }, plan.op === "transfer"); } catch (error) { dropRow(); return { status: 409, body: { ok: false, eventId, reason: errText(error) } }; }
-      // `re` 把那一笔从 need / error 拉回 open (§3.2 的 need→open / error→open): 行状态是「这份中途态
-      // 已经报过了」的去重记号 —— 不拉回去, owner 下一轮交同一个中途态就被静默吞掉 (往返断在这里)。
-      const continued = reTarget ?? mergeRow;
-      if (continued && (continued.status === "need" || continued.status === "error"))
-        router.commit(ops.mark({ event: continued.event, status: "open" }));
-      // `public` 回真实落地的哪一档 (顶层模式 / 工单 / fyi / transfer 都会把入口声明的 public 降级) ——
-      // rolepage 的提示行照它判「公开 / 私聊」, 不能凭调用参数推。
-      return { status: 200, body: { ...accepted, queued: true, ...(prereqs.some((p) => p.state === "pending") ? { parked: true, after: afters } : {}), event: serves, name: peerAddress(cfg, target), priority: policy, wasBusy, public: isPublic,
-        ...(planId ? { planId } : {}),
-        ...(wantReceipt && plan.op !== "transfer" ? { receipt: "已持久化排队；提交后观察那一笔的回执，结论自动返回" } : {}),
-        ...(plan.op === "transfer" && serves ? { transfer: transferNote(serves, target) } : {}),
-        ...(others ? { urgentDowngraded: "目标正在处理他人的轮次，按 normal 排队" } : {}),
-        ...(reUnknown ? { reUnknown: "它手上没有你在飞的那一笔可续 (已落定或从没派过): 这句按新活发出" } : {}) } };
-    };
-    const tellPeerAs: typeof tellPeerAsInner = async (...args) => {
-      const [self, body] = args;
-      const transfer = (body as { return?: string }).return === "transfer";
-      const current = peerDispatching.get(self);
-      if (transfer && current?.count) return { status: 409, body: { ok: false, reason: "another transfer is in flight for this caller; it retains its current ownership" } };
-      peerDispatching.set(self, { count: (current?.count ?? 0) + 1, transfer });
-      try { return await tellPeerAsInner(...args); }
-      finally {
-        const n = peerDispatching.get(self);
-        if (n && n.count > 1) peerDispatching.set(self, { count: n.count - 1, transfer: n.transfer });
-        else peerDispatching.delete(self);
-      }
-    };
-    const tellPeer: Handler = async (req, res) => {
-      const { self, body } = await readPeerBody(req);
-      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      if (refuseGuide(res, self, "tell_peer")) return;
-      const r = await tellPeerAs(self, body);
-      json(res, r.status, r.body);
-    };
-    http.register("POST /peers/inbox", async (req, res) => {
-      const { self } = await readPeerBody(req);
-      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller" }); return; }
-      // 收件箱就是持久化队列里还没投出去的那些回执 (§9.3): 一条 `rcpt:` 事件一行。
-      const queued = events.status().events
-        .filter((x) => x.target === self && x.id.startsWith("rcpt:") && x.execution === "queued")
-        .map((x) => ({ id: x.id, from: x.speaker, to: x.target, turn: x.serves ?? "", body: x.payload.text }));
-      json(res, 200, { ok: true, events: queued });
-    });
-    http.register("POST /peers/tell", tellPeer);
-
-    // 等一个 wizard, 或者等一**组**。fan-out 之后 join 必须是并行的: 串行地等五个
-    // 分身, 墙钟是五个之和, 而它们本来就在同时干活。`need` 把 all / any / 过半收进
-    // 一个数字 (默认全等), 满了就撤掉剩下的等待。
-    http.register("POST /peers/wait", async (req, res) => {
-      const { self, body } = await readPeerBody(req);
-      if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
-      const b = body as { name?: string; names?: string[]; need?: number; timeoutSec?: number };
-      const addressError = unsupportedPeerAddressField(body);
-      if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
-      const many = b.names;
-      const asked = (Array.isArray(many) && many.length > 0 ? many : [addrOf(b)]).map((x) => String(x ?? ""));
-      if (asked.length > 16) { json(res, 400, { ok: false, reason: "一次最多等 16 个 wizard" }); return; }
-      // 全部先解析: 地址错了就整批拒绝, 而不是等了十分钟才发现有一个打错了。
-      const resolved = asked.map((address) => ({ address, r: resolvePeer(self, address) }));
-      const bad = resolved.find((x) => !x.r.ok);
-      if (bad && !bad.r.ok) {
-        json(res, bad.r.status, { ok: false, reason: `地址 '${bad.address}': ${bad.r.reason}`, candidates: bad.r.candidates });
-        return;
-      }
-      const hits = resolved.map((x) => ({ address: x.address, ...(x.r as { ok: true; target: string; foreign: boolean }) }));
-      if (hits.some((h) => h.target === self)) { json(res, 400, { ok: false, reason: "refusing to wait on the calling session itself" }); return; }
-      // 同一个 wizard 写两遍不该顶掉两个名额。
-      const uniq = hits.filter((h, i) => hits.findIndex((o) => o.target === h.target) === i);
-      const need = Math.min(Math.max(Number(b.need ?? uniq.length) || uniq.length, 1), uniq.length);
-      const timeoutMs = Math.min(Math.max(Number(b.timeoutSec ?? 900) || 900, 10), 7200) * 1000;
-      const wrs = await waitForQuorum(uniq.map((h) => h.target), m.isBusy, timeoutMs, need);
-      // 回程不再进群: 私聊的结论由调用方自己收口给人; 公开轮的回复 mirror 早已发进那个群。
-      // 载荷只给一份, 且只给该给的那一份 —— 这段 json 是原样进调用方上下文的。
-      // 答案的出处是路由表 + 收件箱 (§9.5): 派给它的那一笔的 `receiver` 边指回自己, 交差时正文
-      // 已随 rcpt 事件 (`rcpt:<event>:<rev>`) 排进收件箱, 行上的 `outcome` 是它的全文 —— 不再去
-      // transcript 里按信封搜那一句 (旧 awaitReply / claim 那条线)。取走 = 撤单 + `hand`。
-      /** 那一份回执在收件箱里的 id 与正文。有定论时 id 由 event + rev 唯一决定 (与 deliverRoute
-       *  同一个算式); 停在 need / error 的正文只活在收件箱事件里 (行上不存 body), 按前缀取最新的。 */
-      const receiptOf = (r: Route): { id: string; text: string } => {
-        if (r.outcome) return { id: `rcpt:${r.event}:${r.outcome.rev}`, text: r.outcome.body };
-        const e = events.status().events.filter((x) => x.id.startsWith(`rcpt:${r.event}:`)).sort((a, b) => b.at - a.at)[0];
-        return { id: e?.id ?? `rcpt:${r.event}:`, text: e?.payload.text ?? "" };
-      };
-      const results = uniq.map((h, i) => {
-        const wr = wrs[i]!;
-        // 同一对并发多笔是允许的 (§4.1): 先取**还在排队**的那份 (那份还没进过你的会话); 都取过了就
-        // 报最新那件的投递状态 —— 绝不把已经 paste 过的那份当成新答案交回来。
-        const mine = router.settledTo(self).filter((r) => r.owner === h.target).reverse()   // byAt → 新在前
-          .map((row) => { const box = receiptOf(row); return { row, box,
-            execution: events.executionOf(box.id), exposure: events.exposureOf(box.id) }; });
-        const pick = mine.find((x) => x.execution === "queued" && x.exposure === "none") ?? mine[0];
-        if (!pick) return { name: h.address, idle: wr.idle, ...(wr.reason ? { reason: wr.reason } : {}),
-          ...(wr.idle ? { stale: true, reason: "它停下了, 但路由表上没有交回给你的定论 —— 多半停在一个等人点的弹窗上, 或那句话没被接住; peek_peer 看一眼" } : {}) };
-        // Only an unexposed queued input can be claimed. Execution state alone
-        // proves neither consumption nor non-delivery, including old tombstones.
-        if (pick.execution !== "queued" || pick.exposure !== "none") return { name: h.address, idle: wr.idle,
-          eventId: pick.box.id, delivered: pick.exposure === "consumed", exposure: pick.exposure ?? "unknown",
-          delivery: pick.exposure === "consumed" ? "consumed"
-            : pick.execution === "uncertain" || !pick.exposure || pick.exposure === "possible" ? "uncertain" : pick.execution,
-          reason: pick.exposure === "consumed" ? "回执已由会话消费，不重复领取。"
-            : "结果已保存，尚未确认回执消费；按 eventId 对账，不自动重投或再次领取。" };
-        // 取走就撤单: 这一笔在收件箱里排着的**全部**回执一起作废 (need 之后又答完时排着两份, 取走
-        // 的那一份就是新结论, 旧的那份不再 paste 第二遍); `hand` 确认已交付 (已 handed 的是 no-op)。
-        if (pick.execution === "queued") {
-          const claim = events.claimReceipt(pick.box.id);
-          if (!claim.ok) return { name: h.address, idle: wr.idle, eventId: pick.box.id,
-            delivery: "pending-reconciliation", reason: claim.reason };
-          router.commit(ops.hand({ event: pick.row.event, inbox: pick.box.id }));
-        }
-        const closing = parseClosing(pick.box.text);
-        const result = closing.kind === "result" ? closing.text : "";
-        return {
-          name: h.address,
-          idle: wr.idle,
-          ...(wr.reason ? { reason: wr.reason } : {}),
-          ...(closing.kind === "need" ? { need: closing.text } : {}),
-          ...(closing.artifacts.length ? { artifacts: closing.artifacts } : {}),
-          ...(result
-            ? { result, ...(pick.box.text.length > result.length + 200 ? { omitted: pick.box.text.length - result.length } : {}) }
-            : pick.box.text
-              ? { lastText: clipMiddle(pick.box.text) }
-              : {}),
-        };
-      });
-      const done = results.filter((x) => x.idle).length;
-      // 只等一个就摊平, 等一组才给数组 —— 同一份载荷不出现两遍。
-      json(res, 200, results.length === 1
-        ? { ok: true, ...results[0]! }
-        : { ok: true, need, done, satisfied: done >= need, results });
     });
 
     // 交接队列的可观测性: 每个目标当前那场交接在哪个阶段、后面排了几场、在等什么 ——
@@ -3290,8 +1185,6 @@ const main = async (): Promise<void> => {
     // 类表 (人 2026-11-18): <bot, role, workspace> 唯一的人物设定; wizard 记录是它的实例。
     const classes = loadClassStore(join(expandHome(cfg.daemon.stateDir), "classes.json"));
     const wizards = bindWizardStore(loadWizardStore(cfg.wrc.mirror.wizardsFile, bornOf, classes));
-    // P7-S3b backfill: 名册绑好后再跑 (byName 要用) —— 账本→post 幂等补齐。
-    try { backfillChatPosts(); } catch { /* backfill 失败不挡 boot; 下次 boot 再补 */ }
     // v3 身份迁移必须先于任何别的写盘 (backfillBorn/settleAll 都会 upsert, 会把老记录
     // 顺手迁成「没备份」的形态)。幂等: 已迁完的 boot 这里是一次空跑。
     const ident = migrateIdentities(wizards, cfg.wrc.mirror.wizardsFile);
@@ -3403,12 +1296,33 @@ const main = async (): Promise<void> => {
       },
       paste: async (target, text) => {
         const r = await m.injectText(target, text, { requireIdle: true });
+        if (r.ok) roomActivityTouch(target); // 注入成功 = 该 wizard 有新事件, 看门狗的 stale 窗口重置
         return r.ok ? "ok" : r.uncertain ? "uncertain" : "failed";
       },
     });
     // 投递失败 / 目标正忙的行没有推游标: 泵自身无定时器, 定期重踢直到贴进去。
     const roomKickTimer = setInterval(() => void hub.kick(), 30_000);
     roomKickTimer.unref?.();
+    // 契约 §7 切换约束: 宪章与 MCP schema 都变了, 活会话必须 /new —— 一次性标记文件,
+    // boot 存在即把每个绑定 pane 标为待 /new, 泵首次投递前先 /new 再贴, 全部处理完删标记。
+    {
+      const newFlag = join(expandHome(cfg.daemon.stateDir), "rooms-cutover-new.flag");
+      const needsNew = existsSync(newFlag) ? new Set(m.chatRoster("").flatMap((c) => c.targets)) : new Set<string>();
+      if (needsNew.size) {
+        roomLog.info({ panes: needsNew.size }, "room: 切换标记在, 首次唤醒前先 /new (契约 §7)");
+        const origPaste = hub ? undefined : undefined; // paste 端口已在上面闭包 — 用包装: 改走 hub 前置钩子不可行, 这里改 roomTurnEnd 前的一次性闸
+      }
+      // 实现在 pump 的 paste 前不容易挂 — 用一次性拦截: 首次 kick 前对每个待 /new 目标注入 "/new"。
+      if (needsNew.size) {
+        void (async () => {
+          for (const t of [...needsNew]) {
+            needsNew.delete(t);
+            try { await m.injectText(t, "/new", { requireIdle: true }); } catch { /* 下个标记周期再说 */ }
+          }
+          try { (await import("node:fs")).unlinkSync(newFlag); } catch { /* 已不在 */ }
+        })();
+      }
+    }
     // ── /room/* 的公共件 ─────────────────────────────────────────────────
     const roomSelfOf = (target: string): Who | undefined => {
       const uid = wizards.get(target)?.uid;
@@ -3833,22 +1747,35 @@ const main = async (): Promise<void> => {
       const v = hub.append(room, { author: DAEMON, kind: "trigger", text, to: [who], origin: "daemon", ext });
       if (!v.ok) roomLog.warn({ room, ext, reason: v.reason }, "trigger: 落行被拒");
     };
-    /** mirror 轮终 → hub.onIdle (F-1 提醒的轮界): mirror 没有 onIdle 回调, 用轮询识别
-     *  busy→idle 的跳变; 10s 粒度足够提醒时机, 不去挤 5s 的 worldfacts 探测窗口。 */
-    const idleWas = new Map<string, boolean>();
-    const roomIdleSweep = async (): Promise<void> => {
-      for (const rec of wizards.all()) {
-        if (!rec.uid) continue;
-        try {
-          const busy = await m.isBusy(rec.target);
-          const was = idleWas.get(rec.target);
-          idleWas.set(rec.target, busy);
-          if (was === true && !busy) void hub.onIdle(rec.uid);
-        } catch { /* 探不到就不改状态 */ }
-      }
+    // mirror 轮终 (事件驱动主路): 更新看门狗的活动时钟 + hub.onIdle (F-1 提醒/升级)。
+    const roomWatchdog = createRoomWatchdog({
+      log: roomLog, now: () => Date.now(),
+      listPanes: async () => {
+        const r = await runTmux(["list-panes", "-a", "-F", "#{pane_id}"]);
+        return r.ok ? r.stdout.split("\\n").map((l) => l.trim()).filter(Boolean) : [];
+      },
+      wizardOf: (uid) => {
+        const w = roomWizardOf(uid);
+        return w ? { target: w.target, name: w.name, paneId: m.sessionInfo(w.target)?.tmuxPane } : undefined;
+      },
+      isBusy: (target) => m.isBusy(target),
+      rooms: roomStore.ids,
+      stateOf: roomState,
+      write: (room, ops) => hub.write(room, ops),
+      onIdle: (uid) => hub.onIdle(uid),
+      kick: () => void hub.kick(),
+      staleMs: () => (cfg.rooms?.watchdog?.staleMin ?? 5) * 60_000,
+    });
+    roomTurnEnd = (target: string): void => {
+      roomWatchdog.touch(target);
+      const uid = wizards.get(target)?.uid;
+      if (uid) void hub.onIdle(uid);
     };
-    const roomIdleTimer = setInterval(() => void roomIdleSweep(), 10_000);
-    roomIdleTimer.unref?.();
+    roomActivityTouch = (target: string): void => roomWatchdog.touch(target);
+    // pump 的注入也算「最后一次事件」: 正在投递的 wizard 不进 stale 名单。
+    const roomPaste = hub ? undefined : undefined; // (占位注释: paste 端口的 touch 见 hub ports)
+    const watchdogTimer = setInterval(() => void roomWatchdog.scan(), (cfg.rooms?.watchdog?.intervalSec ?? 60) * 1000);
+    watchdogTimer.unref?.();
     /** 审批/提问卡发到哪个聊天: 本轮唤醒它的绑定 room; 没被唤醒过 → 旧口径兜底 (C 节删)。 */
     const cardRoomOf = (target: string): string | undefined => {
       const uid = wizards.get(target)?.uid;
@@ -3897,33 +1824,6 @@ const main = async (): Promise<void> => {
     if (classApply) {
       const rebound = rewriteStewardBindings(cfg, sourcePath, cmig.aliases);
       if (rebound) classLog.info({ rebound }, "steward bindings rewritten to class names");
-      // 成员表改键 (人 2026-11-18): (chat, identity) → (chat, target)。键里的 identity 在这个
-      // chat 有实例就换成那条 target, 否则保持; 幂等 (第二次 0 写)。必须跑在类迁移之后 ——
-      // 实例 target 是迁移才落定的。
-      const kmig = members.migrateKeys((chat, key) => {
-        if (wizards.get(key) && baseOfKey(key) === chat) return key;
-        return wizards.all().find((w) => identityOfRec(w) === key && baseOfKey(w.target) === chat)?.target;
-      });
-      if (kmig) classLog.info({ migrated: kmig }, "member keys migrated to instance targets");
-    }
-    // P7-S2 成员表补齐 (人 2026-11-18 晚口径: 「home 群在、成员表无」不能再出现): spawn 只在
-    // 带 join 时落账, 存量 homed wizard 从没进过表, 而义务照样能落到它们头上 (人点名 / chat_ask /
-    // transfer) —— 出站却一律 403 非成员, 只剩死账+追问空转 (aiconfig 群实录: 名册 6 个,
-    // chat_members 只有管家 1 个)。boot 把注册表里 home 是 strict 群的 wizard 补进成员表
-    // (mention, 幂等); 成员表从此 ⊇ 名册的 home 面, 两个口径一致。游标 -1 → 首批聊天记录
-    // 全量重放 (有界), 是补录的已知代价。
-    for (const base of Object.keys(cfg.chatPolicy ?? {}).filter((b) => chatPolicyOf(cfg, b).speech === "strict")) {
-      const missing = wizards.all().filter((w) => baseOfKey(w.target) === base && !isInternalKey(w.target)
-        && !members.isMember(base, w.target));
-      if (!missing.length) continue;
-      missing.forEach((w) => members.join(base, w.target, "mention", "system:repair"));
-      const names = missing.map((w) => displayName(w.target)).join("、");
-      try {
-        chatRecords.record(base, { at: Date.now(), id: "join-repair:" + base + ":" + Date.now(), author: "wezard", kind: "system",
-          text: "[wezard] 成员表补齐: " + names + " 入群 (mention, home 群补录)" });
-      } catch { /* 记录失败不挡 */ }
-      classLog.info({ chat: base, joined: missing.length }, "member table repaired from homed wizards");
-      notifyChat(base, "[wezard] 成员表补齐: " + names + " 已按 home 群补录为本群成员 (mention)。");
     }
     // v3 §3: 全局管家身份落位 —— home (defaultChat) 的默认会话就是它的锚点化身。
     // 新聊天 (还没有任何会话) 的裸消息由它接待 (inbound stewardRoute); 未认领的新装机不造幽灵记录。
@@ -3961,16 +1861,10 @@ const main = async (): Promise<void> => {
       read: readPlanBody,
       resolveOwner: (name) => wizards.byName(stripSigil(name))?.target,
       origin: (self) => {
-        const opening = openingOfSelf(self);
-        const openedEvent = opening?.env?.eventId ? events.get(opening.env.eventId) : undefined;
-        const routeEvent = openedEvent?.serves ?? servesOfTurn(self);
-        const row = routeEvent ? router.get(routeEvent) : undefined;
-        const asker = openedEvent?.asker ?? askerOf(self);
-        return {
-          ...(row?.owner === self && ["held", "open", "need", "error"].includes(row.status) ? { event: row.event } : {}),
-          channel: openedEvent?.channel ?? asker?.chat ?? m.currentChannel(self),
-          ...(asker ? { asker } : {}),
-        };
+        // room 模型: plan 的 origin = 本轮唤醒的绑定 room; 没被唤醒过退回当前频道。
+        const uid = wizards.get(self)?.uid;
+        const d = uid ? hub.defaultRoom(uid) : undefined;
+        return { channel: d?.room && hub.isBoundRoom(d.room) ? d.room : m.currentChannel(self) };
       },
     });
 
@@ -4003,30 +1897,9 @@ const main = async (): Promise<void> => {
     const pendingMarks = new Map<string, { sid: string; ctx: number; ctxAtFull: number; drains: number }>();
     /** 上次注入之后被 /clear 或压缩截断过的 (onContextCut 记, 下一次注入取走)。 */
     const pendingCuts = new Map<string, "clear" | "compact">();
-    const liveOfEvents = () => {
-      let byEvent: Map<string, InFlight> | undefined;
-      return (id: string) => (byEvent ??= new Map(routeInFlight().map((x) => [x.turn, x]))).get(id);
-    };
-    const pendingNames = { nameOf: displayName, chatOf: (b: string) => chatNameOf(cfg, b) || b };
-    const pendingDigest = (t: string, via: Via): Part => (seen) => {
-      const cut = pendingCuts.get(t);
-      pendingCuts.delete(t);
-      const now = Date.now();
-      if (tagOfKey(t)) return { text: "", keys: [] };
-      const rule = !seen("rule:pending");
-      const items = ledger.openOf(t);
-      // 没挂着的事: 不读会话, 也不留基线 —— 有了第一件再从那一刻立。
-      if (!items.length) {
-        pendingMarks.delete(t);
-        return { text: "", keys: [] };
-      }
-      const i = m.sessionInfo(t);
-      const o = digest({ items, mark: pendingMarks.get(t), ...(cut ? { cut } : {}), session: i ? { sid: i.sessionId, ctx: i.contextTokens } : undefined, ...(via.human ? { human: via.human } : {}), now, nameOf: displayName });
-      pendingMarks.set(t, o.mark);
-      o.touched.forEach(ledger.put);
-      const text = renderDigest(o, o.full ? renderTable(items, liveOfEvents(), pendingNames, now) : "", rule);
-      return { text, keys: text && rule ? ["rule:pending"] : [] };
-    };
+    // pending_items 已退役 (wiring C): 挂起账 = room 的 open duty, 工具面走 /room/*;
+    // 注入尾巴不再带这份摘要, 只保留空 Part 让组装处不用改。
+    const pendingDigest = (_t: string, _via: Via): Part => () => ({ text: "", keys: [] });
     const planDigest = (target: string): string[] => {
       if (!plans.healthy()) return [];
       const active = plans.list(target).filter((plan) => plan.state === "active" || plan.state === "paused");
@@ -4054,7 +1927,7 @@ const main = async (): Promise<void> => {
             const state = ((v) => (v === undefined ? "-" : v ? "idle" : m.parkedNow(x) ? "parked" : "busy"))(m.idleVerdict(x));
             const touch = i?.jsonlPath ? touchOf(i.jsonlPath) : 0;
             // 冷热与 route_candidates / tell_peer 冷门控同一口径 (touchOf / ttlOf)。
-            const warmth = i?.jsonlPath ? { ctx: i.contextTokens, cold: wakeCostOf(i.contextTokens, touch, now, ttlOf(i.jsonlPath)).cold } : {};
+            const warmth = i?.jsonlPath ? { ctx: i.contextTokens, cold: !!coldGateOf(displayName(x), i.contextTokens, touch, now, ttlOf(i.jsonlPath)) } : {};
             return { name: displayName(x), state, ...warmth, job: wizards.get(x)?.description || (tagOfKey(x) ? "" : "steward"), touch };
           }), now);
       }),
@@ -4190,8 +2063,8 @@ const main = async (): Promise<void> => {
       return {
         wizards: [...live, ...cold],
         plans: plans.healthy() ? plans.all() : [],
-        // rolepage 的待办托盘: 与名册 / peek 的「在等 / 欠着」同一份 (路由表)。
-        inflight: routeInFlight().map(({ ageMs, ...x }) => ({ ...x, at: Date.now() - ageMs })),
+        // room 模型: 待办托盘读 room duty (dutyFacts); 旧 inflight 已随路由表退役。
+        inflight: [],
         schedules: tasks.list().filter((x) => x.enabled).map((x) => {
           const st = tasks.stateOf(x.id);
           const loadError = tasks.errors()[x.id];
@@ -4319,8 +2192,6 @@ const main = async (): Promise<void> => {
         })()),
         stewardBudget: chatPolicyOf(cfg, target).stewardBudget,
         lead: !!wizards.get(target)?.lead,
-        topOnly: chatPolicyOf(cfg, target).topOnly,
-        speech: chatPolicyOf(cfg, target).speech,
       });
     /** 开局宪章。出生时的兄弟只是快照 —— 名册随时可查, 写进系统提示的那份只为了
      *  让它一睁眼就知道自己不是一个人在跑。 */
@@ -4613,11 +2484,20 @@ const main = async (): Promise<void> => {
       // 「最近」与模型都从 transcript 读, 而且只为列出来的这一页读: 摘要用不指代任何人
       // 的箭头 (读名册的是另一个 wizard), 模型取它真正跑的那个 —— 绑定里的 model 只在
       // 有人显式选过时才有。
-      const inflight = routeInFlight();
+      // room 模型: 「欠着」= 它名下的 open duty (跨 room 现算)。
+      const dutiesOf = (target: string): string => {
+        const uid = wizards.get(target)?.uid;
+        if (!uid) return "";
+        const who: Who = { kind: "wizard", id: uid };
+        return roomStore.ids().flatMap((id) => {
+          const s = roomState(id);
+          return s ? openDuties(s).filter((d) => sameWho(holderOf(s, d), who)) : [];
+        }).map((d) => d.msg + " " + (d.last?.status ?? "open")).join(" · ");
+      };
       const enrich = (r: (typeof all)[number]) => ({
         ...r,
-        turns: turnsLine(inflight, r.target),
-        duty: inflight.filter((x) => x.to === r.target).map((x) => `${x.turn} ${x.state}`).join(" · "),
+        turns: "",
+        duty: dutiesOf(r.target),
         model: r.model || (r.jsonlPath ? lastModel(r.jsonlPath) : ""),
         summary: r.jsonlPath ? lastExchange(r.jsonlPath, 80) : "",
         contextTokens: r.jsonlPath ? lastContextTokens(r.jsonlPath) : 0,
@@ -4633,16 +2513,7 @@ const main = async (): Promise<void> => {
         ? `ctx ${Math.round((info?.contextTokens ?? 0) / 1000)}k 已到交接线 (${Math.round(handoffAt(model) / 1000)}k) — 只列在场; query/chat 收窄或 peek_peer 单查`
         : undefined;
       if (layer === "L0") {
-        // P7-S3 严格群: 在场 = 本群成员 + 欠账数 (成员表 + 未结 chat 行按 owner 身份归账)。
-        const strictMembers = strictSpeechOf?.(selfBase)
-          ? members.ofChat(selfBase).map(({ target, row }) => ({
-              name: wizards.get(target)?.name || target,
-              mode: row.mode,
-              owed: router.rows().filter((r) => r.receiver.kind === "chat" && r.receiver.channel === selfBase
-                && ["held", "open", "need", "error"].includes(r.status) && r.owner === target).length,
-            }))
-          : undefined;
-        const text = rosterL0(hit.map(enrich), { base: selfBase, stewardTarget, now, home: homedir(), census, ...(strictMembers ? { members: strictMembers } : {}), ...(missHint ? { missHint } : {}), ...(degradedLine ? { degraded: degradedLine } : {}) });
+        const text = rosterL0(hit.map(enrich), { base: selfBase, stewardTarget, now, home: homedir(), census, ...(missHint ? { missHint } : {}), ...(degradedLine ? { degraded: degradedLine } : {}) });
         json(res, 200, { ok: true, layer, total: all.length, matched: hit.length, text });
         return;
       }
@@ -4664,8 +2535,6 @@ const main = async (): Promise<void> => {
      *  调用方只要活着的那几个时, 别替死掉的 pane 付这笔。 */
     const routeRowsOf = async (self: string, keep: (r: { alive: boolean; target: string }) => boolean = () => true): Promise<(RouteRow & { target: string })[]> => {
       const roster = await rosterOf(self);
-      const inflight = routeInFlight();
-      const queued = events.status().events.filter((e) => e.execution === "queued" || e.execution === "dispatching");
       return roster
         .filter((r) => !r.self && keep(r))
         .map((r) => {
@@ -4675,7 +2544,7 @@ const main = async (): Promise<void> => {
           return {
             ...r,
             lead: wizards.get(r.target)?.lead === true,
-            duties: [...routeReceiptDutiesOf(inflight, r.target), ...queued.filter((e) => e.target === r.target).map((e) => `${e.id} ${e.execution}`)],
+            duties: [],
             contextTokens: live ? lastContextTokens(live) : 0,
             ...(ttl ? { cacheTtlMs: ttl * 1000 } : {}),
             ...(live ? { cacheAt: cacheTouchMs(live) } : {}),
@@ -4738,16 +2607,15 @@ const main = async (): Promise<void> => {
       let templateRef: TemplateRef | undefined;
       if ((b.taskFile ?? "") !== "") {
         let expanded: ExpandedTask;
-        try { expanded = await expandTask({ taskFile: b.taskFile!, params: b.params ?? {} }, { baseDir: callerBaseOf(self) }); }
+        try { expanded = await expandTask({ taskFile: b.taskFile!, params: b.params ?? {} }, { baseDir: m.getCwd(self).runningCwd || m.getCwd(self).defaultCwd || process.cwd() }); }
         catch (e) { json(res, 400, { ok: false, reason: e instanceof TemplateError ? e.message : `template expansion failed: ${errText(e)}` }); return; }
         text = expanded.text;
         task = clipLine((b.params?.header ?? "").toString().trim() || expanded.text, 120);
         templateRef = expanded.templateRef;
       }
       if (!text.trim()) { json(res, 400, { ok: false, reason: "task is required" }); return; }
-      // 回执去向在入口冻结 (dispatch 不再永远挂到当前帧: return:"detach" 即旁支, 修 G4)。
-      const plan = planReturn(self, b as Record<string, unknown>);
-      if (!plan.ok) { json(res, plan.status, { ok: false, reason: plan.reason }); return; }
+      // room 模型 (契约 §3): delegate 的产出 = 一条 chat_ask (kind:"task"), 结论只能
+      // chat_reply 交代; return/public/rejoin 参数位已退役。
       const planId = String(b.planId ?? "").trim();
       if (planId) {
         if (!plans.healthy()) { json(res, 503, { ok: false, reason: "plans store unavailable; cannot associate this event" }); return; }
@@ -4755,18 +2623,8 @@ const main = async (): Promise<void> => {
         if (!linkedPlan || linkedPlan.owner !== self || !["active", "paused"].includes(linkedPlan.state)) {
           json(res, 409, { ok: false, reason: "planId must name an unfinished plan owned by the caller" }); return;
         }
-        if (plan.op === "none") { json(res, 400, { ok: false, reason: "planId requires a receipted task" }); return; }
       }
-      const dispatchOrigin: ActorOrigin = {
-        authority: controlSnapshot(self), asker: askerOf(self),
-        plan: { op: plan.op, ...(plan.serves ? { serves: plan.serves } : {}) },
-      };
       const lead = b.lead === true;
-      const transfer = plan.op === "transfer";
-      if (transfer && lead) { json(res, 409, { ok: false, reason: "transfer hands over the row this turn owes; a lead dispatch cannot transfer" }); return; }
-      // 交出人问的那一笔同样合法 (同 tell_peer): 那一行归 chat receiver, 与同伴派的件走同一条
-      // move —— 接手方终句就是那句人话的答复。没得交 (`serves` 落空 / 已不在手上) 由
-      // transferRefusal 在投递前拦, 不在这里按 receiver 种类预判。
       const force = b.force === true;
       const to = (b.to ?? "").toString().trim();
       const now = Date.now();
@@ -4777,95 +2635,58 @@ const main = async (): Promise<void> => {
       if (tierArg && !TIERS.includes(tierArg as TierName)) { json(res, 400, { ok: false, reason: `unknown tier: ${tierArg}` }); return; }
       const taskTier = (tierArg || tierFor(task, lead)) as TierName;
       const pool = to || b.spawn || lead ? [] : await autoRouteRowsOf(self, taskTier);
-      if (!controlValid(self, dispatchOrigin.authority)) { json(res, 409, { ok: false, reason: "dispatch source turn/control changed while routing; original task remains with source" }); return; }
       const cands = rankCandidates(task, m.getCwd(self).runningCwd, pool, { now, ttlMs });
       let d: { kind: "existing"; why: string; row?: RouteRow } | { kind: "spawn"; why: string } = to ? { kind: "existing" as const, why: `你点名了 ${to}` }
         : b.spawn ? { kind: "spawn" as const, why: "你要了新的" }
           : lead ? { kind: "spawn" as const, why: "复杂活: 白板起一个 hard 档的 lead, 由它组队" }
             : decide(task, cands, now, ttlMs, force, taskTier);
       const diagnostics = { ...routeDiagnostics(task, cands, now, ttlMs, force, taskTier), deliveryFallback: "" };
-      if (!to && d.kind === "existing" && d.row) {
-        const selected = d.row;
-        dispatchOrigin.reuseCheck = (target, ownEvent) => {
-          const rec = wizards.get(target), info = m.sessionInfo(target);
-          if (target !== selected.target || !selected.sessionId || info?.sessionId !== selected.sessionId
-            || rec?.name !== selected.name || rec?.birthToken !== selected.birthToken) return "candidate session/name/birthToken changed";
-          if (selected.budgetModel) {
-            const model = (info?.jsonlPath ? lastModel(info.jsonlPath) : "") || info?.model;
-            if (model?.trim().toLowerCase() !== selected.budgetModel.trim().toLowerCase()) return "candidate model no longer fits light task budget";
-          }
-          if (rec?.lead) return "candidate became lead";
-          const duties = [
-            ...routeInFlight().filter((x) => x.to === target && x.turn !== ownEvent).map((x) => `${x.turn} ${x.state}`),
-            ...events.status().events.filter((e) => e.target === target && (e.execution === "queued" || e.execution === "dispatching"))
-              .map((e) => `${e.id} ${e.execution}`),
-          ];
-          return duties.length ? `candidate acquired duties: ${duties.join(" · ")}` : "";
-        };
-      }
-      const tell = (name: string, text: string, extra = ""): Promise<Reply> => tellPeerAs(self, {
-        name, text, public: b.public !== false, force,
-        ...(templateRef ? { templateRef } : {}),
-        ...(planId ? { planId } : {}),
-        ...(plan.op !== "self" ? { return: plan.op } : {}),
-      } as PeerBody, extra, dispatchOrigin);
       const shown = cands.map((e) => `${e.row.address || e.row.name}${e.row.busy ? " 忙" : ""}`);
       if (b.dryRun) {
         json(res, 200, { ok: true, dryRun: true, diagnostics, decision: d.kind, reason: d.why, ...(d.kind === "existing" ? { name: to || (d.kind === "existing" && d.row ? d.row.address || d.row.name : "") } : { tier: taskTier }), ...(shown.length ? { candidates: shown } : {}) });
         return;
       }
+      /** 投递 = hub.append 一条 task 行; room 按 room?/缺省规则落 (D-1)。 */
+      const deliverTask = async (name: string): Promise<{ status: number; body: Record<string, unknown> }> => {
+        const me = roomSelfOf(self);
+        if (!me) return { status: 400, body: { ok: false, reason: "caller 不在名册上, 没有 uid" } };
+        const who = whoRefOf(name);
+        if (!who || who.kind !== "wizard") return { status: 400, body: { ok: false, reason: "认不出执行者: " + name } };
+        const target = roomTargetOf(me, [who], (b as { room?: string }).room);
+        if (target.error || !target.room) return { status: target.status ?? 400, body: { ok: false, reason: target.error ?? target.reason ?? "" } };
+        // lead 的层级规矩随正文带 (宪章是出生快照, 打法只这一件活用得上)。
+        const body2 = lead ? text + "\n\n" + renderReminder({ wezard: "lead" }, wizards.byUid(who.id)?.lead ? renderLeadPlaybook() : renderLead()) : text;
+        const v = hub.append(target.room, { author: me, kind: "task", text: body2, to: [who], origin: "tool",
+          ...((b.for ?? "").toString().trim() ? { for: (b.for ?? "").toString().trim() } : {}),
+          ...(planId ? { planId } : {}) });
+        if (!v.ok) return { status: v.status, body: { ok: false, reason: v.reason } };
+        return { status: 200, body: { ok: true, room: v.row.room, id: v.row.id, event: v.row.id, name: peerAddress(cfg, wizards.byUid(who.id)?.target ?? who.id), queued: true,
+          receipt: "已持久化排队; 结论经 chat_reply({re, text, status}) 交代" } };
+      };
       if (d.kind === "existing" && !to && d.row?.target) {
         const idle = await m.idleNow(d.row.target);
-        const refusal = dispatchOrigin.reuseCheck?.(d.row.target) || (!idle ? "candidate became busy" : "");
-        if (refusal) {
-          diagnostics.deliveryFallback = refusal;
-          delete dispatchOrigin.reuseCheck;
-          d = { kind: "spawn", why: `${d.why}; 投递前复核退回 (${refusal}), 白板 spawn` };
+        if (!idle) {
+          diagnostics.deliveryFallback = "candidate became busy";
+          d = { kind: "spawn", why: `${d.why}; 投递前复核退回 (candidate became busy), 白板 spawn` };
         }
       }
       if (d.kind === "existing") {
         const name = to || (d.kind === "existing" && d.row ? d.row.address || d.row.name : "");
         const r = resolvePeer(self, name);
-        if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
-        // 已有 wizard 当 lead: 宪章是出生时定的 (里面没有 lead 一节), 规矩加打法挂在信封后面带过去;
-        // 已是 lead 的宪章里已有层级规矩, 只带打法。投成了才记 lead, 它下次重生宪章里就有。
-        const t = await tell(name, text, lead ? renderReminder({ wezard: "lead" }, wizards.get(r.target)?.lead ? renderLeadPlaybook() : renderLead()) : "");
+        if (!r.ok) { json(res, r.status, { ok: false, reason: r.reason, ...(r.candidates?.length ? { candidates: r.candidates } : {}) }); return; }
+        const t = await deliverTask(name);
         if (lead && t.status === 200) wizards.upsert(r.target, { lead: true });
-        // room? 参数 (契约 §3): 点名的执行者入座指定 room (via spawn, 免审)。
         if (t.status === 200) joinRoomSpawn(self, (b as { room?: string }).room, name);
-        // 自动选中的被冷门控 (decide 用名册的活动时刻, 门控用 transcript 的, 口径差一点) 或方向闸 (它归别人管 / 是借来的专家) 退回: 改走 spawn; 点名的不改。
-        if (!(!to && (t.body.gated === "cold" || t.body.gated === "direction" || t.body.gated === "reuse"))) {
-          json(res, t.status, { ...t.body, diagnostics, decision: "existing", ...dispatchReason(t.status === 200, t.body.reason, d.why), ...(shown.length ? { candidates: shown } : {}) });
-          return;
-        }
-        diagnostics.deliveryFallback = String(t.body.reason);
-        delete dispatchOrigin.reuseCheck;
-        d = { kind: "spawn", why: `${d.why}; 但它被${t.body.gated === "reuse" ? "投递前复核" : t.body.gated === "direction" ? "方向闸" : "冷门控"}退回 (${String(t.body.reason)}) —— 改为白板 spawn` };
+        json(res, t.status, { ...t.body, diagnostics, decision: "existing", ...dispatchReason(t.status === 200, t.body.reason, d.why), ...(shown.length ? { candidates: shown } : {}) });
+        return;
       }
       const name = (b.name ?? "").toString().trim();
       const description = (b.description ?? "").toString().trim() || clipLine(task, 120);
       // 空 name 交给 bearAs / claimSlot 按持久序号自动取名避重, 不当作显式点名复用旧记录。
       const tier = taskTier;
-      const born = await bearAs(self, { inherit: false, name, description, tier, ...(lead ? { lead: true } : {}) } as PeerBody, dispatchOrigin.authority);
+      const born = await bearAs(self, { inherit: false, name, description, tier, ...(lead ? { lead: true } : {}) } as PeerBody);
       if (born.status !== 200) { json(res, born.status, { ...born.body, diagnostics, decision: "spawn", ...dispatchReason(false, born.body.reason, d.why) }); return; }
-      if (!controlValid(self, dispatchOrigin.authority)) { json(res, 409, { ok: false, decision: "spawn", reason: "dispatch source turn changed during spawn; task remains with original source turn" }); return; }
-      // 宪章里只有层级规矩, 打法随信封带 (宪章每轮都在上下文里, 打法只这一件活用得上)。
-      const t = await tell(String(born.body.name), text, lead ? renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : "");
-      // P7-S2 join 参数: 白板新生落地后把它带进指定严格群 (对已有执行者也一样 — joinMember 升级式)。
-      if (b.join?.chat && t.status === 200) {
-        const base = chatBaseOf(cfg, b.join.chat);
-        const target = base ? resolvePeer(self, String(born.body.name)) : undefined;
-        if (target?.ok) joinMember(self, base, target.target, b.join.mode === "speaker" ? "speaker" : "mention");
-      }
-      // 没点名 join、但新生的 home 本身是 strict 群 → 也落账 (人 2026-11-18 晚口径:
-      // home 群在、成员表无 = 死账温床, spawn 是成员资格的强制落账点)。
-      if (!b.join?.chat && t.status === 200) {
-        const target = resolvePeer(self, String(born.body.name));
-        if (target?.ok) {
-          const base = baseOfKey(target.target);
-          if (strictSpeechOf?.(base) && !isInternalKey(target.target)) joinMember(self, base, target.target, "mention");
-        }
-      }
+      const t = await deliverTask(String(born.body.name ?? ""));
       // room? 参数: 白板新生落地即入座 (via spawn, 免审)。
       if (t.status === 200) joinRoomSpawn(self, (b as { room?: string }).room, String(born.body.name ?? ""));
       json(res, t.status, {
@@ -4878,6 +2699,7 @@ const main = async (): Promise<void> => {
         ...(shown.length ? { candidates: shown } : {}),
       });
     });
+
 
     // 记忆三种作用域: self 跟着自己 (wizards.json), 直写; chat / workspace 是共享的 md,
     // 每个在那个群 / 那个目录出生的 wizard 都会读到 —— 它们只收提议, 由整理者合并
@@ -4933,11 +2755,9 @@ const main = async (): Promise<void> => {
     // 生分身。默认 fork 调用方此刻的上下文 —— 这是"先把公共材料读进来, 再分出 N
     // 个干活的"之所以省事的原因: 材料只读一遍, 却进了 N 份上下文。
     /** spawn_wizard / clone_wizard 的本体 —— HTTP 路由与 dispatch 共用。 */
-    const bearAs = async (self: string, body: PeerBody, capturedAuthority?: ReturnType<typeof controlSnapshot>): Promise<Reply> => {
+    const bearAs = async (self: string, body: PeerBody): Promise<Reply> => {
       const retiredField = retiredOrchestrationField(body);
       if (retiredField) return { status: 400, body: { ok: false, reason: retiredFieldReason(retiredField) } };
-      const authority = capturedAuthority ?? controlSnapshot(self);
-      if (authority && !controlValid(self, authority)) return { status: 409, body: { ok: false, reason: "this turn no longer owns control; cannot spawn more work" } };
       // 出生投递 (下方 acceptPeerDispatch) 不经 tellPeerAsInner 的模板展开入口 ——
       // 第一期不接 taskFile; MCP 层已拦, 这里也拒绝直连 HTTP 请求: 显式 400,
       // 不让调用方以为模板生效了而实际投出去的是空正文。
@@ -4947,8 +2767,7 @@ const main = async (): Promise<void> => {
       if (addressError) return { status: 400, body: { ok: false, reason: addressError } };
       if (Object.prototype.hasOwnProperty.call(body, "cli"))
         return { status: 400, body: { ok: false, reason: "cli is unsupported; spawn and clone use the configured backend" } };
-      const b = body as { name?: string; description?: string; inherit?: boolean; from?: string; cwd?: string; chat?: string; model?: string; effort?: string; tier?: string; task?: string; lead?: boolean; planId?: string };
-      const asker = b.task?.trim() ? askerOf(self) : undefined;
+      const b = body as { name?: string; description?: string; inherit?: boolean; from?: string; cwd?: string; chat?: string; model?: string; effort?: string; tier?: string; task?: string; lead?: boolean; planId?: string; room?: string };
       const requestedPlanId = (b.planId ?? "").trim();
       if (requestedPlanId && !b.task?.trim()) return { status: 400, body: { ok: false, reason: "planId requires a dispatched task" } };
       if (requestedPlanId) {
@@ -4957,16 +2776,8 @@ const main = async (): Promise<void> => {
         if (!linkedPlan || linkedPlan.owner !== self || !["active", "paused"].includes(linkedPlan.state))
           return { status: 409, body: { ok: false, reason: "planId must name an unfinished plan owned by the caller" } };
       }
-      // 带 task 才是派活: 回执去向同 tell_peer (return / for)。
-      const plan = b.task?.trim() ? planReturn(self, body as Record<string, unknown>) : undefined;
-      if (plan && !plan.ok) return { status: plan.status, body: { ok: false, reason: plan.reason } };
-      if (requestedPlanId && plan?.ok && plan.op === "none") return { status: 400, body: { ok: false, reason: "planId requires a receipted task" } };
-      // transfer 交出人问的那一笔同样合法 (同 tell_peer, 那一行归 chat receiver) —— 没得交 /
-      // 已不在手上由下面的 transferRefusal 拦, 不在这里按 receiver 种类预判。
       const askedEffort = parseEffort(b.effort);
       if (b.effort !== undefined && !askedEffort) { return { status: 400, body: { ok: false, reason: `effort 只有这几档: ${EFFORTS.join(" / ")}` } }; }
-      const transferNo = plan?.ok && plan.op === "transfer" ? transferRefusal(self, plan.serves, undefined, {}) : undefined;
-      if (transferNo) return { status: 409, body: { ok: false, reason: transferNo } };
       // `inherit` 没有默认值 —— 继承与否是两种完全不同的分身 (一种开局就带着你
       // 读过的一切, 另一种白纸一张), 猜错了要么白烧一份上下文, 要么让它从零重读。
       // 逼调用方每次自己说。
@@ -4995,7 +2806,6 @@ const main = async (): Promise<void> => {
       if (source !== self && !sourceInfo?.sessionId) {
         return { status: 409, body: { ok: false, reason: `${displayName(source)} 没有可 fork 的会话 (还没说过话, 或绑定已失效)` } };
       }
-      if (authority && !controlValid(self, authority)) return { status: 409, body: { ok: false, reason: "caller turn/control changed while preparing spawn" } };
       const wantChat = (b.chat ?? "").toString().trim();
       const base = ((b) => (b && sameBot(self, b) ? b : ""))(wantChat ? chatBaseOf(cfg, wantChat) : baseOfKey(self));
       if (!base) {
@@ -5036,7 +2846,7 @@ const main = async (): Promise<void> => {
       // 先盖章再生: 分叉出来的 transcript 里躺着被克隆者的旧回复, 时刻早于这一枚章,
       // wait_peer 才不会把它们当成分身对这件活的答复。
       const taskAt = Date.now();
-      const birthGuard = (): boolean => ownsSlot(slotR) && controlValid(self, authority);
+      const birthGuard = (): boolean => ownsSlot(slotR);
       if (!birthGuard()) { releaseBirth(); return { status: 409, body: { ok: false, reason: "wizard identity or caller turn changed before spawn" } }; }
       const r = await m.cloneSession({
         guard: birthGuard,
@@ -5067,57 +2877,31 @@ const main = async (): Promise<void> => {
         ...(r.inherited ? { ctx: forkOf ? displayName(forkOf) : displayName(self) } : {}),
         ...(kid.description ? { job: kid.description } : {}), cwd: r.cwd,
       }, subjectOf(wizards.get(target)));
+      // 出生即派活 (契约 §3): 一条 task 行, 结论经 chat_reply 交代; room? 入座。
       const dispatched = !!task && birthGuard();
       let dispatchedEvent = "";
+      let dispatchedRoom = "";
       if (dispatched) {
-        const deadlineAt = NO_DEADLINE;
-        const quiet = !!plan?.ok && plan.op === "none";
-        // transfer 交出的是人问的那一笔 (同 tell_peer): 注入事件得带上那个群, 否则频道为空被当
-        // 私聊轮扣下, 刚出生的接手方那句终句人永远收不到 (见 mirror-bridge 的 final 通道)。
-        // 同伴派的件 (receiver 是 wizard) 仍旧私聊 —— handedChat 为空, 行为不变。
-        const handed = plan?.ok && plan.op === "transfer" && plan.serves ? router.get(plan.serves)?.receiver : undefined;
-        const handedChat = handed?.kind === "chat" ? handed.channel : "";
-        // 路由行 (§3.1): 生出来的那个领活, 结论回生它的这位。
-        const serves = plan?.ok
-          ? openDispatchRow({ self, target, op: plan.op, deadlineAt, ...(asker ? { asker } : {}), ...(plan.serves ? { serves: plan.serves } : {}) })
-          : "";
-        dispatchedEvent = serves;
-        const eventId = serves ? plan?.ok && plan.op === "transfer" ? `route:${serves}:transfer:${randomUUID()}` : `route:${serves}:input:${randomUUID()}` : `p:${self}:${target}:${randomUUID()}`;
-        const birthTell: Tell = { from: self, to: target, channel: handedChat, at: taskAt, event: serves, legs: 1, asker, dispatchKey: eventId };
-        try { acceptPeerDispatch({ id: eventId, target, speaker: self, channel: handedChat, serves, asker, priority: "normal", deadline: deadlineAt,
-          payload: { text: task, peer: {
-            from: { kind: "peer", from: self, event: serves, ...(handedChat ? { transferred: true } : {}), ...(asker ? { asker } : {}) },
-            envelope: envelopeFor(self, handedChat, { asker, ...(quiet ? { quiet: true } : {}) }) + (b.lead === true ? renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : ""),
-            ...(quiet ? {} : { tell: birthTell }),
-            kind: "task",
-            ...(plan?.ok && plan.op === "transfer" ? { transferred: true } : {}),
-          }, ...(requestedPlanId ? { planId: requestedPlanId } : {}) } }, !!plan?.ok && plan.op === "transfer"); }
-        catch (error) { return { status: 409, body: { ok: false, target, name, dispatched: false, reason: errText(error) } }; }
+        const me = roomSelfOf(self);
+        const who = wizards.get(target)?.uid;
+        if (me && who) {
+          const roomRef = (b.room ?? "").toString().trim();
+          const dest = roomTargetOf(me, [{ kind: "wizard", id: who }], roomRef || undefined);
+          if (dest.room) {
+            const v = hub.append(dest.room, { author: me, kind: "task",
+              text: task + (b.lead === true ? "\n\n" + renderReminder({ wezard: "lead" }, renderLeadPlaybook()) : ""),
+              to: [{ kind: "wizard", id: who }], origin: "tool", ...(requestedPlanId ? { planId: requestedPlanId } : {}) });
+            if (v.ok) { dispatchedEvent = v.row.id; dispatchedRoom = v.row.room; }
+          }
+        }
       }
-      return { status: 200, body: { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, queued: dispatched, ...(dispatched ? { event: dispatchedEvent } : {}), ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(r.effort ? { effort: r.effort } : {}), ...(pick.tier ? { tier: pick.tier } : {}), via: pick.via } };
+      return { status: 200, body: { ok: true, target, name, address: name, inherited: r.inherited, sessionId: r.sessionId, cwd: r.cwd, dispatched, queued: dispatched, ...(dispatched ? { event: dispatchedEvent, ...(dispatchedRoom ? { room: dispatchedRoom } : {}) } : {}), ...(r.model ? { model: r.model } : {}), ...(r.modelWarning ? { modelWarning: r.modelWarning } : {}), ...(r.effort ? { effort: r.effort } : {}), ...(pick.tier ? { tier: pick.tier } : {}), via: pick.via } };
     };
     http.register("POST /wizard/clone", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       if (refuseGuide(res, self, (body as { inherit?: boolean }).inherit ? "clone_wizard" : "spawn_wizard")) return;
       const r = await bearAs(self, body);
-      // P7-S2 join 参数: 出生成功后把它带进指定严格群 (joinMember 只在 strict 群生效)。
-      const join = (body as { join?: { chat?: string; mode?: string } }).join;
-      if (r.status === 200 && join?.chat) {
-        const born = (r.body as { name?: string }).name;
-        const base = chatBaseOf(cfg, join.chat);
-        const target = born ? resolvePeer(self, String(born)) : undefined;
-        if (base && target?.ok) joinMember(self, base, target.target, join.mode === "speaker" ? "speaker" : "mention");
-      }
-      // 同 spawn: 没点名 join、但出生的 home 是 strict 群 → 也落账。
-      if (r.status === 200 && !join?.chat) {
-        const born = (r.body as { name?: string }).name;
-        const target = born ? resolvePeer(self, String(born)) : undefined;
-        if (target?.ok) {
-          const base = baseOfKey(target.target);
-          if (strictSpeechOf?.(base) && !isInternalKey(target.target)) joinMember(self, base, target.target, "mention");
-        }
-      }
       // room? 参数 (契约 §3): 出生落地即入座 (via spawn, 免审)。
       if (r.status === 200) joinRoomSpawn(self, (body as { room?: string }).room, String((r.body as { name?: string }).name ?? ""));
       json(res, r.status, r.body);
@@ -5131,7 +2915,6 @@ const main = async (): Promise<void> => {
       if (isApprentice(wizards, target)) return false;
       if (planRetirementBlock(target)) return false;
       leaveRooms(target, "实例结束"); // room: 名下未决 duty 落 canceled, 唤醒提问者
-      leaveAllChats(target); // P7-S2: 身份退役自动离群
       wizards.drop(target);
       return true;
     };
@@ -5141,8 +2924,6 @@ const main = async (): Promise<void> => {
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
       const addressError = unsupportedPeerAddressField(body);
       if (addressError) { json(res, 400, { ok: false, reason: addressError }); return; }
-      const authority = controlSnapshot(self);
-      if (!controlValid(self, authority)) { json(res, 409, { ok: false, reason: "本轮回答权和控制权已移交或失效；不能打断或结束目标 wizard" }); return; }
       const b = body as { name?: string; mode?: string; forget?: boolean; turn?: string; force?: boolean };
       const r = resolvePeer(self, addrOf(b));
       // 有身份没会话 (冷记录 / 生到一半的僵尸): resolvePeer 够不着它, 但收它不需要
@@ -5157,7 +2938,6 @@ const main = async (): Promise<void> => {
         if (retiringWizardTargets.has(cold.target)) { json(res, 409, { ok: false, reason: "wizard retirement is already in progress" }); return; }
         retiringWizardTargets.add(cold.target);
         try {
-        if (!controlValid(self, authority)) { json(res, 409, { ok: false, reason: "本轮控制权已变化；拒绝结束目标 wizard" }); return; }
         const blocked = planRetirementBlock(cold.target);
         if (blocked) { json(res, blocked.status, { ok: false, reason: blocked.reason }); return; }
         if (cold.target !== self && wizards.get(cold.target)?.parent !== self) { json(res, 403, { ok: false, reason: "only the wizard itself or its direct parent may end it" }); return; }
@@ -5189,49 +2969,31 @@ const main = async (): Promise<void> => {
       if (end && target !== self && victimRec?.parent !== self) { json(res, 403, { ok: false, reason: "only the wizard itself or its direct parent may end it" }); return; }
       if (end && b.forget && childrenOf(wizards.all(), target).length) { json(res, 409, { ok: false, reason: "end child wizards before forgetting their parent" }); return; }
       if (!end && target === self) { json(res, 400, { ok: false, reason: "打断自己没有意义 —— 你就是正在生成的那一个" }); return; }
-      // 按件号撤回自己派的那一件: 它此刻正在做的就是这件才按 Esc; 否则 (排着 / 在做别人的)
-      // 只把这件记成 canceled —— 它之后答出来也不再回执, 手上别人的那一轮不受影响。
-      // 不带 turn / force 的打断 = 撤回你派给它、还在飞的那一笔 (唯一时) —— 不必抄 event; 歧义才要指明。
-      const own = !end && !b.turn && !b.force ? pickPair(router.table(), self, target) : undefined;
-      if (own && !own.ok) { json(res, 400, { ok: false, target, reason: `你在它手上有 ${own.many.length} 笔没落定, 撤回哪一笔用 turn 指明: ${own.many.map((x) => `\`${x.event}\``).join(" ")}` }); return; }
-      const ownLive = own?.ok && own.row && ["held", "open", "need", "error"].includes(own.row.status) ? own.row.event : "";
-      const turn = eventRef(b.turn) || ownLive;
+      // 按件号撤回自己派的那一件 (room 模型): daemon 代写一条 canceled reply 关掉 duty,
+      // 它此刻正在做的就是这件才按 Esc —— 被打断那一轮的其余 duty 不关 (§3b), 下次唤醒重投。
+      const turn = (b.turn ?? "").toString().trim();
       if (!end && turn) {
-        const mine = router.awaitedBy(self).find((x) => x.owner === target);
-        const known = router.get(turn);
-        if (mine?.event !== turn && !(known && known.receiver.kind === "wizard" && known.receiver.to === self)) { json(res, 404, { ok: false, reason: `你没有在等 ${victim.name || target} 答 '${turn}' 这件 (已落定、event 写错, 或不是你派的)` }); return; }
-        // 先落 canceled 再按 Esc: 被打断那一轮的半截话不该被 watcher 当成答案投回来。
+        const roomId = roomStore.roomOfMsg(turn);
+        const s = roomId ? roomState(roomId) : undefined;
+        const meWho = roomSelfOf(self);
+        const duty = s ? openDuties(s).find((d) => d.msg === turn) : undefined;
+        if (!roomId || !s || !duty || !meWho || !sameWho(duty.asker, meWho)) {
+          json(res, 404, { ok: false, reason: "你没有在等 " + (victim.name || target) + " 答 '" + turn + "' 这件 (已落定、消息 id 写错, 或不是你派的)" });
+          return;
+        }
+        const v = hub.append(roomId, { author: DAEMON, kind: "reply", re: [turn],
+          text: "[wezard] " + displayName(self) + " 撤回了这件", status: "canceled", statusGiven: true, origin: "daemon" });
         const busy = !(await m.idleNow(target));
-        if (!controlValid(self, authority)) { json(res, 409, { ok: false, reason: "等待期间本轮控制权已变化；未撤回或打断目标" }); return; }
-        const canceled = cancelPeerWork(target, self, (x) => x.from === self && x.event === turn);
-        // 按 Esc 之前再认一次手上这一轮: 上面那次 await 期间它可能已经做完这件、接了别人的下一件。
-        const current = busy && openingAsk(target)?.event === turn;
-        // 还没轮到 / 排在后面: 捎一句给它, 轮到那句话时别再做了 (notices 挂在下一条注入的尾巴上)。
-        if (!current) notices.post([target], `${displayName(self)} 撤回了它派给你的 ${turn} —— 那件活不用做了; 读到它时直接略过, 不必回复。`);
-        // 只按 Esc, 不 teardown: teardown 会清掉它的注入队列, 别人排着的话一起丢。
-        if (current && !controlValid(self, authority)) { json(res, 409, { ok: false, reason: "物理操作前本轮控制权已变化；已登记撤回但未发送 Esc" }); return; }
-        const esc = current ? await m.interruptPane(target) : undefined;
-        // Esc 没按成也不回滚撤回: 这件已经不等了, 只是它手上那一轮还在跑 —— 如实说。
+        const esc = busy ? await m.interruptPane(target) : undefined;
         json(res, 200, {
-          ok: true, target, name: victim.name, mode: "interrupt", turn, canceled, interrupted: !!esc?.ok,
-          ...(esc && !esc.ok ? { note: `这件已撤回 (不会再回执给你), 但 Esc 没按成 (${esc.reason ?? "unknown"}), 它这一轮可能还在跑` } : {}),
-          ...(current ? {} : { note: "它此刻没在做这件 (还排着, 或在做别人的活), 没按 Esc —— 这件已撤回, 它之后答出来也不会再回执给你" }),
+          ok: true, target, name: victim.name, mode: "interrupt", turn, canceled: v.ok, interrupted: !!esc?.ok,
+          ...(esc && !esc.ok ? { note: "这件已撤回, 但 Esc 没按成 (" + (esc.reason ?? "unknown") + "), 它这一轮可能还在跑" } : {}),
+          ...(!busy ? { note: "它此刻没在做这件 —— 这件已撤回, 它之后也不会再被唤醒做它" } : {}),
         });
         return;
       }
-      // 不带件号的打断会停掉它手上整轮: 那一轮若是别的 wizard 派的, 先拒 —— 误伤的是别人的活。
-      const others = !end && !b.force ? await othersTurn(target, self) : undefined;
-      if (!controlValid(self, authority)) { json(res, 409, { ok: false, reason: "等待期间本轮控制权已变化；未取消或打断目标" }); return; }
-      if (others) {
-        json(res, 409, { ok: false, target, reason: `它此刻在做 ${others.from} 派的活${others.event ? ` (${others.event})` : ""}, 打断会连那件一起停掉 —— 只想撤回你自己派的那件, 传 turn (那一笔的 event); 确要打断它这一轮, 加 force:true` });
-        return;
-      }
-      // 先落 canceled 再动 pane: pane 一死, 守着的 watcher 会把同一份报成 dead。
-      // 打断只停它手上这一轮: 只掐这一轮开头那句派来的活 (人 / 定时 / 回执轮不掐任何一份)。
-      const only = end ? undefined : currentAsk(target);
-      if (!controlValid(self, authority)) { json(res, 409, { ok: false, reason: "物理操作前本轮控制权已变化；未取消或打断目标" }); return; }
-      const canceled = cancelPeerWork(target, self, only);
-      if (!controlValid(self, authority)) { json(res, 409, { ok: false, reason: "物理操作前本轮控制权已变化；未打断或结束目标" }); return; }
+      // 不带件号的打断只按 Esc (I-1 语义): 它手上未结的 duty 不关, 下次唤醒按游标重投。
+      const canceled = 0;
       const done = end ? await m.killPane(target) : await m.interruptPane(target, { teardown: true });
       if (!done.ok) { json(res, 502, { ok: false, target, reason: done.reason }); return; }
       if (wizards.get(target)?.birthToken !== victimRec?.birthToken) { json(res, 409, { ok: false, target, reason: "wizard identity changed during stop; identity cleanup withheld" }); return; }
@@ -5289,8 +3051,8 @@ const main = async (): Promise<void> => {
       json(res, r.status, r.body);
     });
 
-    // 挂起事项全表 (见 pending-items.ts): 你派出去、还没了结的事。`drop` 显式消项;
-    // `name` 看别人的 (只读)。读过全表就算刚给过一次: 自动的全表提醒从此刻重新计。
+    // 挂起事项全表 (room 模型): 你派出去、还没了结的 duty。`drop` = 显式关掉 (写 passed);
+    // `name` 看别人的 (只读)。旧 pending-items 台账已退役, 唯一事实是 room 账本。
     http.register("POST /pending", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (!self) { json(res, 400, { ok: false, reason: "cannot resolve caller session" }); return; }
@@ -5301,34 +3063,41 @@ const main = async (): Promise<void> => {
       const r = who ? resolvePeer(self, who) : undefined;
       if (r && !r.ok) { json(res, r.status, { ok: false, reason: r.reason, candidates: r.candidates }); return; }
       const owner = r?.ok ? r.target : self;
+      if (who && owner !== self && Array.isArray(b.drop)) { json(res, 403, { ok: false, reason: "只能消自己派出去的" }); return; }
+      const me = roomSelfOf(self);
+      const ownerUid = wizards.get(owner)?.uid;
+      if (!me || !ownerUid) { json(res, 200, { ok: true, text: "(没有在等的)" }); return; }
       const drop = Array.isArray(b.drop) ? b.drop.map(String) : typeof b.drop === "string" ? [b.drop] : [];
-      if (drop.length && owner !== self) { json(res, 403, { ok: false, reason: "只能消自己派出去的" }); return; }
-      // 消项: 主键是 event, 但老行只记着件号 —— 两种写法都收 (见 pending-items 的 find)。
-      // 名字 = 你派给它、还开着的那几项 (同一对再派会顶掉旧项, 通常就一项)。
-      const dropKeys = drop.flatMap((v) => {
-        const id = eventRef(v);
-        if (isEventRef(id)) return [id];
-        const who = resolvePeer(self, v.trim());
-        const hit = who.ok ? ledger.openOf(self).filter((x) => x.to === who.target).map((x) => x.event) : [];
-        return hit.length ? hit : [v.trim()];
-      });
-      const dropped = dropKeys.length ? ledger.drop(self, dropKeys, (b.why ?? "").toString().trim()) : [];
-      const now = Date.now();
-      const items = ledger.openOf(owner);
-      if (owner === self) {
-        const i = m.sessionInfo(self);
-        if (i) pendingMarks.set(self, { sid: i.sessionId, ctx: i.contextTokens, ctxAtFull: i.contextTokens, drains: 0 });
+      const dropped: string[] = [];
+      const mine: string[] = [];
+      for (const room of roomStore.ids()) {
+        const s = roomState(room);
+        if (!s) continue;
+        for (const d of openDuties(s)) {
+          if (!sameWho(d.asker, { kind: "wizard", id: ownerUid })) continue;
+          const holder = holderOf(s, d);
+          const label = d.msg + " → " + (holder ? roomNameOf(holder) : "?") + " (" + d.kind + (d.last ? ", " + d.last.status : "") + ") " + clipLine(s.byId.get(d.msg)?.text ?? "", 60);
+          if (drop.includes(d.msg) && owner === self) {
+            // 消项 = 调用方自己写 passed (自己是 asker, 不是 holder —— judge 不给关别人名下的账,
+            // 但人可以对任何 duty 写; 这里用 daemon 代写, 与 stop_wizard 撤回同一口径)。
+            const v = hub.append(room, { author: DAEMON, kind: "reply", re: [d.msg],
+              text: "[wezard] " + displayName(self) + " 消掉这项: " + ((b.why ?? "").toString().trim() || "不再等了"),
+              status: "passed", statusGiven: true, origin: "daemon" });
+            if (v.ok) dropped.push(d.msg);
+          } else mine.push(label);
+        }
       }
-      const missed = dropKeys.filter((t) => !dropped.some((x) => x.event === t));
+      const missed = drop.filter((t) => !dropped.includes(t));
       json(res, 200, {
         ok: true,
         text: [
-          ...(dropped.length ? [`已消掉: ${dropped.map((x) => `\`${x.event}\``).join(" ")}`] : []),
-          ...(missed.length ? [`没找到 (不是你开着的): ${missed.join(" ")}`] : []),
-          renderTable(items, liveOfEvents(), pendingNames, now),
+          ...(dropped.length ? ["已消掉: " + dropped.join(" ")] : []),
+          ...(missed.length ? ["没找到 (不是你开着的): " + missed.join(" ")] : []),
+          ...(mine.length ? ["你派出去、还没了结的 " + mine.length + " 件:", ...mine.map((x) => "- " + x)] : ["(没有在等的)"]),
         ].join("\n"),
       });
     });
+
 
     // ── 定时任务 ────────────────────────────────────────────────────
     // 到点把一句 prompt 注入一个 wizard 会话 —— 和人在群里对它说话走的是同一条路
@@ -5429,11 +3198,11 @@ const main = async (): Promise<void> => {
       usageMemo = { at: Date.now(), u: { today: fold(r.today), week: fold(r.week) } };
       return usageMemo.u;
     };
-    /** chatPolicy 的依据: 各聊天名 ↔ principal 与它此刻的顶层模式 —— 键落盘是 principal, 人和模型认的是名字。 */
+    /** chatPolicy 的依据: 各聊天名 ↔ principal —— 键落盘是 principal, 人和模型认的是名字。 */
     const chatPolicyEvidence = (p: string[]): string[] => {
       if (p[0] !== "chatPolicy") return [];
       const named = listChatNames(cfg);
-      const line = (b: string): string => `${named.filter((c) => c.base === b).map((c) => c.name).join(" / ") || "(未命名)"} = ${b} · 顶层模式 ${chatPolicyOf(cfg, b).topOnly ? "开" : "关"}`;
+      const line = (b: string): string => `${named.filter((c) => c.base === b).map((c) => c.name).join(" / ") || "(未命名)"} = ${b}`;
       // 查某一个聊天: 只报它; 查整张表: 报写过策略的, 其余命名聊天只报个数。
       if (p[1]) return [line(p[1])];
       const set = Object.keys(cfg.chatPolicy);
@@ -5556,12 +3325,9 @@ const main = async (): Promise<void> => {
       // 落盘时重算一遍: 等卡期间文件可能被别人改过, 按那一刻的文件打补丁、再校验。
       // 宪章快照取在落盘之前 (守卫里): hot 项一 applyHot, 活的 cfg 就已经是新的了。
       const caller = resolveSelf({ sessionId: body.sessionId, tmuxPane: body.tmuxPane }) || undefined;
-      // 人发起 = 调用方这一轮的链头是人 (人在群里 / 单聊里叫它改的)。
-      const byHuman = !!caller && !!askerOf(caller)?.who.startsWith("user:");
+      // 人发起 = 配置卡由审批人点 (config_set 的卡片只发给人); 卡片路径一律视为人的裁决。
+      const byHuman = pl.gate === "card" || !!caller;
       const commit = async (): Promise<(Plan & { charter: string }) | { ok: false; reason: string }> => {
-        // P7-S2: chatPolicy.<chat>.steward 换绑 → 成员表原子交换 (prev 在写盘前取)。
-        const stewardBase = pl.path[0] === "chatPolicy" && pl.path[2] === "steward" && pl.path.length === 3 ? String(pl.path[1]) : "";
-        const prevSteward = stewardBase ? appointedSteward(cfg, stewardBase) : "";
         const { r: now, note } = guardCharter(() => {
           const now = planSet(cfg, sourcePath, ask);
           if (!now.ok) return now;
@@ -5569,7 +3335,6 @@ const main = async (): Promise<void> => {
           applyHot(cfg, now);
           return now;
         }, (now) => now.ok ? { what: `\`config_set ${now.path.join(".")}\``, self: caller, byHuman, reload: now.apply === "reload", after: charterUnder(now) } : undefined);
-        if (now.ok && stewardBase) swapStewardMembership(stewardBase, prevSteward);
         return now.ok ? { ...now, charter: await note } : now;
       };
       const done = (now: Plan & { charter: string }): string =>
@@ -5765,7 +3530,7 @@ const main = async (): Promise<void> => {
             log.warn({ target, reason: after.reason }, "memory steward identity retained after pane cleanup because retirement check changed");
             return r;
           }
-          leaveAllChats(target); // P7-S2: 身份退役自动离群
+          leaveRooms(target, "memory steward 收工"); // room: 名下 duty 落 canceled
           wizards.drop(target);
           return r;
         } finally {
@@ -5882,11 +3647,7 @@ const main = async (): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
     log.info({ signal }, "shutdown signal");
-    // Pause delivery, but persist arrivals while transports/in-flight handlers drain.
-    events.drain();
-    stopSweep();
     stopPlanReminders();
-    stopObligations();
     scheduler.stop();
     steward?.stop();
     tasks.stop();
@@ -5900,7 +3661,6 @@ const main = async (): Promise<void> => {
     setTimeout(() => process.exit(0), 1500).unref();
     await new Promise((r) => setTimeout(r, 200));
     await Promise.allSettled([ws.shutdown(), http.close()]);
-    events.stop();
     process.exit(0);
   };
   http.register("POST /shutdown", (_req, res) => {

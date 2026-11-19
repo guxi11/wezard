@@ -14,7 +14,8 @@
 //
 // 全是纯函数: 候选的原料 (文件集 / 最近的话 / ctx) 由调用方从 transcript 读好送进来。
 import { resolve, basename, dirname, isAbsolute } from "node:path";
-import type { InFlight } from "./dispatch.js";
+/** 一件在飞的活 (原 dispatch.ts, 随其退役搬来): from 派给 to、还没落定。 */
+interface InFlight { from: string; to: string; turn: string; state: string; ageMs?: number }
 import { addr, agoOf, ctxOf, type WizardBrief } from "./wizard.js";
 import type { ContextMaterial } from "./peers.js";
 import { fileURLToPath } from "node:url";

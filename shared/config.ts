@@ -407,11 +407,9 @@ const Chats = z.record(z.string(), z.string().describe("base principal (`chat:wr
 // config_set 收名字, 落盘前换成它此刻指向的 principal。会进宪章 (系统提示): 已在跑的 wizard 要 handoff
 // 才换上新规矩 —— config_set 落盘时按宪章前后对比点名受影响的那些。
 export const ChatPolicy = z.object({
-  topOnly: z.boolean().optional().describe("顶层模式: 人只和顶层 wizard (群管家 / 人 `.name` 点名的) 对话; wizard 之间一律私聊 (tell_peer / delegate 的 public 失效), 被派活的 wizard 不能 notify 进群, 过程只在 rolepage。**默认开** (省略即开), 只有显式 `false` 才让 wizard 之间的往来进群"),
   stewardBudget: z.number().int().min(-1).default(4).describe("群管家的手闸: 每轮自己跑命令 / 外部工具的次数上限 (读文件类命令不计), 用完拒并叫它 delegate; 改文件、开子代理一律拒, 读代码放行。-1 = 不设闸"),
-  speech: z.enum(["implicit", "strict"]).optional().describe("发言模式: 不写 = 运行时判定 (P7-S3 起): S3 后首见的群聊默认 strict, 存量聊天 (known-chats.json 的 boot 快照) 与单聊默认 implicit。显式写 implicit/strict 永远优先。strict = 终句不自动进群, 出站走 chat_say/chat_reply/notify/send_file 工具 (2026-11-18 起: 成员即可多次发言, 仅频控每轮 3 / 每分钟 10, 义务不再是出站前置, 只作提醒; 销账只走 chat_reply 显式答复), 人只见占位与详情, CoT/流式/standalone 关"),
   steward: z.string().optional().describe("这个聊天的管家: wizard 身份名 (参数写裸名)。绑定后该群裸消息路由到这个身份在本群的化身 (没有化身就自动开一个, 目录 = 身份的工作区), 管家手闸跟随绑定。缺省 = 该聊天现存的默认会话; 还没有任何会话的新聊天由全局管家接待。换管家 = config_set 这一项, 热生效。群聊/单聊专用 —— 频道 (topic) 的管家写 wrc.channel.steward"),
-});
+}).passthrough(); // room 模型 (契约 §7): 旧出站门键已废 —— 忽略 (boot 时 warn), 不拒启动
 export type ChatPolicy = z.infer<typeof ChatPolicy>;
 
 // gate 的分界线是「放权」: 谁能驱动本机 (allowFrom)、审批怎么判 (approval.*)、跑哪个
@@ -423,7 +421,13 @@ export const ConfigSchema = z.object({
   bots: knob(z.array(BotEntry).default([]).describe("额外的企微机器人 (多机器人; 含 secret, 整个数组可放进 secrets.json —— 数组整体覆盖不逐项合并); 改完重启守护进程生效"), { gate: "hidden" }),
   defaultChat: knob(z.string().default("").describe("出站默认聊天 (没有更具体去向时推往这里)"), { gate: "card", apply: "hot" }),
   chats: hot(Chats.default({}).describe("聊天名 (已冻结, 2026-11-16 起不再写入): 名字 → base principal, 仅作存量显示标签; 新聊天一律用 principal 标识, 聊天命名路径 (/name / name_chat / 自动补名) 已下线")),
-  chatPolicy: hot(z.record(z.string(), ChatPolicy).default({ wezard: { topOnly: true, stewardBudget: 4 } }).describe("群聊级策略: base principal (`chat:wr…` / `user:…`) → 开关; topOnly 默认开, 显式 false 才关；config_set 写聊天名会换成它的 principal 落盘; 进宪章 —— 落盘时受影响且活着的 wizard 会被自动交接 (重开时宪章重渲染)")),
+  chatPolicy: hot(z.record(z.string(), ChatPolicy).default({ wezard: { stewardBudget: 4 } }).describe("群聊级策略: base principal (`chat:wr…` / `user:…`) → 管家绑定与手闸预算 (room 模型后只剩这两项); config_set 写聊天名会换成它的 principal 落盘")),
+  rooms: hot(z.object({
+    watchdog: z.object({
+      intervalSec: z.number().int().min(10).default(60).describe("room 看门狗的扫描间隔 (秒); 正常轮终走 turn_end 事件, 看门狗只兜漏事件与 pane 消失"),
+      staleMin: z.number().int().min(1).default(5).describe("wizard 距最后一次事件 (turn_end / 注入) 超过这么多分钟且仍有未结 duty, 才进看门狗的视野"),
+    }).default({}).describe("room 看门狗 (boot 读一次)"),
+  }).default({}).describe("room 账本相关 (磁盘护栏 / 看门狗)")),
   daemon: Daemon.default({}).describe("守护进程: 监听、日志、详情页"),
   wrc: Wrc.default({}).describe("远程驱动: 授权名单、CLI 后端、工作区、镜像"),
   approval: knob(Approval.default({}).describe("工具调用审批: 粒度、规则、危险名单、窗口"), { gate: "card", apply: "hot" }),

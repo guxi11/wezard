@@ -4,7 +4,6 @@ import { attachmentLine, inboxName, saveToInbox } from "./media.js";
 import type { Logger } from "pino";
 import { PRIMARY_BOT, type Config } from "../shared/config.js";
 import type { MirrorBridge } from "./mirror-bridge.js";
-import { messageId } from "./message-events.js";
 import { tailTurnsWithTools, peerMentionPart, renderHumanEnvelope, renderStewardHint, type PeerInfo, type PeerMention } from "./peers.js";
 import { noticeSuffixFor } from "./notices.js";
 import { renderTail } from "../shared/reminder.js";
@@ -29,7 +28,6 @@ import { settleChannelSteward } from "./onboarding.js";
 import { applyOnboarding, bindSteward, classifyOnboardingInput, GUIDE_DESC, guideOf, guideTargetOf, judgeOnboarding, loadOnboardingStore, needsOnboarding, renderGuideOpening, renderGuideRetry, renderOnboardingDone } from "./onboarding.js";
 import { isApprentice } from "./apprentice.js";
 import { truncate } from "../shared/std.js";
-import { parseStrictCommand, type StrictCommand } from "./strict-switch.js";
 import { hookModePath, readHookMode, writeHookMode } from "../shared/hook-mode.js";
 
 /** 判定"引用内容是否已在目标会话上下文里"时回看的轮数 —— 引用的通常是最近几轮
@@ -170,9 +168,7 @@ const parseCfgSyncCommand = (text: string): { apply: boolean } | undefined => {
   return m ? { apply: Boolean(m[1]) } : undefined;
 };
 // `/chats` — 跨聊天目录: 谁有名字、谁没有、各自跑着哪些会话。
-const isChatsCommand = (text: string): boolean => /^\/chats?$/i.test(text.trim());
 // /owed — 本聊天 (严格群) 的义务账: 谁欠着哪条、多久了。P7-S2; 渲染由 daemon 注入。
-const isOwedCommand = (text: string): boolean => /^\/owed$/i.test(text.trim());
 const isUsageCommand = (text: string): boolean => text.trim() === "/usage";
 const isStopCommand = (text: string): boolean => /^(?:\/stop|stop)$/i.test(text.trim());
 const isKillCommand = (text: string): boolean => text.trim() === "/kill";
@@ -585,12 +581,6 @@ export const installInboundRouter = (
   bridge: MirrorBridge,
   sourcePath: string,
   guardCharter: CharterGuard,
-  /** P7-S1 人话记录: dispatch 前同步写一行 (记录侧自己异步落盘, 这里不 await)。 */
-  noteHuman?: (chat: string, line: { at: number; id: string; author: string; text: string }) => void,
-  /** P7-S2 /owed: 本聊天的义务账渲染 (严格群); 不给 = 回「本群未开严格模式」。 */
-  owedOf?: (base: string) => string,
-  /** P7-S3 /strict: 存量群切换 strict (预演 + apply 执行); 不给 = 回「未接」。 */
-  strictSwitchOf?: (who: string, cmd: StrictCommand) => Promise<string>,
 ): void => {
   const inboxDir = expandHome(cfg.wrc.mirror.inboxDir);
   // 已知的机器人名只随配置变; 下面所有入站路径共用这一个剥离器。
@@ -920,11 +910,6 @@ export const installInboundRouter = (
       await replyText(frame, msg, who, body);
       return { stop: true };
     }
-    // /chats — 跨聊天目录:谁有名字、各自跑着哪些会话。Read-only。
-    if (isChatsCommand(text)) {
-      await replyText(frame, msg, who, renderChats(bridge.chatRoster(who).filter((c) => sameBot(who, c.base))));
-      return { stop: true };
-    }
     // /peers — this chat's own wizard roster (default + siblings), with
     // live busy state. Read-only.
     if (isPeersCommand(text)) {
@@ -934,23 +919,6 @@ export const installInboundRouter = (
       } catch (e) {
         body = `[wezard] /peers failed: ${(e as Error).message}`;
       }
-      await replyText(frame, msg, who, body);
-      return { stop: true };
-    }
-    // /owed — 本聊天的义务账 (P7-S2 严格群)。Read-only。
-    if (isOwedCommand(text)) {
-      const body = owedOf
-        ? owedOf(baseOfKey(who))
-        : "[wezard] 本群未开严格模式 (speech=implicit) — 没有义务账; 回执按现行口径走。";
-      await replyText(frame, msg, who, body);
-      return { stop: true };
-    }
-    // /strict — 存量群切换 strict (P7-S3): 默认预演受影响 wizard 清单, apply 才写配置。
-    const strictCmd = parseStrictCommand(text);
-    if (strictCmd) {
-      const body = strictSwitchOf
-        ? await strictSwitchOf(who, strictCmd)
-        : "[wezard] /strict 未接 (需要 P7-S3 的 daemon)";
       await replyText(frame, msg, who, body);
       return { stop: true };
     }
@@ -1238,10 +1206,10 @@ export const installInboundRouter = (
     // 近几次注入里给过的不再重复)。
     const notice = noticeSuffixFor(who, text, { human: { channel } }, hint);
     // P7-S1 只记录不动行为: 人话 dispatch 前落一行 human (同步内存记账, 落盘在后台)。
-    try { noteHuman?.(channel, { at: Date.now(), id: msg.msgid, author: msg.from.userid, text }); } catch { /* 记录失败不挡消息 */ }
+    // room 模型: 人话行的去重键 = 企微 msgid (账本行 ext), 事件表已退役。
     try {
       // 回复回到发话的这个群 —— `who` 可能住在别的聊天 (名字全局可达)。
-      await bridge.dispatch({ eventId: slash ? undefined : messageId(botTagOf(msg), channel, msg.msgid), identity: JSON.stringify(msg), originalAt: msg.create_time ? (msg.create_time < 1e12 ? msg.create_time * 1000 : msg.create_time) : Date.now(), principal: who, text: text + renderTail(envelope, steward, notice), rawText: text, images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}` });
+      await bridge.dispatch({ eventId: undefined, identity: JSON.stringify(msg), originalAt: msg.create_time ? (msg.create_time < 1e12 ? msg.create_time * 1000 : msg.create_time) : Date.now(), principal: who, text: text + renderTail(envelope, steward, notice), rawText: text, images, frame, streamId: msg.msgid, channel, speaker: `user:${msg.from.userid}` });
     } catch (e) {
       log.error({ err: (e as Error).message }, "bridge dispatch failed");
       try { await client.replyStream(frame, msg.msgid, withTagHeader(who, `[wezard] error: ${(e as Error).message}`), true); } catch { /* ignore */ }

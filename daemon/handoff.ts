@@ -26,7 +26,8 @@ import type { Logger } from "pino";
 import type { JsonMap } from "../shared/json-map-store.js";
 import { sleep, truncate } from "../shared/std.js";
 import { waitForIdle, type IdleOpts, type IdleResult } from "./wait-idle.js";
-import type { EventId } from "./router.js";
+/** 旧路由表的 event 引用 (room 模型前的历史字段); 迁移读侧在 shared/legacy-routes.ts。 */
+export type EventId = string;
 import type { TurnFrom } from "../shared/detail-store.js";
 
 // ── 闸 ──────────────────────────────────────────────────────────────

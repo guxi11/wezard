@@ -698,33 +698,6 @@ export const createWezardServer = (): McpServer => {
   );
 
   server.registerTool(
-    "wait_peer",
-    {
-      title: "Wait until another wizard stops working",
-      description:
-        "阻塞等一个 (或一组) wizard 闲下来。它**只是等待**: 没有回执语义, 也不会把谁的结论送回来。绝大多数时候不必用它 —— 派活走 chat_ask, 对方交代时那条 chat_reply 会唤醒你; 只有下一步硬依赖「它此刻停下来了」这个状态 (例如要克隆它当前的上下文) 才用。等待期间你这个 pane 干不了别的; 守护进程轮询的是 pane, 不烧 token。超时返回 `idle:false` 与原因 (它只是还在干, peek_peer 看一眼再决定)。等一组时别一个一个等, 串行等的墙钟是所有人之和, `need` 决定满几个就返回 (默认全部)。",
-      inputSchema: currentAddressSchema({
-        name: z.string().optional().describe(ADDRESS_DOC + " 等一组时改用 `names`。"),
-        names: z
-          .array(z.string())
-          .optional()
-          .describe("一次等多个 wizard 的名字 (最多 16 个), 每个的写法同 `name`。"),
-        need: z
-          .number()
-          .optional()
-          .describe("满几个就返回 (1 到地址个数, 默认全部)。满足后剩下的等待会被撤掉, 它们照常继续干活。"),
-        timeoutSec: z.number().optional().describe("Max seconds to wait (10-7200, default 900)."),
-      }),
-    },
-    async ({ name, names, need, timeoutSec }) =>
-      unwrap("wait_peer", await daemonPost("/peers/wait", {
-        ...(names?.length ? { names } : { name: name ?? "" }),
-        ...(need ? { need } : {}),
-        ...(timeoutSec ? { timeoutSec } : {}),
-      })),
-  );
-
-  server.registerTool(
     "handoff",
     {
       title: "Hand work over to a fresh context (yourself or another wizard)",
@@ -977,7 +950,7 @@ export const createWezardServer = (): McpServer => {
       title: "Clone a wizard, context and all",
       description:
         "**克隆**一个 wizard 出分身 —— fork 它此刻的上下文: 分身开局就拥有它已经读过的一切 (规范、目录结构、刚啃完的那份文档), 不必重读; 被克隆的那个毫发无损。默认克隆你自己; `from` 点名就克隆别的 wizard (比如一个已经把某个模块啃透的同伴) —— 分身仍归你管 (占你的名额), 只是上下文来自它。分身留在被克隆者的工作区。\n" +
-        "要白纸一张、或要去别的目录, 用 spawn_wizard。被克隆者正在干活时, 分身拿到的是它此刻为止的上下文 —— 想要它读完再分: 是你派的活就等它那条 chat_reply, 否则先 `wait_peer` 等它停下 (或看 wizard_roster 的忙闲)。\n" +
+        "要白纸一张、或要去别的目录, 用 spawn_wizard。被克隆者正在干活时, 分身拿到的是它此刻为止的上下文 —— 想要它读完再分: 等它那条 chat_reply, 或看 wizard_roster 的忙闲。\n" +
         "带上 `task` 就是在它就位的同时开一条 duty (分叉本来就由第一句话触发, 省一次往返)。返回 name、cwd、继承状态、实际模型/档位与警告。" +
         OFFSPRING_TAIL,
       inputSchema: currentAddressSchema({

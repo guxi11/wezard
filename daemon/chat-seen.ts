@@ -129,7 +129,3 @@ export const knownChatsOf = (cfg: Config): KnownChats => {
 /** 测试面: 清缓存后同一路径会重开 (模拟 reboot / 换 cfg 重扫)。 */
 export const resetKnownChatsCache = (): void => { cache.clear(); };
 
-/** speech 的缺省判定: 首见 (在册且非存量) 的**群聊** strict, 其余 implicit。
- *  显式 chatPolicy 在 chat-name.chatPolicyOf 里优先于此。 */
-export const speechDefaultOf = (cfg: Config, base: string): "strict" | "implicit" =>
-  base.startsWith("chat:") && knownChatsOf(cfg).has(base) && !knownChatsOf(cfg).isLegacy(base) ? "strict" : "implicit";

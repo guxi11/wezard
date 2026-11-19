@@ -1,4 +1,4 @@
-// 老 routes.jsonl 的只读折叠 —— 只服务迁移 (契约 §6), 不参与运行时。
+// 老 routes.jsonl 的只读折叠 —— 只服务迁移 migrate (契约 §6), 不参与运行时。
 //
 // daemon/router.ts 即将删除, 但「哪几笔活还没了结」只在那份日志里; 迁移要把它变成 room 账本
 // 里的一条人话 / 一条 task。所以这里留最小的一份: 行类型 + 逐行 parse + fold + 未结判定。
@@ -212,7 +212,7 @@ export const foldLegacyRoutes = (raw: string): LegacyRoute[] => {
   const lastAt = parsed.length - 1;
   const bad = parsed.findIndex((op, i) => !op && i !== lastAt);
   if (bad >= 0) {
-    throw new Error("routes.jsonl 第 " + (bad + 1) + " 行不是一条合法 op —— 拒绝迁移: " + clipLine(lines[bad] ?? "", 120));
+    throw new Error("routes.jsonl 第 " + (bad + 1) + " 行不是一条合法 op —— 拒绝迁移 (migrate): " + clipLine(lines[bad] ?? "", 120));
   }
   const table = new Map<string, LegacyRoute>();
   for (const op of parsed) if (op) step(table, op);

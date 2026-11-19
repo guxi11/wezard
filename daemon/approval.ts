@@ -2146,7 +2146,7 @@ export const makeApproveHandler = ({ cfg, log, client, sourcePath, getMirrorTarg
       json(res, 200, { decision: "deny", reason: guideDeny } satisfies ApproveResp);
       return;
     }
-    // 管家手闸只看 role (wiring B: topOnly / speech 已废, 契约 §7 改由 role 触发)。
+    // 管家手闸只看 role (wiring B: 出站门已废, 契约 §7 改由 role 触发)。
     if (owner && isStewardTarget(cfg, wizardStore(), owner)) {
       const reason = stewardGuard({
         sessionId,

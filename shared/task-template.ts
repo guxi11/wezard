@@ -50,7 +50,7 @@ export interface ExpandTaskOptions {
 }
 
 export interface ExpandedTask {
-  /** 展开后的完整投递正文 —— routes.jsonl 不存文本, 它就是 payload.text 的唯一真相。 */
+  /** 展开后的完整投递正文 —— 账本行不存模板引用, 它就是投递文本的唯一真相。 */
   text: string;
   templateRef: TemplateRef;
 }

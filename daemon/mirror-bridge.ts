@@ -1,5 +1,4 @@
 import type { ClearAttempt } from "./handoff.js";
-import { finalId, publishEventFinal, receiptCoverage, receiptQuiet, runEventFinalRecovery, type MessageEvent, type MessageEvents, type DeliveryInput } from "./message-events.js";
 import { parseEnvelope, renderTail } from "../shared/reminder.js";
 import { charterPreamble, charterToRearm } from "../shared/charter-rearm.js";
 import { codexSessions, codexSessionForPane, recordCodexPaneSession } from "../shared/codex.js";
@@ -2534,7 +2533,8 @@ export interface MirrorDeps {
   log: Logger;
   client: WSClient;
   store: MirrorStore;
-  events?: MessageEvents;
+  /** 轮终事件 (非 soft turn_end, 同 target 同轮一次): room 侧据此 hub.onIdle (wiring C)。 */
+  onTurnEnd?: (target: string) => void;
   /** 身份级工作区 (新群引导给管家落的 workspace; "" = 没记)。newSession 在这个 target 还没有
    *  任何会话 / 绑定记录时用它, 压过聊天兜底与 cfg.wrc.cwd —— 哪条入口起的首个会话都一样。 */
   identityWorkspace?: (target: string) => string;
@@ -2605,17 +2605,6 @@ export type NativeModalAnswer =
   | { status: "still_modal"; title?: string; index: number; label: string };
 
 export interface MirrorBridge {
-  formatFinal: (target: string, turn: string, body: string) => string[];
-  recoverEventFinal: (event: MessageEvent) => void;
-  deliverTransferredFinal: (event: MessageEvent, body: string, status?: DeliveryInput["reportKind"]) => void;
-  transferReply: (event: MessageEvent) => void;
-  /** P7-S2 chat_reply 的交付口子: 在流窗口内把严格群的占位气泡覆盖成正式答复并收口;
-   *  气泡已收/过期/不属于该 target → false (调用方退回 notifyChat)。 */
-  finishPlaceholder: (target: string, msgId: string, md: string) => Promise<boolean>;
-  setEventFinalGate: (gate: (event: MessageEvent) => boolean) => void;
-  setEventProgressGate: (gate: (event: MessageEvent) => boolean) => void;
-  setEventOwnerGate: (gate: (event: MessageEvent) => boolean) => void;
-  settleFinalProgress: (id: string) => Promise<void>;
   dispatch: (args: MirrorDispatchArgs) => Promise<void>;
   shutdown: () => void;
   attach: (args: AttachArgs) => AttachResult;
@@ -3269,84 +3258,17 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   };
 
   const TOOL_DETAIL_PREFIX = "TOOL_DETAIL|";
-  let eventFinalGate: (event: MessageEvent) => boolean = () => true;
-  let eventProgressGate: (event: MessageEvent) => boolean = () => false;
-  let eventOwnerGate: (event: MessageEvent) => boolean = () => true;
-  const eventOwned = (id: string | undefined): boolean => {
-    const event = id ? deps.events?.get(id) : undefined;
-    return !event || eventOwnerGate(event);
-  };
-  const briefMode = (a: AttachState): boolean => cfg.wrc.mirror.brief
-    || !!(a.activeEventId && (deps.events?.get(a.activeEventId)?.payload.peer?.transferred || deps.events?.get(a.activeEventId)?.payload.peer?.from.receipt));
-  const bubbleOwned = (a: AttachState, b: BriefBubble): boolean => {
-    const event = b.owner ? deps.events?.get(b.owner) : undefined;
-    return !event || event.target === a.target && eventOwnerGate(event);
-  };
-  const replyBubbles = new Map<string, BriefBubble>();
-  const rememberReplyBubble = (id: string, bubble: BriefBubble): void => {
-    if (replyBubbles.has(id)) return;
-    replyBubbles.set(id, bubble);
-    setTimeout(() => { if (replyBubbles.get(id) === bubble) replyBubbles.delete(id); }, Math.max(0, (bubble.expires ?? Date.now()) - Date.now()) + 60_000).unref?.();
-  };
-  const claimReplyBubble = (event: MessageEvent): BriefBubble | undefined => {
-    if (!deps.events || !eventOwnerGate(event) || !event.channel) return undefined;
-    const origin = deps.events.replyOrigin(event);
-    const human = origin?.payload.human;
-    if (!origin || !human) return undefined;
-    const source = byTarget.get(origin.target);
-    const out = source?.outbound;
-    if (source && out?.streamId === human.streamId) {
-      if (out.kind === "deferred") clearTimeout(out.timer);
-      source.outbound = undefined;
-    }
-    let bubble = replyBubbles.get(origin.id);
-    if (!bubble) {
-      const expires = origin.at + HARD_TIMEOUT_MS;
-      if (expires <= Date.now() || deps.events.hasReplyDelivery(human.streamId)) return undefined;
-      bubble = { frame: human.frame, streamId: human.streamId, expires, done: false, owner: event.id };
-      rememberReplyBubble(origin.id, bubble);
-    }
-    if (bubble.done || Date.now() >= (bubble.expires ?? 0)) return undefined;
-    if (bubble.source) {
-      const stream = bubble.source;
-      stream.closed = true;
-      clearTimeout(stream.flushTimer);
-      clearTimeout(stream.idleTimer);
-      clearTimeout(stream.hardTimer);
-      bubble.pending = stream.pending;
-      const source = byTarget.get(stream.target);
-      if (source?.liveStream === stream) source.liveStream = undefined;
-      bubble.source = undefined;
-    }
-    if (bubble.owner !== event.id) {
-      // The same object carries the last in-flight write into the receiver's FIFO.
-      // Old final/cleanup/timer paths lose authority before this object is reused.
-      byTarget.forEach((a) => {
-        if (a.briefBubble === bubble) { clearCot(a); a.briefBubble = undefined; }
-      });
-      clearTimeout(bubble.hardTimer);
-      bubble.owner = event.id;
-    }
-    return bubble;
-  };
-  const transferReply = (event: MessageEvent): void => {
-    const bubble = claimReplyBubble(event);
-    if (!bubble) return;
-    const origin = deps.events?.replyOrigin(event);
-    bubble.pending = (bubble.pending ?? Promise.resolve()).catch(() => undefined).then(async () => {
-      if (bubble.done || bubble.owner !== event.id || !eventOwnerGate(event)) return;
-      await client.replyStream(bubble.frame, bubble.streamId,
-        withLinkedTagHeader(event.target, "…", chatTurnUrl(event.target, event.turn || origin?.turn)), false);
-    }).catch((e) => { log.debug({ event: event.id, err: errText(e) }, "transfer reply refresh failed"); });
-  };
+  // ── 事件表已退役 (room 模型, wiring C): 这些判定只剩恒真桩, 保留调用点形状不动。 ──
+  const eventOwned = (_id: string | undefined): boolean => true;
+  const briefMode = (_a: AttachState): boolean => cfg.wrc.mirror.brief;
+  const bubbleOwned = (_a: AttachState, _b: BriefBubble): boolean => true;
   const armBriefBubble = (a: AttachState, b: BriefBubble, turnId: string, channel?: string): void => {
     clearTimeout(b.hardTimer);
     const owner = b.owner;
     if (!isWxFrame(b.frame)) b.hardTimer = setTimeout(() => {
       if (b.owner !== owner || !bubbleOwned(a, b)) return;
       const live = a.briefBubble === b && !a.briefConcluded;
-      // P7-S2 严格群: 收口不添字 —— 占位长什么样就怎么收 (详情链接仍在, 不写「仍在处理中」)。
-      const rest = strictChat(a) ? "…" : live ? STILL_WORKING : "";
+      const rest = live ? STILL_WORKING : "";
       void finishBubble(a, b, briefLine(a, turnId, rest), true);
     }, Math.max(0, (b.expires ?? Date.now()) - Date.now()));
   };
@@ -3369,7 +3291,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const flushStream = async (s: ActiveStream): Promise<void> => {
     s.flushTimer = undefined;
     // P7-S2 严格群: 流式帧不出站; lastSent 推进避免反复重试。
-    if (strictOf(s.dest, s.target)) { s.lastSent = s.acc; return; }
     if (s.closed || s.dead || s.acc === s.lastSent || !eventOwned(s.eventId)) return;
     const content = s.acc;
     s.lastSent = content;
@@ -3403,7 +3324,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 例外是 hard cap 超时: turn 还在跑, 收口时缀上中间结束语 —— 这时即使没正文
     // 也有话可说, 不算空覆盖。
     const body = timedOut ? [s.acc, STILL_WORKING].filter((x) => x.trim()).join("\n\n") : s.acc;
-    if (!s.dead && body.trim() && eventOwned(s.eventId) && !strictOf(s.dest, s.target)) {
+    if (!s.dead && body.trim() && eventOwned(s.eventId)) {
       const card = detailCardFor(s, a.target);
       try {
         await s.pending?.catch(() => undefined);
@@ -3446,10 +3367,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       capped: false, closed: false, dead: false, cardSent: false,
       tools: [], sawTool: false,
     };
-    const event = eventId ? deps.events?.get(eventId) : undefined;
-    if (event?.payload.human) rememberReplyBubble(event.id, {
-      frame, streamId, done: false, owner: event.id, source: s, expires: event.at + HARD_TIMEOUT_MS,
-    });
     // 微信帧没有 stream 窗口: 到点收口只会多发一条「仍在处理中」, 白占它那几格出站额度。
     if (!isWxFrame(frame)) s.hardTimer = setTimeout(() => void finalizeStream(a, s, true), HARD_TIMEOUT_MS);
     log.info({ sessionId: a.sessionId, turnId: s.turnId, streamId }, "stream open");
@@ -3484,7 +3401,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     if (!hasVisibleBody(content) || !eventOwned(eventId)) return;
     if (isPrivate(a) && !/^\[(mirror|wezard)\]/.test(content.trim())) return;
     // P7-S2 严格群: 系统提示照放, 模型正文一律走 chat_reply / chat_say。
-    if (strictChat(a) && !/^\[(mirror|wezard)\]/.test(content.trim())) return;
     const chatId = replyChatId(a);
     const turnId = a.briefTurnId ?? a.liveStream?.turnId; // 推送是排队异步的, 到发出时 turn 早已收口
     const pieces = splitMarkdown(content, Math.max(200, cfg.wrc.mirror.chunkBytes - TAG_HEADER_BUDGET));
@@ -3678,7 +3594,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         // 有正文才写旧 streamId (收入 stream); 空缓冲一个字都不写 —— 否则
         // loading 气泡被 " " 覆盖, 结束处理自己凭空制造一条空消息。
         // P7-S2 严格群: 终句不写流 (占位保持, 交付走 chat_reply)。
-        if (bubbleMd && eventOwned(out.eventId) && !strictChat(a)) await client.replyStream(out.frame, out.streamId, withLinkedTag(a, bubbleMd), true);
+        if (bubbleMd && eventOwned(out.eventId)) await client.replyStream(out.frame, out.streamId, withLinkedTag(a, bubbleMd), true);
       } catch (e) {
         log.warn(
           { sessionId: a.sessionId, err: (e as Error).message },
@@ -3813,14 +3729,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.cotTool = undefined;
   };
 
-  const receiptProgress = (a: AttachState, text?: string): boolean => {
-    const e = a.activeEventId ? deps.events?.get(a.activeEventId) : undefined;
-    return !e?.payload.peer?.from.receipt || (!e.quiet && !(text && receiptQuiet(e, text)) && eventProgressGate(e));
-  };
+  /** 回执轮的 CoT 静默判定已随事件表退役 (room 模型): CoT 进度一律允许推进。 */
+  const receiptProgress = (_a: AttachState, _text?: string): boolean => true;
   const flushCot = async (a: AttachState): Promise<void> => {
     a.cotTimer = undefined;
     // P7-S2 严格群: CoT 进度行不出站, 占位保持「…」。
-    if (strictChat(a)) return;
     // 展示选取: assistant text (含 thinking) 优先; 没有新 text 时才落最新 tool_use。
     const text = a.cotText ?? a.cotTool;
     a.cotText = undefined;
@@ -3842,7 +3755,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   /** 推进气泡里的 CoT 进度。节流窗口内到达的多条只留最后一条 —— 进度永远只展示"最新"。 */
   const updateBriefProgress = (a: AttachState, raw: string): void => {
-    if (strictChat(a)) return;
     const b = a.briefBubble;
     if (!b || b.done || a.briefConcluded || !bubbleOwned(a, b) || !receiptProgress(a, raw)) return;
     const line = cotLine(raw);
@@ -3855,7 +3767,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   /** tool_use 进度进 tool 槽 (不顶掉待发的 assistant text): flush 时 text 优先,
    *  只有没有新 text 的窗口才把最新 tool 行刷上气泡。节流与 text 共用一个计时器。 */
   const updateBriefToolProgress = (a: AttachState, raw: string): void => {
-    if (strictChat(a)) return;
     const b = a.briefBubble;
     if (!b || b.done || a.briefConcluded || !bubbleOwned(a, b) || !receiptProgress(a, raw)) return;
     const line = cotLine(raw);
@@ -3872,96 +3783,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const briefLine = (a: AttachState, turnId: string, rest: string): string =>
     headed(chatHead(a.target, chatTurnUrl(a.target, turnId)), rest) || "…";
 
-  // ── 出处门 (chatOriginOnly) ───────────────────────────────────────────
-  // 人在 CLI 里手敲的一轮, 镜像只发生在两处: 他眼前的终端, 和 chat 详情页 (turn
-  // store 全量记录 + SSE 实时刷新)。聊天里不再下发它的气泡 —— 那份内容他本来就
-  // 在看。群里保留的是需要在群里发生的事: WeCom 发起的轮次、审批/提问卡、
-  // `[mirror]` 系统提示 —— 它们都不走这道门。
-  // 只在 brief 下生效: 抑制的前提是详情页兜得住内容, 而 turn store 只有 brief 在写。
-  // 私聊轮 (wizard 之间, 非 public) 同理: 它的回复属于那场私聊, 只进双方的 rolepage。
-  // ── P7-S2 严格群出站门 (chatPolicy.<chat>.speech = strict; S3 起缺省=首见 strict) ──
-  // 模型的一切「发言」不进严格群: 人只见占位 (ack 的「链接 …」) 与详情页, 正文走
-  // chat_reply (finishPlaceholder / notifyChat 退路) 与 chat_say 两条被批准的口子。
-  // 私聊 (channel === "") 与 implicit 群照旧。P7-S3 起不再内联直读 config ——
-  // 与 chat-name.chatPolicyOf 走同一判定 (显式 chatPolicy > 首见 strict > 存量 implicit)。
-  const strictBase = (base: string): boolean => chatPolicyOf(cfg, base).speech === "strict";
-  const strictOf = (channel: string | undefined, target: string): boolean =>
-    channel !== "" && strictBase(channel ?? baseOfKey(target));
-  const strictChat = (a: AttachState): boolean => strictOf(a.channel, a.target);
-  const turnSilent = (a: AttachState): boolean =>
-    !eventOwned(a.activeEventId) || isPrivate(a) || strictChat(a) || (cfg.wrc.mirror.brief && cfg.wrc.mirror.chatOriginOnly && a.turnFromChat === false);
-  const formatFinal = (target: string, turn: string, body: string): string[] => {
-    const pieces = splitMarkdown(body, Math.max(200, cfg.wrc.mirror.chunkBytes - TAG_HEADER_BUDGET));
-    return pieces.map((text, n) => withLinkedTagHeader(target, text, chatTurnUrl(target, turn), pieces.length > 1 ? `${n + 1}/${pieces.length}` : undefined));
-  };
-  const finalProgress = new Map<string, Promise<unknown>>();
-  const settleFinalProgress = async (id: string): Promise<void> => {
-    await finalProgress.get(id)?.catch(() => undefined);
-    finalProgress.delete(id);
-  };
-  const queueFinal = (target: string, turn: string, channel: string, body: string, eventId?: string, bubble?: BriefBubble, reportKind: DeliveryInput["reportKind"] = parseClosing(body).kind === "need" ? "need" : "done"): string | undefined => {
-    // 投递出口剥掉行首收口标记与 ARTIFACT 行 (peers.stripForChat): 判定读原文, 群里只看结论。
-    const text = stripForChat(body);
-    if (!deps.events || !channel || !text.trim()) return undefined;
-    const revision = finalId(eventId || turn, channel, text);
-    const id = finalId(eventId || turn, channel, revision);
-    const chunks = formatFinal(target, turn, text);
-    if (bubble?.pending) finalProgress.set(id, bubble.pending);
-    const claimed = deps.events.delivery({ id, eventId, target, turn, channel, body: text, revision, chunks, reportKind,
-      ...(eventId && deps.events.get(eventId) ? { coverage: receiptCoverage(deps.events.get(eventId)!, channel, parseClosing(body).kind === "need", body) } : {}),
-      ...(bubble && !bubble.done ? { stream: { frame: bubble.frame, id: bubble.streamId, expires: bubble.expires ?? Date.now() } } : {}) });
-    if (claimed !== id || deps.events.deliveryStatus(id)?.every((s) => s === "delivered")) finalProgress.delete(id);
-    if (bubble) { bubble.done = true; clearTimeout(bubble.hardTimer); }
-    return claimed;
-  };
-  const recoverEventFinal = (event: MessageEvent, bubble?: BriefBubble): void => {
-    const current = deps.events?.get(event.id) ?? event;
-    runEventFinalRecovery(current, eventOwnerGate, (current) => {
-      const result = current.result!;
-      // 事件泵的 evidence 探针 (observe → io.recovered) 与 brief 软收口赛跑: 两者同为
-      // ~1s 周期, 探针常先跑到, 而它调这里不带气泡 —— queueFinal 拿不到 stream, 终句
-      // 全部走 standalone, 气泡定格在最后一行 CoT 进度。没传气泡时按 target/turn 找回
-      // 活着的那只 (turn 已换人/气泡已收则不挂, 维持 standalone)。
-      bubble ??= claimReplyBubble(current);
-      bubble ??= (() => {
-        const a = byTarget.get(current.target);
-        return a && (!current.turn || a.briefTurnId === current.turn) && a.briefBubble && !a.briefBubble.done ? a.briefBubble : undefined;
-      })();
-      const turn = current.turn || current.id;
-      const record = getDetail(turn);
-      if (!record) recordTurnStart({ id: turn, eventId: current.id, target: current.target,
-        userQuery: current.payload.text, createdAt: current.originalAt ?? current.at, channel: current.channel,
-        speaker: current.payload.human ? current.speaker : undefined, from: current.payload.peer?.from,
-        ...(current.payload.human?.rawText?.trim() ? { rawQuery: current.payload.human.rawText } : {}) });
-      // tail 已按软收口记过这句话 (final:false —— 它不带终句语义, doneAt 不认): 就地升级,
-      // 不追加同文第二条, 否则 rolepage 上草稿与终稿各画一颗气泡。没有同文的才补 —— 但也
-      // 只补「这轮还没有任何终句」的: 已有终句而 body 不同, 是续答链把子事件的终句写进了
-      // 同一段话只落一次 (子轮 / 父轮不各画一颗气泡)。
-      if (!(record?.kind === "turn" && markTurnTextFinal(turn, result.body)) &&
-          (record ? record.kind === "turn" && !record.items.some((x) => x.t === "text" && x.final) : true))
-        recordTurnItem(turn, { t: "text", final: true, body: result.body, ts: result.at });
-      recordTurnClose(turn);
-      if (!current.turn) deps.events?.bind(current.id, turn);
-      // 终句按事件自己的路由上下文放行 (§9.4/§9.5): 收口与否由路由表判 (eventFinalGate)。
-      publishEventFinal(current, (candidate) => eventOwnerGate(candidate as MessageEvent),
-        (candidate) => eventFinalGate(candidate as MessageEvent),
-        (target, finalTurn, channel, published) => queueFinal(target, finalTurn, channel, result.body, published.id, bubble));
-    });
-  };
-  const deliverTransferredFinal = (event: MessageEvent, body: string, status: DeliveryInput["reportKind"] = "error"): void => {
-    if (!eventOwnerGate(event) || !event.channel) return;
-    const turn = event.turn || event.id;
-    if (!getDetail(turn)) recordTurnStart({ id: turn, eventId: event.id, target: event.target,
-      userQuery: event.payload.text, createdAt: event.at, channel: event.channel, from: event.payload.peer?.from,
-      ...(event.payload.human?.rawText?.trim() ? { rawQuery: event.payload.human.rawText } : {}) });
-    queueFinal(event.target, turn, event.channel, body, event.id, claimReplyBubble(event), status);
-  };
-  // 收口一条 loading 气泡: finish=true 写入最终内容, 只生效一次。发送失败退回 standalone。
-  // raw=true skips withTagHeader (used when content already contains the linked tag header).
-  // WeCom 客户端收到 finish=true 后仍有打字机动画要播放, 如果紧接着就下发
-  // standalone (sendMessage), 用户会看到 standalone 抢在气泡动画结束之前出现。
-  // 把 finishBubble 的 replyStream promise 链入 standalonePending, 让后续
-  // standalone 自然排在 finish 之后; 额外加一小段延迟留给客户端渲染。
+  // WeCom 客户端收到 finish=true 后仍有打字机动画要播放, standalone 排队前留一小段渲染时间。
   const BUBBLE_FINISH_SETTLE_MS = 600;
   const finishBubble = async (a: AttachState, b: BriefBubble | undefined, content: string, raw = false): Promise<void> => {
     if (!b || b.done || !bubbleOwned(a, b)) return;
@@ -3989,18 +3811,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   };
 
   const finishBriefBubble = (a: AttachState, content: string, raw = false): Promise<void> => finishBubble(a, a.briefBubble, content, raw);
-
-  /** P7-S2 chat_reply 的交付口子: 在流窗口内把严格群的占位气泡(「链接 …」)覆盖成
-   *  正式答复并收口 (finish=true, 挂进 standalonePending 保序)。气泡已收 / 过期 /
-   *  不属于这个 target → false, 调用方退回 notifyChat 另发一条。 */
-  const finishPlaceholder = (target: string, msgId: string, md: string): Promise<boolean> =>
-    (async (): Promise<boolean> => {
-      const a = byTarget.get(target);
-      const b = replyBubbles.get(msgId);
-      if (!a || !b || b.done || Date.now() >= (b.expires ?? 0) || !bubbleOwned(a, b)) return false;
-      await finishBubble(a, b, md);
-      return true;
-    })();
 
   // 让一个已建好记录的 turn 成为活跃 turn。turn 级状态在这里统一归零 —— 唯一入口。
   const openBriefTurn = (a: AttachState, q: QueuedTurn): void => {
@@ -4038,18 +3848,16 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
 
   /** reload 后 tail 从 EOF 接上: 正在跑的这一轮的开头那句已在身后, 它的印章随旧进程没了。
    *  那句话自己挂着信封 (谁说的、私聊还是哪个群) —— 读回来就是这一轮的出处。没挂信封 = undefined。 */
-  /** 回执 / 定时任务信封携带当前 event; 普通 peer 只从注入事件的 durable serves 归属任务。 */
-  const rowOf = (env: { kind: string; receipt?: boolean; event?: string; eventId?: string }): string | undefined =>
-    (env.receipt || env.kind === "task" ? env.event : undefined)
-      ?? (env.eventId ? deps.events?.get(env.eventId)?.serves : undefined);
+  /** 回执 / 定时任务信封携带当前 event (事件表已退役, 只认信封自己带的)。 */
+  const rowOf = (env: { kind: string; receipt?: boolean; event?: string }): string | undefined =>
+    env.receipt || env.kind === "task" ? env.event : undefined;
   const openingOf = (a: AttachState): { channel: string; speaker?: string; from?: TurnFrom; query: string } | undefined => {
     const t = a.jsonlPath ? lastUserTurn(a.jsonlPath, a.openingOffset) : undefined;
     const env = t?.env;
     a.activeEventId = env?.eventId;
     if (!env) return undefined;
     const home = baseOfKey(a.target);
-    // transfer 过来的那一笔信封上写着群 (不是 private), 但它不是公开派活: 回复不标给发话方。
-    const handed = !!(env.eventId && deps.events?.get(env.eventId)?.payload.peer?.from?.transferred);
+    const handed = false; // transfer 语义已随路由表退役
     const from: TurnFrom | undefined =
       env.kind === "peer" ? { kind: "peer", from: wizardStore()?.byName(stripSigil(env.from))?.target, ...(handed ? { transferred: true } : env.private ? {} : { public: true }), ...(env.receipt ? { receipt: true } : {}), ...(env.status ? { status: env.status } : {}), ...((turn) => (turn ? { turn } : {}))(rowOf(env)), ...(env.asker ? { asker: env.asker } : {}) }
       : env.kind === "task" ? { kind: "task", taskId: env.from.replace(/^定时 /, "") }
@@ -4170,7 +3978,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.pendingBriefQuery = undefined;
     a.pendingChannel = { channel: s.channel ?? baseOfKey(a.target), speaker: s.speaker, at: Date.now() };
     consumeChannel(a, true, undefined);
-    recordTurnStart({ id: q.turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), initialModel: a.model || undefined, initialEffort: a.effort || undefined, cwd: a.runningCwd || undefined, userQuery: s.query.trim() || undefined, createdAt: (s.eventId ? deps.events?.get(s.eventId)?.originalAt : undefined) ?? at, ...channelFields(a), ...(s.rawQuery?.trim() ? { rawQuery: s.rawQuery } : {}) });
+    recordTurnStart({ id: q.turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), initialModel: a.model || undefined, initialEffort: a.effort || undefined, cwd: a.runningCwd || undefined, userQuery: s.query.trim() || undefined, createdAt: at, ...channelFields(a), ...(s.rawQuery?.trim() ? { rawQuery: s.rawQuery } : {}) });
     openBriefTurn(a, q);
   };
   /** 一句插话记进它插进的那一轮: 出处、频道、发话人都取它自己的印章 (没写频道 = 在 home 里开口)。 */
@@ -4186,12 +3994,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   };
   /** 一行注入露面了: 把它的印章落成下一轮的出处 / 频道。返回认领到的印章。`ts` = 那一行落盘的时刻。 */
   const bindLine = (a: AttachState, said: string, ts?: number, eventId?: string): Seal | undefined => {
-    const recovered = eventId ? deps.events?.get(eventId) : undefined;
-    const s = takeSeal(a, said, undefined, eventId) ?? (recovered?.target === a.target ? {
-      eventId, keys: [], at: recovered.at, query: recovered.payload.text, channel: recovered.channel,
-      speaker: recovered.payload.human ? recovered.speaker : undefined, from: recovered.payload.peer?.from,
-      fresh: recovered.priority === "normal" || idleVerdict(a.target) === true,
-    } as Seal : undefined);
+    const s = takeSeal(a, said, undefined, eventId);
     if (!s) return undefined;
     if (s.turn) {
       if (!s.activated) activateDispatch(a, s, ts);
@@ -4218,19 +4021,16 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const startBriefTurn = async (a: AttachState, frame: WsFrameHeaders, streamId: string, isSlash = false, userQuery = "", channel?: string, speaker?: string, eventId?: string): Promise<void> => {
     const turnId = newTurnId();
     // hardTimer 兜底: turn 若无终句 / turn_end 收口 (卡死/漏收), 到点仍收气泡。
-    const bubble: BriefBubble = { frame, streamId, done: false, owner: eventId, expires: (eventId ? deps.events?.get(eventId)?.at ?? Date.now() : Date.now()) + HARD_TIMEOUT_MS };
-    if (eventId) deps.events?.bind(eventId, turnId);
+    const bubble: BriefBubble = { frame, streamId, done: false, owner: eventId, expires: Date.now() + HARD_TIMEOUT_MS };
     const q: QueuedTurn = { turnId, bubble, isSlash };
-    // 微信帧不挂: 没有 stream 窗口要赶, 气泡等终句来了再一次发出 (见 openStream 同一条)。
-    if (eventId) rememberReplyBubble(eventId, bubble);
     armBriefBubble(a, bubble, turnId, channel);
-    const seal: Seal = { eventId, keys: sealKeys(userQuery), at: Date.now(), query: userQuery, channel, speaker, fresh: true, turn: q, ...(() => { const rt = eventId ? deps.events?.get(eventId)?.payload.human?.rawText ?? "" : ""; return rt.trim() ? { rawQuery: rt } : {}; })() };
+    const seal: Seal = { eventId, keys: sealKeys(userQuery), at: Date.now(), query: userQuery, channel, speaker, fresh: true, turn: q };
     // 对方闲着 → 这一句就是下一轮, 当场接上。正忙 (在跑别人的回执 / 派活 / 上一句) 就先排着:
     // 那一轮的回复不能流进这一句的气泡, 等它在 transcript 里露面再接 (bindLine)。turn 记录
     // 先建好, ack 里的链接点得开。斜杠命令的行未必露面, 当场接。
     const queued = !isSlash && idleVerdict(a.target) === false;
     pushSeal(a, seal);
-    if (queued) recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), initialModel: a.model || undefined, initialEffort: a.effort || undefined, cwd: a.runningCwd || undefined, userQuery: userQuery.trim() || undefined, eventId, createdAt: eventId ? deps.events?.get(eventId)?.originalAt : undefined, channel: channel ?? baseOfKey(a.target), speaker, ...(() => { const rt = eventId ? deps.events?.get(eventId)?.payload.human?.rawText ?? "" : ""; return rt.trim() ? { rawQuery: rt } : {}; })() });
+    if (queued) recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), initialModel: a.model || undefined, initialEffort: a.effort || undefined, cwd: a.runningCwd || undefined, userQuery: userQuery.trim() || undefined, eventId, channel: channel ?? baseOfKey(a.target), speaker });
     else activateDispatch(a, seal);
     // Durable normal inputs arrive only after the preceding full turn; expired bubbles use the final outbox standalone path.
     // ack 即详情链接。URL 的三个入参 (turnId / target / host) 在收消息这一刻全部已知 ——
@@ -4265,9 +4065,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     a.replyTo = publicPeer(r.from);
     a.turnFromChat = a.turnFromChat ?? true;
     a.briefTurnId = r.id;
-    const event = eventId ? deps.events?.get(eventId) : undefined;
-    a.briefBubble = event ? claimReplyBubble(event) : undefined;
-    if (a.briefBubble) armBriefBubble(a, a.briefBubble, r.id, a.channel);
+    a.briefBubble = undefined; // replyBubbles 已随事件表退役; 占位覆盖走 daemon 的 bubble-frames 表
     a.briefIsSlash = false;
     a.briefHadTool = r.items.some((it) => it.t === "tool_use");
     a.briefConcluded = false;
@@ -4298,10 +4096,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     const from = fresh ?? a.convFrom;
     recordTurnStart({ id: turnId, target: a.target, sessionId: a.sessionId, cli: cliOf(a), initialModel: a.model || undefined, initialEffort: a.effort || undefined, cwd: a.runningCwd || undefined, userQuery: query || opened || undefined, from, ...channelFields(a), ...(query && at ? { createdAt: at } : {}) });
     a.briefTurnId = turnId;
-    if (a.activeEventId) deps.events?.bind(a.activeEventId, turnId);
-    const event = a.activeEventId ? deps.events?.get(a.activeEventId) : undefined;
-    a.briefBubble = event ? claimReplyBubble(event) : undefined;
-    if (a.briefBubble) armBriefBubble(a, a.briefBubble, turnId, a.channel);
+    a.briefBubble = undefined;
     a.briefIsSlash = false;
     a.briefHadTool = false;
     a.briefConcluded = false;
@@ -4310,7 +4105,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 详情链接不在这里单独发 — 本轮的每条 standalone 都由 withLinkedTag 自带
     // (chatTurnUrl 读的正是 a.briefTurnId)。静默轮没有 standalone 可搭车, 那就
     // 一条都不发: 群里只该出现有正文的消息, 纯入口提示是噪音。
-    log.info({ sessionId: a.sessionId, turnId, fromCli, silent: turnSilent(a) }, "brief: turn started (CLI-side, no bubble)");
+    log.info({ sessionId: a.sessionId, turnId, fromCli }, "brief: turn started (CLI-side, no bubble)");
   };
 
   // 本轮出现过工具调用 / tool_result / 非 final 文本 —— 只记状态: 详情链接从 ack 起
@@ -4340,63 +4135,18 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     && (!a.briefBubble || a.briefBubble.done)
     && textSimilarity(a.lastConcludedBody, body) >= DUP_CONCLUSION_RATIO;
 
+  /** 终句落地 (契约 §5 F-1: 终句零语义)。只做三件事: 防重复终稿、记 turn store、
+   *  推进收口标记。不出站、不关账、不写任何投递账 —— 群里的交付只有 room 的镜像
+   *  (chat_reply / chat_say 触发), 终句本身谁也送不到。 */
   const concludeBriefTurn = (a: AttachState, body: string): void => {
     const turnId = a.briefTurnId;
     if (!turnId || a.briefConcluded) return;
     if (!body.trim()) return;
-    // P7-S2 严格群: 终句不出站也不关账 —— 气泡保持占位 (chat_reply 在流窗口内用
-    // finishPlaceholder 覆盖它), 路由行的 strict 终句零 op (router.onFinal)。终句照常
-    // 记进 turn store (详情页可读) 与事件库 result, 收口标记照常推进 (防重复终稿)。
-    if (strictChat(a)) {
-      if (!a.activeEventId && isDuplicateConclusion(a, body)) {
-        a.briefConcluded = true;
-        log.info({ sessionId: a.sessionId, turnId, epoch: a.queryEpoch ?? 0 }, "brief: duplicate conclusion suppressed (strict)");
-        return;
-      }
-      const strictEvent = a.activeEventId ? deps.events?.get(a.activeEventId) : undefined;
-      if (strictEvent) deps.events!.result(strictEvent.id, body, finalId(strictEvent.id, strictEvent.channel, body), turnId);
-      a.briefConcluded = true;
-      a.lastConcludedBody = body;
-      a.lastConcludedEpoch = a.queryEpoch ?? 0;
-      a.lastConcludedAt = Date.now();
-      clearCot(a);
-      recordCloseOpenTurns({ target: a.target, sessionId: a.sessionId, exceptIds: [turnId] });
-      // 出站门判定「答了但没交付」: 结论只进 turn store 与事件库, 群里一个字没有。补发指引由
-      // idle-nudge 下发 (问一次, 话术见 strictDeliveryNudge); 这里留一条带摘录的 warn —— 人问
-      // 「是不是卡死」时有据可查。
-      log.warn({ sessionId: a.sessionId, turnId, event: a.activeEventId, len: body.length, last: clipLine(body, 200) },
-        "brief: strict conclusion (no outbound, obligation open) — 补发指引 (chat_reply) 由 idle-nudge 下发");
-      return;
-    }
     if (!a.activeEventId && isDuplicateConclusion(a, body)) {
-      a.briefConcluded = true; // 本轮已"定稿", 只是不投递
+      a.briefConcluded = true; // 本轮已"定稿"
       log.info({ sessionId: a.sessionId, turnId, epoch: a.queryEpoch ?? 0 }, "brief: duplicate conclusion suppressed");
       return;
     }
-    const event = a.activeEventId ? deps.events?.get(a.activeEventId) : undefined;
-    if (event) deps.events!.result(event.id, body, finalId(event.id, event.channel, body), turnId);
-    const gated = !!event && !eventFinalGate(event);
-    if (!turnSilent(a) && !gated) {
-      if (event) recoverEventFinal(deps.events!.get(event.id)!, a.briefBubble);
-      else queueFinal(a.target, turnId, a.channel ?? baseOfKey(a.target), body, undefined, a.briefBubble);
-    } else if (event && gated && !turnSilent(a) && eventProgressGate(deps.events!.get(event.id)!)) {
-      // A live parent may report progress; settled/canceled rows never use this outlet.
-      const text = stripForChat(body);
-      const channel = event.channel;
-      const id = finalId(event.id, channel, `progress:${text}`);
-      const b = a.briefBubble;
-      if (b?.pending) finalProgress.set(id, b.pending);
-      if (text && channel) deps.events!.delivery({ id, eventId: event.id, target: event.target, turn: turnId,
-        channel, body: text, revision: id, purpose: "progress", chunks: formatFinal(event.target, turnId, text),
-        ...(b && !b.done ? { stream: { frame: b.frame, id: b.streamId, expires: b.expires ?? Date.now() } } : {}) });
-      if (b) { b.done = true; clearTimeout(b.hardTimer); }
-    }
-    const current = event ? deps.events!.get(event.id)! : undefined;
-    if (current && (current.quiet || gated && !eventProgressGate(current))) {
-      const b = a.briefBubble;
-      if (b) { b.done = true; clearTimeout(b.hardTimer); }
-    }
-    // The durable result/outbox must exist before this in-memory dedup bit advances.
     a.briefConcluded = true;
     a.lastConcludedBody = body;
     a.lastConcludedEpoch = a.queryEpoch ?? 0;
@@ -4414,6 +4164,15 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   const closeBriefTurn = (a: AttachState): void => {
     if (!a.briefTurnId) return;
     concludeBriefTurn(a, a.briefLastText ?? "");
+    // recoverEventFinal 的补写搬到这里 (wiring C): 终句没记进 turn store 的场合
+    // (软收口竞态把 final 标记漏了 / 落盘顺序) 就地补上 —— rolepage 的正文只有这一份,
+    // 不依赖任何投递账。
+    {
+      const rec = getDetail(a.briefTurnId);
+      if (rec?.kind === "turn" && (a.briefLastText ?? "").trim()
+        && !(markTurnTextFinal(a.briefTurnId, a.briefLastText!) || rec.items.some((x) => x.t === "text" && x.final)))
+        recordTurnItem(a.briefTurnId, { t: "text", final: true, body: a.briefLastText!, ts: Date.now() });
+    }
     recordTurnClose(a.briefTurnId);
     log.info({ sessionId: a.sessionId, turnId: a.briefTurnId }, "brief: turn closed");
     a.briefTurnId = undefined;
@@ -4432,7 +4191,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     closeSubagentTurns(a); // 父 turn 收口 = 它派出的 subagent 都已结束
     clearCot(a);
     // 它闲下来了: 收件箱里等它闲的回执 / 派活此刻就该贴, 不等下一拍定时泵。
-    void deps.events?.pump();
   };
 
   // ── Subagent turns ─────────────────────────────────────────────────
@@ -4665,7 +4423,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       return;
     }
     if (item.kind === "turn_end") {
-      if (a.activeEventId && !item.soft) deps.events?.finished(a.activeEventId);
+      if (!item.soft) deps.onTurnEnd?.(a.target);
       closeBriefTurn(a);
       return;
     }
@@ -4681,8 +4439,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       // loading 气泡。非 slash 场景的 skill_output 是用户可见的中间反馈, 走 standalone。
       if (a.briefIsSlash && !a.briefHadTool && a.briefBubble && !a.briefBubble.done) {
         void finishBriefBubble(a, item.body);
-      } else if (turnSilent(a)) {
-        // CLI 里手敲的 /clear、/model 之类, 回执给敲的人看就够了 —— 只进详情页。
       } else {
         sendStandalone(a, item.body); // 链接前缀同上, 走 withLinkedTag
       }
@@ -4868,10 +4624,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     // 一条通道 (deferred buf → renderBuf / standalone / stream append) 都会把它写进正文,
     // 那就变回已下线的 thinkStyle 了。
     if (item.kind === "thinking") {
-      const event = a.activeEventId ? deps.events?.get(a.activeEventId) : undefined;
-      // A receiver can begin with thinking, before any text/tool opener. Bind its
-      // turn and inherited bubble now; pending input alone never authorizes output.
-      if (!a.briefTurnId && event?.payload.peer?.transferred && eventOwnerGate(event)) ensureBriefTurn(a);
       if (briefMode(a) && a.briefTurnId) updateBriefProgress(a, item.body);
       return;
     }
@@ -5018,17 +4770,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         }
       }
     }
-    if (!briefMode(a) && item.kind === "text" && item.final !== false && a.activeEventId && deps.events) {
-      const e = deps.events.get(a.activeEventId);
-      if (e) {
-        // Soft final text waits for transcript/idle evidence; it must not escape through the legacy stream.
-        if (item.final !== true) return;
-        const turn = a.liveStream?.turnId ?? e.id;
-        deps.events.result(e.id, item.body, finalId(e.id, e.channel, item.body), turn);
-        if (eventFinalGate(e)) recoverEventFinal(deps.events!.get(e.id)!);
-        return;
-      }
-    }
+    // 非 brief 终句的投递已随事件表退役 (F-1 终句零语义): 文本只进 turn store。
     if (!briefMode(a) && (isPrivate(a) || !eventOwned(a.activeEventId))) return;
     // /goal mode overrides everything below: the session-scoped Stop hook
     // self-drives the model with no terminal stop_reason, so turn_end never fires
@@ -5976,10 +5718,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // 会话边界回执一律不携带 cwd 信息 (📂 项目行 / 下次切换), 需要时 `/pwd` 可查。
   const pushProjectInfo = (target: string, header?: string): void => {
     if (!header) return;
-    // P7-S2 严格群: 会话边界回执 (项目行) 不发 —— 出站只有占位与被批准的口子。
-    // 但「会话已重开」本身是 daemon 的确认, 不是模型发言: 严格群那条由 inbound 的
-    // /new 分支补发 (replySystem, 带 `[wezard]` 前缀走直发口子), 这里保持静音避免双发。
-    if (strictBase(baseOfKey(target))) return;
     const md = header;
     const a = byTarget.get(target);
     if (a) {
@@ -7955,12 +7693,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     },
     interruptPane: async (target, opts) => {
       if (opts?.guard && !opts.guard()) return { ok: false, reason: "interrupt authority changed" };
-      if (opts?.teardown) deps.events?.cancel((e) => e.target === target);
       const a = byTarget.get(target);
       if (!a) return { ok: false, reason: "no mirror attached for target" };
       const interruptedEvent = a.activeEventId;
       const interruptedPane = a.tmuxPane;
-      if (opts?.teardown && interruptedEvent) deps.events?.cancel((e) => e.id === interruptedEvent);
       // `/stop` (teardown: true) must work when tmux itself is the problem, so
       // the order is: local state first, pane second. The old implementation
       // probed the pane FIRST and returned early on failure — meaning a wedged
@@ -8005,9 +7741,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       return { ok: true, torndown, escOk, escReason: escReason || undefined };
     },
     killPane: async (target) => {
-      deps.events?.cancel((e) => e.target === target);
       const r = await downPane(target, true);
-      if (r.ok) deps.events?.stopped(target, "pane kill acknowledged; queued input revoked");
       return r;
     },
     sleepPane: (target) => downPane(target, false),
@@ -8251,15 +7985,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       const a = byTarget.get(target);
       return a?.channel ?? baseOfKey(target);
     },
-    formatFinal,
-    recoverEventFinal,
-    deliverTransferredFinal,
-    finishPlaceholder,
-    transferReply,
-    setEventFinalGate: (gate) => { eventFinalGate = gate; },
-    setEventProgressGate: (gate) => { eventProgressGate = gate; },
-    setEventOwnerGate: (gate) => { eventOwnerGate = gate; },
-    settleFinalProgress,
     dispatch: async ({ principal, text, images, frame, streamId, channel, speaker, eventId, guard, onSubmitted }) => {
       // Route by inbound principal — the WeCom chat the user just messaged us
       // from is the same string we registered as `target` on attach. After a
@@ -8523,16 +8248,6 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           guard: (phase, identity) => byTarget.get(a.target) === a && a.tmuxPane === injectPane && (a.injectGen ?? 0) === myGen && (!guard || guard(phase, identity)),
         });
         // 注入失败可以迟于转录消费；只认这一笔在原绑定转录里的标记，不用别轮产出猜 ACK。
-        const submissionConfirmed = (): boolean => {
-          const event = eventId ? deps.events?.get(eventId) : undefined;
-          return !!event && !event.canceled
-            && (event.exposure === "consumed" || event.execution === "complete"
-              || !!event.transcript && submittedEventSince([{ path: event.transcript, offset: 0 }], event.id, event.at));
-        };
-        if (!r.ok && r.uncertain && submissionConfirmed()) {
-          log.info({ target: a.target, eventId, reason: r.reason }, "mirror inject: late failure superseded by event submission evidence");
-          r = { ok: true };
-        }
         // 宪章已随这一条进了 pane; 失败可重试的 (消息事件层会重投) 不清 —— 重投接着带。
         // /clear 例外: 它自己不带 preamble, 而 tail 认出会话轮换 → contextCut → armCharter
         // 可能先于这里的返回发生, 清了就会把刚挂上的下一份宪章抹掉。
@@ -8550,8 +8265,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           const note = r.uncertain
             ? "[mirror] ⚠ 暂时无法确认目标会话是否收到消息，已停止继续输入；为避免重复执行，不会自动重发"
             : `[mirror] ✗ ${r.reason ?? "failed"}`;
-          // 提示也会排发送队列；真正发出前再认一次同事件证据，撤销过期告警。
-          const stillWanted = (): boolean => !r.uncertain || !submissionConfirmed();
+          const stillWanted = (): boolean => true;
           if (s) {
             s.acc = s.acc ? `${s.acc}\n\n${note}` : note;
             await finalizeStream(a, s, false, stillWanted);
@@ -8607,7 +8321,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
         if (armMigration) {
           // 严格群: 这条确认也是 daemon 的系统回执, 不是模型发言 —— 前缀让它落进
           // sendStandalone 的 [wezard]/[mirror] 白名单 (否则出站门一起吞掉)。
-          sendStandalone(a, strictChat(a) ? "[wezard] cleared" : "cleared");
+          sendStandalone(a, "cleared");
           a.clearRebind = { baseline: preClearBaseline! };
           startMigrationWatcher(a, preClearBaseline!, jsonlIsPostClearChild, 0, true);
         }

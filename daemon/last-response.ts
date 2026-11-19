@@ -16,7 +16,13 @@
 import type { WSClient, WsFrame, BaseMessage, WsFrameHeaders } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
 import { rawTagHeader, parseTagHeader, resolveTagTarget, targetOfTagUrl, withBot, botOfKey } from "../shared/session-label.js";
-import { chatPrincipalOf } from "./chat-records.js";
+/** 聊天键的规范形 (原 chat-records.ts, 随其退役搬来): 裸 chatid → base principal。 */
+const chatPrincipalOf = (chatid: string): string => {
+  const bare = (chatid ?? "").trim().replace(/~[^~]+$/, "");
+  if (!bare) return "";
+  if (/^(chat|user|group):/.test(bare)) return bare;
+  return bare.startsWith("wr") ? `chat:${bare}` : `user:${bare}`;
+};
 import { PRIMARY_BOT } from "../shared/config.js";
 import { botTagOf, pinFrameBot } from "./bot-mux.js";
 import { connFor } from "./reach.js";
