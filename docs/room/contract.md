@@ -152,6 +152,15 @@ export const hostOf = (members: readonly { who: Who; ord: number }[]): string | 
     - 重复 fold 结果幂等。
 - 实例被结束: 从所有 room 退出, 规则同上。
 
+## 4a. 轮终与看门狗 (2026-11-19 裁决)
+
+- 轮终事件驱动: mirror tail 的 turn_end → hub.onIdle, 正常路径零轮询。
+- 全局看门狗一个 (rooms.watchdog.intervalSec 缺省 60 / staleMin 缺省 5): 每次一条 `tmux list-panes -a`, 只看「有未结 duty 且 staleMin 内无任何事件」的 wizard。
+  - pane 活且闲 → 视为漏了 turn_end, onIdle 一次并补投。
+  - **pane 不存在 → 按实例结束**: leaveOps 写 canceled 唤醒提问者, 并在它所在每个 room 落一行 `sys:"instance-ended"` 系统消息 (成员都看得见, 绑定 room 镜像)。**不自动重生**。理由: 自动重生会带着不确定的模型档位与上下文把别人的活接回去, 失败一次还要再兜第二层; 「实例结束了」是账本里说得清、人看得懂的事实。
+  - **pane 忙 → 只 warn 不纠偏** (带 busyForMs + openDuties)。理由: 卡死与长活在外部不可分, 猜错就是打断正在干的活; 卡死由人 stop_wizard。
+- pane cap 清扫误杀导致的 pane 消失属于 spawn 侧问题, 单独开活, 不进看门狗。
+
 ## 5. 终句与提醒 (F-1)
 
 - 终句只进 turn store / rolepage, 不进任何 room, 不关任何 duty。mirror 的流式终句投递整段删除。
