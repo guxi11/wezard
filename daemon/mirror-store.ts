@@ -12,6 +12,11 @@ export interface MirrorAttachment {
   /** Snapshot at attach time. Pane ids are not stable across daemon restarts;
    * restore re-derives the live pane from `tmuxSession` via `list-panes`. */
   tmuxPane?: string;
+  /** 绑定时那块 pane 的窗口名与 shell pid (2026-11-19): tmux server 重启后 pane id 从 %0
+   *  重新编号, 存下来的 %N 很可能落到**别人的** pane 上。restore 用这两个字段核对「%N 还是
+   *  原来那块 pane 吗」; 对不上就按死 pane 处理, 绝不按名字去猜别人的 pane。 */
+  tmuxWindow?: string;
+  tmuxPid?: string;
   /** Project cwd the live pane was last spawned in. Empty/undefined → fall
    *  back to cfg.wrc.cwd. Updated on every spawn/respawn so /pwd reflects
    *  reality, not an outdated user request. */
@@ -39,5 +44,16 @@ export interface MirrorAttachment {
 }
 
 export type MirrorStore = JsonMap<MirrorAttachment>;
+
+/** restore 的 pane 认领判据 (纯): 存过身份 (窗口名/pid) 就要求对得上; 老记录两样都没存 =
+ *  只认 pane id (向后兼容)。pane id 被 tmux 重编号后可能指向别人, 这里对不上就当它没了。 */
+export const paneIdentityMatches = (
+  rec: Pick<MirrorAttachment, "tmuxWindow" | "tmuxPid">,
+  meta: { window: string; pid: string } | undefined,
+): boolean => {
+  if (!rec.tmuxWindow && !rec.tmuxPid) return true;
+  if (!meta) return false;
+  return (!rec.tmuxWindow || meta.window === rec.tmuxWindow) && (!rec.tmuxPid || meta.pid === rec.tmuxPid);
+};
 
 export const loadMirrorStore = (filePath: string): MirrorStore => loadJsonMap<MirrorAttachment>(filePath);
