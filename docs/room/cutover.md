@@ -58,6 +58,14 @@
 
 - **回退注意**: 旧代码下 topOnly 省略 = 开 (现值全是 true, 删了等价); 但 speech 省略 = 运行时判定 (首见 strict / 存量 implicit), 线上 4 个显式 strict 群在旧代码下可能退成 implicit。所以**回退越过第 7 步时, 第 2 步必须一起退** (还原 config 备份), 不能只退代码。
 
+## 执行方式 (2026-11-19 定)
+
+- 第 0-8 步由 `scripts/room-cutover/run-cutover.sh <room-model HEAD>` **一次 Bash 调用**跑完: daemon 停着时 wezard 工具 (tell_peer / notify) 和审批 hook 都不可用, 不能每步来回问; 每步一行写进 `~/wezard-backups/cutover-<ts>.log` (执行了什么 / 结果 / 下一步)。任一步红 → 脚本自动逆序回退 (8 → 7b → 7 → 6 → 2-5 整体 tar 还原 → 0 重启旧 daemon + svr) 并 exit 1。
+- 第 4 步 (记忆文本) 非阻断: 规则未命中只记一行、切后手改 (记忆文件会被 wizard 运行时压缩重写, 规则可能漂)。
+- 第 7 步前自动核对: 停机期间线上工作树没被任何人写过 (`git status` + 自第 0 步起 `find -newer`, 排除 node_modules/.git/dist)。
+- 演练 (2026-11-19 19:44-19:47, PATH 桩 launchctl/curl + HOME 指向 ~/.wezard 的副本 + 临时 worktree 当线上): 成功路径 0-8 全 OK; 第 8 步注入 healthz 失败 → 回退链 8/7b/7/6/2-5/0 全部执行, config 逐字节还原、charters 200 份回位、rooms/ 移为 rejected、线上回 cf3e0b3。
+- **切换后两件事**: ① 7b 标记会让所有绑定 pane (含执行者与派活方) 闲下来后被 /new —— 执行者把第 9 步状态写在同一份日志里, 新会话从日志复原; ② 旧会话缓存的工具面里没有 room_*, 而 tell_peer 已删、终句零语义 —— 切后的进度一律写日志 + notify 进群, 不依赖终句回执。
+
 ## 第 7 步: 代码怎么接
 
 - **当前分支关系** (2026-11-19 实测):
