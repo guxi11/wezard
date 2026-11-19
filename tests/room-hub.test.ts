@@ -1,0 +1,108 @@
+// room-hub: append → 落盘 → 镜像 / 唤醒泵 (游标重算, 不确定不推游标) / interrupt 先 Esc / F-1 提醒与升级。
+import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { openRoomStore } from "../daemon/rooms.js";
+import { createRoomHub, type PasteResult } from "../daemon/room-hub.js";
+import { DAEMON, openDuties, type MsgRow, type Who } from "../shared/room.js";
+import { uid } from "./room-fixture.js";
+
+const dir = mkdtempSync(join(tmpdir(), "room-hub-"));
+const store = openRoomStore(dir);
+const A = uid(1), B = uid(2);
+const wiz: Record<string, { target: string; name: string; parentUid?: string }> = {
+  [A]: { target: "chat:wrG", name: "steward" },
+  [B]: { target: "chat:wrG#b", name: "b", parentUid: A },
+};
+const pasted: Array<{ target: string; text: string }> = [];
+const mirrored: Array<{ row: MsgRow; cover?: string }> = [];
+const escs: string[] = [];
+let busy = new Set<string>();
+let next: PasteResult = "ok";
+const hub = createRoomHub({
+  store, now: () => 10_000,
+  wizardOf: (u) => wiz[u],
+  nameOf: (w: Who) => (w.kind === "wizard" ? "." + (wiz[w.id]?.name ?? w.id) : w.id),
+  roomLabel: (r) => r,
+  mirror: async (row, cover) => { mirrored.push({ row, cover: cover?.id }); },
+  idle: async (t) => !busy.has(t),
+  interrupt: async (t) => { escs.push(t); busy.delete(t); },
+  paste: async (target, text) => { pasted.push({ target, text }); return next; },
+});
+const room = "chat:wrG";
+store.ensure(room, { at: 1, kind: "wecom-group", by: DAEMON });
+hub.write(room, [
+  { op: "join", at: 1, room, who: { kind: "wizard", id: A }, ord: 1, via: "founder", by: DAEMON },
+  { op: "join", at: 2, room, who: { kind: "wizard", id: B }, ord: 2, via: "spawn", by: { kind: "wizard", id: A } },
+]);
+const human: Who = { kind: "human", id: "T1" };
+const settle = () => hub.pump();
+
+// 人话没点名 → 唤醒 host; inbound 不回镜; 投递成功推游标
+{
+  const v = hub.append(room, { author: human, kind: "say", origin: "inbound", text: "在吗", bubble: { stream: "s1", expires: 9e12 } });
+  assert.ok(v.ok);
+  await settle();
+  assert.equal(pasted.length, 1);
+  assert.equal(pasted[0]!.target, "chat:wrG");
+  assert.match(pasted[0]!.text, /在吗/);
+  assert.match(pasted[0]!.text, /你要交代/);
+  assert.equal(mirrored.length, 0);
+  assert.equal(store.get(room)!.members.get("wizard:" + A)!.seen, store.get(room)!.seq);
+  await settle();
+  assert.equal(pasted.length, 1, "游标推进后不重投");
+  assert.equal(hub.defaultRoom(A).room, room);
+  // 交代: 第一条 reply 覆盖占位气泡并镜像
+  const hm = (v.ok && v.row.id)!;
+  const r = hub.append(room, { author: { kind: "wizard", id: A }, kind: "reply", origin: "tool", re: [hm], text: "在的" });
+  assert.ok(r.ok && r.row.status === "done");
+  assert.equal(mirrored.at(-1)!.cover, hm);
+}
+// 不确定投递 → 不推游标, 重投标「可能已读过」
+{
+  next = "uncertain";
+  hub.append(room, { author: { kind: "wizard", id: A }, kind: "ask", origin: "tool", to: [{ kind: "wizard", id: B }], text: "看下日志" });
+  await settle();
+  const before = pasted.length;
+  next = "ok";
+  await settle();
+  assert.equal(pasted.length, before + 1);
+  assert.match(pasted.at(-1)!.text, /可能有你已读过的/);
+  assert.match(pasted.at(-1)!.text, /看下日志/);
+}
+// interrupt: 对方忙 → 先 Esc 再投; 不带 interrupt 时忙就等
+{
+  busy = new Set(["chat:wrG#b"]);
+  hub.append(room, { author: { kind: "wizard", id: A }, kind: "say", origin: "tool", to: [{ kind: "wizard", id: B }], text: "普通" });
+  const n0 = pasted.length;
+  await settle();
+  assert.equal(pasted.length, n0, "忙且没 interrupt → 不投");
+  hub.append(room, { author: { kind: "wizard", id: A }, kind: "ask", origin: "tool", to: [{ kind: "wizard", id: B }], text: "停一下", interrupt: true });
+  await settle();
+  assert.deepEqual(escs, ["chat:wrG#b"]);
+  assert.match(pasted.at(-1)!.text, /停一下/);
+  assert.match(pasted.at(-1)!.text, /普通/, "被压着的那条随游标一起补上");
+}
+// F-1: 一轮结束未交代 → 当轮提醒一次; 再闲 → 给提问者写系统行 (镜像进群), 只写一次
+{
+  const owedBefore = openDuties(store.get(room)!).filter((d) => d.slot === "wizard:" + B).length;
+  assert.ok(owedBefore >= 1);
+  const n0 = pasted.length;
+  await hub.onIdle(B);
+  assert.equal(pasted.length, n0 + 1);
+  assert.match(pasted.at(-1)!.text, /还没交代/);
+  await hub.onIdle(B);
+  const sys = store.get(room)!.msgs.filter((m) => m.sys === "undelivered");
+  assert.ok(sys.length >= 1);
+  assert.equal(mirrored.some((m) => m.row.sys === "undelivered"), true);
+  await hub.onIdle(B);
+  assert.equal(store.get(room)!.msgs.filter((m) => m.sys === "undelivered").length, sys.length, "升级只写一次");
+}
+// 重开 store (模拟 reload): 账本状态一致
+{
+  const again = openRoomStore(dir);
+  assert.equal(again.get(room)!.seq, store.get(room)!.seq);
+  assert.equal(again.roomOfMsg(store.get(room)!.msgs[0]!.id), room);
+}
+console.log("room-hub ok");
