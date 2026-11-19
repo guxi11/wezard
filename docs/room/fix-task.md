@@ -7,7 +7,7 @@
 
 - 工作区 `/Users/zyy/develop/Guxi11/cc-wecom-room-fix` (分支 room-fix, 起点 room-model @ 56d9418)。
 - 不起 / 不 reload 线上 daemon, 不碰 ~/.wezard 下任何文件, 不 push, 不动别的 worktree。
-- 只改 daemon/ shared/ scripts/room-cutover/ 与下面点名的 tests (room-watchdog / class-migration / onboarding / strict-new-ack / 新增测试与 tests/fixtures/)。tests/ 下其它文件另一个执行者在改, 不碰。
+- 只改 daemon/ shared/ mcp/ scripts/room-cutover/ 与下面点名的 tests (room-watchdog / class-migration / onboarding / strict-new-ack / room-quota 等新增测试与 tests/fixtures/)。tests/ 下其它文件另一个执行者在改, 不碰。
 - 测试跑法: `ONLY="tests/a.test.ts tests/b.test.ts" /tmp/room-run-tests.sh /Users/zyy/develop/Guxi11/cc-wecom-room-fix /tmp/<out>` (HOME 指 /tmp/room-test-home); 全量去掉 ONLY。
 - 提交前 `git diff --cached --name-only` 核对只含上面范围内的文件。可以分多笔提交, 鼓励每完成一条就提交一笔。
 - 先读: docs/room/verify-fd4715b.md (含末尾「复核更正」)、docs/room/contract.md §4a、docs/room/cutover.md 的 7b 与「第 9 步附: 30 分钟观察清单」。
@@ -55,9 +55,13 @@ daemon/index.ts ≈1755 的 `split("\\n")` 是字面反斜杠 + n, 多 pane 时�
 
 ## 8. 验证报告 II 的 3 个真红
 
-1. class-migration: uid 回填让 `.pre-classes.bak` 不再是原样字节 —— **修代码** (迁移前先拿原文件字节做备份, 或回填延迟到首次显式写盘), 不许改断言。
+1. class-migration: uid 回填让 `.pre-classes.bak` 不再是原样字节 —— **修代码** (迁移前先拿原文件字节做备份, 或回填延迟到首次显式写盘), 不许改断言。**同一根因还让 tests/wizard-identity-migration.test.ts:49,66 (`.pre-identities.bak` 原样字节) 红** —— 修一处两处都要绿 (该测试文件在 room-model 上已被改过 import, 合并后再跑)。
 2. onboarding + 3. strict-new-ack: 删掉残留的 `.speech` 读点 (inbound.ts isStrictChat ≈660、channel.ts strictTopicOf ≈553 及调用点), 行为按 room 口径统一 (系统行前缀写法一处定), 对应测试按新语义改写断言。
 - 改完把 `speech` 整词加进三条 grep 的第二条复跑, 贴输出。
+
+## 8a. 出站额度 (2026-11-19 增补, design.md:147 / :212)
+
+C 节删 strict-gate 时 `openSayMeter` 没移植, room 出站当前无额度。按设计补成**全量生效**: 每个 wizard 每轮 ≤3 条、每 room 每分钟 ≤10 条, 超出 409 (文案给出口: 合并成一条 / 下一轮再说)。计入面: room_say / room_ask / room_reply (带 text) / notify / send_file 进 room 的行; daemon 系统行与人话不计。计数器纯函数放 shared/ 或 daemon/ 新模块, 轮界按 turn_end 重置。单测: 同轮第 4 条 409、同 room 第 11 条 409、换轮后恢复、系统行不计。tests/strict-chat.test.ts 在 room-model 上已改写 (AliceOwen 913bda2), 你的额度断言写进新文件 tests/room-quota.test.ts, 不碰 strict-chat。
 
 ## 9. 单测清单 (每条要能在修之前红)
 
@@ -72,7 +76,8 @@ daemon/index.ts ≈1755 的 `split("\\n")` 是字面反斜杠 + n, 多 pane 时�
 | ⑦ | 失败 2 次后成功, 零 warn |
 | ⑧ | 3 个忙 wizard 一次扫描只出 1 行日志 |
 | ⑨ | tmux 失败零结束; 冷 wizard 零结束 |
-| ⑩ | class-migration / onboarding / strict-new-ack 绿 |
+| ⑩ | class-migration / onboarding / strict-new-ack 绿; 合并 room-model 后 wizard-identity-migration 绿 |
+| ⑪ | room-quota: 同轮第 4 条 409 / 同 room 第 11 条 409 / 换轮恢复 / 系统行不计 |
 
 ## 10. 验收与交付
 
@@ -90,4 +95,5 @@ daemon/index.ts ≈1755 的 `split("\\n")` 是字面反斜杠 + n, 多 pane 时�
 - [ ] 5 投递日志
 - [ ] 6 observe.mjs
 - [ ] 7 /new 标记
-- [ ] 8 三个真红 + speech grep
+- [ ] 8 三个真红 + speech grep (+ wizard-identity-migration 同根因)
+- [ ] 8a 出站额度
