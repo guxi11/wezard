@@ -36,6 +36,7 @@
 | O3 | 发话到唤醒的延迟 | 挑 1 个绑定 room, 人发一句点名一个闲着的 wizard: ① 账本行 `at` → 企微镜像成功 < 10s; ② 账本行 `at` → 被唤醒者注入成功 (开始干活) < 10s。连测 3 次取最大值 | daemon.log 里按该行 msg id 取两条 info: `room: mirrored` 与 `room: delivered` (修复单新增, 都带 `room/msg/lagMs`); `observe.mjs lag <msg id>` 直接打出两个 lagMs |
 | O4 | 看门狗日志形状 | 每次扫描**至多一行** (`mod:room-watchdog` 汇总行: 持有者 / stale / 补判闲 / 结束 / 忙 计数, 忙的明细折进同一行); 30 分钟内 watchdog 行数 ≤ 30 (60s 间隔); 不出现逐 wizard 刷屏; T0 后首轮扫描「结束」计数 = 0 (除非人确实杀了 pane) | `observe.mjs watchdog --since T0`: 按扫描时间戳分组, 输出每次扫描的行数最大值、总行数、各计数之和 |
 
+- **切后一并核 (2026-11-19 记)**: 切换前群里出现过「答复发不进本群 (strict store write previously failed)」系统提示 (.wezard-15 两条, 旧 daemon 进程残留, 换 pid 后消失)。切换后 30 分钟内若任何成员再遇到这条或同类「发不进」提示, 记下 wizard 名 / 时刻 / 原文, 与 O1 一起核; 新代码里 strict store 已删, 再出现即说明有旧进程或旧 dist 在跑。
 - O2、O3、O4 依赖修复单 (看门狗修复 + /status.openDuties + 两条投递日志 + observe.mjs) 合入 room-model; 没合入之前这四条量不出来, 不许切换。
 - 第 9 步原有的 kill-pane 验收在 O1–O4 都达标之后再做 (它会故意制造一次「结束」计数)。
 
