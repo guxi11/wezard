@@ -5,8 +5,8 @@
 #   只在人点头后执行。第 9 步 (观察 O1-O4) 不在本脚本内。
 set -uo pipefail
 EXPECT="${1:?需要 room-model 期望 HEAD}"
-ROOM=/Users/zyy/develop/Guxi11/cc-wecom-room
-LIVE=/Users/zyy/develop/Guxi11/cc-wecom
+ROOM=${ROOM:-/Users/zyy/develop/Guxi11/cc-wecom-room}
+LIVE=${LIVE:-/Users/zyy/develop/Guxi11/cc-wecom}   # 演练时用 LIVE=<临时 worktree> HOME=<临时目录> 覆盖
 W=$HOME/.wezard
 TS=$(date +%Y%m%d-%H%M%S)
 mkdir -p $HOME/wezard-backups
