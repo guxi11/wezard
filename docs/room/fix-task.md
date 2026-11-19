@@ -81,6 +81,9 @@ C 节删 strict-gate 时 `openSayMeter` 没移植, room 出站当前无额度。
 
 ## 10. 验收与交付
 
+**验证口径 (2026-11-19 人拍板, 优先于下面各条)**: 不跑全量 —— 不要再排 97 个的回归; 全量计数直接引用 room-model 已有那次 (913bda2: 97 例 · PASS 78 · FAIL 18 · SKIP 1)。但**你新增或修改的每个测试文件各跑一次该文件** (`ONLY="tests/x.test.ts" /tmp/room-run-tests.sh ...`), 交付时逐文件贴 rc —— 至少: room-quota (8a)、class-migration 与 wizard-identity-migration (8.1, 后者先 `git merge room-model` 拿到改过 import 的版本再跑)、room-watchdog、onboarding、strict-new-ack。tsc + build 照跑。
+交付三样: ① 全量计数 (引用上面那次) ② 新增/修改文件的单测 rc 表 ③ 本文件末尾的勾选进度。
+
 - tsc + build 绿; tests/room-*.test.ts 全绿 + ⑩ 三个绿。
 - 提交说明贴: 各单测名、fixture 来源命令与时间、冷 wizard 结论、`speech` grep 复跑输出。
 - 回执贴单测里捕获的**首轮扫描日志原文** (O4「首轮结束计数 = 0」要靠 B 保证)。
