@@ -12,15 +12,35 @@
 | 0 | 停 daemon (svr 不停) | `launchctl kill TERM gui/$UID/com.wezard.daemon`。plist 是 KeepAlive.SuccessfulExit=false, 正常退出不会被拉起 | `launchctl list \| grep wezard.daemon` 显示 PID 为 `-` | `launchctl kickstart gui/$UID/com.wezard.daemon` |
 | 1 | **备份** (放 repo 外, 也不放 ~/.wezard 内, 免得下次备份把它也打进去) | `mkdir -p ~/wezard-backups && TS=$(date +%Y%m%d-%H%M%S) && tar -czf ~/wezard-backups/pre-room-$TS.tgz -C ~/.wezard state wizards.json config.jsonc memory tasks` (state 约 228M, 磁盘余 14G) | `tar -tzf ~/wezard-backups/pre-room-$TS.tgz \| wc -l` 非 0; `df -h ~` 余量仍 > 10G | 不需要 (只读); 出事时整体还原 = 停 daemon → `tar -xzf … -C ~/.wezard` |
 | 2 | config 删 topOnly / speech | `node scripts/room-cutover/config-strip.mjs` → 看 diff → `--apply` | dry-run 共 7 个键 (topOnly×3、speech×4) + 1 行注释; steward 绑定不动 | 按脚本打印的命令 `cp config.jsonc.pre-room-<ts>.bak config.jsonc` |
+| 2a | **config 解析 dry-run** (只读, 不连 WS、不起 daemon) | `T=$(mktemp -d) && cp ~/.wezard/config.jsonc $T/c.jsonc && WEZARD_CONFIG=$T/c.jsonc node scripts/room-cutover/config-check.mjs` (缺省用 room 工作树的新 dist; 读副本, secrets.json 只读合并) | exit 0, 且输出「残留旧键 0」; 非 0 时打印 zod 问题清单 | 失败即停在这里: 按第 2 步回退命令还原 config, 线上其余一概未动 |
 | 3 | wizards.json self 记忆 | `node scripts/room-cutover/wizard-memory.mjs` → 看 diff → `--apply` (**daemon 必须停着**) | dry-run 19 个身份、34 条: 15×2 句模板改写, 3 条旧回执口径删除, 1 条 read_chat → room_read; S2/S3 历史交付记录保留 | `--revert <patch.json>`: 只还原 memory 仍等于改后值的身份, 不覆盖新 daemon 回填的 uid; 整份兜底用 `.pre-room-<ts>.bak` |
 | 4 | memory md + 定时任务 prompt | `node scripts/room-cutover/text-memory.mjs` → 看 diff → `--apply` | 4 个文件; 每条规则恰好命中一次, 否则整步中止, 一个字不写 | 按脚本逐文件打印的 `cp <bak> <file>` |
 | 5 | 旧宪章归档 (**移走, 不删**) | `node scripts/room-cutover/charters-archive.mjs` → `--apply` | `state/charters/` 空; `state/archive/charters-<ts>/` 下 200 份 | `mv state/archive/charters-<ts>/*.md state/charters/` |
 | 6 | 账本迁移 | `node dist/cli/migrate-rooms.js --dry-run` → 看报表 → 去掉 --dry-run 跑 | 报表计数对得上源 (未结路由 5、uncertain 103 归档、queued 3); 再跑一次写 0 行 | `mv ~/.wezard/rooms ~/.wezard/rooms.rejected-<ts>`。源文件迁移时一个字不改, 旧 daemon 也不读 rooms/ |
 | 7 | 代码切到 room-model (细节见下节「第 7 步」) | 线上工作树 `cc-wecom` 在 v3 上: 先确认工作树干净 → `git tag pre-room cf3e0b3` → `git merge --ff-only room-model` → `npm run build` | `git status --porcelain` 前后都为空; `git log -1` = room-model 头; build 绿 | `git reset --keep pre-room && npm run build` |
+| 7a | **config 解析 dry-run 复跑** (新 dist 已就位, 起 daemon 前最后一道) | 同 2a, 但第一个参数指线上 dist: `WEZARD_CONFIG=$T/c.jsonc node scripts/room-cutover/config-check.mjs ~/develop/Guxi11/cc-wecom/dist` (副本取自此刻的 ~/.wezard/config.jsonc) | exit 0 | 失败不起 daemon: 先退 7 (`git reset --keep pre-room && npm run build`), 再查 |
 | 8 | 起 daemon + svr | `launchctl kickstart gui/$UID/com.wezard.daemon`; 前端资源有变, svr 也要 `launchctl kickstart -k gui/$UID/com.wezard.svr` | daemon.log 无 crash-loop; uid 回填条数 = 实例数; 每个绑定 pane 都标成待 /new | 从这一步起逆序回退: 8 → 7 → 6 → … |
 | 9 | 旧会话换新工具面 | 不用手动做: daemon 启动时把每个绑定 pane 标为待 /new, 下次唤醒先 /new 再注入, 新会话由 armCharter 拿到新宪章。session-mcp*.json / session-hooks.json 指向的入口不变 (http /mcp 加 hook 路径), 由 daemon writeIfChanged 重写, 不用手改; 真正要换的是会话里缓存的 tools/list, 由 /new 解决 | 抽 1 个群发话: 首轮宪章里没有 tell_peer, 工具列表里有 room_*; 看门狗: 给一个正忙的测试 wizard 派一条 chat_ask 后 `tmux kill-pane` 掉它的 pane, staleMin (缺省 5 分钟) + 一个扫描周期内该 duty 出现 daemon 写的 canceled reply 并唤醒提问者 | 回到 7 后, 旧代码下的下一次 /new 拿回旧工具面 |
 
 | 10 | 切换后清理 (稳定 7 天、未回退之后) | ① `rm ~/wezard-backups/pre-room-*.tgz` (只删第 1 步的切换前快照); ② 冻结的旧源 (~/.wezard/routes.jsonl 3.9M、state/members.json、state/chats/、state/message-events.json*、state/obligations.json、state/idle-nudges.json、state/strict-delivery-notices.json) **原样 mv 到 `~/.wezard/state/archive/pre-room-sources-<ts>/`, 不删、不压缩**: 同卷 rename, 不额外占盘, 逐字节不变; ③ `git branch -d room-model room-mig room-tools room-ui`, 删对应 worktree | `ls state/archive/pre-room-sources-<ts>/` 文件数 = 移动前; `df -h ~`; `git tag -l pre-room` 仍在 | ① 不可逆, 这就是要等满 7 天的原因; ② `mv state/archive/pre-room-sources-<ts>/* 原位` (回退到旧 daemon 前必须先做这一步); ③ 分支可从 tag 与 v3 历史重建 |
+
+## 配置: 未知键与校验 (2026-11-19 实测)
+
+- **结论: 删键只是清理, 漏删不会让新 daemon 起不来。**
+  - `ConfigSchema` 及各子对象都是 zod 缺省 (strip): 未知键静默丢弃, 不报错。全仓 shared/daemon/cli/svr 没有 `.strict()`。
+  - `ChatPolicy` 在 C 节 (fd4715b) 改成 `.passthrough()`: topOnly / speech 留在盘上会原样保留并被忽略, daemon boot 时 warn 一次 (daemon/index.ts 契约 §7 注释处), 不拒启动。passthrough 不校验值类型, 所以「值类型不对」的旧键同样不会炸。
+- **真正会让 boot 失败的只有: 已知键的值不合法** (例如 `rooms.watchdog.intervalSec < 10`, 或手改出错的 steward / stewardBudget 类型)。这才是 2a / 7a 要拦的。
+- 实测矩阵 (线上 config 副本, 不碰线上文件, 跑完核对线上 config 逐字节未变):
+
+| 输入 | dist | 结果 |
+|---|---|---|
+| 原样 (7 个旧键: topOnly×3、speech×4) | 新 (room-model) | exit 0, 报「残留旧键 7」 |
+| config-strip --apply 后 | 新 | exit 0, 残留 0 |
+| config-strip --apply 后 | 旧 (cc-wecom v3, 回退方向) | exit 0 |
+| 顶层 / wrc 下加未知键 | 新 | exit 0 (静默丢弃) |
+| `rooms.watchdog.intervalSec: 5` | 新 | exit 1, `rooms.watchdog.intervalSec: Number must be greater than or equal to 10` |
+
+- **回退注意**: 旧代码下 topOnly 省略 = 开 (现值全是 true, 删了等价); 但 speech 省略 = 运行时判定 (首见 strict / 存量 implicit), 线上 4 个显式 strict 群在旧代码下可能退成 implicit。所以**回退越过第 7 步时, 第 2 步必须一起退** (还原 config 备份), 不能只退代码。
 
 ## 第 7 步: 代码怎么接
 
@@ -109,4 +129,3 @@ grep 清单 §1 (CLAUDE.md / CODEBUDDY / README / docs) 和 §6 (宪章、MCP �
 - **人点名 `.name`、斜杠命令、审批卡 / 提问卡**: 不变 (卡片绑到唤醒它的那个 room)。
 - **定时任务**: 到点写一条 trigger 行唤醒, 不镜像进群; 任务里 wizard 的回复按普通规则 (要交付就 chat_reply / notify)。
 - **第一句话**: 所有绑定 pane 在下次唤醒前先 /new, 所以每个群切换后的第一句话会多一个新会话开局 (宪章重读), 首次回复慢一拍。
-
