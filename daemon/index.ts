@@ -1,6 +1,6 @@
 import { wxMarkdown } from "../shared/wx-text.js";
 // Daemon entry. Resident process — exits only on signal or fatal WS auth failure.
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { createHash, timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
 import { loadOrCreateSvrToken } from "../shared/svr-token.js";
@@ -48,13 +48,12 @@ import { makeWedocBridge } from "./wedoc.js";
 import { errText, installResponseTracker } from "./last-response.js";
 import { openRoomStore } from "./rooms.js";
 import { stewardRoute as resolveSteward } from "./steward.js";
-import { createRoomWatchdog } from "./room-watchdog.js";
+import { createRoomWatchdog, parsePaneIds } from "./room-watchdog.js";
 import { createRoomHub, type RoomHub } from "./room-hub.js";
 import {
   DAEMON, adhocRoomId, dmPeers, dmRoomId, holderOf, isUid, leaveOps, openDuties, renderMsgLine, roomHost, sameWho, whoKey,
   type MsgRow, type ReplyStatus, type RoomOp, type RoomState, type Verdict, type Who,
 } from "../shared/room.js";
-import { knownChatsOf } from "./chat-seen.js";
 import { CHAT_BATCH_BUDGET, sliceBatch } from "../shared/chat-record.js";
 import { CLASS_NAME_MAX, loadClassMerges, loadClassStore, migrateClasses, parseInstanceName, planClasses, renderClassReport, validClassName, type ClassMigration } from "./classes.js";
 import { footerTarget, responseFormatPolicy } from "./message-format.js";
@@ -405,7 +404,9 @@ const main = async (): Promise<void> => {
       return t ? await bridge.injectText(t, text, { channel: bridge.currentChannel(t) }) : { ok: false, reason: "no mirror target for session" };
     },
   };
-  const http = startHttp({ cfg, ws, log, sourcePath });
+  // room 模型的 /status 增量 (修复单 §4): startHttp 在 room 模块之前起, 用可改写的 holder 接。
+  const roomStatusRef = { get: (): Record<string, unknown> => ({}) };
+  const http = startHttp({ cfg, ws, log, sourcePath, roomStatus: roomStatusRef });
   http.register(
     "POST /approve",
     makeApproveHandler({ cfg, log: log.child({ mod: "approval" }), client: ws.client, sourcePath, getMirrorTarget, flushBeforeCard, nativeModal }),
@@ -1253,36 +1254,39 @@ const main = async (): Promise<void> => {
       }
       return chatNameOf(cfg, room) || room;
     };
-    /** 绑定 room 的镜像出站 (§3a): 覆盖占位 > 媒体 > topic 评论 > wx > 群消息。 */
-    const roomMirror = async (row: MsgRow, cover?: MsgRow): Promise<void> => {
+    /** 绑定 room 的镜像出站 (§3a): 覆盖占位 > 媒体 > topic 评论 > wx > 群消息。
+     * 返回 true = 已成功交给传输 (hub 拿它打 O3 的 room: mirrored; 内部失败各路径自己 warn)。 */
+    const roomMirror = async (row: MsgRow, cover?: MsgRow): Promise<boolean> => {
       const chat = row.room;
       const chatId = chat.replace(/^(user|chat|group):/, "");
       const authorTarget = row.author.kind === "wizard" ? roomWizardOf(row.author.id)?.target : undefined;
       const body = row.text.trim() || (row.files?.length ? "📎 " + row.files.map((f) => f.name).join(", ") : "");
       if (cover?.ext && body) {
-        if (await coverBubble(cover.ext, body)) return;
+        if (await coverBubble(cover.ext, body)) return true;
       }
       if (row.files?.length) {
+        let filesOk = true;
         for (const f of row.files) {
           const r = await sendMedia(chat, { path: f.path, kind: f.kind, name: f.name, ...(row.text.trim() ? { description: row.text } : {}) });
-          if (!r.ok) log.warn({ mod: "room", room: chat, file: f.path, reason: r.reason }, "room: 镜像媒体发送失败 (只影响传输, 不回滚)");
+          if (!r.ok) { filesOk = false; log.warn({ mod: "room", room: chat, file: f.path, reason: r.reason }, "room: 镜像媒体发送失败 (只影响传输, 不回滚)"); }
         }
-        if (!body) return;
+        if (!body) return filesOk;
       }
       const md = authorTarget ? headed(ownHead(authorTarget), body, "\n\n") : "[wezard] " + body;
       if (wx.owns(chatId)) {
         const r = wx.sendFinal(chatId, wxMarkdown(md), row.id);
-        if (r.state === "failed") log.warn({ mod: "room", room: chat, reason: r.reason }, "room: wx 镜像失败");
-        return;
+        if (r.state === "failed") { log.warn({ mod: "room", room: chat, reason: r.reason }, "room: wx 镜像失败"); return false; }
+        return true;
       }
       if (isTopicChat(chat)) {
         if (authorTarget) postAsTopic(authorTarget, chat, body);
         else void sendTopicContent(ws.client, log.child({ mod: "room" }), chat.replace(/^chat:/, ""), linkTags(chat, md))
           .catch((e) => log.warn({ mod: "room", room: chat, err: errText(e) }, "room: topic 镜像失败"));
-        return;
+        return true; // 已交给传输; 异步失败由上面的 catch 记 warn
       }
       if (authorTarget) postAs(authorTarget, chat, body);
       else notifyChat(chat, md);
+      return true;
     };
     const roomLog = log.child({ mod: "room" });
     const hub = createRoomHub({
@@ -1304,24 +1308,27 @@ const main = async (): Promise<void> => {
     const roomKickTimer = setInterval(() => void hub.kick(), 30_000);
     roomKickTimer.unref?.();
     // 契约 §7 切换约束: 宪章与 MCP schema 都变了, 活会话必须 /new —— 一次性标记文件,
-    // boot 存在即把每个绑定 pane 标为待 /new, 泵首次投递前先 /new 再贴, 全部处理完删标记。
-    {
-      const newFlag = join(expandHome(cfg.daemon.stateDir), "rooms-cutover-new.flag");
-      const needsNew = existsSync(newFlag) ? new Set(m.chatRoster("").flatMap((c) => c.targets)) : new Set<string>();
-      if (needsNew.size) {
-        roomLog.info({ panes: needsNew.size }, "room: 切换标记在, 首次唤醒前先 /new (契约 §7)");
-        const origPaste = hub ? undefined : undefined; // paste 端口已在上面闭包 — 用包装: 改走 hub 前置钩子不可行, 这里改 roomTurnEnd 前的一次性闸
-      }
-      // 实现在 pump 的 paste 前不容易挂 — 用一次性拦截: 首次 kick 前对每个待 /new 目标注入 "/new"。
-      if (needsNew.size) {
-        void (async () => {
-          for (const t of [...needsNew]) {
-            needsNew.delete(t);
-            try { await m.injectText(t, "/new", { requireIdle: true }); } catch { /* 下个标记周期再说 */ }
-          }
-          try { (await import("node:fs")).unlinkSync(newFlag); } catch { /* 已不在 */ }
-        })();
-      }
+    // boot 存在即把每个绑定标为待 /new。m.chatRoster("") 的 targets 就是全部绑定 (live +
+    // 持久化; 内部键在 base 一层已被滤掉, 见 mirror-bridge 的 chatRoster) —— 不用换来源。
+    // pane 忙的目标不丢 (修复单 §7): 留在 needsNew 里, 轮终 (roomTurnEnd) 与 30s 兜底定时器
+    // 重试, 全部处理完才删标记。pane 已不在的不重生 (noRespawn: boot 时集中重生会打成 pane
+    // 风暴) —— 交给 hub 在下次唤醒时重生, 新 CLI 进程自带新工具面, 无需 /new。
+    const newFlag = join(expandHome(cfg.daemon.stateDir), "rooms-cutover-new.flag");
+    const needsNew = existsSync(newFlag) ? new Set(m.chatRoster("").flatMap((c) => c.targets)) : new Set<string>();
+    const newOne = async (t: string): Promise<void> => {
+      if (!needsNew.has(t)) return;
+      try {
+        const r = await m.injectText(t, "/new", { requireIdle: true, noRespawn: true });
+        if (r.ok) { needsNew.delete(t); roomLog.info({ target: t }, "room: /new 完成 (切换标记)"); }
+        else if (r.retryable === false) { needsNew.delete(t); roomLog.info({ target: t, reason: r.reason }, "room: /new 跳过 — pane 已不在, 等下次唤醒由 hub 重生 (新进程自带新工具面)"); }
+      } catch { /* 稍后重试 */ }
+      if (!needsNew.size) { try { unlinkSync(newFlag); } catch { /* 已不在 */ } }
+    };
+    if (needsNew.size) {
+      roomLog.info({ panes: needsNew.size }, "room: 切换标记在, 首次唤醒前先 /new (契约 §7)");
+      for (const t of [...needsNew]) void newOne(t);
+      const newRetryTimer = setInterval(() => { for (const t of [...needsNew]) void newOne(t); }, 30_000);
+      newRetryTimer.unref?.();
     }
     // ── /room/* 的公共件 ─────────────────────────────────────────────────
     const roomSelfOf = (target: string): Who | undefined => {
@@ -1752,7 +1759,8 @@ const main = async (): Promise<void> => {
       log: roomLog, now: () => Date.now(),
       listPanes: async () => {
         const r = await runTmux(["list-panes", "-a", "-F", "#{pane_id}"]);
-        return r.ok ? r.stdout.split("\\n").map((l) => l.trim()).filter(Boolean) : [];
+        // 解析只用 parsePaneIds (修复单 §1): 之前这里 split 的是字面反斜杠+n, 多 pane 全员误判。
+        return r.ok ? { ok: true, panes: parsePaneIds(r.stdout) } : { ok: false, error: r.stderr.slice(0, 200) || "tmux list-panes 失败 (code " + r.code + ")" };
       },
       wizardOf: (uid) => {
         const w = roomWizardOf(uid);
@@ -1765,15 +1773,25 @@ const main = async (): Promise<void> => {
       onIdle: (uid) => hub.onIdle(uid),
       kick: () => void hub.kick(),
       staleMs: () => (cfg.rooms?.watchdog?.staleMin ?? 5) * 60_000,
+      intervalMs: () => (cfg.rooms?.watchdog?.intervalSec ?? 60) * 1000,
     });
     roomTurnEnd = (target: string): void => {
       roomWatchdog.touch(target);
       const uid = wizards.get(target)?.uid;
       if (uid) void hub.onIdle(uid);
+      if (needsNew.size) void newOne(target); // §7: pane 忙没 /new 成的目标, 轮终 (闲下来了) 补做
     };
     roomActivityTouch = (target: string): void => roomWatchdog.touch(target);
-    // pump 的注入也算「最后一次事件」: 正在投递的 wizard 不进 stale 名单。
-    const roomPaste = hub ? undefined : undefined; // (占位注释: paste 端口的 touch 见 hub ports)
+    // /status 增量 (§4): openDuties 是 daemon 内存里全部 room 的未结 duty 总数; watchdog 暴露
+    // failStreak / lastScanAt。O2 拿 openDuties 对 observe.mjs duties 的盘上重放, 差值应为 0。
+    roomStatusRef.get = () => ({
+      openDuties: roomStore.ids().reduce((n, id) => {
+        const s = roomState(id);
+        return n + (s ? openDuties(s).length : 0);
+      }, 0),
+      watchdog: roomWatchdog.status(),
+    });
+    // pump 的注入也算「最后一次事件」: 正在投递的 wizard 不进 stale 名单 (paste 端口的 touch 见 hub ports)。
     const watchdogTimer = setInterval(() => void roomWatchdog.scan(), (cfg.rooms?.watchdog?.intervalSec ?? 60) * 1000);
     watchdogTimer.unref?.();
     /** 审批/提问卡发到哪个聊天: 本轮唤醒它的绑定 room; 没被唤醒过 → 旧口径兜底 (C 节删)。 */
@@ -3238,7 +3256,7 @@ const main = async (): Promise<void> => {
     /** 其中 pane 活着的 —— 宪章在效的只有它们; 冷的醒来时宪章重渲染, 自然是新的。一次 list-panes 答完。 */
     const liveOf = async (targets: readonly string[]): Promise<string[]> => {
       const snap = await runTmux(["list-panes", "-a", "-F", "#{pane_id}"]);
-      const live = new Set(snap.ok ? snap.stdout.split("\n").map((l) => l.trim()).filter(Boolean) : []);
+      const live = new Set(snap.ok ? parsePaneIds(snap.stdout) : []); // 解析统一走 parsePaneIds (修复单 §1)
       return targets.filter((t) => live.has(m.sessionInfo(t)?.tmuxPane ?? ""));
     };
     /** 这些 wizard 此刻的宪章正文。 */
@@ -3568,7 +3586,7 @@ const main = async (): Promise<void> => {
         const changed = new Set(mds);
         const snap = await runTmux(["list-panes", "-a", "-F", "#{pane_id}"]);
         if (!snap.ok) return;
-        const live = new Set(snap.stdout.split("\n").map((l) => l.trim()).filter(Boolean));
+        const live = new Set(parsePaneIds(snap.stdout)); // 解析统一走 parsePaneIds (修复单 §1)
         for (const t of boundTargets()) {
           const pane = m.sessionInfo(t)?.tmuxPane;
           if (!pane || !live.has(pane)) continue;

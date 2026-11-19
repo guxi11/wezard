@@ -10,6 +10,7 @@
 // 终句零语义: 本文件不读 transcript。一轮结束 (mirror 报 idle) 时只看账本: 唤醒它的 duty
 // 还开着、这一轮又没 chat_reply 过 → 当轮提醒一次; 再闲下来仍没关 → 给提问者写一条系统行。
 import type { Logger } from "pino";
+import { createRoomQuota } from "./room-quota.js";
 import {
   DAEMON, holderOf, isBoundRoom, judge, mirrors, coversBubble, openDuties, renderMsgLine, sameWho, unreadFor, whoKey,
   type Draft, type JudgeCtx, type MsgRow, type RoomOp, type RoomState, type Verdict, type Who,
@@ -27,8 +28,9 @@ export interface HubPorts {
   /** 名字渲染: wizard → .名字, 人 → userid (或人名), daemon → wezard。 */
   nameOf: (w: Who) => string;
   roomLabel: (room: string) => string;
-  /** 绑定 room 的镜像出站 (§3a)。cover = 被这一行覆盖占位气泡的那条人话行。 */
-  mirror: (row: MsgRow, cover?: MsgRow) => Promise<void>;
+  /** 绑定 room 的镜像出站 (§3a)。cover = 被这一行覆盖占位气泡的那条人话行。
+   * 返回 true = 已成功交给传输 (O3 的 room: mirrored 以它为准)。 */
+  mirror: (row: MsgRow, cover?: MsgRow) => Promise<boolean>;
   /** pane 原语: 空闲判定 / 先 Esc / 粘贴一段文本。 */
   idle: (target: string) => Promise<boolean>;
   interrupt: (target: string) => Promise<void>;
@@ -44,6 +46,7 @@ export const REMIND_TEXT = (ids: readonly string[]): string =>
 export const createRoomHub = (p: HubPorts) => {
   const now = (): number => p.now?.() ?? Date.now();
   const turns = new Map<string, TurnWake>();      // uid → 本轮
+  const quota = createRoomQuota();                 // §8a 出站额度: 每轮 ≤3 / 每 room 每分钟 ≤10
   const inflight = new Set<string>();              // uid 正在被粘贴
   const uncertain = new Map<string, Set<string>>(); // uid → 上次不确定投递过的 room
   const reminded = new Set<string>();              // duty key: 已当轮提醒过
@@ -63,6 +66,12 @@ export const createRoomHub = (p: HubPorts) => {
       ...extra,
     });
     if (!v.ok || v.duplicate) return v;
+    // §8a 出站额度: wizard 经工具面写进来的行 (say / ask / task / file / 带 text 的 reply;
+    // notify 落的也是 say 行) 才计 —— daemon 系统行与人话不计。被拒的行不落盘也不占额度。
+    if (d.author.kind === "wizard" && d.origin === "tool" && d.kind !== "join-req" && (d.kind !== "reply" || !!(d.text ?? "").trim())) {
+      const q = quota.admit(d.author.id, room, now());
+      if (!q.ok) return { ok: false, status: 409, reason: q.reason! };
+    }
     p.store.append(room, [v.row]);
     if (v.degraded.length) p.log?.info({ room, id: v.row.id, degraded: v.degraded }, "room: 回合预算用尽, 这几位只推游标不唤醒");
     if (d.author.kind === "wizard" && v.row.kind === "reply") markReplied(d.author.id, v.row);
@@ -89,7 +98,9 @@ export const createRoomHub = (p: HubPorts) => {
     if (mirrors(row)) {
       const s = state(room)!;
       const cover = coversBubble(s, row);
-      void p.mirror(row, cover ? s.byId.get(cover) : undefined).catch((e) => p.log?.warn({ room, id: row.id, err: String(e) }, "room: 镜像失败 (只影响传输, 不回滚)"));
+      void p.mirror(row, cover ? s.byId.get(cover) : undefined)
+        .then((sent) => { if (sent) p.log?.info({ room, msgId: row.id, lagMs: now() - row.at }, "room: mirrored"); }) // O3: 账本行 at → 镜像进企微成功 (字段名 msgId: pino 的 msg 键是日志文案, 再放消息 id 会撞成重复键)
+        .catch((e) => p.log?.warn({ room, id: row.id, err: String(e) }, "room: 镜像失败 (只影响传输, 不回滚)"));
     }
     if (row.wake.length || row.interrupt) kick();
   };
@@ -154,6 +165,8 @@ export const createRoomHub = (p: HubPorts) => {
     const { text, seen, msgs } = render(uid, rooms);
     const res = await p.paste(w.target, text);
     if (res === "ok") {
+      for (const [room, rows] of rooms) for (const t of rows)
+        p.log?.info({ room, msgId: t.id, target: w.target, lagMs: now() - t.at }, "room: delivered"); // O3: 账本行 at → 注入成功 (msgId 同上, 避开 pino 的 msg 键)
       for (const { room, seq } of seen) p.store.append(room, [{ op: "seen", at: now(), room, who: { kind: "wizard", id: uid }, seq }]);
       uncertain.delete(uid);
       const t: TurnWake = turns.get(uid) ?? { rooms: new Set(), msgs: new Set(), replied: new Set(), at: now() };
@@ -194,6 +207,7 @@ export const createRoomHub = (p: HubPorts) => {
   const onIdle = async (uid: string): Promise<void> => {
     const t = turns.get(uid);
     turns.delete(uid);
+    quota.endTurn(uid); // §8a: 轮终重置该 wizard 的本轮发言计数
     const who: Who = { kind: "wizard", id: uid };
     const w = p.wizardOf(uid);
     // 唤醒过它、它仍持有、未关的 duty。

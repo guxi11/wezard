@@ -20,6 +20,8 @@ interface Ctx {
   ws: BotMux;
   log: Logger;
   sourcePath: string;
+  /** room 切换后的增量状态 (openDuties / watchdog), index.ts 在 room 模块就绪后改写 get; /status 展开它。 */
+  roomStatus?: { get: () => Record<string, unknown> };
 }
 
 /** 外部调用方的能力判据 (/status): 按名字查有没有, 别靠盘上目录之类的副作用猜。 */
@@ -52,28 +54,41 @@ const readBody = async (req: IncomingMessage): Promise<unknown> => {
   }
 };
 
+/** /status 的响应体 (抽出来给单测: 修复单 §4 的 openDuties / watchdog 增量在这里并进来)。 */
+export const statusBody = (
+  cfg: Config,
+  ws: BotMux,
+  sourcePath: string,
+  roomStatus?: { get: () => Record<string, unknown> },
+): Record<string, unknown> => {
+  const bots = ws.bots();
+  return {
+    ok: true,
+    version: VERSION,
+    capabilities: CAPABILITIES,
+    wsConnected: ws.client.isConnected,
+    ws: ws.status(),
+    backend: cfg.wrc.defaultCli,
+    botId: cfg.bot.botId,
+    defaultChat: cfg.defaultChat,
+    pending: listPending().length,
+    uptimeSec: Math.round(process.uptime()),
+    sourcePath,
+    logFile: expandHome(cfg.daemon.logFile),
+    // 多机器人才有; wsConnected / botId 仍是主机器人的, 单机器人的输出一字不变。
+    ...(bots.length > 1 ? { bots } : {}),
+    // room 模型增量 (修复单 §4): openDuties = 全部 room 未结 duty 总数 (pending 是审批卡, 别混);
+    // watchdog = { failStreak, lastScanAt } — O1 拿它判「看门狗活着且没停摆」。
+    ...(roomStatus ? roomStatus.get() : {}),
+  };
+};
+
 const routes: Record<string, Handler> = {
   "GET /healthz": (_req, res, _url, { ws }) => {
     json(res, 200, { ok: true, wsConnected: ws.client.isConnected });
   },
-  "GET /status": (_req, res, _url, { cfg, ws, sourcePath }) => {
-    const bots = ws.bots();
-    json(res, 200, {
-      ok: true,
-      version: VERSION,
-      capabilities: CAPABILITIES,
-      wsConnected: ws.client.isConnected,
-      ws: ws.status(),
-      backend: cfg.wrc.defaultCli,
-      botId: cfg.bot.botId,
-      defaultChat: cfg.defaultChat,
-      pending: listPending().length,
-      uptimeSec: Math.round(process.uptime()),
-      sourcePath,
-      logFile: expandHome(cfg.daemon.logFile),
-      // 多机器人才有; wsConnected / botId 仍是主机器人的, 单机器人的输出一字不变。
-      ...(bots.length > 1 ? { bots } : {}),
-    });
+  "GET /status": (_req, res, _url, { cfg, ws, sourcePath, roomStatus }) => {
+    json(res, 200, statusBody(cfg, ws, sourcePath, roomStatus));
   },
   "GET /pending": (_req, res) => {
     json(res, 200, { pending: listPending() });
