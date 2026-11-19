@@ -140,14 +140,12 @@ const mergeFacts = (fresh: readonly FactsPush[]): WorldFacts => {
     inflight: uniq(fresh.flatMap((p) => [...(p.facts.inflight ?? [])]), (x) => `${x.from}\0${x.to}\0${x.turn}`),
     schedules: uniq(fresh.flatMap((p) => [...p.facts.schedules]), (x) => x.id),
     chatNames: Object.assign({}, ...fresh.map((p) => p.facts.chatNames)) as Record<string, string>,
-    // P7-S3/S3b: 人名 / 微信 / 治理面板 / strict 群集合 —— 之前 mergeFacts 重拼时被整个丢掉,
-    // 公网 svr 上这些面一直是空的; 按 key 去重合并 (同一台机器的重推收敛掉)。
+    // 人名 / 微信 / room 账本快照 / 名字表 / 类表 —— 合并时被整个丢掉就等于远端没有这些面。
     ...(fresh.some((p) => p.facts.humanNames) ? { humanNames: Object.assign({}, ...fresh.map((p) => p.facts.humanNames ?? {})) } : {}),
     ...(fresh.some((p) => p.facts.weixin?.length) ? { weixin: uniq(fresh.flatMap((p) => [...(p.facts.weixin ?? [])]), (x) => x.base) } : {}),
-    ...(fresh.some((p) => p.facts.governance?.length) ? { governance: uniq(fresh.flatMap((p) => [...(p.facts.governance ?? [])]), (x) => x.chat) } : {}),
-    ...(fresh.some((p) => p.facts.strictChats?.length) ? { strictChats: [...new Set(fresh.flatMap((p) => [...(p.facts.strictChats ?? [])]))] } : {}),
-    // 群成员列表 (rolepage): 成员表行与类表同样是快照的一部分, 不合并就等于远端没有这一栏。
-    ...(fresh.some((p) => p.facts.memberRows?.length) ? { memberRows: uniq(fresh.flatMap((p) => [...(p.facts.memberRows ?? [])]), (x) => `${x.chat}\0${x.target}`) } : {}),
+    // room 快照按 id 去重: 同一个 room 只可能由它所在的那台机器推出来。
+    ...(fresh.some((p) => p.facts.rooms?.length) ? { rooms: uniq(fresh.flatMap((p) => [...(p.facts.rooms ?? [])]), (r) => r.id) } : {}),
+    ...(fresh.some((p) => p.facts.names) ? { names: Object.assign({}, ...fresh.map((p) => p.facts.names ?? {})) } : {}),
     ...(fresh.some((p) => p.facts.classes?.length) ? { classes: uniq(fresh.flatMap((p) => [...(p.facts.classes ?? [])]), (c) => c.id) } : {}),
   };
 };

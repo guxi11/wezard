@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
 import { callsInExec, execHintCalls, toolReplies } from "../shared/tool-hints.js";
 import { hintOf, hintsOf, renderTurnGroup } from "../shared/detail-render.js";
-import { renderMsg, dependentsOf } from "../shared/role-render.js";
-import { makeDirectory } from "../shared/role-view.js";
-import { EMPTY_FACTS } from "../shared/world.js";
+import { renderTurnBox } from "../shared/role-render.js";
 import type { TurnDetailRecord, TurnItem } from "../shared/detail-store.js";
 
 const wrap = (value: unknown) => JSON.stringify([{ type: "input_text", text: "Script completed" },
@@ -52,15 +50,14 @@ const child: TurnDetailRecord = { ...parent, id: "child", target: "user:admin#ro
 const receipt: TurnDetailRecord = { ...parent, id: "receipt", createdAt: 5,
   from: { kind: "peer", from: child.target, event: "td75fb5", receipt: true, status: "done" }, userQuery: "RESULT: checked", items: [] };
 const records = [parent, child, receipt];
-const dir = makeDirectory(records, EMPTY_FACTS);
-const fragment = renderMsg({ turn: parent, dir: "out", from: parent.target!, to: "human:admin", channel: "user:admin", ts: 2 } as Parameters<typeof renderMsg>[0], records, dir, 10);
-assert.match(fragment.html, /class="handoff/);
-assert.match(fragment.html, /data-hto="user:admin#router-check"/);
-assert.match(fragment.html, /data-hch=""/);
-assert.match(fragment.html, /data-gid="child:in"/);
-assert.match(fragment.html, /st-done/);
-assert.ok(dependentsOf(child, records).includes(parent.id));
-assert.ok(dependentsOf(receipt, records).includes(parent.id));
+// room 模型之后, 一条 room 消息点开的是**那一轮的过程框** (子 agent 内联在父轮里)。
+const html = renderTurnBox(parent, records, 10);
+assert.match(html, /class="handoff/);
+assert.match(html, /router-check/);
+assert.match(html, /check model/);
+// 子 agent 的轮 (agent.parentTurnId) 内联在父轮里; peer 派出来的那一轮是它自己的
+// room 消息, 不在父轮的过程框里 —— 这里没有 agent 标记, 所以只有父轮自己。
+assert.ok(!html.includes("t:child"), "peer 轮不并进父轮");
 const multiHtml = renderTurnGroup({ ...parent, items: [{ ...use, toolInput: multi }, { ...result, body: wrap([b, a]) }] }, 10).html;
 assert.equal((multiHtml.match(/class="handoff/g) ?? []).length, 2);
 

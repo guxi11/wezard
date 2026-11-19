@@ -1,63 +1,66 @@
-// rolepage 群成员 (实例) 列表: 纯函数 groupMembers 的口径 ——
-// 本群实例 + 成员表加入的实例按 target 去重 / 管家在前 / 类实例带类名 / 单聊为空。
+// room 成员列表 (shared/group-members.ts): 读 room 账本的 join 行, 补名册的活体状态与类名。
 import assert from "node:assert/strict";
-import { groupMembers, isGroupChat } from "../shared/group-members.js";
-import type { WorldFactClass, WorldFactMemberRow, WorldFactWizard } from "../shared/world.js";
+import { isGroupChat, roomMembers } from "../shared/group-members.js";
+import type { RoomFact } from "../shared/room-view.js";
+import { H, W, uid } from "./room-fixture.js";
+import type { WorldFactClass, WorldFactWizard } from "../shared/world.js";
+import { uidOf } from "../shared/room.js";
 
-const now = Date.now();
-const wiz = (target: string, name: string, at: number, extra: Partial<WorldFactWizard> = {}): WorldFactWizard => ({
-  target, name, description: "", chat: "", cwd: "", model: "", cli: "codebuddy",
-  busy: false, alive: false, bornAt: at, lastActivity: at, summary: "", ...extra,
-});
-
+const A = W(uid(1));
+const B = W(uid(2));
 const G = "chat:wrG";
-const H = "chat:wrH";
-const steward = wiz(G, "wezard-1", now - 1000, { identity: "cls-steward", ordinal: 1, steward: true, alive: true });
-const worker = wiz(`${G}#fix`, "coder-2", now - 2000, { identity: "cls-coder", ordinal: 2, alive: true, busy: true });
-const joined = wiz(`${H}#helper`, "helper-1", now - 3000, { identity: "cls-helper", ordinal: 1 });
-const elsewhere = wiz(`${H}#other`, "other", now - 500);
-const classes: WorldFactClass[] = [
-  { id: "cls-steward", name: "wezard", role: "steward", workspace: "/w" },
-  { id: "cls-coder", name: "coder", role: "coder", workspace: "/w" },
-  { id: "cls-helper", name: "helper", role: "reviewer", workspace: "/w" },
-];
-const rows: WorldFactMemberRow[] = [
-  { chat: G, target: steward.target, mode: "owner", since: now - 9000, by: "human:T" },
-  { chat: G, target: worker.target, mode: "speaker", since: now - 8000, by: "cls-steward" },
-  { chat: G, target: joined.target, mode: "mention", since: now - 7000, by: "human:T" },
-  { chat: H, target: elsewhere.target, mode: "speaker", since: now - 1, by: "human:T" },
-];
-const statusOf = (t: string) => (t === steward.target ? { alive: true, busy: false, runningUntil: 0 } : t === worker.target ? { alive: true, busy: true, runningUntil: now + 60_000 } : undefined);
 
-const ms = groupMembers(G, [steward, worker, joined, elsewhere], rows, classes, statusOf);
-assert.deepEqual(ms.map((m) => m.target), [steward.target, worker.target, joined.target], "本群实例 + 加入实例, 别的群且没加入的不出现");
-assert.equal(ms[0]!.steward, true, "管家标记");
-assert.equal(ms[0]!.mode, "owner", "strict 在场方式跟着成员表");
-assert.equal(ms[0]!.foreign, false);
-assert.equal(ms[1]!.className, "coder", "类实例标出所属类名");
-assert.equal(ms[1]!.ordinal, 2);
-assert.equal(ms[1]!.status?.busy, true, "活体状态透传");
-assert.equal(ms[2]!.foreign, true, "跨群加入");
-assert.equal(ms[2]!.mode, "mention");
-assert.equal(ms[2]!.className, "helper");
+const wizard = (target: string, name: string, over: Partial<WorldFactWizard> = {}): WorldFactWizard => ({
+  target, name, description: "", chat: "", cwd: "", model: "", cli: "",
+  busy: false, alive: false, lastActivity: 1, summary: "", ...over,
+});
+const wA = wizard(G + "#guide", "guide", { uid: A.id, alive: true });
+const wB = wizard("chat:wrOther#worker", "worker", { uid: B.id, busy: true, ordinal: 2, identity: "class-1" });
 
-// 去重: 同一 target 同时是名册里的本群实例与成员表行 —— 只出现一次。
-const dup = groupMembers(G, [steward, steward], rows, classes);
-assert.equal(dup.filter((m) => m.target === steward.target).length, 1);
+const room: RoomFact = {
+  id: G, kind: "wecom-group", title: "", bound: true, host: A,
+  members: [
+    { who: A, name: "guide", via: "founder", since: 100, ord: 1, host: true },
+    { who: H("U1"), name: "张三", via: "inbound", since: 200, ord: 2, host: false },
+    { who: B, name: "worker", via: "invite", since: 300, ord: 3, host: false },
+  ],
+  openDuties: 0,
+};
+const classes: WorldFactClass[] = [{ id: "class-1", name: "研究", role: "coder", workspace: "/w" }];
 
-// 成员表里有、名册里已经没有 (被裁 / 老快照): 名字退回 slot id, 冷状态。
-const ghostRow: WorldFactMemberRow = { chat: G, target: `${G}#gone`, mode: "speaker", since: 1, by: "x" };
-const withGhost = groupMembers(G, [steward], [ghostRow], []);
-assert.equal(withGhost.find((m) => m.target === `${G}#gone`)?.name, "gone");
+// ── 1. 序: host 先, 然后 wizard (加入序), 人最后 ──────────────────────
+{
+  const ms = roomMembers(room, [wA, wB], classes);
+  assert.deepEqual(ms.map((m) => m.name), ["guide", "worker", "张三"]);
+  assert.equal(ms[0]!.host, true);
+  assert.equal(ms[0]!.kind, "wizard");
+  assert.equal(ms[2]!.kind, "human");
+  assert.equal(ms[0]!.via, "founder");
+  assert.equal(ms[0]!.alive, true, "名册的活体状态跟着走");
+  assert.equal(ms[1]!.busy, true);
+  assert.equal(ms[1]!.className, "研究", "类实例标出所属类");
+  assert.equal(ms[0]!.className, undefined);
+  assert.equal(ms[1]!.foreign, true, "实例 home base ≠ 本 room = 从别处加入");
+  assert.equal(ms[0]!.foreign, undefined);
+}
 
-// 隐式群 (没有成员表行): 成员照旧由名册给, mode 缺省。
-const implicit = groupMembers(G, [steward, worker], [], []);
-assert.equal(implicit.length, 2);
-assert.equal(implicit.some((m) => m.mode !== undefined), false);
+// ── 2. uid 对不上名册: 名字仍来自 room 账本自己 ─────────────────────
+{
+  const ghost = { ...room, members: [{ who: W(uid(9)), name: "旧实例", via: "migrate" as const, since: 1, ord: 1, host: false }] };
+  const ms = roomMembers(ghost, [], []);
+  assert.equal(ms.length, 1);
+  assert.equal(ms[0]!.name, "旧实例");
+  assert.equal(ms[0]!.alive, undefined, "名册里没有就没有活体状态");
+  assert.equal(ms[0]!.foreign, undefined);
+}
 
-// 单聊 / 私聊: 没有群成员。
-assert.equal(isGroupChat("user:T03880027A"), false);
-assert.deepEqual(groupMembers("user:T03880027A", [steward, worker], rows, classes), []);
-assert.deepEqual(groupMembers("", [steward], rows, classes), []);
+// ── 3. 不是群就没有成员这一栏; uidOf 与 room 的 uid 同一套 ────────────
+{
+  assert.equal(isGroupChat("chat:wrG"), true);
+  assert.equal(isGroupChat("user:U1"), false);
+  assert.equal(isGroupChat("dm:" + A.id + "|" + B.id), false);
+  assert.deepEqual(roomMembers({ ...room, members: [] }, [], []), []);
+  assert.equal(uidOf({ target: G + "#guide", uid: A.id }), A.id, "已落盘的 uid 只读");
+}
 
-console.log("group-members: 本群实例+加入实例去重 / 管家在前 / 类名 / 在场方式 / 单聊为空");
+console.log("group-members: 成员读 room 账本 (host 先 / 人最后 / 类名 / 外来实例)");

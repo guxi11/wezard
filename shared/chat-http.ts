@@ -1,40 +1,35 @@
-// Rolepage routes, shared verbatim by the daemon and the standalone svr —
-// both own a DetailStore, so both can serve the same view off it.
+// Rolepage routes, shared verbatim by the daemon and the standalone svr — both own a
+// DetailStore, so both serve the same view off it. Room 历史另需一个 room 账本读者 (RoomReader):
+// daemon 有, svr 没有该参数时 room 视图退化成「只有图与成员」。
 //
 //   GET /role             → static SPA shell (shared/chat-render)
 //   GET /chat/app.css     → 视图样式 (高亮主题 + detail 共用样式 + web/chat.css)
 //   GET /chat/app.js      → 视图脚本 (web/chat.js)
 //   GET /chat/vendor.js   → markdown-it + highlight.js (随包分发, 不走 CDN)
-//   GET /api/role         → 一个 role 的身份 + 它参与的会话 (群聊/单聊) + session 分段
-//   GET /api/msgs         → 一个会话窗口的消息片段 (服务端渲染的 HTML; 工具调用只有摘要)
-//   GET /api/tool         → 一次工具调用的展开正文 —— 片段的第二级, 展开时才取
-//   GET /api/role-events  → SSE: role 摘要变动 + 当前窗口的消息增量
-//   GET /api/world        → 关系视图: wizard 家谱、跨聊天往来、plans、日程
-//   GET /api/search       → cmd+k: 从视角 role 搜 role 名字 / 会话名 / 消息正文
-//   GET /api/charter      → 一个 wizard 出生时被压进系统提示的宪章 (按节 + 体量 + 实测开局底座)
+//   GET /api/world        → 二部图: rooms + wizard/人 节点 + 家谱图层 + plans / 日程
+//   GET /api/room         → 一个 room 的快照 + 历史分页 (before / limit)
+//   GET /api/wizard       → 一个 wizard 的名片 + W-1 (它说的 + 指向它的) / W-2 (全部) 消息
+//   GET /api/turn         → 一条消息对应的那一轮的过程框 (工具调用只有摘要)
+//   GET /api/tool         → 一次工具调用的展开正文 —— 过程框的第二级, 展开时才取
+//   GET /api/charter      → 一个 wizard 出生时被压进系统提示的宪章
 //
-// 资源路由不校验 `?id=` —— 它们是纯静态前端代码, 不含任何会话数据。
+// 资源路由不校验 ?id= —— 它们是纯静态前端代码, 不含任何会话数据。
 //
-// Capability: `?id=` 是一条不可猜的记录 id, 它就是凭据。rolepage 的核心动作是
-// 「点一条消息就切到对端的视角」—— 对端可能住在任何一个聊天里, 所以**任一有效票据
-// 可以看全部 role** (用户确认过的取舍: 单用户部署, 名册本来就对每个 wizard 敞开)。
-// 票据只剩两个作用: 证明你拿到过一条真链接; 以及没有 `role=` 时默认开在谁那里。
-// 要把正文严格关在一个群里的部署, 不该对外暴露这些路由。
-import { createHash } from "node:crypto";
+// Capability: ?id= 是一条不可猜的记录 id, 它就是凭据。rolepage 的核心动作是
+// 「点一条消息就切到它的作者 / 对端」—— 对端可能住在任何一个 room 里, 所以任一有效
+// 票据可以看全部 role (单用户部署, 名册本来就对每个 wizard 敞开)。
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { URL } from "node:url";
 import { baseOfKey, sameBot } from "./session-label.js";
-import { isMark, isPost, isTurn } from "./chat-view.js";
+import { isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, withData, type WorldFacts } from "./world.js";
-import {
-  allMessages, unreadIndex, ledgerOf, windowOf, spanFor, convKeyOf, chatKeysOf, isWizardDm, parseTalkKey, glanceOfTalk, convsOf, hasRelations, inSpan, makeDirectory, marksOf, messageOfPost, messagesOfTurn, injectEchoesOf, strictPostsOf,
-  roleInfo, roleStats, sessionsOf, talkArgs, talkOf, counterpartOf, windowStats, type Directory, type Heard, type Msg, type SessionSpan,
-} from "./role-view.js";
-import { dependentsOf, renderMark, renderMsg, type MsgFragment } from "./role-render.js";
-import { groupMembers, isGroupChat } from "./group-members.js";
-import { searchRole } from "./role-search.js";
+import { buildRoomFact, dutyFacts, roomHistory, whoRef, wizardMessages, type RoomMsg } from "./room-view.js";
+import type { RenderNames, RoomState } from "./room.js";
+import { makeDirectory, roleInfo, roleStats, sessionsOf, type SessionSpan } from "./role-view.js";
+import { roomMembers } from "./group-members.js";
 import { charterBrief, charterView } from "./charter-view.js";
 import { renderToolBody } from "./detail-render.js";
+import { renderTurnBox } from "./role-render.js";
 import { chatScript, chatStyles, chatVendor, renderChatPage } from "./chat-render.js";
 import type { Asset } from "./web-assets.js";
 import type { DetailRecord, DetailStore, TurnDetailRecord } from "./detail-store.js";
@@ -42,48 +37,46 @@ import type { SeenLog } from "./seen-log.js";
 
 export type SimpleHandler = (req: IncomingMessage, res: ServerResponse, url: URL) => void;
 
+/** room 账本的读口 (daemon/rooms.ts 的 RoomStore 满足它)。svr 没有: room 视图只剩快照。 */
+export interface RoomReader {
+  ids: () => string[];
+  get: (id: string) => RoomState | undefined;
+}
+
 export interface ChatRoutes {
   page: SimpleHandler;
   styles: SimpleHandler;
   script: SimpleHandler;
   vendor: SimpleHandler;
-  role: SimpleHandler;
-  msgs: SimpleHandler;
-  tool: SimpleHandler;
-  events: SimpleHandler;
   world: SimpleHandler;
-  search: SimpleHandler;
-  glance: SimpleHandler;
+  room: SimpleHandler;
+  wizard: SimpleHandler;
+  turn: SimpleHandler;
+  tool: SimpleHandler;
   charter: SimpleHandler;
-  seen: SimpleHandler;
 }
 
-/** 注册表侧的事实 (wizard 身份 / 家谱 / plans / 日程) —— 只有 daemon 给得出。
+/** 注册表侧的事实 (wizard 身份 / 家谱 / plans / 日程 / room 快照) —— 只有 daemon 给得出。
  *  async 是因为活体状态要问 tmux; 独立 svr 用 daemon 推来的快照。
  *  实现方自己做节流: 这条路由会被前端定时轮询。 */
 export type WorldFactsProvider = () => Promise<WorldFacts> | WorldFacts;
 
 const DEFAULT_LIMIT = 60;
-const FLUSH_MS = 300;
-const PING_MS = 25_000;
 const FACTS_MS = 10_000;
-/** rolepage 只看最近这么久: 更早的轮次、wizard 登记与家谱一律不进视图。 */
+/** rolepage 只看最近这么久: 更早的轮次、wizard 登记与家谱一律不进视图。
+ *  room 历史不受它限 —— 那是账本, 该翻多久翻多久。 */
 export const HORIZON_MS = 3 * 24 * 3600_000;
-/** 一批已读的上限 (字节): 页面一次攢的是秒级的那几条, 64KB 足够几百条。 */
-const SEEN_BODY_MAX = 64 * 1024;
 
 const lastTsOf = (r: DetailRecord): number => (r as { updatedAt?: number }).updatedAt ?? r.createdAt;
 const publicPlan = <T extends WorldFacts["plans"][number]>({ reminder: _reminder, ...plan }: T) => plan;
 
-/** 记录侧的源头裁剪 —— 下游 (会话列表、窗口、关系图) 都只见得到这一份。 */
+/** 记录侧的源头裁剪 —— 下游 (节点 / 过程框) 都只见得到这一份。 */
 const recentRecords = (records: readonly DetailRecord[], cutoff: number): DetailRecord[] =>
   records.filter((r) => lastTsOf(r) >= cutoff);
 
-/** 注册表侧的源头裁剪: 久未活动的 wizard 连同它挂着的家谱一起退场; 活跃 plans 与日程保留。 */
+/** 注册表侧的源头裁剪: 久未活动、也没有 room 的 wizard 连同它挂着的家谱一起退场。 */
 const recentFacts = (f: WorldFacts, records: readonly DetailRecord[], now: number): WorldFacts => {
-  // 往来可能只落在对端的 transcript: 最近消息里出现的双方仍需保留登记身份,
-  // 不能按自己的 transcript 时刻裁掉名字, 再把 wizard 的 target 当成人的称呼。
-  const participants = new Set(allMessages(records, now).flatMap((m) => [m.from, m.to]));
+  const participants = new Set(records.filter(isTurn).map((r) => (r as { target?: string }).target).filter((t): t is string => !!t));
   const cutoff = now - HORIZON_MS;
   const byTarget = new Map(f.wizards.map((w) => [w.target, w] as const));
   const retained = new Set(f.plans.filter((p) => p.state === "active" || p.state === "paused").map((p) => p.owner));
@@ -92,22 +85,23 @@ const recentFacts = (f: WorldFacts, records: readonly DetailRecord[], now: numbe
     const parent = byTarget.get(pending.pop()!)?.parent;
     if (parent && !retained.has(parent)) { retained.add(parent); pending.push(parent); }
   }
+  // room 成员的身份不能因为最近没说话就被裁掉 —— 图上的成员线会悬空。
+  const inRoom = new Set((f.rooms ?? []).flatMap((r) => r.members.filter((m) => m.who.kind === "wizard").map((m) => m.who.id)));
   return {
     ...f,
-    wizards: f.wizards.filter((w) => retained.has(w.target) || participants.has(w.target) || w.busy || Math.max(w.lastActivity, w.bornAt ?? 0) >= cutoff),
+    wizards: f.wizards.filter((w) => retained.has(w.target) || participants.has(w.target) || w.busy || (!!w.uid && inRoom.has(w.uid)) || Math.max(w.lastActivity, w.bornAt ?? 0) >= cutoff),
     plans: f.plans,
   };
 };
 
-// 多机器人隔离: 一张票据只看得见与它 (票据 selfTarget) sameBot 的记录与名册 (内部会话在多机器人时谁也看不见)。目录、会话列表、
-// 关系图、搜索、窗口都建在这两份上, 所以别的机器人的角色在这一页上与不存在同形 —— `?role=` 落空就回到
-// 票据自己, 同认不出的名字。没有 target 的记录 (审批卡) 不归谁, 留着; 单机器人时一切同属主机器人, 原样。
+// 多机器人隔离: 一张票据只看得见与它 (票据 selfTarget) sameBot 的记录与名册。
 const ofBot = (self: string) => (key: string | undefined): boolean => !key || sameBot(self, key);
 const botRecords = (records: readonly DetailRecord[], self: string): DetailRecord[] =>
   records.filter((r) => ofBot(self)((r as { target?: string }).target));
 const botFacts = (f: WorldFacts, self: string): WorldFacts => {
   const mine = ofBot(self);
   const keep = <V>(o: Readonly<Record<string, V>>): Record<string, V> => Object.fromEntries(Object.entries(o).filter(([k]) => mine(k)));
+  const uidTarget = new Map(f.wizards.filter((w) => w.uid).map((w) => [w.uid!, w.target] as const));
   return {
     ...f,
     wizards: f.wizards.filter((w) => mine(w.target)),
@@ -117,9 +111,9 @@ const botFacts = (f: WorldFacts, self: string): WorldFacts => {
     chatNames: keep(f.chatNames),
     ...(f.humanNames ? { humanNames: keep(f.humanNames) } : {}),
     ...(f.weixin ? { weixin: f.weixin.filter((x) => mine(x.base)) } : {}),
-    ...(f.strictChats ? { strictChats: f.strictChats.filter((c) => mine(c)) } : {}),
-    ...(f.memberRows ? { memberRows: f.memberRows.filter((x) => mine(x.chat) && mine(x.target)) } : {}),
     ...(f.classes ? { classes: f.classes.filter((c) => mine(c.id)) } : {}),
+    // 绑定 room 的 id 就是聊天 base; dm / adhoc 的 id 是 uid —— 按成员是不是本 bot 的实例判。
+    ...(f.rooms ? { rooms: f.rooms.filter((r) => mine(r.id) || r.members.some((m) => m.who.kind === "wizard" && mine(uidTarget.get(m.who.id)))) } : {}),
   };
 };
 const viewerOf = (t: Ticket): string => t.selfTarget;
@@ -131,8 +125,7 @@ const json = (res: ServerResponse, status: number, body: unknown): void => {
   res.end(JSON.stringify(body));
 };
 
-/** 票据自带的默认落点: turn/mark 的 target, 聊天票据的 base (= 那个聊天的默认 wizard)。
- *  审批记录只知道 sessionId, 借同 session 的 turn 反推。 */
+/** 票据自带的默认落点: turn/mark 的 target, 聊天票据的 base (= 那个聊天的默认 wizard)。 */
 const ticketTarget = (store: DetailStore, rec: DetailRecord): string => {
   const direct = (rec as { target?: string }).target;
   if (direct) return direct;
@@ -142,67 +135,74 @@ const ticketTarget = (store: DetailStore, rec: DetailRecord): string => {
     .sort((a, b) => b.updatedAt - a.updatedAt)[0]?.target ?? "";
 };
 
-interface Ticket {
-  selfTarget: string;
-  /** 票据就是一轮对话时的那一轮 —— 气泡头上的链接带的正是它自己那一轮的 id。 */
-  turn?: TurnDetailRecord;
-}
+interface Ticket { selfTarget: string; turn?: TurnDetailRecord }
 
 const resolveTicket = (store: DetailStore, url: URL): Ticket | undefined => {
   const rec = store.get(url.searchParams.get("id") ?? "");
   return rec ? { selfTarget: ticketTarget(store, rec), turn: isTurn(rec) && rec.target ? rec : undefined } : undefined;
 };
 
-/** 没指定窗口时落在哪: 哪个会话, 以及只看与谁的往来 ("" = 由摘要在那个会话里挑)。 */
-interface Landing { conv: string; with: string }
-
-/** 票据是一轮对话、而 role 正是其中一方 → 落在那一句所在的会话, 对面就是那一句的另一方:
- *  从哪个群点进来就开哪个群, 谁问的就只看与谁的往来 —— 都从那条消息反查, 不靠猜。
- *  聊天票据 / 别人的轮次只知道一个群: 落在票据的 home 群。 */
-const landingOf = (ticket: Ticket, role: string): Landing => {
-  const m = ticket.turn ? messagesOfTurn(ticket.turn)[0] : undefined;
-  return m && (m.from === role || m.to === role)
-    ? { conv: convKeyOf(m, role), with: m.channel ? (m.from === role ? m.to : m.from) : "" }
-    : { conv: `c:${baseOfKey(ticket.selfTarget)}`, with: "" };
-};
-
 const NOT_FOUND = "未找到该会话 (链接可能已过期)";
 
 /** `role=` (名字 / target key / human:x) > 票据自带的那个 wizard。 */
-const pickRole = (dir: Directory, ticket: Ticket, url: URL): string =>
-  dir.resolve(url.searchParams.get("role") ?? "") ??
-  ticket.selfTarget;
+const pickRole = (dir: ReturnType<typeof makeDirectory>, ticket: Ticket, url: URL): string => {
+  const ref = url.searchParams.get("role") ?? "";
+  // 只在 room 里出现过、注册表已经没有的 wizard 用 uid:<uid> 当节点 id —— 不经过名录。
+  return ref.startsWith("uid:") ? ref : dir.resolve(ref) ?? ticket.selfTarget;
+};
 
-// 没指定或 "all" = 不切, 全部时间; 否则只看那一段。
-const ALL_SESSIONS = "all";
-/** 一个 sid 在 sessionsOf 里只有一行 (被隔开的段已并进 runs), 所以 find 就是全部区间。 */
-const spanOf = (spans: readonly SessionSpan[], sid: string | null): SessionSpan | undefined =>
-  !sid || sid === ALL_SESSIONS ? undefined
-  : spans.find((s) => s.sessionId === sid);
-
-// Infinity 过不了 JSON。runs 是服务端的时间窗 (inSpan 用), 前端只认 start/end/turns。
+// Infinity 过不了 JSON。runs 是服务端的时间窗, 前端只认 start/end/turns。
 const wireSpan = (s: SessionSpan) => { const { runs: _runs, ...rest } = s; return { ...rest, end: Number.isFinite(s.end) ? s.end : 0 }; };
 
-interface View {
-  role: string;
-  conv: string;
-  with: string;
-  span?: SessionSpan;
-}
+// ── room 的名字 / 消息补轮次 ──────────────────────────────────────────
+const namesOf = (f: WorldFacts): RenderNames => {
+  const byUid = new Map(f.wizards.filter((w) => w.uid).map((w) => [w.uid!, w.name] as const));
+  const titleOf = new Map((f.rooms ?? []).map((r) => [r.id, r.title] as const));
+  const labelOf = new Map((f.rooms ?? []).map((r) => [r.id, r.members.map((m) => m.name).join(" ↔ ")] as const));
+  return {
+    nameOf: (w) => w.kind === "wizard" ? byUid.get(w.id) ?? f.names?.[w.id] ?? w.id
+      : w.kind === "human" ? f.humanNames?.["human:" + w.id] ?? f.names?.[w.id] ?? w.id
+      : "wezard",
+    roomLabel: (room) => f.chatNames[room] || titleOf.get(room) || labelOf.get(room) || room,
+  };
+};
 
-/** seen = 落盘的已读记录 (seen-log); 不给 = 已读只活在页面内存里, POST /api/seen 回 ok:false。 */
-export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider, seen?: SeenLog): ChatRoutes => {
-  // 两份源头都按票据的机器人裁 (见 botFacts): 下游拿到的就只有那个机器人的世界。
+const TURN_SLACK_MS = 30 * 60_000;
+const TURN_AHEAD_MS = 2 * 60_000;
+/** 一条 room 消息对应哪一轮 turn —— 只为了「点开看过程框」, 不参与任何语义判定:
+ *  作者是 wizard, 取它在这一刻之前 (容许一点时钟偏差) 最近开的那一轮。 */
+const turnLinker = (records: readonly DetailRecord[], f: WorldFacts) => {
+  const byTarget = new Map<string, TurnDetailRecord[]>();
+  for (const r of records.filter(isTurn)) {
+    if (!r.target || r.agent) continue;
+    byTarget.set(r.target, [...(byTarget.get(r.target) ?? []), r]);
+  }
+  for (const rs of byTarget.values()) rs.sort((a, b) => a.createdAt - b.createdAt);
+  const uidTarget = new Map(f.wizards.filter((w) => w.uid).map((w) => [w.uid!, w.target] as const));
+  return (m: RoomMsg): string | undefined => {
+    if (m.author.kind !== "wizard") return undefined;
+    const rs = byTarget.get(uidTarget.get(m.author.id) ?? "");
+    if (!rs?.length) return undefined;
+    let lo = 0, hi = rs.length - 1, hit: TurnDetailRecord | undefined;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (rs[mid]!.createdAt <= m.at + TURN_AHEAD_MS) { hit = rs[mid]; lo = mid + 1; } else hi = mid - 1;
+    }
+    return hit && m.at - hit.createdAt <= TURN_SLACK_MS ? hit.id : undefined;
+  };
+};
+
+interface View { role: string; span?: SessionSpan }
+
+export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider, _seen?: SeenLog, rooms?: RoomReader): ChatRoutes => {
   const getFacts = (t: Ticket): Promise<WorldFacts> =>
     Promise.resolve(facts ? facts() : EMPTY_FACTS)
-      // 没有消息数据的 wizard 在这里就退场 —— 会话列表、关系图、+N、搜索都只见得到这一份。
       .then((f) => {
         const now = Date.now();
         const records = listRecent(t);
         return withData(recentFacts(botFacts(f, viewerOf(t)), records, now), records, now);
       })
       .catch(() => EMPTY_FACTS);
-  // 票据校验 (store.get) 不受此限: 一条老链接照样打得开, 只是看到的是最近 3 天。
   const listRecent = (t: Ticket): DetailRecord[] => botRecords(recentRecords(store.list(), Date.now() - HORIZON_MS), viewerOf(t));
 
   const page: SimpleHandler = (_req, res) => {
@@ -212,8 +212,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
     res.end(renderChatPage());
   };
 
-  // 前端资源: ETag 跟着文件 mtime 走 —— 改一次 web/chat.js 浏览器就重新取一次,
-  // 没改则 304, 而 shell 本身永远 no-store, 不会把旧版本钉死在缓存里。
+  // 前端资源: ETag 跟着文件 mtime 走 —— 改一次 web/chat.js 浏览器就重新取一次。
   const asset = (make: () => Asset): SimpleHandler => (req, res) => {
     const a = make();
     res.setHeader("cache-control", "no-cache");
@@ -224,388 +223,130 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
     res.end(a.body);
   };
 
-  /** 未读的基线: 落盘的已读记录有它自己的 (页面也以它为准); 没落盘就是页面带来的 (它首次拿到摘要的时刻), 还没定就用 fallback。 */
-  const sinceOf = (url: URL, fallback: number): number => seen?.base() ?? (Number(url.searchParams.get("since")) || fallback);
-  /** 服务端已知不算未读的先筛掉: 基线前说完的, 与记过已读的 —— 客户端只再减它内存里还没写回的那几条。 */
-  const keepOf = (since: number) => (h: Heard): boolean => h[0] > since && !((seen?.fin(h[3]) ?? 0) >= h[0]);
-
-  /** role 摘要: 身份、会话列表、session 分段、页脚总账 (role 自己的 + 当前窗口的)。 */
-  const summary = (records: readonly DetailRecord[], f: WorldFacts, role: string, sid: string | null, land: Landing, win: Pick<View, "conv" | "with" | "span"> | undefined, since: number) => {
-    const now = Date.now();
-    const dir = makeDirectory(records, f);
-    // P7-S3b: strict 群一轮的气泡换成实发内容 (post 并进它的那一轮, 见 deliveredTurn)。
-    const msgs = allMessages(records, now, dir.canon, dir.strictChats);
-    const spans = sessionsOf(records, role, now);
-    const span = spanOf(spans, sid);
-    // 每一项的未读账按点开它时的那一窗切 (windowOf), 侧栏与关系图卡片 (/api/glance) 同一个 ledgerOf。
-    const ledger = ledgerOf(unreadIndex(msgs), role, keepOf(since));
-    const convs = convsOf(msgs, role, dir, now, { span, ledger }).sort((a, b) => b.lastTs - a.lastTs);
-    // effort: transcript 记的那档优先, 没有才用绑定里记下的 (dir.fact), 都没有就不显示。
-    const stats = ((s) => s && { ...s, effort: s.effort || dir.fact(role)?.effort })(roleStats(records, role, now, span));
-    const info = roleInfo(role, dir, f, stats, now);
-    // 日程页只画定时任务 (与 chat.js 的 renderPlan 同一口径)。
-    const schedules = f.schedules.filter((x) => (x.owner || x.createdBy || x.target) === role);
-    const home = convs.find((c) => c.key === land.conv);
-    // 群成员 (实例): 打开一个群聊时, 这个群里有哪些 wizard 实例。按聊天给全表 (前端按
-    // CONV 取), 因为换窗口不会再取一次摘要; 单聊 / 私聊的 base 不在里面 (isGroupChat)。
-    const chatMembers = [...new Set([
-      ...convs.filter((c) => c.kind === "group").map((c) => c.base),
-      ...f.wizards.map((w) => baseOfKey(w.target)),
-      ...(f.memberRows ?? []).map((r) => r.chat),
-    ])]
-      .filter(isGroupChat)
-      .map((chat) => ({
-        chat,
-        members: groupMembers(chat, f.wizards, f.memberRows ?? [], f.classes ?? [], (t) => dir.status(dir.canon(t), now)),
-      }))
-      .filter((x) => x.members.length);
-    return {
-      at: now,
-      // 落盘的已读记录的基线: 页面的未读基线以它为准, 刷新、另开标签页都是同一条。
-      ...(seen ? { seenBase: seen.base() } : {}),
-      role: info,
-      sessions: spans.map(wireSpan),
-      session: span?.sessionId ?? (spans.length ? ALL_SESSIONS : ""),
-      convs,
-      // 不随视角的 session 段裁: 「它还在别的会话里」说的是它, 不是视角选的那段时间。
-      chatKeys: chatKeysOf(msgs),
-      // 链接来自哪个会话就默认开哪个 (见 landingOf); 否则最近活动的那个。
-      conv: home?.key ?? convs[0]?.key ?? "",
-      // 从群里点名字进来, 要看的是「我在这个群里和它说过什么」—— 默认只看与问话那一方的
-      // 往来。票据不是一轮对话时不知道是谁问的, 退到最近说过话的那个人 (subs 已按往来、
-      // 最近排好)。落在别的会话上就不猜。
-      with: home?.subs.find((s) => s.count && (land.with ? s.role === land.with : s.role.startsWith("human:")))?.role ?? "",
-      relations: hasRelations(msgs, role, info),
-      // P7-S3 严格群治理面板 (成员/游标/欠账): 不随视角裁 —— 面板属于聊天, 不属于 role。
-      ...(f.governance?.length ? { governance: f.governance } : {}),
-      // 群成员 (实例) 列表: 同样属于聊天; 空表 = 这个群没有实例 (前端就不画这一栏)。
-      ...(chatMembers.length ? { chatMembers } : {}),
-      plans: f.plans.filter((p) => p.owner === role).map(publicPlan),
-      inflight: (f.inflight ?? []).filter((x) => x.from === role || x.to === role).map((x) => ({
-        ...x, ...(x.state === "blocked" && dir.fact(x.to)?.waiting?.length ? { waiting: dir.fact(x.to)!.waiting } : {}),
-      })),
-      schedules: schedules.length,
-      // 侧栏日程入口的副标题: 下一枪几点、有没有坏掉的定时。
-      plan: {
-        tasks: schedules.length,
-        nextAt: schedules.reduce((m, x) => (m && m < x.nextAt ? m : x.nextAt), 0),
-        broken: schedules.filter((x) => x.lastGate === "error" || !!x.loadError).length,
-      },
-      stats,
-      // 宪章不受 3 天视界裁剪: 一个开了一周的 wizard, 它的系统提示仍是出生那天那份。
-      charter: charterBrief(store.list(), info.id),
-      // 对端恰好是一个 wizard 的窗口 (判定与窗口取消息同一份 talkOf 入参), 带上它在这段往来里跑的那几轮的账。
-      winStats: peerStats(records, msgs, role, win, dir, now),
-    };
-  };
-  const peerStats = (records: readonly DetailRecord[], msgs: readonly Msg[], role: string, win: Pick<View, "conv" | "with" | "span"> | undefined, dir: Directory, now: number) => {
-    const t = win?.conv ? talkArgs(role, win.conv, win.with || undefined) : undefined;
-    const w = counterpartOf(role, t);
-    if (!t || !w || !dir.isWizard(w)) return undefined;
-    const ms = talkOf(msgs, t.who, t.peers, t.chat).filter((m) => m.turn.target === w && inSpan(win?.span)(m.ts));
-    return windowStats(records, ms, w, now);
-  };
-
-  const role: SimpleHandler = (_req, res, url) => {
+  const withTicket = (handler: (t: Ticket, url: URL, res: ServerResponse) => void): SimpleHandler => (_req, res, url) => {
     const ticket = resolveTicket(store, url);
     if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
+    handler(ticket, url, res);
+  };
+
+  const roomOf = (url: URL): string => url.searchParams.get("room") ?? url.searchParams.get("id") ?? "";
+
+  /** 一个 room 的快照 + 历史分页。没有账本读者 (独立 svr) 时明确说没有, 不装作空。 */
+  const room: SimpleHandler = withTicket((ticket, url, res) => {
+    const id = roomOf(url);
+    if (!id) { json(res, 400, { ok: false, error: "room required" }); return; }
+    if (!rooms) { json(res, 503, { ok: false, error: "这个部署没有 room 账本 (只在 daemon 侧可读)" }); return; }
+    let s: RoomState | undefined;
+    try { s = rooms.get(id); } catch (e) { json(res, 409, { ok: false, error: String(e) }); return; }
+    if (!s) { json(res, 404, { ok: false, error: "没有这个 room: " + id }); return; }
     void getFacts(ticket).then((f) => {
-      const records = listRecent(ticket);
-      const v = viewOf(records, makeDirectory(records, f), ticket, url);
-      if (!v) { json(res, 404, { ok: false, error: "不认识这个 role" }); return; }
-      json(res, 200, { ok: true, ...summary(records, f, v.role, url.searchParams.get("session"), landingOf(ticket, v.role), v, sinceOf(url, Date.now())) });
-    });
-  };
-
-  /** 一个窗口的全部片段, 时间序: 消息 + 视角 role 自己的断点。
-   *  给的是**待渲染**的片段 —— 窗口通常只上屏最后几十条, 先按时间切片再渲染,
-   *  没上屏的那几百轮就一个字都不用排。 */
-  const windowFrags = (records: readonly DetailRecord[], dir: Directory, v: View, now: number): Array<{ id: string; ts: number; render: () => MsgFragment }> => {
-    // 与侧栏 / 关系图这一项的未读账同一个 windowOf: 上屏 (记成已读) 的正是那一项数着的。
-    const msgs = windowOf(allMessages(records, now, dir.canon, dir.strictChats), v.role, v.conv, v.with || undefined, v.span);
-    const lo = msgs[0]?.ts ?? Infinity;
-    const marks = isWizardDm(v.role, v.conv, v.with || undefined, dir) ? [] : marksOf(records, markRole(v)).filter((mk) => mk.createdAt >= lo && inSpan(v.span)(mk.createdAt));
-    const frags = [
-      ...msgs.map((m) => ({ id: m.id, ts: m.ts, render: () => renderMsg(m, records, dir, now) })),
-      ...marks.map((mk) => ({ id: `m:${mk.id}`, ts: mk.createdAt, render: () => renderMark(mk, mk.target ?? v.role, dir) })),
-    ].sort((a, b) => a.ts - b.ts);
-    return frags;
-  };
-
-  /** 窗口里画谁的断点: 平常是视角自己; 「某人的全部对话」窗口画那个人的。 */
-  const markRole = (v: View): string => parseTalkKey(v.conv)?.who ?? v.role;
-
-  const viewOf = (records: readonly DetailRecord[], dir: Directory, ticket: Ticket, url: URL): View | undefined => {
-    const r = pickRole(dir, ticket, url);
-    if (!r) return undefined;
-    const spans = sessionsOf(records, r, Date.now());
-    const conv = url.searchParams.get("conv") ?? "";
-    return {
-      role: r,
-      conv,
-      with: dir.resolve(url.searchParams.get("with") ?? "") ?? "",
-      span: spanFor(conv, spanOf(spans, url.searchParams.get("session"))),
-    };
-  };
-
-  const msgs: SimpleHandler = (_req, res, url) => {
-    const ticket = resolveTicket(store, url);
-    if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
-    void getFacts(ticket).then((f) => {
-      const records = listRecent(ticket);
-      const dir = makeDirectory(records, f);
-      const v = viewOf(records, dir, ticket, url);
-      if (!v || !v.conv) { json(res, 200, { ok: true, at: Date.now(), total: 0, truncated: false, msgs: [] }); return; }
-      const all = windowFrags(records, dir, v, Date.now());
-      // 注意 Number(null) === 0 —— 缺省必须先判 null, 否则默认就成了"全量"。
+      const now = Date.now();
+      const n = namesOf(f);
       const raw = url.searchParams.get("limit");
-      const n = raw === null ? Number.NaN : Number(raw);
-      const limit = Number.isFinite(n) && n >= 0 ? n : DEFAULT_LIMIT;
-      // 游标 `before=<msgid>`: 只取它之前的 —— 「载入更早」一页一页往前翻, 不再一次全量。
-      // 按 id 定位而不按时刻: 同一毫秒的两条不会在页边上被漏掉; 游标那条已经不在窗口里
-      // (记录过了 horizon 被裁掉) 就退回按它的时刻切 —— 取 `<=`, 宁可多带几条同一毫秒的
-      // (客户端按 id 去重) 也不漏。连时刻都没给就切不出「之前」: 回 reset, 让客户端整窗重载,
-      // 而不是回一页空的让按钮凭空消失。
-      const before = url.searchParams.get("before");
-      const cut = before === null ? all.length : all.findIndex((x) => x.id === before);
-      const rawTs = url.searchParams.get("beforeTs");
-      const bts = rawTs === null || rawTs === "" ? Number.NaN : Number(rawTs);
-      if (cut < 0 && !Number.isFinite(bts)) { json(res, 200, { ok: true, at: Date.now(), role: v.role, conv: v.conv, total: all.length, reset: true, truncated: false, msgs: [] }); return; }
-      const older = cut >= 0 ? all.slice(0, cut) : all.filter((x) => x.ts <= bts && x.id !== before);
-      const page = limit === 0 ? older : older.slice(-limit);
+      const limit = raw && Number.isFinite(Number(raw)) ? Number(raw) : DEFAULT_LIMIT;
+      const fromRef = url.searchParams.get("from");
+      const from = fromRef ? whoRef([s], fromRef, n) : undefined;
+      const hist = roomHistory(s, { ...(url.searchParams.get("before") ? { before: url.searchParams.get("before")! } : {}), limit, ...(from ? { from } : {}) }, n);
+      const link = turnLinker(listRecent(ticket), f);
+      const fact = buildRoomFact(s, n);
       json(res, 200, {
-        ok: true, at: Date.now(), role: v.role, conv: v.conv, total: all.length,
-        truncated: page.length < older.length, older: older.length - page.length, msgs: page.map((x) => x.render()),
+        ok: true, at: now,
+        room: fact,
+        label: n.roomLabel(s.id),
+        members: roomMembers(fact, f.wizards, f.classes ?? []),
+        duties: dutyFacts(s, n),
+        msgs: hist.msgs.map((m) => ({ ...m, ...(link(m) ? { turn: link(m)! } : {}) })),
+        total: hist.total,
+        ...(hist.earlier ? { earlier: hist.earlier } : {}),
       });
     });
-  };
+  });
 
-  // 票据照旧只证明「拿到过一条真链接」—— 任一有效票据可以看任一轮, 与 msgs 同一口径。
-  const tool: SimpleHandler = (_req, res, url) => {
-    const ticket = resolveTicket(store, url);
-    if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
-    const r = store.get(url.searchParams.get("turn") ?? "");
-    // 别的机器人的轮次与没有同形。
-    const html = r && isTurn(r) && ofBot(viewerOf(ticket))(r.target) ? renderToolBody(r, url.searchParams.get("use") ?? "") : undefined;
-    if (html === undefined) { json(res, 404, { ok: false, error: "未找到该工具调用" }); return; }
-    json(res, 200, { ok: true, html });
-  };
-
-  // SSE — 一条连接喂两种事件: role (侧栏 + 顶栏 + 页脚) 与 msg (当前窗口的增量)。
-  // store.subscribe 的回调在写入路径上, 所以这里只打标记, 由 FLUSH_MS 定时器合并推送:
-  // 一次工具结果会连带更新 turn 记录多次, 逐条推会把同一段 HTML 重复渲染。
-  const events: SimpleHandler = (req, res, url) => {
-    const ticket = resolveTicket(store, url);
-    if (!ticket) { json(res, 404, { ok: false, error: "not found" }); return; }
-
-    res.writeHead(200, {
-      "content-type": "text/event-stream; charset=utf-8",
-      "cache-control": "no-store, no-transform",
-      connection: "keep-alive",
-      "x-accel-buffering": "no", // nginx 反代下不缓冲, 否则事件会被攒住
-    });
-    res.write(": open\n\n");
-
-    const send = (event: string, data: unknown): void => {
-      try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch { /* closed */ }
-    };
-
-    // 名册快照按连接缓存 —— 每次 flush 都问一遍 provider 会把 tmux 打爆 (daemon 侧
-    // 本身也有 5s TTL, 这里再挡一层)。
-    let f: WorldFacts = EMPTY_FACTS;
-    let factsAt = 0;
-    const freshFacts = async (): Promise<WorldFacts> => {
-      if (Date.now() - factsAt > FACTS_MS) { f = await getFacts(ticket); factsAt = Date.now(); }
-      return f;
-    };
-    const mine = ofBot(viewerOf(ticket));
-
-    const sentSig = new Map<string, string>();
-    const pushFrag = (frag: MsgFragment): void => {
-      if (sentSig.get(frag.id) === frag.sig) return;
-      sentSig.set(frag.id, frag.sig);
-      send("msg", frag);
-    };
-
-    let v: View | undefined;
-    const pushRole = async (): Promise<void> => {
-      const ff = await freshFacts();
+  /** 一个 wizard 的名片 + W-1 / W-2 消息 (跨 room 按时间合并)。 */
+  const wizard: SimpleHandler = withTicket((ticket, url, res) => {
+    void getFacts(ticket).then((f) => {
+      const now = Date.now();
       const records = listRecent(ticket);
-      v ??= viewOf(records, makeDirectory(records, ff), ticket, url);
-      if (!v) return;
-      send("role", summary(records, ff, v.role, url.searchParams.get("session"), landingOf(ticket, v.role), v, sinceOf(url, Date.now())));
-
-    };
-
-    /** 这一轮拆出的消息里, 落在当前窗口的那几条; `deep`: 连同读了它的账 / 结论的别的轮次 (见 dependentsOf)。 */
-    const pushTurn = (id: string, records: readonly DetailRecord[], dir: Directory, now: number, deep = true): void => {
-      if (!v || !v.conv) return;
-      const r = store.get(id);
-      if (!r || !mine((r as { target?: string }).target)) return;
-      if (isMark(r)) {
-        if (!isWizardDm(v.role, v.conv, v.with || undefined, dir) && r.target === markRole(v) && inSpan(v.span)(r.createdAt)) pushFrag(renderMark(r, r.target ?? v.role, dir));
-        return;
-      }
-      if (isPost(r)) {
-        // strict 群的实发并在它那一轮的出消息里 —— 推那一轮。
-        const host = strictPostsOf(records, dir.strictChats, dir.canon).hostOf.get(r.id);
-        if (host) return pushTurn(host, records, dir, now, deep);
-        const m = messageOfPost(r);
-        if (windowOf([m], v.role, v.conv, v.with || undefined, v.span).length) pushFrag(renderMsg(m, records, dir, now));
-        return;
-      }
-      if (!isTurn(r) || !r.target) return;
-      // 子 agent 的一轮渲染在父轮的出消息里 —— 推父轮。
-      const top = r.agent?.parentTurnId ? store.get(r.agent.parentTurnId) : r;
-      if (!top || !isTurn(top) || !top.target) return;
-      windowOf(messagesOfTurn(top, injectEchoesOf(records), strictPostsOf(records, dir.strictChats, dir.canon)), v.role, v.conv, v.with || undefined, v.span).forEach((m) => pushFrag(renderMsg(m, records, dir, now)));
-      if (deep) dependentsOf(top, records).forEach((d) => pushTurn(d, records, dir, now, false));
-    };
-
-    void pushRole();
-
-    let roleDirty = false;
-    const turnDirty = new Set<string>();
-    const flush = setInterval(() => {
-      if (roleDirty) { roleDirty = false; void pushRole(); }
-      if (turnDirty.size) {
-        const now = Date.now();
-        const records = listRecent(ticket);
-        const dir = makeDirectory(records, f);
-        for (const id of turnDirty) pushTurn(id, records, dir, now);
-        turnDirty.clear();
-      }
-    }, FLUSH_MS);
-    const ping = setInterval(() => { try { res.write(": ping\n\n"); } catch { /* closed */ } }, PING_MS);
-    // 「执行中」的一半来自名册 (pane 的 busy), 而名册变了不会写 store —— 没有这一拍,
-    // 最后一次写入带出去的那份旧快照会让灯一直亮着, 别人开工了侧栏也不知道。
-    const beat = setInterval(() => { factsAt = 0; roleDirty = true; }, FACTS_MS);
-
-    const unsub = store.subscribe((rec) => {
-      if (!isTurn(rec) && !isMark(rec) && !isPost(rec)) return;
-      if (!rec.target || !mine(rec.target)) return;
-      // 侧栏的预览/时间只在与视角 role 有关的轮次变动时才需要重算。
-      const involved = !v || rec.target === v.role || (isTurn(rec) && rec.from?.from === v.role) ||
-        (isPost(rec) && !!v.conv && rec.channel === v.conv.slice(2)) ||
-        (isTurn(rec) && !!v.conv && v.conv.startsWith("c:") && (rec.channel ?? baseOfKey(rec.target)) === v.conv.slice(2));
-      if (involved) roleDirty = true;
-      turnDirty.add(rec.id);
+      const dir = makeDirectory(records, f);
+      const role = pickRole(dir, ticket, url);
+      if (!role) { json(res, 404, { ok: false, error: "不认识这个 role" }); return; }
+      const n = namesOf(f);
+      const fact = f.wizards.find((w) => w.target === role);
+      const uid = fact?.uid ?? (role.startsWith("uid:") ? role.slice(4) : "");
+      const spans = sessionsOf(records, role, now);
+      const sid = url.searchParams.get("session");
+      const span = !sid || sid === "all" ? undefined : spans.find((s) => s.sessionId === sid);
+      const all = url.searchParams.get("all") === "1";
+      const raw = url.searchParams.get("limit");
+      const limit = raw && Number.isFinite(Number(raw)) ? Number(raw) : DEFAULT_LIMIT;
+      const states = rooms ? rooms.ids().flatMap((id) => { try { const s = rooms.get(id); return s ? [s] : []; } catch { return []; } }) : [];
+      const hist = uid && states.length
+        ? wizardMessages(states, uid, { all, limit, ...(url.searchParams.get("before") ? { before: url.searchParams.get("before")! } : {}) }, n)
+        : { msgs: [] as (RoomMsg & { roomLabel: string })[], total: 0 };
+      const link = turnLinker(records, f);
+      const schedules = f.schedules.filter((x) => (x.owner || x.createdBy || x.target) === role);
+      json(res, 200, {
+        ok: true, at: now,
+        role: roleInfo(role, dir, f, roleStats(records, role, now, span), now),
+        uid: uid || "",
+        ledger: !!rooms,
+        sessions: spans.map(wireSpan),
+        session: span?.sessionId ?? "all",
+        all,
+        msgs: hist.msgs.map((m) => ({ ...m, ...(link(m) ? { turn: link(m)! } : {}) })),
+        total: hist.total,
+        ...(hist.earlier ? { earlier: hist.earlier } : {}),
+        rooms: f.rooms ?? [],
+        names: f.names ?? {},
+        plans: f.plans.filter((p) => p.owner === role && (p.state === "active" || p.state === "paused" || p.state === "completed")).map(publicPlan),
+        schedules: schedules.map((x) => ({ id: x.id, when: x.when, nextAt: x.nextAt, note: x.note, prompt: x.prompt, lastFired: x.lastFired })),
+        stats: roleStats(records, role, now, span),
+        charter: charterBrief(store.list(), role),
+      });
     });
+  });
 
-    const close = (): void => {
-      unsub();
-      clearInterval(flush);
-      clearInterval(ping);
-      clearInterval(beat);
-      try { res.end(); } catch { /* ignore */ }
-    };
-    req.on("close", close);
-    req.on("error", close);
-  };
-
-  /** base → 那个聊天既有的票据。rolepage 下任何票据都能看任何 role, 这里给出去只是
-   *  让「从关系图走进别的聊天」拿到一张落点就在那个聊天的链接。 */
-  const ticketsByBase = (): Map<string, string> => {
-    const best = store.list().reduce((m, r) => {
-      const key = r.kind === "chat" ? r.target : isTurn(r) && r.target ? baseOfKey(r.target) : "";
-      if (!key) return m;
-      const ts = r.kind === "chat" ? Infinity : (r as { updatedAt: number }).updatedAt;
-      const cur = m.get(key);
-      return cur && cur.ts >= ts ? m : m.set(key, { id: r.id, ts });
-    }, new Map<string, { id: string; ts: number }>());
-    return new Map([...best].map(([base, v]) => [base, v.id] as const));
-  };
-
-  // 前端在关系 / 日程栏每 6s 轮询一次, 而名册多数时候没变: 正文 (除去 `at`) 的摘要作 ETag,
-  // 没变就 304 —— 省掉一遍上百 KB 的重传与客户端重画。成员任务只留首行: 页面只画一行,
-  // 全文是派活的原话, 动辄几段。
-  const world: SimpleHandler = (req, res, url) => {
-    const ticket = resolveTicket(store, url);
-    if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
+  /** 关系图: room 二部图 + 家谱图层。 */
+  const world: SimpleHandler = withTicket((ticket, url, res) => {
     void getFacts(ticket).then((f) => {
       const records = listRecent(ticket);
       const self = pickRole(makeDirectory(records, f), ticket, url);
       const { at, ...w } = buildWorld(records, f, { base: baseOfKey(self), self }, Date.now());
-      const tickets = ticketsByBase();
-      const body = JSON.stringify({
-        ...w,
-        chats: w.chats.map((c) => ({ ...c, token: tickets.get(c.base) })),
-        plans: w.plans.map(publicPlan),
+      json(res, 200, {
+        ok: true, at, ...w, plans: w.plans.map(publicPlan),
+        // 名字表: room 成员只有 id (uid / userid), 图上与消息里的显示名都从这里取。
+        chatNames: f.chatNames, names: f.names ?? {}, humanNames: f.humanNames ?? {},
       });
-      const etag = `"${createHash("sha1").update(body).digest("base64url")}"`;
-      res.setHeader("etag", etag);
-      if (req.headers["if-none-match"] === etag) { res.statusCode = 304; res.setHeader("cache-control", "no-store"); res.end(); return; }
-      res.statusCode = 200;
-      res.setHeader("content-type", "application/json; charset=utf-8");
-      res.setHeader("cache-control", "no-store");
-      res.end(`{"ok":true,"at":${at},${body.slice(1)}`);
     });
-  };
+  });
 
-  const search: SimpleHandler = (_req, res, url) => {
-    const ticket = resolveTicket(store, url);
-    if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
-    void getFacts(ticket).then((f) => {
-      const records = listRecent(ticket);
-      const dir = makeDirectory(records, f);
-      const now = Date.now();
-      const r = pickRole(dir, ticket, url);
-      json(res, 200, { ok: true, q: url.searchParams.get("q") ?? "", ...searchRole(allMessages(records, now, dir.canon, dir.strictChats), r, dir, url.searchParams.get("q") ?? "", now) });
-    });
-  };
+  const tool: SimpleHandler = withTicket((ticket, url, res) => {
+    const r = store.get(url.searchParams.get("turn") ?? "");
+    const html = r && isTurn(r) && ofBot(viewerOf(ticket))(r.target) ? renderToolBody(r, url.searchParams.get("use") ?? "") : undefined;
+    if (html === undefined) { json(res, 404, { ok: false, error: "未找到该工具调用" }); return; }
+    json(res, 200, { ok: true, html });
+  });
 
-  /** 关系图卡片那一行: 每张卡片的窗口 (`a:<x>|<相连者>[|<频道>]`, 换行分隔) 各一份 glance —— 与打开它时看到的同一个 talkOf。
-   *  连同那一窗的未读账 (ledgerOf, 主人 = 卡片上的那个 role): 与侧栏会话项 / 子项同一个实现, 同一个 windowOf。 */
-  const glance: SimpleHandler = (_req, res, url) => {
-    const ticket = resolveTicket(store, url);
-    if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
-    void getFacts(ticket).then((f) => {
-      const records = listRecent(ticket);
-      const dir = makeDirectory(records, f);
-      const now = Date.now();
-      const viewer = pickRole(dir, ticket, url);
-      const msgs = allMessages(records, now, dir.canon, dir.strictChats);
-      const ledger = ledgerOf(unreadIndex(msgs), viewer, keepOf(sinceOf(url, 0)));
-      const keys = (url.searchParams.get("keys") ?? "").split("\n").filter(Boolean);
-      const out = Object.fromEntries(keys.flatMap((k) => {
-        const t = parseTalkKey(k);
-        return t ? [[k, { ...glanceOfTalk(msgs, viewer, dir, t.who, t.peers, t.chat), ...ledger(windowOf(msgs, viewer, k, undefined, undefined), t.who) }]] : [];
-      }));
-      json(res, 200, { ok: true, at: now, glances: out });
-    });
-  };
+  /** 一条消息对应的那一轮的过程框。 */
+  const turn: SimpleHandler = withTicket((ticket, url, res) => {
+    const r = store.get(url.searchParams.get("turn") ?? "");
+    if (!r || !isTurn(r) || !ofBot(viewerOf(ticket))((r as { target?: string }).target)) {
+      json(res, 404, { ok: false, error: "未找到这一轮" });
+      return;
+    }
+    json(res, 200, { ok: true, html: renderTurnBox(r, store.list(), Date.now()) });
+  });
 
-  const charter: SimpleHandler = (_req, res, url) => {
-    const ticket = resolveTicket(store, url);
-    if (!ticket) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
+  const charter: SimpleHandler = withTicket((ticket, url, res) => {
     void getFacts(ticket).then((f) => {
       const records = botRecords(store.list(), viewerOf(ticket));
       const r = pickRole(makeDirectory(listRecent(ticket), f), ticket, url);
       const v = r ? charterView(records, r) : undefined;
       json(res, 200, v ? { ok: true, role: r, ...v } : { ok: true, role: r, none: true });
     });
-  };
+  });
 
-  /** 页面攢下的一批已读 `{id: fin}` (标签页关掉时也走这里, 用 sendBeacon 发)。坏的、超量的整批不收 —— 页面照样留着内存那份。 */
-  const markSeen: SimpleHandler = (req, res, url) => {
-    if (!resolveTicket(store, url)) { json(res, 404, { ok: false, error: NOT_FOUND }); return; }
-    if (!seen) { json(res, 200, { ok: false, error: "已读不落盘" }); return; }
-    const chunks: Buffer[] = [];
-    let size = 0;
-    req.on("data", (c: Buffer) => { size += c.length; if (size <= SEEN_BODY_MAX) chunks.push(c); });
-    req.on("end", () => {
-      try {
-        const rows = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
-        const ok = size <= SEEN_BODY_MAX && !!rows && typeof rows === "object" && !Array.isArray(rows) &&
-          Object.entries(rows).every(([k, v]) => k.length <= 120 && typeof v === "number" && Number.isFinite(v));
-        if (!ok) { json(res, 400, { ok: false, error: "bad rows" }); return; }
-        seen.add(rows as Record<string, number>);
-        json(res, 200, { ok: true });
-      } catch { json(res, 400, { ok: false, error: "bad json" }); }
-    });
-  };
-
-  return { page, styles: asset(chatStyles), script: asset(chatScript), vendor: asset(chatVendor), role, msgs, tool, events, world, search, glance, charter, seen: markSeen };
+  return { page, styles: asset(chatStyles), script: asset(chatScript), vendor: asset(chatVendor), world, room, wizard, turn, tool, charter };
 };
 
 /** Path → handler map; the daemon registers each, svr dispatches through it. */
@@ -614,19 +355,16 @@ export const chatRouteTable = (routes: ChatRoutes): Record<string, SimpleHandler
   "GET /chat/app.css": routes.styles,
   "GET /chat/app.js": routes.script,
   "GET /chat/vendor.js": routes.vendor,
-  "GET /api/role": routes.role,
-  "GET /api/msgs": routes.msgs,
-  "GET /api/tool": routes.tool,
-  "GET /api/role-events": routes.events,
   "GET /api/world": routes.world,
-  "GET /api/search": routes.search,
-  "GET /api/glance": routes.glance,
+  "GET /api/room": routes.room,
+  "GET /api/wizard": routes.wizard,
+  "GET /api/turn": routes.turn,
+  "GET /api/tool": routes.tool,
   "GET /api/charter": routes.charter,
-  "POST /api/seen": routes.seen,
 });
 
 /** Route keys, single-sourced so the daemon's registration can't drift. */
 export const CHAT_ROUTE_KEYS = [
   "GET /role", "GET /chat/app.css", "GET /chat/app.js", "GET /chat/vendor.js",
-  "GET /api/role", "GET /api/msgs", "GET /api/tool", "GET /api/role-events", "GET /api/world", "GET /api/search", "GET /api/glance", "GET /api/charter", "POST /api/seen",
+  "GET /api/world", "GET /api/room", "GET /api/wizard", "GET /api/turn", "GET /api/tool", "GET /api/charter",
 ] as const;
