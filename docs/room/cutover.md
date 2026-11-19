@@ -73,3 +73,40 @@
 
 ## 跟代码一起改的 (不在本清单)
 grep 清单 §1 (CLAUDE.md / CODEBUDDY / README / docs) 和 §6 (宪章、MCP 描述、tool-hints、reminder): 在 room-model 分支上提交, 第 7 步随代码生效, 第 7 步回退时一起回退。
+## 改了什么 / 会打破什么 / 怎么退 (一页摘要)
+
+**改了什么**
+- 沟通层只剩一个原语: room 账本 (`~/.wezard/rooms/<id>.jsonl`, append-only)。人话、wizard 之间的往来、定时任务唤醒、系统行都是同一种 `msg` 行; 成员、游标、duty 都由按文件 fold 推出, 不再有第二份状态。
+- 完成只有一个信号: `chat_reply` (holder 写 done / passed / canceled)。终句零语义 —— 只进 turn store / rolepage, 不投递、不关账。
+- 唤醒由账本驱动: 一行的 `wake` 决定叫醒谁, pane 空闲时按 `seen` 游标补投未读; 投递队列不是事实来源, reload 不丢。
+- 工具面: chat_say / chat_ask / chat_reply / notify / send_file + room_*(open/invite/join/approve/leave/members/transfer/read/watch); spawn / clone / delegate 加 `room?`; chat_ask / chat_say 加 `interrupt` (限 parent / host / 人)。
+- 宪章与工具描述按新模型重写; 「严格模式」「顶层模式」「回执信封」概念整体退役。
+- rolepage: 关系图改成 wizard ↔ room 二部图, 会话视图改按 room 读账本。
+
+**会打破什么**
+- **工具**: tell_peer、wait_peer 的回执语义、read_chat、chat_members、pending_items 的旧口径、tell_peer 的 return / public / fyi / priority 全部消失。旧会话缓存的 tools/list 会调到不存在的工具 → 靠第 9 步强制 /new 解决, 在 /new 之前的那一轮可能报「工具不存在」。
+- **行首 `.name RESULT:` 不再有投递语义**: 写在终句里的 RESULT / NEED / PROGRESS 只是文字, 不会被当成回执送达; 没调 chat_reply 的 duty 当轮被提醒一次, 再不关就进 room 的系统行。
+- **config**: `chatPolicy.<chat>.topOnly` / `speech` 被忽略并在 boot 打一行 warn (第 2 步已删, 不删也不拒启动)。
+- **人侧命令**: `/owed`、`/strict`、`/chats` 下线。
+- **HTTP**: `/peer`、`/peers/tell` 等旧路由删除, 外部脚本若直接打这两个口会 404; 新口是 `/room/*`。
+- **数据**: routes.jsonl / members.json / state/chats / message-events / obligations / idle-nudges / strict-delivery-notices 冻结, 新 daemon 不读也不写; 切换后在旧源上发生的事 (无) 不会回流。
+- **在飞的活**: 切换瞬间 5 条未结路由由迁移脚本转成 room 里的 msg (人话 → 原 owner 的 duty, wizard 之间 → dm room 的 task); 103 条 uncertain 只归档不迁。
+
+**怎么退**
+- 代码: 第 7 步回退 `git reset --keep pre-room && npm run build`, 再按第 8 步重起。
+- 数据: 旧源一个字没改, 旧 daemon 照常读; rooms/ 旧 daemon 不读, 不用删 (要干净就 `mv rooms rooms.rejected-<ts>`)。
+- 切换后新产生的 room 消息**不会**回写旧源: 退回去之后, 切换期间 room 里的往来在旧模型里看不到 (rolepage 旧视图也没有)。这是回退唯一的信息损失, 所以第 9 步的抽查要在切换后尽快做。
+- 第 10 步之前任何时候都能退; 第 10 步只删切换前的 tar 快照, 旧源移进 archive/ 而不删, 退回前先 mv 回原位。
+
+## 存量群切换后的行为变化
+
+适用于切换时已存在的全部群 (含原 implicit 与原 strict), 不区分: 严格 / 宽松两档被一条规则取代。
+- **一律变成「只有正式发言进群」**: wizard 的终句不再自动进群。原 implicit 群的人会第一次感到差异 —— 以前回复「自己冒出来」, 切换后由管家 (host) 用 chat_reply 交付; 没交付的话当轮被提醒, 再闲下来未交付就有一行 [wezard] 系统提示点名提问者。
+- **原 strict 群的手感基本不变**, 但少掉三样: 义务提醒 (idle-nudge) 改为 duty 未关提醒; 每轮 ≤3 / 每分钟 ≤10 的出站额度改为 room 回合预算 (M=20 / 10 分钟, 超了 409 并写一条系统行); /owed 下线 (欠账看 rolepage 的 room 视图)。
+- **wizard 之间的往来现在进群**: 绑定群 room 里 wizard 的 say / ask / task / reply 全部镜像进企微 (署作者名)。以前私聊派活人看不见, 切换后在群里开 room 内对话的会被看见; 只有落到 dm / adhoc room (无绑定) 的往来才只在 rolepage 可见。默认路径是「to 全是本群成员 → 留在本群」, 所以**管家在群里派给本群成员的活会出现在群里**。
+- **成员**: 迁移时 join 顺序 = 绑定管家 (host) → members.json 按 since → 近 7 天在该群有轮次的 wizard。没被迁进来的 wizard 被人 `.name` 点名时自动入群 (via mention)。
+- **管家**: host = 最早入群的 wizard, 读时求值; 管家手闸只看 role, 原 topOnly 条件删掉, 已有管家行为不变。
+- **人点名 `.name`、斜杠命令、审批卡 / 提问卡**: 不变 (卡片绑到唤醒它的那个 room)。
+- **定时任务**: 到点写一条 trigger 行唤醒, 不镜像进群; 任务里 wizard 的回复按普通规则 (要交付就 chat_reply / notify)。
+- **第一句话**: 所有绑定 pane 在下次唤醒前先 /new, 所以每个群切换后的第一句话会多一个新会话开局 (宪章重读), 首次回复慢一拍。
+
