@@ -24,7 +24,7 @@ rollback() {
       8)  launchctl kill TERM gui/$UID/com.wezard.daemon; sleep 3; say "rb 8: 新 daemon 已停";;
       7b) rm -f "$W/state/rooms-cutover-new.flag"; say "rb 7b: 标记已删";;
       7)  (cd "$LIVE" && git reset -q --keep pre-room && npm run build >/dev/null 2>&1) && say "rb 7: 线上回到 pre-room 并重建" || say "rb 7: !!! 失败, 人工处理";;
-      6)  [ -d "$W/rooms" ] && mv "$W/rooms" "$W/rooms.rejected-$TS"; say "rb 6: rooms/ → rooms.rejected-$TS";;
+      6)  [ -d "$W/state/rooms" ] && mv "$W/state/rooms" "$W/state/rooms.rejected-$TS"; say "rb 6: state/rooms/ → state/rooms.rejected-$TS";;
       2)  tar -xzf "$BAK" -C "$W" && say "rb 2-5: 从 $BAK 还原 state wizards.json config.jsonc memory tasks" || say "rb 2-5: !!! tar 还原失败, 人工处理";;
       0)  launchctl kickstart gui/$UID/com.wezard.daemon; launchctl kickstart -k gui/$UID/com.wezard.svr; say "rb 0: 旧 daemon + svr 已拉起";;
     esac
@@ -69,13 +69,17 @@ else say "step 4 | 跳过 (非阻断: 记忆文本规则未命中, 切后手工�
 need node "$ROOM/scripts/room-cutover/charters-archive.mjs" --apply
 say "step 5 | OK | state/charters 剩 $(ls "$W/state/charters" 2>/dev/null | wc -l | tr -d ' ') 份; 下一步 6"
 
-# 6 账本迁移
-[ -e "$W/rooms" ] && rollback "6 前 rooms/ 已存在 (应已移走)"
-need node "$ROOM/dist/cli/migrate-rooms.js"
+# 6 账本迁移 (写配置 stateDir 下的 rooms, 与 daemon 读的同一处推导; O2 闸要拿它重放)
+[ -e "$W/state/rooms" ] && rollback "6 前 state/rooms/ 已存在 (应已移走)"
+mig1=$(node "$ROOM/dist/cli/migrate-rooms.js" 2>&1) || rollback "6 迁移失败: $mig1"
+echo "$mig1" >>"$LOG"
+MIG_ROOMS=$(printf '%s
+' "$mig1" | sed -n 's/^写入 [0-9][0-9]* 行 → //p')
+[ -n "$MIG_ROOMS" ] || rollback "6 迁移输出里没有写入目录: $mig1"
 DONE+=(6)
 second=$(node "$ROOM/dist/cli/migrate-rooms.js" 2>&1 | tail -1); echo "$second" >>"$LOG"
 echo "$second" | grep -q '写入 0 行' || rollback "6 第二次迁移不是 0 行: $second"
-say "step 6 | OK | $(grep -E '^room [0-9]+ 个' "$LOG" | tail -1); 复跑写 0 行; 下一步 7"
+say "step 6 | OK | $(grep -E '^room [0-9]+ 个' "$LOG" | tail -1); 复跑写 0 行; 账本在 $MIG_ROOMS; 下一步 7" 
 
 # 7 代码 ff + 期间无人写线上工作树
 dirty=$(git -C "$LIVE" status --porcelain; find "$LIVE" -newer "$MARK" -type f -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/dist/*' 2>/dev/null | head -5)
@@ -102,5 +106,8 @@ up=0; for i in $(seq 1 60); do curl -s --noproxy '*' -m 2 http://127.0.0.1:17890
 [ $up = 1 ] || rollback "8 daemon 60s 内 healthz 不通"
 p1=$(launchctl list | awk '/com.wezard.daemon/{print $1}'); sleep 20; p2=$(launchctl list | awk '/com.wezard.daemon/{print $1}')
 [ "$p1" = "$p2" ] && [ "$p1" != "-" ] || rollback "8 daemon 20s 内重启过 ($p1→$p2), crash-loop"
+# O2 账实闸: 内存未结 duty 数 == 盘上账本重放数 (迁移写入目录), 不等 → 逆序回退并报两个数
+o2=$("$ROOM/scripts/room-cutover/o2-gate.sh" "http://127.0.0.1:17890/status" "$MIG_ROOMS" 2>>"$LOG") || rollback "8 O2 闸红: $o2"
+say "step 8 | O2 | $o2"
 say "step 8 | OK | daemon pid $p2 稳定 20s, T0=$T0; status: $(curl -s --noproxy '*' http://127.0.0.1:17890/status | head -c 300)"
 say "=== 0-8 完成。T0=${T0}。下一步 9: observe.mjs 取 O1-O4 (T0+5min / T0+30min)"
