@@ -59,6 +59,9 @@ FIXEOF
 # 后台子进程挂在那个子 shell 下, 停 daemon 时容易打到错误 pid (2026-11-19 演练实测:
 # B 段一开就整条脚本被 TERM, 现场只有 A 段日志)。
 start_daemon() { # $1 = home  $2 = port
+  # TMUX_TMPDIR 目录不存在时 tmux 不报错, 直接回落 /tmp/tmux-<uid>/default ——
+  # 也就是真机 wezard 的 socket, 之后 stop_daemon 的 kill-server 会把真 server 一起杀。
+  mkdir -p "$1/tmux" || { echo "建不出 TMUX_TMPDIR: $1/tmux" >&2; return 1; }
   env -u WEZARD_CONFIG -u TMUX HOME="$1" TMUX_TMPDIR="$1/tmux" \
     node "$ROOM/dist/daemon/index.js" >>"$1/daemon-stdout.log" 2>&1 &
   DPID=$!
@@ -69,7 +72,8 @@ stop_daemon() { # $1 = pid  $2 = home
   kill -KILL "$1" 2>/dev/null || true
   # 只杀本用例的 tmux server: $TMUX 若继承自调用方会压过 TMUX_TMPDIR, 直接 kill-server
   # 会把跑演练的那个 tmux (本脚本的父会话) 一起杀掉 —— 必须 -u TMUX。
-  env -u TMUX -u TMUX_PANE HOME="$2" TMUX_TMPDIR="$2/tmux" tmux kill-server 2>/dev/null || true
+  # 目录不在就绝不下手: 那样 tmux 会回落默认 socket, 杀的是真机 server。
+  [ -d "$2/tmux" ] && env -u TMUX -u TMUX_PANE HOME="$2" TMUX_TMPDIR="$2/tmux" tmux kill-server 2>/dev/null || true
 }
 wait_healthz() { # $1 = port
   up=0
