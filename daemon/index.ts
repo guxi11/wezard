@@ -127,7 +127,7 @@ import { registerPlanRoutes } from "./plan-http.js";
 import { NO_DEADLINE, isTerminal, renderInFlight, turnState } from "../shared/turn-state.js";
 import { askerFromEnvelope, parseReminders, renderReminder, stripReminders, withMsg, type NoteAttrs, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
 import { createHandoffs, cuttingTurn, handedOff, handingOff, handoffRound, resumeText, roundPending, settlesCut, type Pending as PendingHandoff } from "./handoff.js";
-import { coldGateOf, decide, rankCandidates, routeDiagnostics, renderCandidates, tierFor, type RouteRow } from "./route.js";
+import { coldGateOf, wakeCostOf, decide, rankCandidates, routeDiagnostics, renderCandidates, tierFor, type RouteRow } from "./route.js";
 import { parseWhen, renderRoomRead } from "../shared/room-view.js";
 import { roomFacts, nameTable } from "./room-facts.js";
 import { waitForIdle, type IdleResult } from "./wait-idle.js";
@@ -2209,6 +2209,8 @@ const main = async (): Promise<void> => {
           cli: p.cli,
           busy: p.busy,
           alive: p.paneAlive,
+          // 冷热 = 与 roster 的冷门控同一口径: transcript 最近一次动静超过缓存 TTL。
+          ...((jp) => (p.paneAlive && jp ? { cacheCold: wakeCostOf(0, touchOf(jp), Date.now(), ttlOf(jp)).cold } : {}))(m.sessionInfo(p.target)?.jsonlPath),
           ...(waiting ? { waiting } : {}),
           // 群成员列表 (rolepage): 类实例的序号 + 是不是本群管家, 判定都在 daemon 侧做
           // (cfg + 注册表只有这里有), svr 拿快照照画。

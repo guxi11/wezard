@@ -65,7 +65,7 @@ const WORLD = {
   uidTargets: { [A]: "chat:wrG#guide", [B]: "chat:wrG#worker" },
   nodes: [
     { target: "chat:wrG#guide", kind: "wizard", uid: A, name: "alice", label: "alice", base: G, tag: "guide", chat: "群G", busy: false, alive: true, lastTs: T0 + 4000, rels: [] },
-    { target: "chat:wrG#worker", kind: "wizard", uid: B, name: "bob", label: "bob", base: G, tag: "worker", chat: "群G", busy: false, alive: true, lastTs: T0 + 5000, rels: [] },
+    { target: "chat:wrG#worker", kind: "wizard", uid: B, name: "bob", label: "bob", base: G, tag: "worker", chat: "群G", busy: false, alive: true, cacheCold: true, lastTs: T0 + 5000, rels: [] },
     { target: "human:U1", kind: "human", name: "张三", label: "👤", base: "", tag: "", chat: "", busy: false, alive: false, lastTs: T0 + 1000, rels: [] },
   ],
   plans: [], schedules: [],
@@ -282,6 +282,33 @@ try {
   assert.ok(g2.people.includes("carol"), "成员不在 world.nodes / 活跃过滤里也补进图: " + JSON.stringify(g2));
   assert.ok(g2.links.includes(DM2), "两 wizard 的 dm 画成直连线: " + JSON.stringify(g2));
   assert.ok(!g2.roomNodes.includes(DM2), "两 wizard 的 dm 没有 room 节点");
+
+  // 节点样式: 人 = 方块 / wizard = 圆点; 状态 idle (alice, 缓存热) / warm (bob, cacheCold) / cold (carol, 注册表里没有); host → room 是特殊边。
+  const look = await page.evaluate(() => ({
+    human: !!document.querySelector('.rv-person.human rect.sh'),
+    alice: document.querySelector('.rv-person[data-node="chat:wrG#guide"]').getAttribute("class"),
+    bob: document.querySelector('.rv-person[data-node="chat:wrG#worker"]').getAttribute("class"),
+    carol: [...document.querySelectorAll(".rv-person")].find((e) => e.textContent.includes("carol")).getAttribute("class"),
+    hostEdges: document.querySelectorAll(".rv-edge.host").length,
+    plainEdges: document.querySelectorAll(".rv-edge:not(.host):not(.direct)").length,
+  }));
+  assert.equal(look.human, true, "人画成方块");
+  assert.match(look.alice, /st-idle/, "alice: pane 在、缓存热 = idle");
+  assert.match(look.bob, /st-warm/, "bob: pane 在、缓存已冷 = warm");
+  assert.match(look.carol, /st-cold/, "carol: 没有会话 = cold");
+  assert.ok(look.hostEdges >= 1, "host → room 是特殊边 (.rv-edge.host)");
+  assert.ok(look.plainEdges >= 1, "普通成员边仍在");
+  // 增量更新: 数据变了 (bob 开始干活) 只改样式, 节点元素与坐标原样保留, 不整图重画。
+  const before = await page.evaluate(() => {
+    const e = document.querySelector('.rv-person[data-node="chat:wrG#worker"]');
+    window.__bobEl = e;
+    return e.getAttribute("transform");
+  });
+  WORLD.nodes[1].busy = true;
+  await page.waitForFunction(() => /st-working/.test(document.querySelector('.rv-person[data-node="chat:wrG#worker"]').getAttribute("class")), null, { timeout: 20000 });
+  const kept = await page.evaluate(() => window.__bobEl.isConnected && window.__bobEl === document.querySelector('.rv-person[data-node="chat:wrG#worker"]'));
+  assert.equal(kept, true, "数据刷新是增量: 同一个节点元素, 没有整图重建");
+  assert.ok(before, "节点带坐标");
 
   console.log("room-graph.dom: " + JSON.stringify(counts) + " —— 节点数 = room + 参与者, 过程框与 wizard 视图可点开; 左栏名片与深链选中 role 正常");
 } finally {
