@@ -161,6 +161,19 @@ const printArgs = (prompt: string, o: { model?: string; effort?: string }): stri
   ...(o.effort ? ["--effort", o.effort] : []),
 ];
 
+// Claude Code jsonl is already in the TranscriptLine shape — identity pass, minus
+// rows that carry a `message` but are not conversation turns. 2.1.3xx writes
+// `api-request-blob` rows: content-addressed, deduped snapshots of request
+// messages (no uuid / timestamp / order guarantee). Read as turns, a blob whose
+// tool_use has no matching tool_result blob made openToolUses report a hanging
+// call forever — an idle wizard counted as "parked on approval" = busy, and the
+// room pump held every receipt addressed to it.
+const NON_TURN_ROWS = new Set(["api-request-blob"]);
+export const normalizeClaude = (raw: unknown): NormalizedTranscriptLine | null =>
+  raw && typeof raw === "object" && NON_TURN_ROWS.has((raw as { type?: unknown }).type as string)
+    ? null
+    : raw as NormalizedTranscriptLine;
+
 const makeClaude = (name: CliBackendName, bin: string): CliBackend => {
   const homeDir = name === "claude-internal" ? "~/.claude-internal" : "~/.claude";
   return {
@@ -176,8 +189,7 @@ const makeClaude = (name: CliBackendName, bin: string): CliBackend => {
     effortFlag: "--effort",
     oneShotArgs: printArgs,
     encodeProjectDir: encodeClaude,
-    // Claude Code jsonl is already in the TranscriptLine shape — identity pass.
-    normalizeTranscriptLine: (raw) => raw as NormalizedTranscriptLine,
+    normalizeTranscriptLine: normalizeClaude,
   };
 };
 
