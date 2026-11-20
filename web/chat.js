@@ -615,7 +615,13 @@
     if (!w) { el.innerHTML = ''; return; }
     var born = w.bornAt || (D.sessions || []).reduce(function (m, s) { return s.start && (!m || s.start < m) ? s.start : m; }, 0);
     var cb = D.charterBrief;
+    // 链接指的那个化身 (target 的 #tag) 与这一页的规范身份不同时说出来 —— 同身份多化身在
+    // rolepage 聚成一页 (见 makeDirectory 的 canon), 不说明会看着像「点错了 / 没选中」。
+    var want = ROLE.indexOf("#") > 0 ? ROLE.split("#").pop() : (/^(chat|user):/.test(ROLE) ? ROLE : "");
+    var tip = want && want !== (w.name || "") && ROLE !== w.id
+      ? fact("🔗", "链接指向 " + want, "链接来自 " + want + "; 它与 " + (w.name || w.id) + " 是同一个身份的化身, 这一页是它的规范页") : "";
     var facts = [
+      tip,
       w.chat ? fact('🏠', w.chat, 'home 群: ' + w.chat) : '',
       born ? fact('🐣', fmtAgo(born), '出生于 ' + fmtDay(born)) : '',
       cb ? fact('📜', '≈' + fmtTok(cb.tokens), '宪章 ≈' + fmtTok(cb.tokens) + ' token · ' + fmtClock(cb.at) + ' 压进系统提示 · 点开看全文', 'charter') : '',
