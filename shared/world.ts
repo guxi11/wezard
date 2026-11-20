@@ -117,6 +117,21 @@ export interface WorldFacts {
   absent?: true;
 }
 
+/** 群名兜底: daemon 的 chatNames 只有 config.chats 里的存量冻结标签, 新群没有 (daemon 侧已不再
+ *  自动写入工作区名) —— 这类群的 room 在 rolepage 上就只剩「群 …xxxx」短代号。
+ *  没名字的聊天按 默认 wizard 的名字 (untagged 会话) → 同聊天任一 wizard 的工作区 basename 补上;
+ *  已有的名字一律不动, 真的什么都没有才留给前端落短代号。 */
+export const withChatNameFallback = (f: WorldFacts): WorldFacts => {
+  const base = (w: WorldFactWizard): string => baseOfKey(w.target);
+  const basename = (p: string): string => p.replace(/\/+$/, "").split("/").pop() ?? "";
+  const missing = (w: WorldFactWizard): boolean => !!base(w) && !f.chatNames[base(w)];
+  const pick = (ws: readonly WorldFactWizard[]): Record<string, string> =>
+    ws.reduce<Record<string, string>>((m, w) => (m[base(w)] ? m : { ...m, [base(w)]: w.name || basename(w.cwd) }), {});
+  const byDefault = pick(f.wizards.filter((w) => missing(w) && !tagOfKey(w.target) && w.name));
+  const byCwd = pick(f.wizards.filter((w) => missing(w) && !byDefault[base(w)] && basename(w.cwd)).map((w) => ({ ...w, name: basename(w.cwd) })));
+  return { ...f, chatNames: { ...byCwd, ...byDefault, ...f.chatNames } };
+};
+
 export const EMPTY_FACTS: WorldFacts = { wizards: [], plans: [], schedules: [], chatNames: {}, absent: true };
 
 // ── 视图模型 ──────────────────────────────────────────────────────────
@@ -200,8 +215,6 @@ export interface WorldView {
   /** uid → target: 前端拿它把 room 成员 id 对到节点上。 */
   uidTargets: Record<string, string>;
   nodes: WorldNode[];
-  /** 家谱图层 (可切换)。 */
-  edges: WorldEdge[];
   plans: PlanRecord[];
   schedules: WorldFactSchedule[];
   /** 注册表缺席 (svr 独立部署) —— 前端据此说明「只画观测到的往来」。 */
@@ -442,8 +455,6 @@ export const buildWorld = (
     uidTargets: Object.fromEntries(uidTarget),
     nodes: shown.sort((a, b) => b.lastTs - a.lastTs)
       .map((n) => ({ ...n, rels: [...(rels.get(n.target) ?? [])].filter((x) => shownIds.has(x)) })),
-    // 两端都还在图上的边才画得出来。
-    edges: edges.filter((e) => shownIds.has(e.from) && shownIds.has(e.to)),
     plans: [...facts.plans].sort((a, b) => b.updatedAt - a.updatedAt),
     schedules: [...facts.schedules].sort((a, b) => a.nextAt - b.nextAt),
     degraded: !!facts.absent,

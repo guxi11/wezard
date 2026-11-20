@@ -224,13 +224,15 @@ export const wizardStream = (
       const room = led?.room ?? b.room;
       const re = led?.re ?? ln.re;
       const status = led?.status ?? ln.status;
+      // 账本全文也要过 splitInline: reminder 折成标签 (rems), 不让信封原文进气泡。
+      const body = splitInline((led?.text ?? ln.text).trim());
       const tags = [...(ln.files.length ? ["📎 " + ln.files.join(", ")] : []), ...(b.owe.length && ln === b.lines[b.lines.length - 1] ? ["要交代 " + b.owe.join(", ")] : [])];
       return {
         id: m.id + "." + ln.id, kind: "in", ts: m.ts,
         from, fromName, fromLabel,
         to, toName: dir.nameOf(to), toLabel: dir.labelOf(to),
         ...where(room, label(room) || b.label),
-        text: (led?.text ?? ln.text).trim(),
+        text: body.body.trim(), ...(body.html ? { rems: body.html } : {}),
         ...(tags.length ? { tags } : {}),
         inj: { id: ln.id, ...(re.length ? { re } : {}), ...(status ? { status } : {}),
           ...(ln === b.lines[0] ? { raw: b.raw } : {}), ...(ln === b.lines[0] && b.notes.length ? { note: b.notes.join(" · ") } : {}) },

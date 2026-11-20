@@ -299,6 +299,9 @@ export interface SessionSpan {
   runs?: ReadonlyArray<{ start: number; end: number }>;
 }
 
+/** 下拉的取值: sessionId 缺失的那一段没有 sid 可当 value (空串会被当成「全部」), 改用起始时刻。 */
+export const spanKey = (s: Pick<SessionSpan, "sessionId" | "start">): string => s.sessionId || "start:" + s.start;
+
 export const sessionsOf = (records: readonly DetailRecord[], role: string, now: number): SessionSpan[] => {
   const turns = records.filter(isTurn).filter((r) => r.target === role && !r.agent && !isGhostTurn(r, now))
     .sort((a, b) => a.createdAt - b.createdAt);

@@ -199,7 +199,17 @@
   //  无依赖的 FR 式模拟: 斥力 + 弹簧 + 向心 + 碰撞, 冷却到定稿; 拖节点会钉住它并重算,
   //  滚轮缩放 / 拖空白平移只改 viewBox, 不动节点坐标; 双击回到自动适配。
   var G_ITER = 240;
-  var buildGraph = function (rooms, people) {
+  // 只有两位成员的 room 不占节点: 在两人之间直接连一条线 (点线 = 打开那个 room)。
+  var directPair = function (r, people) {
+    var ids = {};
+    (r.members || []).forEach(function (m) { var id = nodeIdOf(m.who); if (id) ids[id] = true; });
+    var ks = Object.keys(ids);
+    if (ks.length !== 2) return null;
+    var have = {};
+    people.forEach(function (p) { have[p.target] = true; });
+    return have[ks[0]] && have[ks[1]] ? ks : null;
+  };
+  var buildGraph = function (rooms, people, directs) {
     var nodes = [], index = {};
     // 种子按竖长的椭圆撒 —— 左栏是高窄的一条, 圆形撒点会被压成上半截
     var panelW = Math.max(240, (convsEl.clientWidth || 332) - 12);
@@ -229,6 +239,10 @@
         if (index[pid] === undefined) return;
         links.push({ a: index['r:' + r.id], b: index[pid], room: r.id });
       });
+    });
+    // 两人 room: 线直接落在两个人之间 (room 本身没有节点); 有未决 duty 算未读, 画浅红。
+    (directs || []).forEach(function (d) {
+      links.push({ a: index['p:' + d.pair[0]], b: index['p:' + d.pair[1]], room: d.room.id, direct: true, unread: d.room.openDuties > 0 });
     });
     return { nodes: nodes, links: links, index: index, hw: hw, hh: hh };
   };
@@ -417,8 +431,8 @@
       var e = el[p.id];
       if (e) e.setAttribute('transform', 'translate(' + p.x.toFixed(1) + ' ' + p.y.toFixed(1) + ')');
     });
-    (S.lines || []).forEach(function (ln, i) {
-      var l = g.links[i];
+    (S.lines || []).concat(S.hits || []).forEach(function (ln) {
+      var l = g.links[+ln.getAttribute('data-i')];
       if (!l) return;
       var a = g.nodes[l.a], b = g.nodes[l.b];
       ln.setAttribute('x1', a.x.toFixed(1)); ln.setAttribute('y1', a.y.toFixed(1));
@@ -430,12 +444,20 @@
     var rooms = (W.rooms || []).slice().sort(function (a, b) { return (b.last ? b.last.at : 0) - (a.last ? a.last.at : 0); });
     if (WIN) rooms = rooms.filter(function (r) { return r.openDuties > 0 || inWin(r.last && r.last.at); });
     var people = participants(rooms).sort(function (a, b) { return (b.lastTs || 0) - (a.lastTs || 0) || (a.name < b.name ? -1 : 1); });
-    var g = buildGraph(rooms, people);
+    var directs = [];
+    rooms = rooms.filter(function (r) {
+      var pair = directPair(r, people);
+      if (pair) directs.push({ room: r, pair: pair });
+      return !pair;
+    });
+    var g = buildGraph(rooms, people, directs);
     S.g = g;
     S.gmap = {};
     g.nodes.forEach(function (p) { S.gmap[p.id] = p; });
     var sig = rooms.map(function (r) { return r.id; }).join(',') + '|' +
+      directs.map(function (d) { return d.room.id; }).join(',') + '|' +
       people.map(function (p) { return p.target; }).join(',');
+    var onRoom = function (id) { return D.mode === 'room' && D.roomId === id; };
     var svg = convsEl.querySelector('.rv-graph');
     // 拓扑没变 (定时刷新 / 换选中): 只刷选中态和 viewBox, 不动坐标 —— 图不会跳回原位。
     if (sig === S.gsig && svg && S.sim) {
@@ -447,15 +469,20 @@
       });
       var vb0 = viewBoxOf(g);
       svg.setAttribute('viewBox', vb0.box.map(function (v) { return v.toFixed(1); }).join(' '));
+      (S.lines || []).forEach(function (ln) {
+        var l = g.links[+ln.getAttribute('data-i')];
+        if (l) ln.setAttribute('class', 'rv-edge' + (l.direct && l.unread ? ' unread' : '') + (onRoom(l.room) ? ' on' : ''));
+      });
       drawPos(g);
       return;
     }
     if (S.sim) { S.sim.on('tick', null); S.sim.stop(); S.sim = null; }
-    var onRoom = function (id) { return D.mode === 'room' && D.roomId === id; };
-    var lines = g.links.map(function (l) {
+    var lines = g.links.map(function (l, i) {
       var p = g.nodes[l.a], q = g.nodes[l.b];
-      return '<line x1="' + p.x.toFixed(1) + '" y1="' + p.y.toFixed(1) + '" x2="' + q.x.toFixed(1) + '" y2="' + q.y.toFixed(1) + '"' +
-        ' class="rv-edge' + (onRoom(l.room) ? ' on' : '') + '"/>';
+      var xy = ' x1="' + p.x.toFixed(1) + '" y1="' + p.y.toFixed(1) + '" x2="' + q.x.toFixed(1) + '" y2="' + q.y.toFixed(1) + '"';
+      return '<line' + xy + ' data-i="' + i + '" class="rv-edge' + (l.direct && l.unread ? ' unread' : '') + (onRoom(l.room) ? ' on' : '') + '"/>' +
+        // 两人 room 的线细, 另叠一条透明粗线当点击区。
+        (l.direct ? '<line' + xy + ' data-i="' + i + '" data-link="' + esc(l.room) + '" class="rv-hit"/>' : '');
     }).join('');
     var roomNodes = rooms.map(function (r) {
       var p = g.nodes[g.index['r:' + r.id]];
@@ -474,7 +501,7 @@
         '</g>';
     }).join('');
     convsEl._html = '';
-    convsEl.innerHTML = sideHead(rooms.length + ' 个 room · ' + people.length + ' 位参与者' + (WIN ? ' (' + winLabel() + ')' : '')) +
+    convsEl.innerHTML = sideHead((rooms.length + directs.length) + ' 个 room · ' + people.length + ' 位参与者' + (WIN ? ' (' + winLabel() + ')' : '')) +
       '<svg class="rv-graph"></svg>';
     var svg2 = convsEl.querySelector('.rv-graph');
     var el = {};
@@ -486,7 +513,8 @@
     svg2.querySelectorAll('[data-node]').forEach(function (e) { el['p:' + e.getAttribute('data-node')] = e; });
     svg2.querySelectorAll('[data-room]').forEach(function (e) { el['r:' + e.getAttribute('data-room')] = e; });
     S.elById = el;
-    S.lines = Array.prototype.slice.call(svg2.querySelectorAll('line'));
+    S.lines = Array.prototype.slice.call(svg2.querySelectorAll('line.rv-edge'));
+    S.hits = Array.prototype.slice.call(svg2.querySelectorAll('line.rv-hit'));
     var vb = viewBoxOf(g);
     svg2.setAttribute('width', vb.width);
     svg2.setAttribute('height', vb.height);
@@ -496,6 +524,7 @@
     bindHead();
     bindGraph(svg2);
     convsEl.querySelectorAll('[data-room]').forEach(function (e) { e.onclick = function () { if (S.gmoved) return; loadRoom(e.getAttribute('data-room')); }; });
+    convsEl.querySelectorAll('[data-link]').forEach(function (e) { e.onclick = function () { if (S.gmoved) return; loadRoom(e.getAttribute('data-link')); }; });
     convsEl.querySelectorAll('[data-node]').forEach(function (e) { e.onclick = function () { if (S.gmoved) return; loadWizard(e.getAttribute('data-node')); }; });
   };
 
@@ -666,10 +695,10 @@
       '<div class="rv-mh">' + room +
       '<span class="rv-au ' + esc(m.author.kind) + '" data-node="' + esc(author) + '">' + esc(m.authorName) + '</span>' +
       (to ? '<span class="rv-to">→ ' + to + '</span>' : '') +
+      '<time>' + esc(fmtDay(m.at)) + '</time>' + turn +
       chip(KIND_TAG[m.kind] || '', 'kind') +
       (m.status ? chip(m.status, 'st ' + (ST_CLS[m.status] || '')) : '') +
       re +
-      '<time>' + esc(fmtDay(m.at)) + '</time>' + turn +
       '</div>' + bub +
       '<div class="rv-box" hidden></div>' +
       '</article>';
@@ -717,16 +746,17 @@
             (inj.re && inj.re.length ? '<span class="rv-chip re" title="答的是">↩ ' + esc(inj.re.join(', ')) + '</span>' : '') +
             (inj.status ? chip(inj.status, 'st ' + (ST_CLS[inj.status] || '')) : '')
           : '';
-        // 注入原文一个字节没动: 折起来, 点开才是那句被守护进程贴进输入框的话。
+        // 注入原文一个字节没动: 头部末尾一个小 icon, 点它整条 (头部 + 气泡) 切到原文, 再点切回。
         var raw = inj && inj.raw
-          ? '<details class="rv-inj"><summary>注入原文' + (inj.note ? ' · ' + esc(inj.note) : '') + '</summary><pre>' + esc(inj.raw) + '</pre></details>'
+          ? '<button type="button" class="rv-rawbtn" data-raw-toggle title="' + esc('注入原文' + (inj.note ? ' · ' + inj.note : '')) + '">⟨/⟩</button>'
           : '';
+        var rawBody = inj && inj.raw ? '<pre class="rv-rawpre">' + esc(inj.raw) + '</pre>' : '';
         return '<article class="rv-msg them" data-id="' + esc(f.id) + '">' +
           '<div class="rv-mh">' + room +
           '<span class="rv-au' + (f.from === 'system:' ? ' daemon' : /^human:/.test(f.from || '') ? ' human' : '') + '" data-node="' + esc(f.from === 'system:' ? '' : f.from) + '">' +
-          esc(f.fromLabel || '👤') + ' ' + esc(f.fromName || f.from) + '</span>' + toTag(f) + injchips + tags +
-          '<time>' + esc(fmtDay(f.ts)) + '</time></div>' +
-          bubbleHTML({ text: f.text, rems: f.rems }) + raw + '</article>';
+          esc(f.fromLabel || '👤') + ' ' + esc(f.fromName || f.from) + '</span>' + toTag(f) +
+          '<time>' + esc(fmtDay(f.ts)) + '</time>' + injchips + tags + raw + '</div>' +
+          bubbleHTML({ text: f.text, rems: f.rems }) + rawBody + '</article>';
       }
       // 出一侧: 头在外面 (room · 我 → 说给谁), 下面是这一轮的过程框, 再下面是写进账本的气泡。
       var said = f.said || [];
@@ -736,10 +766,10 @@
         '<div class="rv-mh">' + room +
         '<span class="rv-au wizard" data-node="' + esc(f.from || '') + '">' + esc(f.fromLabel || '🧙‍♂️') + ' ' + esc(f.fromName || D.role) + '</span>' +
         (rcpt ? '<span class="rv-to">→ ' + rcpt + '</span>' : toTag(f)) +
+        '<time>' + esc(fmtDay(f.ts)) + '</time>' +
         (one ? chip(KIND_TAG[one.kind] || '', 'kind') + (one.status ? chip(one.status, 'st ' + (ST_CLS[one.status] || '')) : '') : '') +
         (f.era && !said.length && !f.staleAt ? chip('未发言', '') : '') +
-        (f.meta ? '<span class="mstat">' + f.meta + '</span>' : '') +
-        '<time>' + esc(fmtDay(f.ts)) + '</time></div>' +
+        (f.meta ? '<span class="mstat">' + f.meta + '</span>' : '') + '</div>' +
         (f.html ? '<div class="rv-box rv-turn">' + f.html + '</div>' : '') + spokenHTML(said, f) + '</article>';
     }).join('');
   };
@@ -806,16 +836,16 @@
   var latestSess = function () { return (D.sessions || [])[D.sessions.length - 1]; };
   var sessWhen = function (s) { return s.start ? fmtDay(s.start) : '(无时刻)'; };
   var sessItem = function (s, on) {
-    return { v: s.sessionId || '', on: on, tip: s.sessionId || '',
+    return { v: s.key, on: on, tip: s.sessionId || '',
       html: '<span class="id">' + (s === latestSess() ? '最新 · ' : '') + esc(sessWhen(s)) + '</span><span class="n">' + s.turns + ' 轮</span>' };
   };
   var sessPicker = function () {
-    var cur = (D.sessions || []).filter(function (s) { return s.sessionId === D.session; })[0];
+    var cur = (D.sessions || []).filter(function (s) { return s.key === D.session; })[0];
     return dropdown('sess', {
       title: '切换 session',
       label: !cur ? '全部' : cur === latestSess() ? '最新' : sessWhen(cur),
       items: [{ v: 'all', on: !cur, cls: 'all', html: '<span class="id">全部</span><span class="n">' + D.sessions.length + ' 段</span>' }]
-        .concat(D.sessions.slice().reverse().map(function (s) { return sessItem(s, s.sessionId === D.session); })),
+        .concat(D.sessions.slice().reverse().map(function (s) { return sessItem(s, s.key === D.session); })),
     });
   };
   var bindSessPicker = function () {
@@ -1643,6 +1673,8 @@
     if (g) { var id = g.getAttribute('data-node'); if (id) { if (t.closest('summary')) e.preventDefault(); loadWizard(id); return; } }
     var j = t.closest('[data-jump-room]');
     if (j) { loadRoom(j.getAttribute('data-jump-room')); return; }
+    var rb = t.closest('[data-raw-toggle]');
+    if (rb) { var ra = rb.closest('.rv-msg'); if (ra) { ra.classList.toggle('raw'); rb.classList.toggle('on'); } return; }
     var b = t.closest('.rv-open');
     if (b) {
       var msg = t.closest('.rv-msg');
@@ -1869,7 +1901,7 @@
       inner.innerHTML = '<div class="rv-none">还没有 room —— 说一句话, 或者在群里 .name 点名一个 wizard。</div>';
   };
   // ── 样式: 本页新加的 DOM 只在 chat.js 里, 样式也一并带上 (不改 web/chat.css, 无构建) ──
-  var CSS = ".side-body { flex: 1; min-height: 0; display: flex }\n.convs { flex: 1; min-width: 0; overflow: auto; padding: 0 }\n.rv-ghead { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 8px 10px 4px; color: var(--faint); font-size: 11.5px }\n.rv-gbtn { border: 1px solid var(--line); background: var(--card); border-radius: 6px; padding: 1px 7px; font-size: 11.5px; cursor: pointer; color: var(--mute) }\n.rv-gbtn.on { color: var(--accent); border-color: var(--accent) }\n.rv-gbtns { display: inline-flex; gap: 4px; flex: none }\n.rv-glb { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }\n.rv-seg { display: inline-flex }\n.rv-seg .rv-gbtn { border-radius: 0 }\n.rv-seg .rv-gbtn:first-child { border-radius: 6px 0 0 6px }\n.rv-seg .rv-gbtn:last-child { border-radius: 0 6px 6px 0; margin-left: -1px }\n.rv-seg .rv-gbtn.on { position: relative; z-index: 1 }\n.rv-list { padding: 2px 8px 16px }\n.convs-h { padding: 2px 8px 0 }\n.convs-h h2 { margin-top: 6px }\n.convs h2 > span:nth-of-type(2) { flex: none }\n.convs h2 .vt + .vt { margin-left: 0 }\n.convs h2 .vt.on { color: var(--accent) }\n.convs h2 .vt svg { flex: none }\n@media (min-width: 761px) { .app.side-list .side { width: max(332px, 25vw) } }\n* { scrollbar-width: thin; scrollbar-color: var(--line) transparent }\n::-webkit-scrollbar { width: 8px; height: 8px }\n::-webkit-scrollbar-track { background: transparent }\n::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; border: 2px solid transparent; background-clip: padding-box }\n::-webkit-scrollbar-thumb:hover { background-color: var(--faint) }\n::-webkit-scrollbar-corner { background: transparent }\n.thread-in, .gside, .rolebar, .rv-mh { overflow-wrap: anywhere }\n.rv-bub { min-width: 0; overflow-wrap: anywhere }\n.rv-files { min-width: 0 }\n.rv-files .rv-chip { white-space: normal; overflow-wrap: anywhere; max-width: 100%; line-height: 1.45; padding: 1px 7px }\n.rv-mh > * { min-width: 0 }\n.gs-mem .nm { white-space: normal; overflow-wrap: anywhere }\n.gs-cls { min-width: 0; overflow-wrap: anywhere }\n.rv-list .ci .l2 .rv-chip { flex: none }\n.rv-lnone { padding: 4px 10px 8px; color: var(--faint); font-size: 12px }\n.rv-msg.hit .rv-bub { animation: hit 1.6s ease-out }\n.rv-graph { display: block; font: 11.5px/1 -apple-system, BlinkMacSystemFont, sans-serif; cursor: grab; touch-action: none; user-select: none }\n.rv-edge { stroke: #c9d2df; stroke-width: 1 }\n.rv-edge.on { stroke: var(--accent); stroke-width: 1.6 }\n.rv-node { cursor: grab }\n.rv-room rect { fill: var(--them); stroke: var(--line) }\n.rv-room text { fill: var(--ink) }\n.rv-room.on rect { fill: var(--mine); stroke: var(--accent) }\n.rv-person circle { fill: var(--card); stroke: var(--mute); stroke-width: 1.4 }\n.rv-person circle.live { fill: var(--accent); stroke: var(--accent) }\n.rv-person.human circle { stroke: var(--human) }\n.rv-person text { fill: var(--ink); font-size: 10.5px }\n.rv-room text { font-size: 11px }\n.rv-person.on circle { stroke: var(--accent); stroke-width: 2.4 }\n.rv-person.ghost { opacity: .5 }\n.rv-duty { fill: #cf222e }\n.rv-ttl { font-size: 15.5px; line-height: 22px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }\n.rv-sub { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; margin-top: 3px; font-size: 11.5px; color: var(--mute) }\n.rv-id { font-size: 11px; color: var(--faint); font-weight: 400 }\n.rv-lb { font-size: 15px }\n.rv-desc { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }\n.rv-chip { display: inline-flex; align-items: center; padding: 0 6px; border-radius: 999px; background: var(--them); color: var(--mute); font-size: 11px; line-height: 17px; white-space: nowrap }\n.rv-chip.ok { background: #e8f5ee; color: #1a7f3c }\n.rv-chip.warn { background: #fdf1e3; color: #9a5b10 }\n.rv-chip.ask, .rv-chip.bad { background: #fdecec; color: #b42318 }\n.rv-chip.go { background: var(--mine); color: var(--accent) }\n.rv-chip.file { background: var(--them-soft) }\n.rv-chip.re { background: transparent; color: var(--faint); border: 1px solid var(--line) }\n.rv-act { border: 1px solid var(--line); background: var(--card); border-radius: 7px; padding: 2px 9px; font-size: 12px; cursor: pointer; color: var(--mute) }\n.rv-act:hover, .rv-act.on { color: var(--accent); border-color: var(--accent) }\n.rbacts { display: flex; gap: 6px; align-items: center; margin-top: 2px }\n.rv-sel { border: 1px solid var(--line); background: var(--card); border-radius: 7px; padding: 2px 4px; font-size: 12px; color: var(--mute); max-width: 190px }\n/* 图右侧的成员列: 点开一个 room 才有, 看 wizard 时收起。 */\n.gside { flex: none; width: 208px; min-height: 0; overflow: auto; border-left: 1px solid var(--line); background: var(--card); padding: 8px }\n.gs-host { flex: none; font-size: 11px; line-height: 1 }\n.gside[hidden] { display: none }\n.gs-head { display: flex; justify-content: space-between; gap: 6px; padding: 0 2px 6px; color: var(--faint); font-size: 11px }\n.gs-head b { color: var(--mute); font-weight: 600 }\n.gs-duty { padding: 0 2px 6px; color: #b42318; font-size: 11px }\n.gs-list { display: flex; flex-direction: column; gap: 2px }\n.gs-mem { display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; padding: 4px 6px; border: 0; border-radius: 6px; background: none; color: var(--ink); text-align: left; cursor: pointer }\n.gs-mem:hover { background: var(--paper) }\n.gs-mem .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px }\n.gs-mem.human .nm { color: var(--human) }\n.gs-mem.busy .nm { color: var(--accent) }\n.gs-st { flex: none; margin-left: auto; color: var(--faint); font-size: 10.5px }\n.gs-st.go { color: var(--accent) }\n.gs-cls { flex: none; color: var(--faint); font-size: 10.5px }\n@media (max-width: 760px) { .gside { display: none } }\n.rv-older { display: block; margin: 8px auto; border: 1px solid var(--line); background: var(--card); border-radius: 999px; padding: 2px 12px; font-size: 12px; color: var(--mute); cursor: pointer }\n/* 一条消息: 头在气泡外 (谁 → 谁 · room · 时刻), 气泡只装正文。 */\n.rv-msg { display: flex; flex-direction: column; gap: 3px; margin: 10px 12px; min-width: 0 }\n.rv-msg > .rv-mh { padding: 0 2px }\n.rv-bub { align-self: flex-start; max-width: min(88%, 720px); padding: 7px 11px; background: var(--them); border: 1px solid var(--them-line); border-radius: 3px 12px 12px 12px }\n.rv-msg.me .rv-bub { align-self: flex-end; background: var(--mine); border-color: var(--mine-line); border-radius: 12px 3px 12px 12px }\n.rv-msg.k-system .rv-bub { border-style: dashed }\n.rv-msg.me .rv-turn .bubbles > .say, .rv-msg.me .rv-said { align-self: flex-end }\n.rv-mh { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; font-size: 11.5px; color: var(--mute) }\n.rv-au { font-weight: 600; color: var(--ink); cursor: pointer }\n.rv-au:hover { text-decoration: underline dotted var(--faint); text-underline-offset: 3px }\n.rv-au.human { color: var(--human) }\n.rv-au.daemon { color: var(--wezard) }\n.rv-tag { color: var(--accent); cursor: pointer }\n.rv-roomtag { color: var(--chat); cursor: pointer; border: 1px solid var(--line); border-radius: 999px; padding: 0 6px }\n.rv-mh time { margin-left: auto; color: var(--faint) }\n.rv-open { border: 1px solid var(--line); background: transparent; border-radius: 6px; padding: 0 6px; font-size: 11px; color: var(--faint); cursor: pointer }\n.rv-open:hover { color: var(--accent); border-color: var(--accent) }\n.rv-tx { font-size: 13.5px; line-height: 1.6; overflow-wrap: anywhere }\n.rv-tx p { margin: 3px 0 }\n.rv-tx pre { background: var(--them); padding: 6px 8px; border-radius: 6px; overflow: auto; font-size: 12px }\n.rv-tx a { color: var(--accent) }\n.rv-empty { color: var(--faint); font-size: 12px; margin: 0 }\n.rv-box { margin-top: 4px; padding: 8px 10px; border: 1px dashed var(--line); border-radius: 10px; background: var(--card) }\n.rv-box[hidden] { display: none }\n.rv-turn { margin: 0; padding: 0; border: 0; background: none }\n.rv-turn .turn-group { margin: 0 }\n.rv-said { margin-top: 6px; display: flex; flex-direction: column; gap: 3px }\n.rv-saidrow { display: flex; gap: 6px; align-items: baseline; min-width: 0; font-size: 11.5px; color: var(--faint) }\n.rv-saidtx { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }\n.rv-seq { font-family: ui-monospace, Menlo, monospace }\n.rv-mark { margin: 10px 12px; display: flex; justify-content: center }\n.rv-box .turn-group { margin: 0 }\n.rv-none { padding: 14px; color: var(--faint); font-size: 12.5px }\n.rv-note { margin: 8px 12px; padding: 7px 10px; border-radius: 8px; background: #fdf1e3; color: #9a5b10; font-size: 12px }\n.rv-plans, .rv-charter { margin: 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); font-size: 12px }\n.rv-plans h4, .rv-charter h4 { margin: 6px 0 2px; font-size: 11.5px; color: var(--faint); font-weight: 600 }\n.rv-plans ul { margin: 0; padding-left: 16px }\n.rv-charter h5 { margin: 8px 0 2px; font-size: 11.5px; color: var(--faint) }\n.rv-charter pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11.5px; color: var(--mute) }\n/* 一轮写进账本的气泡: 过程框下面, 靠自己那一侧; 多颗时各带一行小头 (去处 / 定论)。 */\n.rv-spk { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; min-width: 0 }\n.rv-msg.me .rv-spk { align-items: flex-end }\n.rv-smh { font-size: 11px }\n.rv-smh time { margin-left: 6px }\n.rv-files { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px }\n/* reminder 标签收在气泡底: 默认只露种类, 点开看原文。 */\n.rv-bub .rems { padding: 4px 0 0 }\n.rv-bub .rem-raw { max-height: 360px; overflow: auto }\n.rv-mh .mstat { display: inline-flex; gap: 6px; align-items: center; color: var(--faint) }\n.ho-who[data-node], .ho-line[data-node] { cursor: pointer }";
+  var CSS = ".side-body { flex: 1; min-height: 0; display: flex }\n.convs { flex: 1; min-width: 0; overflow: auto; padding: 0 }\n.rv-ghead { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 8px 10px 4px; color: var(--faint); font-size: 11.5px }\n.rv-gbtn { border: 1px solid var(--line); background: var(--card); border-radius: 6px; padding: 1px 7px; font-size: 11.5px; cursor: pointer; color: var(--mute) }\n.rv-gbtn.on { color: var(--accent); border-color: var(--accent) }\n.rv-gbtns { display: inline-flex; gap: 4px; flex: none }\n.rv-glb { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }\n.rv-seg { display: inline-flex }\n.rv-seg .rv-gbtn { border-radius: 0 }\n.rv-seg .rv-gbtn:first-child { border-radius: 6px 0 0 6px }\n.rv-seg .rv-gbtn:last-child { border-radius: 0 6px 6px 0; margin-left: -1px }\n.rv-seg .rv-gbtn.on { position: relative; z-index: 1 }\n.rv-list { padding: 2px 8px 16px }\n.convs-h { padding: 2px 8px 0 }\n.convs-h h2 { margin-top: 6px }\n.convs h2 > span:nth-of-type(2) { flex: none }\n.convs h2 .vt + .vt { margin-left: 0 }\n.convs h2 .vt.on { color: var(--accent) }\n.convs h2 .vt svg { flex: none }\n@media (min-width: 761px) { .app.side-list .side { width: max(332px, 25vw) } }\n* { scrollbar-width: thin; scrollbar-color: var(--line) transparent }\n::-webkit-scrollbar { width: 8px; height: 8px }\n::-webkit-scrollbar-track { background: transparent }\n::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; border: 2px solid transparent; background-clip: padding-box }\n::-webkit-scrollbar-thumb:hover { background-color: var(--faint) }\n::-webkit-scrollbar-corner { background: transparent }\n.thread-in, .gside, .rolebar, .rv-mh { overflow-wrap: anywhere }\n.rv-bub { min-width: 0; overflow-wrap: anywhere }\n.rv-files { min-width: 0 }\n.rv-files .rv-chip { white-space: normal; overflow-wrap: anywhere; max-width: 100%; line-height: 1.45; padding: 1px 7px }\n.rv-mh > * { min-width: 0 }\n.gs-mem .nm { white-space: normal; overflow-wrap: anywhere }\n.gs-cls { min-width: 0; overflow-wrap: anywhere }\n.rv-list .ci .l2 .rv-chip { flex: none }\n.rv-lnone { padding: 4px 10px 8px; color: var(--faint); font-size: 12px }\n.rv-msg.hit .rv-bub { animation: hit 1.6s ease-out }\n.rv-graph { display: block; font: 11.5px/1 -apple-system, BlinkMacSystemFont, sans-serif; cursor: grab; touch-action: none; user-select: none }\n.rv-edge { stroke: #c9d2df; stroke-width: 1 }\n.rv-edge.unread { stroke: #f2a7ad; stroke-width: 1.6 }\n.rv-edge.on { stroke: var(--accent); stroke-width: 1.6 }\n.rv-hit { stroke: transparent; stroke-width: 12; cursor: pointer }\n.rv-node { cursor: grab }\n.rv-room rect { fill: var(--them); stroke: var(--line) }\n.rv-room text { fill: var(--ink) }\n.rv-room.on rect { fill: var(--mine); stroke: var(--accent) }\n.rv-person circle { fill: var(--card); stroke: var(--mute); stroke-width: 1.4 }\n.rv-person circle.live { fill: var(--accent); stroke: var(--accent) }\n.rv-person.human circle { stroke: var(--human) }\n.rv-person text { fill: var(--ink); font-size: 10.5px }\n.rv-room text { font-size: 11px }\n.rv-person.on circle { stroke: var(--accent); stroke-width: 2.4 }\n.rv-person.ghost { opacity: .5 }\n.rv-duty { fill: #cf222e }\n.rv-ttl { font-size: 15.5px; line-height: 22px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }\n.rv-sub { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; margin-top: 3px; font-size: 11.5px; color: var(--mute) }\n.rv-id { font-size: 11px; color: var(--faint); font-weight: 400 }\n.rv-lb { font-size: 15px }\n.rv-desc { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }\n.rv-chip { display: inline-flex; align-items: center; padding: 0 6px; border-radius: 999px; background: var(--them); color: var(--mute); font-size: 11px; line-height: 17px; white-space: nowrap }\n.rv-chip.ok { background: #e8f5ee; color: #1a7f3c }\n.rv-chip.warn { background: #fdf1e3; color: #9a5b10 }\n.rv-chip.ask, .rv-chip.bad { background: #fdecec; color: #b42318 }\n.rv-chip.go { background: var(--mine); color: var(--accent) }\n.rv-chip.file { background: var(--them-soft) }\n.rv-chip.re { background: transparent; color: var(--faint); border: 1px solid var(--line) }\n.rv-act { border: 1px solid var(--line); background: var(--card); border-radius: 7px; padding: 2px 9px; font-size: 12px; cursor: pointer; color: var(--mute) }\n.rv-act:hover, .rv-act.on { color: var(--accent); border-color: var(--accent) }\n.rbacts { display: flex; gap: 6px; align-items: center; margin-top: 2px }\n.rv-sel { border: 1px solid var(--line); background: var(--card); border-radius: 7px; padding: 2px 4px; font-size: 12px; color: var(--mute); max-width: 190px }\n/* 图右侧的成员列: 点开一个 room 才有, 看 wizard 时收起。 */\n.gside { flex: none; width: 208px; min-height: 0; overflow: auto; border-left: 1px solid var(--line); background: var(--card); padding: 8px }\n.gs-host { flex: none; font-size: 11px; line-height: 1 }\n.gside[hidden] { display: none }\n.gs-head { display: flex; justify-content: space-between; gap: 6px; padding: 0 2px 6px; color: var(--faint); font-size: 11px }\n.gs-head b { color: var(--mute); font-weight: 600 }\n.gs-duty { padding: 0 2px 6px; color: #b42318; font-size: 11px }\n.gs-list { display: flex; flex-direction: column; gap: 2px }\n.gs-mem { display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; padding: 4px 6px; border: 0; border-radius: 6px; background: none; color: var(--ink); text-align: left; cursor: pointer }\n.gs-mem:hover { background: var(--paper) }\n.gs-mem .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px }\n.gs-mem.human .nm { color: var(--human) }\n.gs-mem.busy .nm { color: var(--accent) }\n.gs-st { flex: none; margin-left: auto; color: var(--faint); font-size: 10.5px }\n.gs-st.go { color: var(--accent) }\n.gs-cls { flex: none; color: var(--faint); font-size: 10.5px }\n@media (max-width: 760px) { .gside { display: none } }\n.rv-older { display: block; margin: 8px auto; border: 1px solid var(--line); background: var(--card); border-radius: 999px; padding: 2px 12px; font-size: 12px; color: var(--mute); cursor: pointer }\n/* 一条消息: 头在气泡外 (谁 → 谁 · room · 时刻), 气泡只装正文。 */\n.rv-msg { display: flex; flex-direction: column; gap: 3px; margin: 10px 12px; min-width: 0 }\n.rv-msg > .rv-mh { padding: 0 2px }\n.rv-bub { align-self: flex-start; max-width: min(88%, 720px); padding: 7px 11px; background: var(--them); border: 1px solid var(--them-line); border-radius: 3px 12px 12px 12px }\n.rv-msg.me .rv-bub { align-self: flex-end; background: var(--mine); border-color: var(--mine-line); border-radius: 12px 3px 12px 12px }\n.rv-msg.k-system .rv-bub { border-style: dashed }\n.rv-msg.me .rv-turn .bubbles > .say, .rv-msg.me .rv-said { align-self: flex-end }\n.rv-mh { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; font-size: 11.5px; color: var(--mute) }\n.rv-au { font-weight: 600; color: var(--ink); cursor: pointer }\n.rv-au:hover { text-decoration: underline dotted var(--faint); text-underline-offset: 3px }\n.rv-au.human { color: var(--human) }\n.rv-au.daemon { color: var(--wezard) }\n.rv-tag { color: var(--accent); cursor: pointer }\n.rv-roomtag { color: var(--chat); cursor: pointer; border: 1px solid var(--line); border-radius: 999px; padding: 0 6px }\n.rv-mh time { color: var(--faint) }\n.rv-open { border: 1px solid var(--line); background: transparent; border-radius: 6px; padding: 0 6px; font-size: 11px; color: var(--faint); cursor: pointer }\n.rv-open:hover { color: var(--accent); border-color: var(--accent) }\n.rv-tx { font-size: 13.5px; line-height: 1.6; overflow-wrap: anywhere }\n.rv-tx p { margin: 3px 0 }\n.rv-tx pre { background: var(--them); padding: 6px 8px; border-radius: 6px; overflow: auto; font-size: 12px }\n.rv-tx a { color: var(--accent) }\n.rv-empty { color: var(--faint); font-size: 12px; margin: 0 }\n.rv-box { margin-top: 4px; padding: 8px 10px; border: 1px dashed var(--line); border-radius: 10px; background: var(--card) }\n.rv-box[hidden] { display: none }\n.rv-turn { margin: 0; padding: 0; border: 0; background: none }\n.rv-turn .turn-group { margin: 0 }\n.rv-said { margin-top: 6px; display: flex; flex-direction: column; gap: 3px }\n.rv-saidrow { display: flex; gap: 6px; align-items: baseline; min-width: 0; font-size: 11.5px; color: var(--faint) }\n.rv-saidtx { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }\n.rv-seq { font-family: ui-monospace, Menlo, monospace }\n.rv-mark { margin: 10px 12px; display: flex; justify-content: center }\n.rv-box .turn-group { margin: 0 }\n.rv-none { padding: 14px; color: var(--faint); font-size: 12.5px }\n.rv-note { margin: 8px 12px; padding: 7px 10px; border-radius: 8px; background: #fdf1e3; color: #9a5b10; font-size: 12px }\n.rv-plans, .rv-charter { margin: 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); font-size: 12px }\n.rv-plans h4, .rv-charter h4 { margin: 6px 0 2px; font-size: 11.5px; color: var(--faint); font-weight: 600 }\n.rv-plans ul { margin: 0; padding-left: 16px }\n.rv-charter h5 { margin: 8px 0 2px; font-size: 11.5px; color: var(--faint) }\n.rv-charter pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11.5px; color: var(--mute) }\n/* 一轮写进账本的气泡: 过程框下面, 靠自己那一侧; 多颗时各带一行小头 (去处 / 定论)。 */\n.rv-spk { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; min-width: 0 }\n.rv-msg.me .rv-spk { align-items: flex-end }\n.rv-smh { font-size: 11px }\n.rv-smh time { margin-left: 6px }\n.rv-files { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px }\n/* reminder 标签收在气泡底: 默认只露种类, 点开看原文。 */\n.rv-bub .rems { padding: 4px 0 0 }\n.rv-bub .rem-raw { max-height: 360px; overflow: auto }\n.rv-mh .mstat { display: inline-flex; gap: 6px; align-items: center; color: var(--faint) }\n.ho-who[data-node], .ho-line[data-node] { cursor: pointer }";
   var injectStyle = function () {
     if (document.getElementById('rv-style')) return;
     var s = document.createElement('style');

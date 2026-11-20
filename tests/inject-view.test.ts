@@ -118,6 +118,16 @@ const run = async (): Promise<void> => {
     repliesOf: () => [], roomFrom: now - 20_000,
   });
   assert.equal(soloRows.find((r) => r.kind === "out")!.room, DM.id, "单块注入: 出消息的 room 归 dm, 不是 home 群");
+  // ③ 账本全文带 <system-reminder> 信封时: 正文不外露原文, 折叠标签进 rems。
+  const REM = '<system-reminder wezard="roster">花名册 secret-roster-body</system-reminder>';
+  const dirty = (id: string) => { const r = ledgerRow(id); return r && id === reply.id ? { ...r, text: r.text + "\n" + REM } : r; };
+  const dirtyRows = wizardStream([turn], "chat:wrG#guide", dir, now, {
+    msgs: [], woke: [], roomLabel: NAMES.roomLabel, chatLabel: () => "", lookup: dirty,
+    repliesOf: () => [], roomFrom: now - 20_000,
+  }).filter((r) => r.kind === "in");
+  assert.ok(!dirtyRows[0]!.text!.includes("<system-reminder"), "text 不含 reminder 原文");
+  assert.ok(dirtyRows[0]!.text!.includes(reply.text.split("\n")[0]!), "正文仍在");
+  assert.ok(dirtyRows[0]!.rems && dirtyRows[0]!.rems.includes("roster"), "rems 有折叠标签");
   console.log("inject-view: 注入按块拆开 / 作者与 room 归位 / 正文换行 / 原文可逆");
 };
 

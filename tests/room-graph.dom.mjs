@@ -67,7 +67,6 @@ const WORLD = {
     { target: "chat:wrG#worker", kind: "wizard", uid: B, name: "bob", label: "bob", base: G, tag: "worker", chat: "群G", busy: false, alive: true, lastTs: T0 + 5000, rels: [] },
     { target: "human:U1", kind: "human", name: "张三", label: "👤", base: "", tag: "", chat: "", busy: false, alive: false, lastTs: T0 + 1000, rels: [] },
   ],
-  edges: [],
   plans: [], schedules: [],
   chatNames: { [G]: "群G", [OLD]: "老群" }, names: { [A]: "alice", [B]: "bob", U1: "张三", U2: "李四" }, humanNames: { "human:U1": "张三", "human:U2": "李四" },
   degraded: false,
@@ -166,6 +165,7 @@ try {
   await page.waitForSelector(".rv-msg", { timeout: 5000 });
   const counts = await page.evaluate(() => ({
     rooms: document.querySelectorAll(".rv-room").length,
+    directLinks: [...document.querySelectorAll("line.rv-hit")].map((l) => l.getAttribute("data-link")),
     people: document.querySelectorAll(".rv-person").length,
     msgs: document.querySelectorAll(".rv-msg").length,
     title: (document.querySelector(".rv-ttl") || {}).textContent || "",
@@ -186,9 +186,10 @@ try {
   }));
   assert.equal(errs.length, 0, "页面没有脚本错误: " + errs.join(" / "));
   // 默认 2d: 3 天前的老 room 不在范围里 (ROOMS 有 3 间, 画 2 间)。
-  assert.equal(counts.rooms, 2, "room 节点数 = 2d 内有动静的 room 数");
+  // 两人 room (DM) 不画节点: alice—bob 之间直接一条可点的线, 点它 = 打开那个 room。
+  assert.equal(counts.rooms, 1, "room 节点数 = 2d 内有动静的 ≥3 人 room 数 (两人 room 改成连线)");
+  assert.deepEqual(counts.directLinks, [DM], "两人 room 画成成员之间的线");
   assert.equal(counts.people, 3, "参与者节点数 = alice / bob / 张三");
-  assert.equal(counts.rooms + counts.people, 5, "节点数 = room 数 + 参与者数");
   assert.equal(counts.msgs, 4, "room 历史 4 条");
   assert.match(counts.title, /群G/);
   assert.equal(counts.gside, true, "点开 room: 成员列出现");

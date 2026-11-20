@@ -23,10 +23,10 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { URL } from "node:url";
 import { baseOfKey, sameBot } from "./session-label.js";
 import { isTurn } from "./chat-view.js";
-import { buildWorld, EMPTY_FACTS, withData, type WorldFacts } from "./world.js";
+import { buildWorld, EMPTY_FACTS, withChatNameFallback, withData, type WorldFacts } from "./world.js";
 import { buildRoomFact, buildRoomFacts, dutyFacts, roomHistory, whoRef, wizardMessages, wokeRows, type RoomMsg } from "./room-view.js";
 import type { MsgRow, RenderNames, RoomState } from "./room.js";
-import { makeDirectory, roleInfo, roleStats, sessionsOf, type SessionSpan } from "./role-view.js";
+import { makeDirectory, roleInfo, roleStats, sessionsOf, spanKey, type SessionSpan } from "./role-view.js";
 import { roomMembers } from "./group-members.js";
 import { charterBrief, charterView } from "./charter-view.js";
 import { renderToolBody } from "./detail-render.js";
@@ -158,7 +158,7 @@ const pickRole = (dir: ReturnType<typeof makeDirectory>, ticket: Ticket, url: UR
 };
 
 // Infinity 过不了 JSON。runs 是服务端的时间窗, 前端只认 start/end/turns。
-const wireSpan = (s: SessionSpan) => { const { runs: _runs, ...rest } = s; return { ...rest, end: Number.isFinite(s.end) ? s.end : 0 }; };
+const wireSpan = (s: SessionSpan) => { const { runs: _runs, ...rest } = s; return { ...rest, key: spanKey(s), end: Number.isFinite(s.end) ? s.end : 0 }; };
 
 // ── room 的名字 / 消息补轮次 ──────────────────────────────────────────
 const namesOf = (f: WorldFacts): RenderNames => {
@@ -275,7 +275,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       .then((f) => {
         const now = Date.now();
         const records = listRecent(t);
-        return withData(recentFacts(botFacts(roomsNow(f), viewerOf(t)), records, now), records, now);
+        return withData(recentFacts(botFacts(roomsNow(withChatNameFallback(f)), viewerOf(t)), records, now), records, now);
       })
       .catch(() => EMPTY_FACTS);
   const listRecent = (t: Ticket): DetailRecord[] => botRecords(recentRecords(store.list(), Date.now() - HORIZON_MS), viewerOf(t));
@@ -355,7 +355,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const uid = fact?.uid ?? (role.startsWith("uid:") ? role.slice(4) : "");
       const spans = sessionsOf(records, role, now);
       const sid = url.searchParams.get("session");
-      const span = !sid || sid === "all" ? undefined : spans.find((s) => s.sessionId === sid);
+      const span = !sid || sid === "all" ? undefined : spans.find((s) => spanKey(s) === sid);
       const all = url.searchParams.get("all") === "1";
       const raw = url.searchParams.get("limit");
       const limit = raw && Number.isFinite(Number(raw)) ? Number(raw) : DEFAULT_LIMIT;
@@ -379,7 +379,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
         uid: uid || "",
         ledger: !!liveRooms(),
         sessions: spans.map(wireSpan),
-        session: span?.sessionId ?? "all",
+        session: span ? spanKey(span) : "all",
         all,
         msgs: hist.msgs.map(wire).map(linked),
         // 时间轴: 轮次为主线 (入 / 出 + 过程框), 账本行挂上去; 前端 wizard 视图按它画。
