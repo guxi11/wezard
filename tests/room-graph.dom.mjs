@@ -42,6 +42,7 @@ const msgs = [
   { id: "aa000001.4", seq: 4, at: T0 + 4000, room: G, author: who("wizard", B), authorName: "bob", ord: 2, speak: "member", kind: "reply", text: "查完了", re: ["aa000001.3"], status: "done", origin: "tool", turn: "t2" },
   { id: "bb000002.1", seq: 1, at: T0 + 5000, room: DM, author: who("wizard", B), authorName: "bob", ord: 2, speak: "member", kind: "say", text: "私聊一句", origin: "tool", turn: "t2" },
 ];
+const HM = "user:U1";
 const OLD = "chat:wrOld";   // 3 天前有动静: 默认 2d 不画, 选「全部」才出来
 const ROOMS = [
   roomFact(G, "wecom-group", [
@@ -251,6 +252,36 @@ try {
   await page.click(".sk-it.msg");
   await page.waitForSelector('.rv-msg.hit[data-id="aa000001.3"]', { timeout: 5000 });
   assert.equal(await page.evaluate(() => document.querySelector(".sk").hidden), true, "选中后面板收起");
+
+  // 补两间 room 再看图:
+  //  · HM = alice + 人 (张三): 有 human 成员, 仍画 room 节点, 不收成直连线;
+  //  · DM2 = alice + C: C 不在 world.nodes 里 (活跃过滤会筛掉的那种), 成员也得补进图, 两 wizard 的 dm 画成直连线。
+  const C = "w" + "3".padStart(12, "0");
+  const HM = "user:U1", DM2 = "dm:" + [A, C].sort().join("|");
+  ROOMS.push(
+    roomFact(HM, "wecom-dm", [
+      { who: who("wizard", A), name: "alice", via: "founder", since: 7, ord: 1, host: true },
+      { who: who("human", "U1"), name: "张三", via: "inbound", since: 8, ord: 2, host: false },
+    ], who("wizard", A), T0 + 6000),
+    roomFact(DM2, "dm", [
+      { who: who("wizard", A), name: "alice", via: "founder", since: 9, ord: 1, host: true },
+      { who: who("wizard", C), name: "carol", via: "invite", since: 10, ord: 3, host: false },
+    ], who("wizard", A), T0 + 7000),
+  );
+  WORLD.names[C] = "carol";
+  await page.goto(base + "/role?id=t-ticket", { waitUntil: "load" });
+  await page.click('[data-side="graph"]');
+  await page.waitForSelector(".rv-person", { timeout: 5000 });
+  const g2 = await page.evaluate(() => ({
+    roomNodes: [...document.querySelectorAll(".rv-room")].map((e) => e.getAttribute("data-room")),
+    links: [...document.querySelectorAll("line.rv-hit")].map((l) => l.getAttribute("data-link")),
+    people: [...document.querySelectorAll(".rv-person")].map((e) => e.textContent.trim()),
+  }));
+  assert.ok(g2.roomNodes.includes(HM), "有 human 成员的两人 room 仍画 room 节点: " + JSON.stringify(g2));
+  assert.ok(!g2.links.includes(HM), "有 human 成员的 room 不画直连线");
+  assert.ok(g2.people.includes("carol"), "成员不在 world.nodes / 活跃过滤里也补进图: " + JSON.stringify(g2));
+  assert.ok(g2.links.includes(DM2), "两 wizard 的 dm 画成直连线: " + JSON.stringify(g2));
+  assert.ok(!g2.roomNodes.includes(DM2), "两 wizard 的 dm 没有 room 节点");
 
   console.log("room-graph.dom: " + JSON.stringify(counts) + " —— 节点数 = room + 参与者, 过程框与 wizard 视图可点开; 左栏名片与深链选中 role 正常");
 } finally {

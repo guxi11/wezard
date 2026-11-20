@@ -178,21 +178,17 @@
 
   // ── 二部图 ─────────────────────────────────────────────────────────
   var participants = function (rooms) {
-    var seen = {}, hosts = {};
+    var seen = {};
     (rooms || []).forEach(function (r) {
       (r.members || []).forEach(function (m) {
         var id = nodeIdOf(m.who);
-        if (!id) return;
-        seen[id] = true;
-        if (m.host) hosts[id] = true;
+        if (id) seen[id] = true;
       });
     });
-    return Object.keys(seen).map(nodeOf).filter(function (n) {
-      if (n.kind === 'human' || n.self) return true;
-      if (n.alive || n.busy || (n.runningUntil && n.runningUntil > Date.now())) return true;
-      if (hosts[n.target]) return true;
-      return inWin(n.lastTs);
-    });
+    // 画在图上的 room, 它的成员一个都不能缺: 以前这里按活跃度 / 时间窗再筛一遍成员,
+    // 被筛掉的成员没有节点, room 的成员边画不出来, 两人 dm 就剩一个孤零零的 room 胶囊。
+    // room 本身已经按时间窗 / 未决 duty 取舍过, 成员跟着 room 走。
+    return Object.keys(seen).map(nodeOf);
   };
   // ── 力导向图 ───────────────────────────────────────────────────────
   //  room = 胶囊, wizard / user = 圆点, 边 = 成员关系 (家谱另开一层虚线)。
@@ -201,10 +197,16 @@
   var G_ITER = 240;
   // 只有两位成员的 room 不占节点: 在两人之间直接连一条线 (点线 = 打开那个 room)。
   var directPair = function (r, people) {
-    var ids = {};
-    (r.members || []).forEach(function (m) { var id = nodeIdOf(m.who); if (id) ids[id] = true; });
+    var ids = {}, human = false;
+    (r.members || []).forEach(function (m) {
+      var id = nodeIdOf(m.who);
+      if (!id) return;
+      ids[id] = true;
+      if (m.who.kind !== 'wizard') human = true;
+    });
     var ks = Object.keys(ids);
-    if (ks.length !== 2) return null;
+    // 有人 (human) 的 room 始终画 room 节点; 只有恰好两个 wizard 才收成直连线。
+    if (human || ks.length !== 2) return null;
     var have = {};
     people.forEach(function (p) { have[p.target] = true; });
     return have[ks[0]] && have[ks[1]] ? ks : null;
