@@ -148,6 +148,41 @@ const settle = () => hub.pump();
   assert.equal(pasted.length, n1, "交代后不再提醒");
   assert.equal(store.get(room2)!.msgs.filter((m) => m.sys === "undelivered").length, 0, "也不写 undelivered 系统行");
 }
+// progress / need 也算交代: duty 仍开着, 但之后的轮终不提醒、不写系统行 (管家误报「被提醒后仍没有交代」)
+{
+  const room3 = "chat:wrP";
+  store.ensure(room3, { at: 1, kind: "wecom-group", by: DAEMON });
+  hub.write(room3, [{ op: "join", at: 1, room: room3, who: { kind: "wizard", id: A }, ord: 1, via: "founder", by: DAEMON }]);
+  const ask = hub.append(room3, { author: human, kind: "say", origin: "inbound", text: "做 8 件事" });
+  assert.ok(ask.ok);
+  await settle();
+  const pr = hub.append(room3, { author: { kind: "wizard", id: A }, kind: "reply", origin: "tool", re: [ask.row.id], text: "转给同伴在做", status: "progress", statusGiven: true });
+  assert.ok(pr.ok && pr.row.status === "progress");
+  const n0 = pasted.length;
+  await hub.onIdle(A); // 当轮
+  await hub.onIdle(A); // 下一轮 (别的事唤醒它, 没再碰这件)
+  await hub.onIdle(A);
+  assert.equal(pasted.filter((x, i) => i >= n0 && x.text.includes(ask.row.id)).length, 0, "progress 之后不提醒");
+  assert.equal(store.get(room3)!.msgs.filter((m) => m.sys === "undelivered").length, 0, "progress 之后不写系统行");
+  assert.equal(openDuties(store.get(room3)!).filter((d) => d.msg === ask.row.id).length, 1, "duty 仍开着");
+  // need → 人补答再唤醒 → 这一轮没交代 → 照常提醒一次, 再闲写系统行
+  hub.append(room3, { author: { kind: "wizard", id: A }, kind: "reply", origin: "tool", re: [ask.row.id], text: "第 3 项要哪个分支?", status: "need", statusGiven: true });
+  await hub.onIdle(A);
+  assert.equal(pasted.length, n0, "need 当轮也算交代");
+  hub.append(room3, { author: human, kind: "say", origin: "inbound", re: [ask.row.id], to: [{ kind: "wizard", id: A }], text: "v3" });
+  await settle();
+  const n1 = pasted.length;
+  assert.ok(n1 > n0, "补答唤醒了它");
+  await hub.onIdle(A);
+  assert.equal(pasted.length, n1 + 1);
+  assert.ok(pasted.at(-1)!.text.includes(ask.row.id) && /还没交代/.test(pasted.at(-1)!.text), "补答后没交代 → 重新提醒");
+  await hub.onIdle(A);
+  assert.equal(store.get(room3)!.msgs.filter((m) => m.sys === "undelivered" && (m.re ?? []).includes(ask.row.id)).length, 1, "再闲写系统行");
+  // 真正 done 照常关账
+  const done = hub.append(room3, { author: { kind: "wizard", id: A }, kind: "reply", origin: "tool", re: [ask.row.id], text: "8 件都完了" });
+  assert.ok(done.ok && done.row.status === "done");
+  assert.equal(openDuties(store.get(room3)!).filter((d) => d.msg === ask.row.id).length, 0);
+}
 // 重开 store (模拟 reload): 账本状态一致
 {
   const again = openRoomStore(dir);

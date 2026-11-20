@@ -22,9 +22,10 @@ export const responseFormatPolicy = (cfg: Config, context: ResponseFormatContext
 
 /** 一条绑定 room 的消息交给传输时的正文: 作者身份头在这里写, 尾部 rolepage 链接
  *  由 tracker 的 withMessageFooter 补 —— 它认作者只认这个头 (无头的正文不算任何人的,
- *  原样放过)。所以覆盖占位气泡跟发新气泡一样必须先带头, 否则那条气泡既没身份也没链接。 */
+ *  原样放过)。所以覆盖占位气泡跟发新气泡一样必须先带头, 否则那条气泡既没身份也没链接。
+ *  daemon 行 (无作者) 补 "[wezard] " 头; 正文自己已带 (系统行 / 撤回 / 离开…) 就不再叠一层。 */
 export const roomBubble = (author: string | undefined, body: string): string =>
-  (author ? headed(ownHead(author), body, "\n\n") : "[wezard] " + body);
+  (author ? headed(ownHead(author), body, "\n\n") : /^\[wezard\]/.test(body) ? body : "[wezard] " + body);
 
 /** A footer is routing metadata only when it belongs to this daemon's rolepage. */
 export const footerTarget = (raw: string, root: string, known: (target: string) => boolean): string | undefined => {

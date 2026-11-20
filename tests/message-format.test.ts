@@ -45,4 +45,6 @@ const groupPolicy = responseFormatPolicy(cfg, { chatid: "wrkGroup" }, urlOf)!;
 assert.equal(groupPolicy.principal, group, "未知群按前缀落 chat: principal");
 assert.equal(withMessageFooter(roomBubble(worker, "done"), groupPolicy), "\u{1F9D9}\u200D\u2642\uFE0F " + names[worker] + "： done [✦](" + urlOf(worker) + ")");
 assert.equal(withMessageFooter("done", groupPolicy), "done", "无头正文不属于任何人 —— 覆盖气泡不带作者头就会裸奔");
+assert.equal(roomBubble(undefined, "x 已离开"), "[wezard] x 已离开", "daemon 行补 [wezard] 头");
+assert.equal(roomBubble(undefined, "[wezard] .a 被提醒后仍没有交代 m.1"), "[wezard] .a 被提醒后仍没有交代 m.1", "正文自带 [wezard] 不再叠一层");
 console.log("message-format integration tests passed");

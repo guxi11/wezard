@@ -8,10 +8,11 @@
 // 下次重投时标「可能已读过」。所以 reload / teardown 清掉内存, 未投的消息也不会丢。
 //
 // 终句零语义: 本文件不读 transcript。一轮结束 (mirror 报 idle) 时只看账本: 唤醒它的 duty
-// 还开着、这一轮又没 chat_reply 过 → 当轮提醒一次; 再闲下来仍没关 → 给提问者写一条系统行。
+// 还开着、它在最近一次被唤醒之后又没 chat_reply 过 (任何 status, progress / need 也算交代)
+// → 当轮提醒一次; 再闲下来仍没交代 → 给提问者写一条系统行。
 import type { Logger } from "pino";
 import {
-  DAEMON, holderOf, isBoundRoom, judge, mirrors, coversBubble, openDuties, renderMsgLine, sameWho, unreadFor, whoKey,
+  DAEMON, dutyAnswered, holderOf, isBoundRoom, judge, mirrors, coversBubble, openDuties, renderMsgLine, sameWho, unreadFor, whoKey,
   type Draft, type JudgeCtx, type MsgRow, type RoomOp, type RoomState, type Verdict, type Who,
 } from "../shared/room.js";
 import type { RoomStore } from "./rooms.js";
@@ -215,7 +216,11 @@ export const createRoomHub = (p: HubPorts) => {
       for (const d of openDuties(s)) {
         if (!sameWho(holderOf(s, d), who)) continue;
         const woke = s.byId.get(d.msg)?.wake.includes(uid) || t?.msgs.has(d.msg);
-        if (woke) owed.push({ room, key: d.key, msg: d.msg, asker: d.asker });
+        if (!woke) continue;
+        // progress / need 交代过: duty 照常开着等 done, 但这一轮的账算清了 —— 不提醒、不告状;
+        // 清掉提醒记号, 之后被同一 duty 再唤醒 (need 被补答) 又没交代时重新从「提醒一次」开始。
+        if (dutyAnswered(s, d, who)) { reminded.delete(d.key); continue; }
+        owed.push({ room, key: d.key, msg: d.msg, asker: d.asker });
       }
     }
     const fresh = owed.filter((o) => !reminded.has(o.key) && (!t || !t.replied.has(o.msg)));

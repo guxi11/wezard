@@ -285,6 +285,14 @@ const holderMatches = (s: RoomState, d: Duty, who: Who): boolean => sameWho(hold
 export const openDuties = (s: RoomState): Duty[] => [...s.duties.values()].filter((d) => !d.closed);
 /** who 在这个 room 手上未关的 duty。 */
 export const dutiesHeldBy = (s: RoomState, who: Who): Duty[] => openDuties(s).filter((d) => holderMatches(s, d, who));
+/** holder 在最近一次被这条 duty 唤醒之后, 是否已用 chat_reply 交代过 —— 任何 status 都算
+ *  (progress / need 不关账, 但已经「交代过这一轮」, 不该再被提醒、更不该给提问者写系统行)。
+ *  按唤醒算而不按「曾经回过」: need 之后提问者补了信息再唤醒它, 那一轮仍要重新交代。 */
+export const dutyAnswered = (s: RoomState, d: Duty, who: Who): boolean => {
+  const touches = (r: MsgRow): boolean => r.id === d.msg || (r.re ?? []).includes(d.msg);
+  const wokeAt = s.msgs.reduce((at, r) => (touches(r) && r.wake.includes(who.id) ? Math.max(at, r.seq) : at), 0);
+  return s.msgs.some((r) => r.kind === "reply" && r.seq > wokeAt && sameWho(r.author, who) && (r.re ?? []).includes(d.msg));
+};
 /** who 提出、仍未关的 duty。 */
 export const dutiesAskedBy = (s: RoomState, who: Who): Duty[] => openDuties(s).filter((d) => sameWho(d.asker, who));
 
