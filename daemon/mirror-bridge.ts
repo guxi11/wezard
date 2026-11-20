@@ -1744,6 +1744,17 @@ const paneHasLiveSession = async (paneId: string, homeDir: string, panePid?: num
 type PaneProbe = { state: PaneLiveness | "shell" | "session" };
 /** 注入前问 pane 一句话: 还在吗 / 里面还有 AI 会话吗。
  *  `unknown` 必须由调用方按「不知道」处理 —— 不许当 pane 死了去重生。 */
+/** A resume respawn whose transcript is gone can only die at the CLI's
+ *  "No conversation found" — after opening a pane, which, as the shared
+ *  session's lone window, takes the whole `wezard` session down with it. The
+ *  binding is kept on purpose (f113e25: only a human /new replaces a session),
+ *  so every retry would replay that; answer it here instead, non-retryable.
+ *  Codex rollouts are prepared by its own app-server, not resumed by path. */
+const resumeTranscriptMissing = (jsonlPath: string, cli: string): string | undefined =>
+  cli !== "codex" && jsonlPath && !existsSync(jsonlPath)
+    ? `会话转录已不存在 (${basename(jsonlPath)}), 无法 resume; 发 /new 开新会话`
+    : undefined;
+
 const probePane = async (paneId: string, jsonlPath: string): Promise<PaneProbe> => {
   const live = await paneLiveness(paneId);
   if (live !== "alive") return { state: live };
@@ -7773,11 +7784,16 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
       let fresh = a.justSpawned === true;
       if (probe.state !== "session") {
         if (opts?.noRespawn) return { ok: false, retryable: false, reason: "original CLI is unavailable; handoff never respawns" };
+        const respawnCli = backendForPath(a.jsonlPath).name;
+        // Checked before the warn: callers like the room pump retry every 30s,
+        // and a "respawning" line per round for a pane that will never be born
+        // reads as churn that isn't happening.
+        const missing = resumeTranscriptMissing(a.jsonlPath, respawnCli);
+        if (missing) return { ok: false, retryable: false, reason: `respawn skipped: ${missing}` };
         log.warn({ target, sessionId: sid, oldPane: a.tmuxPane, why: probe.state }, "injectText: pane not alive, respawning");
         // Same resume-fork hazard as dispatch: snapshot before spawn, re-bind
         // onto the forked jsonl once it appears (EOF offset — fork is seeded).
         const resumeBaseline = listJsonls(dirname(a.jsonlPath));
-        const respawnCli = backendForPath(a.jsonlPath).name;
         const charter = charterFor(target, { cwd: a.runningCwd, cli: respawnCli });
         const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn-init", sessionId: sid }), resumeSessionId: sid, windowName: displayName(target) || target, cwdOverride: a.runningCwd, chatKey: target, cli: respawnCli, ...respawnSpec(a), systemPrompt: charter });
         if (!r.ok || !r.tmuxPane) return { ok: false, retryable: r.retryable !== false, reason: `respawn failed: ${r.reason ?? "unknown"}` };
@@ -8327,7 +8343,10 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
           // mid-turn reincarnation — only /new and /clear-with-pending swap cwd).
           const respawnCli = backendForPath(a.jsonlPath).name;
           const charter = charterFor(a.target, { cwd: a.runningCwd, cli: respawnCli });
-          const r = await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: displayName(a.target) || a.target, cwdOverride: a.runningCwd, chatKey: a.target, cli: respawnCli, ...respawnSpec(a), systemPrompt: charter });
+          const missing = resumeTranscriptMissing(a.jsonlPath, respawnCli);
+          const r = missing
+            ? { ok: false as const, retryable: false, reason: missing, tmuxPane: undefined, tmuxSession: undefined, cwd: undefined, model: undefined }
+            : await spawnTmuxClaude({ cfg, log: log.child({ sub: "respawn", sessionId: sid }), resumeSessionId: sid, windowName: displayName(a.target) || a.target, cwdOverride: a.runningCwd, chatKey: a.target, cli: respawnCli, ...respawnSpec(a), systemPrompt: charter });
           if (byTarget.get(a.target) !== a || a.sessionId !== sid || (a.injectGen ?? 0) !== myGen || (guard && !guard())) {
             // A stop or replacement during startup revokes this birth before binding.
             if (r.tmuxPane) await runTmux(["kill-pane", "-t", r.tmuxPane]);

@@ -9,6 +9,12 @@ WorkingDirectory=__REPO__
 ExecStart=__NODE__ __REPO__/dist/daemon/index.js
 Restart=always
 RestartSec=5
+# The daemon is often the first to run `tmux new-session` after a boot, so the
+# tmux server forks inside this unit's cgroup. The default KillMode=control-group
+# then kills that server — every wizard pane, the `wezard` session, a human's
+# own sessions on the same socket — on each reload / restart / crash. Stop only
+# the node process; panes outlive it by design (the next daemon re-attaches).
+KillMode=process
 StandardOutput=append:__HOME__/.wezard/daemon.stdout.log
 StandardError=append:__HOME__/.wezard/daemon.stderr.log
 Environment=NODE_ENV=production

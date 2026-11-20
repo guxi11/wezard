@@ -78,6 +78,11 @@ const DETACHED_ROWS = 60;
 
 // stderr signatures of a transient server-side fork failure (ENOMEM/EAGAIN).
 const TRANSIENT_FORK_RE = /Cannot allocate memory|Resource temporarily unavailable/;
+// The two sides of the has-session → new-session/new-window race (see openPane).
+const DUPLICATE_SESSION_RE = /duplicate session/;
+const SESSION_GONE_RE = /can't find session|no server running|session not found/;
+// `--resume <sid>` on a sid whose transcript is gone: no model / flag change can fix it.
+const NO_CONVERSATION_RE = /No conversation found/;
 
 export const TMUX_TIMEOUT_MS = ((): number => {
   const raw = Number(process.env.WEZARD_TMUX_TIMEOUT_MS);
@@ -1171,12 +1176,27 @@ const spawnTmuxInner = async ({ cfg, log, resumeSessionId, sessionId: freshSessi
     // The trailing colon selects the next free window index.
     // Bare `-t wezard` is ambiguous: if a *window* is also named
     // `wezard`, tmux matches it and tries to reuse its index → "index N in use".
-    const create = () => has.code === 0
+    let exists = has.code === 0;
+    const create = () => exists
       ? runTmux(["new-window", "-d", "-t", `=${tmuxName}:`, "-n", winName, ...cwdArg, ...paneEnv, "-P", "-F", "#{pane_id}"])
       : runTmux(["new-session", "-d", "-s", tmuxName, "-n", winName, ...sizeArg, ...cwdArg, ...paneEnv, "-P", "-F", "#{pane_id}"]);
     let pane = warmPane ?? "";
     if (!pane) {
       let created = await create();
+      // has-session → create is not atomic: several respawns at once (boot, the
+      // room pump's 30s kick over cold targets) all see "no session", one wins
+      // new-session and the rest die on "duplicate session" — and a loser that
+      // could have come up is skipped every round while the winner's lone window
+      // takes the whole session down with it (2026-11-21). Flip to the other
+      // verb and go again; the reverse race (session vanished under new-window)
+      // is the same fix.
+      for (let flip = 0; !created.ok && flip < 2; flip++) {
+        const lost = exists ? SESSION_GONE_RE.test(created.stderr) : DUPLICATE_SESSION_RE.test(created.stderr);
+        if (!lost) break;
+        exists = !exists;
+        if (exists) await runTmux(["set-option", "-t", `=${tmuxName}`, "default-size", `${DETACHED_COLS}x${DETACHED_ROWS}`]);
+        created = await create();
+      }
       // Server-side fork failing ENOMEM/EAGAIN is transient on swap-less macOS
       // (a momentary pressure spike, e.g. >20 CLI panes, fails fork outright) —
       // retry briefly before giving up.
@@ -1188,7 +1208,7 @@ const spawnTmuxInner = async ({ cfg, log, resumeSessionId, sessionId: freshSessi
       // leaves zero trace in daemon.log (the 2026-10-14 ENOMEM was unfindable).
       if (!created.ok) {
         log.warn({ tmuxName, winName, stderr: created.stderr.trim(), code: created.code }, "spawn-tmux: pane creation failed");
-        return { reason: `tmux ${has.code === 0 ? "new-window" : "new-session"} failed: ${created.stderr.trim() || created.code}` };
+        return { reason: `tmux ${exists ? "new-window" : "new-session"} failed: ${created.stderr.trim() || created.code}` };
       }
       pane = created.stdout.split("\n").map((s) => s.trim()).filter(Boolean)[0] ?? "";
       if (!pane) return { reason: "tmux returned no pane id" };
@@ -1200,7 +1220,7 @@ const spawnTmuxInner = async ({ cfg, log, resumeSessionId, sessionId: freshSessi
         return { reason: `could not persist workspace handoff pane identity: ${tagged.stderr.trim() || tagged.code}` };
       }
     }
-    log.info({ tmuxName, winName, tmuxPane: pane, cwd, sessionId, cli: backend.name, reused: has.code === 0, warm: !!warmPane, spare: false }, "spawn-tmux: pane created");
+    log.info({ tmuxName, winName, tmuxPane: pane, cwd, sessionId, cli: backend.name, reused: exists, warm: !!warmPane, spare: false }, "spawn-tmux: pane created");
     return { pane, warm: !!warmPane };
   };
 
@@ -1330,6 +1350,10 @@ const spawnTmuxInner = async ({ cfg, log, resumeSessionId, sessionId: freshSessi
   charterArg(cfg, backend, sessionId, systemPrompt, log);
   const first: Launched = spare ? { ok: true, pane: spare.pane, ready: true } : await launch(flagModel);
   if (!first.ok) return { ok: false, reason: first.reason };
+  // A transcript that no longer exists will fail the bare relaunch exactly the
+  // same way — and every retry by a caller would open (and tear down) one more
+  // pane. Say so once, non-retryable; only a human /new replaces the session.
+  if (first.failure && NO_CONVERSATION_RE.test(first.failure)) return { ok: false, retryable: false, reason: `会话转录已不存在, 无法 --resume ${sessionId}; 发 /new 开新会话 (${first.failure})` };
   if (first.failure && !flagModel) return { ok: false, reason: first.failure };
   let landed = first;
   const launchFailure = flagModel ? first.failure : undefined;
