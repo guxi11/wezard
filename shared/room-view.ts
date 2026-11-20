@@ -70,9 +70,25 @@ export const buildRoomFact = (s: RoomState, n: RenderNames): RoomFact => {
     title: s.title ?? "",
     bound: isBoundRoom(s.id),
     ...(host ? { host } : {}),
-    members: [...s.members.values()]
-      .sort((a, b) => a.ord - b.ord)
-      .map((m) => ({ who: m.who, name: n.nameOf(m.who), via: m.via, since: m.since, ord: m.ord, host: !!host && sameWho(host, m.who) })),
+    members: (() => {
+      const list = [...s.members.values()].sort((a, b) => a.ord - b.ord)
+        .map((m) => ({ who: m.who, name: n.nameOf(m.who), via: m.via, since: m.since, ord: m.ord, host: !!host && sameWho(host, m.who) }));
+      // 人从来不走 join (没有 join 行): 只在消息里出现。补成参与者, 否则图上没有 user 节点。
+      const seen = new Set(list.map((m) => m.who.kind + ":" + m.who.id));
+      let ord = list.reduce((mx, m) => Math.max(mx, m.ord), 0);
+      const said = new Map<string, { who: Who; at: number }>();
+      for (const row of s.msgs) {
+        if (row.author.kind !== "human") continue;
+        const key = "human:" + row.author.id;
+        if (seen.has(key)) continue;
+        const hit = said.get(key);
+        if (!hit || row.at < hit.at) said.set(key, { who: row.author, at: row.at });
+      }
+      [...said.values()].sort((a, b) => a.at - b.at).forEach((x) => {
+        list.push({ who: x.who, name: n.nameOf(x.who), via: "inbound", since: x.at, ord: ++ord, host: false });
+      });
+      return list;
+    })(),
     ...(lastRow && preview ? { last: { seq: lastRow.seq, at: lastRow.at, author: lastRow.author, authorName: n.nameOf(lastRow.author), preview } } : {}),
     openDuties: openDuties(s).length,
   };

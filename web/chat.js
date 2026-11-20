@@ -259,6 +259,7 @@
         vb: { x: svg.viewBox.baseVal.x, y: svg.viewBox.baseVal.y,
           w: svg.viewBox.baseVal.width, h: svg.viewBox.baseVal.height } };
       S.gmoved = false;
+      S.gdrag = start.id;
       // 不能在这里 capture: 指针捕获会把随后的 click 改派给 svg, 节点上的点开就失灵了。
       // 等真的开始拖了再捕获。
     };
@@ -276,9 +277,9 @@
         // 直接把 d3 的钉子挪过去并升温: 邻居跟着走, 松手也不会重置布局。
         var node = S.g && S.g.index ? S.g.nodes[S.g.index[start.id]] : null;
         if (node) {
+          // 只搬这一个节点: 不升温、不重排 —— 不然整张图会一起漂, 看着就像没抓住。
           node.x = w.x; node.y = w.y; node.fx = w.x; node.fy = w.y;
-          if (S.g) drawPos(S.g);                    // 立刻跟手, 不等下一帧
-          if (S.sim) S.sim.alphaTarget(0.2).restart();
+          if (S.g) drawPos(S.g);
         }
         if (start.el) start.el.setAttribute('transform', 'translate(' + w.x.toFixed(1) + ' ' + w.y.toFixed(1) + ')');
       } else {
@@ -292,8 +293,9 @@
     };
     var stop = function (e) {
       start = null;
+      S.gdrag = '';
       try { svg.releasePointerCapture(e.pointerId); } catch (err) { /* 已释放 */ }
-      if (S.sim) S.sim.alphaTarget(0);   // 冷却: 留在原地, 不重新排布
+      if (S.sim) S.sim.alphaTarget(0);   // 留在原地, 不重新排布
     };
     svg.onpointerup = stop;
     svg.onpointercancel = stop;
@@ -343,6 +345,7 @@
     });
   };
   var renderGraph = function () {
+    if (S.gdrag) return;    // 正在拖: 定时刷新别来重建 DOM
     var rooms = (W.rooms || []).slice().sort(function (a, b) { return (b.last ? b.last.at : 0) - (a.last ? a.last.at : 0); });
     if (!S.showAll) rooms = rooms.filter(function (r) { return r.openDuties > 0 || fresh(r.last && r.last.at, ROOM_FRESH_MS); });
     var people = participants(rooms).sort(function (a, b) { return (b.lastTs || 0) - (a.lastTs || 0) || (a.name < b.name ? -1 : 1); });

@@ -23,7 +23,7 @@ import type { URL } from "node:url";
 import { baseOfKey, sameBot } from "./session-label.js";
 import { isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, withData, type WorldFacts } from "./world.js";
-import { buildRoomFact, dutyFacts, roomHistory, whoRef, wizardMessages, type RoomMsg } from "./room-view.js";
+import { buildRoomFact, buildRoomFacts, dutyFacts, roomHistory, whoRef, wizardMessages, type RoomMsg } from "./room-view.js";
 import type { RenderNames, RoomState } from "./room.js";
 import { makeDirectory, roleInfo, roleStats, sessionsOf, type SessionSpan } from "./role-view.js";
 import { roomMembers } from "./group-members.js";
@@ -209,12 +209,19 @@ const turnLinker = (records: readonly DetailRecord[], f: WorldFacts) => {
 interface View { role: string; span?: SessionSpan }
 
 export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider, _seen?: SeenLog, rooms?: RoomReader): ChatRoutes => {
+  // room 账本在手边 (daemon / 同机 svr) 就以账本为准重建 rooms —— 推送快照只补认表,
+  // 不然 daemon 没重启时这里会一直是旧的一份 (比如人节点缺失)。
+  const roomsNow = (f: WorldFacts): WorldFacts => {
+    if (!rooms) return f;
+    const states = rooms.ids().flatMap((id) => { try { const s = rooms.get(id); return s ? [s] : []; } catch { return []; } });
+    return states.length ? { ...f, rooms: buildRoomFacts(states, namesOf(f)) } : f;
+  };
   const getFacts = (t: Ticket): Promise<WorldFacts> =>
     Promise.resolve(facts ? facts() : EMPTY_FACTS)
       .then((f) => {
         const now = Date.now();
         const records = listRecent(t);
-        return withData(recentFacts(botFacts(f, viewerOf(t)), records, now), records, now);
+        return withData(recentFacts(botFacts(roomsNow(f), viewerOf(t)), records, now), records, now);
       })
       .catch(() => EMPTY_FACTS);
   const listRecent = (t: Ticket): DetailRecord[] => botRecords(recentRecords(store.list(), Date.now() - HORIZON_MS), viewerOf(t));
