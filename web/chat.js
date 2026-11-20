@@ -23,7 +23,7 @@
 
   var W = { at: 0, rooms: [], nodes: [], edges: [], uidTargets: {}, chatNames: {}, names: {}, degraded: false };
   var D = { mode: '', roomId: '', role: '', uid: '', at: 0, msgs: [], total: 0, earlier: '', room: null, label: '', members: [], duties: [], wizard: null, sessions: [], session: 'all', all: qs.get('all') === '1', ledger: true, plans: [], schedules: [] };
-  var S = { showTree: false, showAll: false, openTurns: {}, charter: null };
+  var S = { showTree: false, showAll: false, openTurns: {}, charter: null, sim: null, gsig: '', gmap: null, elById: null, lines: null };
   // 默认只画还在动的东西: room 近 3 天有消息或有未结 duty; 人 24h 内说过话 / 在跑 / 是 host。
   // 「全部」开关恢复成整本账 (迁移带进来的历史成员都在那儿)。
   var ROOM_FRESH_MS = 2 * 86400000, PERSON_FRESH_MS = 12 * 3600000;
@@ -119,7 +119,13 @@
     var panelH = Math.max(300, (convsEl.clientHeight || 620) - 30);
     var hw = Math.max(104, Math.min(panelW * 0.46, Math.sqrt(rooms.length + people.length) * 26));
     var hh = hw * Math.max(1.4, Math.min(2.2, panelH / panelW));
-    var add = function (n) { index[n.id] = nodes.length; nodes.push(n); };
+    // 拓扑没变时沿用上一轮的对象: 拖过的位置、速度都留着, 定时刷新不会把图弹回原样。
+    var prev = S.gmap || {};
+    var add = function (n) {
+      var old = prev[n.id];
+      if (old) { n.x = old.x; n.y = old.y; n.vx = old.vx; n.vy = old.vy; n.fx = old.fx; n.fy = old.fy; }
+      index[n.id] = nodes.length; nodes.push(n);
+    };
     rooms.forEach(function (r, i) {
       var w = Math.max(62, Math.min(132, 30 + roomLabelOf(r).length * 6.6));
       add({ id: 'r:' + r.id, ref: r, isRoom: true, w: w, r: Math.max(w, 22) / 2,
@@ -145,9 +151,9 @@
     }
     return { nodes: nodes, links: links, index: index, hw: hw, hh: hh };
   };
-  var simulateGraph = function (g, iter) {
+  var simulateGraph = function (g, iter, draw) {
     var ns = g.nodes, n = ns.length;
-    if (!n) return;
+    if (!n) return null;
     var k = Math.max(46, Math.min(110, 2 * Math.sqrt((g.hw * g.hh) / n)));
     // 随包分发的 d3 (web/d3.min.js → /chat/vendor.js) 在, 就用它的力导向模拟。
     var d3 = window.d3;
@@ -168,8 +174,10 @@
         .force("x", d3.forceX(0).strength(0.12))
         .force("y", d3.forceY(0).strength(0.12))
         .stop();
+      if (draw) sim.on("tick", draw);
       sim.tick(iter);
-      return;
+      if (draw) draw();
+      return sim;
     }
     // 椭圆软墙: 模拟空间跟着左栏的长宽比走, 出来的团才填得满那一竖条
     var wall = function (p) {
@@ -224,6 +232,8 @@
       });
       alpha *= 0.985;
     }
+    if (draw) draw();
+    return null;
   };
   var gRaf = 0;
   var scheduleGraph = function () {
@@ -263,6 +273,13 @@
         var w = toWorld(e);
         S.gpos = S.gpos || {};
         S.gpos[start.id] = { x: w.x, y: w.y };
+        // 直接把 d3 的钉子挪过去并升温: 邻居跟着走, 松手也不会重置布局。
+        var node = S.g && S.g.index ? S.g.nodes[S.g.index[start.id]] : null;
+        if (node) {
+          node.x = w.x; node.y = w.y; node.fx = w.x; node.fy = w.y;
+          if (S.g) drawPos(S.g);                    // 立刻跟手, 不等下一帧
+          if (S.sim) S.sim.alphaTarget(0.2).restart();
+        }
         if (start.el) start.el.setAttribute('transform', 'translate(' + w.x.toFixed(1) + ' ' + w.y.toFixed(1) + ')');
       } else {
         var box = svg.getBoundingClientRect();
@@ -274,27 +291,25 @@
       }
     };
     var stop = function (e) {
-      var moved = S.gmoved;
       start = null;
       try { svg.releasePointerCapture(e.pointerId); } catch (err) { /* 已释放 */ }
-      if (moved) scheduleGraph();   // 拖完再按新坐标重排一次
+      if (S.sim) S.sim.alphaTarget(0);   // 冷却: 留在原地, 不重新排布
     };
     svg.onpointerup = stop;
     svg.onpointercancel = stop;
     svg.onwheel = function (e) {
       e.preventDefault();
-      S.gzoom = Math.max(0.35, Math.min(4, (S.gzoom || 1) * (e.deltaY < 0 ? 1.12 : 0.89)));
-      scheduleGraph();
+      var z = Math.max(0.35, Math.min(4, (S.gzoom || 1) * (e.deltaY < 0 ? 1.12 : 0.89)));
+      var f = (S.gzoom || 1) / z;
+      S.gzoom = z;
+      var b = svg.viewBox.baseVal;
+      svg.setAttribute('viewBox', [(b.x + (b.width * (1 - f)) / 2), (b.y + (b.height * (1 - f)) / 2), b.width * f, b.height * f]
+        .map(function (v) { return v.toFixed(1); }).join(' '));
     };
-    svg.ondblclick = function () { S.gzoom = 1; S.gpx = 0; S.gpy = 0; S.gpos = {}; renderGraph(); };
+    svg.ondblclick = function () { S.gzoom = 1; S.gpx = 0; S.gpy = 0; S.gpos = {}; S.gsig = ''; renderGraph(); };
     svg.onclick = function () { setTimeout(function () { S.gmoved = false; }, 0); };
   };
-  var renderGraph = function () {
-    var rooms = (W.rooms || []).slice().sort(function (a, b) { return (b.last ? b.last.at : 0) - (a.last ? a.last.at : 0); });
-    if (!S.showAll) rooms = rooms.filter(function (r) { return r.openDuties > 0 || fresh(r.last && r.last.at, ROOM_FRESH_MS); });
-    var people = participants(rooms).sort(function (a, b) { return (b.lastTs || 0) - (a.lastTs || 0) || (a.name < b.name ? -1 : 1); });
-    var g = buildGraph(rooms, people);
-    simulateGraph(g, G_ITER);
+  var viewBoxOf = function (g) {
     var minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
     g.nodes.forEach(function (p) {
       var hw = p.isRoom ? p.w / 2 + 4 : Math.max(p.r + 6, Math.min(52, (p.ref.name || "").length * 3.4)),
@@ -308,10 +323,50 @@
     var z = S.gzoom || 1;
     var vw = Math.max(80, maxX - minX + pad * 2) / z, vh = Math.max(80, maxY - minY + pad * 2) / z;
     var width = Math.max(240, (convsEl.clientWidth || 332) - 12);
-    // 画布撑满左栏: viewBox 补到和画布同比例, 内容居中, 不留 letterbox
     var height = Math.max(260, (convsEl.clientHeight || 620) - 34);
     var aspect = width / height;
     if (vw / vh < aspect) vw = vh * aspect; else vh = vw / aspect;
+    return { box: [cxm - vw / 2, cym - vh / 2, vw, vh], width: width, height: height };
+  };
+  var drawPos = function (g) {
+    var el = S.elById || {};
+    g.nodes.forEach(function (p) {
+      var e = el[p.id];
+      if (e) e.setAttribute('transform', 'translate(' + p.x.toFixed(1) + ' ' + p.y.toFixed(1) + ')');
+    });
+    (S.lines || []).forEach(function (ln, i) {
+      var l = g.links[i];
+      if (!l) return;
+      var a = g.nodes[l.a], b = g.nodes[l.b];
+      ln.setAttribute('x1', a.x.toFixed(1)); ln.setAttribute('y1', a.y.toFixed(1));
+      ln.setAttribute('x2', b.x.toFixed(1)); ln.setAttribute('y2', b.y.toFixed(1));
+    });
+  };
+  var renderGraph = function () {
+    var rooms = (W.rooms || []).slice().sort(function (a, b) { return (b.last ? b.last.at : 0) - (a.last ? a.last.at : 0); });
+    if (!S.showAll) rooms = rooms.filter(function (r) { return r.openDuties > 0 || fresh(r.last && r.last.at, ROOM_FRESH_MS); });
+    var people = participants(rooms).sort(function (a, b) { return (b.lastTs || 0) - (a.lastTs || 0) || (a.name < b.name ? -1 : 1); });
+    var g = buildGraph(rooms, people);
+    S.g = g;
+    S.gmap = {};
+    g.nodes.forEach(function (p) { S.gmap[p.id] = p; });
+    var sig = rooms.map(function (r) { return r.id; }).join(',') + '|' +
+      people.map(function (p) { return p.target; }).join(',') + '|' + (S.showTree ? 1 : 0);
+    var svg = convsEl.querySelector('.rv-graph');
+    // 拓扑没变 (定时刷新 / 换选中): 只刷选中态和 viewBox, 不动坐标 —— 图不会跳回原位。
+    if (sig === S.gsig && svg && S.sim) {
+      g.nodes.forEach(function (p) {
+        var e = S.elById[p.id];
+        if (!e) return;
+        var on = p.isRoom ? (D.mode === 'room' && D.roomId === p.ref.id) : (D.mode === 'wizard' && D.role === p.ref.target);
+        if (on) e.classList.add('on'); else e.classList.remove('on');
+      });
+      var vb0 = viewBoxOf(g);
+      svg.setAttribute('viewBox', vb0.box.map(function (v) { return v.toFixed(1); }).join(' '));
+      drawPos(g);
+      return;
+    }
+    if (S.sim) { S.sim.on('tick', null); S.sim.stop(); S.sim = null; }
     var onRoom = function (id) { return D.mode === 'room' && D.roomId === id; };
     var lines = g.links.map(function (l) {
       var p = g.nodes[l.a], q = g.nodes[l.b];
@@ -337,17 +392,32 @@
     convsEl.innerHTML = '<div class="rv-ghead">' + esc(rooms.length + ' 个 room · ' + people.length + ' 位参与者' + (S.showAll ? '' : ' (近 2 天)')) +
       ' <span class="rv-gbtns"><button class="rv-tree-t' + (S.showAll ? ' on' : '') + '" id="rv-all">全部</button>' +
       '<button class="rv-tree-t' + (S.showTree ? ' on' : '') + '" id="rv-tree">家谱</button></span></div>' +
-      '<svg class="rv-graph" width="' + width + '" height="' + height + '" viewBox="' +
-      [(cxm - vw / 2).toFixed(1), (cym - vh / 2).toFixed(1), vw.toFixed(1), vh.toFixed(1)].join(' ') + '">' +
-      '<g class="rv-gedges">' + lines + '</g>' + roomNodes + personNodes + '</svg>';
+      '<svg class="rv-graph"></svg>';
+    var svg2 = convsEl.querySelector('.rv-graph');
+    var el = {};
+    svg2.querySelectorAll('[data-node]').forEach(function (e) { el['p:' + e.getAttribute('data-node')] = e; });
+    svg2.querySelectorAll('[data-room]').forEach(function (e) { el['r:' + e.getAttribute('data-room')] = e; });
+    // 先填内容再启模拟: tick 直接更新这些元素, 拖动时邻居会跟着动, 不用重建 DOM。
+    svg2.innerHTML = '<g class="rv-gedges">' + lines + '</g>' + roomNodes + personNodes;
+    el = {};
+    svg2.querySelectorAll('[data-node]').forEach(function (e) { el['p:' + e.getAttribute('data-node')] = e; });
+    svg2.querySelectorAll('[data-room]').forEach(function (e) { el['r:' + e.getAttribute('data-room')] = e; });
+    S.elById = el;
+    S.lines = Array.prototype.slice.call(svg2.querySelectorAll('line'));
+    var vb = viewBoxOf(g);
+    svg2.setAttribute('width', vb.width);
+    svg2.setAttribute('height', vb.height);
+    S.sim = simulateGraph(g, G_ITER, function () { drawPos(g); });
+    S.gsig = sig;
+    svg2.setAttribute('viewBox', vb.box.map(function (v) { return v.toFixed(1); }).join(' '));
     var treeBtn = $('#rv-tree');
     if (treeBtn) treeBtn.onclick = function () { S.showTree = !S.showTree; renderGraph(); };
     var allBtn = $('#rv-all');
     if (allBtn) allBtn.onclick = function () { S.showAll = !S.showAll; renderGraph(); };
-    bindGraph(convsEl.querySelector('.rv-graph'));
-    convsEl.querySelectorAll('[data-room]').forEach(function (el) { el.onclick = function () { if (S.gmoved) return; loadRoom(el.getAttribute('data-room')); }; });
-    convsEl.querySelectorAll('[data-node]').forEach(function (el) { el.onclick = function () { if (S.gmoved) return; loadWizard(el.getAttribute('data-node')); }; });
-  };
+    bindGraph(svg2);
+    convsEl.querySelectorAll('[data-room]').forEach(function (e) { e.onclick = function () { if (S.gmoved) return; loadRoom(e.getAttribute('data-room')); }; });
+    convsEl.querySelectorAll('[data-node]').forEach(function (e) { e.onclick = function () { if (S.gmoved) return; loadWizard(e.getAttribute('data-node')); }; });
+  };;
 
   // ── 右侧 ───────────────────────────────────────────────────────────
   var chip = function (text, cls) { return text ? '<span class="rv-chip' + (cls ? ' ' + cls : '') + '">' + esc(text) + '</span>' : ''; };

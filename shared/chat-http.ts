@@ -179,9 +179,22 @@ const turnLinker = (records: readonly DetailRecord[], f: WorldFacts) => {
   }
   for (const rs of byTarget.values()) rs.sort((a, b) => a.createdAt - b.createdAt);
   const uidTarget = new Map(f.wizards.filter((w) => w.uid).map((w) => [w.uid!, w.target] as const));
+  // 注册表里已经没有的实例 (切换前 migrate 进来的那批) 只剩显示名 —— 按 target 的 tag 兜底,
+  // 不然这些成员的「过程」框永远点不开。
+  const byTag = new Map<string, string>();
+  for (const r of records.filter(isTurn)) {
+    const tag = r.target && !r.agent ? r.target.split("#")[1] : "";
+    if (tag) byTag.set(tag, r.target!);
+  }
+  const targetOf = (uid: string): string => {
+    const hit = uidTarget.get(uid);
+    if (hit) return hit;
+    const name = f.names?.[uid] ?? "";
+    return name ? byTag.get(name) ?? "" : "";
+  };
   return (m: RoomMsg): string | undefined => {
     if (m.author.kind !== "wizard") return undefined;
-    const rs = byTarget.get(uidTarget.get(m.author.id) ?? "");
+    const rs = byTarget.get(targetOf(m.author.id));
     if (!rs?.length) return undefined;
     let lo = 0, hi = rs.length - 1, hit: TurnDetailRecord | undefined;
     while (lo <= hi) {
