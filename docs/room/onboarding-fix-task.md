@@ -36,9 +36,9 @@ docs/room/contract.md §4: 新群 guide 以 founder (ord=1) 入 room 即 host; �
 - 完成后用 chat_reply(status:"done") 交代: commit、改了哪些文件、各测试 rc、遗留。
 
 ## 进度 (执行者自维护)
-- [ ] 1 快路径收窄
-- [ ] 2 guide founder
-- [ ] 3 白名单
-- [ ] 4 onboard_bind
-- [ ] 5 话术
-- [ ] 测试 + typecheck + build + 提交
+- [x] 1 快路径收窄
+- [x] 2 guide founder — ensureBoundRoom 原本不会给未绑定群开 guide room (它先 resolveSteward, 回落 routed), 所以 new 了一条: index.ts `guideTakeover` 显式开 room + guide 作 founder ord=1
+- [x] 3 白名单 (GUIDE_TOOLS; 本群 room 的限制在 /room/say 与 /room/reply 的 guideOutsideRoom)
+- [x] 4 onboard_bind (+ planOnboardBind 纯判定; 轮终后收尸)
+- [x] 5 话术 (renderGuideOpening 现在是引导的「宪章」)
+- [x] 测试 + typecheck + build + 提交 — d493ca6; onboarding.test.ts rc=0, room-leave-cancel.test.ts rc=0, typecheck/build 0
