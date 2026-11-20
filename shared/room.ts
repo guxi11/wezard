@@ -362,6 +362,11 @@ const fail = (status: 400 | 403 | 409, reason: string): Verdict => ({ ok: false,
 const dedupKey = (author: Who, kind: MsgKind, text: string, to: readonly Who[] | undefined, re: readonly string[] | undefined, status?: ReplyStatus): string =>
   [whoKey(author), kind, sha1(text).slice(0, 12), (to ?? []).map(whoKey).sort().join(","), (re ?? []).join(","), status ?? ""].join("|");
 
+/** 请求体里的 id 列表: 缺省 = []。别写成 [x].map(String) —— undefined 会变成假 id "undefined"
+ *  (2026-11-20: chat_ask 没给 after 时 after=["undefined"], 前置永不算满足, 被点名的人永不唤醒)。 */
+export const idList = (x: unknown): string[] =>
+  x == null ? [] : (Array.isArray(x) ? x : [x]).map((v) => String(v).trim()).filter(Boolean);
+
 /** 10 分钟窗内这个 room 已经花掉的唤醒数 (从账本算, 重启不丢)。 */
 export const wakesInWindow = (s: RoomState, now: number, windowMs = WAKE_WINDOW_MS): number =>
   s.msgs.reduce((n, m) => (now - m.at < windowMs ? n + m.wake.length + (m.interrupt ? 1 : 0) : n), 0);

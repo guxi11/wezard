@@ -51,7 +51,7 @@ import { stewardRoute as resolveSteward } from "./steward.js";
 import { createRoomWatchdog, parsePaneIds } from "./room-watchdog.js";
 import { createRoomHub, type RoomHub } from "./room-hub.js";
 import {
-  DAEMON, adhocRoomId, canRename, dmPeers, dmRoomId, holderOf, isUid, leaveOps, openDuties, renderMsgLine, roomHost, roomsDirOf, sameWho, whoKey,
+  DAEMON, adhocRoomId, canRename, dmPeers, dmRoomId, holderOf, idList, isUid, leaveOps, openDuties, renderMsgLine, roomHost, roomsDirOf, sameWho, whoKey,
   type MsgRow, type ReplyStatus, type RoomOp, type RoomState, type Verdict, type Who,
 } from "../shared/room.js";
 import { CHAT_BATCH_BUDGET, sliceBatch } from "../shared/chat-record.js";
@@ -1473,7 +1473,7 @@ const main = async (): Promise<void> => {
       if (!to.who?.length) { json(res, 400, { ok: false, reason: "to required: 至少点名一个 wizard" }); return; }
       const target = roomTargetOf(me, to.who, b.room);
       if (target.error || !target.room) { json(res, target.status ?? 400, { ok: false, reason: target.error ?? target.reason }); return; }
-      const after = (Array.isArray(b.after) ? b.after : [b.after]).map(String).filter((x) => x.trim());
+      const after = idList(b.after);
       roomReply(res, hub.append(target.room, { author: me, kind: b.kind === "task" ? "task" : "ask", text, origin: "tool", to: to.who,
         ...(after.length ? { after } : {}), ...((b.for ?? "").toString().trim() ? { for: (b.for ?? "").toString().trim() } : {}),
         ...((b.planId ?? "").toString().trim() ? { planId: (b.planId ?? "").toString().trim() } : {}),
@@ -1485,7 +1485,7 @@ const main = async (): Promise<void> => {
       const me = roomSelfOf(self);
       if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
       const b = body as { re?: string[] | string; text?: string; status?: string };
-      const re = (Array.isArray(b.re) ? b.re : [b.re]).map(String).filter((x) => x.trim());
+      const re = idList(b.re);
       if (!re.length) { json(res, 400, { ok: false, reason: "re required: 要答的那条 (或那几条) 消息 id" }); return; }
       const rooms = [...new Set(re.map((id) => roomStore.roomOfMsg(id)))];
       if (rooms.some((x) => !x)) { json(res, 400, { ok: false, reason: "认不出的消息 id: " + re.filter((id) => !roomStore.roomOfMsg(id)).join(", ") }); return; }
@@ -1507,7 +1507,7 @@ const main = async (): Promise<void> => {
       const b = body as { room?: string[] | string; markdown?: string };
       const markdown = (b.markdown ?? "").toString();
       if (!markdown.trim()) { json(res, 400, { ok: false, reason: "markdown required" }); return; }
-      const refs = (Array.isArray(b.room) ? b.room : [b.room]).map(String).filter((x) => x.trim());
+      const refs = idList(b.room);
       const rooms: string[] = [];
       for (const ref of refs) {
         const r = roomResolve(ref);
@@ -1540,7 +1540,7 @@ const main = async (): Promise<void> => {
       if (!["image", "file", "voice", "video"].includes(kind)) { json(res, 400, { ok: false, reason: "kind 只认 image / file / voice / video" }); return; }
       const target = roomTargetOf(me, undefined, b.room);
       if (target.error || !target.room) { json(res, target.status ?? 400, { ok: false, reason: target.error ?? target.reason }); return; }
-      const re = (Array.isArray(b.re) ? b.re : [b.re]).map(String).filter((x) => x.trim());
+      const re = idList(b.re);
       const text = [b.title, b.caption, b.description].map((x) => (x ?? "").toString().trim()).filter(Boolean).join(" — ");
       roomReply(res, hub.append(target.room, { author: me, kind: "file", text, origin: "tool",
         files: [{ path, kind, name: basename(path) }], ...(re.length ? { re } : {}) }));
