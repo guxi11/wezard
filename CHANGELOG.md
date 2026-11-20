@@ -41,6 +41,7 @@
 - rolepage 工具框里的出站调用 (chat_reply / chat_say / notify / send_file, 含 REPL / DeferExecuteTool 外壳) 像 delegate / tell_peer 一样挂一行「发到哪、发了什么」: `↩ 回复 / 💬 发言 / 📣 通知 / 📎 发文件 → 群名` + 正文首行 (全文收在 chevron 下), 没起名的群写「本群」/「未命名群」而不是 base; 交付细节 (替换占位气泡 / 新消息 / 答的哪条 msg) 只进悬停说明, 只露 `未发言` / `频道评论` / `待送达` 这类人要知道的标签。外壳里认出了 wezard 调用时, 工具标题改成「说明 · 调了哪些工具」(如 `REPL(回复 hi · chat_reply)`), 不再把 JS 源码塞进标题 (delegate 等同样受益); 提示行都调成了就不再摆那行转义了几层的回包 JSON 预览 (原文仍在展开后的 output 里)。
 
 ### Fixed
+- **新群引导: 引导先关账再绑定, 原话仍交给管家 (v3 遗留项 6)**: 以前只 move 仍开的 duty, 引导若先 chat_reply 关掉人那句再 onboard_bind, 原话就到不了管家 (只靠指令约束)。现在 `guideHandoffOps` 找出引导关掉的人话行 (`guideClosedHumanLines`), 在完成行后追加一条 daemon task 行 (`sys:"onboard-forward"`, re 那些人话、正文引用原话) 给管家开新 duty 并唤醒一次; 完成行此时不再重复唤醒。
 - **rolepage 图: 两人 room 直连线 (v3 遗留项 3, 人 2026-11-21 改规则)**: 只有恰好两个 wizard、没有人 (human) 成员的 room 不画 room 节点, 改为两人间可点的直连线 (点 = 打开该 room; 有未决 duty 时浅红); room 里只要有人始终画 room 节点。修「Grace ↔ Jack 有 room 节点却没有 Jack」: `participants()` 对 room 成员按活跃度 / 时间窗二次筛选, 不活跃成员被筛掉后 room 的成员边画不出 —— 改成 room 上图则成员全上图。
 - **room 轮终「被提醒后仍没有交代」误报 (人 2026-11-21)**: 唤醒判定只认「这一轮 chat_reply 过」, 用 progress / need 交代、把活转给同伴的 holder 下一轮闲下来仍被提醒, 再下一轮往群里写系统行。现按账本算 (`dutyAnswered`, shared/room.ts): holder 在最近一次被该 duty 唤醒之后写过任何 status 的 reply 即算交代 —— duty 照常开着等 done, 只是不提醒、不告状; need 被补答再唤醒后没交代仍照常提醒一次 → 系统行。同时修掉群里「[wezard] [wezard] …」: `roomBubble` 对正文已带 `[wezard]` 的 daemon 行不再叠前缀。
 - **rolepage 注入气泡 (v3 遗留项 1/2)**: 注入行回账本取全文后也过 `splitInline` —— `<system-reminder>` 信封不再原文外露 (折成标签进 rems); 「注入原文」从气泡里的折叠块改成头部 avatar 行末的 `⟨/⟩` icon, 点击整行 + 气泡一起切到原文; 时间与「过程」按钮紧跟收发人, 不再顶到最右。

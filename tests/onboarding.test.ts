@@ -236,6 +236,22 @@ try {
   assert.equal(sys.kind, "system", "最后一行是完成确认");
   assert.deepEqual(sys.wake, [sw.id], "系统行唤醒管家");
   assert.equal(mirrors(sys), true, "系统行镜像进企微");
+  // 引导先 done 关了人话再绑定: 原话仍随一条 daemon task 交给管家, 并给管家开新 duty
+  const closedRow: RoomOp = { op: "msg", at: 4, room: ROOM, id: msgIdOf(ROOM, 2), seq: 2, author: gw, ord: 1, speak: "member", kind: "reply",
+    text: "好的", re: [asked], status: "done", closes: [openDuties(foldRoom(ROOM, journal))[0]!.key], wake: [], origin: "tool" };
+  const early = foldRoom(ROOM, [...journal, closedRow]);
+  assert.equal(openDuties(early).length, 0, "前提: 人那条已被引导关账");
+  const hand2 = guideHandoffOps(early, { guide: gw, steward: sw, text: "✅ 引导完成", now: 10 });
+  const after2 = foldRoom(ROOM, [...[...journal, closedRow], ...hand2]);
+  const fwd = after2.msgs.find((m) => m.sys === "onboard-forward")!;
+  assert.ok(fwd, "有转交原话的 daemon 行");
+  assert.equal(fwd.kind, "task");
+  assert.deepEqual(fwd.wake, [sw.id], "唤醒管家");
+  assert.match(fwd.text, /在 ~\/develop\/Tencent 下建一个 dhtpm 并绑定/, "正文带原话");
+  assert.deepEqual(fwd.re, [asked]);
+  const fduty = openDuties(after2).find((d) => d.msg === fwd.id)!;
+  assert.equal(sameWho(holderOf(after2, fduty), sw), true, "管家名下有新 duty, 可 chat_reply 交代");
+  assert.deepEqual(after2.msgs.find((m) => m.sys === "onboard-done")!.wake, [], "完成行不重复唤醒");
   assert.deepEqual(guideHandoffOps(foldRoom("chat:wrNONE", []), { guide: gw, steward: sw, text: "x", now: 1 }), [],
     "引导不在 room 里 = 没得交");
 

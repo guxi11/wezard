@@ -20,7 +20,7 @@ import { instanceName } from "./classes.js";
 import { appointedChannelSteward, appointedSteward, stewardsAt } from "./steward.js";
 import type { WizardRecord, WizardStore } from "./wizard.js";
 import { channelOf, postsOfChannel } from "./channel-posts.js";
-import { DAEMON, applyOp, holderOf, leaveOps, msgIdOf, openDuties, sameWho, whoKey, type RoomOp, type RoomState, type Who } from "../shared/room.js";
+import { DAEMON, applyOp, holderOf, leaveOps, msgIdOf, openDuties, sameWho, whoKey, type MsgRow, type RoomOp, type RoomState, type Who } from "../shared/room.js";
 
 export type OnboardingStep = "workspace";
 
@@ -367,6 +367,18 @@ export const planOnboardBind = (a: {
 
 // ── 引导落定: 把 room 交给管家 (契约 §4) ──────────────────────────────
 
+/** 引导在 room 期间自己关掉的人话行 (人的原话): 关账后 move 够不着它们, 要另开 duty 交给管家。 */
+export const guideClosedHumanLines = (s: RoomState, guide: Who): MsgRow[] => {
+  const seen = new Set<string>();
+  return [...s.duties.values()].flatMap((d) => {
+    const closer = d.closed && s.byId.get(d.closed.by);
+    const row = s.byId.get(d.msg);
+    if (!closer || !row || !sameWho(closer.author, guide) || row.author.kind !== "human" || seen.has(row.id)) return [];
+    seen.add(row.id);
+    return [row];
+  });
+};
+
 /** 一次交接的全部账本行: 管家 join (via invite, by guide) → guide 名下未结 duty 全部 move 给
  *  管家 (人的原话因此跟到管家手上) → guide leave (此时它手上已无 duty, 不产生 canceled 行) →
  *  daemon 系统行 (引导完成, 镜像进企微, 唤醒管家)。纯函数: 调用方把这一串写进 hub。
@@ -385,9 +397,18 @@ export const guideHandoffOps = (
   if (mine.length)
     push(mine.map((d) => ({ op: "move" as const, at: a.now, room: cur.id, duty: d.msg, from: a.guide, to: a.steward, by: a.guide })));
   push(leaveOps(cur, a.guide, a.guide, a.now, "引导完成, 管家接手"));
+  const orphans = guideClosedHumanLines(cur, a.guide);
   const seq = cur.seq + 1;
+  // 有被引导先关账的人话时, 唤醒交给下面那条 task (带原话 + 新 duty), 完成行只做确认, 免得唤醒两次。
   push([{ op: "msg", at: a.now, room: cur.id, id: msgIdOf(cur.id, seq), seq, author: DAEMON, ord: 0, speak: "daemon",
-    kind: "system", text: a.text, to: [a.steward], wake: [a.steward.id], origin: "daemon", sys: "onboard-done" }]);
+    kind: "system", text: a.text, to: [a.steward], wake: orphans.length ? [] : [a.steward.id], origin: "daemon", sys: "onboard-done" }]);
+  if (orphans.length) {
+    const seq2 = cur.seq + 1;
+    push([{ op: "msg", at: a.now, room: cur.id, id: msgIdOf(cur.id, seq2), seq: seq2, author: DAEMON, ord: 0, speak: "daemon",
+      kind: "task", to: [a.steward], re: orphans.map((r) => r.id), wake: [a.steward.id], origin: "daemon", sys: "onboard-forward",
+      text: "引导在绑定前已把人的下面这些话关账, 其中绑定之外的要求还没人做, 现在归你, 请照原话办并 chat_reply 交代:\n"
+        + orphans.map((r) => "> " + r.text.replace(/\n/g, "\n> ")).join("\n") }]);
+  }
   return ops;
 };
 
