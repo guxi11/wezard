@@ -113,17 +113,23 @@ try {
   // 左栏默认是列表: 「群聊」(有人参与) /「会话」(只有 wizard) 两组, 名片下有搜索入口。
   await page.waitForSelector(".rv-list .ci", { timeout: 5000 });
   const list = await page.evaluate(() => ({
-    heads: [...document.querySelectorAll(".rv-list h2")].map((h) => h.textContent.trim()),
+    heads: [...document.querySelectorAll(".rv-list h2")].map((h) => [...h.querySelectorAll(":scope > span")].map((x) => x.textContent).join("")),
     items: [...document.querySelectorAll(".rv-list .ci")].map((b) => b.getAttribute("data-room")),
     names: [...document.querySelectorAll(".rv-list .ci .t")].map((t) => t.textContent.trim()),
     sbox: !!document.querySelector("#sbox"),
-    tabs: [...document.querySelectorAll("[data-side]")].map((b) => b.textContent + (b.classList.contains("on") ? "*" : "")),
+    tabs: [...document.querySelectorAll("[data-side]")].map((b) => b.getAttribute("data-side") + ":" + b.textContent),
+    toolsInFirstHead: !!document.querySelector(".rv-list h2:first-child [data-side]"),
+    mosaic: document.querySelectorAll(".rv-list .ci .av.mosaic").length,
+    chipBound: /已绑定企微/.test((document.querySelector("#rb-who") || {}).textContent || ""),
   }));
   assert.deepEqual(list.heads, ["群聊1", "会话1"], "列表分两组: " + JSON.stringify(list));
   assert.deepEqual(list.items, [G, DM], "群在群聊, dm 在会话");
   assert.equal(list.names[0], "群G", "显示名 = 聊天名");
   assert.equal(list.sbox, true, "名片下有搜索入口");
-  assert.deepEqual(list.tabs, ["列表*", "图"]);
+  assert.deepEqual(list.tabs, ["graph:图"], "列表下只有一个「图」开关 (照 main 的 .vt)");
+  assert.equal(list.toolsInFirstHead, true, "开关挂在第一个分组标题右端");
+  assert.equal(list.mosaic, 2, "群头像 = 成员头像拼块");
+  assert.equal(list.chipBound, false, "名片上不再有「已绑定企微」chip");
   // 切到图: 视图记在 localStorage, 之后的页面都是图。
   await page.click('[data-side="graph"]');
   await page.waitForSelector(".rv-person", { timeout: 5000 });
