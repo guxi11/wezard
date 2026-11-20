@@ -71,7 +71,10 @@ export const renderChatPage = (): string =>
     <header class="rolebar" id="rolebar">
       <div class="who" id="rb-who"></div>
     </header>
-    <nav class="convs" id="convs" aria-label="会话"></nav>
+    <div class="side-body">
+      <nav class="convs" id="convs" aria-label="会话"></nav>
+      <aside class="gside" id="gside" hidden aria-label="成员"></aside>
+    </div>
   </aside>
   <main class="main">
     <header class="chathead" id="chathead">
@@ -79,7 +82,6 @@ export const renderChatPage = (): string =>
       <div class="ch-who" id="ch-who"></div>
       <div class="ch-acts" id="ch-acts"></div>
     </header>
-    <div class="membar" id="membar" hidden></div>
     <div class="govbar" id="govbar" hidden></div>
     <div class="thread" id="thread"><div class="thread-in" id="thread-in"></div></div>
     <div class="pane" id="pane-world" hidden>

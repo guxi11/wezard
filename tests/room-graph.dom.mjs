@@ -74,7 +74,7 @@ const wizardOf = (role) => {
   const id = isBob ? "chat:wrG#worker" : "chat:wrG#guide";
   const name = isBob ? "bob" : "alice";
   return { ok: true, at: Date.now(), role: { id, kind: "wizard", name, label: name, description: name + " 的职责", cwd: "/w/" + name, model: "m", bornAt: 1, chat: "群G", clones: [], spawns: [], forkedFrom: "", alive: true, busy: false, runningUntil: 0 },
-    uid: isBob ? B : A, ledger: true, sessions: [], session: "all", all: false, msgs: msgs.map((m) => ({ ...m, roomLabel: m.room === G ? "群G" : DM })), total: 5, rooms: ROOMS, plans: [], schedules: [], stats: undefined,
+    uid: isBob ? B : A, ledger: true, sessions: [{ sessionId: "s1", start: T0, end: 0, turns: 2, lastTs: T0 + 4000 }], session: "all", all: false, msgs: msgs.map((m) => ({ ...m, roomLabel: m.room === G ? "群G" : DM })), total: 5, rooms: ROOMS, plans: [], schedules: [], stats: undefined,
     charter: { tokens: 1234, at: T0 } };
 };
 
@@ -111,6 +111,11 @@ try {
     people: document.querySelectorAll(".rv-person").length,
     msgs: document.querySelectorAll(".rv-msg").length,
     title: (document.querySelector(".rv-ttl") || {}).textContent || "",
+    // 成员列在左栏图右侧, chat detail 里不再有成员条。
+    gside: !(document.querySelector("#gside") || {}).hidden,
+    members: document.querySelectorAll("#gside .gs-mem").length,
+    membar: !!document.querySelector("#membar"),
+    headActs: (document.querySelector("#ch-acts") || {}).textContent || "",
   }));
   assert.equal(errs.length, 0, "页面没有脚本错误: " + errs.join(" / "));
   assert.equal(counts.rooms, ROOMS.length, "room 节点数 = room 数");
@@ -118,6 +123,10 @@ try {
   assert.equal(counts.rooms + counts.people, ROOMS.length + 3, "节点数 = room 数 + 参与者数");
   assert.equal(counts.msgs, 4, "room 历史 4 条");
   assert.match(counts.title, /群G/);
+  assert.equal(counts.gside, true, "点开 room: 图右侧的成员列出现");
+  assert.equal(counts.members, 3, "成员列 = alice / bob / 张三");
+  assert.equal(counts.membar, false, "chat detail 上不再挂成员条");
+  assert.ok(counts.headActs.indexOf("刷新") < 0, "右上角不再有刷新: " + counts.headActs);
 
   // 点一条消息的「过程」→ 服务端渲染的过程框进来
   await page.click(".rv-open");
@@ -137,6 +146,14 @@ try {
   assert.match(card.job, /bob 的职责/);
   assert.match(card.charter, /1\.2k/, "宪章入口带体量: " + card.charter);
   assert.match(card.title, /bob 的视角/);
+  const side = await page.evaluate(() => ({
+    gside: !(document.querySelector("#gside") || {}).hidden,
+    sess: !!document.querySelector("#rb-who #rv-session"),
+    charterBtn: !!document.querySelector("#ch-acts #rv-charter"),
+  }));
+  assert.equal(side.gside, false, "看 wizard 时成员列收起");
+  assert.equal(side.sess, true, "全部会话 (session 切换) 在左上名片里");
+  assert.equal(side.charterBtn, false, "宪章不再占右栏头");
 
   // 从群 link 深链打开: role= 带着目标 —— 打开的就是它, 不是第一个 room。
   await page.goto(base + "/role?id=t-ticket&role=" + encodeURIComponent("chat:wrG#guide"), { waitUntil: "load" });

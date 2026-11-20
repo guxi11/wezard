@@ -1,14 +1,16 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>room graph fixture</title>
-<style>body{margin:0}.app{display:flex;height:100vh}.side{width:332px;border-right:1px solid #ddd;display:flex;flex-direction:column}.convs{flex:1;overflow:auto}.main{flex:1;display:flex;flex-direction:column;min-width:0}</style>
+<style>body{margin:0}.app{display:flex;height:100vh}.side{width:332px;border-right:1px solid #ddd;display:flex;flex-direction:column}.side-body{flex:1;display:flex;min-height:0}.convs{flex:1;overflow:auto}.gside{flex:none;width:200px;border-left:1px solid #ddd;overflow:auto;padding:6px}.main{flex:1;display:flex;flex-direction:column;min-width:0}</style>
 </head><body>
 <div class="app" id="app">
   <aside class="side">
     <header class="rolebar" id="rolebar"><div class="who" id="rb-who"></div></header>
-    <nav class="convs" id="convs" aria-label="room"></nav>
+    <div class="side-body">
+      <nav class="convs" id="convs" aria-label="room"></nav>
+      <aside class="gside" id="gside" hidden></aside>
+    </div>
   </aside>
   <main class="main">
     <header class="chathead" id="chathead"><div class="ch-who" id="ch-who"></div><div class="ch-acts" id="ch-acts"></div></header>
-    <div class="membar" id="membar" hidden></div>
     <div class="thread" id="thread"><div class="thread-in" id="thread-in"></div></div>
   </main>
 </div>
