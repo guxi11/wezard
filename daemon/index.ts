@@ -56,7 +56,7 @@ import {
 } from "../shared/room.js";
 import { CHAT_BATCH_BUDGET, sliceBatch } from "../shared/chat-record.js";
 import { CLASS_NAME_MAX, loadClassMerges, loadClassStore, migrateClasses, parseInstanceName, planClasses, renderClassReport, validClassName, type ClassMigration } from "./classes.js";
-import { footerTarget, responseFormatPolicy } from "./message-format.js";
+import { footerTarget, responseFormatPolicy, roomBubble } from "./message-format.js";
 import { scanClaudeSessions } from "./session-scan.js";
 import {
   startScheduler,
@@ -1261,8 +1261,11 @@ const main = async (): Promise<void> => {
       const chatId = chat.replace(/^(user|chat|group):/, "");
       const authorTarget = row.author.kind === "wizard" ? roomWizardOf(row.author.id)?.target : undefined;
       const body = row.text.trim() || (row.files?.length ? "📎 " + row.files.map((f) => f.name).join(", ") : "");
+      // 头像 / 尾部署名都由 tracker 从正文头反解 —— 覆盖占位气泡也必须带这个头,
+      // 否则那条气泡既没有身份也没有 rolepage 链接 (它就是人点名的那个 wizard 的答复)。
+      const md = roomBubble(authorTarget, body);
       if (cover?.ext && body) {
-        if (await coverBubble(cover.ext, body)) return true;
+        if (await coverBubble(cover.ext, md)) return true;
       }
       if (row.files?.length) {
         let filesOk = true;
@@ -1272,7 +1275,6 @@ const main = async (): Promise<void> => {
         }
         if (!body) return filesOk;
       }
-      const md = authorTarget ? headed(ownHead(authorTarget), body, "\n\n") : "[wezard] " + body;
       if (wx.owns(chatId)) {
         const r = wx.sendFinal(chatId, wxMarkdown(md), row.id);
         if (r.state === "failed") { log.warn({ mod: "room", room: chat, reason: r.reason }, "room: wx 镜像失败"); return false; }

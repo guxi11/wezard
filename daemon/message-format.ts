@@ -1,5 +1,5 @@
 import type { Config } from "../shared/config.js";
-import { baseOfKey, isWxChat } from "../shared/session-label.js";
+import { baseOfKey, headed, isWxChat, ownHead } from "../shared/session-label.js";
 import type { ResponseFormatContext } from "./last-response.js";
 
 /** Resolve SDK destinations using frame evidence first, preserving the bot suffix. */
@@ -19,6 +19,12 @@ export const responseFormatPolicy = (cfg: Config, context: ResponseFormatContext
   if (!target || isWxChat(target)) return undefined;
   return { url: urlOf(target), principal: target };
 };
+
+/** 一条绑定 room 的消息交给传输时的正文: 作者身份头在这里写, 尾部 rolepage 链接
+ *  由 tracker 的 withMessageFooter 补 —— 它认作者只认这个头 (无头的正文不算任何人的,
+ *  原样放过)。所以覆盖占位气泡跟发新气泡一样必须先带头, 否则那条气泡既没身份也没链接。 */
+export const roomBubble = (author: string | undefined, body: string): string =>
+  (author ? headed(ownHead(author), body, "\n\n") : "[wezard] " + body);
 
 /** A footer is routing metadata only when it belongs to this daemon's rolepage. */
 export const footerTarget = (raw: string, root: string, known: (target: string) => boolean): string | undefined => {

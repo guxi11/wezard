@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { ConfigSchema } from "../shared/config.js";
 import { bindTagLinker, parseTagHeader } from "../shared/session-label.js";
 import { withMessageFooter } from "../shared/message-footer.js";
-import { footerTarget, responseFormatPolicy, responsePrincipal } from "../daemon/message-format.js";
+import { footerTarget, responseFormatPolicy, responsePrincipal, roomBubble } from "../daemon/message-format.js";
 const a = "user:admin", b = "chat:wrOther~bot", worker = `${a}#worker`, voice = `${a}#voice`;
 const known = [a, b, worker, voice];
 const cfg = ConfigSchema.parse({ bot: { botId: "test", secret: "test" }, chats: { wezard: a, other: b } });
@@ -38,4 +38,11 @@ for (const u of ["https://foreign.test/base/role?id=stream", "https://own.test/r
   const text = `answer [✦](${u})`;
   assert.deepEqual(parseTagHeader(text), { fromBot: false, tag: "", body: text });
 }
+// 群里被点名的 wizard 答话 (room 行 → 覆盖那条人的占位气泡) 也必须带头带 link:
+// tracker 只从正文头反解作者, 无头正文原样放过 —— 所以镜像正文 (roomBubble) 必须先写作者头。
+const group = "chat:wrkGroup";
+const groupPolicy = responseFormatPolicy(cfg, { chatid: "wrkGroup" }, urlOf)!;
+assert.equal(groupPolicy.principal, group, "未知群按前缀落 chat: principal");
+assert.equal(withMessageFooter(roomBubble(worker, "done"), groupPolicy), "\u{1F9D9}\u200D\u2642\uFE0F " + names[worker] + "： done [✦](" + urlOf(worker) + ")");
+assert.equal(withMessageFooter("done", groupPolicy), "done", "无头正文不属于任何人 —— 覆盖气泡不带作者头就会裸奔");
 console.log("message-format integration tests passed");
