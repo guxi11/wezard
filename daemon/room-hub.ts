@@ -10,12 +10,15 @@
 // 终句零语义: 本文件不读 transcript。一轮结束 (mirror 报 idle) 时只看账本: 唤醒它的 duty
 // 还开着、它在最近一次被唤醒之后又没 chat_reply 过 (任何 status, progress / need 也算交代)
 // → 当轮提醒一次; 再闲下来仍没交代 → 给提问者写一条系统行。
+// 带 Stop hook 的后端 (onStop) 把「提醒一次」提前到轮内: CLI 要结束时 hook 来问, 有欠账就
+// block 让它同一轮接着交代; 轮终这条路只在 hook 没来问时兜底。
 import type { Logger } from "pino";
 import {
   DAEMON, afterIsFake, afterTriggerText, afterWakeDue, dutyAnswered, holderOf, isBoundRoom, judge, mirrors, coversBubble, openDuties,
   renderMsgLine, sameWho, unreadFor, whoKey, type Draft, type JudgeCtx, type MsgRow, type RoomOp, type RoomState, type Verdict, type Who,
 } from "../shared/room.js";
 import type { RoomStore } from "./rooms.js";
+import { sleep } from "../shared/std.js";
 
 export type PasteResult = "ok" | "uncertain" | "failed";
 
@@ -37,23 +40,31 @@ export interface HubPorts {
   idle: (target: string) => Promise<boolean>;
   interrupt: (target: string) => Promise<void>;
   paste: (target: string, text: string) => Promise<PasteResult>;
+  /** 轮终等 Stop hook 的 grace (ms, 缺省 3000; 测试给 0)。只对来问过 hook 的 wizard 生效。 */
+  stopGraceMs?: number;
 }
 
 interface AfterScan { closed?: readonly string[]; fake?: boolean; only?: readonly string[] }
 export interface AfterDue { room: string; msg: string; holder: Who; asker: Who; after: string[]; at: number; fake: boolean }
 
 /** 一轮里它被什么唤醒、交代了什么 (只在内存: 轮界由 mirror 报, reload 后从账本重算唤醒)。 */
+interface Owed { room: string; key: string; msg: string; asker: Who }
 interface TurnWake { rooms: Set<string>; msgs: Set<string>; replied: Set<string>; at: number }
 
 export const REMIND_TEXT = (ids: readonly string[]): string =>
   "[wezard] 你这一轮被唤醒处理的 " + ids.join(", ") + " 还没交代 —— 终句不会送到任何人那里。用 chat_reply({re, text, status}) 交代; 不需要答就 chat_reply({re}) 记 passed。";
+
+/** Stop hook 拦截时给模型的话 (同一轮里接着做, 不是新的一轮)。 */
+export const STOP_TEXT = (ids: readonly string[]): string =>
+  "[wezard] 结束这一轮之前: 唤醒你的 " + ids.join(", ") + " 还没交代 —— 终句不会送到任何人那里。现在用 chat_reply({re, text, status}) 交代 (还在做就 status:\"progress\", 要对方补信息就 \"need\"; 不需要答就 chat_reply({re}) 记 passed), 然后再结束。";
 
 export const createRoomHub = (p: HubPorts) => {
   const now = (): number => p.now?.() ?? Date.now();
   const turns = new Map<string, TurnWake>();      // uid → 本轮
   const inflight = new Set<string>();              // uid 正在被粘贴
   const uncertain = new Map<string, Set<string>>(); // uid → 上次不确定投递过的 room
-  const reminded = new Set<string>();              // duty key: 已当轮提醒过
+  const reminded = new Set<string>();              // duty key: 已提醒过 (轮终贴提醒 / Stop hook 拦一次)
+  const stopChecked = new Map<string, number>();   // uid → 它的 Stop hook 最近一次来问的时刻
   let running: Promise<void> | undefined;
   let again = false;
 
@@ -250,38 +261,36 @@ export const createRoomHub = (p: HubPorts) => {
 
   // ── 轮界 (§5, F-1) ──────────────────────────────────────────────────
 
-  /** mirror 报「这个 wizard 闲下来了」时调: 当轮提醒一次, 之后仍未交代就给提问者写系统行。 */
-  const onIdle = async (uid: string): Promise<void> => {
-    const t = turns.get(uid);
-    turns.delete(uid);
+  /** 唤醒过它、它仍持有、未关、且最近一次被唤醒后还没 chat_reply 过的 duty。
+   *  顺手清掉已交代者的提醒记号: 之后被同一 duty 再唤醒 (need 被补答) 又没交代时重新从「提醒一次」开始。
+   *  delivered: 只算已经贴进它输入框的 (Stop hook 当轮拦截不能拿它没见过的行催它)。 */
+  const scanOwed = (uid: string, t: TurnWake | undefined, delivered = false): Owed[] => {
     const who: Who = { kind: "wizard", id: uid };
-    const w = p.wizardOf(uid);
-    // 唤醒过它、它仍持有、未关的 duty。
-    const owed: Array<{ room: string; key: string; msg: string; asker: Who }> = [];
+    const owed: Owed[] = [];
     for (const room of p.store.ids()) {
       let s: RoomState | undefined;
       try { s = state(room); } catch { continue; }
-      if (!s || !s.members.has(whoKey(who))) continue;
+      const me = s?.members.get(whoKey(who));
+      if (!s || !me) continue;
       for (const d of openDuties(s)) {
         if (!sameWho(holderOf(s, d), who)) continue;
-        // 原 ask 唤醒过它, 或 after 补唤醒的 trigger 行 (re 原 ask) 唤醒过它。
-        const woke = s.byId.get(d.msg)?.wake.includes(uid) || t?.msgs.has(d.msg)
-          || s.msgs.some((r) => r.kind === "trigger" && (r.re ?? []).includes(d.msg) && r.wake.includes(uid));
-        if (!woke) continue;
-        // progress / need 交代过: duty 照常开着等 done, 但这一轮的账算清了 —— 不提醒、不告状;
-        // 清掉提醒记号, 之后被同一 duty 再唤醒 (need 被补答) 又没交代时重新从「提醒一次」开始。
+        const row = s.byId.get(d.msg);
+        // 原 ask 唤醒过它, 或 after 补唤醒的 trigger 行 (re 原 ask) 唤醒过它 —— 取最早叫醒它的那一行。
+        const waker = row?.wake.includes(uid) ? row
+          : s.msgs.find((r) => r.kind === "trigger" && (r.re ?? []).includes(d.msg) && r.wake.includes(uid));
+        if (!waker && !t?.msgs.has(d.msg)) continue;
+        if (delivered && (!waker || waker.seq > me.seen)) continue;
+        // progress / need 交代过: duty 照常开着等 done, 但这一轮的账算清了 —— 不提醒、不告状。
         if (dutyAnswered(s, d, who)) { reminded.delete(d.key); continue; }
         owed.push({ room, key: d.key, msg: d.msg, asker: d.asker });
       }
     }
-    const fresh = owed.filter((o) => !reminded.has(o.key) && (!t || !t.replied.has(o.msg)));
-    if (fresh.length && w && t) {
-      fresh.forEach((o) => reminded.add(o.key));
-      const res = await p.paste(w.target, REMIND_TEXT(fresh.map((o) => o.msg)));
-      if (res !== "ok") fresh.forEach((o) => reminded.delete(o.key));
-      return;
-    }
-    // 已提醒过仍未交代 → 系统行 (账本里有即不重复)。
+    return owed;
+  };
+
+  /** 已提醒过仍未交代 → 给提问者写系统行 (账本里有即不重复)。正文自带 [wezard], 镜像不再叠 (roomBubble)。 */
+  const escalate = (uid: string, owed: readonly Owed[]): void => {
+    const who: Who = { kind: "wizard", id: uid };
     for (const o of owed.filter((x) => reminded.has(x.key))) {
       const s = state(o.room)!;
       const done = s.msgs.some((m) => m.sys === "undelivered" && (m.re ?? []).includes(o.msg) && m.text.includes(uid));
@@ -294,13 +303,50 @@ export const createRoomHub = (p: HubPorts) => {
     }
   };
 
+  /** CLI 的 Stop hook 在它要结束这一轮时同步来问 (hooks/stop.sh → POST /room/stop-check):
+   *  有没提醒过的欠账 → 返回 reason, hook 用 decision:"block" 让它同一轮接着 chat_reply (算「提醒一次」);
+   *  全都提醒过仍欠着 → 放行并立刻写系统行。每条 duty 至多拦一次, 所以不会无限 block。 */
+  const onStop = (uid: string): { block?: string } => {
+    stopChecked.set(uid, now());
+    const owed = scanOwed(uid, turns.get(uid), true);
+    const fresh = owed.filter((o) => !reminded.has(o.key));
+    if (fresh.length) {
+      fresh.forEach((o) => reminded.add(o.key));
+      return { block: STOP_TEXT(fresh.map((o) => o.msg)) };
+    }
+    escalate(uid, owed);
+    return {};
+  };
+
+  /** mirror 报「这个 wizard 闲下来了」时调: 当轮提醒一次, 之后仍未交代就给提问者写系统行。
+   *  带 Stop hook 的 pane 由 onStop 在轮内判过了 —— 这里先等一个 grace (hook 与 tail 谁先到不定),
+   *  这段时间里 hook 来问过就不再插手; hook 没来 (老 pane / 不支持的后端 / hook 连不上) 才走下面的老路兜底。 */
+  const onIdle = async (uid: string): Promise<void> => {
+    const t = turns.get(uid);
+    turns.delete(uid);
+    const idleAt = now();
+    const grace = p.stopGraceMs ?? 3000;
+    if (stopChecked.has(uid) && grace > 0) await sleep(grace);
+    if ((stopChecked.get(uid) ?? -Infinity) >= idleAt - grace) return;
+    const w = p.wizardOf(uid);
+    const owed = scanOwed(uid, t);
+    const fresh = owed.filter((o) => !reminded.has(o.key) && (!t || !t.replied.has(o.msg)));
+    if (fresh.length && w && t) {
+      fresh.forEach((o) => reminded.add(o.key));
+      const res = await p.paste(w.target, REMIND_TEXT(fresh.map((o) => o.msg)));
+      if (res !== "ok") fresh.forEach((o) => reminded.delete(o.key));
+      return;
+    }
+    escalate(uid, owed);
+  };
+
   /** 工具缺省 room: 本轮唤醒它的 room; 多个 → undefined (调用方 400 要求显式给)。 */
   const defaultRoom = (uid: string): { room?: string; many: string[] } => {
     const rooms = [...(turns.get(uid)?.rooms ?? [])];
     return rooms.length === 1 ? { room: rooms[0], many: rooms } : { many: rooms };
   };
 
-  return { append, write, pump, kick, onIdle, defaultRoom, pending, isBoundRoom, reconcileAfter };
+  return { append, write, pump, kick, onIdle, onStop, defaultRoom, pending, isBoundRoom, reconcileAfter };
 };
 
 export type RoomHub = ReturnType<typeof createRoomHub>;

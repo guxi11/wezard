@@ -14,6 +14,8 @@ import { fileURLToPath } from "node:url";
 export interface SessionHookSpec {
   /** --settings 用的文件 (claude / codebuddy)。 */
   settingsFile: string;
+  /** 同上再加 Stop hook (hooks/stop.sh: 轮内催 chat_reply) —— 只给 STOP_HOOK_BACKENDS 用。 */
+  stopSettingsFile: string;
   /** --plugin-dir 用的最小插件目录 (claude-internal)。 */
   pluginDir: string;
 }
@@ -26,14 +28,24 @@ export const writeIfChanged = (file: string, content: string): void => {
 };
 
 /** 仓库里的 hook 脚本。dist/shared → ../../hooks, dev (tsx shared/) → ../hooks。 */
-const hookScript = (): string => {
+const hookScript = (file: string): string => {
   const here = dirname(fileURLToPath(import.meta.url));
-  return [resolve(here, "..", "..", "hooks", "pre-tool-use.sh"), resolve(here, "..", "hooks", "pre-tool-use.sh")]
-    .find((p) => existsSync(p)) ?? resolve(here, "..", "..", "hooks", "pre-tool-use.sh");
+  return [resolve(here, "..", "..", "hooks", file), resolve(here, "..", "hooks", file)]
+    .find((p) => existsSync(p)) ?? resolve(here, "..", "..", "hooks", file);
 };
 
-const hookSettings = (script: string, timeoutSec: number): string => `${JSON.stringify({
-  hooks: { PreToolUse: [{ matcher: ".*", hooks: [{ type: "command", command: script, timeout: timeoutSec }] }] },
+/** 实测认 Stop hook 的 `decision:"block"` 的后端 (claude 2.1.329: 带 stop_hook_active,
+ *  自带 CLAUDE_CODE_STOP_HOOK_BLOCK_CAP 上限)。claude-internal / codebuddy 没在有它们的机器上
+ *  验过, 先不给 —— 一个它不认的 hook 键可能让整份 --settings 读失败, 连审批 hook 一起丢。
+ *  codex 的 hook 走 -c 覆盖 + trust hash, 另做。没给的后端由 daemon 轮终提醒兜底。 */
+export const STOP_HOOK_BACKENDS: ReadonlySet<string> = new Set(["claude"]);
+
+const hookSettings = (script: string, timeoutSec: number, stopScript?: string): string => `${JSON.stringify({
+  hooks: {
+    PreToolUse: [{ matcher: ".*", hooks: [{ type: "command", command: script, timeout: timeoutSec }] }],
+    // Stop 只问 daemon 一次 loopback (curl --max-time 5), 10s 上限足够; 超时 = 照常结束。
+    ...(stopScript ? { Stop: [{ hooks: [{ type: "command", command: stopScript, timeout: 10 }] }] } : {}),
+  },
 }, null, 2)}\n`;
 
 /** 写两份产物并返回路径。写失败直接抛: 没有 hook 的 pane 会静默失去审批,
@@ -41,15 +53,18 @@ const hookSettings = (script: string, timeoutSec: number): string => `${JSON.str
 export const prepareSessionHooks = (stateDir: string, hookTimeoutSec: number): SessionHookSpec => {
   const timeout = hookTimeoutSec + 10; // 与原来 hooks.json 的 timeout 语义一致: 必须大于 longPoll
   const settingsFile = join(stateDir, "session-hooks.json");
+  const stopSettingsFile = join(stateDir, "session-hooks-stop.json");
   const pluginDir = join(stateDir, "session-hook-plugin");
-  const json = hookSettings(hookScript(), timeout);
+  const json = hookSettings(hookScript("pre-tool-use.sh"), timeout);
   writeIfChanged(settingsFile, json);
+  writeIfChanged(stopSettingsFile, hookSettings(hookScript("pre-tool-use.sh"), timeout, hookScript("stop.sh")));
   writeIfChanged(join(pluginDir, ".claude-plugin", "plugin.json"),
     `${JSON.stringify({ name: "wezard-session-hooks", version: "0.0.0", description: "wezard 审批 hook (按会话注入)" }, null, 2)}\n`);
   writeIfChanged(join(pluginDir, "hooks", "hooks.json"), json);
-  return { settingsFile, pluginDir };
+  return { settingsFile, stopSettingsFile, pluginDir };
 };
 
 /** 后端对应的注入参数; codex 不用 (它的 hook 走 -c 覆盖)。 */
 export const sessionHookArgs = (backendName: string, spec: SessionHookSpec): string[] =>
-  backendName === "claude-internal" ? ["--plugin-dir", spec.pluginDir] : ["--settings", spec.settingsFile];
+  backendName === "claude-internal" ? ["--plugin-dir", spec.pluginDir]
+    : ["--settings", STOP_HOOK_BACKENDS.has(backendName) ? spec.stopSettingsFile : spec.settingsFile];

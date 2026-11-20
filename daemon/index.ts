@@ -1669,6 +1669,17 @@ const main = async (): Promise<void> => {
       hub.write(r.room, leaveOps(s, who, me, Date.now(), (b.why ?? "").toString().trim() || undefined));
       json(res, 200, { ok: true, room: r.room, left: roomNameOf(who) });
     });
+    // CLI 的 Stop hook (hooks/stop.sh) 在它要结束这一轮时来问: 唤醒它的 duty 有没有交代。
+    // 回 {decision:"block", reason} = 让它同一轮接着 chat_reply; 回 {} = 放行。认不出调用方也放行 ——
+    // 这条路只能催, 不能把一个 pane 卡在「结束不了」里。
+    http.register("POST /room/stop-check", async (req, res) => {
+      const { self } = await readPeerBody(req);
+      const me = self ? roomSelfOf(self) : undefined;
+      if (!me) { json(res, 200, {}); return; }
+      const r = hub.onStop(me.id);
+      if (r.block) roomLog.info({ target: self, uid: me.id }, "room: Stop hook 拦住未交代的一轮");
+      json(res, 200, r.block ? { decision: "block", reason: r.block } : {});
+    });
     http.register("POST /room/members", async (req, res) => {
       const { self, body } = await readPeerBody(req);
       if (READ_ROOM_FAIL(res, self)) return;

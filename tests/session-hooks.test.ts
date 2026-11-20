@@ -36,7 +36,12 @@ try {
   assert.equal(statSync(spec.settingsFile).mtimeMs, before, "同样内容重复调用不应重写");
 
   // 后端 → 参数
-  assert.deepEqual(sessionHookArgs("claude", spec), ["--settings", spec.settingsFile]);
+  assert.deepEqual(sessionHookArgs("claude", spec), ["--settings", spec.stopSettingsFile], "claude 拿带 Stop hook 的那份");
+  const stop = JSON.parse(readFileSync(spec.stopSettingsFile, "utf8")) as { hooks: { PreToolUse: unknown[]; Stop: Array<{ hooks: Array<{ command: string; timeout: number }> }> } };
+  assert.deepEqual(stop.hooks.PreToolUse, settings.hooks.PreToolUse, "审批 hook 两份一致");
+  assert.ok(stop.hooks.Stop[0]!.hooks[0]!.command.endsWith("/hooks/stop.sh") && existsSync(stop.hooks.Stop[0]!.hooks[0]!.command));
+  assert.ok((statSync(stop.hooks.Stop[0]!.hooks[0]!.command).mode & 0o111) !== 0, "stop.sh 必须可执行");
+  assert.equal((settings.hooks as Record<string, unknown>).Stop, undefined, "未验证的后端那份不带 Stop");
   assert.deepEqual(sessionHookArgs("codebuddy", spec), ["--settings", spec.settingsFile]);
   assert.deepEqual(sessionHookArgs("claude-internal", spec), ["--plugin-dir", spec.pluginDir]);
 
