@@ -32,13 +32,15 @@ const APP = readFileSync(join(root, "web", "chat.js"), "utf8");
 const A = "w" + "1".padStart(12, "0"), B = "w" + "2".padStart(12, "0");
 const G = "chat:wrG", DM = "dm:" + [A, B].sort().join("|");
 const who = (kind, id) => ({ kind, id });
-const roomFact = (id, kind, members, host) => ({ id, kind, title: "", bound: id === G, host, members, openDuties: 0 });
+const roomFact = (id, kind, members, host) => ({ id, kind, title: "", bound: id === G, host, members, openDuties: 0, last: { seq: 1, at: T0 + 5000 } });
+// 时间用「刚才」—— rolepage 默认只画近 3 天的 room / 24h 内动过的人。
+const T0 = Date.now() - 60_000;
 const msgs = [
-  { id: "aa000001.1", seq: 1, at: 1000, room: G, author: who("human", "U1"), authorName: "张三", ord: 3, speak: "human", kind: "say", text: "谁来搭把手", origin: "inbound" },
-  { id: "aa000001.2", seq: 2, at: 2000, room: G, author: who("wizard", A), authorName: "alice", ord: 1, speak: "member", kind: "reply", text: "我来", to: undefined, re: ["aa000001.1"], status: "done", origin: "tool", turn: "t1" },
-  { id: "aa000001.3", seq: 3, at: 3000, room: G, author: who("wizard", A), authorName: "alice", ord: 1, speak: "member", kind: "ask", text: "查一下配置", to: [who("wizard", B)], origin: "tool", turn: "t1" },
-  { id: "aa000001.4", seq: 4, at: 4000, room: G, author: who("wizard", B), authorName: "bob", ord: 2, speak: "member", kind: "reply", text: "查完了", re: ["aa000001.3"], status: "done", origin: "tool", turn: "t2" },
-  { id: "bb000002.1", seq: 1, at: 5000, room: DM, author: who("wizard", B), authorName: "bob", ord: 2, speak: "member", kind: "say", text: "私聊一句", origin: "tool", turn: "t2" },
+  { id: "aa000001.1", seq: 1, at: T0 + 1000, room: G, author: who("human", "U1"), authorName: "张三", ord: 3, speak: "human", kind: "say", text: "谁来搭把手", origin: "inbound" },
+  { id: "aa000001.2", seq: 2, at: T0 + 2000, room: G, author: who("wizard", A), authorName: "alice", ord: 1, speak: "member", kind: "reply", text: "我来", to: undefined, re: ["aa000001.1"], status: "done", origin: "tool", turn: "t1" },
+  { id: "aa000001.3", seq: 3, at: T0 + 3000, room: G, author: who("wizard", A), authorName: "alice", ord: 1, speak: "member", kind: "ask", text: "查一下配置", to: [who("wizard", B)], origin: "tool", turn: "t1" },
+  { id: "aa000001.4", seq: 4, at: T0 + 4000, room: G, author: who("wizard", B), authorName: "bob", ord: 2, speak: "member", kind: "reply", text: "查完了", re: ["aa000001.3"], status: "done", origin: "tool", turn: "t2" },
+  { id: "bb000002.1", seq: 1, at: T0 + 5000, room: DM, author: who("wizard", B), authorName: "bob", ord: 2, speak: "member", kind: "say", text: "私聊一句", origin: "tool", turn: "t2" },
 ];
 const ROOMS = [
   roomFact(G, "wecom-group", [
@@ -57,9 +59,9 @@ const WORLD = {
   rooms: ROOMS,
   uidTargets: { [A]: "chat:wrG#guide", [B]: "chat:wrG#worker" },
   nodes: [
-    { target: "chat:wrG#guide", kind: "wizard", uid: A, name: "alice", label: "alice", base: G, tag: "guide", chat: "群G", busy: false, alive: true, lastTs: 4000, rels: [] },
-    { target: "chat:wrG#worker", kind: "wizard", uid: B, name: "bob", label: "bob", base: G, tag: "worker", chat: "群G", busy: false, alive: true, lastTs: 5000, rels: [] },
-    { target: "human:U1", kind: "human", name: "张三", label: "👤", base: "", tag: "", chat: "", busy: false, alive: false, lastTs: 1000, rels: [] },
+    { target: "chat:wrG#guide", kind: "wizard", uid: A, name: "alice", label: "alice", base: G, tag: "guide", chat: "群G", busy: false, alive: true, lastTs: T0 + 4000, rels: [] },
+    { target: "chat:wrG#worker", kind: "wizard", uid: B, name: "bob", label: "bob", base: G, tag: "worker", chat: "群G", busy: false, alive: true, lastTs: T0 + 5000, rels: [] },
+    { target: "human:U1", kind: "human", name: "张三", label: "👤", base: "", tag: "", chat: "", busy: false, alive: false, lastTs: T0 + 1000, rels: [] },
   ],
   edges: [],
   plans: [], schedules: [],
