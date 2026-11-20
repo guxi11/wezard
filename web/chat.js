@@ -582,6 +582,7 @@
     chWho.innerHTML = '<div class="rv-ttl">' + title + '</div>' + (sub ? '<div class="rv-sub">' + sub + '</div>' : '');
     chActs.innerHTML = acts || '';
     var a = $('#rv-all'); if (a) a.onclick = function () { D.all = !D.all; syncUrl(); loadWizard(D.role, true); };
+    var b = $('#rv-back'); if (b) b.onclick = function () { setPane('msgs'); };
   };
   var nodeNameOf = function (who) {
     if (!who) return '';
@@ -740,14 +741,470 @@
       if (det) { det.open = true; loadTool(det); }
     });
   };
-  var plansSection = function () {
-    var ps = D.plans || [], ss = D.schedules || [];
-    if (!ps.length && !ss.length) return '';
-    var li = function (x) { return '<li>' + x + '</li>'; };
-    return '<section class="rv-plans"><h4>计划</h4><ul>' + ps.map(function (p) { return li(esc(p.state) + ' · ' + esc(p.title || p.id) + ' · ' + (p.tasks || []).length + ' 步'); }).join('') + '</ul>' +
-      '<h4>日程</h4><ul>' + ss.map(function (s) { return li('⏰ ' + esc(s.when) + ' · ' + esc(s.note || s.prompt || '').slice(0, 60)); }).join('') + '</ul></section>';
+  // ── 下拉 (main 的那一份): 小号文字触发器 + 浮层列表 ──────────────────
+  // 名片里的 session 切换用它 —— 不用原生 <select>, 样式跟着页面走; 展开的是哪一个按 id 记,
+  // 宿主每次轮询都重画也不会被收起。
+  var DD_OPEN = '';
+  var dropdown = function (id, o) {
+    var open = DD_OPEN === id;
+    return '<span class="sp' + (o.end ? ' end' : '') + (open ? ' open' : '') + '" data-dd="' + id + '">' +
+      (o.ic ? '<span class="sp-ic" aria-hidden="true">' + o.ic + '</span>' : '') +
+      '<button class="sp-btn" aria-haspopup="listbox" aria-expanded="' + open + '" title="' + esc(o.title) + '">' +
+        esc(o.label) + '<span class="car" aria-hidden="true"></span></button>' +
+      '<span class="sp-list" role="listbox">' + o.items.map(function (it) {
+        return '<button class="sp-it' + (it.cls ? ' ' + it.cls : '') + (it.on ? ' on' : '') + '" role="option" aria-selected="' + !!it.on + '" data-v="' + esc(it.v) + '"' +
+          (it.tip ? ' title="' + esc(it.tip) + '"' : '') + '>' + it.html + '</button>';
+      }).join('') + '</span></span>';
+  };
+  var setDdOpen = function (id) {
+    DD_OPEN = id;
+    document.querySelectorAll('.sp[data-dd]').forEach(function (sp) {
+      var on = sp.getAttribute('data-dd') === id;
+      sp.classList.toggle('open', on);
+      sp.querySelector('.sp-btn').setAttribute('aria-expanded', on);
+    });
+  };
+  var bindDropdown = function (root, id, pick) {
+    var sp = root && root.querySelector('.sp[data-dd="' + id + '"]');
+    if (!sp) return;
+    sp.querySelector('.sp-btn').onclick = function () { setDdOpen(DD_OPEN === id ? '' : id); };
+    sp.querySelectorAll('.sp-it').forEach(function (it) {
+      it.onclick = function () { setDdOpen(''); pick(it.getAttribute('data-v')); };
+    });
+  };
+  document.addEventListener('click', function (e) {
+    if (DD_OPEN && !e.target.closest('.sp[data-dd="' + DD_OPEN + '"]')) setDdOpen('');
+  });
+  document.addEventListener('keydown', function (e) {
+    if (DD_OPEN && e.key === 'Escape') setDdOpen('');
+  });
+
+  // session 切换: name 右边那个下拉。最新那段直接叫「最新」, 其余写开始时刻; 每项带轮数。
+  var latestSess = function () { return (D.sessions || [])[D.sessions.length - 1]; };
+  var sessWhen = function (s) { return s.start ? fmtDay(s.start) : '(无时刻)'; };
+  var sessItem = function (s, on) {
+    return { v: s.sessionId || '', on: on, tip: s.sessionId || '',
+      html: '<span class="id">' + (s === latestSess() ? '最新 · ' : '') + esc(sessWhen(s)) + '</span><span class="n">' + s.turns + ' 轮</span>' };
+  };
+  var sessPicker = function () {
+    var cur = (D.sessions || []).filter(function (s) { return s.sessionId === D.session; })[0];
+    return dropdown('sess', {
+      title: '切换 session',
+      label: !cur ? '全部' : cur === latestSess() ? '最新' : sessWhen(cur),
+      items: [{ v: 'all', on: !cur, cls: 'all', html: '<span class="id">全部</span><span class="n">' + D.sessions.length + ' 段</span>' }]
+        .concat(D.sessions.slice().reverse().map(function (s) { return sessItem(s, s.sessionId === D.session); })),
+    });
+  };
+  var bindSessPicker = function () {
+    bindDropdown($('#rb-sp'), 'sess', function (v) { D.session = v || 'all'; loadWizard(D.role, true); });
   };
 
+  // ── 左上名片的「日程与计划」──
+  // 名片上那一行 📅 点开就是它 (main 的老交互: 同一个入口再点一次回到对话)。
+  // 数据全是当前 role 名下的, 只读; 左栏 (room 列表) 不动, 只换右栏。
+  var planEl = $('#plan-in');
+  var srvNow = function () { return D.at ? D.at + (Date.now() - (D.recvAt || Date.now())) : Date.now(); };
+  var fmtHM = function (ts) { var x = new Date(ts); return pad(x.getHours()) + ':' + pad(x.getMinutes()); };
+  var roleNodeName = function () { return (D.wizard && D.wizard.name) || (nodeOf(ROLE) || {}).name || ROLE; };
+  var canOpen = function (n) { return !!n; };
+  var openNode = function (target) { if (target) loadWizard(target); };
+  // 两处数据源都认: 名册快照 (world, 每 6s 一次) 与这一页刚取的名片 (api/wizard)。
+  // 同一份 plan 取 revision 大的那版 —— 免得晚到的旧回包把新状态盖回去。
+  var plansForRole = function () {
+    var by = {};
+    (W.plans || []).filter(function (p) { return p.owner === ROLE; }).forEach(function (p) { by[p.id] = p; });
+    (D.plans || []).forEach(function (p) {
+      var old = by[p.id];
+      if (!old || (p.revision || 0) >= (old.revision || 0)) by[p.id] = p;
+    });
+    return Object.keys(by).map(function (id) { return by[id]; }).sort(function (a, b) { return (b.updatedAt || 0) - (a.updatedAt || 0); });
+  };
+  // world 快照里有全量定时任务 (带 gate / 出错); 它还没到手时才退回名片里那几列。
+  var schedulesForRole = function () {
+    var pool = (W.schedules || []).length ? W.schedules : (D.schedules || []);
+    return pool.filter(function (x) { return (x.owner || x.createdBy || x.target) === ROLE; })
+      .sort(function (a, b) { return (a.nextAt || 0) - (b.nextAt || 0); });
+  };
+  // 名片那一行字: 下一枪几点 / 几个计划; 定时出错就改写成出错数 (染红)。
+  var planFact = function () {
+    var ss = schedulesForRole(), ps = plansForRole();
+    var bad = ss.filter(broken);
+    var txt = [bad.length ? '日程 ⚠ ' + bad.length + ' 出错' : ss.length ? '日程 ' + fmtDayClock(ss[0].nextAt).replace(/^今天 /, '') : '',
+      ps.length ? ps.length + ' 个计划' : ''].filter(Boolean).join(' · ') || '日程与计划';
+    var detail = [ss.length ? ss.length + ' 条定时' : '', ps.length ? ps.length + ' 个计划' : ''].filter(Boolean).join(' · ');
+    return ['📅', txt, (detail ? detail + ' · ' : '') + '点开看日程与计划', 'plan', bad.length ? 'bad' : ''];
+  };
+  // 对话 / 日程两栏互斥: 日程是当前 role 的另一面, 左栏 (room 列表) 留着。
+  var resetPane = function () {
+    S.pane = 'msgs';
+    thread.hidden = false;
+    if (planEl && planEl.parentNode) planEl.parentNode.hidden = true;
+    if (taskDetail && taskDetail.classList.contains('on')) hideTaskDetail();
+  };
+  var setPane = function (v) {
+    if (v === 'plan') {
+      S.pane = 'plan'; thread.hidden = true;
+      if (planEl && planEl.parentNode) planEl.parentNode.hidden = false;
+    } else resetPane();
+    renderWizard(true);
+  };
+  if (planEl) planEl.parentNode.hidden = true;
+
+  // ══ 日程视图 ═══════════════════════════════════════════════════════
+  // 定时任务与 plans 提供各自 owner 的只读状态。
+  var fmtDayClock = function (ts) {
+    if (!ts) return '—';
+    var d = new Date(ts), p = function (n) { return n < 10 ? '0' + n : '' + n; };
+    var today = new Date(srvNow());
+    var sameDay = d.toDateString() === today.toDateString();
+    return (sameDay ? '今天 ' : (p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ')) + p(d.getHours()) + ':' + p(d.getMinutes());
+  };
+  var fmtIn = function (ts) {
+    var d = ts - srvNow();
+    if (d <= 0) return '即将';
+    if (d < 3600000) return Math.max(1, Math.round(d / 60000)) + ' 分钟后';
+    if (d < 86400000) return Math.round(d / 3600000) + ' 小时后';
+    return Math.round(d / 86400000) + ' 天后';
+  };
+
+  var wizChip = function (target) {
+    var n = nodeOf(target);
+    return '<span class="wchip' + (canOpen(n) ? ' go' : '') + '" data-t="' + esc(target) + '">' +
+      esc((n && n.label) || '🧙') + ' ' + esc(nodeOf(target).name) + '</span>';
+  };
+
+  // 未来 12 小时的刻度条: 哪几个钟点会有任务醒来, 一眼看完。超出 12h 的排进下面
+  // 的列表但不占刻度 —— 把 24h 压进这么窄的一条, 刻度会密到读不出。
+  var HORIZON_H = 12;
+  var broken = function (x) { return x.lastGate === 'error' || !!x.loadError; };
+  var renderStrip = function (list) {
+    var now = srvNow(), span = HORIZON_H * 3600000;
+    var soon = list.filter(function (x) { return x.nextAt - now < span; });
+    var ticks = [];
+    for (var i = 0; i <= HORIZON_H; i += 3) {
+      var t = new Date(now + i * 3600000);
+      ticks.push('<span class="tk" style="left:' + (i / HORIZON_H * 100) + '%">' +
+        (i ? pad(t.getHours()) + ':00' : '现在') + '</span>');
+    }
+    var pins = soon.map(function (x) {
+      var pct = Math.max(0, Math.min(100, (x.nextAt - now) / span * 100));
+      return '<button class="pin' + (broken(x) ? ' bad' : '') + '" style="left:' + pct.toFixed(2) + '%" data-id="' + esc(x.id) + '" ' +
+        'title="' + esc(fmtDayClock(x.nextAt) + ' · ' + (x.note || x.id) + ' · ' + x.when) + '"><span>' + esc(fmtHM(x.nextAt)) + '</span></button>';
+    }).join('');
+    return '<div class="strip"><div class="axis">' + ticks.join('') + '</div>' +
+      '<div class="rail">' + pins + '</div>' +
+      '<div class="cap">' + (soon.length ? '未来 ' + HORIZON_H + ' 小时内 ' + soon.length + ' 次触发 · 点刻度跳到那条' : '未来 ' + HORIZON_H + ' 小时内没有定时任务') + '</div></div>';
+  };
+
+  // 触发规则 = describeTrigger 的人话, 各段以 ` · ` 相接: 第一段是时钟 (什么时候响), 其余是闸 (什么时候不响)。
+  var ruleHTML = function (when) {
+    return String(when || '').split(' · ').filter(Boolean).map(function (part, i) {
+      return '<span class="rl' + (i ? ' guard' : ' clock') + '">' + (i ? '' : '⏱ ') + esc(part) + '</span>';
+    }).join('');
+  };
+  var gateHTML = function (x) {
+    if (!x.hasGate) return '<span class="gt none" title="没有 gate: 到点就放">无 gate</span>';
+    var at = x.lastGateAt ? ' · ' + fmtAgo(x.lastGateAt) : '';
+    return x.lastGate === 'go' ? '<span class="gt go" title="上一轮 gate 放行">gate 放行' + esc(at) + '</span>'
+      : x.lastGate === 'skip' ? '<span class="gt skip" title="上一轮 gate 判定没活, 没放枪 (不出声)">gate 挡下' + esc(at) + '</span>'
+      : x.lastGate === 'error' ? '<span class="gt err">gate 出错' + esc(at) + '</span>'
+      : '<span class="gt none">gate 未跑过</span>';
+  };
+  var flowHTML = function (x) {
+    var own = x.owner || x.createdBy;
+    return '<div class="pflow">' +
+      (own && own !== x.target ? '<span class="fl">排班</span>' + wizChip(own) + '<span class="ar">→</span>' : '') +
+      (x.fresh
+        ? '<span class="fl">执行</span><span class="fresh" title="每次到点新起一个白板 wizard, 跑完自动回收">✦ 新起白板</span><span class="fl">在</span>' + wizChip(x.target) + '<span class="fl">名下</span>'
+        : '<span class="fl">执行</span>' + wizChip(x.target) + '<span class="fl">注入已有会话</span>') +
+    '</div>';
+  };
+  var PLAN_OPEN = {};
+  // plan 节点状态徽标的字形: ○ 未动 / ◔ 进行 / ✓ 完 / ✕ 取消 —— 形状先分态, 颜色只是加强 (色弱可辨)。
+  var TASK_BADGE = { pending: '○', in_progress: '◔', completed: '✓', canceled: '✕' };
+  var TASK_WORD = { pending: '待处理', in_progress: '进行中', completed: '已完成', canceled: '已取消' };
+  var planOwnerNode = function (p) {
+    return (W.nodes || []).filter(function (n) { return n.target === p.owner; })[0] || null;
+  };
+  // 执行者解析: task.executor (wizard 全局名字, 带不带点都行, 大小写不敏感) → world 节点;
+  // 没写 → plan owner (owner: true, 展示时淡一档并标 owner); 写了但名册里认不出 → 保留名字纯文本, 不造头像。
+  var executorOf = function (t, ownerNode) {
+    if (!t.executor) return { node: ownerNode, owner: true, name: '' };
+    var want = String(t.executor).replace(/^\./, '').toLowerCase();
+    var hit = (W.nodes || []).filter(function (n) { return String(n.name || '').replace(/^\./, '').toLowerCase() === want; })[0] || null;
+    return { node: hit, owner: false, name: String(t.executor).replace(/^\./, '') };
+  };
+  var taskHTML = function (x) {
+    var lines = String(x.prompt || '').split('\n');
+    var head = x.note || lines[0];
+    var errs = [
+      x.loadError ? '<div class="perr"><b>任务文件加载失败</b> · 仍在跑上一版<code>' + esc(x.loadError.split('\n')[0].slice(0, 240)) + '</code></div>' : '',
+      x.lastGate === 'error' ? '<div class="perr"><b>gate 出错</b>' + (x.lastGateAt ? ' · ' + esc(fmtAgo(x.lastGateAt)) : '') +
+        ' · 本轮未放枪, 下次照常重试' + (x.lastError ? '<code>' + esc(x.lastError.split('\n')[0].slice(0, 240)) + '</code>' : '') + '</div>' : '',
+    ].join('');
+    return '<article class="tcard' + (broken(x) ? ' bad' : '') + '" data-id="' + esc(x.id) + '">' +
+      '<div class="tc-time"><b>' + esc(fmtHM(x.nextAt)) + '</b><span>' + esc(fmtDayClock(x.nextAt).replace(/ \d\d:\d\d$/, '')) + '</span>' +
+        '<em>' + esc(fmtIn(x.nextAt)) + '</em></div>' +
+      '<div class="tc-main">' +
+        errs +
+        '<div class="prule">' + ruleHTML(x.when) + '</div>' +
+        '<div class="ptitle">' + esc(head.slice(0, 120)) + '</div>' +
+        flowHTML(x) +
+        '<details class="pprompt" data-id="' + esc(x.id) + '"' + (PLAN_OPEN[x.id] ? ' open' : '') + '>' +
+          '<summary>prompt<span>' + esc((x.note ? lines[0] : lines.slice(1).join(' ')).slice(0, 90)) + '</span></summary>' +
+          '<pre>' + esc(x.prompt) + '</pre></details>' +
+        '<div class="pfoot">' + gateHTML(x) +
+          '<span>' + (x.lastFired ? '上次触发 ' + esc(fmtAgo(x.lastFired)) : '还没跑过') + '</span>' +
+          '<span class="pid" title="' + esc(x.file || '') + '">' + esc(x.id) + '</span></div>' +
+      '</div>' +
+    '</article>';
+  };
+
+  var drawPlanEdges = function (innerGraph) {
+    if (!innerGraph) return;
+    var svg = innerGraph.querySelector('.plan-edges');
+    var nodes = innerGraph.querySelectorAll('.plan-node');
+    if (!svg) return;
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    var byId = Object.create(null), bounds = innerGraph.getBoundingClientRect();
+    Array.prototype.forEach.call(nodes, function (node) {
+      var box = node.getBoundingClientRect();
+      // 自上而下: 锚点是节点的下沿/上沿中点 —— 边从上游底部垂到下游顶部。
+      byId[node.getAttribute('data-task-id')] = {
+        cx: box.left + box.width / 2 - bounds.left,
+        bottom: box.bottom - bounds.top,
+        top: box.top - bounds.top
+      };
+    });
+    // 尺寸只看 inner 自身 (clientWidth/Height 已含 padding, 且 width:max-content 时就是内容宽):
+    // 不能用 scrollWidth —— svg 是 inner 的绝对定位子元素, 它自己的溢出会反过来把 scrollWidth 撑住,
+    // 缩窗后 svg 就粘在旧宽度上, 图盒出现一段滚不到底的空白。
+    var width = innerGraph.clientWidth;
+    var height = innerGraph.clientHeight;
+    svg.setAttribute('width', width); svg.setAttribute('height', height); svg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+    var markerId = 'plan-arrow-' + Array.prototype.indexOf.call(planEl.querySelectorAll('.plan-graph-inner'), innerGraph);
+    var defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    var marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+    marker.setAttribute('id', markerId); marker.setAttribute('viewBox', '0 0 8 8'); marker.setAttribute('refX', '7'); marker.setAttribute('refY', '4'); marker.setAttribute('markerWidth', '5.5'); marker.setAttribute('markerHeight', '5.5'); marker.setAttribute('orient', 'auto');
+    var tip = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    tip.setAttribute('d', 'M0 0L8 4L0 8Z'); tip.setAttribute('class', 'plan-arrow-tip'); marker.appendChild(tip); defs.appendChild(marker); svg.appendChild(defs);
+    Array.prototype.forEach.call(nodes, function (node) {
+      var target = byId[node.getAttribute('data-task-id')];
+      var dependencies = [];
+      try { dependencies = JSON.parse(node.getAttribute('data-depends-on') || '[]'); } catch (e) { }
+      dependencies.forEach(function (dependency) {
+        var source = byId[dependency];
+        if (!source || !target) return;
+        var x1 = source.cx, x2 = target.cx, y1 = source.bottom, y2 = target.top, bend = Math.max(18, (y2 - y1) * 0.42);
+        var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', 'M' + x1 + ' ' + y1 + ' C' + x1 + ' ' + (y1 + bend) + ' ' + x2 + ' ' + (y2 - bend) + ' ' + x2 + ' ' + y2);
+        path.setAttribute('class', 'plan-edge'); path.setAttribute('marker-end', 'url(#' + markerId + ')'); svg.appendChild(path);
+      });
+    });
+  };
+  var planResizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(function (entries) {
+    entries.forEach(function (entry) { drawPlanEdges(entry.target.querySelector('.plan-graph-inner')); });
+  });
+  var redrawPlanEdges = function () {
+    planEl.querySelectorAll('.plan-graph-inner').forEach(drawPlanEdges);
+  };
+  window.addEventListener('resize', redrawPlanEdges);
+
+  // ── 任务详情浮层: 卡片被压到一眼可扫, 详尽信息 (描述/依赖/进度/结果/执行者/计划账) 都在这里。
+  //    每一节都有真实数据才渲染; 没有的字段整节不出。backdrop / ✕ / Esc 三种关法。 ──
+  var taskDetail = null;
+  var hideTaskDetail = function () {
+    if (!taskDetail || !taskDetail.classList.contains('on')) return;
+    taskDetail.classList.remove('on');
+    document.removeEventListener('keydown', taskDetail._esc);
+  };
+  var showTaskDetail = function (p, t) {
+    if (!taskDetail) {
+      taskDetail = document.createElement('div');
+      taskDetail.className = 'task-detail';
+      taskDetail.innerHTML = '<div class="td-backdrop"></div><div class="td-card" role="dialog" aria-modal="true" aria-label="任务详情"></div>';
+      taskDetail.querySelector('.td-backdrop').onclick = hideTaskDetail;
+      document.body.appendChild(taskDetail);
+    }
+    var badge = function (s) {
+      return '<span class="task-badge tb-' + esc(s) + '">' + esc(TASK_BADGE[s] || '•') + ' ' + esc(TASK_WORD[s] || s) + '</span>';
+    };
+    var tasksById = Object.create(null);
+    (p.tasks || []).forEach(function (x) { tasksById[x.id] = x; });
+    var known = function (id) { return Object.prototype.hasOwnProperty.call(tasksById, id); };
+    var li = function (x) { return '<li>' + badge(x.status) + '<span title="' + esc(x.title) + '">' + esc(x.title) + '</span></li>'; };
+    var ups = (t.dependsOn || []).filter(known).map(function (id) { return li(tasksById[id]); });
+    var downs = (p.tasks || []).filter(function (x) { return (x.dependsOn || []).indexOf(t.id) >= 0; }).map(li);
+    var ex = executorOf(t, planOwnerNode(p));
+    var planState = { active: '进行中', paused: '已暂停', completed: '已完成', canceled: '已取消' }[p.state] || p.state;
+    var exBody = ex.node
+      ? '<div class="td-ex">' + wizChip(ex.node.target) + (ex.owner ? '<i class="ex-mark" title="未指派执行者, 显示 plan owner">· owner</i>' : '') + '</div>' +
+        '<div class="td-ex-meta">' + [
+          ex.node.model ? '<span title="模型 ' + esc(ex.node.model) + '">' + esc(ex.node.model) + '</span>' : '',
+          ex.node.ctx ? '<span title="上下文 — 最近一次请求送入的 input + 缓存">📄 ' + esc(fmtTok(ex.node.ctx)) + '</span>' : '',
+        ].filter(Boolean).join('<i class="pn-dot">·</i>') + '</div>'
+      : (ex.name ? '<div class="td-ex-plain" title="执行者名字此刻不在 world 名册">' + esc(ex.name) + '</div>' : '');
+    var sec = function (h, body) { return body ? '<div class="td-sec"><h5>' + h + '</h5>' + body + '</div>' : ''; };
+    taskDetail.querySelector('.td-card').innerHTML =
+      '<button class="td-close" aria-label="关闭详情">✕</button>' +
+      '<h4 title="' + esc(t.title) + '">' + esc(t.title) + '</h4>' +
+      '<div class="td-row">' + badge(t.status) +
+        (p.state === 'paused' ? '<span class="td-pause" title="整个 plan 暂停中">计划已暂停' + (p.reason ? ' · ' + esc(p.reason) : '') + '</span>' : '') + '</div>' +
+      sec('执行者', exBody) +
+      sec('上游依赖', ups.length ? '<ul>' + ups.join('') + '</ul>' : '') +
+      sec('下游任务', downs.length ? '<ul>' + downs.join('') + '</ul>' : '') +
+      sec('描述', t.description ? '<p>' + esc(t.description) + '</p>' : '') +
+      sec('进度', t.progress ? '<p>' + esc(t.progress) + '</p>' : '') +
+      sec('结果', t.result ? '<p>' + esc(t.result) + '</p>' : '') +
+      '<div class="td-foot" title="task 本身不记时间, 这里是 plan 一级的账">计划 ' + esc(p.title) + ' · ' + esc(planState) + ' · r' + esc(p.revision) +
+        ' · 更新 ' + esc(fmtDayClock(p.updatedAt)) + ' · 创建 ' + esc(fmtDayClock(p.createdAt)) + '</div>';
+    var card = taskDetail.querySelector('.td-card');
+    card.querySelector('.td-close').onclick = hideTaskDetail;
+    card.querySelectorAll('.wchip.go').forEach(function (c) {
+      c.onclick = function (ev) { ev.stopPropagation(); hideTaskDetail(); openNode(c.getAttribute('data-t')); };
+    });
+    taskDetail._esc = function (e) { if (e.key === 'Escape') hideTaskDetail(); };
+    document.addEventListener('keydown', taskDetail._esc);
+    taskDetail.classList.add('on');
+  };
+
+  // 日程与只读 plans 跟着 wizard owner 走。
+  var renderPlan = function () {
+    var ss = schedulesForRole();
+    var ps = plansForRole();
+    var bad = ss.filter(broken);
+    var next = ss[0];
+    var stat = function (k, v, sub, tone) {
+      return '<div class="pst' + (tone ? ' ' + tone : '') + '"><span class="k">' + k + '</span><b>' + v + '</b><span class="s">' + sub + '</span></div>';
+    };
+    var stats = '<div class="pstats">' +
+      stat('下一次', next ? esc(fmtHM(next.nextAt)) : '—', next ? esc(fmtIn(next.nextAt) + ' · ' + (next.note || next.id)) : '没有排期') +
+      stat('定时任务', ss.length, ss.length ? esc(ss.filter(function (x) { return x.hasGate; }).length + ' 条带 gate') : '—') +
+      (bad.length ? stat('出错', bad.length, '见下方红色卡片', 'bad') : '') +
+    '</div>';
+
+    var planCards = ps.length ? ps.map(function (p) {
+      var state = { active: '进行中', paused: '已暂停', completed: '已完成', canceled: '已取消' }[p.state] || p.state;
+      var tasks = p.tasks || [];
+      var taskTitles = Object.create(null);
+      tasks.forEach(function (task) { taskTitles[task.id] = task.title; });
+      var completed = tasks.filter(function (task) { return task.status === 'completed'; }).length;
+      var canceled = tasks.filter(function (task) { return task.status === 'canceled'; }).length;
+      var pending = tasks.filter(function (task) { return task.status === 'pending'; }).length;
+      var inProgress = tasks.filter(function (task) { return task.status === 'in_progress'; }).length;
+      var outgoing = Object.create(null), degree = Object.create(null), rank = Object.create(null);
+      tasks.forEach(function (task) { outgoing[task.id] = []; degree[task.id] = 0; rank[task.id] = 0; });
+      tasks.forEach(function (task) {
+        (task.dependsOn || []).forEach(function (id) {
+          if (!Object.prototype.hasOwnProperty.call(degree, id)) return;
+          outgoing[id].push(task.id); degree[task.id]++;
+        });
+      });
+      var ready = tasks.filter(function (task) { return degree[task.id] === 0; }).map(function (task) { return task.id; });
+      for (var qi = 0; qi < ready.length; qi++) {
+        var id = ready[qi];
+        outgoing[id].forEach(function (next) {
+          rank[next] = Math.max(rank[next], rank[id] + 1);
+          degree[next]--;
+          if (!degree[next]) ready.push(next);
+        });
+      }
+      var layers = [];
+      tasks.forEach(function (task) { (layers[rank[task.id]] || (layers[rank[task.id]] = [])).push(task); });
+      // 节点上的 model / ctx 与执行者: task.executor 优先 (executorOf), 没写 / 解不出退 plan owner;
+      // world 节点里没有它、或它没有带 usage 的轮次, 对应项就不渲染, 不造假值。
+      var ownerNode = planOwnerNode(p);
+      // 同层排序 (barycenter): 节点尽量落在它的上游正下方 —— 边更接近竖直、少交叉少穿字。
+      var above = Object.create(null);
+      layers.forEach(function (items, li) {
+        if (li) {
+          var idx = Object.create(null);
+          items.forEach(function (t, i) { idx[t.id] = i; });
+          var bar = function (t) {
+            var ds = (t.dependsOn || []).filter(function (d) { return above[d] !== undefined; });
+            return ds.length ? ds.reduce(function (s, d) { return s + above[d]; }, 0) / ds.length : idx[t.id];
+          };
+          items.sort(function (a, b) { return bar(a) - bar(b) || idx[a.id] - idx[b.id]; });
+        }
+        items.forEach(function (t, i) { above[t.id] = i; });
+      });
+      var graph = tasks.length ? '<div class="plan-graph" role="region" aria-label="' + esc(p.title) + ' 任务依赖图，可滚动">' +
+        '<div class="plan-graph-inner"><svg class="plan-edges" aria-hidden="true"></svg><div class="plan-layers">' +
+        layers.map(function (items) {
+          return '<div class="plan-layer">' + items.map(function (t) {
+            var status = TASK_WORD[t.status] || t.status;
+            var glyph = TASK_BADGE[t.status] || '•';
+            var deps = (t.dependsOn || []).filter(function (dep) { return Object.prototype.hasOwnProperty.call(taskTitles, dep); });
+            var ex = executorOf(t, ownerNode);
+            // 第一行 meta: 徽标 | 执行者 | model·ctx (右对齐, 弹性收缩); 第二行: 标题 (两行截断)。
+            var exEl = ex.node
+              ? wizChip(ex.node.target) + (ex.owner ? '<i class="ex-mark" title="未指派执行者, 显示 plan owner">· owner</i>' : '')
+              : (ex.name ? '<span class="pn-ex-plain" title="执行者名字此刻不在 world 名册">' + esc(ex.name) + '</span>' : '');
+            var mcParts = ex.node ? [
+              ex.node.model ? '<span class="pn-model">' + esc(ex.node.model) + '</span>' : '',
+              ex.node.ctx ? '<span class="pn-ctx">ctx ' + esc(fmtTok(ex.node.ctx)) + '</span>' : '',
+            ].filter(Boolean) : [];
+            var mcTitle = ex.node ? [
+              ex.node.model ? '模型 ' + ex.node.model : '',
+              ex.node.ctx ? '上下文 ' + fmtTok(ex.node.ctx) + ' (最近一次请求送入的 input + 缓存)' : '',
+            ].filter(Boolean).join(' · ') : '';
+            // 卡片只留一眼可扫的两行 —— 其余 (描述/依赖/进度/结果/时间) 在详情浮层。
+            return '<article class="plan-node task-' + esc(t.status) + '" data-task-id="' + esc(t.id) + '" data-plan="' + esc(p.id) + '" data-depends-on="' + esc(JSON.stringify(deps)) + '" tabindex="0" role="button" aria-label="查看任务 ' + esc(t.title) + ' 详情">' +
+              '<div class="pn-meta">' +
+                '<span class="task-badge tb-' + esc(t.status) + '" title="' + esc(status) + '">' + esc(glyph) + ' ' + esc(status) + '</span>' +
+                (exEl ? '<span class="pn-ex' + (ex.owner ? ' is-owner' : '') + '">' + exEl + '</span>' : '') +
+              '</div>' +
+              '<b class="pn-title" title="' + esc(t.title) + '">' + esc(t.title) + '</b>' +
+              // footer 永远渲染: 没有 model/ctx 就留空行 —— 空行仍占位 (min-height), 保证同层卡片等高、
+              // 注脚分隔线在同层各卡同一高度; 不编占位值。
+              '<div class="pn-foot"' + (mcTitle ? ' title="' + esc(mcTitle) + '"' : '') + '>' + (mcParts.length ? mcParts.join('<i class="pn-sep">·</i>') : '') + '</div>' +
+            '</article>';
+          }).join('') + '</div>';
+        }).join('') + '</div></div></div>' : '<div class="pempty plan-graph-empty">任务图为空 · 完成 0 / 0 · 取消 0</div>';
+      return '<article class="tcard plan-state-' + esc(p.state) + '"><div class="plan-main"><h3>' + esc(p.title) + '<span class="tag plan-state-tag">' + esc(state) + ' · r' + esc(p.revision) + '</span></h3>' +
+        '<div class="pid">' + esc(p.id) + '</div>' +
+        (p.description ? '<p>' + esc(p.description) + '</p>' : '') +
+        (p.state === 'paused' && p.reason ? '<p class="plan-reason">暂停原因：' + esc(p.reason) + '</p>' : '') +
+        '<div class="plan-counts">完成 ' + completed + ' / ' + tasks.length + ' · 取消 ' + canceled + ' · 进行中 ' + inProgress + ' · 待处理 ' + pending + '</div>' +
+        '<div class="plan-graph-note">箭头从前置任务指向依赖它的任务 · 根在上、依赖逐层向下 · 点击节点看详情</div>' + graph + '</div></article>';
+    }).join('') : '<div class="pempty">' + esc(roleNodeName()) + ' 名下没有 plans</div>';
+    var html = stats + '<section class="psec"><h3>Plans<span>' + ps.length + '</span></h3>' + planCards + '</section>' +
+      '<section class="psec">' +
+        '<h3>定时任务<span>' + ss.length + '</span></h3>' +
+        (ss.length ? renderStrip(ss) + bad.concat(ss.filter(function (x) { return !broken(x); })).map(taskHTML).join('')
+          : '<div class="pempty">' + esc(roleNodeName()) + ' 名下没有定时任务 —— 让它 schedule_task 排一个</div>') +
+      '</section>';
+    // 心跳每 3s 重画一次 —— 没变就不碰 DOM (展开着的 prompt、悬停的提示都留着)。
+    if (planEl._html === html) return;
+    planEl._html = html;
+    planEl.innerHTML = html;
+    if (planResizeObserver) {
+      planResizeObserver.disconnect();
+      planEl.querySelectorAll('.plan-graph').forEach(function (graph) { planResizeObserver.observe(graph); });
+    }
+    planEl.querySelectorAll('.wchip.go').forEach(function (c) {
+      c.onclick = function (ev) { ev.stopPropagation(); openNode(c.getAttribute('data-t')); };
+    });
+    planEl.querySelectorAll('.plan-node').forEach(function (n) {
+      n.onclick = function () {
+        var p = ps.filter(function (x) { return x.id === n.getAttribute('data-plan'); })[0];
+        var t = p && (p.tasks || []).filter(function (x) { return x.id === n.getAttribute('data-task-id'); })[0];
+        if (p && t) showTaskDetail(p, t);
+      };
+    });
+    redrawPlanEdges();
+    planEl.querySelectorAll('.pprompt').forEach(function (d) {
+      d.ontoggle = function () { PLAN_OPEN[d.getAttribute('data-id')] = d.open; planEl._html = ''; };
+    });
+    planEl.querySelectorAll('.strip .pin').forEach(function (p) {
+      p.onclick = function () {
+        var card = planEl.querySelector('.tcard[data-id="' + cssEsc(p.getAttribute('data-id')) + '"]');
+        if (!card) return;
+        card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        card.classList.remove('flash'); void card.offsetWidth; card.classList.add('flash');
+      };
+    });
+  };
   // ── 载入 / 渲染 ────────────────────────────────────────────────────
   var scrollState = function () {
     return { top: thread.scrollTop, pinned: thread.scrollHeight - thread.scrollTop - thread.clientHeight < 90 };
@@ -756,8 +1213,8 @@
   var scrollBottom = function () { thread.scrollTop = thread.scrollHeight; };
   // 左上角 = 这一页的主张: 站在谁的位置上, 它一睁眼背着什么 (宪章), 家在哪、什么时候出生。
   // room 模式下改成这个 room 的一行摘要 —— 不留空栏。
-  var fact = function (ic, txt, tip, attr) {
-    var cls = 'fx' + (attr === 'charter' && S.charter ? ' on' : '');
+  var fact = function (ic, txt, tip, attr, tone) {
+    var cls = 'fx' + (attr === 'charter' && S.charter ? ' on' : '') + (attr === 'plan' && S.pane === 'plan' ? ' on' : '') + (tone ? ' ' + tone : '');
     return '<span' + (attr ? ' class="' + cls + '" data-rb="' + attr + '"' : '') + ' title="' + esc(tip || txt) + '">' + ic + ' ' + esc(txt) + '</span>';
   };
   // room 没有名字时服务端会把成员名拼起来当 label —— 那是给关系用的, 不能当标题。
@@ -800,36 +1257,35 @@
     var want = ROLE.indexOf("#") > 0 ? ROLE.split("#").pop() : (/^(chat|user):/.test(ROLE) ? ROLE : "");
     var tip = want && want !== (w.name || "") && ROLE !== w.id
       ? fact("🔗", "链接指向 " + want, "链接来自 " + want + "; 它与 " + (w.name || w.id) + " 是同一个身份的化身, 这一页是它的规范页") : "";
+    // 日程排最后, 可点: 名下排了什么 (main 的口径 —— 名片是这一栏唯一的入口)。
+    var pf = schedulesForRole().length || plansForRole().length ? planFact() : null;
     var facts = [
       tip,
       w.chat ? fact('🏠', w.chat, 'home 群: ' + w.chat) : '',
       born ? fact('🐣', fmtAgo(born), '出生于 ' + fmtDay(born)) : '',
       cb ? fact('📜', '≈' + fmtTok(cb.tokens), '宪章 ≈' + fmtTok(cb.tokens) + ' token · ' + fmtClock(cb.at) + ' 压进系统提示 · 点开看全文', 'charter') : '',
       w.cwd ? fact('🗂️', shortCwd(w.cwd), w.cwd) : '',
-      (D.plans || []).length ? fact('📅', D.plans.length + ' 个计划', (D.plans || []).map(function (p) { return p.title || p.id; }).join(' · ')) : '',
+      pf ? fact(pf[0], pf[1], pf[2], pf[3], pf[4]) : '',
     ].filter(Boolean).join('');
     var st = w.busy ? '<span class="rv-chip go">执行中</span>'
       : w.waiting && w.waiting.length ? '<span class="rv-chip warn">等审批 ' + esc(w.waiting.join(',')) + '</span>'
       : w.alive ? '<span class="rv-chip ok">在线</span>' : '<span class="rv-chip">冷</span>';
     // 会话切换属于「这个角色」: 放在左上的名片里, 不占右栏头。
-    var sess = (D.sessions || []).length
-      ? '<div class="rbacts"><select id="rv-session" class="rv-sel" title="换这个 role 的会话段">' +
-        ['<option value="all">全部会话</option>'].concat((D.sessions || []).map(function (s, i) {
-          return '<option value="' + esc(s.sessionId) + '"' + (D.session === s.sessionId ? ' selected' : '') + '>' +
-            esc('#' + (i + 1) + ' · ' + fmtDay(s.start) + ' · ' + s.turns + ' 轮') + '</option>';
-        })).join('') + '</select></div>'
-      : '';
+    // 会话切换 = main 的那个下拉 (name 右边): 只有一段就没什么可选, 不挂。
+    var sess = (D.sessions || []).length > 1 ? sessPicker() : '';
     el.innerHTML = '<div class="id"><span class="av">' + esc(w.label || '🧙‍♂️') + '</span><span class="l">' +
       '<span class="nl"><span class="cp" title="' + esc('点击复制 ' + (w.name || w.id)) + '"><span class="nm">' + esc(w.name || w.id) + '</span></span>' +
-      '<span id="rb-st">' + st + '</span></span>' +
+      '<span id="rb-st">' + st + '</span><span id="rb-sp">' + sess + '</span></span>' +
       (facts ? '<span class="facts">' + facts + '</span>' : '') +
-      '</span></div>' + (w.description ? '<p class="job">' + esc(w.description) + '</p>' : '') + sess;
+      '</span></div>' + (w.description ? '<p class="job">' + esc(w.description) + '</p>' : '');
     var cp = el.querySelector('.cp');
-    var ss = el.querySelector('#rv-session');
-    if (ss) ss.onchange = function () { D.session = ss.value; loadWizard(D.role, true); };
+    bindSessPicker();
     if (cp) cp.onclick = function () { copyText(w.name || w.id); };
-    var fx = el.querySelector('[data-rb="charter"]');
-    if (fx) fx.onclick = function () { toggleCharter(); };
+    el.querySelectorAll('[data-rb]').forEach(function (x) {
+      var a = x.getAttribute('data-rb');
+      x.onclick = a === 'charter' ? function () { toggleCharter(); }
+        : function () { setPane(S.pane === 'plan' ? 'msgs' : 'plan'); };
+    });
     document.title = (w.label ? w.label + ' ' : '') + (w.name || w.id) + ' 的视角';
     setFavicon(w.label);
   };
@@ -850,17 +1306,23 @@
   };
   var renderWizard = function (skipBody) {
     var w = D.wizard || { name: D.role, label: '🧙‍♂️' };
+    var plan = S.pane === 'plan';
     // 顶栏只有标题与视角切换: 模型 / 在线 / 职责都属于这个 role, 在左上名片 (模型在底部用量条上)。
-    header('<span class="rv-lb">' + esc(w.label || '🧙‍♂️') + '</span> ' + esc(w.name || D.role), '',
-      '<button class="rv-act' + (D.all ? ' on' : '') + '" id="rv-all">' + (D.all ? 'W-2 全部' : 'W-1 与我相关') + '</button>');
+    // 日程是同一个窗口的另一面 —— 标题改成「谁的日程」, 右上角回对话。
+    header(plan ? '<span class="rv-lb">📅</span> 日程与计划'
+      : '<span class="rv-lb">' + esc(w.label || '🧙‍♂️') + '</span> ' + esc(w.name || D.role),
+      plan ? esc(roleNodeName()) + ' 名下的定时任务与计划' : '',
+      plan ? '<button class="rv-act" id="rv-back">‹ 对话</button>'
+        : '<button class="rv-act' + (D.all ? ' on' : '') + '" id="rv-all">' + (D.all ? 'W-2 全部' : 'W-1 与我相关') + '</button>');
     rolebar();
     renderGraphSide();
     renderUsage();
+    if (plan) { renderPlan(); return; }  // 正文在日程栏里, 时间轴的 DOM 原样留着
     if (skipBody) return;  // 时间轴没变: 头更新了, 正文留给 DOM (展开态 / 滚动位置不受打扰)
     var older = '';
     var note = D.ledger ? '' : '<div class="rv-note">这个部署没有 room 账本 — 只能看名片, 看不到消息 (要历史请打开 daemon 的 rolepage)。</div>';
     var ot = openTools();
-    inner.innerHTML = note + older + (D.stream ? streamHTML(D.stream) : listHTML(D.msgs, true)) + plansSection() + (S.charter ? '<section class="rv-charter">' + S.charter + '</section>' : '');
+    inner.innerHTML = note + older + (D.stream ? streamHTML(D.stream) : listHTML(D.msgs, true)) + (S.charter ? '<section class="rv-charter">' + S.charter + '</section>' : '');
     fillMd(inner);
     applyFold(inner);
     reopenTools(ot);
@@ -868,7 +1330,7 @@
     renderSide();
   };
   var loadRoom = function (id, limit) {
-    D.mode = 'room'; D.roomId = id; D.role = ''; D.mode0 = 'room'; S.charter = null; syncUrl();
+    D.mode = 'room'; D.roomId = id; D.role = ''; D.mode0 = 'room'; S.charter = null; resetPane(); syncUrl();
     // 后发先至: 定时刷新的那一发晚于点开 / 搜索跳转回来时, 丢掉它 (不然会把视图拽回旧 room / 拽回底部)。
     var gen = S.roomGen = (S.roomGen || 0) + 1;
     return api('api/room', { room: id, limit: limit || 60 }).then(function (r) {
@@ -880,6 +1342,8 @@
     });
   };
   var loadWizard = function (role, keepScroll) {
+    // 换一个人 = 换一段对话: 日程栏只属于刚才那个人, 收回对话面。
+    if (role && D.mode === 'wizard' && role !== D.role) resetPane();
     D.mode = 'wizard'; D.role = role || D.role; D.roomId = ''; syncUrl();
     var st = scrollState();
     return api('api/wizard', { role: role, all: D.all ? '1' : '', session: D.session === 'all' ? '' : D.session, limit: 60 }).then(function (r) {
@@ -1135,7 +1599,10 @@
       if (!r.ok) { convsEl.innerHTML = '<div class="rv-none">' + esc(r.error || '世界视图加载失败') + '</div>'; return; }
       W.at = r.at; W.rooms = r.rooms || []; W.nodes = r.nodes || [];
       W.uidTargets = r.uidTargets || {}; W.chatNames = r.chatNames || {}; W.names = r.names || {}; W.degraded = !!r.degraded;
+      // 日程栏要的 plans / 定时任务: 名册快照里就是全量 (带 gate 与出错), 每 6s 一次, 开着就看得到最新。
+      W.plans = r.plans || []; W.schedules = r.schedules || [];
       renderSide();
+      if (S.pane === 'plan') { renderPlan(); return r; }
       return r;
     }).catch(function () { worldReq = null; });
     return worldReq;

@@ -398,7 +398,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
         rooms: f.rooms ?? [],
         names: f.names ?? {},
         plans: f.plans.filter((p) => p.owner === role && (p.state === "active" || p.state === "paused" || p.state === "completed")).map(publicPlan),
-        schedules: schedules.map((x) => ({ id: x.id, when: x.when, nextAt: x.nextAt, note: x.note, prompt: x.prompt, lastFired: x.lastFired })),
+        // 日程栏与 main 同形: gate 去向 / 出错理由 / 执行目标 / 任务文件都要, 前端按老卡片渲染。
+        schedules,
         stats: roleStats(records, role, now, span),
         charter: charterBrief(store.list(), role),
       });
