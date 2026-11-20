@@ -25,7 +25,7 @@ import { parseInstanceName } from "./classes.js";
 import { noteNativeChannelFrame } from "./channel.js";
 import { awaitChannelOfPost, channelOf, channelOfPost, postsOfChannel } from "./channel-posts.js";
 import { settleChannelSteward } from "./onboarding.js";
-import { applyOnboarding, bindSteward, classifyOnboardingInput, GUIDE_DESC, guideOf, guideTargetOf, judgeOnboarding, loadOnboardingStore, needsOnboarding, renderGuideOpening, renderGuideRetry, renderOnboardingDone } from "./onboarding.js";
+import { applyOnboarding, bindSteward, classifyOnboardingInput, GUIDE_DESC, guideOf, guideTargetOf, judgeOnboarding, loadOnboardingStore, needsOnboarding, renderGuideOpening, renderGuideRetry, renderOnboardingDone, type OnboardingBound, type OnboardingStore } from "./onboarding.js";
 import { isApprentice } from "./apprentice.js";
 import { truncate } from "../shared/std.js";
 import { hookModePath, readHookMode, writeHookMode } from "../shared/hook-mode.js";
@@ -569,6 +569,20 @@ const downloadToInbox = async (
   }
 };
 
+/** 新群引导在 room 模型里的两个接线点 (实现都在 index.ts 的 room 块: 只有它持有 hub)。
+ *  缺省 (启动竞态 / 测试) = room 还没装上, 引导路径回一句「稍后再发」。 */
+export interface InboundOpts {
+  /** 引导在途状态 (onboarding.json)。daemon 传一份共享实例 —— 否则 /onboarding/bind 那边
+   *  finish 的是一份自己现读的盘, 与这里的在途表各算各的。缺省 = 自己读。 */
+  onboarding?: OnboardingStore;
+  /** 人这句落进本群 room (guide 作 founder, ord=1) 并唤醒它。 */
+  guideInbound?: (a: { base: string; guide: string; text: string; from: string; streamId: string; frame: WsFrame<BaseMessage> }) => Promise<{ ok: boolean; reason?: string }>;
+  /** 引导落定: 引导在 room 里时 join 管家 / 转 duty / leave / 系统行。false = 没得交 (不在 room 里)。 */
+  guideSettle?: (base: string, bound: OnboardingBound) => boolean;
+}
+
+export type GuideInbound = NonNullable<InboundOpts["guideInbound"]>;
+
 export const installInboundRouter = (
   client: WSClient,
   cfg: Config,
@@ -576,6 +590,7 @@ export const installInboundRouter = (
   bridge: MirrorBridge,
   sourcePath: string,
   guardCharter: CharterGuard,
+  opts: InboundOpts = {},
 ): void => {
   const inboxDir = expandHome(cfg.wrc.mirror.inboxDir);
   // 已知的机器人名只随配置变; 下面所有入站路径共用这一个剥离器。
@@ -1094,7 +1109,7 @@ export const installInboundRouter = (
   // 绑定即收: 目录 / 已有管家名一落定, 完成确认走 daemon 系统行, 引导化身当场 kill + drop
   // —— 不再留告别窗口与定时器 (reload 丢定时器 = 群里残留一个「等指令」的会话)。兜底:
   // 绑定已在 (人手改 config、上个进程死在半路) 而引导化身还挂着, 下一条群消息进门时收尸。
-  const onboarding = loadOnboardingStore(cfg);
+  const onboarding = opts.onboarding ?? loadOnboardingStore(cfg);
   /** 频道原生帧等 topic_at_bot 配对的上限 (实测事件先到 0.3–0.8s; 只有没配过的帖子会等)。 */
   const CHANNEL_PAIR_WAIT_MS = 2000;
   const reapGuide = async (base: string, why: string): Promise<void> => {
@@ -1152,34 +1167,45 @@ export const installInboundRouter = (
       await replySystem(frame, msg, "[wezard] 本群还没完成初始化 — 先回复管家的工作目录 (绝对路径) 或已有管家的名字, 命令引导完成后可用。");
       return true;
     }
-    // 起/续引导会话, 然后把「daemon 指令 + 人的原话」注入, 由引导化身转成人话回群。
-    // 引导化身自己的工作区 = 全局默认 (cfg.wrc.cwd) —— 要绑的 workspace 是管家的。
-    // pane 已在 (reload 续接 / 上一轮还在) 就只注入; 记录带 GUIDE_DESC 供收尸与工具面收窄识别。
-    const inject = async (instruction: string): Promise<void> => {
-      const guide = guideTargetOf(store, base);
-      if (!bridge.hasMirrorTarget(guide)) {
-        store?.upsert(guide, { identity: guide, kind: "worker", description: GUIDE_DESC, workspace: expandHome(cfg.wrc.cwd) });
-        const { err } = await ensureSession(guide, "guide", expandHome(cfg.wrc.cwd));
-        if (err) { await replySystem(frame, msg, "[wezard] 引导会话起不来: " + err + " — 稍后再发一句试试。"); return; }
-        log.info({ base, guide }, "onboarding: guide session spawned");
-      }
-      await send(frame, msg, guide, instruction + "\n\n人刚才说: " + text);
-    };
-    // 首触且不是一步到位的回答 → 开场 (引导化身起会话 + 请人给目录或已有管家名)。
     const first = !onboarding.get(base);
     onboarding.begin(base);
-    const verdict = judgeOnboarding(store, base, input, (t) => bridge.sessionInfo(t)?.cwd ?? "");
-    if (verdict.kind === "retry") {
-      await inject(first ? renderGuideOpening() : renderGuideRetry(verdict.reason));
-      return true;
+    // ① 快路径 (2026-11-20 收窄): **整句**就是一个路径 / 一个名字才一步绑定。含路径但还有别的
+    // 话、相对路径、认不出的 —— 全部下面交给引导化身, 不再从长句里抽第一个路径 (实录: 「在
+    // ~/develop/Tencent 下建 dhtpm 并绑定」被绑成父目录, 人真正要的事全丢)。
+    let retryReason = "";
+    if (input.kind !== "sentence") {
+      const verdict = judgeOnboarding(store, base, input, (t) => bridge.sessionInfo(t)?.cwd ?? "");
+      if (verdict.kind !== "retry") {
+        const bound = applyOnboarding(store!, onboarding, base, verdict,
+          (name) => guardCharter(() => bindSteward(cfg, sourcePath, base, name), () => ({ what: verdict.kind === "bind-new" ? "新群引导新建管家 " + name + " (工作区 " + verdict.workspace + ") 并绑到 " + base : "新群引导把 " + name + " 绑为 " + base + " 的管家", byHuman: true })),
+          (t) => identityWorkspaceOf(store, t) || ((c) => c.runningCwd || c.defaultCwd)(bridge.getCwd(t)));
+        log.info({ base, ...bound }, "onboarding: steward bound (fast path)");
+        // 引导化身在 room 里 (上一句已经交给它了): 管家接进 room、duty 连原话一起转过去,
+        // 完成确认由 room 的系统行发; 否则照旧回一条 daemon 系统行。
+        if (!(opts.guideSettle?.(base, bound) ?? false)) await replySystem(frame, msg, renderOnboardingDone(bound));
+        await reapGuide(base, "bound");
+        await reapChannelSiblings(base);
+        return true;
+      }
+      retryReason = verdict.reason;
     }
-    const bound = applyOnboarding(store!, onboarding, base, verdict,
-      (name) => guardCharter(() => bindSteward(cfg, sourcePath, base, name), () => ({ what: verdict.kind === "bind-new" ? "新群引导新建管家 " + name + " (工作区 " + verdict.workspace + ") 并绑到 " + base : "新群引导把 " + name + " 绑为 " + base + " 的管家", byHuman: true })),
-      (t) => identityWorkspaceOf(store, t) || ((c) => c.runningCwd || c.defaultCwd)(bridge.getCwd(t)));
-    log.info({ base, ...bound }, "onboarding: steward bound");
-    await replySystem(frame, msg, renderOnboardingDone(bound));
-    await reapGuide(base, "bound");
-    await reapChannelSiblings(base);
+    // ② 别的都是引导化身的事: 起/续引导会话, 把这轮的话术挂到它下一次注入上 (它就是引导的宪章),
+    // 人这句由 inbound 端口落进本群 room (guide 作 founder) 并唤醒它 —— 绑定后 duty 连原话交给管家。
+    // 引导化身自己的工作区 = 全局默认 (cfg.wrc.cwd) —— 要绑的 workspace 是管家的。
+    const guide = guideTargetOf(store, base);
+    if (!bridge.hasMirrorTarget(guide)) {
+      store?.upsert(guide, { identity: guide, kind: "worker", description: GUIDE_DESC, workspace: expandHome(cfg.wrc.cwd) });
+      log.info({ base, guide }, "onboarding: guide session spawned");
+    }
+    const { err } = await ensureSession(guide, "guide", expandHome(cfg.wrc.cwd));
+    if (err) { await replySystem(frame, msg, "[wezard] 引导会话起不来: " + err + " — 稍后再发一句试试。"); return true; }
+    bridge.armCharter(guide, first ? renderGuideOpening() : renderGuideRetry(retryReason));
+    const sent = opts.guideInbound
+      ? await opts.guideInbound({ base, guide, text, from: msg.from.userid, streamId: msg.msgid, frame })
+      : { ok: false, reason: "room 接线还没就绪" };
+    if (sent.ok) return true;
+    log.warn({ base, guide, reason: sent.reason }, "onboarding: 人这句没能进 room");
+    await replySystem(frame, msg, "[wezard] 引导没接上 (" + (sent.reason ?? "未知原因") + ") — 稍后再发一句。");
     return true;
   };
   const send = async (frame: WsFrame<BaseMessage>, msg: BaseMessage, who: string, text: string, images: string[] = []): Promise<void> => {

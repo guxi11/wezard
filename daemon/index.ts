@@ -27,7 +27,7 @@ import { parsePath } from "../shared/config-meta.js";
 import { pickTier } from "../shared/model-tiers.js";
 import { applyHot, cfgSeenBy, patchedTop, pinChatKeys, configGet, planSet, renderPlan, tierEvidence, type Plan, type SetReq, type TierUsage, type UsageTotals } from "./config-api.js";
 import { computeUsage, costOf, fmtCost, fmtTokens, sumTotal, type ModelTotals } from "./usage.js";
-import { installInboundRouter } from "./inbound.js";
+import { installInboundRouter, type GuideInbound, type InboundOpts } from "./inbound.js";
 import { installChannelTransport, installChannelEvents, readChannel, isTopicChat, sendTopicContent } from "./channel.js";
 import { loadMirrorStore } from "./mirror-store.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
@@ -130,7 +130,7 @@ import { coldGateOf, decide, rankCandidates, routeDiagnostics, renderCandidates,
 import { parseWhen, renderRoomRead } from "../shared/room-view.js";
 import { roomFacts, nameTable } from "./room-facts.js";
 import { waitForIdle, type IdleResult } from "./wait-idle.js";
-import { bindChannelSteward, bindSteward, guideRefusal, isGuideManifestation, rewriteStewardBindings } from "./onboarding.js";
+import { applyOnboarding, bindChannelSteward, bindSteward, guideHandoffOps, guideOf, guideRefusal, isGuideManifestation, judgeOnboarding, loadOnboardingStore, needsOnboarding, planOnboardBind, renderGuideOpening, renderOnboardingDone, rewriteStewardBindings, type OnboardingBound } from "./onboarding.js";
 import { reminderEventId, reminderToken, startPlanReminders, type PlanReminderCandidate } from "./plan-reminders.js";
 
 const waitForQuorum = async (targets: readonly string[], isBusy: (target: string) => Promise<boolean>, timeoutMs: number, need: number): Promise<IdleResult[]> => {
@@ -301,6 +301,11 @@ const main = async (): Promise<void> => {
   let roomTurnEnd: (target: string) => void = () => undefined;
   /** room 泵注入成功的 touch (看门狗活动时钟; 同上, room 块里回填)。 */
   let roomActivityTouch: (target: string) => void = () => undefined;
+  /** 新群引导在 room 模型里的两个接线点 (见 inbound.ts InboundOpts): room 块里回填 —— 只有它持有 hub。 */
+  let guideInboundHook: InboundOpts["guideInbound"];
+  let guideSettleHook: InboundOpts["guideSettle"];
+  /** 引导在途状态 (onboarding.json): inbound 与 /onboarding/bind 共用这一份, 不各读各的盘。 */
+  const onboarding = loadOnboardingStore(cfg);
 
   const bridge = startMirror({ cfg, log: log.child({ mod: "mirror" }), client: ws.client, store: mirrorStore, identityWorkspace: (t) => identityWorkspaceOf(wizardStore(), t), sendFrozen: (channel, content, stream) => responseTracker.sendFrozen(channel.replace(/^(user|chat|group):/, ""), content, stream),
     // 轮终事件 (wiring C): mirror tail 的非 soft turn_end → room 的 F-1 轮界。
@@ -371,7 +376,10 @@ const main = async (): Promise<void> => {
       if (store) void bridge.newSession(a.principal, settleName(store, chatNameOf(cfg, a.principal), a.principal) || a.principal, { silent: true })
         .catch(() => undefined);
     }
-  }   }, sourcePath, (w, c) => guardCharter(w, c));
+  }   }, sourcePath, (w, c) => guardCharter(w, c), { onboarding,
+    guideInbound: (a) => (guideInboundHook ? guideInboundHook(a) : Promise.resolve({ ok: false, reason: "room 接线还没就绪" })),
+    guideSettle: (base, bound) => (guideSettleHook ? guideSettleHook(base, bound) : false),
+  });
   // 频道（topic）事件层：接在 inbound 之后，让频道消息复用同一套 gate / route / mirror。
   installChannelEvents(ws.client, cfg, log.child({ mod: "channel" }), {
     memberNamesOf: () => [], // room 模型: 频道判官的成员名单走 room 成员, 由 channel.ts 自行解析
@@ -1428,6 +1436,13 @@ const main = async (): Promise<void> => {
       json(res, 400, { ok: false, reason: "cannot resolve caller session" });
       return true;
     };
+    /** 引导化身的发言只许落在本群 room (白名单里的 chat_say / chat_reply)。 */
+    const guideOutsideRoom = (res: import("node:http").ServerResponse, self: string, room: string): boolean => {
+      if (!isGuideManifestation(wizards.get(self)) || room === baseOfKey(self)) return false;
+      json(res, 403, { ok: false, reason: "引导会话只在 " + baseOfKey(self) + " 里说话" });
+      return true;
+    };
+
     // ── /room/*: 发言与交付 ───────────────────────────────────────────────
     http.register("POST /room/say", async (req, res) => {
       const { self, body } = await readPeerBody(req);
@@ -1441,6 +1456,7 @@ const main = async (): Promise<void> => {
       if (to?.error) { json(res, 400, { ok: false, reason: to.error }); return; }
       const target = roomTargetOf(me, to?.who, b.room);
       if (target.error || !target.room) { json(res, target.status ?? 400, { ok: false, reason: target.error ?? target.reason }); return; }
+      if (guideOutsideRoom(res, self, target.room)) return;
       roomReply(res, hub.append(target.room, { author: me, kind: "say", text, origin: "tool",
         ...(to?.who?.length ? { to: to.who } : {}), ...(b.interrupt ? { interrupt: true } : {}) }));
     });
@@ -1474,6 +1490,7 @@ const main = async (): Promise<void> => {
       const rooms = [...new Set(re.map((id) => roomStore.roomOfMsg(id)))];
       if (rooms.some((x) => !x)) { json(res, 400, { ok: false, reason: "认不出的消息 id: " + re.filter((id) => !roomStore.roomOfMsg(id)).join(", ") }); return; }
       if (rooms.length > 1) { json(res, 400, { ok: false, reason: "re 跨了多个 room (" + rooms.join(", ") + ") — 分开答" }); return; }
+      if (guideOutsideRoom(res, self, rooms[0]!)) return;
       const status = (b.status ?? "").toString().trim() as ReplyStatus | "";
       if (status && !["done", "need", "progress", "passed", "canceled", "error"].includes(status)) {
         json(res, 400, { ok: false, reason: "status 只认 done / need / progress / passed / canceled (error 只有 daemon 能写)" });
@@ -1719,6 +1736,32 @@ const main = async (): Promise<void> => {
       hub.write(r.room, [{ op: "watch", at: Date.now(), room: r.room, who: me, on: b.on !== false }]);
       json(res, 200, { ok: true, room: r.room, on: b.on !== false });
     });
+    // ── 新群引导的受控绑定 (onboard_bind): 只有引导化身能调 ────────────────
+    // 引导的唯一动作面: 校验 (create 只建最后一级 / 父目录必须已在 / 必须在 $HOME 下) 与落盘都在
+    // daemon, 引导只表达意图。失败 = 4xx 带原因, 引导自己向人追问 (状态机不动)。
+    http.register("POST /onboarding/bind", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (READ_ROOM_FAIL(res, self)) return;
+      const base = baseOfKey(self);
+      const b = body as { workspace?: string; create?: boolean; name?: string };
+      const plan = planOnboardBind({
+        caller: wizards.get(self), onboarding: needsOnboarding(cfg, wizards, base),
+        workspace: b.workspace, create: b.create, name: b.name,
+        judge: (input) => judgeOnboarding(wizards, base, input, (t) => m.sessionInfo(t)?.cwd ?? ""),
+      });
+      if (!plan.ok) { json(res, plan.status, { ok: false, reason: plan.reason }); return; }
+      const { verdict } = plan;
+      const bound = applyOnboarding(wizards, onboarding, base, verdict,
+        (name) => guardCharter(() => bindSteward(cfg, sourcePath, base, name), () => ({ what: verdict.kind === "bind-new" ? "新群引导新建管家 " + name + " (工作区 " + verdict.workspace + ") 并绑到 " + base : "新群引导把 " + name + " 绑为 " + base + " 的管家", byHuman: true })),
+        (t) => identityWorkspaceOf(wizards, t) || ((c) => c.runningCwd || c.defaultCwd)(m.getCwd(t)));
+      roomLog.info({ room: base, ...bound }, "onboarding: steward bound (guide tool)");
+      const handed = guideSettleRoom(base, bound);
+      if (!handed) notifyChat(base, renderOnboardingDone(bound)); // 引导不在 room 里 (老流程): 至少回报一句
+      void reapGuideAfterTurn(self); // 先回成功: 这一轮的话还要说完, 收尸在轮终之后 (或 60s)
+      json(res, 200, { ok: true, name: bound.name, target: bound.target, workspace: bound.workspace, fresh: bound.fresh,
+        ...(handed ? { room: base } : {}),
+        message: "绑定完成, 引导到此结束: 这一轮不要再说话、不要再调工具; 人的原话与后续要求已经交给管家 ." + bound.name + "。" });
+    });
     // ── 出生 / 退役的 room 落账 ──────────────────────────────────────────
     /** spawn / clone / delegate 的 room? 参数: 落地的 wizard 以 via:"spawn" 免审入群 (契约 §3)。 */
     const joinRoomSpawn = (self: string, roomRef: unknown, bornName: string): void => {
@@ -1841,6 +1884,68 @@ const main = async (): Promise<void> => {
       const d = uid ? hub.defaultRoom(uid) : undefined;
       return d?.room && hub.isBoundRoom(d.room) ? d.room : undefined;
     };
+    // ── 新群引导的两端 (契约 §4): 人话落 room → guide 当 founder 说话 → 绑定后交给管家 ────
+    /** 引导期: 人这句落进本群 room (guide 作 founder, ord=1) 并唤醒它。引导从此只能在 room
+     *  里说话 (chat_reply), 绑定后那条 duty 连原话一起交给管家。 */
+    const guideTakeover: GuideInbound = async (a) => {
+      const rec = wizards.get(a.guide);
+      if (!rec?.uid) return { ok: false, reason: "引导会话不在名册上" };
+      const guide: Who = { kind: "wizard", id: rec.uid };
+      const room = baseOfKey(a.guide);
+      const at = Date.now();
+      const s = roomState(room);
+      if (!s) hub.write(room, [
+        { op: "open", at, room, kind: "wecom-group", by: DAEMON },
+        { op: "join", at, room, who: guide, ord: 1, via: "founder", by: DAEMON },
+      ]);
+      else if (!s.members.has(whoKey(guide))) hub.write(room, [{ op: "join", at, room, who: guide, ord: s.nextOrd, via: "inbound", by: DAEMON }]);
+      // 占位气泡: 引导的 chat_reply 覆盖它 (coverBubble 认 ext + bubble.expires)。
+      const expires = at + 6 * 60_000;
+      rememberBubbleFrame(a.streamId, a.frame, expires);
+      if (a.frame && a.streamId) void ws.client.replyStream(a.frame, a.streamId, withTagHeader(a.guide, "…"), false).catch(() => undefined);
+      const v = hub.append(room, {
+        author: { kind: "human", id: a.from }, kind: "say", text: a.text, origin: "inbound",
+        ext: a.streamId, bubble: { stream: a.streamId, expires },
+      });
+      if (!v.ok) return { ok: false, reason: v.reason };
+      roomLog.info({ room, guide: a.guide, msgId: v.row.id }, "onboarding: 人话进了引导 room");
+      return { ok: true };
+    };
+    /** 引导落定: 管家进 room → 引导名下 duty 全部转给它并唤醒 → 引导离开 → 完成系统行。
+     *  false = 引导不在这个 room 里 (老流程 / 没走过 room), 调用方自己回一句。 */
+    const guideSettleRoom = (base: string, bound: OnboardingBound): boolean => {
+      const s = roomState(base);
+      const guideTarget = guideOf(wizards, base);
+      const guide = guideTarget ? roomSelfOf(guideTarget) : undefined;
+      const steward = roomSelfOf(bound.target);
+      if (!s || !guide || !steward) return false;
+      // roomMirror 给 daemon 的行补 "[wezard] " 前缀, 完成确认自己已经带了一个。
+      const text = renderOnboardingDone(bound).replace(/^\[wezard\]\s*/, "");
+      const ops = guideHandoffOps(s, { guide, steward, text, now: Date.now() });
+      if (!ops.length) return false;
+      hub.write(base, ops);
+      roomLog.info({ room: base, guide: guideTarget, steward: bound.target, ops: ops.length }, "onboarding: room 交给管家");
+      // 管家会话还没起: 泵贴不进没绑定的 pane —— 先起一个, 起来后再踢一脚 (否则要等 30s 重踢)。
+      if (m.hasMirrorTarget(bound.target)) hub.kick();
+      else {
+        const name = settleName(wizards, chatNameOf(cfg, bound.target), bound.target) || bound.target;
+        void m.newSession(bound.target, name, { silent: true }).then(() => hub.kick()).catch(() => undefined);
+      }
+      return true;
+    };
+    /** 引导收尸 (绑定后): 工具调用已经回成功, 等它这一轮结束 (或 60s 上限) 再 kill + drop ——
+     *  半路杀 pane 会把这一轮截断在 CLI 里。它已经 leave 过 room, 所以 drop 不会再产生
+     *  canceled 行 (leaveRooms 对非成员是空操作)。 */
+    const reapGuideAfterTurn = async (guide: string): Promise<void> => {
+      const deadline = Date.now() + 60_000;
+      await sleep(2000);
+      while (Date.now() < deadline && !(await m.idleNow(guide))) await sleep(1000);
+      const r = await m.killPane(guide);
+      wizards.drop(guide);
+      roomLog.info({ guide, killed: r.ok, reason: r.reason }, "onboarding: guide reaped after bind");
+    };
+    guideInboundHook = guideTakeover;
+    guideSettleHook = guideSettleRoom;
     // rolepage 的 room 历史路由 (room-ui 的第 4 个接线点): 坏账本按「没有这个 room」处理。
     setRoomReader({ ids: roomStore.ids, get: (id) => roomState(id) });
     // 回填外层引用 (入站包装在 mirror 块之外)。
@@ -2289,9 +2394,10 @@ const main = async (): Promise<void> => {
       // 信箱里装的是相对上一份宪章的变化; 新宪章一渲染就都过期了 (名册、记忆都已在里面)。
       notices.drain(target);
       notices.forget(target);
-      // 引导化身不发宪章: 宪章教的是 wizard 的整套工具与编排, 引导者一句也用不上 —— 带着它,
-      // 「设置工作区为 …」就被读成自己的 set_workspace + handoff (2026-11-17 teststrict)。
-      if (isGuideManifestation(wizardStore()?.get(target))) return "";
+      // 引导化身不发 wizard 宪章: 那套工具与编排它一句也用不上 —— 带着它, 「设置工作区为 …」
+      // 就被读成自己的 set_workspace + handoff (2026-11-17 teststrict)。它的「宪章」就是引导
+      // 话术 (三件工具 + 绑定之外的不要自己做), 由 inbound 每轮 armCharter 覆盖具体那一条。
+      if (isGuideManifestation(wizardStore()?.get(target))) return renderGuideOpening();
       return charterFor(target, { ...charterOptsOf(target, ctx?.cwd), cli: ctx?.cli });
     });
 

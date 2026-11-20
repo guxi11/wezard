@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import pino from "pino";
 import { ConfigSchema } from "../shared/config.js";
 import { chatPolicyOf } from "../daemon/chat-name.js";
 import { makeApproveHandler } from "../daemon/approval.js";
-import { applyOnboarding, bindSteward, classifyOnboardingInput, GUIDE_DESC, relativePathInput, guideOf, guideRefusal, guideTargetOf, isGuideManifestation, isOnboardingActive, judgeOnboarding, loadOnboardingStore, needsOnboarding, renderOnboardingDone, stewardNameCandidates, validateWorkspace, WIZARD_NAME_RE, workspaceInput, type OnboardingInput, type OnboardingVerdict } from "../daemon/onboarding.js";
+import { answerOf, applyOnboarding, bindSteward, classifyOnboardingInput, GUIDE_DESC, guideHandoffOps, guideOf, guideRefusal, guideTargetOf, isGuideManifestation, isOnboardingActive, judgeOnboarding, loadOnboardingStore, needsOnboarding, planOnboardBind, renderOnboardingDone, validateOnboardingWorkspace, validateWorkspace, WIZARD_NAME_RE, type OnboardingInput, type OnboardingVerdict } from "../daemon/onboarding.js";
 import { bindWizardStore, identityWorkspaceOf, loadWizardStore } from "../daemon/wizard.js";
 import { autoOrdinalOf } from "../daemon/wizard-names.js";
 import { stewardRoute } from "../daemon/steward.js";
+import { DAEMON, foldRoom, holderOf, mirrors, msgIdOf, openDuties, roomHost, sameWho, whoKey, type RoomOp } from "../shared/room.js";
 
 type Answer = Exclude<OnboardingInput, { kind: "command" }>;
 type Bind = Exclude<OnboardingVerdict, { kind: "retry" }>;
@@ -46,36 +47,37 @@ try {
   writeFileSync(aFile, "x");
   assert.equal(validateWorkspace(aFile).ok, false, "文件不是工作区");
 
-  // ── workspaceInput / classify: 人话里的目录 (teststrict 实录句式) ──
-  assert.equal(workspaceInput("设置工作区为/Users/zzy/org"), "/Users/zzy/org", "粘着中文的路径认 (11-17 实录)");
-  assert.equal(workspaceInput("/Users/x/proj"), "/Users/x/proj");
-  assert.equal(workspaceInput("工作区 ~/proj。"), "~/proj", "~ 起头 + 中文句号截断");
-  assert.equal(workspaceInput("放在 /Users/x/proj, 谢谢"), "/Users/x/proj", "ASCII 尾标点剥掉");
-  assert.equal(workspaceInput("看 https://a.com/b"), "", "URL 里的 / 不认");
-  assert.equal(workspaceInput("a/b"), "", "相对片段不认");
-  assert.equal(workspaceInput("~foo"), "", "~user 形不认");
-  assert.equal(workspaceInput("你好"), "");
-  assert.deepEqual(classifyOnboardingInput("设置工作区为" + dir), { kind: "workspace", path: dir });
-  assert.deepEqual(classifyOnboardingInput(dir), { kind: "workspace", path: dir }, "行首绝对路径不当命令 (旧版会回「命令引导完成后可用」)");
+  // ── onboard_bind 的 workspace 校验: create 只建最后一级 / 必须在 $HOME 下 ──
+  const made = join(dir, "made");
+  const mk = validateOnboardingWorkspace(made, { create: true });
+  assert.equal(mk.ok && mk.created, true, "create 建了目标目录");
+  assert.equal(statSync(made).isDirectory(), true);
+  assert.deepEqual(validateOnboardingWorkspace(made, { create: true }), { ok: true, abs: made, created: false }, "已存在当普通目录");
+  assert.equal(validateOnboardingWorkspace(join(dir, "no", "deep"), { create: true }).ok, false, "父目录不存在 = 拒 (只建一级)");
+  assert.equal(validateOnboardingWorkspace("/tmp/wezard-onboard-test", { create: true }).ok, false, "$HOME 外 = 拒");
+  assert.equal(validateOnboardingWorkspace(join(dir, "absent"), {}).ok, false, "不带 create 必须已存在");
+  assert.equal(validateOnboardingWorkspace("aiservice/agent-team", { create: true }).ok, false, "相对路径 = 拒");
+  assert.equal(validateOnboardingWorkspace("~foo", {}).ok, false, "~user 形 = 拒");
+  assert.equal(validateOnboardingWorkspace(aFile, { create: true }).ok, false, "目标是文件 = 拒");
+
+  // ── 快路径只收「整句答案」(2026-11-20 重做) ────────────────────────
+  // 旧版从长句里抽第一个路径: 实录那句被读成父目录 ~/develop/Tencent, 0.5s 内绑了管家。
+  const TODAY = "在 ~/develop/Tencent 下创建一个 dhtpm 的目录，并在里面初始化 codebuddy.md，然后绑定它为 workspace";
+  assert.deepEqual(answerOf(TODAY), { kind: "sentence" }, "实录那句不绑 (旧版会抽 ~/develop/Tencent 一步绑走)");
+  assert.deepEqual(classifyOnboardingInput(TODAY), { kind: "sentence" });
+  assert.equal(classifyOnboardingInput("设置工作区为" + dir).kind, "sentence", "带别的话的路径不再算答案");
+  assert.deepEqual(classifyOnboardingInput(dir), { kind: "workspace", path: dir }, "整句就是一个路径 = 答案");
+  assert.deepEqual(classifyOnboardingInput("“" + dir + "”。"), { kind: "workspace", path: dir }, "引号 / 尾标点剥掉");
   assert.deepEqual(classifyOnboardingInput("/Users/zzy/org"), { kind: "workspace", path: "/Users/zzy/org" }, "多段路径即使不存在也按路径 (交给校验报不存在)");
+  assert.deepEqual(classifyOnboardingInput("~/proj"), { kind: "workspace", path: "~/proj" }, "~ 起头");
+  assert.equal(classifyOnboardingInput("放在 " + dir + ", 谢谢").kind, "sentence", "路径之外还有话 = 交引导");
+  assert.equal(classifyOnboardingInput("aiservice/agent-team").kind, "sentence", "相对路径交引导 (onboard_bind 会报要绝对路径)");
+  assert.equal(classifyOnboardingInput("看 https://a.com/b 吧").kind, "sentence");
   assert.deepEqual(classifyOnboardingInput("/new"), { kind: "command" }, "单段且不存在 = 命令");
   assert.deepEqual(classifyOnboardingInput("/strict apply"), { kind: "command" });
-  assert.deepEqual(classifyOnboardingInput("fix"), { kind: "names", names: ["fix"] });
-
-  // 相对路径: 只说明「人在指目录」, 交给校验报要绝对路径 —— 不能退回名字分支 (11-18 实录:
-  // 「绑定workspace 到 aiservice/agent-team」把句子里的 workspace 当成身份名绑走了)。
-  assert.equal(relativePathInput("绑定workspace 到 aiservice/agent-team"), "aiservice/agent-team");
-  assert.equal(relativePathInput("看 https://a.com/b"), "", "URL 不认");
-  assert.equal(relativePathInput("/Users/x/proj"), "", "绝对路径归 workspaceInput");
-  assert.deepEqual(classifyOnboardingInput("绑定workspace 到 aiservice/agent-team"), { kind: "workspace", path: "aiservice/agent-team" }, "相对路径按目录交上去, 不落名字分支");
-  assert.equal(classifyOnboardingInput("看 https://a.com/b 吧").kind, "names", "URL 不当目录");
-
-  // ── stewardNameCandidates: @mention 粘连与记号 ─────────────────────
-  assert.deepEqual(stewardNameCandidates(".fix"), ["fix"]);
-  assert.deepEqual(stewardNameCandidates("🧙‍♂️ fix"), ["fix"]);
-  assert.deepEqual(stewardNameCandidates("teststrict@wezard"), ["teststrict"], "粘连 mention 截断 (@ 后的 bot 名不当候选)");
-  assert.deepEqual(stewardNameCandidates("绑定fix"), ["绑定fix", "fix"], "中文里嵌的 ASCII 名字");
-  assert.deepEqual(stewardNameCandidates(""), []);
+  assert.deepEqual(classifyOnboardingInput("fix"), { kind: "names", names: ["fix"] }, "整句就是一个名字 = 答案");
+  assert.equal(classifyOnboardingInput("绑定 fix").kind, "sentence", "名字之外还有话 = 交引导");
+  assert.equal(answerOf("   ").kind, "sentence");
   assert.ok(WIZARD_NAME_RE.test("teststrict"));
   assert.ok(!WIZARD_NAME_RE.test("a b"), "名字不含空格");
   assert.ok(!WIZARD_NAME_RE.test("a#b"), "名字不含地址语法字符");
@@ -108,7 +110,7 @@ try {
   const obw = loadOnboardingStore(cfg);
   obw.begin(B);
   assert.equal(isOnboardingActive(B), true, "在途豁免已开");
-  const input = classifyOnboardingInput("设置工作区为" + ws) as Answer;
+  const input = classifyOnboardingInput(ws) as Answer;
   const verdict = judgeOnboarding(store, B, input);
   assert.deepEqual(verdict, { kind: "bind-new", workspace: ws });
   const binds: string[] = [];
@@ -135,16 +137,16 @@ try {
   store.upsert("chat:wrHOME", { kind: "steward", name: "fix", workspace: "/Users/x/fixws" });
   const obn = loadOnboardingStore(cfg);
   obn.begin(C);
-  const vName = judgeOnboarding(store, C, { kind: "names", names: stewardNameCandidates("绑定 fix") });
+  const vName = judgeOnboarding(store, C, { kind: "names", names: ["fix"] });
   assert.deepEqual(vName, { kind: "bind-existing", name: "fix", target: "chat:wrHOME" });
   const bn = applyOnboarding(store, obn, C, vName as Bind, (n) => bindSteward(cfg, src, C, n), (t) => identityWorkspaceOf(store, t));
-  assert.deepEqual(bn, { name: "fix", workspace: "/Users/x/fixws", fresh: false });
+  assert.deepEqual(bn, { name: "fix", target: "chat:wrHOME", workspace: "/Users/x/fixws", fresh: false });
   assert.equal(store.get(C), undefined, "绑已有不在本群新建锚点");
   assert.equal(obn.get(C), undefined);
   assert.equal(judgeOnboarding(store, C, { kind: "names", names: ["nobody"] }).kind, "retry", "名册里没有 = 重问");
   store.upsert("user:owner#workspace", { kind: "worker", name: "workspace" });
-  assert.equal(judgeOnboarding(store, C, classifyOnboardingInput("绑定workspace 到 aiservice/agent-team") as Answer).kind, "retry",
-    "相对路径 = 重问要绝对路径, 不拿同一句里的英文词去绑同名身份");
+  assert.equal(judgeOnboarding(store, C, { kind: "workspace", path: "aiservice/agent-team" }).kind, "retry",
+    "相对路径 = 重问要绝对路径, 不拿句子里的英文词去绑同名身份");
   assert.equal(judgeOnboarding(store, C, { kind: "workspace", path: join(dir, "nope") }).kind, "retry", "不存在的目录 = 重问, 不落盘");
   delete cfg.chatPolicy;
 
@@ -197,10 +199,70 @@ try {
   assert.equal(isGuideManifestation(g.upsert("chat:wrG#other", { description: GUIDE_DESC })), false, "slot 不是 guide 系不认");
   assert.equal(judgeOnboarding(g, "chat:wrH", { kind: "names", names: ["guidex"] }).kind, "retry", "引导化身的名字不能被绑成管家");
 
-  // ── 工具面收窄: guideRefusal + 审批层全拒 ───────────────────────────
-  assert.match(guideRefusal(g.get("chat:wrG#guide-2"), "handoff"), /没有工具面 \(handoff 被拒\)/);
-  assert.equal(guideRefusal(g.get("chat:wrG#guide"), "handoff"), "", "人手 .guide 不受限");
+  // ── 工具面 = 白名单三项 (2026-11-20): chat_reply / chat_say / onboard_bind ──
+  const guideRec = g.get("chat:wrG#guide-2");
+  for (const t of ["mcp__wezard__chat_reply", "mcp__wezard__chat_say", "mcp__wezard__onboard_bind"]) {
+    assert.equal(guideRefusal(guideRec, t), "", t + " 放");
+  }
+  assert.match(guideRefusal(guideRec, "mcp__wezard__set_workspace"), /只有 chat_reply \/ chat_say \(本群 room\) \/ onboard_bind 三件工具/);
+  assert.match(guideRefusal(guideRec, "handoff"), /\(handoff 被拒\)/, "白名单外照旧拒");
+  assert.equal(guideRefusal(g.get("chat:wrG#guide"), "mcp__wezard__set_workspace"), "", "人手 .guide 不受限");
   assert.equal(guideRefusal(undefined, "handoff"), "");
+
+  // ── 绑定后 room 交接 (契约 §4): 管家接手, 引导离开, 人那条 duty 跟着走 ──
+  const ROOM = "chat:wrHAND";
+  const gw = { kind: "wizard", id: "wGUIDE" } as const;
+  const sw = { kind: "wizard", id: "wSTEW" } as const;
+  const hw = { kind: "human", id: "zhangsan" } as const;
+  const asked = msgIdOf(ROOM, 1);
+  const journal: RoomOp[] = [
+    { op: "open", at: 1, room: ROOM, kind: "wecom-group", by: DAEMON },
+    { op: "join", at: 2, room: ROOM, who: gw, ord: 1, via: "founder", by: DAEMON },
+    { op: "msg", at: 3, room: ROOM, id: asked, seq: 1, author: hw, ord: 0, speak: "human", kind: "say",
+      text: "在 ~/develop/Tencent 下建一个 dhtpm 并绑定", origin: "inbound", wake: [gw.id] },
+  ];
+  const before = foldRoom(ROOM, journal);
+  assert.equal(sameWho(roomHost(before), gw), true, "引导以 founder 入 room 即 host");
+  assert.equal(sameWho(holderOf(before, openDuties(before)[0]!), gw), true, "人这句话此刻在引导手上");
+  const hand = guideHandoffOps(before, { guide: gw, steward: sw, text: "✅ 引导完成", now: 10 });
+  const after = foldRoom(ROOM, [...journal, ...hand]);
+  assert.equal(after.members.has(whoKey(sw)), true, "管家是成员");
+  assert.equal(sameWho(roomHost(after), sw), true, "管家成为 host");
+  assert.equal(after.members.has(whoKey(gw)), false, "引导已离开");
+  const duty = openDuties(after).find((d) => d.msg === asked)!;
+  assert.equal(sameWho(holderOf(after, duty), sw), true, "人那条 duty 的 holder 是管家");
+  assert.equal(after.msgs.filter((m) => m.status === "canceled").length, 0, "无 canceled 行 (duty 先转走再 leave)");
+  const sys = after.msgs[after.msgs.length - 1]!;
+  assert.equal(sys.kind, "system", "最后一行是完成确认");
+  assert.deepEqual(sys.wake, [sw.id], "系统行唤醒管家");
+  assert.equal(mirrors(sys), true, "系统行镜像进企微");
+  assert.deepEqual(guideHandoffOps(foldRoom("chat:wrNONE", []), { guide: gw, steward: sw, text: "x", now: 1 }), [],
+    "引导不在 room 里 = 没得交");
+
+  // ── onboard_bind 的判定 (路由只负责落盘): 谁 / 什么参数 / 建成什么样 ──
+  const judgeAt = (base: string) => (input: Exclude<OnboardingInput, { kind: "command" | "sentence" }>) => judgeOnboarding(store, base, input);
+  const nonGuide = planOnboardBind({ caller: g.get("chat:wrG"), onboarding: true, workspace: made, judge: judgeAt("chat:wrBIN") });
+  assert.equal(nonGuide.ok, false, "人手开的 .guide 不是引导化身");
+  if (!nonGuide.ok) { assert.equal(nonGuide.status, 403, "非引导会话调用 403"); assert.match(nonGuide.reason, /只有新群引导会话/); }
+  const alreadyBound = planOnboardBind({ caller: guideRec, onboarding: false, name: "fix", judge: judgeAt("chat:wrBIN") });
+  assert.equal(alreadyBound.ok, false);
+  if (!alreadyBound.ok) assert.equal(alreadyBound.status, 409, "已绑过 = 409 (引导应当结束)");
+  const freshWs = join(dir, "fresh");
+  const bindOk = planOnboardBind({ caller: guideRec, onboarding: true, workspace: freshWs, create: true, judge: judgeAt("chat:wrBIN") });
+  assert.equal(bindOk.ok, true, "create 建出目录后交判定");
+  if (bindOk.ok) assert.deepEqual(bindOk.verdict, { kind: "bind-new", workspace: freshWs });
+  assert.equal(statSync(freshWs).isDirectory(), true);
+  const deep = planOnboardBind({ caller: guideRec, onboarding: true, workspace: join(dir, "nope", "deeper"), create: true, judge: judgeAt("chat:wrBIN") });
+  assert.equal(deep.ok, false, "父目录不存在 = 拒 (只建一级)");
+  if (!deep.ok) { assert.equal(deep.status, 400); assert.match(deep.reason, /父目录/); }
+  const outside = planOnboardBind({ caller: guideRec, onboarding: true, workspace: "/tmp/wezard-onboard-outside", create: true, judge: judgeAt("chat:wrBIN") });
+  assert.equal(outside.ok, false, "$HOME 外 = 拒");
+  if (!outside.ok) assert.match(outside.reason, /\$HOME/);
+  assert.equal(planOnboardBind({ caller: guideRec, onboarding: true, workspace: made, name: "fix", judge: judgeAt("chat:wrBIN") }).ok, false, "workspace 与 name 同给 = 400");
+  assert.equal(planOnboardBind({ caller: guideRec, onboarding: true, judge: judgeAt("chat:wrBIN") }).ok, false, "两个都不给 = 400");
+  const unknownName = planOnboardBind({ caller: guideRec, onboarding: true, name: "nobody", judge: judgeAt("chat:wrBIN") });
+  assert.equal(unknownName.ok, false, "名册里没有 = 400 带原因 (引导自己追问)");
+  if (!unknownName.ok) assert.match(unknownName.reason, /名册里也没有/);
 
   bindWizardStore(g);
   const replies: Array<{ status: number; body?: string }> = [];
@@ -222,10 +284,14 @@ try {
     await approve(mkReq({ session_id: sid, tool_name: tool, tool_input: toolInput, cwd: dir }) as never, mkRes());
     return JSON.parse(replies[replies.length - 1]!.body ?? "{}") as { decision: string; reason?: string };
   };
-  for (const tool of ["mcp__wezard__handoff", "mcp__wezard__set_workspace", "mcp__wezard__spawn_wizard", "mcp__wezard__delegate", "Bash", "Read"]) {
+  for (const tool of ["mcp__wezard__handoff", "mcp__wezard__set_workspace", "mcp__wezard__spawn_wizard", "mcp__wezard__delegate", "mcp__wezard__chat_ask", "Bash", "Read"]) {
     const d = await decide("s-guide", tool, { cwd: "/Users/zzy/org" });
-    assert.equal(d.decision, "deny", "引导化身调 " + tool + " 一律拒");
-    assert.match(d.reason ?? "", /引导会话没有工具面/);
+    assert.equal(d.decision, "deny", "引导化身调白名单外的 " + tool + " 一律拒");
+    assert.match(d.reason ?? "", /三件工具/);
+  }
+  for (const tool of ["mcp__wezard__chat_reply", "mcp__wezard__chat_say", "mcp__wezard__onboard_bind"]) {
+    const d = await decide("s-guide", tool, { re: "x.1", text: "好的" });
+    assert.equal(d.decision, "allow", "白名单放行 " + tool);
   }
   const human = await decide("s-human", "Read", { file_path: "/x" });
   assert.equal(human.decision, "allow", "人手开的 .guide 照常 (matcher 外放行), 不吃引导拒绝");

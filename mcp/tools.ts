@@ -465,6 +465,30 @@ export const createWezardServer = (): McpServer => {
       })),
   );
 
+  server.registerTool(
+    "onboard_bind",
+    {
+      title: "Bind a steward for a brand-new chat (onboarding only)",
+      description:
+        "**只有新群引导会话能调** (引导期由 daemon 起在 <chat>#guide 的那个), 其余调用 403 —— 已绑过 / 绑定完成就不要再调。"
+        + "把本群管家定下来: 给 workspace (目录; 要新建就 create:true —— 只建最后一级, 父目录必须已存在, 且必须在 $HOME 下) 或给 name (已有管家)。"
+        + "成功 = 绑定完成、引导结束: 管家进 room 接手, 人的原话连 duty 一起转给它; 你这一轮到此为止, 不要再说话、不要再调工具。"
+        + "失败 = 4xx 带原因 (目录不存在 / 父目录不在 / 名字没认出), 引导继续, 用 chat_reply 向人追问。"
+        + "绑定之外的任何要求都不要自己做 —— 绑定后连原话一起交给管家。",
+      inputSchema: currentAddressSchema({
+        workspace: z.string().optional().describe("管家的工作目录 (绝对路径或 ~ 开头)。要建目录就同时给 create:true。"),
+        create: z.boolean().optional().describe("workspace 不存在时建它 (只建最后一级; 父目录必须已存在; 必须在 $HOME 下)。"),
+        name: z.string().optional().describe("已有管家的名字 —— 给这个就不给 workspace。"),
+      }),
+    },
+    async ({ workspace, create, name }) =>
+      unwrap("onboard_bind", await daemonPost("/onboarding/bind", {
+        ...(workspace ? { workspace } : {}),
+        ...(create ? { create: true } : {}),
+        ...(name ? { name } : {}),
+      })),
+  );
+
   // ── room 管理面 ──────────────────────────────────────────────────────────
   server.registerTool(
     "room_open",
