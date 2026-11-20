@@ -83,7 +83,8 @@
     if (W.chatNames[r.id]) return W.chatNames[r.id];
     if (r.title) return r.title;
     if (r.label) return r.label;
-    return (r.members || []).map(function (m) { return m.name; }).join(' ↔ ') || r.id;
+    var n = (r.members || []).length;
+    return n ? n + ' 人' : r.id;
   };
   var KIND_IC = { 'wecom-group': '👥', 'wecom-dm': '💬', 'topic-post': '📌', wx: '🟢', dm: '🧙', adhoc: '◎' };
   var cssEsc = function (s) { return String(s).replace(/(["\\])/g, '\\$1'); };
@@ -148,6 +149,28 @@
     var ns = g.nodes, n = ns.length;
     if (!n) return;
     var k = Math.max(46, Math.min(110, 2 * Math.sqrt((g.hw * g.hh) / n)));
+    // 随包分发的 d3 (web/d3.min.js → /chat/vendor.js) 在, 就用它的力导向模拟。
+    var d3 = window.d3;
+    if (d3 && d3.forceSimulation) {
+      ns.forEach(function (p) {
+        var pin = S.gpos && S.gpos[p.id];
+        if (pin) { p.fx = pin.x; p.fy = pin.y; }
+      });
+      var dl = g.links.map(function (l) { return { source: ns[l.a], target: ns[l.b], tree: l.tree }; });
+      var sim = d3.forceSimulation(ns)
+        .force("link", d3.forceLink(dl).id(function (p) { return p.id; })
+          .distance(function (l) { return l.tree ? k * 1.6 : k * 0.85; })
+          .strength(function (l) { return l.tree ? 0.2 : 0.6; }))
+        .force("charge", d3.forceManyBody().strength(-k * 2).distanceMax(k * 5))
+        .force("collide", d3.forceCollide(function (p) {
+          return (p.isRoom ? p.w / 2 : Math.max(p.r + 4, Math.min(46, (p.ref.name || "").length * 3.2))) + 6;
+        }).iterations(2))
+        .force("x", d3.forceX(0).strength(0.12))
+        .force("y", d3.forceY(0).strength(0.12))
+        .stop();
+      sim.tick(iter);
+      return;
+    }
     // 椭圆软墙: 模拟空间跟着左栏的长宽比走, 出来的团才填得满那一竖条
     var wall = function (p) {
       var ex = p.x / g.hw, ey = p.y / g.hh, ee = ex * ex + ey * ey;
@@ -274,18 +297,21 @@
     simulateGraph(g, G_ITER);
     var minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
     g.nodes.forEach(function (p) {
-      var hw = p.isRoom ? p.w / 2 : p.r + 6, hh = p.isRoom ? 10 : p.r + 14;
+      var hw = p.isRoom ? p.w / 2 + 4 : Math.max(p.r + 6, Math.min(52, (p.ref.name || "").length * 3.4)),
+        hh = p.isRoom ? 12 : p.r + 16;
       minX = Math.min(minX, p.x - hw); maxX = Math.max(maxX, p.x + hw);
       minY = Math.min(minY, p.y - hh); maxY = Math.max(maxY, p.y + hh);
     });
     if (!g.nodes.length) { minX = minY = maxX = maxY = 0; }
-    var pad = 16;
+    var pad = 26;
     var cxm = (minX + maxX) / 2 + (S.gpx || 0), cym = (minY + maxY) / 2 + (S.gpy || 0);
     var z = S.gzoom || 1;
     var vw = Math.max(80, maxX - minX + pad * 2) / z, vh = Math.max(80, maxY - minY + pad * 2) / z;
     var width = Math.max(240, (convsEl.clientWidth || 332) - 12);
-    // 画布跟着内容的长宽比走 (不再 letterbox): 节点少就是一短块, 多了就往下滚
-    var height = Math.max(220, Math.round(width * (vh / vw)));
+    // 画布撑满左栏: viewBox 补到和画布同比例, 内容居中, 不留 letterbox
+    var height = Math.max(260, (convsEl.clientHeight || 620) - 34);
+    var aspect = width / height;
+    if (vw / vh < aspect) vw = vh * aspect; else vh = vw / aspect;
     var onRoom = function (id) { return D.mode === 'room' && D.roomId === id; };
     var lines = g.links.map(function (l) {
       var p = g.nodes[l.a], q = g.nodes[l.b];
@@ -399,7 +425,7 @@
   var scrollBottom = function () { thread.scrollTop = thread.scrollHeight; };
   var renderRoom = function () {
     var r = D.room || { id: D.roomId, kind: 'wecom-group', members: [], openDuties: 0 };
-    var label = D.label || roomLabelOf(r);
+    var label = W.chatNames[D.roomId] || (D.room && D.room.title) || roomLabelOf(r || { id: D.roomId, members: D.members });
     var host = r.host ? nodeOf(nodeIdOf(r.host)).name : '无人 (人兜底)';
     var sub = [chip(KIND_IC[r.kind] || '·', 'kind'), chip('host ' + host), chip(r.openDuties ? '未决 ' + r.openDuties : '无未决', r.openDuties ? 'warn' : ''), chip(r.bound ? '已绑定企微' : '仅 rolepage')].join('');
     header(esc(label), sub, '<button class="rv-act" id="rv-refresh">刷新</button>');
@@ -573,6 +599,11 @@
     else if (D.mode === 'wizard') loadWizard(D.role, true);
   };
   setInterval(tick, TICK_MS);
+  var rzTimer = 0;
+  window.addEventListener('resize', function () {
+    clearTimeout(rzTimer);
+    rzTimer = setTimeout(function () { if (W.rooms.length) renderGraph(); }, 200);
+  });
   setInterval(function () { if (!document.hidden) loadWorld(); }, WORLD_MS);
 
   // ── 启动 ───────────────────────────────────────────────────────────

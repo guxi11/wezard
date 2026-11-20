@@ -54,8 +54,8 @@ button { font: inherit; color: inherit }
 
 /* ── 侧栏: 我 + 会话 ─────────────────────────────────────────────── */
 .side {
-  /* 宽屏按页宽 25% 放大, 窄时不低于 332px。 */
-  width: max(332px, 25vw); flex: none; background: var(--card); border-right: 1px solid var(--line);
+  /* 宽屏按页宽 25% 放大, 窄时不低于 332px; 关系图要半屏。 */
+  width: max(332px, 50vw); flex: none; background: var(--card); border-right: 1px solid var(--line);
   display: flex; flex-direction: column; min-height: 0;
 }
 

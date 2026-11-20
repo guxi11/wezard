@@ -17,14 +17,15 @@
 // 存储直接复用 daemon 的 createDetailStore (append-only JSONL + LRU + 24h TTL)。
 // 信任模型: token 相同 = 可写; 读端不签名 (拿到 id 即可读)。id 是 uuid, 不可枚举。
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import pino from "pino";
 import { expandHome } from "../shared/paths.js";
 import { loadOrCreateSvrToken } from "../shared/svr-token.js";
 import { createDetailStore, type DetailRecord } from "../shared/detail-store.js";
 import { renderDetailPage, renderNotFound } from "../shared/detail-render.js";
-import { createChatRoutes, chatRouteTable, HORIZON_MS } from "../shared/chat-http.js";
+import { createChatRoutes, chatRouteTable, HORIZON_MS, type RoomReader } from "../shared/chat-http.js";
+import { applyOp, emptyRoom, type RoomOp, type RoomState } from "../shared/room.js";
 import { openSeenLog } from "../shared/seen-log.js";
 import { EMPTY_FACTS, type WorldFacts } from "../shared/world.js";
 import { resolvePublicHost } from "../shared/lan-ip.js";
@@ -35,6 +36,8 @@ interface Args {
   host: string;
   port: number;
   stateDir: string;
+  /** daemon 的 room 账本目录 (只读)。同机部署时 svr 直接读它, 远端浏览器才点得开 room 历史。 */
+  roomsDir: string;
   tokenFile: string;
   token?: string;
   logLevel: pino.Level;
@@ -47,6 +50,7 @@ const buildDefaults = (): Args => {
     host: "0.0.0.0",
     port: 17891,
     stateDir: "~/.wezard/svr",
+    roomsDir: "~/.wezard/state/rooms",
     tokenFile: "~/.wezard/svr-token",
     logLevel: "info",
   };
@@ -59,6 +63,7 @@ const buildDefaults = (): Args => {
       host: s.host || fallback.host,
       port: s.port || fallback.port,
       stateDir: s.stateDir || fallback.stateDir,
+      roomsDir: process.env.WEZARD_ROOMS_DIR || fallback.roomsDir,
       tokenFile: s.tokenFile || fallback.tokenFile,
       token: s.token || undefined,
       logLevel: (s.logLevel as pino.Level) || fallback.logLevel,
@@ -77,6 +82,7 @@ const parseArgs = (argv: readonly string[]): Args => {
       case "--host": a.host = v!; i++; break;
       case "--port": a.port = Number(v!); i++; break;
       case "--state": a.stateDir = v!; i++; break;
+      case "--rooms": a.roomsDir = v!; i++; break;
       case "--token": a.token = v!; i++; break;
       case "--token-file": a.tokenFile = v!; i++; break;
       case "--log-level": a.logLevel = v! as pino.Level; i++; break;
@@ -97,6 +103,7 @@ Defaults come from ~/.wezard/config.jsonc (svr.*) when present; CLI overrides.
   --host <ip>        bind address (default 0.0.0.0)
   --port <n>         listen port  (default 17891)
   --state <dir>      state dir    (default ~/.wezard/svr)
+  --rooms <dir>      daemon 的 room 账本 (只读, default ~/.wezard/state/rooms)
   --token <t>        bearer token (default: generate + persist to --token-file)
   --token-file <p>   token persist path (default ~/.wezard/svr-token)
   --log-level <lvl>  pino level   (default info)
@@ -159,6 +166,28 @@ const isDetailRecord = (v: unknown): v is DetailRecord => {
   return true;
 };
 
+/** 只读的 room 账本读者: 每次现读文件, 不吃缓存 —— daemon 那边一直在追加, 缓存会看到旧快照。 */
+const roomReaderAt = (dir: string): RoomReader => ({
+  ids: () => {
+    try {
+      return readdirSync(dir).filter((f) => f.endsWith(".jsonl"))
+        .map((f) => decodeURIComponent(f.slice(0, -6)));
+    } catch { return []; }
+  },
+  get: (id: string): RoomState | undefined => {
+    let raw: string;
+    try { raw = readFileSync(join(dir, encodeURIComponent(id) + ".jsonl"), "utf8"); }
+    catch { return undefined; }
+    // 撕裂的尾行 (daemon 写一半) 丢掉; 中段坏行也不该让整张图消失 (这是只读视图)。
+    let st = emptyRoom(id);
+    for (const ln of raw.split("\n")) {
+      if (!ln.trim()) continue;
+      try { st = applyOp(st, JSON.parse(ln) as RoomOp); } catch { /* 坏行跳过 */ }
+    }
+    return st;
+  },
+});
+
 const main = async (): Promise<void> => {
   const args = parseArgs(process.argv.slice(2));
   const log = pino({ level: args.logLevel, name: "wezard-svr" });
@@ -178,7 +207,8 @@ const main = async (): Promise<void> => {
   // Chat 视图 (SPA + JSON API + SSE) 与 daemon 完全同源 —— svr 侧的记录是 POST /d
   // 推过来的, store.subscribe 一样会触发, 所以远端浏览也是实时的。
   // 已读记录与消息同住 stateDir, 留到视界为止 (再早的话页面上已经看不到)。
-  const chat = chatRouteTable(createChatRoutes(store, currentFacts, openSeenLog(join(stateDir, "seen.json"), HORIZON_MS)));
+  const roomsDir = expandHome(args.roomsDir);
+  const chat = chatRouteTable(createChatRoutes(store, currentFacts, openSeenLog(join(stateDir, "seen.json"), HORIZON_MS), roomReaderAt(roomsDir)));
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
