@@ -4,7 +4,7 @@
 // daemon 侧从 wizards 表现查)。这一层只做三件事:
 //   ① 快照: 每个 room 的成员 / host / 最后一句 / 未决 duty 数 (WorldFacts.rooms);
 //   ② 历史: 一个 room 的消息分页 (rolepage 的 room 视图);
-//   ③ 视图: 一个 wizard 的 W-1 (它说的 + 指向它的) / W-2 (它所在全部 room 的全部消息);
+//   ③ 视图: 一个 wizard 的「只看与我相关」(它说的 + 指向它的) / 「全部消息」(它所在全部 room 的全部消息);
 //   以及给 room_read 的纯文本渲染。
 //
 // 消息的「出处 / 完成 / 发言权」都在账本行上 (author / status / speak), 这里不再推断任何
@@ -162,7 +162,7 @@ export const roomHistory = (s: RoomState, q: HistoryQuery, n: RenderNames): { ms
   };
 };
 
-// ── wizard 视图 (W-1 / W-2) ────────────────────────────────────────────
+// ── wizard 视图: 只看与我相关 / 全部消息 ──────────────────────────────
 
 export interface WizardMsg extends RoomMsg { roomLabel: string }
 
@@ -176,7 +176,7 @@ export const everMember = (s: RoomState, uid: string): boolean =>
   [...s.everMembers.values()].some((w) => w.kind === "wizard" && w.id === uid);
 
 export interface WizardQuery {
-  /** W-2: 它所在全部 room 的全部消息 (默认 W-1: 它说的 + 指向它的)。 */
+  /** 全部消息: 它所在全部 room 的全部消息 (默认只看与我相关: 它说的 / 点名它的 / 回它那几条的)。 */
   all?: boolean;
   limit?: number;
   /** 游标: 只取它之前的 (跨 room 合并后的位置, 用 orderKey 的形式)。 */
@@ -245,7 +245,7 @@ export interface RoomReadQuery {
   since?: number | string;
   until?: number | string;
   limit?: number;
-  /** W-2: 全部 room 的全部消息 (默认 W-1: 它说的 + 指向它的)。 */
+  /** 全部消息: 全部 room 的全部消息 (默认只看与我相关: 它说的 / 点名它的 / 回它那几条的)。 */
   all?: boolean;
   /** 单条正文的字数上限。 */
   per?: number;

@@ -32,8 +32,8 @@ const APP = readFileSync(join(root, "web", "chat.js"), "utf8");
 const A = "w" + "1".padStart(12, "0"), B = "w" + "2".padStart(12, "0");
 const G = "chat:wrG", DM = "dm:" + [A, B].sort().join("|");
 const who = (kind, id) => ({ kind, id });
-const roomFact = (id, kind, members, host) => ({ id, kind, title: "", bound: id === G, host, members, openDuties: 0, last: { seq: 1, at: T0 + 5000 } });
-// 时间用「刚才」—— rolepage 默认只画近 3 天的 room / 24h 内动过的人。
+const roomFact = (id, kind, members, host, at = T0 + 5000) => ({ id, kind, title: "", bound: id === G, host, members, openDuties: 0, last: { seq: 1, at } });
+// 时间用「刚才」—— rolepage 默认时间范围 2d, 下面另一间 3 天前的 room 只在「全部」下出现。
 const T0 = Date.now() - 60_000;
 const msgs = [
   { id: "aa000001.1", seq: 1, at: T0 + 1000, room: G, author: who("human", "U1"), authorName: "张三", ord: 3, speak: "human", kind: "say", text: "谁来搭把手", origin: "inbound" },
@@ -42,6 +42,7 @@ const msgs = [
   { id: "aa000001.4", seq: 4, at: T0 + 4000, room: G, author: who("wizard", B), authorName: "bob", ord: 2, speak: "member", kind: "reply", text: "查完了", re: ["aa000001.3"], status: "done", origin: "tool", turn: "t2" },
   { id: "bb000002.1", seq: 1, at: T0 + 5000, room: DM, author: who("wizard", B), authorName: "bob", ord: 2, speak: "member", kind: "say", text: "私聊一句", origin: "tool", turn: "t2" },
 ];
+const OLD = "chat:wrOld";   // 3 天前有动静: 默认 2d 不画, 选「全部」才出来
 const ROOMS = [
   roomFact(G, "wecom-group", [
     { who: who("wizard", A), name: "alice", via: "founder", since: 1, ord: 1, host: true },
@@ -52,6 +53,9 @@ const ROOMS = [
     { who: who("wizard", A), name: "alice", via: "founder", since: 4, ord: 1, host: true },
     { who: who("wizard", B), name: "bob", via: "invite", since: 5, ord: 2, host: false },
   ], who("wizard", A)),
+  roomFact(OLD, "wecom-group", [
+    { who: who("human", "U2"), name: "李四", via: "inbound", since: 6, ord: 1, host: false },
+  ], undefined, T0 - 3 * 86400000),
 ];
 const memberViews = ROOMS[0].members.map((m) => ({ id: m.who.id, kind: m.who.kind, name: m.name, label: m.name, via: m.via, ord: m.ord, since: m.since, host: m.host }));
 const WORLD = {
@@ -65,7 +69,7 @@ const WORLD = {
   ],
   edges: [],
   plans: [], schedules: [],
-  chatNames: { [G]: "群G" }, names: { [A]: "alice", [B]: "bob", U1: "张三" }, humanNames: { "human:U1": "张三" },
+  chatNames: { [G]: "群G", [OLD]: "老群" }, names: { [A]: "alice", [B]: "bob", U1: "张三", U2: "李四" }, humanNames: { "human:U1": "张三", "human:U2": "李四" },
   degraded: false,
 };
 const ROOM = { ok: true, at: Date.now(), room: ROOMS[0], label: "群G", members: memberViews, duties: [], msgs: msgs.filter((m) => m.room === G), total: 4 };
@@ -113,7 +117,7 @@ try {
   // 左栏默认是列表: 「群聊」(有人参与) /「会话」(只有 wizard) 两组, 名片下有搜索入口。
   await page.waitForSelector(".rv-list .ci", { timeout: 5000 });
   const list = await page.evaluate(() => ({
-    heads: [...document.querySelectorAll(".rv-list h2")].map((h) => [...h.querySelectorAll(":scope > span")].map((x) => x.textContent).join("")),
+    heads: [...document.querySelectorAll(".rv-list h2")].map((h) => [...h.querySelectorAll(":scope > span:not(.sp)")].map((x) => x.textContent).join("")),
     items: [...document.querySelectorAll(".rv-list .ci")].map((b) => b.getAttribute("data-room")),
     names: [...document.querySelectorAll(".rv-list .ci .t")].map((t) => t.textContent.trim()),
     sbox: !!document.querySelector("#sbox"),
@@ -121,6 +125,11 @@ try {
     toolsInFirstHead: !!document.querySelector(".rv-list h2:first-child [data-side]"),
     mosaic: document.querySelectorAll(".rv-list .ci .av.mosaic").length,
     chipBound: /已绑定企微/.test((document.querySelector("#rb-who") || {}).textContent || ""),
+    // 时间范围: 标题行右端一个下拉, 七档 (1h/2h/6h/12h/1d/2d/全部), 默认 2d。
+    win: (() => {
+      const sp = document.querySelector(".rv-list h2 .sp[data-dd=win]");
+      return sp ? { label: sp.querySelector(".sp-btn").textContent.trim(), items: [...sp.querySelectorAll(".sp-it")].map((b) => b.textContent.trim()) } : null;
+    })(),
   }));
   assert.deepEqual(list.heads, ["群聊1", "会话1"], "列表分两组: " + JSON.stringify(list));
   assert.deepEqual(list.items, [G, DM], "群在群聊, dm 在会话");
@@ -130,6 +139,24 @@ try {
   assert.equal(list.toolsInFirstHead, true, "开关挂在第一个分组标题右端");
   assert.equal(list.mosaic, 2, "群头像 = 成员头像拼块");
   assert.equal(list.chipBound, false, "名片上不再有「已绑定企微」chip");
+  assert.deepEqual(list.win && list.win.items, ["1h", "2h", "6h", "12h", "1d", "2d", "全部"], "时间范围七档: " + JSON.stringify(list.win));
+  assert.equal(list.win && list.win.label, "2d", "默认 2d");
+
+  // 换成「全部」: 老 room 出来, 选择记进 localStorage; 再换回 2d 继续后面的验收。
+  await page.click(".rv-list h2 .sp[data-dd=win] .sp-btn");
+  await page.click('.rv-list .sp[data-dd=win] .sp-it[data-v="0"]');
+  await page.waitForFunction(() => document.querySelectorAll(".rv-list .ci").length === 3, null, { timeout: 5000 });
+  const all = await page.evaluate(() => ({
+    items: [...document.querySelectorAll(".rv-list .ci")].map((b) => b.getAttribute("data-room")),
+    label: document.querySelector(".rv-list .sp[data-dd=win] .sp-btn").textContent.trim(),
+    saved: localStorage.getItem("wezard.role.winMin"),
+  }));
+  assert.deepEqual(all.items, [G, OLD, DM], "「全部」= 整本账 (群聊组 G/OLD, 会话组 DM): " + JSON.stringify(all));
+  assert.equal(all.label, "全部");
+  assert.equal(all.saved, "0", "时间范围记在 localStorage");
+  await page.click(".rv-list h2 .sp[data-dd=win] .sp-btn");
+  await page.click('.rv-list .sp[data-dd=win] .sp-it[data-v="2880"]');
+  await page.waitForFunction(() => document.querySelectorAll(".rv-list .ci").length === 2, null, { timeout: 5000 });
   // 切到图: 视图记在 localStorage, 之后的页面都是图。
   await page.click('[data-side="graph"]');
   await page.waitForSelector(".rv-person", { timeout: 5000 });
@@ -158,9 +185,10 @@ try {
     headActs: (document.querySelector("#ch-acts") || {}).textContent || "",
   }));
   assert.equal(errs.length, 0, "页面没有脚本错误: " + errs.join(" / "));
-  assert.equal(counts.rooms, ROOMS.length, "room 节点数 = room 数");
+  // 默认 2d: 3 天前的老 room 不在范围里 (ROOMS 有 3 间, 画 2 间)。
+  assert.equal(counts.rooms, 2, "room 节点数 = 2d 内有动静的 room 数");
   assert.equal(counts.people, 3, "参与者节点数 = alice / bob / 张三");
-  assert.equal(counts.rooms + counts.people, ROOMS.length + 3, "节点数 = room 数 + 参与者数");
+  assert.equal(counts.rooms + counts.people, 5, "节点数 = room 数 + 参与者数");
   assert.equal(counts.msgs, 4, "room 历史 4 条");
   assert.match(counts.title, /群G/);
   assert.equal(counts.gside, true, "点开 room: 成员列出现");
@@ -174,7 +202,7 @@ try {
   await page.click(".rv-open");
   await page.waitForSelector(".rv-box .turn-group", { timeout: 5000 });
 
-  // 点 wizard 节点 → W-1
+  // 点 wizard 节点 → 只看与我相关
   await page.click('.rv-person[data-node="chat:wrG#worker"]');
   await page.waitForFunction(() => (document.querySelector(".rv-ttl") || {}).textContent?.includes("bob"), null, { timeout: 5000 });
   // 左栏顶上必须是「这个人」: 名字 / 状态 / 职责 / 宪章入口 —— room 图不是名片的替代品。
@@ -190,9 +218,12 @@ try {
   assert.match(card.title, /bob 的视角/);
   const side = await page.evaluate(() => ({
     gside: !(document.querySelector("#gside") || {}).hidden,
-    sess: !!document.querySelector("#rb-who #rv-session"),
+    // session 下拉在 aa5843a 从 #rv-session 挪进名片的 #rb-sp (旧断言一直红着, 这次一并改过来)。
+    sess: !!document.querySelector("#rb-who #rb-sp"),
     charterBtn: !!document.querySelector("#ch-acts #rv-charter"),
+    allBtn: ((document.querySelector("#ch-acts #rv-all") || {}).textContent || "").trim(),
   }));
+  assert.equal(side.allBtn, "只看与我相关", "W-1/W-2 代号换成一看就懂的名字: " + side.allBtn);
   assert.equal(side.gside, false, "看 wizard 时成员列收起");
   assert.equal(side.sess, true, "全部会话 (session 切换) 在左上名片里");
   assert.equal(side.charterBtn, false, "宪章不再占右栏头");
@@ -210,7 +241,7 @@ try {
   await page.click("#sbox");
   await page.waitForSelector(".sk:not([hidden]) .sk-it", { timeout: 5000 });
   const recentN = await page.evaluate(() => document.querySelectorAll(".sk-it.conv").length);
-  assert.equal(recentN, 2, "空查询列最近的 room");
+  assert.equal(recentN, 3, "空查询列最近的 room (搜索不按时间窗裁: fixture 三间都在)");
   await page.fill("#sk-q", "配置");
   await page.waitForSelector(".sk-it.msg", { timeout: 5000 });
   const hit = await page.evaluate(() => ({ sn: document.querySelector(".sk-it.msg .sn").innerHTML, where: document.querySelector(".sk-it.msg .where").textContent }));

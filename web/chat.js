@@ -3,7 +3,7 @@
 //   左栏  力导向图: room 胶囊 ↔ 参与者圆点 (点 room 看历史, 点 wizard 看它说的 + 指向它的);
 //         家谱 (谁生的谁) 是可切换的一层虚线。
 //   右栏  room 历史 (author / to / re / status 都是账本行上的显式字段, 点一条消息可以展开
-//         产出它的那一轮的过程框), 或一个 wizard 的 W-1 (默认) / W-2 (全部) 消息。
+//         产出它的那一轮的过程框), 或一个 wizard 的消息: 「只看与我相关」(默认) / 「全部消息」。
 //
 // 数据面 (全部 GET, ?id= 是票据): /api/world · /api/room · /api/wizard · /api/turn · /api/tool
 // 左栏两种视图可切换 (人 2026-11-20): 列表 = room 按「群聊」(有人参与) /「会话」(只有 wizard)
@@ -24,13 +24,24 @@
 
   var W = { at: 0, rooms: [], nodes: [], uidTargets: {}, chatNames: {}, names: {}, degraded: false };
   var D = { mode: '', roomId: '', role: '', uid: '', at: 0, msgs: [], total: 0, earlier: '', room: null, label: '', members: [], duties: [], wizard: null, sessions: [], session: 'all', all: qs.get('all') === '1', ledger: true, plans: [], schedules: [], charterBrief: null, stream: null, streamSig: '', stats: null };
-  var S = { showAll: false, openTurns: {}, charter: null, sim: null, gsig: '', gmap: null, elById: null, lines: null, view: 'list' };
+  var S = { openTurns: {}, charter: null, sim: null, gsig: '', gmap: null, elById: null, lines: null, view: 'list' };
   var SIDE_KEY = 'wezard.role.side';
   try { if (localStorage.getItem(SIDE_KEY) === 'graph') S.view = 'graph'; } catch (e) { /* 隐私模式 */ }
-  // 默认只画还在动的东西: room 近 3 天有消息或有未结 duty; 人 24h 内说过话 / 在跑 / 是 host。
-  // 「全部」开关恢复成整本账 (迁移带进来的历史成员都在那儿)。
-  var ROOM_FRESH_MS = 2 * 86400000, PERSON_FRESH_MS = 12 * 3600000;
-  var fresh = function (ts, ms) { return !!ts && Date.now() - ts < ms; };
+  // 时间范围 (列表与图共用): room 的动静与人动过都按这一刀, 有未决 duty 的 room 和活着 / 在跑 / 是 host 的人照旧总在。
+  // 选中的那档与左栏视图开关一样记在 localStorage, 默认 2d。
+  var WIN_KEY = 'wezard.role.winMin';
+  var WINS = [[60, '1h'], [120, '2h'], [360, '6h'], [720, '12h'], [1440, '1d'], [2880, '2d'], [0, '全部']];
+  var WIN = 2880;
+  try {
+    var winSaved = localStorage.getItem(WIN_KEY);
+    if (winSaved !== null && WINS.some(function (w) { return String(w[0]) === winSaved; })) WIN = +winSaved;
+  } catch (e) { /* 隐私模式 */ }
+  var winLabel = function () {
+    for (var i = 0; i < WINS.length; i++) if (WINS[i][0] === WIN) return WINS[i][1];
+    return '2d';
+  };
+  var winCut = function () { return WIN ? srvNow() - WIN * 60000 : 0; };
+  var inWin = function (ts) { return !WIN || (!!ts && ts >= winCut()); };
 
   var esc = function (s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -177,10 +188,10 @@
       });
     });
     return Object.keys(seen).map(nodeOf).filter(function (n) {
-      if (S.showAll || n.kind === 'human' || n.self) return true;
+      if (n.kind === 'human' || n.self) return true;
       if (n.alive || n.busy || (n.runningUntil && n.runningUntil > Date.now())) return true;
       if (hosts[n.target]) return true;
-      return fresh(n.lastTs, PERSON_FRESH_MS);
+      return inWin(n.lastTs);
     });
   };
   // ── 力导向图 ───────────────────────────────────────────────────────
@@ -417,7 +428,7 @@
   var renderGraph = function () {
     if (S.gdrag) return;    // 正在拖: 定时刷新别来重建 DOM
     var rooms = (W.rooms || []).slice().sort(function (a, b) { return (b.last ? b.last.at : 0) - (a.last ? a.last.at : 0); });
-    if (!S.showAll) rooms = rooms.filter(function (r) { return r.openDuties > 0 || fresh(r.last && r.last.at, ROOM_FRESH_MS); });
+    if (WIN) rooms = rooms.filter(function (r) { return r.openDuties > 0 || inWin(r.last && r.last.at); });
     var people = participants(rooms).sort(function (a, b) { return (b.lastTs || 0) - (a.lastTs || 0) || (a.name < b.name ? -1 : 1); });
     var g = buildGraph(rooms, people);
     S.g = g;
@@ -463,7 +474,7 @@
         '</g>';
     }).join('');
     convsEl._html = '';
-    convsEl.innerHTML = sideHead(rooms.length + ' 个 room · ' + people.length + ' 位参与者' + (S.showAll ? '' : ' (近 2 天)')) +
+    convsEl.innerHTML = sideHead(rooms.length + ' 个 room · ' + people.length + ' 位参与者' + (WIN ? ' (' + winLabel() + ')' : '')) +
       '<svg class="rv-graph"></svg>';
     var svg2 = convsEl.querySelector('.rv-graph');
     var el = {};
@@ -495,20 +506,28 @@
     return !!r.bound || (r.kind !== 'dm' && r.kind !== 'adhoc') ||
       (r.members || []).some(function (m) { return m.who && m.who.kind === 'human'; });
   };
-  // 与图同一个范围: 默认近 2 天有动静或有未决 duty 的 room, 「全部」= 整本账; 选中的那个总在。
+  // 与图同一个范围: 按所选时间窗有动静 (或留下未决 duty) 的 room; 「全部」= 整本账, 选中的那个总在。
   var sideRooms = function () {
     var rooms = (W.rooms || []).slice().sort(function (a, b) { return (b.last ? b.last.at : 0) - (a.last ? a.last.at : 0); });
-    if (S.showAll) return rooms;
+    if (!WIN) return rooms;
     return rooms.filter(function (r) {
-      return r.openDuties > 0 || fresh(r.last && r.last.at, ROOM_FRESH_MS) || (D.mode === 'room' && D.roomId === r.id);
+      return r.openDuties > 0 || inWin(r.last && r.last.at) || (D.mode === 'room' && D.roomId === r.id);
     });
   };
   // 视图开关照 main 的「聊天 / 关系」小开关 (.vt): 列表下挂在第一个分组标题右端, 图下挂在图的标题行。
   var LIST_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M3 4h10M3 8h10M3 12h10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
   var TREE_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M4 3v10M4 6h5M4 11h5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="11" cy="6" r="1.6" fill="currentColor"/><circle cx="11" cy="11" r="1.6" fill="currentColor"/></svg>';
+  // 时间范围下拉: 列表与图共用 (main 的 .sp 小下拉), 挂在标题行右端、视图开关左边。
+  var winSelect = function () {
+    return dropdown('win', {
+      ic: '⏱', end: true, title: '时间范围: room 的动静与人动过只看这段时间内的',
+      label: winLabel(),
+      items: WINS.map(function (w) { return { v: String(w[0]), on: w[0] === WIN, html: '<span class="id">' + w[1] + '</span>' }; }),
+    });
+  };
   var sideTools = function () {
     var graph = S.view === 'graph';
-    return '<button class="vt' + (S.showAll ? ' on' : '') + '" id="rv-gall" title="默认只列近 2 天有动静 / 有未决的 room">' + (S.showAll ? '全部' : '近 2 天') + '</button>' +
+    return winSelect() +
       '<button class="vt" data-side="' + (graph ? 'list' : 'graph') + '" title="' + (graph ? '换成聊天列表' : '换成关系图') + '">' +
       (graph ? LIST_SVG + '列表' : TREE_SVG + '图') + '</button>';
   };
@@ -517,8 +536,12 @@
   };
   var bindHead = function () {
     convsEl.querySelectorAll('[data-side]').forEach(function (b) { b.onclick = function () { setSide(b.getAttribute('data-side')); }; });
-    var a = convsEl.querySelector('#rv-gall');
-    if (a) a.onclick = function () { S.showAll = !S.showAll; renderSide(); };
+    bindDropdown(convsEl, 'win', function (v) {
+      WIN = +v;
+      try { localStorage.setItem(WIN_KEY, String(WIN)); } catch (e) { /* 隐私模式 */ }
+      convsEl._html = '';   // 列表的「没变就不碰 DOM」缓存里还留着旧范围
+      renderSide();
+    });
   };
   var setSide = function (v) {
     if (v === S.view) return;
@@ -577,7 +600,7 @@
   var ST_CLS = { done: 'ok', passed: 'ok', canceled: 'warn', need: 'ask', progress: 'go', error: 'bad' };
   var KIND_TAG = { ask: '问', task: '派', reply: '答', file: '文件', 'join-req': '申请入群', system: '系统', trigger: '定时' };
 
-  // 右栏头只管「这是哪个窗口」与 W-1/W-2; 属于这个 role 的入口 (宪章 / 会话) 都在左上名片。
+  // 右栏头只管「这是哪个窗口」与「只看与我相关 / 全部消息」; 属于这个 role 的入口 (宪章 / 会话) 都在左上名片。
   var header = function (title, sub, acts) {
     chWho.innerHTML = '<div class="rv-ttl">' + title + '</div>' + (sub ? '<div class="rv-sub">' + sub + '</div>' : '');
     chActs.innerHTML = acts || '';
@@ -1313,7 +1336,9 @@
       : '<span class="rv-lb">' + esc(w.label || '🧙‍♂️') + '</span> ' + esc(w.name || D.role),
       plan ? esc(roleNodeName()) + ' 名下的定时任务与计划' : '',
       plan ? '<button class="rv-act" id="rv-back">‹ 对话</button>'
-        : '<button class="rv-act' + (D.all ? ' on' : '') + '" id="rv-all">' + (D.all ? 'W-2 全部' : 'W-1 与我相关') + '</button>');
+        : '<button class="rv-act' + (D.all ? ' on' : '') + '" id="rv-all" title="' +
+            (D.all ? '只看它说的 / 点名它的 / 回它那几条的' : '它所在的 room 里全部的消息') + '">' +
+            (D.all ? '全部消息' : '只看与我相关') + '</button>');
     rolebar();
     renderGraphSide();
     renderUsage();
