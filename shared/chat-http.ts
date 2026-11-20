@@ -23,13 +23,13 @@ import type { URL } from "node:url";
 import { baseOfKey, sameBot } from "./session-label.js";
 import { isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, withData, type WorldFacts } from "./world.js";
-import { buildRoomFact, buildRoomFacts, dutyFacts, roomHistory, whoRef, wizardMessages, type RoomMsg } from "./room-view.js";
-import type { RenderNames, RoomState } from "./room.js";
+import { buildRoomFact, buildRoomFacts, dutyFacts, roomHistory, whoRef, wizardMessages, wokeRows, type RoomMsg } from "./room-view.js";
+import type { MsgRow, RenderNames, RoomState } from "./room.js";
 import { makeDirectory, roleInfo, roleStats, sessionsOf, type SessionSpan } from "./role-view.js";
 import { roomMembers } from "./group-members.js";
 import { charterBrief, charterView } from "./charter-view.js";
 import { renderToolBody } from "./detail-render.js";
-import { renderTurnBox, wizardStream } from "./role-render.js";
+import { isInjection, renderTurnBox, roomDeco, spokenTurn, wireMsg, wizardStream } from "./role-render.js";
 import { chatScript, chatStyles, chatVendor, renderChatPage } from "./chat-render.js";
 import type { Asset } from "./web-assets.js";
 import type { DetailRecord, DetailStore, TurnDetailRecord } from "./detail-store.js";
@@ -171,7 +171,22 @@ const namesOf = (f: WorldFacts): RenderNames => {
   };
 };
 
+/** 提示行里的去处: 起过名 / 有聊天名就用名字, 否则一个短代号 (与前端 shortRoom 同口径) —— 不拿成员名拼。 */
+const roomShortOf = (f: WorldFacts) => {
+  const titleOf = new Map((f.rooms ?? []).map((r) => [r.id, r.title] as const));
+  return (room: string): string => {
+    const named = titleOf.get(room) || f.chatNames[room];
+    if (named) return named;
+    if (room.startsWith("dm:")) return "私聊";
+    if (room.startsWith("adhoc:")) return "临时 room";
+    const tail = room.replace(/^[a-z-]+:/, "").slice(-6);
+    return (room.startsWith("user:") ? "单聊" : room.startsWith("chat:wx") ? "微信" : "群") + (tail ? " …" + tail : "");
+  };
+};
+
 const TURN_SLACK_MS = 30 * 60_000;
+/** 回包 JSON 里的账本行 id (`"id":"ef965dca.157"`, 可能被转义过几层)。 */
+const ROW_ID_RE = /\bid\\*"\s*:\s*\\*"([0-9a-f]{8}\.\d+)\\*"/g;
 const TURN_AHEAD_MS = 2 * 60_000;
 /** 一条 room 消息对应哪一轮 turn —— 只为了「点开看过程框」, 不参与任何语义判定:
  *  作者是 wizard, 取它在这一刻之前 (容许一点时钟偏差) 最近开的那一轮。 */
@@ -196,20 +211,51 @@ const turnLinker = (records: readonly DetailRecord[], f: WorldFacts) => {
     const name = f.names?.[uid] ?? "";
     return name ? byTag.get(name) ?? "" : "";
   };
-  return (m: RoomMsg): string | undefined => {
-    if (m.author.kind !== "wizard") return undefined;
-    const rs = byTarget.get(targetOf(m.author.id));
-    if (!rs?.length) return undefined;
+  // 先认回包: 写账本的工具 (chat_reply / chat_say / chat_ask …) 回包里带着新行的 id —— 哪一轮的
+  // tool_result 第一次出现这个 id, 这一行就是那一轮写的。按时刻猜会被紧接着开的下一轮抢走。
+  const byRow = new Map<string, TurnDetailRecord>();
+  for (const rs of byTarget.values()) for (const r of rs) for (const it of r.items) {
+    if (it.t !== "tool_result") continue;
+    for (const hit of it.body.matchAll(ROW_ID_RE)) if (!byRow.has(hit[1]!)) byRow.set(hit[1]!, r);
+  }
+  const lastAtOrBefore = (rs: readonly TurnDetailRecord[], at: number): TurnDetailRecord | undefined => {
     let lo = 0, hi = rs.length - 1, hit: TurnDetailRecord | undefined;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
-      if (rs[mid]!.createdAt <= m.at + TURN_AHEAD_MS) { hit = rs[mid]; lo = mid + 1; } else hi = mid - 1;
+      if (rs[mid]!.createdAt <= at) { hit = rs[mid]; lo = mid + 1; } else hi = mid - 1;
     }
+    return hit;
+  };
+  return (m: RoomMsg): string | undefined => {
+    if (m.author.kind !== "wizard") return undefined;
+    const target = targetOf(m.author.id);
+    const exact = byRow.get(m.id);
+    if (exact && exact.target === target) return exact.id;
+    const rs = byTarget.get(target);
+    if (!rs?.length) return undefined;
+    // 回包里认不出 (老记录 / 迁移行): 退回时刻 —— 先找这一刻之前开的那一轮, 没有才容许一点时钟偏差。
+    const hit = lastAtOrBefore(rs, m.at) ?? lastAtOrBefore(rs, m.at + TURN_AHEAD_MS);
     return hit && m.at - hit.createdAt <= TURN_SLACK_MS ? hit.id : undefined;
   };
 };
 
 interface View { role: string; span?: SessionSpan }
+
+/** 账本的读侧索引: 按 id 找行、找 re 它的行, 以及切换时刻 (第一条非迁移行; 此后终句零语义)。 */
+interface Ledger { lookup: (id: string) => MsgRow | undefined; repliesOf: (id: string) => MsgRow[]; roomFrom: number }
+const ledgerIndex = (states: readonly RoomState[]): Ledger => {
+  const replies = new Map<string, MsgRow[]>();
+  let roomFrom = Infinity;
+  for (const s of states) for (const m of s.msgs) {
+    if (m.origin !== "migrate") roomFrom = Math.min(roomFrom, m.at);
+    for (const id of m.re ?? []) replies.set(id, [...(replies.get(id) ?? []), m]);
+  }
+  return {
+    lookup: (id) => states.reduce<MsgRow | undefined>((hit, s) => hit ?? s.byId.get(id), undefined),
+    repliesOf: (id) => replies.get(id) ?? [],
+    roomFrom,
+  };
+};
 
 export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider, _seen?: SeenLog, rooms?: RoomReader): ChatRoutes => {
   // room 账本在手边 (daemon / 同机 svr) 就以账本为准重建 rooms —— 推送快照只补认表,
@@ -230,6 +276,10 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       })
       .catch(() => EMPTY_FACTS);
   const listRecent = (t: Ticket): DetailRecord[] => botRecords(recentRecords(store.list(), Date.now() - HORIZON_MS), viewerOf(t));
+  const statesNow = (): RoomState[] => {
+    const rs = liveRooms();
+    return rs ? rs.ids().flatMap((id) => { try { const s = rs.get(id); return s ? [s] : []; } catch { return []; } }) : [];
+  };
 
   const page: SimpleHandler = (_req, res) => {
     res.statusCode = 200;
@@ -282,7 +332,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
         label: n.roomLabel(s.id),
         members: roomMembers(fact, f.wizards, f.classes ?? []),
         duties: dutyFacts(s, n),
-        msgs: hist.msgs.map((m) => ({ ...m, ...(link(m) ? { turn: link(m)! } : {}) })),
+        msgs: hist.msgs.map(wireMsg(ledgerIndex([s]).lookup)).map((m) => ({ ...m, ...(link(m) ? { turn: link(m)! } : {}) })),
         total: hist.total,
         ...(hist.earlier ? { earlier: hist.earlier } : {}),
       });
@@ -306,12 +356,19 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const all = url.searchParams.get("all") === "1";
       const raw = url.searchParams.get("limit");
       const limit = raw && Number.isFinite(Number(raw)) ? Number(raw) : DEFAULT_LIMIT;
-      const rs = liveRooms();
-      const states = rs ? rs.ids().flatMap((id) => { try { const s = rs.get(id); return s ? [s] : []; } catch { return []; } }) : [];
+      const states = statesNow();
+      const lx = ledgerIndex(states);
+      const wire = wireMsg(lx.lookup);
       const hist = uid && states.length
         ? wizardMessages(states, uid, { all, limit, ...(url.searchParams.get("before") ? { before: url.searchParams.get("before")! } : {}) }, n)
         : { msgs: [] as (RoomMsg & { roomLabel: string })[], total: 0 };
       const link = turnLinker(records, f);
+      const linked = <M extends RoomMsg>(m: M): M => ({ ...m, ...(link(m) ? { turn: link(m)! } : {}) });
+      // 时间轴要的是视野 (HORIZON) 内的全部账本行, 不是分页那 60 条 —— 一轮的气泡就是它写进账本的行。
+      const since = now - HORIZON_MS;
+      const streamMsgs = uid && states.length
+        ? wizardMessages(states, uid, { all, limit: 0 }, n).msgs.filter((m) => m.at >= since).map(wire).map(linked)
+        : [];
       const schedules = f.schedules.filter((x) => (x.owner || x.createdBy || x.target) === role);
       json(res, 200, {
         ok: true, at: now,
@@ -321,12 +378,17 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
         sessions: spans.map(wireSpan),
         session: span?.sessionId ?? "all",
         all,
-        msgs: hist.msgs.map((m) => ({ ...m, ...(link(m) ? { turn: link(m)! } : {}) })),
+        msgs: hist.msgs.map(wire).map(linked),
         // 时间轴: 轮次为主线 (入 / 出 + 过程框), 账本行挂上去; 前端 wizard 视图按它画。
         stream: wizardStream(records, role, dir, now, {
           span,
-          msgs: hist.msgs.map((m) => ({ ...m, ...(link(m) ? { turn: link(m)! } : {}) })),
+          msgs: streamMsgs,
+          woke: uid ? wokeRows(states, uid, since, n).map(wire) : [],
           roomLabel: n.roomLabel,
+          chatLabel: roomShortOf(f),
+          repliesOf: lx.repliesOf,
+          lookup: lx.lookup,
+          roomFrom: lx.roomFrom,
         }),
         total: hist.total,
         ...(hist.earlier ? { earlier: hist.earlier } : {}),
@@ -368,7 +430,13 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       json(res, 404, { ok: false, error: "未找到这一轮" });
       return;
     }
-    json(res, 200, { ok: true, html: renderTurnBox(r, store.list(), Date.now()) });
+    void getFacts(ticket).then((f) => {
+      const lx = ledgerIndex(statesNow());
+      const deco = roomDeco(makeDirectory(listRecent(ticket), f), { chatLabel: roomShortOf(f), repliesOf: lx.repliesOf, lookup: lx.lookup });
+      // room 视图点开的过程框: 气泡就是那一行账本本身, 框里的 CLI 原话 (账本时代) 一律是过程。
+      const era = r.createdAt >= lx.roomFrom || isInjection(r);
+      json(res, 200, { ok: true, html: renderTurnBox(spokenTurn(r, [], era), store.list(), Date.now(), deco) });
+    });
   });
 
   const charter: SimpleHandler = withTicket((ticket, url, res) => {

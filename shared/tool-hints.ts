@@ -176,8 +176,11 @@ export const execHintCalls = (source: string, output: string): (HintCall & { rep
     const compatible = replies.filter((r) => matches(c, r));
     const requested = nameOf(c.toolInput.to ?? c.toolInput.name);
     const named = compatible.filter((r) => requested && requested === nameOf(r.name));
-    // delegate may select someone other than a requested spawn name. A directed tell cannot.
-    return named.length ? named : requested && HINT_TOOL.exec(c.toolName)?.[1] === "chat_ask" ? [] : compatible;
+    // delegate may select someone other than a requested spawn name. A directed tell cannot —
+    // but the room-era chat_ask reply ({ok, room, id}) names nobody, so only a reply that does name
+    // someone else rules the pair out.
+    return named.length ? named
+      : requested && HINT_TOOL.exec(c.toolName)?.[1] === "chat_ask" && compatible.some((r) => typeof r.name === "string") ? [] : compatible;
   });
   return calls.flatMap((c, i) => {
     const rs = candidates[i]!;

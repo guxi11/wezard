@@ -774,7 +774,8 @@ export const hintOf = (use: ToolUse, result: ToolResult | undefined): Hint | und
   const j = replies.length === 1 ? replies[0] : undefined;
   const out = outcomeOf(result, j);
   switch (tool) {
-    case "chat_ask": return handoffFrom("tell", { ...a, name: str(a.name) ?? (Array.isArray(a.to) ? a.to[0] : a.to) }, j, out);
+    // 回包的 id 就是这条 ask 在账本里的行 id —— 提示行凭它挂上 duty 的交代 (rolepage 的 deco.status)。
+    case "chat_ask": return handoffFrom("tell", { ...a, name: str(a.name) ?? (Array.isArray(a.to) ? a.to[0] : a.to) }, j && { ...j, event: str(j.event) ?? str(j.id), ...(str(j.room) ? { public: !/^(?:dm|adhoc):/.test(str(j.room)!) } : {}) }, out);
     case "delegate": return a.dryRun ? undefined : handoffFrom("dispatch", a, j, out);
     case "clone_wizard": case "spawn_wizard": {
       const via = tool === "clone_wizard" ? "clone" : "spawn";

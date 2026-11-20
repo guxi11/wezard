@@ -410,10 +410,12 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .handoff .ho-line[data-hto]:hover { background: var(--av-hot); border-radius: 6px }
 .handoff .ho-who .av { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--line); background: var(--card); font-size: 10px; line-height: 14px; text-align: center }
 .handoff .ho-who .nm { font-weight: 500 }
-/* 过程框收起后移交行仍露在框头下 —— 活交给了谁, 不该和普通工具输出一起藏起来。 */
-.steps.folded > .bubbles:has(> .bubble.tool .handoff) { display: flex; flex-direction: column }
-.steps.folded > .bubbles > :not(:has(.handoff)) { display: none }
-.steps.folded > .bubbles > .bubble.tool > :not(.handoff) { display: none }
+/* 过程框收起后移交行仍露在框头下 —— 活交给了谁, 不该和普通工具输出一起藏起来。
+   发言行 (↩ 回复 / 💬 发言 …) 例外: 说出去的那句就是框下面那颗气泡, 收起时不再露一遍。 */
+.steps.folded > .bubbles:has(> .bubble.tool .handoff:not(.post)) { display: flex; flex-direction: column }
+.steps.folded > .bubbles > :not(:has(.handoff:not(.post))) { display: none }
+.steps.folded > .bubbles > .bubble.tool > :not(.handoff:not(.post)) { display: none }
+.handoff .ho-line[data-node]:hover { background: var(--av-hot); border-radius: 6px }
 .steps.folded .handoff .ho-line { padding-left: 6px }
 .steps.folded .handoff .ho-text { margin-left: 6px }
 .steps.folded .handoff.pub > .say { margin-left: 6px }

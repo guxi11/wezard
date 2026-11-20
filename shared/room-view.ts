@@ -185,6 +185,13 @@ export interface WizardQuery {
 
 const orderKey = (m: MsgRow): string => m.at + "|" + m.room + "|" + String(m.seq).padStart(9, "0");
 
+/** 唤醒过 uid 的那些行 (账本行上的 wake) —— 它们就是 uid 某一轮读到的输入, 不论是否点名它
+ *  (群里人话没有 to / re, W-1 收不进来; rolepage 要把它们画在那一轮的入口上)。 */
+export const wokeRows = (states: readonly RoomState[], uid: string, since: number, n: RenderNames): WizardMsg[] =>
+  states.flatMap((s) => s.msgs.filter((m) => m.at >= since && m.wake.includes(uid)))
+    .sort((a, b) => a.at - b.at || (a.room < b.room ? -1 : a.room > b.room ? 1 : 0) || a.seq - b.seq)
+    .map((m) => ({ ...toRoomMsg(m, n), roomLabel: n.roomLabel(m.room) }));
+
 /** 跨 room 按时间合并, 每条标出属于哪个 room。 */
 export const wizardMessages = (states: readonly RoomState[], uid: string, q: WizardQuery, n: RenderNames): { msgs: WizardMsg[]; total: number; earlier?: string } => {
   const limit = Math.max(0, Math.min(q.limit ?? 60, LIMIT_MAX));
