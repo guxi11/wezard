@@ -12,7 +12,8 @@
 import { escHtml, hashStr, renderCutMark, renderTurnGroup, splitReminders, turnUsageChips, type HandoffDeco, type HandoffStatus, type TurnFragment } from "./detail-render.js";
 import { isTurn, staleAt } from "./chat-view.js";
 import type { DetailRecord, TurnDetailRecord } from "./detail-store.js";
-import { allMessages, inSpan, marksOf, teammateOf, unwrapMates, type Directory, type Msg, type SessionSpan } from "./role-view.js";
+import { parseInjection } from "./inject-view.js";
+import { allMessages, inSpan, marksOf, SYSTEM, teammateOf, unwrapMates, type Directory, type Msg, type SessionSpan } from "./role-view.js";
 import type { RoomMsg } from "./room-view.js";
 import { whoKey, type MsgRow, type Who } from "./room.js";
 import { nameHead } from "./session-label.js";
@@ -136,6 +137,8 @@ export interface StreamRow {
   html?: string;
   /** 出消息的账 (模型 / ctx / 耗时)。 */
   meta?: string;
+  /** 注入行拆出来的账本事实: id / re / status / 所属块的原文 (点开看注入原文) / 头里的提醒。 */
+  inj?: { id: string; re?: string[]; status?: string; raw?: string; note?: string };
   /** 账本切换之后的一轮: 终句零语义, 没写进账本就是没说。 */
   era?: boolean;
   /** 还在跑: 到这个时刻自动算结束; 0 = 已结束。 */
@@ -152,6 +155,7 @@ const sigOf = (r: StreamRow): string => hashStr([
   r.html ?? "", r.meta ?? "", r.text ?? "", r.rems ?? "",
   ...(r.said ?? []).map((m) => m.id + (m.status ?? "") + m.text),
   r.row ? r.row.id + (r.row.status ?? "") + (r.row.turn ?? "") : "",
+  r.inj ? [r.inj.id, r.inj.status ?? "", (r.inj.re ?? []).join(","), r.inj.raw ?? "", r.inj.note ?? ""].join("\u0001") : "",
 ].join("\u0000"));
 
 export interface StreamQuery extends DecoQuery {
@@ -199,14 +203,51 @@ export const wizardStream = (
   const ownTurns = msgs.filter((m) => m.dir === "in" || m.dir === "out").map((m) => m.turn)
     .filter((t, i, a) => a.findIndex((x) => x.id === t.id) === i).sort((a, b) => a.createdAt - b.createdAt);
   const fed = new Set((q.woke ?? []).flatMap((m) => ownTurns.find((t) => t.createdAt >= m.at)?.id ?? []));
+  const where = (room: string, lb = label(room)) => ({ room, ...(lb ? { roomLabel: lb } : {}) });
+  /** 注入原文 → 逐条账本行 (多条注入合在一次输入里时一条一颗气泡)。账本里认得出那一行时
+   *  用它的全文与作者: 注入里那一行是压成一行、截断过的。认不出才按注入文本显示 —— room
+   *  与作者都从注入头和行里解析, 不落回「系统 → home 群」。原文块挂在每块第一条上
+   *  (点开看注入原文),「你要交代」挂在每块最后一条。 */
+  const injectionRows = (m: Msg): StreamRow[] => {
+    const blocks = parseInjection(m.turn.userQuery ?? "");
+    if (!blocks) return [];
+    const rows = blocks.flatMap((b) => b.lines.map((ln): StreamRow => {
+      const led = q.lookup?.(ln.id);
+      // 作者以注入里写的名字为准 (名字就是身份): 账本行只补全文 / re / status。
+      // 名字认不出时退回账本行的 uid 节点 (只在 room 里出现过的 wizard 的写法)。
+      const named = dir.resolve(ln.author);
+      const from = named ?? (led?.author.kind === "wizard" ? "uid:" + led.author.id : led?.author.kind === "human" ? "human:" + led.author.id : SYSTEM);
+      const fromName = named ? dir.nameOf(from) : ln.author.replace(/^\./, "") || dir.nameOf(from);
+      const fromLabel = named ? dir.labelOf(from) : /^human:/.test(from) ? "👤" : SYSTEM === from ? "🧙‍♂️" : "👤";
+      // 收件人 = 这一轮真正的主人 (turn.target), 不被身份折叠后的页 id 带偏。
+      const to = m.turn.target ?? m.to;
+      const room = led?.room ?? b.room;
+      const re = led?.re ?? ln.re;
+      const status = led?.status ?? ln.status;
+      const tags = [...(ln.files.length ? ["📎 " + ln.files.join(", ")] : []), ...(b.owe.length && ln === b.lines[b.lines.length - 1] ? ["要交代 " + b.owe.join(", ")] : [])];
+      return {
+        id: m.id + "." + ln.id, kind: "in", ts: m.ts,
+        from, fromName, fromLabel,
+        to, toName: dir.nameOf(to), toLabel: dir.labelOf(to),
+        ...where(room, label(room) || b.label),
+        text: (led?.text ?? ln.text).trim(),
+        ...(tags.length ? { tags } : {}),
+        inj: { id: ln.id, ...(re.length ? { re } : {}), ...(status ? { status } : {}),
+          ...(ln === b.lines[0] ? { raw: b.raw } : {}), ...(ln === b.lines[0] && b.notes.length ? { note: b.notes.join(" · ") } : {}) },
+      };
+    }));
+    return rows.map((r, k) => ({ ...r, id: m.id + "#" + k, ts: m.ts + k / 1000 }));
+  };
   const turnRows = (m: Msg): StreamRow[] => {
     const r = m.turn;
     const ends = { from: m.from, fromName: dir.nameOf(m.from), fromLabel: dir.labelOf(m.from) };
     const toEnds = { to: m.to, toName: dir.nameOf(m.to), toLabel: dir.labelOf(m.to) };
-    const where = (room: string, lb = label(room)) => ({ room, ...(lb ? { roomLabel: lb } : {}) });
     if (m.dir === "in") {
       // 注入原文只是账本行的转述: 唤醒它的那几行已经按账本画在前面, 这里不再画一遍。
       if (isInjection(r) && fed.has(r.id)) return [];
+      // 注入原文拆成逐条账本行 (有头有行才拆; 拆不出就按原文画, 不猜)。
+      const parsed = isInjection(r) ? injectionRows(m) : [];
+      if (parsed.length) return parsed;
       const q2 = splitInline(unwrapMates(r.userQuery?.trim() ? r.userQuery : r.rawQuery ?? ""));
       if (!q2.body && !q2.html) return [];
       const tags = inTags(r);
@@ -214,6 +255,10 @@ export const wizardStream = (
         ...(q2.html ? { rems: q2.html } : {}), ...(tags.length ? { tags } : {}) }];
     }
     const said = saidByTurn.get(r.id) ?? [];
+    // 一次只带一个 room 块的注入: 这一轮真正发生在那 个 room 里 —— 轮的 channel 是投递时的
+    // 兜底 (home 群), 拿它当头部会把 dm 里说的话挂到群里。
+    const blocks = isInjection(r) ? parseInjection(r.userQuery ?? "") : undefined;
+    const injRoom = blocks?.length === 1 ? blocks[0]!.room : undefined;
     const era = r.createdAt >= roomFrom || isInjection(r);
     const spoken = spokenTurn(r, said, era);
     const live = !r.closed;
@@ -221,7 +266,7 @@ export const wizardStream = (
     return [{ id: m.id, kind: "out", ts: m.ts, ...ends,
       // 账本时代的出消息说给谁由气泡 (账本行) 自己交代; 老轮次照旧按派活链推。
       ...(era || said.length ? {} : toEnds),
-      ...(first ? where(first.room, first.roomLabel) : where(m.channel)),
+      ...(first ? where(first.room, first.roomLabel) : where(injRoom ?? m.channel)),
       html: spoken.items.length || live ? renderTurnBox(spoken, records, now, deco) : "",
       meta: turnUsageChips(r, now),
       ...(era ? { era: true } : {}),

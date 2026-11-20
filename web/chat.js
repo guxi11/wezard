@@ -599,13 +599,24 @@
       if (f.kind === 'ledger') return msgHTML(f.row, true);
       var room = f.roomLabel ? roomTagOf(f.room, f.roomLabel) : '<span class="rv-chip priv">私聊</span>';
       if (f.kind === 'in') {
+        var inj = f.inj || null;
         var tags = (f.tags || []).map(function (t) { return chip(t, 'kind'); }).join('');
+        // 注入拆出来的行: 账本行 id / 答的哪几行 / 交代状态都在头上一眼看到。
+        var injchips = inj
+          ? '<span class="rv-chip re" title="账本行">' + esc(inj.id) + '</span>' +
+            (inj.re && inj.re.length ? '<span class="rv-chip re" title="答的是">↩ ' + esc(inj.re.join(', ')) + '</span>' : '') +
+            (inj.status ? chip(inj.status, 'st ' + (ST_CLS[inj.status] || '')) : '')
+          : '';
+        // 注入原文一个字节没动: 折起来, 点开才是那句被守护进程贴进输入框的话。
+        var raw = inj && inj.raw
+          ? '<details class="rv-inj"><summary>注入原文' + (inj.note ? ' · ' + esc(inj.note) : '') + '</summary><pre>' + esc(inj.raw) + '</pre></details>'
+          : '';
         return '<article class="rv-msg them" data-id="' + esc(f.id) + '">' +
           '<div class="rv-mh">' + room +
           '<span class="rv-au' + (f.from === 'system:' ? ' daemon' : /^human:/.test(f.from || '') ? ' human' : '') + '" data-node="' + esc(f.from === 'system:' ? '' : f.from) + '">' +
-          esc(f.fromLabel || '👤') + ' ' + esc(f.fromName || f.from) + '</span>' + toTag(f) + tags +
+          esc(f.fromLabel || '👤') + ' ' + esc(f.fromName || f.from) + '</span>' + toTag(f) + injchips + tags +
           '<time>' + esc(fmtDay(f.ts)) + '</time></div>' +
-          bubbleHTML({ text: f.text, rems: f.rems }) + '</article>';
+          bubbleHTML({ text: f.text, rems: f.rems }) + raw + '</article>';
       }
       // 出一侧: 头在外面 (room · 我 → 说给谁), 下面是这一轮的过程框, 再下面是写进账本的气泡。
       var said = f.said || [];

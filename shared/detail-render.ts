@@ -230,6 +230,13 @@ export const SHARED_CSS = `
   .vt-flag{display:inline-block;font-size:10px;line-height:14px;color:#8250df;
     border:1px solid #8250df33;border-radius:3px;padding:0 4px;margin-right:6px;
     letter-spacing:.3px;vertical-align:1px}
+  /* rolepage: 注入原文的折叠块 —— 默认只露「注入原文」, 点开才是逐字的那段。 */
+  .rv-inj{margin:2px 0 0}
+  .rv-inj>summary{width:fit-content;cursor:pointer;font-size:11px;color:var(--faint);list-style:none}
+  .rv-inj>summary::-webkit-details-marker{display:none}
+  .rv-inj>summary::before{content:"▸ "}
+  .rv-inj[open]>summary::before{content:"▾ "}
+  .rv-inj pre{margin:4px 0 0;padding:6px 8px;max-height:320px;overflow:auto;background:var(--card);border:1px solid var(--line);border-radius:6px;color:var(--mute);font-size:11.5px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
 `;
 
 interface DiffBlock { path: string; oldStr: string; newStr: string; label?: string }
