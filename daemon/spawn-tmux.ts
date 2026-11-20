@@ -41,6 +41,7 @@ import { activateBackend, resolveCliBackend, type CliBackend, type CliBackendNam
 import { selectModel } from "./model-select.js";
 import type { Effort } from "../shared/effort.js";
 import { hasRegistry, sessionOnPane } from "./wezard-session.js";
+import { memAvailableMb, memShortfall } from "../shared/mem-guard.js";
 import { codebuddyTrustPrompt, startupConfirmation, startupDialog, workspaceTrustPrompt, workspaceTrustConfig } from "../shared/workspace-trust.js";
 import { isModalPane } from "../shared/modal-pane.js";
 import { unknownStartupNotice } from "../shared/startup-notice.js";
@@ -665,6 +666,9 @@ export const ensureSpare = async (cfg: Config, log: Logger, cwd: string, model: 
   if (spareInflight.has(key)) return;
   if (spares.filter((s) => s.key === key).length >= cfg.wrc.sparePool.perKey) return;
   if (cfg.wrc.sparePool.maxTotal <= 0) return;
+  // 备用是一条躺着的完整 CLI: 内存紧时宁可下次冷启动, 也不把主机推进无 swap 的抖动。
+  const short = memShortfall(cfg.wrc.memoryGuard.spareMinMb, memAvailableMb());
+  if (short) { log.info({ cwd, ...short }, "spawn-tmux: spare skipped (low memory)"); return; }
   // 全局满了先按 LRU 腾位置: 这条冷启动刚证明可用, 比一条躺着没人要的更值钱。
   while (spares.length >= cfg.wrc.sparePool.maxTotal) {
     const oldest = [...spares].sort((a, b) => a.builtAt - b.builtAt)[0];

@@ -8,6 +8,7 @@ import { DAEMON_TOKEN_FILE, DAEMON_TOKEN_HEADER } from "../shared/daemon-token.j
 import { homedir } from "node:os";
 import { ChatPolicy, TIERS, defaultChatFor, tiersForBackend, loadConfig, type TierName } from "../shared/config.js";
 import { makeLogger } from "../shared/log.js";
+import { memAvailableMb, memShortfall } from "../shared/mem-guard.js";
 import { clipLine, sleep, truncate } from "../shared/std.js";
 import { patchJsonc } from "../shared/config-writer.js";
 import { EFFORTS, parseEffort } from "../shared/effort.js";
@@ -2980,6 +2981,13 @@ const main = async (): Promise<void> => {
           reason: `unknown chat '${wantChat}' — 只有起过名字的聊天能被指名; 让那边先 /name`,
           candidates: chatNamesFor(self),
         } };
+      }
+      // 内存闸放在占名字之前: 拒了就什么都没留下 (没有半生的身份、没有空 pane)。无 swap 的
+      // 小机上再起一个 CLI 会让整机抖动到事件循环停摆, 调用方只会看到一个迟到几分钟的 MCP 超时。
+      const short = memShortfall(cfg.wrc.memoryGuard.spawnMinMb, memAvailableMb());
+      if (short) {
+        log.warn({ self, ...short }, "spawn refused: low host memory");
+        return { status: 503, body: { ok: false, reason: `主机可用内存只剩 ${short.availMb} MB (< ${short.floorMb} MB, wrc.memoryGuard.spawnMinMb), 再起一个 CLI 会把机器推进抖动 —— 先 stop_wizard 收掉用不着的分身, 或把活派给已有的 wizard` } };
       }
       const askedName = String(b.name ?? "");
       const slotR = await claimSlot(base, askedName, (target) => {

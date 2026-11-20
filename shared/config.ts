@@ -216,6 +216,15 @@ const Wrc = z.object({
     })
     .default({})
     .describe("空白备用池: 冷启动好的 CLI 先养着, 新会话直接领"), { gate: "card" }),
+  // 无 swap 的小内存机上连着起 CLI 会把整机推进抖动 (事件循环停摆、MCP 调用超时、最后
+  // 整机重启), 而不是干净地 OOM。起之前看一眼 MemAvailable, 不够就明说。仅 Linux 生效。
+  memoryGuard: knob(z
+    .object({
+      spawnMinMb: z.number().int().nonnegative().default(600).describe("spawn_wizard / clone_wizard / delegate 新建前主机至少要剩多少 MB 可用内存 (MemAvailable); 不足则 503 拒绝; 0 = 不设防"),
+      spareMinMb: z.number().int().nonnegative().default(1500).describe("补一条空白备用 CLI 前至少要剩多少 MB 可用内存; 备用只是提速, 门槛比新建高; 0 = 不设防"),
+    })
+    .default({})
+    .describe("主机内存闸 (仅 Linux): 可用内存不足时不再起新的 CLI"), { gate: "card", apply: "hot" }),
   // 机器人显示名由建机器人的人自己取, 我们无法从消息里读到。群里 @ 它 / 引用它的
   // 气泡时, WeCom 会把 `@<显示名>` 塞进正文; 配上真名才能把它从 prompt 里剥干净。
   botNames: z.array(z.string()).default([]).describe("机器人在企微里的显示名 (可多个业务别名), 用于剥掉 @; 内置 wezard 恒生效"),
