@@ -19,6 +19,8 @@ const pasted: Array<{ target: string; text: string }> = [];
 const mirrored: Array<{ row: MsgRow; cover?: string }> = [];
 const escs: string[] = [];
 let busy = new Set<string>();
+// 有活 pane 的 target; 不在 = 冷 (reload 后没重挂 / pane 已死)
+let livePanes = new Set<string>(["chat:wrG", "chat:wrG#b"]);
 let next: PasteResult = "ok";
 const hub = createRoomHub({
   store, now: () => 10_000,
@@ -26,6 +28,7 @@ const hub = createRoomHub({
   nameOf: (w: Who) => (w.kind === "wizard" ? "." + (wiz[w.id]?.name ?? w.id) : w.id),
   roomLabel: (r) => r,
   mirror: async (row, cover) => { mirrored.push({ row, cover: cover?.id }); },
+  live: async (t) => livePanes.has(t),
   idle: async (t) => !busy.has(t),
   interrupt: async (t) => { escs.push(t); busy.delete(t); },
   paste: async (target, text) => { pasted.push({ target, text }); return next; },
@@ -84,6 +87,19 @@ const settle = () => hub.pump();
   assert.deepEqual(escs, ["chat:wrG#b"]);
   assert.match(pasted.at(-1)!.text, /停一下/);
   assert.match(pasted.at(-1)!.text, /普通/, "被压着的那条随游标一起补上");
+}
+// 冷目标 (没有活 pane) 不算忙: 照常投 —— injectText 会为它重生, 不能等到一个不会出现的 idle
+{
+  livePanes.delete("chat:wrG#b");
+  busy = new Set(["chat:wrG#b"]);
+  const n0 = pasted.length;
+  hub.append(room, { author: { kind: "wizard", id: A }, kind: "ask", origin: "tool", to: [{ kind: "wizard", id: B }], text: "冷会话也要收到" });
+  await settle();
+  assert.equal(pasted.length, n0 + 1);
+  assert.match(pasted.at(-1)!.text, /冷会话也要收到/);
+  assert.equal(escs.length, 1, "冷目标没有可打断的 pane, 不按 Esc");
+  livePanes = new Set(["chat:wrG", "chat:wrG#b"]);
+  busy = new Set();
 }
 // F-1: 一轮结束未交代 → 当轮提醒一次; 再闲 → 给提问者写系统行 (镜像进群), 只写一次
 {

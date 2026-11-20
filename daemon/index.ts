@@ -1303,6 +1303,7 @@ const main = async (): Promise<void> => {
       store: roomStore, log: roomLog,
       wizardOf: roomWizardOf, nameOf: roomNameOf, roomLabel,
       mirror: roomMirror,
+      live: (target) => m.paneAliveFor(target),
       idle: (target) => m.idleNow(target),
       interrupt: async (target) => {
         const r = await m.interruptPane(target);

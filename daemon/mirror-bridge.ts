@@ -2810,6 +2810,9 @@ export interface MirrorBridge {
   /** Ready to take a new turn: its last turn has ended and it isn't parked on an
    *  approval prompt. Registry-first, pane as fallback. True for dead panes. */
   idleNow: (target: string) => Promise<boolean>;
+  /** 这个 target 现在有没有活着的 pane。冷 (没绑定 / pane 已死) = false —— 那不是一个
+   *  「忙」的会话, injectText 会为它重生; room hub 靠这条区分「等它闲」与「直接贴 (会重生)」。 */
+  paneAliveFor: (target: string) => Promise<boolean>;
   /** 此刻停在审批卡 / 本地弹窗上 (注册表说闲、transcript 悬着工具调用)。认不得的后端 = false。 */
   parkedNow: (target: string) => boolean;
   /** 同步的忙闲: 只问注册表, 不抓 pane —— 给注入尾巴这种不能等的地方。认不得 = undefined。 */
@@ -6407,6 +6410,11 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     return !!cap.trim() && box.known;
   };
 
+  const paneAliveFor = async (target: string): Promise<boolean> => {
+    const pane = paneOf(target);
+    return !!pane && (await tmuxPaneAlive(pane));
+  };
+
   // 等到它闲下来, 事件驱动: 注册表目录一有写入就重判, 翻成 idle 的那一刻即返回。
   // 兜底轮询只防 watch 漏事件 (以及悬着的审批被点掉后 status 没再动的边角)。
   const IDLE_SAFETY_POLL_MS = 1000;
@@ -7416,6 +7424,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
     peekTurns,
     isBusy,
     idleNow,
+    paneAliveFor,
     parkedNow,
     idleVerdict,
     untilIdle,

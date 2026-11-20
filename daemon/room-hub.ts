@@ -30,7 +30,9 @@ export interface HubPorts {
   /** 绑定 room 的镜像出站 (§3a)。cover = 被这一行覆盖占位气泡的那条人话行。
    * 返回 true = 已成功交给传输 (O3 的 room: mirrored 以它为准)。 */
   mirror: (row: MsgRow, cover?: MsgRow) => Promise<boolean>;
-  /** pane 原语: 空闲判定 / 先 Esc / 粘贴一段文本。 */
+  /** pane 原语: 有无活 pane / 空闲判定 / 先 Esc / 粘贴一段文本。cold 的目标不算忙 ——
+   *  贴进去时 injectText 会为它重生, 所以缺省 live 视为 true 的老行为。 */
+  live?: (target: string) => Promise<boolean>;
   idle: (target: string) => Promise<boolean>;
   interrupt: (target: string) => Promise<void>;
   paste: (target: string, text: string) => Promise<PasteResult>;
@@ -150,7 +152,10 @@ export const createRoomHub = (p: HubPorts) => {
     const w = p.wizardOf(uid);
     if (!w) return;
     const wantsInterrupt = [...rooms.values()].some((rows) => rows.some((r) => r.interrupt));
-    if (!(await p.idle(w.target))) {
+    // 没有活 pane ≠ 忙: 那是冷会话 (reload 后没重挂 / pane 已死), 贴进去会把它重生。
+    // 只有活着的 pane 才需要等它闲 (或按 interrupt 先 Esc)。
+    const live = p.live ? await p.live(w.target) : true;
+    if (live && !(await p.idle(w.target))) {
       if (!wantsInterrupt) return;
       await p.interrupt(w.target); // 先 Esc 打断再投, 不拆 pane (§3b I-1); 被打断那一轮的 duty 不关
     }
