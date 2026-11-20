@@ -111,9 +111,18 @@ try {
     people: document.querySelectorAll(".rv-person").length,
     msgs: document.querySelectorAll(".rv-msg").length,
     title: (document.querySelector(".rv-ttl") || {}).textContent || "",
-    // 成员列在左栏图右侧, chat detail 里不再有成员条。
+    // 成员列在整页最右 (chat detail 右边), chat detail 里不再有成员条。
     gside: !(document.querySelector("#gside") || {}).hidden,
     members: document.querySelectorAll("#gside .gs-mem").length,
+    gsideRight: (() => {
+      const g = document.querySelector("#gside"), m = document.querySelector(".main");
+      return !!g && !!m && g.getBoundingClientRect().left >= m.getBoundingClientRect().right - 1 && g === g.parentElement.lastElementChild;
+    })(),
+    // host 标记在名字右边
+    hostStar: (() => {
+      const b = document.querySelector("#gside .gs-mem.host"), nm = b && b.querySelector(".nm"), st = b && b.querySelector(".gs-host");
+      return !!nm && !!st && !nm.textContent.includes("⭐") && st.getBoundingClientRect().left >= nm.getBoundingClientRect().right - 1;
+    })(),
     membar: !!document.querySelector("#membar"),
     headActs: (document.querySelector("#ch-acts") || {}).textContent || "",
   }));
@@ -123,7 +132,9 @@ try {
   assert.equal(counts.rooms + counts.people, ROOMS.length + 3, "节点数 = room 数 + 参与者数");
   assert.equal(counts.msgs, 4, "room 历史 4 条");
   assert.match(counts.title, /群G/);
-  assert.equal(counts.gside, true, "点开 room: 图右侧的成员列出现");
+  assert.equal(counts.gside, true, "点开 room: 成员列出现");
+  assert.equal(counts.gsideRight, true, "成员列在整页最右, chat detail 右边");
+  assert.equal(counts.hostStar, true, "host 标记在名字右边");
   assert.equal(counts.members, 3, "成员列 = alice / bob / 张三");
   assert.equal(counts.membar, false, "chat detail 上不再挂成员条");
   assert.ok(counts.headActs.indexOf("刷新") < 0, "右上角不再有刷新: " + counts.headActs);

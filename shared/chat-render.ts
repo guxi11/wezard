@@ -73,7 +73,6 @@ export const renderChatPage = (): string =>
     </header>
     <div class="side-body">
       <nav class="convs" id="convs" aria-label="会话"></nav>
-      <aside class="gside" id="gside" hidden aria-label="成员"></aside>
     </div>
   </aside>
   <main class="main">
@@ -91,6 +90,7 @@ export const renderChatPage = (): string =>
     <div class="pane" id="pane-plan" hidden><div class="plan-in" id="plan-in"></div></div>
     <footer class="usage" id="ch-usage" hidden></footer>
   </main>
+  <aside class="gside" id="gside" hidden aria-label="成员"></aside>
 </div>
 <footer class="usage page" id="pg-usage" hidden></footer>
 <script src="chat/vendor.js" defer></script>
