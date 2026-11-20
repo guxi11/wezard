@@ -29,7 +29,7 @@ import { makeDirectory, roleInfo, roleStats, sessionsOf, type SessionSpan } from
 import { roomMembers } from "./group-members.js";
 import { charterBrief, charterView } from "./charter-view.js";
 import { renderToolBody } from "./detail-render.js";
-import { renderTurnBox } from "./role-render.js";
+import { renderTurnBox, wizardStream } from "./role-render.js";
 import { chatScript, chatStyles, chatVendor, renderChatPage } from "./chat-render.js";
 import type { Asset } from "./web-assets.js";
 import type { DetailRecord, DetailStore, TurnDetailRecord } from "./detail-store.js";
@@ -41,6 +41,9 @@ export type SimpleHandler = (req: IncomingMessage, res: ServerResponse, url: URL
 export interface RoomReader {
   ids: () => string[];
   get: (id: string) => RoomState | undefined;
+  /** 账本此刻能不能读。daemon 的 reader 在 boot 早期先挂上、room store 之后才开
+   *  (与 worldFacts 同一取舍), 所以「挂上了」不等于「读得到」。 */
+  ready?: () => boolean;
 }
 
 export interface ChatRoutes {
@@ -211,9 +214,11 @@ interface View { role: string; span?: SessionSpan }
 export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider, _seen?: SeenLog, rooms?: RoomReader): ChatRoutes => {
   // room 账本在手边 (daemon / 同机 svr) 就以账本为准重建 rooms —— 推送快照只补认表,
   // 不然 daemon 没重启时这里会一直是旧的一份 (比如人节点缺失)。
+  const liveRooms = (): RoomReader | undefined => (rooms && (!rooms.ready || rooms.ready()) ? rooms : undefined);
   const roomsNow = (f: WorldFacts): WorldFacts => {
-    if (!rooms) return f;
-    const states = rooms.ids().flatMap((id) => { try { const s = rooms.get(id); return s ? [s] : []; } catch { return []; } });
+    const rs = liveRooms();
+    if (!rs) return f;
+    const states = rs.ids().flatMap((id) => { try { const s = rs.get(id); return s ? [s] : []; } catch { return []; } });
     return states.length ? { ...f, rooms: buildRoomFacts(states, namesOf(f)) } : f;
   };
   const getFacts = (t: Ticket): Promise<WorldFacts> =>
@@ -256,9 +261,10 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
   const room: SimpleHandler = withTicket((ticket, url, res) => {
     const id = roomOf(url);
     if (!id) { json(res, 400, { ok: false, error: "room required" }); return; }
-    if (!rooms) { json(res, 503, { ok: false, error: "这个部署没有 room 账本 (只在 daemon 侧可读)" }); return; }
+    const ledger = liveRooms();
+    if (!ledger) { json(res, 503, { ok: false, error: "这个部署没有 room 账本 (只在 daemon 侧可读)" }); return; }
     let s: RoomState | undefined;
-    try { s = rooms.get(id); } catch (e) { json(res, 409, { ok: false, error: String(e) }); return; }
+    try { s = ledger.get(id); } catch (e) { json(res, 409, { ok: false, error: String(e) }); return; }
     if (!s) { json(res, 404, { ok: false, error: "没有这个 room: " + id }); return; }
     void getFacts(ticket).then((f) => {
       const now = Date.now();
@@ -300,7 +306,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const all = url.searchParams.get("all") === "1";
       const raw = url.searchParams.get("limit");
       const limit = raw && Number.isFinite(Number(raw)) ? Number(raw) : DEFAULT_LIMIT;
-      const states = rooms ? rooms.ids().flatMap((id) => { try { const s = rooms.get(id); return s ? [s] : []; } catch { return []; } }) : [];
+      const rs = liveRooms();
+      const states = rs ? rs.ids().flatMap((id) => { try { const s = rs.get(id); return s ? [s] : []; } catch { return []; } }) : [];
       const hist = uid && states.length
         ? wizardMessages(states, uid, { all, limit, ...(url.searchParams.get("before") ? { before: url.searchParams.get("before")! } : {}) }, n)
         : { msgs: [] as (RoomMsg & { roomLabel: string })[], total: 0 };
@@ -310,11 +317,17 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
         ok: true, at: now,
         role: roleInfo(role, dir, f, roleStats(records, role, now, span), now),
         uid: uid || "",
-        ledger: !!rooms,
+        ledger: !!liveRooms(),
         sessions: spans.map(wireSpan),
         session: span?.sessionId ?? "all",
         all,
         msgs: hist.msgs.map((m) => ({ ...m, ...(link(m) ? { turn: link(m)! } : {}) })),
+        // 时间轴: 轮次为主线 (入 / 出 + 过程框), 账本行挂上去; 前端 wizard 视图按它画。
+        stream: wizardStream(records, role, dir, now, {
+          span,
+          msgs: hist.msgs.map((m) => ({ ...m, ...(link(m) ? { turn: link(m)! } : {}) })),
+          roomLabel: n.roomLabel,
+        }),
         total: hist.total,
         ...(hist.earlier ? { earlier: hist.earlier } : {}),
         rooms: f.rooms ?? [],

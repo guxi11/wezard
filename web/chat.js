@@ -482,6 +482,63 @@
     if (!msgs.length) return '<div class="rv-none">这里还没有消息。</div>';
     return msgs.map(function (m) { return msgHTML(m, ctx); }).join('');
   };
+  // ── wizard 时间轴: 轮次为主线 (入 = 问的那句, 出 = 回复 + 过程框), 账本行挂在轮上 ──
+  // 出消息的正文/工具调用是服务端渲染好的 HTML (renderTurnGroup), 直接注入 —— 工具正文
+  // 仍是空壳, 展开时由 loadTool 去 /api/tool 取。
+  var saidHTML = function (list) {
+    if (!list || !list.length) return '';
+    return '<div class="rv-said">' + list.map(function (s) {
+      var st = s.status ? '<span class="rv-chip st">' + esc(s.status) + '</span>' : '';
+      return '<div class="rv-saidrow"><span class="rv-roomtag" data-jump-room="' + esc(s.room) + '">' + esc(s.roomLabel) + '</span>' +
+        '<span class="rv-seq">#' + esc(s.seq) + '</span>' + st + '<span class="rv-saidtx">' + esc(s.text) + '</span></div>';
+    }).join('') + '</div>';
+  };
+  var streamHTML = function (rows) {
+    if (!rows.length) return '<div class="rv-none">这里还没有消息。</div>';
+    return rows.map(function (f) {
+      if (f.kind === 'mark') return '<div class="rv-mark" data-id="' + esc(f.id) + '">' + f.html + '</div>';
+      if (f.kind === 'ledger') return msgHTML(f.row, true);
+      var room = f.roomLabel
+        ? '<span class="rv-roomtag" data-jump-room="' + esc(f.room) + '">' + esc(f.roomLabel) + '</span>'
+        : '<span class="rv-chip priv">私聊</span>';
+      var to = f.to && f.to !== D.role && f.to !== D.uid
+        ? '<span class="rv-to">→ <span class="rv-tag" data-node="' + esc(f.to) + '">' + esc(f.toName || f.to) + '</span></span>' : '';
+      if (f.kind === 'in') {
+        return '<article class="rv-msg them" data-id="' + esc(f.id) + '">' +
+          '<div class="rv-mh">' + room +
+          '<span class="rv-au">' + esc(f.fromLabel || '👤') + ' ' + esc(f.fromName || f.from) + '</span>' + to +
+          '<time>' + esc(fmtDay(f.ts)) + '</time></div>' +
+          '<div class="rv-tx">' + md(f.text || '') + '</div></article>';
+      }
+      return '<article class="rv-msg me" data-id="' + esc(f.id) + '">' +
+        '<div class="rv-mh">' + room +
+        '<span class="rv-au wizard">' + esc(f.fromLabel || '🧙‍♂️') + ' ' + esc(f.fromName || D.role) + '</span>' + to +
+        (f.meta ? '<span class="mstat">' + f.meta + '</span>' : '') +
+        '<time>' + esc(fmtDay(f.ts)) + '</time></div>' +
+        '<div class="rv-box rv-turn">' + (f.html || '') + '</div>' + saidHTML(f.said) + '</article>';
+    }).join('');
+  };
+  // 轮询每 4s 重画一次; 时间轴没变就别动 DOM (展开的工具正文 / 滚动位置都会被打断)。
+  var streamSig = function (rows) {
+    return (rows || []).map(function (f) { return f.id + ':' + (f.sig || f.ts); }).join('|');
+  };
+  // 真重画时把已展开的工具正文按 (turn, use) 记下来, 重画后重新打开并取正文。
+  var openTools = function () {
+    var out = [];
+    inner.querySelectorAll('details.tool-call[open]').forEach(function (d) {
+      var b = d.querySelector('.tool-body');
+      if (b && b.hasAttribute('data-lazy-turn')) out.push([b.getAttribute('data-lazy-turn'), b.getAttribute('data-lazy-use')]);
+    });
+    return out;
+  };
+  var reopenTools = function (list) {
+    list.forEach(function (p) {
+      var d = inner.querySelector('details.tool-call[data-lazy-turn="' + cssEsc(p[0]) + '"] .tool-body[data-lazy-use="' + cssEsc(p[1]) + '"]');
+      if (!d) return;
+      var det = d.closest('details');
+      if (det) { det.open = true; loadTool(det); }
+    });
+  };
   var plansSection = function () {
     var ps = D.plans || [], ss = D.schedules || [];
     if (!ps.length && !ss.length) return '';
@@ -509,7 +566,7 @@
     restoreOpen();
     renderGraph();
   };
-  var renderWizard = function () {
+  var renderWizard = function (skipBody) {
     var w = D.wizard || { name: D.role, label: '🧙‍♂️' };
     var sub = [
       w.description ? '<span class="rv-desc">' + esc(w.description) + '</span>' : '',
@@ -525,10 +582,12 @@
       sess + '<button class="rv-act' + (D.all ? ' on' : '') + '" id="rv-all">' + (D.all ? 'W-2 全部' : 'W-1 与我相关') + '</button>' +
       '<button class="rv-act" id="rv-charter">宪章</button><button class="rv-act" id="rv-refresh">刷新</button>');
     membar.hidden = true; membar.innerHTML = '';
-    var older = D.earlier ? '<button class="rv-older" id="rv-older">‹ 更早</button>' : '';
+    if (skipBody) return;  // 时间轴没变: 头更新了, 正文留给 DOM (展开态 / 滚动位置不受打扰)
+    var older = '';
     var note = D.ledger ? '' : '<div class="rv-note">这个部署没有 room 账本 — 只能看名片, 看不到消息 (要历史请打开 daemon 的 rolepage)。</div>';
-    inner.innerHTML = note + older + listHTML(D.msgs, true) + plansSection() + (S.charter ? '<section class="rv-charter">' + S.charter + '</section>' : '');
-    var o = $('#rv-older'); if (o) o.onclick = function () { olderPage(); };
+    var ot = openTools();
+    inner.innerHTML = note + older + (D.stream ? streamHTML(D.stream) : listHTML(D.msgs, true)) + plansSection() + (S.charter ? '<section class="rv-charter">' + S.charter + '</section>' : '');
+    reopenTools(ot);
     restoreOpen();
     renderGraph();
   };
@@ -546,11 +605,15 @@
     var st = scrollState();
     return api('api/wizard', { role: role, all: D.all ? '1' : '', session: D.session === 'all' ? '' : D.session, limit: 60 }).then(function (r) {
       if (!r.ok) { inner.innerHTML = '<div class="rv-none">' + esc(r.error || '加载失败') + '</div>'; return; }
+      var same = D.mode0 === 'wizard' && D.role0 === role && !!D.stream && D.streamSig === streamSig(r.stream);
+      D.mode0 = 'wizard'; D.role0 = role;
       D.wizard = r.role; D.uid = r.uid || ''; D.msgs = r.msgs || []; D.total = r.total || 0; D.earlier = r.earlier || '';
+      D.stream = r.stream || null; D.streamSig = streamSig(r.stream);
       D.sessions = r.sessions || []; D.session = r.session || 'all'; D.ledger = r.ledger !== false;
       D.plans = r.plans || []; D.schedules = r.schedules || []; D.at = r.at;
       D.members = []; D.duties = [];
-      renderWizard();
+      renderWizard(same);
+      if (same) return;
       if (keepScroll) restore(st); else scrollBottom();
     });
   };
@@ -690,7 +753,7 @@
     });
   };
   // ── 样式: 本页新加的 DOM 只在 chat.js 里, 样式也一并带上 (不改 web/chat.css, 无构建) ──
-  var CSS = ".convs { overflow: auto; padding: 0 }\n.rv-ghead { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 8px 10px 4px; color: var(--faint); font-size: 11.5px }\n.rv-tree-t { border: 1px solid var(--line); background: var(--card); border-radius: 6px; padding: 1px 7px; font-size: 11.5px; cursor: pointer; color: var(--mute) }\n.rv-tree-t.on { color: var(--accent); border-color: var(--accent) }\n.rv-gbtns { display: inline-flex; gap: 4px }\n.rv-graph { display: block; font: 11.5px/1 -apple-system, BlinkMacSystemFont, sans-serif; cursor: grab; touch-action: none; user-select: none }\n.rv-edge { stroke: #c9d2df; stroke-width: 1 }\n.rv-edge.on { stroke: var(--accent); stroke-width: 1.6 }\n.rv-tree { fill: none; stroke: #b9a0e0; stroke-dasharray: 3 3 }\n.rv-node { cursor: grab }\n.rv-room rect { fill: var(--them); stroke: var(--line) }\n.rv-room text { fill: var(--ink) }\n.rv-room.on rect { fill: var(--mine); stroke: var(--accent) }\n.rv-person circle { fill: var(--card); stroke: var(--mute); stroke-width: 1.4 }\n.rv-person circle.live { fill: var(--accent); stroke: var(--accent) }\n.rv-person.human circle { stroke: var(--human) }\n.rv-person text { fill: var(--ink); font-size: 10.5px }\n.rv-room text { font-size: 11px }\n.rv-person.on circle { stroke: var(--accent); stroke-width: 2.4 }\n.rv-person.ghost { opacity: .5 }\n.rv-duty { fill: #cf222e }\n.rv-ttl { font-size: 15.5px; line-height: 22px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }\n.rv-sub { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; margin-top: 3px; font-size: 11.5px; color: var(--mute) }\n.rv-id { font-size: 11px; color: var(--faint); font-weight: 400 }\n.rv-lb { font-size: 15px }\n.rv-desc { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }\n.rv-chip { display: inline-flex; align-items: center; padding: 0 6px; border-radius: 999px; background: var(--them); color: var(--mute); font-size: 11px; line-height: 17px; white-space: nowrap }\n.rv-chip.ok { background: #e8f5ee; color: #1a7f3c }\n.rv-chip.warn { background: #fdf1e3; color: #9a5b10 }\n.rv-chip.ask, .rv-chip.bad { background: #fdecec; color: #b42318 }\n.rv-chip.go { background: var(--mine); color: var(--accent) }\n.rv-chip.file { background: var(--them-soft) }\n.rv-chip.re { background: transparent; color: var(--faint); border: 1px solid var(--line) }\n.rv-act { border: 1px solid var(--line); background: var(--card); border-radius: 7px; padding: 2px 9px; font-size: 12px; cursor: pointer; color: var(--mute) }\n.rv-act:hover, .rv-act.on { color: var(--accent); border-color: var(--accent) }\n.rv-sel { border: 1px solid var(--line); background: var(--card); border-radius: 7px; padding: 2px 4px; font-size: 12px; color: var(--mute); max-width: 190px }\n.ch-acts { display: flex; gap: 6px; align-items: center; flex-wrap: wrap }\n.membar { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; padding: 5px 12px; border-bottom: 1px solid var(--line); background: var(--card); font-size: 11.5px }\n.rv-mem { display: inline-flex; align-items: center; gap: 3px; padding: 0 7px; border-radius: 999px; background: var(--them); color: var(--ink); cursor: pointer; line-height: 18px }\n.rv-mem.host { background: var(--mine); color: var(--accent) }\n.rv-mem.human { color: var(--human) }\n.rv-mem.busy { box-shadow: inset 0 0 0 1px var(--accent) }\n.rv-duties { margin-left: auto; color: #b42318 }\n.rv-older { display: block; margin: 8px auto; border: 1px solid var(--line); background: var(--card); border-radius: 999px; padding: 2px 12px; font-size: 12px; color: var(--mute); cursor: pointer }\n.rv-msg { margin: 8px 12px; padding: 7px 10px; background: var(--card); border: 1px solid var(--line); border-radius: 10px }\n.rv-msg.me { background: var(--mine); border-color: var(--mine-line) }\n.rv-msg.k-system { background: var(--them); border-style: dashed }\n.rv-mh { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; font-size: 11.5px; color: var(--mute) }\n.rv-au { font-weight: 600; color: var(--ink); cursor: pointer }\n.rv-au:hover { text-decoration: underline dotted var(--faint); text-underline-offset: 3px }\n.rv-au.human { color: var(--human) }\n.rv-au.daemon { color: var(--wezard) }\n.rv-tag { color: var(--accent); cursor: pointer }\n.rv-roomtag { color: var(--chat); cursor: pointer; border: 1px solid var(--line); border-radius: 999px; padding: 0 6px }\n.rv-mh time { margin-left: auto; color: var(--faint) }\n.rv-open { border: 1px solid var(--line); background: transparent; border-radius: 6px; padding: 0 6px; font-size: 11px; color: var(--faint); cursor: pointer }\n.rv-open:hover { color: var(--accent); border-color: var(--accent) }\n.rv-tx { margin-top: 4px; font-size: 13.5px; line-height: 1.6; overflow-wrap: anywhere }\n.rv-tx p { margin: 3px 0 }\n.rv-tx pre { background: var(--them); padding: 6px 8px; border-radius: 6px; overflow: auto; font-size: 12px }\n.rv-tx a { color: var(--accent) }\n.rv-empty { color: var(--faint); font-size: 12px; margin: 0 }\n.rv-box { margin-top: 7px; padding-top: 7px; border-top: 1px dashed var(--line) }\n.rv-box .turn-group { margin: 0 }\n.rv-none { padding: 14px; color: var(--faint); font-size: 12.5px }\n.rv-note { margin: 8px 12px; padding: 7px 10px; border-radius: 8px; background: #fdf1e3; color: #9a5b10; font-size: 12px }\n.rv-plans, .rv-charter { margin: 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); font-size: 12px }\n.rv-plans h4, .rv-charter h4 { margin: 6px 0 2px; font-size: 11.5px; color: var(--faint); font-weight: 600 }\n.rv-plans ul { margin: 0; padding-left: 16px }\n.rv-charter h5 { margin: 8px 0 2px; font-size: 11.5px; color: var(--faint) }\n.rv-charter pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11.5px; color: var(--mute) }";
+  var CSS = ".convs { overflow: auto; padding: 0 }\n.rv-ghead { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 8px 10px 4px; color: var(--faint); font-size: 11.5px }\n.rv-tree-t { border: 1px solid var(--line); background: var(--card); border-radius: 6px; padding: 1px 7px; font-size: 11.5px; cursor: pointer; color: var(--mute) }\n.rv-tree-t.on { color: var(--accent); border-color: var(--accent) }\n.rv-gbtns { display: inline-flex; gap: 4px }\n.rv-graph { display: block; font: 11.5px/1 -apple-system, BlinkMacSystemFont, sans-serif; cursor: grab; touch-action: none; user-select: none }\n.rv-edge { stroke: #c9d2df; stroke-width: 1 }\n.rv-edge.on { stroke: var(--accent); stroke-width: 1.6 }\n.rv-tree { fill: none; stroke: #b9a0e0; stroke-dasharray: 3 3 }\n.rv-node { cursor: grab }\n.rv-room rect { fill: var(--them); stroke: var(--line) }\n.rv-room text { fill: var(--ink) }\n.rv-room.on rect { fill: var(--mine); stroke: var(--accent) }\n.rv-person circle { fill: var(--card); stroke: var(--mute); stroke-width: 1.4 }\n.rv-person circle.live { fill: var(--accent); stroke: var(--accent) }\n.rv-person.human circle { stroke: var(--human) }\n.rv-person text { fill: var(--ink); font-size: 10.5px }\n.rv-room text { font-size: 11px }\n.rv-person.on circle { stroke: var(--accent); stroke-width: 2.4 }\n.rv-person.ghost { opacity: .5 }\n.rv-duty { fill: #cf222e }\n.rv-ttl { font-size: 15.5px; line-height: 22px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }\n.rv-sub { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; margin-top: 3px; font-size: 11.5px; color: var(--mute) }\n.rv-id { font-size: 11px; color: var(--faint); font-weight: 400 }\n.rv-lb { font-size: 15px }\n.rv-desc { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }\n.rv-chip { display: inline-flex; align-items: center; padding: 0 6px; border-radius: 999px; background: var(--them); color: var(--mute); font-size: 11px; line-height: 17px; white-space: nowrap }\n.rv-chip.ok { background: #e8f5ee; color: #1a7f3c }\n.rv-chip.warn { background: #fdf1e3; color: #9a5b10 }\n.rv-chip.ask, .rv-chip.bad { background: #fdecec; color: #b42318 }\n.rv-chip.go { background: var(--mine); color: var(--accent) }\n.rv-chip.file { background: var(--them-soft) }\n.rv-chip.re { background: transparent; color: var(--faint); border: 1px solid var(--line) }\n.rv-act { border: 1px solid var(--line); background: var(--card); border-radius: 7px; padding: 2px 9px; font-size: 12px; cursor: pointer; color: var(--mute) }\n.rv-act:hover, .rv-act.on { color: var(--accent); border-color: var(--accent) }\n.rv-sel { border: 1px solid var(--line); background: var(--card); border-radius: 7px; padding: 2px 4px; font-size: 12px; color: var(--mute); max-width: 190px }\n.ch-acts { display: flex; gap: 6px; align-items: center; flex-wrap: wrap }\n.membar { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; padding: 5px 12px; border-bottom: 1px solid var(--line); background: var(--card); font-size: 11.5px }\n.rv-mem { display: inline-flex; align-items: center; gap: 3px; padding: 0 7px; border-radius: 999px; background: var(--them); color: var(--ink); cursor: pointer; line-height: 18px }\n.rv-mem.host { background: var(--mine); color: var(--accent) }\n.rv-mem.human { color: var(--human) }\n.rv-mem.busy { box-shadow: inset 0 0 0 1px var(--accent) }\n.rv-duties { margin-left: auto; color: #b42318 }\n.rv-older { display: block; margin: 8px auto; border: 1px solid var(--line); background: var(--card); border-radius: 999px; padding: 2px 12px; font-size: 12px; color: var(--mute); cursor: pointer }\n.rv-msg { margin: 8px 12px; padding: 7px 10px; background: var(--card); border: 1px solid var(--line); border-radius: 10px }\n.rv-msg.me { background: var(--mine); border-color: var(--mine-line) }\n.rv-msg.k-system { background: var(--them); border-style: dashed }\n.rv-mh { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; font-size: 11.5px; color: var(--mute) }\n.rv-au { font-weight: 600; color: var(--ink); cursor: pointer }\n.rv-au:hover { text-decoration: underline dotted var(--faint); text-underline-offset: 3px }\n.rv-au.human { color: var(--human) }\n.rv-au.daemon { color: var(--wezard) }\n.rv-tag { color: var(--accent); cursor: pointer }\n.rv-roomtag { color: var(--chat); cursor: pointer; border: 1px solid var(--line); border-radius: 999px; padding: 0 6px }\n.rv-mh time { margin-left: auto; color: var(--faint) }\n.rv-open { border: 1px solid var(--line); background: transparent; border-radius: 6px; padding: 0 6px; font-size: 11px; color: var(--faint); cursor: pointer }\n.rv-open:hover { color: var(--accent); border-color: var(--accent) }\n.rv-tx { margin-top: 4px; font-size: 13.5px; line-height: 1.6; overflow-wrap: anywhere }\n.rv-tx p { margin: 3px 0 }\n.rv-tx pre { background: var(--them); padding: 6px 8px; border-radius: 6px; overflow: auto; font-size: 12px }\n.rv-tx a { color: var(--accent) }\n.rv-empty { color: var(--faint); font-size: 12px; margin: 0 }\n.rv-box { margin-top: 7px; padding-top: 7px; border-top: 1px dashed var(--line) }\n.rv-turn { border-top: 0; margin-top: 3px; padding-top: 0 }\n.rv-turn .turn-group { margin: 0 }\n.rv-said { margin-top: 6px; display: flex; flex-direction: column; gap: 3px }\n.rv-saidrow { display: flex; gap: 6px; align-items: baseline; min-width: 0; font-size: 11.5px; color: var(--faint) }\n.rv-saidtx { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }\n.rv-seq { font-family: ui-monospace, Menlo, monospace }\n.rv-mark { margin: 10px 12px; display: flex; justify-content: center }\n.rv-box .turn-group { margin: 0 }\n.rv-none { padding: 14px; color: var(--faint); font-size: 12.5px }\n.rv-note { margin: 8px 12px; padding: 7px 10px; border-radius: 8px; background: #fdf1e3; color: #9a5b10; font-size: 12px }\n.rv-plans, .rv-charter { margin: 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); font-size: 12px }\n.rv-plans h4, .rv-charter h4 { margin: 6px 0 2px; font-size: 11.5px; color: var(--faint); font-weight: 600 }\n.rv-plans ul { margin: 0; padding-left: 16px }\n.rv-charter h5 { margin: 8px 0 2px; font-size: 11.5px; color: var(--faint) }\n.rv-charter pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11.5px; color: var(--mute) }";
   var injectStyle = function () {
     if (document.getElementById('rv-style')) return;
     var s = document.createElement('style');

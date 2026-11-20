@@ -46,6 +46,13 @@ export const setWorldFactsProvider = (fn: WorldFactsProvider): void => { worldFa
 // 与 worldFacts 同一模式 —— 先挂闭包, room store 在 mirror 块里才 set。
 let roomReader: RoomReader | undefined;
 export const setRoomReader = (r: RoomReader): void => { roomReader = r; };
+/** 路由在 boot 早期就建好了 (chatHandlers), 账本更晚才开 —— 传进去的必须是这个代理:
+ *  每次调用都现取, 否则钉死成 undefined, 整页看不到 room 历史 (room-ui 那次的真实故障)。 */
+const liveRoomReader: RoomReader = {
+  ids: () => roomReader?.ids() ?? [],
+  get: (id) => roomReader?.get(id),
+  ready: () => !!roomReader,
+};
 
 // 注册表侧的事实同样要过河。turn 记录是 POST /d 一条条推的, 但身份 / 家谱 / plan /
 // 日程不是"发生的事", 而是"当下的状态" —— 没有增量可推, 只能整份快照定期覆盖。
@@ -395,7 +402,7 @@ export const roleUniq = (target: string): string => wizardStore()?.get(target)?.
 export const chatHandlers = (): Record<string, Handler> => {
   // provider 以闭包间接引用 —— chatHandlers 在 boot 早期就被调用, 那时 mirror 块
   // 还没装上 provider; 直接把 worldFacts 传进去会把 undefined 钉死。
-  const routes = store ? chatRouteTable(createChatRoutes(store, () => (worldFacts ? worldFacts() : EMPTY_FACTS), undefined, roomReader)) : {};
+  const routes = store ? chatRouteTable(createChatRoutes(store, () => (worldFacts ? worldFacts() : EMPTY_FACTS), undefined, liveRoomReader)) : {};
   const unavailable: Handler = (_req, res) => {
     res.statusCode = 503;
     res.end("detail store not ready");
