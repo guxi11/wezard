@@ -69,6 +69,14 @@ const WORLD = {
   degraded: false,
 };
 const ROOM = { ok: true, at: Date.now(), room: ROOMS[0], label: "群G", members: memberViews, duties: [], msgs: msgs.filter((m) => m.room === G), total: 4 };
+// 搜索的服务端口径在 room-view-api.test.ts 验; 这里只验前端: 面板画得出三组、点一条消息能落到那一行。
+const SEARCH = (q) => ({
+  ok: true, q,
+  rooms: q.includes("群") ? [{ id: G, kind: "wecom-group", name: "群G", group: true, preview: "bob: 查完了", lastAt: T0 + 4000, members: 3 }] : [],
+  members: [],
+  msgs: q.includes("配置") ? [{ id: "aa000001.3", room: G, roomName: "群G", roomKind: "wecom-group", group: true, author: who("wizard", A), authorName: "alice", toNames: ["bob"], at: T0 + 3000, snippet: "查一下配置", hits: 1 }] : [],
+  msgTotal: q.includes("配置") ? 1 : 0,
+});
 const wizardOf = (role) => {
   const isBob = /worker|bob/.test(role);
   const id = isBob ? "chat:wrG#worker" : "chat:wrG#guide";
@@ -88,6 +96,7 @@ const server = createServer((req, res) => {
   if (u.pathname === "/api/wizard") return send("application/json", JSON.stringify(wizardOf(u.searchParams.get("role") || "")));
   if (u.pathname === "/api/turn") return send("application/json", JSON.stringify({ ok: true, html: '<section class="turn-group" data-key="t:t1">box</section>' }));
   if (u.pathname === "/api/tool") return send("application/json", JSON.stringify({ ok: true, html: "tool" }));
+  if (u.pathname === "/api/search") return send("application/json", JSON.stringify(SEARCH(u.searchParams.get("q") || "")));
   res.statusCode = 404; res.end("no");
 });
 await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -101,6 +110,22 @@ try {
   page.on("pageerror", (e) => errs.push(String(e)));
   // 只有票据 (消息尾部 ✦ 链接) 时开这一轮的主人, 不是一张随机 room。
   await page.goto(base + "/role?id=t-ticket", { waitUntil: "load" });
+  // 左栏默认是列表: 「群聊」(有人参与) /「会话」(只有 wizard) 两组, 名片下有搜索入口。
+  await page.waitForSelector(".rv-list .ci", { timeout: 5000 });
+  const list = await page.evaluate(() => ({
+    heads: [...document.querySelectorAll(".rv-list h2")].map((h) => h.textContent.trim()),
+    items: [...document.querySelectorAll(".rv-list .ci")].map((b) => b.getAttribute("data-room")),
+    names: [...document.querySelectorAll(".rv-list .ci .t")].map((t) => t.textContent.trim()),
+    sbox: !!document.querySelector("#sbox"),
+    tabs: [...document.querySelectorAll("[data-side]")].map((b) => b.textContent + (b.classList.contains("on") ? "*" : "")),
+  }));
+  assert.deepEqual(list.heads, ["群聊1", "会话1"], "列表分两组: " + JSON.stringify(list));
+  assert.deepEqual(list.items, [G, DM], "群在群聊, dm 在会话");
+  assert.equal(list.names[0], "群G", "显示名 = 聊天名");
+  assert.equal(list.sbox, true, "名片下有搜索入口");
+  assert.deepEqual(list.tabs, ["列表*", "图"]);
+  // 切到图: 视图记在 localStorage, 之后的页面都是图。
+  await page.click('[data-side="graph"]');
   await page.waitForSelector(".rv-person", { timeout: 5000 });
   await page.waitForFunction(() => (document.querySelector("#rb-who .nm") || {}).textContent?.trim() === "alice", null, { timeout: 5000 });
   // room 视图另开: 用 ?room= 明说。
@@ -172,6 +197,22 @@ try {
   const deep = await page.evaluate(() => ({ name: ((document.querySelector("#rb-who .nm") || {}).textContent || "").trim(), rows: document.querySelectorAll(".rv-msg").length }));
   assert.equal(deep.name, "alice", "深链选中的就是 role=");
   assert.ok(deep.rows > 0, "深链打开有消息");
+
+  // 切回列表, 再用搜索: 输入 → 三组结果 → 点消息 → 打开那个 room 并落到那一行。
+  await page.click('[data-side="list"]');
+  await page.waitForSelector(".rv-list .ci", { timeout: 5000 });
+  await page.click("#sbox");
+  await page.waitForSelector(".sk:not([hidden]) .sk-it", { timeout: 5000 });
+  const recentN = await page.evaluate(() => document.querySelectorAll(".sk-it.conv").length);
+  assert.equal(recentN, 2, "空查询列最近的 room");
+  await page.fill("#sk-q", "配置");
+  await page.waitForSelector(".sk-it.msg", { timeout: 5000 });
+  const hit = await page.evaluate(() => ({ sn: document.querySelector(".sk-it.msg .sn").innerHTML, where: document.querySelector(".sk-it.msg .where").textContent }));
+  assert.match(hit.sn, /<mark>配置<\/mark>/, "命中词高亮");
+  assert.match(hit.where, /群聊 · 群G/);
+  await page.click(".sk-it.msg");
+  await page.waitForSelector('.rv-msg.hit[data-id="aa000001.3"]', { timeout: 5000 });
+  assert.equal(await page.evaluate(() => document.querySelector(".sk").hidden), true, "选中后面板收起");
 
   console.log("room-graph.dom: " + JSON.stringify(counts) + " —— 节点数 = room + 参与者, 过程框与 wizard 视图可点开; 左栏名片与深链选中 role 正常");
 } finally {

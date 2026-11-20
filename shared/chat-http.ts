@@ -12,6 +12,7 @@
 //   GET /api/turn         → 一条消息对应的那一轮的过程框 (工具调用只有摘要)
 //   GET /api/tool         → 一次工具调用的展开正文 —— 过程框的第二级, 展开时才取
 //   GET /api/charter      → 一个 wizard 出生时被压进系统提示的宪章
+//   GET /api/search       → ⌘K: 搜 room 名 / 成员 / 消息正文 (账本全量)
 //
 // 资源路由不校验 ?id= —— 它们是纯静态前端代码, 不含任何会话数据。
 //
@@ -30,6 +31,7 @@ import { roomMembers } from "./group-members.js";
 import { charterBrief, charterView } from "./charter-view.js";
 import { renderToolBody } from "./detail-render.js";
 import { isInjection, renderTurnBox, roomDeco, spokenTurn, wireMsg, wizardStream } from "./role-render.js";
+import { searchRooms } from "./room-search.js";
 import { chatScript, chatStyles, chatVendor, renderChatPage } from "./chat-render.js";
 import type { Asset } from "./web-assets.js";
 import type { DetailRecord, DetailStore, TurnDetailRecord } from "./detail-store.js";
@@ -57,6 +59,7 @@ export interface ChatRoutes {
   turn: SimpleHandler;
   tool: SimpleHandler;
   charter: SimpleHandler;
+  search: SimpleHandler;
 }
 
 /** 注册表侧的事实 (wizard 身份 / 家谱 / plans / 日程 / room 快照) —— 只有 daemon 给得出。
@@ -448,7 +451,17 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
     });
   });
 
-  return { page, styles: asset(chatStyles), script: asset(chatScript), vendor: asset(chatVendor), world, room, wizard, turn, tool, charter };
+  /** ⌘K: room 名 / 成员 / 消息正文。范围 = 这张票据看得到的 room (与 /api/world 同一份)。 */
+  const search: SimpleHandler = withTicket((ticket, url, res) => {
+    const q = url.searchParams.get("q") ?? "";
+    void getFacts(ticket).then((f) => {
+      const facts = f.rooms ?? [];
+      const ids = new Set(facts.map((r) => r.id));
+      json(res, 200, { ok: true, q, ...searchRooms(statesNow().filter((s) => ids.has(s.id)), facts, namesOf(f), roomShortOf(f), q) });
+    });
+  });
+
+  return { page, styles: asset(chatStyles), script: asset(chatScript), vendor: asset(chatVendor), world, room, wizard, turn, tool, charter, search };
 };
 
 /** Path → handler map; the daemon registers each, svr dispatches through it. */
@@ -463,10 +476,11 @@ export const chatRouteTable = (routes: ChatRoutes): Record<string, SimpleHandler
   "GET /api/turn": routes.turn,
   "GET /api/tool": routes.tool,
   "GET /api/charter": routes.charter,
+  "GET /api/search": routes.search,
 });
 
 /** Route keys, single-sourced so the daemon's registration can't drift. */
 export const CHAT_ROUTE_KEYS = [
   "GET /role", "GET /chat/app.css", "GET /chat/app.js", "GET /chat/vendor.js",
-  "GET /api/world", "GET /api/room", "GET /api/wizard", "GET /api/turn", "GET /api/tool", "GET /api/charter",
+  "GET /api/world", "GET /api/room", "GET /api/wizard", "GET /api/turn", "GET /api/tool", "GET /api/charter", "GET /api/search",
 ] as const;

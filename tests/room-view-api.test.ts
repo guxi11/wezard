@@ -109,6 +109,28 @@ const run = async (): Promise<void> => {
   assert.match(box.html, /class="turn-group/);
   assert.match(box.html, /hello/);
 
+  // ── /api/search: room 名 / 成员 / 消息 ───────────────────────────────
+  const s1 = await get(routes.search, "id=t-ticket&q=" + encodeURIComponent("配置"));
+  assert.equal(s1.ok, true);
+  assert.deepEqual(s1.msgs.map((m: { text?: string; snippet: string }) => m.snippet), ["查一下配置"]);
+  assert.equal(s1.msgs[0].room, "chat:wrG");
+  assert.equal(s1.msgs[0].roomName, "群G");
+  assert.equal(s1.msgs[0].authorName, "alice");
+  assert.deepEqual(s1.msgs[0].toNames, ["bob"]);
+  assert.equal(s1.msgs[0].group, true, "有人发过话的群 = 群聊");
+  const s2 = await get(routes.search, "id=t-ticket&q=" + encodeURIComponent("群"));
+  assert.deepEqual(s2.rooms.map((r: { name: string }) => r.name), ["群G"], "room 名按显示名搜 (title > 聊天名)");
+  const s3 = await get(routes.search, "id=t-ticket&q=AL");
+  assert.deepEqual(s3.members.map((m: { name: string; rooms: number }) => [m.name, m.rooms]), [["alice", 2]], "成员按名字搜, 不分大小写");
+  const s4 = await get(routes.search, "id=t-ticket&q=" + encodeURIComponent("私聊"));
+  assert.equal(s4.msgs.length, 1);
+  assert.equal(s4.msgs[0].group, false, "wizard 之间的 dm = 会话");
+  assert.equal(s4.msgs[0].roomName, "alice ↔ bob", "没起名的 dm 用成员名, 不是一排「私聊」");
+  const s5 = await get(routes.search, "id=t-ticket&q=" + encodeURIComponent("查 完"));
+  assert.deepEqual(s5.msgs.map((m: { snippet: string }) => m.snippet), ["查完了"], "空格分词, 各词都要命中");
+  const s0 = await get(routes.search, "id=t-ticket&q=");
+  assert.deepEqual([s0.rooms.length, s0.members.length, s0.msgs.length], [0, 0, 0]);
+
   // ── 路由表: 旧接口不再存在 ──────────────────────────────────────────
   const table = chatRouteTable(routes);
   assert.ok(table["GET /api/room"] && table["GET /api/wizard"]);
