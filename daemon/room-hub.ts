@@ -10,7 +10,6 @@
 // 终句零语义: 本文件不读 transcript。一轮结束 (mirror 报 idle) 时只看账本: 唤醒它的 duty
 // 还开着、这一轮又没 chat_reply 过 → 当轮提醒一次; 再闲下来仍没关 → 给提问者写一条系统行。
 import type { Logger } from "pino";
-import { createRoomQuota } from "./room-quota.js";
 import {
   DAEMON, holderOf, isBoundRoom, judge, mirrors, coversBubble, openDuties, renderMsgLine, sameWho, unreadFor, whoKey,
   type Draft, type JudgeCtx, type MsgRow, type RoomOp, type RoomState, type Verdict, type Who,
@@ -46,7 +45,6 @@ export const REMIND_TEXT = (ids: readonly string[]): string =>
 export const createRoomHub = (p: HubPorts) => {
   const now = (): number => p.now?.() ?? Date.now();
   const turns = new Map<string, TurnWake>();      // uid → 本轮
-  const quota = createRoomQuota();                 // §8a 出站额度: 每轮 ≤3 / 每 room 每分钟 ≤10
   const inflight = new Set<string>();              // uid 正在被粘贴
   const uncertain = new Map<string, Set<string>>(); // uid → 上次不确定投递过的 room
   const reminded = new Set<string>();              // duty key: 已当轮提醒过
@@ -66,12 +64,6 @@ export const createRoomHub = (p: HubPorts) => {
       ...extra,
     });
     if (!v.ok || v.duplicate) return v;
-    // §8a 出站额度: wizard 经工具面写进来的行 (say / ask / task / file / 带 text 的 reply;
-    // notify 落的也是 say 行) 才计 —— daemon 系统行与人话不计。被拒的行不落盘也不占额度。
-    if (d.author.kind === "wizard" && d.origin === "tool" && d.kind !== "join-req" && (d.kind !== "reply" || !!(d.text ?? "").trim())) {
-      const q = quota.admit(d.author.id, room, now());
-      if (!q.ok) return { ok: false, status: 409, reason: q.reason! };
-    }
     p.store.append(room, [v.row]);
     if (v.degraded.length) p.log?.info({ room, id: v.row.id, degraded: v.degraded }, "room: 回合预算用尽, 这几位只推游标不唤醒");
     if (d.author.kind === "wizard" && v.row.kind === "reply") markReplied(d.author.id, v.row);
@@ -207,7 +199,6 @@ export const createRoomHub = (p: HubPorts) => {
   const onIdle = async (uid: string): Promise<void> => {
     const t = turns.get(uid);
     turns.delete(uid);
-    quota.endTurn(uid); // §8a: 轮终重置该 wizard 的本轮发言计数
     const who: Who = { kind: "wizard", id: uid };
     const w = p.wizardOf(uid);
     // 唤醒过它、它仍持有、未关的 duty。
