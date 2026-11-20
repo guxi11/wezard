@@ -1310,24 +1310,46 @@ const main = async (): Promise<void> => {
     // 契约 §7 切换约束: 宪章与 MCP schema 都变了, 活会话必须 /new —— 一次性标记文件,
     // boot 存在即把每个绑定标为待 /new。m.chatRoster("") 的 targets 就是全部绑定 (live +
     // 持久化; 内部键在 base 一层已被滤掉, 见 mirror-bridge 的 chatRoster) —— 不用换来源。
+    // 标记文件有内容时按行读 target key, 只重开列出的这几个 (补救个别 pane 用, 不波及在干活的)。
     // pane 忙的目标不丢 (修复单 §7): 留在 needsNew 里, 轮终 (roomTurnEnd) 与 30s 兜底定时器
-    // 重试, 全部处理完才删标记。pane 已不在的不重生 (noRespawn: boot 时集中重生会打成 pane
-    // 风暴) —— 交给 hub 在下次唤醒时重生, 新 CLI 进程自带新工具面, 无需 /new。
+    // 重试, 全部处理完才删标记。pane 已不在的不重生 (boot 时集中重生会打成 pane 风暴) ——
+    // 交给 hub 在下次唤醒时重生, 新 CLI 进程自带新工具面, 无需 /new。
+    //   /new 走 daemon 的 newSession (杀 pane + 新 sid 重生 + 宪章随首条注入), 不往 pane 里敲
+    // CLI 自己的 /new: 那样 CLI 换了 sid, 新转录里却没有任何能认回这个 pane 的痕迹, 绑定钉在旧
+    // 转录上、宪章也不重挂 —— 2026-11-20 切换后一批 pane 就这样停在只有 /new 的空会话里。
+    // 逐个串行: 一次并发十几个 CLI 冷启动, 本机无 swap, fork 会瞬时 ENOMEM。
     const newFlag = join(expandHome(cfg.daemon.stateDir), "rooms-cutover-new.flag");
-    const needsNew = existsSync(newFlag) ? new Set(m.chatRoster("").flatMap((c) => c.targets)) : new Set<string>();
+    const flagTargets = existsSync(newFlag) ? readFileSync(newFlag, "utf8").split("\n").map((l) => l.trim()).filter(Boolean) : [];
+    const needsNew = existsSync(newFlag) ? new Set(flagTargets.length ? flagTargets : m.chatRoster("").flatMap((c) => c.targets)) : new Set<string>();
+    const newInflight = new Set<string>(); // 轮终补做与定时扫描可能同时点到同一个 target
     const newOne = async (t: string): Promise<void> => {
-      if (!needsNew.has(t)) return;
+      if (!needsNew.has(t) || newInflight.has(t)) return;
+      newInflight.add(t);
       try {
-        const r = await m.injectText(t, "/new", { requireIdle: true, noRespawn: true });
-        if (r.ok) { needsNew.delete(t); roomLog.info({ target: t }, "room: /new 完成 (切换标记)"); }
-        else if (r.retryable === false) { needsNew.delete(t); roomLog.info({ target: t, reason: r.reason }, "room: /new 跳过 — pane 已不在, 等下次唤醒由 hub 重生 (新进程自带新工具面)"); }
-      } catch { /* 稍后重试 */ }
+        const pane = m.sessionInfo(t)?.tmuxPane ?? "";
+        const snap = pane ? await runTmux(["list-panes", "-a", "-F", "#{pane_id}"]) : undefined;
+        if (snap && !snap.ok) return; // tmux 无定论: 稍后重试
+        if (!pane || !parsePaneIds(snap!.stdout).includes(pane)) {
+          needsNew.delete(t);
+          roomLog.info({ target: t }, "room: /new 跳过 — pane 已不在, 等下次唤醒由 hub 重生 (新进程自带新工具面)");
+        } else if (await m.idleNow(t)) {
+          const r = await m.newSession(t, displayName(t) || t, { silent: true });
+          if (r.ok) { needsNew.delete(t); roomLog.info({ target: t, sessionId: r.sessionId }, "room: /new 完成 (切换标记)"); }
+          else roomLog.warn({ target: t, reason: r.reason }, "room: /new 失败, 稍后重试");
+        }
+      } catch { /* 稍后重试 */ } finally { newInflight.delete(t); }
       if (!needsNew.size) { try { unlinkSync(newFlag); } catch { /* 已不在 */ } }
+    };
+    let newSweeping = false;
+    const newSweep = async (): Promise<void> => {
+      if (newSweeping) return;
+      newSweeping = true;
+      try { for (const t of [...needsNew]) await newOne(t); } finally { newSweeping = false; }
     };
     if (needsNew.size) {
       roomLog.info({ panes: needsNew.size }, "room: 切换标记在, 首次唤醒前先 /new (契约 §7)");
-      for (const t of [...needsNew]) void newOne(t);
-      const newRetryTimer = setInterval(() => { for (const t of [...needsNew]) void newOne(t); }, 30_000);
+      void newSweep();
+      const newRetryTimer = setInterval(() => void newSweep(), 30_000);
       newRetryTimer.unref?.();
     }
     // ── /room/* 的公共件 ─────────────────────────────────────────────────

@@ -5282,10 +5282,9 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // input. Detect the rotation by watching the project dir for a new .jsonl
   // that didn't exist at /clear time and contains a non-empty user line, then
   // re-target this attachment onto it.
-  const isClearCommand = (text: string): boolean => {
-    const t = text.trim();
-    return t === "/clear" || t.startsWith("/clear ") || t.startsWith("/clear\n");
-  };
+  // CLI 自己的 `/new` (codebuddy 有, 注入进 pane 时并非 daemon 的 /new) 与 /clear 同效:
+  // 当场换 sid、新转录首条是 <command-name>/new —— 不当 /clear 认, 绑定就钉在旧转录上。
+  const isClearCommand = (text: string): boolean => /^\/(?:clear|new)(?:\s|$)/.test(text.trim());
 
   /** mtime(ms), 0 when unreadable — "newest transcript wins" 的排序键。 */
   const mtimeOf = (path: string): number => {
@@ -5325,7 +5324,7 @@ export const startMirror = (deps: MirrorDeps): MirrorBridge => {
   // new jsonl. Match that signature to (a) confirm the file is a /clear-rotated
   // child, (b) avoid mis-migrating onto an unrelated jsonl that some other
   // claude process happened to create on the same cwd in our window.
-  const SLASH_CLEAR_USER_RE = /<command-name>\s*\/clear\s*<\/command-name>/;
+  const SLASH_CLEAR_USER_RE = /<command-name>\s*\/(?:clear|new)\s*<\/command-name>/;
   const jsonlIsPostClearChild = (path: string): boolean => {
     try {
       const fd = openSync(path, "r");
