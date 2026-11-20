@@ -481,6 +481,19 @@ export const createWezardServer = (): McpServer => {
       unwrap("room_open", await daemonPost("/room/open", { with: members, ...(title ? { title } : {}) })),
   );
   server.registerTool(
+    "room_name",
+    {
+      title: "Name a room (host only)",
+      description:
+        "给 room 起一个显示名 —— 只有本 room 的 host 能起 (改)。名字只是别名: room 的地址永远是 id (chat:… / user:… / dm:… / adhoc:…), 名字不参与寻址, 同名也不冲突; 它只出现在 rolepage、注入头与 room_read 的标签里。host 换人后由新 host 改。",
+      inputSchema: currentAddressSchema({
+        room: z.string().describe(ROOM_DOC),
+        name: z.string().describe("新的显示名, 一句话, 最多 60 字。"),
+      }),
+    },
+    async ({ room, name }) => unwrap("room_name", await daemonPost("/room/name", { room, name })),
+  );
+  server.registerTool(
     "room_invite",
     {
       title: "Invite someone into a room",

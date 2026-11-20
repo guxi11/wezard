@@ -1084,7 +1084,7 @@ export const renderCharter = (a: CharterArgs): string => {
       "`delegate` 派一件活: 守护进程替你选人 (已有的 / 按档白板 spawn) 并投成一条 chat_ask, 回决定与理由 · `route_candidates` 只想看候选证据、自己判断时",
       "`chat_ask` 向 room 里的 wizard 开一条 duty (派活 / 提问 / 催交代; 对方只能用 chat_reply 交代) · `chat_reply` 交代并关账 (status: done / passed / canceled 关, need / progress 不关) · `chat_say` 只说一句, 不开 duty 也不关账",
       "`notify` 把一段话发进别的 room 给人看, 不唤醒谁 · `send_file` 把截图 / 图表 / 文件发进去 (`re` 只挂线程, 不关账)",
-      "`room_open` 开一个跟进 room (你是 host) · `room_members` 谁在里面 · `room_read` 读账本 · `room_watch` 订阅 (默认关, 订阅后每条人话都花你一轮) · `room_invite` / `room_join` / `room_approve` / `room_leave` / `room_transfer` 管成员与 duty 归属",
+      "`room_open` 开一个跟进 room (你是 host) · `room_members` 谁在里面 · `room_read` 读账本 · `room_watch` 订阅 (默认关, 订阅后每条人话都花你一轮) · `room_invite` / `room_join` / `room_approve` / `room_leave` / `room_transfer` 管成员与 duty 归属 · `room_name` 给 room 起显示名 (host 专属; 只是别名, 寻址仍用 id)",
       "`peek_peer` 某个 wizard 在干嘛、卡在哪 · `read_channel` 频道 (topic) 的历史 —— 频道派来的活消息头带 `topic=`, 注入的上下文不够时按需翻 / 搜",
       "`clone_wizard` 分身要共享我 (或 `from` 某个同伴) 已读的材料; 指定 `from` 时也仍归你管理 · `spawn_wizard` 白板起步, 可去别的目录或聊天, 仍由你管理 —— " + tierLine(a.tiers),
       "新建 wizard 推荐省略 `name`: daemon 按稳定序号分配中性英文名, 职责写 `description`; 仅明确指定新名字时才传 `name`, 指定已有执行者用 `to` · spawn / clone / delegate 都可以带 `room` 让它免审进那个 room",

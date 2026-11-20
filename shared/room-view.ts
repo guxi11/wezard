@@ -35,7 +35,7 @@ export interface RoomLastFact { seq: number; at: number; author: Who; authorName
 export interface RoomFact {
   id: string;
   kind: RoomKind;
-  /** 只有 room_open 显式给了才有; 绑定 room 的显示名由 chatNames[id] 给。 */
+  /** host 起的显示别名 (room_open 的 title 或 room_name 改的); 空 = 没起名, 显示名回落到聊天名 / 成员。 */
   title: string;
   /** 绑定了传输 (企微群 / 单聊 / topic 帖 / 微信), 镜像进群。 */
   bound: boolean;

@@ -96,6 +96,9 @@ export interface FileRef { path: string; kind: "image" | "file" | "voice" | "vid
 
 interface OpBase { at: number; room: string }
 export interface OpenOp extends OpBase { op: "open"; kind: RoomKind; title?: string; by: Who }
+/** 给 room 起显示名 (host 专用)。名字只是别名, 不参与寻址: 账本文件、消息 id、room 参数
+ *  一律用 id 原样; 同名的两个 room 互不干扰。 */
+export interface NameOp extends OpBase { op: "name"; title: string; by: Who }
 export interface JoinOp extends OpBase { op: "join"; who: Who; ord: number; via: JoinVia; by: Who }
 export interface LeaveOp extends OpBase { op: "leave"; who: Who; by: Who; why?: string }
 export interface SeenOp extends OpBase { op: "seen"; who: Who; seq: number }
@@ -130,7 +133,7 @@ export interface MsgRow extends OpBase {
   /** daemon 系统行的机器语义 (undelivered / left / quota …), 用于去重, 不给模型推断。 */
   sys?: string;
 }
-export type RoomOp = OpenOp | JoinOp | LeaveOp | SeenOp | MoveOp | WatchOp | MsgRow;
+export type RoomOp = OpenOp | NameOp | JoinOp | LeaveOp | SeenOp | MoveOp | WatchOp | MsgRow;
 
 // ── fold ───────────────────────────────────────────────────────────────
 
@@ -164,6 +167,7 @@ export interface Duty {
 export interface RoomState {
   id: string;
   kind?: RoomKind;
+  /** 显示别名 (host 起), 不是索引: 寻址永远用 id。 */
   title?: string;
   openedAt?: number;
   seq: number;
@@ -203,6 +207,7 @@ export const applyOp = (s: RoomState, op: RoomOp): RoomState => {
   switch (op.op) {
     case "open":
       s.kind = op.kind; if (op.title) s.title = op.title; s.openedAt ??= op.at; break;
+    case "name": if (op.title) s.title = op.title; break;
     case "join": {
       const k = whoKey(op.who);
       const prev = s.members.get(k);
@@ -265,6 +270,9 @@ export const hostOf = (members: Iterable<{ who: Who; ord: number }>): Who | unde
   return best?.who;
 };
 export const roomHost = (s: RoomState): Who | undefined => hostOf(s.members.values());
+
+/** 起名 / 改名只有当前 host 能做 (人也不行 —— 人的意见走人话)。 */
+export const canRename = (s: RoomState, who: Who): boolean => sameWho(roomHost(s), who);
 
 /** duty 此刻的处理人 (host 槽位读时求值)。 */
 export const holderOf = (s: RoomState, d: Duty): Who | undefined => {

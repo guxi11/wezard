@@ -51,7 +51,7 @@ import { stewardRoute as resolveSteward } from "./steward.js";
 import { createRoomWatchdog, parsePaneIds } from "./room-watchdog.js";
 import { createRoomHub, type RoomHub } from "./room-hub.js";
 import {
-  DAEMON, adhocRoomId, dmPeers, dmRoomId, holderOf, isUid, leaveOps, openDuties, renderMsgLine, roomHost, roomsDirOf, sameWho, whoKey,
+  DAEMON, adhocRoomId, canRename, dmPeers, dmRoomId, holderOf, isUid, leaveOps, openDuties, renderMsgLine, roomHost, roomsDirOf, sameWho, whoKey,
   type MsgRow, type ReplyStatus, type RoomOp, type RoomState, type Verdict, type Who,
 } from "../shared/room.js";
 import { CHAT_BATCH_BUDGET, sliceBatch } from "../shared/chat-record.js";
@@ -1248,10 +1248,10 @@ const main = async (): Promise<void> => {
         const pair = dmPeers(room);
         return pair ? pair.map((u) => roomWizardOf(u)?.name ?? u).join(" ↔ ") : room;
       }
-      if (room.startsWith("adhoc:")) {
-        const s = roomState(room);
-        return s?.title || [...(s?.members.values() ?? [])].slice(0, 3).map((x) => roomNameOf(x.who)).join(", ") || room;
-      }
+      // host 起的名字是显式别名, 优先于聊天名 (只影响显示, 寻址仍只认 id)。
+      const s = roomState(room);
+      if (s?.title) return s.title;
+      if (room.startsWith("adhoc:")) return [...(s?.members.values() ?? [])].slice(0, 3).map((x) => roomNameOf(x.who)).join(", ") || room;
       return chatNameOf(cfg, room) || room;
     };
     /** 绑定 room 的镜像出站 (§3a): 覆盖占位 > 媒体 > topic 评论 > wx > 群消息。
@@ -1523,6 +1523,23 @@ const main = async (): Promise<void> => {
         ...inv.who!.map((w, i) => ({ op: "join" as const, at, room: id, who: w, ord: i + 2, via: "invite" as const, by: me })),
       ]);
       json(res, 200, { ok: true, room: id, id, members: [me, ...inv.who!].map(roomNameOf) });
+    });
+    http.register("POST /room/name", async (req, res) => {
+      const { self, body } = await readPeerBody(req);
+      if (READ_ROOM_FAIL(res, self)) return;
+      const me = roomSelfOf(self);
+      if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
+      const b = body as { room?: string; name?: string };
+      const r = roomResolve(b.room);
+      if (r.error || !r.room) { json(res, 400, { ok: false, reason: r.error ?? "room required" }); return; }
+      const s = roomState(r.room)!;
+      if (!s.members.has(whoKey(me))) { json(res, 403, { ok: false, reason: "你不是 " + roomLabel(r.room) + " 的成员, 起不了名" }); return; }
+      if (!canRename(s, me)) { json(res, 403, { ok: false, reason: "只有本 room 的 host 能起名 (现在是 " + (roomHost(s) ? roomNameOf(roomHost(s)!) : "无人") + ")" }); return; }
+      const name = (b.name ?? "").toString().trim().replace(/\s+/g, " ");
+      if (!name) { json(res, 400, { ok: false, reason: "name required" }); return; }
+      if (name.length > 60) { json(res, 400, { ok: false, reason: "名字太长 (最多 60 字)" }); return; }
+      hub.write(r.room, [{ op: "name", at: Date.now(), room: r.room, title: name, by: me }]);
+      json(res, 200, { ok: true, room: r.room, name });
     });
     http.register("POST /room/invite", async (req, res) => {
       const { self, body } = await readPeerBody(req);

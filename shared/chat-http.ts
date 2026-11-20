@@ -163,7 +163,8 @@ const namesOf = (f: WorldFacts): RenderNames => {
     nameOf: (w) => w.kind === "wizard" ? byUid.get(w.id) ?? f.names?.[w.id] ?? w.id
       : w.kind === "human" ? f.humanNames?.["human:" + w.id] ?? f.names?.[w.id] ?? w.id
       : "wezard",
-    roomLabel: (room) => f.chatNames[room] || titleOf.get(room) || labelOf.get(room) || room,
+    // host 起的名字 (title) 是显式别名, 优先于聊天名 —— 只影响显示, 寻址仍只认 id。
+    roomLabel: (room) => titleOf.get(room) || f.chatNames[room] || labelOf.get(room) || room,
   };
 };
 

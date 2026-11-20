@@ -80,8 +80,8 @@
   };
   var roomLabelOf = function (r) {
     if (!r) return '';
-    if (W.chatNames[r.id]) return W.chatNames[r.id];
     if (r.title) return r.title;
+    if (W.chatNames[r.id]) return W.chatNames[r.id];
     if (r.label) return r.label;
     var n = (r.members || []).length;
     return n ? n + ' 人' : r.id;
@@ -495,7 +495,7 @@
   var scrollBottom = function () { thread.scrollTop = thread.scrollHeight; };
   var renderRoom = function () {
     var r = D.room || { id: D.roomId, kind: 'wecom-group', members: [], openDuties: 0 };
-    var label = W.chatNames[D.roomId] || (D.room && D.room.title) || roomLabelOf(r || { id: D.roomId, members: D.members });
+    var label = (D.room && D.room.title) || W.chatNames[D.roomId] || roomLabelOf(r || { id: D.roomId, members: D.members });
     var host = r.host ? nodeOf(nodeIdOf(r.host)).name : '无人 (人兜底)';
     var sub = [chip(KIND_IC[r.kind] || '·', 'kind'), chip('host ' + host), chip(r.openDuties ? '未决 ' + r.openDuties : '无未决', r.openDuties ? 'warn' : ''), chip(r.bound ? '已绑定企微' : '仅 rolepage')].join('');
     header(esc(label), sub, '<button class="rv-act" id="rv-refresh">刷新</button>');
