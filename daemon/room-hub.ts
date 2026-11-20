@@ -12,8 +12,8 @@
 // → 当轮提醒一次; 再闲下来仍没交代 → 给提问者写一条系统行。
 import type { Logger } from "pino";
 import {
-  DAEMON, dutyAnswered, holderOf, isBoundRoom, judge, mirrors, coversBubble, openDuties, renderMsgLine, sameWho, unreadFor, whoKey,
-  type Draft, type JudgeCtx, type MsgRow, type RoomOp, type RoomState, type Verdict, type Who,
+  DAEMON, afterIsFake, afterTriggerText, afterWakeDue, dutyAnswered, holderOf, isBoundRoom, judge, mirrors, coversBubble, openDuties,
+  renderMsgLine, sameWho, unreadFor, whoKey, type Draft, type JudgeCtx, type MsgRow, type RoomOp, type RoomState, type Verdict, type Who,
 } from "../shared/room.js";
 import type { RoomStore } from "./rooms.js";
 
@@ -38,6 +38,9 @@ export interface HubPorts {
   interrupt: (target: string) => Promise<void>;
   paste: (target: string, text: string) => Promise<PasteResult>;
 }
+
+interface AfterScan { closed?: readonly string[]; fake?: boolean; only?: readonly string[] }
+export interface AfterDue { room: string; msg: string; holder: Who; asker: Who; after: string[]; at: number; fake: boolean }
 
 /** 一轮里它被什么唤醒、交代了什么 (只在内存: 轮界由 mirror 报, reload 后从账本重算唤醒)。 */
 interface TurnWake { rooms: Set<string>; msgs: Set<string>; replied: Set<string>; at: number }
@@ -71,6 +74,8 @@ export const createRoomHub = (p: HubPorts) => {
     if (v.degraded.length) p.log?.info({ room, id: v.row.id, degraded: v.degraded }, "room: 回合预算用尽, 这几位只推游标不唤醒");
     if (d.author.kind === "wizard" && v.row.kind === "reply") markReplied(d.author.id, v.row);
     fanout(room, v.row);
+    // 以 done 关账 = 可能有 after 等着它: 只重算 after 含被关消息的那些 duty (trigger 行无 closes, 不递归)。
+    if (v.row.closes?.length && v.row.status === "done") reconcileAfter({ closed: v.row.re ?? [] });
     return v;
   };
 
@@ -98,6 +103,50 @@ export const createRoomHub = (p: HubPorts) => {
         .catch((e) => p.log?.warn({ room, id: row.id, err: String(e) }, "room: 镜像失败 (只影响传输, 不回滚)"));
     }
     if (row.wake.length || row.interrupt) kick();
+  };
+
+  // ── after 补唤醒 ────────────────────────────────────────────────────
+
+  /** 欠补唤醒的 after duty (从账本现算; 判定见 shared/room.ts afterWakeDue)。
+   *  closed: 只看 after 含这些消息的 (关账时); 缺省全扫 (boot / 管理入口)。
+   *  fake: 全扫时也收 after 全是假 id "undefined" 的旧受害行 —— 缺省不收, 要人确认清单后经管理入口补。
+   *  only: 只补这几条 ask/task。 */
+  const afterDue = (o: AfterScan = {}): AfterDue[] => {
+    const out: AfterDue[] = [];
+    for (const room of p.store.ids()) {
+      let s: RoomState | undefined;
+      try { s = state(room); } catch { continue; }
+      if (!s) continue;
+      for (const d of openDuties(s)) {
+        if (!d.after?.length) continue;
+        if (o.closed && !d.after.some((id) => o.closed!.includes(id))) continue;
+        if (o.only && !o.only.includes(d.msg)) continue;
+        if (!o.closed && !o.fake && afterIsFake(d.after)) continue;
+        const holder = afterWakeDue(s, d, closedDoneAnywhere);
+        if (holder) out.push({ room, msg: d.msg, holder, asker: d.asker, after: d.after, at: d.at, fake: afterIsFake(d.after) });
+      }
+    }
+    return out;
+  };
+
+  /** 给每条欠账写一条 trigger 行 (to = holder, re = 原 ask): 不开新 duty, 渲染的「你要交代」经 re 指回原 ask。
+   *  不占回合预算 —— 补唤醒被预算降级就等于又丢一次, 而它本该在原 ask 那一刻就花掉这一份。 */
+  const reconcileAfter = (o: AfterScan & { dryRun?: boolean } = {}): { due: AfterDue[]; written: string[] } => {
+    const due = afterDue(o);
+    if (o.dryRun) return { due, written: [] };
+    const written: string[] = [];
+    for (const x of due) {
+      const ask = state(x.room)?.byId.get(x.msg);
+      if (!ask) continue;
+      const v = append(x.room, {
+        author: DAEMON, kind: "trigger", origin: "daemon", sys: "after-wake", to: [x.holder], re: [x.msg],
+        text: afterTriggerText(ask, p.nameOf(x.asker)),
+      }, { budget: Number.MAX_SAFE_INTEGER });
+      if (v.ok) written.push(v.row.id);
+      else p.log?.warn({ room: x.room, msgId: x.msg, reason: v.reason }, "room: after 补唤醒写入被拒");
+    }
+    if (written.length) p.log?.info({ written, msgIds: due.map((x) => x.msg) }, "room: after 前置满足, 补唤醒");
+    return { due, written };
   };
 
   const markReplied = (uid: string, row: MsgRow): void => {
@@ -215,7 +264,9 @@ export const createRoomHub = (p: HubPorts) => {
       if (!s || !s.members.has(whoKey(who))) continue;
       for (const d of openDuties(s)) {
         if (!sameWho(holderOf(s, d), who)) continue;
-        const woke = s.byId.get(d.msg)?.wake.includes(uid) || t?.msgs.has(d.msg);
+        // 原 ask 唤醒过它, 或 after 补唤醒的 trigger 行 (re 原 ask) 唤醒过它。
+        const woke = s.byId.get(d.msg)?.wake.includes(uid) || t?.msgs.has(d.msg)
+          || s.msgs.some((r) => r.kind === "trigger" && (r.re ?? []).includes(d.msg) && r.wake.includes(uid));
         if (!woke) continue;
         // progress / need 交代过: duty 照常开着等 done, 但这一轮的账算清了 —— 不提醒、不告状;
         // 清掉提醒记号, 之后被同一 duty 再唤醒 (need 被补答) 又没交代时重新从「提醒一次」开始。
@@ -249,7 +300,7 @@ export const createRoomHub = (p: HubPorts) => {
     return rooms.length === 1 ? { room: rooms[0], many: rooms } : { many: rooms };
   };
 
-  return { append, write, pump, kick, onIdle, defaultRoom, pending, isBoundRoom };
+  return { append, write, pump, kick, onIdle, defaultRoom, pending, isBoundRoom, reconcileAfter };
 };
 
 export type RoomHub = ReturnType<typeof createRoomHub>;

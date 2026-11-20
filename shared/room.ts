@@ -296,9 +296,40 @@ export const dutyAnswered = (s: RoomState, d: Duty, who: Who): boolean => {
 /** who 提出、仍未关的 duty。 */
 export const dutiesAskedBy = (s: RoomState, who: Who): Duty[] => openDuties(s).filter((d) => sameWho(d.asker, who));
 
+/** 2026-11-20 起 idList 修好之前, 没给 after 的 chat_ask 落成了 after:["undefined"] —— 这个假 id
+ *  不指向任何消息, 视为「没有前置」(否则前置永不满足, 被点名者永不唤醒)。 */
+export const FAKE_AFTER_ID = "undefined";
 /** after 前置是否全部以 done 关闭 (跨 room 的前置由调用方给查询函数)。 */
 export const afterSatisfied = (after: readonly string[] | undefined, closedDone: (msg: string) => boolean): boolean =>
-  !after?.length || after.every(closedDone);
+  !after?.length || after.every((id) => id === FAKE_AFTER_ID || closedDone(id));
+/** 这条 after 只由假 id 构成 (旧 bug 的受害行, 不是真在等谁)。 */
+export const afterIsFake = (after: readonly string[] | undefined): boolean =>
+  !!after?.length && after.every((id) => id === FAKE_AFTER_ID);
+
+/** 带 after 的 duty 是否欠一次补唤醒 —— 欠则返回该叫的 holder。
+ *  judge 在前置未满足时把 wake 落成 [] 存进行里, 之后前置关了没人重算; 而 holder 的 seen 游标可能早已
+ *  越过那一行, pending() 现算也救不回来, 所以由 daemon 追加一条 trigger 行 (新 seq, 必在游标之后)。
+ *  欠 ⇔ 前置此刻满足 ∧ duty 仍开 ∧ holder 是 wizard 成员 ∧ 账本里没有任何一行 (原 ask / re 它的行)
+ *  唤醒过 holder ∧ 没有已写给 holder 的 trigger (幂等: 预算降级也不重写) ∧ holder 从没 re 过它
+ *  (它已经从游标里读到并交代过, 不必再叫)。 */
+export const afterWakeDue = (s: RoomState, d: Duty, closedDone: (msg: string) => boolean): Who | undefined => {
+  if (d.closed || !d.after?.length || !afterSatisfied(d.after, closedDone)) return undefined;
+  const holder = holderOf(s, d);
+  if (holder?.kind !== "wizard" || !s.members.has(whoKey(holder))) return undefined;
+  const touches = (r: MsgRow): boolean => r.id === d.msg || (r.re ?? []).includes(d.msg);
+  const handled = s.msgs.some((r) => touches(r) && (
+    r.wake.includes(holder.id)
+    || (r.kind === "trigger" && (r.to ?? []).some((t) => sameWho(t, holder)))
+    || (r.id !== d.msg && sameWho(r.author, holder))));
+  return handled ? undefined : holder;
+};
+
+/** 补唤醒 trigger 行的正文: 原 ask 可能已在 holder 的游标之前 (渲染时不会再列), 所以带上原文。 */
+export const afterTriggerText = (ask: MsgRow, askerName: string): string =>
+  (afterIsFake(ask.after)
+    ? "[wezard] 补投: " + ask.id + " 当时因 after 写坏 (假 id \"undefined\") 没有唤醒你, 它其实没有前置, 现在补上。"
+    : "[wezard] 前置 " + (ask.after ?? []).join(", ") + " 已完成, " + ask.id + " 现在轮到你了。")
+  + "\n原话 (" + ask.kind + ", 来自 " + askerName + "): " + ask.text;
 export const msgClosedDone = (s: RoomState, msg: string): boolean => {
   const ds = [...s.duties.values()].filter((d) => d.msg === msg);
   return ds.length > 0 && ds.every((d) => d.closed?.status === "done");

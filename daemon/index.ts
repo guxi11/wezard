@@ -1316,6 +1316,24 @@ const main = async (): Promise<void> => {
         return r.ok ? "ok" : r.uncertain ? "uncertain" : "failed";
       },
     });
+    // boot 对账: 停机期间 / 旧版本落下的 after 欠账 (前置已 done、被点名者没被叫过) 补一条 trigger 行。
+    // 只收真前置; after:["undefined"] 旧受害行要人看过清单后经 POST /room/after-reconcile {fake:true} 补。
+    try {
+      const boot = hub.reconcileAfter();
+      if (boot.due.length) roomLog.info({ due: boot.due.length, written: boot.written }, "room: boot after 对账");
+    } catch (e) { roomLog.warn({ err: errText(e) }, "room: boot after 对账失败 (不影响启动)"); }
+    // 管理入口 (要 daemon 口令): 缺省 dryRun —— 只列欠账不写; dryRun:false 才真补。
+    //   fake:true 连带 after:["undefined"] 的旧受害行; only:[msgId…] 只补这几条。幂等: 补过的不再出现在清单里。
+    http.register("POST /room/after-reconcile", guarded(async (req, res) => {
+      const b = ((await readBody(req)) ?? {}) as { dryRun?: boolean; fake?: boolean; only?: unknown };
+      const only = idList(b.only);
+      const r = hub.reconcileAfter({ dryRun: b.dryRun !== false, fake: b.fake === true, ...(only.length ? { only } : {}) });
+      json(res, 200, {
+        ok: true, dryRun: b.dryRun !== false, written: r.written,
+        due: r.due.map((x) => ({ room: x.room, msg: x.msg, asker: roomNameOf(x.asker), holder: roomNameOf(x.holder), holderUid: x.holder.id,
+          at: new Date(x.at).toISOString(), after: x.after, fake: x.fake })),
+      });
+    }));
     // 投递失败 / 目标正忙的行没有推游标: 泵自身无定时器, 定期重踢直到贴进去。
     const roomKickTimer = setInterval(() => void hub.kick(), 30_000);
     roomKickTimer.unref?.();
