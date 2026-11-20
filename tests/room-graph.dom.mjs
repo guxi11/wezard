@@ -73,8 +73,9 @@ const wizardOf = (role) => {
   const isBob = /worker|bob/.test(role);
   const id = isBob ? "chat:wrG#worker" : "chat:wrG#guide";
   const name = isBob ? "bob" : "alice";
-  return { ok: true, at: Date.now(), role: { id, kind: "wizard", name, label: name, description: "", cwd: "", model: "m", bornAt: 1, chat: "群G", clones: [], spawns: [], forkedFrom: "", alive: true, busy: false, runningUntil: 0 },
-    uid: isBob ? B : A, ledger: true, sessions: [], session: "all", all: false, msgs: msgs.map((m) => ({ ...m, roomLabel: m.room === G ? "群G" : DM })), total: 5, rooms: ROOMS, plans: [], schedules: [], stats: undefined };
+  return { ok: true, at: Date.now(), role: { id, kind: "wizard", name, label: name, description: name + " 的职责", cwd: "/w/" + name, model: "m", bornAt: 1, chat: "群G", clones: [], spawns: [], forkedFrom: "", alive: true, busy: false, runningUntil: 0 },
+    uid: isBob ? B : A, ledger: true, sessions: [], session: "all", all: false, msgs: msgs.map((m) => ({ ...m, roomLabel: m.room === G ? "群G" : DM })), total: 5, rooms: ROOMS, plans: [], schedules: [], stats: undefined,
+    charter: { tokens: 1234, at: T0 } };
 };
 
 const server = createServer((req, res) => {
@@ -98,8 +99,13 @@ try {
   const page = await browser.newPage({ viewport: { width: 1100, height: 800 } });
   const errs = [];
   page.on("pageerror", (e) => errs.push(String(e)));
+  // 只有票据 (消息尾部 ✦ 链接) 时开这一轮的主人, 不是一张随机 room。
   await page.goto(base + "/role?id=t-ticket", { waitUntil: "load" });
   await page.waitForSelector(".rv-person", { timeout: 5000 });
+  await page.waitForFunction(() => (document.querySelector("#rb-who .nm") || {}).textContent?.trim() === "alice", null, { timeout: 5000 });
+  // room 视图另开: 用 ?room= 明说。
+  await page.goto(base + "/role?id=t-ticket&room=" + encodeURIComponent(G), { waitUntil: "load" });
+  await page.waitForSelector(".rv-msg", { timeout: 5000 });
   const counts = await page.evaluate(() => ({
     rooms: document.querySelectorAll(".rv-room").length,
     people: document.querySelectorAll(".rv-person").length,
@@ -120,7 +126,26 @@ try {
   // 点 wizard 节点 → W-1
   await page.click('.rv-person[data-node="chat:wrG#worker"]');
   await page.waitForFunction(() => (document.querySelector(".rv-ttl") || {}).textContent?.includes("bob"), null, { timeout: 5000 });
-  console.log("room-graph.dom: " + JSON.stringify(counts) + " —— 节点数 = room + 参与者, 过程框与 wizard 视图可点开");
+  // 左栏顶上必须是「这个人」: 名字 / 状态 / 职责 / 宪章入口 —— room 图不是名片的替代品。
+  const card = await page.evaluate(() => ({
+    name: ((document.querySelector("#rb-who .nm") || {}).textContent || "").trim(),
+    job: ((document.querySelector("#rb-who .job") || {}).textContent || "").trim(),
+    charter: ((document.querySelector('#rb-who [data-rb="charter"]') || {}).textContent || "").trim(),
+    title: document.title,
+  }));
+  assert.equal(card.name, "bob", "左栏顶上是选中的 wizard: " + JSON.stringify(card));
+  assert.match(card.job, /bob 的职责/);
+  assert.match(card.charter, /1\.2k/, "宪章入口带体量: " + card.charter);
+  assert.match(card.title, /bob 的视角/);
+
+  // 从群 link 深链打开: role= 带着目标 —— 打开的就是它, 不是第一个 room。
+  await page.goto(base + "/role?id=t-ticket&role=" + encodeURIComponent("chat:wrG#guide"), { waitUntil: "load" });
+  await page.waitForFunction(() => (document.querySelector("#rb-who .nm") || {}).textContent?.trim() === "alice", null, { timeout: 5000 });
+  const deep = await page.evaluate(() => ({ name: ((document.querySelector("#rb-who .nm") || {}).textContent || "").trim(), rows: document.querySelectorAll(".rv-msg").length }));
+  assert.equal(deep.name, "alice", "深链选中的就是 role=");
+  assert.ok(deep.rows > 0, "深链打开有消息");
+
+  console.log("room-graph.dom: " + JSON.stringify(counts) + " —— 节点数 = room + 参与者, 过程框与 wizard 视图可点开; 左栏名片与深链选中 role 正常");
 } finally {
   await browser.close();
   server.close();
