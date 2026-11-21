@@ -8,7 +8,7 @@
 //   GET /chat/vendor.js   → markdown-it + highlight.js (随包分发, 不走 CDN)
 //   GET /api/world        → 二部图: rooms + wizard/人 节点 + 家谱图层 + plans / 日程
 //   GET /api/room         → 一个 room 的快照 + 历史分页 (before / limit)
-//   GET /api/wizard       → 一个 wizard 的名片 + W-1 (它说的 + 指向它的) / W-2 (全部) 消息
+//   GET /api/wizard       → 一个 wizard 的名片 + 与它相关的消息 (它说的 + 指向它的)
 //   GET /api/turn         → 一条消息对应的那一轮的过程框 (工具调用只有摘要)
 //   GET /api/tool         → 一次工具调用的展开正文 —— 过程框的第二级, 展开时才取
 //   GET /api/charter      → 一个 wizard 出生时被压进系统提示的宪章
@@ -372,7 +372,6 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const spans = sessionsOf(records, role, now);
       const sid = url.searchParams.get("session");
       const span = !sid || sid === "all" ? undefined : spans.find((s) => spanKey(s) === sid);
-      const all = url.searchParams.get("all") === "1";
       const raw = url.searchParams.get("limit");
       const limit = raw && Number.isFinite(Number(raw)) ? Number(raw) : DEFAULT_LIMIT;
       const states = statesNow();
@@ -400,18 +399,17 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const lx = ledgerIndex(states);
       const wire = wireMsg(lx.lookup, n.nameOf);
       const hist = uid && states.length
-        ? wizardMessages(states, uid, { all, limit, ...(url.searchParams.get("before") ? { before: url.searchParams.get("before")! } : {}) }, n)
+        ? wizardMessages(states, uid, { limit, ...(url.searchParams.get("before") ? { before: url.searchParams.get("before")! } : {}) }, n)
         : { msgs: [] as (RoomMsg & { roomLabel: string })[], total: 0 };
       const link = turnLinker(records, f);
       const linked = <M extends RoomMsg>(m: M): M => ({ ...m, ...(link(m) ? { turn: link(m)! } : {}) });
       // 时间轴要的是视野 (HORIZON) 内的全部账本行, 不是分页那 60 条 —— 一轮的气泡就是它写进账本的行。
       const since = now - HORIZON_MS;
       const streamMsgs = uid && states.length
-        ? wizardMessages(states, uid, { all, limit: 0 }, n).msgs.filter((m) => m.at >= since).map(wire).map(linked)
+        ? wizardMessages(states, uid, { limit: 0 }, n).msgs.filter((m) => m.at >= since).map(wire).map(linked)
         : [];
       json(res, 200, {
         ...card,
-        all,
         msgs: hist.msgs.map(wire).map(linked),
         // 时间轴: 轮次为主线 (入 / 出 + 过程框), 账本行挂上去; 前端 wizard 视图按它画。
         stream: wizardStream(records, role, dir, now, {

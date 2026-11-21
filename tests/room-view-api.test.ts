@@ -1,4 +1,4 @@
-// rolepage 的 room 数据面: /api/world (二部图的节点数) · /api/room (历史) · /api/wizard (W-1/W-2) · /api/turn。
+// rolepage 的 room 数据面: /api/world (二部图的节点数) · /api/room (历史) · /api/wizard (与它相关的消息) · /api/turn。
 //
 // 验收口径与前端一致: 图上的节点数 = room 数 + 参与者数; 每个 room 成员都能对到一个节点
 // (uidTargets); room 历史的每一条都带 author / status / re。
@@ -90,17 +90,17 @@ const run = async (): Promise<void> => {
     svr.room({ headers: {} } as IncomingMessage, res, new URL("http://x/?id=t-ticket&room=chat:wrG"));
   });
 
-  // ── /api/wizard: W-1 / W-2 ────────────────────────────────────────
+  // ── /api/wizard: 与它相关的消息 ────────────────────────────────────────
   const w1 = await get(routes.wizard, "id=t-ticket&role=alice");
   assert.equal(w1.ok, true);
   assert.equal(w1.role.name, "alice");
   assert.equal(w1.uid, A.id);
   assert.equal(w1.ledger, true);
-  assert.equal(w1.all, false);
+  assert.ok(!("all" in w1), "「全部消息」已删: 回包不再有 all");
   assert.equal(w1.msgs.length, 3, "说的 + 指向它的");
   assert.ok(w1.msgs.every((m: { roomLabel: string }) => !!m.roomLabel));
   const w2 = await get(routes.wizard, "id=t-ticket&role=alice&all=1");
-  assert.equal(w2.msgs.length, 3 + 2, "W-2 = 它所在两个 room 的全部消息");
+  assert.equal(w2.msgs.length, 3, "all=1 已不再认: 仍只回与它相关的");
   assert.ok(Array.isArray(w1.sessions), "session 分段仍给 (改名 /clear 之后按它切)");
   assert.equal(w1.landingRoom, "chat:wrG", "票据落点 room: turn 的 channel (chat:wrG#guide → chat:wrG)");
 

@@ -4,7 +4,7 @@
 // daemon 侧从 wizards 表现查)。这一层只做三件事:
 //   ① 快照: 每个 room 的成员 / host / 最后一句 / 未决 duty 数 (WorldFacts.rooms);
 //   ② 历史: 一个 room 的消息分页 (rolepage 的 room 视图);
-//   ③ 视图: 一个 wizard 的「只看与我相关」(它说的 + 指向它的) / 「全部消息」(它所在全部 room 的全部消息);
+//   ③ 视图: 一个 wizard 的「与我相关」(它说的 + 点名它的 + 回它那几条的), 跨 room 按时间合并;
 //   以及给 room_read 的纯文本渲染。
 //
 // 消息的「出处 / 完成 / 发言权」都在账本行上 (author / status / speak), 这里不再推断任何
@@ -162,7 +162,7 @@ export const roomHistory = (s: RoomState, q: HistoryQuery, n: RenderNames): { ms
   };
 };
 
-// ── wizard 视图: 只看与我相关 / 全部消息 ──────────────────────────────
+// ── wizard 视图: 与我相关 ──────────────────────────────
 
 export interface WizardMsg extends RoomMsg { roomLabel: string }
 
@@ -172,12 +172,7 @@ export const addressesWho = (s: RoomState, m: MsgRow, uid: string): boolean =>
   !!m.to?.some((t) => t.kind === "wizard" && t.id === uid) ||
   !!m.re?.some((id) => { const r = s.byId.get(id); return !!r && r.author.kind === "wizard" && r.author.id === uid; });
 
-export const everMember = (s: RoomState, uid: string): boolean =>
-  [...s.everMembers.values()].some((w) => w.kind === "wizard" && w.id === uid);
-
 export interface WizardQuery {
-  /** 全部消息: 它所在全部 room 的全部消息 (默认只看与我相关: 它说的 / 点名它的 / 回它那几条的)。 */
-  all?: boolean;
   limit?: number;
   /** 游标: 只取它之前的 (跨 room 合并后的位置, 用 orderKey 的形式)。 */
   before?: string;
@@ -196,7 +191,7 @@ export const wokeRows = (states: readonly RoomState[], uid: string, since: numbe
 export const wizardMessages = (states: readonly RoomState[], uid: string, q: WizardQuery, n: RenderNames): { msgs: WizardMsg[]; total: number; earlier?: string } => {
   const limit = Math.max(0, Math.min(q.limit ?? 60, LIMIT_MAX));
   const rows = states
-    .flatMap((s) => (q.all ? (everMember(s, uid) ? s.msgs : []) : s.msgs.filter((m) => addressesWho(s, m, uid))))
+    .flatMap((s) => s.msgs.filter((m) => addressesWho(s, m, uid)))
     .sort((a, b) => a.at - b.at || (a.room < b.room ? -1 : a.room > b.room ? 1 : 0) || a.seq - b.seq);
   const pool = q.before ? rows.filter((m) => orderKey(m) < q.before!) : rows;
   const page = limit === 0 ? pool : pool.slice(-limit);

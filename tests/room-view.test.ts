@@ -89,7 +89,7 @@ const b1 = say(G, { author: B, kind: "reply", text: "查完了", re: [q2.id], or
   assert.deepEqual(onlyBob.msgs.map((m) => m.text), ["查完了"]);
 }
 
-// ── 3. wizard 视图 W-1 / W-2 ─────────────────────────────────────────
+// ── 3. wizard 视图 (与它相关的) ─────────────────────────────────────────
 const DM = room("dm:" + [A.id, B.id].sort().join("|"), [A, B]);
 const d1 = say(DM, { author: B, kind: "say", text: "私聊一句", origin: "tool" });
 const d2 = say(DM, { author: A, kind: "reply", text: "收到", re: [d1.id], origin: "tool" });
@@ -103,21 +103,17 @@ const d2 = say(DM, { author: A, kind: "reply", text: "收到", re: [d1.id], orig
   assert.equal(w1.msgs[0]!.roomLabel, "群G");
   assert.equal(w1.msgs[1]!.room, DM.id);
 
-  // W-2: 它所在全部 room 的全部消息
-  const w2 = wizardMessages([G, DM], A.id, { all: true }, NAMES);
-  assert.equal(w2.total, 6);
-
   // 与 A 无关的 room 不进来
   const OTHER = room("chat:wrX", [B, H1]);
   say(OTHER, { author: B, kind: "say", text: "别处的闲聊", origin: "tool" });
-  assert.equal(wizardMessages([G, DM, OTHER], A.id, { all: true }, NAMES).total, 6);
+  assert.equal(wizardMessages([G, DM, OTHER], A.id, {}, NAMES).total, 4);
 
   // 分页游标
-  const p = wizardMessages([G, DM], A.id, { all: true, limit: 2 }, NAMES);
+  const p = wizardMessages([G, DM], A.id, { limit: 2 }, NAMES);
   assert.equal(p.msgs.length, 2);
   assert.ok(p.earlier, "更早的消息还有, 给游标");
-  const older = wizardMessages([G, DM], A.id, { all: true, limit: 10, before: p.earlier }, NAMES);
-  assert.equal(older.msgs.length, 4);
+  const older = wizardMessages([G, DM], A.id, { limit: 10, before: p.earlier }, NAMES);
+  assert.equal(older.msgs.length, 2);
 }
 
 // ── 4. room_read 的纯文本 ─────────────────────────────────────────────
