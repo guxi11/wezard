@@ -708,8 +708,9 @@
     });
   };
   // 视图开关照 main 的「聊天 / 关系」小开关 (.vt): 列表下挂在第一个分组标题右端, 图下挂在图的标题行。
-  var LIST_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M3 4h10M3 8h10M3 12h10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
-  var TREE_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M4 3v10M4 6h5M4 11h5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="11" cy="6" r="1.6" fill="currentColor"/><circle cx="11" cy="11" r="1.6" fill="currentColor"/></svg>';
+  // 一对图标: 同一套 14px 线描 (stroke 1.5, 圆头), 列表 = 三行带点的条目, 图 = 三个节点连成一张网。
+  var LIST_SVG = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="3" cy="4" r=".9" fill="currentColor" stroke="none"/><circle cx="3" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="3" cy="12" r=".9" fill="currentColor" stroke="none"/><path d="M6.5 4H14M6.5 8H14M6.5 12H14"/></svg>';
+  var TREE_SVG = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 5.2 4.6 10.8M8 5.2l3.4 5.6M5.6 12.4h4.8"/><circle cx="8" cy="4" r="2" fill="var(--card)"/><circle cx="3.8" cy="12.4" r="2" fill="var(--card)"/><circle cx="12.2" cy="12.4" r="2" fill="var(--card)"/></svg>';
   // 时间范围下拉: 列表与图共用 (main 的 .sp 小下拉), 挂在标题行右端、视图开关左边。
   var winSelect = function () {
     return dropdown('win', {
