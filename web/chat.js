@@ -590,16 +590,16 @@
   };
   // 名字过长用省略号收尾 (全名在节点 <title> 悬停里), 不再硬截成 `DavidDavi` 这种半截词。
   var clipName = function (t, n) { t = String(t); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
-  // 视角标记: 当前 role 的人节点右上角一枚 accent 蓝的小圆徽标, 里面一只白色杏仁眼 (不与状态色 / 👤 抢位置)。
-  var povBadge = function (rr) {
-    var c = (rr * 0.78 + 2).toFixed(1);
-    return '<g class="rv-pov" transform="translate(' + c + ' -' + c + ')"><title>当前视角</title><circle r="6"/>' +
-      '<path d="M-3.9 0Q0-3.5 3.9 0Q0 3.5-3.9 0Z"/><circle class="pu" r="1.25"/></g>';
+  // 视角标记 `<O>` (照人的原话字面): 当前 role 的节点左边一个 `<`、右边一个 `>`, accent 蓝, 画在选中环 (.sel, r+3.5) 之外 ——
+  // 不占圆内 (★ 在那儿)、不改状态色、不压名字。类名 rv-pov 是「哪个是视角」的标记, 测试按它找。
+  var povMark = function (rr) {
+    var a = (rr + 5).toFixed(1), b = (rr + 10).toFixed(1);
+    return '<g class="rv-pov"><title>当前视角</title><path d="M-' + a + ' -5L-' + b + ' 0L-' + a + ' 5M' + a + ' -5L' + b + ' 0L' + a + ' 5"/></g>';
   };
-  // lead 角标: 人节点左上角一颗金色五角星 (右上角归视角徽标 rv-pov, 选中环 .sel 在外圈 —— 三者互不占位)。
-  var leadBadge = function (rr) {
-    var c = (rr * 0.72 + 1).toFixed(1);
-    return '<g transform="translate(-' + c + ' -' + c + ')"><path class="rv-lead" d="M0 -4.8L1.2 -1.7L4.6 -1.5L2 .6L2.8 3.9L0 2.1L-2.8 3.9L-2 .6L-4.6 -1.5L-1.2 -1.7Z"/></g>';
+  // lead: 金色五角星画在节点圆的正中间, 大小随圆 (占直径约 80%); 深色描边, 在绿 / 红 / 灰 / 白各种状态底色上都看得清。
+  var leadStar = function (rr) {
+    var k = (rr * 0.8 / 4.8).toFixed(2);
+    return '<path class="rv-lead" transform="scale(' + k + ')" d="M0 -4.8L1.2 -1.7L4.6 -1.5L2 .6L2.8 3.9L0 2.1L-2.8 3.9L-2 .6L-4.6 -1.5L-1.2 -1.7Z"/>';
   };
   var nodeHtml = function (n) {
     if (n.isRoom) {
@@ -614,13 +614,13 @@
       return '<circle class="' + cls + '" r="' + (rr + grow) + '"/>';
     };
     // 用户不画圆: 一个 👤 emoji + 名字 (多位用户靠名字分辨); 选中环仍留着。
-    var pov = isRoleId(p.target) ? povBadge(rr) : '';
+    var pov = isRoleId(p.target) ? povMark(rr) : '';
     if (human) return '<title>' + esc(p.name + ' · 用户') + '</title>' + shape('sel', 3.5) +
       '<g class="rv-body"><text class="rv-emo" y="5.5" text-anchor="middle">👤</text></g>' +
       '<text class="rv-nm" y="' + (rr + 15) + '" text-anchor="middle">' + esc(clipName(p.name, gNameMax())) + '</text>' + pov;
     var tip = [p.name, ST_WORD[st], p.lead ? '★ lead' : '', smartsWord(p.smarts)].filter(Boolean).join(' · ');
     return '<title>' + esc(tip) + '</title>' +
-      shape('sel', 3.5) + '<g class="rv-body">' + shape('sh', 0) + '</g>' + (p.lead ? leadBadge(rr) : '') +
+      shape('sel', 3.5) + '<g class="rv-body">' + shape('sh', 0) + (p.lead ? leadStar(rr) : '') + '</g>' +
       '<text class="rv-nm" y="' + (rr + 15) + '" text-anchor="middle">' + esc(clipName(p.name, gNameMax())) + '</text>' + pov;
   };
   // 选中 room 时只有「当前 role → 该 room」那条 (直连线则是它自己) 是 .on.sel; 该 room 的其余成员边保持普通灰, 不抢「哪条是选中的 edge」。
@@ -804,7 +804,7 @@
     '<span><span class="lgemo">👤</span>用户</span><span title="host → room"><i class="lg hostln"></i>host</span>' +
     '<span title="被派来领一件复杂活的 lead (daemon 在 lead 派活时记下, 不能自封)"><svg class="lglead" viewBox="-5 -5 10 10" width="11" height="11" aria-hidden="true"><path d="M0 -4.8L1.2 -1.7L4.6 -1.5L2 .6L2.8 3.9L0 2.1L-2.8 3.9L-2 .6L-4.6 -1.5L-1.2 -1.7Z"/></svg>lead</span>' +
     '<span title="聪明程度 1~5 = 实际在跑的模型 + effort (haiku 1 · sonnet 2, high 起 3 · opus 4, xhigh/max 5); 认不出模型时按出生档位 mini..ultra; 都没有 = 中号"><i class="lg wz sz1"></i><i class="lg wz sz5"></i>大小 = 聪明 1~5</span>' +
-    '<span title="当前视角: 左上名片是它, room 里靠右的气泡是它说的"><svg class="lgpov" viewBox="-7 -7 14 14" width="13" height="13" aria-hidden="true"><circle r="6"/><path d="M-3.9 0Q0-3.5 3.9 0Q0 3.5-3.9 0Z"/><circle class="pu" r="1.25"/></svg>视角</span></div>';
+    '<span title="当前视角: 左上名片是它, room 里靠右的气泡是它说的"><svg class="lgpov" viewBox="-13 -7 26 14" width="24" height="13" aria-hidden="true"><circle r="4.5"/><path d="M-8 -4L-12 0L-8 4M8 -4L12 0L8 4"/></svg>视角</span></div>';
   var renderGraph = function () {
     if (S.gdrag) return;    // 正在拖: 定时刷新别来动节点
     var rooms = (W.rooms || []).slice().sort(function (a, b) { return (b.last ? b.last.at : 0) - (a.last ? a.last.at : 0); });
