@@ -45,13 +45,13 @@
 
 ## 待 admin 拍板
 
-1. **charter 删 `wait_peer` 两处** (`daemon/wizard.ts:1087` 工具行整行删, `:1120` 「不 `wait_peer` 守着」改「不守着」)。纯修正 (工具已不存在), 但会让所有 chartered wizard 收到 handoff 提醒。推荐: 批准, 与下一次必要的 charter 改动合并发出, 减少一次全体提醒。
+1. **charter 删 `wait_peer` 两处** (已报, 未批) (`daemon/wizard.ts:1087` 工具行整行删, `:1120` 「不 `wait_peer` 守着」改「不守着」)。纯修正 (工具已不存在), 但会让所有 chartered wizard 收到 handoff 提醒。推荐: 批准, 与下一次必要的 charter 改动合并发出, 减少一次全体提醒。
 
-2. **room vs dm 改进 A~G** (见 [research/room-vs-dm-collaboration.md](research/room-vs-dm-collaboration.md) §5)。推荐先批 A (lead 派活信封加一句「小队一个 room」, 零代码) 与 B (多个非成员 chat_ask 自动开 adhoc); G (charter 判据) 与 #1 合并发出。
+2. ~~room vs dm A~G~~ admin 回复: A、C 不要; D 改为「dm 统一为 room 特殊形式 + history 参数」(进行中); B 未批; E/F/G 未表态。原文: (见 [research/room-vs-dm-collaboration.md](research/room-vs-dm-collaboration.md) §5)。推荐先批 A (lead 派活信封加一句「小队一个 room」, 零代码) 与 B (多个非成员 chat_ask 自动开 adhoc); G (charter 判据) 与 #1 合并发出。
 
 ## 进行中
 
-(无)
+- **room history 参数 + dm 统一为 room 特殊形式** (admin 7aeb85fc.228 拍板, wezard-1 派 d6977146.7): coder `QuinnQuincy` (light, duty e0501681.1, 在 dm 里) 实现 ① room_invite/room_approve 的 `history` (none/N/from:id/all → join 后跟 seen op) ② roomLabel/roomShortOf/roomTitle 的 dm 显示 ③ ensureDmRoom: 有人离开补回; dm 有第三人后 A↔B 另落「成员恰好 {A,B}」的 adhoc。交付后: 起**白板 light reviewer** 只给改动范围与验收标准 (spec 见 QuinnQuincy 的任务 e0501681.1 / research doc §8), reviewer 可直接找 coder 返修; 通过后我重启 svr (`systemctl --user restart wezard-svr.service`), 向 wezard-1 chat_reply done (commit、测试、取舍/遗留), 然后 stop_wizard 两个分身。**B (chat_ask room:"new") 未批, 不做**; charter 不动。同时活着的分身 ≤ 2。
 
 ## 已完成
 
