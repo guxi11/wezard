@@ -57,7 +57,7 @@ import {
 } from "../shared/room.js";
 import { CHAT_BATCH_BUDGET, sliceBatch } from "../shared/chat-record.js";
 import { CLASS_NAME_MAX, loadClassMerges, loadClassStore, migrateClasses, parseInstanceName, planClasses, renderClassReport, validClassName, type ClassMigration } from "./classes.js";
-import { footerTarget, responseFormatPolicy, roomBubble } from "./message-format.js";
+import { addressed, footerTarget, responseFormatPolicy, roomBubble } from "./message-format.js";
 import { scanClaudeSessions } from "./session-scan.js";
 import {
   startScheduler,
@@ -1269,7 +1269,13 @@ const main = async (): Promise<void> => {
       const chat = row.room;
       const chatId = chat.replace(/^(user|chat|group):/, "");
       const authorTarget = row.author.kind === "wizard" ? roomWizardOf(row.author.id)?.target : undefined;
-      const body = row.text.trim() || (row.files?.length ? "📎 " + row.files.map((f) => f.name).join(", ") : "");
+      const plain = row.text.trim() || (row.files?.length ? "📎 " + row.files.map((f) => f.name).join(", ") : "");
+      // 收话人: 显式点名的 wizard (to) + 被答复那条消息的 wizard 作者 (re), 去掉自己与重复。
+      const replied = (row.re ?? []).flatMap((id) => roomState(chat)?.msgs.find((r) => r.id === id)?.author ?? []);
+      const addressees = authorTarget
+        ? [...new Set([...(row.to ?? []), ...replied].filter((w) => w.kind === "wizard" && w.id !== row.author.id).map(roomNameOf))]
+        : [];
+      const body = addressed(addressees, plain);
       // 头像 / 尾部署名都由 tracker 从正文头反解 —— 覆盖占位气泡也必须带这个头,
       // 否则那条气泡既没有身份也没有 rolepage 链接 (它就是人点名的那个 wizard 的答复)。
       const md = roomBubble(authorTarget, body);

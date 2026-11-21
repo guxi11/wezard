@@ -27,6 +27,11 @@ export const responseFormatPolicy = (cfg: Config, context: ResponseFormatContext
 export const roomBubble = (author: string | undefined, body: string): string =>
   (author ? headed(ownHead(author), body, "\n\n") : /^\[wezard\]/.test(body) ? body : "[wezard] " + body);
 
+/** 点名了谁就在正文头写 `→ .a, .b`: 群里的人光看气泡分不出这句是对哪个 wizard 说的。
+ *  写在正文而不是作者头里 —— 尾部改写 (withMessageFooter) 会把作者头剥掉重写, 头里的收话人活不过那一层。 */
+export const addressed = (names: readonly string[], body: string): string =>
+  (names.length && body ? `→ ${names.join(", ")} ${body}` : body);
+
 /** A footer is routing metadata only when it belongs to this daemon's rolepage. */
 export const footerTarget = (raw: string, root: string, known: (target: string) => boolean): string | undefined => {
   try {

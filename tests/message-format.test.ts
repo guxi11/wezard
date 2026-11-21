@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { ConfigSchema } from "../shared/config.js";
 import { bindTagLinker, parseTagHeader } from "../shared/session-label.js";
 import { withMessageFooter } from "../shared/message-footer.js";
-import { footerTarget, responseFormatPolicy, responsePrincipal, roomBubble } from "../daemon/message-format.js";
+import { addressed, footerTarget, responseFormatPolicy, responsePrincipal, roomBubble } from "../daemon/message-format.js";
 const a = "user:admin", b = "chat:wrOther~bot", worker = `${a}#worker`, voice = `${a}#voice`;
 const known = [a, b, worker, voice];
 const cfg = ConfigSchema.parse({ bot: { botId: "test", secret: "test" }, chats: { wezard: a, other: b } });
@@ -47,4 +47,8 @@ assert.equal(withMessageFooter(roomBubble(worker, "done"), groupPolicy), "\u{1F9
 assert.equal(withMessageFooter("done", groupPolicy), "done", "无头正文不属于任何人 —— 覆盖气泡不带作者头就会裸奔");
 assert.equal(roomBubble(undefined, "x 已离开"), "[wezard] x 已离开", "daemon 行补 [wezard] 头");
 assert.equal(roomBubble(undefined, "[wezard] .a 被提醒后仍没有交代 m.1"), "[wezard] .a 被提醒后仍没有交代 m.1", "正文自带 [wezard] 不再叠一层");
+assert.equal(addressed([".Grace"], "看下"), "→ .Grace 看下");
+assert.equal(addressed([".a", ".b"], "x"), "→ .a, .b x");
+assert.equal(addressed([], "x"), "x", "无收话人原样");
+assert.equal(withMessageFooter(roomBubble(worker, addressed([".Grace"], "done")), groupPolicy), "\u{1F9D9}\u200D\u2642\uFE0F " + names[worker] + "： → .Grace done [✦](" + urlOf(worker) + ")", "收话人在尾部改写后仍在");
 console.log("message-format integration tests passed");
