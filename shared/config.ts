@@ -96,9 +96,6 @@ const Mirror = z.object({
   wizardsFile: z.string().default("~/.wezard/wizards.json").describe("wizard 名册 (名字/职责/记忆/家谱) 文件"),
   // 与 wizard 身份、receiver 消息账分开存储。
   plansFile: z.string().default("~/.wezard/plans.jsonl").describe("wizard DAG 计划账本文件"),
-  // 落盘是为了扛住 reload —— 被派活的 wizard 自己常以 reload 收尾, 纯内存的话它那
-  // 一份回执就跟着旧进程没了。
-  pendingFile: z.string().default("~/.wezard/pending.json").describe("挂起事项表: 各 wizard 派出去、还没了结的事"),
   // 同理扛 reload: 落在「杀了旧 pane、还没贴回简报」之间, 纯内存的话新会话就空着
   // 醒来, 简报跟着旧进程没了。
   handoffsFile: z.string().default("~/.wezard/handoffs.json").describe("在飞交接 (handoff) 的登记文件"),
@@ -107,15 +104,6 @@ const Mirror = z.object({
   // 不是能力上限, 是"忘了收"的刹车: 分身能递归生分身, 而每个都是一个 tmux pane +
   // 一份上下文, 一次跑飞的编排足以把 fd 吃光 (见 launchd plist 的 NumberOfFiles)。
   cloneMax: hot(z.number().int().positive().default(8).describe("一个 wizard 名下同时活着的分身上限")),
-  // 派出去的活, 对方持续闲着又没交回结论 → 守护进程代发话方同件号追问一句进展 (见 daemon/idle-nudge.ts)。
-  // 每次巡检现读, 改完即用。
-  idleNudge: hot(z
-    .object({
-      afterMin: z.number().nonnegative().default(5).describe("对方持续闲置多少分钟、仍无回执才追问; 0 = 关闭"),
-      max: z.number().int().nonnegative().default(3).describe("同一件活最多追问几次"),
-    })
-    .default({})
-    .describe("派活后对方闲置无回执时的自动追问")),
   // liveStream 仍活时不受影响——直接走 typewriter。
   standaloneDebounceMs: hot(z.number().int().nonnegative().default(30000).describe("非流式推送的防抖聚合窗口 (ms), 窗口内多条合并; 0 = 关闭")),
   // 窗口内 item 累积:
