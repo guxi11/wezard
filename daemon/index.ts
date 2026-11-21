@@ -120,7 +120,7 @@ import { loadPlans, PlanError } from "./plans.js";
 import type { PlanStore } from "./plans.js";
 import { registerPlanRoutes } from "./plan-http.js";
 import { renderReminder } from "../shared/reminder.js";
-import { createHandoffs, handedOff, handingOff, type Pending as PendingHandoff } from "./handoff.js";
+import { busyOf, createHandoffs, handedOff, handingOff, type Pending as PendingHandoff } from "./handoff.js";
 import { coldGateOf, wakeCostOf, decide, rankCandidates, routeDiagnostics, renderCandidates, tierFor, type RouteRow } from "./route.js";
 import { parseWhen, renderRoomRead } from "../shared/room-view.js";
 import { roomFacts, nameTable } from "./room-facts.js";
@@ -759,7 +759,7 @@ const main = async (): Promise<void> => {
     const handoffs = createHandoffs({
       // room 模型 (wiring C): 终句零语义, 交接只管会话层 —— 清空 + 简报 + carry。
       // 路由/事件表的那些钩子 (currentEvents/suppress/owed/resume/uncut) 全部退场。
-      isBusy: (t) => m.idleNow(t),
+      isBusy: busyOf(m.idleNow),
       sessionId: (t) => m.sessionInfo(t)?.sessionId ?? "",
       // 收口窗口用尽后打断在飞那一轮 (Esc, 无 teardown): 打断不产生欠账 —— 未结 duty
       // 在 room 账本上, 下次唤醒按游标重投。
