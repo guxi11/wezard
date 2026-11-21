@@ -210,6 +210,9 @@ const MANAGED_ENV = "WEZARD_MANAGED=1";
  *  wezard 的变量; 现在只出现在 wezard 自己 spawn 的进程里。 */
 const launchEnv = (cfg: Config): string[] => [
   MANAGED_ENV,
+  // wizard 不用 claude.ai 远程连接器 (Gmail / Drive / Docs ...): 关掉省每进程约 10~12MB、
+  // 启动时的连接请求和提示里的工具名。不认该变量的后端 (codebuddy / codex) 直接忽略。
+  "ENABLE_CLAUDEAI_MCP_SERVERS=false",
   `WEZARD_DAEMON_BASE=${shQuote(`http://${cfg.daemon.host}:${cfg.daemon.port}`)}`,
   `WEZARD_DAEMON_URL=${shQuote(`http://${cfg.daemon.host}:${cfg.daemon.port}/approve`)}`,
   `WEZARD_STATE_DIR=${shQuote(expandHome(cfg.daemon.stateDir))}`,

@@ -202,7 +202,7 @@ const Wrc = z.object({
   cwd: z.string().default("~/.wezard/workspace").describe("新会话的默认工作区"),
   // 默认摘掉 wizard 用不上、每个会话首轮白占 ~18k token 的工具 (Artifact 11.3k · Workflow/SendFeedback/ScheduleWakeup 5.6k · claude.ai Docs/Drive 1.0k)。
   // 显式写了 extraArgs 的 config 整份覆盖它, 不合并 —— 要留某个工具就把整串抄过去删掉那一项。
-  extraArgs: knob(z.array(z.string()).default(["--disallowedTools=Artifact,Workflow,SendFeedback,ScheduleWakeup,mcp__claude_ai_Claude_Docs__*,mcp__claude_ai_Google_Drive__*"]).describe("启动 CLI 时追加的参数"), { gate: "card", apply: "hot" }),
+  extraArgs: knob(z.array(z.string()).default(["--disallowedTools=Artifact,Workflow,SendFeedback,ScheduleWakeup"]).describe("启动 CLI 时追加的参数"), { gate: "card", apply: "hot" }),
   mirror: Mirror.default({}).describe("会话镜像: 推送、分页、详情页、pane 上限"),
   // Auto-spawn fires when an authorized inbound finds no mirror attached for that
   // chat — allowFrom IS the authorization.
