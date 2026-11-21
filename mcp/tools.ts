@@ -119,6 +119,9 @@ const EFFORT_DOC =
 // 把参数变成一次 HTTP 调用 —— 发言权、status 写入权、覆盖检查、唤醒预算都在 daemon 侧。
 // 三条不会变的事实: 完成只认 chat_reply 的 status; 终句没有任何路由语义 (只进 turn store
 // 与 rolepage); 被唤醒的 duty 只能用 chat_reply 交代。
+const HISTORY_DOC =
+  '被拉者入座后第一次被唤醒时能读到的旧话范围: "none" 只看之后的 | 正整数 N 最近 N 条 | "from:<msgId>" 从那条起 | "all" 全部 (缺省)。仍受 ~6000 字未读预算截断; 更早的随时 room_read。';
+const historyArg = () => z.union([z.literal("none"), z.literal("all"), z.number().int().min(1), z.string().regex(/^from:.+/)]).optional().describe(HISTORY_DOC);
 const ROOM_DOC =
   "room: 绑定了企微传输的群 / 单聊 / topic 帖写 base principal 原样 (`chat:…` / `user:…`) 或聊天名; " +
   "`dm:…` 是你和某个 wizard 的两人 room, `adhoc:…` 是 room_open 开的临时 room。缺省 = 唤醒你这一轮的那条消息所在的 room; " +
@@ -522,13 +525,14 @@ export const createWezardServer = (): McpServer => {
     {
       title: "Invite someone into a room",
       description:
-        "把 `who` 拉进 room: host / 人 / 拉自己直属的子 wizard 时立即入群 (via invite / spawn); 其余成员的邀请转成一条 join-req, 等 host 批。",
+        "把 `who` 拉进 room: host / 人 / 拉自己直属的子 wizard 时立即入群 (via invite / spawn); 其余成员的邀请转成一条 join-req, 等 host 批 (此时 history 不生效, 由 host 在 room_approve 时选)。",
       inputSchema: currentAddressSchema({
         room: z.string().describe(ROOM_DOC),
         who: z.string().describe("要拉进来的 wizard 名 (裸名)。"),
+        history: historyArg(),
       }),
     },
-    async ({ room, who }) => unwrap("room_invite", await daemonPost("/room/invite", { room, who })),
+    async ({ room, who, history }) => unwrap("room_invite", await daemonPost("/room/invite", { room, who, ...(history !== undefined ? { history } : {}) })),
   );
   server.registerTool(
     "room_join",
@@ -552,9 +556,10 @@ export const createWezardServer = (): McpServer => {
       inputSchema: currentAddressSchema({
         re: z.string().describe("join-req 的消息 id。"),
         accept: z.boolean().describe("true = 放进来, false = 拒绝。"),
+        history: historyArg(),
       }),
     },
-    async ({ re, accept }) => unwrap("room_approve", await daemonPost("/room/approve", { re, accept })),
+    async ({ re, accept, history }) => unwrap("room_approve", await daemonPost("/room/approve", { re, accept, ...(history !== undefined ? { history } : {}) })),
   );
   server.registerTool(
     "room_leave",

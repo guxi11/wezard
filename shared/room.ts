@@ -586,3 +586,52 @@ export const unreadFor = (s: RoomState, who: Who, triggers: readonly string[] = 
   }
   return { rows: picked, more: eligible.length - picked.length, to: s.seq };
 };
+/** 被拉者入座时能读到多少旧话: none | 最近 N 条 | from:<msgId> | all (缺省)。 */
+export type HistoryArg = "none" | "all" | number | `from:${string}`;
+
+/** 入座时的初始 seen 游标 (null = 不写, 保持 0 = 全部可读); 输入不合法 → {error}。纯函数。
+ *  seen 只往前推, 所以新成员 (从 0 起) 写这条 seen 就等于「只看游标之后」。 */
+export const historyCursor = (s: RoomState, history: unknown): number | null | { error: string } => {
+  if (history === undefined || history === null || history === "" || history === "all") return null;
+  if (history === "none") return s.seq;
+  const asNum = typeof history === "number" ? history : typeof history === "string" && /^\d+$/.test(history.trim()) ? Number(history) : NaN;
+  if (Number.isFinite(asNum)) {
+    if (!Number.isInteger(asNum) || asNum < 1) return { error: "history 的数字要是正整数 (得到 " + asNum + ")" };
+    return s.msgs.length <= asNum ? null : s.msgs[s.msgs.length - asNum]!.seq - 1;
+  }
+  if (typeof history === "string" && history.startsWith("from:")) {
+    const row = s.byId.get(history.slice(5).trim());
+    return row ? row.seq - 1 : { error: "history 的 from: 指向的消息不在本 room: " + history.slice(5) };
+  }
+  return { error: 'history 取值: "none" | 正整数 N | "from:<msgId>" | "all"' };
+};
+
+/** 入座那一批 op 后面跟的 seen (游标 ≤ 0 或 null 时没有)。 */
+export const seatSeenOps = (s: RoomState, who: Who, at: number, history: unknown): SeenOp[] | { error: string } => {
+  const c = historyCursor(s, history);
+  if (c !== null && typeof c === "object") return c;
+  return c ? [{ op: "seen", at, room: s.id, who, seq: c }] : [];
+};
+
+export type DmPlan =
+  | { kind: "create" }
+  | { kind: "use" }
+  | { kind: "rejoin"; missing: string[] }
+  | { kind: "pair-adhoc" };
+
+/** dm:A|B 现状 → 怎么用: 不存在 → 建; 只有 A/B → 用 (缺人先补回); 混进第三人 → 不再落进它, 另找 / 另开 adhoc。 */
+export const planDm = (s: RoomState | undefined, a: string, b: string): DmPlan => {
+  if (!s) return { kind: "create" };
+  const ms = [...s.members.values()].map((m) => m.who);
+  if (ms.some((w) => !(w.kind === "wizard" && (w.id === a || w.id === b)))) return { kind: "pair-adhoc" };
+  const missing = [a, b].filter((u) => !s.members.has(whoKey({ kind: "wizard", id: u })));
+  return missing.length ? { kind: "rejoin", missing } : { kind: "use" };
+};
+
+/** 在 adhoc room 里找当前成员恰好是 {a, b} 的那个; 多个取最近活动 (最后一条消息, 无则 open) 的。 */
+export const findPairAdhoc = (states: readonly RoomState[], a: string, b: string): string | undefined =>
+  states
+    .filter((s) => s.id.startsWith("adhoc:") && s.members.size === 2
+      && s.members.has(whoKey({ kind: "wizard", id: a })) && s.members.has(whoKey({ kind: "wizard", id: b })))
+    .map((s) => ({ id: s.id, at: s.msgs.length ? s.msgs[s.msgs.length - 1]!.at : s.openedAt ?? 0 }))
+    .sort((x, y) => y.at - x.at)[0]?.id;

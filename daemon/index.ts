@@ -52,7 +52,7 @@ import { stewardRoute as resolveSteward } from "./steward.js";
 import { createRoomWatchdog, parsePaneIds } from "./room-watchdog.js";
 import { createRoomHub, type RoomHub } from "./room-hub.js";
 import {
-  DAEMON, adhocRoomId, canRename, dmPeers, dmRoomId, holderOf, idList, isUid, leaveOps, openDuties, roomHost, roomsDirOf, sameWho, whoKey,
+  DAEMON, adhocRoomId, canRename, dmPeers, dmRoomId, findPairAdhoc, holderOf, idList, isUid, leaveOps, planDm, seatSeenOps, openDuties, roomHost, roomsDirOf, sameWho, whoKey,
   type MsgRow, type ReplyStatus, type RoomOp, type RoomState, type Verdict, type Who,
 } from "../shared/room.js";
 import { CLASS_NAME_MAX, loadClassMerges, loadClassStore, migrateClasses, parseInstanceName, planClasses, renderClassReport, validClassName, type ClassMigration } from "./classes.js";
@@ -1203,13 +1203,17 @@ const main = async (): Promise<void> => {
         : w.kind === "human" ? w.id
         : "wezard";
     const roomLabel = (room: string): string => {
-      if (room.startsWith("dm:")) {
-        const pair = dmPeers(room);
-        return pair ? pair.map((u) => roomWizardOf(u)?.name ?? u).join(" ↔ ") : room;
-      }
-      // host 起的名字是显式别名, 优先于聊天名 (只影响显示, 寻址仍只认 id)。
+      // host 起的名字是显式别名, 优先于聊天名与成员拼名 (对 dm 也生效; 只影响显示, 寻址仍只认 id)。
       const s = roomState(room);
       if (s?.title) return s.title;
+      if (room.startsWith("dm:")) {
+        const pair = dmPeers(room);
+        if (!pair) return room;
+        // dm 是 room 的特殊形式: 成员恰好是 id 里那两个 → 「A ↔ B」; 拉进第三人之后按当前全员列。
+        const ms = s ? [...s.members.values()].map((m) => m.who) : [];
+        const onlyPair = !ms.length || ms.every((w) => w.kind === "wizard" && pair.includes(w.id));
+        return onlyPair ? pair.map((u) => roomWizardOf(u)?.name ?? u).join(" ↔ ") : ms.map(roomNameOf).join(", ");
+      }
       if (room.startsWith("adhoc:")) return [...(s?.members.values() ?? [])].slice(0, 3).map((x) => roomNameOf(x.who)).join(", ") || room;
       return chatNameOf(cfg, room) || room;
     };
@@ -1372,15 +1376,35 @@ const main = async (): Promise<void> => {
       }
       return { who: out };
     };
+    /** 开一个 adhoc room: founder 第一个, 其余按序 invite 入座 (POST /room/open 与 dm 拉人后的另开共用)。 */
+    const openAdhoc = (me: Who, others: Who[], title = ""): string => {
+      let id = adhocRoomId(randomBytes(4).toString("hex"));
+      while (roomState(id)) id = adhocRoomId(randomBytes(4).toString("hex"));
+      const at = Date.now();
+      hub.write(id, [
+        { op: "open", at, room: id, kind: "adhoc", ...(title ? { title } : {}), by: me },
+        { op: "join", at, room: id, who: me, ord: 1, via: "founder", by: me },
+        ...others.map((w, i) => ({ op: "join" as const, at, room: id, who: w, ord: i + 2, via: "invite" as const, by: me })),
+      ]);
+      return id;
+    };
+    /** a 对 b 的两人对话落点: dm 只要还是这两人就用 (有人离开先补回); 已变成多人 room 就不再落进它, 找 / 开一个恰好 {a,b} 的 adhoc。 */
     const ensureDmRoom = (a: string, b: string): string => {
       const id = dmRoomId(a, b);
-      if (!roomState(id)) {
-        const at = Date.now();
+      const A: Who = { kind: "wizard", id: a }, B: Who = { kind: "wizard", id: b };
+      const s = roomState(id);
+      const plan = planDm(s, a, b);
+      const at = Date.now();
+      if (plan.kind === "create") {
         hub.write(id, [
-          { op: "open", at, room: id, kind: "dm", by: { kind: "wizard", id: a } },
-          { op: "join", at, room: id, who: { kind: "wizard", id: a }, ord: 1, via: "founder", by: { kind: "wizard", id: a } },
-          { op: "join", at, room: id, who: { kind: "wizard", id: b }, ord: 2, via: "invite", by: { kind: "wizard", id: a } },
+          { op: "open", at, room: id, kind: "dm", by: A },
+          { op: "join", at, room: id, who: A, ord: 1, via: "founder", by: A },
+          { op: "join", at, room: id, who: B, ord: 2, via: "invite", by: A },
         ]);
+      } else if (plan.kind === "rejoin") {
+        hub.write(id, plan.missing.map((u, i) => ({ op: "join" as const, at, room: id, who: { kind: "wizard" as const, id: u }, ord: s!.nextOrd + i, via: "invite" as const, by: A })));
+      } else if (plan.kind === "pair-adhoc") {
+        return findPairAdhoc(roomStore.ids().map(roomState).filter((x): x is RoomState => !!x), a, b) ?? openAdhoc(A, [B]);
       }
       return id;
     };
@@ -1530,15 +1554,7 @@ const main = async (): Promise<void> => {
       const b = body as { with?: string[]; title?: string };
       const inv = whosOf(b.with ?? []);
       if (inv.error) { json(res, 400, { ok: false, reason: inv.error }); return; }
-      let id = adhocRoomId(randomBytes(4).toString("hex"));
-      while (roomState(id)) id = adhocRoomId(randomBytes(4).toString("hex"));
-      const at = Date.now();
-      const title = (b.title ?? "").toString().trim();
-      hub.write(id, [
-        { op: "open", at, room: id, kind: "adhoc", ...(title ? { title } : {}), by: me },
-        { op: "join", at, room: id, who: me, ord: 1, via: "founder", by: me },
-        ...inv.who!.map((w, i) => ({ op: "join" as const, at, room: id, who: w, ord: i + 2, via: "invite" as const, by: me })),
-      ]);
+      const id = openAdhoc(me, inv.who!, (b.title ?? "").toString().trim());
       json(res, 200, { ok: true, room: id, id, members: [me, ...inv.who!].map(roomNameOf) });
     });
     http.register("POST /room/name", async (req, res) => {
@@ -1563,7 +1579,7 @@ const main = async (): Promise<void> => {
       if (READ_ROOM_FAIL(res, self)) return;
       const me = roomSelfOf(self);
       if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
-      const b = body as { room?: string; who?: string };
+      const b = body as { room?: string; who?: string; history?: unknown };
       const r = roomResolve(b.room);
       if (r.error || !r.room) { json(res, 400, { ok: false, reason: r.error ?? "room required" }); return; }
       const s = roomState(r.room)!;
@@ -1574,12 +1590,21 @@ const main = async (): Promise<void> => {
       const host = roomHost(s);
       const direct = sameWho(host, me) || (target.kind === "wizard" && roomWizardOf(target.id)?.parentUid === me.id);
       if (direct) {
-        hub.write(r.room, [{ op: "join", at: Date.now(), room: r.room, who: target, ord: s.nextOrd, via: "invite", by: me }]);
+        const at = Date.now();
+        const seen = seatSeenOps(s, target, at, b.history);
+        if (!Array.isArray(seen)) { json(res, 400, { ok: false, reason: seen.error }); return; }
+        hub.write(r.room, [{ op: "join", at, room: r.room, who: target, ord: s.nextOrd, via: "invite", by: me }, ...seen]);
         json(res, 200, { ok: true, room: r.room, joined: roomNameOf(target) });
         return;
       }
       // 其余成员的邀请转成 join-req, 等 host 批 (room_approve)。
-      roomReply(res, hub.append(r.room, { author: target, kind: "join-req", text: "受邀加入 (由 " + roomNameOf(me) + " 邀请)", origin: "tool" }));
+      // history 在这条路上不生效: 入座时刻的可读范围由 host 在 room_approve 时选。
+      const v = hub.append(r.room, { author: target, kind: "join-req", text: "受邀加入 (由 " + roomNameOf(me) + " 邀请)", origin: "tool" });
+      if (v.ok && b.history !== undefined) {
+        json(res, 200, { ok: true, room: v.row.room, id: v.row.id, seq: v.row.seq, woke: v.row.wake, note: "已转成 join-req, 你给的 history 没有生效 — 由 host 在 room_approve 时选" });
+        return;
+      }
+      roomReply(res, v);
     });
     http.register("POST /room/join", async (req, res) => {
       const { self, body } = await readPeerBody(req);
@@ -1596,7 +1621,7 @@ const main = async (): Promise<void> => {
       if (READ_ROOM_FAIL(res, self)) return;
       const me = roomSelfOf(self);
       if (!me) { json(res, 400, { ok: false, reason: "caller 不在名册上, 没有 uid" }); return; }
-      const b = body as { re?: string; accept?: boolean };
+      const b = body as { re?: string; accept?: boolean; history?: unknown };
       const re = (b.re ?? "").toString().trim();
       const roomId = re ? roomStore.roomOfMsg(re) : undefined;
       const s = roomId ? roomState(roomId) : undefined;
@@ -1604,7 +1629,12 @@ const main = async (): Promise<void> => {
       if (!roomId || !s || !row || row.kind !== "join-req") { json(res, 400, { ok: false, reason: "re 要指向一条 join-req 消息 id" }); return; }
       if (!sameWho(roomHost(s), me)) { json(res, 403, { ok: false, reason: "只有本 room 的 host 能批" }); return; }
       const accept = b.accept !== false;
-      if (accept) hub.write(roomId, [{ op: "join", at: Date.now(), room: roomId, who: row.author, ord: s.nextOrd, via: "approve", by: me }]);
+      if (accept) {
+        const at = Date.now();
+        const seen = seatSeenOps(s, row.author, at, b.history);
+        if (!Array.isArray(seen)) { json(res, 400, { ok: false, reason: seen.error }); return; }
+        hub.write(roomId, [{ op: "join", at, room: roomId, who: row.author, ord: s.nextOrd, via: "approve", by: me }, ...seen]);
+      }
       // 批 / 驳都以 host 的 reply 落定那条 join-req duty, 申请人被唤醒看到结果。
       roomReply(res, hub.append(roomId, { author: me, kind: "reply", re: [re],
         text: accept ? "已批准入群, 欢迎 " + roomNameOf(row.author) : "未批准入群", status: "done", statusGiven: true, origin: "tool" }));

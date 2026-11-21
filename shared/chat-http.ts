@@ -195,7 +195,8 @@ const roomShortOf = (f: WorldFacts) => {
   return (room: string): string => {
     const named = titleOf.get(room) || f.chatNames[room];
     if (named) return named;
-    if (room.startsWith("dm:")) return "私聊";
+    // dm 拉进第三人后就是多人 room, 与 adhoc 同口径。
+    if (room.startsWith("dm:")) return ((f.rooms ?? []).find((r) => r.id === room)?.members.length ?? 2) > 2 ? "临时 room" : "私聊";
     if (room.startsWith("adhoc:")) return "临时 room";
     const tail = room.replace(/^[a-z-]+:/, "").slice(-6);
     return (room.startsWith("user:") ? "单聊" : room.startsWith("chat:wx") ? "微信" : "群") + (tail ? " …" + tail : "");
