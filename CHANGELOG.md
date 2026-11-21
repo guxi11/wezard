@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **rolepage chat detail 点「过程」展开多一层虚线框 (人 2026-11-21)**: room 视图里挂载点 `.rv-box` 自带虚线边, 里面的 `.steps` 过程框又是虚线 —— 框套框。`.rv-msg > .rv-box` 去掉边/内边距/底色, 只留过程框本身的那一层 (`web/chat.css`)。
+
 ### Changed
 - **群气泡标明对谁说话 (人 2026-11-21)**: wizard 在绑定 room 里点名 wizard 的行 (`chat_ask` / `chat_say` 的 `to`, 对某 wizard 消息的 `chat_reply` `re`) 镜像进企微时, 正文头写 `→ .name`, 如 `🧙‍♂️ wezard-1：→ .Grace …`。写在正文而非作者头 —— 尾部改写 `withMessageFooter` 会把作者头剥掉重写。`daemon/message-format.ts` 新增 `addressed`, `roomMirror` 调用; 测试在 tests/message-format.test.ts。
 - **rolepage 移动端 + 图随窗口缩放 (人 2026-11-21)**: ① 窄屏 (≤760px) 点进聊天看不到 chat detail —— CSS 默认 `.main{display:none}`, 只有 `.app.reading` 才换成 detail, 而这个 class 在 room 读侧重写时丢了, 没有任何代码再加它 (`#tb-back` 的返回也没绑)。现在人主动点开 (列表 / 图 / 搜索 / 成员 / 深链) 走 `goRoom` / `goWizard` 进入 detail, ‹ 返回列表; 定时刷新不翻页。② 图所在面板尺寸变了 (窗口缩放 / 旋转屏 / 左栏宽度变, 另用 ResizeObserver 盯面板) 时 svg 撑满新尺寸, 视野按「每像素世界单位不变、中心不动」调整, 力模拟的墙随新尺寸重算并补一点热量; 节点元素与坐标原样保留, 不整图重排。

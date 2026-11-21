@@ -1015,3 +1015,5 @@ button.mchip.rcpt:hover { text-decoration: underline }
 .govbar .gm.late { color: #c0392b; }
 @media (max-width: 760px) { .govbar { gap: 4px 10px; padding: 5px 10px; } }
 
+/* 消息头「过程」展开的 .rv-box 只是个挂载点: 里面的 .steps 已经是虚线过程框, 再描一层就成了框套框。 */
+.rv-msg > .rv-box { padding: 0; border: 0; border-radius: 0; background: none }
