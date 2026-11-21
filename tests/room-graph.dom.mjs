@@ -36,7 +36,7 @@ const roomFact = (id, kind, members, host, at = T0 + 5000) => ({ id, kind, title
 // 时间用「刚才」—— rolepage 默认时间范围 2d, 下面另一间 3 天前的 room 只在「全部」下出现。
 const T0 = Date.now() - 60_000;
 const msgs = [
-  { id: "aa000001.1", seq: 1, at: T0 + 1000, room: G, author: who("human", "U1"), authorName: "张三", ord: 3, speak: "human", kind: "say", text: "谁来搭把手", origin: "inbound" },
+  { id: "aa000001.1", seq: 1, at: T0 + 1000, room: G, author: who("human", "U1"), authorName: "张三", ord: 3, speak: "human", kind: "say", text: "谁来搭把手", origin: "inbound", wakeTo: [who("wizard", A)] },
   { id: "aa000001.2", seq: 2, at: T0 + 2000, room: G, author: who("wizard", A), authorName: "alice", ord: 1, speak: "member", kind: "reply", text: "我来", to: undefined, re: ["aa000001.1"], status: "done", origin: "tool", turn: "t1" },
   { id: "aa000001.3", seq: 3, at: T0 + 3000, room: G, author: who("wizard", A), authorName: "alice", ord: 1, speak: "member", kind: "ask", text: "查一下配置", to: [who("wizard", B)], origin: "tool", turn: "t1" },
   { id: "aa000001.4", seq: 4, at: T0 + 4000, room: G, author: who("wizard", B), authorName: "bob", ord: 2, speak: "member", kind: "reply", text: "查完了", re: ["aa000001.3"], status: "done", origin: "tool", turn: "t2" },
@@ -338,6 +338,9 @@ try {
   const a1 = await page.evaluate(() => ({ ttl: document.querySelector(".rv-ttl").textContent, sub: !!document.querySelector(".rv-sub"), btns: document.querySelectorAll("#ch-acts button").length,
     sess: !!document.querySelector("#rb-who #rb-sp .sp"), me: (document.querySelector("#gside .gs-mem.me .nm") || {}).textContent }));
   assert.equal(a1.ttl, "群G", "标题 = room 名");
+  // 人在群里直接说的话 (无 to / re): 头上的收件人用账本行的 wakeTo (alice), 不再只剩 `张三 —群G→`。
+  const hh = await page.evaluate(() => { const p = document.querySelector('#thread-in .rv-msg[data-id="aa000001.1"] .rv-path'); return { txt: p ? p.textContent : "", to: p ? [...p.querySelectorAll(".rv-tag")].map((e) => e.textContent) : [] }; });
+  assert.deepEqual(hh.to, ["alice"], "人话头部有收件人 (wakeTo): " + JSON.stringify(hh));
   assert.equal(a1.sub, false, "头不再写「👁 X 的视角」sub 行");
   assert.equal(a1.btns, 0, "头上没有取消选中按钮");
   assert.equal(a1.me, "alice", "成员列里当前视角那行带 .me");

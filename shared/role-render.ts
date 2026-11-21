@@ -32,8 +32,9 @@ export const splitInline = (text: string): { body: string; html: string } =>
 /** 引用块里的一条: 被答的那行 (re 指向) 的作者 + 首行摘要。查不到 (账本已裁掉 / 别的 room 不可见) = missing, 前端降级成「较早的消息」。 */
 export interface ReQuote { id: string; missing?: true; author?: Who; authorName?: string; snippet?: string; at?: number; room?: string }
 /** 发到 rolepage 的一条账本行: 正文剥掉 reminder (另给折叠 HTML), 没有显式收件人的 reply 补上
- *  它答的那几行的作者 —— 头部的「→ 谁」; 有 re 的再带只读的 `reQuote` (chat detail 的引用块, 不进企微)。 */
-export type WireMsg<M extends RoomMsg = RoomMsg> = M & { rems?: string; reTo?: Who[]; reQuote?: ReQuote[] };
+ *  它答的那几行的作者 —— 头部的「→ 谁」; 有 re 的再带只读的 `reQuote` (chat detail 的引用块, 不进企微);
+ *  人在群里不点名也不 re 的话 (to / reTo 都空) 补 `wakeTo` = 账本行上 `wake` 记的那一行当时唤醒了谁。 */
+export type WireMsg<M extends RoomMsg = RoomMsg> = M & { rems?: string; reTo?: Who[]; reQuote?: ReQuote[]; wakeTo?: Who[] };
 
 const SNIPPET_MAX = 80;
 const snippetOf = (text: string): string => {
@@ -47,13 +48,17 @@ export const wireMsg = (lookup: (id: string) => MsgRow | undefined, nameOf?: (w:
   const seen = new Set<string>();
   const reTo = m.to?.length ? [] : (m.re ?? []).map(lookup)
     .flatMap((r) => (r && !seen.has(whoKey(r.author)) && seen.add(whoKey(r.author)) ? [r.author] : []));
+  // 人的直接发言没有 to / re, 收件人只在账本行的 wake 里 (显式事实, 写入时 host / 被点名者已定; 不按「现在的 host」推 —— host 是读时现算, 历史上会变)。
+  // 只给人话: wizard 自己的行 to / reTo 另有语义。wake 为空 (没人被唤醒) 就不给, 前端退回只画 `A —room→`。
+  const wakeTo = m.author?.kind === "human" && !m.to?.length && !reTo.length
+    ? (lookup(m.id)?.wake ?? []).map((id): Who => ({ kind: "wizard", id })) : [];
   const reQuote: ReQuote[] = (m.re ?? []).slice(0, RE_QUOTE_MAX).map((id) => {
     const r = lookup(id);
     return r
       ? { id, author: r.author, ...(nameOf ? { authorName: nameOf(r.author) } : {}), snippet: snippetOf(r.text), at: r.at, room: r.room }
       : { id, missing: true as const };
   });
-  return { ...m, text: q.body, ...(q.html ? { rems: q.html } : {}), ...(reTo.length ? { reTo } : {}), ...(reQuote.length ? { reQuote } : {}) };
+  return { ...m, text: q.body, ...(q.html ? { rems: q.html } : {}), ...(reTo.length ? { reTo } : {}), ...(wakeTo.length ? { wakeTo } : {}), ...(reQuote.length ? { reQuote } : {}) };
 };
 
 // ── 提示行的 rolepage 一半 ─────────────────────────────────────────────

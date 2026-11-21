@@ -77,6 +77,8 @@ const run = async (): Promise<void> => {
   assert.equal(one.msgs[1].status, "done");
   assert.deepEqual(one.msgs[1].re, [q1.id]);
   assert.equal(one.room.openDuties, 0);
+  assert.deepEqual(one.msgs[0].wakeTo, [{ kind: "wizard", id: A.id }], "人的直接发言 (无 to / re): 收件人 = 行上 wake 记的 host");
+  assert.equal(one.msgs[1].wakeTo, undefined, "wizard 的行不带 wakeTo");
   assert.deepEqual(one.members.map((m: { name: string }) => m.name), ["alice", "bob", "张三"]);
   assert.equal(one.earlier, undefined);
   const page = await get(routes.room, "id=t-ticket&room=chat:wrG&limit=2");

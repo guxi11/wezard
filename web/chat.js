@@ -1011,7 +1011,8 @@
   // 一条消息 = 气泡外的一行头 (谁 → 谁 · 哪个 room · 状态 · 时刻) + 一颗气泡。
   // 头在外面是历史方案: 气泡只装正文, 身份与路由不跟着正文一起被染色。
   // 说给谁: 显式 to; 没写 to 的 reply 就是答它 re 的那几行的作者 (服务端按账本补的 reTo)。
-  var recipientsOf = function (m) { return m.to && m.to.length ? m.to : (m.reTo || []); };
+  // 显式 to → 服务端按 re 补的 reTo → 人话的 wakeTo (账本行 wake: 这一行当时唤醒了谁); 都空才只画 `发送人 —room→`。
+  var recipientsOf = function (m) { return m.to && m.to.length ? m.to : (m.reTo && m.reTo.length ? m.reTo : (m.wakeTo || [])); };
   var whoTags = function (list) {
     var seen = {};
     return (list || []).filter(function (w) { var k = w.kind + ':' + w.id; if (seen[k]) return false; seen[k] = 1; return true; })
