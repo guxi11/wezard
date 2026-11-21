@@ -2169,6 +2169,9 @@ const main = async (): Promise<void> => {
           // (cfg + 注册表只有这里有), svr 拿快照照画。
           ...(w?.ordinal !== undefined ? { ordinal: w.ordinal } : {}),
           steward: isStewardTarget(cfg, wizards, p.target),
+          // 图节点的 lead 角标与聪明程度 (shared/smarts.ts): 只读注册表, 不改语义。
+          ...(w?.tier ? { tier: w.tier } : {}),
+          ...(w?.lead ? { lead: true } : {}),
           parent: w?.parent,
           clonedFrom: w?.clonedFrom,
           forkOf: w?.forkOf,
@@ -2194,6 +2197,8 @@ const main = async (): Promise<void> => {
           busy: false, alive: false,
           ...(w.ordinal !== undefined ? { ordinal: w.ordinal } : {}),
           steward: isStewardTarget(cfg, wizards, w.target),
+          ...(w.tier ? { tier: w.tier } : {}),
+          ...(w.lead ? { lead: true } : {}),
           parent: w.parent,
           clonedFrom: w.clonedFrom,
           forkOf: w.forkOf,
