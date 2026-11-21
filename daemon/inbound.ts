@@ -16,9 +16,9 @@ import { computeUsage, renderUsageReport } from "./usage.js";
 import { computeAuditReport } from "./audit.js";
 import { syncProjectConfig, renderSyncReport } from "./cfg-sync.js";
 import { captureQuota, renderQuotaReport } from "./quota.js";
-import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe, allNames, unlinkTags, uniqueTag, displayName, createdAck, tagLink, withBot, sameBot, stripSigil } from "../shared/session-label.js";
+import { tagOfKey, baseOfKey, keyOf, withTagHeader, parseTagHeader, nameTokenRe, allNames, unlinkTags, uniqueTag, displayName, tagLink, withBot, sameBot, stripSigil } from "../shared/session-label.js";
 import { botTagOf } from "./bot-mux.js";
-import { chatNameOf, chatPolicyOf, listChatNames, stewardTierOf, type CharterGuard } from "./chat-name.js";
+import { chatNameOf, stewardTierOf, type CharterGuard } from "./chat-name.js";
 import { anchorOf, identityFieldsOf, identityOf, identityWorkspaceOf, manifestationOf, openInstance, settleName, wizardStore } from "./wizard.js";
 import { stewardIdentityOf, stewardRoute as resolveSteward, type StewardRoute } from "./steward.js";
 import { parseInstanceName } from "./classes.js";
@@ -324,21 +324,6 @@ const renderPeers = (peers: PeerInfo[], chatName: string): string => {
 };
 
 // /chats — 跨聊天目录: 每个聊天里住着哪些 wizard (`.name`, 全局可达)。
-const renderChats = (
-  roster: Array<{ base: string; name: string; self: boolean; targets: string[] }>,
-): string => {
-  if (roster.length === 0) return "[wezard] 还没有任何聊天在跑会话。";
-  const rows = roster.flatMap((c) => {
-    const sessions = c.targets.map((t) => tagLink(t, `.${displayName(t) || "?"}`)).join(" · ") || "(无)";
-    const head = c.name ? `\`${c.name}\`` : `_(未命名)_ \`${c.base}\``;
-    return [`**${head}**${c.self ? " ⬅️ 本聊天" : ""} · ${c.targets.length} 个会话`, `　${sessions}`, ""];
-  });
-  return [
-    `[wezard] 已知的聊天 · ${roster.length} 个`,
-    "",
-    ...rows,
-  ].join("\n");
-};
 
 // Match a switch arg against a scanned session: animal emoji label, full
 // sessionId, or a ≥6 char sessionId prefix. Returns the session or undefined.

@@ -7,7 +7,7 @@
 // 覆盖 (daemon/spawn-tmux.ts), 不用这里的产物。
 //
 // 不加 `--strict-mcp-config`: 那会把用户自己配的 lisct / tapd 等一起挡掉。
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DAEMON_TOKEN_FILE, DAEMON_TOKEN_HEADER, readDaemonToken } from "./daemon-token.js";

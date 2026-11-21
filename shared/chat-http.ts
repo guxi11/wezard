@@ -68,7 +68,6 @@ export interface ChatRoutes {
 export type WorldFactsProvider = () => Promise<WorldFacts> | WorldFacts;
 
 const DEFAULT_LIMIT = 60;
-const FACTS_MS = 10_000;
 /** rolepage 只看最近这么久: 更早的轮次、wizard 登记与家谱一律不进视图。
  *  room 历史不受它限 —— 那是账本, 该翻多久翻多久。 */
 export const HORIZON_MS = 3 * 24 * 3600_000;
@@ -242,7 +241,6 @@ const turnLinker = (records: readonly DetailRecord[], f: WorldFacts) => {
   };
 };
 
-interface View { role: string; span?: SessionSpan }
 
 /** 账本的读侧索引: 按 id 找行、找 re 它的行, 以及切换时刻 (第一条非迁移行; 此后终句零语义)。 */
 interface Ledger { lookup: (id: string) => MsgRow | undefined; repliesOf: (id: string) => MsgRow[]; roomFrom: number }

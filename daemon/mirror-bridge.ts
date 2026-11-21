@@ -65,12 +65,12 @@ import { getDetail, knowsToolUse, recordTool, recordToolResult, recordMark, reco
 import type { Asker } from "../shared/detail-store.js";
 import type { CtxCut, TurnFrom, TurnUsage } from "./detail.js";
 import { errText } from "./last-response.js";
-import { labelFor, tagOfKey, baseOfKey, keyOf, stripSigil, displayName, createdAck, windowLabel, withTagHeader, withLinkedTagHeader, chatHead, headed, tagBadge, linkTags, parseTagHeader, MAX_BODY_LINKS, isInternalKey, sameBot } from "../shared/session-label.js";
+import { labelFor, tagOfKey, baseOfKey, stripSigil, displayName, createdAck, windowLabel, withTagHeader, withLinkedTagHeader, chatHead, headed, tagBadge, parseTagHeader, MAX_BODY_LINKS, isInternalKey, sameBot } from "../shared/session-label.js";
 import { splitMarkdown } from "../shared/md-chunk.js";
 import { readHookMode } from "../shared/hook-mode.js";
 import { isWxFrame } from "../shared/wx-text.js";
-import { chatNameOf, chatPolicyOf, listChatNames, peerAddress } from "./chat-name.js";
-import { stripAnsi, paneIsBusy, codexTurnBusy, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, lastModel, lastUserTurn, talkRounds, openToolUses, turnClosed, renderDialog, stripForChat, parseClosing, type PeerInfo, type PeerReply } from "./peers.js";
+import { chatNameOf, listChatNames, peerAddress } from "./chat-name.js";
+import { stripAnsi, paneIsBusy, codexTurnBusy, summarizeTail, lastAssistantText, lastReply, replyToPeer as replyToPeerIn, unwrapPasted, lastContextTokens, lastModel, lastUserTurn, talkRounds, openToolUses, turnClosed, renderDialog, type PeerInfo, type PeerReply } from "./peers.js";
 
 // PATH augmentation: launchd / systemd start the daemon
 // with a stripped PATH that often lacks nvm / homebrew, breaking spawn(claudeBin).

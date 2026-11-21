@@ -24,7 +24,7 @@
 // 失败」。交接别人仍走同步等待 + 失败记录准入 (调用方在场, 记录挡的是对半清会话的二次清空)。
 import type { Logger } from "pino";
 import type { JsonMap } from "../shared/json-map-store.js";
-import { sleep, truncate } from "../shared/std.js";
+import { sleep } from "../shared/std.js";
 import { waitForIdle, type IdleOpts, type IdleResult } from "./wait-idle.js";
 /** 旧路由表的 event 引用 (room 模型前的历史字段); 迁移读侧在 shared/legacy-routes.ts。 */
 export type EventId = string;

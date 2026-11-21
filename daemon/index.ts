@@ -2,24 +2,24 @@ import { wxMarkdown } from "../shared/wx-text.js";
 // Daemon entry. Resident process — exits only on signal or fatal WS auth failure.
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { createHash, timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
+import { timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
 import { loadOrCreateSvrToken } from "../shared/svr-token.js";
 import { DAEMON_TOKEN_FILE, DAEMON_TOKEN_HEADER } from "../shared/daemon-token.js";
 import { homedir } from "node:os";
-import { ChatPolicy, TIERS, defaultChatFor, tiersForBackend, loadConfig, type TierName } from "../shared/config.js";
+import { TIERS, defaultChatFor, tiersForBackend, loadConfig, type TierName } from "../shared/config.js";
 import { makeLogger } from "../shared/log.js";
 import { memAvailableMb, memShortfall } from "../shared/mem-guard.js";
-import { clipLine, sleep, truncate } from "../shared/std.js";
+import { clipLine, sleep } from "../shared/std.js";
 import { patchJsonc } from "../shared/config-writer.js";
 import { EFFORTS, parseEffort } from "../shared/effort.js";
 import { bindCliBackends, projectDirsFor, type CliBackendName } from "../shared/cli-backends.js";
 import { bindCodexStateDir } from "../shared/codex.js";
-import { startMux, pinFrameBot } from "./bot-mux.js";
+import { startMux } from "./bot-mux.js";
 import { startWeixin } from "./weixin.js";
 import { installWeixinPort } from "./weixin-port.js";
 import { bindWxCommands, makeOnBound, makeWxCommands, routeSendMedia, wecomBindSink, weixinSendMedia, wxAdmins, wxRoutes } from "./weixin-cmd.js";
 import { bindChatReach } from "./reach.js";
-import { kindOf, planMedia, type MediaKind, type SendMedia } from "./media.js";
+import { kindOf, type SendMedia } from "./media.js";
 import { aibotSendMedia } from "./aibot-media.js";
 import { startNetWatch } from "./net-watch.js";
 import { startHttp, json, readBody, type Handler } from "./http.js";
@@ -32,9 +32,9 @@ import { installInboundRouter, type GuideInbound, type InboundOpts } from "./inb
 import { installChannelTransport, installChannelEvents, readChannel, isTopicChat, sendTopicContent } from "./channel.js";
 import { loadMirrorStore } from "./mirror-store.js";
 import { startMirror, installMirrorEventListener } from "./mirror-bridge.js";
-import { backendFor, bindStartupNotice, prewarmShell, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
-import { bindCardChannel, installApprovalEventListener, makeApproveHandler, requestConfirm } from "./approval.js";
-import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, buildChatUrl, getDetail, setRoomReader, setWorldFactsProvider, currentHumanQueryOf, recordPost, recordCharter, backfillCharter, lastChannelOf } from "./detail.js";
+import { backendFor, prewarmShell, runTmux, setTmuxTimeoutReporter, spawnTmuxClaude } from "./spawn-tmux.js";
+import { installApprovalEventListener, makeApproveHandler, requestConfirm } from "./approval.js";
+import { initDetailPersistence, makeDetailHandler, chatHandlers, configureRemoteForward, chatUrlFor, buildChatUrl, setRoomReader, setWorldFactsProvider, recordCharter, backfillCharter, lastChannelOf } from "./detail.js";
 import { EMPTY_FACTS, type WorldFacts, type WorldFactWizard } from "../shared/world.js";
 import { clearAutoWindow, initAutoWindowPersistence, setAutoWindow } from "./session-cache.js";
 import { makeMessageHandler } from "./outbound.js";
@@ -52,10 +52,9 @@ import { stewardRoute as resolveSteward } from "./steward.js";
 import { createRoomWatchdog, parsePaneIds } from "./room-watchdog.js";
 import { createRoomHub, type RoomHub } from "./room-hub.js";
 import {
-  DAEMON, adhocRoomId, canRename, dmPeers, dmRoomId, holderOf, idList, isUid, leaveOps, openDuties, renderMsgLine, roomHost, roomsDirOf, sameWho, whoKey,
+  DAEMON, adhocRoomId, canRename, dmPeers, dmRoomId, holderOf, idList, isUid, leaveOps, openDuties, roomHost, roomsDirOf, sameWho, whoKey,
   type MsgRow, type ReplyStatus, type RoomOp, type RoomState, type Verdict, type Who,
 } from "../shared/room.js";
-import { CHAT_BATCH_BUDGET, sliceBatch } from "../shared/chat-record.js";
 import { CLASS_NAME_MAX, loadClassMerges, loadClassStore, migrateClasses, parseInstanceName, planClasses, renderClassReport, validClassName, type ClassMigration } from "./classes.js";
 import { addressed, footerTarget, responseFormatPolicy, roomBubble } from "./message-format.js";
 import { scanClaudeSessions } from "./session-scan.js";
@@ -64,19 +63,16 @@ import {
   promptWantsFreshWizard,
   renderTask,
   sinceOf,
-  TASK_POSTPONE_MS,
-  TASK_QUIET_WAIT_MS,
 } from "./tasks.js";
 import { openTaskRegistry } from "./task-registry.js";
-import { deliverScheduled, type ScheduledDispatchOptions, type ScheduledResult } from "./scheduled-delivery.js";
+import { type ScheduledDispatchOptions, type ScheduledResult } from "./scheduled-delivery.js";
 import { describeTrigger, nextFire, parseTrigger, WHEN_HELP } from "../shared/trigger.js";
-import { isQuiet, slugify, uniqueId } from "../shared/task-file.js";
-import { baseOfKey, bindMultiBot, bindTagLinker, botOfKey, headed, ownHead, isInternalKey, keyOf, linkTags, normalizeTag, sameBot, speakerHead, stripSigil, tagHead, tagLink, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
+import { slugify, uniqueId } from "../shared/task-file.js";
+import { baseOfKey, bindMultiBot, bindTagLinker, botOfKey, headed, ownHead, isInternalKey, keyOf, linkTags, normalizeTag, sameBot, stripSigil, tagOfKey, uniqueTag, withTagHeader } from "../shared/session-label.js";
 import { appendEpisode, clipForCharter, cwdOfMd, episodePath, inboxPath, mdsOf, proposedCwds, memoryPath, memoryRoot, proposeMemory, readMemory, type MemoryScope } from "./wizard-memory.js";
 import { startSteward, stewardEnvelope, STEWARD_ID, STEWARD_RUN_MS, STEWARD_TARGET, type RefsOf } from "./memory-steward.js";
-import type { Asker, TurnFrom } from "../shared/detail-store.js";
-import { chatBaseOf, chatNameOf, chatPolicyOf, listChatNames, peerAddress, stewardTierOf, type CharterChange, type CharterGuard } from "./chat-name.js";
-import { appointedSteward, isStewardTarget, markGlobalSteward, STEWARD_KINDS, stewardRoute, stewardsAt } from "./steward.js";
+import { chatBaseOf, chatNameOf, chatPolicyOf, listChatNames, peerAddress, type CharterChange, type CharterGuard } from "./chat-name.js";
+import { isStewardTarget, markGlobalSteward, STEWARD_KINDS, stewardRoute, stewardsAt } from "./steward.js";
 import { apprenticeOf, ensureApprentice, ensurePatrolTask, handoffLineOf, isApprentice } from "./apprentice.js";
 import {
   anchorOf,
@@ -110,53 +106,29 @@ import {
   slotInUse,
   identityOf as identityOfRec,
   identityWorkspaceOf,
-  manifestationOf,
   identityEditRefusal,
   instancesOf,
   type WizardBrief,
   type WizardRecord,
 } from "./wizard.js";
-import { activeRows, bindNoticeBox, createNoticeBox, createSeenRing, gcSeen, chatAudience, hears, noticeSuffixFor, type Notice, type Subject, type Part, type SeenRow, type TimedSnapRow, type Via } from "./notices.js";
-import { cacheTouchMs, cacheTtlSec, clipMiddle, contextMaterials, firstStamp, parseClosing, receiptKeyword, stripClosingMark, stripForChat, addressedResults, lastContextTokens, lastExchange, lastModel, openingTurn, talkTurns, turnsSince, renderPeerEnvelope, renderReceiptEnvelope, renderTaskEnvelope } from "./peers.js";
+import { activeRows, bindNoticeBox, createNoticeBox, createSeenRing, gcSeen, chatAudience, hears, type Notice, type Subject, type Part, type SeenRow, type TimedSnapRow, type Via } from "./notices.js";
+import { cacheTouchMs, cacheTtlSec, contextMaterials, firstStamp, lastContextTokens, lastExchange, lastModel, talkTurns } from "./peers.js";
 import { expandHome } from "../shared/paths.js";
-import { expandTask, TemplateError, type ExpandedTask, type TemplateRef } from "../shared/task-template.js";
+import { expandTask, TemplateError, type ExpandedTask } from "../shared/task-template.js";
 import { loadJsonMap } from "../shared/json-map-store.js";
 import { loadPlans, PlanError } from "./plans.js";
 import type { PlanStore } from "./plans.js";
 import { registerPlanRoutes } from "./plan-http.js";
-import { NO_DEADLINE, isTerminal, renderInFlight, turnState } from "../shared/turn-state.js";
-import { askerFromEnvelope, parseReminders, renderReminder, stripReminders, withMsg, type NoteAttrs, type ReceiptStatus, type TurnTag } from "../shared/reminder.js";
-import { createHandoffs, cuttingTurn, handedOff, handingOff, handoffRound, resumeText, roundPending, settlesCut, type Pending as PendingHandoff } from "./handoff.js";
+import { renderReminder } from "../shared/reminder.js";
+import { createHandoffs, handedOff, handingOff, type Pending as PendingHandoff } from "./handoff.js";
 import { coldGateOf, wakeCostOf, decide, rankCandidates, routeDiagnostics, renderCandidates, tierFor, type RouteRow } from "./route.js";
 import { parseWhen, renderRoomRead } from "../shared/room-view.js";
 import { roomFacts, nameTable } from "./room-facts.js";
-import { waitForIdle, type IdleResult } from "./wait-idle.js";
-import { applyOnboarding, bindChannelSteward, bindSteward, guideHandoffOps, guideOf, guideRefusal, isGuideManifestation, judgeOnboarding, loadOnboardingStore, needsOnboarding, planOnboardBind, renderGuideOpening, renderOnboardingDone, rewriteStewardBindings, type OnboardingBound } from "./onboarding.js";
-import { reminderEventId, reminderToken, startPlanReminders, type PlanReminderCandidate } from "./plan-reminders.js";
+import { waitForIdle } from "./wait-idle.js";
+import { applyOnboarding, bindSteward, guideHandoffOps, guideOf, guideRefusal, isGuideManifestation, judgeOnboarding, loadOnboardingStore, needsOnboarding, planOnboardBind, renderGuideOpening, renderOnboardingDone, rewriteStewardBindings, type OnboardingBound } from "./onboarding.js";
+import { reminderToken, startPlanReminders, type PlanReminderCandidate } from "./plan-reminders.js";
 
-const waitForQuorum = async (targets: readonly string[], isBusy: (target: string) => Promise<boolean>, timeoutMs: number, need: number): Promise<IdleResult[]> => {
-  const quota = Math.max(1, Math.min(need, targets.length));
-  let done = 0;
-  const results = await Promise.all(targets.map(async (target) => {
-    const result = await waitForIdle(target, isBusy, timeoutMs, () => done >= quota);
-    if (result.idle) done++;
-    return result;
-  }));
-  return results.map((result) => result.reason === "stopped" ? { idle: false, reason: "仍在干活 (法定人数已满, 不再等它)" } : result);
-};
 
-/** 交接简报那一轮的信封: 它是被切断那一轮的续写, 出处照那一轮写。reload 后 openingOf 就是从这里
- *  读回出处 (from / speaker) 与频道 (scope + chat-key) —— 缺了它续写会被认成「自己跟自己说」,
- *  或者把群里的交接复述成私聊 (→ rolepage 另立一栏)。老记录没有印章时退回旧行为: 自己 + private。 */
-const handoffEnvelopeAttrs = (h: { from?: TurnFrom; speaker?: string }, channel: string, eventId: string, self: string): NoteAttrs => {
-  const scope = channel ? "public" : "private";
-  const chat = channel ? { "chat-key": channel } : {};
-  const f = h.from;
-  if (f?.kind === "peer") return { wezard: "envelope", kind: "peer", from: wizardStore()?.get(f.from ?? "")?.name || f.from || "", scope, ...chat, msg: eventId };
-  if (f?.kind === "task") return { wezard: "envelope", kind: "task", from: f.taskId ?? "", scope, ...chat, msg: eventId };
-  if (h.speaker) return { wezard: "envelope", kind: "human", from: h.speaker.replace(/^user:/, ""), scope, ...chat, msg: eventId };
-  return { wezard: "envelope", kind: "peer", from: self, scope, ...chat, msg: eventId };
-};
 
 const retiredOrchestrationField = (body: unknown): string | undefined => {
   if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
@@ -204,10 +176,7 @@ const main = async (): Promise<void> => {
   // 定时调度器的 `inject` 真正实现, 赋值在 mirror-mode 的大块里 (要用到那里面的
   // wizards / m / notifyChat), 但 startScheduler 在那块外面接线 —— 见文件尾。
   // 记忆整理者的执行体, 同样只有 mirror 模式给得出 —— 赋值见 scheduledTaskInject 旁边。
-  /** 统一 route 恢复与 held 前置清理巡检。 */
-  let stopSweep = (): void => {};
   let stopPlanReminders = (): void => {};
-  let stopObligations = (): void => {};
   let stewardRun: ((prompt: string) => Promise<{ ok: boolean; reason?: string }>) | undefined;
   let stewardWiring: { refsOf?: RefsOf; onMerged?: (mds: readonly string[]) => void } = {};
   let scheduledTaskInject:
@@ -331,8 +300,6 @@ const main = async (): Promise<void> => {
   // 重开的空档里 resume 回旧 sid。
   // 宪章守卫 (见「改配置会不会动到宪章」): 要等下面宪章渲染那一块立起来才有; 之前 (启动时那次自动补名) 只写不比对。
   let guardCharter: CharterGuard = (write) => ({ r: write(), note: Promise.resolve("") });
-  const who = (t: string): string => `.${wizardStore()?.get(t)?.name || t}`;
-  const ago = (at: number): string => { const s = Math.max(0, Math.round((Date.now() - at) / 1000)); return s < 60 ? `${s}s` : `${Math.round(s / 60)}m`; };
   installInboundRouter(ws.client, cfg, log, { ...bridge, dispatch: async (a) => {
     // slash 是会话控制 (/new /model ...), 不落账本, 照旧直接进 pane。
     if (a.text.trimStart().startsWith("/")) { await handedOff(a.principal); await bridge.dispatch(a); return; }
@@ -760,12 +727,6 @@ const main = async (): Promise<void> => {
       return name ? `.${name}` : "默认 wizard";
     };
 
-    // wizard 之间的往返默认是私聊, 不进群。只有发话方判断「该当着人说」的那一次
-    // (tell_peer public:true) 在公开频道里成一条气泡, 头写成 `.a: .b`, 方向一眼可读。
-    const RELAY_MAX = 1200;
-    /** 一个 wizard 在群里的称呼: `.name`, 挂它的 rolepage。名字全局唯一, 不再
-     *  因为落在哪个群而换写法 —— 引用这一段就能跟它说话 (parseTagHeader 认得)。 */
-    const relayLabel = (t: string): string => ((h) => (h ? tagLink(t, h) : ""))(tagHead(t));
     /** 以 `self` 的名义往 `dest` 群发一条: 头独占一行; 头怎么写 (群默认 wizard 报不报名) 归 ownHead。 */
     const postAs = (self: string, dest: string, text: string): void => notifyChat(dest, headed(ownHead(self), text, "\n\n"));
     /** P7-S3: 同 postAs, 但去到的是频道 (chat:<topic_id>) —— 按 replyOk 选评论/新帖
@@ -776,19 +737,6 @@ const main = async (): Promise<void> => {
         linkTags(dest, headed(ownHead(self), text, "\n\n")), msgid)
         .catch((e: unknown) => log.warn({ topicId, err: errText(e) }, "channel tool send failed"));
     };
-    /** 公开的 wizard 间对话: 落在 `channel` 这个群。 */
-    const relayPeer = (from: string, to: string, body: string, channel: string): void => {
-      const text = body.trim();
-      if (!text || !channel) return;
-      const head = speakerHead(relayLabel(from), relayLabel(to));
-      const clipped = text.length > RELAY_MAX ? `${text.slice(0, RELAY_MAX)}…` : text;
-      // 头独占一行, 正文自成一个块 —— 只隔一个换行的话, markdown 会把正文首行
-      // 当成头那一段的续行; 表格因此整张塌成一行带竖线的文字 (表格不能打断段落)。
-      notifyChat(channel, `${head}\n\n${clipped}`);
-    };
-    /** 调用方这一轮所在的公开频道: 人从哪个群叫的它 / 公开 peer 轮的那个群;
-     *  私聊轮或无记录 → 它的 home 群。notify 与 public tell_peer 默认发到这里。 */
-    const channelOf = (self: string): string => m.currentChannel(self) || baseOfKey(self);
     /** 同伴注入的信封: 公开轮写上那个群的 key 与名字 (key 归档, 名字显示), 私聊都不写 (见 peers.renderPeerEnvelope)。 */
     const retiringWizardTargets = new Set<string>();
     const plans: PlanStore = (() => {
@@ -1917,12 +1865,6 @@ const main = async (): Promise<void> => {
     // pump 的注入也算「最后一次事件」: 正在投递的 wizard 不进 stale 名单 (paste 端口的 touch 见 hub ports)。
     const watchdogTimer = setInterval(() => void roomWatchdog.scan(), (cfg.rooms?.watchdog?.intervalSec ?? 60) * 1000);
     watchdogTimer.unref?.();
-    /** 审批/提问卡发到哪个聊天: 本轮唤醒它的绑定 room; 没被唤醒过 → 旧口径兜底 (C 节删)。 */
-    const cardRoomOf = (target: string): string | undefined => {
-      const uid = wizards.get(target)?.uid;
-      const d = uid ? hub.defaultRoom(uid) : undefined;
-      return d?.room && hub.isBoundRoom(d.room) ? d.room : undefined;
-    };
     // ── 新群引导的两端 (契约 §4): 人话落 room → guide 当 founder 说话 → 绑定后交给管家 ────
     /** 引导期: 人这句落进本群 room (guide 作 founder, ord=1) 并唤醒它。引导从此只能在 room
      *  里说话 (chat_reply), 绑定后那条 duty 连原话一起交给管家。 */
@@ -2097,7 +2039,6 @@ const main = async (): Promise<void> => {
     };
     // 挂起事项的提醒 (见 pending-items.digest): 只给管家 —— 各群的默认会话, 同时挂着多件活、
     // 又被人随时打断的就是它。上次全表时的样子纯内存: reload 后头一次见到只立基线。
-    const pendingMarks = new Map<string, { sid: string; ctx: number; ctxAtFull: number; drains: number }>();
     /** 上次注入之后被 /clear 或压缩截断过的 (onContextCut 记, 下一次注入取走)。 */
     const pendingCuts = new Map<string, "clear" | "compact">();
     // pending_items 已退役 (wiring C): 挂起账 = room 的 open duty, 工具面走 /room/*;
@@ -2151,15 +2092,6 @@ const main = async (): Promise<void> => {
     const recharter = (targets: readonly string[]): void =>
       targets.forEach((t) => { if (m.sessionInfo(t)?.sessionId) m.armCharter(t); });
 
-    /** 一个聊天的工作区: 它名下各会话跑在哪个目录, 取最多的那个。聊天与工作区是
-     *  一对多, 但绝大多数聊天只围着一个项目转。 */
-    const chatCwd = (targets: readonly string[]): string => {
-      const counts = targets.reduce<Record<string, number>>((acc, t) => {
-        const c = m.getCwd(t).runningCwd;
-        return c ? { ...acc, [c]: (acc[c] ?? 0) + 1 } : acc;
-      }, {});
-      return Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
-    };
 
     // 当前身份初始化与按需落定: transcript 校准懒接管会话的 bornAt, 再按默认会话
     // 优先的顺序落定已知 wizard 名称; 后续空名记录仍由对应入口补齐。
@@ -2812,14 +2744,12 @@ const main = async (): Promise<void> => {
       // 选人/选档/description 用的摘要从展开文本 (或 params.header) 派生, 投递的是全文。
       let task = (b.task ?? "").toString().trim();
       let text = task;
-      let templateRef: TemplateRef | undefined;
       if ((b.taskFile ?? "") !== "") {
         let expanded: ExpandedTask;
         try { expanded = await expandTask({ taskFile: b.taskFile!, params: b.params ?? {} }, { baseDir: m.getCwd(self).runningCwd || m.getCwd(self).defaultCwd || process.cwd() }); }
         catch (e) { json(res, 400, { ok: false, reason: e instanceof TemplateError ? e.message : `template expansion failed: ${errText(e)}` }); return; }
         text = expanded.text;
         task = clipLine((b.params?.header ?? "").toString().trim() || expanded.text, 120);
-        templateRef = expanded.templateRef;
       }
       if (!text.trim()) { json(res, 400, { ok: false, reason: "task is required" }); return; }
       // room 模型 (契约 §3): delegate 的产出 = 一条 chat_ask (kind:"task"), 结论只能
@@ -3060,7 +2990,6 @@ const main = async (): Promise<void> => {
       const task = (b.task ?? "").toString().trim();
       // 先盖章再生: 分叉出来的 transcript 里躺着被克隆者的旧回复, 时刻早于这一枚章,
       // wait_peer 才不会把它们当成分身对这件活的答复。
-      const taskAt = Date.now();
       const birthGuard = (): boolean => ownsSlot(slotR);
       if (!birthGuard()) { releaseBirth(); return { status: 409, body: { ok: false, reason: "wizard identity or caller turn changed before spawn" } }; }
       const r = await m.cloneSession({

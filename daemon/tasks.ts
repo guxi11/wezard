@@ -13,7 +13,6 @@
 // 加一份上下文。gate 在 daemon 侧花几秒钱把这件事问清楚, 没活就连气泡都不出。
 import type { WSClient } from "@wecom/aibot-node-sdk";
 import type { Logger } from "pino";
-import type { Config } from "../shared/config.js";
 import { baseOfKey } from "../shared/session-label.js";
 import { interpolate } from "../shared/std.js";
 import { describeTrigger, isDue, nextFire } from "../shared/trigger.js";

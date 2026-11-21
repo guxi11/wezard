@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { dirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseJsonc } from "jsonc-parser";
-import { loadConfig, type Config } from "../shared/config.js";
+import { loadConfig } from "../shared/config.js";
 import { expandHome } from "../shared/paths.js";
 import { codexHookCommand } from "../shared/codex-hooks.js";
 import { syncCodexHooks } from "./codex-sync.js";

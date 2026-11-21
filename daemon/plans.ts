@@ -2,7 +2,7 @@ import { appendFileSync, closeSync, existsSync, ftruncateSync, fsyncSync, mkdirS
 import { createHash, randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { expandHome } from "../shared/paths.js";
-import { PlanInputSchema, PlanOriginSchema, PlanRecordSchema, PlanUpdateSchema, validatePlan, type PlanInput, type PlanOrigin, type PlanRecord, type PlanUpdate } from "../shared/plan.js";
+import { PlanInputSchema, PlanOriginSchema, PlanRecordSchema, PlanUpdateSchema, validatePlan, type PlanInput, type PlanOrigin, type PlanRecord } from "../shared/plan.js";
 import { z } from "zod";
 
 const CreateKeySchema = z.object({ id: z.string().min(1), hash: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
