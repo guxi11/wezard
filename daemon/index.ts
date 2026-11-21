@@ -514,7 +514,7 @@ const main = async (): Promise<void> => {
       }
       const spawnLog = log.child({ mod: "mirror", sub: "spawn-init", target });
       const charter = charterFor(target, { cli: backendFor(cfg).name });
-      const r = await spawnTmuxClaude({ cfg, log: spawnLog, windowName: target, chatKey: target, systemPrompt: charter });
+      const r = await spawnTmuxClaude({ cfg, log: spawnLog, windowName: target, systemPrompt: charter });
       if (!r.ok) { json(res, 500, { ok: false, reason: r.reason }); return; }
       const att = m.attach({ sessionId: r.sessionId!, jsonlPath: r.jsonlPath!, target, tmuxPane: r.tmuxPane, tmuxSession: r.tmuxSession });
       // spawn 不再带宪章 (省冷启动), 身份改挂到这个 pane 的首条注入上。
