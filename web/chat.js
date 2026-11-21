@@ -1629,26 +1629,34 @@
     if (!roomCache[id]) { roomCacheOrder.push(id); if (roomCacheOrder.length > 12) delete roomCache[roomCacheOrder.shift()]; }
     roomCache[id] = r;
   };
-  var loadRoom = function (id, limit, instant) {
-    D.mode = 'room'; D.roomId = id; D.role = ''; D.mode0 = 'room'; S.charter = null; resetPane(); syncUrl();
+  // poll = 定时刷新 (tick), 区别于人点开: 回包与上一份没有差别就一个字也不碰 DOM; 有差别时滚动位置在「替换 innerHTML 的那一刻」现取现还
+  // (旧写法在发请求前取、回包后还: 请求在路上时用户滚过的距离被拽回去 —— 远端 svr 上每 4s 一次、可见), 只有贴底才跟随新内容。
+  var loadRoom = function (id, limit, instant, poll) {
+    if (!poll) { D.mode = 'room'; D.roomId = id; D.role = ''; D.mode0 = 'room'; S.charter = null; resetPane(); syncUrl(); }
     // 后发先至: 定时刷新的那一发晚于点开 / 搜索跳转回来时, 丢掉它 (不然会把视图拽回旧 room / 拽回底部)。
-    var gen = S.roomGen = (S.roomGen || 0) + 1;
+    var gen = poll ? S.roomGen : (S.roomGen = (S.roomGen || 0) + 1);
     var shown = false;
-    if (instant && roomCache[id] && roomCache[id].ok) { applyRoom(roomCache[id]); renderRoom(); scrollBottom(); shown = true; }
+    if (instant && roomCache[id] && roomCache[id].ok) { applyRoom(roomCache[id]); renderRoom(); scrollBottom(); shown = true; S.roomSig = ''; }
     return api('api/room', { room: id, limit: limit || 60 }).then(function (r) {
-      if (gen !== S.roomGen) return false;
+      if (gen !== S.roomGen || (poll && (D.mode !== 'room' || D.roomId !== id))) return false;
       if (!r.ok) { inner.innerHTML = '<div class="rv-none">' + esc(r.error || '加载失败') + '</div>'; if (gside) gside.hidden = true; return; }
       if (!limit || limit <= 60) cacheRoom(id, r);
-      var pinned = shown ? scrollState().pinned : true;
+      var sig = id + '|' + JSON.stringify(Object.assign({}, r, { at: 0 }));
+      if (poll && sig === S.roomSig) { D.at = r.at; return false; }
+      S.roomSig = sig;
+      var st = scrollState();
       applyRoom(r);
-      renderRoom(); if (pinned) scrollBottom();
+      renderRoom();
+      if (poll || shown) {
+        var hr = S.hit && S.hit.until > Date.now() && rowEl(S.hit.id);
+        if (hr) hr.scrollIntoView({ block: 'center' }); else restore(st);
+      } else scrollBottom();
     });
   };
   var loadWizard = function (role, keepScroll) {
     // 换一个人 = 换一段对话: 日程栏只属于刚才那个人, 收回对话面。
     if (role && D.mode === 'wizard' && role !== D.role) resetPane();
     D.mode = 'wizard'; D.role = role || D.role; D.roomId = ''; syncUrl();
-    var st = scrollState();
     return api('api/wizard', { role: role, all: D.all ? '1' : '', session: D.session === 'all' ? '' : D.session, limit: 60 }).then(function (r) {
       if (!r.ok) { inner.innerHTML = '<div class="rv-none">' + esc(r.error || '加载失败') + '</div>'; return false; }
       var same = D.mode0 === 'wizard' && D.role0 === role && !!D.stream && D.streamSig === streamSig(r.stream);
@@ -1661,6 +1669,7 @@
       D.plans = r.plans || []; D.schedules = r.schedules || []; D.charterBrief = r.charter || null; D.at = r.at; D.recvAt = Date.now();
       D.stats = r.stats || null;
       D.members = []; D.duties = [];
+      var st = scrollState();   // 替换 DOM 的那一刻现取, 不是发请求前
       renderWizard(same);
       if (!same) { if (keepScroll) restore(st); else scrollBottom(); }
       return true;
@@ -1986,14 +1995,12 @@
     }
   });
   // room 账本没有订阅口子 (daemon 的 store 只管落盘), 页面自己定时取。
+  // 用户正在滚 (最近 1.2s 内有 scroll) 就让这一轮刷新过去: 下一轮 4s 后再来, 不在手指 / 滚轮底下换 DOM。
+  var scrollAt = 0;
+  thread.addEventListener('scroll', function () { scrollAt = Date.now(); }, { passive: true });
   var tick = function () {
-    if (document.hidden) return;
-    var st = scrollState();
-    if (D.mode === 'room') loadRoom(D.roomId, Math.max(60, D.msgs.length)).then(function (ok) {
-      if (ok === false) return;
-      var hr = S.hit && S.hit.until > Date.now() && rowEl(S.hit.id);
-      if (hr) hr.scrollIntoView({ block: 'center' }); else restore(st);
-    });
+    if (document.hidden || Date.now() - scrollAt < 1200) return;
+    if (D.mode === 'room') loadRoom(D.roomId, Math.max(60, D.msgs.length), false, true);
     else if (D.mode === 'wizard') loadWizard(D.role, true);
   };
   setInterval(tick, TICK_MS);

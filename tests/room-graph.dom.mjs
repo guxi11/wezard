@@ -92,7 +92,9 @@ const wizardOf = (role) => {
 
 const server = createServer((req, res) => {
   const u = new URL(req.url || "/", "http://x");
-  const send = (type, body) => { res.statusCode = 200; res.setHeader("content-type", type); res.end(body); };
+  const send0 = (type, body) => { res.statusCode = 200; res.setHeader("content-type", type); res.end(body); };
+  // 慢回包 (globalThis.__delay ms): 模拟远端 svr, 请求在路上的那段时间里用户还在滚。
+  const send = u.pathname === "/api/room" && globalThis.__delay ? (type, body) => { globalThis.__reqs = (globalThis.__reqs || 0) + 1; setTimeout(() => send0(type, body), globalThis.__delay); } : send0;
   if (u.pathname === "/role") return send("text/html; charset=utf-8", SHELL);
   if (u.pathname === "/chat/app.js") return send("text/javascript", APP);
   if (u.pathname === "/api/world") {
@@ -100,7 +102,15 @@ const server = createServer((req, res) => {
     if (globalThis.__degrade) return send("application/json", JSON.stringify({ ...WORLD, degraded: true, names: {}, chatNames: {}, nodes: WORLD.nodes.map((n) => ({ ...n, name: n.target })) }));
     return send("application/json", JSON.stringify(WORLD));
   }
-  if (u.pathname === "/api/room") return send("application/json", JSON.stringify(ROOM));
+  if (u.pathname === "/api/room") {
+    // 滚动测试: 一百多条消息, 每次回包最后一条的正文都变 (模拟进行中的一轮 / 新消息), 逼 detail 每 4s 真重渲染一次。
+    if (globalThis.__bulk) {
+      const base = msgs.filter((m) => m.room === G)[0];
+      const many = Array.from({ length: 120 }, (_, i) => ({ ...base, id: "bb" + String(i).padStart(6, "0") + ".1", seq: 100 + i, text: "第 " + i + " 条消息 ".repeat(8) + (i === 119 ? " v" + (globalThis.__bulk++) : "") }));
+      return send("application/json", JSON.stringify({ ...ROOM, at: Date.now(), msgs: many, total: 120 }));
+    }
+    return send("application/json", JSON.stringify(ROOM));
+  }
   if (u.pathname === "/api/wizard") return send("application/json", JSON.stringify(wizardOf(u.searchParams.get("role") || "")));
   if (u.pathname === "/api/turn") return send("application/json", JSON.stringify({ ok: true, html: '<section class="turn-group" data-key="t:t1">box</section>' }));
   if (u.pathname === "/api/tool") return send("application/json", JSON.stringify({ ok: true, html: "tool" }));
@@ -352,6 +362,27 @@ try {
   assert.deepEqual(idLeak, [], "名册缺席时图里不露 id: " + JSON.stringify(idLeak));
   globalThis.__degrade = false;
   await page.waitForFunction(() => [...document.querySelectorAll(".rv-person text.rv-nm")].some((t) => t.textContent === "alice"), null, { timeout: 8000 });
+
+  // detail 的定时刷新不能把滚动位置拽走: 滚到中间, 每 4s 回包都有变化, 等 >10s scrollTop 纹丝不动 (含「用户正滚动时延后」)。
+  globalThis.__bulk = 1;
+  await page.click('.rv-room[data-room="' + G + '"]');
+  await page.waitForFunction(() => document.querySelectorAll("#thread-in .rv-msg").length >= 100, null, { timeout: 8000 });
+  const mid = await page.evaluate(() => { const t = document.querySelector("#thread"); t.scrollTop = Math.round((t.scrollHeight - t.clientHeight) / 2); return t.scrollTop; });
+  await page.waitForTimeout(10500);
+  const mid2 = await page.evaluate(() => ({ top: document.querySelector("#thread").scrollTop, n: window.__ticks }));
+  assert.ok(Math.abs(mid2.top - mid) <= 2, "定时刷新后滚动位置不变: " + mid + " → " + mid2.top);
+  // 请求在路上时用户又滚了一段: 回包渲染后停在用户滚到的位置, 不被拽回发请求前的位置。
+  globalThis.__delay = 1500; globalThis.__reqs = 0;
+  await page.waitForFunction(() => true);
+  const r0 = globalThis.__reqs;
+  await page.waitForFunction(() => document.querySelector("#thread").scrollTop >= 0);
+  while (globalThis.__reqs === r0) await new Promise((r) => setTimeout(r, 50));   // 一发刷新请求已出发、回包还要 1.5s
+  const moved = await page.evaluate(() => { const t = document.querySelector("#thread"); t.scrollTop = t.scrollTop + 400; return t.scrollTop; });
+  await page.waitForTimeout(2600);
+  const after = await page.evaluate(() => document.querySelector("#thread").scrollTop);
+  assert.ok(Math.abs(after - moved) <= 2, "在途请求回来后不把滚动拽回旧位置: " + moved + " → " + after);
+  globalThis.__delay = 0;
+  globalThis.__bulk = 0;
 
   // 侧栏拖拽调宽: 图视角记 wz.sbw.graph (与列表的 wz.sbw.list 互不相干), 图随之重算; 双击恢复默认。
   const sw0 = await page.evaluate(() => ({ side: document.querySelector(".side").getBoundingClientRect().width, svg: +document.querySelector(".rv-graph").getAttribute("width") }));
