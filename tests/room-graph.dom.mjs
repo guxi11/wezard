@@ -81,13 +81,24 @@ const SEARCH = (q) => ({
   msgs: q.includes("配置") ? [{ id: "aa000001.3", room: G, roomName: "群G", roomKind: "wecom-group", group: true, author: who("wizard", A), authorName: "alice", toNames: ["bob"], at: T0 + 3000, snippet: "查一下配置", hits: 1 }] : [],
   msgTotal: q.includes("配置") ? 1 : 0,
 });
-const wizardOf = (role) => {
+const wizardOf = (role, card) => {
+  // 人的名片 (role-view.ts: human:<userid> 解析到它自己, kind human): 没有 uid / session / 宪章。
+  if (/^human:/.test(role)) {
+    const nm = role === "human:U2" ? "李四" : "张三";
+    return { ok: true, at: Date.now(), role: { id: role, kind: "human", name: nm, label: "👤", description: "", clones: [], spawns: [], alive: false, busy: false },
+      uid: "", ledger: true, sessions: [], session: "all", plans: [], schedules: [], charter: null, ...(card ? {} : { all: false, msgs: [], total: 0, rooms: ROOMS }) };
+  }
   const isBob = /worker|bob/.test(role);
   const id = isBob ? "chat:wrG#worker" : "chat:wrG#guide";
   const name = isBob ? "bob" : "alice";
-  return { ok: true, at: Date.now(), role: { id, kind: "wizard", name, label: name, description: name + " 的职责", cwd: "/w/" + name, model: "m", bornAt: 1, chat: "群G", clones: [], spawns: [], forkedFrom: "", alive: true, busy: false, runningUntil: 0 },
+  const full = { ok: true, at: Date.now(), role: { id, kind: "wizard", name, label: name, description: name + " 的职责", cwd: "/w/" + name, model: "m", bornAt: 1, chat: "群G", clones: [], spawns: [], forkedFrom: "", alive: true, busy: false, runningUntil: 0 },
     uid: isBob ? B : A, ledger: true, sessions: [{ sessionId: "s1", start: T0, end: 0, turns: 2, lastTs: T0 + 4000 }], session: "all", all: false, msgs: msgs.map((m) => ({ ...m, roomLabel: m.room === G ? "群G" : DM })), total: 5, rooms: ROOMS, plans: [], schedules: [], stats: undefined,
-    charter: { tokens: 1234, at: T0 } };
+    charter: { tokens: 1234, at: T0 },
+    ...(globalThis.__landing ? { landingRoom: globalThis.__landing } : {}) };
+  if (!card) return full;
+  // card=1: 只回名片 (与 shared/chat-http.ts 一致: 不带 msgs / total / rooms / stream)。
+  const { msgs: _m, total: _t, rooms: _r, all: _a, ...rest } = full;
+  return rest;
 };
 
 const server = createServer((req, res) => {
@@ -111,7 +122,7 @@ const server = createServer((req, res) => {
     }
     return send("application/json", JSON.stringify(ROOM));
   }
-  if (u.pathname === "/api/wizard") return send("application/json", JSON.stringify(wizardOf(u.searchParams.get("role") || "")));
+  if (u.pathname === "/api/wizard") return send("application/json", JSON.stringify(wizardOf(u.searchParams.get("role") || "", u.searchParams.get("card") === "1")));
   if (u.pathname === "/api/turn") return send("application/json", JSON.stringify({ ok: true, html: '<section class="turn-group" data-key="t:t1">box</section>' }));
   if (u.pathname === "/api/tool") return send("application/json", JSON.stringify({ ok: true, html: "tool" }));
   if (u.pathname === "/api/search") return send("application/json", JSON.stringify(SEARCH(u.searchParams.get("q") || "")));
@@ -130,7 +141,7 @@ const browser = await chromium.launch({ channel: "chrome", ...launchOpts }).catc
 try {
   const page = await browser.newPage({ viewport: { width: 1100, height: 800 } });
   const errs = [];
-  page.on("pageerror", (e) => errs.push(String(e)));
+  page.on("pageerror", (e) => errs.push(String(e) + (process.env.WZ_STACK ? "\n" + e.stack : "")));
   // 只有票据 (消息尾部 ✦ 链接) 时开这一轮的主人, 不是一张随机 room。
   await page.goto(base + "/role?id=t-ticket", { waitUntil: "load" });
   // 左栏默认是列表: 「群聊」(有人参与) /「会话」(只有 wizard) 两组, 名片下有搜索入口。
@@ -185,7 +196,7 @@ try {
   await page.waitForSelector(".rv-msg", { timeout: 5000 });
   const counts = await page.evaluate(() => ({
     rooms: document.querySelectorAll(".rv-room").length,
-    directLinks: [...document.querySelectorAll("line.rv-hit")].map((l) => l.getAttribute("data-link")),
+    directLinks: [...document.querySelectorAll('line.rv-hit[data-edge^="d|"]')].map((l) => l.getAttribute("data-link")),
     people: document.querySelectorAll(".rv-person").length,
     msgs: document.querySelectorAll(".rv-msg").length,
     title: (document.querySelector(".rv-ttl") || {}).textContent || "",
@@ -222,9 +233,19 @@ try {
   // 点一条消息的「过程」→ 服务端渲染的过程框进来
   await page.click(".rv-open");
   await page.waitForSelector(".rv-box .turn-group", { timeout: 5000 });
+  const po = await page.evaluate(() => { const b = document.querySelector(".rv-open"), art = b.closest(".rv-msg"); const kids = [...art.children]; return { on: b.classList.contains("on"), exp: b.getAttribute("aria-expanded"), boxIdx: kids.findIndex((e) => e.classList.contains("rv-box")), headIdx: kids.findIndex((e) => e.classList.contains("rv-mh")), bubIdx: kids.findIndex((e) => e.classList.contains("rv-bub")) }; });
+  assert.ok(po.on && po.exp === "true", "展开后「过程」按钮高亮 + aria-expanded: " + JSON.stringify(po));
+  assert.ok(po.boxIdx < po.headIdx && po.headIdx < po.bubIdx, "过程框 → 头 → 气泡: " + JSON.stringify(po));
+  await page.click(".rv-open");
+  assert.equal(await page.evaluate(() => document.querySelector(".rv-open").classList.contains("on")), false, "收起后恢复常态");
+  await page.click(".rv-open");
+  await page.waitForSelector(".rv-box .turn-group", { timeout: 5000 });
 
-  // 点 wizard 节点 → 只看与我相关
+  // 点 wizard 节点 (bob 是 G 的成员): 视角换成 bob, room 选中保留; 再点 ✕ 取消选中 → 看 bob 在所有 room 的记录 (只看与我相关)。
   await page.click('.rv-person[data-node="chat:wrG#worker"]');
+  await page.waitForFunction(() => (document.querySelector("#rb-who .nm") || {}).textContent?.trim() === "bob", null, { timeout: 5000 });
+  assert.equal(await page.evaluate(() => (document.querySelector(".rv-ttl") || {}).textContent), "群G", "成员间换视角: 右栏仍是这个 room");
+  await page.click("#rv-clear");
   await page.waitForFunction(() => (document.querySelector(".rv-ttl") || {}).textContent?.includes("bob"), null, { timeout: 5000 });
   // 左栏顶上必须是「这个人」: 名字 / 状态 / 职责 / 宪章入口 —— room 图不是名片的替代品。
   const card = await page.evaluate(() => ({
@@ -272,6 +293,129 @@ try {
   await page.waitForSelector('.rv-msg.hit[data-id="aa000001.3"]', { timeout: 5000 });
   assert.equal(await page.evaluate(() => document.querySelector(".sk").hidden), true, "选中后面板收起");
 
+  // ══ 视角模型: role = 视角 (永远只有一个人), room = 可选的选中态; 点 room 只换选中, 点人才换 role ══
+  const TA = "chat:wrG#guide", TB = "chat:wrG#worker", enc = encodeURIComponent;
+  const q = () => new URL(page.url()).searchParams;
+  const cardName = () => page.evaluate(() => ((document.querySelector("#rb-who .nm") || {}).textContent || "").trim());
+  const meAuthors = () => page.evaluate(() => [...document.querySelectorAll("#thread-in .rv-msg.me")].map((m) => m.getAttribute("data-id")));
+  const ciOn = () => page.evaluate(() => [...document.querySelectorAll(".rv-list .ci.on")].map((e) => e.getAttribute("data-room")));
+  const viewTab = (v) => page.evaluate((x) => !!document.querySelector('[data-side="' + x + '"]'), v);
+  const goListView = async () => { if (await viewTab("list")) await page.click('[data-side="list"]'); await page.waitForSelector(".rv-list .ci", { timeout: 5000 }); };
+  const goGraphView = async () => { if (await viewTab("graph")) await page.click('[data-side="graph"]'); await page.waitForSelector(".rv-person", { timeout: 5000 }); };
+
+  // a. ?role=A&room=G: 名片是 A (wizard, 不是 room); 列表高亮 G; detail 是 G, A 说的行靠右 (.me); 头上有取消按钮, 标题行写「A 的视角」。
+  await page.goto(base + "/role?id=t-ticket&role=" + enc(TA) + "&room=" + enc(G), { waitUntil: "load" });
+  await page.waitForSelector("#thread-in .rv-msg", { timeout: 5000 });
+  await page.waitForSelector("#thread-in .rv-msg.me", { timeout: 5000 });
+  assert.equal(await cardName(), "alice", "选中 room 时名片仍是 role (wizard 名), 不是 room");
+  assert.deepEqual(await ciOn(), [G], "列表高亮选中的 room");
+  assert.deepEqual(await meAuthors(), ["aa000001.2", "aa000001.3"], "A 说的两行靠右 (.me)");
+  const a1 = await page.evaluate(() => ({ ttl: document.querySelector(".rv-ttl").textContent, sub: document.querySelector(".rv-sub").textContent, clr: !!document.querySelector("#ch-acts #rv-clear"),
+    sess: !!document.querySelector("#rb-who #rb-sp .sp"), me: (document.querySelector("#gside .gs-mem.me .nm") || {}).textContent }));
+  assert.equal(a1.ttl, "群G", "标题 = room 名");
+  assert.match(a1.sub, /👁 alice 的视角/, "sub 行写谁的视角: " + a1.sub);
+  assert.equal(a1.clr, true, "头上有取消选中按钮");
+  assert.equal(a1.me, "alice", "成员列里当前视角那行带 .me");
+  assert.equal(q().get("role"), TA); assert.equal(q().get("room"), G);
+
+  // b. 图: A 节点有视角标记 (.rv-pov); 选中 edge (m|G|p:A) 带 sel, 点它 = 取消选中 (URL room= 空, 无 .on / sel), detail 换成 A 的全部记录; 再点 G 节点 = 重新选中。
+  await goGraphView();
+  const g1 = await page.evaluate((ta) => ({
+    pov: [...document.querySelectorAll(".rv-person")].filter((e) => e.querySelector(".rv-pov")).map((e) => e.getAttribute("data-node")),
+    sel: document.querySelectorAll("line.rv-edge.sel").length,
+    roomOn: !!document.querySelector('.rv-room.on[data-room="' + "chat:wrG" + '"]'),
+    legend: /视角/.test((document.querySelector(".rv-legend") || {}).textContent || ""),
+    selGeo: (() => { const l = document.querySelector("line.rv-edge.sel"), h = document.querySelector('line.rv-hit[data-edge="m|chat:wrG|p:' + ta + '"]');
+      return !!l && !!h && ["x1", "y1", "x2", "y2"].every((k) => l.getAttribute(k) === h.getAttribute(k)); })(),
+  }), TA);
+  assert.deepEqual(g1.pov, [TA], "只有当前 role 的节点带 .rv-pov: " + JSON.stringify(g1));
+  assert.equal(g1.sel, 1, "role → 选中 room 的成员边有 sel (只一条)");
+  assert.equal(g1.selGeo, true, "sel 的就是 m|G|p:A 那条 (与它的点击线同一线段)");
+  assert.equal(g1.roomOn, true, "room 节点 .on");
+  assert.equal(g1.legend, true, "图例有「视角」一项");
+  await page.dispatchEvent('line.rv-hit[data-edge="m|' + G + '|p:' + TA + '"]', "click");
+  await page.waitForFunction(() => !document.querySelector("#ch-acts #rv-clear") && document.querySelector("#ch-acts #rv-all"), null, { timeout: 5000 });
+  const g2a = await page.evaluate(() => ({ sel: document.querySelectorAll("line.rv-edge.sel").length, on: document.querySelectorAll(".rv-room.on, line.rv-edge.on").length, ttl: document.querySelector(".rv-ttl").textContent,
+    pov: document.querySelectorAll(".rv-pov").length }));
+  assert.equal(q().get("room"), "", "取消选中: URL 写 room= 空串 (刷新不会被落点重新选中)"); assert.equal(q().get("role"), TA);
+  assert.equal(q().has("room"), true);
+  assert.equal(g2a.sel + g2a.on, 0, "取消选中后图上没有 on / sel: " + JSON.stringify(g2a));
+  assert.match(g2a.ttl, /alice/, "detail 换成 A 的全部记录");
+  assert.equal(g2a.pov, 1, "视角标记仍在 (role 没变)");
+  assert.equal(await cardName(), "alice", "取消选中不换名片");
+  await page.click('.rv-room[data-room="' + G + '"]');
+  await page.waitForFunction(() => document.querySelector("#ch-acts #rv-clear") && document.querySelectorAll("line.rv-edge.sel").length === 1, null, { timeout: 5000 });
+  assert.equal(q().get("room"), G, "点 room 节点重新选中");
+  // 再点一次选中的 room 节点 = 取消选中 (toggle)
+  await page.click('.rv-room[data-room="' + G + '"]');
+  await page.waitForFunction(() => !document.querySelector("#ch-acts #rv-clear"), null, { timeout: 5000 });
+  await page.click('.rv-room[data-room="' + G + '"]');
+  await page.waitForFunction(() => document.querySelector("#ch-acts #rv-clear"), null, { timeout: 5000 });
+
+  // c. 选中 G 时点 G 的成员 B → room 保留、名片换 B、「我」换人; 点非成员 → room 清空。
+  await goListView();
+  await page.click('#gside .gs-mem[data-node="' + TB + '"]');
+  await page.waitForFunction(() => (document.querySelector("#rb-who .nm") || {}).textContent?.trim() === "bob", null, { timeout: 5000 });
+  assert.equal(q().get("room"), G, "成员间换视角: room 保留"); assert.equal(q().get("role"), TB);
+  await page.waitForFunction(() => [...document.querySelectorAll("#thread-in .rv-msg.me")].map((m) => m.getAttribute("data-id")).join() === "aa000001.4", null, { timeout: 5000 });
+  assert.equal(await page.evaluate(() => (document.querySelector("#gside .gs-mem.me .nm") || {}).textContent), "bob", "成员列的视角标记跟着换");
+  assert.deepEqual(await ciOn(), [G]);
+  // 非成员: detail 里点一个不在 G 里的名字 (消息里的 data-node 同一条路径) → 选中清空, 看它的全部记录。
+  await page.evaluate(([id, name]) => {
+    const el = document.createElement("span"); el.className = "rv-au"; el.setAttribute("data-node", id); el.id = "probe-nonmember"; el.textContent = name;
+    document.querySelector("#thread-in").appendChild(el);
+  }, ["chat:wrNobody#x", "路人"]);
+  await page.click("#probe-nonmember");
+  await page.waitForFunction(() => !document.querySelector("#ch-acts #rv-clear"), null, { timeout: 5000 });
+  assert.equal(q().get("room"), "", "点非成员: room 选中清空"); assert.equal((await ciOn()).length, 0, "列表无高亮");
+  await page.goto(base + "/role?id=t-ticket&role=" + enc(TA) + "&room=" + enc(G), { waitUntil: "load" });
+  await page.waitForSelector("#thread-in .rv-msg.me", { timeout: 5000 });
+
+  // d. 旧链接: ?room=G (无 role) → 名片是 wizard (落点 alice 是成员), 选中 G; ?role=<dm id> → 选中该 dm, 名片是 wizard。
+  await page.goto(base + "/role?id=t-ticket&room=" + enc(G), { waitUntil: "load" });
+  await page.waitForSelector("#thread-in .rv-msg", { timeout: 5000 });
+  await page.waitForFunction(() => (document.querySelector("#rb-who .nm") || {}).textContent?.trim() === "alice", null, { timeout: 5000 });
+  assert.deepEqual(await ciOn(), [G], "旧链接 ?room=G: 选中 G");
+  assert.equal(q().get("role"), TA, "role 补进 URL");
+  await page.goto(base + "/role?id=t-ticket&role=" + enc(DM), { waitUntil: "load" });
+  await page.waitForFunction((id) => document.querySelector('.rv-list .ci.on[data-room="' + id + '"]'), DM, { timeout: 5000 });
+  assert.equal(await cardName(), "alice", "?role=<dm id>: 名片是 wizard 不是 room");
+  assert.equal(q().get("room"), DM); assert.equal(q().get("role"), TA, "dm 的成员里落点 alice 在 → 用它");
+  // 落点 role 不是该 room 的成员 → 用 host: OLD 里只有一个人 (李四, human) 没有 wizard —— 退到第一个 human 成员。
+  await page.goto(base + "/role?id=t-ticket&room=" + enc(OLD), { waitUntil: "load" });
+  await page.waitForFunction(() => /^human:/.test(new URL(location.href).searchParams.get("role") || ""), null, { timeout: 5000 });
+  assert.equal(q().get("role"), "human:U2", "没有 wizard 成员时用第一个 human 成员: " + page.url());
+  assert.equal(q().get("room"), OLD);
+
+  // e. 无 room 参数 + 票据 landingRoom=G 且 role 是成员 → 选中 G (detail link); room= 空 → 不选; 落点 room 不存在 / role 非成员 → 不选。
+  globalThis.__landing = G;
+  await page.goto(base + "/role?id=t-ticket&role=" + enc(TA), { waitUntil: "load" });
+  await page.waitForFunction((id) => document.querySelector('.rv-list .ci.on[data-room="' + id + '"]'), G, { timeout: 5000 });
+  assert.equal(await cardName(), "alice"); assert.equal(q().get("room"), G, "落点只在 boot 用一次, 之后 URL 带 room");
+  await page.goto(base + "/role?id=t-ticket", { waitUntil: "load" });
+  await page.waitForFunction((id) => document.querySelector('.rv-list .ci.on[data-room="' + id + '"]'), G, { timeout: 5000 });
+  await page.goto(base + "/role?id=t-ticket&role=" + enc(TA) + "&room=", { waitUntil: "load" });
+  await page.waitForSelector("#ch-acts #rv-all", { timeout: 5000 });
+  assert.deepEqual(await ciOn(), [], "room= 空: 明确不选, 不被落点重新选中");
+  assert.equal(q().get("room"), "");
+  globalThis.__landing = "chat:wrGone";   // 不存在的 room: 不选
+  await page.goto(base + "/role?id=t-ticket&role=" + enc(TA), { waitUntil: "load" });
+  await page.waitForSelector("#ch-acts #rv-all", { timeout: 5000 });
+  assert.deepEqual(await ciOn(), [], "落点 room 不存在: 不选");
+  globalThis.__landing = "";
+
+  // f. popstate: detail 里点进别人 → history.back() 恢复原 role + room。
+  await page.goto(base + "/role?id=t-ticket&role=" + enc(TA) + "&room=" + enc(G), { waitUntil: "load" });
+  await page.waitForSelector("#thread-in .rv-msg.me", { timeout: 5000 });
+  await page.click('#thread-in .rv-msg[data-id="aa000001.4"] .rv-au');   // bob 的名字 (在 detail 里点, 压返回栈)
+  await page.waitForFunction(() => (document.querySelector("#rb-who .nm") || {}).textContent?.trim() === "bob", null, { timeout: 5000 });
+  assert.equal(q().get("role"), TB); assert.equal(q().get("room"), G);
+  await page.goBack();
+  await page.waitForFunction(() => (document.querySelector("#rb-who .nm") || {}).textContent?.trim() === "alice", null, { timeout: 5000 });
+  assert.equal(q().get("role"), TA, "返回: 视角回到 alice"); assert.equal(q().get("room"), G, "返回: room 选中仍是 G");
+  assert.deepEqual(await meAuthors(), ["aa000001.2", "aa000001.3"]);
+  await goListView();
+
   // 补两间 room 再看图:
   //  · HM = alice + 人 (张三): 有 human 成员, 仍画 room 节点, 不收成直连线;
   //  · DM2 = alice + C: C 不在 world.nodes 里 (活跃过滤会筛掉的那种), 成员也得补进图, 两 wizard 的 dm 画成直连线。
@@ -293,7 +437,7 @@ try {
   await page.waitForSelector(".rv-person", { timeout: 5000 });
   const g2 = await page.evaluate(() => ({
     roomNodes: [...document.querySelectorAll(".rv-room")].map((e) => e.getAttribute("data-room")),
-    links: [...document.querySelectorAll("line.rv-hit")].map((l) => l.getAttribute("data-link")),
+    links: [...document.querySelectorAll('line.rv-hit[data-edge^="d|"]')].map((l) => l.getAttribute("data-link")),
     // 取名字那行文本: 节点的 textContent 还带着悬浮提示 (<title>), 整串比对会对不上名字。
     people: [...document.querySelectorAll(".rv-person")].map((e) => ([...e.querySelectorAll("text")].pop() || e).textContent.trim()),
   }));
@@ -417,6 +561,7 @@ try {
   assert.equal(await vis(".side"), true, "‹ 返回列表");
   assert.equal(await vis(".main"), false);
 
+  assert.equal(errs.length, 0, "全程没有页面脚本错误: " + errs.join(" / "));
   console.log("room-graph.dom: " + JSON.stringify(counts) + " —— 节点数 = room + 参与者, 过程框与 wizard 视图可点开; 左栏名片与深链选中 role 正常");
 } finally {
   await browser.close();
