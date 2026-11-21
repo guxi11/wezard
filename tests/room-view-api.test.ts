@@ -102,6 +102,19 @@ const run = async (): Promise<void> => {
   const w2 = await get(routes.wizard, "id=t-ticket&role=alice&all=1");
   assert.equal(w2.msgs.length, 3 + 2, "W-2 = 它所在两个 room 的全部消息");
   assert.ok(Array.isArray(w1.sessions), "session 分段仍给 (改名 /clear 之后按它切)");
+  assert.equal(w1.landingRoom, "chat:wrG", "票据落点 room: turn 的 channel (chat:wrG#guide → chat:wrG)");
+
+  // ── /api/wizard?card=1: 只回名片 (room 视角下左上角仍是 role) ───────
+  const card = await get(routes.wizard, "id=t-ticket&role=alice&card=1");
+  assert.equal(card.ok, true);
+  assert.equal(card.role.name, "alice", "card=1 仍带 role 名片");
+  assert.equal(card.uid, A.id);
+  for (const k of ["ledger", "sessions", "session", "stats", "charter", "plans", "schedules", "landingRoom"]) assert.ok(k in card || k === "charter", "card=1 带 " + k);
+  assert.equal(card.landingRoom, "chat:wrG");
+  for (const k of ["msgs", "stream", "total", "rooms"]) assert.ok(!(k in card), "card=1 不带 " + k + " (省时)");
+  // 没有 role 参数 = 票据落点那位 (旧链接 / 只有票据)
+  const cardLanding = await get(routes.wizard, "id=t-ticket&card=1");
+  assert.equal(cardLanding.role.id, "chat:wrG#guide", "role 空 → 票据落点 role");
 
   // ── /api/turn: 过程框 ──────────────────────────────────────────────
   const box = await get(routes.turn, "id=t-ticket&turn=t-ticket");

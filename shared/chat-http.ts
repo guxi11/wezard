@@ -27,7 +27,7 @@ import { isTurn } from "./chat-view.js";
 import { buildWorld, EMPTY_FACTS, withChatNameFallback, withData, type WorldFacts } from "./world.js";
 import { buildRoomFact, buildRoomFacts, dutyFacts, roomHistory, whoRef, wizardMessages, wokeRows, type RoomFact, type RoomMsg } from "./room-view.js";
 import { unreadCount, type MsgRow, type RenderNames, type RoomState } from "./room.js";
-import { makeDirectory, roleInfo, roleStats, sessionsOf, spanKey, type SessionSpan } from "./role-view.js";
+import { channelOf, makeDirectory, roleInfo, roleStats, sessionsOf, spanKey, type SessionSpan } from "./role-view.js";
 import { roomMembers } from "./group-members.js";
 import { charterBrief, charterView } from "./charter-view.js";
 import { renderToolBody } from "./detail-render.js";
@@ -376,6 +376,27 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const raw = url.searchParams.get("limit");
       const limit = raw && Number.isFinite(Number(raw)) ? Number(raw) : DEFAULT_LIMIT;
       const states = statesNow();
+      // 票据的落点 room (detail link 进来「选中该 role + 该群聊」): turn 票据 = 这一轮说话的那个聊天, 其余 = 票据 wizard 的 home 群。
+      // 只在它是现存 room 时给; 该 role 是不是它的成员留给前端判 (换 role 时不一定是)。
+      const landing = ticket.turn ? channelOf(ticket.turn) : baseOfKey(ticket.selfTarget);
+      const landingRoom = landing && (states.some((s) => s.id === landing) || (f.rooms ?? []).some((r) => r.id === landing)) ? landing : "";
+      const schedules = f.schedules.filter((x) => (x.owner || x.createdBy || x.target) === role);
+      const card = {
+        ok: true, at: now,
+        role: roleInfo(role, dir, f, roleStats(records, role, now, span), now),
+        uid: uid || "",
+        ledger: !!liveRooms(),
+        sessions: spans.map(wireSpan),
+        session: span ? spanKey(span) : "all",
+        plans: f.plans.filter((p) => p.owner === role && (p.state === "active" || p.state === "paused" || p.state === "completed")).map(publicPlan),
+        // 日程栏与 main 同形: gate 去向 / 出错理由 / 执行目标 / 任务文件都要, 前端按老卡片渲染。
+        schedules,
+        stats: roleStats(records, role, now, span),
+        charter: charterBrief(store.list(), role),
+        ...(landingRoom ? { landingRoom } : {}),
+      };
+      // card=1: 只要名片 (room 视角下左上角仍是 role, 不必为它再算一遍消息与时间轴)。
+      if (url.searchParams.get("card") === "1") { json(res, 200, card); return; }
       const lx = ledgerIndex(states);
       const wire = wireMsg(lx.lookup);
       const hist = uid && states.length
@@ -388,14 +409,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
       const streamMsgs = uid && states.length
         ? wizardMessages(states, uid, { all, limit: 0 }, n).msgs.filter((m) => m.at >= since).map(wire).map(linked)
         : [];
-      const schedules = f.schedules.filter((x) => (x.owner || x.createdBy || x.target) === role);
       json(res, 200, {
-        ok: true, at: now,
-        role: roleInfo(role, dir, f, roleStats(records, role, now, span), now),
-        uid: uid || "",
-        ledger: !!liveRooms(),
-        sessions: spans.map(wireSpan),
-        session: span ? spanKey(span) : "all",
+        ...card,
         all,
         msgs: hist.msgs.map(wire).map(linked),
         // 时间轴: 轮次为主线 (入 / 出 + 过程框), 账本行挂上去; 前端 wizard 视图按它画。
@@ -413,11 +428,6 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
         ...(hist.earlier ? { earlier: hist.earlier } : {}),
         rooms: f.rooms ?? [],
         names: f.names ?? {},
-        plans: f.plans.filter((p) => p.owner === role && (p.state === "active" || p.state === "paused" || p.state === "completed")).map(publicPlan),
-        // 日程栏与 main 同形: gate 去向 / 出错理由 / 执行目标 / 任务文件都要, 前端按老卡片渲染。
-        schedules,
-        stats: roleStats(records, role, now, span),
-        charter: charterBrief(store.list(), role),
       });
     });
   });
