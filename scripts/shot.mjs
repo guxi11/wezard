@@ -4,9 +4,10 @@
 //   node scripts/shot.mjs --role chat:wr…            # 本机守护进程的 rolepage, 票据自动取
 //   node scripts/shot.mjs --role .Iris --mobile       # 窄屏 (390×844)
 //   node scripts/shot.mjs --role chat:wr… --selector '.rv-graph' --wait-for '.rv-room'
+//   node scripts/shot.mjs --role .Iris --room chat:wr…  # 站在 Iris 的视角、选中那个 room; --room '' = 明确不选 (不带 --room = 走票据落点)
 //   node scripts/shot.mjs --url http://127.0.0.1:8080/x.html --full --out /tmp/x.png
 //
-// 选项: --role <名字|target|chat:…>  --url <完整 URL> (与 --role 二选一)  --mobile  --full (整页)
+// 选项: --role <名字|target|chat:…>  --room <roomId|空串> (拼进 URL 的 room=; 缺省不带)  --url <完整 URL> (与 --role 二选一)  --mobile  --full (整页)
 //       --click <css> (截图前先点它, 可重复; 如切到关系图)  --selector <css> (只截该元素)  --wait-for <css>  --wait <ms, 默认 1500>  --scale <dsf, 默认 1>
 //       --base <http://host:port> (默认本机守护进程回环; 想看 svr 就传它)  --out <png 路径>
 // 输出: 末行打印 png 的绝对路径 (默认 ~/.wezard/shots/)。送图给人: send_file 发进群。
@@ -33,7 +34,7 @@ const redact = (s) => s.replace(/([?&]id=)[^&#\s]+/g, "$1<ticket>");
 
 const { values: o } = parseArgs({
   options: {
-    role: { type: "string" }, url: { type: "string" }, base: { type: "string" },
+    role: { type: "string" }, room: { type: "string" }, url: { type: "string" }, base: { type: "string" },
     mobile: { type: "boolean", default: false }, full: { type: "boolean", default: false },
     selector: { type: "string" }, click: { type: "string", multiple: true }, "wait-for": { type: "string" }, wait: { type: "string", default: "1500" },
     scale: { type: "string", default: "1" }, out: { type: "string" }, help: { type: "boolean", short: "h", default: false },
@@ -76,6 +77,7 @@ const target = (() => {
   if (o.url) return o.url;
   const base = (o.base ?? `http://${cfg.host === "0.0.0.0" ? "127.0.0.1" : cfg.host}:${cfg.port}`).replace(/\/$/, "");
   const q = new URLSearchParams({ id: latestTicket(cfg.stateDir), role: o.role.replace(/^\./, "") });
+  if (o.room !== undefined) q.set("room", o.room);   // 空串也写: room= 是「明确不选」, 与缺省 (走落点) 不同
   return `${base}/role?${q}`;
 })();
 
