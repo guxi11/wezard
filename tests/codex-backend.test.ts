@@ -33,8 +33,10 @@ assert.equal(normalizeCodex({ type: "turn_context", payload: { model: "gpt-6.1-s
 assert.deepEqual(normalizeCodex({ type: "token_usage_record", payload: { usage: { input_tokens: 100, cached_input_tokens: 70, output_tokens: 8 } } })?.message?.usage,
   { input_tokens: 100, cache_creation_input_tokens: 0, cache_read_input_tokens: 70, output_tokens: 8 });
 assert.equal(normalizeCodex({ type: "event_msg", payload: { type: "token_count", info: {} } }), null);
-assert.equal(resolveCliBackend({ defaultCli: "codex", cliBackends: { codex: { bin: "/opt/codex" } } }).bin, "/opt/codex");
-assert.equal(resolveCliBackend({ claudeBin: "/opt/codex" }).name, "codex");
+// bin 覆盖已在 043219c 退役: 启动命令只按内置可执行名在 PATH 上找, 配置里写路径不再生效。
+assert.equal(resolveCliBackend({ defaultCli: "codex" }).bin, "codex");
+assert.equal(resolveCliBackend({ defaultCli: "codex" }).name, "codex");
+assert.equal(resolveCliBackend({}).name, "claude");
 const root = mkdtempSync(join(tmpdir(), "wezard-codex-"));
 try {
   const dir = join(root, "2026", "10", "11");
@@ -56,6 +58,6 @@ try {
   assert.equal(rounds[0]?.[0]?.env?.from, ".wezard-old");
   assert.equal(rounds[0]?.[0]?.env?.private, true);
   assert.equal(rounds[0]?.at(-1)?.text, "RESULT: checked");
-  assert.equal(ConfigSchema.parse({ bot: { botId: "id", secret: "secret" }, wrc: { defaultCli: "codex" } }).wrc.claudeBin, "codex");
+  assert.equal(ConfigSchema.parse({ bot: { botId: "id", secret: "secret" }, wrc: { defaultCli: "codex" } }).wrc.defaultCli, "codex");
 } finally { rmSync(root, { recursive: true, force: true }); bindCliBackends({}); }
 console.log("Codex backend checks passed");

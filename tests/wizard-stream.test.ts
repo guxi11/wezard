@@ -30,7 +30,7 @@ const turn: TurnDetailRecord = {
     { t: "text", body: "跑完了", ts: now - 1000, final: true },
   ],
 } as TurnDetailRecord;
-// 同 room 里别人的一句, 不点名、不唤醒 A: 只在 W-2 里。
+// 同 room 里别人的一句, 不点名、不唤醒 A: 不进 A 的「与它相关」视图。
 const other = say(G, { author: B, kind: "say", text: "别人的话", origin: "tool" }, { now: now - 2000 });
 assert.ok(!other.wake.includes(A.id), "fixture: 别人的话不唤醒 A");
 // 这一轮真写进账本的那一行 (chat_reply) —— 必须挂到 t1 的出消息上, 不另起一条。
@@ -94,9 +94,10 @@ const run = async (): Promise<void> => {
   assert.equal(late.stream[0].kind, "ledger", "没有对应轮次的行仍独立成行");
   assert.equal(late.stream[0].row.id, far.id);
 
-  // W-2 (它所在 room 的全部消息) 不会把别人的轮次也画成它的: 时间轴仍只折叠它自己的轮次。
+  // W-2「全部消息」已在 762482b 退役: all=1 不再被认, 页面只给「与它相关」那一份, 时间轴只折叠它自己的轮次。
   const w2 = await get(routes.wizard, "id=t1&role=alice&all=1");
-  assert.ok(w2.stream.length > late.stream.length, "W-2 多出 room 里的其他行");
+  assert.equal(w2.stream.length, late.stream.length, "all=1 被忽略, 与默认视图同一份");
+  assert.ok(!JSON.stringify(late.stream).includes("别人的话"), "别人不点名的话不进它的视图");
   assert.equal(w2.stream.filter((r: { kind: string }) => r.kind === "out").length, 2, "别人的话不成轮次卡片 (只有它自己的 t1 / t2)");
 
   console.log("wizard-stream: 入/出 + 过程框 + 账本行挂轮 + 账本晚挂载可读");

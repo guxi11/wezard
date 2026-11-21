@@ -19,14 +19,14 @@
 
 ## 测试基线 (2026-11-22, 逐个 `npx tsx tests/<f>`, 120s 超时)
 
-**109 / 113 通过** (2026-11-22 加 room-gone 后复跑; 早先 108 / 112、102 / 106)。失败 4 个: `codex-hooks` / `codex-session` (本机没装 `codex`, spawn ENOENT, 环境问题) · `codex-backend` (断言 `'/opt/codex'` 实得 `'codex'`, 待查) · `wizard-stream` (「W-2 多出 room 里的其他行」, 疑为 `762482b` 删掉「全部消息」all 链路后断言没跟上, 属 rolepage detail 线)。每次改动后对照, 通过数不能减少。
+**111 / 113 通过** (2026-11-22)。只剩 `codex-hooks` / `codex-session` 失败: 本机没装 `codex`, spawn ENOENT, 属环境问题。`codex-backend` 与 `wizard-stream` 已修: 两处都是断言跟不上有意的退役 (`043219c` 删 bin / claudeBin 覆盖; `762482b` 删「全部消息」all=1), 不是回归。每次改动后对照, 通过数不能减少。
 
 ## 优先级清单
 
 ### P0 — 正确性 / 直接误导模型
 - [x] **提醒文案指向已退役的 `wait_peer`** —— 人话里点名 wizard 时注入的 mention 提醒 (`daemon/peers.ts` `peerMentionPart`) 让模型调用一个已不存在的工具。改成 `chat_ask · peek_peer`。(本轮)
 - [ ] **charter 仍列 `wait_peer`** (`daemon/wizard.ts` 「我能做什么」与「派完就放手」两行)。工具已从 `mcp/tools.ts` 删除, 模型照 charter 去调会失败。改 charter 文案会触发全体 handoff 提醒 → **待拍板** (见下)。
-- [ ] 测试基线里的真失败: `codex-backend` 断言 (是否真回归) · `wizard-stream` W-2 断言 (rolepage detail 线, 先问 `IrisIrwin` 是否在它手上)。
+- [x] 测试基线里的失败: `codex-backend` / `wizard-stream` 都是过时断言 (对应功能有意退役), 已改为断言现行行为。(本轮)
 
 ### P1 — 死代码 / 包体 / 可靠性
 - [x] **chat_ask 给已结束 (stop_wizard end) 的 wizard 静默丢失**: hub 认 `gone` → 给提问者写 `undelivered` 系统行; 其他失败打 warn。(本轮)
@@ -64,6 +64,7 @@
 | 2026-11-22 | room_invite/room_approve `history` 参数 (none/N/from:id/all); dm 显示统一 (多人列全员); ensureDmRoom 补回 / 混入第三人改落 {A,B} adhoc。coder QuinnQuincy, 白板 reviewer RoseReed 通过。遗留: join-req 路径不校验 history; rejoin 不写 seen 未细查; 多个 {A,B} adhoc 取最近活动会合流 | `d986e7a` |
 | 2026-11-22 | `daemon/peers.ts` 删回执时代死代码 ~260 行 (我自己做: 活着的 wizard 已 4 个, 不起新人) | 见 git log |
 | 2026-11-22 | room hub: 投给已结束 wizard 的 duty 不再静默丢失 (`gone` → `undelivered` 系统行给提问者; 其他失败打 warn)。起因: IrisIrwin 被 /kill 后两次派活都没投进去 | 见 git log |
+| 2026-11-22 | 测试基线 109→111 / 113: `codex-backend` (bin 覆盖已退役) 与 `wizard-stream` W-2 (all=1 已退役) 改断言现行行为 | 见 git log |
 
 ## 已知坑
 
