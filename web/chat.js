@@ -1664,6 +1664,12 @@
     }
     return shortRoom(r.id);
   };
+  // 🏠 = 这个 wizard 的主群: target key 的 base principal 那个聊天 (不是创建者 —— 创建者另起「👤 创建者」)。
+  // 名字取 room 列表里显示的那个 (host 起的别名优先), 没有才用服务端给的聊天名; 都没有就不画, 不拿 id 凑数。
+  var homeFact = function (w) {
+    var hr = w.chatId ? roomById(w.chatId) : null, nm = hr ? roomNameOf(hr, w.chat) : w.chat;
+    return nm ? fact('🏠', '主群 ' + nm, '主群: ' + nm + ' (这个 wizard 常驻的聊天; ' + (w.chatId || '') + ')') : '';
+  };
   var rolebar = function () {
     var el = $('#rb-who');
     if (!el) return;
@@ -1689,7 +1695,8 @@
     var nd = nodeOf(w.id);
     var facts = [
       tip,
-      w.chat ? fact('🏠', w.chat, 'home 群: ' + w.chat) : '',
+      homeFact(w),
+      w.parent && w.parent.name ? fact('👤', '创建者 ' + w.parent.name, '创建者: ' + w.parent.name + ' (spawn / clone 出它的 wizard, 管理上的 parent)') : '',
       born ? fact('🐣', fmtAgo(born), '出生于 ' + fmtDay(born)) : '',
       cb ? fact('📜', '≈' + fmtTok(cb.tokens), '宪章 ≈' + fmtTok(cb.tokens) + ' token · ' + fmtClock(cb.at) + ' 压进系统提示 · 点开看全文', 'charter') : '',
       w.cwd ? fact('🗂️', shortCwd(w.cwd), w.cwd) : '',

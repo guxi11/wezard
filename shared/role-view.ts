@@ -336,8 +336,10 @@ export interface RoleInfo extends RoleStatus {
   cwd: string;
   model: string;
   bornAt?: number;
-  /** home 聊天的名字。 */
+  /** home 聊天的名字 (wizard target key 的 base principal 那个聊天 = 它的主群; 不是 creator —— creator 在 parent)。 */
   chat: string;
+  /** home 聊天的 id (base principal); 前端拿它在 room 列表里取显示名。非 wizard = ""。 */
+  chatId: string;
   parent?: { id: string; name: string; label: string };
   /** 分身: 从某个 session 节点 fork 出来的, 开局带着那一刻的上下文。 */
   clones: Array<{ id: string; name: string; label: string }>;
@@ -364,6 +366,7 @@ export const roleInfo = (id: string, dir: Directory, facts: WorldFacts, stats: T
     model: f?.model || stats?.model || "",
     bornAt: f?.bornAt,
     chat: wiz ? dir.chatName(baseOfKey(id)) : "",
+    chatId: wiz ? baseOfKey(id) : "",
     parent: f?.parent ? ref(f.parent) : undefined,
     clones: kids.filter((w) => w.clonedFrom).map((w) => ref(w.target)),
     spawns: kids.filter((w) => !w.clonedFrom).map((w) => ref(w.target)),

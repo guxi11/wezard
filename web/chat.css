@@ -96,7 +96,7 @@ body.sb-dragging { cursor: col-resize; user-select: none }
 .rolebar .job.open { display: block; -webkit-line-clamp: unset; overflow: visible }
 .rolebar .job.open::after { content: "▴" }
 /* 名字下的描述: 📁 cwd · 🏠 home · 🐣 出生, 一段低调的灰字, 排不下就整项落到下一行。 */
-.rolebar .facts { display: flex; flex-wrap: wrap; gap: 0 10px; font-size: 11.5px; line-height: 1.45; color: var(--faint); min-width: 0 }
+.rolebar .facts { display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: 11.5px; line-height: 1.75; color: var(--faint); min-width: 0 }
 /* 每条自身不折行; 独占一行仍超宽 (长路径 / 长群名) 才省略。 */
 .rolebar .facts span { white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis }
 .rolebar .facts .fx { cursor: pointer }
