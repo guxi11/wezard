@@ -77,7 +77,7 @@ export const renderChatPage = (): string =>
   </aside>
   <main class="main">
     <header class="chathead" id="chathead">
-      <button class="back" id="tb-back" aria-label="返回会话列表">‹</button>
+      <button class="back" id="tb-back" aria-label="返回会话列表"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3 5 8l5 5"/></svg></button>
       <div class="ch-who" id="ch-who"></div>
       <div class="ch-acts" id="ch-acts"></div>
     </header>

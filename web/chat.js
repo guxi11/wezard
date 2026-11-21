@@ -1900,13 +1900,16 @@
   S.stack = []; S.fromMain = false;
   document.addEventListener('click', function (e) { S.fromMain = !!(e.target && e.target.closest && e.target.closest('.main')); }, true);
   var chatheadEl = $('#chathead');
+  var BACK_SVG = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3 5 8l5 5"/></svg>';
+  var tbb = $('#tb-back');
+  if (tbb && !tbb.querySelector('svg')) tbb.innerHTML = BACK_SVG;
   var syncJb = function () {
     if (!chatheadEl) return;
     var top = S.stack[S.stack.length - 1], on = !!top && top.k === 'view', jb = chatheadEl.querySelector('#tb-jb');
     if (!on) { if (jb) jb.remove(); return; }
     if (!jb) {
       jb = document.createElement('button');
-      jb.className = 'back jb'; jb.id = 'tb-jb'; jb.setAttribute('aria-label', '返回上一个视图'); jb.title = '返回'; jb.textContent = '←';
+      jb.className = 'back jb'; jb.id = 'tb-jb'; jb.setAttribute('aria-label', '返回上一个视图'); jb.title = '返回'; jb.innerHTML = BACK_SVG;
       jb.onclick = function () { history.back(); };
       chatheadEl.insertBefore(jb, chatheadEl.firstChild);
     }
