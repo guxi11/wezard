@@ -20,6 +20,7 @@
 // 「点一条消息就切到它的作者 / 对端」—— 对端可能住在任何一个 room 里, 所以任一有效
 // 票据可以看全部 role (单用户部署, 名册本来就对每个 wizard 敞开)。
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { gzipSync } from "node:zlib";
 import type { URL } from "node:url";
 import { baseOfKey, sameBot } from "./session-label.js";
 import { isTurn } from "./chat-view.js";
@@ -123,11 +124,26 @@ const botFacts = (f: WorldFacts, self: string): WorldFacts => {
 };
 const viewerOf = (t: Ticket): string => t.selfTarget;
 
+/** 浏览器收 gzip 吗 (ServerResponse.req 就是这条请求)。远端 svr 的 room / world 回包 5~70KB, 资源 200KB+, 全文本, 压后 1/5 ~ 1/8。 */
+const wantsGzip = (res: ServerResponse): boolean => /\bgzip\b/i.test(String(res.req?.headers["accept-encoding"] ?? ""));
+const GZIP_MIN = 1024;
+const sendText = (res: ServerResponse, body: string | Buffer, gz?: () => Buffer): void => {
+  const raw = typeof body === "string" ? Buffer.from(body) : body;
+  if (raw.length >= GZIP_MIN && wantsGzip(res)) {
+    const z = gz ? gz() : gzipSync(raw);
+    res.setHeader("content-encoding", "gzip");
+    res.setHeader("vary", "accept-encoding");
+    res.end(z);
+    return;
+  }
+  res.end(raw);
+};
+
 const json = (res: ServerResponse, status: number, body: unknown): void => {
   res.statusCode = status;
   res.setHeader("content-type", "application/json; charset=utf-8");
   res.setHeader("cache-control", "no-store");
-  res.end(JSON.stringify(body));
+  sendText(res, JSON.stringify(body));
 };
 
 /** 票据自带的默认落点: turn/mark 的 target, 聊天票据的 base (= 那个聊天的默认 wizard)。 */
@@ -289,6 +305,7 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
     res.end(renderChatPage());
   };
 
+  const gzCache = new Map<string, Buffer>();
   // 前端资源: ETag 跟着文件 mtime 走 —— 改一次 web/chat.js 浏览器就重新取一次。
   const asset = (make: () => Asset): SimpleHandler => (req, res) => {
     const a = make();
@@ -297,7 +314,8 @@ export const createChatRoutes = (store: DetailStore, facts?: WorldFactsProvider,
     if (req.headers["if-none-match"] === a.etag) { res.statusCode = 304; res.end(); return; }
     res.statusCode = 200;
     res.setHeader("content-type", a.type);
-    res.end(a.body);
+    // 资源按 etag 缓存压缩结果: 压一次, 之后每个浏览器直接发。
+    sendText(res, a.body, () => { const k = a.etag; let z = gzCache.get(k); if (!z) { z = gzipSync(typeof a.body === "string" ? Buffer.from(a.body) : a.body); if (gzCache.size > 16) gzCache.clear(); gzCache.set(k, z); } return z; });
   };
 
   const withTicket = (handler: (t: Ticket, url: URL, res: ServerResponse) => void): SimpleHandler => (_req, res, url) => {

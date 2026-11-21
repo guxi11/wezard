@@ -151,8 +151,11 @@
     var h = s.indexOf('#');
     return h >= 0 && h < s.length - 1 ? s.slice(h + 1) : '…';
   };
+  // W.nodes 一次拉一份新数组: 按引用建一张 target → node 表, 列表 31 行 × 4 头像不再各扫一遍 57 个节点。
+  var nodeIdx = null, nodeIdxOf = null;
   var nodeOf = function (id) {
-    for (var i = 0; i < W.nodes.length; i++) if (W.nodes[i].target === id) return W.nodes[i];
+    if (nodeIdxOf !== W.nodes) { nodeIdxOf = W.nodes; nodeIdx = {}; W.nodes.forEach(function (n) { if (!(n.target in nodeIdx)) nodeIdx[n.target] = n; }); }
+    if (nodeIdx[id]) return nodeIdx[id];
     var uid = id.indexOf('uid:') === 0 ? id.slice(4) : '';
     var human = id.indexOf('human:') === 0;
     var name = uid ? (W.names[uid] || uid) : human ? (W.names[id.slice(6)] || id.slice(6)) : id;
@@ -276,6 +279,12 @@
     return { nodes: nodes, links: links };
   };
   // 把 model 并进常驻节点表: 已有的沿用对象 (坐标 / 速度 / 钉子都在), 新的落在已就位邻居的旁边。
+  // 图所在面板的尺寸: 每次 reconcile / viewBox 都现读 clientWidth 会把刚改的 DOM 强制同步排版一遍 (点 room 一次两趟, 24~116ms)。
+  // 缓存一份, 由 ResizeObserver (尺寸真变了才触发) 刷新; 还没有缓存时读一次。
+  var panelBox = function () {
+    if (!S.panelBox) S.panelBox = { w: convsEl.clientWidth, h: convsEl.clientHeight };
+    return S.panelBox;
+  };
   var reconcileGraph = function (model) {
     var old = S.gnodes || {}, next = {}, fresh = [];
     var nb = {};
@@ -284,8 +293,8 @@
       var o = old[n.id];
       if (o) { o.ref = n.ref; o.w = n.w; o.r = n.r; next[n.id] = o; } else { next[n.id] = n; fresh.push(n); }
     });
-    var panelW = Math.max(240, (convsEl.clientWidth || 332) - 12);
-    var panelH = Math.max(300, (convsEl.clientHeight || 620) - 30);
+    var panelW = Math.max(240, (panelBox().w || 332) - 12);
+    var panelH = Math.max(300, (panelBox().h || 620) - 30);
     var hw = Math.max(104, Math.min(panelW * 0.46, Math.sqrt(model.nodes.length) * 26));
     var hh = hw * Math.max(1.4, Math.min(2.2, panelH / panelW));
     fresh.forEach(function (n, i) {
@@ -585,8 +594,8 @@
     var cxm = (minX + maxX) / 2 + (S.gpx || 0), cym = (minY + maxY) / 2 + (S.gpy || 0);
     var z = S.gzoom || 1;
     var vw = Math.max(80, maxX - minX + pad * 2) / z, vh = Math.max(80, maxY - minY + pad * 2) / z;
-    var width = Math.max(240, (convsEl.clientWidth || 332) - 12);
-    var height = Math.max(260, (convsEl.clientHeight || 620) - 62);
+    var width = Math.max(240, (panelBox().w || 332) - 12);
+    var height = Math.max(260, (panelBox().h || 620) - 62);
     var aspect = width / height;
     if (vw / vh < aspect) vw = vh * aspect; else vh = vw / aspect;
     return { box: [cxm - vw / 2, cym - vh / 2, vw, vh], width: width, height: height };
@@ -751,10 +760,10 @@
     return '<span class="av mosaic n' + ms.length + '" aria-hidden="true">' + ms.map(function (m) { return '<i>' + esc(memberLabel(m)) + '</i>'; }).join('') + '</span>';
   };
   var roomItem = function (r) {
-    var on = D.mode === 'room' && D.roomId === r.id;
+    // 选中态不进 HTML (切 room 时整张列表因此重建 ~25-80ms): 由 syncListSel 单独切 class。
     var pv = r.last ? (r.last.authorName ? r.last.authorName + ': ' : '') + r.last.preview : '';
     var nm = r.kind === 'dm' || r.kind === 'adhoc' ? 'wizard' : 'chat';
-    return '<button class="ci' + (on ? ' on' : '') + '" data-room="' + esc(r.id) + '" title="' + esc(roomTitle(r) + ' · ' + (r.members || []).length + ' 人') + '">' +
+    return '<button class="ci" data-room="' + esc(r.id) + '" title="' + esc(roomTitle(r) + ' · ' + (r.members || []).length + ' 人') + '">' +
       roomAvatar(r) + '<span class="b">' +
       '<span class="l1"><span class="t"><span class="nm ' + nm + '">' + esc(roomTitle(r)) + '</span></span>' +
         '<span class="ts">' + esc(r.last ? fmtAgo(r.last.at) : '') + '</span></span>' +
@@ -774,12 +783,21 @@
       sec('会话', '只有 wizard: dm / adhoc', convs) || '<h2><span>群聊</span><span>0</span></h2>';
     var html = '<div class="rv-list">' + body.replace('</h2>', sideTools() + '</h2>') + '</div>';
     // 没变就不碰 DOM: 定时刷新会把列表的滚动与焦点蹭掉。
-    if (convsEl._html === html) return;
-    var top = convsEl.querySelector('.rv-list') ? convsEl.scrollTop : 0;
-    convsEl._html = html; convsEl.innerHTML = html;
-    convsEl.scrollTop = top;
-    bindHead();
-    convsEl.querySelectorAll('[data-room]').forEach(function (e) { e.onclick = function () { goRoom(e.getAttribute('data-room')); }; });
+    if (convsEl._html !== html) {
+      var top = convsEl.querySelector('.rv-list') ? convsEl.scrollTop : 0;
+      convsEl._html = html; convsEl.innerHTML = html;
+      convsEl.scrollTop = top;
+      bindHead();
+      convsEl.querySelectorAll('[data-room]').forEach(function (e) { e.onclick = function () { goRoom(e.getAttribute('data-room')); }; });
+    }
+    syncListSel();
+  };
+  var syncListSel = function () {
+    var cur = D.mode === 'room' ? D.roomId : '';
+    convsEl.querySelectorAll('.ci').forEach(function (e) {
+      var on = !!cur && e.getAttribute('data-room') === cur;
+      if (e.classList.contains('on') !== on) e.classList.toggle('on', on);
+    });
   };
   // 列表不需要图那么宽: 左栏收窄, 把宽度还给 chat detail (图仍占半屏, 力导向要地方)。
   // ── 侧栏宽度: 拖右缘调, 「列表」与「图」两种视角各记各的 (localStorage wz.sbw.list / wz.sbw.graph); 双击恢复默认; 窄屏不启用。
@@ -818,6 +836,7 @@
     var app = $('#app');
     if (app) app.classList.toggle('side-list', S.view !== 'graph');
     applySbw();
+    if (S.pbView !== S.view) { S.pbView = S.view; S.panelBox = null; }   // 列表 / 图两种视角的侧栏宽度不同: 换视角后重读一次面板尺寸
     if (S.view === 'graph') renderGraph(); else renderList();
   };
 
@@ -1596,19 +1615,33 @@
     restoreOpen();
     renderSide();
   };
-  var loadRoom = function (id, limit) {
+  // 服务端回包 → D: 名册缺席时拿 id 当名字 (成员 / 发话人), 一律过一遍 safeName, 名册到了下一轮取回来就是真名。
+  var applyRoom = function (r) {
+    var fixM = function (ms) { return (ms || []).map(function (m) { return m && m.name && ID_LIKE.test(m.name) ? Object.assign({}, m, { name: safeName(m.name) }) : m; }); };
+    if (r.room && r.room.members) r.room = Object.assign({}, r.room, { members: fixM(r.room.members) });
+    D.room = r.room; D.label = r.label || ''; D.members = fixM(r.members); D.duties = r.duties || [];
+    D.msgs = (r.msgs || []).map(function (m) { return m && m.authorName && ID_LIKE.test(m.authorName) ? Object.assign({}, m, { authorName: safeName(m.authorName) }) : m; });
+    D.total = r.total || 0; D.earlier = r.earlier || ''; D.at = r.at;
+  };
+  // 每个 room 最近一次的回包: 点开时先用它即时渲染 (不等网络), 后台照常取新的盖上去。只存 60 条的首页, 最多 12 个 room。
+  var roomCache = {}, roomCacheOrder = [];
+  var cacheRoom = function (id, r) {
+    if (!roomCache[id]) { roomCacheOrder.push(id); if (roomCacheOrder.length > 12) delete roomCache[roomCacheOrder.shift()]; }
+    roomCache[id] = r;
+  };
+  var loadRoom = function (id, limit, instant) {
     D.mode = 'room'; D.roomId = id; D.role = ''; D.mode0 = 'room'; S.charter = null; resetPane(); syncUrl();
     // 后发先至: 定时刷新的那一发晚于点开 / 搜索跳转回来时, 丢掉它 (不然会把视图拽回旧 room / 拽回底部)。
     var gen = S.roomGen = (S.roomGen || 0) + 1;
+    var shown = false;
+    if (instant && roomCache[id] && roomCache[id].ok) { applyRoom(roomCache[id]); renderRoom(); scrollBottom(); shown = true; }
     return api('api/room', { room: id, limit: limit || 60 }).then(function (r) {
       if (gen !== S.roomGen) return false;
       if (!r.ok) { inner.innerHTML = '<div class="rv-none">' + esc(r.error || '加载失败') + '</div>'; if (gside) gside.hidden = true; return; }
-      // 服务端在名册缺席时拿 id 当名字 (成员 / 发话人): 一律过一遍 safeName, 名册到了下一轮取回来就是真名。
-      var fixM = function (ms) { return (ms || []).map(function (m) { return m && m.name && ID_LIKE.test(m.name) ? Object.assign({}, m, { name: safeName(m.name) }) : m; }); };
-      if (r.room && r.room.members) r.room = Object.assign({}, r.room, { members: fixM(r.room.members) });
-      D.room = r.room; D.label = r.label || ''; D.members = fixM(r.members); D.duties = r.duties || [];
-      D.msgs = (r.msgs || []).map(function (m) { return m && m.authorName && ID_LIKE.test(m.authorName) ? Object.assign({}, m, { authorName: safeName(m.authorName) }) : m; }); D.total = r.total || 0; D.earlier = r.earlier || ''; D.at = r.at;
-      renderRoom(); scrollBottom();
+      if (!limit || limit <= 60) cacheRoom(id, r);
+      var pinned = shown ? scrollState().pinned : true;
+      applyRoom(r);
+      renderRoom(); if (pinned) scrollBottom();
     });
   };
   var loadWizard = function (role, keepScroll) {
@@ -1671,7 +1704,8 @@
     var back = e.mode === 'room' ? loadRoom(e.room, 60) : loadWizard(e.role, true);
     Promise.resolve(back).then(function () { thread.scrollTop = e.top; });
   });
-  var goRoom = function (id, limit) { pushNav(); setReading(true); markSeen(id); if (S.view === 'graph' && S.gdom) renderGraph(); return loadRoom(id, limit); };
+  // 先 loadRoom (同步改 D.mode, 选中态到位) 再重画图一次; 之前先画再 load, 取回来 renderRoom 又画一遍。
+  var goRoom = function (id, limit) { pushNav(); setReading(true); markSeen(id); var p = loadRoom(id, limit, true); if (S.view === 'graph' && S.gdom) renderGraph(); return p; };
   var goWizard = function (role, keepScroll) { pushNav(); setReading(true); return loadWizard(role, keepScroll); };
   var tbBack = $('#tb-back');
   if (tbBack) tbBack.onclick = function () {
@@ -1972,6 +2006,7 @@
   if (window.ResizeObserver) {
     var roTimer = 0;
     new ResizeObserver(function () {
+      S.panelBox = { w: convsEl.clientWidth, h: convsEl.clientHeight };
       clearTimeout(roTimer);
       roTimer = setTimeout(function () { if (S.view === 'graph' && S.gdom && S.g) renderGraph(); }, 80);
     }).observe(convsEl);
