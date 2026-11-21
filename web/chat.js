@@ -277,7 +277,8 @@
   var graphModel = function (rooms, people, directs) {
     var nodes = [], links = [], seen = {}, have = {};
     rooms.forEach(function (r) {
-      var w = Math.max(62, Math.min(132, 30 + roomLabelOf(r).length * 6.6));
+      // 胶囊宽按 12pt (16px) 字估: 图标 + 名字 (最多 gNameMax 个字) 每字 ~9.3px, 两侧各留 8。
+      var w = Math.max(70, 40 + Math.min(gNameMax() + 1, roomLabelOf(r).length) * 9.3);
       nodes.push({ id: 'r:' + r.id, ref: r, isRoom: true, w: w, r: Math.max(w, 22) / 2 });
     });
     people.forEach(function (p) {
@@ -346,25 +347,25 @@
   // 斥力 + 弹簧 + 交叉力 + 椭圆墙 + 随机多起点 (几项互相打架, 真实拓扑上 10~30 条交叉、叶子叠成一团、每次增量整图挪动)
   // 少了所有调不平的魔数: 一份确定的起点 (径向树) 跑到收敛就是结果, 增量从当前位置接着收敛, 只动该动的。
   // 节点不重叠由一个包围盒碰撞项单独负责 (含名字标签, 按缩放后的字号算)。
-  var GK = 54;   // 一条普通边的目标长度 (世界单位)
+  var GK = 70;   // 一条普通边的目标长度 (像素, 间距倍数 S.gs = 1 时): 名字是 16px 字, 一个名字 ~70~100px 宽, 边要比它长一截
   var gDeg = function (g) {
     if (g._deg) return g._deg;
     var d = {};
     g.links.forEach(function (l) { d[l.s.id] = (d[l.s.id] || 0) + 1; d[l.t.id] = (d[l.t.id] || 0) + 1; });
     return (g._deg = d);
   };
-  // 边的目标长度: 枢纽的边要长到一圈放得下它所有的邻居 (每个邻居约占 34 单位弧长), 否则叶子只能叠在一起;
+  // 边的目标长度: 枢纽的边要长到一圈放得下它所有的邻居 (每个邻居约占 44px 弧长, 名字上下错开), 否则叶子只能叠在一起;
   // room 胶囊比圆点宽, 边从胶囊中心出发, 补上胶囊的半宽; host 边略短, 让 host 贴着自己的 room。
   var gLen = function (g, l) {
     var dg = gDeg(g), m = Math.max(dg[l.s.id] || 1, dg[l.t.id] || 1);
     var ex = (l.s.isRoom ? l.s.w / 2 - 10 : 0) + (l.t.isRoom ? l.t.w / 2 - 10 : 0);
-    return Math.max(GK, m * 34 / (2 * Math.PI)) * (l.host ? 0.85 : 1) + ex;
+    return (Math.max(GK, m * 44 / (2 * Math.PI)) * (l.host ? 0.85 : 1) + ex) * (S.gs || 1);
   };
   // 目标距离矩阵 (Floyd, n ≤ 一两百时几毫秒): 拓扑或 room 宽度没变就沿用上一份。不连通的块按「比最远还远一点」摆在旁边。
   var gPrep = function (g) {
     if (g._D) return g._D;
     var ns = g.nodes, n = ns.length, ix = {}, i, j, k;
-    var key = ns.map(function (p) { return p.id + ':' + (p.w || 0); }).join('|') + '#' + S.glsig;
+    var key = ns.map(function (p) { return p.id + ':' + (p.w || 0); }).join('|') + '#' + S.glsig + '@' + (S.gs || 1);
     if (S.gD && S.gD.key === key) return (g._D = S.gD.D);
     var D = new Float64Array(n * n).fill(Infinity);
     ns.forEach(function (p, i) { ix[p.id] = i; D[i * n + i] = 0; });
@@ -387,20 +388,21 @@
     S.gD = { key: key, D: D };
     return (g._D = D);
   };
-  // 包围盒 [半宽, 半高, 中心下移]: 人 = 圆点 + 下方名字 (字号随 viewBox 缩放放大, 见 drawPos 的 --lbs), room = 胶囊。
-  // 圆点上方左右两角各可能挂一枚徽标 (lead ★ / 视角眼, 约伸出 n.r 外 6~10), 留够 9。
-  var gBox = function (p, lbs) {
-    if (p.isRoom) return [p.w / 2 + 3, 13, 0];
-    var lh = ((panelBox().w || 332) <= 420 ? 11.5 : 10.5) * (lbs || 1);
-    var hw = Math.max(p.r + 9, Math.min(11, String((p.ref && p.ref.name) || '').length) * 0.3 * lh + 3);
-    var top = p.r + 9, bot = p.r + 3 + lh;
+  // 布局坐标就是屏幕像素 (视野缩放 k = 1 时): 节点半径、名字字号都是固定像素 (GFS = 12pt = 16px, 见 nodeHtml),
+  // 不随画布缩放; 画布大小只改变间距 —— 首排按面板大小把目标边长整体乘 S.gs (gFitScale)。
+  var GFS = 16;
+  var gNameMax = function () { return (panelBox().w || 332) <= 420 ? 9 : 11; };   // 名字最多几个字, 再长省略号 (窄屏更短)
+  // 包围盒 [半宽, 半高, 中心下移] (像素): 人 = 圆点 + 下方名字, 圆点上方留 4 (选中环 / 视角箭头在左右); room = 胶囊。
+  var gBox = function (p) {
+    if (p.isRoom) return [p.w / 2 + 3, 16, 0];
+    var hw = Math.max(p.r + 12, Math.min(gNameMax(), String((p.ref && p.ref.name) || '').length) * 0.29 * GFS + 3);
+    var top = p.r + 4, bot = p.r + 5 + GFS;
     return [hw, (top + bot) / 2, (bot - top) / 2];
   };
-  var gLbsNow = function () { return (S.gdom && +S.gdom.lbs) || S.glbs || 1; };
   // 碰撞: 两个包围盒相交就沿穿透最浅的轴各退一半 (被钉住的不动, 另一个退全程)。
   var gCollide = function (g, s) {
-    var ns = g.nodes, n = ns.length, lbs = gLbsNow();
-    var bs = ns.map(function (p) { return gBox(p, lbs); });
+    var ns = g.nodes, n = ns.length;
+    var bs = ns.map(gBox);
     for (var a = 0; a < n; a++) for (var b = a + 1; b < n; b++) {
       var p = ns[a], q = ns[b], A = bs[a], B = bs[b];
       var dx = q.x - p.x, dy = (q.y + B[2]) - (p.y + A[2]);
@@ -462,7 +464,7 @@
       p.x += mx; p.y += my;
       mv = Math.max(mv, Math.abs(mx), Math.abs(my));
     }
-    gCollide(g, cs == null ? Math.min(0.5, alpha * 2) : cs);
+    gCollide(g, cs == null ? 1 : cs);
     // 边让点是硬约束 (每步把压边的点整段推出去), 不随热量衰减: 软的话热量小时 stress 每帧往回拉一点, 又慢慢压回边上。
     if (!rough) gEdgeClear(g);
     return mv;
@@ -516,29 +518,48 @@
     var rot = (g.hh >= g.hw ? Math.PI / 2 : 0) - 0.5 * Math.atan2(2 * sxy, sxx - syy), c = Math.cos(rot), s = Math.sin(rot);
     ns.forEach(function (p) { var x = p.x - cx, y = p.y - cy; p.x = x * c - y * s; p.y = x * s + y * c; });
   };
-  // 估计出图后的标签放大倍数 (同 drawPos 的 --lbs: viewBox 宽 / svg 宽, 1~1.5), 碰撞按它留位置。
-  var gLbs = function (g) {
-    var x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+  // 图的画布 (像素): 面板减去标题行与图例 (legendH 量图例实际高度: 窄屏折两行时第二行不被压到底栏下)。
+  var gPanel = function () {
+    return { w: Math.max(240, (panelBox().w || 332) - 12), h: Math.max(260, (panelBox().h || 620) - 38 - legendH()) };
+  };
+  // 要多大的缩放才能把整张图 (节点中心 ± 各自的像素包围盒) 放进画布: 节点大小不缩, 只缩中心之间的距离。
+  var gFitK = function (g, pn) {
+    var x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9, el = 0, er = 0, et = 0, eb = 0;
     g.nodes.forEach(function (p) {
-      var b = gBox(p, 1);
-      x0 = Math.min(x0, p.x - b[0]); x1 = Math.max(x1, p.x + b[0]);
-      y0 = Math.min(y0, p.y + b[2] - b[1]); y1 = Math.max(y1, p.y + b[2] + b[1]);
+      var b = gBox(p);
+      x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y);
+      el = Math.max(el, b[0]); er = el; et = Math.max(et, b[1] - b[2]); eb = Math.max(eb, b[1] + b[2]);
     });
-    var pw = Math.max(240, (panelBox().w || 332) - 12), ph = Math.max(260, (panelBox().h || 620) - 38 - legendH());
-    return Math.max(1, Math.min(1.5, Math.max((x1 - x0 + 52) / pw, (y1 - y0 + 52) / ph)));
+    if (!g.nodes.length) return { k: 1, cx: 0, cy: 0 };
+    var pad = 14, kx = (pn.w - 2 * pad - el - er) / Math.max(1, x1 - x0), ky = (pn.h - 2 * pad - et - eb) / Math.max(1, y1 - y0);
+    return { k: Math.max(0.05, Math.min(kx, ky)), cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 };
+  };
+  // 间距随画布: 把整张图 (连同目标边长) 按「恰好放满画布」等比缩放, 夹在 0.8~2 倍之间 —— 再小就宁可让图溢出画布 (拖背景平移),
+  // 也不把点挤到名字压在一起; 节点本身不缩放。
+  var gFitScale = function (g) {
+    var f = gFitK(g, gPanel()), s0 = S.gs || 1, s1 = Math.max(0.8, Math.min(2, s0 * f.k)), r = s1 / s0;
+    if (Math.abs(r - 1) < 0.02) return false;
+    g.nodes.forEach(function (p) { p.x = f.cx + (p.x - f.cx) * r; p.y = f.cy + (p.y - f.cy) * r; });
+    S.gs = s1; g._D = null;
+    return true;
   };
   // 首次出图: 径向树起点 → stress 跑到收敛 → 主轴对齐面板 → 按估计的标签尺寸再收一段 (碰撞跟上)。确定性, 同一张图每次一样。
   var gLayout = function (g) {
     if (g.nodes.length < 2) { g.nodes.forEach(function (p) { p.x = 0; p.y = 0; }); return; }
+    S.gs = 1; g._D = null;
     gRadialInit(g);
     for (var i = 0; i < 300; i++) if (gStep(g, 0.4, undefined, true) < 0.05 && i > 20) break;
     gAlign(g);
-    S.glbs = gLbs(g);
+    // 按画布定间距: 缩放 → 带碰撞排一段 (碰撞会把图撑大) → 再按画布缩放, 来回三轮, 让「放满画布」时名字不压在一起。
+    for (var it = 0; it < 3; it++) {
+      gFitScale(g);
+      for (var k = 0; k < 60; k++) gStep(g, 0.4 * Math.pow(0.95, k), 0.5);
+    }
     // 收尾: stress 步子逐渐收小, 碰撞保持全力 —— 最后由碰撞说了算, 名字标签不压在一起。
     for (var j = 0; j < 80; j++) gStep(g, 0.4 * Math.pow(0.95, j), 0.5);
   };
   // 常驻循环: alpha 逐帧衰减, 衰减到几乎为 0 就停帧; 拖动时 gtarget 把热量吊在 0.3 上。
-  // 没缩放 / 没平移过 (视野还是「整张图」) 时视野跟着内容走: 增量长出来的节点不会落在框外; 拖动中不跟, 免得画面在指针下滑走。
+  // 视野是否还是「整张图」(没缩放 / 平移过): 是的话 drawPos 每帧让视野跟着内容走 (见 gView)。
   var gUntouched = function () { return (S.gzoom || 1) === 1 && !S.gpx && !S.gpy; };
   var gLoop = function () {
     S.graf = 0;
@@ -546,8 +567,6 @@
     if (!g || !S.gdom) return;
     gStep(g, Math.max(S.galpha || 0, S.gtarget || 0));
     S.galpha = (S.galpha || 0) * 0.97;
-    var svg = !S.gdrag && gUntouched() && convsEl.querySelector('.rv-graph');
-    if (svg) setViewBox(svg, g);
     drawPos(g);
     if (S.galpha > 0.012 || S.gtarget) S.graf = requestAnimationFrame(gLoop);
   };
@@ -586,9 +605,9 @@
     if (n.isRoom) {
       var r = n.ref;
       var un = unreadOf(r);
-      var dot = un ? '<g class="rv-un"><circle cx="' + (n.w / 2 - 2).toFixed(1) + '" cy="-10" r="' + (un > 9 ? 8 : 7) + '"/><text x="' + (n.w / 2 - 2).toFixed(1) + '" y="-7" text-anchor="middle">' + (un > 99 ? '99+' : un) + '</text></g>' : '';
-      return '<rect x="' + (-n.w / 2).toFixed(1) + '" y="-10" width="' + n.w.toFixed(1) + '" height="20" rx="7"/>' +
-        '<text x="' + (-n.w / 2 + 7).toFixed(1) + '" y="4">' + esc((KIND_IC[r.kind] || '·') + ' ' + clipName(roomLabelOf(r), 12)) + '</text>' + dot;
+      var dot = un ? '<g class="rv-un"><circle cx="' + (n.w / 2 - 2).toFixed(1) + '" cy="-13" r="' + (un > 9 ? 8 : 7) + '"/><text x="' + (n.w / 2 - 2).toFixed(1) + '" y="-10" text-anchor="middle">' + (un > 99 ? '99+' : un) + '</text></g>' : '';
+      return '<rect x="' + (-n.w / 2).toFixed(1) + '" y="-13" width="' + n.w.toFixed(1) + '" height="26" rx="9"/>' +
+        '<text x="' + (-n.w / 2 + 8).toFixed(1) + '" y="5.5">' + esc((KIND_IC[r.kind] || '·') + ' ' + clipName(roomLabelOf(r), gNameMax())) + '</text>' + dot;
     }
     var p = n.ref, human = p.kind === 'human', st = stateOfNode(p), rr = n.r;
     var shape = function (cls, grow) {
@@ -598,11 +617,11 @@
     var pov = isRoleId(p.target) ? povBadge(rr) : '';
     if (human) return '<title>' + esc(p.name + ' · 用户') + '</title>' + shape('sel', 3.5) +
       '<g class="rv-body"><text class="rv-emo" y="5.5" text-anchor="middle">👤</text></g>' +
-      '<text class="rv-nm" y="' + (rr + 11) + '" text-anchor="middle">' + esc(clipName(p.name, 11)) + '</text>' + pov;
+      '<text class="rv-nm" y="' + (rr + 15) + '" text-anchor="middle">' + esc(clipName(p.name, gNameMax())) + '</text>' + pov;
     var tip = [p.name, ST_WORD[st], p.lead ? '★ lead' : '', smartsWord(p.smarts)].filter(Boolean).join(' · ');
     return '<title>' + esc(tip) + '</title>' +
       shape('sel', 3.5) + '<g class="rv-body">' + shape('sh', 0) + '</g>' + (p.lead ? leadBadge(rr) : '') +
-      '<text class="rv-nm" y="' + (rr + 11) + '" text-anchor="middle">' + esc(clipName(p.name, 11)) + '</text>' + pov;
+      '<text class="rv-nm" y="' + (rr + 15) + '" text-anchor="middle">' + esc(clipName(p.name, gNameMax())) + '</text>' + pov;
   };
   // 选中 room 时只有「当前 role → 该 room」那条 (直连线则是它自己) 是 .on.sel; 该 room 的其余成员边保持普通灰, 不抢「哪条是选中的 edge」。
   // role 不是成员 (旧链接) 时没有这条边, 只有 room 节点 .on。
@@ -659,22 +678,18 @@
   };
   var bindGraph = function (svg) {
     if (!svg) return;
-    var pt = svg.createSVGPoint();
+    // 指针 → 布局坐标: drawPos 的逆 (viewBox 与像素 1:1, 只需扣掉 svg 的位置)。
     var toWorld = function (e) {
-      var m = svg.getScreenCTM();
-      if (!m) return { x: 0, y: 0 };
-      pt.x = e.clientX; pt.y = e.clientY;
-      var p = pt.matrixTransform(m.inverse());
-      return { x: p.x, y: p.y };
+      var v = S.gvNow, rc = svg.getBoundingClientRect();
+      if (!v) return { x: 0, y: 0 };
+      return { x: (e.clientX - rc.left - v.ox) / v.k + v.cx, y: (e.clientY - rc.top - v.oy) / v.k + v.cy };
     };
     var start = null;
     svg.onpointerdown = function (e) {
       var el = e.target.closest ? e.target.closest('[data-node],[data-room]') : null;
       var node = el && el.getAttribute('data-node'), room = el && el.getAttribute('data-room');
       start = { id: node ? 'p:' + node : room ? 'r:' + room : '', el: el,
-        x: e.clientX, y: e.clientY, px: S.gpx || 0, py: S.gpy || 0,
-        vb: { x: svg.viewBox.baseVal.x, y: svg.viewBox.baseVal.y,
-          w: svg.viewBox.baseVal.width, h: svg.viewBox.baseVal.height } };
+        x: e.clientX, y: e.clientY, px: S.gpx || 0, py: S.gpy || 0 };
       S.gmoved = false;
       S.gdrag = start.id;
       // 不能在这里 capture: 指针捕获会把随后的 click 改派给 svg, 节点上的点开就失灵了。
@@ -700,12 +715,10 @@
           gKick(0.3, true);
         }
       } else {
-        var box = svg.getBoundingClientRect();
-        var pxu = start.vb.w / (box.width || 1), pyu = start.vb.h / (box.height || 1);
-        S.gpx = start.px - dx * pxu;
-        S.gpy = start.py - dy * pyu;
-        svg.setAttribute('viewBox', [start.vb.x - dx * pxu, start.vb.y - dy * pyu,
-          start.vb.w, start.vb.h].map(function (v) { return v.toFixed(1); }).join(' '));
+        // 平移: 像素直接加到平移量上 (viewBox 与像素 1:1)。
+        S.gpx = start.px + dx || 0.001;   // 拖回原点也算动过 (0 会被当成「没平移」, 视野又开始跟内容)
+        S.gpy = start.py + dy;
+        if (S.g) drawPos(S.g);
       }
     };
     var stop = function (e) {
@@ -724,85 +737,64 @@
     svg.onwheel = function (e) {
       e.preventDefault();
       var z = Math.max(0.35, Math.min(4, (S.gzoom || 1) * (e.deltaY < 0 ? 1.12 : 0.89)));
-      var f = (S.gzoom || 1) / z;
-      S.gzoom = z;
-      var b = svg.viewBox.baseVal;
-      svg.setAttribute('viewBox', [(b.x + (b.width * (1 - f)) / 2), (b.y + (b.height * (1 - f)) / 2), b.width * f, b.height * f]
-        .map(function (v) { return v.toFixed(1); }).join(' '));
+      // 以画布中点为不动点缩放: 平移量跟着同比缩放。只缩放中心之间的距离, 节点 / 字号不变。
+      var f = z / (S.gzoom || 1);
+      S.gzoom = z; S.gpx = (S.gpx || 0) * f; S.gpy = (S.gpy || 0) * f;
+      if (S.g) drawPos(S.g);
     };
     // 双击 = 复位视野并整图重排 (拖乱了 / 增量攒多了时回到确定的那一份)。
     svg.ondblclick = function () { S.gzoom = 1; S.gpx = 0; S.gpy = 0; S.gfit = true; S.grelayout = true; renderGraph(); };
     svg.onclick = function () { setTimeout(function () { S.gmoved = false; }, 0); };
   };
-  var viewBoxOf = function (g) {
-    var minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
-    g.nodes.forEach(function (p) {
-      var hw = p.isRoom ? p.w / 2 + 4 : Math.max(p.r + 6, Math.min(52, (p.ref.name || "").length * 3.4)),
-        hh = p.isRoom ? 12 : p.r + 16;
-      minX = Math.min(minX, p.x - hw); maxX = Math.max(maxX, p.x + hw);
-      minY = Math.min(minY, p.y - hh); maxY = Math.max(maxY, p.y + hh);
-    });
-    if (!g.nodes.length) { minX = minY = maxX = maxY = 0; }
-    var pad = 26;
-    var cxm = (minX + maxX) / 2 + (S.gpx || 0), cym = (minY + maxY) / 2 + (S.gpy || 0);
-    var z = S.gzoom || 1;
-    var vw = Math.max(80, maxX - minX + pad * 2) / z, vh = Math.max(80, maxY - minY + pad * 2) / z;
-    var width = Math.max(240, (panelBox().w || 332) - 12);
-    var height = Math.max(260, (panelBox().h || 620) - 38 - legendH());
-    var aspect = width / height;
-    if (vw / vh < aspect) vw = vh * aspect; else vh = vw / aspect;
-    return { box: [cxm - vw / 2, cym - vh / 2, vw, vh], width: width, height: height };
+  // 视野: svg 的 viewBox 恒等于它的像素尺寸 (1 单位 = 1 像素), 节点半径 / 名字字号 / 线宽 / 箭头都是固定像素;
+  // 视野缩放 (k) 与平移只作用在节点中心的坐标上 —— 屏幕坐标 = (布局坐标 − 中心) × k + 画布中点 + 平移。
+  // 没缩放 / 平移过时 k 与中心每帧按内容重算, 增量长出来的节点不会落在框外。k 夹在 0.95~1: 不放大, 也几乎不缩 ——
+  // 节点和字是固定像素, 再缩只会把名字压到一起; 画布实在放不下 (手机上三十几个节点) 就溢出, 拖背景平移看其余部分;
+
+  // 动过之后 (或正在拖) 冻结在那一刻, 只叠加用户的缩放 (S.gzoom) 与平移 (S.gpx / S.gpy, 像素)。
+  var gView = function (g) {
+    var pn = gPanel();
+    if (!S.gv0 || (gUntouched() && !S.gdrag)) { var f = gFitK(g, pn); S.gv0 = { k: Math.max(0.95, Math.min(1, f.k)), cx: f.cx, cy: f.cy }; }
+    var v0 = S.gv0;
+    return { w: pn.w, h: pn.h, k: v0.k * (S.gzoom || 1), cx: v0.cx, cy: v0.cy, ox: pn.w / 2 + (S.gpx || 0), oy: pn.h / 2 + (S.gpy || 0) };
   };
   var drawPos = function (g) {
-    var dom = S.gdom;
-    if (!dom) return;
-    // 节点多 / 面板窄时 viewBox 比 svg 宽, 标签被等比缩小到看不清: 按缩放比把标签字号放回去 (封顶 1.5 倍, 免得互相压)。
-    var gs = convsEl.querySelector('.rv-graph'), vbw = gs && gs.viewBox ? gs.viewBox.baseVal.width : 0, sw = gs ? parseFloat(gs.getAttribute('width')) : 0;
-    if (vbw && sw) {
-      var ls = Math.max(1, Math.min(1.5, vbw / sw)).toFixed(2);
-      if (dom.lbs !== ls) { dom.lbs = ls; gs.style.setProperty('--lbs', ls); }
-    }
+    var dom = S.gdom, svg = convsEl.querySelector('.rv-graph');
+    if (!dom || !svg) return;
+    var v = gView(g), box = '0 0 ' + v.w + ' ' + v.h;
+    if (svg.getAttribute('width') !== String(v.w)) svg.setAttribute('width', v.w);
+    if (svg.getAttribute('height') !== String(v.h)) svg.setAttribute('height', v.h);
+    if (svg.getAttribute('viewBox') !== box) svg.setAttribute('viewBox', box);
+    S.gvNow = v;
+    var X = function (p) { return (p.x - v.cx) * v.k + v.ox; }, Y = function (p) { return (p.y - v.cy) * v.k + v.oy; };
     g.nodes.forEach(function (p) {
       var e = dom.nodes[p.id];
-      if (e) e.setAttribute('transform', 'translate(' + p.x.toFixed(1) + ' ' + p.y.toFixed(1) + ')');
+      if (e) e.setAttribute('transform', 'translate(' + X(p).toFixed(1) + ' ' + Y(p).toFixed(1) + ')');
     });
     Object.keys(dom.edges).forEach(function (k) {
       var d = dom.edges[k], l = d.l;
       if (!l || !l.s || !l.t) return;
-      var ex = l.t.x, ey = l.t.y;
+      var sx = X(l.s), sy = Y(l.s), ex = X(l.t), ey = Y(l.t);
       if (l.host && !l.t.isRoom) {
-        // 箭头停在 host 圆点 / 方块边上, 不扎进中心 (节点盖在边上面, 箭头会被遮住)。
-        var vx = l.s.x - ex, vy = l.s.y - ey, vd = Math.sqrt(vx * vx + vy * vy) || 1, back = Math.min(vd, l.t.r + 3);
+        // 箭头停在 host 圆点边上, 不扎进中心 (节点盖在边上面, 箭头会被遮住)。半径是像素, 直接退。
+        var vx = sx - ex, vy = sy - ey, vd = Math.sqrt(vx * vx + vy * vy) || 1, back = Math.min(vd, l.t.r + 3);
         ex += (vx / vd) * back; ey += (vy / vd) * back;
       }
       [d.ln, d.hit].forEach(function (ln) {
         if (!ln) return;
-        ln.setAttribute('x1', l.s.x.toFixed(1)); ln.setAttribute('y1', l.s.y.toFixed(1));
+        ln.setAttribute('x1', sx.toFixed(1)); ln.setAttribute('y1', sy.toFixed(1));
         ln.setAttribute('x2', ex.toFixed(1)); ln.setAttribute('y2', ey.toFixed(1));
       });
     });
   };
-  // 帧循环里每帧都会调: 值没变就不写属性。
-  var setViewBox = function (svg, g) {
-    var vb = viewBoxOf(g), box = vb.box.map(function (v) { return v.toFixed(1); }).join(' ');
-    if (svg.getAttribute('width') !== String(vb.width)) svg.setAttribute('width', vb.width);
-    if (svg.getAttribute('height') !== String(vb.height)) svg.setAttribute('height', vb.height);
-    if (svg.getAttribute('viewBox') !== box) svg.setAttribute('viewBox', box);
-  };
-  // 面板尺寸变了 (窗口缩放 / 旋转屏 / 左栏宽度变): svg 跟着撑满, 视野保持「每像素多少世界单位」不变、
-  // 中心不动 —— 节点大小和位置原样, 只是看得见的范围随面板变大变小 (视野没动过的, gLoop 会接着把它收成整张图);
-  // 补一点热量让碰撞按新的标签缩放重新留位, 不重排、不重建。
-  var fitToPanel = function (svg, g) {
-    var vb = viewBoxOf(g), cur = svg.viewBox.baseVal;
-    var ow = parseFloat(svg.getAttribute('width')) || 0, oh = parseFloat(svg.getAttribute('height')) || 0;
-    if (Math.abs(ow - vb.width) < 1 && Math.abs(oh - vb.height) < 1) return false;
-    var upp = ow && cur.width ? cur.width / ow : 0;
-    svg.setAttribute('width', vb.width);
-    svg.setAttribute('height', vb.height);
-    if (!upp) { setViewBox(svg, g); return true; }
-    var w = vb.width * upp, h = vb.height * upp, cx = cur.x + cur.width / 2, cy = cur.y + cur.height / 2;
-    svg.setAttribute('viewBox', [cx - w / 2, cy - h / 2, w, h].map(function (v) { return v.toFixed(1); }).join(' '));
-    gKick(0.2);
+  // 面板尺寸变了 (窗口缩放 / 旋转屏 / 左栏宽度变): 画布跟着撑满, 间距按新画布重定 (gFitScale, 节点大小不变),
+  // 补一点热量让碰撞 / 边让点重新落定; 不重排、不重建。
+  var fitToPanel = function (g) {
+    var pn = gPanel(), key = pn.w + 'x' + pn.h;
+    if (S.gpanel === key) return false;
+    var had = !!S.gpanel;
+    S.gpanel = key;
+    if (had && gFitScale(g)) gKick(0.2);
     return true;
   };
   var GRAPH_LEGEND = '<div class="rv-legend">' +
@@ -847,10 +839,10 @@
     syncGraphDom(svg, g);
     // 整图排一次只在还没排过时 (首次出图 / 双击重排); 从列表切回图沿用常驻坐标, 拖过的位置不丢。
     var lay = first && !S.glaid || S.grelayout;
-    if (lay) { gLayout(g); S.glaid = true; S.grelayout = false; }
+    if (lay) { gLayout(g); S.glaid = true; S.grelayout = false; S.gpanel = gPanel().w + 'x' + gPanel().h; }
+    else fitToPanel(g);
+    if (first || S.gfit) { S.gv0 = null; S.gfit = false; }
     drawPos(g);
-    if (first || S.gfit) { setViewBox(svg, g); S.gfit = false; }
-    else fitToPanel(svg, g);
     if (lay) gKick(0.02);
     else if (rec.changed) gKick(0.35);
     else if (first) gKick(0.05);
@@ -2533,7 +2525,7 @@
       inner.innerHTML = '<div class="rv-none">还没有 room —— 说一句话, 或者在群里 .name 点名一个 wizard。</div>';
   };
   // ── 样式: 本页新加的 DOM 只在 chat.js 里, 样式也一并带上 (不改 web/chat.css, 无构建) ──
-  var CSS = ".side-body { flex: 1; min-height: 0; display: flex }\n.convs { flex: 1; min-width: 0; overflow: auto; padding: 0 }\n.rv-list { padding: 2px 8px 16px }\n.convs-h { padding: 2px 8px 0 }\n.convs-h h2 { margin-top: 6px }\n.convs h2 > span:nth-of-type(2) { flex: none }\n.convs h2 .vt + .vt { margin-left: 0 }\n.convs h2 .vt.on { color: var(--accent) }\n.convs h2 .vt svg { flex: none }\n@media (min-width: 761px) { .app.side-list .side { width: max(332px, 25vw) } }\n* { scrollbar-width: thin; scrollbar-color: var(--line) transparent }\n::-webkit-scrollbar { width: 8px; height: 8px }\n::-webkit-scrollbar-track { background: transparent }\n::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; border: 2px solid transparent; background-clip: padding-box }\n::-webkit-scrollbar-thumb:hover { background-color: var(--faint) }\n::-webkit-scrollbar-corner { background: transparent }\n.thread-in, .gside, .rolebar, .rv-mh { overflow-wrap: anywhere }\n.rv-bub { min-width: 0; overflow-wrap: anywhere }\n.rv-files { min-width: 0 }\n.rv-files .rv-chip { white-space: normal; overflow-wrap: anywhere; max-width: 100%; line-height: 1.45; padding: 1px 7px }\n.rv-mh > * { min-width: 0 }\n.gs-mem .nm { white-space: normal; overflow-wrap: anywhere }\n.gs-cls { min-width: 0; overflow-wrap: anywhere }\n.rv-list .ci .l2 .rv-chip { flex: none }\n.rv-msg.hit .rv-bub { animation: hit 1.6s ease-out }\n.rv-graph { display: block; font: 11.5px/1 -apple-system, BlinkMacSystemFont, sans-serif; cursor: grab; touch-action: none; user-select: none }\n.rv-edge { stroke: #c9d2df; stroke-width: 1 }\n.rv-edge.unread { stroke: #f2a7ad; stroke-width: 1.6 }\n.rv-edge.on { stroke: var(--accent); stroke-width: 1.6 }\n.rv-hit { stroke: transparent; stroke-width: 12; cursor: pointer }\n.rv-node { cursor: grab }\n.rv-room rect { fill: var(--them); stroke: var(--line) }\n.rv-room text { fill: var(--ink) }\n.rv-room.on rect { fill: var(--mine); stroke: var(--accent) }\n.rv-person .sh { fill: var(--card); stroke: var(--mute); stroke-width: 1.6 }\n.rv-person .sel { fill: none; stroke: var(--accent); stroke-width: 2; display: none }\n.rv-person.on .sel { display: inline }\n.rv-person .rv-emo { font-size: 17px; fill: initial }\n.rv-person.human .rv-nm { fill: var(--human); font-weight: 600 }\n.rv-person.wizard.st-working .sh { fill: #2da44e; stroke: #1a7f37 }\n.rv-body { transform-box: fill-box; transform-origin: center }\n.rv-person.wizard.st-working .rv-body { animation: rvbreath 1.8s ease-in-out infinite }\n@keyframes rvbreath { 0%, 100% { transform: scale(.88) } 50% { transform: scale(1.14) } }\n.rv-person.wizard.st-blocked .sh { fill: #e8336d; stroke: #b3124a }\n.rv-person.wizard.st-idle .sh { fill: #e4e7ec; stroke: #7d8795 }\n.rv-person.wizard.st-stale .sh { fill: #fff; stroke: #9aa4b2 }\n.rv-person.wizard.st-asleep .sh { fill: #f6f7f9; stroke: #b9c0ca; stroke-dasharray: 3 2.5 }\n.rv-person.wizard.st-asleep text { fill: var(--faint) }\n.rv-edge.host { stroke: #f5b301; marker-end: url(#rv-arrow) }\n.rv-room .rv-un circle { fill: #cf222e }\n.rv-room .rv-un text { fill: #fff; font-size: 9px; font-weight: 600 }\n.rv-edge.direct { stroke: #9aa7ba; stroke-width: 1.4 }\n.rv-edge.sel { stroke: var(--accent); stroke-width: 3 }\n.rv-pov circle:first-of-type, .rv-legend .lgpov circle:first-of-type { fill: var(--accent); stroke: var(--card); stroke-width: 1.2 }\n.rv-pov path, .rv-legend .lgpov path { fill: #fff }\n.rv-pov .pu, .rv-legend .lgpov .pu { fill: var(--accent) }\n.rv-pov { pointer-events: none }\n.rv-legend .lgpov { flex: none }\n.rv-legend { display: flex; flex-wrap: wrap; gap: 3px 10px; padding: 4px 10px 8px; font-size: 11px; color: var(--faint) }\n.rv-legend span { display: inline-flex; align-items: center; gap: 4px }\n.rv-legend .lg { display: inline-block; width: 9px; height: 9px; border: 1.6px solid var(--mute); box-sizing: border-box }\n.rv-legend .wz { border-radius: 50% }\n.rv-legend .wz.working { background: #2da44e; border-color: #1a7f37 }\n.rv-legend .wz.idle { background: #e4e7ec; border-color: #7d8795 }\n.rv-legend .wz.blocked { background: #e8336d; border-color: #b3124a }\n.rv-legend .wz.stale { background: #fff; border-color: #9aa4b2 }\n.rv-legend .wz.asleep { background: #f6f7f9; border-style: dashed; border-color: #b9c0ca }\n.rv-legend .lgemo { font-size: 11px; line-height: 1 }\n.rv-legend .hostln { width: 14px; height: 0; border: 0; border-top: 1px solid #f5b301 }\n.rv-lead { fill: #d99a00; stroke: var(--card); stroke-width: 1.4; stroke-linejoin: round; pointer-events: none; transform: scale(var(--lbs, 1)) }\n.rv-legend .lglead { fill: #d99a00 }\n.rv-legend .wz.sz1 { width: 7px; height: 7px; margin-right: -1px }\n.rv-legend .wz.sz5 { width: 12px; height: 12px }\n.rolebar .facts .lead { color: #b07d00 }\n.rv-person text { fill: var(--ink); font-size: calc(10.5px * var(--lbs, 1)) }\n.rv-person text.rv-nm { paint-order: stroke; stroke: var(--card); stroke-width: 3.5px; stroke-linejoin: round }\n@media (max-width: 760px) { .rv-person text.rv-nm { font-size: calc(11.5px * var(--lbs, 1)) } }\n.rv-room text { font-size: 11px }\n.rv-person.ghost .sh { fill: #f6f7f9; stroke: #c9d0da; stroke-dasharray: 3 2.5 }\n.rv-person.ghost text { fill: var(--faint) }\n.rv-ttl { font-size: 15.5px; line-height: 22px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }\n.rv-sub { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; margin-top: 3px; font-size: 11.5px; color: var(--mute) }\n.rv-lb { font-size: 15px }\n.rv-chip { display: inline-flex; align-items: center; padding: 0 6px; border-radius: 999px; background: var(--them); color: var(--mute); font-size: 11px; line-height: 17px; white-space: nowrap }\n.rv-chip.ok { background: #e8f5ee; color: #1a7f3c }\n.rv-chip.warn { background: #fdf1e3; color: #9a5b10 }\n.rv-chip.ask, .rv-chip.bad { background: #fdecec; color: #b42318 }\n.rv-chip.go { background: var(--mine); color: var(--accent) }\n.rv-chip.file { background: var(--them-soft) }\n.rv-chip.re { background: transparent; color: var(--faint); border: 1px solid var(--line) }\n.rv-act { border: 1px solid var(--line); background: var(--card); border-radius: 7px; padding: 2px 9px; font-size: 12px; cursor: pointer; color: var(--mute) }\n.rv-act:hover, .rv-act.on { color: var(--accent); border-color: var(--accent) }\n/* 图右侧的成员列: 点开一个 room 才有, 看 wizard 时收起。 */\n.gside { flex: none; width: 208px; min-height: 0; overflow: auto; border-left: 1px solid var(--line); background: var(--card); padding: 8px }\n.gs-host { flex: none; font-size: 11px; line-height: 1 }\n.gside[hidden] { display: none }\n.gs-head { display: flex; justify-content: space-between; gap: 6px; padding: 0 2px 6px; color: var(--faint); font-size: 11px }\n.gs-head b { color: var(--mute); font-weight: 600 }\n.gs-duty { padding: 0 2px 6px; color: #b42318; font-size: 11px }\n.gs-list { display: flex; flex-direction: column; gap: 2px }\n.gs-mem { display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; padding: 4px 6px; border: 0; border-radius: 6px; background: none; color: var(--ink); text-align: left; cursor: pointer }\n.gs-mem:hover { background: var(--paper) }\n.gs-mem .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px }\n.gs-mem.human .nm { color: var(--human) }\n.gs-mem.busy .nm { color: var(--accent) }\n.gs-st { flex: none; margin-left: auto; color: var(--faint); font-size: 10.5px }\n.gs-st.go { color: var(--accent) }\n.gs-cls { flex: none; color: var(--faint); font-size: 10.5px }\n.gs-mem.me { background: var(--mine) }\n.gs-pov { flex: none; font-size: 11px; line-height: 1 }\n@media (max-width: 760px) { .gside { display: none } }\n.rv-older { display: block; margin: 8px auto; border: 1px solid var(--line); background: var(--card); border-radius: 999px; padding: 2px 12px; font-size: 12px; color: var(--mute); cursor: pointer }\n/* 一条消息: 头在气泡外 (谁 → 谁 · room · 时刻), 气泡只装正文。 */\n.rv-msg { display: flex; flex-direction: column; gap: 3px; margin: 10px 0; min-width: 0 }\n.rv-msg > .rv-mh { padding: 0 2px }\n.rv-bub { align-self: flex-start; max-width: min(88%, 720px); padding: 8px 13px; background: var(--them); border: 0; border-radius: 14px }\n.rv-msg.me .rv-bub { align-self: flex-end; background: var(--mine) }\n.rv-msg.k-system .rv-bub { background: var(--them-soft, var(--them)) }\n.rv-msg.me .rv-turn .bubbles > .say { align-self: flex-end }\n.rv-mh { display: flex; flex-wrap: wrap; gap: 3px 8px; align-items: center; font-size: 11.5px; color: var(--mute) }\n.rv-path { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 2px 5px; min-width: 0 }\n.rv-arr { color: var(--faint); white-space: nowrap }\n.rv-arr::before { content: '→' }\n.rv-via::before { content: '—' }\n.rv-via::after { content: '→' }\n.rv-msg.me > .rv-mh, .rv-msg.me .rv-spk > .rv-mh { flex-direction: row-reverse }\n.rv-msg.me .rv-path { flex-direction: row-reverse }\n.rv-msg.me .rv-arr::before { content: '←' }\n.rv-msg.me .rv-via::before { content: '←' }\n.rv-msg.me .rv-via::after { content: '—' }\n.rv-msg.me .rv-rawbtn { margin-left: 0 }\n.rv-au { font-weight: 600; color: var(--ink); cursor: pointer }\n.rv-au:hover { text-decoration: underline dotted var(--faint); text-underline-offset: 3px }\n.rv-au.human { color: var(--human) }\n.rv-au.daemon { color: var(--wezard) }\n.rv-tag { color: var(--accent); cursor: pointer }\n.rv-roomtag { color: var(--chat); cursor: pointer; font-size: 11px; margin: 0 1px }\n.rv-roomtag:hover { text-decoration: underline dotted; text-underline-offset: 3px }\n.rv-mh time { color: var(--faint) }\n.rv-open { border: 1px solid var(--line); background: transparent; border-radius: 6px; padding: 0 6px; font-size: 11px; color: var(--faint); cursor: pointer }\n.rv-open:hover { color: var(--accent); border-color: var(--accent) }\n.rv-quote { margin: 0 0 6px; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px; min-width: 0 }\n.rv-quote .rq-it { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; text-align: left; border: 0; border-radius: 8px; padding: 4px 8px; background: #0000000a; font: inherit; cursor: pointer; color: inherit }\n.rv-quote .rq-it:hover { background: #00000012 }\n.rv-quote .rq-who { font-size: 11.5px; font-weight: 600; color: var(--accent) }\n.rv-quote .rq-who.human { color: var(--human) }\n.rv-quote .rq-tx { font-size: 12px; line-height: 1.45; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }\n.rv-quote .rq-gone { font-style: italic; color: var(--faint); cursor: default }\n.rv-quote .rq-more { flex: none; align-self: center; border: 0; border-radius: 999px; padding: 0 7px; font-size: 11px; line-height: 18px; background: #0000000a; color: var(--mute); cursor: pointer }\n.rv-quote .rq-more.on { color: var(--accent); background: var(--mine) }\n.rv-quote .rq-rest { flex-basis: 100%; display: flex; flex-direction: column; gap: 4px }\n.rv-quote .rq-rest[hidden] { display: none }\n.rv-open { display: inline-flex; align-items: center; gap: 4px }\n.rv-och { width: 0; height: 0; border-left: 4px solid currentColor; border-top: 3.5px solid transparent; border-bottom: 3.5px solid transparent; transition: transform .12s }\n.rv-open.on { background: var(--mine); color: var(--accent); border-color: var(--accent); font-weight: 600 }\n.rv-open.on .rv-och { transform: rotate(90deg) }\n.rv-tx { font-size: 14px; line-height: 1.65; overflow-wrap: anywhere; color: #1f2328 }\n.rv-tx > :first-child { margin-top: 0 }\n.rv-tx > :last-child { margin-bottom: 0 }\n.rv-tx p { margin: .6em 0 }\n.rv-tx h1, .rv-tx h2, .rv-tx h3, .rv-tx h4 { margin: 1em 0 .4em; font-weight: 600; line-height: 1.35 }\n.rv-tx h1 { font-size: 1.4em }\n.rv-tx h2 { font-size: 1.2em }\n.rv-tx h3 { font-size: 1.05em }\n.rv-tx h4 { font-size: 1em }\n.rv-tx ul, .rv-tx ol { margin: .6em 0; padding-left: 1.6em }\n.rv-tx li { margin: .2em 0 }\n.rv-tx li > p { margin: .2em 0 }\n.rv-tx code { background: #0000000d; border-radius: 4px; padding: 1px 5px; font-size: .9em; font-family: ui-monospace, Menlo, monospace }\n.rv-tx pre { background: #ffffffb3; border-radius: 8px; padding: 8px 10px; margin: .6em 0; overflow: auto; font-size: 12.5px; line-height: 1.5 }\n.rv-tx pre code { background: transparent; padding: 0; font-size: inherit }\n.rv-tx blockquote { margin: .6em 0; padding: .1em 1em; border-left: 3px solid #0000001f; color: #656d76 }\n.rv-tx table { border-collapse: collapse; margin: .7em 0; display: block; overflow: auto; max-width: 100% }\n.rv-tx th, .rv-tx td { border: 1px solid #0000001a; padding: 5px 10px }\n.rv-tx th { background: #0000000a; font-weight: 600 }\n.rv-tx hr { border: 0; border-top: 1px solid #0000001a; margin: .9em 0 }\n.rv-tx a { color: #0969da; text-decoration: none }\n.rv-tx a:hover { text-decoration: underline }\n.rv-empty { color: var(--faint); font-size: 12px; margin: 0 }\n.rv-box { margin-top: 4px; padding: 8px 10px; border: 1px dashed var(--line); border-radius: 10px; background: var(--card) }\n.rv-box[hidden] { display: none }\n.rv-turn { margin: 0; padding: 0; border: 0; background: none }\n.rv-turn .turn-group { margin: 0 }\n.rv-mark { margin: 10px 12px; display: flex; justify-content: center }\n.rv-box .turn-group { margin: 0 }\n.rv-none { padding: 14px; color: var(--faint); font-size: 12.5px }\n.rv-note { margin: 8px 12px; padding: 7px 10px; border-radius: 8px; background: #fdf1e3; color: #9a5b10; font-size: 12px }\n.rv-charter { margin: 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); font-size: 12px }\n.rv-charter h4 { margin: 6px 0 2px; font-size: 11.5px; color: var(--faint); font-weight: 600 }\n.rv-charter h5 { margin: 8px 0 2px; font-size: 11.5px; color: var(--faint) }\n.rv-charter pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11.5px; color: var(--mute) }\n/* 一轮写进账本的气泡: 过程框下面, 靠自己那一侧; 多颗时各带一行小头 (去处 / 定论)。 */\n.rv-spk { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; min-width: 0 }\n.rv-msg.me .rv-spk { align-items: flex-end }\n.rv-smh { font-size: 11px }\n.rv-smh time { margin-left: 6px }\n.rv-files { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px }\n/* reminder 标签收在气泡底: 默认只露种类, 点开看原文。 */\n.rv-bub .rems { padding: 4px 0 0 }\n.rv-bub .rem-raw { max-height: 360px; overflow: auto }\n.rv-mh .mstat { display: inline-flex; gap: 6px; align-items: center; color: var(--faint) }\n.ho-who[data-node], .ho-line[data-node] { cursor: pointer }";
+  var CSS = ".side-body { flex: 1; min-height: 0; display: flex }\n.convs { flex: 1; min-width: 0; overflow: auto; padding: 0 }\n.rv-list { padding: 2px 8px 16px }\n.convs-h { padding: 2px 8px 0 }\n.convs-h h2 { margin-top: 6px }\n.convs h2 > span:nth-of-type(2) { flex: none }\n.convs h2 .vt + .vt { margin-left: 0 }\n.convs h2 .vt.on { color: var(--accent) }\n.convs h2 .vt svg { flex: none }\n@media (min-width: 761px) { .app.side-list .side { width: max(332px, 25vw) } }\n* { scrollbar-width: thin; scrollbar-color: var(--line) transparent }\n::-webkit-scrollbar { width: 8px; height: 8px }\n::-webkit-scrollbar-track { background: transparent }\n::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; border: 2px solid transparent; background-clip: padding-box }\n::-webkit-scrollbar-thumb:hover { background-color: var(--faint) }\n::-webkit-scrollbar-corner { background: transparent }\n.thread-in, .gside, .rolebar, .rv-mh { overflow-wrap: anywhere }\n.rv-bub { min-width: 0; overflow-wrap: anywhere }\n.rv-files { min-width: 0 }\n.rv-files .rv-chip { white-space: normal; overflow-wrap: anywhere; max-width: 100%; line-height: 1.45; padding: 1px 7px }\n.rv-mh > * { min-width: 0 }\n.gs-mem .nm { white-space: normal; overflow-wrap: anywhere }\n.gs-cls { min-width: 0; overflow-wrap: anywhere }\n.rv-list .ci .l2 .rv-chip { flex: none }\n.rv-msg.hit .rv-bub { animation: hit 1.6s ease-out }\n.rv-graph { display: block; font: 11.5px/1 -apple-system, BlinkMacSystemFont, sans-serif; cursor: grab; touch-action: none; user-select: none }\n.rv-edge { stroke: #c9d2df; stroke-width: 1 }\n.rv-edge.unread { stroke: #f2a7ad; stroke-width: 1.6 }\n.rv-edge.on { stroke: var(--accent); stroke-width: 1.6 }\n.rv-hit { stroke: transparent; stroke-width: 12; cursor: pointer }\n.rv-node { cursor: grab }\n.rv-room rect { fill: var(--them); stroke: var(--line) }\n.rv-room text { fill: var(--ink) }\n.rv-room.on rect { fill: var(--mine); stroke: var(--accent) }\n.rv-person .sh { fill: var(--card); stroke: var(--mute); stroke-width: 1.6 }\n.rv-person .sel { fill: none; stroke: var(--accent); stroke-width: 2; display: none }\n.rv-person.on .sel { display: inline }\n.rv-person .rv-emo { font-size: 17px; fill: initial }\n.rv-person.human .rv-nm { fill: var(--human); font-weight: 600 }\n.rv-person.wizard.st-working .sh { fill: #2da44e; stroke: #1a7f37 }\n.rv-body { transform-box: fill-box; transform-origin: center }\n.rv-person.wizard.st-working .rv-body { animation: rvbreath 1.8s ease-in-out infinite }\n@keyframes rvbreath { 0%, 100% { transform: scale(.88) } 50% { transform: scale(1.14) } }\n.rv-person.wizard.st-blocked .sh { fill: #e8336d; stroke: #b3124a }\n.rv-person.wizard.st-idle .sh { fill: #e4e7ec; stroke: #7d8795 }\n.rv-person.wizard.st-stale .sh { fill: #fff; stroke: #9aa4b2 }\n.rv-person.wizard.st-asleep .sh { fill: #f6f7f9; stroke: #b9c0ca; stroke-dasharray: 3 2.5 }\n.rv-person.wizard.st-asleep text { fill: var(--faint) }\n.rv-edge.host { stroke: #f5b301; marker-end: url(#rv-arrow) }\n.rv-room .rv-un circle { fill: #cf222e }\n.rv-room .rv-un text { fill: #fff; font-size: 9px; font-weight: 600 }\n.rv-edge.direct { stroke: #9aa7ba; stroke-width: 1.4 }\n.rv-edge.sel { stroke: var(--accent); stroke-width: 3 }\n.rv-pov circle:first-of-type, .rv-legend .lgpov circle:first-of-type { fill: var(--accent); stroke: var(--card); stroke-width: 1.2 }\n.rv-pov path, .rv-legend .lgpov path { fill: #fff }\n.rv-pov .pu, .rv-legend .lgpov .pu { fill: var(--accent) }\n.rv-pov { pointer-events: none }\n.rv-legend .lgpov { flex: none }\n.rv-legend { display: flex; flex-wrap: wrap; gap: 3px 10px; padding: 4px 10px 8px; font-size: 11px; color: var(--faint) }\n.rv-legend span { display: inline-flex; align-items: center; gap: 4px }\n.rv-legend .lg { display: inline-block; width: 9px; height: 9px; border: 1.6px solid var(--mute); box-sizing: border-box }\n.rv-legend .wz { border-radius: 50% }\n.rv-legend .wz.working { background: #2da44e; border-color: #1a7f37 }\n.rv-legend .wz.idle { background: #e4e7ec; border-color: #7d8795 }\n.rv-legend .wz.blocked { background: #e8336d; border-color: #b3124a }\n.rv-legend .wz.stale { background: #fff; border-color: #9aa4b2 }\n.rv-legend .wz.asleep { background: #f6f7f9; border-style: dashed; border-color: #b9c0ca }\n.rv-legend .lgemo { font-size: 11px; line-height: 1 }\n.rv-legend .hostln { width: 14px; height: 0; border: 0; border-top: 1px solid #f5b301 }\n.rv-lead { fill: #d99a00; stroke: var(--card); stroke-width: 1.4; stroke-linejoin: round; pointer-events: none }\n.rv-legend .lglead { fill: #d99a00 }\n.rv-legend .wz.sz1 { width: 7px; height: 7px; margin-right: -1px }\n.rv-legend .wz.sz5 { width: 12px; height: 12px }\n.rolebar .facts .lead { color: #b07d00 }\n.rv-person text { fill: var(--ink); font-size: 12pt }\n.rv-person text.rv-nm { paint-order: stroke; stroke: var(--card); stroke-width: 3.5px; stroke-linejoin: round }\n.rv-room text { font-size: 12pt }\n.rv-person.ghost .sh { fill: #f6f7f9; stroke: #c9d0da; stroke-dasharray: 3 2.5 }\n.rv-person.ghost text { fill: var(--faint) }\n.rv-ttl { font-size: 15.5px; line-height: 22px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }\n.rv-sub { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; margin-top: 3px; font-size: 11.5px; color: var(--mute) }\n.rv-lb { font-size: 15px }\n.rv-chip { display: inline-flex; align-items: center; padding: 0 6px; border-radius: 999px; background: var(--them); color: var(--mute); font-size: 11px; line-height: 17px; white-space: nowrap }\n.rv-chip.ok { background: #e8f5ee; color: #1a7f3c }\n.rv-chip.warn { background: #fdf1e3; color: #9a5b10 }\n.rv-chip.ask, .rv-chip.bad { background: #fdecec; color: #b42318 }\n.rv-chip.go { background: var(--mine); color: var(--accent) }\n.rv-chip.file { background: var(--them-soft) }\n.rv-chip.re { background: transparent; color: var(--faint); border: 1px solid var(--line) }\n.rv-act { border: 1px solid var(--line); background: var(--card); border-radius: 7px; padding: 2px 9px; font-size: 12px; cursor: pointer; color: var(--mute) }\n.rv-act:hover, .rv-act.on { color: var(--accent); border-color: var(--accent) }\n/* 图右侧的成员列: 点开一个 room 才有, 看 wizard 时收起。 */\n.gside { flex: none; width: 208px; min-height: 0; overflow: auto; border-left: 1px solid var(--line); background: var(--card); padding: 8px }\n.gs-host { flex: none; font-size: 11px; line-height: 1 }\n.gside[hidden] { display: none }\n.gs-head { display: flex; justify-content: space-between; gap: 6px; padding: 0 2px 6px; color: var(--faint); font-size: 11px }\n.gs-head b { color: var(--mute); font-weight: 600 }\n.gs-duty { padding: 0 2px 6px; color: #b42318; font-size: 11px }\n.gs-list { display: flex; flex-direction: column; gap: 2px }\n.gs-mem { display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; padding: 4px 6px; border: 0; border-radius: 6px; background: none; color: var(--ink); text-align: left; cursor: pointer }\n.gs-mem:hover { background: var(--paper) }\n.gs-mem .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px }\n.gs-mem.human .nm { color: var(--human) }\n.gs-mem.busy .nm { color: var(--accent) }\n.gs-st { flex: none; margin-left: auto; color: var(--faint); font-size: 10.5px }\n.gs-st.go { color: var(--accent) }\n.gs-cls { flex: none; color: var(--faint); font-size: 10.5px }\n.gs-mem.me { background: var(--mine) }\n.gs-pov { flex: none; font-size: 11px; line-height: 1 }\n@media (max-width: 760px) { .gside { display: none } }\n.rv-older { display: block; margin: 8px auto; border: 1px solid var(--line); background: var(--card); border-radius: 999px; padding: 2px 12px; font-size: 12px; color: var(--mute); cursor: pointer }\n/* 一条消息: 头在气泡外 (谁 → 谁 · room · 时刻), 气泡只装正文。 */\n.rv-msg { display: flex; flex-direction: column; gap: 3px; margin: 10px 0; min-width: 0 }\n.rv-msg > .rv-mh { padding: 0 2px }\n.rv-bub { align-self: flex-start; max-width: min(88%, 720px); padding: 8px 13px; background: var(--them); border: 0; border-radius: 14px }\n.rv-msg.me .rv-bub { align-self: flex-end; background: var(--mine) }\n.rv-msg.k-system .rv-bub { background: var(--them-soft, var(--them)) }\n.rv-msg.me .rv-turn .bubbles > .say { align-self: flex-end }\n.rv-mh { display: flex; flex-wrap: wrap; gap: 3px 8px; align-items: center; font-size: 11.5px; color: var(--mute) }\n.rv-path { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 2px 5px; min-width: 0 }\n.rv-arr { color: var(--faint); white-space: nowrap }\n.rv-arr::before { content: '→' }\n.rv-via::before { content: '—' }\n.rv-via::after { content: '→' }\n.rv-msg.me > .rv-mh, .rv-msg.me .rv-spk > .rv-mh { flex-direction: row-reverse }\n.rv-msg.me .rv-path { flex-direction: row-reverse }\n.rv-msg.me .rv-arr::before { content: '←' }\n.rv-msg.me .rv-via::before { content: '←' }\n.rv-msg.me .rv-via::after { content: '—' }\n.rv-msg.me .rv-rawbtn { margin-left: 0 }\n.rv-au { font-weight: 600; color: var(--ink); cursor: pointer }\n.rv-au:hover { text-decoration: underline dotted var(--faint); text-underline-offset: 3px }\n.rv-au.human { color: var(--human) }\n.rv-au.daemon { color: var(--wezard) }\n.rv-tag { color: var(--accent); cursor: pointer }\n.rv-roomtag { color: var(--chat); cursor: pointer; font-size: 11px; margin: 0 1px }\n.rv-roomtag:hover { text-decoration: underline dotted; text-underline-offset: 3px }\n.rv-mh time { color: var(--faint) }\n.rv-open { border: 1px solid var(--line); background: transparent; border-radius: 6px; padding: 0 6px; font-size: 11px; color: var(--faint); cursor: pointer }\n.rv-open:hover { color: var(--accent); border-color: var(--accent) }\n.rv-quote { margin: 0 0 6px; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px; min-width: 0 }\n.rv-quote .rq-it { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; text-align: left; border: 0; border-radius: 8px; padding: 4px 8px; background: #0000000a; font: inherit; cursor: pointer; color: inherit }\n.rv-quote .rq-it:hover { background: #00000012 }\n.rv-quote .rq-who { font-size: 11.5px; font-weight: 600; color: var(--accent) }\n.rv-quote .rq-who.human { color: var(--human) }\n.rv-quote .rq-tx { font-size: 12px; line-height: 1.45; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }\n.rv-quote .rq-gone { font-style: italic; color: var(--faint); cursor: default }\n.rv-quote .rq-more { flex: none; align-self: center; border: 0; border-radius: 999px; padding: 0 7px; font-size: 11px; line-height: 18px; background: #0000000a; color: var(--mute); cursor: pointer }\n.rv-quote .rq-more.on { color: var(--accent); background: var(--mine) }\n.rv-quote .rq-rest { flex-basis: 100%; display: flex; flex-direction: column; gap: 4px }\n.rv-quote .rq-rest[hidden] { display: none }\n.rv-open { display: inline-flex; align-items: center; gap: 4px }\n.rv-och { width: 0; height: 0; border-left: 4px solid currentColor; border-top: 3.5px solid transparent; border-bottom: 3.5px solid transparent; transition: transform .12s }\n.rv-open.on { background: var(--mine); color: var(--accent); border-color: var(--accent); font-weight: 600 }\n.rv-open.on .rv-och { transform: rotate(90deg) }\n.rv-tx { font-size: 14px; line-height: 1.65; overflow-wrap: anywhere; color: #1f2328 }\n.rv-tx > :first-child { margin-top: 0 }\n.rv-tx > :last-child { margin-bottom: 0 }\n.rv-tx p { margin: .6em 0 }\n.rv-tx h1, .rv-tx h2, .rv-tx h3, .rv-tx h4 { margin: 1em 0 .4em; font-weight: 600; line-height: 1.35 }\n.rv-tx h1 { font-size: 1.4em }\n.rv-tx h2 { font-size: 1.2em }\n.rv-tx h3 { font-size: 1.05em }\n.rv-tx h4 { font-size: 1em }\n.rv-tx ul, .rv-tx ol { margin: .6em 0; padding-left: 1.6em }\n.rv-tx li { margin: .2em 0 }\n.rv-tx li > p { margin: .2em 0 }\n.rv-tx code { background: #0000000d; border-radius: 4px; padding: 1px 5px; font-size: .9em; font-family: ui-monospace, Menlo, monospace }\n.rv-tx pre { background: #ffffffb3; border-radius: 8px; padding: 8px 10px; margin: .6em 0; overflow: auto; font-size: 12.5px; line-height: 1.5 }\n.rv-tx pre code { background: transparent; padding: 0; font-size: inherit }\n.rv-tx blockquote { margin: .6em 0; padding: .1em 1em; border-left: 3px solid #0000001f; color: #656d76 }\n.rv-tx table { border-collapse: collapse; margin: .7em 0; display: block; overflow: auto; max-width: 100% }\n.rv-tx th, .rv-tx td { border: 1px solid #0000001a; padding: 5px 10px }\n.rv-tx th { background: #0000000a; font-weight: 600 }\n.rv-tx hr { border: 0; border-top: 1px solid #0000001a; margin: .9em 0 }\n.rv-tx a { color: #0969da; text-decoration: none }\n.rv-tx a:hover { text-decoration: underline }\n.rv-empty { color: var(--faint); font-size: 12px; margin: 0 }\n.rv-box { margin-top: 4px; padding: 8px 10px; border: 1px dashed var(--line); border-radius: 10px; background: var(--card) }\n.rv-box[hidden] { display: none }\n.rv-turn { margin: 0; padding: 0; border: 0; background: none }\n.rv-turn .turn-group { margin: 0 }\n.rv-mark { margin: 10px 12px; display: flex; justify-content: center }\n.rv-box .turn-group { margin: 0 }\n.rv-none { padding: 14px; color: var(--faint); font-size: 12.5px }\n.rv-note { margin: 8px 12px; padding: 7px 10px; border-radius: 8px; background: #fdf1e3; color: #9a5b10; font-size: 12px }\n.rv-charter { margin: 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); font-size: 12px }\n.rv-charter h4 { margin: 6px 0 2px; font-size: 11.5px; color: var(--faint); font-weight: 600 }\n.rv-charter h5 { margin: 8px 0 2px; font-size: 11.5px; color: var(--faint) }\n.rv-charter pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11.5px; color: var(--mute) }\n/* 一轮写进账本的气泡: 过程框下面, 靠自己那一侧; 多颗时各带一行小头 (去处 / 定论)。 */\n.rv-spk { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; min-width: 0 }\n.rv-msg.me .rv-spk { align-items: flex-end }\n.rv-smh { font-size: 11px }\n.rv-smh time { margin-left: 6px }\n.rv-files { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px }\n/* reminder 标签收在气泡底: 默认只露种类, 点开看原文。 */\n.rv-bub .rems { padding: 4px 0 0 }\n.rv-bub .rem-raw { max-height: 360px; overflow: auto }\n.rv-mh .mstat { display: inline-flex; gap: 6px; align-items: center; color: var(--faint) }\n.ho-who[data-node], .ho-line[data-node] { cursor: pointer }";
   var injectStyle = function () {
     if (document.getElementById('rv-style')) return;
     var s = document.createElement('style');

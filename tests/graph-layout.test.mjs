@@ -59,24 +59,24 @@ const crossings = (links) => {
   return n;
 };
 
-/** 包围盒重叠对数: 人 = 圆点 + 下方名字 (字号 × 出图后的放大倍数, 同 drawPos 的 --lbs), room = 胶囊 */
+/** 屏幕上的包围盒重叠对数: 节点与名字是固定像素 (名字 12pt = 16px, 窄屏最多 9 字 / 宽屏 11 字), 中心按视野缩放 k
+ *  (= 把整张图放进画布所需的缩放, 夹在 0.95~1: 同 gView) 换算到屏幕; room = 胶囊 (26px 高)。 */
 const overlaps = (g, panel) => {
-  const fs = panel.w <= 420 ? 11.5 : 10.5;
-  const box = (p, lbs) => {
-    if (p.isRoom) return [p.x - p.w / 2, p.x + p.w / 2, p.y - 10, p.y + 10];
-    const hw = Math.max(p.r, Math.min(11, (p.ref.name || "").length) * 0.58 * fs * lbs / 2);
-    return [p.x - hw, p.x + hw, p.y - p.r, p.y + p.r + 2 + fs * lbs];
-  };
-  const ext = (bs) => [Math.min(...bs.map((b) => b[0])), Math.max(...bs.map((b) => b[1])), Math.min(...bs.map((b) => b[2])), Math.max(...bs.map((b) => b[3]))];
-  const e = ext(g.nodes.map((p) => box(p, 1)));
-  const pw = Math.max(240, panel.w - 12), ph = Math.max(260, panel.h - 62);
-  const lbs = Math.max(1, Math.min(1.5, Math.max((e[1] - e[0] + 52) / pw, (e[3] - e[2] + 52) / ph)));
-  const bs = g.nodes.map((p) => box(p, lbs));
+  const fs = 16, nmax = panel.w <= 420 ? 9 : 11;
+  const ext = (p) => p.isRoom ? [p.w / 2, p.w / 2, 13, 13]
+    : [Math.max(p.r, Math.min(nmax, (p.ref.name || "").length) * 0.55 * fs / 2), Math.max(p.r, Math.min(nmax, (p.ref.name || "").length) * 0.55 * fs / 2), p.r, p.r + 3 + fs];
+  const es = g.nodes.map(ext);
+  const xs = g.nodes.map((p) => p.x), ys = g.nodes.map((p) => p.y);
+  const W = Math.max(240, panel.w - 12), H = Math.max(260, panel.h - 38 - 24);
+  const el = Math.max(...es.map((e) => Math.max(e[0], e[1]))), et = Math.max(...es.map((e) => e[2])), eb = Math.max(...es.map((e) => e[3]));
+  const k = Math.max(0.95, Math.min(1, (W - 28 - 2 * el) / (Math.max(...xs) - Math.min(...xs)), (H - 28 - et - eb) / (Math.max(...ys) - Math.min(...ys))));
+  const bs = g.nodes.map((p, i) => [p.x * k - es[i][0], p.x * k + es[i][1], p.y * k - es[i][2], p.y * k + es[i][3]]);
   let n = 0;
   for (let i = 0; i < bs.length; i++) for (let j = i + 1; j < bs.length; j++) {
     const A = bs[i], B = bs[j];
     if (A[0] < B[1] - 0.5 && B[0] < A[1] - 0.5 && A[2] < B[3] - 0.5 && B[2] < A[3] - 0.5) n++;
   }
+  overlaps.k = k;
   return n;
 };
 
@@ -87,7 +87,7 @@ const onEdge = (g) => {
     if (p === l.s || p === l.t) return;
     const vx = l.t.x - l.s.x, vy = l.t.y - l.s.y, L2 = vx * vx + vy * vy || 1;
     const t = ((p.x - l.s.x) * vx + (p.y - l.s.y) * vy) / L2;
-    if (t <= 0 || t >= 1) return;
+    if (t <= 0.03 || t >= 0.97) return;   // 贴着端点那一小段归碰撞管 (同 gEdgeClear)
     const d = Math.hypot(p.x - (l.s.x + t * vx), p.y - (l.s.y + t * vy));
     if (d < (p.isRoom ? 10 : p.r) + 2) n++;
   }));
@@ -103,7 +103,7 @@ for (const [label, panel] of [["桌面", { w: 575, h: 690 }], ["手机", { w: 39
   assert.equal(g.links.length, 42, "fixture 应画出 42 条边");
   assert.ok(finite(g), `${label}: 坐标出现 NaN / Infinity`);
   const c = crossings(g.links), o = overlaps(g, panel), oe = onEdge(g);
-  console.log(`graph-layout ${label}: 交叉 ${c} · 重叠 ${o} · 压边 ${oe}`);
+  console.log(`graph-layout ${label}: 间距倍数 ${L.S.gs.toFixed(2)} · 交叉 ${c} · 重叠 ${o} · 压边 ${oe} · 视野缩放 ${overlaps.k.toFixed(2)}`);
   assert.equal(oe, 0, `${label}: ${oe} 处节点压在别的边上`);
   assert.ok(c <= 4, `${label}: 边交叉 ${c} > 4`);
   assert.ok(o <= 3, `${label}: 节点 / 标签重叠 ${o} 对 > 3`);
@@ -125,7 +125,10 @@ for (const [label, panel] of [["桌面", { w: 575, h: 690 }], ["手机", { w: 39
   assert.ok(rec.changed, "加了 room 应判为拓扑变化");
   settle(L, rec.g, 0.35);
   assert.ok(finite(rec.g), `${label}: 增量后坐标出现 NaN`);
-  const moves = rec.g.nodes.filter((p) => snap.has(p.id)).map((p) => Math.hypot(p.x - snap.get(p.id)[0], p.y - snap.get(p.id)[1]));
+  // 视野没动过时跟着内容居中 (gView), 整体平移看不出来: 扣掉旧节点的重心平移再量。
+  const olds = rec.g.nodes.filter((p) => snap.has(p.id));
+  const mx = olds.reduce((a, p) => a + p.x - snap.get(p.id)[0], 0) / olds.length, my = olds.reduce((a, p) => a + p.y - snap.get(p.id)[1], 0) / olds.length;
+  const moves = olds.map((p) => Math.hypot(p.x - mx - snap.get(p.id)[0], p.y - my - snap.get(p.id)[1]));
   const mean = moves.reduce((s, v) => s + v, 0) / moves.length, ca = crossings(rec.g.links);
   console.log(`graph-layout ${label} 增量: 旧节点平均位移 ${mean.toFixed(1)} · 最大 ${Math.max(...moves).toFixed(1)} · 交叉 ${ca}`);
   assert.ok(mean <= 20, `${label}: 增量后旧节点平均位移 ${mean.toFixed(1)} > 20 (整图被打乱)`);
@@ -153,7 +156,7 @@ for (const [label, panel] of [["桌面", { w: 575, h: 690 }], ["手机", { w: 39
 // 三角形 / 共线专用例: 每个 3 人 adhoc room 收成 room 节点, 再叠两两 dm (直连线), 加一个大枢纽把边长拉得悬殊 ——
 // 曾出现的退化是第三个点被挤到另两点的连线上, 两条边与之完全重叠。量到 0 才算过。
 {
-  const panel = { w: 390, h: 640 };
+  const panel = { w: 575, h: 690 };   // 桌面画布: 量的是共线退化, 不是手机塞满时的拥挤
   const L = load(WORLD, panel);
   const ids = Object.keys(WORLD.uidTargets);
   const wiz = (i) => ({ who: { kind: "wizard", id: ids[i] }, name: "n" + i });
