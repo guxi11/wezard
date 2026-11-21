@@ -141,3 +141,81 @@ wezard 已经在机制上替你做了不少: 只有点名的人被唤醒、每�
 - Claude Code agent teams: <https://code.claude.com/docs/en/agent-teams> (转引自 agent-team-comms.md)
 
 内部 (HEAD `c182134` 前后): `shared/room.ts` (`wakeTargets` · `unreadFor` · `WAKE_BUDGET=20` · `UNREAD_BUDGET=6000`)、`daemon/room-hub.ts` (`render`)、`mcp/tools.ts` (chat_ask 落点规则、room_open 描述)、`daemon/wizard.ts:1004/1118` (charter 编排段)、`~/.wezard/state/rooms/*.jsonl` (§1 统计)。
+
+## 8. 追问核实 (2026-11-22, admin 对 §5 的回复)
+
+> admin 的回复 (经 `wezard-1` 转): A、C 不要。B 可以考虑, 取决于它们需不需要感知彼此的消息。D: 「dm 按现在的定义本来就是通过 room 聊天的, room 也支持拉人, 拉人时可以选择附带多少聊天记录」。E/F/G 未表态。以下只核实、出方案, 不改代码。
+
+### 8.1 往 dm 里 `room_invite` 第三人: 能成功; 账本语义一致, 显示与寻址有 4 处不一致
+
+**能成功**: `POST /room/invite` (`daemon/index.ts` ~1561) 不看 room 的类型。邀请人是 host (dm 里 ord=1 的那一方, 即最先 chat_ask 的那个) 或者被拉者的直属 parent 时, 直接写 `join`; 其余情况转成 join-req, 等 host 批。
+
+**账本语义一致** (用 `shared/room.ts` 的纯函数在内存里跑过一遍, 不碰磁盘, 脚本见本节末):
+- C 入座 ord=3, `seen=0`; host 仍是 A; 成员判定、`judge`、`wakeTargets`、duty 开关都按 fold 后的成员表算, 和 adhoc 没有区别。
+- A `chat_ask` C 只唤醒 C; B 一句不点名的 `say` 谁也不唤醒; C 用 `chat_reply` 交代后唤醒 A, duty 关账。
+- C 第一次被唤醒时读到的未读 = 从 `seen=0` 起最新的 ~6000 字 (实测 30 条 × 400 字, 列出最近 16 条, 并提示「更早还有 16 条没列, 用 room_read 翻」)。
+
+**不一致的地方** (都不会让账本出错, 但会误导人或模型):
+1. **注入头和标签少一个人**: daemon 的 `roomLabel` 对 `dm:` 直接按 id 拆出两个人, 渲染成「A ↔ B」, 而且这一支在 `s.title` 判断**之前**返回, 所以 `room_name` 起的名字对 dm 不生效。C 收到的注入头是【A ↔ B】, 看不出自己也在里面。rolepage 上 `roomTitle` 对 dm 只取前两个成员 (起了名则用名字); 提示行的去处写「私聊」(`shared/chat-http.ts` `roomShortOf`)。关系图按成员数画, 三个 wizard 会画成 room 节点, 这一处没问题。
+2. **A↔B 以后的「私聊」都落进三人 room**: `ensureDmRoom(A,B)` 只认 id; A 之后对 B 单独 `chat_ask` 仍落进 `dm:A|B`, C 会读到。A 和 B 也没有别的「两人默认 room」了 (要私下说就只能 `room_open({with:[B]})` 再开一个)。
+3. **有人离开后, 这一对就被卡死** (这个问题在两人 dm 里早就有, 拉人后更容易碰上): B `room_leave` 之后, `ensureDmRoom` 看到 room 已存在, 直接返回; A 再 `chat_ask` B, `judge` 会拒 409「不是本 room 成员」。A 和 B 之间的默认通道就此不可用, 除非有人重新邀请 B。
+4. **id 不再描述成员**: `dmPeers(id)` 仍然只报两个人。目前它只被 `roomLabel` 用到, 所以只影响显示 (第 1 条)。
+
+**推荐**: 承认「dm 也是 room, 可以拉人」这个定义, 补两处小改动 (都不改账本格式):
+- (a) `roomLabel` 先看 `s.title`; dm 成员超过两个时按成员列名字 (和 adhoc 同一种写法); 前端 `roomTitle` 和 `roomShortOf` 同步。
+- (b) `ensureDmRoom` 碰到「room 存在但对方不在成员里」时, 把对方补回来 (重新写 `join`), 而不是让 `judge` 返回 409。
+- 第 2 条 (A↔B 的私聊落进三人 room) 我认为是这个定义的自然结果: 拉了人, 这个 room 就是这几个人的。要不要改, 由 admin 定。
+
+### 8.2 拉人时「附带多少聊天记录」: 现在没有这个参数; 最小实现不需要改账本格式
+
+**现状**: `room_invite` 只有 `room` 和 `who`; `room_join` 只有 `room` 和 `reason`; `room_approve` 只有 `re` 和 `accept`。实际效果是固定的: 新成员 `seen=0`, 第一次被唤醒时读到「全部历史里最新的 ~6000 字」, 外加「更早还有 N 条」的提示 (`UNREAD_BUDGET`)。另外, 直接入座**不会唤醒**被拉者 (`join` 是 op, 不是 msg 行), 它要等有人点名才第一次读到这些。`room_read` 指定了 room 时不检查成员身份, 所以要读更早的记录随时都能读。
+
+**最小方案**: 在 `room_invite` 和 `room_approve` 上加一个 `history` 参数, 落成被拉者的**初始 `seen` 游标**:
+
+| `history` | 游标 | 被拉者第一次被唤醒时读到 |
+|---|---|---|
+| `"none"` | `seen = s.seq` | 只有入座之后的新消息 |
+| `N` (数字) | `seen` = 倒数第 N 条 msg 的 seq − 1 | 最近 N 条 |
+| `"from:<msgId>"` | `seen = seq(msgId) − 1` | 从那一条起 |
+| `"all"` / 缺省 | `seen = 0` (现状) | 全部, 仍受 ~6000 字预算截断, 超出的提示 room_read |
+
+- **落点**: 只改 `daemon/index.ts` 的 `POST /room/invite` 直接入座那一支, 和 `POST /room/approve` 的接受那一支。在同一次 `hub.write` 里, `join` 后面紧跟一条现成的 `{op:"seen", who, seq}`。fold 对 `seen` 本来就只往前推 (`if (op.seq > m.seen)`), 新成员从 0 开始, 一定生效。`room-hub.ts` 的 `pending` / `render` / `unreadFor` 都不用动, 它们本来就从 `seen` 往后读。
+- **不改账本格式**: `seen` op 已经存在, 老账本照常 fold。
+- **join-req 那条路**: 申请时不带 history, 由 host 在 `room_approve({re, history})` 时决定。这样 join-req 行也不用加字段。
+- **MCP**: `room_invite` 和 `room_approve` 的 schema 各加一个可选 `history` (`z.union([z.literal("none"), z.literal("all"), z.number().int().positive(), z.string().regex(/^from:/)])`); 描述里写清「这是被拉者第一次被唤醒时能读到的范围, 更早的随时可以 room_read」。
+- **可选的第二步** (先不做): `history:"all"` 时让第一次投递不受 6000 字预算限制。这会让新成员第一轮的上下文变大, 所以默认仍按预算截断、提示 room_read。
+- **测试**: 往 `tests/room-hub.test.ts` (或新加一个 fold 用例) 加: 入座 + `seen` 后, `unreadFor` 只列游标之后的行; 四种取值各一例。
+
+### 8.3 B: 以「它们要不要感知彼此」为判据, 不一刀切
+
+`chat_ask({to:[X,Y]})` 里有非成员时, 现在返回 400 (`roomTargetOf`)。一条 ask 点名多个人, 实际是两类完全相反的意图:
+
+| 意图 | 该不该互相看得见 | 正确落点 |
+|---|---|---|
+| 协作: 同一个文件 / 接口 / 决定, 或者一个做、一个审 | **要** | 新开 adhoc, 发起者当 host |
+| 独立并行: 互不相干的分工, 或者**刻意隔离**的独立评审 / 竞争方案 (互相看见会锚定, 独立性就没了) | **不要** | 每人一条 dm |
+
+所以「多个非成员就自动开 room」会在第二类上出错, 正好破坏「白板 reviewer 不继承别人上下文」这条现行规矩。**最小实现**: 让发起者显式说出意图, daemon 不猜:
+- `chat_ask` 的 `room` 参数接受一个保留值 `"new"`: daemon 开 `adhoc:` (`open` + 发起者 ord=1 + 各个 `to` 的 `join`, 和 `POST /room/open` 是同一段逻辑, 抽成一个函数共用), 再把这条 ask 落进去。账本格式不变。
+- 400 的报错文本改成二选一的指引: 「要它们互相看得见 → `room:"new"`; 各干各的 → 对每个人分别 chat_ask (各落 dm)」。默认行为仍是 400, 不会悄悄选错。
+- 可以再加 `history` 吗? 不需要: 新 room 本来就是空的。
+- **风险**: ① 一次性 room 变多 → 关系图和列表上 adhoc 节点变多 (已有 2d 时间窗过滤); ② 发起者对第二类误用 `"new"` → 只能靠描述讲清楚, daemon 不替它判断; ③ `to` 里有人已经在发起者的缺省 room 里 → 仍然全部落进新 room, 这是明确的选择。
+- **实现面**: `daemon/index.ts` `roomTargetOf` 加一支 (约 15 行) + `mcp/tools.ts` 描述 + 一个测试。
+
+**推荐**: 8.2 (`history` 参数) 和 8.3 (`room:"new"` + 二选一报错) 都是小改动, 账本格式不变、无行为回退, 可以一起批; 8.1 的 (a)(b) 两处修正顺带做。都等批准后再动。
+
+<details><summary>8.1 的内存验证脚本 (只 import 纯函数, 不写盘)</summary>
+
+```ts
+import { applyOp, unreadFor, roomHost, dmPeers, openDuties } from "../shared/room.ts";
+import { room, W, uid, say, dmRoomId } from "../tests/room-fixture.ts";
+const [A, B, C] = [uid(1), uid(2), uid(3)];
+const id = dmRoomId(A, B), s = room(id, [W(A), W(B)]);
+for (let i = 0; i < 30; i++) say(s, { author: W(i % 2 ? B : A), text: "历史 " + i + " " + "x".repeat(400) });
+applyOp(s, { op: "join", at: 5000, room: id, who: W(C), ord: s.nextOrd, via: "invite", by: W(A) });
+const ask = say(s, { author: W(A), kind: "ask", to: [W(C)], text: "C 来看一下" });   // wake → [C]
+say(s, { author: W(B), text: "不点名的一句" });                                      // wake → []
+unreadFor(s, W(C), [ask.id]);                                                          // 16 行, more 16
+say(s, { author: W(C), kind: "reply", re: [ask.id], status: "done", statusGiven: true, text: "看了" }); // wake → [A], duty 关
+```
+</details>
