@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Removed
+- **企微侧 `/model` 命令 (人 2026-11-21「会卡住, 删掉这个命令」)**: 它从来不是 daemon 的命令, 只是未知 slash 被原样注入 pane, TUI 弹出交互式模型选择器, 等不到结果就卡住 pane。现在 `daemon/inbound.ts` 在授权后把 `/model [..]` 直接拦下, 回「/model 已移除, 换模型请让 wizard 用 set_model, 或改 config」, 不再注入 pane。MCP `set_model`、config 的 model / tiers、wizard 内部换模型 (`model-select.ts`) 不动。
+
 ### Changed
 - **rolepage chat detail 消息头重排 (人 2026-11-21)**: ① 头改成一条「去向」`发送人 → [群名] → 收件人`, 群名居中夹在两个箭头之间 (同关系图); 没有 room 的 (私聊) 中间放「私聊」, 房间视图里不重复写 room。② 发送人 / 去向信息直接挂在每颗气泡上方 (过程框里发消息的调用不再有这一行, 过程框也不再挂头; 一轮什么都没说出去时才在框上留一行头)。成功的 chat_reply / chat_say 在过程里连摘要行都不留; 失败 / 状态不明 / 不答 / 待送达 / 频道评论仍留可见的摘要。③ 靠右的气泡 (我) 整条头 `row-reverse`、箭头翻成 ←、发送人贴着气泡那一侧, 左侧的 (他人) 保持原序; DOM 始终是阅读顺序, 镜像全在 CSS, 窄屏折行。点头像/名字切 role、点群名跳 room、点空白切 viewpoint 的交互不变。只改前端展示与过程框的渲染 (`web/chat.js`、`shared/detail-render.ts`), 不动数据模型 / 路由。
 - **rolepage 四项 (人 2026-11-21)**: ① 关系图里的用户节点不再是方块, 画 👤 emoji、名字写在下面 (多位用户靠名字分辨), 图例同步; ② 角色名片的职责(description)重排: 淡底引文块 + 左侧色条, 字色比名字灰一档、比 facts 深一档, 最多三行, 溢出的点一下展开/收起; ③ 详情「过程」里 chat_reply / chat_say 与公开的 tell_peer / chat_ask 只留一行摘要 (工具 + 去处/状态), 不再重复下面气泡里的正文 (私聊的移交仍可展开原文); ④ 在 detail 里点进别的 role / room 时顶栏出 ← 返回, 并压一条浏览器历史, 手机系统返回手势 / 浏览器后退走同一条路并恢复滚动位置; 窄屏从列表/图进 detail 后的系统返回 = 回列表。

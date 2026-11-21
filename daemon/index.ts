@@ -301,7 +301,7 @@ const main = async (): Promise<void> => {
   // 宪章守卫 (见「改配置会不会动到宪章」): 要等下面宪章渲染那一块立起来才有; 之前 (启动时那次自动补名) 只写不比对。
   let guardCharter: CharterGuard = (write) => ({ r: write(), note: Promise.resolve("") });
   installInboundRouter(ws.client, cfg, log, { ...bridge, dispatch: async (a) => {
-    // slash 是会话控制 (/new /model ...), 不落账本, 照旧直接进 pane。
+    // slash 是会话控制 (/new /clear ...), 不落账本, 照旧直接进 pane。
     if (a.text.trimStart().startsWith("/")) { await handedOff(a.principal); await bridge.dispatch(a); return; }
     // 人话进 room 账本 (wiring B): 绑定 room = 本聊天的 base principal, 原样作 room id (契约 §1)。
     // room 块还没装上 (启动竞态) 或落行被拒 → 退回老路径, 人话不能丢。

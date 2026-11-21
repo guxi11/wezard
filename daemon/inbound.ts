@@ -172,7 +172,8 @@ const isStopCommand = (text: string): boolean => /^(?:\/stop|stop)$/i.test(text.
 const isKillCommand = (text: string): boolean => text.trim() === "/kill";
 const isEnterCommand = (text: string): boolean => text.trim() === "/n";
 const isRevealCommand = (text: string): boolean => text.trim() === "/reveal";
-const isHelpCommand = (text: string): boolean => /^\/(?:help|\?|h)$/i.test(text.trim());
+const isModelCommand = (text: string): boolean => /^\/model(?:\s|$)/i.test(text.trim());
+const isHelpCommand =(text: string): boolean => /^\/(?:help|\?|h)$/i.test(text.trim());
 
 // Static command reference. Grouped: session control, usage/info. Anything
 // not matching a command is a
@@ -866,6 +867,12 @@ export const installInboundRouter = (
       }
       const r = await bridge.killPane(who);
       await replyText(frame, msg, who, r.ok ? "🗑️ 会话已结束，pane 已移除" : `[wezard] /kill failed: ${r.reason ?? "unknown"}`);
+      return { stop: true };
+    }
+    // `/model` 已移除: 原样注入 pane 会让 TUI 弹出交互式模型选择器, 等不到回执就把 pane 卡死。
+    // 在企微侧拦下并回一句提示, 绝不退化成注入。(换模型走 MCP set_model / config, 内部能力不变。)
+    if (isModelCommand(text)) {
+      await replyText(frame, msg, who, "[wezard] /model 已移除 —— 换模型请让 wizard 用 set_model, 或改 config 里的 model / tiers。");
       return { stop: true };
     }
     // Authorized `/n` — send a bare Enter to the live pane. Confirms a prompt /
