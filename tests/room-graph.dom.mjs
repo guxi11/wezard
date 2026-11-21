@@ -128,6 +128,7 @@ const server = createServer((req, res) => {
     }
     return send("application/json", JSON.stringify(ROOM));
   }
+  if (u.pathname === "/api/wizard" && u.searchParams.get("card") === "1" && globalThis.__cardDelay) { globalThis.__cardReqs = (globalThis.__cardReqs || 0) + 1; return setTimeout(() => send0("application/json", JSON.stringify(wizardOf(u.searchParams.get("role") || "", true))), globalThis.__cardDelay); }
   if (u.pathname === "/api/wizard") return send("application/json", JSON.stringify(wizardOf(u.searchParams.get("role") || "", u.searchParams.get("card") === "1")));
   if (u.pathname === "/api/turn") return send("application/json", JSON.stringify({ ok: true, html: '<section class="turn-group" data-key="t:t1">box</section>' }));
   if (u.pathname === "/api/tool") return send("application/json", JSON.stringify({ ok: true, html: "tool" }));
@@ -393,6 +394,25 @@ try {
   await page.goto(base + "/role?id=t-ticket&role=" + enc(TA) + "&room=" + enc(G), { waitUntil: "load" });
   await page.waitForSelector("#thread-in .rv-msg.me", { timeout: 5000 });
 
+  // c2. 换 role 后新名片在路上 (card=1 慢 2.5s): 名片不能还是旧人 —— 占位用新 role 的名字, 回包后才是完整名片。
+  await page.goto(base + "/role?id=t-ticket&role=" + enc(TA) + "&room=" + enc(G), { waitUntil: "load" });
+  await page.waitForSelector("#thread-in .rv-msg.me", { timeout: 5000 });
+  globalThis.__cardDelay = 2500;
+  await page.click('#gside .gs-mem[data-node="' + TB + '"]');
+  await page.waitForTimeout(600);
+  const slow = await page.evaluate(() => ({ name: ((document.querySelector("#rb-who .nm") || {}).textContent || "").trim(), job: !!document.querySelector("#rb-who .job"), sub: (document.querySelector(".rv-sub") || {}).textContent || "" }));
+  assert.equal(slow.name, "bob", "新名片在路上时不画旧人 (alice), 先用新 role 的名字占位: " + JSON.stringify(slow));
+  assert.equal(slow.job, false, "占位名片没有旧人的职责");
+  assert.match(slow.sub, /bob 的视角/);
+  await page.waitForFunction(() => document.querySelector("#rb-who .job"), null, { timeout: 6000 });
+  assert.equal(await cardName(), "bob", "名片回包后是完整的新人");
+  globalThis.__cardDelay = 0;
+  // 选中 room 时 world 每 6s 一拍, 名片只在过了 30s 才跟着刷 (card=1 服务端不便宜): 8s 内不会再发 card 请求。
+  globalThis.__cardDelay = 1; globalThis.__cardReqs = 0;
+  await page.waitForTimeout(8000);
+  assert.equal(globalThis.__cardReqs, 0, "名片不随每拍 world 刷: " + globalThis.__cardReqs);
+  globalThis.__cardDelay = 0;
+
   // d. 旧链接: ?room=G (无 role) → 名片是 wizard (落点 alice 是成员), 选中 G; ?role=<dm id> → 选中该 dm, 名片是 wizard。
   await page.goto(base + "/role?id=t-ticket&room=" + enc(G), { waitUntil: "load" });
   await page.waitForSelector("#thread-in .rv-msg", { timeout: 5000 });
@@ -582,6 +602,19 @@ try {
   await page.click("#tb-back");
   assert.equal(await vis(".side"), true, "‹ 返回列表");
   assert.equal(await vis(".main"), false);
+
+  // 手机: room detail 点返回 (popstate 的 list 格) 后, URL 要跟着当前选中走, 不是压栈时的旧 URL。
+  await page.goto(base + "/role?id=t-ticket&role=" + enc(TA) + "&room=", { waitUntil: "load" });
+  await page.waitForSelector("#ch-acts #rv-all", { timeout: 5000 });
+  await page.click("#tb-back");   // history.back → 回列表
+  await page.waitForFunction(() => !document.querySelector("#app").classList.contains("reading"), null, { timeout: 5000 });
+  await page.click('.rv-list .ci[data-room="' + G + '"]');
+  await page.waitForSelector("#ch-acts #rv-clear", { timeout: 5000 });
+  assert.equal(q().get("room"), G);
+  await page.goBack();   // 系统返回: 回列表, 选中 (列表高亮) 仍是 G
+  await page.waitForFunction(() => !document.querySelector("#app").classList.contains("reading"), null, { timeout: 5000 });
+  assert.deepEqual(await ciOn(), [G], "返回列表后选中态没变");
+  assert.equal(q().get("room"), G, "URL 与选中态一致 (复制 / 刷新不丢选中): " + page.url());
 
   assert.equal(errs.length, 0, "全程没有页面脚本错误: " + errs.join(" / "));
   console.log("room-graph.dom: " + JSON.stringify(counts) + " —— 节点数 = room + 参与者, 过程框与 wizard 视图可点开; 左栏名片与深链选中 role 正常");

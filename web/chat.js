@@ -1590,7 +1590,13 @@
     var el = $('#rb-who');
     if (!el) return;
     var w = D.wizard;
-    if (!w) { el.innerHTML = ''; return; }
+    // 名片还是上一个 role 的 (刚换 role、新名片在路上 / 取失败): 不画旧人, 先用名册里的名字占位 —— 否则顶栏已是「新人的视角」名片却还是旧人。
+    if (!w || D.cardRole !== D.role) {
+      if (!D.role) { el.innerHTML = ''; return; }
+      var ph = nodeOf(D.role);
+      el.innerHTML = '<div class="id"><span class="av">' + esc(ph.label || '🧙‍♂️') + '</span><span class="l"><span class="nl"><span class="nm">' + esc(ph.name || D.role) + '</span></span></span></div>';
+      return;
+    }
     var born = w.bornAt || (D.sessions || []).reduce(function (m, s) { return s.start && (!m || s.start < m) ? s.start : m; }, 0);
     var cb = D.charterBrief;
     // 链接指的那个化身 (target 的 #tag) 与这一页的规范身份不同时说出来 —— 同身份多化身在
@@ -1730,7 +1736,7 @@
   var applyCard = function (r) {
     D.wizard = r.role; D.uid = r.uid || ''; D.ledger = r.ledger !== false;
     D.plans = r.plans || []; D.schedules = r.schedules || []; D.charterBrief = r.charter || null; D.stats = r.stats || null;
-    D.sessions = r.sessions || []; D.at = r.at; D.recvAt = Date.now(); D.cardRole = D.role;
+    D.sessions = r.sessions || []; D.at = r.at; D.recvAt = Date.now(); D.cardRole = D.role; S.cardAt = Date.now();
   };
   var loadCard = function () {
     var role = D.role;
@@ -1804,7 +1810,8 @@
     var e = S.stack.pop();
     if (!e) return;
     syncJb();
-    if (e.k === 'list') { setReading(false); return; }
+    // 返回回列表: 浏览器退到的那一格 URL 是压栈时的旧 URL, 而选中态没变 —— 把 URL 改回与当前 role / room 一致, 复制 / 刷新才不丢选中。
+    if (e.k === 'list') { setReading(false); syncUrl(); return; }
     S.fromMain = false;
     // 视角与选中态一起恢复: role 先落定 (名片按它取), 再按 room 有无选画哪一页。
     adoptRole(e.role); D.all = !!e.all;
@@ -2124,7 +2131,8 @@
       // 日程栏要的 plans / 定时任务: 名册快照里就是全量 (带 gate 与出错), 每 6s 一次, 开着就看得到最新。
       W.plans = r.plans || []; W.schedules = r.schedules || [];
       renderSide();
-      if (D.roomId && D.role) loadCard();   // 选中 room 时名片不随 /api/wizard 轮询, 跟着 world 这一拍顺带刷新
+      // 选中 room 时名片不随 /api/wizard 轮询: 跟着 world 这一拍刷新, 但名片本身不常变 (card=1 服务端要算名录 / 用量 / 宪章), 30s 一次足够; 换 role 时由 loadRoom 即时补取。
+      if (D.roomId && D.role && Date.now() - (S.cardAt || 0) > 30000) loadCard();
       if (S.pane === 'plan') { renderPlan(); return r; }
       return r;
     }).catch(function () { worldReq = null; });
