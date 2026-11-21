@@ -5,6 +5,7 @@
 ## [Unreleased]
 
 ### Fixed
+- **Linux 安装开启 linger, 登出不再停掉 daemon / svr**: 没有 linger 时 systemd --user 的 user manager 跟着最后一个登录会话走 —— 2026-11-21 02:18 ssh 断开, logind 停掉 user manager, wezard.service 与 wezard-svr 一起被停 (Restart=always 不管 systemd 自己发起的 stop), 直到 08:41 再次 ssh 登录才回来: 期间机器人离线, 定时任务 hourly-push 02:51~07:51 的 6 枪全部漏掉, 08:41 那一枪是开机后 `every` 时钟的补放 (`t - since >= 间隔` 只补一枪)。`scripts/install.sh` 在 Linux 分支检查 `Linger`, 未开则 `loginctl enable-linger` (失败再试 `sudo -n`), 都不行就 warn 并给出命令。
 - **rolepage chat detail 点「过程」展开多一层虚线框 (人 2026-11-21)**: room 视图里挂载点 `.rv-box` 自带虚线边, 里面的 `.steps` 过程框又是虚线 —— 框套框。`.rv-msg > .rv-box` 去掉边/内边距/底色, 只留过程框本身的那一层 (`web/chat.css`)。
 
 ### Changed

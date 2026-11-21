@@ -101,6 +101,17 @@ case "$OS" in
     systemctl --user daemon-reload
     systemctl --user enable --now "$UNIT"
     echo "[install] systemd unit enabled: $UNIT_DST"
+    # 没有 linger 时 user manager 跟着最后一个登录会话走: ssh 一断, logind 就把
+    # daemon / svr 一起停掉, 直到下次登录才回来 —— 机器人离线、定时任务整夜不放枪
+    # (2026-11-21 02:18 → 08:41 实测)。Restart=always 救不了, 停它的是 systemd 本身。
+    if [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != "yes" ]; then
+      if loginctl enable-linger "$(id -un)" 2>/dev/null || sudo -n loginctl enable-linger "$(id -un)" 2>/dev/null; then
+        echo "[install] linger enabled: $COMPONENT survives logout"
+      else
+        echo "[install] WARNING: linger is off — $COMPONENT stops when your last login session ends." >&2
+        echo "[install]          run: sudo loginctl enable-linger $(id -un)" >&2
+      fi
+    fi
     ;;
   *)
     echo "unsupported OS: $OS"; exit 1 ;;
