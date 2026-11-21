@@ -119,7 +119,7 @@ assert.ok(summary.includes("回复 hi · chat_reply") && !summary.includes("cons
 assert.ok(!replyHtml.includes('class="tool-result-line"'), "调成了不再摆回包 JSON 预览行");
 assert.ok(replyHtml.includes("回复") && replyHtml.includes("未命名群") && !replyHtml.includes(">chat:wrX<"), "去处翻成群名, 不摆 base");
 assert.ok(!/>覆盖占位</.test(replyHtml) && replyHtml.includes("替换了群里那条「处理中」的气泡"), "交付细节只进悬停说明");
-assert.ok(replyHtml.includes("在，我是这个群的管家 study。"), "发了什么在行内");
+assert.ok(!replyHtml.includes("在，我是这个群的管家 study。"), "回复正文就是下面的气泡, 过程里不再重复");
 // chat_reply 不带 text = 不答 (passed)
 const passUse: Extract<TurnItem, { t: "tool_use" }> = { t: "tool_use", toolUseId: "cp", toolName: "mcp__wezard__chat_reply", toolInput: { re: "h3" }, ts: 1 };
 const passHtml = turnOfCalls([passUse, { t: "tool_result", toolUseId: "cp", body: JSON.stringify({ ok: true, delivered: "passed", event: "e3", chat: "wezard" }), ts: 2 }]);

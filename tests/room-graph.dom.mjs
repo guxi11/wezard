@@ -286,16 +286,20 @@ try {
   assert.ok(g2.links.includes(DM2), "两 wizard 的 dm 画成直连线: " + JSON.stringify(g2));
   assert.ok(!g2.roomNodes.includes(DM2), "两 wizard 的 dm 没有 room 节点");
 
-  // 节点样式: 人 = 方块 / wizard = 圆点; 状态 idle (alice, 缓存热) / stale = 缓存冷 (bob, cacheCold) / asleep = 休眠 (carol, 注册表里没有); host → room 是特殊边。
+  // 节点样式: 人 = 👤 + 名字 / wizard = 圆点; 状态 idle (alice, 缓存热) / stale = 缓存冷 (bob, cacheCold) / asleep = 休眠 (carol, 注册表里没有); host → room 是特殊边。
   const look = await page.evaluate(() => ({
-    human: !!document.querySelector('.rv-person.human rect.sh'),
+    human: (document.querySelector('.rv-person.human text.rv-emo') || {}).textContent,
+    humanName: (document.querySelector('.rv-person.human text.rv-nm') || {}).textContent,
+    humanShape: !!document.querySelector('.rv-person.human .sh'),
     alice: document.querySelector('.rv-person[data-node="chat:wrG#guide"]').getAttribute("class"),
     bob: document.querySelector('.rv-person[data-node="chat:wrG#worker"]').getAttribute("class"),
     carol: [...document.querySelectorAll(".rv-person")].find((e) => e.textContent.includes("carol")).getAttribute("class"),
     hostEdges: document.querySelectorAll(".rv-edge.host").length,
     plainEdges: document.querySelectorAll(".rv-edge:not(.host):not(.direct)").length,
   }));
-  assert.equal(look.human, true, "人画成方块");
+  assert.equal(look.human, "👤", "用户画成 👤 emoji");
+  assert.equal(look.humanName, "张三", "emoji 下写着用户名字 (多位用户靠名字分辨)");
+  assert.equal(look.humanShape, false, "用户不再是方块 / 圆");
   assert.match(look.alice, /st-idle/, "alice: pane 在、缓存热 = idle");
   assert.match(look.bob, /st-stale/, "bob: pane 在、缓存已冷 = stale");
   assert.match(look.carol, /st-asleep/, "carol: pane 不在 = asleep (休眠, 不同于缓存冷)");

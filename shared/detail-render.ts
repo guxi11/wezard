@@ -930,7 +930,9 @@ const renderHandoff = (h: Handoff, key: string, deco?: HandoffDeco): string => {
   const acct = deco ? deco.acct(h) : "";
   // 移交体「发给谁」就是被移交的那个 wizard; 点它与移交行同一套跳转 (同一份 attrs)。
   const to = attrs ? `<span class="to-in" role="button" tabindex="0"${attrs}>${who}</span>` : "";
-  return hoBox("", attrs, `${hoArrow(st, glyph)}${verb} ${who}${turn}${tags}${lost}${acct ? `<span class="ho-acct">${acct}</span>` : ""}`, h.text, pub ? `${key}:ho` : undefined, undefined, to);
+  return hoBox("", attrs, `${hoArrow(st, glyph)}${verb} ${who}${turn}${tags}${lost}${acct ? `<span class="ho-acct">${acct}</span>` : ""}`,
+    // 公开的那句话在下面有自己的气泡, 这里只留摘要行; 私聊的才收起原文备查。
+    pub ? "" : h.text, undefined, undefined, to);
 };
 
 /** 发进聊天的那一行: 「图标 动词 → 群名」+ 发了什么 (首行跟在行内, 全文收在 chevron 下)。
@@ -960,7 +962,9 @@ const renderPost = (h: Extract<Hint, { k: "post" }>, deco?: HandoffDeco): string
   const tip = [h.delivered ? DELIVERED_TIP[h.delivered] : "", h.re ? "答的是消息 " + h.re : ""].filter(Boolean).join(" · ");
   const attrs = tip ? ` title="${escHtml(tip)}"` : "";
   return hoTrouble(h, glyph, verb0 + (names.length ? " → " + names.join("、") : ""), "", h.text) ??
-    hoBox(" post", attrs, `${hoArrow(stOf(h.state), glyph)}${verb}${to}${file}${tags}`, h.text);
+    hoBox(" post", attrs, `${hoArrow(stOf(h.state), glyph)}${verb}${to}${file}${tags}`,
+      // 回复 / 发言的正文就是下面那颗气泡, 过程里只留一行摘要, 不再重复一遍。
+      h.via === "reply" || h.via === "say" ? "" : h.text);
 };
 
 const PLAIN: HandoffStatus = { key: "plain", tip: "" };
