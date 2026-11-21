@@ -3,8 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { contextMaterials } from "../daemon/peers.js";
-import { commonStems, decide, isSmallTask, rankCandidates, renderCandidates, routeReceiptDutiesOf, tierFor, type RouteRow } from "../daemon/route.js";
-import type { InFlight } from "../daemon/dispatch.js";
+import { commonStems, decide, isSmallTask, rankCandidates, renderCandidates, tierFor, type RouteRow } from "../daemon/route.js";
 
 const now = 1_000_000;
 const ttlMs = 60_000;
@@ -102,10 +101,7 @@ for (const patch of [
 assert.equal(decision("继续完善刚才 route.ts", [row()]).kind, "spawn", "裸同名文件不能替代路径");
 assert.equal(decision(followup, [row({ files: [`${cwd}/daemon/route.ts`, `/repo/b/daemon/route.ts`] })]).kind, "existing", "另一同名路径不覆盖准确命中");
 
-const receiverDuty = routeReceiptDutiesOf([
-  { from: "caller", to: "worker", turn: "t1", state: "needs-input" as const },
-], "worker");
-assert.deepEqual(receiverDuty, ["t1 欠着 caller: needs-input"]);
+const receiverDuty = ["t1 open"];
 for (const patch of [ { lead: true }, { duties: receiverDuty } ]) {
   const rows = [row(patch)];
   assert.equal(decision(followup, rows).kind, "spawn");
@@ -131,32 +127,12 @@ const sixth = decide(followup, crowded, now, ttlMs);
 assert(sixth.kind === "existing");
 assert.equal(sixth.row.name, "sixth");
 
-// 每个状态验证 incoming 占用；另用一个 outgoing 样本验证 child 归属与「在等」方向。
-const receipt = (state: InFlight["state"], outgoing = false): InFlight => ({
-  from: outgoing ? "worker" : "caller", to: outgoing ? "child" : "worker",
-  turn: "t123456", state, ageMs: 1000,
-});
-for (const state of ["working", "blocked", "needs-input", "deferred", "errored", "queued"] as const) {
-  const inflight = [receipt(state)];
-  const duties = routeReceiptDutiesOf(inflight, "worker");
-  assert.equal(duties.length, 1);
-  assert.deepEqual(duties, routeReceiptDutiesOf(inflight, "worker"));
-  assert.match(duties[0]!, /欠着 caller/);
-  assert(duties[0]!.includes(state));
+// 任何占用 (欠着别人 / 在等别人) 都挡自动复用, force 也不绕。
+for (const duties of [["t123456 open"], ["t123456 need", "t2 progress"]]) {
   const rows = [row({ busy: false, duties })];
-  assert.equal(decision(followup, rows, true).kind, "spawn", state);
+  assert.equal(decision(followup, rows, true).kind, "spawn", duties.join());
   assert.match(renderCandidates(followup, candidates(followup, rows), now, ttlMs), /自动复用: 任务占用/);
-  assert.deepEqual(routeReceiptDutiesOf(inflight, "unrelated"), []);
 }
-const outgoing = [receipt("working", true)];
-const outgoingDuties = routeReceiptDutiesOf(outgoing, "worker");
-assert.deepEqual(outgoingDuties, routeReceiptDutiesOf(outgoing, "worker"));
-assert.match(outgoingDuties[0]!, /在等 child/);
-assert.equal(decision(followup, [row({ busy: false, duties: outgoingDuties })], true).kind, "spawn");
-assert.deepEqual(routeReceiptDutiesOf(outgoing, "unrelated"), []);
-for (const state of ["done", "timeout", "silent", "dead", "canceled"] as const)
-  assert.deepEqual(routeReceiptDutiesOf([receipt(state)], "worker"), []);
-assert.equal(routeReceiptDutiesOf([receipt("needs-input"), receipt("deferred", true)], "worker").length, 2);
 
 // 成本与任务档位都参与复用决策, force 不把弱连续性升级。
 const cold = row({ contextTokens: 100_000, lastActivity: now - ttlMs - 1 });

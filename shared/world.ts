@@ -13,7 +13,6 @@ import { baseOfKey, labelFor, stripSigil, tagOfKey } from "./session-label.js";
 import { ctxNow, isTurn, staleAt, isGhostTurn } from "./chat-view.js";
 import { stripReminders } from "./reminder.js";
 import type { CharterLineage, CharterRecord, DetailRecord, TurnDetailRecord, TurnItem } from "./detail-store.js";
-import type { TurnState } from "./turn-state.js";
 import type { PlanRecord } from "./plan.js";
 import type { RoomFact } from "./room-view.js";
 import { smartsOf, type Smarts } from "./smarts.js";
@@ -98,17 +97,12 @@ export interface WorldFactSchedule {
   file?: string;
 }
 
-/** 一件在飞的活 (见 turn-state.ts): from 派给 to、还没落定。at = 派出的时刻。 */
-export interface WorldFactInFlight { from: string; to: string; turn: string; state: TurnState; at: number }
-
 /** 一个微信通道的此刻: 掉没掉线、人最近何时开口、压着几条没发、这份 context_token 还能发几条、频控暂停到何时 (0 = 没停)。 */
 export interface WorldFactWeixin { base: string; state: "live" | "expired"; lastInAt: number; held: number; budget: number; pausedUntil: number }
 
 export interface WorldFacts {
   wizards: readonly WorldFactWizard[];
   plans: readonly PlanRecord[];
-  /** 老 daemon 推来的快照没有。 */
-  inflight?: readonly WorldFactInFlight[];
   schedules: readonly WorldFactSchedule[];
   /** base → 聊天名; 没起名的不在表里。 */
   chatNames: Readonly<Record<string, string>>;

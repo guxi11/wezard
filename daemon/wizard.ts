@@ -734,8 +734,6 @@ export interface RosterRow extends WizardBrief {
   contextTokens?: number;
   parent?: WizardBrief;
   clones: readonly WizardBrief[];
-  /** 在飞的活: 它在等谁、谁在等它 (各带状态) —— 见 turn-state.ts。 */
-  turns?: string;
 }
 
 // 上下文窗口 (token)。transcript 里记的是 API 模型 id, 不带 `[1m]`, 所以按家族认:
@@ -796,7 +794,6 @@ const rosterEntry = (r: RosterRow, now: number, home: string): string[] => {
     ...(r.expertise ? [`  专长: ${r.expertise}`] : []),
     // 冷会话的摘要是很久以前的话, 不值得占一行; 要读就 peek_peer。
     ...(r.alive && !r.self && r.summary ? [`  最近: ${r.summary}`] : []),
-    ...(r.turns ? [`  ${r.turns}`] : []),
   ];
 };
 
@@ -930,7 +927,7 @@ export const rosterL1 = (rows: readonly RosterRow[], a: { base: string; now: num
   ].join("\n");
 };
 
-/** L2 组团: 每个聊天一行 (名字串, 无 summary/turns/职责), 自己的聊天最前, 其余按最近活动排。
+/** L2 组团: 每个聊天一行 (名字串, 无 summary/职责), 自己的聊天最前, 其余按最近活动排。
  *  行数 ≤ ROSTER_L2_MAX_LINES。 */
 export const rosterL2 = (rows: readonly RosterRow[], a: { base: string; now: number }): string => {
   const byChat = new Map<string, RosterRow[]>();

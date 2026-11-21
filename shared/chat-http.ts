@@ -112,7 +112,6 @@ const botFacts = (f: WorldFacts, self: string): WorldFacts => {
     ...f,
     wizards: f.wizards.filter((w) => mine(w.target)),
     plans: f.plans.filter((p) => mine(p.owner)),
-    ...(f.inflight ? { inflight: f.inflight.filter((x) => mine(x.from) && mine(x.to)) } : {}),
     schedules: f.schedules.filter((x) => mine(x.owner || x.createdBy || x.target)),
     chatNames: keep(f.chatNames),
     ...(f.humanNames ? { humanNames: keep(f.humanNames) } : {}),

@@ -921,7 +921,6 @@ const main = async (): Promise<void> => {
       // 截断的视口加一层 TUI 装饰, 而「它卡在哪」transcript 答得更准 —— 不在转圈
       // 却悬着工具调用, 就是停在审批卡 / 本地弹窗上等人点。
       const peek = await m.peekTurns(target, turns);
-      const inflight = "";
       const waiting = peek.waiting ?? [];
       const state = peek.busy
         ? "正在生成"
@@ -933,7 +932,7 @@ const main = async (): Promise<void> => {
         name: peerAddress(cfg, target),
         busy: peek.busy ?? false,
         ...(waiting.length ? { waiting } : {}),
-        text: [`${displayName(target)} · ${state}${foreign ? ` · 住在群 ${chatNameOf(cfg, target) || "(未命名)"}` : ""}`, ...(inflight ? [inflight] : []), peek.dialog ?? `(${peek.reason})`].join("\n"),
+        text: [`${displayName(target)} · ${state}${foreign ? ` · 住在群 ${chatNameOf(cfg, target) || "(未命名)"}` : ""}`, peek.dialog ?? `(${peek.reason})`].join("\n"),
       });
     });
 
@@ -2239,8 +2238,6 @@ const main = async (): Promise<void> => {
       return {
         wizards: [...live, ...cold],
         plans: plans.healthy() ? plans.all() : [],
-        // room 模型: 待办托盘读 room duty (dutyFacts); 旧 inflight 已随路由表退役。
-        inflight: [],
         schedules: tasks.list().filter((x) => x.enabled).map((x) => {
           const st = tasks.stateOf(x.id);
           const loadError = tasks.errors()[x.id];
@@ -2673,7 +2670,6 @@ const main = async (): Promise<void> => {
       };
       const enrich = (r: (typeof all)[number]) => ({
         ...r,
-        turns: "",
         duty: dutiesOf(r.target),
         model: r.model || (r.jsonlPath ? lastModel(r.jsonlPath) : ""),
         summary: r.jsonlPath ? lastExchange(r.jsonlPath, 80) : "",

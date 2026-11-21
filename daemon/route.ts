@@ -14,8 +14,6 @@
 //
 // 全是纯函数: 候选的原料 (文件集 / 最近的话 / ctx) 由调用方从 transcript 读好送进来。
 import { resolve, basename, dirname, isAbsolute } from "node:path";
-/** 一件在飞的活 (原 dispatch.ts, 随其退役搬来): from 派给 to、还没落定。 */
-interface InFlight { from: string; to: string; turn: string; state: string; ageMs?: number }
 import { addr, agoOf, ctxOf, type WizardBrief } from "./wizard.js";
 import type { ContextMaterial } from "./peers.js";
 import { fileURLToPath } from "node:url";
@@ -91,17 +89,6 @@ const GUIDANCE = new Set(["agents", "claude", "readme", "contributing", "code_of
 const withoutGuidance = (text: string): string => text.replace(/[A-Za-z0-9_][A-Za-z0-9_.\-/]{2,}/g,
   (w) => GUIDANCE.has(stemOf(w).toLowerCase()) ? " " : w);
 const fileRefs = (text: string): string[] => text.match(/(?:\/|\.\/|\.\.\/)?[A-Za-z0-9_][A-Za-z0-9_.\/-]*\.[A-Za-z][A-Za-z0-9]*(?![A-Za-z0-9_.\/-])/g) ?? [];
-const UNSETTLED = new Set<InFlight["state"]>(["working", "blocked", "needs-input", "deferred", "errored", "queued"]);
-type RouteInFlight = Pick<InFlight, "from" | "to" | "turn" | "state">;
-
-/** Receiver rows remain visible as duties whether incoming or outgoing. */
-export const routeReceiptDutiesOf = (inflight: readonly RouteInFlight[], target: string): string[] => inflight
-  .filter((x) => UNSETTLED.has(x.state))
-  .flatMap((x) => [
-    ...(x.to === target ? [`${x.turn} 欠着 ${x.from}: ${x.state}`] : []),
-    ...(x.from === target ? [`${x.turn} 在等 ${x.to}: ${x.state}`] : []),
-  ]);
-
 const shared = (task: Set<string>, text: string): string[] => [...termsOf(withoutGuidance(text))].filter((t) => task.has(t));
 
 const relTo = (cwd: string, p: string): string => (cwd && p.startsWith(`${cwd}/`) ? p.slice(cwd.length + 1) : p);

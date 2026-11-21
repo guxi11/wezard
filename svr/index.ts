@@ -144,7 +144,6 @@ const mergeFacts = (fresh: readonly FactsPush[]): WorldFacts => {
   return {
     wizards: uniq(fresh.flatMap((p) => [...p.facts.wizards]), (w) => w.target),
     plans: uniq(fresh.flatMap((p) => [...p.facts.plans]), (plan) => plan.id),
-    inflight: uniq(fresh.flatMap((p) => [...(p.facts.inflight ?? [])]), (x) => `${x.from}\0${x.to}\0${x.turn}`),
     schedules: uniq(fresh.flatMap((p) => [...p.facts.schedules]), (x) => x.id),
     chatNames: Object.assign({}, ...fresh.map((p) => p.facts.chatNames)) as Record<string, string>,
     // 人名 / 微信 / room 账本快照 / 名字表 / 类表 —— 合并时被整个丢掉就等于远端没有这些面。

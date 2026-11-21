@@ -33,7 +33,8 @@
 - [ ] **跟进: 被结束的 wizard 被唤醒时要不要自动白板重生** —— `stop_wizard` 描述写的是「之后再找它是一个空白会话」, 人那边 `/kill` 后下条消息也会自动重开, 但 room 唤醒没有这条路 (`injectText` 对无绑定目标直接 gone)。自动重生要定: 模型/档位与 cwd 从哪来 (绑定随 /kill 一起删了)、内存闸、要不要先问 parent。改的是语义 → 先写方案报 admin。
 - [x] **vendor.js 去掉无人使用的 d3** (~280KB 未压缩, 每次冷加载 rolepage 都要下): `shared/chat-render.ts` 不再拼 `d3.min.js`, 删 `web/d3.min.js`。关系图早已换成自写的 stress majorization。(本轮)
 - [x] **`daemon/peers.ts` 回执时代遗留删净** (~260 行): `parseClosing` 一族、`addressedResults`、`replyClosedBefore` / `openingTurn`、`renderTask/Peer/ReceiptEnvelope`、`tailTurns`; `tsc --noUnusedLocals` 逐轮确认, 测试里只测回执措辞的一条断言同删。(本轮)
-- [ ] `shared/turn-state.ts` `TurnState` / `WorldFacts.inflight` 恒空 —— 收成类型或删。
+- [x] `shared/turn-state.ts` 整个删; `WorldFacts.inflight` / `WorldFactInFlight`、`route.ts` `routeReceiptDutiesOf`、`WizardBrief.turns`、peek 里恒空的 inflight 行一并删。(本轮)
+- [ ] **delegate 的「任务占用」veto 在生产里从不触发**: `routeRowsOf` (`daemon/index.ts`) 给每行写死 `duties: []`, 而 `route.ts` 的 veto / 渲染都读它。名册那边已有 `dutiesOf` (跨 room 现算 open duty), 喂进来就能恢复。要定: 什么样的 duty 算占用 (常驻 duty 如 d6977146.1 会让 lead 永远被挡 —— lead 本就另有 veto; 人话唤醒开的 duty 在它回复前也会挡) → 改的是派活语义, 先报。
 - [ ] `shared/reminder.ts` 已退役 attr; tests 里 `topOnly` / `speech` 死数据; 注释里残留 `tell_peer` / `router` / `read_chat`。
 - [ ] svr 重启后名册缺席 30~70s: daemon 应在 svr 上线时立即补推 `WorldFacts`。
 - [ ] lead 标记 (`WizardRecord.lead`) 写入后从不清除。
@@ -64,6 +65,7 @@
 | 2026-11-22 | room_invite/room_approve `history` 参数 (none/N/from:id/all); dm 显示统一 (多人列全员); ensureDmRoom 补回 / 混入第三人改落 {A,B} adhoc。coder QuinnQuincy, 白板 reviewer RoseReed 通过。遗留: join-req 路径不校验 history; rejoin 不写 seen 未细查; 多个 {A,B} adhoc 取最近活动会合流 | `d986e7a` |
 | 2026-11-22 | `daemon/peers.ts` 删回执时代死代码 ~260 行 (我自己做: 活着的 wizard 已 4 个, 不起新人) | 见 git log |
 | 2026-11-22 | room hub: 投给已结束 wizard 的 duty 不再静默丢失 (`gone` → `undelivered` 系统行给提问者; 其他失败打 warn)。起因: IrisIrwin 被 /kill 后两次派活都没投进去 | 见 git log |
+| 2026-11-22 | 删 `shared/turn-state.ts` 与恒空的 `WorldFacts.inflight` / `routeReceiptDutiesOf` / `WizardBrief.turns` (-64 行); 顺带发现 delegate 的占用 veto 恒空 (登记 P1) | 见 git log |
 | 2026-11-22 | 测试基线 109→111 / 113: `codex-backend` (bin 覆盖已退役) 与 `wizard-stream` W-2 (all=1 已退役) 改断言现行行为 | 见 git log |
 
 ## 已知坑
